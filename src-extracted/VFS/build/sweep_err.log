@@ -1,0 +1,6 @@
+sweep: processing 1 (doc01.md)
+[explode] doc01.md: not zip (magic 23 20 49 6e)
+sweep: processing 2 (volume.c)
+[explode] volume.c: not zip (magic 2f 2a 0d 0a)
+sweep: processing 3 (gost.exe)
+[explode] gost.exe: not zip (magic 4d 5a 90 00)

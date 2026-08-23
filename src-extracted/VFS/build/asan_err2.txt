@@ -1,0 +1,23 @@
+[main] rebuild D:\VFS\build\t.wav D:\VFS\build\t_v2.rcp D:\VFS\build\t_asan.flac
+[main] w=0000021803381800 r=00001274231A0400 wlen=5292078 rlen=44099
+[rebuild] enter rn=44099
+[rebuild] nframes=288 hlen=8286 covers=0
+[rebuild] wav n=2646000 ch=2 bits=16 nframes=288
+=================================================================
+==23808==ERROR: AddressSanitizer: access-violation on unknown address 0xffffffffffffffff (pc 0x7ffb82d584b5 bp 0x00befdadeba0 sp 0x00befdadea50 T0)
+==23808==The signal is caused by a READ memory access.
+    #0 0x7ffb82d584b4 in __asan_load4 D:\a\_work\1\s\src\vctools\asan\llvm\compiler-rt\lib\asan\asan_rtl.cpp:194
+    #1 0x7ff69400369c  (D:\VFS\build\flacx_asan.exe+0x14000369c)
+    #2 0x7ff694004d92  (D:\VFS\build\flacx_asan.exe+0x140004d92)
+    #3 0x7ff6940091d7  (D:\VFS\build\flacx_asan.exe+0x1400091d7)
+    #4 0x7ffc37f1e956  (C:\WINDOWS\System32\KERNEL32.DLL+0x18002e956)
+    #5 0x7ffc386ead6b  (C:\WINDOWS\SYSTEM32\ntdll.dll+0x1800aad6b)
+
+==23808==Register values:
+rax = 21823180000  rbx = befdadec80  rcx = a20021803891800  rdx = 144004300712300  
+rdi = a20021803891800  rsi = 2ff8  rbp = befdadeba0  rsp = befdadea50  
+r8  = 0  r9  = a20021803891800  r10 = 0  r11 = 7fffffffffff  
+r12 = 21823180000  r13 = 2  r14 = a20021803891800  r15 = 8  
+AddressSanitizer can not provide additional info.
+SUMMARY: AddressSanitizer: access-violation (D:\VFS\build\flacx_asan.exe+0x14000369c) 
+==23808==ABORTING

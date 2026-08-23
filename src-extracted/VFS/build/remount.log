@@ -1,0 +1,17 @@
+==== unmount ====
+SUCCESS: The process "invf-dokan.exe" with PID 15268 has been terminated.
+==== mkfs E: ====
+InvariFS volume created: \\.\E:
+  size:            15727591424 bytes (3839744 blocks of 4096)
+  metadata zone:   blocks 1 .. 68306 (68306 blocks, 266 MB)
+  raw zone:        blocks 68307 .. 822593 (754287 blocks, 2946 MB)
+  shadow zone:     blocks 822594 .. 3839743 (3017150 blocks, 11785 MB)
+  state: CLEAN, uuid: 10b4786a0000400093b5c975ee000000
+==== verify fresh volume ====
+OK: E: is a valid InvariFS volume
+  state: CLEAN, uuid: 10b4786a0000400093b5c975ee000000
+  blocks: 3839744 total, 3771437 free, 68307 allocated (1.8% used)
+  zones: metadata 68306 | raw 754287 | shadow 3017150
+==== mount E: -> M: ====
+MOUNT TIMEOUT
+InvariFS mounted via Dokan: 0 names

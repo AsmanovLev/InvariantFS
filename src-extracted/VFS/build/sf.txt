@@ -1,0 +1,68 @@
+
+[94mInvariFS[0m volume: [2mtg.img[0m
+  2097152 blocks x 4096 = 8.0 GiB
+
+  vol [[96m█[0m[96m█[0m[96m█[0m[96m█[0m[96m█[0m[96m█[0m[96m█[0m[96m█[0m[96m█[0m[96m█[0m[96m█[0m[2m░[0m[2m░[0m[2m░[0m[2m░[0m[2m░[0m[2m░[0m[2m░[0m[2m░[0m[2m░[0m[2m░[0m[2m░[0m[2m░[0m[2m░[0m[2m░[0m[2m░[0m[2m░[0m[2m░[0m[2m░[0m[2m░[0m[2m░[0m[2m░[0m[2m░[0m[2m░[0m[2m░[0m[2m░[0m[2m░[0m[2m░[0m[2m░[0m[2m░[0m[2m░[0m[2m░[0m[2m░[0m[2m░[0m[2m░[0m[2m░[0m[2m░[0m[2m░[0m[2m░[0m[2m░[0m[2m░[0m[2m░[0m[2m░[0m[2m░[0m[2m░[0m[2m░[0m[2m░[0m[2m░[0m[2m░[0m[2m░[0m[2m░[0m[2m░[0m[2m░[0m[2m░[0m[2m░[0m[2m░[0m[2m░[0m[2m░[0m[2m░[0m[2m░[0m[2m░[0m[2m░[0m[2m░[0m[2m░[0m[2m░[0m[2m░[0m[2m░[0m[2m░[0m[2m░[0m[2m░[0m[2m░[0m[2m░[0m[2m░[0m[2m░[0m[2m░[0m[2m░[0m[2m░[0m[2m░[0m[2m░[0m[2m░[0m[2m░[0m[2m░[0m[2m░[0m[2m░[0m[2m░[0m[2m░[0m[2m░[0m[2m░[0m[2m░[0m[2m░[0m[2m░[0m[2m░[0m[2m░[0m[2m░[0m[2m░[0m[2m░[0m[2m░[0m[2m░[0m[2m░[0m[2m░[0m]
+
+  [90m█ As-IS (RAW)[0m  [94m█ semantic[0m  [92m█ dedup[0m  [96m█ semantic+dedup[0m  [2m░ free[0m
+
+  space : 837.7 MiB used / 7.1 GiB free of 8.0 GiB (10.2%)
+  zones : meta 34 MB | raw 1631 MB | shadow 6526 MB
+  files : 49 live of 49 names (46 tombstones), 57.2 MiB logical, largest 57.2 MiB
+  l2p   : 14587 maps, journal 2.4% (of 8192 blk)
+  inode : area 19.0% used
+
+  semantic: 3960 blk (1.8%)  dedup: 0 blk (0.0%)  both: 210496
+
+  files by policy:
+    [96m[B] f01.flac                                     16.6 MiB[0m
+    [96m[B] f02.flac                                     23.1 MiB[0m
+    [96m[B] f03.flac                                     31.5 MiB[0m
+    [96m[B] f04.flac                                     26.6 MiB[0m
+    [96m[B] f05.flac                                     19.8 MiB[0m
+    [96m[B] f06.flac                                     12.4 MiB[0m
+    [96m[B] f07.flac                                     14.9 MiB[0m
+    [96m[B] f08.flac                                     21.2 MiB[0m
+    [96m[B] f09.flac                                     40.5 MiB[0m
+    [96m[B] f10.flac                                     45.0 MiB[0m
+    [96m[B] f11.flac                                     37.6 MiB[0m
+    [96m[B] f12.flac                                     47.5 MiB[0m
+    [96m[B] f13.flac                                     50.5 MiB[0m
+    [96m[B] f14.flac                                     34.5 MiB[0m
+    [96m[B] f15.flac                                     57.2 MiB[0m
+    [96m[B] f16.flac                                     21.1 MiB[0m
+    [96m[B] f17.flac                                     22.4 MiB[0m
+    [96m[B] f18.flac                                     29.8 MiB[0m
+    [96m[B] f19.flac                                     24.4 MiB[0m
+    [96m[B] f20.flac                                     27.7 MiB[0m
+    [96m[B] f21.flac                                     20.9 MiB[0m
+    [96m[B] f22.flac                                     30.9 MiB[0m
+    [96m[B] f23.flac                                     33.8 MiB[0m
+    [96m[B] f24.flac                                     33.0 MiB[0m
+    [96m[B] f25.flac                                     23.2 MiB[0m
+    [96m[B] f26.flac                                     26.9 MiB[0m
+    [96m[B] f27.flac                                     30.9 MiB[0m
+    [96m[B] p02.jpg                                       1.1 MiB[0m
+    [96m[B] p03.jpg                                       6.6 MiB[0m
+    [96m[B] p04.jpg                                       1.7 MiB[0m
+    [96m[B] p05.jpg                                       1.9 MiB[0m
+    [96m[B] p06.jpg                                       1.8 MiB[0m
+    [96m[B] p07.jpg                                       2.0 MiB[0m
+    [96m[B] p08.jpg                                       2.6 MiB[0m
+    [96m[B] p11.jpg                                       1.2 MiB[0m
+    [96m[B] p12.jpg                                       1.1 MiB[0m
+    [96m[B] p13.jpg                                       1.1 MiB[0m
+    [94m[S] p14.jpg                                       1.6 MiB[0m
+    [94m[S] p15.jpg                                       8.8 MiB[0m
+    [94m[S] p16.jpg                                       4.1 MiB[0m
+    [96m[B] p17.jpg                                       4.4 MiB[0m
+    [96m[B] p18.jpg                                       1.4 MiB[0m
+    [96m[B] p19.jpg                                       1.5 MiB[0m
+    [96m[B] p20.jpg                                       7.3 MiB[0m
+    [96m[B] p21.jpg                                       6.4 MiB[0m
+    [96m[B] p22.jpg                                       1.1 MiB[0m
+    [96m[B] p23.jpg                                       1.1 MiB[0m
+    [96m[B] p24.jpg                                       3.5 MiB[0m
+    [96m[B] p25.jpg                                       2.1 MiB[0m
+
+  [90m[A] as-is[0m  [94m[S] semantic[0m  [92m[D] dedup[0m  [96m[B] both[0m

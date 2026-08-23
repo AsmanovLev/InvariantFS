@@ -1,0 +1,97 @@
+InvariFS mounted: 0 files
+[fuse_arg 0] invf-fuse
+[fuse_arg 1] -d
+[fuse_arg 2] /mnt/invarifs
+FUSE library version: 3.18.2
+dev unique: 2, opcode: INIT (26), nodeid: 0, insize: 104, pid: 0
+INIT: 7.39
+flags=0x73fffffb
+max_readahead=0x00020000
+   INIT: 7.45
+   flags=0x00400000
+   max_readahead=0x00020000
+   max_write=0x00100000
+   max_background=0
+   congestion_threshold=0
+   time_gran=1
+   unique: 2, success, outsize: 80
+dev unique: 4, opcode: LOOKUP (1), nodeid: 1, insize: 46, pid: 14
+LOOKUP /w.txt
+getattr[NULL] /w.txt
+   unique: 4, error: -2 (No such file or directory), outsize: 16
+dev unique: 6, opcode: CREATE (35), nodeid: 1, insize: 62, pid: 14
+create flags: 0x8241 /w.txt 0100644 umask=0022
+[create] /w.txt
+   create[129822164520592] flags: 0x8241 /w.txt
+getattr[129822164] /w.txt
+   NODEID: 2
+   unique: 6, success, outsize: 160
+dev unique: 8, opcode: FLUSH (25), nodeid: 2, insize: 64, pid: 14
+flush[129822164520592]
+[flush] /w.txt fh=129822164520592
+invf: flush w.txt empty buf
+   unique: 8, success, outsize: 16
+dev unique: 10, opcode: GETXATTR (22), nodeid: 2, insize: 68, pid: 14
+   unique: 10, error: -38 (Function not implemented), outsize: 16
+dev unique: 12, opcode: WRITE (16), nodeid: 2, insize: 85, pid: 14
+write[129822164520592] 5 bytes to 0 flags: 0x8001
+[write] /w.txt off=0 size=5 fh=129822164520592
+   write[129822164520592] 5 bytes to 0
+   unique: 12, success, outsize: 24
+dev unique: 14, opcode: FLUSH (25), nodeid: 2, insize: 64, pid: 14
+flush[129822164520592]
+[flush] /w.txt fh=129822164520592
+invf: flush w.txt len=5 ok
+   unique: 14, success, outsize: 16
+dev unique: 16, opcode: RELEASE (18), nodeid: 2, insize: 64, pid: 0
+release[129822164520592] flags: 0x8001
+   unique: 16, success, outsize: 16
+dev unique: 18, opcode: LOOKUP (1), nodeid: 1, insize: 46, pid: 14
+LOOKUP /w.txt
+getattr[NULL] /w.txt
+   NODEID: 2
+   unique: 18, success, outsize: 144
+dev unique: 20, opcode: OPEN (14), nodeid: 2, insize: 48, pid: 14
+open flags: 0x8401 /w.txt
+   open[129822164520592] flags: 0x8401 /w.txt
+   unique: 20, success, outsize: 32
+dev unique: 22, opcode: FLUSH (25), nodeid: 2, insize: 64, pid: 14
+flush[129822164520592]
+[flush] /w.txt fh=129822164520592
+invf: flush w.txt len=5 ok
+   unique: 22, success, outsize: 16
+dev unique: 24, opcode: WRITE (16), nodeid: 2, insize: 88, pid: 14
+write[129822164520592] 8 bytes to 5 flags: 0x8401
+[write] /w.txt off=5 size=8 fh=129822164520592
+   write[129822164520592] 8 bytes to 5
+   unique: 24, success, outsize: 24
+dev unique: 26, opcode: FLUSH (25), nodeid: 2, insize: 64, pid: 14
+flush[129822164520592]
+[flush] /w.txt fh=129822164520592
+invf: flush w.txt len=13 ok
+   unique: 26, success, outsize: 16
+dev unique: 28, opcode: RELEASE (18), nodeid: 2, insize: 64, pid: 0
+release[129822164520592] flags: 0x8401
+   unique: 28, success, outsize: 16
+dev unique: 30, opcode: LOOKUP (1), nodeid: 1, insize: 46, pid: 26
+LOOKUP /w.txt
+getattr[NULL] /w.txt
+   NODEID: 2
+   unique: 30, success, outsize: 144
+dev unique: 32, opcode: OPEN (14), nodeid: 2, insize: 48, pid: 26
+open flags: 0x8000 /w.txt
+   open[0] flags: 0x8000 /w.txt
+   unique: 32, success, outsize: 32
+dev unique: 34, opcode: READ (15), nodeid: 2, insize: 80, pid: 26
+read[0] 4096 bytes from 0 flags: 0x8000
+   read[0] 13 bytes from 0
+   unique: 34, success, outsize: 29
+dev unique: 36, opcode: FLUSH (25), nodeid: 2, insize: 64, pid: 26
+flush[0]
+[flush] /w.txt fh=0
+   unique: 36, success, outsize: 16
+dev unique: 38, opcode: RELEASE (18), nodeid: 2, insize: 64, pid: 0
+release[0] flags: 0x8000
+   unique: 38, success, outsize: 16
+fuse: session exited, terminating workers
+[fuse_main rc=0]

@@ -1,0 +1,863 @@
+' ' is not recognized as an internal or external command,
+operable program or batch file.
+mkfs.c
+D:\VFS\src\mkfs.c(21): warning C4005: _CRT_SECURE_NO_WARNINGS: изменение макроопределения
+D:\VFS\src\mkfs.c(21): note: "_CRT_SECURE_NO_WARNINGS" ранее объявлен в командной строке
+crc32c.c
+blkio.c
+D:\VFS\src\blkio.c(5): warning C4005: _CRT_SECURE_NO_WARNINGS: изменение макроопределения
+D:\VFS\src\blkio.c(5): note: "_CRT_SECURE_NO_WARNINGS" ранее объявлен в командной строке
+Создание кода...
+blkio_test.c
+D:\VFS\src\blkio_test.c(14): warning C4005: _CRT_SECURE_NO_WARNINGS: изменение макроопределения
+D:\VFS\src\blkio_test.c(14): note: "_CRT_SECURE_NO_WARNINGS" ранее объявлен в командной строке
+blkio.c
+D:\VFS\src\blkio.c(5): warning C4005: _CRT_SECURE_NO_WARNINGS: изменение макроопределения
+D:\VFS\src\blkio.c(5): note: "_CRT_SECURE_NO_WARNINGS" ранее объявлен в командной строке
+Создание кода...
+verify.c
+D:\VFS\src\verify.c(9): warning C4005: _CRT_SECURE_NO_WARNINGS: изменение макроопределения
+D:\VFS\src\verify.c(9): note: "_CRT_SECURE_NO_WARNINGS" ранее объявлен в командной строке
+volume.c
+D:\VFS\src\volume.c(16): warning C4005: _CRT_SECURE_NO_WARNINGS: изменение макроопределения
+D:\VFS\src\volume.c(16): note: "_CRT_SECURE_NO_WARNINGS" ранее объявлен в командной строке
+D:\VFS\src\volume.c(84): warning C4005: deflateInit2: изменение макроопределения
+D:\VFS\src\zlib\zlib.h(1817): note: см. предыдущее определение "deflateInit2"
+D:\VFS\src\volume.c(85): warning C4005: inflateInit2: изменение макроопределения
+D:\VFS\src\zlib\zlib.h(1820): note: см. предыдущее определение "inflateInit2"
+D:\VFS\src\volume.c(1550): warning C4101: seg_zone: неиспользованная локальная переменная
+D:\VFS\src\volume.c(4303): warning C4267: инициализация: преобразование из "size_t" в "mz_uint"; возможна потеря данных
+crc32c.c
+blkio.c
+D:\VFS\src\blkio.c(5): warning C4005: _CRT_SECURE_NO_WARNINGS: изменение макроопределения
+D:\VFS\src\blkio.c(5): note: "_CRT_SECURE_NO_WARNINGS" ранее объявлен в командной строке
+lz4.c
+miniz.c
+flacx.c
+D:\VFS\src\flacx.c(29): warning C4005: _CRT_SECURE_NO_WARNINGS: изменение макроопределения
+D:\VFS\src\flacx.c(29): note: "_CRT_SECURE_NO_WARNINGS" ранее объявлен в командной строке
+tarx.c
+pngx.c
+deflate.c
+trees.c
+adler32.c
+crc32.c
+zutil.c
+inflate.c
+inffast.c
+inftrees.c
+debug.c
+entropy_common.c
+error_private.c
+Создание кода...
+Компиляция...
+fse_decompress.c
+pool.c
+threading.c
+xxhash.c
+zstd_common.c
+fse_compress.c
+hist.c
+huf_compress.c
+zstd_compress.c
+zstd_compress_literals.c
+zstd_compress_sequences.c
+zstd_compress_superblock.c
+zstd_double_fast.c
+zstd_fast.c
+zstd_lazy.c
+zstd_ldm.c
+zstd_opt.c
+huf_decompress.c
+zstd_ddict.c
+zstd_decompress.c
+Создание кода...
+Компиляция...
+zstd_decompress_block.c
+Создание кода...
+fsck.c
+volume.c
+D:\VFS\src\volume.c(16): warning C4005: _CRT_SECURE_NO_WARNINGS: изменение макроопределения
+D:\VFS\src\volume.c(16): note: "_CRT_SECURE_NO_WARNINGS" ранее объявлен в командной строке
+D:\VFS\src\volume.c(84): warning C4005: deflateInit2: изменение макроопределения
+D:\VFS\src\zlib\zlib.h(1817): note: см. предыдущее определение "deflateInit2"
+D:\VFS\src\volume.c(85): warning C4005: inflateInit2: изменение макроопределения
+D:\VFS\src\zlib\zlib.h(1820): note: см. предыдущее определение "inflateInit2"
+D:\VFS\src\volume.c(1550): warning C4101: seg_zone: неиспользованная локальная переменная
+D:\VFS\src\volume.c(4303): warning C4267: инициализация: преобразование из "size_t" в "mz_uint"; возможна потеря данных
+crc32c.c
+blkio.c
+D:\VFS\src\blkio.c(5): warning C4005: _CRT_SECURE_NO_WARNINGS: изменение макроопределения
+D:\VFS\src\blkio.c(5): note: "_CRT_SECURE_NO_WARNINGS" ранее объявлен в командной строке
+lz4.c
+miniz.c
+flacx.c
+D:\VFS\src\flacx.c(29): warning C4005: _CRT_SECURE_NO_WARNINGS: изменение макроопределения
+D:\VFS\src\flacx.c(29): note: "_CRT_SECURE_NO_WARNINGS" ранее объявлен в командной строке
+tarx.c
+pngx.c
+deflate.c
+trees.c
+adler32.c
+crc32.c
+zutil.c
+inflate.c
+inffast.c
+inftrees.c
+debug.c
+entropy_common.c
+error_private.c
+Создание кода...
+Компиляция...
+fse_decompress.c
+pool.c
+threading.c
+xxhash.c
+zstd_common.c
+fse_compress.c
+hist.c
+huf_compress.c
+zstd_compress.c
+zstd_compress_literals.c
+zstd_compress_sequences.c
+zstd_compress_superblock.c
+zstd_double_fast.c
+zstd_fast.c
+zstd_lazy.c
+zstd_ldm.c
+zstd_opt.c
+huf_decompress.c
+zstd_ddict.c
+zstd_decompress.c
+Создание кода...
+Компиляция...
+zstd_decompress_block.c
+Создание кода...
+cp.c
+D:\VFS\src\cp.c(6): warning C4005: _CRT_SECURE_NO_WARNINGS: изменение макроопределения
+D:\VFS\src\cp.c(6): note: "_CRT_SECURE_NO_WARNINGS" ранее объявлен в командной строке
+volume.c
+D:\VFS\src\volume.c(16): warning C4005: _CRT_SECURE_NO_WARNINGS: изменение макроопределения
+D:\VFS\src\volume.c(16): note: "_CRT_SECURE_NO_WARNINGS" ранее объявлен в командной строке
+D:\VFS\src\volume.c(84): warning C4005: deflateInit2: изменение макроопределения
+D:\VFS\src\zlib\zlib.h(1817): note: см. предыдущее определение "deflateInit2"
+D:\VFS\src\volume.c(85): warning C4005: inflateInit2: изменение макроопределения
+D:\VFS\src\zlib\zlib.h(1820): note: см. предыдущее определение "inflateInit2"
+D:\VFS\src\volume.c(1550): warning C4101: seg_zone: неиспользованная локальная переменная
+D:\VFS\src\volume.c(4303): warning C4267: инициализация: преобразование из "size_t" в "mz_uint"; возможна потеря данных
+crc32c.c
+blkio.c
+D:\VFS\src\blkio.c(5): warning C4005: _CRT_SECURE_NO_WARNINGS: изменение макроопределения
+D:\VFS\src\blkio.c(5): note: "_CRT_SECURE_NO_WARNINGS" ранее объявлен в командной строке
+lz4.c
+miniz.c
+flacx.c
+D:\VFS\src\flacx.c(29): warning C4005: _CRT_SECURE_NO_WARNINGS: изменение макроопределения
+D:\VFS\src\flacx.c(29): note: "_CRT_SECURE_NO_WARNINGS" ранее объявлен в командной строке
+tarx.c
+pngx.c
+deflate.c
+trees.c
+adler32.c
+crc32.c
+zutil.c
+inflate.c
+inffast.c
+inftrees.c
+debug.c
+entropy_common.c
+error_private.c
+Создание кода...
+Компиляция...
+fse_decompress.c
+pool.c
+threading.c
+xxhash.c
+zstd_common.c
+fse_compress.c
+hist.c
+huf_compress.c
+zstd_compress.c
+zstd_compress_literals.c
+zstd_compress_sequences.c
+zstd_compress_superblock.c
+zstd_double_fast.c
+zstd_fast.c
+zstd_lazy.c
+zstd_ldm.c
+zstd_opt.c
+huf_decompress.c
+zstd_ddict.c
+zstd_decompress.c
+Создание кода...
+Компиляция...
+zstd_decompress_block.c
+Создание кода...
+cat.c
+D:\VFS\src\cat.c(9): warning C4005: _CRT_SECURE_NO_WARNINGS: изменение макроопределения
+D:\VFS\src\cat.c(9): note: "_CRT_SECURE_NO_WARNINGS" ранее объявлен в командной строке
+volume.c
+D:\VFS\src\volume.c(16): warning C4005: _CRT_SECURE_NO_WARNINGS: изменение макроопределения
+D:\VFS\src\volume.c(16): note: "_CRT_SECURE_NO_WARNINGS" ранее объявлен в командной строке
+D:\VFS\src\volume.c(84): warning C4005: deflateInit2: изменение макроопределения
+D:\VFS\src\zlib\zlib.h(1817): note: см. предыдущее определение "deflateInit2"
+D:\VFS\src\volume.c(85): warning C4005: inflateInit2: изменение макроопределения
+D:\VFS\src\zlib\zlib.h(1820): note: см. предыдущее определение "inflateInit2"
+D:\VFS\src\volume.c(1550): warning C4101: seg_zone: неиспользованная локальная переменная
+D:\VFS\src\volume.c(4303): warning C4267: инициализация: преобразование из "size_t" в "mz_uint"; возможна потеря данных
+crc32c.c
+blkio.c
+D:\VFS\src\blkio.c(5): warning C4005: _CRT_SECURE_NO_WARNINGS: изменение макроопределения
+D:\VFS\src\blkio.c(5): note: "_CRT_SECURE_NO_WARNINGS" ранее объявлен в командной строке
+lz4.c
+miniz.c
+flacx.c
+D:\VFS\src\flacx.c(29): warning C4005: _CRT_SECURE_NO_WARNINGS: изменение макроопределения
+D:\VFS\src\flacx.c(29): note: "_CRT_SECURE_NO_WARNINGS" ранее объявлен в командной строке
+tarx.c
+pngx.c
+deflate.c
+trees.c
+adler32.c
+crc32.c
+zutil.c
+inflate.c
+inffast.c
+inftrees.c
+debug.c
+entropy_common.c
+error_private.c
+Создание кода...
+Компиляция...
+fse_decompress.c
+pool.c
+threading.c
+xxhash.c
+zstd_common.c
+fse_compress.c
+hist.c
+huf_compress.c
+zstd_compress.c
+zstd_compress_literals.c
+zstd_compress_sequences.c
+zstd_compress_superblock.c
+zstd_double_fast.c
+zstd_fast.c
+zstd_lazy.c
+zstd_ldm.c
+zstd_opt.c
+huf_decompress.c
+zstd_ddict.c
+zstd_decompress.c
+Создание кода...
+Компиляция...
+zstd_decompress_block.c
+Создание кода...
+ls.c
+D:\VFS\src\ls.c(6): warning C4005: _CRT_SECURE_NO_WARNINGS: изменение макроопределения
+D:\VFS\src\ls.c(6): note: "_CRT_SECURE_NO_WARNINGS" ранее объявлен в командной строке
+volume.c
+D:\VFS\src\volume.c(16): warning C4005: _CRT_SECURE_NO_WARNINGS: изменение макроопределения
+D:\VFS\src\volume.c(16): note: "_CRT_SECURE_NO_WARNINGS" ранее объявлен в командной строке
+D:\VFS\src\volume.c(84): warning C4005: deflateInit2: изменение макроопределения
+D:\VFS\src\zlib\zlib.h(1817): note: см. предыдущее определение "deflateInit2"
+D:\VFS\src\volume.c(85): warning C4005: inflateInit2: изменение макроопределения
+D:\VFS\src\zlib\zlib.h(1820): note: см. предыдущее определение "inflateInit2"
+D:\VFS\src\volume.c(1550): warning C4101: seg_zone: неиспользованная локальная переменная
+D:\VFS\src\volume.c(4303): warning C4267: инициализация: преобразование из "size_t" в "mz_uint"; возможна потеря данных
+crc32c.c
+blkio.c
+D:\VFS\src\blkio.c(5): warning C4005: _CRT_SECURE_NO_WARNINGS: изменение макроопределения
+D:\VFS\src\blkio.c(5): note: "_CRT_SECURE_NO_WARNINGS" ранее объявлен в командной строке
+lz4.c
+miniz.c
+flacx.c
+D:\VFS\src\flacx.c(29): warning C4005: _CRT_SECURE_NO_WARNINGS: изменение макроопределения
+D:\VFS\src\flacx.c(29): note: "_CRT_SECURE_NO_WARNINGS" ранее объявлен в командной строке
+tarx.c
+pngx.c
+deflate.c
+trees.c
+adler32.c
+crc32.c
+zutil.c
+inflate.c
+inffast.c
+inftrees.c
+debug.c
+entropy_common.c
+error_private.c
+Создание кода...
+Компиляция...
+fse_decompress.c
+pool.c
+threading.c
+xxhash.c
+zstd_common.c
+fse_compress.c
+hist.c
+huf_compress.c
+zstd_compress.c
+zstd_compress_literals.c
+zstd_compress_sequences.c
+zstd_compress_superblock.c
+zstd_double_fast.c
+zstd_fast.c
+zstd_lazy.c
+zstd_ldm.c
+zstd_opt.c
+huf_decompress.c
+zstd_ddict.c
+zstd_decompress.c
+Создание кода...
+Компиляция...
+zstd_decompress_block.c
+Создание кода...
+sweep.c
+D:\VFS\src\sweep.c(12): warning C4005: _CRT_SECURE_NO_WARNINGS: изменение макроопределения
+D:\VFS\src\sweep.c(12): note: "_CRT_SECURE_NO_WARNINGS" ранее объявлен в командной строке
+volume.c
+D:\VFS\src\volume.c(16): warning C4005: _CRT_SECURE_NO_WARNINGS: изменение макроопределения
+D:\VFS\src\volume.c(16): note: "_CRT_SECURE_NO_WARNINGS" ранее объявлен в командной строке
+D:\VFS\src\volume.c(84): warning C4005: deflateInit2: изменение макроопределения
+D:\VFS\src\zlib\zlib.h(1817): note: см. предыдущее определение "deflateInit2"
+D:\VFS\src\volume.c(85): warning C4005: inflateInit2: изменение макроопределения
+D:\VFS\src\zlib\zlib.h(1820): note: см. предыдущее определение "inflateInit2"
+D:\VFS\src\volume.c(1550): warning C4101: seg_zone: неиспользованная локальная переменная
+D:\VFS\src\volume.c(4303): warning C4267: инициализация: преобразование из "size_t" в "mz_uint"; возможна потеря данных
+crc32c.c
+blkio.c
+D:\VFS\src\blkio.c(5): warning C4005: _CRT_SECURE_NO_WARNINGS: изменение макроопределения
+D:\VFS\src\blkio.c(5): note: "_CRT_SECURE_NO_WARNINGS" ранее объявлен в командной строке
+lz4.c
+miniz.c
+blake3.c
+blake3_dispatch.c
+blake3_portable.c
+flacx.c
+D:\VFS\src\flacx.c(29): warning C4005: _CRT_SECURE_NO_WARNINGS: изменение макроопределения
+D:\VFS\src\flacx.c(29): note: "_CRT_SECURE_NO_WARNINGS" ранее объявлен в командной строке
+tarx.c
+pngx.c
+deflate.c
+trees.c
+adler32.c
+crc32.c
+zutil.c
+inflate.c
+inffast.c
+inftrees.c
+Создание кода...
+Компиляция...
+debug.c
+entropy_common.c
+error_private.c
+fse_decompress.c
+pool.c
+threading.c
+xxhash.c
+zstd_common.c
+fse_compress.c
+hist.c
+huf_compress.c
+zstd_compress.c
+zstd_compress_literals.c
+zstd_compress_sequences.c
+zstd_compress_superblock.c
+zstd_double_fast.c
+zstd_fast.c
+zstd_lazy.c
+zstd_ldm.c
+zstd_opt.c
+Создание кода...
+Компиляция...
+huf_decompress.c
+zstd_ddict.c
+zstd_decompress.c
+zstd_decompress_block.c
+Создание кода...
+range_test.c
+volume.c
+D:\VFS\src\volume.c(16): warning C4005: _CRT_SECURE_NO_WARNINGS: изменение макроопределения
+D:\VFS\src\volume.c(16): note: "_CRT_SECURE_NO_WARNINGS" ранее объявлен в командной строке
+D:\VFS\src\volume.c(84): warning C4005: deflateInit2: изменение макроопределения
+D:\VFS\src\zlib\zlib.h(1817): note: см. предыдущее определение "deflateInit2"
+D:\VFS\src\volume.c(85): warning C4005: inflateInit2: изменение макроопределения
+D:\VFS\src\zlib\zlib.h(1820): note: см. предыдущее определение "inflateInit2"
+D:\VFS\src\volume.c(1550): warning C4101: seg_zone: неиспользованная локальная переменная
+D:\VFS\src\volume.c(4303): warning C4267: инициализация: преобразование из "size_t" в "mz_uint"; возможна потеря данных
+crc32c.c
+blkio.c
+D:\VFS\src\blkio.c(5): warning C4005: _CRT_SECURE_NO_WARNINGS: изменение макроопределения
+D:\VFS\src\blkio.c(5): note: "_CRT_SECURE_NO_WARNINGS" ранее объявлен в командной строке
+lz4.c
+miniz.c
+flacx.c
+D:\VFS\src\flacx.c(29): warning C4005: _CRT_SECURE_NO_WARNINGS: изменение макроопределения
+D:\VFS\src\flacx.c(29): note: "_CRT_SECURE_NO_WARNINGS" ранее объявлен в командной строке
+tarx.c
+pngx.c
+deflate.c
+trees.c
+adler32.c
+crc32.c
+zutil.c
+inflate.c
+inffast.c
+inftrees.c
+debug.c
+entropy_common.c
+error_private.c
+Создание кода...
+Компиляция...
+fse_decompress.c
+pool.c
+threading.c
+xxhash.c
+zstd_common.c
+fse_compress.c
+hist.c
+huf_compress.c
+zstd_compress.c
+zstd_compress_literals.c
+zstd_compress_sequences.c
+zstd_compress_superblock.c
+zstd_double_fast.c
+zstd_fast.c
+zstd_lazy.c
+zstd_ldm.c
+zstd_opt.c
+huf_decompress.c
+zstd_ddict.c
+zstd_decompress.c
+Создание кода...
+Компиляция...
+zstd_decompress_block.c
+Создание кода...
+sizes.c
+D:\VFS\src\sizes.c(11): warning C4005: _CRT_SECURE_NO_WARNINGS: изменение макроопределения
+D:\VFS\src\sizes.c(11): note: "_CRT_SECURE_NO_WARNINGS" ранее объявлен в командной строке
+volume.c
+D:\VFS\src\volume.c(16): warning C4005: _CRT_SECURE_NO_WARNINGS: изменение макроопределения
+D:\VFS\src\volume.c(16): note: "_CRT_SECURE_NO_WARNINGS" ранее объявлен в командной строке
+D:\VFS\src\volume.c(84): warning C4005: deflateInit2: изменение макроопределения
+D:\VFS\src\zlib\zlib.h(1817): note: см. предыдущее определение "deflateInit2"
+D:\VFS\src\volume.c(85): warning C4005: inflateInit2: изменение макроопределения
+D:\VFS\src\zlib\zlib.h(1820): note: см. предыдущее определение "inflateInit2"
+D:\VFS\src\volume.c(1550): warning C4101: seg_zone: неиспользованная локальная переменная
+D:\VFS\src\volume.c(4303): warning C4267: инициализация: преобразование из "size_t" в "mz_uint"; возможна потеря данных
+crc32c.c
+blkio.c
+D:\VFS\src\blkio.c(5): warning C4005: _CRT_SECURE_NO_WARNINGS: изменение макроопределения
+D:\VFS\src\blkio.c(5): note: "_CRT_SECURE_NO_WARNINGS" ранее объявлен в командной строке
+lz4.c
+miniz.c
+flacx.c
+D:\VFS\src\flacx.c(29): warning C4005: _CRT_SECURE_NO_WARNINGS: изменение макроопределения
+D:\VFS\src\flacx.c(29): note: "_CRT_SECURE_NO_WARNINGS" ранее объявлен в командной строке
+tarx.c
+pngx.c
+deflate.c
+trees.c
+adler32.c
+crc32.c
+zutil.c
+inflate.c
+inffast.c
+inftrees.c
+debug.c
+entropy_common.c
+error_private.c
+Создание кода...
+Компиляция...
+fse_decompress.c
+pool.c
+threading.c
+xxhash.c
+zstd_common.c
+fse_compress.c
+hist.c
+huf_compress.c
+zstd_compress.c
+zstd_compress_literals.c
+zstd_compress_sequences.c
+zstd_compress_superblock.c
+zstd_double_fast.c
+zstd_fast.c
+zstd_lazy.c
+zstd_ldm.c
+zstd_opt.c
+huf_decompress.c
+zstd_ddict.c
+zstd_decompress.c
+Создание кода...
+Компиляция...
+zstd_decompress_block.c
+Создание кода...
+stat.c
+D:\VFS\src\stat.c(12): warning C4005: _CRT_SECURE_NO_WARNINGS: изменение макроопределения
+D:\VFS\src\stat.c(12): note: "_CRT_SECURE_NO_WARNINGS" ранее объявлен в командной строке
+volume.c
+D:\VFS\src\volume.c(16): warning C4005: _CRT_SECURE_NO_WARNINGS: изменение макроопределения
+D:\VFS\src\volume.c(16): note: "_CRT_SECURE_NO_WARNINGS" ранее объявлен в командной строке
+D:\VFS\src\volume.c(84): warning C4005: deflateInit2: изменение макроопределения
+D:\VFS\src\zlib\zlib.h(1817): note: см. предыдущее определение "deflateInit2"
+D:\VFS\src\volume.c(85): warning C4005: inflateInit2: изменение макроопределения
+D:\VFS\src\zlib\zlib.h(1820): note: см. предыдущее определение "inflateInit2"
+D:\VFS\src\volume.c(1550): warning C4101: seg_zone: неиспользованная локальная переменная
+D:\VFS\src\volume.c(4303): warning C4267: инициализация: преобразование из "size_t" в "mz_uint"; возможна потеря данных
+crc32c.c
+blkio.c
+D:\VFS\src\blkio.c(5): warning C4005: _CRT_SECURE_NO_WARNINGS: изменение макроопределения
+D:\VFS\src\blkio.c(5): note: "_CRT_SECURE_NO_WARNINGS" ранее объявлен в командной строке
+lz4.c
+miniz.c
+flacx.c
+D:\VFS\src\flacx.c(29): warning C4005: _CRT_SECURE_NO_WARNINGS: изменение макроопределения
+D:\VFS\src\flacx.c(29): note: "_CRT_SECURE_NO_WARNINGS" ранее объявлен в командной строке
+tarx.c
+pngx.c
+deflate.c
+trees.c
+adler32.c
+crc32.c
+zutil.c
+inflate.c
+inffast.c
+inftrees.c
+debug.c
+entropy_common.c
+error_private.c
+Создание кода...
+Компиляция...
+fse_decompress.c
+pool.c
+threading.c
+xxhash.c
+zstd_common.c
+fse_compress.c
+hist.c
+huf_compress.c
+zstd_compress.c
+zstd_compress_literals.c
+zstd_compress_sequences.c
+zstd_compress_superblock.c
+zstd_double_fast.c
+zstd_fast.c
+zstd_lazy.c
+zstd_ldm.c
+zstd_opt.c
+huf_decompress.c
+zstd_ddict.c
+zstd_decompress.c
+Создание кода...
+Компиляция...
+zstd_decompress_block.c
+Создание кода...
+zip.c
+D:\VFS\src\zip.c(11): warning C4005: _CRT_SECURE_NO_WARNINGS: изменение макроопределения
+D:\VFS\src\zip.c(11): note: "_CRT_SECURE_NO_WARNINGS" ранее объявлен в командной строке
+volume.c
+D:\VFS\src\volume.c(16): warning C4005: _CRT_SECURE_NO_WARNINGS: изменение макроопределения
+D:\VFS\src\volume.c(16): note: "_CRT_SECURE_NO_WARNINGS" ранее объявлен в командной строке
+D:\VFS\src\volume.c(84): warning C4005: deflateInit2: изменение макроопределения
+D:\VFS\src\zlib\zlib.h(1817): note: см. предыдущее определение "deflateInit2"
+D:\VFS\src\volume.c(85): warning C4005: inflateInit2: изменение макроопределения
+D:\VFS\src\zlib\zlib.h(1820): note: см. предыдущее определение "inflateInit2"
+D:\VFS\src\volume.c(1550): warning C4101: seg_zone: неиспользованная локальная переменная
+D:\VFS\src\volume.c(4303): warning C4267: инициализация: преобразование из "size_t" в "mz_uint"; возможна потеря данных
+crc32c.c
+blkio.c
+D:\VFS\src\blkio.c(5): warning C4005: _CRT_SECURE_NO_WARNINGS: изменение макроопределения
+D:\VFS\src\blkio.c(5): note: "_CRT_SECURE_NO_WARNINGS" ранее объявлен в командной строке
+lz4.c
+flacx.c
+D:\VFS\src\flacx.c(29): warning C4005: _CRT_SECURE_NO_WARNINGS: изменение макроопределения
+D:\VFS\src\flacx.c(29): note: "_CRT_SECURE_NO_WARNINGS" ранее объявлен в командной строке
+tarx.c
+pngx.c
+deflate.c
+trees.c
+adler32.c
+crc32.c
+zutil.c
+inflate.c
+inffast.c
+inftrees.c
+debug.c
+entropy_common.c
+error_private.c
+fse_decompress.c
+Создание кода...
+Компиляция...
+pool.c
+threading.c
+xxhash.c
+zstd_common.c
+fse_compress.c
+hist.c
+huf_compress.c
+zstd_compress.c
+zstd_compress_literals.c
+zstd_compress_sequences.c
+zstd_compress_superblock.c
+zstd_double_fast.c
+zstd_fast.c
+zstd_lazy.c
+zstd_ldm.c
+zstd_opt.c
+huf_decompress.c
+zstd_ddict.c
+zstd_decompress.c
+zstd_decompress_block.c
+Создание кода...
+bench.c
+D:\VFS\src\bench.c(10): warning C4005: _CRT_SECURE_NO_WARNINGS: изменение макроопределения
+D:\VFS\src\bench.c(10): note: "_CRT_SECURE_NO_WARNINGS" ранее объявлен в командной строке
+volume.c
+D:\VFS\src\volume.c(16): warning C4005: _CRT_SECURE_NO_WARNINGS: изменение макроопределения
+D:\VFS\src\volume.c(16): note: "_CRT_SECURE_NO_WARNINGS" ранее объявлен в командной строке
+D:\VFS\src\volume.c(84): warning C4005: deflateInit2: изменение макроопределения
+D:\VFS\src\zlib\zlib.h(1817): note: см. предыдущее определение "deflateInit2"
+D:\VFS\src\volume.c(85): warning C4005: inflateInit2: изменение макроопределения
+D:\VFS\src\zlib\zlib.h(1820): note: см. предыдущее определение "inflateInit2"
+D:\VFS\src\volume.c(1550): warning C4101: seg_zone: неиспользованная локальная переменная
+D:\VFS\src\volume.c(4303): warning C4267: инициализация: преобразование из "size_t" в "mz_uint"; возможна потеря данных
+crc32c.c
+blkio.c
+D:\VFS\src\blkio.c(5): warning C4005: _CRT_SECURE_NO_WARNINGS: изменение макроопределения
+D:\VFS\src\blkio.c(5): note: "_CRT_SECURE_NO_WARNINGS" ранее объявлен в командной строке
+lz4.c
+miniz.c
+flacx.c
+D:\VFS\src\flacx.c(29): warning C4005: _CRT_SECURE_NO_WARNINGS: изменение макроопределения
+D:\VFS\src\flacx.c(29): note: "_CRT_SECURE_NO_WARNINGS" ранее объявлен в командной строке
+tarx.c
+pngx.c
+deflate.c
+trees.c
+adler32.c
+crc32.c
+zutil.c
+inflate.c
+inffast.c
+inftrees.c
+debug.c
+entropy_common.c
+error_private.c
+Создание кода...
+Компиляция...
+fse_decompress.c
+pool.c
+threading.c
+xxhash.c
+zstd_common.c
+fse_compress.c
+hist.c
+huf_compress.c
+zstd_compress.c
+zstd_compress_literals.c
+zstd_compress_sequences.c
+zstd_compress_superblock.c
+zstd_double_fast.c
+zstd_fast.c
+zstd_lazy.c
+zstd_ldm.c
+zstd_opt.c
+huf_decompress.c
+zstd_ddict.c
+zstd_decompress.c
+Создание кода...
+Компиляция...
+zstd_decompress_block.c
+Создание кода...
+dokan_fs.c
+D:\VFS\src\dokan_fs.c(11): warning C4005: _CRT_SECURE_NO_WARNINGS: изменение макроопределения
+D:\VFS\src\dokan_fs.c(11): note: "_CRT_SECURE_NO_WARNINGS" ранее объявлен в командной строке
+C:\Program Files (x86)\Windows Kits\10\\include\10.0.26100.0\\shared\ntstatus.h(66): warning C4005: STATUS_WAIT_0: изменение макроопределения
+C:\Program Files (x86)\Windows Kits\10\\include\10.0.26100.0\\um\winnt.h(2611): note: см. предыдущее определение "STATUS_WAIT_0"
+C:\Program Files (x86)\Windows Kits\10\\include\10.0.26100.0\\shared\ntstatus.h(227): warning C4005: STATUS_ABANDONED_WAIT_0: изменение макроопределения
+C:\Program Files (x86)\Windows Kits\10\\include\10.0.26100.0\\um\winnt.h(2612): note: см. предыдущее определение "STATUS_ABANDONED_WAIT_0"
+C:\Program Files (x86)\Windows Kits\10\\include\10.0.26100.0\\shared\ntstatus.h(250): warning C4005: STATUS_USER_APC: изменение макроопределения
+C:\Program Files (x86)\Windows Kits\10\\include\10.0.26100.0\\um\winnt.h(2613): note: см. предыдущее определение "STATUS_USER_APC"
+C:\Program Files (x86)\Windows Kits\10\\include\10.0.26100.0\\shared\ntstatus.h(286): warning C4005: STATUS_TIMEOUT: изменение макроопределения
+C:\Program Files (x86)\Windows Kits\10\\include\10.0.26100.0\\um\winnt.h(2614): note: см. предыдущее определение "STATUS_TIMEOUT"
+C:\Program Files (x86)\Windows Kits\10\\include\10.0.26100.0\\shared\ntstatus.h(295): warning C4005: STATUS_PENDING: изменение макроопределения
+C:\Program Files (x86)\Windows Kits\10\\include\10.0.26100.0\\um\winnt.h(2615): note: см. предыдущее определение "STATUS_PENDING"
+C:\Program Files (x86)\Windows Kits\10\\include\10.0.26100.0\\shared\ntstatus.h(751): warning C4005: DBG_EXCEPTION_HANDLED: изменение макроопределения
+C:\Program Files (x86)\Windows Kits\10\\include\10.0.26100.0\\um\winnt.h(2616): note: см. предыдущее определение "DBG_EXCEPTION_HANDLED"
+C:\Program Files (x86)\Windows Kits\10\\include\10.0.26100.0\\shared\ntstatus.h(760): warning C4005: DBG_CONTINUE: изменение макроопределения
+C:\Program Files (x86)\Windows Kits\10\\include\10.0.26100.0\\um\winnt.h(2617): note: см. предыдущее определение "DBG_CONTINUE"
+C:\Program Files (x86)\Windows Kits\10\\include\10.0.26100.0\\shared\ntstatus.h(835): warning C4005: STATUS_SEGMENT_NOTIFICATION: изменение макроопределения
+C:\Program Files (x86)\Windows Kits\10\\include\10.0.26100.0\\um\winnt.h(2618): note: см. предыдущее определение "STATUS_SEGMENT_NOTIFICATION"
+C:\Program Files (x86)\Windows Kits\10\\include\10.0.26100.0\\shared\ntstatus.h(998): warning C4005: STATUS_FATAL_APP_EXIT: изменение макроопределения
+C:\Program Files (x86)\Windows Kits\10\\include\10.0.26100.0\\um\winnt.h(2619): note: см. предыдущее определение "STATUS_FATAL_APP_EXIT"
+C:\Program Files (x86)\Windows Kits\10\\include\10.0.26100.0\\shared\ntstatus.h(1345): warning C4005: DBG_REPLY_LATER: изменение макроопределения
+C:\Program Files (x86)\Windows Kits\10\\include\10.0.26100.0\\um\winnt.h(2620): note: см. предыдущее определение "DBG_REPLY_LATER"
+C:\Program Files (x86)\Windows Kits\10\\include\10.0.26100.0\\shared\ntstatus.h(1363): warning C4005: DBG_TERMINATE_THREAD: изменение макроопределения
+C:\Program Files (x86)\Windows Kits\10\\include\10.0.26100.0\\um\winnt.h(2621): note: см. предыдущее определение "DBG_TERMINATE_THREAD"
+C:\Program Files (x86)\Windows Kits\10\\include\10.0.26100.0\\shared\ntstatus.h(1372): warning C4005: DBG_TERMINATE_PROCESS: изменение макроопределения
+C:\Program Files (x86)\Windows Kits\10\\include\10.0.26100.0\\um\winnt.h(2622): note: см. предыдущее определение "DBG_TERMINATE_PROCESS"
+C:\Program Files (x86)\Windows Kits\10\\include\10.0.26100.0\\shared\ntstatus.h(1381): warning C4005: DBG_CONTROL_C: изменение макроопределения
+C:\Program Files (x86)\Windows Kits\10\\include\10.0.26100.0\\um\winnt.h(2623): note: см. предыдущее определение "DBG_CONTROL_C"
+C:\Program Files (x86)\Windows Kits\10\\include\10.0.26100.0\\shared\ntstatus.h(1390): warning C4005: DBG_PRINTEXCEPTION_C: изменение макроопределения
+C:\Program Files (x86)\Windows Kits\10\\include\10.0.26100.0\\um\winnt.h(2624): note: см. предыдущее определение "DBG_PRINTEXCEPTION_C"
+C:\Program Files (x86)\Windows Kits\10\\include\10.0.26100.0\\shared\ntstatus.h(1399): warning C4005: DBG_RIPEXCEPTION: изменение макроопределения
+C:\Program Files (x86)\Windows Kits\10\\include\10.0.26100.0\\um\winnt.h(2625): note: см. предыдущее определение "DBG_RIPEXCEPTION"
+C:\Program Files (x86)\Windows Kits\10\\include\10.0.26100.0\\shared\ntstatus.h(1408): warning C4005: DBG_CONTROL_BREAK: изменение макроопределения
+C:\Program Files (x86)\Windows Kits\10\\include\10.0.26100.0\\um\winnt.h(2626): note: см. предыдущее определение "DBG_CONTROL_BREAK"
+C:\Program Files (x86)\Windows Kits\10\\include\10.0.26100.0\\shared\ntstatus.h(1417): warning C4005: DBG_COMMAND_EXCEPTION: изменение макроопределения
+C:\Program Files (x86)\Windows Kits\10\\include\10.0.26100.0\\um\winnt.h(2627): note: см. предыдущее определение "DBG_COMMAND_EXCEPTION"
+C:\Program Files (x86)\Windows Kits\10\\include\10.0.26100.0\\shared\ntstatus.h(1426): warning C4005: DBG_PRINTEXCEPTION_WIDE_C: изменение макроопределения
+C:\Program Files (x86)\Windows Kits\10\\include\10.0.26100.0\\um\winnt.h(2628): note: см. предыдущее определение "DBG_PRINTEXCEPTION_WIDE_C"
+C:\Program Files (x86)\Windows Kits\10\\include\10.0.26100.0\\shared\ntstatus.h(1458): warning C4005: STATUS_GUARD_PAGE_VIOLATION: изменение макроопределения
+C:\Program Files (x86)\Windows Kits\10\\include\10.0.26100.0\\um\winnt.h(2629): note: см. предыдущее определение "STATUS_GUARD_PAGE_VIOLATION"
+C:\Program Files (x86)\Windows Kits\10\\include\10.0.26100.0\\shared\ntstatus.h(1469): warning C4005: STATUS_DATATYPE_MISALIGNMENT: изменение макроопределения
+C:\Program Files (x86)\Windows Kits\10\\include\10.0.26100.0\\um\winnt.h(2630): note: см. предыдущее определение "STATUS_DATATYPE_MISALIGNMENT"
+C:\Program Files (x86)\Windows Kits\10\\include\10.0.26100.0\\shared\ntstatus.h(1480): warning C4005: STATUS_BREAKPOINT: изменение макроопределения
+C:\Program Files (x86)\Windows Kits\10\\include\10.0.26100.0\\um\winnt.h(2631): note: см. предыдущее определение "STATUS_BREAKPOINT"
+C:\Program Files (x86)\Windows Kits\10\\include\10.0.26100.0\\shared\ntstatus.h(1491): warning C4005: STATUS_SINGLE_STEP: изменение макроопределения
+C:\Program Files (x86)\Windows Kits\10\\include\10.0.26100.0\\um\winnt.h(2632): note: см. предыдущее определение "STATUS_SINGLE_STEP"
+C:\Program Files (x86)\Windows Kits\10\\include\10.0.26100.0\\shared\ntstatus.h(1794): warning C4005: STATUS_LONGJUMP: изменение макроопределения
+C:\Program Files (x86)\Windows Kits\10\\include\10.0.26100.0\\um\winnt.h(2633): note: см. предыдущее определение "STATUS_LONGJUMP"
+C:\Program Files (x86)\Windows Kits\10\\include\10.0.26100.0\\shared\ntstatus.h(1821): warning C4005: STATUS_UNWIND_CONSOLIDATE: изменение макроопределения
+C:\Program Files (x86)\Windows Kits\10\\include\10.0.26100.0\\um\winnt.h(2634): note: см. предыдущее определение "STATUS_UNWIND_CONSOLIDATE"
+C:\Program Files (x86)\Windows Kits\10\\include\10.0.26100.0\\shared\ntstatus.h(1945): warning C4005: DBG_EXCEPTION_NOT_HANDLED: изменение макроопределения
+C:\Program Files (x86)\Windows Kits\10\\include\10.0.26100.0\\um\winnt.h(2635): note: см. предыдущее определение "DBG_EXCEPTION_NOT_HANDLED"
+C:\Program Files (x86)\Windows Kits\10\\include\10.0.26100.0\\shared\ntstatus.h(2112): warning C4005: STATUS_ACCESS_VIOLATION: изменение макроопределения
+C:\Program Files (x86)\Windows Kits\10\\include\10.0.26100.0\\um\winnt.h(2636): note: см. предыдущее определение "STATUS_ACCESS_VIOLATION"
+C:\Program Files (x86)\Windows Kits\10\\include\10.0.26100.0\\shared\ntstatus.h(2121): warning C4005: STATUS_IN_PAGE_ERROR: изменение макроопределения
+C:\Program Files (x86)\Windows Kits\10\\include\10.0.26100.0\\um\winnt.h(2637): note: см. предыдущее определение "STATUS_IN_PAGE_ERROR"
+C:\Program Files (x86)\Windows Kits\10\\include\10.0.26100.0\\shared\ntstatus.h(2139): warning C4005: STATUS_INVALID_HANDLE: изменение макроопределения
+C:\Program Files (x86)\Windows Kits\10\\include\10.0.26100.0\\um\winnt.h(2638): note: см. предыдущее определение "STATUS_INVALID_HANDLE"
+C:\Program Files (x86)\Windows Kits\10\\include\10.0.26100.0\\shared\ntstatus.h(2184): warning C4005: STATUS_INVALID_PARAMETER: изменение макроопределения
+C:\Program Files (x86)\Windows Kits\10\\include\10.0.26100.0\\um\winnt.h(2639): note: см. предыдущее определение "STATUS_INVALID_PARAMETER"
+C:\Program Files (x86)\Windows Kits\10\\include\10.0.26100.0\\shared\ntstatus.h(2284): warning C4005: STATUS_NO_MEMORY: изменение макроопределения
+C:\Program Files (x86)\Windows Kits\10\\include\10.0.26100.0\\um\winnt.h(2640): note: см. предыдущее определение "STATUS_NO_MEMORY"
+C:\Program Files (x86)\Windows Kits\10\\include\10.0.26100.0\\shared\ntstatus.h(2341): warning C4005: STATUS_ILLEGAL_INSTRUCTION: изменение макроопределения
+C:\Program Files (x86)\Windows Kits\10\\include\10.0.26100.0\\um\winnt.h(2641): note: см. предыдущее определение "STATUS_ILLEGAL_INSTRUCTION"
+C:\Program Files (x86)\Windows Kits\10\\include\10.0.26100.0\\shared\ntstatus.h(2422): warning C4005: STATUS_NONCONTINUABLE_EXCEPTION: изменение макроопределения
+C:\Program Files (x86)\Windows Kits\10\\include\10.0.26100.0\\um\winnt.h(2642): note: см. предыдущее определение "STATUS_NONCONTINUABLE_EXCEPTION"
+C:\Program Files (x86)\Windows Kits\10\\include\10.0.26100.0\\shared\ntstatus.h(2431): warning C4005: STATUS_INVALID_DISPOSITION: изменение макроопределения
+C:\Program Files (x86)\Windows Kits\10\\include\10.0.26100.0\\um\winnt.h(2643): note: см. предыдущее определение "STATUS_INVALID_DISPOSITION"
+C:\Program Files (x86)\Windows Kits\10\\include\10.0.26100.0\\shared\ntstatus.h(3364): warning C4005: STATUS_ARRAY_BOUNDS_EXCEEDED: изменение макроопределения
+C:\Program Files (x86)\Windows Kits\10\\include\10.0.26100.0\\um\winnt.h(2644): note: см. предыдущее определение "STATUS_ARRAY_BOUNDS_EXCEEDED"
+C:\Program Files (x86)\Windows Kits\10\\include\10.0.26100.0\\shared\ntstatus.h(3374): warning C4005: STATUS_FLOAT_DENORMAL_OPERAND: изменение макроопределения
+C:\Program Files (x86)\Windows Kits\10\\include\10.0.26100.0\\um\winnt.h(2645): note: см. предыдущее определение "STATUS_FLOAT_DENORMAL_OPERAND"
+C:\Program Files (x86)\Windows Kits\10\\include\10.0.26100.0\\shared\ntstatus.h(3384): warning C4005: STATUS_FLOAT_DIVIDE_BY_ZERO: изменение макроопределения
+C:\Program Files (x86)\Windows Kits\10\\include\10.0.26100.0\\um\winnt.h(2646): note: см. предыдущее определение "STATUS_FLOAT_DIVIDE_BY_ZERO"
+C:\Program Files (x86)\Windows Kits\10\\include\10.0.26100.0\\shared\ntstatus.h(3394): warning C4005: STATUS_FLOAT_INEXACT_RESULT: изменение макроопределения
+C:\Program Files (x86)\Windows Kits\10\\include\10.0.26100.0\\um\winnt.h(2647): note: см. предыдущее определение "STATUS_FLOAT_INEXACT_RESULT"
+C:\Program Files (x86)\Windows Kits\10\\include\10.0.26100.0\\shared\ntstatus.h(3404): warning C4005: STATUS_FLOAT_INVALID_OPERATION: изменение макроопределения
+C:\Program Files (x86)\Windows Kits\10\\include\10.0.26100.0\\um\winnt.h(2648): note: см. предыдущее определение "STATUS_FLOAT_INVALID_OPERATION"
+C:\Program Files (x86)\Windows Kits\10\\include\10.0.26100.0\\shared\ntstatus.h(3414): warning C4005: STATUS_FLOAT_OVERFLOW: изменение макроопределения
+C:\Program Files (x86)\Windows Kits\10\\include\10.0.26100.0\\um\winnt.h(2649): note: см. предыдущее определение "STATUS_FLOAT_OVERFLOW"
+C:\Program Files (x86)\Windows Kits\10\\include\10.0.26100.0\\shared\ntstatus.h(3424): warning C4005: STATUS_FLOAT_STACK_CHECK: изменение макроопределения
+C:\Program Files (x86)\Windows Kits\10\\include\10.0.26100.0\\um\winnt.h(2650): note: см. предыдущее определение "STATUS_FLOAT_STACK_CHECK"
+C:\Program Files (x86)\Windows Kits\10\\include\10.0.26100.0\\shared\ntstatus.h(3434): warning C4005: STATUS_FLOAT_UNDERFLOW: изменение макроопределения
+C:\Program Files (x86)\Windows Kits\10\\include\10.0.26100.0\\um\winnt.h(2651): note: см. предыдущее определение "STATUS_FLOAT_UNDERFLOW"
+C:\Program Files (x86)\Windows Kits\10\\include\10.0.26100.0\\shared\ntstatus.h(3444): warning C4005: STATUS_INTEGER_DIVIDE_BY_ZERO: изменение макроопределения
+C:\Program Files (x86)\Windows Kits\10\\include\10.0.26100.0\\um\winnt.h(2652): note: см. предыдущее определение "STATUS_INTEGER_DIVIDE_BY_ZERO"
+C:\Program Files (x86)\Windows Kits\10\\include\10.0.26100.0\\shared\ntstatus.h(3454): warning C4005: STATUS_INTEGER_OVERFLOW: изменение макроопределения
+C:\Program Files (x86)\Windows Kits\10\\include\10.0.26100.0\\um\winnt.h(2653): note: см. предыдущее определение "STATUS_INTEGER_OVERFLOW"
+C:\Program Files (x86)\Windows Kits\10\\include\10.0.26100.0\\shared\ntstatus.h(3464): warning C4005: STATUS_PRIVILEGED_INSTRUCTION: изменение макроопределения
+C:\Program Files (x86)\Windows Kits\10\\include\10.0.26100.0\\um\winnt.h(2654): note: см. предыдущее определение "STATUS_PRIVILEGED_INSTRUCTION"
+C:\Program Files (x86)\Windows Kits\10\\include\10.0.26100.0\\shared\ntstatus.h(4410): warning C4005: STATUS_STACK_OVERFLOW: изменение макроопределения
+C:\Program Files (x86)\Windows Kits\10\\include\10.0.26100.0\\um\winnt.h(2655): note: см. предыдущее определение "STATUS_STACK_OVERFLOW"
+C:\Program Files (x86)\Windows Kits\10\\include\10.0.26100.0\\shared\ntstatus.h(4927): warning C4005: STATUS_DLL_NOT_FOUND: изменение макроопределения
+C:\Program Files (x86)\Windows Kits\10\\include\10.0.26100.0\\um\winnt.h(2656): note: см. предыдущее определение "STATUS_DLL_NOT_FOUND"
+C:\Program Files (x86)\Windows Kits\10\\include\10.0.26100.0\\shared\ntstatus.h(4956): warning C4005: STATUS_ORDINAL_NOT_FOUND: изменение макроопределения
+C:\Program Files (x86)\Windows Kits\10\\include\10.0.26100.0\\um\winnt.h(2657): note: см. предыдущее определение "STATUS_ORDINAL_NOT_FOUND"
+C:\Program Files (x86)\Windows Kits\10\\include\10.0.26100.0\\shared\ntstatus.h(4966): warning C4005: STATUS_ENTRYPOINT_NOT_FOUND: изменение макроопределения
+C:\Program Files (x86)\Windows Kits\10\\include\10.0.26100.0\\um\winnt.h(2658): note: см. предыдущее определение "STATUS_ENTRYPOINT_NOT_FOUND"
+C:\Program Files (x86)\Windows Kits\10\\include\10.0.26100.0\\shared\ntstatus.h(4976): warning C4005: STATUS_CONTROL_C_EXIT: изменение макроопределения
+C:\Program Files (x86)\Windows Kits\10\\include\10.0.26100.0\\um\winnt.h(2659): note: см. предыдущее определение "STATUS_CONTROL_C_EXIT"
+C:\Program Files (x86)\Windows Kits\10\\include\10.0.26100.0\\shared\ntstatus.h(5054): warning C4005: STATUS_DLL_INIT_FAILED: изменение макроопределения
+C:\Program Files (x86)\Windows Kits\10\\include\10.0.26100.0\\um\winnt.h(2660): note: см. предыдущее определение "STATUS_DLL_INIT_FAILED"
+C:\Program Files (x86)\Windows Kits\10\\include\10.0.26100.0\\shared\ntstatus.h(6051): warning C4005: STATUS_CONTROL_STACK_VIOLATION: изменение макроопределения
+C:\Program Files (x86)\Windows Kits\10\\include\10.0.26100.0\\um\winnt.h(2661): note: см. предыдущее определение "STATUS_CONTROL_STACK_VIOLATION"
+C:\Program Files (x86)\Windows Kits\10\\include\10.0.26100.0\\shared\ntstatus.h(7645): warning C4005: STATUS_FLOAT_MULTIPLE_FAULTS: изменение макроопределения
+C:\Program Files (x86)\Windows Kits\10\\include\10.0.26100.0\\um\winnt.h(2662): note: см. предыдущее определение "STATUS_FLOAT_MULTIPLE_FAULTS"
+C:\Program Files (x86)\Windows Kits\10\\include\10.0.26100.0\\shared\ntstatus.h(7655): warning C4005: STATUS_FLOAT_MULTIPLE_TRAPS: изменение макроопределения
+C:\Program Files (x86)\Windows Kits\10\\include\10.0.26100.0\\um\winnt.h(2663): note: см. предыдущее определение "STATUS_FLOAT_MULTIPLE_TRAPS"
+C:\Program Files (x86)\Windows Kits\10\\include\10.0.26100.0\\shared\ntstatus.h(7787): warning C4005: STATUS_REG_NAT_CONSUMPTION: изменение макроопределения
+C:\Program Files (x86)\Windows Kits\10\\include\10.0.26100.0\\um\winnt.h(2664): note: см. предыдущее определение "STATUS_REG_NAT_CONSUMPTION"
+C:\Program Files (x86)\Windows Kits\10\\include\10.0.26100.0\\shared\ntstatus.h(8770): warning C4005: STATUS_HEAP_CORRUPTION: изменение макроопределения
+C:\Program Files (x86)\Windows Kits\10\\include\10.0.26100.0\\um\winnt.h(2665): note: см. предыдущее определение "STATUS_HEAP_CORRUPTION"
+C:\Program Files (x86)\Windows Kits\10\\include\10.0.26100.0\\shared\ntstatus.h(8998): warning C4005: STATUS_STACK_BUFFER_OVERRUN: изменение макроопределения
+C:\Program Files (x86)\Windows Kits\10\\include\10.0.26100.0\\um\winnt.h(2666): note: см. предыдущее определение "STATUS_STACK_BUFFER_OVERRUN"
+C:\Program Files (x86)\Windows Kits\10\\include\10.0.26100.0\\shared\ntstatus.h(9125): warning C4005: STATUS_INVALID_CRUNTIME_PARAMETER: изменение макроопределения
+C:\Program Files (x86)\Windows Kits\10\\include\10.0.26100.0\\um\winnt.h(2667): note: см. предыдущее определение "STATUS_INVALID_CRUNTIME_PARAMETER"
+C:\Program Files (x86)\Windows Kits\10\\include\10.0.26100.0\\shared\ntstatus.h(9188): warning C4005: STATUS_ASSERTION_FAILURE: изменение макроопределения
+C:\Program Files (x86)\Windows Kits\10\\include\10.0.26100.0\\um\winnt.h(2668): note: см. предыдущее определение "STATUS_ASSERTION_FAILURE"
+C:\Program Files (x86)\Windows Kits\10\\include\10.0.26100.0\\shared\ntstatus.h(10097): warning C4005: STATUS_ENCLAVE_VIOLATION: изменение макроопределения
+C:\Program Files (x86)\Windows Kits\10\\include\10.0.26100.0\\um\winnt.h(2669): note: см. предыдущее определение "STATUS_ENCLAVE_VIOLATION"
+C:\Program Files (x86)\Windows Kits\10\\include\10.0.26100.0\\shared\ntstatus.h(10884): warning C4005: STATUS_INTERRUPTED: изменение макроопределения
+C:\Program Files (x86)\Windows Kits\10\\include\10.0.26100.0\\um\winnt.h(2670): note: см. предыдущее определение "STATUS_INTERRUPTED"
+C:\Program Files (x86)\Windows Kits\10\\include\10.0.26100.0\\shared\ntstatus.h(10893): warning C4005: STATUS_THREAD_NOT_RUNNING: изменение макроопределения
+C:\Program Files (x86)\Windows Kits\10\\include\10.0.26100.0\\um\winnt.h(2671): note: см. предыдущее определение "STATUS_THREAD_NOT_RUNNING"
+C:\Program Files (x86)\Windows Kits\10\\include\10.0.26100.0\\shared\ntstatus.h(11205): warning C4005: STATUS_ALREADY_REGISTERED: изменение макроопределения
+C:\Program Files (x86)\Windows Kits\10\\include\10.0.26100.0\\um\winnt.h(2672): note: см. предыдущее определение "STATUS_ALREADY_REGISTERED"
+C:\Program Files (x86)\Windows Kits\10\\include\10.0.26100.0\\shared\ntstatus.h(15341): warning C4005: STATUS_SXS_EARLY_DEACTIVATION: изменение макроопределения
+C:\Program Files (x86)\Windows Kits\10\\include\10.0.26100.0\\um\winnt.h(2674): note: см. предыдущее определение "STATUS_SXS_EARLY_DEACTIVATION"
+C:\Program Files (x86)\Windows Kits\10\\include\10.0.26100.0\\shared\ntstatus.h(15350): warning C4005: STATUS_SXS_INVALID_DEACTIVATION: изменение макроопределения
+C:\Program Files (x86)\Windows Kits\10\\include\10.0.26100.0\\um\winnt.h(2675): note: см. предыдущее определение "STATUS_SXS_INVALID_DEACTIVATION"
+volume.c
+D:\VFS\src\volume.c(16): warning C4005: _CRT_SECURE_NO_WARNINGS: изменение макроопределения
+D:\VFS\src\volume.c(16): note: "_CRT_SECURE_NO_WARNINGS" ранее объявлен в командной строке
+D:\VFS\src\volume.c(84): warning C4005: deflateInit2: изменение макроопределения
+D:\VFS\src\zlib\zlib.h(1817): note: см. предыдущее определение "deflateInit2"
+D:\VFS\src\volume.c(85): warning C4005: inflateInit2: изменение макроопределения
+D:\VFS\src\zlib\zlib.h(1820): note: см. предыдущее определение "inflateInit2"
+D:\VFS\src\volume.c(1550): warning C4101: seg_zone: неиспользованная локальная переменная
+D:\VFS\src\volume.c(4303): warning C4267: инициализация: преобразование из "size_t" в "mz_uint"; возможна потеря данных
+crc32c.c
+blkio.c
+D:\VFS\src\blkio.c(5): warning C4005: _CRT_SECURE_NO_WARNINGS: изменение макроопределения
+D:\VFS\src\blkio.c(5): note: "_CRT_SECURE_NO_WARNINGS" ранее объявлен в командной строке
+lz4.c
+miniz.c
+flacx.c
+D:\VFS\src\flacx.c(29): warning C4005: _CRT_SECURE_NO_WARNINGS: изменение макроопределения
+D:\VFS\src\flacx.c(29): note: "_CRT_SECURE_NO_WARNINGS" ранее объявлен в командной строке
+tarx.c
+pngx.c
+deflate.c
+trees.c
+adler32.c
+crc32.c
+zutil.c
+inflate.c
+inffast.c
+inftrees.c
+debug.c
+entropy_common.c
+error_private.c
+Создание кода...
+Компиляция...
+fse_decompress.c
+pool.c
+threading.c
+xxhash.c
+zstd_common.c
+fse_compress.c
+hist.c
+huf_compress.c
+zstd_compress.c
+zstd_compress_literals.c
+zstd_compress_sequences.c
+zstd_compress_superblock.c
+zstd_double_fast.c
+zstd_fast.c
+zstd_lazy.c
+zstd_ldm.c
+zstd_opt.c
+huf_decompress.c
+zstd_ddict.c
+zstd_decompress.c
+Создание кода...
+Компиляция...
+zstd_decompress_block.c
+Создание кода...
+
+Build OK: D:\VFS\build

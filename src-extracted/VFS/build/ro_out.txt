@@ -1,0 +1,5 @@
+TRACE open...
+[open] io opened
+[open] magic ok, total=26214 zones m=1 r=8706 s=12207
+[open] bitmap read, blocks=1
+[open] done, free=17508

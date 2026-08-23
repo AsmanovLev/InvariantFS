@@ -1,0 +1,72 @@
+[main] rebuild D:\VFS\build\rc_t1.wav D:\VFS\build\rc_t1v4.rcp D:\VFS\build\xa.out.flac
+[main] w=000001E2032A1800 r=000001E2050F1800 wlen=31750590 rlen=634271
+[rebuild] enter rn=634271
+[rebuild] nframes=1938 hlen=398854 covers=2
+[rebuild] wav n=15875096 ch=2 bits=16 nframes=1938
+[rebuild] frame 0/1938
+[rebuild] frame 200/1938
+=================================================================
+==21936==ERROR: AddressSanitizer: stack-buffer-overflow on address 0x006768d9ef28 at pc 0x7ff724204733 bp 0x006768d7e9f0 sp 0x006768d7e9f0
+WRITE of size 1 at 0x006768d9ef28 thread T0
+    #0 0x7ff724204732  (D:\VFS\build\flacx_asan.exe+0x140004732)
+    #1 0x7ff72420556c  (D:\VFS\build\flacx_asan.exe+0x14000556c)
+    #2 0x7ff724209c27  (D:\VFS\build\flacx_asan.exe+0x140009c27)
+    #3 0x7ffc37f1e956  (C:\WINDOWS\System32\KERNEL32.DLL+0x18002e956)
+    #4 0x7ffc386ead6b  (C:\WINDOWS\SYSTEM32\ntdll.dll+0x1800aad6b)
+
+Address 0x006768d9ef28 is located in stack of thread T0 at offset 132360 in frame
+    #0 0x7ff724202d0f  (D:\VFS\build\flacx_asan.exe+0x140002d0f)
+
+  This frame has 17 object(s):
+    [32, 112) 'si'
+    [48, 112) 'cover_off'
+    [64, 128) 'cover_len'
+    [80, 144) 'hb'
+    [96, 131168) 'chs'
+    [112, 152) 'sf'
+    [128, 256) 'warm'
+    [144, 272) 'coeff'
+    [160, 288) 'warm'
+    [176, 184) 'p'
+    [192, 208) 'cover_kind'
+    [208, 212) 'wn'
+    [224, 228) 'wch'
+    [240, 244) 'wbits'
+    [256, 280) 'bw'
+    [272, 304) 'ks'
+    [288, 320) 'ks' <== Memory access at offset 132360 overflows this variable
+HINT: this may be a false positive if your program uses some custom stack unwind mechanism, swapcontext or vfork
+      (longjmp, SEH and C++ exceptions *are* supported)
+SUMMARY: AddressSanitizer: stack-buffer-overflow (D:\VFS\build\flacx_asan.exe+0x140004732) 
+Shadow bytes around the buggy address:
+  0x006768d9ec80: 00 00 00 00 00 00 00 00 f2 f2 f2 f2 00 00 00 00
+  0x006768d9ed00: 00 00 00 00 00 00 00 00 00 00 00 00 f2 f2 f2 f2
+  0x006768d9ed80: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+  0x006768d9ee00: f2 f2 f2 f2 00 f2 00 00 f2 f2 f2 f2 04 f2 04 f2
+  0x006768d9ee80: 04 f2 00 00 00 f2 f2 f2 f2 f8 f8 f8 f8 f2 f2 f2
+=>0x006768d9ef00: f2 00 00 00 00[f3]f3 f3 f3 00 00 00 00 00 00 00
+  0x006768d9ef80: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+  0x006768d9f000: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+  0x006768d9f080: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+  0x006768d9f100: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+  0x006768d9f180: 00 00 f1 f1 f1 f1 00 00 00 00 00 00 00 00 00 00
+Shadow byte legend (one shadow byte represents 8 application bytes):
+  Addressable:           00
+  Partially addressable: 01 02 03 04 05 06 07 
+  Heap left redzone:       fa
+  Freed heap region:       fd
+  Stack left redzone:      f1
+  Stack mid redzone:       f2
+  Stack right redzone:     f3
+  Stack after return:      f5
+  Stack use after scope:   f8
+  Global redzone:          f9
+  Global init order:       f6
+  Poisoned by user:        f7
+  Container overflow:      fc
+  Array cookie:            ac
+  Intra object redzone:    bb
+  ASan internal:           fe
+  Left alloca redzone:     ca
+  Right alloca redzone:    cb
+==21936==ABORTING

@@ -1,0 +1,1007 @@
+Dokan: debug mode on
+Dokan: use stderr
+AllocationUnitSize: 512 SectorSize: 512
+Global device opened
+Dokan: Using 12 main pull threads with ipc batching: 0
+Dokan Information: mounted: Y: -> \Volume{d6cc17c5-1761-4085-bce7-964f1e9f5de9}
+[Mounted]
+###QueryVolumeInfo file handle = 0x0000000000000000, eventID = -001, event Info = 0x0000026DA3EFC550
+[GetVolumeInformation]
+###QueryVolumeInfo file handle = 0x0000000000000000, eventID = -001, event Info = 0x0000026DA3EFC780
+[GetVolumeInformation]
+Dokan Information: SendAndPullEventInformation() with NTSTATUS 0x0, context 0x0, and result object 0x0000026DA3FB96B0 with size 64
+Dokan Information: SendAndPullEventInformation() with NTSTATUS 0x80000005, context 0x0, and result object 0x0000026DA3FAEBF0 with size 56
+###Create file handle = 0x0000026DA3EF8B70, eventID = 0001, event Info = 0x0000026DA3EFC780
+[ZwCreateFile] \
+Dokan Information: DokanEndDispatchCreate() status = 0, file handle = 0x0000026DA3EF8B70, eventID = 0001, result = 0x1
+Dokan Information: SendAndPullEventInformation() with NTSTATUS 0x0, context 0xa3ef8b70, and result object 0x0000026DA3FAEBF0 with size 48
+###GetFileInfo file handle = 0x0000026DA3EF8B70, eventID = 0001, event Info = 0x0000026DA3EFC780
+	result =  0
+  unknown type:54
+	DispatchQueryInformation result =  c000000d
+Dokan Information: SendAndPullEventInformation() with NTSTATUS 0xc000000d, context 0xa3ef8b70, and result object 0x0000026DA3FAEBF0 with size 48
+###GetFileInfo file handle = 0x0000026DA3EF8B70, eventID = 0001, event Info = 0x0000026DA3EFC780
+	result =  0
+	FileStandardInformation
+	DispatchQueryInformation result =  0
+Dokan Information: SendAndPullEventInformation() with NTSTATUS 0x0, context 0xa3ef8b70, and result object 0x0000026DA3FAEBF0 with size 64
+###QueryVolumeInfo file handle = 0x0000026DA3EF8B70, eventID = 0001, event Info = 0x0000026DA3EFC780
+[GetVolumeInformation]
+Dokan Information: SendAndPullEventInformation() with NTSTATUS 0x0, context 0xa3ef8b70, and result object 0x0000026DA3FAEBF0 with size 74
+###Cleanup file handle = 0x0000026DA3EF8B70, eventID = 0001, event Info = 0x0000026DA3EFC780
+Dokan Information: SendAndPullEventInformation() with NTSTATUS 0x0, context 0xa3ef8b70, and result object 0x0000026DA3FAEBF0 with size 48
+###Close file handle = 0x0000026DA3EF8B70, eventID = 0001, event Info = 0x0000026DA3EFC780
+[Close] \
+###Create file handle = 0x0000026DA3EF8B70, eventID = 0002, event Info = 0x0000026DA3EFC780
+[ZwCreateFile] \
+Dokan Information: DokanEndDispatchCreate() status = 0, file handle = 0x0000026DA3EF8B70, eventID = 0002, result = 0x1
+Dokan Information: SendAndPullEventInformation() with NTSTATUS 0x0, context 0xa3ef8b70, and result object 0x0000026DA3FAEBF0 with size 48
+###GetFileInfo file handle = 0x0000026DA3EF8B70, eventID = 0002, event Info = 0x0000026DA3EFC780
+	result =  0
+	FileStandardInformation
+	DispatchQueryInformation result =  0
+Dokan Information: SendAndPullEventInformation() with NTSTATUS 0x0, context 0xa3ef8b70, and result object 0x0000026DA3FAEBF0 with size 64
+###QueryVolumeInfo file handle = 0x0000026DA3EF8B70, eventID = 0002, event Info = 0x0000026DA3EFC780
+[GetVolumeInformation]
+Dokan Information: SendAndPullEventInformation() with NTSTATUS 0x0, context 0xa3ef8b70, and result object 0x0000026DA3FAEBF0 with size 74
+###Cleanup file handle = 0x0000026DA3EF8B70, eventID = 0002, event Info = 0x0000026DA3EFC780
+Dokan Information: SendAndPullEventInformation() with NTSTATUS 0x0, context 0xa3ef8b70, and result object 0x0000026DA3FAEBF0 with size 48
+###Close file handle = 0x0000026DA3EF8B70, eventID = 0002, event Info = 0x0000026DA3EFC780
+[Close] \
+###Create file handle = 0x0000026DA3EF8B70, eventID = 0003, event Info = 0x0000026DA3EFC240
+[ZwCreateFile] \
+###Create file handle = 0x0000026DA3EF86F0, eventID = 0004, event Info = 0x0000026DA3EFC860
+[ZwCreateFile] \
+Dokan Information: DokanEndDispatchCreate() status = 0, file handle = 0x0000026DA3EF8B70, eventID = 0003, result = 0x1
+Dokan Information: SendAndPullEventInformation() with NTSTATUS 0x0, context 0xa3ef8b70, and result object 0x0000026DA3FAEBF0 with size 48
+Dokan Information: DokanEndDispatchCreate() status = 0, file handle = 0x0000026DA3EF86F0, eventID = 0004, result = 0x1
+Dokan Information: SendAndPullEventInformation() with NTSTATUS 0x0, context 0xa3ef86f0, and result object 0x0000026DA5D42C30 with size 48
+###QueryVolumeInfo file handle = 0x0000026DA3EF8B70, eventID = 0003, event Info = 0x0000026DA3EFC240
+[GetVolumeInformation]
+###GetFileInfo file handle = 0x0000026DA3EF86F0, eventID = 0004, event Info = 0x0000026DA3EFC860
+	result =  0
+	FileBasicInformation
+	DispatchQueryInformation result =  0
+Dokan Information: SendAndPullEventInformation() with NTSTATUS 0x0, context 0xa3ef8b70, and result object 0x0000026DA3FAEBF0 with size 74
+Dokan Information: SendAndPullEventInformation() with NTSTATUS 0x0, context 0xa3ef86f0, and result object 0x0000026DA5D42C30 with size 80
+###QueryVolumeInfo file handle = 0x0000026DA3EF8B70, eventID = 0003, event Info = 0x0000026DA3EFC240
+[GetVolumeInformation]
+###Cleanup file handle = 0x0000026DA3EF86F0, eventID = 0004, event Info = 0x0000026DA3EFC860
+Dokan Information: SendAndPullEventInformation() with NTSTATUS 0x0, context 0xa3ef8b70, and result object 0x0000026DA3FAEBF0 with size 68
+Dokan Information: SendAndPullEventInformation() with NTSTATUS 0x0, context 0xa3ef86f0, and result object 0x0000026DA5D42C30 with size 48
+###Cleanup file handle = 0x0000026DA3EF8B70, eventID = 0003, event Info = 0x0000026DA3EFC240
+###Close file handle = 0x0000026DA3EF86F0, eventID = 0004, event Info = 0x0000026DA3EFC860
+Dokan Information: SendAndPullEventInformation() with NTSTATUS 0x0, context 0xa3ef8b70, and result object 0x0000026DA3FAEBF0 with size 48
+[Close] \
+###Create file handle = 0x0000026DA3EF8270, eventID = 0005, event Info = 0x0000026DA3EFC400
+[ZwCreateFile] \
+###Close file handle = 0x0000026DA3EF8B70, eventID = 0003, event Info = 0x0000026DA3EFC240
+[Close] \
+Dokan Information: DokanEndDispatchCreate() status = 0, file handle = 0x0000026DA3EF8270, eventID = 0005, result = 0x1
+Dokan Information: SendAndPullEventInformation() with NTSTATUS 0x0, context 0xa3ef8270, and result object 0x0000026DA5D42C30 with size 48
+###GetFileInfo file handle = 0x0000026DA3EF8270, eventID = 0005, event Info = 0x0000026DA3EFC400
+	result =  0
+	FileBasicInformation
+	DispatchQueryInformation result =  0
+Dokan Information: SendAndPullEventInformation() with NTSTATUS 0x0, context 0xa3ef8270, and result object 0x0000026DA5D42C30 with size 80
+###GetFileInfo file handle = 0x0000026DA3EF8270, eventID = 0005, event Info = 0x0000026DA3EFC400
+	result =  0
+	FileBasicInformation
+	DispatchQueryInformation result =  0
+Dokan Information: SendAndPullEventInformation() with NTSTATUS 0x0, context 0xa3ef8270, and result object 0x0000026DA5D42C30 with size 80
+###Create file handle = 0x0000026DA3EF8B70, eventID = 0006, event Info = 0x0000026DA3EFC400
+[ZwCreateFile] \
+Dokan Information: DokanEndDispatchCreate() status = 0, file handle = 0x0000026DA3EF8B70, eventID = 0006, result = 0x1
+Dokan Information: SendAndPullEventInformation() with NTSTATUS 0x0, context 0xa3ef8b70, and result object 0x0000026DA5D42C30 with size 48
+###GetFileInfo file handle = 0x0000026DA3EF8B70, eventID = 0006, event Info = 0x0000026DA3EFC400
+	result =  0
+	FileBasicInformation
+	DispatchQueryInformation result =  0
+Dokan Information: SendAndPullEventInformation() with NTSTATUS 0x0, context 0xa3ef8b70, and result object 0x0000026DA5D42C30 with size 80
+###GetFileInfo file handle = 0x0000026DA3EF8B70, eventID = 0006, event Info = 0x0000026DA3EFC400
+	result =  0
+	FileBasicInformation
+	DispatchQueryInformation result =  0
+Dokan Information: SendAndPullEventInformation() with NTSTATUS 0x0, context 0xa3ef8b70, and result object 0x0000026DA5D42C30 with size 80
+###Create file handle = 0x0000026DA3EF86F0, eventID = 0007, event Info = 0x0000026DA3F1ABD0
+[ZwCreateFile] \
+Dokan Information: DokanEndDispatchCreate() status = 0, file handle = 0x0000026DA3EF86F0, eventID = 0007, result = 0x1
+Dokan Information: SendAndPullEventInformation() with NTSTATUS 0x0, context 0xa3ef86f0, and result object 0x0000026DA3FAEBF0 with size 48
+###QueryVolumeInfo file handle = 0x0000026DA3EF86F0, eventID = 0007, event Info = 0x0000026DA3F1ABD0
+[GetVolumeInformation]
+Dokan Information: SendAndPullEventInformation() with NTSTATUS 0x0, context 0xa3ef86f0, and result object 0x0000026DA3FAEBF0 with size 74
+###QueryVolumeInfo file handle = 0x0000026DA3EF86F0, eventID = 0007, event Info = 0x0000026DA3F1ABD0
+[GetVolumeInformation]
+Dokan Information: SendAndPullEventInformation() with NTSTATUS 0x0, context 0xa3ef86f0, and result object 0x0000026DA3FAEBF0 with size 68
+###Cleanup file handle = 0x0000026DA3EF86F0, eventID = 0007, event Info = 0x0000026DA3F1ABD0
+Dokan Information: SendAndPullEventInformation() with NTSTATUS 0x0, context 0xa3ef86f0, and result object 0x0000026DA3FAEBF0 with size 48
+###Close file handle = 0x0000026DA3EF86F0, eventID = 0007, event Info = 0x0000026DA3F1ABD0
+[Close] \
+###Create file handle = 0x0000026DA3EF82F0, eventID = 0008, event Info = 0x0000026DA3F1A700
+[ZwCreateFile] \
+Dokan Information: DokanEndDispatchCreate() status = 0, file handle = 0x0000026DA3EF82F0, eventID = 0008, result = 0x1
+Dokan Information: SendAndPullEventInformation() with NTSTATUS 0x0, context 0xa3ef82f0, and result object 0x0000026DA3FAEBF0 with size 48
+###QueryVolumeInfo file handle = 0x0000026DA3EF82F0, eventID = 0008, event Info = 0x0000026DA3F1A700
+Dokan Information: SendAndPullEventInformation() with NTSTATUS 0x0, context 0xa3ef82f0, and result object 0x0000026DA3FAEBF0 with size 64
+###Cleanup file handle = 0x0000026DA3EF82F0, eventID = 0008, event Info = 0x0000026DA3F1A700
+Dokan Information: SendAndPullEventInformation() with NTSTATUS 0x0, context 0xa3ef82f0, and result object 0x0000026DA3FAEBF0 with size 48
+###Close file handle = 0x0000026DA3EF82F0, eventID = 0008, event Info = 0x0000026DA3F1A700
+[Close] \
+###Create file handle = 0x0000026DA3EF86F0, eventID = 0009, event Info = 0x0000026DA3F1ABD0
+[ZwCreateFile] \
+Dokan Information: DokanEndDispatchCreate() status = 0, file handle = 0x0000026DA3EF86F0, eventID = 0009, result = 0x1
+Dokan Information: SendAndPullEventInformation() with NTSTATUS 0x0, context 0xa3ef86f0, and result object 0x0000026DA3FAEBF0 with size 48
+###Cleanup file handle = 0x0000026DA3EF86F0, eventID = 0009, event Info = 0x0000026DA3F1ABD0
+Dokan Information: SendAndPullEventInformation() with NTSTATUS 0x0, context 0xa3ef86f0, and result object 0x0000026DA3FAEBF0 with size 48
+###Close file handle = 0x0000026DA3EF86F0, eventID = 0009, event Info = 0x0000026DA3F1ABD0
+[Close] \
+###Create file handle = 0x0000026DA3EF86F0, eventID = 0010, event Info = 0x0000026DA3F1ABD0
+[ZwCreateFile] \
+Dokan Information: DokanEndDispatchCreate() status = 0, file handle = 0x0000026DA3EF86F0, eventID = 0010, result = 0x1
+Dokan Information: SendAndPullEventInformation() with NTSTATUS 0x0, context 0xa3ef86f0, and result object 0x0000026DA3FAEBF0 with size 48
+###QueryVolumeInfo file handle = 0x0000026DA3EF86F0, eventID = 0010, event Info = 0x0000026DA3F1ABD0
+[GetVolumeInformation]
+Dokan Information: SendAndPullEventInformation() with NTSTATUS 0x0, context 0xa3ef86f0, and result object 0x0000026DA3FAEBF0 with size 64
+###GetFileInfo file handle = 0x0000026DA3EF86F0, eventID = 0010, event Info = 0x0000026DA3F1ABD0
+	result =  0
+	FileAllInformation
+	DispatchQueryInformation result =  0
+Dokan Information: SendAndPullEventInformation() with NTSTATUS 0x0, context 0xa3ef86f0, and result object 0x0000026DA3FAEBF0 with size 140
+###Cleanup file handle = 0x0000026DA3EF86F0, eventID = 0010, event Info = 0x0000026DA3F1ABD0
+Dokan Information: SendAndPullEventInformation() with NTSTATUS 0x0, context 0xa3ef86f0, and result object 0x0000026DA3FAEBF0 with size 48
+###Close file handle = 0x0000026DA3EF86F0, eventID = 0010, event Info = 0x0000026DA3F1ABD0
+[Close] \
+###Create file handle = 0x0000026DA3EF82F0, eventID = 0011, event Info = 0x0000026DA3F1A700
+[ZwCreateFile] \
+Dokan Information: DokanEndDispatchCreate() status = 0, file handle = 0x0000026DA3EF82F0, eventID = 0011, result = 0x1
+Dokan Information: SendAndPullEventInformation() with NTSTATUS 0x0, context 0xa3ef82f0, and result object 0x0000026DA3FAEBF0 with size 48
+###QueryVolumeInfo file handle = 0x0000026DA3EF82F0, eventID = 0011, event Info = 0x0000026DA3F1A700
+[GetVolumeInformation]
+Dokan Information: SendAndPullEventInformation() with NTSTATUS 0x0, context 0xa3ef82f0, and result object 0x0000026DA3FAEBF0 with size 64
+###GetFileInfo file handle = 0x0000026DA3EF82F0, eventID = 0011, event Info = 0x0000026DA3F1A700
+	result =  0
+	FileAllInformation
+	DispatchQueryInformation result =  0
+Dokan Information: SendAndPullEventInformation() with NTSTATUS 0x0, context 0xa3ef82f0, and result object 0x0000026DA3FAEBF0 with size 140
+###Cleanup file handle = 0x0000026DA3EF82F0, eventID = 0011, event Info = 0x0000026DA3F1A700
+Dokan Information: SendAndPullEventInformation() with NTSTATUS 0x0, context 0xa3ef82f0, and result object 0x0000026DA3FAEBF0 with size 48
+###Close file handle = 0x0000026DA3EF82F0, eventID = 0011, event Info = 0x0000026DA3F1A700
+[Close] \
+###Create file handle = 0x0000026DA3EF82F0, eventID = 0012, event Info = 0x0000026DA3F1ABD0
+[ZwCreateFile] \
+Dokan Information: DokanEndDispatchCreate() status = 0, file handle = 0x0000026DA3EF82F0, eventID = 0012, result = 0x1
+Dokan Information: SendAndPullEventInformation() with NTSTATUS 0x0, context 0xa3ef82f0, and result object 0x0000026DA3FAEBF0 with size 48
+###QueryVolumeInfo file handle = 0x0000026DA3EF82F0, eventID = 0012, event Info = 0x0000026DA3F1ABD0
+[GetVolumeInformation]
+Dokan Information: SendAndPullEventInformation() with NTSTATUS 0x0, context 0xa3ef82f0, and result object 0x0000026DA3FAEBF0 with size 64
+###GetFileInfo file handle = 0x0000026DA3EF82F0, eventID = 0012, event Info = 0x0000026DA3F1ABD0
+	result =  0
+	FileAllInformation
+	DispatchQueryInformation result =  0
+Dokan Information: SendAndPullEventInformation() with NTSTATUS 0x0, context 0xa3ef82f0, and result object 0x0000026DA3FAEBF0 with size 140
+###Cleanup file handle = 0x0000026DA3EF82F0, eventID = 0012, event Info = 0x0000026DA3F1ABD0
+Dokan Information: SendAndPullEventInformation() with NTSTATUS 0x0, context 0xa3ef82f0, and result object 0x0000026DA3FAEBF0 with size 48
+###Close file handle = 0x0000026DA3EF82F0, eventID = 0012, event Info = 0x0000026DA3F1ABD0
+[Close] \
+###Create file handle = 0x0000026DA3EF86F0, eventID = 0013, event Info = 0x0000026DA3F1A700
+[ZwCreateFile] \
+Dokan Information: DokanEndDispatchCreate() status = 0, file handle = 0x0000026DA3EF86F0, eventID = 0013, result = 0x1
+Dokan Information: SendAndPullEventInformation() with NTSTATUS 0x0, context 0xa3ef86f0, and result object 0x0000026DA3FAEBF0 with size 48
+###QueryVolumeInfo file handle = 0x0000026DA3EF86F0, eventID = 0013, event Info = 0x0000026DA3F1A700
+[GetVolumeInformation]
+Dokan Information: SendAndPullEventInformation() with NTSTATUS 0x0, context 0xa3ef86f0, and result object 0x0000026DA3FAEBF0 with size 64
+###GetFileInfo file handle = 0x0000026DA3EF86F0, eventID = 0013, event Info = 0x0000026DA3F1A700
+	result =  0
+	FileAllInformation
+	DispatchQueryInformation result =  0
+Dokan Information: SendAndPullEventInformation() with NTSTATUS 0x0, context 0xa3ef86f0, and result object 0x0000026DA3FAEBF0 with size 140
+###Cleanup file handle = 0x0000026DA3EF86F0, eventID = 0013, event Info = 0x0000026DA3F1A700
+Dokan Information: SendAndPullEventInformation() with NTSTATUS 0x0, context 0xa3ef86f0, and result object 0x0000026DA3FAEBF0 with size 48
+###Close file handle = 0x0000026DA3EF86F0, eventID = 0013, event Info = 0x0000026DA3F1A700
+[Close] \
+###Create file handle = 0x0000026DA3EF82F0, eventID = 0014, event Info = 0x0000026DA3F1ABD0
+[ZwCreateFile] \
+Dokan Information: DokanEndDispatchCreate() status = 0, file handle = 0x0000026DA3EF82F0, eventID = 0014, result = 0x1
+Dokan Information: SendAndPullEventInformation() with NTSTATUS 0x0, context 0xa3ef82f0, and result object 0x0000026DA3FAEBF0 with size 48
+###QueryVolumeInfo file handle = 0x0000026DA3EF82F0, eventID = 0014, event Info = 0x0000026DA3F1ABD0
+[GetVolumeInformation]
+Dokan Information: SendAndPullEventInformation() with NTSTATUS 0x0, context 0xa3ef82f0, and result object 0x0000026DA3FAEBF0 with size 64
+###GetFileInfo file handle = 0x0000026DA3EF82F0, eventID = 0014, event Info = 0x0000026DA3F1ABD0
+	result =  0
+	FileAllInformation
+	DispatchQueryInformation result =  0
+Dokan Information: SendAndPullEventInformation() with NTSTATUS 0x0, context 0xa3ef82f0, and result object 0x0000026DA3FAEBF0 with size 140
+###Cleanup file handle = 0x0000026DA3EF82F0, eventID = 0014, event Info = 0x0000026DA3F1ABD0
+Dokan Information: SendAndPullEventInformation() with NTSTATUS 0x0, context 0xa3ef82f0, and result object 0x0000026DA3FAEBF0 with size 48
+###Close file handle = 0x0000026DA3EF82F0, eventID = 0014, event Info = 0x0000026DA3F1ABD0
+[Close] \
+###Create file handle = 0x0000026DA3EF82F0, eventID = 0015, event Info = 0x0000026DA3F1A700
+[ZwCreateFile] \
+Dokan Information: DokanEndDispatchCreate() status = 0, file handle = 0x0000026DA3EF82F0, eventID = 0015, result = 0x1
+Dokan Information: SendAndPullEventInformation() with NTSTATUS 0x0, context 0xa3ef82f0, and result object 0x0000026DA3FAEBF0 with size 48
+###QueryVolumeInfo file handle = 0x0000026DA3EF82F0, eventID = 0015, event Info = 0x0000026DA3F1A700
+[GetVolumeInformation]
+Dokan Information: SendAndPullEventInformation() with NTSTATUS 0x0, context 0xa3ef82f0, and result object 0x0000026DA3FAEBF0 with size 64
+###GetFileInfo file handle = 0x0000026DA3EF82F0, eventID = 0015, event Info = 0x0000026DA3F1A700
+	result =  0
+	FileAllInformation
+	DispatchQueryInformation result =  0
+Dokan Information: SendAndPullEventInformation() with NTSTATUS 0x0, context 0xa3ef82f0, and result object 0x0000026DA3FAEBF0 with size 140
+###Create file handle = 0x0000026DA3EF86F0, eventID = 0016, event Info = 0x0000026DA3F1A700
+[ZwCreateFile] \
+###Cleanup file handle = 0x0000026DA3EF82F0, eventID = 0015, event Info = 0x0000026DA3F1ABD0
+Dokan Information: SendAndPullEventInformation() with NTSTATUS 0x0, context 0xa3ef82f0, and result object 0x0000026DA3FC2F30 with size 48
+Dokan Information: DokanEndDispatchCreate() status = 0, file handle = 0x0000026DA3EF86F0, eventID = 0016, result = 0x1
+###Close file handle = 0x0000026DA3EF82F0, eventID = 0015, event Info = 0x0000026DA3F1ABD0
+[Close] \
+###Create file handle = 0x0000026DA3EF84F0, eventID = 0017, event Info = 0x0000026DA3F1B0A0
+[ZwCreateFile] \
+Dokan Information: SendAndPullEventInformation() with NTSTATUS 0x0, context 0xa3ef86f0, and result object 0x0000026DA3FAEBF0 with size 48
+Dokan Information: DokanEndDispatchCreate() status = 0, file handle = 0x0000026DA3EF84F0, eventID = 0017, result = 0x1
+Dokan Information: SendAndPullEventInformation() with NTSTATUS 0x0, context 0xa3ef84f0, and result object 0x0000026DA3FC2F30 with size 48
+###QueryVolumeInfo file handle = 0x0000026DA3EF86F0, eventID = 0016, event Info = 0x0000026DA3F1A700
+[GetVolumeInformation]
+###QueryVolumeInfo file handle = 0x0000026DA3EF84F0, eventID = 0017, event Info = 0x0000026DA3F1B0A0
+[GetVolumeInformation]
+Dokan Information: SendAndPullEventInformation() with NTSTATUS 0x0, context 0xa3ef86f0, and result object 0x0000026DA3FAEBF0 with size 74
+Dokan Information: SendAndPullEventInformation() with NTSTATUS 0x0, context 0xa3ef84f0, and result object 0x0000026DA3FC2F30 with size 64
+###QueryVolumeInfo file handle = 0x0000026DA3EF86F0, eventID = 0016, event Info = 0x0000026DA3F1A700
+[GetVolumeInformation]
+###GetFileInfo file handle = 0x0000026DA3EF84F0, eventID = 0017, event Info = 0x0000026DA3F1B0A0
+	result =  0
+	FileAllInformation
+	DispatchQueryInformation result =  0
+Dokan Information: SendAndPullEventInformation() with NTSTATUS 0x0, context 0xa3ef86f0, and result object 0x0000026DA3FAEBF0 with size 68
+Dokan Information: SendAndPullEventInformation() with NTSTATUS 0x0, context 0xa3ef84f0, and result object 0x0000026DA3FC2F30 with size 140
+###Cleanup file handle = 0x0000026DA3EF86F0, eventID = 0016, event Info = 0x0000026DA3F1A700
+Dokan Information: SendAndPullEventInformation() with NTSTATUS 0x0, context 0xa3ef86f0, and result object 0x0000026DA3FAEBF0 with size 48
+###Cleanup file handle = 0x0000026DA3EF84F0, eventID = 0017, event Info = 0x0000026DA3F1B0A0
+###Close file handle = 0x0000026DA3EF86F0, eventID = 0016, event Info = 0x0000026DA3F1A700
+[Close] \
+Dokan Information: SendAndPullEventInformation() with NTSTATUS 0x0, context 0xa3ef84f0, and result object 0x0000026DA3FC2F30 with size 48
+###Close file handle = 0x0000026DA3EF84F0, eventID = 0017, event Info = 0x0000026DA3F1B0A0
+[Close] \
+###Create file handle = 0x0000026DA3EF86F0, eventID = 0018, event Info = 0x0000026DA3F1A700
+[ZwCreateFile] \
+Dokan Information: DokanEndDispatchCreate() status = 0, file handle = 0x0000026DA3EF86F0, eventID = 0018, result = 0x1
+Dokan Information: SendAndPullEventInformation() with NTSTATUS 0x0, context 0xa3ef86f0, and result object 0x0000026DA3FC2F30 with size 48
+###Create file handle = 0x0000026DA3EF84F0, eventID = 0019, event Info = 0x0000026DA3F1B0A0
+[ZwCreateFile] \
+###QueryVolumeInfo file handle = 0x0000026DA3EF86F0, eventID = 0018, event Info = 0x0000026DA3F1A700
+[GetVolumeInformation]
+Dokan Information: DokanEndDispatchCreate() status = 0, file handle = 0x0000026DA3EF84F0, eventID = 0019, result = 0x1
+Dokan Information: SendAndPullEventInformation() with NTSTATUS 0x0, context 0xa3ef86f0, and result object 0x0000026DA3FC2F30 with size 64
+Dokan Information: SendAndPullEventInformation() with NTSTATUS 0x0, context 0xa3ef84f0, and result object 0x0000026DA3FAEBF0 with size 48
+###GetFileInfo file handle = 0x0000026DA3EF86F0, eventID = 0018, event Info = 0x0000026DA3F1A700
+###GetFileInfo file handle = 0x0000026DA3EF84F0, eventID = 0019, event Info = 0x0000026DA3F1B0A0
+	result =  0
+	FileBasicInformation
+	DispatchQueryInformation result =  0
+	result =  0
+	FileAllInformation
+	DispatchQueryInformation result =  0
+Dokan Information: SendAndPullEventInformation() with NTSTATUS 0x0, context 0xa3ef84f0, and result object 0x0000026DA3FC2F30 with size 80
+Dokan Information: SendAndPullEventInformation() with NTSTATUS 0x0, context 0xa3ef86f0, and result object 0x0000026DA3FAEBF0 with size 140
+###Cleanup file handle = 0x0000026DA3EF84F0, eventID = 0019, event Info = 0x0000026DA3F1B0A0
+###Cleanup file handle = 0x0000026DA3EF86F0, eventID = 0018, event Info = 0x0000026DA3F1A700
+Dokan Information: SendAndPullEventInformation() with NTSTATUS 0x0, context 0xa3ef84f0, and result object 0x0000026DA3FC2F30 with size 48
+Dokan Information: SendAndPullEventInformation() with NTSTATUS 0x0, context 0xa3ef86f0, and result object 0x0000026DA3FAEBF0 with size 48
+###Close file handle = 0x0000026DA3EF84F0, eventID = 0019, event Info = 0x0000026DA3F1B0A0
+###Create file handle = 0x0000026DA3EF8970, eventID = 0021, event Info = 0x0000026DA3F1AB60
+[ZwCreateFile] \
+###Create file handle = 0x0000026DA3EF82F0, eventID = 0020, event Info = 0x0000026DA3F1ABD0
+[ZwCreateFile] \
+###Close file handle = 0x0000026DA3EF86F0, eventID = 0018, event Info = 0x0000026DA3F1A700
+[Close] \
+Dokan Information: DokanEndDispatchCreate() status = 0, file handle = 0x0000026DA3EF8970, eventID = 0021, result = 0x1
+[Close] \
+Dokan Information: DokanEndDispatchCreate() status = 0, file handle = 0x0000026DA3EF82F0, eventID = 0020, result = 0x1
+Dokan Information: SendAndPullEventInformation() with NTSTATUS 0x0, context 0xa3ef8970, and result object 0x0000026DA3FC2F30 with size 48
+Dokan Information: SendAndPullEventInformation() with NTSTATUS 0x0, context 0xa3ef82f0, and result object 0x0000026DA3FAEBF0 with size 48
+###QueryVolumeInfo file handle = 0x0000026DA3EF8970, eventID = 0021, event Info = 0x0000026DA3F1AB60
+###QueryVolumeInfo file handle = 0x0000026DA3EF82F0, eventID = 0020, event Info = 0x0000026DA3F1ABD0
+[GetVolumeInformation]
+Dokan Information: SendAndPullEventInformation() with NTSTATUS 0x0, context 0xa3ef8970, and result object 0x0000026DA3FC2F30 with size 64
+[GetVolumeInformation]
+###GetFileInfo file handle = 0x0000026DA3EF8970, eventID = 0021, event Info = 0x0000026DA3F1AB60
+Dokan Information: SendAndPullEventInformation() with NTSTATUS 0x0, context 0xa3ef82f0, and result object 0x0000026DA3FAEBF0 with size 74
+	result =  0
+	FileAllInformation
+	DispatchQueryInformation result =  0
+###QueryVolumeInfo file handle = 0x0000026DA3EF82F0, eventID = 0020, event Info = 0x0000026DA3F1ABD0
+Dokan Information: SendAndPullEventInformation() with NTSTATUS 0x0, context 0xa3ef8970, and result object 0x0000026DA3FC2F30 with size 140
+[GetVolumeInformation]
+###Cleanup file handle = 0x0000026DA3EF8970, eventID = 0021, event Info = 0x0000026DA3F1AB60
+Dokan Information: SendAndPullEventInformation() with NTSTATUS 0x0, context 0xa3ef82f0, and result object 0x0000026DA3FAEBF0 with size 68
+Dokan Information: SendAndPullEventInformation() with NTSTATUS 0x0, context 0xa3ef8970, and result object 0x0000026DA3FC2F30 with size 48
+###Cleanup file handle = 0x0000026DA3EF82F0, eventID = 0020, event Info = 0x0000026DA3F1ABD0
+###Close file handle = 0x0000026DA3EF8970, eventID = 0021, event Info = 0x0000026DA3F1AB60
+###Create file handle = 0x0000026DA3EF86F0, eventID = 0022, event Info = 0x0000026DA3F1A700
+[Close] \
+Dokan Information: SendAndPullEventInformation() with NTSTATUS 0x0, context 0xa3ef82f0, and result object 0x0000026DA3FAEBF0 with size 48
+[ZwCreateFile] \
+###Close file handle = 0x0000026DA3EF82F0, eventID = 0020, event Info = 0x0000026DA3F1ABD0
+[Close] \
+Dokan Information: DokanEndDispatchCreate() status = 0, file handle = 0x0000026DA3EF86F0, eventID = 0022, result = 0x1
+###Create file handle = 0x0000026DA3EF8970, eventID = 0023, event Info = 0x0000026DA3F1AB60
+[ZwCreateFile] \
+Dokan Information: SendAndPullEventInformation() with NTSTATUS 0x0, context 0xa3ef86f0, and result object 0x0000026DA3FC2F30 with size 48
+Dokan Information: DokanEndDispatchCreate() status = 0, file handle = 0x0000026DA3EF8970, eventID = 0023, result = 0x1
+Dokan Information: SendAndPullEventInformation() with NTSTATUS 0x0, context 0xa3ef8970, and result object 0x0000026DA3FAEBF0 with size 48
+###QueryVolumeInfo file handle = 0x0000026DA3EF86F0, eventID = 0022, event Info = 0x0000026DA3F1A700
+[GetVolumeInformation]
+###QueryVolumeInfo file handle = 0x0000026DA3EF8970, eventID = 0023, event Info = 0x0000026DA3F1AB60
+Dokan Information: SendAndPullEventInformation() with NTSTATUS 0x0, context 0xa3ef86f0, and result object 0x0000026DA3FC2F30 with size 64
+Dokan Information: SendAndPullEventInformation() with NTSTATUS 0x0, context 0xa3ef8970, and result object 0x0000026DA3FAEBF0 with size 64
+###GetFileInfo file handle = 0x0000026DA3EF86F0, eventID = 0022, event Info = 0x0000026DA3F1A700
+###Cleanup file handle = 0x0000026DA3EF8970, eventID = 0023, event Info = 0x0000026DA3F1AB60
+Dokan Information: SendAndPullEventInformation() with NTSTATUS 0x0, context 0xa3ef8970, and result object 0x0000026DA3FAEBF0 with size 48
+	result =  0
+###Close file handle = 0x0000026DA3EF8970, eventID = 0023, event Info = 0x0000026DA3F1AB60
+[Close] \
+###Create file handle = 0x0000026DA3EF82F0, eventID = 0024, event Info = 0x0000026DA3F1ABD0
+[ZwCreateFile] \
+	FileAllInformation
+Dokan Information: DokanEndDispatchCreate() status = 0, file handle = 0x0000026DA3EF82F0, eventID = 0024, result = 0x1
+Dokan Information: SendAndPullEventInformation() with NTSTATUS 0x0, context 0xa3ef82f0, and result object 0x0000026DA3FAEBF0 with size 48
+	DispatchQueryInformation result =  0
+###GetFileInfo file handle = 0x0000026DA3EF82F0, eventID = 0024, event Info = 0x0000026DA3F1ABD0
+	result =  0
+	FileBasicInformation
+	DispatchQueryInformation result =  0
+Dokan Information: SendAndPullEventInformation() with NTSTATUS 0x0, context 0xa3ef86f0, and result object 0x0000026DA3FC2F30 with size 140
+Dokan Information: SendAndPullEventInformation() with NTSTATUS 0x0, context 0xa3ef82f0, and result object 0x0000026DA3FAEBF0 with size 80
+###Cleanup file handle = 0x0000026DA3EF86F0, eventID = 0022, event Info = 0x0000026DA3F1A700
+###Cleanup file handle = 0x0000026DA3EF82F0, eventID = 0024, event Info = 0x0000026DA3F1ABD0
+Dokan Information: SendAndPullEventInformation() with NTSTATUS 0x0, context 0xa3ef82f0, and result object 0x0000026DA3FAEBF0 with size 48
+Dokan Information: SendAndPullEventInformation() with NTSTATUS 0x0, context 0xa3ef86f0, and result object 0x0000026DA3FC2F30 with size 48
+###Close file handle = 0x0000026DA3EF82F0, eventID = 0024, event Info = 0x0000026DA3F1ABD0
+###Close file handle = 0x0000026DA3EF86F0, eventID = 0022, event Info = 0x0000026DA3F1A700
+[Close] \
+###Create file handle = 0x0000026DA3EF82F0, eventID = 0025, event Info = 0x0000026DA3F1AB60
+[Close] \
+[ZwCreateFile] \
+Dokan Information: DokanEndDispatchCreate() status = 0, file handle = 0x0000026DA3EF82F0, eventID = 0025, result = 0x1
+Dokan Information: SendAndPullEventInformation() with NTSTATUS 0x0, context 0xa3ef82f0, and result object 0x0000026DA3FC2F30 with size 48
+###QueryVolumeInfo file handle = 0x0000026DA3EF82F0, eventID = 0025, event Info = 0x0000026DA3F1AB60
+[GetVolumeInformation]
+Dokan Information: SendAndPullEventInformation() with NTSTATUS 0x0, context 0xa3ef82f0, and result object 0x0000026DA3FC2F30 with size 64
+###Create file handle = 0x0000026DA3EF86F0, eventID = 0026, event Info = 0x0000026DA3F1A700
+[ZwCreateFile] \
+###GetFileInfo file handle = 0x0000026DA3EF82F0, eventID = 0025, event Info = 0x0000026DA3F1AB60
+	result =  0
+	FileAllInformation
+	DispatchQueryInformation result =  0
+Dokan Information: DokanEndDispatchCreate() status = 0, file handle = 0x0000026DA3EF86F0, eventID = 0026, result = 0x1
+Dokan Information: SendAndPullEventInformation() with NTSTATUS 0x0, context 0xa3ef82f0, and result object 0x0000026DA3FC2F30 with size 140
+Dokan Information: SendAndPullEventInformation() with NTSTATUS 0x0, context 0xa3ef86f0, and result object 0x0000026DA3FAEBF0 with size 48
+###Cleanup file handle = 0x0000026DA3EF82F0, eventID = 0025, event Info = 0x0000026DA3F1AB60
+Dokan Information: SendAndPullEventInformation() with NTSTATUS 0x0, context 0xa3ef82f0, and result object 0x0000026DA3FC2F30 with size 48
+###GetFileInfo file handle = 0x0000026DA3EF86F0, eventID = 0026, event Info = 0x0000026DA3F1A700
+###Close file handle = 0x0000026DA3EF82F0, eventID = 0025, event Info = 0x0000026DA3F1AB60
+[Close] \
+###Create file handle = 0x0000026DA3EF8970, eventID = 0027, event Info = 0x0000026DA3F1ABD0
+[ZwCreateFile] \
+	result =  0
+Dokan Information: DokanEndDispatchCreate() status = 0, file handle = 0x0000026DA3EF8970, eventID = 0027, result = 0x1
+	FileBasicInformation
+	DispatchQueryInformation result =  0
+Dokan Information: SendAndPullEventInformation() with NTSTATUS 0x0, context 0xa3ef86f0, and result object 0x0000026DA3FAEBF0 with size 80
+Dokan Information: SendAndPullEventInformation() with NTSTATUS 0x0, context 0xa3ef8970, and result object 0x0000026DA3FC2F30 with size 48
+###Cleanup file handle = 0x0000026DA3EF86F0, eventID = 0026, event Info = 0x0000026DA3F1A700
+###QueryVolumeInfo file handle = 0x0000026DA3EF8970, eventID = 0027, event Info = 0x0000026DA3F1ABD0
+Dokan Information: SendAndPullEventInformation() with NTSTATUS 0x0, context 0xa3ef86f0, and result object 0x0000026DA3FAEBF0 with size 48
+[GetVolumeInformation]
+###Close file handle = 0x0000026DA3EF86F0, eventID = 0026, event Info = 0x0000026DA3F1A700
+Dokan Information: SendAndPullEventInformation() with NTSTATUS 0x0, context 0xa3ef8970, and result object 0x0000026DA3FC2F30 with size 64
+[Close] \
+###GetFileInfo file handle = 0x0000026DA3EF8970, eventID = 0027, event Info = 0x0000026DA3F1ABD0
+	result =  0
+	FileAllInformation
+	DispatchQueryInformation result =  0
+Dokan Information: SendAndPullEventInformation() with NTSTATUS 0x0, context 0xa3ef8970, and result object 0x0000026DA3FC2F30 with size 140
+###Cleanup file handle = 0x0000026DA3EF8970, eventID = 0027, event Info = 0x0000026DA3F1ABD0
+Dokan Information: SendAndPullEventInformation() with NTSTATUS 0x0, context 0xa3ef8970, and result object 0x0000026DA3FC2F30 with size 48
+###Close file handle = 0x0000026DA3EF8970, eventID = 0027, event Info = 0x0000026DA3F1ABD0
+###Create file handle = 0x0000026DA3EF86F0, eventID = 0028, event Info = 0x0000026DA3F1A700
+[Close] \
+[ZwCreateFile] \
+Dokan Information: DokanEndDispatchCreate() status = 0, file handle = 0x0000026DA3EF86F0, eventID = 0028, result = 0x1
+Dokan Information: SendAndPullEventInformation() with NTSTATUS 0x0, context 0xa3ef86f0, and result object 0x0000026DA3FC2F30 with size 48
+###QueryVolumeInfo file handle = 0x0000026DA3EF86F0, eventID = 0028, event Info = 0x0000026DA3F1A700
+[GetVolumeInformation]
+Dokan Information: SendAndPullEventInformation() with NTSTATUS 0x0, context 0xa3ef86f0, and result object 0x0000026DA3FC2F30 with size 64
+###GetFileInfo file handle = 0x0000026DA3EF86F0, eventID = 0028, event Info = 0x0000026DA3F1A700
+	result =  0
+	FileAllInformation
+	DispatchQueryInformation result =  0
+Dokan Information: SendAndPullEventInformation() with NTSTATUS 0x0, context 0xa3ef86f0, and result object 0x0000026DA3FC2F30 with size 140
+###Cleanup file handle = 0x0000026DA3EF86F0, eventID = 0028, event Info = 0x0000026DA3F1A700
+Dokan Information: SendAndPullEventInformation() with NTSTATUS 0x0, context 0xa3ef86f0, and result object 0x0000026DA3FC2F30 with size 48
+###Close file handle = 0x0000026DA3EF86F0, eventID = 0028, event Info = 0x0000026DA3F1A700
+[Close] \
+###Create file handle = 0x0000026DA3EF8970, eventID = 0029, event Info = 0x0000026DA3F1ABD0
+[ZwCreateFile] \
+Dokan Information: DokanEndDispatchCreate() status = 0, file handle = 0x0000026DA3EF8970, eventID = 0029, result = 0x1
+Dokan Information: SendAndPullEventInformation() with NTSTATUS 0x0, context 0xa3ef8970, and result object 0x0000026DA3FC2F30 with size 48
+###QueryVolumeInfo file handle = 0x0000026DA3EF8970, eventID = 0029, event Info = 0x0000026DA3F1ABD0
+[GetVolumeInformation]
+Dokan Information: SendAndPullEventInformation() with NTSTATUS 0x0, context 0xa3ef8970, and result object 0x0000026DA3FC2F30 with size 64
+###GetFileInfo file handle = 0x0000026DA3EF8970, eventID = 0029, event Info = 0x0000026DA3F1ABD0
+	result =  0
+	FileAllInformation
+	DispatchQueryInformation result =  0
+Dokan Information: SendAndPullEventInformation() with NTSTATUS 0x0, context 0xa3ef8970, and result object 0x0000026DA3FC2F30 with size 140
+###Cleanup file handle = 0x0000026DA3EF8970, eventID = 0029, event Info = 0x0000026DA3F1ABD0
+Dokan Information: SendAndPullEventInformation() with NTSTATUS 0x0, context 0xa3ef8970, and result object 0x0000026DA3FC2F30 with size 48
+###Close file handle = 0x0000026DA3EF8970, eventID = 0029, event Info = 0x0000026DA3F1ABD0
+[Close] \
+###Create file handle = 0x0000026DA3EF86F0, eventID = 0030, event Info = 0x0000026DA3F1A700
+[ZwCreateFile] \
+Dokan Information: DokanEndDispatchCreate() status = 0, file handle = 0x0000026DA3EF86F0, eventID = 0030, result = 0x1
+Dokan Information: SendAndPullEventInformation() with NTSTATUS 0x0, context 0xa3ef86f0, and result object 0x0000026DA3FC2F30 with size 48
+###QueryVolumeInfo file handle = 0x0000026DA3EF86F0, eventID = 0030, event Info = 0x0000026DA3F1A700
+[GetVolumeInformation]
+Dokan Information: SendAndPullEventInformation() with NTSTATUS 0x0, context 0xa3ef86f0, and result object 0x0000026DA3FC2F30 with size 64
+###GetFileInfo file handle = 0x0000026DA3EF86F0, eventID = 0030, event Info = 0x0000026DA3F1A700
+	result =  0
+	FileAllInformation
+	DispatchQueryInformation result =  0
+Dokan Information: SendAndPullEventInformation() with NTSTATUS 0x0, context 0xa3ef86f0, and result object 0x0000026DA3FC2F30 with size 140
+###Cleanup file handle = 0x0000026DA3EF86F0, eventID = 0030, event Info = 0x0000026DA3F1A700
+Dokan Information: SendAndPullEventInformation() with NTSTATUS 0x0, context 0xa3ef86f0, and result object 0x0000026DA3FC2F30 with size 48
+###Close file handle = 0x0000026DA3EF86F0, eventID = 0030, event Info = 0x0000026DA3F1A700
+[Close] \
+###Create file handle = 0x0000026DA3EF8970, eventID = 0031, event Info = 0x0000026DA3F1ABD0
+[ZwCreateFile] \
+Dokan Information: DokanEndDispatchCreate() status = 0, file handle = 0x0000026DA3EF8970, eventID = 0031, result = 0x1
+Dokan Information: SendAndPullEventInformation() with NTSTATUS 0x0, context 0xa3ef8970, and result object 0x0000026DA3FC2F30 with size 48
+###QueryVolumeInfo file handle = 0x0000026DA3EF8970, eventID = 0031, event Info = 0x0000026DA3F1ABD0
+[GetVolumeInformation]
+Dokan Information: SendAndPullEventInformation() with NTSTATUS 0x0, context 0xa3ef8970, and result object 0x0000026DA3FC2F30 with size 64
+###GetFileInfo file handle = 0x0000026DA3EF8970, eventID = 0031, event Info = 0x0000026DA3F1ABD0
+	result =  0
+	FileAllInformation
+	DispatchQueryInformation result =  0
+Dokan Information: SendAndPullEventInformation() with NTSTATUS 0x0, context 0xa3ef8970, and result object 0x0000026DA3FC2F30 with size 140
+###Cleanup file handle = 0x0000026DA3EF8970, eventID = 0031, event Info = 0x0000026DA3F1ABD0
+Dokan Information: SendAndPullEventInformation() with NTSTATUS 0x0, context 0xa3ef8970, and result object 0x0000026DA3FC2F30 with size 48
+###Close file handle = 0x0000026DA3EF8970, eventID = 0031, event Info = 0x0000026DA3F1ABD0
+###Create file handle = 0x0000026DA3EF86F0, eventID = 0032, event Info = 0x0000026DA3F1A700
+[Close] \
+[ZwCreateFile] \
+Dokan Information: DokanEndDispatchCreate() status = 0, file handle = 0x0000026DA3EF86F0, eventID = 0032, result = 0x1
+Dokan Information: SendAndPullEventInformation() with NTSTATUS 0x0, context 0xa3ef86f0, and result object 0x0000026DA3FC2F30 with size 48
+###QueryVolumeInfo file handle = 0x0000026DA3EF86F0, eventID = 0032, event Info = 0x0000026DA3F1A700
+[GetVolumeInformation]
+Dokan Information: SendAndPullEventInformation() with NTSTATUS 0x0, context 0xa3ef86f0, and result object 0x0000026DA3FC2F30 with size 64
+###GetFileInfo file handle = 0x0000026DA3EF86F0, eventID = 0032, event Info = 0x0000026DA3F1A700
+	result =  0
+	FileAllInformation
+	DispatchQueryInformation result =  0
+Dokan Information: SendAndPullEventInformation() with NTSTATUS 0x0, context 0xa3ef86f0, and result object 0x0000026DA3FC2F30 with size 140
+###Cleanup file handle = 0x0000026DA3EF86F0, eventID = 0032, event Info = 0x0000026DA3F1A700
+Dokan Information: SendAndPullEventInformation() with NTSTATUS 0x0, context 0xa3ef86f0, and result object 0x0000026DA3FC2F30 with size 48
+###Close file handle = 0x0000026DA3EF86F0, eventID = 0032, event Info = 0x0000026DA3F1A700
+###Create file handle = 0x0000026DA3EF8970, eventID = 0033, event Info = 0x0000026DA3F1ABD0
+[Close] \
+[ZwCreateFile] \
+Dokan Information: DokanEndDispatchCreate() status = 0, file handle = 0x0000026DA3EF8970, eventID = 0033, result = 0x1
+Dokan Information: SendAndPullEventInformation() with NTSTATUS 0x0, context 0xa3ef8970, and result object 0x0000026DA3FC2F30 with size 48
+###QueryVolumeInfo file handle = 0x0000026DA3EF8970, eventID = 0033, event Info = 0x0000026DA3F1ABD0
+[GetVolumeInformation]
+Dokan Information: SendAndPullEventInformation() with NTSTATUS 0x0, context 0xa3ef8970, and result object 0x0000026DA3FC2F30 with size 64
+###GetFileInfo file handle = 0x0000026DA3EF8970, eventID = 0033, event Info = 0x0000026DA3F1ABD0
+	result =  0
+	FileAllInformation
+	DispatchQueryInformation result =  0
+Dokan Information: SendAndPullEventInformation() with NTSTATUS 0x0, context 0xa3ef8970, and result object 0x0000026DA3FC2F30 with size 140
+###Cleanup file handle = 0x0000026DA3EF8970, eventID = 0033, event Info = 0x0000026DA3F1ABD0
+Dokan Information: SendAndPullEventInformation() with NTSTATUS 0x0, context 0xa3ef8970, and result object 0x0000026DA3FC2F30 with size 48
+###Close file handle = 0x0000026DA3EF8970, eventID = 0033, event Info = 0x0000026DA3F1ABD0
+[Close] \
+###Create file handle = 0x0000026DA3EF8970, eventID = 0034, event Info = 0x0000026DA3F1A700
+[ZwCreateFile] \
+Dokan Information: DokanEndDispatchCreate() status = 0, file handle = 0x0000026DA3EF8970, eventID = 0034, result = 0x1
+Dokan Information: SendAndPullEventInformation() with NTSTATUS 0x0, context 0xa3ef8970, and result object 0x0000026DA3FC2F30 with size 48
+###QueryVolumeInfo file handle = 0x0000026DA3EF8970, eventID = 0034, event Info = 0x0000026DA3F1A700
+[GetVolumeInformation]
+Dokan Information: SendAndPullEventInformation() with NTSTATUS 0x0, context 0xa3ef8970, and result object 0x0000026DA3FC2F30 with size 64
+###GetFileInfo file handle = 0x0000026DA3EF8970, eventID = 0034, event Info = 0x0000026DA3F1A700
+	result =  0
+	FileAllInformation
+	DispatchQueryInformation result =  0
+Dokan Information: SendAndPullEventInformation() with NTSTATUS 0x0, context 0xa3ef8970, and result object 0x0000026DA3FC2F30 with size 140
+###Cleanup file handle = 0x0000026DA3EF8970, eventID = 0034, event Info = 0x0000026DA3F1A700
+Dokan Information: SendAndPullEventInformation() with NTSTATUS 0x0, context 0xa3ef8970, and result object 0x0000026DA3FC2F30 with size 48
+###Close file handle = 0x0000026DA3EF8970, eventID = 0034, event Info = 0x0000026DA3F1A700
+###Create file handle = 0x0000026DA3EF86F0, eventID = 0035, event Info = 0x0000026DA3F1ABD0
+[Close] \
+[ZwCreateFile] \
+Dokan Information: DokanEndDispatchCreate() status = 0, file handle = 0x0000026DA3EF86F0, eventID = 0035, result = 0x1
+Dokan Information: SendAndPullEventInformation() with NTSTATUS 0x0, context 0xa3ef86f0, and result object 0x0000026DA3FC2F30 with size 48
+###QueryVolumeInfo file handle = 0x0000026DA3EF86F0, eventID = 0035, event Info = 0x0000026DA3F1ABD0
+[GetVolumeInformation]
+Dokan Information: SendAndPullEventInformation() with NTSTATUS 0x0, context 0xa3ef86f0, and result object 0x0000026DA3FC2F30 with size 64
+###GetFileInfo file handle = 0x0000026DA3EF86F0, eventID = 0035, event Info = 0x0000026DA3F1ABD0
+	result =  0
+	FileAllInformation
+	DispatchQueryInformation result =  0
+Dokan Information: SendAndPullEventInformation() with NTSTATUS 0x0, context 0xa3ef86f0, and result object 0x0000026DA3FC2F30 with size 140
+###Cleanup file handle = 0x0000026DA3EF86F0, eventID = 0035, event Info = 0x0000026DA3F1ABD0
+Dokan Information: SendAndPullEventInformation() with NTSTATUS 0x0, context 0xa3ef86f0, and result object 0x0000026DA3FC2F30 with size 48
+###Close file handle = 0x0000026DA3EF86F0, eventID = 0035, event Info = 0x0000026DA3F1ABD0
+[Close] \
+###Create file handle = 0x0000026DA3EF8970, eventID = 0036, event Info = 0x0000026DA3F1A700
+[ZwCreateFile] \
+Dokan Information: DokanEndDispatchCreate() status = 0, file handle = 0x0000026DA3EF8970, eventID = 0036, result = 0x1
+Dokan Information: SendAndPullEventInformation() with NTSTATUS 0x0, context 0xa3ef8970, and result object 0x0000026DA3FC2F30 with size 48
+###QueryVolumeInfo file handle = 0x0000026DA3EF8970, eventID = 0036, event Info = 0x0000026DA3F1A700
+[GetVolumeInformation]
+Dokan Information: SendAndPullEventInformation() with NTSTATUS 0x0, context 0xa3ef8970, and result object 0x0000026DA3FC2F30 with size 64
+###GetFileInfo file handle = 0x0000026DA3EF8970, eventID = 0036, event Info = 0x0000026DA3F1A700
+	result =  0
+	FileAllInformation
+	DispatchQueryInformation result =  0
+Dokan Information: SendAndPullEventInformation() with NTSTATUS 0x0, context 0xa3ef8970, and result object 0x0000026DA3FC2F30 with size 140
+###Cleanup file handle = 0x0000026DA3EF8970, eventID = 0036, event Info = 0x0000026DA3F1A700
+Dokan Information: SendAndPullEventInformation() with NTSTATUS 0x0, context 0xa3ef8970, and result object 0x0000026DA3FC2F30 with size 48
+###Close file handle = 0x0000026DA3EF8970, eventID = 0036, event Info = 0x0000026DA3F1A700
+[Close] \
+###Create file handle = 0x0000026DA3EF86F0, eventID = 0037, event Info = 0x0000026DA3F1ABD0
+[ZwCreateFile] \
+Dokan Information: DokanEndDispatchCreate() status = 0, file handle = 0x0000026DA3EF86F0, eventID = 0037, result = 0x1
+Dokan Information: SendAndPullEventInformation() with NTSTATUS 0x0, context 0xa3ef86f0, and result object 0x0000026DA3FC2F30 with size 48
+###QueryVolumeInfo file handle = 0x0000026DA3EF86F0, eventID = 0037, event Info = 0x0000026DA3F1ABD0
+[GetVolumeInformation]
+Dokan Information: SendAndPullEventInformation() with NTSTATUS 0x0, context 0xa3ef86f0, and result object 0x0000026DA3FC2F30 with size 64
+###GetFileInfo file handle = 0x0000026DA3EF86F0, eventID = 0037, event Info = 0x0000026DA3F1ABD0
+	result =  0
+	FileAllInformation
+	DispatchQueryInformation result =  0
+Dokan Information: SendAndPullEventInformation() with NTSTATUS 0x0, context 0xa3ef86f0, and result object 0x0000026DA3FC2F30 with size 140
+###Cleanup file handle = 0x0000026DA3EF86F0, eventID = 0037, event Info = 0x0000026DA3F1ABD0
+Dokan Information: SendAndPullEventInformation() with NTSTATUS 0x0, context 0xa3ef86f0, and result object 0x0000026DA3FC2F30 with size 48
+###Close file handle = 0x0000026DA3EF86F0, eventID = 0037, event Info = 0x0000026DA3F1ABD0
+[Close] \
+###Create file handle = 0x0000026DA3EF8970, eventID = 0038, event Info = 0x0000026DA3F1A700
+[ZwCreateFile] \
+Dokan Information: DokanEndDispatchCreate() status = 0, file handle = 0x0000026DA3EF8970, eventID = 0038, result = 0x1
+Dokan Information: SendAndPullEventInformation() with NTSTATUS 0x0, context 0xa3ef8970, and result object 0x0000026DA3FC2F30 with size 48
+###QueryVolumeInfo file handle = 0x0000026DA3EF8970, eventID = 0038, event Info = 0x0000026DA3F1A700
+[GetVolumeInformation]
+Dokan Information: SendAndPullEventInformation() with NTSTATUS 0x0, context 0xa3ef8970, and result object 0x0000026DA3FC2F30 with size 64
+###GetFileInfo file handle = 0x0000026DA3EF8970, eventID = 0038, event Info = 0x0000026DA3F1A700
+	result =  0
+	FileAllInformation
+	DispatchQueryInformation result =  0
+Dokan Information: SendAndPullEventInformation() with NTSTATUS 0x0, context 0xa3ef8970, and result object 0x0000026DA3FC2F30 with size 140
+###Cleanup file handle = 0x0000026DA3EF8970, eventID = 0038, event Info = 0x0000026DA3F1A700
+Dokan Information: SendAndPullEventInformation() with NTSTATUS 0x0, context 0xa3ef8970, and result object 0x0000026DA3FC2F30 with size 48
+###Close file handle = 0x0000026DA3EF8970, eventID = 0038, event Info = 0x0000026DA3F1A700
+[Close] \
+###Create file handle = 0x0000026DA3EF8970, eventID = 0039, event Info = 0x0000026DA3F1ABD0
+[ZwCreateFile] \
+Dokan Information: DokanEndDispatchCreate() status = 0, file handle = 0x0000026DA3EF8970, eventID = 0039, result = 0x1
+Dokan Information: SendAndPullEventInformation() with NTSTATUS 0x0, context 0xa3ef8970, and result object 0x0000026DA3FC2F30 with size 48
+###QueryVolumeInfo file handle = 0x0000026DA3EF8970, eventID = 0039, event Info = 0x0000026DA3F1ABD0
+[GetVolumeInformation]
+Dokan Information: SendAndPullEventInformation() with NTSTATUS 0x0, context 0xa3ef8970, and result object 0x0000026DA3FC2F30 with size 64
+###GetFileInfo file handle = 0x0000026DA3EF8970, eventID = 0039, event Info = 0x0000026DA3F1ABD0
+	result =  0
+	FileAllInformation
+	DispatchQueryInformation result =  0
+Dokan Information: SendAndPullEventInformation() with NTSTATUS 0x0, context 0xa3ef8970, and result object 0x0000026DA3FC2F30 with size 140
+###Cleanup file handle = 0x0000026DA3EF8970, eventID = 0039, event Info = 0x0000026DA3F1ABD0
+Dokan Information: SendAndPullEventInformation() with NTSTATUS 0x0, context 0xa3ef8970, and result object 0x0000026DA3FC2F30 with size 48
+###Close file handle = 0x0000026DA3EF8970, eventID = 0039, event Info = 0x0000026DA3F1ABD0
+[Close] \
+###Create file handle = 0x0000026DA3EF8970, eventID = 0040, event Info = 0x0000026DA3F1ABD0
+[ZwCreateFile] \
+Dokan Information: DokanEndDispatchCreate() status = 0, file handle = 0x0000026DA3EF8970, eventID = 0040, result = 0x1
+Dokan Information: SendAndPullEventInformation() with NTSTATUS 0x0, context 0xa3ef8970, and result object 0x0000026DA3FC2F30 with size 48
+###QueryVolumeInfo file handle = 0x0000026DA3EF8970, eventID = 0040, event Info = 0x0000026DA3F1ABD0
+[GetVolumeInformation]
+Dokan Information: SendAndPullEventInformation() with NTSTATUS 0x0, context 0xa3ef8970, and result object 0x0000026DA3FC2F30 with size 64
+###GetFileInfo file handle = 0x0000026DA3EF8970, eventID = 0040, event Info = 0x0000026DA3F1ABD0
+	result =  0
+	FileAllInformation
+	DispatchQueryInformation result =  0
+Dokan Information: SendAndPullEventInformation() with NTSTATUS 0x0, context 0xa3ef8970, and result object 0x0000026DA3FC2F30 with size 140
+###Cleanup file handle = 0x0000026DA3EF8970, eventID = 0040, event Info = 0x0000026DA3F1ABD0
+Dokan Information: SendAndPullEventInformation() with NTSTATUS 0x0, context 0xa3ef8970, and result object 0x0000026DA3FC2F30 with size 48
+###Close file handle = 0x0000026DA3EF8970, eventID = 0040, event Info = 0x0000026DA3F1ABD0
+[Close] \
+###Create file handle = 0x0000026DA3EF86F0, eventID = 0041, event Info = 0x0000026DA3F1A700
+[ZwCreateFile] \
+Dokan Information: DokanEndDispatchCreate() status = 0, file handle = 0x0000026DA3EF86F0, eventID = 0041, result = 0x1
+Dokan Information: SendAndPullEventInformation() with NTSTATUS 0x0, context 0xa3ef86f0, and result object 0x0000026DA3FC2F30 with size 48
+###QueryVolumeInfo file handle = 0x0000026DA3EF86F0, eventID = 0041, event Info = 0x0000026DA3F1A700
+[GetVolumeInformation]
+Dokan Information: SendAndPullEventInformation() with NTSTATUS 0x0, context 0xa3ef86f0, and result object 0x0000026DA3FC2F30 with size 64
+###GetFileInfo file handle = 0x0000026DA3EF86F0, eventID = 0041, event Info = 0x0000026DA3F1A700
+	result =  0
+	FileAllInformation
+	DispatchQueryInformation result =  0
+Dokan Information: SendAndPullEventInformation() with NTSTATUS 0x0, context 0xa3ef86f0, and result object 0x0000026DA3FC2F30 with size 140
+###Cleanup file handle = 0x0000026DA3EF86F0, eventID = 0041, event Info = 0x0000026DA3F1A700
+Dokan Information: SendAndPullEventInformation() with NTSTATUS 0x0, context 0xa3ef86f0, and result object 0x0000026DA3FC2F30 with size 48
+###Close file handle = 0x0000026DA3EF86F0, eventID = 0041, event Info = 0x0000026DA3F1A700
+[Close] \
+###Create file handle = 0x0000026DA3EF8970, eventID = 0042, event Info = 0x0000026DA3F1ABD0
+[ZwCreateFile] \
+Dokan Information: DokanEndDispatchCreate() status = 0, file handle = 0x0000026DA3EF8970, eventID = 0042, result = 0x1
+Dokan Information: SendAndPullEventInformation() with NTSTATUS 0x0, context 0xa3ef8970, and result object 0x0000026DA3FC2F30 with size 48
+###QueryVolumeInfo file handle = 0x0000026DA3EF8970, eventID = 0042, event Info = 0x0000026DA3F1ABD0
+[GetVolumeInformation]
+Dokan Information: SendAndPullEventInformation() with NTSTATUS 0x0, context 0xa3ef8970, and result object 0x0000026DA3FC2F30 with size 64
+###GetFileInfo file handle = 0x0000026DA3EF8970, eventID = 0042, event Info = 0x0000026DA3F1ABD0
+	result =  0
+	FileAllInformation
+	DispatchQueryInformation result =  0
+Dokan Information: SendAndPullEventInformation() with NTSTATUS 0x0, context 0xa3ef8970, and result object 0x0000026DA3FC2F30 with size 140
+###Cleanup file handle = 0x0000026DA3EF8970, eventID = 0042, event Info = 0x0000026DA3F1ABD0
+Dokan Information: SendAndPullEventInformation() with NTSTATUS 0x0, context 0xa3ef8970, and result object 0x0000026DA3FC2F30 with size 48
+###Close file handle = 0x0000026DA3EF8970, eventID = 0042, event Info = 0x0000026DA3F1ABD0
+[Close] \
+###Create file handle = 0x0000026DA3EF86F0, eventID = 0043, event Info = 0x0000026DA3F1A700
+[ZwCreateFile] \
+Dokan Information: DokanEndDispatchCreate() status = 0, file handle = 0x0000026DA3EF86F0, eventID = 0043, result = 0x1
+Dokan Information: SendAndPullEventInformation() with NTSTATUS 0x0, context 0xa3ef86f0, and result object 0x0000026DA3FC2F30 with size 48
+###QueryVolumeInfo file handle = 0x0000026DA3EF86F0, eventID = 0043, event Info = 0x0000026DA3F1A700
+[GetVolumeInformation]
+Dokan Information: SendAndPullEventInformation() with NTSTATUS 0x0, context 0xa3ef86f0, and result object 0x0000026DA3FC2F30 with size 64
+###GetFileInfo file handle = 0x0000026DA3EF86F0, eventID = 0043, event Info = 0x0000026DA3F1A700
+	result =  0
+	FileAllInformation
+	DispatchQueryInformation result =  0
+Dokan Information: SendAndPullEventInformation() with NTSTATUS 0x0, context 0xa3ef86f0, and result object 0x0000026DA3FC2F30 with size 140
+###Cleanup file handle = 0x0000026DA3EF86F0, eventID = 0043, event Info = 0x0000026DA3F1A700
+Dokan Information: SendAndPullEventInformation() with NTSTATUS 0x0, context 0xa3ef86f0, and result object 0x0000026DA3FC2F30 with size 48
+###Close file handle = 0x0000026DA3EF86F0, eventID = 0043, event Info = 0x0000026DA3F1A700
+[Close] \
+###Create file handle = 0x0000026DA3EF8970, eventID = 0044, event Info = 0x0000026DA3F1ABD0
+[ZwCreateFile] \
+Dokan Information: DokanEndDispatchCreate() status = 0, file handle = 0x0000026DA3EF8970, eventID = 0044, result = 0x1
+Dokan Information: SendAndPullEventInformation() with NTSTATUS 0x0, context 0xa3ef8970, and result object 0x0000026DA3FC2F30 with size 48
+###QueryVolumeInfo file handle = 0x0000026DA3EF8970, eventID = 0044, event Info = 0x0000026DA3F1ABD0
+[GetVolumeInformation]
+Dokan Information: SendAndPullEventInformation() with NTSTATUS 0x0, context 0xa3ef8970, and result object 0x0000026DA3FC2F30 with size 64
+###GetFileInfo file handle = 0x0000026DA3EF8970, eventID = 0044, event Info = 0x0000026DA3F1ABD0
+	result =  0
+	FileAllInformation
+	DispatchQueryInformation result =  0
+Dokan Information: SendAndPullEventInformation() with NTSTATUS 0x0, context 0xa3ef8970, and result object 0x0000026DA3FC2F30 with size 140
+###Cleanup file handle = 0x0000026DA3EF8970, eventID = 0044, event Info = 0x0000026DA3F1ABD0
+Dokan Information: SendAndPullEventInformation() with NTSTATUS 0x0, context 0xa3ef8970, and result object 0x0000026DA3FC2F30 with size 48
+###Close file handle = 0x0000026DA3EF8970, eventID = 0044, event Info = 0x0000026DA3F1ABD0
+[Close] \
+###Create file handle = 0x0000026DA3EF86F0, eventID = 0045, event Info = 0x0000026DA3F1A700
+[ZwCreateFile] \
+Dokan Information: DokanEndDispatchCreate() status = 0, file handle = 0x0000026DA3EF86F0, eventID = 0045, result = 0x1
+Dokan Information: SendAndPullEventInformation() with NTSTATUS 0x0, context 0xa3ef86f0, and result object 0x0000026DA3FC2F30 with size 48
+###QueryVolumeInfo file handle = 0x0000026DA3EF86F0, eventID = 0045, event Info = 0x0000026DA3F1A700
+[GetVolumeInformation]
+Dokan Information: SendAndPullEventInformation() with NTSTATUS 0x0, context 0xa3ef86f0, and result object 0x0000026DA3FC2F30 with size 64
+###GetFileInfo file handle = 0x0000026DA3EF86F0, eventID = 0045, event Info = 0x0000026DA3F1A700
+	result =  0
+	FileAllInformation
+	DispatchQueryInformation result =  0
+Dokan Information: SendAndPullEventInformation() with NTSTATUS 0x0, context 0xa3ef86f0, and result object 0x0000026DA3FC2F30 with size 140
+###Cleanup file handle = 0x0000026DA3EF86F0, eventID = 0045, event Info = 0x0000026DA3F1A700
+Dokan Information: SendAndPullEventInformation() with NTSTATUS 0x0, context 0xa3ef86f0, and result object 0x0000026DA3FC2F30 with size 48
+###Close file handle = 0x0000026DA3EF86F0, eventID = 0045, event Info = 0x0000026DA3F1A700
+###Create file handle = 0x0000026DA3EF8970, eventID = 0046, event Info = 0x0000026DA3F1ABD0
+[Close] \
+[ZwCreateFile] \
+Dokan Information: DokanEndDispatchCreate() status = 0, file handle = 0x0000026DA3EF8970, eventID = 0046, result = 0x1
+Dokan Information: SendAndPullEventInformation() with NTSTATUS 0x0, context 0xa3ef8970, and result object 0x0000026DA3FC2F30 with size 48
+###QueryVolumeInfo file handle = 0x0000026DA3EF8970, eventID = 0046, event Info = 0x0000026DA3F1ABD0
+[GetVolumeInformation]
+Dokan Information: SendAndPullEventInformation() with NTSTATUS 0x0, context 0xa3ef8970, and result object 0x0000026DA3FC2F30 with size 64
+###GetFileInfo file handle = 0x0000026DA3EF8970, eventID = 0046, event Info = 0x0000026DA3F1ABD0
+	result =  0
+	FileAllInformation
+	DispatchQueryInformation result =  0
+Dokan Information: SendAndPullEventInformation() with NTSTATUS 0x0, context 0xa3ef8970, and result object 0x0000026DA3FC2F30 with size 140
+###Cleanup file handle = 0x0000026DA3EF8970, eventID = 0046, event Info = 0x0000026DA3F1ABD0
+Dokan Information: SendAndPullEventInformation() with NTSTATUS 0x0, context 0xa3ef8970, and result object 0x0000026DA3FC2F30 with size 48
+###Close file handle = 0x0000026DA3EF8970, eventID = 0046, event Info = 0x0000026DA3F1ABD0
+[Close] \
+###Create file handle = 0x0000026DA3EF86F0, eventID = 0047, event Info = 0x0000026DA3F1A700
+[ZwCreateFile] \
+Dokan Information: DokanEndDispatchCreate() status = 0, file handle = 0x0000026DA3EF86F0, eventID = 0047, result = 0x1
+Dokan Information: SendAndPullEventInformation() with NTSTATUS 0x0, context 0xa3ef86f0, and result object 0x0000026DA3FC2F30 with size 48
+###QueryVolumeInfo file handle = 0x0000026DA3EF86F0, eventID = 0047, event Info = 0x0000026DA3F1A700
+[GetVolumeInformation]
+Dokan Information: SendAndPullEventInformation() with NTSTATUS 0x0, context 0xa3ef86f0, and result object 0x0000026DA3FC2F30 with size 64
+###GetFileInfo file handle = 0x0000026DA3EF86F0, eventID = 0047, event Info = 0x0000026DA3F1A700
+	result =  0
+	FileAllInformation
+	DispatchQueryInformation result =  0
+Dokan Information: SendAndPullEventInformation() with NTSTATUS 0x0, context 0xa3ef86f0, and result object 0x0000026DA3FC2F30 with size 140
+###Cleanup file handle = 0x0000026DA3EF86F0, eventID = 0047, event Info = 0x0000026DA3F1A700
+Dokan Information: SendAndPullEventInformation() with NTSTATUS 0x0, context 0xa3ef86f0, and result object 0x0000026DA3FC2F30 with size 48
+###Close file handle = 0x0000026DA3EF86F0, eventID = 0047, event Info = 0x0000026DA3F1A700
+[Close] \
+###Create file handle = 0x0000026DA3EF8970, eventID = 0048, event Info = 0x0000026DA3F1ABD0
+[ZwCreateFile] \
+Dokan Information: DokanEndDispatchCreate() status = 0, file handle = 0x0000026DA3EF8970, eventID = 0048, result = 0x1
+Dokan Information: SendAndPullEventInformation() with NTSTATUS 0x0, context 0xa3ef8970, and result object 0x0000026DA3FC2F30 with size 48
+###QueryVolumeInfo file handle = 0x0000026DA3EF8970, eventID = 0048, event Info = 0x0000026DA3F1ABD0
+[GetVolumeInformation]
+Dokan Information: SendAndPullEventInformation() with NTSTATUS 0x0, context 0xa3ef8970, and result object 0x0000026DA3FC2F30 with size 64
+###GetFileInfo file handle = 0x0000026DA3EF8970, eventID = 0048, event Info = 0x0000026DA3F1ABD0
+	result =  0
+	FileAllInformation
+	DispatchQueryInformation result =  0
+Dokan Information: SendAndPullEventInformation() with NTSTATUS 0x0, context 0xa3ef8970, and result object 0x0000026DA3FC2F30 with size 140
+###Cleanup file handle = 0x0000026DA3EF8970, eventID = 0048, event Info = 0x0000026DA3F1ABD0
+Dokan Information: SendAndPullEventInformation() with NTSTATUS 0x0, context 0xa3ef8970, and result object 0x0000026DA3FC2F30 with size 48
+###Close file handle = 0x0000026DA3EF8970, eventID = 0048, event Info = 0x0000026DA3F1ABD0
+[Close] \
+###Create file handle = 0x0000026DA3EF86F0, eventID = 0049, event Info = 0x0000026DA3F1A700
+[ZwCreateFile] \
+Dokan Information: DokanEndDispatchCreate() status = 0, file handle = 0x0000026DA3EF86F0, eventID = 0049, result = 0x1
+Dokan Information: SendAndPullEventInformation() with NTSTATUS 0x0, context 0xa3ef86f0, and result object 0x0000026DA3FC2F30 with size 48
+###QueryVolumeInfo file handle = 0x0000026DA3EF86F0, eventID = 0049, event Info = 0x0000026DA3F1A700
+[GetVolumeInformation]
+Dokan Information: SendAndPullEventInformation() with NTSTATUS 0x0, context 0xa3ef86f0, and result object 0x0000026DA3FC2F30 with size 64
+###GetFileInfo file handle = 0x0000026DA3EF86F0, eventID = 0049, event Info = 0x0000026DA3F1A700
+	result =  0
+	FileAllInformation
+	DispatchQueryInformation result =  0
+Dokan Information: SendAndPullEventInformation() with NTSTATUS 0x0, context 0xa3ef86f0, and result object 0x0000026DA3FC2F30 with size 140
+###Cleanup file handle = 0x0000026DA3EF86F0, eventID = 0049, event Info = 0x0000026DA3F1A700
+Dokan Information: SendAndPullEventInformation() with NTSTATUS 0x0, context 0xa3ef86f0, and result object 0x0000026DA3FC2F30 with size 48
+###Close file handle = 0x0000026DA3EF86F0, eventID = 0049, event Info = 0x0000026DA3F1A700
+[Close] \
+###Create file handle = 0x0000026DA3EF8970, eventID = 0050, event Info = 0x0000026DA3F1ABD0
+[ZwCreateFile] \
+Dokan Information: DokanEndDispatchCreate() status = 0, file handle = 0x0000026DA3EF8970, eventID = 0050, result = 0x1
+Dokan Information: SendAndPullEventInformation() with NTSTATUS 0x0, context 0xa3ef8970, and result object 0x0000026DA3FC2F30 with size 48
+###QueryVolumeInfo file handle = 0x0000026DA3EF8970, eventID = 0050, event Info = 0x0000026DA3F1ABD0
+[GetVolumeInformation]
+Dokan Information: SendAndPullEventInformation() with NTSTATUS 0x0, context 0xa3ef8970, and result object 0x0000026DA3FC2F30 with size 64
+###GetFileInfo file handle = 0x0000026DA3EF8970, eventID = 0050, event Info = 0x0000026DA3F1ABD0
+	result =  0
+	FileAllInformation
+	DispatchQueryInformation result =  0
+Dokan Information: SendAndPullEventInformation() with NTSTATUS 0x0, context 0xa3ef8970, and result object 0x0000026DA3FC2F30 with size 140
+###Cleanup file handle = 0x0000026DA3EF8970, eventID = 0050, event Info = 0x0000026DA3F1ABD0
+Dokan Information: SendAndPullEventInformation() with NTSTATUS 0x0, context 0xa3ef8970, and result object 0x0000026DA3FC2F30 with size 48
+###Close file handle = 0x0000026DA3EF8970, eventID = 0050, event Info = 0x0000026DA3F1ABD0
+[Close] \
+###Create file handle = 0x0000026DA3EF86F0, eventID = 0051, event Info = 0x0000026DA3F1A700
+[ZwCreateFile] \
+Dokan Information: DokanEndDispatchCreate() status = 0, file handle = 0x0000026DA3EF86F0, eventID = 0051, result = 0x1
+Dokan Information: SendAndPullEventInformation() with NTSTATUS 0x0, context 0xa3ef86f0, and result object 0x0000026DA3FC2F30 with size 48
+###QueryVolumeInfo file handle = 0x0000026DA3EF86F0, eventID = 0051, event Info = 0x0000026DA3F1A700
+[GetVolumeInformation]
+Dokan Information: SendAndPullEventInformation() with NTSTATUS 0x0, context 0xa3ef86f0, and result object 0x0000026DA3FC2F30 with size 64
+###GetFileInfo file handle = 0x0000026DA3EF86F0, eventID = 0051, event Info = 0x0000026DA3F1A700
+	result =  0
+	FileAllInformation
+	DispatchQueryInformation result =  0
+Dokan Information: SendAndPullEventInformation() with NTSTATUS 0x0, context 0xa3ef86f0, and result object 0x0000026DA3FC2F30 with size 140
+###Cleanup file handle = 0x0000026DA3EF86F0, eventID = 0051, event Info = 0x0000026DA3F1A700
+Dokan Information: SendAndPullEventInformation() with NTSTATUS 0x0, context 0xa3ef86f0, and result object 0x0000026DA3FC2F30 with size 48
+###Close file handle = 0x0000026DA3EF86F0, eventID = 0051, event Info = 0x0000026DA3F1A700
+[Close] \
+###Create file handle = 0x0000026DA3EF8970, eventID = 0052, event Info = 0x0000026DA3F1ABD0
+[ZwCreateFile] \
+Dokan Information: DokanEndDispatchCreate() status = 0, file handle = 0x0000026DA3EF8970, eventID = 0052, result = 0x1
+Dokan Information: SendAndPullEventInformation() with NTSTATUS 0x0, context 0xa3ef8970, and result object 0x0000026DA3FC2F30 with size 48
+###QueryVolumeInfo file handle = 0x0000026DA3EF8970, eventID = 0052, event Info = 0x0000026DA3F1ABD0
+[GetVolumeInformation]
+Dokan Information: SendAndPullEventInformation() with NTSTATUS 0x0, context 0xa3ef8970, and result object 0x0000026DA3FC2F30 with size 64
+###GetFileInfo file handle = 0x0000026DA3EF8970, eventID = 0052, event Info = 0x0000026DA3F1ABD0
+	result =  0
+	FileAllInformation
+	DispatchQueryInformation result =  0
+Dokan Information: SendAndPullEventInformation() with NTSTATUS 0x0, context 0xa3ef8970, and result object 0x0000026DA3FC2F30 with size 140
+###Cleanup file handle = 0x0000026DA3EF8970, eventID = 0052, event Info = 0x0000026DA3F1ABD0
+Dokan Information: SendAndPullEventInformation() with NTSTATUS 0x0, context 0xa3ef8970, and result object 0x0000026DA3FC2F30 with size 48
+###Close file handle = 0x0000026DA3EF8970, eventID = 0052, event Info = 0x0000026DA3F1ABD0
+[Close] \
+###Create file handle = 0x0000026DA3EF86F0, eventID = 0053, event Info = 0x0000026DA3F1A700
+[ZwCreateFile] \
+Dokan Information: DokanEndDispatchCreate() status = 0, file handle = 0x0000026DA3EF86F0, eventID = 0053, result = 0x1
+Dokan Information: SendAndPullEventInformation() with NTSTATUS 0x0, context 0xa3ef86f0, and result object 0x0000026DA3FC2F30 with size 48
+###QueryVolumeInfo file handle = 0x0000026DA3EF86F0, eventID = 0053, event Info = 0x0000026DA3F1A700
+[GetVolumeInformation]
+Dokan Information: SendAndPullEventInformation() with NTSTATUS 0x0, context 0xa3ef86f0, and result object 0x0000026DA3FC2F30 with size 64
+###GetFileInfo file handle = 0x0000026DA3EF86F0, eventID = 0053, event Info = 0x0000026DA3F1A700
+	result =  0
+	FileAllInformation
+	DispatchQueryInformation result =  0
+Dokan Information: SendAndPullEventInformation() with NTSTATUS 0x0, context 0xa3ef86f0, and result object 0x0000026DA3FC2F30 with size 140
+###Cleanup file handle = 0x0000026DA3EF86F0, eventID = 0053, event Info = 0x0000026DA3F1A700
+Dokan Information: SendAndPullEventInformation() with NTSTATUS 0x0, context 0xa3ef86f0, and result object 0x0000026DA3FC2F30 with size 48
+###Close file handle = 0x0000026DA3EF86F0, eventID = 0053, event Info = 0x0000026DA3F1A700
+[Close] \
+###Create file handle = 0x0000026DA3EF8970, eventID = 0054, event Info = 0x0000026DA3F1ABD0
+[ZwCreateFile] \
+Dokan Information: DokanEndDispatchCreate() status = 0, file handle = 0x0000026DA3EF8970, eventID = 0054, result = 0x1
+Dokan Information: SendAndPullEventInformation() with NTSTATUS 0x0, context 0xa3ef8970, and result object 0x0000026DA3FC2F30 with size 48
+###QueryVolumeInfo file handle = 0x0000026DA3EF8970, eventID = 0054, event Info = 0x0000026DA3F1ABD0
+[GetVolumeInformation]
+Dokan Information: SendAndPullEventInformation() with NTSTATUS 0x0, context 0xa3ef8970, and result object 0x0000026DA3FC2F30 with size 64
+###GetFileInfo file handle = 0x0000026DA3EF8970, eventID = 0054, event Info = 0x0000026DA3F1ABD0
+	result =  0
+	FileAllInformation
+	DispatchQueryInformation result =  0
+Dokan Information: SendAndPullEventInformation() with NTSTATUS 0x0, context 0xa3ef8970, and result object 0x0000026DA3FC2F30 with size 140
+###Cleanup file handle = 0x0000026DA3EF8970, eventID = 0054, event Info = 0x0000026DA3F1ABD0
+Dokan Information: SendAndPullEventInformation() with NTSTATUS 0x0, context 0xa3ef8970, and result object 0x0000026DA3FC2F30 with size 48
+###Close file handle = 0x0000026DA3EF8970, eventID = 0054, event Info = 0x0000026DA3F1ABD0
+[Close] \
+###Create file handle = 0x0000026DA3EF86F0, eventID = 0055, event Info = 0x0000026DA3F1A700
+[ZwCreateFile] \
+Dokan Information: DokanEndDispatchCreate() status = 0, file handle = 0x0000026DA3EF86F0, eventID = 0055, result = 0x1
+Dokan Information: SendAndPullEventInformation() with NTSTATUS 0x0, context 0xa3ef86f0, and result object 0x0000026DA3FC2F30 with size 48
+###QueryVolumeInfo file handle = 0x0000026DA3EF86F0, eventID = 0055, event Info = 0x0000026DA3F1A700
+[GetVolumeInformation]
+Dokan Information: SendAndPullEventInformation() with NTSTATUS 0x0, context 0xa3ef86f0, and result object 0x0000026DA3FC2F30 with size 64
+###GetFileInfo file handle = 0x0000026DA3EF86F0, eventID = 0055, event Info = 0x0000026DA3F1A700
+	result =  0
+	FileAllInformation
+	DispatchQueryInformation result =  0
+Dokan Information: SendAndPullEventInformation() with NTSTATUS 0x0, context 0xa3ef86f0, and result object 0x0000026DA3FC2F30 with size 140
+###Cleanup file handle = 0x0000026DA3EF86F0, eventID = 0055, event Info = 0x0000026DA3F1A700
+Dokan Information: SendAndPullEventInformation() with NTSTATUS 0x0, context 0xa3ef86f0, and result object 0x0000026DA3FC2F30 with size 48
+###Close file handle = 0x0000026DA3EF86F0, eventID = 0055, event Info = 0x0000026DA3F1A700
+[Close] \
+###Create file handle = 0x0000026DA3EF8970, eventID = 0056, event Info = 0x0000026DA3F1ABD0
+[ZwCreateFile] \
+Dokan Information: DokanEndDispatchCreate() status = 0, file handle = 0x0000026DA3EF8970, eventID = 0056, result = 0x1
+Dokan Information: SendAndPullEventInformation() with NTSTATUS 0x0, context 0xa3ef8970, and result object 0x0000026DA3FC2F30 with size 48
+###QueryVolumeInfo file handle = 0x0000026DA3EF8970, eventID = 0056, event Info = 0x0000026DA3F1ABD0
+[GetVolumeInformation]
+Dokan Information: SendAndPullEventInformation() with NTSTATUS 0x0, context 0xa3ef8970, and result object 0x0000026DA3FC2F30 with size 64
+###GetFileInfo file handle = 0x0000026DA3EF8970, eventID = 0056, event Info = 0x0000026DA3F1ABD0
+	result =  0
+	FileAllInformation
+	DispatchQueryInformation result =  0
+Dokan Information: SendAndPullEventInformation() with NTSTATUS 0x0, context 0xa3ef8970, and result object 0x0000026DA3FC2F30 with size 140
+###Cleanup file handle = 0x0000026DA3EF8970, eventID = 0056, event Info = 0x0000026DA3F1ABD0
+Dokan Information: SendAndPullEventInformation() with NTSTATUS 0x0, context 0xa3ef8970, and result object 0x0000026DA3FC2F30 with size 48
+###Close file handle = 0x0000026DA3EF8970, eventID = 0056, event Info = 0x0000026DA3F1ABD0
+[Close] \
+###Create file handle = 0x0000026DA3EF86F0, eventID = 0057, event Info = 0x0000026DA3F1A700
+[ZwCreateFile] \
+Dokan Information: DokanEndDispatchCreate() status = 0, file handle = 0x0000026DA3EF86F0, eventID = 0057, result = 0x1
+Dokan Information: SendAndPullEventInformation() with NTSTATUS 0x0, context 0xa3ef86f0, and result object 0x0000026DA3FC2F30 with size 48
+###QueryVolumeInfo file handle = 0x0000026DA3EF86F0, eventID = 0057, event Info = 0x0000026DA3F1A700
+[GetVolumeInformation]
+Dokan Information: SendAndPullEventInformation() with NTSTATUS 0x0, context 0xa3ef86f0, and result object 0x0000026DA3FC2F30 with size 64
+###GetFileInfo file handle = 0x0000026DA3EF86F0, eventID = 0057, event Info = 0x0000026DA3F1A700
+	result =  0
+	FileAllInformation
+	DispatchQueryInformation result =  0
+Dokan Information: SendAndPullEventInformation() with NTSTATUS 0x0, context 0xa3ef86f0, and result object 0x0000026DA3FC2F30 with size 140
+###Cleanup file handle = 0x0000026DA3EF86F0, eventID = 0057, event Info = 0x0000026DA3F1A700
+Dokan Information: SendAndPullEventInformation() with NTSTATUS 0x0, context 0xa3ef86f0, and result object 0x0000026DA3FC2F30 with size 48
+###Close file handle = 0x0000026DA3EF86F0, eventID = 0057, event Info = 0x0000026DA3F1A700
+[Close] \
+###Create file handle = 0x0000026DA3EF8970, eventID = 0058, event Info = 0x0000026DA3F1ABD0
+[ZwCreateFile] \
+Dokan Information: DokanEndDispatchCreate() status = 0, file handle = 0x0000026DA3EF8970, eventID = 0058, result = 0x1
+Dokan Information: SendAndPullEventInformation() with NTSTATUS 0x0, context 0xa3ef8970, and result object 0x0000026DA3FC2F30 with size 48
+###QueryVolumeInfo file handle = 0x0000026DA3EF8970, eventID = 0058, event Info = 0x0000026DA3F1ABD0
+[GetVolumeInformation]
+Dokan Information: SendAndPullEventInformation() with NTSTATUS 0x0, context 0xa3ef8970, and result object 0x0000026DA3FC2F30 with size 64
+###GetFileInfo file handle = 0x0000026DA3EF8970, eventID = 0058, event Info = 0x0000026DA3F1ABD0
+	result =  0
+	FileAllInformation
+	DispatchQueryInformation result =  0
+Dokan Information: SendAndPullEventInformation() with NTSTATUS 0x0, context 0xa3ef8970, and result object 0x0000026DA3FC2F30 with size 140
+###Cleanup file handle = 0x0000026DA3EF8970, eventID = 0058, event Info = 0x0000026DA3F1ABD0
+Dokan Information: SendAndPullEventInformation() with NTSTATUS 0x0, context 0xa3ef8970, and result object 0x0000026DA3FC2F30 with size 48
+###Close file handle = 0x0000026DA3EF8970, eventID = 0058, event Info = 0x0000026DA3F1ABD0
+[Close] \
+###Create file handle = 0x0000026DA3EF8970, eventID = 0059, event Info = 0x0000026DA3F1A700
+[ZwCreateFile] \
+Dokan Information: DokanEndDispatchCreate() status = 0, file handle = 0x0000026DA3EF8970, eventID = 0059, result = 0x1
+Dokan Information: SendAndPullEventInformation() with NTSTATUS 0x0, context 0xa3ef8970, and result object 0x0000026DA3FC2F30 with size 48
+###QueryVolumeInfo file handle = 0x0000026DA3EF8970, eventID = 0059, event Info = 0x0000026DA3F1A700
+[GetVolumeInformation]
+Dokan Information: SendAndPullEventInformation() with NTSTATUS 0x0, context 0xa3ef8970, and result object 0x0000026DA3FC2F30 with size 64
+###GetFileInfo file handle = 0x0000026DA3EF8970, eventID = 0059, event Info = 0x0000026DA3F1A700
+	result =  0
+	FileAllInformation
+	DispatchQueryInformation result =  0
+Dokan Information: SendAndPullEventInformation() with NTSTATUS 0x0, context 0xa3ef8970, and result object 0x0000026DA3FC2F30 with size 140
+###Cleanup file handle = 0x0000026DA3EF8970, eventID = 0059, event Info = 0x0000026DA3F1A700
+Dokan Information: SendAndPullEventInformation() with NTSTATUS 0x0, context 0xa3ef8970, and result object 0x0000026DA3FC2F30 with size 48
+###Close file handle = 0x0000026DA3EF8970, eventID = 0059, event Info = 0x0000026DA3F1A700
+[Close] \
+###Create file handle = 0x0000026DA3EF86F0, eventID = 0060, event Info = 0x0000026DA3F1ABD0
+[ZwCreateFile] \
+Dokan Information: DokanEndDispatchCreate() status = 0, file handle = 0x0000026DA3EF86F0, eventID = 0060, result = 0x1
+Dokan Information: SendAndPullEventInformation() with NTSTATUS 0x0, context 0xa3ef86f0, and result object 0x0000026DA3FC2F30 with size 48
+###QueryVolumeInfo file handle = 0x0000026DA3EF86F0, eventID = 0060, event Info = 0x0000026DA3F1ABD0
+[GetVolumeInformation]
+Dokan Information: SendAndPullEventInformation() with NTSTATUS 0x0, context 0xa3ef86f0, and result object 0x0000026DA3FC2F30 with size 64
+###GetFileInfo file handle = 0x0000026DA3EF86F0, eventID = 0060, event Info = 0x0000026DA3F1ABD0
+	result =  0
+	FileAllInformation
+	DispatchQueryInformation result =  0
+Dokan Information: SendAndPullEventInformation() with NTSTATUS 0x0, context 0xa3ef86f0, and result object 0x0000026DA3FC2F30 with size 140
+###Cleanup file handle = 0x0000026DA3EF86F0, eventID = 0060, event Info = 0x0000026DA3F1ABD0
+Dokan Information: SendAndPullEventInformation() with NTSTATUS 0x0, context 0xa3ef86f0, and result object 0x0000026DA3FC2F30 with size 48
+###Close file handle = 0x0000026DA3EF86F0, eventID = 0060, event Info = 0x0000026DA3F1ABD0
+[Close] \
+###Create file handle = 0x0000026DA3EF8970, eventID = 0061, event Info = 0x0000026DA3F1A700
+[ZwCreateFile] \
+Dokan Information: DokanEndDispatchCreate() status = 0, file handle = 0x0000026DA3EF8970, eventID = 0061, result = 0x1
+Dokan Information: SendAndPullEventInformation() with NTSTATUS 0x0, context 0xa3ef8970, and result object 0x0000026DA3FC2F30 with size 48
+###QueryVolumeInfo file handle = 0x0000026DA3EF8970, eventID = 0061, event Info = 0x0000026DA3F1A700
+[GetVolumeInformation]
+Dokan Information: SendAndPullEventInformation() with NTSTATUS 0x0, context 0xa3ef8970, and result object 0x0000026DA3FC2F30 with size 64
+###GetFileInfo file handle = 0x0000026DA3EF8970, eventID = 0061, event Info = 0x0000026DA3F1A700
+	result =  0
+	FileAllInformation
+	DispatchQueryInformation result =  0
+Dokan Information: SendAndPullEventInformation() with NTSTATUS 0x0, context 0xa3ef8970, and result object 0x0000026DA3FC2F30 with size 140
+###Cleanup file handle = 0x0000026DA3EF8970, eventID = 0061, event Info = 0x0000026DA3F1A700
+Dokan Information: SendAndPullEventInformation() with NTSTATUS 0x0, context 0xa3ef8970, and result object 0x0000026DA3FC2F30 with size 48
+###Close file handle = 0x0000026DA3EF8970, eventID = 0061, event Info = 0x0000026DA3F1A700
+[Close] \
+###Create file handle = 0x0000026DA3EF8970, eventID = 0062, event Info = 0x0000026DA3F1A700
+[ZwCreateFile] \
+Dokan Information: DokanEndDispatchCreate() status = 0, file handle = 0x0000026DA3EF8970, eventID = 0062, result = 0x1
+Dokan Information: SendAndPullEventInformation() with NTSTATUS 0x0, context 0xa3ef8970, and result object 0x0000026DA3FC2F30 with size 48
+###QueryVolumeInfo file handle = 0x0000026DA3EF8970, eventID = 0062, event Info = 0x0000026DA3F1A700
+[GetVolumeInformation]
+Dokan Information: SendAndPullEventInformation() with NTSTATUS 0x0, context 0xa3ef8970, and result object 0x0000026DA3FC2F30 with size 74
+###QueryVolumeInfo file handle = 0x0000026DA3EF8970, eventID = 0062, event Info = 0x0000026DA3F1A700
+[GetVolumeInformation]
+Dokan Information: SendAndPullEventInformation() with NTSTATUS 0x0, context 0xa3ef8970, and result object 0x0000026DA3FC2F30 with size 68
+###Cleanup file handle = 0x0000026DA3EF8970, eventID = 0062, event Info = 0x0000026DA3F1A700
+Dokan Information: SendAndPullEventInformation() with NTSTATUS 0x0, context 0xa3ef8970, and result object 0x0000026DA3FC2F30 with size 48
+###Close file handle = 0x0000026DA3EF8970, eventID = 0062, event Info = 0x0000026DA3F1A700
+[Close] \
+###Create file handle = 0x0000026DA3EF86F0, eventID = 0063, event Info = 0x0000026DA3F1ABD0
+[ZwCreateFile] \
+Dokan Information: DokanEndDispatchCreate() status = 0, file handle = 0x0000026DA3EF86F0, eventID = 0063, result = 0x1
+Dokan Information: SendAndPullEventInformation() with NTSTATUS 0x0, context 0xa3ef86f0, and result object 0x0000026DA3FC2F30 with size 48
+###GetFileInfo file handle = 0x0000026DA3EF86F0, eventID = 0063, event Info = 0x0000026DA3F1ABD0
+	result =  0
+	FileNetworkOpenInformation
+	DispatchQueryInformation result =  0
+Dokan Information: SendAndPullEventInformation() with NTSTATUS 0x0, context 0xa3ef86f0, and result object 0x0000026DA3FC2F30 with size 96
+###Cleanup file handle = 0x0000026DA3EF86F0, eventID = 0063, event Info = 0x0000026DA3F1ABD0
+Dokan Information: SendAndPullEventInformation() with NTSTATUS 0x0, context 0xa3ef86f0, and result object 0x0000026DA3FC2F30 with size 48
+###Close file handle = 0x0000026DA3EF86F0, eventID = 0063, event Info = 0x0000026DA3F1ABD0
+[Close] \
+###Create file handle = 0x0000026DA3EF86F0, eventID = 0064, event Info = 0x0000026DA3F1ABD0
+[ZwCreateFile] \
+Dokan Information: DokanEndDispatchCreate() status = 0, file handle = 0x0000026DA3EF86F0, eventID = 0064, result = 0x1
+Dokan Information: SendAndPullEventInformation() with NTSTATUS 0x0, context 0xa3ef86f0, and result object 0x0000026DA3FC2F30 with size 48
+###GetFileInfo file handle = 0x0000026DA3EF86F0, eventID = 0064, event Info = 0x0000026DA3F1ABD0
+	result =  0
+	FileBasicInformation
+	DispatchQueryInformation result =  0
+Dokan Information: SendAndPullEventInformation() with NTSTATUS 0x0, context 0xa3ef86f0, and result object 0x0000026DA3FC2F30 with size 80
+###Cleanup file handle = 0x0000026DA3EF86F0, eventID = 0064, event Info = 0x0000026DA3F1ABD0
+Dokan Information: SendAndPullEventInformation() with NTSTATUS 0x0, context 0xa3ef86f0, and result object 0x0000026DA3FC2F30 with size 48
+###Close file handle = 0x0000026DA3EF86F0, eventID = 0064, event Info = 0x0000026DA3F1ABD0
+[Close] \
+###Create file handle = 0x0000026DA3EF86F0, eventID = 0065, event Info = 0x0000026DA3F1ABD0
+[ZwCreateFile] \proj
+Dokan Information: DokanEndDispatchCreate() status = c0000034, file handle = 0x0000000000000000, eventID = -001, result = 0x5
+Dokan Information: SendAndPullEventInformation() with NTSTATUS 0xc0000034, context 0x0, and result object 0x0000026DA3FC2F30 with size 48
+###Create file handle = 0x0000026DA3EF86F0, eventID = 0066, event Info = 0x0000026DA3F1ABD0
+[ZwCreateFile] \proj
+Dokan Information: DokanEndDispatchCreate() status = c0000034, file handle = 0x0000000000000000, eventID = -001, result = 0x5
+Dokan Information: SendAndPullEventInformation() with NTSTATUS 0xc0000034, context 0x0, and result object 0x0000026DA3FC2F30 with size 48
+###Create file handle = 0x0000026DA3EF86F0, eventID = 0067, event Info = 0x0000026DA3F1ABD0
+[ZwCreateFile] \proj
+Dokan Information: DokanEndDispatchCreate() status = c0000034, file handle = 0x0000000000000000, eventID = -001, result = 0x5
+Dokan Information: SendAndPullEventInformation() with NTSTATUS 0xc0000034, context 0x0, and result object 0x0000026DA3FC2F30 with size 48
+###Create file handle = 0x0000026DA3EF86F0, eventID = 0068, event Info = 0x0000026DA3F1ABD0
+[ZwCreateFile] \
+Dokan Information: DokanEndDispatchCreate() status = 0, file handle = 0x0000026DA3EF86F0, eventID = 0068, result = 0x1
+Dokan Information: SendAndPullEventInformation() with NTSTATUS 0x0, context 0xa3ef86f0, and result object 0x0000026DA3FC2F30 with size 48
+###FindFiles file handle = 0x0000026DA3EF86F0, eventID = 0068, event Info = 0x0000026DA3F1ABD0

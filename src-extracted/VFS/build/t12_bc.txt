@@ -1,0 +1,2052 @@
+/*
+ * volume.c — InvariFS volume access layer
+ *
+ *   vol_open / vol_close
+ *   vol_alloc  (bitmap free-list cursor)
+ *   vol_write_raw (allocate blocks in RAW zone + write)
+ *   vol_map    (L2P journal MAP entry + in-memory table)
+ *   vol_read_block (read raw bytes at pba)
+ *   inode area: append-only records (name + AST recipe)
+ *
+ * Metadata zone layout:
+ *   [0 .. bitmap_blocks):            block bitmap
+ *   [bitmap_blocks .. +journal):     L2P journal (append-only)
+ *   [bitmap_blocks+journal .. end):  inode/AST area (append-only)
+ */
+#define _CRT_SECURE_NO_WARNINGS
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <time.h>
+
+#ifdef _WIN32
+#include <windows.h>
+#else
+#include <unistd.h>
+#include <fcntl.h>
+#include <sys/stat.h>
+#endif
+
+#include "invarifs.h"
+#include "volume.h"
+#include "volume.h"
+#include "lz4.h"
+#include "zstd.h"
+
+#ifdef _WIN32
+#define strdup _strdup
+#endif
+
+#define SEGMENT_SIZE (64u * 1024u)  /* RAW segment granularity */
+
+/* ---- platform I/O (same layer as mkfs.c) ---- */
+struct io_ctx {
+#ifdef _WIN32
+    HANDLE h;
+#else
+    int fd;
+#endif
+};
+
+static int io_open(struct io_ctx *ctx, const char *path)
+{
+#ifdef _WIN32
+    wchar_t wpath[1024];
+    MultiByteToWideChar(CP_UTF8, 0, path, -1, wpath, 1024);
+    ctx->h = CreateFileW(wpath, GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ,
+                         NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    return ctx->h == INVALID_HANDLE_VALUE ? -1 : 0;
+#else
+    ctx->fd = open(path, O_RDWR);
+    return ctx->fd < 0 ? -1 : 0;
+#endif
+}
+static int io_seek(struct io_ctx *ctx, uint64_t off)
+{
+#ifdef _WIN32
+    LARGE_INTEGER li; li.QuadPart = (LONGLONG)off;
+    return SetFilePointerEx(ctx->h, li, NULL, FILE_BEGIN) ? 0 : -1;
+#else
+    return lseek(ctx->fd, (off_t)off, SEEK_SET) < 0 ? -1 : 0;
+#endif
+}
+static int io_read(struct io_ctx *ctx, void *buf, size_t len)
+{
+#ifdef _WIN32
+    DWORD rd = 0;
+    return (ReadFile(ctx->h, buf, (DWORD)len, &rd, NULL) && rd == len) ? 0 : -1;
+#else
+    return read(ctx->fd, buf, len) == (ssize_t)len ? 0 : -1;
+#endif
+}
+static int io_write(struct io_ctx *ctx, const void *buf, size_t len)
+{
+#ifdef _WIN32
+    DWORD wr = 0;
+    return (WriteFile(ctx->h, buf, (DWORD)len, &wr, NULL) && wr == len) ? 0 : -1;
+#else
+    return write(ctx->fd, buf, len) == (ssize_t)len ? 0 : -1;
+#endif
+}
+static void io_close(struct io_ctx *ctx)
+{
+#ifdef _WIN32
+    CloseHandle(ctx->h);
+#else
+    close(ctx->fd);
+#endif
+}
+
+/* ---- volume ---- */
+typedef struct invfs_volume {
+    char *path;
+    struct io_ctx io;
+    invfs_superblock sb;
+    uint8_t *bitmap;          /* in-memory copy */
+    uint64_t bitmap_blocks;
+    uint64_t journal_start;   /* block offset of journal within volume */
+    uint64_t journal_pos;     /* next journal entry block*4096 + offset */
+    uint64_t inode_area_start;/* block offset */
+    uint64_t inode_area_pos;
+    uint64_t inode_area_end;
+    uint64_t alloc_cursor;    /* free-list cursor */
+    /* in-memory L2P */
+    invfs_l2p_entry *l2p;
+    size_t l2p_count, l2p_cap;
+    uint64_t next_inode_id;
+} invfs_volume;
+
+static const uint64_t JOURNAL_BLOCKS = INVFS_JOURNAL_BLOCKS;
+
+static void l2p_remove(invfs_volume *v, uint64_t inode, uint64_t lba);
+
+/* inode area record (append-only) */
+#define INODE_REC_MAGIC 0x444F4E49u  /* "INOD" LE */
+#define TOMBSTONE_MAGIC 0x544C4544u  /* "DELT" LE */
+
+#pragma pack(push, 1)
+typedef struct invfs_inode_rec {
+    uint32_t magic;
+    uint32_t rec_len;      /* total record length incl. header+name+ast */
+    uint64_t inode_id;
+    uint64_t file_size;
+    uint64_t ctime;
+    uint32_t name_len;
+    char     name[256];
+    /* followed by: invfs_ast_recipe_header + entries[] */
+} invfs_inode_rec;
+#pragma pack(pop)
+
+static int bit_get(const uint8_t *b, uint64_t i) { return (b[i / 8] >> (i % 8)) & 1; }
+static void bit_set(uint8_t *b, uint64_t i) { b[i / 8] |= (uint8_t)(1u << (i % 8)); }
+static void bit_clr(uint8_t *b, uint64_t i) { b[i / 8] &= (uint8_t)~(1u << (i % 8)); }
+
+invfs_volume *vol_open(const char *path, int *err)
+{
+    invfs_volume *v = (invfs_volume *)calloc(1, sizeof(invfs_volume));
+    if (!v) { *err = -1; return NULL; }
+    v->path = strdup(path);
+    if (io_open(&v->io, path) != 0) { *err = -2; free(v); return NULL; }
+    if (io_seek(&v->io, 0) != 0 ||
+        io_read(&v->io, &v->sb, sizeof(v->sb)) != 0) { *err = -3; goto fail; }
+    if (memcmp(v->sb.magic, INVFS_MAGIC, 8) != 0) { *err = -4; goto fail; }
+    if (invfs_crc32c(&v->sb, offsetof(invfs_superblock, checksum)) != v->sb.checksum)
+        { *err = -5; goto fail; }
+
+    v->bitmap_blocks = (v->sb.total_blocks / 8 + INVFS_BLOCK_SIZE - 1) / INVFS_BLOCK_SIZE;
+    v->bitmap = (uint8_t *)calloc(1, (size_t)v->bitmap_blocks * INVFS_BLOCK_SIZE);
+    if (!v->bitmap) { *err = -6; goto fail; }
+    if (io_seek(&v->io, v->sb.metadata_zone_start * INVFS_BLOCK_SIZE) != 0 ||
+        io_read(&v->io, v->bitmap, (size_t)v->bitmap_blocks * INVFS_BLOCK_SIZE) != 0)
+        { *err = -7; goto fail; }
+
+    v->journal_start = v->sb.metadata_zone_start + v->bitmap_blocks;
+    v->journal_pos = v->journal_start * INVFS_BLOCK_SIZE;
+    v->inode_area_start = v->journal_start + JOURNAL_BLOCKS;
+    v->inode_area_pos = v->inode_area_start * INVFS_BLOCK_SIZE;
+    v->inode_area_end = (v->sb.metadata_zone_start + v->sb.metadata_zone_blocks)
+                        * INVFS_BLOCK_SIZE;
+
+    /* scan existing inode records: find end of area + max inode id */
+    {
+        uint64_t p = v->inode_area_pos;
+        uint64_t found = 0;
+        while (p + sizeof(invfs_inode_rec) <= v->inode_area_end) {
+            invfs_inode_rec rec_h;
+            if (io_seek(&v->io, p) != 0 ||
+                io_read(&v->io, &rec_h, sizeof(rec_h)) != 0)
+                break;
+            if (rec_h.magic != INODE_REC_MAGIC && rec_h.magic != TOMBSTONE_MAGIC)
+                break;  /* end of records */
+            if (rec_h.rec_len < sizeof(invfs_inode_rec) ||
+                rec_h.rec_len > 0x10000 ||
+                p + rec_h.rec_len + 4 > v->inode_area_end)
+                break;  /* corrupted tail — stop */
+            /* torn-write protection: verify trailing CRC32C; a record
+             * whose CRC fails is a half-written append (crash/SIGPIPE),
+             * NOT a valid boundary — stop here so later tools never
+             * step into garbage. */
+            {
+                uint8_t *rb = (uint8_t *)malloc((size_t)rec_h.rec_len + 4);
+                uint32_t crc_stored, crc_calc;
+                if (!rb) break;
+                if (io_seek(&v->io, p) != 0 ||
+                    io_read(&v->io, rb, (size_t)rec_h.rec_len + 4) != 0) {
+                    free(rb); break;
+                }
+                memcpy(&crc_stored, rb + rec_h.rec_len, 4);
+                crc_calc = invfs_crc32c(rb, rec_h.rec_len);
+                free(rb);
+                if (crc_calc != crc_stored) {
+                    fprintf(stderr, "vol_open: torn/corrupt inode record at %llu, "
+                            "truncating scan (area_pos=%llu)\n",
+                            (unsigned long long)p, (unsigned long long)p);
+                    break;
+                }
+            }
+            if (rec_h.magic == INODE_REC_MAGIC &&
+                rec_h.inode_id >= v->next_inode_id)
+                v->next_inode_id = rec_h.inode_id + 1;
+            p += rec_h.rec_len + 4;
+            found++;
+        }
+        v->inode_area_pos = p;
+        if (getenv("INVFS_DEBUG"))
+            printf("[vol_open] scanned %llu inode recs, next_inode=%llu, area_pos=%llu\n",
+                   (unsigned long long)found, (unsigned long long)v->next_inode_id,
+                   (unsigned long long)v->inode_area_pos);
+    }
+
+    /* replay L2P journal: rebuild in-memory table, continue at end */
+    {
+        uint64_t jp = v->journal_start * INVFS_BLOCK_SIZE;
+        uint64_t jend = (v->journal_start + JOURNAL_BLOCKS) * INVFS_BLOCK_SIZE;
+        uint64_t replayed = 0;
+        while (jp + sizeof(invfs_l2p_entry) <= jend) {
+            invfs_l2p_entry e;
+            if (io_seek(&v->io, jp) != 0 ||
+                io_read(&v->io, &e, sizeof(e)) != 0)
+                break;
+            if (invfs_crc32c(&e, offsetof(invfs_l2p_entry, crc)) != e.crc)
+                break;  /* end of valid journal */
+            if (e.type == INVFS_JRN_MAP) {
+                if (v->l2p_count == v->l2p_cap) {
+                    v->l2p_cap = v->l2p_cap ? v->l2p_cap * 2 : 256;
+                    v->l2p = (invfs_l2p_entry *)realloc(v->l2p,
+                                    v->l2p_cap * sizeof(invfs_l2p_entry));
+                    if (!v->l2p) { *err = -9; goto fail; }
+                }
+                v->l2p[v->l2p_count++] = e;
+                replayed++;
+            } else if (e.type == INVFS_JRN_UNMAP) {
+                l2p_remove(v, e.inode, e.lba);
+            }
+            jp += sizeof(e);
+        }
+        v->journal_pos = jp;
+        if (getenv("INVFS_DEBUG"))
+            printf("[vol_open] replayed %llu L2P entries, journal_pos=%llu\n",
+                   (unsigned long long)replayed, (unsigned long long)v->journal_pos);
+    }
+
+    v->alloc_cursor = v->sb.raw_zone_start;
+    if (v->next_inode_id == 0)
+        v->next_inode_id = 1;
+    *err = 0;
+    return v;
+fail:
+    io_close(&v->io);
+    if (v->bitmap) free(v->bitmap);
+    free(v->path);
+    free(v);
+    return NULL;
+}
+
+void vol_close(invfs_volume *v)
+{
+    if (!v) return;
+    io_close(&v->io);
+    free(v->bitmap);
+    free(v->l2p);
+    free(v->path);
+    free(v);
+}
+
+int vol_flush(invfs_volume *v)
+{
+    /* persist bitmap */
+    if (io_seek(&v->io, v->sb.metadata_zone_start * INVFS_BLOCK_SIZE) != 0 ||
+        io_write(&v->io, v->bitmap, (size_t)v->bitmap_blocks * INVFS_BLOCK_SIZE) != 0)
+        return -1;
+    /* compact L2P journal: rewrite from the in-memory table (source of
+     * truth after replay + ops). Keeps the journal bounded across many
+     * sweep/cp cycles and drops stale MAP entries of tombstoned inodes
+     * (vol_delete_inode removes them in-memory without journaling). */
+    {
+        uint64_t jp = v->journal_start * INVFS_BLOCK_SIZE;
+        size_t i;
+        for (i = 0; i < v->l2p_count; i++) {
+            invfs_l2p_entry e = v->l2p[i];
+            e.crc = invfs_crc32c(&e, offsetof(invfs_l2p_entry, crc));
+            if (io_seek(&v->io, jp) != 0 ||
+                io_write(&v->io, &e, sizeof(e)) != 0)
+                return -1;
+            jp += sizeof(e);
+        }
+        v->journal_pos = jp;
+    }
+    return 0;
+}
+
+/* allocate n consecutive free blocks in a zone; returns start block or 0 */
+static uint64_t alloc_blocks(invfs_volume *v, uint64_t zone_start, uint64_t zone_len,
+                             uint64_t n)
+{
+    uint64_t zone_end = zone_start + zone_len;
+    uint64_t i = v->alloc_cursor, count = 0, start = 0;
+
+    if (i < zone_start || i >= zone_end)
+        i = zone_start;
+
+    for (count = 0; count < zone_len; count++) {
+        if (i >= zone_end) i = zone_start;
+        if (!bit_get(v->bitmap, i)) {
+            if (start == 0) start = i;
+            if (i - start + 1 == n) {
+                uint64_t k;
+                for (k = start; k <= i; k++) bit_set(v->bitmap, k);
+                v->alloc_cursor = (i + 1 < zone_end) ? i + 1 : zone_start;
+                return start;
+            }
+        } else {
+            start = 0;
+        }
+        i++;
+    }
+    return 0;  /* ENOSPC */
+}
+
+/* write raw data to RAW zone, returns first pba (0 on error) */
+uint64_t vol_write_raw(invfs_volume *v, const uint8_t *data, size_t len)
+{
+    uint64_t nblocks = (len + INVFS_BLOCK_SIZE - 1) / INVFS_BLOCK_SIZE;
+    uint64_t pba = alloc_blocks(v, v->sb.raw_zone_start, v->sb.raw_zone_blocks, nblocks);
+    if (pba == 0) return 0;
+    if (io_seek(&v->io, pba * INVFS_BLOCK_SIZE) != 0 ||
+        io_write(&v->io, data, (size_t)nblocks * INVFS_BLOCK_SIZE) != 0)
+        return 0;
+    return pba;
+}
+
+/* L2P MAP entry: inode logical block -> physical block */
+int vol_map(invfs_volume *v, uint64_t inode, uint64_t lba, uint64_t pba, uint32_t length)
+{
+    invfs_l2p_entry e;
+    memset(&e, 0, sizeof(e));
+    e.type = INVFS_JRN_MAP;
+    e.inode = inode;
+    e.lba = lba;
+    e.pba = pba;
+    e.length = length;
+    e.crc = invfs_crc32c(&e, offsetof(invfs_l2p_entry, crc));
+
+    /* append to journal (bounded: never write past journal zone) */
+    if (v->journal_pos + sizeof(e) >
+        (v->journal_start + JOURNAL_BLOCKS) * INVFS_BLOCK_SIZE) {
+        fprintf(stderr, "L2P journal full\n");
+        return -1;
+    }
+    if (io_seek(&v->io, v->journal_pos) != 0 ||
+        io_write(&v->io, &e, sizeof(e)) != 0)
+        return -1;
+    v->journal_pos += sizeof(e);
+
+    /* in-memory */
+    if (v->l2p_count == v->l2p_cap) {
+        v->l2p_cap = v->l2p_cap ? v->l2p_cap * 2 : 256;
+        v->l2p = (invfs_l2p_entry *)realloc(v->l2p, v->l2p_cap * sizeof(invfs_l2p_entry));
+        if (!v->l2p) return -1;
+    }
+    v->l2p[v->l2p_count++] = e;
+    return 0;
+}
+
+/* in-memory L2P lookup: inode + lba -> pba and phys length (or 0) */
+uint64_t vol_lookup(invfs_volume *v, uint64_t inode, uint64_t lba)
+{
+    uint64_t pba = 0, len = 0;
+    vol_lookup_entry(v, inode, lba, &pba, &len);
+    return pba;
+}
+
+int vol_lookup_entry(invfs_volume *v, uint64_t inode, uint64_t lba,
+                     uint64_t *pba_out, uint64_t *len_out)
+{
+    /* newest wins: scan from the end (L2P is append-only journal) */
+    size_t i;
+    for (i = v->l2p_count; i-- > 0; ) {
+        const invfs_l2p_entry *e = &v->l2p[i];
+        if (e->type == INVFS_JRN_MAP && e->inode == inode && e->lba == lba) {
+            *pba_out = e->pba;
+            *len_out = e->length;
+            return 0;
+        }
+    }
+    return -1;
+}
+
+/* remove all mappings for (inode, lba) from the in-memory table */
+static void l2p_remove(invfs_volume *v, uint64_t inode, uint64_t lba)
+{
+    size_t i, w = 0;
+    for (i = 0; i < v->l2p_count; i++) {
+        const invfs_l2p_entry *e = &v->l2p[i];
+        if (e->type == INVFS_JRN_MAP && e->inode == inode && e->lba == lba)
+            continue;  /* drop */
+        if (w != i) v->l2p[w] = v->l2p[i];
+        w++;
+    }
+    v->l2p_count = w;
+}
+
+/* public wrapper (used by dedupe pass) */
+void vol_l2p_remove(invfs_volume *v, uint64_t inode, uint64_t lba)
+{
+    l2p_remove(v, inode, lba);
+}
+
+/* read one block worth of raw bytes at pba */
+int vol_read_block(invfs_volume *v, uint64_t pba, void *buf)
+{
+    if (io_seek(&v->io, pba * INVFS_BLOCK_SIZE) != 0 ||
+        io_read(&v->io, buf, INVFS_BLOCK_SIZE) != 0)
+        return -1;
+    return 0;
+}
+
+/* ---- inode area (append-only records) ---- */
+
+/* write inode record: name + AST blocks; returns inode_id (0 on error) */
+uint64_t vol_create_file(invfs_volume *v, const char *name,
+                         const uint8_t *data, size_t len)
+{
+    size_t i, ast_entries;
+    uint64_t inode_id = v->next_inode_id++;
+    if (getenv("INVFS_DEBUG"))
+        printf("[create_file] next_inode was %llu -> using %llu\n",
+               (unsigned long long)(inode_id - 1), (unsigned long long)inode_id);
+    invfs_ast_recipe_header ast_h;
+    size_t rec_size;
+    uint8_t *rec;
+    invfs_inode_rec *rec_h;
+    invfs_ast_block_entry *entries;
+    uint32_t crc_rec;
+    int *seg_lz4 = NULL;   /* per-segment: 1 = lz4, 0 = raw */
+    uint32_t *seg_csize = NULL;
+
+    if (len == 0) {
+        /* empty file: inode record with 0 AST entries */
+        invfs_ast_recipe_header ast_h0;
+        size_t rec_size0 = sizeof(invfs_inode_rec) + sizeof(ast_h0);
+        uint8_t *rec0 = (uint8_t *)calloc(1, rec_size0);
+        invfs_inode_rec *rh0 = (invfs_inode_rec *)rec0;
+        uint32_t crc0;
+        if (!rec0) return 0;
+        memset(&ast_h0, 0, sizeof(ast_h0));
+        ast_h0.version = 1;
+        ast_h0.file_size = 0;
+        rh0->magic = INODE_REC_MAGIC;
+        rh0->rec_len = (uint32_t)rec_size0;
+        rh0->inode_id = inode_id;
+        rh0->file_size = 0;
+        rh0->ctime = (uint64_t)time(NULL);
+        rh0->name_len = (uint32_t)strlen(name);
+        strncpy(rh0->name, name, sizeof(rh0->name) - 1);
+        memcpy(rec0 + sizeof(invfs_inode_rec), &ast_h0, sizeof(ast_h0));
+        crc0 = invfs_crc32c(rec0, rec_size0);
+        if (v->inode_area_pos + rec_size0 + 4 > v->inode_area_end) { free(rec0); return 0; }
+        if (io_seek(&v->io, v->inode_area_pos) != 0 ||
+            io_write(&v->io, rec0, rec_size0) != 0 ||
+            io_write(&v->io, &crc0, 4) != 0) { free(rec0); return 0; }
+        v->inode_area_pos += rec_size0 + 4;
+        free(rec0);
+        return inode_id;
+    }
+
+    /* 1. split file into SEGMENT_SIZE chunks, LZ4-compress each */
+    ast_entries = (len + SEGMENT_SIZE - 1) / SEGMENT_SIZE;
+    entries = (invfs_ast_block_entry *)calloc(ast_entries, sizeof(invfs_ast_block_entry));
+    seg_lz4 = (int *)calloc(ast_entries, sizeof(int));
+    seg_csize = (uint32_t *)calloc(ast_entries, sizeof(uint32_t));
+    if (!entries || !seg_lz4 || !seg_csize) { free(entries); free(seg_lz4); free(seg_csize); return 0; }
+
+    for (i = 0; i < ast_entries; i++) {
+        const uint8_t *src = data + (size_t)i * SEGMENT_SIZE;
+        size_t slen = (i + 1 == ast_entries) ? len - (size_t)i * SEGMENT_SIZE : SEGMENT_SIZE;
+        int cbound = LZ4_compressBound((int)slen);
+        uint8_t *cbuf = (uint8_t *)malloc((size_t)cbound + 8);
+        uint8_t hdr[8];
+        uint64_t pba, phys_blocks;
+        uint32_t csize, seg_crc;
+
+        if (!cbuf) { free(entries); free(seg_lz4); free(seg_csize); return 0; }
+        csize = (uint32_t)LZ4_compress_default((const char *)src, (char *)(cbuf + 8),
+                                               (int)slen, cbound);
+        if (csize == 0 || csize >= slen) {
+            /* store raw */
+            csize = (uint32_t)slen;
+            memcpy(cbuf + 8, src, slen);
+            seg_lz4[i] = 0;
+        } else {
+            seg_lz4[i] = 1;
+        }
+        seg_csize[i] = csize;
+        seg_crc = invfs_crc32c(cbuf + 8, csize);
+        if (getenv("INVFS_DEBUG"))
+            printf("[create_file] seg %zu: slen=%zu csize=%u %s\n",
+                   i, slen, csize, seg_lz4[i] ? "(lz4)" : "(raw)");
+
+        hdr[0] = (uint8_t)(csize & 0xFF);
+        hdr[1] = (uint8_t)((csize >> 8) & 0xFF);
+        hdr[2] = (uint8_t)((csize >> 16) & 0xFF);
+        hdr[3] = (uint8_t)((csize >> 24) & 0xFF);
+        hdr[4] = (uint8_t)(seg_crc & 0xFF);
+        hdr[5] = (uint8_t)((seg_crc >> 8) & 0xFF);
+        hdr[6] = (uint8_t)((seg_crc >> 16) & 0xFF);
+        hdr[7] = (uint8_t)((seg_crc >> 24) & 0xFF);
+        memcpy(cbuf, hdr, 8);
+
+        /* allocate physical blocks and write segment */
+        phys_blocks = ((uint64_t)csize + 8 + INVFS_BLOCK_SIZE - 1) / INVFS_BLOCK_SIZE;
+        pba = alloc_blocks(v, v->sb.raw_zone_start, v->sb.raw_zone_blocks, phys_blocks);
+        if (pba == 0) {
+            fprintf(stderr, "[create] ENOSPC seg %zu\n", i);
+            free(cbuf); free(entries); free(seg_lz4); free(seg_csize); return 0;
+        }
+        /* write only the real bytes [8B hdr][data]; never past the buffer */
+        if (io_seek(&v->io, pba * INVFS_BLOCK_SIZE) != 0 ||
+            io_write(&v->io, cbuf, (size_t)csize + 8) != 0) {
+            fprintf(stderr, "[create] write fail seg %zu pba=%llu phys=%llu%s%s\n",
+                    i, (unsigned long long)pba, (unsigned long long)phys_blocks,
+#ifdef _WIN32
+                    " err=", "");
+            fprintf(stderr, "%lu", (unsigned long)GetLastError());
+#else
+                    "", "");
+#endif
+            free(cbuf); free(entries); free(seg_lz4); free(seg_csize); return 0;
+        }
+        free(cbuf);
+
+        /* L2P: segment index -> physical start */
+        if (vol_map(v, inode_id, (uint64_t)i, pba, (uint32_t)phys_blocks) != 0) {
+            fprintf(stderr, "[create] L2P fail seg %zu\n", i);
+            free(entries); free(seg_lz4); free(seg_csize); return 0;
+        }
+
+        entries[i].file_offset = (uint64_t)i * SEGMENT_SIZE;
+        entries[i].length = slen;
+        entries[i].zone = INVFS_ZONE_RAW;
+        entries[i].algo = seg_lz4[i] ? INVFS_ALGO_LZ4 : INVFS_ALGO_NONE;
+        entries[i].block_id = (uint32_t)i;   /* segment index (L2P lba) */
+        entries[i].block_offset = 0;
+    }
+    free(seg_lz4);
+    free(seg_csize);
+
+    /* 2. AST recipe header */
+    memset(&ast_h, 0, sizeof(ast_h));
+    ast_h.version = 1;
+    ast_h.file_size = (uint32_t)len;
+    ast_h.num_blocks = (uint16_t)ast_entries;
+    ast_h.num_children = 0;
+
+    /* 3. assemble record: header + name + ast_header + entries */
+    rec_size = sizeof(invfs_inode_rec) + sizeof(ast_h) + ast_entries * sizeof(invfs_ast_block_entry);
+    rec = (uint8_t *)calloc(1, rec_size);
+    if (!rec) { free(entries); return 0; }
+    rec_h = (invfs_inode_rec *)rec;
+    rec_h->magic = INODE_REC_MAGIC;
+    rec_h->rec_len = (uint32_t)rec_size;
+    rec_h->inode_id = inode_id;
+    rec_h->file_size = len;
+    rec_h->ctime = (uint64_t)time(NULL);
+    rec_h->name_len = (uint32_t)strlen(name);
+    strncpy(rec_h->name, name, sizeof(rec_h->name) - 1);
+
+    memcpy(rec + sizeof(invfs_inode_rec), &ast_h, sizeof(ast_h));
+    memcpy(rec + sizeof(invfs_inode_rec) + sizeof(ast_h),
+           entries, ast_entries * sizeof(invfs_ast_block_entry));
+    free(entries);
+
+    crc_rec = invfs_crc32c(rec, rec_size);
+    /* append record with trailing CRC32C (4 bytes) */
+    if (v->inode_area_pos + rec_size + 4 > v->inode_area_end) {
+        fprintf(stderr, "inode area full\n");
+        free(rec);
+        return 0;
+    }
+    if (io_seek(&v->io, v->inode_area_pos) != 0 ||
+        io_write(&v->io, rec, rec_size) != 0 ||
+        io_write(&v->io, &crc_rec, 4) != 0) {
+        free(rec);
+        return 0;
+    }
+    v->inode_area_pos += rec_size + 4;
+    free(rec);
+    return inode_id;
+}
+
+/* ---- AST children: serialize / deserialize / container creation ---- */
+
+/* serialize children after the block entries; malloc'd buf or NULL */
+static uint8_t *vol_serialize_children(const invfs_ast_child_entry *ch,
+                                       size_t n, size_t *len_out)
+{
+    size_t total = 0;
+    uint8_t *buf, *p;
+    for (size_t i = 0; i < n; i++) {
+        if (ch[i].name_len > MAX_AST_CHILD_NAME) return NULL;
+        total += 2 + ch[i].name_len + 8 + 8 + 4;
+        if (total > (1u << 20)) return NULL;  /* cap children blob */
+    }
+    buf = (uint8_t *)malloc(total ? total : 1);
+    if (!buf) return NULL;
+    p = buf;
+    for (size_t i = 0; i < n; i++) {
+        uint16_t nl = (uint16_t)ch[i].name_len;
+        memcpy(p, &nl, 2); p += 2;
+        memcpy(p, ch[i].name, nl); p += nl;
+        memcpy(p, &ch[i].inode, 8); p += 8;
+        memcpy(p, &ch[i].size, 8); p += 8;
+        memcpy(p, &ch[i].crc, 4); p += 4;
+    }
+    *len_out = total;
+    return buf;
+}
+
+/* deserialize children with hard bounds against blob_len (no OOM) */
+static int vol_deserialize_children(const uint8_t *blob, size_t blob_len,
+                                    invfs_ast_child_entry **out, size_t *n_out)
+{
+    const uint8_t *p = blob, *end = blob + blob_len;
+    invfs_ast_child_entry *ch;
+    size_t n = 0, cap = 64;
+    ch = (invfs_ast_child_entry *)malloc(cap * sizeof(*ch));
+    if (!ch) return -1;
+    while (p + 2 <= end && n < MAX_AST_CHILDREN) {
+        uint16_t nl;
+        memcpy(&nl, p, 2); p += 2;
+        if (nl > MAX_AST_CHILD_NAME || p + nl + 20 > end) break;  /* corrupt */
+        if (n == cap) {
+            cap *= 2;
+            invfs_ast_child_entry *nc =
+                (invfs_ast_child_entry *)realloc(ch, cap * sizeof(*ch));
+            if (!nc) { free(ch); return -1; }
+            ch = nc;
+        }
+        ch[n].name_len = nl;
+        memcpy(ch[n].name, p, nl); ch[n].name[nl] = 0;
+        p += nl;
+        memcpy(&ch[n].inode, p, 8); p += 8;
+        memcpy(&ch[n].size, p, 8); p += 8;
+        memcpy(&ch[n].crc, p, 4); p += 4;
+        n++;
+    }
+    if (n == 0) { free(ch); *out = NULL; *n_out = 0; return 0; }
+    *out = ch;
+    *n_out = n;
+    return 0;
+}
+
+/* create file with container children (ZIP members) — bounded allocs */
+uint64_t vol_create_container_file(invfs_volume *v, const char *name,
+                                   const uint8_t *data, size_t len,
+                                   const invfs_ast_child_entry *children,
+                                   size_t nchildren)
+{
+    size_t i, ast_entries;
+    uint64_t inode_id = v->next_inode_id++;
+    invfs_ast_recipe_header ast_h;
+    size_t rec_size, children_blob_len = 0;
+    uint8_t *rec, *children_blob = NULL;
+    invfs_inode_rec *rec_h;
+    invfs_ast_block_entry *entries;
+    uint32_t crc_rec;
+    int *seg_lz4 = NULL;
+    uint32_t *seg_csize = NULL;
+
+    if (nchildren > MAX_AST_CHILDREN) return 0;
+    children_blob = vol_serialize_children(children, nchildren, &children_blob_len);
+    if (nchildren && !children_blob) return 0;
+
+    ast_entries = (len + SEGMENT_SIZE - 1) / SEGMENT_SIZE;
+    if (ast_entries > MAX_SEGMENTS) { free(children_blob); return 0; }
+    entries = (invfs_ast_block_entry *)calloc(ast_entries, sizeof(invfs_ast_block_entry));
+    seg_lz4 = (int *)calloc(ast_entries, sizeof(int));
+    seg_csize = (uint32_t *)calloc(ast_entries, sizeof(uint32_t));
+    if (!entries || !seg_lz4 || !seg_csize) {
+        free(entries); free(seg_lz4); free(seg_csize); free(children_blob);
+        return 0;
+    }
+
+    for (i = 0; i < ast_entries; i++) {
+        const uint8_t *src = data + (size_t)i * SEGMENT_SIZE;
+        size_t slen = (i + 1 == ast_entries) ? len - (size_t)i * SEGMENT_SIZE : SEGMENT_SIZE;
+        int cbound = LZ4_compressBound((int)slen);
+        uint8_t *cbuf = (uint8_t *)malloc((size_t)cbound + 8);
+        uint8_t hdr[8];
+        uint64_t pba, phys_blocks;
+        uint32_t csize, seg_crc;
+
+        if (!cbuf) { free(entries); free(seg_lz4); free(seg_csize); free(children_blob); return 0; }
+        csize = (uint32_t)LZ4_compress_default((const char *)src, (char *)(cbuf + 8),
+                                               (int)slen, cbound);
+        if (csize == 0 || csize >= slen) {
+            csize = (uint32_t)slen;
+            memcpy(cbuf + 8, src, slen);
+            seg_lz4[i] = 0;
+        } else {
+            seg_lz4[i] = 1;
+        }
+        seg_csize[i] = csize;
+        seg_crc = invfs_crc32c(cbuf + 8, csize);
+        /* segment header: [4B csize][4B crc32c(data)][data] */
+        hdr[0] = (uint8_t)(csize & 0xFF);
+        hdr[1] = (uint8_t)((csize >> 8) & 0xFF);
+        hdr[2] = (uint8_t)((csize >> 16) & 0xFF);
+        hdr[3] = (uint8_t)((csize >> 24) & 0xFF);
+        hdr[4] = (uint8_t)(seg_crc & 0xFF);
+        hdr[5] = (uint8_t)((seg_crc >> 8) & 0xFF);
+        hdr[6] = (uint8_t)((seg_crc >> 16) & 0xFF);
+        hdr[7] = (uint8_t)((seg_crc >> 24) & 0xFF);
+        memcpy(cbuf, hdr, 8);
+
+        phys_blocks = ((uint64_t)csize + 8 + INVFS_BLOCK_SIZE - 1) / INVFS_BLOCK_SIZE;
+        pba = alloc_blocks(v, v->sb.raw_zone_start, v->sb.raw_zone_blocks, phys_blocks);
+        if (pba == 0) {
+            fprintf(stderr, "[create] ENOSPC seg %zu\n", i);
+            free(cbuf); free(entries); free(seg_lz4); free(seg_csize); free(children_blob);
+            return 0;
+        }
+        if (io_seek(&v->io, pba * INVFS_BLOCK_SIZE) != 0 ||
+            io_write(&v->io, cbuf, (size_t)csize + 8) != 0) {
+            fprintf(stderr, "[create] write fail seg %zu\n", i);
+            free(cbuf); free(entries); free(seg_lz4); free(seg_csize); free(children_blob);
+            return 0;
+        }
+        free(cbuf);
+        if (vol_map(v, inode_id, (uint64_t)i, pba, (uint32_t)phys_blocks) != 0) {
+            fprintf(stderr, "[create] L2P fail seg %zu\n", i);
+            free(entries); free(seg_lz4); free(seg_csize); free(children_blob);
+            return 0;
+        }
+        entries[i].file_offset = (uint64_t)i * SEGMENT_SIZE;
+        entries[i].length = slen;
+        entries[i].zone = INVFS_ZONE_RAW;
+        entries[i].algo = seg_lz4[i] ? INVFS_ALGO_LZ4 : INVFS_ALGO_NONE;
+        entries[i].block_id = (uint32_t)i;
+        entries[i].block_offset = 0;
+    }
+    free(seg_lz4);
+    free(seg_csize);
+
+    memset(&ast_h, 0, sizeof(ast_h));
+    ast_h.version = 1;
+    if (nchildren > 0) {
+        /* container: logical size = sum of member sizes (children-only) */
+        size_t ci;
+        uint64_t ctotal = 0;
+        for (ci = 0; ci < nchildren; ci++) ctotal += children[ci].size;
+        ast_h.file_size = (uint32_t)ctotal;
+    } else {
+        ast_h.file_size = (uint32_t)len;
+    }
+    ast_h.num_blocks = (uint16_t)ast_entries;
+    ast_h.num_children = (uint16_t)(nchildren > 0xFFFF ? 0xFFFF : nchildren);
+
+    rec_size = sizeof(invfs_inode_rec) + sizeof(ast_h) +
+               ast_entries * sizeof(invfs_ast_block_entry) + children_blob_len;
+    rec = (uint8_t *)calloc(1, rec_size);
+    if (!rec) { free(entries); free(children_blob); return 0; }
+    rec_h = (invfs_inode_rec *)rec;
+    rec_h->magic = INODE_REC_MAGIC;
+    rec_h->rec_len = (uint32_t)rec_size;
+    rec_h->inode_id = inode_id;
+    if (nchildren > 0) {
+        size_t ci;
+        uint64_t ctotal = 0;
+        for (ci = 0; ci < nchildren; ci++) ctotal += children[ci].size;
+        rec_h->file_size = ctotal;
+    } else {
+        rec_h->file_size = (uint64_t)len;
+    }
+    rec_h->ctime = (uint64_t)time(NULL);
+    rec_h->name_len = (uint32_t)strlen(name);
+    strncpy(rec_h->name, name, sizeof(rec_h->name) - 1);
+
+    memcpy(rec + sizeof(invfs_inode_rec), &ast_h, sizeof(ast_h));
+    memcpy(rec + sizeof(invfs_inode_rec) + sizeof(ast_h),
+           entries, ast_entries * sizeof(invfs_ast_block_entry));
+    if (children_blob_len)
+        memcpy(rec + sizeof(invfs_inode_rec) + sizeof(ast_h) +
+               ast_entries * sizeof(invfs_ast_block_entry),
+               children_blob, children_blob_len);
+    free(entries);
+    free(children_blob);
+
+    crc_rec = invfs_crc32c(rec, rec_size);
+    if (v->inode_area_pos + rec_size + 4 > v->inode_area_end) {
+        fprintf(stderr, "inode area full\n");
+        free(rec);
+        return 0;
+    }
+    if (io_seek(&v->io, v->inode_area_pos) != 0 ||
+        io_write(&v->io, rec, rec_size) != 0 ||
+        io_write(&v->io, &crc_rec, 4) != 0) {
+        free(rec);
+        return 0;
+    }
+    v->inode_area_pos += rec_size + 4;
+    free(rec);
+    return inode_id;
+}
+
+/* parse ZIP central directory into children (bounded, no OOM);
+ * returns number of children, -1 on structural failure */
+int vol_zip_parse_children(const uint8_t *z, size_t zlen,
+                           invfs_ast_child_entry *ch, size_t maxch)
+{
+    size_t eocd = zlen >= 22 ? zlen - 22 : 0;
+    uint16_t ncen;
+    uint32_t cen_off;
+    size_t p;
+    size_t n = 0;
+    while (eocd > 0 && !(z[eocd] == 'P' && z[eocd + 1] == 'K' &&
+                         z[eocd + 2] == 5 && z[eocd + 3] == 6))
+        eocd--;
+    if (!(z[eocd] == 'P' && z[eocd + 1] == 'K' && z[eocd + 2] == 5 && z[eocd + 3] == 6))
+        return -1;
+    memcpy(&ncen, z + eocd + 10, 2);
+    memcpy(&cen_off, z + eocd + 16, 4);
+    if (cen_off >= zlen) return -1;
+    if (ncen > maxch) ncen = (uint16_t)maxch;
+    p = cen_off;
+    for (uint16_t i = 0; i < ncen; i++) {
+        uint16_t nlen, elen, clen;
+        uint32_t usize, crc, local_off;
+        if (p + 46 > zlen || !(z[p] == 'P' && z[p + 1] == 'K' &&
+                               z[p + 2] == 1 && z[p + 3] == 2))
+            break;
+        memcpy(&crc, z + p + 16, 4);
+        memcpy(&usize, z + p + 24, 4);
+        memcpy(&nlen, z + p + 28, 2);
+        memcpy(&elen, z + p + 30, 2);
+        memcpy(&clen, z + p + 32, 2);
+        memcpy(&local_off, z + p + 42, 4);
+        if (nlen > MAX_AST_CHILD_NAME || p + 46 + nlen > zlen) break;
+        ch[n].name_len = nlen;
+        memcpy(ch[n].name, z + p + 46, nlen);
+        ch[n].name[nlen] = 0;
+        ch[n].inode = 0;   /* filled when member inode is created */
+        ch[n].size = usize;
+        ch[n].crc = crc;
+        n++;
+        p += 46 + nlen + elen + clen;
+    }
+    return (int)n;
+}
+
+/* read children from an inode record (bounded); 0 = none, -1 = corrupt */
+int vol_get_children(invfs_volume *v, uint64_t inode_id,
+                     invfs_ast_child_entry **out, size_t *n_out)
+{
+    invfs_ast_recipe_header ast_h;
+    uint8_t *rec = NULL;
+    size_t rec_len, nblocks;
+    uint64_t p;
+    uint32_t magic;
+    uint64_t ino, fsz;
+    uint32_t rl;
+
+    *out = NULL;
+    *n_out = 0;
+    p = vol_inode_area_start(v);
+    while ((p = vol_inode_next(v, p, &magic, &ino, &fsz, NULL, 0, &rl)) != 0) {
+        if (magic != INODE_REC_MAGIC || ino != inode_id) continue;
+        rec = (uint8_t *)malloc(rl);
+        if (!rec) return -1;
+        if (vol_read_raw(v, p - rl - 4, rec, rl) != 0) { free(rec); return -1; }
+        rec_len = rl;
+        if (rec_len < sizeof(invfs_inode_rec) + sizeof(ast_h)) { free(rec); return -1; }
+        memcpy(&ast_h, rec + sizeof(invfs_inode_rec), sizeof(ast_h));
+        nblocks = ast_h.num_blocks;
+        if (rec_len < sizeof(invfs_inode_rec) + sizeof(ast_h) +
+                      nblocks * sizeof(invfs_ast_block_entry)) {
+            free(rec);
+            return -1;
+        }
+        if (ast_h.num_children == 0) { free(rec); *out = NULL; *n_out = 0; return 0; }
+        {
+            const uint8_t *children_blob = rec + sizeof(invfs_inode_rec) + sizeof(ast_h) +
+                                           nblocks * sizeof(invfs_ast_block_entry);
+            int rc = vol_deserialize_children(children_blob,
+                                              rec_len - (size_t)(children_blob - rec),
+                                              out, n_out);
+            free(rec);
+            return rc;
+        }
+    }
+    return -1;  /* inode not found */
+}
+
+/* find inode record by name; returns inode_id (0 = not found) */
+uint64_t vol_find(invfs_volume *v, const char *name)
+{
+    /* forward scan; last record for a name wins (tombstones delete) */
+    uint64_t pos = v->inode_area_start * INVFS_BLOCK_SIZE;
+    uint64_t end = v->inode_area_pos;
+    uint64_t result = 0;
+
+    while (pos + sizeof(invfs_inode_rec) <= end) {
+        invfs_inode_rec rec_h;
+        if (io_seek(&v->io, pos) != 0 ||
+            io_read(&v->io, &rec_h, sizeof(rec_h)) != 0)
+            return result;
+        if (rec_h.magic != INODE_REC_MAGIC && rec_h.magic != TOMBSTONE_MAGIC)
+            return result;  /* corrupted area */
+        if (rec_h.name_len == strlen(name) &&
+            strncmp(rec_h.name, name, rec_h.name_len) == 0) {
+            if (rec_h.magic == INODE_REC_MAGIC)
+                result = rec_h.inode_id;
+            else if (rec_h.inode_id == result)
+                result = 0;  /* tombstone kills only ITS version
+                              * (sweep: create-new-first appends the
+                              * new inode BEFORE the old tombstone, so
+                              * the newer version must survive) */
+        }
+        pos += rec_h.rec_len + 4;
+    }
+    return result;
+}
+
+/* read file data back via AST + L2P (recursive for containers); returns 0 */
+static int vol_read_inode(invfs_volume *v, uint64_t inode_id, unsigned depth,
+                          uint8_t **out, size_t *out_len)
+{
+    uint64_t pos = v->inode_area_start * INVFS_BLOCK_SIZE;
+    uint64_t end = v->inode_area_pos;
+    uint8_t *data = NULL;
+    size_t len = 0;
+
+    while (pos + sizeof(invfs_inode_rec) <= end) {
+        invfs_inode_rec rec_h;
+        uint32_t crc_stored, crc_calc;
+        uint8_t *rec;
+
+        if (io_seek(&v->io, pos) != 0 ||
+            io_read(&v->io, &rec_h, sizeof(rec_h)) != 0)
+            return -1;
+        if (rec_h.magic != INODE_REC_MAGIC && rec_h.magic != TOMBSTONE_MAGIC)
+            return -1;
+        if (rec_h.magic == TOMBSTONE_MAGIC) { pos += rec_h.rec_len + 4; continue; }
+        if (rec_h.inode_id != inode_id) { pos += rec_h.rec_len + 4; continue; }
+
+        /* read full record + crc, verify */
+        rec = (uint8_t *)malloc(rec_h.rec_len);
+        if (!rec) return -1;
+        if (io_seek(&v->io, pos) != 0 ||
+            io_read(&v->io, rec, rec_h.rec_len) != 0 ||
+            io_read(&v->io, &crc_stored, 4) != 0) {
+            free(rec);
+            return -1;
+        }
+        crc_calc = invfs_crc32c(rec, rec_h.rec_len);
+        if (crc_calc != crc_stored) {
+            fprintf(stderr, "inode record CRC mismatch (inode %llu)\n",
+                    (unsigned long long)inode_id);
+            free(rec);
+            return -1;
+        }
+
+        /* parse AST: header + entries after rec header */
+        {
+            invfs_ast_recipe_header ast_h;
+            const invfs_ast_block_entry *ents;
+            uint16_t i;
+            size_t off = sizeof(invfs_inode_rec);
+            memcpy(&ast_h, rec + off, sizeof(ast_h));
+            off += sizeof(ast_h);
+            ents = (const invfs_ast_block_entry *)(rec + off);
+
+            if (ast_h.num_children > 0) {
+                /* container: children-only inode; reconstruct the original
+                 * byte stream by concatenating member files recursively
+                 * (nested containers supported, depth-guarded). */
+                size_t ch_off = sizeof(invfs_inode_rec) + sizeof(ast_h)
+                              + (size_t)ast_h.num_blocks * sizeof(invfs_ast_block_entry);
+                size_t ch_len, nch = 0, total = 0, dst = 0, j;
+                invfs_ast_child_entry *ch = NULL;
+                uint8_t *cbuf;
+
+                if (depth >= MAX_AST_DEPTH) { free(rec); return -1; }
+                if (ch_off > rec_h.rec_len) { free(rec); return -1; }
+                ch_len = rec_h.rec_len - ch_off;
+                if (vol_deserialize_children(rec + ch_off, ch_len, &ch, &nch) != 0 ||
+                    nch != (size_t)ast_h.num_children) {
+                    free(rec); return -1;
+                }
+                for (j = 0; j < nch; j++) {
+                    if (ch[j].size > (size_t)-1 - total) { free(ch); free(rec); return -1; }
+                    total += (size_t)ch[j].size;
+                }
+                cbuf = (uint8_t *)malloc(total ? total : 1);
+                if (!cbuf) { free(ch); free(rec); return -1; }
+                for (j = 0; j < nch; j++) {
+                    uint8_t *cd = NULL; size_t cl = 0;
+                    if (ch[j].inode == 0 || ch[j].inode == inode_id) {
+                        free(cbuf); free(ch); free(rec); return -1;  /* unattached/cycle */
+                    }
+                    if (vol_read_inode(v, ch[j].inode, depth + 1, &cd, &cl) != 0) {
+                        free(cbuf); free(ch); free(rec); return -1;
+                    }
+                    if (cl != (size_t)ch[j].size) {
+                        fprintf(stderr, "container member size mismatch (inode %llu)\n",
+                                (unsigned long long)ch[j].inode);
+                        free(cd); free(cbuf); free(ch); free(rec); return -1;
+                    }
+                    memcpy(cbuf + dst, cd, cl);
+                    dst += cl;
+                    free(cd);
+                }
+                free(ch);
+                free(rec);
+                *out = cbuf;
+                *out_len = dst;
+                return 0;
+            }
+
+            len = ast_h.file_size;
+            data = (uint8_t *)malloc(len ? len : 1);
+            if (!data) { free(rec); return -1; }
+
+            for (i = 0; i < ast_h.num_blocks; i++) {
+                const invfs_ast_block_entry *e = &ents[i];
+                uint64_t pba = 0, phys_len = 0;
+                uint32_t hdr, crc_hdr;
+                uint8_t *blob;
+                size_t dst_off = (size_t)e->file_offset;
+
+                /* segment physical location via L2P */
+                if (vol_lookup_entry(v, inode_id, e->block_id, &pba, &phys_len) != 0) {
+                    fprintf(stderr, "L2P miss: inode %llu seg %u\n",
+                            (unsigned long long)inode_id, e->block_id);
+                    free(data); free(rec); return -1;
+                }
+                /* read 8-byte header: [4B csize][4B crc32c(data)] */
+                {
+                    uint8_t hdrb[8];
+                    if (io_seek(&v->io, pba * INVFS_BLOCK_SIZE) != 0 ||
+                        io_read(&v->io, hdrb, 8) != 0) {
+                        free(data); free(rec); return -1;
+                    }
+                    memcpy(&hdr, hdrb, 4);
+                    memcpy(&crc_hdr, hdrb + 4, 4);
+                }
+                if (e->algo == INVFS_ALGO_NONE) {
+                    if (hdr != e->length) {
+                        fprintf(stderr, "raw segment header corrupt (csize %u, want %llu)\n",
+                                hdr, (unsigned long long)e->length);
+                        free(data); free(rec); return -1;
+                    }
+                } else {  /* LZ4 */
+                    if (hdr >= e->length || hdr == 0) {
+                        fprintf(stderr, "lz4 segment header corrupt (csize %u)\n", hdr);
+                        free(data); free(rec); return -1;
+                    }
+                }
+                blob = (uint8_t *)malloc(hdr);
+                if (!blob) { free(data); free(rec); return -1; }
+                if (io_seek(&v->io, pba * INVFS_BLOCK_SIZE + 8) != 0 ||
+                    io_read(&v->io, blob, hdr) != 0) {
+                    free(blob); free(data); free(rec); return -1;
+                }
+                /* deep protection: verify segment CRC32C before decode */
+                if (crc_hdr != 0 && invfs_crc32c(blob, hdr) != crc_hdr) {
+                    fprintf(stderr, "segment CRC mismatch: inode %llu seg %u (corrupt)\n",
+                            (unsigned long long)inode_id, e->block_id);
+                    free(blob); free(data); free(rec); return -1;
+                }
+
+                if (e->algo == INVFS_ALGO_LZ4) {
+                    int got = LZ4_decompress_safe((const char *)blob,
+                                                  (char *)(data + dst_off),
+                                                  (int)hdr, (int)e->length);
+                    if (got != (int)e->length) {
+                        fprintf(stderr, "LZ4 decompress error: got %d, want %llu\n",
+                                got, (unsigned long long)e->length);
+                        free(blob); free(data); free(rec); return -1;
+                    }
+                } else if (e->algo == INVFS_ALGO_ZSTD) {
+                    size_t got = ZSTD_decompress(data + dst_off, e->length, blob, hdr);
+                    if (ZSTD_isError(got) || got != e->length) {
+                        fprintf(stderr, "ZSTD decompress error: %s\n",
+                                ZSTD_isError(got) ? ZSTD_getErrorName(got) : "size mismatch");
+                        free(blob); free(data); free(rec); return -1;
+                    }
+                } else if (e->algo == INVFS_ALGO_JXL) {
+                    /* whole file is one JXL blob -> decode to jpeg */
+                    uint8_t *jpg = NULL;
+                    size_t jpg_len = 0;
+                    if (invfs_jxl_decompress(blob, hdr, &jpg, &jpg_len) != 0 ||
+                        jpg_len != e->length) {
+                        fprintf(stderr, "JXL decompress error\n");
+                        free(blob); free(data); free(rec); return -1;
+                    }
+                    memcpy(data + dst_off, jpg, jpg_len);
+                    free(jpg);
+                } else if (e->algo == INVFS_ALGO_APE) {
+                    /* whole file is one APE blob -> decode to flac */
+                    uint8_t *fl = NULL;
+                    size_t fl_len = 0;
+                    if (invfs_ape_decompress(blob, hdr, &fl, &fl_len) != 0) {
+                        fprintf(stderr, "APE decompress error\n");
+                        free(blob); free(data); free(rec); return -1;
+                    }
+                    memcpy(data + dst_off, fl, fl_len < e->length ? fl_len : e->length);
+                    free(fl);
+                } else {
+                    memcpy(data + dst_off, blob, hdr);
+                }
+                free(blob);
+            }
+        }
+        free(rec);
+        *out = data;
+        *out_len = len;
+        return 0;
+    }
+    return -1;  /* not found */
+}
+
+/* public entry: read file, reconstructing containers from children */
+int vol_read_file(invfs_volume *v, uint64_t inode_id, uint8_t **out, size_t *out_len)
+{
+    return vol_read_inode(v, inode_id, 0, out, out_len);
+}
+
+const invfs_superblock *vol_sb(invfs_volume *v)
+{
+    return &v->sb;
+}
+
+const uint8_t *vol_bitmap(invfs_volume *v, uint64_t *blocks_out)
+{
+    if (blocks_out) *blocks_out = v->sb.total_blocks;
+    return v->bitmap;
+}
+
+const invfs_l2p_entry *vol_l2p(invfs_volume *v, size_t *count_out)
+{
+    if (count_out) *count_out = v->l2p_count;
+    return v->l2p;
+}
+
+uint64_t vol_inode_area_pos(invfs_volume *v) { return v->inode_area_pos; }
+uint64_t vol_inode_area_start(invfs_volume *v) { return v->inode_area_start * INVFS_BLOCK_SIZE; }
+uint64_t vol_inode_area_end(invfs_volume *v) { return v->inode_area_end; }
+uint64_t vol_journal_pos(invfs_volume *v)   { return v->journal_pos; }
+
+uint64_t vol_inode_next(invfs_volume *v, uint64_t pos, uint32_t *magic_out,
+                        uint64_t *inode_out, uint64_t *size_out,
+                        char *name_out, size_t name_cap, uint32_t *rec_len_out)
+{
+    invfs_inode_rec rec_h;
+    /* scan only the CRC-validated extent (vol_open truncated at the first
+     * torn/corrupt record); never step into garbage past area_pos */
+    uint64_t end = v->inode_area_pos;
+    while (pos + sizeof(rec_h) <= end) {
+        if (vol_read_raw(v, pos, &rec_h, sizeof(rec_h)) != 0)
+            break;
+        if (rec_h.magic != INODE_REC_MAGIC && rec_h.magic != TOMBSTONE_MAGIC)
+            break;  /* end of valid records */
+        if (rec_h.rec_len < sizeof(rec_h) || rec_h.rec_len > 0x10000)
+            break;
+        if (magic_out)  *magic_out = rec_h.magic;
+        if (inode_out)  *inode_out = rec_h.inode_id;
+        if (size_out)   *size_out = rec_h.file_size;
+        if (rec_len_out) *rec_len_out = rec_h.rec_len;
+        if (name_out && name_cap) {
+            size_t n = rec_h.name_len;
+            if (n > name_cap - 1) n = name_cap - 1;
+            memcpy(name_out, rec_h.name, n);  /* name lives inside rec */
+            name_out[n] = 0;
+        }
+        return pos + rec_h.rec_len + 4;  /* +4: trailing CRC32C */
+    }
+    return 0;
+}
+
+/* raw byte-range read at absolute volume offset (for tools) */
+int vol_read_raw(invfs_volume *v, uint64_t offset, void *buf, size_t len)
+{
+    if (io_seek(&v->io, offset) != 0 || io_read(&v->io, buf, len) != 0)
+        return -1;
+    return 0;
+}
+
+/* free n physical blocks (clear bitmap bits), bounded by volume size */
+void vol_free_blocks(invfs_volume *v, uint64_t pba, uint64_t nblocks)
+{
+    uint64_t i;
+    uint64_t end = pba + nblocks;
+    if (end > v->sb.total_blocks)
+        end = v->sb.total_blocks;
+    for (i = pba; i < end; i++)
+        bit_clr(v->bitmap, i);
+}
+
+/*
+ * Sweep one file: recompress all segments RAW(LZ4) -> Shadow(ZSTD-19).
+ * Returns 0 on success, -1 on error, 1 if nothing to sweep.
+ */
+int vol_sweep_file(invfs_volume *v, uint64_t inode_id)
+{
+    uint64_t pos = v->inode_area_start * INVFS_BLOCK_SIZE;
+    uint64_t end = v->inode_area_pos;
+    uint64_t rec_pos = 0;
+    invfs_inode_rec rec_h;
+    uint8_t *rec = NULL;
+    uint32_t crc_stored, crc_calc;
+    invfs_ast_recipe_header ast_h;
+    invfs_ast_block_entry *ents;
+    uint16_t i;
+    int swept_any = 0;
+
+    /* locate the inode record */
+    while (pos + sizeof(invfs_inode_rec) <= end) {
+        if (io_seek(&v->io, pos) != 0 || io_read(&v->io, &rec_h, sizeof(rec_h)) != 0)
+            return -1;
+        if (rec_h.magic != INODE_REC_MAGIC) {
+            if (rec_h.magic == TOMBSTONE_MAGIC) {
+                pos += rec_h.rec_len + 4;
+                continue;
+            }
+            return -1;
+        }
+        if (rec_h.inode_id == inode_id) { rec_pos = pos; break; }
+        pos += rec_h.rec_len + 4;
+    }
+    if (rec_pos == 0) return -1;
+
+    rec = (uint8_t *)malloc(rec_h.rec_len);
+    if (!rec) return -1;
+    if (io_seek(&v->io, rec_pos) != 0 || io_read(&v->io, rec, rec_h.rec_len) != 0 ||
+        io_read(&v->io, &crc_stored, 4) != 0) { free(rec); return -1; }
+    crc_calc = invfs_crc32c(rec, rec_h.rec_len);
+    if (crc_calc != crc_stored) { fprintf(stderr, "inode CRC mismatch\n"); free(rec); return -1; }
+
+    memcpy(&ast_h, rec + sizeof(invfs_inode_rec), sizeof(ast_h));
+    ents = (invfs_ast_block_entry *)(rec + sizeof(invfs_inode_rec) + sizeof(ast_h));
+
+    /* already swept (Shadow/BINARY) — nothing to do */
+    if (ents[0].zone != INVFS_ZONE_RAW) {
+        if (getenv("INVFS_DEBUG"))
+            printf("[sweep] %s: already in Shadow (zone %u), skip\n",
+                   rec_h.name, ents[0].zone);
+        free(rec);
+        return 1;
+    }
+
+    /* JXL pass: if file is a RAW blob starting with JPEG magic,
+     * transcode the whole file via cjxl and replace the inode. */
+    if (ents[0].zone == INVFS_ZONE_RAW) {
+        uint8_t *full = NULL;
+        size_t full_len = 0;
+        if (getenv("INVFS_DEBUG"))
+            printf("[sweep] %s: reading full file\n", rec_h.name);
+        if (vol_read_file(v, inode_id, &full, &full_len) == 0 && full_len >= 3 &&
+            full[0] == 0xFF && full[1] == 0xD8 && full[2] == 0xFF) {
+            if (getenv("INVFS_DEBUG"))
+                printf("[sweep] %s: JPEG detected (%zu bytes), transcoding...\n",
+                       rec_h.name, full_len);
+            uint8_t *jxl = NULL;
+            size_t jxl_len = 0;
+            {
+                int crc_res = invfs_jxl_compress(full, full_len, &jxl, &jxl_len);
+                if (getenv("INVFS_DEBUG"))
+                    printf("[sweep] %s: compress rc=%d jxl_len=%zu (orig %zu)\n",
+                           rec_h.name, crc_res, jxl_len, full_len);
+                if (crc_res == 0 && jxl_len < full_len) {
+                /* atomic: create new inode first; old stays until then */
+                if (getenv("INVFS_DEBUG"))
+                    printf("[sweep] %s: create JXL inode first\n", rec_h.name);
+                {
+                    uint64_t newino = vol_create_jxl_file(v, rec_h.name, jxl, jxl_len, full_len);
+                    if (newino == 0)
+                        fprintf(stderr, "sweep: JXL create failed (%s)\n", rec_h.name);
+                    else {
+                        vol_delete_inode(v, inode_id, rec_h.name);
+                        swept_any = 1;
+                    }
+                }
+                free(jxl);
+                free(full);
+                free(rec);
+                if (getenv("INVFS_DEBUG"))
+                    printf("[sweep] %s: JXL %llu -> %zu bytes\n",
+                           rec_h.name, (unsigned long long)full_len, jxl_len);
+                return swept_any ? 0 : 1;
+            }
+            }
+            free(jxl);
+        }
+        free(full);
+    }
+
+    /* APE pass: FLAC magic -> transcode whole file via MAC.exe -c4000 */
+    if (ents[0].zone == INVFS_ZONE_RAW && getenv("INVFS_APE")) {
+        uint8_t *full = NULL;
+        size_t full_len = 0;
+        if (vol_read_file(v, inode_id, &full, &full_len) == 0 && full_len >= 4 &&
+            full[0] == 'f' && full[1] == 'L' && full[2] == 'a' && full[3] == 'C') {
+            uint8_t *ape = NULL;
+            size_t ape_len = 0;
+            int crc_res = invfs_ape_compress(full, full_len, &ape, &ape_len);
+            if (getenv("INVFS_DEBUG"))
+                printf("[sweep] %s: APE rc=%d ape_len=%zu (flac %zu)\n",
+                       rec_h.name, crc_res, ape_len, full_len);
+            if (crc_res == 0 && ape_len < full_len) {
+                /* probe decode to learn exact re-encoded FLAC size
+                 * (ffmpeg re-encode differs from original FLAC bytes) */
+                uint8_t *probe = NULL;
+                size_t probe_len = 0;
+                uint64_t fsize = full_len;
+                if (invfs_ape_decompress(ape, ape_len, &probe, &probe_len) == 0) {
+                    fsize = probe_len;
+                    free(probe);
+                }
+                {
+                    uint64_t newino = vol_create_ape_file(v, rec_h.name, ape, ape_len, fsize);
+                    if (newino == 0)
+                        fprintf(stderr, "sweep: APE create failed (%s)\n", rec_h.name);
+                    else {
+                        vol_delete_inode(v, inode_id, rec_h.name);
+                        swept_any = 1;
+                    }
+                }
+                free(ape); free(full); free(rec);
+                return swept_any ? 0 : 1;
+            }
+            free(ape);
+        }
+        free(full);
+    }
+
+    for (i = 0; i < ast_h.num_blocks; i++) {
+        invfs_ast_block_entry *e = &ents[i];
+        uint64_t pba_old = 0, phys_len_old = 0;
+        uint32_t hdr_old, crc_old;
+        uint8_t *blob_old = NULL, *orig = NULL;
+        size_t orig_len = e->length;
+        uint64_t pba_new, phys_blocks_new;
+        uint32_t csize_new, crc_new;
+        uint8_t *cbuf_new = NULL;
+        int cbound;
+        uint8_t hdr4[8];  /* [4B csize][4B crc] — was [4] = stack overflow */
+
+        if (e->zone != INVFS_ZONE_RAW)
+            continue;  /* already swept */
+
+        /* 1. read old segment */
+        if (vol_lookup_entry(v, inode_id, e->block_id, &pba_old, &phys_len_old) != 0) {
+            fprintf(stderr, "sweep: L2P miss seg %u\n", e->block_id);
+            free(rec); return -1;
+        }
+        {
+            uint8_t hdrb[8];
+            if (io_seek(&v->io, pba_old * INVFS_BLOCK_SIZE) != 0 ||
+                io_read(&v->io, hdrb, 8) != 0) { free(rec); return -1; }
+            memcpy(&hdr_old, hdrb, 4);
+            memcpy(&crc_old, hdrb + 4, 4);
+        }
+        blob_old = (uint8_t *)malloc(hdr_old);
+        if (!blob_old) { free(rec); return -1; }
+        if (io_seek(&v->io, pba_old * INVFS_BLOCK_SIZE + 8) != 0 ||
+            io_read(&v->io, blob_old, hdr_old) != 0) { free(blob_old); free(rec); return -1; }
+        /* deep protection: verify segment CRC32C */
+        if (crc_old != 0 && invfs_crc32c(blob_old, hdr_old) != crc_old) {
+            fprintf(stderr, "sweep: segment CRC mismatch inode %llu seg %u\n",
+                    (unsigned long long)inode_id, e->block_id);
+            free(blob_old); free(rec); return -1;
+        }
+
+        /* 2. decompress to original */
+        orig = (uint8_t *)malloc(orig_len ? orig_len : 1);
+        if (!orig) { free(blob_old); free(rec); return -1; }
+        if (e->algo == INVFS_ALGO_LZ4) {
+            int got = LZ4_decompress_safe((const char *)blob_old, (char *)orig,
+                                          (int)hdr_old, (int)orig_len);
+            if (got != (int)orig_len) { free(blob_old); free(orig); free(rec); return -1; }
+        } else {  /* NONE */
+            if (hdr_old != orig_len) { free(blob_old); free(orig); free(rec); return -1; }
+            memcpy(orig, blob_old, orig_len);
+        }
+        free(blob_old);
+
+        /* 3. recompress with ZSTD level 19 (fallback raw) */
+        cbound = (int)ZSTD_compressBound(orig_len);
+        cbuf_new = (uint8_t *)malloc((size_t)cbound + 8);
+        if (!cbuf_new) { free(orig); free(rec); return -1; }
+        csize_new = (uint32_t)ZSTD_compress(cbuf_new + 8, cbound, orig, orig_len, 19);
+        if (ZSTD_isError(csize_new) || csize_new >= orig_len) {
+            csize_new = (uint32_t)orig_len;   /* store raw */
+            memcpy(cbuf_new + 8, orig, orig_len);
+            e->algo = INVFS_ALGO_NONE;
+        } else {
+            e->algo = INVFS_ALGO_ZSTD;
+        }
+        e->zone = INVFS_ZONE_BINARY;
+        /* block_id stays the segment index (L2P key) */
+        crc_new = invfs_crc32c(cbuf_new + 8, csize_new);
+
+        /* 4. write to Shadow zone */
+        phys_blocks_new = ((uint64_t)csize_new + 8 + INVFS_BLOCK_SIZE - 1) / INVFS_BLOCK_SIZE;
+        pba_new = alloc_blocks(v, v->sb.shadow_zone_start, v->sb.shadow_zone_blocks,
+                               phys_blocks_new);
+        if (pba_new == 0) { free(cbuf_new); free(orig); free(rec); return -1; }
+        hdr4[0] = (uint8_t)(csize_new & 0xFF);
+        hdr4[1] = (uint8_t)((csize_new >> 8) & 0xFF);
+        hdr4[2] = (uint8_t)((csize_new >> 16) & 0xFF);
+        hdr4[3] = (uint8_t)((csize_new >> 24) & 0xFF);
+        hdr4[4] = (uint8_t)(crc_new & 0xFF);
+        hdr4[5] = (uint8_t)((crc_new >> 8) & 0xFF);
+        hdr4[6] = (uint8_t)((crc_new >> 16) & 0xFF);
+        hdr4[7] = (uint8_t)((crc_new >> 24) & 0xFF);
+        memcpy(cbuf_new, hdr4, 8);
+        /* write only real bytes [8B hdr][data] */
+        if (io_seek(&v->io, pba_new * INVFS_BLOCK_SIZE) != 0 ||
+            io_write(&v->io, cbuf_new, (size_t)csize_new + 8) != 0) {
+            free(cbuf_new); free(orig); free(rec); return -1;
+        }
+        free(cbuf_new);
+
+        /* 5. L2P: unmap old, map new */
+        {
+            invfs_l2p_entry ue;
+            memset(&ue, 0, sizeof(ue));
+            ue.type = INVFS_JRN_UNMAP;
+            ue.inode = inode_id;
+            ue.lba = e->block_id;
+            ue.crc = invfs_crc32c(&ue, offsetof(invfs_l2p_entry, crc));
+            if (io_seek(&v->io, v->journal_pos) != 0 ||
+                io_write(&v->io, &ue, sizeof(ue)) != 0) { free(orig); free(rec); return -1; }
+            v->journal_pos += sizeof(ue);
+        }
+        l2p_remove(v, inode_id, e->block_id);
+        if (vol_map(v, inode_id, e->block_id, pba_new, (uint32_t)phys_blocks_new) != 0) {
+            free(orig); free(rec); return -1;
+        }
+
+        /* 6. free old RAW blocks */
+        vol_free_blocks(v, pba_old, (hdr_old + 4 + INVFS_BLOCK_SIZE - 1) / INVFS_BLOCK_SIZE);
+        free(orig);
+        swept_any = 1;
+
+        if (getenv("INVFS_DEBUG"))
+            printf("[sweep] inode %llu seg %u: RAW(%llu) -> SHADOW(%llu) %u bytes (%s)\n",
+                   (unsigned long long)inode_id, e->block_id,
+                   (unsigned long long)pba_old, (unsigned long long)pba_new,
+                   csize_new, e->algo == INVFS_ALGO_ZSTD ? "zstd-19" : "raw");
+    }
+
+    /* 7. rewrite inode record in place (same rec_len) + new CRC */
+    if (swept_any) {
+        crc_calc = invfs_crc32c(rec, rec_h.rec_len);
+        if (io_seek(&v->io, rec_pos) != 0 ||
+            io_write(&v->io, rec, rec_h.rec_len) != 0 ||
+            io_write(&v->io, &crc_calc, 4) != 0) { free(rec); return -1; }
+    }
+    free(rec);
+    return swept_any ? 0 : 1;
+}
+
+/* stat: get file size by name; returns 0 on success */
+int vol_stat(invfs_volume *v, const char *name, uint64_t *size_out)
+{
+    uint64_t pos = v->inode_area_start * INVFS_BLOCK_SIZE;
+    uint64_t end = v->inode_area_pos;
+
+    while (pos + sizeof(invfs_inode_rec) <= end) {
+        invfs_inode_rec rec_h;
+        if (io_seek(&v->io, pos) != 0 ||
+            io_read(&v->io, &rec_h, sizeof(rec_h)) != 0)
+            return -1;
+        if (rec_h.magic != INODE_REC_MAGIC)
+            return -1;
+        if (rec_h.name_len == strlen(name) &&
+            strncmp(rec_h.name, name, rec_h.name_len) == 0) {
+            *size_out = rec_h.file_size;
+            return 0;
+        }
+        pos += rec_h.rec_len + 4;
+    }
+    return -1;
+}
+
+/*
+ * Range read: decode only the segments covering [offset, offset+len).
+ * Returns bytes actually read (may be less near EOF), or -1 on error.
+ */
+int vol_read_range(invfs_volume *v, uint64_t inode_id, uint64_t offset,
+                   size_t len, void *buf)
+{
+    uint64_t pos = v->inode_area_start * INVFS_BLOCK_SIZE;
+    uint64_t end = v->inode_area_pos;
+    invfs_ast_recipe_header ast_h;
+    invfs_ast_block_entry *ents = NULL;
+    uint8_t *rec = NULL;
+    uint16_t i;
+    size_t got = 0;
+
+    while (pos + sizeof(invfs_inode_rec) <= end) {
+        invfs_inode_rec rec_h;
+        uint32_t crc_stored, crc_calc;
+        if (io_seek(&v->io, pos) != 0 || io_read(&v->io, &rec_h, sizeof(rec_h)) != 0)
+            return -1;
+        if (rec_h.magic != INODE_REC_MAGIC && rec_h.magic != TOMBSTONE_MAGIC) return -1;
+        if (rec_h.magic == TOMBSTONE_MAGIC) { pos += rec_h.rec_len + 4; continue; }
+        if (rec_h.inode_id != inode_id) { pos += rec_h.rec_len + 4; continue; }
+        rec = (uint8_t *)malloc(rec_h.rec_len);
+        if (!rec) return -1;
+        if (io_seek(&v->io, pos) != 0 || io_read(&v->io, rec, rec_h.rec_len) != 0 ||
+            io_read(&v->io, &crc_stored, 4) != 0) { free(rec); return -1; }
+        crc_calc = invfs_crc32c(rec, rec_h.rec_len);
+        if (crc_calc != crc_stored) { free(rec); return -1; }
+
+        memcpy(&ast_h, rec + sizeof(invfs_inode_rec), sizeof(ast_h));
+        ents = (invfs_ast_block_entry *)(rec + sizeof(invfs_inode_rec) + sizeof(ast_h));
+        break;
+    }
+    if (!rec) return -1;
+    if (ast_h.num_children > 0) {
+        /* container: reconstruct whole file, serve the requested range */
+        uint8_t *all = NULL; size_t all_len = 0, take;
+        free(rec);
+        if (vol_read_file(v, inode_id, &all, &all_len) != 0) return -1;
+        if (offset >= all_len) { free(all); return 0; }
+        take = (size_t)((offset + len > all_len) ? all_len - offset : len);
+        memcpy(buf, all + offset, take);
+        free(all);
+        return (int)take;
+    }
+    if (offset >= ast_h.file_size) { free(rec); return 0; }
+
+    for (i = 0; i < ast_h.num_blocks; i++) {
+        const invfs_ast_block_entry *e = &ents[i];
+        uint64_t seg_lo = e->file_offset;
+        uint64_t seg_hi = e->file_offset + e->length;
+        uint64_t req_lo = offset, req_hi = offset + len;
+        uint64_t lo, hi;
+        uint8_t tmp[SEGMENT_SIZE];
+        size_t want;
+
+        if (seg_hi <= req_lo || seg_lo >= req_hi)
+            continue;  /* no overlap */
+        lo = (req_lo > seg_lo) ? req_lo : seg_lo;
+        hi = (req_hi < seg_hi) ? req_hi : seg_hi;
+        if (hi > ast_h.file_size) hi = ast_h.file_size;
+        if (lo >= hi) continue;
+
+        /* decode whole segment */
+        {
+            uint64_t pba = 0, plen = 0;
+            uint32_t hdr, crc_hdr;
+            uint8_t *blob;
+            if (vol_lookup_entry(v, inode_id, e->block_id, &pba, &plen) != 0) {
+                free(rec); return -1;
+            }
+            {
+                uint8_t hdrb[8];
+                if (io_seek(&v->io, pba * INVFS_BLOCK_SIZE) != 0 ||
+                    io_read(&v->io, hdrb, 8) != 0) { free(rec); return -1; }
+                memcpy(&hdr, hdrb, 4);
+                memcpy(&crc_hdr, hdrb + 4, 4);
+            }
+            blob = (uint8_t *)malloc(hdr);
+            if (!blob) { free(rec); return -1; }
+            if (io_seek(&v->io, pba * INVFS_BLOCK_SIZE + 8) != 0 ||
+                io_read(&v->io, blob, hdr) != 0) { free(blob); free(rec); return -1; }
+            /* deep protection: verify segment CRC32C */
+            if (crc_hdr != 0 && invfs_crc32c(blob, hdr) != crc_hdr) {
+                fprintf(stderr, "segment CRC mismatch: inode %llu seg %u\n",
+                        (unsigned long long)inode_id, e->block_id);
+                free(blob); free(rec); return -1;
+            }
+
+            if (e->algo == INVFS_ALGO_LZ4) {
+                int got = LZ4_decompress_safe((const char *)blob, (char *)tmp,
+                                              (int)hdr, (int)e->length);
+                if (got != (int)e->length) { free(blob); free(rec); return -1; }
+            } else if (e->algo == INVFS_ALGO_ZSTD) {
+                size_t got = ZSTD_decompress(tmp, e->length, blob, hdr);
+                if (ZSTD_isError(got) || got != e->length) { free(blob); free(rec); return -1; }
+            } else if (e->algo == INVFS_ALGO_JXL) {
+                uint8_t *jpg = NULL;
+                size_t jpg_len = 0;
+                if (invfs_jxl_decompress(blob, hdr, &jpg, &jpg_len) != 0 ||
+                    jpg_len != e->length) {
+                    free(blob); free(rec); return -1;
+                }
+                want = (size_t)(hi - lo);
+                memcpy((uint8_t *)buf + (size_t)(lo - offset), jpg + (size_t)(lo - seg_lo), want);
+                got += want;
+                free(jpg);
+                free(blob);
+            } else if (e->algo == INVFS_ALGO_APE) {
+                uint8_t *fl = NULL;
+                size_t fl_len = 0;
+                if (invfs_ape_decompress(blob, hdr, &fl, &fl_len) != 0 ||
+                    fl_len < (size_t)(hi - lo) || (size_t)(lo - seg_lo) > fl_len) {
+                    free(blob); free(rec); return -1;
+                }
+                want = (size_t)(hi - lo);
+                memcpy((uint8_t *)buf + (size_t)(lo - offset),
+                       fl + (size_t)(lo - seg_lo), want);
+                got += want;
+                free(fl);
+                free(blob);
+                continue;
+            } else {
+                if (hdr != e->length) { free(blob); free(rec); return -1; }
+                memcpy(tmp, blob, e->length);
+            }
+            free(blob);
+        }
+
+        want = (size_t)(hi - lo);
+        memcpy((uint8_t *)buf + (size_t)(lo - offset), tmp + (size_t)(lo - seg_lo), want);
+        got += want;
+    }
+    free(rec);
+    return (int)got;
+}
+
+/*
+ * Delete a file: free its data blocks, unmap L2P, append tombstone.
+ * Returns 0 on success, -1 if not found.
+ */
+/* delete the specific inode (NOT by name — safe for atomic sweeps:
+ * create-new-first then delete-old; the new inode stays untouched). */
+int vol_delete_inode(invfs_volume *v, uint64_t inode_id, const char *name)
+{
+    uint64_t pos, end;
+    size_t i;
+
+    if (inode_id == 0)
+        return -1;
+
+    /* free all blocks mapped to this inode.
+     * L2P length is the PHYSICAL block count of each segment (written at
+     * map time), so no header reads here — safe against stale/reallocated
+     * blocks. */
+    for (i = 0; i < v->l2p_count; i++) {
+        const invfs_l2p_entry *e = &v->l2p[i];
+        if (e->type == INVFS_JRN_MAP && e->inode == inode_id) {
+            uint64_t nblk = e->length;
+            if (nblk == 0 || e->pba >= v->sb.total_blocks ||
+                nblk > v->sb.total_blocks - e->pba)
+                continue;  /* stale entry — never free out of bounds */
+            vol_free_blocks(v, e->pba, nblk);
+        }
+    }
+    /* rewrite L2P in-memory: drop this inode's maps */
+    {
+        size_t w = 0;
+        for (i = 0; i < v->l2p_count; i++) {
+            if (v->l2p[i].inode == inode_id)
+                continue;
+            if (w != i) v->l2p[w] = v->l2p[i];
+            w++;
+        }
+        v->l2p_count = w;
+    }
+
+    /* append tombstone record */
+    pos = v->inode_area_pos;
+    end = v->inode_area_end;
+    if (pos + sizeof(invfs_inode_rec) + 4 > end)
+        return -1;
+    {
+        invfs_inode_rec rec;
+        uint32_t crc;
+        memset(&rec, 0, sizeof(rec));
+        rec.magic = TOMBSTONE_MAGIC;
+        rec.rec_len = (uint32_t)sizeof(invfs_inode_rec);
+        rec.inode_id = inode_id;
+        rec.file_size = 0;
+        rec.name_len = (uint32_t)strlen(name);
+        strncpy(rec.name, name, sizeof(rec.name) - 1);
+        crc = invfs_crc32c(&rec, sizeof(rec));
+        if (io_seek(&v->io, pos) != 0 ||
+            io_write(&v->io, &rec, sizeof(rec)) != 0 ||
+            io_write(&v->io, &crc, 4) != 0)
+            return -1;
+        v->inode_area_pos = pos + sizeof(rec) + 4;
+    }
+    return 0;
+}
+
+int vol_delete_file(invfs_volume *v, const char *name)
+{
+    uint64_t inode_id = vol_find(v, name);
+    if (inode_id == 0)
+        return -1;
+    return vol_delete_inode(v, inode_id, name);
+}
+
+/* count free blocks from in-memory bitmap */
+uint64_t vol_count_free(invfs_volume *v)
+{
+    uint64_t i, free = 0;
+    for (i = 0; i < v->sb.total_blocks; i++)
+        if (!bit_get(v->bitmap, i))
+            free++;
+    return free;
+}
+
+/*
+/*
+ * JXL helpers: transcode JPEG -> JXL (lossless) and back via subprocesses.
+ * Returns 0 on success. Out buffers are malloc'd.
+ */
+static int run_tool(const char *exe, const char *a1, const char *a2, const char *opts)
+{
+#ifdef _WIN32
+    WCHAR wexe[512], wcmd[4096];
+    WCHAR wa1[512], wa2[512], wopts[256];
+    STARTUPINFOW si;
+    PROCESS_INFORMATION pi;
+    DWORD code = 0;
+    MultiByteToWideChar(CP_UTF8, 0, exe, -1, wexe, 512);
+    MultiByteToWideChar(CP_UTF8, 0, a1, -1, wa1, 512);
+    MultiByteToWideChar(CP_UTF8, 0, a2, -1, wa2, 512);
+    MultiByteToWideChar(CP_UTF8, 0, opts, -1, wopts, 256);
+    swprintf_s(wcmd, 4096, L"\"%s\" \"%s\" \"%s\" %s", wexe, wa1, wa2, wopts);
+    memset(&si, 0, sizeof si);
+    si.cb = sizeof si;
+    memset(&pi, 0, sizeof pi);
+    if (!CreateProcessW(wexe, wcmd, NULL, NULL, FALSE, CREATE_NO_WINDOW,
+                        NULL, NULL, &si, &pi)) {
+        fprintf(stderr, "run_tool: CreateProcess failed (%lu): %ls\n",
+                (unsigned long)GetLastError(), wcmd);
+        return -1;
+    }
+    WaitForSingleObject(pi.hProcess, INFINITE);
+    GetExitCodeProcess(pi.hProcess, &code);
+    CloseHandle(pi.hThread);
+    CloseHandle(pi.hProcess);
+    return (int)code;
+#else
+    (void)exe; (void)a1; (void)a2; (void)opts;
+    return -1;
+#endif
+}
+
+/* ffmpeg needs -i before the input */
+static int run_ffmpeg(const char *a1, const char *a2, const char *opts)
+{
+#ifdef _WIN32
+    WCHAR wcmd[4096];
+    WCHAR wa1[512], wa2[512], wopts[256];
+    STARTUPINFOW si;
+    PROCESS_INFORMATION pi;
+    DWORD code = 0;
+    MultiByteToWideChar(CP_UTF8, 0, a1, -1, wa1, 512);
+    MultiByteToWideChar(CP_UTF8, 0, a2, -1, wa2, 512);
+    MultiByteToWideChar(CP_UTF8, 0, opts, -1, wopts, 256);
+    swprintf_s(wcmd, 4096, L"ffmpeg -loglevel error -i \"%s\" \"%s\" %s", wa1, wa2, wopts);
+    memset(&si, 0, sizeof si);
+    si.cb = sizeof si;
+    memset(&pi, 0, sizeof pi);
+    if (!CreateProcessW(NULL, wcmd, NULL, NULL, FALSE, CREATE_NO_WINDOW,
+                        NULL, NULL, &si, &pi)) {
+        fprintf(stderr, "run_ffmpeg: CreateProcess failed (%lu)\n",
+                (unsigned long)GetLastError());
+        return -1;
+    }
+    WaitForSingleObject(pi.hProcess, INFINITE);
+    GetExitCodeProcess(pi.hProcess, &code);
+    CloseHandle(pi.hThread);
+    CloseHandle(pi.hProcess);
+    if (code != 0)
+        fprintf(stderr, "run_ffmpeg: exit code %lu: %ls\n", (unsigned long)code, wcmd);
+    return (int)code;
+#else
+    (void)a1; (void)a2; (void)opts;
+    return -1;
+#endif
+}
+
+int invfs_jxl_compress(const uint8_t *jpeg, size_t jpeg_len,
+                       uint8_t **jxl_out, size_t *jxl_len)
+{
+#ifdef _WIN32
+    char jpg_tmp[256], jxl_tmp[256];
+    static const char *cjxl = "D:\\VFS\\tools\\jxl\\x64-windows-static\\bin\\cjxl.exe";
+    FILE *f;
+    long sz;
+
+    _snprintf_s(jpg_tmp, sizeof jpg_tmp, _TRUNCATE, "%s\\%d_tmp.jpg",
+                getenv("TEMP") ? getenv("TEMP") : ".", (int)GetCurrentProcessId());
+    _snprintf_s(jxl_tmp, sizeof jxl_tmp, _TRUNCATE, "%s\\%d_tmp.jxl",
+                getenv("TEMP") ? getenv("TEMP") : ".", (int)GetCurrentProcessId());
+
+    f = fopen(jpg_tmp, "wb");
+    if (!f) return -1;
+    fwrite(jpeg, 1, jpeg_len, f);
+    fclose(f);
+
+    if (run_tool(cjxl, jpg_tmp, jxl_tmp, "-d 0") != 0) {
+        remove(jpg_tmp); remove(jxl_tmp);
+        return -1;
+    }
+    f = fopen(jxl_tmp, "rb");
+    if (!f) { remove(jpg_tmp); remove(jxl_tmp); return -1; }
+    fseek(f, 0, SEEK_END); sz = ftell(f); fseek(f, 0, SEEK_SET);
+    *jxl_out = (uint8_t *)malloc(sz ? (size_t)sz : 1);
+    if (!*jxl_out) { fclose(f); remove(jpg_tmp); remove(jxl_tmp); return -1; }
+    if (fread(*jxl_out, 1, (size_t)sz, f) != (size_t)sz) {
+        free(*jxl_out); fclose(f); remove(jpg_tmp); remove(jxl_tmp); return -1;
+    }
+    fclose(f);
+    *jxl_len = (size_t)sz;
+    remove(jpg_tmp); remove(jxl_tmp);
+    return 0;
+#else
+    (void)jpeg; (void)jpeg_len; (void)jxl_out; (void)jxl_len;
+    return -1;  /* Linux: JXL via tools not wired yet */
+#endif
+}
+
+int invfs_jxl_decompress(const uint8_t *jxl, size_t jxl_len,
+                         uint8_t **jpg_out, size_t *jpg_len)
+{
+#ifdef _WIN32
+    char jxl_tmp[256], jpg_tmp[256];
+    static const char *djxl = "D:\\VFS\\tools\\jxl\\x64-windows-static\\bin\\djxl.exe";
+    FILE *f;
+    long sz;
+
+    _snprintf_s(jxl_tmp, sizeof jxl_tmp, _TRUNCATE, "%s\\%d_tmp2.jxl",
+                getenv("TEMP") ? getenv("TEMP") : ".", (int)GetCurrentProcessId());
+    _snprintf_s(jpg_tmp, sizeof jpg_tmp, _TRUNCATE, "%s\\%d_tmp2.jpg",
+                getenv("TEMP") ? getenv("TEMP") : ".", (int)GetCurrentProcessId());
+
+    f = fopen(jxl_tmp, "wb");
+    if (!f) return -1;
+    fwrite(jxl, 1, jxl_len, f);
+    fclose(f);
+
+    if (run_tool(djxl, jxl_tmp, jpg_tmp, "") != 0) {
+        remove(jxl_tmp); remove(jpg_tmp);
+        return -1;
+    }
+    f = fopen(jpg_tmp, "rb");
+    if (!f) { remove(jxl_tmp); remove(jpg_tmp); return -1; }
+    fseek(f, 0, SEEK_END); sz = ftell(f); fseek(f, 0, SEEK_SET);
+    *jpg_out = (uint8_t *)malloc(sz ? (size_t)sz : 1);
+    if (!*jpg_out) { fclose(f); remove(jxl_tmp); remove(jpg_tmp); return -1; }
+    if (fread(*jpg_out, 1, (size_t)sz, f) != (size_t)sz) {
+        free(*jpg_out); fclose(f); remove(jxl_tmp); remove(jpg_tmp); return -1;
+    }
+    fclose(f);
+    *jpg_len = (size_t)sz;
+    remove(jxl_tmp); remove(jpg_tmp);
+    return 0;
+#else
+    (void)jxl; (void)jxl_len; (void)jpg_out; (void)jpg_len;
+    return -1;
+#endif
+}
+
+int invfs_ape_compress(const uint8_t *flac, size_t flac_len,
+                       uint8_t **ape_out, size_t *ape_len)
+{
+#ifdef _WIN32
+    char flac_tmp[256], wav_tmp[256], ape_tmp[256];
+    static const char *mac = "D:\\bin\\MAC.exe";
+    FILE *f;
+    long sz;
+
+    _snprintf_s(flac_tmp, sizeof flac_tmp, _TRUNCATE, "%s\\%d_tmp.flac",
+                getenv("TEMP") ? getenv("TEMP") : ".", (int)GetCurrentProcessId());
+    _snprintf_s(wav_tmp, sizeof wav_tmp, _TRUNCATE, "%s\\%d_tmp.wav",
+                getenv("TEMP") ? getenv("TEMP") : ".", (int)GetCurrentProcessId());
+    _snprintf_s(ape_tmp, sizeof ape_tmp, _TRUNCATE, "%s\\%d_tmp.ape",
+                getenv("TEMP") ? getenv("TEMP") : ".", (int)GetCurrentProcessId());
+
+    f = fopen(flac_tmp, "wb");
+    if (!f) return -1;
+    fwrite(flac, 1, flac_len, f);
+    fclose(f);
+
+    /* FLAC -> WAV (ffmpeg), WAV -> APE (MAC.exe -c4000, density profile) */
+    if (run_ffmpeg(flac_tmp, wav_tmp, "-y") != 0 ||
+        run_tool(mac, wav_tmp, ape_tmp, "-c4000") != 0) {
+        remove(flac_tmp); remove(wav_tmp); remove(ape_tmp);
+        return -1;
+    }
+    f = fopen(ape_tmp, "rb");
+    if (!f) { remove(flac_tmp); remove(wav_tmp); remove(ape_tmp); return -1; }
+    fseek(f, 0, SEEK_END); sz = ftell(f); fseek(f, 0, SEEK_SET);
+    *ape_out = (uint8_t *)malloc(sz ? (size_t)sz : 1);
+    if (!*ape_out) { fclose(f); remove(flac_tmp); remove(wav_tmp); remove(ape_tmp); return -1; }
+    if (fread(*ape_out, 1, (size_t)sz, f) != (size_t)sz) {
+        free(*ape_out); fclose(f); remove(flac_tmp); remove(wav_tmp); remove(ape_tmp); return -1;
+    }
+    fclose(f);
+    *ape_len = (size_t)sz;
+    remove(flac_tmp); remove(wav_tmp); remove(ape_tmp);
+    return 0;
+#else
+    (void)flac; (void)flac_len; (void)ape_out; (void)ape_len;
+    return -1;
+#endif
+}
+
+int invfs_ape_decompress(const uint8_t *ape, size_t ape_len,
+                         uint8_t **flac_out, size_t *flac_len)
+{
+#ifdef _WIN32
+    char ape_tmp[256], wav_tmp[256], flac_tmp[256];
+    static const char *mac = "D:\\bin\\MAC.exe";
+    FILE *f;
+    long sz;
+
+    _snprintf_s(ape_tmp, sizeof ape_tmp, _TRUNCATE, "%s\\%d_tmp2.ape",
+                getenv("TEMP") ? getenv("TEMP") : ".", (int)GetCurrentProcessId());
+    _snprintf_s(wav_tmp, sizeof wav_tmp, _TRUNCATE, "%s\\%d_tmp2.wav",
+                getenv("TEMP") ? getenv("TEMP") : ".", (int)GetCurrentProcessId());
+    _snprintf_s(flac_tmp, sizeof flac_tmp, _TRUNCATE, "%s\\%d_tmp2.flac",
+                getenv("TEMP") ? getenv("TEMP") : ".", (int)GetCurrentProcessId());
+
+    f = fopen(ape_tmp, "wb");
+    if (!f) return -1;
+    fwrite(ape, 1, ape_len, f);
+    fclose(f);
+
+    /* APE -> WAV (MAC.exe -d), WAV -> FLAC (ffmpeg) */
+    if (run_tool(mac, ape_tmp, wav_tmp, "-d") != 0 ||
+        run_ffmpeg(wav_tmp, flac_tmp, "-y") != 0) {
+        remove(ape_tmp); remove(wav_tmp); remove(flac_tmp);
+        return -1;
+    }
+    f = fopen(flac_tmp, "rb");
+    if (!f) { remove(ape_tmp); remove(wav_tmp); remove(flac_tmp); return -1; }
+    fseek(f, 0, SEEK_END); sz = ftell(f); fseek(f, 0, SEEK_SET);
+    *flac_out = (uint8_t *)malloc(sz ? (size_t)sz : 1);
+    if (!*flac_out) { fclose(f); remove(ape_tmp); remove(wav_tmp); remove(flac_tmp); return -1; }
+    if (fread(*flac_out, 1, (size_t)sz, f) != (size_t)sz) {
+        free(*flac_out); fclose(f); remove(ape_tmp); remove(wav_tmp); remove(flac_tmp); return -1;
+    }
+    fclose(f);
+    *flac_len = (size_t)sz;
+    remove(ape_tmp); remove(wav_tmp); remove(flac_tmp);
+    return 0;
+#else
+    (void)ape; (void)ape_len; (void)flac_out; (void)flac_len;
+    return -1;
+#endif
+}
+
+/* create inode storing one blob (JXL/APE/...) as a single segment */
+static uint64_t vol_create_blob_file(invfs_volume *v, const char *name,
+                                     const uint8_t *blob, size_t blob_len,
+                                     uint64_t orig_size, uint32_t algo)
+{
+    uint64_t inode_id = v->next_inode_id++;
+    uint64_t phys_blocks = (blob_len + 8 + INVFS_BLOCK_SIZE - 1) / INVFS_BLOCK_SIZE;
+    uint64_t pba = alloc_blocks(v, v->sb.shadow_zone_start, v->sb.shadow_zone_blocks,
+                                phys_blocks);
+    uint8_t hdr4[8];
+    size_t rec_size;
+    uint8_t *rec;
+    invfs_inode_rec *rh;
+    invfs_ast_recipe_header ast_h;
+    invfs_ast_block_entry e;
+    uint32_t crc;
+
+    if (pba == 0) return 0;
+    hdr4[0] = (uint8_t)(blob_len & 0xFF);
+    hdr4[1] = (uint8_t)((blob_len >> 8) & 0xFF);
+    hdr4[2] = (uint8_t)((blob_len >> 16) & 0xFF);
+    hdr4[3] = (uint8_t)((blob_len >> 24) & 0xFF);
+    {
+        uint32_t bcrc = invfs_crc32c(blob, blob_len);
+        hdr4[4] = (uint8_t)(bcrc & 0xFF);
+        hdr4[5] = (uint8_t)((bcrc >> 8) & 0xFF);
+        hdr4[6] = (uint8_t)((bcrc >> 16) & 0xFF);
+        hdr4[7] = (uint8_t)((bcrc >> 24) & 0xFF);
+    }
+
+    if (io_seek(&v->io, pba * INVFS_BLOCK_SIZE) != 0 ||
+        io_write(&v->io, hdr4, 8) != 0 ||
+        io_write(&v->io, blob, blob_len) != 0) {
+        vol_free_blocks(v, pba, phys_blocks);
+        return 0;
+    }
+    if (vol_map(v, inode_id, 0, pba, (uint32_t)phys_blocks) != 0) {
+        vol_free_blocks(v, pba, phys_blocks);
+        return 0;
+    }
+
+    memset(&ast_h, 0, sizeof ast_h);
+    ast_h.version = 1;
+    ast_h.file_size = (uint32_t)orig_size;
+    ast_h.num_blocks = 1;
+    memset(&e, 0, sizeof e);
+    e.file_offset = 0;
+    e.length = orig_size;
+    e.zone = INVFS_ZONE_BINARY;
+    e.algo = algo;
+    e.block_id = 0;
+
+    rec_size = sizeof(invfs_inode_rec) + sizeof(ast_h) + sizeof(e);
+    rec = (uint8_t *)calloc(1, rec_size);
+    if (!rec) return 0;
+    rh = (invfs_inode_rec *)rec;
+    rh->magic = INODE_REC_MAGIC;
+    rh->rec_len = (uint32_t)rec_size;
+    rh->inode_id = inode_id;
+    rh->file_size = orig_size;
+    rh->ctime = (uint64_t)time(NULL);
+    rh->name_len = (uint32_t)strlen(name);
+    strncpy(rh->name, name, sizeof(rh->name) - 1);
+    memcpy(rec + sizeof(invfs_inode_rec), &ast_h, sizeof ast_h);
+    memcpy(rec + sizeof(invfs_inode_rec) + sizeof ast_h, &e, sizeof e);
+    crc = invfs_crc32c(rec, rec_size);
+
+    if (v->inode_area_pos + rec_size + 4 > v->inode_area_end) { free(rec); return 0; }
+    if (io_seek(&v->io, v->inode_area_pos) != 0 ||
+        io_write(&v->io, rec, rec_size) != 0 ||
+        io_write(&v->io, &crc, 4) != 0) { free(rec); return 0; }
+    v->inode_area_pos += rec_size + 4;
+    free(rec);
+    return inode_id;
+}
+
+uint64_t vol_create_jxl_file(invfs_volume *v, const char *name,
+                             const uint8_t *jxl, size_t jxl_len,
+                             uint64_t orig_size)
+{
+    return vol_create_blob_file(v, name, jxl, jxl_len, orig_size, INVFS_ALGO_JXL);
+}
+
+uint64_t vol_create_ape_file(invfs_volume *v, const char *name,
+                             const uint8_t *ape, size_t ape_len,
+                             uint64_t orig_size)
+{
+    return vol_create_blob_file(v, name, ape, ape_len, orig_size, INVFS_ALGO_APE);
+}
