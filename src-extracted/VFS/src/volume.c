@@ -203,6 +203,7 @@ typedef struct invfs_volume {
 static const uint64_t JOURNAL_BLOCKS = INVFS_JOURNAL_BLOCKS;
 
 static void l2p_remove(invfs_volume *v, uint64_t inode, uint64_t lba);
+static int vol_write_sb(invfs_volume *v);
 
 /* inode area record (append-only); invfs_inode_rec lives in invarifs.h */
 #define INODE_REC_MAGIC 0x444F4E49u  /* "INOD" LE */
@@ -1043,7 +1044,13 @@ int vol_fsck_scan(invfs_volume *v, invfs_fsck_report *rep, int fix)
 
     rep->l2p_entries = l2p_n;
 
-    if (fix && (rep->orphans || rep->missing || rep->bad_recs)) {
+    /* repair when there is structural damage, or when the volume is merely
+     * dirty: a scan that found nothing else is exactly a clean-close
+     * simulation, so rewriting bitmap/journal and setting CLEAN is safe.
+     * Volumes with l2p_miss keep their read-only hold: mappings are gone
+     * from the journal and cannot be reconstructed without human review. */
+    if (fix && (rep->orphans || rep->missing || rep->bad_recs ||
+                (!rep->l2p_miss && v->sb.state != INVFS_STATE_CLEAN))) {
         /* journal rewrite: keep only live-AST mappings (drops stale
          * entries of records fsck could not verify) */
         if (l2p_n) {

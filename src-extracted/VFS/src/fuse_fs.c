@@ -24,6 +24,8 @@ static invfs_volume *g_vol;
 static pthread_mutex_t g_io_lock = PTHREAD_MUTEX_INITIALIZER;
 /* open-handle counter: background sweep only when idle */
 static volatile int g_open_handles = 0;
+/* set at unmount: stops the background sweep thread before vol_close */
+static volatile int g_shutdown = 0;
 static void rebuild_table_locked(void);   /* fwd (defined below) */
 
 /* ---- file table snapshot ---- */
@@ -333,8 +335,12 @@ static void *fuse_sweep_thread(void *arg)
     if (interval < 1) interval = 1;
     for (;;) {
         sleep(interval);
-        if (g_open_handles != 0) continue;
+        if (g_shutdown || g_open_handles != 0) continue;
         pthread_mutex_lock(&g_io_lock);
+        if (g_shutdown || !g_vol) {   /* unmount won the race */
+            pthread_mutex_unlock(&g_io_lock);
+            break;
+        }
         if (vol_pending_count(g_vol) > 0) {
             int n = vol_sweep_pending(g_vol);
             if (n > 0) {
@@ -360,9 +366,15 @@ static int invf_flush(const char *path, struct fuse_file_info *fi)
         /* append the new record before tombstoning the old one: the delete-first
            order lost the existing file when the create could not fit */
         uint64_t nid = vol_replace_file(g_vol, c->name, c->buf, c->len);
-        if (nid == 0)
+        if (nid == 0) {
+            /* late ENOSPC must be visible to the writer, never dropped
+             * silently (audit H4; Dokan already reports STATUS_DISK_FULL) */
             fprintf(stderr, "invf: vol_replace_file failed (%s)\n", c->name);
-        else {
+            vol_flush(g_vol);
+            rebuild_table_locked();
+            pthread_mutex_unlock(&g_io_lock);
+            return -ENOSPC;
+        } else {
             fprintf(stderr, "invf: flush %s len=%zu ok\n", c->name, c->len);
             vol_mark_pending(g_vol, nid);   /* on-demand sweep */
         }
@@ -385,6 +397,22 @@ static int invf_release(const char *path, struct fuse_file_info *fi)
     }
     __sync_fetch_and_sub(&g_open_handles, 1);
     return 0;
+}
+
+/* graceful unmount: persist superblock CLEAN so the next mount is writable
+ * without a manual fsck (audit PB3: main never closed the volume, so every
+ * session -- including perfectly clean ones -- left state=DIRTY) */
+static void invf_destroy(void *private_data)
+{
+    (void)private_data;
+    g_shutdown = 1;
+    pthread_mutex_lock(&g_io_lock);
+    if (g_vol) {
+        vol_close(g_vol);   /* flush + journal compact + sb CLEAN */
+        g_vol = NULL;
+        fprintf(stderr, "invf: volume closed cleanly\n");
+    }
+    pthread_mutex_unlock(&g_io_lock);
 }
 
 static int invf_unlink(const char *path)
@@ -414,6 +442,7 @@ static const struct fuse_operations invf_ops = {
     .flush = invf_flush,
     .release = invf_release,
     .unlink = invf_unlink,
+    .destroy = invf_destroy,
 };
 
 int main(int argc, char *argv[])
@@ -464,6 +493,14 @@ int main(int argc, char *argv[])
             fprintf(stderr, "[fuse_arg %d] %s\n", k, fuse_argv[k]);
         rc = fuse_main(fuse_argc, fuse_argv, &invf_ops, NULL);
         fprintf(stderr, "[fuse_main rc=%d]\n", rc);
+        /* fallback: if the session never reached .destroy (early mount
+         * failure), still close so a read-only-opened volume is not left
+         * looking crashed */
+        if (g_vol) {
+            g_shutdown = 1;
+            vol_close(g_vol);
+            g_vol = NULL;
+        }
         return rc;
     }
 }
