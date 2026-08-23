@@ -1,0 +1,10 @@
+counter_high     function    153 /home/user/InvariantFS/src-extracted/VFS/src/blake3_impl.h INLINE uint32_t counter_high(uint64_t counter) {
+counter_low      function    151 /home/user/InvariantFS/src-extracted/VFS/src/blake3_impl.h INLINE uint32_t counter_low(uint64_t counter) { return (uint32_t)counter; }
+highest_one      function    102 /home/user/InvariantFS/src-extracted/VFS/src/blake3_impl.h static unsigned int highest_one(uint64_t x) {
+load32           function    157 /home/user/InvariantFS/src-extracted/VFS/src/blake3_impl.h INLINE uint32_t load32(const void *src) {
+load_block_words function    175 /home/user/InvariantFS/src-extracted/VFS/src/blake3_impl.h INLINE void load_block_words(const uint8_t block[BLAKE3_BLOCK_LEN],
+load_key_words   function    163 /home/user/InvariantFS/src-extracted/VFS/src/blake3_impl.h INLINE void load_key_words(const uint8_t key[BLAKE3_KEY_LEN],
+popcnt           function    132 /home/user/InvariantFS/src-extracted/VFS/src/blake3_impl.h INLINE unsigned int popcnt(uint64_t x) {
+round_down_to_power_of_2 function    147 /home/user/InvariantFS/src-extracted/VFS/src/blake3_impl.h INLINE uint64_t round_down_to_power_of_2(uint64_t x) {
+store32          function    182 /home/user/InvariantFS/src-extracted/VFS/src/blake3_impl.h INLINE void store32(void *dst, uint32_t w) {
+store_cv_words   function    190 /home/user/InvariantFS/src-extracted/VFS/src/blake3_impl.h INLINE void store_cv_words(uint8_t bytes_out[32], uint32_t cv_words[8]) {

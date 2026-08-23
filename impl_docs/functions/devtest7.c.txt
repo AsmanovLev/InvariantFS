@@ -1,0 +1,1 @@
+wmain            function      3 /home/user/InvariantFS/src-extracted/VFS/src/devtest7.c int wmain(void) {

@@ -1,0 +1,8 @@
+blake3_compress_in_place_portable function     84 /home/user/InvariantFS/src-extracted/VFS/src/blake3_portable.c void blake3_compress_in_place_portable(uint32_t cv[8],
+blake3_compress_xof_portable function    100 /home/user/InvariantFS/src-extracted/VFS/src/blake3_portable.c void blake3_compress_xof_portable(const uint32_t cv[8],
+blake3_hash_many_portable function    145 /home/user/InvariantFS/src-extracted/VFS/src/blake3_portable.c void blake3_hash_many_portable(const uint8_t *const *inputs, size_t num_inputs,
+compress_pre     function     37 /home/user/InvariantFS/src-extracted/VFS/src/blake3_portable.c INLINE void compress_pre(uint32_t state[16], const uint32_t cv[8],
+g                function      8 /home/user/InvariantFS/src-extracted/VFS/src/blake3_portable.c INLINE void g(uint32_t *state, size_t a, size_t b, size_t c, size_t d,
+hash_one_portable function    125 /home/user/InvariantFS/src-extracted/VFS/src/blake3_portable.c INLINE void hash_one_portable(const uint8_t *input, size_t blocks,
+rotr32           function      4 /home/user/InvariantFS/src-extracted/VFS/src/blake3_portable.c INLINE uint32_t rotr32(uint32_t w, uint32_t c) {
+round_fn         function     20 /home/user/InvariantFS/src-extracted/VFS/src/blake3_portable.c INLINE void round_fn(uint32_t state[16], const uint32_t *msg, size_t round) {

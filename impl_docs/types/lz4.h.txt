@@ -1,0 +1,16 @@
+LZ4_byte         typedef     702 /home/user/InvariantFS/src-extracted/VFS/src/lz4.h typedef uint8_t LZ4_byte;
+LZ4_byte         typedef     707 /home/user/InvariantFS/src-extracted/VFS/src/lz4.h typedef unsigned char LZ4_byte;
+LZ4_i8           typedef     701 /home/user/InvariantFS/src-extracted/VFS/src/lz4.h typedef int8_t LZ4_i8;
+LZ4_i8           typedef     706 /home/user/InvariantFS/src-extracted/VFS/src/lz4.h typedef signed char LZ4_i8;
+LZ4_streamDecode_t typedef     457 /home/user/InvariantFS/src-extracted/VFS/src/lz4.h typedef union LZ4_streamDecode_u LZ4_streamDecode_t; /* tracking context */
+LZ4_streamDecode_t_internal typedef     763 /home/user/InvariantFS/src-extracted/VFS/src/lz4.h } LZ4_streamDecode_t_internal;
+LZ4_streamDecode_u union       766 /home/user/InvariantFS/src-extracted/VFS/src/lz4.h union LZ4_streamDecode_u {
+LZ4_stream_t     typedef     314 /home/user/InvariantFS/src-extracted/VFS/src/lz4.h typedef union LZ4_stream_u LZ4_stream_t; /* incomplete type (defined later) */
+LZ4_stream_t_internal struct      719 /home/user/InvariantFS/src-extracted/VFS/src/lz4.h struct LZ4_stream_t_internal {
+LZ4_stream_t_internal typedef     718 /home/user/InvariantFS/src-extracted/VFS/src/lz4.h typedef struct LZ4_stream_t_internal LZ4_stream_t_internal;
+LZ4_stream_u     union       730 /home/user/InvariantFS/src-extracted/VFS/src/lz4.h union LZ4_stream_u {
+LZ4_u16          typedef     703 /home/user/InvariantFS/src-extracted/VFS/src/lz4.h typedef uint16_t LZ4_u16;
+LZ4_u16          typedef     708 /home/user/InvariantFS/src-extracted/VFS/src/lz4.h typedef unsigned short LZ4_u16;
+LZ4_u32          typedef     704 /home/user/InvariantFS/src-extracted/VFS/src/lz4.h typedef uint32_t LZ4_u32;
+LZ4_u32          typedef     709 /home/user/InvariantFS/src-extracted/VFS/src/lz4.h typedef unsigned int LZ4_u32;
+__anonc2b1ebbb0108 struct      758 /home/user/InvariantFS/src-extracted/VFS/src/lz4.h typedef struct {

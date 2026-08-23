@@ -1,0 +1,8 @@
+draw_bar         function     53 /home/user/InvariantFS/src-extracted/VFS/src/stat.c static void draw_bar(const invfs_volume *v, const invfs_superblock *sb,
+enable_ansi      function     33 /home/user/InvariantFS/src-extracted/VFS/src/stat.c static void enable_ansi(void)
+fent_find        function    126 /home/user/InvariantFS/src-extracted/VFS/src/stat.c static size_t fent_find(const uint32_t *hb, size_t hmask, const fent *tbl,
+fent_hash        function    117 /home/user/InvariantFS/src-extracted/VFS/src/stat.c static uint64_t fent_hash(const char *s)
+fent_insert      function    136 /home/user/InvariantFS/src-extracted/VFS/src/stat.c static int fent_insert(uint32_t **hbp, size_t *hmaskp, const fent *tbl,
+human            function    105 /home/user/InvariantFS/src-extracted/VFS/src/stat.c static void human(uint64_t bytes, char *buf, size_t cap)
+main             function    160 /home/user/InvariantFS/src-extracted/VFS/src/stat.c int main(int argc, char **argv)
+zone_name        function     43 /home/user/InvariantFS/src-extracted/VFS/src/stat.c static const char *zone_name(int z)

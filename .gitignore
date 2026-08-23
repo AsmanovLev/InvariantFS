@@ -1,0 +1,18 @@
+# build artifacts
+bin/invf-*
+bin/7zz
+*.o
+*.a
+
+# volume images (never commit)
+*.img
+vm/
+
+# runtime logs
+logs/
+
+# external clone with own .git
+tools/7-Zip-zstd/
+
+# empty by design
+downloads/

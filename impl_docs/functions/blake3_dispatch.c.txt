@@ -1,0 +1,9 @@
+blake3_compress_in_place function    168 /home/user/InvariantFS/src-extracted/VFS/src/blake3_dispatch.c void blake3_compress_in_place(uint32_t cv[8],
+blake3_compress_xof function    197 /home/user/InvariantFS/src-extracted/VFS/src/blake3_dispatch.c void blake3_compress_xof(const uint32_t cv[8],
+blake3_hash_many function    250 /home/user/InvariantFS/src-extracted/VFS/src/blake3_dispatch.c void blake3_hash_many(const uint8_t *const *inputs, size_t num_inputs,
+blake3_simd_degree function    303 /home/user/InvariantFS/src-extracted/VFS/src/blake3_dispatch.c size_t blake3_simd_degree(void) {
+blake3_xof_many  function    227 /home/user/InvariantFS/src-extracted/VFS/src/blake3_dispatch.c void blake3_xof_many(const uint32_t cv[8],
+cpuid            function     60 /home/user/InvariantFS/src-extracted/VFS/src/blake3_dispatch.c static void cpuid(uint32_t out[4], uint32_t id) {
+cpuidex          function     76 /home/user/InvariantFS/src-extracted/VFS/src/blake3_dispatch.c static void cpuidex(uint32_t out[4], uint32_t id, uint32_t sid) {
+get_cpu_features function    114 /home/user/InvariantFS/src-extracted/VFS/src/blake3_dispatch.c get_cpu_features(void) {
+xgetbv           function     50 /home/user/InvariantFS/src-extracted/VFS/src/blake3_dispatch.c static uint64_t xgetbv(void) {

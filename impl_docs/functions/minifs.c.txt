@@ -1,0 +1,3 @@
+MinGetSecurityByName function     16 /home/user/InvariantFS/src-extracted/VFS/src/minifs.c static NTSTATUS MinGetSecurityByName(FSP_FILE_SYSTEM *fs, PCWSTR name,
+MinGetVolumeInfo function      6 /home/user/InvariantFS/src-extracted/VFS/src/minifs.c static NTSTATUS MinGetVolumeInfo(FSP_FILE_SYSTEM *fs, FSP_FSCTL_VOLUME_INFO *vi)
+wmain            function     24 /home/user/InvariantFS/src-extracted/VFS/src/minifs.c int wmain(int argc, wchar_t **argv)

@@ -1,0 +1,63 @@
+ZSTD_CCtx        typedef     259 /home/user/InvariantFS/src-extracted/VFS/src/zstd.h typedef struct ZSTD_CCtx_s ZSTD_CCtx;
+ZSTD_CCtx_params typedef    1276 /home/user/InvariantFS/src-extracted/VFS/src/zstd.h typedef struct ZSTD_CCtx_params_s ZSTD_CCtx_params;
+ZSTD_CDict       typedef     956 /home/user/InvariantFS/src-extracted/VFS/src/zstd.h typedef struct ZSTD_CDict_s ZSTD_CDict;
+ZSTD_CStream     typedef     753 /home/user/InvariantFS/src-extracted/VFS/src/zstd.h typedef ZSTD_CCtx ZSTD_CStream; /**< CCtx and CStream are now effectively same object (>= v1.3.0) */
+ZSTD_DCtx        typedef     282 /home/user/InvariantFS/src-extracted/VFS/src/zstd.h typedef struct ZSTD_DCtx_s ZSTD_DCtx;
+ZSTD_DDict       typedef     989 /home/user/InvariantFS/src-extracted/VFS/src/zstd.h typedef struct ZSTD_DDict_s ZSTD_DDict;
+ZSTD_DStream     typedef     880 /home/user/InvariantFS/src-extracted/VFS/src/zstd.h typedef ZSTD_DCtx ZSTD_DStream; /**< DCtx and DStream are now effectively same object (>= v1.3.0) */
+ZSTD_EndDirective typedef     771 /home/user/InvariantFS/src-extracted/VFS/src/zstd.h } ZSTD_EndDirective;
+ZSTD_ResetDirective typedef     570 /home/user/InvariantFS/src-extracted/VFS/src/zstd.h } ZSTD_ResetDirective;
+ZSTD_Sequence    typedef    1313 /home/user/InvariantFS/src-extracted/VFS/src/zstd.h } ZSTD_Sequence;
+ZSTD_allocFunction typedef    1792 /home/user/InvariantFS/src-extracted/VFS/src/zstd.h typedef void* (*ZSTD_allocFunction) (void* opaque, size_t size);
+ZSTD_bounds      typedef     525 /home/user/InvariantFS/src-extracted/VFS/src/zstd.h } ZSTD_bounds;
+ZSTD_cParameter  typedef     519 /home/user/InvariantFS/src-extracted/VFS/src/zstd.h } ZSTD_cParameter;
+ZSTD_compressionParameters typedef    1323 /home/user/InvariantFS/src-extracted/VFS/src/zstd.h } ZSTD_compressionParameters;
+ZSTD_customMem   typedef    1794 /home/user/InvariantFS/src-extracted/VFS/src/zstd.h typedef struct { ZSTD_allocFunction customAlloc; ZSTD_freeFunction customFree; void* opaque; } ZSTD_customMem;
+ZSTD_dParameter  typedef     645 /home/user/InvariantFS/src-extracted/VFS/src/zstd.h } ZSTD_dParameter;
+ZSTD_dictAttachPref_e typedef    1403 /home/user/InvariantFS/src-extracted/VFS/src/zstd.h } ZSTD_dictAttachPref_e;
+ZSTD_dictContentType_e typedef    1340 /home/user/InvariantFS/src-extracted/VFS/src/zstd.h } ZSTD_dictContentType_e;
+ZSTD_dictLoadMethod_e typedef    1345 /home/user/InvariantFS/src-extracted/VFS/src/zstd.h } ZSTD_dictLoadMethod_e;
+ZSTD_forceIgnoreChecksum_e typedef    1358 /home/user/InvariantFS/src-extracted/VFS/src/zstd.h } ZSTD_forceIgnoreChecksum_e;
+ZSTD_format_e    typedef    1352 /home/user/InvariantFS/src-extracted/VFS/src/zstd.h } ZSTD_format_e;
+ZSTD_frameHeader typedef    1483 /home/user/InvariantFS/src-extracted/VFS/src/zstd.h } ZSTD_frameHeader;
+ZSTD_frameParameters typedef    1329 /home/user/InvariantFS/src-extracted/VFS/src/zstd.h } ZSTD_frameParameters;
+ZSTD_frameProgression typedef    2634 /home/user/InvariantFS/src-extracted/VFS/src/zstd.h } ZSTD_frameProgression;
+ZSTD_frameType_e typedef    1472 /home/user/InvariantFS/src-extracted/VFS/src/zstd.h typedef enum { ZSTD_frame, ZSTD_skippableFrame } ZSTD_frameType_e;
+ZSTD_freeFunction typedef    1793 /home/user/InvariantFS/src-extracted/VFS/src/zstd.h typedef void (*ZSTD_freeFunction) (void* opaque, void* address);
+ZSTD_inBuffer    typedef     682 /home/user/InvariantFS/src-extracted/VFS/src/zstd.h } ZSTD_inBuffer;
+ZSTD_inBuffer_s  struct      678 /home/user/InvariantFS/src-extracted/VFS/src/zstd.h typedef struct ZSTD_inBuffer_s {
+ZSTD_literalCompressionMode_e typedef    1412 /home/user/InvariantFS/src-extracted/VFS/src/zstd.h } ZSTD_literalCompressionMode_e;
+ZSTD_nextInputType_e typedef    3027 /home/user/InvariantFS/src-extracted/VFS/src/zstd.h typedef enum { ZSTDnit_frameHeader, ZSTDnit_blockHeader, ZSTDnit_block, ZSTDnit_lastBlock, ZSTDnit_checksum, ZSTDnit_skippableFrame } ZSTD_nextInputType_e;
+ZSTD_outBuffer   typedef     688 /home/user/InvariantFS/src-extracted/VFS/src/zstd.h } ZSTD_outBuffer;
+ZSTD_outBuffer_s struct      684 /home/user/InvariantFS/src-extracted/VFS/src/zstd.h typedef struct ZSTD_outBuffer_s {
+ZSTD_paramSwitch_e typedef    1422 /home/user/InvariantFS/src-extracted/VFS/src/zstd.h } ZSTD_paramSwitch_e;
+ZSTD_parameters  typedef    1334 /home/user/InvariantFS/src-extracted/VFS/src/zstd.h } ZSTD_parameters;
+ZSTD_refMultipleDDicts_e typedef    1364 /home/user/InvariantFS/src-extracted/VFS/src/zstd.h } ZSTD_refMultipleDDicts_e;
+ZSTD_sequenceFormat_e typedef    1544 /home/user/InvariantFS/src-extracted/VFS/src/zstd.h } ZSTD_sequenceFormat_e;
+ZSTD_sequenceProducer_F typedef    2821 /home/user/InvariantFS/src-extracted/VFS/src/zstd.h typedef size_t (*ZSTD_sequenceProducer_F) (
+ZSTD_strategy    typedef     326 /home/user/InvariantFS/src-extracted/VFS/src/zstd.h } ZSTD_strategy;
+ZSTD_threadPool  typedef    1822 /home/user/InvariantFS/src-extracted/VFS/src/zstd.h typedef struct POOL_ctx_s ZSTD_threadPool;
+__anon393ce7460103 enum        315 /home/user/InvariantFS/src-extracted/VFS/src/zstd.h typedef enum { ZSTD_fast=1,
+__anon393ce7460203 enum        328 /home/user/InvariantFS/src-extracted/VFS/src/zstd.h typedef enum {
+__anon393ce7460308 struct      521 /home/user/InvariantFS/src-extracted/VFS/src/zstd.h typedef struct {
+__anon393ce7460403 enum        566 /home/user/InvariantFS/src-extracted/VFS/src/zstd.h typedef enum {
+__anon393ce7460503 enum        617 /home/user/InvariantFS/src-extracted/VFS/src/zstd.h typedef enum {
+__anon393ce7460603 enum        760 /home/user/InvariantFS/src-extracted/VFS/src/zstd.h typedef enum {
+__anon393ce7460708 struct     1278 /home/user/InvariantFS/src-extracted/VFS/src/zstd.h typedef struct {
+__anon393ce7460808 struct     1315 /home/user/InvariantFS/src-extracted/VFS/src/zstd.h typedef struct {
+__anon393ce7460908 struct     1325 /home/user/InvariantFS/src-extracted/VFS/src/zstd.h typedef struct {
+__anon393ce7460a08 struct     1331 /home/user/InvariantFS/src-extracted/VFS/src/zstd.h typedef struct {
+__anon393ce7460b03 enum       1336 /home/user/InvariantFS/src-extracted/VFS/src/zstd.h typedef enum {
+__anon393ce7460c03 enum       1342 /home/user/InvariantFS/src-extracted/VFS/src/zstd.h typedef enum {
+__anon393ce7460d03 enum       1347 /home/user/InvariantFS/src-extracted/VFS/src/zstd.h typedef enum {
+__anon393ce7460e03 enum       1354 /home/user/InvariantFS/src-extracted/VFS/src/zstd.h typedef enum {
+__anon393ce7460f03 enum       1360 /home/user/InvariantFS/src-extracted/VFS/src/zstd.h typedef enum {
+__anon393ce7461003 enum       1366 /home/user/InvariantFS/src-extracted/VFS/src/zstd.h typedef enum {
+__anon393ce7461103 enum       1405 /home/user/InvariantFS/src-extracted/VFS/src/zstd.h typedef enum {
+__anon393ce7461203 enum       1414 /home/user/InvariantFS/src-extracted/VFS/src/zstd.h typedef enum {
+__anon393ce7461303 enum       1472 /home/user/InvariantFS/src-extracted/VFS/src/zstd.h typedef enum { ZSTD_frame, ZSTD_skippableFrame } ZSTD_frameType_e;
+__anon393ce7461408 struct     1473 /home/user/InvariantFS/src-extracted/VFS/src/zstd.h typedef struct {
+__anon393ce7461503 enum       1541 /home/user/InvariantFS/src-extracted/VFS/src/zstd.h typedef enum {
+__anon393ce7461608 struct     1794 /home/user/InvariantFS/src-extracted/VFS/src/zstd.h typedef struct { ZSTD_allocFunction customAlloc; ZSTD_freeFunction customFree; void* opaque; } ZSTD_customMem;
+__anon393ce7461708 struct     2627 /home/user/InvariantFS/src-extracted/VFS/src/zstd.h typedef struct {
+__anon393ce7461803 enum       3027 /home/user/InvariantFS/src-extracted/VFS/src/zstd.h typedef enum { ZSTDnit_frameHeader, ZSTDnit_blockHeader, ZSTDnit_block, ZSTDnit_lastBlock, ZSTDnit_checksum, ZSTDnit_skippableFrame } ZSTD_nextInputType_e;

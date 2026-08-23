@@ -1,0 +1,2 @@
+main             function     57 /home/user/InvariantFS/src-extracted/VFS/src/rangechk.c int main(int argc, char **argv)
+scan             function     23 /home/user/InvariantFS/src-extracted/VFS/src/rangechk.c static int scan(invfs_volume *v, uint64_t inode, const uint8_t *whole,

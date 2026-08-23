@@ -1,0 +1,1 @@
+main             function      5 /home/user/InvariantFS/src-extracted/VFS/src/range_test.c int main(int argc, char **argv) {

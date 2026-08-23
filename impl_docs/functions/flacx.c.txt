@@ -1,0 +1,33 @@
+br_get           function     42 /home/user/InvariantFS/src-extracted/VFS/src/flacx.c static int br_get(br_t *b, int n)
+bw_align         function    115 /home/user/InvariantFS/src-extracted/VFS/src/flacx.c static void bw_align(bw_t *b)
+bw_free          function     64 /home/user/InvariantFS/src-extracted/VFS/src/flacx.c static void bw_free(bw_t *b) { free(b->buf); b->buf = NULL; b->bits = 0; b->cap = 0; }
+bw_grow          function     65 /home/user/InvariantFS/src-extracted/VFS/src/flacx.c static void bw_grow(bw_t *b, size_t need)
+bw_init          function     63 /home/user/InvariantFS/src-extracted/VFS/src/flacx.c static void bw_init(bw_t *b) { b->buf = NULL; b->bits = 0; b->cap = 0; }
+bw_put           function     76 /home/user/InvariantFS/src-extracted/VFS/src/flacx.c static void bw_put(bw_t *b, uint32_t v, int n)
+bw_size          function    119 /home/user/InvariantFS/src-extracted/VFS/src/flacx.c static size_t bw_size(const bw_t *b) { return b->bits / 8; }
+bw_zeros         function     93 /home/user/InvariantFS/src-extracted/VFS/src/flacx.c static void bw_zeros(bw_t *b, size_t n)
+crc16            function    132 /home/user/InvariantFS/src-extracted/VFS/src/flacx.c static uint16_t crc16(const uint8_t *p, size_t n)
+crc8             function    122 /home/user/InvariantFS/src-extracted/VFS/src/flacx.c static uint8_t crc8(const uint8_t *p, size_t n)
+flacx_extract    function    467 /home/user/InvariantFS/src-extracted/VFS/src/flacx.c int flacx_extract(const uint8_t *d, size_t n, uint8_t **recipe_out, size_t *rlen_out,
+flacx_rebuild    function    754 /home/user/InvariantFS/src-extracted/VFS/src/flacx.c int flacx_rebuild(const uint8_t *wav, size_t wlen, const uint8_t *r, size_t rn,
+flacx_recipe_num_covers function    679 /home/user/InvariantFS/src-extracted/VFS/src/flacx.c int flacx_recipe_num_covers(const uint8_t *r, size_t rn)
+frame_channels   function    154 /home/user/InvariantFS/src-extracted/VFS/src/flacx.c static int frame_channels(int ch_assign)
+main             function   1046 /home/user/InvariantFS/src-extracted/VFS/src/flacx.c int main(int argc, char **argv)
+parse_frame      function    307 /home/user/InvariantFS/src-extracted/VFS/src/flacx.c static long parse_frame(const uint8_t *d, size_t n, long off,
+put_utf8         function    696 /home/user/InvariantFS/src-extracted/VFS/src/flacx.c static void put_utf8(bw_t *b, uint64_t v)
+rd16             function    149 /home/user/InvariantFS/src-extracted/VFS/src/flacx.c static uint16_t rd16(const uint8_t **p) { uint16_t v = (uint16_t)((*p)[0] | ((*p)[1] << 8)); *p += 2; return v; }
+rd32             function    150 /home/user/InvariantFS/src-extracted/VFS/src/flacx.c static uint32_t rd32(const uint8_t **p) { uint32_t v = (uint32_t)((*p)[0] | ((*p)[1]<<8) | ((*p)[2]<<16) | ((uint32_t)(*p)[3]<<24)); *p += 4; return v; }
+rd64             function    151 /home/user/InvariantFS/src-extracted/VFS/src/flacx.c static uint64_t rd64(const uint8_t **p) { uint64_t v = 0; for (int i = 0; i < 8; i++) v |= (uint64_t)(*p)[i] << (8*i); *p += 8; return v; }
+rd8              function    148 /home/user/InvariantFS/src-extracted/VFS/src/flacx.c static uint8_t rd8(const uint8_t **p) { return *(*p)++; }
+read_file        function    291 /home/user/InvariantFS/src-extracted/VFS/src/flacx.c static uint8_t *read_file(const char *path, size_t *len)
+read_utf8        function    272 /home/user/InvariantFS/src-extracted/VFS/src/flacx.c static int read_utf8(br_t *b, uint64_t *out)
+read_wav         function    261 /home/user/InvariantFS/src-extracted/VFS/src/flacx.c static int32_t *read_wav(const char *path, int *out_n, int *out_ch, int *out_bits)
+read_wav_mem     function    212 /home/user/InvariantFS/src-extracted/VFS/src/flacx.c static int32_t *read_wav_mem(const uint8_t *buf, size_t sz, int *out_n, int *out_ch, int *out_bits)
+sub_bps          function    162 /home/user/InvariantFS/src-extracted/VFS/src/flacx.c static int sub_bps(int ch_assign, int ch, int bps)
+unzigzag         function    693 /home/user/InvariantFS/src-extracted/VFS/src/flacx.c static int32_t unzigzag(int32_t m) { return (m & 1) ? -(m / 2) - 1 : m / 2; }
+wr16             function    145 /home/user/InvariantFS/src-extracted/VFS/src/flacx.c static void wr16(uint8_t **p, uint16_t v){ *(*p)++ = v & 0xFF; *(*p)++ = v >> 8; }
+wr32             function    146 /home/user/InvariantFS/src-extracted/VFS/src/flacx.c static void wr32(uint8_t **p, uint32_t v){ *(*p)++ = v & 0xFF; *(*p)++ = (v>>8)&0xFF; *(*p)++ = (v>>16)&0xFF; *(*p)++ = v >> 24; }
+wr64             function    147 /home/user/InvariantFS/src-extracted/VFS/src/flacx.c static void wr64(uint8_t **p, uint64_t v){ for (int i = 0; i < 8; i++) *(*p)++ = (v >> (8*i)) & 0xFF; }
+wr8              function    144 /home/user/InvariantFS/src-extracted/VFS/src/flacx.c static void wr8(uint8_t **p, uint8_t v) { *(*p)++ = v; }
+write_residuals  function    708 /home/user/InvariantFS/src-extracted/VFS/src/flacx.c static int write_residuals(bw_t *bw, const subframe_t *sf, const int64_t *res, int nres)
+zigzag64         function    694 /home/user/InvariantFS/src-extracted/VFS/src/flacx.c static int64_t zigzag64(int64_t v) { return v < 0 ? -2 * v - 1 : 2 * v; }

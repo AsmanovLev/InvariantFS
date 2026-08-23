@@ -1,0 +1,16 @@
+build_file_table function     40 /home/user/InvariantFS/src-extracted/VFS/src/fuse_fs.c static void build_file_table(void)
+find_entry       function    104 /home/user/InvariantFS/src-extracted/VFS/src/fuse_fs.c static fs_entry *find_entry(const char *name)
+fuse_sweep_thread function    328 /home/user/InvariantFS/src-extracted/VFS/src/fuse_fs.c static void *fuse_sweep_thread(void *arg)
+invf_create      function    274 /home/user/InvariantFS/src-extracted/VFS/src/fuse_fs.c static int invf_create(const char *path, mode_t mode, struct fuse_file_info *fi)
+invf_flush       function    351 /home/user/InvariantFS/src-extracted/VFS/src/fuse_fs.c static int invf_flush(const char *path, struct fuse_file_info *fi)
+invf_getattr     function    114 /home/user/InvariantFS/src-extracted/VFS/src/fuse_fs.c static int invf_getattr(const char *path, struct stat *st, struct fuse_file_info *fi)
+invf_mkdir       function    171 /home/user/InvariantFS/src-extracted/VFS/src/fuse_fs.c static int invf_mkdir(const char *path, mode_t mode)
+invf_open        function    229 /home/user/InvariantFS/src-extracted/VFS/src/fuse_fs.c static int invf_open(const char *path, struct fuse_file_info *fi)
+invf_read        function    203 /home/user/InvariantFS/src-extracted/VFS/src/fuse_fs.c static int invf_read(const char *path, char *buf, size_t size, off_t offset,
+invf_readdir     function    145 /home/user/InvariantFS/src-extracted/VFS/src/fuse_fs.c static int invf_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
+invf_release     function    378 /home/user/InvariantFS/src-extracted/VFS/src/fuse_fs.c static int invf_release(const char *path, struct fuse_file_info *fi)
+invf_rmdir       function    186 /home/user/InvariantFS/src-extracted/VFS/src/fuse_fs.c static int invf_rmdir(const char *path)
+invf_unlink      function    390 /home/user/InvariantFS/src-extracted/VFS/src/fuse_fs.c static int invf_unlink(const char *path)
+invf_write       function    300 /home/user/InvariantFS/src-extracted/VFS/src/fuse_fs.c static int invf_write(const char *path, const char *buf, size_t size, off_t offset,
+main             function    419 /home/user/InvariantFS/src-extracted/VFS/src/fuse_fs.c int main(int argc, char *argv[])
+rebuild_table_locked function    221 /home/user/InvariantFS/src-extracted/VFS/src/fuse_fs.c static void rebuild_table_locked(void)

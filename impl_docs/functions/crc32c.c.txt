@@ -1,0 +1,2 @@
+crc32c_init      function     10 /home/user/InvariantFS/src-extracted/VFS/src/crc32c.c static void crc32c_init(void)
+invfs_crc32c     function     23 /home/user/InvariantFS/src-extracted/VFS/src/crc32c.c uint32_t invfs_crc32c(const void *data, size_t len)

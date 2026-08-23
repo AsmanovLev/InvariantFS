@@ -1,0 +1,38 @@
+DkCleanup        function    867 /home/user/InvariantFS/src-extracted/VFS/src/dokan_fs.c static void DOKAN_CALLBACK DkCleanup(LPCWSTR path, PDOKAN_FILE_INFO info)
+DkCloseFile      function    905 /home/user/InvariantFS/src-extracted/VFS/src/dokan_fs.c static void DOKAN_CALLBACK DkCloseFile(LPCWSTR path, PDOKAN_FILE_INFO info)
+DkDeleteDirectory function    836 /home/user/InvariantFS/src-extracted/VFS/src/dokan_fs.c static NTSTATUS DOKAN_CALLBACK DkDeleteDirectory(LPCWSTR path, PDOKAN_FILE_INFO info)
+DkDeleteFile     function    813 /home/user/InvariantFS/src-extracted/VFS/src/dokan_fs.c static NTSTATUS DOKAN_CALLBACK DkDeleteFile(LPCWSTR path, PDOKAN_FILE_INFO info)
+DkFindFiles      function    453 /home/user/InvariantFS/src-extracted/VFS/src/dokan_fs.c static NTSTATUS DOKAN_CALLBACK DkFindFiles(LPCWSTR path, PFillFindData fill,
+DkFindFilesWithPattern function   1085 /home/user/InvariantFS/src-extracted/VFS/src/dokan_fs.c static NTSTATUS DOKAN_CALLBACK DkFindFilesWithPattern(LPCWSTR path,
+DkFlushFileBuffers function    680 /home/user/InvariantFS/src-extracted/VFS/src/dokan_fs.c static NTSTATUS DOKAN_CALLBACK DkFlushFileBuffers(LPCWSTR path, PDOKAN_FILE_INFO info)
+DkGetDiskFreeSpace function   1038 /home/user/InvariantFS/src-extracted/VFS/src/dokan_fs.c static NTSTATUS DOKAN_CALLBACK DkGetDiskFreeSpace(PULONGLONG free_avail,
+DkGetFileInformation function    343 /home/user/InvariantFS/src-extracted/VFS/src/dokan_fs.c static NTSTATUS DOKAN_CALLBACK DkGetFileInformation(LPCWSTR path,
+DkGetVolumeInformation function   1053 /home/user/InvariantFS/src-extracted/VFS/src/dokan_fs.c static NTSTATUS DOKAN_CALLBACK DkGetVolumeInformation(LPWSTR vol_name,
+DkMounted        function   1017 /home/user/InvariantFS/src-extracted/VFS/src/dokan_fs.c static NTSTATUS DOKAN_CALLBACK DkMounted(LPCWSTR mount_point, PDOKAN_FILE_INFO info)
+DkMoveFile       function    755 /home/user/InvariantFS/src-extracted/VFS/src/dokan_fs.c static NTSTATUS DOKAN_CALLBACK DkMoveFile(LPCWSTR path, LPCWSTR new_path,
+DkReadFile       function    526 /home/user/InvariantFS/src-extracted/VFS/src/dokan_fs.c static NTSTATUS DOKAN_CALLBACK DkReadFile(LPCWSTR path, LPVOID buf,
+DkSetAllocationSize function    710 /home/user/InvariantFS/src-extracted/VFS/src/dokan_fs.c static NTSTATUS DOKAN_CALLBACK DkSetAllocationSize(LPCWSTR path,
+DkSetEndOfFile   function    739 /home/user/InvariantFS/src-extracted/VFS/src/dokan_fs.c static NTSTATUS DOKAN_CALLBACK DkSetEndOfFile(LPCWSTR path,
+DkSetFileAttributes function    746 /home/user/InvariantFS/src-extracted/VFS/src/dokan_fs.c static NTSTATUS DOKAN_CALLBACK DkSetFileAttributes(LPCWSTR path,
+DkSetFileTime    function    859 /home/user/InvariantFS/src-extracted/VFS/src/dokan_fs.c static NTSTATUS DOKAN_CALLBACK DkSetFileTime(LPCWSTR path, CONST FILETIME *creation,
+DkUnmounted      function   1026 /home/user/InvariantFS/src-extracted/VFS/src/dokan_fs.c static NTSTATUS DOKAN_CALLBACK DkUnmounted(PDOKAN_FILE_INFO info)
+DkWriteFile      function    595 /home/user/InvariantFS/src-extracted/VFS/src/dokan_fs.c static NTSTATUS DOKAN_CALLBACK DkWriteFile(LPCWSTR path, LPCVOID buf,
+DkZwCreateFile   function    223 /home/user/InvariantFS/src-extracted/VFS/src/dokan_fs.c static NTSTATUS DOKAN_CALLBACK DkZwCreateFile(LPCWSTR path,
+cleanup_impl     function    874 /home/user/InvariantFS/src-extracted/VFS/src/dokan_fs.c static void cleanup_impl(LPCWSTR path, PDOKAN_FILE_INFO info)
+close_file_impl  function    912 /home/user/InvariantFS/src-extracted/VFS/src/dokan_fs.c static void close_file_impl(LPCWSTR path, PDOKAN_FILE_INFO info)
+create_file_impl function    234 /home/user/InvariantFS/src-extracted/VFS/src/dokan_fs.c static NTSTATUS create_file_impl(LPCWSTR path,
+ctx_alloc        function    199 /home/user/InvariantFS/src-extracted/VFS/src/dokan_fs.c static wctx *ctx_alloc(const wchar_t *path)
+ctx_free         function    212 /home/user/InvariantFS/src-extracted/VFS/src/dokan_fs.c static void ctx_free(wctx *c)
+find_files_impl  function    462 /home/user/InvariantFS/src-extracted/VFS/src/dokan_fs.c static NTSTATUS find_files_impl(LPCWSTR path, PFillFindData fill,
+getinfo_impl     function    352 /home/user/InvariantFS/src-extracted/VFS/src/dokan_fs.c static NTSTATUS getinfo_impl(LPCWSTR path,
+lookup_entry     function    162 /home/user/InvariantFS/src-extracted/VFS/src/dokan_fs.c static fs_entry *lookup_entry(const char *name, fs_entry *out)
+path_to_utf8     function    141 /home/user/InvariantFS/src-extracted/VFS/src/dokan_fs.c static int path_to_utf8(const wchar_t *path, char *out, int max)
+prof_now         function     63 /home/user/InvariantFS/src-extracted/VFS/src/dokan_fs.c static double prof_now(void)
+prof_tick        function     97 /home/user/InvariantFS/src-extracted/VFS/src/dokan_fs.c static void prof_tick(void)
+read_file_impl   function    535 /home/user/InvariantFS/src-extracted/VFS/src/dokan_fs.c static NTSTATUS read_file_impl(LPCWSTR path, LPVOID buf,
+rebuild_table_locked function    159 /home/user/InvariantFS/src-extracted/VFS/src/dokan_fs.c static void rebuild_table_locked(void) { }
+stop_sweep_thread function   1001 /home/user/InvariantFS/src-extracted/VFS/src/dokan_fs.c static void stop_sweep_thread(void)
+sweep_thread     function    966 /home/user/InvariantFS/src-extracted/VFS/src/dokan_fs.c static DWORD WINAPI sweep_thread(LPVOID arg)
+utf16_to_utf8    function    131 /home/user/InvariantFS/src-extracted/VFS/src/dokan_fs.c static int utf16_to_utf8(const wchar_t *u, char *c, int max)
+wmain            function   1186 /home/user/InvariantFS/src-extracted/VFS/src/dokan_fs.c int wmain(int argc, wchar_t **argv)
+write_file_impl  function    604 /home/user/InvariantFS/src-extracted/VFS/src/dokan_fs.c static NTSTATUS write_file_impl(LPCWSTR path, LPCVOID buf,

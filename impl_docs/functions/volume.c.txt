@@ -1,0 +1,123 @@
+algo_is_whole_file function   3648 /home/user/InvariantFS/src-extracted/VFS/src/volume.c static int algo_is_whole_file(uint32_t algo)
+alloc_blocks     function   1232 /home/user/InvariantFS/src-extracted/VFS/src/volume.c static uint64_t alloc_blocks(invfs_volume *v, uint64_t zone_start, uint64_t zone_len,
+alloc_raw_or_shadow function   1315 /home/user/InvariantFS/src-extracted/VFS/src/volume.c static uint64_t alloc_raw_or_shadow(invfs_volume *v, uint64_t nblocks, int *zone_out)
+alloc_state_reset function   4252 /home/user/InvariantFS/src-extracted/VFS/src/volume.c static void alloc_state_reset(invfs_volume *v)
+bit_clr          function    546 /home/user/InvariantFS/src-extracted/VFS/src/volume.c static void bit_clr(uint8_t *b, uint64_t i) { b[i / 8] &= (uint8_t)~(1u << (i % 8)); }
+bit_get          function    266 /home/user/InvariantFS/src-extracted/VFS/src/volume.c static int bit_get(const uint8_t *b, uint64_t i) { return (b[i / 8] >> (i % 8)) & 1; }
+bit_set          function    545 /home/user/InvariantFS/src-extracted/VFS/src/volume.c static void bit_set(uint8_t *b, uint64_t i) { b[i / 8] |= (uint8_t)(1u << (i % 8)); }
+bm_dirty         function    550 /home/user/InvariantFS/src-extracted/VFS/src/volume.c static void bm_dirty(invfs_volume *v, uint64_t i)
+dirent_cmp       function   2117 /home/user/InvariantFS/src-extracted/VFS/src/volume.c static int dirent_cmp(const void *a, const void *b)
+flac_bits_per_sample function   4559 /home/user/InvariantFS/src-extracted/VFS/src/volume.c static int flac_bits_per_sample(const uint8_t *flac, size_t n)
+fsck_rebuild_one function    854 /home/user/InvariantFS/src-extracted/VFS/src/volume.c static int fsck_rebuild_one(invfs_volume *v, uint64_t rec_pos, uint64_t inode_id,
+idx_bump_dirs    function    426 /home/user/InvariantFS/src-extracted/VFS/src/volume.c static void idx_bump_dirs(invfs_volume *v, const char *name, size_t nlen,
+idx_clear        function    281 /home/user/InvariantFS/src-extracted/VFS/src/volume.c static void idx_clear(invfs_volume *v)
+idx_del          function    499 /home/user/InvariantFS/src-extracted/VFS/src/volume.c static void idx_del(invfs_volume *v, const char *name, size_t nlen,
+idx_dir_count    function    528 /home/user/InvariantFS/src-extracted/VFS/src/volume.c static uint64_t idx_dir_count(invfs_volume *v, const char *pre, size_t plen)
+idx_dir_live     function    540 /home/user/InvariantFS/src-extracted/VFS/src/volume.c static int idx_dir_live(invfs_volume *v, const char *pre, size_t plen)
+idx_get          function    516 /home/user/InvariantFS/src-extracted/VFS/src/volume.c static const name_index_entry *idx_get(invfs_volume *v, const char *name,
+idx_get_id       function    412 /home/user/InvariantFS/src-extracted/VFS/src/volume.c static uint64_t idx_get_id(invfs_volume *v, uint64_t id)
+idx_grow_dirs    function    331 /home/user/InvariantFS/src-extracted/VFS/src/volume.c static void idx_grow_dirs(invfs_volume *v)
+idx_grow_ids     function    372 /home/user/InvariantFS/src-extracted/VFS/src/volume.c static void idx_grow_ids(invfs_volume *v)
+idx_grow_names   function    312 /home/user/InvariantFS/src-extracted/VFS/src/volume.c static void idx_grow_names(invfs_volume *v)
+idx_hash         function    270 /home/user/InvariantFS/src-extracted/VFS/src/volume.c static uint64_t idx_hash(const char *s, size_t n)
+idx_init         function    350 /home/user/InvariantFS/src-extracted/VFS/src/volume.c static int idx_init(invfs_volume *v)
+idx_mix          function    365 /home/user/InvariantFS/src-extracted/VFS/src/volume.c static uint64_t idx_mix(uint64_t x)
+idx_put          function    465 /home/user/InvariantFS/src-extracted/VFS/src/volume.c static void idx_put(invfs_volume *v, const char *name, size_t nlen,
+idx_put_id       function    393 /home/user/InvariantFS/src-extracted/VFS/src/volume.c static void idx_put_id(invfs_volume *v, uint64_t id, uint64_t pos)
+invfs_ape_compress function   4571 /home/user/InvariantFS/src-extracted/VFS/src/volume.c int invfs_ape_compress(const uint8_t *flac, size_t flac_len,
+invfs_ape_decompress function   4623 /home/user/InvariantFS/src-extracted/VFS/src/volume.c int invfs_ape_decompress(const uint8_t *ape, size_t ape_len,
+invfs_ape_to_wav function   4671 /home/user/InvariantFS/src-extracted/VFS/src/volume.c int invfs_ape_to_wav(const uint8_t *ape, size_t ape_len,
+invfs_jxl_compress function   4339 /home/user/InvariantFS/src-extracted/VFS/src/volume.c int invfs_jxl_compress(const uint8_t *jpeg, size_t jpeg_len,
+invfs_jxl_decompress function   4382 /home/user/InvariantFS/src-extracted/VFS/src/volume.c int invfs_jxl_decompress(const uint8_t *jxl, size_t jxl_len,
+invfs_pmp_compress function   4493 /home/user/InvariantFS/src-extracted/VFS/src/volume.c int invfs_pmp_compress(const uint8_t *mp3, size_t mp3_len,
+invfs_pmp_decompress function   4525 /home/user/InvariantFS/src-extracted/VFS/src/volume.c int invfs_pmp_decompress(const uint8_t *pmp, size_t pmp_len,
+invfs_png_from_jxl function   5105 /home/user/InvariantFS/src-extracted/VFS/src/volume.c static int invfs_png_from_jxl(invfs_volume *v, uint64_t jxl_inode,
+jxl_tool         function   5188 /home/user/InvariantFS/src-extracted/VFS/src/volume.c static int jxl_tool(const char *exe, const char *in, const char *out,
+l2p_remove       function   1418 /home/user/InvariantFS/src-extracted/VFS/src/volume.c static void l2p_remove(invfs_volume *v, uint64_t inode, uint64_t lba)
+mz_tdefl_compress function   5153 /home/user/InvariantFS/src-extracted/VFS/src/volume.c static int mz_tdefl_compress(const uint8_t *in, size_t in_len,
+name_too_long    function    229 /home/user/InvariantFS/src-extracted/VFS/src/volume.c static int name_too_long(const char *name)
+name_too_long_for_children function    249 /home/user/InvariantFS/src-extracted/VFS/src/volume.c static int name_too_long_for_children(const char *name)
+png_inflate      function   5166 /home/user/InvariantFS/src-extracted/VFS/src/volume.c static int png_inflate(const unsigned char *in, size_t in_len,
+rec_set_name     function    257 /home/user/InvariantFS/src-extracted/VFS/src/volume.c static void rec_set_name(invfs_inode_rec *rh, const char *name)
+rename_one       function   4080 /home/user/InvariantFS/src-extracted/VFS/src/volume.c static int rename_one(invfs_volume *v, const char *from, const char *to)
+run_ffmpeg       function   4303 /home/user/InvariantFS/src-extracted/VFS/src/volume.c static int run_ffmpeg(const char *a1, const char *a2, const char *opts)
+run_packmp3      function   4438 /home/user/InvariantFS/src-extracted/VFS/src/volume.c static int run_packmp3(const char *path)
+run_tool         function   4269 /home/user/InvariantFS/src-extracted/VFS/src/volume.c static int run_tool(const char *exe, const char *a1, const char *a2, const char *opts)
+slurp_file       function   4476 /home/user/InvariantFS/src-extracted/VFS/src/volume.c static int slurp_file(const char *path, uint8_t **out, size_t *out_len)
+sweep_unwind     function   2872 /home/user/InvariantFS/src-extracted/VFS/src/volume.c static void sweep_unwind(invfs_volume *v, uint64_t new_id)
+vol_arc_stats    function    836 /home/user/InvariantFS/src-extracted/VFS/src/volume.c void vol_arc_stats(invfs_volume *v, invfs_arc_stats *out)
+vol_bitmap       function   2739 /home/user/InvariantFS/src-extracted/VFS/src/volume.c const uint8_t *vol_bitmap(invfs_volume *v, uint64_t *blocks_out)
+vol_close        function    801 /home/user/InvariantFS/src-extracted/VFS/src/volume.c void vol_close(invfs_volume *v)
+vol_count_free   function   4231 /home/user/InvariantFS/src-extracted/VFS/src/volume.c uint64_t vol_count_free(invfs_volume *v)
+vol_create_ape_file function   5530 /home/user/InvariantFS/src-extracted/VFS/src/volume.c uint64_t vol_create_ape_file(invfs_volume *v, const char *name,
+vol_create_blob_file function   5406 /home/user/InvariantFS/src-extracted/VFS/src/volume.c static uint64_t vol_create_blob_file(invfs_volume *v, const char *name,
+vol_create_container_file function   1768 /home/user/InvariantFS/src-extracted/VFS/src/volume.c uint64_t vol_create_container_file(invfs_volume *v, const char *name,
+vol_create_file  function   1480 /home/user/InvariantFS/src-extracted/VFS/src/volume.c uint64_t vol_create_file(invfs_volume *v, const char *name,
+vol_create_flac_file function   4722 /home/user/InvariantFS/src-extracted/VFS/src/volume.c uint64_t vol_create_flac_file(invfs_volume *v, const char *name,
+vol_create_gz_file function   4934 /home/user/InvariantFS/src-extracted/VFS/src/volume.c uint64_t vol_create_gz_file(invfs_volume *v, const char *name,
+vol_create_jxl_file function   5523 /home/user/InvariantFS/src-extracted/VFS/src/volume.c uint64_t vol_create_jxl_file(invfs_volume *v, const char *name,
+vol_create_pmp_file function   5537 /home/user/InvariantFS/src-extracted/VFS/src/volume.c uint64_t vol_create_pmp_file(invfs_volume *v, const char *name,
+vol_create_png_file function   5200 /home/user/InvariantFS/src-extracted/VFS/src/volume.c uint64_t vol_create_png_file(invfs_volume *v, const char *name,
+vol_create_tar_file function   4839 /home/user/InvariantFS/src-extracted/VFS/src/volume.c uint64_t vol_create_tar_file(invfs_volume *v, const char *name,
+vol_delete_file  function   4046 /home/user/InvariantFS/src-extracted/VFS/src/volume.c int vol_delete_file(invfs_volume *v, const char *name)
+vol_delete_inode function   3939 /home/user/InvariantFS/src-extracted/VFS/src/volume.c int vol_delete_inode(invfs_volume *v, uint64_t inode_id, const char *name)
+vol_delete_siblings function   3955 /home/user/InvariantFS/src-extracted/VFS/src/volume.c static int vol_delete_siblings(invfs_volume *v, const char *name)
+vol_deserialize_children function   1731 /home/user/InvariantFS/src-extracted/VFS/src/volume.c static int vol_deserialize_children(const uint8_t *blob, size_t blob_len,
+vol_ensure_path  function   2100 /home/user/InvariantFS/src-extracted/VFS/src/volume.c int vol_ensure_path(invfs_volume *v, const char *name)
+vol_find         function   2044 /home/user/InvariantFS/src-extracted/VFS/src/volume.c uint64_t vol_find(invfs_volume *v, const char *name)
+vol_flush        function   1094 /home/user/InvariantFS/src-extracted/VFS/src/volume.c int vol_flush(invfs_volume *v)
+vol_free_blocks  function   2841 /home/user/InvariantFS/src-extracted/VFS/src/volume.c void vol_free_blocks(invfs_volume *v, uint64_t pba, uint64_t nblocks)
+vol_free_blocks_cached function   2830 /home/user/InvariantFS/src-extracted/VFS/src/volume.c uint64_t vol_free_blocks_cached(invfs_volume *v)
+vol_fsck_scan    function    918 /home/user/InvariantFS/src-extracted/VFS/src/volume.c int vol_fsck_scan(invfs_volume *v, invfs_fsck_report *rep, int fix)
+vol_get_children function   1992 /home/user/InvariantFS/src-extracted/VFS/src/volume.c int vol_get_children(invfs_volume *v, uint64_t inode_id,
+vol_inode_area_end function   2753 /home/user/InvariantFS/src-extracted/VFS/src/volume.c uint64_t vol_inode_area_end(invfs_volume *v) { return v->inode_area_end; }
+vol_inode_area_free function   2761 /home/user/InvariantFS/src-extracted/VFS/src/volume.c uint64_t vol_inode_area_free(invfs_volume *v)
+vol_inode_area_pos function   2751 /home/user/InvariantFS/src-extracted/VFS/src/volume.c uint64_t vol_inode_area_pos(invfs_volume *v) { return v->inode_area_pos; }
+vol_inode_area_start function   2752 /home/user/InvariantFS/src-extracted/VFS/src/volume.c uint64_t vol_inode_area_start(invfs_volume *v) { return v->inode_area_start * INVFS_BLOCK_SIZE; }
+vol_inode_first_zone function   3301 /home/user/InvariantFS/src-extracted/VFS/src/volume.c static int vol_inode_first_zone(invfs_volume *v, uint64_t inode_id)
+vol_inode_next   function   2767 /home/user/InvariantFS/src-extracted/VFS/src/volume.c uint64_t vol_inode_next(invfs_volume *v, uint64_t pos, uint32_t *magic_out,
+vol_is_dir       function   2057 /home/user/InvariantFS/src-extracted/VFS/src/volume.c int vol_is_dir(invfs_volume *v, const char *name)
+vol_journal_pos  function   2754 /home/user/InvariantFS/src-extracted/VFS/src/volume.c uint64_t vol_journal_pos(invfs_volume *v) { return v->journal_pos; }
+vol_l2p          function   2745 /home/user/InvariantFS/src-extracted/VFS/src/volume.c const invfs_l2p_entry *vol_l2p(invfs_volume *v, size_t *count_out)
+vol_l2p_remove   function   1437 /home/user/InvariantFS/src-extracted/VFS/src/volume.c void vol_l2p_remove(invfs_volume *v, uint64_t inode, uint64_t lba)
+vol_list_dir     function   2124 /home/user/InvariantFS/src-extracted/VFS/src/volume.c int vol_list_dir(invfs_volume *v, const char *dir, invfs_dirent *ents, int max)
+vol_lookup       function   1394 /home/user/InvariantFS/src-extracted/VFS/src/volume.c uint64_t vol_lookup(invfs_volume *v, uint64_t inode, uint64_t lba)
+vol_lookup_entry function   1401 /home/user/InvariantFS/src-extracted/VFS/src/volume.c int vol_lookup_entry(invfs_volume *v, uint64_t inode, uint64_t lba,
+vol_map          function   1345 /home/user/InvariantFS/src-extracted/VFS/src/volume.c int vol_map(invfs_volume *v, uint64_t inode, uint64_t lba, uint64_t pba, uint32_t length)
+vol_mark_dirty   function   1208 /home/user/InvariantFS/src-extracted/VFS/src/volume.c static int vol_mark_dirty(invfs_volume *v)
+vol_mark_pending function   3262 /home/user/InvariantFS/src-extracted/VFS/src/volume.c void vol_mark_pending(invfs_volume *v, uint64_t inode_id)
+vol_mkdir        function   2070 /home/user/InvariantFS/src-extracted/VFS/src/volume.c uint64_t vol_mkdir(invfs_volume *v, const char *name)
+vol_name_count   function   3636 /home/user/InvariantFS/src-extracted/VFS/src/volume.c uint64_t vol_name_count(invfs_volume *v) { return (uint64_t)v->ncount; }
+vol_needs_recovery function   1226 /home/user/InvariantFS/src-extracted/VFS/src/volume.c int vol_needs_recovery(invfs_volume *v)
+vol_open         function    568 /home/user/InvariantFS/src-extracted/VFS/src/volume.c invfs_volume *vol_open(const char *path, int *err)
+vol_pending_count function   3289 /home/user/InvariantFS/src-extracted/VFS/src/volume.c size_t vol_pending_count(invfs_volume *v)
+vol_pre_record   function   1220 /home/user/InvariantFS/src-extracted/VFS/src/volume.c static int vol_pre_record(invfs_volume *v)
+vol_read_block   function   1443 /home/user/InvariantFS/src-extracted/VFS/src/volume.c int vol_read_block(invfs_volume *v, uint64_t pba, void *buf)
+vol_read_file    function   2729 /home/user/InvariantFS/src-extracted/VFS/src/volume.c int vol_read_file(invfs_volume *v, uint64_t inode_id, uint8_t **out, size_t *out_len)
+vol_read_inode   function   2231 /home/user/InvariantFS/src-extracted/VFS/src/volume.c static int vol_read_inode(invfs_volume *v, uint64_t inode_id, unsigned depth,
+vol_read_named   function   3541 /home/user/InvariantFS/src-extracted/VFS/src/volume.c int vol_read_named(invfs_volume *v, const char *name, uint8_t **out, size_t *out_len)
+vol_read_range   function   3656 /home/user/InvariantFS/src-extracted/VFS/src/volume.c int vol_read_range(invfs_volume *v, uint64_t inode_id, uint64_t offset,
+vol_read_raw     function   2803 /home/user/InvariantFS/src-extracted/VFS/src/volume.c int vol_read_raw(invfs_volume *v, uint64_t offset, void *buf, size_t len)
+vol_rename       function   4153 /home/user/InvariantFS/src-extracted/VFS/src/volume.c int vol_rename(invfs_volume *v, const char *from, const char *to)
+vol_replace_file function   4028 /home/user/InvariantFS/src-extracted/VFS/src/volume.c uint64_t vol_replace_file(invfs_volume *v, const char *name,
+vol_retire_inode function   3864 /home/user/InvariantFS/src-extracted/VFS/src/volume.c static int vol_retire_inode(invfs_volume *v, uint64_t inode_id,
+vol_rmdir        function   2081 /home/user/InvariantFS/src-extracted/VFS/src/volume.c int vol_rmdir(invfs_volume *v, const char *name)
+vol_sb           function   2734 /home/user/InvariantFS/src-extracted/VFS/src/volume.c const invfs_superblock *vol_sb(invfs_volume *v)
+vol_serialize_children function   1702 /home/user/InvariantFS/src-extracted/VFS/src/volume.c static uint8_t *vol_serialize_children(const invfs_ast_child_entry *ch,
+vol_set_readonly function   2823 /home/user/InvariantFS/src-extracted/VFS/src/volume.c void vol_set_readonly(invfs_volume *v, int ro)
+vol_stat         function   3603 /home/user/InvariantFS/src-extracted/VFS/src/volume.c int vol_stat(invfs_volume *v, const char *name, uint64_t *size_out)
+vol_stat_full    function   3613 /home/user/InvariantFS/src-extracted/VFS/src/volume.c int vol_stat_full(invfs_volume *v, const char *name, uint64_t *id_out,
+vol_sweep_file   function   2917 /home/user/InvariantFS/src-extracted/VFS/src/volume.c int vol_sweep_file(invfs_volume *v, uint64_t inode_id)
+vol_sweep_one    function   3330 /home/user/InvariantFS/src-extracted/VFS/src/volume.c int vol_sweep_one(invfs_volume *v, uint64_t inode_id, const char *name)
+vol_sweep_pending function   3460 /home/user/InvariantFS/src-extracted/VFS/src/volume.c int vol_sweep_pending(invfs_volume *v)
+vol_transcode_abort function   4004 /home/user/InvariantFS/src-extracted/VFS/src/volume.c static uint64_t vol_transcode_abort(invfs_volume *v, const char *name)
+vol_unlink       function   4058 /home/user/InvariantFS/src-extracted/VFS/src/volume.c int vol_unlink(invfs_volume *v, const char *name)
+vol_unmark_pending function   3277 /home/user/InvariantFS/src-extracted/VFS/src/volume.c void vol_unmark_pending(invfs_volume *v, uint64_t inode_id)
+vol_write_enabled function   2812 /home/user/InvariantFS/src-extracted/VFS/src/volume.c int vol_write_enabled(invfs_volume *v)
+vol_write_guard  function   2836 /home/user/InvariantFS/src-extracted/VFS/src/volume.c uint64_t vol_write_guard(invfs_volume *v)
+vol_write_raw    function   1330 /home/user/InvariantFS/src-extracted/VFS/src/volume.c uint64_t vol_write_raw(invfs_volume *v, const uint8_t *data, size_t len)
+vol_write_sb     function   1085 /home/user/InvariantFS/src-extracted/VFS/src/volume.c static int vol_write_sb(invfs_volume *v)
+vol_zip_extract_member function   3503 /home/user/InvariantFS/src-extracted/VFS/src/volume.c int vol_zip_extract_member(const uint8_t *z, size_t zlen,
+vol_zip_parse_children function   1927 /home/user/InvariantFS/src-extracted/VFS/src/volume.c int vol_zip_parse_children(const uint8_t *z, size_t zlen,
+write_segment_blocks function   1465 /home/user/InvariantFS/src-extracted/VFS/src/volume.c static int write_segment_blocks(invfs_volume *v, uint64_t pba, uint8_t *buf,
+zone_count_free  function   4243 /home/user/InvariantFS/src-extracted/VFS/src/volume.c static uint64_t zone_count_free(invfs_volume *v, uint64_t start, uint64_t len)

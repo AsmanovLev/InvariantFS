@@ -1,0 +1,72 @@
+Byte             typedef     445 /home/user/InvariantFS/src-extracted/VFS/src/miniz.h typedef unsigned char Byte;
+Bytef            typedef     448 /home/user/InvariantFS/src-extracted/VFS/src/miniz.h typedef Byte Bytef;
+__anon60688b080103 enum        250 /home/user/InvariantFS/src-extracted/VFS/src/miniz.h {
+__anon60688b080203 enum        269 /home/user/InvariantFS/src-extracted/VFS/src/miniz.h {
+__anon60688b080303 enum        289 /home/user/InvariantFS/src-extracted/VFS/src/miniz.h {
+__anon60688b080403 enum        300 /home/user/InvariantFS/src-extracted/VFS/src/miniz.h {
+__anon60688b080503 enum        648 /home/user/InvariantFS/src-extracted/VFS/src/miniz.h {
+__anon60688b080603 enum        664 /home/user/InvariantFS/src-extracted/VFS/src/miniz.h {
+__anon60688b080703 enum        710 /home/user/InvariantFS/src-extracted/VFS/src/miniz.h {
+__anon60688b080803 enum        724 /home/user/InvariantFS/src-extracted/VFS/src/miniz.h {
+__anon60688b080903 enum        735 /home/user/InvariantFS/src-extracted/VFS/src/miniz.h {
+__anon60688b080a03 enum        747 /home/user/InvariantFS/src-extracted/VFS/src/miniz.h typedef enum {
+__anon60688b080b03 enum        755 /home/user/InvariantFS/src-extracted/VFS/src/miniz.h typedef enum {
+__anon60688b080c08 struct      764 /home/user/InvariantFS/src-extracted/VFS/src/miniz.h {
+__anon60688b080d03 enum        841 /home/user/InvariantFS/src-extracted/VFS/src/miniz.h {
+__anon60688b080e03 enum        883 /home/user/InvariantFS/src-extracted/VFS/src/miniz.h typedef enum {
+__anon60688b080f03 enum        931 /home/user/InvariantFS/src-extracted/VFS/src/miniz.h {
+__anon60688b081003 enum        987 /home/user/InvariantFS/src-extracted/VFS/src/miniz.h {
+__anon60688b081108 struct      995 /home/user/InvariantFS/src-extracted/VFS/src/miniz.h {
+__anon60688b081203 enum       1058 /home/user/InvariantFS/src-extracted/VFS/src/miniz.h typedef enum {
+__anon60688b081303 enum       1065 /home/user/InvariantFS/src-extracted/VFS/src/miniz.h typedef enum {
+__anon60688b081403 enum       1080 /home/user/InvariantFS/src-extracted/VFS/src/miniz.h typedef enum {
+__anon60688b081503 enum       1091 /home/user/InvariantFS/src-extracted/VFS/src/miniz.h typedef enum {
+__anon60688b081608 struct     1128 /home/user/InvariantFS/src-extracted/VFS/src/miniz.h {
+__anon60688b081708 struct     1155 /home/user/InvariantFS/src-extracted/VFS/src/miniz.h {
+charf            typedef     450 /home/user/InvariantFS/src-extracted/VFS/src/miniz.h typedef char charf;
+intf             typedef     451 /home/user/InvariantFS/src-extracted/VFS/src/miniz.h typedef int intf;
+mz_alloc_func    typedef     263 /home/user/InvariantFS/src-extracted/VFS/src/miniz.h typedef void *(*mz_alloc_func)(void *opaque, size_t items, size_t size);
+mz_bool          typedef     552 /home/user/InvariantFS/src-extracted/VFS/src/miniz.h typedef int mz_bool;
+mz_dummy_time_t  typedef     576 /home/user/InvariantFS/src-extracted/VFS/src/miniz.h } mz_dummy_time_t;
+mz_dummy_time_t_tag struct      572 /home/user/InvariantFS/src-extracted/VFS/src/miniz.h typedef struct mz_dummy_time_t_tag
+mz_file_needs_keepalive typedef    1053 /home/user/InvariantFS/src-extracted/VFS/src/miniz.h typedef mz_bool (*mz_file_needs_keepalive)(void *pOpaque);
+mz_file_read_func typedef    1051 /home/user/InvariantFS/src-extracted/VFS/src/miniz.h typedef size_t (*mz_file_read_func)(void *pOpaque, mz_uint64 file_ofs, void *pBuf, size_t n);
+mz_file_write_func typedef    1052 /home/user/InvariantFS/src-extracted/VFS/src/miniz.h typedef size_t (*mz_file_write_func)(void *pOpaque, mz_uint64 file_ofs, const void *pBuf, size_t n);
+mz_free_func     typedef     264 /home/user/InvariantFS/src-extracted/VFS/src/miniz.h typedef void (*mz_free_func)(void *opaque, void *address);
+mz_int16         typedef     546 /home/user/InvariantFS/src-extracted/VFS/src/miniz.h typedef signed short mz_int16;
+mz_int64         typedef     550 /home/user/InvariantFS/src-extracted/VFS/src/miniz.h typedef int64_t mz_int64;
+mz_realloc_func  typedef     265 /home/user/InvariantFS/src-extracted/VFS/src/miniz.h typedef void *(*mz_realloc_func)(void *opaque, void *address, size_t items, size_t size);
+mz_stream        typedef     339 /home/user/InvariantFS/src-extracted/VFS/src/miniz.h } mz_stream;
+mz_stream_s      struct      319 /home/user/InvariantFS/src-extracted/VFS/src/miniz.h typedef struct mz_stream_s
+mz_streamp       typedef     341 /home/user/InvariantFS/src-extracted/VFS/src/miniz.h typedef mz_stream *mz_streamp;
+mz_uint          typedef     549 /home/user/InvariantFS/src-extracted/VFS/src/miniz.h typedef unsigned int mz_uint;
+mz_uint16        typedef     547 /home/user/InvariantFS/src-extracted/VFS/src/miniz.h typedef unsigned short mz_uint16;
+mz_uint32        typedef     548 /home/user/InvariantFS/src-extracted/VFS/src/miniz.h typedef unsigned int mz_uint32;
+mz_uint64        typedef     551 /home/user/InvariantFS/src-extracted/VFS/src/miniz.h typedef uint64_t mz_uint64;
+mz_uint8         typedef     545 /home/user/InvariantFS/src-extracted/VFS/src/miniz.h typedef unsigned char mz_uint8;
+mz_ulong         typedef     235 /home/user/InvariantFS/src-extracted/VFS/src/miniz.h typedef unsigned long mz_ulong;
+mz_zip_archive   typedef    1152 /home/user/InvariantFS/src-extracted/VFS/src/miniz.h } mz_zip_archive;
+mz_zip_archive_file_stat typedef    1049 /home/user/InvariantFS/src-extracted/VFS/src/miniz.h } mz_zip_archive_file_stat;
+mz_zip_error     typedef    1125 /home/user/InvariantFS/src-extracted/VFS/src/miniz.h } mz_zip_error;
+mz_zip_flags     typedef    1078 /home/user/InvariantFS/src-extracted/VFS/src/miniz.h } mz_zip_flags;
+mz_zip_internal_state typedef    1056 /home/user/InvariantFS/src-extracted/VFS/src/miniz.h typedef struct mz_zip_internal_state_tag mz_zip_internal_state;
+mz_zip_mode      typedef    1063 /home/user/InvariantFS/src-extracted/VFS/src/miniz.h } mz_zip_mode;
+mz_zip_reader_extract_iter_state typedef    1176 /home/user/InvariantFS/src-extracted/VFS/src/miniz.h } mz_zip_reader_extract_iter_state;
+mz_zip_type      typedef    1088 /home/user/InvariantFS/src-extracted/VFS/src/miniz.h } mz_zip_type;
+tdefl_compressor typedef     788 /home/user/InvariantFS/src-extracted/VFS/src/miniz.h } tdefl_compressor;
+tdefl_flush      typedef     760 /home/user/InvariantFS/src-extracted/VFS/src/miniz.h } tdefl_flush;
+tdefl_put_buf_func_ptr typedef     704 /home/user/InvariantFS/src-extracted/VFS/src/miniz.h typedef mz_bool (*tdefl_put_buf_func_ptr)(const void *pBuf, int len, void *pUser);
+tdefl_status     typedef     752 /home/user/InvariantFS/src-extracted/VFS/src/miniz.h } tdefl_status;
+tinfl_bit_buf_t  typedef     947 /home/user/InvariantFS/src-extracted/VFS/src/miniz.h typedef mz_uint64 tinfl_bit_buf_t;
+tinfl_bit_buf_t  typedef     950 /home/user/InvariantFS/src-extracted/VFS/src/miniz.h typedef mz_uint32 tinfl_bit_buf_t;
+tinfl_decompressor typedef     869 /home/user/InvariantFS/src-extracted/VFS/src/miniz.h typedef struct tinfl_decompressor_tag tinfl_decompressor;
+tinfl_decompressor_tag struct      954 /home/user/InvariantFS/src-extracted/VFS/src/miniz.h struct tinfl_decompressor_tag
+tinfl_put_buf_func_ptr typedef     865 /home/user/InvariantFS/src-extracted/VFS/src/miniz.h typedef int (*tinfl_put_buf_func_ptr)(const void *pBuf, int len, void *pUser);
+tinfl_status     typedef     914 /home/user/InvariantFS/src-extracted/VFS/src/miniz.h } tinfl_status;
+uInt             typedef     446 /home/user/InvariantFS/src-extracted/VFS/src/miniz.h typedef unsigned int uInt;
+uIntf            typedef     449 /home/user/InvariantFS/src-extracted/VFS/src/miniz.h typedef uInt uIntf;
+uLong            typedef     447 /home/user/InvariantFS/src-extracted/VFS/src/miniz.h typedef mz_ulong uLong;
+uLongf           typedef     453 /home/user/InvariantFS/src-extracted/VFS/src/miniz.h typedef uLong uLongf;
+voidp            typedef     454 /home/user/InvariantFS/src-extracted/VFS/src/miniz.h typedef void *voidp;
+voidpc           typedef     455 /home/user/InvariantFS/src-extracted/VFS/src/miniz.h typedef void *const voidpc;
+voidpf           typedef     452 /home/user/InvariantFS/src-extracted/VFS/src/miniz.h typedef void *voidpf;

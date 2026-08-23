@@ -1,0 +1,6 @@
+MdCloseFile      function     58 /home/user/InvariantFS/src-extracted/VFS/src/minidokan.c static void DOKAN_CALLBACK MdCloseFile(LPCWSTR path, PDOKAN_FILE_INFO info)
+MdCreateFile     function      8 /home/user/InvariantFS/src-extracted/VFS/src/minidokan.c static NTSTATUS DOKAN_CALLBACK MdCreateFile(LPCWSTR path, PDOKAN_IO_SECURITY_CONTEXT sec,
+MdFindFiles      function     40 /home/user/InvariantFS/src-extracted/VFS/src/minidokan.c static NTSTATUS DOKAN_CALLBACK MdFindFiles(LPCWSTR path, PFillFindData fill,
+MdGetFileInformation function     25 /home/user/InvariantFS/src-extracted/VFS/src/minidokan.c static NTSTATUS DOKAN_CALLBACK MdGetFileInformation(LPCWSTR path,
+MdReadFile       function     50 /home/user/InvariantFS/src-extracted/VFS/src/minidokan.c static NTSTATUS DOKAN_CALLBACK MdReadFile(LPCWSTR path, LPVOID buf, DWORD len,
+wmain            function     71 /home/user/InvariantFS/src-extracted/VFS/src/minidokan.c int wmain(int argc, wchar_t **argv)

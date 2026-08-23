@@ -1,0 +1,5 @@
+__anon85d06b390108 struct       24 /home/user/InvariantFS/src-extracted/VFS/src/volume.h typedef struct {
+__anon85d06b390208 struct       62 /home/user/InvariantFS/src-extracted/VFS/src/volume.h typedef struct {
+invfs_dirent     typedef      67 /home/user/InvariantFS/src-extracted/VFS/src/volume.h } invfs_dirent;
+invfs_fsck_report typedef      31 /home/user/InvariantFS/src-extracted/VFS/src/volume.h } invfs_fsck_report;
+invfs_volume     typedef       8 /home/user/InvariantFS/src-extracted/VFS/src/volume.h typedef struct invfs_volume invfs_volume;

@@ -1,0 +1,14 @@
+apply_filters    function     81 /home/user/InvariantFS/src-extracted/VFS/src/pngx.c static void apply_filters(const uint8_t *f, uint8_t bpp, size_t width,
+chunk_crc        function     69 /home/user/InvariantFS/src-extracted/VFS/src/pngx.c static unsigned long chunk_crc(const uint8_t *type, const uint8_t *data, size_t dlen)
+pngx_build_recipe function    244 /home/user/InvariantFS/src-extracted/VFS/src/pngx.c int pngx_build_recipe(const pngx_info *info, uint8_t enc, uint8_t level,
+pngx_chunk_append function     41 /home/user/InvariantFS/src-extracted/VFS/src/pngx.c int pngx_chunk_append(uint8_t **buf, size_t *len, size_t *cap,
+pngx_extract     function    121 /home/user/InvariantFS/src-extracted/VFS/src/pngx.c int pngx_extract(const uint8_t *png, size_t png_len,
+pngx_free        function    488 /home/user/InvariantFS/src-extracted/VFS/src/pngx.c void pngx_free(pngx_info *info)
+pngx_parse_recipe function    281 /home/user/InvariantFS/src-extracted/VFS/src/pngx.c int pngx_parse_recipe(const uint8_t *r, size_t rlen, pngx_info *info)
+pngx_rebuild     function    428 /home/user/InvariantFS/src-extracted/VFS/src/pngx.c int pngx_rebuild(const pngx_info *info, const uint8_t *idat_stream,
+pngx_refilter    function    376 /home/user/InvariantFS/src-extracted/VFS/src/pngx.c int pngx_refilter(const uint8_t *rgb, size_t rgb_len, const pngx_info *info,
+rd16             function     35 /home/user/InvariantFS/src-extracted/VFS/src/pngx.c static uint16_t rd16(const uint8_t *p)
+rd32             function     31 /home/user/InvariantFS/src-extracted/VFS/src/pngx.c static uint32_t rd32(const uint8_t *p)
+wr16             function     37 /home/user/InvariantFS/src-extracted/VFS/src/pngx.c static void wr16(uint8_t *p, uint16_t v)
+wr32             function     33 /home/user/InvariantFS/src-extracted/VFS/src/pngx.c static void wr32(uint8_t *p, uint32_t v)
+wr32v            function     29 /home/user/InvariantFS/src-extracted/VFS/src/pngx.c uint32_t wr32v(uint8_t *p, uint32_t v)

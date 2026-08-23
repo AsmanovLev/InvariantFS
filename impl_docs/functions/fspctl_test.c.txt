@@ -1,0 +1,1 @@
+wmain            function      4 /home/user/InvariantFS/src-extracted/VFS/src/fspctl_test.c int wmain(void) {

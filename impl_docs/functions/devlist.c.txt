@@ -1,0 +1,2 @@
+enumerate_dir    function     12 /home/user/InvariantFS/src-extracted/VFS/src/devlist.c static void enumerate_dir(const WCHAR *path)
+wmain            function     44 /home/user/InvariantFS/src-extracted/VFS/src/devlist.c int wmain(void)
