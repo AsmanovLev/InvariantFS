@@ -16,6 +16,9 @@
 #include <pthread.h>
 #include <stddef.h>
 #include <unistd.h>
+#include <fcntl.h>
+#include <time.h>
+#include <sys/statvfs.h>
 
 #include "invarifs.h"
 #include "volume.h"
@@ -112,6 +115,29 @@ static fs_entry *find_entry(const char *name)
     return NULL;
 }
 
+/* Race-safe lookup (audit H1): g_entries is freed and rebuilt by every
+ * flush/create/unlink/sweep, so callers must never hold the pointer across
+ * a rebuild. Copy the fields out under g_io_lock instead. */
+static int snapshot_entry(const char *name, uint64_t *ino_out, uint64_t *size_out,
+                          uint64_t *ctime_out)
+{
+    pthread_mutex_lock(&g_io_lock);
+    if (!g_vol) { pthread_mutex_unlock(&g_io_lock); return 0; }
+    {
+        /* prefer the live engine index: it is always current */
+        uint64_t id = 0, size = 0, ctime = 0;
+        if (vol_stat_full(g_vol, name, &id, &size, &ctime) == 0 && id) {
+            if (ino_out) *ino_out = id;
+            if (size_out) *size_out = size;
+            if (ctime_out) *ctime_out = ctime;
+            pthread_mutex_unlock(&g_io_lock);
+            return 1;
+        }
+    }
+    pthread_mutex_unlock(&g_io_lock);
+    return 0;
+}
+
 /* ---- FUSE operations ---- */
 static int invf_getattr(const char *path, struct stat *st, struct fuse_file_info *fi)
 {
@@ -123,11 +149,11 @@ static int invf_getattr(const char *path, struct stat *st, struct fuse_file_info
         return 0;
     }
     {
-        fs_entry *e = find_entry(path + 1);
-        if (!e) {
+        uint64_t ino = 0, size = 0, ctime = 0;
+        if (!snapshot_entry(path + 1, &ino, &size, &ctime)) {
             int is_dir;
             pthread_mutex_lock(&g_io_lock);
-            is_dir = vol_is_dir(g_vol, path + 1);
+            is_dir = g_vol ? vol_is_dir(g_vol, path + 1) : 0;
             pthread_mutex_unlock(&g_io_lock);
             if (is_dir) {
                 st->st_mode = S_IFDIR | 0555;
@@ -138,8 +164,8 @@ static int invf_getattr(const char *path, struct stat *st, struct fuse_file_info
         }
         st->st_mode = S_IFREG | 0444;
         st->st_nlink = 1;
-        st->st_size = (off_t)e->size;
-        st->st_mtime = e->ctime;
+        st->st_size = (off_t)size;
+        st->st_mtime = (time_t)ctime;
         return 0;
     }
 }
@@ -149,14 +175,25 @@ static int invf_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
                         enum fuse_readdir_flags flags)
 {
     (void)offset; (void)fi; (void)flags;
-    invfs_dirent ents[4096];
     const char *dir = path[0] == '/' && path[1] ? path + 1 : "";
+    /* grow-on-demand: the old fixed ents[4096] (~1.1 MB stack, silent
+     * truncation) dropped entries in large dirs like /usr/share (audit H7) */
+    int cap = 1024, n = 0;
+    invfs_dirent *ents = NULL;
     pthread_mutex_lock(&g_io_lock);
+    if (!g_vol) { pthread_mutex_unlock(&g_io_lock); return -EIO; }
     if (dir[0] && !vol_is_dir(g_vol, dir)) {
         pthread_mutex_unlock(&g_io_lock);
         return -ENOENT;
     }
-    int n = vol_list_dir(g_vol, dir, ents, 4096);
+    for (;;) {
+        free(ents);
+        ents = (invfs_dirent *)malloc((size_t)cap * sizeof(invfs_dirent));
+        if (!ents) { pthread_mutex_unlock(&g_io_lock); return -ENOMEM; }
+        n = vol_list_dir(g_vol, dir, ents, cap);
+        if (n < cap || n < 0) break;
+        cap *= 2;   /* possibly truncated: retry with a bigger buffer */
+    }
     pthread_mutex_unlock(&g_io_lock);
     int i;
     filler(buf, ".", NULL, 0, 0);
@@ -165,8 +202,10 @@ static int invf_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
         struct stat st;
         memset(&st, 0, sizeof st);
         st.st_mode = ents[i].is_dir ? S_IFDIR | 0555 : S_IFREG | 0444;
+        st.st_size = (off_t)ents[i].size;
         filler(buf, ents[i].name, &st, 0, 0);
     }
+    free(ents);
     return 0;
 }
 
@@ -205,15 +244,16 @@ typedef struct {
 static int invf_read(const char *path, char *buf, size_t size, off_t offset,
                      struct fuse_file_info *fi)
 {
-    fs_entry *e = find_entry(path + 1);
+    uint64_t ino = 0, size64 = 0, ctime;
     int got;
     (void)fi;
-    if (!e)
+    if (!snapshot_entry(path + 1, &ino, &size64, &ctime))
         return -ENOENT;
-    if ((uint64_t)offset >= e->size)
+    if ((uint64_t)offset >= size64)
         return 0;
     pthread_mutex_lock(&g_io_lock);
-    got = vol_read_range(g_vol, e->inode_id, (uint64_t)offset, size, buf);
+    if (!g_vol) { pthread_mutex_unlock(&g_io_lock); return -EIO; }
+    got = vol_read_range(g_vol, ino, (uint64_t)offset, size, buf);
     pthread_mutex_unlock(&g_io_lock);
     if (got < 0)
         return -EIO;
@@ -232,7 +272,7 @@ static int invf_open(const char *path, struct fuse_file_info *fi)
 {
     if (strcmp(path, "/") == 0)
         return -EISDIR;
-    if (!find_entry(path + 1))
+    if (!snapshot_entry(path + 1, NULL, NULL, NULL))
         return -ENOENT;
     __sync_fetch_and_add(&g_open_handles, 1);
     if ((fi->flags & O_ACCMODE) == O_RDONLY)
@@ -354,37 +394,55 @@ static void *fuse_sweep_thread(void *arg)
     return NULL;
 }
 
+/* Commit a write-back context into the volume. Shared by .flush and .fsync
+ * so that fsync() before a crash actually persists buffered data. */
+static int commit_wctx(wctx *c)
+{
+    if (!c) return 0;
+    if (!c->buf || c->len == 0) return 0;
+    pthread_mutex_lock(&g_io_lock);
+    if (!g_vol) { pthread_mutex_unlock(&g_io_lock); return -EIO; }
+    vol_ensure_path(g_vol, c->name);   /* auto-create parent dirs */
+    /* append the new record before tombstoning the old one: the delete-first
+       order lost the existing file when the create could not fit */
+    uint64_t nid = vol_replace_file(g_vol, c->name, c->buf, c->len);
+    if (nid == 0) {
+        /* late ENOSPC must be visible to the writer, never dropped
+         * silently (audit H4; Dokan already reports STATUS_DISK_FULL) */
+        fprintf(stderr, "invf: vol_replace_file failed (%s)\n", c->name);
+        vol_flush(g_vol);
+        rebuild_table_locked();
+        pthread_mutex_unlock(&g_io_lock);
+        return -ENOSPC;
+    }
+    fprintf(stderr, "invf: flush %s len=%zu ok\n", c->name, c->len);
+    vol_mark_pending(g_vol, nid);   /* on-demand sweep */
+    vol_flush(g_vol);
+    rebuild_table_locked();
+    pthread_mutex_unlock(&g_io_lock);
+    return 0;
+}
+
 static int invf_flush(const char *path, struct fuse_file_info *fi)
 {
     wctx *c = (wctx *)(uintptr_t)fi->fh;
     (void)path;
     fprintf(stderr, "[flush] %s fh=%llu\n", path, (unsigned long long)fi->fh);
-    if (!c) return 0;
-    if (c->buf && c->len > 0) {
+    return commit_wctx(c);
+}
+
+static int invf_fsync(const char *path, int datasync, struct fuse_file_info *fi)
+{
+    wctx *c = (wctx *)(uintptr_t)fi->fh;
+    int rc;
+    (void)path; (void)datasync;   /* whole-volume flush covers both */
+    rc = commit_wctx(c);
+    if (rc == 0) {
         pthread_mutex_lock(&g_io_lock);
-        vol_ensure_path(g_vol, c->name);   /* auto-create parent dirs */
-        /* append the new record before tombstoning the old one: the delete-first
-           order lost the existing file when the create could not fit */
-        uint64_t nid = vol_replace_file(g_vol, c->name, c->buf, c->len);
-        if (nid == 0) {
-            /* late ENOSPC must be visible to the writer, never dropped
-             * silently (audit H4; Dokan already reports STATUS_DISK_FULL) */
-            fprintf(stderr, "invf: vol_replace_file failed (%s)\n", c->name);
-            vol_flush(g_vol);
-            rebuild_table_locked();
-            pthread_mutex_unlock(&g_io_lock);
-            return -ENOSPC;
-        } else {
-            fprintf(stderr, "invf: flush %s len=%zu ok\n", c->name, c->len);
-            vol_mark_pending(g_vol, nid);   /* on-demand sweep */
-        }
-        vol_flush(g_vol);
-        rebuild_table_locked();
+        rc = g_vol ? (vol_flush(g_vol) == 0 ? 0 : -EIO) : -EIO;
         pthread_mutex_unlock(&g_io_lock);
-    } else {
-        fprintf(stderr, "invf: flush %s empty buf\n", c->name);
     }
-    return 0;
+    return rc;
 }
 
 static int invf_release(const char *path, struct fuse_file_info *fi)
@@ -396,6 +454,146 @@ static int invf_release(const char *path, struct fuse_file_info *fi)
         free(c);
     }
     __sync_fetch_and_sub(&g_open_handles, 1);
+    return 0;
+}
+
+/* rename is fully implemented in the engine (sibling-safe, dir-prefix
+ * aware); audit PB8: it was simply never wired into this ops table */
+static int invf_rename(const char *from, const char *to, unsigned int flags)
+{
+    int rc;
+    if (flags)
+        return -EINVAL;   /* RENAME_NOREPLACE / RENAME_EXCHANGE unsupported */
+    pthread_mutex_lock(&g_io_lock);
+    if (!g_vol) { pthread_mutex_unlock(&g_io_lock); return -EIO; }
+    rc = vol_rename(g_vol, from + 1, to + 1);
+    if (rc == 0) { vol_flush(g_vol); rebuild_table_locked(); }
+    pthread_mutex_unlock(&g_io_lock);
+    switch (rc) {
+    case 0:  return 0;
+    case -2: return -EEXIST;
+    case -3: return -ENOSPC;
+    default: return rc == -1 ? -ENOENT : -EIO;
+    }
+}
+
+static int invf_statfs(const char *path, struct statvfs *st)
+{
+    const invfs_superblock *sb;
+    uint64_t free_blocks;
+    (void)path;
+    pthread_mutex_lock(&g_io_lock);
+    if (!g_vol) { pthread_mutex_unlock(&g_io_lock); return -EIO; }
+    sb = vol_sb(g_vol);
+    free_blocks = vol_free_blocks_cached(g_vol);
+    pthread_mutex_unlock(&g_io_lock);
+    memset(st, 0, sizeof(*st));
+    st->f_bsize = INVFS_BLOCK_SIZE;
+    st->f_frsize = INVFS_BLOCK_SIZE;
+    st->f_blocks = sb->total_blocks;
+    st->f_bfree = free_blocks;
+    st->f_bavail = free_blocks;
+    st->f_files = 0;      /* name-indexed fs: inode count unbounded */
+    st->f_ffree = 0;
+    st->f_namemax = INVFS_MAX_NAME;
+    return 0;
+}
+
+/* permission model is still v1 (0444 files / 0555 dirs, uid 0): report
+ * honestly instead of pretending (WP2 adds real metadata storage) */
+static int invf_access(const char *path, int mask)
+{
+    if (mask & W_OK)
+        return vol_write_enabled(g_vol) ? -EACCES : -EROFS;
+    if (snapshot_entry(path + 1, NULL, NULL, NULL))
+        return 0;
+    /* directories are prefix anchors: check via engine */
+    {
+        int is_dir = 0;
+        pthread_mutex_lock(&g_io_lock);
+        is_dir = g_vol ? vol_is_dir(g_vol, path + 1) : 0;
+        pthread_mutex_unlock(&g_io_lock);
+        return is_dir ? 0 : -ENOENT;
+    }
+}
+
+static int resize_volume_file(const char *name, off_t len)
+{
+    int rc = 0;
+    pthread_mutex_lock(&g_io_lock);
+    if (!g_vol) { pthread_mutex_unlock(&g_io_lock); return -EIO; }
+    if (len == 0) {
+        if (vol_replace_file(g_vol, name + 1, NULL, 0) == 0)
+            rc = -ENOSPC;
+    } else {
+        uint8_t *data = NULL;
+        size_t oldlen = 0;
+        uint64_t ino = vol_find(g_vol, name + 1);
+        if (ino && vol_read_file(g_vol, ino, &data, &oldlen) != 0) {
+            data = NULL; oldlen = 0;
+        }
+        {
+            size_t nlen = (size_t)len;
+            uint8_t *nb = (uint8_t *)malloc(nlen ? nlen : 1);
+            if (!nb) { free(data); pthread_mutex_unlock(&g_io_lock); return -ENOMEM; }
+            if (data) {
+                memcpy(nb, data, oldlen < nlen ? oldlen : nlen);
+                if (nlen > oldlen) memset(nb + oldlen, 0, nlen - oldlen);
+            } else {
+                memset(nb, 0, nlen);
+            }
+            free(data);
+            if (vol_replace_file(g_vol, name + 1, nb, nlen) == 0)
+                rc = -ENOSPC;
+            else
+                vol_mark_pending(g_vol, vol_find(g_vol, name + 1));
+            free(nb);
+        }
+    }
+    vol_flush(g_vol);
+    rebuild_table_locked();
+    pthread_mutex_unlock(&g_io_lock);
+    return rc;
+}
+
+/* libfuse3: one truncate entry point; fi != NULL for ftruncate-style calls
+ * where the data may still live in the write-back buffer (cheap path) */
+static int invf_truncate(const char *path, off_t len, struct fuse_file_info *fi)
+{
+    wctx *c = fi ? (wctx *)(uintptr_t)fi->fh : NULL;
+    if (!vol_write_enabled(g_vol))
+        return -EROFS;
+    if (len < 0)
+        return -EINVAL;
+    if (!c)
+        return resize_volume_file(path, len);
+    if ((uint64_t)len > c->cap) {
+        size_t ncap = c->cap ? c->cap : 4096;
+        while (ncap < (size_t)len) ncap *= 2;
+        c->buf = (uint8_t *)realloc(c->buf, ncap);
+        if (!c->buf) return -ENOMEM;
+        c->cap = ncap;
+    }
+    if ((size_t)len > c->len)
+        memset(c->buf + c->len, 0, (size_t)len - c->len);
+    c->len = (size_t)len;
+    return 0;
+}
+
+/* format v1 stores no timestamps: accept so that tar/cp -a style imports do
+ * not fail wholesale; real mtime/atime persistence lands with WP2 format v2 */
+static int invf_utimens(const char *path, const struct timespec tv[2],
+                        struct fuse_file_info *fi)
+{
+    (void)tv;
+    if (!snapshot_entry(path + 1, NULL, NULL, NULL)) {
+        int is_dir = 0;
+        pthread_mutex_lock(&g_io_lock);
+        is_dir = g_vol ? vol_is_dir(g_vol, path + 1) : 0;
+        pthread_mutex_unlock(&g_io_lock);
+        if (!is_dir)
+            return -ENOENT;
+    }
     return 0;
 }
 
@@ -440,6 +638,12 @@ static const struct fuse_operations invf_ops = {
     .create = invf_create,
     .write = invf_write,
     .flush = invf_flush,
+    .fsync = invf_fsync,
+    .truncate = invf_truncate,
+    .utimens = invf_utimens,
+    .statfs = invf_statfs,
+    .access = invf_access,
+    .rename = invf_rename,
     .release = invf_release,
     .unlink = invf_unlink,
     .destroy = invf_destroy,
@@ -447,18 +651,29 @@ static const struct fuse_operations invf_ops = {
 
 int main(int argc, char *argv[])
 {
-    /* usage: invf-fuse [-f] <image> <mountpoint> */
-    const char *img = NULL, *mnt = NULL;
+    /* usage: invf-fuse [-f] [-o opt[,opt...]] <image> <mountpoint> */
+    const char *img = NULL, *mnt = NULL, *opts = NULL;
     int fg = 0, err, i;
 
     for (i = 1; i < argc; i++) {
         if (strcmp(argv[i], "-f") == 0 || strcmp(argv[i], "-d") == 0)
             fg = 1;
+        else if (strcmp(argv[i], "-o") == 0 && i + 1 < argc) {
+            /* join multiple -o into one comma list for fuse_main */
+            if (!opts)
+                opts = argv[++i];
+            else {
+                static char obuf[1024];
+                i++;
+                snprintf(obuf, sizeof obuf, "%s,%s", opts, argv[i]);
+                opts = obuf;
+            }
+        }
         else if (!img) img = argv[i];
         else if (!mnt) mnt = argv[i];
     }
     if (!img || !mnt) {
-        fprintf(stderr, "usage: invf-fuse [-f] <image> <mountpoint>\n");
+        fprintf(stderr, "usage: invf-fuse [-f] [-o opt,opt] <image> <mountpoint>\n");
         return 2;
     }
 
@@ -478,7 +693,9 @@ int main(int argc, char *argv[])
             pthread_detach(tid);
     }
 
-    /* build fuse args: [progname] [-f] [mountpoint] */
+    /* build fuse args: [progname] [-f] [-o opts] [mountpoint].
+     * No forced -d: debug spam slowed IO and -o options (allow_other,
+     * default_permissions, ro, ...) were unparseable before (audit H11). */
     {
         char *fuse_argv[8];
         int fuse_argc = 0;
@@ -486,7 +703,10 @@ int main(int argc, char *argv[])
         int k;
         fuse_argv[fuse_argc++] = "invf-fuse";
         if (fg) fuse_argv[fuse_argc++] = "-f";
-        fuse_argv[fuse_argc++] = "-d";  /* workaround: fuse3 3.18 mis-parses argv without -d */
+        if (opts) {
+            fuse_argv[fuse_argc++] = "-o";
+            fuse_argv[fuse_argc++] = (char *)opts;
+        }
         fuse_argv[fuse_argc++] = (char *)mnt;
         fuse_argv[fuse_argc] = NULL;
         for (k = 0; k < fuse_argc; k++)
