@@ -38,6 +38,25 @@ static void table_rebuild_locked(void);   /* fwd (defined below) */
 static int g_table_stale = 0;
 
 static void table_mark_stale(void) { g_table_stale = 1; }
+static void table_upsert_locked(const char *name, uint64_t ino,
+                                uint64_t size, uint64_t ctime);
+static void table_remove_name(const char *name);
+
+static void table_sync_one(const char *name)
+{
+    uint64_t id = 0, sz = 0, ct = 0;
+    pthread_mutex_lock(&g_io_lock);
+    if (!g_vol) { pthread_mutex_unlock(&g_io_lock); return; }
+    id = vol_find(g_vol, name);
+    if (!id) {
+        table_remove_name(name);
+        pthread_mutex_unlock(&g_io_lock);
+        return;
+    }
+    vol_stat_full(g_vol, name, &id, &sz, &ct);
+    table_upsert_locked(name, id, sz, ct);
+    pthread_mutex_unlock(&g_io_lock);
+}
 
 static void table_refresh_if_stale_locked(void)
 {
@@ -202,6 +221,69 @@ static fs_entry *find_entry(const char *name)
     return (fs_entry *)bsearch(name, g_entries, (size_t)g_nentries,
                                sizeof(fs_entry), cmp_entry_key);
 }
+/* ---- incremental single-name sync (avoids full rebuild per mutation) ----
+ * Common ops (create/flush/unlink/truncate/mkdir/rmdir) touch exactly one
+ * name; syncing that name costs one engine lookup instead of rescanning a
+ * 200k+ record inode area. Complex ops (rename/link/sweep) keep mark_stale.
+ * All helpers require g_io_lock held. */
+static void table_upsert_locked(const char *name, uint64_t ino, uint64_t size,
+                                uint64_t ctime)
+{
+    int lo = 0, hi = g_nentries;
+    while (lo < hi) {                    /* lower_bound by name */
+        int mid = (lo + hi) / 2;
+        if (strcmp(g_entries[mid].name, name) < 0) lo = mid + 1;
+        else hi = mid;
+    }
+    if (lo < g_nentries && strcmp(g_entries[lo].name, name) == 0) {
+        g_entries[lo].inode_id = ino;
+        g_entries[lo].size = size;
+        g_entries[lo].ctime = ctime;
+        return;
+    }
+    if (g_nentries == g_cap) {
+        int ncap = g_cap ? g_cap * 2 : 1024;
+        fs_entry *ne = (fs_entry *)realloc(g_entries, ncap * sizeof(fs_entry));
+        if (!ne) return;               /* keep old table on OOM */
+        g_entries = ne;
+        g_cap = ncap;
+    }
+    memmove(&g_entries[lo + 1], &g_entries[lo],
+            (size_t)(g_nentries - lo) * sizeof(fs_entry));
+    memset(&g_entries[lo], 0, sizeof(fs_entry));
+    strncpy(g_entries[lo].name, name, sizeof(g_entries[lo].name) - 1);
+    g_entries[lo].inode_id = ino;
+    g_entries[lo].size = size;
+    g_entries[lo].ctime = ctime;
+    g_nentries++;
+}
+
+static void table_remove_name(const char *name)
+{
+    int lo = 0, hi = g_nentries;
+    while (lo < hi) {
+        int mid = (lo + hi) / 2;
+        if (strcmp(g_entries[mid].name, name) < 0) lo = mid + 1;
+        else hi = mid;
+    }
+    if (lo >= g_nentries || strcmp(g_entries[lo].name, name) != 0) return;
+    memmove(&g_entries[lo], &g_entries[lo + 1],
+            (size_t)(g_nentries - lo - 1) * sizeof(fs_entry));
+    g_nentries--;
+}
+
+/* re-read one name from the engine into the table. Call WITHOUT the lock. */
+/* same as table_sync_one but caller already holds g_io_lock */
+static void table_sync_one_locked(const char *name)
+{
+    uint64_t id, sz = 0, ct = 0;
+    if (!g_vol) return;
+    id = vol_find(g_vol, name);
+    if (!id) { table_remove_name(name); return; }
+    if (vol_stat_full(g_vol, name, &id, &sz, &ct) == 0)
+        table_upsert_locked(name, id, sz, ct);
+}
+
 
 /* Race-safe lookup (audit H1): g_entries is freed and rebuilt by every
  * flush/create/unlink/sweep, so callers must never hold the pointer across
@@ -289,7 +371,13 @@ static int meta_for_path(const char *path, char *ename, size_t ecapsz,
             got = g_vol ? (vol_get_meta(g_vol, ino, m) == 0) : 0;
             pthread_mutex_unlock(&g_io_lock);
         }
-        if (!got) meta_defaults(name, 0, m);
+        if (!got) {
+            /* anchor record may predate its INO2 ext (or ext parse failed):
+             * report sane DIR defaults; first setattr rewrites the ext */
+            meta_defaults(name, 0, m);
+            m->type = INVFS_ITYP_DIR;
+            m->nlink = 2;
+        }
         snprintf(ename, ecapsz, "%s", anchor);
         return 1;
     }
@@ -376,7 +464,12 @@ static int invf_getattr(const char *path, struct stat *st, struct fuse_file_info
             if (!is_dir) return -ENOENT;
         }
         if (!meta_for_path(path, ename, sizeof ename, &m)) {
+            int isd;
+            pthread_mutex_lock(&g_io_lock);
+            isd = g_vol ? vol_is_dir(g_vol, name) : 0;
+            pthread_mutex_unlock(&g_io_lock);
             meta_defaults(name, size, &m);
+            if (isd) { m.type = INVFS_ITYP_DIR; m.nlink = 2; }
         }
         fill_stat_from_meta(st, &m, size, ctime);
         return 0;
@@ -444,7 +537,7 @@ static int invf_mkdir(const char *path, mode_t mode)
         m.mtime = m.atime = (int64_t)time(NULL);
         vol_apply_meta(g_vol, anchor, &m);
         vol_flush(g_vol);
-        table_mark_stale();
+        table_sync_one_locked(anchor);
     }
     pthread_mutex_unlock(&g_io_lock);
     rc = d ? 0 : -EEXIST;
@@ -456,7 +549,12 @@ static int invf_rmdir(const char *path)
     int rc;
     pthread_mutex_lock(&g_io_lock);
     rc = vol_rmdir(g_vol, path + 1);
-    if (rc == 0) { vol_flush(g_vol); table_mark_stale(); }
+    if (rc == 0) {
+        char anc[300];
+        vol_flush(g_vol);
+        snprintf(anc, sizeof anc, "%s/", path + 1);
+        table_remove_name(anc);
+    }
     pthread_mutex_unlock(&g_io_lock);
     return rc == 0 ? 0 : (rc == -2 ? -ENOTEMPTY : -ENOENT);
 }
@@ -545,7 +643,7 @@ static int invf_open(const char *path, struct fuse_file_info *fi)
         if (have_keep)
             vol_apply_meta(g_vol, path + 1, &keep);
         vol_flush(g_vol);
-        table_mark_stale();
+        table_sync_one_locked(path + 1);
         pthread_mutex_unlock(&g_io_lock);
     }
     return 0;
@@ -579,7 +677,7 @@ static int invf_create(const char *path, mode_t mode, struct fuse_file_info *fi)
         m.mtime = m.atime = (int64_t)time(NULL);
         vol_apply_meta(g_vol, path + 1, &m);
         vol_flush(g_vol);
-        table_mark_stale();
+        table_sync_one_locked(path + 1);
     }
     pthread_mutex_unlock(&g_io_lock);
     c = (wctx *)calloc(1, sizeof(wctx));
@@ -672,7 +770,7 @@ static int commit_wctx(wctx *c)
          * silently (audit H4; Dokan already reports STATUS_DISK_FULL) */
         fprintf(stderr, "invf: vol_replace_file failed (%s)\n", c->name);
         vol_flush(g_vol);
-        table_mark_stale();
+        table_sync_one_locked(c->name);
         pthread_mutex_unlock(&g_io_lock);
         return -ENOSPC;
     }
@@ -682,7 +780,7 @@ static int commit_wctx(wctx *c)
         vol_apply_meta(g_vol, c->name, &c->meta);
     vol_mark_pending(g_vol, nid);   /* on-demand sweep */
     vol_flush(g_vol);
-    table_mark_stale();
+    table_sync_one_locked(c->name);
     pthread_mutex_unlock(&g_io_lock);
     return 0;
 }
@@ -767,18 +865,31 @@ static int invf_statfs(const char *path, struct statvfs *st)
  * honestly instead of pretending (WP2 adds real metadata storage) */
 static int invf_access(const char *path, int mask)
 {
-    if (mask & W_OK)
-        return vol_write_enabled(g_vol) ? -EACCES : -EROFS;
-    if (snapshot_entry(path + 1, NULL, NULL, NULL))
+    char ename[300];
+    invfs_meta_pub m;
+    struct fuse_context *ctx = fuse_get_context();
+    mode_t bits;
+    unsigned shift;
+
+    if (!meta_for_path(path, ename, sizeof ename, &m))
+        return -ENOENT;
+    if (ctx->uid == 0)
+        return 0;                       /* CAP_DAC_OVERRIDE */
+    if (!(mask & (R_OK | W_OK | X_OK)))
         return 0;
-    /* directories are prefix anchors: check via engine */
-    {
-        int is_dir = 0;
-        pthread_mutex_lock(&g_io_lock);
-        is_dir = g_vol ? vol_is_dir(g_vol, path + 1) : 0;
-        pthread_mutex_unlock(&g_io_lock);
-        return is_dir ? 0 : -ENOENT;
-    }
+    /* pick owner / group / other triad from the stored mode */
+    if (ctx->uid == m.uid && m.uid != (uid_t)-1)
+        shift = 0;
+    else if (ctx->gid == m.gid && m.gid != (gid_t)-1)
+        shift = 1;
+    else
+        shift = 2;
+    bits = (mode_t)m.mode >> (shift * 3);
+    if (((mask & R_OK) && !(bits & 4)) ||
+        ((mask & W_OK) && !(bits & 2)) ||
+        ((mask & X_OK) && !(bits & 1)))
+        return -EACCES;
+    return 0;
 }
 
 static int resize_volume_file(const char *name, off_t len)
@@ -822,7 +933,7 @@ static int resize_volume_file(const char *name, off_t len)
             vol_apply_meta(g_vol, name + 1, &keep);
     }
     vol_flush(g_vol);
-    table_mark_stale();
+    table_sync_one_locked(name + 1);
     pthread_mutex_unlock(&g_io_lock);
     return rc;
 }
@@ -913,7 +1024,7 @@ static int invf_symlink(const char *target, const char *linkpath)
         snprintf(m.target, sizeof m.target, "%s", target);
         vol_apply_meta(g_vol, linkpath + 1, &m);
         vol_flush(g_vol);
-        table_mark_stale();
+        table_sync_one_locked(linkpath + 1);
     }
     pthread_mutex_unlock(&g_io_lock);
     return nid ? 0 : -ENOSPC;
@@ -969,7 +1080,7 @@ static int invf_mknod(const char *path, mode_t mode, dev_t rdev)
     vol_ensure_path(g_vol, path + 1);
     nid = vol_create_special(g_vol, path + 1, typ,
                              (uint16_t)(mode & 07777), (uint64_t)rdev);
-    if (nid) { vol_flush(g_vol); table_mark_stale(); }
+    if (nid) { vol_flush(g_vol); table_sync_one_locked(path + 1); }
     pthread_mutex_unlock(&g_io_lock);
     if (nid && ctx && (ctx->uid || ctx->gid)) {
         /* non-root mount: stamp the creating user */
@@ -1025,7 +1136,7 @@ static int invf_setxattr(const char *path, const char *name,
     ino = vol_find(g_vol, ename);
     if (!ino) { pthread_mutex_unlock(&g_io_lock); return -ENOENT; }
     rc = vol_set_xattr(g_vol, ino, name, value, size);
-    if (rc == 0) { vol_flush(g_vol); table_mark_stale(); }
+    if (rc == 0) { vol_flush(g_vol); table_sync_one_locked(ename); }
     pthread_mutex_unlock(&g_io_lock);
     if (rc == -2) return -ERANGE;
     if (rc == -3) return -EEXIST;      /* XATTR_CREATE on existing */
@@ -1069,7 +1180,7 @@ static int invf_removexattr(const char *path, const char *name)
     ino = vol_find(g_vol, ename);
     if (!ino) { pthread_mutex_unlock(&g_io_lock); return -ENOENT; }
     rc = vol_remove_xattr(g_vol, ino, name);
-    if (rc == 0) { vol_flush(g_vol); table_mark_stale(); }
+    if (rc == 0) { vol_flush(g_vol); table_sync_one_locked(ename); }
     pthread_mutex_unlock(&g_io_lock);
     return rc == 0 ? 0 : (rc == -1 ? -ENODATA : -EIO);
 }
@@ -1095,7 +1206,7 @@ static int invf_unlink(const char *path)
     rc = vol_unlink(g_vol, path + 1);
     if (rc == 0) {
         vol_flush(g_vol);
-        table_mark_stale();
+        table_remove_name(path + 1);
     }
     pthread_mutex_unlock(&g_io_lock);
     return rc == 0 ? 0 : -ENOENT;
@@ -1190,7 +1301,8 @@ int main(int argc, char *argv[])
         int rc;
         int k;
         fuse_argv[fuse_argc++] = "invf-fuse";
-        if (fg) fuse_argv[fuse_argc++] = "-f";
+        /* -f/-d are consumed by us (fuse_daemonize below); fuse_new
+         * rejects them as unknown options */
         if (opts) {
             fuse_argv[fuse_argc++] = "-o";
             fuse_argv[fuse_argc++] = (char *)opts;
