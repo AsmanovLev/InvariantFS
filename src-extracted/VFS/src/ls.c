@@ -139,6 +139,13 @@ int main(int argc, char **argv)
             continue;
         }
         if (h.magic == TOMBSTONE_MAGIC) {  /* tombstone: remove only its version */
+            if (h.file_size != 0) {
+                /* v2 position kill: retires one older version of this name;
+                   the replacement INOD always follows in the same combo, and
+                   this listing keeps the last version seen -- nothing to do */
+                p += (uint64_t)h.rec_len + 4;
+                continue;
+            }
             int i = ls_find(tab, tmask, names, name);
             if (i >= 0 && inodes[i] == h.inode_id) {
                 sizes[i] = 0;
