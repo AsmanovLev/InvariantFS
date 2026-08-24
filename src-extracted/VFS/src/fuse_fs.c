@@ -725,13 +725,17 @@ static int invf_write(const char *path, const char *buf, size_t size, off_t offs
     return (int)size;
 }
 
-/* background on-demand sweep (FUSE): drain pending while no open handles */
+/* background sweep (FUSE): OPT-IN via INVFS_SWEEP_INTERVAL=<seconds>.
+ * Automatic transcoding of a root filesystem in the background was the
+ * wrong default (constant HDD wakeups, surprise CPU, churn during
+ * emerge). Default OFF: sweeping happens explicitly (invf-sweep CLI)
+ * or when this env var is set. */
 static void *fuse_sweep_thread(void *arg)
 {
     (void)arg;
     const char *iv = getenv("INVFS_SWEEP_INTERVAL");
-    int interval = iv ? atoi(iv) : 30;
-    if (interval < 1) interval = 1;
+    if (!iv || atoi(iv) < 1) return NULL;   /* disabled by default */
+    int interval = atoi(iv);
     for (;;) {
         sleep(interval);
         if (g_shutdown || g_open_handles != 0) continue;
@@ -744,7 +748,9 @@ static void *fuse_sweep_thread(void *arg)
             int n = vol_sweep_pending(g_vol);
             if (n > 0) {
                 vol_flush(g_vol);
-                table_mark_stale();
+                /* no table invalidation: sweeping rewrites block layout
+                 * only -- name/inode_id/file_size are invariant, and the
+                 * generic ZSTD path clones the record verbatim */
                 fprintf(stderr, "[sweep] on-demand: processed %d pending\n", n);
             }
         }
@@ -828,8 +834,22 @@ static int invf_rename(const char *from, const char *to, unsigned int flags)
         return -EINVAL;   /* RENAME_NOREPLACE / RENAME_EXCHANGE unsupported */
     pthread_mutex_lock(&g_io_lock);
     if (!g_vol) { pthread_mutex_unlock(&g_io_lock); return -EIO; }
-    rc = vol_rename(g_vol, from + 1, to + 1);
-    if (rc == 0) { vol_flush(g_vol); table_mark_stale(); }
+    {
+        int was_dir = vol_is_dir(g_vol, from + 1);
+        rc = vol_rename(g_vol, from + 1, to + 1);
+        if (rc == 0) {
+            vol_flush(g_vol);
+            /* plain-file renames are the hot path (portage atomic
+             * moves): sync the two names incrementally. Directory
+             * renames rewrite every child name prefix -> full rebuild */
+            if (!was_dir) {
+                table_remove_name(from + 1);
+                table_sync_one_locked(to + 1);
+            } else {
+                table_mark_stale();
+            }
+        }
+    }
     pthread_mutex_unlock(&g_io_lock);
     switch (rc) {
     case 0:  return 0;
