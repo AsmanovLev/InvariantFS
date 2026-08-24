@@ -106,6 +106,46 @@ uint64_t vol_replace_file(invfs_volume *v, const char *name,
    (whole "dir/" prefix). 0 = ok, -1 = ENOENT/EINVAL, -2 = EEXIST, -3 = ENOSPC */
 int  vol_rename(invfs_volume *v, const char *from, const char *to);
 
+/* ---- format v2 per-inode metadata ("INO2" ext block) ----
+ * Friendly view of invfs_meta_ext_hdr + symlink target. Records written
+ * before v2 have no ext: vol_get_meta returns -ENOENT-ish (-1) and every
+ * writer falls back to v1 defaults (uid/gid 0, mode by type). */
+typedef struct {
+    uint8_t  type;                 /* INVFS_ITYP_* */
+    uint16_t mode;                 /* permission bits */
+    uint32_t uid;
+    uint32_t gid;
+    int64_t  mtime;
+    int64_t  atime;
+    uint32_t nlink;
+    uint64_t rdev;                 /* CHR/BLK device number */
+    char     target[INVFS_META_TARGET_MAX];  /* symlink target (NUL-terminated) */
+} invfs_meta_pub;
+
+/* read metadata for an inode: 0 = found, -1 = none/corrupt/not indexed.
+ * target is only filled for INVFS_ITYP_LNK. */
+int      vol_get_meta(invfs_volume *v, uint64_t inode_id, invfs_meta_pub *out);
+/* rewrite `name`'s record carrying `meta` (xattrs preserved); data blocks and
+ * the AST are untouched — the L2P keys move to the new inode id internally.
+ * Returns the new inode id, or 0 on failure (volume untouched). */
+uint64_t vol_apply_meta(invfs_volume *v, const char *name,
+                        const invfs_meta_pub *meta);
+/* create a symlink (target stored in the record's meta ext) or a special
+ * node (FIFO/SOCK/CHR/BLK; no data segments). Return inode id / 0. */
+uint64_t vol_create_symlink(invfs_volume *v, const char *name,
+                            const char *target);
+uint64_t vol_create_special(invfs_volume *v, const char *name,
+                            uint8_t type, uint16_t mode, uint64_t rdev);
+/* xattrs stored inside the same INO2 ext (TLVs). val semantics like
+ * getxattr(2): size query via *vlen==0. list returns NUL-separated names. */
+int vol_get_xattr(invfs_volume *v, uint64_t inode_id, const char *xn,
+                  void *val, size_t *vlen);
+int vol_set_xattr(invfs_volume *v, uint64_t inode_id, const char *xn,
+                  const void *val, size_t vlen);
+int vol_remove_xattr(invfs_volume *v, uint64_t inode_id, const char *xn);
+int vol_list_xattr(invfs_volume *v, uint64_t inode_id,
+                   char *buf, size_t bcap);
+
 /* accessors for tools */
 const invfs_superblock *vol_sb(invfs_volume *v);
 

@@ -160,7 +160,7 @@ int main(int argc, char **argv)
      * ordinary writes must keep (reserved + hard_min) free */
     sb.reserved_blocks = (uint32_t)(sb.total_blocks / 128 + 64);
     sb.hard_min_blocks = (uint32_t)(sb.total_blocks / 1024 + 16);
-    sb.vol_flags = 0;
+    sb.vol_flags = VOLF_META2;   /* fresh volumes carry metadata v2 */
     sb.pad2 = 0;
     sb.checksum = invfs_crc32c(&sb, offsetof(invfs_superblock, checksum));
 

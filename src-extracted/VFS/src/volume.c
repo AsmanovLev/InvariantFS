@@ -514,6 +514,30 @@ static void idx_del(invfs_volume *v, const char *name, size_t nlen,
     idx_bump_dirs(v, name, nlen, -1);
 }
 
+/* v2 position kill: remove the entry whose record lives exactly at `pos`,
+ * whatever its id. Same-id metadata rewrites chain versions under one name,
+ * so a plain id match would kill the NEWEST version instead of the one the
+ * tombstone names. Falls back to nothing -- callers keep the id path for
+ * legacy (file_size==0) tombstones. */
+static void idx_del_at(invfs_volume *v, const char *name, size_t nlen,
+                       uint64_t pos)
+{
+    size_t b;
+    name_index_entry *e, **pp;
+    if (!v->nbuck || nlen == 0 || nlen > 255 || pos == 0) return;
+    b = (size_t)(idx_hash(name, nlen) & v->nmask);
+    pp = &v->nbuck[b];
+    for (e = *pp; e; pp = &e->next, e = e->next)
+        if (e->nlen == nlen && memcmp(e->name, name, nlen) == 0 &&
+            e->pos == pos)
+            break;
+    if (!e) return;
+    *pp = e->next;
+    free(e);
+    v->ncount--;
+    idx_bump_dirs(v, name, nlen, -1);
+}
+
 static const name_index_entry *idx_get(invfs_volume *v, const char *name,
                                        size_t nlen)
 {
@@ -673,7 +697,12 @@ invfs_volume *vol_open(const char *path, int *err)
                             rec_h.file_size, rec_h.ctime);
                     idx_put_id(v, rec_h.inode_id, p);
                 } else {
-                    idx_del(v, rec_h.name, nl, rec_h.inode_id);
+                    /* v2 tombstones carry the killed record's byte offset in
+                     * the unused file_size field; 0 keeps legacy semantics */
+                    if (rec_h.file_size != 0)
+                        idx_del_at(v, rec_h.name, nl, rec_h.file_size);
+                    else
+                        idx_del(v, rec_h.name, nl, rec_h.inode_id);
                 }
             }
             p += rec_h.rec_len + 4;
@@ -924,7 +953,9 @@ int vol_fsck_scan(invfs_volume *v, invfs_fsck_report *rep, int fix)
     invfs_l2p_entry *newl2p = NULL;
     uint8_t *used = NULL;
     size_t used_bytes;
-    uint64_t *tomb = NULL;
+    /* v2 tombstones kill by record position (DELT.file_size != 0);
+     * legacy ones kill by inode id. Keep both fields per entry. */
+    uint64_t *tomb_id = NULL, *tomb_pos = NULL;
     size_t tomb_n = 0, tomb_cap = 0;
 
     memset(rep, 0, sizeof(*rep));
@@ -973,12 +1004,20 @@ int vol_fsck_scan(invfs_volume *v, invfs_fsck_report *rep, int fix)
             }
             if (rh.magic == TOMBSTONE_MAGIC) {
                 if (tomb_n == tomb_cap) {
-                    tomb_cap = tomb_cap ? tomb_cap * 2 : 64;
-                    uint64_t *nt = (uint64_t *)realloc(tomb, tomb_cap * sizeof(uint64_t));
-                    if (!nt) { free(rec); free(used); free(live_pos); free(live_id); return -1; }
-                    tomb = nt;
+                    size_t ncap = tomb_cap ? tomb_cap * 2 : 64;
+                    uint64_t *ni = (uint64_t *)realloc(tomb_id, ncap * sizeof(uint64_t));
+                    uint64_t *np = (uint64_t *)realloc(tomb_pos, ncap * sizeof(uint64_t));
+                    if (!ni || !np) {
+                        free(ni); free(np);
+                        free(rec); free(used); free(live_pos); free(live_id);
+                        return -1;
+                    }
+                    tomb_id = ni; tomb_pos = np;
+                    tomb_cap = ncap;
                 }
-                tomb[tomb_n++] = rh.inode_id;
+                tomb_id[tomb_n] = rh.inode_id;
+                tomb_pos[tomb_n] = rh.file_size;   /* v2: record position */
+                tomb_n++;
             } else if (rh.magic == INODE_REC_MAGIC) {
                 if (live_n == live_cap) {
                     live_cap = live_cap ? live_cap * 2 : 256;
@@ -1004,7 +1043,10 @@ int vol_fsck_scan(invfs_volume *v, invfs_fsck_report *rep, int fix)
             int killed = 0;
             size_t t;
             for (t = 0; t < tomb_n; t++)
-                if (tomb[t] == live_id[i]) { killed = 1; break; }
+                if ((tomb_pos[t] == 0 && tomb_id[t] == live_id[i]) ||
+                    (tomb_pos[t] != 0 && tomb_pos[t] == live_pos[i])) {
+                    killed = 1; break;
+                }
             if (killed) continue;
             /* Counted here, not in pass 1: a record that a tombstone later
                killed is not a live file. Counting every INOD reported 40004
@@ -1014,14 +1056,15 @@ int vol_fsck_scan(invfs_volume *v, invfs_fsck_report *rep, int fix)
             if (fsck_rebuild_one(v, live_pos[i], live_id[i],
                                  &newl2p, &l2p_n, &l2p_cap,
                                  used, used_bytes, rep) != 0) {
-                free(used); free(live_pos); free(live_id); free(tomb);
+                free(used); free(live_pos); free(live_id); free(tomb_id); free(tomb_pos);
                 free(newl2p);
                 return -1;
             }
         }
         free(live_pos); free(live_id);
     }
-    free(tomb);
+    free(tomb_id);
+    free(tomb_pos);
 
     /* metadata zone is always allocated */
     {
@@ -2921,7 +2964,52 @@ static void sweep_unwind(invfs_volume *v, uint64_t new_id)
  * the error return. The file was left decodable-as-garbage. Now nothing is
  * visible until the whole file is done, and the unwind gives the space back.
  */
+/* Carry INO2 metadata across transcode rewrites. The generic ZSTD path
+ * copies the old record verbatim (ext included), but the JXL/APE/FLAC/TAR/
+ * GZ/PNG/PMP/ZIP branches build fresh records that would silently drop the
+ * file's permissions/owner/times. Wrapper resolves the name up front, lets
+ * the inner sweep run, and re-applies the captured meta only when the name
+ * now belongs to a NEW record that lacks an ext. */
+static int vol_sweep_file_inner(invfs_volume *v, uint64_t inode_id);
+
 int vol_sweep_file(invfs_volume *v, uint64_t inode_id)
+{
+    invfs_meta_pub keep;
+    int have_keep;
+    char name[256] = "";
+    int rc;
+
+    have_keep = vol_get_meta(v, inode_id, &keep) == 0;
+    {
+        uint64_t pos = idx_get_id(v, inode_id);
+        if (pos >= v->inode_area_start * INVFS_BLOCK_SIZE &&
+            pos + sizeof(invfs_inode_rec) <= v->inode_area_pos) {
+            invfs_inode_rec h;
+            if (io_seek(&v->io, pos) == 0 &&
+                io_read(&v->io, &h, sizeof h) == 0 &&
+                h.magic == INODE_REC_MAGIC && h.inode_id == inode_id) {
+                size_t nl = h.name_len < sizeof(name) - 1
+                          ? h.name_len : sizeof(name) - 1;
+                memcpy(name, h.name, nl);
+                name[nl] = 0;
+            }
+        }
+    }
+
+    rc = vol_sweep_file_inner(v, inode_id);
+
+    if (have_keep && name[0]) {
+        uint64_t nid = vol_find(v, name);
+        if (nid != 0 && nid != inode_id) {
+            invfs_meta_pub chk;
+            if (vol_get_meta(v, nid, &chk) != 0)
+                vol_apply_meta(v, name, &keep);
+        }
+    }
+    return rc;
+}
+
+static int vol_sweep_file_inner(invfs_volume *v, uint64_t inode_id)
 {
     uint64_t pos = v->inode_area_start * INVFS_BLOCK_SIZE;
     uint64_t end = v->inode_area_pos;
@@ -4015,6 +4103,536 @@ static uint64_t vol_transcode_abort(invfs_volume *v, const char *name)
         fprintf(stderr, "[vol] %s: transcode aborted, purged %d orphan(s)\n",
                 name, n);
     return 0;
+}
+
+/* ==================== format v2 metadata (INO2 ext block) ====================
+ *
+ * A v2 record is [base][AST blob]["INO2" ext][CRC32C]. The ext carries the
+ * POSIX identity of the inode: type, mode, uid/gid, mtime/atime, nlink,
+ * rdev, symlink target and xattr TLVs. Everything a Linux rootfs needs that
+ * the v1 base record cannot hold.
+ *
+ * Rewrites NEVER change the inode id: the L2P keys stay valid, so metadata
+ * updates are crash-safe without touching data blocks. The old version is
+ * killed by appending a tombstone whose UNUSED file_size field holds the
+ * byte offset of the exact INOD being retired ("position kill"). Legacy
+ * tombstones leave file_size 0 and keep the old kill-by-id semantics, so
+ * v1 volumes replay identically. Both records land in ONE io_write: a torn
+ * tail fails the trailing CRC and the scan stops at the previous boundary.
+ */
+
+/* total AST blob length after the fixed header (recipe + children), or
+ * (size_t)-1 if bounds are violated */
+static size_t vol_ast_blob_len(const uint8_t *rec, size_t rec_len)
+{
+    invfs_ast_recipe_header h;
+    size_t base = sizeof(invfs_inode_rec);
+    size_t len;
+    uint16_t i;
+    const uint8_t *p, *end;
+    if (rec_len < base + sizeof(h)) return (size_t)-1;
+    memcpy(&h, rec + base, sizeof(h));
+    len = sizeof(h) + (size_t)h.num_blocks * sizeof(invfs_ast_block_entry);
+    if (len > rec_len - base) return (size_t)-1;
+    p = rec + base + len;
+    end = rec + rec_len;
+    for (i = 0; i < h.num_children; i++) {
+        uint16_t nl;
+        if ((size_t)(end - p) < 2) return (size_t)-1;
+        memcpy(&nl, p, 2); p += 2;
+        /* wire child = [u16 nlen][name][u16 method][4x u32] */
+        if (nl > MAX_AST_CHILD_NAME || (size_t)(end - p) < nl + 18)
+            return (size_t)-1;
+        p += nl + 18;
+    }
+    return (size_t)(p - (rec + base));
+}
+
+/* parse one xattr TLV at p; returns bytes consumed or 0 on corruption */
+static size_t xattr_tlv_size(const uint8_t *p, size_t avail)
+{
+    uint16_t nl, vl;
+    if (avail < 4) return 0;
+    memcpy(&nl, p, 2);
+    memcpy(&vl, p + 2 + nl, 2);
+    if ((size_t)2 + nl + 2 + vl > avail || nl == 0) return 0;
+    return (size_t)2 + nl + 2 + vl;
+}
+
+static int meta_parse_ext(const uint8_t *p, size_t n,
+                          invfs_meta_pub *out,
+                          uint8_t **xattrs_out, size_t *xlen_out)
+{
+    invfs_meta_ext_hdr h;
+    if (n < sizeof(h)) return -1;
+    memcpy(&h, p, sizeof(h));
+    if (h.magic != INVFS_META_MAGIC || h.version != 2 ||
+        h.ext_len > n || h.target_len >= sizeof(out->target))
+        return -1;
+    if ((size_t)sizeof(h) + h.target_len > h.ext_len) return -1;
+    memset(out, 0, sizeof(*out));
+    out->type = h.type;
+    out->mode = h.mode;
+    out->uid = h.uid;
+    out->gid = h.gid;
+    out->mtime = h.mtime;
+    out->atime = h.atime;
+    out->nlink = h.nlink;
+    out->rdev = h.rdev;
+    if (h.target_len) {
+        memcpy(out->target, p + sizeof(h), h.target_len);
+        out->target[h.target_len] = 0;
+    } else {
+        out->target[0] = 0;
+    }
+    if (xattrs_out) {
+        *xattrs_out = (uint8_t *)(p + sizeof(h) + h.target_len);
+        *xlen_out = h.ext_len - sizeof(h) - h.target_len;
+    }
+    return 0;
+}
+
+/* locate the ext inside a raw record; NULL when absent (v1 record) */
+static const uint8_t *meta_locate_ext(const uint8_t *rec, size_t rec_len,
+                                      size_t *ext_len_out)
+{
+    size_t ast = vol_ast_blob_len(rec, rec_len);
+    size_t off;
+    invfs_meta_ext_hdr h;
+    if (ast == (size_t)-1) return NULL;
+    off = sizeof(invfs_inode_rec) + ast;
+    if (rec_len < off + sizeof(h)) return NULL;
+    memcpy(&h, rec + off, sizeof(h));
+    if (h.magic != INVFS_META_MAGIC || h.ext_len > rec_len - off)
+        return NULL;
+    *ext_len_out = h.ext_len;
+    return rec + off;
+}
+
+/* read the latest live record for an inode id; returns malloc'd buffer and
+ * optionally its name/position. Walks forward from the index hint so stale
+ * hints degrade to a full-area scan instead of wrong answers. */
+static int meta_read_record_by_id(invfs_volume *v, uint64_t inode_id,
+                                  uint8_t **buf_out, uint32_t *rl_out,
+                                  char *name_out, size_t name_cap,
+                                  uint64_t *pos_out)
+{
+    uint64_t p, hint;
+
+    hint = idx_get_id(v, inode_id);
+    p = vol_inode_area_start(v);
+    if (hint >= p && hint + sizeof(invfs_inode_rec) <= v->inode_area_pos)
+        p = hint;
+    /* vol_inode_next returns the NEXT scan position; the record it described
+     * sits at p - rl - 4. Same pattern as vol_get_children. */
+    while ((p = vol_inode_next(v, p, NULL, NULL, NULL, NULL, 0, rl_out)) != 0) {
+        invfs_inode_rec rh;
+        uint8_t *buf;
+        if (vol_read_raw(v, p - *rl_out - 4, &rh, sizeof(rh)) != 0)
+            break;
+        if (rh.magic == TOMBSTONE_MAGIC) continue;
+        if (rh.inode_id != inode_id) continue;
+        buf = (uint8_t *)malloc(*rl_out);
+        if (!buf) return -1;
+        if (vol_read_raw(v, p - *rl_out - 4, buf, *rl_out) != 0) {
+            free(buf);
+            return -1;
+        }
+        if (name_out && name_cap) {
+            size_t nl = rh.name_len < name_cap - 1 ? rh.name_len : name_cap - 1;
+            memcpy(name_out, rh.name, nl);
+            name_out[nl] = 0;
+        }
+        if (pos_out) *pos_out = p - *rl_out - 4;
+        *buf_out = buf;
+        return 0;
+    }
+    return -1;
+}
+
+static size_t meta_serialize(const invfs_meta_pub *m,
+                             const uint8_t *xattrs, size_t xlen,
+                             uint8_t *dst)
+{
+    invfs_meta_ext_hdr h;
+    size_t tlen = m ? strlen(m->target) : 0;
+    uint8_t *d = dst;
+    memset(&h, 0, sizeof(h));
+    h.magic = INVFS_META_MAGIC;
+    h.version = 2;
+    h.ext_len = (uint16_t)(sizeof(h) + tlen + xlen);
+    if (m) {
+        h.type = m->type;
+        h.mode = m->mode;
+        h.uid = m->uid;
+        h.gid = m->gid;
+        h.mtime = m->mtime;
+        h.atime = m->atime;
+        h.nlink = m->nlink;
+        h.rdev = m->rdev;
+        h.target_len = (uint16_t)tlen;
+    }
+    memcpy(d, &h, sizeof(h)); d += sizeof(h);
+    if (tlen) { memcpy(d, m->target, tlen); d += tlen; }
+    if (xlen) { memcpy(d, xattrs, xlen); d += xlen; }
+    return (size_t)(d - dst);
+}
+
+static void meta_pub_from_hdr_defaults(invfs_meta_pub *m, uint8_t type)
+{
+    memset(m, 0, sizeof(*m));
+    m->type = type;
+    m->mode = (type == INVFS_ITYP_DIR) ? 0755 :
+              (type == INVFS_ITYP_LNK) ? 0777 : 0644;
+    m->nlink = (type == INVFS_ITYP_DIR) ? 2 : 1;
+}
+
+int vol_get_meta(invfs_volume *v, uint64_t inode_id, invfs_meta_pub *out)
+{
+    uint8_t *buf = NULL;
+    uint32_t rl;
+    const uint8_t *ext;
+    size_t elen = 0;
+    if (!out) return -1;
+    if (meta_read_record_by_id(v, inode_id, &buf, &rl, NULL, 0, NULL) != 0)
+        return -1;
+    ext = meta_locate_ext(buf, rl, &elen);
+    free(buf);
+    if (!ext) return -1;
+    return meta_parse_ext(ext, elen, out, NULL, NULL);
+}
+
+/* append [INOD(same id, updated ext)][DELT(position-kill)] as one write */
+static uint64_t meta_rewrite(invfs_volume *v, uint64_t inode_id,
+                             const invfs_meta_pub *newpub,   /* NULL=keep */
+                             const uint8_t *newx, size_t newxlen, /* NULL=keep */
+                             uint64_t *new_pos_out)
+{
+    uint8_t *oldbuf = NULL, *nurec = NULL, *combo = NULL;
+    uint32_t rl;
+    char name[256];
+    uint64_t old_pos = 0;
+    invfs_inode_rec *oh, *nh;
+    size_t ast, elen = 0, new_ext_size, nu_len, total, off;
+    const uint8_t *extp;
+    uint8_t *xattrs = NULL;
+    size_t xlen = 0;
+    invfs_meta_pub cur;
+    invfs_inode_rec tomb;
+    uint32_t crc_nu, crc_tb;
+
+    if (meta_read_record_by_id(v, inode_id, &oldbuf, &rl, name, sizeof(name),
+                               &old_pos) != 0)
+        return 0;
+    oh = (invfs_inode_rec *)oldbuf;
+    ast = vol_ast_blob_len(oldbuf, rl);
+    if (ast == (size_t)-1) { free(oldbuf); return 0; }
+
+    extp = meta_locate_ext(oldbuf, rl, &elen);
+    if (extp && meta_parse_ext(extp, elen, &cur, &xattrs, &xlen) != 0)
+        extp = NULL;
+    if (!extp) {
+        meta_pub_from_hdr_defaults(&cur, oh->name_len &&
+                                   name[oh->name_len - 1] == '/'
+                                   ? INVFS_ITYP_DIR : INVFS_ITYP_REG);
+        xattrs = NULL; xlen = 0;
+    }
+
+    {
+        static const uint8_t no_x[1] = { 0 };
+        if (!newpub) newpub = &cur;
+        if (!newx) { newx = xattrs ? xattrs : no_x; newxlen = xattrs ? xlen : 0; }
+        new_ext_size = sizeof(invfs_meta_ext_hdr) +
+                       strlen(newpub->target) + newxlen;
+        if (new_ext_size > INVFS_META_SLACK) { free(oldbuf); return 0; }
+        nu_len = sizeof(invfs_inode_rec) + ast + new_ext_size;
+        total = nu_len + 4 + sizeof(invfs_inode_rec) + 4;
+        combo = (uint8_t *)calloc(1, total);
+        if (!combo) { free(oldbuf); return 0; }
+
+        nh = (invfs_inode_rec *)combo;
+        memcpy(nh, oh, sizeof(*oh));
+        nh->rec_len = (uint32_t)nu_len;   /* ext grows the record */
+        memcpy(combo + sizeof(invfs_inode_rec),
+               oldbuf + sizeof(invfs_inode_rec), ast);
+        meta_serialize(newpub, newx, newxlen,
+                       combo + sizeof(invfs_inode_rec) + ast);
+        crc_nu = invfs_crc32c(combo, nu_len);
+        memcpy(combo + nu_len, &crc_nu, 4);
+
+        memset(&tomb, 0, sizeof(tomb));
+        tomb.magic = TOMBSTONE_MAGIC;
+        tomb.rec_len = (uint32_t)sizeof(tomb);
+        tomb.inode_id = inode_id;
+        tomb.file_size = old_pos;          /* position kill (v2) */
+        tomb.name_len = oh->name_len;
+        memcpy(tomb.name, oh->name, sizeof(tomb.name));
+        crc_tb = invfs_crc32c((uint8_t *)&tomb, sizeof(tomb));
+        off = nu_len + 4;
+        memcpy(combo + off, &tomb, sizeof(tomb));
+        memcpy(combo + off + sizeof(tomb), &crc_tb, 4);
+    }
+    free(oldbuf);
+
+    if (v->inode_area_pos + total > v->inode_area_end) { free(combo); return 0; }
+    if (vol_mark_dirty(v) != 0) { free(combo); return 0; }
+    {
+        uint64_t rec_start = v->inode_area_pos;
+        if (io_seek(&v->io, rec_start) != 0 ||
+            io_write(&v->io, combo, total) != 0) {
+            free(combo);
+            return 0;
+        }
+        if (new_pos_out) *new_pos_out = rec_start;
+        v->inode_area_pos = rec_start + total;
+        idx_put(v, name, strlen(name), inode_id, rec_start,
+                nh->file_size, nh->ctime);
+        idx_put_id(v, inode_id, rec_start);
+    }
+    free(combo);
+    return inode_id;
+}
+
+uint64_t vol_apply_meta(invfs_volume *v, const char *name,
+                        const invfs_meta_pub *meta)
+{
+    uint64_t id;
+    if (v->sb.vol_flags & VOLF_READONLY) return 0;
+    id = vol_find(v, name);
+    if (id == 0) return 0;
+    return meta_rewrite(v, id, meta, NULL, 0, NULL);
+}
+
+uint64_t vol_create_symlink(invfs_volume *v, const char *name,
+                            const char *target)
+{
+    invfs_meta_pub m;
+    size_t tl;
+    uint64_t nid;
+
+    if (v->sb.vol_flags & VOLF_READONLY) return 0;
+    if (name_too_long(name)) return 0;
+    tl = strlen(target);
+    if (tl == 0 || tl >= INVFS_META_TARGET_MAX) return 0;
+
+    nid = vol_create_file(v, name, NULL, 0);
+    if (nid == 0) return 0;
+    meta_pub_from_hdr_defaults(&m, INVFS_ITYP_LNK);
+    m.mode = 0777;
+    memcpy(m.target, target, tl + 1);
+    m.mtime = (int64_t)time(NULL);
+    if (meta_rewrite(v, nid, &m, NULL, 0, NULL) == 0) {
+        vol_delete_file(v, name);      /* roll back the empty placeholder */
+        return 0;
+    }
+    return nid;
+}
+
+uint64_t vol_create_special(invfs_volume *v, const char *name,
+                            uint8_t type, uint16_t mode, uint64_t rdev)
+{
+    invfs_meta_pub m;
+    uint64_t nid;
+
+    if (v->sb.vol_flags & VOLF_READONLY) return 0;
+    if (name_too_long(name)) return 0;
+    if (type != INVFS_ITYP_FIFO && type != INVFS_ITYP_SOCK &&
+        type != INVFS_ITYP_CHR && type != INVFS_ITYP_BLK)
+        return 0;
+
+    nid = vol_create_file(v, name, NULL, 0);
+    if (nid == 0) return 0;
+    meta_pub_from_hdr_defaults(&m, type);
+    m.mode = mode;
+    m.rdev = rdev;
+    m.mtime = (int64_t)time(NULL);
+    if (meta_rewrite(v, nid, &m, NULL, 0, NULL) == 0) {
+        vol_delete_file(v, name);
+        return 0;
+    }
+    return nid;
+}
+
+/* ---- xattr TLV helpers ---- */
+
+int vol_get_xattr(invfs_volume *v, uint64_t inode_id, const char *xn,
+                  void *val, size_t *vlen)
+{
+    uint8_t *buf = NULL, *x = NULL;
+    uint32_t rl;
+    size_t xl = 0, nlen = strlen(xn), rem, got = 0;
+    const uint8_t *p;
+    if (!vlen) return -1;
+    if (meta_read_record_by_id(v, inode_id, &buf, &rl, NULL, 0, NULL) != 0)
+        return -1;
+    if (!meta_locate_ext(buf, rl, &xl)) { free(buf); return -1; }
+    /* re-walk via parse to get the TLV slice */
+    {
+        size_t ast = vol_ast_blob_len(buf, rl);
+        const uint8_t *ext = buf + sizeof(invfs_inode_rec) + ast;
+        if (meta_parse_ext(ext, xl, &(invfs_meta_pub){0}, &x, &xl) != 0) {
+            free(buf);
+            return -1;
+        }
+    }
+    p = x; rem = xl;
+    while (rem > 0) {
+        size_t tsz = xattr_tlv_size(p, rem);
+        uint16_t nl, vl;
+        if (tsz == 0) break;
+        memcpy(&nl, p, 2); memcpy(&vl, p + 2 + nl, 2);
+        if (nl == nlen && memcmp(p + 2, xn, nlen) == 0) {
+            got = vl;
+            if (*vlen == 0) { *vlen = vl; free(buf); return 0; }
+            if (*vlen < vl) { free(buf); return -2; }   /* ERANGE-ish */
+            memcpy(val, p + 2 + nl + 2, vl);
+            *vlen = vl;
+            free(buf);
+            return 0;
+        }
+        p += tsz; rem -= tsz;
+    }
+    free(buf);
+    return -1;   /* ENODATA */
+}
+
+int vol_set_xattr(invfs_volume *v, uint64_t inode_id, const char *xn,
+                  const void *val, size_t vlen)
+{
+    uint8_t *buf = NULL, *nb = NULL;
+    uint32_t rl;
+    size_t xl = 0, nlen = strlen(xn), rem;
+    uint8_t *x = NULL;
+    const uint8_t *p;
+    size_t cap = INVFS_META_XATTR_MAX, used = 0, tsz;
+    char name[256];
+    int rc = -1;
+
+    if (v->sb.vol_flags & VOLF_READONLY) return -1;
+    if (nlen == 0 || nlen > 255) return -1;
+    if (meta_read_record_by_id(v, inode_id, &buf, &rl, name, sizeof(name),
+                               NULL) != 0)
+        return -1;
+    nb = (uint8_t *)calloc(1, cap);
+    if (!nb) { free(buf); return -1; }
+
+    if (meta_locate_ext(buf, rl, &xl)) {
+        size_t ast = vol_ast_blob_len(buf, rl);
+        const uint8_t *ext = buf + sizeof(invfs_inode_rec) + ast;
+        if (meta_parse_ext(ext, xl, &(invfs_meta_pub){0}, &x, &xl) == 0) {
+            /* copy existing TLVs except the one being replaced */
+            p = x; rem = xl;
+            while (rem > 0) {
+                uint16_t nl;
+                tsz = xattr_tlv_size(p, rem);
+                if (tsz == 0) break;
+                memcpy(&nl, p, 2);
+                if (!(nl == nlen && memcmp(p + 2, xn, nlen) == 0)) {
+                    if (used + tsz > cap) goto done;
+                    memcpy(nb + used, p, tsz);
+                    used += tsz;
+                }
+                p += tsz; rem -= tsz;
+            }
+        }
+    }
+    tsz = 2 + nlen + 2 + vlen;
+    if (used + tsz > cap) { rc = -2; goto done; }
+    {
+        uint16_t nl = (uint16_t)nlen, vl = (uint16_t)vlen;
+        memcpy(nb + used, &nl, 2);
+        memcpy(nb + used + 2, xn, nlen);
+        memcpy(nb + used + 2 + nlen, &vl, 2);
+        if (vlen) memcpy(nb + used + 2 + nlen + 2, val, vlen);
+    }
+    used += tsz;
+    rc = meta_rewrite(v, inode_id, NULL, nb, used, NULL) ? 0 : -1;
+done:
+    free(nb);
+    free(buf);
+    return rc;
+}
+
+int vol_remove_xattr(invfs_volume *v, uint64_t inode_id, const char *xn)
+{
+    uint8_t *buf = NULL, *nb = NULL;
+    uint32_t rl;
+    size_t xl = 0, nlen = strlen(xn), rem, used = 0, cap = INVFS_META_XATTR_MAX;
+    uint8_t *x = NULL;
+    const uint8_t *p;
+    char name[256];
+    int found = 0, rc;
+
+    if (v->sb.vol_flags & VOLF_READONLY) return -1;
+    if (meta_read_record_by_id(v, inode_id, &buf, &rl, name, sizeof(name),
+                               NULL) != 0)
+        return -1;
+    if (!meta_locate_ext(buf, rl, &xl)) { free(buf); return -1; }
+    nb = (uint8_t *)calloc(1, cap);
+    if (!nb) { free(buf); return -1; }
+    {
+        size_t ast = vol_ast_blob_len(buf, rl);
+        const uint8_t *ext = buf + sizeof(invfs_inode_rec) + ast;
+        if (meta_parse_ext(ext, xl, &(invfs_meta_pub){0}, &x, &xl) != 0) {
+            free(nb); free(buf); return -1;
+        }
+    }
+    p = x; rem = xl;
+    while (rem > 0) {
+        uint16_t nl;
+        size_t tsz = xattr_tlv_size(p, rem);
+        if (tsz == 0) break;
+        memcpy(&nl, p, 2);
+        if (nl == nlen && memcmp(p + 2, xn, nlen) == 0) {
+            found = 1;
+        } else {
+            if (used + tsz > cap) break;
+            memcpy(nb + used, p, tsz);
+            used += tsz;
+        }
+        p += tsz; rem -= tsz;
+    }
+    if (!found) { free(nb); free(buf); return -1; }
+    rc = meta_rewrite(v, inode_id, NULL, nb, used, NULL) ? 0 : -1;
+    free(nb);
+    free(buf);
+    return rc;
+}
+
+int vol_list_xattr(invfs_volume *v, uint64_t inode_id,
+                   char *buf, size_t bcap)
+{
+    uint8_t *rb = NULL, *x = NULL;
+    uint32_t rl;
+    size_t xl = 0, rem, used = 0;
+    const uint8_t *p;
+    if (meta_read_record_by_id(v, inode_id, &rb, &rl, NULL, 0, NULL) != 0)
+        return -1;
+    if (!meta_locate_ext(rb, rl, &xl)) { free(rb); return 0; }  /* none */
+    {
+        size_t ast = vol_ast_blob_len(rb, rl);
+        const uint8_t *ext = rb + sizeof(invfs_inode_rec) + ast;
+        if (meta_parse_ext(ext, xl, &(invfs_meta_pub){0}, &x, &xl) != 0) {
+            free(rb);
+            return -1;
+        }
+    }
+    p = x; rem = xl;
+    while (rem > 0) {
+        uint16_t nl;
+        size_t tsz = xattr_tlv_size(p, rem);
+        if (tsz == 0) break;
+        memcpy(&nl, p, 2);
+        if (buf) {
+            if (used + nl + 1 > bcap) { free(rb); return -2; }
+            memcpy(buf + used, p + 2, nl);
+            buf[used + nl] = 0;
+        }
+        used += nl + 1;
+        p += tsz; rem -= tsz;
+    }
+    free(rb);
+    return (int)used;
 }
 
 /* Replace `name` with `data`, or create it if absent.

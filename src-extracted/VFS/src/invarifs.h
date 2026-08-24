@@ -81,6 +81,7 @@ typedef struct {
 
 /* volume flags (sb.vol_flags) */
 #define VOLF_READONLY 0x00000001
+#define VOLF_META2    0x00000002  /* records may carry "INO2" metadata ext */
 
 /* AST block entry — one byte-range mapping (kernel binary format) */
 typedef struct {
@@ -150,6 +151,41 @@ typedef struct invfs_inode_rec {
 } invfs_inode_rec;
 #pragma pack(pop)
 
+/* META2 extension block — format v2 per-inode metadata. Sits AFTER the AST
+   recipe (+ children blob), still covered by the record's trailing CRC32C and
+   inside rec_len, so v1 scanners skip it via their normal advance rule.
+   Wire layout:
+     [invfs_meta_ext_hdr][target bytes if LNK][xattr TLVs...]
+   xattr TLV = [u16 name_len][name][u16 val_len][value], repeated to the end
+   of the block. All fields little-endian-by-host (see invfs_le*). */
+#define INVFS_META_MAGIC 0x324F4E49u  /* "INO2" LE */
+
+/* POSIX file types stored in invfs_meta_ext_hdr.type */
+#define INVFS_ITYP_REG  0
+#define INVFS_ITYP_DIR  1
+#define INVFS_ITYP_LNK  2
+#define INVFS_ITYP_FIFO 3
+#define INVFS_ITYP_SOCK 4
+#define INVFS_ITYP_CHR  5
+#define INVFS_ITYP_BLK  6
+
+#pragma pack(push, 1)
+typedef struct invfs_meta_ext_hdr {
+    uint32_t magic;      /* INVFS_META_MAGIC */
+    uint16_t ext_len;    /* total bytes: hdr + target + xattrs */
+    uint8_t  version;    /* 2 */
+    uint8_t  type;       /* INVFS_ITYP_* */
+    uint16_t mode;       /* permission bits (incl setuid/sticky) */
+    uint32_t uid;
+    uint32_t gid;
+    int64_t  mtime;
+    int64_t  atime;
+    uint32_t nlink;
+    uint64_t rdev;       /* device number for CHR/BLK */
+    uint16_t target_len; /* bytes of symlink target following the header */
+} invfs_meta_ext_hdr;    /* 48 bytes */
+#pragma pack(pop)
+
 /* Longest record this format can produce: the header, the recipe header, the
    most segments num_blocks can count, and the largest children blob the writer
    will build. A record longer than this was not written by this code, so it is
@@ -161,11 +197,21 @@ typedef struct invfs_inode_rec {
    skip an over-long record, they STOP, taking inode_area_pos back with them.
    Every file appended after the first big one disappeared, and the next append
    would have overwritten them. A 274 MB claude.exe sat 4th in a 143k-file
-   image and vol_open reported three names. */
+   image and vol_open reported three names.
+
+   META2 slack: records written by format v2 append an "INO2" metadata block
+   (uid/gid/mode/type/times/symlink target/xattrs) AFTER the AST recipe. The
+   slack covers the largest ext this implementation can produce so v2 records
+   never trip the bound a v1-only scanner enforces. */
+#define INVFS_META_TARGET_MAX 1024u  /* symlink target cap */
+#define INVFS_META_XATTR_MAX  4096u  /* total xattr TLV bytes per inode */
+#define INVFS_META_SLACK \
+    (sizeof(invfs_meta_ext_hdr) + (size_t)INVFS_META_TARGET_MAX + INVFS_META_XATTR_MAX)
+
 #define INVFS_MAX_REC_LEN \
     (sizeof(invfs_inode_rec) + sizeof(invfs_ast_recipe_header) + \
      (size_t)MAX_SEGMENTS * sizeof(invfs_ast_block_entry) + \
-     (size_t)INVFS_MAX_CHILD_BLOB)
+     (size_t)INVFS_MAX_CHILD_BLOB + INVFS_META_SLACK)
 
 /* Reserve a writer must see free in the inode area before it accepts data it
    would otherwise have to drop at Close. */
