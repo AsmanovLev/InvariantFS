@@ -198,6 +198,9 @@ typedef struct invfs_volume {
        cleanly, and refuses every mutation until vol_recover() has run. */
     int dirty;
     int needs_recovery;
+    /* records that failed CRC/bounds during the open scan; >0 means the
+     * volume shows real damage and must not self-recover a DIRTY state */
+    uint64_t scan_anomalies;
 } invfs_volume;
 
 static const uint64_t JOURNAL_BLOCKS = INVFS_JOURNAL_BLOCKS;
@@ -652,8 +655,10 @@ invfs_volume *vol_open(const char *path, int *err)
                 break;  /* end of records */
             if (rec_h.rec_len < sizeof(invfs_inode_rec) ||
                 rec_h.rec_len > INVFS_MAX_REC_LEN ||
-                p + rec_h.rec_len + 4 > v->inode_area_end)
+                p + rec_h.rec_len + 4 > v->inode_area_end) {
+                v->scan_anomalies++;
                 break;  /* corrupted tail — stop */
+            }
             /* torn-write protection: verify trailing CRC32C; a record
              * whose CRC fails is a half-written append (crash/SIGPIPE),
              * NOT a valid boundary — stop here so later tools never
@@ -674,6 +679,7 @@ invfs_volume *vol_open(const char *path, int *err)
                             "skipping (rec_len=%u)\n",
                             (unsigned long long)p,
                             (unsigned)rec_h.rec_len);
+                    v->scan_anomalies++;
                     /* skip the corrupt record and keep scanning so files
                      * AFTER it stay visible; run fsck -f to clean up */
                     p += (uint64_t)rec_h.rec_len + 4;
@@ -808,16 +814,36 @@ invfs_volume *vol_open(const char *path, int *err)
                    v->arc ? "on" : "off", (unsigned long long)budget);
     }
     *err = 0;
-    /* Unclean shutdown. The volume opens either way -- reading it is how you
-       find out what survived, and invf-fsck has to be able to report on it --
-       but every mutation is refused until vol_recover() has run, so a second
-       crash cannot pile new records on top of maps that were never finished. */
+    /* Unclean shutdown. Reading always works -- that is how you find out
+     * what survived. For WRITES the old behavior was a hard latch: every
+     * mount after an unclean stop stayed read-only until a manual
+     * `invf-fsck -f`, which made any ungraceful kill (openrc shutdown
+     * storms, OOM, host crash) boot-blocking for root-FS duty.
+     * Auto-recovery instead: if the full-record scan just completed with
+     * ZERO anomalies (every CRC verified, no torn tail), replay already
+     * rebuilt the exact on-disk truth and nothing was lost -- clear DIRTY
+     * and continue read-write. Any real damage keeps the conservative
+     * manual-fsck path. INVFS_AUTO_RECOVER=0 opts out. */
     if (v->sb.state != INVFS_STATE_CLEAN) {
-        fprintf(stderr,
-                "vol_open: %s was not closed cleanly (state=0x%02X); "
-                "read-only until recovery. Run `invf-fsck -f %s`.\n",
-                real, (unsigned)v->sb.state, path);
-        v->needs_recovery = 1;
+        const char *ar = getenv("INVFS_AUTO_RECOVER");
+        int ro_flag = (v->sb.vol_flags & VOLF_READONLY) != 0;
+        if (!ro_flag && v->scan_anomalies == 0 && (!ar || strcmp(ar, "0") != 0)) {
+            v->sb.state = INVFS_STATE_CLEAN;
+            if (vol_write_sb(v) == 0)
+                fprintf(stderr, "vol_open: %s not closed cleanly but scan is "
+                                "anomaly-free; recovered to CLEAN (rw)\n",
+                        real);
+            else
+                v->needs_recovery = 1;
+        } else {
+            fprintf(stderr,
+                    "vol_open: %s was not closed cleanly (state=0x%02X%s); "
+                    "read-only until recovery. Run `invf-fsck -f %s`.\n",
+                    real, (unsigned)v->sb.state,
+                    v->scan_anomalies ? ", damaged records" : "",
+                    path);
+            v->needs_recovery = 1;
+        }
     }
     return v;
 fail:
