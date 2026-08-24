@@ -37,7 +37,8 @@ static int excluded(const char *base)
     return 0;
 }
 
-static void apply_meta_or_die(const char *vname, const struct stat *st)
+static void apply_meta_or_die(const char *vname, const struct stat *st,
+                              const char *target)
 {
     invfs_meta_pub m;
     uint64_t nid;
@@ -52,11 +53,20 @@ static void apply_meta_or_die(const char *vname, const struct stat *st)
     default:       m.type = INVFS_ITYP_REG;  break;
     }
     m.mode  = st->st_mode & 07777;
-    m.uid   = st->st_uid;
-    m.gid   = st->st_gid;
+    /* distro trees are authored to be extracted as root; keeping the
+     * extractor's uid/gid would leave every file owned by an
+     * irrelevant host user inside the image */
+    if (getenv("INVFS_IMPORT_KEEP_OWNER")) {
+        m.uid   = st->st_uid;
+        m.gid   = st->st_gid;
+    } else {
+        m.uid   = 0;
+        m.gid   = 0;
+    }
     m.mtime = (int64_t)st->st_mtim.tv_sec;
     m.atime = (int64_t)st->st_atim.tv_sec;
     m.nlink = 0;                       /* engine default per type */
+    if (target) snprintf(m.target, sizeof(m.target), "%s", target);
     nid = vol_apply_meta(vol, vname, &m);
     if (!nid) {
         fprintf(stderr, "meta failed: %s (%s)\n", vname, strerror(errno));
@@ -104,7 +114,7 @@ static void import_file(const char *spath, const char *vname)
             vol_create_file(vol, vname, NULL, 0);
     }
     free(buf);
-    apply_meta_or_die(vname, &st);
+    apply_meta_or_die(vname, &st, NULL);
     n_files++;
 }
 
@@ -130,7 +140,7 @@ static void import_entry(const char *spath, const char *vname, int depth)
             return;
         }
         snprintf(anchor, sizeof(anchor), "%s/", vname);
-        apply_meta_or_die(anchor, &st);
+        apply_meta_or_die(anchor, &st, NULL);
         n_dirs++;
         if (depth < 32) import_dir(spath, vname, depth + 1);
         else fprintf(stderr, "too deep: %s\n", spath);
@@ -144,7 +154,8 @@ static void import_entry(const char *spath, const char *vname, int depth)
         if (tl < 0) { n_skipped++; return; }
         tgt[tl] = 0;
         if (vol_create_symlink(vol, vname, tgt) == 0) { n_skipped++; return; }
-        apply_meta_or_die(vname, &st);
+        /* keep the real target through the metadata restamp */
+        apply_meta_or_die(vname, &st, tgt);
         n_links++;
         break;
     }
@@ -153,7 +164,7 @@ static void import_entry(const char *spath, const char *vname, int depth)
                                (st.st_mode & S_IFMT) == S_IFIFO ?
                                    INVFS_ITYP_FIFO : INVFS_ITYP_SOCK,
                                st.st_mode & 07777, 0) == 0) { n_skipped++; return; }
-        apply_meta_or_die(vname, &st);
+        apply_meta_or_die(vname, &st, NULL);
         n_special++;
         break;
     case S_IFCHR: case S_IFBLK:
@@ -163,7 +174,7 @@ static void import_entry(const char *spath, const char *vname, int depth)
                                st.st_mode & 07777, (uint64_t)st.st_rdev) == 0) {
             n_skipped++; return;
         }
-        apply_meta_or_die(vname, &st);
+        apply_meta_or_die(vname, &st, NULL);
         n_special++;
         break;
     default:
