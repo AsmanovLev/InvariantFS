@@ -98,6 +98,8 @@ int  vol_delete_file(invfs_volume *v, const char *name);
 int  vol_delete_inode(invfs_volume *v, uint64_t inode_id, const char *name);
 /* unlink a file AND its "name!recipe"/"!partN"/"!coverN"/"!jxl" siblings */
 int  vol_unlink(invfs_volume *v, const char *name);
+/* remove a single name of a hardlinked inode without retiring blocks */
+int  vol_unlink_name(invfs_volume *v, const char *name);
 /* overwrite (or create) a file without a window in which neither version
    exists: append the new record, then tombstone the old one */
 uint64_t vol_replace_file(invfs_volume *v, const char *name,

@@ -4722,6 +4722,45 @@ int vol_delete_file(invfs_volume *v, const char *name)
 
 /* Delete a file and the sibling records that belong to it. This is what an
    unlink means for a transcoded file; vol_delete_file alone strands them. */
+/* remove ONE name of a multi-name (hardlinked) inode: tombstone only
+ * this name's record; blocks stay alive for the surviving names.
+ * nlink on surviving records is not rewritten (drift only delays block
+ * retirement; fsck recount fixes it). */
+int vol_unlink_name(invfs_volume *v, const char *name)
+{
+    uint64_t id, pos = 0;
+    uint8_t *obuf = NULL;
+    uint32_t orl = 0, crc;
+    size_t nl;
+    invfs_inode_rec rec;
+
+    if (v->sb.vol_flags & VOLF_READONLY) return -1;
+    id = vol_find(v, name);
+    if (!id) return -1;
+    if (meta_read_record_by_id(v, id, &obuf, &orl, NULL, 0, &pos) != 0 || !pos) {
+        free(obuf);
+        return -1;
+    }
+    free(obuf);
+    vol_mark_dirty(v);
+    nl = strlen(name);
+    memset(&rec, 0, sizeof(rec));
+    rec.magic = TOMBSTONE_MAGIC;
+    rec.rec_len = (uint32_t)sizeof(rec);
+    rec.inode_id = id;
+    rec.file_size = pos;                    /* v2 position-kill */
+    rec_set_name(&rec, name);
+    crc = invfs_crc32c((const uint8_t *)&rec, sizeof(rec));
+    if (io_seek(&v->io, v->inode_area_pos) != 0 ||
+        io_write(&v->io, &rec, sizeof(rec)) != 0 ||
+        io_write(&v->io, &crc, 4) != 0)
+        return -1;
+    v->inode_area_pos += sizeof(rec) + 4;
+    idx_del_at(v, name, nl, pos);
+    idx_bump_dirs(v, name, nl, -1);
+    return 0;
+}
+
 int vol_unlink(invfs_volume *v, const char *name)
 {
     int rc;

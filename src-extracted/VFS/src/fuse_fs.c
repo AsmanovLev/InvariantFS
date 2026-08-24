@@ -1076,8 +1076,21 @@ static int invf_link(const char *from, const char *dest)
     /* portage creates lockfiles via link() in hot loops; a full table
      * rebuild here (mark_stale) made every later negative lookup cost
      * O(area). The new name is one upsert. */
-    if (rc == 0)
+    if (rc == 0) {
+        /* both names share blocks now: record nlink=2 so unlinking ONE
+         * name takes the name-only path instead of retiring blocks */
+        const char *names[2] = { from + 1, dest + 1 };
+        for (int q = 0; q < 2; q++) {
+            invfs_meta_pub mm;
+            uint64_t nid2 = vol_find(g_vol, names[q]);
+            if (nid2 && vol_get_meta(g_vol, nid2, &mm) == 0) {
+                mm.nlink = 2;
+                vol_apply_meta(g_vol, names[q], &mm);
+            }
+        }
         table_sync_one_locked(dest + 1);
+        table_sync_one_locked(from + 1);
+    }
     pthread_mutex_unlock(&g_io_lock);
     switch (rc) {
     case 0:  return 0;
@@ -1227,6 +1240,18 @@ static int invf_unlink(const char *path)
     int rc;
     if (!vol_write_enabled(g_vol))
         return -EROFS;
+    {
+        char ename[300];
+        invfs_meta_pub hm;
+        if (meta_for_path(path, ename, sizeof ename, &hm) && hm.nlink > 1) {
+            pthread_mutex_lock(&g_io_lock);
+            if (!g_vol) { pthread_mutex_unlock(&g_io_lock); return -EIO; }
+            rc = vol_unlink_name(g_vol, path + 1);
+            if (rc == 0) table_remove_name(path + 1);
+            pthread_mutex_unlock(&g_io_lock);
+            return rc == 0 ? 0 : -ENOENT;
+        }
+    }
     pthread_mutex_lock(&g_io_lock);
     rc = vol_unlink(g_vol, path + 1);
     if (rc == 0)
