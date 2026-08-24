@@ -4686,10 +4686,26 @@ uint64_t vol_replace_file(invfs_volume *v, const char *name,
     nid = vol_create_file(v, name, data, len);
     if (nid == 0) return 0;                          /* old file still there */
     if (old_id != 0) {
-        vol_delete_inode(v, old_id, name);
         /* the replacement is plain RAW, so the old file's recipe/parts/covers
            describe bytes that no longer exist under this name */
-        vol_delete_siblings(v, name);
+        int has_children = -1;   /* -1 = unknown, scan conservatively */
+        uint8_t *obuf = NULL;
+        uint32_t orl = 0;
+        if (meta_read_record_by_id(v, old_id, &obuf, &orl, NULL, 0, NULL) == 0) {
+            invfs_ast_recipe_header ah;
+            size_t base = sizeof(invfs_inode_rec);
+            if (orl >= base + sizeof(ah)) {
+                memcpy(&ah, obuf + base, sizeof(ah));
+                has_children = ah.num_children != 0;
+            }
+            free(obuf);
+        }
+        vol_delete_inode(v, old_id, name);
+        /* sibling deletion walks the WHOLE inode area (pread per record):
+         * plain files -- everything written through FUSE -- can only have
+         * '!' siblings when their AST lists children, so skip the walk */
+        if (has_children != 0)
+            vol_delete_siblings(v, name);
     }
     return nid;
 }
@@ -4711,8 +4727,25 @@ int vol_unlink(invfs_volume *v, const char *name)
     int rc;
     if (v->sb.vol_flags & VOLF_READONLY) return -1;   /* EROFS */
     if (strchr(name, '!')) return vol_delete_file(v, name);   /* a sibling */
-    rc = vol_delete_file(v, name);
-    if (rc == 0) vol_delete_siblings(v, name);
+    /* capture the record first: sibling deletion is a full-area walk and
+     * plain files (children==0) never have '!' siblings */
+    {
+        int has_children = -1;
+        uint8_t *obuf = NULL;
+        uint32_t orl = 0;
+        uint64_t id = vol_find(v, name);
+        if (id && meta_read_record_by_id(v, id, &obuf, &orl, NULL, 0, NULL) == 0) {
+            invfs_ast_recipe_header ah;
+            size_t base = sizeof(invfs_inode_rec);
+            if (orl >= base + sizeof(ah)) {
+                memcpy(&ah, obuf + base, sizeof(ah));
+                has_children = ah.num_children != 0;
+            }
+            free(obuf);
+        }
+        rc = vol_delete_file(v, name);
+        if (rc == 0 && has_children != 0) vol_delete_siblings(v, name);
+    }
     return rc;
 }
 
