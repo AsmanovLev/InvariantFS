@@ -4977,7 +4977,20 @@ int vol_hardlink(invfs_volume *v, const char *from, const char *to)
 
     id = vol_find(v, from);
     if (!id) return -1;                              /* ENOENT */
-    if (vol_find(v, to)) return -2;                  /* EEXIST */
+    {
+        uint64_t toid = vol_find(v, to);
+        if (toid) {
+            /* stale-index self-heal: trust EEXIST only when the found
+             * record is actually alive (killed emerges leave index
+             * ghosts whose records are already tombstoned) */
+            uint8_t *chk = NULL;
+            uint32_t crl = 0;
+            int alive = meta_read_record_by_id(v, toid, &chk, &crl,
+                                               NULL, 0, NULL) == 0;
+            free(chk);
+            if (alive) return -2;                    /* EEXIST */
+        }
+    }
     if (vol_is_dir(v, from)) return -3;              /* dirs can't hardlink */
 
     if (meta_read_record_by_id(v, id, &buf, &rl, NULL, 0, NULL) != 0)
