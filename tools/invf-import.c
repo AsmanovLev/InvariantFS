@@ -107,6 +107,7 @@ static void import_file(const char *spath, const char *vname)
     }
     close(fd);
 
+    vol_ensure_path(vol, vname);   /* create missing parent dirs */
     if (vol_replace_file(vol, vname, buf, len) == 0 && !buf) {
         /* replace_file with NULL/0 only overwrites an existing name; ensure
          * creation for fresh empty entries too */
@@ -222,6 +223,10 @@ int main(int argc, char **argv)
     if (!(vol_sb(vol)->total_blocks)) { fprintf(stderr, "bad sb\n"); return 1; }
 
     clock_gettime(CLOCK_MONOTONIC, &t0);
+    /* INVFS_IMPORT_PREFIX=var/db/repos/gentoo imports UNDER an existing
+     * volume directory instead of the root (target must already exist) */
+    const char *prefix = getenv("INVFS_IMPORT_PREFIX");
+    if (prefix && !prefix[0]) prefix = NULL;
     if (lstat(argv[2], &root_st) == 0 && S_ISDIR(root_st.st_mode)) {
         invfs_meta_pub rm;
         memset(&rm, 0, sizeof(rm));
@@ -233,7 +238,7 @@ int main(int argc, char **argv)
         rm.atime = (int64_t)root_st.st_atim.tv_sec;
         vol_apply_meta(vol, "", &rm);   /* root anchor meta (best effort) */
     }
-    import_dir(argv[2], "", 0);
+    import_dir(argv[2], prefix ? prefix : "", 0);
     vol_flush(vol);
     clock_gettime(CLOCK_MONOTONIC, &t1);
 
