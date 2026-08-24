@@ -4998,7 +4998,9 @@ int vol_hardlink(invfs_volume *v, const char *from, const char *to)
                     hh.inode_id == toid)
                     alive = 1;
             }
-            if (alive) return -2;                    /* EEXIST */
+            if (alive) {
+                return -2;                           /* EEXIST */
+            }
         }
     }
     if (vol_is_dir(v, from)) return -3;              /* dirs can't hardlink */
