@@ -44,6 +44,18 @@ mount --move /proc /newroot/proc
 mount --move /sys  /newroot/sys
 mount --move /dev  /newroot/dev
 
-echo "[init] switch_root"
-exec switch_root /newroot /bin/sh -c \
-    'echo ===M1_PROOF_OK=== uid=$(id -u) shell=$0; cat /etc/invariant-release 2>/dev/null; export PS1="invfs-m1> "; exec /bin/sh' sh
+INIT=""; SHELLONLY=0
+for a in $(cat /proc/cmdline); do
+    case "$a" in
+        invfs.init=shell) SHELLONLY=1 ;;
+        invfs.init=*) INIT="${a#invfs.init=}" ;;
+    esac
+done
+
+if [ "$SHELLONLY" = 1 ]; then
+    echo "[init] switch_root -> rescue shell"
+    exec switch_root /newroot /bin/busybox sh
+fi
+
+echo "[init] switch_root -> ${INIT:-/sbin/init}"
+exec switch_root /newroot "${INIT:-/sbin/init}"

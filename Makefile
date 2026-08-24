@@ -17,7 +17,7 @@ CORE_O  := $(addprefix $(OBJ)/,$(addsuffix .o,$(CORE)))
 B3      := blake3 blake3_dispatch blake3_portable
 
 TOOLS   := invf-mkfs invf-verify invf-fsck invf-cp invf-cat invf-ls invf-stat \
-           invf-zip invf-arctest invf-blkio_test invf-fuse invf-import meta_probe
+           invf-zip invf-arctest invf-blkio_test invf-fuse invf-import invf-sweep meta_probe
 
 all: $(TOOLS:%=$(OUT)/%)
 
@@ -53,6 +53,11 @@ $(OBJ)/fuse_fs.o: $(SRC)/fuse_fs.c | $(OBJ)
 $(OUT)/invf-import: $(OBJ)/invf-import.o $(CORE_O)
 	$(CC) $(CFLAGS) -Itools -o $@ $< $(CORE_O) $(LDLIBS)
 $(OBJ)/invf-import.o: tools/invf-import.c | $(OBJ)
+	$(CC) $(CFLAGS) -c -o $@ $<
+
+$(OUT)/invf-sweep: $(OBJ)/invf-sweep.o $(CORE_O)
+	$(CC) $(CFLAGS) -Itools -o $@ $< $(CORE_O) $(LDLIBS)
+$(OBJ)/invf-sweep.o: tools/invf-sweep.c | $(OBJ)
 	$(CC) $(CFLAGS) -c -o $@ $<
 
 $(OUT)/meta_probe: $(OBJ)/meta_probe.o $(CORE_O)
