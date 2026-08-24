@@ -6348,3 +6348,31 @@ uint64_t vol_create_pmp_file(invfs_volume *v, const char *name,
     return vol_create_blob_file(v, name, pmp, pmp_len, orig_size, INVFS_ALGO_PMP);
 }
 
+
+/* Drop a name whose backing record is already gone (index ghost left by
+ * a killed process). Returns 0 if the entry was forgotten, -1 if the
+ * name looks live (caller should use the normal unlink path). */
+int vol_forget_name(invfs_volume *v, const char *name)
+{
+    uint64_t id, pos = 0;
+    invfs_inode_rec hh;
+
+    if (v->sb.vol_flags & VOLF_READONLY) return -1;
+    id = vol_find(v, name);
+    if (!id) return 0;                       /* already forgotten */
+    pos = idx_get_id(v, id);
+    if (!pos ||
+        pos < v->inode_area_start * INVFS_BLOCK_SIZE ||
+        pos + sizeof(hh) > v->inode_area_pos)
+        return -1;
+    if (io_seek(&v->io, pos) != 0 ||
+        io_read(&v->io, &hh, sizeof(hh)) != 0)
+        return -1;
+    if (hh.magic == INODE_REC_MAGIC && hh.inode_id == id)
+        return -1;                           /* record is alive */
+    /* dead: drop the index entry and undo the directory child count */
+    idx_del_at(v, name, strlen(name), pos);
+    idx_bump_dirs(v, name, strlen(name), -1);
+    vol_mark_dirty(v);
+    return 0;
+}

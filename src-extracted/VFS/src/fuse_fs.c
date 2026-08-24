@@ -1243,7 +1243,8 @@ static int invf_unlink(const char *path)
     {
         char ename[300];
         invfs_meta_pub hm;
-        if (meta_for_path(path, ename, sizeof ename, &hm) && hm.nlink > 1) {
+        int have_meta = meta_for_path(path, ename, sizeof ename, &hm);
+        if (have_meta && hm.nlink > 1) {
             pthread_mutex_lock(&g_io_lock);
             if (!g_vol) { pthread_mutex_unlock(&g_io_lock); return -EIO; }
             rc = vol_unlink_name(g_vol, path + 1);
@@ -1254,10 +1255,18 @@ static int invf_unlink(const char *path)
     }
     pthread_mutex_lock(&g_io_lock);
     rc = vol_unlink(g_vol, path + 1);
-    if (rc == 0)
+    if (rc == 0) {
         table_remove_name(path + 1);   /* no flush: tombstone+bitmap are
         durable on the next flush/close; per-unlink fsync-class writes
         made rm -rf of a source tree take minutes */
+    } else {
+        /* index ghost? record already tombstoned by a killed process:
+         * drop the entry instead of reporting ENOENT forever */
+        if (vol_forget_name(g_vol, path + 1) == 0) {
+            table_remove_name(path + 1);
+            rc = 0;
+        }
+    }
     pthread_mutex_unlock(&g_io_lock);
     return rc == 0 ? 0 : -ENOENT;
 }
