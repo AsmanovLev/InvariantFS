@@ -134,7 +134,19 @@ int main(int argc, char **argv)
      * after that failed. Scale it with the volume instead -- 1/64 of the
      * blocks, which at the ~336-byte record size is roughly one file per
      * 21 KB of volume, with the old 512 as the floor for tiny images. */
-    inode_blocks = total_blocks / 64;
+    /* INVFS_META_FRAC tunes the inode-area share for churn-heavy
+     * workloads: every rewrite appends [new record + tombstone], and a
+     * package-manager session can append hundreds of thousands of
+     * records. Default 64; rootfs images want 16-24. */
+    {
+        long frac = 64;
+        const char *mf = getenv("INVFS_META_FRAC");
+        if (mf) {
+            long v = strtol(mf, NULL, 10);
+            if (v >= 8 && v <= 256) frac = v;
+        }
+        inode_blocks = total_blocks / (uint64_t)frac;
+    }
     if (inode_blocks < 512) inode_blocks = 512;
     metadata_blocks = bitmap_blocks + INVFS_JOURNAL_BLOCKS + inode_blocks;
     if (metadata_blocks < 256)

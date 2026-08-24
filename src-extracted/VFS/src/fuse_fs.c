@@ -535,8 +535,8 @@ static int invf_mkdir(const char *path, mode_t mode)
         m.gid = ctx ? ctx->gid : 0;
         m.nlink = 2;
         m.mtime = m.atime = (int64_t)time(NULL);
-        vol_apply_meta(g_vol, anchor, &m);
-        vol_flush(g_vol);
+        if (!vol_apply_meta(g_vol, anchor, &m))
+            fprintf(stderr, "invf: mkdir stamp FAILED %s (area full?)\n", anchor);
         table_sync_one_locked(anchor);
     }
     pthread_mutex_unlock(&g_io_lock);
@@ -551,7 +551,6 @@ static int invf_rmdir(const char *path)
     rc = vol_rmdir(g_vol, path + 1);
     if (rc == 0) {
         char anc[300];
-        vol_flush(g_vol);
         snprintf(anc, sizeof anc, "%s/", path + 1);
         table_remove_name(anc);
     }
@@ -642,7 +641,6 @@ static int invf_open(const char *path, struct fuse_file_info *fi)
         vol_replace_file(g_vol, path + 1, NULL, 0);
         if (have_keep)
             vol_apply_meta(g_vol, path + 1, &keep);
-        vol_flush(g_vol);
         table_sync_one_locked(path + 1);
         pthread_mutex_unlock(&g_io_lock);
     }
@@ -675,8 +673,8 @@ static int invf_create(const char *path, mode_t mode, struct fuse_file_info *fi)
         m.gid = ctx ? ctx->gid : 0;
         m.nlink = 1;
         m.mtime = m.atime = (int64_t)time(NULL);
-        vol_apply_meta(g_vol, path + 1, &m);
-        vol_flush(g_vol);
+        if (!vol_apply_meta(g_vol, path + 1, &m))
+            fprintf(stderr, "invf: mknod stamp FAILED %s\n", path);
         table_sync_one_locked(path + 1);
     }
     pthread_mutex_unlock(&g_io_lock);
@@ -783,7 +781,8 @@ static int commit_wctx(wctx *c)
     fprintf(stderr, "invf: flush %s len=%zu ok\n", c->name, c->len);
     /* re-stamp metadata: the replace built a fresh record without it */
     if (c->have_meta)
-        vol_apply_meta(g_vol, c->name, &c->meta);
+        if (!vol_apply_meta(g_vol, c->name, &c->meta))
+            fprintf(stderr, "invf: close stamp FAILED %s (area full?)\n", c->name);
     vol_mark_pending(g_vol, nid);   /* on-demand sweep */
     vol_flush(g_vol);
     table_sync_one_locked(c->name);
@@ -838,7 +837,6 @@ static int invf_rename(const char *from, const char *to, unsigned int flags)
         int was_dir = vol_is_dir(g_vol, from + 1);
         rc = vol_rename(g_vol, from + 1, to + 1);
         if (rc == 0) {
-            vol_flush(g_vol);
             /* plain-file renames are the hot path (portage atomic
              * moves): sync the two names incrementally. Directory
              * renames rewrite every child name prefix -> full rebuild */
@@ -893,8 +891,12 @@ static int invf_access(const char *path, int mask)
 
     if (!meta_for_path(path, ename, sizeof ename, &m))
         return -ENOENT;
-    if (ctx->uid == 0)
-        return 0;                       /* CAP_DAC_OVERRIDE */
+    /* CAP_DAC_OVERRIDE: root, or the host account that owns the image
+     * (daemon euid). A single-admin image has no security boundary yet;
+     * refusing the image owner breaks ordinary tooling (mkdir -p runs
+     * access(W_OK) even when the kernel check is delegated to us). */
+    if (ctx->uid == 0 || ctx->uid == (uid_t)geteuid())
+        return 0;
     if (!(mask & (R_OK | W_OK | X_OK)))
         return 0;
     /* pick owner / group / other triad from the stored mode */
@@ -952,7 +954,6 @@ static int resize_volume_file(const char *name, off_t len)
         if (have && rc == 0)
             vol_apply_meta(g_vol, name + 1, &keep);
     }
-    vol_flush(g_vol);
     table_sync_one_locked(name + 1);
     pthread_mutex_unlock(&g_io_lock);
     return rc;
@@ -1042,8 +1043,8 @@ static int invf_symlink(const char *target, const char *linkpath)
         m.nlink = 1;
         m.mtime = m.atime = (int64_t)time(NULL);
         snprintf(m.target, sizeof m.target, "%s", target);
-        vol_apply_meta(g_vol, linkpath + 1, &m);
-        vol_flush(g_vol);
+        if (!vol_apply_meta(g_vol, linkpath + 1, &m))
+            fprintf(stderr, "invf: symlink stamp FAILED %s\n", linkpath);
         table_sync_one_locked(linkpath + 1);
     }
     pthread_mutex_unlock(&g_io_lock);
@@ -1104,7 +1105,7 @@ static int invf_mknod(const char *path, mode_t mode, dev_t rdev)
     vol_ensure_path(g_vol, path + 1);
     nid = vol_create_special(g_vol, path + 1, typ,
                              (uint16_t)(mode & 07777), (uint64_t)rdev);
-    if (nid) { vol_flush(g_vol); table_sync_one_locked(path + 1); }
+    if (nid) { table_sync_one_locked(path + 1); }
     pthread_mutex_unlock(&g_io_lock);
     if (nid && ctx && (ctx->uid || ctx->gid)) {
         /* non-root mount: stamp the creating user */
@@ -1228,10 +1229,10 @@ static int invf_unlink(const char *path)
         return -EROFS;
     pthread_mutex_lock(&g_io_lock);
     rc = vol_unlink(g_vol, path + 1);
-    if (rc == 0) {
-        vol_flush(g_vol);
-        table_remove_name(path + 1);
-    }
+    if (rc == 0)
+        table_remove_name(path + 1);   /* no flush: tombstone+bitmap are
+        durable on the next flush/close; per-unlink fsync-class writes
+        made rm -rf of a source tree take minutes */
     pthread_mutex_unlock(&g_io_lock);
     return rc == 0 ? 0 : -ENOENT;
 }
