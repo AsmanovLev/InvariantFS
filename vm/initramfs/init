@@ -1,0 +1,49 @@
+#!/bin/busybox sh
+# InvariantFS M1 initramfs /init — mount InvariantFS volume as real root.
+# Kernel cmdline: root=/dev/vda (or root= parsed below)
+/bin/busybox --install -s /bin
+
+export PATH=/bin:/usr/local/bin
+export LD_LIBRARY_PATH=/usr/local/lib
+
+mkdir -p /proc /sys /dev /run /newroot
+mount -t proc proc /proc
+mount -t sysfs sysfs /sys
+mount -t devtmpfs devtmpfs /dev 2>/dev/null
+
+echo "[init] loading fuse.ko"
+insmod /fuse.ko 2>/dev/null || insmod /fuse.ko.xz 2>/dev/null
+
+ROOTDEV=""
+for a in $(cat /proc/cmdline); do
+    case "$a" in root=*) ROOTDEV="${a#root=}";; esac
+done
+ROOTDEV="${ROOTDEV:-/dev/vda}"
+
+n=0
+while [ $n -lt 20 ]; do
+    [ -b "$ROOTDEV" ] && break
+    n=$((n+1)); sleep 0.25
+done
+if [ ! -b "$ROOTDEV" ]; then
+    echo "[init] FATAL: root device $ROOTDEV not found"
+    exec /bin/sh
+fi
+
+echo "[init] mounting InvariantFS volume $ROOTDEV at /newroot"
+/usr/local/bin/invf-fuse "$ROOTDEV" /newroot -o allow_other
+sleep 1
+
+if ! grep -q " /newroot " /proc/mounts; then
+    echo "[init] FATAL: InvariantFS mount failed"
+    exec /bin/sh
+fi
+
+echo "[init] InvariantFS root mounted; moving pseudo-filesystems"
+mount --move /proc /newroot/proc
+mount --move /sys  /newroot/sys
+mount --move /dev  /newroot/dev
+
+echo "[init] switch_root"
+exec switch_root /newroot /bin/sh -c \
+    'echo ===M1_PROOF_OK=== uid=$(id -u) shell=$0; cat /etc/invariant-release 2>/dev/null; export PS1="invfs-m1> "; exec /bin/sh' sh
