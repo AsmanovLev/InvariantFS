@@ -32,6 +32,18 @@ case "$(file -b /tmp/fuse.ko.packed)" in
 esac
 rm -f /tmp/fuse.ko.packed
 
+# virtio_net + net_failover (guest NIC for M4c ssh; decompress like fuse)
+mkdir -p modules
+for mod in virtio_net net_failover; do
+    src=$(find "/lib/modules/$KVER/kernel/drivers/net" -name "$mod.ko.*" | head -1)
+    [ -n "$src" ] || continue
+    case "$(file -b "$src")" in
+        *XZ*)   xz  -dc "$src" > "modules/$mod.ko" ;;
+        *Zstd*) zstd -dc "$src" > "modules/$mod.ko" ;;
+        *)      cp "$src" "modules/$mod.ko" ;;
+    esac
+done
+
 chmod 755 init
 
 find . | cpio -o -H newc --quiet | gzip -1 > "$ROOT/vm/initramfs.cpio.gz"
