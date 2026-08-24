@@ -4793,7 +4793,16 @@ int vol_rename(invfs_volume *v, const char *from, const char *to)
 
     dir = vol_is_dir(v, from);
     if (!dir && vol_find(v, from) == 0) return -1;            /* ENOENT */
-    if (vol_find(v, to) != 0 || vol_is_dir(v, to)) return -2; /* EEXIST */
+    /* POSIX rename replaces an existing plain-file destination
+     * silently; directory destinations stay unsupported (EEXIST). */
+    if (vol_is_dir(v, to)) return -2;
+    {
+        uint64_t toid = vol_find(v, to);
+        if (toid != 0) {
+            if (dir) return -1;                    /* dir over file: ENOTDIR-ish */
+            if (vol_delete_file(v, to) != 0) return -1;
+        }
+    }
 
     vol_ensure_path(v, to);   /* parents of the destination */
 

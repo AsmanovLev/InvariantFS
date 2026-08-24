@@ -60,15 +60,45 @@ typedef struct {
 static fs_entry *g_entries;
 static int g_nentries, g_cap;
 
+/* sort helpers */
+static int cmp_entry_pos(const void *pa, const void *pb)
+{
+    const fs_entry *a = (const fs_entry *)pa, *b = (const fs_entry *)pb;
+    if (a->pos < b->pos) return -1;
+    if (a->pos > b->pos) return 1;
+    return 0;
+}
+
+static int cmp_entry_name_pos(const void *pa, const void *pb)
+{
+    const fs_entry *a = (const fs_entry *)pa, *b = (const fs_entry *)pb;
+    int c = strcmp(a->name, b->name);
+    if (c) return c;
+    if (a->pos < b->pos) return -1;
+    if (a->pos > b->pos) return 1;
+    return 0;
+}
+
+static int cmp_entry_key(const void *key, const void *element)
+{
+    return strcmp((const char *)key, ((const fs_entry *)element)->name);
+}
+
 static void build_file_table(void)
 {
     const invfs_superblock *sb = vol_sb(g_vol);
     uint64_t bm = (sb->total_blocks / 8 + INVFS_BLOCK_SIZE - 1) / INVFS_BLOCK_SIZE;
     uint64_t p = (sb->metadata_zone_start + bm + INVFS_JOURNAL_BLOCKS) * INVFS_BLOCK_SIZE;
     uint64_t end = (sb->metadata_zone_start + sb->metadata_zone_blocks) * INVFS_BLOCK_SIZE;
-    int i;
+    fs_entry *recs = NULL;
+    uint64_t nrecs = 0, caprecs = 0;
+    /* tombstone kill list: (position-or-0, inode-id) pairs */
+    uint64_t *tpos = NULL, *tid = NULL;
+    uint64_t ntomb = 0, captomb = 0;
 
     g_entries = NULL; g_nentries = 0; g_cap = 0;
+
+    /* pass 1: collect raw records */
     while (p + 8 <= end) {
         uint32_t magic, rec_len;
         uint64_t inode_id, file_size, ctime;
@@ -87,55 +117,90 @@ static void build_file_table(void)
         name[name_len] = 0;
 
         if (magic == 0x544C4544u) {  /* tombstone */
-            /* v2: file_size carries the killed record's position; legacy
-             * tombstones carry 0 there and kill by inode id */
-            for (i = 0; i < g_nentries; i++) {
-                if ((file_size != 0 && g_entries[i].pos == file_size) ||
-                    (file_size == 0 && g_entries[i].inode_id == inode_id)) {
-                    memmove(&g_entries[i], &g_entries[i + 1],
-                            (size_t)(g_nentries - i - 1) * sizeof(fs_entry));
-                    g_nentries--;
-                    break;
-                }
+            if (ntomb == captomb) {
+                captomb = captomb ? captomb * 2 : 64;
+                tpos = (uint64_t *)realloc(tpos, captomb * sizeof(uint64_t));
+                tid = (uint64_t *)realloc(tid, captomb * sizeof(uint64_t));
+                if (!tpos || !tid) goto done;
             }
+            /* v2: file_size carries the killed record's byte position;
+             * legacy tombstones carry 0 there and kill by inode id */
+            tpos[ntomb] = file_size;
+            tid[ntomb] = inode_id;
+            ntomb++;
             p += (uint64_t)rec_len + 4;
             continue;
         }
 
-        /* last write wins: replace existing entry with same name */
-        for (i = 0; i < g_nentries; i++) {
-            if (strcmp(g_entries[i].name, name) == 0) {
-                g_entries[i].inode_id = inode_id;
-                g_entries[i].size = file_size;
-                g_entries[i].ctime = ctime;
-                g_entries[i].pos = p;
-                goto next_rec;
-            }
+        if (nrecs == caprecs) {
+            fs_entry *nr;
+            caprecs = caprecs ? caprecs * 2 : 1024;
+            nr = (fs_entry *)realloc(recs, caprecs * sizeof(fs_entry));
+            if (!nr) goto done;
+            recs = nr;
         }
-        if (g_nentries == g_cap) {
-            g_cap = g_cap ? g_cap * 2 : 16;
-            g_entries = (fs_entry *)realloc(g_entries, g_cap * sizeof(fs_entry));
-            if (!g_entries) return;
-        }
-        memset(&g_entries[g_nentries], 0, sizeof(fs_entry));
-        strncpy(g_entries[g_nentries].name, name, 255);
-        g_entries[g_nentries].inode_id = inode_id;
-        g_entries[g_nentries].size = file_size;
-        g_entries[g_nentries].ctime = ctime;
-        g_entries[g_nentries].pos = p;
-        g_nentries++;
-    next_rec:
+        memset(&recs[nrecs], 0, sizeof(fs_entry));
+        strncpy(recs[nrecs].name, name, 255);
+        recs[nrecs].inode_id = inode_id;
+        recs[nrecs].size = file_size;
+        recs[nrecs].ctime = ctime;
+        recs[nrecs].pos = p;
+        nrecs++;
         p += (uint64_t)rec_len + 4;
     }
+
+    /* pass 2: apply tombstones (records sorted by pos for bsearch) */
+    qsort(recs, (size_t)nrecs, sizeof(fs_entry), cmp_entry_pos);
+    for (uint64_t t = 0; t < ntomb; t++) {
+        if (tpos[t] != 0) {
+            /* v2 position kill: exact record offset */
+            uint64_t lo = 0, hi = nrecs;
+            while (lo < hi) {
+                uint64_t mid = (lo + hi) / 2;
+                if (recs[mid].pos < tpos[t]) lo = mid + 1;
+                else hi = mid;
+            }
+            if (lo < nrecs && recs[lo].pos == tpos[t]) recs[lo].inode_id = UINT64_MAX; /* dead */
+        } else {
+            /* legacy kill-by-id: retire every version of this inode */
+            for (uint64_t r = 0; r < nrecs; r++)
+                if (recs[r].inode_id == tid[t]) recs[r].inode_id = UINT64_MAX;
+        }
+    }
+
+    /* pass 3: drop dead, then last-write-wins per name */
+    {
+        uint64_t w = 0, r;
+        for (r = 0; r < nrecs; r++)
+            if (recs[r].inode_id != UINT64_MAX) recs[w++] = recs[r];
+        nrecs = w;
+    }
+    qsort(recs, (size_t)nrecs, sizeof(fs_entry), cmp_entry_name_pos);
+    {
+        uint64_t w = 0, r;
+        for (r = 0; r < nrecs; r++) {
+            if (w > 0 && strcmp(recs[w - 1].name, recs[r].name) == 0)
+                recs[w - 1] = recs[r];      /* newer pos wins */
+            else
+                recs[w++] = recs[r];
+        }
+        nrecs = w;
+    }
+
+    g_entries = recs;
+    g_cap = (int)caprecs;
+    g_nentries = (nrecs > 0x7fffffff) ? 0x7fffffff : (int)nrecs;
+    free(tpos); free(tid);
+    return;
+done:
+    free(recs); free(tpos); free(tid);
 }
 
 static fs_entry *find_entry(const char *name)
 {
-    int i;
-    for (i = 0; i < g_nentries; i++)
-        if (strcmp(g_entries[i].name, name) == 0)
-            return &g_entries[i];
-    return NULL;
+    if (g_nentries == 0) return NULL;
+    return (fs_entry *)bsearch(name, g_entries, (size_t)g_nentries,
+                               sizeof(fs_entry), cmp_entry_key);
 }
 
 /* Race-safe lookup (audit H1): g_entries is freed and rebuilt by every
