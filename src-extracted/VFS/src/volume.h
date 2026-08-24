@@ -136,6 +136,11 @@ uint64_t vol_create_symlink(invfs_volume *v, const char *name,
                             const char *target);
 uint64_t vol_create_special(invfs_volume *v, const char *name,
                             uint8_t type, uint16_t mode, uint64_t rdev);
+/* hard link: second name for the same inode (record clone with new name).
+ * CAVEAT: no block refcounts yet -- unlinking EITHER name retires the
+ * shared blocks and dangles the survivor (WP6). Intended for transient
+ * locks/atomic-replace patterns (portage), not permanent aliasing. */
+int vol_hardlink(invfs_volume *v, const char *from, const char *to);
 /* xattrs stored inside the same INO2 ext (TLVs). val semantics like
  * getxattr(2): size query via *vlen==0. list returns NUL-separated names. */
 int vol_get_xattr(invfs_volume *v, uint64_t inode_id, const char *xn,

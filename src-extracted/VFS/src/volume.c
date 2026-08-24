@@ -4887,6 +4887,54 @@ int vol_rename(invfs_volume *v, const char *from, const char *to)
     return rc;
 }
 
+/* Hard link: a second NAME record sharing the same inode_id (and thus the
+ * same AST/L2P blocks). LIMITATION: no block refcounts yet -- unlinking
+ * EITHER name retires the shared blocks and dangles the survivor
+ * (audit WP6). Portage lock files and similar transient links are fine. */
+int vol_hardlink(invfs_volume *v, const char *from, const char *to)
+{
+    uint8_t *buf = NULL;
+    uint32_t rl = 0, crc;
+    invfs_inode_rec *nh;
+    uint64_t id, pos;
+    size_t nl;
+
+    if (!v || !from || !to || !from[0] || !to[0]) return -1;
+    if (v->sb.vol_flags & VOLF_READONLY) return -1;
+    if (strlen(to) >= 256) return -1;
+
+    id = vol_find(v, from);
+    if (!id) return -1;                              /* ENOENT */
+    if (vol_find(v, to)) return -2;                  /* EEXIST */
+    if (vol_is_dir(v, from)) return -3;              /* dirs can't hardlink */
+
+    if (meta_read_record_by_id(v, id, &buf, &rl, NULL, 0, NULL) != 0)
+        return -1;
+    if (rl < sizeof(invfs_inode_rec)) { free(buf); return -1; }
+
+    /* name[] is a fixed 256-byte field: record size is unchanged */
+    nh = (invfs_inode_rec *)buf;
+    nl = strlen(to);
+    memset(nh->name, 0, sizeof(nh->name));
+    memcpy(nh->name, to, nl);
+    nh->name_len = (uint32_t)nl;
+
+    if (vol_mark_dirty(v) != 0) { free(buf); return -1; }
+    crc = invfs_crc32c(buf, rl);
+    if (io_seek(&v->io, v->inode_area_pos) != 0 ||
+        io_write(&v->io, buf, rl) != 0 ||
+        io_write(&v->io, &crc, 4) != 0) {
+        free(buf);
+        return -1;
+    }
+    pos = v->inode_area_pos;
+    v->inode_area_pos += (uint64_t)rl + 4;
+    idx_put(v, nh->name, nl, id, pos, nh->file_size, nh->ctime);
+    idx_put_id(v, id, pos);
+    free(buf);
+    return 0;
+}
+
 /* count free blocks from in-memory bitmap */
 uint64_t vol_count_free(invfs_volume *v)
 {

@@ -933,9 +933,26 @@ static int invf_readlink(const char *path, char *buf, size_t size)
     return 0;
 }
 
-static int invf_mknod(const char *path, mode_t mode, dev_t rdev)
+static int invf_link(const char *from, const char *dest)
 {
-    uint8_t typ;
+    int rc;
+    if (!vol_write_enabled(g_vol))
+        return -EROFS;
+    pthread_mutex_lock(&g_io_lock);
+    if (!g_vol) { pthread_mutex_unlock(&g_io_lock); return -EIO; }
+    rc = vol_hardlink(g_vol, from + 1, dest + 1);
+    table_mark_stale();
+    pthread_mutex_unlock(&g_io_lock);
+    switch (rc) {
+    case 0:  return 0;
+    case -2: return -EEXIST;
+    case -3: return -EPERM;
+    default: return -ENOENT;
+    }
+}
+
+static int invf_mknod(const char *path, mode_t mode, dev_t rdev)
+{    uint8_t typ;
     uint64_t nid;
     struct fuse_context *ctx = fuse_get_context();
     if (!vol_write_enabled(g_vol))
@@ -1105,6 +1122,7 @@ static const struct fuse_operations invf_ops = {
     .chmod = invf_chmod,
     .chown = invf_chown,
     .symlink = invf_symlink,
+    .link = invf_link,
     .readlink = invf_readlink,
     .mknod = invf_mknod,
     .getxattr = invf_getxattr,
