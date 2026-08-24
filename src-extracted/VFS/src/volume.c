@@ -4931,6 +4931,10 @@ int vol_hardlink(invfs_volume *v, const char *from, const char *to)
     v->inode_area_pos += (uint64_t)rl + 4;
     idx_put(v, nh->name, nl, id, pos, nh->file_size, nh->ctime);
     idx_put_id(v, id, pos);
+    /* the second name is a live child of its parent directories; without
+     * this bump, unlinking it later drives parent counts negative and
+     * rmdir starts refusing empty dirs ("Directory not empty") */
+    idx_bump_dirs(v, to, nl, +1);
     free(buf);
     return 0;
 }

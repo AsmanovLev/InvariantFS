@@ -1052,7 +1052,11 @@ static int invf_link(const char *from, const char *dest)
     pthread_mutex_lock(&g_io_lock);
     if (!g_vol) { pthread_mutex_unlock(&g_io_lock); return -EIO; }
     rc = vol_hardlink(g_vol, from + 1, dest + 1);
-    table_mark_stale();
+    /* portage creates lockfiles via link() in hot loops; a full table
+     * rebuild here (mark_stale) made every later negative lookup cost
+     * O(area). The new name is one upsert. */
+    if (rc == 0)
+        table_sync_one_locked(dest + 1);
     pthread_mutex_unlock(&g_io_lock);
     switch (rc) {
     case 0:  return 0;
