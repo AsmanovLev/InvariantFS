@@ -29,7 +29,23 @@ static pthread_mutex_t g_io_lock = PTHREAD_MUTEX_INITIALIZER;
 static volatile int g_open_handles = 0;
 /* set at unmount: stops the background sweep thread before vol_close */
 static volatile int g_shutdown = 0;
-static void rebuild_table_locked(void);   /* fwd (defined below) */
+static void table_rebuild_locked(void);   /* fwd (defined below) */
+
+/* Mutations only mark the name table stale; the next consumer pays for one
+ * rebuild instead of every close paying one. tar/cp imports fire thousands
+ * of closes -- rebuilding per close scanned the whole inode area each time
+ * and made imports O(N^2). */
+static int g_table_stale = 0;
+
+static void table_mark_stale(void) { g_table_stale = 1; }
+
+static void table_refresh_if_stale_locked(void)
+{
+    if (g_table_stale && g_vol) {
+        table_rebuild_locked();
+        g_table_stale = 0;
+    }
+}
 
 /* ---- file table snapshot ---- */
 typedef struct {
@@ -136,6 +152,8 @@ static int snapshot_entry(const char *name, uint64_t *ino_out, uint64_t *size_ou
     }
     {
         fs_entry *e = find_entry(name);
+        if (!e) table_refresh_if_stale_locked();
+        if (!e) e = find_entry(name);
         if (e) {
             if (ino_out)   *ino_out   = e->inode_id;
             if (size_out)  *size_out  = e->size;
@@ -259,7 +277,9 @@ static int meta_apply_patch(const char *path, unsigned mask,
         return g_vol ? -EROFS : -EIO;
     }
     nid = vol_apply_meta(g_vol, ename, &cur);
-    if (nid) { vol_flush(g_vol); rebuild_table_locked(); }
+    /* no vol_flush / table rebuild here: tar/cp fire setattr per file and
+     * both would make imports O(N^2). Records land durably at close/flush;
+     * the name index stays valid because apply_meta keeps inode ids. */
     pthread_mutex_unlock(&g_io_lock);
     return nid ? 0 : -ENOSPC;
 }
@@ -359,7 +379,7 @@ static int invf_mkdir(const char *path, mode_t mode)
         m.mtime = m.atime = (int64_t)time(NULL);
         vol_apply_meta(g_vol, anchor, &m);
         vol_flush(g_vol);
-        rebuild_table_locked();
+        table_mark_stale();
     }
     pthread_mutex_unlock(&g_io_lock);
     rc = d ? 0 : -EEXIST;
@@ -371,7 +391,7 @@ static int invf_rmdir(const char *path)
     int rc;
     pthread_mutex_lock(&g_io_lock);
     rc = vol_rmdir(g_vol, path + 1);
-    if (rc == 0) { vol_flush(g_vol); rebuild_table_locked(); }
+    if (rc == 0) { vol_flush(g_vol); table_mark_stale(); }
     pthread_mutex_unlock(&g_io_lock);
     return rc == 0 ? 0 : (rc == -2 ? -ENOTEMPTY : -ENOENT);
 }
@@ -404,7 +424,7 @@ static int invf_read(const char *path, char *buf, size_t size, off_t offset,
     return got;
 }
 
-static void rebuild_table_locked(void)
+static void table_rebuild_locked(void)
 {
     /* free old table, rescan */
     free(g_entries);
@@ -460,7 +480,7 @@ static int invf_open(const char *path, struct fuse_file_info *fi)
         if (have_keep)
             vol_apply_meta(g_vol, path + 1, &keep);
         vol_flush(g_vol);
-        rebuild_table_locked();
+        table_mark_stale();
         pthread_mutex_unlock(&g_io_lock);
     }
     return 0;
@@ -494,7 +514,7 @@ static int invf_create(const char *path, mode_t mode, struct fuse_file_info *fi)
         m.mtime = m.atime = (int64_t)time(NULL);
         vol_apply_meta(g_vol, path + 1, &m);
         vol_flush(g_vol);
-        rebuild_table_locked();
+        table_mark_stale();
     }
     pthread_mutex_unlock(&g_io_lock);
     c = (wctx *)calloc(1, sizeof(wctx));
@@ -561,7 +581,7 @@ static void *fuse_sweep_thread(void *arg)
             int n = vol_sweep_pending(g_vol);
             if (n > 0) {
                 vol_flush(g_vol);
-                rebuild_table_locked();
+                table_mark_stale();
                 fprintf(stderr, "[sweep] on-demand: processed %d pending\n", n);
             }
         }
@@ -587,7 +607,7 @@ static int commit_wctx(wctx *c)
          * silently (audit H4; Dokan already reports STATUS_DISK_FULL) */
         fprintf(stderr, "invf: vol_replace_file failed (%s)\n", c->name);
         vol_flush(g_vol);
-        rebuild_table_locked();
+        table_mark_stale();
         pthread_mutex_unlock(&g_io_lock);
         return -ENOSPC;
     }
@@ -597,7 +617,7 @@ static int commit_wctx(wctx *c)
         vol_apply_meta(g_vol, c->name, &c->meta);
     vol_mark_pending(g_vol, nid);   /* on-demand sweep */
     vol_flush(g_vol);
-    rebuild_table_locked();
+    table_mark_stale();
     pthread_mutex_unlock(&g_io_lock);
     return 0;
 }
@@ -646,7 +666,7 @@ static int invf_rename(const char *from, const char *to, unsigned int flags)
     pthread_mutex_lock(&g_io_lock);
     if (!g_vol) { pthread_mutex_unlock(&g_io_lock); return -EIO; }
     rc = vol_rename(g_vol, from + 1, to + 1);
-    if (rc == 0) { vol_flush(g_vol); rebuild_table_locked(); }
+    if (rc == 0) { vol_flush(g_vol); table_mark_stale(); }
     pthread_mutex_unlock(&g_io_lock);
     switch (rc) {
     case 0:  return 0;
@@ -737,7 +757,7 @@ static int resize_volume_file(const char *name, off_t len)
             vol_apply_meta(g_vol, name + 1, &keep);
     }
     vol_flush(g_vol);
-    rebuild_table_locked();
+    table_mark_stale();
     pthread_mutex_unlock(&g_io_lock);
     return rc;
 }
@@ -828,7 +848,7 @@ static int invf_symlink(const char *target, const char *linkpath)
         snprintf(m.target, sizeof m.target, "%s", target);
         vol_apply_meta(g_vol, linkpath + 1, &m);
         vol_flush(g_vol);
-        rebuild_table_locked();
+        table_mark_stale();
     }
     pthread_mutex_unlock(&g_io_lock);
     return nid ? 0 : -ENOSPC;
@@ -867,7 +887,7 @@ static int invf_mknod(const char *path, mode_t mode, dev_t rdev)
     vol_ensure_path(g_vol, path + 1);
     nid = vol_create_special(g_vol, path + 1, typ,
                              (uint16_t)(mode & 07777), (uint64_t)rdev);
-    if (nid) { vol_flush(g_vol); rebuild_table_locked(); }
+    if (nid) { vol_flush(g_vol); table_mark_stale(); }
     pthread_mutex_unlock(&g_io_lock);
     if (nid && ctx && (ctx->uid || ctx->gid)) {
         /* non-root mount: stamp the creating user */
@@ -923,7 +943,7 @@ static int invf_setxattr(const char *path, const char *name,
     ino = vol_find(g_vol, ename);
     if (!ino) { pthread_mutex_unlock(&g_io_lock); return -ENOENT; }
     rc = vol_set_xattr(g_vol, ino, name, value, size);
-    if (rc == 0) { vol_flush(g_vol); rebuild_table_locked(); }
+    if (rc == 0) { vol_flush(g_vol); table_mark_stale(); }
     pthread_mutex_unlock(&g_io_lock);
     if (rc == -2) return -ERANGE;
     if (rc == -3) return -EEXIST;      /* XATTR_CREATE on existing */
@@ -967,7 +987,7 @@ static int invf_removexattr(const char *path, const char *name)
     ino = vol_find(g_vol, ename);
     if (!ino) { pthread_mutex_unlock(&g_io_lock); return -ENOENT; }
     rc = vol_remove_xattr(g_vol, ino, name);
-    if (rc == 0) { vol_flush(g_vol); rebuild_table_locked(); }
+    if (rc == 0) { vol_flush(g_vol); table_mark_stale(); }
     pthread_mutex_unlock(&g_io_lock);
     return rc == 0 ? 0 : (rc == -1 ? -ENODATA : -EIO);
 }
@@ -993,7 +1013,7 @@ static int invf_unlink(const char *path)
     rc = vol_unlink(g_vol, path + 1);
     if (rc == 0) {
         vol_flush(g_vol);
-        rebuild_table_locked();
+        table_mark_stale();
     }
     pthread_mutex_unlock(&g_io_lock);
     return rc == 0 ? 0 : -ENOENT;

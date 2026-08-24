@@ -1800,7 +1800,7 @@ static int vol_deserialize_children(const uint8_t *blob, size_t blob_len,
         ch[n].name_len = nl;
         memcpy(ch[n].name, p, nl); ch[n].name[nl] = 0;
         p += nl;
-        if (p + 18 > end) break;
+        if (p + 20 > end) break;
         memcpy(&ch[n].method, p, 2); p += 2;
         memcpy(&ch[n].csize, p, 4); p += 4;
         memcpy(&ch[n].usize, p, 4); p += 4;
@@ -4141,9 +4141,9 @@ static size_t vol_ast_blob_len(const uint8_t *rec, size_t rec_len)
         if ((size_t)(end - p) < 2) return (size_t)-1;
         memcpy(&nl, p, 2); p += 2;
         /* wire child = [u16 nlen][name][u16 method][4x u32] */
-        if (nl > MAX_AST_CHILD_NAME || (size_t)(end - p) < nl + 18)
+        if (nl > MAX_AST_CHILD_NAME || (size_t)(end - p) < nl + 20)
             return (size_t)-1;
-        p += nl + 18;
+        p += nl + 20;
     }
     return (size_t)(p - (rec + base));
 }
