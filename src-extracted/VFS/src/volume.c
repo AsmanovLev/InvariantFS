@@ -4980,14 +4980,24 @@ int vol_hardlink(invfs_volume *v, const char *from, const char *to)
     {
         uint64_t toid = vol_find(v, to);
         if (toid) {
-            /* stale-index self-heal: trust EEXIST only when the found
-             * record is actually alive (killed emerges leave index
-             * ghosts whose records are already tombstoned) */
-            uint8_t *chk = NULL;
-            uint32_t crl = 0;
-            int alive = meta_read_record_by_id(v, toid, &chk, &crl,
-                                               NULL, 0, NULL) == 0;
-            free(chk);
+            /* stale-index self-heal: killed emerges leave table entries
+             * whose latest record is already a tombstone. The id-index
+             * hint always points at the newest version we wrote, so
+             * liveness = the header AT THE HINT is an INOD for this id.
+             * (meta_read_record_by_id alone would false-positive: it
+             * happily reads OLDER same-id versions still present in the
+             * append-only area.) */
+            int alive = 0;
+            uint64_t hp = idx_get_id(v, toid);
+            if (hp >= v->inode_area_start * INVFS_BLOCK_SIZE &&
+                hp + sizeof(invfs_inode_rec) <= v->inode_area_pos &&
+                io_seek(&v->io, hp) == 0) {
+                invfs_inode_rec hh;
+                if (io_read(&v->io, &hh, sizeof(hh)) == 0 &&
+                    hh.magic == INODE_REC_MAGIC &&
+                    hh.inode_id == toid)
+                    alive = 1;
+            }
             if (alive) return -2;                    /* EEXIST */
         }
     }
