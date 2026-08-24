@@ -1,7 +1,7 @@
 #!/bin/bash
 # Assemble the single-drive M3 boot disk:
 #   GPT: p1 ESP (GRUB EFI --removable + kernel + initramfs)
-#        p2 InvariantFS root volume (byte-copy of vm/vol-gentoo.img)
+#        p2 InvariantFS root volume (byte-copy of var/tmp/vol-root.img (or pass path as $1))
 # Usage: tools/mkdisk.sh [volume-img] [disk-img]
 set -euo pipefail
 cd "$(dirname "$0")/.."
