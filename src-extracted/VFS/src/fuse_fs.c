@@ -1158,12 +1158,17 @@ int main(int argc, char *argv[])
             pthread_detach(tid);
     }
 
-    /* build fuse args: [progname] [-f] [-o opts] [mountpoint].
-     * No forced -d: debug spam slowed IO and -o options (allow_other,
-     * default_permissions, ro, ...) were unparseable before (audit H11). */
+    /* build fuse args: [progname] [-f] [-o opts]; mountpoint handled
+     * explicitly below so we control the full lifecycle.
+     * Explicit fuse_set_signal_handlers(): without it SIGTERM (openrc
+     * shutdown, fusermount rivals) leaves the daemon stuck and the
+     * volume permanently DIRTY. */
     {
         char *fuse_argv[8];
         int fuse_argc = 0;
+        struct fuse_args fa = FUSE_ARGS_INIT(0, NULL);
+        struct fuse *f;
+        struct fuse_session *se;
         int rc;
         int k;
         fuse_argv[fuse_argc++] = "invf-fuse";
@@ -1172,15 +1177,34 @@ int main(int argc, char *argv[])
             fuse_argv[fuse_argc++] = "-o";
             fuse_argv[fuse_argc++] = (char *)opts;
         }
-        fuse_argv[fuse_argc++] = (char *)mnt;
         fuse_argv[fuse_argc] = NULL;
         for (k = 0; k < fuse_argc; k++)
             fprintf(stderr, "[fuse_arg %d] %s\n", k, fuse_argv[k]);
-        rc = fuse_main(fuse_argc, fuse_argv, &invf_ops, NULL);
+
+        fa.argc = fuse_argc;
+        fa.argv = fuse_argv;
+        fa.allocated = 0;
+
+        rc = 1;
+        f = fuse_new(&fa, &invf_ops, sizeof(invf_ops), NULL);
+        if (!f || fuse_mount(f, (char *)mnt) != 0) {
+            fprintf(stderr, "[fuse_mount failed]\n");
+            if (f) fuse_destroy(f);
+            if (g_vol) { g_shutdown = 1; vol_close(g_vol); g_vol = NULL; }
+            return 1;
+        }
+        if (!fg) fuse_daemonize(0);
+        se = fuse_get_session(f);
+        fuse_set_signal_handlers(se);
+
+        rc = fuse_loop(f);
+
+        /* graceful path: signal or unmount -> close volume CLEAN */
+        fuse_remove_signal_handlers(se);
+        fuse_unmount(f);
+        fuse_destroy(f);
         fprintf(stderr, "[fuse_main rc=%d]\n", rc);
-        /* fallback: if the session never reached .destroy (early mount
-         * failure), still close so a read-only-opened volume is not left
-         * looking crashed */
+        /* fallback: if .destroy never ran (early failure), still close */
         if (g_vol) {
             g_shutdown = 1;
             vol_close(g_vol);
