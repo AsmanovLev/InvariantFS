@@ -201,6 +201,17 @@ typedef struct invfs_volume {
     /* records that failed CRC/bounds during the open scan; >0 means the
      * volume shows real damage and must not self-recover a DIRTY state */
     uint64_t scan_anomalies;
+    /* hot population counters, maintained incrementally by idx_put /
+     * idx_del_at / idx_del (insert vs update vs removal) and bumped once
+     * per DELT append. Seeded for free: the open scan replays every
+     * record through the same index calls. Served instantly by the
+     * user.invfs.stats virtual xattr -- no record walk needed. */
+    struct {
+        uint64_t files;        /* non-dir live names */
+        uint64_t dirs;         /* "path/" anchors */
+        uint64_t tombstones;   /* DELT records appended this volume life */
+        uint64_t logical_bytes;/* sum of live file sizes */
+    } hot;
 } invfs_volume;
 
 static const uint64_t JOURNAL_BLOCKS = INVFS_JOURNAL_BLOCKS;
@@ -475,12 +486,18 @@ static void idx_put(invfs_volume *v, const char *name, size_t nlen,
     b = (size_t)(idx_hash(name, nlen) & v->nmask);
     for (e = v->nbuck[b]; e; e = e->next)
         if (e->nlen == nlen && memcmp(e->name, name, nlen) == 0) {
+            /* update of an existing name: only logical size moves */
+            v->hot.logical_bytes += size;
+            v->hot.logical_bytes -= e->size;
             e->inode_id = id;
             e->pos = pos;
             e->size = size;
             e->ctime = ctime;
             return;
         }
+    /* brand-new name: population counter (dir anchors end with '/') */
+    if (nlen && name[nlen - 1] == '/') v->hot.dirs++;
+    else { v->hot.files++; v->hot.logical_bytes += size; }
     e = (name_index_entry *)malloc(sizeof *e + nlen);
     if (!e) return;
     memcpy(e->name, name, nlen);
@@ -512,6 +529,8 @@ static void idx_del(invfs_volume *v, const char *name, size_t nlen,
         if (e->nlen == nlen && memcmp(e->name, name, nlen) == 0) break;
     if (!e || e->inode_id != id) return;
     *pp = e->next;
+    if (nlen && name[nlen - 1] == '/') v->hot.dirs--;
+    else { v->hot.files--; v->hot.logical_bytes -= e->size; }
     free(e);
     v->ncount--;
     idx_bump_dirs(v, name, nlen, -1);
@@ -536,6 +555,8 @@ static void idx_del_at(invfs_volume *v, const char *name, size_t nlen,
             break;
     if (!e) return;
     *pp = e->next;
+    if (nlen && name[nlen - 1] == '/') v->hot.dirs--;
+    else { v->hot.files--; v->hot.logical_bytes -= e->size; }
     free(e);
     v->ncount--;
     idx_bump_dirs(v, name, nlen, -1);
@@ -4068,6 +4089,8 @@ static int vol_retire_inode(invfs_volume *v, uint64_t inode_id,
         uint32_t crc;
         memset(&rec, 0, sizeof(rec));
         rec.magic = TOMBSTONE_MAGIC;
+    v->hot.tombstones++;
+    v->hot.tombstones++;
         rec.rec_len = (uint32_t)sizeof(invfs_inode_rec);
         rec.inode_id = inode_id;
         rec.file_size = 0;
@@ -4414,6 +4437,7 @@ static uint64_t meta_rewrite(invfs_volume *v, uint64_t inode_id,
 
         memset(&tomb, 0, sizeof(tomb));
         tomb.magic = TOMBSTONE_MAGIC;
+    v->hot.tombstones++;
         tomb.rec_len = (uint32_t)sizeof(tomb);
         tomb.inode_id = inode_id;
         tomb.file_size = old_pos;          /* position kill (v2) */
@@ -4772,6 +4796,7 @@ int vol_unlink_name(invfs_volume *v, const char *name)
     nl = strlen(name);
     memset(&rec, 0, sizeof(rec));
     rec.magic = TOMBSTONE_MAGIC;
+    v->hot.tombstones++;
     rec.rec_len = (uint32_t)sizeof(rec);
     rec.inode_id = id;
     rec.file_size = pos;                    /* v2 position-kill */
@@ -6583,4 +6608,14 @@ int vol_compute_stats(invfs_volume *v, invfs_volume_stats *out)
     out->shadow_used_bytes =
         vol_zone_used_bytes(v, v->sb.shadow_zone_start, v->sb.total_blocks);
     return 0;
+}
+
+/* hot population counters for the user.invfs.stats virtual xattr */
+void vol_hot_counters(invfs_volume *v, uint64_t *files, uint64_t *dirs,
+                      uint64_t *tombstones, uint64_t *logical_bytes)
+{
+    if (files)       *files = v->hot.files;
+    if (dirs)        *dirs = v->hot.dirs;
+    if (tombstones)  *tombstones = v->hot.tombstones;
+    if (logical_bytes) *logical_bytes = v->hot.logical_bytes;
 }

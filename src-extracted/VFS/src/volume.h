@@ -159,6 +159,8 @@ typedef struct {
 } invfs_volume_stats;
 int vol_compute_stats(invfs_volume *v, invfs_volume_stats *out);
 uint64_t vol_zone_used_bytes(invfs_volume *v, uint64_t start_blk, uint64_t end_blk);
+void vol_hot_counters(invfs_volume *v, uint64_t *files, uint64_t *dirs,
+                      uint64_t *tombstones, uint64_t *logical_bytes);
 
 /* xattrs stored inside the same INO2 ext (TLVs). val semantics like
  * getxattr(2): size query via *vlen==0. list returns NUL-separated names. */

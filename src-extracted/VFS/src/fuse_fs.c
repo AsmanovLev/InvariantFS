@@ -1202,9 +1202,9 @@ static int invf_getxattr(const char *path, const char *name, char *value,
     invfs_meta_pub m;
     uint64_t ino;
     int rc;
-    /* virtual control namespace on the mount root:
-     *   user.invfs      -> live daemon stats (text)
-     * No engine lookup, no disk IO -- answers from RAM state. */
+    /* virtual control namespace on the mount root. Reads are cheap
+     * (RAM counters / bitmap pass); the sweep trigger is ROOT ONLY
+     * (a background sweep is an administrative action). */
     if (strcmp(path, "/") == 0 && strcmp(name, "user.invfs") == 0) {
         char buf[512];
         int n;
@@ -1225,44 +1225,40 @@ static int invf_getxattr(const char *path, const char *name, char *value,
         memcpy(value, buf, (size_t)n + 1);
         return n;
     }
-    /* full statistics walk (same data as invf-stats, served by the
-     * daemon). Holds the io lock for the duration of the record scan --
-     * fine for a manual query on an idle system. */
+    /* hot population counters: maintained incrementally by the index,
+     * seeded automatically by the open scan. O(1) read here; the only
+     * non-trivial part is a 256KiB bitmap pass for per-zone usage. */
     if (strcmp(path, "/") == 0 && strcmp(name, "user.invfs.stats") == 0) {
-        char buf[2048];
+        char buf[1024];
         int n;
-        invfs_volume_stats st;
+        const invfs_superblock *sb;
+        uint64_t raw_used = 0, shadow_used = 0;
         pthread_mutex_lock(&g_io_lock);
-        n = -EIO;
-        if (g_vol && vol_compute_stats(g_vol, &st) == 0) {
-            double ratio = 0;
-            if (st.raw_used_bytes)
-                ratio = (double)st.logic_raw_bytes / (double)st.raw_used_bytes;
-            n = snprintf(buf, sizeof buf,
-                    "files=%llu\ndirs=%llu\nlinks=%llu\nspecial=%llu\n"
-                    "tombstones=%llu\nbad_records=%llu\n"
-                    "logical_bytes=%llu\n"
-                    "biggest=%s (%llu KiB)\n"
-                    "raw_used_bytes=%llu\nraw_logic_bytes=%llu\nraw_ratio=%.2fx\n"
-                    "shadow_used_bytes=%llu\nshadow_logic_bytes=%llu\n",
-                    (unsigned long long)st.files,
-                    (unsigned long long)st.dirs,
-                    (unsigned long long)st.links,
-                    (unsigned long long)st.special,
-                    (unsigned long long)st.tombstones,
-                    (unsigned long long)st.bad_records,
-                    (unsigned long long)st.logical_bytes,
-                    st.biggest_name, (unsigned long long)(st.biggest_size / 1024),
-                    (unsigned long long)st.raw_used_bytes,
-                    (unsigned long long)st.logic_raw_bytes, ratio,
-                    (unsigned long long)st.shadow_used_bytes,
-                    (unsigned long long)st.logic_shadow_bytes);
-            if (n < 0 || (size_t)n >= sizeof buf) n = sizeof buf - 1;
-            if (!value || size == 0) { pthread_mutex_unlock(&g_io_lock); return n; }
-            memcpy(value, buf, (size_t)n + 1);
-            n++;
-        }
+        if (!g_vol) { pthread_mutex_unlock(&g_io_lock); return -EIO; }
+        sb = vol_sb(g_vol);
+        raw_used = vol_zone_used_bytes(g_vol, sb->raw_zone_start,
+                                       sb->raw_zone_start + sb->raw_zone_blocks);
+        shadow_used = vol_zone_used_bytes(g_vol, sb->shadow_zone_start,
+                                          sb->shadow_zone_start + sb->shadow_zone_blocks);
+        uint64_t hfiles, hdirs, htombs, hlogic;
+        vol_hot_counters(g_vol, &hfiles, &hdirs, &htombs, &hlogic);
+        n = snprintf(buf, sizeof buf,
+                "files=%llu\ndirs=%llu\ntombstones=%llu\n"
+                "logical_bytes=%llu\n"
+                "raw_used_bytes=%llu\nshadow_used_bytes=%llu\n"
+                "free_blocks=%llu\n",
+                (unsigned long long)hfiles,
+                (unsigned long long)hdirs,
+                (unsigned long long)htombs,
+                (unsigned long long)hlogic,
+                (unsigned long long)(raw_used * 4096ull),
+                (unsigned long long)(shadow_used * 4096ull),
+                (unsigned long long)vol_count_free(g_vol));
         pthread_mutex_unlock(&g_io_lock);
+        if (n < 0 || (size_t)n >= sizeof buf) n = sizeof buf - 1;
+        if (!value || size == 0) return n;
+        if ((size_t)n + 1 > size) return -ERANGE;
+        memcpy(value, buf, (size_t)n + 1);
         return n;
     }
     if (!meta_for_path(path, ename, sizeof ename, &m))
