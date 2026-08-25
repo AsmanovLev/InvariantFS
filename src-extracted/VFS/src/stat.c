@@ -221,8 +221,12 @@ int main(int argc, char **argv)
             if (magic == INODE_REC_MAGIC) {
                 tbl[slot].ino = ino; tbl[slot].fsz = fsz; tbl[slot].killed = 0;
             } else {
-                /* tombstone: kills only the matching version */
-                if (tbl[slot].ino == ino) tbl[slot].killed = 1;
+                /* tombstone: kills only the matching version. A v2 position
+                 * kill (file_size = retired record's offset, != 0) names a
+                 * version that was already superseded by a same-id INOD seen
+                 * above -- ls.c skips these; counting them here marked every
+                 * meta-rewritten (class-stamped) file as deleted. */
+                if (fsz == 0 && tbl[slot].ino == ino) tbl[slot].killed = 1;
             }
         }
     }

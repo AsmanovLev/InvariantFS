@@ -40,6 +40,7 @@ static const char *algo_name(uint32_t a)
     case INVFS_ALGO_PMP:  return "PMP";
     case INVFS_ALGO_ZSTD: return "ZSTD";
     case INVFS_ALGO_LZ4:  return "LZ4";
+    case INVFS_ALGO_PPMD: return "PPMd";
     case INVFS_ALGO_NONE: return "RAW";
     default:              return "?";
     }

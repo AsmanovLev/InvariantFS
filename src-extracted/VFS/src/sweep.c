@@ -20,7 +20,12 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#ifdef _WIN32
 #include <windows.h>   /* QueryPerformanceCounter for the progress clock */
+#else
+#include <signal.h>
+#include <time.h>
+#endif
 
 #include "invarifs.h"
 #include "volume.h"
@@ -28,7 +33,11 @@
 #include "miniz.h"
 
 /* Set from the console handler thread, read by the walk. */
+#ifdef _WIN32
 static volatile LONG g_stop = 0;
+#else
+static volatile sig_atomic_t g_stop = 0;
+#endif
 
 /* A sweep over a real tree runs for the better part of an hour, so the
    only way to stop it used to be killing it -- which drops whatever
@@ -52,6 +61,7 @@ static volatile LONG g_stop = 0;
  * gives it ~5 s before killing the process regardless, which is not
  * enough to finish a transcode, so pretending to handle it would only
  * turn a clean kill into a truncated one. */
+#ifdef _WIN32
 static BOOL WINAPI on_ctrl(DWORD type)
 {
     if (type != CTRL_C_EVENT && type != CTRL_BREAK_EVENT)
@@ -62,6 +72,19 @@ static BOOL WINAPI on_ctrl(DWORD type)
            " (Ctrl+C again aborts now, losing it)\n");
     return TRUE;
 }
+#else
+static void on_sigint(int sig)
+{
+    if (g_stop) {          /* second one: restore default, die for real */
+        signal(sig, SIG_DFL);
+        raise(sig);
+        return;
+    }
+    g_stop = 1;
+    printf("\n^C  stopping after the current file"
+           " (Ctrl+C again aborts now, losing it)\n");
+}
+#endif
 
 /* Directory anchors are zero-length records named "dir/". vol_sweep_one
    reads one, finds nothing a codec wants, and reports "skipped (no
@@ -75,11 +98,17 @@ static int is_dir_anchor(const char *n, uint32_t len)
 
 static double now_ms(void)
 {
+#ifdef _WIN32
     static LARGE_INTEGER f;
     LARGE_INTEGER t;
     if (!f.QuadPart) QueryPerformanceFrequency(&f);
     QueryPerformanceCounter(&t);
     return (double)t.QuadPart * 1000.0 / (double)f.QuadPart;
+#else
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (double)ts.tv_sec * 1000.0 + (double)ts.tv_nsec / 1e6;
+#endif
 }
 
 /* Fixed-width so columns line up down the run; four buffers because a
@@ -192,6 +221,9 @@ static int sweep_dedupe(invfs_volume *vol, uint64_t p, uint64_t inode_area_end)
             uint32_t block_id = bits >> 8;
             if (algo == INVFS_ALGO_JXL || algo == INVFS_ALGO_APE)
                 continue;  /* whole-file blobs: unique by construction */
+            if (zone == INVFS_ZONE_TEXT)
+                continue;  /* WP10 §11: shared PPMd batches belong to the
+                              owner inode; never dedup candidates */
             if (vol_lookup_entry(vol, h.inode_id, block_id, &pba, &len) != 0)
                 continue;
             if (vol_read_raw(vol, pba * INVFS_BLOCK_SIZE, &hdr4, 4) != 0) continue;
@@ -393,11 +425,44 @@ int main(int argc, char **argv)
 
     setvbuf(stdout, NULL, _IONBF, 0);
     setvbuf(stderr, NULL, _IONBF, 0);
+#ifdef _WIN32
     SetConsoleCtrlHandler(on_ctrl, TRUE);
+#else
+    signal(SIGINT, on_sigint);
+#endif
     vol = vol_open(img, &err);
     if (!vol) {
         fprintf(stderr, "cannot open volume %s (err %d)\n", img, err);
         return 1;
+    }
+    /* WP10 memory policy: same size grammar as INVFS_ARC_BYTES in volume.c;
+     * unset keeps the volume default. */
+    {
+        const char *dl = getenv("INVFS_DEC_MEM_LIMIT");
+        if (dl) {
+            char *endp = NULL;
+            unsigned long long want = strtoull(dl, &endp, 10);
+            unsigned long long mult = 1;
+            int ok = (endp != dl);
+            if (ok) {
+                while (*endp == ' ' || *endp == '\t') endp++;
+                switch (*endp) {
+                    case 'k': case 'K': mult = 1024ull; endp++; break;
+                    case 'm': case 'M': mult = 1024ull * 1024; endp++; break;
+                    case 'g': case 'G': mult = 1024ull * 1024 * 1024; endp++; break;
+                    default: break;
+                }
+                if (*endp == 'b' || *endp == 'B') endp++;
+                while (*endp == ' ' || *endp == '\t') endp++;
+                if (*endp != '\0') ok = 0;
+                if (want > (unsigned long long)SIZE_MAX / mult) ok = 0;
+            }
+            if (ok)
+                vol_set_dec_mem_limit(vol, (uint64_t)(want * mult));
+            else
+                fprintf(stderr, "[sweep] INVFS_DEC_MEM_LIMIT=\"%s\" is not a "
+                                "size; ignored\n", dl);
+        }
     }
     sb = vol_sb(vol);
     bm = (sb->total_blocks / 8 + INVFS_BLOCK_SIZE - 1) / INVFS_BLOCK_SIZE;
@@ -495,6 +560,7 @@ int main(int argc, char **argv)
             case 5:  what = "PNG -> JXL + recipe";       break;
             case 7:  what = "JPEG -> JXL (lossless)";    break;
             case 8:  what = "MP3 -> PMP (packMP3)";      break;
+            case 9:  what = "text -> PPMd batch";        break;
             default: what = "RAW -> ZSTD-19";            break;
             }
         } else if (rc < 0) {
@@ -551,6 +617,26 @@ int main(int argc, char **argv)
         printf("\ndedupe: scanning live segments...\n");
         if (sweep_dedupe(vol, p_start, inode_area_end) != 0)
             fprintf(stderr, "dedupe: pass failed (sweep results are intact)\n");
+    }
+
+    /* WP10 §7: text-batch GC runs after the dedupe pass (so dedupe never
+     * sees a zone==TEXT entry) and before the flush seals new batches. */
+    {
+        int gcrc = vol_tz_gc(vol);
+        if (gcrc > 0)
+            printf("text gc: %u dead batches reclaimed\n", (unsigned)gcrc);
+        else if (gcrc < 0)
+            fprintf(stderr, "text gc failed (rc=%d)\n", gcrc);
+    }
+
+    /* WP10: seal the partial text batch the walk accumulated. rc==1 means
+     * nothing pending -- not an error, not worth a line. */
+    {
+        int tzrc = vol_tz_flush(vol);
+        if (tzrc == 0)
+            printf("text batches flushed: rc=%d\n", tzrc);
+        else if (tzrc < 0)
+            fprintf(stderr, "text batch flush failed (rc=%d)\n", tzrc);
     }
 
     if (vol_flush(vol) != 0) {

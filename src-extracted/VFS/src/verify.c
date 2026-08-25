@@ -157,6 +157,14 @@ int main(int argc, char **argv)
         invfs_volume *vol;
         uint64_t pos, live = 0, bad = 0;
         uint64_t total_bytes = 0;
+        /* One row per live inode id. Same-id record chains (meta rewrites,
+         * the text-batch owner's growing record) appear once per version in
+         * the area walk, and a read resolves to the LATEST version for all
+         * of them -- so reading per record would compare new bytes against
+         * a stale fsz. Collect the live id -> (fsz,name) map first (last
+         * record per id wins, matching the index), then read each id once. */
+        struct deep_ent { uint64_t id, fsz; char nm[256]; } *ents = NULL;
+        size_t nents = 0, capents = 0;
         /* Close first: vol_open takes a device exclusively (lock + dismount),
            which cannot succeed while this handle is still open. */
         blkio_close(&io);
@@ -167,10 +175,30 @@ int main(int argc, char **argv)
         while (1) {
             uint32_t magic; uint64_t ino, fsz; uint32_t rl; char nm[256];
             uint64_t np = vol_inode_next(vol, pos, &magic, &ino, &fsz, nm, sizeof nm, &rl);
+            size_t k;
             if (!np) break;
             pos = np;
             if (magic != INODE_REC_MAGIC) continue;
             if (vol_find(vol, nm) != ino) continue;  /* superseded */
+            for (k = 0; k < nents; k++)
+                if (ents[k].id == ino) break;
+            if (k == nents) {
+                if (nents == capents) {
+                    size_t nc = capents ? capents * 2 : 256;
+                    void *ne = realloc(ents, nc * sizeof *ents);
+                    if (!ne) break;
+                    ents = (struct deep_ent *)ne;
+                    capents = nc;
+                }
+                k = nents++;
+            }
+            ents[k].id = ino;
+            ents[k].fsz = fsz;
+            memcpy(ents[k].nm, nm, sizeof ents[k].nm);
+        }
+        for (size_t k = 0; k < nents; k++) {
+            uint64_t ino = ents[k].id, fsz = ents[k].fsz;
+            const char *nm = ents[k].nm;
             if (fsz > MAX_FILE_SIZE) { printf("  BAD size %s: %llu\n", nm, (unsigned long long)fsz); bad++; continue; }
             {
                 uint8_t *buf = NULL;
@@ -186,6 +214,7 @@ int main(int argc, char **argv)
                 live++;
             }
         }
+        free(ents);
         printf("deep: %llu files ok, %llu corrupt, %llu bytes verified\n",
                (unsigned long long)live, (unsigned long long)bad,
                (unsigned long long)total_bytes);

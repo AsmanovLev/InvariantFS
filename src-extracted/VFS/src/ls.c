@@ -122,6 +122,9 @@ int main(int argc, char **argv)
             h.rec_len > INVFS_MAX_REC_LEN) break;
         if (vol_read_raw(vol, p + offsetof(invfs_inode_rec, name), name, h.name_len) != 0) break;
         name[h.name_len] = 0;
+        /* internal control-prefixed names (the WP10 batch owner "\x01tzb")
+         * are not directory content -- same filter as vol_list_dir */
+        if ((uint8_t)name[0] == 0x01) { p += (uint64_t)h.rec_len + 4; continue; }
         /* torn-write guard: stop at the first CRC-broken record */
         if (vol_read_raw(vol, p + h.rec_len, &crc_stored, 4) != 0) break;
         crc_calc = 0;

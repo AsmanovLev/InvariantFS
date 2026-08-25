@@ -4,9 +4,11 @@
  *   invf-sweep <image> [--dry-run]
  *
  * Walks live records (same CRC-validated scan as invf-ls), feeds every
- * regular file with segments to vol_sweep_file() — the same unified core
- * the FUSE daemon uses (LZ4->ZSTD-19 recompress, containers/transcodes
- * handled per their own recipes). The author's sweep.c CLI is Windows-only.
+ * regular file with segments to vol_sweep_one() — the unified per-inode
+ * dispatch (containers/transcodes/text-batching/generic ZSTD-19). Text
+ * candidates defer into the volume's accumulator and are sealed into
+ * shared PPMd batches by vol_tz_flush() at the end of the run, after the
+ * dead-batch GC (vol_tz_gc). The author's sweep.c CLI is Windows-only.
  */
 #define _CRT_SECURE_NO_WARNINGS
 
@@ -78,7 +80,7 @@ int main(int argc, char **argv)
     const invfs_superblock *sb;
     int err, dry = 0;
     uint64_t bm, area_start, area_end, p;
-    int count = 0, cap = 0, swept = 0, skipped = 0, failed = 0;
+    int count = 0, cap = 0, swept = 0, skipped = 0, failed = 0, textb = 0;
     char (*names)[256] = NULL;
     uint64_t *inodes = NULL;
     uint64_t *sizes = NULL;
@@ -93,10 +95,43 @@ int main(int argc, char **argv)
     img = argv[1];
     dry = (argc == 3 && strcmp(argv[2], "--dry-run") == 0);
 
+    /* per-file lines go to stdout, the summary to stderr: unbuffered, or a
+     * redirected log tears a line at every 4 KB flush boundary */
+    setvbuf(stdout, NULL, _IONBF, 0);
+
     vol = vol_open(img, &err);
     if (!vol) {
         fprintf(stderr, "cannot open volume %s (err %d)\n", img, err);
         return 1;
+    }
+    /* WP10 memory policy: same size grammar as INVFS_ARC_BYTES in volume.c;
+     * unset keeps the volume default. */
+    {
+        const char *dl = getenv("INVFS_DEC_MEM_LIMIT");
+        if (dl) {
+            char *endp = NULL;
+            unsigned long long want = strtoull(dl, &endp, 10);
+            unsigned long long mult = 1;
+            int ok = (endp != dl);
+            if (ok) {
+                while (*endp == ' ' || *endp == '\t') endp++;
+                switch (*endp) {
+                    case 'k': case 'K': mult = 1024ull; endp++; break;
+                    case 'm': case 'M': mult = 1024ull * 1024; endp++; break;
+                    case 'g': case 'G': mult = 1024ull * 1024 * 1024; endp++; break;
+                    default: break;
+                }
+                if (*endp == 'b' || *endp == 'B') endp++;
+                while (*endp == ' ' || *endp == '\t') endp++;
+                if (*endp != '\0') ok = 0;
+                if (want > (unsigned long long)SIZE_MAX / mult) ok = 0;
+            }
+            if (ok)
+                vol_set_dec_mem_limit(vol, (uint64_t)(want * mult));
+            else
+                fprintf(stderr, "[sweep] INVFS_DEC_MEM_LIMIT=\"%s\" is not a "
+                                "size; ignored\n", dl);
+        }
     }
     sb = vol_sb(vol);
     bm = (sb->total_blocks / 8 + INVFS_BLOCK_SIZE - 1) / INVFS_BLOCK_SIZE;
@@ -172,15 +207,42 @@ int main(int argc, char **argv)
         if (dry) { printf("would sweep %s (%llu bytes)\n",
                           names[i], (unsigned long long)sizes[i]); continue; }
         {
-            /* vol_sweep_file returns 0 = swept, 1 = nothing to do
-             * (already Shadow / no gain), <0 = hard error */
-            int rc = vol_sweep_file(vol, inodes[i]);
-            if (rc == 0) swept++;
-            else if (rc == 1) skipped++;
+            /* vol_sweep_one: 0 = nothing to do, >0 = transcoded/swept,
+             * 9 = text deferred into the batch accumulator (sealed by
+             * vol_tz_flush below), <0 = hard error */
+            int rc = vol_sweep_one(vol, inodes[i], names[i]);
+            if (rc == 9) {
+                textb++;
+                printf("  %s: text -> PPMd batch\n", names[i]);
+            }
+            else if (rc == 7) {
+                swept++;
+                printf("  %s: JPEG -> JXL (lossless)\n", names[i]);
+            }
+            else if (rc > 0) swept++;
+            else if (rc == 0) skipped++;
             else failed++;
         }
         if ((swept + skipped) % 5000 == 0)
             fprintf(stderr, "  ..%d done (swept=%d)\n", swept + skipped, swept);
+    }
+
+    /* WP10 §7: reclaim owner batches no live member references, then seal
+     * the accumulated text candidates into shared PPMd batches. */
+    if (!dry) {
+        int gcrc = vol_tz_gc(vol);
+        int tzrc;
+        if (gcrc > 0)
+            printf("text gc: %u dead batches reclaimed\n", (unsigned)gcrc);
+        else if (gcrc < 0)
+            fprintf(stderr, "text gc failed (rc=%d)\n", gcrc);
+        tzrc = vol_tz_flush(vol);
+        if (tzrc == 0)
+            printf("text batches flushed (%d deferred)\n", textb);
+        else if (tzrc < 0) {
+            fprintf(stderr, "text batch flush failed (rc=%d)\n", tzrc);
+            failed++;
+        }
     }
 
     fprintf(stderr, "sweep done: swept=%d skipped=%d failed=%d\n",

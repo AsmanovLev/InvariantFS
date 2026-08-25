@@ -165,6 +165,7 @@ typedef struct {
      * through each file's AST block entries (zone bitfield) */
     uint64_t raw_used_bytes, shadow_used_bytes;
     uint64_t logic_raw_bytes, logic_shadow_bytes;
+    uint64_t logic_text_bytes;   /* zone==TEXT (PPMd batch members), WP10 */
 } invfs_volume_stats;
 int vol_compute_stats(invfs_volume *v, invfs_volume_stats *out);
 uint64_t vol_zone_used_bytes(invfs_volume *v, uint64_t start_blk, uint64_t end_blk);
@@ -245,3 +246,29 @@ int invfs_pmp_decompress(const uint8_t *pmp, size_t pmp_len,
 uint64_t vol_create_pmp_file(invfs_volume *v, const char *name,
                              const uint8_t *pmp, size_t pmp_len,
                              uint64_t orig_size);
+
+/* ---- WP10: memory policy + storage class + text batching ---- */
+
+/* Memory policy setters (mount options arc_limit=/dec_mem_limit=, CLI tools
+ * use env INVFS_ARC_BYTES/INVFS_DEC_MEM_LIMIT). Admission is enforced at
+ * SWEEP time only; the read path never refuses stored data. */
+void     vol_set_arc_budget(invfs_volume *v, uint64_t bytes);     /* 0 = keep */
+void     vol_set_dec_mem_limit(invfs_volume *v, uint64_t bytes);  /* 0 = default */
+uint64_t vol_get_dec_mem_limit(invfs_volume *v);
+
+/* Seal + commit the partial PPMd text batch. Drivers (invf-sweep, daemon
+ * drain) call this at the end of a sweep run. 0 = ok/flushed, 1 = nothing
+ * pending, <0 = error. */
+int vol_tz_flush(invfs_volume *v);
+
+/* Text-zone GC (WP10 §7): reclaim owner batches no live member references.
+ * Runs between the dedupe pass and vol_tz_flush in invf-sweep. Returns the
+ * number of dead batches reclaimed, 0 = none, <0 = error. */
+int vol_tz_gc(invfs_volume *v);
+
+/* Storage-class flag (invfs.class xattr, see invarifs.h).
+ * vol_get_class: 0 = found, 1 = absent. stamp writes only on change. */
+int vol_get_class(invfs_volume *v, uint64_t inode_id,
+                  uint8_t *cls, uint8_t *algo, uint16_t *gen);
+int vol_stamp_class(invfs_volume *v, uint64_t inode_id,
+                    uint8_t cls, uint8_t algo, uint16_t gen);

@@ -78,6 +78,27 @@ from doc/02 would produce volumes this code cannot mount (and vice versa).
 | WP7 | Fix g_entries locking (H1), readdir cap (H7), FUSE flush ENOSPC propagation (H4), ZIP sweep idempotence marker (H8) | code-fix | S-M |
 | WP8 | Build system: invf-fuse in build_linux.sh, kill /mnt/d hardcode, static-link recipe for initramfs | recipe-tooling | S |
 | WP9 | Initramfs kit rewritten for FUSE (busybox /init, devtmpfs, invf-fuse, switch_root, CONFIG_FUSE_FS kernel) + offline rootfs packer preserving modes + finalize `invf-fsck -f` → first boot CLEAN | recipe-tooling | M |
+| WP10 | Codec registry (sniff/probe/caps/dec_mem/generation) + Text Zone cross-file PPMd batching (4MB batches, bytypesize sort, `\x01tzb` owner inode, member L2P dups) + storage-class xattr `invfs.class` + sweep-time memory policy (arc_limit/dec_mem_limit, both-directions re-sweep) + TEXT GC mark-and-sweep. Spec: `WP10-textzone-codec-registry.md`. Addresses: dead constants INVFS_ZONE_TEXT/PPMD, PB6 (probe gate), H10 (PPMD batch decode+memcmp verify), per-sweep wasted ZSTD re-encodes (class stamp) | code-fix | L |
+
+## 6. Addendum 2026-08-26 (WP10)
+
+New audit findings folded into WP10 spec (`WP10-textzone-codec-registry.md`):
+- PPMd8 wrapper (`src/ppmd_codec.c`) debugged and verified: `CPpmd8.Stream` is a UNION
+  `{In,Out}` (Ppmd8.h:88-92); assigning both members clobbers the input stream. Fixed —
+  decode assigns only `.In`, encode only `.Out`. Wire format: `[2B LE props][range-coded
+  stream incl. END marker]`, params o=8/64MB/CUT_OFF (props bytes `f7 13`).
+- Read-path hard ceiling found: `vol_read_range` per-segment decode uses stack
+  `uint8_t tmp[SEGMENT_SIZE]` (volume.c:4331) — 64KB logical-segment ceiling; PPMD batch
+  slices must bypass it (heap) since decode unit is the 4MB batch.
+- ARC pba-keying hazard identified and designed around: ARC keys are inode_ids today;
+  TEXT batch caching keys by pba, invalidated only in GC (single point where TEXT blocks
+  are freed) — required because pba reuse by alloc_blocks would otherwise serve stale
+  decoded batches to a different file.
+- doc/16 B29.5 confirms: sorted (bytypesize) 4MB PPMd batches beat ZSTD-19 by +12% even
+  on heterogeneous batches; Benchmark.md attributes the 2.95x vs 4.01x Silesia gap to
+  missing cross-file context — WP10 closes exactly that gap.
+- AUDIT sections affected as WP10 lands: "Design fiction inventory" loses Text Zone/PPMd;
+  PB6 gains probe-based gating; H10 gains real verify for the PPMD lane.
 
 Estimated distance to OpenRC-bootable Gentoo root on InvariantFS (FUSE route): **4–8 engineer-weeks**
 (long poles WP2, WP4). Doc13's literal kernel-module ambition: 4–9+ months, effectively a new project.

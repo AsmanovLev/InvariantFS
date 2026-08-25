@@ -27,6 +27,9 @@
 #include <unistd.h>
 #include <fcntl.h>
 #include <sys/stat.h>
+#include <sys/wait.h>
+#include <errno.h>
+#include <signal.h>
 #endif
 
 #include "invarifs.h"
@@ -36,6 +39,8 @@
 #include "lz4.h"
 #include "zstd.h"
 #include "zlib.h"
+#include "ppmd_codec.h"
+#include "codec.h"
 
 /* flacx.c — FLAC frame recipe extract/rebuild (bit-exact). */
 /* MUST match src/flacx.c layout: offset, len, kind, data */
@@ -93,6 +98,14 @@ extern uLong crc32(uLong crc, const Bytef *buf, uInt len);
 
 #define SEGMENT_SIZE (64u * 1024u)  /* RAW segment granularity */
 
+/* WP10: ARC keys for decoded PPMd batches are the batch's PBA with this tag
+ * bit set. Whole-file cache entries key by inode id (monotonic from 1), so
+ * an untagged pba could collide with an inode id and serve the wrong bytes;
+ * with bit 63 set the two key spaces can never meet (pbas < total_blocks,
+ * ids < 2^63). Used by vol_read_text_slice and vol_tz_gc (invalidate before
+ * the block goes back to the bitmap). */
+#define TZ_ARC_TAG (1ULL << 63)
+
 /* ---- backing store: image file or raw block device (see blkio.c) ----
    This used to be a private copy of a four-function shim over ReadFile/read.
    It now delegates to blkio, which is shared with mkfs.c and which handles
@@ -144,6 +157,16 @@ typedef struct dir_index_entry {
     char name[1];          /* prefix including the trailing '/' */
 } dir_index_entry;
 
+/* WP10 §4: one deferred text-batching candidate. Lives only in RAM for the
+ * duration of a sweep run; a crash before vol_tz_flush just leaves the file
+ * RAW for the next run (invariant: nothing lost). */
+typedef struct {
+    uint64_t inode_id;
+    uint64_t size;         /* size at defer time (sort key only) */
+    uint32_t family;       /* INVFS_TEXT_FAMILY_* — the batching sort key */
+    char     name[256];
+} tz_candidate;
+
 typedef struct invfs_volume {
     char *path;
     blkio io;
@@ -191,6 +214,17 @@ typedef struct invfs_volume {
        segments -- only a blob plus a sibling recipe -- so serving a 64 KB
        ranged read means rebuilding the whole file. See arc.h. */
     invfs_arc *arc;
+    /* WP10 sweep-time memory policy: peak decoder bytes a codec may need
+       per unit; 0 = the 512 MiB default (vol_get_dec_mem_limit). Enforced
+       at sweep admission only -- the read path never refuses stored data. */
+    uint64_t dec_mem_limit;
+    /* WP10: the ARC budget as last set (vol_open parse / vol_set_arc_budget),
+       kept because the text-batch target is min(4 MB, budget/2) and the
+       WHOLEFILE/compliance policy checks need it. 0 = cache disabled. */
+    uint64_t arc_budget;
+    /* WP10 §4: deferred text candidates awaiting vol_tz_flush */
+    tz_candidate *tz;
+    size_t tz_n, tz_cap;
     /* Crash consistency (doc/08). `dirty` remembers that the on-disk state
        has already been set to DIRTY this session, so the mark costs one
        superblock write per mount instead of one per mutation.
@@ -830,6 +864,7 @@ invfs_volume *vol_open(const char *path, int *err)
             }
         }
         v->arc = arc_create(budget);     /* NULL == disabled, callers cope */
+        v->arc_budget = (uint64_t)budget;
         if (getenv("INVFS_DEBUG"))
             printf("[vol_open] content cache: %s (%llu bytes)\n",
                    v->arc ? "on" : "off", (unsigned long long)budget);
@@ -904,6 +939,7 @@ void vol_close(invfs_volume *v)
     io_close(&v->io);
     idx_clear(v);
     arc_destroy(v->arc);
+    free(v->tz);
     free(v->bitmap);
     free(v->l2p);
     free(v->path);
@@ -914,6 +950,35 @@ void vol_arc_stats(invfs_volume *v, invfs_arc_stats *out)
 {
     arc_stats(v ? v->arc : NULL, out);
 }
+
+/* ---- WP10: memory policy (sweep-time admission only) ---- */
+
+#define INVFS_DEC_MEM_DEFAULT (512ull << 20)   /* 512 MiB (WP10 §6) */
+
+/* Recreate the content cache with a new budget (the arc has no resize).
+ * 0 keeps the current one, so INVFS_ARC_BYTES at vol_open stays the
+ * fallback when no explicit budget was set. */
+void vol_set_arc_budget(invfs_volume *v, uint64_t bytes)
+{
+    if (!v || bytes == 0) return;
+    arc_destroy(v->arc);
+    v->arc = arc_create((size_t)bytes);   /* NULL == disabled, callers cope */
+    v->arc_budget = bytes;
+}
+
+void vol_set_dec_mem_limit(invfs_volume *v, uint64_t bytes)
+{
+    if (v) v->dec_mem_limit = bytes;      /* 0 = default */
+}
+
+uint64_t vol_get_dec_mem_limit(invfs_volume *v)
+{
+    return (v && v->dec_mem_limit) ? v->dec_mem_limit : INVFS_DEC_MEM_DEFAULT;
+}
+
+/* The batch accumulator and the real vol_tz_flush/vol_tz_gc live with the
+ * rest of the WP10 write path, right after the storage-class helpers (they
+ * need meta_rewrite/vol_stamp_class/vol_delete_inode). */
 
 /* ================= fsck / repair =================
  * NOTE on physical addressing: AST entries store block_id = segment
@@ -2728,6 +2793,8 @@ int vol_list_dir(invfs_volume *v, const char *dir, invfs_dirent *ents, int max)
             first[flen] = 0;
             /* skip internal '!' siblings (recipe/cover/part/jxl) */
             if (memchr(first, '!', flen)) continue;
+            /* hide control-prefixed internal names (the "\x01tzb" owner) */
+            if ((uint8_t)first[0] == 0x01) continue;
 
             hb = (size_t)(idx_hash(first, flen) & seen_mask);
             for (d = seen[hb]; d; d = d->next)
@@ -2776,6 +2843,88 @@ static int invfs_png_from_jxl(invfs_volume *v, uint64_t jxl_inode,
 static int mz_tdefl_compress(const uint8_t *in, size_t in_len,
                              uint8_t *out, size_t out_cap, int level,
                              size_t *out_len);
+
+/* WP10 §5: read a slice of a shared PPMd text batch. A member AST entry
+ * (zone=TEXT, algo=PPMD) names its batch by block_id: the member's L2P dup
+ * entry maps it to the batch pba, and block_offset is the slice's offset in
+ * the DECODED batch. The batch segment carries a [4B usize LE] sub-header in
+ * front of the PPMd wire blob ([2B props][stream]), usize = decoded batch
+ * size, under the usual [4B csize][4B crc32c] framing. The decoded batch is
+ * cached in the ARC keyed by the TAGGED pba (pba | TZ_ARC_TAG), not inode id:
+ * one batch is shared by many member inodes, and the segment is freed only
+ * by GC (which invalidates the tagged pba key first). Batches reach 4 MB, so
+ * this is heap-only -- never the callers' stack segment buffer. */
+static int vol_read_text_slice(invfs_volume *v, uint64_t inode_id,
+                               const invfs_ast_block_entry *e,
+                               uint64_t slice_off, uint8_t *dst, size_t want)
+{
+    uint64_t pba = 0, plen = 0;
+    const uint8_t *batch = NULL;
+    uint8_t *fresh = NULL;
+    size_t batch_len = 0;
+    int rc = -1;
+
+    if (want == 0) return 0;
+    if (slice_off + want > e->length)
+        return -1;   /* window runs past the member's slice */
+    if (vol_lookup_entry(v, inode_id, e->block_id, &pba, &plen) != 0 ||
+        pba == 0) {
+        fprintf(stderr, "L2P miss: inode %llu text seg %u\n",
+                (unsigned long long)inode_id, e->block_id);
+        return -1;
+    }
+    if (!arc_get(v->arc, pba | TZ_ARC_TAG, &batch, &batch_len)) {
+        uint8_t hdrb[8];
+        uint32_t csize, crc_hdr, usize;
+        uint8_t *blob;
+
+        if (io_seek(&v->io, pba * INVFS_BLOCK_SIZE) != 0 ||
+            io_read(&v->io, hdrb, 8) != 0)
+            return -1;
+        memcpy(&csize, hdrb, 4);
+        memcpy(&crc_hdr, hdrb + 4, 4);
+        /* payload holds at least [4B usize][2B props] and fits the segment */
+        if (csize < 4 + 2 ||
+            (plen && (uint64_t)csize + 8 > plen * INVFS_BLOCK_SIZE))
+            return -1;
+        blob = (uint8_t *)malloc(csize);
+        if (!blob) return -1;
+        if (io_seek(&v->io, pba * INVFS_BLOCK_SIZE + 8) != 0 ||
+            io_read(&v->io, blob, csize) != 0) {
+            free(blob); return -1;
+        }
+        /* deep protection: verify segment CRC32C before decode */
+        if (crc_hdr != 0 && invfs_crc32c(blob, csize) != crc_hdr) {
+            fprintf(stderr, "segment CRC mismatch: text batch pba %llu\n",
+                    (unsigned long long)pba);
+            free(blob); return -1;
+        }
+        memcpy(&usize, blob, 4);
+        if (usize == 0 || usize > (64u << 20)) {   /* batches are <= 4 MB */
+            free(blob); return -1;
+        }
+        fresh = (uint8_t *)malloc(usize);
+        if (!fresh) { free(blob); return -1; }
+        /* the decoder's wire blob starts at the props, past the usize LE */
+        if (invfs_ppmd_decode(blob + 4, csize - 4, fresh, usize) != 0) {
+            fprintf(stderr, "ppmd decode failed: text batch pba %llu\n",
+                    (unsigned long long)pba);
+            free(fresh); free(blob); return -1;
+        }
+        free(blob);
+        batch = fresh;
+        batch_len = usize;
+    }
+    if ((uint64_t)e->block_offset + slice_off + want <= batch_len) {
+        memcpy(dst, batch + e->block_offset + slice_off, want);
+        rc = 0;
+    }
+    /* arc_put takes ownership (or frees an oversized entry), so the slice
+     * is copied out BEFORE the buffer is handed over. NULL cache frees. */
+    if (fresh) arc_put(v->arc, pba | TZ_ARC_TAG, fresh, batch_len);
+    return rc;
+}
+
 static int vol_read_inode(invfs_volume *v, uint64_t inode_id, unsigned depth,
                           uint8_t **out, size_t *out_len)
 {
@@ -2843,6 +2992,17 @@ static int vol_read_inode(invfs_volume *v, uint64_t inode_id, unsigned depth,
                 uint32_t hdr, crc_hdr;
                 uint8_t *blob;
                 size_t dst_off = (size_t)e->file_offset;
+
+                /* TEXT member: a slice of a shared PPMd batch, decoded and
+                 * cached by pba (heap only -- see vol_read_text_slice) */
+                if (e->zone == INVFS_ZONE_TEXT && e->algo == INVFS_ALGO_PPMD) {
+                    if (vol_read_text_slice(v, inode_id, e, 0,
+                                            data + dst_off,
+                                            (size_t)e->length) != 0) {
+                        free(data); free(rec); return -1;
+                    }
+                    continue;
+                }
 
                 /* segment physical location via L2P */
                 if (vol_lookup_entry(v, inode_id, e->block_id, &pba, &phys_len) != 0) {
@@ -3468,7 +3628,68 @@ static void sweep_unwind(invfs_volume *v, uint64_t new_id)
  * file's permissions/owner/times. Wrapper resolves the name up front, lets
  * the inner sweep run, and re-applies the captured meta only when the name
  * now belongs to a NEW record that lacks an ext. */
-static int vol_sweep_file_inner(invfs_volume *v, uint64_t inode_id);
+static int vol_sweep_file_inner(invfs_volume *v, uint64_t inode_id,
+                                int generic_only);
+
+/* WP10 §2: the minimum compression gain (in percent) below which a file is
+ * stamped UNCOMPRESSIBLE and skipped by later sweeps until a newer codec
+ * generation sniffs it. INVFS_MIN_GAIN_PCT, default 0.5. */
+static double vol_min_gain_pct(void)
+{
+    const char *e = getenv("INVFS_MIN_GAIN_PCT");
+    if (!e || !*e) return 0.5;
+    char *endp = NULL;
+    double pct = strtod(e, &endp);
+    if (endp == e || pct < 0.0 || pct >= 100.0) {
+        fprintf(stderr, "[vol] INVFS_MIN_GAIN_PCT=\"%s\" invalid; using 0.5\n", e);
+        return 0.5;
+    }
+    return pct;
+}
+
+static uint16_t tz_codec_gen(uint32_t algo)
+{
+    const invfs_codec *c = invfs_codec_by_algo(algo);
+    return c ? c->generation : 0;
+}
+
+/* WP10 §12.2: the JXL codec's decode working set from cheap JPEG headers,
+ * never a trial decode. Walks the marker stream for SOF0/SOF1/SOF2
+ * (0xFFC0-0xC2; baseline/extended/progressive) and returns ~w*h*3 -- the
+ * pixel buffer djxl materializes before writing the JPEG back out.
+ * 0 = geometry unknown (the caller admits the file and lets cjxl try). */
+static uint64_t jpeg_raw_estimate(const uint8_t *j, size_t n)
+{
+    size_t p = 2;   /* past SOI (FF D8) */
+
+    while (p + 4 <= n) {
+        uint8_t m;
+        unsigned seglen;
+        if (j[p] != 0xFF) { p++; continue; }   /* tolerate garbage padding */
+        m = j[p + 1];
+        if (m == 0xFF) { p++; continue; }      /* fill byte */
+        if (m == 0x00) { p += 2; continue; }   /* stuffed 0xFF */
+        if (m == 0xD9) break;                  /* EOI */
+        if (m == 0xDA) break;                  /* SOS: entropy data follows */
+        if (m == 0xD8 || m == 0x01 ||
+            (m >= 0xD0 && m <= 0xD7)) {        /* SOI/TEM/RSTn: no length */
+            p += 2;
+            continue;
+        }
+        seglen = ((unsigned)j[p + 2] << 8) | j[p + 3];
+        if (seglen < 2 || p + 2 + seglen > n) break;
+        if (m >= 0xC0 && m <= 0xC2) {
+            unsigned h, w;
+            if (p + 9 > n) break;
+            h = ((unsigned)j[p + 5] << 8) | j[p + 6];
+            w = ((unsigned)j[p + 7] << 8) | j[p + 8];
+            if (!w || !h) return 0;
+            return (uint64_t)w * h * 3;
+        }
+        p += 2 + seglen;
+    }
+    return 0;
+}
 
 int vol_sweep_file(invfs_volume *v, uint64_t inode_id)
 {
@@ -3494,7 +3715,7 @@ int vol_sweep_file(invfs_volume *v, uint64_t inode_id)
         }
     }
 
-    rc = vol_sweep_file_inner(v, inode_id);
+    rc = vol_sweep_file_inner(v, inode_id, 0);
 
     if (have_keep && name[0]) {
         uint64_t nid = vol_find(v, name);
@@ -3507,7 +3728,8 @@ int vol_sweep_file(invfs_volume *v, uint64_t inode_id)
     return rc;
 }
 
-static int vol_sweep_file_inner(invfs_volume *v, uint64_t inode_id)
+static int vol_sweep_file_inner(invfs_volume *v, uint64_t inode_id,
+                                int generic_only)
 {
     uint64_t pos = v->inode_area_start * INVFS_BLOCK_SIZE;
     uint64_t end = v->inode_area_pos;
@@ -3523,6 +3745,14 @@ static int vol_sweep_file_inner(invfs_volume *v, uint64_t inode_id)
        whole file is written under it before anything references it. */
     uint64_t new_id = 0;
     int all_raw = 1;
+    /* WP10: bytes the sweep actually stored (sum of csize+8 per segment),
+       for the UNCOMPRESSIBLE gain check; a codec guard that refused the file
+       (guard_algo) stamps GENERIC_GUARD instead of a gain-based class. A
+       codec rejected by the decode-memory policy (memlimit_algo) stamps
+       GENERIC_MEMLIMIT -- stamped on the NEW id at the end, like guard. */
+    uint64_t new_bytes = 0;
+    uint32_t guard_algo = 0;
+    uint32_t memlimit_algo = 0;
 
     /* locate the inode record */
     {   /* jump straight to it; 0 = not indexed, keep the full scan */
@@ -3565,57 +3795,100 @@ static int vol_sweep_file_inner(invfs_volume *v, uint64_t inode_id)
 
     /* JXL pass: if file is a RAW blob starting with JPEG magic,
      * transcode the whole file via cjxl and replace the inode. */
-    if (ents[0].zone == INVFS_ZONE_RAW) {
+    if (!generic_only && ents[0].zone == INVFS_ZONE_RAW) {
         uint8_t *full = NULL;
         size_t full_len = 0;
         if (getenv("INVFS_DEBUG"))
             printf("[sweep] %s: reading full file\n", rec_h.name);
         if (vol_read_file(v, inode_id, &full, &full_len) == 0 && full_len >= 3 &&
             full[0] == 0xFF && full[1] == 0xD8 && full[2] == 0xFF) {
+            const invfs_codec *jc = invfs_codec_by_algo(INVFS_ALGO_JXL);
+            uint64_t raw;
             if (getenv("INVFS_DEBUG"))
-                printf("[sweep] %s: JPEG detected (%zu bytes), transcoding...\n",
+                printf("[sweep] %s: JPEG detected (%zu bytes)\n",
                        rec_h.name, full_len);
-            uint8_t *jxl = NULL;
-            size_t jxl_len = 0;
-            {
+            if (!jc || !jc->probe || !jc->probe()) {
+                /* cjxl absent: leave the file RAW and UNSTAMPED. Falling
+                 * into the generic path would be terminal for it -- zone!=RAW
+                 * and a GENERIC/UNCOMPRESSIBLE stamp never re-arm when a tool
+                 * appears -- so it waits, and the first sweep after cjxl is
+                 * installed picks it up. */
+                if (getenv("INVFS_DEBUG"))
+                    printf("[sweep] %s: cjxl unavailable, deferred\n",
+                           rec_h.name);
+                free(full);
+                free(rec);
+                return 1;
+            }
+            /* admission from the SOF geometry (WP10 §12.2); past the
+             * decode-memory policy the file goes generic, stamped so a
+             * raised limit re-arms the JXL path */
+            raw = jpeg_raw_estimate(full, full_len);
+            if (raw && raw > vol_get_dec_mem_limit(v)) {
+                if (getenv("INVFS_DEBUG"))
+                    printf("[sweep] %s: JPEG raw ~%llu B > dec_mem limit\n",
+                           rec_h.name, (unsigned long long)raw);
+                memlimit_algo = INVFS_ALGO_JXL;
+            } else {
+                uint8_t *jxl = NULL;
+                size_t jxl_len = 0;
                 int crc_res = invfs_jxl_compress(full, full_len, &jxl, &jxl_len);
                 if (getenv("INVFS_DEBUG"))
                     printf("[sweep] %s: compress rc=%d jxl_len=%zu (orig %zu)\n",
                            rec_h.name, crc_res, jxl_len, full_len);
                 if (crc_res == 0 && jxl_len < full_len) {
-                /* atomic: create new inode first; old stays until then */
-                if (getenv("INVFS_DEBUG"))
-                    printf("[sweep] %s: create JXL inode first\n", rec_h.name);
-                {
-                    uint64_t newino = vol_create_jxl_file(v, rec_h.name, jxl, jxl_len, full_len);
-                    if (newino == 0)
-                        fprintf(stderr, "sweep: JXL create failed (%s)\n", rec_h.name);
-                    else {
-                        vol_delete_inode(v, inode_id, rec_h.name);
-                        swept_any = 1;
+                    /* guard: the blob must djxl back to the exact original
+                     * JPEG bytes before anything is replaced */
+                    uint8_t *back = NULL;
+                    size_t back_len = 0;
+                    int exact =
+                        invfs_jxl_decompress(jxl, jxl_len, &back, &back_len) == 0 &&
+                        back_len == full_len &&
+                        memcmp(back, full, full_len) == 0;
+                    free(back);
+                    if (exact) {
+                        /* atomic: create new inode first; old stays until then */
+                        if (getenv("INVFS_DEBUG"))
+                            printf("[sweep] %s: create JXL inode first\n", rec_h.name);
+                        {
+                            uint64_t newino = vol_create_jxl_file(v, rec_h.name, jxl, jxl_len, full_len);
+                            if (newino == 0)
+                                fprintf(stderr, "sweep: JXL create failed (%s)\n", rec_h.name);
+                            else {
+                                vol_delete_inode(v, inode_id, rec_h.name);
+                                vol_stamp_class(v, newino, INVFS_CLASS_CODEC,
+                                                INVFS_ALGO_JXL, tz_codec_gen(INVFS_ALGO_JXL));
+                                swept_any = 1;
+                            }
+                        }
+                        free(jxl);
+                        free(full);
+                        free(rec);
+                        if (getenv("INVFS_DEBUG"))
+                            printf("[sweep] %s: JXL %llu -> %zu bytes\n",
+                                   rec_h.name, (unsigned long long)full_len, jxl_len);
+                        /* 2, not 0: the generic ZSTD-19 path below also returns 0,
+                           so the caller could not tell a JPEG that went through
+                           cjxl from one that got shadow-compressed -- and every
+                           cover in a sweep was reported as "Shadow (ZSTD-19)"
+                           even when JXL had done the work. */
+                        return swept_any ? 2 : 1;
                     }
+                    if (getenv("INVFS_DEBUG"))
+                        printf("[sweep] %s: JXL round-trip mismatch\n", rec_h.name);
                 }
+                /* JXL declined (tool failed, no gain, or the round-trip
+                 * guard refused): guard-stamp so the next sweep skips the
+                 * retry until cjxl's generation improves */
+                guard_algo = INVFS_ALGO_JXL;
                 free(jxl);
-                free(full);
-                free(rec);
-                if (getenv("INVFS_DEBUG"))
-                    printf("[sweep] %s: JXL %llu -> %zu bytes\n",
-                           rec_h.name, (unsigned long long)full_len, jxl_len);
-                /* 2, not 0: the generic ZSTD-19 path below also returns 0,
-                   so the caller could not tell a JPEG that went through
-                   cjxl from one that got shadow-compressed -- and every
-                   cover in a sweep was reported as "Shadow (ZSTD-19)"
-                   even when JXL had done the work. */
-                return swept_any ? 2 : 1;
             }
-            }
-            free(jxl);
         }
         free(full);
     }
 
     /* APE pass: FLAC magic -> transcode whole file via MAC.exe -c4000 */
-    if (ents[0].zone == INVFS_ZONE_RAW && getenv("INVFS_APE")) {
+    if (!generic_only && ents[0].zone == INVFS_ZONE_RAW && getenv("INVFS_APE")) {
         uint8_t *full = NULL;
         size_t full_len = 0;
         if (vol_read_file(v, inode_id, &full, &full_len) == 0 && full_len >= 4 &&
@@ -3642,12 +3915,15 @@ static int vol_sweep_file_inner(invfs_volume *v, uint64_t inode_id)
                         fprintf(stderr, "sweep: APE create failed (%s)\n", rec_h.name);
                     else {
                         vol_delete_inode(v, inode_id, rec_h.name);
+                        vol_stamp_class(v, newino, INVFS_CLASS_CODEC,
+                                        INVFS_ALGO_APE, tz_codec_gen(INVFS_ALGO_APE));
                         swept_any = 1;
                     }
                 }
                 free(ape); free(full); free(rec);
                 return swept_any ? 0 : 1;
             }
+            guard_algo = INVFS_ALGO_APE;
             free(ape);
         }
         free(full);
@@ -3750,6 +4026,7 @@ static int vol_sweep_file_inner(invfs_volume *v, uint64_t inode_id)
         hdr4[6] = (uint8_t)((crc_new >> 16) & 0xFF);
         hdr4[7] = (uint8_t)((crc_new >> 24) & 0xFF);
         memcpy(cbuf_new, hdr4, 8);
+        new_bytes += (uint64_t)csize_new + 8;   /* WP10 gain accounting */
         if (write_segment_blocks(v, pba_new, cbuf_new, (size_t)csize_new + 8,
                                  phys_blocks_new) != 0) {
             free(cbuf_new); free(orig); sweep_unwind(v, new_id); free(rec); return -1;
@@ -3844,6 +4121,35 @@ static int vol_sweep_file_inner(invfs_volume *v, uint64_t inode_id)
     } else {
         sweep_unwind(v, new_id);   /* nothing swept: give the id's maps back */
     }
+    /* WP10 §2: stamp the outcome class. A codec guard that refused the file
+     * pins GENERIC_GUARD (retried when that codec's generation grows past the
+     * stored one); otherwise the file-level gain decides UNCOMPRESSIBLE vs
+     * GENERIC. A GUARD/MEMLIMIT stamp the caller set before we ran (it lives
+     * in the copied ext) wins over the gain verdict -- it carries the retry
+     * semantics the gain verdict knows nothing about. */
+    if (swept_any && ast_h.file_size > 0) {
+        uint64_t tid = new_id ? new_id : inode_id;
+        uint8_t oc = 0, oa = 0;
+        uint16_t og = 0;
+        int havec = vol_get_class(v, tid, &oc, &oa, &og) == 0;
+        if (guard_algo) {
+            vol_stamp_class(v, tid, INVFS_CLASS_GENERIC_GUARD,
+                            (uint8_t)guard_algo, tz_codec_gen(guard_algo));
+        } else if (memlimit_algo) {
+            vol_stamp_class(v, tid, INVFS_CLASS_GENERIC_MEMLIMIT,
+                            (uint8_t)memlimit_algo, tz_codec_gen(memlimit_algo));
+        } else if (!havec || oc == INVFS_CLASS_GENERIC ||
+                   oc == INVFS_CLASS_UNCOMPRESSIBLE) {
+            double pct = vol_min_gain_pct();
+            if ((double)new_bytes >=
+                (double)ast_h.file_size * (1.0 - pct / 100.0))
+                vol_stamp_class(v, tid, INVFS_CLASS_UNCOMPRESSIBLE, 0,
+                                invfs_registry_generation());
+            else
+                vol_stamp_class(v, tid, INVFS_CLASS_GENERIC, INVFS_ALGO_ZSTD,
+                                tz_codec_gen(INVFS_ALGO_ZSTD));
+        }
+    }
     free(rec);
     return swept_any ? 0 : 1;
 }
@@ -3917,6 +4223,18 @@ static int vol_inode_first_zone(invfs_volume *v, uint64_t inode_id)
     return (int)e0.zone;
 }
 
+/* WP10 write path (defined with the class helpers, after vol_stamp_class):
+ * defer into the text accumulator, downgrade a stored file to the generic
+ * form on policy violation, and the cheap head-sniff behind the
+ * UNCOMPRESSIBLE retry predicate. */
+static int tz_defer(invfs_volume *v, uint64_t inode_id, const char *name,
+                    uint64_t size, uint32_t family);
+static int vol_class_downgrade(invfs_volume *v, uint64_t inode_id,
+                               const char *name, uint8_t calgo);
+static int tz_sniff_any(invfs_volume *v, uint64_t inode_id, const char *name);
+static int tz_member_oversized(invfs_volume *v, uint64_t inode_id,
+                               uint64_t unit_limit);
+
 /* process a single inode: container explode / transcode / shadow move.
    Returns 1 if the inode was replaced/transcoded, 0 if not applicable,
    -1 on hard error (caller keeps it pending or aborts). */
@@ -3927,14 +4245,76 @@ int vol_sweep_one(invfs_volume *v, uint64_t inode_id, const char *name)
     size_t full_len = 0;
 
     if (!name || strlen(name) > 240 || inode_id == 0) return 0;
+    /* internal control names (the "\x01tzb" batch owner) are never swept */
+    if ((uint8_t)name[0] == 0x01) return 0;
 
-    /* Cheap reject before the expensive read. vol_read_file DECODES, so on
-       an already-swept volume the old order paid a full packMP3/cjxl/APE
-       decode per file just to conclude "nothing to do" -- 6.5s for three
-       MP3s, and every Ctrl+C resume re-paid it for everything already
-       done. Anything not in RAW has been swept; the one caller that still
-       needs the decoded bytes (vol_sweep_file) re-checks the zone itself. */
-    if (vol_inode_first_zone(v, inode_id) != INVFS_ZONE_RAW) return 0;
+    /* WP10 §2: class-aware walk predicate. A present class flag decides
+     * skip/retry/downgrade without touching content; absent = the legacy
+     * rule (RAW zone = full path below, anything else = already swept). */
+    {
+        uint8_t ccls = 0, calgo = 0;
+        uint16_t cgen = 0;
+        if (vol_get_class(v, inode_id, &ccls, &calgo, &cgen) == 0) {
+            const invfs_codec *cc = invfs_codec_by_algo(calgo);
+            switch (ccls) {
+            case INVFS_CLASS_UNCOMPRESSIBLE:
+                /* Retry only when the registry grew AND a codec actually
+                 * sniffs the content now (the sniff is the cheap part --
+                 * one head segment, no full read). */
+                if (invfs_registry_generation() <= cgen) return 0;
+                if (!tz_sniff_any(v, inode_id, name)) {
+                    /* Nothing claims it even now: advance the snapshot so
+                     * the next sweep skips the sniff until the registry
+                     * grows again. */
+                    vol_stamp_class(v, inode_id, INVFS_CLASS_UNCOMPRESSIBLE, 0,
+                                    invfs_registry_generation());
+                    return 0;
+                }
+                break;
+            case INVFS_CLASS_GENERIC_GUARD:
+                if (!cc || cc->generation <= cgen) return 0;
+                break;   /* new sub-encoder: retry via the full path */
+            case INVFS_CLASS_GENERIC_MEMLIMIT:
+                if (!cc || cc->dec_mem_bytes > vol_get_dec_mem_limit(v))
+                    return 0;
+                break;   /* the policy now admits the codec: retry */
+            default: {
+                /* TEXT/CODEC/CONTAINER/GENERIC: policy compliance. The
+                 * generic floor codecs (NONE/LZ4/ZSTD) are always compliant
+                 * -- there is nothing cheaper left to downgrade INTO. */
+                int violated = 0;
+                if (cc && calgo != INVFS_ALGO_NONE &&
+                    calgo != INVFS_ALGO_LZ4 && calgo != INVFS_ALGO_ZSTD) {
+                    if (cc->dec_mem_bytes > vol_get_dec_mem_limit(v))
+                        violated = 1;
+                    if (!violated && (cc->caps & INVFS_CODEC_CAP_WHOLEFILE) &&
+                        v->arc_budget) {
+                        uint64_t fsz = 0;
+                        vol_stat_full(v, name, NULL, &fsz, NULL);
+                        if (fsz > v->arc_budget) violated = 1;
+                    }
+                }
+                /* a TEXT batch that outgrew the cache budget un-batches:
+                 * arc refuses entries over budget/2 (arc.c), so the policy
+                 * guarantee is read-time, and the member re-stores generic */
+                if (!violated && ccls == INVFS_CLASS_TEXT && v->arc_budget &&
+                    tz_member_oversized(v, inode_id, v->arc_budget / 2))
+                    violated = 1;
+                if (!violated) return 0;
+                return vol_class_downgrade(v, inode_id, name, calgo) == 0
+                       ? 6 : -1;
+            }
+            }
+        } else if (vol_inode_first_zone(v, inode_id) != INVFS_ZONE_RAW) {
+            /* Cheap reject before the expensive read. vol_read_file DECODES,
+               so on an already-swept volume the old order paid a full
+               packMP3/cjxl/APE decode per file just to conclude "nothing to
+               do". Anything not in RAW has been swept; the one caller that
+               still needs the decoded bytes (vol_sweep_file) re-checks the
+               zone itself. (Legacy rule for files with no class flag.) */
+            return 0;
+        }
+    }
 
     if (vol_read_file(v, inode_id, &full, &full_len) != 0 || full_len < 4) {
         free(full);
@@ -3953,9 +4333,14 @@ int vol_sweep_one(invfs_volume *v, uint64_t inode_id, const char *name)
                                                           ch, (size_t)n);
                 if (nino) {
                     vol_delete_inode(v, inode_id, name);
+                    vol_stamp_class(v, nino, INVFS_CLASS_CONTAINER,
+                                    INVFS_ALGO_ZIPR, tz_codec_gen(INVFS_ALGO_ZIPR));
                     free(ch); free(full);
                     return 1;
                 }
+                /* recognized but refused: retry only on a new generation */
+                vol_stamp_class(v, inode_id, INVFS_CLASS_GENERIC_GUARD,
+                                INVFS_ALGO_ZIPR, tz_codec_gen(INVFS_ALGO_ZIPR));
             }
             free(ch);
         }
@@ -3969,8 +4354,14 @@ int vol_sweep_one(invfs_volume *v, uint64_t inode_id, const char *name)
         if (vol_find(v, rname) != 0) { free(full); return 0; }
         uint64_t nino = vol_create_flac_file(v, name, full, full_len);
         free(full);
-        if (!nino) return 0;
+        if (!nino) {
+            vol_stamp_class(v, inode_id, INVFS_CLASS_GENERIC_GUARD,
+                            INVFS_ALGO_FLACR, tz_codec_gen(INVFS_ALGO_FLACR));
+            return 0;
+        }
         if (vol_delete_inode(v, inode_id, name) != 0) return -1;
+        vol_stamp_class(v, nino, INVFS_CLASS_CONTAINER,
+                        INVFS_ALGO_FLACR, tz_codec_gen(INVFS_ALGO_FLACR));
         return 2;   /* FLAC */
     }
 
@@ -3981,8 +4372,14 @@ int vol_sweep_one(invfs_volume *v, uint64_t inode_id, const char *name)
         if (vol_find(v, p0name) != 0) { free(full); return 0; }
         uint64_t nino = vol_create_tar_file(v, name, full, full_len);
         free(full);
-        if (!nino) return 0;
+        if (!nino) {
+            vol_stamp_class(v, inode_id, INVFS_CLASS_GENERIC_GUARD,
+                            INVFS_ALGO_TARR, tz_codec_gen(INVFS_ALGO_TARR));
+            return 0;
+        }
         if (vol_delete_inode(v, inode_id, name) != 0) return -1;
+        vol_stamp_class(v, nino, INVFS_CLASS_CONTAINER,
+                        INVFS_ALGO_TARR, tz_codec_gen(INVFS_ALGO_TARR));
         return 3;   /* TAR */
     }
 
@@ -3993,8 +4390,14 @@ int vol_sweep_one(invfs_volume *v, uint64_t inode_id, const char *name)
         if (vol_find(v, p0name) != 0) { free(full); return 0; }
         uint64_t nino = vol_create_gz_file(v, name, full, full_len);
         free(full);
-        if (!nino) return 0;
+        if (!nino) {
+            vol_stamp_class(v, inode_id, INVFS_CLASS_GENERIC_GUARD,
+                            INVFS_ALGO_GZR, tz_codec_gen(INVFS_ALGO_GZR));
+            return 0;
+        }
         if (vol_delete_inode(v, inode_id, name) != 0) return -1;
+        vol_stamp_class(v, nino, INVFS_CLASS_CONTAINER,
+                        INVFS_ALGO_GZR, tz_codec_gen(INVFS_ALGO_GZR));
         return 4;   /* GZIP */
     }
 
@@ -4002,10 +4405,39 @@ int vol_sweep_one(invfs_volume *v, uint64_t inode_id, const char *name)
     if (full_len >= 33 && memcmp(full, "\x89PNG\r\n\x1a\n", 8) == 0) {
         snprintf(jn, sizeof jn, "%s!jxl", name);
         if (vol_find(v, jn) != 0) { free(full); return 0; }
+        /* WP10 §12.2: admission needs the DECODE working set, derivable from
+         * IHDR without a trial decode: raw pixels ~= h * (1 + ceil(w*ch*bd/8))
+         * (unfiltered rows + per-row filter byte). Beyond the limit the file
+         * stays admissible to generic ZSTD but never to PNGR. */
+        {
+            uint32_t w = ((uint32_t)full[16] << 24) | ((uint32_t)full[17] << 16) |
+                         ((uint32_t)full[18] << 8) | (uint32_t)full[19];
+            uint32_t h = ((uint32_t)full[20] << 24) | ((uint32_t)full[21] << 16) |
+                         ((uint32_t)full[22] << 8) | (uint32_t)full[23];
+            unsigned bd = full[24], ct = full[25];
+            static const uint8_t chans[7] = { 1, 0, 3, 1, 2, 0, 4 };
+            unsigned ch = ct < sizeof chans ? chans[ct] : 0;
+            if (w && h && ch) {
+                uint64_t raw = (uint64_t)h *
+                               (1 + (((uint64_t)w * ch * bd) + 7) / 8);
+                if (raw > vol_get_dec_mem_limit(v)) {
+                    vol_stamp_class(v, inode_id, INVFS_CLASS_GENERIC_MEMLIMIT,
+                                    INVFS_ALGO_PNGR, tz_codec_gen(INVFS_ALGO_PNGR));
+                    free(full);
+                    return 0;
+                }
+            }
+        }
         uint64_t nino = vol_create_png_file(v, name, full, full_len);
         free(full);
-        if (!nino) return 0;
+        if (!nino) {
+            vol_stamp_class(v, inode_id, INVFS_CLASS_GENERIC_GUARD,
+                            INVFS_ALGO_PNGR, tz_codec_gen(INVFS_ALGO_PNGR));
+            return 0;
+        }
         if (vol_delete_inode(v, inode_id, name) != 0) return -1;
+        vol_stamp_class(v, nino, INVFS_CLASS_CONTAINER,
+                        INVFS_ALGO_PNGR, tz_codec_gen(INVFS_ALGO_PNGR));
         return 5;   /* PNG */
     }
 
@@ -4031,10 +4463,41 @@ int vol_sweep_one(invfs_volume *v, uint64_t inode_id, const char *name)
             free(pmp); free(full);
             if (!nino) return 0;
             if (vol_delete_inode(v, inode_id, name) != 0) return -1;
+            vol_stamp_class(v, nino, INVFS_CLASS_CODEC,
+                            INVFS_ALGO_PMP, tz_codec_gen(INVFS_ALGO_PMP));
             return 8;   /* MP3 */
         }
         free(pmp);
+        /* Refused (MPEG-2/2.5, or a rare expansion). The generic path below
+         * still runs; the GUARD stamp survives it (inner re-reads the record
+         * and its gain-stamp yields to GUARD), so a new packMP3 generation
+         * is what re-arms this file. */
+        vol_stamp_class(v, inode_id, INVFS_CLASS_GENERIC_GUARD,
+                        INVFS_ALGO_PMP, tz_codec_gen(INVFS_ALGO_PMP));
     }
+
+    /* WP10 §4: every magic dispatch above declined -- classify text. Text
+     * DEFERS into the sweep-run accumulator (sealed into shared PPMd batches
+     * by vol_tz_flush at the end of the run); "!" sibling parts stay with
+     * their container in v1 (WP10 §12.7). */
+    if (!strchr(name, '!')) {
+        int fam = invfs_text_family(name, full, full_len);
+        if (fam > 0) {
+            const invfs_codec *pc = invfs_codec_by_algo(INVFS_ALGO_PPMD);
+            if (pc && pc->dec_mem_bytes > vol_get_dec_mem_limit(v)) {
+                /* PPMd's model exceeds the decode-memory policy: store
+                 * generic (below), stamped so a raised limit re-tries the
+                 * text path without waiting for a generation bump. */
+                vol_stamp_class(v, inode_id, INVFS_CLASS_GENERIC_MEMLIMIT,
+                                INVFS_ALGO_PPMD, pc->generation);
+            } else if (tz_defer(v, inode_id, name, full_len,
+                                (uint32_t)fam) == 0) {
+                free(full);
+                return 9;   /* text -> PPMd batch (deferred to flush) */
+            }
+        }
+    }
+
     free(full);
 
     /* generic: recompress RAW -> Shadow(ZSTD-19), JPEG -> JXL */
@@ -4085,6 +4548,8 @@ int vol_sweep_pending(invfs_volume *v)
         }
         n = v->n_pending;   /* re-read (list may shrink) */
     }
+    /* seal the partial text batch the drain accumulated (WP10 §4) */
+    vol_tz_flush(v);
     return done;
 }
 
@@ -4338,6 +4803,19 @@ int vol_read_range(invfs_volume *v, uint64_t inode_id, uint64_t offset,
         if (hi > ast_h.file_size) hi = ast_h.file_size;
         if (lo >= hi) continue;
 
+        /* TEXT member: slice of the shared PPMd batch; heap + pba-keyed ARC,
+         * never the stack tmp[] (batches reach 4 MB, segments only 64 KB) */
+        if (e->zone == INVFS_ZONE_TEXT && e->algo == INVFS_ALGO_PPMD) {
+            want = (size_t)(hi - lo);
+            if (vol_read_text_slice(v, inode_id, e, lo - seg_lo,
+                                    (uint8_t *)buf + (size_t)(lo - offset),
+                                    want) != 0) {
+                free(rec); return -1;
+            }
+            got += want;
+            continue;
+        }
+
         /* decode whole segment */
         {
             uint64_t pba = 0, plen = 0;
@@ -4433,6 +4911,45 @@ int vol_read_range(invfs_volume *v, uint64_t inode_id, uint64_t offset,
     return (int)got;
 }
 
+/* Collect the block_ids of an inode's zone==TEXT AST entries (WP10 §7).
+ * Those segments are shared PPMd batches owned by the internal "\x01tzb"
+ * inode; the retiring inode holds only duplicate L2P mappings to them, so
+ * the blocks must survive the retire. *out is malloc'd (NULL when 0). A
+ * parse failure yields 0/NULL, which just disables the skip -- the same
+ * behaviour the retire path always had for a record it cannot read. */
+static size_t collect_text_lbas(invfs_volume *v, uint64_t inode_id,
+                                uint32_t **out)
+{
+    uint8_t *buf = NULL;
+    uint32_t rl = 0;
+    invfs_ast_recipe_header ah;
+    const invfs_ast_block_entry *ents;
+    uint32_t *ids = NULL;
+    size_t n = 0, i;
+
+    *out = NULL;
+    if (meta_read_record_by_id(v, inode_id, &buf, &rl, NULL, 0, NULL) != 0)
+        return 0;
+    if (rl >= sizeof(invfs_inode_rec) + sizeof(ah)) {
+        memcpy(&ah, buf + sizeof(invfs_inode_rec), sizeof(ah));
+        if (rl >= sizeof(invfs_inode_rec) + sizeof(ah) +
+                  (size_t)ah.num_blocks * sizeof(invfs_ast_block_entry)) {
+            ids = (uint32_t *)malloc(ah.num_blocks
+                                     ? ah.num_blocks * sizeof(uint32_t) : 1);
+            if (ids) {
+                ents = (const invfs_ast_block_entry *)
+                       (buf + sizeof(invfs_inode_rec) + sizeof(ah));
+                for (i = 0; i < ah.num_blocks; i++)
+                    if (ents[i].zone == INVFS_ZONE_TEXT)
+                        ids[n++] = ents[i].block_id;
+            }
+        }
+    }
+    free(buf);
+    *out = ids;
+    return n;
+}
+
 /*
  * Delete a file: free its data blocks, unmap L2P, append tombstone.
  * Returns 0 on success, -1 if not found.
@@ -4483,16 +5000,28 @@ static int vol_retire_inode(invfs_volume *v, uint64_t inode_id,
      * map time), so no header reads here — safe against stale/reallocated
      * blocks. */
     if (free_data) {
+        /* WP10 §7 (anti-PB7): never free blocks a zone==TEXT AST entry
+         * names. The member holds only an L2P dup into the shared batch,
+         * which belongs to the hidden owner inode; freeing here would punch
+         * a hole in every other member. GC reclaims dead batches. The dup
+         * mappings themselves are dropped with the inode below, as usual. */
+        uint32_t *text_lbas = NULL;
+        size_t n_text = collect_text_lbas(v, inode_id, &text_lbas), t;
         for (i = 0; i < v->l2p_count; i++) {
             const invfs_l2p_entry *e = &v->l2p[i];
             if (e->type == INVFS_JRN_MAP && e->inode == inode_id) {
                 uint64_t nblk = e->length;
+                int shared = 0;
+                for (t = 0; t < n_text; t++)
+                    if (text_lbas[t] == e->lba) { shared = 1; break; }
+                if (shared) continue;
                 if (nblk == 0 || e->pba >= v->sb.total_blocks ||
                     nblk > v->sb.total_blocks - e->pba)
                     continue;  /* stale entry — never free out of bounds */
                 vol_free_blocks(v, e->pba, nblk);
             }
         }
+        free(text_lbas);
     }
     /* rewrite L2P in-memory: drop this inode's maps */
     {
@@ -5141,6 +5670,989 @@ int vol_list_xattr(invfs_volume *v, uint64_t inode_id,
     return (int)used;
 }
 
+/* ---- WP10 storage-class flag ("invfs.class" xattr, WP10 §2) ---- */
+
+int vol_get_class(invfs_volume *v, uint64_t inode_id,
+                  uint8_t *cls, uint8_t *algo, uint16_t *gen)
+{
+    invfs_class_tlv tlv;
+    size_t vlen = sizeof(tlv);
+    if (vol_get_xattr(v, inode_id, INVFS_XATTR_CLASS, &tlv, &vlen) != 0 ||
+        vlen != sizeof(tlv))
+        return 1;   /* absent (a malformed value reads as unclassified) */
+    if (cls)  *cls  = tlv.cls;
+    if (algo) *algo = tlv.algo;
+    if (gen)  *gen  = tlv.gen;
+    return 0;
+}
+
+int vol_stamp_class(invfs_volume *v, uint64_t inode_id,
+                    uint8_t cls, uint8_t algo, uint16_t gen)
+{
+    invfs_class_tlv cur, want;
+    size_t vlen = sizeof(cur);
+
+    /* check-then-write: an unchanged stamp would still cost a meta_rewrite
+     * (record append + position-kill tombstone) per file per sweep */
+    if (vol_get_xattr(v, inode_id, INVFS_XATTR_CLASS, &cur, &vlen) == 0 &&
+        vlen == sizeof(cur) &&
+        cur.cls == cls && cur.algo == algo && cur.gen == gen)
+        return 1;   /* unchanged */
+    want.cls  = cls;
+    want.algo = algo;
+    want.gen  = gen;
+    if (vol_set_xattr(v, inode_id, INVFS_XATTR_CLASS,
+                      &want, sizeof(want)) != 0)
+        return -1;
+    return 0;
+}
+
+/* ==================== WP10: Text Zone write path ====================
+ *
+ * Text files are not compressed per file; they are concatenated into shared
+ * ~4 MB batches (sorted by language family, then size -- the doc/06 grouping
+ * win) and each batch is PPMd-compressed once (WP10 §3, ReiserFS-style
+ * packing). Three record shapes cooperate:
+ *
+ *   owner  "\x01tzb"  -- hidden internal inode (0x01-prefixed names are
+ *     filtered from vol_list_dir/readdir). One AST entry per sealed batch:
+ *     {file_offset=cumulative decoded offset, length=usize, zone=TEXT,
+ *      algo=PPMD, block_id=batch_seq}; L2P under the owner id maps
+ *     batch_seq -> batch pba, which is what keeps batch blocks live in fsck.
+ *     The owner id never changes across rewrites (position-kill tombstones),
+ *     so its L2P keys stay valid for the volume's whole life.
+ *   member -- one AST entry per slice:
+ *     {file_offset=in the file, length=slice_len, zone=TEXT, algo=PPMD,
+ *      block_id=batch_seq, block_offset=offset_in_batch}, plus an L2P dup
+ *     (member_new_id, batch_seq) -> batch pba (the offline-dedupe trick).
+ *   batch segment -- standard framing [4B csize][4B crc32c] around payload
+ *     [4B usize LE][2B props][PPMd stream]; allocated in the shadow zone
+ *     with use_reserve=1 like every other sweep output.
+ *
+ * Crash safety: the batch segment and the owner map are journaled BEFORE the
+ * owner record names the batch, and the owner record lands before any member
+ * record references it. A crash between seal and member commits leaves an
+ * orphan batch (vol_tz_gc reclaims it) and the members still RAW (readable).
+ * The inverse order is never written, so no state needs recovery.
+ *
+ * The accumulator is RAM-only by design: deferral changes nothing on disk,
+ * so an interrupted sweep simply re-classifies the files next run. */
+
+#define TZ_OWNER_NAME "\x01tzb"
+#define TZ_BATCH_MAX  (4ull << 20)    /* user-confirmed PPMd optimum (§3) */
+
+/* one slice of one member file, inside one batch */
+typedef struct {
+    uint64_t batch_seq;
+    uint64_t file_off;
+    uint32_t batch_off;
+    uint32_t len;
+} tz_slice;
+
+/* per-candidate build state while a flush runs */
+typedef struct {
+    tz_slice *slices;
+    size_t n_slices, cap_slices;
+    uint64_t file_size;      /* authoritative size when fed (fresh read) */
+    uint64_t new_id;         /* allocated at commit (0 = not yet) */
+    int complete;            /* all bytes of the candidate fed */
+    int fallback;            /* its batch failed -> generic per-file path */
+    int committed;           /* member record rewritten */
+} tz_member;
+
+/* a batch that made it to disk during this flush */
+typedef struct {
+    uint64_t seq, pba;
+    uint32_t phys;
+} tz_sealed;
+
+/* owner inode state, loaded once and rewritten per change */
+typedef struct {
+    invfs_ast_block_entry *ents;
+    uint32_t n, cap;
+    uint8_t *ext;            /* INO2 ext blob, carried verbatim (usually none) */
+    uint32_t ext_len;
+    uint64_t pos;            /* current record position (position-kill target) */
+    uint64_t ctime;
+    uint64_t next_seq;       /* max block_id + 1 -- strictly monotone */
+} tz_owner;
+
+/* ---- accumulator (deferral side) ---- */
+
+static int tz_defer(invfs_volume *v, uint64_t inode_id, const char *name,
+                    uint64_t size, uint32_t family)
+{
+    size_t i, nl = strlen(name);
+    tz_candidate *nt;
+    if (nl == 0 || nl > INVFS_MAX_NAME) return -1;
+    for (i = 0; i < v->tz_n; i++)
+        if (v->tz[i].inode_id == inode_id) return 0;   /* already deferred */
+    if (v->tz_n == v->tz_cap) {
+        size_t nc = v->tz_cap ? v->tz_cap * 2 : 64;
+        nt = (tz_candidate *)realloc(v->tz, nc * sizeof(tz_candidate));
+        if (!nt) return -1;
+        v->tz = nt;
+        v->tz_cap = nc;
+    }
+    nt = &v->tz[v->tz_n++];
+    nt->inode_id = inode_id;
+    nt->size = size;
+    nt->family = family;
+    memcpy(nt->name, name, nl + 1);
+    return 0;
+}
+
+/* ---- owner inode ---- */
+
+/* Load the owner record: entries, ext, position. Absent owner => *o zeroed
+ * and o->pos = 0 (caller creates it). Returns 0 on success. */
+static int tz_owner_load(invfs_volume *v, uint64_t owner, tz_owner *o)
+{
+    uint8_t *buf = NULL;
+    uint32_t rl = 0;
+    invfs_ast_recipe_header ah;
+    const invfs_ast_block_entry *ents;
+    size_t base = sizeof(invfs_inode_rec);
+    size_t elen = 0;
+    uint32_t i;
+
+    memset(o, 0, sizeof *o);
+    if (meta_read_record_by_id(v, owner, &buf, &rl, NULL, 0, &o->pos) != 0 ||
+        !o->pos) {
+        free(buf);
+        return -1;
+    }
+    if (rl < base + sizeof(ah)) { free(buf); return -1; }
+    memcpy(&ah, buf + base, sizeof(ah));
+    if (rl < base + sizeof(ah) +
+             (size_t)ah.num_blocks * sizeof(invfs_ast_block_entry)) {
+        free(buf);
+        return -1;
+    }
+    o->ctime = ((const invfs_inode_rec *)buf)->ctime;
+    if (ah.num_blocks) {
+        o->ents = (invfs_ast_block_entry *)malloc((size_t)ah.num_blocks *
+                                                  sizeof(*o->ents));
+        if (!o->ents) { free(buf); return -1; }
+        ents = (const invfs_ast_block_entry *)(buf + base + sizeof(ah));
+        for (i = 0; i < ah.num_blocks; i++) {
+            o->ents[i] = ents[i];
+            /* seq assignment is strictly monotone even after GC removed
+             * middle entries: max surviving block_id + 1 */
+            if ((uint64_t)ents[i].block_id + 1 > o->next_seq)
+                o->next_seq = (uint64_t)ents[i].block_id + 1;
+        }
+        o->n = ah.num_blocks;
+        o->cap = ah.num_blocks;
+    }
+    {
+        const uint8_t *ext = meta_locate_ext(buf, rl, &elen);
+        if (ext && elen && elen <= 0xFFFF) {
+            o->ext = (uint8_t *)malloc(elen);
+            if (o->ext) { memcpy(o->ext, ext, elen); o->ext_len = (uint32_t)elen; }
+        }
+    }
+    free(buf);
+    return 0;
+}
+
+static void tz_owner_free(tz_owner *o)
+{
+    free(o->ents);
+    free(o->ext);
+    memset(o, 0, sizeof *o);
+}
+
+/* Append [INOD(owner, entries)][DELT(position-kill previous)] as one write.
+ * The owner keeps its inode id so the owner L2P maps stay valid. Entry
+ * file_offsets are rebuilt as the cumulative concatenation of the given
+ * entries (so the owner itself stays readable as the concatenation of its
+ * live batches, and GC repacks the same way). */
+static int tz_owner_write(invfs_volume *v, uint64_t owner, tz_owner *o)
+{
+    size_t rec_len, total, off;
+    uint8_t *combo;
+    invfs_inode_rec *rh, tomb;
+    invfs_ast_recipe_header ah;
+    uint32_t crc_rec, crc_tomb;
+    uint64_t run = 0, new_pos;
+    uint32_t i;
+
+    for (i = 0; i < o->n; i++) {
+        o->ents[i].file_offset = run;
+        run += o->ents[i].length;
+    }
+    if (run > 0xFFFFFFFFu) return -1;   /* ast_h.file_size is u32 */
+
+    rec_len = sizeof(invfs_inode_rec) + sizeof(ah) +
+              (size_t)o->n * sizeof(invfs_ast_block_entry) + o->ext_len;
+    total = rec_len + 4 + (o->pos ? sizeof(tomb) + 4 : 0);
+    combo = (uint8_t *)calloc(1, total);
+    if (!combo) return -1;
+
+    memset(&ah, 0, sizeof ah);
+    ah.version = 1;
+    ah.file_size = (uint32_t)run;
+    ah.num_blocks = (uint16_t)o->n;
+
+    rh = (invfs_inode_rec *)combo;
+    rh->magic = INODE_REC_MAGIC;
+    rh->rec_len = (uint32_t)rec_len;
+    rh->inode_id = owner;
+    rh->file_size = run;
+    rh->ctime = o->ctime;
+    rec_set_name(rh, TZ_OWNER_NAME);
+    memcpy(combo + sizeof(invfs_inode_rec), &ah, sizeof ah);
+    if (o->n)
+        memcpy(combo + sizeof(invfs_inode_rec) + sizeof(ah), o->ents,
+               (size_t)o->n * sizeof(invfs_ast_block_entry));
+    if (o->ext_len)
+        memcpy(combo + rec_len - o->ext_len, o->ext, o->ext_len);
+    crc_rec = invfs_crc32c(combo, rec_len);
+    memcpy(combo + rec_len, &crc_rec, 4);
+
+    off = rec_len + 4;
+    if (o->pos) {
+        memset(&tomb, 0, sizeof tomb);
+        tomb.magic = TOMBSTONE_MAGIC;
+        v->hot.tombstones++;
+        tomb.rec_len = (uint32_t)sizeof(tomb);
+        tomb.inode_id = owner;
+        tomb.file_size = o->pos;        /* v2 position kill */
+        tomb.name_len = (uint32_t)(sizeof(TZ_OWNER_NAME) - 1);
+        memcpy(tomb.name, TZ_OWNER_NAME, sizeof(TZ_OWNER_NAME) - 1);
+        crc_tomb = invfs_crc32c((uint8_t *)&tomb, sizeof tomb);
+        memcpy(combo + off, &tomb, sizeof tomb);
+        memcpy(combo + off + sizeof tomb, &crc_tomb, 4);
+    }
+
+    if (v->inode_area_pos + total > v->inode_area_end) { free(combo); return -1; }
+    if (vol_mark_dirty(v) != 0) { free(combo); return -1; }
+    new_pos = v->inode_area_pos;
+    if (io_seek(&v->io, new_pos) != 0 ||
+        io_write(&v->io, combo, total) != 0) { free(combo); return -1; }
+    v->inode_area_pos = new_pos + total;
+    free(combo);
+    idx_put(v, TZ_OWNER_NAME, sizeof(TZ_OWNER_NAME) - 1, owner, new_pos,
+            run, o->ctime);
+    idx_put_id(v, owner, new_pos);
+    o->pos = new_pos;
+    return 0;
+}
+
+/* Find the batch owner, creating it lazily (empty record) on first use. */
+static uint64_t tz_owner_id(invfs_volume *v)
+{
+    uint64_t id = vol_find(v, TZ_OWNER_NAME);
+    if (id) return id;
+    return vol_create_file(v, TZ_OWNER_NAME, NULL, 0);
+}
+
+/* ---- small policy helpers used by the walk predicate ---- */
+
+/* Cheap head sniff across the registry (UNCOMPRESSIBLE retry gate): one
+ * 8 KB window, registry order (= sniff priority), any positive answer
+ * qualifies. */
+static int tz_sniff_any(invfs_volume *v, uint64_t inode_id, const char *name)
+{
+    uint8_t head[8192];
+    int got = vol_read_range(v, inode_id, 0, sizeof head, head);
+    size_t n = 0, i;
+    const invfs_codec *all;
+    if (got <= 0) return 0;
+    all = invfs_codec_all(&n);
+    for (i = 0; i < n; i++)
+        if (all[i].sniff && all[i].sniff(head, (size_t)got, name) > 0)
+            return 1;
+    return 0;
+}
+
+/* Read the usize of a TEXT member's batch segment without decoding it
+ * (WP10 §6: "store decoded unit sizes to speed this up" -- the [4B usize]
+ * sits right behind the 8-byte framing). 1 = batch exceeds unit_limit. */
+static int tz_member_oversized(invfs_volume *v, uint64_t inode_id,
+                               uint64_t unit_limit)
+{
+    uint8_t *buf = NULL;
+    uint32_t rl = 0;
+    invfs_ast_recipe_header ah;
+    const invfs_ast_block_entry *ents;
+    size_t base = sizeof(invfs_inode_rec);
+    uint16_t i;
+    int over = 0;
+
+    if (meta_read_record_by_id(v, inode_id, &buf, &rl, NULL, 0, NULL) != 0)
+        return 0;   /* unreadable: not GC/policy business here */
+    if (rl < base + sizeof(ah)) { free(buf); return 0; }
+    memcpy(&ah, buf + base, sizeof(ah));
+    if (rl < base + sizeof(ah) +
+             (size_t)ah.num_blocks * sizeof(invfs_ast_block_entry)) {
+        free(buf);
+        return 0;
+    }
+    ents = (const invfs_ast_block_entry *)(buf + base + sizeof(ah));
+    for (i = 0; i < ah.num_blocks && !over; i++) {
+        uint64_t pba = 0, plen = 0;
+        uint8_t hb[12];
+        uint32_t usize;
+        if (ents[i].zone != INVFS_ZONE_TEXT) continue;
+        if (vol_lookup_entry(v, inode_id, ents[i].block_id, &pba, &plen) != 0 ||
+            !pba) continue;
+        if (io_seek(&v->io, pba * INVFS_BLOCK_SIZE) != 0 ||
+            io_read(&v->io, hb, sizeof hb) != 0) continue;
+        memcpy(&usize, hb + 8, 4);
+        if (usize > unit_limit) over = 1;
+    }
+    free(buf);
+    return over;
+}
+
+/* Policy downgrade (WP10 §6, both directions): decode and re-store through
+ * the generic per-segment path, then stamp GENERIC_MEMLIMIT{codec} -- NOT
+ * bare GENERIC, because the limit is the reason, and MEMLIMIT is what makes
+ * the re-sweep after a RAISED limit find the file again (§2 table). The old
+ * record's blocks retire as usual; TEXT members' batch blocks survive via
+ * the retire gate and their L2P dups vanish with the old record (the batch
+ * keeps a hole -- GC/compactor territory). */
+static int vol_class_downgrade(invfs_volume *v, uint64_t inode_id,
+                               const char *name, uint8_t calgo)
+{
+    uint8_t *data = NULL;
+    size_t len = 0;
+    invfs_meta_pub keep;
+    int have_keep;
+    uint64_t nid;
+
+    have_keep = vol_get_meta(v, inode_id, &keep) == 0;
+    if (vol_read_file(v, inode_id, &data, &len) != 0)
+        return -1;
+    nid = vol_replace_file(v, name, data, len);   /* fresh RAW record */
+    free(data);
+    if (!nid) return -1;
+    if (have_keep) vol_apply_meta(v, name, &keep);
+    /* generic_only: a downgraded JPEG must not loop straight back into JXL */
+    if (vol_sweep_file_inner(v, nid, 1) < 0) return -1;
+    /* the inner sweep re-ids the file (append-only store): stamp the LIVE
+     * record, never the intermediate -- stamping the deleted id would
+     * resurrect it and hijack the name */
+    {
+        uint64_t live = vol_find(v, name);
+        vol_stamp_class(v, live ? live : nid, INVFS_CLASS_GENERIC_MEMLIMIT,
+                        calgo, tz_codec_gen(calgo));
+    }
+    return 0;
+}
+
+/* ---- flush: seal batches, commit members ---- */
+
+typedef struct {
+    invfs_volume *v;
+    tz_owner owner;
+    uint64_t owner_id;
+    uint64_t next_seq;
+    /* the batch currently being filled */
+    uint8_t *bbuf;
+    size_t blen, bcap;          /* bcap = batch target */
+    uint64_t open_seq;
+    /* sealed batches of this flush (for member-commit pba lookup) */
+    tz_sealed *sealed;
+    size_t n_sealed, cap_sealed;
+    int sealed_any;
+    int skip_commit;            /* INVFS_TZ_SKIP_COMMIT fault-injection hook */
+} tz_ctx;
+
+static int tz_slice_push(tz_member *m, uint64_t seq, uint64_t file_off,
+                         uint32_t batch_off, uint32_t len)
+{
+    if (m->n_slices == m->cap_slices) {
+        size_t nc = m->cap_slices ? m->cap_slices * 2 : 4;
+        tz_slice *ns = (tz_slice *)realloc(m->slices, nc * sizeof(tz_slice));
+        if (!ns) return -1;
+        m->slices = ns;
+        m->cap_slices = nc;
+    }
+    m->slices[m->n_slices].batch_seq = seq;
+    m->slices[m->n_slices].file_off = file_off;
+    m->slices[m->n_slices].batch_off = batch_off;
+    m->slices[m->n_slices].len = len;
+    m->n_slices++;
+    return 0;
+}
+
+static const tz_sealed *tz_sealed_find(const tz_ctx *c, uint64_t seq)
+{
+    size_t i;
+    for (i = 0; i < c->n_sealed; i++)
+        if (c->sealed[i].seq == seq) return &c->sealed[i];
+    return NULL;
+}
+
+/* Rewrite one member's record under its pre-allocated new id (dup maps are
+ * already written and flushed by tz_commit_ready) with TEXT entries,
+ * carrying the old record's ext (INO2 + xattrs) verbatim, then retire the
+ * old id (its RAW blocks free normally -- the TEXT gate only covers batches)
+ * and stamp TEXT. */
+static int tz_commit_member(tz_ctx *c, tz_member *m, const tz_candidate *cand)
+{
+    invfs_volume *v = c->v;
+    uint8_t *old = NULL;
+    uint32_t orl = 0;
+    uint64_t old_pos = 0;
+    char name[256];
+    const uint8_t *ext;
+    size_t ext_len = 0;
+    uint64_t new_id, fsize, ctime;
+    size_t rec_size, i;
+    uint8_t *rec;
+    invfs_inode_rec *rh;
+    invfs_ast_recipe_header ah;
+    invfs_ast_block_entry *ne;
+    uint32_t crc;
+    int rc = -1;
+
+    if (meta_read_record_by_id(v, cand->inode_id, &old, &orl, name,
+                               sizeof name, &old_pos) != 0)
+        return -1;
+    ext = meta_locate_ext(old, orl, &ext_len);   /* may be NULL (v1 record) */
+    ctime = ((const invfs_inode_rec *)old)->ctime;
+    fsize = m->file_size;
+
+    new_id = m->new_id;
+    rec_size = sizeof(invfs_inode_rec) + sizeof(ah) +
+               m->n_slices * sizeof(invfs_ast_block_entry) + ext_len;
+    rec = (uint8_t *)calloc(1, rec_size);
+    if (!rec) { free(old); return -1; }
+
+    memset(&ah, 0, sizeof ah);
+    ah.version = 1;
+    ah.file_size = (uint32_t)fsize;
+    ah.num_blocks = (uint16_t)m->n_slices;
+
+    rh = (invfs_inode_rec *)rec;
+    rh->magic = INODE_REC_MAGIC;
+    rh->rec_len = (uint32_t)rec_size;
+    rh->inode_id = new_id;
+    rh->file_size = fsize;
+    rh->ctime = ctime;
+    rec_set_name(rh, name);
+    memcpy(rec + sizeof(invfs_inode_rec), &ah, sizeof ah);
+    ne = (invfs_ast_block_entry *)(rec + sizeof(invfs_inode_rec) + sizeof ah);
+    for (i = 0; i < m->n_slices; i++) {
+        const tz_sealed *s = tz_sealed_find(c, m->slices[i].batch_seq);
+        if (!s) goto out;   /* can only be a bug in the flush */
+        memset(&ne[i], 0, sizeof ne[i]);
+        ne[i].file_offset = m->slices[i].file_off;
+        ne[i].length = m->slices[i].len;
+        ne[i].zone = INVFS_ZONE_TEXT;
+        ne[i].algo = INVFS_ALGO_PPMD;
+        ne[i].block_id = (uint32_t)m->slices[i].batch_seq;
+        ne[i].block_offset = m->slices[i].batch_off;
+    }
+    if (ext_len)
+        memcpy(rec + rec_size - ext_len, ext, ext_len);
+    crc = invfs_crc32c(rec, rec_size);
+
+    /* room for the record AND the tombstone the retire appends */
+    if (v->inode_area_pos + rec_size + 4 + sizeof(invfs_inode_rec) + 4 >
+        v->inode_area_end)
+        goto out;
+    if (io_seek(&v->io, v->inode_area_pos) != 0 ||
+        io_write(&v->io, rec, rec_size) != 0 ||
+        io_write(&v->io, &crc, 4) != 0)
+        goto out;
+    idx_put(v, name, strlen(name), new_id, v->inode_area_pos, fsize, ctime);
+    idx_put_id(v, new_id, v->inode_area_pos);
+    v->inode_area_pos += rec_size + 4;
+
+    /* the retire frees the old RAW/generic blocks; the record had no TEXT
+     * entries, so the batch gate does not engage */
+    if (vol_delete_inode(v, cand->inode_id, name) != 0)
+        fprintf(stderr, "tz: %s committed but the old record survived; "
+                        "invf-fsck -f will reclaim it\n", name);
+    vol_stamp_class(v, new_id, INVFS_CLASS_TEXT, INVFS_ALGO_PPMD,
+                    invfs_registry_generation());
+    rc = 0;
+out:
+    free(rec);
+    free(old);
+    return rc;
+}
+
+/* Commit every complete, non-fallback member whose slices all live in
+ * sealed batches. Two phases: allocate new ids + write the L2P dup maps
+ * for ALL ready members, ONE journal flush so the dups are durable, then
+ * the record rewrites (crash ordering, WP10 §4: batch segments and owner
+ * maps are already durable from the seal). */
+static int tz_commit_ready(tz_ctx *c, const tz_candidate *cands,
+                           tz_member *members, size_t n)
+{
+    invfs_volume *v = c->v;
+    size_t i, j;
+    int any = 0, rc = 0;
+
+    if (c->skip_commit) return 0;   /* crash-safety fault injection */
+    for (i = 0; i < n; i++) {
+        tz_member *m = &members[i];
+        if (!m->complete || m->fallback || m->committed || m->new_id ||
+            !m->n_slices)
+            continue;
+        for (j = 0; j < m->n_slices; j++)
+            if (!tz_sealed_find(c, m->slices[j].batch_seq))
+                break;
+        if (j < m->n_slices) continue;   /* still feeding an open batch */
+        m->new_id = v->next_inode_id++;
+        for (j = 0; j < m->n_slices; j++) {
+            const tz_sealed *s = tz_sealed_find(c, m->slices[j].batch_seq);
+            if (vol_map(v, m->new_id, m->slices[j].batch_seq, s->pba,
+                        s->phys) != 0)
+                return -1;
+        }
+        any = 1;
+    }
+    if (any && vol_pre_record(v) != 0)
+        return -1;
+    for (i = 0; i < n; i++) {
+        tz_member *m = &members[i];
+        if (!m->new_id || m->committed) continue;
+        if (tz_commit_member(c, m, &cands[i]) != 0) {
+            fprintf(stderr, "tz: commit failed for %s\n", cands[i].name);
+            rc = -1;   /* the old record is untouched; the member stays RAW */
+        }
+        m->committed = 1;
+    }
+    return rc;
+}
+
+/* cumulative decoded bytes the owner covers (= its readable size) */
+static uint64_t tz_owner_total(const tz_owner *o)
+{
+    uint64_t t = 0;
+    uint32_t i;
+    for (i = 0; i < o->n; i++) t += o->ents[i].length;
+    return t;
+}
+
+/* Seal the open batch: PPMd-encode, MANDATORY decode+memcmp verify (doc/06
+ * invariant), size guard, write the segment in the shadow zone, map it under
+ * the owner, flush the journal, append the owner AST entry. On ANY refusal
+ * (encode/verify/guard/ENOSPC) the batch is dropped unwritten and every
+ * member with a slice in it falls back to the generic per-file path -- the
+ * same "not smaller, keep the original" answer every other path gives.
+ * Returns 0 on seal/fallback, -1 on hard error after the segment landed. */
+static int tz_seal(tz_ctx *c, const tz_candidate *cands,
+                   tz_member *members, size_t n_members)
+{
+    invfs_volume *v = c->v;
+    size_t cap = c->blen + c->blen / 2 + 4096;
+    uint8_t *enc = NULL, *ver = NULL, *seg = NULL;
+    size_t enc_len = 0;
+    uint64_t pba = 0, phys = 0;
+    uint32_t csize = 0, crc;
+    int fail = 0;
+    size_t i, j;
+    int rc = 0;
+
+    if (c->blen == 0) return 0;
+
+    enc = (uint8_t *)malloc(cap);
+    ver = (uint8_t *)malloc(c->blen);
+    if (!enc || !ver) fail = 1;
+    if (!fail && invfs_ppmd_encode(c->bbuf, c->blen, enc, cap, &enc_len) != 0)
+        fail = 1;
+    /* invariant: the batch must round-trip byte-exactly before it is stored */
+    if (!fail &&
+        (invfs_ppmd_decode(enc, enc_len, ver, c->blen) != 0 ||
+         memcmp(ver, c->bbuf, c->blen) != 0)) {
+        fprintf(stderr, "tz: PPMd round-trip mismatch -- batch dropped, "
+                        "members stay generic\n");
+        fail = 1;
+    }
+    /* size guard: the batch must beat storing the slices raw (§4: ppmd<raw,
+     * no ZSTD comparison -- 3 s/4 MB is too expensive) */
+    if (!fail && enc_len + 4 >= c->blen)
+        fail = 1;
+    /* the owner's ast_h.file_size is u32 */
+    if (!fail && tz_owner_total(&c->owner) + c->blen > 0xFFFFFFFFu)
+        fail = 1;
+
+    if (!fail) {
+        /* payload = [4B usize LE][PPMd wire]; standard [csize][crc] framing */
+        uint32_t usize = (uint32_t)c->blen;
+        uint8_t hdr[8];
+        csize = (uint32_t)(4 + enc_len);
+        phys = ((uint64_t)csize + 8 + INVFS_BLOCK_SIZE - 1) / INVFS_BLOCK_SIZE;
+        pba = alloc_blocks(v, v->sb.shadow_zone_start, v->sb.shadow_zone_blocks,
+                           phys, 1);
+        if (!pba) {
+            fail = 1;
+        } else {
+            seg = (uint8_t *)malloc((size_t)phys * INVFS_BLOCK_SIZE);
+            if (!seg) { vol_free_blocks(v, pba, phys); pba = 0; fail = 1; }
+        }
+        if (!fail) {
+            memcpy(seg + 8, &usize, 4);
+            memcpy(seg + 12, enc, enc_len);
+            crc = invfs_crc32c(seg + 8, csize);
+            hdr[0] = (uint8_t)(csize & 0xFF);
+            hdr[1] = (uint8_t)((csize >> 8) & 0xFF);
+            hdr[2] = (uint8_t)((csize >> 16) & 0xFF);
+            hdr[3] = (uint8_t)((csize >> 24) & 0xFF);
+            hdr[4] = (uint8_t)(crc & 0xFF);
+            hdr[5] = (uint8_t)((crc >> 8) & 0xFF);
+            hdr[6] = (uint8_t)((crc >> 16) & 0xFF);
+            hdr[7] = (uint8_t)((crc >> 24) & 0xFF);
+            memcpy(seg, hdr, 8);
+            if (write_segment_blocks(v, pba, seg, (size_t)csize + 8,
+                                     phys) != 0) {
+                vol_free_blocks(v, pba, phys);
+                pba = 0;
+                fail = 1;
+            }
+        }
+        if (!fail && vol_map(v, c->owner_id, c->open_seq, pba,
+                             (uint32_t)phys) != 0) {
+            vol_free_blocks(v, pba, phys);
+            pba = 0;
+            fail = 1;
+        }
+    }
+
+    if (fail) {
+        /* nothing durable references the batch: every member with a slice
+         * in it goes through the generic per-file path. A member that ALSO
+         * has slices in earlier, sealed batches leaves those as holes in
+         * otherwise-live batches -- GC/compactor territory, never a read
+         * hazard (no record ever names them). */
+        for (i = 0; i < n_members; i++) {
+            tz_member *m = &members[i];
+            if (m->committed || m->fallback) continue;
+            for (j = 0; j < m->n_slices; j++)
+                if (m->slices[j].batch_seq == c->open_seq) {
+                    m->fallback = 1;
+                    break;
+                }
+        }
+        c->blen = 0;
+        free(enc); free(ver); free(seg);
+        return 0;
+    }
+
+    /* the owner map must be durable BEFORE the owner record names the pba */
+    if (vol_pre_record(v) != 0) {
+        free(enc); free(ver); free(seg);
+        return -1;
+    }
+    /* owner AST += {cumulative offset, usize, TEXT, PPMD, open_seq, 0} */
+    if (c->owner.n == c->owner.cap) {
+        uint32_t nc = c->owner.cap ? c->owner.cap * 2 : 16;
+        invfs_ast_block_entry *ne =
+            (invfs_ast_block_entry *)realloc(c->owner.ents,
+                                             nc * sizeof(*ne));
+        if (!ne) { free(enc); free(ver); free(seg); return -1; }
+        c->owner.ents = ne;
+        c->owner.cap = nc;
+    }
+    {
+        invfs_ast_block_entry *e = &c->owner.ents[c->owner.n];
+        memset(e, 0, sizeof *e);
+        e->length = c->blen;              /* file_offset rebuilt by write */
+        e->zone = INVFS_ZONE_TEXT;
+        e->algo = INVFS_ALGO_PPMD;
+        e->block_id = (uint32_t)c->open_seq;
+        e->block_offset = 0;
+        c->owner.n++;
+    }
+    if (tz_owner_write(v, c->owner_id, &c->owner) != 0) {
+        free(enc); free(ver); free(seg);
+        return -1;   /* segment + map landed; no record names them: orphan,
+                        fsck/GC territory -- members stay RAW, nothing torn */
+    }
+    /* remember the seal for member-commit pba lookup */
+    if (c->n_sealed == c->cap_sealed) {
+        size_t nc = c->cap_sealed ? c->cap_sealed * 2 : 16;
+        tz_sealed *ns = (tz_sealed *)realloc(c->sealed, nc * sizeof(*ns));
+        if (!ns) { free(enc); free(ver); free(seg); return -1; }
+        c->sealed = ns;
+        c->cap_sealed = nc;
+    }
+    c->sealed[c->n_sealed].seq = c->open_seq;
+    c->sealed[c->n_sealed].pba = pba;
+    c->sealed[c->n_sealed].phys = (uint32_t)phys;
+    c->n_sealed++;
+    c->sealed_any = 1;
+    if (getenv("INVFS_DEBUG"))
+        fprintf(stderr, "[tz] sealed batch %llu: %zu -> %zu bytes (pba %llu)\n",
+                (unsigned long long)c->open_seq, c->blen, enc_len,
+                (unsigned long long)pba);
+    c->open_seq++;
+    c->blen = 0;
+    /* members whose slices ALL live in sealed batches commit now */
+    rc = tz_commit_ready(c, cands, members, n_members);
+    free(enc); free(ver); free(seg);
+    return rc;
+}
+
+/* stable ordering key: (family, size, original index) -- the doc/06 language
+ * grouping; qsort is not stable, so the index breaks residual ties */
+static const tz_candidate *g_sort_cands;
+static int tz_order_cmp(const void *a, const void *b)
+{
+    size_t ia = *(const size_t *)a, ib = *(const size_t *)b;
+    const tz_candidate *x = &g_sort_cands[ia], *y = &g_sort_cands[ib];
+    if (x->family != y->family) return x->family < y->family ? -1 : 1;
+    if (x->size != y->size) return x->size < y->size ? -1 : 1;
+    return ia < ib ? -1 : 1;
+}
+
+int vol_tz_flush(invfs_volume *v)
+{
+    tz_ctx c;
+    size_t n, i;
+    size_t *order = NULL;
+    tz_candidate *sc = NULL;   /* candidates in sorted order */
+    tz_member *members = NULL;
+    int rc = 0;
+
+    if (!v) return -1;
+    if (v->tz_n == 0) return 1;   /* nothing pending */
+    if (!vol_write_enabled(v)) {
+        v->tz_n = 0;              /* read-only volume: nothing can land */
+        return 1;
+    }
+
+    memset(&c, 0, sizeof c);
+    c.v = v;
+    c.skip_commit = getenv("INVFS_TZ_SKIP_COMMIT") != NULL;
+    n = v->tz_n;
+
+    /* batch target: min(4 MB, arc/2) (arc refuses larger units); a disabled
+     * cache (budget 0) does not bound the batch -- reads still decode */
+    c.bcap = (size_t)TZ_BATCH_MAX;
+    if (v->arc_budget && v->arc_budget / 2 < (uint64_t)c.bcap)
+        c.bcap = (size_t)(v->arc_budget / 2);
+    if (c.bcap < 4096) c.bcap = 4096;
+
+    c.bbuf = (uint8_t *)malloc(c.bcap);
+    order = (size_t *)malloc(n * sizeof(size_t));
+    sc = (tz_candidate *)malloc(n * sizeof(tz_candidate));
+    members = (tz_member *)calloc(n, sizeof(tz_member));
+    if (!c.bbuf || !order || !sc || !members) { rc = -1; goto out; }
+
+    /* owner: find-or-create, then load its current AST state */
+    c.owner_id = tz_owner_id(v);
+    if (!c.owner_id || tz_owner_load(v, c.owner_id, &c.owner) != 0) {
+        rc = -1;
+        goto out;
+    }
+    c.open_seq = c.owner.next_seq;
+
+    /* stable sort by (family, size) into the working copy */
+    g_sort_cands = v->tz;
+    for (i = 0; i < n; i++) order[i] = i;
+    qsort(order, n, sizeof(size_t), tz_order_cmp);
+    for (i = 0; i < n; i++) sc[i] = v->tz[order[i]];
+
+    /* feed every candidate into the batch stream, sealing as batches fill */
+    for (i = 0; i < n; i++) {
+        tz_candidate *cand = &sc[i];
+        tz_member *m = &members[i];
+        uint8_t *data = NULL;
+        size_t dlen = 0, off = 0;
+        int z;
+
+        /* re-validate against the LIVE name: the deferral is only a hint,
+         * the content may have moved on (replaced => new id; swept by a
+         * sibling path meanwhile => no longer ours to batch) */
+        if (vol_find(v, cand->name) != cand->inode_id)
+            continue;
+        z = vol_inode_first_zone(v, cand->inode_id);
+        if (z != INVFS_ZONE_RAW) {
+            uint8_t cc = 0, ca = 0;
+            uint16_t cg = 0;
+            /* a deferred retry (MEMLIMIT/UNCOMPRESSIBLE/Guard settled into
+             * generic storage) is fine to batch; anything else was swept
+             * meanwhile and is left alone */
+            if (z < 0 ||
+                vol_get_class(v, cand->inode_id, &cc, &ca, &cg) != 0 ||
+                (cc != INVFS_CLASS_GENERIC_MEMLIMIT &&
+                 cc != INVFS_CLASS_UNCOMPRESSIBLE &&
+                 cc != INVFS_CLASS_GENERIC_GUARD))
+                continue;
+        }
+        if (vol_read_file(v, cand->inode_id, &data, &dlen) != 0 || !dlen) {
+            free(data);
+            continue;
+        }
+        if (invfs_text_family(cand->name, data, dlen) == 0) {
+            /* content changed class since the deferral: plain generic */
+            vol_sweep_file(v, cand->inode_id);
+            free(data);
+            continue;
+        }
+        m->file_size = dlen;
+        while (off < dlen) {
+            size_t take;
+            if (c.blen == c.bcap &&
+                tz_seal(&c, sc, members, n) != 0) { rc = -1; free(data); goto out; }
+            if (m->fallback) break;   /* its batch was dropped mid-file */
+            take = c.bcap - c.blen;
+            if (take > dlen - off) take = dlen - off;
+            if (tz_slice_push(m, c.open_seq, off, (uint32_t)c.blen,
+                              (uint32_t)take) != 0) { rc = -1; free(data); goto out; }
+            memcpy(c.bbuf + c.blen, data + off, take);
+            c.blen += take;
+            off += take;
+        }
+        free(data);
+        m->complete = 1;
+        if (c.blen == c.bcap &&
+            tz_seal(&c, sc, members, n) != 0) { rc = -1; goto out; }
+    }
+    /* drain the partial batch, then commit whatever is left */
+    if (rc == 0 && tz_seal(&c, sc, members, n) != 0) rc = -1;
+    if (rc == 0 && tz_commit_ready(&c, sc, members, n) != 0) rc = -1;
+    /* fallbacks go through the generic per-file path now; never-fed
+     * candidates simply keep their files for the next run */
+    for (i = 0; i < n; i++) {
+        tz_member *m = &members[i];
+        if (m->fallback && !m->committed)
+            vol_sweep_file(v, sc[i].inode_id);
+        free(m->slices);
+    }
+out:
+    free(order);
+    free(sc);
+    free(members);
+    free(c.bbuf);
+    free(c.sealed);
+    tz_owner_free(&c.owner);
+    v->tz_n = 0;   /* the accumulator is drained either way */
+    if (rc != 0) return rc;
+    return c.sealed_any ? 0 : 1;
+}
+
+/* u32 comparator for the GC mark set */
+static int tz_u32_cmp(const void *a, const void *b)
+{
+    uint32_t x = *(const uint32_t *)a, y = *(const uint32_t *)b;
+    return x < y ? -1 : x > y ? 1 : 0;
+}
+
+/* Text-zone GC (WP10 §7): mark-and-sweep over the owner AST. A batch is
+ * live iff at least one LIVE member record has a zone==TEXT entry naming
+ * its batch_seq (marking by block_id rather than pba keeps the mark set
+ * correct even if a member's L2P dup is damaged -- the dup only maps the
+ * name, it does not define liveness). Owner entries outside the mark set
+ * are dead: invalidate the tagged ARC key, free the blocks (the retire-time
+ * TEXT gate does not apply here -- freeing is the whole point), drop the
+ * owner L2P map, and rewrite the owner record without them.
+ * Returns the number of dead batches reclaimed, 0 = nothing, <0 = error. */
+int vol_tz_gc(invfs_volume *v)
+{
+    tz_owner o;
+    uint64_t owner;
+    uint32_t *live = NULL;     /* sorted live batch_seqs */
+    size_t n_live = 0, cap_live = 0;
+    uint64_t pos, end;
+    uint32_t i;
+    size_t w;
+    int freed = 0;
+    int rc = 0;
+
+    if (!v) return -1;
+    owner = vol_find(v, TZ_OWNER_NAME);
+    if (!owner) return 0;
+    if (tz_owner_load(v, owner, &o) != 0) return -1;
+    if (o.n == 0) { tz_owner_free(&o); return 0; }
+    if (!vol_write_enabled(v)) { tz_owner_free(&o); return 0; }
+
+    /* mark: walk live records, collect block_ids of zone==TEXT entries */
+    pos = v->inode_area_start * INVFS_BLOCK_SIZE;
+    end = v->inode_area_pos;
+    while (pos + sizeof(invfs_inode_rec) <= end) {
+        invfs_inode_rec h;
+        invfs_ast_recipe_header ah;
+        invfs_ast_block_entry e;
+        uint64_t apos;
+        uint16_t nb, j;
+        size_t nl;
+        if (io_seek(&v->io, pos) != 0 ||
+            io_read(&v->io, &h, sizeof h) != 0) break;
+        if (h.magic != INODE_REC_MAGIC && h.magic != TOMBSTONE_MAGIC) break;
+        if (h.rec_len < sizeof h || pos + h.rec_len + 4 > end) break;
+        if (h.magic == TOMBSTONE_MAGIC) { pos += h.rec_len + 4; continue; }
+        if (h.inode_id == owner) { pos += h.rec_len + 4; continue; }
+        nl = h.name_len < sizeof(h.name) ? h.name_len : sizeof(h.name) - 1;
+        /* only the LIVE record of a name marks anything (superseded ones
+         * may still carry TEXT entries of an older batching generation) */
+        {
+            char nm[257];
+            memcpy(nm, h.name, nl);
+            nm[nl] = 0;
+            if (vol_find(v, nm) != h.inode_id) { pos += h.rec_len + 4; continue; }
+        }
+        apos = pos + sizeof h;
+        if (io_seek(&v->io, apos) != 0 ||
+            io_read(&v->io, &ah, sizeof ah) != 0) break;
+        nb = ah.num_blocks;
+        for (j = 0; j < nb; j++) {
+            if (io_seek(&v->io, apos + sizeof ah +
+                        (uint64_t)j * sizeof e) != 0 ||
+                io_read(&v->io, &e, sizeof e) != 0) { rc = -1; goto out; }
+            if (e.zone != INVFS_ZONE_TEXT) continue;
+            if (n_live == cap_live) {
+                size_t nc = cap_live ? cap_live * 2 : 64;
+                uint32_t *nl2 = (uint32_t *)realloc(live, nc * sizeof *nl2);
+                if (!nl2) { rc = -1; goto out; }
+                live = nl2;
+                cap_live = nc;
+            }
+            live[n_live++] = e.block_id;
+        }
+        pos += h.rec_len + 4;
+    }
+    /* sort for the membership queries below */
+    if (n_live > 1)
+        qsort(live, n_live, sizeof *live, tz_u32_cmp);
+
+    /* sweep: drop owner entries no live member names */
+    if (vol_mark_dirty(v) != 0) { rc = -1; goto out; }
+    w = 0;
+    for (i = 0; i < o.n; i++) {
+        uint32_t seq = o.ents[i].block_id;
+        int keep = 0;
+        if (live) {
+            size_t lo = 0, hi = n_live;
+            while (lo < hi) {
+                size_t mid = (lo + hi) / 2;
+                if (live[mid] < seq) lo = mid + 1; else hi = mid;
+            }
+            keep = lo < n_live && live[lo] == seq;
+        }
+        if (keep) {
+            o.ents[w++] = o.ents[i];
+            continue;
+        }
+        {
+            uint64_t pba = 0, plen = 0;
+            if (vol_lookup_entry(v, owner, seq, &pba, &plen) == 0 && pba) {
+                arc_invalidate(v->arc, pba | TZ_ARC_TAG);
+                vol_free_blocks(v, pba, plen);
+                freed++;
+            }
+            l2p_remove(v, owner, seq);
+        }
+    }
+    o.n = (uint32_t)w;
+    if (freed > 0 && tz_owner_write(v, owner, &o) != 0) rc = -1;
+out:
+    free(live);
+    tz_owner_free(&o);
+    return rc ? rc : freed;
+}
+
+
+
 /* Replace `name` with `data`, or create it if absent.
  *
  * The write commit path used to delete by name and then create, which loses
@@ -5581,6 +7093,136 @@ static void alloc_state_reset(invfs_volume *v)
  * JXL helpers: transcode JPEG -> JXL (lossless) and back via subprocesses.
  * Returns 0 on success. Out buffers are malloc'd.
  */
+#ifndef _WIN32
+/* ---- WP11: POSIX twin of the Windows tool plumbing (CreateProcessW) ----
+ *
+ * One exec layer serves every external codec (cjxl/djxl, MAC, packMP3,
+ * ffmpeg): fixed argv arrays (no shell), a fresh mkdtemp scratch dir per
+ * transcode (a leftover output from an earlier run can never be misread as
+ * this run's), and a hard timeout so a wedged helper cannot hang a sweep.
+ * Scratch lives in /dev/shm (tmpfs) first -- the intermediate WAV/JPEG can
+ * be tens of MB and should not wear the flash the volume itself lives on --
+ * with /tmp as fallback. */
+
+/* read a whole file into a fresh buffer; returns 0 on success */
+static int slurp_file(const char *path, uint8_t **out, size_t *out_len);
+
+/* Tool search order: $INVFS_TOOLS/<name> -> /usr/lib/invfs/tools/<name> ->
+ * the bare name (execvp's PATH search). No other absolute paths. */
+static const char *tool_resolve(const char *name, char *buf, size_t cap)
+{
+    const char *dir = getenv("INVFS_TOOLS");
+    int n;
+
+    if (dir && *dir) {
+        n = snprintf(buf, cap, "%s/%s", dir, name);
+        if (n > 0 && (size_t)n < cap && access(buf, X_OK) == 0)
+            return buf;
+    }
+    n = snprintf(buf, cap, "/usr/lib/invfs/tools/%s", name);
+    if (n > 0 && (size_t)n < cap && access(buf, X_OK) == 0)
+        return buf;
+    return name;
+}
+
+static uint64_t tool_now_ms(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000 + (uint64_t)ts.tv_nsec / 1000000;
+}
+
+#define TOOL_TIMEOUT_MS (120ull * 1000ull)
+
+/* fork/execvp, wait with a timeout. The child is muted (stdin/out/err to
+ * /dev/null), matching the CREATE_NO_WINDOW processes on the Windows side.
+ * Returns the child's exit code, or -1 on fork failure, a kill, or expiry. */
+static int tool_exec(char *const argv[])
+{
+    pid_t pid;
+    int st = 0;
+    uint64_t t0;
+
+    if (!argv || !argv[0]) return -1;
+    pid = fork();
+    if (pid < 0) return -1;
+    if (pid == 0) {
+        int dn = open("/dev/null", O_RDWR);
+        if (dn >= 0) {
+            dup2(dn, STDIN_FILENO);
+            dup2(dn, STDOUT_FILENO);
+            dup2(dn, STDERR_FILENO);
+        }
+        execvp(argv[0], argv);
+        _exit(127);
+    }
+    t0 = tool_now_ms();
+    for (;;) {
+        pid_t r = waitpid(pid, &st, WNOHANG);
+        if (r == pid) break;
+        if (r < 0) {
+            if (errno == EINTR) continue;
+            return -1;
+        }
+        if (tool_now_ms() - t0 > TOOL_TIMEOUT_MS) {
+            kill(pid, SIGKILL);
+            while (waitpid(pid, &st, 0) < 0 && errno == EINTR)
+                ;
+            fprintf(stderr, "tool_exec: %s killed after %llus\n", argv[0],
+                    (unsigned long long)(TOOL_TIMEOUT_MS / 1000));
+            return -1;
+        }
+        usleep(5000);
+    }
+    if (!WIFEXITED(st)) return -1;
+    return WEXITSTATUS(st);
+}
+
+static int tool_tmpdir(char *dir, size_t cap)
+{
+    static const char *roots[] = { "/dev/shm", "/tmp" };
+    size_t r;
+
+    for (r = 0; r < sizeof roots / sizeof roots[0]; r++) {
+        int n = snprintf(dir, cap, "%s/invfs-tool-XXXXXX", roots[r]);
+        if (n > 0 && (size_t)n < cap && mkdtemp(dir) != NULL)
+            return 0;
+    }
+    return -1;
+}
+
+static void tool_rm(const char *dir, const char *name)
+{
+    char p[320];
+    int n = snprintf(p, sizeof p, "%s/%s", dir, name);
+    if (n > 0 && (size_t)n < sizeof p) unlink(p);
+}
+
+/* write a whole buffer, creating/truncating; 0 on success */
+static int tool_write(const char *path, const uint8_t *data, size_t len)
+{
+    FILE *f = fopen(path, "wb");
+    if (!f) return -1;
+    if (len && fwrite(data, 1, len, f) != len) { fclose(f); return -1; }
+    return fclose(f);
+}
+
+/* slurp a tool's output file; 0 only if it exists and is non-empty (an
+ * empty output is how several of these tools say "refused") */
+static int tool_slurp_out(const char *path, uint8_t **out, size_t *out_len)
+{
+    *out = NULL;
+    *out_len = 0;
+    if (slurp_file(path, out, out_len) != 0 || *out_len == 0) {
+        free(*out);
+        *out = NULL;
+        *out_len = 0;
+        return -1;
+    }
+    return 0;
+}
+#endif /* !_WIN32 */
+
 static int run_tool(const char *exe, const char *a1, const char *a2, const char *opts)
 {
 #ifdef _WIN32
@@ -5609,8 +7251,22 @@ static int run_tool(const char *exe, const char *a1, const char *a2, const char 
     CloseHandle(pi.hProcess);
     return (int)code;
 #else
-    (void)exe; (void)a1; (void)a2; (void)opts;
-    return -1;
+    /* "<tool> <in> <out> <opts...>" — opts is a compile-time literal at
+     * every call site ("--lossless_jpeg=1", "-d 0 -e 7", ...), split on
+     * whitespace into a fixed argv; no shell, no quoting. */
+    char exeb[512], obuf[256];
+    char *argv[16], *save = NULL, *tok;
+    int ac = 0;
+
+    argv[ac++] = (char *)tool_resolve(exe, exeb, sizeof exeb);
+    argv[ac++] = (char *)a1;
+    argv[ac++] = (char *)a2;
+    snprintf(obuf, sizeof obuf, "%s", opts ? opts : "");
+    for (tok = strtok_r(obuf, " \t", &save); tok && ac < 15;
+         tok = strtok_r(NULL, " \t", &save))
+        argv[ac++] = tok;
+    argv[ac] = NULL;
+    return tool_exec(argv);
 #endif
 }
 
@@ -5646,8 +7302,28 @@ static int run_ffmpeg(const char *a1, const char *a2, const char *opts)
         fprintf(stderr, "run_ffmpeg: exit code %lu: %ls\n", (unsigned long)code, wcmd);
     return (int)code;
 #else
-    (void)a1; (void)a2; (void)opts;
-    return -1;
+    /* ffmpeg -loglevel error -i <a1> <opts...> <a2> — options MUST come
+     * before the output file: ffmpeg 8.x ignores -c:a/-sample_fmt placed
+     * after the output (silently emits 16-bit) */
+    char exeb[512], obuf[256];
+    char *argv[20], *save = NULL, *tok;
+    int ac = 0, rc;
+
+    argv[ac++] = (char *)tool_resolve("ffmpeg", exeb, sizeof exeb);
+    argv[ac++] = (char *)"-loglevel";
+    argv[ac++] = (char *)"error";
+    argv[ac++] = (char *)"-i";
+    argv[ac++] = (char *)a1;
+    snprintf(obuf, sizeof obuf, "%s", opts ? opts : "");
+    for (tok = strtok_r(obuf, " \t", &save); tok && ac < 18;
+         tok = strtok_r(NULL, " \t", &save))
+        argv[ac++] = tok;
+    argv[ac++] = (char *)a2;
+    argv[ac] = NULL;
+    rc = tool_exec(argv);
+    if (rc != 0)
+        fprintf(stderr, "run_ffmpeg: exit code %d\n", rc);
+    return rc;
 #endif
 }
 
@@ -5689,8 +7365,23 @@ int invfs_jxl_compress(const uint8_t *jpeg, size_t jpeg_len,
     remove(jpg_tmp); remove(jxl_tmp);
     return 0;
 #else
-    (void)jpeg; (void)jpeg_len; (void)jxl_out; (void)jxl_len;
-    return -1;  /* Linux: JXL via tools not wired yet */
+    char dir[64], in[128], out[128];
+    int rc;
+
+    if (tool_tmpdir(dir, sizeof dir) != 0) return -1;
+    snprintf(in, sizeof in, "%s/in.jpg", dir);
+    snprintf(out, sizeof out, "%s/out.jxl", dir);
+    if (tool_write(in, jpeg, jpeg_len) != 0) { rmdir(dir); return -1; }
+
+    /* lossless JPEG transcode: JXL stores the original JPEG bitstream
+     * (boxes), djxl reconstructs the exact same JPEG bytes (1:1 invariant) */
+    rc = run_tool("cjxl", in, out, "--lossless_jpeg=1");
+    if (rc != 0 || tool_slurp_out(out, jxl_out, jxl_len) != 0) {
+        tool_rm(dir, "in.jpg"); tool_rm(dir, "out.jxl"); rmdir(dir);
+        return -1;
+    }
+    tool_rm(dir, "in.jpg"); tool_rm(dir, "out.jxl"); rmdir(dir);
+    return 0;
 #endif
 }
 
@@ -5730,8 +7421,23 @@ int invfs_jxl_decompress(const uint8_t *jxl, size_t jxl_len,
     remove(jxl_tmp); remove(jpg_tmp);
     return 0;
 #else
-    (void)jxl; (void)jxl_len; (void)jpg_out; (void)jpg_len;
-    return -1;
+    /* djxl picks the output format by extension: a JXL holding a JPEG
+     * reconstruction written to "*.jpg" reproduces the original bytes */
+    char dir[64], in[128], out[128];
+    int rc;
+
+    if (tool_tmpdir(dir, sizeof dir) != 0) return -1;
+    snprintf(in, sizeof in, "%s/in.jxl", dir);
+    snprintf(out, sizeof out, "%s/out.jpg", dir);
+    if (tool_write(in, jxl, jxl_len) != 0) { rmdir(dir); return -1; }
+
+    rc = run_tool("djxl", in, out, "");
+    if (rc != 0 || tool_slurp_out(out, jpg_out, jpg_len) != 0) {
+        tool_rm(dir, "in.jxl"); tool_rm(dir, "out.jpg"); rmdir(dir);
+        return -1;
+    }
+    tool_rm(dir, "in.jxl"); tool_rm(dir, "out.jpg"); rmdir(dir);
+    return 0;
 #endif
 }
 
@@ -5782,8 +7488,15 @@ static int run_packmp3(const char *path)
     CloseHandle(pi.hProcess);
     return (int)code;
 #else
-    (void)path;
-    return -1;
+    char exeb[512];
+    char *argv[5];
+
+    argv[0] = (char *)tool_resolve("packMP3", exeb, sizeof exeb);
+    argv[1] = (char *)"-np";   /* never block on "press any key" */
+    argv[2] = (char *)"-o";    /* overwrite, else foo_.pmp is invented */
+    argv[3] = (char *)path;
+    argv[4] = NULL;
+    return tool_exec(argv);
 #endif
 }
 
@@ -5832,8 +7545,20 @@ int invfs_pmp_compress(const uint8_t *mp3, size_t mp3_len,
     remove(mp3_tmp); remove(pmp_tmp);
     return rc;
 #else
-    (void)mp3; (void)mp3_len; (void)pmp_out; (void)pmp_len;
-    return -1;
+    /* packMP3 derives the output name from the input (in.mp3 -> in.pmp);
+     * the scratch dir is fresh per call, so a stale blob cannot be misread */
+    char dir[64], in[128], out[128];
+    int rc;
+
+    if (tool_tmpdir(dir, sizeof dir) != 0) return -1;
+    snprintf(in, sizeof in, "%s/in.mp3", dir);
+    snprintf(out, sizeof out, "%s/in.pmp", dir);
+    if (tool_write(in, mp3, mp3_len) != 0) { rmdir(dir); return -1; }
+
+    run_packmp3(in);   /* exit 0 even on refusal: only the blob proves it */
+    rc = tool_slurp_out(out, pmp_out, pmp_len);
+    tool_rm(dir, "in.mp3"); tool_rm(dir, "in.pmp"); rmdir(dir);
+    return rc;
 #endif
 }
 
@@ -5864,8 +7589,18 @@ int invfs_pmp_decompress(const uint8_t *pmp, size_t pmp_len,
     remove(pmp_tmp); remove(mp3_tmp);
     return rc;
 #else
-    (void)pmp; (void)pmp_len; (void)mp3_out; (void)mp3_len;
-    return -1;
+    char dir[64], in[128], out[128];
+    int rc;
+
+    if (tool_tmpdir(dir, sizeof dir) != 0) return -1;
+    snprintf(in, sizeof in, "%s/in.pmp", dir);
+    snprintf(out, sizeof out, "%s/in.mp3", dir);
+    if (tool_write(in, pmp, pmp_len) != 0) { rmdir(dir); return -1; }
+
+    run_packmp3(in);
+    rc = tool_slurp_out(out, mp3_out, mp3_len);
+    tool_rm(dir, "in.pmp"); tool_rm(dir, "in.mp3"); rmdir(dir);
+    return rc;
 #endif
 }
 
@@ -5930,8 +7665,31 @@ int invfs_ape_compress(const uint8_t *flac, size_t flac_len,
     remove(flac_tmp); remove(wav_tmp); remove(ape_tmp);
     return 0;
 #else
-    (void)flac; (void)flac_len; (void)ape_out; (void)ape_len;
-    return -1;
+    /* FLAC -> WAV (ffmpeg, explicit codec matching the source bit depth),
+     * WAV -> APE (mac -c4000) */
+    char dir[64], fin[128], wmid[128], aout[128], fopts[64];
+    int bps = flac_bits_per_sample(flac, flac_len);
+
+    if (tool_tmpdir(dir, sizeof dir) != 0) return -1;
+    snprintf(fin, sizeof fin, "%s/in.flac", dir);
+    snprintf(wmid, sizeof wmid, "%s/mid.wav", dir);
+    snprintf(aout, sizeof aout, "%s/out.ape", dir);
+    if (tool_write(fin, flac, flac_len) != 0) { rmdir(dir); return -1; }
+
+    if (bps >= 25)      snprintf(fopts, sizeof fopts, "-y -c:a pcm_s32le");
+    else if (bps >= 17) snprintf(fopts, sizeof fopts, "-y -c:a pcm_s24le");
+    else if (bps >= 9)  snprintf(fopts, sizeof fopts, "-y -c:a pcm_s16le");
+    else                snprintf(fopts, sizeof fopts, "-y -c:a pcm_u8");
+    if (run_ffmpeg(fin, wmid, fopts) != 0 ||
+        run_tool("mac", wmid, aout, "-c4000") != 0 ||
+        tool_slurp_out(aout, ape_out, ape_len) != 0) {
+        tool_rm(dir, "in.flac"); tool_rm(dir, "mid.wav");
+        tool_rm(dir, "out.ape"); rmdir(dir);
+        return -1;
+    }
+    tool_rm(dir, "in.flac"); tool_rm(dir, "mid.wav");
+    tool_rm(dir, "out.ape"); rmdir(dir);
+    return 0;
 #endif
 }
 
@@ -5975,8 +7733,25 @@ int invfs_ape_decompress(const uint8_t *ape, size_t ape_len,
     remove(ape_tmp); remove(wav_tmp); remove(flac_tmp);
     return 0;
 #else
-    (void)ape; (void)ape_len; (void)flac_out; (void)flac_len;
-    return -1;
+    /* APE -> WAV (mac -d), WAV -> FLAC (ffmpeg) */
+    char dir[64], ain[128], wmid[128], fout[128];
+
+    if (tool_tmpdir(dir, sizeof dir) != 0) return -1;
+    snprintf(ain, sizeof ain, "%s/in.ape", dir);
+    snprintf(wmid, sizeof wmid, "%s/mid.wav", dir);
+    snprintf(fout, sizeof fout, "%s/out.flac", dir);
+    if (tool_write(ain, ape, ape_len) != 0) { rmdir(dir); return -1; }
+
+    if (run_tool("mac", ain, wmid, "-d") != 0 ||
+        run_ffmpeg(wmid, fout, "-y") != 0 ||
+        tool_slurp_out(fout, flac_out, flac_len) != 0) {
+        tool_rm(dir, "in.ape"); tool_rm(dir, "mid.wav");
+        tool_rm(dir, "out.flac"); rmdir(dir);
+        return -1;
+    }
+    tool_rm(dir, "in.ape"); tool_rm(dir, "mid.wav");
+    tool_rm(dir, "out.flac"); rmdir(dir);
+    return 0;
 #endif
 }
 
@@ -6020,8 +7795,21 @@ int invfs_ape_to_wav(const uint8_t *ape, size_t ape_len,
     remove(ape_tmp); remove(wav_tmp);
     return 0;
 #else
-    (void)ape; (void)ape_len; (void)wav_out; (void)wav_len;
-    return -1;
+    /* APE -> WAV (mac -d only; the WAV feeds flacx_rebuild) */
+    char dir[64], ain[128], wout[128];
+
+    if (tool_tmpdir(dir, sizeof dir) != 0) return -1;
+    snprintf(ain, sizeof ain, "%s/in.ape", dir);
+    snprintf(wout, sizeof wout, "%s/out.wav", dir);
+    if (tool_write(ain, ape, ape_len) != 0) { rmdir(dir); return -1; }
+
+    if (run_tool("mac", ain, wout, "-d") != 0 ||
+        tool_slurp_out(wout, wav_out, wav_len) != 0) {
+        tool_rm(dir, "in.ape"); tool_rm(dir, "out.wav"); rmdir(dir);
+        return -1;
+    }
+    tool_rm(dir, "in.ape"); tool_rm(dir, "out.wav"); rmdir(dir);
+    return 0;
 #endif
 }
 
@@ -6991,6 +8779,16 @@ int vol_compute_stats(invfs_volume *v, invfs_volume_stats *out)
         if (calc != stored) { out->bad_records++; pos += (uint64_t)h.rec_len + 4; continue; }
         pos += (uint64_t)h.rec_len + 4;
         if (h.magic == TOMBSTONE_MAGIC) { out->tombstones++; continue; }
+        /* count each file once, at its live version: the name resolves to
+         * the current id and the id index points at the newest record.
+         * Older same-id versions (meta rewrites, class stamps, batch-owner
+         * growth) and replaced/deleted records would otherwise inflate every
+         * counter below. */
+        {
+            uint64_t ip = idx_get_id(v, h.inode_id);
+            if (vol_find(v, h.name) != h.inode_id || (ip && ip != pos - ((uint64_t)h.rec_len + 4)))
+                continue;
+        }
         {
             invfs_meta_pub m;
             int type = (vol_get_meta(v, h.inode_id, &m) == 0) ? m.type : -1;
@@ -7013,11 +8811,24 @@ int vol_compute_stats(invfs_volume *v, invfs_volume_stats *out)
                         int i;
                         for (i = 0; i < nb && remain > 0; i++) {
                             uint8_t *e = rb + base + 16 + (size_t)i * 24;
-                            uint32_t zf = e[16];          /* zone:2 LSB */
-                            uint64_t seg = remain > 65536 ? 65536 : remain;
+                            uint32_t zone = e[16] & 3;   /* zone:2 LSB */
+                            uint64_t seg;
+                            /* TEXT entries are arbitrary-length slices of a
+                             * shared batch (not 64 KB segments): use the
+                             * entry's own length */
+                            if (zone == INVFS_ZONE_TEXT) {
+                                memcpy(&seg, e + 8, 8);
+                                if (seg > remain) seg = remain;
+                            } else {
+                                seg = remain > 65536 ? 65536 : remain;
+                            }
                             remain -= seg;
-                            if (zf & 1) out->logic_shadow_bytes += seg;
-                            else        out->logic_raw_bytes    += seg;
+                            if (zone == INVFS_ZONE_TEXT)
+                                out->logic_text_bytes += seg;
+                            else if (zone == INVFS_ZONE_BINARY)
+                                out->logic_shadow_bytes += seg;
+                            else
+                                out->logic_raw_bytes += seg;
                         }
                     }
                 }

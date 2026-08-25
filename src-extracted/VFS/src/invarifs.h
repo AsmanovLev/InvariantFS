@@ -44,6 +44,34 @@
 #define INVFS_ALGO_PNGR 10  /* PNG: JXL-lossless blob + "name!jxl" + IVPN recipe */
 #define INVFS_ALGO_PMP  11  /* MP3: packMP3 blob (MPEG-1 Layer III only, bit-exact) */
 
+/* Storage-class flag (WP10): persisted as internal xattr "invfs.class" in the
+ * INO2 ext block, value = invfs_class_tlv. Records WHY a file is stored the
+ * way it is so sweep can skip/retry without re-deriving from content.
+ * See impl_docs/WP10-textzone-codec-registry.md §2. */
+#define INVFS_XATTR_CLASS "invfs.class"
+
+enum {
+    INVFS_CLASS_UNCOMPRESSIBLE   = 1, /* gain < threshold; retry only if a NEWER
+                                       * codec generation sniffs positive */
+    INVFS_CLASS_CODEC            = 2, /* codec-specific (PMP/JXL/APE/WV) */
+    INVFS_CLASS_CONTAINER        = 3, /* container decomposition (TARR/GZR/...) */
+    INVFS_CLASS_GENERIC          = 4, /* generic per-segment ZSTD */
+    INVFS_CLASS_GENERIC_MEMLIMIT = 5, /* codec rejected by dec_mem policy; retry
+                                       * when the limit admits it */
+    INVFS_CLASS_GENERIC_GUARD    = 6, /* codec guard refused; first retry
+                                       * candidate when codec generation bumps */
+    INVFS_CLASS_TEXT             = 7  /* PPMd batch member */
+};
+
+#pragma pack(push, 1)
+typedef struct {
+    uint8_t  cls;    /* INVFS_CLASS_* */
+    uint8_t  algo;   /* rejecting/winning codec (INVFS_ALGO_*); 0 if n/a */
+    uint16_t gen;    /* rejecting codec's generation; registry generation
+                      * snapshot for UNCOMPRESSIBLE */
+} invfs_class_tlv;   /* 4 bytes */
+#pragma pack(pop)
+
 /* L2P journal entry types */
 #define INVFS_JRN_MAP       0x01
 #define INVFS_JRN_UNMAP     0x02

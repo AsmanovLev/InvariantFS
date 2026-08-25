@@ -510,6 +510,8 @@ static int invf_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
     filler(buf, ".", NULL, 0, 0);
     filler(buf, "..", NULL, 0, 0);
     for (i = 0; i < n; i++) {
+        /* internal names (WP10 batch owner "\x01tzb") stay hidden */
+        if ((unsigned char)ents[i].name[0] == 0x01) continue;
         /* no cached stat: let the kernel re-stat each entry through
          * getattr, which knows about v2 types (dirs, symlinks, devices) */
         filler(buf, ents[i].name, NULL, 0, 0);
@@ -808,6 +810,7 @@ static void *fuse_sweep_thread(void *arg)
         if (vol_pending_count(g_vol) > 0) {
             int n = vol_sweep_pending(g_vol);
             if (n > 0) {
+                vol_tz_flush(g_vol);   /* seal the partial text batch */
                 vol_flush(g_vol);
                 /* no table invalidation: sweeping rewrites block layout
                  * only -- name/inode_id/file_size are invariant, and the
@@ -1433,6 +1436,31 @@ static const struct fuse_operations invf_ops = {
     .destroy = invf_destroy,
 };
 
+/* "<n>[K|M|G]" mount-option sizes, same grammar as the INVFS_ARC_BYTES
+ * parser in volume.c. 1 + *out on success, 0 on garbage. */
+static int parse_size_opt(const char *s, uint64_t *out)
+{
+    char *endp = NULL;
+    unsigned long long want = strtoull(s, &endp, 10);
+    unsigned long long mult = 1;
+    int ok = (endp != s);
+    if (ok) {
+        while (*endp == ' ' || *endp == '\t') endp++;
+        switch (*endp) {
+            case 'k': case 'K': mult = 1024ull; endp++; break;
+            case 'm': case 'M': mult = 1024ull * 1024; endp++; break;
+            case 'g': case 'G': mult = 1024ull * 1024 * 1024; endp++; break;
+            default: break;
+        }
+        if (*endp == 'b' || *endp == 'B') endp++;
+        while (*endp == ' ' || *endp == '\t') endp++;
+        if (*endp != '\0') ok = 0;
+        if (want > (unsigned long long)SIZE_MAX / mult) ok = 0;
+    }
+    if (ok) *out = (uint64_t)(want * mult);
+    return ok;
+}
+
 int main(int argc, char *argv[])
 {
     /* usage: invf-fuse [-f] [-o opt[,opt...]] <image> <mountpoint> */
@@ -1461,11 +1489,45 @@ int main(int argc, char *argv[])
         return 2;
     }
 
+    /* WP10: pull our keys out of the -o list before libfuse sees it --
+     * unknown options make fuse_new reject the mount. */
+    uint64_t arc_limit = 0, dec_mem_limit = 0;
+    int have_arc = 0, have_dec = 0;
+    if (opts) {
+        static char fbuf[1024];
+        char tmp[1024];
+        char *save = NULL, *tok;
+        size_t fl = 0;
+        snprintf(tmp, sizeof tmp, "%s", opts);
+        for (tok = strtok_r(tmp, ",", &save); tok;
+             tok = strtok_r(NULL, ",", &save)) {
+            if (strncmp(tok, "arc_limit=", 10) == 0) {
+                if (parse_size_opt(tok + 10, &arc_limit)) have_arc = 1;
+                else fprintf(stderr, "invf: bad -o arc_limit=%s; ignored\n",
+                             tok + 10);
+            } else if (strncmp(tok, "dec_mem_limit=", 14) == 0) {
+                if (parse_size_opt(tok + 14, &dec_mem_limit)) have_dec = 1;
+                else fprintf(stderr, "invf: bad -o dec_mem_limit=%s; ignored\n",
+                             tok + 14);
+            } else {
+                size_t tl = strlen(tok);
+                if (fl + tl + 2 < sizeof fbuf) {
+                    if (fl) fbuf[fl++] = ',';
+                    memcpy(fbuf + fl, tok, tl + 1);
+                    fl += tl;
+                }
+            }
+        }
+        opts = fl ? fbuf : NULL;
+    }
+
     g_vol = vol_open(img, &err);
     if (!g_vol) {
         fprintf(stderr, "cannot open volume %s (err %d)\n", img, err);
         return 1;
     }
+    if (have_arc) vol_set_arc_budget(g_vol, arc_limit);
+    if (have_dec) vol_set_dec_mem_limit(g_vol, dec_mem_limit);
     snprintf(g_img_path, sizeof g_img_path, "%s", img);
     setvbuf(stderr, NULL, _IONBF, 0);
     build_file_table();

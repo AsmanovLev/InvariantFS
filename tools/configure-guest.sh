@@ -151,3 +151,12 @@ done
 # installkernel: dracut backend (initramfs generation for kernel-bin)
 mkdir -p "$M/etc/portage/package.use"
 echo "sys-kernel/installkernel dracut" > "$M/etc/portage/package.use/kernel"
+
+# manual sweep trigger helper (USR1 -> running daemon; progress on console)
+cat > "$MNT/usr/local/bin/invf-sweep" << "EOS"
+#!/bin/sh
+PID=$(pidof invf-fuse)
+[ -n "$PID" ] || { echo "invf-fuse not running"; exit 1; }
+kill -USR1 "$PID" && echo "sweep triggered on pid $PID; watch console"
+EOS
+chmod 755 "$MNT/usr/local/bin/invf-sweep"
