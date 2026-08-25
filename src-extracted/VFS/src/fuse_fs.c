@@ -14,6 +14,7 @@
 #include <string.h>
 #include <errno.h>
 #include <pthread.h>
+#include <signal.h>
 #include <stddef.h>
 #include <unistd.h>
 #include <fcntl.h>
@@ -29,6 +30,10 @@ static pthread_mutex_t g_io_lock = PTHREAD_MUTEX_INITIALIZER;
 static volatile int g_open_handles = 0;
 /* set at unmount: stops the background sweep thread before vol_close */
 static volatile int g_shutdown = 0;
+static volatile sig_atomic_t g_sweep_now = 0;
+static char g_img_path[512] = "?";
+static volatile int g_sweep_busy = 0;
+static void invf_sweep_worker(void);   /* defined below sweep thread */
 static void table_rebuild_locked(void);   /* fwd (defined below) */
 
 /* Mutations only mark the name table stale; the next consumer pays for one
@@ -728,15 +733,73 @@ static int invf_write(const char *path, const char *buf, size_t size, off_t offs
  * wrong default (constant HDD wakeups, surprise CPU, churn during
  * emerge). Default OFF: sweeping happens explicitly (invf-sweep CLI)
  * or when this env var is set. */
+static void on_sweep_signal(int sig)
+{
+    (void)sig;
+    g_sweep_now = 1;
+}
+
+/* Manual full pass: collect every data file and sweep it with per-file
+ * locking (system stays responsive). Progress to stderr (= console in
+ * the guest init context). Trigger: kill -USR1 $(pidof invf-fuse) or
+ * /usr/local/bin/invf-sweep. INVFS_SWEEP_INTERVAL=<sec> additionally
+ * enables the periodic mode. */
+static void invf_sweep_worker(void)
+{
+    uint64_t *ids = NULL;
+    size_t max = 300000, n, i;
+    long saved = 0, swept = 0, skipped = 0, failed = 0;
+
+    ids = malloc(max * sizeof(*ids));
+    if (!ids) return;
+    pthread_mutex_lock(&g_io_lock);
+    if (!g_vol) { pthread_mutex_unlock(&g_io_lock); free(ids); return; }
+    n = vol_collect_sweepables(g_vol, ids, max);
+    fprintf(stderr, "[sweep] manual pass started: %zu files\n", n);
+    for (i = 0; i < n; i++) {
+        int rc;
+        if (g_shutdown || !g_vol) break;
+        rc = vol_sweep_file(g_vol, ids[i]);
+        if (rc == 0)      { swept++;   }
+        else if (rc == 1) { skipped++; }
+        else              { failed++; }
+        if ((i+1) % 250 == 0)
+            fprintf(stderr, "[sweep] %zu/%zu done=%ld skip=%ld fail=%ld\n",
+                    i+1, n, swept, skipped, failed);
+        pthread_mutex_unlock(&g_io_lock);
+        usleep(500);                       /* let the system breathe */
+        pthread_mutex_lock(&g_io_lock);
+    }
+    if (g_vol) vol_flush(g_vol);
+    pthread_mutex_unlock(&g_io_lock);
+    fprintf(stderr, "[sweep] DONE files=%zu swept=%ld skipped=%ld failed=%ld\n",
+            n, swept, skipped, failed);
+    free(ids);
+}
+
 static void *fuse_sweep_thread(void *arg)
 {
     (void)arg;
+    signal(SIGUSR1, on_sweep_signal);
     const char *iv = getenv("INVFS_SWEEP_INTERVAL");
-    if (!iv || atoi(iv) < 1) return NULL;   /* disabled by default */
-    int interval = atoi(iv);
+    int interval = iv ? atoi(iv) : 0;
+    int tick = 0;
     for (;;) {
-        sleep(interval);
-        if (g_shutdown || g_open_handles != 0) continue;
+        sleep(1);
+        if (g_shutdown) break;
+        if (g_sweep_now) {
+            g_sweep_now = 0;
+            if (!g_sweep_busy) {
+                g_sweep_busy = 1;
+                invf_sweep_worker();
+                g_sweep_busy = 0;
+                continue;
+            }
+        }
+        if (interval > 0 && ++tick >= interval) {
+            tick = 0;
+            if (g_shutdown || g_open_handles != 0) continue;
+        }
         pthread_mutex_lock(&g_io_lock);
         if (g_shutdown || !g_vol) {   /* unmount won the race */
             pthread_mutex_unlock(&g_io_lock);
@@ -1139,6 +1202,28 @@ static int invf_getxattr(const char *path, const char *name, char *value,
     invfs_meta_pub m;
     uint64_t ino;
     int rc;
+    /* virtual control namespace on the mount root:
+     *   user.invfs      -> live daemon stats (text)
+     * No engine lookup, no disk IO -- answers from RAM state. */
+    if (strcmp(path, "/") == 0 && strcmp(name, "user.invfs") == 0) {
+        char buf[512];
+        int n;
+        pthread_mutex_lock(&g_io_lock);
+        n = snprintf(buf, sizeof buf,
+                     "volume=%s\n"
+                     "entries=%d\n"
+                     "free_blocks=%llu\n"
+                     "pending_sweep=%llu\n"
+                     "sweep_busy=%d\n",
+                     g_img_path, g_nentries,
+                     (unsigned long long)(g_vol ? vol_count_free(g_vol) : 0),
+                     (unsigned long long)(g_vol ? vol_pending_count(g_vol) : 0),
+                     g_sweep_busy);
+        pthread_mutex_unlock(&g_io_lock);
+        if ((size_t)n > size) return -ERANGE;
+        if (value && size > 0) memcpy(value, buf, (size_t)n + 1);
+        return n;
+    }
     if (!meta_for_path(path, ename, sizeof ename, &m))
         return -ENOENT;
     pthread_mutex_lock(&g_io_lock);
@@ -1165,6 +1250,15 @@ static int invf_setxattr(const char *path, const char *name,
     invfs_meta_pub m;
     uint64_t ino;
     int rc;
+    /* virtual control namespace on the mount root:
+     *   setxattr user.invfs.sweep = "1"  -> trigger a manual sweep pass
+     * (same as kill -USR1; kept so scripts need no signal access) */
+    if (strcmp(path, "/") == 0 && strcmp(name, "user.invfs.sweep") == 0) {
+        if (!vol_write_enabled(g_vol)) return -EROFS;
+        g_sweep_now = 1;
+        fprintf(stderr, "[sweep] triggered via xattr\n");
+        return 0;
+    }
     if (!vol_write_enabled(g_vol))
         return -EROFS;
     if (!meta_for_path(path, ename, sizeof ename, &m))
@@ -1335,6 +1429,7 @@ int main(int argc, char *argv[])
         fprintf(stderr, "cannot open volume %s (err %d)\n", img, err);
         return 1;
     }
+    snprintf(g_img_path, sizeof g_img_path, "%s", img);
     setvbuf(stderr, NULL, _IONBF, 0);
     build_file_table();
     fprintf(stderr, "InvariantFS mounted: %d files\n", g_nentries);
