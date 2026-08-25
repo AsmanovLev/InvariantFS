@@ -1225,6 +1225,46 @@ static int invf_getxattr(const char *path, const char *name, char *value,
         memcpy(value, buf, (size_t)n + 1);
         return n;
     }
+    /* full statistics walk (same data as invf-stats, served by the
+     * daemon). Holds the io lock for the duration of the record scan --
+     * fine for a manual query on an idle system. */
+    if (strcmp(path, "/") == 0 && strcmp(name, "user.invfs.stats") == 0) {
+        char buf[2048];
+        int n;
+        invfs_volume_stats st;
+        pthread_mutex_lock(&g_io_lock);
+        n = -EIO;
+        if (g_vol && vol_compute_stats(g_vol, &st) == 0) {
+            double ratio = 0;
+            if (st.raw_used_bytes)
+                ratio = (double)st.logic_raw_bytes / (double)st.raw_used_bytes;
+            n = snprintf(buf, sizeof buf,
+                    "files=%llu\ndirs=%llu\nlinks=%llu\nspecial=%llu\n"
+                    "tombstones=%llu\nbad_records=%llu\n"
+                    "logical_bytes=%llu\n"
+                    "biggest=%s (%llu KiB)\n"
+                    "raw_used_bytes=%llu\nraw_logic_bytes=%llu\nraw_ratio=%.2fx\n"
+                    "shadow_used_bytes=%llu\nshadow_logic_bytes=%llu\n",
+                    (unsigned long long)st.files,
+                    (unsigned long long)st.dirs,
+                    (unsigned long long)st.links,
+                    (unsigned long long)st.special,
+                    (unsigned long long)st.tombstones,
+                    (unsigned long long)st.bad_records,
+                    (unsigned long long)st.logical_bytes,
+                    st.biggest_name, (unsigned long long)(st.biggest_size / 1024),
+                    (unsigned long long)st.raw_used_bytes,
+                    (unsigned long long)st.logic_raw_bytes, ratio,
+                    (unsigned long long)st.shadow_used_bytes,
+                    (unsigned long long)st.logic_shadow_bytes);
+            if (n < 0 || (size_t)n >= sizeof buf) n = sizeof buf - 1;
+            if (!value || size == 0) { pthread_mutex_unlock(&g_io_lock); return n; }
+            memcpy(value, buf, (size_t)n + 1);
+            n++;
+        }
+        pthread_mutex_unlock(&g_io_lock);
+        return n;
+    }
     if (!meta_for_path(path, ename, sizeof ename, &m))
         return -ENOENT;
     pthread_mutex_lock(&g_io_lock);
