@@ -6429,3 +6429,123 @@ int vol_forget_name(invfs_volume *v, const char *name)
     vol_mark_dirty(v);
     return 0;
 }
+
+
+/* ---- manual live sweep support --------------------------------------
+ * Collect inode ids of every live regular file with data (last record
+ * per name wins), for a caller-driven sweep pass with its own locking
+ * and progress reporting. CRC-validated scan, same rules as open. */
+typedef struct { char name[256]; uint64_t id; } sweep_seed;
+
+size_t vol_collect_sweepables(invfs_volume *v, uint64_t *ids, size_t max)
+{
+    sweep_seed *seen = NULL;
+    size_t seen_n = 0, seen_cap = 0;
+    size_t out = 0;
+    uint64_t pos, end;
+    size_t s;
+
+    if (!v || !ids || max == 0) return 0;
+    pos = v->inode_area_start * INVFS_BLOCK_SIZE;
+    end = v->inode_area_pos;
+    while (pos + sizeof(invfs_inode_rec) <= end && out < max) {
+        invfs_inode_rec h;
+        if (io_seek(&v->io, pos) != 0 ||
+            io_read(&v->io, &h, sizeof(h)) != 0) break;
+        if (h.magic != INODE_REC_MAGIC && h.magic != TOMBSTONE_MAGIC) break;
+        if (h.rec_len < sizeof(h) || h.rec_len > INVFS_MAX_REC_LEN ||
+            pos + h.rec_len + 4 > end) break;
+        {
+            uint8_t *rb = (uint8_t *)malloc((size_t)h.rec_len + 4);
+            uint32_t stored, calc;
+            int bad = 0;
+            if (!rb) break;
+            if (io_seek(&v->io, pos) != 0 ||
+                io_read(&v->io, rb, (size_t)h.rec_len + 4) != 0) { free(rb); break; }
+            memcpy(&stored, rb + h.rec_len, 4);
+            calc = invfs_crc32c(rb, h.rec_len);
+            free(rb);
+            if (calc != stored) bad = 1;   /* torn: skip, keep scanning */
+            if (bad) { pos += (uint64_t)h.rec_len + 4; continue; }
+        }
+        pos += (uint64_t)h.rec_len + 4;
+        if (h.magic != INODE_REC_MAGIC) continue;
+        if (h.file_size == 0) continue;               /* nothing to move */
+        {
+            size_t nl = h.name_len < sizeof(h.name) ? h.name_len : sizeof(h.name)-1;
+            int dup = 0;
+            for (s = 0; s < seen_n; s++)
+                if (strncmp(seen[s].name, h.name, sizeof(seen[s].name)) == 0)
+                    { seen[s].id = h.inode_id; dup = 1; break; }
+            if (dup) continue;
+            if (seen_n == seen_cap) {
+                sweep_seed *ns;
+                seen_cap = seen_cap ? seen_cap*2 : 4096;
+                ns = realloc(seen, seen_cap * sizeof(*seen));
+                if (!ns) break;
+                seen = ns;
+            }
+            memset(seen[seen_n].name, 0, sizeof(seen[seen_n].name));
+            memcpy(seen[seen_n].name, h.name, nl);
+            seen[seen_n].id = h.inode_id;
+            seen_n++;
+        }
+    }
+    /* resolve through the live index: tombstoned seeds drop out here */
+    for (s = 0; s < seen_n && out < max; s++) {
+        uint64_t id = vol_find(v, seen[s].name);
+        if (id != 0) ids[out++] = id;
+    }
+    free(seen);
+    return out;
+}
+
+int vol_compute_stats(invfs_volume *v, invfs_volume_stats *out)
+{
+    uint64_t pos, end;
+    if (!v || !out) return -1;
+    memset(out, 0, sizeof(*out));
+    pos = v->inode_area_start * INVFS_BLOCK_SIZE;
+    end = v->inode_area_pos;
+    while (pos + sizeof(invfs_inode_rec) <= end) {
+        invfs_inode_rec h;
+        uint8_t *rb;
+        uint32_t stored, calc;
+        if (io_seek(&v->io, pos) != 0 ||
+            io_read(&v->io, &h, sizeof(h)) != 0) break;
+        if (h.magic != INODE_REC_MAGIC && h.magic != TOMBSTONE_MAGIC) break;
+        if (h.rec_len < sizeof(h) || h.rec_len > INVFS_MAX_REC_LEN ||
+            pos + h.rec_len + 4 > end) { out->bad_records++; break; }
+        rb = malloc((size_t)h.rec_len + 4);
+        if (!rb) break;
+        if (io_seek(&v->io, pos) != 0 ||
+            io_read(&v->io, rb, (size_t)h.rec_len + 4) != 0) { free(rb); break; }
+        memcpy(&stored, rb + h.rec_len, 4);
+        calc = invfs_crc32c(rb, h.rec_len);
+        free(rb);
+        if (calc != stored) { out->bad_records++; pos += (uint64_t)h.rec_len + 4; continue; }
+        pos += (uint64_t)h.rec_len + 4;
+        if (h.magic == TOMBSTONE_MAGIC) { out->tombstones++; continue; }
+        {
+            invfs_meta_pub m;
+            int type = (vol_get_meta(v, h.inode_id, &m) == 0) ? m.type : -1;
+            switch (type) {
+            case INVFS_ITYP_DIR:  out->dirs++; break;
+            case INVFS_ITYP_LNK:  out->links++; break;
+            case INVFS_ITYP_FIFO: case INVFS_ITYP_SOCK:
+            case INVFS_ITYP_CHR:  case INVFS_ITYP_BLK: out->special++; break;
+            default:
+                out->files++;
+                if (h.file_size && vol_find(v, h.name) == h.inode_id) {
+                    out->logical_bytes += h.file_size;
+                    if (h.file_size > out->biggest_size) {
+                        out->biggest_size = h.file_size;
+                        snprintf(out->biggest_name, sizeof(out->biggest_name),
+                                 "%s", h.name);
+                    }
+                }
+            }
+        }
+    }
+    return 0;
+}

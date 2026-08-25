@@ -144,6 +144,17 @@ uint64_t vol_create_special(invfs_volume *v, const char *name,
  * shared blocks and dangles the survivor (WP6). Intended for transient
  * locks/atomic-replace patterns (portage), not permanent aliasing. */
 int vol_hardlink(invfs_volume *v, const char *from, const char *to);
+size_t vol_collect_sweepables(invfs_volume *v, uint64_t *ids, size_t max);
+
+/* whole-volume statistics for tools/UIs (read-only walk). */
+typedef struct {
+    uint64_t files, dirs, links, special;
+    uint64_t tombstones, bad_records;
+    uint64_t logical_bytes, biggest_size;
+    char     biggest_name[256];
+} invfs_volume_stats;
+int vol_compute_stats(invfs_volume *v, invfs_volume_stats *out);
+
 /* xattrs stored inside the same INO2 ext (TLVs). val semantics like
  * getxattr(2): size query via *vlen==0. list returns NUL-separated names. */
 int vol_get_xattr(invfs_volume *v, uint64_t inode_id, const char *xn,

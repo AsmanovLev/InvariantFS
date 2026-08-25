@@ -70,3 +70,8 @@ clean:
 
 .PHONY: all clean
 -include $(wildcard $(OBJ)/*.d)
+
+$(OUT)/invf-stats: $(OBJ)/invf-stats.o $(CORE_O)
+	$(CC) $(CFLAGS) -Itools -o $@ $< $(CORE_O) $(LDLIBS)
+$(OBJ)/invf-stats.o: tools/invf-stats.c | $(OBJ)
+	$(CC) $(CFLAGS) -c -o $@ $<
