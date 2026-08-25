@@ -1220,8 +1220,9 @@ static int invf_getxattr(const char *path, const char *name, char *value,
                      (unsigned long long)(g_vol ? vol_pending_count(g_vol) : 0),
                      g_sweep_busy);
         pthread_mutex_unlock(&g_io_lock);
-        if ((size_t)n > size) return -ERANGE;
-        if (value && size > 0) memcpy(value, buf, (size_t)n + 1);
+        if (!value || size == 0) return n;      /* size query */
+        if ((size_t)n + 1 > size) return -ERANGE;
+        memcpy(value, buf, (size_t)n + 1);
         return n;
     }
     if (!meta_for_path(path, ename, sizeof ename, &m))
