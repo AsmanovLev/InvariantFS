@@ -1251,8 +1251,8 @@ static int invf_getxattr(const char *path, const char *name, char *value,
                 (unsigned long long)hdirs,
                 (unsigned long long)htombs,
                 (unsigned long long)hlogic,
-                (unsigned long long)(raw_used * 4096ull),
-                (unsigned long long)(shadow_used * 4096ull),
+                (unsigned long long)raw_used,
+                (unsigned long long)shadow_used,
                 (unsigned long long)vol_count_free(g_vol));
         pthread_mutex_unlock(&g_io_lock);
         if (n < 0 || (size_t)n >= sizeof buf) n = sizeof buf - 1;
