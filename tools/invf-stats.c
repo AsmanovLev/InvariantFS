@@ -13,7 +13,17 @@ int main(int argc, char **argv)
     invfs_volume_stats st = {0};
     uint64_t meta_blocks, raw_blocks, shadow_blocks;
 
-    if (argc != 2) { fprintf(stderr, "usage: %s <volume>\n", argv[0]); return 2; }
+    if (argc != 2 || strcmp(argv[1], "-h") == 0 ||
+        strcmp(argv[1], "--help") == 0) {
+        fprintf(stderr,
+            "usage: %s <volume-image|idle-block-device>\n"
+            "  read-only overview: population, zones, compression ratios\n"
+            "NOTE: the volume must NOT be actively mounted by invf-fuse\n"
+            "      (open the image file from the host, or run this from the\n"
+            "       initramfs shell before switch_root for the root device)\n",
+            argv[0]);
+        return 2;
+    }
     v = vol_open(argv[1], &err);
     if (!v) { fprintf(stderr, "open failed err=%d\n", err); return 1; }
     sb = vol_sb(v);
