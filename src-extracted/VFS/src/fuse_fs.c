@@ -1366,6 +1366,17 @@ int main(int argc, char *argv[])
          * empty file right after 80KB landed. User -o opts can override. */
         fuse_argv[fuse_argc++] = "-o";
         fuse_argv[fuse_argc++] = "attr_timeout=0,ac_attr_timeout=0";
+        /* identify ourselves in /proc/mounts: source field becomes
+         * "invfs" instead of anonymous /dev/fuse, so `mount | grep invfs`
+         * and findmnt -t fuse.invfs work. User -o fsname= overrides. */
+        {
+            static char fsname[300];
+            const char *base = strrchr(img, '/');
+            snprintf(fsname, sizeof fsname, "fsname=invfs[%s]",
+                     base ? base + 1 : img);
+            fuse_argv[fuse_argc++] = "-o";
+            fuse_argv[fuse_argc++] = fsname;
+        }
         /* -f/-d are consumed by us (fuse_daemonize below); fuse_new
          * rejects them as unknown options */
         if (opts) {
