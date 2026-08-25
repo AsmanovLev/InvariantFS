@@ -1,6 +1,6 @@
 /*
- * fuse_fs.c — InvariantFS FUSE filesystem (read-only)
- *
+ * fuse_fs.c — InvariantFS FUSE filesystem (rw; POSIX v2 metadata,
+ * control xattr namespace, manual/opt-in sweep)
  *   invf-fuse [-f] <image> <mountpoint>
  *
  * Built on the same volume.c core as the Windows/WinFsp port.
