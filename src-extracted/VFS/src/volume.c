@@ -1793,6 +1793,431 @@ uint64_t vol_create_file(invfs_volume *v, const char *name,
     return inode_id;
 }
 
+/* ---- WP4b: incremental ranged-write sessions ----------------------------
+ * A session forks the file under a NEW inode id and builds its AST
+ * incrementally, one 64K segment per touched range:
+ *   begin  -> alias every old segment into the new id's L2P (no copies)
+ *   write  -> first touch of a segment reads its old plaintext (old id),
+ *             patches, recompresses, writes a NEW pba, re-maps it
+ *   commit -> append [INOD(new)][DELT(poskill old)] as ONE combo write,
+ *             then drop the old id's L2P aliases WITHOUT freeing blocks
+ *             (the new id owns them all now)
+ * Crash before commit: old record still live and owns its blocks; orphaned
+ * new-id maps are purged by fsck. No torn states. */
+static int meta_read_record_by_id(invfs_volume *v, uint64_t inode_id,
+                                  uint8_t **buf_out, uint32_t *rl_out,
+                                  char *name_out, size_t name_cap,
+                                  uint64_t *pos_out);
+static const uint8_t *meta_locate_ext(const uint8_t *rec, size_t rec_len,
+                                      size_t *ext_len_out);
+typedef struct invfs_wsession invfs_wsession;
+struct invfs_wsession {
+    invfs_volume *v;
+    char     name[256];
+    uint64_t new_id, old_id, old_pos, old_size;
+    int      have_old, committed, loaded;
+    uint8_t *old_ext;
+    uint32_t old_ext_len;
+    invfs_ast_block_entry *ents;
+    uint32_t n_ents, cap_ents, old_n_ents;
+    uint8_t *touched;
+    uint32_t touched_cap;
+    uint32_t mat_upto;       /* highest contiguously materialized seg +1 */
+    uint64_t logical_size;
+};
+
+uint64_t vol_write_begin(invfs_volume *v, const char *name, int truncate,
+                         invfs_wsession **out)
+{
+    invfs_wsession *s;
+    if (!out) return 0;
+    *out = NULL;
+    if (!v || !name || name_too_long(name)) return 0;
+    if (v->sb.vol_flags & VOLF_READONLY) return 0;
+    s = calloc(1, sizeof *s);
+    if (!s) return 0;
+    s->v = v;
+    snprintf(s->name, sizeof s->name, "%s", name);
+    s->new_id = v->next_inode_id++;
+    {
+        uint64_t old_id = vol_find(v, name);
+        if (old_id != 0 && !truncate) {
+            s->have_old = 1;
+            s->old_id = old_id;
+        }
+    }
+    *out = s;
+    return s->new_id;
+}
+
+static int wsession_load_old(invfs_wsession *s)
+{
+    uint8_t *buf = NULL;
+    uint32_t rl = 0;
+    invfs_ast_recipe_header ah;
+    const uint8_t *ext;
+    size_t ext_len = 0;
+    size_t base = sizeof(invfs_inode_rec);
+    uint32_t i;
+
+    if (s->loaded || !s->have_old) { s->loaded = 1; return 0; }
+    if (meta_read_record_by_id(s->v, s->old_id, &buf, &rl, NULL, 0,
+                               &s->old_pos) != 0 || !s->old_pos) {
+        free(buf);
+        return -1;
+    }
+    if (rl < base + sizeof(ah)) { free(buf); return -1; }
+    memcpy(&ah, buf + base, sizeof(ah));
+    s->old_size = ah.file_size;
+    s->logical_size = ah.file_size;
+    s->n_ents = ah.num_blocks;
+    s->old_n_ents = ah.num_blocks;
+    if (s->n_ents) {
+        s->cap_ents = s->n_ents;
+        s->ents = malloc(s->cap_ents * sizeof(*s->ents));
+        if (!s->ents) { free(buf); return -1; }
+        memcpy(s->ents, buf + base + sizeof(ah), s->n_ents * sizeof(*s->ents));
+    }
+    s->touched_cap = s->n_ents ? s->n_ents : 64;
+    s->touched = calloc(s->touched_cap, 1);
+    if (!s->touched) { free(buf); return -1; }
+    ext = meta_locate_ext(buf, rl, &ext_len);
+    if (ext && ext_len && ext_len <= 0xFFFF) {
+        s->old_ext = malloc(ext_len);
+        if (s->old_ext) {
+            memcpy(s->old_ext, ext, ext_len);
+            s->old_ext_len = (uint32_t)ext_len;
+        }
+    }
+    free(buf);
+    /* alias old segments into the new id's L2P (no data copies) */
+    for (i = 0; i < s->n_ents; i++) {
+        uint64_t pba = 0, plen = 0;
+        if (vol_lookup_entry(s->v, s->old_id, i, &pba, &plen) == 0 && pba)
+            vol_map(s->v, s->new_id, i, pba, (uint32_t)plen);
+    }
+    s->loaded = 1;
+    return 0;
+}
+
+static size_t wsession_seg_plain(invfs_wsession *s, uint32_t i, uint8_t *buf)
+{
+    memset(buf, 0, SEGMENT_SIZE);
+    if (i < s->n_ents && s->ents[i].length > 0 &&
+        !(i < s->touched_cap && s->touched[i])) {
+        uint64_t off = (uint64_t)i * SEGMENT_SIZE;
+        if (vol_read_range(s->v, s->old_id, off, s->ents[i].length, buf) != 0)
+            return 0;
+        return s->ents[i].length;
+    }
+    return 0;
+}
+
+static int wsession_grow(invfs_wsession *s, uint32_t count)
+{
+    if (count > s->cap_ents) {
+        uint32_t nc = s->cap_ents ? s->cap_ents : 64;
+        invfs_ast_block_entry *ne;
+        while (nc < count) nc *= 2;
+        ne = realloc(s->ents, nc * sizeof(*ne));
+        if (!ne) return -1;
+        memset(ne + s->cap_ents, 0, (nc - s->cap_ents) * sizeof(*ne));
+        s->ents = ne;
+        s->cap_ents = nc;
+    }
+    if (count > s->touched_cap) {
+        uint8_t *nt = realloc(s->touched, count);
+        if (!nt) return -1;
+        memset(nt + s->touched_cap, 0, count - s->touched_cap);
+        s->touched = nt;
+        s->touched_cap = count;
+    }
+    return 0;
+}
+
+/* materialize zero segments [from,to) so no unmapped LBA ever exists */
+static int wsession_zero_fill(invfs_wsession *s, uint32_t from, uint32_t to)
+{
+    uint32_t k;
+    if (to <= from) return 0;
+    if (wsession_grow(s, to) != 0) return -1;
+    for (k = from; k < to; k++) {
+        uint8_t zbuf[SEGMENT_SIZE];
+        int cbound = LZ4_compressBound((int)SEGMENT_SIZE);
+        uint8_t *cbuf = malloc((size_t)cbound + 8 + INVFS_BLOCK_SIZE);
+        uint32_t csize;
+        uint8_t hdr[8];
+        uint32_t seg_crc;
+        uint64_t pba, phys_blocks;
+        int zone;
+        if (!cbuf) return -1;
+        memset(zbuf, 0, SEGMENT_SIZE);
+        csize = (uint32_t)LZ4_compress_default((const char *)zbuf,
+                                               (char *)(cbuf + 8),
+                                               SEGMENT_SIZE, cbound);
+        if (csize == 0 || csize >= SEGMENT_SIZE) {
+            csize = SEGMENT_SIZE;
+            memcpy(cbuf + 8, zbuf, SEGMENT_SIZE);
+        }
+        seg_crc = invfs_crc32c(cbuf + 8, csize);
+        hdr[0]=(uint8_t)(csize&0xFF); hdr[1]=(uint8_t)((csize>>8)&0xFF);
+        hdr[2]=(uint8_t)((csize>>16)&0xFF); hdr[3]=(uint8_t)((csize>>24)&0xFF);
+        hdr[4]=(uint8_t)(seg_crc&0xFF); hdr[5]=(uint8_t)((seg_crc>>8)&0xFF);
+        hdr[6]=(uint8_t)((seg_crc>>16)&0xFF); hdr[7]=(uint8_t)((seg_crc>>24)&0xFF);
+        memcpy(cbuf, hdr, 8);
+        phys_blocks = ((uint64_t)csize + 8 + INVFS_BLOCK_SIZE - 1) /
+                      INVFS_BLOCK_SIZE;
+        pba = alloc_raw_or_shadow(s->v, phys_blocks, &zone);
+        if (pba == 0 ||
+            write_segment_blocks(s->v, pba, cbuf,
+                                 (size_t)csize + 8, phys_blocks) != 0 ||
+            vol_map(s->v, s->new_id, k, pba, (uint32_t)phys_blocks) != 0) {
+            free(cbuf);
+            return -1;
+        }
+        free(cbuf);
+        s->ents[k].file_offset = (uint64_t)k * SEGMENT_SIZE;
+        s->ents[k].length = SEGMENT_SIZE;
+        s->ents[k].zone = (uint32_t)zone;
+        s->ents[k].algo =
+            (csize < SEGMENT_SIZE) ? INVFS_ALGO_LZ4 : INVFS_ALGO_NONE;
+        s->ents[k].block_id = k;
+        s->ents[k].block_offset = 0;
+        if (k >= s->n_ents) s->n_ents = k + 1;
+        if (k < s->touched_cap) s->touched[k] = 1;
+    }
+    if (to > s->mat_upto) s->mat_upto = to;
+    return 0;
+}
+
+int vol_write_range(invfs_wsession *ws, uint64_t offset,
+                    const uint8_t *data, size_t len)
+{
+    invfs_wsession *s = ws;
+    uint32_t first, last, j;
+    size_t done = 0;
+
+    if (!s || s->committed) return -1;
+    if (len == 0) return 0;
+    if ((uint64_t)offset + len > 0xFFFFFFFFu) return -1;
+    if (wsession_load_old(s) != 0) return -1;
+
+    first = (uint32_t)(offset / SEGMENT_SIZE);
+    last  = (uint32_t)((offset + len - 1) / SEGMENT_SIZE);
+    if ((uint64_t)last + 1 > MAX_SEGMENTS) return -1;
+    /* load_old aliases old segments; anything past the aliased tail must
+     * exist as real zero segments before we can jump ahead */
+    {
+        uint32_t alias_tail = s->have_old ? s->old_n_ents : 0;
+        uint32_t filled = s->mat_upto > alias_tail ? s->mat_upto : alias_tail;
+        if (first > filled && wsession_zero_fill(s, filled, first) != 0)
+            return -1;
+    }
+    if (wsession_grow(s, last + 1) != 0) return -1;
+
+    for (j = first; j <= last; j++) {
+        uint8_t plain[SEGMENT_SIZE];
+        size_t base = (size_t)j * SEGMENT_SIZE;
+        size_t seg_off = offset + done - base;
+        size_t can = SEGMENT_SIZE - seg_off;
+        size_t take = len - done < can ? len - done : can;
+        size_t plain_len;
+        int cbound, lz4_used = 0;
+        uint8_t *cbuf, hdr[8];
+        uint32_t csize, seg_crc;
+        uint64_t pba, phys_blocks;
+        int zone;
+
+        plain_len = wsession_seg_plain(s, j, plain);
+        memcpy(plain + seg_off, data + done, take);
+        if (seg_off + take > plain_len) plain_len = seg_off + take;
+        /* compress the WHOLE segment: interior zero tails belong to this
+         * entry; LZ4 collapses them to almost nothing */
+        plain_len = SEGMENT_SIZE;
+
+        cbound = LZ4_compressBound((int)plain_len);
+        cbuf = malloc((size_t)cbound + 8 + INVFS_BLOCK_SIZE);
+        if (!cbuf) return -1;
+        csize = (uint32_t)LZ4_compress_default((const char *)plain,
+                                               (char *)(cbuf + 8),
+                                               (int)plain_len, cbound);
+        if (csize == 0 || csize >= (uint32_t)plain_len) {
+            csize = (uint32_t)plain_len;
+            memcpy(cbuf + 8, plain, plain_len);
+        } else {
+            lz4_used = 1;
+        }
+        seg_crc = invfs_crc32c(cbuf + 8, csize);
+        hdr[0] = (uint8_t)(csize & 0xFF);
+        hdr[1] = (uint8_t)((csize >> 8) & 0xFF);
+        hdr[2] = (uint8_t)((csize >> 16) & 0xFF);
+        hdr[3] = (uint8_t)((csize >> 24) & 0xFF);
+        hdr[4] = (uint8_t)(seg_crc & 0xFF);
+        hdr[5] = (uint8_t)((seg_crc >> 8) & 0xFF);
+        hdr[6] = (uint8_t)((seg_crc >> 16) & 0xFF);
+        hdr[7] = (uint8_t)((seg_crc >> 24) & 0xFF);
+        memcpy(cbuf, hdr, 8);
+
+        phys_blocks = ((uint64_t)csize + 8 + INVFS_BLOCK_SIZE - 1) /
+                      INVFS_BLOCK_SIZE;
+        pba = alloc_raw_or_shadow(s->v, phys_blocks, &zone);
+        if (pba == 0 ||
+            write_segment_blocks(s->v, pba, cbuf,
+                                 (size_t)csize + 8, phys_blocks) != 0 ||
+            vol_map(s->v, s->new_id, j, pba, (uint32_t)phys_blocks) != 0) {
+            fprintf(stderr, "[wsession] seg %u write fail\n", j);
+            free(cbuf);
+            return -1;
+        }
+        free(cbuf);
+
+        s->ents[j].file_offset = (uint64_t)j * SEGMENT_SIZE;
+        /* full segment unless it is the last one of the file: interior
+         * tails are zeros and MUST be covered by this entry, or reads
+         * past plain_len fall into an uncovered hole */
+        s->ents[j].length =
+            (base + SEGMENT_SIZE <= s->logical_size ||
+             j + 1 < s->n_ents) ? SEGMENT_SIZE : plain_len;
+        s->ents[j].zone = (uint32_t)zone;
+        s->ents[j].algo = lz4_used ? INVFS_ALGO_LZ4 : INVFS_ALGO_NONE;
+        s->ents[j].block_id = j;
+        s->ents[j].block_offset = 0;
+        if (j >= s->n_ents) s->n_ents = j + 1;
+        if (j < s->touched_cap) s->touched[j] = 1;
+        if (j + 1 > s->mat_upto) s->mat_upto = j + 1;
+
+        {
+            uint64_t dend = (uint64_t)j * SEGMENT_SIZE + seg_off + take;
+            if (dend > s->logical_size) s->logical_size = dend;
+        }
+        done += take;
+        if (done >= len) break;
+    }
+    return 0;
+}
+
+int vol_write_commit(invfs_wsession *ws)
+{
+    invfs_wsession *s = ws;
+    invfs_volume *v = ws ? ws->v : NULL;
+    size_t rec_size, total;
+    uint8_t *rec, *combo, *p;
+    invfs_inode_rec *rh, tomb;
+    invfs_ast_recipe_header ah;
+    uint32_t crc_rec, crc_tomb;
+    uint64_t now = (uint64_t)time(NULL);
+
+    if (!s || s->committed) return -1;
+    if (wsession_load_old(s) != 0) return -1;
+    if (s->logical_size > 0xFFFFFFFFu || s->n_ents > MAX_SEGMENTS) return -1;
+
+    memset(&ah, 0, sizeof(ah));
+    ah.version = 1;
+    ah.file_size = (uint32_t)s->logical_size;
+    ah.num_blocks = (uint16_t)s->n_ents;
+
+    rec_size = sizeof(invfs_inode_rec) + sizeof(ah)
+             + (size_t)s->n_ents * sizeof(invfs_ast_block_entry)
+             + s->old_ext_len;
+    rec = calloc(1, rec_size);
+    if (!rec) return -1;
+    rh = (invfs_inode_rec *)rec;
+    rh->magic = INODE_REC_MAGIC;
+    rh->rec_len = (uint32_t)rec_size;
+    rh->inode_id = s->new_id;
+    rh->file_size = (uint32_t)s->logical_size;
+    rh->ctime = now;
+    rec_set_name(rh, s->name);
+    memcpy(rec + sizeof(invfs_inode_rec), &ah, sizeof(ah));
+    if (s->n_ents)
+        memcpy(rec + sizeof(invfs_inode_rec) + sizeof(ah), s->ents,
+               (size_t)s->n_ents * sizeof(invfs_ast_block_entry));
+    if (s->old_ext_len)
+        memcpy(rec + rec_size - s->old_ext_len, s->old_ext, s->old_ext_len);
+    crc_rec = invfs_crc32c(rec, rec_size);
+
+    memset(&tomb, 0, sizeof(tomb));
+    tomb.magic = TOMBSTONE_MAGIC;
+    tomb.rec_len = (uint32_t)sizeof(tomb);
+    if (s->have_old) {
+        uint8_t *obuf = NULL;
+        uint32_t orl = 0;
+        invfs_inode_rec oh;
+        if (meta_read_record_by_id(v, s->old_id, &obuf, &orl,
+                                   NULL, 0, NULL) == 0 && orl >= sizeof(oh)) {
+            memcpy(&oh, obuf, sizeof(oh));
+            tomb.name_len = oh.name_len;
+            memcpy(tomb.name, oh.name, sizeof(tomb.name));
+        }
+        free(obuf);
+        tomb.inode_id = s->old_id;
+        tomb.file_size = s->old_pos;      /* v2 position kill */
+        v->hot.tombstones++;
+    }
+
+    total = rec_size + 4 + (s->have_old ? sizeof(tomb) + 4 : 0);
+    combo = malloc(total);
+    if (!combo) { free(rec); return -1; }
+    p = combo;
+    memcpy(p, rec, rec_size); p += rec_size;
+    memcpy(p, &crc_rec, 4);   p += 4;
+    if (s->have_old) {
+        crc_tomb = invfs_crc32c((uint8_t *)&tomb, sizeof(tomb));
+        memcpy(p, &tomb, sizeof(tomb)); p += sizeof(tomb);
+        memcpy(p, &crc_tomb, 4);
+    }
+    free(rec);
+
+    if (vol_mark_dirty(v) != 0 || vol_pre_record(v) != 0 ||
+        v->inode_area_pos + total > v->inode_area_end ||
+        io_seek(&v->io, v->inode_area_pos) != 0 ||
+        io_write(&v->io, combo, total) != 0) {
+        free(combo);
+        return -1;
+    }
+    v->inode_area_pos += total;
+    free(combo);
+
+    idx_put(v, s->name, strlen(s->name), s->new_id,
+            v->inode_area_pos - total, (uint32_t)s->logical_size, now);
+    idx_put_id(v, s->new_id, v->inode_area_pos - total);
+
+    if (s->have_old) {
+        /* blocks re-owned by the new id: drop old aliases, no frees.
+         * arc entry for the old id dies naturally -- ids never repeat. */
+        uint32_t i;
+        arc_invalidate(v->arc, s->old_id);
+        for (i = 0; i < s->old_n_ents; i++)
+            l2p_remove(v, s->old_id, i);
+    }
+    s->committed = 1;
+    return 0;
+}
+
+void vol_write_abort(invfs_wsession *ws)
+{
+    invfs_wsession *s = ws;
+    uint32_t i;
+    if (!s) return;
+    if (!s->committed) {
+        for (i = 0; s->touched && i < s->n_ents && i < s->touched_cap; i++) {
+            uint64_t pba = 0, plen = 0;
+            if (s->touched[i] &&
+                vol_lookup_entry(s->v, s->new_id, i, &pba, &plen) == 0 && pba) {
+                vol_free_blocks(s->v, pba, plen);
+                l2p_remove(s->v, s->new_id, i);
+            }
+        }
+        for (i = 0; s->have_old && s->ents && i < s->old_n_ents; i++)
+            l2p_remove(s->v, s->new_id, i);
+    }
+    free(s->ents);
+    free(s->touched);
+    free(s->old_ext);
+    free(s);
+}
+
+
 /* ---- AST children: serialize / deserialize / container creation ---- */
 
 /* serialize children after the block entries; malloc'd buf or NULL */
@@ -3842,7 +4267,9 @@ int vol_read_range(invfs_volume *v, uint64_t inode_id, uint64_t offset,
         uint32_t crc_stored, crc_calc;
         if (io_seek(&v->io, pos) != 0 || io_read(&v->io, &rec_h, sizeof(rec_h)) != 0)
             return -1;
-        if (rec_h.magic != INODE_REC_MAGIC && rec_h.magic != TOMBSTONE_MAGIC) return -1;
+        if (rec_h.magic != INODE_REC_MAGIC && rec_h.magic != TOMBSTONE_MAGIC) {
+            return -1;
+        }
         if (rec_h.magic == TOMBSTONE_MAGIC) { pos += rec_h.rec_len + 4; continue; }
         if (rec_h.inode_id != inode_id) { pos += rec_h.rec_len + 4; continue; }
         rec = (uint8_t *)malloc(rec_h.rec_len);
@@ -3856,7 +4283,8 @@ int vol_read_range(invfs_volume *v, uint64_t inode_id, uint64_t offset,
         ents = (invfs_ast_block_entry *)(rec + sizeof(invfs_inode_rec) + sizeof(ast_h));
         break;
     }
-    if (!rec) return -1;
+    if (!rec) { fprintf(stderr,"[rr] record not found id=%llu\n",
+        (unsigned long long)inode_id); return -1; }
     if (ast_h.num_children > 0 ||
         (ast_h.num_blocks == 1 && algo_is_whole_file(ents[0].algo))) {
         /* Whole-file reconstruction, served out of the content cache.
@@ -3939,7 +4367,8 @@ int vol_read_range(invfs_volume *v, uint64_t inode_id, uint64_t offset,
             if (e->algo == INVFS_ALGO_LZ4) {
                 int got = LZ4_decompress_safe((const char *)blob, (char *)tmp,
                                               (int)hdr, (int)e->length);
-                if (got != (int)e->length) { free(blob); free(rec); return -1; }
+                if (got != (int)e->length) {
+                    free(blob); free(rec); return -1; }
             } else if (e->algo == INVFS_ALGO_ZSTD) {
                 size_t got = ZSTD_decompress(tmp, e->length, blob, hdr);
                 if (ZSTD_isError(got) || got != e->length) { free(blob); free(rec); return -1; }
@@ -3989,7 +4418,8 @@ int vol_read_range(invfs_volume *v, uint64_t inode_id, uint64_t offset,
                 free(blob);
                 continue;
             } else {
-                if (hdr != e->length) { free(blob); free(rec); return -1; }
+                if (hdr != e->length) {
+                    free(blob); free(rec); return -1; }
                 memcpy(tmp, blob, e->length);
             }
             free(blob);
@@ -6619,3 +7049,7 @@ void vol_hot_counters(invfs_volume *v, uint64_t *files, uint64_t *dirs,
     if (tombstones)  *tombstones = v->hot.tombstones;
     if (logical_bytes) *logical_bytes = v->hot.logical_bytes;
 }
+
+/* test-only export of the static parser */
+int meta_read_record_by_id_p(invfs_volume *v, uint64_t id, uint8_t **buf, uint32_t *rl)
+{ return meta_read_record_by_id(v, id, buf, rl, NULL, 0, NULL); }

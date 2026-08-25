@@ -146,6 +146,15 @@ uint64_t vol_create_special(invfs_volume *v, const char *name,
 int vol_hardlink(invfs_volume *v, const char *from, const char *to);
 size_t vol_collect_sweepables(invfs_volume *v, uint64_t *ids, size_t max);
 
+/* ---- WP4b: incremental ranged-write sessions ---- */
+typedef struct invfs_wsession invfs_wsession;
+uint64_t vol_write_begin(invfs_volume *v, const char *name, int truncate,
+                         invfs_wsession **out);
+int  vol_write_range(invfs_wsession *ws, uint64_t offset,
+                     const uint8_t *data, size_t len);
+int  vol_write_commit(invfs_wsession *ws);
+void vol_write_abort(invfs_wsession *ws);
+
 /* whole-volume statistics for tools/UIs (read-only walk). */
 typedef struct {
     uint64_t files, dirs, links, special;
