@@ -6500,6 +6500,16 @@ size_t vol_collect_sweepables(invfs_volume *v, uint64_t *ids, size_t max)
     return out;
 }
 
+
+uint64_t vol_zone_used_bytes(invfs_volume *v, uint64_t start_blk, uint64_t end_blk)
+{
+    uint64_t b, used = 0;
+    if (!v || end_blk <= start_blk) return 0;
+    for (b = start_blk; b < end_blk; b++)
+        if (v->bitmap[b >> 3] & (1u << (b & 7))) used++;
+    return used * INVFS_BLOCK_SIZE;
+}
+
 int vol_compute_stats(invfs_volume *v, invfs_volume_stats *out)
 {
     uint64_t pos, end;
@@ -6534,8 +6544,28 @@ int vol_compute_stats(invfs_volume *v, invfs_volume_stats *out)
             case INVFS_ITYP_LNK:  out->links++; break;
             case INVFS_ITYP_FIFO: case INVFS_ITYP_SOCK:
             case INVFS_ITYP_CHR:  case INVFS_ITYP_BLK: out->special++; break;
-            default:
+            default: {
                 out->files++;
+                /* attribute logical size across the AST's zones */
+                {
+                    size_t ast = vol_ast_blob_len(rb, h.rec_len);
+                    size_t base = sizeof(invfs_inode_rec) + ast;
+                    uint16_t nb = 0;
+                    if (ast != (size_t)-1 && h.rec_len >= base + 16 &&
+                        h.file_size > 0) {
+                        memcpy(&nb, rb + base + 8, 2);
+                        uint64_t remain = h.file_size;
+                        int i;
+                        for (i = 0; i < nb && remain > 0; i++) {
+                            uint8_t *e = rb + base + 16 + (size_t)i * 24;
+                            uint32_t zf = e[16];          /* zone:2 LSB */
+                            uint64_t seg = remain > 65536 ? 65536 : remain;
+                            remain -= seg;
+                            if (zf & 1) out->logic_shadow_bytes += seg;
+                            else        out->logic_raw_bytes    += seg;
+                        }
+                    }
+                }
                 if (h.file_size && vol_find(v, h.name) == h.inode_id) {
                     out->logical_bytes += h.file_size;
                     if (h.file_size > out->biggest_size) {
@@ -6545,7 +6575,12 @@ int vol_compute_stats(invfs_volume *v, invfs_volume_stats *out)
                     }
                 }
             }
+            }
         }
     }
+    out->raw_used_bytes =
+        vol_zone_used_bytes(v, v->sb.raw_zone_start, v->sb.shadow_zone_start);
+    out->shadow_used_bytes =
+        vol_zone_used_bytes(v, v->sb.shadow_zone_start, v->sb.total_blocks);
     return 0;
 }

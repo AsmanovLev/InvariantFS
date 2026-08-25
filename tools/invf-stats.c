@@ -51,6 +51,23 @@ int main(int argc, char **argv)
         printf("  biggest file     : %.1f KiB %s\n",
                st.biggest_size / 1024.0, st.biggest_name);
         printf("  est. ratio       : %.2fx logical/on-disk\n", ratio);
+        printf("zones detail       :\n");
+        {
+            double lr = st.logic_raw_bytes / 1048576.0;
+            double ls = st.logic_shadow_bytes / 1048576.0;
+            double pr = st.raw_used_bytes / 1048576.0;
+            double ps = st.shadow_used_bytes / 1048576.0;
+            if (st.raw_used_bytes)
+                printf("  RAW   : logic %8.1f MiB | used %8.1f MiB | %.2fx\n",
+                       lr, pr, pr ? lr / pr : 0);
+            else
+                printf("  RAW   : empty\n");
+            if (st.shadow_used_bytes)
+                printf("  SHADOW: logic %8.1f MiB | used %8.1f MiB | %.2fx\n",
+                       ls, ps, ps ? ls / ps : 0);
+            else
+                printf("  SHADOW: empty (not swept yet)\n");
+        }
     }
     vol_close(v);
     return 0;

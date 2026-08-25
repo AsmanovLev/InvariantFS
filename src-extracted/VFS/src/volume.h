@@ -152,8 +152,13 @@ typedef struct {
     uint64_t tombstones, bad_records;
     uint64_t logical_bytes, biggest_size;
     char     biggest_name[256];
+    /* per-zone split: physical = bitmap bits*4K, logical attributed
+     * through each file's AST block entries (zone bitfield) */
+    uint64_t raw_used_bytes, shadow_used_bytes;
+    uint64_t logic_raw_bytes, logic_shadow_bytes;
 } invfs_volume_stats;
 int vol_compute_stats(invfs_volume *v, invfs_volume_stats *out);
+uint64_t vol_zone_used_bytes(invfs_volume *v, uint64_t start_blk, uint64_t end_blk);
 
 /* xattrs stored inside the same INO2 ext (TLVs). val semantics like
  * getxattr(2): size query via *vlen==0. list returns NUL-separated names. */
