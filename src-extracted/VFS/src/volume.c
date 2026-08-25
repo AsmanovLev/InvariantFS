@@ -2167,8 +2167,34 @@ int vol_rmdir(invfs_volume *v, const char *name)
        scan, which accepted records already killed by a later tombstone and
        so kept an emptied directory ENOTEMPTY forever. */
     if (idx_dir_count(v, anchor, (size_t)alen) >
-        (idx_get(v, anchor, (size_t)alen) ? 1u : 0u))
-        return -2;   /* ENOTEMPTY */
+        (idx_get(v, anchor, (size_t)alen) ? 1u : 0u)) {
+        /* Ghost tolerance: unlink-while-open (.fuse_hidden dance) can
+         * leave children whose index entry outlived its record. If every
+         * listed child resolves to no live name index entry, the dir is
+         * de-facto empty -- scrub and remove instead of ENOTEMPTY. */
+        int listed = 0, alive = 0;
+        char child[600];
+        invfs_dirent ents[64];
+        int n = vol_list_dir(v, name, ents, 64);
+        int k;
+        for (k = 0; k < n; k++) {
+            if (ents[k].name[0] == 0) continue;
+            snprintf(child, sizeof child, "%s/%s", name, ents[k].name);
+            listed++;
+            if (vol_find(v, child) != 0 || vol_is_dir(v, child)) alive++;
+        }
+        if (alive == 0 && listed > 0 && n <= 64) {
+            for (k = 0; k < n; k++) {
+                if (ents[k].name[0] == 0) continue;
+                snprintf(child, sizeof child, "%s/%s", name, ents[k].name);
+                idx_del(v, child, (size_t)strlen(child), 0);
+                idx_bump_dirs(v, child, strlen(child), -1);
+            }
+            v->dirty = 1;
+        } else {
+            return -2;   /* genuinely not empty */
+        }
+    }
     return vol_delete_file(v, anchor);
 }
 
