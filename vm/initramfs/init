@@ -15,6 +15,7 @@ echo "[init] loading fuse.ko"
 insmod /fuse.ko 2>/dev/null || insmod /fuse.ko.xz 2>/dev/null
 
 # NIC for ssh/networking (harmless if absent)
+[ -f /modules/failover.ko ] && insmod /modules/failover.ko 2>/dev/null
 [ -f /modules/net_failover.ko ] && insmod /modules/net_failover.ko 2>/dev/null
 [ -f /modules/virtio_net.ko ]   && insmod /modules/virtio_net.ko 2>/dev/null
 
