@@ -4904,6 +4904,31 @@ int vol_rename(invfs_volume *v, const char *from, const char *to)
 
     vol_ensure_path(v, to);   /* parents of the destination */
 
+    /* FAST PATH: plain files without container siblings are renamed as
+     * hardlink(new)+unlink_name(old) -- both are O(1) index-hint ops.
+     * The legacy full-area sibling scan below only runs for directories
+     * and container anchors ('!' siblings / num_children>0); on big
+     * volumes it cost minutes per rename (dracut does hundreds). */
+    if (!dir && !strchr(from, '!') && !strchr(to, '!')) {
+        uint8_t *buf = NULL;
+        uint32_t rl = 0;
+        uint64_t fid = vol_find(v, from);
+        int simple = 0;
+        if (fid != 0 &&
+            meta_read_record_by_id(v, fid, &buf, &rl, NULL, 0, NULL) == 0 &&
+            rl >= sizeof(invfs_inode_rec) + 16) {
+            uint16_t nch;
+            memcpy(&nch, buf + sizeof(invfs_inode_rec) + 12, 2);
+            simple = (nch == 0);
+        }
+        free(buf);
+        if (simple) {
+            if (vol_hardlink(v, from, to) != 0) return -1;
+            if (vol_unlink_name(v, from) != 0) return -1;
+            return 0;
+        }
+    }
+
     if (dir) { snprintf(pre, sizeof pre, "%s/", from); pren = strlen(pre); }
 
     /* Collect every record the move touches BEFORE appending anything:

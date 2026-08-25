@@ -1360,6 +1360,12 @@ int main(int argc, char *argv[])
         int rc;
         int k;
         fuse_argv[fuse_argc++] = "invf-fuse";
+        /* attribute caching off by default: a writer process (wget) and
+         * the stat-ing process (portage digest check) are different
+         * clients; a cached size=0 from create time made portage see an
+         * empty file right after 80KB landed. User -o opts can override. */
+        fuse_argv[fuse_argc++] = "-o";
+        fuse_argv[fuse_argc++] = "attr_timeout=0,ac_attr_timeout=0";
         /* -f/-d are consumed by us (fuse_daemonize below); fuse_new
          * rejects them as unknown options */
         if (opts) {
