@@ -166,6 +166,67 @@ static int sniff_ppmd(const uint8_t *head, size_t head_len, const char *name)
     return invfs_text_family(name, head, head_len) ? 50 : 0;
 }
 
+/* ---------------- binary (executable) classifier (WP14a) ----------------
+ *
+ * The binary analogue of invfs_text_family: recognizes executable
+ * container magics so the sweep can batch them cross-file (shared ZSTD
+ * frame per <=4MB batch, x86 members BCJ-prefiltered first). Magic-only
+ * on purpose: an extension like ".bin"/".so" says nothing about the
+ * content, and the sweep calls this with the whole file in hand, so a
+ * magic check costs nothing extra.
+ *
+ * CAFEBABE is also the Java .class magic: classifying one as "Mach-O
+ * family" is harmless -- the family is only a sort/BCJ-eligibility key,
+ * and family 25 never gets the x86 prefilter. */
+
+#define INVFS_BIN_MIN_SIZE 4096   /* smaller files stay on the generic path */
+
+int invfs_binary_family(const uint8_t *head, size_t head_len, const char *name)
+{
+    (void)name;
+    if (!head || head_len < INVFS_BIN_MIN_SIZE) return 0;
+
+    /* ELF: \x7F "ELF"; e_machine is the u16 LE at offset 18 */
+    if (head[0] == 0x7F && head[1] == 'E' && head[2] == 'L' &&
+        head[3] == 'F') {
+        unsigned em = (unsigned)head[18] | ((unsigned)head[19] << 8);
+        switch (em) {
+        case 62:  return INVFS_BIN_FAMILY_ELF_X64;    /* EM_X86_64 */
+        case 3:   return INVFS_BIN_FAMILY_ELF_X86;    /* EM_386 */
+        case 183: return INVFS_BIN_FAMILY_ELF_A64;    /* EM_AARCH64 */
+        default:  return INVFS_BIN_FAMILY_ELF_OTHER;
+        }
+    }
+
+    /* PE: "MZ" DOS stub, e_lfanew (u32 LE @0x3C) -> "PE\0\0" */
+    if (head[0] == 'M' && head[1] == 'Z') {
+        uint32_t peoff = (uint32_t)head[0x3C]        | ((uint32_t)head[0x3D] << 8) |
+                         ((uint32_t)head[0x3E] << 16) | ((uint32_t)head[0x3F] << 24);
+        if (peoff >= 0x40 && (uint64_t)peoff + 4 <= head_len &&
+            head[peoff] == 'P' && head[peoff + 1] == 'E' &&
+            head[peoff + 2] == 0 && head[peoff + 3] == 0)
+            return INVFS_BIN_FAMILY_PE;
+        return 0;   /* an MZ that cannot confirm PE\0\0 is a DOS exe at
+                     * best: leave it generic rather than mis-sort it */
+    }
+
+    /* Mach-O: 32/64-bit, both byte orders, and the fat-universal magics */
+    if (head[0] == 0xFE && head[1] == 0xED &&
+        head[2] == 0xFA && (head[3] == 0xCE || head[3] == 0xCF))
+        return INVFS_BIN_FAMILY_MACHO;
+    if ((head[0] == 0xCE || head[0] == 0xCF) &&
+        head[1] == 0xFA && head[2] == 0xED && head[3] == 0xFE)
+        return INVFS_BIN_FAMILY_MACHO;
+    if (head[0] == 0xCA && head[1] == 0xFE &&
+        head[2] == 0xBA && head[3] == 0xBE)
+        return INVFS_BIN_FAMILY_MACHO;
+    if (head[0] == 0xBE && head[1] == 0xBA &&
+        head[2] == 0xFE && head[3] == 0xCA)
+        return INVFS_BIN_FAMILY_MACHO;
+
+    return 0;
+}
+
 /* ---------------- magic sniffs ---------------- */
 
 static int magic_at(const uint8_t *head, size_t head_len,
@@ -825,7 +886,9 @@ static void pack_entry_free(pack_entry *p)
  * Filled lazily on the first probe of each codec. The sweep is
  * single-threaded today, so a plain unsynchronized cache is fine --
  * revisit if probing ever goes concurrent. */
-#define PROBE_CACHE_SLOTS 16   /* INVFS_ALGO_* run 0..13 (invarifs.h, codec.h) */
+#define PROBE_CACHE_SLOTS 16   /* INVFS_ALGO_* registry ids run 0..13; 14
+                                * (ZSTD_BCJ) is an AST-only tag (WP14a) with
+                                * no registry entry, so it never probes */
 static signed char probe_cache[PROBE_CACHE_SLOTS];   /* 0 = not probed yet */
 
 static int probe_cached(uint32_t algo, const char *name, const char *tool)

@@ -561,6 +561,7 @@ int main(int argc, char **argv)
             case 7:  what = "JPEG -> JXL (lossless)";    break;
             case 8:  what = "MP3 -> PMP (packMP3)";      break;
             case 9:  what = "text -> PPMd batch";        break;
+            case 10: what = "binary -> ZSTD batch";      break;   /* WP14a */
             default: what = "RAW -> ZSTD-19";            break;
             }
         } else if (rc < 0) {

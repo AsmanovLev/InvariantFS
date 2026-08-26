@@ -41,6 +41,7 @@
 #include "zlib.h"
 #include "ppmd_codec.h"
 #include "codec.h"
+#include "bcj_x86.h"
 #include "blake3.h"
 
 /* flacx.c — FLAC frame recipe extract/rebuild (bit-exact). */
@@ -226,6 +227,10 @@ typedef struct invfs_volume {
     /* WP10 §4: deferred text candidates awaiting vol_tz_flush */
     tz_candidate *tz;
     size_t tz_n, tz_cap;
+    /* WP14a: deferred binary (executable) candidates awaiting the same
+     * vol_tz_flush -- one flush entry point drains both accumulators */
+    tz_candidate *bz;
+    size_t bz_n, bz_cap;
     /* Crash consistency (doc/08). `dirty` remembers that the on-disk state
        has already been set to DIRTY this session, so the mark costs one
        superblock write per mount instead of one per mutation.
@@ -941,6 +946,7 @@ void vol_close(invfs_volume *v)
     idx_clear(v);
     arc_destroy(v->arc);
     free(v->tz);
+    free(v->bz);
     free(v->bitmap);
     free(v->l2p);
     free(v->path);
@@ -2845,16 +2851,34 @@ static int mz_tdefl_compress(const uint8_t *in, size_t in_len,
                              uint8_t *out, size_t out_cap, int level,
                              size_t *out_len);
 
-/* WP10 §5: read a slice of a shared PPMd text batch. A member AST entry
- * (zone=TEXT, algo=PPMD) names its batch by block_id: the member's L2P dup
- * entry maps it to the batch pba, and block_offset is the slice's offset in
- * the DECODED batch. The batch segment carries a [4B usize LE] sub-header in
- * front of the PPMd wire blob ([2B props][stream]), usize = decoded batch
- * size, under the usual [4B csize][4B crc32c] framing. The decoded batch is
- * cached in the ARC keyed by the TAGGED pba (pba | TZ_ARC_TAG), not inode id:
- * one batch is shared by many member inodes, and the segment is freed only
- * by GC (which invalidates the tagged pba key first). Batches reach 4 MB, so
- * this is heap-only -- never the callers' stack segment buffer. */
+/* WP10 §5 / WP14a: is this AST entry a member slice of a shared batch?
+ * zone=TEXT means "batched"; the payload codec is PPMD (text batches,
+ * WP10) or ZSTD / ZSTD_BCJ (binary batches, WP14a). */
+static int tz_batch_algo(uint32_t algo)
+{
+    return algo == INVFS_ALGO_PPMD || algo == INVFS_ALGO_ZSTD ||
+           algo == INVFS_ALGO_ZSTD_BCJ;
+}
+
+/* WP10 §5 + WP14a: read a slice of a shared batch. A member AST entry
+ * (zone=TEXT) names its batch by block_id: the member's L2P dup entry maps
+ * it to the batch pba, and block_offset is the slice's offset in the
+ * DECODED batch. The batch segment carries a [4B usize LE] sub-header in
+ * front of the codec blob (PPMd: [2B props][stream]; binary: one zstd
+ * frame), usize = decoded batch size, under the usual [4B csize]
+ * [4B crc32c] framing. The decoded batch is cached in the ARC keyed by the
+ * TAGGED pba (pba | TZ_ARC_TAG), not inode id: one batch is shared by many
+ * member inodes, and the segment is freed only by GC (which invalidates the
+ * tagged pba key first). Batches reach 4 MB, so this is heap-only -- never
+ * the callers' stack segment buffer.
+ *
+ * WP14a BCJ: an algo==ZSTD_BCJ batch holds member slices that were each
+ * x86-BCJ-prefiltered STANDALONE (pc=0, state=0) before concatenation. The
+ * inverse is only bijective over exactly that member window, so a partial
+ * read of such a slice first decodes the slice [block_offset, +length) as
+ * a whole, inverts it, and only then serves the requested sub-window. The
+ * cached batch stays in encoded form (the cache is shared with the other
+ * members and must never be mutated). */
 static int vol_read_text_slice(invfs_volume *v, uint64_t inode_id,
                                const invfs_ast_block_entry *e,
                                uint64_t slice_off, uint8_t *dst, size_t want)
@@ -2906,17 +2930,56 @@ static int vol_read_text_slice(invfs_volume *v, uint64_t inode_id,
         }
         fresh = (uint8_t *)malloc(usize);
         if (!fresh) { free(blob); return -1; }
-        /* the decoder's wire blob starts at the props, past the usize LE */
-        if (invfs_ppmd_decode(blob + 4, csize - 4, fresh, usize) != 0) {
-            fprintf(stderr, "ppmd decode failed: text batch pba %llu\n",
-                    (unsigned long long)pba);
+        /* the decoder's wire blob starts past the usize LE */
+        if (e->algo == INVFS_ALGO_PPMD) {
+            if (invfs_ppmd_decode(blob + 4, csize - 4, fresh, usize) != 0) {
+                fprintf(stderr, "ppmd decode failed: text batch pba %llu\n",
+                        (unsigned long long)pba);
+                free(fresh); free(blob); return -1;
+            }
+        } else if (e->algo == INVFS_ALGO_ZSTD ||
+                   e->algo == INVFS_ALGO_ZSTD_BCJ) {
+            /* WP14a: one zstd stream for the whole batch (decode-whole is
+             * fine at GB/s); the BCJ tag only names the prefilter, which
+             * is undone per member slice below, not here */
+            const invfs_codec *zc = invfs_codec_by_algo(INVFS_ALGO_ZSTD);
+            if (!zc || !zc->decode ||
+                zc->decode(blob + 4, csize - 4, fresh, usize) != 0) {
+                fprintf(stderr, "zstd decode failed: binary batch pba %llu\n",
+                        (unsigned long long)pba);
+                free(fresh); free(blob); return -1;
+            }
+        } else {
+            fprintf(stderr, "text slice: unknown batch algo %u\n",
+                    (unsigned)e->algo);
             free(fresh); free(blob); return -1;
         }
         free(blob);
         batch = fresh;
         batch_len = usize;
     }
-    if ((uint64_t)e->block_offset + slice_off + want <= batch_len) {
+    if (e->algo == INVFS_ALGO_ZSTD_BCJ) {
+        /* invert the per-member prefilter: the window is exactly the
+         * member slice, decoded whole, at pc=0 -- the same window the
+         * encoder ran over (see the flush feed loop) */
+        if ((uint64_t)e->block_offset + e->length <= batch_len) {
+            if (slice_off == 0 && want == (size_t)e->length) {
+                /* the common case (whole-slice read): no extra copy */
+                memcpy(dst, batch + e->block_offset, want);
+                invfs_bcj_x86_dec(dst, want);
+                rc = 0;
+            } else {
+                uint8_t *sl = (uint8_t *)malloc(e->length ? e->length : 1);
+                if (sl) {
+                    memcpy(sl, batch + e->block_offset, e->length);
+                    invfs_bcj_x86_dec(sl, e->length);
+                    memcpy(dst, sl + slice_off, want);
+                    free(sl);
+                    rc = 0;
+                }
+            }
+        }
+    } else if ((uint64_t)e->block_offset + slice_off + want <= batch_len) {
         memcpy(dst, batch + e->block_offset + slice_off, want);
         rc = 0;
     }
@@ -2994,9 +3057,10 @@ static int vol_read_inode(invfs_volume *v, uint64_t inode_id, unsigned depth,
                 uint8_t *blob;
                 size_t dst_off = (size_t)e->file_offset;
 
-                /* TEXT member: a slice of a shared PPMd batch, decoded and
-                 * cached by pba (heap only -- see vol_read_text_slice) */
-                if (e->zone == INVFS_ZONE_TEXT && e->algo == INVFS_ALGO_PPMD) {
+                /* Batch member: a slice of a shared batch (PPMd text,
+                 * ZSTD/ZSTD_BCJ binary), decoded and cached by pba (heap
+                 * only -- see vol_read_text_slice) */
+                if (e->zone == INVFS_ZONE_TEXT && tz_batch_algo(e->algo)) {
                     if (vol_read_text_slice(v, inode_id, e, 0,
                                             data + dst_off,
                                             (size_t)e->length) != 0) {
@@ -4243,10 +4307,12 @@ static int vol_inode_first_zone(invfs_volume *v, uint64_t inode_id)
 }
 
 /* WP10 write path (defined with the class helpers, after vol_stamp_class):
- * defer into the text accumulator, downgrade a stored file to the generic
- * form on policy violation, and the cheap head-sniff behind the
- * UNCOMPRESSIBLE retry predicate. */
+ * defer into the text/binary accumulators, downgrade a stored file to the
+ * generic form on policy violation, and the cheap head-sniff behind the
+ * UNCOMPRESSIBLE retry predicate. WP14a: bz_defer is the binary half. */
 static int tz_defer(invfs_volume *v, uint64_t inode_id, const char *name,
+                    uint64_t size, uint32_t family);
+static int bz_defer(invfs_volume *v, uint64_t inode_id, const char *name,
                     uint64_t size, uint32_t family);
 static int vol_class_downgrade(invfs_volume *v, uint64_t inode_id,
                                const char *name, uint8_t calgo);
@@ -4388,9 +4454,14 @@ int vol_sweep_one(invfs_volume *v, uint64_t inode_id, const char *name)
                     return vol_jxl_retry(v, inode_id, name);
                 break;   /* the policy now admits the codec: retry */
             default: {
-                /* TEXT/CODEC/CONTAINER/GENERIC: policy compliance. The
-                 * generic floor codecs (NONE/LZ4/ZSTD) are always compliant
-                 * -- there is nothing cheaper left to downgrade INTO. */
+                /* TEXT/BATCHED_BIN/CODEC/CONTAINER/GENERIC: policy
+                 * compliance. The generic floor codecs (NONE/LZ4/ZSTD) are
+                 * always compliant -- there is nothing cheaper left to
+                 * downgrade INTO. (A BATCHED_BIN member stamped with the
+                 * ZSTD_BCJ AST tag finds no registry entry -- the BCJ tag
+                 * names a pipeline stage, not a codec -- and skips the
+                 * codec-level checks entirely; the batch-size rule below is
+                 * its compliance check.) */
                 int violated = 0;
                 if (cc && calgo != INVFS_ALGO_NONE &&
                     calgo != INVFS_ALGO_LZ4 && calgo != INVFS_ALGO_ZSTD) {
@@ -4403,15 +4474,51 @@ int vol_sweep_one(invfs_volume *v, uint64_t inode_id, const char *name)
                         if (fsz > v->arc_budget) violated = 1;
                     }
                 }
-                /* a TEXT batch that outgrew the cache budget un-batches:
-                 * arc refuses entries over budget/2 (arc.c), so the policy
-                 * guarantee is read-time, and the member re-stores generic */
-                if (!violated && ccls == INVFS_CLASS_TEXT && v->arc_budget &&
+                /* a batch that outgrew the cache budget un-batches: arc
+                 * refuses entries over budget/2 (arc.c), so the policy
+                 * guarantee is read-time, and the member re-stores generic.
+                 * BATCHED_BIN (WP14a) obeys the same rule -- the batch
+                 * payload's [4B usize] header is codec-independent, so
+                 * tz_member_oversized reads zstd batches unchanged. */
+                if (!violated && (ccls == INVFS_CLASS_TEXT ||
+                                  ccls == INVFS_CLASS_BATCHED_BIN) &&
+                    v->arc_budget &&
                     tz_member_oversized(v, inode_id, v->arc_budget / 2))
                     violated = 1;
+                /* WP14a migration path: a GENERIC file (pre-WP14a that
+                 * means per-segment ZSTD) whose head sniffs as an
+                 * executable family re-enters the full path below and
+                 * defers into the binary accumulator. ALWAYS on -- not
+                 * generation-gated: binary batching shipped in the same
+                 * build as this predicate, so a GENERIC stamp on a
+                 * binary-family file can only predate it, and re-batching
+                 * it is the upgrade the stamp exists to permit. (The
+                 * UNCOMPRESSIBLE stamp stays generation-gated: such a file
+                 * already proved the gain is not there.) */
+                if (!violated && ccls == INVFS_CLASS_GENERIC &&
+                    !strchr(name, '!')) {
+                    uint8_t head[8192];
+                    int got = vol_read_range(v, inode_id, 0, sizeof head,
+                                             head);
+                    if (got > 0 &&
+                        invfs_binary_family(head, (size_t)got, name) > 0)
+                        break;   /* -> full path: re-read + bz_defer */
+                }
                 if (!violated) return 0;
-                return vol_class_downgrade(v, inode_id, name, calgo) == 0
-                       ? 6 : -1;
+                {
+                    /* the downgrade stamp names the batch PAYLOAD codec:
+                     * BCJ is a pipeline stage with no registry entry, so a
+                     * MEMLIMIT{ZSTD_BCJ} stamp could never re-arm (the
+                     * predicate's by_algo lookup finds nothing). ZSTD is
+                     * the codec the retry consults; it is always admitted,
+                     * so the re-batch fires on the very next sweep and
+                     * re-targets the CURRENT batch size. */
+                    uint8_t dalgo = (ccls == INVFS_CLASS_BATCHED_BIN &&
+                                     calgo == INVFS_ALGO_ZSTD_BCJ)
+                                  ? (uint8_t)INVFS_ALGO_ZSTD : calgo;
+                    return vol_class_downgrade(v, inode_id, name, dalgo) == 0
+                           ? 6 : -1;
+                }
             }
             }
         } else if (vol_inode_first_zone(v, inode_id) != INVFS_ZONE_RAW) {
@@ -4626,6 +4733,23 @@ int vol_sweep_one(invfs_volume *v, uint64_t inode_id, const char *name)
                 free(full);
                 return 9;   /* text -> PPMd batch (deferred to flush) */
             }
+        }
+    }
+
+    /* WP14a: not text either -- executable binaries (ELF/PE/Mach-O by
+     * magic, >= 4 KB) defer into the BINARY accumulator and are sealed
+     * into shared ZSTD batches (x86 members BCJ-prefiltered first) by the
+     * same vol_tz_flush. No dec_mem gate on purpose: the batch payload
+     * codec is ZSTD, the generic floor itself -- a policy tight enough to
+     * reject it would reject the floor it falls back to, and the batch
+     * unit is already bounded by arc_budget/2 at seal time. Same "!"
+     * sibling exclusion as text. */
+    if (!strchr(name, '!')) {
+        int bfam = invfs_binary_family(full, full_len, name);
+        if (bfam > 0 &&
+            bz_defer(v, inode_id, name, full_len, (uint32_t)bfam) == 0) {
+            free(full);
+            return 10;   /* binary -> ZSTD batch (deferred to flush) */
         }
     }
 
@@ -4939,9 +5063,10 @@ int vol_read_range(invfs_volume *v, uint64_t inode_id, uint64_t offset,
         if (hi > ast_h.file_size) hi = ast_h.file_size;
         if (lo >= hi) continue;
 
-        /* TEXT member: slice of the shared PPMd batch; heap + pba-keyed ARC,
-         * never the stack tmp[] (batches reach 4 MB, segments only 64 KB) */
-        if (e->zone == INVFS_ZONE_TEXT && e->algo == INVFS_ALGO_PPMD) {
+        /* Batch member: slice of a shared PPMd/ZSTD(+BCJ) batch; heap +
+         * pba-keyed ARC, never the stack tmp[] (batches reach 4 MB,
+         * segments only 64 KB) */
+        if (e->zone == INVFS_ZONE_TEXT && tz_batch_algo(e->algo)) {
             want = (size_t)(hi - lo);
             if (vol_read_text_slice(v, inode_id, e, lo - seg_lo,
                                     (uint8_t *)buf + (size_t)(lo - offset),
@@ -5891,6 +6016,9 @@ typedef struct {
     size_t n_slices, cap_slices;
     uint64_t file_size;      /* authoritative size when fed (fresh read) */
     uint64_t new_id;         /* allocated at commit (0 = not yet) */
+    uint32_t algo;           /* batch algo its slices carry (PPMD / ZSTD /
+                              * ZSTD_BCJ) -- WP14a */
+    int bcj;                 /* member is x86-BCJ-prefiltered per slice */
     int complete;            /* all bytes of the candidate fed */
     int fallback;            /* its batch failed -> generic per-file path */
     int committed;           /* member record rewritten */
@@ -5900,6 +6028,7 @@ typedef struct {
 typedef struct {
     uint64_t seq, pba;
     uint32_t phys;
+    uint32_t algo;           /* the batch payload codec tag (WP14a) */
 } tz_sealed;
 
 /* owner inode state, loaded once and rewritten per change */
@@ -5915,27 +6044,47 @@ typedef struct {
 
 /* ---- accumulator (deferral side) ---- */
 
-static int tz_defer(invfs_volume *v, uint64_t inode_id, const char *name,
-                    uint64_t size, uint32_t family)
+/* one accumulator is a (array, n, cap) triple on the volume: v->tz for
+ * text candidates (WP10), v->bz for binary ones (WP14a). Same growth
+ * and dedup rules for both. */
+static int acc_defer(tz_candidate **arr, size_t *np, size_t *capp,
+                     uint64_t inode_id, const char *name,
+                     uint64_t size, uint32_t family)
 {
     size_t i, nl = strlen(name);
     tz_candidate *nt;
     if (nl == 0 || nl > INVFS_MAX_NAME) return -1;
-    for (i = 0; i < v->tz_n; i++)
-        if (v->tz[i].inode_id == inode_id) return 0;   /* already deferred */
-    if (v->tz_n == v->tz_cap) {
-        size_t nc = v->tz_cap ? v->tz_cap * 2 : 64;
-        nt = (tz_candidate *)realloc(v->tz, nc * sizeof(tz_candidate));
+    for (i = 0; i < *np; i++)
+        if ((*arr)[i].inode_id == inode_id) return 0;   /* already deferred */
+    if (*np == *capp) {
+        size_t nc = *capp ? *capp * 2 : 64;
+        nt = (tz_candidate *)realloc(*arr, nc * sizeof(tz_candidate));
         if (!nt) return -1;
-        v->tz = nt;
-        v->tz_cap = nc;
+        *arr = nt;
+        *capp = nc;
     }
-    nt = &v->tz[v->tz_n++];
+    nt = &(*arr)[(*np)++];
     nt->inode_id = inode_id;
     nt->size = size;
     nt->family = family;
     memcpy(nt->name, name, nl + 1);
     return 0;
+}
+
+static int tz_defer(invfs_volume *v, uint64_t inode_id, const char *name,
+                    uint64_t size, uint32_t family)
+{
+    return acc_defer(&v->tz, &v->tz_n, &v->tz_cap, inode_id, name, size,
+                     family);
+}
+
+/* WP14a: defer an executable (binary-family) file into the binary
+ * accumulator; vol_tz_flush seals it into shared ZSTD(+BCJ) batches. */
+static int bz_defer(invfs_volume *v, uint64_t inode_id, const char *name,
+                    uint64_t size, uint32_t family)
+{
+    return acc_defer(&v->bz, &v->bz_n, &v->bz_cap, inode_id, name, size,
+                     family);
 }
 
 /* ---- owner inode ---- */
@@ -6190,6 +6339,15 @@ typedef struct {
     uint8_t *bbuf;
     size_t blen, bcap;          /* bcap = batch target */
     uint64_t open_seq;
+    /* WP14a: 0 = text flush (PPMd), 1 = binary flush (ZSTD[+BCJ]).
+     * open_algo/open_bcj describe the batch currently being filled:
+     * the first member of a batch sets the tone, and a member of the
+     * other BCJ kind seals the open batch first (binary batches are
+     * prefilter-homogeneous -- the (family,size) sort makes BCJ families
+     * adjacent, so this split only ever fires at family boundaries). */
+    int binary;
+    uint32_t open_algo;         /* PPMD / ZSTD / ZSTD_BCJ */
+    int open_bcj;
     /* sealed batches of this flush (for member-commit pba lookup) */
     tz_sealed *sealed;
     size_t n_sealed, cap_sealed;
@@ -6224,10 +6382,12 @@ static const tz_sealed *tz_sealed_find(const tz_ctx *c, uint64_t seq)
 }
 
 /* Rewrite one member's record under its pre-allocated new id (dup maps are
- * already written and flushed by tz_commit_ready) with TEXT entries,
+ * already written and flushed by tz_commit_ready) with TEXT-zone entries,
  * carrying the old record's ext (INO2 + xattrs) verbatim, then retire the
  * old id (its RAW blocks free normally -- the TEXT gate only covers batches)
- * and stamp TEXT. */
+ * and stamp the batching class (TEXT for PPMd batches, BATCHED_BIN for
+ * WP14a binary batches). The entry algo comes from the sealed batch the
+ * slice landed in: PPMD for text, ZSTD or ZSTD_BCJ for binary. */
 static int tz_commit_member(tz_ctx *c, tz_member *m, const tz_candidate *cand)
 {
     invfs_volume *v = c->v;
@@ -6279,8 +6439,8 @@ static int tz_commit_member(tz_ctx *c, tz_member *m, const tz_candidate *cand)
         memset(&ne[i], 0, sizeof ne[i]);
         ne[i].file_offset = m->slices[i].file_off;
         ne[i].length = m->slices[i].len;
-        ne[i].zone = INVFS_ZONE_TEXT;
-        ne[i].algo = INVFS_ALGO_PPMD;
+        ne[i].zone = INVFS_ZONE_TEXT;      /* TEXT zone == "batched" (WP14a) */
+        ne[i].algo = s->algo;              /* PPMD / ZSTD / ZSTD_BCJ */
         ne[i].block_id = (uint32_t)m->slices[i].batch_seq;
         ne[i].block_offset = m->slices[i].batch_off;
     }
@@ -6305,8 +6465,12 @@ static int tz_commit_member(tz_ctx *c, tz_member *m, const tz_candidate *cand)
     if (vol_delete_inode(v, cand->inode_id, name) != 0)
         fprintf(stderr, "tz: %s committed but the old record survived; "
                         "invf-fsck -f will reclaim it\n", name);
-    vol_stamp_class(v, new_id, INVFS_CLASS_TEXT, INVFS_ALGO_PPMD,
-                    invfs_registry_generation());
+    if (c->binary)
+        vol_stamp_class(v, new_id, INVFS_CLASS_BATCHED_BIN,
+                        (uint8_t)m->algo, invfs_registry_generation());
+    else
+        vol_stamp_class(v, new_id, INVFS_CLASS_TEXT, INVFS_ALGO_PPMD,
+                        invfs_registry_generation());
     rc = 0;
 out:
     free(rec);
@@ -6368,12 +6532,14 @@ static uint64_t tz_owner_total(const tz_owner *o)
     return t;
 }
 
-/* Seal the open batch: PPMd-encode, MANDATORY decode+memcmp verify (doc/06
- * invariant), size guard, write the segment in the shadow zone, map it under
- * the owner, flush the journal, append the owner AST entry. On ANY refusal
- * (encode/verify/guard/ENOSPC) the batch is dropped unwritten and every
- * member with a slice in it falls back to the generic per-file path -- the
- * same "not smaller, keep the original" answer every other path gives.
+/* Seal the open batch: encode (PPMd for text, ZSTD-19 for binary -- the
+ * registry's zstd entry, mirroring the generic sweep level), MANDATORY
+ * decode+memcmp verify (doc/06 invariant), size guard, write the segment
+ * in the shadow zone, map it under the owner, flush the journal, append
+ * the owner AST entry. On ANY refusal (encode/verify/guard/ENOSPC) the
+ * batch is dropped unwritten and every member with a slice in it falls
+ * back to the generic per-file path -- the same "not smaller, keep the
+ * original" answer every other path gives.
  * Returns 0 on seal/fallback, -1 on hard error after the segment landed. */
 static int tz_seal(tz_ctx *c, const tz_candidate *cands,
                    tz_member *members, size_t n_members)
@@ -6393,15 +6559,37 @@ static int tz_seal(tz_ctx *c, const tz_candidate *cands,
     enc = (uint8_t *)malloc(cap);
     ver = (uint8_t *)malloc(c->blen);
     if (!enc || !ver) fail = 1;
-    if (!fail && invfs_ppmd_encode(c->bbuf, c->blen, enc, cap, &enc_len) != 0)
-        fail = 1;
-    /* invariant: the batch must round-trip byte-exactly before it is stored */
-    if (!fail &&
-        (invfs_ppmd_decode(enc, enc_len, ver, c->blen) != 0 ||
-         memcmp(ver, c->bbuf, c->blen) != 0)) {
-        fprintf(stderr, "tz: PPMd round-trip mismatch -- batch dropped, "
-                        "members stay generic\n");
-        fail = 1;
+    if (!fail) {
+        if (c->binary) {
+            /* WP14a: one zstd stream per batch. The payload codec is the
+             * registry ZSTD entry; BCJ (algo tag 14 on the AST) already
+             * ran per member slice before the bytes landed in bbuf. */
+            const invfs_codec *zc = invfs_codec_by_algo(INVFS_ALGO_ZSTD);
+            if (!zc || !zc->encode ||
+                zc->encode(c->bbuf, c->blen, enc, cap, &enc_len) != 0)
+                fail = 1;
+            /* invariant: the batch must round-trip byte-exactly before it
+             * is stored */
+            if (!fail &&
+                (zc->decode(enc, enc_len, ver, c->blen) != 0 ||
+                 memcmp(ver, c->bbuf, c->blen) != 0)) {
+                fprintf(stderr, "tz: ZSTD round-trip mismatch -- binary "
+                                "batch dropped, members stay generic\n");
+                fail = 1;
+            }
+        } else {
+            if (invfs_ppmd_encode(c->bbuf, c->blen, enc, cap, &enc_len) != 0)
+                fail = 1;
+            /* invariant: the batch must round-trip byte-exactly before it
+             * is stored */
+            if (!fail &&
+                (invfs_ppmd_decode(enc, enc_len, ver, c->blen) != 0 ||
+                 memcmp(ver, c->bbuf, c->blen) != 0)) {
+                fprintf(stderr, "tz: PPMd round-trip mismatch -- batch dropped, "
+                                "members stay generic\n");
+                fail = 1;
+            }
+        }
     }
     /* size guard: the batch must beat storing the slices raw (§4: ppmd<raw,
      * no ZSTD comparison -- 3 s/4 MB is too expensive) */
@@ -6478,7 +6666,7 @@ static int tz_seal(tz_ctx *c, const tz_candidate *cands,
         free(enc); free(ver); free(seg);
         return -1;
     }
-    /* owner AST += {cumulative offset, usize, TEXT, PPMD, open_seq, 0} */
+    /* owner AST += {cumulative offset, usize, TEXT, <batch algo>, seq, 0} */
     if (c->owner.n == c->owner.cap) {
         uint32_t nc = c->owner.cap ? c->owner.cap * 2 : 16;
         invfs_ast_block_entry *ne =
@@ -6493,7 +6681,7 @@ static int tz_seal(tz_ctx *c, const tz_candidate *cands,
         memset(e, 0, sizeof *e);
         e->length = c->blen;              /* file_offset rebuilt by write */
         e->zone = INVFS_ZONE_TEXT;
-        e->algo = INVFS_ALGO_PPMD;
+        e->algo = c->open_algo;           /* PPMD / ZSTD / ZSTD_BCJ */
         e->block_id = (uint32_t)c->open_seq;
         e->block_offset = 0;
         c->owner.n++;
@@ -6514,10 +6702,13 @@ static int tz_seal(tz_ctx *c, const tz_candidate *cands,
     c->sealed[c->n_sealed].seq = c->open_seq;
     c->sealed[c->n_sealed].pba = pba;
     c->sealed[c->n_sealed].phys = (uint32_t)phys;
+    c->sealed[c->n_sealed].algo = c->open_algo;
     c->n_sealed++;
     c->sealed_any = 1;
     if (getenv("INVFS_DEBUG"))
-        fprintf(stderr, "[tz] sealed batch %llu: %zu -> %zu bytes (pba %llu)\n",
+        fprintf(stderr, "[tz] sealed %s batch %llu: %zu -> %zu bytes (pba %llu)\n",
+                c->open_algo == INVFS_ALGO_PPMD ? "ppmd" :
+                c->open_algo == INVFS_ALGO_ZSTD_BCJ ? "zstd+bcj" : "zstd",
                 (unsigned long long)c->open_seq, c->blen, enc_len,
                 (unsigned long long)pba);
     c->open_seq++;
@@ -6540,26 +6731,51 @@ static int tz_order_cmp(const void *a, const void *b)
     return ia < ib ? -1 : 1;
 }
 
-int vol_tz_flush(invfs_volume *v)
+/* which stored classes may be re-batched at flush time (the candidate is
+ * no longer RAW): the deferred retries (MEMLIMIT/UNCOMPRESSIBLE/GUARD
+ * settled into generic storage) for both domains; plus, for the BINARY
+ * accumulator, plain GENERIC -- the WP14a migration path re-batches
+ * pre-existing per-segment-ZSTD binaries outright (binary batching shipped
+ * with this build, so a GENERIC stamp on a binary-family file can only
+ * predate it). Text keeps GENERIC terminal (WP10: no upgrade path). */
+static int tz_flush_class_ok(int binary, uint8_t cc)
+{
+    if (cc == INVFS_CLASS_GENERIC_MEMLIMIT ||
+        cc == INVFS_CLASS_UNCOMPRESSIBLE ||
+        cc == INVFS_CLASS_GENERIC_GUARD)
+        return 1;
+    if (binary && cc == INVFS_CLASS_GENERIC)
+        return 1;
+    return 0;
+}
+
+/* Flush ONE accumulator (text: binary=0, WP10; binary: binary=1, WP14a).
+ * The machinery is shared; what differs is exactly the codec (PPMd vs
+ * ZSTD[+BCJ]), the class stamp, and the content re-validation. */
+static int tz_flush_one(invfs_volume *v, int binary)
 {
     tz_ctx c;
     size_t n, i;
     size_t *order = NULL;
     tz_candidate *sc = NULL;   /* candidates in sorted order */
     tz_member *members = NULL;
+    tz_candidate *acc = binary ? v->bz : v->tz;
+    size_t acc_n = binary ? v->bz_n : v->tz_n;
     int rc = 0;
 
-    if (!v) return -1;
-    if (v->tz_n == 0) return 1;   /* nothing pending */
+    if (acc_n == 0) return 1;   /* nothing pending */
     if (!vol_write_enabled(v)) {
-        v->tz_n = 0;              /* read-only volume: nothing can land */
+        if (binary) v->bz_n = 0;   /* read-only volume: nothing can land */
+        else        v->tz_n = 0;
         return 1;
     }
 
     memset(&c, 0, sizeof c);
     c.v = v;
+    c.binary = binary;
+    c.open_algo = binary ? INVFS_ALGO_ZSTD : INVFS_ALGO_PPMD;
     c.skip_commit = getenv("INVFS_TZ_SKIP_COMMIT") != NULL;
-    n = v->tz_n;
+    n = acc_n;
 
     /* batch target: min(4 MB, arc/2) (arc refuses larger units); a disabled
      * cache (budget 0) does not bound the batch -- reads still decode */
@@ -6574,7 +6790,9 @@ int vol_tz_flush(invfs_volume *v)
     members = (tz_member *)calloc(n, sizeof(tz_member));
     if (!c.bbuf || !order || !sc || !members) { rc = -1; goto out; }
 
-    /* owner: find-or-create, then load its current AST state */
+    /* owner: find-or-create, then load its current AST state. ONE owner
+     * ("\x01tzb") holds text and binary batches alike: the batch_seq space,
+     * the L2P maps and the GC mark rule (zone==TEXT) are codec-agnostic. */
     c.owner_id = tz_owner_id(v);
     if (!c.owner_id || tz_owner_load(v, c.owner_id, &c.owner) != 0) {
         rc = -1;
@@ -6583,10 +6801,10 @@ int vol_tz_flush(invfs_volume *v)
     c.open_seq = c.owner.next_seq;
 
     /* stable sort by (family, size) into the working copy */
-    g_sort_cands = v->tz;
+    g_sort_cands = acc;
     for (i = 0; i < n; i++) order[i] = i;
     qsort(order, n, sizeof(size_t), tz_order_cmp);
-    for (i = 0; i < n; i++) sc[i] = v->tz[order[i]];
+    for (i = 0; i < n; i++) sc[i] = acc[order[i]];
 
     /* feed every candidate into the batch stream, sealing as batches fill */
     for (i = 0; i < n; i++) {
@@ -6606,24 +6824,48 @@ int vol_tz_flush(invfs_volume *v)
             uint8_t cc = 0, ca = 0;
             uint16_t cg = 0;
             /* a deferred retry (MEMLIMIT/UNCOMPRESSIBLE/Guard settled into
-             * generic storage) is fine to batch; anything else was swept
-             * meanwhile and is left alone */
+             * generic storage) is fine to batch -- and, for the binary
+             * accumulator, so is plain GENERIC (the WP14a migration);
+             * anything else was swept meanwhile and is left alone */
             if (z < 0 ||
                 vol_get_class(v, cand->inode_id, &cc, &ca, &cg) != 0 ||
-                (cc != INVFS_CLASS_GENERIC_MEMLIMIT &&
-                 cc != INVFS_CLASS_UNCOMPRESSIBLE &&
-                 cc != INVFS_CLASS_GENERIC_GUARD))
+                !tz_flush_class_ok(binary, cc))
                 continue;
         }
         if (vol_read_file(v, cand->inode_id, &data, &dlen) != 0 || !dlen) {
             free(data);
             continue;
         }
-        if (invfs_text_family(cand->name, data, dlen) == 0) {
-            /* content changed class since the deferral: plain generic */
-            vol_sweep_file(v, cand->inode_id);
-            free(data);
-            continue;
+        if (binary) {
+            /* the BCJ prefilter decision rides on the FRESH content's
+             * family, not the defer-time sort key */
+            int bfam = invfs_binary_family(data, dlen, cand->name);
+            if (bfam == 0) {
+                /* content changed class since the deferral: plain generic */
+                vol_sweep_file(v, cand->inode_id);
+                free(data);
+                continue;
+            }
+            m->bcj = (bfam == INVFS_BIN_FAMILY_ELF_X64 ||
+                      bfam == INVFS_BIN_FAMILY_ELF_X86);
+            m->algo = m->bcj ? INVFS_ALGO_ZSTD_BCJ : INVFS_ALGO_ZSTD;
+            /* batches are prefilter-homogeneous (a batch's algo is uniform
+             * for all its members): a member of the other BCJ kind seals
+             * the open batch first. The (family,size) sort keeps the BCJ
+             * families (20,21) adjacent, so this split only ever fires at
+             * a family boundary. */
+            if (c.blen && c.open_bcj != m->bcj &&
+                tz_seal(&c, sc, members, n) != 0) {
+                rc = -1; free(data); goto out;
+            }
+        } else {
+            if (invfs_text_family(cand->name, data, dlen) == 0) {
+                /* content changed class since the deferral: plain generic */
+                vol_sweep_file(v, cand->inode_id);
+                free(data);
+                continue;
+            }
+            m->algo = INVFS_ALGO_PPMD;
         }
         m->file_size = dlen;
         while (off < dlen) {
@@ -6631,11 +6873,22 @@ int vol_tz_flush(invfs_volume *v)
             if (c.blen == c.bcap &&
                 tz_seal(&c, sc, members, n) != 0) { rc = -1; free(data); goto out; }
             if (m->fallback) break;   /* its batch was dropped mid-file */
+            if (c.blen == 0) {   /* first member of a batch sets the tone */
+                c.open_bcj = m->bcj;
+                c.open_algo = m->algo;
+            }
             take = c.bcap - c.blen;
             if (take > dlen - off) take = dlen - off;
             if (tz_slice_push(m, c.open_seq, off, (uint32_t)c.blen,
                               (uint32_t)take) != 0) { rc = -1; free(data); goto out; }
             memcpy(c.bbuf + c.blen, data + off, take);
+            /* WP14a: the BCJ prefilter runs on the member slice STANDALONE
+             * (pc=0, state=0), before the batch exists as a whole. The read
+             * path inverts exactly this window at pc=0 after the batch
+             * decode -- enc and dec windows coincide, so the transform is
+             * bijective regardless of where the slice sits in the batch. */
+            if (m->bcj)
+                invfs_bcj_x86_enc(c.bbuf + c.blen, take);
             c.blen += take;
             off += take;
         }
@@ -6662,9 +6915,23 @@ out:
     free(c.bbuf);
     free(c.sealed);
     tz_owner_free(&c.owner);
-    v->tz_n = 0;   /* the accumulator is drained either way */
+    if (binary) v->bz_n = 0;   /* the accumulator is drained either way */
+    else        v->tz_n = 0;
     if (rc != 0) return rc;
     return c.sealed_any ? 0 : 1;
+}
+
+int vol_tz_flush(invfs_volume *v)
+{
+    int rt, rb;
+
+    if (!v) return -1;
+    /* text first, then binary: two independent accumulators, one shared
+     * owner inode (batch_seq space is handed out by tz_owner_load) */
+    rt = tz_flush_one(v, 0);
+    rb = tz_flush_one(v, 1);
+    if (rt < 0 || rb < 0) return -1;
+    return (rt == 0 || rb == 0) ? 0 : 1;   /* 0 = something sealed */
 }
 
 /* u32 comparator for the GC mark set */
@@ -6803,10 +7070,11 @@ out:
  *  - zone==INVFS_ZONE_TEXT entries (WP10 §11): shared PPMd batches belong
  *    to the owner inode and are never dedup candidates;
  *  - whole-file blobs (JXL/APE): unique by construction;
- *  - inodes sitting in the sweep run's text accumulator (v->tz): their
- *    records are retired by the SAME run's vol_tz_flush, and retiring
- *    frees the id's L2P targets -- merging one first would free the
- *    canonical copy under the survivor the dup was remapped onto.
+ *  - inodes sitting in the sweep run's batching accumulators (v->tz text,
+ *    v->bz binary): their records are retired by the SAME run's
+ *    vol_tz_flush, and retiring frees the id's L2P targets -- merging one
+ *    first would free the canonical copy under the survivor the dup was
+ *    remapped onto.
  *
  * Liveness uses the same rule as vol_compute_stats: the name must resolve
  * to this id (newest record wins) AND the id index must point at THIS
@@ -6841,12 +7109,15 @@ static int dedup_cmp(const void *a, const void *b)
     return 0;
 }
 
-/* is this inode deferred into the text accumulator of the running sweep? */
+/* is this inode deferred into one of the running sweep's accumulators
+ * (text WP10 / binary WP14a)? */
 static int dedup_is_deferred(const invfs_volume *v, uint64_t inode_id)
 {
     size_t i;
     for (i = 0; i < v->tz_n; i++)
         if (v->tz[i].inode_id == inode_id) return 1;
+    for (i = 0; i < v->bz_n; i++)
+        if (v->bz[i].inode_id == inode_id) return 1;
     return 0;
 }
 

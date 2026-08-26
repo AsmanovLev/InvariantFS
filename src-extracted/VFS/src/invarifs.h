@@ -44,6 +44,14 @@
 #define INVFS_ALGO_PNGR 10  /* PNG: JXL-lossless blob + "name!jxl" + IVPN recipe */
 #define INVFS_ALGO_PMP  11  /* MP3: packMP3 blob (MPEG-1 Layer III only, bit-exact) */
 #define INVFS_ALGO_RAWIMG 13 /* raw_image codecpack: DICOM/PNM/BMP/TIFF -> lossless JXL */
+/* WP14a: a shared binary batch (zone=TEXT semantics = "batched") whose
+ * members were x86-BCJ-prefiltered per member slice before concatenation.
+ * Exists ONLY as an AST tag: there is deliberately no codec-registry entry
+ * (BCJ is a pipeline stage in front of the batch's ZSTD frame, not a codec);
+ * the batch payload wire format is [4B usize LE][one zstd stream], exactly
+ * like an algo=ZSTD batch, and decode is ZSTD + per-member-slice BCJ inverse
+ * at pc=0 (bijective -- applied to the same window it was encoded over). */
+#define INVFS_ALGO_ZSTD_BCJ 14
 
 /* Storage-class flag (WP10): persisted as internal xattr "invfs.class" in the
  * INO2 ext block, value = invfs_class_tlv. Records WHY a file is stored the
@@ -61,7 +69,11 @@ enum {
                                        * when the limit admits it */
     INVFS_CLASS_GENERIC_GUARD    = 6, /* codec guard refused; first retry
                                        * candidate when codec generation bumps */
-    INVFS_CLASS_TEXT             = 7  /* PPMd batch member */
+    INVFS_CLASS_TEXT             = 7, /* PPMd batch member */
+    INVFS_CLASS_BATCHED_BIN      = 8  /* binary batch member (WP14a): zone=TEXT,
+                                       * algo = ZSTD (plain binary batch) or
+                                       * ZSTD_BCJ (x86-prefiltered batch).
+                                       * Same compliance/GC semantics as TEXT */
 };
 
 #pragma pack(push, 1)

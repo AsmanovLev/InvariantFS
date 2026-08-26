@@ -78,7 +78,7 @@ int main(int argc, char **argv)
             else
                 printf("  SHADOW: empty (not swept yet)\n");
             if (st.logic_text_bytes)
-                printf("  TEXT  : logic %8.1f MiB | shared PPMd batches\n",
+                printf("  TEXT  : logic %8.1f MiB | shared batches (PPMd text / ZSTD binary)\n",
                        st.logic_text_bytes / 1048576.0);
         }
     }

@@ -94,4 +94,24 @@ int invfs_codec_pack_estimate(const invfs_codec *c, const char *in_path,
 
 int invfs_text_family(const char *name, const uint8_t *head, size_t head_len);
 
+/* Binary (executable) families — the WP14a binary-batch sort key. Kept
+ * well clear of the INVFS_TEXT_FAMILY_* range (1..11) so one sort key
+ * column can never mix the two batching domains. */
+#define INVFS_BIN_FAMILY_ELF_X64   20   /* e_machine 62: BCJ-prefiltered */
+#define INVFS_BIN_FAMILY_ELF_X86   21   /* e_machine 3:  BCJ-prefiltered */
+#define INVFS_BIN_FAMILY_ELF_A64   22   /* e_machine 183 */
+#define INVFS_BIN_FAMILY_ELF_OTHER 23   /* any other e_machine */
+#define INVFS_BIN_FAMILY_PE        24   /* MZ + PE\0\0 at e_lfanew */
+#define INVFS_BIN_FAMILY_MACHO     25   /* FEEDFACE/CAFEBABE magic family */
+/* 26 ("other executable") is reserved: NOT assigned in v1. In particular
+ * a "#!" shebang script is TEXT (the text classifier claims it first) and
+ * must never be binary-batched. */
+
+/* 0 = not binary-batchable. Magic-only: ELF (arch split by e_machine @18),
+ * PE (MZ + PE\0\0 at e_lfanew), Mach-O. Files smaller than 4096 bytes are
+ * never classified (head_len carries the FILE size at the sweep call site,
+ * which passes the whole file). A PE whose e_lfanew points past the head
+ * window reads as 0 rather than guessing. */
+int invfs_binary_family(const uint8_t *head, size_t head_len, const char *name);
+
 #endif /* CODEC_H */

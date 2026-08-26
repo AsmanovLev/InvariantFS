@@ -21,6 +21,7 @@
 
 #include "codec.h"
 #include "invarifs.h"
+#include "bcj_x86.h"
 
 /* ---- test-local implementations of the pack exec hooks (WP13) ----
  * The production hooks live in volume.c (which this test does not link);
@@ -235,6 +236,167 @@ static void test_text_family(void)
     ok(invfs_text_family("noext", bin, sizeof bin) == 0, "binary -> not text");
     ok(invfs_text_family("a.unknownext", bin, sizeof bin) == 0,
        "unknown ext + binary -> not text");
+}
+
+/* ---------------- WP14a: binary classifier + BCJ round-trip ---------------- */
+
+static void test_binary_family(void)
+{
+    uint8_t elf[4096], pe[4096], bin[4096];
+    size_t i;
+    static const char text[] =
+        "the quick brown fox jumps over the lazy dog\n";
+
+    memset(elf, 0, sizeof elf);
+    elf[0] = 0x7F; elf[1] = 'E'; elf[2] = 'L'; elf[3] = 'F';
+
+    elf[18] = 62;  elf[19] = 0;
+    ok(invfs_binary_family(elf, sizeof elf, "a.out") == INVFS_BIN_FAMILY_ELF_X64,
+       "ELF e_machine=62 (x86-64) -> family 20");
+    elf[18] = 3;
+    ok(invfs_binary_family(elf, sizeof elf, "a.out") == INVFS_BIN_FAMILY_ELF_X86,
+       "ELF e_machine=3 (i386) -> family 21");
+    elf[18] = 183;
+    ok(invfs_binary_family(elf, sizeof elf, "a.out") == INVFS_BIN_FAMILY_ELF_A64,
+       "ELF e_machine=183 (aarch64) -> family 22");
+    elf[18] = 40;
+    ok(invfs_binary_family(elf, sizeof elf, "a.out") == INVFS_BIN_FAMILY_ELF_OTHER,
+       "ELF e_machine=40 (arm) -> family 23");
+    elf[18] = 0xF3; elf[19] = 0;   /* 243 = EM_RISCV */
+    ok(invfs_binary_family(elf, sizeof elf, "a.out") == INVFS_BIN_FAMILY_ELF_OTHER,
+       "ELF e_machine=243 (riscv) -> family 23");
+
+    /* the >=4KB gate: same magic, smaller file -> not batchable */
+    elf[18] = 62;
+    ok(invfs_binary_family(elf, 4095, "a.out") == 0, "ELF below 4KB -> 0");
+    ok(invfs_binary_family(elf, 20, "a.out") == 0, "ELF 20-byte head -> 0");
+    ok(invfs_binary_family(elf, 4096, "a.out") == INVFS_BIN_FAMILY_ELF_X64,
+       "ELF exactly 4KB -> family 20");
+
+    /* PE: MZ + e_lfanew -> "PE\0\0" */
+    memset(pe, 0, sizeof pe);
+    pe[0] = 'M'; pe[1] = 'Z';
+    pe[0x3C] = 0x80;
+    pe[0x80] = 'P'; pe[0x81] = 'E';
+    ok(invfs_binary_family(pe, sizeof pe, "x.exe") == INVFS_BIN_FAMILY_PE,
+       "MZ + PE\\0\\0 @0x80 -> family 24");
+    pe[0x80] = 'X';
+    ok(invfs_binary_family(pe, sizeof pe, "x.exe") == 0,
+       "MZ without PE signature -> 0");
+    pe[0x80] = 'P';
+    pe[0x3C] = 0xFF; pe[0x3D] = 0xFF; pe[0x3E] = 0xFF; pe[0x3F] = 0x7F;
+    ok(invfs_binary_family(pe, sizeof pe, "x.exe") == 0,
+       "e_lfanew past the head window -> 0 (no guessing)");
+
+    /* Mach-O magics */
+    memset(bin, 0, sizeof bin);
+    bin[0] = 0xFE; bin[1] = 0xED; bin[2] = 0xFA; bin[3] = 0xCF;
+    ok(invfs_binary_family(bin, sizeof bin, "x") == INVFS_BIN_FAMILY_MACHO,
+       "Mach-O 64-bit -> family 25");
+    bin[0] = 0xFE; bin[1] = 0xED; bin[2] = 0xFA; bin[3] = 0xCE;
+    ok(invfs_binary_family(bin, sizeof bin, "x") == INVFS_BIN_FAMILY_MACHO,
+       "Mach-O 32-bit -> family 25");
+    bin[0] = 0xCE; bin[1] = 0xFA; bin[2] = 0xED; bin[3] = 0xFE;
+    ok(invfs_binary_family(bin, sizeof bin, "x") == INVFS_BIN_FAMILY_MACHO,
+       "Mach-O CIGAM -> family 25");
+    bin[0] = 0xCA; bin[1] = 0xFE; bin[2] = 0xBA; bin[3] = 0xBE;
+    ok(invfs_binary_family(bin, sizeof bin, "x") == INVFS_BIN_FAMILY_MACHO,
+       "Mach-O fat (CAFEBABE) -> family 25");
+
+    /* negatives */
+    for (i = 0; i < sizeof bin; i++) bin[i] = (uint8_t)(i * 31u + 7u);
+    ok(invfs_binary_family(bin, sizeof bin, "x.bin") == 0,
+       "random binary -> 0");
+    {
+        uint8_t big[4096];
+        memset(big, 'x', sizeof big);
+        memcpy(big, text, sizeof text - 1);
+        ok(invfs_binary_family(big, sizeof big, "notes.txt") == 0,
+           "4KB of prose -> 0");
+    }
+    {
+        /* a >=4KB shebang script: binary classifier must refuse it (the
+         * text classifier claims it first on the real pipeline) */
+        uint8_t sh[4096];
+        memset(sh, '\n', sizeof sh);
+        memcpy(sh, "#!/bin/sh\nexit 0", 16);
+        ok(invfs_binary_family(sh, sizeof sh, "x") == 0,
+           "shebang script -> 0 (stays on the text path)");
+        ok(invfs_text_family("x.sh", sh, sizeof sh) == INVFS_TEXT_FAMILY_SHELL,
+           "shebang script IS text (.sh)");
+    }
+    {
+        /* real ELF from the build host, if readable */
+        FILE *f = fopen("/bin/true", "rb");
+        if (f) {
+            size_t got = fread(bin, 1, sizeof bin, f);
+            fclose(f);
+            if (got == sizeof bin)
+                ok(invfs_binary_family(bin, got, "true") ==
+                   INVFS_BIN_FAMILY_ELF_X64, "/bin/true -> ELF x86-64");
+        }
+    }
+}
+
+static void test_bcj(void)
+{
+    /* synthetic x86-ish stream: E8/E9 call+jmp sites with small rel32
+     * targets (the convertible shape) inside filler */
+    uint8_t code[8192], work[8192];
+    size_t i;
+
+    for (i = 0; i < sizeof code; i++)
+        code[i] = (uint8_t)(i * 37u + 11u);
+    for (i = 64; i + 5 < sizeof code; i += 256) {
+        uint32_t rel = (uint32_t)(i * 3 + 7);
+        code[i] = (i & 512) ? 0xE8 : 0xE9;   /* call / jmp */
+        code[i + 1] = (uint8_t)(rel & 0xFF);
+        code[i + 2] = (uint8_t)((rel >> 8) & 0xFF);
+        code[i + 3] = (uint8_t)((rel >> 16) & 0xFF);
+        code[i + 4] = 0;                     /* top byte 0x00: convertible */
+    }
+
+    memcpy(work, code, sizeof work);
+    invfs_bcj_x86_enc(work, sizeof work);
+    ok(memcmp(work, code, sizeof code) != 0,
+       "BCJ enc transforms convertible call/jmp operands");
+    invfs_bcj_x86_dec(work, sizeof work);
+    ok(memcmp(work, code, sizeof code) == 0,
+       "BCJ dec inverts enc byte-exactly (whole buffer, pc=0)");
+
+    /* slice-local bijectivity (the WP14a read-path shape): enc a buffer,
+     * dec a sub-window of it starting at a 0 mod anything offset is NOT
+     * the contract -- enc and dec windows must coincide, so exercise the
+     * actual contract: several independent slices, each enc+dec at pc=0 */
+    {
+        uint8_t a[3000], b[3000];
+        for (i = 0; i < sizeof a; i++) a[i] = (uint8_t)(i * 13u + 5u);
+        a[100] = 0xE8; a[101] = 0x34; a[102] = 0x12; a[103] = 0; a[104] = 0;
+        memcpy(b, a, sizeof a);
+        invfs_bcj_x86_enc(b, sizeof b);
+        invfs_bcj_x86_dec(b, sizeof b);
+        ok(memcmp(a, b, sizeof a) == 0, "BCJ slice round-trip (3KB)");
+    }
+
+    /* <5 byte buffers pass through untouched in both directions */
+    {
+        uint8_t tiny[4] = { 0xE8, 1, 2, 3 };
+        uint8_t ref[4];
+        memcpy(ref, tiny, 4);
+        invfs_bcj_x86_enc(tiny, 4);
+        invfs_bcj_x86_dec(tiny, 4);
+        ok(memcmp(tiny, ref, 4) == 0, "BCJ: <5B buffer untouched");
+    }
+
+    /* no convertible bytes: enc is a no-op */
+    {
+        uint8_t plain[4096];
+        for (i = 0; i < sizeof plain; i++) plain[i] = (uint8_t)(i * 7u + 3u);
+        memcpy(work, plain, sizeof plain);
+        invfs_bcj_x86_enc(work, sizeof plain);
+        ok(memcmp(work, plain, sizeof plain) == 0,
+           "BCJ: buffer without call sites unchanged");
+    }
 }
 
 /* ---------------- round trips ---------------- */
@@ -552,6 +714,8 @@ int main(void)
     test_registry();
     test_sniff();
     test_text_family();
+    test_binary_family();
+    test_bcj();
     test_roundtrips();
     test_probe();
     test_packs();

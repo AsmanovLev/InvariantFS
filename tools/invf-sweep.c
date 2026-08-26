@@ -84,6 +84,7 @@ int main(int argc, char **argv)
     int err, dry = 0;
     uint64_t bm, area_start, area_end, p;
     int count = 0, cap = 0, swept = 0, skipped = 0, failed = 0, textb = 0;
+    int binb = 0;
     char (*names)[256] = NULL;
     uint64_t *inodes = NULL;
     uint64_t *sizes = NULL;
@@ -211,13 +212,18 @@ int main(int argc, char **argv)
                           names[i], (unsigned long long)sizes[i]); continue; }
         {
             /* vol_sweep_one: 0 = nothing to do, >0 = transcoded/swept,
-             * 7 = JPEG->JXL, 9 = text deferred into the batch accumulator
-             * (sealed by vol_tz_flush below), >=100 = codecpack transcode
+             * 7 = JPEG->JXL, 9 = text deferred into the batch accumulator,
+             * 10 = binary deferred into the WP14a binary accumulator (both
+             * sealed by vol_tz_flush below), >=100 = codecpack transcode
              * (100+algo, WP13), <0 = hard error */
             int rc = vol_sweep_one(vol, inodes[i], names[i]);
             if (rc == 9) {
                 textb++;
                 printf("  %s: text -> PPMd batch\n", names[i]);
+            }
+            else if (rc == 10) {
+                binb++;
+                printf("  %s: binary -> ZSTD batch\n", names[i]);
             }
             else if (rc == 7) {
                 swept++;
@@ -248,8 +254,9 @@ int main(int argc, char **argv)
             fprintf(stderr, "dedupe: pass failed (sweep results are intact)\n");
     }
 
-    /* WP10 §7: reclaim owner batches no live member references, then seal
-     * the accumulated text candidates into shared PPMd batches. */
+    /* WP10 §7 + WP14a: reclaim owner batches no live member references,
+     * then seal the accumulated text AND binary candidates into shared
+     * batches (one vol_tz_flush drains both accumulators). */
     if (!dry) {
         int gcrc = vol_tz_gc(vol);
         int tzrc;
@@ -258,10 +265,13 @@ int main(int argc, char **argv)
         else if (gcrc < 0)
             fprintf(stderr, "text gc failed (rc=%d)\n", gcrc);
         tzrc = vol_tz_flush(vol);
-        if (tzrc == 0)
+        if (tzrc == 0) {
             printf("text batches flushed (%d deferred)\n", textb);
+            if (binb)
+                printf("binary batches flushed (%d deferred)\n", binb);
+        }
         else if (tzrc < 0) {
-            fprintf(stderr, "text batch flush failed (rc=%d)\n", tzrc);
+            fprintf(stderr, "batch flush failed (rc=%d)\n", tzrc);
             failed++;
         }
     }

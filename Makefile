@@ -12,7 +12,7 @@ LDLIBS  := -Wl,-l:libzstd.so.1 -lz -lpthread
 FUSE_CFLAGS := $(shell pkg-config --cflags fuse3)
 FUSE_LIBS   := $(shell pkg-config --libs fuse3)
 
-CORE    := volume arc crc32c lz4 flacx tarx pngx blkio miniz blake3 blake3_dispatch blake3_portable ppmd8 ppmd8enc ppmd8dec ppmd_codec codec
+CORE    := volume arc crc32c lz4 flacx tarx pngx blkio miniz blake3 blake3_dispatch blake3_portable ppmd8 ppmd8enc ppmd8dec ppmd_codec codec bcj_x86
 CORE_O  := $(addprefix $(OBJ)/,$(addsuffix .o,$(CORE)))
 B3      := blake3 blake3_dispatch blake3_portable
 
@@ -71,7 +71,7 @@ clean:
 
 # ---- tests ---------------------------------------------------------------
 # unit tier: fast, no I/O images
-$(OUT)/invf-codec_test: $(OBJ)/codec_test.o $(OBJ)/codec.o $(OBJ)/ppmd8.o $(OBJ)/ppmd8enc.o $(OBJ)/ppmd8dec.o $(OBJ)/ppmd_codec.o $(OBJ)/lz4.o
+$(OUT)/invf-codec_test: $(OBJ)/codec_test.o $(OBJ)/codec.o $(OBJ)/ppmd8.o $(OBJ)/ppmd8enc.o $(OBJ)/ppmd8dec.o $(OBJ)/ppmd_codec.o $(OBJ)/lz4.o $(OBJ)/bcj_x86.o
 	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
 
 test: $(OUT)/invf-arctest $(OUT)/invf-blkio_test $(OUT)/invf-codec_test
@@ -84,6 +84,8 @@ e2e: all
 	bash tools/test-textzone.sh
 	bash tools/test-dedupe.sh
 	bash tools/test-jxl.sh
+	bash tools/test-rawimg.sh
+	bash tools/test-binbatch.sh
 
 .PHONY: all clean test e2e
 -include $(wildcard $(OBJ)/*.d)
