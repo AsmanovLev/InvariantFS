@@ -17,7 +17,8 @@ CORE_O  := $(addprefix $(OBJ)/,$(addsuffix .o,$(CORE)))
 B3      := blake3 blake3_dispatch blake3_portable
 
 TOOLS   := invf-mkfs invf-verify invf-fsck invf-cp invf-cat invf-ls invf-stat \
-           invf-zip invf-arctest invf-blkio_test invf-fuse invf-import invf-sweep meta_probe
+           invf-zip invf-arctest invf-blkio_test invf-fuse invf-import invf-sweep meta_probe \
+           invf-stats
 
 all: $(TOOLS:%=$(OUT)/%)
 
@@ -66,9 +67,25 @@ $(OBJ)/meta_probe.o: tools/meta_probe.c | $(OBJ)
 	$(CC) $(CFLAGS) -c -o $@ $<
 
 clean:
-	rm -rf $(OBJ) $(TOOLS:%=$(OUT)/%) 
+	rm -rf $(OBJ) $(TOOLS:%=$(OUT)/%) $(OUT)/invf-codec_test
 
-.PHONY: all clean
+# ---- tests ---------------------------------------------------------------
+# unit tier: fast, no I/O images
+$(OUT)/invf-codec_test: $(OBJ)/codec_test.o $(OBJ)/codec.o $(OBJ)/ppmd8.o $(OBJ)/ppmd8enc.o $(OBJ)/ppmd8dec.o $(OBJ)/ppmd_codec.o $(OBJ)/lz4.o
+	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
+
+test: $(OUT)/invf-arctest $(OUT)/invf-blkio_test $(OUT)/invf-codec_test
+	$(OUT)/invf-arctest
+	$(OUT)/invf-blkio_test
+	$(OUT)/invf-codec_test
+
+# e2e tier: tmpfs images under /dev/shm; test-jxl needs cjxl/djxl installed
+e2e: all
+	bash tools/test-textzone.sh
+	bash tools/test-dedupe.sh
+	bash tools/test-jxl.sh
+
+.PHONY: all clean test e2e
 -include $(wildcard $(OBJ)/*.d)
 
 $(OUT)/invf-stats: $(OBJ)/invf-stats.o $(CORE_O)

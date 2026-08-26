@@ -78,7 +78,33 @@ from doc/02 would produce volumes this code cannot mount (and vice versa).
 | WP7 | Fix g_entries locking (H1), readdir cap (H7), FUSE flush ENOSPC propagation (H4), ZIP sweep idempotence marker (H8) | code-fix | S-M |
 | WP8 | Build system: invf-fuse in build_linux.sh, kill /mnt/d hardcode, static-link recipe for initramfs | recipe-tooling | S |
 | WP9 | Initramfs kit rewritten for FUSE (busybox /init, devtmpfs, invf-fuse, switch_root, CONFIG_FUSE_FS kernel) + offline rootfs packer preserving modes + finalize `invf-fsck -f` → first boot CLEAN | recipe-tooling | M |
-| WP10 | Codec registry (sniff/probe/caps/dec_mem/generation) + Text Zone cross-file PPMd batching (4MB batches, bytypesize sort, `\x01tzb` owner inode, member L2P dups) + storage-class xattr `invfs.class` + sweep-time memory policy (arc_limit/dec_mem_limit, both-directions re-sweep) + TEXT GC mark-and-sweep. Spec: `WP10-textzone-codec-registry.md`. Addresses: dead constants INVFS_ZONE_TEXT/PPMD, PB6 (probe gate), H10 (PPMD batch decode+memcmp verify), per-sweep wasted ZSTD re-encodes (class stamp) | code-fix | L |
+| WP10 | **DONE (ff84bf8)** Codec registry (sniff/probe/caps/dec_mem/generation) + Text Zone cross-file PPMd batching (4MB batches, bytypesize sort, `\x01tzb` owner inode, member L2P dups) + storage-class xattr `invfs.class` + sweep-time memory policy (arc_limit/dec_mem_limit, both-directions re-sweep) + TEXT GC mark-and-sweep. Spec: `WP10-textzone-codec-registry.md`. Addresses: dead constants INVFS_ZONE_TEXT/PPMD, PB6 (probe gate), H10 (PPMD batch decode+memcmp verify), per-sweep wasted ZSTD re-encodes (class stamp) | code-fix | L |
+| WP11 | **DONE (ff84bf8)** JPEG→JXL on Linux: POSIX exec layer in volume.c (`tool_resolve`: $INVFS_TOOLS → /usr/lib/invfs/tools → PATH; fork/execvp, fixed argv, mkdtemp in /dev/shm, 120 s timeout) + JPEG sniff (FF D8 FF) + probe gate (no cjxl → RAW unstamped, retried next sweep) + SOF0/1/2 decode-working-set admission vs dec_mem_limit + djxl decode-back bit-exact guard; class CODEC{JXL}. Spec: `WP11-jxl-posix.md`. Closes the PB6 readability cliff for the JXL/PMP/APE lanes | code-fix | M |
+| WP12 | WP10/WP11 follow-ups (known gaps, honestly carried): (a) vol_compute_stats logical_bytes double-counts TEXT (owner + members; Silesia image showed 309 MiB logical vs 202 MiB raw); (b) JPEG upgrade retry incomplete — MEMLIMIT/GUARD{JXL} stamps re-enter vol_sweep_one, but the JXL branch fires only on RAW-zone files; (c) PNGR/FLACR transcode paths still Windows-only (their exec deps now resolve on Linux); (d) no RLIMIT_AS in tool children (WP10 §10 hardening); (e) probe() runs per file, no caching; (f) owner-AST rewrite is O(batches) per seal + 4 GB u32 cap on total batched text per volume; (g) no binary cross-file context (the xz gap, doc/16 B30); (h) **tools/invf-sweep.c has NO dedupe pass** (dedupe→GC→flush exists only in the Windows-prototype src/sweep.c) — the Silesia bench ran dedupless; port or engine-ize the pass; (i) EXE codec: ELF/PE/Mach-O sniff → BCJ(x86 call/jump normalization) prefilter → strong backend (BCJ+LZMA is the proven shape — xz/7z BCJ2; BCJ+CM in paq; BCJ→BWT→MTF→RLE chain is the bzip2-shape variant, needs experiment, not doctrine); BCJ filters available in tools/7-Zip-zstd sources; bit-exact reverse + decode-back guard, class CODEC; (j) DICOM container: preamble+DICM header kept verbatim as recipe, pixel data → lossless JXL (cjxl accepts PGM/PPM frames); same wrapper covers raw-pixel files (silesia mr/x-ray) IF geometry is known — headerless geometry sniffing is fragile, mark experimental; (k) binary batching: extend the TEXT accumulator to binary families (ELF objects/libs, record-structured files like osdb/sao) so PPMd sees cross-file context — this is also the correct answer to "dedupe file headers": 4KB-aligned block dedupe cannot catch sub-block header similarity, batched PPMd can (alternative: zstd dictionaries, doc/04 B22) | code-fix | M-L |
+
+### WP12 status update 2026-08-26 (post-bench fixes, second commit)
+
+- **(a) DONE.** vol_compute_stats skips 0x01-internal owner records in all logical
+  fields. The fix exposed two latent bugs in the same function, also fixed: a record
+  buffer use-after-free (freed after the CRC check, then parsed for AST), and the AST
+  base offset computed as `sizeof(rec)+vol_ast_blob_len()` so num_blocks was read past
+  the recipe (TEXT logic silently zero / garbage-lucky). Plus the build-system trap that
+  hid all of it: `invf-stats` was missing from Makefile TOOLS, plain `make` never
+  relinked it, and the e2e scripts kept testing a stale binary.
+- **(b) DONE.** `vol_jxl_retry`: MEMLIMIT/GUARD{JXL} re-arms now run the full
+  cjxl→djxl→memcmp path on the decoded content (new blob inode, retire old, meta carried
+  over). Retry leg in tools/test-jxl.sh: "6/6 bit-exact after upgrade".
+- **(e) DONE.** probe() results memoized per process; codec_test stays at 73/0 via the
+  test-only `invfs_codec_probe_reset()` hook.
+- **(h) DONE.** `vol_sweep_dedupe` in volume.c: BLAKE3 over stored segment bytes, keep
+  one pba per hash, L2P-remap losers, free blocks; skips zone==TEXT (WP10 §11),
+  whole-file JXL/APE blobs, and inodes deferred in the running sweep's accumulator.
+  Linux CLI order: walk → dedupe → vol_tz_gc → vol_tz_flush. tools/test-dedupe.sh PASS.
+- Still open: (c) PNGR/FLACR POSIX transcode bodies, (d) RLIMIT_AS in tool children,
+  (f) owner-AST O(batches) rewrite + 4 GB u32 cap, (g) binary cross-file context,
+  (i) EXE BCJ, (j) DICOM / raw-image codecpack, (k) binary batching.
+- Verification: `make test` (arctest 4467/0, blkio 86/0, codec 73/0) + test-dedupe /
+  test-textzone / test-jxl e2e all PASS.
 
 ## 6. Addendum 2026-08-26 (WP10)
 
@@ -99,6 +125,34 @@ New audit findings folded into WP10 spec (`WP10-textzone-codec-registry.md`):
   missing cross-file context — WP10 closes exactly that gap.
 - AUDIT sections affected as WP10 lands: "Design fiction inventory" loses Text Zone/PPMd;
   PB6 gains probe-based gating; H10 gains real verify for the PPMD lane.
+
+## 7. Addendum 2026-08-26 (2) (WP10+WP11 landed)
+
+WP10+WP11 landed as **ff84bf8** ("WP10+WP11: Text Zone (cross-file PPMd batching),
+codec registry, JPEG->JXL on Linux"). Effects on the findings above:
+- "Design fiction inventory" loses Text Zone/PPMd, the codec registry, the class
+  flag and the sweep memory policy — all real now (`codec.c/h`, `tz_*` in
+  volume.c, `invfs.class` xattr).
+- PB6 gains probe-based gating plus POSIX exec for JXL/PMP/APE; PNGR/FLACR
+  transcode paths stay Windows-only (their tools resolve on Linux now, but the
+  recipe code itself is still `#ifdef _WIN32`) → WP12(c).
+- H10 gains a real verify for the PPMD lane (decode+memcmp at seal).
+- Fixes folded into the same commit: verify --deep same-id growing records;
+  stat.c poskill accounting; ls.c 0x01-name filter; vol_compute_stats
+  live-version filtering; tools/invf-sweep.c now actually dispatches
+  vol_sweep_one + vol_tz_gc + vol_tz_flush + vol_flush.
+
+Silesia re-run (2026-08-26, 23 GB RAM, /dev/shm; `CORPUS_DIR=/var/tmp/bench/silesia
+bash tools/bench-fs.sh`): raw 211 940 183 → **invfs data 75 287 756 (2.82x)** vs
+tar|zstd-19 52 850 394 (4.01x), tar|xz -6 49 500 564 (4.28x); image alloc
+162 521 088 (1.30x, incl. 32 MB journal + inode area). TEXT logic 76 MiB
+(dickens/nci/reymont/webster/MANIFEST.txt → PPMd batches); mozilla/samba/xml are
+TARs → 1573 extracted member parts; mr/x-ray → UNCOMPRESSIBLE; ooffice/osdb/sao →
+generic ZSTD-19. Two corpus discoveries: silesia "xml" is a ustar archive (the
+content sniff correctly rejected it — NULs in the header), "reymont" is a PDF
+accepted by the content sniff. The bench also exposed a stats bug:
+vol_compute_stats logical bytes double-count TEXT (owner + members) — the image
+showed 309 MiB logical vs 202 MiB raw → WP12(a).
 
 Estimated distance to OpenRC-bootable Gentoo root on InvariantFS (FUSE route): **4–8 engineer-weeks**
 (long poles WP2, WP4). Doc13's literal kernel-module ambition: 4–9+ months, effectively a new project.

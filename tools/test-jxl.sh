@@ -9,6 +9,9 @@
 #   estimate w*h*3 = 518KB..7MB > 256K) fall back to generic ZSTD with a
 #   GENERIC_MEMLIMIT{JXL} stamp and still read back bit-exactly; the tiny
 #   one (128x128 = 48KB raw) is admitted even there and serves as control.
+#   Retry (WP12(b)): re-sweep the negative image WITHOUT the limit -> the
+#   five MEMLIMIT-stamped photos upgrade to JXL (class CODEC{JXL,1}) and
+#   stay bit-exact; tiny.jpg is already JXL and must not be re-processed.
 #
 # Run from the repo root after `make`:  bash tools/test-jxl.sh
 # Uses /dev/shm (tmpfs) like the other soak scripts. NOTE: blkio treats
@@ -162,6 +165,40 @@ for f in $FILES; do
     cmp -s "$WORK/orig/$f" "$WORK/out/$f.neg" || { echo "MISMATCH neg $f"; ok=0; }
 done
 [ "$ok" = 1 ] || exit 1
+$B/invf-verify "$IMGNEG" --deep | tail -1
+
+echo "== upgrade retry: re-sweep IMGNEG without the limit (WP12(b)) =="
+# the five photos carry GENERIC_MEMLIMIT{JXL,1} over generic ZSTD storage;
+# with the limit gone the class predicate re-arms and the retry must run
+# the full cjxl + djxl-guard flow even though the zone is no longer RAW
+$B/invf-sweep "$IMGNEG" > "$WORK/sweep-upg.log" 2>&1 \
+    || { cat "$WORK/sweep-upg.log"; exit 1; }
+UPG_LINES=$(grep -c "JPEG -> JXL (lossless)" "$WORK/sweep-upg.log" || true)
+echo "JPEG->JXL upgrade lines: $UPG_LINES"
+[ "$UPG_LINES" -eq 5 ] || { echo "FAIL: expected 5 upgrades, tiny.jpg must NOT re-process"; \
+    grep "JPEG" "$WORK/sweep-upg.log"; exit 1; }
+for f in p1.jpg p2.jpg p3.jpg p4.jpg p5.jpg; do
+    C=$("$WORK/classof" "$IMGNEG" "$f")
+    echo "  $f: $C"
+    [ "$C" = "cls=2 algo=4 gen=1" ] || { echo "FAIL: $f: want CODEC{JXL,1} after upgrade"; exit 1; }
+done
+CT=$("$WORK/classof" "$IMGNEG" tiny.jpg)
+echo "  tiny.jpg: $CT (already JXL: untouched)"
+[ "$CT" = "cls=2 algo=4 gen=1" ] || { echo "FAIL: tiny.jpg changed"; exit 1; }
+# bit-exact after the upgrade
+ok=1
+for f in $FILES; do
+    $B/invf-cat "$IMGNEG" "$f" "$WORK/out/$f.upg" >/dev/null
+    cmp -s "$WORK/orig/$f" "$WORK/out/$f.upg" || { echo "MISMATCH upg $f"; ok=0; }
+done
+[ "$ok" = 1 ] || exit 1
+echo "all $(echo "$FILES" | wc -w) files bit-exact after upgrade"
+# idempotence: another sweep transcodes nothing
+$B/invf-sweep "$IMGNEG" > "$WORK/sweep-upg2.log" 2>&1 \
+    || { cat "$WORK/sweep-upg2.log"; exit 1; }
+if grep -q "JPEG -> JXL" "$WORK/sweep-upg2.log"; then
+    echo "FAIL: third sweep re-transcoded"; grep "JPEG" "$WORK/sweep-upg2.log"; exit 1
+fi
 $B/invf-verify "$IMGNEG" --deep | tail -1
 
 echo "JXL E2E: PASS"

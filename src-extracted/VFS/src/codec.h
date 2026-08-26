@@ -42,6 +42,7 @@ typedef struct invfs_codec {
 const invfs_codec *invfs_codec_by_algo(uint32_t algo);
 const invfs_codec *invfs_codec_all(size_t *count);   /* order = sniff priority: specific magics first, text LAST */
 uint16_t           invfs_registry_generation(void);  /* max generation over all codecs */
+void               invfs_codec_probe_reset(void);    /* test hook: clear memoized probe() results */
 
 /* Text families — the batching sort key (WP10 §4). 1..10 are the extension
  * families; INVFS_TEXT_FAMILY_CONTENT is content-sniffed text with no known

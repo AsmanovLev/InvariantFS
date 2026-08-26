@@ -322,6 +322,7 @@ static void test_probe(void)
     r |= write_file(path, "#!/bin/sh\nexit 0\n", 1);
     ok(r == 0, "fixture: codecpack written");
     setenv("INVFS_CODECPACKS", packs, 1);
+    invfs_codec_probe_reset();
     ok(pmp->probe() == 1, "codecpack manifest makes the codec available");
 
     /* 2. no pack, but a self-describing binary on PATH -> available */
@@ -333,6 +334,7 @@ static void test_probe(void)
                    "exit 1\n", 1);
     ok(r == 0, "fixture: self-describing tool written");
     setenv("PATH", bin, 1);
+    invfs_codec_probe_reset();
     ok(pmp->probe() == 1, "self-describing binary makes the codec available");
 
     /* 3. broken pack (helpers missing) + tool absent -> unavailable */
@@ -343,6 +345,7 @@ static void test_probe(void)
     unlink(path);
     setenv("INVFS_CODECPACKS", packs, 1);
     setenv("PATH", empty, 1);
+    invfs_codec_probe_reset();
     ok(pmp->probe() == 0, "broken pack + absent tool -> unavailable");
 
     /* restore the environment, clean up the fixture */

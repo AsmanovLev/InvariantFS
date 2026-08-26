@@ -57,7 +57,7 @@
 | 13 | `13-linux-rootfs.md` | Initramfs, VFS driver, special file types |
 | 14 | `14-windows-io-deep.md` | OVERLAPPED I/O, WRITE_THROUGH, IOCP, TRIM |
 | 15 | `15-caching.md` | 1 GB LRU cache, dedup-aware |
-| 16 | `16-benchmarks.md` | 20 бенчмарков (B1-B20), обоснование алгоритмов |
+| 16 | `16-benchmarks.md` | Бенчмарки B1-B30, обоснование алгоритмов |
 | 17 | `17-template-zone.md` | Семантическая декомпозиция: эталоны, residuals, audio LZ77 |
 
 ## Инструменты (обновление: ivfs-stat)

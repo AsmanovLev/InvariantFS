@@ -266,6 +266,16 @@ int vol_tz_flush(invfs_volume *v);
  * number of dead batches reclaimed, 0 = none, <0 = error. */
 int vol_tz_gc(invfs_volume *v);
 
+/* Offline per-segment dedupe (WP12(h)): BLAKE3 the stored bytes of every
+ * live segment, keep one physical copy per hash, remap duplicate
+ * (inode,lba) L2P entries onto it and free the loser blocks. Skips
+ * zone==TEXT entries (WP10 §11), whole-file JXL/APE blobs, and inodes
+ * deferred into the running sweep's text accumulator (their records are
+ * retired by this run's vol_tz_flush). Runs between the sweep walk and
+ * vol_tz_gc in invf-sweep; the caller's vol_flush persists the remaps.
+ * Returns the number of merged segments, <0 on error. */
+int vol_sweep_dedupe(invfs_volume *v);
+
 /* Storage-class flag (invfs.class xattr, see invarifs.h).
  * vol_get_class: 0 = found, 1 = absent. stamp writes only on change. */
 int vol_get_class(invfs_volume *v, uint64_t inode_id,

@@ -5,10 +5,12 @@
  *
  * Walks live records (same CRC-validated scan as invf-ls), feeds every
  * regular file with segments to vol_sweep_one() — the unified per-inode
- * dispatch (containers/transcodes/text-batching/generic ZSTD-19). Text
- * candidates defer into the volume's accumulator and are sealed into
- * shared PPMd batches by vol_tz_flush() at the end of the run, after the
- * dead-batch GC (vol_tz_gc). The author's sweep.c CLI is Windows-only.
+ * dispatch (containers/transcodes/text-batching/generic ZSTD-19). Then the
+ * per-segment dedupe pass (vol_sweep_dedupe, WP12(h)) merges identical
+ * stored segments. Text candidates defer into the volume's accumulator and
+ * are sealed into shared PPMd batches by vol_tz_flush() at the end of the
+ * run, after the dead-batch GC (vol_tz_gc). The author's sweep.c CLI is
+ * Windows-only.
  */
 #define _CRT_SECURE_NO_WARNINGS
 
@@ -225,6 +227,17 @@ int main(int argc, char **argv)
         }
         if ((swept + skipped) % 5000 == 0)
             fprintf(stderr, "  ..%d done (swept=%d)\n", swept + skipped, swept);
+    }
+
+    /* WP12(h): per-segment dedupe between the walk and the text-batch GC
+     * (order: walk -> dedupe -> GC -> flush). The walk's transcodes are
+     * what create the duplicates worth finding -- identical content lands
+     * in Shadow as identical segments -- and dedupe runs before the GC so
+     * it never sees a zone==TEXT entry (WP10 §11). The pass prints its
+     * own merged/freed counts. */
+    if (!dry) {
+        if (vol_sweep_dedupe(vol) < 0)
+            fprintf(stderr, "dedupe: pass failed (sweep results are intact)\n");
     }
 
     /* WP10 §7: reclaim owner batches no live member references, then seal

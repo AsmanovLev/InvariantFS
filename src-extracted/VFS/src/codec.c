@@ -465,10 +465,36 @@ static int probe_external(const char *name, const char *tool)
     return on_path(tool);
 }
 
-static int probe_pmp(void) { return probe_external("pmp", "packMP3"); }
-static int probe_jxl(void) { return probe_external("jxl", "cjxl"); }
-static int probe_ape(void) { return probe_external("ape", "mac"); }
-static int probe_wv(void)  { return probe_external("wv",  "wavpack"); }
+/* WP12(e): probe() results memoized per registry entry, keyed by algo.
+ * Filled lazily on the first probe of each codec. The sweep is
+ * single-threaded today, so a plain unsynchronized cache is fine --
+ * revisit if probing ever goes concurrent. */
+#define PROBE_CACHE_SLOTS 16   /* INVFS_ALGO_* run 0..12 (invarifs.h, codec.h) */
+static signed char probe_cache[PROBE_CACHE_SLOTS];   /* 0 = not probed yet */
+
+static int probe_cached(uint32_t algo, const char *name, const char *tool)
+{
+    signed char r;
+    if (algo >= PROBE_CACHE_SLOTS) return probe_external(name, tool);
+    r = probe_cache[algo];
+    if (r == 0) {
+        r = (signed char)(probe_external(name, tool) ? 1 : -1);
+        probe_cache[algo] = r;
+    }
+    return r > 0;
+}
+
+/* test hook: probe results are memoized; fixtures that mutate
+ * INVFS_CODECPACKS/PATH between scenarios must reset first. */
+void invfs_codec_probe_reset(void)
+{
+    memset(probe_cache, 0, sizeof probe_cache);
+}
+
+static int probe_pmp(void) { return probe_cached(INVFS_ALGO_PMP, "pmp", "packMP3"); }
+static int probe_jxl(void) { return probe_cached(INVFS_ALGO_JXL, "jxl", "cjxl"); }
+static int probe_ape(void) { return probe_cached(INVFS_ALGO_APE, "ape", "mac"); }
+static int probe_wv(void)  { return probe_cached(INVFS_ALGO_WV,  "wv",  "wavpack"); }
 
 /* ---------------- the registry ----------------
  * Order = sniff priority: specific magics first, text LAST. NONE/LZ4/ZSTD
