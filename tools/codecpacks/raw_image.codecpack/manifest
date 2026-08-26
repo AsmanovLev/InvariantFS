@@ -1,0 +1,25 @@
+# raw_image codecpack (WP13): DICOM/PNM/BMP/TIFF -> lossless JXL, bit-exact.
+#
+# The helper is stdlib-only python3; the heavy lifting is cjxl/djxl
+# (requires). The blob splices the UNTOUCHED container bytes (everything
+# before/after the pixel region) around a lossless JXL of the normalized
+# pixels, so rebuild is byte-exact by construction (see raw_image.py).
+name = raw_image
+algo = 13
+pack_version = 1
+generation = 1
+caps = wholefile|external
+dec_mem = 0
+requires = cjxl,djxl
+# DICM at offset 128 (DICOM), P5/P6 (PNM), BM (BMP), II2A/MM2A (TIFF)
+sniff.magic = 4449434D
+sniff.offset = 128
+sniff.magic = 5035
+sniff.magic = 5036
+sniff.magic = 424D
+sniff.magic = 49492A00
+sniff.magic = 4D4D002A
+sniff.ext = dcm,pgm,ppm,bmp,tif,tiff
+encode = python3 {pack}/raw_image.py encode {in} {out}
+decode = python3 {pack}/raw_image.py decode {in} {out}
+estimate = python3 {pack}/raw_image.py estimate {in}

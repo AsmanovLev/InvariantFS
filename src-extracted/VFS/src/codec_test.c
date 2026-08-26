@@ -10,14 +10,76 @@
  */
 #define _CRT_SECURE_NO_WARNINGS
 
+#include <errno.h>
+#include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <sys/wait.h>
 #include <unistd.h>
 
 #include "codec.h"
 #include "invarifs.h"
+
+/* ---- test-local implementations of the pack exec hooks (WP13) ----
+ * The production hooks live in volume.c (which this test does not link);
+ * codec.c's trampolines call them, so the fixture pack round-trips through
+ * the REAL dynamic-registration code and a stubbed subprocess runner. */
+
+static char *subst_token(const char *tok, const char *in, const char *out)
+{
+    /* whole-token substitution is enough for the fixture manifests */
+    if (!strcmp(tok, "{in}"))  return strdup(in);
+    if (!strcmp(tok, "{out}")) return strdup(out);
+    return strdup(tok);
+}
+
+int invfs_codec_pack_exec(const invfs_codec *c, int is_encode,
+                          const char *in_path, const char *out_path)
+{
+    const invfs_pack_def *def = invfs_codec_pack_def(c);
+    const char *tmpl;
+    char *argv[16];
+    int argc = 0, i, rc;
+    char buf[1024];
+    char *save = NULL, *t;
+    int st = 0;
+    pid_t pid;
+
+    if (!def) return -1;
+    tmpl = is_encode ? def->encode : def->decode;
+    if (!tmpl || strlen(tmpl) >= sizeof buf) return -1;
+    strcpy(buf, tmpl);
+    for (t = strtok_r(buf, " \t", &save); t && argc < 15;
+         t = strtok_r(NULL, " \t", &save))
+        argv[argc++] = subst_token(t, in_path, out_path);
+    argv[argc] = NULL;
+    if (!argc) return -1;
+    pid = fork();
+    if (pid == 0) {
+        int dn = open("/dev/null", O_RDWR);
+        if (dn >= 0) { dup2(dn, 0); dup2(dn, 1); dup2(dn, 2); }
+        execvp(argv[0], argv);
+        _exit(127);
+    }
+    for (i = 0; i < argc; i++) free(argv[i]);
+    if (pid < 0) return -1;
+    while (waitpid(pid, &st, 0) < 0 && errno == EINTR)
+        ;
+    rc = WIFEXITED(st) ? WEXITSTATUS(st) : -1;
+    return rc;
+}
+
+int invfs_codec_pack_estimate(const invfs_codec *c, const char *in_path,
+                              uint64_t *out_bytes)
+{
+    const invfs_pack_def *def = invfs_codec_pack_def(c);
+    (void)in_path; (void)out_bytes;
+    if (!def || !def->estimate) return -1;   /* the fixture has none */
+    return -1;
+}
+
 
 static int failures = 0;
 static int checks = 0;
@@ -364,6 +426,125 @@ static void test_probe(void)
     rmdir(dir);
 }
 
+/* ---------------- dynamic pack registration (WP13) ---------------- */
+
+static void test_packs(void)
+{
+    char dir[256], packs[320], pack[384], dupe[384], path[448];
+    const invfs_codec *c, *all;
+    const invfs_pack_def *def;
+    size_t n = 0, i, olen = 0;
+    uint8_t data[64], enc[128], dec[64];
+    uint64_t est = 0;
+    static const uint8_t mz4[6] = { 0, 0, 0, 0, 'M', 'Z' };   /* MZ at off 4 */
+    static const uint8_t mz0[6] = { 'M', 'Z', 0, 0, 0, 0 };   /* MZ at off 0 */
+    int r;
+
+    snprintf(dir, sizeof dir, "/tmp/invfs_pack_test_%d", (int)getpid());
+    snprintf(packs, sizeof packs, "%s/packs", dir);
+    snprintf(pack, sizeof pack, "%s/fakeimg.codecpack", packs);
+    snprintf(dupe, sizeof dupe, "%s/dupe.codecpack", packs);
+    r = mkdir(dir, 0755) | mkdir(packs, 0755) | mkdir(pack, 0755) |
+        mkdir(dupe, 0755);
+
+    /* one valid pack (sniff.offset BEFORE sniff.magic: pending-offset path)
+     * plus a second pack whose algo collides with builtin ZSTD (skipped) */
+    snprintf(path, sizeof path, "%s/manifest", pack);
+    r |= write_file(path,
+                    "# fake pack for codec_test\n"
+                    "name = fakeimg\n"
+                    "algo = 42\n"
+                    "pack_version = 1\n"
+                    "caps = external|wholefile\n"
+                    "dec_mem = 4096\n"
+                    "generation = 3\n"
+                    "sniff.offset = 4\n"
+                    "sniff.magic = 4D5A\n"
+                    "sniff.ext = fak,fake\n"
+                    "requires = cp\n"
+                    "encode = cp {in} {out}\n"
+                    "decode = cp {in} {out}\n"
+                    "unknown.key = skipped\n", 0);
+    snprintf(path, sizeof path, "%s/manifest", dupe);
+    r |= write_file(path,
+                    "name = dupe\n"
+                    "algo = 1\n"
+                    "caps = external\n"
+                    "encode = cp {in} {out}\n"
+                    "decode = cp {in} {out}\n", 0);
+    ok(r == 0, "fixture: pack dirs written");
+
+    setenv("INVFS_CODECPACKS", packs, 1);
+    invfs_codec_probe_reset();
+
+    all = invfs_codec_all(&n);
+    ok(all != NULL && n == 14, "pack registered: 13 static + 1 pack");
+    ok(all[n - 1].algo == INVFS_ALGO_PPMD,
+       "text heuristic still LAST with a pack loaded");
+    c = invfs_codec_by_algo(INVFS_ALGO_ZSTD);
+    ok(c && strcmp(c->name, "zstd") == 0,
+       "pack whose algo collides with a builtin is skipped");
+
+    c = invfs_codec_by_algo(42);
+    ok(c != NULL, "pack found by algo");
+    ok(c && strcmp(c->name, "fakeimg") == 0, "pack name from manifest");
+    ok(c && (c->caps & INVFS_CODEC_CAP_EXTERNAL) &&
+       (c->caps & INVFS_CODEC_CAP_WHOLEFILE), "pack caps parsed");
+    ok(c && c->dec_mem_bytes == 4096 && c->generation == 3,
+       "pack dec_mem/generation parsed");
+    ok(c && c->sniff && c->probe && c->encode && c->decode,
+       "pack fn pointers wired (trampolines)");
+
+    ok(c && c->sniff(mz4, sizeof mz4, "x.bin") == 100,
+       "manifest magic@offset -> 100");
+    ok(c && c->sniff(mz0, sizeof mz0, "x.bin") == 0,
+       "magic at the wrong offset -> 0");
+    ok(c && c->sniff(mz0, sizeof mz0, "x.fak") == 50,
+       "extension list -> 50");
+    ok(c && c->sniff(mz0, sizeof mz0, "x.png") == 0, "no match -> 0");
+
+    ok(c && c->probe() == 1, "pack probe: cp resolvable (requires)");
+
+    for (i = 0; i < sizeof data; i++) data[i] = (uint8_t)(i * 29 + 5);
+    olen = 0;
+    ok(c && c->encode(data, sizeof data, enc, sizeof enc, &olen) == 0 &&
+       olen == sizeof data && memcmp(enc, data, sizeof data) == 0,
+       "pack encode trampoline (cp = identity)");
+    ok(c && c->decode(enc, olen, dec, sizeof dec) == 0 &&
+       memcmp(dec, data, sizeof data) == 0,
+       "pack decode trampoline (cp = identity)");
+    ok(c && c->decode(enc, olen, dec, sizeof dec - 1) == -1,
+       "pack decode: wrong output size -> -1 (bit-exact or nothing)");
+
+    ok(invfs_codec_pack_estimate(c, "whatever", &est) == -1,
+       "pack without estimate command -> -1");
+    ok(invfs_registry_generation() >= 3,
+       "registry generation includes packs");
+    def = invfs_codec_pack_def(c);
+    ok(def && def->dir && strstr(def->dir, "fakeimg.codecpack") != NULL,
+       "pack def exposes the pack dir");
+    ok(invfs_codec_pack_def(invfs_codec_by_algo(INVFS_ALGO_ZSTD)) == NULL,
+       "builtin codec has no pack def");
+
+    /* reset must unload the pack (the probe cache AND the registration);
+     * the env goes first or the re-scan legitimately finds it again */
+    unsetenv("INVFS_CODECPACKS");
+    invfs_codec_probe_reset();
+    ok(invfs_codec_by_algo(42) == NULL, "reset unloads packs");
+    all = invfs_codec_all(&n);
+    ok(n == 13, "reset restores the static registry");
+    invfs_codec_probe_reset();   /* a second reset is harmless */
+
+    snprintf(path, sizeof path, "%s/manifest", pack);
+    unlink(path);
+    snprintf(path, sizeof path, "%s/manifest", dupe);
+    unlink(path);
+    rmdir(pack);
+    rmdir(dupe);
+    rmdir(packs);
+    rmdir(dir);
+}
+
 int main(void)
 {
     printf("codec registry tests\n");
@@ -373,6 +554,7 @@ int main(void)
     test_text_family();
     test_roundtrips();
     test_probe();
+    test_packs();
 
     printf("%d checks, %d failure(s)\n", checks, failures);
     printf("%s\n", failures ? "FAIL" : "PASS");

@@ -3420,8 +3420,26 @@ static int vol_read_inode(invfs_volume *v, uint64_t inode_id, unsigned depth,
                     }
                     memcpy(data + dst_off, fl, fl_len);
                     pngx_free(&pi); free(fl); free(rcp_own);
-                } else {
+                } else if (e->algo == INVFS_ALGO_NONE) {
                     memcpy(data + dst_off, blob, hdr);
+                } else {
+                    /* WP13: a codecpack whole-file blob decodes through the
+                     * pack trampoline. An algo this build cannot decode
+                     * (pack not loaded) fails LOUDLY -- the historical raw
+                     * copy would serve the blob as if it were the file,
+                     * silently breaking the 1:1 invariant. */
+                    const invfs_codec *pc = invfs_codec_by_algo(e->algo);
+                    if (!pc || !pc->decode) {
+                        fprintf(stderr, "inode %llu: algo %u requires a "
+                                "codecpack that is not loaded\n",
+                                (unsigned long long)inode_id, e->algo);
+                        free(blob); free(data); free(rec); return -1;
+                    }
+                    if (pc->decode(blob, hdr, data + dst_off,
+                                   (size_t)e->length) != 0) {
+                        fprintf(stderr, "%s: pack decode error\n", pc->name);
+                        free(blob); free(data); free(rec); return -1;
+                    }
                 }
                 free(blob);
             }
@@ -4235,6 +4253,9 @@ static int vol_class_downgrade(invfs_volume *v, uint64_t inode_id,
 static int tz_sniff_any(invfs_volume *v, uint64_t inode_id, const char *name);
 static int tz_member_oversized(invfs_volume *v, uint64_t inode_id,
                                uint64_t unit_limit);
+static int vol_pack_sweep(invfs_volume *v, uint64_t inode_id,
+                          const char *name, const invfs_codec *pc,
+                          const uint8_t *full, size_t full_len);
 
 /* WP12(b): JPEG upgrade retry for a file the class predicate just re-armed
  * (GENERIC_MEMLIMIT: the raised dec_mem limit admits it; GENERIC_GUARD: a
@@ -4564,6 +4585,28 @@ int vol_sweep_one(invfs_volume *v, uint64_t inode_id, const char *name)
                         INVFS_ALGO_PMP, tz_codec_gen(INVFS_ALGO_PMP));
     }
 
+    /* WP13: codecpack codecs — the registry's dynamic EXTERNAL entries, the
+     * only ones carrying encode/decode trampolines (builtin externals have
+     * NULL fn pointers and their own branches above). First sniff hit wins;
+     * a declined pack stamps and falls through to text/generic. */
+    {
+        size_t cn = 0, ci;
+        const invfs_codec *all = invfs_codec_all(&cn);
+        for (ci = 0; ci < cn; ci++) {
+            const invfs_codec *pc = &all[ci];
+            int prc;
+            if (!(pc->caps & INVFS_CODEC_CAP_EXTERNAL) || !pc->encode ||
+                !pc->decode || !pc->sniff)
+                continue;
+            if (pc->sniff(full, full_len, name) <= 0)
+                continue;
+            prc = vol_pack_sweep(v, inode_id, name, pc, full, full_len);
+            if (prc == 1) { free(full); return 0; }   /* tool absent: defer */
+            if (prc >= 100) { free(full); return prc; }   /* transcoded */
+            break;   /* declined: stamps applied; text/generic still run */
+        }
+    }
+
     /* WP10 §4: every magic dispatch above declined -- classify text. Text
      * DEFERS into the sweep-run accumulator (sealed into shared PPMd batches
      * by vol_tz_flush at the end of the run); "!" sibling parts stay with
@@ -4793,10 +4836,15 @@ uint64_t vol_name_count(invfs_volume *v) { return (uint64_t)v->ncount; }
    subprocess to produce. */
 static int algo_is_whole_file(uint32_t algo)
 {
-    return algo == INVFS_ALGO_FLACR || algo == INVFS_ALGO_TARR ||
-           algo == INVFS_ALGO_GZR   || algo == INVFS_ALGO_PNGR ||
-           algo == INVFS_ALGO_PMP   || algo == INVFS_ALGO_APE  ||
-           algo == INVFS_ALGO_JXL;
+    const invfs_codec *c;
+    if (algo == INVFS_ALGO_FLACR || algo == INVFS_ALGO_TARR ||
+        algo == INVFS_ALGO_GZR   || algo == INVFS_ALGO_PNGR ||
+        algo == INVFS_ALGO_PMP   || algo == INVFS_ALGO_APE  ||
+        algo == INVFS_ALGO_JXL)
+        return 1;
+    /* WP13: codecpack codecs declare WHOLEFILE in their manifest caps */
+    c = invfs_codec_by_algo(algo);
+    return c && (c->caps & INVFS_CODEC_CAP_WHOLEFILE) != 0;
 }
 
 int vol_read_range(invfs_volume *v, uint64_t inode_id, uint64_t offset,
@@ -7557,7 +7605,188 @@ static int tool_slurp_out(const char *path, uint8_t **out, size_t *out_len)
     }
     return 0;
 }
+
+/* like tool_exec, but the child's stdout lands in buf (NUL-terminated,
+ * truncated at cap-1, overflow drained and discarded so the child never
+ * blocks on a full pipe). Used by the codecpack estimate hook. */
+static int tool_exec_out(char *const argv[], char *buf, size_t cap)
+{
+    int pfd[2], st = 0, exited = 0;
+    pid_t pid;
+    uint64_t t0;
+    size_t got = 0;
+
+    if (cap) buf[0] = '\0';
+    if (pipe(pfd) != 0) return -1;
+    pid = fork();
+    if (pid < 0) { close(pfd[0]); close(pfd[1]); return -1; }
+    if (pid == 0) {
+        int dn = open("/dev/null", O_RDWR);
+        if (dn >= 0) {
+            dup2(dn, STDIN_FILENO);
+            dup2(dn, STDERR_FILENO);
+        }
+        dup2(pfd[1], STDOUT_FILENO);
+        close(pfd[0]);
+        close(pfd[1]);
+        execvp(argv[0], argv);
+        _exit(127);
+    }
+    close(pfd[1]);
+    fcntl(pfd[0], F_SETFL, fcntl(pfd[0], F_GETFL, 0) | O_NONBLOCK);
+    t0 = tool_now_ms();
+    for (;;) {
+        pid_t w;
+        for (;;) {   /* drain what there is; discard past cap */
+            char junk[256];
+            char *dst = got + 1 < cap ? buf + got : junk;
+            size_t room = dst == junk ? sizeof junk : cap - 1 - got;
+            ssize_t r = read(pfd[0], dst, room);
+            if (r <= 0) break;
+            if (dst != junk) got += (size_t)r;
+        }
+        if (exited) break;      /* reaped and drained */
+        w = waitpid(pid, &st, WNOHANG);
+        if (w == pid) { exited = 1; continue; }
+        if (w < 0 && errno != EINTR) { close(pfd[0]); return -1; }
+        if (tool_now_ms() - t0 > TOOL_TIMEOUT_MS) {
+            kill(pid, SIGKILL);
+            while (waitpid(pid, &st, 0) < 0 && errno == EINTR)
+                ;
+            close(pfd[0]);
+            return -1;
+        }
+        usleep(5000);
+    }
+    close(pfd[0]);
+    if (cap) buf[got < cap ? got : cap - 1] = '\0';
+    if (!WIFEXITED(st)) return -1;
+    return WEXITSTATUS(st);
+}
 #endif /* !_WIN32 */
+
+/* ---- codecpack execution hooks (WP13; declared in codec.h, called by the
+ * codec.c trampolines and the sweep's pack branch) ---- */
+
+/* Substitute {in} {out} {pack} in one argv token. Returns 0 on overflow. */
+static size_t pack_subst(char *dst, size_t cap, const char *tok,
+                         const char *packdir, const char *in, const char *out)
+{
+    size_t w = 0;
+
+    while (*tok) {
+        const char *rep;
+        size_t rl;
+        if (strncmp(tok, "{in}", 4) == 0)         { rep = in;      tok += 4; }
+        else if (strncmp(tok, "{out}", 5) == 0)   { rep = out;     tok += 5; }
+        else if (strncmp(tok, "{pack}", 6) == 0)  { rep = packdir; tok += 6; }
+        else { rep = tok++; rl = 1; goto emit; }
+        rl = strlen(rep);
+    emit:
+        if (w + rl + 1 > cap) return 0;
+        memcpy(dst + w, rep, rl);
+        w += rl;
+    }
+    dst[w] = '\0';
+    return w;
+}
+
+/* Fixed argv from the manifest template: split on whitespace, substitute
+ * placeholders per token (no shell — WP10 §10). A bare argv[0] stays bare
+ * (execvp does the PATH search); a relative path containing '/' is taken
+ * relative to the pack dir (mirrors manifest_tool_ok). */
+static int pack_argv_build(const invfs_pack_def *def, const char *tmpl,
+                           const char *in, const char *out,
+                           char *argv[], size_t maxa,
+                           char *arena, size_t acap)
+{
+    size_t used = 0, argc = 0;
+
+    while (*tmpl) {
+        char tok[1024];
+        size_t tl = 0, w;
+
+        while (*tmpl == ' ' || *tmpl == '\t') tmpl++;
+        if (!*tmpl) break;
+        while (tmpl[tl] && tmpl[tl] != ' ' && tmpl[tl] != '\t') {
+            if (tl + 1 >= sizeof tok) return -1;
+            tok[tl] = tmpl[tl];
+            tl++;
+        }
+        tok[tl] = '\0';
+        tmpl += tl;
+        if (argc + 1 >= maxa) return -1;
+        w = pack_subst(arena + used, acap - used, tok,
+                       def->dir, in ? in : "", out ? out : "");
+        if (!w && tok[0]) return -1;    /* arena overflow */
+        if (argc == 0 && strchr(arena + used, '/') && arena[used] != '/') {
+            /* relative path: resolve against the pack dir */
+            char joined[4096];
+            int n = snprintf(joined, sizeof joined, "%s/%s",
+                             def->dir, arena + used);
+            if (n <= 0 || (size_t)n >= sizeof joined ||
+                (size_t)n + 1 > acap - used) return -1;
+            memcpy(arena + used, joined, (size_t)n + 1);
+            w = (size_t)n;
+        }
+        argv[argc++] = arena + used;
+        used += w + 1;
+    }
+    argv[argc] = NULL;
+    return argc ? 0 : -1;
+}
+
+int invfs_codec_pack_exec(const invfs_codec *c, int is_encode,
+                          const char *in_path, const char *out_path)
+{
+#ifdef _WIN32
+    (void)c; (void)is_encode; (void)in_path; (void)out_path;
+    return -1;   /* the POSIX tool layer does not exist on Windows */
+#else
+    const invfs_pack_def *def = invfs_codec_pack_def(c);
+    const char *tmpl;
+    char *argv[24];
+    char arena[4096];
+
+    if (!def) return -1;
+    tmpl = is_encode ? def->encode : def->decode;
+    if (!tmpl || !in_path || !out_path) return -1;
+    if (pack_argv_build(def, tmpl, in_path, out_path,
+                        argv, 24, arena, sizeof arena) != 0)
+        return -1;
+    return tool_exec(argv);
+#endif
+}
+
+int invfs_codec_pack_estimate(const invfs_codec *c, const char *in_path,
+                              uint64_t *out_bytes)
+{
+#ifdef _WIN32
+    (void)c; (void)in_path; (void)out_bytes;
+    return -1;
+#else
+    const invfs_pack_def *def = invfs_codec_pack_def(c);
+    char *argv[24];
+    char arena[4096];
+    char out[256];
+    char *endp = NULL;
+    unsigned long long v;
+
+    if (!def || !def->estimate || !in_path) return -1;
+    if (pack_argv_build(def, def->estimate, in_path, NULL,
+                        argv, 24, arena, sizeof arena) != 0)
+        return -1;
+    if (tool_exec_out(argv, out, sizeof out) != 0) return -1;
+    errno = 0;
+    v = strtoull(out, &endp, 10);
+    if (errno || endp == out) return -1;
+    while (*endp == ' ' || *endp == '\t' || *endp == '\n' || *endp == '\r')
+        endp++;
+    if (*endp) return -1;   /* trailing garbage: not a bare byte count */
+    *out_bytes = (uint64_t)v;
+    return 0;
+#endif
+}
 
 static int run_tool(const char *exe, const char *a1, const char *a2, const char *opts)
 {
@@ -8978,6 +9207,111 @@ uint64_t vol_create_pmp_file(invfs_volume *v, const char *name,
                              uint64_t orig_size)
 {
     return vol_create_blob_file(v, name, pmp, pmp_len, orig_size, INVFS_ALGO_PMP);
+}
+
+/* WP13: one codecpack transcode attempt on a RAW file (packs register
+ * whole-file EXTERNAL codecs; the manifest argv runs as a subprocess via
+ * the codec.c trampolines + the exec hooks above). Mirrors the JXL branch
+ * of vol_sweep_file_inner: probe -> admission (WP10 §12.2: the pack's
+ * estimate command when it has one, else the manifest dec_mem constant) ->
+ * encode -> decode-back memcmp guard (the 1:1 invariant) -> size guard ->
+ * new blob inode first, retire the old one after, CODEC{algo, pack
+ * generation} stamp.
+ * Returns 100+algo on success, 1 when the pack's tools are unavailable
+ * (defer: leave the file RAW and unstamped -- like a missing cjxl, the
+ * first sweep after the tools appear picks it up), 0 when the pack
+ * declined (GUARD/MEMLIMIT stamped; the caller falls through to
+ * text/generic, and the stamp carries the retry semantics). */
+static int vol_pack_sweep(invfs_volume *v, uint64_t inode_id, const char *name,
+                          const invfs_codec *pc, const uint8_t *full,
+                          size_t full_len)
+{
+    const invfs_pack_def *def;
+    uint8_t *enc = NULL, *back = NULL;
+    size_t enc_cap, enc_len = 0;
+    uint64_t ws;
+
+    if (!pc->probe || !pc->probe()) return 1;    /* tools absent: wait */
+    def = invfs_codec_pack_def(pc);
+    if (!def) return 0;
+
+    /* WP10 §12.2 admission: decode working set from the pack's estimate
+     * (header-derived, never a trial decode), else the manifest constant */
+    ws = pc->dec_mem_bytes;
+    if (def->estimate) {
+        char dir[64], in[128];
+        int ok = 0;
+        if (tool_tmpdir(dir, sizeof dir) != 0) return 0;
+        snprintf(in, sizeof in, "%s/in", dir);
+        if (tool_write(in, full, full_len) == 0 &&
+            invfs_codec_pack_estimate(pc, in, &ws) == 0)
+            ok = 1;
+        tool_rm(dir, "in");
+        rmdir(dir);
+        /* the pack could not size the job — for an estimate command that
+         * parses the container header this IS the refusal (e.g. an
+         * encapsulated DICOM): record it as a guard refusal so a newer
+         * pack generation re-arms the retry (WP10 §2 table) */
+        if (!ok) {
+            vol_stamp_class(v, inode_id, INVFS_CLASS_GENERIC_GUARD,
+                            (uint8_t)pc->algo, pc->generation);
+            return 0;
+        }
+    }
+    if (ws && ws > vol_get_dec_mem_limit(v)) {
+        vol_stamp_class(v, inode_id, INVFS_CLASS_GENERIC_MEMLIMIT,
+                        (uint8_t)pc->algo, pc->generation);
+        return 0;
+    }
+
+    /* the blob may exceed the input (codec overhead); the size guard below
+     * is what refuses it, but the trampoline needs room to produce it */
+    enc_cap = full_len + full_len / 4 + 65536;
+    enc = (uint8_t *)malloc(enc_cap);
+    if (!enc) return 0;
+    if (pc->encode(full, full_len, enc, enc_cap, &enc_len) == 0 &&
+        enc_len < full_len) {
+        /* guard: the blob must decode back to the exact original bytes
+         * before anything is replaced */
+        back = (uint8_t *)malloc(full_len ? full_len : 1);
+        if (back &&
+            pc->decode(enc, enc_len, back, full_len) == 0 &&
+            memcmp(back, full, full_len) == 0) {
+            invfs_meta_pub keep;
+            int have_keep = vol_get_meta(v, inode_id, &keep) == 0;
+            uint64_t newino = vol_create_blob_file(v, name, enc, enc_len,
+                                                   full_len, pc->algo);
+            if (newino) {
+                vol_delete_inode(v, inode_id, name);
+                /* the fresh blob record has no ext; carry the old meta
+                 * across, like the vol_jxl_retry flow does */
+                if (have_keep) {
+                    invfs_meta_pub chk;
+                    if (vol_get_meta(v, newino, &chk) != 0)
+                        vol_apply_meta(v, name, &keep);
+                }
+                vol_stamp_class(v, newino, INVFS_CLASS_CODEC,
+                                (uint8_t)pc->algo, pc->generation);
+                free(back);
+                free(enc);
+                return 100 + (int)pc->algo;
+            }
+            /* no space for the blob: NOT a guard refusal (vol_jxl_retry's
+             * convention) -- leave unstamped so a retry re-arms */
+            fprintf(stderr, "sweep: %s create failed (%s)\n", pc->name, name);
+            free(back);
+            free(enc);
+            return 0;
+        }
+        free(back);
+    }
+    free(enc);
+    /* declined: tool failed, no gain, or the round-trip guard refused --
+     * the file goes generic below and retries when the pack's generation
+     * improves (WP10 §2 table) */
+    vol_stamp_class(v, inode_id, INVFS_CLASS_GENERIC_GUARD,
+                    (uint8_t)pc->algo, pc->generation);
+    return 0;
 }
 
 

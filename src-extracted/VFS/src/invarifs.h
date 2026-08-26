@@ -43,6 +43,7 @@
 #define INVFS_ALGO_GZR   9  /* GZIP: deflate-replica recipe + "name!partN" (bit-exact) */
 #define INVFS_ALGO_PNGR 10  /* PNG: JXL-lossless blob + "name!jxl" + IVPN recipe */
 #define INVFS_ALGO_PMP  11  /* MP3: packMP3 blob (MPEG-1 Layer III only, bit-exact) */
+#define INVFS_ALGO_RAWIMG 13 /* raw_image codecpack: DICOM/PNM/BMP/TIFF -> lossless JXL */
 
 /* Storage-class flag (WP10): persisted as internal xattr "invfs.class" in the
  * INO2 ext block, value = invfs_class_tlv. Records WHY a file is stored the

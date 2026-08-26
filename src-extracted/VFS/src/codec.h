@@ -42,7 +42,40 @@ typedef struct invfs_codec {
 const invfs_codec *invfs_codec_by_algo(uint32_t algo);
 const invfs_codec *invfs_codec_all(size_t *count);   /* order = sniff priority: specific magics first, text LAST */
 uint16_t           invfs_registry_generation(void);  /* max generation over all codecs */
-void               invfs_codec_probe_reset(void);    /* test hook: clear memoized probe() results */
+void               invfs_codec_probe_reset(void);    /* test hook: clear memoized probe() results + unload packs */
+
+/* ---- codecpack execution boundary (WP13) ----
+ *
+ * Dynamically registered packs (invfs_codec_load_packs, lazy on first
+ * registry access) carry a manifest argv executed as a subprocess. The
+ * registry lives in codec.c but process execution is volume.c's tool-layer
+ * business, so the two run-time hooks below are DECLARED here and
+ * IMPLEMENTED in volume.c (codec.c's encode/decode trampolines call them;
+ * codec_test stubs them). */
+typedef struct invfs_pack_def {
+    const char *dir;       /* pack directory — the {pack} substitution */
+    const char *encode;    /* argv template, {in}/{out}/{pack} placeholders */
+    const char *decode;
+    const char *estimate;  /* argv template with {in}; NULL when absent */
+    const char *requires;  /* comma list of extra tools, NULL when none */
+} invfs_pack_def;
+
+/* The pack record behind a registry entry, or NULL for builtin codecs.
+ * Matches by algo (the materialized registry holds COPIES of the pack
+ * records, so callers cannot rely on pointer identity). */
+const invfs_pack_def *invfs_codec_pack_def(const invfs_codec *c);
+
+/* Run the pack's encode (is_encode=1) or decode argv with {in}/{out}
+ * substituted by the given paths. Returns the child's exit code, -1 on
+ * failure to launch. */
+int invfs_codec_pack_exec(const invfs_codec *c, int is_encode,
+                          const char *in_path, const char *out_path);
+
+/* Run the pack's estimate argv ({in} substituted); parses a u64 byte count
+ * from its stdout. Returns 0 on success, -1 when the pack has no estimate
+ * command or it failed. */
+int invfs_codec_pack_estimate(const invfs_codec *c, const char *in_path,
+                              uint64_t *out_bytes);
 
 /* Text families — the batching sort key (WP10 §4). 1..10 are the extension
  * families; INVFS_TEXT_FAMILY_CONTENT is content-sniffed text with no known

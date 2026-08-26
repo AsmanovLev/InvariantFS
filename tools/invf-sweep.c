@@ -21,6 +21,7 @@
 
 #include "invarifs.h"
 #include "volume.h"
+#include "codec.h"
 
 typedef struct sw_bucket { struct sw_bucket *next; int slot; } sw_bucket;
 
@@ -210,8 +211,9 @@ int main(int argc, char **argv)
                           names[i], (unsigned long long)sizes[i]); continue; }
         {
             /* vol_sweep_one: 0 = nothing to do, >0 = transcoded/swept,
-             * 9 = text deferred into the batch accumulator (sealed by
-             * vol_tz_flush below), <0 = hard error */
+             * 7 = JPEG->JXL, 9 = text deferred into the batch accumulator
+             * (sealed by vol_tz_flush below), >=100 = codecpack transcode
+             * (100+algo, WP13), <0 = hard error */
             int rc = vol_sweep_one(vol, inodes[i], names[i]);
             if (rc == 9) {
                 textb++;
@@ -220,6 +222,12 @@ int main(int argc, char **argv)
             else if (rc == 7) {
                 swept++;
                 printf("  %s: JPEG -> JXL (lossless)\n", names[i]);
+            }
+            else if (rc >= 100) {
+                const invfs_codec *pc = invfs_codec_by_algo((uint32_t)(rc - 100));
+                swept++;
+                printf("  %s: %s (codecpack)\n", names[i],
+                       pc ? pc->name : "unknown-pack");
             }
             else if (rc > 0) swept++;
             else if (rc == 0) skipped++;
