@@ -25,6 +25,62 @@
 
 typedef struct sw_bucket { struct sw_bucket *next; int slot; } sw_bucket;
 
+/* WP14b: container-part deferrals ("name!partN") are aggregated per
+ * container and printed as one summary line at the end of the walk --
+ * a Silesia mozilla/samba/xml run would otherwise log 1573 near-identical
+ * per-part lines. */
+typedef struct {
+    char prefix[256];   /* container name including the '!' */
+    int  n_text;        /* parts deferred to PPMd batches */
+    int  n_bin;         /* parts deferred to ZSTD batches */
+} part_agg;
+
+static part_agg *g_parts;
+static size_t   g_parts_n, g_parts_cap;
+
+static void part_agg_add(const char *name, int binary)
+{
+    const char *bang = strchr(name, '!');
+    size_t plen = bang ? (size_t)(bang - name) + 1 : 0;
+    size_t i;
+
+    if (!plen || plen >= 256) return;
+    for (i = 0; i < g_parts_n; i++)
+        if (strncmp(g_parts[i].prefix, name, plen) == 0 &&
+            g_parts[i].prefix[plen] == 0)
+            break;
+    if (i == g_parts_n) {
+        if (g_parts_n == g_parts_cap) {
+            size_t nc = g_parts_cap ? g_parts_cap * 2 : 16;
+            part_agg *na = realloc(g_parts, nc * sizeof *na);
+            if (!na) return;
+            g_parts = na;
+            g_parts_cap = nc;
+        }
+        memset(&g_parts[i], 0, sizeof g_parts[i]);
+        memcpy(g_parts[i].prefix, name, plen);
+        g_parts_n++;
+    }
+    if (binary) g_parts[i].n_bin++;
+    else        g_parts[i].n_text++;
+}
+
+static void part_agg_print(void)
+{
+    size_t i;
+    for (i = 0; i < g_parts_n; i++) {
+        if (g_parts[i].n_bin)
+            printf("  %s*: %d parts -> ZSTD batch\n", g_parts[i].prefix,
+                   g_parts[i].n_bin);
+        if (g_parts[i].n_text)
+            printf("  %s*: %d parts -> PPMd batch\n", g_parts[i].prefix,
+                   g_parts[i].n_text);
+    }
+    free(g_parts);
+    g_parts = NULL;
+    g_parts_n = g_parts_cap = 0;
+}
+
 static uint64_t sw_hash(const char *s)
 {
     uint64_t h = 1469598103934665603ULL;
@@ -83,8 +139,7 @@ int main(int argc, char **argv)
     const invfs_superblock *sb;
     int err, dry = 0;
     uint64_t bm, area_start, area_end, p;
-    int count = 0, cap = 0, swept = 0, skipped = 0, failed = 0, textb = 0;
-    int binb = 0;
+    int count = 0, cap = 0, swept = 0, skipped = 0, failed = 0;
     char (*names)[256] = NULL;
     uint64_t *inodes = NULL;
     uint64_t *sizes = NULL;
@@ -218,12 +273,16 @@ int main(int argc, char **argv)
              * (100+algo, WP13), <0 = hard error */
             int rc = vol_sweep_one(vol, inodes[i], names[i]);
             if (rc == 9) {
-                textb++;
-                printf("  %s: text -> PPMd batch\n", names[i]);
+                if (strchr(names[i], '!'))
+                    part_agg_add(names[i], 0);
+                else
+                    printf("  %s: text -> PPMd batch\n", names[i]);
             }
             else if (rc == 10) {
-                binb++;
-                printf("  %s: binary -> ZSTD batch\n", names[i]);
+                if (strchr(names[i], '!'))
+                    part_agg_add(names[i], 1);
+                else
+                    printf("  %s: binary -> ZSTD batch\n", names[i]);
             }
             else if (rc == 7) {
                 swept++;
@@ -243,6 +302,10 @@ int main(int argc, char **argv)
             fprintf(stderr, "  ..%d done (swept=%d)\n", swept + skipped, swept);
     }
 
+    /* WP14b: print the aggregated container-part deferral lines collected
+     * during the walk (one line per container instead of one per part) */
+    part_agg_print();
+
     /* WP12(h): per-segment dedupe between the walk and the text-batch GC
      * (order: walk -> dedupe -> GC -> flush). The walk's transcodes are
      * what create the duplicates worth finding -- identical content lands
@@ -256,9 +319,13 @@ int main(int argc, char **argv)
 
     /* WP10 §7 + WP14a: reclaim owner batches no live member references,
      * then seal the accumulated text AND binary candidates into shared
-     * batches (one vol_tz_flush drains both accumulators). */
+     * batches (one vol_tz_flush drains both accumulators). The deferred
+     * counts come from the accumulators themselves: parts deferred at
+     * container-explode time (WP14b) never produced a walk line. */
     if (!dry) {
         int gcrc = vol_tz_gc(vol);
+        size_t tzp = vol_acc_pending(vol, 0);
+        size_t bzp = vol_acc_pending(vol, 1);
         int tzrc;
         if (gcrc > 0)
             printf("text gc: %u dead batches reclaimed\n", (unsigned)gcrc);
@@ -266,9 +333,10 @@ int main(int argc, char **argv)
             fprintf(stderr, "text gc failed (rc=%d)\n", gcrc);
         tzrc = vol_tz_flush(vol);
         if (tzrc == 0) {
-            printf("text batches flushed (%d deferred)\n", textb);
-            if (binb)
-                printf("binary batches flushed (%d deferred)\n", binb);
+            if (tzp)
+                printf("text batches flushed (%zu deferred)\n", tzp);
+            if (bzp)
+                printf("binary batches flushed (%zu deferred)\n", bzp);
         }
         else if (tzrc < 0) {
             fprintf(stderr, "batch flush failed (rc=%d)\n", tzrc);

@@ -308,6 +308,16 @@ static int sniff_wv(const uint8_t *head, size_t head_len, const char *name)
     return magic_at(head, head_len, m, sizeof m, 0);
 }
 
+/* WP14b M2: exe-as-container prefilter. The carving decision needs a
+ * whole-file media scan (embedded JPEG >= 16 KiB), which a head window
+ * cannot see -- that runs in the vol_sweep_one branch on full content.
+ * Here the binary-family magic (ELF/PE/Mach-O) is only a cheap gate for
+ * the registry users (tz_sniff_any's UNCOMPRESSIBLE retry). */
+static int sniff_exer(const uint8_t *head, size_t head_len, const char *name)
+{
+    return invfs_binary_family(head, head_len, name) > 0 ? 40 : 0;
+}
+
 /* ---------------- codecpack probe (WP10 §10) ---------------- */
 
 #define PACK_MAX_MAGIC 8   /* sniff.magic rules per pack (repeated lines) */
@@ -886,7 +896,7 @@ static void pack_entry_free(pack_entry *p)
  * Filled lazily on the first probe of each codec. The sweep is
  * single-threaded today, so a plain unsynchronized cache is fine --
  * revisit if probing ever goes concurrent. */
-#define PROBE_CACHE_SLOTS 16   /* INVFS_ALGO_* registry ids run 0..13; 14
+#define PROBE_CACHE_SLOTS 16   /* INVFS_ALGO_* registry ids run 0..15; 14
                                 * (ZSTD_BCJ) is an AST-only tag (WP14a) with
                                 * no registry entry, so it never probes */
 static signed char probe_cache[PROBE_CACHE_SLOTS];   /* 0 = not probed yet */
@@ -961,6 +971,9 @@ static const invfs_codec registry[] = {
     { INVFS_ALGO_WV, "wv",
       INVFS_CODEC_CAP_EXTERNAL, 0, 1,
       sniff_wv, probe_wv, NULL, NULL },
+    { INVFS_ALGO_EXER, "exer",
+      INVFS_CODEC_CAP_CONTAINER, 0, 1,
+      sniff_exer, NULL, NULL, NULL },
     { INVFS_ALGO_PPMD, "ppmd",
       INVFS_CODEC_CAP_BATCHED, 68ull << 20, 0,
       sniff_ppmd, NULL, invfs_ppmd_encode, invfs_ppmd_decode },

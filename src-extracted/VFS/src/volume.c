@@ -2851,6 +2851,145 @@ static int mz_tdefl_compress(const uint8_t *in, size_t in_len,
                              uint8_t *out, size_t out_cap, int level,
                              size_t *out_len);
 
+/* ---- WP14b M2: exe-as-container shared helpers ----
+ * The carve recipe ("name!exerecipe") is self-describing and little-endian:
+ *   [4B "IVER"][1B ver=1][u32 nregions]
+ *   per region: [u64 file_offset][u64 length][u8 kind][u8 name_len][name]
+ * kind 0 = glue ("gN" sibling: verbatim/batched), 1 = JPEG media ("mN"
+ * sibling: lossless JXL blob), 2 = PNG media (recognized, never promoted
+ * in v1: djxl's PNG output is a fresh encoding, so the bit-exact guard
+ * could never pass -- the PNGR machinery that could rebuild one is
+ * Windows-only, WP12(c)). */
+
+static void exer_wr64(uint8_t *p, uint64_t v)
+{
+    int i;
+    for (i = 0; i < 8; i++) { p[i] = (uint8_t)v; v >>= 8; }
+}
+
+static uint64_t exer_rd64(const uint8_t *p)
+{
+    uint64_t v = 0;
+    int i;
+    for (i = 0; i < 8; i++) v |= (uint64_t)p[i] << (8 * i);
+    return v;
+}
+
+#define EXE_MEDIA_MIN (16 * 1024)   /* smaller finds are not worth carving */
+#define EXE_MAX_MEDIA 64            /* sanity bound on regions per exe */
+
+typedef struct {
+    uint64_t off, len;
+    int kind;                       /* 0 = glue, 1 = JPEG, 2 = PNG */
+} exe_region;
+
+/* End of the JPEG stream that starts at p (FF D8 FF validated by the
+ * caller): walk the marker stream to EOI. Segments carry their length, so
+ * thumbnails inside APPn cannot truncate the walk; after SOS the
+ * entropy-coded run ends at the first FF NOT followed by 00 (stuffing),
+ * D0-D7 (RSTn) or FF (fill) -- that is the next marker. Valid only if a
+ * SOFn appeared before EOI. Returns the offset just past FF D9, 0 on
+ * truncation/malformation. */
+static size_t jpeg_scan_end(const uint8_t *b, size_t n, size_t p)
+{
+    int saw_sof = 0;
+
+    p += 2;   /* past SOI */
+    while (p + 1 < n) {
+        uint8_t m;
+        if (b[p] != 0xFF) return 0;
+        m = b[p + 1];
+        if (m == 0xFF) { p++; continue; }      /* fill bytes */
+        if (m == 0x00) return 0;               /* stuffed byte: not a marker */
+        if (m == 0xD8 || m == 0x01 || (m >= 0xD0 && m <= 0xD7)) {
+            p += 2;                            /* SOI/TEM/RSTn: no length */
+            continue;
+        }
+        if (m == 0xD9)
+            return saw_sof ? p + 2 : 0;        /* EOI */
+        if (p + 4 > n) return 0;
+        {
+            unsigned sl = ((unsigned)b[p + 2] << 8) | b[p + 3];
+            if (sl < 2 || p + 2 + sl > n) return 0;
+            if (m >= 0xC0 && m <= 0xCF && m != 0xC4 && m != 0xC8 &&
+                m != 0xCC)
+                saw_sof = 1;                   /* SOFn (any encoding) */
+            p += 2 + sl;
+            if (m == 0xDA) {
+                /* SOS: entropy run follows the header */
+                for (;;) {
+                    if (p + 1 >= n) return 0;
+                    if (b[p] == 0xFF && b[p + 1] != 0x00 &&
+                        !(b[p + 1] >= 0xD0 && b[p + 1] <= 0xD7) &&
+                        b[p + 1] != 0xFF)
+                        break;
+                    p++;
+                }
+            }
+        }
+    }
+    return 0;
+}
+
+/* End of the PNG stream starting at p (8-byte signature validated by the
+ * caller): walk [u32 BE len][4B type][data][4B crc] chunks to IEND; IHDR
+ * must come first. Returns the offset just past IEND, 0 on truncation or
+ * structural garbage. */
+static size_t png_scan_end(const uint8_t *b, size_t n, size_t p)
+{
+    int first = 1;
+
+    p += 8;
+    while (p + 12 <= n) {           /* shortest chunk: len+type+crc */
+        uint32_t cl = ((uint32_t)b[p] << 24) | ((uint32_t)b[p + 1] << 16) |
+                      ((uint32_t)b[p + 2] << 8) | b[p + 3];
+        if ((uint64_t)cl + 12 > n - p) return 0;
+        if (first && memcmp(b + p + 4, "IHDR", 4) != 0) return 0;
+        first = 0;
+        if (memcmp(b + p + 4, "IEND", 4) == 0)
+            return p + 12 + cl;
+        p += 12 + cl;
+    }
+    return 0;
+}
+
+/* Scan an executable image for embedded media worth carving (>= 16 KiB).
+ * Regions are returned in file order; a validated stream's bytes are never
+ * rescanned (no false hits inside an accepted JPEG/PNG). A random FF D8 FF
+ * in code dies in jpeg_scan_end's marker walk long before the cjxl guard
+ * would ever see it. */
+static size_t exe_scan_media(const uint8_t *b, size_t n,
+                             exe_region *out, size_t cap)
+{
+    size_t p = 0, cnt = 0;
+
+    while (p + EXE_MEDIA_MIN <= n && cnt < cap) {
+        size_t end = 0;
+        int kind = 0;
+        if (b[p] == 0xFF && p + 3 <= n &&
+            b[p + 1] == 0xD8 && b[p + 2] == 0xFF) {
+            end = jpeg_scan_end(b, n, p);
+            kind = 1;
+        } else if (b[p] == 0x89 && p + 8 <= n &&
+                   memcmp(b + p, "\x89PNG\r\n\x1a\n", 8) == 0) {
+            end = png_scan_end(b, n, p);
+            kind = 2;
+        }
+        if (end && end - p >= EXE_MEDIA_MIN) {
+            if (kind == 1) {        /* JPEG only in v1 (PNG: see above) */
+                out[cnt].off = p;
+                out[cnt].len = end - p;
+                out[cnt].kind = kind;
+                cnt++;
+            }
+            p = end;
+        } else {
+            p++;
+        }
+    }
+    return cnt;
+}
+
 /* WP10 §5 / WP14a: is this AST entry a member slice of a shared batch?
  * zone=TEXT means "batched"; the payload codec is PPMD (text batches,
  * WP10) or ZSTD / ZSTD_BCJ (binary batches, WP14a). */
@@ -3484,6 +3623,84 @@ static int vol_read_inode(invfs_volume *v, uint64_t inode_id, unsigned depth,
                     }
                     memcpy(data + dst_off, fl, fl_len);
                     pngx_free(&pi); free(fl); free(rcp_own);
+                } else if (e->algo == INVFS_ALGO_EXER) {
+                    /* WP14b M2: exe-as-container. The blob is the 4-byte
+                     * "IVEX" marker; sibling "name!exerecipe" holds the
+                     * ordered region list, and every region's bytes live in
+                     * their own sibling ("name!mN" JXL media, "name!gN"
+                     * glue) read through the normal path -- batched glue
+                     * arrives as TEXT slices, verbatim glue as NONE. The
+                     * regions must tile the file exactly (recipe is disk
+                     * input: every bound is checked). */
+                    uint8_t *xr = NULL;
+                    size_t xr_len = 0;
+                    char xn[320];
+                    uint64_t xid;
+                    uint32_t nreg, ri;
+                    size_t ro;
+                    uint64_t expect;
+                    int ok;
+
+                    if (hdr != 4 || memcmp(blob, "IVEX", 4) != 0) {
+                        fprintf(stderr, "EXER: bad marker for %s\n", rec_h.name);
+                        free(blob); free(data); free(rec); return -1;
+                    }
+                    snprintf(xn, sizeof xn, "%s!exerecipe", rec_h.name);
+                    xid = vol_find(v, xn);
+                    if (!xid ||
+                        vol_read_inode(v, xid, 0, &xr, &xr_len) != 0) {
+                        fprintf(stderr, "EXER: recipe '%s' missing\n", xn);
+                        free(blob); free(data); free(rec); return -1;
+                    }
+                    ok = xr_len >= 9 && memcmp(xr, "IVER", 4) == 0 &&
+                         xr[4] == 1;
+                    nreg = 0;
+                    if (ok) {
+                        nreg = (uint32_t)xr[5] | ((uint32_t)xr[6] << 8) |
+                               ((uint32_t)xr[7] << 16) | ((uint32_t)xr[8] << 24);
+                        if (nreg == 0 || nreg > 8192) ok = 0;
+                    }
+                    ro = 9;
+                    expect = 0;
+                    for (ri = 0; ok && ri < nreg; ri++) {
+                        uint64_t roff, rlen;
+                        uint8_t kind, nl;
+                        char mn[320];
+                        uint64_t mid;
+                        uint8_t *mb = NULL;
+                        size_t mb_len = 0;
+
+                        if (ro + 18 > xr_len) { ok = 0; break; }
+                        roff = exer_rd64(xr + ro);
+                        rlen = exer_rd64(xr + ro + 8);
+                        kind = xr[ro + 16];
+                        nl = xr[ro + 17];
+                        ro += 18;
+                        if (ro + nl > xr_len || nl == 0 || nl > 16 ||
+                            kind > 2) { ok = 0; break; }
+                        if (roff != expect || rlen == 0 ||
+                            rlen > e->length - expect) { ok = 0; break; }
+                        snprintf(mn, sizeof mn, "%s!%.*s", rec_h.name,
+                                 (int)nl, (const char *)(xr + ro));
+                        ro += nl;
+                        mid = vol_find(v, mn);
+                        if (!mid ||
+                            vol_read_inode(v, mid, 0, &mb, &mb_len) != 0 ||
+                            mb_len != (size_t)rlen) {
+                            free(mb);
+                            ok = 0;
+                            break;
+                        }
+                        memcpy(data + roff, mb, (size_t)rlen);
+                        free(mb);
+                        expect += rlen;
+                    }
+                    free(xr);
+                    if (!ok || expect != e->length) {
+                        fprintf(stderr, "EXER: recipe does not tile %s\n",
+                                rec_h.name);
+                        free(blob); free(data); free(rec); return -1;
+                    }
                 } else if (e->algo == INVFS_ALGO_NONE) {
                     memcpy(data + dst_off, blob, hdr);
                 } else {
@@ -4306,6 +4523,53 @@ static int vol_inode_first_zone(invfs_volume *v, uint64_t inode_id)
     return (int)e0.zone;
 }
 
+/* WP14b candidate shape (WP10 §12.7 v2): every AST entry is a per-segment
+ * generic store (BINARY zone, NONE/LZ4/ZSTD algo). An extraction container's
+ * part ("name!partN") looks exactly like this before batching; a part
+ * holding anything else (a whole-file JXL/APE blob, a batch member) is not
+ * a candidate. 1 = the shape matches. */
+static int part_generic_segments(invfs_volume *v, uint64_t inode_id)
+{
+    uint8_t *buf = NULL;
+    uint32_t rl = 0;
+    invfs_ast_recipe_header ah;
+    const invfs_ast_block_entry *ents;
+    size_t base = sizeof(invfs_inode_rec);
+    uint16_t i;
+    int ok = 0;
+
+    if (meta_read_record_by_id(v, inode_id, &buf, &rl, NULL, 0, NULL) != 0)
+        return 0;
+    if (rl >= base + sizeof(ah)) {
+        memcpy(&ah, buf + base, sizeof(ah));
+        if (ah.num_blocks && ah.num_children == 0 &&
+            rl >= base + sizeof(ah) +
+                   (size_t)ah.num_blocks * sizeof(invfs_ast_block_entry)) {
+            ents = (const invfs_ast_block_entry *)(buf + base + sizeof(ah));
+            ok = 1;
+            for (i = 0; i < ah.num_blocks; i++) {
+                if (ents[i].zone != INVFS_ZONE_BINARY ||
+                    (ents[i].algo != INVFS_ALGO_NONE &&
+                     ents[i].algo != INVFS_ALGO_LZ4 &&
+                     ents[i].algo != INVFS_ALGO_ZSTD)) {
+                    ok = 0;
+                    break;
+                }
+            }
+        }
+    }
+    free(buf);
+    return ok;
+}
+
+/* WP14b: defer the parts of a just-exploded extraction container
+ * ("name!partN", N = 0..) into the batching accumulators, so a TAR swept in
+ * this run has its members batched by THIS run's vol_tz_flush instead of
+ * sitting one run in per-file ZSTD. The flush re-reads and re-sniffs each
+ * part from its live record, so a head sniff is enough here; parts that
+ * sniff as nothing stay per-file generic (the absent-stamp walk branch
+ * reconsiders them next run). */
+
 /* WP10 write path (defined with the class helpers, after vol_stamp_class):
  * defer into the text/binary accumulators, downgrade a stored file to the
  * generic form on policy violation, and the cheap head-sniff behind the
@@ -4322,6 +4586,54 @@ static int tz_member_oversized(invfs_volume *v, uint64_t inode_id,
 static int vol_pack_sweep(invfs_volume *v, uint64_t inode_id,
                           const char *name, const invfs_codec *pc,
                           const uint8_t *full, size_t full_len);
+
+/* WP14b: defer the parts of a just-exploded extraction container
+ * ("name!partN", N = 0..) into the batching accumulators, so a TAR swept in
+ * this run has its members batched by THIS run's vol_tz_flush instead of
+ * sitting one run in per-file ZSTD. The flush re-reads and re-sniffs each
+ * part from its live record, so a head sniff is enough here; parts that
+ * sniff as nothing stay per-file generic (the absent-stamp walk branch
+ * reconsiders them next run). */
+static void defer_container_parts(invfs_volume *v, const char *name)
+{
+    uint8_t head[8192];
+    char pn[320];
+    unsigned i;
+    int n_bin = 0, n_text = 0;
+
+    for (i = 0; ; i++) {
+        uint64_t pino, fsz = 0;
+        int got, bfam, tfam;
+
+        snprintf(pn, sizeof pn, "%s!part%u", name, i);
+        pino = vol_find(v, pn);
+        if (!pino) break;
+        got = vol_read_range(v, pino, 0, sizeof head, head);
+        if (got <= 0 ||
+            vol_stat_full(v, pn, NULL, &fsz, NULL) != 0 || !fsz)
+            continue;
+        bfam = invfs_binary_family(head, (size_t)got, pn);
+        if (bfam > 0) {
+            if (bz_defer(v, pino, pn, fsz, (uint32_t)bfam) == 0) n_bin++;
+            continue;
+        }
+        tfam = invfs_text_family(pn, head, (size_t)got);
+        if (tfam > 0) {
+            const invfs_codec *pc = invfs_codec_by_algo(INVFS_ALGO_PPMD);
+            if (pc && pc->dec_mem_bytes > vol_get_dec_mem_limit(v))
+                vol_stamp_class(v, pino, INVFS_CLASS_GENERIC_MEMLIMIT,
+                                INVFS_ALGO_PPMD, pc->generation);
+            else if (tz_defer(v, pino, pn, fsz, (uint32_t)tfam) == 0)
+                n_text++;
+        }
+    }
+    /* one summary line per container, not one per part (a Silesia TAR has
+     * ~1500 members); same format the sweep driver's part aggregator uses */
+    if (n_bin)
+        printf("  %s!*: %d parts -> ZSTD batch\n", name, n_bin);
+    if (n_text)
+        printf("  %s!*: %d parts -> PPMd batch\n", name, n_text);
+}
 
 /* WP12(b): JPEG upgrade retry for a file the class predicate just re-armed
  * (GENERIC_MEMLIMIT: the raised dec_mem limit admits it; GENERIC_GUARD: a
@@ -4521,14 +4833,57 @@ int vol_sweep_one(invfs_volume *v, uint64_t inode_id, const char *name)
                 }
             }
             }
-        } else if (vol_inode_first_zone(v, inode_id) != INVFS_ZONE_RAW) {
-            /* Cheap reject before the expensive read. vol_read_file DECODES,
-               so on an already-swept volume the old order paid a full
-               packMP3/cjxl/APE decode per file just to conclude "nothing to
-               do". Anything not in RAW has been swept; the one caller that
-               still needs the decoded bytes (vol_sweep_file) re-checks the
-               zone itself. (Legacy rule for files with no class flag.) */
-            return 0;
+        } else {
+            int fz = vol_inode_first_zone(v, inode_id);
+            if (fz != INVFS_ZONE_RAW) {
+                /* WP14b (WP10 §12.7 v2): an extraction container's part
+                 * ("name!partN") stored per-segment generic -- absent class
+                 * stamp, BINARY zone, NONE/LZ4/ZSTD algos -- is a batching
+                 * candidate: sniff the head, defer into the binary or text
+                 * accumulator. Parts already in batches (zone TEXT) and
+                 * whole-file blob siblings skip here as before. The flush
+                 * re-validates from the live record. */
+                if (fz == INVFS_ZONE_BINARY && strchr(name, '!') &&
+                    part_generic_segments(v, inode_id)) {
+                    uint8_t head[8192];
+                    uint64_t fsz = 0;
+                    int got = vol_read_range(v, inode_id, 0, sizeof head,
+                                             head);
+                    int bfam, tfam;
+                    if (got > 0 &&
+                        vol_stat_full(v, name, NULL, &fsz, NULL) == 0 &&
+                        fsz) {
+                        bfam = invfs_binary_family(head, (size_t)got, name);
+                        if (bfam > 0 &&
+                            bz_defer(v, inode_id, name, fsz,
+                                     (uint32_t)bfam) == 0)
+                            return 10;   /* part -> ZSTD batch */
+                        tfam = invfs_text_family(name, head, (size_t)got);
+                        if (tfam > 0) {
+                            const invfs_codec *pc =
+                                invfs_codec_by_algo(INVFS_ALGO_PPMD);
+                            if (pc && pc->dec_mem_bytes >
+                                      vol_get_dec_mem_limit(v)) {
+                                vol_stamp_class(v, inode_id,
+                                                INVFS_CLASS_GENERIC_MEMLIMIT,
+                                                INVFS_ALGO_PPMD,
+                                                pc->generation);
+                            } else if (tz_defer(v, inode_id, name, fsz,
+                                                (uint32_t)tfam) == 0) {
+                                return 9;   /* part -> PPMd batch */
+                            }
+                        }
+                    }
+                }
+                /* Cheap reject before the expensive read. vol_read_file
+                   DECODES, so on an already-swept volume the old order paid
+                   a full packMP3/cjxl/APE decode per file just to conclude
+                   "nothing to do". Anything not in RAW has been swept; the
+                   one caller that still needs the decoded bytes
+                   (vol_sweep_file) re-checks the zone itself. (Legacy rule
+                   for files with no class flag.) */
+                return 0;
+            }
         }
     }
 
@@ -4596,6 +4951,7 @@ int vol_sweep_one(invfs_volume *v, uint64_t inode_id, const char *name)
         if (vol_delete_inode(v, inode_id, name) != 0) return -1;
         vol_stamp_class(v, nino, INVFS_CLASS_CONTAINER,
                         INVFS_ALGO_TARR, tz_codec_gen(INVFS_ALGO_TARR));
+        defer_container_parts(v, name);   /* WP14b: batch parts this run */
         return 3;   /* TAR */
     }
 
@@ -4614,6 +4970,7 @@ int vol_sweep_one(invfs_volume *v, uint64_t inode_id, const char *name)
         if (vol_delete_inode(v, inode_id, name) != 0) return -1;
         vol_stamp_class(v, nino, INVFS_CLASS_CONTAINER,
                         INVFS_ALGO_GZR, tz_codec_gen(INVFS_ALGO_GZR));
+        defer_container_parts(v, name);   /* WP14b: batch parts this run */
         return 4;   /* GZIP */
     }
 
@@ -5054,6 +5411,12 @@ int vol_read_range(invfs_volume *v, uint64_t inode_id, uint64_t offset,
         uint64_t req_lo = offset, req_hi = offset + len;
         uint64_t lo, hi;
         uint8_t tmp[SEGMENT_SIZE];
+        /* A container part (vol_create_blob_file) is ONE segment holding the
+         * whole part, and a part can far exceed the 64 KB segment size of
+         * the regular path: decode those from the heap, not the stack
+         * (WP14b reads part heads through here at sweep time). */
+        uint8_t *segbuf = tmp;
+        uint8_t *segheap = NULL;
         size_t want;
 
         if (seg_hi <= req_lo || seg_lo >= req_hi)
@@ -5082,53 +5445,62 @@ int vol_read_range(invfs_volume *v, uint64_t inode_id, uint64_t offset,
             uint64_t pba = 0, plen = 0;
             uint32_t hdr, crc_hdr;
             uint8_t *blob;
+            if (e->length > sizeof tmp) {
+                segheap = (uint8_t *)malloc((size_t)e->length);
+                if (!segheap) { free(rec); return -1; }
+                segbuf = segheap;
+            }
             if (vol_lookup_entry(v, inode_id, e->block_id, &pba, &plen) != 0) {
-                free(rec); return -1;
+                free(segheap); free(rec); return -1;
             }
             {
                 uint8_t hdrb[8];
                 if (io_seek(&v->io, pba * INVFS_BLOCK_SIZE) != 0 ||
-                    io_read(&v->io, hdrb, 8) != 0) { free(rec); return -1; }
+                    io_read(&v->io, hdrb, 8) != 0) { free(segheap); free(rec); return -1; }
                 memcpy(&hdr, hdrb, 4);
                 memcpy(&crc_hdr, hdrb + 4, 4);
             }
             blob = (uint8_t *)malloc(hdr);
-            if (!blob) { free(rec); return -1; }
+            if (!blob) { free(segheap); free(rec); return -1; }
             if (io_seek(&v->io, pba * INVFS_BLOCK_SIZE + 8) != 0 ||
-                io_read(&v->io, blob, hdr) != 0) { free(blob); free(rec); return -1; }
+                io_read(&v->io, blob, hdr) != 0) { free(blob); free(segheap); free(rec); return -1; }
             /* deep protection: verify segment CRC32C */
             if (crc_hdr != 0 && invfs_crc32c(blob, hdr) != crc_hdr) {
                 fprintf(stderr, "segment CRC mismatch: inode %llu seg %u\n",
                         (unsigned long long)inode_id, e->block_id);
-                free(blob); free(rec); return -1;
+                free(blob); free(segheap); free(rec); return -1;
             }
 
             if (e->algo == INVFS_ALGO_LZ4) {
-                int got = LZ4_decompress_safe((const char *)blob, (char *)tmp,
+                int got = LZ4_decompress_safe((const char *)blob, (char *)segbuf,
                                               (int)hdr, (int)e->length);
                 if (got != (int)e->length) {
-                    free(blob); free(rec); return -1; }
+                    free(blob); free(segheap); free(rec); return -1; }
             } else if (e->algo == INVFS_ALGO_ZSTD) {
-                size_t got = ZSTD_decompress(tmp, e->length, blob, hdr);
-                if (ZSTD_isError(got) || got != e->length) { free(blob); free(rec); return -1; }
+                size_t got = ZSTD_decompress(segbuf, e->length, blob, hdr);
+                if (ZSTD_isError(got) || got != e->length) { free(blob); free(segheap); free(rec); return -1; }
             } else if (e->algo == INVFS_ALGO_JXL) {
                 uint8_t *jpg = NULL;
                 size_t jpg_len = 0;
                 if (invfs_jxl_decompress(blob, hdr, &jpg, &jpg_len) != 0 ||
                     jpg_len != e->length) {
-                    free(blob); free(rec); return -1;
+                    free(blob); free(segheap); free(rec); return -1;
                 }
                 want = (size_t)(hi - lo);
                 memcpy((uint8_t *)buf + (size_t)(lo - offset), jpg + (size_t)(lo - seg_lo), want);
                 got += want;
                 free(jpg);
                 free(blob);
+                free(segheap);
+                continue;   /* unreachable in practice: JXL blobs divert via
+                             * algo_is_whole_file (single-segment records) --
+                             * the continue matches APE/PMP for safety */
             } else if (e->algo == INVFS_ALGO_APE) {
                 uint8_t *fl = NULL;
                 size_t fl_len = 0;
                 if (invfs_ape_decompress(blob, hdr, &fl, &fl_len) != 0 ||
                     fl_len < (size_t)(hi - lo) || (size_t)(lo - seg_lo) > fl_len) {
-                    free(blob); free(rec); return -1;
+                    free(blob); free(segheap); free(rec); return -1;
                 }
                 want = (size_t)(hi - lo);
                 memcpy((uint8_t *)buf + (size_t)(lo - offset),
@@ -5136,6 +5508,7 @@ int vol_read_range(invfs_volume *v, uint64_t inode_id, uint64_t offset,
                 got += want;
                 free(fl);
                 free(blob);
+                free(segheap);
                 continue;
             } else if (e->algo == INVFS_ALGO_PMP) {
                 /* ranged read: decode the whole blob, hand back the window.
@@ -5147,7 +5520,7 @@ int vol_read_range(invfs_volume *v, uint64_t inode_id, uint64_t offset,
                 if (invfs_pmp_decompress(blob, hdr, &m, &m_len) != 0 ||
                     (size_t)(lo - seg_lo) > m_len ||
                     m_len - (size_t)(lo - seg_lo) < (size_t)(hi - lo)) {
-                    free(m); free(blob); free(rec); return -1;
+                    free(m); free(blob); free(segheap); free(rec); return -1;
                 }
                 want = (size_t)(hi - lo);
                 memcpy((uint8_t *)buf + (size_t)(lo - offset),
@@ -5155,17 +5528,19 @@ int vol_read_range(invfs_volume *v, uint64_t inode_id, uint64_t offset,
                 got += want;
                 free(m);
                 free(blob);
+                free(segheap);
                 continue;
             } else {
                 if (hdr != e->length) {
-                    free(blob); free(rec); return -1; }
-                memcpy(tmp, blob, e->length);
+                    free(blob); free(segheap); free(rec); return -1; }
+                memcpy(segbuf, blob, e->length);
             }
             free(blob);
         }
 
         want = (size_t)(hi - lo);
-        memcpy((uint8_t *)buf + (size_t)(lo - offset), tmp + (size_t)(lo - seg_lo), want);
+        memcpy((uint8_t *)buf + (size_t)(lo - offset), segbuf + (size_t)(lo - seg_lo), want);
+        free(segheap);
         got += want;
     }
     free(rec);
@@ -6827,9 +7202,16 @@ static int tz_flush_one(invfs_volume *v, int binary)
              * generic storage) is fine to batch -- and, for the binary
              * accumulator, so is plain GENERIC (the WP14a migration);
              * anything else was swept meanwhile and is left alone */
-            if (z < 0 ||
-                vol_get_class(v, cand->inode_id, &cc, &ca, &cg) != 0 ||
-                !tz_flush_class_ok(binary, cc))
+            if (z < 0)
+                continue;
+            if (vol_get_class(v, cand->inode_id, &cc, &ca, &cg) != 0) {
+                /* WP14b: a container part carries no class stamp; the walk
+                 * deferred it out of the absent-stamp + BINARY zone +
+                 * generic-algos shape, and the name->id pin above still
+                 * holds the record that shape was checked against. */
+                if (z != INVFS_ZONE_BINARY || !strchr(cand->name, '!'))
+                    continue;
+            } else if (!tz_flush_class_ok(binary, cc))
                 continue;
         }
         if (vol_read_file(v, cand->inode_id, &data, &dlen) != 0 || !dlen) {
@@ -6932,6 +7314,12 @@ int vol_tz_flush(invfs_volume *v)
     rb = tz_flush_one(v, 1);
     if (rt < 0 || rb < 0) return -1;
     return (rt == 0 || rb == 0) ? 0 : 1;   /* 0 = something sealed */
+}
+
+size_t vol_acc_pending(const invfs_volume *v, int binary)
+{
+    if (!v) return 0;
+    return binary ? v->bz_n : v->tz_n;
 }
 
 /* u32 comparator for the GC mark set */
@@ -7308,6 +7696,38 @@ out:
 
 
 
+/* Does this record own "name!..." siblings that must die with it? A
+ * ZIP-style container lists AST children; the extraction containers
+ * (TARR/GZR/PNGR/FLACR) carry num_children == 0 but keep their payload in
+ * sibling inodes ("name!partN", "name!recipe", "name!jxl", "name!coverN")
+ * the read path resolves by name -- deleting only the anchor strands them
+ * as live records nothing reaches (verified: a TAR's parts survived
+ * vol_unlink). The sibling walk is O(area), so plain files skip it.
+ * 1 = siblings possible (unknown record -> 1: scan conservatively). */
+static int record_owns_siblings(const uint8_t *rec, uint32_t rl)
+{
+    invfs_ast_recipe_header ah;
+    size_t base = sizeof(invfs_inode_rec);
+    uint32_t fl;
+
+    if (!rec || rl < base + sizeof(ah) + sizeof(invfs_ast_block_entry))
+        return 1;
+    memcpy(&ah, rec + base, sizeof(ah));
+    if (ah.num_children != 0)
+        return 1;
+    if (ah.num_blocks == 0)
+        return 0;
+    memcpy(&fl, rec + base + sizeof(ah) + 16, 4);   /* zone:2 | algo:6 LSB */
+    switch ((fl >> 2) & 0x3F) {
+    case INVFS_ALGO_TARR:
+    case INVFS_ALGO_GZR:
+    case INVFS_ALGO_PNGR:
+    case INVFS_ALGO_FLACR:
+        return 1;
+    }
+    return 0;
+}
+
 /* Replace `name` with `data`, or create it if absent.
  *
  * The write commit path used to delete by name and then create, which loses
@@ -7335,23 +7755,19 @@ uint64_t vol_replace_file(invfs_volume *v, const char *name,
     if (old_id != 0) {
         /* the replacement is plain RAW, so the old file's recipe/parts/covers
            describe bytes that no longer exist under this name */
-        int has_children = -1;   /* -1 = unknown, scan conservatively */
+        int owns_siblings = 1;   /* unknown: scan conservatively */
         uint8_t *obuf = NULL;
         uint32_t orl = 0;
         if (meta_read_record_by_id(v, old_id, &obuf, &orl, NULL, 0, NULL) == 0) {
-            invfs_ast_recipe_header ah;
-            size_t base = sizeof(invfs_inode_rec);
-            if (orl >= base + sizeof(ah)) {
-                memcpy(&ah, obuf + base, sizeof(ah));
-                has_children = ah.num_children != 0;
-            }
+            owns_siblings = record_owns_siblings(obuf, orl);
             free(obuf);
         }
         vol_delete_inode(v, old_id, name);
         /* sibling deletion walks the WHOLE inode area (pread per record):
          * plain files -- everything written through FUSE -- can only have
-         * '!' siblings when their AST lists children, so skip the walk */
-        if (has_children != 0)
+         * '!' siblings when their AST lists children or a container algo,
+         * so skip the walk */
+        if (owns_siblings)
             vol_delete_siblings(v, name);
     }
     return nid;
@@ -7415,23 +7831,18 @@ int vol_unlink(invfs_volume *v, const char *name)
     if (v->sb.vol_flags & VOLF_READONLY) return -1;   /* EROFS */
     if (strchr(name, '!')) return vol_delete_file(v, name);   /* a sibling */
     /* capture the record first: sibling deletion is a full-area walk and
-     * plain files (children==0) never have '!' siblings */
+     * plain files (no children, no container algo) never have '!' siblings */
     {
-        int has_children = -1;
+        int owns_siblings = 1;
         uint8_t *obuf = NULL;
         uint32_t orl = 0;
         uint64_t id = vol_find(v, name);
         if (id && meta_read_record_by_id(v, id, &obuf, &orl, NULL, 0, NULL) == 0) {
-            invfs_ast_recipe_header ah;
-            size_t base = sizeof(invfs_inode_rec);
-            if (orl >= base + sizeof(ah)) {
-                memcpy(&ah, obuf + base, sizeof(ah));
-                has_children = ah.num_children != 0;
-            }
+            owns_siblings = record_owns_siblings(obuf, orl);
             free(obuf);
         }
         rc = vol_delete_file(v, name);
-        if (rc == 0 && has_children != 0) vol_delete_siblings(v, name);
+        if (rc == 0 && owns_siblings) vol_delete_siblings(v, name);
     }
     return rc;
 }

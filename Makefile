@@ -86,6 +86,7 @@ e2e: all
 	bash tools/test-jxl.sh
 	bash tools/test-rawimg.sh
 	bash tools/test-binbatch.sh
+	bash tools/test-conbatch.sh
 
 .PHONY: all clean test e2e
 -include $(wildcard $(OBJ)/*.d)

@@ -52,6 +52,15 @@
  * like an algo=ZSTD batch, and decode is ZSTD + per-member-slice BCJ inverse
  * at pc=0 (bijective -- applied to the same window it was encoded over). */
 #define INVFS_ALGO_ZSTD_BCJ 14
+/* WP14b M2: exe-as-container -- a binary-family file (ELF/PE) with embedded
+ * JPEG media is carved into an ordered region list: media regions become
+ * "name!mN" siblings (lossless JXL blobs), glue regions become "name!gN"
+ * siblings (verbatim NONE / generic ZSTD, BCJ+ZSTD-batched for x86-family
+ * exes via the WP14b part batching), and "name!exerecipe" holds the
+ * self-describing region list the read path splices back at exact offsets.
+ * The exe's own AST is a single whole-file marker entry (blob = "IVEX",
+ * length = original size) -- the same shape TARR/GZR marker records use. */
+#define INVFS_ALGO_EXER 15
 
 /* Storage-class flag (WP10): persisted as internal xattr "invfs.class" in the
  * INO2 ext block, value = invfs_class_tlv. Records WHY a file is stored the

@@ -63,14 +63,19 @@ static void tarx_wr16(uint8_t *p, uint16_t v)
     p[0] = (uint8_t)(v & 0xFF); p[1] = (uint8_t)(v >> 8);
 }
 
-/* parse octal (or GNU base-256) size field: 12 bytes at offset 124 */
+/* parse octal (or GNU base-256) size field: 12 bytes at offset 124.
+   Old tars (Silesia mozilla/xml are V7-style) pad the field with leading
+   SPACES instead of zeros -- skip them, or the size reads as 0 and the
+   extractor stops at the first header. */
 static uint64_t tarx_parse_size(const uint8_t *h)
 {
     const uint8_t *f = h + 124;
+    int i = 0;
     if (f[0] & 0x80) /* GNU base-256, 8 significant bytes */
         return tarx_rd64(f + 1);
+    while (i < 11 && f[i] == ' ') i++;
     uint64_t v = 0;
-    for (int i = 0; i < 11; i++) {
+    for (; i < 11; i++) {
         if (f[i] == 0 || f[i] == ' ') break;
         if (f[i] < '0' || f[i] > '7') break;
         v = (v << 3) | (uint64_t)(f[i] - '0');
@@ -79,7 +84,8 @@ static uint64_t tarx_parse_size(const uint8_t *h)
 }
 
 /* checksum: sum of header bytes with the checksum field treated as
-   spaces (POSIX) or NULs (GNU). Header valid if either matches. */
+   spaces (POSIX) or NULs (GNU). Header valid if either matches. The field
+   itself may be space-padded on the left (old tars) -- skip spaces. */
 static int tarx_check_checksum(const uint8_t *h)
 {
     unsigned sp = 0, nu = 0, want = 0;
@@ -89,6 +95,7 @@ static int tarx_check_checksum(const uint8_t *h)
     }
     for (int i = 0; i < 8; i++) {
         unsigned c = h[148 + i];
+        if (c == ' ') continue;
         if (c >= '0' && c <= '7') want = (want << 3) | (unsigned)(c - '0');
         else if (c >= 0x80) want = (want << 3) | (unsigned)(c & 7); /* base-256 */
         else break;

@@ -261,6 +261,12 @@ uint64_t vol_get_dec_mem_limit(invfs_volume *v);
  * pending, <0 = error. */
 int vol_tz_flush(invfs_volume *v);
 
+/* Candidates currently sitting in the sweep-run batching accumulators
+ * (binary = the WP14a binary one, 0 = text). For the sweep driver's flush
+ * summary: parts deferred at container-explode time never produced a
+ * per-file walk line, so only the accumulator count is the truth. */
+size_t vol_acc_pending(const invfs_volume *v, int binary);
+
 /* Text-zone GC (WP10 §7): reclaim owner batches no live member references.
  * Runs between the dedupe pass and vol_tz_flush in invf-sweep. Returns the
  * number of dead batches reclaimed, 0 = none, <0 = error. */
