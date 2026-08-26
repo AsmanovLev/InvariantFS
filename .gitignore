@@ -16,3 +16,5 @@ tools/7-Zip-zstd/
 
 # empty by design
 downloads/
+__pycache__/
+*.pyc
