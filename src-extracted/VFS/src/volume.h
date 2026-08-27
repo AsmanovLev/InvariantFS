@@ -267,6 +267,10 @@ int vol_tz_flush(invfs_volume *v);
  * per-file walk line, so only the accumulator count is the truth. */
 size_t vol_acc_pending(const invfs_volume *v, int binary);
 
+/* WP14b M2: part count of the exe carve behind the last rc-11 answer of
+ * vol_sweep_one (the sweep driver prints it: "exe media -> JXL (N parts)") */
+unsigned vol_exer_last_parts(const invfs_volume *v);
+
 /* Text-zone GC (WP10 §7): reclaim owner batches no live member references.
  * Runs between the dedupe pass and vol_tz_flush in invf-sweep. Returns the
  * number of dead batches reclaimed, 0 = none, <0 = error. */

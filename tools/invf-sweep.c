@@ -269,8 +269,9 @@ int main(int argc, char **argv)
             /* vol_sweep_one: 0 = nothing to do, >0 = transcoded/swept,
              * 7 = JPEG->JXL, 9 = text deferred into the batch accumulator,
              * 10 = binary deferred into the WP14a binary accumulator (both
-             * sealed by vol_tz_flush below), >=100 = codecpack transcode
-             * (100+algo, WP13), <0 = hard error */
+             * sealed by vol_tz_flush below), 11 = exe-as-container carve
+             * (WP14b M2), >=100 = codecpack transcode (100+algo, WP13),
+             * <0 = hard error */
             int rc = vol_sweep_one(vol, inodes[i], names[i]);
             if (rc == 9) {
                 if (strchr(names[i], '!'))
@@ -283,6 +284,11 @@ int main(int argc, char **argv)
                     part_agg_add(names[i], 1);
                 else
                     printf("  %s: binary -> ZSTD batch\n", names[i]);
+            }
+            else if (rc == 11) {
+                swept++;
+                printf("  %s: exe media -> JXL (%u parts)\n", names[i],
+                       vol_exer_last_parts(vol));
             }
             else if (rc == 7) {
                 swept++;

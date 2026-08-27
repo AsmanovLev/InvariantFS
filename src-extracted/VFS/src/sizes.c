@@ -42,6 +42,7 @@ static const char *algo_name(uint32_t a)
     case INVFS_ALGO_LZ4:  return "LZ4";
     case INVFS_ALGO_PPMD: return "PPMd";
     case INVFS_ALGO_ZSTD_BCJ: return "ZSTD+BCJ";  /* WP14a */
+    case INVFS_ALGO_EXER: return "EXER";          /* WP14b M2 */
     case INVFS_ALGO_NONE: return "RAW";
     default:              return "?";
     }

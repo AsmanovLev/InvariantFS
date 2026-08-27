@@ -231,6 +231,9 @@ typedef struct invfs_volume {
      * vol_tz_flush -- one flush entry point drains both accumulators */
     tz_candidate *bz;
     size_t bz_n, bz_cap;
+    /* WP14b M2: part count of the last exe carve (vol_sweep_one rc 11);
+     * reporting-only, read by the sweep driver */
+    uint32_t last_exer_parts;
     /* Crash consistency (doc/08). `dirty` remembers that the on-disk state
        has already been set to DIRTY this session, so the mark costs one
        superblock write per mount instead of one per mutation.
@@ -2852,14 +2855,14 @@ static int mz_tdefl_compress(const uint8_t *in, size_t in_len,
                              size_t *out_len);
 
 /* ---- WP14b M2: exe-as-container shared helpers ----
- * The carve recipe ("name!exerecipe") is self-describing and little-endian:
- *   [4B "IVER"][1B ver=1][u32 nregions]
- *   per region: [u64 file_offset][u64 length][u8 kind][u8 name_len][name]
- * kind 0 = glue ("gN" sibling: verbatim/batched), 1 = JPEG media ("mN"
- * sibling: lossless JXL blob), 2 = PNG media (recognized, never promoted
- * in v1: djxl's PNG output is a fresh encoding, so the bit-exact guard
- * could never pass -- the PNGR machinery that could rebuild one is
- * Windows-only, WP12(c)). */
+ * The main record's segment is ZSTD-19 of the EXER payload (see
+ * invarifs.h): [4B "EXER"][u32 LE num_parts][per part u64 file_offset +
+ * u64 member_len + u8 codec][glue bytes]. codec = INVFS_ALGO_JXL for JPEG
+ * members (the sibling "name!exrN" holds the lossless JXL blob),
+ * INVFS_ALGO_ZSTD for PNG members (recognized and carved, but stored
+ * recompressed-only: djxl's PNG output is a fresh encoding, so a
+ * pixel-transcode could never pass the bit-exact guard -- the PNGR
+ * machinery that could rebuild one is Windows-only, WP12(c)). */
 
 static void exer_wr64(uint8_t *p, uint64_t v)
 {
@@ -2880,8 +2883,15 @@ static uint64_t exer_rd64(const uint8_t *p)
 
 typedef struct {
     uint64_t off, len;
-    int kind;                       /* 0 = glue, 1 = JPEG, 2 = PNG */
+    int kind;                       /* 1 = JPEG, 2 = PNG */
 } exe_region;
+
+/* one row of the EXER payload's part table (wire form; the codec is an
+ * INVFS_ALGO_* value so the table is self-describing) */
+typedef struct {
+    uint64_t off, len;
+    uint8_t codec;
+} exer_row;
 
 /* End of the JPEG stream that starts at p (FF D8 FF validated by the
  * caller): walk the marker stream to EOI. Segments carry their length, so
@@ -2976,18 +2986,76 @@ static size_t exe_scan_media(const uint8_t *b, size_t n,
             kind = 2;
         }
         if (end && end - p >= EXE_MEDIA_MIN) {
-            if (kind == 1) {        /* JPEG only in v1 (PNG: see above) */
-                out[cnt].off = p;
-                out[cnt].len = end - p;
-                out[cnt].kind = kind;
-                cnt++;
-            }
+            out[cnt].off = p;
+            out[cnt].len = end - p;
+            out[cnt].kind = kind;
+            cnt++;
             p = end;
         } else {
             p++;
         }
     }
     return cnt;
+}
+
+/* Parse + validate an EXER payload. Disk input, never trusted: magic, part
+ * count (1..EXE_MAX_MEDIA), ascending non-overlapping ranges inside
+ * [0, file_size), and the glue must account for every byte the parts do
+ * not cover. codecid is INVFS_ALGO_JXL or INVFS_ALGO_ZSTD; anything else
+ * fails loudly (a newer encoder wrote it). Returns 0 and fills rows[] or
+ * -1 on any violation. */
+static int exer_payload_parse(const uint8_t *pay, size_t pay_len,
+                              uint64_t file_size,
+                              exer_row *rows, size_t cap, size_t *n_out)
+{
+    uint32_t n, i;
+    uint64_t prev_end = 0, member_sum = 0;
+    size_t glue_len;
+
+    if (pay_len < 8 || memcmp(pay, "EXER", 4) != 0) return -1;
+    n = (uint32_t)pay[4] | ((uint32_t)pay[5] << 8) |
+        ((uint32_t)pay[6] << 16) | ((uint32_t)pay[7] << 24);
+    if (n == 0 || n > EXE_MAX_MEDIA || (size_t)n > cap) return -1;
+    if ((uint64_t)8 + 17ull * n > pay_len) return -1;
+    glue_len = pay_len - 8 - 17 * (size_t)n;
+    for (i = 0; i < n; i++) {
+        const uint8_t *r = pay + 8 + 17 * (size_t)i;
+        rows[i].off = exer_rd64(r);
+        rows[i].len = exer_rd64(r + 8);
+        rows[i].codec = r[16];
+        if (rows[i].codec != INVFS_ALGO_JXL &&
+            rows[i].codec != INVFS_ALGO_ZSTD)
+            return -1;
+        if (rows[i].len == 0 || rows[i].len > file_size ||
+            rows[i].off > file_size - rows[i].len)
+            return -1;
+        if (rows[i].off < prev_end) return -1;   /* ascending, no overlap */
+        prev_end = rows[i].off + rows[i].len;
+        member_sum += rows[i].len;
+    }
+    if (member_sum + glue_len != file_size) return -1;
+    *n_out = n;
+    return 0;
+}
+
+/* Splice an EXER payload's glue + the decoded part buffers into dst
+ * (file_size bytes). Rows come pre-validated from exer_payload_parse, so
+ * the glue arithmetic cannot overrun: parts are ascending, inside the
+ * file, and member_sum + glue_len == file_size. */
+static void exer_splice(const uint8_t *pay, const exer_row *rows, size_t n,
+                        uint8_t *const *parts, uint8_t *dst, uint64_t file_size)
+{
+    size_t gp = 8 + 17 * n;   /* glue cursor: past header + table */
+    uint64_t fp = 0;
+    size_t i;
+
+    for (i = 0; i < n; i++) {
+        memcpy(dst + fp, pay + gp, (size_t)(rows[i].off - fp));
+        gp += (size_t)(rows[i].off - fp);
+        memcpy(dst + rows[i].off, parts[i], (size_t)rows[i].len);
+        fp = rows[i].off + rows[i].len;
+    }
+    memcpy(dst + fp, pay + gp, (size_t)(file_size - fp));
 }
 
 /* WP10 §5 / WP14a: is this AST entry a member slice of a shared batch?
@@ -3624,80 +3692,56 @@ static int vol_read_inode(invfs_volume *v, uint64_t inode_id, unsigned depth,
                     memcpy(data + dst_off, fl, fl_len);
                     pngx_free(&pi); free(fl); free(rcp_own);
                 } else if (e->algo == INVFS_ALGO_EXER) {
-                    /* WP14b M2: exe-as-container. The blob is the 4-byte
-                     * "IVEX" marker; sibling "name!exerecipe" holds the
-                     * ordered region list, and every region's bytes live in
-                     * their own sibling ("name!mN" JXL media, "name!gN"
-                     * glue) read through the normal path -- batched glue
-                     * arrives as TEXT slices, verbatim glue as NONE. The
-                     * regions must tile the file exactly (recipe is disk
-                     * input: every bound is checked). */
-                    uint8_t *xr = NULL;
-                    size_t xr_len = 0;
-                    char xn[320];
-                    uint64_t xid;
-                    uint32_t nreg, ri;
-                    size_t ro;
-                    uint64_t expect;
-                    int ok;
+                    /* WP14b M2: exe-as-container. The blob is ZSTD-19 of
+                     * the EXER payload (header + part table + glue); each
+                     * member's bytes live in a "name!exrN" sibling read
+                     * through the normal path (a JXL sibling decodes to the
+                     * member, a ZSTD one just inflates). Splice the members
+                     * back over the glue at the table offsets. The payload
+                     * is disk input: exer_payload_parse validates every
+                     * bound before anything is copied. */
+                    uint8_t *pay = NULL;
+                    exer_row *rows = NULL;
+                    uint8_t *parts[EXE_MAX_MEDIA];
+                    size_t n = 0, pi;
+                    int ok = 0;
+                    size_t dsize = ZSTD_getFrameContentSize(blob, hdr);
 
-                    if (hdr != 4 || memcmp(blob, "IVEX", 4) != 0) {
-                        fprintf(stderr, "EXER: bad marker for %s\n", rec_h.name);
-                        free(blob); free(data); free(rec); return -1;
+                    memset(parts, 0, sizeof parts);
+                    if (dsize != ZSTD_CONTENTSIZE_ERROR &&
+                        dsize != ZSTD_CONTENTSIZE_UNKNOWN &&
+                        dsize >= 8 + 17 &&
+                        dsize <= (uint64_t)e->length + 8 + 17 * EXE_MAX_MEDIA)
+                        pay = (uint8_t *)malloc(dsize);
+                    rows = (exer_row *)malloc(EXE_MAX_MEDIA * sizeof *rows);
+                    if (pay && rows) {
+                        size_t d = ZSTD_decompress(pay, dsize, blob, hdr);
+                        if (!ZSTD_isError(d) && d == dsize &&
+                            exer_payload_parse(pay, dsize, e->length,
+                                               rows, EXE_MAX_MEDIA, &n) == 0)
+                            ok = 1;
                     }
-                    snprintf(xn, sizeof xn, "%s!exerecipe", rec_h.name);
-                    xid = vol_find(v, xn);
-                    if (!xid ||
-                        vol_read_inode(v, xid, 0, &xr, &xr_len) != 0) {
-                        fprintf(stderr, "EXER: recipe '%s' missing\n", xn);
-                        free(blob); free(data); free(rec); return -1;
-                    }
-                    ok = xr_len >= 9 && memcmp(xr, "IVER", 4) == 0 &&
-                         xr[4] == 1;
-                    nreg = 0;
-                    if (ok) {
-                        nreg = (uint32_t)xr[5] | ((uint32_t)xr[6] << 8) |
-                               ((uint32_t)xr[7] << 16) | ((uint32_t)xr[8] << 24);
-                        if (nreg == 0 || nreg > 8192) ok = 0;
-                    }
-                    ro = 9;
-                    expect = 0;
-                    for (ri = 0; ok && ri < nreg; ri++) {
-                        uint64_t roff, rlen;
-                        uint8_t kind, nl;
-                        char mn[320];
-                        uint64_t mid;
-                        uint8_t *mb = NULL;
-                        size_t mb_len = 0;
-
-                        if (ro + 18 > xr_len) { ok = 0; break; }
-                        roff = exer_rd64(xr + ro);
-                        rlen = exer_rd64(xr + ro + 8);
-                        kind = xr[ro + 16];
-                        nl = xr[ro + 17];
-                        ro += 18;
-                        if (ro + nl > xr_len || nl == 0 || nl > 16 ||
-                            kind > 2) { ok = 0; break; }
-                        if (roff != expect || rlen == 0 ||
-                            rlen > e->length - expect) { ok = 0; break; }
-                        snprintf(mn, sizeof mn, "%s!%.*s", rec_h.name,
-                                 (int)nl, (const char *)(xr + ro));
-                        ro += nl;
-                        mid = vol_find(v, mn);
-                        if (!mid ||
-                            vol_read_inode(v, mid, 0, &mb, &mb_len) != 0 ||
-                            mb_len != (size_t)rlen) {
-                            free(mb);
+                    for (pi = 0; ok && pi < n; pi++) {
+                        char pn[288];
+                        uint64_t pino;
+                        size_t plen = 0;
+                        snprintf(pn, sizeof pn, "%s!exr%zu", rec_h.name, pi);
+                        pino = vol_find(v, pn);
+                        if (!pino ||
+                            vol_read_file(v, pino, &parts[pi], &plen) != 0 ||
+                            plen != (size_t)rows[pi].len) {
+                            fprintf(stderr, "EXER: part '%s' unreadable\n", pn);
                             ok = 0;
                             break;
                         }
-                        memcpy(data + roff, mb, (size_t)rlen);
-                        free(mb);
-                        expect += rlen;
                     }
-                    free(xr);
-                    if (!ok || expect != e->length) {
-                        fprintf(stderr, "EXER: recipe does not tile %s\n",
+                    if (ok)
+                        exer_splice(pay, rows, n, parts, data, e->length);
+                    for (pi = 0; pi < n; pi++) free(parts[pi]);
+                    free(pay);
+                    free(rows);
+                    if (!ok) {
+                        fprintf(stderr, "EXER: rebuild failed for %s\n",
                                 rec_h.name);
                         free(blob); free(data); free(rec); return -1;
                     }
@@ -4586,6 +4630,12 @@ static int tz_member_oversized(invfs_volume *v, uint64_t inode_id,
 static int vol_pack_sweep(invfs_volume *v, uint64_t inode_id,
                           const char *name, const invfs_codec *pc,
                           const uint8_t *full, size_t full_len);
+/* WP14b M2 (definitions live with the container creators, below) */
+static uint64_t vol_create_blob_file(invfs_volume *v, const char *name,
+                                     const uint8_t *data, size_t len,
+                                     uint64_t orig_size, uint32_t algo);
+static int vol_delete_siblings(invfs_volume *v, const char *name);
+static uint64_t vol_transcode_abort(invfs_volume *v, const char *name);
 
 /* WP14b: defer the parts of a just-exploded extraction container
  * ("name!partN", N = 0..) into the batching accumulators, so a TAR swept in
@@ -4713,6 +4763,255 @@ static int vol_jxl_retry(invfs_volume *v, uint64_t inode_id, const char *name)
 out:
     free(jxl);
     free(full);
+    return rc;
+}
+
+/* ---- WP14b M2: exe-as-container carve (sweep side) ----
+ *
+ * A binary-family file (ELF/PE/Mach-O per invfs_binary_family) is scanned
+ * for embedded media (exe_scan_media: validated JPEG/PNG streams, each
+ * >= 16 KiB, at most EXE_MAX_MEDIA). Admission: the media must be worth
+ * carving (sum of member lengths >= 64 KiB AND >= 5% of the file) and the
+ * read-time working set (decoded payload + member bytes, ~usize + parts)
+ * must fit the decode-memory policy. Then per member: JPEG transcodes via
+ * the WP11 machinery (cjxl --lossless_jpeg=1, djxl decode-back memcmp
+ * guard; a refusal skips just that member -- its bytes stay in the glue),
+ * PNG is recompressed ZSTD-19 only (no pixel transcode can be bit-exact
+ * while PNGR is Windows-only). The house invariant is checked as a whole
+ * before anything reaches disk: ZSTD-decompress the final blob, splice
+ * the decode-proven members at the table offsets, memcmp against the
+ * original -- any mismatch abandons the carve.
+ *
+ * Storage: parts land first as "name!exrN" whole-file blob inodes
+ * (algo=JXL / algo=ZSTD), then the main record replaces the file as one
+ * EXER segment (children-first, the FLAC note), then the old record is
+ * tombstoned and the classes stamped (main CONTAINER{EXER}, JXL parts
+ * CODEC{JXL}, ZSTD parts GENERIC{ZSTD}).
+ *
+ * Returns 1 = carved (the caller reports rc 11), 0 = declined (caller
+ * falls through to binary batching), 2 = decode-memory refusal
+ * (GENERIC_MEMLIMIT{EXER} stamped; the caller must NOT batch -- the retry
+ * re-arms from generic storage when the limit rises, the JXL pattern). */
+static int vol_exer_carve(invfs_volume *v, uint64_t inode_id,
+                          const char *name, const uint8_t *full,
+                          size_t full_len, uint32_t *nparts_out)
+{
+    const invfs_codec *jc = invfs_codec_by_algo(INVFS_ALGO_JXL);
+    exe_region reg[EXE_MAX_MEDIA];
+    /* per-member build state: the stored blob plus its decode-back proof */
+    struct { uint8_t *blob, *back; size_t blen; } pm[EXE_MAX_MEDIA];
+    exer_row rows[EXE_MAX_MEDIA];
+    invfs_meta_pub keep;
+    int have_keep, rc = 0;
+    size_t nr, i, kept = 0;
+    uint64_t media_sum = 0, kept_sum = 0, blob_total;
+    uint8_t *pay = NULL, *cblob = NULL;
+    size_t pay_len, cblob_len = 0;
+
+    /* cjxl absent: no carve at all -- the JPEG members are the point */
+    if (!jc || !jc->probe || !jc->probe()) return 0;
+    if (name_too_long_for_children(name)) return 0;
+    {
+        /* leftover siblings can only come from a carve killed mid-commit
+         * (a finished one is CONTAINER-stamped and never reaches here):
+         * purge and proceed rather than refusing the file forever */
+        char p0[288];
+        snprintf(p0, sizeof p0, "%s!exr0", name);
+        if (vol_find(v, p0) != 0)
+            vol_delete_siblings(v, name);
+    }
+
+    nr = exe_scan_media(full, full_len, reg, EXE_MAX_MEDIA);
+    if (nr == 0) return 0;
+    for (i = 0; i < nr; i++) media_sum += reg[i].len;
+    if (media_sum < (64ull << 10) || media_sum * 20 < full_len)
+        return 0;   /* not worth carving: binary batching is its home */
+    {
+        /* decode-time working set (WP10 §12.2, mirrored): the read holds
+         * the decoded payload (table + glue) plus the member bytes */
+        uint64_t usize = 8 + 17 * (uint64_t)nr + (full_len - media_sum);
+        if (usize + media_sum > vol_get_dec_mem_limit(v)) {
+            vol_stamp_class(v, inode_id, INVFS_CLASS_GENERIC_MEMLIMIT,
+                            INVFS_ALGO_EXER, tz_codec_gen(INVFS_ALGO_EXER));
+            return 2;
+        }
+    }
+
+    have_keep = vol_get_meta(v, inode_id, &keep) == 0;
+    memset(pm, 0, sizeof pm);
+    for (i = 0; i < nr; i++) {
+        const uint8_t *mem = full + reg[i].off;
+        size_t ml = (size_t)reg[i].len;
+        exer_row *r = &rows[kept];
+
+        if (reg[i].kind == 1) {
+            /* JPEG -> lossless JXL; SOF-geometry admission first (the
+             * whole-file branch's rule, per member) */
+            uint64_t raw = jpeg_raw_estimate(mem, ml);
+            size_t bl = 0;
+            if (raw && raw > vol_get_dec_mem_limit(v)) continue;
+            if (invfs_jxl_compress(mem, ml, &pm[kept].blob,
+                                   &pm[kept].blen) != 0 ||
+                pm[kept].blen >= ml)
+                goto skip;
+            if (invfs_jxl_decompress(pm[kept].blob, pm[kept].blen,
+                                     &pm[kept].back, &bl) != 0 ||
+                bl != ml || memcmp(pm[kept].back, mem, ml) != 0)
+                goto skip;   /* guard refused: the range stays glue */
+            r->codec = INVFS_ALGO_JXL;
+        } else {
+            /* PNG: carved verbatim under ZSTD-19 (see the header note) */
+            size_t cb = ZSTD_compressBound(ml), cl;
+            pm[kept].blob = (uint8_t *)malloc(cb);
+            pm[kept].back = (uint8_t *)malloc(ml);
+            if (!pm[kept].blob || !pm[kept].back)
+                goto skip;
+            cl = ZSTD_compress(pm[kept].blob, cb, mem, ml, 19);
+            if (ZSTD_isError(cl) || cl >= ml)
+                goto skip;
+            pm[kept].blen = cl;
+            {
+                size_t d = ZSTD_decompress(pm[kept].back, ml,
+                                           pm[kept].blob, cl);
+                if (ZSTD_isError(d) || d != ml)
+                    goto skip;
+            }
+            r->codec = INVFS_ALGO_ZSTD;
+        }
+        r->off = reg[i].off;
+        r->len = reg[i].len;
+        kept_sum += r->len;
+        kept++;
+        continue;
+    skip:
+        free(pm[kept].blob); free(pm[kept].back);
+        memset(&pm[kept], 0, sizeof pm[kept]);
+    }
+    if (kept == 0)
+        goto out;   /* every member refused: binary batching is its home */
+
+    /* payload = [EXER][u32 n][rows][glue (original minus carved ranges)] */
+    pay_len = 8 + 17 * kept + (size_t)(full_len - kept_sum);
+    pay = (uint8_t *)malloc(pay_len);
+    cblob = (uint8_t *)malloc(ZSTD_compressBound(pay_len));
+    if (!pay || !cblob) goto out;
+    memcpy(pay, "EXER", 4);
+    pay[4] = (uint8_t)kept;
+    pay[5] = (uint8_t)(kept >> 8);
+    pay[6] = (uint8_t)(kept >> 16);
+    pay[7] = (uint8_t)(kept >> 24);
+    {
+        size_t gp = 8 + 17 * kept;
+        uint64_t fp = 0;
+        for (i = 0; i < kept; i++) {
+            exer_wr64(pay + 8 + 17 * i, rows[i].off);
+            exer_wr64(pay + 8 + 17 * i + 8, rows[i].len);
+            pay[8 + 17 * i + 16] = rows[i].codec;
+            memcpy(pay + gp, full + fp, (size_t)(rows[i].off - fp));
+            gp += (size_t)(rows[i].off - fp);
+            fp = rows[i].off + rows[i].len;
+        }
+        memcpy(pay + gp, full + fp, (size_t)(full_len - fp));
+    }
+    {
+        size_t cl = ZSTD_compress(cblob, ZSTD_compressBound(pay_len),
+                                  pay, pay_len, 19);
+        if (ZSTD_isError(cl)) goto out;
+        cblob_len = cl;
+    }
+
+    /* the house invariant, whole-file form: decode the FINAL blob, parse
+     * the table back out of it, splice the decode-proven member bytes at
+     * the table offsets, and memcmp the rebuild against the original */
+    {
+        uint8_t *dec = (uint8_t *)malloc(pay_len);
+        uint8_t *reb = (uint8_t *)malloc(full_len ? full_len : 1);
+        uint8_t *pb[EXE_MAX_MEDIA];
+        exer_row *grows = NULL;
+        size_t gn = 0;
+        int okm = 0;
+
+        if (dec && reb) {
+            size_t d = ZSTD_decompress(dec, pay_len, cblob, cblob_len);
+            grows = (exer_row *)malloc(EXE_MAX_MEDIA * sizeof *grows);
+            if (grows && !ZSTD_isError(d) && d == pay_len &&
+                exer_payload_parse(dec, d, full_len, grows,
+                                   EXE_MAX_MEDIA, &gn) == 0 && gn == kept) {
+                for (i = 0; i < kept; i++) pb[i] = pm[i].back;
+                exer_splice(dec, grows, gn, pb, reb, full_len);
+                okm = memcmp(reb, full, full_len) == 0;
+            }
+        }
+        free(dec); free(reb); free(grows);
+        if (!okm) {
+            fprintf(stderr, "EXER: %s: rebuild guard refused, "
+                            "carve abandoned\n", name);
+            goto out;
+        }
+    }
+
+    /* size guard (the TAR/GZ rule): the stored form must beat the file */
+    blob_total = cblob_len;
+    for (i = 0; i < kept; i++) blob_total += pm[i].blen;
+    if (blob_total >= full_len) {
+        if (getenv("INVFS_DEBUG"))
+            fprintf(stderr, "[vol] %s: EXER blobs %llu >= exe %zu -- keep "
+                            "original\n", name, (unsigned long long)blob_total,
+                    full_len);
+        goto out;
+    }
+
+    /* children first, the name-owning record last (the FLAC note) */
+    for (i = 0; i < kept; i++) {
+        char pn[288];
+        uint64_t pino;
+        snprintf(pn, sizeof pn, "%s!exr%zu", name, i);
+        pino = vol_create_blob_file(v, pn, pm[i].blob, pm[i].blen,
+                                    rows[i].len, rows[i].codec);
+        if (!pino) {
+            fprintf(stderr, "EXER: part inode failed for %s\n", pn);
+            vol_transcode_abort(v, name);
+            goto out;
+        }
+        if (rows[i].codec == INVFS_ALGO_JXL)
+            vol_stamp_class(v, pino, INVFS_CLASS_CODEC, INVFS_ALGO_JXL,
+                            tz_codec_gen(INVFS_ALGO_JXL));
+        else
+            vol_stamp_class(v, pino, INVFS_CLASS_GENERIC, INVFS_ALGO_ZSTD,
+                            tz_codec_gen(INVFS_ALGO_ZSTD));
+    }
+    {
+        uint64_t newino = vol_create_blob_file(v, name, cblob, cblob_len,
+                                               (uint64_t)full_len,
+                                               INVFS_ALGO_EXER);
+        if (!newino) {
+            /* no space for the main record: NOT a guard refusal (the
+             * vol_jxl_retry convention) -- leave unstamped, the file is
+             * untouched and a retry re-arms */
+            fprintf(stderr, "sweep: EXER create failed (%s)\n", name);
+            vol_transcode_abort(v, name);
+            goto out;
+        }
+        vol_delete_inode(v, inode_id, name);
+        /* the fresh blob record has no ext; carry the old meta across,
+         * exactly like the vol_jxl_retry flow does */
+        if (have_keep) {
+            invfs_meta_pub chk;
+            if (vol_get_meta(v, newino, &chk) != 0)
+                vol_apply_meta(v, name, &keep);
+        }
+        vol_stamp_class(v, newino, INVFS_CLASS_CONTAINER, INVFS_ALGO_EXER,
+                        tz_codec_gen(INVFS_ALGO_EXER));
+    }
+    *nparts_out = (uint32_t)kept;
+    rc = 1;
+out:
+    for (i = 0; i < kept; i++) {
+        free(pm[i].blob);
+        free(pm[i].back);
+    }
+    free(pay);
+    free(cblob);
     return rc;
 }
 
@@ -5093,6 +5392,25 @@ int vol_sweep_one(invfs_volume *v, uint64_t inode_id, const char *name)
         }
     }
 
+    /* WP14b M2: exe-as-container carving, BEFORE the binary-batch
+     * deferral -- a carved exe is strictly better than a batched one (the
+     * embedded media gets a real codec, the glue still gets ZSTD-19).
+     * '!'-sibling parts are never carved (WP10 §12.7). A MEMLIMIT refusal
+     * (rc 2) skips batching too: the retry must re-arm from generic
+     * storage, not from inside a batch. */
+    int exer_no_bz = 0;
+    if (!strchr(name, '!') &&
+        invfs_binary_family(full, full_len, name) > 0) {
+        uint32_t nparts = 0;
+        int erc = vol_exer_carve(v, inode_id, name, full, full_len, &nparts);
+        if (erc == 1) {
+            v->last_exer_parts = nparts;   /* invf-sweep reports the count */
+            free(full);
+            return 11;   /* exe media -> JXL container */
+        }
+        exer_no_bz = (erc == 2);
+    }
+
     /* WP14a: not text either -- executable binaries (ELF/PE/Mach-O by
      * magic, >= 4 KB) defer into the BINARY accumulator and are sealed
      * into shared ZSTD batches (x86 members BCJ-prefiltered first) by the
@@ -5101,7 +5419,7 @@ int vol_sweep_one(invfs_volume *v, uint64_t inode_id, const char *name)
      * reject it would reject the floor it falls back to, and the batch
      * unit is already bounded by arc_budget/2 at seal time. Same "!"
      * sibling exclusion as text. */
-    if (!strchr(name, '!')) {
+    if (!strchr(name, '!') && !exer_no_bz) {
         int bfam = invfs_binary_family(full, full_len, name);
         if (bfam > 0 &&
             bz_defer(v, inode_id, name, full_len, (uint32_t)bfam) == 0) {
@@ -5321,7 +5639,7 @@ static int algo_is_whole_file(uint32_t algo)
     if (algo == INVFS_ALGO_FLACR || algo == INVFS_ALGO_TARR ||
         algo == INVFS_ALGO_GZR   || algo == INVFS_ALGO_PNGR ||
         algo == INVFS_ALGO_PMP   || algo == INVFS_ALGO_APE  ||
-        algo == INVFS_ALGO_JXL)
+        algo == INVFS_ALGO_JXL   || algo == INVFS_ALGO_EXER)
         return 1;
     /* WP13: codecpack codecs declare WHOLEFILE in their manifest caps */
     c = invfs_codec_by_algo(algo);
@@ -7322,6 +7640,12 @@ size_t vol_acc_pending(const invfs_volume *v, int binary)
     return binary ? v->bz_n : v->tz_n;
 }
 
+/* WP14b M2: part count of the exe carve behind the last rc-11 answer */
+unsigned vol_exer_last_parts(const invfs_volume *v)
+{
+    return v ? v->last_exer_parts : 0;
+}
+
 /* u32 comparator for the GC mark set */
 static int tz_u32_cmp(const void *a, const void *b)
 {
@@ -7588,7 +7912,8 @@ int vol_sweep_dedupe(invfs_volume *v)
                    (size_t)i * sizeof(e), sizeof(e));
             if (e.zone == INVFS_ZONE_TEXT)
                 continue;   /* WP10 §11: shared PPMd batches, owner-owned */
-            if (e.algo == INVFS_ALGO_JXL || e.algo == INVFS_ALGO_APE)
+            if (e.algo == INVFS_ALGO_JXL || e.algo == INVFS_ALGO_APE ||
+                e.algo == INVFS_ALGO_EXER)
                 continue;   /* whole-file blobs: unique by construction */
             if (vol_lookup_entry(v, h.inode_id, e.block_id, &pba, &phys) != 0 ||
                 pba == 0)
@@ -7698,11 +8023,12 @@ out:
 
 /* Does this record own "name!..." siblings that must die with it? A
  * ZIP-style container lists AST children; the extraction containers
- * (TARR/GZR/PNGR/FLACR) carry num_children == 0 but keep their payload in
- * sibling inodes ("name!partN", "name!recipe", "name!jxl", "name!coverN")
- * the read path resolves by name -- deleting only the anchor strands them
- * as live records nothing reaches (verified: a TAR's parts survived
- * vol_unlink). The sibling walk is O(area), so plain files skip it.
+ * (TARR/GZR/PNGR/FLACR/EXER) carry num_children == 0 but keep their
+ * payload in sibling inodes ("name!partN", "name!recipe", "name!jxl",
+ * "name!coverN", "name!exrN") the read path resolves by name -- deleting
+ * only the anchor strands them as live records nothing reaches (verified:
+ * a TAR's parts survived vol_unlink). The sibling walk is O(area), so
+ * plain files skip it.
  * 1 = siblings possible (unknown record -> 1: scan conservatively). */
 static int record_owns_siblings(const uint8_t *rec, uint32_t rl)
 {
@@ -7723,6 +8049,7 @@ static int record_owns_siblings(const uint8_t *rec, uint32_t rl)
     case INVFS_ALGO_GZR:
     case INVFS_ALGO_PNGR:
     case INVFS_ALGO_FLACR:
+    case INVFS_ALGO_EXER:
         return 1;
     }
     return 0;
@@ -9059,11 +9386,6 @@ int invfs_ape_to_wav(const uint8_t *ape, size_t ape_len,
     return 0;
 #endif
 }
-
-/* forward decl (vol_create_flac_file runs before the definition) */
-static uint64_t vol_create_blob_file(invfs_volume *v, const char *name,
-                                     const uint8_t *data, size_t len,
-                                     uint64_t orig_size, uint32_t algo);
 
 /* FLAC transcode (density profile): store the PCM as an APE blob in inode
    `name` (algo=FLACR, file_size = original FLAC size) and the frame recipe

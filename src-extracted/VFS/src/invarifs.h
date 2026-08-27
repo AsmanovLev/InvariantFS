@@ -52,14 +52,20 @@
  * like an algo=ZSTD batch, and decode is ZSTD + per-member-slice BCJ inverse
  * at pc=0 (bijective -- applied to the same window it was encoded over). */
 #define INVFS_ALGO_ZSTD_BCJ 14
-/* WP14b M2: exe-as-container -- a binary-family file (ELF/PE) with embedded
- * JPEG media is carved into an ordered region list: media regions become
- * "name!mN" siblings (lossless JXL blobs), glue regions become "name!gN"
- * siblings (verbatim NONE / generic ZSTD, BCJ+ZSTD-batched for x86-family
- * exes via the WP14b part batching), and "name!exerecipe" holds the
- * self-describing region list the read path splices back at exact offsets.
- * The exe's own AST is a single whole-file marker entry (blob = "IVEX",
- * length = original size) -- the same shape TARR/GZR marker records use. */
+/* WP14b M2: exe-as-container -- a binary-family file (ELF/PE/Mach-O) with
+ * embedded media is carved: each embedded JPEG/PNG region (>= 16 KiB,
+ * validated by a real marker/chunk walk, cap 64) becomes a "name!exrN"
+ * sibling (JPEG -> lossless JXL blob, algo=JXL; PNG stays a ZSTD blob --
+ * djxl emits a fresh PNG encoding, so no transcode can pass the bit-exact
+ * guard while PNGR is Windows-only, WP12(c)), and the exe's own AST is a
+ * single whole-file entry (zone=BINARY, algo=EXER, length = original size)
+ * whose segment is ZSTD-19 of the recipe+glue payload:
+ *   [4B "EXER"][u32 LE num_parts]
+ *   per part: [u64 LE file_offset][u64 LE member_len][u8 codec=INVFS_ALGO_*]
+ *   then the original bytes with the carved ranges REMOVED (glue).
+ * Read = ZSTD-decompress, read each exrN sibling through the normal path,
+ * splice at the offsets; the sweep stores nothing before a full in-memory
+ * rebuild memcmps the original (the house 1:1 invariant). */
 #define INVFS_ALGO_EXER 15
 
 /* Storage-class flag (WP10): persisted as internal xattr "invfs.class" in the

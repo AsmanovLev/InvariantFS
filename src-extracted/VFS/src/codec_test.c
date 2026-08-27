@@ -103,7 +103,7 @@ static void test_registry(void)
     const invfs_codec *c;
     int roundtrip;
 
-    ok(all != NULL && n == 13, "registry holds the 13 v1 entries");
+    ok(all != NULL && n == 14, "registry holds the 14 static entries");
     ok(invfs_registry_generation() >= 1, "registry generation >= 1");
 
     c = invfs_codec_by_algo(INVFS_ALGO_NONE);
@@ -640,7 +640,7 @@ static void test_packs(void)
     invfs_codec_probe_reset();
 
     all = invfs_codec_all(&n);
-    ok(all != NULL && n == 14, "pack registered: 13 static + 1 pack");
+    ok(all != NULL && n == 15, "pack registered: 14 static + 1 pack");
     ok(all[n - 1].algo == INVFS_ALGO_PPMD,
        "text heuristic still LAST with a pack loaded");
     c = invfs_codec_by_algo(INVFS_ALGO_ZSTD);
@@ -694,7 +694,7 @@ static void test_packs(void)
     invfs_codec_probe_reset();
     ok(invfs_codec_by_algo(42) == NULL, "reset unloads packs");
     all = invfs_codec_all(&n);
-    ok(n == 13, "reset restores the static registry");
+    ok(n == 14, "reset restores the static registry");
     invfs_codec_probe_reset();   /* a second reset is harmless */
 
     snprintf(path, sizeof path, "%s/manifest", pack);
