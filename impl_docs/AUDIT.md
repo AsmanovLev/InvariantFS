@@ -84,6 +84,7 @@ from doc/02 would produce volumes this code cannot mount (and vice versa).
 | WP13 | **DONE (26b0d43)** Codecpack exec path + raw_image pack (DICOM/PNM/BMP/TIFF -> lossless JXL, RIMG blob); dynamic pack registry, estimate-based admission | code+pack | M |
 | WP14a | **DONE** Binary batching: zone=TEXT/algo=ZSTD(BCJ=14) batches, family sort (ELF e_machine/PE/Mach-O), class 8; Silesia 2.82->2.84x (tar-member exclusion caps the win) | code | M |
 | WP14b | **M1 DONE**: container-member batching ('!'-sibling parts batch; tarx V7 space-padding fix); Silesia 74.55->59.14MB (2.84x->3.58x, beats btrfs 3.18x). M2 pending: exe-as-container carving (embedded JPEG/PNG -> JXL, recipe + guard) | code | M/L |
+| WP15 | **SHELVED 2026-08-27** Video (H.264 lossless recompress via dropbox/avrecode): built after 2015-codebase port (yasm/inline-asm/arc4random/unique_ptr fixes); model broken for B-frames (crash; universal in real content) and 8x8dct (compress "OK", decompress asserts — silent-corruption class, caught by decode+memcmp guard pattern); works only on constrained CABAC streams (bframes=0, ref<=2, no 8x8dct) at ~1.03x vs zstd-19's 1.003x on the same bytes. Positive: pack-crash -> GUARD -> generic fallback path proven safe. Revisit only if the model is fixed upstream | research | M |
 
 ### WP12 status update 2026-08-26 (post-bench fixes, second commit)
 
