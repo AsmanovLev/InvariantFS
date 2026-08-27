@@ -58,6 +58,21 @@ typedef struct invfs_pack_def {
     const char *decode;
     const char *estimate;  /* argv template with {in}; NULL when absent */
     const char *requires;  /* comma list of extra tools, NULL when none */
+    /* WP16a: manifest `type = container` (default/absent = codec). A
+     * container pack decomposes a container file into member inodes and
+     * carries the four container commands instead of encode/decode (both
+     * NULL in the registry entry then, so the WP13 whole-file sweep loop
+     * skips it). Placeholders: enumerate {in} {out} (writes the member
+     * table: "idx<TAB>suggested_name<TAB>usize" lines), extract
+     * {in} {idx} {out} (member bytes), strip {in} {out} (recipe = original
+     * minus member payloads, pack-owned format), rebuild
+     * {recipe} {dir} {out} ({dir} holds member files named "<idx>", must
+     * reproduce the original bit-exact). */
+    int          is_container;
+    const char  *enumerate;
+    const char  *extract;
+    const char  *strip;
+    const char  *rebuild;
 } invfs_pack_def;
 
 /* The pack record behind a registry entry, or NULL for builtin codecs.
@@ -76,6 +91,22 @@ int invfs_codec_pack_exec(const invfs_codec *c, int is_encode,
  * command or it failed. */
 int invfs_codec_pack_estimate(const invfs_codec *c, const char *in_path,
                               uint64_t *out_bytes);
+
+/* WP16a: run one of a CONTAINER pack's commands (the volume.c tool layer
+ * implements it; codec.c never calls it itself — container execution is
+ * driven by the sweep/read paths). Placeholders per command per the
+ * invfs_pack_def comment above; unused slots pass NULL. Returns the
+ * child's exit code, -1 on failure to launch (and on _WIN32). */
+enum {
+    INVFS_PACK_CMD_ENUMERATE = 0,   /* {in} {out} -> member table file */
+    INVFS_PACK_CMD_EXTRACT,         /* {in} {idx} {out} -> member bytes */
+    INVFS_PACK_CMD_STRIP,           /* {in} {out} -> recipe */
+    INVFS_PACK_CMD_REBUILD          /* {recipe} {dir} {out} -> original */
+};
+int invfs_codec_pack_cmd(const invfs_codec *c, int cmd,
+                         const char *in, const char *idx,
+                         const char *dir, const char *recipe,
+                         const char *out);
 
 /* Text families — the batching sort key (WP10 §4). 1..10 are the extension
  * families; INVFS_TEXT_FAMILY_CONTENT is content-sniffed text with no known

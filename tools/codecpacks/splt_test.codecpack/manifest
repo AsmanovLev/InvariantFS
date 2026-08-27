@@ -1,0 +1,24 @@
+# splt_test codecpack (WP16a): the containerpack ABI proof fixture.
+#
+# SPLT is a trivial container: "SPLT" + u32 LE member count + n u64 LE
+# member lengths + the member payloads concatenated. strip = the header
+# (the recipe); rebuild = splice the member files back under it.
+#
+# The FS side identifies members by INDEX only; the suggested_name column
+# ("chunk<i>") is advisory and rides inside the sibling name. There is no
+# estimate command on purpose: the FS-side ABI default (sum of member
+# usizes + the container's own size) is the admission input.
+# algo 40: test range -- production packs take the low free ids.
+name = splt_test
+type = container
+algo = 40
+pack_version = 1
+generation = 1
+caps = container|external
+dec_mem = 0
+sniff.magic = 53504C54
+sniff.ext = splt
+enumerate = python3 {pack}/splt.py enumerate {in} {out}
+extract = python3 {pack}/splt.py extract {in} {idx} {out}
+strip = python3 {pack}/splt.py strip {in} {out}
+rebuild = python3 {pack}/splt.py rebuild {recipe} {dir} {out}

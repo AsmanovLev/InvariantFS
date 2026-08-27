@@ -22,3 +22,8 @@ __pycache__/
 # generated docs bundle + playwright scratch
 INVARIFS-DOCS.md
 .playwright-mcp/
+
+# generated video artifacts (regenerable: video/gen-overview.py + build.sh)
+video/frames/
+video/*.mp4
+video/filter.txt

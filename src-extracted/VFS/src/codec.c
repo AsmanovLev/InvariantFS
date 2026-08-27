@@ -346,6 +346,17 @@ struct pack_manifest {
     int      has_encode;
     int      has_decode;
     int      has_estimate;
+    /* WP16a: `type = container` (default/absent = codec). Container packs
+     * carry the four decomposition commands instead of encode/decode. */
+    int      is_container;
+    char     enumerate[512];
+    char     extract[512];
+    char     strip[512];
+    char     rebuild[512];
+    int      has_enumerate;
+    int      has_extract;
+    int      has_strip;
+    int      has_rebuild;
 };
 
 static void str_copy(char *dst, size_t cap, const char *src)
@@ -443,6 +454,21 @@ static int parse_manifest(const char *path, struct pack_manifest *m)
         } else if (strcmp(s, "estimate") == 0) {
             str_copy(m->estimate, sizeof m->estimate, val);
             m->has_estimate = 1;
+        } else if (strcmp(s, "enumerate") == 0) {
+            str_copy(m->enumerate, sizeof m->enumerate, val);
+            m->has_enumerate = 1;
+        } else if (strcmp(s, "extract") == 0) {
+            str_copy(m->extract, sizeof m->extract, val);
+            m->has_extract = 1;
+        } else if (strcmp(s, "strip") == 0) {
+            str_copy(m->strip, sizeof m->strip, val);
+            m->has_strip = 1;
+        } else if (strcmp(s, "rebuild") == 0) {
+            str_copy(m->rebuild, sizeof m->rebuild, val);
+            m->has_rebuild = 1;
+        } else if (strcmp(s, "type") == 0) {
+            /* WP16a: only "container" is special; anything else = codec */
+            m->is_container = (strcmp(val, "container") == 0);
         } else if (strcmp(s, "name") == 0) {
             str_copy(m->name, sizeof m->name, val);
         } else if (strcmp(s, "algo") == 0) {
@@ -665,6 +691,9 @@ typedef struct {
     invfs_pack_def   def;       /* exec record for the volume.c hooks */
     char            *dir;       /* pack directory ({pack} substitution) */
     char            *name, *encode, *decode, *estimate, *requires, *exts;
+    /* WP16a container commands (all NULL for a codec pack) */
+    int              is_container;
+    char            *enumerate, *extract, *strip, *rebuild;
     pack_magic_rule  magic[PACK_MAX_MAGIC];
     size_t           n_magic;
     int              probed;    /* memoized availability probe */
@@ -724,8 +753,9 @@ static int pack_tool_resolvable(const char *tool)
     return on_path(tool);
 }
 
-/* available iff every argv's tool resolves (encode/decode, estimate when
- * present) and every `requires` entry does */
+/* available iff every argv's tool resolves (the codec set — encode/decode,
+ * estimate when present — or the WP16a container set — enumerate/extract/
+ * strip/rebuild) and every `requires` entry does */
 static int pack_probe_impl(pack_entry *p)
 {
     const char *r;
@@ -733,9 +763,17 @@ static int pack_probe_impl(pack_entry *p)
     if (p->probed) return p->avail;
     p->probed = 1;
     p->avail = 0;
-    if (!manifest_tool_ok(p->dir, p->encode) ||
-        !manifest_tool_ok(p->dir, p->decode))
-        return 0;
+    if (p->is_container) {
+        if (!manifest_tool_ok(p->dir, p->enumerate) ||
+            !manifest_tool_ok(p->dir, p->extract) ||
+            !manifest_tool_ok(p->dir, p->strip) ||
+            !manifest_tool_ok(p->dir, p->rebuild))
+            return 0;
+    } else {
+        if (!manifest_tool_ok(p->dir, p->encode) ||
+            !manifest_tool_ok(p->dir, p->decode))
+            return 0;
+    }
     if (p->estimate && !manifest_tool_ok(p->dir, p->estimate))
         return 0;
     r = p->requires;
@@ -889,6 +927,7 @@ static void pack_entry_free(pack_entry *p)
 {
     free(p->dir); free(p->name); free(p->encode); free(p->decode);
     free(p->estimate); free(p->requires); free(p->exts);
+    free(p->enumerate); free(p->extract); free(p->strip); free(p->rebuild);
     memset(p, 0, sizeof *p);
 }
 
@@ -992,8 +1031,19 @@ static void pack_register(const char *dir, const struct pack_manifest *m)
     size_t i;
 
     if (packs_n >= INVFS_PACK_MAX) return;
-    if (!m->name[0] || m->algo < 0 || !m->has_encode || !m->has_decode)
+    if (!m->name[0] || m->algo < 0)
         return;
+    /* WP16a: a container pack (type=container) declares the four
+     * decomposition commands INSTEAD of encode/decode; a codec pack
+     * declares encode/decode. A pack missing its type's commands is
+     * silently skipped (a half-written pack must not register). */
+    if (m->is_container) {
+        if (!m->has_enumerate || !m->has_extract ||
+            !m->has_strip || !m->has_rebuild)
+            return;
+    } else if (!m->has_encode || !m->has_decode) {
+        return;
+    }
     if ((unsigned long)m->algo >= 64) return;   /* AST algo field is 6 bits */
     for (i = 0; i < REGISTRY_N; i++)
         if (registry[i].algo == (uint32_t)m->algo) return;   /* algo taken */
@@ -1004,16 +1054,24 @@ static void pack_register(const char *dir, const struct pack_manifest *m)
 
     p = &packs[packs_n];
     memset(p, 0, sizeof *p);
+    p->is_container = m->is_container;
     p->dir      = pack_strdup(dir);
     p->name     = pack_strdup(m->name);
-    p->encode   = pack_strdup(m->encode);
-    p->decode   = pack_strdup(m->decode);
+    p->encode   = m->has_encode ? pack_strdup(m->encode) : NULL;
+    p->decode   = m->has_decode ? pack_strdup(m->decode) : NULL;
     p->estimate = m->has_estimate ? pack_strdup(m->estimate) : NULL;
     p->requires = m->requires[0] ? pack_strdup(m->requires) : NULL;
     p->exts     = m->exts[0] ? pack_strdup(m->exts) : NULL;
-    if (!p->dir || !p->name || !p->encode || !p->decode ||
+    p->enumerate = m->has_enumerate ? pack_strdup(m->enumerate) : NULL;
+    p->extract   = m->has_extract ? pack_strdup(m->extract) : NULL;
+    p->strip     = m->has_strip ? pack_strdup(m->strip) : NULL;
+    p->rebuild   = m->has_rebuild ? pack_strdup(m->rebuild) : NULL;
+    if (!p->dir || !p->name ||
+        (m->has_encode && !p->encode) || (m->has_decode && !p->decode) ||
         (m->has_estimate && !p->estimate) ||
-        (m->requires[0] && !p->requires) || (m->exts[0] && !p->exts)) {
+        (m->requires[0] && !p->requires) || (m->exts[0] && !p->exts) ||
+        (m->is_container &&
+         (!p->enumerate || !p->extract || !p->strip || !p->rebuild))) {
         pack_entry_free(p);
         return;
     }
@@ -1027,14 +1085,33 @@ static void pack_register(const char *dir, const struct pack_manifest *m)
     p->pub.generation    = (uint16_t)m->generation;
     p->pub.sniff         = pack_fns[packs_n].sniff;
     p->pub.probe         = pack_fns[packs_n].probe;
-    p->pub.encode        = pack_fns[packs_n].encode;
-    p->pub.decode        = pack_fns[packs_n].decode;
+    if (p->is_container) {
+        /* a container pack never whole-file transcodes: the WP13 sweep
+         * loop skips NULL encode/decode, and the WP16a container branch
+         * picks it up by the CONTAINER cap + def->is_container. CONTAINER/
+         * EXTERNAL/WHOLEFILE are forced on regardless of the manifest:
+         * packs are external by definition and the rebuild is a
+         * whole-file read unit (the ARC divert and the policy compliance
+         * check both key off WHOLEFILE). */
+        p->pub.caps  |= INVFS_CODEC_CAP_CONTAINER | INVFS_CODEC_CAP_EXTERNAL |
+                        INVFS_CODEC_CAP_WHOLEFILE;
+        p->pub.encode = NULL;
+        p->pub.decode = NULL;
+    } else {
+        p->pub.encode = pack_fns[packs_n].encode;
+        p->pub.decode = pack_fns[packs_n].decode;
+    }
 
     p->def.dir      = p->dir;
     p->def.encode   = p->encode;
     p->def.decode   = p->decode;
     p->def.estimate = p->estimate;
     p->def.requires = p->requires;
+    p->def.is_container = p->is_container;
+    p->def.enumerate = p->enumerate;
+    p->def.extract   = p->extract;
+    p->def.strip     = p->strip;
+    p->def.rebuild   = p->rebuild;
     packs_n++;
 }
 

@@ -2853,6 +2853,11 @@ static int invfs_png_from_jxl(invfs_volume *v, uint64_t jxl_inode,
 static int mz_tdefl_compress(const uint8_t *in, size_t in_len,
                              uint8_t *out, size_t out_cap, int level,
                              size_t *out_len);
+/* WP16a (the definition lives with the codecpack exec layer, below) */
+static int pack_container_rebuild(invfs_volume *v, const invfs_codec *pc,
+                                  const char *name, const uint8_t *recipe,
+                                  size_t recipe_len, uint8_t *dst,
+                                  size_t want_len);
 
 /* ---- WP14b M2: exe-as-container shared helpers ----
  * The main record's segment is ZSTD-19 of the EXER payload (see
@@ -3748,20 +3753,36 @@ static int vol_read_inode(invfs_volume *v, uint64_t inode_id, unsigned depth,
                 } else if (e->algo == INVFS_ALGO_NONE) {
                     memcpy(data + dst_off, blob, hdr);
                 } else {
-                    /* WP13: a codecpack whole-file blob decodes through the
-                     * pack trampoline. An algo this build cannot decode
-                     * (pack not loaded) fails LOUDLY -- the historical raw
-                     * copy would serve the blob as if it were the file,
-                     * silently breaking the 1:1 invariant. */
                     const invfs_codec *pc = invfs_codec_by_algo(e->algo);
-                    if (!pc || !pc->decode) {
+                    const invfs_pack_def *pd =
+                        pc ? invfs_codec_pack_def(pc) : NULL;
+                    if (pd && pd->is_container) {
+                        /* WP16a: the blob is the pack's recipe; the members
+                         * live in "!mbrNNNN" sibling inodes and are read
+                         * through their CURRENT stored form (vol_read_file
+                         * -- the pack's extract cannot help, the original
+                         * container no longer exists), then spliced by the
+                         * pack's rebuild command. A missing/corrupt member
+                         * fails the read LOUDLY (the 1:1 invariant). */
+                        if (pack_container_rebuild(v, pc, rec_h.name,
+                                                   blob, hdr,
+                                                   data + dst_off,
+                                                   (size_t)e->length) != 0) {
+                            fprintf(stderr, "%s: container rebuild failed "
+                                    "for %s\n", pc->name, rec_h.name);
+                            free(blob); free(data); free(rec); return -1;
+                        }
+                    } else if (!pc || !pc->decode) {
+                        /* WP13: an algo this build cannot decode (pack not
+                         * loaded) fails LOUDLY -- the historical raw copy
+                         * would serve the blob as if it were the file,
+                         * silently breaking the 1:1 invariant. */
                         fprintf(stderr, "inode %llu: algo %u requires a "
                                 "codecpack that is not loaded\n",
                                 (unsigned long long)inode_id, e->algo);
                         free(blob); free(data); free(rec); return -1;
-                    }
-                    if (pc->decode(blob, hdr, data + dst_off,
-                                   (size_t)e->length) != 0) {
+                    } else if (pc->decode(blob, hdr, data + dst_off,
+                                          (size_t)e->length) != 0) {
                         fprintf(stderr, "%s: pack decode error\n", pc->name);
                         free(blob); free(data); free(rec); return -1;
                     }
@@ -4630,6 +4651,10 @@ static int tz_member_oversized(invfs_volume *v, uint64_t inode_id,
 static int vol_pack_sweep(invfs_volume *v, uint64_t inode_id,
                           const char *name, const invfs_codec *pc,
                           const uint8_t *full, size_t full_len);
+/* WP16a (the definition lives with the codecpack exec layer, below) */
+static int vol_containerpack_sweep(invfs_volume *v, uint64_t inode_id,
+                                   const char *name, const invfs_codec *pc,
+                                   const uint8_t *full, size_t full_len);
 /* WP14b M2 (definitions live with the container creators, below) */
 static uint64_t vol_create_blob_file(invfs_volume *v, const char *name,
                                      const uint8_t *data, size_t len,
@@ -5346,6 +5371,34 @@ int vol_sweep_one(invfs_volume *v, uint64_t inode_id, const char *name)
          * is what re-arms this file. */
         vol_stamp_class(v, inode_id, INVFS_CLASS_GENERIC_GUARD,
                         INVFS_ALGO_PMP, tz_codec_gen(INVFS_ALGO_PMP));
+    }
+
+    /* WP16a: container codecpacks (manifest type=container) -- decompose a
+     * container into "!mbrNNNN" member inodes that flow through the whole
+     * normal pipeline. Placed AFTER every builtin container magic above
+     * (ZIP/TAR/GZ/PNG/FLAC, and the MP3 codec branch) and BEFORE the WP13
+     * whole-file codec-pack loop / text / generic. First sniff hit wins; a
+     * declined pack falls through (its stamps carry the retry semantics). */
+    {
+        size_t cn = 0, ci;
+        const invfs_codec *all = invfs_codec_all(&cn);
+        for (ci = 0; ci < cn; ci++) {
+            const invfs_codec *pc = &all[ci];
+            const invfs_pack_def *pd;
+            int prc;
+            if (!pc->sniff || !(pc->caps & INVFS_CODEC_CAP_CONTAINER))
+                continue;
+            pd = invfs_codec_pack_def(pc);
+            if (!pd || !pd->is_container)
+                continue;
+            if (pc->sniff(full, full_len, name) <= 0)
+                continue;
+            prc = vol_containerpack_sweep(v, inode_id, name, pc, full,
+                                          full_len);
+            if (prc == 1) { free(full); return 0; }   /* tools absent: defer */
+            if (prc >= 100) { free(full); return prc; }   /* decomposed */
+            break;   /* declined: stamps applied; text/generic still run */
+        }
     }
 
     /* WP13: codecpack codecs — the registry's dynamic EXTERNAL entries, the
@@ -8044,13 +8097,28 @@ static int record_owns_siblings(const uint8_t *rec, uint32_t rl)
     if (ah.num_blocks == 0)
         return 0;
     memcpy(&fl, rec + base + sizeof(ah) + 16, 4);   /* zone:2 | algo:6 LSB */
-    switch ((fl >> 2) & 0x3F) {
-    case INVFS_ALGO_TARR:
-    case INVFS_ALGO_GZR:
-    case INVFS_ALGO_PNGR:
-    case INVFS_ALGO_FLACR:
-    case INVFS_ALGO_EXER:
-        return 1;
+    {
+        uint32_t algo = (fl >> 2) & 0x3F;
+        switch (algo) {
+        case INVFS_ALGO_TARR:
+        case INVFS_ALGO_GZR:
+        case INVFS_ALGO_PNGR:
+        case INVFS_ALGO_FLACR:
+        case INVFS_ALGO_EXER:
+            return 1;
+        }
+        /* WP16a: a container codecpack's recipe record owns "!mbrNNNN"
+         * siblings. An algo this build cannot resolve (the pack is not
+         * loaded right now) gets the conservative answer: the scan costs
+         * one area walk and can only find what is there -- the codec-pack
+         * case (raw_image et al) simply has no siblings to find. */
+        {
+            const invfs_codec *pc = invfs_codec_by_algo(algo);
+            const invfs_pack_def *pd;
+            if (!pc) return 1;
+            pd = invfs_codec_pack_def(pc);
+            if (pd && pd->is_container) return 1;
+        }
     }
     return 0;
 }
@@ -8677,9 +8745,11 @@ static int tool_exec_out(char *const argv[], char *buf, size_t cap)
 /* ---- codecpack execution hooks (WP13; declared in codec.h, called by the
  * codec.c trampolines and the sweep's pack branch) ---- */
 
-/* Substitute {in} {out} {pack} in one argv token. Returns 0 on overflow. */
+/* Substitute {in} {out} {pack} {idx} {dir} {recipe} in one argv token.
+ * Returns 0 on overflow. */
 static size_t pack_subst(char *dst, size_t cap, const char *tok,
-                         const char *packdir, const char *in, const char *out)
+                         const char *packdir, const char *in, const char *out,
+                         const char *idx, const char *dir, const char *recipe)
 {
     size_t w = 0;
 
@@ -8689,8 +8759,11 @@ static size_t pack_subst(char *dst, size_t cap, const char *tok,
         if (strncmp(tok, "{in}", 4) == 0)         { rep = in;      tok += 4; }
         else if (strncmp(tok, "{out}", 5) == 0)   { rep = out;     tok += 5; }
         else if (strncmp(tok, "{pack}", 6) == 0)  { rep = packdir; tok += 6; }
+        else if (strncmp(tok, "{idx}", 5) == 0)   { rep = idx;     tok += 5; }
+        else if (strncmp(tok, "{dir}", 5) == 0)   { rep = dir;     tok += 5; }
+        else if (strncmp(tok, "{recipe}", 8) == 0){ rep = recipe;  tok += 8; }
         else { rep = tok++; rl = 1; goto emit; }
-        rl = strlen(rep);
+        rl = rep ? strlen(rep) : 0;
     emit:
         if (w + rl + 1 > cap) return 0;
         memcpy(dst + w, rep, rl);
@@ -8706,6 +8779,8 @@ static size_t pack_subst(char *dst, size_t cap, const char *tok,
  * relative to the pack dir (mirrors manifest_tool_ok). */
 static int pack_argv_build(const invfs_pack_def *def, const char *tmpl,
                            const char *in, const char *out,
+                           const char *idx, const char *dir,
+                           const char *recipe,
                            char *argv[], size_t maxa,
                            char *arena, size_t acap)
 {
@@ -8726,7 +8801,8 @@ static int pack_argv_build(const invfs_pack_def *def, const char *tmpl,
         tmpl += tl;
         if (argc + 1 >= maxa) return -1;
         w = pack_subst(arena + used, acap - used, tok,
-                       def->dir, in ? in : "", out ? out : "");
+                       def->dir, in ? in : "", out ? out : "",
+                       idx ? idx : "", dir ? dir : "", recipe ? recipe : "");
         if (!w && tok[0]) return -1;    /* arena overflow */
         if (argc == 0 && strchr(arena + used, '/') && arena[used] != '/') {
             /* relative path: resolve against the pack dir */
@@ -8760,7 +8836,40 @@ int invfs_codec_pack_exec(const invfs_codec *c, int is_encode,
     if (!def) return -1;
     tmpl = is_encode ? def->encode : def->decode;
     if (!tmpl || !in_path || !out_path) return -1;
-    if (pack_argv_build(def, tmpl, in_path, out_path,
+    if (pack_argv_build(def, tmpl, in_path, out_path, NULL, NULL, NULL,
+                        argv, 24, arena, sizeof arena) != 0)
+        return -1;
+    return tool_exec(argv);
+#endif
+}
+
+/* WP16a: run one of a CONTAINER pack's four commands. See codec.h for the
+ * command set and the placeholder contract. */
+int invfs_codec_pack_cmd(const invfs_codec *c, int cmd,
+                         const char *in, const char *idx,
+                         const char *dir, const char *recipe,
+                         const char *out)
+{
+#ifdef _WIN32
+    (void)c; (void)cmd; (void)in; (void)idx; (void)dir; (void)recipe;
+    (void)out;
+    return -1;   /* the POSIX tool layer does not exist on Windows */
+#else
+    const invfs_pack_def *def = invfs_codec_pack_def(c);
+    const char *tmpl;
+    char *argv[24];
+    char arena[4096];
+
+    if (!def || !def->is_container) return -1;
+    switch (cmd) {
+    case INVFS_PACK_CMD_ENUMERATE: tmpl = def->enumerate; break;
+    case INVFS_PACK_CMD_EXTRACT:   tmpl = def->extract;   break;
+    case INVFS_PACK_CMD_STRIP:     tmpl = def->strip;     break;
+    case INVFS_PACK_CMD_REBUILD:   tmpl = def->rebuild;   break;
+    default: return -1;
+    }
+    if (!tmpl) return -1;
+    if (pack_argv_build(def, tmpl, in, out, idx, dir, recipe,
                         argv, 24, arena, sizeof arena) != 0)
         return -1;
     return tool_exec(argv);
@@ -8782,7 +8891,7 @@ int invfs_codec_pack_estimate(const invfs_codec *c, const char *in_path,
     unsigned long long v;
 
     if (!def || !def->estimate || !in_path) return -1;
-    if (pack_argv_build(def, def->estimate, in_path, NULL,
+    if (pack_argv_build(def, def->estimate, in_path, NULL, NULL, NULL, NULL,
                         argv, 24, arena, sizeof arena) != 0)
         return -1;
     if (tool_exec_out(argv, out, sizeof out) != 0) return -1;
@@ -10316,6 +10425,514 @@ static int vol_pack_sweep(invfs_volume *v, uint64_t inode_id, const char *name,
     vol_stamp_class(v, inode_id, INVFS_CLASS_GENERIC_GUARD,
                     (uint8_t)pc->algo, pc->generation);
     return 0;
+}
+
+/* ---- WP16a: container codecpacks (manifest type=container) ----
+ *
+ * A container pack decomposes a container file into MEMBER inodes that
+ * flow through the entire normal pipeline (RAW -> text/binary batching /
+ * generic ZSTD / nested containers, recursively). The pack owns the
+ * format knowledge through four commands (codec.h has the placeholder
+ * contract): enumerate (member table "idx<TAB>suggested_name<TAB>usize"),
+ * extract (one member's bytes), strip (recipe = original minus member
+ * payloads, pack-owned format), rebuild (recipe + a directory of member
+ * files named "<idx>" -> the original, bit-exact).
+ *
+ * Storage shape (the TAR/EXER pattern): members are sibling inodes
+ * "<name>!mbr<NNNN>" (NNNN = zero-padded idx; a sanitized suggested_name
+ * rides after a '-' when the pack offers one) created RAW via
+ * vol_create_file; the member table is stored verbatim as the sibling
+ * "<name>!mbrt" (the recipe is pack-owned and the FS cannot parse it --
+ * the table is how the read path learns the member set); the main record
+ * is replaced by the recipe blob (zone BINARY, algo = the pack's, one
+ * whole-file segment), stamped CONTAINER{algo, pack generation}.
+ *
+ * The house 1:1 invariant is enforced at sweep time: rebuild over the
+ * recipe + extracted members must memcmp-equal the original BEFORE
+ * anything reaches disk. Any failure abandons the decomposition (the
+ * siblings, if any were already created, are purged) and the file falls
+ * through to text/generic UNSTAMPED by the pack -- a guard failure here
+ * means the pack is broken for this content, and the generic stamp the
+ * file earns below is terminal until its content changes.
+ *
+ * Read path: algo -> pack container -> materialize "<idx>" files from the
+ * member siblings read THROUGH their current stored form (vol_read_file;
+ * the pack's extract cannot help -- the original container no longer
+ * exists), run rebuild, hand back the bytes. Whole-file unit, ARC-cached
+ * by inode id via algo_is_whole_file (the WHOLEFILE cap is forced at
+ * registration). A missing/corrupt member or a pack failure fails the
+ * read LOUDLY (-1; EIO at the FUSE boundary, exit 1 in invf-cat -- the
+ * WP13 missing-pack errno semantics, there is no per-cause channel).
+ */
+
+#define CPACK_MAX_MEMBERS 65536u   /* the WP10 §12 total-member sanity bound */
+#define CPACK_MAX_IDX     65535u   /* idx values name "!mbr<NNNN>" + {dir} files */
+#define CPACK_SNAME_MAX   24       /* sanitized suggested_name in a sibling name */
+#define CPACK_NAME_RESERVE 40      /* "!mbr" + idx + "-" + sname (and "!mbrt") */
+
+typedef struct {
+    uint32_t idx;                        /* member index (the {dir} file name) */
+    uint64_t usize;                      /* member size in bytes */
+    char     sname[CPACK_SNAME_MAX + 1]; /* sanitized suggested name ("" ok) */
+} cpack_member;
+
+/* suggested_name -> the part that may ride inside a sibling name:
+ * [A-Za-z0-9._-] kept, anything else folds to '_' (never a '/', never
+ * a control byte), capped at CPACK_SNAME_MAX. */
+static size_t cpack_sanitize(char *dst, const char *src, size_t n)
+{
+    size_t w = 0, i;
+    for (i = 0; i < n && w < CPACK_SNAME_MAX; i++) {
+        unsigned ch = (unsigned char)src[i];
+        int ok = (ch >= 'A' && ch <= 'Z') || (ch >= 'a' && ch <= 'z') ||
+                 (ch >= '0' && ch <= '9') || ch == '.' || ch == '_' ||
+                 ch == '-';
+        dst[w++] = (char)(ok ? ch : '_');
+    }
+    dst[w] = 0;
+    return w;
+}
+
+/* "<name>!mbr<NNNN>" or "<name>!mbr<NNNN>-<san>"; the caller sized the
+ * name budget up front (CPACK_NAME_RESERVE), truncation cannot fire. */
+static void cpack_mbr_name(char *out, size_t cap, const char *base,
+                           uint32_t idx, const char *san)
+{
+    if (san && san[0])
+        snprintf(out, cap, "%s!mbr%04u-%s", base, idx, san);
+    else
+        snprintf(out, cap, "%s!mbr%04u", base, idx);
+}
+
+/* Parse a member table (the enumerate output, stored verbatim as the
+ * "name!mbrt" sibling): one line per member "idx<TAB>suggested_name<TAB>
+ * usize". Read-side input is disk data, write-side input is pack output --
+ * both are validated identically: idx unique and <= CPACK_MAX_IDX, at most
+ * CPACK_MAX_MEMBERS rows. usize is deliberately NOT bounded by the
+ * container's own size: a compressing container (7z solid blocks) can hold
+ * members larger than the archive. Honesty is enforced where the bytes
+ * move -- the sweep stats every extracted member against its announced
+ * usize, the read side compares what vol_read_file returned against it.
+ * *sum_out (nullable) accumulates the member bytes (overflow-refused) for
+ * the admission estimate. Returns 0 on success. */
+static int cpack_parse_table(const uint8_t *text, size_t len,
+                             cpack_member **out, size_t *n_out,
+                             uint64_t *sum_out)
+{
+    cpack_member *mem = NULL;
+    size_t n = 0, cap = 0, pos = 0;
+    uint8_t *seen = NULL;
+    uint64_t sum = 0;
+    int rc = -1;
+
+    *out = NULL;
+    *n_out = 0;
+    if (sum_out) *sum_out = 0;
+    seen = (uint8_t *)calloc(CPACK_MAX_IDX / 8 + 1, 1);
+    if (!seen) return -1;
+    while (pos < len) {
+        size_t eol = pos, f1, f2, slen;
+        uint64_t idx, usize;
+        char numbuf[32];
+        while (eol < len && text[eol] != '\n') eol++;
+        if (eol == pos) { pos++; continue; }   /* blank line: tolerate */
+        /* field boundaries: idx TAB sname TAB usize */
+        f1 = pos;
+        while (f1 < eol && text[f1] != '\t') f1++;
+        f2 = f1;
+        if (f2 < eol) f2++;
+        while (f2 < eol && text[f2] != '\t') f2++;
+        if (f1 >= eol || f2 >= eol || text[f1] != '\t' || text[f2] != '\t')
+            goto out;                          /* malformed row */
+        if ((size_t)(f1 - pos) >= sizeof numbuf ||
+            (size_t)(eol - f2 - 1) >= sizeof numbuf)
+            goto out;
+        memcpy(numbuf, text + pos, f1 - pos);
+        numbuf[f1 - pos] = 0;
+        idx = strtoull(numbuf, NULL, 10);
+        memcpy(numbuf, text + f2 + 1, eol - f2 - 1);
+        numbuf[eol - f2 - 1] = 0;
+        usize = strtoull(numbuf, NULL, 10);
+        slen = f2 - f1 - 1;
+        if (idx > CPACK_MAX_IDX || usize > UINT64_MAX - sum)
+            goto out;
+        if (seen[idx / 8] & (1u << (idx % 8)))
+            goto out;                          /* duplicate idx */
+        seen[idx / 8] |= (uint8_t)(1u << (idx % 8));
+        if (n == CPACK_MAX_MEMBERS)
+            goto out;
+        if (n == cap) {
+            size_t nc = cap ? cap * 2 : 64;
+            cpack_member *nm =
+                (cpack_member *)realloc(mem, nc * sizeof *nm);
+            if (!nm) goto out;
+            mem = nm;
+            cap = nc;
+        }
+        mem[n].idx = (uint32_t)idx;
+        mem[n].usize = usize;
+        cpack_sanitize(mem[n].sname, (const char *)text + f1 + 1, slen);
+        n++;
+        sum += usize;
+        pos = eol + 1;
+    }
+    *out = mem;
+    *n_out = n;
+    if (sum_out) *sum_out = sum;
+    rc = 0;
+out:
+    if (rc) free(mem);
+    free(seen);
+    return rc;
+}
+
+/* WP16a sweep attempt: decompose one RAW container through a container
+ * codecpack. See the section header for the pipeline; the return
+ * convention mirrors vol_pack_sweep (100+algo on commit, 1 = tools absent
+ * -- wait RAW and unstamped, 0 = declined: fall through to text/generic;
+ * GENERIC_MEMLIMIT is stamped on a policy refusal, everything else leaves
+ * the stamp to the generic path below). */
+static int vol_containerpack_sweep(invfs_volume *v, uint64_t inode_id,
+                                   const char *name, const invfs_codec *pc,
+                                   const uint8_t *full, size_t full_len)
+{
+    const invfs_pack_def *def;
+    cpack_member *mem = NULL;
+    size_t nmem = 0, i;
+    uint64_t sum_usize = 0, ws;
+    char dir[64], pin[128], ptable[128], precipe[128], pout[128], pmdir[192];
+    uint8_t *table = NULL, *recipe = NULL, *outb = NULL;
+    size_t table_len = 0, recipe_len = 0, out_len = 0;
+    invfs_meta_pub keep;
+    int have_keep, rc = 0;
+
+    if (!pc->probe || !pc->probe()) return 1;    /* tools absent: wait */
+    def = invfs_codec_pack_def(pc);
+    if (!def || !def->is_container) return 0;
+    if (strlen(name) + CPACK_NAME_RESERVE > INVFS_MAX_NAME) return 0;
+    {
+        /* leftover siblings can only come from a decomposition killed
+         * mid-commit (a finished one is CONTAINER-stamped and never
+         * reaches here): purge and proceed rather than refusing the file
+         * forever (the EXER rule) */
+        char tn[288];
+        snprintf(tn, sizeof tn, "%s!mbrt", name);
+        if (vol_find(v, tn) != 0)
+            vol_delete_siblings(v, name);
+    }
+    if (tool_tmpdir(dir, sizeof dir) != 0) return 0;
+    snprintf(pin, sizeof pin, "%s/in", dir);
+    snprintf(ptable, sizeof ptable, "%s/table", dir);
+    snprintf(precipe, sizeof precipe, "%s/recipe", dir);
+    snprintf(pout, sizeof pout, "%s/out", dir);
+    snprintf(pmdir, sizeof pmdir, "%s/mbr", dir);
+    if (tool_write(pin, full, full_len) != 0) goto out;
+
+    /* 1. enumerate: the member table */
+    if (invfs_codec_pack_cmd(pc, INVFS_PACK_CMD_ENUMERATE, pin, NULL,
+                             NULL, NULL, ptable) != 0)
+        goto out;   /* refused: fall through, no stamp */
+    if (slurp_file(ptable, &table, &table_len) != 0) goto out;
+    if (cpack_parse_table(table, table_len, &mem, &nmem, &sum_usize) != 0 ||
+        nmem == 0)
+        goto out;
+
+    /* 2. admission (WP10 §12; sweep-time only): the rebuild is a
+     * whole-file read into the inode-keyed ARC, so the container obeys
+     * the whole-file arc rule; the decode working set comes from the
+     * pack's estimate command when it has one (header-derived, never a
+     * trial decode), else the manifest dec_mem constant, else the ABI
+     * default: sum(member usize) + the container's own size. The recipe
+     * is not in hand yet (strip runs next), and the container's size
+     * bounds it -- the default covers the read path's true peak (the
+     * whole-file output buffer plus one member in flight). */
+    if (v->arc_budget && (uint64_t)full_len > v->arc_budget) {
+        vol_stamp_class(v, inode_id, INVFS_CLASS_GENERIC_MEMLIMIT,
+                        (uint8_t)pc->algo, pc->generation);
+        goto out;
+    }
+    ws = pc->dec_mem_bytes;
+    if (def->estimate) {
+        /* a pack that cannot size the job refuses the file (the WP13
+         * estimate convention: GENERIC_GUARD, re-armed by a generation
+         * bump) */
+        if (invfs_codec_pack_estimate(pc, pin, &ws) != 0) {
+            vol_stamp_class(v, inode_id, INVFS_CLASS_GENERIC_GUARD,
+                            (uint8_t)pc->algo, pc->generation);
+            goto out;
+        }
+    } else if (!ws) {
+        ws = sum_usize + (uint64_t)full_len;
+    }
+    if (ws && ws > vol_get_dec_mem_limit(v)) {
+        vol_stamp_class(v, inode_id, INVFS_CLASS_GENERIC_MEMLIMIT,
+                        (uint8_t)pc->algo, pc->generation);
+        goto out;
+    }
+
+    /* 3. strip: the recipe (original minus member payloads, pack-owned) */
+    if (invfs_codec_pack_cmd(pc, INVFS_PACK_CMD_STRIP, pin, NULL,
+                             NULL, NULL, precipe) != 0)
+        goto out;
+    if (slurp_file(precipe, &recipe, &recipe_len) != 0) goto out;
+
+    /* 4. extract every member into the scratch dir as "<idx>"; the pack
+     * must produce exactly the announced byte count */
+    if (mkdir(pmdir, 0700) != 0) goto out;
+    for (i = 0; i < nmem; i++) {
+        char idxbuf[16], pm[256];
+        struct stat st;
+        snprintf(idxbuf, sizeof idxbuf, "%u", mem[i].idx);
+        snprintf(pm, sizeof pm, "%s/%u", pmdir, mem[i].idx);
+        if (invfs_codec_pack_cmd(pc, INVFS_PACK_CMD_EXTRACT, pin, idxbuf,
+                                 NULL, NULL, pm) != 0)
+            goto out;
+        if (stat(pm, &st) != 0 || (uint64_t)st.st_size != mem[i].usize)
+            goto out;   /* the pack lied about its members */
+    }
+
+    /* 5. GUARD (the house 1:1 invariant): rebuild from the recipe + the
+     * extracted members and memcmp against the original BEFORE anything
+     * reaches disk. ANY failure abandons the decomposition; no siblings
+     * exist yet, so there is nothing to purge. */
+    if (invfs_codec_pack_cmd(pc, INVFS_PACK_CMD_REBUILD, NULL, NULL,
+                             pmdir, precipe, pout) != 0)
+        goto out;
+    if (slurp_file(pout, &outb, &out_len) != 0 ||
+        out_len != full_len ||
+        (full_len && memcmp(outb, full, full_len) != 0)) {
+        fprintf(stderr, "sweep: %s: %s: rebuild guard refused, "
+                        "decomposition abandoned\n", pc->name, name);
+        goto out;
+    }
+    free(outb);
+    outb = NULL;
+
+    /* 6. commit: children first (the FLAC note) -- members (RAW, the
+     * normal pipeline owns them from here), then the member table, then
+     * the name-owning recipe record; retire the old record last. */
+    have_keep = vol_get_meta(v, inode_id, &keep) == 0;
+    for (i = 0; i < nmem; i++) {
+        char pm[256], mn[320];
+        uint8_t *mb = NULL;
+        size_t mlen = 0;
+        uint64_t pino;
+        snprintf(pm, sizeof pm, "%s/%u", pmdir, mem[i].idx);
+        if (slurp_file(pm, &mb, &mlen) != 0 || mlen != (size_t)mem[i].usize) {
+            free(mb);
+            vol_transcode_abort(v, name);
+            goto out;
+        }
+        cpack_mbr_name(mn, sizeof mn, name, mem[i].idx, mem[i].sname);
+        pino = vol_create_file(v, mn, mb, mlen);
+        free(mb);
+        if (!pino) {
+            fprintf(stderr, "sweep: %s: member inode failed for %s\n",
+                    pc->name, mn);
+            vol_transcode_abort(v, name);
+            goto out;
+        }
+        /* member meta: uid/gid/mode from the container's record */
+        if (have_keep) {
+            invfs_meta_pub mm = keep;
+            mm.type = INVFS_ITYP_REG;
+            mm.nlink = 1;
+            mm.target[0] = 0;
+            vol_apply_meta(v, mn, &mm);
+        }
+    }
+    {
+        char tn[288];
+        snprintf(tn, sizeof tn, "%s!mbrt", name);
+        if (!vol_create_file(v, tn, table, table_len)) {
+            fprintf(stderr, "sweep: %s: member table inode failed (%s)\n",
+                    pc->name, tn);
+            vol_transcode_abort(v, name);
+            goto out;
+        }
+    }
+    {
+        uint64_t newino = vol_create_blob_file(v, name, recipe, recipe_len,
+                                               (uint64_t)full_len, pc->algo);
+        if (!newino) {
+            /* no space for the main record: NOT a guard refusal (the
+             * vol_jxl_retry convention) -- leave unstamped, a retry
+             * re-arms */
+            fprintf(stderr, "sweep: %s container create failed (%s)\n",
+                    pc->name, name);
+            vol_transcode_abort(v, name);
+            goto out;
+        }
+        vol_delete_inode(v, inode_id, name);
+        /* the fresh blob record has no ext; carry the old meta across
+         * (the vol_pack_sweep flow) */
+        if (have_keep) {
+            invfs_meta_pub chk;
+            if (vol_get_meta(v, newino, &chk) != 0)
+                vol_apply_meta(v, name, &keep);
+        }
+        vol_stamp_class(v, newino, INVFS_CLASS_CONTAINER,
+                        (uint8_t)pc->algo, pc->generation);
+    }
+
+    /* 7. WP14b pattern: defer the fresh members into THIS run's batching
+     * accumulators (the flush re-reads and re-sniffs each from its live
+     * record, so a head sniff is enough here; members that sniff as
+     * nothing stay RAW for the next run's generic pass). */
+    {
+        int n_bin = 0, n_text = 0;
+        for (i = 0; i < nmem; i++) {
+            char mn[320];
+            uint64_t pino, fsz = 0;
+            uint8_t head[8192];
+            int got, bfam, tfam;
+            cpack_mbr_name(mn, sizeof mn, name, mem[i].idx, mem[i].sname);
+            pino = vol_find(v, mn);
+            if (!pino) continue;
+            got = vol_read_range(v, pino, 0, sizeof head, head);
+            if (got <= 0 ||
+                vol_stat_full(v, mn, NULL, &fsz, NULL) != 0 || !fsz)
+                continue;
+            bfam = invfs_binary_family(head, (size_t)got, mn);
+            if (bfam > 0) {
+                if (bz_defer(v, pino, mn, fsz, (uint32_t)bfam) == 0) n_bin++;
+                continue;
+            }
+            tfam = invfs_text_family(mn, head, (size_t)got);
+            if (tfam > 0) {
+                const invfs_codec *tc = invfs_codec_by_algo(INVFS_ALGO_PPMD);
+                if (tc && tc->dec_mem_bytes > vol_get_dec_mem_limit(v))
+                    vol_stamp_class(v, pino, INVFS_CLASS_GENERIC_MEMLIMIT,
+                                    INVFS_ALGO_PPMD, tc->generation);
+                else if (tz_defer(v, pino, mn, fsz, (uint32_t)tfam) == 0)
+                    n_text++;
+            }
+        }
+        /* one summary line per container, not one per member (the
+         * defer_container_parts convention) */
+        if (n_bin)
+            printf("  %s!*: %d parts -> ZSTD batch\n", name, n_bin);
+        if (n_text)
+            printf("  %s!*: %d parts -> PPMd batch\n", name, n_text);
+    }
+    rc = 100 + (int)pc->algo;   /* the WP13 pack rc convention */
+out:
+    /* scratch cleanup (member temps are named by the parsed idx set) */
+    tool_rm(dir, "in");
+    tool_rm(dir, "table");
+    tool_rm(dir, "recipe");
+    tool_rm(dir, "out");
+    if (mem) {
+        for (i = 0; i < nmem; i++) {
+            char pm[256];
+            snprintf(pm, sizeof pm, "%s/%u", pmdir, mem[i].idx);
+            unlink(pm);
+        }
+    }
+    rmdir(pmdir);
+    rmdir(dir);
+    free(mem);
+    free(table);
+    free(recipe);
+    free(outb);
+    return rc;
+}
+
+/* WP16a read side: rebuild the original container from the recipe blob +
+ * the member siblings. Returns 0 and fills dst (want_len bytes) exactly,
+ * -1 on any failure (loud: a missing/corrupt member, a bad table, or a
+ * pack error all mean the file cannot be served). */
+static int pack_container_rebuild(invfs_volume *v, const invfs_codec *pc,
+                                  const char *name,
+                                  const uint8_t *recipe, size_t recipe_len,
+                                  uint8_t *dst, size_t want_len)
+{
+#ifdef _WIN32
+    (void)v; (void)pc; (void)name; (void)recipe; (void)recipe_len;
+    (void)dst; (void)want_len;
+    return -1;   /* the POSIX tool layer does not exist on Windows */
+#else
+    char dir[64], precipe[128], pout[128], pmdir[192], tn[288];
+    uint8_t *table = NULL, *outb = NULL;
+    size_t table_len = 0, out_len = 0;
+    cpack_member *mem = NULL;
+    size_t nmem = 0, i;
+    int made = 0, rc = -1;
+
+    snprintf(tn, sizeof tn, "%s!mbrt", name);
+    {
+        uint64_t tino = vol_find(v, tn);
+        if (!tino || vol_read_file(v, tino, &table, &table_len) != 0) {
+            fprintf(stderr, "%s: member table '%s' unreadable\n",
+                    pc->name, tn);
+            return -1;
+        }
+    }
+    if (cpack_parse_table(table, table_len, &mem, &nmem, NULL) != 0 ||
+        nmem == 0) {
+        fprintf(stderr, "%s: member table '%s' corrupt\n", pc->name, tn);
+        goto out;
+    }
+    if (tool_tmpdir(dir, sizeof dir) != 0) goto out;
+    made = 1;
+    snprintf(precipe, sizeof precipe, "%s/recipe", dir);
+    snprintf(pout, sizeof pout, "%s/out", dir);
+    snprintf(pmdir, sizeof pmdir, "%s/mbr", dir);
+    if (tool_write(precipe, recipe, recipe_len) != 0) goto out;
+    if (mkdir(pmdir, 0700) != 0) goto out;
+    for (i = 0; i < nmem; i++) {
+        char mn[320], pm[256];
+        uint64_t pino;
+        uint8_t *mb = NULL;
+        size_t mlen = 0;
+        cpack_mbr_name(mn, sizeof mn, name, mem[i].idx, mem[i].sname);
+        pino = vol_find(v, mn);
+        if (!pino || vol_read_file(v, pino, &mb, &mlen) != 0) {
+            fprintf(stderr, "%s: member '%s' unreadable\n", pc->name, mn);
+            free(mb);
+            goto out;
+        }
+        if (mlen != (size_t)mem[i].usize) {
+            fprintf(stderr, "%s: member '%s' corrupt (got %zu, want %llu)\n",
+                    pc->name, mn, mlen, (unsigned long long)mem[i].usize);
+            free(mb);
+            goto out;
+        }
+        snprintf(pm, sizeof pm, "%s/%u", pmdir, mem[i].idx);
+        if (tool_write(pm, mb, mlen) != 0) { free(mb); goto out; }
+        free(mb);
+    }
+    if (invfs_codec_pack_cmd(pc, INVFS_PACK_CMD_REBUILD, NULL, NULL,
+                             pmdir, precipe, pout) != 0) {
+        fprintf(stderr, "%s: rebuild failed for %s\n", pc->name, name);
+        goto out;
+    }
+    if (slurp_file(pout, &outb, &out_len) != 0 || out_len != want_len) {
+        fprintf(stderr, "%s: rebuild of %s produced %zu bytes, want %zu\n",
+                pc->name, name, out_len, want_len);
+        goto out;
+    }
+    if (want_len) memcpy(dst, outb, want_len);
+    rc = 0;
+out:
+    if (made) {
+        tool_rm(dir, "recipe");
+        tool_rm(dir, "out");
+        if (mem) {
+            for (i = 0; i < nmem; i++) {
+                char pm[256];
+                snprintf(pm, sizeof pm, "%s/%u", pmdir, mem[i].idx);
+                unlink(pm);
+            }
+        }
+        rmdir(pmdir);
+        rmdir(dir);
+    }
+    free(mem);
+    free(table);
+    free(outb);
+    return rc;
+#endif
 }
 
 

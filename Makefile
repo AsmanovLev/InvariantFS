@@ -88,6 +88,7 @@ e2e: all
 	bash tools/test-binbatch.sh
 	bash tools/test-conbatch.sh
 	bash tools/test-exercarve.sh
+	bash tools/test-containerpack.sh
 
 .PHONY: all clean test e2e
 -include $(wildcard $(OBJ)/*.d)

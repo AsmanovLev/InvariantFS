@@ -592,7 +592,8 @@ static void test_probe(void)
 
 static void test_packs(void)
 {
-    char dir[256], packs[320], pack[384], dupe[384], path[448];
+    char dir[256], packs[320], pack[384], dupe[384], cpack[384], bpack[384],
+         path[448];
     const invfs_codec *c, *all;
     const invfs_pack_def *def;
     size_t n = 0, i, olen = 0;
@@ -600,14 +601,17 @@ static void test_packs(void)
     uint64_t est = 0;
     static const uint8_t mz4[6] = { 0, 0, 0, 0, 'M', 'Z' };   /* MZ at off 4 */
     static const uint8_t mz0[6] = { 'M', 'Z', 0, 0, 0, 0 };   /* MZ at off 0 */
+    static const uint8_t splt[4] = { 'S', 'P', 'L', 'T' };
     int r;
 
     snprintf(dir, sizeof dir, "/tmp/invfs_pack_test_%d", (int)getpid());
     snprintf(packs, sizeof packs, "%s/packs", dir);
     snprintf(pack, sizeof pack, "%s/fakeimg.codecpack", packs);
     snprintf(dupe, sizeof dupe, "%s/dupe.codecpack", packs);
+    snprintf(cpack, sizeof cpack, "%s/spltmini.codecpack", packs);
+    snprintf(bpack, sizeof bpack, "%s/badcont.codecpack", packs);
     r = mkdir(dir, 0755) | mkdir(packs, 0755) | mkdir(pack, 0755) |
-        mkdir(dupe, 0755);
+        mkdir(dupe, 0755) | mkdir(cpack, 0755) | mkdir(bpack, 0755);
 
     /* one valid pack (sniff.offset BEFORE sniff.magic: pending-offset path)
      * plus a second pack whose algo collides with builtin ZSTD (skipped) */
@@ -634,18 +638,47 @@ static void test_packs(void)
                     "caps = external\n"
                     "encode = cp {in} {out}\n"
                     "decode = cp {in} {out}\n", 0);
+    /* WP16a: a container pack (type=container): the four decomposition
+     * commands instead of encode/decode; plus a broken one (no rebuild)
+     * that must NOT register */
+    snprintf(path, sizeof path, "%s/manifest", cpack);
+    r |= write_file(path,
+                    "# container pack fixture (WP16a)\n"
+                    "name = spltmini\n"
+                    "type = container\n"
+                    "algo = 43\n"
+                    "pack_version = 1\n"
+                    "generation = 2\n"
+                    "dec_mem = 0\n"
+                    "sniff.magic = 53504C54\n"
+                    "sniff.ext = splt\n"
+                    "enumerate = cp {in} {out}\n"
+                    "extract = cp {in} {idx} {out}\n"
+                    "strip = cp {in} {out}\n"
+                    "rebuild = cp {recipe} {dir} {out}\n", 0);
+    snprintf(path, sizeof path, "%s/manifest", bpack);
+    r |= write_file(path,
+                    "name = badcont\n"
+                    "type = container\n"
+                    "algo = 44\n"
+                    "sniff.magic = 42414443\n"
+                    "enumerate = cp {in} {out}\n"
+                    "extract = cp {in} {idx} {out}\n"
+                    "strip = cp {in} {out}\n", 0);
     ok(r == 0, "fixture: pack dirs written");
 
     setenv("INVFS_CODECPACKS", packs, 1);
     invfs_codec_probe_reset();
 
     all = invfs_codec_all(&n);
-    ok(all != NULL && n == 15, "pack registered: 14 static + 1 pack");
+    ok(all != NULL && n == 16, "packs registered: 14 static + codec + container");
     ok(all[n - 1].algo == INVFS_ALGO_PPMD,
-       "text heuristic still LAST with a pack loaded");
+       "text heuristic still LAST with packs loaded");
     c = invfs_codec_by_algo(INVFS_ALGO_ZSTD);
     ok(c && strcmp(c->name, "zstd") == 0,
        "pack whose algo collides with a builtin is skipped");
+    ok(invfs_codec_by_algo(44) == NULL,
+       "container pack missing a command (rebuild) is not registered");
 
     c = invfs_codec_by_algo(42);
     ok(c != NULL, "pack found by algo");
@@ -688,11 +721,52 @@ static void test_packs(void)
     ok(invfs_codec_pack_def(invfs_codec_by_algo(INVFS_ALGO_ZSTD)) == NULL,
        "builtin codec has no pack def");
 
-    /* reset must unload the pack (the probe cache AND the registration);
-     * the env goes first or the re-scan legitimately finds it again */
+    /* ---- WP16a: container pack registration + precedence ---- */
+    c = invfs_codec_by_algo(43);
+    ok(c != NULL, "container pack found by algo");
+    ok(c && strcmp(c->name, "spltmini") == 0, "container pack name parsed");
+    ok(c && (c->caps & INVFS_CODEC_CAP_CONTAINER) &&
+       (c->caps & INVFS_CODEC_CAP_EXTERNAL) &&
+       (c->caps & INVFS_CODEC_CAP_WHOLEFILE),
+       "container pack caps forced: CONTAINER|EXTERNAL|WHOLEFILE");
+    ok(c && c->generation == 2, "container pack generation parsed");
+    ok(c && c->sniff && c->probe, "container pack sniff/probe wired");
+    ok(c && c->encode == NULL && c->decode == NULL,
+       "container pack has NO encode/decode (the WP13 codec loop skips it)");
+    ok(c && c->sniff(splt, sizeof splt, "x.splt") == 100,
+       "container pack magic -> 100");
+    ok(c && c->sniff(mz0, sizeof mz0, "x.splt") == 50,
+       "container pack extension list -> 50");
+    ok(c && c->sniff(mz0, sizeof mz0, "x.bin") == 0,
+       "container pack: no magic/ext match -> 0");
+    ok(c && c->probe() == 1, "container pack probe: all four argv tools resolve");
+    def = invfs_codec_pack_def(c);
+    ok(def && def->is_container == 1, "pack def: is_container");
+    ok(def && def->enumerate && def->extract && def->strip && def->rebuild,
+       "pack def exposes the four container commands");
+    ok(def && strstr(def->rebuild, "{recipe}") && strstr(def->rebuild, "{dir}"),
+       "rebuild argv carries {recipe} {dir} placeholders");
+    /* precedence: builtin entries first, packs after, text LAST */
+    {
+        size_t exer_at = 0, pack_at = 0, ppmd_at = 0;
+        for (i = 0; i < n; i++) {
+            if (all[i].algo == INVFS_ALGO_EXER) exer_at = i;
+            if (all[i].algo == 43) pack_at = i;
+            if (all[i].algo == INVFS_ALGO_PPMD) ppmd_at = i;
+        }
+        ok(exer_at < pack_at && pack_at < ppmd_at,
+           "order: builtin magics first, packs after, text LAST");
+    }
+    ok(invfs_codec_pack_def(invfs_codec_by_algo(INVFS_ALGO_TARR)) == NULL ||
+       !invfs_codec_pack_def(invfs_codec_by_algo(INVFS_ALGO_TARR))->is_container,
+       "builtin TARR is not a container pack");
+
+    /* reset must unload the packs (the probe cache AND the registration);
+     * the env goes first or the re-scan legitimately finds them again */
     unsetenv("INVFS_CODECPACKS");
     invfs_codec_probe_reset();
     ok(invfs_codec_by_algo(42) == NULL, "reset unloads packs");
+    ok(invfs_codec_by_algo(43) == NULL, "reset unloads container packs");
     all = invfs_codec_all(&n);
     ok(n == 14, "reset restores the static registry");
     invfs_codec_probe_reset();   /* a second reset is harmless */
@@ -701,8 +775,14 @@ static void test_packs(void)
     unlink(path);
     snprintf(path, sizeof path, "%s/manifest", dupe);
     unlink(path);
+    snprintf(path, sizeof path, "%s/manifest", cpack);
+    unlink(path);
+    snprintf(path, sizeof path, "%s/manifest", bpack);
+    unlink(path);
     rmdir(pack);
     rmdir(dupe);
+    rmdir(cpack);
+    rmdir(bpack);
     rmdir(packs);
     rmdir(dir);
 }
