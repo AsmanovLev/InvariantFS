@@ -1,5 +1,9 @@
 # WP16: Containerpacks — external container decomposition (WP16a)
 
+ABI v1.1 (WP16b) adds **seekable containers** (the `map` command + local
+splice reads), the **DEFER_ENOSPC** storage class, and **codec profiles**.
+See "ABI v1.1" below; the v1 text is the foundation and still holds.
+
 A **containerpack** is a codecpack (WP10 §10, WP13) that *decomposes* a
 container file into member inodes instead of transcoding it whole. The
 members become first-class files and flow through the ENTIRE normal
@@ -194,3 +198,169 @@ siblings with the container (the existing `!`-aware walk).
 - **Exit codes are the only channel**: 0 = ok, anything else =
   refuse/fail. Stdout/stderr are /dev/null (except estimate's stdout).
 - Scratch dirs are fresh per call — never read a leftover.
+
+# ABI v1.1 (WP16b): seekable containers, DEFER_ENOSPC, profiles
+
+## 8. The `map` command (seekable containers)
+
+A container pack may declare one more command:
+
+```
+map = python3 {pack}/rd.py map {in} {out}
+```
+
+Its presence puts `INVFS_CODEC_CAP_SEEK` on the registry entry (the ONLY
+source of that bit for a container pack — a `caps` line claiming `seek`
+without a map command is stripped at registration; a `map` line on a
+codec pack is parsed but never wired). probe() covers the map tool like
+the other four. The map lets the FS serve ANY byte range of the original
+container WITHOUT running the pack: no rebuild exec, no whole-file
+reconstruction, and — the point — **reads keep working with the pack
+uninstalled** (the map on disk is self-describing).
+
+### The map format (FS-owned, binary, little-endian)
+
+The pack renders it; the FS defines, validates and owns it:
+
+```
+[4B "MRMP"][u32 count]
+count x { u64 orig_off, u64 len, u8 kind, u32 idx, u64 src_off }  (29 B)
+```
+
+Entries are sorted by `orig_off` and must partition `[0, container_size)`
+exactly: contiguous, no gaps, no overlaps, `len > 0` (a zero-length
+member simply has no entries). `kind` 0 = RECIPE (the bytes live at
+`[src_off, +len)` of the recipe blob; `idx` must be 0), 1 = MEMBER (the
+bytes are member `idx`'s `[src_off, +len)`; `idx` must exist in the
+member table, `src_off + len <= usize`). The blob length must be exactly
+`8 + count * 29`; count is capped at `4 * CPACK_MAX_MEMBERS + 4`
+(262148). For SPLT the map is trivial: one RECIPE range for the header,
+one MEMBER range per non-empty member (members are contiguous chunks).
+
+### Sweep flow with a map (vol_containerpack_sweep)
+
+enumerate -> admission (arc / dec_mem, unchanged) -> DEFER_ENOSPC (§9) ->
+strip -> extract (size-checked) -> **map: parse + validate the shape**
+(partition, recipe/member bounds) -> commit members RAW + `!mbrt` ->
+commit the recipe record (the name flips to it; the old RAW record is NOT
+retired yet) -> **map guard**: every map entry's source range is read
+back THROUGH THE REAL READ PATH (the recipe segment of the fresh record,
+member siblings via `vol_read_range`) and chunked-memcmp'd (8 MiB
+windows) against the original — streaming, constant memory, **no rebuild
+exec** (map-less packs keep the v1 rebuild-exec guard) -> store `!mbrmap`
+LAST via `vol_create_file` (it compresses itself later) -> retire the old
+record -> stamp CONTAINER{algo,gen}.
+
+`!mbrmap` lands last on purpose: its presence on disk is the "the guard
+passed" marker, so a crash mid-commit can only leave a container that
+falls back to the pack's rebuild exec (or fails loudly with the pack
+absent) — never one that serves an unguarded map. A guard/write failure
+rolls the name back onto the untouched old record and purges every
+sibling: abandon to generic, no pack stamp, exactly the v1 guard
+semantics. Map-capable packs skip the rebuild guard entirely.
+
+### Read path (seekable)
+
+`algo_is_whole_file` excludes CAP_SEEK container packs, so
+`vol_read_range` no longer diverts them to the whole-file ARC rebuild.
+Instead (both in `vol_read_range` and in the whole-file `vol_read_inode`
+pack branch): pack algo + CAP_SEEK, OR an algo no loaded pack resolves,
+PLUS a live `name!mbrmap` sibling -> `cpack_map_read`:
+
+1. load-or-cache the parsed map + member table (idx-sorted) + the recipe
+   blob (segment read, CRC-checked), re-validated against the live record
+   (it is disk data now); cached per open volume keyed by container name
+   (freed at vol_close; retiring the container or any "name!..." sibling
+   invalidates the entry);
+2. serve the range by walking the map: RECIPE ranges copy from the cached
+   recipe, MEMBER ranges `vol_read_range` the member sibling (batched /
+   generic / nested-container reads all just work — a nested seekable
+   container splices through its own map recursively).
+
+NO pack exec on read, ever. A missing `!mbrmap` (a pre-v1.1 sweep, or a
+deleted sibling) falls back to the whole-file rebuild exec when the pack
+is loaded, and fails loudly (EIO) when it is not — the v1 semantics. A
+map present but invalid at load fails the read LOUDLY (like a corrupt
+member table); the sweep-time guard makes this unreachable for content
+the FS itself wrote.
+
+The WP16a admission rules are unchanged in v1.1 (a seekable container
+still obeys the whole-file ARC budget and the decode working set at sweep
+time; relaxing them for the map shape is future work — a pack with a big
+but honestly estimable container should ship an `estimate` command).
+
+## 9. INVFS_CLASS_DEFER_ENOSPC (9)
+
+A sweep that must hold the NEW shape while the OLD one is still stored
+has a worst-case space price; paying it only to unwind at a mid-commit
+ENOSPC is wasted work. The containerpack sweep (and the codec-pack sweep,
+and the generic ZSTD-19 sweep) now price it up front against
+`vol_free_blocks_cached()` and, when short, stamp
+`DEFER_ENOSPC{algo, gen}` and wait RAW — silently (the tools-absent
+convention), never falling through to generic.
+
+The heuristic (documented in `sweep_enospc()`): the containerpack sweep
+requires `free_blocks >= (sum(member usize)/2 + 64 MiB) / 4096` — member
+csizes are unknowable pre-write (they compress through the pipeline
+later), so the charge is a conservative fraction of the announced total;
+the 64 MiB margin covers the recipe/table/map and the records. The
+codec-pack sweep charges the encode scratch bound (full + full/4 + 64K)
+plus the margin; the generic sweep charges the original's own size raw
+plus per-segment framing plus the margin.
+
+DEFER_ENOSPC is re-evaluated EVERY sweep (the `vol_sweep_one` class
+predicate breaks straight into the full path, like an absent stamp):
+space now suffices -> the file processes; still short -> re-stamp, which
+the check-then-write stamp makes free. It names the declining codec
+(pack algo, or ZSTD for the generic floor) so the sweep log can
+attribute the wait.
+
+## 10. Codec profiles (INVFS_PROFILE)
+
+Four effort levels — `fast` / `balanced` / `dense` / `archive` — which
+are also the future heat scale (hot<->fast, warm<->balanced,
+cold<->dense, frozen<->archive). `vol_open` parses `INVFS_PROFILE`
+(default `balanced`; an unknown value keeps the default with a
+complaint), stores it on the volume (`vol_get_profile`), and publishes
+the effective name back to the environment, so every pack subprocess
+(exec'd with fixed argv from the sweep/read paths) inherits it and pack
+helpers can map effort. mkfs/sweep CLIs inherit the env — no CLI flags
+in v1; invf-sweep logs `profile: <name> (generic zstd level N)` when the
+env is set (unset: no line, byte-identical logs).
+
+v1 effects: (1) the generic sweep's ZSTD level maps fast=6,
+**balanced=19 (the historical default — an unset env reproduces existing
+volumes' bytes)**, dense=22, archive=22 (archive reserves the slot for a
+future LZMA2 backend swap, not a higher zstd level); (2) the
+`INVFS_PROFILE` env for pack execs. **PPMd wrapper params stay fixed
+(o8/64M) regardless of the profile in v1**, and the text/binary batch
+payloads keep the registry ZSTD level.
+
+## 11. Pack-author recipe for a seekable pack (v1.1)
+
+Everything from §7 still holds. To make reads stop needing your pack at
+runtime:
+
+1. Add `map = <tool> {in} {out}` to the manifest. The tool reads the
+   ORIGINAL container and writes the MRMP map (§8): which stored source
+   reproduces each byte range — the recipe blob (what your `strip`
+   writes) for container metadata, a member idx + offset for member
+   payload. Members need not be contiguous in the original; a member
+   fragmented across the archive is several MEMBER entries with rising
+   `src_off`s, and recipe/member runs may interleave freely as long as
+   `orig_off`s partition `[0, container_size)`.
+2. Registration adds CAP_SEEK; the sweep validates the map's shape, then
+   proves it byte-exactly by reading every source range back through the
+   real FS read path and memcmp'ing against the original — a map that
+   lies is a guard refusal (abandon to generic, no stamp), exactly like a
+   rebuild mismatch. **Test your map against junk tables too.**
+3. Keep `rebuild` anyway: it is the fallback when the map sibling is
+   absent (a pre-v1.1 sweep, a deleted `!mbrmap`), and registration still
+   requires the four v1 commands.
+4. The map command must stream like the others (a member may be a
+   partition); the FS side never holds more than the recipe + one 8 MiB
+   window.
+
+(The 4-pack wave — rawdisk/ext4/fat/xfs — builds on this recipe: their
+maps are filesystem-structure walks rendered to MRMP runs.)
+

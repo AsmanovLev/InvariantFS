@@ -593,7 +593,7 @@ static void test_probe(void)
 static void test_packs(void)
 {
     char dir[256], packs[320], pack[384], dupe[384], cpack[384], bpack[384],
-         path[448];
+         mpack[384], path[448];
     const invfs_codec *c, *all;
     const invfs_pack_def *def;
     size_t n = 0, i, olen = 0;
@@ -610,8 +610,10 @@ static void test_packs(void)
     snprintf(dupe, sizeof dupe, "%s/dupe.codecpack", packs);
     snprintf(cpack, sizeof cpack, "%s/spltmini.codecpack", packs);
     snprintf(bpack, sizeof bpack, "%s/badcont.codecpack", packs);
+    snprintf(mpack, sizeof mpack, "%s/spltmap.codecpack", packs);
     r = mkdir(dir, 0755) | mkdir(packs, 0755) | mkdir(pack, 0755) |
-        mkdir(dupe, 0755) | mkdir(cpack, 0755) | mkdir(bpack, 0755);
+        mkdir(dupe, 0755) | mkdir(cpack, 0755) | mkdir(bpack, 0755) |
+        mkdir(mpack, 0755);
 
     /* one valid pack (sniff.offset BEFORE sniff.magic: pending-offset path)
      * plus a second pack whose algo collides with builtin ZSTD (skipped) */
@@ -630,6 +632,8 @@ static void test_packs(void)
                     "requires = cp\n"
                     "encode = cp {in} {out}\n"
                     "decode = cp {in} {out}\n"
+                    "map = cp {in} {out}\n"   /* container-ABI key on a codec
+                                               * pack: parsed, never wired */
                     "unknown.key = skipped\n", 0);
     snprintf(path, sizeof path, "%s/manifest", dupe);
     r |= write_file(path,
@@ -665,13 +669,28 @@ static void test_packs(void)
                     "enumerate = cp {in} {out}\n"
                     "extract = cp {in} {idx} {out}\n"
                     "strip = cp {in} {out}\n", 0);
+    /* WP16b: a container pack WITH a map command -> CAP_SEEK on the entry */
+    snprintf(path, sizeof path, "%s/manifest", mpack);
+    r |= write_file(path,
+                    "# seekable container pack fixture (WP16b)\n"
+                    "name = spltmap\n"
+                    "type = container\n"
+                    "algo = 45\n"
+                    "pack_version = 1\n"
+                    "generation = 1\n"
+                    "sniff.magic = 53504C54\n"
+                    "enumerate = cp {in} {out}\n"
+                    "extract = cp {in} {idx} {out}\n"
+                    "strip = cp {in} {out}\n"
+                    "rebuild = cp {recipe} {dir} {out}\n"
+                    "map = cp {in} {out}\n", 0);
     ok(r == 0, "fixture: pack dirs written");
 
     setenv("INVFS_CODECPACKS", packs, 1);
     invfs_codec_probe_reset();
 
     all = invfs_codec_all(&n);
-    ok(all != NULL && n == 16, "packs registered: 14 static + codec + container");
+    ok(all != NULL && n == 17, "packs registered: 14 static + codec + 2 containers");
     ok(all[n - 1].algo == INVFS_ALGO_PPMD,
        "text heuristic still LAST with packs loaded");
     c = invfs_codec_by_algo(INVFS_ALGO_ZSTD);
@@ -744,8 +763,29 @@ static void test_packs(void)
     ok(def && def->is_container == 1, "pack def: is_container");
     ok(def && def->enumerate && def->extract && def->strip && def->rebuild,
        "pack def exposes the four container commands");
+    ok(def && def->map == NULL && !(c->caps & INVFS_CODEC_CAP_SEEK),
+       "map-less container pack: no map cmd, NO CAP_SEEK");
     ok(def && strstr(def->rebuild, "{recipe}") && strstr(def->rebuild, "{dir}"),
        "rebuild argv carries {recipe} {dir} placeholders");
+
+    /* WP16b: the same container pack + a `map` command gains CAP_SEEK */
+    c = invfs_codec_by_algo(45);
+    ok(c != NULL && strcmp(c->name, "spltmap") == 0,
+       "seekable container pack found by algo");
+    ok(c && (c->caps & INVFS_CODEC_CAP_CONTAINER) &&
+       (c->caps & INVFS_CODEC_CAP_EXTERNAL) &&
+       (c->caps & INVFS_CODEC_CAP_WHOLEFILE) &&
+       (c->caps & INVFS_CODEC_CAP_SEEK),
+       "container pack with a map command: CONTAINER|EXTERNAL|WHOLEFILE|SEEK");
+    ok(c && c->probe && c->probe() == 1,
+       "seekable container pack probe covers the map tool");
+    def = c ? invfs_codec_pack_def(c) : NULL;
+    ok(def && def->map && strstr(def->map, "{in}") && strstr(def->map, "{out}"),
+       "pack def exposes the map command argv");
+    def = invfs_codec_pack_def(invfs_codec_by_algo(42));
+    ok(def && def->map == NULL &&
+       !(invfs_codec_by_algo(42)->caps & INVFS_CODEC_CAP_SEEK),
+       "map line on a CODEC pack is ignored (no def.map, no CAP_SEEK)");
     /* precedence: builtin entries first, packs after, text LAST */
     {
         size_t exer_at = 0, pack_at = 0, ppmd_at = 0;
@@ -767,6 +807,7 @@ static void test_packs(void)
     invfs_codec_probe_reset();
     ok(invfs_codec_by_algo(42) == NULL, "reset unloads packs");
     ok(invfs_codec_by_algo(43) == NULL, "reset unloads container packs");
+    ok(invfs_codec_by_algo(45) == NULL, "reset unloads seekable packs");
     all = invfs_codec_all(&n);
     ok(n == 14, "reset restores the static registry");
     invfs_codec_probe_reset();   /* a second reset is harmless */
@@ -779,12 +820,44 @@ static void test_packs(void)
     unlink(path);
     snprintf(path, sizeof path, "%s/manifest", bpack);
     unlink(path);
+    snprintf(path, sizeof path, "%s/manifest", mpack);
+    unlink(path);
     rmdir(pack);
     rmdir(dupe);
     rmdir(cpack);
     rmdir(bpack);
+    rmdir(mpack);
     rmdir(packs);
     rmdir(dir);
+}
+
+/* ---------------- WP16b: codec profiles ---------------- */
+
+static void test_profiles(void)
+{
+    ok(invfs_profile_parse("fast") == INVFS_PROFILE_FAST, "parse fast");
+    ok(invfs_profile_parse("balanced") == INVFS_PROFILE_BALANCED,
+       "parse balanced");
+    ok(invfs_profile_parse("dense") == INVFS_PROFILE_DENSE, "parse dense");
+    ok(invfs_profile_parse("archive") == INVFS_PROFILE_ARCHIVE,
+       "parse archive");
+    ok(invfs_profile_parse(NULL) == -1, "NULL is not a profile");
+    ok(invfs_profile_parse("") == -1, "empty is not a profile");
+    ok(invfs_profile_parse("FAST") == -1, "profile names are exact/lowercase");
+    ok(invfs_profile_parse("turbo") == -1, "unknown name -> -1");
+    ok(strcmp(invfs_profile_name(INVFS_PROFILE_FAST), "fast") == 0 &&
+       strcmp(invfs_profile_name(INVFS_PROFILE_BALANCED), "balanced") == 0 &&
+       strcmp(invfs_profile_name(INVFS_PROFILE_DENSE), "dense") == 0 &&
+       strcmp(invfs_profile_name(INVFS_PROFILE_ARCHIVE), "archive") == 0,
+       "name round-trip");
+    ok(invfs_profile_zstd_level(INVFS_PROFILE_FAST) == 6 &&
+       invfs_profile_zstd_level(INVFS_PROFILE_BALANCED) == 19 &&
+       invfs_profile_zstd_level(INVFS_PROFILE_DENSE) == 22 &&
+       invfs_profile_zstd_level(INVFS_PROFILE_ARCHIVE) == 22,
+       "generic sweep levels: 6/19/22/22 (19 = the historical default)");
+    ok(invfs_profile_zstd_level(-1) == 19 &&
+       invfs_profile_zstd_level(99) == 19,
+       "out-of-range profile -> the default level");
 }
 
 int main(void)
@@ -799,6 +872,7 @@ int main(void)
     test_roundtrips();
     test_probe();
     test_packs();
+    test_profiles();
 
     printf("%d checks, %d failure(s)\n", checks, failures);
     printf("%s\n", failures ? "FAIL" : "PASS");

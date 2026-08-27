@@ -256,6 +256,10 @@ void     vol_set_arc_budget(invfs_volume *v, uint64_t bytes);     /* 0 = keep */
 void     vol_set_dec_mem_limit(invfs_volume *v, uint64_t bytes);  /* 0 = default */
 uint64_t vol_get_dec_mem_limit(invfs_volume *v);
 
+/* WP16b: the volume's codec profile (INVFS_PROFILE_* from codec.h), parsed
+ * from INVFS_PROFILE at vol_open (default INVFS_PROFILE_BALANCED). */
+unsigned vol_get_profile(const invfs_volume *v);
+
 /* Seal + commit the partial PPMd text batch. Drivers (invf-sweep, daemon
  * drain) call this at the end of a sweep run. 0 = ok/flushed, 1 = nothing
  * pending, <0 = error. */

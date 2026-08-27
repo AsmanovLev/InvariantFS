@@ -85,10 +85,14 @@ enum {
     INVFS_CLASS_GENERIC_GUARD    = 6, /* codec guard refused; first retry
                                        * candidate when codec generation bumps */
     INVFS_CLASS_TEXT             = 7, /* PPMd batch member */
-    INVFS_CLASS_BATCHED_BIN      = 8  /* binary batch member (WP14a): zone=TEXT,
+    INVFS_CLASS_BATCHED_BIN      = 8, /* binary batch member (WP14a): zone=TEXT,
                                        * algo = ZSTD (plain binary batch) or
                                        * ZSTD_BCJ (x86-prefiltered batch).
                                        * Same compliance/GC semantics as TEXT */
+    INVFS_CLASS_DEFER_ENOSPC     = 9  /* sweep deferred for free space (WP16b):
+                                       * the file waits RAW and is
+                                       * re-evaluated EVERY sweep; stamped
+                                       * {algo,gen} of the declining codec */
 };
 
 #pragma pack(push, 1)

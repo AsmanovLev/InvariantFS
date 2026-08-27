@@ -158,10 +158,20 @@ int main(int argc, char **argv)
      * redirected log tears a line at every 4 KB flush boundary */
     setvbuf(stdout, NULL, _IONBF, 0);
 
-    vol = vol_open(img, &err);
-    if (!vol) {
-        fprintf(stderr, "cannot open volume %s (err %d)\n", img, err);
-        return 1;
+    /* WP16b: the codec profile rides the environment (INVFS_PROFILE).
+     * Capture the setting BEFORE vol_open publishes the default into the
+     * env: a default run must produce byte-identical LOGS too. */
+    {
+        int prof_from_env = getenv("INVFS_PROFILE") != NULL;
+        vol = vol_open(img, &err);
+        if (!vol) {
+            fprintf(stderr, "cannot open volume %s (err %d)\n", img, err);
+            return 1;
+        }
+        if (prof_from_env)
+            fprintf(stderr, "profile: %s (generic zstd level %d)\n",
+                    invfs_profile_name((int)vol_get_profile(vol)),
+                    invfs_profile_zstd_level((int)vol_get_profile(vol)));
     }
     /* WP10 memory policy: same size grammar as INVFS_ARC_BYTES in volume.c;
      * unset keeps the volume default. */

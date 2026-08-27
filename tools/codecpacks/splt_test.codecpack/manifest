@@ -22,3 +22,6 @@ enumerate = python3 {pack}/splt.py enumerate {in} {out}
 extract = python3 {pack}/splt.py extract {in} {idx} {out}
 strip = python3 {pack}/splt.py strip {in} {out}
 rebuild = python3 {pack}/splt.py rebuild {recipe} {dir} {out}
+# WP16b: the map command makes the pack SEEKABLE (CAP_SEEK): reads splice
+# locally from the recipe + member siblings and never exec the pack.
+map = python3 {pack}/splt.py map {in} {out}

@@ -357,6 +357,10 @@ struct pack_manifest {
     int      has_extract;
     int      has_strip;
     int      has_rebuild;
+    /* WP16b: optional `map` command (container packs only): {in} {out} ->
+     * the FS-owned member map (MRMP); presence makes the pack SEEKABLE. */
+    char     map[512];
+    int      has_map;
 };
 
 static void str_copy(char *dst, size_t cap, const char *src)
@@ -466,6 +470,9 @@ static int parse_manifest(const char *path, struct pack_manifest *m)
         } else if (strcmp(s, "rebuild") == 0) {
             str_copy(m->rebuild, sizeof m->rebuild, val);
             m->has_rebuild = 1;
+        } else if (strcmp(s, "map") == 0) {
+            str_copy(m->map, sizeof m->map, val);
+            m->has_map = 1;
         } else if (strcmp(s, "type") == 0) {
             /* WP16a: only "container" is special; anything else = codec */
             m->is_container = (strcmp(val, "container") == 0);
@@ -694,6 +701,7 @@ typedef struct {
     /* WP16a container commands (all NULL for a codec pack) */
     int              is_container;
     char            *enumerate, *extract, *strip, *rebuild;
+    char            *map;       /* WP16b: container packs only, optional */
     pack_magic_rule  magic[PACK_MAX_MAGIC];
     size_t           n_magic;
     int              probed;    /* memoized availability probe */
@@ -755,7 +763,8 @@ static int pack_tool_resolvable(const char *tool)
 
 /* available iff every argv's tool resolves (the codec set — encode/decode,
  * estimate when present — or the WP16a container set — enumerate/extract/
- * strip/rebuild) and every `requires` entry does */
+ * strip/rebuild, plus the WP16b map command when the pack declares one) and
+ * every `requires` entry does */
 static int pack_probe_impl(pack_entry *p)
 {
     const char *r;
@@ -768,6 +777,8 @@ static int pack_probe_impl(pack_entry *p)
             !manifest_tool_ok(p->dir, p->extract) ||
             !manifest_tool_ok(p->dir, p->strip) ||
             !manifest_tool_ok(p->dir, p->rebuild))
+            return 0;
+        if (p->map && !manifest_tool_ok(p->dir, p->map))
             return 0;
     } else {
         if (!manifest_tool_ok(p->dir, p->encode) ||
@@ -928,6 +939,7 @@ static void pack_entry_free(pack_entry *p)
     free(p->dir); free(p->name); free(p->encode); free(p->decode);
     free(p->estimate); free(p->requires); free(p->exts);
     free(p->enumerate); free(p->extract); free(p->strip); free(p->rebuild);
+    free(p->map);
     memset(p, 0, sizeof *p);
 }
 
@@ -1066,10 +1078,14 @@ static void pack_register(const char *dir, const struct pack_manifest *m)
     p->extract   = m->has_extract ? pack_strdup(m->extract) : NULL;
     p->strip     = m->has_strip ? pack_strdup(m->strip) : NULL;
     p->rebuild   = m->has_rebuild ? pack_strdup(m->rebuild) : NULL;
+    /* WP16b: `map` is a container-ABI command; on a codec pack the line is
+     * parsed but never wired (def.map stays NULL, no CAP_SEEK). */
+    p->map = (m->is_container && m->has_map) ? pack_strdup(m->map) : NULL;
     if (!p->dir || !p->name ||
         (m->has_encode && !p->encode) || (m->has_decode && !p->decode) ||
         (m->has_estimate && !p->estimate) ||
         (m->requires[0] && !p->requires) || (m->exts[0] && !p->exts) ||
+        (m->is_container && m->has_map && !p->map) ||
         (m->is_container &&
          (!p->enumerate || !p->extract || !p->strip || !p->rebuild))) {
         pack_entry_free(p);
@@ -1092,9 +1108,17 @@ static void pack_register(const char *dir, const struct pack_manifest *m)
          * EXTERNAL/WHOLEFILE are forced on regardless of the manifest:
          * packs are external by definition and the rebuild is a
          * whole-file read unit (the ARC divert and the policy compliance
-         * check both key off WHOLEFILE). */
+         * check both key off WHOLEFILE). WP16b: a `map` command makes the
+         * container SEEKABLE (local splice reads through the !mbrmap
+         * sibling, no pack exec); it is the ONLY source of CAP_SEEK for a
+         * container pack -- a caps line claiming "seek" without the map
+         * command would divert reads to a map that cannot exist. */
         p->pub.caps  |= INVFS_CODEC_CAP_CONTAINER | INVFS_CODEC_CAP_EXTERNAL |
                         INVFS_CODEC_CAP_WHOLEFILE;
+        if (p->map)
+            p->pub.caps |= INVFS_CODEC_CAP_SEEK;
+        else
+            p->pub.caps &= ~INVFS_CODEC_CAP_SEEK;
         p->pub.encode = NULL;
         p->pub.decode = NULL;
     } else {
@@ -1112,6 +1136,7 @@ static void pack_register(const char *dir, const struct pack_manifest *m)
     p->def.extract   = p->extract;
     p->def.strip     = p->strip;
     p->def.rebuild   = p->rebuild;
+    p->def.map       = p->map;
     packs_n++;
 }
 
@@ -1216,4 +1241,39 @@ uint16_t invfs_registry_generation(void)
     for (i = 0; i < g_all_n; i++)
         if (g_all[i].generation > g) g = g_all[i].generation;
     return g;
+}
+
+/* ---------------- WP16b: codec profiles ---------------- */
+
+static const char *const profile_names[4] = {
+    "fast", "balanced", "dense", "archive"
+};
+
+int invfs_profile_parse(const char *s)
+{
+    int i;
+    if (!s) return -1;
+    for (i = 0; i < 4; i++)
+        if (strcmp(s, profile_names[i]) == 0) return i;
+    return -1;
+}
+
+const char *invfs_profile_name(int p)
+{
+    if (p < 0 || p > 3) return "balanced";
+    return profile_names[p];
+}
+
+/* Generic-sweep ZSTD level per profile. balanced = 19 is the historical
+ * default: an unset INVFS_PROFILE must reproduce the bytes existing volumes
+ * were swept with. archive shares 22 in v1 -- it reserves the slot for a
+ * future LZMA2 backend swap, not a higher zstd level. */
+int invfs_profile_zstd_level(int p)
+{
+    switch (p) {
+    case INVFS_PROFILE_FAST:   return 6;
+    case INVFS_PROFILE_DENSE:  return 22;
+    case INVFS_PROFILE_ARCHIVE: return 22;
+    default:                   return 19;
+    }
 }

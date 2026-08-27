@@ -67,12 +67,17 @@ typedef struct invfs_pack_def {
      * {in} {idx} {out} (member bytes), strip {in} {out} (recipe = original
      * minus member payloads, pack-owned format), rebuild
      * {recipe} {dir} {out} ({dir} holds member files named "<idx>", must
-     * reproduce the original bit-exact). */
+     * reproduce the original bit-exact). WP16b: a container pack may ALSO
+     * carry `map` ({in} {out} -> the FS-owned binary member map, MRMP);
+     * its presence puts INVFS_CODEC_CAP_SEEK on the entry and makes reads
+     * pack-free (the FS splices ranges from the recipe + member siblings
+     * itself). */
     int          is_container;
     const char  *enumerate;
     const char  *extract;
     const char  *strip;
     const char  *rebuild;
+    const char  *map;        /* WP16b: NULL when the pack has no map cmd */
 } invfs_pack_def;
 
 /* The pack record behind a registry entry, or NULL for builtin codecs.
@@ -101,12 +106,33 @@ enum {
     INVFS_PACK_CMD_ENUMERATE = 0,   /* {in} {out} -> member table file */
     INVFS_PACK_CMD_EXTRACT,         /* {in} {idx} {out} -> member bytes */
     INVFS_PACK_CMD_STRIP,           /* {in} {out} -> recipe */
-    INVFS_PACK_CMD_REBUILD          /* {recipe} {dir} {out} -> original */
+    INVFS_PACK_CMD_REBUILD,         /* {recipe} {dir} {out} -> original */
+    INVFS_PACK_CMD_MAP              /* WP16b: {in} {out} -> member map (MRMP) */
 };
 int invfs_codec_pack_cmd(const invfs_codec *c, int cmd,
                          const char *in, const char *idx,
                          const char *dir, const char *recipe,
                          const char *out);
+
+/* ---- WP16b: codec profiles (the 4-level effort scale) ----
+ *
+ * INVFS_PROFILE names a sweep-time effort level; it is ALSO the future
+ * heat scale: hot <-> fast, warm <-> balanced, cold <-> dense, frozen <->
+ * archive. v1 effects: the generic ZSTD sweep level (6/19/22/22 -- 19 is
+ * the historical default, so an unset env reproduces yesterday's bytes)
+ * and the INVFS_PROFILE env var published to pack subprocesses so their
+ * helpers can map effort. PPMd wrapper params stay fixed (o8/64M)
+ * regardless of the profile in v1. */
+enum {
+    INVFS_PROFILE_FAST = 0,
+    INVFS_PROFILE_BALANCED,     /* the default */
+    INVFS_PROFILE_DENSE,
+    INVFS_PROFILE_ARCHIVE       /* reserved: same level as dense in v1 (a
+                                 * future LZMA2 backend swap lands here) */
+};
+int         invfs_profile_parse(const char *s);   /* enum value, -1 unknown */
+const char *invfs_profile_name(int p);            /* canonical name */
+int         invfs_profile_zstd_level(int p);      /* generic sweep level */
 
 /* Text families — the batching sort key (WP10 §4). 1..10 are the extension
  * families; INVFS_TEXT_FAMILY_CONTENT is content-sniffed text with no known
