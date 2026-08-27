@@ -18,3 +18,7 @@ tools/7-Zip-zstd/
 downloads/
 __pycache__/
 *.pyc
+
+# generated docs bundle + playwright scratch
+INVARIFS-DOCS.md
+.playwright-mcp/
