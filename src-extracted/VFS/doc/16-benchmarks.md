@@ -1051,3 +1051,31 @@ btrfs обойдён; впереди только потоковые рефер�
 всего корпуса. TEXT logic 93.4 → 117.6 MiB (члены контейнеров в батчах).
 Acceptance: пересборка контейнера из забатченных членов bit-exact
 (tools/test-conbatch.sh).
+
+## B34. Скорость чтения: InvariantFS vs btrfs (2026-08-26)
+
+Silesia 202 MiB, образ WP14b-M1 (текст→PPMd-батчи, бинари→ZSTD/ZSTD+BCJ
+батчи); btrfs = loop-образ compress-force=zstd:15. Протокол
+tools/bench-read.sh: свежий mount + drop_caches, фаза random-first (честный
+cold), затем full-seq; два прогона (cold/warm). Медианы per-read:
+
+| фаза | btrfs | InvariantFS |
+|---|---|---|
+| rand-4K cold | 0.612 ms (p99 108 ms) | 0.104 ms (p99 444 ms) |
+| rand-1M cold | 0.238 ms | 0.492 ms |
+| full-seq cold | 672 MB/s | ~21 MB/s чистый / 104 MB/s с ARC-прогревом |
+| rand-4K warm | 0.023 ms | 0.101 ms |
+| rand-1M warm | 0.133 ms (6279 MB/s) | 0.390 ms (2332 MB/s) |
+| full-seq warm | 7194 MB/s | 1316 MB/s |
+
+Чтение результатов:
+- Медианное случайное чтение invfs **быстрее btrfs на cold** — ARC на inode
+  + page cache против btrfs-декомпрессии блоков (p99 108 ms у btrfs).
+- Хвост p99 444 ms у invfs = PPMd-декод 4-МБ батча — плата за ratio;
+  попадание в батч окупает все соседние чтения (батч покрывает много файлов).
+- full-seq cold ~21 MB/s = PPMd-такс (~8-10 MB/s декод) на текстовой массе;
+  бинарные ZSTD-батчи декодируются на скоростях ~GB/s и не лимитируют.
+- Тёплый упор (~5x к btrfs) — FUSE-оверхед, не кодеки: warm full-seq
+  1316 MB/s против 7194 MB/s ядерного btrfs.
+- Вывод для профиля: PPMd — для холодных данных (текстовые батчи), ZSTD —
+  для горячих (бинари, PATH-исполняемые) — ровно как решено в WP14a.
