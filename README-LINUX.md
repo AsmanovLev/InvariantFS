@@ -42,6 +42,7 @@ zstd/lz4/miniz/blake3/flacx, libfuse3 for the daemon.
 | `invf-sweep <img> [--dry-run]` | offline sweep driver |
 | `invf-stats <img>` | full statistics walk incl per-zone compression ratios |
 | `meta_probe <img> <name>` | developer probe (**mutates**: applies a test setattr) |
+| `meta_probe <img> --heat <name>` | WP19 read-only dump: storage class, per-segment AST (zone/algo), per-entry heat counters (rheat/wheat from the L2P pad) |
 
 ## FUSE daemon
 

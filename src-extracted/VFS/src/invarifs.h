@@ -277,10 +277,22 @@ typedef struct invfs_meta_ext_hdr {
    would otherwise have to drop at Close. */
 #define INVFS_INODE_REC_MAX INVFS_MAX_REC_LEN
 
-/* L2P journal entry (append-only) */
+/* L2P journal entry (append-only)
+ *
+ * pad[3] is the WP19 heat home (it rides inside the CRC region, so the
+ * counters are as durable as the mapping itself):
+ *   pad[0..1] = u16 LE read-heat  -- saturating, +1 per open-session that
+ *               touches the entry, >>= 1 per sweep run (exponential decay)
+ *   pad[2]    = u8 write-heat     -- saturating, born 1 on create, old+1
+ *               carried across a rewrite, -1 per sweep run
+ * Keyed by (inode,lba) by construction, so it survives pba remaps (dedupe
+ * re-keys preserve it). New entries (rewrites, transcodes) start cold:
+ * read-heat resets (seeded by INVFS_HEAT_INIT at create), write-heat
+ * accumulates across rewrites only. 0,0,0 on pre-WP19 volumes = cold --
+ * no migration, nothing asserts pad==0. */
 typedef struct {
     uint8_t  type;                  /* MAP/UNMAP/SWEEP/CHECKPOINT */
-    uint8_t  pad[3];
+    uint8_t  pad[3];                /* WP19 heat: rheat u16 LE + wheat u8 */
     uint64_t inode;                 /* logical file id */
     uint64_t lba;                   /* logical block address */
     uint64_t pba;                   /* physical block address */

@@ -1243,37 +1243,50 @@ uint16_t invfs_registry_generation(void)
     return g;
 }
 
-/* ---------------- WP16b: codec profiles ---------------- */
+/* ---------------- WP16b/WP19: codec profiles ---------------- */
 
-static const char *const profile_names[4] = {
-    "fast", "balanced", "dense", "archive"
+static const char *const profile_names[7] = {
+    "fast", "balanced", "dense", "archive", "faster", "fastest", "turbo"
 };
 
 int invfs_profile_parse(const char *s)
 {
     int i;
     if (!s) return -1;
-    for (i = 0; i < 4; i++)
+    for (i = 0; i < 7; i++)
         if (strcmp(s, profile_names[i]) == 0) return i;
     return -1;
 }
 
 const char *invfs_profile_name(int p)
 {
-    if (p < 0 || p > 3) return "balanced";
+    if (p < 0 || p > 6) return "balanced";
     return profile_names[p];
 }
 
 /* Generic-sweep ZSTD level per profile. balanced = 19 is the historical
  * default: an unset INVFS_PROFILE must reproduce the bytes existing volumes
- * were swept with. archive shares 22 in v1 -- it reserves the slot for a
- * future LZMA2 backend swap, not a higher zstd level. */
+ * were swept with. dense/archive share 19 since WP19 (22 is dropped);
+ * archive reserves the slot for a future LZMA2 backend swap, not a higher
+ * zstd level. Meaningless for fastest/turbo (no ZSTD involved) -- they get
+ * the default so an out-of-place call still answers sanely. */
 int invfs_profile_zstd_level(int p)
 {
     switch (p) {
     case INVFS_PROFILE_FAST:   return 6;
-    case INVFS_PROFILE_DENSE:  return 22;
-    case INVFS_PROFILE_ARCHIVE: return 22;
+    case INVFS_PROFILE_FASTER: return 3;
     default:                   return 19;
+    }
+}
+
+/* Admission-time codec substitution for the meta-profiles (WP19): the
+ * generic sweep and the RAW write path ask "which floor codec" here; the
+ * registry itself never learns the meta-profiles exist. */
+int invfs_profile_generic_algo(int p)
+{
+    switch (p) {
+    case INVFS_PROFILE_FASTEST: return INVFS_ALGO_LZ4;
+    case INVFS_PROFILE_TURBO:   return INVFS_ALGO_NONE;
+    default:                    return INVFS_ALGO_ZSTD;
     }
 }

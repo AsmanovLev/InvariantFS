@@ -114,25 +114,47 @@ int invfs_codec_pack_cmd(const invfs_codec *c, int cmd,
                          const char *dir, const char *recipe,
                          const char *out);
 
-/* ---- WP16b: codec profiles (the 4-level effort scale) ----
+/* ---- WP16b/WP19: codec profiles (the effort ladder) ----
  *
- * INVFS_PROFILE names a sweep-time effort level; it is ALSO the future
- * heat scale: hot <-> fast, warm <-> balanced, cold <-> dense, frozen <->
- * archive. v1 effects: the generic ZSTD sweep level (6/19/22/22 -- 19 is
- * the historical default, so an unset env reproduces yesterday's bytes)
- * and the INVFS_PROFILE env var published to pack subprocesses so their
- * helpers can map effort. PPMd wrapper params stay fixed (o8/64M)
- * regardless of the profile in v1. */
+ * INVFS_PROFILE names a sweep-time effort level; it doubles as the heat
+ * scale WP19 tiers against (hot <-> fast end, cold <-> dense end). The
+ * ladder (WP19, user-approved):
+ *
+ *   turbo    store bytes verbatim (segment-aligned); skips even LZ4 on the
+ *            RAW write path -- admission-time codec substitution
+ *   fastest  LZ4 everywhere (RAW writes already try LZ4 first)
+ *   faster   generic sweep ZSTD-3
+ *   fast     generic sweep ZSTD-6
+ *   balanced generic sweep ZSTD-19 (the historical default: an unset env
+ *            reproduces yesterday's bytes)
+ *   dense    generic sweep ZSTD-19 (22 dropped in WP19)
+ *   archive  generic sweep ZSTD-19 (reserved: a future LZMA2 backend swap
+ *            lands here)
+ *
+ * faster/fastest/turbo are meta-profiles: they act at admission (codec
+ * substitution in the generic sweep / RAW write path), the codec registry
+ * never sees them. The effective name is published to pack subprocesses
+ * via INVFS_PROFILE. PPMd wrapper params stay fixed (o8/64M) regardless. */
 enum {
     INVFS_PROFILE_FAST = 0,
     INVFS_PROFILE_BALANCED,     /* the default */
     INVFS_PROFILE_DENSE,
-    INVFS_PROFILE_ARCHIVE       /* reserved: same level as dense in v1 (a
-                                 * future LZMA2 backend swap lands here) */
+    INVFS_PROFILE_ARCHIVE,      /* reserved: same level as dense (a future
+                                 * LZMA2 backend swap lands here) */
+    INVFS_PROFILE_FASTER,
+    INVFS_PROFILE_FASTEST,
+    INVFS_PROFILE_TURBO
 };
 int         invfs_profile_parse(const char *s);   /* enum value, -1 unknown */
 const char *invfs_profile_name(int p);            /* canonical name */
-int         invfs_profile_zstd_level(int p);      /* generic sweep level */
+int         invfs_profile_zstd_level(int p);      /* generic sweep level;
+                                                   * meaningful only when
+                                                   * invfs_profile_generic_algo
+                                                   * says INVFS_ALGO_ZSTD */
+/* the codec the generic sweep/RAW write substitutes at admission:
+ * INVFS_ALGO_ZSTD for the levelled profiles, INVFS_ALGO_LZ4 for fastest,
+ * INVFS_ALGO_NONE for turbo (out-of-range -> ZSTD, the default shape) */
+int         invfs_profile_generic_algo(int p);
 
 /* Text families — the batching sort key (WP10 §4). 1..10 are the extension
  * families; INVFS_TEXT_FAMILY_CONTENT is content-sniffed text with no known

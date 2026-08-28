@@ -841,23 +841,43 @@ static void test_profiles(void)
     ok(invfs_profile_parse("dense") == INVFS_PROFILE_DENSE, "parse dense");
     ok(invfs_profile_parse("archive") == INVFS_PROFILE_ARCHIVE,
        "parse archive");
+    ok(invfs_profile_parse("faster") == INVFS_PROFILE_FASTER, "parse faster");
+    ok(invfs_profile_parse("fastest") == INVFS_PROFILE_FASTEST,
+       "parse fastest");
+    ok(invfs_profile_parse("turbo") == INVFS_PROFILE_TURBO, "parse turbo");
     ok(invfs_profile_parse(NULL) == -1, "NULL is not a profile");
     ok(invfs_profile_parse("") == -1, "empty is not a profile");
     ok(invfs_profile_parse("FAST") == -1, "profile names are exact/lowercase");
-    ok(invfs_profile_parse("turbo") == -1, "unknown name -> -1");
+    ok(invfs_profile_parse("ludicrous") == -1, "unknown name -> -1");
     ok(strcmp(invfs_profile_name(INVFS_PROFILE_FAST), "fast") == 0 &&
        strcmp(invfs_profile_name(INVFS_PROFILE_BALANCED), "balanced") == 0 &&
        strcmp(invfs_profile_name(INVFS_PROFILE_DENSE), "dense") == 0 &&
-       strcmp(invfs_profile_name(INVFS_PROFILE_ARCHIVE), "archive") == 0,
-       "name round-trip");
+       strcmp(invfs_profile_name(INVFS_PROFILE_ARCHIVE), "archive") == 0 &&
+       strcmp(invfs_profile_name(INVFS_PROFILE_FASTER), "faster") == 0 &&
+       strcmp(invfs_profile_name(INVFS_PROFILE_FASTEST), "fastest") == 0 &&
+       strcmp(invfs_profile_name(INVFS_PROFILE_TURBO), "turbo") == 0,
+       "name round-trip (7 rungs)");
     ok(invfs_profile_zstd_level(INVFS_PROFILE_FAST) == 6 &&
        invfs_profile_zstd_level(INVFS_PROFILE_BALANCED) == 19 &&
-       invfs_profile_zstd_level(INVFS_PROFILE_DENSE) == 22 &&
-       invfs_profile_zstd_level(INVFS_PROFILE_ARCHIVE) == 22,
-       "generic sweep levels: 6/19/22/22 (19 = the historical default)");
+       invfs_profile_zstd_level(INVFS_PROFILE_DENSE) == 19 &&
+       invfs_profile_zstd_level(INVFS_PROFILE_ARCHIVE) == 19 &&
+       invfs_profile_zstd_level(INVFS_PROFILE_FASTER) == 3,
+       "generic sweep levels: 6/19/19/19/3 (19 = the historical default, "
+       "22 dropped in WP19)");
     ok(invfs_profile_zstd_level(-1) == 19 &&
        invfs_profile_zstd_level(99) == 19,
        "out-of-range profile -> the default level");
+    ok(invfs_profile_generic_algo(INVFS_PROFILE_FAST) == INVFS_ALGO_ZSTD &&
+       invfs_profile_generic_algo(INVFS_PROFILE_BALANCED) == INVFS_ALGO_ZSTD &&
+       invfs_profile_generic_algo(INVFS_PROFILE_DENSE) == INVFS_ALGO_ZSTD &&
+       invfs_profile_generic_algo(INVFS_PROFILE_ARCHIVE) == INVFS_ALGO_ZSTD &&
+       invfs_profile_generic_algo(INVFS_PROFILE_FASTER) == INVFS_ALGO_ZSTD &&
+       invfs_profile_generic_algo(INVFS_PROFILE_FASTEST) == INVFS_ALGO_LZ4 &&
+       invfs_profile_generic_algo(INVFS_PROFILE_TURBO) == INVFS_ALGO_NONE,
+       "meta-profiles substitute the floor codec: fastest=LZ4, turbo=NONE");
+    ok(invfs_profile_generic_algo(-1) == INVFS_ALGO_ZSTD &&
+       invfs_profile_generic_algo(99) == INVFS_ALGO_ZSTD,
+       "out-of-range profile -> ZSTD (the default shape)");
 }
 
 int main(void)

@@ -168,10 +168,17 @@ int main(int argc, char **argv)
             fprintf(stderr, "cannot open volume %s (err %d)\n", img, err);
             return 1;
         }
-        if (prof_from_env)
-            fprintf(stderr, "profile: %s (generic zstd level %d)\n",
-                    invfs_profile_name((int)vol_get_profile(vol)),
-                    invfs_profile_zstd_level((int)vol_get_profile(vol)));
+        if (prof_from_env) {
+            int ga = invfs_profile_generic_algo((int)vol_get_profile(vol));
+            if (ga == INVFS_ALGO_ZSTD)
+                fprintf(stderr, "profile: %s (generic zstd level %d)\n",
+                        invfs_profile_name((int)vol_get_profile(vol)),
+                        invfs_profile_zstd_level((int)vol_get_profile(vol)));
+            else
+                fprintf(stderr, "profile: %s (generic %s)\n",
+                        invfs_profile_name((int)vol_get_profile(vol)),
+                        ga == INVFS_ALGO_LZ4 ? "lz4" : "verbatim");
+        }
     }
     /* WP10 memory policy: same size grammar as INVFS_ARC_BYTES in volume.c;
      * unset keeps the volume default. */
@@ -270,6 +277,12 @@ int main(int argc, char **argv)
 
     fprintf(stderr, "live entries: %d\n", count);
 
+    /* WP19: the once-per-RUN heat decay (rheat >>= 1, wheat -= 1), before
+     * the walk so the walk's write-hot skip and the promotion pass below
+     * both see post-decay values. */
+    if (!dry)
+        vol_heat_sweep_begin(vol);
+
     /* sweep candidates: regular files with actual payload */
     for (int i = 0; i < count; i++) {
         if (inodes[i] == 0 || sizes[i] == 0) { skipped++; continue; }
@@ -321,6 +334,16 @@ int main(int argc, char **argv)
     /* WP14b: print the aggregated container-part deferral lines collected
      * during the walk (one line per container instead of one per part) */
     part_agg_print();
+
+    /* WP19: extract read-hot PPMd batch members to standalone per-segment
+     * ZSTD (class GENERIC) -- between the walk and the dedupe pass, so the
+     * promoted segments can merge and the GC below reclaims any batch the
+     * promotions killed. The pass prints its own counts. */
+    if (!dry) {
+        if (vol_heat_promote(vol) < 0)
+            fprintf(stderr, "heat: promotion pass failed (sweep results "
+                            "are intact)\n");
+    }
 
     /* WP12(h): per-segment dedupe between the walk and the text-batch GC
      * (order: walk -> dedupe -> GC -> flush). The walk's transcodes are

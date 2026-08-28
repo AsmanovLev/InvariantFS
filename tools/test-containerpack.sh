@@ -582,9 +582,11 @@ cmp -s "$WORK/orig/member0.bin" "$WORK/out/prof.bin" \
     || { echo "FAIL: fast-profile sweep not bit-exact"; exit 1; }
 INVFS_PROFILE=dense $B/invf-sweep "$IMGP" > "$WORK/sweepp2.log" 2>&1 \
     || { cat "$WORK/sweepp2.log"; exit 1; }
-grep -q "profile: dense (generic zstd level 22)" "$WORK/sweepp2.log" \
+grep -q "profile: dense (generic zstd level 19)" "$WORK/sweepp2.log" \
     || { echo "FAIL: no dense-profile log line"; cat "$WORK/sweepp2.log"; exit 1; }
-INVFS_PROFILE=turbo $B/invf-sweep "$IMGP" > "$WORK/sweepp3.log" 2>&1 \
+# WP19: turbo is a real profile now (verbatim store), so the rejection leg
+# uses a genuinely unknown name
+INVFS_PROFILE=ludicrous $B/invf-sweep "$IMGP" > "$WORK/sweepp3.log" 2>&1 \
     || { cat "$WORK/sweepp3.log"; exit 1; }
 grep -q "is not a profile; using balanced" "$WORK/sweepp3.log" \
     || { echo "FAIL: invalid profile not rejected to the default"; cat "$WORK/sweepp3.log"; exit 1; }
@@ -619,7 +621,7 @@ INVFS_CODECPACKS=$WORK/packs-prof INVFS_PROFILE=dense $B/invf-sweep "$IMGP" \
     > "$WORK/sweepp4.log" 2>&1 || { cat "$WORK/sweepp4.log"; exit 1; }
 [ "$(cat "$WORK/profseen" 2>/dev/null)" = "dense" ] \
     || { echo "FAIL: pack exec saw INVFS_PROFILE='$(cat "$WORK/profseen" 2>/dev/null)', want dense"; exit 1; }
-echo "profiles: fast=6 / dense=22 logged, invalid -> balanced, default silent"
+echo "profiles: fast=6 / dense=19 logged, invalid -> balanced, default silent"
 echo "profile env reaches pack execs (pack saw INVFS_PROFILE=dense)"
 
 echo "== admission leg: INVFS_DEC_MEM_LIMIT=64K =="

@@ -290,6 +290,31 @@ int vol_tz_gc(invfs_volume *v);
  * Returns the number of merged segments, <0 on error. */
 int vol_sweep_dedupe(invfs_volume *v);
 
+/* ---- WP19: heat counters + adaptive tiering ----
+ * Heat lives in invfs_l2p_entry.pad (see invarifs.h): u16 LE read-heat
+ * (+1 per open-session touch of an (inode,lba) via the vol_read_* paths;
+ * seeded by INVFS_HEAT_INIT on create) and u8 write-heat (born 1, old+1
+ * carried across rewrites). Persisted through the journal (flush copies
+ * whole entries; replay likewise), cold on pre-WP19 volumes and after an
+ * fsck -f rebuild.
+ *
+ * vol_heat_sweep_begin: the once-per-RUN decay pass (rheat >>= 1,
+ * wheat -= 1). Drivers call it before the sweep walk; vol_sweep_pending
+ * runs it internally.
+ *
+ * vol_heat_promote: extract read-hot PPMd batch members (rheat >= 8 after
+ * the decay -- a single burst promotes iff it survives one halving) to
+ * standalone per-segment ZSTD, stamped GENERIC{ZSTD}; the batch keeps a
+ * hole vol_tz_gc reclaims as today. Never promotes BATCHED_BIN members,
+ * dedup-shared members, or past the budget (min(64, 10% of live TEXT
+ * members)). Runs after the walk, before the dedupe pass; the caller's
+ * vol_flush persists. Returns promotions, <0 on error. */
+void vol_heat_sweep_begin(invfs_volume *v);
+int  vol_heat_promote(invfs_volume *v);
+/* heat decode helpers for tools (meta_probe) */
+uint16_t vol_heat_r(const invfs_l2p_entry *e);
+uint8_t  vol_heat_w(const invfs_l2p_entry *e);
+
 /* Storage-class flag (invfs.class xattr, see invarifs.h).
  * vol_get_class: 0 = found, 1 = absent. stamp writes only on change. */
 int vol_get_class(invfs_volume *v, uint64_t inode_id,
