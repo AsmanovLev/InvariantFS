@@ -1,7 +1,7 @@
 /*
  * invf-sweep.c — offline sweep driver for Linux
  *
- *   invf-sweep <image> [--dry-run]
+ *   invf-sweep <image> [--dry-run|--seal|--unseal]
  *
  * Walks live records (same CRC-validated scan as invf-ls), feeds every
  * regular file with segments to vol_sweep_one() — the unified per-inode
@@ -11,6 +11,10 @@
  * are sealed into shared PPMd batches by vol_tz_flush() at the end of the
  * run, after the dead-batch GC (vol_tz_gc). The author's sweep.c CLI is
  * Windows-only.
+ *
+ * WP20: --seal re-seals the shadow-zone XOR parity AFTER the sweep is fully
+ * flushed (idempotent check-and-update, see vol_seal); --unseal frees every
+ * parity block and removes the owners, without sweeping.
  */
 #define _CRT_SECURE_NO_WARNINGS
 
@@ -137,7 +141,7 @@ int main(int argc, char **argv)
 {
     invfs_volume *vol;
     const invfs_superblock *sb;
-    int err, dry = 0;
+    int err, dry = 0, seal = 0, unseal = 0;
     uint64_t bm, area_start, area_end, p;
     int count = 0, cap = 0, swept = 0, skipped = 0, failed = 0;
     char (*names)[256] = NULL;
@@ -147,12 +151,19 @@ int main(int argc, char **argv)
     sw_bucket **tab = NULL;
     size_t tmask = 0, tcount = 0;
 
-    if (argc < 2 || argc > 3) {
-        fprintf(stderr, "usage: %s <image> [--dry-run]\n", argv[0]);
+    if (argc < 2 || argc > 3 ||
+        (argc == 3 && strcmp(argv[2], "--dry-run") != 0 &&
+         strcmp(argv[2], "--seal") != 0 && strcmp(argv[2], "--unseal") != 0)) {
+        fprintf(stderr, "usage: %s <image> [--dry-run|--seal|--unseal]\n",
+                argv[0]);
         return 2;
     }
     img = argv[1];
-    dry = (argc == 3 && strcmp(argv[2], "--dry-run") == 0);
+    if (argc == 3) {
+        dry    = strcmp(argv[2], "--dry-run") == 0;
+        seal   = strcmp(argv[2], "--seal") == 0;
+        unseal = strcmp(argv[2], "--unseal") == 0;
+    }
 
     /* per-file lines go to stdout, the summary to stderr: unbuffered, or a
      * redirected log tears a line at every 4 KB flush boundary */
@@ -210,6 +221,24 @@ int main(int argc, char **argv)
         }
     }
     sb = vol_sb(vol);
+
+    /* WP20 --unseal: free all parity blocks and remove the owners; no sweep
+     * walk runs (there is nothing to recompress, only seal state to drop). */
+    if (unseal) {
+        invfs_seal_report rep;
+        if (vol_seal(vol, 1, &rep) != 0) {
+            fprintf(stderr, "unseal failed\n");
+            vol_close(vol);
+            return 1;
+        }
+        printf("[unseal] %llu parity blocks freed, seal removed\n",
+               (unsigned long long)rep.freed);
+        if (vol_flush(vol) != 0)
+            fprintf(stderr, "warning: final flush failed\n");
+        vol_close(vol);
+        return 0;
+    }
+
     bm = (sb->total_blocks / 8 + INVFS_BLOCK_SIZE - 1) / INVFS_BLOCK_SIZE;
     area_start = (sb->metadata_zone_start + bm + INVFS_JOURNAL_BLOCKS)
                  * INVFS_BLOCK_SIZE;
@@ -390,6 +419,35 @@ int main(int argc, char **argv)
         if (vol_flush(vol) != 0)
             fprintf(stderr, "warning: final flush failed\n");
     }
+
+    /* WP20 --seal: (re)seal the shadow-zone parity AFTER the sweep is fully
+     * flushed -- the parity covers the post-sweep state. Idempotent
+     * check-and-update: an unchanged volume reports 0 stripes updated. */
+    if (seal) {
+        invfs_seal_report rep;
+        if (vol_seal(vol, 0, &rep) != 0) {
+            fprintf(stderr, "seal failed\n");
+            vol_close(vol);
+            return 1;
+        }
+        printf("[seal] %llu stripes, %llu parity blocks, overhead %.2f%% of "
+               "occupied shadow; %llu stripes updated, %llu unchanged",
+               (unsigned long long)rep.stripes,
+               (unsigned long long)rep.parity_blocks, rep.overhead_pct,
+               (unsigned long long)rep.updated,
+               (unsigned long long)rep.unchanged);
+        if (rep.added || rep.freed)
+            printf(" (%llu added, %llu stale freed)",
+                   (unsigned long long)rep.added,
+                   (unsigned long long)rep.freed);
+        if (rep.unprotected)
+            printf(", %llu unprotected (ENOSPC)",
+                   (unsigned long long)rep.unprotected);
+        printf("\n");
+        if (vol_flush(vol) != 0)
+            fprintf(stderr, "warning: final flush failed\n");
+    }
+
     vol_close(vol);
     return failed ? 1 : 0;
 }

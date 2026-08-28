@@ -321,3 +321,37 @@ int vol_get_class(invfs_volume *v, uint64_t inode_id,
                   uint8_t *cls, uint8_t *algo, uint16_t *gen);
 int vol_stamp_class(invfs_volume *v, uint64_t inode_id,
                     uint8_t cls, uint8_t algo, uint16_t gen);
+
+/* ---- WP20: --seal shadow-zone XOR parity ----
+ * Stripes of 32 blocks over the shadow zone (RAW excluded); one parity
+ * block per stripe holding the XOR of the stripe's occupied blocks.
+ * Parity blocks are owned by hidden internal inodes "\x01parity",
+ * "\x01parity1", ... (65535 stripes per owner record: AST num_blocks is
+ * u16) via ordinary L2P maps, so fsck sees them as live. Sealing is
+ * check-and-update: stripes are recomputed in memory and rewritten only
+ * when the parity changed -- never delete-then-regenerate. */
+typedef struct {
+    uint64_t stripes;        /* stripes with >=1 covered block */
+    uint64_t parity_blocks;  /* live parity blocks after the run */
+    uint64_t updated;        /* parity blocks (re)written this run */
+    uint64_t unchanged;      /* parity already correct (idempotent no-op) */
+    uint64_t added;          /* stripes that gained parity this run */
+    uint64_t freed;          /* parity blocks freed (empty stripes/unseal) */
+    uint64_t unprotected;    /* stripes that wanted parity but got none */
+    double   overhead_pct;   /* parity_blocks / covered blocks * 100 */
+} invfs_seal_report;
+
+/* unseal != 0: free every parity block and remove the owners.
+ * 0 = ok, -1 = error (incl. read-only volume: sealing mutates). */
+int vol_seal(invfs_volume *v, int unseal, invfs_seal_report *rep);
+
+/* verify --deep leg: recompute every sealed stripe against its stored
+ * parity block. All four counters are 0 on an unsealed volume. */
+typedef struct {
+    uint64_t sealed;       /* sealed stripes re-verified */
+    uint64_t mismatched;   /* stored parity != recomputed (drift/corruption) */
+    uint64_t missing;      /* occupied stripes without parity */
+    uint64_t extra;        /* parity blocks over stripes with no content */
+} invfs_seal_verify;
+
+int vol_seal_verify(invfs_volume *v, invfs_seal_verify *out);

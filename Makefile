@@ -84,6 +84,7 @@ e2e: all
 	bash tools/test-textzone.sh
 	bash tools/test-dedupe.sh
 	bash tools/test-heat.sh
+	bash tools/test-seal.sh
 	bash tools/test-jxl.sh
 	bash tools/test-rawimg.sh
 	bash tools/test-binbatch.sh

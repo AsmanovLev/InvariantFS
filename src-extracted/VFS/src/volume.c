@@ -291,6 +291,14 @@ static const uint64_t JOURNAL_BLOCKS = INVFS_JOURNAL_BLOCKS;
 static void l2p_remove(invfs_volume *v, uint64_t inode, uint64_t lba);
 static int vol_write_sb(invfs_volume *v);
 
+/* WP20 (the seal parity machinery lives with the write-path WP code far
+ * below; the read paths above it need these two): */
+static int seal_recover_segment(invfs_volume *v, uint64_t pba, uint64_t plen,
+                                uint32_t *csize_out, uint8_t **blob_out);
+static int seg_read_checked(invfs_volume *v, uint64_t pba, uint64_t plen,
+                            uint32_t min_csize, uint32_t *csize_out,
+                            uint8_t **blob_out);
+
 /* WP19 heat thresholds + pad codec (the full rules live with the heat
  * machinery after the L2P helpers; these are needed by vol_open already):
  * promotion needs rheat >= HOT *after* the run's decay, so a single read
@@ -3396,6 +3404,64 @@ static int tz_batch_algo(uint32_t algo)
            algo == INVFS_ALGO_ZSTD_BCJ;
 }
 
+/* ---- WP20: framed-segment read with seal recovery ------------------------
+ * Every shadow-zone segment read funnels through here: [4B csize LE]
+ * [4B crc32c(payload)] at pba, payload right behind the header, plen = the
+ * segment's physical block count from the L2P (0 = unknown: bounds check
+ * skipped, the historical behaviour). min_csize is the smallest legal
+ * payload (a batch's [usize][props] head needs 6, a plain segment 1, an
+ * empty recipe 0). A segment whose csize is out of bounds is corrupt by
+ * construction (writers always allocate ceil((csize+8)/4096) blocks), so
+ * the bounds check costs the happy path nothing.
+ *
+ * A shadow-zone segment that fails the bounds/CRC check gets ONE recovery
+ * attempt from the WP20 seal parity (seal_recover_segment) before the
+ * original failure propagates; the recovered payload is verified against
+ * the segment's own framed CRC, so a failed parity reconstruction can
+ * never surface as good bytes. RAW-zone segments are not sealed and fail
+ * straight away. 0 = ok (*blob_out malloc'd, *csize_out bytes), -1 =
+ * unreadable (parity could not help or absent). */
+static int seg_read_checked(invfs_volume *v, uint64_t pba, uint64_t plen,
+                            uint32_t min_csize, uint32_t *csize_out,
+                            uint8_t **blob_out)
+{
+    uint8_t hdrb[8];
+    uint32_t csize;
+    uint8_t *blob = NULL;
+    int bad = 0;
+
+    if (io_seek(&v->io, pba * INVFS_BLOCK_SIZE) != 0 ||
+        io_read(&v->io, hdrb, 8) != 0)
+        return -1;
+    memcpy(&csize, hdrb, 4);
+    if (csize < min_csize ||
+        (plen && (uint64_t)csize + 8 > plen * INVFS_BLOCK_SIZE)) {
+        bad = 1;            /* header out of bounds: never a legit segment */
+    } else {
+        uint32_t crc_hdr;
+        memcpy(&crc_hdr, hdrb + 4, 4);
+        blob = (uint8_t *)malloc(csize ? (size_t)csize : 1);
+        if (!blob) return -1;
+        if (csize &&
+            (io_seek(&v->io, pba * INVFS_BLOCK_SIZE + 8) != 0 ||
+             io_read(&v->io, blob, csize) != 0)) {
+            bad = 1;
+        } else if (crc_hdr != 0 && invfs_crc32c(blob, csize) != crc_hdr) {
+            bad = 1;        /* deep protection: payload CRC32C mismatch */
+        }
+    }
+    if (bad) {
+        free(blob);
+        blob = NULL;
+        if (seal_recover_segment(v, pba, plen, &csize, &blob) != 0)
+            return -1;      /* original error stands */
+        if (csize < min_csize) { free(blob); return -1; }
+    }
+    *csize_out = csize;
+    *blob_out = blob;
+    return 0;
+}
+
 /* WP10 §5 + WP14a: read a slice of a shared batch. A member AST entry
  * (zone=TEXT) names its batch by block_id: the member's L2P dup entry maps
  * it to the batch pba, and block_offset is the slice's offset in the
@@ -3436,30 +3502,16 @@ static int vol_read_text_slice(invfs_volume *v, uint64_t inode_id,
     }
     heat_touch_read(v, inode_id, e->block_id);   /* WP19: member dup heat */
     if (!arc_get(v->arc, pba | TZ_ARC_TAG, &batch, &batch_len)) {
-        uint8_t hdrb[8];
-        uint32_t csize, crc_hdr, usize;
+        uint32_t csize, usize;
         uint8_t *blob;
 
-        if (io_seek(&v->io, pba * INVFS_BLOCK_SIZE) != 0 ||
-            io_read(&v->io, hdrb, 8) != 0)
-            return -1;
-        memcpy(&csize, hdrb, 4);
-        memcpy(&crc_hdr, hdrb + 4, 4);
-        /* payload holds at least [4B usize][2B props] and fits the segment */
-        if (csize < 4 + 2 ||
-            (plen && (uint64_t)csize + 8 > plen * INVFS_BLOCK_SIZE))
-            return -1;
-        blob = (uint8_t *)malloc(csize);
-        if (!blob) return -1;
-        if (io_seek(&v->io, pba * INVFS_BLOCK_SIZE + 8) != 0 ||
-            io_read(&v->io, blob, csize) != 0) {
-            free(blob); return -1;
-        }
-        /* deep protection: verify segment CRC32C before decode */
-        if (crc_hdr != 0 && invfs_crc32c(blob, csize) != crc_hdr) {
+        /* framed read, CRC-verified inside (payload holds at least
+         * [4B usize][2B props]); on failure the WP20 seal parity gets one
+         * recovery attempt before the error propagates */
+        if (seg_read_checked(v, pba, plen, 4 + 2, &csize, &blob) != 0) {
             fprintf(stderr, "segment CRC mismatch: text batch pba %llu\n",
                     (unsigned long long)pba);
-            free(blob); return -1;
+            return -1;
         }
         memcpy(&usize, blob, 4);
         if (usize == 0 || usize > (64u << 20)) {   /* batches are <= 4 MB */
@@ -3590,7 +3642,7 @@ static int vol_read_inode(invfs_volume *v, uint64_t inode_id, unsigned depth,
             for (i = 0; i < ast_h.num_blocks; i++) {
                 const invfs_ast_block_entry *e = &ents[i];
                 uint64_t pba = 0, phys_len = 0;
-                uint32_t hdr, crc_hdr;
+                uint32_t hdr;
                 uint8_t *blob;
                 size_t dst_off = (size_t)e->file_offset;
 
@@ -3613,44 +3665,29 @@ static int vol_read_inode(invfs_volume *v, uint64_t inode_id, unsigned depth,
                     free(data); free(rec); return -1;
                 }
                 heat_touch_read(v, inode_id, e->block_id);   /* WP19 */
-                /* read 8-byte header: [4B csize][4B crc32c(data)] */
-                {
-                    uint8_t hdrb[8];
-                    if (io_seek(&v->io, pba * INVFS_BLOCK_SIZE) != 0 ||
-                        io_read(&v->io, hdrb, 8) != 0) {
-                        free(data); free(rec); return -1;
-                    }
-                    memcpy(&hdr, hdrb, 4);
-                    memcpy(&crc_hdr, hdrb + 4, 4);
+                /* framed segment [4B csize][4B crc32c][payload]: CRC-verified
+                 * read; a shadow-zone failure gets one WP20 seal-parity
+                 * recovery attempt inside before the error propagates */
+                if (seg_read_checked(v, pba, phys_len, 1, &hdr, &blob) != 0) {
+                    fprintf(stderr, "segment CRC mismatch: inode %llu seg %u (corrupt)\n",
+                            (unsigned long long)inode_id, e->block_id);
+                    free(data); free(rec); return -1;
                 }
                 if (e->algo == INVFS_ALGO_NONE) {
                     if (hdr != e->length) {
                         fprintf(stderr, "raw segment header corrupt (csize %u, want %llu)\n",
                                 hdr, (unsigned long long)e->length);
-                        free(data); free(rec); return -1;
+                        free(blob); free(data); free(rec); return -1;
                     }
                 } else if (e->algo == INVFS_ALGO_LZ4 || e->algo == INVFS_ALGO_ZSTD) {
                     /* compressed-in-place segments: csize < usize is required */
                     if (hdr >= e->length || hdr == 0) {
                         fprintf(stderr, "lz4 segment header corrupt (csize %u)\n", hdr);
-                        free(data); free(rec); return -1;
+                        free(blob); free(data); free(rec); return -1;
                     }
                 }
                 /* whole-file blobs (JXL/APE/FLACR) keep csize unrelated to the
                    logical size: the transcoder may be smaller OR larger */
-                blob = (uint8_t *)malloc(hdr);
-                if (!blob) { free(data); free(rec); return -1; }
-                if (io_seek(&v->io, pba * INVFS_BLOCK_SIZE + 8) != 0 ||
-                    io_read(&v->io, blob, hdr) != 0) {
-                    free(blob); free(data); free(rec); return -1;
-                }
-                /* deep protection: verify segment CRC32C before decode */
-                if (crc_hdr != 0 && invfs_crc32c(blob, hdr) != crc_hdr) {
-                    fprintf(stderr, "segment CRC mismatch: inode %llu seg %u (corrupt)\n",
-                            (unsigned long long)inode_id, e->block_id);
-                    free(blob); free(data); free(rec); return -1;
-                }
-
                 if (e->algo == INVFS_ALGO_LZ4) {
                     int got = LZ4_decompress_safe((const char *)blob,
                                                   (char *)(data + dst_off),
@@ -6303,7 +6340,7 @@ int vol_read_range(invfs_volume *v, uint64_t inode_id, uint64_t offset,
         /* decode whole segment */
         {
             uint64_t pba = 0, plen = 0;
-            uint32_t hdr, crc_hdr;
+            uint32_t hdr;
             uint8_t *blob;
             if (e->length > sizeof tmp) {
                 segheap = (uint8_t *)malloc((size_t)e->length);
@@ -6314,22 +6351,13 @@ int vol_read_range(invfs_volume *v, uint64_t inode_id, uint64_t offset,
                 free(segheap); free(rec); return -1;
             }
             heat_touch_read(v, inode_id, e->block_id);   /* WP19 */
-            {
-                uint8_t hdrb[8];
-                if (io_seek(&v->io, pba * INVFS_BLOCK_SIZE) != 0 ||
-                    io_read(&v->io, hdrb, 8) != 0) { free(segheap); free(rec); return -1; }
-                memcpy(&hdr, hdrb, 4);
-                memcpy(&crc_hdr, hdrb + 4, 4);
-            }
-            blob = (uint8_t *)malloc(hdr);
-            if (!blob) { free(segheap); free(rec); return -1; }
-            if (io_seek(&v->io, pba * INVFS_BLOCK_SIZE + 8) != 0 ||
-                io_read(&v->io, blob, hdr) != 0) { free(blob); free(segheap); free(rec); return -1; }
-            /* deep protection: verify segment CRC32C */
-            if (crc_hdr != 0 && invfs_crc32c(blob, hdr) != crc_hdr) {
+            /* framed segment read, CRC-verified inside; a shadow-zone
+             * failure gets one WP20 seal-parity recovery attempt before
+             * the error propagates */
+            if (seg_read_checked(v, pba, plen, 1, &hdr, &blob) != 0) {
                 fprintf(stderr, "segment CRC mismatch: inode %llu seg %u\n",
                         (unsigned long long)inode_id, e->block_id);
-                free(blob); free(segheap); free(rec); return -1;
+                free(segheap); free(rec); return -1;
             }
 
             if (e->algo == INVFS_ALGO_LZ4) {
@@ -7432,8 +7460,10 @@ static void tz_owner_free(tz_owner *o)
  * The owner keeps its inode id so the owner L2P maps stay valid. Entry
  * file_offsets are rebuilt as the cumulative concatenation of the given
  * entries (so the owner itself stays readable as the concatenation of its
- * live batches, and GC repacks the same way). */
-static int tz_owner_write(invfs_volume *v, uint64_t owner, tz_owner *o)
+ * live batches, and GC repacks the same way). The name is a parameter so
+ * the WP20 seal owners ("\x01parity*") reuse the exact same pattern. */
+static int tz_owner_write(invfs_volume *v, uint64_t owner, const char *name,
+                          tz_owner *o)
 {
     size_t rec_len, total, off;
     uint8_t *combo;
@@ -7466,7 +7496,7 @@ static int tz_owner_write(invfs_volume *v, uint64_t owner, tz_owner *o)
     rh->inode_id = owner;
     rh->file_size = run;
     rh->ctime = o->ctime;
-    rec_set_name(rh, TZ_OWNER_NAME);
+    rec_set_name(rh, name);
     memcpy(combo + sizeof(invfs_inode_rec), &ah, sizeof ah);
     if (o->n)
         memcpy(combo + sizeof(invfs_inode_rec) + sizeof(ah), o->ents,
@@ -7484,8 +7514,8 @@ static int tz_owner_write(invfs_volume *v, uint64_t owner, tz_owner *o)
         tomb.rec_len = (uint32_t)sizeof(tomb);
         tomb.inode_id = owner;
         tomb.file_size = o->pos;        /* v2 position kill */
-        tomb.name_len = (uint32_t)(sizeof(TZ_OWNER_NAME) - 1);
-        memcpy(tomb.name, TZ_OWNER_NAME, sizeof(TZ_OWNER_NAME) - 1);
+        tomb.name_len = (uint32_t)strlen(name);
+        memcpy(tomb.name, name, strlen(name));
         crc_tomb = invfs_crc32c((uint8_t *)&tomb, sizeof tomb);
         memcpy(combo + off, &tomb, sizeof tomb);
         memcpy(combo + off + sizeof tomb, &crc_tomb, 4);
@@ -7498,8 +7528,7 @@ static int tz_owner_write(invfs_volume *v, uint64_t owner, tz_owner *o)
         io_write(&v->io, combo, total) != 0) { free(combo); return -1; }
     v->inode_area_pos = new_pos + total;
     free(combo);
-    idx_put(v, TZ_OWNER_NAME, sizeof(TZ_OWNER_NAME) - 1, owner, new_pos,
-            run, o->ctime);
+    idx_put(v, name, strlen(name), owner, new_pos, run, o->ctime);
     idx_put_id(v, owner, new_pos);
     o->pos = new_pos;
     return 0;
@@ -7972,7 +8001,7 @@ static int tz_seal(tz_ctx *c, const tz_candidate *cands,
         e->block_offset = 0;
         c->owner.n++;
     }
-    if (tz_owner_write(v, c->owner_id, &c->owner) != 0) {
+    if (tz_owner_write(v, c->owner_id, TZ_OWNER_NAME, &c->owner) != 0) {
         free(enc); free(ver); free(seg);
         return -1;   /* segment + map landed; no record names them: orphan,
                         fsck/GC territory -- members stay RAW, nothing torn */
@@ -8352,7 +8381,7 @@ int vol_tz_gc(invfs_volume *v)
         }
     }
     o.n = (uint32_t)w;
-    if (freed > 0 && tz_owner_write(v, owner, &o) != 0) rc = -1;
+    if (freed > 0 && tz_owner_write(v, owner, TZ_OWNER_NAME, &o) != 0) rc = -1;
 out:
     free(live);
     tz_owner_free(&o);
@@ -8487,6 +8516,16 @@ int vol_sweep_dedupe(invfs_volume *v)
                 pos += (uint64_t)h.rec_len + 4;
                 continue;
             }
+        }
+        /* internal owner records ("\x01tzb", the WP20 "\x01parityN" seal
+         * owners): tzb entries are zone==TEXT and skipped below anyway, and
+         * parity blocks are NOT framed segments -- hashing them would merge
+         * stripes with identical content onto one shared parity block,
+         * which a later re-seal write would corrupt for the other sharers */
+        if (h.name_len && (uint8_t)h.name[0] == 0x01) {
+            free(rec);
+            pos += (uint64_t)h.rec_len + 4;
+            continue;
         }
         base = sizeof(invfs_inode_rec);
         if (h.rec_len < base + sizeof(ah)) { free(rec); break; }
@@ -9353,7 +9392,742 @@ int vol_hardlink(invfs_volume *v, const char *from, const char *to)
     return 0;
 }
 
-/* count free blocks from in-memory bitmap */
+/* ==================== WP20: --seal shadow-zone XOR parity ==================
+ *
+ * Optional parity over the shadow zone (the RAW zone is excluded: it is the
+ * hot, transient staging area; everything valuable is swept into Shadow).
+ * Stripe s covers the shadow-zone-relative block range
+ * [s*SEAL_STRIPE_K, (s+1)*SEAL_STRIPE_K); its parity block holds the XOR of
+ * the stripe's OCCUPIED blocks at seal time (absent blocks read as zero).
+ *
+ * Ownership mirrors the WP10 text-batch owner: parity blocks are ordinary
+ * shadow-zone allocations mapped through the L2P of hidden internal inodes
+ * "\x01parity", "\x01parity1", ... (0x01-prefixed names are filtered from
+ * listings, swept never, and skipped by dedupe). One owner record (shard)
+ * covers SEAL_SHARD stripes -- ast_h.num_blocks is u16 -- and maps
+ * block_id = shard-local stripe number to the parity pba, which is what
+ * keeps parity blocks live in fsck and what makes the seal survive
+ * close/reopen. Shard owners exist contiguously from shard 0 (the state
+ * probe stops at the first absent name).
+ *
+ * Parity blocks are themselves occupied shadow blocks but are NOT covered
+ * by the XOR (excluded via the owner's L2P map set, at seal and recovery
+ * alike). Covering them would make a re-seal's parity write invalidate an
+ * earlier-computed stripe holding that block -- an ordering hazard with no
+ * fix inside one pass -- and a corrupt parity block would then poison
+ * recovery of its neighbours. RAID's rule: parity is the tool, not the
+ * cargo. A corrupt parity block is detected by verify --deep (recompute
+ * vs stored) and rewritten by the next re-seal.
+ *
+ * Re-seal is check-and-update, never delete-then-regenerate: each stripe's
+ * parity is recomputed in memory and written back ONLY when it changed
+ * (membership churn since the last seal is just recomputed -- the mapping
+ * is positional, there is no persistent table beyond the owner AST/L2P).
+ * A stripe whose content all went away loses its parity block; a stripe
+ * that gained content gains one.
+ *
+ * Crash ordering follows the tz_seal rules: new maps are flushed durable
+ * (step: vol_flush) BEFORE any owner record names them; removals rewrite
+ * the owner record FIRST and only then unmap+free. A crash anywhere leaves
+ * at worst orphan parity blocks (fsck reclaims them as usual), never a
+ * live record pointing at a free block.
+ *
+ * Read-path recovery (seg_read_checked hooks every framed-segment read):
+ * on a CRC/bounds failure of a shadow-zone segment, the stripe syndrome
+ * (stored parity XOR the stripe's current occupied blocks) is the corrupt
+ * block's XOR delta when exactly one block of the stripe went bad and
+ * membership is unchanged. Candidates are spliced into a fresh image of
+ * the segment and the segment's OWN framed CRC32C arbitrates -- a wrong
+ * reconstruction can never pass it, so drift or double damage degrades to
+ * the original EIO, never to garbage. On success the restored block is
+ * written back (self-heal) and logged. */
+
+#define SEAL_STRIPE_K   32u      /* data blocks per parity stripe */
+#define SEAL_SHARD      65535u   /* stripes per owner record (u16 num_blocks) */
+
+static void seal_shard_name(uint64_t shard, char *out, size_t cap)
+{
+    if (shard == 0)
+        snprintf(out, cap, "\x01parity");
+    else
+        snprintf(out, cap, "\x01parity%llu", (unsigned long long)shard);
+}
+
+/* The seal state a read/verify path needs: the shard owner ids and the set
+ * of blocks they map (the XOR exclusion set). Read-only to load. */
+typedef struct {
+    uint64_t *shard_id;      /* owner inode id per shard */
+    size_t   nshards;
+    uint8_t *is_par;         /* bitmap over total_blocks: 1 = parity block */
+} seal_view;
+
+static void seal_view_free(seal_view *sv)
+{
+    free(sv->shard_id);
+    free(sv->is_par);
+    memset(sv, 0, sizeof *sv);
+}
+
+static int seal_view_load(invfs_volume *v, seal_view *sv)
+{
+    uint64_t shard;
+    size_t i;
+
+    memset(sv, 0, sizeof *sv);
+    sv->is_par = (uint8_t *)calloc((size_t)(v->sb.total_blocks + 7) / 8, 1);
+    if (!sv->is_par) return -1;
+    for (shard = 0;; shard++) {
+        char nm[32];
+        uint64_t id;
+        uint64_t *ns;
+        seal_shard_name(shard, nm, sizeof nm);
+        id = vol_find(v, nm);
+        if (!id) break;      /* shards exist contiguously from 0 */
+        ns = (uint64_t *)realloc(sv->shard_id,
+                                 (shard + 1) * sizeof *sv->shard_id);
+        if (!ns) { seal_view_free(sv); return -1; }
+        sv->shard_id = ns;
+        sv->shard_id[shard] = id;
+    }
+    sv->nshards = (size_t)shard;
+    for (i = 0; i < v->l2p_count; i++) {
+        const invfs_l2p_entry *e = &v->l2p[i];
+        uint64_t b, bend;
+        if (e->type != INVFS_JRN_MAP) continue;
+        for (shard = 0; (size_t)shard < sv->nshards; shard++)
+            if (e->inode == sv->shard_id[shard]) break;
+        if ((size_t)shard == sv->nshards) continue;
+        if (e->pba >= v->sb.total_blocks) continue;
+        bend = e->pba + (e->length ? e->length : 1);
+        if (bend > v->sb.total_blocks) bend = v->sb.total_blocks;
+        for (b = e->pba; b < bend; b++)
+            bit_set(sv->is_par, b);
+    }
+    return 0;
+}
+
+static void seal_xor_block(uint8_t *acc, const uint8_t *blk)
+{
+    uint64_t *a = (uint64_t *)acc;
+    const uint64_t *b = (const uint64_t *)blk;
+    size_t i;
+    for (i = 0; i < INVFS_BLOCK_SIZE / sizeof(uint64_t); i++)
+        a[i] ^= b[i];
+}
+
+/* XOR of the stripe's occupied non-parity blocks (absent = zero) into out
+ * (out is the accumulator: callers memset or read the parity block into it
+ * first). Returns 0, -1 on a device-level read failure. */
+static int seal_stripe_xor(invfs_volume *v, const seal_view *sv,
+                           uint64_t stripe, uint8_t *acc)
+{
+    uint64_t base = v->sb.shadow_zone_start + stripe * SEAL_STRIPE_K;
+    uint64_t end = base + SEAL_STRIPE_K;
+    uint64_t shadow_end = v->sb.shadow_zone_start + v->sb.shadow_zone_blocks;
+    uint64_t b;
+    uint8_t *tmp;
+
+    if (end > shadow_end) end = shadow_end;
+    tmp = (uint8_t *)malloc(INVFS_BLOCK_SIZE);
+    if (!tmp) return -1;
+    for (b = base; b < end; b++) {
+        if (!bit_get(v->bitmap, b)) continue;
+        if (bit_get(sv->is_par, b)) continue;
+        if (io_seek(&v->io, b * INVFS_BLOCK_SIZE) != 0 ||
+            io_read(&v->io, tmp, INVFS_BLOCK_SIZE) != 0) {
+            free(tmp);
+            return -1;
+        }
+        seal_xor_block(acc, tmp);
+    }
+    free(tmp);
+    return 0;
+}
+
+/* The syndrome of one stripe: stored parity XOR the stripe's current
+ * occupied content. With no membership drift and exactly one corrupt block
+ * in the stripe, this is that block's XOR delta. Returns 1 when the stripe
+ * has a parity block (out filled), 0 when it is not sealed / not readable. */
+static int seal_syndrome(invfs_volume *v, const seal_view *sv,
+                         uint64_t stripe, uint8_t *out)
+{
+    uint64_t shard = stripe / SEAL_SHARD;
+    uint64_t local = stripe % SEAL_SHARD;
+    uint64_t ppba = 0, plen = 0;
+
+    if (shard >= sv->nshards || !sv->shard_id[shard]) return 0;
+    if (vol_lookup_entry(v, sv->shard_id[shard], local, &ppba, &plen) != 0 ||
+        !ppba || ppba >= v->sb.total_blocks)
+        return 0;   /* no parity for this stripe (or a corrupt map): out */
+    if (io_seek(&v->io, ppba * INVFS_BLOCK_SIZE) != 0 ||
+        io_read(&v->io, out, INVFS_BLOCK_SIZE) != 0)
+        return 0;   /* the parity block itself is unreadable */
+    if (seal_stripe_xor(v, sv, stripe, out) != 0)
+        return 0;   /* a stripe-mate is unreadable: cannot isolate */
+    return 1;
+}
+
+/* A repaired segment image must re-prove itself against its own framing:
+ * [4B csize][4B crc32c] and crc32c over the csize payload bytes. crc == 0
+ * segments carry no check and can never be recovered-verified. */
+static int seal_seg_verify(const uint8_t *seg, uint64_t plen,
+                           uint32_t *csize_out)
+{
+    uint32_t csize, crc;
+    memcpy(&csize, seg, 4);
+    memcpy(&crc, seg + 4, 4);
+    if (csize == 0 || crc == 0 ||
+        (uint64_t)csize + 8 > plen * INVFS_BLOCK_SIZE)
+        return -1;
+    if (invfs_crc32c(seg + 8, csize) != crc)
+        return -1;
+    *csize_out = csize;
+    return 0;
+}
+
+/* One recovery attempt for a framed segment whose read just failed. Reads
+ * the whole segment (plen blocks), tries the stripe-syndrome repairs and
+ * returns the verified payload (malloc'd, *csize_out bytes). On success the
+ * restored block is written back when the volume is writable and the
+ * recovery is logged. -1 = no recovery: the caller's original error. */
+static int seal_recover_segment(invfs_volume *v, uint64_t pba, uint64_t plen,
+                                uint32_t *csize_out, uint8_t **blob_out)
+{
+    seal_view sv;
+    uint8_t *seg = NULL, *syn = NULL, *blob = NULL;
+    uint64_t ss, i, cb, s0, s1;
+    uint64_t healed[8];      /* corrupt blocks the repair spliced in */
+    size_t healed_n = 0;
+    size_t span;
+    uint32_t csize = 0;
+    /* one-stripe syndrome memo (blocks are walked in address order) */
+    uint64_t syn_s = 0;
+    int syn_have = 0, syn_live = 0;
+    int rc = -1;
+
+    if (!plen || pba < v->sb.shadow_zone_start ||
+        plen > v->sb.total_blocks - pba)
+        return -1;
+    ss = v->sb.shadow_zone_start;
+    if (seal_view_load(v, &sv) != 0)
+        return -1;
+    if (sv.nshards == 0) { seal_view_free(&sv); return -1; }  /* never sealed */
+    if (plen > (uint64_t)SIZE_MAX / INVFS_BLOCK_SIZE) { seal_view_free(&sv); return -1; }
+    span = (size_t)plen * INVFS_BLOCK_SIZE;
+    seg = (uint8_t *)malloc(span);
+    syn = (uint8_t *)malloc(INVFS_BLOCK_SIZE);
+    if (!seg || !syn) goto out;
+    /* per-block reads: a block that fails at the device level reads as
+     * zeros here and is exactly what the parity math is asked to restore */
+    for (i = 0; i < plen; i++) {
+        if (io_seek(&v->io, (pba + i) * INVFS_BLOCK_SIZE) != 0 ||
+            io_read(&v->io, seg + i * INVFS_BLOCK_SIZE,
+                    INVFS_BLOCK_SIZE) != 0)
+            memset(seg + i * INVFS_BLOCK_SIZE, 0, INVFS_BLOCK_SIZE);
+    }
+
+    /* pass A: a single corrupt block in its stripe (the common case, and
+     * the only drift-tolerant one). With no membership drift since the
+     * seal, the stripe's syndrome is exactly the block's XOR delta; the
+     * segment's own framed CRC arbitrates, so drift or a second bad block
+     * in the stripe can never surface as good bytes. */
+    for (i = 0; i < plen; i++) {
+        uint64_t s, z;
+        cb = pba + i;
+        s = (cb - ss) / SEAL_STRIPE_K;
+        if (!syn_have || syn_s != s) {
+            syn_live = seal_syndrome(v, &sv, s, syn) == 1;
+            if (syn_live) {     /* zero syndrome: nothing to repair with */
+                syn_live = 0;
+                for (z = 0; z < INVFS_BLOCK_SIZE; z++)
+                    if (syn[z]) { syn_live = 1; break; }
+            }
+            syn_s = s;
+            syn_have = 1;
+        }
+        if (!syn_live) continue;
+        seal_xor_block(seg + i * INVFS_BLOCK_SIZE, syn);
+        if (seal_seg_verify(seg, plen, &csize) == 0) {
+            healed[healed_n++] = cb;
+            break;
+        }
+        seal_xor_block(seg + i * INVFS_BLOCK_SIZE, syn);   /* undo */
+    }
+
+    /* pass B: corrupt blocks in SEVERAL of the stripes the segment spans
+     * (a pass-A single repair can never verify then). One corrupt block per
+     * stripe stays recoverable: odometer over the syndromed stripes'
+     * candidate blocks, the framed CRC arbitrating each combination.
+     * Bounded: <= 8 syndromed stripes and the combination count times the
+     * segment size capped (a wider burst fails loud -- RS-grade repair is
+     * the WP20 successor's job). */
+    if (!healed_n) {
+        uint64_t nspan, t, combos = 1;
+        uint64_t st_lo[8], st_hi[8], cur[8];
+        uint8_t (*st_syn)[INVFS_BLOCK_SIZE];
+        size_t nsyn = 0;
+        int ok = 0;
+
+        s0 = (pba - ss) / SEAL_STRIPE_K;
+        s1 = (pba + plen - 1 - ss) / SEAL_STRIPE_K;
+        nspan = s1 - s0 + 1;
+        st_syn = malloc(8 * sizeof *st_syn);
+        if (st_syn) {
+            for (t = 0; t < nspan && nsyn < 8; t++) {
+                uint64_t s = s0 + t;
+                uint64_t lo, hi, z;
+                int nz = 0;
+                if (seal_syndrome(v, &sv, s, st_syn[nsyn]) != 1)
+                    continue;
+                for (z = 0; z < INVFS_BLOCK_SIZE; z++)
+                    if (st_syn[nsyn][z]) { nz = 1; break; }
+                if (!nz) continue;   /* consistent stripe: no candidate */
+                lo = pba > ss + s * SEAL_STRIPE_K ? pba
+                                                  : ss + s * SEAL_STRIPE_K;
+                hi = ss + (s + 1) * SEAL_STRIPE_K;
+                if (hi > pba + plen) hi = pba + plen;
+                if (hi <= lo) continue;
+                st_lo[nsyn] = lo;
+                st_hi[nsyn] = hi;
+                combos *= hi - lo;
+                nsyn++;
+            }
+            if (nsyn >= 2 &&
+                combos <= 65536 &&
+                combos * ((uint64_t)plen * INVFS_BLOCK_SIZE) <= (1ull << 32)) {
+                uint64_t ci;
+                for (ci = 0; ci < combos && !ok; ci++) {
+                    uint64_t c = ci;
+                    size_t j;
+                    for (j = 0; j < nsyn; j++) {
+                        cur[j] = st_lo[j] + c % (st_hi[j] - st_lo[j]);
+                        c /= st_hi[j] - st_lo[j];
+                    }
+                    for (j = 0; j < nsyn; j++)
+                        seal_xor_block(seg + (cur[j] - pba) * INVFS_BLOCK_SIZE,
+                                       st_syn[j]);
+                    if (seal_seg_verify(seg, plen, &csize) == 0) {
+                        for (j = 0; j < nsyn && healed_n < 8; j++)
+                            healed[healed_n++] = cur[j];
+                        ok = 1;
+                    } else {
+                        for (j = 0; j < nsyn; j++)
+                            seal_xor_block(seg + (cur[j] - pba) *
+                                           INVFS_BLOCK_SIZE, st_syn[j]);
+                    }
+                }
+            }
+            free(st_syn);
+        }
+    }
+    if (!healed_n) goto out;
+
+    /* self-heal: write the restored block(s) back. A data-only repair --
+     * bitmap, journal and superblock are untouched, so no dirty marking;
+     * a failed write-back is not fatal (the next read recovers again). */
+    if (vol_write_enabled(v)) {
+        for (i = 0; i < healed_n; i++) {
+            int wok = io_seek(&v->io, healed[i] * INVFS_BLOCK_SIZE) == 0 &&
+                      io_write(&v->io,
+                               seg + (healed[i] - pba) * INVFS_BLOCK_SIZE,
+                               INVFS_BLOCK_SIZE) == 0;
+            fprintf(stderr, "[seal] recovered block %llu via parity%s\n",
+                    (unsigned long long)healed[i],
+                    wok ? "" : " (write-back failed)");
+        }
+    } else {
+        for (i = 0; i < healed_n; i++)
+            fprintf(stderr, "[seal] recovered block %llu via parity "
+                    "(read-only volume, not written back)\n",
+                    (unsigned long long)healed[i]);
+    }
+    blob = (uint8_t *)malloc(csize);
+    if (!blob) goto out;
+    memcpy(blob, seg + 8, csize);
+    *csize_out = csize;
+    *blob_out = blob;
+    rc = 0;
+out:
+    free(seg);
+    free(syn);
+    seal_view_free(&sv);
+    return rc;
+}
+
+/* Rewrite one shard's owner record when its entry set changed. `par_pba`
+ * is the desired stripe set (stripe -> parity pba, 0 = none). */
+static int seal_shard_sync(invfs_volume *v, uint64_t owner, uint64_t shard,
+                           tz_owner *o, const uint64_t *par_pba,
+                           uint64_t n_stripes)
+{
+    uint64_t base = shard * SEAL_SHARD;
+    uint64_t hi = base + SEAL_SHARD;
+    uint32_t want_n = 0, i;
+    uint64_t s;
+    int same;
+    char nm[32];
+
+    if (hi > n_stripes) hi = n_stripes;
+    for (s = base; s < hi; s++)
+        if (par_pba[s]) want_n++;
+    /* compare against the record's current block_id list */
+    same = (o->n == want_n);
+    if (same) {
+        uint64_t w = base;
+        for (i = 0; i < o->n && same; i++, w++) {
+            while (w < hi && !par_pba[w]) w++;
+            if (w >= hi || o->ents[i].block_id != (uint32_t)(w - base))
+                same = 0;
+        }
+    }
+    if (same) return 0;
+
+    if (o->cap < want_n) {
+        invfs_ast_block_entry *ne = (invfs_ast_block_entry *)
+            realloc(o->ents, (want_n ? want_n : 1) * sizeof(*ne));
+        if (!ne) return -1;
+        o->ents = ne;
+        o->cap = want_n;
+    }
+    o->n = 0;
+    for (s = base; s < hi; s++) {
+        invfs_ast_block_entry *e;
+        if (!par_pba[s]) continue;
+        e = &o->ents[o->n++];
+        memset(e, 0, sizeof *e);
+        e->length = INVFS_BLOCK_SIZE;   /* file_offset rebuilt by the write */
+        e->zone = INVFS_ZONE_BINARY;    /* physical home; NOT TEXT: the WP10
+                                         * GC marks zone==TEXT block_ids and
+                                         * the retire path spares them */
+        e->algo = INVFS_ALGO_NONE;
+        e->block_id = (uint32_t)(s - base);
+        e->block_offset = 0;
+    }
+    seal_shard_name(shard, nm, sizeof nm);
+    return tz_owner_write(v, owner, nm, o);
+}
+
+int vol_seal(invfs_volume *v, int unseal, invfs_seal_report *rep)
+{
+    seal_view sv;
+    tz_owner *own = NULL;
+    size_t own_cap = 0;
+    uint64_t ss, snb, n_stripes, s, b;
+    uint64_t occupied = 0;
+    uint64_t *par_pba = NULL;    /* stripe -> parity pba (0 = none) */
+    uint8_t *want = NULL;        /* stripe holds >=1 occupied non-parity blk */
+    uint8_t *acc = NULL, *stored = NULL;
+    int rc = 0;
+    size_t i;
+
+    if (!v || !rep) return -1;
+    memset(rep, 0, sizeof *rep);
+    if (!vol_write_enabled(v)) {
+        fprintf(stderr, "seal: volume is read-only; cannot %s\n",
+                unseal ? "unseal" : "seal");
+        return -1;
+    }
+    if (seal_view_load(v, &sv) != 0) return -1;
+
+    if (unseal) {
+        /* free every parity block and remove the owners. The retire path
+         * frees the blocks the owner's maps name (entries are zone!=TEXT,
+         * so the shared-batch gate does not hold them back) and drops the
+         * maps; the tombstone lands in the same run. */
+        if (sv.nshards && vol_mark_dirty(v) != 0) { seal_view_free(&sv); return -1; }
+        for (i = 0; i < sv.nshards; i++) {
+            char nm[32];
+            size_t j;
+            for (j = 0; j < v->l2p_count; j++) {
+                const invfs_l2p_entry *e = &v->l2p[j];
+                if (e->type == INVFS_JRN_MAP && e->inode == sv.shard_id[i])
+                    rep->freed += e->length ? e->length : 1;
+            }
+            seal_shard_name(i, nm, sizeof nm);
+            if (vol_delete_file(v, nm) != 0) {
+                fprintf(stderr, "seal: could not remove owner shard %zu\n", i);
+                rc = -1;
+            }
+        }
+        if (vol_flush(v) != 0) rc = -1;
+        seal_view_free(&sv);
+        return rc;
+    }
+
+    ss = v->sb.shadow_zone_start;
+    snb = v->sb.shadow_zone_blocks;
+    if (!snb) { seal_view_free(&sv); return 0; }
+    n_stripes = (snb + SEAL_STRIPE_K - 1) / SEAL_STRIPE_K;
+    par_pba = (uint64_t *)calloc(n_stripes, sizeof *par_pba);
+    want = (uint8_t *)calloc((size_t)(n_stripes + 7) / 8, 1);
+    acc = (uint8_t *)malloc(INVFS_BLOCK_SIZE);
+    stored = (uint8_t *)malloc(INVFS_BLOCK_SIZE);
+    if (!par_pba || !want || !acc || !stored) { rc = -1; goto out; }
+
+    /* current stripe -> parity pba map from the journal (newest wins, the
+     * vol_lookup_entry rule); strays outside the zone are fsck's business */
+    for (i = 0; i < v->l2p_count; i++) {
+        const invfs_l2p_entry *e = &v->l2p[i];
+        size_t shard;
+        if (e->type != INVFS_JRN_MAP) continue;
+        for (shard = 0; shard < sv.nshards; shard++)
+            if (e->inode == sv.shard_id[shard]) break;
+        if (shard == sv.nshards) continue;
+        s = shard * SEAL_SHARD + e->lba;
+        if (s < n_stripes && e->pba) par_pba[s] = e->pba;
+    }
+    /* owner record state per shard (position-kill targets) */
+    if (sv.nshards) {
+        own = (tz_owner *)calloc(sv.nshards, sizeof *own);
+        if (!own) { rc = -1; goto out; }
+        own_cap = sv.nshards;
+        for (i = 0; i < sv.nshards; i++) {
+            if (tz_owner_load(v, sv.shard_id[i], &own[i]) != 0) {
+                fprintf(stderr, "seal: owner shard %zu unreadable\n", i);
+                rc = -1;
+                goto out;
+            }
+        }
+    }
+
+    if (vol_mark_dirty(v) != 0) { rc = -1; goto out; }
+
+    /* membership from the live bitmap, parity blocks excluded */
+    for (s = 0; s < n_stripes; s++) {
+        uint64_t base = ss + s * SEAL_STRIPE_K;
+        uint64_t end = base + SEAL_STRIPE_K;
+        uint64_t cnt = 0;
+        if (end > ss + snb) end = ss + snb;
+        for (b = base; b < end; b++)
+            if (bit_get(v->bitmap, b) && !bit_get(sv.is_par, b)) cnt++;
+        if (cnt) {
+            want[s / 8] |= (uint8_t)(1u << (s % 8));
+            occupied += cnt;
+        }
+    }
+
+    /* allocate parity where a stripe wants it but has none */
+    for (s = 0; s < n_stripes; s++) {
+        uint64_t shard, pba;
+        if (!(want[s / 8] & (1u << (s % 8))) || par_pba[s]) continue;
+        shard = s / SEAL_SHARD;
+        /* shards exist contiguously: create the missing owners up to the
+         * one this stripe needs (empty records; the sync below fills them) */
+        while (shard >= sv.nshards) {
+            char nm[32];
+            uint64_t nid;
+            uint64_t *ns;
+            tz_owner *no;
+            seal_shard_name(sv.nshards, nm, sizeof nm);
+            nid = vol_create_file(v, nm, NULL, 0);
+            if (!nid) { rc = -1; goto finalize; }
+            ns = (uint64_t *)realloc(sv.shard_id,
+                                     (sv.nshards + 1) * sizeof *sv.shard_id);
+            if (!ns) { rc = -1; goto finalize; }
+            sv.shard_id = ns;
+            sv.shard_id[sv.nshards] = nid;
+            no = (tz_owner *)realloc(own, (sv.nshards + 1) * sizeof *own);
+            if (!no) { rc = -1; goto finalize; }
+            own = no;
+            memset(&own[sv.nshards], 0, sizeof *own);
+            own_cap = sv.nshards + 1;
+            /* load the fresh record's position so the sync's rewrite
+             * position-kills it (a created-but-never-killed empty record
+             * would stay live next to the full one) */
+            if (tz_owner_load(v, nid, &own[sv.nshards]) != 0) {
+                rc = -1;
+                goto finalize;
+            }
+            sv.nshards++;
+        }
+        pba = alloc_blocks(v, ss, snb, 1, 1);
+        if (!pba) {
+            fprintf(stderr, "seal: ENOSPC for parity of stripe %llu\n",
+                    (unsigned long long)s);
+            rep->unprotected++;
+            continue;
+        }
+        if (vol_map(v, sv.shard_id[shard], s % SEAL_SHARD, pba, 1) != 0) {
+            vol_free_blocks(v, pba, 1);
+            rep->unprotected++;
+            continue;
+        }
+        par_pba[s] = pba;
+        bit_set(sv.is_par, pba);
+        rep->added++;
+    }
+    /* maps durable BEFORE any owner record names them (the tz_seal rule) */
+    if (rep->added && vol_flush(v) != 0) { rc = -1; goto finalize; }
+
+    /* check-and-update every wanted stripe: recompute, write only on change */
+    for (s = 0; s < n_stripes; s++) {
+        if (!(want[s / 8] & (1u << (s % 8))) || !par_pba[s]) continue;
+        memset(acc, 0, INVFS_BLOCK_SIZE);
+        if (seal_stripe_xor(v, &sv, s, acc) != 0) { rc = -1; goto finalize; }
+        if (io_seek(&v->io, par_pba[s] * INVFS_BLOCK_SIZE) != 0 ||
+            io_read(&v->io, stored, INVFS_BLOCK_SIZE) != 0) {
+            rc = -1;
+            goto finalize;
+        }
+        if (memcmp(acc, stored, INVFS_BLOCK_SIZE) == 0) {
+            rep->unchanged++;
+        } else {
+            if (io_seek(&v->io, par_pba[s] * INVFS_BLOCK_SIZE) != 0 ||
+                io_write(&v->io, acc, INVFS_BLOCK_SIZE) != 0) {
+                rc = -1;
+                goto finalize;
+            }
+            rep->updated++;
+        }
+    }
+
+finalize:
+    /* live seal state after this run (also what a hard error leaves) */
+    for (s = 0; s < n_stripes; s++)
+        if (par_pba[s] && (want[s / 8] & (1u << (s % 8))))
+            rep->stripes++;
+    rep->parity_blocks = rep->stripes;
+    /* owner records name exactly the final map set (additions landed above,
+     * removals drop here BEFORE their maps/blocks go away) */
+    for (i = 0; i < sv.nshards; i++) {
+        if (i < own_cap &&
+            seal_shard_sync(v, sv.shard_id[i], i, &own[i],
+                            par_pba, n_stripes) != 0) {
+            fprintf(stderr, "seal: owner shard %zu write failed\n", i);
+            rc = -1;
+        }
+    }
+    /* removals: stripes whose content went away (and stray maps no record
+     * names -- an earlier interrupted seal's debris) */
+    {
+        size_t j, w2;
+        for (j = 0; j < v->l2p_count; j++) {
+            const invfs_l2p_entry *e = &v->l2p[j];
+            size_t shard;
+            uint64_t gs;
+            if (e->type != INVFS_JRN_MAP) continue;
+            for (shard = 0; shard < sv.nshards; shard++)
+                if (e->inode == sv.shard_id[shard]) break;
+            if (shard == sv.nshards) continue;
+            gs = shard * SEAL_SHARD + e->lba;
+            if (gs < n_stripes && par_pba[gs] == e->pba &&
+                (want[gs / 8] & (1u << (gs % 8))))
+                continue;   /* live seal member */
+            if (e->pba < v->sb.total_blocks)
+                vol_free_blocks(v, e->pba, e->length ? e->length : 1);
+            rep->freed++;
+        }
+        /* drop the removed maps (collect-then-remove is unnecessary here:
+         * the loop above only READS; this pass removes everything not in
+         * the final set, matching the rewritten records) */
+        w2 = 0;
+        for (j = 0; j < v->l2p_count; j++) {
+            const invfs_l2p_entry *e = &v->l2p[j];
+            size_t shard;
+            uint64_t gs;
+            int keep = 1;
+            if (e->type == INVFS_JRN_MAP) {
+                for (shard = 0; shard < sv.nshards; shard++)
+                    if (e->inode == sv.shard_id[shard]) break;
+                if (shard < sv.nshards) {
+                    gs = shard * SEAL_SHARD + e->lba;
+                    keep = gs < n_stripes && par_pba[gs] == e->pba &&
+                           (want[gs / 8] & (1u << (gs % 8)));
+                }
+            }
+            if (keep) {
+                if (w2 != j) v->l2p[w2] = v->l2p[j];
+                w2++;
+            } else if (w2 < v->l2p_dirty) {
+                v->l2p_dirty = w2;
+            }
+        }
+        v->l2p_count = w2;
+        if (v->l2p_dirty > v->l2p_count) v->l2p_dirty = v->l2p_count;
+    }
+    if (rep->freed || rep->added || rep->updated) {
+        if (vol_flush(v) != 0) rc = -1;
+    }
+    rep->overhead_pct = occupied
+        ? 100.0 * (double)rep->parity_blocks / (double)occupied : 0.0;
+out:
+    free(par_pba);
+    free(want);
+    free(acc);
+    free(stored);
+    if (own)
+        for (i = 0; i < own_cap; i++) tz_owner_free(&own[i]);
+    free(own);
+    seal_view_free(&sv);
+    return rc;
+}
+
+/* verify --deep leg: recompute every sealed stripe against its stored
+ * parity block and report the drift counters. */
+int vol_seal_verify(invfs_volume *v, invfs_seal_verify *out)
+{
+    seal_view sv;
+    uint64_t ss, snb, n_stripes, s, b;
+    uint64_t *par_pba = NULL;
+    uint8_t *acc = NULL, *stored = NULL;
+    size_t i;
+    int rc = 0;
+
+    if (!v || !out) return -1;
+    memset(out, 0, sizeof *out);
+    if (seal_view_load(v, &sv) != 0) return -1;
+    if (sv.nshards == 0) { seal_view_free(&sv); return 0; }   /* not sealed */
+
+    ss = v->sb.shadow_zone_start;
+    snb = v->sb.shadow_zone_blocks;
+    n_stripes = (snb + SEAL_STRIPE_K - 1) / SEAL_STRIPE_K;
+    par_pba = (uint64_t *)calloc(n_stripes, sizeof *par_pba);
+    acc = (uint8_t *)malloc(INVFS_BLOCK_SIZE);
+    stored = (uint8_t *)malloc(INVFS_BLOCK_SIZE);
+    if (!par_pba || !acc || !stored) { rc = -1; goto out; }
+
+    for (i = 0; i < v->l2p_count; i++) {
+        const invfs_l2p_entry *e = &v->l2p[i];
+        size_t shard;
+        if (e->type != INVFS_JRN_MAP) continue;
+        for (shard = 0; shard < sv.nshards; shard++)
+            if (e->inode == sv.shard_id[shard]) break;
+        if (shard == sv.nshards) continue;
+        s = shard * SEAL_SHARD + e->lba;
+        if (s < n_stripes && e->pba) par_pba[s] = e->pba;
+    }
+
+    for (s = 0; s < n_stripes; s++) {
+        uint64_t base = ss + s * SEAL_STRIPE_K;
+        uint64_t end = base + SEAL_STRIPE_K;
+        uint64_t cnt = 0;
+        if (end > ss + snb) end = ss + snb;
+        for (b = base; b < end; b++)
+            if (bit_get(v->bitmap, b) && !bit_get(sv.is_par, b)) cnt++;
+        if (cnt && !par_pba[s]) { out->missing++; continue; }
+        if (!cnt && par_pba[s]) { out->extra++; continue; }
+        if (!cnt) continue;
+        memset(acc, 0, INVFS_BLOCK_SIZE);
+        if (seal_stripe_xor(v, &sv, s, acc) != 0 ||
+            io_seek(&v->io, par_pba[s] * INVFS_BLOCK_SIZE) != 0 ||
+            io_read(&v->io, stored, INVFS_BLOCK_SIZE) != 0) {
+            out->mismatched++;   /* unreadable while checking: not clean */
+            out->sealed++;
+            continue;
+        }
+        if (memcmp(acc, stored, INVFS_BLOCK_SIZE) != 0)
+            out->mismatched++;
+        out->sealed++;
+    }
+out:
+    free(par_pba);
+    free(acc);
+    free(stored);
+    seal_view_free(&sv);
+    return rc;
+}
+
+
 uint64_t vol_count_free(invfs_volume *v)
 {
     uint64_t i, free = 0;
@@ -11597,26 +12371,16 @@ static int cpack_recipe_seg(invfs_volume *v, uint64_t ino,
                             uint8_t **out, size_t *out_len)
 {
     uint64_t pba = 0, plen = 0;
-    uint8_t hdrb[8];
-    uint32_t csize, crc;
+    uint32_t csize;
     uint8_t *blob;
 
     *out = NULL;
     *out_len = 0;
     if (vol_lookup_entry(v, ino, 0, &pba, &plen) != 0 || !pba) return -1;
-    if (io_seek(&v->io, pba * INVFS_BLOCK_SIZE) != 0 ||
-        io_read(&v->io, hdrb, 8) != 0) return -1;
-    memcpy(&csize, hdrb, 4);
-    memcpy(&crc, hdrb + 4, 4);
-    blob = (uint8_t *)malloc(csize ? (size_t)csize : 1);
-    if (!blob) return -1;
-    if (csize &&
-        (io_seek(&v->io, pba * INVFS_BLOCK_SIZE + 8) != 0 ||
-         io_read(&v->io, blob, csize) != 0)) { free(blob); return -1; }
-    if (crc != 0 && invfs_crc32c(blob, csize) != crc) {
-        free(blob);
+    /* framed read, CRC-verified inside (an empty recipe is legal);
+     * a shadow-zone failure gets one WP20 seal-parity recovery attempt */
+    if (seg_read_checked(v, pba, plen, 0, &csize, &blob) != 0)
         return -1;
-    }
     *out = blob;
     *out_len = csize;
     return 0;

@@ -157,6 +157,7 @@ int main(int argc, char **argv)
         invfs_volume *vol;
         uint64_t pos, live = 0, bad = 0;
         uint64_t total_bytes = 0;
+        int parity_bad = 0;
         /* One row per live inode id. Same-id record chains (meta rewrites,
          * the text-batch owner's growing record) appear once per version in
          * the area walk, and a read resolves to the LATEST version for all
@@ -179,6 +180,9 @@ int main(int argc, char **argv)
             if (!np) break;
             pos = np;
             if (magic != INODE_REC_MAGIC) continue;
+            if ((uint8_t)nm[0] == 0x01) continue;  /* internal owners
+                    ("\x01tzb", WP20 "\x01parityN"): not user files; the
+                    parity leg below checks the seal owners' real payload */
             if (vol_find(vol, nm) != ino) continue;  /* superseded */
             for (k = 0; k < nents; k++)
                 if (ents[k].id == ino) break;
@@ -215,11 +219,30 @@ int main(int argc, char **argv)
             }
         }
         free(ents);
+        /* WP20: when the volume is sealed, recompute every parity stripe
+         * against its stored parity block. Drift counters are all zero on
+         * an unsealed volume (seal is opt-in), so the line appears only
+         * when a seal exists or drifted. Parity drift is reported and is
+         * fatal to the exit code, but it is not a "corrupt file". */
+        {
+            invfs_seal_verify sv;
+            if (vol_seal_verify(vol, &sv) == 0 &&
+                (sv.sealed || sv.mismatched || sv.missing || sv.extra)) {
+                printf("parity: %llu sealed stripes, %llu mismatched, "
+                       "%llu missing, %llu extra\n",
+                       (unsigned long long)sv.sealed,
+                       (unsigned long long)sv.mismatched,
+                       (unsigned long long)sv.missing,
+                       (unsigned long long)sv.extra);
+                if (sv.mismatched || sv.missing || sv.extra)
+                    parity_bad = 1;
+            }
+        }
         printf("deep: %llu files ok, %llu corrupt, %llu bytes verified\n",
                (unsigned long long)live, (unsigned long long)bad,
                (unsigned long long)total_bytes);
         vol_close(vol);
-        return bad ? 1 : 0;
+        return (bad || parity_bad) ? 1 : 0;
     }
 
     blkio_close(&io);
