@@ -1,0 +1,38 @@
+# vdi codecpack (WP16a/WP16b): VirtualBox VDI disk image decomposition.
+#
+# DYNAMIC (type 1) VDI v1.1 images only. One member: idx 1 "diskimg" = the
+# concatenated allocated-block stream (table order, full cbBlock extents) —
+# a raw disk image padded to a block multiple, the input the rawdisk/ext4
+# container packs decompose further (nested containers). The recipe is every
+# other byte of the file verbatim (header + block allocation map + holes +
+# tail), so rebuild is bit-exact by construction, junk-in-a-hole included.
+# STATIC (type 2) images are declined: a static VDI is a raw disk image with
+# a preamble — rawdisk-pack territory. Differencing images (uuidLink != 0),
+# non-1.1 versions, cbBlockExtra != 0, and corrupt geometry are all declined
+# (exit 3). See vdi.c for the full format documentation + validation list.
+#
+# The sniff keys on the u32 signature 0xBEDA107F at offset 64 (the 64-byte
+# comment text at offset 0 varies by vendor — VirtualBox vs QEMU — so the
+# signature is the reliable rule). The map command makes the pack SEEKABLE
+# (CAP_SEEK): reads splice from the recipe + the member sibling and never
+# exec the pack.
+#
+# The helper is a compiled C11 binary (libc only): bin/vdi, built from the
+# in-pack vdi.c (tools/test-vdi.sh compiles it; a missing binary = probe
+# fails = files wait RAW, the standard tools-absent convention).
+name = vdi
+type = container
+algo = 21
+pack_version = 1
+generation = 1
+caps = container|external
+dec_mem = 0
+sniff.offset = 64
+sniff.magic = 7F10DABE
+sniff.ext = vdi
+enumerate = bin/vdi enumerate {in} {out}
+extract = bin/vdi extract {in} {idx} {out}
+strip = bin/vdi strip {in} {out}
+rebuild = bin/vdi rebuild {recipe} {dir} {out}
+map = bin/vdi map {in} {out}
+estimate = bin/vdi estimate {in}

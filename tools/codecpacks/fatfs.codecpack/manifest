@@ -1,0 +1,36 @@
+# fatfs codecpack (WP16a/WP16b): FAT12/16/32 + exFAT disk images ->
+# per-file member inodes. See fatfs.c for the full format documentation
+# (member indexing, recipe layout, decline rules).
+#
+# The helper is a self-contained C11 binary (libc only) built in place by
+# tools/test-fatfs.sh:  cc -std=c11 -O2 -Wall -Wextra fatfs.c -o bin/fatfs
+# (argv0 is the pack-dir-relative "bin/fatfs": the FS probe resolves argv0
+# against the pack dir and does NOT substitute {pack} there).
+#
+# Sniff: 55AA @510 is the (weak) FAT/exFAT boot signature -- a strict BPB /
+# boot-region parse in enumerate does the real validation and declines
+# anything that merely carries the signature. "EXFAT   " @3 is the exFAT
+# boot signature (second rule, stronger).
+#
+# algo 18: production range (test packs take 40+).
+name = fatfs
+type = container
+algo = 18
+pack_version = 1
+generation = 1
+caps = container|external
+dec_mem = 0
+sniff.magic = 55AA
+sniff.offset = 510
+sniff.magic = 4558464154202020
+sniff.offset = 3
+sniff.ext = img,fat,vfat,exfat
+enumerate = bin/fatfs enumerate {in} {out}
+extract = bin/fatfs extract {in} {idx} {out}
+strip = bin/fatfs strip {in} {out}
+rebuild = bin/fatfs rebuild {recipe} {dir} {out}
+# WP16b: the map command makes the pack SEEKABLE (CAP_SEEK): reads splice
+# locally from the recipe + member siblings and never exec the pack.
+map = bin/fatfs map {in} {out}
+# decode working set = sum(member usize) + 64 MiB (FAT table + walk state)
+estimate = bin/fatfs estimate {in}

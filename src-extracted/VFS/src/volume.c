@@ -5510,11 +5510,14 @@ int vol_sweep_one(invfs_volume *v, uint64_t inode_id, const char *name)
      * container into "!mbrNNNN" member inodes that flow through the whole
      * normal pipeline. Placed AFTER every builtin container magic above
      * (ZIP/TAR/GZ/PNG/FLAC, and the MP3 codec branch) and BEFORE the WP13
-     * whole-file codec-pack loop / text / generic. First sniff hit wins; a
-     * declined pack falls through (its stamps carry the retry semantics). */
+     * whole-file codec-pack loop / text / generic. Every sniff-positive pack
+     * gets its chance in registry order: a decline tries the NEXT pack (weak
+     * magics overlap — e.g. rawdisk vs fatfs both sniff 55AA@510); a defer
+     * (tools absent / DEFER_ENOSPC) is remembered and wins over declines. */
     {
         size_t cn = 0, ci;
         const invfs_codec *all = invfs_codec_all(&cn);
+        int deferred = 0;
         for (ci = 0; ci < cn; ci++) {
             const invfs_codec *pc = &all[ci];
             const invfs_pack_def *pd;
@@ -5528,10 +5531,14 @@ int vol_sweep_one(invfs_volume *v, uint64_t inode_id, const char *name)
                 continue;
             prc = vol_containerpack_sweep(v, inode_id, name, pc, full,
                                           full_len);
-            if (prc == 1) { free(full); return 0; }   /* tools absent: defer */
+            if (getenv("INVFS_DEBUG_PACKS"))
+                fprintf(stderr, "[packdbg] %s on %s -> prc=%d\n",
+                        pc->name, name, prc);
             if (prc >= 100) { free(full); return prc; }   /* decomposed */
-            break;   /* declined: stamps applied; text/generic still run */
+            if (prc == 1) { deferred = 1; continue; }     /* defer: try next */
+            /* declined: stamps carry the retry semantics; try next pack */
         }
+        if (deferred) { free(full); return 0; }   /* a later sweep may claim */
     }
 
     /* WP13: codecpack codecs — the registry's dynamic EXTERNAL entries, the
@@ -6200,11 +6207,34 @@ static int vol_retire_inode(invfs_volume *v, uint64_t inode_id,
          * a hole in every other member. GC reclaims dead batches. The dup
          * mappings themselves are dropped with the inode below, as usual. */
         uint32_t *text_lbas = NULL;
-        size_t n_text = collect_text_lbas(v, inode_id, &text_lbas), t;
+        size_t n_text = collect_text_lbas(v, inode_id, &text_lbas), t, j;
+        /* PB7 (dedupe sharers): a segment merged by vol_sweep_dedupe is
+         * mapped under EVERY sharer; freeing it with one retiring inode
+         * leaves the survivors dangling (fsck "missing"). Skip any pba
+         * another live MAP entry still references. Two pba-indexed bitmaps
+         * make the check O(l2p) once per retire instead of O(own x l2p);
+         * the second bitmap also stops double-frees when a file's own
+         * entries share a pba (same-file dedupe). Costs 2 x total_blocks/8
+         * bytes per delete. */
+        uint8_t *refd = calloc((size_t)(v->sb.total_blocks + 7) / 8, 1);
+        uint8_t *done = calloc((size_t)(v->sb.total_blocks + 7) / 8, 1);
+        if (refd) {
+            for (j = 0; j < v->l2p_count; j++) {
+                const invfs_l2p_entry *o = &v->l2p[j];
+                uint64_t b, bend;
+                if (o->type != INVFS_JRN_MAP || o->inode == inode_id)
+                    continue;
+                if (o->pba >= v->sb.total_blocks) continue;
+                bend = o->pba + o->length;
+                if (bend > v->sb.total_blocks) bend = v->sb.total_blocks;
+                for (b = o->pba; b < bend; b++)
+                    refd[b >> 3] |= (uint8_t)(1u << (b & 7));
+            }
+        }
         for (i = 0; i < v->l2p_count; i++) {
             const invfs_l2p_entry *e = &v->l2p[i];
             if (e->type == INVFS_JRN_MAP && e->inode == inode_id) {
-                uint64_t nblk = e->length;
+                uint64_t nblk = e->length, b, bend;
                 int shared = 0;
                 for (t = 0; t < n_text; t++)
                     if (text_lbas[t] == e->lba) { shared = 1; break; }
@@ -6212,9 +6242,25 @@ static int vol_retire_inode(invfs_volume *v, uint64_t inode_id,
                 if (nblk == 0 || e->pba >= v->sb.total_blocks ||
                     nblk > v->sb.total_blocks - e->pba)
                     continue;  /* stale entry — never free out of bounds */
+                bend = e->pba + nblk;
+                shared = 0;
+                for (b = e->pba; b < bend; b++) {
+                    if (refd && (refd[b >> 3] & (1u << (b & 7)))) {
+                        shared = 1; break;   /* another live inode maps it */
+                    }
+                    if (done && (done[b >> 3] & (1u << (b & 7)))) {
+                        shared = 1; break;   /* already freed this retire */
+                    }
+                }
+                if (shared) continue;
                 vol_free_blocks(v, e->pba, nblk);
+                if (done)
+                    for (b = e->pba; b < bend; b++)
+                        done[b >> 3] |= (uint8_t)(1u << (b & 7));
             }
         }
+        free(refd);
+        free(done);
         free(text_lbas);
     }
     /* rewrite L2P in-memory: drop this inode's maps */
@@ -11290,11 +11336,11 @@ static int vol_containerpack_sweep(invfs_volume *v, uint64_t inode_id,
     /* 1. enumerate: the member table */
     if (invfs_codec_pack_cmd(pc, INVFS_PACK_CMD_ENUMERATE, pin, NULL,
                              NULL, NULL, ptable) != 0)
-        goto out;   /* refused: fall through, no stamp */
+        { if (getenv("INVFS_DEBUG_PACKS")) fprintf(stderr,"[cpack] enumerate failed\n"); goto out; }
     if (slurp_file(ptable, &table, &table_len) != 0) goto out;
     if (cpack_parse_table(table, table_len, &mem, &nmem, &sum_usize) != 0 ||
         nmem == 0)
-        goto out;
+        { if (getenv("INVFS_DEBUG_PACKS")) fprintf(stderr,"[cpack] table parse failed nmem=%zu\n", nmem); goto out; }
 
     /* 2. admission (WP10 §12; sweep-time only): the rebuild is a
      * whole-file read into the inode-keyed ARC, so the container obeys
@@ -11349,7 +11395,7 @@ static int vol_containerpack_sweep(invfs_volume *v, uint64_t inode_id,
     /* 3. strip: the recipe (original minus member payloads, pack-owned) */
     if (invfs_codec_pack_cmd(pc, INVFS_PACK_CMD_STRIP, pin, NULL,
                              NULL, NULL, precipe) != 0)
-        goto out;
+        { if (getenv("INVFS_DEBUG_PACKS")) fprintf(stderr,"[cpack] strip failed\n"); goto out; }
     if (slurp_file(precipe, &recipe, &recipe_len) != 0) goto out;
 
     /* 4. extract every member into the scratch dir as "<idx>"; the pack
@@ -11362,9 +11408,9 @@ static int vol_containerpack_sweep(invfs_volume *v, uint64_t inode_id,
         snprintf(pm, sizeof pm, "%s/%u", pmdir, mem[i].idx);
         if (invfs_codec_pack_cmd(pc, INVFS_PACK_CMD_EXTRACT, pin, idxbuf,
                                  NULL, NULL, pm) != 0)
-            goto out;
+            { if (getenv("INVFS_DEBUG_PACKS")) fprintf(stderr,"[cpack] extract idx=%u failed\n", mem[i].idx); goto out; }
         if (stat(pm, &st) != 0 || (uint64_t)st.st_size != mem[i].usize)
-            goto out;   /* the pack lied about its members */
+            { if (getenv("INVFS_DEBUG_PACKS")) fprintf(stderr,"[cpack] extract idx=%u size mismatch\n", mem[i].idx); goto out; }
     }
 
     /* 5. the map command (ABI v1.1), when the pack has one: the FS-owned
@@ -11376,9 +11422,10 @@ static int vol_containerpack_sweep(invfs_volume *v, uint64_t inode_id,
     if (def->map) {
         if (invfs_codec_pack_cmd(pc, INVFS_PACK_CMD_MAP, pin, NULL,
                                  NULL, NULL, pmap) != 0)
-            goto out;
+            { if (getenv("INVFS_DEBUG_PACKS")) fprintf(stderr,"[cpack] map cmd failed\n"); goto out; }
         if (slurp_file(pmap, &mapb, &map_len) != 0) goto out;
         if (cpack_map_parse(mapb, map_len, &ments, &nments) != 0) {
+            if (getenv("INVFS_DEBUG_PACKS")) fprintf(stderr,"[cpack] map parse failed\n");
             fprintf(stderr, "sweep: %s: %s: map unreadable, "
                             "decomposition abandoned\n", pc->name, name);
             goto out;

@@ -1,0 +1,39 @@
+# rawdisk codecpack (WP16a/WP16b): raw disk images -> partition members.
+#
+# Decomposes 512-byte-sector disk images with GPT or MBR/EBR partition
+# tables into one member per partition; the members then flow through the
+# whole normal pipeline (text PPMd batching / binary ZSTD(+BCJ) batching /
+# generic ZSTD-19, nested containers included). The recipe (strip) is the
+# RDR1 blob: disk size + the member (idx,off,len) table + every byte
+# OUTSIDE the member extents, verbatim (boot sectors, GPT primary+backup
+# tables, EBRs, and all gaps with arbitrary content). The map command
+# makes the pack SEEKABLE: reads splice locally from the recipe + member
+# siblings and never exec the pack (WP16b MRMP; partitions are contiguous,
+# so one MEMBER range per partition plus RECIPE ranges for the rest).
+#
+# The helper is a single C11 binary (rawdisk.c), libc only, streaming in
+# <= 8 MiB windows. It is resolved by NAME: probe/exec look for "rawdisk"
+# in <pack>/bin/ first, then PATH (pack authors: put the compiled helper
+# on PATH, or drop it into bin/ here). See rawdisk.c for the full format
+# doc and the refuse list.
+# algo 16: the first production containerpack id (test packs live at 40+).
+name = rawdisk
+type = container
+algo = 16
+pack_version = 1
+generation = 1
+caps = container|external
+dec_mem = 0
+# GPT: "EFI PART" at LBA1. MBR: 0x55AA at 510 (weak on purpose -- the
+# helper's strict parse is the real gate; a miss declines with exit 3).
+sniff.magic = 4546492050415254
+sniff.offset = 512
+sniff.magic = 55AA
+sniff.offset = 510
+sniff.ext = img,raw
+enumerate = rawdisk enumerate {in} {out}
+extract = rawdisk extract {in} {idx} {out}
+strip = rawdisk strip {in} {out}
+rebuild = rawdisk rebuild {recipe} {dir} {out}
+map = rawdisk map {in} {out}
+estimate = rawdisk estimate {in}

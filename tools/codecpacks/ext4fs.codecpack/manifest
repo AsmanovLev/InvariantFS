@@ -1,0 +1,35 @@
+# ext4fs codecpack (WP16a/WP16b): ext4 filesystem images -> per-file
+# members that flow through the whole codec pipeline (text PPMd batching,
+# binary ZSTD+BCJ batching, generic ZSTD-19). Members are identified by
+# ext4 INODE NUMBER (idx); everything that is not regular-file content
+# (superblock, GDT, bitmaps, inode tables, directory blocks, extent-tree
+# index nodes, journal, reserved/unused/unwritten blocks, past-i_size
+# tails) stays in the recipe verbatim, so bit-rot survives the round trip.
+# The map command makes the pack SEEKABLE (CAP_SEEK): reads splice locally
+# from the !mbrmap map + recipe + member siblings and never exec the tool.
+#
+# The tool is a compiled C11 helper (ext4fs.c, libc only): the test script
+# tools/test-ext4fs.sh builds it to bin/ext4fs (cc -O2 -Wall -Wextra
+# -Werror). A pack whose tool is missing is skipped by the FS probe (the
+# image waits RAW, unstamped).
+#
+# estimate prints sum(member usize) + 64 MiB (header-derived, never a
+# trial decode) so big-but-sparse images stay admissible under
+# INVFS_DEC_MEM_LIMIT.
+name = ext4fs
+type = container
+algo = 17
+pack_version = 1
+generation = 1
+caps = container|external
+dec_mem = 0
+# ext4 superblock magic 0xEF53 (little-endian) at 1024 + 56
+sniff.magic = 53EF
+sniff.offset = 1080
+sniff.ext = ext4,ext4img
+enumerate = bin/ext4fs enumerate {in} {out}
+extract = bin/ext4fs extract {in} {idx} {out}
+strip = bin/ext4fs strip {in} {out}
+rebuild = bin/ext4fs rebuild {recipe} {dir} {out}
+map = bin/ext4fs map {in} {out}
+estimate = bin/ext4fs estimate {in}

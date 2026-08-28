@@ -89,6 +89,12 @@ e2e: all
 	bash tools/test-conbatch.sh
 	bash tools/test-exercarve.sh
 	bash tools/test-containerpack.sh
+	bash tools/test-rawdisk.sh
+	bash tools/test-ext4fs.sh
+	bash tools/test-fatfs.sh
+	bash tools/test-xfs.sh
+	bash tools/test-ntfs.sh
+	bash tools/test-vdi.sh
 
 .PHONY: all clean test e2e
 -include $(wildcard $(OBJ)/*.d)

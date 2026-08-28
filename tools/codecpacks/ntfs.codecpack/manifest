@@ -1,0 +1,39 @@
+# ntfs codecpack (WP16a/WP16b): NTFS filesystem image -> per-file members.
+#
+# Every non-resident unnamed $DATA stream of a plain user file becomes a
+# member (idx = the MFT record number); everything else — boot sectors,
+# the whole $MFT (fixup trailers included), $Bitmap/$LogFile/$Boot/
+# $BadClus/$Secure/$Upcase/$Extend, directory indexes, resident $DATA,
+# content slack and free space — is the recipe, verbatim. The pack is
+# SEEKABLE (the map command): reads splice recipe + member ranges and
+# never exec the helper.
+#
+# v1 scope (the helper declines, exit 3, so the FS stores such images
+# generically): sector size != 512, $ATTRIBUTE_LIST / extension records,
+# named $DATA (ADS) on user files, compressed (LZNT1) or encrypted (EFS)
+# $DATA on user files, images > 4 GiB, corrupt fixups/runlists. Sparse
+# files ARE supported (holes extract as zeros, occupy no disk bytes).
+#
+# The helper is C11, libc only; build:
+#   cc -std=c11 -O2 -Wall -Wextra -o bin/ntfs ntfs.c
+# (tools/test-ntfs.sh does exactly this.)
+# algo 20: first free production id below the splt_test fixture (40).
+name = ntfs
+type = container
+algo = 20
+pack_version = 1
+generation = 1
+caps = container|external
+dec_mem = 0
+# "NTFS    " lives at offset 3 in the boot sector (after the jump EB 52 90)
+sniff.offset = 3
+sniff.magic = 4E5446532020202020
+sniff.ext = ntfs
+enumerate = bin/ntfs enumerate {in} {out}
+extract = bin/ntfs extract {in} {idx} {out}
+strip = bin/ntfs strip {in} {out}
+rebuild = bin/ntfs rebuild {recipe} {dir} {out}
+# WP16b: the map command makes the pack SEEKABLE (CAP_SEEK).
+map = bin/ntfs map {in} {out}
+# estimate = sum(member usize) + 64 MiB (header-derived, never a trial run)
+estimate = bin/ntfs estimate {in}
