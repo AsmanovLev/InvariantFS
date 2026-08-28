@@ -33,6 +33,7 @@ static volatile int g_shutdown = 0;
 static volatile sig_atomic_t g_sweep_now = 0;
 static char g_img_path[512] = "?";
 static volatile int g_sweep_busy = 0;
+static double g_attr_t = 1.0;   /* -o attr_t= override; 0 = bench-honest */
 static void invf_sweep_worker(void);   /* defined below sweep thread */
 static void table_rebuild_locked(void);   /* fwd (defined below) */
 
@@ -608,8 +609,14 @@ static int invf_open(const char *path, struct fuse_file_info *fi)
     if (!snapshot_entry(path + 1, NULL, NULL, NULL))
         return -ENOENT;
     __sync_fetch_and_add(&g_open_handles, 1);
-    if ((fi->flags & O_ACCMODE) == O_RDONLY)
+    if ((fi->flags & O_ACCMODE) == O_RDONLY) {
+        /* WP17: keep page cache across open/close. Every content change
+         * flows through this kernel mount (single-mount model; sweeps keep
+         * logical bytes identical), so the kernel always knows when to
+         * invalidate -- same argument as the pre-existing RDWR branch. */
+        fi->keep_cache = 1;
         return 0;  /* plain read open */
+    }
     /* read-write open: allocate write context, load existing content */
     {
         wctx *c = (wctx *)calloc(1, sizeof(wctx));
@@ -714,11 +721,15 @@ static int invf_write(const char *path, const char *buf, size_t size, off_t offs
     fprintf(stderr, "[write] %s off=%lld size=%zu fh=%llu\n", path, (long long)offset, size,
             (unsigned long long)fi->fh);
     if (!c) return -EBADF;
+    /* mt loop: the per-handle buffer is mutable shared state once the kernel
+     * can dispatch two writes of one inode to different worker threads;
+     * keep it under the same big lock as everything else */
+    pthread_mutex_lock(&g_io_lock);
     if (need > c->cap) {
         size_t ncap = c->cap ? c->cap : 4096;
         while (ncap < need) ncap *= 2;
         c->buf = (uint8_t *)realloc(c->buf, ncap);
-        if (!c->buf) return -ENOMEM;
+        if (!c->buf) { pthread_mutex_unlock(&g_io_lock); return -ENOMEM; }
         if (need > c->len)
             memset(c->buf + c->len, 0, need - c->len);  /* zero fill hole */
         c->cap = ncap;
@@ -727,6 +738,7 @@ static int invf_write(const char *path, const char *buf, size_t size, off_t offs
     }
     memcpy(c->buf + offset, buf, size);
     if (need > c->len) c->len = need;
+    pthread_mutex_unlock(&g_io_lock);
     return (int)size;
 }
 
@@ -828,9 +840,11 @@ static void *fuse_sweep_thread(void *arg)
 static int commit_wctx(wctx *c)
 {
     if (!c) return 0;
-    if (!c->buf || c->len == 0) return 0;
     pthread_mutex_lock(&g_io_lock);
     if (!g_vol) { pthread_mutex_unlock(&g_io_lock); return -EIO; }
+    /* checked under the lock: mt loop may run invf_write (realloc of
+     * c->buf) on another worker thread right up to this point */
+    if (!c->buf || c->len == 0) { pthread_mutex_unlock(&g_io_lock); return 0; }
     vol_ensure_path(g_vol, c->name);   /* auto-create parent dirs */
     /* append the new record before tombstoning the old one: the delete-first
        order lost the existing file when the create could not fit */
@@ -1036,16 +1050,19 @@ static int invf_truncate(const char *path, off_t len, struct fuse_file_info *fi)
         return -EINVAL;
     if (!c)
         return resize_volume_file(path, len);
+    /* mt loop: per-handle buffer mutation, same locking as invf_write */
+    pthread_mutex_lock(&g_io_lock);
     if ((uint64_t)len > c->cap) {
         size_t ncap = c->cap ? c->cap : 4096;
         while (ncap < (size_t)len) ncap *= 2;
         c->buf = (uint8_t *)realloc(c->buf, ncap);
-        if (!c->buf) return -ENOMEM;
+        if (!c->buf) { pthread_mutex_unlock(&g_io_lock); return -ENOMEM; }
         c->cap = ncap;
     }
     if ((size_t)len > c->len)
         memset(c->buf + c->len, 0, (size_t)len - c->len);
     c->len = (size_t)len;
+    pthread_mutex_unlock(&g_io_lock);
     return 0;
 }
 
@@ -1405,7 +1422,39 @@ static int invf_unlink(const char *path)
     return rc == 0 ? 0 : -ENOENT;
 }
 
+/* Negotiate transport features (WP17). Splice moves read payload
+ * /dev/fuse -> page cache without a userspace copy; async_read keeps
+ * kernel readahead concurrent (libfuse default, stated explicitly).
+ * Mask with capable: only what this kernel offers.
+ * API quirk: at FUSE_USE_VERSION=31 libfuse rejects the -o max_write=/
+ * max_readahead=/splice_* conn options (fuse_conn_info_opts wiring is
+ * API >= 32), so request sizes are set on conn directly here. The kernel
+ * clamps max_write/max_read to FUSE_MAX_PAGES_PER_REQ (1 MiB on 4K pages). */
+static void *invf_init(struct fuse_conn_info *conn, struct fuse_config *cfg)
+{
+    (void)cfg;
+    conn->want |= conn->capable & (FUSE_CAP_SPLICE_READ |
+                                   FUSE_CAP_SPLICE_WRITE |
+                                   FUSE_CAP_SPLICE_MOVE |
+                                   FUSE_CAP_ASYNC_READ);
+    /* max_read: -o max_read= sets the SESSION value (libfuse sizes its
+     * buffers from it) but leaves conn->max_read at 0 here; init must
+     * restate the same value or libfuse aborts with "requested different
+     * maximum read size". max_write/max_readahead have no such check.
+     * The kernel clamps all three to FUSE_MAX_PAGES_PER_REQ (1 MiB). */
+    conn->max_read = 1048576;
+    conn->max_write = 1048576;
+    conn->max_readahead = 1048576;
+    fprintf(stderr, "invf: conn max_read=%u max_write=%u max_readahead=%u splice=%c%c%c\n",
+            conn->max_read, conn->max_write, conn->max_readahead,
+            (conn->want & FUSE_CAP_SPLICE_READ)  ? 'r' : '-',
+            (conn->want & FUSE_CAP_SPLICE_MOVE)  ? 'm' : '-',
+            (conn->want & FUSE_CAP_SPLICE_WRITE) ? 'w' : '-');
+    return NULL;
+}
+
 static const struct fuse_operations invf_ops = {
+    .init = invf_init,
     .getattr = invf_getattr,
     .readdir = invf_readdir,
     .mkdir = invf_mkdir,
@@ -1509,6 +1558,15 @@ int main(int argc, char *argv[])
                 if (parse_size_opt(tok + 14, &dec_mem_limit)) have_dec = 1;
                 else fprintf(stderr, "invf: bad -o dec_mem_limit=%s; ignored\n",
                              tok + 14);
+            } else if (strncmp(tok, "attr_t=", 7) == 0) {
+                /* attr/entry cache TTL in seconds (WP17); 0 restores the
+                 * old bench-honest mode where every stat hits the daemon */
+                char *ep = NULL;
+                double v = strtod(tok + 7, &ep);
+                if (ep != tok + 7 && *ep == '\0' && v >= 0.0 && v <= 86400.0)
+                    g_attr_t = v;
+                else
+                    fprintf(stderr, "invf: bad -o attr_t=%s; ignored\n", tok + 7);
             } else {
                 size_t tl = strlen(tok);
                 if (fl + tl + 2 < sizeof fbuf) {
@@ -1554,12 +1612,23 @@ int main(int argc, char *argv[])
         int rc;
         int k;
         fuse_argv[fuse_argc++] = "invf-fuse";
-        /* attribute caching off by default: a writer process (wget) and
-         * the stat-ing process (portage digest check) are different
-         * clients; a cached size=0 from create time made portage see an
-         * empty file right after 80KB landed. User -o opts can override. */
-        fuse_argv[fuse_argc++] = "-o";
-        fuse_argv[fuse_argc++] = "attr_timeout=0,ac_attr_timeout=0";
+        /* WP17 transport tuning. attr/entry TTL: production default 1.0 s
+         * (same-process daemon writes invalidate through the mount
+         * naturally); -o attr_t=0 restores the old bench-honest mode where
+         * a distinct writer process and stat-ing process never see a stale
+         * cached size. max_read is an -o here (libfuse sizes its session
+         * buffers from it); max_write/max_readahead/splice caps are set in
+         * .init -- at FUSE_USE_VERSION=31 libfuse rejects those as -o
+         * options. User -o opts come after this string and win. */
+        {
+            static char tuning[128];
+            snprintf(tuning, sizeof tuning,
+                     "attr_timeout=%.3f,ac_attr_timeout=%.3f,entry_timeout=%.3f,"
+                     "max_read=1048576",
+                     g_attr_t, g_attr_t, g_attr_t);
+            fuse_argv[fuse_argc++] = "-o";
+            fuse_argv[fuse_argc++] = tuning;
+        }
         /* identify ourselves in /proc/mounts: source field becomes
          * "invfs" instead of anonymous /dev/fuse, so `mount | grep invfs`
          * and findmnt -t fuse.invfs work. User -o fsname= overrides. */
@@ -1597,7 +1666,16 @@ int main(int argc, char *argv[])
         se = fuse_get_session(f);
         fuse_set_signal_handlers(se);
 
-        rc = fuse_loop(f);
+        /* WP17: multithreaded loop. volume.c has NO internal locks, so all
+         * engine/table state stays serialized by the single g_io_lock (every
+         * op already takes it; the per-handle write-buffer paths were closed
+         * in this wave). mt then overlaps kernel<->daemon IPC (request
+         * dispatch, splice copies) with the locked engine work.
+         * API quirk: at FUSE_USE_VERSION=31 fuse_loop_mt(f, arg) maps to
+         * fuse_loop_mt_31(f, clone_fd) -- struct fuse_loop_config only
+         * exists at API >= 32 -- so pass clone_fd=0 and take libfuse
+         * defaults (demand-grown pool, max_idle_threads=10 >= min(cpus,8)). */
+        rc = fuse_loop_mt(f, 0);
 
         /* graceful path: signal or unmount -> close volume CLEAN */
         fuse_remove_signal_handlers(se);

@@ -17,7 +17,7 @@ sudo umount "$BMNT" 2>/dev/null || true
 fusermount3 -u "$IMNT" 2>/dev/null || true
 
 mount_btrfs() { sudo mount -o loop,compress=zstd:15 "$BTRFS_IMG" "$BMNT"; }
-mount_invfs() { (cd /dev/shm && "$REPO/bin/invf-fuse" "$(basename "$INVFS_IMG")" "$IMNT" &)
+mount_invfs() { (cd /dev/shm && "$REPO/bin/invf-fuse" -o "attr_t=${INVFS_ATTR_T:-1.0}" "$(basename "$INVFS_IMG")" "$IMNT" &)
                 for i in $(seq 1 50); do mountpoint -q "$IMNT" && return 0; sleep 0.1; done
                 echo "invfs mount FAILED"; return 1; }
 dropcaches() { sync; echo 3 | sudo tee /proc/sys/vm/drop_caches >/dev/null; }
