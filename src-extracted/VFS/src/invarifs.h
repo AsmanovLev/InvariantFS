@@ -182,6 +182,68 @@ typedef struct {
 } invfs_rdp0;                   /* 0x118 = 24 bytes */
 #pragma pack(pop)
 
+/* ---- WP18: RSZ0 resize descriptor (block 0 reserved area) ----
+ * Lives at byte offset 0x140 of block 0, past the 144-byte superblock and
+ * the RDP0 descriptor at 0x100; pre-WP18 images carry zeros there, which
+ * read as "absent" (magic mismatch) -- the RDP0 convention.
+ *
+ * invf-resize can never move the metadata payload (bitmap + journal + inode
+ * records) atomically: the bitmap grows into the journal head whenever
+ * total_blocks crosses a 32768-block boundary, so the rewrite overlaps and
+ * destroys the copy it replaces. The resize therefore runs in two phases:
+ * first the whole payload is copied into a collision-free staging area and
+ * made durable, then this descriptor and a RECOVERY superblock state are
+ * written ("armed"); only then may the payload be rewritten at its
+ * post-resize location, from the staging copy alone. A crash before arming
+ * leaves the old volume byte-identical (auto-recovery clears RECOVERY); a
+ * crash after re-enters the apply here at vol_open -- it is idempotent
+ * because it reads only the staging area, never the regions being
+ * overwritten. The commit (new superblock + cleared descriptor, one
+ * block-0 rewrite) is the last write.
+ *
+ *   0x140  char magic[4]             "RSZ0"
+ *   0x144  u32 version               1
+ *   0x148  u64 stage_start           first staging block
+ *   0x150  u64 stage_blocks          staging span, blocks
+ *   0x158  u64 bm_bytes              staged bitmap bytes
+ *   0x160  u64 j_bytes               staged journal bytes
+ *   0x168  u64 i_bytes               staged inode-area bytes
+ *   0x170  u64 old_total             pre-resize total_blocks (sanity)
+ *   0x178  invfs_superblock new_sb   the post-resize superblock image
+ *   0x208  u32 crc32c                over the descriptor with this field 0
+ * 208 bytes total; the rest of block 0 stays reserved-zero. */
+#define INVFS_RSZ0_OFF 0x140
+#pragma pack(push, 1)
+typedef struct {
+    char     magic[4];          /* 0x140 "RSZ0" */
+    uint32_t version;           /* 0x144 */
+    uint64_t stage_start;       /* 0x148 */
+    uint64_t stage_blocks;      /* 0x150 */
+    uint64_t bm_bytes;          /* 0x158 */
+    uint64_t j_bytes;           /* 0x160 */
+    uint64_t i_bytes;           /* 0x168 */
+    uint64_t old_total;         /* 0x170 */
+    invfs_superblock new_sb;    /* 0x178 */
+    uint32_t crc32c;            /* 0x208 */
+} invfs_rsz0;                   /* 0x20C = 208 bytes */
+#pragma pack(pop)
+
+/* The staging area's own header, one block at stage_start. The payload
+ * follows contiguously: bm_bytes of bitmap, then j_bytes of journal, then
+ * i_bytes of inode-area records. payload_crc covers exactly those
+ * bm+j+i bytes; the descriptor cross-checks the three lengths. */
+#pragma pack(push, 1)
+typedef struct {
+    char     magic[4];          /* "RSZS" */
+    uint32_t version;           /* 1 */
+    uint64_t bm_bytes;
+    uint64_t j_bytes;
+    uint64_t i_bytes;
+    uint32_t payload_crc;
+    uint32_t crc32c;            /* over the header with this field 0 */
+} invfs_rszs;                   /* 40 bytes, block-padded */
+#pragma pack(pop)
+
 /* AST block entry — one byte-range mapping (kernel binary format) */
 typedef struct {
     uint64_t file_offset;           /* offset in original file */
@@ -343,6 +405,10 @@ typedef struct {
 
 /* CRC32C (Castagnoli) — software table-based */
 uint32_t invfs_crc32c(const void *data, size_t len);
+/* Chained form: crc = invfs_crc32c_update(crc, p, n) over successive chunks
+ * equals invfs_crc32c over the concatenation; start from 0. Used where the
+ * input does not fit in memory at once (WP18 resize staging). */
+uint32_t invfs_crc32c_update(uint32_t crc, const void *data, size_t len);
 
 /* Byte-order helpers: all on-disk values are little-endian.
  * Host is assumed little-endian (x86/x64/ARM LE); on BE platforms

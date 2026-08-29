@@ -18,7 +18,7 @@ B3      := blake3 blake3_dispatch blake3_portable
 
 TOOLS   := invf-mkfs invf-verify invf-fsck invf-cp invf-cat invf-ls invf-stat \
            invf-zip invf-arctest invf-blkio_test invf-fuse invf-import invf-sweep meta_probe \
-           invf-stats
+           invf-stats invf-resize
 
 all: $(TOOLS:%=$(OUT)/%)
 
@@ -38,7 +38,7 @@ $(OUT)/invf-$(1): $$(OBJ)/$(1).o $(CORE_O)
 endef
 
 # CLI tools (main in src/<name>.c)
-CLI_MAINS := mkfs verify fsck cp cat ls stat arctest blkio_test
+CLI_MAINS := mkfs verify fsck cp cat ls stat arctest blkio_test resize
 $(foreach t,$(CLI_MAINS),$(eval $(call TOOL_RULE,$(t),)))
 
 $(OBJ)/invf-zip.o: $(SRC)/zip.c | $(OBJ)
@@ -107,6 +107,7 @@ e2e: all
 	bash tools/test-xfs.sh
 	bash tools/test-ntfs.sh
 	bash tools/test-vdi.sh
+	bash tools/test-resize.sh
 
 .PHONY: all clean test e2e fuzz
 -include $(wildcard $(OBJ)/*.d)

@@ -33,3 +33,16 @@ uint32_t invfs_crc32c(const void *data, size_t len)
 
     return crc ^ 0xFFFFFFFFu;
 }
+
+uint32_t invfs_crc32c_update(uint32_t crc, const void *data, size_t len)
+{
+    const uint8_t *p = (const uint8_t *)data;
+
+    if (!crc32c_table_ready)
+        crc32c_init();
+
+    crc ^= 0xFFFFFFFFu;             /* finished form -> running state */
+    while (len--)
+        crc = (crc >> 8) ^ crc32c_table[(crc ^ *p++) & 0xFF];
+    return crc ^ 0xFFFFFFFFu;
+}
