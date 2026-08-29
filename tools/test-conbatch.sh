@@ -159,7 +159,7 @@ int main(int argc, char **argv)
 }
 C
 gcc -std=gnu11 -O2 -I$REPO/src-extracted/VFS/src -o "$WORK/classof" "$WORK/classof.c" \
-    $REPO/build/obj/{volume,arc,crc32c,lz4,blkio,flacx,tarx,pngx,miniz,ppmd8,ppmd8enc,ppmd8dec,ppmd_codec,codec,bcj_x86,blake3,blake3_dispatch,blake3_portable}.o \
+    $REPO/build/obj/{volume,arc,crc32c,lz4,blkio,flacx,tarx,pngx,miniz,ppmd8,ppmd8enc,ppmd8dec,ppmd_codec,codec,bcj_x86,blake3,blake3_dispatch,blake3_portable,rs}.o \
     -Wl,-l:libzstd.so.1 -lz -lpthread
 
 NB=$($B/invf-ls "$IMG" | grep -c "^")  # total lines (header+files+summary)
@@ -214,7 +214,7 @@ int main(int argc, char **argv)
 }
 C
 gcc -std=gnu11 -O2 -I$REPO/src-extracted/VFS/src -o "$WORK/cbrm" "$WORK/cbrm.c" \
-    $REPO/build/obj/{volume,arc,crc32c,lz4,blkio,flacx,tarx,pngx,miniz,ppmd8,ppmd8enc,ppmd8dec,ppmd_codec,codec,bcj_x86,blake3,blake3_dispatch,blake3_portable}.o \
+    $REPO/build/obj/{volume,arc,crc32c,lz4,blkio,flacx,tarx,pngx,miniz,ppmd8,ppmd8enc,ppmd8dec,ppmd_codec,codec,bcj_x86,blake3,blake3_dispatch,blake3_portable,rs}.o \
     -Wl,-l:libzstd.so.1 -lz -lpthread
 "$WORK/cbrm" "$IMG" bins.tar
 # every "bins.tar!..." sibling must be gone (deletion semantics, WP14b)

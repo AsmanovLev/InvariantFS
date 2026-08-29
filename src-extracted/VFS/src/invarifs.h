@@ -143,6 +143,45 @@ typedef struct {
 #define VOLF_READONLY 0x00000001
 #define VOLF_META2    0x00000002  /* records may carry "INO2" metadata ext */
 
+/* ---- WP20b: RDP0 redundancy descriptor (block 0 reserved area) ----
+ * Lives at byte offset 0x100 of block 0, past the 144-byte superblock
+ * struct: vol_open and vol_write_sb only ever touch sizeof(invfs_superblock)
+ * bytes at offset 0, and pre-WP20b images carry zeros there, which read as
+ * "absent" (magic mismatch). The descriptor makes a configured redundancy
+ * scheme findable at mount/bootstrap without scanning the inode area for
+ * the "\x01parity*" owners, and persists the stripe geometry (k1/k2/m2)
+ * that the parity blocks on disk were computed with.
+ *
+ *   0x100  char magic[4]        "RDP0"
+ *   0x104  u8  l1_algo          0=off, 1=xor (WP20 stripe XOR)
+ *   0x105  u8  l2_algo          0=off, 1=rs-vm, 2=rs-cauchy (rs.c)
+ *   0x106  u16 k1               layer-1 stripe data blocks (8..128)
+ *   0x108  u16 k2               layer-2 stripe data blocks (32)
+ *   0x10A  u8  m2               layer-2 parity blocks per stripe (2..8)
+ *   0x10B  u8  pad              0
+ *   0x10C  u64 parity_area_hint live parity blocks (both layers) at write
+ *   0x114  u32 crc32c           CRC32C over 0x100..0x117 -- the full
+ *                               24-byte descriptor with this very field
+ *                               read as zero
+ * 24 bytes total; the rest of block 0 stays reserved-zero. */
+#define INVFS_RDP0_OFF 0x100
+#define INVFS_RDP0_L1_XOR       1
+#define INVFS_RDP0_L2_RS_VM     1
+#define INVFS_RDP0_L2_RS_CAUCHY 2
+#pragma pack(push, 1)
+typedef struct {
+    char     magic[4];          /* 0x100 "RDP0" */
+    uint8_t  l1_algo;           /* 0x104 */
+    uint8_t  l2_algo;           /* 0x105 */
+    uint16_t k1;                /* 0x106 */
+    uint16_t k2;                /* 0x108 */
+    uint8_t  m2;                /* 0x10A */
+    uint8_t  pad;               /* 0x10B */
+    uint64_t parity_area_hint;  /* 0x10C */
+    uint32_t crc32c;            /* 0x114 */
+} invfs_rdp0;                   /* 0x118 = 24 bytes */
+#pragma pack(pop)
+
 /* AST block entry — one byte-range mapping (kernel binary format) */
 typedef struct {
     uint64_t file_offset;           /* offset in original file */

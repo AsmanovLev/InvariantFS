@@ -164,7 +164,7 @@ int main(int argc, char **argv)
 }
 C
 gcc -std=gnu11 -O2 -I$REPO/src-extracted/VFS/src -o "$WORK/classof" "$WORK/classof.c" \
-    $REPO/build/obj/{volume,arc,crc32c,lz4,blkio,flacx,tarx,pngx,miniz,ppmd8,ppmd8enc,ppmd8dec,ppmd_codec,codec,bcj_x86,blake3,blake3_dispatch,blake3_portable}.o \
+    $REPO/build/obj/{volume,arc,crc32c,lz4,blkio,flacx,tarx,pngx,miniz,ppmd8,ppmd8enc,ppmd8dec,ppmd_codec,codec,bcj_x86,blake3,blake3_dispatch,blake3_portable,rs}.o \
     -Wl,-l:libzstd.so.1 -lz -lpthread
 
 echo "== import =="
@@ -232,7 +232,7 @@ int main(int argc, char **argv)
 }
 C
 gcc -std=gnu11 -O2 -I$REPO/src-extracted/VFS/src -o "$WORK/rread" "$WORK/rread.c" \
-    $REPO/build/obj/{volume,arc,crc32c,lz4,blkio,flacx,tarx,pngx,miniz,ppmd8,ppmd8enc,ppmd8dec,ppmd_codec,codec,bcj_x86,blake3,blake3_dispatch,blake3_portable}.o \
+    $REPO/build/obj/{volume,arc,crc32c,lz4,blkio,flacx,tarx,pngx,miniz,ppmd8,ppmd8enc,ppmd8dec,ppmd_codec,codec,bcj_x86,blake3,blake3_dispatch,blake3_portable,rs}.o \
     -Wl,-l:libzstd.so.1 -lz -lpthread
 # windows: glue head | inside the JPEG member | across the JPEG/PNG gap |
 # inside the PNG member | the tail. game.exe = 64B elf + 8K code + jpg@8256
@@ -300,7 +300,7 @@ int main(int argc, char **argv)
 }
 C
 gcc -std=gnu11 -O2 -I$REPO/src-extracted/VFS/src -o "$WORK/exrm" "$WORK/exrm.c" \
-    $REPO/build/obj/{volume,arc,crc32c,lz4,blkio,flacx,tarx,pngx,miniz,ppmd8,ppmd8enc,ppmd8dec,ppmd_codec,codec,bcj_x86,blake3,blake3_dispatch,blake3_portable}.o \
+    $REPO/build/obj/{volume,arc,crc32c,lz4,blkio,flacx,tarx,pngx,miniz,ppmd8,ppmd8enc,ppmd8dec,ppmd_codec,codec,bcj_x86,blake3,blake3_dispatch,blake3_portable,rs}.o \
     -Wl,-l:libzstd.so.1 -lz -lpthread
 "$WORK/exrm" "$IMG" game.exe
 if $B/invf-ls "$IMG" | grep -q "game.exe"; then

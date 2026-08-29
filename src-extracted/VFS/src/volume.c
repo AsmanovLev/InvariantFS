@@ -43,6 +43,7 @@
 #include "codec.h"
 #include "bcj_x86.h"
 #include "blake3.h"
+#include "rs.h"
 
 /* flacx.c — FLAC frame recipe extract/rebuild (bit-exact). */
 /* MUST match src/flacx.c layout: offset, len, kind, data */
@@ -263,6 +264,21 @@ typedef struct invfs_volume {
      * vol_close. */
     struct cpack_map_cache *maps;
     size_t maps_n, maps_cap;
+    /* WP20b: redundancy configuration (the RDP0 descriptor at block 0
+     * offset 0x100) + dirty-stripe tracking for incremental reseal.
+     * seal_k1 is the EFFECTIVE layer-1 stripe size (the descriptor's k1
+     * when live, SEAL_STRIPE_K = 32 otherwise). seal_dirty is a bitmap
+     * over shadow_zone_blocks, allocated lazily when a seal config
+     * exists (descriptor live at open, or vol_seal configures one): a
+     * set bit means the block (and hence its stripes) changed since the
+     * last successful reseal. It is always allocated ALL-ONES: what
+     * happened before this process opened the volume is unknowable, so
+     * the first reseal of a session is a full pass; a successful
+     * vol_seal zeroes it. */
+    invfs_rdp0 rd;
+    int rd_present;
+    uint32_t seal_k1;
+    uint8_t *seal_dirty;
     /* Crash consistency (doc/08). `dirty` remembers that the on-disk state
        has already been set to DIRTY this session, so the mark costs one
        superblock write per mount instead of one per mutation.
@@ -718,6 +734,98 @@ static void bm_dirty(invfs_volume *v, uint64_t i)
     if (byte + 1 > v->bm_hi) v->bm_hi = byte + 1;
 }
 
+/* ---- WP20b: redundancy descriptor + dirty-stripe bitmap ---------------
+ * (the seal machinery itself lives with the write-path WP20 code far
+ * below; vol_open and the write/alloc/free hooks need these early) */
+
+#define SEAL_STRIPE_K   32u   /* default layer-1 stripe (descriptor k1) */
+#define SEAL2_K         32u   /* layer-2 RS stripe data blocks (fixed) */
+#define SEAL2_M2_MIN    2u
+#define SEAL2_M2_MAX    8u
+
+/* CRC convention: over the 24-byte descriptor with the crc32c field
+ * itself read as zero (i.e. the bytes 0x100..0x117 of block 0). */
+static uint32_t rdp0_crc(const invfs_rdp0 *rd)
+{
+    invfs_rdp0 t = *rd;
+    t.crc32c = 0;
+    return invfs_crc32c(&t, sizeof t);
+}
+
+/* Persist (rd != NULL) or clear (rd == NULL) the RDP0 descriptor by
+ * read-modify-write of the whole block 0. vol_write_sb only ever writes
+ * the 144-byte struct at offset 0, so the reserved tail survives state
+ * flips; on a raw device the full-block write is what the alignment
+ * demands anyway. The in-memory copy follows the disk state. */
+static int vol_write_rdp0(invfs_volume *v, const invfs_rdp0 *rd)
+{
+    uint8_t blk[INVFS_BLOCK_SIZE];
+    if (io_seek(&v->io, 0) != 0 ||
+        io_read(&v->io, blk, sizeof blk) != 0)
+        return -1;
+    if (rd) {
+        invfs_rdp0 t = *rd;
+        memcpy(t.magic, "RDP0", 4);
+        t.pad = 0;
+        t.crc32c = 0;
+        t.crc32c = rdp0_crc(&t);
+        memcpy(blk + INVFS_RDP0_OFF, &t, sizeof t);
+        v->rd = t;
+        v->rd_present = 1;
+    } else {
+        memset(blk + INVFS_RDP0_OFF, 0, sizeof(invfs_rdp0));
+        memset(&v->rd, 0, sizeof v->rd);
+        v->rd_present = 0;
+    }
+    if (io_seek(&v->io, 0) != 0 ||
+        io_write(&v->io, blk, sizeof blk) != 0)
+        return -1;
+    return 0;
+}
+
+/* (Re)allocate the dirty bitmap and mark every shadow block: the state
+ * before that moment is simply not tracked, so the next reseal must be a
+ * full pass. */
+static void seal_dirty_reset(invfs_volume *v)
+{
+    size_t bytes = (size_t)((v->sb.shadow_zone_blocks + 7) / 8);
+    if (!v->seal_dirty)
+        v->seal_dirty = (uint8_t *)malloc(bytes ? bytes : 1);
+    if (v->seal_dirty)
+        memset(v->seal_dirty, 0xFF, bytes);
+}
+
+/* Mark the shadow-zone blocks [pba, pba+n) dirty (their stripes need a
+ * parity recompute at the next reseal). No-op outside the shadow zone or
+ * when no seal config exists (the bitmap is NULL then). */
+static void seal_dirty_mark(invfs_volume *v, uint64_t pba, uint64_t n)
+{
+    uint64_t ss = v->sb.shadow_zone_start;
+    uint64_t b, end;
+    if (!v->seal_dirty || !n) return;
+    if (pba + n <= ss || pba >= ss + v->sb.shadow_zone_blocks) return;
+    if (pba < ss) { n -= ss - pba; pba = ss; }
+    end = pba + n;
+    if (end > ss + v->sb.shadow_zone_blocks)
+        end = ss + v->sb.shadow_zone_blocks;
+    for (b = pba; b < end; b++)
+        bit_set(v->seal_dirty, b - ss);
+}
+
+/* 1 when any block of the stripe is dirty (or nothing is tracked, which
+ * is the full-pass fallback); 0 = the stripe is provably unchanged since
+ * the last successful reseal. */
+static int seal_stripe_dirty(const invfs_volume *v, uint64_t stripe,
+                             uint32_t k)
+{
+    uint64_t base = stripe * k, end = base + k, b;
+    if (!v->seal_dirty) return 1;
+    if (end > v->sb.shadow_zone_blocks) end = v->sb.shadow_zone_blocks;
+    for (b = base; b < end; b++)
+        if (bit_get(v->seal_dirty, b)) return 1;
+    return 0;
+}
+
 /* defined near vol_count_free; needed by vol_open and the fsck fixup above it */
 static void alloc_state_reset(invfs_volume *v);
 
@@ -761,6 +869,42 @@ invfs_volume *vol_open(const char *path, int *err)
     if (memcmp(v->sb.magic, INVFS_MAGIC, 8) != 0) { *err = -4; goto fail; }
     if (invfs_crc32c(&v->sb, offsetof(invfs_superblock, checksum)) != v->sb.checksum)
         { *err = -5; goto fail; }
+
+    /* WP20b: second block-0 read for the RDP0 redundancy descriptor at
+     * 0x100 (past the 144-byte superblock struct; pre-WP20b images carry
+     * zeros there -> absent). Valid magic+crc loads the persisted
+     * redundancy config; anything else leaves the layer-1 default. */
+    v->seal_k1 = SEAL_STRIPE_K;
+    {
+        invfs_rdp0 rd;
+        if (io_seek(&v->io, INVFS_RDP0_OFF) == 0 &&
+            io_read(&v->io, &rd, sizeof rd) == 0 &&
+            memcmp(rd.magic, "RDP0", 4) == 0) {
+            if (rdp0_crc(&rd) == rd.crc32c) {
+                v->rd = rd;
+                v->rd_present = 1;
+            } else {
+                fprintf(stderr, "vol_open: RDP0 descriptor CRC mismatch; "
+                                "redundancy config ignored\n");
+            }
+        }
+    }
+    if (v->rd_present) {
+        int l2_ok = (v->rd.l2_algo == INVFS_RDP0_L2_RS_VM ||
+                     v->rd.l2_algo == INVFS_RDP0_L2_RS_CAUCHY) &&
+                    v->rd.k2 == SEAL2_K &&
+                    v->rd.m2 >= SEAL2_M2_MIN && v->rd.m2 <= SEAL2_M2_MAX;
+        if (v->rd.l1_algo == INVFS_RDP0_L1_XOR &&
+            v->rd.k1 >= 8 && v->rd.k1 <= 128)
+            v->seal_k1 = v->rd.k1;
+        if (v->rd.l2_algo && !l2_ok) {
+            fprintf(stderr, "vol_open: unsupported RDP0 layer-2 shape "
+                    "(algo %u, k2 %u, m2 %u); layer 2 ignored\n",
+                    (unsigned)v->rd.l2_algo, (unsigned)v->rd.k2,
+                    (unsigned)v->rd.m2);
+            v->rd.l2_algo = 0;
+        }
+    }
 
     v->bitmap_blocks = (v->sb.total_blocks / 8 + INVFS_BLOCK_SIZE - 1) / INVFS_BLOCK_SIZE;
     v->bitmap = (uint8_t *)calloc(1, (size_t)v->bitmap_blocks * INVFS_BLOCK_SIZE);
@@ -1020,6 +1164,11 @@ invfs_volume *vol_open(const char *path, int *err)
             }
         }
     }
+    /* WP20b: a live descriptor means a seal config exists -- start the
+     * dirty bitmap (all-ones: the first reseal of a session is a full
+     * pass, what happened while unmounted is unknowable). */
+    if (v->rd_present && (v->rd.l1_algo || v->rd.l2_algo))
+        seal_dirty_reset(v);
     *err = 0;
     /* Unclean shutdown. Reading always works -- that is how you find out
      * what survived. For WRITES the old behavior was a hard latch: every
@@ -1092,6 +1241,7 @@ void vol_close(invfs_volume *v)
     arc_destroy(v->arc);
     cpack_map_cache_reset(v);
     free(v->heat_seen);
+    free(v->seal_dirty);
     free(v->tz);
     free(v->bz);
     free(v->bitmap);
@@ -1380,6 +1530,9 @@ int vol_fsck_scan(invfs_volume *v, invfs_fsck_report *rep, int fix)
         memcpy(v->bitmap, used, used_bytes);
         v->free_blocks = vol_count_free(v);
         alloc_state_reset(v);   /* bitmap replaced: per-zone counters stale */
+        /* WP20b: the whole occupancy map may have changed -- every seal
+         * stripe's membership is now unproven, force a full reseal */
+        seal_dirty_reset(v);
         /* alloc_state_reset marks the bitmap clean, which holds on mount but
          * not here: every byte may differ from disk, so flush all of it. */
         v->bm_lo = 0;
@@ -1617,6 +1770,10 @@ static uint64_t alloc_blocks(invfs_volume *v, uint64_t zone_start, uint64_t zone
                 for (k = start; k <= i; k++) bit_set(v->bitmap, k);
                 bm_dirty(v, start);
                 bm_dirty(v, i);
+                /* WP20b: fresh shadow content invalidates its stripes'
+                 * parity (the block's old content was zero-as-absent) */
+                if (zone_start == v->sb.shadow_zone_start)
+                    seal_dirty_mark(v, start, n);
                 *cursor = (i + 1 < zone_end) ? i + 1 : zone_start;
                 v->free_blocks -= n;
                 *zone_free -= n;
@@ -1961,6 +2118,8 @@ static int write_segment_blocks(invfs_volume *v, uint64_t pba, uint8_t *buf,
     if (io_seek(&v->io, pba * INVFS_BLOCK_SIZE) != 0 ||
         io_write(&v->io, buf, span) != 0)
         return -1;
+    /* WP20b: overwriting occupied shadow blocks dirties their stripes */
+    seal_dirty_mark(v, pba, phys_blocks);
     return 0;
 }
 
@@ -4323,6 +4482,8 @@ void vol_free_blocks(invfs_volume *v, uint64_t pba, uint64_t nblocks)
     for (i = pba; i < end; i++)
         bit_clr(v->bitmap, i);
     if (end > pba) { bm_dirty(v, pba); bm_dirty(v, end - 1); }
+    /* WP20b: a freed shadow block changes its stripes' membership */
+    seal_dirty_mark(v, pba, end - pba);
     v->free_blocks += nblocks;
 
     /* Give the freed space back to the zone it came from, and drop the
@@ -9397,7 +9558,7 @@ int vol_hardlink(invfs_volume *v, const char *from, const char *to)
  * Optional parity over the shadow zone (the RAW zone is excluded: it is the
  * hot, transient staging area; everything valuable is swept into Shadow).
  * Stripe s covers the shadow-zone-relative block range
- * [s*SEAL_STRIPE_K, (s+1)*SEAL_STRIPE_K); its parity block holds the XOR of
+ * [s*k1, (s+1)*k1); its parity block holds the XOR of
  * the stripe's OCCUPIED blocks at seal time (absent blocks read as zero).
  *
  * Ownership mirrors the WP10 text-batch owner: parity blocks are ordinary
@@ -9440,9 +9601,27 @@ int vol_hardlink(invfs_volume *v, const char *from, const char *to)
  * the segment and the segment's OWN framed CRC32C arbitrates -- a wrong
  * reconstruction can never pass it, so drift or double damage degrades to
  * the original EIO, never to garbage. On success the restored block is
- * written back (self-heal) and logged. */
+ * written back (self-heal) and logged.
+ *
+ * WP20b: the layer-1 stripe size k1 is runtime-configurable (v->seal_k1,
+ * persisted in the RDP0 descriptor; SEAL_STRIPE_K is only the default),
+ * and a second, independent layer sits next to it: RS(32+m2, 32) over
+ * GF(2^8) (rs.c), m2 parity blocks per 32-block stripe, owned by hidden
+ * "\x01parity2", "\x01parity21", ... records (same owner pattern as
+ * layer 1: AST entries algo=NONE length=4096, L2P maps; shard-local
+ * block_id = stripe*m2 + slot). Layers are independent: a block may be
+ * covered by both, and parity blocks of EITHER layer are excluded from
+ * BOTH layers' data (parity is the tool, not the cargo). Layer-2
+ * recovery is fsck-only (vol_seal2_repair, invoked by invf-fsck
+ * --repair): the runtime read path is unchanged and still fails loudly
+ * when layer 1 cannot help.
+ *
+ * (Name-space note: layer-1 shard N is "\x01parity<N>", layer-2 shard N
+ * is "\x01parity2<N>": layer-1 shard 2 collides with layer-2 shard 0,
+ * but a second shard needs > 65535 stripes -- an 8+ TB shadow zone.)
+ */
 
-#define SEAL_STRIPE_K   32u      /* data blocks per parity stripe */
+/* SEAL_STRIPE_K/SEAL2_K live with the WP20b helpers ahead of vol_open */
 #define SEAL_SHARD      65535u   /* stripes per owner record (u16 num_blocks) */
 
 static void seal_shard_name(uint64_t shard, char *out, size_t cap)
@@ -9453,17 +9632,35 @@ static void seal_shard_name(uint64_t shard, char *out, size_t cap)
         snprintf(out, cap, "\x01parity%llu", (unsigned long long)shard);
 }
 
-/* The seal state a read/verify path needs: the shard owner ids and the set
- * of blocks they map (the XOR exclusion set). Read-only to load. */
+static void seal2_shard_name(uint64_t shard, char *out, size_t cap)
+{
+    if (shard == 0)
+        snprintf(out, cap, "\x01parity2");
+    else
+        snprintf(out, cap, "\x01parity2%llu", (unsigned long long)shard);
+}
+
+/* layer-2 stripes per owner record: one AST entry per parity block */
+static uint64_t seal2_shard_stripes(uint32_t m2)
+{
+    return 65535 / m2;
+}
+
+/* The seal state a read/verify path needs: the shard owner ids of BOTH
+ * layers and the set of blocks they map (the exclusion set: parity blocks
+ * are cargo for neither layer). Read-only to load. */
 typedef struct {
-    uint64_t *shard_id;      /* owner inode id per shard */
+    uint64_t *shard_id;      /* layer-1 owner inode id per shard */
     size_t   nshards;
+    uint64_t *shard2_id;     /* layer-2 owner inode id per shard */
+    size_t   nshards2;
     uint8_t *is_par;         /* bitmap over total_blocks: 1 = parity block */
 } seal_view;
 
 static void seal_view_free(seal_view *sv)
 {
     free(sv->shard_id);
+    free(sv->shard2_id);
     free(sv->is_par);
     memset(sv, 0, sizeof *sv);
 }
@@ -9490,13 +9687,31 @@ static int seal_view_load(invfs_volume *v, seal_view *sv)
         sv->shard_id[shard] = id;
     }
     sv->nshards = (size_t)shard;
+    for (shard = 0;; shard++) {
+        char nm[32];
+        uint64_t id;
+        uint64_t *ns;
+        seal2_shard_name(shard, nm, sizeof nm);
+        id = vol_find(v, nm);
+        if (!id) break;      /* layer-2 shards exist contiguously from 0 */
+        ns = (uint64_t *)realloc(sv->shard2_id,
+                                 (shard + 1) * sizeof *sv->shard2_id);
+        if (!ns) { seal_view_free(sv); return -1; }
+        sv->shard2_id = ns;
+        sv->shard2_id[shard] = id;
+    }
+    sv->nshards2 = (size_t)shard;
     for (i = 0; i < v->l2p_count; i++) {
         const invfs_l2p_entry *e = &v->l2p[i];
         uint64_t b, bend;
+        int is_owner = 0;
         if (e->type != INVFS_JRN_MAP) continue;
         for (shard = 0; (size_t)shard < sv->nshards; shard++)
-            if (e->inode == sv->shard_id[shard]) break;
-        if ((size_t)shard == sv->nshards) continue;
+            if (e->inode == sv->shard_id[shard]) { is_owner = 1; break; }
+        if (!is_owner)
+            for (shard = 0; (size_t)shard < sv->nshards2; shard++)
+                if (e->inode == sv->shard2_id[shard]) { is_owner = 1; break; }
+        if (!is_owner) continue;
         if (e->pba >= v->sb.total_blocks) continue;
         bend = e->pba + (e->length ? e->length : 1);
         if (bend > v->sb.total_blocks) bend = v->sb.total_blocks;
@@ -9521,8 +9736,8 @@ static void seal_xor_block(uint8_t *acc, const uint8_t *blk)
 static int seal_stripe_xor(invfs_volume *v, const seal_view *sv,
                            uint64_t stripe, uint8_t *acc)
 {
-    uint64_t base = v->sb.shadow_zone_start + stripe * SEAL_STRIPE_K;
-    uint64_t end = base + SEAL_STRIPE_K;
+    uint64_t base = v->sb.shadow_zone_start + stripe * v->seal_k1;
+    uint64_t end = base + v->seal_k1;
     uint64_t shadow_end = v->sb.shadow_zone_start + v->sb.shadow_zone_blocks;
     uint64_t b;
     uint8_t *tmp;
@@ -9634,7 +9849,7 @@ static int seal_recover_segment(invfs_volume *v, uint64_t pba, uint64_t plen,
     for (i = 0; i < plen; i++) {
         uint64_t s, z;
         cb = pba + i;
-        s = (cb - ss) / SEAL_STRIPE_K;
+        s = (cb - ss) / v->seal_k1;
         if (!syn_have || syn_s != s) {
             syn_live = seal_syndrome(v, &sv, s, syn) == 1;
             if (syn_live) {     /* zero syndrome: nothing to repair with */
@@ -9668,8 +9883,8 @@ static int seal_recover_segment(invfs_volume *v, uint64_t pba, uint64_t plen,
         size_t nsyn = 0;
         int ok = 0;
 
-        s0 = (pba - ss) / SEAL_STRIPE_K;
-        s1 = (pba + plen - 1 - ss) / SEAL_STRIPE_K;
+        s0 = (pba - ss) / v->seal_k1;
+        s1 = (pba + plen - 1 - ss) / v->seal_k1;
         nspan = s1 - s0 + 1;
         st_syn = malloc(8 * sizeof *st_syn);
         if (st_syn) {
@@ -9682,9 +9897,9 @@ static int seal_recover_segment(invfs_volume *v, uint64_t pba, uint64_t plen,
                 for (z = 0; z < INVFS_BLOCK_SIZE; z++)
                     if (st_syn[nsyn][z]) { nz = 1; break; }
                 if (!nz) continue;   /* consistent stripe: no candidate */
-                lo = pba > ss + s * SEAL_STRIPE_K ? pba
-                                                  : ss + s * SEAL_STRIPE_K;
-                hi = ss + (s + 1) * SEAL_STRIPE_K;
+                lo = pba > ss + s * v->seal_k1 ? pba
+                                                  : ss + s * v->seal_k1;
+                hi = ss + (s + 1) * v->seal_k1;
                 if (hi > pba + plen) hi = pba + plen;
                 if (hi <= lo) continue;
                 st_lo[nsyn] = lo;
@@ -9807,6 +10022,471 @@ static int seal_shard_sync(invfs_volume *v, uint64_t owner, uint64_t shard,
     return tz_owner_write(v, owner, nm, o);
 }
 
+/* ---- WP20b: redundancy configuration + layer 2 (RS) ------------------ */
+
+void vol_redun_config(invfs_volume *v, uint32_t k1, int l2_algo, uint32_t m2)
+{
+    uint32_t ok1, om;
+    int oa;
+    uint32_t nk1, nm;
+    int na;
+
+    if (!v) return;
+    ok1 = v->seal_k1;
+    oa = v->rd_present ? v->rd.l2_algo : 0;
+    om = v->rd_present ? v->rd.m2 : 0;
+    nk1 = k1 ? k1 : ok1;
+    na = l2_algo >= 0 ? l2_algo : oa;
+    nm = m2 ? m2 : om;
+    if (nk1 < 8) nk1 = 8;
+    if (nk1 > 128) nk1 = 128;
+    if (na && nm < SEAL2_M2_MIN) nm = SEAL2_M2_MIN;
+    if (na && nm > SEAL2_M2_MAX) nm = SEAL2_M2_MAX;
+    /* a geometry change invalidates the dirty tracking: full pass */
+    if (nk1 != ok1 || na != oa || (na && nm != om))
+        seal_dirty_reset(v);
+    v->seal_k1 = nk1;
+    v->rd.l1_algo = INVFS_RDP0_L1_XOR;
+    v->rd.l2_algo = (uint8_t)na;
+    v->rd.k1 = (uint16_t)nk1;
+    v->rd.k2 = (uint16_t)(na ? SEAL2_K : 0);
+    v->rd.m2 = (uint8_t)(na ? nm : 0);
+    v->rd_present = 1;
+    if (!v->seal_dirty)
+        seal_dirty_reset(v);
+}
+
+int vol_redun_state(const invfs_volume *v, uint32_t *k1, int *l2_algo,
+                    uint32_t *m2)
+{
+    if (!v) return 0;
+    if (k1) *k1 = v->seal_k1;
+    if (l2_algo) *l2_algo = v->rd_present ? v->rd.l2_algo : 0;
+    if (m2) *m2 = v->rd_present ? v->rd.m2 : 0;
+    return v->rd_present;
+}
+
+/* Rebuild the layer-2 stripe -> parity-pba map from the journal (newest
+ * wins). par has n_stripes*m2 slots: stripe*s slot j at par[s*m2+j]. */
+static void seal2_map_load(const invfs_volume *v, const seal_view *sv,
+                           uint64_t shard_stripes, uint32_t m2,
+                           uint64_t n_stripes, uint64_t *par)
+{
+    size_t i;
+    for (i = 0; i < v->l2p_count; i++) {
+        const invfs_l2p_entry *e = &v->l2p[i];
+        size_t shard;
+        uint64_t gs;
+        if (e->type != INVFS_JRN_MAP) continue;
+        for (shard = 0; shard < sv->nshards2; shard++)
+            if (e->inode == sv->shard2_id[shard]) break;
+        if (shard == sv->nshards2) continue;
+        gs = shard * shard_stripes + e->lba / m2;
+        if (gs < n_stripes && e->pba)
+            par[gs * m2 + e->lba % m2] = e->pba;
+    }
+}
+
+/* Rewrite one layer-2 shard's owner record when its entry set changed.
+ * Entries are (stripe, slot) pairs in ascending shard-local block_id
+ * order (block_id = local_stripe*m2 + slot). Same pattern as
+ * seal_shard_sync. */
+static int seal2_shard_sync(invfs_volume *v, uint64_t owner, uint64_t shard,
+                            tz_owner *o, const uint64_t *par,
+                            uint64_t n_stripes, uint32_t m2)
+{
+    uint64_t shard_stripes = seal2_shard_stripes(m2);
+    uint64_t base = shard * shard_stripes;
+    uint64_t hi = base + shard_stripes;
+    uint32_t want_n = 0, i;
+    uint64_t s, j;
+    int same;
+    char nm[32];
+
+    if (hi > n_stripes) hi = n_stripes;
+    for (s = base; s < hi; s++)
+        for (j = 0; j < m2; j++)
+            if (par[s * m2 + j]) want_n++;
+    same = (o->n == want_n);
+    if (same) {
+        uint64_t idx = 0;
+        for (s = base; s < hi && same; s++)
+            for (j = 0; j < m2 && same; j++) {
+                if (!par[s * m2 + j]) continue;
+                if (idx >= o->n ||
+                    o->ents[idx].block_id != (uint32_t)((s - base) * m2 + j))
+                    same = 0;
+                idx++;
+            }
+    }
+    if (same) return 0;
+
+    if (o->cap < want_n) {
+        invfs_ast_block_entry *ne = (invfs_ast_block_entry *)
+            realloc(o->ents, (want_n ? want_n : 1) * sizeof(*ne));
+        if (!ne) return -1;
+        o->ents = ne;
+        o->cap = want_n;
+    }
+    o->n = 0;
+    for (s = base; s < hi; s++) {
+        for (j = 0; j < m2; j++) {
+            invfs_ast_block_entry *e;
+            if (!par[s * m2 + j]) continue;
+            e = &o->ents[o->n++];
+            memset(e, 0, sizeof *e);
+            e->length = INVFS_BLOCK_SIZE;
+            e->zone = INVFS_ZONE_BINARY;   /* see seal_shard_sync */
+            e->algo = INVFS_ALGO_NONE;
+            e->block_id = (uint32_t)((s - base) * m2 + j);
+            e->block_offset = 0;
+        }
+    }
+    seal2_shard_name(shard, nm, sizeof nm);
+    return tz_owner_write(v, owner, nm, o);
+}
+
+/* The layer-2 seal pass (called by vol_seal after the layer-1 pass, with
+ * the same live seal_view): check-and-update RS(32+m2, 32) parity over
+ * the shadow zone. Mirrors the layer-1 rules: absent blocks encode as
+ * zero, parity blocks of both layers are excluded from the data, new maps
+ * are flushed durable before any owner record names them, stripes are
+ * recomputed only when their blocks dirtied since the last reseal. */
+static int vol_seal_l2(invfs_volume *v, seal_view *sv, invfs_seal_report *rep)
+{
+    const uint32_t k2 = SEAL2_K;
+    const uint32_t m2 = v->rd.m2;
+    const int algo = v->rd.l2_algo;
+    uint64_t shard_stripes = seal2_shard_stripes(m2);
+    uint64_t ss = v->sb.shadow_zone_start, snb = v->sb.shadow_zone_blocks;
+    uint64_t n_stripes = (snb + k2 - 1) / k2;
+    uint64_t s, j, b;
+    uint64_t occupied = 0;
+    uint64_t *par = NULL;    /* (stripe*m2 + slot) -> parity pba (0 = none) */
+    uint8_t *want = NULL;    /* stripe holds >=1 occupied non-parity block */
+    uint8_t *data = NULL, *pacc = NULL, *stored = NULL;
+    uint8_t **dp = NULL, **pp = NULL;
+    tz_owner *own = NULL;
+    size_t own_cap = 0;
+    int rc = 0;
+    size_t i;
+
+    par = (uint64_t *)calloc((size_t)n_stripes * m2, sizeof *par);
+    want = (uint8_t *)calloc((size_t)(n_stripes + 7) / 8, 1);
+    data = (uint8_t *)malloc((size_t)k2 * INVFS_BLOCK_SIZE);
+    pacc = (uint8_t *)malloc((size_t)m2 * INVFS_BLOCK_SIZE);
+    stored = (uint8_t *)malloc(INVFS_BLOCK_SIZE);
+    dp = (uint8_t **)malloc(k2 * sizeof *dp);
+    pp = (uint8_t **)malloc(m2 * sizeof *pp);
+    if (!par || !want || !data || !pacc || !stored || !dp || !pp) {
+        rc = -1;
+        goto out;
+    }
+    for (i = 0; i < k2; i++) dp[i] = data + i * INVFS_BLOCK_SIZE;
+    for (i = 0; i < m2; i++) pp[i] = pacc + i * INVFS_BLOCK_SIZE;
+
+    seal2_map_load(v, sv, shard_stripes, m2, n_stripes, par);
+    if (sv->nshards2) {
+        own = (tz_owner *)calloc(sv->nshards2, sizeof *own);
+        if (!own) { rc = -1; goto out; }
+        own_cap = sv->nshards2;
+        for (i = 0; i < sv->nshards2; i++) {
+            if (tz_owner_load(v, sv->shard2_id[i], &own[i]) != 0) {
+                fprintf(stderr, "seal2: owner shard %zu unreadable\n", i);
+                rc = -1;
+                goto out;
+            }
+        }
+    }
+
+    /* membership from the live bitmap, parity blocks (both layers) out */
+    for (s = 0; s < n_stripes; s++) {
+        uint64_t base = ss + s * k2, end = base + k2, cnt = 0;
+        if (end > ss + snb) end = ss + snb;
+        for (b = base; b < end; b++)
+            if (bit_get(v->bitmap, b) && !bit_get(sv->is_par, b)) cnt++;
+        if (cnt) {
+            want[s / 8] |= (uint8_t)(1u << (s % 8));
+            occupied += cnt;
+        }
+    }
+
+    /* allocate the parity slots a wanted stripe is missing */
+    for (s = 0; s < n_stripes; s++) {
+        uint64_t shard;
+        int missing = 0;
+        if (!(want[s / 8] & (1u << (s % 8)))) continue;
+        for (j = 0; j < m2; j++)
+            if (!par[s * m2 + j]) missing = 1;
+        if (!missing) continue;
+        shard = s / shard_stripes;
+        /* shards exist contiguously: create the missing owners up to the
+         * one this stripe needs (empty records; the sync below fills
+         * them) */
+        while (shard >= sv->nshards2) {
+            char nm[32];
+            uint64_t nid;
+            uint64_t *ns;
+            tz_owner *no;
+            seal2_shard_name(sv->nshards2, nm, sizeof nm);
+            nid = vol_create_file(v, nm, NULL, 0);
+            if (!nid) { rc = -1; goto finalize; }
+            ns = (uint64_t *)realloc(sv->shard2_id,
+                                     (sv->nshards2 + 1) *
+                                     sizeof *sv->shard2_id);
+            if (!ns) { rc = -1; goto finalize; }
+            sv->shard2_id = ns;
+            sv->shard2_id[sv->nshards2] = nid;
+            no = (tz_owner *)realloc(own, (sv->nshards2 + 1) * sizeof *own);
+            if (!no) { rc = -1; goto finalize; }
+            own = no;
+            memset(&own[sv->nshards2], 0, sizeof *own);
+            own_cap = sv->nshards2 + 1;
+            /* load the fresh record's position so the sync's rewrite
+             * position-kills it (see the layer-1 loop) */
+            if (tz_owner_load(v, nid, &own[sv->nshards2]) != 0) {
+                rc = -1;
+                goto finalize;
+            }
+            sv->nshards2++;
+        }
+        for (j = 0; j < m2; j++) {
+            uint64_t pba;
+            if (par[s * m2 + j]) continue;
+            pba = alloc_blocks(v, ss, snb, 1, 1);
+            if (!pba) {
+                fprintf(stderr, "seal2: ENOSPC for parity %llu of stripe "
+                        "%llu\n", (unsigned long long)j,
+                        (unsigned long long)s);
+                rep->l2_unprotected++;
+                continue;
+            }
+            if (vol_map(v, sv->shard2_id[shard],
+                        (s % shard_stripes) * m2 + j, pba, 1) != 0) {
+                vol_free_blocks(v, pba, 1);
+                rep->l2_unprotected++;
+                continue;
+            }
+            par[s * m2 + j] = pba;
+            bit_set(sv->is_par, pba);
+            rep->l2_added++;
+        }
+    }
+    /* maps durable BEFORE any owner record names them (the tz_seal rule) */
+    if (rep->l2_added && vol_flush(v) != 0) { rc = -1; goto finalize; }
+
+    /* check-and-update every wanted stripe with complete parity */
+    for (s = 0; s < n_stripes; s++) {
+        int full = 1;
+        if (!(want[s / 8] & (1u << (s % 8)))) continue;
+        for (j = 0; j < m2; j++)
+            if (!par[s * m2 + j]) full = 0;
+        if (!full) continue;
+        if (!seal_stripe_dirty(v, s, k2)) {
+            rep->l2_dirty_skipped++;
+            continue;
+        }
+        /* data slots: occupied non-parity blocks, everything else zero */
+        memset(data, 0, (size_t)k2 * INVFS_BLOCK_SIZE);
+        for (i = 0; i < k2; i++) {
+            b = ss + s * k2 + i;
+            if (b >= ss + snb) break;
+            if (!bit_get(v->bitmap, b) || bit_get(sv->is_par, b)) continue;
+            if (io_seek(&v->io, b * INVFS_BLOCK_SIZE) != 0 ||
+                io_read(&v->io, data + i * INVFS_BLOCK_SIZE,
+                        INVFS_BLOCK_SIZE) != 0) {
+                rc = -1;
+                goto finalize;
+            }
+        }
+        if (rs_encode(algo, k2, m2, INVFS_BLOCK_SIZE, dp, pp) != 0) {
+            rc = -1;
+            goto finalize;
+        }
+        for (j = 0; j < m2; j++) {
+            uint64_t pb = par[s * m2 + j];
+            if (io_seek(&v->io, pb * INVFS_BLOCK_SIZE) != 0 ||
+                io_read(&v->io, stored, INVFS_BLOCK_SIZE) != 0) {
+                rc = -1;
+                goto finalize;
+            }
+            if (memcmp(pp[j], stored, INVFS_BLOCK_SIZE) == 0) {
+                rep->l2_unchanged++;
+            } else {
+                if (io_seek(&v->io, pb * INVFS_BLOCK_SIZE) != 0 ||
+                    io_write(&v->io, pp[j], INVFS_BLOCK_SIZE) != 0) {
+                    rc = -1;
+                    goto finalize;
+                }
+                rep->l2_updated++;
+            }
+        }
+    }
+
+finalize:
+    /* live layer-2 state after this run */
+    for (s = 0; s < n_stripes; s++) {
+        int full = 1;
+        if (!(want[s / 8] & (1u << (s % 8)))) continue;
+        for (j = 0; j < m2; j++)
+            if (!par[s * m2 + j]) full = 0;
+        if (full) rep->l2_stripes++;
+    }
+    rep->l2_parity_blocks = rep->l2_stripes * m2;
+    for (i = 0; i < sv->nshards2; i++) {
+        if (i < own_cap &&
+            seal2_shard_sync(v, sv->shard2_id[i], i, &own[i],
+                             par, n_stripes, m2) != 0) {
+            fprintf(stderr, "seal2: owner shard %zu write failed\n", i);
+            rc = -1;
+        }
+    }
+    /* removals: stripes whose content went away, and stray maps no record
+     * names (an earlier interrupted seal's debris) */
+    {
+        size_t j2, w2;
+        for (j2 = 0; j2 < v->l2p_count; j2++) {
+            const invfs_l2p_entry *e = &v->l2p[j2];
+            size_t shard;
+            uint64_t gs, slot;
+            if (e->type != INVFS_JRN_MAP) continue;
+            for (shard = 0; shard < sv->nshards2; shard++)
+                if (e->inode == sv->shard2_id[shard]) break;
+            if (shard == sv->nshards2) continue;
+            gs = shard * shard_stripes + e->lba / m2;
+            slot = e->lba % m2;
+            if (gs < n_stripes && par[gs * m2 + slot] == e->pba &&
+                (want[gs / 8] & (1u << (gs % 8))))
+                continue;   /* live seal member */
+            if (e->pba < v->sb.total_blocks)
+                vol_free_blocks(v, e->pba, e->length ? e->length : 1);
+            rep->l2_freed++;
+        }
+        w2 = 0;
+        for (j2 = 0; j2 < v->l2p_count; j2++) {
+            const invfs_l2p_entry *e = &v->l2p[j2];
+            size_t shard;
+            uint64_t gs, slot;
+            int keep = 1;
+            if (e->type == INVFS_JRN_MAP) {
+                for (shard = 0; shard < sv->nshards2; shard++)
+                    if (e->inode == sv->shard2_id[shard]) break;
+                if (shard < sv->nshards2) {
+                    gs = shard * shard_stripes + e->lba / m2;
+                    slot = e->lba % m2;
+                    keep = gs < n_stripes && par[gs * m2 + slot] == e->pba &&
+                           (want[gs / 8] & (1u << (gs % 8)));
+                }
+            }
+            if (keep) {
+                if (w2 != j2) v->l2p[w2] = v->l2p[j2];
+                w2++;
+            } else if (w2 < v->l2p_dirty) {
+                v->l2p_dirty = w2;
+            }
+        }
+        v->l2p_count = w2;
+        if (v->l2p_dirty > v->l2p_count) v->l2p_dirty = v->l2p_count;
+    }
+    if (rep->l2_freed || rep->l2_added || rep->l2_updated) {
+        if (vol_flush(v) != 0) rc = -1;
+    }
+    rep->l2_overhead_pct = occupied
+        ? 100.0 * (double)rep->l2_parity_blocks / (double)occupied : 0.0;
+out:
+    free(par);
+    free(want);
+    free(data);
+    free(pacc);
+    free(stored);
+    free(dp);
+    free(pp);
+    if (own)
+        for (i = 0; i < own_cap; i++) tz_owner_free(&own[i]);
+    free(own);
+    return rc;
+}
+
+/* verify --deep layer-2 leg: recompute every layer-2 stripe's RS parity
+ * from the current data and compare against the stored parity blocks.
+ * Full scan (the dirty bitmap is a reseal optimization, not a verifier). */
+static int vol_seal2_verify_leg(invfs_volume *v, const seal_view *sv,
+                                invfs_seal_verify *out)
+{
+    const uint32_t k2 = SEAL2_K;
+    const uint32_t m2 = v->rd.m2;
+    const int algo = v->rd.l2_algo;
+    uint64_t shard_stripes = seal2_shard_stripes(m2);
+    uint64_t ss = v->sb.shadow_zone_start, snb = v->sb.shadow_zone_blocks;
+    uint64_t n_stripes = (snb + k2 - 1) / k2;
+    uint64_t s, j, b;
+    uint64_t *par = NULL;
+    uint8_t *data = NULL, *pacc = NULL, *stored = NULL;
+    uint8_t **dp = NULL, **pp = NULL;
+    int rc = 0;
+    size_t i;
+
+    par = (uint64_t *)calloc((size_t)n_stripes * m2, sizeof *par);
+    data = (uint8_t *)malloc((size_t)k2 * INVFS_BLOCK_SIZE);
+    pacc = (uint8_t *)malloc((size_t)m2 * INVFS_BLOCK_SIZE);
+    stored = (uint8_t *)malloc(INVFS_BLOCK_SIZE);
+    dp = (uint8_t **)malloc(k2 * sizeof *dp);
+    pp = (uint8_t **)malloc(m2 * sizeof *pp);
+    if (!par || !data || !pacc || !stored || !dp || !pp) { rc = -1; goto out; }
+    for (i = 0; i < k2; i++) dp[i] = data + i * INVFS_BLOCK_SIZE;
+    for (i = 0; i < m2; i++) pp[i] = pacc + i * INVFS_BLOCK_SIZE;
+
+    seal2_map_load(v, sv, shard_stripes, m2, n_stripes, par);
+
+    for (s = 0; s < n_stripes; s++) {
+        uint64_t base = ss + s * k2, end = base + k2, cnt = 0, mapped = 0;
+        if (end > ss + snb) end = ss + snb;
+        for (b = base; b < end; b++)
+            if (bit_get(v->bitmap, b) && !bit_get(sv->is_par, b)) cnt++;
+        for (j = 0; j < m2; j++)
+            if (par[s * m2 + j]) mapped++;
+        if (cnt && !mapped) { out->missing2++; continue; }
+        if (!cnt && mapped) { out->extra2++; continue; }
+        if (!cnt) continue;
+        if (mapped != m2) { out->mismatched2++; out->sealed2++; continue; }
+        memset(data, 0, (size_t)k2 * INVFS_BLOCK_SIZE);
+        for (i = 0; i < k2; i++) {
+            b = base + i;
+            if (!bit_get(v->bitmap, b) || bit_get(sv->is_par, b)) continue;
+            if (io_seek(&v->io, b * INVFS_BLOCK_SIZE) != 0 ||
+                io_read(&v->io, data + i * INVFS_BLOCK_SIZE,
+                        INVFS_BLOCK_SIZE) != 0) {
+                out->mismatched2++;   /* unreadable while checking */
+                out->sealed2++;
+                goto next_stripe;
+            }
+        }
+        if (rs_encode(algo, k2, m2, INVFS_BLOCK_SIZE, dp, pp) != 0) {
+            rc = -1;
+            goto out;
+        }
+        for (j = 0; j < m2; j++) {
+            if (io_seek(&v->io, par[s * m2 + j] * INVFS_BLOCK_SIZE) != 0 ||
+                io_read(&v->io, stored, INVFS_BLOCK_SIZE) != 0 ||
+                memcmp(pp[j], stored, INVFS_BLOCK_SIZE) != 0) {
+                out->mismatched2++;
+                break;
+            }
+        }
+        out->sealed2++;
+    next_stripe:
+        ;
+    }
+out:
+    free(par);
+    free(data);
+    free(pacc);
+    free(stored);
+    free(dp);
+    free(pp);
+    return rc;
+}
+
 int vol_seal(invfs_volume *v, int unseal, invfs_seal_report *rep)
 {
     seal_view sv;
@@ -9830,34 +10510,51 @@ int vol_seal(invfs_volume *v, int unseal, invfs_seal_report *rep)
     if (seal_view_load(v, &sv) != 0) return -1;
 
     if (unseal) {
-        /* free every parity block and remove the owners. The retire path
-         * frees the blocks the owner's maps name (entries are zone!=TEXT,
-         * so the shared-batch gate does not hold them back) and drops the
-         * maps; the tombstone lands in the same run. */
-        if (sv.nshards && vol_mark_dirty(v) != 0) { seal_view_free(&sv); return -1; }
-        for (i = 0; i < sv.nshards; i++) {
+        /* free every parity block and remove the owners (BOTH layers).
+         * The retire path frees the blocks the owner's maps name (entries
+         * are zone!=TEXT, so the shared-batch gate does not hold them
+         * back) and drops the maps; the tombstone lands in the same run.
+         * The RDP0 descriptor goes too: nothing is configured any more. */
+        if ((sv.nshards || sv.nshards2 || v->rd_present) &&
+            vol_mark_dirty(v) != 0) { seal_view_free(&sv); return -1; }
+        for (i = 0; i < sv.nshards + sv.nshards2; i++) {
             char nm[32];
             size_t j;
+            uint64_t oid = i < sv.nshards ? sv.shard_id[i]
+                                          : sv.shard2_id[i - sv.nshards];
+            if (i < sv.nshards) seal_shard_name(i, nm, sizeof nm);
+            else                seal2_shard_name(i - sv.nshards, nm, sizeof nm);
             for (j = 0; j < v->l2p_count; j++) {
                 const invfs_l2p_entry *e = &v->l2p[j];
-                if (e->type == INVFS_JRN_MAP && e->inode == sv.shard_id[i])
+                if (e->type == INVFS_JRN_MAP && e->inode == oid)
                     rep->freed += e->length ? e->length : 1;
             }
-            seal_shard_name(i, nm, sizeof nm);
             if (vol_delete_file(v, nm) != 0) {
                 fprintf(stderr, "seal: could not remove owner shard %zu\n", i);
                 rc = -1;
             }
         }
+        if (vol_write_rdp0(v, NULL) != 0) {
+            fprintf(stderr, "seal: could not clear the RDP0 descriptor\n");
+            rc = -1;
+        }
+        free(v->seal_dirty);
+        v->seal_dirty = NULL;
         if (vol_flush(v) != 0) rc = -1;
         seal_view_free(&sv);
         return rc;
     }
 
+    /* configure/reseal: the dirty bitmap must exist (a NULL one = "no
+     * tracking state", which has to mean a full pass) */
+    if (!v->seal_dirty)
+        seal_dirty_reset(v);
+    if (!v->seal_dirty) { seal_view_free(&sv); return -1; }
+
     ss = v->sb.shadow_zone_start;
     snb = v->sb.shadow_zone_blocks;
     if (!snb) { seal_view_free(&sv); return 0; }
-    n_stripes = (snb + SEAL_STRIPE_K - 1) / SEAL_STRIPE_K;
+    n_stripes = (snb + v->seal_k1 - 1) / v->seal_k1;
     par_pba = (uint64_t *)calloc(n_stripes, sizeof *par_pba);
     want = (uint8_t *)calloc((size_t)(n_stripes + 7) / 8, 1);
     acc = (uint8_t *)malloc(INVFS_BLOCK_SIZE);
@@ -9894,8 +10591,8 @@ int vol_seal(invfs_volume *v, int unseal, invfs_seal_report *rep)
 
     /* membership from the live bitmap, parity blocks excluded */
     for (s = 0; s < n_stripes; s++) {
-        uint64_t base = ss + s * SEAL_STRIPE_K;
-        uint64_t end = base + SEAL_STRIPE_K;
+        uint64_t base = ss + s * v->seal_k1;
+        uint64_t end = base + v->seal_k1;
         uint64_t cnt = 0;
         if (end > ss + snb) end = ss + snb;
         for (b = base; b < end; b++)
@@ -9959,9 +10656,17 @@ int vol_seal(invfs_volume *v, int unseal, invfs_seal_report *rep)
     /* maps durable BEFORE any owner record names them (the tz_seal rule) */
     if (rep->added && vol_flush(v) != 0) { rc = -1; goto finalize; }
 
-    /* check-and-update every wanted stripe: recompute, write only on change */
+    /* check-and-update every wanted stripe: recompute, write only on change.
+     * WP20b: stripes whose blocks are all clean in the dirty bitmap cannot
+     * have drifted (every write/alloc/free path marks them), so their
+     * recompute is skipped; the first seal of a session is always a full
+     * pass (the bitmap starts all-ones). */
     for (s = 0; s < n_stripes; s++) {
         if (!(want[s / 8] & (1u << (s % 8))) || !par_pba[s]) continue;
+        if (!seal_stripe_dirty(v, s, v->seal_k1)) {
+            rep->dirty_skipped++;
+            continue;
+        }
         memset(acc, 0, INVFS_BLOCK_SIZE);
         if (seal_stripe_xor(v, &sv, s, acc) != 0) { rc = -1; goto finalize; }
         if (io_seek(&v->io, par_pba[s] * INVFS_BLOCK_SIZE) != 0 ||
@@ -10050,6 +10755,35 @@ finalize:
     }
     rep->overhead_pct = occupied
         ? 100.0 * (double)rep->parity_blocks / (double)occupied : 0.0;
+
+    /* WP20b layer 2 (independent of layer 1, same occupancy model) */
+    if (rc == 0 && v->rd_present && v->rd.l2_algo &&
+        v->rd.m2 >= SEAL2_M2_MIN && v->rd.m2 <= SEAL2_M2_MAX &&
+        vol_seal_l2(v, &sv, rep) != 0) {
+        fprintf(stderr, "seal: layer-2 pass failed\n");
+        rc = -1;
+    }
+    /* persist the redundancy configuration (the RDP0 descriptor): this is
+     * what makes the seal findable after close/reopen (auto-reseal) and
+     * what the geometry (k1/k2/m2) on disk is read back from */
+    if (rc == 0) {
+        invfs_rdp0 rd = v->rd;
+        rd.l1_algo = INVFS_RDP0_L1_XOR;
+        rd.k1 = (uint16_t)v->seal_k1;
+        rd.k2 = (uint16_t)(rd.l2_algo ? SEAL2_K : 0);
+        if (!rd.l2_algo) rd.m2 = 0;
+        rd.parity_area_hint = rep->parity_blocks + rep->l2_parity_blocks;
+        if (vol_write_rdp0(v, &rd) != 0) {
+            fprintf(stderr, "seal: RDP0 descriptor write failed\n");
+            rc = -1;
+        } else if (vol_flush(v) != 0) {
+            rc = -1;
+        }
+    }
+    /* a fully successful reseal leaves nothing dirty */
+    if (rc == 0 && v->seal_dirty)
+        memset(v->seal_dirty, 0,
+               (size_t)((v->sb.shadow_zone_blocks + 7) / 8));
 out:
     free(par_pba);
     free(want);
@@ -10076,16 +10810,18 @@ int vol_seal_verify(invfs_volume *v, invfs_seal_verify *out)
     if (!v || !out) return -1;
     memset(out, 0, sizeof *out);
     if (seal_view_load(v, &sv) != 0) return -1;
-    if (sv.nshards == 0) { seal_view_free(&sv); return 0; }   /* not sealed */
+    /* not sealed at all: neither layer has owners */
+    if (sv.nshards == 0 && sv.nshards2 == 0) { seal_view_free(&sv); return 0; }
 
     ss = v->sb.shadow_zone_start;
     snb = v->sb.shadow_zone_blocks;
-    n_stripes = (snb + SEAL_STRIPE_K - 1) / SEAL_STRIPE_K;
+    n_stripes = (snb + v->seal_k1 - 1) / v->seal_k1;
     par_pba = (uint64_t *)calloc(n_stripes, sizeof *par_pba);
     acc = (uint8_t *)malloc(INVFS_BLOCK_SIZE);
     stored = (uint8_t *)malloc(INVFS_BLOCK_SIZE);
     if (!par_pba || !acc || !stored) { rc = -1; goto out; }
 
+    if (sv.nshards) {
     for (i = 0; i < v->l2p_count; i++) {
         const invfs_l2p_entry *e = &v->l2p[i];
         size_t shard;
@@ -10098,8 +10834,8 @@ int vol_seal_verify(invfs_volume *v, invfs_seal_verify *out)
     }
 
     for (s = 0; s < n_stripes; s++) {
-        uint64_t base = ss + s * SEAL_STRIPE_K;
-        uint64_t end = base + SEAL_STRIPE_K;
+        uint64_t base = ss + s * v->seal_k1;
+        uint64_t end = base + v->seal_k1;
         uint64_t cnt = 0;
         if (end > ss + snb) end = ss + snb;
         for (b = base; b < end; b++)
@@ -10119,10 +10855,698 @@ int vol_seal_verify(invfs_volume *v, invfs_seal_verify *out)
             out->mismatched++;
         out->sealed++;
     }
+    }
+    /* WP20b layer-2 leg (full scan, like layer 1): recompute every sealed
+     * RS stripe against its stored parity blocks. Needs the live
+     * descriptor (algo/m2 are not recoverable from the owners alone). */
+    if (sv.nshards2 && v->rd_present && v->rd.l2_algo &&
+        v->rd.m2 >= SEAL2_M2_MIN && v->rd.m2 <= SEAL2_M2_MAX)
+        rc = vol_seal2_verify_leg(v, &sv, out);
+    else if (sv.nshards2) {
+        /* owners but no readable config: every mapped stripe is drift */
+        fprintf(stderr, "verify: layer-2 owners present but no valid RDP0 "
+                        "descriptor; layer 2 not verifiable\n");
+        out->mismatched2 += sv.nshards2;   /* honest drift, not "clean" */
+    }
 out:
     free(par_pba);
     free(acc);
     free(stored);
+    seal_view_free(&sv);
+    return rc;
+}
+
+/* ---- WP20b layer-2 repair (invf-fsck --repair) -------------------------
+ *
+ * Layer-2 recovery is fsck-ONLY: the runtime read path never touches RS
+ * parity (it fails loudly past one bad block per layer-1 stripe). The
+ * repair pass:
+ *
+ *   1. walks the live records (the verify --deep name walk) and checks the
+ *      framing CRC32C of every distinct shadow-zone segment -> the failed
+ *      segment list (a segment's bad blocks are among its plen blocks; a
+ *      device-unreadable block is known-bad outright);
+ *   2. groups the failures by layer-2 stripe and, per stripe, searches the
+ *      erasure set: the forced set E0 (device-missing blocks + unmapped
+ *      parity slots) plus hypotheses of 1..m2-|E0| blocks drawn from the
+ *      failed segments' blocks, decoded with rs_decode and ARBITRATED:
+ *        (a) the parity slots outside E recomputed from the decoded data
+ *            must equal the stored parity blocks (deterministic: two
+ *            distinct codewords of an MDS(k+m, k) code that agree on k
+ *            surviving slots are equal, so a decode poisoned by a
+ *            still-bad survivor always mismatches a compared parity slot);
+ *        (b) every failed segment fully inside the stripe must pass its
+ *            own framing CRC32C with the decoded blocks spliced in.
+ *      A hypothesis that passes both is the true damage with overwhelming
+ *      margin; its blocks are written back and re-read from the device.
+ *   3. after all stripes, every failed segment is re-verified from the
+ *      device; a segment that still fails flips its stripe to
+ *      "unrecoverable" in the report (the blocks written are the
+ *      parity-consistent reconstruction, but the report stays honest).
+ *
+ * The search is bounded (SEAL2_REPAIR_MAX_HYP hypotheses per stripe): a
+ * stripe with damage beyond m2 -- or a hypothesis space too wide -- is
+ * reported and left untouched, never written with garbage.
+ */
+#define SEAL2_REPAIR_MAX_HYP 4096u
+
+typedef struct {
+    uint64_t pba;
+    uint32_t plen;
+    int checkable;          /* framing crc present (bounds+crc sane) */
+    uint8_t *img;           /* the segment's current device image */
+} seal2_segref;
+
+static unsigned pop64(uint64_t x)
+{
+    unsigned n = 0;
+    while (x) { n += (unsigned)(x & 1); x >>= 1; }
+    return n;
+}
+
+static void seal2_free_failed(seal2_segref *f, size_t n)
+{
+    size_t i;
+    if (!f) return;
+    for (i = 0; i < n; i++) free(f[i].img);
+    free(f);
+}
+
+/* context for one stripe's repair attempts */
+typedef struct {
+    invfs_volume *v;
+    const seal_view *sv;
+    int algo;
+    uint32_t m2;
+    uint64_t base;            /* first block of the stripe */
+    uint64_t zone_end;        /* shadow zone end (block) */
+    const uint64_t *par;      /* the stripe's m2 parity pbas (0 = unmapped) */
+    const uint8_t *orig;      /* (32+m2) blocks: the current slot content */
+    uint8_t *work;            /* per-attempt decode target */
+    uint8_t *reenc;           /* per-attempt re-encoded parity */
+    uint8_t **blocks;
+    uint8_t *present;
+    uint8_t **dd, **pp;
+    const seal2_segref *fail; /* all failed segments */
+    const size_t *fidx;       /* indices of this stripe's failed segments */
+    size_t nfail;
+} seal2_ctx;
+
+/* One hypothesis: erase the slots in E (bits 0..31 data, 32..32+m2-1
+ * parity), decode, and arbitrate. The parity-recompute check alone is NOT
+ * sufficient: with all parity slots among the survivors, any k-survivor
+ * solve reproduces them by construction, so a decode poisoned by a
+ * still-bad survivor would pass it (two distinct codewords of an
+ * MDS(32+m2, 32) code may agree on any k slots). The framing CRC32C of
+ * every failed segment is the real arbiter:
+ *   (a) fast pre-filter -- recompute the parity from the decoded data:
+ *       every parity slot NOT in E must equal its current content;
+ *   (b) every checkable failed segment touching the stripe must pass its
+ *       own framing CRC32C with the stripe's decoded blocks spliced in;
+ *       blocks beyond the stripe (a segment spanning a stripe boundary)
+ *       are re-read from the device NOW, so a clean or already-repaired
+ *       neighbour arbitrates honestly. At least one checkable segment must
+ *       arbitrate, or the hypothesis is unprovable. Returns 1 = proved
+ *       (work holds the true stripe). */
+static int seal2_try(seal2_ctx *c, uint64_t E)
+{
+    const uint32_t k2 = SEAL2_K;
+    uint32_t nslots = k2 + c->m2;
+    size_t i, j, f;
+    unsigned arbitrated = 0;
+
+    memcpy(c->work, c->orig, (size_t)nslots * INVFS_BLOCK_SIZE);
+    for (i = 0; i < nslots; i++)
+        c->present[i] = (uint8_t)!((E >> i) & 1);
+    if (rs_decode(c->algo, k2, c->m2, INVFS_BLOCK_SIZE,
+                  c->blocks, c->present) != 0)
+        return 0;
+    /* (a) fast pre-filter: parity consistency */
+    if (rs_encode(c->algo, k2, c->m2, INVFS_BLOCK_SIZE, c->dd, c->pp) != 0)
+        return 0;
+    for (j = 0; j < c->m2; j++) {
+        if ((E >> (k2 + j)) & 1) continue;
+        if (memcmp(c->pp[j], c->work + (k2 + j) * INVFS_BLOCK_SIZE,
+                   INVFS_BLOCK_SIZE) != 0)
+            return 0;
+    }
+    /* (b) the framing CRC of every failed segment. The spliced image is
+     * verified as a whole, so a segment whose HEADER block is corrupt
+     * (uncheckable at scan time) arbitrates fine once the hypothesis
+     * restores the header. */
+    for (f = 0; f < c->nfail; f++) {
+        const seal2_segref *g = &c->fail[c->fidx[f]];
+        uint8_t *tmp;
+        uint64_t b, lo, hi;
+        uint32_t cs;
+        int vok;
+        tmp = (uint8_t *)malloc((size_t)g->plen * INVFS_BLOCK_SIZE);
+        if (!tmp) return 0;
+        memcpy(tmp, g->img, (size_t)g->plen * INVFS_BLOCK_SIZE);
+        /* splice the stripe's decoded blocks */
+        lo = g->pba > c->base ? g->pba : c->base;
+        hi = g->pba + g->plen;
+        if (hi > c->base + k2) hi = c->base + k2;
+        if (hi > c->zone_end) hi = c->zone_end;
+        for (b = lo; b < hi; b++)
+            memcpy(tmp + (b - g->pba) * INVFS_BLOCK_SIZE,
+                   c->work + (b - c->base) * INVFS_BLOCK_SIZE,
+                   INVFS_BLOCK_SIZE);
+        /* re-read any blocks beyond the stripe from the device (clean or
+         * already-repaired neighbour: the current truth) */
+        for (b = g->pba; b < g->pba + g->plen; b++) {
+            if (b >= lo && b < hi) continue;
+            if (io_seek(&c->v->io, b * INVFS_BLOCK_SIZE) != 0 ||
+                io_read(&c->v->io, tmp + (b - g->pba) * INVFS_BLOCK_SIZE,
+                        INVFS_BLOCK_SIZE) != 0) {
+                free(tmp);
+                return 0;   /* cannot arbitrate now */
+            }
+        }
+        vok = seal_seg_verify(tmp, g->plen, &cs);
+        free(tmp);
+        if (vok != 0) return 0;
+        arbitrated++;
+    }
+    return arbitrated > 0;
+}
+
+/* Write back every erased slot that is a real block (occupied data slot /
+ * mapped parity slot) and re-read it from the device. 0 = ok. */
+static int seal2_commit(seal2_ctx *c, uint64_t E, uint64_t *written)
+{
+    const uint32_t k2 = SEAL2_K;
+    uint8_t *chk = NULL;
+    size_t i;
+    int rc = -1;
+
+    chk = (uint8_t *)malloc(INVFS_BLOCK_SIZE);
+    if (!chk) return -1;
+    for (i = 0; i < k2 + c->m2; i++) {
+        uint64_t b;
+        if (!((E >> i) & 1)) continue;
+        if (i < k2) {
+            b = c->base + i;
+            if (b >= c->zone_end) continue;
+            if (!bit_get(c->v->bitmap, b) || bit_get(c->sv->is_par, b))
+                continue;   /* absent slot: zero content, nothing allocated */
+        } else {
+            b = c->par[i - k2];
+            if (!b) continue;   /* unmapped parity slot: stays unmapped */
+        }
+        if (io_seek(&c->v->io, b * INVFS_BLOCK_SIZE) != 0 ||
+            io_write(&c->v->io, c->work + i * INVFS_BLOCK_SIZE,
+                     INVFS_BLOCK_SIZE) != 0 ||
+            io_seek(&c->v->io, b * INVFS_BLOCK_SIZE) != 0 ||
+            io_read(&c->v->io, chk, INVFS_BLOCK_SIZE) != 0 ||
+            memcmp(chk, c->work + i * INVFS_BLOCK_SIZE,
+                   INVFS_BLOCK_SIZE) != 0) {
+            fprintf(stderr, "seal2 repair: write-back of block %llu failed "
+                    "to stick\n", (unsigned long long)b);
+            goto out;
+        }
+        (*written)++;
+        fprintf(stderr, "[seal2] repaired block %llu via RS parity\n",
+                (unsigned long long)b);
+    }
+    rc = 0;
+out:
+    free(chk);
+    return rc;
+}
+
+/* Repair one stripe: enumerate erasure hypotheses E0 + 0..budget candidate
+ * blocks (drawn from the failed segments' blocks) until one proves itself.
+ * Returns 1 = repaired (*written bumped), 0 = unrecoverable. */
+static int seal2_repair_stripe(seal2_ctx *c, uint64_t E0, uint32_t pool,
+                               invfs_seal2_repair *rep, uint64_t *written)
+{
+    unsigned e0n = pop64(E0);
+    unsigned budget, t, np = 0, att = 0;
+    unsigned pslots[32];
+    unsigned i;
+    uint32_t p = pool;
+
+    if (e0n > c->m2) return 0;   /* forced erasures alone exceed the code */
+    budget = c->m2 - e0n;
+    while (p) {                  /* candidate slots: pool's set bits */
+        unsigned bit = 0;
+        while (!((p >> bit) & 1)) bit++;
+        pslots[np++] = bit;
+        p &= p - 1;
+    }
+    for (t = 0; t <= budget; t++) {
+        unsigned idx[SEAL2_M2_MAX];
+        if (t > np) break;
+        if (t == 0) {
+            att++;
+            if (seal2_try(c, E0) && seal2_commit(c, E0, written) == 0) {
+                rep->hypotheses += att;
+                return 1;
+            }
+            continue;
+        }
+        for (i = 0; i < t; i++) idx[i] = i;
+        for (;;) {
+            uint64_t E = E0;
+            if (att >= SEAL2_REPAIR_MAX_HYP) {
+                rep->hypotheses += att;
+                return 0;
+            }
+            for (i = 0; i < t; i++) E |= 1ull << pslots[idx[i]];
+            att++;
+            if (seal2_try(c, E) && seal2_commit(c, E, written) == 0) {
+                rep->hypotheses += att;
+                return 1;
+            }
+            /* next t-combination (odometer) */
+            {
+                int q = (int)t - 1;
+                while (q >= 0 && idx[q] == np - t + (unsigned)q) q--;
+                if (q < 0) break;
+                idx[q]++;
+                for (i = (unsigned)q + 1; i < t; i++)
+                    idx[i] = idx[i - 1] + 1;
+            }
+        }
+    }
+    rep->hypotheses += att;
+    return 0;
+}
+
+int vol_seal2_repair(invfs_volume *v, invfs_seal2_repair *rep)
+{
+    const uint32_t k2 = SEAL2_K;
+    seal_view sv;
+    uint64_t ss, snb, n2, shard_stripes, zone_end;
+    uint32_t m2;
+    int algo;
+    int rc = 0;
+    /* live-record walk (the verify --deep pattern: newest id per name) */
+    struct lr_ent { uint64_t id; } *ents = NULL;
+    size_t nents = 0, capents = 0;
+    /* candidate segments (deduped by pba) and the failed ones */
+    typedef struct { uint64_t pba; uint32_t plen; } segcand;
+    segcand *cand = NULL;
+    size_t ncand = 0, capcand = 0;
+    seal2_segref *fail = NULL;
+    size_t nfail = 0, capfail = 0;
+    /* per-stripe failure grouping */
+    uint32_t *st_cnt = NULL;
+    size_t *st_off = NULL, *st_fill = NULL;
+    size_t *st_idx = NULL;
+    uint8_t *st_status = NULL;    /* 1 = repaired, 2 = unrecoverable */
+    /* device-missing occupied blocks (allocated on first failure) */
+    uint8_t *devmiss = NULL;
+    /* per-stripe decode context */
+    uint8_t *orig = NULL, *work = NULL, *reenc = NULL;
+    uint8_t **blocks = NULL, *present = NULL, **dd = NULL, **pp = NULL;
+    uint64_t *par = NULL;
+    uint32_t nslots;
+    size_t i;
+
+    if (!v || !rep) return -1;
+    memset(rep, 0, sizeof *rep);
+    if (!vol_write_enabled(v)) {
+        fprintf(stderr, "seal2 repair: volume is read-only\n");
+        return -1;
+    }
+    if (!v->rd_present || !v->rd.l2_algo) {
+        fprintf(stderr, "seal2 repair: no layer-2 seal configured\n");
+        return 0;
+    }
+    algo = v->rd.l2_algo;
+    m2 = v->rd.m2;
+    nslots = k2 + m2;
+    if (m2 < SEAL2_M2_MIN || m2 > SEAL2_M2_MAX) return -1;
+    if (seal_view_load(v, &sv) != 0) return -1;
+    if (!sv.nshards2) {
+        fprintf(stderr, "seal2 repair: layer 2 configured but never sealed\n");
+        seal_view_free(&sv);
+        return 0;
+    }
+    ss = v->sb.shadow_zone_start;
+    snb = v->sb.shadow_zone_blocks;
+    zone_end = ss + snb;
+    n2 = (snb + k2 - 1) / k2;
+    shard_stripes = seal2_shard_stripes(m2);
+
+    par = (uint64_t *)calloc((size_t)n2 * m2, sizeof *par);
+    st_cnt = (uint32_t *)calloc((size_t)n2, sizeof *st_cnt);
+    st_status = (uint8_t *)calloc((size_t)n2, 1);
+    orig = (uint8_t *)malloc((size_t)nslots * INVFS_BLOCK_SIZE);
+    work = (uint8_t *)malloc((size_t)nslots * INVFS_BLOCK_SIZE);
+    reenc = (uint8_t *)malloc((size_t)m2 * INVFS_BLOCK_SIZE);
+    blocks = (uint8_t **)malloc(nslots * sizeof *blocks);
+    present = (uint8_t *)malloc(nslots);
+    dd = (uint8_t **)malloc(k2 * sizeof *dd);
+    pp = (uint8_t **)malloc(m2 * sizeof *pp);
+    if (!par || !st_cnt || !st_status || !orig || !work || !reenc ||
+        !blocks || !present || !dd || !pp) { rc = -1; goto out; }
+    for (i = 0; i < nslots; i++) blocks[i] = work + i * INVFS_BLOCK_SIZE;
+    for (i = 0; i < k2; i++) dd[i] = work + i * INVFS_BLOCK_SIZE;
+    for (i = 0; i < m2; i++) pp[i] = reenc + i * INVFS_BLOCK_SIZE;
+    seal2_map_load(v, &sv, shard_stripes, m2, n2, par);
+
+    /* ---- pass 1: live files' shadow segments -> framing-CRC check ---- */
+    {
+        uint64_t pos = v->inode_area_start * INVFS_BLOCK_SIZE;
+        while (pos) {
+            uint32_t magic, rl;
+            uint64_t ino, fsz, np;
+            char nm[256];
+            np = vol_inode_next(v, pos, &magic, &ino, &fsz, nm, sizeof nm,
+                                &rl);
+            if (!np) break;
+            pos = np;
+            if (magic != INODE_REC_MAGIC) continue;
+            if ((uint8_t)nm[0] == 0x01) continue;   /* internal owners */
+            if (vol_find(v, nm) != ino) continue;   /* superseded */
+            for (i = 0; i < nents; i++)
+                if (ents[i].id == ino) break;
+            if (i < nents) continue;               /* seen (name chain) */
+            if (nents == capents) {
+                size_t nc = capents ? capents * 2 : 256;
+                void *ne = realloc(ents, nc * sizeof *ents);
+                if (!ne) { rc = -1; goto out; }
+                ents = (struct lr_ent *)ne;
+                capents = nc;
+            }
+            ents[nents++].id = ino;
+        }
+    }
+    for (i = 0; i < nents; i++) {
+        uint8_t *buf = NULL;
+        uint32_t rl = 0;
+        uint64_t rpos = 0;
+        uint32_t crc_stored;
+        invfs_ast_recipe_header ah;
+        const invfs_ast_block_entry *be;
+        size_t base = sizeof(invfs_inode_rec);
+        uint32_t bi;
+
+        if (meta_read_record_by_id(v, ents[i].id, &buf, &rl, NULL, 0,
+                                   &rpos) != 0)
+            continue;
+        /* the structural scan reports bad records; here a record whose
+         * CRC fails is simply not a trustworthy segment source */
+        if (io_seek(&v->io, rpos + rl) != 0 ||
+            io_read(&v->io, &crc_stored, 4) != 0 ||
+            invfs_crc32c(buf, rl) != crc_stored ||
+            rl < base + sizeof(ah)) {
+            free(buf);
+            continue;
+        }
+        memcpy(&ah, buf + base, sizeof(ah));
+        if (rl < base + sizeof(ah) +
+                 (size_t)ah.num_blocks * sizeof(invfs_ast_block_entry)) {
+            free(buf);
+            continue;
+        }
+        be = (const invfs_ast_block_entry *)(buf + base + sizeof(ah));
+        for (bi = 0; bi < ah.num_blocks; bi++) {
+            uint64_t pba = 0, plen = 0;
+            if (vol_lookup_entry(v, ents[i].id, be[bi].block_id,
+                                 &pba, &plen) != 0 || !pba)
+                continue;
+            if (!plen) plen = 1;
+            if (pba < ss || pba + plen > zone_end) continue;
+            if (plen > 8192) continue;   /* beyond any legit segment */
+            if (ncand == capcand) {
+                size_t nc = capcand ? capcand * 2 : 512;
+                void *ncp = realloc(cand, nc * sizeof *cand);
+                if (!ncp) { free(buf); rc = -1; goto out; }
+                cand = (segcand *)ncp;
+                capcand = nc;
+            }
+            cand[ncand].pba = pba;
+            cand[ncand].plen = (uint32_t)plen;
+            ncand++;
+        }
+        free(buf);
+    }
+    /* dedup by pba (batch members share the batch's segment) */
+    if (ncand) {
+        size_t a, w;
+        /* insertion sort is fine for the counts fsck-scale volumes have */
+        for (a = 1; a < ncand; a++) {
+            segcand t = cand[a];
+            size_t h = a;
+            while (h > 0 && cand[h - 1].pba > t.pba) {
+                cand[h] = cand[h - 1];
+                h--;
+            }
+            cand[h] = t;
+        }
+        w = 0;
+        for (a = 0; a < ncand; a++)
+            if (!w || cand[a].pba != cand[w - 1].pba)
+                cand[w++] = cand[a];
+        ncand = w;
+    }
+    /* framing-CRC check each distinct segment */
+    for (i = 0; i < ncand; i++) {
+        uint64_t pba = cand[i].pba;
+        uint32_t plen = cand[i].plen;
+        uint8_t *img = (uint8_t *)malloc((size_t)plen * INVFS_BLOCK_SIZE);
+        uint32_t csize, crc;
+        int devbad = 0, failed = 0, checkable = 0;
+        uint64_t b2;
+        if (!img) { rc = -1; goto out; }
+        for (b2 = 0; b2 < plen; b2++) {
+            if (io_seek(&v->io, (pba + b2) * INVFS_BLOCK_SIZE) != 0 ||
+                io_read(&v->io, img + b2 * INVFS_BLOCK_SIZE,
+                        INVFS_BLOCK_SIZE) != 0) {
+                memset(img + b2 * INVFS_BLOCK_SIZE, 0, INVFS_BLOCK_SIZE);
+                devbad = 1;
+                if (!devmiss)
+                    devmiss = (uint8_t *)calloc((size_t)(snb + 7) / 8, 1);
+                if (devmiss) bit_set(devmiss, pba + b2 - ss);
+            }
+        }
+        memcpy(&csize, img, 4);
+        memcpy(&crc, img + 4, 4);
+        if (csize && crc && (uint64_t)csize + 8 <=
+            (uint64_t)plen * INVFS_BLOCK_SIZE) {
+            checkable = 1;
+            if (invfs_crc32c(img + 8, csize) != crc) failed = 1;
+        } else if (csize || crc) {
+            failed = 1;   /* header out of bounds: corrupt by construction */
+        }
+        /* devbad with a readable framing: the CRC is the truth */
+        if (devbad && !checkable) failed = 1;
+        if (!failed) { free(img); continue; }
+        if (nfail == capfail) {
+            size_t nc = capfail ? capfail * 2 : 32;
+            void *nf = realloc(fail, nc * sizeof *fail);
+            if (!nf) { free(img); rc = -1; goto out; }
+            fail = (seal2_segref *)nf;
+            capfail = nc;
+        }
+        fail[nfail].pba = pba;
+        fail[nfail].plen = plen;
+        fail[nfail].checkable = checkable;
+        fail[nfail].img = img;
+        nfail++;
+        /* group by stripe */
+        {
+            uint64_t s0 = (pba - ss) / k2;
+            uint64_t s1 = (pba + plen - 1 - ss) / k2;
+            uint64_t sx;
+            for (sx = s0; sx <= s1 && sx < n2; sx++)
+                st_cnt[sx]++;
+        }
+    }
+    if (!nfail) goto out;   /* nothing to repair: all counters zero */
+
+    /* stripe -> failed-segment index lists */
+    st_off = (size_t *)calloc((size_t)n2, sizeof *st_off);
+    st_fill = (size_t *)calloc((size_t)n2, sizeof *st_fill);
+    if (!st_off || !st_fill) { rc = -1; goto out; }
+    {
+        uint64_t sx;
+        size_t tot = 0;
+        for (sx = 0; sx < n2; sx++) { st_off[sx] = tot; tot += st_cnt[sx]; }
+        st_idx = (size_t *)malloc((tot ? tot : 1) * sizeof *st_idx);
+        if (!st_idx) { rc = -1; goto out; }
+    }
+    for (i = 0; i < nfail; i++) {
+        uint64_t s0 = (fail[i].pba - ss) / k2;
+        uint64_t s1 = (fail[i].pba + fail[i].plen - 1 - ss) / k2;
+        uint64_t sx;
+        for (sx = s0; sx <= s1 && sx < n2; sx++)
+            st_idx[st_off[sx] + st_fill[sx]++] = i;
+    }
+
+    {
+        uint64_t sx;
+        for (sx = 0; sx < n2; sx++)
+            if (st_cnt[sx]) rep->stripes_scanned++;
+    }
+
+    /* ---- pass 2: per-stripe erasure search + writeback ----
+     * A stripe whose failed segments all span into another damaged stripe
+     * can only be arbitrated after the neighbour is repaired, so the pass
+     * repeats while it keeps repairing stripes (each success retires one;
+     * a stripe that proves nothing in a no-progress round is honestly
+     * unrecoverable). */
+    {
+        uint64_t sx;
+        int progress;
+        do {
+            progress = 0;
+            for (sx = 0; sx < n2; sx++) {
+                uint64_t base, E0 = 0;
+                uint32_t pool = 0;
+                size_t f;
+                int repaired;
+                uint64_t written = 0;
+                seal2_ctx c;
+                if (!st_cnt[sx] || st_status[sx]) continue;
+                base = ss + sx * k2;
+
+                /* slot content: occupied non-parity data blocks read from
+                 * the device (device-missing -> zero + forced erasure),
+                 * parity slots from their map (unmapped -> forced) */
+                memset(orig, 0, (size_t)nslots * INVFS_BLOCK_SIZE);
+                for (i = 0; i < k2; i++) {
+                    uint64_t b = base + i;
+                    if (b >= zone_end) break;
+                    if (!bit_get(v->bitmap, b) || bit_get(sv.is_par, b))
+                        continue;
+                    if (devmiss && bit_get(devmiss, b - ss)) {
+                        E0 |= 1ull << i;
+                        continue;
+                    }
+                    if (io_seek(&v->io, b * INVFS_BLOCK_SIZE) != 0 ||
+                        io_read(&v->io, orig + i * INVFS_BLOCK_SIZE,
+                                INVFS_BLOCK_SIZE) != 0)
+                        E0 |= 1ull << i;
+                }
+                for (i = 0; i < m2; i++) {
+                    uint64_t pb = par[sx * m2 + i];
+                    if (!pb || pb >= v->sb.total_blocks) {
+                        E0 |= 1ull << (k2 + i);
+                        continue;
+                    }
+                    if (io_seek(&v->io, pb * INVFS_BLOCK_SIZE) != 0 ||
+                        io_read(&v->io, orig + (k2 + i) * INVFS_BLOCK_SIZE,
+                                INVFS_BLOCK_SIZE) != 0)
+                        E0 |= 1ull << (k2 + i);
+                }
+                /* the candidate pool: blocks of the failed segments that
+                 * fall in this stripe (occupied, non-parity, not forced) */
+                for (f = 0; f < st_cnt[sx]; f++) {
+                    const seal2_segref *g = &fail[st_idx[st_off[sx] + f]];
+                    uint64_t lo = g->pba > base ? g->pba : base;
+                    uint64_t hi = g->pba + g->plen;
+                    uint64_t b;
+                    if (hi > base + k2) hi = base + k2;
+                    if (hi > zone_end) hi = zone_end;
+                    for (b = lo; b < hi; b++) {
+                        if (!bit_get(v->bitmap, b) || bit_get(sv.is_par, b))
+                            continue;
+                        if ((E0 >> (b - base)) & 1) continue;
+                        pool |= 1u << (b - base);
+                    }
+                }
+
+                memset(&c, 0, sizeof c);
+                c.v = v;
+                c.sv = &sv;
+                c.algo = algo;
+                c.m2 = m2;
+                c.base = base;
+                c.zone_end = zone_end;
+                c.par = &par[sx * m2];
+                c.orig = orig;
+                c.work = work;
+                c.reenc = reenc;
+                c.blocks = blocks;
+                c.present = present;
+                c.dd = dd;
+                c.pp = pp;
+                c.fail = fail;
+                c.fidx = &st_idx[st_off[sx]];
+                c.nfail = st_cnt[sx];
+
+                repaired = seal2_repair_stripe(&c, E0, pool, rep, &written);
+                if (repaired) {
+                    rep->stripes_repaired++;
+                    rep->blocks_rewritten += written;
+                    st_status[sx] = 1;
+                    progress = 1;
+                    fprintf(stderr, "[seal2] stripe %llu repaired "
+                            "(%llu blocks rewritten)\n",
+                            (unsigned long long)sx,
+                            (unsigned long long)written);
+                }
+            }
+        } while (progress);
+        for (sx = 0; sx < n2; sx++) {
+            if (!st_cnt[sx] || st_status[sx]) continue;
+            st_status[sx] = 2;
+            rep->unrecoverable++;
+            fprintf(stderr, "[seal2] stripe %llu UNRECOVERABLE: "
+                    "%u failed segment(s), damage beyond m2=%u or "
+                    "unprovable -- left untouched\n",
+                    (unsigned long long)sx, (unsigned)st_cnt[sx],
+                    (unsigned)m2);
+        }
+    }
+
+    /* ---- final gate: every failed segment re-verified from the device ---- */
+    for (i = 0; i < nfail; i++) {
+        uint8_t *img2;
+        uint64_t b2, s0, s1, sx;
+        uint32_t cs2;
+        int vok = 0;
+        /* no scan-time checkable filter here: a segment whose header was
+         * corrupt verifies fine once its stripe was repaired */
+        img2 = (uint8_t *)malloc((size_t)fail[i].plen * INVFS_BLOCK_SIZE);
+        if (!img2) { rc = -1; goto out; }
+        for (b2 = 0; b2 < fail[i].plen; b2++) {
+            if (io_seek(&v->io, (fail[i].pba + b2) * INVFS_BLOCK_SIZE) != 0 ||
+                io_read(&v->io, img2 + b2 * INVFS_BLOCK_SIZE,
+                        INVFS_BLOCK_SIZE) != 0)
+                memset(img2 + b2 * INVFS_BLOCK_SIZE, 0, INVFS_BLOCK_SIZE);
+        }
+        vok = seal_seg_verify(img2, fail[i].plen, &cs2) == 0;
+        free(img2);
+        if (vok) continue;
+        s0 = (fail[i].pba - ss) / k2;
+        s1 = (fail[i].pba + fail[i].plen - 1 - ss) / k2;
+        for (sx = s0; sx <= s1 && sx < n2; sx++) {
+            if (st_status[sx] == 1) {
+                st_status[sx] = 2;
+                rep->stripes_repaired--;
+                rep->unrecoverable++;
+                fprintf(stderr, "[seal2] stripe %llu: segment at %llu "
+                        "still fails CRC after repair -- honest failure\n",
+                        (unsigned long long)sx,
+                        (unsigned long long)fail[i].pba);
+            }
+        }
+    }
+
+out:
+    free(ents);
+    free(cand);
+    seal2_free_failed(fail, nfail);
+    free(st_cnt);
+    free(st_off);
+    free(st_fill);
+    free(st_idx);
+    free(st_status);
+    free(devmiss);
+    free(orig);
+    free(work);
+    free(reenc);
+    free(blocks);
+    free(present);
+    free(dd);
+    free(pp);
+    free(par);
     seal_view_free(&sv);
     return rc;
 }

@@ -12,7 +12,7 @@ LDLIBS  := -Wl,-l:libzstd.so.1 -lz -lpthread
 FUSE_CFLAGS := $(shell pkg-config --cflags fuse3)
 FUSE_LIBS   := $(shell pkg-config --libs fuse3)
 
-CORE    := volume arc crc32c lz4 flacx tarx pngx blkio miniz blake3 blake3_dispatch blake3_portable ppmd8 ppmd8enc ppmd8dec ppmd_codec codec bcj_x86
+CORE    := volume arc crc32c lz4 flacx tarx pngx blkio miniz blake3 blake3_dispatch blake3_portable ppmd8 ppmd8enc ppmd8dec ppmd_codec codec bcj_x86 rs
 CORE_O  := $(addprefix $(OBJ)/,$(addsuffix .o,$(CORE)))
 B3      := blake3 blake3_dispatch blake3_portable
 
@@ -67,12 +67,22 @@ $(OBJ)/meta_probe.o: tools/meta_probe.c | $(OBJ)
 	$(CC) $(CFLAGS) -c -o $@ $<
 
 clean:
-	rm -rf $(OBJ) $(TOOLS:%=$(OUT)/%) $(OUT)/invf-codec_test
+	rm -rf $(OBJ) $(TOOLS:%=$(OUT)/%) $(OUT)/invf-codec_test $(OUT)/invf-fuzz
 
 # ---- tests ---------------------------------------------------------------
 # unit tier: fast, no I/O images
 $(OUT)/invf-codec_test: $(OBJ)/codec_test.o $(OBJ)/codec.o $(OBJ)/ppmd8.o $(OBJ)/ppmd8enc.o $(OBJ)/ppmd8dec.o $(OBJ)/ppmd_codec.o $(OBJ)/lz4.o $(OBJ)/bcj_x86.o
 	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
+
+# fuzz tier: on-demand property/fuzz harness for the pure/parsing layers.
+# NOT part of `make test` -- `make fuzz` only builds it, run it by hand:
+#   bin/invf-fuzz [iterations] [seed]
+FUZZ_O := $(OBJ)/codec.o $(OBJ)/ppmd8.o $(OBJ)/ppmd8enc.o $(OBJ)/ppmd8dec.o \
+          $(OBJ)/ppmd_codec.o $(OBJ)/lz4.o $(OBJ)/bcj_x86.o
+$(OUT)/invf-fuzz: $(OBJ)/fuzz_invfs.o $(FUZZ_O)
+	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
+
+fuzz: $(OUT)/invf-fuzz
 
 test: $(OUT)/invf-arctest $(OUT)/invf-blkio_test $(OUT)/invf-codec_test
 	$(OUT)/invf-arctest
@@ -98,7 +108,7 @@ e2e: all
 	bash tools/test-ntfs.sh
 	bash tools/test-vdi.sh
 
-.PHONY: all clean test e2e
+.PHONY: all clean test e2e fuzz
 -include $(wildcard $(OBJ)/*.d)
 
 $(OUT)/invf-stats: $(OBJ)/invf-stats.o $(CORE_O)

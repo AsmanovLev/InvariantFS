@@ -236,6 +236,22 @@ int main(int argc, char **argv)
         return 1;
     }
 
+    /* WP20b: no redundancy descriptor on a fresh volume. The superblock
+     * write covers only sizeof(sb) bytes of block 0, and while a fresh
+     * image file is all zeros (and a device got the 1 MB erase above), a
+     * re-mkfs of a same-size image file keeps the old bytes -- blkio_chsize
+     * does not wipe. Zero the descriptor explicitly. */
+    {
+        uint8_t z[sizeof(invfs_rdp0)];
+        memset(z, 0, sizeof z);
+        if (blkio_seek(&io, INVFS_RDP0_OFF) != 0 ||
+            blkio_write(&io, z, sizeof z) != 0) {
+            fprintf(stderr, "descriptor area erase failed\n");
+            blkio_close(&io);
+            return 1;
+        }
+    }
+
     /* ---- bitmap: mark superblock + metadata zone allocated ---- */
     bitmap_bytes = (size_t)bitmap_blocks * INVFS_BLOCK_SIZE;
     bitmap = (uint8_t *)calloc(1, bitmap_bytes);

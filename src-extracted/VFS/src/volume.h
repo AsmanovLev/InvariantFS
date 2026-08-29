@@ -323,8 +323,14 @@ int vol_stamp_class(invfs_volume *v, uint64_t inode_id,
                     uint8_t cls, uint8_t algo, uint16_t gen);
 
 /* ---- WP20: --seal shadow-zone XOR parity ----
- * Stripes of 32 blocks over the shadow zone (RAW excluded); one parity
- * block per stripe holding the XOR of the stripe's occupied blocks.
+ * Stripes of k1 blocks over the shadow zone (RAW excluded; k1 = 32 by
+ * default, 8..128 via the RDP0 descriptor); one parity block per stripe
+ * holding the XOR of the stripe's occupied blocks.
+ * WP20b adds layer 2: RS(32+m2, 32) stripes over the same occupancy model
+ * (m2 parity blocks per 32 data blocks, GF(2^8), see rs.c), owned by
+ * "\x01parity2*" records; layer-2 recovery is fsck-only (the runtime read
+ * path is layer-1-only and still fails loudly beyond one bad block per
+ * stripe).
  * Parity blocks are owned by hidden internal inodes "\x01parity",
  * "\x01parity1", ... (65535 stripes per owner record: AST num_blocks is
  * u16) via ordinary L2P maps, so fsck sees them as live. Sealing is
@@ -339,7 +345,34 @@ typedef struct {
     uint64_t freed;          /* parity blocks freed (empty stripes/unseal) */
     uint64_t unprotected;    /* stripes that wanted parity but got none */
     double   overhead_pct;   /* parity_blocks / covered blocks * 100 */
+    /* WP20b: stripes skipped because no block in them changed since the
+     * last successful reseal (the dirty bitmap; a fresh mount always
+     * starts all-dirty, so this is nonzero only for second and later
+     * reseals of one session) */
+    uint64_t dirty_skipped;
+    /* WP20b layer 2 (RS(32+m2,32) over GF(2^8)); all zero when off */
+    uint64_t l2_stripes;
+    uint64_t l2_parity_blocks;
+    uint64_t l2_updated;
+    uint64_t l2_unchanged;
+    uint64_t l2_added;
+    uint64_t l2_freed;
+    uint64_t l2_unprotected;
+    uint64_t l2_dirty_skipped;
+    double   l2_overhead_pct;
 } invfs_seal_report;
+
+/* WP20b: set the redundancy configuration the next vol_seal applies and
+ * persists in the RDP0 descriptor. k1 == 0 keeps the persisted/default
+ * layer-1 stripe size; l2_algo < 0 keeps the persisted layer-2 shape,
+ * l2_algo == 0 turns layer 2 off, l2_algo > 0 selects the codec
+ * (INVFS_RDP0_L2_*, see invarifs.h/rs.h); m2 == 0 keeps the persisted
+ * layer-2 width. Any change forces the next seal to a full pass. */
+void vol_redun_config(invfs_volume *v, uint32_t k1, int l2_algo, uint32_t m2);
+/* current effective config (k1 always >= 8; l2_algo/m2 0 = layer 2 off).
+ * Returns 1 when a live RDP0 descriptor was loaded at open. */
+int  vol_redun_state(const invfs_volume *v, uint32_t *k1, int *l2_algo,
+                     uint32_t *m2);
 
 /* unseal != 0: free every parity block and remove the owners.
  * 0 = ok, -1 = error (incl. read-only volume: sealing mutates). */
@@ -352,6 +385,29 @@ typedef struct {
     uint64_t mismatched;   /* stored parity != recomputed (drift/corruption) */
     uint64_t missing;      /* occupied stripes without parity */
     uint64_t extra;        /* parity blocks over stripes with no content */
+    /* WP20b layer 2 (RS); all zero when layer 2 is off */
+    uint64_t sealed2;
+    uint64_t mismatched2;
+    uint64_t missing2;
+    uint64_t extra2;
 } invfs_seal_verify;
 
 int vol_seal_verify(invfs_volume *v, invfs_seal_verify *out);
+
+/* WP20b layer-2 repair (invf-fsck --repair): scan every live shadow-zone
+ * segment's framing CRC, then for each layer-2 stripe with failures try to
+ * reconstruct the bad blocks with rs_decode (erasure search bounded by the
+ * descriptor's m2, arbitrated by the stripes' stored parity AND the failed
+ * segments' own CRC32C) and write the recovered blocks back. Stripes with
+ * more damage than m2 (or whose reconstruction cannot prove itself) are
+ * reported and left untouched -- never written with garbage. All counters
+ * zero when no layer-2 seal is configured. */
+typedef struct {
+    uint64_t stripes_scanned;    /* layer-2 stripes holding a failed segment */
+    uint64_t stripes_repaired;
+    uint64_t blocks_rewritten;
+    uint64_t unrecoverable;      /* stripes beyond repair, left untouched */
+    uint64_t hypotheses;         /* decode attempts the erasure search spent */
+} invfs_seal2_repair;
+
+int vol_seal2_repair(invfs_volume *v, invfs_seal2_repair *rep);

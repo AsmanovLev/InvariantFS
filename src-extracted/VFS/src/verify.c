@@ -226,16 +226,30 @@ int main(int argc, char **argv)
          * fatal to the exit code, but it is not a "corrupt file". */
         {
             invfs_seal_verify sv;
-            if (vol_seal_verify(vol, &sv) == 0 &&
-                (sv.sealed || sv.mismatched || sv.missing || sv.extra)) {
-                printf("parity: %llu sealed stripes, %llu mismatched, "
-                       "%llu missing, %llu extra\n",
-                       (unsigned long long)sv.sealed,
-                       (unsigned long long)sv.mismatched,
-                       (unsigned long long)sv.missing,
-                       (unsigned long long)sv.extra);
-                if (sv.mismatched || sv.missing || sv.extra)
-                    parity_bad = 1;
+            if (vol_seal_verify(vol, &sv) == 0) {
+                if (sv.sealed || sv.mismatched || sv.missing || sv.extra) {
+                    printf("parity: %llu sealed stripes, %llu mismatched, "
+                           "%llu missing, %llu extra\n",
+                           (unsigned long long)sv.sealed,
+                           (unsigned long long)sv.mismatched,
+                           (unsigned long long)sv.missing,
+                           (unsigned long long)sv.extra);
+                    if (sv.mismatched || sv.missing || sv.extra)
+                        parity_bad = 1;
+                }
+                /* WP20b layer-2 (RS) leg: same drift counters over the
+                 * RS(32+m2, 32) stripes */
+                if (sv.sealed2 || sv.mismatched2 || sv.missing2 ||
+                    sv.extra2) {
+                    printf("parity2: %llu sealed stripes, %llu mismatched, "
+                           "%llu missing, %llu extra\n",
+                           (unsigned long long)sv.sealed2,
+                           (unsigned long long)sv.mismatched2,
+                           (unsigned long long)sv.missing2,
+                           (unsigned long long)sv.extra2);
+                    if (sv.mismatched2 || sv.missing2 || sv.extra2)
+                        parity_bad = 1;
+                }
             }
         }
         printf("deep: %llu files ok, %llu corrupt, %llu bytes verified\n",

@@ -1,7 +1,12 @@
 /*
  * invf-sweep.c — offline sweep driver for Linux
  *
- *   invf-sweep <image> [--dry-run|--seal|--unseal]
+ *   invf-sweep <image> [--dry-run]
+ *                      [--seal|--unseal]
+ *                      [--redundant-blocks <f>]
+ *                      [--redundant-paranoic <f>[:rs-vm|rs-cauchy]]
+ *                      [--free-redundant]
+ *                      [--redundant-bench]
  *
  * Walks live records (same CRC-validated scan as invf-ls), feeds every
  * regular file with segments to vol_sweep_one() — the unified per-inode
@@ -15,6 +20,15 @@
  * WP20: --seal re-seals the shadow-zone XOR parity AFTER the sweep is fully
  * flushed (idempotent check-and-update, see vol_seal); --unseal frees every
  * parity block and removes the owners, without sweeping.
+ *
+ * WP20b: --redundant-blocks <f> configures layer-1 XOR with stripe
+ * k = clamp(round(1/f), 8..128) (f = overhead fraction);
+ * --redundant-paranoic <f>[:algo] adds layer-2 RS(32+m2, 32) with
+ * m2 = clamp(round(f*32/(1-f)), 2..8) (algo picked by --redundant-bench on
+ * first use, persisted in the RDP0 descriptor); --free-redundant removes
+ * both layers and the descriptor (same as --unseal). A bare run (no
+ * redundancy flags) on a volume with a live descriptor auto-reseals after
+ * the sweep. --redundant-bench prints rs-vm vs rs-cauchy MB/s and exits.
  */
 #define _CRT_SECURE_NO_WARNINGS
 
@@ -26,6 +40,7 @@
 #include "invarifs.h"
 #include "volume.h"
 #include "codec.h"
+#include "rs.h"
 
 typedef struct sw_bucket { struct sw_bucket *next; int slot; } sw_bucket;
 
@@ -141,7 +156,10 @@ int main(int argc, char **argv)
 {
     invfs_volume *vol;
     const invfs_superblock *sb;
-    int err, dry = 0, seal = 0, unseal = 0;
+    int err, dry = 0, seal = 0, unseal = 0, bench = 0;
+    double rb_f = -1.0, rp_f = -1.0;   /* <0: flag absent */
+    int rp_algo = 0;                   /* explicit :rs-vm/:rs-cauchy suffix */
+    int auto_reseal = 0;
     uint64_t bm, area_start, area_end, p;
     int count = 0, cap = 0, swept = 0, skipped = 0, failed = 0;
     char (*names)[256] = NULL;
@@ -150,24 +168,91 @@ int main(int argc, char **argv)
     const char *img;
     sw_bucket **tab = NULL;
     size_t tmask = 0, tcount = 0;
+    int i;
 
-    if (argc < 2 || argc > 3 ||
-        (argc == 3 && strcmp(argv[2], "--dry-run") != 0 &&
-         strcmp(argv[2], "--seal") != 0 && strcmp(argv[2], "--unseal") != 0)) {
-        fprintf(stderr, "usage: %s <image> [--dry-run|--seal|--unseal]\n",
+    if (argc < 2) {
+        fprintf(stderr,
+                "usage: %s <image> [--dry-run] [--seal|--unseal]\n"
+                "           [--redundant-blocks <f>]\n"
+                "           [--redundant-paranoic <f>[:rs-vm|rs-cauchy]]\n"
+                "           [--free-redundant] [--redundant-bench]\n",
                 argv[0]);
         return 2;
     }
     img = argv[1];
-    if (argc == 3) {
-        dry    = strcmp(argv[2], "--dry-run") == 0;
-        seal   = strcmp(argv[2], "--seal") == 0;
-        unseal = strcmp(argv[2], "--unseal") == 0;
+    for (i = 2; i < argc; i++) {
+        const char *a = argv[i];
+        if (strcmp(a, "--dry-run") == 0) {
+            dry = 1;
+        } else if (strcmp(a, "--seal") == 0) {
+            seal = 1;
+        } else if (strcmp(a, "--unseal") == 0 ||
+                   strcmp(a, "--free-redundant") == 0) {
+            unseal = 1;
+        } else if (strcmp(a, "--redundant-bench") == 0) {
+            bench = 1;
+        } else if (strcmp(a, "--redundant-blocks") == 0 && i + 1 < argc) {
+            char *endp = NULL;
+            rb_f = strtod(argv[++i], &endp);
+            if (endp == argv[i] || *endp != '\0' || !(rb_f > 0.0)) {
+                fprintf(stderr, "--redundant-blocks: bad fraction '%s'\n",
+                        argv[i]);
+                return 2;
+            }
+        } else if (strcmp(a, "--redundant-paranoic") == 0 && i + 1 < argc) {
+            char *endp = NULL;
+            const char *colon;
+            rp_f = strtod(argv[++i], &endp);
+            if (endp == argv[i] || !(rp_f > 0.0 && rp_f < 1.0) ||
+                (*endp != '\0' && *endp != ':')) {
+                fprintf(stderr, "--redundant-paranoic: bad fraction '%s'\n",
+                        argv[i]);
+                return 2;
+            }
+            colon = strchr(argv[i], ':');
+            if (colon) {
+                if (strcmp(colon + 1, "rs-vm") == 0)
+                    rp_algo = RS_ALGO_VM;
+                else if (strcmp(colon + 1, "rs-cauchy") == 0)
+                    rp_algo = RS_ALGO_CAUCHY;
+                else {
+                    fprintf(stderr, "--redundant-paranoic: unknown algo "
+                                    "'%s'\n", colon + 1);
+                    return 2;
+                }
+            }
+        } else {
+            fprintf(stderr, "unknown flag '%s'\n", a);
+            return 2;
+        }
+    }
+    if (dry + unseal + bench > 0 &&
+        (seal || rb_f >= 0 || rp_f >= 0)) {
+        fprintf(stderr, "conflicting flags\n");
+        return 2;
+    }
+    if (seal && (rb_f >= 0 || rp_f >= 0)) {
+        fprintf(stderr, "--seal conflicts with --redundant-*\n");
+        return 2;
     }
 
     /* per-file lines go to stdout, the summary to stderr: unbuffered, or a
      * redirected log tears a line at every 4 KB flush boundary */
     setvbuf(stdout, NULL, _IONBF, 0);
+
+    /* WP20b --redundant-bench: synthetic head-to-head, no volume needed
+     * (k=32, m=4, 64 MiB of data in RAM) */
+    if (bench) {
+        double vm, ca;
+        if (rs_bench(32, 4, INVFS_BLOCK_SIZE, 512, &vm, &ca) != 0) {
+            fprintf(stderr, "--redundant-bench: benchmark failed\n");
+            return 1;
+        }
+        printf("[bench] rs-vm: %.1f MB/s, rs-cauchy: %.1f MB/s "
+               "(k=32, m=4, 64 MiB data); winner: %s\n",
+               vm, ca, vm >= ca ? "rs-vm" : "rs-cauchy");
+        return 0;
+    }
 
     /* WP16b: the codec profile rides the environment (INVFS_PROFILE).
      * Capture the setting BEFORE vol_open publishes the default into the
@@ -221,6 +306,62 @@ int main(int argc, char **argv)
         }
     }
     sb = vol_sb(vol);
+
+    /* WP20b: apply the requested redundancy configuration (persisted into
+     * the RDP0 descriptor by vol_seal at the end of the run) */
+    if (rb_f >= 0 || rp_f >= 0) {
+        uint32_t k1 = 0, m2 = 0;
+        int l2 = -1;
+        if (rb_f >= 0) {
+            long lk = (long)(1.0 / rb_f + 0.5);
+            if (lk < 8) lk = 8;
+            if (lk > 128) lk = 128;
+            k1 = (uint32_t)lk;
+        }
+        if (rp_f >= 0) {
+            long lm = (long)(rp_f * 32.0 / (1.0 - rp_f) + 0.5);
+            if (lm < 2) lm = 2;
+            if (lm > 8) lm = 8;
+            m2 = (uint32_t)lm;
+            l2 = rp_algo;
+            if (!l2) {
+                /* no explicit suffix: keep the persisted algo; on the
+                 * first paranoic configure the bench picks the winner */
+                uint32_t ok1, om;
+                int oa;
+                vol_redun_state(vol, &ok1, &oa, &om);
+                if (oa) {
+                    l2 = oa;
+                } else {
+                    double vm, ca;
+                    if (rs_bench(32, 4, INVFS_BLOCK_SIZE, 512,
+                                 &vm, &ca) != 0) {
+                        fprintf(stderr, "redundant-paranoic: internal "
+                                        "bench failed\n");
+                        vol_close(vol);
+                        return 1;
+                    }
+                    l2 = vm >= ca ? RS_ALGO_VM : RS_ALGO_CAUCHY;
+                    fprintf(stderr, "redundant-paranoic: bench picked %s "
+                            "(rs-vm %.1f vs rs-cauchy %.1f MB/s)\n",
+                            rs_algo_name(l2), vm, ca);
+                }
+            }
+        }
+        vol_redun_config(vol, k1, l2, m2);
+    }
+    /* auto-reseal: no redundancy flags but a live descriptor -> continue
+     * the persisted configuration after the sweep */
+    if (!seal && !unseal && !dry && rb_f < 0 && rp_f < 0) {
+        uint32_t k1c, m2c;
+        int l2c;
+        if (vol_redun_state(vol, &k1c, &l2c, &m2c)) {
+            auto_reseal = 1;
+            fprintf(stderr, "redundancy: live RDP0 descriptor (k1=%u, "
+                    "l2=%s m2=%u) -- auto-reseal after sweep\n",
+                    (unsigned)k1c, rs_algo_name(l2c), (unsigned)m2c);
+        }
+    }
 
     /* WP20 --unseal: free all parity blocks and remove the owners; no sweep
      * walk runs (there is nothing to recompress, only seal state to drop). */
@@ -420,22 +561,30 @@ int main(int argc, char **argv)
             fprintf(stderr, "warning: final flush failed\n");
     }
 
-    /* WP20 --seal: (re)seal the shadow-zone parity AFTER the sweep is fully
-     * flushed -- the parity covers the post-sweep state. Idempotent
-     * check-and-update: an unchanged volume reports 0 stripes updated. */
-    if (seal) {
+    /* WP20 --seal / WP20b: (re)seal the shadow-zone parity AFTER the sweep
+     * is fully flushed -- the parity covers the post-sweep state.
+     * Idempotent check-and-update: an unchanged volume reports 0 stripes
+     * updated. Runs for --seal, the --redundant-* configures, and the
+     * auto-reseal (live descriptor, no flags). */
+    if (seal || rb_f >= 0 || rp_f >= 0 || auto_reseal) {
         invfs_seal_report rep;
+        uint32_t k1c, m2c;
+        int l2c;
+        vol_redun_state(vol, &k1c, &l2c, &m2c);
         if (vol_seal(vol, 0, &rep) != 0) {
             fprintf(stderr, "seal failed\n");
             vol_close(vol);
             return 1;
         }
         printf("[seal] %llu stripes, %llu parity blocks, overhead %.2f%% of "
-               "occupied shadow; %llu stripes updated, %llu unchanged",
+               "occupied shadow; %llu stripes updated, %llu unchanged, "
+               "%llu dirty-skipped (k1=%u)",
                (unsigned long long)rep.stripes,
                (unsigned long long)rep.parity_blocks, rep.overhead_pct,
                (unsigned long long)rep.updated,
-               (unsigned long long)rep.unchanged);
+               (unsigned long long)rep.unchanged,
+               (unsigned long long)rep.dirty_skipped,
+               (unsigned)k1c);
         if (rep.added || rep.freed)
             printf(" (%llu added, %llu stale freed)",
                    (unsigned long long)rep.added,
@@ -444,6 +593,26 @@ int main(int argc, char **argv)
             printf(", %llu unprotected (ENOSPC)",
                    (unsigned long long)rep.unprotected);
         printf("\n");
+        if (l2c) {
+            printf("[seal2] %llu stripes, %llu parity blocks, overhead "
+                   "%.2f%% of occupied shadow; %llu stripes updated, "
+                   "%llu unchanged, %llu dirty-skipped (%s, k=32, m=%u)",
+                   (unsigned long long)rep.l2_stripes,
+                   (unsigned long long)rep.l2_parity_blocks,
+                   rep.l2_overhead_pct,
+                   (unsigned long long)rep.l2_updated,
+                   (unsigned long long)rep.l2_unchanged,
+                   (unsigned long long)rep.l2_dirty_skipped,
+                   rs_algo_name(l2c), (unsigned)m2c);
+            if (rep.l2_added || rep.l2_freed)
+                printf(" (%llu added, %llu stale freed)",
+                       (unsigned long long)rep.l2_added,
+                       (unsigned long long)rep.l2_freed);
+            if (rep.l2_unprotected)
+                printf(", %llu unprotected (ENOSPC)",
+                       (unsigned long long)rep.l2_unprotected);
+            printf("\n");
+        }
         if (vol_flush(vol) != 0)
             fprintf(stderr, "warning: final flush failed\n");
     }
