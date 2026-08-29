@@ -244,6 +244,45 @@ typedef struct {
 } invfs_rszs;                   /* 40 bytes, block-padded */
 #pragma pack(pop)
 
+/* ---- WP21: CKP0 sweep-checkpoint descriptor (block 0 reserved area) ----
+ * Lives at byte offset 0x220 of block 0, past the superblock (0x00..0x90),
+ * the RDP0 descriptor (0x100..0x118) and the RSZ0 descriptor
+ * (0x140..0x20C -- 0x180, the offset the WP21 spec suggested, lies INSIDE
+ * the RSZ0 payload, so CKP0 moved to the first free 0x20 boundary).
+ * Pre-WP21 images carry zeros there, which read as "absent" (magic
+ * mismatch) -- the RDP0 convention.
+ *
+ * Written by invf-sweep BEFORE the walk (the checkpoint = the two append
+ * pointers at sweep start), then every block the sweep retires is held by
+ * the retention registry ("\x01reten" owner inode) instead of being freed.
+ * invf-rollback restores the STAGED journal prefix (vol_flush rewrites the
+ * journal in place, so the pre-sweep L2P survives only as a copy), zeroes
+ * the inode area at inode_area_pos (append-only: the pre-sweep records are
+ * byte-intact), and lets the fsck rebuild machinery reconcile the rest.
+ *
+ *   0x220  char magic[4]        "CKP0"
+ *   0x224  u32 crc32c           over the descriptor with this field 0
+ *   0x228  u64 inode_area_pos   inode-area append pointer at checkpoint
+ *   0x230  u64 journal_pos      journal append pointer at checkpoint
+ *   0x238  u64 stage_pba        staging run holding the journal prefix
+ *   0x240  u64 stage_blocks     (content length = journal_pos - jstart)
+ *   0x248  u64 sweep_seq        per-volume monotone checkpoint counter
+ *   0x250  u64 time_unix        checkpoint wall time
+ * 56 bytes total; the rest of block 0 stays reserved-zero. */
+#define INVFS_CKP0_OFF 0x220
+#pragma pack(push, 1)
+typedef struct {
+    char     magic[4];          /* 0x220 "CKP0" */
+    uint32_t crc32c;            /* 0x224 */
+    uint64_t inode_area_pos;    /* 0x228 */
+    uint64_t journal_pos;       /* 0x230 */
+    uint64_t stage_pba;         /* 0x238 */
+    uint64_t stage_blocks;      /* 0x240 */
+    uint64_t sweep_seq;         /* 0x248 */
+    uint64_t time_unix;         /* 0x250 */
+} invfs_ckp0;                   /* 0x258 = 56 bytes */
+#pragma pack(pop)
+
 /* AST block entry — one byte-range mapping (kernel binary format) */
 typedef struct {
     uint64_t file_offset;           /* offset in original file */

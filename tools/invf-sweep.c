@@ -29,6 +29,17 @@
  * both layers and the descriptor (same as --unseal). A bare run (no
  * redundancy flags) on a volume with a live descriptor auto-reseals after
  * the sweep. --redundant-bench prints rs-vm vs rs-cauchy MB/s and exits.
+ *
+ * WP21: every non-dry run arms a sweep checkpoint (CKP0) BEFORE the walk
+ * and holds the blocks it retires in the "\x01reten" retention registry
+ * (see vol_ckp_begin); invf-rollback undoes the last sweep from it.
+ * --realize is the point of no return: the previous run's retained blocks
+ * are freed and CKP0 is cleared, then a normal (freshly checkpointed)
+ * sweep proceeds. The next bare sweep auto-realizes the same way --
+ * K=1 means one checkpoint, and only --realize or invf-rollback resolve
+ * it by hand. Checkpointing is declined (the sweep runs without one) on
+ * read-only/recovering volumes, under a live redundancy seal (rollback
+ * would invalidate the parity stripes), and with INVFS_CHECKPOINT=0.
  */
 #define _CRT_SECURE_NO_WARNINGS
 
@@ -36,6 +47,11 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stddef.h>
+
+#ifndef _WIN32
+#include <signal.h>
+#include <unistd.h>
+#endif
 
 #include "invarifs.h"
 #include "volume.h"
@@ -156,7 +172,7 @@ int main(int argc, char **argv)
 {
     invfs_volume *vol;
     const invfs_superblock *sb;
-    int err, dry = 0, seal = 0, unseal = 0, bench = 0;
+    int err, dry = 0, seal = 0, unseal = 0, bench = 0, realize = 0;
     double rb_f = -1.0, rp_f = -1.0;   /* <0: flag absent */
     int rp_algo = 0;                   /* explicit :rs-vm/:rs-cauchy suffix */
     int auto_reseal = 0;
@@ -175,7 +191,9 @@ int main(int argc, char **argv)
                 "usage: %s <image> [--dry-run] [--seal|--unseal]\n"
                 "           [--redundant-blocks <f>]\n"
                 "           [--redundant-paranoic <f>[:rs-vm|rs-cauchy]]\n"
-                "           [--free-redundant] [--redundant-bench]\n",
+                "           [--free-redundant] [--redundant-bench]\n"
+                "           [--realize]  (accept the last sweep: free its\n"
+                "                         retention registry, clear CKP0)\n",
                 argv[0]);
         return 2;
     }
@@ -184,6 +202,8 @@ int main(int argc, char **argv)
         const char *a = argv[i];
         if (strcmp(a, "--dry-run") == 0) {
             dry = 1;
+        } else if (strcmp(a, "--realize") == 0) {
+            realize = 1;
         } else if (strcmp(a, "--seal") == 0) {
             seal = 1;
         } else if (strcmp(a, "--unseal") == 0 ||
@@ -227,7 +247,7 @@ int main(int argc, char **argv)
         }
     }
     if (dry + unseal + bench > 0 &&
-        (seal || rb_f >= 0 || rp_f >= 0)) {
+        (seal || rb_f >= 0 || rp_f >= 0 || realize)) {
         fprintf(stderr, "conflicting flags\n");
         return 2;
     }
@@ -380,6 +400,37 @@ int main(int argc, char **argv)
         return 0;
     }
 
+    /* WP21: resolve the previous sweep's checkpoint (realize: the retained
+     * blocks are freed, CKP0 cleared -- the point of no return), then arm
+     * a fresh one. This is the K=1 contract: one checkpoint per volume,
+     * overwritten only after the previous one is rolled back or realized;
+     * a bare sweep auto-realizes so checkpointing never needs a separate
+     * command in the normal flow. A dry run touches nothing. A decline
+     * (sealed / read-only / no room for the staging) never stops the
+     * sweep -- the run just goes uncheckpointed. */
+    if (!dry) {
+        uint64_t rfree = 0;
+        int rrc = vol_ckp_realize(vol, &rfree);
+        /* on a read-only/recovering volume the realize refusal is not
+         * fatal here -- the sweep's own machinery refuses the same way
+         * (and --seal needs to print its own read-only diagnostic) */
+        if (rrc < 0 && vol_write_enabled(vol)) {
+            fprintf(stderr, "checkpoint: realizing the previous run "
+                            "failed\n");
+            vol_close(vol);
+            return 1;
+        }
+        if (rrc > 0)
+            fprintf(stderr, "checkpoint: previous run realized "
+                    "(%llu retained blocks freed)\n",
+                    (unsigned long long)rfree);
+        else if (realize)
+            fprintf(stderr, "checkpoint: nothing to realize\n");
+        if (vol_ckp_begin(vol) < 0)
+            fprintf(stderr, "checkpoint: arm failed; sweeping without "
+                            "one\n");
+    }
+
     bm = (sb->total_blocks / 8 + INVFS_BLOCK_SIZE - 1) / INVFS_BLOCK_SIZE;
     area_start = (sb->metadata_zone_start + bm + INVFS_JOURNAL_BLOCKS)
                  * INVFS_BLOCK_SIZE;
@@ -455,6 +506,17 @@ int main(int argc, char **argv)
 
     /* sweep candidates: regular files with actual payload */
     for (int i = 0; i < count; i++) {
+#ifndef _WIN32
+        /* WP21 test hook (tools/test-rollback.sh): die mid-walk, after N
+         * candidates, with the checkpoint armed and retention half-filled
+         * -- the crash-mid-sweep rollback leg. (Keyed on the walk index:
+         * deferred batching candidates move neither swept nor skipped.) */
+        {
+            const char *ab = getenv("INVFS_SWEEP_ABORT_AFTER");
+            if (ab && !dry && i + 1 == atoi(ab) && atoi(ab) > 0)
+                kill(getpid(), SIGKILL);
+        }
+#endif
         if (inodes[i] == 0 || sizes[i] == 0) { skipped++; continue; }
         if (dry) { printf("would sweep %s (%llu bytes)\n",
                           names[i], (unsigned long long)sizes[i]); continue; }
@@ -555,6 +617,23 @@ int main(int argc, char **argv)
 
     fprintf(stderr, "sweep done: swept=%d skipped=%d failed=%d\n",
             swept, skipped, failed);
+
+    /* WP21: seal the retention registry (the "\x01reten" owner) holding
+     * every block this run retired. From here the volume's end-state is:
+     * checkpoint live + retained blocks held, until invf-rollback or the
+     * next realize. A registry failure does NOT invalidate the checkpoint
+     * (rollback never reads the registry); the realize of an unregistered
+     * range is just deferred to the fsck after the next realize. */
+    if (!dry) {
+        uint64_t rr = 0, rb = 0;
+        if (vol_ckp_end(vol, &rr, &rb) != 0)
+            fprintf(stderr, "checkpoint: registry write failed (the "
+                            "checkpoint itself is intact)\n");
+        else if (rb)
+            fprintf(stderr, "checkpoint: %llu retained blocks held for "
+                    "rollback (%llu ranges)\n",
+                    (unsigned long long)rb, (unsigned long long)rr);
+    }
 
     if (!dry) {
         if (vol_flush(vol) != 0)

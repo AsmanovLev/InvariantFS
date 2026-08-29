@@ -18,7 +18,7 @@ B3      := blake3 blake3_dispatch blake3_portable
 
 TOOLS   := invf-mkfs invf-verify invf-fsck invf-cp invf-cat invf-ls invf-stat \
            invf-zip invf-arctest invf-blkio_test invf-fuse invf-import invf-sweep meta_probe \
-           invf-stats invf-resize
+           invf-stats invf-resize invf-rollback
 
 all: $(TOOLS:%=$(OUT)/%)
 
@@ -59,6 +59,11 @@ $(OBJ)/invf-import.o: tools/invf-import.c | $(OBJ)
 $(OUT)/invf-sweep: $(OBJ)/invf-sweep.o $(CORE_O)
 	$(CC) $(CFLAGS) -Itools -o $@ $< $(CORE_O) $(LDLIBS)
 $(OBJ)/invf-sweep.o: tools/invf-sweep.c | $(OBJ)
+	$(CC) $(CFLAGS) -c -o $@ $<
+
+$(OUT)/invf-rollback: $(OBJ)/invf-rollback.o $(CORE_O)
+	$(CC) $(CFLAGS) -Itools -o $@ $< $(CORE_O) $(LDLIBS)
+$(OBJ)/invf-rollback.o: tools/invf-rollback.c | $(OBJ)
 	$(CC) $(CFLAGS) -c -o $@ $<
 
 $(OUT)/meta_probe: $(OBJ)/meta_probe.o $(CORE_O)
@@ -108,6 +113,7 @@ e2e: all
 	bash tools/test-ntfs.sh
 	bash tools/test-vdi.sh
 	bash tools/test-resize.sh
+	bash tools/test-rollback.sh
 
 .PHONY: all clean test e2e fuzz
 -include $(wildcard $(OBJ)/*.d)

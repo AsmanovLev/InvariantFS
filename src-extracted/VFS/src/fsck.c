@@ -54,6 +54,20 @@ int main(int argc, char **argv)
         return 1;
     }
 
+    /* WP21: with a sweep checkpoint live, the rebuild's orphan reclaim is
+     * the one pass that could free a not-yet-registered retained block
+     * out from under a future rollback. Report mode is unaffected; -f is
+     * refused until the checkpoint is resolved. (invf-rollback drives the
+     * same engine with the checkpoint in place -- it is not blocked.) */
+    if (fix && vol_ckp_armed(v)) {
+        fprintf(stderr, "invf-fsck: %s: a sweep checkpoint is live; -f "
+                "would break rollback. Resolve it first: invf-rollback %s "
+                "(undo the sweep) or invf-sweep %s --realize (accept it)\n",
+                img, img, img);
+        vol_close(v);
+        return 1;
+    }
+
     if (vol_fsck_scan(v, &rep, fix) != 0) {
         fprintf(stderr, "invf-fsck: scan failed\n");
         vol_close(v);
@@ -100,6 +114,13 @@ int main(int argc, char **argv)
         printf("  bad records:  %llu\n", (unsigned long long)rep.bad_recs);
         printf("  free blocks:  %llu\n",
                (unsigned long long)vol_free_blocks_cached(v));
+        {
+            invfs_ckp0 ck;
+            if (vol_ckp_info(v, &ck))
+                printf("  checkpoint:   sweep #%llu live (undo: "
+                       "invf-rollback; accept: invf-sweep --realize)\n",
+                       (unsigned long long)ck.sweep_seq);
+        }
         printf("%s\n", issues ? (fix || r2.stripes_repaired
                                  ? "REPAIRED" : "ISSUES FOUND")
                               : "OK");

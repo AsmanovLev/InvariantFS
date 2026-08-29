@@ -411,3 +411,49 @@ typedef struct {
 } invfs_seal2_repair;
 
 int vol_seal2_repair(invfs_volume *v, invfs_seal2_repair *rep);
+
+/* ---- WP21: sweep checkpoint + rollback (CKP0 descriptor, invarifs.h) ----
+ * invf-sweep arms a checkpoint BEFORE the walk (vol_ckp_begin): the CKP0
+ * descriptor records the inode-area and journal append pointers plus a
+ * staging run holding the journal prefix (vol_flush rewrites the journal
+ * in place, so the pre-sweep L2P survives the sweep only as that copy).
+ * While a checkpoint-armed sweep runs, vol_free_blocks does NOT free: the
+ * blocks stay allocated and are remembered in the retention registry (the
+ * hidden "\x01reten" owner inode, written by vol_ckp_end at sweep end).
+ * Post-sweep sessions free immediately as before (documented best-effort
+ * hole for deletes between sweep and rollback).
+ *
+ * vol_ckp_realize (invf-sweep --realize, and automatically at the start
+ * of the next sweep) deletes the registry -- freeing every retained block
+ * -- and clears CKP0: the point of no return.
+ *
+ * vol_rollback (invf-rollback, offline) restores the staged journal and
+ * truncates the inode area to the checkpoint pointers, then runs the
+ * ordinary fsck rebuild: post-sweep records/journal entries vanish
+ * wholesale, pre-sweep record versions resurrect with their (retained,
+ * never-reallocated) blocks, and everything the sweep allocated is
+ * reclaimed as orphans. */
+/* 1 = a live (magic+CRC-valid) CKP0 descriptor was read at open */
+int  vol_ckp_armed(const invfs_volume *v);
+/* 1 = the previous session did not close cleanly (and did not
+ * auto-recover); rollback tools proceed anyway -- they ARE the recovery */
+int  vol_needs_recovery(invfs_volume *v);
+/* 1 = live (+ a copy of the descriptor), 0 = absent */
+int  vol_ckp_info(const invfs_volume *v, invfs_ckp0 *out);
+/* sweep start: 1 = armed (retention active), 0 = declined (the volume is
+ * read-only/recovering, a redundancy seal is live, or the environment
+ * opted out), -1 = hard error. Declined is NOT an error: the sweep runs
+ * uncheckpointed. */
+int  vol_ckp_begin(invfs_volume *v);
+/* sweep end: write the retention registry (the "\x01reten" owner + L2P
+ * maps, sharded like the seal owners). 0 = ok (or nothing armed). */
+int  vol_ckp_end(invfs_volume *v, uint64_t *ranges_out, uint64_t *blocks_out);
+/* realize: delete the registry (freeing its blocks) + clear CKP0.
+ * 1 = something was realized, 0 = nothing live, -1 = error. */
+int  vol_ckp_realize(invfs_volume *v, uint64_t *freed_blocks_out);
+/* rollback: 0 = rolled back, 1 = no checkpoint, -2 = refused (a live
+ * redundancy seal would be invalidated; --free-redundant first), -3 = the
+ * checkpoint or its staging failed verification (the post-sweep state is
+ * untouched), -1 = io/rebuild error (re-run; the steps are idempotent).
+ * *reclaimed_out (optional) takes the orphan-block count the rebuild freed. */
+int  vol_rollback(invfs_volume *v, uint64_t *reclaimed_out);

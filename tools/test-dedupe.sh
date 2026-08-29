@@ -79,6 +79,11 @@ FREED=$(echo "$DEDUP_LINE" | awk '{print $6}')
 # 1 shared middle segment (a1/a2) + 3 fully-shared segments (dup1/dup2)
 [ "$MERGED" = "4" ] || { echo "FAIL: expected 4 merged segments, got $MERGED"; exit 1; }
 # merged blocks must be back in the bitmap: free-after == free-before + freed
+# WP21: the sweep held its frees in the retention registry (the live
+# checkpoint); realize it first so the bitmap reflects the dedupe (the
+# no-op re-sweep inside --realize leaves no new checkpoint behind).
+$B/invf-sweep "$IMG" --realize >> "$WORK/sweep1.log" 2>&1 || {
+    cat "$WORK/sweep1.log"; exit 1; }
 FREE1=$(free_blocks "$IMG")
 echo "free blocks after sweep: $FREE1 (freed by dedupe: $FREED)"
 [ "$((FREE0 + FREED))" = "$FREE1" ] || {
