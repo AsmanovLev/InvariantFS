@@ -13581,6 +13581,49 @@ static uint64_t vol_create_blob_file(invfs_volume *v, const char *name,
     }
     if (name_too_long(name)) return 0;
 
+    /* Empty member (e.g. a zero-length TAR part): the generic guard stores
+     * such a blob verbatim as csize=0, and the read path (seg_read_checked,
+     * min_csize=1) would then reject our own segment forever. An empty
+     * original needs no segment at all — write the same num_blocks=0 record
+     * shape vol_create_file uses for empty files. blob_len==0 with a
+     * nonzero orig_size is an upstream bug: refuse rather than store
+     * something no decoder could satisfy. */
+    if (blob_len == 0) {
+        if (orig_size != 0) {
+            fprintf(stderr, "invarifs: %s: empty blob for %llu-byte original\n",
+                    name, (unsigned long long)orig_size);
+            return 0;
+        }
+        inode_id = v->next_inode_id++;
+        memset(&ast_h, 0, sizeof ast_h);
+        ast_h.version = 1;
+        ast_h.file_size = 0;
+        ast_h.num_blocks = 0;
+        rec_size = sizeof(invfs_inode_rec) + sizeof(ast_h);
+        rec = (uint8_t *)calloc(1, rec_size);
+        if (!rec) return 0;
+        rh = (invfs_inode_rec *)rec;
+        rh->magic = INODE_REC_MAGIC;
+        rh->rec_len = (uint32_t)rec_size;
+        rh->inode_id = inode_id;
+        rh->file_size = 0;
+        rh->ctime = (uint64_t)time(NULL);
+        rec_set_name(rh, name);
+        memcpy(rec + sizeof(invfs_inode_rec), &ast_h, sizeof ast_h);
+        crc = invfs_crc32c(rec, rec_size);
+        if (v->inode_area_pos + rec_size + 4 > v->inode_area_end) { free(rec); return 0; }
+        if (vol_pre_record(v) != 0) { free(rec); return 0; }
+        if (io_seek(&v->io, v->inode_area_pos) != 0 ||
+            io_write(&v->io, rec, rec_size) != 0 ||
+            io_write(&v->io, &crc, 4) != 0) { free(rec); return 0; }
+        v->inode_area_pos += rec_size + 4;
+        idx_put(v, name, strlen(name), inode_id, v->inode_area_pos - rec_size - 4,
+                rh->file_size, rh->ctime);
+        idx_put_id(v, inode_id, v->inode_area_pos - rec_size - 4);
+        free(rec);
+        return inode_id;
+    }
+
     inode_id = v->next_inode_id++;
     phys_blocks = (blob_len + 8 + INVFS_BLOCK_SIZE - 1) / INVFS_BLOCK_SIZE;
     pba = alloc_blocks(v, v->sb.shadow_zone_start, v->sb.shadow_zone_blocks,

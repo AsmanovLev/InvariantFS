@@ -241,4 +241,15 @@ for f in texts.tar misc.tar; do
 done
 $B/invf-verify "$IMG" --deep | tail -1
 
+echo "== empty-member tar regression (zero-length part must not corrupt) =="
+mkdir -p "$WORK/emptyfix"
+printf 'some compressible content some compressible content\n' > "$WORK/emptyfix/full.txt"
+: > "$WORK/emptyfix/empty.txt"
+tar -cf "$WORK/emptyfix/e.tar" -C "$WORK/emptyfix" .   # includes './' dir member
+$B/invf-cp "$IMG" "$WORK/emptyfix/e.tar" e.tar >/dev/null
+$B/invf-sweep "$IMG" >/dev/null 2>&1
+$B/invf-cat "$IMG" e.tar "$WORK/out/e.tar" >/dev/null
+cmp -s "$WORK/emptyfix/e.tar" "$WORK/out/e.tar" || { echo "FAIL: empty-member tar mismatch"; exit 1; }
+$B/invf-verify "$IMG" --deep | tail -1 | grep -q "0 corrupt" || { echo "FAIL: corrupt after empty-member sweep"; exit 1; }
+
 echo "CONBATCH E2E: PASS"
