@@ -691,7 +691,7 @@ static int probe_external(const char *name, const char *tool)
  * the PPMD text heuristic in registry order (specific magics first, text
  * LAST) and after the builtin entries.
  */
-#define INVFS_PACK_MAX 8
+#define INVFS_PACK_MAX 16
 
 typedef struct {
     invfs_codec      pub;       /* what the registry exposes */
@@ -909,6 +909,14 @@ PACK_TRAMPOLINES(4)
 PACK_TRAMPOLINES(5)
 PACK_TRAMPOLINES(6)
 PACK_TRAMPOLINES(7)
+PACK_TRAMPOLINES(8)
+PACK_TRAMPOLINES(9)
+PACK_TRAMPOLINES(10)
+PACK_TRAMPOLINES(11)
+PACK_TRAMPOLINES(12)
+PACK_TRAMPOLINES(13)
+PACK_TRAMPOLINES(14)
+PACK_TRAMPOLINES(15)
 
 static const struct pack_slot_fns {
     int (*sniff)(const uint8_t *, size_t, const char *);
@@ -924,6 +932,14 @@ static const struct pack_slot_fns {
     { pack_sniff_5, pack_probe_5, pack_encode_5, pack_decode_5 },
     { pack_sniff_6, pack_probe_6, pack_encode_6, pack_decode_6 },
     { pack_sniff_7, pack_probe_7, pack_encode_7, pack_decode_7 },
+    { pack_sniff_8, pack_probe_8, pack_encode_8, pack_decode_8 },
+    { pack_sniff_9, pack_probe_9, pack_encode_9, pack_decode_9 },
+    { pack_sniff_10, pack_probe_10, pack_encode_10, pack_decode_10 },
+    { pack_sniff_11, pack_probe_11, pack_encode_11, pack_decode_11 },
+    { pack_sniff_12, pack_probe_12, pack_encode_12, pack_decode_12 },
+    { pack_sniff_13, pack_probe_13, pack_encode_13, pack_decode_13 },
+    { pack_sniff_14, pack_probe_14, pack_encode_14, pack_decode_14 },
+    { pack_sniff_15, pack_probe_15, pack_encode_15, pack_decode_15 },
 };
 
 static char *pack_strdup(const char *s)
@@ -1042,7 +1058,11 @@ static void pack_register(const char *dir, const struct pack_manifest *m)
     pack_entry *p;
     size_t i;
 
-    if (packs_n >= INVFS_PACK_MAX) return;
+    if (packs_n >= INVFS_PACK_MAX) {
+        fprintf(stderr, "[codecpack] WARNING: pack table full (%d), %s/%s dropped\n",
+                INVFS_PACK_MAX, dir, m->name);
+        return;
+    }
     if (!m->name[0] || m->algo < 0)
         return;
     /* WP16a: a container pack (type=container) declares the four
