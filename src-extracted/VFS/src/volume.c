@@ -28,6 +28,7 @@
 #include <fcntl.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
+#include <sys/file.h>
 #include <sys/resource.h>
 #include <errno.h>
 #include <signal.h>
@@ -212,6 +213,13 @@ typedef struct invfs_volume {
     /* on-demand sweep pending list (RAM) */
     uint64_t *pending;
     size_t n_pending, cap_pending;
+    /* WP4ab: live ranged-write sessions (intrusive list, linked in
+     * vol_write_begin, unlinked at commit/abort). The sweep must not
+     * touch a file a session has forked: the session aliases the old
+     * record's blocks, and a transcode retiring that record mid-session
+     * would drop the old id's L2P maps and free blocks the session still
+     * reads through its aliases. */
+    invfs_wsession *wsessions;
     /* in-memory name index */
     name_index_entry **nbuck;
     size_t nmask, ncount;
@@ -1259,6 +1267,19 @@ invfs_volume *vol_open(const char *path, int *err)
         free(v);
         return NULL;
     }
+#ifndef _WIN32
+    /* POSIX twin of the Windows no-share open above: a lingering FUSE daemon
+     * finishing its drain and an offline tool (invf-cp/invf-sweep) writing
+     * the same image corrupt it between their in-memory bitmaps/L2P (seen
+     * in the wild: stale-position record appends clobbering fresh records).
+     * LOCK_NB: fail loudly instead of waiting. Released by close(). */
+    if (flock(v->io.fd, LOCK_EX | LOCK_NB) != 0) {
+        fprintf(stderr, "vol_open: %s: image is in use by another process\n",
+                real);
+        *err = -2;
+        goto fail;
+    }
+#endif
     if (io_seek(&v->io, 0) != 0 ||
         io_read(&v->io, &v->sb, sizeof(v->sb)) != 0) { *err = -3; goto fail; }
     if (memcmp(v->sb.magic, INVFS_MAGIC, 8) != 0) { *err = -4; goto fail; }
@@ -2071,6 +2092,18 @@ int vol_flush(invfs_volume *v)
     return 0;
 }
 
+/* fsync/fdatasync entry point (WP4ab): everything vol_flush persists
+ * (superblock, dirty bitmap range, journal suffix + terminator) becomes
+ * durable against power loss, not just process death. vol_write_commit
+ * has already pushed the data blocks themselves with io_write, so one
+ * barrier at the end covers the whole pending state. */
+int vol_sync(invfs_volume *v)
+{
+    if (!v) return -1;
+    if (vol_flush(v) != 0) return -1;
+    return blkio_flush(&v->io);
+}
+
 /* ================= crash consistency =================
  *
  * Three rules, and each one closes a hole that was open before:
@@ -2833,7 +2866,22 @@ struct invfs_wsession {
     uint32_t mat_upto;       /* highest contiguously materialized seg +1 */
     uint64_t logical_size;
     int      dirty;          /* any write/truncate landed */
+    invfs_wsession *next;    /* v->wsessions link (live sessions) */
 };
+
+/* 1 while a session for `name` is mid-flight: sweeps (all entry points)
+ * skip such a file. The session has forked the file's segment layout --
+ * a transcode retiring the old record mid-session would drop the old
+ * id's L2P maps the session's aliases resolve through, and the in-place
+ * sweep path would free blocks the aliases still name. */
+static int vol_write_active_name(invfs_volume *v, const char *name)
+{
+    const invfs_wsession *s;
+    for (s = v->wsessions; s; s = s->next)
+        if (strcmp(s->name, name) == 0)
+            return 1;
+    return 0;
+}
 
 uint64_t vol_write_begin(invfs_volume *v, const char *name, int truncate,
                          invfs_wsession **out)
@@ -2857,8 +2905,20 @@ uint64_t vol_write_begin(invfs_volume *v, const char *name, int truncate,
             s->truncating = truncate;
         }
     }
+    s->next = v->wsessions;
+    v->wsessions = s;
     *out = s;
     return s->new_id;
+}
+
+/* drop the session from the volume's live list (commit/abort) */
+static void wsession_unlink(invfs_wsession *s)
+{
+    invfs_wsession **pp = &s->v->wsessions;
+    while (*pp) {
+        if (*pp == s) { *pp = s->next; s->next = NULL; return; }
+        pp = &(*pp)->next;
+    }
 }
 
 /* The old record supports segment-aliasing only when it is exactly what
@@ -3034,12 +3094,32 @@ static int wsession_seg_current(invfs_wsession *s, uint32_t j,
         return rc;
     }
     if (s->have_old && j < s->aliased_n) {
-        uint64_t off = (uint64_t)j * SEGMENT_SIZE;
-        uint64_t room = s->old_size > off ? s->old_size - off : 0;
-        size_t want = (size_t)(room < SEGMENT_SIZE ? room : SEGMENT_SIZE);
-        if (want == 0) return 0;
-        return vol_read_range(s->v, s->old_id, off, want, plain) ==
-               (int)want ? 0 : -1;
+        /* Aliased segment: read through the session's OWN (new_id,j) map.
+         * Same pba the old record uses, but independent of the old
+         * record's lifetime: a concurrent retire of old_id (unlink while
+         * the handle is open -- the sweep is session-guarded) drops the
+         * old id's maps, and resolving through old_id would miss or,
+         * worse, the map could be gone after its blocks were reallocated.
+         * ents[j] is the old record's entry (plain NONE/LZ4, its own
+         * index -- wsession_simple_old guaranteed it). */
+        uint64_t pba = 0, plen = 0;
+        uint32_t csize = 0;
+        uint8_t *blob = NULL;
+        int rc;
+        if (vol_lookup_entry(s->v, s->new_id, j, &pba, &plen) != 0 || !pba)
+            return -1;
+        if (seg_read_checked(s->v, pba, plen, 1, &csize, &blob) != 0)
+            return -1;
+        if (s->ents[j].algo == INVFS_ALGO_LZ4) {
+            rc = LZ4_decompress_safe((const char *)blob, (char *)plain,
+                                     (int)csize, (int)SEGMENT_SIZE)
+                 == (int)s->ents[j].length ? 0 : -1;
+        } else {
+            rc = csize == s->ents[j].length ? 0 : -1;
+            if (rc == 0) memcpy(plain, blob, csize);
+        }
+        free(blob);
+        return rc;
     }
     return 0;
 }
@@ -3454,6 +3534,10 @@ int vol_write_commit(invfs_wsession *ws)
     }
     if (s->owns_siblings)
         vol_delete_siblings(v, s->name);
+    /* committed: the new record owns everything the session mapped, so the
+     * sweep guard no longer needs to see this session. (abort unlinks too;
+     * the unlink is idempotent.) */
+    wsession_unlink(s);
     s->committed = 1;
     return 0;
 }
@@ -3463,6 +3547,8 @@ void vol_write_abort(invfs_wsession *ws)
     invfs_wsession *s = ws;
     uint32_t i;
     if (!s) return;
+    wsession_unlink(s);   /* drop the sweep guard BEFORE freeing: the volume
+                           * list must never name a dead session */
     if (!s->committed) {
         for (i = 0; s->touched && i < s->n_ents && i < s->touched_cap; i++) {
             uint64_t pba = 0, plen = 0;
@@ -5372,6 +5458,12 @@ int vol_sweep_file(invfs_volume *v, uint64_t inode_id)
         }
     }
 
+    /* WP4ab: a live write session aliases this file's blocks under its own
+     * id; sweeping (worst case the pre-atomic in-place path, which frees
+     * old segments directly) would pull them from under the session. */
+    if (name[0] && vol_write_active_name(v, name))
+        return 1;   /* skipped -- the caller counts it, the file stays RAW */
+
     rc = vol_sweep_file_inner(v, inode_id, 0);
 
     if (have_keep && name[0]) {
@@ -6255,6 +6347,11 @@ int vol_sweep_one(invfs_volume *v, uint64_t inode_id, const char *name)
     if (!name || strlen(name) > 240 || inode_id == 0) return 0;
     /* internal control names (the "\x01tzb" batch owner) are never swept */
     if ((uint8_t)name[0] == 0x01) return 0;
+    /* WP4ab: a live write session has forked this file's segment layout
+     * (old-record blocks aliased under the session's new id). Transcoding
+     * it now would retire the old record mid-session. Skip; the commit
+     * re-marks the file pending, so the next drain picks it up. */
+    if (vol_write_active_name(v, name)) return 0;
 
     /* WP10 §2: class-aware walk predicate. A present class flag decides
      * skip/retry/downgrade without touching content; absent = the legacy
