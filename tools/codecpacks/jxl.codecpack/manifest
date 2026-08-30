@@ -1,0 +1,45 @@
+# jxl codecpack (WP16e): JPEG -> lossless JXL (JPEG bitstream
+# reconstruction) -- the WP11 lane migrated from a builtin volume.c branch
+# to a pack. This is the builtin -> pack migration proof.
+#
+# The manifest claims algo 4 (INVFS_ALGO_JXL), which the builtin registry
+# holds as an EXTERNAL + PACKONLY placeholder (sniff + probe only, the
+# transcode retired). By the WP16e override rule the pack REPLACES that
+# entry in the materialized registry: the sweep's WP13 pack loop runs this
+# pack's estimate/encode/decode (vol_pack_sweep: probe -> estimate-based
+# admission -> encode -> decode-back memcmp guard -> size guard -> blob ->
+# CODEC{4,gen} stamp), and the read path decodes algo-4 blobs through the
+# pack's decode trampoline. With the pack NOT installed the placeholder
+# defers JPEGs RAW and unstamped -- they wait for the pack instead of
+# falling to the terminal generic floor.
+#
+# encode/decode are the direct cjxl/djxl argv (fixed flags, no shell):
+#   cjxl --lossless_jpeg=1 stores the original JPEG bitstream in the JXL
+#   blob, so djxl reconstructs the exact same bytes (the 1:1 invariant);
+#   djxl --output_format=jpeg names that reconstruction explicitly -- the
+#   scratch output path the FS substitutes for {out} has no extension, so
+#   the format flag, not the extension, must say JPEG.
+# estimate is the SOF marker-walk helper (jxlest.c, C11/libc only,
+# streaming): prints w*h*3 -- the pixel buffer djxl materializes on
+# decode-back -- or 0 when the geometry is unknown (admit; the decode-back
+# guard is the arbiter). The helper is resolved by NAME, the rawdisk
+# convention: <pack>/bin/, then $INVFS_TOOLS, /usr/lib/invfs/tools, PATH
+# (tools/test-jxl.sh compiles it into a PATH dir at test time).
+name = jxl
+algo = 4
+pack_version = 1
+generation = 1
+caps = wholefile|external
+dec_mem = 0
+# JPEG SOI is the input claim. The JXL box + raw codestream magics ride
+# along for the registry-sniff users (the WP10 UNCOMPRESSIBLE retry gate),
+# like the retired builtin sniff_jxl -- a bare .jxl fed to cjxl simply
+# fails the encode or the decode-back guard (GENERIC_GUARD, retry on a
+# generation bump).
+sniff.magic = FFD8FF
+sniff.magic = FF0A
+sniff.magic = 0000000C4A584C20
+encode = cjxl {in} {out} --lossless_jpeg=1
+decode = djxl {in} {out} --output_format=jpeg
+estimate = jxlest estimate {in}
+requires = cjxl,djxl

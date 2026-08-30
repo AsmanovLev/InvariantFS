@@ -364,3 +364,51 @@ runtime:
 (The 4-pack wave — rawdisk/ext4/fat/xfs — builds on this recipe: their
 maps are filesystem-structure walks rendered to MRMP runs.)
 
+# WP16e: builtin -> pack migration (the jxl.codecpack proof)
+
+The JPEG->JXL lane (WP11) was the last whole-file codec hardcoded in
+volume.c; WP16e moved it to `tools/codecpacks/jxl.codecpack/` (algo 4)
+without changing the on-disk shape or the class-stamp semantics, proving
+the migration pattern every remaining builtin external (pmp/ape/wv) can
+follow:
+
+1. **The pack claims the builtin's algo.** A manifest whose `algo` names a
+   builtin **EXTERNAL placeholder** (sniff+probe only: pmp/jxl/ape/wv)
+   **overrides** it — the placeholder drops out of the materialized
+   registry and the pack entry (manifest sniff, dec_mem, generation, the
+   encode/decode trampolines) becomes the algo's only entry. Precedence
+   rule as implemented in `pack_register`: **pack wins over
+   builtin-external**; builtin **stream** codecs (NONE/LZ4/ZSTD/PPMD) and
+   builtin **CONTAINER** entries (zip/tarr/gzr/pngr/flacr/exer) can never
+   be claimed — a manifest naming their algo is silently skipped;
+   pack-vs-pack collisions keep the first-registered (readdir order).
+2. **The placeholder earns CAP_PACKONLY** (`INVFS_CODEC_CAP_PACKONLY`,
+   codec.h): with no pack loaded, the sweep DEFERS sniff-positive content
+   RAW and unstamped (vol_sweep_one's WP13 loop) instead of letting it
+   fall to the terminal generic floor; the first sweep with the pack
+   installed picks it up. The defer only fires when no *real* pack claimed
+   the content (builtins sit before packs in registry order, so the loop
+   remembers the placeholder hit and decides after the pack loop ran).
+3. **The builtin sweep branch is deleted**; the generic pack path
+   (`vol_pack_sweep`: probe -> `estimate` admission -> encode ->
+   decode-back memcmp guard -> size guard -> blob -> CODEC{algo,gen})
+   carries the file, and the class-predicate retry (vol_jxl_retry for
+   GUARD/MEMLIMIT{JXL}) re-enters through the same `vol_pack_sweep`. For
+   jxl the manifest is direct argv (`cjxl {in} {out} --lossless_jpeg=1` /
+   `djxl {in} {out} --output_format=jpeg` — the flag replaces the
+   extension the FS scratch paths do not carry) plus a C SOF-walk
+   `estimate` helper (`jxlest`, prints w*h*3, 0 = geometry unknown).
+4. **Reads dispatch through the registry**: algo-4 blobs decode via the
+   pack trampoline when the pack is loaded (the WP13 read branch's shape);
+   the builtin djxl wrapper remains as the pack-absent fallback so
+   pre-migration blobs and EXER-carved JXL parts stay readable.
+
+WP12(d) landed with the same change: every POSIX tool child now runs under
+RLIMIT_AS — a pack with manifest `dec_mem` > 0 gets
+`max(2*dec_mem, 256 MB)`, everything else (builtin tool callers, packs
+without dec_mem) the 2 GB default — and the pack exec resolves a bare
+argv[0] through `$INVFS_TOOLS` -> `/usr/lib/invfs/tools` -> PATH, matching
+the probe (before, probe could pass on INVFS_TOOLS while exec ran the PATH
+tool of the same name). E2E: tools/test-jxl.sh (parity legs + guard /
+tool-absent / pack-absent legs + an RLIMIT-kill fixture pack).
+

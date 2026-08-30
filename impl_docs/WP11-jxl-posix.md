@@ -60,3 +60,23 @@ layer; WV registers sniff+probe only (no transcode path yet).
 - (d) No RLIMIT_AS in tool children (WP10 §10 hardening) — the timeout
   bounds time, not memory.
 - (e) probe() runs per file; tool availability is not cached.
+
+## WP16e addendum (2026-08-30): the lane is a codecpack now
+
+The builtin JPEG branch this document describes is RETIRED. The lane lives
+in `tools/codecpacks/jxl.codecpack/` (algo 4, the WP16e override: a pack
+claiming a builtin EXTERNAL placeholder's algo replaces it; stream codecs
+and container builtins can never be claimed — see WP16-containerpacks.md
+"WP16e" for the full pattern and precedence rule). The gates above map
+onto the generic pack sweep as: probe gate = the pack probe (tools absent
+-> wait RAW, unstamped); admission = the pack's `estimate` command
+(`jxlest`, the same SOF w*h*3 walk, packaged as a streaming C helper);
+transcode/guard = `cjxl {in} {out} --lossless_jpeg=1` +
+djxl decode-back memcmp inside vol_pack_sweep. Reads dispatch through the
+registry entry (the pack trampoline; the builtin djxl wrapper remains as
+the pack-absent fallback for pre-migration blobs and EXER-carved parts).
+Gap (b) is long closed (WP12(b) vol_jxl_retry — now re-entering the pack
+sweep); gap (d) is closed here too: WP12(d) gives every tool child an
+RLIMIT_AS ceiling (max(2*dec_mem, 256MB) for packs with a manifest
+dec_mem, 2GB default otherwise) and the pack exec resolves bare argv[0]
+through $INVFS_TOOLS like the probe always did.

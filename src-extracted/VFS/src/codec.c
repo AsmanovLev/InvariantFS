@@ -685,6 +685,14 @@ static int probe_external(const char *name, const char *tool)
  * encode/decode trampolines that run the manifest argv as a subprocess via
  * the volume.c exec hooks (codec.h).
  *
+ * WP16e precedence rule (builtin -> pack migration): a manifest whose algo
+ * names a builtin EXTERNAL placeholder (a sniff+probe-only entry: pmp/jxl/
+ * ape/wv) OVERRIDES it -- the placeholder drops out of the materialized
+ * view and the pack entry is the algo's only entry. Builtin stream codecs
+ * (NONE/LZ4/ZSTD/PPMD) and builtin CONTAINER entries (zip/tarr/gzr/pngr/
+ * flacr/exer) can never be claimed: a manifest naming their algo is
+ * silently skipped. Pack-vs-pack collisions keep the first-registered.
+ *
  * Static slots, cap INVFS_PACK_MAX; all manifest strings are strdup'd.
  * Loaded lazily on the first registry access and memoized; the sweep is
  * single-threaded, same discipline as the probe cache. Packs sit BEFORE
@@ -704,6 +712,10 @@ typedef struct {
     char            *map;       /* WP16b: container packs only, optional */
     pack_magic_rule  magic[PACK_MAX_MAGIC];
     size_t           n_magic;
+    int              overrides_builtin;  /* WP16e: this pack replaced a
+                                          * builtin EXTERNAL entry (its algo
+                                          * is pub.algo); packs_ensure drops
+                                          * the builtin from the view */
     int              probed;    /* memoized availability probe */
     int              avail;
 } pack_entry;
@@ -1029,8 +1041,12 @@ static const invfs_codec registry[] = {
     { INVFS_ALGO_PMP, "pmp",
       INVFS_CODEC_CAP_EXTERNAL, 0, 1,
       sniff_pmp, probe_pmp, NULL, NULL },
+    /* WP16e: the JPEG->JXL lane migrated to tools/codecpacks/jxl.codecpack.
+     * The placeholder keeps sniff + probe so the sweep can DEFER JPEGs when
+     * the pack is not installed (PACKONLY -- see codec.h), and a pack whose
+     * manifest claims algo 4 OVERRIDES this entry (pack_register). */
     { INVFS_ALGO_JXL, "jxl",
-      INVFS_CODEC_CAP_EXTERNAL, 0, 1,
+      INVFS_CODEC_CAP_EXTERNAL | INVFS_CODEC_CAP_PACKONLY, 0, 1,
       sniff_jxl, probe_jxl, NULL, NULL },
     { INVFS_ALGO_APE, "ape",
       INVFS_CODEC_CAP_EXTERNAL, 0, 1,
@@ -1057,6 +1073,7 @@ static void pack_register(const char *dir, const struct pack_manifest *m)
 {
     pack_entry *p;
     size_t i;
+    int overrides = 0;
 
     if (packs_n >= INVFS_PACK_MAX) {
         fprintf(stderr, "[codecpack] WARNING: pack table full (%d), %s/%s dropped\n",
@@ -1077,8 +1094,21 @@ static void pack_register(const char *dir, const struct pack_manifest *m)
         return;
     }
     if ((unsigned long)m->algo >= 64) return;   /* AST algo field is 6 bits */
+    /* WP16e override precedence: a pack manifest may claim the algo of a
+     * builtin EXTERNAL placeholder (sniff+probe only, the transcode lives
+     * outside the registry -- pmp/jxl/ape/wv); the pack then REPLACES that
+     * entry in the materialized registry (sniff, policy fields and the
+     * encode/decode trampolines all come from the manifest). Builtin STREAM
+     * codecs (NONE/LZ4/ZSTD/PPMD -- they have in-process encode/decode) and
+     * builtin CONTAINER entries are never overridden: their algos stay
+     * taken. */
     for (i = 0; i < REGISTRY_N; i++)
-        if (registry[i].algo == (uint32_t)m->algo) return;   /* algo taken */
+        if (registry[i].algo == (uint32_t)m->algo) {
+            if (!(registry[i].caps & INVFS_CODEC_CAP_EXTERNAL))
+                return;                     /* algo taken, not overridable */
+            overrides = 1;
+            break;
+        }
     for (i = 0; i < packs_n; i++) {
         if (packs[i].pub.algo == (uint32_t)m->algo) return;
         if (strcmp(packs[i].name, m->name) == 0) return;     /* seen already */
@@ -1113,6 +1143,7 @@ static void pack_register(const char *dir, const struct pack_manifest *m)
     }
     memcpy(p->magic, m->magic, sizeof p->magic);
     p->n_magic = m->n_magic;
+    p->overrides_builtin = overrides;
 
     p->pub.algo          = (uint32_t)m->algo;
     p->pub.name          = p->name;
@@ -1209,17 +1240,28 @@ static void pack_scan_all(void)
 
 /* lazy init: scan once, then build the materialized registry view --
  * static entries, packs, PPMD last (registry order = sniff priority:
- * specific magics first, text LAST, packs sit between) */
+ * specific magics first, text LAST, packs sit between). WP16e: a builtin
+ * EXTERNAL entry a loaded pack overrides drops out of the view -- the
+ * pack's entry (in the packs section) is the ONLY entry for that algo. */
 static void packs_ensure(void)
 {
-    size_t i, n;
+    size_t i, j, n;
 
     if (packs_built) return;
     packs_built = 1;
     pack_scan_all();
     n = 0;
-    for (i = 0; i < REGISTRY_N; i++)
-        if (registry[i].algo != INVFS_ALGO_PPMD) g_all[n++] = registry[i];
+    for (i = 0; i < REGISTRY_N; i++) {
+        int taken = 0;
+        if (registry[i].algo == INVFS_ALGO_PPMD) continue;
+        for (j = 0; j < packs_n; j++)
+            if (packs[j].overrides_builtin &&
+                packs[j].pub.algo == registry[i].algo) {
+                taken = 1;
+                break;
+            }
+        if (!taken) g_all[n++] = registry[i];
+    }
     for (i = 0; i < packs_n; i++) g_all[n++] = packs[i].pub;
     for (i = 0; i < REGISTRY_N; i++)
         if (registry[i].algo == INVFS_ALGO_PPMD) g_all[n++] = registry[i];

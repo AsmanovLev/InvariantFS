@@ -192,6 +192,10 @@ static void test_sniff(void)
        "JPEG SOI -> JXL (JPEG is the codec's input format)");
     ok(jxl->sniff(jpeg, sizeof jpeg, "x.jpg") == 0,
        "2-byte SOI prefix is not enough");
+    ok(jxl->encode == NULL && jxl->decode == NULL &&
+       (jxl->caps & INVFS_CODEC_CAP_EXTERNAL) &&
+       (jxl->caps & INVFS_CODEC_CAP_PACKONLY),
+       "jxl placeholder (WP16e): EXTERNAL|PACKONLY, no transcode of its own");
     ok(ape->sniff((const uint8_t *)"MAC ", 4, "x.ape") == 100, "APE magic -> 100");
     ok(wv->sniff((const uint8_t *)"wvpk", 4, "x.wv") == 100, "WavPack magic -> 100");
     ok(flacr->sniff((const uint8_t *)"fLaC", 4, "x.flac") == 100, "FLAC magic -> 100");
@@ -593,7 +597,7 @@ static void test_probe(void)
 static void test_packs(void)
 {
     char dir[256], packs[320], pack[384], dupe[384], cpack[384], bpack[384],
-         mpack[384], path[448];
+         mpack[384], opack[384], path[448];
     const invfs_codec *c, *all;
     const invfs_pack_def *def;
     size_t n = 0, i, olen = 0;
@@ -611,9 +615,10 @@ static void test_packs(void)
     snprintf(cpack, sizeof cpack, "%s/spltmini.codecpack", packs);
     snprintf(bpack, sizeof bpack, "%s/badcont.codecpack", packs);
     snprintf(mpack, sizeof mpack, "%s/spltmap.codecpack", packs);
+    snprintf(opack, sizeof opack, "%s/jxlpack.codecpack", packs);
     r = mkdir(dir, 0755) | mkdir(packs, 0755) | mkdir(pack, 0755) |
         mkdir(dupe, 0755) | mkdir(cpack, 0755) | mkdir(bpack, 0755) |
-        mkdir(mpack, 0755);
+        mkdir(mpack, 0755) | mkdir(opack, 0755);
 
     /* one valid pack (sniff.offset BEFORE sniff.magic: pending-offset path)
      * plus a second pack whose algo collides with builtin ZSTD (skipped) */
@@ -684,13 +689,31 @@ static void test_packs(void)
                     "strip = cp {in} {out}\n"
                     "rebuild = cp {recipe} {dir} {out}\n"
                     "map = cp {in} {out}\n", 0);
+    /* WP16e: a codec pack claiming algo 4 (JXL) -- held by a builtin
+     * EXTERNAL placeholder -- OVERRIDES the builtin entry (pack wins);
+     * the dupe pack above (algo 1, ZSTD) proves stream codecs cannot be
+     * claimed. */
+    snprintf(path, sizeof path, "%s/manifest", opack);
+    r |= write_file(path,
+                    "# override fixture (WP16e)\n"
+                    "name = jxlpack\n"
+                    "algo = 4\n"
+                    "pack_version = 1\n"
+                    "caps = external|wholefile\n"
+                    "dec_mem = 4096\n"
+                    "generation = 7\n"
+                    "sniff.magic = FFD8FF\n"
+                    "encode = cp {in} {out}\n"
+                    "decode = cp {in} {out}\n", 0);
     ok(r == 0, "fixture: pack dirs written");
 
     setenv("INVFS_CODECPACKS", packs, 1);
     invfs_codec_probe_reset();
 
     all = invfs_codec_all(&n);
-    ok(all != NULL && n == 17, "packs registered: 14 static + codec + 2 containers");
+    ok(all != NULL && n == 17,
+       "packs registered: 13 static + codec + override + 2 containers "
+       "(the override REPLACES the builtin jxl placeholder)");
     ok(all[n - 1].algo == INVFS_ALGO_PPMD,
        "text heuristic still LAST with packs loaded");
     c = invfs_codec_by_algo(INVFS_ALGO_ZSTD);
@@ -797,6 +820,30 @@ static void test_packs(void)
         ok(exer_at < pack_at && pack_at < ppmd_at,
            "order: builtin magics first, packs after, text LAST");
     }
+    /* WP16e: the pack claiming the builtin JXL algo REPLACED the
+     * placeholder: one entry for algo 4, and it is the pack's. */
+    c = invfs_codec_by_algo(INVFS_ALGO_JXL);
+    ok(c && strcmp(c->name, "jxlpack") == 0,
+       "override: pack claims the builtin EXTERNAL algo (name from manifest)");
+    ok(c && c->encode && c->decode && c->sniff && c->probe,
+       "override: the pack entry carries the trampolines");
+    ok(c && c->generation == 7 && c->dec_mem_bytes == 4096,
+       "override: generation/dec_mem come from the manifest");
+    ok(c && !(c->caps & INVFS_CODEC_CAP_PACKONLY),
+       "override: the PACKONLY bit is the placeholder's, not the pack's");
+    def = c ? invfs_codec_pack_def(c) : NULL;
+    ok(def && def->dir && strstr(def->dir, "jxlpack.codecpack") != NULL,
+       "override: the algo-4 entry has a pack def");
+    {
+        size_t jxl_at = 0, exer_at = 0, ppmd_at = 0;
+        for (i = 0; i < n; i++) {
+            if (all[i].algo == INVFS_ALGO_JXL) jxl_at = i;
+            if (all[i].algo == INVFS_ALGO_EXER) exer_at = i;
+            if (all[i].algo == INVFS_ALGO_PPMD) ppmd_at = i;
+        }
+        ok(exer_at < jxl_at && jxl_at < ppmd_at,
+           "override: the winning entry sits in the pack section");
+    }
     ok(invfs_codec_pack_def(invfs_codec_by_algo(INVFS_ALGO_TARR)) == NULL ||
        !invfs_codec_pack_def(invfs_codec_by_algo(INVFS_ALGO_TARR))->is_container,
        "builtin TARR is not a container pack");
@@ -808,6 +855,10 @@ static void test_packs(void)
     ok(invfs_codec_by_algo(42) == NULL, "reset unloads packs");
     ok(invfs_codec_by_algo(43) == NULL, "reset unloads container packs");
     ok(invfs_codec_by_algo(45) == NULL, "reset unloads seekable packs");
+    c = invfs_codec_by_algo(INVFS_ALGO_JXL);
+    ok(c && strcmp(c->name, "jxl") == 0 && c->encode == NULL &&
+       c->decode == NULL && (c->caps & INVFS_CODEC_CAP_PACKONLY),
+       "reset restores the overridden builtin placeholder (sniff+probe only)");
     all = invfs_codec_all(&n);
     ok(n == 14, "reset restores the static registry");
     invfs_codec_probe_reset();   /* a second reset is harmless */
@@ -822,11 +873,14 @@ static void test_packs(void)
     unlink(path);
     snprintf(path, sizeof path, "%s/manifest", mpack);
     unlink(path);
+    snprintf(path, sizeof path, "%s/manifest", opack);
+    unlink(path);
     rmdir(pack);
     rmdir(dupe);
     rmdir(cpack);
     rmdir(bpack);
     rmdir(mpack);
+    rmdir(opack);
     rmdir(packs);
     rmdir(dir);
 }

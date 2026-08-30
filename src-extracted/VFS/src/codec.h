@@ -20,6 +20,20 @@
 #define INVFS_CODEC_CAP_WHOLEFILE 0x04
 #define INVFS_CODEC_CAP_CONTAINER 0x08
 #define INVFS_CODEC_CAP_EXTERNAL  0x10
+/* WP16e: the builtin transcode for this entry was RETIRED to a codecpack
+ * (the placeholder keeps only sniff + probe). Two consequences:
+ *  - a codecpack manifest claiming the algo of any builtin EXTERNAL entry
+ *    REPLACES that entry in the materialized registry (pack wins; builtin
+ *    stream codecs NONE/LZ4/ZSTD/PPMD and builtin CONTAINER entries can
+ *    never be overridden -- their algos stay taken);
+ *  - while no pack is loaded (encode/decode still NULL) the sweep DEFERS
+ *    sniff-positive content RAW and unstamped instead of letting it fall to
+ *    the generic floor, whose stamp would be terminal (the class predicate
+ *    never re-arms plain GENERIC for a codec). The first sweep with the
+ *    pack installed picks the file up.
+ * Registry-internal: pack manifests cannot set this bit (parse_caps does
+ * not know the token); a pack's caps come from its manifest alone. */
+#define INVFS_CODEC_CAP_PACKONLY  0x20
 
 /* Registry-local algo id: a ZIP container keeps its original archive bytes
  * on disk (members are windows into them, see zip.c), so no AST entry ever
