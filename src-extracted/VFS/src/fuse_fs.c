@@ -795,8 +795,11 @@ static int invf_write(const char *path, const char *buf, size_t size, off_t offs
     size_t done = 0;
     if (!vol_write_enabled(g_vol))
         return -ENOSPC;
-    if ((uint64_t)offset + size > 0xFFFFFFFFull)
-        return -EFBIG;   /* format cap: u32 file_size, 64K x 65535 segs */
+    /* WP22a: the 4 GB wall is gone -- the commit writes a v2 recipe header
+     * (u64 file_size) once v1's u32 overflows. MAX_FILE_SIZE (1 TB) remains
+     * as the format sanity bound. */
+    if ((uint64_t)offset + size > MAX_FILE_SIZE)
+        return -EFBIG;
     (void)path;
     if (!c) return -EBADF;
     /* mt loop: the per-handle state is mutable shared state once the kernel
@@ -1509,8 +1512,11 @@ static void invf_destroy(void *private_data)
 static int invf_unlink(const char *path)
 {
     int rc;
-    if (!vol_write_enabled(g_vol))
-        return -EROFS;
+    /* H5: deliberately NOT gated on vol_write_enabled: a delete never
+     * allocates data blocks, and it is the way OUT of the ENOSPC
+     * READONLY latch (the engine frees the blocks, vol_free_blocks
+     * releases the latch above the hysteresis band). The engine still
+     * refuses on a recovery-pending volume. */
     {
         char ename[300];
         invfs_meta_pub hm;
@@ -1539,7 +1545,8 @@ static int invf_unlink(const char *path)
         }
     }
     pthread_mutex_unlock(&g_io_lock);
-    return rc == 0 ? 0 : -ENOENT;
+    if (rc == 0) return 0;
+    return vol_write_enabled(g_vol) ? -ENOENT : -EROFS;
 }
 
 /* Negotiate transport features (WP17). Splice moves read payload

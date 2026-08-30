@@ -94,7 +94,7 @@ int tz_owner_load(invfs_volume *v, uint64_t owner, tz_owner *o)
 {
     uint8_t *buf = NULL;
     uint32_t rl = 0;
-    invfs_ast_recipe_header ah;
+    invfs_ast_hdr ah;
     const invfs_ast_block_entry *ents;
     size_t base = sizeof(invfs_inode_rec);
     size_t elen = 0;
@@ -106,9 +106,12 @@ int tz_owner_load(invfs_volume *v, uint64_t owner, tz_owner *o)
         free(buf);
         return -1;
     }
-    if (rl < base + sizeof(ah)) { free(buf); return -1; }
-    memcpy(&ah, buf + base, sizeof(ah));
-    if (rl < base + sizeof(ah) +
+    if (rl < base + INVFS_AST_HDR_V1_LEN ||
+        invfs_ast_hdr_parse(buf + base, rl - base, &ah) != 0) {
+        free(buf);
+        return -1;
+    }
+    if (rl < base + ah.hdr_len +
              (size_t)ah.num_blocks * sizeof(invfs_ast_block_entry)) {
         free(buf);
         return -1;
@@ -118,7 +121,7 @@ int tz_owner_load(invfs_volume *v, uint64_t owner, tz_owner *o)
         o->ents = (invfs_ast_block_entry *)malloc((size_t)ah.num_blocks *
                                                   sizeof(*o->ents));
         if (!o->ents) { free(buf); return -1; }
-        ents = (const invfs_ast_block_entry *)(buf + base + sizeof(ah));
+        ents = (const invfs_ast_block_entry *)(buf + base + ah.hdr_len);
         for (i = 0; i < ah.num_blocks; i++) {
             o->ents[i] = ents[i];
             /* seq assignment is strictly monotone even after GC removed
@@ -160,7 +163,8 @@ int tz_owner_write(invfs_volume *v, uint64_t owner, const char *name,
     size_t rec_len, total, off;
     uint8_t *combo;
     invfs_inode_rec *rh, tomb;
-    invfs_ast_recipe_header ah;
+    uint8_t ah[INVFS_AST_HDR_V2_LEN];
+    size_t ahlen;
     uint32_t crc_rec, crc_tomb;
     uint64_t run = 0, new_pos;
     uint32_t i;
@@ -169,18 +173,18 @@ int tz_owner_write(invfs_volume *v, uint64_t owner, const char *name,
         o->ents[i].file_offset = run;
         run += o->ents[i].length;
     }
-    if (run > 0xFFFFFFFFu) return -1;   /* ast_h.file_size is u32 */
+    /* WP22a: past 4 GB of live batches the owner record needs the v2
+     * recipe header (u64 file_size / u32 num_blocks) -- the helper picks
+     * it; past MAX_FILE_SIZE/2^24 entries nothing can hold the truth */
+    if (run > MAX_FILE_SIZE || o->n > MAX_SEGMENTS_V2) return -1;
+    ahlen = invfs_ast_hdr_write(ah, run, o->n, 0);
+    if (!ahlen) return -1;
 
-    rec_len = sizeof(invfs_inode_rec) + sizeof(ah) +
+    rec_len = sizeof(invfs_inode_rec) + ahlen +
               (size_t)o->n * sizeof(invfs_ast_block_entry) + o->ext_len;
     total = rec_len + 4 + (o->pos ? sizeof(tomb) + 4 : 0);
     combo = (uint8_t *)calloc(1, total);
     if (!combo) return -1;
-
-    memset(&ah, 0, sizeof ah);
-    ah.version = 1;
-    ah.file_size = (uint32_t)run;
-    ah.num_blocks = (uint16_t)o->n;
 
     rh = (invfs_inode_rec *)combo;
     rh->magic = INODE_REC_MAGIC;
@@ -189,9 +193,9 @@ int tz_owner_write(invfs_volume *v, uint64_t owner, const char *name,
     rh->file_size = run;
     rh->ctime = o->ctime;
     rec_set_name(rh, name);
-    memcpy(combo + sizeof(invfs_inode_rec), &ah, sizeof ah);
+    memcpy(combo + sizeof(invfs_inode_rec), ah, ahlen);
     if (o->n)
-        memcpy(combo + sizeof(invfs_inode_rec) + sizeof(ah), o->ents,
+        memcpy(combo + sizeof(invfs_inode_rec) + ahlen, o->ents,
                (size_t)o->n * sizeof(invfs_ast_block_entry));
     if (o->ext_len)
         memcpy(combo + rec_len - o->ext_len, o->ext, o->ext_len);
@@ -264,22 +268,25 @@ int tz_member_oversized(invfs_volume *v, uint64_t inode_id,
 {
     uint8_t *buf = NULL;
     uint32_t rl = 0;
-    invfs_ast_recipe_header ah;
+    invfs_ast_hdr ah;
     const invfs_ast_block_entry *ents;
     size_t base = sizeof(invfs_inode_rec);
-    uint16_t i;
+    uint32_t i;
     int over = 0;
 
     if (meta_read_record_by_id(v, inode_id, &buf, &rl, NULL, 0, NULL) != 0)
         return 0;   /* unreadable: not GC/policy business here */
-    if (rl < base + sizeof(ah)) { free(buf); return 0; }
-    memcpy(&ah, buf + base, sizeof(ah));
-    if (rl < base + sizeof(ah) +
+    if (rl < base + INVFS_AST_HDR_V1_LEN ||
+        invfs_ast_hdr_parse(buf + base, rl - base, &ah) != 0) {
+        free(buf);
+        return 0;
+    }
+    if (rl < base + ah.hdr_len +
              (size_t)ah.num_blocks * sizeof(invfs_ast_block_entry)) {
         free(buf);
         return 0;
     }
-    ents = (const invfs_ast_block_entry *)(buf + base + sizeof(ah));
+    ents = (const invfs_ast_block_entry *)(buf + base + ah.hdr_len);
     for (i = 0; i < ah.num_blocks && !over; i++) {
         uint64_t pba = 0, plen = 0;
         uint8_t hb[12];
@@ -416,7 +423,8 @@ static int tz_commit_member(tz_ctx *c, tz_member *m, const tz_candidate *cand)
     size_t rec_size, i;
     uint8_t *rec;
     invfs_inode_rec *rh;
-    invfs_ast_recipe_header ah;
+    uint8_t ah[INVFS_AST_HDR_V2_LEN];
+    size_t ahlen;
     invfs_ast_block_entry *ne;
     uint32_t crc;
     int rc = -1;
@@ -429,15 +437,14 @@ static int tz_commit_member(tz_ctx *c, tz_member *m, const tz_candidate *cand)
     fsize = m->file_size;
 
     new_id = m->new_id;
-    rec_size = sizeof(invfs_inode_rec) + sizeof(ah) +
+    /* WP22a: a member bigger than 4 GB (or with > 65535 slices) needs the
+     * v2 recipe header; the helper picks, 0 = past the format caps */
+    ahlen = invfs_ast_hdr_write(ah, fsize, (uint32_t)m->n_slices, 0);
+    if (!ahlen) { free(old); return -1; }
+    rec_size = sizeof(invfs_inode_rec) + ahlen +
                m->n_slices * sizeof(invfs_ast_block_entry) + ext_len;
     rec = (uint8_t *)calloc(1, rec_size);
     if (!rec) { free(old); return -1; }
-
-    memset(&ah, 0, sizeof ah);
-    ah.version = 1;
-    ah.file_size = (uint32_t)fsize;
-    ah.num_blocks = (uint16_t)m->n_slices;
 
     rh = (invfs_inode_rec *)rec;
     rh->magic = INODE_REC_MAGIC;
@@ -446,8 +453,8 @@ static int tz_commit_member(tz_ctx *c, tz_member *m, const tz_candidate *cand)
     rh->file_size = fsize;
     rh->ctime = ctime;
     rec_set_name(rh, name);
-    memcpy(rec + sizeof(invfs_inode_rec), &ah, sizeof ah);
-    ne = (invfs_ast_block_entry *)(rec + sizeof(invfs_inode_rec) + sizeof ah);
+    memcpy(rec + sizeof(invfs_inode_rec), ah, ahlen);
+    ne = (invfs_ast_block_entry *)(rec + sizeof(invfs_inode_rec) + ahlen);
     for (i = 0; i < m->n_slices; i++) {
         const tz_sealed *s = tz_sealed_find(c, m->slices[i].batch_seq);
         if (!s) goto out;   /* can only be a bug in the flush */
@@ -613,8 +620,9 @@ static int tz_seal(tz_ctx *c, const tz_candidate *cands,
      * no ZSTD comparison -- 3 s/4 MB is too expensive) */
     if (!fail && enc_len + 4 >= c->blen)
         fail = 1;
-    /* the owner's ast_h.file_size is u32 */
-    if (!fail && tz_owner_total(&c->owner) + c->blen > 0xFFFFFFFFu)
+    /* the owner's recipe header is v2-capable (WP22a): the cap that must
+     * not be crossed is the format's MAX_FILE_SIZE, not v1's u32 */
+    if (!fail && tz_owner_total(&c->owner) + c->blen > MAX_FILE_SIZE)
         fail = 1;
 
     if (!fail) {
@@ -1013,10 +1021,12 @@ int vol_tz_gc(invfs_volume *v)
     end = v->inode_area_pos;
     while (pos + sizeof(invfs_inode_rec) <= end) {
         invfs_inode_rec h;
-        invfs_ast_recipe_header ah;
+        uint8_t hbuf[INVFS_AST_HDR_V2_LEN];
+        invfs_ast_hdr ah;
         invfs_ast_block_entry e;
         uint64_t apos;
-        uint16_t nb, j;
+        uint32_t nb, j, ver;
+        size_t hl;
         size_t nl;
         if (io_seek(&v->io, pos) != 0 ||
             io_read(&v->io, &h, sizeof h) != 0) break;
@@ -1034,11 +1044,20 @@ int vol_tz_gc(invfs_volume *v)
             if (vol_find(v, nm) != h.inode_id) { pos += h.rec_len + 4; continue; }
         }
         apos = pos + sizeof h;
+        /* the recipe header length is version-dependent (16 B v1 / 24 B
+         * v2): read the version word, then the header it implies */
         if (io_seek(&v->io, apos) != 0 ||
-            io_read(&v->io, &ah, sizeof ah) != 0) break;
+            io_read(&v->io, &ver, 4) != 0) break;
+        if (ver != INVFS_AST_VERSION_V1 && ver != INVFS_AST_VERSION_V2)
+            break;
+        hl = ver == INVFS_AST_VERSION_V1 ? INVFS_AST_HDR_V1_LEN
+                                         : INVFS_AST_HDR_V2_LEN;
+        if (io_seek(&v->io, apos) != 0 ||
+            io_read(&v->io, hbuf, hl) != 0) break;
+        if (invfs_ast_hdr_parse(hbuf, hl, &ah) != 0) break;
         nb = ah.num_blocks;
         for (j = 0; j < nb; j++) {
-            if (io_seek(&v->io, apos + sizeof ah +
+            if (io_seek(&v->io, apos + hl +
                         (uint64_t)j * sizeof e) != 0 ||
                 io_read(&v->io, &e, sizeof e) != 0) { rc = -1; goto out; }
             if (e.zone != INVFS_ZONE_TEXT) continue;

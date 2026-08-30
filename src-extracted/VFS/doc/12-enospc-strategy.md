@@ -92,8 +92,19 @@ write() → RAW full (99%)
   в SHADOW (zone=BINARY, тот же LZ4-сегмент) — записи не блокируются
   при живом SHADOW.
 - **READONLY**: при free <= hard_min флаг пишется в суперблок
-  (vol_flush теперь пишет sb), все write-пути (delete/mkdir/rmdir/raw/
-  create/sweep) возвращают EROFS/ENOSPC. Dokan: STATUS_DISK_FULL в
+  (vol_flush теперь пишет sb), write-пути (mkdir/create/sweep/write)
+  возвращают EROFS/ENOSPC. Dokan: STATUS_DISK_FULL в
   WriteFile/Close-flush (проверка по free-кэшу до буферизации — .NET
   видит ошибку на WriteFile, а не молча теряет запись). FUSE: -ENOSPC
-  в write, -EROFS в create/mkdir/unlink.
+  в write, -EROFS в create/mkdir.
+- **Возврат из READONLY (WP22a/H5)**: флаг-защёлка — теперь с
+  гистерезисом и обратным ходом. `alloc_blocks` поднимает
+  `VOLF_READONLY|VOLF_RO_SPACE` на флоре; при свободе выше
+  `hard_min + 2%` тома `vol_readonly_unlatch` (вызывается из
+  vol_free_blocks, из fsck-пересборки битмапа и при vol_open) снимает оба
+  бита с логом `[alloc] RW again`. Удаления под защёлкой разрешены
+  (они только освобождают место — это и есть выход), включая unlink/rmdir
+  через FUSE. Операторский hold (`vol_set_readonly(1)`, бит0 без
+  RO_SPACE) авто-снятию НЕ подлежит; `vol_set_readonly(0)` снимает оба
+  бита. Тома, залатченные до WP22a (бит0 без RO_SPACE), сохраняют старую
+  одностороннюю семантику.

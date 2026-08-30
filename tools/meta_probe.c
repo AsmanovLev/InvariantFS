@@ -52,15 +52,16 @@ static int heat_dump(invfs_volume *v, const char *name)
         pos = p;
     }
     if (rec) {
-        invfs_ast_recipe_header ah;
+        invfs_ast_hdr ah;
         size_t base = sizeof(invfs_inode_rec);
-        if (rec_rl >= base + sizeof ah) {
+        /* WP22a: v1/v2 recipe header -- entries follow hdr_len */
+        if (rec_rl >= base + INVFS_AST_HDR_V1_LEN &&
+            invfs_ast_hdr_parse(rec + base, rec_rl - base, &ah) == 0) {
             const invfs_ast_block_entry *ents;
-            uint16_t k;
-            memcpy(&ah, rec + base, sizeof ah);
-            ents = (const invfs_ast_block_entry *)(rec + base + sizeof ah);
+            uint32_t k;
+            ents = (const invfs_ast_block_entry *)(rec + base + ah.hdr_len);
             for (k = 0; k < ah.num_blocks; k++) {
-                if (base + sizeof ah + (size_t)(k + 1) * sizeof(*ents) > rec_rl)
+                if (base + ah.hdr_len + (size_t)(k + 1) * sizeof(*ents) > rec_rl)
                     break;
                 printf("ast i=%u off=%llu len=%llu zone=%u algo=%u "
                        "bid=%u boff=%u\n", k,

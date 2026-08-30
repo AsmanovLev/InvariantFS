@@ -62,7 +62,9 @@ static int seal_stripe_dirty(const invfs_volume *v, uint64_t stripe,
  * shadow-zone allocations mapped through the L2P of hidden internal inodes
  * "\x01parity", "\x01parity1", ... (0x01-prefixed names are filtered from
  * listings, swept never, and skipped by dedupe). One owner record (shard)
- * covers SEAL_SHARD stripes -- ast_h.num_blocks is u16 -- and maps
+ * covers SEAL_SHARD stripes -- a policy cap per record, not a format one
+ * (WP22a v2 recipe headers count past it; the shard rule stays so records
+ * remain small and pre-WP22a readers still parse them) -- and maps
  * block_id = shard-local stripe number to the parity pba, which is what
  * keeps parity blocks live in fsck and what makes the seal survive
  * close/reopen. Shard owners exist contiguously from shard 0 (the state
@@ -119,7 +121,8 @@ static int seal_stripe_dirty(const invfs_volume *v, uint64_t stripe,
  */
 
 /* SEAL_STRIPE_K/SEAL2_K live with the WP20b helpers ahead of vol_open */
-#define SEAL_SHARD      65535u   /* stripes per owner record (u16 num_blocks) */
+#define SEAL_SHARD      65535u   /* stripes per owner record (policy cap;
+                                  * keeps owner records v1-header sized) */
 
 
 static void seal_shard_name(uint64_t shard, char *out, size_t cap)

@@ -23,6 +23,9 @@ __pycache__/
 INVARIFS-DOCS.md
 .playwright-mcp/
 
+# WP22b flakey soak failure artifacts (backing images + logs)
+tools/flakey/artifacts/
+
 # generated video artifacts (regenerable: video/gen-overview.py + build.sh)
 video/frames/
 video/*.mp4

@@ -769,6 +769,11 @@ uint64_t alloc_blocks(invfs_volume *v, uint64_t zone_start, uint64_t zone_len,
                              uint64_t n, int use_reserve);
 uint64_t alloc_raw_or_shadow(invfs_volume *v, uint64_t nblocks, int *zone_out);
 
+/* H5: release the hard_min space latch (VOLF_READONLY) once free space is
+ * back above hard_min + 2% of the volume. Runs from vol_free_blocks, the
+ * fsck bitmap rebuild and vol_open; logged, persisted by the next flush. */
+void vol_readonly_unlatch(invfs_volume *v);
+
 /* remove all mappings for (inode, lba) from the in-memory table */
 void l2p_remove(invfs_volume *v, uint64_t inode, uint64_t lba);
 

@@ -9,6 +9,7 @@
 
 #include <stdint.h>
 #include <stddef.h>
+#include <string.h>
 
 /* On-disk magic. Exactly 8 bytes, and it is the bytes that decide whether a
    volume opens at all -- so it stays "InvariFS" even though the project is now
@@ -142,6 +143,17 @@ typedef struct {
 /* volume flags (sb.vol_flags) */
 #define VOLF_READONLY 0x00000001
 #define VOLF_META2    0x00000002  /* records may carry "INO2" metadata ext */
+/* WP22a/H5: WHY the volume is read-only. alloc_blocks raises VOLF_READONLY
+ * together with VOLF_RO_SPACE when the free count hits hard_min (the space
+ * latch); an operator/tool hold (vol_set_readonly) sets VOLF_READONLY alone.
+ * The distinction is what auto-release keys on: only a space latch drops
+ * itself when free space climbs back above hard_min + 2% (see
+ * vol_readonly_unlatch); an operator hold survives opens, frees and fsck.
+ * Pre-WP22a latched volumes carry VOLF_READONLY alone -- they keep the old
+ * one-way semantics (never auto-released). Old binaries ignore the new bit
+ * (they copy the superblock wholesale) and read the volume as plain
+ * read-only, which is the safe answer either way. */
+#define VOLF_RO_SPACE 0x00000004  /* READONLY came from the space latch */
 
 /* ---- WP20b: RDP0 redundancy descriptor (block 0 reserved area) ----
  * Lives at byte offset 0x100 of block 0, past the 144-byte superblock
@@ -283,7 +295,15 @@ typedef struct {
 } invfs_ckp0;                   /* 0x258 = 56 bytes */
 #pragma pack(pop)
 
-/* AST block entry — one byte-range mapping (kernel binary format) */
+/* AST block entry — one byte-range mapping (kernel binary format).
+ *
+ * block_id is 24 bits: at most 2^24 segments per file. At the 64 KB
+ * SEGMENT_SIZE that is exactly 2^24 * 2^16 = 2^40 bytes == MAX_FILE_SIZE,
+ * so the bitfield, the v2 recipe header's u32 num_blocks and the file-size
+ * sanity bound are mutually consistent -- 64 KB segments never need a
+ * wider block_id. (Files that large SHOULD rather use fewer, bigger
+ * segments; the format simply allows the 64 KB worst case -- a 1 TB file
+ * is a ~384 MB recipe, rec_len is u32 and holds it. See doc/02.) */
 typedef struct {
     uint64_t file_offset;           /* offset in original file */
     uint64_t length;                /* length of range */
@@ -293,14 +313,143 @@ typedef struct {
     uint32_t block_offset;          /* offset within block */
 } invfs_ast_block_entry;            /* 24 bytes */
 
-/* AST recipe header */
+/* recursion / allocation guards (deep protection) */
+#define MAX_AST_CHILDREN      65536u   /* max members per container */
+#define MAX_AST_CHILD_NAME    255u
+#define MAX_AST_DEPTH         16u      /* nested containers (zip-in-zip) */
+#define MAX_FILE_SIZE         (1ull << 40)  /* sanity bound for file_size */
+#define MAX_SEGMENTS          0xFFFFu  /* v1: num_blocks fits u16 */
+#define MAX_SEGMENTS_V2       (1u << 24)  /* v2: block_id is 24 bits; at
+                       * 64 KB segments this reaches exactly MAX_FILE_SIZE */
+
+/* AST recipe header, v1 (16 bytes) — the original layout. Still what every
+ * writer emits for anything that fits (file_size <= 4 GB - 1 and
+ * num_blocks <= 0xFFFF), so existing volumes stay byte-stable. */
 typedef struct {
-    uint32_t version;
+    uint32_t version;               /* 1 */
     uint32_t file_size;
     uint16_t num_blocks;
     uint16_t num_children;
-    uint32_t checksum;              /* CRC32C of recipe */
-} invfs_ast_recipe_header;          /* 16 bytes */
+    uint32_t checksum;              /* CRC32C of recipe — see note below */
+} invfs_ast_recipe_header_v1;       /* 16 bytes */
+
+/* AST recipe header, v2 (24 bytes) — WP22a. Emitted ONLY when the v1 fields
+ * cannot hold the truth (file_size > 4 GB - 1 || num_blocks > 0xFFFF);
+ * everything else keeps the v1 header above. Readers branch on `version`
+ * (the first u32 in both layouts) and fail LOUDLY on anything else.
+ *
+ * checksum: in v1 this field was always written as 0 and never verified
+ * (integrity comes from the inode record's trailing CRC32C over rec_len,
+ * which covers the recipe); v2 keeps exactly that rule -- the field is
+ * reserved-zero, the covered span is the same (none beyond the record CRC). */
+typedef struct {
+    uint32_t version;               /* 2 */
+    uint64_t file_size;
+    uint32_t num_blocks;
+    uint32_t num_children;
+    uint32_t checksum;              /* reserved: 0 (see the v1 note) */
+} invfs_ast_recipe_header_v2;       /* 24 bytes */
+
+#define INVFS_AST_VERSION_V1  1u
+#define INVFS_AST_VERSION_V2  2u
+#define INVFS_AST_HDR_V1_LEN  16u
+#define INVFS_AST_HDR_V2_LEN  24u
+
+/* Version-agnostic parsed view of either header. hdr_len is where the
+ * block entries begin (16 or 24); every consumer of the recipe MUST take
+ * the entries offset from here -- a fixed 16 is the v1-only assumption
+ * WP22a removed from every site. */
+typedef struct {
+    uint32_t version;
+    uint64_t file_size;
+    uint32_t num_blocks;
+    uint32_t num_children;
+    uint32_t checksum;
+    uint32_t hdr_len;               /* INVFS_AST_HDR_V1_LEN / _V2_LEN */
+} invfs_ast_hdr;
+
+/* Parse a recipe header at buf[0..avail). 0 on success, -1 on truncation,
+ * an unknown version (a newer format — fail loudly, never misread) or a
+ * field past the format's own caps (file_size > MAX_FILE_SIZE,
+ * num_blocks > MAX_SEGMENTS_V2 — both impossible from this writer, so such
+ * a header is corrupt regardless of what the record CRC says). */
+static inline int invfs_ast_hdr_parse(const void *buf, size_t avail,
+                                      invfs_ast_hdr *out)
+{
+    const uint8_t *p = (const uint8_t *)buf;
+    uint32_t ver;
+    if (avail < INVFS_AST_HDR_V1_LEN) return -1;
+    memcpy(&ver, p, 4);
+    if (ver == INVFS_AST_VERSION_V1) {
+        uint32_t fs, ck;
+        uint16_t nb, nc;
+        memcpy(&fs, p + 4, 4);
+        memcpy(&nb, p + 8, 2);
+        memcpy(&nc, p + 10, 2);
+        memcpy(&ck, p + 12, 4);
+        out->version      = ver;
+        out->file_size    = fs;
+        out->num_blocks   = nb;
+        out->num_children = nc;
+        out->checksum     = ck;
+        out->hdr_len      = INVFS_AST_HDR_V1_LEN;
+        return 0;
+    }
+    if (ver == INVFS_AST_VERSION_V2) {
+        uint64_t fs;
+        uint32_t nb, nc, ck;
+        if (avail < INVFS_AST_HDR_V2_LEN) return -1;
+        memcpy(&fs, p + 4, 8);
+        memcpy(&nb, p + 12, 4);
+        memcpy(&nc, p + 16, 4);
+        memcpy(&ck, p + 20, 4);
+        out->version      = ver;
+        out->file_size    = fs;
+        out->num_blocks   = nb;
+        out->num_children = nc;
+        out->checksum     = ck;
+        out->hdr_len      = INVFS_AST_HDR_V2_LEN;
+        if (out->file_size > MAX_FILE_SIZE ||
+            out->num_blocks > MAX_SEGMENTS_V2)
+            return -1;
+        return 0;
+    }
+    return -1;
+}
+
+/* Serialize the SMALLEST header that holds the values: v2 only when
+ * file_size, num_blocks or num_children overflow v1 (keeps current
+ * volumes byte-stable). buf must hold INVFS_AST_HDR_V2_LEN bytes; returns
+ * the length written (16 or 24). Values past the format caps return 0
+ * (refuse, never fold). */
+static inline size_t invfs_ast_hdr_write(void *buf, uint64_t file_size,
+                                         uint32_t num_blocks,
+                                         uint32_t num_children)
+{
+    if (file_size > MAX_FILE_SIZE || num_blocks > MAX_SEGMENTS_V2)
+        return 0;
+    if (file_size > 0xFFFFFFFFu || num_blocks > 0xFFFFu ||
+        num_children > 0xFFFFu) {
+        invfs_ast_recipe_header_v2 h;
+        memset(&h, 0, sizeof h);
+        h.version      = INVFS_AST_VERSION_V2;
+        h.file_size    = file_size;
+        h.num_blocks   = num_blocks;
+        h.num_children = num_children;
+        memcpy(buf, &h, sizeof h);
+        return INVFS_AST_HDR_V2_LEN;
+    }
+    {
+        invfs_ast_recipe_header_v1 h;
+        memset(&h, 0, sizeof h);
+        h.version      = INVFS_AST_VERSION_V1;
+        h.file_size    = (uint32_t)file_size;
+        h.num_blocks   = (uint16_t)num_blocks;
+        h.num_children = (uint16_t)num_children;
+        memcpy(buf, &h, sizeof h);
+        return INVFS_AST_HDR_V1_LEN;
+    }
+}
 
 /* AST child entry — one member of a container (e.g. ZIP member).
  * Serialized right after the block entries:
@@ -321,19 +470,13 @@ typedef struct {
     uint32_t data_off;              /* member data offset in container */
 } invfs_ast_child_entry;            /* in-memory */
 
-/* recursion / allocation guards (deep protection) */
-#define MAX_AST_CHILDREN      65536u   /* max members per container */
-#define MAX_AST_CHILD_NAME    255u
-#define MAX_AST_DEPTH         16u      /* nested containers (zip-in-zip) */
-#define MAX_FILE_SIZE         (1ull << 40)  /* sanity bound for file_size */
-#define MAX_SEGMENTS          0xFFFFu  /* num_blocks fits u16 */
-
 /* Largest children blob a container record may carry. */
 #define INVFS_MAX_CHILD_BLOB  (1u << 20)
 
 /* Inode area record (append-only), as it sits on disk. Followed by
-   invfs_ast_recipe_header, the block entries, the children blob, and a
-   trailing CRC32C over the whole rec_len.
+   the AST recipe header (v1 or v2 — invfs_ast_hdr_parse decides), the
+   block entries, the children blob, and a trailing CRC32C over the whole
+   rec_len.
 
    This lived as three separate copies -- volume.c, ls.c, sweep.c -- each with
    its own idea of how long a record may be, which is how the bug below got in.
@@ -347,7 +490,7 @@ typedef struct invfs_inode_rec {
     uint64_t ctime;
     uint32_t name_len;
     char     name[256];
-    /* followed by: invfs_ast_recipe_header + entries[] [+ children blob] */
+    /* followed by: recipe header (v1 16B / v2 24B) + entries[] [+ children] */
 } invfs_inode_rec;
 #pragma pack(pop)
 
@@ -386,10 +529,10 @@ typedef struct invfs_meta_ext_hdr {
 } invfs_meta_ext_hdr;    /* 48 bytes */
 #pragma pack(pop)
 
-/* Longest record this format can produce: the header, the recipe header, the
-   most segments num_blocks can count, and the largest children blob the writer
-   will build. A record longer than this was not written by this code, so it is
-   garbage whatever its magic says.
+/* Longest record this format can produce: the header, the (v2) recipe
+   header, the most segments a v2 num_blocks can count, and the largest
+   children blob the writer will build. A record longer than this was not
+   written by this code, so it is garbage whatever its magic says.
 
    The bound used to be a flat 0x10000, which is not a property of anything.
    One 24-byte block entry per 64 KB segment means rec_len grows as
@@ -398,6 +541,11 @@ typedef struct invfs_meta_ext_hdr {
    Every file appended after the first big one disappeared, and the next append
    would have overwritten them. A 274 MB claude.exe sat 4th in a 143k-file
    image and vol_open reported three names.
+
+   WP22a: with the v2 recipe header the worst case is a 1 TB file at 64 KB
+   segments -- 2^24 entries, a ~384 MB recipe. Insane as a record, but
+   rec_len (u32) holds it and the bound must, or such a file's record would
+   stop every scan exactly like the claude.exe case did.
 
    META2 slack: records written by format v2 append an "INO2" metadata block
    (uid/gid/mode/type/times/symlink target/xattrs) AFTER the AST recipe. The
@@ -409,13 +557,21 @@ typedef struct invfs_meta_ext_hdr {
     (sizeof(invfs_meta_ext_hdr) + (size_t)INVFS_META_TARGET_MAX + INVFS_META_XATTR_MAX)
 
 #define INVFS_MAX_REC_LEN \
-    (sizeof(invfs_inode_rec) + sizeof(invfs_ast_recipe_header) + \
-     (size_t)MAX_SEGMENTS * sizeof(invfs_ast_block_entry) + \
+    (sizeof(invfs_inode_rec) + INVFS_AST_HDR_V2_LEN + \
+     (size_t)MAX_SEGMENTS_V2 * sizeof(invfs_ast_block_entry) + \
      (size_t)INVFS_MAX_CHILD_BLOB + INVFS_META_SLACK)
 
 /* Reserve a writer must see free in the inode area before it accepts data it
-   would otherwise have to drop at Close. */
-#define INVFS_INODE_REC_MAX INVFS_MAX_REC_LEN
+   would otherwise have to drop at Close. This is a PRE-WRITE heuristic for
+   paths that cannot report late failures (the dokan write gate), so it stays
+   at the v1-era record size: the exact check (inode_area_pos + rec_size vs
+   inode_area_end) runs at every append anyway, and demanding headroom for a
+   hypothetical 1 TB file's 384 MB recipe would refuse tiny writes on small
+   volumes. */
+#define INVFS_INODE_REC_MAX \
+    (sizeof(invfs_inode_rec) + INVFS_AST_HDR_V1_LEN + \
+     (size_t)MAX_SEGMENTS * sizeof(invfs_ast_block_entry) + \
+     (size_t)INVFS_MAX_CHILD_BLOB + INVFS_META_SLACK)
 
 /* L2P journal entry (append-only)
  *

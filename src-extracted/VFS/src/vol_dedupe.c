@@ -99,7 +99,7 @@ int vol_sweep_dedupe(invfs_volume *v)
     end = v->inode_area_pos;
     while (pos + sizeof(invfs_inode_rec) <= end) {
         invfs_inode_rec h;
-        invfs_ast_recipe_header ah;
+        invfs_ast_hdr ah;
         uint8_t *rec;
         uint32_t crc_stored, crc_calc;
         uint32_t i;
@@ -147,9 +147,11 @@ int vol_sweep_dedupe(invfs_volume *v)
             continue;
         }
         base = sizeof(invfs_inode_rec);
-        if (h.rec_len < base + sizeof(ah)) { free(rec); break; }
-        memcpy(&ah, rec + base, sizeof(ah));
-        if (h.rec_len < base + sizeof(ah) +
+        if (h.rec_len < base + INVFS_AST_HDR_V1_LEN ||
+            invfs_ast_hdr_parse(rec + base, h.rec_len - base, &ah) != 0) {
+            free(rec); break;
+        }
+        if (h.rec_len < base + ah.hdr_len +
                          (size_t)ah.num_blocks * sizeof(invfs_ast_block_entry)) {
             free(rec); break;
         }
@@ -159,7 +161,7 @@ int vol_sweep_dedupe(invfs_volume *v)
             uint8_t hdrb[8];
             uint32_t csize;
 
-            memcpy(&e, rec + base + sizeof(ah) +
+            memcpy(&e, rec + base + ah.hdr_len +
                    (size_t)i * sizeof(e), sizeof(e));
             if (e.zone == INVFS_ZONE_TEXT)
                 continue;   /* WP10 §11: shared PPMd batches, owner-owned */

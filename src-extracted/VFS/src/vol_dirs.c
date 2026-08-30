@@ -38,7 +38,11 @@ int vol_rmdir(invfs_volume *v, const char *name)
 {
     char anchor[300];
     int alen;
-    if (v->sb.vol_flags & VOLF_READONLY) return -1;   /* EROFS */
+    /* H5: NOT gated on VOLF_READONLY -- a delete only frees space, and the
+     * free-space latch must not weld its own exit shut. needs_recovery
+     * (the true "never mutate" state) is still enforced via vol_mark_dirty
+     * in the delete below. */
+    if (v->needs_recovery) return -1;
     if (!name || name[0] == 0) return -1;
     alen = snprintf(anchor, sizeof anchor, "%s/", name);
     if (alen <= 0 || (size_t)alen >= sizeof anchor) return -1;
@@ -269,7 +273,10 @@ uint64_t vol_replace_file(invfs_volume *v, const char *name,
 int vol_delete_file(invfs_volume *v, const char *name)
 {
     uint64_t inode_id;
-    if (v->sb.vol_flags & VOLF_READONLY) return -1;   /* EROFS */
+    /* H5: allowed under the VOLF_READONLY space latch -- a delete only
+     * frees blocks and appends a tombstone, moving the volume AWAY from
+     * the wall. needs_recovery still refuses via vol_mark_dirty below. */
+    if (v->needs_recovery) return -1;
     inode_id = vol_find(v, name);
     if (inode_id == 0)
         return -1;
@@ -291,7 +298,9 @@ int vol_unlink_name(invfs_volume *v, const char *name)
     size_t nl;
     invfs_inode_rec rec;
 
-    if (v->sb.vol_flags & VOLF_READONLY) return -1;
+    /* H5: allowed under the VOLF_READONLY space latch (tombstone only,
+     * blocks stay alive for the surviving names -- see vol_delete_file) */
+    if (v->needs_recovery) return -1;
     id = vol_find(v, name);
     if (!id) return -1;
     if (meta_read_record_by_id(v, id, &obuf, &orl, NULL, 0, &pos) != 0 || !pos) {
@@ -323,7 +332,8 @@ int vol_unlink_name(invfs_volume *v, const char *name)
 int vol_unlink(invfs_volume *v, const char *name)
 {
     int rc;
-    if (v->sb.vol_flags & VOLF_READONLY) return -1;   /* EROFS */
+    /* H5: allowed under the VOLF_READONLY space latch (frees only) */
+    if (v->needs_recovery) return -1;
     if (strchr(name, '!')) return vol_delete_file(v, name);   /* a sibling */
     /* capture the record first: sibling deletion is a full-area walk and
      * plain files (no children, no container algo) never have '!' siblings */
@@ -472,10 +482,14 @@ int vol_rename(invfs_volume *v, const char *from, const char *to)
         int simple = 0;
         if (fid != 0 &&
             meta_read_record_by_id(v, fid, &buf, &rl, NULL, 0, NULL) == 0 &&
-            rl >= sizeof(invfs_inode_rec) + 16) {
-            uint16_t nch;
-            memcpy(&nch, buf + sizeof(invfs_inode_rec) + 12, 2);
-            simple = (nch == 0);
+            rl >= sizeof(invfs_inode_rec) + INVFS_AST_HDR_V1_LEN) {
+            /* num_children decides; its offset is version-dependent
+             * (WP22a) -- parse, never pun */
+            invfs_ast_hdr ah;
+            if (invfs_ast_hdr_parse(buf + sizeof(invfs_inode_rec),
+                                    rl - sizeof(invfs_inode_rec),
+                                    &ah) == 0)
+                simple = (ah.num_children == 0);
         }
         free(buf);
         if (simple) {

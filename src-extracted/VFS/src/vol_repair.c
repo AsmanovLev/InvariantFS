@@ -376,7 +376,7 @@ int vol_seal2_repair(invfs_volume *v, invfs_seal2_repair *rep)
         uint32_t rl = 0;
         uint64_t rpos = 0;
         uint32_t crc_stored;
-        invfs_ast_recipe_header ah;
+        invfs_ast_hdr ah;
         const invfs_ast_block_entry *be;
         size_t base = sizeof(invfs_inode_rec);
         uint32_t bi;
@@ -389,17 +389,17 @@ int vol_seal2_repair(invfs_volume *v, invfs_seal2_repair *rep)
         if (io_seek(&v->io, rpos + rl) != 0 ||
             io_read(&v->io, &crc_stored, 4) != 0 ||
             invfs_crc32c(buf, rl) != crc_stored ||
-            rl < base + sizeof(ah)) {
+            rl < base + INVFS_AST_HDR_V1_LEN ||
+            invfs_ast_hdr_parse(buf + base, rl - base, &ah) != 0) {
             free(buf);
             continue;
         }
-        memcpy(&ah, buf + base, sizeof(ah));
-        if (rl < base + sizeof(ah) +
+        if (rl < base + ah.hdr_len +
                  (size_t)ah.num_blocks * sizeof(invfs_ast_block_entry)) {
             free(buf);
             continue;
         }
-        be = (const invfs_ast_block_entry *)(buf + base + sizeof(ah));
+        be = (const invfs_ast_block_entry *)(buf + base + ah.hdr_len);
         for (bi = 0; bi < ah.num_blocks; bi++) {
             uint64_t pba = 0, plen = 0;
             if (vol_lookup_entry(v, ents[i].id, be[bi].block_id,

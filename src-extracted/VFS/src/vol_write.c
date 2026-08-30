@@ -86,7 +86,7 @@ static void wsession_unlink(invfs_wsession *s)
  * children, every entry a plain per-segment NONE/LZ4 chunk keyed by its
  * own index. Anything else (ZSTD/PPMD/batched/container/pack/whole-file
  * blobs) goes through the materialize path instead. */
-static int wsession_simple_old(const invfs_ast_recipe_header *ah,
+static int wsession_simple_old(const invfs_ast_hdr *ah,
                                const invfs_ast_block_entry *ents)
 {
     uint32_t i;
@@ -318,7 +318,7 @@ static int wsession_load_old(invfs_wsession *s)
 {
     uint8_t *buf = NULL;
     uint32_t rl = 0, i;
-    invfs_ast_recipe_header ah;
+    invfs_ast_hdr ah;
     const uint8_t *ext;
     size_t ext_len = 0;
     size_t base = sizeof(invfs_inode_rec);
@@ -329,9 +329,12 @@ static int wsession_load_old(invfs_wsession *s)
     if (meta_read_record_by_id(s->v, s->old_id, &buf, &rl, NULL, 0,
                                NULL) != 0)
         return -1;
-    if (rl < base + sizeof(ah)) { free(buf); return -1; }
-    memcpy(&ah, buf + base, sizeof(ah));
-    if (rl < base + sizeof(ah) + (size_t)ah.num_blocks * sizeof(*s->ents)) {
+    if (rl < base + INVFS_AST_HDR_V1_LEN ||
+        invfs_ast_hdr_parse(buf + base, rl - base, &ah) != 0) {
+        free(buf);
+        return -1;
+    }
+    if (rl < base + ah.hdr_len + (size_t)ah.num_blocks * sizeof(*s->ents)) {
         free(buf);
         return -1;
     }
@@ -360,7 +363,7 @@ static int wsession_load_old(invfs_wsession *s)
         s->cap_ents = s->n_ents;
         s->ents = malloc(s->cap_ents * sizeof(*s->ents));
         if (!s->ents) { free(buf); return -1; }
-        memcpy(s->ents, buf + base + sizeof(ah), s->n_ents * sizeof(*s->ents));
+        memcpy(s->ents, buf + base + ah.hdr_len, s->n_ents * sizeof(*s->ents));
         s->touched_cap = s->n_ents;
         s->touched = calloc(s->touched_cap, 1);
         if (!s->touched) { free(buf); return -1; }
@@ -428,13 +431,14 @@ int vol_write_range(invfs_wsession *ws, uint64_t offset,
 
     if (!s || s->committed || !data) return -1;
     if (len == 0) return 0;
-    if (offset + len > 0xFFFFFFFFull) return -1;   /* u32 file_size cap */
+    if (offset + len > MAX_FILE_SIZE) return -1;   /* format sanity bound;
+            the v1->v2 recipe header choice happens at commit */
     rc = wsession_load_old(s);
     if (rc != 0) return rc;
 
     first = (uint32_t)(offset / SEGMENT_SIZE);
     last  = (uint32_t)((offset + len - 1) / SEGMENT_SIZE);
-    if ((uint64_t)last + 1 > MAX_SEGMENTS) return -1;
+    if ((uint64_t)last + 1 > MAX_SEGMENTS_V2) return -1;
 
     /* Atomic ENOSPC precheck, same shape as vol_create_file: every
      * not-yet-materialized segment this call touches (plus any zero-fill
@@ -492,12 +496,12 @@ int vol_write_truncate(invfs_wsession *ws, uint64_t len)
     int rc;
 
     if (!s || s->committed) return -1;
-    if (len > 0xFFFFFFFFull) return -1;
+    if (len > MAX_FILE_SIZE) return -1;
     rc = wsession_load_old(s);
     if (rc != 0) return rc;
     if (len == s->logical_size) return 0;
     keep = (uint32_t)((len + SEGMENT_SIZE - 1) / SEGMENT_SIZE);
-    if (keep > MAX_SEGMENTS) return -1;
+    if (keep > MAX_SEGMENTS_V2) return -1;
 
     if (keep < s->n_ents) {
         /* shrink: drop tail segments. Session-owned pbas are freed;
@@ -588,10 +592,10 @@ int vol_write_commit(invfs_wsession *ws)
 {
     invfs_wsession *s = ws;
     invfs_volume *v = ws ? ws->v : NULL;
-    size_t rec_size;
+    size_t rec_size, hdr_len;
     uint8_t *rec;
     invfs_inode_rec *rh;
-    invfs_ast_recipe_header ah;
+    uint8_t ah[INVFS_AST_HDR_V2_LEN];
     uint32_t crc_rec;
     uint64_t now = (uint64_t)time(NULL);
     uint64_t cur;
@@ -600,7 +604,7 @@ int vol_write_commit(invfs_wsession *ws)
     if (!s || s->committed) return -1;
     rc = wsession_load_old(s);
     if (rc != 0) return rc;
-    if (s->logical_size > 0xFFFFFFFFull || s->n_ents > MAX_SEGMENTS)
+    if (s->logical_size > MAX_FILE_SIZE || s->n_ents > MAX_SEGMENTS_V2)
         return -1;
 
     /* no segment may live entirely past the logical end (defensive;
@@ -633,12 +637,13 @@ int vol_write_commit(invfs_wsession *ws)
         }
     }
 
-    memset(&ah, 0, sizeof(ah));
-    ah.version = 1;
-    ah.file_size = (uint32_t)s->logical_size;
-    ah.num_blocks = (uint16_t)s->n_ents;
+    /* v2 recipe header only when v1 cannot hold the truth (file_size >
+     * 4 GB - 1 or num_blocks > 0xFFFF) -- anything else stays byte-identical
+     * to the pre-WP22a record. */
+    hdr_len = invfs_ast_hdr_write(ah, s->logical_size, s->n_ents, 0);
+    if (!hdr_len) return -1;
 
-    rec_size = sizeof(invfs_inode_rec) + sizeof(ah)
+    rec_size = sizeof(invfs_inode_rec) + hdr_len
              + (size_t)s->n_ents * sizeof(invfs_ast_block_entry)
              + s->old_ext_len;
     rec = calloc(1, rec_size);
@@ -650,9 +655,9 @@ int vol_write_commit(invfs_wsession *ws)
     rh->file_size = s->logical_size;
     rh->ctime = now;
     rec_set_name(rh, s->name);
-    memcpy(rec + sizeof(invfs_inode_rec), &ah, sizeof(ah));
+    memcpy(rec + sizeof(invfs_inode_rec), ah, hdr_len);
     if (s->n_ents)
-        memcpy(rec + sizeof(invfs_inode_rec) + sizeof(ah), s->ents,
+        memcpy(rec + sizeof(invfs_inode_rec) + hdr_len, s->ents,
                (size_t)s->n_ents * sizeof(invfs_ast_block_entry));
     if (s->old_ext_len)
         memcpy(rec + rec_size - s->old_ext_len, s->old_ext, s->old_ext_len);

@@ -27,10 +27,16 @@ static int fsck_rebuild_one(invfs_volume *v, uint64_t rec_pos, uint64_t inode_id
                             invfs_fsck_report *rep)
 {
     invfs_inode_rec rh;
-    invfs_ast_recipe_header ast_h;
+    invfs_ast_hdr ast_h;
     uint8_t *rec = NULL;
     uint32_t crc_stored, crc_calc;
-    size_t off, i;
+    size_t off;
+    uint32_t i;
+    /* H6: per-file l2p_miss detail, printed loudly at the end of the record
+     * (name + lost byte ranges; a lost journal tail usually means a whole
+     * contiguous run, so the first few ranges + the count say it) */
+    uint64_t miss_off[4], miss_len[4];
+    unsigned miss_n = 0, miss_total = 0;
 
     (void)used; (void)used_bytes;
     if (io_seek(&v->io, rec_pos) != 0 ||
@@ -44,9 +50,12 @@ static int fsck_rebuild_one(invfs_volume *v, uint64_t rec_pos, uint64_t inode_id
     if (crc_calc != crc_stored) { rep->bad_recs++; free(rec); return 0; }
 
     off = sizeof(invfs_inode_rec);   /* name[] lives inside the header */
-    if (off + sizeof(ast_h) > rh.rec_len) { free(rec); return -1; }
-    memcpy(&ast_h, rec + off, sizeof(ast_h));
-    off += sizeof(ast_h);
+    if (off + INVFS_AST_HDR_V1_LEN > rh.rec_len ||
+        invfs_ast_hdr_parse(rec + off, rh.rec_len - off, &ast_h) != 0) {
+        free(rec);
+        return -1;
+    }
+    off += ast_h.hdr_len;
 
     for (i = 0; i < ast_h.num_blocks; i++) {
         invfs_ast_block_entry e;
@@ -58,6 +67,12 @@ static int fsck_rebuild_one(invfs_volume *v, uint64_t rec_pos, uint64_t inode_id
         if (vol_lookup_entry(v, inode_id, e.block_id, &pba, &len) != 0 ||
             pba == 0) {
             rep->l2p_miss++;
+            miss_total++;
+            if (miss_n < 4) {
+                miss_off[miss_n] = e.file_offset;
+                miss_len[miss_n] = e.length;
+                miss_n++;
+            }
             continue;
         }
         /* mark used from L2P (physical) */
@@ -82,6 +97,27 @@ static int fsck_rebuild_one(invfs_volume *v, uint64_t rec_pos, uint64_t inode_id
         /* WP19: a rebuild has no history to be faithful to -- heat cold */
         memset((*l2p)[*n].pad, 0, sizeof (*l2p)[*n].pad);
         (*n)++;
+    }
+    if (miss_total) {
+        /* H6: name the file and the lost ranges, loudly and on stderr even
+         * in -q mode -- data loss is never a quiet event. The file keeps
+         * failing reads with EIO per missing segment; the rest of the
+         * volume is repaired around it. */
+        char nm[257];
+        size_t nl = rh.name_len < 256 ? rh.name_len : 256;
+        unsigned k;
+        memcpy(nm, rh.name, nl);
+        nm[nl] = 0;
+        fprintf(stderr, "fsck: l2p_miss: %s (inode %llu): %u segment(s) "
+                "without an L2P mapping, lost:",
+                nm, (unsigned long long)inode_id, miss_total);
+        for (k = 0; k < miss_n; k++)
+            fprintf(stderr, " [%llu, %llu)",
+                    (unsigned long long)miss_off[k],
+                    (unsigned long long)(miss_off[k] + miss_len[k]));
+        if (miss_total > miss_n)
+            fprintf(stderr, " ... and %u more", miss_total - miss_n);
+        fprintf(stderr, "\n");
     }
     free(rec);
     return 0;
@@ -233,10 +269,15 @@ int vol_fsck_scan(invfs_volume *v, invfs_fsck_report *rep, int fix)
     /* repair when there is structural damage, or when the volume is merely
      * dirty: a scan that found nothing else is exactly a clean-close
      * simulation, so rewriting bitmap/journal and setting CLEAN is safe.
-     * Volumes with l2p_miss keep their read-only hold: mappings are gone
-     * from the journal and cannot be reconstructed without human review. */
+     * H6: l2p_miss no longer blocks the repair -- the mappings are gone
+     * from the journal and cannot be reconstructed, but refusing the
+     * journal rewrite kept the whole VOLUME read-only (a DIRTY state
+     * mounts read-only) over damage that is per-file. The repair proceeds
+     * around them: the affected files are listed by name and lost ranges
+     * above, keep failing reads with EIO per missing segment, and the
+     * volume mounts RW again after the fix. */
     if (fix && (rep->orphans || rep->missing || rep->bad_recs ||
-                (!rep->l2p_miss && v->sb.state != INVFS_STATE_CLEAN))) {
+                rep->l2p_miss || v->sb.state != INVFS_STATE_CLEAN)) {
         /* journal rewrite: keep only live-AST mappings (drops stale
          * entries of records fsck could not verify) */
         if (l2p_n) {
@@ -250,6 +291,9 @@ int vol_fsck_scan(invfs_volume *v, invfs_fsck_report *rep, int fix)
         memcpy(v->bitmap, used, used_bytes);
         v->free_blocks = vol_count_free(v);
         alloc_state_reset(v);   /* bitmap replaced: per-zone counters stale */
+        /* H5: the rebuild may have reclaimed enough to release a space
+         * latch the volume was carrying */
+        vol_readonly_unlatch(v);
         /* WP20b: the whole occupancy map may have changed -- every seal
          * stripe's membership is now unproven, force a full reseal */
         seal_dirty_reset(v);

@@ -329,7 +329,8 @@ uint64_t vol_create_blob_file(invfs_volume *v, const char *name,
     size_t rec_size;
     uint8_t *rec;
     invfs_inode_rec *rh;
-    invfs_ast_recipe_header ast_h;
+    uint8_t ast_h[INVFS_AST_HDR_V2_LEN];
+    size_t ast_hlen;
     invfs_ast_block_entry e;
     uint32_t crc;
 
@@ -358,11 +359,12 @@ uint64_t vol_create_blob_file(invfs_volume *v, const char *name,
         }
     }
 
-    /* blob_len goes into a 4-byte on-disk header and orig_size into the
-       uint32 ast_h.file_size — refuse rather than fold either silently */
-    if (blob_len > 0xFFFFFFFFu || orig_size > 0xFFFFFFFFu) {
+    /* blob_len goes into a 4-byte on-disk segment header, so the blob stays
+       u32-capped; orig_size rides the v2 recipe header past 4 GB (WP22a) --
+       only MAX_FILE_SIZE is refused, never silently folded */
+    if (blob_len > 0xFFFFFFFFu || orig_size > MAX_FILE_SIZE) {
         fprintf(stderr, "invarifs: %s: blob %llu / original %llu bytes "
-                "exceeds the 4 GB format limit\n", name,
+                "exceeds the format limit (blob 4 GB / file 1 TB)\n", name,
                 (unsigned long long)blob_len, (unsigned long long)orig_size);
         return 0;
     }
@@ -382,13 +384,14 @@ uint64_t vol_create_blob_file(invfs_volume *v, const char *name,
             return 0;
         }
         inode_id = v->next_inode_id++;
-        memset(&ast_h, 0, sizeof ast_h);
-        ast_h.version = 1;
-        ast_h.file_size = 0;
-        ast_h.num_blocks = 0;
-        rec_size = sizeof(invfs_inode_rec) + sizeof(ast_h);
+        rec_size = sizeof(invfs_inode_rec) + INVFS_AST_HDR_V1_LEN;
         rec = (uint8_t *)calloc(1, rec_size);
         if (!rec) return 0;
+        /* empty file, v1 header by definition (nothing overflows it) */
+        if (invfs_ast_hdr_write(rec + sizeof(invfs_inode_rec), 0, 0, 0) == 0) {
+            free(rec);
+            return 0;
+        }
         rh = (invfs_inode_rec *)rec;
         rh->magic = INODE_REC_MAGIC;
         rh->rec_len = (uint32_t)rec_size;
@@ -396,7 +399,6 @@ uint64_t vol_create_blob_file(invfs_volume *v, const char *name,
         rh->file_size = 0;
         rh->ctime = (uint64_t)time(NULL);
         rec_set_name(rh, name);
-        memcpy(rec + sizeof(invfs_inode_rec), &ast_h, sizeof ast_h);
         crc = invfs_crc32c(rec, rec_size);
         if (v->inode_area_pos + rec_size + 4 > v->inode_area_end) { free(rec); return 0; }
         if (vol_pre_record(v) != 0) { free(rec); return 0; }
@@ -440,10 +442,6 @@ uint64_t vol_create_blob_file(invfs_volume *v, const char *name,
         return 0;
     }
 
-    memset(&ast_h, 0, sizeof ast_h);
-    ast_h.version = 1;
-    ast_h.file_size = (uint32_t)orig_size;
-    ast_h.num_blocks = 1;
     memset(&e, 0, sizeof e);
     e.file_offset = 0;
     e.length = orig_size;
@@ -451,7 +449,10 @@ uint64_t vol_create_blob_file(invfs_volume *v, const char *name,
     e.algo = algo;
     e.block_id = 0;
 
-    rec_size = sizeof(invfs_inode_rec) + sizeof(ast_h) + sizeof(e);
+    /* v2 recipe header only when orig_size overflows v1's u32 (WP22a) */
+    ast_hlen = invfs_ast_hdr_write(ast_h, orig_size, 1, 0);
+    if (!ast_hlen) return 0;
+    rec_size = sizeof(invfs_inode_rec) + ast_hlen + sizeof(e);
     rec = (uint8_t *)calloc(1, rec_size);
     if (!rec) return 0;
     rh = (invfs_inode_rec *)rec;
@@ -461,8 +462,8 @@ uint64_t vol_create_blob_file(invfs_volume *v, const char *name,
     rh->file_size = orig_size;
     rh->ctime = (uint64_t)time(NULL);
     rec_set_name(rh, name);
-    memcpy(rec + sizeof(invfs_inode_rec), &ast_h, sizeof ast_h);
-    memcpy(rec + sizeof(invfs_inode_rec) + sizeof ast_h, &e, sizeof e);
+    memcpy(rec + sizeof(invfs_inode_rec), ast_h, ast_hlen);
+    memcpy(rec + sizeof(invfs_inode_rec) + ast_hlen, &e, sizeof e);
     crc = invfs_crc32c(rec, rec_size);
 
     if (v->inode_area_pos + rec_size + 4 > v->inode_area_end) { free(rec); return 0; }

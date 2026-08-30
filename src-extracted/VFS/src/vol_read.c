@@ -238,15 +238,26 @@ int vol_read_inode(invfs_volume *v, uint64_t inode_id, unsigned depth,
 
         /* parse AST: header + entries after rec header */
         {
-            invfs_ast_recipe_header ast_h;
+            invfs_ast_hdr ast_h;
             const invfs_ast_block_entry *ents;
-            uint16_t i;
+            uint32_t i;
             size_t off = sizeof(invfs_inode_rec);
-            memcpy(&ast_h, rec + off, sizeof(ast_h));
-            off += sizeof(ast_h);
+            if (invfs_ast_hdr_parse(rec + off, rec_h.rec_len - off,
+                                    &ast_h) != 0) {
+                fprintf(stderr, "inode %llu: unsupported/corrupt AST recipe "
+                        "header\n", (unsigned long long)inode_id);
+                free(rec);
+                return -1;
+            }
+            off += ast_h.hdr_len;
+            if ((size_t)ast_h.num_blocks * sizeof(invfs_ast_block_entry) >
+                rec_h.rec_len - off) {
+                free(rec);
+                return -1;
+            }
             ents = (const invfs_ast_block_entry *)(rec + off);
 
-            len = ast_h.file_size;
+            len = (size_t)ast_h.file_size;
             data = (uint8_t *)malloc(len ? len : 1);
             if (!data) { free(rec); return -1; }
 
@@ -967,10 +978,10 @@ int vol_read_range(invfs_volume *v, uint64_t inode_id, uint64_t offset,
 {
     uint64_t pos = v->inode_area_start * INVFS_BLOCK_SIZE;
     uint64_t end = v->inode_area_pos;
-    invfs_ast_recipe_header ast_h;
+    invfs_ast_hdr ast_h;
     invfs_ast_block_entry *ents = NULL;
     uint8_t *rec = NULL;
-    uint16_t i;
+    uint32_t i;
     size_t got = 0;
 
     {   /* jump straight to the record; 0 = not indexed, keep the full scan */
@@ -995,8 +1006,18 @@ int vol_read_range(invfs_volume *v, uint64_t inode_id, uint64_t offset,
         crc_calc = invfs_crc32c(rec, rec_h.rec_len);
         if (crc_calc != crc_stored) { free(rec); return -1; }
 
-        memcpy(&ast_h, rec + sizeof(invfs_inode_rec), sizeof(ast_h));
-        ents = (invfs_ast_block_entry *)(rec + sizeof(invfs_inode_rec) + sizeof(ast_h));
+        if (invfs_ast_hdr_parse(rec + sizeof(invfs_inode_rec),
+                                rec_h.rec_len - sizeof(invfs_inode_rec),
+                                &ast_h) != 0 ||
+            (size_t)ast_h.num_blocks * sizeof(invfs_ast_block_entry) >
+                rec_h.rec_len - sizeof(invfs_inode_rec) - ast_h.hdr_len) {
+            fprintf(stderr, "[rr] inode %llu: unsupported/corrupt AST recipe "
+                    "header\n", (unsigned long long)inode_id);
+            free(rec);
+            return -1;
+        }
+        ents = (invfs_ast_block_entry *)(rec + sizeof(invfs_inode_rec) +
+                                         ast_h.hdr_len);
         break;
     }
     if (!rec) { fprintf(stderr,"[rr] record not found id=%llu\n",

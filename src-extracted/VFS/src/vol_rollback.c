@@ -103,8 +103,9 @@ static int vol_write_ckp0(invfs_volume *v, const invfs_ckp0 *ck)
 
 #define RET_OWNER_NAME "\x01reten"
 
-/* ranges per registry owner record: ast_h.num_blocks is u16 (the
- * SEAL_SHARD rule); shard N>0 is "\x01reten<N>" */
+/* ranges per registry owner record: policy cap like SEAL_SHARD (the v2
+ * recipe header counts past it -- the cap keeps records small and readable
+ * by pre-WP22a binaries); shard N>0 is "\x01reten<N>" */
 #define RET_SHARD 65535u
 
 void ret_shard_name(uint64_t shard, char *out, size_t cap)

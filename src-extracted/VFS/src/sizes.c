@@ -78,7 +78,7 @@ int main(int argc, char **argv)
         {
             uint8_t *rec = (uint8_t *)malloc(rl);
             uint32_t crc_stored, crc_calc;
-            invfs_ast_recipe_header ast_h;
+            invfs_ast_hdr ast_h;
             invfs_ast_block_entry *ents;
             uint64_t blob = 0;
             const char *algo = "?";
@@ -88,8 +88,17 @@ int main(int argc, char **argv)
                 vol_read_raw(vol, np - 4, &crc_stored, 4) != 0) { free(rec); break; }
             crc_calc = invfs_crc32c(rec, rl);
             if (crc_calc != crc_stored) { free(rec); continue; }
-            memcpy(&ast_h, rec + sizeof(rec_hdr_t), sizeof(ast_h));
-            ents = (invfs_ast_block_entry *)(rec + sizeof(rec_hdr_t) + sizeof(ast_h));
+            /* WP22a: v1/v2 recipe header — the entry offset follows the
+             * parsed header length, never a fixed 16 */
+            if (invfs_ast_hdr_parse(rec + sizeof(rec_hdr_t),
+                                    rl - sizeof(rec_hdr_t), &ast_h) != 0 ||
+                (size_t)ast_h.num_blocks * sizeof(invfs_ast_block_entry) >
+                    rl - sizeof(rec_hdr_t) - ast_h.hdr_len) {
+                free(rec);
+                continue;
+            }
+            ents = (invfs_ast_block_entry *)(rec + sizeof(rec_hdr_t) +
+                                             ast_h.hdr_len);
             if (ast_h.num_blocks > 0) {
                 uint32_t bits;
                 memcpy(&bits, (uint8_t *)&ents[0] + 16, 4);

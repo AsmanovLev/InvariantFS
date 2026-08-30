@@ -708,6 +708,11 @@ invfs_volume *vol_open(const char *path, int *err)
         v->sb.hard_min_blocks = (uint32_t)(v->sb.total_blocks / 1024 + 16);
     v->free_blocks = vol_count_free(v);
     alloc_state_reset(v);
+    /* H5: a volume whose latch persisted in the superblock re-evaluates it
+     * at open: space freed while it was offline (fsck reclaim, a resize,
+     * a delete in a session that never flushed the flag clear) must not
+     * keep it read-only. In RAM only -- persisted by the first flush. */
+    vol_readonly_unlatch(v);
 
     /* Reconstructed-content cache.
      *
@@ -1097,14 +1102,16 @@ uint64_t alloc_blocks(invfs_volume *v, uint64_t zone_start, uint64_t zone_len,
      * untouched; sweep/transcodes (use_reserve) may drain the reserve but
      * never the hard-min floor. Hitting the floor flips the volume to
      * READONLY so applications get a clean ENOSPC/EROFS instead of data
-     * loss (fsck can then reclaim orphaned blocks). */
+     * loss (fsck can then reclaim orphaned blocks). H5: VOLF_RO_SPACE
+     * marks it as the SPACE latch (not an operator hold) so
+     * vol_readonly_unlatch may release it when space comes back. */
     {
         uint64_t guard = (use_reserve ? 0 : v->sb.reserved_blocks)
                          + v->sb.hard_min_blocks;
         if (v->free_blocks <= guard) {
             if (v->free_blocks <= v->sb.hard_min_blocks &&
                 !(v->sb.vol_flags & VOLF_READONLY)) {
-                v->sb.vol_flags |= VOLF_READONLY;
+                v->sb.vol_flags |= VOLF_READONLY | VOLF_RO_SPACE;
                 fprintf(stderr, "[alloc] READONLY: free=%llu hard_min=%u\n",
                         (unsigned long long)v->free_blocks,
                         (unsigned)v->sb.hard_min_blocks);
@@ -1420,13 +1427,44 @@ int vol_write_enabled(invfs_volume *v)
 }
 
 
-/* flip the READONLY flag; persists on next vol_flush (caller flushes) */
+/* flip the READONLY flag; persists on next vol_flush (caller flushes).
+ * An operator hold (ro=1) is VOLF_READONLY ALONE -- never auto-released
+ * (vol_readonly_unlatch only releases the space latch, VOLF_RO_SPACE).
+ * A manual release (ro=0) clears both bits: it overrides either hold. */
 void vol_set_readonly(invfs_volume *v, int ro)
 {
     if (ro)
         v->sb.vol_flags |= VOLF_READONLY;
     else
-        v->sb.vol_flags &= ~VOLF_READONLY;
+        v->sb.vol_flags &= ~(VOLF_READONLY | VOLF_RO_SPACE);
+}
+
+/* H5: the hard_min READONLY latch has a return path. alloc_blocks sets
+ * VOLF_READONLY|VOLF_RO_SPACE when the free count hits the floor; before
+ * WP22a nothing ever cleared the flag (vol_set_readonly(v, 0) had zero
+ * callers), so a volume that once touched the floor stayed read-only
+ * forever -- including across remounts (the flag persists in the
+ * superblock) and even after deletes freed half the volume. A SPACE latch
+ * now auto-releases with hysteresis: when free space climbs back above
+ * hard_min + 2% of the volume, both bits drop (logged; the next
+ * vol_flush's superblock write persists it). The band keeps a workload
+ * hovering at the trigger from flapping the flag. An operator hold
+ * (VOLF_READONLY alone) is never auto-released. Runs from vol_free_blocks
+ * (every real free), from the fsck bitmap rebuild, and at vol_open (a
+ * volume freed while offline opens RW). */
+void vol_readonly_unlatch(invfs_volume *v)
+{
+    uint64_t watermark = (uint64_t)v->sb.hard_min_blocks +
+                         v->sb.total_blocks / 50;
+    if ((v->sb.vol_flags & (VOLF_READONLY | VOLF_RO_SPACE)) ==
+            (VOLF_READONLY | VOLF_RO_SPACE) &&
+        v->free_blocks > watermark) {
+        v->sb.vol_flags &= ~(VOLF_READONLY | VOLF_RO_SPACE);
+        fprintf(stderr, "[alloc] RW again: free=%llu above hard_min+2%% "
+                "(hard_min=%u); READONLY latch released\n",
+                (unsigned long long)v->free_blocks,
+                (unsigned)v->sb.hard_min_blocks);
+    }
 }
 
 uint64_t vol_free_blocks_cached(invfs_volume *v)
@@ -1481,6 +1519,8 @@ void vol_free_blocks(invfs_volume *v, uint64_t pba, uint64_t nblocks)
         v->raw_fail_run = 0;
         if (pba < v->raw_cursor) v->raw_cursor = pba;
     }
+    /* H5: freeing is the way out of the space latch -- re-evaluate */
+    vol_readonly_unlatch(v);
 }
 
 

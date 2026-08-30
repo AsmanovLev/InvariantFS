@@ -184,14 +184,12 @@ static int sweep_dedupe(invfs_volume *vol, uint64_t p, uint64_t inode_area_end)
     while (p + sizeof(invfs_inode_rec) <= inode_area_end) {
         invfs_inode_rec h;
         uint8_t *rec = NULL;
-        uint64_t *ast = NULL;
-        uint32_t num_blocks = 0, rec_size;
+        uint32_t num_blocks = 0, rec_size, ast_hdr_len = 0;
         uint64_t i;
         if (vol_read_raw(vol, p, &h, sizeof(h)) != 0) break;
         if (dbg)
-            fprintf(stderr, "dedupe: rec at %llu magic=%08x inode=%llu nb=%u\n",
-                    (unsigned long long)p, h.magic, (unsigned long long)h.inode_id,
-                    (unsigned int)(((uint32_t *)((uint8_t *)&h + sizeof(h)))[2] & 0xFFFF));
+            fprintf(stderr, "dedupe: rec at %llu magic=%08x inode=%llu\n",
+                    (unsigned long long)p, h.magic, (unsigned long long)h.inode_id);
         if (h.magic != 0x444F4E49u) {
             if (h.magic == 0x544C4544u) { p += (uint64_t)h.rec_len + 4; continue; }
             break;
@@ -202,16 +200,30 @@ static int sweep_dedupe(invfs_volume *vol, uint64_t p, uint64_t inode_area_end)
         rec = (uint8_t *)malloc(h.rec_len);
         if (!rec) { free(segs); return -1; }
         if (vol_read_raw(vol, p, rec, h.rec_len) != 0) { free(rec); free(segs); return -1; }
-        ast = (uint64_t *)(rec + sizeof(invfs_inode_rec));
-        if (dbg)
-            fprintf(stderr, "dedupe: rec inode=%llu rec_len=%u ast[0..4]=%u %u %u %u %u\n",
-                    (unsigned long long)h.inode_id, h.rec_len,
-                    (unsigned int)ast[0], (unsigned int)ast[1], (unsigned int)ast[2],
-                    (unsigned int)ast[3], (unsigned int)ast[4]);
-        num_blocks = (uint32_t)ast[1] & 0xFFFF;  /* recipe[2] as u32 pair */
-        rec_size = (uint32_t)sizeof(invfs_inode_rec) + 16 + (uint32_t)num_blocks * 24;
+        /* WP22a: the recipe header is v1 (16 B) or v2 (24 B) -- parse it,
+         * never pun fixed offsets */
+        {
+            invfs_ast_hdr ah;
+            if (invfs_ast_hdr_parse(rec + sizeof(invfs_inode_rec),
+                                    h.rec_len - sizeof(invfs_inode_rec),
+                                    &ah) != 0) {
+                free(rec);
+                p += (uint64_t)h.rec_len + 4;
+                continue;
+            }
+            num_blocks = ah.num_blocks;
+            ast_hdr_len = ah.hdr_len;
+        }
+        rec_size = (uint32_t)sizeof(invfs_inode_rec) + ast_hdr_len +
+                   (uint32_t)num_blocks * 24;
+        if (rec_size > h.rec_len) {   /* truncated recipe: not ours */
+            free(rec);
+            p += (uint64_t)h.rec_len + 4;
+            continue;
+        }
         for (i = 0; i < num_blocks; i++) {
-            uint32_t *e = (uint32_t *)((uint8_t *)ast + 16 + i * 24);
+            uint32_t *e = (uint32_t *)((uint8_t *)rec +
+                          sizeof(invfs_inode_rec) + ast_hdr_len + i * 24);
             uint64_t pba, len;
             uint8_t *blob;
             uint32_t hdr4;

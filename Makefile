@@ -122,8 +122,17 @@ e2e: all
 	bash tools/test-qcow2.sh
 	bash tools/test-fuzz.sh
 	bash tools/test-writepath.sh
+	bash tools/test-astv2.sh
 
-.PHONY: all clean test e2e fuzz
+# WP22b flakey tier: power-loss / unstable-device soak on dm-flakey over a
+# loop device. Standalone on purpose (needs passwordless sudo + dm-flakey,
+# takes minutes) — NOT part of `make e2e`. The script is sudo-aware; run
+# `sudo -v` first if the credential cache may be cold.
+#   knobs: FLAKEY_SEED=20260831 FLAKEY_SOAK_S=210 FLAKEY_ONLY=<leg>
+flakey:
+	bash tools/test-flakey.sh
+
+.PHONY: all clean test e2e fuzz flakey
 -include $(wildcard $(OBJ)/*.d)
 
 $(OUT)/invf-stats: $(OBJ)/invf-stats.o $(CORE_O)
