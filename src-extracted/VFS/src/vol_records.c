@@ -424,7 +424,6 @@ static int vol_retire_inode(invfs_volume *v, uint64_t inode_id,
         memset(&rec, 0, sizeof(rec));
         rec.magic = TOMBSTONE_MAGIC;
     v->hot.tombstones++;
-    v->hot.tombstones++;
         rec.rec_len = (uint32_t)sizeof(invfs_inode_rec);
         rec.inode_id = inode_id;
         rec.file_size = 0;

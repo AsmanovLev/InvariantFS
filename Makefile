@@ -119,6 +119,7 @@ e2e: all
 	bash tools/test-resize.sh
 	bash tools/test-rollback.sh
 	bash tools/test-p7z.sh
+	bash tools/test-qcow2.sh
 	bash tools/test-fuzz.sh
 	bash tools/test-writepath.sh
 

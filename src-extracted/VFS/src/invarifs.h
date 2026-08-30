@@ -211,7 +211,7 @@ typedef struct {
  *   0x170  u64 old_total             pre-resize total_blocks (sanity)
  *   0x178  invfs_superblock new_sb   the post-resize superblock image
  *   0x208  u32 crc32c                over the descriptor with this field 0
- * 208 bytes total; the rest of block 0 stays reserved-zero. */
+ * 204 bytes total (0x140..0x20C); the rest of block 0 stays reserved-zero. */
 #define INVFS_RSZ0_OFF 0x140
 #pragma pack(push, 1)
 typedef struct {
@@ -225,7 +225,7 @@ typedef struct {
     uint64_t old_total;         /* 0x170 */
     invfs_superblock new_sb;    /* 0x178 */
     uint32_t crc32c;            /* 0x208 */
-} invfs_rsz0;                   /* 0x20C = 208 bytes */
+} invfs_rsz0;                   /* 0x140 + 204 bytes -> ends 0x20C */
 #pragma pack(pop)
 
 /* The staging area's own header, one block at stage_start. The payload

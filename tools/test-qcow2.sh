@@ -61,7 +61,7 @@ rm -f "$IMG" "$IMGMEM"
 echo "== tools =="
 command -v cc >/dev/null || { echo "FAIL: cc not installed"; exit 1; }
 command -v python3 >/dev/null || { echo "FAIL: python3 not installed"; exit 1; }
-command -v qemu-img >/dev/null || { echo "FAIL: qemu-img not installed"; exit 1; }
+command -v qemu-img >/dev/null || { echo "SKIP: qemu-img not installed"; exit 0; }
 command -v qemu-io >/dev/null || { echo "FAIL: qemu-io not installed"; exit 1; }
 echo "  qemu-img: $(qemu-img --version | head -1)"
 
