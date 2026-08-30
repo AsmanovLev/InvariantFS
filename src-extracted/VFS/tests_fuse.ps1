@@ -5,7 +5,7 @@ $root = Split-Path -Parent $MyInvocation.MyCommand.Path
 $build = Join-Path $root 'build'
 
 Write-Host "=== T-F1: сборка в WSL ===" -ForegroundColor Cyan
-$r = wsl -d void -- bash -c "cd /mnt/d/VFS && gcc -O2 -o build_linux/invf-fuse src/fuse_fs.c src/volume.c src/arc.c src/crc32c.c src/lz4.c src/flacx.c src/tarx.c src/pngx.c src/miniz.c -lfuse3 -Wl,-l:libzstd.so.1 -lz -Isrc -pthread -DINVFS_EMBED_FLACX -DMINIZ_NO_ZLIB_APIS 2>&1 && echo BUILD-OK"
+$r = wsl -d void -- bash -c "cd /mnt/d/VFS && gcc -O2 -o build_linux/invf-fuse src/fuse_fs.c src/volume.c src/vol_cpack.c src/vol_png.c src/vol_seal.c src/vol_repair.c src/vol_rollback.c src/vol_resize.c src/vol_fsck.c src/vol_crash.c src/vol_exer.c src/vol_dedupe.c src/vol_textzone.c src/vol_heat.c src/vol_sweep.c src/vol_read.c src/vol_write.c src/vol_records.c src/vol_ast.c src/vol_dirs.c src/arc.c src/crc32c.c src/lz4.c src/flacx.c src/tarx.c src/pngx.c src/miniz.c -lfuse3 -Wl,-l:libzstd.so.1 -lz -Isrc -pthread -DINVFS_EMBED_FLACX -DMINIZ_NO_ZLIB_APIS 2>&1 && echo BUILD-OK"
 if ($r -match 'BUILD-OK') { Write-Host "  PASS: сборка" -ForegroundColor Green } else { Write-Host "  FAIL: сборка $r" -ForegroundColor Red; exit 1 }
 
 Write-Host "=== T-F2: образ + монтирование ===" -ForegroundColor Cyan

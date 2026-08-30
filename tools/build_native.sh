@@ -11,7 +11,7 @@ mkdir -p "$OUT" "$ROOT/logs"
 cd "$SRC"
 : > "$LOG"
 
-CORE="src/volume.c src/arc.c src/crc32c.c src/lz4.c src/flacx.c src/tarx.c src/pngx.c src/blkio.c"
+CORE="src/volume.c src/vol_cpack.c src/vol_png.c src/vol_seal.c src/vol_repair.c src/vol_rollback.c src/vol_resize.c src/vol_fsck.c src/vol_crash.c src/vol_exer.c src/vol_dedupe.c src/vol_textzone.c src/vol_heat.c src/vol_sweep.c src/vol_read.c src/vol_write.c src/vol_records.c src/vol_ast.c src/vol_dirs.c src/arc.c src/crc32c.c src/lz4.c src/flacx.c src/tarx.c src/pngx.c src/blkio.c"
 B3="src/blake3.c src/blake3_dispatch.c src/blake3_portable.c"
 COMMON="-std=gnu11 -O2 -DINVFS_EMBED_FLACX -DMINIZ_NO_ZLIB_APIS \
  -DBLAKE3_NO_SSE2 -DBLAKE3_NO_SSE41 -DBLAKE3_NO_AVX2 -DBLAKE3_NO_AVX512 \
