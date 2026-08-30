@@ -1,5 +1,12 @@
 # Security & Cross-Platform Permissions
 
+> **Статус:** POSIX-половина реализована иначе — uid/gid/mode/type/times
+> живут в INO2 meta-ext записи (format v2, VOLF_META2; «Primary Index»
+> из этого документа не строился, см. 02-on-disk-format.md). Проверка прав
+> при доступе (enforcement) и Windows-половина (SID-маппинг, NTFS ACL)
+> **не реализованы**; Windows-порт EOL (09-windows-port.md), так что
+> разделы про SID ниже — исторический контекст.
+
 ## POSIX + Windows Гибридная модель
 
 Первичный индекс хранит расширенную структуру прав, совместимую с обеими платформами:

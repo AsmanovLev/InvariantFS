@@ -103,7 +103,7 @@ For archives and container formats, the recipe is a tree:
 | `zstd` | binary | ZSTD -19 compressed binary |
 | `ape` | binary | APE -c4000 compressed audio |
 | `jxl` | binary | JPEG XL lossless recompression |
-| `brotli` | text | Brotli -11 compressed text |
+| `brotli` | text | (не реализовано; текст жмётся PPMd-батчами, WP10) |
 
 ## Read Algorithm
 

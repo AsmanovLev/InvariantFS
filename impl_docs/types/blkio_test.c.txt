@@ -1,0 +1,1 @@
+__anon53162a4c0108 struct      121 /home/user/InvariantFS/src-extracted/VFS/src/blkio_test.c struct { uint64_t off; size_t len; const char *what; } cases[] = {

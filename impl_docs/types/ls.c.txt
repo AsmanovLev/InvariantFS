@@ -1,0 +1,2 @@
+ls_bucket        struct       18 /home/user/InvariantFS/src-extracted/VFS/src/ls.c typedef struct ls_bucket { struct ls_bucket *next; int slot; } ls_bucket;
+ls_bucket        typedef      18 /home/user/InvariantFS/src-extracted/VFS/src/ls.c typedef struct ls_bucket { struct ls_bucket *next; int slot; } ls_bucket;

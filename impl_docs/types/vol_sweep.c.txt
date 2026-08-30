@@ -1,0 +1,2 @@
+__anon5cb14a700108 struct     1420 /home/user/InvariantFS/src-extracted/VFS/src/vol_sweep.c typedef struct { char name[256]; uint64_t id; } sweep_seed;
+sweep_seed       typedef    1420 /home/user/InvariantFS/src-extracted/VFS/src/vol_sweep.c typedef struct { char name[256]; uint64_t id; } sweep_seed;

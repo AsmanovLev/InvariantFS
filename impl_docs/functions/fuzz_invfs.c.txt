@@ -1,0 +1,37 @@
+gen_name         function    213 /home/user/InvariantFS/src-extracted/VFS/src/fuzz_invfs.c static const char *gen_name(char *buf, size_t cap)
+gen_printable    function    150 /home/user/InvariantFS/src-extracted/VFS/src/fuzz_invfs.c static void gen_printable(uint8_t *b, size_t n)
+gen_random       function    144 /home/user/InvariantFS/src-extracted/VFS/src/fuzz_invfs.c static void gen_random(uint8_t *b, size_t n)
+gen_structured   function    161 /home/user/InvariantFS/src-extracted/VFS/src/fuzz_invfs.c static void gen_structured(uint8_t *b, size_t n)
+get_le32         function   1228 /home/user/InvariantFS/src-extracted/VFS/src/fuzz_invfs.c static uint32_t get_le32(const uint8_t *p)
+get_le64         function   1221 /home/user/InvariantFS/src-extracted/VFS/src/fuzz_invfs.c static uint64_t get_le64(const uint8_t *p)
+invfs_codec_pack_estimate function     78 /home/user/InvariantFS/src-extracted/VFS/src/fuzz_invfs.c int invfs_codec_pack_estimate(const invfs_codec *c, const char *in_path,
+invfs_codec_pack_exec function     71 /home/user/InvariantFS/src-extracted/VFS/src/fuzz_invfs.c int invfs_codec_pack_exec(const invfs_codec *c, int is_encode,
+leg_bcj          function   1144 /home/user/InvariantFS/src-extracted/VFS/src/fuzz_invfs.c static leg_t leg_bcj(uint64_t iters)
+leg_classifier   function    361 /home/user/InvariantFS/src-extracted/VFS/src/fuzz_invfs.c static leg_t leg_classifier(uint64_t iters)
+leg_done         function    135 /home/user/InvariantFS/src-extracted/VFS/src/fuzz_invfs.c static void leg_done(leg_t *l, double t0, const char *info)
+leg_fail         function    113 /home/user/InvariantFS/src-extracted/VFS/src/fuzz_invfs.c static void leg_fail(leg_t *l, uint64_t iter, const char *fmt, ...)
+leg_manifest     function    733 /home/user/InvariantFS/src-extracted/VFS/src/fuzz_invfs.c static leg_t leg_manifest(uint64_t iters)
+leg_mrmp         function   1407 /home/user/InvariantFS/src-extracted/VFS/src/fuzz_invfs.c static leg_t leg_mrmp(uint64_t iters)
+leg_now          function    128 /home/user/InvariantFS/src-extracted/VFS/src/fuzz_invfs.c static double leg_now(void)
+leg_ppmd         function   1030 /home/user/InvariantFS/src-extracted/VFS/src/fuzz_invfs.c static leg_t leg_ppmd(uint64_t iters)
+leg_sniff        function    265 /home/user/InvariantFS/src-extracted/VFS/src/fuzz_invfs.c static leg_t leg_sniff(uint64_t iters)
+main             function   1560 /home/user/InvariantFS/src-extracted/VFS/src/fuzz_invfs.c int main(int argc, char **argv)
+mf_algo_is_static function    665 /home/user/InvariantFS/src-extracted/VFS/src/fuzz_invfs.c static int mf_algo_is_static(uint32_t a)
+mf_entry_consistent function    696 /home/user/InvariantFS/src-extracted/VFS/src/fuzz_invfs.c static int mf_entry_consistent(const invfs_codec *c)
+mf_generate      function    502 /home/user/InvariantFS/src-extracted/VFS/src/fuzz_invfs.c static void mf_generate(mf_gen *g)
+mf_hex           function    491 /home/user/InvariantFS/src-extracted/VFS/src/fuzz_invfs.c static void mf_hex(char *dst, const uint8_t *b, size_t n)
+mf_line          function    475 /home/user/InvariantFS/src-extracted/VFS/src/fuzz_invfs.c static void mf_line(mf_gen *g, const char *key, const char *fmt, ...)
+mf_new_entries   function    680 /home/user/InvariantFS/src-extracted/VFS/src/fuzz_invfs.c static size_t mf_new_entries(const invfs_codec *all, size_t n,
+mf_render        function    638 /home/user/InvariantFS/src-extracted/VFS/src/fuzz_invfs.c static size_t mf_render(const mf_gen *g, char *out, size_t cap)
+mf_required_key  function    721 /home/user/InvariantFS/src-extracted/VFS/src/fuzz_invfs.c static int mf_required_key(const mf_gen *g, const char *key)
+mf_write         function    656 /home/user/InvariantFS/src-extracted/VFS/src/fuzz_invfs.c static int mf_write(const char *path, const char *data, size_t len)
+mrmp_check       function   1392 /home/user/InvariantFS/src-extracted/VFS/src/fuzz_invfs.c static int mrmp_check(const uint8_t *blob, size_t blob_len,
+mrmp_find        function   1265 /home/user/InvariantFS/src-extracted/VFS/src/fuzz_invfs.c static const mrmp_member *mrmp_find(const mrmp_member *mem, size_t n,
+mrmp_generate    function   1316 /home/user/InvariantFS/src-extracted/VFS/src/fuzz_invfs.c static void mrmp_generate(mrmp_map *m)
+mrmp_parse       function   1237 /home/user/InvariantFS/src-extracted/VFS/src/fuzz_invfs.c static int mrmp_parse(const uint8_t *blob, size_t blob_len,
+mrmp_serialize   function   1373 /home/user/InvariantFS/src-extracted/VFS/src/fuzz_invfs.c static size_t mrmp_serialize(const mrmp_map *m, uint8_t *out)
+mrmp_validate    function   1275 /home/user/InvariantFS/src-extracted/VFS/src/fuzz_invfs.c static int mrmp_validate(const mrmp_ent *e, size_t n, uint64_t csize,
+put_le32         function   1219 /home/user/InvariantFS/src-extracted/VFS/src/fuzz_invfs.c static void put_le32(uint8_t *p, uint32_t v)
+put_le64         function   1217 /home/user/InvariantFS/src-extracted/VFS/src/fuzz_invfs.c static void put_le64(uint8_t *p, uint64_t v)
+xr_below         function     99 /home/user/InvariantFS/src-extracted/VFS/src/fuzz_invfs.c static uint64_t xr_below(uint64_t n) /* 0 when n == 0 (callers avoid) */
+xr_next          function     89 /home/user/InvariantFS/src-extracted/VFS/src/fuzz_invfs.c static uint64_t xr_next(void)

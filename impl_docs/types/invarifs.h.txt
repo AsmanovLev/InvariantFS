@@ -1,12 +1,25 @@
-__anond5a8f7030108 struct       60 /home/user/InvariantFS/src-extracted/VFS/src/invarifs.h typedef struct {
-__anond5a8f7030208 struct       86 /home/user/InvariantFS/src-extracted/VFS/src/invarifs.h typedef struct {
-__anond5a8f7030308 struct       96 /home/user/InvariantFS/src-extracted/VFS/src/invarifs.h typedef struct {
-__anond5a8f7030408 struct      113 /home/user/InvariantFS/src-extracted/VFS/src/invarifs.h typedef struct {
-__anond5a8f7030508 struct      175 /home/user/InvariantFS/src-extracted/VFS/src/invarifs.h typedef struct {
-invfs_ast_block_entry typedef      93 /home/user/InvariantFS/src-extracted/VFS/src/invarifs.h } invfs_ast_block_entry; /* 24 bytes */
-invfs_ast_child_entry typedef     121 /home/user/InvariantFS/src-extracted/VFS/src/invarifs.h } invfs_ast_child_entry; /* in-memory */
-invfs_ast_recipe_header typedef     102 /home/user/InvariantFS/src-extracted/VFS/src/invarifs.h } invfs_ast_recipe_header; /* 16 bytes */
-invfs_inode_rec  struct      141 /home/user/InvariantFS/src-extracted/VFS/src/invarifs.h typedef struct invfs_inode_rec {
-invfs_inode_rec  typedef     150 /home/user/InvariantFS/src-extracted/VFS/src/invarifs.h } invfs_inode_rec;
-invfs_l2p_entry  typedef     183 /home/user/InvariantFS/src-extracted/VFS/src/invarifs.h } invfs_l2p_entry; /* 36 bytes */
-invfs_superblock typedef      80 /home/user/InvariantFS/src-extracted/VFS/src/invarifs.h } invfs_superblock; /* 0x90 = 144 bytes */
+__anond5a8f7030103 enum         77 /home/user/InvariantFS/src-extracted/VFS/src/invarifs.h enum {
+__anond5a8f7030208 struct       99 /home/user/InvariantFS/src-extracted/VFS/src/invarifs.h typedef struct {
+__anond5a8f7030308 struct      120 /home/user/InvariantFS/src-extracted/VFS/src/invarifs.h typedef struct {
+__anond5a8f7030408 struct      172 /home/user/InvariantFS/src-extracted/VFS/src/invarifs.h typedef struct {
+__anond5a8f7030508 struct      217 /home/user/InvariantFS/src-extracted/VFS/src/invarifs.h typedef struct {
+__anond5a8f7030608 struct      236 /home/user/InvariantFS/src-extracted/VFS/src/invarifs.h typedef struct {
+__anond5a8f7030708 struct      274 /home/user/InvariantFS/src-extracted/VFS/src/invarifs.h typedef struct {
+__anond5a8f7030808 struct      287 /home/user/InvariantFS/src-extracted/VFS/src/invarifs.h typedef struct {
+__anond5a8f7030908 struct      297 /home/user/InvariantFS/src-extracted/VFS/src/invarifs.h typedef struct {
+__anond5a8f7030a08 struct      314 /home/user/InvariantFS/src-extracted/VFS/src/invarifs.h typedef struct {
+__anond5a8f7030b08 struct      433 /home/user/InvariantFS/src-extracted/VFS/src/invarifs.h typedef struct {
+invfs_ast_block_entry typedef     294 /home/user/InvariantFS/src-extracted/VFS/src/invarifs.h } invfs_ast_block_entry; /* 24 bytes */
+invfs_ast_child_entry typedef     322 /home/user/InvariantFS/src-extracted/VFS/src/invarifs.h } invfs_ast_child_entry; /* in-memory */
+invfs_ast_recipe_header typedef     303 /home/user/InvariantFS/src-extracted/VFS/src/invarifs.h } invfs_ast_recipe_header; /* 16 bytes */
+invfs_ckp0       typedef     283 /home/user/InvariantFS/src-extracted/VFS/src/invarifs.h } invfs_ckp0; /* 0x258 = 56 bytes */
+invfs_class_tlv  typedef     104 /home/user/InvariantFS/src-extracted/VFS/src/invarifs.h } invfs_class_tlv; /* 4 bytes */
+invfs_inode_rec  struct      342 /home/user/InvariantFS/src-extracted/VFS/src/invarifs.h typedef struct invfs_inode_rec {
+invfs_inode_rec  typedef     351 /home/user/InvariantFS/src-extracted/VFS/src/invarifs.h } invfs_inode_rec;
+invfs_l2p_entry  typedef     441 /home/user/InvariantFS/src-extracted/VFS/src/invarifs.h } invfs_l2p_entry; /* 36 bytes */
+invfs_meta_ext_hdr struct      373 /home/user/InvariantFS/src-extracted/VFS/src/invarifs.h typedef struct invfs_meta_ext_hdr {
+invfs_meta_ext_hdr typedef     386 /home/user/InvariantFS/src-extracted/VFS/src/invarifs.h } invfs_meta_ext_hdr; /* 48 bytes */
+invfs_rdp0       typedef     182 /home/user/InvariantFS/src-extracted/VFS/src/invarifs.h } invfs_rdp0; /* 0x118 = 24 bytes */
+invfs_rsz0       typedef     228 /home/user/InvariantFS/src-extracted/VFS/src/invarifs.h } invfs_rsz0; /* 0x20C = 208 bytes */
+invfs_rszs       typedef     244 /home/user/InvariantFS/src-extracted/VFS/src/invarifs.h } invfs_rszs; /* 40 bytes, block-padded */
+invfs_superblock typedef     140 /home/user/InvariantFS/src-extracted/VFS/src/invarifs.h } invfs_superblock; /* 0x90 = 144 bytes */

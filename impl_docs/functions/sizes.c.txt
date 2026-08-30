@@ -1,2 +1,2 @@
 algo_name        function     35 /home/user/InvariantFS/src-extracted/VFS/src/sizes.c static const char *algo_name(uint32_t a)
-main             function     48 /home/user/InvariantFS/src-extracted/VFS/src/sizes.c int main(int argc, char **argv)
+main             function     51 /home/user/InvariantFS/src-extracted/VFS/src/sizes.c int main(int argc, char **argv)

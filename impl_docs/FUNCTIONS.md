@@ -1,745 +1,1187 @@
 # Function Index (all sources)
 
-| symbol | line | file |
-|---|---|---|
-| arc_clear | function | 347 |
-| arc_create | function | 169 |
-| arc_destroy | function | 184 |
-| arc_get | function | 196 |
-| arc_hash | function | 62 |
-| arc_invalidate | function | 335 |
-| arc_put | function | 256 |
-| arc_replace | function | 219 |
-| arc_stats | function | 364 |
-| arc_trim_ghosts | function | 247 |
-| ht_find | function | 73 |
-| ht_grow | function | 96 |
-| ht_insert | function | 80 |
-| ht_remove | function | 88 |
-| list_of | function | 138 |
-| lst_push_mru | function | 127 |
-| lst_unlink | function | 118 |
-| move_to | function | 149 |
-| node_free | function | 158 |
-| blob | function | 45 |
-| blob_ok | function | 55 |
-| check_invariants | function | 65 |
-| main | function | 87 |
-| ok | function | 34 |
-| main | function | 28 |
-| now_ms | function | 19 |
-| blake3_compress_subtree_wide | function | 269 |
-| blake3_hasher_finalize | function | 599 |
-| blake3_hasher_finalize_seek | function | 604 |
-| blake3_hasher_init | function | 390 |
-| blake3_hasher_init_derive_key | function | 411 |
-| blake3_hasher_init_derive_key_raw | function | 399 |
-| blake3_hasher_init_keyed | function | 392 |
-| blake3_hasher_reset | function | 648 |
-| blake3_hasher_update | function | 585 |
-| blake3_hasher_update_base | function | 476 |
-| blake3_hasher_update_tbb | function | 592 |
-| blake3_version | function | 9 |
-| chunk_state_fill_buf | function | 35 |
-| chunk_state_init | function | 11 |
-| chunk_state_len | function | 30 |
-| chunk_state_maybe_start_flag | function | 47 |
-| chunk_state_output | function | 147 |
-| chunk_state_reset | function | 21 |
-| chunk_state_update | function | 119 |
-| compress_chunks_parallel | function | 173 |
-| compress_parents_parallel | function | 217 |
-| compress_subtree_to_parent_node | function | 350 |
-| hasher_init_base | function | 383 |
-| hasher_merge_cv_stack | function | 425 |
-| hasher_push_cv | function | 468 |
-| left_subtree_len | function | 162 |
-| make_output | function | 63 |
-| output_chaining_value | function | 82 |
-| output_root_bytes | function | 90 |
-| parent_output | function | 154 |
-| blake3_compress_in_place | function | 168 |
-| blake3_compress_xof | function | 197 |
-| blake3_hash_many | function | 250 |
-| blake3_simd_degree | function | 303 |
-| blake3_xof_many | function | 227 |
-| cpuid | function | 60 |
-| cpuidex | function | 76 |
-| get_cpu_features | function | 114 |
-| xgetbv | function | 50 |
-| counter_high | function | 153 |
-| counter_low | function | 151 |
-| highest_one | function | 102 |
-| load32 | function | 157 |
-| load_block_words | function | 175 |
-| load_key_words | function | 163 |
-| popcnt | function | 132 |
-| round_down_to_power_of_2 | function | 147 |
-| store32 | function | 182 |
-| store_cv_words | function | 190 |
-| blake3_compress_in_place_portable | function | 84 |
-| blake3_compress_xof_portable | function | 100 |
-| blake3_hash_many_portable | function | 145 |
-| compress_pre | function | 37 |
-| g | function | 8 |
-| hash_one_portable | function | 125 |
-| rotr32 | function | 4 |
-| round_fn | function | 20 |
-| blkio_capacity | function | 605 |
-| blkio_chsize | function | 580 |
-| blkio_close | function | 345 |
-| blkio_flush | function | 608 |
-| blkio_is_device | function | 606 |
-| blkio_looks_like_device | function | 31 |
-| blkio_normalize | function | 61 |
-| blkio_open | function | 199 |
-| blkio_pread | function | 542 |
-| blkio_pwrite | function | 550 |
-| blkio_read | function | 564 |
-| blkio_seek | function | 558 |
-| blkio_strerror | function | 83 |
-| blkio_write | function | 572 |
-| dev_geometry | function | 136 |
-| dev_lock | function | 175 |
-| dev_path_allowed | function | 106 |
-| dev_pread | function | 438 |
-| dev_pwrite | function | 476 |
-| raw_pread | function | 381 |
-| raw_pwrite | function | 406 |
-| main | function | 39 |
-| ok | function | 27 |
-| pat | function | 37 |
-| main | function | 23 |
-| main | function | 32 |
-| read_file | function | 15 |
-| crc32c_init | function | 10 |
-| invfs_crc32c | function | 23 |
-| enumerate_dir | function | 12 |
-| wmain | function | 44 |
-| wmain | function | 3 |
-| wmain | function | 3 |
-| wmain | function | 3 |
-| wmain | function | 3 |
-| wmain | function | 3 |
-| wmain | function | 3 |
-| wmain | function | 3 |
-| wmain | function | 5 |
-| wmain | function | 3 |
-| wmain | function | 3 |
-| open_it | function | 3 |
-| wmain | function | 9 |
-| nt_open | function | 5 |
-| wmain | function | 18 |
-| wmain | function | 3 |
-| main | function | 88 |
-| now_ms | function | 31 |
-| run | function | 39 |
-| DkCleanup | function | 867 |
-| DkCloseFile | function | 905 |
-| DkDeleteDirectory | function | 836 |
-| DkDeleteFile | function | 813 |
-| DkFindFiles | function | 453 |
-| DkFindFilesWithPattern | function | 1085 |
-| DkFlushFileBuffers | function | 680 |
-| DkGetDiskFreeSpace | function | 1038 |
-| DkGetFileInformation | function | 343 |
-| DkGetVolumeInformation | function | 1053 |
-| DkMounted | function | 1017 |
-| DkMoveFile | function | 755 |
-| DkReadFile | function | 526 |
-| DkSetAllocationSize | function | 710 |
-| DkSetEndOfFile | function | 739 |
-| DkSetFileAttributes | function | 746 |
-| DkSetFileTime | function | 859 |
-| DkUnmounted | function | 1026 |
-| DkWriteFile | function | 595 |
-| DkZwCreateFile | function | 223 |
-| cleanup_impl | function | 874 |
-| close_file_impl | function | 912 |
-| create_file_impl | function | 234 |
-| ctx_alloc | function | 199 |
-| ctx_free | function | 212 |
-| find_files_impl | function | 462 |
-| getinfo_impl | function | 352 |
-| lookup_entry | function | 162 |
-| path_to_utf8 | function | 141 |
-| prof_now | function | 63 |
-| prof_tick | function | 97 |
-| read_file_impl | function | 535 |
-| rebuild_table_locked | function | 159 |
-| stop_sweep_thread | function | 1001 |
-| sweep_thread | function | 966 |
-| utf16_to_utf8 | function | 131 |
-| wmain | function | 1186 |
-| write_file_impl | function | 604 |
-| main | function | 7 |
-| br_get | function | 42 |
-| bw_align | function | 115 |
-| bw_free | function | 64 |
-| bw_grow | function | 65 |
-| bw_init | function | 63 |
-| bw_put | function | 76 |
-| bw_size | function | 119 |
-| bw_zeros | function | 93 |
-| crc16 | function | 132 |
-| crc8 | function | 122 |
-| flacx_extract | function | 467 |
-| flacx_rebuild | function | 754 |
-| flacx_recipe_num_covers | function | 679 |
-| frame_channels | function | 154 |
-| main | function | 1046 |
-| parse_frame | function | 307 |
-| put_utf8 | function | 696 |
-| rd16 | function | 149 |
-| rd32 | function | 150 |
-| rd64 | function | 151 |
-| rd8 | function | 148 |
-| read_file | function | 291 |
-| read_utf8 | function | 272 |
-| read_wav | function | 261 |
-| read_wav_mem | function | 212 |
-| sub_bps | function | 162 |
-| unzigzag | function | 693 |
-| wr16 | function | 145 |
-| wr32 | function | 146 |
-| wr64 | function | 147 |
-| wr8 | function | 144 |
-| write_residuals | function | 708 |
-| zigzag64 | function | 694 |
-| main | function | 21 |
-| wmain | function | 4 |
-| wmain | function | 4 |
-| build_file_table | function | 40 |
-| find_entry | function | 104 |
-| fuse_sweep_thread | function | 328 |
-| invf_create | function | 274 |
-| invf_flush | function | 351 |
-| invf_getattr | function | 114 |
-| invf_mkdir | function | 171 |
-| invf_open | function | 229 |
-| invf_read | function | 203 |
-| invf_readdir | function | 145 |
-| invf_release | function | 378 |
-| invf_rmdir | function | 186 |
-| invf_unlink | function | 390 |
-| invf_write | function | 300 |
-| main | function | 419 |
-| rebuild_table_locked | function | 221 |
-| main | function | 28 |
-| read_file | function | 15 |
-| main | function | 5 |
-| ls_find | function | 28 |
-| ls_hash | function | 20 |
-| ls_insert | function | 39 |
-| main | function | 76 |
-| LZ4_NbCommonBytes | function | 579 |
-| LZ4_attach_dictionary | function | 1658 |
-| LZ4_clearHash | function | 808 |
-| LZ4_compress | function | 2768 |
-| LZ4_compressBound | function | 751 |
-| LZ4_compress_continue | function | 2784 |
-| LZ4_compress_default | function | 1472 |
-| LZ4_compress_destSize | function | 1506 |
-| LZ4_compress_destSize_extState | function | 1497 |
-| LZ4_compress_destSize_extState_internal | function | 1481 |
-| LZ4_compress_fast | function | 1453 |
-| LZ4_compress_fast_continue | function | 1707 |
-| LZ4_compress_fast_extState | function | 1382 |
-| LZ4_compress_fast_extState_fastReset | function | 1414 |
-| LZ4_compress_forceExtDict | function | 1787 |
-| LZ4_compress_generic | function | 1344 |
-| LZ4_compress_generic_validated | function | 930 |
-| LZ4_compress_limitedOutput | function | 2764 |
-| LZ4_compress_limitedOutput_continue | function | 2780 |
-| LZ4_compress_limitedOutput_withState | function | 2772 |
-| LZ4_compress_withState | function | 2776 |
-| LZ4_count | function | 680 |
-| LZ4_create | function | 2816 |
-| LZ4_createStream | function | 1531 |
-| LZ4_createStreamDecode | function | 2569 |
-| LZ4_decoderRingBufferSize | function | 2615 |
-| LZ4_decompress_fast | function | 2468 |
-| LZ4_decompress_fast_continue | function | 2671 |
-| LZ4_decompress_fast_extDict | function | 2545 |
-| LZ4_decompress_fast_usingDict | function | 2749 |
-| LZ4_decompress_fast_withPrefix64k | function | 2496 |
-| LZ4_decompress_generic | function | 2023 |
-| LZ4_decompress_safe | function | 2451 |
-| LZ4_decompress_safe_continue | function | 2631 |
-| LZ4_decompress_safe_doubleDict | function | 2558 |
-| LZ4_decompress_safe_forceExtDict | function | 2523 |
-| LZ4_decompress_safe_partial | function | 2459 |
-| LZ4_decompress_safe_partial_forceExtDict | function | 2534 |
-| LZ4_decompress_safe_partial_usingDict | function | 2734 |
-| LZ4_decompress_safe_partial_withPrefix64k | function | 2487 |
-| LZ4_decompress_safe_partial_withSmallPrefix | function | 2513 |
-| LZ4_decompress_safe_usingDict | function | 2719 |
-| LZ4_decompress_safe_withPrefix64k | function | 2479 |
-| LZ4_decompress_safe_withSmallPrefix | function | 2504 |
-| LZ4_decompress_unsafe_generic | function | 1870 |
-| LZ4_freeStream | function | 1575 |
-| LZ4_freeStreamDecode | function | 2575 |
-| LZ4_getIndexOnHash | function | 853 |
-| LZ4_getPosition | function | 876 |
-| LZ4_getPositionOnHash | function | 869 |
-| LZ4_hash4 | function | 777 |
-| LZ4_hash5 | function | 785 |
-| LZ4_hashPosition | function | 797 |
-| LZ4_initStream | function | 1552 |
-| LZ4_isAligned | function | 292 |
-| LZ4_isLittleEndian | function | 363 |
-| LZ4_loadDict | function | 1648 |
-| LZ4_loadDictSlow | function | 1653 |
-| LZ4_loadDict_internal | function | 1587 |
-| LZ4_memcpy_using_offset | function | 535 |
-| LZ4_memcpy_using_offset_base | function | 496 |
-| LZ4_prepareTable | function | 884 |
-| LZ4_putIndexOnHash | function | 820 |
-| LZ4_putPosition | function | 841 |
-| LZ4_putPositionOnHash | function | 833 |
-| LZ4_read16 | function | 378 |
-| LZ4_read16 | function | 393 |
-| LZ4_read16 | function | 402 |
-| LZ4_read32 | function | 379 |
-| LZ4_read32 | function | 394 |
-| LZ4_read32 | function | 407 |
-| LZ4_readLE16 | function | 430 |
-| LZ4_readLE32 | function | 441 |
-| LZ4_read_ARCH | function | 380 |
-| LZ4_read_ARCH | function | 395 |
-| LZ4_read_ARCH | function | 412 |
-| LZ4_renormDictT | function | 1687 |
-| LZ4_resetStream | function | 1564 |
-| LZ4_resetStreamState | function | 2808 |
-| LZ4_resetStream_fast | function | 1570 |
-| LZ4_saveDict | function | 1814 |
-| LZ4_setStreamDecode | function | 2589 |
-| LZ4_sizeofState | function | 752 |
-| LZ4_sizeofStreamState | function | 2806 |
-| LZ4_slideInputBuffer | function | 2823 |
-| LZ4_stream_t_alignment | function | 1542 |
-| LZ4_uncompress | function | 2795 |
-| LZ4_uncompress_unknownOutputSize | function | 2799 |
-| LZ4_versionNumber | function | 749 |
-| LZ4_versionString | function | 750 |
-| LZ4_wildCopy32 | function | 522 |
-| LZ4_wildCopy8 | function | 465 |
-| LZ4_write16 | function | 382 |
-| LZ4_write16 | function | 397 |
-| LZ4_write16 | function | 417 |
-| LZ4_write32 | function | 383 |
-| LZ4_write32 | function | 398 |
-| LZ4_write32 | function | 422 |
-| LZ4_writeLE16 | function | 452 |
-| read_long_length_no_check | function | 1852 |
-| read_variable_length | function | 1979 |
-| MdCloseFile | function | 58 |
-| MdCreateFile | function | 8 |
-| MdFindFiles | function | 40 |
-| MdGetFileInformation | function | 25 |
-| MdReadFile | function | 50 |
-| wmain | function | 71 |
-| MinGetSecurityByName | function | 16 |
-| MinGetVolumeInfo | function | 6 |
-| wmain | function | 24 |
-| TDEFL_READ_UNALIGNED_WORD | function | 1412 |
-| TDEFL_READ_UNALIGNED_WORD2 | function | 1418 |
-| TDEFL_READ_UNALIGNED_WORD32 | function | 1528 |
-| miniz_def_alloc_func | function | 167 |
-| miniz_def_free_func | function | 172 |
-| miniz_def_realloc_func | function | 177 |
-| mz_adler32 | function | 40 |
-| mz_compress | function | 349 |
-| mz_compress2 | function | 319 |
-| mz_compressBound | function | 354 |
-| mz_crc32 | function | 95 |
-| mz_deflate | function | 242 |
-| mz_deflateBound | function | 312 |
-| mz_deflateEnd | function | 300 |
-| mz_deflateInit | function | 192 |
-| mz_deflateInit2 | function | 197 |
-| mz_deflateReset | function | 233 |
-| mz_error | function | 600 |
-| mz_file_read_func_stdio | function | 6852 |
-| mz_free | function | 162 |
-| mz_inflate | function | 439 |
-| mz_inflateEnd | function | 551 |
-| mz_inflateInit | function | 408 |
-| mz_inflateInit2 | function | 372 |
-| mz_inflateReset | function | 413 |
-| mz_uncompress | function | 593 |
-| mz_uncompress2 | function | 562 |
-| mz_version | function | 183 |
-| mz_write_le16 | function | 5643 |
-| mz_write_le32 | function | 5648 |
-| mz_write_le64 | function | 5655 |
-| mz_zip_add_mem_to_archive_file_in_place | function | 7463 |
-| mz_zip_add_mem_to_archive_file_in_place_v2 | function | 7468 |
-| mz_zip_array_clear | function | 3350 |
-| mz_zip_array_ensure_capacity | function | 3356 |
-| mz_zip_array_ensure_room | function | 3397 |
-| mz_zip_array_init | function | 3344 |
-| mz_zip_array_push_back | function | 3402 |
-| mz_zip_array_range_check | function | 3334 |
-| mz_zip_array_reserve | function | 3376 |
-| mz_zip_array_resize | function | 3386 |
-| mz_zip_clear_last_error | function | 7642 |
-| mz_zip_compute_crc32_callback | function | 5282 |
-| mz_zip_dos_to_time_t | function | 3413 |
-| mz_zip_end | function | 7814 |
-| mz_zip_extract_archive_file_to_heap | function | 7600 |
-| mz_zip_extract_archive_file_to_heap_v2 | function | 7561 |
-| mz_zip_file_read_func | function | 4018 |
-| mz_zip_file_stat_internal | function | 4221 |
-| mz_zip_file_write_callback | function | 5209 |
-| mz_zip_file_write_func | function | 5837 |
-| mz_zip_filename_compare | function | 4352 |
-| mz_zip_get_archive_file_start_offset | function | 7766 |
-| mz_zip_get_archive_size | function | 7759 |
-| mz_zip_get_cdh | function | 4132 |
-| mz_zip_get_central_dir_size | function | 7746 |
-| mz_zip_get_cfile | function | 7773 |
-| mz_zip_get_error_string | function | 7660 |
-| mz_zip_get_file_modified_time | function | 3451 |
-| mz_zip_get_last_error | function | 7647 |
-| mz_zip_get_mode | function | 7611 |
-| mz_zip_get_type | function | 7616 |
-| mz_zip_heap_write_func | function | 5665 |
-| mz_zip_is_zip64 | function | 7738 |
-| mz_zip_locate_file_binary_search | function | 4369 |
-| mz_zip_mem_read_func | function | 3975 |
-| mz_zip_peek_last_error | function | 7634 |
-| mz_zip_read_archive_data | function | 7780 |
-| mz_zip_reader_end | function | 3951 |
-| mz_zip_reader_end_internal | function | 3904 |
-| mz_zip_reader_extract_file_iter_new | function | 5038 |
-| mz_zip_reader_extract_file_to_callback | function | 4901 |
-| mz_zip_reader_extract_file_to_cfile | function | 5272 |
-| mz_zip_reader_extract_file_to_file | function | 5250 |
-| mz_zip_reader_extract_file_to_heap | function | 4689 |
-| mz_zip_reader_extract_file_to_mem | function | 4648 |
-| mz_zip_reader_extract_file_to_mem_no_alloc | function | 4635 |
-| mz_zip_reader_extract_iter_free | function | 5167 |
-| mz_zip_reader_extract_iter_new | function | 4910 |
-| mz_zip_reader_extract_iter_read | function | 5050 |
-| mz_zip_reader_extract_to_callback | function | 4701 |
-| mz_zip_reader_extract_to_cfile | function | 5259 |
-| mz_zip_reader_extract_to_file | function | 5216 |
-| mz_zip_reader_extract_to_heap | function | 4653 |
-| mz_zip_reader_extract_to_mem | function | 4643 |
-| mz_zip_reader_extract_to_mem_no_alloc | function | 4630 |
-| mz_zip_reader_extract_to_mem_no_alloc1 | function | 4484 |
-| mz_zip_reader_file_stat | function | 7809 |
-| mz_zip_reader_filename_less | function | 3519 |
-| mz_zip_reader_get_filename | function | 7788 |
-| mz_zip_reader_get_num_files | function | 7754 |
-| mz_zip_reader_init | function | 3955 |
-| mz_zip_reader_init_cfile | function | 4090 |
-| mz_zip_reader_init_file | function | 4031 |
-| mz_zip_reader_init_file_v2 | function | 4036 |
-| mz_zip_reader_init_internal | function | 3485 |
-| mz_zip_reader_init_mem | function | 3983 |
-| mz_zip_reader_is_file_a_directory | function | 4189 |
-| mz_zip_reader_is_file_encrypted | function | 4139 |
-| mz_zip_reader_is_file_supported | function | 4153 |
-| mz_zip_reader_locate_file | function | 4409 |
-| mz_zip_reader_locate_file_v2 | function | 4418 |
-| mz_zip_reader_locate_header_sig | function | 3600 |
-| mz_zip_reader_read_central_dir | function | 3646 |
-| mz_zip_reader_sort_central_dir_offsets_by_filename | function | 3548 |
-| mz_zip_set_error | function | 3478 |
-| mz_zip_set_file_times | function | 3465 |
-| mz_zip_set_last_error | function | 7621 |
-| mz_zip_string_equal | function | 4341 |
-| mz_zip_time_t_to_dos_time | function | 3428 |
-| mz_zip_validate_archive | function | 5505 |
-| mz_zip_validate_file | function | 5290 |
-| mz_zip_validate_file_archive | function | 5597 |
-| mz_zip_validate_mem_archive | function | 5555 |
-| mz_zip_writer_add_cfile | function | 6863 |
-| mz_zip_writer_add_file | function | 6870 |
-| mz_zip_writer_add_from_zip_reader | function | 6982 |
-| mz_zip_writer_add_mem | function | 6019 |
-| mz_zip_writer_add_mem_ex | function | 6198 |
-| mz_zip_writer_add_mem_ex_v2 | function | 6204 |
-| mz_zip_writer_add_put_buf_callback | function | 6031 |
-| mz_zip_writer_add_read_buf_callback | function | 6490 |
-| mz_zip_writer_add_to_central_dir | function | 6122 |
-| mz_zip_writer_compute_padding_needed_for_file_alignment | function | 6173 |
-| mz_zip_writer_create_central_dir_header | function | 6097 |
-| mz_zip_writer_create_local_dir_header | function | 6079 |
-| mz_zip_writer_create_zip64_extra_data | function | 6044 |
-| mz_zip_writer_end | function | 7457 |
-| mz_zip_writer_end_internal | function | 5703 |
-| mz_zip_writer_finalize_archive | function | 7344 |
-| mz_zip_writer_finalize_heap_archive | function | 7432 |
-| mz_zip_writer_init | function | 5798 |
-| mz_zip_writer_init_cfile | function | 5905 |
-| mz_zip_writer_init_file | function | 5853 |
-| mz_zip_writer_init_file_v2 | function | 5858 |
-| mz_zip_writer_init_from_reader | function | 6013 |
-| mz_zip_writer_init_from_reader_v2 | function | 5926 |
-| mz_zip_writer_init_heap | function | 5831 |
-| mz_zip_writer_init_heap_v2 | function | 5803 |
-| mz_zip_writer_init_v2 | function | 5749 |
-| mz_zip_writer_update_zip64_extension_block | function | 6902 |
-| mz_zip_writer_validate_archive_name | function | 6162 |
-| mz_zip_writer_write_zeros | function | 6182 |
-| mz_zip_zero_struct | function | 3898 |
-| tdefl_calculate_minimum_redundancy | function | 787 |
-| tdefl_compress | function | 1918 |
-| tdefl_compress_block | function | 1245 |
-| tdefl_compress_buffer | function | 1986 |
-| tdefl_compress_fast | function | 1537 |
-| tdefl_compress_lz_codes | function | 1102 |
-| tdefl_compress_lz_codes | function | 1197 |
-| tdefl_compress_mem_to_heap | function | 2085 |
-| tdefl_compress_mem_to_mem | function | 2100 |
-| tdefl_compress_mem_to_output | function | 2038 |
-| tdefl_compress_normal | function | 1752 |
-| tdefl_compressor_alloc | function | 2232 |
-| tdefl_compressor_free | function | 2237 |
-| tdefl_create_comp_flags_from_zip_params | function | 2116 |
-| tdefl_find_match | function | 1428 |
-| tdefl_find_match | function | 1481 |
-| tdefl_flush_block | function | 1256 |
-| tdefl_flush_output_buffer | function | 1897 |
-| tdefl_get_adler32 | function | 2033 |
-| tdefl_get_prev_return_status | function | 2028 |
-| tdefl_huffman_enforce_max_code_size | function | 847 |
-| tdefl_init | function | 1992 |
-| tdefl_optimize_huffman_table | function | 871 |
-| tdefl_output_buffer_putter | function | 2060 |
-| tdefl_radix_sort_syms | function | 753 |
-| tdefl_record_literal | function | 1711 |
-| tdefl_record_match | function | 1724 |
-| tdefl_start_dynamic_block | function | 990 |
-| tdefl_start_static_block | function | 1077 |
-| tdefl_write_image_to_png_file_in_memory | function | 2222 |
-| tdefl_write_image_to_png_file_in_memory_ex | function | 2144 |
-| tinfl_clear_tree | function | 2427 |
-| tinfl_decompress | function | 2437 |
-| tinfl_decompress_mem_to_callback | function | 2971 |
-| tinfl_decompress_mem_to_heap | function | 2924 |
-| tinfl_decompress_mem_to_mem | function | 2962 |
-| tinfl_decompressor_alloc | function | 3002 |
-| tinfl_decompressor_free | function | 3010 |
-| div_ceil | function | 58 |
-| gen_uuid | function | 39 |
-| main | function | 60 |
-| main | function | 47 |
-| mkname | function | 38 |
-| ok | function | 31 |
-| main | function | 8 |
-| main | function | 24 |
-| read_file | function | 11 |
-| apply_filters | function | 81 |
-| chunk_crc | function | 69 |
-| pngx_build_recipe | function | 244 |
-| pngx_chunk_append | function | 41 |
-| pngx_extract | function | 121 |
-| pngx_free | function | 488 |
-| pngx_parse_recipe | function | 281 |
-| pngx_rebuild | function | 428 |
-| pngx_refilter | function | 376 |
-| rd16 | function | 35 |
-| rd32 | function | 31 |
-| wr16 | function | 37 |
-| wr32 | function | 33 |
-| wr32v | function | 29 |
-| main | function | 57 |
-| scan | function | 23 |
-| main | function | 5 |
-| main | function | 5 |
-| main | function | 5 |
-| algo_name | function | 35 |
-| main | function | 48 |
-| draw_bar | function | 53 |
-| enable_ansi | function | 33 |
-| fent_find | function | 126 |
-| fent_hash | function | 117 |
-| fent_insert | function | 136 |
-| human | function | 105 |
-| main | function | 160 |
-| zone_name | function | 43 |
-| wmain | function | 4 |
-| dedup_cmp | function | 130 |
-| hms | function | 99 |
-| human | function | 87 |
-| is_dir_anchor | function | 71 |
-| main | function | 369 |
-| now_ms | function | 76 |
-| on_ctrl | function | 55 |
-| scan_read | function | 293 |
-| shortname | function | 112 |
-| sweep_dedupe | function | 141 |
-| sweep_survey | function | 320 |
-| tarx_build_recipe | function | 163 |
-| tarx_check_checksum | function | 83 |
-| tarx_extract | function | 101 |
-| tarx_parse_recipe | function | 198 |
-| tarx_parse_size | function | 67 |
-| tarx_rd16 | function | 56 |
-| tarx_rd64 | function | 44 |
-| tarx_rebuild | function | 243 |
-| tarx_recipe_num_parts | function | 235 |
-| tarx_wr16 | function | 61 |
-| tarx_wr64 | function | 51 |
-| main | function | 4 |
-| main | function | 124 |
-| now_ms | function | 29 |
-| slurp | function | 39 |
-| walk | function | 59 |
-| err | function | 26 |
-| fail | function | 36 |
-| main | function | 38 |
-| algo_is_whole_file | function | 3648 |
-| alloc_blocks | function | 1232 |
-| alloc_raw_or_shadow | function | 1315 |
-| alloc_state_reset | function | 4252 |
-| bit_clr | function | 546 |
-| bit_get | function | 266 |
-| bit_set | function | 545 |
-| bm_dirty | function | 550 |
-| dirent_cmp | function | 2117 |
-| flac_bits_per_sample | function | 4559 |
-| fsck_rebuild_one | function | 854 |
-| idx_bump_dirs | function | 426 |
-| idx_clear | function | 281 |
-| idx_del | function | 499 |
-| idx_dir_count | function | 528 |
-| idx_dir_live | function | 540 |
-| idx_get | function | 516 |
-| idx_get_id | function | 412 |
-| idx_grow_dirs | function | 331 |
-| idx_grow_ids | function | 372 |
-| idx_grow_names | function | 312 |
-| idx_hash | function | 270 |
-| idx_init | function | 350 |
-| idx_mix | function | 365 |
-| idx_put | function | 465 |
-| idx_put_id | function | 393 |
-| invfs_ape_compress | function | 4571 |
-| invfs_ape_decompress | function | 4623 |
-| invfs_ape_to_wav | function | 4671 |
-| invfs_jxl_compress | function | 4339 |
-| invfs_jxl_decompress | function | 4382 |
-| invfs_pmp_compress | function | 4493 |
-| invfs_pmp_decompress | function | 4525 |
-| invfs_png_from_jxl | function | 5105 |
-| jxl_tool | function | 5188 |
-| l2p_remove | function | 1418 |
-| mz_tdefl_compress | function | 5153 |
-| name_too_long | function | 229 |
-| name_too_long_for_children | function | 249 |
-| png_inflate | function | 5166 |
-| rec_set_name | function | 257 |
-| rename_one | function | 4080 |
-| run_ffmpeg | function | 4303 |
-| run_packmp3 | function | 4438 |
-| run_tool | function | 4269 |
-| slurp_file | function | 4476 |
-| sweep_unwind | function | 2872 |
-| vol_arc_stats | function | 836 |
-| vol_bitmap | function | 2739 |
-| vol_close | function | 801 |
-| vol_count_free | function | 4231 |
-| vol_create_ape_file | function | 5530 |
-| vol_create_blob_file | function | 5406 |
-| vol_create_container_file | function | 1768 |
-| vol_create_file | function | 1480 |
-| vol_create_flac_file | function | 4722 |
-| vol_create_gz_file | function | 4934 |
-| vol_create_jxl_file | function | 5523 |
-| vol_create_pmp_file | function | 5537 |
-| vol_create_png_file | function | 5200 |
-| vol_create_tar_file | function | 4839 |
-| vol_delete_file | function | 4046 |
-| vol_delete_inode | function | 3939 |
-| vol_delete_siblings | function | 3955 |
-| vol_deserialize_children | function | 1731 |
-| vol_ensure_path | function | 2100 |
-| vol_find | function | 2044 |
-| vol_flush | function | 1094 |
-| vol_free_blocks | function | 2841 |
-| vol_free_blocks_cached | function | 2830 |
-| vol_fsck_scan | function | 918 |
-| vol_get_children | function | 1992 |
-| vol_inode_area_end | function | 2753 |
-| vol_inode_area_free | function | 2761 |
-| vol_inode_area_pos | function | 2751 |
-| vol_inode_area_start | function | 2752 |
-| vol_inode_first_zone | function | 3301 |
-| vol_inode_next | function | 2767 |
-| vol_is_dir | function | 2057 |
-| vol_journal_pos | function | 2754 |
-| vol_l2p | function | 2745 |
-| vol_l2p_remove | function | 1437 |
-| vol_list_dir | function | 2124 |
-| vol_lookup | function | 1394 |
-| vol_lookup_entry | function | 1401 |
-| vol_map | function | 1345 |
-| vol_mark_dirty | function | 1208 |
-| vol_mark_pending | function | 3262 |
-| vol_mkdir | function | 2070 |
-| vol_name_count | function | 3636 |
-| vol_needs_recovery | function | 1226 |
-| vol_open | function | 568 |
-| vol_pending_count | function | 3289 |
-| vol_pre_record | function | 1220 |
-| vol_read_block | function | 1443 |
-| vol_read_file | function | 2729 |
-| vol_read_inode | function | 2231 |
-| vol_read_named | function | 3541 |
-| vol_read_range | function | 3656 |
-| vol_read_raw | function | 2803 |
-| vol_rename | function | 4153 |
-| vol_replace_file | function | 4028 |
-| vol_retire_inode | function | 3864 |
-| vol_rmdir | function | 2081 |
-| vol_sb | function | 2734 |
-| vol_serialize_children | function | 1702 |
-| vol_set_readonly | function | 2823 |
-| vol_stat | function | 3603 |
-| vol_stat_full | function | 3613 |
-| vol_sweep_file | function | 2917 |
-| vol_sweep_one | function | 3330 |
-| vol_sweep_pending | function | 3460 |
-| vol_transcode_abort | function | 4004 |
-| vol_unlink | function | 4058 |
-| vol_unmark_pending | function | 3277 |
-| vol_write_enabled | function | 2812 |
-| vol_write_guard | function | 2836 |
-| vol_write_raw | function | 1330 |
-| vol_write_sb | function | 1085 |
-| vol_zip_extract_member | function | 3503 |
-| vol_zip_parse_children | function | 1927 |
-| write_segment_blocks | function | 1465 |
-| zone_count_free | function | 4243 |
-| InvFspClose | function | 183 |
-| InvFspGetFileInfo | function | 189 |
-| InvFspGetSecurityByName | function | 137 |
-| InvFspGetVolumeInfo | function | 120 |
-| InvFspOpen | function | 161 |
-| InvFspRead | function | 206 |
-| InvFspReadDirectory | function | 224 |
-| build_file_table | function | 59 |
-| fill_file_info | function | 100 |
-| fill_root_info | function | 112 |
-| find_entry | function | 49 |
-| init_interface | function | 259 |
-| usage | function | 272 |
-| utf16_to_utf8 | function | 44 |
-| utf8_to_utf16 | function | 39 |
-| wmain | function | 279 |
-| find_inode | function | 123 |
-| main | function | 134 |
-| member_data | function | 80 |
-| rd16 | function | 38 |
-| rd32 | function | 35 |
-| vol_close | function | 120 |
-| vol_find | function | 118 |
-| vol_open | function | 115 |
-| vol_read_file | function | 116 |
-| vol_stat | function | 119 |
-| zip_parse | function | 43 |
+Generated by tools/gen_impl_docs.sh — do not edit by hand.
+
+| symbol | kind | line | file |
+|---|---|---|---|
+| Z7_C_IFACE_DECL | function | 328 | 7zTypes.h |
+| Z7_C_IFACE_DECL | function | 335 | 7zTypes.h |
+| Z7_C_IFACE_DECL | function | 342 | 7zTypes.h |
+| Z7_C_IFACE_DECL | function | 358 | 7zTypes.h |
+| Z7_C_IFACE_DECL | function | 374 | 7zTypes.h |
+| Z7_C_IFACE_DECL | function | 383 | 7zTypes.h |
+| Z7_C_IFACE_DECL | function | 447 | 7zTypes.h |
+| arc_clear | function | 347 | arc.c |
+| arc_create | function | 169 | arc.c |
+| arc_destroy | function | 184 | arc.c |
+| arc_get | function | 196 | arc.c |
+| arc_hash | function | 62 | arc.c |
+| arc_invalidate | function | 335 | arc.c |
+| arc_put | function | 256 | arc.c |
+| arc_replace | function | 219 | arc.c |
+| arc_stats | function | 364 | arc.c |
+| arc_trim_ghosts | function | 247 | arc.c |
+| ht_find | function | 73 | arc.c |
+| ht_grow | function | 96 | arc.c |
+| ht_insert | function | 80 | arc.c |
+| ht_remove | function | 88 | arc.c |
+| list_of | function | 138 | arc.c |
+| lst_push_mru | function | 127 | arc.c |
+| lst_unlink | function | 118 | arc.c |
+| move_to | function | 149 | arc.c |
+| node_free | function | 158 | arc.c |
+| blob | function | 45 | arctest.c |
+| blob_ok | function | 55 | arctest.c |
+| check_invariants | function | 65 | arctest.c |
+| main | function | 87 | arctest.c |
+| ok | function | 34 | arctest.c |
+| bcj_get32 | function | 21 | bcj_x86.c |
+| bcj_put32 | function | 22 | bcj_x86.c |
+| bcj_x86_conv | function | 31 | bcj_x86.c |
+| invfs_bcj_x86_dec | function | 146 | bcj_x86.c |
+| invfs_bcj_x86_enc | function | 140 | bcj_x86.c |
+| main | function | 28 | bench.c |
+| now_ms | function | 19 | bench.c |
+| blake3_compress_subtree_wide | function | 269 | blake3.c |
+| blake3_hasher_finalize | function | 599 | blake3.c |
+| blake3_hasher_finalize_seek | function | 604 | blake3.c |
+| blake3_hasher_init | function | 390 | blake3.c |
+| blake3_hasher_init_derive_key | function | 411 | blake3.c |
+| blake3_hasher_init_derive_key_raw | function | 399 | blake3.c |
+| blake3_hasher_init_keyed | function | 392 | blake3.c |
+| blake3_hasher_reset | function | 648 | blake3.c |
+| blake3_hasher_update | function | 585 | blake3.c |
+| blake3_hasher_update_base | function | 476 | blake3.c |
+| blake3_hasher_update_tbb | function | 592 | blake3.c |
+| blake3_version | function | 9 | blake3.c |
+| chunk_state_fill_buf | function | 35 | blake3.c |
+| chunk_state_init | function | 11 | blake3.c |
+| chunk_state_len | function | 30 | blake3.c |
+| chunk_state_maybe_start_flag | function | 47 | blake3.c |
+| chunk_state_output | function | 147 | blake3.c |
+| chunk_state_reset | function | 21 | blake3.c |
+| chunk_state_update | function | 119 | blake3.c |
+| compress_chunks_parallel | function | 173 | blake3.c |
+| compress_parents_parallel | function | 217 | blake3.c |
+| compress_subtree_to_parent_node | function | 350 | blake3.c |
+| hasher_init_base | function | 383 | blake3.c |
+| hasher_merge_cv_stack | function | 425 | blake3.c |
+| hasher_push_cv | function | 468 | blake3.c |
+| left_subtree_len | function | 162 | blake3.c |
+| make_output | function | 63 | blake3.c |
+| output_chaining_value | function | 82 | blake3.c |
+| output_root_bytes | function | 90 | blake3.c |
+| parent_output | function | 154 | blake3.c |
+| blake3_compress_in_place | function | 168 | blake3_dispatch.c |
+| blake3_compress_xof | function | 197 | blake3_dispatch.c |
+| blake3_hash_many | function | 250 | blake3_dispatch.c |
+| blake3_simd_degree | function | 303 | blake3_dispatch.c |
+| blake3_xof_many | function | 227 | blake3_dispatch.c |
+| cpuid | function | 60 | blake3_dispatch.c |
+| cpuidex | function | 76 | blake3_dispatch.c |
+| get_cpu_features | function | 114 | blake3_dispatch.c |
+| xgetbv | function | 50 | blake3_dispatch.c |
+| counter_high | function | 153 | blake3_impl.h |
+| counter_low | function | 151 | blake3_impl.h |
+| highest_one | function | 102 | blake3_impl.h |
+| load32 | function | 157 | blake3_impl.h |
+| load_block_words | function | 175 | blake3_impl.h |
+| load_key_words | function | 163 | blake3_impl.h |
+| popcnt | function | 132 | blake3_impl.h |
+| round_down_to_power_of_2 | function | 147 | blake3_impl.h |
+| store32 | function | 182 | blake3_impl.h |
+| store_cv_words | function | 190 | blake3_impl.h |
+| blake3_compress_in_place_portable | function | 84 | blake3_portable.c |
+| blake3_compress_xof_portable | function | 100 | blake3_portable.c |
+| blake3_hash_many_portable | function | 145 | blake3_portable.c |
+| compress_pre | function | 37 | blake3_portable.c |
+| g | function | 8 | blake3_portable.c |
+| hash_one_portable | function | 125 | blake3_portable.c |
+| rotr32 | function | 4 | blake3_portable.c |
+| round_fn | function | 20 | blake3_portable.c |
+| blkio_capacity | function | 605 | blkio.c |
+| blkio_chsize | function | 580 | blkio.c |
+| blkio_close | function | 345 | blkio.c |
+| blkio_flush | function | 608 | blkio.c |
+| blkio_is_device | function | 606 | blkio.c |
+| blkio_looks_like_device | function | 31 | blkio.c |
+| blkio_normalize | function | 61 | blkio.c |
+| blkio_open | function | 199 | blkio.c |
+| blkio_pread | function | 542 | blkio.c |
+| blkio_pwrite | function | 550 | blkio.c |
+| blkio_read | function | 564 | blkio.c |
+| blkio_seek | function | 558 | blkio.c |
+| blkio_strerror | function | 83 | blkio.c |
+| blkio_write | function | 572 | blkio.c |
+| dev_geometry | function | 136 | blkio.c |
+| dev_lock | function | 175 | blkio.c |
+| dev_path_allowed | function | 106 | blkio.c |
+| dev_pread | function | 438 | blkio.c |
+| dev_pwrite | function | 476 | blkio.c |
+| raw_pread | function | 381 | blkio.c |
+| raw_pwrite | function | 406 | blkio.c |
+| main | function | 39 | blkio_test.c |
+| ok | function | 27 | blkio_test.c |
+| pat | function | 37 | blkio_test.c |
+| main | function | 23 | cat.c |
+| content_is_text | function | 130 | codec.c |
+| dir_has_tool | function | 519 | codec.c |
+| executable | function | 513 | codec.c |
+| ext_eq | function | 117 | codec.c |
+| hex_nib | function | 374 | codec.c |
+| invfs_binary_family | function | 184 | codec.c |
+| invfs_codec_all | function | 1291 | codec.c |
+| invfs_codec_by_algo | function | 1282 | codec.c |
+| invfs_codec_pack_def | function | 1271 | codec.c |
+| invfs_codec_probe_reset | function | 997 | codec.c |
+| invfs_profile_generic_algo | function | 1347 | codec.c |
+| invfs_profile_name | function | 1323 | codec.c |
+| invfs_profile_parse | function | 1314 | codec.c |
+| invfs_profile_zstd_level | function | 1335 | codec.c |
+| invfs_registry_generation | function | 1298 | codec.c |
+| invfs_text_family | function | 145 | codec.c |
+| list_has_tool | function | 531 | codec.c |
+| lz4c_decode | function | 57 | codec.c |
+| lz4c_encode | function | 45 | codec.c |
+| magic_at | function | 232 | codec.c |
+| manifest_tool_ok | function | 556 | codec.c |
+| none_decode | function | 35 | codec.c |
+| none_encode | function | 26 | codec.c |
+| on_path | function | 546 | codec.c |
+| pack_buffer_io | function | 861 | codec.c |
+| pack_decode_io | function | 891 | codec.c |
+| pack_entry_free | function | 965 | codec.c |
+| pack_probe_impl | function | 780 | codec.c |
+| pack_register | function | 1072 | codec.c |
+| pack_scan_all | function | 1226 | codec.c |
+| pack_scan_dir | function | 1194 | codec.c |
+| pack_slurp | function | 843 | codec.c |
+| pack_sniff_impl | function | 729 | codec.c |
+| pack_strdup | function | 957 | codec.c |
+| pack_tmpdir | function | 822 | codec.c |
+| pack_tool_resolvable | function | 766 | codec.c |
+| pack_write | function | 835 | codec.c |
+| packs_ensure | function | 1246 | codec.c |
+| parse_caps | function | 396 | codec.c |
+| parse_hex_bytes | function | 383 | codec.c |
+| parse_manifest | function | 428 | codec.c |
+| probe_ape | function | 1010 | codec.c |
+| probe_cached | function | 983 | codec.c |
+| probe_external | function | 661 | codec.c |
+| probe_jxl | function | 1009 | codec.c |
+| probe_pack_dir | function | 594 | codec.c |
+| probe_pmp | function | 1008 | codec.c |
+| probe_wv | function | 1011 | codec.c |
+| sniff_ape | function | 297 | codec.c |
+| sniff_exer | function | 316 | codec.c |
+| sniff_flacr | function | 267 | codec.c |
+| sniff_gzr | function | 253 | codec.c |
+| sniff_jxl | function | 283 | codec.c |
+| sniff_pmp | function | 274 | codec.c |
+| sniff_pngr | function | 260 | codec.c |
+| sniff_ppmd | function | 164 | codec.c |
+| sniff_tarr | function | 246 | codec.c |
+| sniff_wv | function | 304 | codec.c |
+| sniff_zip | function | 239 | codec.c |
+| str_copy | function | 366 | codec.c |
+| tool_self_describes | function | 620 | codec.c |
+| zstdc_decode | function | 76 | codec.c |
+| zstdc_encode | function | 67 | codec.c |
+| fill_text | function | 408 | codec_test.c |
+| invfs_codec_pack_estimate | function | 75 | codec_test.c |
+| invfs_codec_pack_exec | function | 39 | codec_test.c |
+| main | function | 937 | codec_test.c |
+| ok | function | 88 | codec_test.c |
+| subst_token | function | 31 | codec_test.c |
+| test_bcj | function | 345 | codec_test.c |
+| test_binary_family | function | 247 | codec_test.c |
+| test_packs | function | 597 | codec_test.c |
+| test_probe | function | 502 | codec_test.c |
+| test_profiles | function | 890 | codec_test.c |
+| test_registry | function | 99 | codec_test.c |
+| test_roundtrips | function | 428 | codec_test.c |
+| test_sniff | function | 145 | codec_test.c |
+| test_text_family | function | 211 | codec_test.c |
+| write_file | function | 492 | codec_test.c |
+| main | function | 32 | cp.c |
+| read_file | function | 15 | cp.c |
+| crc32c_init | function | 10 | crc32c.c |
+| invfs_crc32c | function | 23 | crc32c.c |
+| invfs_crc32c_update | function | 37 | crc32c.c |
+| enumerate_dir | function | 12 | devlist.c |
+| wmain | function | 44 | devlist.c |
+| wmain | function | 3 | devtest10.c |
+| wmain | function | 3 | devtest11.c |
+| wmain | function | 3 | devtest12.c |
+| wmain | function | 3 | devtest13.c |
+| wmain | function | 3 | devtest2.c |
+| wmain | function | 3 | devtest3.c |
+| wmain | function | 3 | devtest4.c |
+| wmain | function | 5 | devtest5.c |
+| wmain | function | 3 | devtest6.c |
+| wmain | function | 3 | devtest7.c |
+| open_it | function | 3 | devtest8.c |
+| wmain | function | 9 | devtest8.c |
+| nt_open | function | 5 | devtest9.c |
+| wmain | function | 18 | devtest9.c |
+| wmain | function | 3 | devtest.c |
+| main | function | 88 | devwbench.c |
+| now_ms | function | 31 | devwbench.c |
+| run | function | 39 | devwbench.c |
+| DkCleanup | function | 867 | dokan_fs.c |
+| DkCloseFile | function | 905 | dokan_fs.c |
+| DkDeleteDirectory | function | 836 | dokan_fs.c |
+| DkDeleteFile | function | 813 | dokan_fs.c |
+| DkFindFiles | function | 453 | dokan_fs.c |
+| DkFindFilesWithPattern | function | 1085 | dokan_fs.c |
+| DkFlushFileBuffers | function | 680 | dokan_fs.c |
+| DkGetDiskFreeSpace | function | 1038 | dokan_fs.c |
+| DkGetFileInformation | function | 343 | dokan_fs.c |
+| DkGetVolumeInformation | function | 1053 | dokan_fs.c |
+| DkMounted | function | 1017 | dokan_fs.c |
+| DkMoveFile | function | 755 | dokan_fs.c |
+| DkReadFile | function | 526 | dokan_fs.c |
+| DkSetAllocationSize | function | 710 | dokan_fs.c |
+| DkSetEndOfFile | function | 739 | dokan_fs.c |
+| DkSetFileAttributes | function | 746 | dokan_fs.c |
+| DkSetFileTime | function | 859 | dokan_fs.c |
+| DkUnmounted | function | 1026 | dokan_fs.c |
+| DkWriteFile | function | 595 | dokan_fs.c |
+| DkZwCreateFile | function | 223 | dokan_fs.c |
+| cleanup_impl | function | 874 | dokan_fs.c |
+| close_file_impl | function | 912 | dokan_fs.c |
+| create_file_impl | function | 234 | dokan_fs.c |
+| ctx_alloc | function | 199 | dokan_fs.c |
+| ctx_free | function | 212 | dokan_fs.c |
+| find_files_impl | function | 462 | dokan_fs.c |
+| getinfo_impl | function | 352 | dokan_fs.c |
+| lookup_entry | function | 162 | dokan_fs.c |
+| path_to_utf8 | function | 141 | dokan_fs.c |
+| prof_now | function | 63 | dokan_fs.c |
+| prof_tick | function | 97 | dokan_fs.c |
+| read_file_impl | function | 535 | dokan_fs.c |
+| rebuild_table_locked | function | 159 | dokan_fs.c |
+| stop_sweep_thread | function | 1001 | dokan_fs.c |
+| sweep_thread | function | 966 | dokan_fs.c |
+| utf16_to_utf8 | function | 131 | dokan_fs.c |
+| wmain | function | 1186 | dokan_fs.c |
+| write_file_impl | function | 604 | dokan_fs.c |
+| main | function | 7 | enospctest.c |
+| br_get | function | 42 | flacx.c |
+| bw_align | function | 115 | flacx.c |
+| bw_free | function | 64 | flacx.c |
+| bw_grow | function | 65 | flacx.c |
+| bw_init | function | 63 | flacx.c |
+| bw_put | function | 76 | flacx.c |
+| bw_size | function | 119 | flacx.c |
+| bw_zeros | function | 93 | flacx.c |
+| crc16 | function | 132 | flacx.c |
+| crc8 | function | 122 | flacx.c |
+| flacx_extract | function | 467 | flacx.c |
+| flacx_rebuild | function | 754 | flacx.c |
+| flacx_recipe_num_covers | function | 679 | flacx.c |
+| frame_channels | function | 154 | flacx.c |
+| main | function | 1046 | flacx.c |
+| parse_frame | function | 307 | flacx.c |
+| put_utf8 | function | 696 | flacx.c |
+| rd16 | function | 149 | flacx.c |
+| rd32 | function | 150 | flacx.c |
+| rd64 | function | 151 | flacx.c |
+| rd8 | function | 148 | flacx.c |
+| read_file | function | 291 | flacx.c |
+| read_utf8 | function | 272 | flacx.c |
+| read_wav | function | 261 | flacx.c |
+| read_wav_mem | function | 212 | flacx.c |
+| sub_bps | function | 162 | flacx.c |
+| unzigzag | function | 693 | flacx.c |
+| wr16 | function | 145 | flacx.c |
+| wr32 | function | 146 | flacx.c |
+| wr64 | function | 147 | flacx.c |
+| wr8 | function | 144 | flacx.c |
+| write_residuals | function | 708 | flacx.c |
+| zigzag64 | function | 694 | flacx.c |
+| main | function | 25 | fsck.c |
+| wmain | function | 4 | fspctl_test2.c |
+| wmain | function | 4 | fspctl_test.c |
+| build_file_table | function | 112 | fuse_fs.c |
+| cmp_entry_key | function | 107 | fuse_fs.c |
+| cmp_entry_name_pos | function | 97 | fuse_fs.c |
+| cmp_entry_pos | function | 89 | fuse_fs.c |
+| commit_wctx | function | 956 | fuse_fs.c |
+| dirty_add_locked | function | 593 | fuse_fs.c |
+| dirty_del_locked | function | 602 | fuse_fs.c |
+| dirty_find_locked | function | 611 | fuse_fs.c |
+| fill_stat_from_meta | function | 392 | fuse_fs.c |
+| find_entry | function | 224 | fuse_fs.c |
+| fuse_sweep_thread | function | 908 | fuse_fs.c |
+| invf_access | function | 1094 | fuse_fs.c |
+| invf_chmod | function | 1201 | fuse_fs.c |
+| invf_chown | function | 1210 | fuse_fs.c |
+| invf_create | function | 742 | fuse_fs.c |
+| invf_destroy | function | 1496 | fuse_fs.c |
+| invf_flush | function | 998 | fuse_fs.c |
+| invf_fsync | function | 1005 | fuse_fs.c |
+| invf_getattr | function | 447 | fuse_fs.c |
+| invf_getxattr | function | 1338 | fuse_fs.c |
+| invf_init | function | 1553 | fuse_fs.c |
+| invf_link | function | 1271 | fuse_fs.c |
+| invf_listxattr | function | 1456 | fuse_fs.c |
+| invf_mkdir | function | 524 | fuse_fs.c |
+| invf_mknod | function | 1306 | fuse_fs.c |
+| invf_open | function | 696 | fuse_fs.c |
+| invf_read | function | 652 | fuse_fs.c |
+| invf_readdir | function | 485 | fuse_fs.c |
+| invf_readlink | function | 1257 | fuse_fs.c |
+| invf_release | function | 1021 | fuse_fs.c |
+| invf_removexattr | function | 1477 | fuse_fs.c |
+| invf_rename | function | 1039 | fuse_fs.c |
+| invf_rmdir | function | 555 | fuse_fs.c |
+| invf_setxattr | function | 1423 | fuse_fs.c |
+| invf_statfs | function | 1070 | fuse_fs.c |
+| invf_sweep_worker | function | 875 | fuse_fs.c |
+| invf_symlink | function | 1226 | fuse_fs.c |
+| invf_truncate | function | 1157 | fuse_fs.c |
+| invf_unlink | function | 1509 | fuse_fs.c |
+| invf_utimens | function | 1190 | fuse_fs.c |
+| invf_write | function | 791 | fuse_fs.c |
+| is_anchor_name | function | 326 | fuse_fs.c |
+| main | function | 1642 | fuse_fs.c |
+| meta_apply_patch | function | 421 | fuse_fs.c |
+| meta_defaults | function | 332 | fuse_fs.c |
+| meta_for_path | function | 351 | fuse_fs.c |
+| on_sweep_signal | function | 864 | fuse_fs.c |
+| parse_size_opt | function | 1619 | fuse_fs.c |
+| resize_volume_file | function | 1127 | fuse_fs.c |
+| snapshot_entry | function | 297 | fuse_fs.c |
+| table_mark_stale | function | 46 | fuse_fs.c |
+| table_rebuild_locked | function | 688 | fuse_fs.c |
+| table_refresh_if_stale_locked | function | 67 | fuse_fs.c |
+| table_remove_name | function | 267 | fuse_fs.c |
+| table_sync_one | function | 51 | fuse_fs.c |
+| table_sync_one_locked | function | 283 | fuse_fs.c |
+| table_upsert_locked | function | 235 | fuse_fs.c |
+| wctx_ensure_ws_locked | function | 635 | fuse_fs.c |
+| wctx_flush_tail_locked | function | 622 | fuse_fs.c |
+| gen_name | function | 213 | fuzz_invfs.c |
+| gen_printable | function | 150 | fuzz_invfs.c |
+| gen_random | function | 144 | fuzz_invfs.c |
+| gen_structured | function | 161 | fuzz_invfs.c |
+| get_le32 | function | 1228 | fuzz_invfs.c |
+| get_le64 | function | 1221 | fuzz_invfs.c |
+| invfs_codec_pack_estimate | function | 78 | fuzz_invfs.c |
+| invfs_codec_pack_exec | function | 71 | fuzz_invfs.c |
+| leg_bcj | function | 1144 | fuzz_invfs.c |
+| leg_classifier | function | 361 | fuzz_invfs.c |
+| leg_done | function | 135 | fuzz_invfs.c |
+| leg_fail | function | 113 | fuzz_invfs.c |
+| leg_manifest | function | 733 | fuzz_invfs.c |
+| leg_mrmp | function | 1407 | fuzz_invfs.c |
+| leg_now | function | 128 | fuzz_invfs.c |
+| leg_ppmd | function | 1030 | fuzz_invfs.c |
+| leg_sniff | function | 265 | fuzz_invfs.c |
+| main | function | 1560 | fuzz_invfs.c |
+| mf_algo_is_static | function | 665 | fuzz_invfs.c |
+| mf_entry_consistent | function | 696 | fuzz_invfs.c |
+| mf_generate | function | 502 | fuzz_invfs.c |
+| mf_hex | function | 491 | fuzz_invfs.c |
+| mf_line | function | 475 | fuzz_invfs.c |
+| mf_new_entries | function | 680 | fuzz_invfs.c |
+| mf_render | function | 638 | fuzz_invfs.c |
+| mf_required_key | function | 721 | fuzz_invfs.c |
+| mf_write | function | 656 | fuzz_invfs.c |
+| mrmp_check | function | 1392 | fuzz_invfs.c |
+| mrmp_find | function | 1265 | fuzz_invfs.c |
+| mrmp_generate | function | 1316 | fuzz_invfs.c |
+| mrmp_parse | function | 1237 | fuzz_invfs.c |
+| mrmp_serialize | function | 1373 | fuzz_invfs.c |
+| mrmp_validate | function | 1275 | fuzz_invfs.c |
+| put_le32 | function | 1219 | fuzz_invfs.c |
+| put_le64 | function | 1217 | fuzz_invfs.c |
+| xr_below | function | 99 | fuzz_invfs.c |
+| xr_next | function | 89 | fuzz_invfs.c |
+| main | function | 28 | gzrepro.c |
+| read_file | function | 15 | gzrepro.c |
+| main | function | 5 | jxltest.c |
+| ls_find | function | 28 | ls.c |
+| ls_hash | function | 20 | ls.c |
+| ls_insert | function | 39 | ls.c |
+| main | function | 76 | ls.c |
+| LZ4_NbCommonBytes | function | 579 | lz4.c |
+| LZ4_attach_dictionary | function | 1658 | lz4.c |
+| LZ4_clearHash | function | 808 | lz4.c |
+| LZ4_compress | function | 2768 | lz4.c |
+| LZ4_compressBound | function | 751 | lz4.c |
+| LZ4_compress_continue | function | 2784 | lz4.c |
+| LZ4_compress_default | function | 1472 | lz4.c |
+| LZ4_compress_destSize | function | 1506 | lz4.c |
+| LZ4_compress_destSize_extState | function | 1497 | lz4.c |
+| LZ4_compress_destSize_extState_internal | function | 1481 | lz4.c |
+| LZ4_compress_fast | function | 1453 | lz4.c |
+| LZ4_compress_fast_continue | function | 1707 | lz4.c |
+| LZ4_compress_fast_extState | function | 1382 | lz4.c |
+| LZ4_compress_fast_extState_fastReset | function | 1414 | lz4.c |
+| LZ4_compress_forceExtDict | function | 1787 | lz4.c |
+| LZ4_compress_generic | function | 1344 | lz4.c |
+| LZ4_compress_generic_validated | function | 930 | lz4.c |
+| LZ4_compress_limitedOutput | function | 2764 | lz4.c |
+| LZ4_compress_limitedOutput_continue | function | 2780 | lz4.c |
+| LZ4_compress_limitedOutput_withState | function | 2772 | lz4.c |
+| LZ4_compress_withState | function | 2776 | lz4.c |
+| LZ4_count | function | 680 | lz4.c |
+| LZ4_create | function | 2816 | lz4.c |
+| LZ4_createStream | function | 1531 | lz4.c |
+| LZ4_createStreamDecode | function | 2569 | lz4.c |
+| LZ4_decoderRingBufferSize | function | 2615 | lz4.c |
+| LZ4_decompress_fast | function | 2468 | lz4.c |
+| LZ4_decompress_fast_continue | function | 2671 | lz4.c |
+| LZ4_decompress_fast_extDict | function | 2545 | lz4.c |
+| LZ4_decompress_fast_usingDict | function | 2749 | lz4.c |
+| LZ4_decompress_fast_withPrefix64k | function | 2496 | lz4.c |
+| LZ4_decompress_generic | function | 2023 | lz4.c |
+| LZ4_decompress_safe | function | 2451 | lz4.c |
+| LZ4_decompress_safe_continue | function | 2631 | lz4.c |
+| LZ4_decompress_safe_doubleDict | function | 2558 | lz4.c |
+| LZ4_decompress_safe_forceExtDict | function | 2523 | lz4.c |
+| LZ4_decompress_safe_partial | function | 2459 | lz4.c |
+| LZ4_decompress_safe_partial_forceExtDict | function | 2534 | lz4.c |
+| LZ4_decompress_safe_partial_usingDict | function | 2734 | lz4.c |
+| LZ4_decompress_safe_partial_withPrefix64k | function | 2487 | lz4.c |
+| LZ4_decompress_safe_partial_withSmallPrefix | function | 2513 | lz4.c |
+| LZ4_decompress_safe_usingDict | function | 2719 | lz4.c |
+| LZ4_decompress_safe_withPrefix64k | function | 2479 | lz4.c |
+| LZ4_decompress_safe_withSmallPrefix | function | 2504 | lz4.c |
+| LZ4_decompress_unsafe_generic | function | 1870 | lz4.c |
+| LZ4_freeStream | function | 1575 | lz4.c |
+| LZ4_freeStreamDecode | function | 2575 | lz4.c |
+| LZ4_getIndexOnHash | function | 853 | lz4.c |
+| LZ4_getPosition | function | 876 | lz4.c |
+| LZ4_getPositionOnHash | function | 869 | lz4.c |
+| LZ4_hash4 | function | 777 | lz4.c |
+| LZ4_hash5 | function | 785 | lz4.c |
+| LZ4_hashPosition | function | 797 | lz4.c |
+| LZ4_initStream | function | 1552 | lz4.c |
+| LZ4_isAligned | function | 292 | lz4.c |
+| LZ4_isLittleEndian | function | 363 | lz4.c |
+| LZ4_loadDict | function | 1648 | lz4.c |
+| LZ4_loadDictSlow | function | 1653 | lz4.c |
+| LZ4_loadDict_internal | function | 1587 | lz4.c |
+| LZ4_memcpy_using_offset | function | 535 | lz4.c |
+| LZ4_memcpy_using_offset_base | function | 496 | lz4.c |
+| LZ4_prepareTable | function | 884 | lz4.c |
+| LZ4_putIndexOnHash | function | 820 | lz4.c |
+| LZ4_putPosition | function | 841 | lz4.c |
+| LZ4_putPositionOnHash | function | 833 | lz4.c |
+| LZ4_read16 | function | 378 | lz4.c |
+| LZ4_read16 | function | 393 | lz4.c |
+| LZ4_read16 | function | 402 | lz4.c |
+| LZ4_read32 | function | 379 | lz4.c |
+| LZ4_read32 | function | 394 | lz4.c |
+| LZ4_read32 | function | 407 | lz4.c |
+| LZ4_readLE16 | function | 430 | lz4.c |
+| LZ4_readLE32 | function | 441 | lz4.c |
+| LZ4_read_ARCH | function | 380 | lz4.c |
+| LZ4_read_ARCH | function | 395 | lz4.c |
+| LZ4_read_ARCH | function | 412 | lz4.c |
+| LZ4_renormDictT | function | 1687 | lz4.c |
+| LZ4_resetStream | function | 1564 | lz4.c |
+| LZ4_resetStreamState | function | 2808 | lz4.c |
+| LZ4_resetStream_fast | function | 1570 | lz4.c |
+| LZ4_saveDict | function | 1814 | lz4.c |
+| LZ4_setStreamDecode | function | 2589 | lz4.c |
+| LZ4_sizeofState | function | 752 | lz4.c |
+| LZ4_sizeofStreamState | function | 2806 | lz4.c |
+| LZ4_slideInputBuffer | function | 2823 | lz4.c |
+| LZ4_stream_t_alignment | function | 1542 | lz4.c |
+| LZ4_uncompress | function | 2795 | lz4.c |
+| LZ4_uncompress_unknownOutputSize | function | 2799 | lz4.c |
+| LZ4_versionNumber | function | 749 | lz4.c |
+| LZ4_versionString | function | 750 | lz4.c |
+| LZ4_wildCopy32 | function | 522 | lz4.c |
+| LZ4_wildCopy8 | function | 465 | lz4.c |
+| LZ4_write16 | function | 382 | lz4.c |
+| LZ4_write16 | function | 397 | lz4.c |
+| LZ4_write16 | function | 417 | lz4.c |
+| LZ4_write32 | function | 383 | lz4.c |
+| LZ4_write32 | function | 398 | lz4.c |
+| LZ4_write32 | function | 422 | lz4.c |
+| LZ4_writeLE16 | function | 452 | lz4.c |
+| read_long_length_no_check | function | 1852 | lz4.c |
+| read_variable_length | function | 1979 | lz4.c |
+| MdCloseFile | function | 58 | minidokan.c |
+| MdCreateFile | function | 8 | minidokan.c |
+| MdFindFiles | function | 40 | minidokan.c |
+| MdGetFileInformation | function | 25 | minidokan.c |
+| MdReadFile | function | 50 | minidokan.c |
+| wmain | function | 71 | minidokan.c |
+| MinGetSecurityByName | function | 16 | minifs.c |
+| MinGetVolumeInfo | function | 6 | minifs.c |
+| wmain | function | 24 | minifs.c |
+| TDEFL_READ_UNALIGNED_WORD | function | 1412 | miniz.c |
+| TDEFL_READ_UNALIGNED_WORD2 | function | 1418 | miniz.c |
+| TDEFL_READ_UNALIGNED_WORD32 | function | 1528 | miniz.c |
+| miniz_def_alloc_func | function | 167 | miniz.c |
+| miniz_def_free_func | function | 172 | miniz.c |
+| miniz_def_realloc_func | function | 177 | miniz.c |
+| mz_adler32 | function | 40 | miniz.c |
+| mz_compress | function | 349 | miniz.c |
+| mz_compress2 | function | 319 | miniz.c |
+| mz_compressBound | function | 354 | miniz.c |
+| mz_crc32 | function | 95 | miniz.c |
+| mz_deflate | function | 242 | miniz.c |
+| mz_deflateBound | function | 312 | miniz.c |
+| mz_deflateEnd | function | 300 | miniz.c |
+| mz_deflateInit | function | 192 | miniz.c |
+| mz_deflateInit2 | function | 197 | miniz.c |
+| mz_deflateReset | function | 233 | miniz.c |
+| mz_error | function | 600 | miniz.c |
+| mz_file_read_func_stdio | function | 6852 | miniz.c |
+| mz_free | function | 162 | miniz.c |
+| mz_inflate | function | 439 | miniz.c |
+| mz_inflateEnd | function | 551 | miniz.c |
+| mz_inflateInit | function | 408 | miniz.c |
+| mz_inflateInit2 | function | 372 | miniz.c |
+| mz_inflateReset | function | 413 | miniz.c |
+| mz_uncompress | function | 593 | miniz.c |
+| mz_uncompress2 | function | 562 | miniz.c |
+| mz_version | function | 183 | miniz.c |
+| mz_write_le16 | function | 5643 | miniz.c |
+| mz_write_le32 | function | 5648 | miniz.c |
+| mz_write_le64 | function | 5655 | miniz.c |
+| mz_zip_add_mem_to_archive_file_in_place | function | 7463 | miniz.c |
+| mz_zip_add_mem_to_archive_file_in_place_v2 | function | 7468 | miniz.c |
+| mz_zip_array_clear | function | 3350 | miniz.c |
+| mz_zip_array_ensure_capacity | function | 3356 | miniz.c |
+| mz_zip_array_ensure_room | function | 3397 | miniz.c |
+| mz_zip_array_init | function | 3344 | miniz.c |
+| mz_zip_array_push_back | function | 3402 | miniz.c |
+| mz_zip_array_range_check | function | 3334 | miniz.c |
+| mz_zip_array_reserve | function | 3376 | miniz.c |
+| mz_zip_array_resize | function | 3386 | miniz.c |
+| mz_zip_clear_last_error | function | 7642 | miniz.c |
+| mz_zip_compute_crc32_callback | function | 5282 | miniz.c |
+| mz_zip_dos_to_time_t | function | 3413 | miniz.c |
+| mz_zip_end | function | 7814 | miniz.c |
+| mz_zip_extract_archive_file_to_heap | function | 7600 | miniz.c |
+| mz_zip_extract_archive_file_to_heap_v2 | function | 7561 | miniz.c |
+| mz_zip_file_read_func | function | 4018 | miniz.c |
+| mz_zip_file_stat_internal | function | 4221 | miniz.c |
+| mz_zip_file_write_callback | function | 5209 | miniz.c |
+| mz_zip_file_write_func | function | 5837 | miniz.c |
+| mz_zip_filename_compare | function | 4352 | miniz.c |
+| mz_zip_get_archive_file_start_offset | function | 7766 | miniz.c |
+| mz_zip_get_archive_size | function | 7759 | miniz.c |
+| mz_zip_get_cdh | function | 4132 | miniz.c |
+| mz_zip_get_central_dir_size | function | 7746 | miniz.c |
+| mz_zip_get_cfile | function | 7773 | miniz.c |
+| mz_zip_get_error_string | function | 7660 | miniz.c |
+| mz_zip_get_file_modified_time | function | 3451 | miniz.c |
+| mz_zip_get_last_error | function | 7647 | miniz.c |
+| mz_zip_get_mode | function | 7611 | miniz.c |
+| mz_zip_get_type | function | 7616 | miniz.c |
+| mz_zip_heap_write_func | function | 5665 | miniz.c |
+| mz_zip_is_zip64 | function | 7738 | miniz.c |
+| mz_zip_locate_file_binary_search | function | 4369 | miniz.c |
+| mz_zip_mem_read_func | function | 3975 | miniz.c |
+| mz_zip_peek_last_error | function | 7634 | miniz.c |
+| mz_zip_read_archive_data | function | 7780 | miniz.c |
+| mz_zip_reader_end | function | 3951 | miniz.c |
+| mz_zip_reader_end_internal | function | 3904 | miniz.c |
+| mz_zip_reader_extract_file_iter_new | function | 5038 | miniz.c |
+| mz_zip_reader_extract_file_to_callback | function | 4901 | miniz.c |
+| mz_zip_reader_extract_file_to_cfile | function | 5272 | miniz.c |
+| mz_zip_reader_extract_file_to_file | function | 5250 | miniz.c |
+| mz_zip_reader_extract_file_to_heap | function | 4689 | miniz.c |
+| mz_zip_reader_extract_file_to_mem | function | 4648 | miniz.c |
+| mz_zip_reader_extract_file_to_mem_no_alloc | function | 4635 | miniz.c |
+| mz_zip_reader_extract_iter_free | function | 5167 | miniz.c |
+| mz_zip_reader_extract_iter_new | function | 4910 | miniz.c |
+| mz_zip_reader_extract_iter_read | function | 5050 | miniz.c |
+| mz_zip_reader_extract_to_callback | function | 4701 | miniz.c |
+| mz_zip_reader_extract_to_cfile | function | 5259 | miniz.c |
+| mz_zip_reader_extract_to_file | function | 5216 | miniz.c |
+| mz_zip_reader_extract_to_heap | function | 4653 | miniz.c |
+| mz_zip_reader_extract_to_mem | function | 4643 | miniz.c |
+| mz_zip_reader_extract_to_mem_no_alloc | function | 4630 | miniz.c |
+| mz_zip_reader_extract_to_mem_no_alloc1 | function | 4484 | miniz.c |
+| mz_zip_reader_file_stat | function | 7809 | miniz.c |
+| mz_zip_reader_filename_less | function | 3519 | miniz.c |
+| mz_zip_reader_get_filename | function | 7788 | miniz.c |
+| mz_zip_reader_get_num_files | function | 7754 | miniz.c |
+| mz_zip_reader_init | function | 3955 | miniz.c |
+| mz_zip_reader_init_cfile | function | 4090 | miniz.c |
+| mz_zip_reader_init_file | function | 4031 | miniz.c |
+| mz_zip_reader_init_file_v2 | function | 4036 | miniz.c |
+| mz_zip_reader_init_internal | function | 3485 | miniz.c |
+| mz_zip_reader_init_mem | function | 3983 | miniz.c |
+| mz_zip_reader_is_file_a_directory | function | 4189 | miniz.c |
+| mz_zip_reader_is_file_encrypted | function | 4139 | miniz.c |
+| mz_zip_reader_is_file_supported | function | 4153 | miniz.c |
+| mz_zip_reader_locate_file | function | 4409 | miniz.c |
+| mz_zip_reader_locate_file_v2 | function | 4418 | miniz.c |
+| mz_zip_reader_locate_header_sig | function | 3600 | miniz.c |
+| mz_zip_reader_read_central_dir | function | 3646 | miniz.c |
+| mz_zip_reader_sort_central_dir_offsets_by_filename | function | 3548 | miniz.c |
+| mz_zip_set_error | function | 3478 | miniz.c |
+| mz_zip_set_file_times | function | 3465 | miniz.c |
+| mz_zip_set_last_error | function | 7621 | miniz.c |
+| mz_zip_string_equal | function | 4341 | miniz.c |
+| mz_zip_time_t_to_dos_time | function | 3428 | miniz.c |
+| mz_zip_validate_archive | function | 5505 | miniz.c |
+| mz_zip_validate_file | function | 5290 | miniz.c |
+| mz_zip_validate_file_archive | function | 5597 | miniz.c |
+| mz_zip_validate_mem_archive | function | 5555 | miniz.c |
+| mz_zip_writer_add_cfile | function | 6863 | miniz.c |
+| mz_zip_writer_add_file | function | 6870 | miniz.c |
+| mz_zip_writer_add_from_zip_reader | function | 6982 | miniz.c |
+| mz_zip_writer_add_mem | function | 6019 | miniz.c |
+| mz_zip_writer_add_mem_ex | function | 6198 | miniz.c |
+| mz_zip_writer_add_mem_ex_v2 | function | 6204 | miniz.c |
+| mz_zip_writer_add_put_buf_callback | function | 6031 | miniz.c |
+| mz_zip_writer_add_read_buf_callback | function | 6490 | miniz.c |
+| mz_zip_writer_add_to_central_dir | function | 6122 | miniz.c |
+| mz_zip_writer_compute_padding_needed_for_file_alignment | function | 6173 | miniz.c |
+| mz_zip_writer_create_central_dir_header | function | 6097 | miniz.c |
+| mz_zip_writer_create_local_dir_header | function | 6079 | miniz.c |
+| mz_zip_writer_create_zip64_extra_data | function | 6044 | miniz.c |
+| mz_zip_writer_end | function | 7457 | miniz.c |
+| mz_zip_writer_end_internal | function | 5703 | miniz.c |
+| mz_zip_writer_finalize_archive | function | 7344 | miniz.c |
+| mz_zip_writer_finalize_heap_archive | function | 7432 | miniz.c |
+| mz_zip_writer_init | function | 5798 | miniz.c |
+| mz_zip_writer_init_cfile | function | 5905 | miniz.c |
+| mz_zip_writer_init_file | function | 5853 | miniz.c |
+| mz_zip_writer_init_file_v2 | function | 5858 | miniz.c |
+| mz_zip_writer_init_from_reader | function | 6013 | miniz.c |
+| mz_zip_writer_init_from_reader_v2 | function | 5926 | miniz.c |
+| mz_zip_writer_init_heap | function | 5831 | miniz.c |
+| mz_zip_writer_init_heap_v2 | function | 5803 | miniz.c |
+| mz_zip_writer_init_v2 | function | 5749 | miniz.c |
+| mz_zip_writer_update_zip64_extension_block | function | 6902 | miniz.c |
+| mz_zip_writer_validate_archive_name | function | 6162 | miniz.c |
+| mz_zip_writer_write_zeros | function | 6182 | miniz.c |
+| mz_zip_zero_struct | function | 3898 | miniz.c |
+| tdefl_calculate_minimum_redundancy | function | 787 | miniz.c |
+| tdefl_compress | function | 1918 | miniz.c |
+| tdefl_compress_block | function | 1245 | miniz.c |
+| tdefl_compress_buffer | function | 1986 | miniz.c |
+| tdefl_compress_fast | function | 1537 | miniz.c |
+| tdefl_compress_lz_codes | function | 1102 | miniz.c |
+| tdefl_compress_lz_codes | function | 1197 | miniz.c |
+| tdefl_compress_mem_to_heap | function | 2085 | miniz.c |
+| tdefl_compress_mem_to_mem | function | 2100 | miniz.c |
+| tdefl_compress_mem_to_output | function | 2038 | miniz.c |
+| tdefl_compress_normal | function | 1752 | miniz.c |
+| tdefl_compressor_alloc | function | 2232 | miniz.c |
+| tdefl_compressor_free | function | 2237 | miniz.c |
+| tdefl_create_comp_flags_from_zip_params | function | 2116 | miniz.c |
+| tdefl_find_match | function | 1428 | miniz.c |
+| tdefl_find_match | function | 1481 | miniz.c |
+| tdefl_flush_block | function | 1256 | miniz.c |
+| tdefl_flush_output_buffer | function | 1897 | miniz.c |
+| tdefl_get_adler32 | function | 2033 | miniz.c |
+| tdefl_get_prev_return_status | function | 2028 | miniz.c |
+| tdefl_huffman_enforce_max_code_size | function | 847 | miniz.c |
+| tdefl_init | function | 1992 | miniz.c |
+| tdefl_optimize_huffman_table | function | 871 | miniz.c |
+| tdefl_output_buffer_putter | function | 2060 | miniz.c |
+| tdefl_radix_sort_syms | function | 753 | miniz.c |
+| tdefl_record_literal | function | 1711 | miniz.c |
+| tdefl_record_match | function | 1724 | miniz.c |
+| tdefl_start_dynamic_block | function | 990 | miniz.c |
+| tdefl_start_static_block | function | 1077 | miniz.c |
+| tdefl_write_image_to_png_file_in_memory | function | 2222 | miniz.c |
+| tdefl_write_image_to_png_file_in_memory_ex | function | 2144 | miniz.c |
+| tinfl_clear_tree | function | 2427 | miniz.c |
+| tinfl_decompress | function | 2437 | miniz.c |
+| tinfl_decompress_mem_to_callback | function | 2971 | miniz.c |
+| tinfl_decompress_mem_to_heap | function | 2924 | miniz.c |
+| tinfl_decompress_mem_to_mem | function | 2962 | miniz.c |
+| tinfl_decompressor_alloc | function | 3002 | miniz.c |
+| tinfl_decompressor_free | function | 3010 | miniz.c |
+| div_ceil | function | 58 | mkfs.c |
+| gen_uuid | function | 39 | mkfs.c |
+| main | function | 60 | mkfs.c |
+| main | function | 47 | nametest.c |
+| mkname | function | 38 | nametest.c |
+| ok | function | 31 | nametest.c |
+| main | function | 8 | ovtest.c |
+| main | function | 24 | pngbrute.c |
+| read_file | function | 11 | pngbrute.c |
+| apply_filters | function | 81 | pngx.c |
+| chunk_crc | function | 69 | pngx.c |
+| pngx_build_recipe | function | 244 | pngx.c |
+| pngx_chunk_append | function | 41 | pngx.c |
+| pngx_extract | function | 121 | pngx.c |
+| pngx_free | function | 488 | pngx.c |
+| pngx_parse_recipe | function | 281 | pngx.c |
+| pngx_rebuild | function | 428 | pngx.c |
+| pngx_refilter | function | 376 | pngx.c |
+| rd16 | function | 35 | pngx.c |
+| rd32 | function | 31 | pngx.c |
+| wr16 | function | 37 | pngx.c |
+| wr32 | function | 33 | pngx.c |
+| wr32v | function | 29 | pngx.c |
+| CutOff | function | 609 | ppmd8.c |
+| ExpandTextArea | function | 374 | ppmd8.c |
+| FreeUnits | function | 337 | ppmd8.c |
+| GetUsedMemory | function | 763 | ppmd8.c |
+| Ppmd8State_SetSuccessor | function | 423 | ppmd8.c |
+| Ppmd8_Alloc | function | 92 | ppmd8.c |
+| Ppmd8_AllocUnits | function | 287 | ppmd8.c |
+| Ppmd8_AllocUnitsRare | function | 254 | ppmd8.c |
+| Ppmd8_Construct | function | 52 | ppmd8.c |
+| Ppmd8_CreateSuccessors | function | 863 | ppmd8.c |
+| Ppmd8_Free | function | 84 | ppmd8.c |
+| Ppmd8_GlueFreeBlocks | function | 162 | ppmd8.c |
+| Ppmd8_Init | function | 515 | ppmd8.c |
+| Ppmd8_InsertNode | function | 117 | ppmd8.c |
+| Ppmd8_MakeEscFreq | function | 1434 | ppmd8.c |
+| Ppmd8_NextContext | function | 1464 | ppmd8.c |
+| Ppmd8_RemoveNode | function | 127 | ppmd8.c |
+| Ppmd8_Rescale | function | 1312 | ppmd8.c |
+| Ppmd8_RestartModel | function | 432 | ppmd8.c |
+| Ppmd8_SplitBlock | function | 137 | ppmd8.c |
+| Ppmd8_Update1 | function | 1474 | ppmd8.c |
+| Ppmd8_Update1_0 | function | 1492 | ppmd8.c |
+| Ppmd8_Update2 | function | 1520 | ppmd8.c |
+| Ppmd8_UpdateModel | function | 1072 | ppmd8.c |
+| ReduceOrder | function | 966 | ppmd8.c |
+| Refresh | function | 543 | ppmd8.c |
+| RemoveBinContexts | function | 723 | ppmd8.c |
+| RestoreModel | function | 779 | ppmd8.c |
+| SWAP_STATES | function | 593 | ppmd8.c |
+| ShrinkUnits | function | 319 | ppmd8.c |
+| SpecialFreeUnit | function | 343 | ppmd8.c |
+| Ppmd8_DecodeSymbol | function | 64 | ppmd8dec.c |
+| Ppmd8_Init_RangeDec | function | 16 | ppmd8dec.c |
+| Ppmd8_RD_Decode | function | 42 | ppmd8dec.c |
+| Ppmd8_EncodeSymbol | function | 89 | ppmd8enc.c |
+| Ppmd8_Flush_RangeEnc | function | 16 | ppmd8enc.c |
+| Ppmd8_RangeEnc_Encode | function | 59 | ppmd8enc.c |
+| Inv_InRead | function | 27 | ppmd_codec.c |
+| Inv_OutWrite | function | 35 | ppmd_codec.c |
+| PutProps | function | 42 | ppmd_codec.c |
+| SzAlloc | function | 20 | ppmd_codec.c |
+| SzFree | function | 21 | ppmd_codec.c |
+| invfs_ppmd_decode | function | 92 | ppmd_codec.c |
+| invfs_ppmd_encode | function | 52 | ppmd_codec.c |
+| main | function | 57 | rangechk.c |
+| scan | function | 23 | rangechk.c |
+| main | function | 5 | range_test2.c |
+| main | function | 5 | range_test3.c |
+| main | function | 5 | range_test.c |
+| abort_at | function | 88 | resize.c |
+| bit_get | function | 81 | resize.c |
+| bm_blocks | function | 76 | resize.c |
+| copy_crc | function | 245 | resize.c |
+| div_ceil | function | 73 | resize.c |
+| find_free_run | function | 229 | resize.c |
+| is_parity_name | function | 145 | resize.c |
+| main | function | 261 | resize.c |
+| parse_size | function | 98 | resize.c |
+| scan_inode_area | function | 152 | resize.c |
+| scan_journal | function | 125 | resize.c |
+| gf_inv | function | 97 | rs.c |
+| gf_mul | function | 92 | rs.c |
+| gf_pow | function | 102 | rs.c |
+| rs_algo_name | function | 250 | rs.c |
+| rs_bench | function | 501 | rs.c |
+| rs_bench_one | function | 415 | rs.c |
+| rs_decode | function | 323 | rs.c |
+| rs_encode | function | 259 | rs.c |
+| rs_gf_init | function | 72 | rs.c |
+| rs_gf_mat_inv | function | 281 | rs.c |
+| rs_mac | function | 241 | rs.c |
+| rs_mac_cauchy | function | 218 | rs.c |
+| rs_mac_vm | function | 195 | rs.c |
+| rs_matrix | function | 112 | rs.c |
+| rs_now | function | 390 | rs.c |
+| rs_rng | function | 406 | rs.c |
+| rs_roundtrip | function | 453 | rs.c |
+| algo_name | function | 35 | sizes.c |
+| main | function | 51 | sizes.c |
+| draw_bar | function | 53 | stat.c |
+| enable_ansi | function | 33 | stat.c |
+| fent_find | function | 126 | stat.c |
+| fent_hash | function | 117 | stat.c |
+| fent_insert | function | 136 | stat.c |
+| human | function | 105 | stat.c |
+| main | function | 160 | stat.c |
+| zone_name | function | 43 | stat.c |
+| wmain | function | 4 | svc_test.c |
+| dedup_cmp | function | 159 | sweep.c |
+| hms | function | 128 | sweep.c |
+| human | function | 116 | sweep.c |
+| is_dir_anchor | function | 94 | sweep.c |
+| main | function | 401 | sweep.c |
+| now_ms | function | 99 | sweep.c |
+| on_ctrl | function | 65 | sweep.c |
+| on_sigint | function | 76 | sweep.c |
+| scan_read | function | 325 | sweep.c |
+| shortname | function | 141 | sweep.c |
+| sweep_dedupe | function | 170 | sweep.c |
+| sweep_survey | function | 352 | sweep.c |
+| tarx_build_recipe | function | 170 | tarx.c |
+| tarx_check_checksum | function | 89 | tarx.c |
+| tarx_extract | function | 108 | tarx.c |
+| tarx_parse_recipe | function | 205 | tarx.c |
+| tarx_parse_size | function | 70 | tarx.c |
+| tarx_rd16 | function | 56 | tarx.c |
+| tarx_rd64 | function | 44 | tarx.c |
+| tarx_rebuild | function | 250 | tarx.c |
+| tarx_recipe_num_parts | function | 242 | tarx.c |
+| tarx_wr16 | function | 61 | tarx.c |
+| tarx_wr64 | function | 51 | tarx.c |
+| main | function | 4 | tmp_rm.c |
+| main | function | 124 | treecp.c |
+| now_ms | function | 29 | treecp.c |
+| slurp | function | 39 | treecp.c |
+| walk | function | 59 | treecp.c |
+| err | function | 26 | verify.c |
+| fail | function | 36 | verify.c |
+| main | function | 38 | verify.c |
+| vol_create_container_file | function | 79 | vol_ast.c |
+| vol_deserialize_children | function | 41 | vol_ast.c |
+| vol_find | function | 358 | vol_ast.c |
+| vol_get_children | function | 305 | vol_ast.c |
+| vol_serialize_children | function | 11 | vol_ast.c |
+| vol_zip_extract_member | function | 373 | vol_ast.c |
+| vol_zip_parse_children | function | 239 | vol_ast.c |
+| cpack_map_cache_free_ent | function | 1913 | vol_cpack.c |
+| cpack_map_cache_invalidate | function | 1937 | vol_cpack.c |
+| cpack_map_cache_reset | function | 1922 | vol_cpack.c |
+| cpack_map_get | function | 1961 | vol_cpack.c |
+| cpack_map_guard | function | 1862 | vol_cpack.c |
+| cpack_map_parse | function | 1661 | vol_cpack.c |
+| cpack_map_read | function | 2037 | vol_cpack.c |
+| cpack_map_serve | function | 1816 | vol_cpack.c |
+| cpack_map_validate | function | 1727 | vol_cpack.c |
+| cpack_mbr_name | function | 1514 | vol_cpack.c |
+| cpack_member_find | function | 1710 | vol_cpack.c |
+| cpack_member_idx_cmp | function | 1690 | vol_cpack.c |
+| cpack_member_read | function | 1785 | vol_cpack.c |
+| cpack_members_sorted | function | 1700 | vol_cpack.c |
+| cpack_parse_table | function | 1535 | vol_cpack.c |
+| cpack_recipe_seg | function | 1761 | vol_cpack.c |
+| cpack_sanitize | function | 1497 | vol_cpack.c |
+| flac_bits_per_sample | function | 836 | vol_cpack.c |
+| invfs_ape_compress | function | 849 | vol_cpack.c |
+| invfs_ape_decompress | function | 925 | vol_cpack.c |
+| invfs_ape_to_wav | function | 991 | vol_cpack.c |
+| invfs_codec_pack_cmd | function | 381 | vol_cpack.c |
+| invfs_codec_pack_estimate | function | 414 | vol_cpack.c |
+| invfs_codec_pack_exec | function | 353 | vol_cpack.c |
+| invfs_jxl_compress | function | 551 | vol_cpack.c |
+| invfs_jxl_decompress | function | 610 | vol_cpack.c |
+| invfs_pmp_compress | function | 746 | vol_cpack.c |
+| invfs_pmp_decompress | function | 791 | vol_cpack.c |
+| pack_argv_build | function | 295 | vol_cpack.c |
+| pack_container_rebuild | function | 2429 | vol_cpack.c |
+| pack_subst | function | 264 | vol_cpack.c |
+| run_ffmpeg | function | 494 | vol_cpack.c |
+| run_packmp3 | function | 682 | vol_cpack.c |
+| run_tool | function | 445 | vol_cpack.c |
+| slurp_file | function | 728 | vol_cpack.c |
+| tool_child_memlimit | function | 88 | vol_cpack.c |
+| tool_exec | function | 144 | vol_cpack.c |
+| tool_exec_lim | function | 101 | vol_cpack.c |
+| tool_exec_out_lim | function | 199 | vol_cpack.c |
+| tool_mem_cap_for | function | 77 | vol_cpack.c |
+| tool_now_ms | function | 48 | vol_cpack.c |
+| tool_resolve | function | 31 | vol_cpack.c |
+| tool_rm | function | 162 | vol_cpack.c |
+| tool_slurp_out | function | 182 | vol_cpack.c |
+| tool_tmpdir | function | 149 | vol_cpack.c |
+| tool_write | function | 171 | vol_cpack.c |
+| vol_containerpack_sweep | function | 2061 | vol_cpack.c |
+| vol_create_flac_file | function | 1051 | vol_cpack.c |
+| vol_create_gz_file | function | 1266 | vol_cpack.c |
+| vol_create_tar_file | function | 1170 | vol_cpack.c |
+| vol_mark_dirty | function | 38 | vol_crash.c |
+| vol_needs_recovery | function | 58 | vol_crash.c |
+| vol_pre_record | function | 51 | vol_crash.c |
+| dedup_cmp | function | 53 | vol_dedupe.c |
+| dedup_is_deferred | function | 66 | vol_dedupe.c |
+| vol_sweep_dedupe | function | 77 | vol_dedupe.c |
+| dirent_cmp | function | 101 | vol_dirs.c |
+| rename_one | function | 358 | vol_dirs.c |
+| vol_delete_file | function | 269 | vol_dirs.c |
+| vol_ensure_path | function | 83 | vol_dirs.c |
+| vol_forget_name | function | 626 | vol_dirs.c |
+| vol_hardlink | function | 548 | vol_dirs.c |
+| vol_is_dir | function | 11 | vol_dirs.c |
+| vol_list_dir | function | 109 | vol_dirs.c |
+| vol_mkdir | function | 25 | vol_dirs.c |
+| vol_rename | function | 432 | vol_dirs.c |
+| vol_replace_file | function | 228 | vol_dirs.c |
+| vol_rmdir | function | 37 | vol_dirs.c |
+| vol_unlink | function | 323 | vol_dirs.c |
+| vol_unlink_name | function | 286 | vol_dirs.c |
+| exe_scan_media | function | 119 | vol_exer.c |
+| exer_payload_parse | function | 156 | vol_exer.c |
+| exer_rd64 | function | 24 | vol_exer.c |
+| exer_splice | function | 195 | vol_exer.c |
+| exer_wr64 | function | 17 | vol_exer.c |
+| jpeg_scan_end | function | 49 | vol_exer.c |
+| png_scan_end | function | 95 | vol_exer.c |
+| vol_exer_carve | function | 238 | vol_exer.c |
+| vol_exer_last_parts | function | 463 | vol_exer.c |
+| fsck_rebuild_one | function | 24 | vol_fsck.c |
+| vol_fsck_scan | function | 91 | vol_fsck.c |
+| heat_cand_cmp | function | 236 | vol_heat.c |
+| heat_file_maxw | function | 125 | vol_heat.c |
+| heat_file_setw | function | 139 | vol_heat.c |
+| heat_grab | function | 155 | vol_heat.c |
+| heat_hash | function | 48 | vol_heat.c |
+| heat_max_get | function | 291 | vol_heat.c |
+| heat_max_put | function | 250 | vol_heat.c |
+| heat_member_shared | function | 314 | vol_heat.c |
+| heat_seen_add | function | 59 | vol_heat.c |
+| heat_stamp | function | 170 | vol_heat.c |
+| heat_touch_read | function | 103 | vol_heat.c |
+| vol_heat_promote | function | 349 | vol_heat.c |
+| vol_heat_r | function | 8 | vol_heat.c |
+| vol_heat_sweep_begin | function | 195 | vol_heat.c |
+| vol_heat_w | function | 10 | vol_heat.c |
+| invfs_png_from_jxl | function | 15 | vol_png.c |
+| jxl_tool | function | 101 | vol_png.c |
+| mz_tdefl_compress | function | 64 | vol_png.c |
+| png_inflate | function | 78 | vol_png.c |
+| vol_create_ape_file | function | 490 | vol_png.c |
+| vol_create_blob_file | function | 321 | vol_png.c |
+| vol_create_jxl_file | function | 482 | vol_png.c |
+| vol_create_pmp_file | function | 498 | vol_png.c |
+| vol_create_png_file | function | 114 | vol_png.c |
+| algo_is_whole_file | function | 941 | vol_read.c |
+| seg_read_checked | function | 34 | vol_read.c |
+| tz_batch_algo | function | 10 | vol_read.c |
+| vol_name_count | function | 928 | vol_read.c |
+| vol_read_file | function | 819 | vol_read.c |
+| vol_read_inode | function | 192 | vol_read.c |
+| vol_read_named | function | 830 | vol_read.c |
+| vol_read_range | function | 965 | vol_read.c |
+| vol_read_text_slice | function | 95 | vol_read.c |
+| vol_stat | function | 893 | vol_read.c |
+| vol_stat_full | function | 904 | vol_read.c |
+| collect_text_lbas | function | 250 | vol_records.c |
+| meta_locate_ext | function | 612 | vol_records.c |
+| meta_parse_ext | function | 577 | vol_records.c |
+| meta_pub_from_hdr_defaults | function | 700 | vol_records.c |
+| meta_read_record_by_id | function | 632 | vol_records.c |
+| meta_read_record_by_id_p | function | 1160 | vol_records.c |
+| meta_rewrite | function | 727 | vol_records.c |
+| meta_serialize | function | 671 | vol_records.c |
+| record_owns_siblings | function | 1118 | vol_records.c |
+| vol_apply_meta | function | 819 | vol_records.c |
+| vol_ast_blob_len | function | 539 | vol_records.c |
+| vol_create_file | function | 10 | vol_records.c |
+| vol_create_special | function | 856 | vol_records.c |
+| vol_create_symlink | function | 830 | vol_records.c |
+| vol_delete_inode | function | 444 | vol_records.c |
+| vol_delete_siblings | function | 461 | vol_records.c |
+| vol_get_class | function | 1070 | vol_records.c |
+| vol_get_meta | function | 710 | vol_records.c |
+| vol_get_xattr | function | 884 | vol_records.c |
+| vol_list_xattr | function | 1031 | vol_records.c |
+| vol_remove_xattr | function | 984 | vol_records.c |
+| vol_retire_inode | function | 310 | vol_records.c |
+| vol_set_xattr | function | 926 | vol_records.c |
+| vol_stamp_class | function | 1085 | vol_records.c |
+| vol_transcode_abort | function | 511 | vol_records.c |
+| xattr_tlv_size | function | 566 | vol_records.c |
+| pop64 | function | 50 | vol_repair.c |
+| seal2_commit | function | 170 | vol_repair.c |
+| seal2_free_failed | function | 58 | vol_repair.c |
+| seal2_repair_stripe | function | 216 | vol_repair.c |
+| seal2_try | function | 104 | vol_repair.c |
+| vol_seal2_repair | function | 273 | vol_repair.c |
+| rsz0_crc | function | 18 | vol_resize.c |
+| rsz0_sane | function | 29 | vol_resize.c |
+| rsz_abort_at | function | 59 | vol_resize.c |
+| vol_rsz0_apply | function | 70 | vol_resize.c |
+| ckp0_crc | function | 15 | vol_rollback.c |
+| rb_abort_at | function | 140 | vol_rollback.c |
+| ret_shard_name | function | 110 | vol_rollback.c |
+| vol_ckp_armed | function | 120 | vol_rollback.c |
+| vol_ckp_begin | function | 149 | vol_rollback.c |
+| vol_ckp_end | function | 283 | vol_rollback.c |
+| vol_ckp_info | function | 126 | vol_rollback.c |
+| vol_ckp_realize | function | 399 | vol_rollback.c |
+| vol_rollback | function | 447 | vol_rollback.c |
+| vol_write_ckp0 | function | 27 | vol_rollback.c |
+| seal2_map_load | function | 599 | vol_seal.c |
+| seal2_shard_name | function | 134 | vol_seal.c |
+| seal2_shard_stripes | function | 144 | vol_seal.c |
+| seal2_shard_sync | function | 623 | vol_seal.c |
+| seal_dirty_mark | function | 23 | vol_seal.c |
+| seal_dirty_reset | function | 10 | vol_seal.c |
+| seal_excluded | function | 161 | vol_seal.c |
+| seal_recover_segment | function | 332 | vol_seal.c |
+| seal_seg_verify | function | 311 | vol_seal.c |
+| seal_shard_name | function | 125 | vol_seal.c |
+| seal_shard_sync | function | 499 | vol_seal.c |
+| seal_stripe_dirty | function | 41 | vol_seal.c |
+| seal_stripe_xor | function | 257 | vol_seal.c |
+| seal_syndrome | function | 288 | vol_seal.c |
+| seal_view_free | function | 149 | vol_seal.c |
+| seal_view_load | function | 166 | vol_seal.c |
+| seal_xor_block | function | 244 | vol_seal.c |
+| vol_redun_config | function | 553 | vol_seal.c |
+| vol_redun_state | function | 586 | vol_seal.c |
+| vol_seal | function | 1022 | vol_seal.c |
+| vol_seal2_verify_leg | function | 944 | vol_seal.c |
+| vol_seal_l2 | function | 685 | vol_seal.c |
+| vol_seal_verify | function | 1334 | vol_seal.c |
+| defer_container_parts | function | 654 | vol_sweep.c |
+| jpeg_raw_estimate | function | 74 | vol_sweep.c |
+| part_generic_segments | function | 608 | vol_sweep.c |
+| sweep_enospc | function | 7 | vol_sweep.c |
+| sweep_unwind | function | 20 | vol_sweep.c |
+| tz_codec_gen | function | 62 | vol_sweep.c |
+| vol_collect_sweepables | function | 1423 | vol_sweep.c |
+| vol_compute_stats | function | 1498 | vol_sweep.c |
+| vol_hot_counters | function | 1616 | vol_sweep.c |
+| vol_inode_first_zone | function | 576 | vol_sweep.c |
+| vol_jxl_retry | function | 712 | vol_sweep.c |
+| vol_mark_pending | function | 534 | vol_sweep.c |
+| vol_min_gain_pct | function | 49 | vol_sweep.c |
+| vol_pack_sweep | function | 1308 | vol_sweep.c |
+| vol_pending_count | function | 563 | vol_sweep.c |
+| vol_sweep_file | function | 108 | vol_sweep.c |
+| vol_sweep_file_inner | function | 151 | vol_sweep.c |
+| vol_sweep_one | function | 740 | vol_sweep.c |
+| vol_sweep_pending | function | 1244 | vol_sweep.c |
+| vol_unmark_pending | function | 550 | vol_sweep.c |
+| vol_zone_used_bytes | function | 1488 | vol_sweep.c |
+| acc_defer | function | 47 | vol_textzone.c |
+| bz_defer | function | 81 | vol_textzone.c |
+| tz_commit_member | function | 406 | vol_textzone.c |
+| tz_commit_ready | function | 502 | vol_textzone.c |
+| tz_defer | function | 71 | vol_textzone.c |
+| tz_flush_class_ok | function | 762 | vol_textzone.c |
+| tz_flush_one | function | 777 | vol_textzone.c |
+| tz_member_oversized | function | 262 | vol_textzone.c |
+| tz_order_cmp | function | 745 | vol_textzone.c |
+| tz_owner_free | function | 143 | vol_textzone.c |
+| tz_owner_id | function | 231 | vol_textzone.c |
+| tz_owner_load | function | 93 | vol_textzone.c |
+| tz_owner_total | function | 544 | vol_textzone.c |
+| tz_owner_write | function | 157 | vol_textzone.c |
+| tz_seal | function | 562 | vol_textzone.c |
+| tz_sealed_find | function | 390 | vol_textzone.c |
+| tz_slice_push | function | 371 | vol_textzone.c |
+| tz_sniff_any | function | 244 | vol_textzone.c |
+| tz_u32_cmp | function | 976 | vol_textzone.c |
+| vol_acc_pending | function | 968 | vol_textzone.c |
+| vol_store_generic | function | 313 | vol_textzone.c |
+| vol_tz_flush | function | 954 | vol_textzone.c |
+| vol_tz_gc | function | 992 | vol_textzone.c |
+| alloc_blocks | function | 1064 | volume.c |
+| alloc_raw_or_shadow | function | 1151 | volume.c |
+| alloc_state_reset | function | 1510 | volume.c |
+| bm_dirty | function | 349 | volume.c |
+| idx_bump_dirs | function | 190 | volume.c |
+| idx_clear | function | 37 | volume.c |
+| idx_del | function | 271 | volume.c |
+| idx_del_at | function | 296 | volume.c |
+| idx_dir_count | function | 329 | volume.c |
+| idx_dir_live | function | 341 | volume.c |
+| idx_get | function | 317 | volume.c |
+| idx_get_id | function | 175 | volume.c |
+| idx_grow_dirs | function | 89 | volume.c |
+| idx_grow_ids | function | 133 | volume.c |
+| idx_grow_names | function | 69 | volume.c |
+| idx_hash | function | 25 | volume.c |
+| idx_init | function | 109 | volume.c |
+| idx_mix | function | 125 | volume.c |
+| idx_put | function | 230 | volume.c |
+| idx_put_id | function | 155 | volume.c |
+| l2p_remove | function | 1259 | volume.c |
+| l2p_replay | function | 405 | volume.c |
+| rdp0_crc | function | 360 | volume.c |
+| vol_arc_stats | function | 909 | volume.c |
+| vol_bitmap | function | 1330 | volume.c |
+| vol_close | function | 867 | volume.c |
+| vol_count_free | function | 1488 | volume.c |
+| vol_flush | function | 966 | volume.c |
+| vol_free_blocks | function | 1445 | volume.c |
+| vol_free_blocks_cached | function | 1432 | volume.c |
+| vol_get_dec_mem_limit | function | 938 | volume.c |
+| vol_get_profile | function | 944 | volume.c |
+| vol_inode_area_end | function | 1348 | volume.c |
+| vol_inode_area_free | function | 1358 | volume.c |
+| vol_inode_area_pos | function | 1344 | volume.c |
+| vol_inode_area_start | function | 1346 | volume.c |
+| vol_inode_next | function | 1365 | volume.c |
+| vol_journal_pos | function | 1350 | volume.c |
+| vol_l2p | function | 1337 | volume.c |
+| vol_l2p_remove | function | 1279 | volume.c |
+| vol_lookup | function | 1233 | volume.c |
+| vol_lookup_entry | function | 1241 | volume.c |
+| vol_map | function | 1183 | volume.c |
+| vol_open | function | 454 | volume.c |
+| vol_read_block | function | 1286 | volume.c |
+| vol_read_raw | function | 1402 | volume.c |
+| vol_sb | function | 1324 | volume.c |
+| vol_set_arc_budget | function | 923 | volume.c |
+| vol_set_dec_mem_limit | function | 932 | volume.c |
+| vol_set_readonly | function | 1424 | volume.c |
+| vol_sync | function | 1055 | volume.c |
+| vol_write_enabled | function | 1412 | volume.c |
+| vol_write_guard | function | 1439 | volume.c |
+| vol_write_raw | function | 1167 | volume.c |
+| vol_write_rdp0 | function | 373 | volume.c |
+| vol_write_sb | function | 956 | volume.c |
+| write_segment_blocks | function | 1309 | volume.c |
+| zone_count_free | function | 1501 | volume.c |
+| bit_clr | function | 538 | volume_internal.h |
+| bit_get | function | 534 | volume_internal.h |
+| bit_set | function | 536 | volume_internal.h |
+| l2p_rheat | function | 496 | volume_internal.h |
+| l2p_set_rheat | function | 501 | volume_internal.h |
+| name_too_long | function | 507 | volume_internal.h |
+| name_too_long_for_children | function | 516 | volume_internal.h |
+| rec_set_name | function | 525 | volume_internal.h |
+| vol_write_abort | function | 717 | vol_write.c |
+| vol_write_active_name | function | 34 | vol_write.c |
+| vol_write_begin | function | 44 | vol_write.c |
+| vol_write_commit | function | 587 | vol_write.c |
+| vol_write_range | function | 421 | vol_write.c |
+| vol_write_read | function | 559 | vol_write.c |
+| vol_write_truncate | function | 488 | vol_write.c |
+| wsession_filled | function | 311 | vol_write.c |
+| wsession_grow | function | 105 | vol_write.c |
+| wsession_load_old | function | 317 | vol_write.c |
+| wsession_seg_current | function | 228 | vol_write.c |
+| wsession_simple_old | function | 89 | vol_write.c |
+| wsession_unlink | function | 74 | vol_write.c |
+| wsession_write_seg | function | 218 | vol_write.c |
+| wsession_write_seg_n | function | 135 | vol_write.c |
+| wsession_zero_fill | function | 293 | vol_write.c |
+| InvFspClose | function | 183 | winfsp_fs.c |
+| InvFspGetFileInfo | function | 189 | winfsp_fs.c |
+| InvFspGetSecurityByName | function | 137 | winfsp_fs.c |
+| InvFspGetVolumeInfo | function | 120 | winfsp_fs.c |
+| InvFspOpen | function | 161 | winfsp_fs.c |
+| InvFspRead | function | 206 | winfsp_fs.c |
+| InvFspReadDirectory | function | 224 | winfsp_fs.c |
+| build_file_table | function | 59 | winfsp_fs.c |
+| fill_file_info | function | 100 | winfsp_fs.c |
+| fill_root_info | function | 112 | winfsp_fs.c |
+| find_entry | function | 49 | winfsp_fs.c |
+| init_interface | function | 259 | winfsp_fs.c |
+| usage | function | 272 | winfsp_fs.c |
+| utf16_to_utf8 | function | 44 | winfsp_fs.c |
+| utf8_to_utf16 | function | 39 | winfsp_fs.c |
+| wmain | function | 279 | winfsp_fs.c |
+| find_inode | function | 123 | zip.c |
+| main | function | 134 | zip.c |
+| member_data | function | 80 | zip.c |
+| rd16 | function | 38 | zip.c |
+| rd32 | function | 35 | zip.c |
+| vol_close | function | 120 | zip.c |
+| vol_find | function | 118 | zip.c |
+| vol_open | function | 115 | zip.c |
+| vol_read_file | function | 116 | zip.c |
+| vol_stat | function | 119 | zip.c |
+| zip_parse | function | 43 | zip.c |

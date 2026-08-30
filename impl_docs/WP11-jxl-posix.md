@@ -56,10 +56,14 @@ layer; WV registers sniff+probe only (no transcode path yet).
   branch fires only on RAW-zone files — the upgrade path for an already
   generic-stored JPEG is incomplete.
 - (c) PNGR/FLACR transcode paths are still Windows-only (`#ifdef _WIN32`);
-  their exec dependencies resolve on Linux now.
+  their exec dependencies resolve on Linux now. (Still open 2026-08-31:
+  vol_cpack.c:vol_create_flac_file and vol_png.c:vol_create_png_file keep
+  POSIX stubs that decline.)
 - (d) No RLIMIT_AS in tool children (WP10 §10 hardening) — the timeout
-  bounds time, not memory.
-- (e) probe() runs per file; tool availability is not cached.
+  bounds time, not memory. (Closed by WP12(d), see the WP16e addendum.)
+- (e) ~~probe() runs per file; tool availability is not cached.~~ Closed
+  2026-08-26: probe() results are memoized per process; codec_test uses the
+  test-only `invfs_codec_probe_reset()` hook (codec.c).
 
 ## WP16e addendum (2026-08-30): the lane is a codecpack now
 

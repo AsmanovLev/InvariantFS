@@ -1,0 +1,1 @@
+dedup            struct      120 /home/user/InvariantFS/src-extracted/VFS/src/vol_dirs.c struct dedup { struct dedup *next; size_t at; int is_dir; char name[1]; };

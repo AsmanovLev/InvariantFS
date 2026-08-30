@@ -1,16 +1,59 @@
-build_file_table function     40 /home/user/InvariantFS/src-extracted/VFS/src/fuse_fs.c static void build_file_table(void)
-find_entry       function    104 /home/user/InvariantFS/src-extracted/VFS/src/fuse_fs.c static fs_entry *find_entry(const char *name)
-fuse_sweep_thread function    328 /home/user/InvariantFS/src-extracted/VFS/src/fuse_fs.c static void *fuse_sweep_thread(void *arg)
-invf_create      function    274 /home/user/InvariantFS/src-extracted/VFS/src/fuse_fs.c static int invf_create(const char *path, mode_t mode, struct fuse_file_info *fi)
-invf_flush       function    351 /home/user/InvariantFS/src-extracted/VFS/src/fuse_fs.c static int invf_flush(const char *path, struct fuse_file_info *fi)
-invf_getattr     function    114 /home/user/InvariantFS/src-extracted/VFS/src/fuse_fs.c static int invf_getattr(const char *path, struct stat *st, struct fuse_file_info *fi)
-invf_mkdir       function    171 /home/user/InvariantFS/src-extracted/VFS/src/fuse_fs.c static int invf_mkdir(const char *path, mode_t mode)
-invf_open        function    229 /home/user/InvariantFS/src-extracted/VFS/src/fuse_fs.c static int invf_open(const char *path, struct fuse_file_info *fi)
-invf_read        function    203 /home/user/InvariantFS/src-extracted/VFS/src/fuse_fs.c static int invf_read(const char *path, char *buf, size_t size, off_t offset,
-invf_readdir     function    145 /home/user/InvariantFS/src-extracted/VFS/src/fuse_fs.c static int invf_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
-invf_release     function    378 /home/user/InvariantFS/src-extracted/VFS/src/fuse_fs.c static int invf_release(const char *path, struct fuse_file_info *fi)
-invf_rmdir       function    186 /home/user/InvariantFS/src-extracted/VFS/src/fuse_fs.c static int invf_rmdir(const char *path)
-invf_unlink      function    390 /home/user/InvariantFS/src-extracted/VFS/src/fuse_fs.c static int invf_unlink(const char *path)
-invf_write       function    300 /home/user/InvariantFS/src-extracted/VFS/src/fuse_fs.c static int invf_write(const char *path, const char *buf, size_t size, off_t offset,
-main             function    419 /home/user/InvariantFS/src-extracted/VFS/src/fuse_fs.c int main(int argc, char *argv[])
-rebuild_table_locked function    221 /home/user/InvariantFS/src-extracted/VFS/src/fuse_fs.c static void rebuild_table_locked(void)
+build_file_table function    112 /home/user/InvariantFS/src-extracted/VFS/src/fuse_fs.c static void build_file_table(void)
+cmp_entry_key    function    107 /home/user/InvariantFS/src-extracted/VFS/src/fuse_fs.c static int cmp_entry_key(const void *key, const void *element)
+cmp_entry_name_pos function     97 /home/user/InvariantFS/src-extracted/VFS/src/fuse_fs.c static int cmp_entry_name_pos(const void *pa, const void *pb)
+cmp_entry_pos    function     89 /home/user/InvariantFS/src-extracted/VFS/src/fuse_fs.c static int cmp_entry_pos(const void *pa, const void *pb)
+commit_wctx      function    956 /home/user/InvariantFS/src-extracted/VFS/src/fuse_fs.c static int commit_wctx(wctx *c)
+dirty_add_locked function    593 /home/user/InvariantFS/src-extracted/VFS/src/fuse_fs.c static void dirty_add_locked(wctx *c)
+dirty_del_locked function    602 /home/user/InvariantFS/src-extracted/VFS/src/fuse_fs.c static void dirty_del_locked(wctx *c)
+dirty_find_locked function    611 /home/user/InvariantFS/src-extracted/VFS/src/fuse_fs.c static wctx *dirty_find_locked(const char *name)
+fill_stat_from_meta function    392 /home/user/InvariantFS/src-extracted/VFS/src/fuse_fs.c static void fill_stat_from_meta(struct stat *st, const invfs_meta_pub *m,
+find_entry       function    224 /home/user/InvariantFS/src-extracted/VFS/src/fuse_fs.c static fs_entry *find_entry(const char *name)
+fuse_sweep_thread function    908 /home/user/InvariantFS/src-extracted/VFS/src/fuse_fs.c static void *fuse_sweep_thread(void *arg)
+invf_access      function   1094 /home/user/InvariantFS/src-extracted/VFS/src/fuse_fs.c static int invf_access(const char *path, int mask)
+invf_chmod       function   1201 /home/user/InvariantFS/src-extracted/VFS/src/fuse_fs.c static int invf_chmod(const char *path, mode_t mode, struct fuse_file_info *fi)
+invf_chown       function   1210 /home/user/InvariantFS/src-extracted/VFS/src/fuse_fs.c static int invf_chown(const char *path, uid_t uid, gid_t gid,
+invf_create      function    742 /home/user/InvariantFS/src-extracted/VFS/src/fuse_fs.c static int invf_create(const char *path, mode_t mode, struct fuse_file_info *fi)
+invf_destroy     function   1496 /home/user/InvariantFS/src-extracted/VFS/src/fuse_fs.c static void invf_destroy(void *private_data)
+invf_flush       function    998 /home/user/InvariantFS/src-extracted/VFS/src/fuse_fs.c static int invf_flush(const char *path, struct fuse_file_info *fi)
+invf_fsync       function   1005 /home/user/InvariantFS/src-extracted/VFS/src/fuse_fs.c static int invf_fsync(const char *path, int datasync, struct fuse_file_info *fi)
+invf_getattr     function    447 /home/user/InvariantFS/src-extracted/VFS/src/fuse_fs.c static int invf_getattr(const char *path, struct stat *st, struct fuse_file_info *fi)
+invf_getxattr    function   1338 /home/user/InvariantFS/src-extracted/VFS/src/fuse_fs.c static int invf_getxattr(const char *path, const char *name, char *value,
+invf_init        function   1553 /home/user/InvariantFS/src-extracted/VFS/src/fuse_fs.c static void *invf_init(struct fuse_conn_info *conn, struct fuse_config *cfg)
+invf_link        function   1271 /home/user/InvariantFS/src-extracted/VFS/src/fuse_fs.c static int invf_link(const char *from, const char *dest)
+invf_listxattr   function   1456 /home/user/InvariantFS/src-extracted/VFS/src/fuse_fs.c static int invf_listxattr(const char *path, char *list, size_t size)
+invf_mkdir       function    524 /home/user/InvariantFS/src-extracted/VFS/src/fuse_fs.c static int invf_mkdir(const char *path, mode_t mode)
+invf_mknod       function   1306 /home/user/InvariantFS/src-extracted/VFS/src/fuse_fs.c static int invf_mknod(const char *path, mode_t mode, dev_t rdev)
+invf_open        function    696 /home/user/InvariantFS/src-extracted/VFS/src/fuse_fs.c static int invf_open(const char *path, struct fuse_file_info *fi)
+invf_read        function    652 /home/user/InvariantFS/src-extracted/VFS/src/fuse_fs.c static int invf_read(const char *path, char *buf, size_t size, off_t offset,
+invf_readdir     function    485 /home/user/InvariantFS/src-extracted/VFS/src/fuse_fs.c static int invf_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
+invf_readlink    function   1257 /home/user/InvariantFS/src-extracted/VFS/src/fuse_fs.c static int invf_readlink(const char *path, char *buf, size_t size)
+invf_release     function   1021 /home/user/InvariantFS/src-extracted/VFS/src/fuse_fs.c static int invf_release(const char *path, struct fuse_file_info *fi)
+invf_removexattr function   1477 /home/user/InvariantFS/src-extracted/VFS/src/fuse_fs.c static int invf_removexattr(const char *path, const char *name)
+invf_rename      function   1039 /home/user/InvariantFS/src-extracted/VFS/src/fuse_fs.c static int invf_rename(const char *from, const char *to, unsigned int flags)
+invf_rmdir       function    555 /home/user/InvariantFS/src-extracted/VFS/src/fuse_fs.c static int invf_rmdir(const char *path)
+invf_setxattr    function   1423 /home/user/InvariantFS/src-extracted/VFS/src/fuse_fs.c static int invf_setxattr(const char *path, const char *name,
+invf_statfs      function   1070 /home/user/InvariantFS/src-extracted/VFS/src/fuse_fs.c static int invf_statfs(const char *path, struct statvfs *st)
+invf_sweep_worker function    875 /home/user/InvariantFS/src-extracted/VFS/src/fuse_fs.c static void invf_sweep_worker(void)
+invf_symlink     function   1226 /home/user/InvariantFS/src-extracted/VFS/src/fuse_fs.c static int invf_symlink(const char *target, const char *linkpath)
+invf_truncate    function   1157 /home/user/InvariantFS/src-extracted/VFS/src/fuse_fs.c static int invf_truncate(const char *path, off_t len, struct fuse_file_info *fi)
+invf_unlink      function   1509 /home/user/InvariantFS/src-extracted/VFS/src/fuse_fs.c static int invf_unlink(const char *path)
+invf_utimens     function   1190 /home/user/InvariantFS/src-extracted/VFS/src/fuse_fs.c static int invf_utimens(const char *path, const struct timespec tv[2],
+invf_write       function    791 /home/user/InvariantFS/src-extracted/VFS/src/fuse_fs.c static int invf_write(const char *path, const char *buf, size_t size, off_t offset,
+is_anchor_name   function    326 /home/user/InvariantFS/src-extracted/VFS/src/fuse_fs.c static int is_anchor_name(const char *name) /* "dir/" anchor record */
+main             function   1642 /home/user/InvariantFS/src-extracted/VFS/src/fuse_fs.c int main(int argc, char *argv[])
+meta_apply_patch function    421 /home/user/InvariantFS/src-extracted/VFS/src/fuse_fs.c static int meta_apply_patch(const char *path, unsigned mask,
+meta_defaults    function    332 /home/user/InvariantFS/src-extracted/VFS/src/fuse_fs.c static void meta_defaults(const char *name, uint64_t size, invfs_meta_pub *m)
+meta_for_path    function    351 /home/user/InvariantFS/src-extracted/VFS/src/fuse_fs.c static int meta_for_path(const char *path, char *ename, size_t ecapsz,
+on_sweep_signal  function    864 /home/user/InvariantFS/src-extracted/VFS/src/fuse_fs.c static void on_sweep_signal(int sig)
+parse_size_opt   function   1619 /home/user/InvariantFS/src-extracted/VFS/src/fuse_fs.c static int parse_size_opt(const char *s, uint64_t *out)
+resize_volume_file function   1127 /home/user/InvariantFS/src-extracted/VFS/src/fuse_fs.c static int resize_volume_file(const char *name, off_t len)
+snapshot_entry   function    297 /home/user/InvariantFS/src-extracted/VFS/src/fuse_fs.c static int snapshot_entry(const char *name, uint64_t *ino_out, uint64_t *size_out,
+table_mark_stale function     46 /home/user/InvariantFS/src-extracted/VFS/src/fuse_fs.c static void table_mark_stale(void) { g_table_stale = 1; }
+table_rebuild_locked function    688 /home/user/InvariantFS/src-extracted/VFS/src/fuse_fs.c static void table_rebuild_locked(void)
+table_refresh_if_stale_locked function     67 /home/user/InvariantFS/src-extracted/VFS/src/fuse_fs.c static void table_refresh_if_stale_locked(void)
+table_remove_name function    267 /home/user/InvariantFS/src-extracted/VFS/src/fuse_fs.c static void table_remove_name(const char *name)
+table_sync_one   function     51 /home/user/InvariantFS/src-extracted/VFS/src/fuse_fs.c static void table_sync_one(const char *name)
+table_sync_one_locked function    283 /home/user/InvariantFS/src-extracted/VFS/src/fuse_fs.c static void table_sync_one_locked(const char *name)
+table_upsert_locked function    235 /home/user/InvariantFS/src-extracted/VFS/src/fuse_fs.c static void table_upsert_locked(const char *name, uint64_t ino, uint64_t size,
+wctx_ensure_ws_locked function    635 /home/user/InvariantFS/src-extracted/VFS/src/fuse_fs.c static int wctx_ensure_ws_locked(wctx *c)
+wctx_flush_tail_locked function    622 /home/user/InvariantFS/src-extracted/VFS/src/fuse_fs.c static int wctx_flush_tail_locked(wctx *c)

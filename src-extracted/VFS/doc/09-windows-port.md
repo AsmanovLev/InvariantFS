@@ -1,5 +1,12 @@
 # Windows Port
 
+> **Статус: EOL / stale (исторический контекст).** Windows-порт заморожен:
+> вся работа WP10–WP21 (Text Zone, кодепаки, контейнерпаки, heat, seal,
+> resize, rollback, streaming write path, flock) велась только на Linux,
+> и Windows-код (dokan_fs.c, winfsp_fs.c, tests*.ps1) этих возможностей
+> не имеет и сборкой не проверяется. Документ описывает последнее
+> состояние порта как справку, не как план.
+
 ## I/O Path
 
 On Windows, raw block device access is done via `\\.\PhysicalDriveN` or `\\.\G:` syntax:

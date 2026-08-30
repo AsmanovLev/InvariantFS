@@ -1,0 +1,9 @@
+exe_scan_media   function    119 /home/user/InvariantFS/src-extracted/VFS/src/vol_exer.c static size_t exe_scan_media(const uint8_t *b, size_t n,
+exer_payload_parse function    156 /home/user/InvariantFS/src-extracted/VFS/src/vol_exer.c int exer_payload_parse(const uint8_t *pay, size_t pay_len,
+exer_rd64        function     24 /home/user/InvariantFS/src-extracted/VFS/src/vol_exer.c static uint64_t exer_rd64(const uint8_t *p)
+exer_splice      function    195 /home/user/InvariantFS/src-extracted/VFS/src/vol_exer.c void exer_splice(const uint8_t *pay, const exer_row *rows, size_t n,
+exer_wr64        function     17 /home/user/InvariantFS/src-extracted/VFS/src/vol_exer.c static void exer_wr64(uint8_t *p, uint64_t v)
+jpeg_scan_end    function     49 /home/user/InvariantFS/src-extracted/VFS/src/vol_exer.c static size_t jpeg_scan_end(const uint8_t *b, size_t n, size_t p)
+png_scan_end     function     95 /home/user/InvariantFS/src-extracted/VFS/src/vol_exer.c static size_t png_scan_end(const uint8_t *b, size_t n, size_t p)
+vol_exer_carve   function    238 /home/user/InvariantFS/src-extracted/VFS/src/vol_exer.c int vol_exer_carve(invfs_volume *v, uint64_t inode_id,
+vol_exer_last_parts function    463 /home/user/InvariantFS/src-extracted/VFS/src/vol_exer.c unsigned vol_exer_last_parts(const invfs_volume *v)

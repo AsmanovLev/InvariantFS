@@ -1,0 +1,7 @@
+vol_create_container_file function     79 /home/user/InvariantFS/src-extracted/VFS/src/vol_ast.c uint64_t vol_create_container_file(invfs_volume *v, const char *name,
+vol_deserialize_children function     41 /home/user/InvariantFS/src-extracted/VFS/src/vol_ast.c static int vol_deserialize_children(const uint8_t *blob, size_t blob_len,
+vol_find         function    358 /home/user/InvariantFS/src-extracted/VFS/src/vol_ast.c uint64_t vol_find(invfs_volume *v, const char *name)
+vol_get_children function    305 /home/user/InvariantFS/src-extracted/VFS/src/vol_ast.c int vol_get_children(invfs_volume *v, uint64_t inode_id,
+vol_serialize_children function     11 /home/user/InvariantFS/src-extracted/VFS/src/vol_ast.c static uint8_t *vol_serialize_children(const invfs_ast_child_entry *ch,
+vol_zip_extract_member function    373 /home/user/InvariantFS/src-extracted/VFS/src/vol_ast.c int vol_zip_extract_member(const uint8_t *z, size_t zlen,
+vol_zip_parse_children function    239 /home/user/InvariantFS/src-extracted/VFS/src/vol_ast.c int vol_zip_parse_children(const uint8_t *z, size_t zlen,

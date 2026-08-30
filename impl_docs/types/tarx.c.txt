@@ -1,0 +1,2 @@
+__anon29f776bb0108 struct       36 /home/user/InvariantFS/src-extracted/VFS/src/tarx.c typedef struct {
+tarx_member      typedef      42 /home/user/InvariantFS/src-extracted/VFS/src/tarx.c } tarx_member;

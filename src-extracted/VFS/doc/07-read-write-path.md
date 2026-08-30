@@ -7,7 +7,8 @@ write(fd, buf, len, offset):
   1. Allocate blocks in RAW Zone (via Bitmap + free-list cursor)
   2. Write data to RAW Zone (linear append, fast)
   3. Update in-memory L2P: inode → RAW blocks
-  4. Update file size in Primary Index
+  4. Update file size (новая append-запись в inode-области; «Primary Index»
+     не строился — 02-on-disk-format.md)
   5. Return written bytes
 
   Note: No compression on write. The file stays in RAW Zone
@@ -159,8 +160,9 @@ static const struct address_space_operations invarifs_aops = {
 
 ```
 stat(path):
-  → Look up inode in Primary Index
-  → Return file_size, permissions, timestamps from index
+  → Найти живую запись по in-memory индексу имён (inode-область
+    сканируется при открытии тома; перезапись = новая запись + tombstone)
+  → Return file_size, permissions, timestamps (INO2 ext)
   → No I/O to Shadow Space needed
 ```
 
@@ -168,29 +170,23 @@ stat(path):
 
 ```
 readdir(dir):
-  → Look up directory inode
-  → Read directory listing from Primary Index or dedicated directory blocks
+  → Каталоги виртуальные: vol_list_dir выводит их из плоских имён
+    (путь = имя), пустые каталоги — якоря-записи `dir/`
+    (02-on-disk-format.md, «Виртуальные каталоги»)
+  → Второй проход вычёркивает имена, убитые поздними DELT-записями
   → Return entries
 ```
 
 ### chmod / chown / utimens
 
-```
-chmod(path, mode):
-  → Update permissions in Primary Index (in-memory)
-  → Log change in L2P journal
-  → On fsync: flush journal
-```
+Реализовано (FUSE: `.chmod`/`.chown`/`.utimens`): правка полей INO2
+meta-ext записи (format v2, VOLF_META2) — append новой записи, tombstone
+старой; без перепаковки данных. Проектный «Primary Index» не строился —
+см. 02-on-disk-format.md (Inode Area).
 
 ### Tag Edit (rename artist)
 
-```
-rename_metadata(path, "artist", "Beyoncé"):
-  → Load current tag block from Text Zone
-  → Append delta {artist: "Beyoncé"} to Text Zone
-  → Update AST recipe (add delta reference)
-  → No re-compression of audio needed
-  → On fsync: flush journal
-
-  Cost: ~50 bytes written, ~15 ms total
-```
+**(Не реализовано.)** Проектный `rename_metadata` с append-дельтой в Text
+Zone никогда не существовал в коде (и отменён — см. 04, «Tag Block Delta
+System»). Правка тега сегодня = обычная перезапись файла через путь
+записи WP4b (материализация в RAW, пересборка на следующем sweep'е).

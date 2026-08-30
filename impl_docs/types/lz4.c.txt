@@ -1,0 +1,30 @@
+BYTE             typedef     304 /home/user/InvariantFS/src-extracted/VFS/src/lz4.c typedef uint8_t BYTE;
+BYTE             typedef     314 /home/user/InvariantFS/src-extracted/VFS/src/lz4.c typedef unsigned char BYTE;
+LoadDict_mode_e  typedef    1585 /home/user/InvariantFS/src-extracted/VFS/src/lz4.c typedef enum { _ld_fast, _ld_slow } LoadDict_mode_e;
+Rvl_t            typedef    1976 /home/user/InvariantFS/src-extracted/VFS/src/lz4.c typedef size_t Rvl_t;
+S32              typedef     307 /home/user/InvariantFS/src-extracted/VFS/src/lz4.c typedef int32_t S32;
+S32              typedef     317 /home/user/InvariantFS/src-extracted/VFS/src/lz4.c typedef signed int S32;
+U16              typedef     305 /home/user/InvariantFS/src-extracted/VFS/src/lz4.c typedef uint16_t U16;
+U16              typedef     315 /home/user/InvariantFS/src-extracted/VFS/src/lz4.c typedef unsigned short U16;
+U32              typedef     306 /home/user/InvariantFS/src-extracted/VFS/src/lz4.c typedef uint32_t U32;
+U32              typedef     316 /home/user/InvariantFS/src-extracted/VFS/src/lz4.c typedef unsigned int U32;
+U64              typedef     308 /home/user/InvariantFS/src-extracted/VFS/src/lz4.c typedef uint64_t U64;
+U64              typedef     318 /home/user/InvariantFS/src-extracted/VFS/src/lz4.c typedef unsigned long long U64;
+__anonc2b1ebb60103 enum        328 /home/user/InvariantFS/src-extracted/VFS/src/lz4.c typedef enum {
+__anonc2b1ebb6020a union       365 /home/user/InvariantFS/src-extracted/VFS/src/lz4.c const union { U32 u; BYTE c[4]; } one = { 1 }; /* don't use static : performance detrimental */
+__anonc2b1ebb60303 enum        717 /home/user/InvariantFS/src-extracted/VFS/src/lz4.c typedef enum { clearedTable = 0, byPtr, byU32, byU16 } tableType_t;
+__anonc2b1ebb60403 enum        742 /home/user/InvariantFS/src-extracted/VFS/src/lz4.c typedef enum { noDict = 0, withPrefix64k, usingExtDict, usingDictCtx } dict_directive;
+__anonc2b1ebb60503 enum        743 /home/user/InvariantFS/src-extracted/VFS/src/lz4.c typedef enum { noDictIssue = 0, dictSmall } dictIssue_directive;
+__anonc2b1ebb60608 struct     1545 /home/user/InvariantFS/src-extracted/VFS/src/lz4.c typedef struct { char c; LZ4_stream_t t; } t_a;
+__anonc2b1ebb60703 enum       1585 /home/user/InvariantFS/src-extracted/VFS/src/lz4.c typedef enum { _ld_fast, _ld_slow } LoadDict_mode_e;
+__anonc2b1ebb60803 enum       1842 /home/user/InvariantFS/src-extracted/VFS/src/lz4.c typedef enum { decode_full_block = 0, partial_decode = 1 } earlyEnd_directive;
+dictIssue_directive typedef     743 /home/user/InvariantFS/src-extracted/VFS/src/lz4.c typedef enum { noDictIssue = 0, dictSmall } dictIssue_directive;
+dict_directive   typedef     742 /home/user/InvariantFS/src-extracted/VFS/src/lz4.c typedef enum { noDict = 0, withPrefix64k, usingExtDict, usingDictCtx } dict_directive;
+earlyEnd_directive typedef    1842 /home/user/InvariantFS/src-extracted/VFS/src/lz4.c typedef enum { decode_full_block = 0, partial_decode = 1 } earlyEnd_directive;
+limitedOutput_directive typedef     332 /home/user/InvariantFS/src-extracted/VFS/src/lz4.c } limitedOutput_directive;
+reg_t            typedef     323 /home/user/InvariantFS/src-extracted/VFS/src/lz4.c typedef U64 reg_t; /* 64-bits in x32 mode */
+reg_t            typedef     325 /home/user/InvariantFS/src-extracted/VFS/src/lz4.c typedef size_t reg_t; /* 32-bits in x32 mode */
+t_a              typedef    1545 /home/user/InvariantFS/src-extracted/VFS/src/lz4.c typedef struct { char c; LZ4_stream_t t; } t_a;
+tableType_t      typedef     717 /home/user/InvariantFS/src-extracted/VFS/src/lz4.c typedef enum { clearedTable = 0, byPtr, byU32, byU16 } tableType_t;
+uptrval          typedef     309 /home/user/InvariantFS/src-extracted/VFS/src/lz4.c typedef uintptr_t uptrval;
+uptrval          typedef     319 /home/user/InvariantFS/src-extracted/VFS/src/lz4.c typedef size_t uptrval; /* generally true, except OpenVMS-64 */

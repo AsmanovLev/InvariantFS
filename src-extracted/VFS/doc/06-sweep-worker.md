@@ -6,41 +6,61 @@ The Sweep worker is a background thread/process that moves data from the RAW Zon
 
 - **Idle-triggered**: Runs when the filesystem is idle (like ReFS scrubber)
 - **On-demand**: Can be manually triggered for bulk processing
-- **Cursor-based**: Tracks last swept position via `sweep_cursor` in superblock
-- **Crash-safe**: Every sweep batch is journaled
+- **Walk-based**: проход по живым записям inode-области (поле суперблока
+  `sweep_cursor` зарезервировано, но не используется — курсора нет,
+  sweep каждый раз пересматривает том; флаг класса `invfs.class` делает
+  повторный проход дешёвым)
+- **Crash-safe**: до обхода взводится чекпоинт CKP0 (WP21, см. ниже);
+  журналируется каждая запись
 
-## Pipeline
+## Pipeline (как реализовано, `invf-sweep`)
 
 ```
-For each file in RAW Zone (from sweep_cursor):
-  1. Read file from RAW Zone
-  2. Magic Sniff → determine type(s)
-  3. For each semantic component:
-     a. Compress with optimal algorithm
-     b. Write to Shadow Space (batched by type)
-     c. Update in-memory L2P
-     d. Log journal entry: SWEEP_COMMIT
-  4. Build/update AST recipe
-  5. Update Primary Index (inode → AST recipe location)
-  6. Mark RAW blocks as free in Bitmap
-  7. Advance sweep_cursor
-  8. On fsync: flush journal + bitmap
+0. auto-realize: если жив чекпоинт прошлого sweep'а — vol_ckp_realize
+   (освободить удержанные блоки, снять CKP0); --realize делает только это
+1. vol_ckp_begin: взвести CKP0 + стадировать префикс журнала (WP21);
+   с этого момента vol_free_blocks ничего не освобождает (retmap)
+2. vol_heat_sweep_begin: распад тепловых счётчиков (WP19: rheat >>= 1,
+   wheat -= 1)
+3. Обход (walk): для каждой живой записи — vol_sweep_one(inode):
+   a. класс-флаг говорит, нужно ли пересматривать (таблица ниже)
+   b. Magic sniff → политика → транскод (bit-exact guard обязателен)
+   c. текст откладывается в PPMd-аккумулятор, бинарь семейств — в
+      бинарный аккумулятор (WP14a), члены контейнеров — тоже (WP14b)
+   d. освобождённое копится в retmap (пока CKP0 жив)
+4. vol_heat_promote: горячие члены PPMd/LZMA2-батчей → ZSTD-сегменты
+   (top-K по heat в пределах бюджета прохода)
+5. vol_sweep_dedupe: офлайн-дедуп сегментов (BLAKE3 хранимых байт,
+   L2P-remap дублей на один pba; zone==TEXT, целофайловые блобы и
+   отложенные в аккумулятор пропускаются)
+6. vol_tz_gc: mark-and-sweep мёртвых батчей владельца \x01tzb
+7. vol_tz_flush: seal накопленных text+binary батчей (сортировка
+   bytypesize, PPMd o=8 / ZSTD(+BCJ), decode+memcmp, size-guard)
+8. vol_ckp_end: retmap → реестр удержания (owner \x01reten)
+9. vol_flush; далее --seal / auto-reseal (WP20/20b: XOR-полосы + RS,
+   идемпотентный check-and-update по RDP0)
 ```
 
 ## Per-Type Processing
 
 ### FLAC
 
+Реализовано как FLACR (`algo=7`, детали формата — 03-ast-recipe.md):
+
 ```
-1. Parse FLAC metadata blocks
-   └─ METADATA_BLOCK_STREAMINFO → store raw (tiny, needed for header)
-   └─ METADATA_BLOCK_PICTURE → magic sniff → JPEG → JXL
-   └─ METADATA_BLOCK_VORBIS_COMMENT → text → ZSTD-19 + dict
-   └─ METADATA_BLOCK_PADDING → strip (not needed)
-2. Extract PCM frames → APE -c4000
-3. Build AST recipe (nested: FLAC container → components)
-4. Invariant check: decompress → compare BLAKE3 hash
+1. Разбор METADATA_BLOCK_*: PICTURE → сиблинги name!coverN (NONE-сегменты,
+   одинаковые обложки дедупятся), PADDING отбрасывается
+2. PCM → APE -c4000 блоб (один сегмент == весь файл)
+3. Заголовки фреймов (предиктор/LPC/Rice/партиции/…) → рецепт IVFR v2,
+   сиблинг name!recipe
+4. Guard: транскод только если ape+recipe+covers < flac; проверка —
+   полная пересборка и побайтовое сравнение (b3sum)
 ```
+
+Статус по платформам: тело транскода (`vol_create_flac_file`) на HEAD
+собрано только под Windows (`#ifdef _WIN32`, WP12(c) открыт) — на Linux
+FLAC уходит в generic-путь. Чтение FLACR на Linux работает при
+установленном внешнем `mac` (probe-гейт реестра кодеков).
 
 ### MP3 / ID3
 
@@ -81,32 +101,42 @@ PMP, тег → как есть (или ZSTD). Декомпозиция тега
 
 ### ZIP / Archives
 
-```
-1. Parse ZIP structure (local headers, central directory)
-2. For each entry:
-   └─ If low compression: decompress → sniff → recurse into Sweep
-   └─ If max compression: store raw as single block
-3. Build AST recipe (nested: ZIP container → entries)
-4. Reconstruct central directory on read
-```
+Первоначальный план «разобрать архив и пережать каждого члена» **не
+реализован и отменён**: deflate-поток члена необратим из несжатых данных
+(LZ77+Хаффман конкретного зиппера невоспроизводимы), поэтому единственный
+бит-экзактный вариант — хранить архив целиком. Как есть:
+
+- **ZIP** хранится verbatim (ZSTD-19 по сегментам); члены — виртуальные
+  окна `name!member` в оригинальные байты, извлекаются на лету
+  (stored = копия диапазона, deflate = tinfl). Вложенность
+  `a.zip!inner.zip!x.txt` — рекурсивно. Подробности: 03-ast-recipe.md.
+- **TAR / tar.gz** — рецептные формы TARR/GZR (члены → сиблинги
+  `name!partN`, заголовки и хвост — в рецепте, deflate-реплика для gz).
+- **Образы ФС и прочие контейнеры** — внешние контейнерные пакеты
+  (WP16): члены → `name!mbrNNNN`, seekable-карта `name!mbrmap`.
+  Пакеты: rawdisk/ext4fs/fatfs/xfs/ntfs/vdi/qcow2/p7z.
+- Сами члены контейнеров проходят весь обычный pipeline, включая
+  батчинг (WP14b M1).
 
 ### Executables
 
-```
-1. Magic sniff → PE/ELF
-2. Apply BCJ2 filter (x86 branch/call conversion)
-3. ZSTD -19
-4. Invariant check
-```
+Реализовано иначе, чем первоначальный «BCJ2 + ZSTD-19 на файл»:
+
+- **WP14a binary batching**: ELF/PE/Mach-O складываются в cross-file
+  батчи (zone=TEXT, тот же владелец `\x01tzb`): сортировка по семейству
+  (e_machine/PE/Mach-O), x86-файлы проходят BCJ-префильтр перед
+  склейкой (algo=ZSTD_BCJ=14), батч жмётся ZSTD.
+- **WP14b M2 exe-as-container (EXER, algo=15)**: встроенные JPEG/PNG
+  ≥ 16 КиБ вырезаются в сиблинги `name!exrN`, главная запись — ZSTD-19
+  блоб рецепта + склеенных остатков; guard — полная пересборка с memcmp.
 
 ### Unknown Files
 
-```
-1. Entropy test
-   └─ Low entropy → ZSTD -19
-   └─ High entropy → store raw
-2. Invariant check
-```
+Эвристика энтропии из первоначального дизайна не реализована. Как есть:
+неопознанные данные идут в **generic-путь (ZSTD-19)**; если выигрыш
+меньше `INVFS_MIN_GAIN_PCT` (по умолч. 0.5%), файл получает класс
+UNCOMPRESSIBLE и не пересматривается, пока снифф головы ничего не
+признает при выросшем поколении реестра кодеков.
 
 ## Compactor (дефрагментация Shadow Space)
 
@@ -136,6 +166,14 @@ mark-and-sweep (`vol_tz_gc`: метка по живым member-записям, �
 - Ручной вызов (ioctl)
 
 ## Конкурентность: L2P Redirect-on-Write (Вариант B)
+
+**Статус:** ниже — дизайн-обоснование, почему записи не блокируются
+под sweep'ом (исторический контекст). На практике гонка исключена
+грубее: демон дренит pending-очередь только при `open_handles == 0`,
+а офлайн `invf-sweep` против живого демона исключён флоком —
+`vol_open` берёт `flock(LOCK_EX|LOCK_NB)` на POSIX (WP4b, b5300ab3) /
+share-режим без WRITE на Windows. Запись в уже свёрнутый файл при этом
+материализует его обратно в RAW (write = implicit downgrade, WP4b).
 
 Запись в файл **во время** работы Sweep-воркера не блокирует inode (никаких `EBUSY`, как в CoW-деревьях btrfs):
 
@@ -225,11 +263,13 @@ generic-путь нетронут.
 | — | нет флага | свежая запись: полный путь (снифф → политика → транскод → guard → штамп) |
 | 1 | UNCOMPRESSIBLE | выигрыш < `INVFS_MIN_GAIN_PCT` (по умолч. 0.5%); повтор, только если поколение реестра выросло **и** снифф головы что-то признал; иначе снапшот gen подвигается (полного чтения нет — только 8 KB снифф) |
 | 2 | CODEC | кодек-специфичное (PMP/JXL/APE/WV); проверка соответствия политике |
-| 3 | CONTAINER | контейнер (ZIPR/TARR/GZR/PNGR/FLACR); то же |
+| 3 | CONTAINER | контейнер (ZIPR/TARR/GZR/PNGR/FLACR, EXER, контейнерпаки WP16 — штамп CONTAINER{algo,gen}); то же |
 | 4 | GENERIC | generic ZSTD-19; «пол» всегда соответствует — ниже некуда |
 | 5 | GENERIC_MEMLIMIT{algo,gen} | кодек отклонён лимитом памяти; повтор, когда `dec_mem` кодека ≤ текущего лимита |
 | 6 | GENERIC_GUARD{algo,gen} | guard кодека отказал; повтор первым кандидатом, когда `generation` кодека выросло (новый субэнкодер) |
 | 7 | TEXT | член PPMd-батча; соответствие = размер батча против arc_limit/2 |
+| 8 | BATCHED_BIN | член бинарного батча (WP14a: zone=TEXT, algo=ZSTD или ZSTD_BCJ); та же семантика compliance/GC, что у TEXT |
+| 9 | DEFER_ENOSPC{algo,gen} | sweep отложил файл из-за цены по месту (WP16b): ждёт в RAW и перевычисляется на КАЖДОМ sweep'е; штамп — отклонивший кодек |
 
 Для 5/6 поля `algo`/`gen` — **отклонивший** кодек и его поколение на момент
 отказа; для 1 — 0 + снапшот `invfs_registry_generation()`; для принятых —
@@ -276,8 +316,9 @@ MEMLIMIT, чтобы поднятый лимит нашёл файл снова)
 
 Полный CLI-проход (`invf-sweep`) — офлайн. Для «горячо смонтированной»
 ФС (Dokan/FUSE) sweep живёт **внутри демона** (одна L2P в памяти — два
-процесса не открывают том: `io_open` держит `FILE_SHARE_READ` без
-WRITE).
+процесса не открывают том: на POSIX `vol_open` держит
+`flock(LOCK_EX|LOCK_NB)` на образе (WP4b), на Windows — `io_open`
+держит `FILE_SHARE_READ` без WRITE).
 
 - **pending-список в RAM**: `vol_mark_pending` при записи
   (DkFlushFileBuffers/DkCloseFile, FUSE-flush — после `vol_create_file`).
@@ -288,7 +329,9 @@ WRITE).
   Интервал — `INVFS_SWEEP_INTERVAL` (сек, по умолчанию 30; тесты — 2).
 - **Единое ядро**: `vol_sweep_one(inode)` — ZIP-explode / FLAC / TAR /
   GZ / PNG / JPEG / MP3 / generic-shadow — используется и CLI, и демоном
-  (sweep.c main стал тонким циклом поверх ядра, коды 1-8 = тип транскода).
+  (CLI `tools/invf-sweep.c` — тонкий цикл поверх ядра; коды результата =
+  тип транскода: 2=FLAC, 3=TAR, 4=GZ, 5=PNG, 6=generic, 8=MP3,
+  9=text→батч, 10=binary→батч, 11=exe-carve).
 - **Горячий путь честный**: транскод никогда не происходит при чтении;
   но чтение PNGR вызывает djxl (секунды) — принято на этой фазе,
   оптимизация (кэш пикселей / dual-store) — отдельной задачей.

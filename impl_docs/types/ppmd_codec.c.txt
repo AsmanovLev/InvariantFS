@@ -1,0 +1,4 @@
+CInvIn           typedef      24 /home/user/InvariantFS/src-extracted/VFS/src/ppmd_codec.c typedef struct { IByteIn base; const Byte *cur, *end; unsigned extra; } CInvIn;
+CInvOut          typedef      25 /home/user/InvariantFS/src-extracted/VFS/src/ppmd_codec.c typedef struct { IByteOut base; Byte *cur, *end; size_t overflow; } CInvOut;
+__anon3b86d38a0108 struct       24 /home/user/InvariantFS/src-extracted/VFS/src/ppmd_codec.c typedef struct { IByteIn base; const Byte *cur, *end; unsigned extra; } CInvIn;
+__anon3b86d38a0208 struct       25 /home/user/InvariantFS/src-extracted/VFS/src/ppmd_codec.c typedef struct { IByteOut base; Byte *cur, *end; size_t overflow; } CInvOut;

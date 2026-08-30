@@ -45,3 +45,7 @@
 
 Повтор: `/var/tmp/bench/harness/fs-bench.sh` (btrfs/erofs), INVFS-легa —
 команды в истории сессии; скрипт `bench-invfs.sh` планируется в tests/.
+
+> Этот прогон (2025-08-25, 2.95x) — до WP10/WP14. Актуальные числа на том
+> же корпусе и чтение vs btrfs: `src-extracted/VFS/doc/16-benchmarks.md`,
+> серия B30+ (Silesia end-to-end, батчинг, B34–B36).

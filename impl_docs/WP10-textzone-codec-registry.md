@@ -135,8 +135,10 @@ generic path untouched. Sorting: stable sort by (family, size) inside the accumu
 ("не перемешивать, доупорядочивать", doc/06 B29 +26.6% ratio) — this is the language grouping.
 
 Accumulator lives in volume.c (house style: needs statics vol_map/l2p/meta/tombstones; a separate
-module can't reach them). vol_sweep_one defers text candidates into accumulator; seals at ≥4MB;
-`vol_tz_flush(v)` drains the partial batch at end of CLI run (sweep.c) and daemon drain
+module can't reach them). [Post-split (14bb2d72): the accumulator and the whole text-zone write path
+live in `vol_textzone.c`; the statics argument is why `volume_internal.h` exists.] vol_sweep_one
+defers text candidates into accumulator; seals at ≥4MB;
+`vol_tz_flush(v)` drains the partial batch at end of CLI run (tools/invf-sweep.c) and daemon drain
 (vol_sweep_pending). Seal: PPMd encode → MANDATORY decode+memcmp verify (doc/06 invariant,
 in-process, free) → size guard `ppmd_len < raw_len` (else store batch as NONE) → write segment
 under owner → per-member: new record version (append-only), L2P dups, tombstone old record,
@@ -261,8 +263,10 @@ shell interpolation; Landlock/seccomp for helpers is a later hardening phase.
   zone==TEXT blocks (anti-PB7 pattern by design; GC owns batch blocks).
 - The sweep dedupe pass MUST skip zone==TEXT entries: batches are already shared, their
   pbas belong to the owner inode, and they are never dedup candidates.
-- PB7 itself (BINARY dedup delete frees shared blocks) stays open (old roadmap WP6);
-  WP10 neither fixes nor worsens it.
+- ~~PB7 itself (BINARY dedup delete frees shared blocks) stays open (old roadmap WP6);
+  WP10 neither fixes nor worsens it.~~ CLOSED 2026-08-28: vol_retire_inode (now
+  vol_records.c) skips any pba another live MAP entry references (two pba-indexed
+  bitmaps per retire); refcounts were never needed. WP6 is moot.
 
 Open defaults (accepted unless vetoed): owner name `\x01tzb`; GC v1 reclaims only fully-dead
 batches; batch size guard = `ppmd < raw` (no ZSTD comparison, ~3s/4MB too expensive);
@@ -313,9 +317,11 @@ Rules:
    no inode → no class flag, no sweep visibility); per-member treatment happens only via
    extraction containers (parts are inodes — class flag + policy apply as usual). The
    container as a whole still gets class CONTAINER.
-7. Sibling parts ("!"-names) are excluded from TEXT batching in v1 (their bytes are owned
-   by the container rebuild semantics; PPMD is lossless so vol_read_file-based rebuilds
-   would survive it, but GC/L2P coupling needs care — revisit in v2).
+7. ~~Sibling parts ("!"-names) are excluded from TEXT batching in v1~~ — the v2 revisit LANDED as
+   WP14b: parts of a freshly-exploded container defer into THIS run's accumulators
+   (vol_sweep.c:defer_container_parts), and the walk's absent-stamp branch re-batches parts stored
+   per-segment generic (binary batches too, WP14a). The coupling concern is handled by the flush
+   re-reading each part's live record before sealing it.
 8. **Async decode-ahead (m0089, design-only for v1):** when the budget allows (decoded
    unit ≤ arc_limit/2 per the ARC refusal rule; decode working set ≤ dec_mem_limit),
    reads may prefetch — touching one TEXT member already decodes and ARCs its whole

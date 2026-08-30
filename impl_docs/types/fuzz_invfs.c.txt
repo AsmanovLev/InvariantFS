@@ -1,0 +1,13 @@
+__anonf0de9a300108 struct      106 /home/user/InvariantFS/src-extracted/VFS/src/fuzz_invfs.c typedef struct {
+__anonf0de9a300208 struct      243 /home/user/InvariantFS/src-extracted/VFS/src/fuzz_invfs.c typedef struct {
+__anonf0de9a300308 struct      458 /home/user/InvariantFS/src-extracted/VFS/src/fuzz_invfs.c typedef struct {
+__anonf0de9a300408 struct      471 /home/user/InvariantFS/src-extracted/VFS/src/fuzz_invfs.c struct { uint8_t bytes[16]; size_t len; size_t off; } magic[3];
+__anonf0de9a300508 struct     1207 /home/user/InvariantFS/src-extracted/VFS/src/fuzz_invfs.c typedef struct {
+__anonf0de9a300608 struct     1215 /home/user/InvariantFS/src-extracted/VFS/src/fuzz_invfs.c typedef struct { uint32_t idx; uint64_t usize; } mrmp_member;
+__anonf0de9a300708 struct     1305 /home/user/InvariantFS/src-extracted/VFS/src/fuzz_invfs.c typedef struct {
+leg_t            typedef     111 /home/user/InvariantFS/src-extracted/VFS/src/fuzz_invfs.c } leg_t;
+mf_gen           typedef     473 /home/user/InvariantFS/src-extracted/VFS/src/fuzz_invfs.c } mf_gen;
+mrmp_ent         typedef    1213 /home/user/InvariantFS/src-extracted/VFS/src/fuzz_invfs.c } mrmp_ent;
+mrmp_map         typedef    1312 /home/user/InvariantFS/src-extracted/VFS/src/fuzz_invfs.c } mrmp_map;
+mrmp_member      typedef    1215 /home/user/InvariantFS/src-extracted/VFS/src/fuzz_invfs.c typedef struct { uint32_t idx; uint64_t usize; } mrmp_member;
+sniff_magic      typedef     249 /home/user/InvariantFS/src-extracted/VFS/src/fuzz_invfs.c } sniff_magic;

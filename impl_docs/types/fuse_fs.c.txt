@@ -1,4 +1,4 @@
-__anon762b32870108 struct       30 /home/user/InvariantFS/src-extracted/VFS/src/fuse_fs.c typedef struct {
-__anon762b32870208 struct      197 /home/user/InvariantFS/src-extracted/VFS/src/fuse_fs.c typedef struct {
-fs_entry         typedef      35 /home/user/InvariantFS/src-extracted/VFS/src/fuse_fs.c } fs_entry;
-wctx             typedef     201 /home/user/InvariantFS/src-extracted/VFS/src/fuse_fs.c } wctx;
+__anon762b32870108 struct       76 /home/user/InvariantFS/src-extracted/VFS/src/fuse_fs.c typedef struct {
+fs_entry         typedef      83 /home/user/InvariantFS/src-extracted/VFS/src/fuse_fs.c } fs_entry;
+wctx             struct      576 /home/user/InvariantFS/src-extracted/VFS/src/fuse_fs.c typedef struct wctx {
+wctx             typedef     586 /home/user/InvariantFS/src-extracted/VFS/src/fuse_fs.c } wctx;

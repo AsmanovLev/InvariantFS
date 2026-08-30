@@ -1,0 +1,22 @@
+__anon778cfc150108 struct       51 /home/user/InvariantFS/src-extracted/VFS/src/volume_internal.h typedef struct { uint32_t offset, len; uint8_t kind; uint8_t *data; } flacx_cover;
+__anon778cfc150208 struct       60 /home/user/InvariantFS/src-extracted/VFS/src/volume_internal.h typedef struct {
+__anon778cfc150308 struct      183 /home/user/InvariantFS/src-extracted/VFS/src/volume_internal.h typedef struct {
+__anon778cfc150408 struct      341 /home/user/InvariantFS/src-extracted/VFS/src/volume_internal.h struct {
+__anon778cfc150508 struct      417 /home/user/InvariantFS/src-extracted/VFS/src/volume_internal.h typedef struct {
+__anon778cfc150608 struct      468 /home/user/InvariantFS/src-extracted/VFS/src/volume_internal.h typedef struct {
+__anon778cfc150708 struct      482 /home/user/InvariantFS/src-extracted/VFS/src/volume_internal.h typedef struct {
+dir_index_entry  struct      172 /home/user/InvariantFS/src-extracted/VFS/src/volume_internal.h typedef struct dir_index_entry {
+dir_index_entry  typedef     177 /home/user/InvariantFS/src-extracted/VFS/src/volume_internal.h } dir_index_entry;
+exer_row         typedef     420 /home/user/InvariantFS/src-extracted/VFS/src/volume_internal.h } exer_row;
+flacx_cover      typedef      51 /home/user/InvariantFS/src-extracted/VFS/src/volume_internal.h typedef struct { uint32_t offset, len; uint8_t kind; uint8_t *data; } flacx_cover;
+id_index_entry   struct      165 /home/user/InvariantFS/src-extracted/VFS/src/volume_internal.h typedef struct id_index_entry {
+id_index_entry   typedef     169 /home/user/InvariantFS/src-extracted/VFS/src/volume_internal.h } id_index_entry;
+invfs_name_fits  typedef     384 /home/user/InvariantFS/src-extracted/VFS/src/volume_internal.h typedef char invfs_name_fits[
+invfs_volume     struct      197 /home/user/InvariantFS/src-extracted/VFS/src/volume_internal.h typedef struct invfs_volume {
+invfs_volume     typedef     347 /home/user/InvariantFS/src-extracted/VFS/src/volume_internal.h } invfs_volume;
+name_index_entry struct      147 /home/user/InvariantFS/src-extracted/VFS/src/volume_internal.h typedef struct name_index_entry {
+name_index_entry typedef     159 /home/user/InvariantFS/src-extracted/VFS/src/volume_internal.h } name_index_entry;
+seal_view        typedef     494 /home/user/InvariantFS/src-extracted/VFS/src/volume_internal.h } seal_view;
+tarx_member      typedef      66 /home/user/InvariantFS/src-extracted/VFS/src/volume_internal.h } tarx_member;
+tz_candidate     typedef     188 /home/user/InvariantFS/src-extracted/VFS/src/volume_internal.h } tz_candidate;
+tz_owner         typedef     476 /home/user/InvariantFS/src-extracted/VFS/src/volume_internal.h } tz_owner;

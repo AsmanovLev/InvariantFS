@@ -66,9 +66,12 @@ advisory only — members are identified by INDEX. `usize` is NOT bounded by
 the container's size (a compressing container can hold members larger than
 the archive); the sum is overflow-checked. Honesty is enforced where the
 bytes move: the sweep stats every extracted member against its announced
-usize, the read side compares what it read against it.
+usize, the read side compares what it read against it. Registry capacity:
+**INVFS_PACK_MAX = 16** loaded packs (codec.c; raised 8 → 16 by `9022d31e`,
+with a loud drop warning when a pack doesn't fit).
 
-## 2. Sweep pipeline (volume.c `vol_containerpack_sweep`)
+## 2. Sweep pipeline (`vol_containerpack_sweep`; post-split in vol_cpack.c,
+called from vol_sweep.c's `vol_sweep_one`)
 
 Placement in `vol_sweep_one`: AFTER every builtin container magic
 (ZIP/TAR/GZ/PNG/FLAC, and the MP3 codec branch), BEFORE the WP13
@@ -361,8 +364,11 @@ runtime:
    partition); the FS side never holds more than the recipe + one 8 MiB
    window.
 
-(The 4-pack wave — rawdisk/ext4/fat/xfs — builds on this recipe: their
-maps are filesystem-structure walks rendered to MRMP runs.)
+(The production pack wave builds on this recipe: rawdisk/ext4fs/fatfs/xfs/
+ntfs/vdi (the six WP16c filesystem containerpacks, maps rendered from
+filesystem-structure walks), qcow2 (`b62f980e`), p7z (`f26139bd`, 7z
+stored-member decomposition) — plus jxl.codecpack as the WP16e whole-file
+codec proof above. splt_test stays the fixture pack.)
 
 # WP16e: builtin -> pack migration (the jxl.codecpack proof)
 

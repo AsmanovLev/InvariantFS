@@ -1,0 +1,2 @@
+__anon2f1cce4a0108 struct       24 /home/user/InvariantFS/src-extracted/VFS/src/sizes.c typedef struct {
+rec_hdr_t        typedef      32 /home/user/InvariantFS/src-extracted/VFS/src/sizes.c } rec_hdr_t;

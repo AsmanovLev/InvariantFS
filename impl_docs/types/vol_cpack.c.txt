@@ -1,0 +1,5 @@
+__anon7c6fd1ee0108 struct     1487 /home/user/InvariantFS/src-extracted/VFS/src/vol_cpack.c typedef struct {
+__anon7c6fd1ee0208 struct     1647 /home/user/InvariantFS/src-extracted/VFS/src/vol_cpack.c typedef struct {
+cpack_map_cache  struct     1902 /home/user/InvariantFS/src-extracted/VFS/src/vol_cpack.c struct cpack_map_cache {
+cpack_map_ent    typedef    1655 /home/user/InvariantFS/src-extracted/VFS/src/vol_cpack.c } cpack_map_ent;
+cpack_member     typedef    1491 /home/user/InvariantFS/src-extracted/VFS/src/vol_cpack.c } cpack_member;

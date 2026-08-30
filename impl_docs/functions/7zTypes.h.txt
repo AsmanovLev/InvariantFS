@@ -1,0 +1,7 @@
+Z7_C_IFACE_DECL  function    328 /home/user/InvariantFS/src-extracted/VFS/src/7zTypes.h Z7_C_IFACE_DECL (IByteIn)
+Z7_C_IFACE_DECL  function    335 /home/user/InvariantFS/src-extracted/VFS/src/7zTypes.h Z7_C_IFACE_DECL (IByteOut)
+Z7_C_IFACE_DECL  function    342 /home/user/InvariantFS/src-extracted/VFS/src/7zTypes.h Z7_C_IFACE_DECL (ISeqInStream)
+Z7_C_IFACE_DECL  function    358 /home/user/InvariantFS/src-extracted/VFS/src/7zTypes.h Z7_C_IFACE_DECL (ISeqOutStream)
+Z7_C_IFACE_DECL  function    374 /home/user/InvariantFS/src-extracted/VFS/src/7zTypes.h Z7_C_IFACE_DECL (ISeekInStream)
+Z7_C_IFACE_DECL  function    383 /home/user/InvariantFS/src-extracted/VFS/src/7zTypes.h Z7_C_IFACE_DECL (ILookInStream)
+Z7_C_IFACE_DECL  function    447 /home/user/InvariantFS/src-extracted/VFS/src/7zTypes.h Z7_C_IFACE_DECL (ICompressProgress)

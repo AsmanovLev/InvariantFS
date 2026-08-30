@@ -1,0 +1,17 @@
+__anon60688b030108 struct      364 /home/user/InvariantFS/src-extracted/VFS/src/miniz.c {
+__anon60688b030208 struct      603 /home/user/InvariantFS/src-extracted/VFS/src/miniz.c {
+__anon60688b030308 struct      750 /home/user/InvariantFS/src-extracted/VFS/src/miniz.c {
+__anon60688b030403 enum        844 /home/user/InvariantFS/src-extracted/VFS/src/miniz.c {
+__anon60688b030508 struct     2054 /home/user/InvariantFS/src-extracted/VFS/src/miniz.c {
+__anon60688b030603 enum       3212 /home/user/InvariantFS/src-extracted/VFS/src/miniz.c {
+__anon60688b030708 struct     3301 /home/user/InvariantFS/src-extracted/VFS/src/miniz.c {
+__anon60688b030808 struct     6025 /home/user/InvariantFS/src-extracted/VFS/src/miniz.c {
+inflate_state    typedef     370 /home/user/InvariantFS/src-extracted/VFS/src/miniz.c } inflate_state;
+mz_validate_uint16 typedef      30 /home/user/InvariantFS/src-extracted/VFS/src/miniz.c typedef unsigned char mz_validate_uint16[sizeof(mz_uint16) == 2 ? 1 : -1];
+mz_validate_uint32 typedef      31 /home/user/InvariantFS/src-extracted/VFS/src/miniz.c typedef unsigned char mz_validate_uint32[sizeof(mz_uint32) == 4 ? 1 : -1];
+mz_validate_uint64 typedef      32 /home/user/InvariantFS/src-extracted/VFS/src/miniz.c typedef unsigned char mz_validate_uint64[sizeof(mz_uint64) == 8 ? 1 : -1];
+mz_zip_array     typedef    3305 /home/user/InvariantFS/src-extracted/VFS/src/miniz.c } mz_zip_array;
+mz_zip_internal_state_tag struct     3307 /home/user/InvariantFS/src-extracted/VFS/src/miniz.c struct mz_zip_internal_state_tag
+mz_zip_writer_add_state typedef    6029 /home/user/InvariantFS/src-extracted/VFS/src/miniz.c } mz_zip_writer_add_state;
+tdefl_output_buffer typedef    2058 /home/user/InvariantFS/src-extracted/VFS/src/miniz.c } tdefl_output_buffer;
+tdefl_sym_freq   typedef     752 /home/user/InvariantFS/src-extracted/VFS/src/miniz.c } tdefl_sym_freq;

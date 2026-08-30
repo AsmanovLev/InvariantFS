@@ -22,9 +22,9 @@
 | **Sweep Worker** | Background process that moves data from RAW → Shadow, applying optimal compression per type. On-demand / offline. |
 | **L2P Table** | In-memory Logical-to-Physical address mapping, persisted via journal. |
 | **Magic Sniffer** | Classifies data by type (FLAC, MP3, ZIP, EXE, JPEG, etc.) using magic bytes and heuristics. |
-| **BLAKE3 Dedup** | Content-addressed storage via BLAKE3 hashing. Same block stored once, referenced many times. |
-| **Cache Layer** | In-RAM LRU cache (up to 1 GB) for decompressed blocks. |
-| **Trimming (TRIM)** | SSD-friendly block deallocation via IOCTL_STORAGE_MANAGE_DATA_SET_ATTRIBUTES. |
+| **BLAKE3 Dedup** | Офлайн-дедуп при sweep: сегменты хэшируются BLAKE3, дубли L2P-remap'ятся на один физический блок (doc/10). |
+| **Cache Layer** | In-RAM ARC cache (256 MB default budget, `INVFS_ARC_BYTES`) for whole reconstructed files — containers and whole-file transcodes (doc/15). |
+| **Trimming (TRIM)** | SSD-friendly block deallocation via `IOCTL_STORAGE_MANAGE_DATA_SET_ATTRIBUTES` (исторический контекст: Windows-порт, EOL — см. 09; на Linux пути discard в blkio нет). |
 
 ## Design Goals
 
@@ -43,7 +43,7 @@
 | # | Document | Description |
 |---|----------|-------------|
 | 01 | `01-overview.md` | Philosophy, concepts, design goals |
-| 02 | `02-on-disk-format.md` | Superblock, zones, bitmap, indexes |
+| 02 | `02-on-disk-format.md` | Superblock (+RDP0/RSZ0/CKP0), zones, bitmap, inode area |
 | 03 | `03-ast-recipe.md` | AST recipe format, flat & nested, read algorithm |
 | 04 | `04-compression-matrix.md` | Algorithm selection, benchmark results |
 | 05 | `05-data-classification.md` | Magic Sniffer, magic bytes, container detection |
@@ -51,18 +51,19 @@
 | 07 | `07-read-write-path.md` | Read/write I/O flow, fast metadata path |
 | 08 | `08-crash-recovery.md` | Journal recovery, superblock state machine |
 | 09 | `09-windows-port.md` | WinFsp vs raw, paths, tools table |
-| 10 | `10-deduplication.md` | BLAKE3 content addressing, semantic dedup, refcounting |
+| 10 | `10-deduplication.md` | Офлайн-дедуп сегментов (BLAKE3), почему без refcount'ов (PB7) |
 | 11 | `11-security-and-permissions.md` | POSIX + Windows hybrid permissions, xattr |
-| 12 | `12-enospc-strategy.md` | Watermarks, throttling, emergency fallback |
-| 13 | `13-linux-rootfs.md` | Initramfs, VFS driver, special file types |
+| 12 | `12-enospc-strategy.md` | Резерв/hard-min/READONLY, RAW→SHADOW spill (вотермарки — дизайн) |
+| 13 | `13-linux-rootfs.md` | Rootfs: FUSE-boot сегодня (Gentoo), kernel-маршрут как дизайн |
 | 14 | `14-windows-io-deep.md` | OVERLAPPED I/O, WRITE_THROUGH, IOCP, TRIM |
-| 15 | `15-caching.md` | 1 GB LRU cache, dedup-aware |
-| 16 | `16-benchmarks.md` | Бенчмарки B1-B30, обоснование алгоритмов |
-| 17 | `17-template-zone.md` | Семантическая декомпозиция: эталоны, residuals, audio LZ77 |
+| 15 | `15-caching.md` | ARC-кэш реконструированных файлов (256 МБ умолч.), байтовый бюджет |
+| 16 | `16-benchmarks.md` | Бенчмарки B1-B36, обоснование алгоритмов |
+| 17 | `17-template-zone.md` | Семантическая декомпозиция: эталоны, residuals, audio LZ77 (far-roadmap) |
+| 18 | `18-test-coverage.md` | Покрытие тестами: 21 e2e-набор (`make e2e`), unit-уровень, fuzz |
 
-## Инструменты (обновление: ivfs-stat)
+## Инструменты (обновление: invf-stat)
 
-`ivfs-stat <image> [--files]` — консольный инспектор места (Windows + Linux):
+`invf-stat <image> [--files]` — консольный инспектор места:
 
 - **Одна отсортированная полоса** (110 ячеек, масштаб ко всему тому):
   `[зелёный dedup][бирюзовый both][синий semantic][серый As-IS] → ░ free`
@@ -74,4 +75,6 @@
 
 Тесты в ОЗУ: `build_linux.sh` собирает весь CLI под Linux (gcc, системный zstd);
 `build_linux_ram_test.sh` — полный цикл cp→sweep→verify→stat в `/dev/shm` (tmpfs, RAM).
-Windows-сборка: `build.bat` (invf-stat добавлен).
+Основная сборка теперь — корневой `Makefile` (`make` → `bin/`, `make e2e` → 21 e2e-набор,
+см. 18-test-coverage.md). Windows-сборка `build.bat` — исторический контекст: порт EOL,
+вся работа WP10-WP21 велась только на Linux (см. 09-windows-port.md).

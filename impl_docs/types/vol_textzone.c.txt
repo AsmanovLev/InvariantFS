@@ -1,0 +1,8 @@
+__anon0eacfaad0108 struct       11 /home/user/InvariantFS/src-extracted/VFS/src/vol_textzone.c typedef struct {
+__anon0eacfaad0208 struct       20 /home/user/InvariantFS/src-extracted/VFS/src/vol_textzone.c typedef struct {
+__anon0eacfaad0308 struct       35 /home/user/InvariantFS/src-extracted/VFS/src/vol_textzone.c typedef struct {
+__anon0eacfaad0408 struct      345 /home/user/InvariantFS/src-extracted/VFS/src/vol_textzone.c typedef struct {
+tz_ctx           typedef     368 /home/user/InvariantFS/src-extracted/VFS/src/vol_textzone.c } tz_ctx;
+tz_member        typedef      31 /home/user/InvariantFS/src-extracted/VFS/src/vol_textzone.c } tz_member;
+tz_sealed        typedef      39 /home/user/InvariantFS/src-extracted/VFS/src/vol_textzone.c } tz_sealed;
+tz_slice         typedef      16 /home/user/InvariantFS/src-extracted/VFS/src/vol_textzone.c } tz_slice;

@@ -13,18 +13,18 @@ The Magic Sniffer identifies file types by examining magic bytes and structure. 
 | FLAC | `fLaC` | Container: parse METADATA_BLOCK_*, extract PCM, cover, tags |
 | MP3 | `ID3` / `\xff\xfb` / `\xff\xf3` | **packMP3 → PMP** (bit-exact, MPEG-1 Layer III; −9…−12%). MPEG-2/2.5 отвергается → ZSTD-19. Разбор ID3v2 на компоненты (APIC→JXL, теги→text) — будущий этап, сейчас файл жмётся целиком |
 | Opus | `OpusHead` (within Ogg) | Store raw (already lossy-compressed) |
-| ZIP | `PK\x03\x04` | Container: check compression method per entry, recurse |
-| GZ | `\x1f\x8b` | Check compression level, recompress if low |
+| ZIP | `PK\x03\x04` | Контейнер verbatim: оригинал хранится целиком, члены — окна `name!member` (извлечение на лету); пережатие членов не делается (deflate необратим, 03-ast-recipe.md) |
+| GZ | `\x1f\x8b` | GZR: deflate-реплика — перебор (level × memLevel) до бит-совпадения потока, иначе guard-оригинал (03-ast-recipe.md) |
 | JPEG | `\xff\xd8\xff` | JXL lossless recompression |
 | PNG | `\x89PNG` | JXL + delta (or store raw) |
-| AVIF | `....ftypavif` | JXL recompression (if gain) / store raw |
-| HEIC | `....ftypheic` | JXL recompression (if gain) / store raw |
-| WebP | `RIFF....WEBP` | JXL recompression (if gain) / store raw |
-| MP4/M4A | `ftyp` | **Контейнер!** Извлечь обложки (→JXL), субтитры SRT/ASS (→ZSTD-19 + dict (горячий путь)), главы (→text). Видеопоток → store raw |
-| MKV | `\x1aE\xdf\xa3` | **Контейнер!** То же: субтитры → ZSTD-19, обложки → JXL, видеопоток → store raw |
+| AVIF | `....ftypavif` | (не реализовано — сниффа нет, generic-путь) План: JXL recompression (if gain) / store raw |
+| HEIC | `....ftypheic` | (не реализовано — сниффа нет, generic-путь) План: JXL recompression (if gain) / store raw |
+| WebP | `RIFF....WEBP` | (не реализовано — сниффа нет, generic-путь) План: JXL recompression (if gain) / store raw |
+| MP4/M4A | `ftyp` | **Контейнер (не реализовано, future work).** План: извлечь обложки (→JXL), субтитры SRT/ASS (→текст), главы (→текст); видеопоток → store raw |
+| MKV | `\x1aE\xdf\xa3` | **Контейнер (не реализовано, future work).** То же: субтитры/обложки наружу, видеопоток → store raw |
 | PDF | `%PDF` | Check for already-compressed streams |
-| EXE (PE) | `MZ` | Проверить компилятор: Go → ZSTD -19 без BCJ2; C/C++ → BCJ2 + ZSTD -19 |
-| ELF | `\x7fELF` | Проверить компилятор: Go → ZSTD -19; C/C++ → BCJ2 + ZSTD -19 |
+| EXE (PE) | `MZ` | WP14a/WP14b: бинарный батчинг по семейству (x86 → BCJ-префильтр, algo=ZSTD_BCJ); встроенные JPEG/PNG ≥ 16 КиБ вырезаются (EXER, algo=15) |
+| ELF | `\x7fELF` | То же: семейство по e_machine, батчинг, EXER-вырезание |
 | WAV | `RIFF....WAVE` | Check PCM vs compressed |
 | BZ2 | `BZ` | Store raw |
 | XZ | `\xfd7zXZ` | Store raw |
@@ -32,9 +32,14 @@ The Magic Sniffer identifies file types by examining magic bytes and structure. 
 
 ## Archive Detection (Nested AST)
 
-For archives with low compression, the Sniffer decomposes the container:
+**(Исторический контекст — первоначальный дизайн, не реализован.)**
+План был «разжать члена → снифф → пережать»; shipped-поведение другое:
+ZIP хранится verbatim с окнами членов, GZ — deflate-реплика GZR,
+образы ФС/архивы — внешние контейнерные пакеты WP16. Эскизы ниже
+оставлены как обоснование, почему от пережатия членов отказались
+(deflate-поток необратим из несжатых данных — см. 03-ast-recipe.md):
 
-### ZIP Detection
+### ZIP Detection (первоначальный дизайн)
 
 ```
 ZIP file → read End of Central Directory → enumerate local file headers
@@ -48,7 +53,7 @@ ZIP file → read End of Central Directory → enumerate local file headers
 
 The AST recipe is built as a tree mirroring the ZIP structure, including local file headers, central directory, and end-of-central-directory record for byte-perfect reconstruction.
 
-### GZ Detection
+### GZ Detection (первоначальный дизайн; shipped — GZR deflate-реплика)
 
 ```
 GZ file → read header (magic + compression method + flags + mtime + extra)
@@ -60,7 +65,10 @@ GZ file → read header (magic + compression method + flags + mtime + extra)
 
 ## Compression Level Detection
 
-For archives, detecting the compression level helps decide whether to recompress:
+**(Исторический контекст.)** Эвристика «уровень по заголовку» не
+реализована; вместо неё GZR определяет параметры брутфорс-репликацией
+(level 1-9 × memLevel 7-9 до бит-совпадения потока). Таблица —
+первоначальный дизайн:
 
 | Format | Low Compression (recompress) | High Compression (store raw) |
 |--------|------------------------------|------------------------------|
@@ -70,6 +78,12 @@ For archives, detecting the compression level helps decide whether to recompress
 | LZ4 | Level 0-3 (fast) | Level 9-16 (high) |
 
 ## Парсинг медиаконтейнеров (MP4/MKV)
+
+**(Не реализовано — future work.)** Парсера MP4/MKV в коде нет; shipped
+контейнерные пакеты WP16 покрывают образы ФС (rawdisk/ext4/fat/xfs/ntfs/
+vdi/qcow2) и 7z. Ниже — план, для которого естественная посадка теперь
+именно контейнерный пакет (манифест `type = container`, члены →
+`name!mbrNNNN`):
 
 MP4/MKV — не "просто store raw". Это контейнеры, внутри которых есть ценные семантические компоненты:
 
@@ -94,6 +108,12 @@ Sweep-воркер извлекает субтитры и обложки (сем
 
 ## Детекция Go-бинарников (BCJ2 не применять!)
 
+**(Исторический контекст — не реализовано.)** Детектора Go в коде нет;
+shipped-ответ WP14a — сортировка бинарного батча по семейству
+(e_machine/PE/Mach-O), BCJ-префильтр применяется к x86-членам, а не
+«всем, кроме Go». Обоснование (B9) остаётся в силе и стоит за этой
+семейной группировкой:
+
 Бенчмарк B9 показал: BCJ2 **ухудшает** сжатие Go-бинарников (32.77% vs 29.61% для ZSTD -19). Go-компилятор генерирует код без классических x86 branch/call паттернов.
 
 **Признаки Go-бинарника:**
@@ -105,15 +125,16 @@ Sweep-воркер извлекает субтитры и обложки (сем
 | Секция `.noptrdata` | Секция `.noptrdata` |
 | Секция `.data.rel.ro` + `go:buildid` строка | `go.buildid` в `.note.go.buildid` |
 
-**Если обнаружен Go → ZSTD -19 без BCJ2.** Для C/C++ (MSVC, GCC, clang) → BCJ2 + ZSTD -19.
+**Если обнаружен Go → без BCJ-префильтра.** Для C/C++ (MSVC, GCC, clang) → BCJ + ZSTD (shipped: батч algo=ZSTD_BCJ).
 
 ## Unknown Data
 
-If the Sniffer cannot identify the data:
-- Bytes pass entropy test → binary → **ZSTD -19**
-- Bytes fail entropy test (high entropy / random) → **store raw**
-
-## Entropy Heuristic
+Эвристика энтропии из первоначального дизайна не реализована (код её не
+содержит). Как есть: неопознанные данные → generic ZSTD-19; sweep мерит
+реальный выигрыш, и при выигрыше < `INVFS_MIN_GAIN_PCT` (0.5%) файл
+получает класс UNCOMPRESSIBLE и больше не пересматривается без причины
+(см. 06-sweep-worker.md, таблица классов). Ниже — первоначальный эскиз
+(исторический контекст):
 
 ```
 entropy = sum(-p(x) * log2(p(x)) for x in bytes)

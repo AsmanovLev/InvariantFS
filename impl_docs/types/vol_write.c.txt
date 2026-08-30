@@ -1,0 +1,2 @@
+invfs_wsession   struct        8 /home/user/InvariantFS/src-extracted/VFS/src/vol_write.c struct invfs_wsession {
+invfs_wsession   typedef       6 /home/user/InvariantFS/src-extracted/VFS/src/vol_write.c typedef struct invfs_wsession invfs_wsession;

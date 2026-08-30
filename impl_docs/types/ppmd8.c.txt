@@ -1,0 +1,4 @@
+CPpmd8_Node      typedef      48 /home/user/InvariantFS/src-extracted/VFS/src/ppmd8.c } CPpmd8_Node;
+CPpmd8_Node_     struct       42 /home/user/InvariantFS/src-extracted/VFS/src/ppmd8.c typedef struct CPpmd8_Node_
+CPpmd8_Node_Ref  typedef      40 /home/user/InvariantFS/src-extracted/VFS/src/ppmd8.c typedef Ppmd_Ref_Type(struct CPpmd8_Node_) CPpmd8_Node_Ref;
+PPMD8_CTX_PTR    typedef      36 /home/user/InvariantFS/src-extracted/VFS/src/ppmd8.c typedef CPpmd8_Context * PPMD8_CTX_PTR;

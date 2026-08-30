@@ -1,6 +1,21 @@
 # InvariantFS как RootFS в Linux
 
-## Архитектура декомпрессоров
+> **Статус (2026-08):** загрузка rootfs с InvariantFS **работает сегодня —
+> через FUSE**, не через модуль ядра: цепочка OVMF → GRUB (ESP) → initramfs
+> (busybox + fuse.ko + virtio_net.ko + invf-fuse) монтирует `/dev/vda2` →
+> switch_root в Gentoo/OpenRC (см. README-LINUX.md, `tools/mkdisk.sh`,
+> `tools/configure-guest.sh`, `vm/`). Весь этот документ ниже описывает
+> **kernel-module маршрут** (`invarifs_core.ko`, `request_module`,
+> `chattr +S`, встроенный BCJ2) — он **не построен** (по AUDIT §7 это
+> отдельный проект на 4–9+ месяцев) и оставлен как его дизайн-документ.
+> Аргумент «FUSE для корневой ФС не годится» в разделе «VFS-драйвер ядра,
+> не FUSE» опровергнут практикой: Gentoo/OpenRC грузится с FUSE-демона
+> в initramfs. Boot-time sweep («sweepboot» — проход sweep'а на ранней
+> загрузке из initramfs/сервиса) — **future work**: сейчас sweep после
+> монтирования запускается вручную (`kill -USR1`, `user.invfs.sweep`)
+> или по `INVFS_SWEEP_INTERVAL`.
+
+## Архитектура декомпрессоров (kernel-маршрут, не построен)
 
 Декомпрессоры разделены на два уровня, чтобы ядро оставалось легковесным, а загрузка — надёжной.
 
@@ -130,6 +145,11 @@ struct ast_block_entry {
 
 ## NoSweep (Out-of-Policy) флаг
 
+**(Не реализовано — ни `chattr +S`, ни флага `INVARIFS_NOSWEEP` в коде
+нет.)** Ближайший shipped-механизм — класс-флаг `invfs.class`
+(06-sweep-worker.md): файл со штампом UNCOMPRESSIBLE/CONTAINER уже не
+пересматривается sweep'ом без причины. Далее — первоначальный дизайн:
+
 Флаг `INVARIFS_NOSWEEP` (аналог `chattr +C` для Copy-on-Write в ext4) запрещает Sweep-воркеру сжимать файл.
 
 ```
@@ -170,7 +190,11 @@ BCJ2 не используется с PPMd, APE или JXL — он имеет �
 
 ## VFS-драйвер ядра, не FUSE
 
-FUSE для корневой ФС приведёт к:
+**(Исторический контекст — kernel-маршрут не построен; shipped-реальность
+опровергает аргумент: Gentoo/OpenRC грузится с invf-fuse в initramfs,
+см. шапку документа.)**
+
+Исходный аргумент был таким. FUSE для корневой ФС приведёт к:
 - Проблемам с правами (root не сможет читать файлы пользователя без `allow_other`)
 - Огромным задержкам (каждый syscall — context switch в userspace)
 - Невозможности использовать `execve()` из FIFO/PIPE на FUSE

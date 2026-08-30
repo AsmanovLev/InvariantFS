@@ -6,13 +6,14 @@ The physical storage is divided into four zones:
 
 ```
 ┌─────────────────────────────────────────────────┐
-│  Superblock (Block 0)                           │  ~4 KB
+│  Superblock (Block 0)                           │  4 KB
+│  + дескрипторы RDP0/RSZ0/CKP0 (см. ниже)        │
 ├─────────────────────────────────────────────────┤
-│  Metadata Zone                                  │  ~64 MB
-│  ├── L2P Journal (append-only log)              │
-│  ├── Block Bitmap (1 bit per block)             │
-│  ├── Tag Index (B-tree: artist/album/title)     │
-│  └── Primary Index (B-tree: inode → metadata)   │
+│  Metadata Zone (начинается с блока 1)           │  bitmap + журнал +
+│  ├── Block Bitmap (1 bit per block)             │  inode-область
+│  ├── L2P Journal (append-only log, 8192 блока)  │  (≈1/64 тома по умолч.,
+│  └── Inode Area (append-only INOD-записи        │  INVFS_META_FRAC,
+│      [+ INO2 meta-ext], position-kill DELT)     │  мин. 512 блоков inode)
 ├─────────────────────────────────────────────────┤
 │  RAW Zone                                       │  ~20% of volume
 │  (linear write area for incoming data)          │
@@ -21,23 +22,20 @@ The physical storage is divided into four zones:
 │                                                   │
 │  Blocks are type-consolidated across all files:  │
 │  ┌─────────────────────────────────────────┐    │
-│  │ TextZone: PPMd-compressed tag blocks   │    │
-│  │ All text data from all files batched   │    │
-│  │ into large blocks for better ratio     │    │
+│  │ TextZone: PPMd-батчи текста +           │    │
+│  │ ZSTD/BCJ-батчи бинарей (WP10/WP14a)     │    │
 │  └─────────────────────────────────────────┘    │
 │  ┌─────────────────────────────────────────┐    │
 │  │ BinaryZone: WavPack/JXL/ZSTD blocks    │    │
 │  │ Audio, images, executables — each      │    │
 │  │ stored in type-homogeneous extents     │    │
 │  └─────────────────────────────────────────┘    │
-├─────────────────────────────────────────────────┤
-│  Template Zone                                  │  (часть Shadow)
-│  ├── Эталонные сэмплы (audio LZ77)             │
-│  ├── Эталонные секции ELF/PE (.rodata и т.д.)  │
-│  └── Базовые слои ОС (Docker, rootfs)          │
-│  refcount + пинятся в ARC-кэше                  │
 └─────────────────────────────────────────────────┘
 ```
+
+Template Zone (эталоны/residuals) в диаграмму не входит: не реализована,
+far-roadmap — см. 17-template-zone.md. Значение `zone=3` в AST под неё
+зарезервировано.
 
 ### Суб-секции Shadow Space
 
@@ -45,7 +43,7 @@ Shadow — не однородная зона, а контейнер **суб-с
 
 | Суб-секция | Что лежит | Как сжимаются блоки |
 |---|---|---|
-| **text** | несжатый текст (теги, JSON, исходники, субтитры) | **PPMd** поверх блока |
+| **text** | несжатый текст (теги, JSON, исходники, субтитры); с WP14a — и cross-file батчи бинарей (zone=TEXT, algo=ZSTD / ZSTD_BCJ=14) | **PPMd** поверх блока текста; ZSTD(+BCJ-префильтр) поверх бинарного батча |
 | **binary** | всё остальное: APE/WavPack/JXL-блобы, ZSTD-сегменты, EXE | по типу (см. 04-compression-matrix.md) |
 
 Ключевой момент про text: **в суб-секции лежит именно несжатый текст**, а
@@ -111,7 +109,9 @@ PPMd даёт 2.484× при случайном порядке и 3.146× при
   на батч: `{length=usize, zone=TEXT, algo=PPMD, block_id=batch_seq}`, а его
   L2P отображает `batch_seq → pba` — это и держит батчи живыми для fsck.
   Id владельца неизменен (перезапись через position-kill tombstone), так
-  что его L2P-ключи валидны всю жизнь тома.
+  что его L2P-ключи валидны всю жизнь тома. С WP14a тот же владелец держит
+  и **бинарные** батчи (algo=ZSTD / ZSTD_BCJ) — общее пространство
+  `batch_seq`.
 - **Сегмент батча** — обычный фрейминг `[4B csize][4B crc32c]` поверх
   payload'а `[4B usize LE][2B props][PPMd-поток]` (o=8, 64 MB, CUT_OFF).
   `usize` — размер декодированного батча: член знает лишь свой срез, а
@@ -162,26 +162,54 @@ u8 kind, u32 idx, u64 src_off). Она пишется ПОСЛЕДНЕЙ (её �
 диапазоны из сегмента-рецепта и членов-сиблингов локально, без вызова
 пакета — в т.ч. когда пакет не установлен.
 
+Поставляемые контейнерные пакеты (algo id): rawdisk=16 (MBR/EBR/GPT),
+ext4fs=17, fatfs=18 (FAT12/16/32+exFAT), xfs=19, ntfs=20, vdi=21,
+qcow2=22, p7z=23 (7z со stored-членами); кодепаки: jxl=4 (WP16e),
+raw_image=13 (WP13, DICOM/PNM/BMP/TIFF → lossless JXL). Диапазон 40+
+зарезервирован под фикстурные пакеты тестов.
+
+### Служебные owner-иноды (пространство имён `\x01…`)
+
+Имена с первым байтом 0x01 фильтруются из листингов (`vol_list_dir`,
+readdir) и никогда не свипятся; fsck считает их блоки живыми:
+
+| Имя | Что держит | WP |
+|---|---|---|
+| `\x01tzb` | text- и binary-батчи (AST-запись + L2P на батч) | WP10/WP14a |
+| `\x01parity`, `\x01parityN`, `\x01parity2N` | XOR/RS-полосы чётности seal'а (шарды по 65535 полос) | WP20/20b |
+| `\x01reten`, `\x01retenN` | реестр удержания блоков живого чекпоинта sweep'а | WP21 |
+
 ### Superblock (Block 0, 4096 bytes)
 
 | Offset | Size | Field | Description |
 |--------|------|-------|-------------|
-| 0x0000 | 8 | `magic` | "InvariantFS\0" |
+| 0x0000 | 8 | `magic` | "InvariFS\0" (ровно 8 байт; историческое написание, смена = format break) |
 | 0x0008 | 16 | `uuid` | Volume UUID |
-| 0x0018 | 4 | `state` | Clean (0xCA), Dirty (0xDA), Recovery (0xRE) |
-| 0x001C | 4 | `block_size` | Logical block size (default: 4096) |
+| 0x0018 | 4 | `state` | Clean (0xCA), Dirty (0xDA), Recovery (0x52) |
+| 0x001C | 4 | `block_size` | Logical block size (4096) |
 | 0x0020 | 8 | `total_blocks` | Total blocks in volume |
-| 0x0028 | 8 | `metadata_zone_start` | Block offset of Metadata Zone |
+| 0x0028 | 8 | `metadata_zone_start` | Block offset of Metadata Zone (= 1) |
 | 0x0030 | 8 | `metadata_zone_blocks` | Size of Metadata Zone in blocks |
 | 0x0038 | 8 | `raw_zone_start` | Block offset of RAW Zone |
 | 0x0040 | 8 | `raw_zone_blocks` | Size of RAW Zone in blocks |
 | 0x0048 | 8 | `shadow_zone_start` | Block offset of Shadow Space |
 | 0x0050 | 8 | `shadow_zone_blocks` | Size of Shadow Space in blocks |
 | 0x0058 | 32 | `root_ast_hash` | BLAKE3 hash of root AST directory |
-| 0x0078 | 4 | `sweep_cursor` | Last swept RAW block position |
+| 0x0078 | 4 | `sweep_cursor` | Зарезервировано (пишется 0; sweep обходит inode-область, курсор не используется) |
 | 0x007C | 4 | `checksum` | CRC32C of superblock (bytes 0-0x7B) |
+| 0x0080 | 4 | `reserved_blocks` | ENOSPC-резерв под sweep/транскоды (1/128+64); вне checksum, 0 на старых образах |
+| 0x0084 | 4 | `hard_min_blocks` | Ниже этого free → READONLY (1/1024+16) |
+| 0x0088 | 4 | `vol_flags` | bit0 = VOLF_READONLY, bit1 = VOLF_META2 (записи с INO2-расширением) |
 
-Total: 128 bytes used, rest reserved for future use.
+Итого: 144 байта (0x90), остальное блока 0 — зарезервировано нулями; там же
+по фиксированным смещениям живут необязательные дескрипторы (конвенция:
+magic + crc32c, нули = «отсутствует»):
+
+| Offset | Descriptor | WP | Назначение |
+|--------|-----------|----|-----------|
+| 0x100 | `RDP0` (24 B) | WP20b | Конфигурация избыточности seal'а: l1_algo (1=XOR), l2_algo (1=rs-vm, 2=rs-cauchy), геометрия полос k1/k2/m2, parity_area_hint |
+| 0x140 | `RSZ0` (204 B) | WP18 | In-flight offline-resize: staging-область (bitmap+journal+inode) + образ нового суперблока; применяется идемпотентно при vol_open |
+| 0x220 | `CKP0` (56 B) | WP21 | Чекпоинт sweep'а: позиции append'ов inode-области и журнала на старт sweep'а + staging копии журнала, sweep_seq, время |
 
 ### Block Bitmap
 
@@ -195,48 +223,50 @@ Maintained with a **free-list cursor** (pointer to last known free block) to avo
 
 ### L2P Journal
 
-Append-only log recording logical-to-physical mappings:
+Append-only log (8192 блока = 32 МБ) в Metadata Zone, сразу после bitmap.
+Запись — 36 байт, с CRC32C:
 
 ```
-Entry format:
-┌─────────┬──────────┬──────────┬──────────┐
-│  inode  │  lba     │  pba     │  length  │
-│  8 bytes │ 8 bytes │ 8 bytes  │  4 bytes │
-└─────────┴──────────┴──────────┴──────────┘
-Type byte prefix:
-  0x01 = MAP    (assign mapping)
-  0x02 = UNMAP  (release mapping)
-  0x03 = SWEEP  (sweep commit marker)
-  0xFF = CHECKPOINT (full L2P snapshot follows)
+┌──────┬────────┬────────┬────────┬────────┬─────────┬─────────┐
+│ type │ pad[3] │ inode  │  lba   │  pba   │ length  │ crc32c  │
+│ 1 B  │ 3 B    │ 8 B    │ 8 B    │ 8 B    │ 4 B     │ 4 B     │
+└──────┴────────┴────────┴────────┴────────┴─────────┴─────────┘
+type: 0x01 = MAP (assign mapping), 0x02 = UNMAP (release mapping).
+      Константы 0x03 SWEEP и 0xFF CHECKPOINT определены в invarifs.h,
+      но кодом не пишутся (остановка/коммит sweep'а видна по самим
+      MAP-записям; чекпоинт sweep'а — это CKP0 в блоке 0, WP21).
+pad:  WP19 heat — pad[0..1] = u16 LE read-heat, pad[2] = u8 write-heat;
+      внутри CRC-региона, переживает remap pba (ключ — (inode, lba)).
 ```
 
 On mount: replay journal to rebuild in-memory L2P.
 On fsync: flush journal to disk (O(pending writes), not O(total mappings)).
-Periodically: compact journal + L2P into a CHECKPOINT.
+Компактируется при fsck -f / vol_close (переписывается только из живых
+L2P-записей).
 
-### Primary Index (B-tree by inode)
+### Inode Area (append-only; вместо проектного B-tree «Primary Index»)
 
-```
-inode → {
-  ast_recipe_loc:  (zone, block, offset)  // where the AST recipe lives
-  file_size:       u64
-  blake3_hash:     [u8; 32]
-  ctime:           u64
-  mtime:           u64
-  permissions:     u16
-}
-```
-
-~72 bytes per file. For 100K files: ~7 MB.
-
-### Tag Index (B-tree by BLAKE3 hash)
+Проектный B-tree-индекс не строился: метаданные файлов — **append-only
+область записей** в Metadata Zone после журнала:
 
 ```
-(artist_hash, album_hash, title_hash) → [inode]
+[INOD rec_len ... CRC][DELT tombstone CRC] — пары;
+rec = header (magic, rec_len, inode_id, file_size, ctime, name)
+  + invfs_ast_recipe_header + block entries [+ children blob]
+  + INO2 meta-ext (VOLF_META2: type, mode, uid/gid, mtime/atime,
+    nlink, symlink target, xattr TLVs — среди них invfs.class)
+  + trailing CRC32C
 ```
 
-Enables O(log n) lookup: "find all tracks by artist X".
-~32 bytes per tag triple + 8 bytes per inode reference.
+Перезапись файла = новая запись + tombstone старой (position-kill:
+DELT ссылается на позицию записи). В памяти — хэш-индекс имён,
+пересобирается сканом области при открытии; битая запись переживается
+(skip по rec_len+4, файлы после неё остаются доступны).
+
+Отдельного «Tag Index (B-tree по BLAKE3)» нет и не было: семантический
+поиск по тегам не реализован, а дедупликация офлайновая — sweep хэширует
+хранимые сегменты в момент прогона (см. 10-deduplication.md),
+персистентного content-index'а на диске нет.
 
 ## Виртуальные каталоги (2025-08)
 

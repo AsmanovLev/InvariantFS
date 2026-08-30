@@ -1,0 +1,2 @@
+__anonc3a6ef8f0108 struct       26 /home/user/InvariantFS/src-extracted/VFS/src/zip.c typedef struct {
+zip_member       typedef      33 /home/user/InvariantFS/src-extracted/VFS/src/zip.c } zip_member;

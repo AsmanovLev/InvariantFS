@@ -12,7 +12,7 @@ entire root on an InvariantFS volume (see `tools/mkdisk.sh`, `vm/`).
 ## Layout
 
     src-extracted/VFS/src/   engine + FUSE daemon + CLI tools (C11)
-    src-extracted/VFS/doc/   original design docs (17 files; aspirational
+    src-extracted/VFS/doc/   original design docs (18 files; aspirational
                              in parts -- see impl_docs/AUDIT.md for the
                              code-vs-docs reconciliation)
     impl_docs/               generated navigation (functions/types/maps)
@@ -39,8 +39,10 @@ zstd/lz4/miniz/blake3/flacx, libfuse3 for the daemon.
 | `invf-fsck [-f] <img>` | check; `-f` repairs orphans/bitmap/journal. Auto-recovery: a DIRTY volume with an anomaly-free scan self-heals to CLEAN+rw at mount (`INVFS_AUTO_RECOVER=0` disables) |
 | `invf-ls / cat / cp / stat` | read-side CLI (position-kill aware) |
 | `invf-import <vol> <dir>` | direct engine-level tree import (~50k files in seconds). `INVFS_IMPORT_PREFIX=a/b` imports under an existing dir; uid/gid default to 0 (`INVFS_IMPORT_KEEP_OWNER=1` keeps) |
-| `invf-sweep <img> [--dry-run]` | offline sweep driver |
+| `invf-sweep <img> [--dry-run] [--seal\|--unseal] [--realize]` | offline sweep driver; `--seal` re-seals shadow parity after the run (WP20), `--realize` accepts the previous sweep's checkpoint (WP21) |
 | `invf-stats <img>` | full statistics walk incl per-zone compression ratios |
+| `invf-resize <img> ...` | WP18 offline volume grow/shrink (RSZ0 roll-forward, idempotent apply at next open) |
+| `invf-rollback <img>` | WP21 undo the last sweep from its CKP0 checkpoint (bit-exact to pre-sweep state) |
 | `meta_probe <img> <name>` | developer probe (**mutates**: applies a test setattr) |
 | `meta_probe <img> --heat <name>` | WP19 read-only dump: storage class, per-segment AST (zone/algo), per-entry heat counters (rheat/wheat from the L2P pad) |
 
@@ -104,11 +106,16 @@ before building the disk.
 - mmap is supported (read of all storage forms; write via FUSE
   writeback cache, WP4a). If a kernel declines FUSE_CAP_WRITEBACK_CACHE,
   shared-writable mmap fails ENODEV rather than faking it.
-- External transcoders (JXL/APE/MP3) are Linux stubs; native codecs
-  (LZ4/ZSTD/gzip-replica/PNG-replica/TAR/ZIP/FLAC) fully work (WP5).
-- ~52 l2p_miss casualties from crash-killed merges remain on the demo
-  volume; fsck reports them, data unrecoverable by design (no RAW backup
-  after sweep).
+- Codecs on Linux: JPEG→JXL is fully wired (jxl.codecpack owns the lane,
+  WP16e; needs cjxl/djxl installed); PMP/APE/WavPack are probe-gated
+  external tools (packMP3 / mac / wavpack resolved via `$INVFS_TOOLS`,
+  `/usr/lib/invfs/tools`, PATH — absent tool = codec deferred, file waits
+  in RAW). The PNG/FLAC **transcode** bodies are still `#ifdef _WIN32`
+  (WP12(c)): on Linux those files take the generic path; reading existing
+  FLACR records works when `mac` is installed.
+- Bit-rot recovery exists only via an explicit seal (`invf-sweep --seal`,
+  WP20: XOR stripes + optional RS layer-2); after a sweep the RAW
+  originals are gone, so an unsealed volume has no second copy.
 - OpenRC shutdown stalls at its kill-all phase (guest-side quirk); the
   filesystem itself closes CLEAN when the daemon receives SIGTERM.
 - Hot counters (`user.invfs.stats`) count unique names; `invf-stats`

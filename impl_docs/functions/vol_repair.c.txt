@@ -1,0 +1,6 @@
+pop64            function     50 /home/user/InvariantFS/src-extracted/VFS/src/vol_repair.c static unsigned pop64(uint64_t x)
+seal2_commit     function    170 /home/user/InvariantFS/src-extracted/VFS/src/vol_repair.c static int seal2_commit(seal2_ctx *c, uint64_t E, uint64_t *written)
+seal2_free_failed function     58 /home/user/InvariantFS/src-extracted/VFS/src/vol_repair.c static void seal2_free_failed(seal2_segref *f, size_t n)
+seal2_repair_stripe function    216 /home/user/InvariantFS/src-extracted/VFS/src/vol_repair.c static int seal2_repair_stripe(seal2_ctx *c, uint64_t E0, uint32_t pool,
+seal2_try        function    104 /home/user/InvariantFS/src-extracted/VFS/src/vol_repair.c static int seal2_try(seal2_ctx *c, uint64_t E)
+vol_seal2_repair function    273 /home/user/InvariantFS/src-extracted/VFS/src/vol_repair.c int vol_seal2_repair(invfs_volume *v, invfs_seal2_repair *rep)

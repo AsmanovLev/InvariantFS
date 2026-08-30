@@ -1,0 +1,26 @@
+collect_text_lbas function    250 /home/user/InvariantFS/src-extracted/VFS/src/vol_records.c static size_t collect_text_lbas(invfs_volume *v, uint64_t inode_id,
+meta_locate_ext  function    612 /home/user/InvariantFS/src-extracted/VFS/src/vol_records.c const uint8_t *meta_locate_ext(const uint8_t *rec, size_t rec_len,
+meta_parse_ext   function    577 /home/user/InvariantFS/src-extracted/VFS/src/vol_records.c static int meta_parse_ext(const uint8_t *p, size_t n,
+meta_pub_from_hdr_defaults function    700 /home/user/InvariantFS/src-extracted/VFS/src/vol_records.c static void meta_pub_from_hdr_defaults(invfs_meta_pub *m, uint8_t type)
+meta_read_record_by_id function    632 /home/user/InvariantFS/src-extracted/VFS/src/vol_records.c int meta_read_record_by_id(invfs_volume *v, uint64_t inode_id,
+meta_read_record_by_id_p function   1160 /home/user/InvariantFS/src-extracted/VFS/src/vol_records.c int meta_read_record_by_id_p(invfs_volume *v, uint64_t id, uint8_t **buf, uint32_t *rl)
+meta_rewrite     function    727 /home/user/InvariantFS/src-extracted/VFS/src/vol_records.c static uint64_t meta_rewrite(invfs_volume *v, uint64_t inode_id,
+meta_serialize   function    671 /home/user/InvariantFS/src-extracted/VFS/src/vol_records.c static size_t meta_serialize(const invfs_meta_pub *m,
+record_owns_siblings function   1118 /home/user/InvariantFS/src-extracted/VFS/src/vol_records.c int record_owns_siblings(const uint8_t *rec, uint32_t rl)
+vol_apply_meta   function    819 /home/user/InvariantFS/src-extracted/VFS/src/vol_records.c uint64_t vol_apply_meta(invfs_volume *v, const char *name,
+vol_ast_blob_len function    539 /home/user/InvariantFS/src-extracted/VFS/src/vol_records.c static size_t vol_ast_blob_len(const uint8_t *rec, size_t rec_len)
+vol_create_file  function     10 /home/user/InvariantFS/src-extracted/VFS/src/vol_records.c uint64_t vol_create_file(invfs_volume *v, const char *name,
+vol_create_special function    856 /home/user/InvariantFS/src-extracted/VFS/src/vol_records.c uint64_t vol_create_special(invfs_volume *v, const char *name,
+vol_create_symlink function    830 /home/user/InvariantFS/src-extracted/VFS/src/vol_records.c uint64_t vol_create_symlink(invfs_volume *v, const char *name,
+vol_delete_inode function    444 /home/user/InvariantFS/src-extracted/VFS/src/vol_records.c int vol_delete_inode(invfs_volume *v, uint64_t inode_id, const char *name)
+vol_delete_siblings function    461 /home/user/InvariantFS/src-extracted/VFS/src/vol_records.c int vol_delete_siblings(invfs_volume *v, const char *name)
+vol_get_class    function   1070 /home/user/InvariantFS/src-extracted/VFS/src/vol_records.c int vol_get_class(invfs_volume *v, uint64_t inode_id,
+vol_get_meta     function    710 /home/user/InvariantFS/src-extracted/VFS/src/vol_records.c int vol_get_meta(invfs_volume *v, uint64_t inode_id, invfs_meta_pub *out)
+vol_get_xattr    function    884 /home/user/InvariantFS/src-extracted/VFS/src/vol_records.c int vol_get_xattr(invfs_volume *v, uint64_t inode_id, const char *xn,
+vol_list_xattr   function   1031 /home/user/InvariantFS/src-extracted/VFS/src/vol_records.c int vol_list_xattr(invfs_volume *v, uint64_t inode_id,
+vol_remove_xattr function    984 /home/user/InvariantFS/src-extracted/VFS/src/vol_records.c int vol_remove_xattr(invfs_volume *v, uint64_t inode_id, const char *xn)
+vol_retire_inode function    310 /home/user/InvariantFS/src-extracted/VFS/src/vol_records.c static int vol_retire_inode(invfs_volume *v, uint64_t inode_id,
+vol_set_xattr    function    926 /home/user/InvariantFS/src-extracted/VFS/src/vol_records.c int vol_set_xattr(invfs_volume *v, uint64_t inode_id, const char *xn,
+vol_stamp_class  function   1085 /home/user/InvariantFS/src-extracted/VFS/src/vol_records.c int vol_stamp_class(invfs_volume *v, uint64_t inode_id,
+vol_transcode_abort function    511 /home/user/InvariantFS/src-extracted/VFS/src/vol_records.c uint64_t vol_transcode_abort(invfs_volume *v, const char *name)
+xattr_tlv_size   function    566 /home/user/InvariantFS/src-extracted/VFS/src/vol_records.c static size_t xattr_tlv_size(const uint8_t *p, size_t avail)

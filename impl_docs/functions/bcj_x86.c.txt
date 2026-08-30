@@ -1,0 +1,5 @@
+bcj_get32        function     21 /home/user/InvariantFS/src-extracted/VFS/src/bcj_x86.c static uint32_t bcj_get32(const uint8_t *p) { uint32_t v; memcpy(&v, p, 4); return v; }
+bcj_put32        function     22 /home/user/InvariantFS/src-extracted/VFS/src/bcj_x86.c static void bcj_put32(uint8_t *p, uint32_t v) { memcpy(p, &v, 4); }
+bcj_x86_conv     function     31 /home/user/InvariantFS/src-extracted/VFS/src/bcj_x86.c static uint8_t *bcj_x86_conv(uint8_t *p, size_t size, uint32_t pc,
+invfs_bcj_x86_dec function    146 /home/user/InvariantFS/src-extracted/VFS/src/bcj_x86.c void invfs_bcj_x86_dec(uint8_t *buf, size_t len)
+invfs_bcj_x86_enc function    140 /home/user/InvariantFS/src-extracted/VFS/src/bcj_x86.c void invfs_bcj_x86_enc(uint8_t *buf, size_t len)

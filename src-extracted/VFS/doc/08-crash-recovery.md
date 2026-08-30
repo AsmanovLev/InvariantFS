@@ -6,40 +6,50 @@ InvariantFS uses an append-only journal in the Metadata Zone for crash-safe meta
 
 ### Journal Entry Types
 
+Реально пишутся два типа (формат записи 36 B — см. 02-on-disk-format.md):
+
 | Type byte | Entry | Description |
 |-----------|-------|-------------|
 | `0x01` | `MAP(inode, lba, pba, len)` | Assign logical-to-physical mapping |
 | `0x02` | `UNMAP(inode, lba)` | Release mapping |
-| `0x03` | `SWEEP_COMMIT(inode, old_raw_blocks, new_shadow_blocks)` | Sweep atomic commit |
-| `0x04` | `DELTA(inode, tag_path, value)` | Tag edit delta |
-| `0x05` | `META(inode, field, value)` | Metadata change (perms, times) |
-| `0xFF` | `CHECKPOINT(snapshot_offset)` | Full L2P snapshot follows |
+
+Константы `0x03` (SWEEP) и `0xFF` (CHECKPOINT) определены в invarifs.h,
+но не пишутся; типов `0x04 DELTA` / `0x05 META` из раннего дизайна не
+существовало никогда. Чекпоинт sweep'а — это CKP0-дескриптор в блоке 0
+(WP21), а не запись журнала.
 
 ### Mount Recovery
+
+Как реализовано (`vol_open`):
 
 ```
 On mount:
   1. Read Superblock → check state
      └─ Clean (0xCA) → normal mount
-     └─ Dirty (0xDA) → replay journal
-     └─ Recovery (0xRE) → replay journal + verify
+     └─ Dirty (0xDA) → scan inode-области + replay журнала;
+        если скан без аномалий — auto-recovery в CLEAN+rw
+        (INVFS_AUTO_RECOVER=0 отключает); с аномалиями → read-only,
+        чинит invf-fsck -f
+     └─ Recovery (0x52) → armed-дескриптор RSZ0 (resize, WP18)
+        применяется идемпотентно
 
-  2. Replay journal from last CHECKPOINT:
-     └─ Rebuild in-memory L2P table
-     └─ Rebuild in-memory Bitmap
-     └─ Rebuild in-memory Primary Index
-     └─ Rebuild in-memory Tag Index
+  2. Scan inode-области: живые записи (INOD/INO2), position-kill
+     DELT-tombstone'ы; битая запись переживается (skip по rec_len+4)
 
-  3. Check for incomplete SWEEP operations:
-     └─ If SWEEP_COMMIT found → keep Shadow data, free RAW
-     └─ If SWEEP_BEGIN without COMMIT → invalidate Shadow, keep RAW
+  3. Replay журнала (только MAP/UNMAP) → in-memory L2P;
+     bitmap читается с диска (не пересобирается)
 
-  4. Verify invariant: sample check random swept files
-     └─ Decompress → compare BLAKE3 hash vs stored hash
+  4. Дескрипторы блока 0: RDP0 (живой seal), CKP0 (живой чекпоинт
+     sweep'а), RSZ0 (незавершённый resize)
 
-  5. Set state → Clean (0xCA)
-  6. Flush superblock
+  5. Set state → Clean (0xCA) при корректном размонтировании
+     (vol_close: flush + компакция журнала)
 ```
+
+Проектные элементы «replay от последнего CHECKPOINT-снапшота» и
+«выборочная BLAKE3-проверка свёрнутых файлов при монтировании» не
+реализованы (в журнале нет снапшотов; проверка данных — CRC32C на
+сегмент при чтении + verify --deep по требованию).
 
 ### Graceful Shutdown
 
@@ -56,18 +66,20 @@ On unmount:
 
 | Scenario | Outcome |
 |----------|---------|
-| Crash during RAW write | Lost write (data in buffer not flushed). File marked incomplete in L2P. |
-| Crash during journal flush | Journal replay picks up from last CHECKPOINT. Max 1 checkpoint interval of data loss. |
-| Crash during Sweep | SWEEP_BEGIN without COMMIT → RAW data preserved, Shadow data invalidated. |
-| Crash during CHECKPOINT | Previous CHECKPOINT still valid. |
-| Bit error in Shadow data | BLAKE3 mismatch on read → return EIO, schedule re-sweep from RAW backup. |
+| Crash during RAW write | Порванный хвост виден по CRC записи (torn-write guard): скан останавливается на нём, данные за хвостом не появляются |
+| Crash during journal flush | Replay берёт префикс до первой битой записи (на запись CRC32C); fsync-данные переживают kill -9 (нога WP21/test-writepath) |
+| Crash during Sweep | Живой CKP0: ничего не освобождено (retention-реестр `\x01reten`); `invf-rollback` возвращает pre-sweep состояние, либо следующий sweep auto-realize'ит чекпоинт (точка невозврата) |
+| Crash during resize | RSZ0: до arming — том нетронут; после — apply идемпотентен при следующем открытии |
+| Bit error in Shadow data | CRC32C сегмента не сходится при чтении → отказ чтения (не мусор); при живом seal'е (WP20) блок прозрачно восстанавливается из XOR-полосы (layer-1, ровно один битый блок на полосу; layer-2 RS — только через fsck). «Re-sweep из RAW-бэкапа» не существует: RAW освобождается при sweep'е — redundancy даёт только seal |
 
 ## Superblock State Transitions
 
 ```
-Clean ──mount──→ Dirty ──recovery──→ Recovery ──replay──→ Clean
-  ↑                                                    │
-  └─────────────────unmount────────────────────────────┘
+Clean ──mount──→ Dirty ──auto-recovery (anomaly-free scan)──→ Clean
+  ↑                  │
+  │                  └──аномалии──→ read-only → invf-fsck -f → Clean
+  └──unmount (vol_close: flush + journal compact + sb CLEAN)──┘
+  Recovery (0x52) — только под armed RSZ0 (resize), разрешается в vol_open
 ```
 
 ## fsck / repair (2025-08): invf-fsck

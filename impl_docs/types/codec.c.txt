@@ -1,0 +1,8 @@
+__anon6be996da0108 struct       87 /home/user/InvariantFS/src-extracted/VFS/src/codec.c static const struct { const char *ext; int family; } ext_families[] = {
+__anon6be996da0208 struct      325 /home/user/InvariantFS/src-extracted/VFS/src/codec.c typedef struct {
+__anon6be996da0308 struct      398 /home/user/InvariantFS/src-extracted/VFS/src/codec.c static const struct { const char *tok; uint32_t bit; } ct[] = {
+__anon6be996da0408 struct      704 /home/user/InvariantFS/src-extracted/VFS/src/codec.c typedef struct {
+pack_entry       typedef     721 /home/user/InvariantFS/src-extracted/VFS/src/codec.c } pack_entry;
+pack_magic_rule  typedef     329 /home/user/InvariantFS/src-extracted/VFS/src/codec.c } pack_magic_rule;
+pack_manifest    struct      331 /home/user/InvariantFS/src-extracted/VFS/src/codec.c struct pack_manifest {
+pack_slot_fns    struct      933 /home/user/InvariantFS/src-extracted/VFS/src/codec.c static const struct pack_slot_fns {
