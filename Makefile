@@ -116,6 +116,7 @@ e2e: all
 	bash tools/test-rollback.sh
 	bash tools/test-p7z.sh
 	bash tools/test-fuzz.sh
+	bash tools/test-writepath.sh
 
 .PHONY: all clean test e2e fuzz
 -include $(wildcard $(OBJ)/*.d)

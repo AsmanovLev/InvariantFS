@@ -566,21 +566,112 @@ static int invf_rmdir(const char *path)
     return rc == 0 ? 0 : (rc == -2 ? -ENOTEMPTY : -ENOENT);
 }
 
-/* ---- write context (buffered write-back) ---- */
-typedef struct {
+/* ---- write context (WP4b streaming ranged writes) ----
+ * A handle stages at most one partially-written 64K segment (the tail
+ * window) and streams everything else straight into an engine write
+ * session (vol_write_begin/vol_write_range): per-handle memory is O(1)
+ * plus O(segments) AST metadata in the engine, never O(filesize).
+ * The engine session forks the file under a new inode id and commits it
+ * (new record, then old retire) at flush/fsync/release. */
+typedef struct wctx {
     char name[256];
-    uint8_t *buf;
-    size_t len, cap;
-    int have_meta;             /* stamp this meta after the flush replace */
+    invfs_wsession *ws;      /* lazily begun on first write/truncate */
+    int have_meta;           /* stamp this meta after the commit */
     invfs_meta_pub meta;
+    /* sub-segment tail: bytes in [tail_lo,tail_hi) of segment tail_seg
+     * are staged in tail[] and not yet written to the session */
+    uint8_t *tail;
+    uint32_t tail_seg, tail_lo, tail_hi;
+    struct wctx *next_dirty;   /* g_dirty list link (live sessions) */
 } wctx;
+
+/* Active write sessions, newest first: lets invf_read serve .write data
+ * before commit (a clean page the kernel evicted must never come back
+ * stale). Requires g_io_lock for all list ops. */
+static wctx *g_dirty;
+
+static void dirty_add_locked(wctx *c)
+{
+    wctx *p;
+    for (p = g_dirty; p; p = p->next_dirty)
+        if (p == c) return;    /* already listed */
+    c->next_dirty = g_dirty;
+    g_dirty = c;
+}
+
+static void dirty_del_locked(wctx *c)
+{
+    wctx **pp = &g_dirty;
+    while (*pp) {
+        if (*pp == c) { *pp = c->next_dirty; c->next_dirty = NULL; return; }
+        pp = &(*pp)->next_dirty;
+    }
+}
+
+static wctx *dirty_find_locked(const char *name)
+{
+    wctx *p;
+    for (p = g_dirty; p; p = p->next_dirty)
+        if (strcmp(p->name, name) == 0) return p;
+    return NULL;
+}
+
+/* push the staged tail window into the session. Requires g_io_lock.
+ * On error the window is kept staged (a retry rewrites the same bytes --
+ * idempotent -- and the failure surfaces to the next writer/flusher). */
+static int wctx_flush_tail_locked(wctx *c)
+{
+    int rc;
+    if (!c->tail || c->tail_hi <= c->tail_lo) return 0;
+    rc = vol_write_range(c->ws,
+                         (uint64_t)c->tail_seg * INVFS_SEGMENT_SIZE +
+                         c->tail_lo,
+                         c->tail + c->tail_lo, c->tail_hi - c->tail_lo);
+    if (rc == 0) c->tail_lo = c->tail_hi = 0;
+    return rc;
+}
+
+/* begin the engine write session on first use. Requires g_io_lock. */
+static int wctx_ensure_ws_locked(wctx *c)
+{
+    if (c->ws) return 0;
+    if (!g_vol || !vol_write_begin(g_vol, c->name, 0, &c->ws) || !c->ws)
+        return -1;
+    dirty_add_locked(c);
+    if (!c->have_meta) {
+        /* carry current metadata so the commit can refresh mtime without
+         * losing mode/owner (the engine also carries the raw ext; this
+         * stamp is what updates mtime) */
+        uint64_t ino = vol_find(g_vol, c->name);
+        if (ino && vol_get_meta(g_vol, ino, &c->meta) == 0)
+            c->have_meta = 1;
+    }
+    return 0;
+}
 
 static int invf_read(const char *path, char *buf, size_t size, off_t offset,
                      struct fuse_file_info *fi)
 {
     uint64_t ino = 0, size64 = 0, ctime;
     int got;
+    wctx *w;
     (void)fi;
+    pthread_mutex_lock(&g_io_lock);
+    if (!g_vol) { pthread_mutex_unlock(&g_io_lock); return -EIO; }
+    /* a live write session for this path owns the freshest bytes:
+     * .write data must stay readable before commit even if the kernel
+     * evicted a clean (already-written-back) page. Flush staged tails of
+     * every session on this name first so the session view is complete. */
+    for (w = g_dirty; w; w = w->next_dirty)
+        if (strcmp(w->name, path + 1) == 0)
+            wctx_flush_tail_locked(w);
+    w = dirty_find_locked(path + 1);
+    if (w) {
+        got = vol_write_read(w->ws, (uint64_t)offset, (uint8_t *)buf, size);
+        pthread_mutex_unlock(&g_io_lock);
+        return got < 0 ? -EIO : got;
+    }
+    pthread_mutex_unlock(&g_io_lock);
     if (!snapshot_entry(path + 1, &ino, &size64, &ctime))
         return -ENOENT;
     if ((uint64_t)offset >= size64)
@@ -617,27 +708,14 @@ static int invf_open(const char *path, struct fuse_file_info *fi)
         fi->keep_cache = 1;
         return 0;  /* plain read open */
     }
-    /* read-write open: allocate write context, load existing content */
+    /* read-write open: allocate a write context. Content is NOT loaded:
+     * the engine session (begun lazily at the first write) forks the
+     * file's segment layout incrementally, so memory stays bounded no
+     * matter how large the file is (WP4b). */
     {
         wctx *c = (wctx *)calloc(1, sizeof(wctx));
         if (!c) return -ENOMEM;
         strncpy(c->name, path + 1, 255);
-        /* load via vol_find (not the snapshot g_entries): an append right
-           after a write+close may hit a stale table */
-        if (!(fi->flags & O_TRUNC)) {
-            uint8_t *data = NULL;
-            size_t len = 0;
-            pthread_mutex_lock(&g_io_lock);
-            uint64_t ino = vol_find(g_vol, path + 1);
-            if (ino && vol_read_file(g_vol, ino, &data, &len) == 0 && len > 0) {
-                c->buf = data;
-                c->len = len;
-                c->cap = len;
-            } else {
-                free(data);
-            }
-            pthread_mutex_unlock(&g_io_lock);
-        }
         fi->fh = (uint64_t)(uintptr_t)c;
         fi->keep_cache = 1;
     }
@@ -714,30 +792,66 @@ static int invf_write(const char *path, const char *buf, size_t size, off_t offs
                       struct fuse_file_info *fi)
 {
     wctx *c = (wctx *)(uintptr_t)fi->fh;
+    size_t done = 0;
     if (!vol_write_enabled(g_vol))
         return -ENOSPC;
-    size_t need = (size_t)offset + size;
+    if ((uint64_t)offset + size > 0xFFFFFFFFull)
+        return -EFBIG;   /* format cap: u32 file_size, 64K x 65535 segs */
     (void)path;
-    fprintf(stderr, "[write] %s off=%lld size=%zu fh=%llu\n", path, (long long)offset, size,
-            (unsigned long long)fi->fh);
     if (!c) return -EBADF;
-    /* mt loop: the per-handle buffer is mutable shared state once the kernel
+    /* mt loop: the per-handle state is mutable shared state once the kernel
      * can dispatch two writes of one inode to different worker threads;
      * keep it under the same big lock as everything else */
     pthread_mutex_lock(&g_io_lock);
-    if (need > c->cap) {
-        size_t ncap = c->cap ? c->cap : 4096;
-        while (ncap < need) ncap *= 2;
-        c->buf = (uint8_t *)realloc(c->buf, ncap);
-        if (!c->buf) { pthread_mutex_unlock(&g_io_lock); return -ENOMEM; }
-        if (need > c->len)
-            memset(c->buf + c->len, 0, need - c->len);  /* zero fill hole */
-        c->cap = ncap;
-    } else if (need > c->len) {
-        memset(c->buf + c->len, 0, need - c->len);
+    if (wctx_ensure_ws_locked(c) != 0) {
+        pthread_mutex_unlock(&g_io_lock);
+        return -ENOSPC;
     }
-    memcpy(c->buf + offset, buf, size);
-    if (need > c->len) c->len = need;
+    while (done < size) {
+        uint64_t off = (uint64_t)offset + done;
+        uint32_t seg = (uint32_t)(off / INVFS_SEGMENT_SIZE);
+        uint32_t soff = (uint32_t)(off % INVFS_SEGMENT_SIZE);
+        size_t piece = INVFS_SEGMENT_SIZE - soff;
+        int rc = 0;
+        if (piece > size - done) piece = size - done;
+
+        if (soff == 0 && piece == INVFS_SEGMENT_SIZE) {
+            /* full segment: straight to the engine, no staging */
+            rc = wctx_flush_tail_locked(c);
+            if (rc == 0)
+                rc = vol_write_range(c->ws, off,
+                                     (const uint8_t *)buf + done, piece);
+        } else {
+            /* sub-segment window: stage in the 64K tail buffer so that
+             * consecutive small writes cost one RMW per segment, not one
+             * per write call */
+            if (!c->tail) {
+                c->tail = (uint8_t *)malloc(INVFS_SEGMENT_SIZE);
+                if (!c->tail) { pthread_mutex_unlock(&g_io_lock); return -ENOMEM; }
+                c->tail_lo = c->tail_hi = 0;
+            }
+            if (c->tail_hi > c->tail_lo && c->tail_seg != seg)
+                rc = wctx_flush_tail_locked(c);
+            if (rc == 0 && c->tail_hi > c->tail_lo &&
+                (soff > c->tail_hi || soff + piece < c->tail_lo))
+                rc = wctx_flush_tail_locked(c);   /* disjoint window */
+            if (rc != 0) break;
+            if (c->tail_hi <= c->tail_lo) {
+                c->tail_seg = seg;
+                c->tail_lo = soff;
+                c->tail_hi = soff;
+            }
+            memcpy(c->tail + soff, buf + done, piece);
+            if (soff < c->tail_lo) c->tail_lo = soff;
+            if (soff + piece > c->tail_hi)
+                c->tail_hi = (uint32_t)(soff + piece);
+        }
+        if (rc != 0) {
+            pthread_mutex_unlock(&g_io_lock);
+            return rc == -2 ? -ENOSPC : -EIO;
+        }
+        done += piece;
+    }
     pthread_mutex_unlock(&g_io_lock);
     return (int)size;
 }
@@ -835,35 +949,46 @@ static void *fuse_sweep_thread(void *arg)
     return NULL;
 }
 
-/* Commit a write-back context into the volume. Shared by .flush and .fsync
- * so that fsync() before a crash actually persists buffered data. */
+/* Commit a write context's session into the volume. Shared by .flush,
+ * .fsync and .release so that fsync() before a crash actually persists
+ * written data, and so mmap-writeback traffic (which may arrive between
+ * the last close() and the final release) is committed too. */
 static int commit_wctx(wctx *c)
 {
+    int rc = 0;
     if (!c) return 0;
     pthread_mutex_lock(&g_io_lock);
     if (!g_vol) { pthread_mutex_unlock(&g_io_lock); return -EIO; }
-    /* checked under the lock: mt loop may run invf_write (realloc of
-     * c->buf) on another worker thread right up to this point */
-    if (!c->buf || c->len == 0) { pthread_mutex_unlock(&g_io_lock); return 0; }
+    if (!c->ws) { pthread_mutex_unlock(&g_io_lock); return 0; }
     vol_ensure_path(g_vol, c->name);   /* auto-create parent dirs */
-    /* append the new record before tombstoning the old one: the delete-first
-       order lost the existing file when the create could not fit */
-    uint64_t nid = vol_replace_file(g_vol, c->name, c->buf, c->len);
-    if (nid == 0) {
+    rc = wctx_flush_tail_locked(c);
+    if (rc == 0) rc = vol_write_commit(c->ws);
+    if (rc != 0) {
         /* late ENOSPC must be visible to the writer, never dropped
-         * silently (audit H4; Dokan already reports STATUS_DISK_FULL) */
-        fprintf(stderr, "invf: vol_replace_file failed (%s)\n", c->name);
+         * silently (audit H4; Dokan already reports STATUS_DISK_FULL).
+         * The abort below rolls the volume back to the pre-session
+         * state, so a failed commit never leaves a torn file. */
+        fprintf(stderr, "invf: commit %s failed (%s)\n", c->name,
+                rc == -2 ? "ENOSPC" : "io");
+        vol_write_abort(c->ws);
+        c->ws = NULL;
+        dirty_del_locked(c);
         vol_flush(g_vol);
         table_sync_one_locked(c->name);
         pthread_mutex_unlock(&g_io_lock);
-        return -ENOSPC;
+        return rc == -2 ? -ENOSPC : -EIO;
     }
-    fprintf(stderr, "invf: flush %s len=%zu ok\n", c->name, c->len);
-    /* re-stamp metadata: the replace built a fresh record without it */
-    if (c->have_meta)
+    vol_write_abort(c->ws);   /* committed: frees the session memory only */
+    c->ws = NULL;
+    dirty_del_locked(c);
+    /* re-stamp metadata with a fresh mtime (the commit carries the old
+     * ext, so mode/owner/xattrs survive; this updates the write time) */
+    if (c->have_meta) {
+        c->meta.mtime = (int64_t)time(NULL);
         if (!vol_apply_meta(g_vol, c->name, &c->meta))
             fprintf(stderr, "invf: close stamp FAILED %s (area full?)\n", c->name);
-    vol_mark_pending(g_vol, nid);   /* on-demand sweep */
+    }
+    vol_mark_pending(g_vol, vol_find(g_vol, c->name));   /* on-demand sweep */
     vol_flush(g_vol);
     table_sync_one_locked(c->name);
     pthread_mutex_unlock(&g_io_lock);
@@ -874,7 +999,6 @@ static int invf_flush(const char *path, struct fuse_file_info *fi)
 {
     wctx *c = (wctx *)(uintptr_t)fi->fh;
     (void)path;
-    fprintf(stderr, "[flush] %s fh=%llu\n", path, (unsigned long long)fi->fh);
     return commit_wctx(c);
 }
 
@@ -886,7 +1010,9 @@ static int invf_fsync(const char *path, int datasync, struct fuse_file_info *fi)
     rc = commit_wctx(c);
     if (rc == 0) {
         pthread_mutex_lock(&g_io_lock);
-        rc = g_vol ? (vol_flush(g_vol) == 0 ? 0 : -EIO) : -EIO;
+        /* fsync/fdatasync = durability contract: journal + bitmap + data
+         * past a real storage barrier, not just into the OS page cache */
+        rc = g_vol ? (vol_sync(g_vol) == 0 ? 0 : -EIO) : -EIO;
         pthread_mutex_unlock(&g_io_lock);
     }
     return rc;
@@ -897,7 +1023,11 @@ static int invf_release(const char *path, struct fuse_file_info *fi)
     wctx *c = (wctx *)(uintptr_t)fi->fh;
     (void)path;
     if (c) {
-        free(c->buf);
+        /* mmap writeback can dirty pages after the last close()/flush()
+         * (the mapping pins the file, so release is the last word):
+         * commit whatever the session still holds */
+        commit_wctx(c);
+        free(c->tail);
         free(c);
     }
     __sync_fetch_and_sub(&g_open_handles, 1);
@@ -997,73 +1127,63 @@ static int invf_access(const char *path, int mask)
 static int resize_volume_file(const char *name, off_t len)
 {
     int rc = 0;
+    invfs_wsession *ws = NULL;
     pthread_mutex_lock(&g_io_lock);
     if (!g_vol) { pthread_mutex_unlock(&g_io_lock); return -EIO; }
-    /* preserve v2 metadata across the record rewrite below */
-    {
-        uint64_t oid = vol_find(g_vol, name + 1);
-        invfs_meta_pub keep;
-        int have = oid ? (vol_get_meta(g_vol, oid, &keep) == 0) : 0;
-        if (len == 0) {
-            if (vol_replace_file(g_vol, name + 1, NULL, 0) == 0)
-                rc = -ENOSPC;
-        } else {
-            uint8_t *data = NULL;
-            size_t oldlen = 0;
-            if (oid && vol_read_file(g_vol, oid, &data, &oldlen) != 0) {
-                data = NULL; oldlen = 0;
-            }
-            {
-                size_t nlen = (size_t)len;
-                uint8_t *nb = (uint8_t *)malloc(nlen ? nlen : 1);
-                if (!nb) { free(data); pthread_mutex_unlock(&g_io_lock); return -ENOMEM; }
-                if (data) {
-                    memcpy(nb, data, oldlen < nlen ? oldlen : nlen);
-                    if (nlen > oldlen) memset(nb + oldlen, 0, nlen - oldlen);
-                } else {
-                    memset(nb, 0, nlen);
-                }
-                free(data);
-                if (vol_replace_file(g_vol, name + 1, nb, nlen) == 0)
-                    rc = -ENOSPC;
-                else
-                    vol_mark_pending(g_vol, vol_find(g_vol, name + 1));
-                free(nb);
-            }
-        }
-        if (have && rc == 0)
-            vol_apply_meta(g_vol, name + 1, &keep);
+    /* session-based resize: no whole-file buffer. The engine carries the
+     * v2 metadata ext across the commit; a swept file is materialized to
+     * RAW first (a truncate IS a write). */
+    if (!vol_write_begin(g_vol, name + 1, 0, &ws) || !ws) {
+        pthread_mutex_unlock(&g_io_lock);
+        return -ENOSPC;
+    }
+    rc = vol_write_truncate(ws, (uint64_t)len);
+    if (rc == 0) rc = vol_write_commit(ws);
+    vol_write_abort(ws);
+    if (rc == 0) {
+        vol_mark_pending(g_vol, vol_find(g_vol, name + 1));
+        vol_flush(g_vol);
     }
     table_sync_one_locked(name + 1);
     pthread_mutex_unlock(&g_io_lock);
-    return rc;
+    return rc == 0 ? 0 : (rc == -2 ? -ENOSPC : -EIO);
 }
 
 /* libfuse3: one truncate entry point; fi != NULL for ftruncate-style calls
- * where the data may still live in the write-back buffer (cheap path) */
+ * (routed into the handle's write session). A truncate must be VISIBLE
+ * immediately: libfuse re-stats the file for the SETATTR reply, and the
+ * kernel caches that size -- so the session is committed synchronously
+ * here, not deferred to flush. */
 static int invf_truncate(const char *path, off_t len, struct fuse_file_info *fi)
 {
     wctx *c = fi ? (wctx *)(uintptr_t)fi->fh : NULL;
+    int rc;
     if (!vol_write_enabled(g_vol))
         return -EROFS;
     if (len < 0)
         return -EINVAL;
     if (!c)
         return resize_volume_file(path, len);
-    /* mt loop: per-handle buffer mutation, same locking as invf_write */
+    /* mt loop: per-handle state mutation, same locking as invf_write */
     pthread_mutex_lock(&g_io_lock);
-    if ((uint64_t)len > c->cap) {
-        size_t ncap = c->cap ? c->cap : 4096;
-        while (ncap < (size_t)len) ncap *= 2;
-        c->buf = (uint8_t *)realloc(c->buf, ncap);
-        if (!c->buf) { pthread_mutex_unlock(&g_io_lock); return -ENOMEM; }
-        c->cap = ncap;
+    rc = wctx_ensure_ws_locked(c);
+    if (rc == 0) rc = wctx_flush_tail_locked(c);   /* writes precede the cut */
+    if (rc == 0) rc = vol_write_truncate(c->ws, (uint64_t)len);
+    if (rc == 0) rc = vol_write_commit(c->ws);
+    vol_write_abort(c->ws);
+    c->ws = NULL;
+    dirty_del_locked(c);
+    if (rc == 0) {
+        if (c->have_meta) {
+            c->meta.mtime = (int64_t)time(NULL);
+            vol_apply_meta(g_vol, c->name, &c->meta);
+        }
+        vol_mark_pending(g_vol, vol_find(g_vol, c->name));
+        vol_flush(g_vol);
+        table_sync_one_locked(c->name);
     }
-    if ((size_t)len > c->len)
-        memset(c->buf + c->len, 0, (size_t)len - c->len);
-    c->len = (size_t)len;
     pthread_mutex_unlock(&g_io_lock);
-    return 0;
+    return rc == 0 ? 0 : (rc == -2 ? -ENOSPC : -EIO);
 }
 
 /* format v2: persist real timestamps by merging into the INO2 ext */
@@ -1436,7 +1556,15 @@ static void *invf_init(struct fuse_conn_info *conn, struct fuse_config *cfg)
     conn->want |= conn->capable & (FUSE_CAP_SPLICE_READ |
                                    FUSE_CAP_SPLICE_WRITE |
                                    FUSE_CAP_SPLICE_MOVE |
-                                   FUSE_CAP_ASYNC_READ);
+                                   FUSE_CAP_ASYNC_READ |
+                                   FUSE_CAP_WRITEBACK_CACHE);
+    /* WRITEBACK_CACHE is what makes shared-writable mmap safe: dirty
+     * mmap pages are written back through the ordinary .write path
+     * (which streams into an engine session) instead of being refused
+     * or silently dropped. Coherency is sound because every content
+     * change flows through this single mount. If the kernel does not
+     * offer it, mmap(PROT_WRITE, MAP_SHARED) fails ENODEV in the kernel
+     * -- loudly, nothing faked. */
     /* max_read: -o max_read= sets the SESSION value (libfuse sizes its
      * buffers from it) but leaves conn->max_read at 0 here; init must
      * restate the same value or libfuse aborts with "requested different
@@ -1445,11 +1573,12 @@ static void *invf_init(struct fuse_conn_info *conn, struct fuse_config *cfg)
     conn->max_read = 1048576;
     conn->max_write = 1048576;
     conn->max_readahead = 1048576;
-    fprintf(stderr, "invf: conn max_read=%u max_write=%u max_readahead=%u splice=%c%c%c\n",
+    fprintf(stderr, "invf: conn max_read=%u max_write=%u max_readahead=%u splice=%c%c%c wbc=%c\n",
             conn->max_read, conn->max_write, conn->max_readahead,
             (conn->want & FUSE_CAP_SPLICE_READ)  ? 'r' : '-',
             (conn->want & FUSE_CAP_SPLICE_MOVE)  ? 'm' : '-',
-            (conn->want & FUSE_CAP_SPLICE_WRITE) ? 'w' : '-');
+            (conn->want & FUSE_CAP_SPLICE_WRITE) ? 'w' : '-',
+            (conn->want & FUSE_CAP_WRITEBACK_CACHE) ? '+' : '-');
     return NULL;
 }
 

@@ -14,6 +14,21 @@ write(fd, buf, len, offset):
   until the Sweep worker processes it.
 ```
 
+> **Status (2026-08-30, WP4b landed):** the FUSE mount no longer buffers
+> whole files per handle. `write()` streams through an engine session
+> (`vol_write_begin` → `vol_write_range` → `vol_write_commit`): each
+> complete 64 KB logical segment is compressed (LZ4, NONE fallback — the
+> vol_create_file policy) and stored immediately (alloc + L2P map under a
+> fresh inode id); only the tail partial segment stays in the handle.
+> flush/fsync/release commit the session (new record first, then the old
+> version retires — the vol_replace_file ordering); fsync additionally
+> takes a real storage barrier (`vol_sync` = `vol_flush` + `blkio_flush`).
+> Ranged writes RMW only the head/tail partial segments; aligned spans are
+> rewritten in place; beyond-EOF gaps zero-fill through the same path.
+> A write to a swept file (ZSTD/PPMD/batch/container) materializes it back
+> to RAW segments first — a write is an implicit downgrade (v1 policy).
+> `vol_replace_file` remains for sweep/offline callers.
+
 ### fsync
 
 ```
@@ -124,6 +139,19 @@ static const struct address_space_operations invarifs_aops = {
 ```
 
 Это критично для корректной работы mmap-приложений.
+
+> **Status (2026-08-30, WP4a landed, FUSE route instead of the kernel
+> module above):** the mount negotiates `FUSE_CAP_WRITEBACK_CACHE` (with
+> `keep_cache` on open), so mmap read works for every stored form
+> `vol_read_range` serves (RAW/LZ4/ZSTD segments, PPMD/ZSTD batch members,
+> containers, whole-file blobs via ARC) and mmap **write** works through
+> the kernel writeback cache: dirty pages come back as ordinary `.write`
+> calls into the streaming session path, `msync`/`fsync`/close commit them
+> (acceptance leg: real `gpg --verify` over the mount — gpg mmaps its
+> inputs — plus a dirty-page `kill -9` crash leg). If the kernel refuses
+> WRITEBACK_CACHE, shared-writable mmap fails ENODEV in the kernel —
+> loudly, nothing faked. The `address_space_operations` sketch above stays
+> the design for the kernel-module route (doc/13), which does not exist.
 
 ## Metadata Operations
 

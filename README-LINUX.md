@@ -61,9 +61,12 @@ zstd/lz4/miniz/blake3/flacx, libfuse3 for the daemon.
       getfattr --only-values -n user.invfs.stats /  # hot counters +
                                                     # zone usage (instant)
 
-- Write path note: writes currently buffer per-handle and replace the
-  file at flush/close; fsync commits pending data. Ranged/incremental
-  segment writes (WP4b) are the active work item.
+- Write path: `write()` streams through engine write sessions
+  (`vol_write_begin/range/commit`) — per-handle memory is O(1) (one staged
+  64K tail segment), complete segments compress+store immediately, ranged
+  pwrite RMWs only edge segments, beyond-EOF gaps zero-fill. fsync commits
+  + barriers the volume (`vol_sync`). mmap read/write work (writeback
+  cache); `gpg` over the mount is a covered acceptance leg.
 
 ## Volume format v2 (de-facto spec = invarifs.h + volume.c)
 
@@ -95,10 +98,12 @@ before building the disk.
 
 ## Current limitations (post-audit, honest)
 
-- Whole-file write buffering per open handle (WP4b ranged writes pending);
-  fsync/close durability exists, per-op barriers/group-commit do not (WP3).
-- No mmap support: gpg keyrings assert; stubs ship via
-  `tools/configure-guest.sh` (fake-gpg-verify, getuto) until WP4a.
+- Per-op write barriers/group-commit still open (WP3); the durability
+  contract is fsync/close (`vol_sync` = journal+bitmap+data past a real
+  storage barrier), which the kill -9 crash leg verifies.
+- mmap is supported (read of all storage forms; write via FUSE
+  writeback cache, WP4a). If a kernel declines FUSE_CAP_WRITEBACK_CACHE,
+  shared-writable mmap fails ENODEV rather than faking it.
 - External transcoders (JXL/APE/MP3) are Linux stubs; native codecs
   (LZ4/ZSTD/gzip-replica/PNG-replica/TAR/ZIP/FLAC) fully work (WP5).
 - ~52 l2p_miss casualties from crash-killed merges remain on the demo
@@ -111,8 +116,8 @@ before building the disk.
 
 ## Workstreams
 
-WP3 durability barriers/group-commit · WP4a mmap · WP4b ranged writes ·
-WP4d recipe cache (drop per-read re-verification) · WP5 codec neutrality +
+WP3 durability barriers/group-commit · WP4d recipe cache (drop per-read
+re-verification) · WP5 codec neutrality +
 version pinning (see impl_docs/WP5-codec-seekability.md) · WP6 block
 refcounts for hardlinks · compaction (online or fsck-time) · regression
 suite.

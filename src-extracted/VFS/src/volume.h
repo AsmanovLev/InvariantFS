@@ -17,6 +17,9 @@ typedef struct invfs_volume invfs_volume;
 invfs_volume *vol_open(const char *path, int *err);
 void vol_close(invfs_volume *v);
 int  vol_flush(invfs_volume *v);
+/* vol_flush + a real storage barrier (fsync on image files, no-op-ish on
+ * write-through devices): the FUSE fsync/fdatasync path. 0 = durable. */
+int  vol_sync(invfs_volume *v);
 
 uint64_t vol_write_raw(invfs_volume *v, const uint8_t *data, size_t len);
 
@@ -146,12 +149,32 @@ uint64_t vol_create_special(invfs_volume *v, const char *name,
 int vol_hardlink(invfs_volume *v, const char *from, const char *to);
 size_t vol_collect_sweepables(invfs_volume *v, uint64_t *ids, size_t max);
 
-/* ---- WP4b: incremental ranged-write sessions ---- */
+/* ---- WP4b: incremental ranged-write sessions ----
+ * Streaming write path: begin a session for `name` (truncate != 0 drops
+ * the old content at first use), then vol_write_range any [off,len)
+ * window in any order -- each INVFS_SEGMENT_SIZE segment is
+ * read-modify-written to a NEW pba (never in place) the first time it is
+ * touched; vol_truncate extends (zero-filled) or shrinks the logical
+ * size; commit appends the new inode record and only then retires the
+ * old version (the vol_replace_file ordering); abort rolls back to the
+ * pre-session state.
+ * A file stored swept (ZSTD/PPMD/batched/container) is materialized back
+ * to RAW segments at the first write -- a write is an implicit downgrade
+ * (v1 policy). Return values: 0 ok, -2 ENOSPC (reserve guard), -1 other.
+ * Per-session memory: O(segments) metadata, no file-data buffering.
+ * Engine-level crash contract: pre-commit crash leaves the old version
+ * live; fsck purges orphaned maps/blocks. */
+#define INVFS_SEGMENT_SIZE (64u * 1024u)   /* RAW segment granularity */
 typedef struct invfs_wsession invfs_wsession;
 uint64_t vol_write_begin(invfs_volume *v, const char *name, int truncate,
                          invfs_wsession **out);
 int  vol_write_range(invfs_wsession *ws, uint64_t offset,
                      const uint8_t *data, size_t len);
+int  vol_write_truncate(invfs_wsession *ws, uint64_t len);
+/* read the session's current (uncommitted) logical view -- lets a mount
+ * serve .write data before commit; returns bytes read or -1 */
+int  vol_write_read(invfs_wsession *ws, uint64_t offset,
+                    uint8_t *buf, size_t len);
 int  vol_write_commit(invfs_wsession *ws);
 void vol_write_abort(invfs_wsession *ws);
 
