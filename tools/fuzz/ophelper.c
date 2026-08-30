@@ -1,0 +1,42 @@
+/*
+ * ophelper.c — tools/fuzz helper for the ops the CLI tools do not expose
+ * (there is deliberately no `invf-rm`; the e2e scripts use the same
+ * tzrm-style throwaway helper convention). Public volume.h API only.
+ *
+ *   ophelper <image> rm <name> [name...]        delete files, flush, close
+ *   ophelper <image> rm-nonexistent <name>      delete must FAIL (rc 2)
+ *
+ * Build (tools/test-fuzz.sh does this):
+ *   gcc -std=gnu11 -O2 -I src-extracted/VFS/src -o ophelper ophelper.c \
+ *       build/obj/{volume,arc,crc32c,lz4,flacx,tarx,pngx,blkio,miniz,blake3,
+ *       blake3_dispatch,blake3_portable,ppmd8,ppmd8enc,ppmd8dec,ppmd_codec,
+ *       codec,bcj_x86,rs}.o -Wl,-l:libzstd.so.1 -lz -lpthread
+ */
+#include <stdio.h>
+#include <string.h>
+#include "volume.h"
+
+int main(int argc, char **argv)
+{
+    invfs_volume *v;
+    int err = 0, rc = 0, i;
+
+    if (argc < 4) {
+        fprintf(stderr, "usage: %s <image> rm <name>...\n", argv[0]);
+        return 2;
+    }
+    v = vol_open(argv[1], &err);
+    if (!v) { fprintf(stderr, "open err %d\n", err); return 1; }
+    for (i = 3; i < argc; i++) {
+        if (vol_delete_file(v, argv[i]) != 0) {
+            fprintf(stderr, "rm %s failed\n", argv[i]);
+            rc = 1;
+        }
+    }
+    if (rc == 0 && vol_flush(v) != 0) {
+        fprintf(stderr, "flush failed\n");
+        rc = 1;
+    }
+    vol_close(v);
+    return rc;
+}

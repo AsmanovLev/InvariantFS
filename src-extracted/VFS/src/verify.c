@@ -169,8 +169,9 @@ int main(int argc, char **argv)
         /* Close first: vol_open takes a device exclusively (lock + dismount),
            which cannot succeed while this handle is still open. */
         blkio_close(&io);
-        vol = vol_open(path, &errors);
-        if (!vol) { fprintf(stderr, "deep: cannot open volume (err %d)\n", errors); return 1; }
+        int open_err = 0;   /* vol_open's out-param; must NOT clobber errors */
+        vol = vol_open(path, &open_err);
+        if (!vol) { fprintf(stderr, "deep: cannot open volume (err %d)\n", open_err); return 1; }
         pos = vol_inode_area_start(vol);
         printf("deep: reading all live files...\n");
         while (1) {
@@ -256,7 +257,7 @@ int main(int argc, char **argv)
                (unsigned long long)live, (unsigned long long)bad,
                (unsigned long long)total_bytes);
         vol_close(vol);
-        return (bad || parity_bad) ? 1 : 0;
+        return (bad || parity_bad || errors) ? 1 : 0;
     }
 
     blkio_close(&io);

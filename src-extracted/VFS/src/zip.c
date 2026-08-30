@@ -197,8 +197,10 @@ int main(int argc, char **argv)
         }
         FILE *f = fopen(outf, "wb");
         if (!f) { fprintf(stderr, "cannot write %s\n", outf); free(data); free(z); vol_close(vol); return 1; }
-        fwrite(data, 1, dlen, f);
-        fclose(f);
+        if (fwrite(data, 1, dlen, f) != dlen || fclose(f) != 0) {
+            fprintf(stderr, "write failed: %s\n", outf);
+            free(data); free(z); vol_close(vol); return 1;
+        }
         printf("extracted '%s' -> %s (%zu bytes)\n", member, outf, dlen);
         free(data);
     } else {

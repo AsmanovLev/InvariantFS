@@ -82,11 +82,16 @@ int main(int argc, char **argv)
     if (out) {
         FILE *f = fopen(out, "wb");
         if (!f) { fprintf(stderr, "cannot write %s\n", out); free(data); vol_close(vol); return 1; }
-        fwrite(data, 1, len, f);
-        fclose(f);
+        if (fwrite(data, 1, len, f) != len || fclose(f) != 0) {
+            fprintf(stderr, "write failed: %s\n", out);
+            free(data); vol_close(vol); return 1;
+        }
         printf("extracted '%s' -> %s (%zu bytes)\n", name, out, len);
     } else {
-        fwrite(data, 1, len, stdout);
+        if (fwrite(data, 1, len, stdout) != len || fflush(stdout) != 0) {
+            fprintf(stderr, "write failed: stdout\n");
+            free(data); vol_close(vol); return 1;
+        }
     }
 
     free(data);
