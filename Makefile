@@ -114,6 +114,8 @@ e2e: all
 	bash tools/test-vdi.sh
 	bash tools/test-resize.sh
 	bash tools/test-rollback.sh
+	bash tools/test-p7z.sh
+	bash tools/test-fuzz.sh
 
 .PHONY: all clean test e2e fuzz
 -include $(wildcard $(OBJ)/*.d)

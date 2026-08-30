@@ -1,0 +1,50 @@
+# p7z codecpack (WP16a/WP16b): 7z archives with STORED members -> members.
+#
+# Decomposes 7z archives whose file payloads are all stored with the Copy
+# method (coder id {00}, i.e. `7zz a -t7z -m0=Copy`) into one member per
+# archived file; the members then flow through the whole normal pipeline
+# (text PPMd batching / binary ZSTD(+BCJ) batching / generic ZSTD-19,
+# nested containers included). The recipe (strip) is the P7R1 blob:
+# archive size + the member (idx,off,len) table + every byte OUTSIDE the
+# member extents, verbatim (signature header, the — typically
+# LZMA-compressed — 7z header, gaps, trailing junk). Bit-exactness is by
+# construction: stored bytes are spliced, never re-encoded. The map command
+# makes the pack SEEKABLE (WP16b MRMP; one MEMBER range per stored file,
+# RECIPE ranges for the rest).
+#
+# Compressed/encrypted archives (LZMA/LZMA2/PPMd/BZip2/Deflate/BCJ/7zAES —
+# the 7z defaults!) are DECLINED: their members cannot be rebuilt
+# bit-exactly without re-encoding, and carrying the compressed bytes in the
+# recipe would store the data twice. RAR is not claimed at all (7zz reads
+# it, but that is a different format needing its own parser).
+#
+# The helper is a single C11 binary (p7z.c), libc + POSIX only, streaming
+# in <= 8 MiB windows. It parses the 7z header itself (7zFormat.txt) to
+# locate member extents; for the default LZMA-compressed header it
+# fabricates an LZMA-Alone stream and decodes it through the real 7zz
+# (`7zz x -tlzma -so`), resolved from $P7Z_7ZZ, then a sibling of the
+# helper named "7zz", then PATH. Without 7zz only archives with an
+# uncompressed header (`-mhc=off`) are handled; encoded-header archives
+# decline cleanly. argv0 is the pack-dir-relative "bin/p7z": the FS
+# resolves a relative argv0 containing '/' against the pack dir both at
+# probe and at exec time (a BARE "p7z" probes OK via <pack>/bin/ but the
+# exec layer resolves $INVFS_TOOLS -> /usr/lib/invfs/tools -> PATH
+# instead — the pack would never fire). See p7z.c for the full format
+# doc and the refuse list.
+# algo 23: after qcow2 (22).
+name = p7z
+type = container
+algo = 23
+pack_version = 1
+generation = 1
+caps = container|external
+dec_mem = 0
+sniff.magic = 377ABCAF271C
+sniff.offset = 0
+sniff.ext = 7z
+enumerate = bin/p7z enumerate {in} {out}
+extract = bin/p7z extract {in} {idx} {out}
+strip = bin/p7z strip {in} {out}
+rebuild = bin/p7z rebuild {recipe} {dir} {out}
+map = bin/p7z map {in} {out}
+estimate = bin/p7z estimate {in}
