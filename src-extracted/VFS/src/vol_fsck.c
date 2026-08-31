@@ -124,126 +124,191 @@ static int fsck_rebuild_one(invfs_volume *v, uint64_t rec_pos, uint64_t inode_id
 }
 
 
+/* ---- live-record set ----------------------------------------------------
+ * Liveness must mirror the name index vol_open builds (idx_put / idx_del /
+ * idx_del_at) EXACTLY, or fsck and the read path disagree about the same
+ * volume -- the WP22c/F2 lesson: a legacy kill-by-id tombstone for one
+ * name of a SHARED id (the rename fast path hardlinks the copy onto the
+ * old id) used to kill the survivor's record here while the name index
+ * kept it, so fsck reported "l2p misses: 0" over a file verify --deep saw
+ * as CORRUPT and --repair never engaged. So tombstones apply in write
+ * order with index semantics: an INOD upserts its name (last record
+ * wins), a legacy DELT kills the name's entry only when the id matches, a
+ * v2 DELT only when the position matches. */
+typedef struct fsck_name {
+    struct fsck_name *next;
+    uint64_t id, pos;
+    uint32_t nlen;
+    char name[1];
+} fsck_name;
+
+typedef struct {
+    fsck_name **buck;
+    size_t mask, count;
+} fsck_nameset;
+
+static fsck_name *fsn_find(const fsck_nameset *s, const char *name,
+                           size_t nlen)
+{
+    size_t b = (size_t)(idx_hash(name, nlen) & s->mask);
+    fsck_name *e;
+    for (e = s->buck[b]; e; e = e->next)
+        if (e->nlen == nlen && memcmp(e->name, name, nlen) == 0)
+            return e;
+    return NULL;
+}
+
+static void fsn_grow(fsck_nameset *s)
+{
+    size_t ncap = (s->mask + 1) * 2, i;
+    fsck_name **nb = (fsck_name **)calloc(ncap, sizeof *nb);
+    if (!nb) return;
+    for (i = 0; i <= s->mask; i++) {
+        fsck_name *e = s->buck[i];
+        while (e) {
+            fsck_name *nx = e->next;
+            size_t b = (size_t)(idx_hash(e->name, e->nlen) & (ncap - 1));
+            e->next = nb[b]; nb[b] = e;
+            e = nx;
+        }
+    }
+    free(s->buck);
+    s->buck = nb;
+    s->mask = ncap - 1;
+}
+
+static void fsn_put(fsck_nameset *s, const char *name, size_t nlen,
+                    uint64_t id, uint64_t pos)
+{
+    fsck_name *e;
+    size_t b;
+    if (!s->buck) {
+        s->buck = (fsck_name **)calloc(1024, sizeof *s->buck);
+        if (!s->buck) return;
+        s->mask = 1023;
+    }
+    e = fsn_find(s, name, nlen);
+    if (e) { e->id = id; e->pos = pos; return; }   /* last record wins */
+    e = (fsck_name *)malloc(sizeof *e + nlen);
+    if (!e) return;
+    memcpy(e->name, name, nlen);
+    e->name[nlen] = 0;
+    e->nlen = (uint32_t)nlen;
+    e->id = id;
+    e->pos = pos;
+    b = (size_t)(idx_hash(name, nlen) & s->mask);
+    e->next = s->buck[b];
+    s->buck[b] = e;
+    s->count++;
+    if (s->count > s->mask + 1) fsn_grow(s);
+}
+
+static void fsn_drop(fsck_nameset *s, const char *name, size_t nlen)
+{
+    size_t b = (size_t)(idx_hash(name, nlen) & s->mask);
+    fsck_name *e, **pp = &s->buck[b];
+    for (e = *pp; e; pp = &e->next, e = e->next)
+        if (e->nlen == nlen && memcmp(e->name, name, nlen) == 0) break;
+    if (!e) return;
+    *pp = e->next;
+    free(e);
+    s->count--;
+}
+
+static void fsn_free(fsck_nameset *s)
+{
+    size_t i;
+    if (!s->buck) return;
+    for (i = 0; i <= s->mask; i++) {
+        fsck_name *e = s->buck[i];
+        while (e) { fsck_name *nx = e->next; free(e); e = nx; }
+    }
+    free(s->buck);
+    s->buck = NULL;
+}
+
 int vol_fsck_scan(invfs_volume *v, invfs_fsck_report *rep, int fix)
 {
     uint64_t pos, end;
-    uint64_t i;
+    size_t bi;
     size_t l2p_n = 0, l2p_cap = 0;
     invfs_l2p_entry *newl2p = NULL;
     uint8_t *used = NULL;
     size_t used_bytes;
-    /* v2 tombstones kill by record position (DELT.file_size != 0);
-     * legacy ones kill by inode id. Keep both fields per entry. */
-    uint64_t *tomb_id = NULL, *tomb_pos = NULL;
-    size_t tomb_n = 0, tomb_cap = 0;
+    fsck_nameset live = { NULL, 0, 0 };
 
     memset(rep, 0, sizeof(*rep));
     used_bytes = (size_t)v->bitmap_blocks * INVFS_BLOCK_SIZE;
     used = (uint8_t *)calloc(1, used_bytes);
     if (!used) return -1;
 
-    end = v->inode_area_pos;
+    /* pass 1: ordered replay of the area -- the name-keyed live set.
+     * Scan the FULL metadata zone tail, not just v->inode_area_pos
+     * (vol_open truncates the area at the first corrupt record). */
+    end = (v->sb.metadata_zone_start + v->sb.metadata_zone_blocks)
+          * INVFS_BLOCK_SIZE;
     pos = v->inode_area_start * INVFS_BLOCK_SIZE;
-
-    /* pass 1: tombstones + live inode record offsets */
-    {
-        uint64_t *live_pos = NULL, *live_id = NULL;
-        size_t live_n = 0, live_cap = 0;
-        /* scan the FULL metadata zone tail, not just v->inode_area_pos
-         * (vol_open truncates the area at the first corrupt record) */
-        end = (v->sb.metadata_zone_start + v->sb.metadata_zone_blocks)
-              * INVFS_BLOCK_SIZE;
-        pos = v->inode_area_start * INVFS_BLOCK_SIZE;
-        while (pos + sizeof(invfs_inode_rec) <= end) {
-            invfs_inode_rec rh;
-            uint32_t crc_stored, crc_calc;
-            uint8_t *rec = NULL;
-            if (io_seek(&v->io, pos) != 0 ||
-                io_read(&v->io, &rh, sizeof(rh)) != 0) break;
-            if (rh.magic != INODE_REC_MAGIC && rh.magic != TOMBSTONE_MAGIC) break;
-            if (rh.rec_len < sizeof(invfs_inode_rec) ||
-                pos + rh.rec_len + 4 > end) {
-                rep->bad_recs++;
-                break;
-            }
-            rec = (uint8_t *)malloc(rh.rec_len);
-            if (!rec) { free(used); free(live_pos); free(live_id); return -1; }
-            if (io_seek(&v->io, pos) != 0 ||
-                io_read(&v->io, rec, rh.rec_len) != 0 ||
-                io_read(&v->io, &crc_stored, 4) != 0) {
-                free(rec); free(used); free(live_pos); free(live_id); return -1;
-            }
-            crc_calc = invfs_crc32c(rec, rh.rec_len);
-            if (crc_calc != crc_stored) {
-                /* corrupt record: report, skip past it, keep scanning */
-                rep->bad_recs++;
-                free(rec);
-                pos += rh.rec_len + 4;
-                continue;
-            }
-            if (rh.magic == TOMBSTONE_MAGIC) {
-                if (tomb_n == tomb_cap) {
-                    size_t ncap = tomb_cap ? tomb_cap * 2 : 64;
-                    uint64_t *ni = (uint64_t *)realloc(tomb_id, ncap * sizeof(uint64_t));
-                    uint64_t *np = (uint64_t *)realloc(tomb_pos, ncap * sizeof(uint64_t));
-                    if (!ni || !np) {
-                        free(ni); free(np);
-                        free(rec); free(used); free(live_pos); free(live_id);
-                        return -1;
-                    }
-                    tomb_id = ni; tomb_pos = np;
-                    tomb_cap = ncap;
-                }
-                tomb_id[tomb_n] = rh.inode_id;
-                tomb_pos[tomb_n] = rh.file_size;   /* v2: record position */
-                tomb_n++;
-            } else if (rh.magic == INODE_REC_MAGIC) {
-                if (live_n == live_cap) {
-                    live_cap = live_cap ? live_cap * 2 : 256;
-                    uint64_t *np = (uint64_t *)realloc(live_pos, live_cap * sizeof(uint64_t));
-                    uint64_t *ni = (uint64_t *)realloc(live_id, live_cap * sizeof(uint64_t));
-                    if (!np || !ni) {
-                        free(np); free(ni);
-                        free(rec); free(used); free(live_pos); free(live_id);
-                        return -1;
-                    }
-                    live_pos = np; live_id = ni;
-                }
-                live_pos[live_n] = pos;
-                live_id[live_n] = rh.inode_id;
-                live_n++;
-            }
-            free(rec);
+    while (pos + sizeof(invfs_inode_rec) <= end) {
+        invfs_inode_rec rh;
+        uint32_t crc_stored, crc_calc;
+        uint8_t *rec = NULL;
+        if (io_seek(&v->io, pos) != 0 ||
+            io_read(&v->io, &rh, sizeof(rh)) != 0) break;
+        if (rh.magic != INODE_REC_MAGIC && rh.magic != TOMBSTONE_MAGIC) break;
+        if (rh.rec_len < sizeof(invfs_inode_rec) ||
+            pos + rh.rec_len + 4 > end) {
+            rep->bad_recs++;
+            break;
+        }
+        rec = (uint8_t *)malloc(rh.rec_len);
+        if (!rec) { free(used); fsn_free(&live); return -1; }
+        if (io_seek(&v->io, pos) != 0 ||
+            io_read(&v->io, rec, rh.rec_len) != 0 ||
+            io_read(&v->io, &crc_stored, 4) != 0) {
+            free(rec); free(used); fsn_free(&live); return -1;
+        }
+        crc_calc = invfs_crc32c(rec, rh.rec_len);
+        free(rec);
+        if (crc_calc != crc_stored) {
+            /* corrupt record: report, skip past it, keep scanning */
+            rep->bad_recs++;
             pos += rh.rec_len + 4;
+            continue;
         }
-
-        /* pass 2: per live inode, verify AST<->L2P and collect used blocks */
-        for (i = 0; i < live_n; i++) {
-            int killed = 0;
-            size_t t;
-            for (t = 0; t < tomb_n; t++)
-                if ((tomb_pos[t] == 0 && tomb_id[t] == live_id[i]) ||
-                    (tomb_pos[t] != 0 && tomb_pos[t] == live_pos[i])) {
-                    killed = 1; break;
-                }
-            if (killed) continue;
-            /* Counted here, not in pass 1: a record that a tombstone later
-               killed is not a live file. Counting every INOD reported 40004
-               live files on a volume holding 40000 -- the 4 rewritten ones
-               were counted twice. */
-            rep->live_files++;
-            if (fsck_rebuild_one(v, live_pos[i], live_id[i],
-                                 &newl2p, &l2p_n, &l2p_cap,
-                                 used, used_bytes, rep) != 0) {
-                free(used); free(live_pos); free(live_id); free(tomb_id); free(tomb_pos);
-                free(newl2p);
-                return -1;
+        {
+            size_t nl = rh.name_len < 256 ? rh.name_len : 256;
+            if (rh.magic == INODE_REC_MAGIC) {
+                if (nl) fsn_put(&live, rh.name, nl, rh.inode_id, pos);
+            } else {
+                /* v2 tombstones kill by record position; legacy ones by
+                 * id -- both only when the name's CURRENT entry matches,
+                 * exactly idx_del_at / idx_del */
+                fsck_name *e = nl ? fsn_find(&live, rh.name, nl) : NULL;
+                if (e && ((rh.file_size == 0 && e->id == rh.inode_id) ||
+                          (rh.file_size != 0 && e->pos == rh.file_size)))
+                    fsn_drop(&live, rh.name, nl);
             }
         }
-        free(live_pos); free(live_id);
+        pos += rh.rec_len + 4;
     }
-    free(tomb_id);
-    free(tomb_pos);
+
+    /* pass 2: per live record, verify AST<->L2P and collect used blocks */
+    if (live.buck) {
+        for (bi = 0; bi <= live.mask; bi++) {
+            fsck_name *e;
+            for (e = live.buck[bi]; e; e = e->next) {
+                rep->live_files++;
+                if (fsck_rebuild_one(v, e->pos, e->id,
+                                     &newl2p, &l2p_n, &l2p_cap,
+                                     used, used_bytes, rep) != 0) {
+                    free(used); fsn_free(&live);
+                    free(newl2p);
+                    return -1;
+                }
+            }
+        }
+    }
+    fsn_free(&live);
 
     /* metadata zone is always allocated */
     {
@@ -255,7 +320,7 @@ int vol_fsck_scan(invfs_volume *v, invfs_fsck_report *rep, int fix)
 
     /* compare bitmaps: orphans = in v->bitmap, not in used; missing = reverse */
     {
-        uint64_t total = v->sb.total_blocks;
+        uint64_t total = v->sb.total_blocks, i;
         for (i = 0; i < total; i++) {
             int bm = bit_get(v->bitmap, i);
             int us = bit_get(used, i);

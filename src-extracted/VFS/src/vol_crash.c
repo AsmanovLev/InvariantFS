@@ -59,3 +59,63 @@ int vol_needs_recovery(invfs_volume *v)
 {
     return v && v->needs_recovery;
 }
+
+
+/* WP22c/F1: a flush/sync failed. On a buffered backing store the append
+ * path's io_writes report success from the page cache, so a device error
+ * surfaces only at a barrier -- possibly many commits after the bytes it
+ * covers were written. The dm-flakey error window proved what happens if
+ * the session then keeps going: the storm-era dirty pages die in
+ * writeback leaving a zero hole in the append-only inode area, every
+ * record committed past the hole is valid-CRC yet unreachable at the next
+ * mount (the open scan stops at the gap), and fsck frees their blocks as
+ * orphans -- fsync-acknowledged files silently gone after a clean
+ * unmount.
+ *
+ * So a failed flush/sync must never leave the in-memory append cursors
+ * past unpersisted bytes, and the volume must not continue appending into
+ * a known-broken tail:
+ *
+ *  - the inode-area cursor is re-anchored at inode_area_durable, the last
+ *    position a successful barrier pinned. This is deliberately NOT a
+ *    device rescan: mid-error-window reads are unreliable, and the anchor
+ *    is a conservative lower bound -- records between it and the true end
+ *    are reachable-or-not exactly as their own fsyncs were answered (any
+ *    commit since the last successful barrier was never acknowledged), so
+ *    treating them as lost breaks no promise. The precise end is the next
+ *    mount's ordinary open scan (the volume is latched, so nothing
+ *    overwrites the tail in between).
+ *  - needs_recovery latches: every mutation path (vol_write_enabled /
+ *    vol_mark_dirty) fails loudly until a remount + recovery.
+ *  - the failure stays loud where it happened: the caller of the failed
+ *    flush/sync returns the error, and vol_close will not mark the volume
+ *    CLEAN, so the next mount runs recovery instead of silently adopting
+ *    a truncated tail.
+ *
+ * The same class lived in the bitmap and the journal (both rewritten in
+ * place by vol_flush from in-memory state): the latch covers them too --
+ * with mutation stopped, neither can be extended past unpersisted bytes,
+ * and the next flush on a healed device rewrites them whole from the
+ * in-memory tables. */
+void vol_io_error_latch(invfs_volume *v, const char *what)
+{
+    if (!v) return;
+    if (!v->needs_recovery)
+        fprintf(stderr, "vol: %s failed; volume latched until "
+                "remount+fsck (inode-area tail re-anchored %llu -> %llu)\n",
+                what,
+                (unsigned long long)v->inode_area_pos,
+                (unsigned long long)v->inode_area_durable);
+    v->needs_recovery = 1;
+    v->io_latched = 1;
+    v->inode_area_pos = v->inode_area_durable;
+}
+
+
+/* 1 when a flush/sync failure latched the volume THIS session: the FUSE
+ * read path refuses on it (loud beats maybe-phantom), while a volume
+ * that merely OPENED dirty stays readable for inspection. */
+int vol_io_latched(invfs_volume *v)
+{
+    return v && v->io_latched;
+}

@@ -181,6 +181,8 @@ int main(int argc, char **argv)
     char (*names)[256] = NULL;
     uint64_t *inodes = NULL;
     uint64_t *sizes = NULL;
+    uint64_t *poss = NULL;   /* each name's current record position
+                                (v2 position-kill matching, WP22c) */
     const char *img;
     sw_bucket **tab = NULL;
     size_t tmask = 0, tcount = 0;
@@ -461,16 +463,23 @@ int main(int argc, char **argv)
         if (crc_calc != crc_stored) continue;
 
         if (h.magic == TOMBSTONE_MAGIC) {
+            int i = sw_find(tab, tmask, names, name);
             if (h.file_size == 0) {   /* legacy kill-by-id */
-                int i = sw_find(tab, tmask, names, name);
                 if (i >= 0 && inodes[i] == h.inode_id) inodes[i] = 0;
+            } else if (i >= 0 && poss[i] == (uint64_t)h.file_size) {
+                /* v2 position kill: retires exactly the record at that
+                 * position -- the name dies only if its current version IS
+                 * that record (an unlink/rename kill names the last one;
+                 * a meta_rewrite's names the already-superseded one) */
+                inodes[i] = 0;
             }
             continue;
         }
 
         {
             int i = sw_find(tab, tmask, names, name);
-            if (i >= 0) inodes[i] = h.inode_id, sizes[i] = h.file_size;
+            if (i >= 0) { inodes[i] = h.inode_id; sizes[i] = h.file_size;
+                          poss[i] = p - h.rec_len - 4; }   /* p advanced already */
             else {
                 if (count == cap) {
                     int ncap = cap ? cap * 2 : 512;
@@ -480,16 +489,23 @@ int main(int argc, char **argv)
                         (uint64_t *)realloc(inodes, (size_t)ncap * sizeof *ni);
                     uint64_t *ns =
                         (uint64_t *)realloc(sizes, (size_t)ncap * sizeof *ns);
-                    if (!nn || !ni || !ns) {
+                    uint64_t *np =
+                        (uint64_t *)realloc(poss, (size_t)ncap * sizeof *np);
+                    if (nn) names = nn;
+                    if (ni) inodes = ni;
+                    if (ns) sizes = ns;
+                    if (np) poss = np;
+                    if (!nn || !ni || !ns || !np) {
                         fprintf(stderr, "out of memory\n");
                         return 1;
                     }
-                    names = nn; inodes = ni; sizes = ns; cap = ncap;
+                    cap = ncap;
                 }
                 strncpy(names[count], name, 256);
                 names[count][255] = 0;
                 inodes[count] = h.inode_id;
                 sizes[count] = h.file_size;
+                poss[count] = p - h.rec_len - 4;   /* p advanced already */
                 sw_insert(&tab, &tmask, &tcount, names, count);
                 count++;
             }

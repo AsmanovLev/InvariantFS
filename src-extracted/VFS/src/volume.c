@@ -184,6 +184,50 @@ uint64_t idx_get_id(invfs_volume *v, uint64_t id)
 }
 
 
+/* Shared-id bookkeeping (WP22c/F2): the rename fast path hardlinks the
+ * copy onto the old id, so two live records can resolve through one id's
+ * L2P mappings, and a torn drop can leave such a pair behind too. Tracked
+ * from the name index's own updates, so the count is exactly "live names
+ * pointing at this id". The retire path reads it before dropping maps. */
+static void idx_ref_id(invfs_volume *v, uint64_t id, int delta)
+{
+    size_t b;
+    id_index_entry *e;
+    if (!v->ibuck) return;
+    b = (size_t)(idx_mix(id) & v->imask);
+    for (e = v->ibuck[b]; e; e = e->next)
+        if (e->id == id) {
+            if (delta > 0) e->live++;
+            else if (e->live) e->live--;
+            return;
+        }
+    if (delta <= 0) return;
+    /* no entry yet (the record's idx_put_id lands right after): create a
+     * hint-less one -- pos 0 reads as "unknown" and callers fall back to
+     * a scan, exactly as if the entry did not exist */
+    e = (id_index_entry *)calloc(1, sizeof *e);
+    if (!e) return;
+    e->id = id;
+    e->live = 1;
+    e->next = v->ibuck[b];
+    v->ibuck[b] = e;
+    v->icount++;
+    if (v->icount > v->imask + 1) idx_grow_ids(v);
+}
+
+
+uint32_t idx_id_live(const invfs_volume *v, uint64_t id)
+{
+    size_t b;
+    const id_index_entry *e;
+    if (!v->ibuck) return 0;
+    b = (size_t)(idx_mix(id) & v->imask);
+    for (e = v->ibuck[b]; e; e = e->next)
+        if (e->id == id) return e->live;
+    return 0;
+}
+
+
 /* add `delta` to the live count of every directory prefix of `name`:
    "a/b/c.txt" bumps "a/" and "a/b/"; the anchor "a/" bumps "a/" itself,
    which is what keeps an empty directory visible */
@@ -239,6 +283,10 @@ void idx_put(invfs_volume *v, const char *name, size_t nlen,
             /* update of an existing name: only logical size moves */
             v->hot.logical_bytes += size;
             v->hot.logical_bytes -= e->size;
+            if (e->inode_id != id) {   /* replacement under a new id */
+                idx_ref_id(v, e->inode_id, -1);
+                idx_ref_id(v, id, +1);
+            }
             e->inode_id = id;
             e->pos = pos;
             e->size = size;
@@ -260,6 +308,7 @@ void idx_put(invfs_volume *v, const char *name, size_t nlen,
     e->next = v->nbuck[b];
     v->nbuck[b] = e;
     v->ncount++;
+    idx_ref_id(v, id, +1);
     idx_bump_dirs(v, name, nlen, +1);
     if (v->ncount > v->nmask + 1) idx_grow_names(v);
 }
@@ -282,6 +331,7 @@ void idx_del(invfs_volume *v, const char *name, size_t nlen,
     *pp = e->next;
     if (nlen && name[nlen - 1] == '/') v->hot.dirs--;
     else { v->hot.files--; v->hot.logical_bytes -= e->size; }
+    idx_ref_id(v, e->inode_id, -1);
     free(e);
     v->ncount--;
     idx_bump_dirs(v, name, nlen, -1);
@@ -309,6 +359,7 @@ void idx_del_at(invfs_volume *v, const char *name, size_t nlen,
     *pp = e->next;
     if (nlen && name[nlen - 1] == '/') v->hot.dirs--;
     else { v->hot.files--; v->hot.logical_bytes -= e->size; }
+    idx_ref_id(v, e->inode_id, -1);
     free(e);
     v->ncount--;
     idx_bump_dirs(v, name, nlen, -1);
@@ -687,6 +738,9 @@ invfs_volume *vol_open(const char *path, int *err)
             found++;
         }
         v->inode_area_pos = p;
+        /* everything the scan just walked is on the device already: the
+         * first barrier anchor (WP22c/F1) */
+        v->inode_area_durable = p;
         if (getenv("INVFS_DEBUG"))
             printf("[vol_open] scanned %llu inode recs, next_inode=%llu, area_pos=%llu, "
                    "index=%llu names/%llu dirs\n",
@@ -822,6 +876,17 @@ invfs_volume *vol_open(const char *path, int *err)
             }
         }
     }
+    /* WP22c test hook: see sync_fail_at (volume_internal.h). Parsed once
+     * here like the other env knobs; fires once per process. */
+    {
+        const char *sf = getenv("INVFS_SYNC_FAIL_AT");
+        if (sf && *sf) {
+            char *endp = NULL;
+            unsigned long long n = strtoull(sf, &endp, 10);
+            if (endp != sf && *endp == '\0' && n > 0)
+                v->sync_fail_at = n;
+        }
+    }
     /* WP20b: a live descriptor means a seal config exists -- start the
      * dirty bitmap (all-ones: the first reseal of a session is a full
      * pass, what happened while unmounted is unknowable). */
@@ -879,7 +944,18 @@ void vol_close(invfs_volume *v)
        actually dirtied the volume writes anything, so invf-ls and invf-cat
        stay read-only. */
     if (v->dirty) {
-        if (vol_flush(v) == 0) {
+        if (v->needs_recovery) {
+            /* WP22c: an io error latched this session. Do NOT run the
+             * usual final flush: the in-RAM journal/bitmap may reflect
+             * mutations whose records never reached the device (the
+             * re-anchored tail), and persisting them over the
+             * last-barriered state would invent exactly the F2 mismatch
+             * (a live record whose map is gone). Leave the device at the
+             * last successful barrier; the next mount recovers. */
+            fprintf(stderr, "vol_close: an io error was latched this "
+                    "session; the final flush is skipped and the volume "
+                    "stays dirty for recovery at the next mount\n");
+        } else if (vol_flush(v) == 0) {
             v->sb.state = INVFS_STATE_CLEAN;
             if (vol_write_sb(v) != 0)
                 fprintf(stderr, "vol_close: could not mark volume clean; "
@@ -971,8 +1047,10 @@ int vol_write_sb(invfs_volume *v)
 int vol_flush(invfs_volume *v)
 {
     /* persist superblock (state / ENOSPC policy fields / READONLY flag) */
-    if (vol_write_sb(v) != 0)
+    if (vol_write_sb(v) != 0) {
+        vol_io_error_latch(v, "superblock write");
         return -1;
+    }
     /* Persist only the part of the bitmap that changed. Dokan flushes on
      * every file close and the device is unbuffered write-through, so the
      * old unconditional full-bitmap write cost a synchronous 480 KB per
@@ -992,8 +1070,10 @@ int vol_flush(invfs_volume *v)
             if (hi > bm_bytes) hi = bm_bytes;
             if (hi > lo) {
                 if (io_seek(&v->io, base + lo) != 0 ||
-                    io_write(&v->io, v->bitmap + lo, (size_t)(hi - lo)) != 0)
+                    io_write(&v->io, v->bitmap + lo, (size_t)(hi - lo)) != 0) {
+                    vol_io_error_latch(v, "bitmap write");
                     return -1;
+                }
             }
             v->bm_lo = 1; v->bm_hi = 0;   /* clean */
         }
@@ -1029,7 +1109,11 @@ int vol_flush(invfs_volume *v)
                 buf[i].crc = invfs_crc32c(&buf[i], offsetof(invfs_l2p_entry, crc));
             }
             if (io_seek(&v->io, jp) != 0 ||
-                io_write(&v->io, buf, n * esz) != 0) { free(buf); return -1; }
+                io_write(&v->io, buf, n * esz) != 0) {
+                free(buf);
+                vol_io_error_latch(v, "journal write");
+                return -1;
+            }
             free(buf);
             jp += (uint64_t)n * esz;
         }
@@ -1042,8 +1126,10 @@ int vol_flush(invfs_volume *v)
             memset(&z, 0, sizeof z);
             z.crc = ~invfs_crc32c(&z, offsetof(invfs_l2p_entry, crc));
             if (io_seek(&v->io, jp) != 0 ||
-                io_write(&v->io, &z, esz) != 0)
+                io_write(&v->io, &z, esz) != 0) {
+                vol_io_error_latch(v, "journal terminator write");
                 return -1;
+            }
         }
         v->journal_pos = jp;
         v->l2p_dirty = v->l2p_count;
@@ -1056,12 +1142,46 @@ int vol_flush(invfs_volume *v)
  * (superblock, dirty bitmap range, journal suffix + terminator) becomes
  * durable against power loss, not just process death. vol_write_commit
  * has already pushed the data blocks themselves with io_write, so one
- * barrier at the end covers the whole pending state. */
+ * barrier at the end covers the whole pending state.
+ *
+ * WP22c/F1: the barrier is also the only place a buffered backing store
+ * reports a write error (a pwrite lands in the page cache and returns
+ * success; the dm-flakey error window kills the dirty pages in writeback
+ * and surfaces EIO here). A failed barrier therefore means the append
+ * cursors may already sit past bytes that will never reach the device:
+ * latch the volume and re-anchor the tail (vol_io_error_latch). Only a
+ * successful barrier moves inode_area_durable. */
 int vol_sync(invfs_volume *v)
 {
     if (!v) return -1;
-    if (vol_flush(v) != 0) return -1;
-    return blkio_flush(&v->io);
+    if (vol_flush(v) != 0) return -1;   /* flush latches its own failures */
+#ifndef _WIN32
+    /* WP22c test hook (tools/test-flushfail.sh): the Nth vol_sync of the
+     * process simulates the error window -- the un-barriered inode-area
+     * tail dies in "writeback" (zeroed on the image) and the barrier
+     * reports EIO. */
+    if (v->sync_fail_at && --v->sync_fail_at == 0) {
+        if (v->inode_area_pos > v->inode_area_durable) {
+            static const uint8_t z[INVFS_BLOCK_SIZE];
+            uint64_t p = v->inode_area_durable;
+            while (p < v->inode_area_pos) {
+                size_t n = (size_t)(v->inode_area_pos - p);
+                if (n > sizeof z) n = sizeof z;
+                if (io_seek(&v->io, p) != 0 || io_write(&v->io, z, n) != 0)
+                    break;   /* the device is erroring anyway: latch below */
+                p += n;
+            }
+        }
+        vol_io_error_latch(v, "sync (INVFS_SYNC_FAIL_AT)");
+        return -1;
+    }
+#endif
+    if (blkio_flush(&v->io) != 0) {
+        vol_io_error_latch(v, "sync");
+        return -1;
+    }
+    v->inode_area_durable = v->inode_area_pos;
+    return 0;
 }
 
 

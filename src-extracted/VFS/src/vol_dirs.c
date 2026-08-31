@@ -293,23 +293,39 @@ int vol_delete_file(invfs_volume *v, const char *name)
 int vol_unlink_name(invfs_volume *v, const char *name)
 {
     uint64_t id, pos = 0;
-    uint8_t *obuf = NULL;
-    uint32_t orl = 0, crc;
+    uint32_t crc;
     size_t nl;
     invfs_inode_rec rec;
+    const name_index_entry *e;
 
     /* H5: allowed under the VOLF_READONLY space latch (tombstone only,
      * blocks stay alive for the surviving names -- see vol_delete_file) */
     if (v->needs_recovery) return -1;
-    id = vol_find(v, name);
-    if (!id) return -1;
-    if (meta_read_record_by_id(v, id, &obuf, &orl, NULL, 0, &pos) != 0 || !pos) {
-        free(obuf);
-        return -1;
-    }
-    free(obuf);
-    vol_mark_dirty(v);
     nl = strlen(name);
+    e = idx_get(v, name, nl);
+    if (!e) return -1;
+    id = e->inode_id;
+    /* The kill target is the record THIS NAME points at. Resolving the
+     * position through the inode id (meta_read_record_by_id /
+     * idx_get_id) is wrong here: the rename fast path's vol_hardlink has
+     * just re-pointed the id index at the NEW record, which shares the
+     * id -- the position-kill tombstone then named the replacement and
+     * killed nothing at replay, so the old name stayed live and a later
+     * retire of the shared id dropped the surviving name's mappings
+     * (WP22c/F2). The name index tracks each name's own record. */
+    pos = e->pos;
+    /* sanity: the index entry must name a live INOD for this id (the
+     * vol_forget_name ghost pattern) */
+    if (!pos ||
+        pos < v->inode_area_start * INVFS_BLOCK_SIZE ||
+        pos + sizeof(rec) > v->inode_area_pos)
+        return -1;
+    if (io_seek(&v->io, pos) != 0 || io_read(&v->io, &rec, sizeof(rec)) != 0)
+        return -1;
+    if (rec.magic != INODE_REC_MAGIC || rec.inode_id != id)
+        return -1;
+    if (vol_mark_dirty(v) != 0)
+        return -1;
     memset(&rec, 0, sizeof(rec));
     rec.magic = TOMBSTONE_MAGIC;
     v->hot.tombstones++;
@@ -404,7 +420,33 @@ static int rename_one(invfs_volume *v, const char *from, const char *to)
     memset(nh->name, 0, sizeof nh->name);
     memcpy(nh->name, to, tolen);
     crc = invfs_crc32c(rec, rh.rec_len);
-    if (io_seek(&v->io, v->inode_area_pos) != 0 ||
+
+    /* Hand the blocks over BEFORE the record that needs them: copy the old
+       id's mappings under the new id and make them durable (vol_pre_record
+       -- crash rule 2). The old entries stay until vol_delete_inode below,
+       so a crash mid-rename leaves the old name fully readable, and the
+       delete frees nothing the copy still references (the PB7 sharer
+       check). This used to re-key the table in RAM AFTER the append, so
+       the re-key persisted only at the next flush: a crash (or a dropped
+       writeback) between left the new record live with mappings nobody
+       had ever written -- present-but-unreadable, the F2 shape. */
+    {
+        size_t n0 = v->l2p_count;
+        for (i = 0; i < n0; i++) {
+            invfs_l2p_entry e = v->l2p[i];   /* by value: vol_map may realloc */
+            if (e.type == INVFS_JRN_MAP && e.inode == old_id) {
+                if (vol_map(v, new_id, e.lba, e.pba, e.length) != 0) {
+                    free(rec);
+                    return -1;
+                }
+                /* a rename is not a rewrite: the carried mapping keeps its
+                 * heat (the in-place re-key preserved it implicitly) */
+                memcpy(v->l2p[v->l2p_count - 1].pad, e.pad, sizeof e.pad);
+            }
+        }
+    }
+    if (vol_pre_record(v) != 0 ||
+        io_seek(&v->io, v->inode_area_pos) != 0 ||
         io_write(&v->io, rec, rh.rec_len) != 0 ||
         io_write(&v->io, &crc, 4) != 0) { free(rec); return -1; }
     v->inode_area_pos += rh.rec_len + 4;
@@ -412,15 +454,6 @@ static int rename_one(invfs_volume *v, const char *from, const char *to)
             nh->file_size, nh->ctime);
     idx_put_id(v, new_id, v->inode_area_pos - rh.rec_len - 4);
     free(rec);
-
-    /* hand the blocks over BEFORE tombstoning the old name: vol_delete_inode
-       frees every block still mapped to its inode, so the re-key is what
-       makes the tombstone a pure unlink instead of a data free */
-    for (i = 0; i < v->l2p_count; i++)
-        if (v->l2p[i].inode == old_id) {
-            v->l2p[i].inode = new_id;
-            if (i < v->l2p_dirty) v->l2p_dirty = i;
-        }
 
     return vol_delete_inode(v, old_id, from);
 }
@@ -448,6 +481,14 @@ int vol_rename(invfs_volume *v, const char *from, const char *to)
     int dir, rc = 0;
 
     if (v->sb.vol_flags & VOLF_READONLY) return -1;   /* EROFS */
+    /* WP21/WP22c: refuse to rename while a sweep checkpoint is live. The
+     * rollback decapitates the inode area at the checkpoint's append
+     * pointer, discarding the whole rename pair -- the copy dies AND the
+     * tombstone dies, so the source name resurrects: a file nobody
+     * deleted reappearing out of nowhere is the one outcome the crash
+     * contract cannot allow (the chaos soak reads it as a ghost). Resolve
+     * the checkpoint first (invf-rollback / invf-sweep --realize). */
+    if (v->ck_present) return -4;
     if (!v || !from || !to || !from[0] || !to[0]) return -1;
     if (strcmp(from, to) == 0) return 0;
     flen = strlen(from);
@@ -481,16 +522,14 @@ int vol_rename(invfs_volume *v, const char *from, const char *to)
         uint64_t fid = vol_find(v, from);
         int simple = 0;
         if (fid != 0 &&
-            meta_read_record_by_id(v, fid, &buf, &rl, NULL, 0, NULL) == 0 &&
-            rl >= sizeof(invfs_inode_rec) + INVFS_AST_HDR_V1_LEN) {
-            /* num_children decides; its offset is version-dependent
-             * (WP22a) -- parse, never pun */
-            invfs_ast_hdr ah;
-            if (invfs_ast_hdr_parse(buf + sizeof(invfs_inode_rec),
-                                    rl - sizeof(invfs_inode_rec),
-                                    &ah) == 0)
-                simple = (ah.num_children == 0);
-        }
+            meta_read_record_by_id(v, fid, &buf, &rl, NULL, 0, NULL) == 0)
+            /* Extraction containers (TARR/EXER/...) carry num_children==0
+             * yet keep their payload in "name!..." siblings the read path
+             * resolves BY NAME: a hardlink rename would move the anchor
+             * and strand the recipe under the old name (the renamed file
+             * never reads again). record_owns_siblings is the conservative
+             * test; anything unknown takes the slow path. */
+            simple = !record_owns_siblings(buf, rl);
         free(buf);
         if (simple) {
             if (vol_hardlink(v, from, to) != 0) return -1;

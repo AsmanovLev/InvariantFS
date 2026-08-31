@@ -302,19 +302,25 @@ class Soak:
     def recover(self):
         """The documented ladder; returns True when fsck ends OK."""
         rc, out = self.fsck()
+        self.log("gate: fsck rc=%d: %s" % (rc, out[-300:].replace("\n", " | ")))
         if "checkpoint:" in out and "live" in out:
             self.log("gate: checkpoint live -> rollback")
             rc, out = self.rollback()
+            self.log("gate: rollback rc=%d: %s" % (rc, out[-300:].replace("\n", " | ")))
             if rc != 0 and "free-redundant" in out:
                 self.log("gate: rollback refused (seal live) "
                          "-> --free-redundant")
-                self.sweep("--free-redundant")
+                rc2, out2 = self.sweep("--free-redundant")
+                self.log("gate: free-redundant rc=%d: %s" % (rc2, out2[-200:].replace("\n", " | ")))
                 rc, out = self.rollback()
+                self.log("gate: rollback#2 rc=%d: %s" % (rc, out[-300:].replace("\n", " | ")))
             if rc != 0:
                 self.log("gate: rollback ladder failed: %s" % out[-300:])
                 return False
         rc, out = self.fsck(fix=True)
+        self.log("gate: fsck -f rc=%d: %s" % (rc, out[-300:].replace("\n", " | ")))
         rc, out = self.fsck()
+        self.log("gate: fsck final rc=%d: %s" % (rc, out[-300:].replace("\n", " | ")))
         return rc == 0 and "\nOK" in ("\n" + out)
 
     def gate(self, final=False):

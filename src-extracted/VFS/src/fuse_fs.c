@@ -658,6 +658,15 @@ static int invf_read(const char *path, char *buf, size_t size, off_t offset,
     (void)fi;
     pthread_mutex_lock(&g_io_lock);
     if (!g_vol) { pthread_mutex_unlock(&g_io_lock); return -EIO; }
+    /* WP22c: on an io-latched volume (a flush/sync failed THIS session)
+     * the in-RAM state may describe bytes that never reached the device;
+     * serving them would be the silent-corruption flavor of the same
+     * bug. Reads fail loudly until the remount that re-anchors truth.
+     * (A volume that merely OPENED dirty stays readable -- inspection.) */
+    if (vol_io_latched(g_vol)) {
+        pthread_mutex_unlock(&g_io_lock);
+        return -EIO;
+    }
     /* a live write session for this path owns the freshest bytes:
      * .write data must stay readable before commit even if the kernel
      * evicted a clean (already-written-back) page. Flush staged tails of
@@ -1016,6 +1025,17 @@ static int invf_fsync(const char *path, int datasync, struct fuse_file_info *fi)
         /* fsync/fdatasync = durability contract: journal + bitmap + data
          * past a real storage barrier, not just into the OS page cache */
         rc = g_vol ? (vol_sync(g_vol) == 0 ? 0 : -EIO) : -EIO;
+        if (rc != 0) {
+            /* WP22c: the commit landed in-RAM but the barrier failed, so
+             * the new content is past the durable anchor and will not
+             * survive the remount. Drop the name from the table: a later
+             * open() must fail (ENOENT) instead of being served the
+             * un-acked bytes out of the kernel page cache (a failed write
+             * is complete-or-absent, never a third state). The volume is
+             * latched now; the next mount rebuilds the table from the
+             * device. */
+            table_remove_name(path + 1);
+        }
         pthread_mutex_unlock(&g_io_lock);
     }
     return rc;
@@ -1050,6 +1070,18 @@ static int invf_rename(const char *from, const char *to, unsigned int flags)
         int was_dir = vol_is_dir(g_vol, from + 1);
         rc = vol_rename(g_vol, from + 1, to + 1);
         if (rc == 0) {
+            /* WP22c: a rename that reports OK must never silently vanish.
+             * The record pair rides the same buffered page cache as every
+             * other write, and without a barrier an error window can
+             * acknowledge the rename and then kill it in writeback -- the
+             * source name resurrects at the next mount (a file nobody
+             * deleted reappearing is worse than a failed call). The
+             * barrier pins the pair; its failure latches the volume and
+             * fails the rename loudly instead of promising a lie. */
+            if (vol_sync(g_vol) != 0) {
+                pthread_mutex_unlock(&g_io_lock);
+                return -EIO;
+            }
             /* plain-file renames are the hot path (portage atomic
              * moves): sync the two names incrementally. Directory
              * renames rewrite every child name prefix -> full rebuild */
@@ -1066,6 +1098,7 @@ static int invf_rename(const char *from, const char *to, unsigned int flags)
     case 0:  return 0;
     case -2: return -EEXIST;
     case -3: return -ENOSPC;
+    case -4: return -EBUSY;    /* a sweep checkpoint is live (WP21/WP22c) */
     default: return rc == -1 ? -ENOENT : -EIO;
     }
 }

@@ -461,6 +461,10 @@ int  vol_ckp_armed(const invfs_volume *v);
 /* 1 = the previous session did not close cleanly (and did not
  * auto-recover); rollback tools proceed anyway -- they ARE the recovery */
 int  vol_needs_recovery(invfs_volume *v);
+/* 1 = a flush/sync failure latched the volume THIS session (WP22c). The
+ * FUSE read path refuses on it (loud beats maybe-phantom); a volume that
+ * merely opened dirty stays readable for inspection. */
+int  vol_io_latched(invfs_volume *v);
 /* 1 = live (+ a copy of the descriptor), 0 = absent */
 int  vol_ckp_info(const invfs_volume *v, invfs_ckp0 *out);
 /* sweep start: 1 = armed (retention active), 0 = declined (the volume is

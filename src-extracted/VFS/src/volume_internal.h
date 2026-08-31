@@ -161,11 +161,15 @@ typedef struct name_index_entry {
 
 /* inode_id -> record offset. Never pruned on tombstone: the record stays on
    disk and vol_read_inode is expected to still find it, exactly as the old
-   scan did. */
+   scan did. `live` counts the LIVE name-index entries pointing at this id:
+   the rename fast path (hardlink + unlink) deliberately shares one id
+   between two records, and a retire must not drop maps a surviving record
+   still resolves through (WP22c/F2). */
 typedef struct id_index_entry {
     struct id_index_entry *next;
     uint64_t id;
     uint64_t pos;
+    uint32_t live;         /* live name entries referencing this id */
 } id_index_entry;
 
 
@@ -205,6 +209,18 @@ typedef struct invfs_volume {
     uint64_t inode_area_start;/* block offset */
     uint64_t inode_area_pos;
     uint64_t inode_area_end;
+    /* WP22c/F1: the inode-area position the last successful barrier pinned
+     * (vol_open's scanned end; every successful vol_sync moves it to the
+     * then-current tail). On a buffered backing store an append's io_write
+     * reports success from the page cache, so a device error surfaces only
+     * at the next barrier -- possibly many commits later, with the cursor
+     * already past bytes that will never reach the device (the dm-flakey
+     * error window left a zero hole in the append-only area and every
+     * record committed past it became unreachable at the next mount). A
+     * failed flush/sync must therefore never leave the cursor ahead of
+     * unpersisted bytes: vol_io_error_latch re-anchors it here and latches
+     * the volume read-only until remount + recovery. */
+    uint64_t inode_area_durable;
     uint64_t alloc_cursor;    /* free-list cursor */
     /* Per-zone cursors and free counts. One shared cursor made every
      * allocation restart at the zone head after a RAW->Shadow spill, so a
@@ -330,9 +346,22 @@ typedef struct invfs_volume {
        cleanly, and refuses every mutation until vol_recover() has run. */
     int dirty;
     int needs_recovery;
+    /* set only by vol_io_error_latch: a flush/sync failed THIS session.
+     * Distinct from needs_recovery (which may be inherited from the
+     * superblock at open): a merely-unclean volume is read-only but
+     * READABLE (inspection); a latched one must not serve possibly
+     * phantom content at all. */
+    int io_latched;
     /* records that failed CRC/bounds during the open scan; >0 means the
      * volume shows real damage and must not self-recover a DIRTY state */
     uint64_t scan_anomalies;
+    /* WP22c test hook (tools/test-flushfail.sh): when nonzero, the Nth
+     * vol_sync of this process simulates the dm-flakey error window --
+     * every inode-area byte appended since the last successful barrier
+     * dies in "writeback" (zeroed on the image) and the barrier reports
+     * EIO. The engine must latch + re-anchor, and every later mutation
+     * must fail loudly. 0 = off. */
+    uint64_t sync_fail_at;
     /* hot population counters, maintained incrementally by idx_put /
      * idx_del_at / idx_del (insert vs update vs removal) and bumped once
      * per DELT append. Seeded for free: the open scan replays every
@@ -634,6 +663,11 @@ void idx_put_id(invfs_volume *v, uint64_t id, uint64_t pos);
 /* 0 = unknown; callers fall back to a scan */
 uint64_t idx_get_id(invfs_volume *v, uint64_t id);
 
+/* live name-index entries currently pointing at this id (the rename fast
+   path shares one id between two names; the retire path reads this to keep
+   a survivor's mappings) */
+uint32_t idx_id_live(const invfs_volume *v, uint64_t id);
+
 /* add `delta` to the live count of every directory prefix of `name`:
    "a/b/c.txt" bumps "a/" and "a/b/"; the anchor "a/" bumps "a/" itself,
    which is what keeps an empty directory visible */
@@ -763,6 +797,13 @@ int vol_mark_dirty(invfs_volume *v);
 /* Call before appending an inode record: mark dirty, then make the maps
    durable so the record about to land is backed by something readable. */
 int vol_pre_record(invfs_volume *v);
+
+/* WP22c/F1: a flush/sync failed -- some buffered writes may never reach
+ * the device. Re-anchor the inode-area append cursor at the last position
+ * a successful barrier pinned and latch the volume (needs_recovery), so
+ * nothing appends into a known-broken tail and every later mutation fails
+ * loudly until remount + recovery. Idempotent. */
+void vol_io_error_latch(invfs_volume *v, const char *what);
 
 /* allocate n consecutive free blocks in a zone; returns start block or 0 */
 uint64_t alloc_blocks(invfs_volume *v, uint64_t zone_start, uint64_t zone_len,

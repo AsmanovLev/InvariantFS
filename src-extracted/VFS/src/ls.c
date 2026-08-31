@@ -88,6 +88,8 @@ int main(int argc, char **argv)
     char (*names)[256] = NULL;
     uint64_t *sizes = NULL;
     uint64_t *inodes = NULL;
+    uint64_t *poss = NULL;   /* each name's current record position
+                                (v2 position-kill matching) */
     ls_bucket **tab = NULL;
     size_t tmask = 0, tcount = 0;
 
@@ -142,23 +144,31 @@ int main(int argc, char **argv)
             continue;
         }
         if (h.magic == TOMBSTONE_MAGIC) {  /* tombstone: remove only its version */
-            if (h.file_size != 0) {
-                /* v2 position kill: retires one older version of this name;
-                   the replacement INOD always follows in the same combo, and
-                   this listing keeps the last version seen -- nothing to do */
-                p += (uint64_t)h.rec_len + 4;
-                continue;
-            }
             int i = ls_find(tab, tmask, names, name);
-            if (i >= 0 && inodes[i] == h.inode_id) {
-                sizes[i] = 0;
-                inodes[i] = 0;
+            if (i >= 0) {
+                if (h.file_size != 0) {
+                    /* v2 position kill: retires exactly the record at that
+                     * position. Kill the name only when its CURRENT version
+                     * is that record: a meta_rewrite's kill names the OLD
+                     * version (already superseded by the combo's INOD), but
+                     * an unlink/rename kill (vol_unlink_name) names the LAST
+                     * one -- skipping those listed renamed-away files as
+                     * live (WP22c: the flakey soak's GHOST). */
+                    if (poss[i] == h.file_size) {
+                        sizes[i] = 0;
+                        inodes[i] = 0;
+                    }
+                } else if (inodes[i] == h.inode_id) {
+                    sizes[i] = 0;
+                    inodes[i] = 0;
+                }
             }
         } else {
             int i = ls_find(tab, tmask, names, name);
             if (i >= 0) {
                 sizes[i] = h.file_size;
                 inodes[i] = h.inode_id;
+                poss[i] = p;
             } else {
                 if (count == cap) {
                     int ncap = cap ? cap * 2 : 512;
@@ -168,10 +178,13 @@ int main(int argc, char **argv)
                         (size_t)ncap * sizeof *ns);
                     uint64_t *ni = (uint64_t *)realloc(inodes,
                         (size_t)ncap * sizeof *ni);
+                    uint64_t *np = (uint64_t *)realloc(poss,
+                        (size_t)ncap * sizeof *np);
                     if (nn) names = nn;
                     if (ns) sizes = ns;
                     if (ni) inodes = ni;
-                    if (!nn || !ns || !ni) {
+                    if (np) poss = np;
+                    if (!nn || !ns || !ni || !np) {
                         fprintf(stderr, "out of memory at %d names\n", count);
                         break;
                     }
@@ -181,6 +194,7 @@ int main(int argc, char **argv)
                 names[count][255] = 0;
                 sizes[count] = h.file_size;
                 inodes[count] = h.inode_id;
+                poss[count] = p;
                 if (ls_insert(&tab, &tmask, &tcount, names, count) != 0) {
                     fprintf(stderr, "out of memory at %d names\n", count);
                     break;
@@ -227,6 +241,7 @@ int main(int argc, char **argv)
     free(names);
     free(sizes);
     free(inodes);
+    free(poss);
     if (tab) {
         size_t i;
         for (i = 0; i <= tmask; i++) {

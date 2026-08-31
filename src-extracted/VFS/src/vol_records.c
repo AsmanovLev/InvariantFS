@@ -319,6 +319,22 @@ static int vol_retire_inode(invfs_volume *v, uint64_t inode_id,
     if (vol_mark_dirty(v) != 0)
         return -1;
 
+    /* WP22c/F2: another live record may carry this same inode id -- the
+       rename fast path hardlinks the copy onto the old id, and a torn drop
+       of the unlink half can leave such a pair behind too. Dropping the
+       id's maps or freeing its blocks then saws the survivor's legs off:
+       its record passes every structural check while every read misses in
+       the L2P (present-but-unreadable, and the old fsck could not see it).
+       With a survivor the retire is tombstone-only; the LAST live record
+       of the id takes the maps down with it. */
+    int shared = 0;
+    if (free_data) {
+        const name_index_entry *e = name ? idx_get(v, name, strlen(name))
+                                         : NULL;
+        uint32_t self = (e && e->inode_id == inode_id) ? 1u : 0u;
+        shared = idx_id_live(v, inode_id) > self;
+    }
+
     /* Give the cache's budget back. Not a safety measure: inode ids come from
        a monotonic counter and no path rewrites a record in place, so a stale
        entry could never be served for the wrong content -- it would just hold
@@ -336,7 +352,7 @@ static int vol_retire_inode(invfs_volume *v, uint64_t inode_id,
      * L2P length is the PHYSICAL block count of each segment (written at
      * map time), so no header reads here — safe against stale/reallocated
      * blocks. */
-    if (free_data) {
+    if (free_data && !shared) {
         /* WP10 §7 (anti-PB7): never free blocks a zone==TEXT AST entry
          * names. The member holds only an L2P dup into the shared batch,
          * which belongs to the hidden owner inode; freeing here would punch
@@ -400,7 +416,7 @@ static int vol_retire_inode(invfs_volume *v, uint64_t inode_id,
         free(text_lbas);
     }
     /* rewrite L2P in-memory: drop this inode's maps */
-    {
+    if (!shared) {
         size_t w = 0;
         for (i = 0; i < v->l2p_count; i++) {
             if (v->l2p[i].inode == inode_id) {

@@ -123,6 +123,7 @@ e2e: all
 	bash tools/test-fuzz.sh
 	bash tools/test-writepath.sh
 	bash tools/test-astv2.sh
+	bash tools/test-flushfail.sh
 
 # WP22b flakey tier: power-loss / unstable-device soak on dm-flakey over a
 # loop device. Standalone on purpose (needs passwordless sudo + dm-flakey,
