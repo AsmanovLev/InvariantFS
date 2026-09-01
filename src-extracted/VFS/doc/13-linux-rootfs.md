@@ -10,10 +10,10 @@
 > отдельный проект на 4–9+ месяцев) и оставлен как его дизайн-документ.
 > Аргумент «FUSE для корневой ФС не годится» в разделе «VFS-драйвер ядра,
 > не FUSE» опровергнут практикой: Gentoo/OpenRC грузится с FUSE-демона
-> в initramfs. Boot-time sweep («sweepboot» — проход sweep'а на ранней
-> загрузке из initramfs/сервиса) — **future work**: сейчас sweep после
-> монтирования запускается вручную (`kill -USR1`, `user.invfs.sweep`)
-> или по `INVFS_SWEEP_INTERVAL`.
+> в initramfs. Boot-time sweep («sweepboot») **реализован в WP23** — см.
+> раздел «Sweepboot: maintenance-загрузка» ниже; sweep после монтирования
+> по-прежнему доступен вручную (`kill -USR1`, `user.invfs.sweep`) или по
+> `INVFS_SWEEP_INTERVAL`.
 
 ## Архитектура декомпрессоров (kernel-маршрут, не построен)
 
@@ -142,6 +142,51 @@ struct ast_block_entry {
 ```
 
 **Sweep Worker до switch_root не запускается** — это нормально. VFS-драйвер с ZSTD + BCJ2 + AST в ядре достаточен для полной загрузки системы.
+
+## Sweepboot: maintenance-загрузка (WP23)
+
+**Статус: реализовано (engine-side; GRUB-прогон не тестировался — см.
+ниже).** Sweep требует эксклюзивного доступа к тому, а в обычной загрузке
+том уже смонтирован и обслуживает систему. Sweepboot решает это отдельной
+загрузкой, в которой том **вообще не монтируется через FUSE**.
+
+Поток (`vm/initramfs/init` → `tools/sweepboot-init.sh`, кладётся в
+initramfs как `/sweepboot-init.sh`):
+
+1. `invfs.sweepboot` в cmdline ядра → `/init` **не делает switch_root**,
+   а вызывает ветку sweepboot.
+2. Монтируется tmpfs-scratch (`/mnt/sweepboot`, 64 MiB) — извлечённое
+   живёт только в RAM.
+3. `invf-sweep <dev> --extract-packs /mnt/sweepboot/packs` — движок
+   **напрямую, без FUSE** читает codecpack'и, лежащие НА САМОМ ТОМЕ
+   (`/.invfs/codecpacks`, иначе `/usr/lib/invfs/codecpacks`), и
+   материализует их в tmpfs. Файлы пакетов — обычные файлы тома: после
+   прошлых sweep'ов они хранятся как ELF→ZSTD-батчи и скрипты→PPMd-батчи
+   и читаются in-process базовыми кодеками. Том **self-hosting**: sweep
+   получает ровно те инструменты, которые том несёт сам.
+4. `INVFS_CODECPACKS=<scratch> invf-sweep <dev> --seal` — сам
+   maintenance-проход (sweep-обход + parity reseal).
+5. `reboot -f` — возврат в нормальную загрузку.
+
+Oneshot-паттерн `grub-reboot`: в grub.cfg добавляется запись с тем же
+ядром и initramfs плюс `invfs.sweepboot`; перед плановым обслуживанием
+она выбирается однократно (`grub-reboot <entry>`; под Fedora —
+`saved_entry`), а `reboot -f` в конце прохода возвращает загрузку
+обычной записи. Сам GRUB-прогон осознанно не тестируется (это
+стандартная механика дистрибутива); engine-side шаги покрыты
+`tools/test-sweepboot.sh`.
+
+**Контракт отказов:** ЛЮБОЙ сбой шага (tmpfs, extract, sweep) → громкое
+сообщение на консоль и **провал в нормальную загрузку** — maintenance-
+загрузка никогда не должна превращаться в boot loop. Отсутствие пакетов
+на томе — не ошибка: `--extract-packs` возвращает пустой каталог, и
+sweep идёт на встроенных кодеках (NONE/LZ4/ZSTD/PPMd).
+
+**initramfs:** `tools/mkinitramfs.sh` кладёт `invf-sweep` рядом с
+`invf-fuse`. Статическая линковка недоступна на хосте сборки (нет
+`libzstd.a`/`libz.a`), поэтому so-зависимости копируются по `ldd` —
+`invf-sweep` требует подмножество библиотек `invf-fuse`
+(`libzstd.so.1`, `libz.so.1`, `libc.so.6`), без libfuse.
 
 ## NoSweep (Out-of-Policy) флаг
 
