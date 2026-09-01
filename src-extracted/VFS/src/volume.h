@@ -484,3 +484,42 @@ int  vol_ckp_realize(invfs_volume *v, uint64_t *freed_blocks_out);
  * untouched), -1 = io/rebuild error (re-run; the steps are idempotent).
  * *reclaimed_out (optional) takes the orphan-block count the rebuild freed. */
 int  vol_rollback(invfs_volume *v, uint64_t *reclaimed_out);
+
+/* ---- WP22e: online inode-area compaction (hot tail pruning) ----
+ * The append-only inode area accumulates dead record versions and
+ * tombstones; compaction rewrites it with just the live records (verbatim,
+ * same inode ids, id order, tombstones dropped) and cuts the dead tail.
+ * Crash protocol: the compacted stream is staged in free space (CMPS
+ * header + payload CRC, verified by read-back), the CMP0 descriptor AND
+ * the VOLF_READONLY latch are armed in one block-0 write, the staging is
+ * copied over the area, a zero guard terminates it, and descriptor+latch
+ * are cleared in one write. A crash before the arm leaves the old area
+ * intact (the stranded staging run is an fsck orphan); a crash after the
+ * arm is rolled forward by invf-fsck -f (vol_compact_recover). Never runs
+ * while a CKP0 sweep checkpoint is live (rollback truncates to absolute
+ * checkpoint positions), nor on read-only/recovering volumes.
+ *
+ * vol_inode_live_bytes: sum of rec_len+4 over the live records (what the
+ * area would compact to); 0 on an empty area or a troubled scan -- never
+ * trigger on it.
+ * vol_inode_compact: 1 = compacted (the out params take the used bytes
+ * before and after), 0 = declined (reason on stderr; the run is fine),
+ * -1 = hard error.
+ * vol_compact_pending: 1 = a CMP0 descriptor is armed (an interrupted
+ * compaction is pending; write tools should refuse and point at fsck).
+ * vol_compact_recover: 1 = rolled an interrupted pass forward (idempotent),
+ * 0 = none pending, -1 = the descriptor/staging failed verification (the
+ * area is left untouched for review). fsck-side only; the staging run is
+ * left for the rebuild to reclaim as an orphan. */
+uint64_t vol_inode_live_bytes(invfs_volume *v);
+int  vol_inode_compact(invfs_volume *v, uint64_t *before_out,
+                       uint64_t *after_out);
+int  vol_compact_pending(invfs_volume *v);
+int  vol_compact_recover(invfs_volume *v);
+
+/* WP22e --fast sweep mode: the per-file decision narrowed to "generic or
+ * nothing" -- RAW segments are recompressed per-segment at the volume's
+ * profile level (the generic floor); classification, container
+ * decomposition, codec transcodes and batching never run. Returns
+ * vol_sweep_file_inner's: 0 swept, 1 nothing to do, -1 hard error. */
+int  vol_sweep_file_generic(invfs_volume *v, uint64_t inode_id);

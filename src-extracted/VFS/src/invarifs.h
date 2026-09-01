@@ -295,6 +295,65 @@ typedef struct {
 } invfs_ckp0;                   /* 0x258 = 56 bytes */
 #pragma pack(pop)
 
+/* ---- WP22e: CMP0 inode-area compaction descriptor (block 0 reserved) ----
+ * Lives at byte offset 0x260 of block 0, past the superblock (0x00..0x90),
+ * RDP0 (0x100..0x118), RSZ0 (0x140..0x20C) and CKP0 (0x220..0x258).
+ * Pre-WP22e images carry zeros there, which read as "absent" (magic
+ * mismatch) -- the RDP0 convention.
+ *
+ * Online compaction of the append-only inode area rewrites the area with
+ * just the live records (newest version per name, tombstones dropped),
+ * which invalidates every absolute record position -- including the ones
+ * v2 position-kill tombstones carry. The pass therefore never edits the
+ * live area in place: the compacted stream is first staged in free space
+ * (a CMPS-headed run, CRC-verified by read-back), then this descriptor is
+ * armed TOGETHER with the VOLF_READONLY latch in one block-0 write (so an
+ * interrupted pass can never open read-write into a half-rewritten area),
+ * then the staged stream is copied over the area, a zero guard block
+ * terminates it, and the descriptor+latch are cleared last (again one
+ * write). A crash before the arm leaves the old area byte-intact (the
+ * stranded staging run is an ordinary orphan for fsck); a crash after the
+ * arm leaves CMP0 + the latch, so the volume opens read-only /
+ * needs-recovery and invf-fsck -f rolls the staging forward (idempotent)
+ * before its usual rebuild. Compaction is never run while a CKP0 sweep
+ * checkpoint is live (rollback truncates to the checkpoint's absolute
+ * positions), so the two descriptors never coexist.
+ *
+ *   0x260  char magic[4]        "CMP0"
+ *   0x264  u32 crc32c           over the descriptor with this field 0
+ *   0x268  u64 stage_pba        staging run: CMPS header block + payload
+ *   0x270  u64 stage_blocks
+ *   0x278  u64 s_bytes          compacted stream bytes (records + CRCs)
+ *   0x280  u64 old_area_pos     inode-area append pointer at arm time
+ *   0x288  u64 time_unix
+ * 48 bytes total; the rest of block 0 stays reserved-zero. */
+#define INVFS_CMP0_OFF 0x260
+#pragma pack(push, 1)
+typedef struct {
+    char     magic[4];          /* 0x260 "CMP0" */
+    uint32_t crc32c;            /* 0x264 */
+    uint64_t stage_pba;         /* 0x268 */
+    uint64_t stage_blocks;      /* 0x270 */
+    uint64_t s_bytes;           /* 0x278 */
+    uint64_t old_area_pos;      /* 0x280 */
+    uint64_t time_unix;         /* 0x288 */
+} invfs_cmp0;                   /* 0x290 = 48 bytes */
+#pragma pack(pop)
+
+/* The compaction staging run's own header, one block at stage_pba. The
+ * compacted record stream (s_bytes) follows contiguously from the next
+ * block; payload_crc covers exactly those s_bytes (the RSZS rule: the
+ * input is verified before anything it would replace is overwritten). */
+#pragma pack(push, 1)
+typedef struct {
+    char     magic[4];          /* "CMPS" */
+    uint32_t version;           /* 1 */
+    uint64_t s_bytes;
+    uint32_t payload_crc;
+    uint32_t crc32c;            /* over the header with this field 0 */
+} invfs_cmps;                   /* 24 bytes, block-padded */
+#pragma pack(pop)
+
 /* AST block entry — one byte-range mapping (kernel binary format).
  *
  * block_id is 24 bits: at most 2^24 segments per file. At the 64 KB

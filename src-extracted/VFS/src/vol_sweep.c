@@ -1264,6 +1264,20 @@ generic_floor:
 }
 
 
+/* WP22e --fast: the sweep narrowed to "generic or nothing" -- only the
+ * per-segment profile-level recompress of a RAW file (the generic floor).
+ * The class predicate, container decomposition, codec transcodes and the
+ * batching accumulators never run; a file already past RAW (batched,
+ * container, generic, codec) is reported as "nothing to do". The record
+ * (with its INO2 ext) is copied verbatim by the inner path, so no metadata
+ * carry is needed -- unlike the transcode branches vol_sweep_file exists
+ * for. */
+int vol_sweep_file_generic(invfs_volume *v, uint64_t inode_id)
+{
+    return vol_sweep_file_inner(v, inode_id, 1);
+}
+
+
 /* drain the pending list (daemon background): process each pending inode
    and unmark it. Called when the daemon holds the volume exclusively
    (no open handles). Returns number of processed inodes. */
