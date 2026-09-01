@@ -100,30 +100,30 @@ test: $(OUT)/invf-arctest $(OUT)/invf-blkio_test $(OUT)/invf-codec_test
 
 # e2e tier: tmpfs images under /dev/shm; test-jxl needs cjxl/djxl installed
 e2e: all
-	bash tools/test-textzone.sh
-	bash tools/test-dedupe.sh
-	bash tools/test-heat.sh
-	bash tools/test-seal.sh
-	bash tools/test-jxl.sh
-	bash tools/test-rawimg.sh
-	bash tools/test-binbatch.sh
-	bash tools/test-conbatch.sh
-	bash tools/test-exercarve.sh
-	bash tools/test-containerpack.sh
-	bash tools/test-rawdisk.sh
-	bash tools/test-ext4fs.sh
-	bash tools/test-fatfs.sh
-	bash tools/test-xfs.sh
-	bash tools/test-ntfs.sh
-	bash tools/test-vdi.sh
-	bash tools/test-resize.sh
-	bash tools/test-rollback.sh
-	bash tools/test-p7z.sh
-	bash tools/test-qcow2.sh
-	bash tools/test-fuzz.sh
-	bash tools/test-writepath.sh
-	bash tools/test-astv2.sh
-	bash tools/test-flushfail.sh
+	bash tools/run-e2e.sh tools/test-textzone.sh
+	bash tools/run-e2e.sh tools/test-dedupe.sh
+	bash tools/run-e2e.sh tools/test-heat.sh
+	bash tools/run-e2e.sh tools/test-seal.sh
+	bash tools/run-e2e.sh tools/test-jxl.sh
+	bash tools/run-e2e.sh tools/test-rawimg.sh
+	bash tools/run-e2e.sh tools/test-binbatch.sh
+	bash tools/run-e2e.sh tools/test-conbatch.sh
+	bash tools/run-e2e.sh tools/test-exercarve.sh
+	bash tools/run-e2e.sh tools/test-containerpack.sh
+	bash tools/run-e2e.sh tools/test-rawdisk.sh
+	bash tools/run-e2e.sh tools/test-ext4fs.sh
+	bash tools/run-e2e.sh tools/test-fatfs.sh
+	bash tools/run-e2e.sh tools/test-xfs.sh
+	bash tools/run-e2e.sh tools/test-ntfs.sh
+	bash tools/run-e2e.sh tools/test-vdi.sh
+	bash tools/run-e2e.sh tools/test-resize.sh
+	bash tools/run-e2e.sh tools/test-rollback.sh
+	bash tools/run-e2e.sh tools/test-p7z.sh
+	bash tools/run-e2e.sh tools/test-qcow2.sh
+	bash tools/run-e2e.sh tools/test-fuzz.sh
+	bash tools/run-e2e.sh tools/test-writepath.sh
+	bash tools/run-e2e.sh tools/test-astv2.sh
+	bash tools/run-e2e.sh tools/test-flushfail.sh
 
 # WP22b flakey tier: power-loss / unstable-device soak on dm-flakey over a
 # loop device. Standalone on purpose (needs passwordless sudo + dm-flakey,
