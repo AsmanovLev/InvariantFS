@@ -346,6 +346,13 @@ int vol_sweep_file_inner(invfs_volume *v, uint64_t inode_id,
             int got = LZ4_decompress_safe((const char *)blob_old, (char *)orig,
                                           (int)hdr_old, (int)orig_len);
             if (got != (int)orig_len) { free(blob_old); free(orig); sweep_unwind(v, new_id); free(rec); return -1; }
+        } else if (e->algo == INVFS_ALGO_ZSTD) {
+            /* WP23 (cross-lane touch, flagged for the WP22e lane): a RAW
+             * segment written under fill pressure is ZSTD -- decode it
+             * with the same per-segment dispatch the read paths already
+             * had, or the sweep would mis-decode it as verbatim NONE. */
+            size_t got = ZSTD_decompress(orig, orig_len, blob_old, hdr_old);
+            if (ZSTD_isError(got) || got != orig_len) { free(blob_old); free(orig); sweep_unwind(v, new_id); free(rec); return -1; }
         } else {  /* NONE */
             if (hdr_old != orig_len) { free(blob_old); free(orig); sweep_unwind(v, new_id); free(rec); return -1; }
             memcpy(orig, blob_old, orig_len);
