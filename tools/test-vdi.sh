@@ -54,6 +54,7 @@ REPO=/home/user/InvariantFS
 B=$REPO/bin
 PACK=$REPO/tools/codecpacks/vdi.codecpack
 WORK=/dev/shm/wp16vdi
+trap 'rm -rf "$WORK" /dev/shm/wp16vdi*.img' EXIT
 IMG=wp16vdi.img
 IMGMEM=wp16vdi-mem.img
 export INVFS_CODECPACKS=$REPO/tools/codecpacks   # the sweep AND the reads

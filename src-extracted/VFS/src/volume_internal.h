@@ -241,7 +241,25 @@ typedef struct invfs_volume {
     /* in-memory L2P */
     invfs_l2p_entry *l2p;
     size_t l2p_count, l2p_cap;
-    size_t l2p_dirty;         /* first index whose on-disk copy is stale */
+    /* WP22d: the journal is append-only within a slot (invarifs.h WP22d
+     * note); the in-memory table stays the compacted newest-wins view.
+     * jops[] holds the not-yet-journaled ops (MAP/UNMAP, in order) that
+     * the next vol_flush appends at the active slot's log end; j_heat[]
+     * holds (inode,lba) pairs whose pad bytes changed in RAM only (WP19
+     * read touches) and which the next flush re-appends as refresh MAPs
+     * (or folds into the compaction image when bulk). */
+    invfs_l2p_entry *jops;
+    size_t jops_n, jops_cap;
+    uint64_t (*j_heat)[2];
+    size_t j_heat_n, j_heat_cap;
+    int j_slotted;            /* 0 = legacy flat log, 1 = slot format */
+    uint32_t j_slot;          /* active slot index when slotted (0/1) */
+    uint64_t j_seq;           /* active slot image's sequence number */
+    uint32_t j_last_crc;      /* chain crc of the last journaled entry
+                               * (the slot header's crc when the log is bare) */
+    int j_compact;            /* next flush compacts (fsck rebuild) */
+    int j_heat_all;           /* bulk heat change (decay) -> compact */
+    uint64_t open_cuts;       /* consistent-cut hides at mount (WP22d) */
     uint64_t next_inode_id;
     /* on-demand sweep pending list (RAM) */
     uint64_t *pending;
@@ -325,18 +343,28 @@ typedef struct invfs_volume {
      * INVFS_CKP0_OFF) + the retention registry (the "\x01reten" owner)
      * behind it. ck/ck_present: the descriptor as read at open (absent =
      * zero-filled). ck_prev_seq: the last armed/realized sequence number,
-     * so the next arm increments across a realize. retain: THIS session
-     * routes vol_free_blocks into retmap instead of freeing -- set only by
-     * vol_ckp_begin (the offline sweep), never by a plain mount: post-sweep
-     * user deletes free immediately (documented best-effort hole). retmap
-     * is a bitmap over total_blocks of the blocks held for the checkpoint;
-     * they stay allocated in the real bitmap too (that is what bars reuse),
-     * retmap is only the realize/registry list. ck_stage_*: the journal
-     * staging run allocated at arm time. */
+     * so the next arm increments across a realize. Retention is a VOLUME
+     * state, not a session state: while CKP0 is live on disk EVERY process
+     * routes vol_free_blocks into retmap instead of freeing (a post-
+     * checkpoint rewrite/delete that freed a pre-checkpoint block for real
+     * would let a rollback resurrect a record whose pba was reallocated --
+     * F4, the leg-5 soak's THIRD STATE). retmap is a bitmap over
+     * total_blocks of the blocks held for the checkpoint; they stay
+     * allocated in the real bitmap too (that is what bars reuse), retmap
+     * is only the realize/registry list. A NULL retmap (every process that
+     * did not arm the checkpoint itself) degrades registration to "blocks
+     * stay allocated, nothing is registered" -- rollback is unaffected (it
+     * never reads the registry); the unregistered ranges are reclaimed by
+     * the fsck rebuild after the checkpoint resolves. retain_release: the
+     * checkpoint machinery's own deliberate frees (the realize's registry
+     * delete, the arm's staging unwind, the no-op disarm) bypass
+     * retention. ck_stage_*: the journal staging run allocated at arm
+     * time. */
     invfs_ckp0 ck;
     int ck_present;
     uint64_t ck_prev_seq;
     int retain;
+    int retain_release;
     uint8_t *retmap;
     uint64_t ck_stage_pba, ck_stage_blocks;
     /* Crash consistency (doc/08). `dirty` remembers that the on-disk state
@@ -815,8 +843,81 @@ uint64_t alloc_raw_or_shadow(invfs_volume *v, uint64_t nblocks, int *zone_out);
  * fsck bitmap rebuild and vol_open; logged, persisted by the next flush. */
 void vol_readonly_unlatch(invfs_volume *v);
 
-/* remove all mappings for (inode, lba) from the in-memory table */
+/* remove all mappings for (inode, lba) from the in-memory table and
+ * journal the UNMAP op (append-only; l2p_remove_mem skips the op for
+ * replay) */
 void l2p_remove(invfs_volume *v, uint64_t inode, uint64_t lba);
+void l2p_remove_mem(invfs_volume *v, uint64_t inode, uint64_t lba);
+
+/* WP22d: queue one journal op for the next flush's append (MAP/UNMAP,
+ * CRC restamped from the chain at write time; a MAP op's pad is re-read
+ * from the live table at write time) */
+int jrn_push_op(invfs_volume *v, const invfs_l2p_entry *e);
+
+/* absolute byte offset of slot `slot`'s header block */
+uint64_t jrn_slot_base(const invfs_volume *v, uint32_t slot);
+
+/* WP22d: remember a heat-only change for the next flush (appended as a
+ * refresh MAP, or folded into the compaction image when the pending set
+ * overflows) */
+void jrn_heat_touch(invfs_volume *v, uint64_t inode, uint64_t lba);
+/* a MAP's heat was set in the table right after its op was queued (the
+ * create paths): keep the queued op's pad in sync when it is the tail,
+ * else queue a refresh */
+void jrn_pad_sync(invfs_volume *v, const invfs_l2p_entry *e);
+
+/* WP22d consistent-cut mapset: the set of (inode,lba) keys the replayed
+ * journal maps. Built once per open/fsck; O(1) membership. */
+typedef struct {
+    uint64_t inode, lba;          /* inode==0 = empty */
+    const invfs_l2p_entry *e;     /* the newest entry with this key */
+} mapset_ent;
+typedef struct { mapset_ent *tab; size_t mask; } mapset;
+int  mapset_build(const invfs_volume *v, mapset *ms);
+int  mapset_has(const mapset *ms, uint64_t inode, uint64_t lba);
+/* the newest live entry for the key, NULL when unmapped */
+const invfs_l2p_entry *mapset_get(const mapset *ms, uint64_t inode,
+                                  uint64_t lba);
+void mapset_free(mapset *ms);
+
+/* WP22d consistent-cut scan set: per-name version stack built by the
+ * open/fsck inode-area scan. A version is "broken" when some AST segment
+ * has no mapping in the replayed journal (a drop window ate it). The live
+ * version of a name is the newest non-broken one; a position-kill DELT
+ * removes its version UNLESS that version's successor is broken (a torn
+ * retire transaction: keep the fallback), and a DELT naming the newest
+ * version ever seen kills the name outright (a user delete must not
+ * resurrect older versions). */
+typedef struct {
+    uint64_t pos, id;
+    uint64_t size, ctime;
+    uint64_t miss;        /* AST segments without a mapping (0 = valid) */
+    uint8_t  broken;      /* miss != 0, or the header failed to parse */
+} scan_ver;
+typedef struct scan_name {
+    struct scan_name *next;
+    scan_ver *vers;
+    uint32_t nvers, capvers;
+    uint32_t nlen;
+    char name[1];
+} scan_name;
+typedef struct {
+    scan_name **buck;
+    size_t mask, count;
+} scan_set;
+int  scanset_inod(scan_set *ss, const char *name, size_t nlen,
+                  uint64_t id, uint64_t pos, uint64_t size, uint64_t ctime,
+                  uint64_t miss);
+void scanset_delt(scan_set *ss, const char *name, size_t nlen,
+                  uint64_t id, uint64_t killpos);
+/* newest non-broken version, NULL when the name is lost */
+const scan_ver *scanset_live(const scan_name *e);
+void scanset_free(scan_set *ss);
+/* count the record's AST segments missing from the mapset; fills the
+ * first few lost ranges for the loud log. Returns the miss count. */
+uint64_t rec_l2p_miss(const uint8_t *rec, uint32_t rec_len, uint64_t inode_id,
+                      const mapset *ms, uint64_t *miss_off, uint64_t *miss_len,
+                      unsigned *miss_n);
 
 /* +1 read-heat on the live mapping for (inode,lba), once per session.
  * Read-only sessions (READONLY flag / awaiting recovery) accrue nothing:

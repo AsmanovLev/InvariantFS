@@ -34,6 +34,13 @@
 #   -> --free-redundant -> rollback works (bit-exact); a bare sweep on
 #   the sealed volume declines to checkpoint.
 #
+#   image G (F4 regression, the leg-5 soak's THIRD STATE): with the
+#   checkpoint live, an OVERWRITE through an ordinary (non-sweep) process
+#   must NOT free the old record's pre-checkpoint blocks -- retention keys
+#   on the on-disk CKP0, not on the arming session. overwrite -> heavy
+#   post-checkpoint allocation (would reuse the freed blocks) -> rollback
+#   -> the file is bit-exact to its checkpoint-time bytes.
+#
 # Run from the repo root after `make`:  bash tools/test-rollback.sh
 # Uses /dev/shm (tmpfs) like the other soak scripts. NOTE: blkio treats
 # /dev/* paths as raw devices, so the script cd's into /dev/shm and uses
@@ -50,9 +57,10 @@ IMGC=wp21rb-c.img    # realize = point of no return
 IMGD=wp21rb-d.img    # retention fidelity (resurrection)
 IMGE=wp21rb-e.img    # crash legs
 IMGF=wp21rb-f.img    # refusals (fresh / sealed / double)
+IMGG=wp21rb-g.img    # F4: overwrite under a live checkpoint retains
 rm -rf "$WORK" && mkdir -p "$WORK/orig" "$WORK/out"
 cd /dev/shm
-rm -f "$IMGA" "$IMGB" "$IMGC" "$IMGD" "$IMGE" "$IMGF"
+rm -f "$IMGA" "$IMGB" "$IMGC" "$IMGD" "$IMGE" "$IMGF" "$IMGG"
 
 fail() { echo "FAIL: $*" >&2; exit 1; }
 
@@ -414,6 +422,68 @@ check_all "F2 post-unseal rollback" "$IMGF.2"
 $B/invf-fsck "$IMGF.2" | grep -q "^OK$" || fail "F2: fsck not clean"
 echo "  unsealed volume: rollback works, bit-exact"
 rm -f "$IMGF.2"
+
+echo
+echo "== [G] F4: overwrite under a live checkpoint retains the old blocks =="
+# The leg-5 soak's THIRD STATE: with CKP0 live, an overwrite from an
+# ordinary process (invf-cp here; the soak's FUSE daemon there) retired
+# the old record and freed its PRE-checkpoint blocks for real (retention
+# was session-scoped); a post-checkpoint allocation reused them; the
+# rollback resurrected the old record over foreign bytes. Retention now
+# keys on the on-disk checkpoint, so the old blocks stay allocated until
+# the checkpoint resolves.
+$B/invf-mkfs "$IMGG" 0.5 >/dev/null
+python3 -c "open('$WORK/edit/target.bin','wb').write(__import__('os').urandom(200000))"
+$B/invf-cp "$IMGG" "$WORK/edit/target.bin" target.bin >/dev/null
+# settle target.bin's blocks (sweep + realize = point of no return; the
+# file lands in the shadow zone verbatim): they PREDATE the checkpoint
+# armed below, and the UNCOMPRESSIBLE stamp keeps that sweep from
+# touching the file again
+$B/invf-sweep "$IMGG" >/dev/null 2>&1 || fail "G: settle sweep"
+$B/invf-sweep "$IMGG" --realize >/dev/null 2>&1 || fail "G: settle realize"
+$RP "$IMGG" ckp | grep -q "present=0" || fail "G: checkpoint live after settle"
+[ "$(class_of "$IMGG" target.bin)" = "1" ] || fail "G: target not UNCOMPRESSIBLE"
+# arm a checkpoint that stays live: bait.txt transforms (its old blocks
+# fill the retention registry); target.bin is skipped (stamped)
+python3 -c "open('$WORK/edit/bait.txt','w').write('compressible bait for the sweep\n' * 6000)"
+$B/invf-cp "$IMGG" "$WORK/edit/bait.txt" bait.txt >/dev/null
+$B/invf-sweep "$IMGG" > "$WORK/sweep-g.log" 2>&1 || { cat "$WORK/sweep-g.log"; fail "G: sweep"; }
+grep -q "retained blocks held for rollback" "$WORK/sweep-g.log" \
+    || { cat "$WORK/sweep-g.log"; fail "G: checkpoint did not stay live (nothing retained)"; }
+$RP "$IMGG" ckp | grep -q "present=1" || fail "G: no live checkpoint"
+# exhaust the RAW zone (120 MB on a 94 MB zone): the tail segments spill
+# into the shadow zone, so every later allocation is a SHADOW one -- the
+# zone target.bin's freed blocks live in
+python3 -c "open('$WORK/edit/fill.bin','wb').write(__import__('os').urandom(120*1024*1024))"
+$B/invf-cp "$IMGG" "$WORK/edit/fill.bin" fill.bin >/dev/null || fail "G: fill.bin"
+$B/meta_probe "$IMGG" --heat fill.bin > "$WORK/probe-g.txt" 2>/dev/null
+grep -q "zone=2" "$WORK/probe-g.txt" \
+    || fail "G: RAW zone never exhausted (no shadow spill)"
+# the overwrite: new blocks land first, then the old record retires -- its
+# pre-checkpoint blocks must be RETAINED, not freed for reuse
+python3 -c "open('$WORK/edit/target.v2','wb').write(__import__('os').urandom(200000))"
+$B/invf-cp "$IMGG" "$WORK/edit/target.v2" target.bin >/dev/null || fail "G: overwrite"
+$B/invf-cat "$IMGG" target.bin "$WORK/out/target.v2" >/dev/null
+cmp -s "$WORK/edit/target.v2" "$WORK/out/target.v2" || fail "G: overwrite not live"
+# heavy post-checkpoint shadow allocation: without retention this reuses
+# the just-freed pre-checkpoint blocks (the free rewound the zone cursor);
+# 4 MB >> target.bin's 200 KB, so the freed runs are consumed with certainty
+python3 -c "open('$WORK/edit/fat.bin','wb').write(__import__('os').urandom(4*1024*1024))"
+$B/invf-cp "$IMGG" "$WORK/edit/fat.bin" fat.bin >/dev/null || fail "G: fat.bin"
+# roll back: the overwrite, fill.bin and fat.bin are post-checkpoint and
+# vanish; target.bin must resurrect BIT-EXACT to its checkpoint-time bytes
+$B/invf-rollback "$IMGG" > "$WORK/rb-g.log" 2>&1 || { cat "$WORK/rb-g.log"; fail "G: rollback"; }
+if $B/invf-ls "$IMGG" | grep -q "fat.bin\|fill.bin"; then
+    fail "G: post-checkpoint file survived the rollback"
+fi
+$B/invf-cat "$IMGG" target.bin "$WORK/out/target.g" >/dev/null \
+    || fail "G: target.bin unreadable post-rollback"
+cmp -s "$WORK/edit/target.bin" "$WORK/out/target.g" \
+    || fail "G: target.bin resurrected with FOREIGN bytes (F4 third state)"
+echo "  target.bin bit-exact after overwrite+reuse+rollback"
+$B/invf-fsck "$IMGG" | grep -q "^OK$" || fail "G: fsck not clean"
+$B/invf-verify "$IMGG" --deep | tail -1 | grep -q " 0 corrupt," \
+    || fail "G: verify not clean"
 
 echo
 echo "ROLLBACK E2E: PASS"

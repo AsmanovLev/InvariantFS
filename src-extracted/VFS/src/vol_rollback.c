@@ -61,10 +61,13 @@ static int vol_write_ckp0(invfs_volume *v, const invfs_ckp0 *ck)
  *
  * Why the staging exists: the inode area is strictly append-only, so its
  * checkpoint-time prefix is byte-intact at rollback time by construction
- * -- but vol_flush rewrites the journal from l2p_dirty on every flush
- * (a sweep's first flush rewrites it wholesale), so the pre-sweep L2P
- * does NOT survive the sweep in place. The stage is the RSZ0 pattern in
- * miniature: durable copy first, descriptor naming it second.
+ * -- and WP22d made the journal append-only too (slot log), but a
+ * compaction REPLACES the active slot wholesale, so the pre-sweep L2P
+ * does NOT survive a sweep in place. The stage is the RSZ0 pattern in
+ * miniature: durable copy first, descriptor naming it second. The staged
+ * bytes are the whole used prefix of the active slot (header + image +
+ * log); the restore writes them into BOTH slots, so a higher-sequence
+ * post-sweep slot can never win the replay race.
  *
  * While a checkpoint-armed sweep runs, vol_free_blocks does not free
  * (see there): the blocks stay allocated (which bars their reuse) and are
@@ -78,10 +81,17 @@ static int vol_write_ckp0(invfs_volume *v, const invfs_ckp0 *ck)
  *
  * End states:
  *  - sweep done        : CKP0 live + registry holding the retired blocks.
- *  - invf-sweep --realize (and the next sweep's automatic pre-realize):
- *    the registry owners are deleted -- the retire path frees exactly the
- *    mapped ranges -- and CKP0 is cleared. The point of no return.
- *  - invf-rollback     : journal prefix restored from the stage, inode
+ *  - invf-sweep --realize: the registry owners are deleted -- the retire
+ *    path frees exactly the mapped ranges -- and CKP0 is cleared. The
+ *    point of no return.
+ *  - the next bare sweep (WP22d realize-after-arm): vol_ckp_begin stages
+ *    the current journal, arms the new checkpoint, and only THEN deletes
+ *    the old registry (those frees are real -- retention for the new run
+ *    engages after). The pre-WP22d order (realize, then arm) left the
+ *    volume with no net in between; the new order always keeps one live,
+ *    and a crash mid-way leaves the new checkpoint live with the old
+ *    registry intact (rollback or the next sweep reconciles it).
+ *  - invf-rollback     : journal restored from the stage, inode
  *    area decapitated at the checkpoint (post-sweep records, tombstones
  *    and the registry itself vanish wholesale), then the ORDINARY fsck
  *    rebuild reconciles bitmap+journal: retained blocks are referenced by
@@ -132,6 +142,22 @@ int vol_ckp_info(const invfs_volume *v, invfs_ckp0 *out)
 }
 
 
+/* defined with vol_ckp_realize below */
+static int ret_registry_delete(invfs_volume *v, uint64_t *freed_out);
+
+
+/* Free the arm's own staging run: the checkpoint machinery's bookkeeping,
+ * never rollback-relevant content (the run was allocated seconds ago,
+ * post any live checkpoint's cut), so the CKP0-live retention must not
+ * hold it. */
+static void ckp_free_direct(invfs_volume *v, uint64_t pba, uint64_t nblocks)
+{
+    v->retain_release = 1;
+    vol_free_blocks(v, pba, nblocks);
+    v->retain_release = 0;
+}
+
+
 #ifndef _WIN32
 
 /* Test hook (tools/test-rollback.sh): die mid-rollback, right after the
@@ -151,6 +177,7 @@ int vol_ckp_begin(invfs_volume *v)
 {
     uint64_t jstart, jused, sblocks, pba = 0;
     invfs_ckp0 ck;
+    int had_ck, rrc;
 
     if (!v) return -1;
     {
@@ -174,18 +201,28 @@ int vol_ckp_begin(invfs_volume *v)
                         "invf-sweep --free-redundant first)\n");
         return 0;
     }
-    if (v->ck_present) {
-        /* the driver realizes the previous checkpoint before arming;
-         * reaching this means a bug or a hand-run sequence -- decline,
-         * never overwrite */
-        fprintf(stderr, "checkpoint: declined (checkpoint #%llu still "
-                        "live)\n", (unsigned long long)v->ck.sweep_seq);
+    if (v->retain) {
+        /* begin twice in one session is a driver bug -- decline, never
+         * overwrite the live arm */
+        fprintf(stderr, "checkpoint: declined (already armed this "
+                        "session)\n");
         return 0;
     }
 
-    /* Stage the used journal prefix (see the section comment for why the
-     * inode area needs no staging). */
-    jstart = v->journal_start * (uint64_t)INVFS_BLOCK_SIZE;
+    /* WP22d: flush BEFORE staging -- the staged journal must be current
+     * and in the slot format (a legacy volume migrates on this flush), so
+     * the rollback never has to reconcile a legacy stage against a
+     * slotted live journal. */
+    if (vol_flush(v) != 0)
+        return -1;
+    had_ck = v->ck_present;
+
+    /* Stage the used journal prefix of the ACTIVE slot (see the section
+     * comment for why the inode area needs no staging). The staged bytes
+     * include the slot header -- a rollback rewrites them into BOTH
+     * slots, so a post-sweep slot can never win the sequence race. */
+    jstart = v->j_slotted ? jrn_slot_base(v, v->j_slot)
+                          : v->journal_start * (uint64_t)INVFS_BLOCK_SIZE;
     jused = v->journal_pos - jstart;
     sblocks = (jused + INVFS_BLOCK_SIZE - 1) / INVFS_BLOCK_SIZE;
     if (sblocks) {
@@ -209,7 +246,7 @@ int vol_ckp_begin(invfs_volume *v)
             return 0;
         }
         buf = (uint8_t *)malloc(BLKIO_BOUNCE);
-        if (!buf) { vol_free_blocks(v, pba, sblocks); return -1; }
+        if (!buf) { ckp_free_direct(v, pba, sblocks); return -1; }
         left = jused;
         roff = jstart;
         woff = pba * (uint64_t)INVFS_BLOCK_SIZE;
@@ -240,10 +277,10 @@ int vol_ckp_begin(invfs_volume *v)
             free(chk);
         }
         free(buf);
-        if (!ok) { vol_free_blocks(v, pba, sblocks); return -1; }
+        if (!ok) { ckp_free_direct(v, pba, sblocks); return -1; }
         /* the staging allocation must be durable before CKP0 can name it */
         if (vol_flush(v) != 0) {
-            vol_free_blocks(v, pba, sblocks);
+            ckp_free_direct(v, pba, sblocks);
             return -1;
         }
     }
@@ -256,7 +293,7 @@ int vol_ckp_begin(invfs_volume *v)
     ck.sweep_seq = v->ck_prev_seq + 1;
     ck.time_unix = (uint64_t)time(NULL);
     if (vol_write_ckp0(v, &ck) != 0) {
-        if (pba) vol_free_blocks(v, pba, sblocks);
+        if (pba) ckp_free_direct(v, pba, sblocks);
         return -1;
     }
     if (!v->retmap)
@@ -268,6 +305,32 @@ int vol_ckp_begin(invfs_volume *v)
      * registry); realize reclaims via fsck after clearing CKP0 */
     v->ck_stage_pba = pba;
     v->ck_stage_blocks = sblocks;
+
+    /* WP22d realize-AFTER-arm: the previous run's retention registry is
+     * deleted only now that the new checkpoint is live. The pre-WP22d
+     * order (realize the old checkpoint, then arm) left the volume with
+     * no safety net in between -- a torn sweep during that window had
+     * neither checkpoint nor (after a no-op sweep's disarm) anything to
+     * roll back to. The frees here are REAL (the old checkpoint's point of
+     * no return): retention keys on ck_present now, so the delete runs
+     * under the release flag -- registry retention for the new run engages
+     * only below. A crash between the CKP0 write and this delete leaves
+     * the new checkpoint live with the old registry intact (the defensive
+     * pre-sweep realize or a rollback reconciles it). */
+    if (had_ck) {
+        uint64_t rfree = 0;
+        v->retain_release = 1;
+        rrc = ret_registry_delete(v, &rfree);
+        v->retain_release = 0;
+        if (rrc < 0)
+            fprintf(stderr, "checkpoint: previous registry delete failed; "
+                    "the blocks stay held (fsck reclaims after the next "
+                    "realize)\n");
+        else if (rfree)
+            fprintf(stderr, "checkpoint: previous run realized (%llu "
+                    "retained blocks freed)\n", (unsigned long long)rfree);
+    }
+
     /* retention engages only from here on: anything freed earlier this
      * session was freed pre-checkpoint and is none of its business */
     v->retain = 1;
@@ -308,7 +371,7 @@ int vol_ckp_end(invfs_volume *v, uint64_t *ranges_out, uint64_t *blocks_out)
      * quiescent (no staging cost, no registry record, no CKP0). */
     if (!n_blocks) {
         if (v->ck_stage_blocks)
-            vol_free_blocks(v, v->ck_stage_pba, v->ck_stage_blocks);
+            ckp_free_direct(v, v->ck_stage_pba, v->ck_stage_blocks);
         v->ck_stage_pba = v->ck_stage_blocks = 0;
         if (v->ck_present) {
             if (getenv("INVFS_DEBUG"))
@@ -397,24 +460,18 @@ int vol_ckp_end(invfs_volume *v, uint64_t *ranges_out, uint64_t *blocks_out)
 }
 
 
-int vol_ckp_realize(invfs_volume *v, uint64_t *freed_blocks_out)
+/* Delete every registry shard ("\x01reten*"): the retire path frees
+ * exactly the ranges the shard maps (zone==BINARY entries, so the
+ * batch-owner gate does not hold them). Its PB7 sharer check can find no
+ * live reference to a retained block: retained blocks stayed allocated
+ * throughout the window, so nothing was ever reallocated onto one.
+ * Returns 1 when something was deleted, 0 when absent, -1 on error. */
+static int ret_registry_delete(invfs_volume *v, uint64_t *freed_out)
 {
     uint64_t freed = 0;
     uint64_t shard;
     int did = 0;
 
-    if (freed_blocks_out) *freed_blocks_out = 0;
-    if (!v) return -1;
-    /* A realize IS the end of the retention window: if it runs inside a
-     * checkpoint-armed session (it normally runs before the next arm),
-     * the frees must be real. */
-    v->retain = 0;
-
-    /* Delete every registry shard: the retire path frees exactly the
-     * ranges the shard maps (zone==BINARY entries, so the batch-owner
-     * gate does not hold them). Its PB7 sharer check can find no live
-     * reference to a retained block: retained blocks stayed allocated
-     * throughout the window, so nothing was ever reallocated onto one. */
     for (shard = 0; ; shard++) {
         char nm[32];
         uint64_t oid;
@@ -435,6 +492,28 @@ int vol_ckp_realize(invfs_volume *v, uint64_t *freed_blocks_out)
         }
         did = 1;
     }
+    if (freed_out) *freed_out = freed;
+    return did;
+}
+
+
+int vol_ckp_realize(invfs_volume *v, uint64_t *freed_blocks_out)
+{
+    uint64_t freed = 0;
+    int did = 0, rrc;
+
+    if (freed_blocks_out) *freed_blocks_out = 0;
+    if (!v) return -1;
+    /* A realize IS the end of the retention window: the registry delete
+     * must free for real (the point of no return for everything the
+     * checkpoint held). Retention keys on ck_present now, and CKP0 is
+     * cleared only below, so the delete runs under the release flag. */
+    v->retain = 0;
+    v->retain_release = 1;
+    rrc = ret_registry_delete(v, &freed);
+    v->retain_release = 0;
+    if (rrc < 0) return -1;
+    did = rrc;
     if (v->ck_present) {
         if (vol_write_ckp0(v, NULL) != 0) return -1;
         did = 1;
@@ -449,6 +528,7 @@ int vol_rollback(invfs_volume *v, uint64_t *reclaimed_out)
 {
     invfs_fsck_report rep;
     uint64_t jstart, jpos, iapos, stage_len;
+    int stage_slotted = 0;
 
     if (reclaimed_out) *reclaimed_out = 0;
     if (!v) return -1;
@@ -461,16 +541,42 @@ int vol_rollback(invfs_volume *v, uint64_t *reclaimed_out)
     jstart = v->journal_start * (uint64_t)INVFS_BLOCK_SIZE;
     jpos = v->ck.journal_pos;
     iapos = v->ck.inode_area_pos;
-    stage_len = jpos - jstart;   /* underflow caught by the check below */
+
+    /* WP22d: the stage holds the journal prefix as it was at arm time --
+     * the slot-format bytes (slot header + image + chained log) when the
+     * arm happened post-migration, else the legacy flat log. Sniff the
+     * first staged block for the JRN0 header to tell them apart. */
+    if (v->ck.stage_blocks) {
+        invfs_jrn_hdr sh;
+        if (io_seek(&v->io, v->ck.stage_pba * (uint64_t)INVFS_BLOCK_SIZE) == 0 &&
+            io_read(&v->io, &sh, sizeof sh) == 0 &&
+            memcmp(sh.magic, INVFS_JRN_MAGIC, 4) == 0 &&
+            sh.version == INVFS_JRN_VERSION &&
+            invfs_crc32c(&sh, offsetof(invfs_jrn_hdr, crc32c)) == sh.crc32c)
+            stage_slotted = 1;
+    }
+    if (stage_slotted) {
+        /* the armed slot: the checkpoint's journal_pos names the append
+         * point inside it; the stage content starts at that slot's base */
+        uint64_t rel = (jpos / INVFS_BLOCK_SIZE) - v->journal_start;
+        uint64_t idx = rel / INVFS_JRN_SLOT_BLOCKS;
+        uint64_t rem = rel % INVFS_JRN_SLOT_BLOCKS;
+        if (jpos < jstart || idx >= INVFS_JRN_SLOTS || rem == 0)
+            return -3;
+        stage_len = jpos - (jstart + idx * INVFS_JRN_SLOT_BLOCKS *
+                            INVFS_BLOCK_SIZE);
+    } else {
+        stage_len = jpos - jstart;   /* underflow caught by the check below */
+        if (jpos < jstart ||
+            (stage_len % sizeof(invfs_l2p_entry)) != 0)
+            return -3;
+    }
 
     /* Descriptor sanity (the CRC already proved the bytes; these bounds
      * are what the writes below rely on). A failure here means the
      * descriptor or its staging was clobbered: refuse LOUDLY and leave
      * the post-sweep state untouched. */
-    if (jpos < jstart ||
-        (stage_len % sizeof(invfs_l2p_entry)) != 0 ||
-        jpos + sizeof(invfs_l2p_entry) >
-            jstart + (uint64_t)INVFS_JOURNAL_BLOCKS * INVFS_BLOCK_SIZE ||
+    if (stage_len > (uint64_t)INVFS_JOURNAL_BLOCKS * INVFS_BLOCK_SIZE ||
         iapos < v->inode_area_start * (uint64_t)INVFS_BLOCK_SIZE ||
         iapos > v->inode_area_end ||
         (v->ck.stage_blocks &&
@@ -479,11 +585,11 @@ int vol_rollback(invfs_volume *v, uint64_t *reclaimed_out)
         stage_len > v->ck.stage_blocks * (uint64_t)INVFS_BLOCK_SIZE)
         return -3;
 
-    /* Phase 1: restore the staged journal prefix + decapitate the inode
-     * area at the checkpoint -- the commit point. Skipped when a previous
-     * killed attempt already landed it (both append pointers match), so a
+    /* Phase 1: restore the staged journal + decapitate the inode area at
+     * the checkpoint -- the commit point. Skipped when a previous killed
+     * attempt already landed it (both append pointers match), so a
      * re-run only re-executes the idempotent rebuild. NOTE: no vol_flush
-     * in this phase -- it would rewrite the journal from the stale
+     * in this phase -- it would append journal ops from the stale
      * in-memory table. Nothing here vol_mark_dirty's either, so vol_close
      * stays silent. */
     if (v->inode_area_pos > iapos || v->journal_pos != jpos) {
@@ -496,29 +602,99 @@ int vol_rollback(invfs_volume *v, uint64_t *reclaimed_out)
                 free(buf);
                 return -1;
             }
-            /* verify the staging by REPLAYING it before anything is
-             * overwritten: every entry must be CRC-valid. A reused or
-             * clobbered stage can never pass -- loud refusal beats a
-             * half-foreign journal. */
-            for (off = 0; off + sizeof(invfs_l2p_entry) <= stage_len;
-                 off += sizeof(invfs_l2p_entry)) {
-                invfs_l2p_entry e;
-                memcpy(&e, buf + off, sizeof e);
-                if (invfs_crc32c(&e, offsetof(invfs_l2p_entry, crc)) != e.crc) {
+            /* verify the staging before anything is overwritten (the
+             * RSZ0 rule): a reused or clobbered stage can never parse --
+             * loud refusal beats a half-foreign journal. */
+            if (stage_slotted) {
+                /* header (already sniffed) + whole-image CRC + the
+                 * chained log to its end */
+                invfs_jrn_hdr sh;
+                uint64_t ib, jp2;
+                uint32_t prev, icrc;
+                memcpy(&sh, buf, sizeof sh);
+                if (sh.image_bytes > stage_len - INVFS_BLOCK_SIZE ||
+                    sh.image_bytes % sizeof(invfs_l2p_entry) != 0) {
                     free(buf);
                     return -3;
                 }
-            }
-            if (io_seek(&v->io, jstart) != 0 ||
-                io_write(&v->io, buf, (size_t)stage_len) != 0) {
+                ib = sh.image_bytes;
+                icrc = ib ? invfs_crc32c(buf + INVFS_BLOCK_SIZE,
+                                         (size_t)ib) : 0;
+                if (icrc != sh.image_crc) { free(buf); return -3; }
+                prev = invfs_crc32c(&sh, offsetof(invfs_jrn_hdr, image_crc));
+                if (ib) {
+                    const invfs_l2p_entry *le = (const invfs_l2p_entry *)
+                        (buf + INVFS_BLOCK_SIZE + ib -
+                         sizeof(invfs_l2p_entry));
+                    prev = le->crc;
+                }
+                jp2 = INVFS_BLOCK_SIZE + ib;
+                while (jp2 + sizeof(invfs_l2p_entry) <= stage_len) {
+                    const invfs_l2p_entry *e = (const invfs_l2p_entry *)(buf + jp2);
+                    if (invfs_crc32c_update(prev, e,
+                            offsetof(invfs_l2p_entry, crc)) != e->crc)
+                        break;
+                    prev = e->crc;
+                    jp2 += sizeof(*e);
+                }
+                if (jp2 != stage_len) { free(buf); return -3; }
+                /* both slots get the staged bytes: a half-restored pair
+                 * is still consistent (the staged header sequence is the
+                 * same in both; a crash mid-restore is re-entered with
+                 * CKP0 live) */
+                {
+                    uint32_t s;
+                    for (s = 0; s < INVFS_JRN_SLOTS; s++) {
+                        if (io_seek(&v->io, jrn_slot_base(v, s)) != 0 ||
+                            io_write(&v->io, buf, (size_t)stage_len) != 0) {
+                            free(buf);
+                            return -1;
+                        }
+                    }
+                }
                 free(buf);
-                return -1;
+                /* the selector follows the restored content */
+                v->sb.pad2 = INVFS_JSEL_SLOT0;
+                if (vol_write_sb(v) != 0) return -1;
+            } else {
+                for (off = 0; off + sizeof(invfs_l2p_entry) <= stage_len;
+                     off += sizeof(invfs_l2p_entry)) {
+                    invfs_l2p_entry e;
+                    memcpy(&e, buf + off, sizeof e);
+                    if (invfs_crc32c(&e, offsetof(invfs_l2p_entry, crc)) != e.crc) {
+                        free(buf);
+                        return -3;
+                    }
+                }
+                /* kill any live slot headers first: the restored bytes
+                 * are the legacy flat log and must REPLAY as legacy */
+                {
+                    uint8_t zb[INVFS_BLOCK_SIZE];
+                    memset(zb, 0, sizeof zb);
+                    if (io_seek(&v->io, jstart) != 0 ||
+                        io_write(&v->io, zb, sizeof zb) != 0 ||
+                        io_seek(&v->io, jstart + (uint64_t)INVFS_JRN_SLOT_BLOCKS *
+                                INVFS_BLOCK_SIZE) != 0 ||
+                        io_write(&v->io, zb, sizeof zb) != 0) {
+                        free(buf);
+                        return -1;
+                    }
+                }
+                if (io_seek(&v->io, jstart) != 0 ||
+                    io_write(&v->io, buf, (size_t)stage_len) != 0) {
+                    free(buf);
+                    return -1;
+                }
+                free(buf);
+                v->sb.pad2 = INVFS_JSEL_LEGACY;
+                if (vol_write_sb(v) != 0) return -1;
             }
-            free(buf);
         }
-        /* the terminator: replay stops exactly at the checkpoint (the
-         * vol_flush convention) */
-        {
+        /* the terminator: replay stops exactly at the checkpoint. Only
+         * the legacy log needs one (the chained slot log stops itself);
+         * in the slotted restore the byte after the staged content simply
+         * fails the chain. */
+        if (!stage_slotted) {
             invfs_l2p_entry z;
             memset(&z, 0, sizeof z);
             z.crc = ~invfs_crc32c(&z, offsetof(invfs_l2p_entry, crc));
@@ -559,7 +735,14 @@ int vol_rollback(invfs_volume *v, uint64_t *reclaimed_out)
      * orphaned and reclaimed; the journal is rewritten from the live
      * records; the superblock goes CLEAN. l2p_miss can only reflect
      * damage the pre-sweep state already had (rollback restores it
-     * faithfully, damage included) -- reported, not fatal. */
+     * faithfully, damage included) -- reported, not fatal.
+     *
+     * WP22d note: the checkpoint is being dismantled RIGHT HERE, so the
+     * fsck held-for-checkpoint accounting (blocks allocated-unreferenced
+     * while CKP0 lives) must not classify this run's garbage as "held" --
+     * clear the in-memory ck_present before the scan (the on-disk CKP0 is
+     * cleared below, after the rebuild succeeded). */
+    v->ck_present = 0;
     if (vol_fsck_scan(v, &rep, 1) != 0) {
         fprintf(stderr, "rollback: the fsck rebuild failed; the volume is "
                 "left for invf-fsck -f review (re-running invf-rollback "

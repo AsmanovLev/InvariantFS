@@ -376,6 +376,20 @@ uint64_t vol_find(invfs_volume *v, const char *name)
 }
 
 
+/* The live version of a name under the consistent cut (WP22d): the index
+ * holds exactly the post-cut view, so this is the answer listing tools
+ * must print (raw area walks see torn versions the index has hidden). */
+uint64_t vol_find_ex(invfs_volume *v, const char *name,
+                     uint64_t *size_out, uint64_t *ctime_out)
+{
+    const name_index_entry *e = idx_get(v, name, strlen(name));
+    if (!e) return 0;
+    if (size_out) *size_out = e->size;
+    if (ctime_out) *ctime_out = e->ctime;
+    return e->inode_id;
+}
+
+
 /*
  * Extract one container member (window) from an in-memory archive buffer.
  * member data is at ch->data_off, compressed with ch->method (0=stored,

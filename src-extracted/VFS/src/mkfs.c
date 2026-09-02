@@ -215,9 +215,18 @@ int main(int argc, char **argv)
         bad |= blkio_pwrite(&io, 0, zero, zn) != 0;
         /* The journal usually falls inside that first megabyte and the inode
            area usually does not, but both depend on the volume size, so zero
-           them by their computed offsets rather than by assumption. */
+           them by their computed offsets rather than by assumption. WP22d:
+           the journal is two slots -- zero BOTH slot header blocks, else a
+           re-mkfs of a slotted volume replays the stale slot (the selector
+           is only a hint; a CRC-valid stale header wins the replay). */
         if (jstart + INVFS_BLOCK_SIZE <= size_bytes)
             bad |= blkio_pwrite(&io, jstart, zero, INVFS_BLOCK_SIZE) != 0;
+        {
+            uint64_t s1 = jstart +
+                (uint64_t)INVFS_JRN_SLOT_BLOCKS * INVFS_BLOCK_SIZE;
+            if (s1 + INVFS_BLOCK_SIZE <= size_bytes)
+                bad |= blkio_pwrite(&io, s1, zero, INVFS_BLOCK_SIZE) != 0;
+        }
         if (istart + INVFS_BLOCK_SIZE <= size_bytes)
             bad |= blkio_pwrite(&io, istart, zero, INVFS_BLOCK_SIZE) != 0;
         free(zero);

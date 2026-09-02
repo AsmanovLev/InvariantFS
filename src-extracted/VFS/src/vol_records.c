@@ -182,6 +182,7 @@ uint64_t vol_create_file(invfs_volume *v, const char *name,
             invfs_l2p_entry *ne = &v->l2p[v->l2p_count - 1];
             l2p_set_rheat(ne, v->heat_init);
             ne->pad[2] = 1;
+            jrn_pad_sync(v, ne);   /* the queued MAP op carries the pad */
         }
 
         entries[i].file_offset = (uint64_t)i * SEGMENT_SIZE;
@@ -415,19 +416,27 @@ static int vol_retire_inode(invfs_volume *v, uint64_t inode_id,
         free(done);
         free(text_lbas);
     }
-    /* rewrite L2P in-memory: drop this inode's maps */
+    /* rewrite L2P in-memory: drop this inode's maps, and queue one UNMAP
+     * op per dropped entry -- the on-disk journal is append-only (WP22d),
+     * so the old MAP entries are cancelled by op, never rewritten */
     if (!shared) {
         size_t w = 0;
         for (i = 0; i < v->l2p_count; i++) {
             if (v->l2p[i].inode == inode_id) {
-                if (w < v->l2p_dirty) v->l2p_dirty = w;
+                if (v->l2p[i].type == INVFS_JRN_MAP) {
+                    invfs_l2p_entry ue;
+                    memset(&ue, 0, sizeof ue);
+                    ue.type = INVFS_JRN_UNMAP;
+                    ue.inode = v->l2p[i].inode;
+                    ue.lba = v->l2p[i].lba;
+                    jrn_push_op(v, &ue);
+                }
                 continue;
             }
             if (w != i) v->l2p[w] = v->l2p[i];
             w++;
         }
         v->l2p_count = w;
-        if (v->l2p_dirty > v->l2p_count) v->l2p_dirty = v->l2p_count;
     }
 
     /* append tombstone record */

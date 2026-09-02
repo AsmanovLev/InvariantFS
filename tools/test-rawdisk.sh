@@ -52,6 +52,7 @@ REPO=/home/user/InvariantFS
 B=$REPO/bin
 PACK=$REPO/tools/codecpacks/rawdisk.codecpack
 WORK=/dev/shm/rawdiskwp
+trap 'rm -rf "$WORK" /dev/shm/rawdiskwp*' EXIT
 IMG=rawdiskwp.img
 IMGMD=rawdiskwp-md.img
 IMGMEM=rawdiskwp-mem.img

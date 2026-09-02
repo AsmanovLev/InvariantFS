@@ -39,11 +39,16 @@ uint8_t  vol_heat_w(const invfs_l2p_entry *e) { return e ? e->pad[2] : 0; }
  * Write-hot (wheat >= 2 post-decay = rewritten at least twice inside the
  * last interval) skips the heavy codec fan-out for one sweep.
  *
- * Persistence: vol_flush rewrites the journal suffix from l2p_dirty
- * copying whole 36-byte structs (pad rides along, inside the CRC region),
- * and replay copies whole structs too -- so heat crosses unmount/remount.
- * An fsck -f REBUILD reconstructs mappings from records and resets heat
- * to cold (documented: the rebuild has no history to be faithful to). */
+ * Persistence (WP22d): the journal is append-only, so heat rides it in
+ * three ways -- a MAP op carries its entry's current pad (re-read at flush
+ * time); a pure read touch queues (inode,lba) into v->j_heat and the next
+ * flush appends a refresh MAP with the live pad (one entry per pair per
+ * session at most: heat_seen gates the touch, so reads never churn the
+ * journal); a bulk change (the sweep's decay, or >64k pending refreshes)
+ * sets j_heat_all and the next flush compacts, the image carrying every
+ * pad. An fsck -f REBUILD reconstructs mappings from records and resets
+ * heat to cold (documented: the rebuild has no history to be faithful
+ * to). A crash loses only the pending touches -- heat is advisory. */
 
 static uint64_t heat_hash(uint64_t inode, uint64_t lba)
 {
@@ -113,7 +118,9 @@ void heat_touch_read(invfs_volume *v, uint64_t inode, uint64_t lba)
         r = l2p_rheat(e);
         if (r == 0xFFFFu) return;   /* saturated: nothing new to persist */
         l2p_set_rheat(e, (uint16_t)(r + 1));
-        if (i < v->l2p_dirty) v->l2p_dirty = i;
+        /* WP22d: RAM-only until the flush; the flush re-appends a refresh
+         * MAP carrying the current pad -- no rewrite of durable entries */
+        jrn_heat_touch(v, inode, lba);
         if ((uint32_t)r + 1 >= INVFS_HEAT_HOT) v->heat_any_rhot = 1;
         vol_mark_dirty(v);
         return;
@@ -143,7 +150,7 @@ void heat_file_setw(invfs_volume *v, uint64_t inode, uint8_t w)
         invfs_l2p_entry *e = &v->l2p[i];
         if (e->type == INVFS_JRN_MAP && e->inode == inode) {
             e->pad[2] = w;
-            if (i < v->l2p_dirty) v->l2p_dirty = i;
+            jrn_heat_touch(v, e->inode, e->lba);
         }
     }
 }
@@ -176,7 +183,7 @@ void heat_stamp(invfs_volume *v, uint64_t inode, uint64_t lba,
         if (e->type == INVFS_JRN_MAP && e->inode == inode && e->lba == lba) {
             l2p_set_rheat(e, r);
             e->pad[2] = w;
-            if (i < v->l2p_dirty) v->l2p_dirty = i;
+            jrn_heat_touch(v, inode, lba);
             return;
         }
     }
@@ -207,12 +214,10 @@ void vol_heat_sweep_begin(invfs_volume *v)
         w = e->pad[2];
         if (r) {
             l2p_set_rheat(e, (uint16_t)(r >> 1));
-            if (i < v->l2p_dirty) v->l2p_dirty = i;
             changed = 1;
         }
         if (w) {
             e->pad[2] = (uint8_t)(w - 1);
-            if (i < v->l2p_dirty) v->l2p_dirty = i;
             changed = 1;
         }
         if ((uint32_t)(r >> 1) >= INVFS_HEAT_HOT) any_r = 1;
@@ -220,8 +225,14 @@ void vol_heat_sweep_begin(invfs_volume *v)
     }
     v->heat_any_rhot = any_r;
     v->heat_any_whot = any_w;
-    if (changed && vol_write_enabled(v))
-        vol_mark_dirty(v);   /* the caller's vol_flush persists the decay */
+    if (changed) {
+        /* WP22d: the decay touched every entry at once -- persisting it is
+         * a bulk change, so the next flush compacts (the image carries the
+         * whole table's pads) instead of appending per-entry refreshes */
+        v->j_heat_all = 1;
+        if (vol_write_enabled(v))
+            vol_mark_dirty(v);   /* the caller's vol_flush persists the decay */
+    }
 }
 
 

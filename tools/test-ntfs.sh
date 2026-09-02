@@ -59,7 +59,8 @@ rm -rf "$WORK" && mkdir -p "$WORK/orig" "$WORK/out" "$WORK/nopacks" "$WORK/mbr" 
 cd /dev/shm
 rm -f "$IMG" "$IMGD" "$IMGT" "$IMGM" "$IMGA"
 
-cleanup_mount() { sudo -n umount "$WORK/mnt" 2>/dev/null || true; }
+cleanup_mount() { sudo -n umount "$WORK/mnt" 2>/dev/null || true; \
+    rm -rf "$WORK" /dev/shm/wp16ntfs*.img 2>/dev/null || true; }
 trap cleanup_mount EXIT
 
 echo "== tools =="

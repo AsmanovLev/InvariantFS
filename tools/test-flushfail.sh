@@ -224,80 +224,133 @@ static int cmd_f2mkdangle(const char *img)
     return 0;
 }
 
-/* offline sabotage (volume CLOSED): zero the victim's journal entries
- * (replay stops at the first one) and append a legacy kill-by-id
- * tombstone for the victim's name. The survivor's record stays live with
- * no mappings -- exactly what the leg-5 artifact holds. */
+/* the drop-window analogue (WP22d: the on-disk journal is no longer
+ * rewriteable test collateral, so the maps are dropped through the
+ * engine): the victim's name is deleted (the shared-id guard keeps the
+ * maps), then the shared id's mappings are UNMAP-journaled away. The
+ * survivor's record stays live with no mappings -- exactly what the
+ * leg-5 artifact held. */
 static int cmd_f2sabotage(const char *img, uint64_t victim_id)
 {
-    FILE *f = fopen(img, "r+b");
-    invfs_superblock sb;
-    uint64_t bitmap_blocks, journal_off, ia_off, ia_end, jp, p;
-    if (!f) die("fopen");
-    if (fread(&sb, sizeof sb, 1, f) != 1) die("sb read");
-    bitmap_blocks = (sb.total_blocks / 8 + INVFS_BLOCK_SIZE - 1) /
-                    INVFS_BLOCK_SIZE;
-    journal_off = (sb.metadata_zone_start + bitmap_blocks) *
-                  INVFS_BLOCK_SIZE;
-    ia_off = (sb.metadata_zone_start + bitmap_blocks + INVFS_JOURNAL_BLOCKS)
-             * (uint64_t)INVFS_BLOCK_SIZE;
-    ia_end = (sb.metadata_zone_start + sb.metadata_zone_blocks) *
-             (uint64_t)INVFS_BLOCK_SIZE;
-    /* zero the journal from the victim's first entry on */
-    jp = journal_off;
-    for (;;) {
-        invfs_l2p_entry e;
-        if (fseek(f, (long)jp, SEEK_SET) != 0 ||
-            fread(&e, sizeof e, 1, f) != 1) break;
-        if (invfs_crc32c(&e, offsetof(invfs_l2p_entry, crc)) != e.crc)
-            break;
-        if (e.type == INVFS_JRN_MAP && e.inode == victim_id) {
-            uint8_t z[sizeof(invfs_l2p_entry)];
-            memset(z, 0, sizeof z);
-            if (fseek(f, (long)jp, SEEK_SET) != 0 ||
-                fwrite(z, sizeof z, 1, f) != 1) die("entry zero");
-        }
-        jp += sizeof e;
-    }
-    /* append the legacy tombstone at the inode-area tail */
-    p = ia_off;
-    for (;;) {
-        invfs_inode_rec rh;
-        uint8_t *rec;
-        uint32_t crc_stored;
-        if (p + sizeof rh + 4 > ia_end) die("area full");
-        if (fseek(f, (long)p, SEEK_SET) != 0 ||
-            fread(&rh, sizeof rh, 1, f) != 1) break;
-        if (rh.magic != INODE_REC_MAGIC && rh.magic != TOMBSTONE_MAGIC)
-            break;
-        if (rh.rec_len < sizeof rh || p + rh.rec_len + 4 > ia_end)
-            die("area scan hit a bad record");
-        rec = malloc(rh.rec_len);
-        if (!rec) die("oom");
-        if (fseek(f, (long)p, SEEK_SET) != 0 ||
-            fread(rec, rh.rec_len, 1, f) != 1 ||
-            fread(&crc_stored, 4, 1, f) != 1) die("rec read");
-        if (invfs_crc32c(rec, rh.rec_len) != crc_stored) break;
-        free(rec);
-        p += rh.rec_len + 4;
-    }
-    {
-        invfs_inode_rec rec;
-        uint32_t crc;
-        memset(&rec, 0, sizeof rec);
-        rec.magic = TOMBSTONE_MAGIC;
-        rec.rec_len = (uint32_t)sizeof rec;
-        rec.inode_id = victim_id;
-        rec.file_size = 0;              /* legacy kill-by-id */
-        rec.name_len = 11;
-        memcpy(rec.name, "victimV.bin", 11);
-        crc = invfs_crc32c(&rec, sizeof rec);
-        if (fseek(f, (long)p, SEEK_SET) != 0 ||
-            fwrite(&rec, sizeof rec, 1, f) != 1 ||
-            fwrite(&crc, 4, 1, f) != 1) die("tombstone write");
-    }
-    fclose(f);
+    int err = 0;
+    invfs_volume *v = vol_open(img, &err);
+    const invfs_l2p_entry *t;
+    size_t n = 0, i, nl = 0;
+    uint64_t *lbas;
+    if (!v) die("open");
+    if (vol_delete_file(v, "victimV.bin") != 0) die("delete victim");
+    t = vol_l2p(v, &n);
+    lbas = malloc(n * sizeof *lbas);
+    if (!lbas) die("oom");
+    for (i = 0; i < n; i++)
+        if (t[i].type == INVFS_JRN_MAP && t[i].inode == victim_id)
+            lbas[nl++] = t[i].lba;
+    if (!nl) die("no victim mappings found");
+    for (i = 0; i < nl; i++)
+        vol_l2p_remove(v, victim_id, lbas[i]);
+    free(lbas);
+    if (vol_flush(v) != 0) die("flush");
+    vol_close(v);
     printf("F2SABOTAGE-OK\n");
+    return 0;
+}
+
+/* ---- leg G: a compaction crash at each stage is consistent-cut -------- */
+static int cmd_f3fill(const char *img)
+{
+    int err = 0;
+    invfs_volume *v = vol_open(img, &err);
+    if (!v) die("open");
+    /* the pinned file: committed and barriered BEFORE the crash run */
+    create_pattern(v, "pinA.bin", 96 * 1024, 77);
+    if (vol_sync(v) != 0) die("sync");
+    vol_close(v);
+    printf("F3FILL-OK\n");
+    return 0;
+}
+
+/* with INVFS_JRN_FORCE_COMPACT=1 + INVFS_COMPACT_ABORT_AT set, the create
+ * below dies SIGKILL mid-compaction (in its pre_record flush) */
+static int cmd_f3crash(const char *img)
+{
+    int err = 0;
+    invfs_volume *v = vol_open(img, &err);
+    if (!v) die("open");
+    create_pattern(v, "newB.bin", 128 * 1024, 88);
+    vol_close(v);
+    printf("F3CRASH-survived\n");   /* reached only when the hook is off */
+    return 0;
+}
+
+static int cmd_f3check(const char *img)
+{
+    int err = 0;
+    invfs_volume *v = vol_open(img, &err);
+    if (!v) die("open");
+    /* the pinned file must be intact; the crashed one is present-and-
+     * bit-exact or absent (complete-or-absent) -- never torn */
+    assert_file(v, "pinA.bin", 96 * 1024, 77);
+    if (vol_find(v, "newB.bin"))
+        assert_file(v, "newB.bin", 128 * 1024, 88);
+    vol_close(v);
+    printf("F3CHECK-OK\n");
+    return 0;
+}
+
+/* leg G2 variant: the pinned file came from the OLD (flat-log) binaries,
+ * so only the crashed create's complete-or-absent is checked here; the
+ * pinned file's bit-exactness is asserted by the leg via invf-cat | cmp */
+static int cmd_f3checkb(const char *img)
+{
+    int err = 0;
+    invfs_volume *v = vol_open(img, &err);
+    if (!v) die("open");
+    if (vol_find(v, "newB.bin"))
+        assert_file(v, "newB.bin", 128 * 1024, 88);
+    vol_close(v);
+    printf("F3CHECKB-OK\n");
+    return 0;
+}
+
+/* ---- leg I: bitmap/journal divergence (WP22d open-time reconcile) ---- */
+/* create the survivor, sync, and print the pba of its first segment (the
+ * leg then clears that bit in the on-disk bitmap, simulating a bitmap
+ * page dropped by a window while the journal append landed) */
+static int cmd_f4mkdiv(const char *img)
+{
+    int err = 0;
+    invfs_volume *v = vol_open(img, &err);
+    uint64_t id, pba = 0, len;
+    size_t n = 0, i;
+    const invfs_l2p_entry *t;
+    if (!v) die("open");
+    id = create_pattern(v, "survivorS.bin", 192 * 1024, 55);
+    if (vol_sync(v) != 0) die("sync");
+    t = vol_l2p(v, &n);
+    for (i = 0; i < n; i++)
+        if (t[i].type == INVFS_JRN_MAP && t[i].inode == id) {
+            pba = t[i].pba; break;
+        }
+    if (!pba) die("no mapping for the survivor");
+    printf("F4MKDIV-OK pba=%llu\n", (unsigned long long)pba);
+    vol_close(v);
+    return 0;
+}
+
+/* after the sabotage: the open must reconcile (the survivor's block is
+ * forced used), then a fresh write must NOT be allocated on it */
+static int cmd_f4checkdiv(const char *img)
+{
+    int err = 0;
+    invfs_volume *v = vol_open(img, &err);
+    if (!v) die("open");
+    assert_file(v, "survivorS.bin", 192 * 1024, 55);
+    create_pattern(v, "attackerA.bin", 256 * 1024, 66);
+    if (vol_sync(v) != 0) die("sync");
+    assert_file(v, "survivorS.bin", 192 * 1024, 55);
+    assert_file(v, "attackerA.bin", 256 * 1024, 66);
+    vol_close(v);
+    printf("F4CHECKDIV-OK\n");
     return 0;
 }
 
@@ -412,6 +465,18 @@ int main(int argc, char **argv)
         return cmd_f2mkdangle(argv[2]);
     if (strcmp(argv[1], "f2sabotage") == 0 && argc == 4)
         return cmd_f2sabotage(argv[2], strtoull(argv[3], NULL, 0));
+    if (strcmp(argv[1], "f3fill") == 0 && argc == 3)
+        return cmd_f3fill(argv[2]);
+    if (strcmp(argv[1], "f3crash") == 0 && argc == 3)
+        return cmd_f3crash(argv[2]);
+    if (strcmp(argv[1], "f3check") == 0 && argc == 3)
+        return cmd_f3check(argv[2]);
+    if (strcmp(argv[1], "f3checkb") == 0 && argc == 3)
+        return cmd_f3checkb(argv[2]);
+    if (strcmp(argv[1], "f4mkdiv") == 0 && argc == 3)
+        return cmd_f4mkdiv(argv[2]);
+    if (strcmp(argv[1], "f4checkdiv") == 0 && argc == 3)
+        return cmd_f4checkdiv(argv[2]);
     if (strcmp(argv[1], "f2cp") == 0 && argc == 5)
         return cmd_f2cp(argv[2], argv[3], argv[4]);
     if (strcmp(argv[1], "f2mvrefuse") == 0 && argc == 5)
@@ -469,32 +534,51 @@ $B/invf-verify $IMG_C --deep >"$WORK/verify-c.log" 2>&1 || fail "verify C"
 grep -q " 0 corrupt," "$WORK/verify-c.log" || fail "verify C reported corrupt"
 echo "   survivor bit-exact in-session and after reopen; fsck/verify clean"
 
-# ---- leg D: F2 -- fsck sees what verify sees ----------------------------
-echo "== leg D: fsck counts the dangling live record (agrees with verify) =="
+# ---- leg D: WP22d -- the dangling live record is cut + quarantined ------
+# (pre-WP22d this leg asserted fsck only COUNTED the miss; the consistent
+# cut now HIDES the dangling record and fsck -f quarantines it, so the
+# final fsck comes back OK with the loss explicitly listed)
+echo "== leg D: fsck reports the cut, hides the dangling record, -f quarantines =="
 $B/invf-mkfs $IMG_D 0.0625 >"$WORK/mkfs-d.log" || fail "mkfs D"
 VID=$("$H" f2mkdangle $IMG_D | sed -n 's/.*victim_id=//p')
 [ -n "$VID" ] || fail "victim id"
 "$H" f2sabotage $IMG_D "$VID" || fail "f2sabotage"
+# the cut: the survivor is hidden at open (the log is loud about it)
+$B/invf-ls $IMG_D >"$WORK/ls-d.log" 2>"$WORK/ls-d.err" || true
+grep -q "survivorS.bin" "$WORK/ls-d.log" && { cat "$WORK/ls-d.log"; fail "dangling survivor is listed"; }
+grep -q "bystanderB.bin" "$WORK/ls-d.log" || { cat "$WORK/ls-d.log"; fail "bystander lost too"; }
+grep -q "l2p cut: survivorS.bin" "$WORK/ls-d.err" \
+    || { cat "$WORK/ls-d.err"; fail "open did not log the cut"; }
 set +e
 $B/invf-fsck $IMG_D >"$WORK/fsck-d.log" 2>&1
 FSCK_RC=$?
 set -e
 [ $FSCK_RC -eq 3 ] || { cat "$WORK/fsck-d.log"; fail "fsck rc=$FSCK_RC (want 3)"; }
 grep -q "l2p_miss: survivorS.bin" "$WORK/fsck-d.log" \
-    || { cat "$WORK/fsck-d.log"; fail "fsck did not name the survivor"; }
+    || { cat "$WORK/fsck-d.log"; fail "fsck did not name the lost file"; }
 grep -q "l2p misses:   3 " "$WORK/fsck-d.log" \
     || { cat "$WORK/fsck-d.log"; fail "fsck did not count 3 lost segments"; }
+grep -q "lost files:   1" "$WORK/fsck-d.log" \
+    || { cat "$WORK/fsck-d.log"; fail "fsck did not count the lost file"; }
+# verify --deep agrees: the hidden file is not served, nothing is corrupt
+$B/invf-verify $IMG_D --deep >"$WORK/verify-d.log" 2>&1 \
+    || { cat "$WORK/verify-d.log"; fail "verify D not clean"; }
+grep -q " 0 corrupt," "$WORK/verify-d.log" || fail "verify D reported corrupt"
+# fsck -f: quarantine; the final fsck comes back OK with the loss listed
 set +e
-$B/invf-verify $IMG_D --deep >"$WORK/verify-d.log" 2>&1
-VERIFY_RC=$?
+$B/invf-fsck $IMG_D -f >"$WORK/fsck-df.log" 2>&1
+FSCKF_RC=$?
 set -e
-[ $VERIFY_RC -ne 0 ] || fail "verify clean on a dangling record"
-grep -q "CORRUPT: survivorS.bin" "$WORK/verify-d.log" \
-    || { cat "$WORK/verify-d.log"; fail "verify did not name the survivor"; }
-grep -q "bystanderB.bin" "$WORK/verify-d.log" || true   # context only
-echo "   fsck rc=3 + l2p_miss survivorS.bin, verify CORRUPT: agree"
+[ $FSCKF_RC -eq 3 ] || { cat "$WORK/fsck-df.log"; fail "fsck -f rc=$FSCKF_RC (want 3)"; }
+grep -q "file quarantined" "$WORK/fsck-df.log" \
+    || { cat "$WORK/fsck-df.log"; fail "fsck -f did not quarantine"; }
+$B/invf-fsck $IMG_D >"$WORK/fsck-d2.log" 2>&1 || true
+grep -q "^OK$" "$WORK/fsck-d2.log" \
+    || { cat "$WORK/fsck-d2.log"; fail "fsck not OK post-quarantine"; }
+grep -q "lost files:   0" "$WORK/fsck-d2.log" \
+    || { cat "$WORK/fsck-d2.log"; fail "the loss was not quarantined away"; }
+echo "   fsck rc=3 + names the loss, file hidden at open, -f quarantines -> OK"
 
-# ---- leg E: F2 -- renaming a swept container keeps its siblings --------
 echo "== leg E: swept-container rename moves the sibling payload =="
 $B/invf-mkfs $IMG_E 0.125 >"$WORK/mkfs-e.log" || fail "mkfs E"
 python3 - "$WORK/t.tar" <<'PY'
@@ -531,5 +615,239 @@ set -e
 [ $VE -eq 0 ] || { cat "$WORK/verify-e.log"; fail "verify E"; }
 grep -q " 0 corrupt," "$WORK/verify-e.log" || fail "verify E reported corrupt"
 echo "   swept container renamed: bit-exact in-session + after reopen, fsck/verify clean"
+
+# ---- leg F: WP22d journal migration (legacy -> slots on first flush) ---
+echo "== leg F: legacy journal migrates on first flush, slots work =="
+IMGF=wp22d-f.img
+rm -f "$IMGF"
+$B/invf-mkfs $IMGF 0.0625 >"$WORK/mkfs-f.log" || fail "mkfs F"
+# a fresh volume is born legacy (pad2 == 0)
+python3 - "$IMGF" <<'PY' || fail "fresh volume not legacy (pad2)"
+import struct, sys
+sb = open(sys.argv[1], "rb").read(0x90)
+pad2 = struct.unpack_from("<I", sb, 0x8C)[0]
+sys.exit(0 if pad2 == 0 else 1)
+PY
+"$H" f2rename $IMGF || fail "f2rename F"   # create + rename (mutations)
+# after the first flush the volume is slotted (pad2 == 2 -> slot 1; the
+# legacy flat log's start lives in slot 0's region, so migration images
+# into slot 1 to keep the fallback intact until the flip lands)
+python3 - "$IMGF" <<'PY' || fail "volume did not migrate to slots"
+import struct, sys
+sb = open(sys.argv[1], "rb").read(0x90)
+pad2 = struct.unpack_from("<I", sb, 0x8C)[0]
+sys.exit(0 if pad2 == 2 else 1)
+PY
+INVFS_DEBUG=1 $B/invf-ls $IMGF 2>/dev/null | grep -q "slot 1" \
+    || fail "replay did not pick slot 1"
+$B/invf-fsck $IMGF >"$WORK/fsck-f.log" 2>&1 || true
+grep -q "^OK$" "$WORK/fsck-f.log" || { cat "$WORK/fsck-f.log"; fail "fsck F not OK"; }
+echo "   born legacy -> migrated to slot 1 on first flush; fsck OK"
+
+# ---- leg G: WP22d mid-compaction crash is consistent-cut ---------------
+echo "== leg G: mid-compaction crash (image/barrier/flip) -> consistent cut =="
+IMGG=wp22d-g.img
+for stage in image barrier1 flip; do
+    rm -f "$IMGG"
+    $B/invf-mkfs $IMGG 0.0625 >"$WORK/mkfs-g.log" || fail "mkfs G"
+    "$H" f3fill $IMGG || fail "f3fill $stage"
+    set +e
+    INVFS_JRN_FORCE_COMPACT=1 INVFS_COMPACT_ABORT_AT=$stage \
+        "$H" f3crash $IMGG >"$WORK/f3crash-$stage.log" 2>&1
+    RC=$?
+    set -e
+    [ "$RC" = "137" ] || { cat "$WORK/f3crash-$stage.log"; fail "G($stage): expected SIGKILL (137), got $RC"; }
+    "$H" f3check $IMGG || fail "f3check $stage"
+    # the killed create's orphaned blocks are reclaimed by the ladder's
+    # fsck -f (orphan reclaim), then the volume is clean
+    $B/invf-fsck $IMGG -f >"$WORK/fsck-gf-$stage.log" 2>&1 || true
+    $B/invf-fsck $IMGG >"$WORK/fsck-g-$stage.log" 2>&1 || true
+    grep -q "^OK$" "$WORK/fsck-g-$stage.log" \
+        || { cat "$WORK/fsck-g-$stage.log"; fail "fsck G($stage) not OK"; }
+    echo "   stage=$stage: pinned file intact, crashed file complete-or-absent, fsck OK"
+done
+
+# ---- leg G2: WP22d crash mid-MIGRATION (legacy -> slot 1) ---------------
+# The legacy fixture must be built by binaries that predate the slot
+# format (a new-binary flush would migrate immediately): OLDB points at a
+# pre-WP22d build (make it with: git worktree add /tmp/invfs-base HEAD~ &&
+# make -C /tmp/invfs-base). Skipped (not failed) when absent.
+OLDB=${OLDB:-/tmp/invfs-base/bin}
+if [ -x "$OLDB/invf-mkfs" ] && [ -x "$OLDB/invf-cp" ]; then
+    echo "== leg G2: crash mid-migration (image/barrier/flip) -> legacy fallback =="
+    IMGG2=wp22d-g2.img
+    for stage in image barrier1 flip; do
+        rm -f "$IMGG2"
+        $OLDB/invf-mkfs $IMGG2 0.0625 >"$WORK/mkfs-g2.log" || fail "mkfs G2"
+        # pinned file, durable under the OLD (flat-log) binaries
+        echo "pinned content $(date +%s)" > "$WORK/pin.txt"
+        $OLDB/invf-cp $IMGG2 "$WORK/pin.txt" pinA.txt >/dev/null || fail "G2 cp"
+        python3 - "$IMGG2" <<'PY' || fail "G2 fixture not legacy (pad2)"
+import struct, sys
+sb = open(sys.argv[1], "rb").read(0x90)
+sys.exit(0 if struct.unpack_from("<I", sb, 0x8C)[0] == 0 else 1)
+PY
+        # the new binary's first flush migrates legacy -> slot 1; die inside
+        set +e
+        INVFS_COMPACT_ABORT_AT=$stage \
+            "$H" f3crash $IMGG2 >"$WORK/f3crash-g2-$stage.log" 2>&1
+        RC=$?
+        set -e
+        [ "$RC" = "137" ] || { cat "$WORK/f3crash-g2-$stage.log"; fail "G2($stage): expected SIGKILL (137), got $RC"; }
+        # the pinned file must be intact whichever side of the flip we died on
+        "$H" f3checkb $IMGG2 >"$WORK/f3check-g2-$stage.log" 2>&1 || true
+        grep -q F3CHECKB-OK "$WORK/f3check-g2-$stage.log" \
+            || { cat "$WORK/f3check-g2-$stage.log"; fail "G2($stage) check"; }
+        $B/invf-cat $IMGG2 pinA.txt "$WORK/pin.out" >/dev/null 2>&1 \
+            || fail "G2($stage): pinA.txt unreadable"
+        cmp -s "$WORK/pin.txt" "$WORK/pin.out" \
+            || fail "G2($stage): pinA.txt not bit-exact"
+        $B/invf-fsck $IMGG2 -f >"$WORK/fsck-g2f-$stage.log" 2>&1 || true
+        $B/invf-fsck $IMGG2 >"$WORK/fsck-g2-$stage.log" 2>&1 || true
+        grep -q "^OK$" "$WORK/fsck-g2-$stage.log" \
+            || { cat "$WORK/fsck-g2-$stage.log"; fail "fsck G2($stage) not OK"; }
+        echo "   stage=$stage: migration crash -> pinned file intact, fsck OK"
+    done
+    # stage "torndrop": the deterministic silent-drop shape -- kill at the
+    # image barrier, then CORRUPT the slot-1 image bytes (what drop_writes
+    # leaves behind when the barrier lies). pad2 still says legacy, so
+    # replay must fall back to the intact flat log, not the torn slot.
+    rm -f "$IMGG2"
+    $OLDB/invf-mkfs $IMGG2 0.0625 >"$WORK/mkfs-g2.log" || fail "mkfs G2t"
+    echo "pinned content $(date +%s)" > "$WORK/pin.txt"
+    $OLDB/invf-cp $IMGG2 "$WORK/pin.txt" pinA.txt >/dev/null || fail "G2t cp"
+    set +e
+    INVFS_COMPACT_ABORT_AT=barrier1 \
+        "$H" f3crash $IMGG2 >"$WORK/f3crash-g2-td.log" 2>&1
+    RC=$?
+    set -e
+    [ "$RC" = "137" ] || { cat "$WORK/f3crash-g2-td.log"; fail "G2(torndrop): expected SIGKILL, got $RC"; }
+    python3 - "$IMGG2" <<'PY' || fail "G2t sabotage"
+import struct, sys
+img = sys.argv[1]
+with open(img, "r+b") as f:
+    sb = f.read(0x90)
+    mzs, = struct.unpack_from("<Q", sb, 0x28)   # metadata_zone_start
+    tb,  = struct.unpack_from("<Q", sb, 0x20)   # total_blocks
+    bm_blocks = (tb // 8 + 4095) // 4096
+    slot1 = (mzs + bm_blocks + 4096) * 4096     # slot 1 header block
+    f.seek(slot1)
+    hdr = f.read(28)
+    assert hdr[0:4] == b"JRN0", "slot-1 header missing"
+    image_bytes, = struct.unpack_from("<Q", hdr, 12)
+    assert image_bytes > 0
+    f.seek(slot1 + 4096)                        # the image's first page
+    f.write(b"\xAA" * 4096)                     # ...dropped mid-flight
+PY
+    "$H" f3checkb $IMGG2 >"$WORK/f3check-g2-td.log" 2>&1 || true
+    grep -q F3CHECKB-OK "$WORK/f3check-g2-td.log" \
+        || { cat "$WORK/f3check-g2-td.log"; fail "G2(torndrop) check"; }
+    grep -q "pre-migration flat log" "$WORK/f3check-g2-td.log" \
+        || { cat "$WORK/f3check-g2-td.log"; fail "G2(torndrop): legacy fallback not taken"; }
+    $B/invf-cat $IMGG2 pinA.txt "$WORK/pin.out" >/dev/null 2>&1 \
+        || fail "G2(torndrop): pinA.txt unreadable"
+    cmp -s "$WORK/pin.txt" "$WORK/pin.out" \
+        || fail "G2(torndrop): pinA.txt not bit-exact"
+    $B/invf-fsck $IMGG2 -f >"$WORK/fsck-g2f-td.log" 2>&1 || true
+    $B/invf-fsck $IMGG2 >"$WORK/fsck-g2-td.log" 2>&1 || true
+    grep -q "^OK$" "$WORK/fsck-g2-td.log" \
+        || { cat "$WORK/fsck-g2-td.log"; fail "fsck G2(torndrop) not OK"; }
+    echo "   stage=torndrop: torn slot-1 image -> legacy flat-log fallback, pinned file intact, fsck OK"
+else
+    echo "== leg G2: SKIPPED (no pre-WP22d binaries at $OLDB) =="
+fi
+
+# ---- leg H: WP22d old-volume migration (built by pre-WP22d binaries) ---
+# A volume fully written by the OLD (flat-log) binaries -- import, sweep,
+# a delete -- must mount under the NEW binaries, migrate the journal on
+# its first flush, sweep, and stay bit-exact throughout. Same OLDB gate
+# as leg G2.
+if [ -x "$OLDB/invf-mkfs" ] && [ -x "$OLDB/invf-sweep" ]; then
+    echo "== leg H: pre-WP22d volume mounts, migrates, sweeps, bit-exact =="
+    IMGH=wp22d-h.img
+    rm -f "$IMGH"
+    mkdir -p "$WORK/hgen"
+    python3 - "$WORK/hgen" <<'PY' || fail "H gen"
+import os, random, sys
+rng = random.Random(22)
+d = sys.argv[1]
+for i in range(6):
+    with open(os.path.join(d, "h%d.bin" % i), "wb") as f:
+        f.write(os.urandom(rng.randrange(30000, 300000)))
+with open(os.path.join(d, "note.txt"), "w") as f:
+    f.write("pre-WP22d volume\n" * 40)
+PY
+    $OLDB/invf-mkfs $IMGH 0.0625 >"$WORK/mkfs-h.log" || fail "mkfs H"
+    for f in "$WORK/hgen"/*; do
+        $OLDB/invf-cp $IMGH "$f" "$(basename "$f")" >/dev/null || fail "H cp $f"
+    done
+    $OLDB/invf-sweep $IMGH >"$WORK/sweep-h-old.log" 2>&1 || fail "H old sweep"
+    # (the old sweep's retires leave UNMAPs in the flat log -- the
+    #  trickiest shape a migration can inherit)
+    python3 - "$IMGH" <<'PY' || fail "H fixture not legacy"
+import struct, sys
+sb = open(sys.argv[1], "rb").read(0x90)
+sys.exit(0 if struct.unpack_from("<I", sb, 0x8C)[0] == 0 else 1)
+PY
+    # NEW binaries: content bit-exact before any new-binary write
+    $B/invf-cat $IMGH h3.bin "$WORK/h3.out" >/dev/null 2>&1 || fail "H cat h3"
+    cmp -s "$WORK/hgen/h3.bin" "$WORK/h3.out" || fail "H h3 mismatch pre-migration"
+    # NOTE: there is no read-only probe of the pre-migration state here --
+    # the WP19 heat path dirties+flushes even a pure read at close, and
+    # that flush is exactly what migrates the journal. The migration is
+    # what the rest of the leg exercises.
+    # the first mutating session migrates: sweep under the NEW binaries
+    $B/invf-sweep $IMGH >"$WORK/sweep-h-new.log" 2>&1 || fail "H new sweep"
+    python3 - "$IMGH" <<'PY' || fail "H: no slot selector after the new sweep"
+import struct, sys
+sb = open(sys.argv[1], "rb").read(0x90)
+sys.exit(0 if struct.unpack_from("<I", sb, 0x8C)[0] in (1, 2) else 1)
+PY
+    for f in "$WORK/hgen"/*; do
+        n=$(basename "$f")
+        $B/invf-cat $IMGH "$n" "$WORK/h.out" >/dev/null 2>&1 || fail "H cat $n post-migration"
+        cmp -s "$f" "$WORK/h.out" || fail "H $n mismatch post-migration"
+    done
+    $B/invf-verify $IMGH --deep >"$WORK/verify-h.log" 2>&1 || fail "H verify"
+    grep -q " 0 corrupt," "$WORK/verify-h.log" || fail "H verify corrupt"
+    $B/invf-fsck $IMGH >"$WORK/fsck-h.log" 2>&1 || true
+    grep -q "^OK$" "$WORK/fsck-h.log" || { cat "$WORK/fsck-h.log"; fail "fsck H not OK"; }
+    echo "   pre-WP22d volume: mount + migrate + sweep + verify all bit-exact"
+else
+    echo "== leg H: SKIPPED (no pre-WP22d binaries at $OLDB) =="
+fi
+
+# ---- leg I: WP22d bitmap/journal divergence reconcile at open ---------
+# A drop window can take a flush's bitmap pages and spare its journal
+# append; the disk bitmap then calls a MAPPED block free, and the next
+# allocation would hand it out from under its live file (the leg-5
+# soak's clobbered-segment case). vol_open reconciles the one-sided
+# direction: every journal-mapped block is forced used (never cleared).
+echo "== leg I: a dropped bitmap bit is reconciled at open, no clobber =="
+IMGI=wp22d-i.img
+rm -f "$IMGI"
+$B/invf-mkfs $IMGI 0.0625 >"$WORK/mkfs-i.log" || fail "mkfs I"
+PBA=$("$H" f4mkdiv $IMGI | sed -n 's/F4MKDIV-OK pba=//p')
+[ -n "$PBA" ] || fail "I: no survivor pba"
+python3 - "$IMGI" "$PBA" <<'PY' || fail "I: sabotage"
+import struct, sys
+img, pba = sys.argv[1], int(sys.argv[2])
+with open(img, "r+b") as f:
+    sb = f.read(0x90)
+    mzs, = struct.unpack_from("<Q", sb, 0x28)
+    f.seek(mzs * 4096 + pba // 8)
+    byte = f.read(1)[0]
+    assert byte & (1 << (pba % 8)), "bit not set pre-sabotage"
+    f.seek(mzs * 4096 + pba // 8)
+    f.write(bytes([byte & ~(1 << (pba % 8))]))
+PY
+# the open inside f4checkdiv must log the divergence repair
+"$H" f4checkdiv $IMGI >"$WORK/f4check.log" 2>&1 || { cat "$WORK/f4check.log"; fail "f4checkdiv"; }
+grep -q "bitmap/journal divergence" "$WORK/f4check.log" \
+    || { cat "$WORK/f4check.log"; fail "I: open did not reconcile the dropped bit"; }
+$B/invf-fsck $IMGI >"$WORK/fsck-i.log" 2>&1 || true
+grep -q "^OK$" "$WORK/fsck-i.log" || { cat "$WORK/fsck-i.log"; fail "fsck I not OK"; }
+echo "   mapped block's dropped used-bit repaired at open; attacker write went elsewhere; fsck OK"
+
 
 echo "PASS: WP22c (flush/sync failure latch + rename/retire/fsck liveness)"

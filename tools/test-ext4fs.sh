@@ -48,6 +48,7 @@ B=$REPO/bin
 PACKDIR=$REPO/tools/codecpacks/ext4fs.codecpack
 E4=$PACKDIR/bin/ext4fs
 WORK=/dev/shm/wp16ext4
+trap 'rm -rf "$WORK" /dev/shm/wp16ext4*.img' EXIT
 IMG=wp16ext4.img
 IMGCTL=wp16ext4-ctl.img
 IMGMEM=wp16ext4-mem.img

@@ -126,14 +126,20 @@ class Soak:
     # ------------------------------------------------------------ mount --
 
     def mount(self):
-        rc, out = self.sh([os.path.join(self.a.bin, "invf-fuse"),
-                           self.a.dev, self.a.mnt])
+        # the daemon runs -f in the background so its stderr lands in
+        # fuse.log (a daemonized run drops every post-detach diagnostic,
+        # which is exactly what a soak failure needs for the postmortem)
+        flog = open(os.path.join(self.a.work, "fuse.log"), "ab")
+        subprocess.Popen([os.path.join(self.a.bin, "invf-fuse"),
+                          self.a.dev, self.a.mnt, "-f"],
+                         stdout=flog, stderr=flog,
+                         start_new_session=True)
         for _ in range(50):
             if self._mounted_q():
                 self.mounted = True
                 return
             time.sleep(0.1)
-        raise SoakFail("mount never appeared: %s" % out[:400])
+        raise SoakFail("mount never appeared (see fuse.log)")
 
     def _mounted_q(self):
         with open("/proc/mounts") as f:
@@ -157,11 +163,19 @@ class Soak:
 
     # --------------------------------------------------------- engine ----
 
-    def fsck(self, fix=False):
+    def fsck(self, fix=False, content=False):
         a = [os.path.join(self.a.bin, "invf-fsck"), self.a.dev]
         if fix:
             a.append("-f")
-        return self.sh(a, timeout=300)
+        env = dict(os.environ)
+        if content:
+            env["INVFS_FSCK_CONTENT"] = "1"
+        try:
+            r = subprocess.run(a, capture_output=True, text=True,
+                               timeout=300, env=env)
+            return r.returncode, (r.stdout or "") + (r.stderr or "")
+        except subprocess.TimeoutExpired:
+            return 124, "TIMEOUT"
 
     def verify(self):
         return self.sh([os.path.join(self.a.bin, "invf-verify"),
@@ -303,7 +317,17 @@ class Soak:
         """The documented ladder; returns True when fsck ends OK."""
         rc, out = self.fsck()
         self.log("gate: fsck rc=%d: %s" % (rc, out[-300:].replace("\n", " | ")))
-        if "checkpoint:" in out and "live" in out:
+        # Bounded ladder: a live checkpoint is rolled back; a REFUSED
+        # rollback (rc==3: torn journal staging -- under silent drops no
+        # barrier proves the stage persisted) leaves the post-sweep state
+        # untouched by construction, so the honest move is to ACCEPT it:
+        # realize the unusable checkpoint (frees the retention registry,
+        # clears CKP0) and re-run the ladder from the top. The re-armed
+        # checkpoint from the realize is made in UP mode (the gate set it)
+        # and rolls back cleanly if the next fsck needs it gone.
+        for _ in range(3):
+            if not ("checkpoint:" in out and "live" in out):
+                break
             self.log("gate: checkpoint live -> rollback")
             rc, out = self.rollback()
             self.log("gate: rollback rc=%d: %s" % (rc, out[-300:].replace("\n", " | ")))
@@ -314,9 +338,19 @@ class Soak:
                 self.log("gate: free-redundant rc=%d: %s" % (rc2, out2[-200:].replace("\n", " | ")))
                 rc, out = self.rollback()
                 self.log("gate: rollback#2 rc=%d: %s" % (rc, out[-300:].replace("\n", " | ")))
+            if rc == 3:
+                self.log("gate: rollback declined (torn staging); "
+                         "accepting the post-sweep state via --realize")
+                rc2, out2 = self.sweep("--realize")
+                self.log("gate: realize rc=%d: %s" % (rc2, out2[-200:].replace("\n", " | ")))
+                rc, out = self.fsck()
+                self.log("gate: fsck rc=%d: %s" % (rc, out[-300:].replace("\n", " | ")))
+                continue
             if rc != 0:
                 self.log("gate: rollback ladder failed: %s" % out[-300:])
                 return False
+        else:
+            return False
         rc, out = self.fsck(fix=True)
         self.log("gate: fsck -f rc=%d: %s" % (rc, out[-300:].replace("\n", " | ")))
         rc, out = self.fsck()
@@ -335,6 +369,18 @@ class Soak:
             self.log("gate: torn parity -> re-seal")
             self.sweep("--seal")
             rc, out = self.verify()
+        if rc != 0 and "CORRUPT" in out:
+            # WP22d: a segment's data can be dropped by a window after its
+            # map survived (maps are re-durabilized by compactions; data
+            # is written once). The map-level cut is blind to it; the
+            # segment CRC is not. Quarantine the content-torn records
+            # (the losses are listed loudly; the names fall back or go
+            # absent) and re-verify.
+            self.log("gate: content-corrupt -> fsck -f (content cut)")
+            rc2, out2 = self.fsck(fix=True, content=True)
+            self.log("gate: fsck -f (content) rc=%d: %s"
+                     % (rc2, out2[-300:].replace("\n", " | ")))
+            rc, out = self.verify()
         if rc != 0:
             raise SoakFail("verify not clean at gate: %s" % out[-500:])
         # manifest diff: presence => known name + content in its history
@@ -342,6 +388,13 @@ class Soak:
         for name in sorted(present):
             ent = self.model.get(name)
             if ent is None:
+                # a container member ("archive!part") is engine-generated
+                # content-addressed payload of its parent archive; it is
+                # tracked through the parent's read-back, never written
+                # directly. A member whose parent is PRESENT is no ghost.
+                # (A member with no live parent IS one.)
+                if "!" in name and name.split("!", 1)[0] in present:
+                    continue
                 raise SoakFail("GHOST: %s on the volume, never written"
                                % name)
             sha = self.cat_sha(name)

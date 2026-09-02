@@ -205,10 +205,18 @@ int main(int argc, char **argv)
         p += (uint64_t)h.rec_len + 4;  /* + trailing crc */
     }
     for (int i = 0; i < count; i++) {
-        if (inodes[i] != 0)
+        if (inodes[i] != 0) {
+            /* WP22d: the walk above sees every record version; the live
+             * answer is the name index's consistent cut (a torn newest
+             * version is hidden, the name falls back to an older one).
+             * Defer to it for both liveness and the reported id/size. */
+            uint64_t id = vol_find_ex(vol, names[i], &sizes[i], NULL);
+            if (!id) { inodes[i] = 0; continue; }
+            inodes[i] = id;
             printf("  %8llu bytes  inode %llu  %s\n",
                    (unsigned long long)sizes[i],
                    (unsigned long long)inodes[i], names[i]);
+        }
     }
     /* container members (virtual windows into the original archive) */
     {
@@ -231,11 +239,13 @@ int main(int argc, char **argv)
         if (mcount)
             printf("%d container member(s) (virtual)\n", mcount);
     }
-    /* `count` is names seen, including ones a tombstone later killed; those
-       are skipped above, so reporting it as the total contradicted the list. */
+    /* `count` is names seen, including ones a tombstone later killed or
+       the consistent cut hid; those are skipped above, so reporting it as
+       the total contradicted the list. */
     {
         int live = 0, i;
-        for (i = 0; i < count; i++) if (inodes[i] != 0) live++;
+        for (i = 0; i < count; i++)
+            if (inodes[i] != 0 && vol_find(vol, names[i]) != 0) live++;
         printf("%d file(s)\n", live);
     }
     free(names);

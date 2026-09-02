@@ -25,6 +25,7 @@ set -o pipefail
 REPO=/home/user/InvariantFS
 B=$REPO/bin
 WORK=/dev/shm/wp13rawimg
+trap 'rm -rf "$WORK" /dev/shm/wp13rawimg*.img' EXIT
 IMG=wp13rawimg.img
 IMGNEG=wp13rawimg-neg.img
 export INVFS_CODECPACKS=$REPO/tools/codecpacks   # the sweep AND the reads

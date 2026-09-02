@@ -95,6 +95,7 @@ int main(int argc, char **argv)
     }
 
     issues = (rep.orphans || rep.missing || rep.bad_recs || rep.l2p_miss ||
+              rep.cut_records || rep.lost_files || rep.corrupt_files ||
               r2.unrecoverable);
     if (!quiet) {
         const invfs_superblock *sb = vol_sb(v);
@@ -107,8 +108,23 @@ int main(int argc, char **argv)
         printf("  l2p entries:  %llu\n", (unsigned long long)rep.l2p_entries);
         printf("  l2p misses:   %llu (AST segments without L2P - data lost)\n",
                (unsigned long long)rep.l2p_miss);
+        printf("  cut records:  %llu (torn newest versions, fallback live)%s\n",
+               (unsigned long long)rep.cut_records,
+               rep.cut_records ? (fix ? " -> quarantined" :
+                                  " (use -f to quarantine)") : "");
+        printf("  lost files:   %llu (no readable version)%s\n",
+               (unsigned long long)rep.lost_files,
+               rep.lost_files ? (fix ? " -> quarantined" :
+                                 " (use -f to quarantine)") : "");
+        if (rep.corrupt_files)
+            printf("  corrupt files: %llu (segment CRC failed)%s\n",
+                   (unsigned long long)rep.corrupt_files,
+                   fix ? " -> quarantined" : "");
         printf("  orphans:      %llu%s\n", (unsigned long long)rep.orphans,
                rep.orphans ? (fix ? " -> freed" : " (use -f to free)") : "");
+        if (rep.held_ckpt)
+            printf("  held for checkpoint: %llu (retained until "
+                   "rollback/realize)\n", (unsigned long long)rep.held_ckpt);
         printf("  missing:      %llu%s\n", (unsigned long long)rep.missing,
                rep.missing ? (fix ? " -> restored" : " (use -f)") : "");
         printf("  bad records:  %llu\n", (unsigned long long)rep.bad_recs);

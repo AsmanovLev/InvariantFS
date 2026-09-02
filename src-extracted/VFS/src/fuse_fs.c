@@ -717,6 +717,16 @@ static int invf_open(const char *path, struct fuse_file_info *fi)
         fi->keep_cache = 1;
         return 0;  /* plain read open */
     }
+    /* WP22d: refuse a write open on a non-writable volume (latched /
+     * read-only) HERE, at open: with WRITEBACK_CACHE, a write() buffers
+     * payload in the kernel page cache before this daemon is asked, and a
+     * later-refused write leaves exactly those un-acked bytes in the cache
+     * -- the next read would serve the phantom. Failing the open is the
+     * POSIX EROFS shape and keeps the phantom out of the cache entirely. */
+    if (!vol_write_enabled(g_vol)) {
+        __sync_fetch_and_sub(&g_open_handles, 1);
+        return -EROFS;
+    }
     /* read-write open: allocate a write context. Content is NOT loaded:
      * the engine session (begun lazily at the first write) forks the
      * file's segment layout incrementally, so memory stays bounded no

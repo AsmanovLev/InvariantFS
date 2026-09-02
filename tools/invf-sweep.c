@@ -402,32 +402,35 @@ int main(int argc, char **argv)
         return 0;
     }
 
-    /* WP21: resolve the previous sweep's checkpoint (realize: the retained
-     * blocks are freed, CKP0 cleared -- the point of no return), then arm
-     * a fresh one. This is the K=1 contract: one checkpoint per volume,
-     * overwritten only after the previous one is rolled back or realized;
-     * a bare sweep auto-realizes so checkpointing never needs a separate
-     * command in the normal flow. A dry run touches nothing. A decline
-     * (sealed / read-only / no room for the staging) never stops the
-     * sweep -- the run just goes uncheckpointed. */
+    /* WP21+WP22d: resolve the previous sweep's checkpoint. --realize is
+     * the standalone point of no return (free the retention registry,
+     * clear CKP0), then a normal sweep proceeds. A bare sweep instead
+     * goes straight to vol_ckp_begin, which arms the NEW checkpoint FIRST
+     * and realizes the old registry only with the new net already live
+     * (realize-after-arm): a torn sweep never leaves the volume with
+     * neither a checkpoint nor intact data. A dry run touches nothing. A
+     * decline (sealed / read-only / no room for the staging) never stops
+     * the sweep -- the run just goes uncheckpointed. */
     if (!dry) {
-        uint64_t rfree = 0;
-        int rrc = vol_ckp_realize(vol, &rfree);
-        /* on a read-only/recovering volume the realize refusal is not
-         * fatal here -- the sweep's own machinery refuses the same way
-         * (and --seal needs to print its own read-only diagnostic) */
-        if (rrc < 0 && vol_write_enabled(vol)) {
-            fprintf(stderr, "checkpoint: realizing the previous run "
-                            "failed\n");
-            vol_close(vol);
-            return 1;
+        if (realize) {
+            uint64_t rfree = 0;
+            int rrc = vol_ckp_realize(vol, &rfree);
+            /* on a read-only/recovering volume the realize refusal is not
+             * fatal here -- the sweep's own machinery refuses the same way
+             * (and --seal needs to print its own read-only diagnostic) */
+            if (rrc < 0 && vol_write_enabled(vol)) {
+                fprintf(stderr, "checkpoint: realizing the previous run "
+                                "failed\n");
+                vol_close(vol);
+                return 1;
+            }
+            if (rrc > 0)
+                fprintf(stderr, "checkpoint: previous run realized "
+                        "(%llu retained blocks freed)\n",
+                        (unsigned long long)rfree);
+            else
+                fprintf(stderr, "checkpoint: nothing to realize\n");
         }
-        if (rrc > 0)
-            fprintf(stderr, "checkpoint: previous run realized "
-                    "(%llu retained blocks freed)\n",
-                    (unsigned long long)rfree);
-        else if (realize)
-            fprintf(stderr, "checkpoint: nothing to realize\n");
         if (vol_ckp_begin(vol) < 0)
             fprintf(stderr, "checkpoint: arm failed; sweeping without "
                             "one\n");
@@ -512,7 +515,23 @@ int main(int argc, char **argv)
         }
     }
 
-    fprintf(stderr, "live entries: %d\n", count);
+    /* WP22d: the walk above collects the newest record per name, but the
+     * live answer is the name index's consistent cut (a torn newest
+     * version is hidden and the name resolves to an older id, or is
+     * absent). Sweep exactly the live ids -- sweeping a hidden record
+     * would fail its reads and could resurrect dead ids' blocks. */
+    {
+        int j, kept = 0;
+        for (j = 0; j < count; j++) {
+            uint64_t live;
+            if (inodes[j] == 0 || sizes[j] == 0) continue;
+            live = vol_find(vol, names[j]);
+            if (live == 0) { inodes[j] = 0; continue; }
+            inodes[j] = live;   /* may be the fallback version's id */
+            kept++;
+        }
+        fprintf(stderr, "live entries: %d (of %d walked)\n", kept, count);
+    }
 
     /* WP19: the once-per-RUN heat decay (rheat >>= 1, wheat -= 1), before
      * the walk so the walk's write-hot skip and the promotion pass below

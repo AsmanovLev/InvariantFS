@@ -60,8 +60,118 @@ mapping of a durable file. A legal outcome would have been: rename lands
 fully (r03.bin readable) or vanishes (t.tar readable). Present +
 permanently unreadable + fsck-blind is neither.
 
+## F3 — drop window silently un-maps fsync-acknowledged files
+(leg 5 soak; reproduces with `FLAKEY_ONLY=5 FLAKEY_SEED=20260831 bash
+tools/test-flakey.sh`, soak seed = SEED+500)
+
+Symptom at the gate: fsck rc=3 with
+`l2p_miss: s20.bin (inode 486): 13 segment(s) without an L2P mapping` —
+a LIVE record whose segments the journal no longer maps
+(present-but-unreadable frankenstate).
+
+Mechanism (verified against the code): `vol_flush` rewrote the journal as
+a suffix from the `l2p_dirty` watermark plus a terminator, and every
+delete/heat touch dragged `l2p_dirty` backwards (`l2p_remove` compacts the
+in-memory table), so a later, UNRELATED flush re-wrote journal positions
+that were already durable. dm-flakey's drop_writes makes an arbitrary
+subset of in-flight writes vanish — including, here, pages of OLD
+fsync-acknowledged mappings being rewritten for unrelated reasons. The
+durability axiom under silent drops is "a barrier completed OUTSIDE the
+loss window covers everything submitted before it"; a rewrite submitted
+inside a window cannot be repaired by any later fsync, because the
+watermark believes it persisted. The aggravating chain: a sweep armed
+CKP0 during a drop window, and a later clean no-op sweep auto-realized
+the checkpoint BEFORE integrity was confirmed (realize-then-arm), so the
+safety net was gone by the time the damage surfaced.
+
+Fix (WP22d): the journal is append-only within a slot — nothing durable
+is ever rewritten. Deletes append UNMAP ops, remaps append new MAP ops
+(replay is newest-wins), and the WP19 heat pad rides the same appends
+(read touches queue one refresh entry per pair per flush at most; a bulk
+decay compacts). When the log fills (or fsck rebuilds the table, or a
+legacy volume migrates), the whole table is imaged into the INACTIVE of
+two journal slots with a JRN0 header (seq, image bytes, whole-image CRC)
+→ blkio_flush → the superblock selector (sb.pad2) flips → blkio_flush.
+Replay validates both slots and picks the highest-sequence CRC-valid one,
+so a torn compaction always leaves the old slot authoritative. Every
+entry crc in a slot is CHAINED from the previous one, so a dropped write
+mid-log stops the replay exactly at the hole (no phantom stale tail).
+Recovery folds to a consistent cut at open: a record whose segments lack
+mappings is hidden — the name falls back to its newest fully-mapped
+version (the inode area is append-only, older versions survive), or is
+absent; fsck -f quarantines the torn versions with position-kill
+tombstones so the final fsck is OK with the losses explicitly listed.
+The sweep realizes the previous checkpoint only AFTER arming the new one
+(realize-after-arm). New legs: test-flushfail.sh F (legacy→slot
+migration), G (mid-compaction kill at image/barrier/flip via
+INVFS_COMPACT_ABORT_AT), and test-flakey.sh leg 6 (compaction under
+drop windows).
+
+### F3 follow-ons found while greening the WP22d soak (all fixed)
+
+The append-only/double-slot journal removed F3's map loss. The same soak
+then surfaced a ladder of adjacent drop-window defects, each fixed and
+locked in by a leg:
+
+- **Legacy migration targeted slot 0.** The flat log begins at the journal
+  base = slot 0's header block, so imaging slot 0 destroyed the fallback
+  it was meant to survive: a torn migration left neither a valid slot nor
+  a replayable log. Migration now images into slot 1, and replay, seeing
+  pad2==LEGACY with no CRC-valid slot, falls back to the flat log.
+  (test-flushfail.sh leg G2, incl. the "torndrop" stage that corrupts the
+  slot-1 image bytes deterministically.)
+- **fsck -f could not quarantine on a dirty volume.** The quarantine's
+  vol_mark_dirty refuses needs_recovery, which is exactly the state being
+  repaired (fsck -f IS the recovery) — the scan failed mid-quarantine
+  (soak: "scan failed", ladder dead-ended). The fix marks DIRTY directly
+  and clears needs_recovery after a successful rebuild (vol_fsck.c).
+- **Torn journal staging of a checkpoint.** Under drop windows the WP21
+  stage's read-back verify is defeated by the bdev page cache (the bytes
+  are read from cache, not the device), so CKP0 can name a stage that
+  never landed; the rollback then rightly refuses (rc=3, volume
+  untouched). Both recovery ladders (test-flakey.sh recover(), soak.py
+  gate) now accept the post-sweep state via --realize instead of
+  dead-ending.
+- **Bitmap/journal divergence.** A flush writes the dirty bitmap range
+  and the journal append as separate pages under one barrier; a window
+  can drop the bitmap pages and keep the journal's → the disk bitmap
+  calls a MAPPED block free → the next allocation hands it out from under
+  its live file (observed: a live record's segment range held a foreign
+  valid frame → verify CORRUPT, or worse). vol_open now forces every
+  journal-mapped block USED in the runtime bitmap (never clears; a false
+  positive is a leak fsck reclaims) and marks the range dirty so the
+  first flush converges it on disk. (test-flushfail.sh leg I.)
+- **Content-level cut.** A segment's data can be dropped after its map
+  is durable (maps are re-durabilized by every compaction; data is
+  written once). The map-level cut is blind to it; the segment CRC is
+  not. fsck -f with INVFS_FSCK_CONTENT=1 reads every live segment
+  (zone != TEXT) and quarantines records whose content fails (the name
+  falls back or goes absent; losses listed loudly). The ladders engage it
+  when verify --deep reports CORRUPT.
+- **Quarantine convergence.** scanset_delt's torn-retire guard kept a
+  fallback whose successor was broken even when the fallback ITSELF was
+  broken (unreadable, useless) — a quarantined chain never converged
+  (every fsck re-reported the same cut). The guard now only protects a
+  healthy target. (volume.c)
+- **rename-onto-a-container orphaned its members.** vol_rename replaced
+  an existing destination with vol_delete_file only — no sibling cascade
+  (vol_unlink has it) — stranding the container's "name!partN" records as
+  parentless live records (the soak's GHOST). The victim path now
+  cascades. (vol_dirs.c)
+- **Soak model: container members are not ghosts.** The gate's GHOST
+  check now treats "parent!member" names as engine-generated content of
+  the (present) parent, never written directly. (soak.py)
+
 ## Tier status
 
 legs 1 (baseline), 3 (torn sweep), 4 (crash mid-seal) PASS;
 leg 2 FAILS on F1 (by design — do not weaken the assertions);
 leg 5 FAILS on F2. Suite runtime ≈ 6–8 min at defaults (FLAKEY_SOAK_S=210).
+
+**WP22d update (2026-09-01/02):** F1/F2 fixed by WP22c, F3 by WP22d (+
+the follow-ons above). With the WP22d engine, leg 5's original F3
+symptom (live record, unmapped segments, fsck rc=3 l2p_miss) is gone —
+the consistent cut hides/quarantines torn records and the ladder
+converges to fsck OK. Pre-WP22d binaries fail the same seed at round ~32
+with the classic F3 l2p_miss; the WP22d engine runs the full 210 s soak
+(220+ rounds, 57 gates). Legs 1–6 PASS at seeds 20260831, 1, 42.

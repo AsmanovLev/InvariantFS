@@ -198,6 +198,14 @@ class Run:
 
     # -- whole-tree check (after every sweep) ---------------------------
     def full_check(self, i):
+        # WP22d lifecycle housekeeping: blocks freed by short-lived
+        # processes while a checkpoint was live are retained in degraded
+        # form (allocated, unregistered); once the checkpoint is resolved
+        # they surface as reclaimable orphans until fsck -f. Do the
+        # housekeeping before the strict gate (same pattern as
+        # test-heat/test-seal/test-resize).
+        self.tool("invf-sweep", "--realize", op_idx=i, what="housekeep realize")
+        self.tool("invf-fsck", "-f", op_idx=i, what="housekeep fsck -f")
         self.tool("invf-fsck", "-q", expect=0, op_idx=i,
                   what="post-sweep fsck")
         self.tool("invf-verify", "--deep", expect=0, op_idx=i,

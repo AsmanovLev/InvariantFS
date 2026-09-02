@@ -19,7 +19,67 @@
 #define INVFS_MAGIC       "InvariFS\0"   /* 8 bytes */
 #define INVFS_BLOCK_SIZE  4096
 #define INVFS_VERSION     1
-#define INVFS_JOURNAL_BLOCKS 8192  /* 32MB: ~235k entries */
+#define INVFS_JOURNAL_BLOCKS 8192  /* 32MB total: two 16MB journal slots (WP22d) */
+
+/* ---- WP22d: crash-atomic L2P journal (double-buffered slots) ----
+ * The journal area is split into two equal slots of INVFS_JRN_SLOT_BLOCKS
+ * each. A slot holds: one header block (invfs_jrn_hdr), then the compacted
+ * image (the whole live L2P table, one MAP entry per key), then the
+ * appended op log (MAP/UNMAP, newest wins). In slotted mode an entry's crc
+ * is CHAINED: crc = crc32c_update(prev_crc, entry[0..offsetof(crc)]), the
+ * first entry chaining from the header's crc32c -- a hole or a stale tail
+ * left by a dropped write breaks the chain and stops the replay exactly
+ * there (the bare-CRC terminator of the legacy format is subsumed). The
+ * image additionally carries a whole-image CRC (image_crc): a torn
+ * compaction invalidates the whole slot instead of replaying half a table.
+ *
+ * Writes are append-only within a slot: a flush appends the pending ops at
+ * the log end and never rewrites durable entries (WP22d/F3: rewriting
+ * already-durable positions is what let a drop window silently un-map
+ * fsync-acknowledged files). When the log cannot hold the pending ops (or
+ * fsck rebuilds the table, or legacy migrates) the whole table is imaged
+ * into the INACTIVE slot, barriered, and only then the superblock selector
+ * (pad2) is flipped and barriered again. Crash before the flip = old slot
+ * intact; crash mid-flip = the selector (outside the sb checksum, so a
+ * torn flip can read as garbage) is only a hint: replay picks the
+ * highest-sequence CRC-valid slot, which is always the right one (an image
+ * is a pure compaction of everything the older slot holds).
+ *
+ * Capacity: a slot's payload is (INVFS_JRN_SLOT_BLOCKS-1) blocks, so the
+ * live L2P table may hold at most ~(4095*4096/36) = 465,920 mappings
+ * (vol_map refuses past that). Pre-WP22d volumes carry pad2 == 0 and no
+ * slot headers: they replay as the legacy flat log and migrate into slot
+ * 1 on the first flush (slot 1, not 0: the flat log starts at the journal
+ * base = slot 0's header block, so imaging slot 1 keeps the old log's
+ * beginning intact as the fallback until the flip lands; a torn migration
+ * is caught by image_crc and replay falls back to the flat log). mkfs
+ * keeps writing legacy volumes -- born-legacy, migrated-on-first-flush,
+ * so the migration path is exercised by every test. Old binaries mounting
+ * a migrated volume replay the active slot's header as a (bad-CRC) entry
+ * and see an empty journal -- downgrade was never a guaranteed direction;
+ * the geometry (INVFS_JOURNAL_BLOCKS) is unchanged so at least the zone
+ * layout stays intact for them.
+ */
+#define INVFS_JRN_SLOTS       2
+#define INVFS_JRN_SLOT_BLOCKS (INVFS_JOURNAL_BLOCKS / INVFS_JRN_SLOTS)
+#define INVFS_JRN_MAGIC   "JRN0"
+#define INVFS_JRN_VERSION 1
+
+/* sb.pad2 values (the journal slot selector; 0 on pre-WP22d volumes) */
+#define INVFS_JSEL_LEGACY 0   /* no slots: the whole area is one flat log */
+#define INVFS_JSEL_SLOT0  1
+#define INVFS_JSEL_SLOT1  2
+
+#pragma pack(push, 1)
+typedef struct {
+    char     magic[4];      /* "JRN0" */
+    uint32_t version;       /* INVFS_JRN_VERSION */
+    uint64_t seq;           /* compaction sequence, monotone per volume */
+    uint64_t image_bytes;   /* compacted-image bytes behind the header block */
+    uint32_t image_crc;     /* CRC32C over the image bytes (0 when empty) */
+    uint32_t crc32c;        /* over the header with this field read as zero */
+} invfs_jrn_hdr;            /* 28 bytes, occupies the slot's first block */
+#pragma pack(pop)
 
 /* Volume state */
 #define INVFS_STATE_CLEAN    0xCA
@@ -137,7 +197,10 @@ typedef struct {
     uint32_t reserved_blocks;       /* 0x80 reserve for sweep/transcodes */
     uint32_t hard_min_blocks;       /* 0x84 below this -> READONLY */
     uint32_t vol_flags;             /* 0x88 bit0 = VOLF_READONLY */
-    uint32_t pad2;                  /* 0x8C */
+    uint32_t pad2;                  /* 0x8C WP22d: journal slot selector
+                                     * (INVFS_JSEL_*; 0 = legacy flat log).
+                                     * Outside the checksum like the other
+                                     * policy fields -> 0 on old images. */
 } invfs_superblock;                 /* 0x90 = 144 bytes */
 
 /* volume flags (sb.vol_flags) */
@@ -585,7 +648,13 @@ typedef struct invfs_meta_ext_hdr {
  * re-keys preserve it). New entries (rewrites, transcodes) start cold:
  * read-heat resets (seeded by INVFS_HEAT_INIT at create), write-heat
  * accumulates across rewrites only. 0,0,0 on pre-WP19 volumes = cold --
- * no migration, nothing asserts pad==0. */
+ * no migration, nothing asserts pad==0.
+ *
+ * crc: in the legacy flat log (pad2 == 0) a bare CRC32C over
+ * entry[0..offsetof(crc)]; in slotted mode chained from the previous
+ * entry's crc (the first entry from the slot header's) -- see the WP22d
+ * note at INVFS_JRN_MAGIC. crc32c_update(0, e, 32) == the bare CRC, so the
+ * legacy log is exactly "chain from zero". */
 typedef struct {
     uint8_t  type;                  /* MAP/UNMAP/SWEEP/CHECKPOINT */
     uint8_t  pad[3];                /* WP19 heat: rheat u16 LE + wheat u8 */

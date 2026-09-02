@@ -47,6 +47,7 @@ REPO=/home/user/InvariantFS
 B=$REPO/bin
 PACK=$REPO/tools/codecpacks/fatfs.codecpack
 WORK=/dev/shm/wp16fatfs
+trap 'rm -rf "$WORK" /dev/shm/wp16fatfs*.img' EXIT
 IMG=wp16fatfs.img
 IMGMEM=wp16fatfs-mem.img
 export MTOOLS_SKIP_CHECK=1

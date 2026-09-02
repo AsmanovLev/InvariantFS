@@ -199,6 +199,12 @@ $B/invf-cat "$IMG2" w.txt "$WORK/out/w.txt" >/dev/null
 cmp -s "$WORK/orig2/w.txt" "$WORK/out/w.txt" || { echo "FAIL: w.txt not bit-exact"; exit 1; }
 $B/invf-cat "$IMG2" c.txt "$WORK/out/c.txt" >/dev/null
 cmp -s "$WORK/orig2/c.txt" "$WORK/out/c.txt" || { echo "FAIL: c.txt not bit-exact"; exit 1; }
+# WP22d: frees made by a non-arming process while a checkpoint was live are
+# held (never reused) but unregistered -- they sit as allocated orphans until
+# the checkpoint resolves AND fsck -f reclaims them. Close the lifecycle
+# explicitly here: realize the checkpoint, reclaim, then assert clean.
+$B/invf-sweep "$IMG2" --realize >/dev/null 2>&1 || true
+$B/invf-fsck "$IMG2" -f >/dev/null 2>&1 || true
 $B/invf-fsck "$IMG2" | tee "$WORK/fsck2.log"
 grep -q "orphans:      0" "$WORK/fsck2.log" || { echo "FAIL: orphans (leg2)"; exit 1; }
 grep -q "missing:      0" "$WORK/fsck2.log" || { echo "FAIL: missing (leg2)"; exit 1; }

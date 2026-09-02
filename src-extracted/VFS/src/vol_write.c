@@ -195,6 +195,7 @@ static int wsession_write_seg_n(invfs_wsession *s, uint32_t j,
         invfs_l2p_entry *ne = &v->l2p[v->l2p_count - 1];
         l2p_set_rheat(ne, v->heat_init);
         ne->pad[2] = s->wheat_carry;
+        jrn_pad_sync(v, ne);   /* the queued MAP op carries the pad */
     }
     /* superseded session segment: nothing references it once the new map
      * landed, so free it now instead of leaving it for fsck */

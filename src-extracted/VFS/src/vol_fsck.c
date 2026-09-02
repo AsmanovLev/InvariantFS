@@ -15,6 +15,11 @@
  * be rebuilt from ASTs with the current format. What fsck CAN do:
  *   - verify inode-record CRCs and record lengths (bad_recs)
  *   - verify that every live AST segment has an L2P entry (l2p_miss)
+ *   - WP22d: fold the live set to the consistent cut (a record whose
+ *     segments lack mappings is hidden; the name falls back to its newest
+ *     fully-mapped version) and, with -f, QUARANTINE the broken versions
+ *     (position-kill tombstones, newest first) so the cut is permanent
+ *     and the next run comes back OK with the losses explicitly listed
  *   - rebuild the used-bitmap from (metadata zone + live L2P pbas):
  *     orphans (allocated, unreferenced) are freed, missing (referenced,
  *     free in bitmap) are restored
@@ -32,11 +37,6 @@ static int fsck_rebuild_one(invfs_volume *v, uint64_t rec_pos, uint64_t inode_id
     uint32_t crc_stored, crc_calc;
     size_t off;
     uint32_t i;
-    /* H6: per-file l2p_miss detail, printed loudly at the end of the record
-     * (name + lost byte ranges; a lost journal tail usually means a whole
-     * contiguous run, so the first few ranges + the count say it) */
-    uint64_t miss_off[4], miss_len[4];
-    unsigned miss_n = 0, miss_total = 0;
 
     (void)used; (void)used_bytes;
     if (io_seek(&v->io, rec_pos) != 0 ||
@@ -63,16 +63,11 @@ static int fsck_rebuild_one(invfs_volume *v, uint64_t rec_pos, uint64_t inode_id
         if (off + sizeof(e) > rh.rec_len) { rep->bad_recs++; break; }
         memcpy(&e, rec + off, sizeof(e));
         off += sizeof(e);
-        /* every live segment must have an L2P entry */
+        /* every live segment must have an L2P entry (post-cut this cannot
+         * fire for a live record; kept as the safety net) */
         if (vol_lookup_entry(v, inode_id, e.block_id, &pba, &len) != 0 ||
             pba == 0) {
             rep->l2p_miss++;
-            miss_total++;
-            if (miss_n < 4) {
-                miss_off[miss_n] = e.file_offset;
-                miss_len[miss_n] = e.length;
-                miss_n++;
-            }
             continue;
         }
         /* mark used from L2P (physical) */
@@ -98,134 +93,224 @@ static int fsck_rebuild_one(invfs_volume *v, uint64_t rec_pos, uint64_t inode_id
         memset((*l2p)[*n].pad, 0, sizeof (*l2p)[*n].pad);
         (*n)++;
     }
-    if (miss_total) {
-        /* H6: name the file and the lost ranges, loudly and on stderr even
-         * in -q mode -- data loss is never a quiet event. The file keeps
-         * failing reads with EIO per missing segment; the rest of the
-         * volume is repaired around it. */
-        char nm[257];
-        size_t nl = rh.name_len < 256 ? rh.name_len : 256;
-        unsigned k;
-        memcpy(nm, rh.name, nl);
-        nm[nl] = 0;
-        fprintf(stderr, "fsck: l2p_miss: %s (inode %llu): %u segment(s) "
-                "without an L2P mapping, lost:",
-                nm, (unsigned long long)inode_id, miss_total);
-        for (k = 0; k < miss_n; k++)
-            fprintf(stderr, " [%llu, %llu)",
-                    (unsigned long long)miss_off[k],
-                    (unsigned long long)(miss_off[k] + miss_len[k]));
-        if (miss_total > miss_n)
-            fprintf(stderr, " ... and %u more", miss_total - miss_n);
-        fprintf(stderr, "\n");
-    }
     free(rec);
     return 0;
 }
 
 
 /* ---- live-record set ----------------------------------------------------
- * Liveness must mirror the name index vol_open builds (idx_put / idx_del /
- * idx_del_at) EXACTLY, or fsck and the read path disagree about the same
- * volume -- the WP22c/F2 lesson: a legacy kill-by-id tombstone for one
- * name of a SHARED id (the rename fast path hardlinks the copy onto the
- * old id) used to kill the survivor's record here while the name index
- * kept it, so fsck reported "l2p misses: 0" over a file verify --deep saw
- * as CORRUPT and --repair never engaged. So tombstones apply in write
- * order with index semantics: an INOD upserts its name (last record
- * wins), a legacy DELT kills the name's entry only when the id matches, a
- * v2 DELT only when the position matches. */
-typedef struct fsck_name {
-    struct fsck_name *next;
-    uint64_t id, pos;
-    uint32_t nlen;
-    char name[1];
-} fsck_name;
+ * Liveness must mirror the consistent cut vol_open applies (the scan-set
+ * in volume.c) EXACTLY, or fsck and the read path disagree about the same
+ * volume -- the WP22c/F2 lesson. The set is built with per-name version
+ * stacks: an INOD whose segments lack mappings is BROKEN (drop-torn) and
+ * never live (the name falls back to its newest fully-mapped version); a
+ * position-kill DELT removes its version unless that version's successor
+ * is broken (a torn retire keeps its fallback). */
 
-typedef struct {
-    fsck_name **buck;
-    size_t mask, count;
-} fsck_nameset;
-
-static fsck_name *fsn_find(const fsck_nameset *s, const char *name,
-                           size_t nlen)
+/* Append a quarantine tombstone (v2 position-kill) for one broken record.
+ * The record stays in the append-only area but every future scan drops it
+ * from the name's version stack, which is what makes the cut permanent. */
+static int fsck_quarantine(invfs_volume *v, const char *name,
+                           uint64_t killpos, uint64_t id)
 {
-    size_t b = (size_t)(idx_hash(name, nlen) & s->mask);
-    fsck_name *e;
-    for (e = s->buck[b]; e; e = e->next)
-        if (e->nlen == nlen && memcmp(e->name, name, nlen) == 0)
-            return e;
-    return NULL;
+    invfs_inode_rec rec;
+    uint32_t crc;
+    uint64_t pos = v->inode_area_pos;
+
+    if (pos + sizeof(rec) + 4 > v->inode_area_end)
+        return -1;
+    memset(&rec, 0, sizeof rec);
+    rec.magic = TOMBSTONE_MAGIC;
+    v->hot.tombstones++;
+    rec.rec_len = (uint32_t)sizeof rec;
+    rec.inode_id = id;
+    rec.file_size = killpos;      /* v2 position kill */
+    rec_set_name(&rec, name);
+    crc = invfs_crc32c(&rec, sizeof rec);
+    if (io_seek(&v->io, pos) != 0 ||
+        io_write(&v->io, &rec, sizeof rec) != 0 ||
+        io_write(&v->io, &crc, 4) != 0)
+        return -1;
+    v->inode_area_pos = pos + sizeof rec + 4;
+    return 0;
 }
 
-static void fsn_grow(fsck_nameset *s)
+/* WP22d/H6 repair: a name with no fully-mapped version is not lost whole
+ * when the missing segments form a SUFFIX of the newest record -- repair
+ * by truncation to the longest fully-mapped prefix: append a new record
+ * version with the tail entries dropped, then position-kill the old one.
+ * The readable head survives and the volume reaches CLEAN (quarantine
+ * would destroy data that is still fine). Returns 0 when truncated,
+ * 1 when the damage is not a clean suffix (caller quarantines),
+ * -1 on io/alloc failure. */
+static int fsck_truncate_suffix(invfs_volume *v, const mapset *ms,
+                                const char *name, uint64_t pos,
+                                uint64_t id, uint64_t *out_size,
+                                uint64_t *out_pos)
 {
-    size_t ncap = (s->mask + 1) * 2, i;
-    fsck_name **nb = (fsck_name **)calloc(ncap, sizeof *nb);
-    if (!nb) return;
-    for (i = 0; i <= s->mask; i++) {
-        fsck_name *e = s->buck[i];
-        while (e) {
-            fsck_name *nx = e->next;
-            size_t b = (size_t)(idx_hash(e->name, e->nlen) & (ncap - 1));
-            e->next = nb[b]; nb[b] = e;
-            e = nx;
+    invfs_inode_rec rh;
+    invfs_ast_hdr ah;
+    uint8_t *rec = NULL, *nr = NULL, *w;
+    size_t off, ext_off = 0, ext_len = 0, ent0, body;
+    uint32_t i, k;
+    uint64_t new_size, newp = 0;
+    int trc = -1;
+
+    if (io_seek(&v->io, pos) != 0 || io_read(&v->io, &rh, sizeof rh) != 0)
+        return -1;
+    if (rh.magic != INODE_REC_MAGIC || rh.rec_len < sizeof rh ||
+        rh.rec_len > INVFS_MAX_REC_LEN)
+        return 1;
+    rec = (uint8_t *)malloc(rh.rec_len);
+    if (!rec) return -1;
+    if (io_seek(&v->io, pos) != 0 || io_read(&v->io, rec, rh.rec_len) != 0)
+        { free(rec); return -1; }
+    off = sizeof(invfs_inode_rec);
+    if (invfs_ast_hdr_parse(rec + off, rh.rec_len - off, &ah) != 0)
+        { free(rec); return 1; }
+    if (ah.num_children != 0) { free(rec); return 1; }  /* container: quarantine */
+    ent0 = off + ah.hdr_len;
+    /* first unmapped entry; everything from it on must be unmapped too
+     * (a clean suffix) -- a mid-file hole stays a quarantine case */
+    for (k = 0; k < ah.num_blocks; k++) {
+        invfs_ast_block_entry e;
+        memcpy(&e, rec + ent0 + (size_t)k * sizeof e, sizeof e);
+        if (!mapset_has(ms, id, e.block_id)) break;
+    }
+    if (k == 0 || k == ah.num_blocks) { free(rec); return 1; }
+    for (i = k; i < ah.num_blocks; i++) {
+        invfs_ast_block_entry e;
+        memcpy(&e, rec + ent0 + (size_t)i * sizeof e, sizeof e);
+        if (mapset_has(ms, id, e.block_id)) { free(rec); return 1; }
+    }
+    {
+        invfs_ast_block_entry e;
+        memcpy(&e, rec + ent0 + (size_t)k * sizeof e, sizeof e);
+        new_size = e.file_offset;
+    }
+    if (new_size == 0) { free(rec); return 1; }
+    off = ent0 + (size_t)ah.num_blocks * sizeof(invfs_ast_block_entry);
+    if (v->sb.vol_flags & VOLF_META2) { ext_off = off; ext_len = rh.rec_len - off; }
+    /* the recipe header follows invfs_ast_hdr_write's own v1/v2 pick */
+    {
+        size_t hl = (new_size > 0xFFFFFFFFu || k > 0xFFFFu)
+                    ? INVFS_AST_HDR_V2_LEN : INVFS_AST_HDR_V1_LEN;
+        uint32_t crc;
+        uint64_t p;
+        body = sizeof(invfs_inode_rec) + hl +
+               (size_t)k * sizeof(invfs_ast_block_entry) + ext_len;
+        if (v->inode_area_pos + body + 4 > v->inode_area_end)
+            { free(rec); return -1; }
+        nr = (uint8_t *)malloc(body);
+        if (!nr) { free(rec); return -1; }
+        memset(nr, 0, body);
+        memcpy(nr, rec, sizeof(invfs_inode_rec));   /* header incl. name */
+        ((invfs_inode_rec *)nr)->rec_len = (uint32_t)body;
+        ((invfs_inode_rec *)nr)->file_size = new_size;
+        w = nr + sizeof(invfs_inode_rec);
+        if (invfs_ast_hdr_write(w, new_size, k, 0) != hl)
+            { free(rec); free(nr); return -1; }
+        w += hl;
+        memcpy(w, rec + ent0, (size_t)k * sizeof(invfs_ast_block_entry));
+        w += (size_t)k * sizeof(invfs_ast_block_entry);
+        if (ext_len) memcpy(w, rec + ext_off, ext_len);
+        crc = invfs_crc32c(nr, (uint32_t)body);
+        p = v->inode_area_pos;
+        if (io_seek(&v->io, p) != 0 ||
+            io_write(&v->io, nr, (uint32_t)body) != 0 ||
+            io_write(&v->io, &crc, 4) != 0)
+            { free(rec); free(nr); return -1; }
+        v->inode_area_pos = p + body + 4;
+        newp = p;
+    }
+    free(rec); free(nr);
+    *out_pos = newp;   /* the appended truncated record (pre-tombstone) */
+    if (fsck_quarantine(v, name, pos, id) != 0) return -1;  /* kill old ver */
+    *out_size = new_size;
+    return 0;
+}
+
+/* WP22d content-level cut (fsck -f + INVFS_FSCK_CONTENT=1): read every
+ * non-TEXT segment of the record at rec_pos through the CRC'd path and
+ * mirror the read path's per-algo shape checks. A segment whose bytes
+ * were torn by a drop window AFTER its map became durable (the map is
+ * re-written by every compaction; the data is written once) fails here:
+ * the map-level cut cannot see it, the segment CRC + csize checks can.
+ * Returns 1 when any segment fails. */
+static int rec_content_bad(invfs_volume *v, uint64_t rec_pos,
+                           uint64_t inode_id)
+{
+    invfs_inode_rec rh;
+    invfs_ast_hdr ah;
+    uint8_t *rec, *scratch = NULL;
+    size_t off;
+    uint32_t i;
+    int bad = 0;
+
+    if (io_seek(&v->io, rec_pos) != 0 ||
+        io_read(&v->io, &rh, sizeof rh) != 0)
+        return 1;
+    if (rh.rec_len < sizeof rh || rh.rec_len > INVFS_MAX_REC_LEN)
+        return 1;
+    rec = (uint8_t *)malloc(rh.rec_len);
+    if (!rec) return 1;
+    if (io_seek(&v->io, rec_pos) != 0 ||
+        io_read(&v->io, rec, rh.rec_len) != 0) { free(rec); return 1; }
+    off = sizeof(invfs_inode_rec);
+    if (off + INVFS_AST_HDR_V1_LEN > rh.rec_len ||
+        invfs_ast_hdr_parse(rec + off, rh.rec_len - off, &ah) != 0) {
+        free(rec); return 1;
+    }
+    off += ah.hdr_len;
+    for (i = 0; i < ah.num_blocks && !bad; i++) {
+        invfs_ast_block_entry e;
+        uint64_t pba = 0, plen = 0;
+        uint32_t csize = 0;
+        uint8_t *blob = NULL;
+        if (off + sizeof(e) > rh.rec_len) { bad = 1; break; }
+        memcpy(&e, rec + off, sizeof(e));
+        off += sizeof(e);
+        if (e.zone == INVFS_ZONE_TEXT)
+            continue;   /* batch members: the tz layer's own integrity */
+        if (vol_lookup_entry(v, inode_id, e.block_id, &pba, &plen) != 0 ||
+            pba == 0)
+            continue;   /* unmapped: the map-level cut already counts it */
+        if (seg_read_checked(v, pba, plen, 1, &csize, &blob) != 0) {
+            bad = 1;
+        } else if (e.algo == INVFS_ALGO_NONE) {
+            /* RAW: the frame must cover exactly the logical segment */
+            if ((uint64_t)csize != e.length) bad = 1;
+        } else if (e.algo == INVFS_ALGO_LZ4 || e.algo == INVFS_ALGO_ZSTD) {
+            /* compressed: must inflate to exactly the logical size */
+            if (csize == 0 || (uint64_t)csize >= e.length) {
+                bad = 1;
+            } else {
+                if (!scratch) scratch = (uint8_t *)malloc(INVFS_SEGMENT_SIZE);
+                if (!scratch) { free(blob); bad = 1; }
+                else if (e.algo == INVFS_ALGO_LZ4) {
+                    int d = LZ4_decompress_safe((const char *)blob,
+                                                (char *)scratch,
+                                                (int)csize,
+                                                INVFS_SEGMENT_SIZE);
+                    if (d != (int)e.length) bad = 1;
+                } else {
+                    size_t d = ZSTD_decompress(scratch, e.length,
+                                               blob, csize);
+                    if (ZSTD_isError(d) || d != e.length) bad = 1;
+                }
+            }
         }
+        /* other algos are whole-file blobs (a container part, a swept
+         * recipe): csize is unrelated to e.length; seg_read_checked's
+         * payload CRC is the check that applies */
+        free(blob);
+        if (bad) break;
     }
-    free(s->buck);
-    s->buck = nb;
-    s->mask = ncap - 1;
+    free(scratch);
+    free(rec);
+    return bad;
 }
 
-static void fsn_put(fsck_nameset *s, const char *name, size_t nlen,
-                    uint64_t id, uint64_t pos)
-{
-    fsck_name *e;
-    size_t b;
-    if (!s->buck) {
-        s->buck = (fsck_name **)calloc(1024, sizeof *s->buck);
-        if (!s->buck) return;
-        s->mask = 1023;
-    }
-    e = fsn_find(s, name, nlen);
-    if (e) { e->id = id; e->pos = pos; return; }   /* last record wins */
-    e = (fsck_name *)malloc(sizeof *e + nlen);
-    if (!e) return;
-    memcpy(e->name, name, nlen);
-    e->name[nlen] = 0;
-    e->nlen = (uint32_t)nlen;
-    e->id = id;
-    e->pos = pos;
-    b = (size_t)(idx_hash(name, nlen) & s->mask);
-    e->next = s->buck[b];
-    s->buck[b] = e;
-    s->count++;
-    if (s->count > s->mask + 1) fsn_grow(s);
-}
-
-static void fsn_drop(fsck_nameset *s, const char *name, size_t nlen)
-{
-    size_t b = (size_t)(idx_hash(name, nlen) & s->mask);
-    fsck_name *e, **pp = &s->buck[b];
-    for (e = *pp; e; pp = &e->next, e = e->next)
-        if (e->nlen == nlen && memcmp(e->name, name, nlen) == 0) break;
-    if (!e) return;
-    *pp = e->next;
-    free(e);
-    s->count--;
-}
-
-static void fsn_free(fsck_nameset *s)
-{
-    size_t i;
-    if (!s->buck) return;
-    for (i = 0; i <= s->mask; i++) {
-        fsck_name *e = s->buck[i];
-        while (e) { fsck_name *nx = e->next; free(e); e = nx; }
-    }
-    free(s->buck);
-    s->buck = NULL;
-}
 
 int vol_fsck_scan(invfs_volume *v, invfs_fsck_report *rep, int fix)
 {
@@ -235,14 +320,18 @@ int vol_fsck_scan(invfs_volume *v, invfs_fsck_report *rep, int fix)
     invfs_l2p_entry *newl2p = NULL;
     uint8_t *used = NULL;
     size_t used_bytes;
-    fsck_nameset live = { NULL, 0, 0 };
+    scan_set live = { NULL, 0, 0 };
+    mapset ms;
 
     memset(rep, 0, sizeof(*rep));
     used_bytes = (size_t)v->bitmap_blocks * INVFS_BLOCK_SIZE;
     used = (uint8_t *)calloc(1, used_bytes);
     if (!used) return -1;
+    if (mapset_build(v, &ms) != 0) { free(used); return -1; }
 
-    /* pass 1: ordered replay of the area -- the name-keyed live set.
+    /* pass 1: ordered replay of the area -- the name-keyed live set, with
+     * the consistent cut applied per record (broken = some AST segment has
+     * no mapping in the replayed journal).
      * Scan the FULL metadata zone tail, not just v->inode_area_pos
      * (vol_open truncates the area at the first corrupt record). */
     end = (v->sb.metadata_zone_start + v->sb.metadata_zone_blocks)
@@ -261,54 +350,283 @@ int vol_fsck_scan(invfs_volume *v, invfs_fsck_report *rep, int fix)
             break;
         }
         rec = (uint8_t *)malloc(rh.rec_len);
-        if (!rec) { free(used); fsn_free(&live); return -1; }
+        if (!rec) { free(used); scanset_free(&live); mapset_free(&ms); return -1; }
         if (io_seek(&v->io, pos) != 0 ||
             io_read(&v->io, rec, rh.rec_len) != 0 ||
             io_read(&v->io, &crc_stored, 4) != 0) {
-            free(rec); free(used); fsn_free(&live); return -1;
+            free(rec); free(used); scanset_free(&live); mapset_free(&ms);
+            return -1;
         }
         crc_calc = invfs_crc32c(rec, rh.rec_len);
-        free(rec);
         if (crc_calc != crc_stored) {
             /* corrupt record: report, skip past it, keep scanning */
             rep->bad_recs++;
+            free(rec);
             pos += rh.rec_len + 4;
             continue;
         }
         {
             size_t nl = rh.name_len < 256 ? rh.name_len : 256;
             if (rh.magic == INODE_REC_MAGIC) {
-                if (nl) fsn_put(&live, rh.name, nl, rh.inode_id, pos);
+                if (nl) {
+                    uint64_t moff[4], mlen[4];
+                    unsigned mn = 0;
+                    uint64_t miss = rec_l2p_miss(rec, rh.rec_len,
+                                                 rh.inode_id, &ms,
+                                                 moff, mlen, &mn);
+                    if (scanset_inod(&live, rh.name, nl, rh.inode_id, pos,
+                                     rh.file_size, rh.ctime,
+                                     miss) != 0) {
+                        free(rec); free(used); scanset_free(&live);
+                        mapset_free(&ms); return -1;
+                    }
+                }
             } else {
                 /* v2 tombstones kill by record position; legacy ones by
-                 * id -- both only when the name's CURRENT entry matches,
-                 * exactly idx_del_at / idx_del */
-                fsck_name *e = nl ? fsn_find(&live, rh.name, nl) : NULL;
-                if (e && ((rh.file_size == 0 && e->id == rh.inode_id) ||
-                          (rh.file_size != 0 && e->pos == rh.file_size)))
-                    fsn_drop(&live, rh.name, nl);
+                 * id -- the scan-set applies them with the consistent-cut
+                 * rules (a kill whose successor is broken is skipped) */
+                if (nl)
+                    scanset_delt(&live, rh.name, nl, rh.inode_id,
+                                 rh.file_size);
             }
         }
+        free(rec);
         pos += rh.rec_len + 4;
+    }
+
+    /* pass 1b: the cut accounting + (fix) quarantine. Per name: the live
+     * version is the newest non-broken one; broken versions NEWER than it
+     * are torn writes -- a name with a fallback is "cut" (regressed), a
+     * name without one is lost entirely (counted in l2p_miss, listed with
+     * its lost ranges). Broken versions older than the live one are silent
+     * history (already superseded in the healthy timeline). */
+    if (live.buck) {
+        for (bi = 0; bi <= live.mask; bi++) {
+            scan_name *e;
+            for (e = live.buck[bi]; e; e = e->next) {
+                const scan_ver *lv = scanset_live(e);
+                uint32_t first_broken;
+                /* index of the first version newer than the live one */
+                if (lv)
+                    first_broken = (uint32_t)(lv - e->vers) + 1;
+                else
+                    first_broken = 0;
+                if (first_broken < e->nvers) {
+                    /* torn suffix exists: report (the newest carries the
+                     * loss detail) */
+                    uint32_t newest = e->nvers - 1;
+                    uint64_t miss = e->vers[newest].miss;
+                    if (lv) {
+                        rep->cut_records++;
+                        fprintf(stderr,
+                                "fsck: l2p cut: %s (inode %llu): newest "
+                                "record @%llu lost %llu segment(s); fell "
+                                "back to @%llu%s\n",
+                                e->name,
+                                (unsigned long long)e->vers[newest].id,
+                                (unsigned long long)e->vers[newest].pos,
+                                (unsigned long long)miss,
+                                (unsigned long long)lv->pos,
+                                fix ? " (quarantined)" : "");
+                    } else {
+                        /* H6 format: name the file and the lost ranges,
+                         * loudly and on stderr -- data loss is never a
+                         * quiet event. With fix, decide the repair FIRST
+                         * (suffix damage truncates to the longest mapped
+                         * prefix; anything else quarantines), then print
+                         * the outcome. */
+                        uint64_t moff[4], mlen[4];
+                        unsigned mn = 0, k;
+                        uint8_t *rec2 = NULL;
+                        invfs_inode_rec rh;
+                        rep->lost_files++;
+                        rep->l2p_miss += miss;
+                        if (io_seek(&v->io, e->vers[newest].pos) == 0 &&
+                            io_read(&v->io, &rh, sizeof rh) == 0 &&
+                            rh.rec_len >= sizeof rh &&
+                            rh.rec_len <= INVFS_MAX_REC_LEN &&
+                            (rec2 = malloc(rh.rec_len)) != NULL &&
+                            io_seek(&v->io, e->vers[newest].pos) == 0 &&
+                            io_read(&v->io, rec2, rh.rec_len) == 0)
+                            rec_l2p_miss(rec2, rh.rec_len,
+                                         e->vers[newest].id, &ms,
+                                         moff, mlen, &mn);
+                        free(rec2);
+                        fprintf(stderr, "fsck: l2p_miss: %s (inode %llu): "
+                                "%llu segment(s) without an L2P mapping, "
+                                "lost:",
+                                e->name,
+                                (unsigned long long)e->vers[newest].id,
+                                (unsigned long long)miss);
+                        for (k = 0; k < mn; k++)
+                            fprintf(stderr, " [%llu, %llu)",
+                                    (unsigned long long)moff[k],
+                                    (unsigned long long)(moff[k] + mlen[k]));
+                        if (miss > mn)
+                            fprintf(stderr, " ... and %llu more",
+                                    (unsigned long long)(miss - mn));
+                        fprintf(stderr, "%s\n",
+                                fix ? " (repair below)"
+                                    : " (use -f to repair)");
+                    }
+                    if (fix) {
+                        /* Repair the torn suffix, newest first (the
+                         * scan-set's kill-skip rule needs each victim's
+                         * successor already gone). A no-fallback name whose
+                         * damage is a clean suffix TRUNCATES to the longest
+                         * fully-mapped prefix instead of being quarantined
+                         * (the readable head survives, the volume reaches
+                         * CLEAN). Mark the volume dirty first so a crash
+                         * mid-repair cannot read as CLEAN; fsck -f IS the
+                         * recovery, so this bypasses vol_mark_dirty's
+                         * needs_recovery refusal (that latch is exactly
+                         * what is being repaired -- the rebuild tail below
+                         * writes CLEAN). */
+                        uint32_t q;
+                        int truncated = 0;
+                        if (!v->dirty) {
+                            v->sb.state = INVFS_STATE_DIRTY;
+                            if (vol_write_sb(v) != 0) {
+                                free(used); scanset_free(&live);
+                                mapset_free(&ms);
+                                free(newl2p);
+                                return -1;
+                            }
+                            v->dirty = 1;
+                        }
+                        if (!lv) {
+                            uint64_t nsz = 0, npos = 0;
+                            int trc = fsck_truncate_suffix(
+                                v, &ms, e->name, e->vers[e->nvers - 1].pos,
+                                e->vers[e->nvers - 1].id, &nsz, &npos);
+                            if (trc < 0) {
+                                free(used); scanset_free(&live);
+                                mapset_free(&ms); free(newl2p);
+                                return -1;
+                            }
+                            if (trc == 0) {
+                                truncated = 1;
+                                /* the scan-set drives the rebuild: register
+                                 * the truncated version as live (healthy,
+                                 * miss=0) or its segments are dropped from
+                                 * the rebuilt journal and the file vanishes */
+                                if (scanset_inod(&live, e->name, e->nlen,
+                                                 e->vers[e->nvers - 1].id,
+                                                 npos, nsz,
+                                                 e->vers[e->nvers - 1].ctime,
+                                                 0) != 0) {
+                                    free(used); scanset_free(&live);
+                                    mapset_free(&ms); free(newl2p);
+                                    return -1;
+                                }
+                                fprintf(stderr, "fsck: l2p_miss: %s: "
+                                        "truncated to %llu bytes "
+                                        "(readable head kept)\n",
+                                        e->name, (unsigned long long)nsz);
+                            }
+                        }
+                        for (q = e->nvers; !truncated && q-- > first_broken; ) {
+                            if (fsck_quarantine(v, e->name,
+                                                e->vers[q].pos,
+                                                e->vers[q].id) != 0) {
+                                fprintf(stderr, "fsck: quarantine of %s "
+                                        "@%llu failed (inode area full?)\n",
+                                        e->name,
+                                        (unsigned long long)e->vers[q].pos);
+                                free(used); scanset_free(&live);
+                                mapset_free(&ms);
+                                free(newl2p);
+                                return -1;
+                            }
+                        }
+                        if (fix && !lv && !truncated)
+                            fprintf(stderr, "fsck: l2p_miss: %s: file "
+                                    "quarantined\n", e->name);
+                    }
+                }
+            }
+        }
+    }
+    mapset_free(&ms);
+
+    /* pass 1c (fsck -f + INVFS_FSCK_CONTENT=1): the content-level
+     * consistent cut. A segment's DATA can be dropped by a window while
+     * its map survives (the map is re-durabilized by every compaction;
+     * the data is written once), leaving a live record whose bytes fail
+     * the segment CRC. Per name, settle the live version = the newest
+     * version that is BOTH map-clean and content-clean, quarantining the
+     * whole torn suffix above it (newest first, so the scan-set's
+     * kill-skip rule is never tripped). Cost is a full data read --
+     * recovery-time only, off unless the knob is set (the flakey ladders
+     * set it when verify --deep reports CORRUPT). */
+    if (fix && live.buck && getenv("INVFS_FSCK_CONTENT")) {
+        for (bi = 0; bi <= live.mask; bi++) {
+            scan_name *e;
+            for (e = live.buck[bi]; e; e = e->next) {
+                int64_t live_i = -1, i;
+                for (i = (int64_t)e->nvers; i-- > 0; ) {
+                    if (e->vers[i].broken)
+                        continue;            /* map-broken: never live */
+                    if (rec_content_bad(v, e->vers[i].pos, e->vers[i].id)) {
+                        e->vers[i].broken = 1;   /* content-broken */
+                        rep->corrupt_files++;
+                        fprintf(stderr,
+                                "fsck: content cut: %s (inode %llu): "
+                                "record @%llu fails segment CRC\n",
+                                e->name, (unsigned long long)e->vers[i].id,
+                                (unsigned long long)e->vers[i].pos);
+                        continue;
+                    }
+                    live_i = i;
+                    break;
+                }
+                /* quarantine the torn suffix above the settled live
+                 * version (pass 1b already took the map-broken part that
+                 * was visible without content; a position-kill is
+                 * idempotent, so an overlap is harmless) */
+                for (i = (int64_t)e->nvers; i-- > live_i + 1; ) {
+                    if (!v->dirty) {
+                        v->sb.state = INVFS_STATE_DIRTY;
+                        if (vol_write_sb(v) != 0) {
+                            free(used); scanset_free(&live);
+                            free(newl2p);
+                            return -1;
+                        }
+                        v->dirty = 1;
+                    }
+                    if (fsck_quarantine(v, e->name, e->vers[i].pos,
+                                        e->vers[i].id) != 0) {
+                        fprintf(stderr, "fsck: quarantine of %s @%llu "
+                                "failed (inode area full?)\n", e->name,
+                                (unsigned long long)e->vers[i].pos);
+                        free(used); scanset_free(&live);
+                        free(newl2p);
+                        return -1;
+                    }
+                }
+            }
+        }
     }
 
     /* pass 2: per live record, verify AST<->L2P and collect used blocks */
     if (live.buck) {
         for (bi = 0; bi <= live.mask; bi++) {
-            fsck_name *e;
+            scan_name *e;
             for (e = live.buck[bi]; e; e = e->next) {
+                const scan_ver *lv = scanset_live(e);
+                if (!lv) continue;
                 rep->live_files++;
-                if (fsck_rebuild_one(v, e->pos, e->id,
+                if (fsck_rebuild_one(v, lv->pos, lv->id,
                                      &newl2p, &l2p_n, &l2p_cap,
                                      used, used_bytes, rep) != 0) {
-                    free(used); fsn_free(&live);
+                    free(used); scanset_free(&live);
                     free(newl2p);
                     return -1;
                 }
             }
         }
     }
-    fsn_free(&live);
+    scanset_free(&live);
 
     /* metadata zone is always allocated */
     {
@@ -318,13 +636,28 @@ int vol_fsck_scan(invfs_volume *v, invfs_fsck_report *rep, int fix)
             bit_set(used, b);
     }
 
+    /* WP21/WP22d: a live sweep checkpoint owns its journal staging run
+     * (referenced by the CKP0 descriptor, not by any AST/L2P entry), so it
+     * must not count as orphans. fsck -f is refused while a checkpoint is
+     * live, so this only ever affects reporting. */
+    if (v->ck_present && v->ck.stage_blocks) {
+        uint64_t b;
+        for (b = 0; b < v->ck.stage_blocks; b++)
+            bit_set(used, v->ck.stage_pba + b);
+    }
+
     /* compare bitmaps: orphans = in v->bitmap, not in used; missing = reverse */
     {
         uint64_t total = v->sb.total_blocks, i;
         for (i = 0; i < total; i++) {
             int bm = bit_get(v->bitmap, i);
             int us = bit_get(used, i);
-            if (bm && !us) rep->orphans++;
+            if (bm && !us && v->ck_present) rep->held_ckpt++;
+            else if (bm && !us) rep->orphans++;
+            if (bm && !us && getenv("INVFS_DEBUG"))
+                fprintf(stderr, "[fsck] %s block %llu\n",
+                        v->ck_present ? "held" : "orphan",
+                        (unsigned long long)i);
             if (us && !bm) rep->missing++;
         }
     }
@@ -334,15 +667,17 @@ int vol_fsck_scan(invfs_volume *v, invfs_fsck_report *rep, int fix)
     /* repair when there is structural damage, or when the volume is merely
      * dirty: a scan that found nothing else is exactly a clean-close
      * simulation, so rewriting bitmap/journal and setting CLEAN is safe.
-     * H6: l2p_miss no longer blocks the repair -- the mappings are gone
-     * from the journal and cannot be reconstructed, but refusing the
+     * H6/WP22d: l2p_miss no longer blocks the repair -- the mappings are
+     * gone from the journal and cannot be reconstructed, but refusing the
      * journal rewrite kept the whole VOLUME read-only (a DIRTY state
      * mounts read-only) over damage that is per-file. The repair proceeds
-     * around them: the affected files are listed by name and lost ranges
-     * above, keep failing reads with EIO per missing segment, and the
-     * volume mounts RW again after the fix. */
+     * around them: the torn versions were quarantined above (the affected
+     * names are listed, with their lost ranges), the live set is the
+     * consistent cut, and the volume mounts RW again after the fix. */
     if (fix && (rep->orphans || rep->missing || rep->bad_recs ||
-                rep->l2p_miss || v->sb.state != INVFS_STATE_CLEAN)) {
+                rep->l2p_miss || rep->cut_records || rep->lost_files ||
+                rep->corrupt_files ||
+                v->sb.state != INVFS_STATE_CLEAN)) {
         /* journal rewrite: keep only live-AST mappings (drops stale
          * entries of records fsck could not verify) */
         if (l2p_n) {
@@ -350,7 +685,6 @@ int vol_fsck_scan(invfs_volume *v, invfs_fsck_report *rep, int fix)
             v->l2p = newl2p;
             v->l2p_count = l2p_n;
             v->l2p_cap = l2p_n;
-            v->l2p_dirty = 0;   /* whole table replaced */
             newl2p = NULL;
         }
         memcpy(v->bitmap, used, used_bytes);
@@ -366,6 +700,12 @@ int vol_fsck_scan(invfs_volume *v, invfs_fsck_report *rep, int fix)
          * not here: every byte may differ from disk, so flush all of it. */
         v->bm_lo = 0;
         v->bm_hi = (uint64_t)v->bitmap_blocks * INVFS_BLOCK_SIZE;
+        /* WP22d: the table was replaced wholesale -- the next flush
+         * compacts (atomic double-buffer) instead of appending */
+        v->jops_n = 0;
+        v->j_heat_n = 0;
+        v->j_heat_all = 0;
+        v->j_compact = 1;
         if (vol_flush(v) != 0) {
             free(used); free(newl2p);
             return -1;
@@ -375,6 +715,10 @@ int vol_fsck_scan(invfs_volume *v, invfs_fsck_report *rep, int fix)
             free(used); free(newl2p);
             return -1;
         }
+        /* the volume is rebuilt and barriered: it IS recovered. Clear the
+         * latch so the close path takes the ordinary final flush instead
+         * of reporting a latched io error that never happened. */
+        v->needs_recovery = 0;
     }
     free(used);
     free(newl2p);

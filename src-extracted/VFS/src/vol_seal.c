@@ -914,12 +914,18 @@ finalize:
             if (keep) {
                 if (w2 != j2) v->l2p[w2] = v->l2p[j2];
                 w2++;
-            } else if (w2 < v->l2p_dirty) {
-                v->l2p_dirty = w2;
+            } else if (e->type == INVFS_JRN_MAP) {
+                /* WP22d: the journal is append-only -- the stale map is
+                 * cancelled by an UNMAP op, never rewritten in place */
+                invfs_l2p_entry ue;
+                memset(&ue, 0, sizeof ue);
+                ue.type = INVFS_JRN_UNMAP;
+                ue.inode = e->inode;
+                ue.lba = e->lba;
+                jrn_push_op(v, &ue);
             }
         }
         v->l2p_count = w2;
-        if (v->l2p_dirty > v->l2p_count) v->l2p_dirty = v->l2p_count;
     }
     if (rep->l2_freed || rep->l2_added || rep->l2_updated) {
         if (vol_flush(v) != 0) rc = -1;
@@ -1278,12 +1284,16 @@ finalize:
             if (keep) {
                 if (w2 != j) v->l2p[w2] = v->l2p[j];
                 w2++;
-            } else if (w2 < v->l2p_dirty) {
-                v->l2p_dirty = w2;
+            } else if (e->type == INVFS_JRN_MAP) {
+                invfs_l2p_entry ue;
+                memset(&ue, 0, sizeof ue);
+                ue.type = INVFS_JRN_UNMAP;
+                ue.inode = e->inode;
+                ue.lba = e->lba;
+                jrn_push_op(v, &ue);
             }
         }
         v->l2p_count = w2;
-        if (v->l2p_dirty > v->l2p_count) v->l2p_dirty = v->l2p_count;
     }
     if (rep->freed || rep->added || rep->updated) {
         if (vol_flush(v) != 0) rc = -1;

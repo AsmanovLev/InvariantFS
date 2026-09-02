@@ -52,6 +52,7 @@ REPO=/home/user/InvariantFS
 B=$REPO/bin
 PACK=$REPO/tools/codecpacks/qcow2.codecpack
 WORK=/dev/shm/wp16qcow2
+trap 'rm -rf "$WORK" /dev/shm/wp16qcow2*.img' EXIT
 IMG=wp16qcow2.img
 IMGMEM=wp16qcow2-mem.img
 rm -rf "$WORK" && mkdir -p "$WORK/orig" "$WORK/out" "$WORK/nopacks" "$WORK/bin" "$WORK/packs"

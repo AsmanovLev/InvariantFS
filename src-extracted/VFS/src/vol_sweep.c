@@ -32,14 +32,23 @@ static void sweep_unwind(invfs_volume *v, uint64_t new_id)
     }
     for (i = 0; i < v->l2p_count; i++) {
         if (v->l2p[i].inode == new_id) {
-            if (w < v->l2p_dirty) v->l2p_dirty = w;
+            /* WP22d: queue the UNMAP op; an earlier flush of this same
+             * session may already have made the MAP durable, so the cancel
+             * must reach the journal too (append-only, never rewritten) */
+            if (v->l2p[i].type == INVFS_JRN_MAP) {
+                invfs_l2p_entry ue;
+                memset(&ue, 0, sizeof ue);
+                ue.type = INVFS_JRN_UNMAP;
+                ue.inode = v->l2p[i].inode;
+                ue.lba = v->l2p[i].lba;
+                jrn_push_op(v, &ue);
+            }
             continue;
         }
         if (w != i) v->l2p[w] = v->l2p[i];
         w++;
     }
     v->l2p_count = w;
-    if (v->l2p_dirty > v->l2p_count) v->l2p_dirty = v->l2p_count;
 }
 
 

@@ -43,6 +43,7 @@ set -o pipefail
 REPO=/home/user/InvariantFS
 B=$REPO/bin
 WORK=/dev/shm/wp18resize
+trap 'rm -rf "$WORK" /dev/shm/wp18r-*.img' EXIT  # e2e hygiene: /dev/shm is a small tmpfs
 IMG=wp18r-a.img      # grow + shrink legs
 IMGB=wp18r-b.img     # batches + container members
 IMGC=wp18r-c.img     # sealed refusal
@@ -170,6 +171,8 @@ for f in $(cd "$WORK/orig" && ls); do
     $B/invf-cp "$IMG" "$WORK/orig/$f" "$f" >/dev/null
 done
 $B/invf-sweep "$IMG" > "$WORK/sweep-a.log" 2>&1 || { cat "$WORK/sweep-a.log"; exit 1; }
+# WP22d: a productive sweep leaves a live checkpoint; resize refuses it
+$B/invf-sweep "$IMG" --realize >/dev/null 2>&1 || true
 $B/invf-fsck "$IMG" | tee "$WORK/fsck-a0.log" | grep -q "^OK$" || fail "fsck not clean pre-resize"
 $B/invf-verify "$IMG" --deep | tee "$WORK/verify-a0.log" | grep -q " 0 corrupt," \
     || fail "verify not clean pre-resize"
@@ -315,6 +318,7 @@ for f in $(cd "$WORK/origb" && ls | grep -v '^bins$'); do
     $B/invf-cp "$IMGB" "$WORK/origb/$f" "$f" >/dev/null
 done
 $B/invf-sweep "$IMGB" > "$WORK/sweep-b.log" 2>&1 || { cat "$WORK/sweep-b.log"; exit 1; }
+$B/invf-sweep "$IMGB" --realize >/dev/null 2>&1 || true
 grep -q "PPMd batch" "$WORK/sweep-b.log" || fail "no text batching happened"
 grep -q "bins.tar!\*: .* -> ZSTD batch" "$WORK/sweep-b.log" \
     || fail "container members were not batched"
@@ -355,6 +359,12 @@ $B/invf-fsck "$IMGC" | grep -q "^OK$" || fail "C: fsck not clean after refusal"
 echo "  sealed volume refused (rc=$RC), volume untouched"
 $B/invf-sweep "$IMGC" --free-redundant > "$WORK/free-c.log" 2>&1 \
     || { cat "$WORK/free-c.log"; exit 1; }
+# the sweep --seal above left a live checkpoint (CKP0) which resize also
+# refuses (it would move the positions the checkpoint pins); realize it,
+# then fsck -f reclaims the degraded-retention leftovers (WP22d: frees
+# under a live checkpoint stay allocated-unregistered until resolution)
+$B/invf-sweep "$IMGC" --realize >/dev/null 2>&1 || true
+$B/invf-fsck "$IMGC" -f >/dev/null 2>&1 || true
 $B/invf-resize "$IMGC" 1G | grep -q "invf-resize: OK" || fail "C: grow after unseal failed"
 $B/invf-fsck "$IMGC" | grep -q "^OK$" || fail "C: fsck not clean post-grow"
 $B/invf-cat "$IMGC" a.c "$WORK/out/a.c" >/dev/null
@@ -368,6 +378,7 @@ for f in a.c h.py bin_x64; do
     $B/invf-cp "$IMGD" "$WORK/orig/$f" "$f" >/dev/null
 done
 $B/invf-sweep "$IMGD" >/dev/null 2>&1
+$B/invf-sweep "$IMGD" --realize >/dev/null 2>&1 || true
 set +e
 INVFS_RESIZE_ABORT_AT=staged $B/invf-resize "$IMGD" 1G > "$WORK/resize-d1.log" 2>&1
 RC=$?

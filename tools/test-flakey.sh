@@ -34,8 +34,12 @@
 #      create/write/delete/rename/sweep/seal/unseal/fsck with the device
 #      toggling up/drop_writes/error, ~$FLAKEY_SOAK_S wall; periodic
 #      gates + final fsck/verify/manifest diff.
-#   6  repeatability: fixed seeds; any failure preserves the backing
-#      image + all logs under tools/flakey/artifacts/<leg>-<ts>/.
+#   6  journal compaction under drops (WP22d): every flush forced into a
+#      slot flip (INVFS_JRN_FORCE_COMPACT) across seeded drop_writes
+#      windows -- incl. the legacy->slot migration flip -- then recovery,
+#      fsck/verify clean, files bit-exact.
+#   (repeatability: fixed seeds; any failure preserves the backing
+#      image + all logs under tools/flakey/artifacts/<leg>-<ts>/.)
 #
 # Env knobs: FLAKEY_SEED (default 20260831), FLAKEY_SOAK_S (default 210),
 #            FLAKEY_WORK (default /tmp/invfs-flakey — tmpfs, needs ~4G of
@@ -202,19 +206,40 @@ recover() { # <label>
     $B/invf-fsck "$DM" >"$FLK/rec-fsck1.log" 2>&1
     grep -E "state:|checkpoint:|OK$|REPAIRED|ISSUES" "$FLK/rec-fsck1.log" | sed 's/^/  fsck: /'
     if grep -q "checkpoint:.*live" "$FLK/rec-fsck1.log"; then
-        info "checkpoint live -> rollback ($label)"
-        $B/invf-rollback "$DM" >"$FLK/rec-rb.log" 2>&1
-        rc=$?
-        if [ "$rc" != 0 ]; then
-            if grep -q "free-redundant" "$FLK/rec-rb.log"; then
-                info "rollback refused (seal live) -> --free-redundant first"
-                $B/invf-sweep "$DM" --free-redundant >>"$FLK/rec-rb.log" 2>&1
-                $B/invf-rollback "$DM" >>"$FLK/rec-rb.log" 2>&1
-                rc=$?
+        local attempt resolved=0
+        for attempt in 1 2 3; do
+            info "checkpoint live -> rollback ($label)"
+            $B/invf-rollback "$DM" >"$FLK/rec-rb.log" 2>&1
+            rc=$?
+            if [ "$rc" != 0 ]; then
+                if grep -q "free-redundant" "$FLK/rec-rb.log"; then
+                    info "rollback refused (seal live) -> --free-redundant first"
+                    $B/invf-sweep "$DM" --free-redundant >>"$FLK/rec-rb.log" 2>&1
+                    $B/invf-rollback "$DM" >>"$FLK/rec-rb.log" 2>&1
+                    rc=$?
+                fi
             fi
+            if [ "$rc" = 3 ]; then
+                # a clean REFUSAL (torn journal staging): the post-sweep
+                # state is untouched by construction, and under silent
+                # drops a torn stage is a legitimate outcome -- accept it
+                # (realize frees the retention registry + clears CKP0,
+                # arming a fresh UP-mode checkpoint that rolls back clean)
+                # and re-run the ladder.
+                info "rollback declined (torn staging); accepting via --realize"
+                $B/invf-sweep "$DM" --realize >>"$FLK/rec-rb.log" 2>&1 || true
+                $B/invf-fsck "$DM" >"$FLK/rec-fsck1.log" 2>&1
+                grep -q "checkpoint:.*live" "$FLK/rec-fsck1.log" || { resolved=1; break; }
+                continue
+            fi
+            [ "$rc" = 0 ] && { info "rollback done"; resolved=1; break; }
+            { echo "  rollback ladder failed:"; cat "$FLK/rec-rb.log"; } >&2
+            return 1
+        done
+        if [ "$resolved" != 1 ]; then
+            echo "  rollback ladder never resolved the checkpoint" >&2
+            return 1
         fi
-        [ "$rc" = 0 ] || { echo "  rollback ladder failed:" >&2; cat "$FLK/rec-rb.log" >&2; return 1; }
-        info "rollback done"
     fi
     $B/invf-fsck "$DM" -f >"$FLK/rec-fsckf.log" 2>&1
     grep -E "REPAIRED|ISSUES|OK$" "$FLK/rec-fsckf.log" | sed 's/^/  fsck -f: /'
@@ -231,8 +256,26 @@ verify_or_reseal() { # <label>
     $B/invf-verify "$DM" --deep >"$FLK/verify.last" 2>&1
     rc=$?
     grep -E "^parity|^deep" "$FLK/verify.last"
+    if [ "$rc" != 0 ] && grep -q "CORRUPT" "$FLK/verify.last"; then
+        # WP22d: a segment's DATA can be dropped by a window after its map
+        # survived (the map is re-durabilized by every compaction; the
+        # data is written once). The map-level cut is blind to it; the
+        # segment CRC is not. fsck -f with the content pass quarantines
+        # the torn records (losses listed loudly; names fall back or go
+        # absent) and the ladder then converges.
+        info "content-corrupt files -> fsck -f (content cut) ($label)"
+        INVFS_FSCK_CONTENT=1 $B/invf-fsck "$DM" -f >"$FLK/rec-content.log" 2>&1 \
+            || { cat "$FLK/rec-content.log"; return 1; }
+        grep -E "content cut|corrupt files" "$FLK/rec-content.log" | sed 's/^/  /' || true
+        $B/invf-fsck "$DM" >"$FLK/rec-fsckq.log" 2>&1
+        grep -q "^OK$" "$FLK/rec-fsckq.log" \
+            || { echo "  fsck not OK after content quarantine:"; cat "$FLK/rec-fsckq.log"; return 1; }
+        $B/invf-verify "$DM" --deep >"$FLK/verify.last" 2>&1
+        rc=$?
+        grep -E "^parity|^deep" "$FLK/verify.last"
+    fi
     [ "$rc" = 0 ] && return 0
-    grep -q "CORRUPT" "$FLK/verify.last" && return 1   # content damage: beyond re-seal
+    grep -q "CORRUPT" "$FLK/verify.last" && return 1   # still corrupt: beyond repair
     if grep -qE "^parity: [0-9]+ sealed stripes, [1-9][0-9]* mismatched" "$FLK/verify.last"; then
         info "torn parity -> re-seal repairs ($label)"
         $B/invf-sweep "$DM" --seal >>"$FLK/rec-reseal.log" 2>&1 || return 1
@@ -628,6 +671,11 @@ seal_resolve() { # <label>
         recover "$label" || fail "$label: recovery ladder dead-ended"
         SEAL_STATE="ABSENT"
     fi
+    # A drop window can take a flush's bitmap pages while keeping the
+    # journal's: a realize's freed blocks then stay marked used on disk --
+    # a leak, never corruption, and fsck -f's rebuild reclaims exactly
+    # those. Reclaim before the structural gate.
+    $B/invf-fsck "$DM" -f >"$FLK/rec-fsckf2.log" 2>&1 || true
     fsck_ok "$label" || fail "$label: fsck after recovery"
     verify_or_reseal "$label" || fail "$label: verify/corrupt content after recovery"
     vol_files_exact "$FLK/orig4" "$label post-recovery" || fail "$label: files not bit-exact"
@@ -651,6 +699,40 @@ leg5() {
     # the soak leaves the device up and unmounted; final global checks
     fsck_ok "post-soak" || fail "fsck post-soak"
     verify_or_reseal "post-soak" || fail "verify post-soak"
+}
+
+# Leg 6 (WP22d): the journal compaction itself under drop windows. Every
+# flush of the driving runs is a forced slot flip (INVFS_JRN_FORCE_COMPACT),
+# so the double-buffer commit (image -> barrier -> selector flip -> barrier)
+# is raced against drop_writes dozens of times -- including the legacy ->
+# slot migration flip at the first dirty close. Whatever tears, replay must
+# land on exactly one CRC-valid side of the flip (or the pre-migration flat
+# log) and the consistent cut must keep every live record fully mapped.
+leg6() {
+    LEG=leg6-compact-flip
+    say "[6] journal compaction (slot flip) under drop_writes windows"
+    mkfs_fresh
+    gen_corpus "$FLK/orig6" $((SEED + 6)) small
+    import_all "$FLK/orig6"
+    manifest_build "$FLK/orig6" > "$FLK/manifest6"
+    fsck_ok "pre-compact" || fail "fsck pre-compact"
+    python3 "$REPO/tools/flakey/dmchaos.py" "$DEV" "$LOOP" "$SEC" \
+        $((SEED + 600)) 900 "$FLK/stop6" drop >"$FLK/chaos6.log" 2>&1 &
+    CHAOS_PID=$!
+    local round src
+    for round in 1 2 3; do
+        INVFS_JRN_FORCE_COMPACT=1 $B/invf-sweep "$DM" >"$FLK/sweep6-$round.log" 2>&1
+        src=$?
+        [ "$src" = 0 ] || info "sweep round $round failed loudly under chaos (acceptable): rc=$src"
+        grep -E "sweep done|failed" "$FLK/sweep6-$round.log" | tail -1 | sed 's/^/  /'
+    done
+    touch "$FLK/stop6"; wait $CHAOS_PID 2>/dev/null; CHAOS_PID=""
+    dm_set up
+    info "compaction chaos over ($(grep -c drop "$FLK/chaos6.log") drop windows)"
+    recover "leg6" || fail "recovery ladder dead-ended"
+    fsck_ok "leg6" || fail "fsck after recovery"
+    verify_clean "leg6" || fail "verify after recovery"
+    vol_files_exact "$FLK/orig6" "post-recovery" || fail "content after compaction chaos"
 }
 
 # -------------------------------------------------------------- main ----
@@ -688,7 +770,8 @@ want_leg 2 && leg2
 want_leg 3 && leg3
 want_leg 4 && leg4
 want_leg 5 && leg5
+want_leg 6 && leg6
 
 say "FLAKEY E2E: PASS  (seed=$SEED, $((SECONDS - T0))s total)"
-echo "  legs: baseline / error-storm / torn-sweep / mid-seal kill / ${SOAK_S}s soak"
+echo "  legs: baseline / error-storm / torn-sweep / mid-seal kill / ${SOAK_S}s soak / compact-flip chaos"
 echo "  scratch $FLK cleaned; on failure the image + logs land in $ART"

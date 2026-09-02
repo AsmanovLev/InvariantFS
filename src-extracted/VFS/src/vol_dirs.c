@@ -505,7 +505,20 @@ int vol_rename(invfs_volume *v, const char *from, const char *to)
         uint64_t toid = vol_find(v, to);
         if (toid != 0) {
             if (dir) return -1;                    /* dir over file: ENOTDIR-ish */
+            /* the victim takes its '!' siblings down with it (the
+             * vol_unlink cascade): a container victim whose members were
+             * only renamed in would otherwise strand them as parentless
+             * live records (the chaos soak reads one as a ghost). */
+            int owns_siblings = 1;
+            uint8_t *obuf = NULL;
+            uint32_t orl = 0;
+            if (meta_read_record_by_id(v, toid, &obuf, &orl, NULL, 0,
+                                       NULL) == 0) {
+                owns_siblings = record_owns_siblings(obuf, orl);
+                free(obuf);
+            }
             if (vol_delete_file(v, to) != 0) return -1;
+            if (owns_siblings) vol_delete_siblings(v, to);
         }
     }
 

@@ -176,7 +176,8 @@ echo "== fixtures: mkfs.xfs + loop-mount populate =="
 MNT=$WORK/mnt
 mkdir -p "$MNT"
 UMOUNTED=0
-cleanup() { if [ "$UMOUNTED" = 0 ]; then sudo umount "$MNT" 2>/dev/null || true; fi; }
+cleanup() { if [ "$UMOUNTED" = 0 ]; then sudo umount "$MNT" 2>/dev/null || true; fi; \
+    rm -rf "$WORK" /dev/shm/wp16xfs*.img 2>/dev/null || true; }
 trap cleanup EXIT
 
 # mkdir, retrying until the inode lands in AG0 (ino < 65536): XFS rotates

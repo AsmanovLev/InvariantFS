@@ -44,6 +44,7 @@ REPO=/home/user/InvariantFS
 B=$REPO/bin
 PACK=$REPO/tools/codecpacks/jxl.codecpack
 WORK=/dev/shm/wp11jxl
+trap 'rm -rf "$WORK" /dev/shm/wp11jxl*.img' EXIT
 IMG=wp11jxl.img
 IMGNEG=wp11jxl-neg.img
 IMGPA=wp11jxl-pa.img

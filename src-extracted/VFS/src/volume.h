@@ -31,6 +31,22 @@ typedef struct {
     uint64_t orphans;
     uint64_t missing;
     uint64_t bad_recs;
+    /* WP22d consistent cut: torn newest versions hidden with a live
+     * fallback (regressed), and names with no readable version at all
+     * (their segments are counted in l2p_miss). -f quarantines both. */
+    uint64_t cut_records;
+    uint64_t lost_files;
+    /* -f content pass: live records whose segment bytes fail the CRC
+     * (a drop window took the data after the maps survived) -- the
+     * content-level consistent cut. Quarantined like the map-level cut. */
+    uint64_t corrupt_files;
+    /* Allocated-but-unreferenced blocks while a sweep checkpoint is live:
+     * retention holds them (never reused), but non-arming processes do not
+     * register them in \x01reten, so they are indistinguishable from true
+     * orphans until the checkpoint resolves. Reported separately, never
+     * counted as issues, and reclaimed by fsck -f after the checkpoint is
+     * gone (report mode then shows them as orphans again). */
+    uint64_t held_ckpt;
 } invfs_fsck_report;
 int vol_fsck_scan(invfs_volume *v, invfs_fsck_report *rep, int fix);
 int  vol_map(invfs_volume *v, uint64_t inode, uint64_t lba, uint64_t pba, uint32_t length);
@@ -58,6 +74,12 @@ int vol_read_named(invfs_volume *v, const char *name,
 int vol_zip_parse_children(const uint8_t *z, size_t zlen,
                            invfs_ast_child_entry *ch, size_t maxch);
 uint64_t vol_find(invfs_volume *v, const char *name);
+/* The live version of a name under the consistent cut (WP22d): the inode
+ * id, or 0 when absent; fills the live record's size/ctime. Raw area
+ * walkers (invf-ls) must defer to this -- they see torn versions the
+ * index has hidden. */
+uint64_t vol_find_ex(invfs_volume *v, const char *name,
+                     uint64_t *size_out, uint64_t *ctime_out);
 
 /* virtual directories (prefix-based; anchor "dir/" is an empty file) */
 /* size/ctime come straight out of the name index, so a listing needs no
@@ -438,17 +460,20 @@ int vol_seal2_repair(invfs_volume *v, invfs_seal2_repair *rep);
 /* ---- WP21: sweep checkpoint + rollback (CKP0 descriptor, invarifs.h) ----
  * invf-sweep arms a checkpoint BEFORE the walk (vol_ckp_begin): the CKP0
  * descriptor records the inode-area and journal append pointers plus a
- * staging run holding the journal prefix (vol_flush rewrites the journal
- * in place, so the pre-sweep L2P survives the sweep only as that copy).
- * While a checkpoint-armed sweep runs, vol_free_blocks does NOT free: the
- * blocks stay allocated and are remembered in the retention registry (the
- * hidden "\x01reten" owner inode, written by vol_ckp_end at sweep end).
+ * staging run holding the journal prefix (the journal is append-only but
+ * compactions replace the active slot, so the pre-sweep L2P survives the
+ * sweep only as that copy). While a checkpoint-armed sweep runs,
+ * vol_free_blocks does NOT free: the blocks stay allocated and are
+ * remembered in the retention registry (the hidden "\x01reten" owner
+ * inode, written by vol_ckp_end at sweep end).
  * Post-sweep sessions free immediately as before (documented best-effort
  * hole for deletes between sweep and rollback).
  *
- * vol_ckp_realize (invf-sweep --realize, and automatically at the start
- * of the next sweep) deletes the registry -- freeing every retained block
- * -- and clears CKP0: the point of no return.
+ * vol_ckp_realize (invf-sweep --realize) deletes the registry -- freeing
+ * every retained block -- and clears CKP0: the point of no return. A bare
+ * sweep instead realizes AFTER arming (WP22d): vol_ckp_begin stages the
+ * current journal and writes the new CKP0 first, and only then deletes
+ * the old registry -- the volume always has one live net.
  *
  * vol_rollback (invf-rollback, offline) restores the staged journal and
  * truncates the inode area to the checkpoint pointers, then runs the
