@@ -227,8 +227,23 @@ int main(int argc, char **argv)
             if (s1 + INVFS_BLOCK_SIZE <= size_bytes)
                 bad |= blkio_pwrite(&io, s1, zero, INVFS_BLOCK_SIZE) != 0;
         }
-        if (istart + INVFS_BLOCK_SIZE <= size_bytes)
-            bad |= blkio_pwrite(&io, istart, zero, INVFS_BLOCK_SIZE) != 0;
+        if (istart + INVFS_BLOCK_SIZE <= size_bytes) {
+            /* Zero the WHOLE inode area, not just its head block: the
+             * record scan stops at the first invalid record, and fresh
+             * records written by the first imports outgrow a one-block
+             * head within minutes -- anything past it would be the previous
+             * volume's still-CRC-valid records coming back from the dead
+             * (seen as a flood of l2p_miss on a re-mkfs'd device). */
+            uint64_t iend = ((uint64_t)sb.metadata_zone_start +
+                             sb.metadata_zone_blocks) * INVFS_BLOCK_SIZE;
+            uint64_t p = istart;
+            while (p < iend && !bad) {
+                size_t c = zn;
+                if (p + c > iend) c = (size_t)(iend - p);
+                bad |= blkio_pwrite(&io, p, zero, c) != 0;
+                p += c;
+            }
+        }
         free(zero);
         if (bad) {
             fprintf(stderr, "cannot erase the old filesystem on %s\n", path);

@@ -162,6 +162,35 @@ locked in by a leg:
   check now treats "parent!member" names as engine-generated content of
   the (present) parent, never written directly. (soak.py)
 
+## F5 — mkfs on a dirty device resurrects the previous volume (leg 6)
+
+**Found by:** leg 6 (compact-flip), the first leg with a *pre-chaos* fsck
+gate — the bug is pre-existing, latent since the device path exists.
+
+**Symptom:** full-suite leg 6 fails at `fsck pre-compact` with the volume
+full of leg 5's files (dozens of `l2p cut`/`l2p_miss`). The probe fsck
+right after mkfs shows a fresh volume; after the first imports the old
+volume's records come back to life.
+
+**Root cause:** mkfs's device erase zeroed only the FIRST BLOCK of the
+inode area (plus the 1 MB head and both journal slot headers). The record
+scan stops at the first invalid record; fresh import records outgrow the
+zeroed 4 KiB head within a few files, and everything past it is the
+previous volume's still-CRC-valid records — adopted wholesale, with an
+empty journal → every segment unmapped (l2p_miss flood). Image files never
+hit this: CREATE_ALWAYS gives an all-zero area.
+
+**Fix:** mkfs now zeroes the whole inode area on devices (chunked loop);
+leg 6 gained a post-mkfs regression gate (`live files: 0`).
+
+**Also fixed in this session:** `want_leg` learned comma lists
+(`FLAKEY_ONLY=5,6`) and kept the empty-means-all default (a first version
+of that change silently skipped every leg — a "1 s PASS" suite).
+
+**Meta-lesson:** never edit a bash script while it runs (incremental
+reads + byte-offset shift executed a `_leg` fragment mid-suite once);
+edit between runs only.
+
 ## Tier status
 
 legs 1 (baseline), 3 (torn sweep), 4 (crash mid-seal) PASS;

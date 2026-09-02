@@ -58,3 +58,20 @@ Repro: `FLAKEY_ONLY=5 FLAKEY_SEED=20260831 bash tools/test-flakey.sh`
   Losers' branches are discarded; findings stay in this file.
 
 ## Findings log (append-only)
+
+## 2026-09-03 — RESOLUTION (maintainer, no race needed)
+
+F4 did NOT reproduce after WP22d: leg5 seed 20260831 (the original failing
+seed) PASS, then full flakey suite PASS. The WP22d retention hardening
+("nothing is freed while a checkpoint is live", vol_free_blocks gate) is
+the mechanism-level fix for the F4 hypothesis chain (post-checkpoint free
+of a pre-checkpoint block -> reuse -> rollback resurrects a stale mapping).
+
+While hunting, a DIFFERENT latent bug was found and fixed instead — F5:
+mkfs on a dirty device zeroed only the first 4 KiB of the inode area, so
+imports past one block resurrected the previous volume's CRC-valid records
+(leg6 pre-compact gate caught it). mkfs now zeroes the whole inode area on
+devices; leg6 has a post-mkfs regression gate. See FINDINGS.md F5.
+
+The race is stood down. If F4-class symptoms (THIRD STATE / l2p_miss after
+rollback under chaos) reappear, revive the hypotheses R1-R6 above.

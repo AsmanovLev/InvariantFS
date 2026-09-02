@@ -56,7 +56,7 @@ REPO=/home/user/InvariantFS
 B=$REPO/bin
 FLK=${FLAKEY_WORK:-/tmp/invfs-flakey}
 ART=$REPO/tools/flakey/artifacts
-DEV=invfs_flakey
+DEV=${FLAKEY_DEV:-invfs_flakey}
 DM=/dev/mapper/$DEV
 BACK=$FLK/backing.img
 MNT=$FLK/mnt
@@ -114,7 +114,7 @@ preserve() {   # copy the ground truth + every log for replay
 
 fail() { echo; echo "FAIL[$LEG]: $*" >&2; FAILED=1; preserve; exit 1; }
 
-want_leg() { [ -z "$ONLY" ] || [ "$ONLY" = "$1" ]; }
+want_leg() { [ -z "$ONLY" ] && return 0; case ",$ONLY," in *",$1,"*) return 0;; esac; return 1; }
 
 # ------------------------------------------------------------- devices --
 
@@ -712,6 +712,11 @@ leg6() {
     LEG=leg6-compact-flip
     say "[6] journal compaction (slot flip) under drop_writes windows"
     mkfs_fresh
+    # re-mkfs on a dirty device must leave NO trace of the previous volume
+    # (the inode-area full-erase regression guard)
+    $B/invf-fsck "$DM" >"$FLK/fsck6-postmkfs.log" 2>&1 || true
+    grep -qE 'live files:\s+0$' "$FLK/fsck6-postmkfs.log" \
+        || { cat "$FLK/fsck6-postmkfs.log"; fail "mkfs left stale records (pre-compact)"; }
     gen_corpus "$FLK/orig6" $((SEED + 6)) small
     import_all "$FLK/orig6"
     manifest_build "$FLK/orig6" > "$FLK/manifest6"
