@@ -53,6 +53,20 @@
  * checkpoint is live (rollback truncates to absolute checkpoint positions)
  * or on a read-only volume; INVFS_NO_COMPACT=1 disables the automatic
  * pass. --compact forces the pass alone (no walk, no checkpoint).
+ *
+ * WP23: --extract-packs <dir> is the sweepboot helper mode (see
+ * tools/sweepboot-init.sh): with NO FUSE MOUNT and no sweep, the volume
+ * is opened through the engine alone and the codecpack directory stored
+ * ON the volume ("/.invfs/codecpacks" when present, else
+ * "/usr/lib/invfs/codecpacks") is materialized into <dir> (a tmpfs
+ * scratch in the initramfs), which is then printed on stdout as the
+ * mode's single payload line. The pack files are plain files -- on a
+ * swept volume they are PPMd/ZSTD batch members, decoded in-process by
+ * the ordinary read path -- so a maintenance boot can run the sweep with
+ * INVFS_CODECPACKS=<dir> and the volume is SELF-HOSTING: it carries the
+ * very tools its own sweep needs. Read-only volumes open fine (the mode
+ * writes nothing to the volume; read heat accrues exactly like any
+ * mount's reads).
  */
 #define _CRT_SECURE_NO_WARNINGS
 
@@ -64,6 +78,8 @@
 #ifndef _WIN32
 #include <signal.h>
 #include <unistd.h>
+#include <errno.h>
+#include <sys/stat.h>
 #endif
 
 #include "invarifs.h"
@@ -136,6 +152,147 @@ static uint64_t sw_hash(const char *s)
     return h;
 }
 
+/* ---- WP23: --extract-packs (sweepboot self-hosting) -------------------
+ * The sweep's codecpacks are expected to live ON the rootfs volume (that
+ * is what "self-hosting" means), but the maintenance boot needs them
+ * BEFORE the volume is mounted -- and a FUSE mount is exactly what the
+ * sweep must be exclusive against. So the packs are read out through the
+ * engine alone: plain files, decoded in-process by the ordinary read
+ * path (a swept volume keeps them as PPMd/ZSTD batch members; nothing
+ * here depends on their stored shape).
+ */
+
+/* mkdir -p for the extraction target; 0 = exists/created */
+static int xp_mkdirs(const char *path)
+{
+    char tmp[1024];
+    size_t n = strlen(path), i;
+    if (n == 0 || n >= sizeof tmp) return -1;
+    memcpy(tmp, path, n + 1);
+    for (i = 1; i <= n; i++) {
+        if (tmp[i] != '/' && tmp[i] != '\0') continue;
+        tmp[i] = '\0';
+        if (mkdir(tmp, 0755) != 0 && errno != EEXIST) return -1;
+        tmp[i] = '/';
+    }
+    return 0;
+}
+
+/* one volume file -> <dstdir>/<rel>; parents created; mode = the
+ * recorded meta when present, 0755 otherwise (pack helpers under bin/
+ * are exec'd by name, so an executable default is the safe one) */
+static int xp_file(invfs_volume *v, const char *vname, const char *rel,
+                   const char *dstdir)
+{
+    char dst[1024];
+    uint8_t *buf = NULL;
+    size_t len = 0;
+    uint64_t id;
+    FILE *f;
+    invfs_meta_pub m;
+    long mode = 0755;
+    int rc = -1;
+
+    if (snprintf(dst, sizeof dst, "%s/%s", dstdir, rel) >= (int)sizeof dst)
+        return -1;
+    id = vol_find(v, vname);
+    if (!id) return -1;
+    if (vol_read_file(v, id, &buf, &len) != 0) return -1;
+    {
+        char *sl = strrchr(dst, '/');
+        if (sl) {
+            *sl = '\0';
+            if (xp_mkdirs(dst) != 0) { free(buf); return -1; }
+            *sl = '/';
+        }
+    }
+    f = fopen(dst, "wb");
+    if (!f) { free(buf); return -1; }
+    if (len && fwrite(buf, 1, len, f) != len) { fclose(f); free(buf); return -1; }
+    if (fclose(f) != 0) { free(buf); return -1; }
+    if (vol_get_meta(v, id, &m) == 0 && (m.mode & 0777))
+        mode = m.mode & 0777;
+    if (chmod(dst, (mode_t)mode) != 0) { free(buf); return -1; }
+    free(buf);
+    rc = 0;
+    return rc;
+}
+
+static int xp_walk(invfs_volume *v, const char *vdir, const char *rel,
+                   const char *dstdir, unsigned depth,
+                   unsigned long *files_out)
+{
+    invfs_dirent *ents = NULL;
+    int cap = 256, n, i, rc = 0;
+
+    for (;;) {   /* grow the listing window until the dir fits */
+        invfs_dirent *ne = realloc(ents, (size_t)cap * sizeof *ents);
+        if (!ne) { free(ents); return -1; }
+        ents = ne;
+        n = vol_list_dir(v, vdir, ents, cap);
+        if (n < 0) { free(ents); return -1; }
+        if (n < cap) break;
+        cap *= 2;
+    }
+    for (i = 0; i < n && rc == 0; i++) {
+        char vchild[512], rchild[512];
+        if (snprintf(vchild, sizeof vchild, "%s/%s", vdir, ents[i].name) >=
+                (int)sizeof vchild ||
+            snprintf(rchild, sizeof rchild, "%s%s%s", rel, rel[0] ? "/" : "",
+                     ents[i].name) >= (int)sizeof rchild) {
+            rc = -1; break;
+        }
+        if (ents[i].is_dir) {
+            if (depth < 16)
+                rc = xp_walk(v, vchild, rchild, dstdir, depth + 1, files_out);
+            else
+                rc = -1;
+        } else {
+            if (xp_file(v, vchild, rchild, dstdir) != 0) {
+                fprintf(stderr, "extract-packs: cannot materialize %s\n",
+                        vchild);
+                rc = -1;
+            } else {
+                (*files_out)++;
+            }
+        }
+    }
+    free(ents);
+    return rc;
+}
+
+/* The mode body: open volume already held. Returns 0 (dir printed on
+ * stdout even when the volume carries no packs -- an empty dir is the
+ * honest "nothing to self-host with") or 1. */
+static int extract_packs(invfs_volume *vol, const char *dir)
+{
+    static const char *const roots[] = {
+        ".invfs/codecpacks",          /* /.invfs/codecpacks */
+        "usr/lib/invfs/codecpacks",   /* the system location */
+    };
+    const char *root = NULL;
+    unsigned long files = 0;
+    size_t i;
+
+    for (i = 0; i < sizeof roots / sizeof roots[0]; i++)
+        if (vol_is_dir(vol, roots[i])) { root = roots[i]; break; }
+    if (xp_mkdirs(dir) != 0) {
+        fprintf(stderr, "extract-packs: cannot create %s\n", dir);
+        return 1;
+    }
+    if (root && xp_walk(vol, root, "", dir, 0, &files) != 0) {
+        fprintf(stderr, "extract-packs: walk of /%s failed\n", root);
+        return 1;
+    }
+    if (root)
+        fprintf(stderr, "extract-packs: /%s -> %s (%lu files)\n",
+                root, dir, files);
+    else
+        fprintf(stderr, "extract-packs: volume carries no codecpack dir\n");
+    printf("%s\n", dir);   /* the payload line sweepboot-init.sh reads */
+    return 0;
+}
+
 static int sw_find(sw_bucket **tab, size_t mask, char (*names)[256],
                    const char *name)
 {
@@ -187,6 +344,7 @@ int main(int argc, char **argv)
     const invfs_superblock *sb;
     int err, dry = 0, seal = 0, unseal = 0, bench = 0, realize = 0;
     int fast = 0, compact_only = 0;
+    const char *extract_dir = NULL;    /* WP23 --extract-packs mode */
     double rb_f = -1.0, rp_f = -1.0;   /* <0: flag absent */
     int rp_algo = 0;                   /* explicit :rs-vm/:rs-cauchy suffix */
     int auto_reseal = 0;
@@ -214,7 +372,10 @@ int main(int argc, char **argv)
                 "  --fast      cheap pass: RAW files take the generic\n"
                 "              per-segment recompress only (no classification,\n"
                 "              transcodes, decomposition, batching or dedupe)\n"
-                "  --compact   run only the inode-area compaction pass\n",
+                "  --compact   run only the inode-area compaction pass\n"
+                "           [--extract-packs <dir>]  (WP23 sweepboot: copy the\n"
+                "                         volume's codepack dir to <dir>,\n"
+                "                         engine-side, no sweep, no FUSE)\n",
                 argv[0]);
         return 2;
     }
@@ -229,6 +390,8 @@ int main(int argc, char **argv)
             fast = 1;
         } else if (strcmp(a, "--compact") == 0) {
             compact_only = 1;
+        } else if (strcmp(a, "--extract-packs") == 0 && i + 1 < argc) {
+            extract_dir = argv[++i];
         } else if (strcmp(a, "--seal") == 0) {
             seal = 1;
         } else if (strcmp(a, "--unseal") == 0 ||
@@ -272,8 +435,13 @@ int main(int argc, char **argv)
         }
     }
     if (dry + unseal + bench > 0 &&
-        (seal || rb_f >= 0 || rp_f >= 0 || realize)) {
+        (seal || rb_f >= 0 || rp_f >= 0 || realize || extract_dir)) {
         fprintf(stderr, "conflicting flags\n");
+        return 2;
+    }
+    if (extract_dir &&
+        (dry || unseal || bench || seal || rb_f >= 0 || rp_f >= 0 || realize)) {
+        fprintf(stderr, "--extract-packs is a standalone mode\n");
         return 2;
     }
     if (seal && (rb_f >= 0 || rp_f >= 0)) {
@@ -387,6 +555,16 @@ int main(int argc, char **argv)
         }
         vol_close(vol);
         return crc < 0 ? 1 : 0;
+    }
+
+    /* WP23 --extract-packs: a standalone, read-only, engine-side mode for
+     * the sweepboot maintenance boot (tools/sweepboot-init.sh). No sweep,
+     * no checkpoint, no seal -- copy the on-volume codecpack dir out and
+     * leave. */
+    if (extract_dir) {
+        int xrc = extract_packs(vol, extract_dir);
+        vol_close(vol);
+        return xrc;
     }
 
     /* WP20b: apply the requested redundancy configuration (persisted into

@@ -25,6 +25,20 @@ for a in $(cat /proc/cmdline); do
 done
 ROOTDEV="${ROOTDEV:-/dev/vda}"
 
+# WP23 sweepboot: `invfs.sweepboot` on the cmdline turns this boot into a
+# maintenance pass — the sweep runs ENGINE-SIDE (the volume is never
+# FUSE-mounted here) and reboot -f hands back to the normal entry. The
+# branch script never blocks the fall-through to a normal boot.
+SWEEPBOOT=0
+for a in $(cat /proc/cmdline); do
+    case "$a" in invfs.sweepboot) SWEEPBOOT=1 ;; esac
+done
+if [ "$SWEEPBOOT" = 1 ] && [ -f /sweepboot-init.sh ]; then
+    echo "[init] invfs.sweepboot: maintenance boot for $ROOTDEV"
+    . /sweepboot-init.sh "$ROOTDEV"
+    echo "[init] sweepboot returned without rebooting; NORMAL boot continues"
+fi
+
 n=0
 while [ $n -lt 20 ]; do
     [ -b "$ROOTDEV" ] && break

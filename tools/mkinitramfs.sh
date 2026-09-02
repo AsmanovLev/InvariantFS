@@ -1,5 +1,6 @@
 #!/bin/bash
-# Build the InvariantFS M1 initramfs (busybox + invf-fuse + fuse.ko).
+# Build the InvariantFS M1 initramfs (busybox + invf-fuse + invf-sweep +
+# sweepboot branch + fuse.ko).
 # Output: vm/initramfs.cpio.gz
 set -eu
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -17,6 +18,15 @@ ln -sf busybox bin/sh
 # engine daemon + shared libs (host paths -> /usr/local)
 cp "$ROOT/bin/invf-fuse" usr/local/bin/
 chmod 755 usr/local/bin/invf-fuse
+# WP23 sweepboot: the offline sweep + the /init branch script. A static
+# invf-sweep would spare the shared libs, but this distro ships no
+# libzstd.a/libz.a (checked /usr/lib64), so the dynamic deps ride along
+# -- invf-sweep needs exactly the set invf-fuse already pulls in, minus
+# libfuse (ldd bin/invf-sweep: libzstd.so.1, libz.so.1, libc.so.6).
+cp "$ROOT/bin/invf-sweep" usr/local/bin/
+chmod 755 usr/local/bin/invf-sweep
+cp "$ROOT/tools/sweepboot-init.sh" sweepboot-init.sh
+chmod 755 sweepboot-init.sh
 for lib in libzstd.so.1 libz.so.1 libfuse3.so.4 libc.so.6; do
     cp -L "/lib64/$lib" lib64/
 done

@@ -84,8 +84,9 @@ static void wsession_unlink(invfs_wsession *s)
 /* The old record supports segment-aliasing only when it is exactly what
  * vol_create_file / a prior session commit produces: no container
  * children, every entry a plain per-segment NONE/LZ4 chunk keyed by its
- * own index. Anything else (ZSTD/PPMD/batched/container/pack/whole-file
- * blobs) goes through the materialize path instead. */
+ * own index (WP23: or a ZSTD chunk -- the adaptive RAW effort writes
+ * those under fill pressure). Anything else (PPMD/batched/container/
+ * pack/whole-file blobs) goes through the materialize path instead. */
 static int wsession_simple_old(const invfs_ast_hdr *ah,
                                const invfs_ast_block_entry *ents)
 {
@@ -95,7 +96,8 @@ static int wsession_simple_old(const invfs_ast_hdr *ah,
         if (ents[i].length == 0 || ents[i].length > SEGMENT_SIZE ||
             ents[i].block_id != i || ents[i].block_offset != 0)
             return 0;
-        if (ents[i].algo != INVFS_ALGO_NONE && ents[i].algo != INVFS_ALGO_LZ4)
+        if (ents[i].algo != INVFS_ALGO_NONE && ents[i].algo != INVFS_ALGO_LZ4 &&
+            ents[i].algo != INVFS_ALGO_ZSTD)
             return 0;
     }
     return 1;
@@ -125,6 +127,69 @@ static int wsession_grow(invfs_wsession *s, uint32_t count)
 }
 
 
+/* ---- WP23: adaptive RAW-zone compression effort ----------------------
+ * Per-64K-segment codec choice at WRITE time, keyed on the RAW zone's
+ * fill pressure (v->raw_free is maintained incrementally by alloc/free,
+ * so the check is two loads and a divide):
+ *
+ *     RAW fill < 80%   ->  LZ4      (the historical default, unchanged)
+ *     RAW fill >= 80%  ->  ZSTD level 3
+ *     RAW fill >= 95%  ->  ZSTD level 6
+ *
+ * Rationale: throttle-time-into-compression. Past 80% the volume is
+ * climbing doc/12's watermark ladder anyway -- writers are about to be
+ * throttled and the sweep woken, so the writer's CPU is the cheap
+ * resource. Spend it making the segment smaller: every block the codec
+ * shaves off is a block the RAW zone still has.
+ *
+ * Precedence: an explicit operator choice beats pressure, always --
+ * INVFS_PROFILE=turbo still stores verbatim (NONE) without even a codec
+ * attempt, and INVFS_RAW_ADAPT=0 pins the legacy LZ4-only behaviour.
+ * A segment that does not shrink under the chosen codec falls back to
+ * verbatim NONE, exactly like the LZ4 path before it.
+ *
+ * On disk there is nothing new: the AST entry's algo field already
+ * carries the per-segment codec and the read path dispatches per
+ * segment, so one file may freely mix NONE/LZ4/ZSTD segments -- a write
+ * that crosses the 80% line mid-file is representable by construction. */
+static const struct { unsigned fill_pct; int zlevel; } raw_effort_ladder[] = {
+    { 95, 6 },   /* highest pressure first: first match wins */
+    { 80, 3 },
+};
+
+/* INVFS_RAW_ADAPT=0 opts out (default ON). Parsed once per process -- the
+ * same single-volume discipline the INVFS_PROFILE parse documents (the
+ * tools hold one volume per process, so the env IS the volume's
+ * context). */
+static int raw_adapt_enabled(void)
+{
+    static int memo = -1;
+    if (memo < 0) {
+        const char *ra = getenv("INVFS_RAW_ADAPT");
+        memo = !(ra && strcmp(ra, "0") == 0);
+    }
+    return memo;
+}
+
+/* The ZSTD effort level the current RAW-zone fill asks for; 0 = stay
+ * with LZ4. */
+static int raw_effort_zlevel(const invfs_volume *v)
+{
+    uint64_t total = v->sb.raw_zone_blocks;
+    unsigned pct;
+    size_t i;
+    if (!raw_adapt_enabled() || total == 0) return 0;
+    /* RAW exhausted means the segment spills to SHADOW (100% pressure):
+     * maximum effort either way -- the smaller the segment, the less it
+     * costs wherever it lands. */
+    pct = (unsigned)(((total - v->raw_free) * 100) / total);
+    for (i = 0; i < sizeof raw_effort_ladder / sizeof raw_effort_ladder[0]; i++)
+        if (pct >= raw_effort_ladder[i].fill_pct)
+            return raw_effort_ladder[i].zlevel;
+    return 0;
+}
+
+
 /* Encode + write + map one segment for the session: enc_len plaintext
  * bytes (the entry's length -- the read path decompresses with length as
  * the output cap, so the stored payload must decode to exactly enc_len).
@@ -136,25 +201,51 @@ static int wsession_write_seg_n(invfs_wsession *s, uint32_t j,
                                 const uint8_t *plain, size_t enc_len)
 {
     invfs_volume *v = s->v;
+    /* one buffer serves both codecs: ZSTD's bound covers LZ4's for every
+     * size this path encodes (<= 64 KB), but take the max explicitly --
+     * the bound is a contract, not a benchmark result */
     int cbound = LZ4_compressBound((int)enc_len);
     uint8_t *cbuf;
     uint8_t hdr[8];
     uint32_t csize = 0, seg_crc;
     uint64_t pba, phys_blocks, prev_pba = 0, prev_len = 0;
-    int zone, lz4_used = 0, have_prev = 0;
+    int zone, algo_used = INVFS_ALGO_NONE, have_prev = 0;
+    {
+        size_t zb = ZSTD_compressBound(enc_len);
+        if (zb > (size_t)cbound) cbound = (int)zb;
+    }
 
     if (wsession_grow(s, j + 1) != 0) return -1;
     cbuf = malloc((size_t)cbound + 8 + INVFS_BLOCK_SIZE);
     if (!cbuf) return -1;
-    if (v->profile != INVFS_PROFILE_TURBO)
-        csize = (uint32_t)LZ4_compress_default((const char *)plain,
-                                               (char *)(cbuf + 8),
-                                               (int)enc_len, cbound);
-    if (csize == 0 || csize >= (uint32_t)enc_len) {
+    if (v->profile != INVFS_PROFILE_TURBO) {
+        int zlevel = raw_effort_zlevel(v);
+        if (getenv("INVFS_DEBUG"))
+            fprintf(stderr, "[rawadapt] %s seg %u: raw fill %llu/%llu, zlevel %d\n",
+                    s->name, j,
+                    (unsigned long long)(v->sb.raw_zone_blocks - v->raw_free),
+                    (unsigned long long)v->sb.raw_zone_blocks, zlevel);
+        if (zlevel) {
+            /* pressure rung (WP23): ZSTD at the ladder's level. A rung
+             * that cannot shrink the segment means LZ4 would not either
+             * -- skip the retry, store verbatim below. */
+            size_t zr = ZSTD_compress((char *)(cbuf + 8), (size_t)cbound,
+                                      (const char *)plain, enc_len, zlevel);
+            if (!ZSTD_isError(zr) && zr < (size_t)enc_len) {
+                csize = (uint32_t)zr;
+                algo_used = INVFS_ALGO_ZSTD;
+            }
+        } else {
+            csize = (uint32_t)LZ4_compress_default((const char *)plain,
+                                                   (char *)(cbuf + 8),
+                                                   (int)enc_len, cbound);
+            if (csize != 0 && csize < (uint32_t)enc_len)
+                algo_used = INVFS_ALGO_LZ4;
+        }
+    }
+    if (algo_used == INVFS_ALGO_NONE) {
         csize = (uint32_t)enc_len;
         memcpy(cbuf + 8, plain, enc_len);
-    } else {
-        lz4_used = 1;
     }
     seg_crc = invfs_crc32c(cbuf + 8, csize);
     hdr[0]=(uint8_t)(csize&0xFF); hdr[1]=(uint8_t)((csize>>8)&0xFF);
@@ -205,7 +296,7 @@ static int wsession_write_seg_n(invfs_wsession *s, uint32_t j,
     s->ents[j].file_offset = (uint64_t)j * SEGMENT_SIZE;
     s->ents[j].length = (uint64_t)enc_len;
     s->ents[j].zone = (uint32_t)zone;
-    s->ents[j].algo = lz4_used ? INVFS_ALGO_LZ4 : INVFS_ALGO_NONE;
+    s->ents[j].algo = (uint32_t)algo_used;
     s->ents[j].block_id = j;
     s->ents[j].block_offset = 0;
     if (j >= s->n_ents) s->n_ents = j + 1;
@@ -249,6 +340,14 @@ static int wsession_seg_current(invfs_wsession *s, uint32_t j,
             if (rc == 0 && s->ents[j].length < SEGMENT_SIZE)
                 memset(plain + s->ents[j].length, 0,
                        SEGMENT_SIZE - (size_t)s->ents[j].length);
+        } else if (s->ents[j].algo == INVFS_ALGO_ZSTD) {
+            /* WP23: this session's own pressure-rung segment */
+            size_t zg = ZSTD_decompress((char *)plain, SEGMENT_SIZE,
+                                        blob, csize);
+            rc = (!ZSTD_isError(zg) && zg == s->ents[j].length) ? 0 : -1;
+            if (rc == 0 && s->ents[j].length < SEGMENT_SIZE)
+                memset(plain + s->ents[j].length, 0,
+                       SEGMENT_SIZE - (size_t)s->ents[j].length);
         } else {
             rc = csize == s->ents[j].length ? 0 : -1;
             if (rc == 0) memcpy(plain, blob, csize);
@@ -279,6 +378,12 @@ static int wsession_seg_current(invfs_wsession *s, uint32_t j,
             rc = LZ4_decompress_safe((const char *)blob, (char *)plain,
                                      (int)csize, (int)SEGMENT_SIZE)
                  == (int)s->ents[j].length ? 0 : -1;
+        } else if (s->ents[j].algo == INVFS_ALGO_ZSTD) {
+            /* WP23: an aliased adaptive-effort segment of the old record
+             * (plain[] is zeroed up front, so the tail needs no pad) */
+            size_t zg = ZSTD_decompress((char *)plain, SEGMENT_SIZE,
+                                        blob, csize);
+            rc = (!ZSTD_isError(zg) && zg == s->ents[j].length) ? 0 : -1;
         } else {
             rc = csize == s->ents[j].length ? 0 : -1;
             if (rc == 0) memcpy(plain, blob, csize);
