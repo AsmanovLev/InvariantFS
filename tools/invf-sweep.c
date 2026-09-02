@@ -40,6 +40,19 @@
  * it by hand. Checkpointing is declined (the sweep runs without one) on
  * read-only/recovering volumes, under a live redundancy seal (rollback
  * would invalidate the parity stripes), and with INVFS_CHECKPOINT=0.
+ *
+ * WP22e: --fast narrows the per-file decision to "generic or nothing"
+ * (RAW files take the per-segment profile recompress; classification,
+ * container decomposition, codec transcodes, batching, dedupe and the
+ * promotion pass never run; the walk, the checkpoint and the reports are
+ * the usual ones).
+ *
+ * WP22e: the run ends with online inode-area compaction when the dead
+ * share of the area (superseded versions + tombstones) exceeds ~30% of the
+ * used bytes ("inode area compacted: X -> Y bytes"). Never while a CKP0
+ * checkpoint is live (rollback truncates to absolute checkpoint positions)
+ * or on a read-only volume; INVFS_NO_COMPACT=1 disables the automatic
+ * pass. --compact forces the pass alone (no walk, no checkpoint).
  */
 #define _CRT_SECURE_NO_WARNINGS
 
@@ -173,6 +186,7 @@ int main(int argc, char **argv)
     invfs_volume *vol;
     const invfs_superblock *sb;
     int err, dry = 0, seal = 0, unseal = 0, bench = 0, realize = 0;
+    int fast = 0, compact_only = 0;
     double rb_f = -1.0, rp_f = -1.0;   /* <0: flag absent */
     int rp_algo = 0;                   /* explicit :rs-vm/:rs-cauchy suffix */
     int auto_reseal = 0;
@@ -190,12 +204,17 @@ int main(int argc, char **argv)
 
     if (argc < 2) {
         fprintf(stderr,
-                "usage: %s <image> [--dry-run] [--seal|--unseal]\n"
+                "usage: %s <image> [--dry-run] [--fast] [--compact]\n"
+                "           [--seal|--unseal]\n"
                 "           [--redundant-blocks <f>]\n"
                 "           [--redundant-paranoic <f>[:rs-vm|rs-cauchy]]\n"
                 "           [--free-redundant] [--redundant-bench]\n"
                 "           [--realize]  (accept the last sweep: free its\n"
-                "                         retention registry, clear CKP0)\n",
+                "                         retention registry, clear CKP0)\n"
+                "  --fast      cheap pass: RAW files take the generic\n"
+                "              per-segment recompress only (no classification,\n"
+                "              transcodes, decomposition, batching or dedupe)\n"
+                "  --compact   run only the inode-area compaction pass\n",
                 argv[0]);
         return 2;
     }
@@ -206,6 +225,10 @@ int main(int argc, char **argv)
             dry = 1;
         } else if (strcmp(a, "--realize") == 0) {
             realize = 1;
+        } else if (strcmp(a, "--fast") == 0) {
+            fast = 1;
+        } else if (strcmp(a, "--compact") == 0) {
+            compact_only = 1;
         } else if (strcmp(a, "--seal") == 0) {
             seal = 1;
         } else if (strcmp(a, "--unseal") == 0 ||
@@ -255,6 +278,13 @@ int main(int argc, char **argv)
     }
     if (seal && (rb_f >= 0 || rp_f >= 0)) {
         fprintf(stderr, "--seal conflicts with --redundant-*\n");
+        return 2;
+    }
+    /* --compact is the pass alone: no walk, no checkpoint, no seal */
+    if (compact_only &&
+        (dry || fast || seal || unseal || bench || realize ||
+         rb_f >= 0 || rp_f >= 0)) {
+        fprintf(stderr, "--compact conflicts with the sweep/seal flags\n");
         return 2;
     }
 
@@ -328,6 +358,36 @@ int main(int argc, char **argv)
         }
     }
     sb = vol_sb(vol);
+
+    /* WP22e: an interrupted inode-area compaction left CMP0 armed and the
+     * volume latched read-only -- sweeping on it would append onto a
+     * possibly torn area. invf-fsck -f rolls the staged stream in
+     * (idempotent) and clears the latch. */
+    if (vol_compact_pending(vol)) {
+        fprintf(stderr, "invf-sweep: %s: an interrupted inode-area "
+                "compaction is pending; run invf-fsck -f %s to finish it "
+                "first\n", img, img);
+        vol_close(vol);
+        return 1;
+    }
+
+    /* WP22e --compact: the compaction pass alone (no realize, no
+     * checkpoint, no walk, no seal). The engine prints the outcome or the
+     * decline reason (a live CKP0 checkpoint bars compaction: rollback
+     * truncates to its absolute positions). */
+    if (compact_only) {
+        int crc;
+        uint64_t before = 0, after = 0;
+        crc = vol_inode_compact(vol, &before, &after);
+        if (crc > 0) {
+            printf("inode area compacted: %llu -> %llu bytes\n",
+                   (unsigned long long)before, (unsigned long long)after);
+            if (vol_flush(vol) != 0)
+                fprintf(stderr, "warning: final flush failed\n");
+        }
+        vol_close(vol);
+        return crc < 0 ? 1 : 0;
+    }
 
     /* WP20b: apply the requested redundancy configuration (persisted into
      * the RDP0 descriptor by vol_seal at the end of the run) */
@@ -562,7 +622,19 @@ int main(int argc, char **argv)
              * sealed by vol_tz_flush below), 11 = exe-as-container carve
              * (WP14b M2), >=100 = codecpack transcode (100+algo, WP13),
              * <0 = hard error */
-            int rc = vol_sweep_one(vol, inodes[i], names[i]);
+            int rc;
+            if (fast) {
+                /* WP22e --fast: the decision narrows to "generic or
+                 * nothing" (vol_sweep_file_generic: 0 = swept to Shadow,
+                 * 1 = nothing to do, <0 = hard error). No per-file line:
+                 * the generic floor prints none in the full pass either. */
+                rc = vol_sweep_file_generic(vol, inodes[i]);
+                if (rc == 0) swept++;
+                else if (rc > 0) skipped++;
+                else failed++;
+                goto progress;
+            }
+            rc = vol_sweep_one(vol, inodes[i], names[i]);
             if (rc == 9) {
                 if (strchr(names[i], '!'))
                     part_agg_add(names[i], 0);
@@ -594,6 +666,7 @@ int main(int argc, char **argv)
             else if (rc == 0) skipped++;
             else failed++;
         }
+progress:
         if ((swept + skipped) % 5000 == 0)
             fprintf(stderr, "  ..%d done (swept=%d)\n", swept + skipped, swept);
     }
@@ -605,8 +678,9 @@ int main(int argc, char **argv)
     /* WP19: extract read-hot PPMd batch members to standalone per-segment
      * ZSTD (class GENERIC) -- between the walk and the dedupe pass, so the
      * promoted segments can merge and the GC below reclaims any batch the
-     * promotions killed. The pass prints its own counts. */
-    if (!dry) {
+     * promotions killed. The pass prints its own counts.
+     * WP22e: --fast skips this (a transcode), along with dedupe/batching. */
+    if (!dry && !fast) {
         if (vol_heat_promote(vol) < 0)
             fprintf(stderr, "heat: promotion pass failed (sweep results "
                             "are intact)\n");
@@ -618,7 +692,7 @@ int main(int argc, char **argv)
      * in Shadow as identical segments -- and dedupe runs before the GC so
      * it never sees a zone==TEXT entry (WP10 §11). The pass prints its
      * own merged/freed counts. */
-    if (!dry) {
+    if (!dry && !fast) {
         if (vol_sweep_dedupe(vol) < 0)
             fprintf(stderr, "dedupe: pass failed (sweep results are intact)\n");
     }
@@ -627,8 +701,9 @@ int main(int argc, char **argv)
      * then seal the accumulated text AND binary candidates into shared
      * batches (one vol_tz_flush drains both accumulators). The deferred
      * counts come from the accumulators themselves: parts deferred at
-     * container-explode time (WP14b) never produced a walk line. */
-    if (!dry) {
+     * container-explode time (WP14b) never produced a walk line.
+     * --fast deferred nothing, so the GC/flush are skipped with it. */
+    if (!dry && !fast) {
         int gcrc = vol_tz_gc(vol);
         size_t tzp = vol_acc_pending(vol, 0);
         size_t bzp = vol_acc_pending(vol, 1);
@@ -673,6 +748,36 @@ int main(int argc, char **argv)
     if (!dry) {
         if (vol_flush(vol) != 0)
             fprintf(stderr, "warning: final flush failed\n");
+    }
+
+    /* WP22e: hot tail pruning. The sweep appends a fresh record version +
+     * tombstone per rewritten/stamped file, so the inode area's dead share
+     * climbs; past ~30% dead bytes, compact the area online (live records
+     * verbatim, id order, tombstones dropped; the CMP0 crash protocol makes
+     * a mid-pass kill recoverable). NEVER while a CKP0 checkpoint is live
+     * -- rollback truncates the area to the checkpoint's absolute
+     * positions -- and never on a read-only volume; the engine prints the
+     * skip reason. INVFS_NO_COMPACT=1 opts out (the --compact form is the
+     * manual override). A failure here never invalidates the sweep. */
+    if (!dry) {
+        const char *nc = getenv("INVFS_NO_COMPACT");
+        int compact_off = nc && strcmp(nc, "0") != 0;   /* =1 (or any
+                        non-"0" value) disables the automatic pass */
+        if (!compact_off) {
+            uint64_t used = vol_inode_area_pos(vol) - vol_inode_area_start(vol);
+            uint64_t live = vol_inode_live_bytes(vol);
+            if (live && used > live && (used - live) * 10 > used * 3) {
+                uint64_t before = 0, after = 0;
+                int crc = vol_inode_compact(vol, &before, &after);
+                if (crc > 0)
+                    printf("inode area compacted: %llu -> %llu bytes\n",
+                           (unsigned long long)before,
+                           (unsigned long long)after);
+                else if (crc < 0)
+                    fprintf(stderr, "inode compact: pass failed (sweep "
+                                    "results are intact)\n");
+            }
+        }
     }
 
     /* WP20 --seal / WP20b: (re)seal the shadow-zone parity AFTER the sweep

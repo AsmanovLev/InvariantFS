@@ -1188,3 +1188,762 @@ int record_owns_siblings(const uint8_t *rec, uint32_t rl)
 /* test-only export of the static parser */
 int meta_read_record_by_id_p(invfs_volume *v, uint64_t id, uint8_t **buf, uint32_t *rl)
 { return meta_read_record_by_id(v, id, buf, rl, NULL, 0, NULL); }
+
+
+/* ==================== WP22e: online inode-area compaction ================
+ *
+ * The inode area is append-only: every rewrite, meta update and class stamp
+ * appends a new record version and kills the old one with a DELT tombstone
+ * (v2: by ABSOLUTE record position in file_size). Until now the only way to
+ * reclaim the dead prefix was the offline fsck -f equivalent of a rewrite.
+ * vol_inode_compact does it online (from invf-sweep, single opener, flock
+ * held):
+ *
+ *   live set: one CRC-validated replay of the area with EXACTLY the vol_open
+ *   index semantics (an INOD upserts its name, last record wins; a legacy
+ *   DELT kills the name's entry when the id matches; a v2 DELT kills the
+ *   entry whose position matches; a CRC-bad record is skipped, a bad
+ *   magic/length ends the walk). The result is cross-checked against the
+ *   in-memory name index (cardinality + vol_find per name) -- compaction is
+ *   the one pass that DESTROYS record positions, so it runs only when both
+ *   views agree and the walk ended exactly at the current append pointer.
+ *
+ *   cut semantics: the compacted stream is the live records VERBATIM
+ *   (same bytes, same inode ids -- the L2P journal keys on ids, so no map
+ *   moves), re-emitted in id order, with ALL tombstones dropped. That makes
+ *   the new stream self-consistent by construction: no position-kill can
+ *   reference across the cut because nothing that names an absolute
+ *   position survives it. Everything before the cut is canonically dead.
+ *
+ *   crash protocol (the house stage -> arm -> apply -> commit shape, CMP0
+ *   descriptor at INVFS_CMP0_OFF, CMPS staging header -- the RSZ0/CKP0
+ *   conventions):
+ *     1. stage: write the compacted stream to a free-space run (RAW zone
+ *        first, shadow as fallback -- the ckp staging rule), CMPS header +
+ *        chained payload CRC, verified by read-back BEFORE the descriptor
+ *        names it; bitmap flushed so the staging blocks are durable.
+ *     2. arm: ONE block-0 write carries the CMP0 descriptor AND the
+ *        VOLF_READONLY latch (+ DIRTY state). The latch is what makes an
+ *        interrupted pass safe without any vol_open support: a mid-copy
+ *        crash can leave a torn area, but the volume opens read-only /
+ *        needs-recovery (never auto-recovered: ro_flag bars it) and every
+ *        mutation refuses until invf-fsck -f completes the pass.
+ *     3. apply: copy the staged stream over the area from area_start, then
+ *        a zero guard block terminates the scan at the new end (the
+ *        rollback decapitation rule); fsync.
+ *     4. commit: ONE block-0 write clears CMP0 + the latch; the staging
+ *        run is freed (a stranded run from a crash before this point is an
+ *        ordinary orphan -- fsck reclaims it), the in-memory index is
+ *        re-pointed at the new positions, and the append cursor moves to
+ *        the compacted end.
+ *     Crash before the arm: old area byte-intact, staging is an orphan.
+ *     Crash after the arm (before/during/after the copy): CMP0 + latch
+ *     survive, invf-fsck -f re-does the copy from the staging (idempotent:
+ *     the staged bytes are the same live set), clears CMP0+latch and its
+ *     rebuild reclaims the staging. A CMP0 is never armed while a CKP0
+ *     sweep checkpoint is live (the compaction declines), so rollback's
+ *     absolute positions and compaction's position invalidation never
+ *     coexist. */
+
+typedef struct cmp_name {
+    struct cmp_name *next;
+    uint64_t id, pos;
+    uint32_t rec_len;
+    uint32_t nlen;
+    char name[1];
+} cmp_name;
+
+typedef struct {
+    cmp_name **buck;
+    size_t mask, count;
+} cmp_nameset;
+
+static cmp_name *cmp_find(const cmp_nameset *s, const char *name, size_t nlen)
+{
+    size_t b = (size_t)(idx_hash(name, nlen) & s->mask);
+    cmp_name *e;
+    for (e = s->buck[b]; e; e = e->next)
+        if (e->nlen == nlen && memcmp(e->name, name, nlen) == 0)
+            return e;
+    return NULL;
+}
+
+static void cmp_grow(cmp_nameset *s)
+{
+    size_t ncap = (s->mask + 1) * 2, i;
+    cmp_name **nb = (cmp_name **)calloc(ncap, sizeof *nb);
+    if (!nb) return;
+    for (i = 0; i <= s->mask; i++) {
+        cmp_name *e = s->buck[i];
+        while (e) {
+            cmp_name *nx = e->next;
+            size_t b = (size_t)(idx_hash(e->name, e->nlen) & (ncap - 1));
+            e->next = nb[b]; nb[b] = e;
+            e = nx;
+        }
+    }
+    free(s->buck);
+    s->buck = nb;
+    s->mask = ncap - 1;
+}
+
+static void cmp_put(cmp_nameset *s, const char *name, size_t nlen,
+                    uint64_t id, uint64_t pos, uint32_t rec_len)
+{
+    cmp_name *e;
+    size_t b;
+    if (!s->buck) {
+        s->buck = (cmp_name **)calloc(1024, sizeof *s->buck);
+        if (!s->buck) return;
+        s->mask = 1023;
+    }
+    e = cmp_find(s, name, nlen);
+    if (e) {   /* last record wins */
+        e->id = id; e->pos = pos; e->rec_len = rec_len;
+        return;
+    }
+    e = (cmp_name *)malloc(sizeof *e + nlen);
+    if (!e) return;
+    memcpy(e->name, name, nlen);
+    e->name[nlen] = 0;
+    e->nlen = (uint32_t)nlen;
+    e->id = id;
+    e->pos = pos;
+    e->rec_len = rec_len;
+    b = (size_t)(idx_hash(name, nlen) & s->mask);
+    e->next = s->buck[b];
+    s->buck[b] = e;
+    s->count++;
+    if (s->count > s->mask + 1) cmp_grow(s);
+}
+
+static void cmp_drop(cmp_nameset *s, const char *name, size_t nlen)
+{
+    size_t b = (size_t)(idx_hash(name, nlen) & s->mask);
+    cmp_name *e, **pp = &s->buck[b];
+    for (e = *pp; e; pp = &e->next, e = e->next)
+        if (e->nlen == nlen && memcmp(e->name, name, nlen) == 0) break;
+    if (!e) return;
+    *pp = e->next;
+    free(e);
+    s->count--;
+}
+
+static void cmp_free(cmp_nameset *s)
+{
+    size_t i;
+    if (!s->buck) return;
+    for (i = 0; i <= s->mask; i++) {
+        cmp_name *e = s->buck[i];
+        while (e) { cmp_name *nx = e->next; free(e); e = nx; }
+    }
+    free(s->buck);
+    s->buck = NULL;
+}
+
+/* One CRC-validated replay of the inode area into the live set (see the
+ * section comment for the exact semantics mirrored from vol_open/fsck).
+ * Returns the position the walk stopped at (== v->inode_area_pos on a
+ * healthy area), fills *live (heap-allocated set; caller cmp_frees),
+ * *live_bytes (sum of rec_len+4 over the live records) and *bad_out
+ * (CRC-damaged records skipped on the way). */
+static uint64_t compact_scan_live(invfs_volume *v, cmp_nameset *live,
+                                  uint64_t *live_bytes, uint64_t *bad_out)
+{
+    uint64_t pos = v->inode_area_start * INVFS_BLOCK_SIZE;
+    uint64_t end = v->inode_area_pos;
+    uint64_t bytes = 0, bad = 0;
+
+    memset(live, 0, sizeof *live);
+    while (pos + sizeof(invfs_inode_rec) <= end) {
+        invfs_inode_rec h;
+        uint8_t *rb;
+        uint32_t crc_stored, crc_calc;
+        size_t nl;
+        if (io_seek(&v->io, pos) != 0 ||
+            io_read(&v->io, &h, sizeof h) != 0)
+            break;
+        if (h.magic != INODE_REC_MAGIC && h.magic != TOMBSTONE_MAGIC)
+            break;
+        if (h.rec_len < sizeof h || h.rec_len > INVFS_MAX_REC_LEN ||
+            pos + h.rec_len + 4 > end)
+            break;
+        rb = (uint8_t *)malloc((size_t)h.rec_len + 4);
+        if (!rb) break;
+        if (io_seek(&v->io, pos) != 0 ||
+            io_read(&v->io, rb, (size_t)h.rec_len + 4) != 0) {
+            free(rb);
+            break;
+        }
+        memcpy(&crc_stored, rb + h.rec_len, 4);
+        crc_calc = invfs_crc32c(rb, h.rec_len);
+        free(rb);
+        if (crc_calc != crc_stored) {
+            bad++;                      /* torn/corrupt: skip, keep going */
+            pos += (uint64_t)h.rec_len + 4;
+            continue;
+        }
+        nl = h.name_len < sizeof h.name ? h.name_len : sizeof h.name - 1;
+        if (h.magic == INODE_REC_MAGIC) {
+            if (nl) {
+                cmp_put(live, h.name, nl, h.inode_id, pos, h.rec_len);
+                /* careful: re-adding an already-live name replaces the old
+                 * version -- the byte total tracks the CURRENT entry only */
+            }
+        } else if (nl) {
+            /* DELT: v2 position kill vs legacy kill-by-id -- both only when
+             * the name's CURRENT entry matches (idx_del_at / idx_del) */
+            cmp_name *e = cmp_find(live, h.name, nl);
+            if (e && ((h.file_size == 0 && e->id == h.inode_id) ||
+                      (h.file_size != 0 && e->pos == h.file_size)))
+                cmp_drop(live, h.name, nl);
+        }
+        pos += (uint64_t)h.rec_len + 4;
+    }
+    /* the byte total is recomputed from the final set, not accumulated
+     * (a replaced version's bytes must leave the sum with the record) */
+    if (live->buck) {
+        size_t bi;
+        for (bi = 0; bi <= live->mask; bi++) {
+            cmp_name *e;
+            for (e = live->buck[bi]; e; e = e->next)
+                bytes += (uint64_t)e->rec_len + 4;
+        }
+    }
+    if (live_bytes) *live_bytes = bytes;
+    if (bad_out) *bad_out = bad;
+    return pos;
+}
+
+
+/* id order (ties by old position -- a hardlinked id keeps write order) */
+static int cmp_entry_cmp(const void *a, const void *b)
+{
+    const cmp_name *x = *(const cmp_name *const *)a;
+    const cmp_name *y = *(const cmp_name *const *)b;
+    if (x->id != y->id) return x->id < y->id ? -1 : 1;
+    if (x->pos != y->pos) return x->pos < y->pos ? -1 : 1;
+    return 0;
+}
+
+
+/* Sum of rec_len+4 over the live records -- the compacted size the area
+ * would have. 0 on an empty area or a troubled scan (callers treat 0 as
+ * "nothing to report", never as a trigger). */
+uint64_t vol_inode_live_bytes(invfs_volume *v)
+{
+    cmp_nameset live;
+    uint64_t bytes = 0, bad = 0;
+    uint64_t stop;
+    if (!v) return 0;
+    stop = compact_scan_live(v, &live, &bytes, &bad);
+    cmp_free(&live);
+    if (bad || stop != v->inode_area_pos)
+        return 0;   /* damaged area: compaction territory is fsck's */
+    return bytes;
+}
+
+
+static uint32_t cmp0_crc(const invfs_cmp0 *cd)
+{
+    invfs_cmp0 t = *cd;
+    t.crc32c = 0;
+    return invfs_crc32c(&t, sizeof t);
+}
+
+
+/* Read + validate the CMP0 descriptor from block 0. 1 = armed (out filled
+ * when non-NULL), 0 = absent or corrupt (corrupt reads as absent -- the
+ * CKP0 convention: a torn arm/clear is ignored, never fatal). */
+int vol_compact_pending(invfs_volume *v)
+{
+    invfs_cmp0 cd;
+    if (!v) return 0;
+    if (io_seek(&v->io, INVFS_CMP0_OFF) != 0 ||
+        io_read(&v->io, &cd, sizeof cd) != 0)
+        return 0;
+    if (memcmp(cd.magic, "CMP0", 4) != 0)
+        return 0;
+    if (cmp0_crc(&cd) != cd.crc32c)
+        return 0;
+    return 1;
+}
+
+static int cmp0_read(invfs_volume *v, invfs_cmp0 *out)
+{
+    invfs_cmp0 cd;
+    if (io_seek(&v->io, INVFS_CMP0_OFF) != 0 ||
+        io_read(&v->io, &cd, sizeof cd) != 0)
+        return -1;
+    if (memcmp(cd.magic, "CMP0", 4) != 0 || cmp0_crc(&cd) != cd.crc32c)
+        return -1;
+    *out = cd;
+    return 0;
+}
+
+
+/* The arm/clear write. The CMP0 descriptor and the VOLF_READONLY latch
+ * ALWAYS change in ONE block-0 write: armed-without-latch would let a
+ * volume with a half-rewritten area open read-write (the auto-recovery
+ * accepts any anomaly-free scan), latch-without-descriptor would leave the
+ * volume read-only with no recovery note. Block 0 holds both the
+ * superblock (144 bytes at 0) and the descriptor region, so one aligned
+ * block write is the atomic unit -- the RDP0/CKP0 RMW convention. */
+static int compact_block0_write(invfs_volume *v, int latch,
+                                const invfs_cmp0 *cd)
+{
+    uint8_t blk[INVFS_BLOCK_SIZE];
+    invfs_superblock sb;
+
+    if (io_seek(&v->io, 0) != 0 || io_read(&v->io, blk, sizeof blk) != 0)
+        return -1;
+    sb = v->sb;
+    if (latch) sb.vol_flags |= VOLF_READONLY;
+    else       sb.vol_flags &= ~VOLF_READONLY;
+    sb.checksum = invfs_crc32c(&sb, offsetof(invfs_superblock, checksum));
+    memcpy(blk, &sb, sizeof sb);
+    if (cd) {
+        invfs_cmp0 t = *cd;
+        memcpy(t.magic, "CMP0", 4);
+        t.crc32c = 0;
+        t.crc32c = cmp0_crc(&t);
+        memcpy(blk + INVFS_CMP0_OFF, &t, sizeof t);
+    } else {
+        memset(blk + INVFS_CMP0_OFF, 0, sizeof(invfs_cmp0));
+    }
+    if (io_seek(&v->io, 0) != 0 || io_write(&v->io, blk, sizeof blk) != 0)
+        return -1;
+    v->sb = sb;   /* the in-memory copy follows the disk state */
+    return 0;
+}
+
+
+#ifndef _WIN32
+
+/* Test hook (tools/test-compact.sh): die mid-compaction at a phase
+ * boundary (or mid-copy for "copying"). Mirrors INVFS_RESIZE_ABORT_AT /
+ * INVFS_ROLLBACK_ABORT_AT: every abort point is one the staging protocol
+ * makes recoverable -- before the arm the old area is intact, after it
+ * fsck rolls the staging forward. */
+static int cmp_abort_at(const char *stage)
+{
+    const char *a = getenv("INVFS_COMPACT_ABORT_AT");
+    return a && strcmp(a, stage) == 0;
+}
+
+#endif
+
+
+/* Copy `bytes` from the staging payload to the inode area at area_start,
+ * then write the zero guard that ends the compacted stream (the rollback
+ * decapitation rule: whatever lies past the guard never parses again).
+ * Shared by the compaction itself and the fsck roll-forward -- the apply
+ * reads ONLY the staging, so re-entering it after a crash is safe. */
+static int compact_apply(invfs_volume *v, uint64_t stage_pba,
+                         uint64_t s_bytes, int allow_abort_hook)
+{
+    uint64_t src = (stage_pba + 1) * (uint64_t)INVFS_BLOCK_SIZE;
+    uint64_t dst = v->inode_area_start * INVFS_BLOCK_SIZE;
+    uint64_t left = s_bytes, done = 0;
+    uint8_t *buf = (uint8_t *)malloc(BLKIO_BOUNCE);
+    int first = 1;
+
+    if (!buf) return -1;
+    while (left) {
+        size_t n = left > BLKIO_BOUNCE ? BLKIO_BOUNCE : (size_t)left;
+        if (io_seek(&v->io, src + done) != 0 ||
+            io_read(&v->io, buf, n) != 0 ||
+            io_seek(&v->io, dst + done) != 0 ||
+            io_write(&v->io, buf, n) != 0) {
+            free(buf);
+            return -1;
+        }
+        done += n;
+        left -= n;
+#ifndef _WIN32
+        /* a genuinely torn area (first chunk landed, the rest did not):
+         * the strongest crash leg -- CMP0 + the latch carry it */
+        if (allow_abort_hook && first && cmp_abort_at("copying")) {
+            blkio_flush(&v->io);
+            kill(getpid(), SIGKILL);
+        }
+#endif
+        first = 0;
+    }
+    free(buf);
+    /* the guard: zero up to one block past the stream end; shorter (down
+     * to nothing) at the area end is fine -- the scan's own bounds check
+     * stops there (the rollback decapitation arithmetic) */
+    {
+        uint64_t room = v->inode_area_end - (dst + s_bytes);
+        uint8_t z[INVFS_BLOCK_SIZE];
+        memset(z, 0, sizeof z);
+        if (room > sizeof z) room = sizeof z;
+        if (room > 0 &&
+            (io_seek(&v->io, dst + s_bytes) != 0 ||
+             io_write(&v->io, z, (size_t)room) != 0))
+            return -1;
+    }
+    return 0;
+}
+
+
+/* Validate the staging run named by the descriptor: CMPS header (magic,
+ * version, self-CRC, length agreement with the descriptor) + a full
+ * read-back of the payload against its chained CRC. The RSZ0 rule: the
+ * copy source is proven BEFORE anything it replaces is overwritten.
+ * 0 = the staging is good, -1 = unusable (loud). */
+static int compact_stage_verify(invfs_volume *v, const invfs_cmp0 *cd)
+{
+    uint8_t hb[INVFS_BLOCK_SIZE];
+    invfs_cmps sh;
+    uint64_t left, off;
+    uint32_t pcrc = 0;
+    uint8_t *buf;
+
+    if (io_seek(&v->io, cd->stage_pba * (uint64_t)INVFS_BLOCK_SIZE) != 0 ||
+        io_read(&v->io, hb, sizeof hb) != 0)
+        return -1;
+    memcpy(&sh, hb, sizeof sh);
+    if (memcmp(sh.magic, "CMPS", 4) != 0 || sh.version != 1 ||
+        sh.s_bytes != cd->s_bytes)
+        return -1;
+    {
+        invfs_cmps t = sh;
+        uint32_t want = sh.crc32c;
+        t.crc32c = 0;
+        if (invfs_crc32c(&t, sizeof t) != want)
+            return -1;
+    }
+    buf = (uint8_t *)malloc(BLKIO_BOUNCE);
+    if (!buf) return -1;
+    left = cd->s_bytes;
+    off = (cd->stage_pba + 1) * (uint64_t)INVFS_BLOCK_SIZE;
+    while (left) {
+        size_t n = left > BLKIO_BOUNCE ? BLKIO_BOUNCE : (size_t)left;
+        if (io_seek(&v->io, off) != 0 || io_read(&v->io, buf, n) != 0) {
+            free(buf);
+            return -1;
+        }
+        pcrc = invfs_crc32c_update(pcrc, buf, n);
+        off += n;
+        left -= n;
+    }
+    free(buf);
+    return pcrc == sh.payload_crc ? 0 : -1;
+}
+
+
+/* Bounds both the compaction and the roll-forward rely on, checked before
+ * any staging block is trusted (disk data, never trusted). */
+static int compact_desc_sane(invfs_volume *v, const invfs_cmp0 *cd)
+{
+    uint64_t area_start = v->inode_area_start * INVFS_BLOCK_SIZE;
+    if (!cd->stage_blocks ||
+        cd->stage_pba >= v->sb.total_blocks ||
+        cd->stage_blocks > v->sb.total_blocks - cd->stage_pba)
+        return 0;
+    if (cd->s_bytes > (cd->stage_blocks - 1) * (uint64_t)INVFS_BLOCK_SIZE)
+        return 0;
+    if (cd->old_area_pos < area_start || cd->old_area_pos > v->inode_area_end)
+        return 0;
+    /* the compacted stream must fit the area with a guard behind it (or
+     * exactly reach the end, where the scan's bounds check is the guard) */
+    if (area_start + cd->s_bytes > v->inode_area_end)
+        return 0;
+    return 1;
+}
+
+
+/* fsck -f entry: complete an interrupted compaction (CMP0 armed). The
+ * apply is idempotent -- it copies the verified staging over the area
+ * again -- so a killed run simply continues; the descriptor's live set is
+ * the same one the area would have had. Clears CMP0 + the compaction's
+ * READONLY latch last (one block-0 write, the arm's mirror). The staging
+ * run is NOT freed here: the fsck rebuild that follows reclaims it as an
+ * ordinary orphan (allocated, referenced by no live record). Returns 1 =
+ * a pass was rolled forward, 0 = none pending, -1 = the staging failed
+ * verification (the area is left as-is for review). */
+int vol_compact_recover(invfs_volume *v)
+{
+    invfs_cmp0 cd;
+    uint64_t area_start;
+
+    if (!v) return -1;
+    if (cmp0_read(v, &cd) != 0)
+        return 0;
+    area_start = v->inode_area_start * INVFS_BLOCK_SIZE;
+    if (!compact_desc_sane(v, &cd)) {
+        fprintf(stderr, "compact: CMP0 descriptor failed sanity checks; "
+                "leaving the area untouched for review\n");
+        return -1;
+    }
+    if (compact_stage_verify(v, &cd) != 0) {
+        fprintf(stderr, "compact: staging run failed verification; leaving "
+                "the area untouched for review\n");
+        return -1;
+    }
+    if (compact_apply(v, cd.stage_pba, cd.s_bytes, 0) != 0)
+        return -1;
+    if (blkio_flush(&v->io) != 0)
+        return -1;
+    if (compact_block0_write(v, 0, NULL) != 0)
+        return -1;
+    blkio_flush(&v->io);
+    v->inode_area_pos = area_start + cd.s_bytes;
+    v->inode_area_durable = v->inode_area_pos;
+    fprintf(stderr, "compact: interrupted pass rolled forward (area now "
+            "%llu bytes)\n", (unsigned long long)cd.s_bytes);
+    return 1;
+}
+
+
+/* Re-point the in-memory name/id indexes at the post-commit positions.
+ * The compacted stream holds exactly the live names, so every idx_put here
+ * is an in-place update of an existing entry (counts and the logical-byte
+ * total do not move). Records carry no tombstones any more, so the
+ * tombstone counter resets to what a fresh open would report. */
+static int compact_repoint(invfs_volume *v, uint64_t s_bytes)
+{
+    uint64_t pos = v->inode_area_start * INVFS_BLOCK_SIZE;
+    uint64_t end = pos + s_bytes;
+
+    while (pos + sizeof(invfs_inode_rec) <= end) {
+        invfs_inode_rec h;
+        size_t nl;
+        if (io_seek(&v->io, pos) != 0 ||
+            io_read(&v->io, &h, sizeof h) != 0)
+            return -1;
+        if (h.magic != INODE_REC_MAGIC ||
+            h.rec_len < sizeof h || h.rec_len > INVFS_MAX_REC_LEN ||
+            pos + h.rec_len + 4 > end)
+            return -1;   /* the stream we just wrote must parse exactly */
+        nl = h.name_len < sizeof h.name ? h.name_len : sizeof h.name - 1;
+        if (nl) {
+            idx_put(v, h.name, nl, h.inode_id, pos, h.file_size, h.ctime);
+            idx_put_id(v, h.inode_id, pos);
+        }
+        pos += (uint64_t)h.rec_len + 4;
+    }
+    if (pos != end)
+        return -1;
+    v->hot.tombstones = 0;   /* none survive the cut; matches a fresh open */
+    return 0;
+}
+
+
+int vol_inode_compact(invfs_volume *v, uint64_t *before_out,
+                      uint64_t *after_out)
+{
+    cmp_nameset live;
+    cmp_name **ord = NULL;
+    uint64_t area_start, used, live_bytes = 0, bad = 0, stop;
+    uint64_t s_bytes, stage_blocks, pba = 0, off;
+    uint64_t new_pos;
+    size_t n, i;
+    uint32_t payload_crc = 0;
+    invfs_cmps sh;
+    invfs_cmp0 cd;
+    uint8_t *hb = NULL;
+    int rc = -1;
+
+    if (before_out) *before_out = 0;
+    if (after_out) *after_out = 0;
+    if (!v) return -1;
+    memset(&live, 0, sizeof live);
+
+    /* ---- gates (all declines are non-errors; the caller's run is fine) -- */
+    if (!vol_write_enabled(v)) {
+        fprintf(stderr, "inode compact: skipped (volume is read-only or "
+                "awaiting recovery)\n");
+        return 0;
+    }
+    if (v->ck_present) {
+        /* rollback truncates the area to the checkpoint's ABSOLUTE
+         * positions -- rewriting them from under it would destroy the
+         * volume. The next checkpoint-free sweep compacts instead. */
+        fprintf(stderr, "inode compact: skipped (sweep checkpoint #%llu "
+                "live; invf-sweep --realize or invf-rollback first)\n",
+                (unsigned long long)v->ck.sweep_seq);
+        return 0;
+    }
+    if (vol_compact_pending(v)) {
+        fprintf(stderr, "inode compact: skipped (a previous compaction was "
+                "interrupted; run invf-fsck -f to finish it)\n");
+        return 0;
+    }
+
+    /* ---- live set + legality of the cut ---- */
+    area_start = v->inode_area_start * INVFS_BLOCK_SIZE;
+    used = v->inode_area_pos - area_start;
+    stop = compact_scan_live(v, &live, &live_bytes, &bad);
+    if (stop != v->inode_area_pos || bad) {
+        /* the walk did not reproduce the open scan exactly: damage is
+         * fsck's territory, never a reason to rewrite the area */
+        fprintf(stderr, "inode compact: declined (the area scan hit "
+                "damage; run invf-fsck first)\n");
+        cmp_free(&live);
+        return 0;
+    }
+    if (used == 0) {
+        fprintf(stderr, "inode compact: nothing to do (area is empty)\n");
+        cmp_free(&live);
+        return 0;
+    }
+    if (live_bytes == used) {
+        fprintf(stderr, "inode compact: nothing to do (area already "
+                "compact: %llu bytes)\n", (unsigned long long)used);
+        cmp_free(&live);
+        return 0;
+    }
+    /* (an all-tombstone area -- every file deleted -- compacts to the
+     * empty stream: s_bytes == 0, the guard lands at area_start) */
+    /* the one pass that destroys positions runs only when the disk walk
+     * and the live index agree EXACTLY: same cardinality, same ids */
+    if (live.count != v->ncount) {
+        fprintf(stderr, "inode compact: declined (live set %zu vs index "
+                "%llu disagree)\n", live.count, (unsigned long long)v->ncount);
+        cmp_free(&live);
+        return 0;
+    }
+    ord = (cmp_name **)malloc((live.count ? live.count : 1) * sizeof *ord);
+    hb = (uint8_t *)malloc(INVFS_BLOCK_SIZE);
+    if (!ord || !hb) goto out;
+    n = 0;
+    for (i = 0; i <= live.mask; i++) {
+        cmp_name *e;
+        for (e = live.buck[i]; e; e = e->next) {
+            if (vol_find(v, e->name) != e->id) {
+                fprintf(stderr, "inode compact: declined (index/disk "
+                        "mismatch on %s)\n", e->name);
+                goto out_decline;
+            }
+            ord[n++] = e;
+        }
+    }
+    /* id order (ties by old position -- a hardlinked id keeps write order) */
+    qsort(ord, n, sizeof *ord, cmp_entry_cmp);
+
+    s_bytes = live_bytes;
+    stage_blocks = 1 + (s_bytes + INVFS_BLOCK_SIZE - 1) / INVFS_BLOCK_SIZE;
+
+    if (vol_mark_dirty(v) != 0) goto out;
+    /* the staging run: transient pre-commit bytes, so the RAW zone is its
+     * honest home (a seal never covers RAW); shadow is the fallback for a
+     * nearly-full RAW zone (the ckp_begin convention) */
+    pba = alloc_blocks(v, v->sb.raw_zone_start, v->sb.raw_zone_blocks,
+                       stage_blocks, 1);
+    if (!pba)
+        pba = alloc_blocks(v, v->sb.shadow_zone_start,
+                           v->sb.shadow_zone_blocks, stage_blocks, 1);
+    if (!pba) {
+        fprintf(stderr, "inode compact: declined (no %llu-block run for "
+                "the staging)\n", (unsigned long long)stage_blocks);
+        goto out_decline;
+    }
+
+    /* ---- stage: emit the live records verbatim, in id order ---- */
+    off = (pba + 1) * (uint64_t)INVFS_BLOCK_SIZE;
+    for (i = 0; i < n; i++) {
+        cmp_name *e = ord[i];
+        size_t total = (size_t)e->rec_len + 4;
+        uint8_t *rec = (uint8_t *)malloc(total);
+        uint32_t crc_stored, crc_calc;
+        int ok = 0;
+        if (!rec) goto out;
+        if (io_seek(&v->io, e->pos) == 0 &&
+            io_read(&v->io, rec, total) == 0) {
+            memcpy(&crc_stored, rec + e->rec_len, 4);
+            crc_calc = invfs_crc32c(rec, e->rec_len);
+            if (crc_calc == crc_stored &&
+                io_seek(&v->io, off) == 0 &&
+                io_write(&v->io, rec, total) == 0) {
+                payload_crc = invfs_crc32c_update(payload_crc, rec, total);
+                ok = 1;
+            }
+        }
+        free(rec);
+        if (!ok) goto out;
+        off += total;
+    }
+    /* the CMPS header lands LAST in the staging block... (no: first block
+     * of the run; the payload follows) -- written after the payload so a
+     * torn stage never carries a valid header over a partial payload */
+    memset(&sh, 0, sizeof sh);
+    memcpy(sh.magic, "CMPS", 4);
+    sh.version = 1;
+    sh.s_bytes = s_bytes;
+    sh.payload_crc = payload_crc;
+    sh.crc32c = 0;   /* the house convention: CRC over the full header
+                      * with the field itself read as zero */
+    sh.crc32c = invfs_crc32c(&sh, sizeof sh);
+    memset(hb, 0, INVFS_BLOCK_SIZE);
+    memcpy(hb, &sh, sizeof sh);
+    if (io_seek(&v->io, pba * (uint64_t)INVFS_BLOCK_SIZE) != 0 ||
+        io_write(&v->io, hb, INVFS_BLOCK_SIZE) != 0)
+        goto out;
+
+    /* the staging allocation + bytes must be durable before CMP0 can name
+     * them (bitmap via vol_flush, bytes via the barrier) */
+    if (vol_flush(v) != 0) goto out;
+    /* verify the staging by read-back BEFORE the descriptor names it (the
+     * RSZ0 rule: a broken copy must fail the arm, never the recovery) */
+    memset(&cd, 0, sizeof cd);
+    cd.stage_pba = pba;
+    cd.stage_blocks = stage_blocks;
+    cd.s_bytes = s_bytes;
+    cd.old_area_pos = v->inode_area_pos;
+    cd.time_unix = (uint64_t)time(NULL);
+    if (compact_stage_verify(v, &cd) != 0) {
+        fprintf(stderr, "inode compact: staging read-back failed; the "
+                "area is untouched\n");
+        goto out;
+    }
+    if (blkio_flush(&v->io) != 0) goto out;
+#ifndef _WIN32
+    if (cmp_abort_at("staged")) { blkio_flush(&v->io); kill(getpid(), SIGKILL); }
+#endif
+
+    /* ---- arm: CMP0 + the READONLY latch, one atomic block-0 write ---- */
+    if (compact_block0_write(v, 1, &cd) != 0) goto out;
+    if (blkio_flush(&v->io) != 0) goto out;
+#ifndef _WIN32
+    if (cmp_abort_at("armed")) { blkio_flush(&v->io); kill(getpid(), SIGKILL); }
+#endif
+
+    /* ---- apply: copy the verified staging over the area + guard ---- */
+    if (compact_apply(v, pba, s_bytes, 1) != 0) goto out;
+    if (blkio_flush(&v->io) != 0) goto out;
+#ifndef _WIN32
+    if (cmp_abort_at("copied")) { blkio_flush(&v->io); kill(getpid(), SIGKILL); }
+#endif
+
+    /* ---- commit: clear CMP0 + the latch, one atomic block-0 write ---- */
+    if (compact_block0_write(v, 0, NULL) != 0) goto out;
+    if (blkio_flush(&v->io) != 0) goto out;
+
+    /* ---- in-memory switch ---- */
+    new_pos = area_start + s_bytes;
+    v->inode_area_pos = new_pos;
+    v->inode_area_durable = new_pos;   /* the barrier above covered it */
+    vol_free_blocks(v, pba, stage_blocks);
+    pba = 0;   /* committed: the staging is gone, the error paths below
+                * must not free it again */
+    if (compact_repoint(v, s_bytes) != 0) goto out;
+    if (vol_flush(v) != 0) goto out;
+
+    if (before_out) *before_out = used;
+    if (after_out) *after_out = s_bytes;
+    rc = 1;
+    goto out;
+
+out_decline:
+    rc = 0;
+out:
+    if (rc != 1 && pba)
+        vol_free_blocks(v, pba, stage_blocks);
+    free(ord);
+    free(hb);
+    cmp_free(&live);
+    return rc;
+}
