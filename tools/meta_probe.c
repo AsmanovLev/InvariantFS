@@ -106,6 +106,15 @@ int main(int argc, char **argv)
         vol_close(v);
         return rc;
     }
+    if (strcmp(argv[2], "--zonefree") == 0) {
+        uint64_t rf = 0, rt = 0, sf = 0, st = 0;
+        rc = vol_zone_free(v, &rf, &rt, &sf, &st);
+        printf("raw %llu/%llu shadow %llu/%llu\n",
+               (unsigned long long)(rt - rf), (unsigned long long)rt,
+               (unsigned long long)(st - sf), (unsigned long long)st);
+        vol_close(v);
+        return rc;
+    }
     id = vol_find(v, argv[2]);
     printf("find(%s)=%llu\n", argv[2], (unsigned long long)id);
     if (!id) { vol_close(v); return 1; }

@@ -49,9 +49,19 @@ rm -f "$IMG1" "$IMG2"
 fail() { echo "FAIL: $*" >&2; exit 1; }
 
 # physical blocks a file occupies (L2P entry lens, summed) and the list
-# of per-segment AST algos -- both read-only probes of a closed volume
+# of per-segment AST algos -- both read-only probes of a closed volume.
+# blocks_of_raw counts only RAW-zone segments (pba within the zone):
+# the daemon's background sweep drains files RAW->SHADOW between the fill
+# and the measured write, and the engine's pressure reads RAW-zone free
+# blocks ONLY -- an any-zone count drifts from the truth the engine uses
+# (the WP22d merge made the drain fire inside the oscillation legs).
 blocks_of() { $B/meta_probe "$1" --heat "$2" 2>/dev/null \
     | awk '/^entry /{for(i=1;i<=NF;i++) if ($i ~ /^len=/) {sub("len=","",$i); s+=$i}} END {print s+0}'; }
+blocks_of_raw() { $B/meta_probe "$1" --heat "$2" 2>/dev/null \
+    | awk -v lo="$RAW_LO" -v hi="$RAW_HI" '/^entry /{p=0; l=0;
+        for(i=1;i<=NF;i++) { if ($i ~ /^pba=/) {sub("pba=","",$i); p=$i+0}
+                             if ($i ~ /^len=/) {sub("len=","",$i); l=$i+0} }
+        if (p >= lo && p < hi) s+=l} END {print s+0}'; }
 algos_of() { $B/meta_probe "$1" --heat "$2" 2>/dev/null \
     | awk '/^ast /{for(i=1;i<=NF;i++) if ($i ~ /^algo=/) {sub("algo=","",$i); printf "%s ", $i}}'; }
 
@@ -128,6 +138,9 @@ PY
 $B/invf-mkfs "$IMG1" 0.0625 > "$WORK/mkfs1.log"
 RAWBLOCKS=$(sed -n 's/.*raw zone:.*(\([0-9]*\) blocks,.*/\1/p' "$WORK/mkfs1.log")
 [ -n "$RAWBLOCKS" ] || fail "could not parse raw zone size"
+RAW_LO=$(sed -n 's/.*raw zone: *blocks \([0-9]*\) \.\. \([0-9]*\).*/\1/p' "$WORK/mkfs1.log")
+RAW_HI=$(sed -n 's/.*raw zone: *blocks \([0-9]*\) \.\. \([0-9]*\).*/\2/p' "$WORK/mkfs1.log")
+[ -n "$RAW_LO" ] && [ -n "$RAW_HI" ] || fail "could not parse raw zone bounds"
 T80=$(( RAWBLOCKS * 80 / 100 ))
 T95=$(( RAWBLOCKS * 95 / 100 ))
 echo "  RAW zone: $RAWBLOCKS blocks (80% = $T80, 95% = $T95)"
@@ -136,31 +149,35 @@ FILL=0      # running RAW-block total: every add measured via meta_probe
 FATN=0
 SMALLN=0
 LIVE=()     # volume paths the script created and did not delete
+# Engine-measured RAW-zone fill (the truth the write path uses). The old
+# FILL counter summed per-file L2P lens and drifted from the bitmap truth
+# across the delete/refill oscillation legs (the engine reads raw_free,
+# not a shadow-copy of it).
+raw_used() { $B/meta_probe "$1" --zonefree 2>/dev/null \
+    | awk '/^raw /{split($2,a,"/"); print a[1]}'; }
 fill_to() { # <img> <target-blocks> — offline fillers until FILL >= target
     # fat steps (~41 blocks) only while they cannot overshoot the target;
     # the last ~50 blocks come in small ~3-block steps (worst-case
     # overshoot one small file)
-    while [ "$FILL" -lt "$2" ]; do
-        local f
-        if [ $(( $2 - FILL )) -gt 50 ]; then
+    local f u
+    u=$(raw_used "$1")
+    while [ "$u" -lt "$2" ]; do
+        if [ $(( $2 - u )) -gt 50 ]; then
             f=$(printf 'fat%02d.txt' "$FATN"); FATN=$((FATN+1))
         else
             f=$(printf 'small%02d.txt' "$SMALLN"); SMALLN=$((SMALLN+1))
         fi
-        [ -f "$WORK/ref/$f" ] || fail "filler pool exhausted at $FILL blocks"
+        [ -f "$WORK/ref/$f" ] || fail "filler pool exhausted at $u blocks"
         $B/invf-cp "$1" "$WORK/ref/$f" "$f" >/dev/null
-        FILL=$((FILL + $(blocks_of "$1" "$f")))
         LIVE+=("$f")
+        u=$(raw_used "$1")
     done
-    echo "  fill: $FILL/$RAWBLOCKS blocks ($(( FILL * 100 / RAWBLOCKS ))%)"
+    echo "  fill: $u/$RAWBLOCKS blocks (engine-measured)"
 }
-refill_note() { # recompute FILL from the live set (post-delete honesty)
-    local f
-    FILL=0
-    for f in "${LIVE[@]}"; do
-        FILL=$((FILL + $(blocks_of "$1" "$f")))
-    done
-    echo "  fill (re-derived): $FILL/$RAWBLOCKS ($(( FILL * 100 / RAWBLOCKS ))%)"
+refill_note() { # report the engine-measured fill (post-delete honesty)
+    local u
+    u=$(raw_used "$1")
+    echo "  fill (engine-measured): $u/$RAWBLOCKS ($(( u * 100 / RAWBLOCKS ))%)"
 }
 
 # write one payload through the mount, then read it back mounted

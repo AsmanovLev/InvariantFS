@@ -220,6 +220,13 @@ static int wsession_write_seg_n(invfs_wsession *s, uint32_t j,
     if (!cbuf) return -1;
     if (v->profile != INVFS_PROFILE_TURBO) {
         int zlevel = raw_effort_zlevel(v);
+        if (getenv("INVFS_DEBUG_FILE")) {
+            FILE *df = fopen(getenv("INVFS_DEBUG_FILE"), "a");
+            if (df) { fprintf(df, "[dbg] wseg %s seg %u profile=%u zlevel=%d fill=%llu/%llu\n",
+                        s->name, j, v->profile, zlevel,
+                        (unsigned long long)(v->sb.raw_zone_blocks - v->raw_free),
+                        (unsigned long long)v->sb.raw_zone_blocks); fclose(df); }
+        }
         if (getenv("INVFS_DEBUG"))
             fprintf(stderr, "[rawadapt] %s seg %u: raw fill %llu/%llu, zlevel %d\n",
                     s->name, j,

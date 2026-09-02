@@ -2548,6 +2548,17 @@ uint64_t vol_count_free(invfs_volume *v)
     return free;
 }
 
+int vol_zone_free(invfs_volume *v, uint64_t *raw_free, uint64_t *raw_total,
+                  uint64_t *shadow_free, uint64_t *shadow_total)
+{
+    if (!v) return -1;
+    if (raw_free)    *raw_free = v->raw_free;
+    if (raw_total)   *raw_total = v->sb.raw_zone_blocks;
+    if (shadow_free) *shadow_free = v->shadow_free;
+    if (shadow_total) *shadow_total = v->sb.shadow_zone_blocks;
+    return 0;
+}
+
 
 /* Free blocks inside one zone. Called once per mount (and after fsck
  * rewrites the bitmap) to seed the per-zone counters that alloc_blocks
@@ -2571,4 +2582,15 @@ void alloc_state_reset(invfs_volume *v)
                                     v->sb.shadow_zone_blocks);
     v->raw_fail_run = v->shadow_fail_run = 0;
     v->bm_lo = 1; v->bm_hi = 0;   /* on-disk bitmap matches memory */
+    if (getenv("INVFS_DEBUG"))
+        fprintf(stderr, "[alloc_state_reset] raw_free=%llu/%llu shadow_free=%llu/%llu\n",
+                (unsigned long long)v->raw_free, (unsigned long long)v->sb.raw_zone_blocks,
+                (unsigned long long)v->shadow_free, (unsigned long long)v->sb.shadow_zone_blocks);
+    if (getenv("INVFS_DEBUG_FILE")) {
+        FILE *df = fopen(getenv("INVFS_DEBUG_FILE"), "a");
+        if (df) { fprintf(df, "[alloc_state_reset] raw_free=%llu/%llu shadow_free=%llu/%llu\n",
+                    (unsigned long long)v->raw_free, (unsigned long long)v->sb.raw_zone_blocks,
+                    (unsigned long long)v->shadow_free, (unsigned long long)v->sb.shadow_zone_blocks);
+                  fclose(df); }
+    }
 }

@@ -260,6 +260,11 @@ uint64_t vol_inode_next(invfs_volume *v, uint64_t pos, uint32_t *magic_out,
 
 #endif
 uint64_t vol_count_free(invfs_volume *v);
+/* per-zone free counters (maintained incrementally by alloc/free):
+ * 0 ok, -1 no volume. For tests/probes that need the engine's own view
+ * of zone pressure (e.g. test-rawadapt's fill targeting). */
+int vol_zone_free(invfs_volume *v, uint64_t *raw_free, uint64_t *raw_total,
+                  uint64_t *shadow_free, uint64_t *shadow_total);
 int invfs_jxl_compress(const uint8_t *jpeg, size_t jpeg_len,
                        uint8_t **jxl_out, size_t *jxl_len);
 int invfs_jxl_decompress(const uint8_t *jxl, size_t jxl_len,
