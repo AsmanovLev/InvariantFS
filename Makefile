@@ -122,6 +122,7 @@ e2e: all
 	bash tools/run-e2e.sh tools/test-qcow2.sh
 	bash tools/run-e2e.sh tools/test-fuzz.sh
 	bash tools/run-e2e.sh tools/test-writepath.sh
+	bash tools/run-e2e.sh tools/test-acl.sh
 	bash tools/run-e2e.sh tools/test-astv2.sh
 	bash tools/run-e2e.sh tools/test-flushfail.sh
 	bash tools/run-e2e.sh tools/test-compact.sh
