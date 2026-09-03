@@ -112,6 +112,9 @@ void vol_unmark_pending(invfs_volume *v, uint64_t inode_id);
 size_t vol_pending_count(invfs_volume *v);
 int  vol_sweep_pending(invfs_volume *v);
 int  vol_sweep_one(invfs_volume *v, uint64_t inode_id, const char *name);
+/* resolve the live name of an inode id for vol_sweep_one drivers that
+ * collected only ids (vol_collect_sweepables); 1 = found, 0 = gone */
+int  vol_sweep_name_of(invfs_volume *v, uint64_t id, char *nm, size_t cap);
 int  vol_stat(invfs_volume *v, const char *name, uint64_t *size_out);
 /* inode id + size + ctime in one O(1) index lookup */
 int  vol_stat_full(invfs_volume *v, const char *name, uint64_t *id_out,
