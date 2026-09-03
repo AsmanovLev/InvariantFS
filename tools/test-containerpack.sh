@@ -598,7 +598,11 @@ if grep -q "^profile:" "$WORK/sweep1.log"; then
     echo "FAIL: default sweep gained a profile line"; exit 1
 fi
 # the effective profile is published to pack subprocesses (vol_open setenv):
-# a codec pack whose helper records the env it runs under proves it
+# a codec pack whose helper records the env it runs under proves it.
+# WP12d: that observation works by writing $WORK/profseen OUTSIDE the pack
+# scratch dir — exactly what the Landlock pack sandbox denies. This leg's
+# subject is env propagation, not sandboxing, so it opts out via
+# INVFS_PACK_SANDBOX=0 (tools/test-sandbox.sh owns the sandbox coverage).
 mkdir -p "$WORK/packs-prof/prop.codecpack"
 cat > "$WORK/packs-prof/prop.codecpack/enc" <<EOF
 #!/bin/sh
@@ -617,7 +621,7 @@ EOF
 python3 -c "open('$WORK/orig/prop.bin','wb').write(b'PROP' + bytes(100000))"
 $B/invf-cp "$IMGP" "$WORK/orig/prop.bin" prop.bin >/dev/null
 rm -f "$WORK/profseen"
-INVFS_CODECPACKS=$WORK/packs-prof INVFS_PROFILE=dense $B/invf-sweep "$IMGP" \
+INVFS_PACK_SANDBOX=0 INVFS_CODECPACKS=$WORK/packs-prof INVFS_PROFILE=dense $B/invf-sweep "$IMGP" \
     > "$WORK/sweepp4.log" 2>&1 || { cat "$WORK/sweepp4.log"; exit 1; }
 [ "$(cat "$WORK/profseen" 2>/dev/null)" = "dense" ] \
     || { echo "FAIL: pack exec saw INVFS_PROFILE='$(cat "$WORK/profseen" 2>/dev/null)', want dense"; exit 1; }
