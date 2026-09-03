@@ -136,7 +136,11 @@ static void tool_child_memlimit(uint64_t mem_cap)
  *   RW subtree: the mkdtemp scratch dir (the {out} file's parent — tools
  *               may create temp siblings or rename over the output;
  *               TMPDIR is pointed there too so tempfile.mkdtemp() & co
- *               stay inside the whitelist);
+ *               stay inside the whitelist). The estimate command has no
+ *               {out}: its scratch is the input file's parent (always a
+ *               fresh mkdtemp dir at the call sites), so a whitelisted
+ *               grandchild (a requires= tool, e.g. p7z's 7zz) still gets a
+ *               TMPDIR it can stage temp files in;
  *   everything else denied (all FS rights the running ABI knows are
  *   handled; network rights are out of scope for this layer).
  *
@@ -782,16 +786,23 @@ int invfs_codec_pack_estimate(const invfs_codec *c, const char *in_path,
     char *endp = NULL;
     unsigned long long v;
     tool_sandbox sb;
+    char rwbuf[4096];
 
     if (!def || !def->estimate || !in_path) return -1;
     if (pack_argv_build(def, def->estimate, in_path, NULL, NULL, NULL, NULL,
                         argv, 24, arena, sizeof arena) != 0)
         return -1;
-    /* WP12d: the estimate child reads its input and prints a number —
-     * the sandbox grants no write anywhere (rw_dir NULL) */
+    /* WP12d: the estimate child reads its input and prints a number — it
+     * writes nothing itself. The input's parent is still granted as the RW
+     * scratch (it is the caller's fresh mkdtemp dir at every call site):
+     * a pack whose estimate parses through a whitelisted grandchild (p7z's
+     * encoded-header decode stages a temp file for 7zz) needs a TMPDIR
+     * inside the whitelist, and tool_child_sandbox only points TMPDIR at
+     * rw_dir. Without this the grandchild's mkstemp hits EACCES and the
+     * estimate fails closed (GENERIC_GUARD) on a file the pack accepts. */
     sb.pack_dir = def->dir;
     sb.ro_path = in_path;
-    sb.rw_dir = NULL;
+    sb.rw_dir = sb_dirname(rwbuf, sizeof rwbuf, in_path);
     sb.requires = def->requires;
     if (tool_exec_out_lim(argv, out, sizeof out, tool_mem_cap_for(c),
                           &sb) != 0)
@@ -2368,7 +2379,8 @@ static int cpack_map_guard(invfs_volume *v, const char *name,
     size_t recipe_len = 0, gi;
     int rc = -1;
 
-    if (cpack_recipe_seg(v, recipe_ino, &recipe, &recipe_len) != 0) goto out;
+    if (cpack_recipe_seg(v, recipe_ino, &recipe, &recipe_len) != 0)
+        { if (getenv("INVFS_DEBUG_PACKS")) fprintf(stderr,"[cpack] guard: recipe seg read failed\n"); goto out; }
     buf = (uint8_t *)malloc(CPACK_GUARD_CHUNK);
     if (!buf) goto out;
     for (gi = 0; gi < n_ents; gi++) {
@@ -2379,10 +2391,15 @@ static int cpack_map_guard(invfs_volume *v, const char *name,
                                    ? CPACK_GUARD_CHUNK : left);
             if (cpack_map_serve(v, name, ents, n_ents, mem_sorted, nmem,
                                 recipe, recipe_len,
-                                ents[gi].orig_off + done, buf, clen) != 0 ||
-                memcmp(buf, full + (size_t)ents[gi].orig_off + (size_t)done,
-                       clen) != 0)
+                                ents[gi].orig_off + done, buf, clen) != 0) {
+                if (getenv("INVFS_DEBUG_PACKS")) fprintf(stderr,"[cpack] guard: serve failed ent=%zu off=%llu\n", gi, (unsigned long long)(ents[gi].orig_off + done));
                 goto out;
+            }
+            if (memcmp(buf, full + (size_t)ents[gi].orig_off + (size_t)done,
+                       clen) != 0) {
+                if (getenv("INVFS_DEBUG_PACKS")) fprintf(stderr,"[cpack] guard: memcmp failed ent=%zu off=%llu len=%zu\n", gi, (unsigned long long)(ents[gi].orig_off + done), clen);
+                goto out;
+            }
             done += clen;
         }
     }
@@ -2631,6 +2648,7 @@ int vol_containerpack_sweep(invfs_volume *v, uint64_t inode_id,
          * estimate convention: GENERIC_GUARD, re-armed by a generation
          * bump) */
         if (invfs_codec_pack_estimate(pc, pin, &ws) != 0) {
+            if (getenv("INVFS_DEBUG_PACKS")) fprintf(stderr,"[cpack] estimate failed\n");
             vol_stamp_class(v, inode_id, INVFS_CLASS_GENERIC_GUARD,
                             (uint8_t)pc->algo, pc->generation);
             goto out;
@@ -2692,7 +2710,7 @@ int vol_containerpack_sweep(invfs_volume *v, uint64_t inode_id,
         if (invfs_codec_pack_cmd(pc, INVFS_PACK_CMD_MAP, pin, NULL,
                                  NULL, NULL, pmap) != 0)
             { if (getenv("INVFS_DEBUG_PACKS")) fprintf(stderr,"[cpack] map cmd failed\n"); goto out; }
-        if (slurp_file(pmap, &mapb, &map_len) != 0) goto out;
+        if (slurp_file(pmap, &mapb, &map_len) != 0) { if (getenv("INVFS_DEBUG_PACKS")) fprintf(stderr,"[cpack] map slurp failed\n"); goto out; }
         if (cpack_map_parse(mapb, map_len, &ments, &nments) != 0) {
             if (getenv("INVFS_DEBUG_PACKS")) fprintf(stderr,"[cpack] map parse failed\n");
             fprintf(stderr, "sweep: %s: %s: map unreadable, "
@@ -2700,7 +2718,7 @@ int vol_containerpack_sweep(invfs_volume *v, uint64_t inode_id,
             goto out;
         }
         mem_sorted = cpack_members_sorted(mem, nmem);
-        if (!mem_sorted) goto out;
+        if (!mem_sorted) { if (getenv("INVFS_DEBUG_PACKS")) fprintf(stderr,"[cpack] members_sorted alloc failed\n"); goto out; }
         if (cpack_map_validate(ments, nments, (uint64_t)full_len,
                                (uint64_t)recipe_len, mem_sorted, nmem) != 0) {
             fprintf(stderr, "sweep: %s: %s: map does not partition the "
@@ -2739,6 +2757,7 @@ int vol_containerpack_sweep(invfs_volume *v, uint64_t inode_id,
         snprintf(pm, sizeof pm, "%s/%u", pmdir, mem[i].idx);
         if (slurp_file(pm, &mb, &mlen) != 0 || mlen != (size_t)mem[i].usize) {
             free(mb);
+            if (getenv("INVFS_DEBUG_PACKS")) fprintf(stderr,"[cpack] commit: member idx=%u slurp/size fail\n", mem[i].idx);
             vol_transcode_abort(v, name);
             goto out;
         }
