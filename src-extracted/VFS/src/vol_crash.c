@@ -37,7 +37,15 @@
  */
 int vol_mark_dirty(invfs_volume *v)
 {
-    if (v->needs_recovery) return -1;   /* refuse writes until recovered */
+    if (v->needs_recovery) {
+        /* WP25: name the degraded case -- it is a mount state, not
+         * damage, so the refusal says so plainly (loud EROFS). */
+        if (v->degraded)
+            fprintf(stderr, "vol: write refused: DEGRADED mount (device 0 "
+                    "absent) -- the volume is read-only (EROFS). Reattach "
+                    "dev0 for read-write.\n");
+        return -1;   /* refuse writes until recovered */
+    }
     if (v->dirty) return 0;
     v->sb.state = INVFS_STATE_DIRTY;
     if (vol_write_sb(v) != 0) return -1;

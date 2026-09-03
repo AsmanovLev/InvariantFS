@@ -54,6 +54,16 @@ int main(int argc, char **argv)
         return 1;
     }
 
+    /* WP25: a degraded mount (dev0 absent) is read-only -- report mode
+     * works (every structure reads from the dev1 mirror), but -f mutates:
+     * the mirror would diverge with dev0 absent. Reattach dev0 first. */
+    if (fix && vol_degraded(v)) {
+        fprintf(stderr, "invf-fsck: %s: DEGRADED volume (dev0 absent) -- "
+                "report mode only; reattach dev0 to repair\n", img);
+        vol_close(v);
+        return 1;
+    }
+
     /* WP21: with a sweep checkpoint live, the rebuild's orphan reclaim is
      * the one pass that could free a not-yet-registered retained block
      * out from under a future rollback. Report mode is unaffected; -f is

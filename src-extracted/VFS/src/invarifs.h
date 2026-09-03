@@ -403,6 +403,62 @@ typedef struct {
 } invfs_cmp0;                   /* 0x290 = 48 bytes */
 #pragma pack(pop)
 
+/* ---- WP25: DEVT device-table descriptor (block 0 reserved area) ----
+ * Lives at byte offset 0x2A0 of block 0, past the superblock (0x00..0x90),
+ * RDP0 (0x100..0x118), RSZ0 (0x140..0x20C), CKP0 (0x220..0x258) and CMP0
+ * (0x260..0x290). Single-device (pre-WP25) images carry zeros there, which
+ * read as "absent" (magic mismatch) -- the RDP0 convention, and the reason
+ * single-device volumes are byte-identical to what they were.
+ *
+ * A volume is up to TWO backing devices: dev0 (fast) + dev1 (capacity).
+ * The global block address space is the concatenation: a global pba P with
+ * P < dev_blocks[0] lives on dev0 at local block P, otherwise on dev1 at
+ * local block P - dev_blocks[0]. sb.total_blocks = dev0 + dev1 blocks.
+ *
+ * Both devices hold the metadata span [0, metadata_zone_end) byte-identical
+ * (writethrough mirror: superblock+descriptors, bitmap, journal slots,
+ * inode area); the mirror is also where the positional redundancy lives:
+ * on dev1 the local blocks [0, metadata_end) are the mirror of dev0's
+ * metadata, i.e. they occupy GLOBAL blocks [dev0_blocks, dev0_blocks +
+ * metadata_end) which the bitmap marks permanently allocated. The shadow
+ * zone starts ABOVE that span, so the canonical shadow is entirely on
+ * dev1; dev0's tail beyond the RAW zone is the tier arena (acceleration
+ * copies only -- no sole copies on dev0, ever).
+ *
+ * sync_seq certifies mirror freshness: vol_flush bumps it and rewrites the
+ * descriptor on every writable device AFTER the flush's other metadata; a
+ * device that missed writes (io-latched continue-on-dev1, or a crash that
+ * took only one side's DEVT) shows a lower sync_seq at open and is resynced
+ * from the newer side at the next flush (newest state wins).
+ *
+ *   0x2A0  char magic[4]        "DEVT"
+ *   0x2A4  u32 version          1
+ *   0x2A8  u32 dev_count        1..2 (1 = recorded single-device table)
+ *   0x2AC  u32 flags            DEVTF_*
+ *   0x2B0  u64 dev_blocks[2]    per-device total blocks (0 = absent)
+ *   0x2C0  u64 sync_seq         mirror sync sequence
+ *   0x2C8  u8  vol_uuid[16]     copy of sb.uuid (device pairing check)
+ *   0x2D8  char dev1_hint[128]  NUL-padded path hint for device 1
+ *                               (INVFS_DEV1 env wins over the hint)
+ *   0x358  u32 crc32c           over the descriptor with this field 0
+ * 188 bytes total; the rest of block 0 stays reserved-zero. */
+#define INVFS_DEVT_OFF 0x2A0
+#define INVFS_DEVT_VERSION 1
+#define INVFS_DEVTF_RAW_MIRROR 0x00000001u  /* RAW segments dual-written */
+#pragma pack(push, 1)
+typedef struct {
+    char     magic[4];          /* 0x2A0 "DEVT" */
+    uint32_t version;           /* 0x2A4 */
+    uint32_t dev_count;         /* 0x2A8 */
+    uint32_t flags;             /* 0x2AC */
+    uint64_t dev_blocks[2];     /* 0x2B0 */
+    uint64_t sync_seq;          /* 0x2C0 */
+    uint8_t  vol_uuid[16];      /* 0x2C8 */
+    char     dev1_hint[128];    /* 0x2D8 */
+    uint32_t crc32c;            /* 0x358 */
+} invfs_devt;                   /* 0x35C - 0x2A0 = 188 bytes */
+#pragma pack(pop)
+
 /* The compaction staging run's own header, one block at stage_pba. The
  * compacted record stream (s_bytes) follows contiguously from the next
  * block; payload_crc covers exactly those s_bytes (the RSZS rule: the

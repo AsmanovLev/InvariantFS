@@ -31,9 +31,13 @@ static int tz_batch_algo(uint32_t algo)
  * never surface as good bytes. RAW-zone segments are not sealed and fail
  * straight away. 0 = ok (*blob_out malloc'd, *csize_out bytes), -1 =
  * unreadable (parity could not help or absent). */
-int seg_read_checked(invfs_volume *v, uint64_t pba, uint64_t plen,
-                            uint32_t min_csize, uint32_t *csize_out,
-                            uint8_t **blob_out)
+/* One framed-segment read attempt at pba (the pre-WP25 body of
+ * seg_read_checked): verifies [4B csize LE][4B crc32c(payload)] against
+ * plen and the payload CRC. *bad_out: 1 = the bytes failed bounds/CRC
+ * (seal-eligible), 0 = a device-level io failure. */
+static int seg_read_once(invfs_volume *v, uint64_t pba, uint64_t plen,
+                         uint32_t min_csize, uint32_t *csize_out,
+                         uint8_t **blob_out, int *bad_out)
 {
     uint8_t hdrb[8];
     uint32_t csize;
@@ -42,7 +46,7 @@ int seg_read_checked(invfs_volume *v, uint64_t pba, uint64_t plen,
 
     if (io_seek(&v->io, pba * INVFS_BLOCK_SIZE) != 0 ||
         io_read(&v->io, hdrb, 8) != 0)
-        return -1;
+        { *bad_out = 0; return -1; }
     memcpy(&csize, hdrb, 4);
     if (csize < min_csize ||
         (plen && (uint64_t)csize + 8 > plen * INVFS_BLOCK_SIZE)) {
@@ -60,16 +64,66 @@ int seg_read_checked(invfs_volume *v, uint64_t pba, uint64_t plen,
             bad = 1;        /* deep protection: payload CRC32C mismatch */
         }
     }
-    if (bad) {
-        free(blob);
-        blob = NULL;
-        if (seal_recover_segment(v, pba, plen, &csize, &blob) != 0)
-            return -1;      /* original error stands */
-        if (csize < min_csize) { free(blob); return -1; }
-    }
+    *bad_out = bad;
+    if (bad) { free(blob); return -1; }
     *csize_out = csize;
     *blob_out = blob;
     return 0;
+}
+
+int seg_read_checked(invfs_volume *v, uint64_t pba, uint64_t plen,
+                            uint32_t min_csize, uint32_t *csize_out,
+                            uint8_t **blob_out)
+{
+    uint8_t *blob = NULL;
+    int bad = 0;
+
+    /* WP25: reads prefer dev0 -- a read-hot canonical segment keeps an
+     * acceleration copy in the dev0 tier arena (vol_tier_migrate). The
+     * copy is byte-identical, so the framed CRC proves it; any failure
+     * falls back to the canonical dev1 segment (the copy is then stale
+     * or dev0 is gone -- either way the canonical read is the truth). */
+    if (v->ndev == 2 && v->dev0_present && !v->dev_skip[0] &&
+        pba >= v->sb.shadow_zone_start) {
+        uint64_t dpba = 0, dlen = 0;
+        if (wp25_tier_lookup(v, pba, &dpba, &dlen) == 0) {
+            if (seg_read_once(v, dpba, dlen, min_csize, csize_out,
+                              blob_out, &bad) == 0)
+                return 0;
+            if (getenv("INVFS_DEBUG"))
+                fprintf(stderr, "[tier] dev0 copy of pba %llu failed; "
+                        "reading canonical\n", (unsigned long long)pba);
+            /* fall through to the canonical read */
+        }
+    }
+    if (seg_read_once(v, pba, plen, min_csize, csize_out, &blob,
+                      &bad) == 0) {
+        *blob_out = blob;
+        return 0;
+    }
+    /* WP25: a raw-zone segment whose dev0 copy is unreadable (degraded
+     * mount, io error, or a CRC-failed torn write) is served by its dev1
+     * mirror -- same framed bytes, the CRC governs. */
+    if (v->ndev == 2 &&
+        pba >= v->sb.raw_zone_start &&
+        pba < v->sb.raw_zone_start + v->sb.raw_zone_blocks) {
+        uint64_t mpba = 0, mlen = 0;
+        if (wp25_rawm_lookup(v, pba, &mpba, &mlen) == 0) {
+            int mbad = 0;
+            if (seg_read_once(v, mpba, mlen, min_csize, csize_out,
+                              blob_out, &mbad) == 0)
+                return 0;
+        }
+        return -1;   /* no mirror or mirror unreadable: fail loudly */
+    }
+    if (bad) {
+        if (seal_recover_segment(v, pba, plen, csize_out, &blob) != 0)
+            return -1;      /* original error stands */
+        if (*csize_out < min_csize) { free(blob); return -1; }
+        *blob_out = blob;
+        return 0;
+    }
+    return -1;
 }
 
 

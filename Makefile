@@ -15,7 +15,7 @@ FUSE_LIBS   := $(shell pkg-config --libs fuse3)
 CORE    := volume vol_cpack vol_png vol_seal vol_repair vol_rollback \
            vol_resize vol_fsck vol_crash vol_exer vol_dedupe vol_textzone \
            vol_heat vol_sweep vol_read vol_write vol_records vol_ast \
-           vol_dirs \
+           vol_dirs vol_tier \
            arc crc32c lz4 flacx tarx pngx blkio miniz blake3 blake3_dispatch blake3_portable ppmd8 ppmd8enc ppmd8dec ppmd_codec codec bcj_x86 rs
 CORE_O  := $(addprefix $(OBJ)/,$(addsuffix .o,$(CORE)))
 B3      := blake3 blake3_dispatch blake3_portable

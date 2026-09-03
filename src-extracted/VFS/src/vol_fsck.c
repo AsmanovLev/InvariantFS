@@ -636,6 +636,16 @@ int vol_fsck_scan(invfs_volume *v, invfs_fsck_report *rep, int fix)
             bit_set(used, b);
     }
 
+    /* WP25: on a two-device volume the dev1 span below the shadow zone --
+     * [dev0_total, shadow_zone_start) -- is the reserved metadata mirror
+     * (and never holds allocatable data); it is allocated by construction,
+     * exactly like the metadata zone itself. */
+    if (v->ndev == 2) {
+        uint64_t b;
+        for (b = v->dev0_blocks; b < v->sb.shadow_zone_start; b++)
+            bit_set(used, b);
+    }
+
     /* WP21/WP22d: a live sweep checkpoint owns its journal staging run
      * (referenced by the CKP0 descriptor, not by any AST/L2P entry), so it
      * must not count as orphans. fsck -f is refused while a checkpoint is
@@ -690,6 +700,11 @@ int vol_fsck_scan(invfs_volume *v, invfs_fsck_report *rep, int fix)
         memcpy(v->bitmap, used, used_bytes);
         v->free_blocks = vol_count_free(v);
         alloc_state_reset(v);   /* bitmap replaced: per-zone counters stale */
+        /* WP25: the rebuild replaced the bitmap wholesale (no
+         * vol_free_blocks calls), so the tier/mirror second copies were
+         * never re-validated: drop any whose canonical key or copy blocks
+         * fell out of the rebuilt allocation map. */
+        wp25_fsck_prune(v);
         /* H5: the rebuild may have reclaimed enough to release a space
          * latch the volume was carrying */
         vol_readonly_unlatch(v);

@@ -328,6 +328,73 @@ static uint64_t find_free_run(const uint8_t *bitmap, uint64_t lo,
     return 0;
 }
 
+/* ------------------------------------------------------------------ *
+ * WP25: two-device resize -- v1 grows the TAIL device (dev1) only.
+ *
+ * The volume's global block space is the concatenation dev0+dev1, so a
+ * grow lands entirely on dev1's tail: dev1's image is extended, the new
+ * superblock's total_blocks grows, the DEVT table follows at the commit
+ * (vol_rsz0_apply), and every metadata write this tool does must reach
+ * BOTH devices' block 0 (the mirror). The io router below is the
+ * tool-local twin of the engine mux (which this standalone tool cannot
+ * use: it works on raw blkio handles for the pre-open phases). With
+ * io2 == NULL it degenerates to plain blkio on io -- the single-device
+ * path is byte-identical.
+ * ------------------------------------------------------------------ */
+typedef struct {
+    blkio   *io, *io2;         /* io2 NULL = single-device */
+    uint64_t dev0_bytes;       /* global->local split */
+    uint64_t meta_end;         /* mirrored span [0, meta_end) */
+} rzio;
+
+static int rz_pread(rzio *r, uint64_t off, void *buf, size_t len)
+{
+    if (off < r->meta_end || !r->io2)
+        return blkio_pread(r->io, off, buf, len);       /* primary */
+    if (off < r->dev0_bytes)
+        return blkio_pread(r->io, off, buf, len);
+    return blkio_pread(r->io2, off - r->dev0_bytes, buf, len);
+}
+
+static int rz_pwrite(rzio *r, uint64_t off, const void *buf, size_t len)
+{
+    if (off < r->meta_end) {
+        /* metadata span: writethrough mirror to both devices */
+        if (blkio_pwrite(r->io, off, buf, len) != 0)
+            return -1;
+        if (r->io2 && blkio_pwrite(r->io2, off, buf, len) != 0)
+            return -1;
+        return 0;
+    }
+    if (off < r->dev0_bytes || !r->io2)
+        return blkio_pwrite(r->io, off, buf, len);
+    return blkio_pwrite(r->io2, off - r->dev0_bytes, buf, len);
+}
+
+static int rz_flush(rzio *r)
+{
+    int rc = blkio_flush(r->io);
+    if (r->io2 && blkio_flush(r->io2) != 0) rc = -1;
+    return rc;
+}
+
+/* copy `len` bytes from src to dst through the bounce, chaining a CRC */
+static int copy_crc2(rzio *rz, uint64_t src, uint64_t dst, uint64_t len,
+                     uint8_t *buf, uint32_t *crc)
+{
+    while (len) {
+        size_t n = len > BLKIO_BOUNCE ? BLKIO_BOUNCE : (size_t)len;
+        if (rz_pread(rz, src, buf, n) != 0 ||
+            rz_pwrite(rz, dst, buf, n) != 0)
+            return -1;
+        *crc = invfs_crc32c_update(*crc, buf, n);
+        src += n;
+        dst += n;
+        len -= n;
+    }
+    return 0;
+}
+
 /* copy `len` bytes from src to dst through the bounce, chaining a CRC */
 static int copy_crc(blkio *io, uint64_t src, uint64_t dst, uint64_t len,
                     uint8_t *buf, uint32_t *crc)
@@ -366,11 +433,19 @@ int main(int argc, char **argv)
     size_t parity_live = 0;
     int is_dev, rc, grow;
     int err = 0;
+    rzio rz2;                          /* WP25: two-device io router */
+    blkio io2;
+    int twodev = 0;
+    uint64_t dev0_blocks = 0, dev1_blocks = 0;
+    char dev1_path[128];
 
     if (argc != 3) {
         fprintf(stderr, "usage: invf-resize <image|device> <newsize[K|M|G]>\n"
                         "  offline volume resize (grow/shrink); the volume "
-                        "must be unmounted\n");
+                        "must be unmounted\n"
+                        "  two-device volumes (WP25): newsize is the TOTAL;\n"
+                        "  growth lands on the tail device (dev1, set\n"
+                        "  INVFS_DEV1); shrink is refused\n");
         return 2;
     }
     path = blkio_normalize(argv[1], devbuf, sizeof devbuf);
@@ -394,6 +469,8 @@ int main(int argc, char **argv)
         return 1;
     }
     is_dev = blkio_is_device(&io);
+    memset(&rz2, 0, sizeof rz2);
+    rz2.io = &io;
 
     if (blkio_pread(&io, 0, &sb, sizeof sb) != 0) {
         fprintf(stderr, "invf-resize: cannot read superblock\n");
@@ -509,6 +586,68 @@ int main(int argc, char **argv)
     is_old = js_old + INVFS_JOURNAL_BLOCKS;
     iend_old = sb.metadata_zone_start + meta_blocks;   /* blocks */
 
+    /* WP25: the device table decides single- vs two-device. Two-device
+     * v1 rule: GROWTH ONLY, and growth lands on the tail device (dev1);
+     * dev0's size never changes. */
+    {
+        invfs_devt dt;
+        memset(&dt, 0, sizeof dt);
+        memset(dev1_path, 0, sizeof dev1_path);
+        if (blkio_pread(&io, INVFS_DEVT_OFF, &dt, sizeof dt) == 0 &&
+            memcmp(dt.magic, "DEVT", 4) == 0) {
+            invfs_devt t = dt;
+            t.crc32c = 0;
+            if (invfs_crc32c(&t, sizeof t) == dt.crc32c &&
+                dt.version == 1 && dt.dev_count == 2 &&
+                dt.dev_blocks[0] && dt.dev_blocks[1] &&
+                dt.dev_blocks[0] + dt.dev_blocks[1] == sb.total_blocks &&
+                memcmp(dt.vol_uuid, sb.uuid, 16) == 0) {
+                twodev = 1;
+                dev0_blocks = dt.dev_blocks[0];
+                dev1_blocks = dt.dev_blocks[1];
+                memcpy(dev1_path, dt.dev1_hint,
+                       sizeof dev1_path < sizeof dt.dev1_hint ?
+                       sizeof dev1_path : sizeof dt.dev1_hint);
+                dev1_path[sizeof dev1_path - 1] = 0;
+            } else {
+                fprintf(stderr, "invf-resize: %s: DEVT device table is "
+                        "torn; refusing to resize\n", path);
+                goto fail;
+            }
+        }
+    }
+    if (twodev) {
+        const char *d1 = getenv("INVFS_DEV1");
+        if (d1 && *d1) {
+            snprintf(dev1_path, sizeof dev1_path, "%s", d1);
+        }
+        if (!dev1_path[0]) {
+            fprintf(stderr, "invf-resize: %s: two-device volume; set "
+                    "INVFS_DEV1 to device 1\n", path);
+            goto fail;
+        }
+        rc = blkio_open(&io2, dev1_path,
+                        blkio_looks_like_device(dev1_path) ?
+                        BLKIO_EXCLUSIVE : 0);
+        if (rc != 0) {
+            fprintf(stderr, "invf-resize: cannot open device 1 %s: %s\n",
+                    dev1_path, blkio_strerror(rc));
+            goto fail;
+        }
+        if (blkio_capacity(&io2) <
+            dev1_blocks * (uint64_t)INVFS_BLOCK_SIZE) {
+            fprintf(stderr, "invf-resize: device 1 %s is smaller than the "
+                    "device table says\n", dev1_path);
+            blkio_close(&io2);
+            goto fail;
+        }
+        rz2.io = &io;
+        rz2.io2 = &io2;
+        rz2.dev0_bytes = dev0_blocks * (uint64_t)INVFS_BLOCK_SIZE;
+        rz2.meta_end = (sb.metadata_zone_start + meta_blocks) *
+                       (uint64_t)INVFS_BLOCK_SIZE;
+    }
+
     bitmap = (uint8_t *)malloc((size_t)(bm_old * INVFS_BLOCK_SIZE));
     buf = (uint8_t *)malloc(BLKIO_BOUNCE);
     blk = (uint8_t *)malloc(INVFS_BLOCK_SIZE);
@@ -565,12 +704,18 @@ int main(int argc, char **argv)
         return 0;
     }
     grow = new_total > old_total;
+    if (twodev && !grow) {
+        fprintf(stderr, "invf-resize: %s: two-device v1 grows only the "
+                "TAIL device (dev1); shrink is not supported -- refuse\n",
+                path);
+        goto fail;
+    }
     bm_new = bm_blocks(new_total);
     new_js = sb.metadata_zone_start + bm_new;
     new_is = new_js + INVFS_JOURNAL_BLOCKS;
     new_iend = iend_old;   /* the metadata zone's block count does not move */
 
-    if (is_dev) {
+    if (is_dev && !twodev) {
         uint64_t cap = blkio_capacity(&io);
         if (!grow) {
             fprintf(stderr, "invf-resize: cannot shrink a block device "
@@ -583,6 +728,26 @@ int main(int argc, char **argv)
                     (unsigned long long)cap);
             goto fail;
         }
+    }
+    if (twodev) {
+        /* the tail device absorbs the whole delta; dev0 never moves */
+        uint64_t dev1_bytes =
+            (new_total - dev0_blocks) * (uint64_t)INVFS_BLOCK_SIZE;
+        if (blkio_is_device(&io2)) {
+            uint64_t cap = blkio_capacity(&io2);
+            if (dev1_bytes != cap) {
+                fprintf(stderr, "invf-resize: device 1 is a block device: "
+                        "the grown size must be exactly %llu bytes\n",
+                        (unsigned long long)cap);
+                goto fail;
+            }
+        } else if (blkio_chsize(&io2, dev1_bytes) != 0) {
+            fprintf(stderr, "invf-resize: cannot grow device 1 %s to %llu "
+                    "bytes\n", dev1_path, (unsigned long long)dev1_bytes);
+            goto fail;
+        }
+        printf("  two-device: growth lands on device 1 (%s -> %llu bytes)\n",
+               dev1_path, (unsigned long long)dev1_bytes);
     }
 
     /* the inode area absorbs the bitmap growth: it must still hold every
@@ -668,7 +833,7 @@ int main(int argc, char **argv)
 
     /* ---- grow: the file must exist at the new size before the staging
      * lands in its tail (device: validates the partition is big enough) -- */
-    if (grow && (rc = blkio_chsize(&io, want_bytes)) != 0) {
+    if (grow && !twodev && (rc = blkio_chsize(&io, want_bytes)) != 0) {
         fprintf(stderr, "invf-resize: cannot set size to %llu bytes: %s\n",
                 (unsigned long long)want_bytes, blkio_strerror(rc));
         goto fail;
@@ -685,7 +850,7 @@ int main(int argc, char **argv)
             while (left) {
                 size_t n = left > BLKIO_BOUNCE ? BLKIO_BOUNCE : (size_t)left;
                 memcpy(buf, bitmap + put, n);
-                if (blkio_pwrite(&io, off, buf, n) != 0) {
+                if (rz_pwrite(&rz2, off, buf, n) != 0) {
                     fprintf(stderr, "invf-resize: staging write failed\n");
                     goto fail;
                 }
@@ -695,13 +860,13 @@ int main(int argc, char **argv)
                 left -= n;
             }
         }
-        if (copy_crc(&io, j_src, off, j_used,
+        if (copy_crc2(&rz2, j_src, off, j_used,
                      buf, &pcrc) != 0) {
             fprintf(stderr, "invf-resize: staging write failed (journal)\n");
             goto fail;
         }
         off += j_used;
-        if (copy_crc(&io, is_old * (uint64_t)INVFS_BLOCK_SIZE, off, i_used,
+        if (copy_crc2(&rz2, is_old * (uint64_t)INVFS_BLOCK_SIZE, off, i_used,
                      buf, &pcrc) != 0) {
             fprintf(stderr, "invf-resize: staging write failed (inodes)\n");
             goto fail;
@@ -717,12 +882,12 @@ int main(int argc, char **argv)
         sh.crc32c = 0;
         sh.crc32c = invfs_crc32c(&sh, sizeof sh);
         memcpy(blk, &sh, sizeof sh);
-        if (blkio_pwrite(&io, stage_start * (uint64_t)INVFS_BLOCK_SIZE,
+        if (rz_pwrite(&rz2, stage_start * (uint64_t)INVFS_BLOCK_SIZE,
                          blk, INVFS_BLOCK_SIZE) != 0) {
             fprintf(stderr, "invf-resize: staging header write failed\n");
             goto fail;
         }
-        if (blkio_flush(&io) != 0) {
+        if (rz_flush(&rz2) != 0) {
             fprintf(stderr, "invf-resize: staging flush failed\n");
             goto fail;
         }
@@ -737,7 +902,7 @@ int main(int argc, char **argv)
         uint32_t pcrc = 0;
         while (left) {
             size_t n = left > BLKIO_BOUNCE ? BLKIO_BOUNCE : (size_t)left;
-            if (blkio_pread(&io, off, buf, n) != 0) {
+            if (rz_pread(&rz2, off, buf, n) != 0) {
                 fprintf(stderr, "invf-resize: staging read-back failed\n");
                 goto fail;
             }
@@ -754,7 +919,7 @@ int main(int argc, char **argv)
 
 #ifndef _WIN32
     if (abort_at("staged")) {
-        blkio_flush(&io);
+        rz_flush(&rz2);
         kill(getpid(), SIGKILL);
     }
 #endif
@@ -785,7 +950,7 @@ int main(int argc, char **argv)
         invfs_superblock rsb = sb;
         rsb.state = INVFS_STATE_RECOVERY;
         rsb.checksum = invfs_crc32c(&rsb, offsetof(invfs_superblock, checksum));
-        if (blkio_pwrite(&io, 0, &rsb, sizeof rsb) != 0) {
+        if (rz_pwrite(&rz2, 0, &rsb, sizeof rsb) != 0) {
             fprintf(stderr, "invf-resize: cannot mark RECOVERY\n");
             goto fail;
         }
@@ -806,11 +971,11 @@ int main(int argc, char **argv)
         t.crc32c = 0;
         rz.crc32c = invfs_crc32c(&t, sizeof t);
     }
-    if (blkio_pwrite(&io, INVFS_RSZ0_OFF, &rz, sizeof rz) != 0) {
+    if (rz_pwrite(&rz2, INVFS_RSZ0_OFF, &rz, sizeof rz) != 0) {
         fprintf(stderr, "invf-resize: cannot write the RSZ0 descriptor\n");
         goto fail;
     }
-    if (blkio_flush(&io) != 0) {
+    if (rz_flush(&rz2) != 0) {
         fprintf(stderr, "invf-resize: arm flush failed\n");
         goto fail;
     }
@@ -819,7 +984,7 @@ int main(int argc, char **argv)
 
 #ifndef _WIN32
     if (abort_at("armed")) {
-        blkio_flush(&io);
+        rz_flush(&rz2);
         kill(getpid(), SIGKILL);
     }
 #endif
@@ -884,6 +1049,7 @@ int main(int argc, char **argv)
     return 0;
 
 fail:
+    if (rz2.io2) blkio_close(rz2.io2);
     blkio_close(&io);
     free(bitmap);
     free(buf);

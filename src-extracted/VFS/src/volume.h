@@ -553,3 +553,20 @@ int  vol_compact_recover(invfs_volume *v);
  * decomposition, codec transcodes and batching never run. Returns
  * vol_sweep_file_inner's: 0 swept, 1 nothing to do, -1 hard error. */
 int  vol_sweep_file_generic(invfs_volume *v, uint64_t inode_id);
+
+/* ---- WP25: two-device volumes (DEVT descriptor, invarifs.h) ----
+ * vol_ndev: 1 or 2 backing devices. vol_degraded: the volume is open
+ * READ-ONLY with dev0 absent -- metadata comes from the dev1 mirror and
+ * every live block is readable (canonical data lives on dev1 by the WP25
+ * placement rules); writes fail loudly. */
+int  vol_ndev(const invfs_volume *v);
+int  vol_degraded(const invfs_volume *v);
+/* 1 = the metadata mirror devices disagree (a resync runs at the next
+ * flush, newest state wins). */
+int  vol_mirror_stale(const invfs_volume *v);
+/* tiering (dev0 acceleration copies): live copy count + their block total;
+ * for tools/tests. first_cpba/first_dpba optionally take one sample. */
+uint64_t vol_tier_count(invfs_volume *v, uint64_t *blocks_out,
+                        uint64_t *first_cpba, uint64_t *first_dpba);
+/* RAW mirror: live mirrored segment count + blocks. */
+uint64_t vol_rawm_count(invfs_volume *v, uint64_t *blocks_out);
