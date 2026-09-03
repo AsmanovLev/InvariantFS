@@ -1,5 +1,6 @@
 /*
  * fuse_fs.c — InvariantFS FUSE filesystem (rw; POSIX v2 metadata,
+ * POSIX ACLs + daemon-side permission enforcement (WP-A),
  * control xattr namespace, manual/opt-in sweep)
  *   invf-fuse [-f] <image> <mountpoint>
  *
@@ -20,6 +21,7 @@
 #include <fcntl.h>
 #include <time.h>
 #include <sys/statvfs.h>
+#include <ctype.h>
 
 #include "invarifs.h"
 #include "volume.h"
@@ -453,10 +455,544 @@ static int meta_apply_patch(const char *path, unsigned mask,
     return nid ? 0 : -ENOSPC;
 }
 
+/* ==================== POSIX ACLs (WP-A) ====================
+ * Storage: the standard Linux posix_acl xattr blob (u32 version-2 header,
+ * then {u16 tag, u16 perm, u32 id} entries, little-endian) is kept
+ * VERBATIM as the value of the system.posix_acl_access /
+ * system.posix_acl_default xattrs inside the inode's INO2 TLV area
+ * (vol_get/set_xattr) -- the kernel and acl(5) tools parse that layout,
+ * so nothing is re-encoded on the way in or out.
+ *
+ * Enforcement split (daemon vs kernel): this mount does NOT use
+ * default_permissions, and without it this kernel never delegates
+ * permission() decisions to the daemon either (verified: as a foreign
+ * uid, open/read/readdir/unlink of 0600/0700 objects all succeeded
+ * unchecked), so the daemon is the sole object-level permission
+ * authority. Every op entry point that matters evaluates here:
+ *   open            R/W per flags       readdir          R on the dir
+ *   access(2)       the asked mask      truncate(path)   W
+ *   create/mkdir/mknod/symlink/link     parent dir W|X (+inheritance)
+ *   unlink/rmdir/rename                 parent W|X (+t ownership rule)
+ *   all path ops                        X on intermediate components
+ * The kernel still owns: umask masking of create/mkdir modes
+ * (vfs_prepare_mode -- SB_POSIXACL is NOT negotiated, see below), and
+ * chmod/chown ownership rules (notify_change refuses non-owners before
+ * the daemon is ever called; chmod additionally folds the new mode into
+ * a stored access ACL here, POSIX.1e mask rule).
+ *
+ * uid 0 and the daemon's own euid bypass all checks (the pre-WP-A
+ * CAP_DAC_OVERRIDE analog: a single-admin image has no security boundary
+ * against its own administrator, and refusing the image owner breaks
+ * ordinary tooling). fuse_context carries uid/gid only; supplementary
+ * groups come from /proc/<caller-pid>/status (best effort: unreadable
+ * process -> primary gid only).
+ *
+ * FUSE_CAP_POSIX_ACL is deliberately NOT requested: the generic FUSE
+ * xattr handler already transports system.posix_acl_* blobs verbatim
+ * (verified), and negotiating it would move umask handling into the
+ * daemon for zero semantic gain. Consequence (documented deviation):
+ * when a parent default ACL exists, the kernel has already applied the
+ * caller's umask to the create mode before we see it, so inheritance
+ * masks the umask-filtered mode instead of the raw one.
+ */
+
+#define INVFS_ACL_VERSION 2u   /* posix_acl_xattr_header.a_version */
+#define ACL_USER_OBJ  0x01
+#define ACL_USER      0x02
+#define ACL_GROUP_OBJ 0x04
+#define ACL_GROUP     0x08
+#define ACL_MASK      0x10
+#define ACL_OTHER     0x20
+#define ACL_UNDEF_ID  0xffffffffu
+
+#define XATTR_ACL_ACCESS  "system.posix_acl_access"
+#define XATTR_ACL_DEFAULT "system.posix_acl_default"
+
+static uint16_t acl_ent_tag(const uint8_t *e)  { uint16_t v; memcpy(&v, e, 2); return v; }
+static uint16_t acl_ent_perm(const uint8_t *e) { uint16_t v; memcpy(&v, e + 2, 2); return v; }
+static uint32_t acl_ent_id(const uint8_t *e)   { uint32_t v; memcpy(&v, e + 4, 4); return v; }
+static void acl_ent_set_perm(uint8_t *e, uint16_t p) { memcpy(e + 2, &p, 2); }
+
+/* structural check of a blob about to be stored: canonical tag order,
+ * exactly one of each base entry, perms in 0..7 */
+static int acl_blob_valid(const uint8_t *b, size_t n)
+{
+    size_t nent, i;
+    uint32_t ver;
+    int seen_uobj = 0, seen_gobj = 0, seen_other = 0;
+    int stage = 0;   /* 0 USER_OBJ | 1 USER | 2 GROUP_OBJ | 3 GROUP | 4 MASK | 5 OTHER */
+    if (n < 4 || (n - 4) % 8) return 0;
+    memcpy(&ver, b, 4);
+    if (ver != INVFS_ACL_VERSION) return 0;
+    nent = (n - 4) / 8;
+    if (nent < 3 || nent > 128) return 0;
+    for (i = 0; i < nent; i++) {
+        const uint8_t *e = b + 4 + i * 8;
+        uint16_t tag = acl_ent_tag(e);
+        unsigned perm = acl_ent_perm(e);
+        uint32_t id = acl_ent_id(e);
+        if (perm & ~7u) return 0;
+        switch (tag) {
+        case ACL_USER_OBJ:
+            if (i != 0 || id != ACL_UNDEF_ID) return 0;
+            seen_uobj = 1; stage = 1; break;
+        case ACL_USER:
+            if (stage > 1 || id == ACL_UNDEF_ID) return 0;
+            stage = 1; break;
+        case ACL_GROUP_OBJ:
+            if (stage > 1 || id != ACL_UNDEF_ID) return 0;
+            seen_gobj = 1; stage = 2; break;
+        case ACL_GROUP:
+            if (stage < 2 || stage > 3 || id == ACL_UNDEF_ID) return 0;
+            stage = 3; break;
+        case ACL_MASK:
+            if (stage < 2 || stage > 3 || id != ACL_UNDEF_ID) return 0;
+            stage = 4; break;
+        case ACL_OTHER:
+            if (i != nent - 1 || id != ACL_UNDEF_ID) return 0;
+            seen_other = 1; stage = 5; break;
+        default:
+            return 0;
+        }
+    }
+    return seen_uobj && seen_gobj && seen_other;
+}
+
+typedef struct acreds {
+    uid_t uid;
+    gid_t gid;
+    gid_t grps[64];
+    int ngr;
+    int bypass;   /* root or the daemon's euid: CAP_DAC_OVERRIDE analog */
+} acreds;
+
+static void acreds_get(struct acreds *c)
+{
+    struct fuse_context *ctx = fuse_get_context();
+    c->uid = ctx ? ctx->uid : 0;
+    c->gid = ctx ? ctx->gid : 0;
+    c->ngr = 0;
+    c->bypass = (c->uid == 0 || c->uid == (uid_t)geteuid());
+    if (c->bypass || !ctx || ctx->pid <= 0) return;
+    /* supplementary groups of the caller; fuse_context does not carry them */
+    {
+        char procpath[64], line[1024];
+        FILE *f;
+        snprintf(procpath, sizeof procpath, "/proc/%d/status", (int)ctx->pid);
+        f = fopen(procpath, "r");
+        if (!f) return;
+        while (fgets(line, sizeof line, f)) {
+            char *s;
+            if (strncmp(line, "Groups:", 7) != 0) continue;
+            s = line + 7;
+            while (*s && *s != '\n' && c->ngr < (int)(sizeof c->grps / sizeof c->grps[0])) {
+                char *end;
+                unsigned long v;
+                while (*s == ' ' || *s == '\t') s++;
+                if (!isdigit((unsigned char)*s)) break;
+                v = strtoul(s, &end, 10);
+                if (end == s) break;
+                c->grps[c->ngr++] = (gid_t)v;
+                s = end;
+            }
+            break;
+        }
+        fclose(f);
+    }
+}
+
+static int acreds_in_group(const struct acreds *c, gid_t g)
+{
+    int i;
+    if (c->gid == g) return 1;
+    for (i = 0; i < c->ngr; i++)
+        if (c->grps[i] == g) return 1;
+    return 0;
+}
+
+/* mode+ACL evaluation, mirrors kernel posix_acl_permission_masq:
+ * named-user hits and every group-class hit are ANDed with ACL_MASK (if
+ * present); a caller that matched the group class but was granted nothing
+ * never falls through to OTHER. want = R_OK|W_OK|X_OK bits. 0 allowed,
+ * -1 denied. No ACL -> the plain mode triad (group = primary OR any
+ * supplementary group match). Malformed blobs fail closed. */
+static int acl_eval(const invfs_meta_pub *m, const uint8_t *acl, size_t alen,
+                    const struct acreds *c, unsigned want)
+{
+    size_t nent, i;
+    const uint8_t *base;
+    unsigned mask_perm = 7;   /* no MASK entry: group class unbounded */
+    int found_group = 0;
+
+    if (!acl || alen < 4 + 3 * 8 || (alen - 4) % 8) {
+        unsigned shift = c->uid == m->uid ? 6 :
+                         acreds_in_group(c, m->gid) ? 3 : 0;
+        return (((unsigned)m->mode >> shift) & want) == want ? 0 : -1;
+    }
+    base = acl + 4;
+    nent = (alen - 4) / 8;
+    for (i = 0; i < nent; i++)
+        if (acl_ent_tag(base + i * 8) == ACL_MASK) {
+            mask_perm = acl_ent_perm(base + i * 8);
+            break;
+        }
+    for (i = 0; i < nent; i++) {
+        const uint8_t *e = base + i * 8;
+        unsigned perm = acl_ent_perm(e);
+        uint32_t id = acl_ent_id(e);
+        switch (acl_ent_tag(e)) {
+        case ACL_USER_OBJ:
+            if (c->uid == m->uid)
+                return (perm & want) == want ? 0 : -1;
+            break;
+        case ACL_USER:
+            if (id == c->uid)
+                return (perm & mask_perm & want) == want ? 0 : -1;
+            break;
+        case ACL_GROUP_OBJ:
+            if (acreds_in_group(c, m->gid)) {
+                found_group = 1;
+                if ((perm & mask_perm & want) == want) return 0;
+            }
+            break;
+        case ACL_GROUP:
+            if (acreds_in_group(c, id)) {
+                found_group = 1;
+                if ((perm & mask_perm & want) == want) return 0;
+            }
+            break;
+        case ACL_MASK:
+            break;
+        case ACL_OTHER:
+            if (found_group) return -1;
+            return (perm & want) == want ? 0 : -1;
+        default:
+            return -1;
+        }
+    }
+    return -1;   /* no OTHER entry: malformed */
+}
+
+/* the root directory has no record: fixed meta (matches invf_getattr) */
+static void root_meta(invfs_meta_pub *m)
+{
+    memset(m, 0, sizeof *m);
+    m->type = INVFS_ITYP_DIR;
+    m->mode = 0755;
+    m->uid = 0;
+    m->gid = 0;
+    m->nlink = 2;
+}
+
+/* mode+ACL check for one existing path; want = R_OK|W_OK|X_OK bits
+ * (0 = existence only). 0 ok, -EACCES denied, -ENOENT missing. */
+static int perm_check_cred(const struct acreds *c, const char *path,
+                           unsigned want)
+{
+    invfs_meta_pub m;
+    char ename[300];
+    int is_root = strcmp(path, "/") == 0;
+
+    if (is_root) {
+        root_meta(&m);
+    } else if (!meta_for_path(path, ename, sizeof ename, &m)) {
+        return -ENOENT;
+    }
+    if (c->bypass || !want)
+        return 0;
+    /* fetch the access ACL (the root has no record, hence none) */
+    {
+        uint8_t acl[INVFS_META_XATTR_MAX];
+        size_t alen = 0;
+        const uint8_t *aclp = NULL;
+        if (!is_root) {
+            uint64_t ino;
+            size_t vlen = sizeof acl;
+            pthread_mutex_lock(&g_io_lock);
+            ino = g_vol ? vol_find(g_vol, ename) : 0;
+            if (ino && vol_get_xattr(g_vol, ino, XATTR_ACL_ACCESS,
+                                     acl, &vlen) == 0) {
+                alen = vlen;
+                aclp = acl;
+            }
+            pthread_mutex_unlock(&g_io_lock);
+        }
+        return acl_eval(&m, aclp, alen, c, want) == 0 ? 0 : -EACCES;
+    }
+}
+
+static int perm_check(const char *path, unsigned want)
+{
+    struct acreds c;
+    acreds_get(&c);
+    return perm_check_cred(&c, path, want);
+}
+
+/* X_OK on every intermediate directory component of a FUSE path (the final
+ * component is each op's own business). Bypass callers return before any
+ * record I/O, so the mounting user's hot path is unchanged. */
+static int perm_check_traversal_cred(const struct acreds *c, const char *path)
+{
+    const char *p = path[0] == '/' ? path + 1 : path;
+    const char *s;
+    if (c->bypass) return 0;
+    for (s = strchr(p, '/'); s; s = strchr(s + 1, '/')) {
+        char comp[300];
+        char ename[300];
+        invfs_meta_pub m;
+        size_t n = (size_t)(s - p);
+        int rc;
+        if (n == 0 || n >= sizeof comp) continue;
+        memcpy(comp, p, n);
+        comp[n] = 0;
+        if (!meta_for_path(comp, ename, sizeof ename, &m))
+            return -ENOENT;
+        if (m.type != INVFS_ITYP_DIR)
+            return -ENOTDIR;
+        rc = perm_check_cred(c, comp, X_OK);
+        if (rc) return rc;
+    }
+    return 0;
+}
+
+static int perm_check_traversal(const char *path)
+{
+    struct acreds c;
+    acreds_get(&c);
+    return perm_check_traversal_cred(&c, path);
+}
+
+/* `want` on the parent directory of a FUSE path ("/x" -> "/") */
+static int perm_check_parent_cred(const struct acreds *c, const char *path,
+                                  unsigned want)
+{
+    char parent[300];
+    const char *p = path[0] == '/' ? path + 1 : path;
+    const char *s = strrchr(p, '/');
+    if (c->bypass) return 0;
+    if (!s) return perm_check_cred(c, "/", want);
+    {
+        size_t n = (size_t)(s - p);
+        if (n == 0 || n >= sizeof parent) return -ENAMETOOLONG;
+        memcpy(parent, p, n);
+        parent[n] = 0;
+    }
+    return perm_check_cred(c, parent, want);
+}
+
+static int perm_check_parent(const char *path, unsigned want)
+{
+    struct acreds c;
+    acreds_get(&c);
+    return perm_check_parent_cred(&c, path, want);
+}
+
+/* +t directory rule for unlink/rmdir/rename: in a sticky dir only the
+ * entry's owner, the dir's owner or a bypass caller may remove/rename an
+ * entry (Linux: EPERM). */
+static int perm_check_sticky(const struct acreds *c, const char *path)
+{
+    invfs_meta_pub em, pm;
+    char ename[300];
+    const char *p = path[0] == '/' ? path + 1 : path;
+    const char *s = strrchr(p, '/');
+
+    if (c->bypass) return 0;
+    if (!meta_for_path(path, ename, sizeof ename, &em))
+        return -ENOENT;
+    if (!s) {
+        root_meta(&pm);
+    } else {
+        char parent[300];
+        size_t n = (size_t)(s - p);
+        if (n == 0 || n >= sizeof parent) return -ENAMETOOLONG;
+        memcpy(parent, p, n);
+        parent[n] = 0;
+        if (!meta_for_path(parent, ename, sizeof ename, &pm))
+            return -ENOENT;
+    }
+    if (!(pm.mode & 01000)) return 0;
+    if (c->uid == pm.uid || c->uid == em.uid) return 0;
+    return -EPERM;
+}
+
+/* fetch the default ACL of path's parent directory. 1 = present (valid
+ * blob in buf, *len bytes), 0 = none. The root has no default ACL.
+ * Call without g_io_lock held. */
+static int parent_default_acl(const char *path, uint8_t *buf, size_t *len)
+{
+    char anchor[300];
+    const char *p = path[0] == '/' ? path + 1 : path;
+    const char *s = strrchr(p, '/');
+    uint64_t ino;
+    size_t vlen;
+    int rc;
+
+    if (!s) return 0;                    /* parent is "/" */
+    {
+        size_t n = (size_t)(s - p);
+        if (n + 2 > sizeof anchor) return 0;
+        memcpy(anchor, p, n);
+        anchor[n] = '/';                 /* the dir anchor record name */
+        anchor[n + 1] = 0;
+    }
+    vlen = INVFS_META_XATTR_MAX;         /* bounded by the TLV budget */
+    pthread_mutex_lock(&g_io_lock);
+    ino = g_vol ? vol_find(g_vol, anchor) : 0;
+    rc = ino ? vol_get_xattr(g_vol, ino, XATTR_ACL_DEFAULT, buf, &vlen) : -1;
+    pthread_mutex_unlock(&g_io_lock);
+    if (rc != 0 || !acl_blob_valid(buf, vlen))
+        return 0;                        /* absent (or corrupt: treat as none) */
+    *len = vlen;
+    return 1;
+}
+
+/* posix_acl_create_masq: fold the create mode into an inherited ACL (in
+ * place). Base entries' perms are ANDed with the matching mode triad; the
+ * mode's group bits come back as the effective group class (MASK when
+ * present, else GROUP_OBJ). Returns 1 when the result still carries named
+ * entries (the blob must be stored), 0 when it degraded to exactly the
+ * mode (no xattr needed). */
+static int acl_create_masq(uint8_t *acl, size_t alen, unsigned *mode_p)
+{
+    size_t nent = (alen - 4) / 8, i;
+    uint8_t *base = acl + 4;
+    uint8_t *group_obj = NULL, *mask_obj = NULL;
+    unsigned mode = *mode_p;
+    int not_equiv = 0;
+
+    for (i = 0; i < nent; i++) {
+        uint8_t *e = base + i * 8;
+        unsigned perm = acl_ent_perm(e);
+        switch (acl_ent_tag(e)) {
+        case ACL_USER_OBJ:
+            perm &= (mode >> 6) & 7;
+            acl_ent_set_perm(e, (uint16_t)perm);
+            mode = (mode & ~0700u) | (perm << 6);
+            break;
+        case ACL_USER:
+        case ACL_GROUP:
+            not_equiv = 1;
+            break;
+        case ACL_GROUP_OBJ:
+            group_obj = e;
+            break;
+        case ACL_OTHER:
+            perm &= mode & 7;
+            acl_ent_set_perm(e, (uint16_t)perm);
+            mode = (mode & ~07u) | perm;
+            break;
+        case ACL_MASK:
+            mask_obj = e;
+            not_equiv = 1;
+            break;
+        default:
+            return -1;
+        }
+    }
+    {
+        uint8_t *gce = mask_obj ? mask_obj : group_obj;
+        unsigned perm;
+        if (!gce) return -1;
+        perm = acl_ent_perm(gce) & ((mode >> 3) & 7);
+        acl_ent_set_perm(gce, (uint16_t)perm);
+        mode = (mode & ~070u) | (perm << 3);
+    }
+    *mode_p = mode & 0777u;
+    return not_equiv;
+}
+
+/* posix_acl_chmod_masq: fold a chmod into the stored access ACL. Base
+ * entries are SET from the mode (not ANDed); the group-class slot is MASK
+ * when one is present, else GROUP_OBJ. Returns 1 when named entries
+ * remain (store the blob back), 0 when the ACL is now exactly the mode
+ * (the kernel drops the xattr in that case -- so do we). */
+static int acl_chmod_masq(uint8_t *acl, size_t alen, unsigned mode)
+{
+    size_t nent = (alen - 4) / 8, i;
+    uint8_t *base = acl + 4;
+    uint8_t *group_obj = NULL, *mask_obj = NULL;
+    int not_equiv = 0;
+
+    for (i = 0; i < nent; i++) {
+        uint8_t *e = base + i * 8;
+        switch (acl_ent_tag(e)) {
+        case ACL_USER_OBJ:
+            acl_ent_set_perm(e, (uint16_t)((mode >> 6) & 7));
+            break;
+        case ACL_USER:
+        case ACL_GROUP:
+            not_equiv = 1;
+            break;
+        case ACL_GROUP_OBJ:
+            group_obj = e;
+            break;
+        case ACL_MASK:
+            mask_obj = e;
+            not_equiv = 1;
+            break;
+        case ACL_OTHER:
+            acl_ent_set_perm(e, (uint16_t)(mode & 7));
+            break;
+        default:
+            return -1;
+        }
+    }
+    {
+        uint8_t *gce = mask_obj ? mask_obj : group_obj;
+        if (!gce) return -1;
+        acl_ent_set_perm(gce, (uint16_t)((mode >> 3) & 7));
+    }
+    return not_equiv;
+}
+
+/* posix_acl_update_mode: after an access ACL is set, st_mode's 9 perm bits
+ * mirror it (group bits = MASK when present, else GROUP_OBJ). Special
+ * bits (setuid/setgid/sticky) are kept. The kernel does this inside
+ * ->set_acl on real filesystems; the generic-xattr transport never calls
+ * it for FUSE, so the daemon syncs here. */
+static unsigned acl_sync_mode(const uint8_t *acl, size_t alen,
+                              unsigned old_mode)
+{
+    size_t nent = (alen - 4) / 8, i;
+    const uint8_t *base = acl + 4;
+    unsigned mode = old_mode & ~0777u;
+    int gobj_perm = -1, mask_perm = -1;
+
+    for (i = 0; i < nent; i++) {
+        const uint8_t *e = base + i * 8;
+        switch (acl_ent_tag(e)) {
+        case ACL_USER_OBJ:
+            mode |= (unsigned)(acl_ent_perm(e) & 7) << 6;
+            break;
+        case ACL_GROUP_OBJ:
+            gobj_perm = acl_ent_perm(e) & 7;
+            break;
+        case ACL_MASK:
+            mask_perm = acl_ent_perm(e) & 7;
+            break;
+        case ACL_OTHER:
+            mode |= (unsigned)(acl_ent_perm(e) & 7);
+            break;
+        default:
+            break;
+        }
+    }
+    mode |= (unsigned)(mask_perm >= 0 ? mask_perm :
+                       gobj_perm >= 0 ? gobj_perm : 0) << 3;
+    return mode;
+}
+
 /* ---- FUSE operations ---- */
 static int invf_getattr(const char *path, struct stat *st, struct fuse_file_info *fi)
 {
     (void)fi;
+    {
+        /* foreign uids: path walk needs X on every component (the kernel
+         * never asks us -- without default_permissions nothing does) */
+        int rc = perm_check_traversal(path);
+        if (rc) return rc;
+    }
     if (strcmp(path, "/") == 0) {
         memset(st, 0, sizeof(*st));
         st->st_mode = S_IFDIR | 0755;
@@ -498,6 +1034,13 @@ static int invf_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
 {
     (void)offset; (void)fi; (void)flags;
     const char *dir = path[0] == '/' && path[1] ? path + 1 : "";
+    {
+        /* listing needs R on the dir itself, X on the way there */
+        int rc = perm_check_traversal(path);
+        if (rc) return rc;
+        rc = perm_check(path, R_OK);
+        if (rc) return rc;
+    }
     /* grow-on-demand: the old fixed ents[4096] (~1.1 MB stack, silent
      * truncation) dropped entries in large dirs like /usr/share (audit H7) */
     int cap = 1024, n = 0;
@@ -535,8 +1078,24 @@ static int invf_mkdir(const char *path, mode_t mode)
 {
     int rc;
     struct fuse_context *ctx = fuse_get_context();
+    /* inheritance: the parent's default ACL (if any) becomes the child's
+     * access ACL masked by the create mode, and the child's own default */
+    uint8_t aacl[INVFS_META_XATTR_MAX], dacl[INVFS_META_XATTR_MAX];
+    size_t aalen = 0, dlen = 0;
+    mode_t cmode = mode & 07777;
     if (!vol_write_enabled(g_vol))
         return -EROFS;
+    rc = perm_check_traversal(path);
+    if (rc) return rc;
+    rc = perm_check_parent(path, W_OK | X_OK);
+    if (rc) return rc;
+    if (parent_default_acl(path, dacl, &dlen)) {
+        unsigned mm = cmode;
+        memcpy(aacl, dacl, dlen);
+        if (acl_create_masq(aacl, dlen, &mm) > 0)
+            aalen = dlen;              /* named entries remain: store */
+        cmode = (mode_t)(mm & 0777);
+    }
     pthread_mutex_lock(&g_io_lock);
     vol_ensure_path(g_vol, path + 1);
     uint64_t d = vol_mkdir(g_vol, path + 1);
@@ -547,7 +1106,7 @@ static int invf_mkdir(const char *path, mode_t mode)
         snprintf(anchor, sizeof anchor, "%s/", path + 1);
         memset(&m, 0, sizeof m);
         m.type = INVFS_ITYP_DIR;
-        m.mode = mode & 07777;
+        m.mode = cmode;
         if (!m.mode) m.mode = 0755;
         m.uid = ctx ? ctx->uid : 0;
         m.gid = ctx ? ctx->gid : 0;
@@ -555,6 +1114,16 @@ static int invf_mkdir(const char *path, mode_t mode)
         m.mtime = m.atime = (int64_t)time(NULL);
         if (!vol_apply_meta(g_vol, anchor, &m))
             fprintf(stderr, "invf: mkdir stamp FAILED %s (area full?)\n", anchor);
+        if (dlen) {
+            uint64_t ino2 = vol_find(g_vol, anchor);
+            if (ino2) {
+                if (aalen &&
+                    vol_set_xattr(g_vol, ino2, XATTR_ACL_ACCESS, aacl, aalen) != 0)
+                    fprintf(stderr, "invf: mkdir ACL inherit FAILED %s\n", anchor);
+                if (vol_set_xattr(g_vol, ino2, XATTR_ACL_DEFAULT, dacl, dlen) != 0)
+                    fprintf(stderr, "invf: mkdir defACL inherit FAILED %s\n", anchor);
+            }
+        }
         table_sync_one_locked(anchor);
     }
     pthread_mutex_unlock(&g_io_lock);
@@ -565,7 +1134,15 @@ static int invf_mkdir(const char *path, mode_t mode)
 static int invf_rmdir(const char *path)
 {
     int rc;
+    struct acreds c;
     if (g_tt) return -EROFS;   /* WP24-lite: time-travel views never mutate */
+    acreds_get(&c);
+    rc = perm_check_traversal_cred(&c, path);
+    if (rc) return rc;
+    rc = perm_check_parent_cred(&c, path, W_OK | X_OK);
+    if (rc) return rc;
+    rc = perm_check_sticky(&c, path);
+    if (rc) return rc;
     pthread_mutex_lock(&g_io_lock);
     rc = vol_rmdir(g_vol, path + 1);
     if (rc == 0) {
@@ -715,10 +1292,25 @@ static void table_rebuild_locked(void)
 
 static int invf_open(const char *path, struct fuse_file_info *fi)
 {
+    struct acreds c;
     if (strcmp(path, "/") == 0)
         return -EISDIR;
     if (!snapshot_entry(path + 1, NULL, NULL, NULL))
         return -ENOENT;
+    acreds_get(&c);
+    /* O_PATH is a handle-only open (stat material): no data access, hence
+     * no permission gate (POSIX: O_PATH needs none) */
+    if (!c.bypass && !(fi->flags & O_PATH)) {
+        /* mode+ACL gate on the open mode (read() / write() are not
+         * re-checked per call -- POSIX checks at open) */
+        unsigned want = ((fi->flags & O_ACCMODE) == O_WRONLY) ? (unsigned)W_OK :
+                        ((fi->flags & O_ACCMODE) == O_RDWR) ?
+                        (unsigned)(R_OK | W_OK) : (unsigned)R_OK;
+        int rc = perm_check_traversal_cred(&c, path);
+        if (rc) return rc;
+        rc = perm_check_cred(&c, path, want);
+        if (rc) return rc;
+    }
     __sync_fetch_and_add(&g_open_handles, 1);
     if ((fi->flags & O_ACCMODE) == O_RDONLY) {
         /* WP17: keep page cache across open/close. Every content change
@@ -773,11 +1365,43 @@ static int invf_create(const char *path, mode_t mode, struct fuse_file_info *fi)
 {
     wctx *c;
     struct fuse_context *ctx = fuse_get_context();
+    uint8_t aacl[INVFS_META_XATTR_MAX];
+    size_t aalen = 0;
+    mode_t cmode = mode & 07777;
     if (!vol_write_enabled(g_vol))
         return -EROFS;
     fprintf(stderr, "[create] %s\n", path);
     if (strcmp(path, "/") == 0)
         return -EISDIR;
+    {
+        int rc;
+        struct acreds cr;
+        acreds_get(&cr);
+        if (!cr.bypass) {
+            rc = perm_check_traversal_cred(&cr, path);
+            if (rc) return rc;
+            rc = perm_check_parent_cred(&cr, path, W_OK | X_OK);
+            if (rc) return rc;
+            /* O_CREAT over an existing file is an open: needs W on it.
+             * (The daemon replaces the record either way -- pre-existing
+             * semantics -- but never for a caller the file would refuse.) */
+            if (snapshot_entry(path + 1, NULL, NULL, NULL)) {
+                rc = perm_check_cred(&cr, path, W_OK);
+                if (rc) return rc;
+            }
+        }
+    }
+    /* default-ACL inheritance: child access ACL = parent's default,
+     * masked by the create mode (posix_acl_create_masq) */
+    {
+        size_t dlen = 0;
+        if (parent_default_acl(path, aacl, &dlen)) {
+            unsigned mm = cmode;
+            if (acl_create_masq(aacl, dlen, &mm) > 0)
+                aalen = dlen;
+            cmode = (mode_t)(mm & 0777);
+        }
+    }
     /* create empty file immediately so getattr-after-create works */
     pthread_mutex_lock(&g_io_lock);
     if (vol_replace_file(g_vol, path + 1, NULL, 0) == 0) {
@@ -790,13 +1414,19 @@ static int invf_create(const char *path, mode_t mode, struct fuse_file_info *fi)
         invfs_meta_pub m;
         memset(&m, 0, sizeof m);
         m.type = INVFS_ITYP_REG;
-        m.mode = mode & 07777;
+        m.mode = cmode;
         m.uid = ctx ? ctx->uid : 0;
         m.gid = ctx ? ctx->gid : 0;
         m.nlink = 1;
         m.mtime = m.atime = (int64_t)time(NULL);
         if (!vol_apply_meta(g_vol, path + 1, &m))
             fprintf(stderr, "invf: mknod stamp FAILED %s\n", path);
+        if (aalen) {
+            uint64_t ino2 = vol_find(g_vol, path + 1);
+            if (ino2 &&
+                vol_set_xattr(g_vol, ino2, XATTR_ACL_ACCESS, aacl, aalen) != 0)
+                fprintf(stderr, "invf: create ACL inherit FAILED %s\n", path);
+        }
         table_sync_one_locked(path + 1);
     }
     pthread_mutex_unlock(&g_io_lock);
@@ -807,7 +1437,7 @@ static int invf_create(const char *path, mode_t mode, struct fuse_file_info *fi)
     {
         struct fuse_context *cx = fuse_get_context();
         c->meta.type = INVFS_ITYP_REG;
-        c->meta.mode = mode & 07777;
+        c->meta.mode = cmode;   /* inheritance-masked mode */
         c->meta.uid = cx ? cx->uid : 0;
         c->meta.gid = cx ? cx->gid : 0;
         c->meta.nlink = 1;
@@ -1195,9 +1825,28 @@ static int invf_release(const char *path, struct fuse_file_info *fi)
 static int invf_rename(const char *from, const char *to, unsigned int flags)
 {
     int rc;
+    struct acreds c;
     if (flags)
         return -EINVAL;   /* RENAME_NOREPLACE / RENAME_EXCHANGE unsupported */
     if (g_tt) return -EROFS;   /* WP24-lite: time-travel views never mutate */
+    acreds_get(&c);
+    if (!c.bypass) {
+        rc = perm_check_traversal_cred(&c, from);
+        if (rc) return rc;
+        rc = perm_check_traversal_cred(&c, to);
+        if (rc) return rc;
+        rc = perm_check_parent_cred(&c, from, W_OK | X_OK);
+        if (rc) return rc;
+        rc = perm_check_parent_cred(&c, to, W_OK | X_OK);
+        if (rc) return rc;
+        rc = perm_check_sticky(&c, from);
+        if (rc) return rc;
+        /* an overwritten victim is a delete: same sticky rule */
+        if (meta_for_path(to, (char[300]){0}, 300, &(invfs_meta_pub){0})) {
+            rc = perm_check_sticky(&c, to);
+            if (rc) return rc;
+        }
+    }
     pthread_mutex_lock(&g_io_lock);
     if (!g_vol) { pthread_mutex_unlock(&g_io_lock); return -EIO; }
     {
@@ -1259,39 +1908,20 @@ static int invf_statfs(const char *path, struct statvfs *st)
     return 0;
 }
 
-/* permission model is still v1 (0444 files / 0555 dirs, uid 0): report
- * honestly instead of pretending (WP2 adds real metadata storage) */
+/* access(2): full mode+ACL evaluation (see the WP-A section above).
+ * NOTE: on this kernel the FUSE ->permission hook is never consulted
+ * without default_permissions, so this runs for access(2) calls only --
+ * open/create/unlink/... enforce through their own entry-point checks. */
 static int invf_access(const char *path, int mask)
 {
-    char ename[300];
-    invfs_meta_pub m;
-    struct fuse_context *ctx = fuse_get_context();
-    mode_t bits;
-    unsigned shift;
-
-    if (!meta_for_path(path, ename, sizeof ename, &m))
-        return -ENOENT;
-    /* CAP_DAC_OVERRIDE: root, or the host account that owns the image
-     * (daemon euid). A single-admin image has no security boundary yet;
-     * refusing the image owner breaks ordinary tooling (mkdir -p runs
-     * access(W_OK) even when the kernel check is delegated to us). */
-    if (ctx->uid == 0 || ctx->uid == (uid_t)geteuid())
-        return 0;
-    if (!(mask & (R_OK | W_OK | X_OK)))
-        return 0;
-    /* pick owner / group / other triad from the stored mode */
-    if (ctx->uid == m.uid && m.uid != (uid_t)-1)
-        shift = 0;
-    else if (ctx->gid == m.gid && m.gid != (gid_t)-1)
-        shift = 1;
-    else
-        shift = 2;
-    bits = (mode_t)m.mode >> (shift * 3);
-    if (((mask & R_OK) && !(bits & 4)) ||
-        ((mask & W_OK) && !(bits & 2)) ||
-        ((mask & X_OK) && !(bits & 1)))
-        return -EACCES;
-    return 0;
+    struct acreds c;
+    int rc;
+    if (mask & ~(R_OK | W_OK | X_OK | F_OK))
+        return -EINVAL;
+    acreds_get(&c);
+    rc = perm_check_traversal_cred(&c, path);
+    if (rc) return rc;
+    return perm_check_cred(&c, path, (unsigned)(mask & (R_OK | W_OK | X_OK)));
 }
 
 static int resize_volume_file(const char *name, off_t len)
@@ -1332,8 +1962,15 @@ static int invf_truncate(const char *path, off_t len, struct fuse_file_info *fi)
         return -EROFS;
     if (len < 0)
         return -EINVAL;
-    if (!c)
+    if (!c) {
+        /* truncate(2) by path: the ftruncate-on-handle route was gated at
+         * open; this one needs its own W check */
+        rc = perm_check_traversal(path);
+        if (rc) return rc;
+        rc = perm_check(path, W_OK);
+        if (rc) return rc;
         return resize_volume_file(path, len);
+    }
     /* mt loop: per-handle state mutation, same locking as invf_write */
     pthread_mutex_lock(&g_io_lock);
     rc = wctx_ensure_ws_locked(c);
@@ -1362,6 +1999,8 @@ static int invf_utimens(const char *path, const struct timespec tv[2],
 {
     (void)fi;
     invfs_meta_pub patch;
+    int rc = perm_check_traversal(path);
+    if (rc) return rc;
     memset(&patch, 0, sizeof patch);
     patch.mtime = tv[1].tv_sec;   /* [0]=atime, [1]=mtime */
     patch.atime = tv[0].tv_sec;
@@ -1372,6 +2011,38 @@ static int invf_chmod(const char *path, mode_t mode, struct fuse_file_info *fi)
 {
     (void)fi;
     invfs_meta_pub patch;
+    char ename[300];
+    invfs_meta_pub cur;
+    struct acreds c;
+    int rc = perm_check_traversal(path);
+    if (rc) return rc;
+    if (!meta_for_path(path, ename, sizeof ename, &cur))
+        return -ENOENT;
+    /* ownership rule (notify_change enforces it at VFS level already;
+     * kept here as the daemon is the sole authority on everything else) */
+    acreds_get(&c);
+    if (!c.bypass && c.uid != cur.uid)
+        return -EPERM;
+    /* POSIX.1e: fold the new mode into a stored access ACL -- USER_OBJ
+     * and OTHER are set from the mode, the group class (MASK if present,
+     * else GROUP_OBJ) gets the mode's group bits; a now-trivial ACL is
+     * dropped. No ACL -> nothing to do. */
+    pthread_mutex_lock(&g_io_lock);
+    if (g_vol) {
+        uint64_t ino = vol_find(g_vol, ename);
+        if (ino) {
+            uint8_t acl[INVFS_META_XATTR_MAX];
+            size_t alen = sizeof acl;
+            if (vol_get_xattr(g_vol, ino, XATTR_ACL_ACCESS, acl, &alen) == 0) {
+                if (acl_chmod_masq(acl, alen, (unsigned)(mode & 0777)) > 0)
+                    vol_set_xattr(g_vol, ino, XATTR_ACL_ACCESS, acl, alen);
+                else
+                    vol_remove_xattr(g_vol, ino, XATTR_ACL_ACCESS);
+                vol_flush(g_vol);
+            }
+        }
+    }
+    pthread_mutex_unlock(&g_io_lock);
     memset(&patch, 0, sizeof patch);
     patch.mode = mode & 07777;
     return meta_apply_patch(path, MM_MODE, &patch);
@@ -1383,8 +2054,24 @@ static int invf_chown(const char *path, uid_t uid, gid_t gid,
     (void)fi;
     char ename[300];
     invfs_meta_pub cur;
+    struct acreds c;
+    int rc = perm_check_traversal(path);
+    if (rc) return rc;
     if (!meta_for_path(path, ename, sizeof ename, &cur))
         return -ENOENT;
+    /* POSIX chown rules, daemon-side: on this kernel the VFS does NOT
+     * police chown for a default_permissions-less FUSE mount (verified:
+     * a foreign uid could chown away someone else's file). Owner change
+     * is privileged (CAP_CHOWN); a group change is allowed for the owner
+     * into a group they belong to. */
+    acreds_get(&c);
+    if (!c.bypass) {
+        if (uid != (uid_t)-1 && uid != cur.uid)
+            return -EPERM;
+        if (gid != (gid_t)-1 && gid != cur.gid &&
+            (c.uid != cur.uid || !acreds_in_group(&c, gid)))
+            return -EPERM;
+    }
     if (uid != (uid_t)-1) cur.uid = uid;
     if (gid != (gid_t)-1) cur.gid = gid;
     {
@@ -1396,10 +2083,16 @@ static int invf_chown(const char *path, uid_t uid, gid_t gid,
 static int invf_symlink(const char *target, const char *linkpath)
 {
     uint64_t nid;
+    int rc;
     if (!vol_write_enabled(g_vol))
         return -EROFS;
     if (strlen(target) >= INVFS_META_TARGET_MAX)
         return -ENAMETOOLONG;
+    rc = perm_check_traversal(linkpath);
+    if (rc) return rc;
+    rc = perm_check_parent(linkpath, W_OK | X_OK);
+    if (rc) return rc;
+    /* symlinks carry no ACL (POSIX: their perms are never consulted) */
     pthread_mutex_lock(&g_io_lock);
     if (!g_vol) { pthread_mutex_unlock(&g_io_lock); return -EIO; }
     vol_ensure_path(g_vol, linkpath + 1);
@@ -1428,6 +2121,8 @@ static int invf_readlink(const char *path, char *buf, size_t size)
 {
     char ename[300];
     invfs_meta_pub m;
+    int rc = perm_check_traversal(path);
+    if (rc) return rc;
     if (!meta_for_path(path, ename, sizeof ename, &m))
         return -ENOENT;
     if (m.type != INVFS_ITYP_LNK)
@@ -1441,8 +2136,18 @@ static int invf_readlink(const char *path, char *buf, size_t size)
 static int invf_link(const char *from, const char *dest)
 {
     int rc;
+    struct acreds c;
     if (!vol_write_enabled(g_vol))
         return -EROFS;
+    acreds_get(&c);
+    if (!c.bypass) {
+        rc = perm_check_traversal_cred(&c, from);
+        if (rc) return rc;
+        rc = perm_check_traversal_cred(&c, dest);
+        if (rc) return rc;
+        rc = perm_check_parent_cred(&c, dest, W_OK | X_OK);
+        if (rc) return rc;
+    }
     pthread_mutex_lock(&g_io_lock);
     if (!g_vol) { pthread_mutex_unlock(&g_io_lock); return -EIO; }
     rc = vol_hardlink(g_vol, from + 1, dest + 1);
@@ -1477,6 +2182,10 @@ static int invf_mknod(const char *path, mode_t mode, dev_t rdev)
 {    uint8_t typ;
     uint64_t nid;
     struct fuse_context *ctx = fuse_get_context();
+    uint8_t aacl[INVFS_META_XATTR_MAX];
+    size_t aalen = 0, dlen = 0;
+    mode_t cmode = mode & 07777;
+    int rc;
     if (!vol_write_enabled(g_vol))
         return -EROFS;
     switch (mode & S_IFMT) {
@@ -1486,12 +2195,29 @@ static int invf_mknod(const char *path, mode_t mode, dev_t rdev)
     case S_IFBLK:  typ = INVFS_ITYP_BLK;  break;
     default: return -EPERM;   /* regular files go through .create */
     }
+    rc = perm_check_traversal(path);
+    if (rc) return rc;
+    rc = perm_check_parent(path, W_OK | X_OK);
+    if (rc) return rc;
+    /* same default-ACL inheritance as .create (no default ACL onward:
+     * only dirs carry one) */
+    if (parent_default_acl(path, aacl, &dlen)) {
+        unsigned mm = cmode;
+        if (acl_create_masq(aacl, dlen, &mm) > 0)
+            aalen = dlen;
+        cmode = (mode_t)(mm & 0777);
+    }
     pthread_mutex_lock(&g_io_lock);
     if (!g_vol) { pthread_mutex_unlock(&g_io_lock); return -EIO; }
     vol_ensure_path(g_vol, path + 1);
     nid = vol_create_special(g_vol, path + 1, typ,
-                             (uint16_t)(mode & 07777), (uint64_t)rdev);
-    if (nid) { table_sync_one_locked(path + 1); }
+                             (uint16_t)cmode, (uint64_t)rdev);
+    if (nid) {
+        if (aalen &&
+            vol_set_xattr(g_vol, nid, XATTR_ACL_ACCESS, aacl, aalen) != 0)
+            fprintf(stderr, "invf: mknod ACL inherit FAILED %s\n", path);
+        table_sync_one_locked(path + 1);
+    }
     pthread_mutex_unlock(&g_io_lock);
     if (nid && ctx && (ctx->uid || ctx->gid)) {
         /* non-root mount: stamp the creating user */
@@ -1571,6 +2297,10 @@ static int invf_getxattr(const char *path, const char *name, char *value,
         memcpy(value, buf, (size_t)n + 1);
         return n;
     }
+    {
+        int trc = perm_check_traversal(path);
+        if (trc) return trc;
+    }
     if (!meta_for_path(path, ename, sizeof ename, &m))
         return -ENOENT;
     pthread_mutex_lock(&g_io_lock);
@@ -1608,8 +2338,29 @@ static int invf_setxattr(const char *path, const char *name,
     }
     if (!vol_write_enabled(g_vol))
         return -EROFS;
+    {
+        int trc = perm_check_traversal(path);
+        if (trc) return trc;
+    }
     if (!meta_for_path(path, ename, sizeof ename, &m))
         return -ENOENT;
+    /* ACL xattrs are security state: only the owner (or the bypass
+     * admin) may set them, the blob must be a well-formed version-2
+     * posix_acl blob, and a default ACL only makes sense on a dir.
+     * (On a real fs the kernel checks inode_owner_or_capable in
+     * posix_acl_xattr_set; the generic-xattr FUSE transport skips that,
+     * so the daemon owns the rule.) */
+    if (strcmp(name, XATTR_ACL_ACCESS) == 0 ||
+        strcmp(name, XATTR_ACL_DEFAULT) == 0) {
+        struct acreds c;
+        acreds_get(&c);
+        if (!c.bypass && c.uid != m.uid)
+            return -EPERM;
+        if (!acl_blob_valid((const uint8_t *)value, size))
+            return -EINVAL;
+        if (strcmp(name, XATTR_ACL_DEFAULT) == 0 && m.type != INVFS_ITYP_DIR)
+            return -EACCES;
+    }
     pthread_mutex_lock(&g_io_lock);
     if (!g_vol) { pthread_mutex_unlock(&g_io_lock); return -EIO; }
     ino = vol_find(g_vol, ename);
@@ -1617,6 +2368,16 @@ static int invf_setxattr(const char *path, const char *name,
     rc = vol_set_xattr(g_vol, ino, name, value, size);
     if (rc == 0) { vol_flush(g_vol); table_sync_one_locked(ename); }
     pthread_mutex_unlock(&g_io_lock);
+    if (rc == 0 && strcmp(name, XATTR_ACL_ACCESS) == 0) {
+        /* posix_acl_update_mode: mirror the ACL into st_mode's 9 bits
+         * (the kernel does this inside ->set_acl on real filesystems;
+         * the generic-xattr transport never calls it for FUSE) */
+        invfs_meta_pub patch;
+        memset(&patch, 0, sizeof patch);
+        patch.mode = (uint16_t)acl_sync_mode((const uint8_t *)value, size,
+                                             m.mode & 07777);
+        meta_apply_patch(path, MM_MODE, &patch);
+    }
     if (rc == -2) return -ERANGE;
     if (rc == -3) return -EEXIST;      /* XATTR_CREATE on existing */
     if (rc == -4) return -ENODATA;     /* XATTR_REPLACE on missing */
@@ -1629,6 +2390,10 @@ static int invf_listxattr(const char *path, char *list, size_t size)
     invfs_meta_pub m;
     uint64_t ino;
     int rc;
+    {
+        int trc = perm_check_traversal(path);
+        if (trc) return trc;
+    }
     if (!meta_for_path(path, ename, sizeof ename, &m))
         return -ENOENT;
     pthread_mutex_lock(&g_io_lock);
@@ -1652,8 +2417,20 @@ static int invf_removexattr(const char *path, const char *name)
     int rc;
     if (!vol_write_enabled(g_vol))
         return -EROFS;
+    {
+        int trc = perm_check_traversal(path);
+        if (trc) return trc;
+    }
     if (!meta_for_path(path, ename, sizeof ename, &m))
         return -ENOENT;
+    /* removing an ACL is the same privilege as setting one */
+    if (strcmp(name, XATTR_ACL_ACCESS) == 0 ||
+        strcmp(name, XATTR_ACL_DEFAULT) == 0) {
+        struct acreds c;
+        acreds_get(&c);
+        if (!c.bypass && c.uid != m.uid)
+            return -EPERM;
+    }
     pthread_mutex_lock(&g_io_lock);
     if (!g_vol) { pthread_mutex_unlock(&g_io_lock); return -EIO; }
     ino = vol_find(g_vol, ename);
@@ -1679,11 +2456,19 @@ static void invf_destroy(void *private_data)
 static int invf_unlink(const char *path)
 {
     int rc;
+    struct acreds c;
     /* WP24-lite: a delete is deliberately allowed under the ordinary
      * read-only space latch (H5, it is the way out), but a time-travel
      * view is not the present -- the tombstone would land on the live
      * volume's post-checkpoint records. Refuse like every other write. */
     if (g_tt) return -EROFS;
+    acreds_get(&c);
+    rc = perm_check_traversal_cred(&c, path);
+    if (rc) return rc;
+    rc = perm_check_parent_cred(&c, path, W_OK | X_OK);
+    if (rc) return rc;
+    rc = perm_check_sticky(&c, path);
+    if (rc) return rc;
     /* H5: deliberately NOT gated on vol_write_enabled: a delete never
      * allocates data blocks, and it is the way OUT of the ENOSPC
      * READONLY latch (the engine frees the blocks, vol_free_blocks
