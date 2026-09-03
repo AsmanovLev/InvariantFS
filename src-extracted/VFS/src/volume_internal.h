@@ -936,9 +936,14 @@ int vol_pre_record(invfs_volume *v);
  * loudly until remount + recovery. Idempotent. */
 void vol_io_error_latch(invfs_volume *v, const char *what);
 
-/* allocate n consecutive free blocks in a zone; returns start block or 0 */
+/* allocate n consecutive free blocks in one extent (the raw/shadow/arena
+ * pba range); returns start block or 0. WP-DZ: extents are the advisory
+ * policy geometry; content-class PREFERENCE lives one level up, in
+ * alloc_raw_or_shadow (raw class) -- everything else allocates its
+ * canonical extent directly (shadow class never crosses into the raw
+ * extent: the seal stripes are defined over the shadow pba range). */
 uint64_t alloc_blocks(invfs_volume *v, uint64_t zone_start, uint64_t zone_len,
-                             uint64_t n, int use_reserve);
+                              uint64_t n, int use_reserve);
 uint64_t alloc_raw_or_shadow(invfs_volume *v, uint64_t nblocks, int *zone_out);
 
 /* H5: release the hard_min space latch (VOLF_READONLY) once free space is

@@ -6,10 +6,24 @@ The Sweep worker is a background thread/process that moves data from the RAW Zon
 
 - **Idle-triggered**: Runs when the filesystem is idle (like ReFS scrubber)
 - **On-demand**: Can be manually triggered for bulk processing
+- **Watermark-triggered (WP26)**: ступень лестницы давления между
+  адаптивным усилием записи (WP23) и троттлингом: у FUSE-демона опция
+  `-o raw_watermark=<pct>` (env `INVFS_RAW_WATERMARK`) запускает полный
+  проход sweep'а с чекпоинтом, как только заполнение RAW-региона (по
+  `vol_zone_free`, не по классу) превышает порог. Перезапуск — только на
+  РАСТУЩЕМ заполнении: пока жив чекпоинт прошлого прохода, его retention
+  держит снятые блоки, и заполнение не может упасть — без этого пола
+  (`wm_floor` в fuse_fs.c) демон гонял бы проходы цепочкой и разрушал бы
+  только что созданное окно отката. Чекпоинт, оставшийся от прошлого
+  монтирования, засевает пол текущим заполнением: следующий проход ждёт
+  именно НОВОГО давления. По умолчанию (без опции) — lazy, этот код инертен.
 - **Walk-based**: проход по живым записям inode-области (поле суперблока
   `sweep_cursor` зарезервировано, но не используется — курсора нет,
   sweep каждый раз пересматривает том; флаг класса `invfs.class` делает
-  повторный проход дешёвым)
+  повторный проход дешёвым). «RAW-файл» определяется по ТЕГУ zone=0 в AST,
+  не по физическому адресу: с WP-DZ raw-класс может лежать и в
+  shadow-экстенте (переполнение advisory-доли RAW), и такие сегменты
+  обход видит наравне с остальными — см. 12-enospc-strategy.md
 - **Crash-safe**: до обхода взводится чекпоинт CKP0 (WP21, см. ниже);
   журналируется каждая запись
 
@@ -65,10 +79,12 @@ The Sweep worker is a background thread/process that moves data from the RAW Zon
    полная пересборка и побайтовое сравнение (b3sum)
 ```
 
-Статус по платформам: тело транскода (`vol_create_flac_file`) на HEAD
-собрано только под Windows (`#ifdef _WIN32`, WP12(c) открыт) — на Linux
-FLAC уходит в generic-путь. Чтение FLACR на Linux работает при
-установленном внешнем `mac` (probe-гейт реестра кодеков).
+Статус по платформам: тело транскода (`vol_create_flac_file`) портировано
+на POSIX (WP12c — `vol_cpack.c`, тот же tool-слой, что у WP11: mac/ffmpeg
+резолвятся через `$INVFS_TOOLS` → `/usr/lib/invfs/tools` → PATH, дети под
+RLIMIT_AS + Landlock-сандбоксом WP12d). Без установленного `mac` sweep
+чисто отказывает (GENERIC_GUARD, файл остаётся RAW); чтение FLACR работает
+при установленном `mac`.
 
 ### MP3 / ID3
 

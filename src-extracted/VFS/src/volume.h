@@ -228,9 +228,18 @@ typedef struct {
     uint64_t tombstones, bad_records;
     uint64_t logical_bytes, biggest_size;
     char     biggest_name[256];
-    /* per-zone split: physical = bitmap bits*4K, logical attributed
-     * through each file's AST block entries (zone bitfield) */
+    /* per-zone split: physical = CONTENT CLASS (the AST zone tag of the
+     * referencing entry, resolved through the L2P; each physical block is
+     * attributed once). WP-DZ: zone boundaries are advisory, so a bitmap
+     * scan over the raw/shadow REGIONS would misreport -- raw-class blocks
+     * routinely live past raw_zone_blocks once the raw share is exceeded.
+     * (vol_zone_used_bytes remains for region/pba-range questions, e.g.
+     * the WP26 watermark's raw-region fill.) */
     uint64_t raw_used_bytes, shadow_used_bytes;
+    uint64_t text_used_bytes;      /* physical TEXT class (shared batches) */
+    uint64_t unclaimed_used_bytes; /* allocated in the data region but
+                                    * referenced by no live record (orphans
+                                    * awaiting fsck, crash debris) */
     uint64_t logic_raw_bytes, logic_shadow_bytes;
     uint64_t logic_text_bytes;   /* zone==TEXT (PPMd batch members), WP10 */
 } invfs_volume_stats;
@@ -282,9 +291,11 @@ uint64_t vol_inode_next(invfs_volume *v, uint64_t pos, uint32_t *magic_out,
 
 #endif
 uint64_t vol_count_free(invfs_volume *v);
-/* per-zone free counters (maintained incrementally by alloc/free):
- * 0 ok, -1 no volume. For tests/probes that need the engine's own view
- * of zone pressure (e.g. test-rawadapt's fill targeting). */
+/* per-REGION free counters (maintained incrementally by alloc/free):
+ * 0 ok, -1 no volume. WP-DZ: the regions are the advisory zone extents,
+ * and this region view is exactly what the WP23/WP26 pressure ladder
+ * reads (raw-region fill). For tests/probes that need the engine's own
+ * view of zone pressure (e.g. test-rawadapt's fill targeting). */
 int vol_zone_free(invfs_volume *v, uint64_t *raw_free, uint64_t *raw_total,
                   uint64_t *shadow_free, uint64_t *shadow_total);
 int invfs_jxl_compress(const uint8_t *jpeg, size_t jpeg_len,

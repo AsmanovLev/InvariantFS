@@ -53,7 +53,7 @@
 | 09 | `09-windows-port.md` | WinFsp vs raw, paths, tools table |
 | 10 | `10-deduplication.md` | Офлайн-дедуп сегментов (BLAKE3), почему без refcount'ов (PB7) |
 | 11 | `11-security-and-permissions.md` | POSIX + Windows hybrid permissions, xattr |
-| 12 | `12-enospc-strategy.md` | Резерв/hard-min/READONLY, RAW→SHADOW spill (вотермарки — дизайн) |
+| 12 | `12-enospc-strategy.md` | Резерв/hard-min/READONLY, динамические зоны (WP-DZ), вотермарки WP23/WP26 (частично реализованы) |
 | 13 | `13-linux-rootfs.md` | Rootfs: FUSE-boot сегодня (Gentoo), kernel-маршрут как дизайн |
 | 14 | `14-windows-io-deep.md` | OVERLAPPED I/O, WRITE_THROUGH, IOCP, TRIM |
 | 15 | `15-caching.md` | ARC-кэш реконструированных файлов (256 МБ умолч.), байтовый бюджет |

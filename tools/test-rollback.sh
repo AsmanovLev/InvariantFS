@@ -48,7 +48,7 @@
 set -e
 set -o pipefail
 
-REPO=${REPO:-/home/user/InvariantFS}   # override with the worktree when testing a branch
+REPO="$(cd "$(dirname "$0")/.." && pwd)"
 B=$REPO/bin
 WORK=/dev/shm/wp21rollback
 IMGA=wp21rb-a.img    # core: sweep -> rollback -> pre-sweep bytes
@@ -432,7 +432,12 @@ echo "== [G] F4: overwrite under a live checkpoint retains the old blocks =="
 # rollback resurrected the old record over foreign bytes. Retention now
 # keys on the on-disk checkpoint, so the old blocks stay allocated until
 # the checkpoint resolves.
-$B/invf-mkfs "$IMGG" 0.5 >/dev/null
+$B/invf-mkfs "$IMGG" 0.5 > "$WORK/mkfs-g.log"
+# WP-DZ: overflow raw-class blocks keep the RAW tag (zone=0) -- placement,
+# not the tag, proves the raw share was exceeded. Parse the advisory
+# shadow extent start from the mkfs geometry.
+SHADOW_LO=$(sed -n 's/.*shadow zone: *blocks \([0-9]*\) \.\. \([0-9]*\).*/\1/p' "$WORK/mkfs-g.log")
+[ -n "$SHADOW_LO" ] || fail "G: could not parse shadow zone start"
 python3 -c "open('$WORK/edit/target.bin','wb').write(__import__('os').urandom(200000))"
 $B/invf-cp "$IMGG" "$WORK/edit/target.bin" target.bin >/dev/null
 # settle target.bin's blocks (sweep + realize = point of no return; the
@@ -451,14 +456,17 @@ $B/invf-sweep "$IMGG" > "$WORK/sweep-g.log" 2>&1 || { cat "$WORK/sweep-g.log"; f
 grep -q "retained blocks held for rollback" "$WORK/sweep-g.log" \
     || { cat "$WORK/sweep-g.log"; fail "G: checkpoint did not stay live (nothing retained)"; }
 $RP "$IMGG" ckp | grep -q "present=1" || fail "G: no live checkpoint"
-# exhaust the RAW zone (120 MB on a 94 MB zone): the tail segments spill
-# into the shadow zone, so every later allocation is a SHADOW one -- the
-# zone target.bin's freed blocks live in
+# exhaust the RAW zone (120 MB on a 94 MB zone): the tail segments
+# overflow into shadow-space blocks (WP-DZ: still raw-classed, zone=0 --
+# no spill path any more), so every later allocation is a SHADOW-side one
+# -- the region target.bin's freed blocks live in
 python3 -c "open('$WORK/edit/fill.bin','wb').write(__import__('os').urandom(120*1024*1024))"
 $B/invf-cp "$IMGG" "$WORK/edit/fill.bin" fill.bin >/dev/null || fail "G: fill.bin"
 $B/meta_probe "$IMGG" --heat fill.bin > "$WORK/probe-g.txt" 2>/dev/null
-grep -q "zone=2" "$WORK/probe-g.txt" \
-    || fail "G: RAW zone never exhausted (no shadow spill)"
+awk -v lo="$SHADOW_LO" '/^entry /{for(i=1;i<=NF;i++) if ($i ~ /^pba=/) \
+    {sub("pba=","",$i); if ($i+0 >= lo) found=1}} END{exit !found}' \
+    "$WORK/probe-g.txt" \
+    || fail "G: RAW share never exceeded (no overflow into shadow space)"
 # the overwrite: new blocks land first, then the old record retires -- its
 # pre-checkpoint blocks must be RETAINED, not freed for reuse
 python3 -c "open('$WORK/edit/target.v2','wb').write(__import__('os').urandom(200000))"

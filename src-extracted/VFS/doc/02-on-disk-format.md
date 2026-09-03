@@ -7,7 +7,7 @@ The physical storage is divided into four zones:
 ```
 ┌─────────────────────────────────────────────────┐
 │  Superblock (Block 0)                           │  4 KB
-│  + дескрипторы RDP0/RSZ0/CKP0 (см. ниже)        │
+│  + дескрипторы RDP0/RSZ0/CKP0/CMP0/DEVT (см. ниже) │
 ├─────────────────────────────────────────────────┤
 │  Metadata Zone (начинается с блока 1)           │  bitmap + журнал +
 │  ├── Block Bitmap (1 bit per block)             │  inode-область
@@ -16,9 +16,12 @@ The physical storage is divided into four zones:
 │      [+ INO2 meta-ext], position-kill DELT)     │  мин. 512 блоков inode)
 ├─────────────────────────────────────────────────┤
 │  RAW Zone                                       │  ~20% of volume
-│  (linear write area for incoming data)          │
+│  (linear write area for incoming data;          │
+│   advisory split — WP-DZ, см. заметку к полям)  │
 ├─────────────────────────────────────────────────┤
 │  Shadow Space                                   │  ~80% of volume
+│  (advisory split — WP-DZ; seal stripes          │
+│   привязаны к этому pba-диапазону)              │
 │                                                   │
 │  Blocks are type-consolidated across all files:  │
 │  ┌─────────────────────────────────────────┐    │
@@ -203,6 +206,22 @@ readdir) и никогда не свипятся; fsck считает их бл�
 | 0x0084 | 4 | `hard_min_blocks` | Ниже этого free → READONLY (1/1024+16) |
 | 0x0088 | 4 | `vol_flags` | bit0 = VOLF_READONLY, bit1 = VOLF_META2 (записи с INO2-расширением), bit2 = VOLF_RO_SPACE (WP22a: READONLY поднят space-защёлкой; только такой флаг авто-снимается при hard_min+2%, см. 12-enospc-strategy.md) |
 
+С WP-DZ четыре поля зон (raw/shadow start+blocks) — это **advisory-
+политика, а не жёсткие границы**: битмап один на весь том (общий пул
+свободных блоков), а запрос на размещение несёт лишь предпочтение зоны
+(raw-fast vs shadow-cold). Raw-класс (свежие записи) предпочитает
+raw-экстент, но когда его доля (`raw_zone_blocks`, изначально 1/5)
+исчерпана, то же размещение продолжается в блоках shadow-экстента с ТЕМ ЖЕ
+классом контента (`zone=0` в AST) — отдельного «spill»-пути нет (раньше
+spill помечал такие сегменты `zone=2`, и sweep их больше никогда не видел).
+Shadow-класс канонично остаётся в shadow-экстенте: полосы seal'а определены
+по pba-диапазону `[shadow_zone_start, +blocks)`, и на двухдисковых томах
+(DEVT) это каноническая сторона dev1. Статистика (`invf-stats`) считает
+физические байты зон по КЛАССУ контента (тегу AST-записи), а не по региону;
+заполнение регионов для лестницы давления (WP23/WP26) читается через
+`vol_zone_free`. Формат не менялся: старые тома работают с тем же layout —
+их геометрия и есть начальное состояние политики.
+
 Итого: 144 байта (0x90), остальное блока 0 — зарезервировано нулями; там же
 по фиксированным смещениям живут необязательные дескрипторы (конвенция:
 magic + crc32c, нули = «отсутствует»):
@@ -212,6 +231,8 @@ magic + crc32c, нули = «отсутствует»):
 | 0x100 | `RDP0` (24 B) | WP20b | Конфигурация избыточности seal'а: l1_algo (1=XOR), l2_algo (1=rs-vm, 2=rs-cauchy), геометрия полос k1/k2/m2, parity_area_hint |
 | 0x140 | `RSZ0` (204 B) | WP18 | In-flight offline-resize: staging-область (bitmap+journal+inode) + образ нового суперблока; применяется идемпотентно при vol_open |
 | 0x220 | `CKP0` (56 B) | WP21 | Чекпоинт sweep'а: позиции append'ов inode-области и журнала на старт sweep'а + staging копии журнала, sweep_seq, время |
+| 0x260 | `CMP0` (48 B) | WP22e | In-flight компакция inode-области: staging-ран (CMPS + payload CRC), s_bytes, old_area_pos; армиется вместе с защёлкой VOLF_READONLY одной записью блока 0, fsck -f докатывает |
+| 0x2A0 | `DEVT` (188 B) | WP25 | Таблица устройств двухдискового тома: dev_count (1..2), dev_blocks[2], sync_seq (свежесть зеркала метаданных), vol_uuid, dev1_hint (путь; `INVFS_DEV1` в приоритете), flags (bit0 = RAW_MIRROR). Однодисковые тома держат тут нули = «отсутствует», поэтому они побайтово равны pre-WP25 образам |
 
 ### Block Bitmap
 

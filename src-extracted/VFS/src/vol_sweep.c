@@ -1567,8 +1567,23 @@ uint64_t vol_zone_used_bytes(invfs_volume *v, uint64_t start_blk, uint64_t end_b
 int vol_compute_stats(invfs_volume *v, invfs_volume_stats *out)
 {
     uint64_t pos, end;
+    /* WP-DZ: physical per-zone attribution is by CONTENT CLASS (the AST
+     * entry's zone tag resolved through the L2P), never by pba region --
+     * zone boundaries are advisory, so raw-class blocks legitimately live
+     * in the shadow extent. `claimed` (one bit per block) makes each
+     * physical block count exactly once no matter how many live records
+     * reference it (dedupe shares, the TEXT owner/member double maps). */
+    mapset ms;
+    uint8_t *claimed = NULL;
+    int have_ms = 0;
     if (!v || !out) return -1;
     memset(out, 0, sizeof(*out));
+    memset(&ms, 0, sizeof ms);
+    claimed = (uint8_t *)calloc((size_t)(v->sb.total_blocks + 7) / 8, 1);
+    if (claimed && mapset_build(v, &ms) == 0)
+        have_ms = 1;
+    else
+        free(claimed), claimed = NULL;   /* degrade: physical zeros, not a lie */
     pos = v->inode_area_start * INVFS_BLOCK_SIZE;
     end = v->inode_area_pos;
     while (pos + sizeof(invfs_inode_rec) <= end) {
@@ -1601,6 +1616,46 @@ int vol_compute_stats(invfs_volume *v, invfs_volume_stats *out)
                 continue;
             }
         }
+        /* WP-DZ: physical attribution by content class, for EVERY live
+         * record including the 0x01 internal owners (their blocks -- text
+         * batches, seal parity, the retention registry -- are real used
+         * bytes; the 0x01 exclusion below stays logical-only). */
+        if (have_ms) {
+            size_t pbase = sizeof(invfs_inode_rec);
+            invfs_ast_hdr pah;
+            if (h.rec_len >= pbase + INVFS_AST_HDR_V1_LEN &&
+                invfs_ast_hdr_parse(rb + pbase, h.rec_len - pbase, &pah) == 0 &&
+                h.rec_len >= pbase + pah.hdr_len +
+                              (size_t)pah.num_blocks *
+                                  sizeof(invfs_ast_block_entry)) {
+                const uint8_t *ep = rb + pbase + pah.hdr_len;
+                uint32_t pi;
+                for (pi = 0; pi < pah.num_blocks; pi++) {
+                    const uint8_t *e = ep + (size_t)pi *
+                                            sizeof(invfs_ast_block_entry);
+                    uint32_t zab, zone, bid;
+                    const invfs_l2p_entry *me;
+                    uint64_t b, bend;
+                    memcpy(&zab, e + 16, 4);   /* zone:2 | algo:6 | bid:24 */
+                    zone = zab & 3;
+                    bid = zab >> 8;
+                    me = mapset_get(&ms, h.inode_id, bid);
+                    if (!me || !me->pba || !me->length) continue;
+                    bend = me->pba + me->length;
+                    if (bend > v->sb.total_blocks) bend = v->sb.total_blocks;
+                    for (b = me->pba; b < bend; b++) {
+                        if (bit_get(claimed, b)) continue;
+                        bit_set(claimed, b);
+                        if (zone == INVFS_ZONE_TEXT)
+                            out->text_used_bytes += INVFS_BLOCK_SIZE;
+                        else if (zone == INVFS_ZONE_BINARY)
+                            out->shadow_used_bytes += INVFS_BLOCK_SIZE;
+                        else
+                            out->raw_used_bytes += INVFS_BLOCK_SIZE;
+                    }
+                }
+            }
+        }
         {
             invfs_meta_pub m;
             int type = (vol_get_meta(v, h.inode_id, &m) == 0) ? m.type : -1;
@@ -1619,7 +1674,8 @@ int vol_compute_stats(invfs_volume *v, invfs_volume_stats *out)
                  * members carry the logical truth, so 0x01-prefixed
                  * internal names contribute nothing to ANY logical field
                  * (zone attribution, logical_bytes, biggest). Physical
-                 * used-bytes accounting is bitmap-based and untouched. */
+                 * used-bytes accounting is the class-based pass above and
+                 * DOES include the internal owners. */
                 if (h.name_len && (uint8_t)h.name[0] == 0x01)
                     break;
                 /* attribute logical size across the AST's zones */
@@ -1682,10 +1738,25 @@ int vol_compute_stats(invfs_volume *v, invfs_volume_stats *out)
             free(rb);
         }
     }
-    out->raw_used_bytes =
-        vol_zone_used_bytes(v, v->sb.raw_zone_start, v->sb.shadow_zone_start);
-    out->shadow_used_bytes =
-        vol_zone_used_bytes(v, v->sb.shadow_zone_start, v->sb.total_blocks);
+    /* unattributed data-region blocks: used in the bitmap but claimed by
+     * no live record above (orphans awaiting fsck, crash debris). On a
+     * two-device volume the dev1 reserved span (metadata mirror + the
+     * RAW-width gap) is allocated by construction -- it is metadata, not
+     * content, so it never counts as unclaimed. */
+    if (have_ms) {
+        uint64_t used = vol_zone_used_bytes(v, v->sb.raw_zone_start,
+                                            v->sb.total_blocks);
+        uint64_t cl = out->raw_used_bytes + out->shadow_used_bytes +
+                      out->text_used_bytes;
+        if (v->ndev == 2) {
+            uint64_t span = (v->sb.shadow_zone_start - v->dev0_blocks) *
+                            INVFS_BLOCK_SIZE;
+            used = span < used ? used - span : 0;
+        }
+        out->unclaimed_used_bytes = used > cl ? used - cl : 0;
+    }
+    mapset_free(&ms);
+    free(claimed);
     return 0;
 }
 

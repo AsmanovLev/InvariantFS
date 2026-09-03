@@ -36,7 +36,7 @@
 set -e
 set -o pipefail
 
-REPO=/home/user/InvariantFS
+REPO="$(cd "$(dirname "$0")/.." && pwd)"
 B=$REPO/bin
 WORK=/dev/shm/wp22a
 IMG_A=wp22a-a.img     # leg A: v2 header
@@ -52,7 +52,7 @@ fail() { echo "FAIL: $*" >&2; exit 1; }
 CORE="volume vol_cpack vol_png vol_seal vol_repair vol_rollback \
       vol_resize vol_fsck vol_crash vol_exer vol_dedupe vol_textzone \
       vol_heat vol_sweep vol_read vol_write vol_records vol_ast \
-      vol_dirs arc crc32c lz4 flacx tarx pngx blkio miniz blake3 \
+      vol_dirs vol_tier arc crc32c lz4 flacx tarx pngx blkio miniz blake3 \
       blake3_dispatch blake3_portable ppmd8 ppmd8enc ppmd8dec \
       ppmd_codec codec bcj_x86 rs"
 OBJS=""

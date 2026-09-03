@@ -15,6 +15,7 @@
 #if defined(__linux__)
 #  include <sys/prctl.h>
 #  include <sys/syscall.h>
+#  include <dirent.h>
 #  if defined(__has_include)
 #    if __has_include(<linux/landlock.h>)
 #      include <linux/landlock.h>
@@ -779,22 +780,44 @@ int invfs_codec_pack_estimate(const invfs_codec *c, const char *in_path,
     char *argv[24];
     char arena[4096];
     char out[256];
+    char scratch[320];
     char *endp = NULL;
     unsigned long long v;
     tool_sandbox sb;
+    int rc;
 
     if (!def || !def->estimate || !in_path) return -1;
     if (pack_argv_build(def, def->estimate, in_path, NULL, NULL, NULL, NULL,
                         argv, 24, arena, sizeof arena) != 0)
         return -1;
-    /* WP12d: the estimate child reads its input and prints a number —
-     * the sandbox grants no write anywhere (rw_dir NULL) */
+    /* WP12d: the estimate child reads its input and prints a number; the
+     * input itself stays RO. It still gets a throwaway scratch (RW +
+     * TMPDIR): an estimate that decodes the input's header through a
+     * grandchild tool (p7z -> 7zz for the encoded-header form) needs a
+     * temp file, and under the whitelist /tmp is denied by construction. */
     sb.pack_dir = def->dir;
     sb.ro_path = in_path;
     sb.rw_dir = NULL;
+    if (tool_tmpdir(scratch, sizeof scratch) == 0)
+        sb.rw_dir = scratch;
     sb.requires = def->requires;
-    if (tool_exec_out_lim(argv, out, sizeof out, tool_mem_cap_for(c),
-                          &sb) != 0)
+    rc = tool_exec_out_lim(argv, out, sizeof out, tool_mem_cap_for(c),
+                           &sb);
+    if (sb.rw_dir) {
+        /* flat scratch: helper temps (e.g. .p7zhdr*) sit at the top */
+        DIR *dd = opendir(sb.rw_dir);
+        if (dd) {
+            struct dirent *de;
+            while ((de = readdir(dd))) {
+                if (!strcmp(de->d_name, ".") || !strcmp(de->d_name, ".."))
+                    continue;
+                tool_rm(sb.rw_dir, de->d_name);
+            }
+            closedir(dd);
+        }
+        rmdir(sb.rw_dir);
+    }
+    if (rc != 0)
         return -1;   /* WP12(d): the estimate child is capped too */
     errno = 0;
     v = strtoull(out, &endp, 10);

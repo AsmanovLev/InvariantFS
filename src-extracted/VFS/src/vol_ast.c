@@ -147,7 +147,9 @@ uint64_t vol_create_container_file(invfs_volume *v, const char *name,
         memcpy(cbuf, hdr, 8);
 
         phys_blocks = ((uint64_t)csize + 8 + INVFS_BLOCK_SIZE - 1) / INVFS_BLOCK_SIZE;
-        pba = alloc_blocks(v, v->sb.raw_zone_start, v->sb.raw_zone_blocks, phys_blocks, 0);
+        /* WP-DZ: the container's original bytes are raw-class content --
+         * RAW-preferred over the shared pool, tagged RAW either way */
+        pba = alloc_raw_or_shadow(v, phys_blocks, NULL);
         if (pba == 0) {
             fprintf(stderr, "[create] ENOSPC seg %zu\n", i);
             /* reclaim already-written segments (no orphans) */

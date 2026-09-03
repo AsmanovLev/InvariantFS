@@ -179,9 +179,9 @@ static int raw_effort_zlevel(const invfs_volume *v)
     unsigned pct;
     size_t i;
     if (!raw_adapt_enabled() || total == 0) return 0;
-    /* RAW exhausted means the segment spills to SHADOW (100% pressure):
-     * maximum effort either way -- the smaller the segment, the less it
-     * costs wherever it lands. */
+    /* RAW exhausted means the segment overflows into shadow-space blocks
+     * (WP-DZ: 100% pressure, still raw-class): maximum effort either way
+     * -- the smaller the segment, the less it costs wherever it lands. */
     pct = (unsigned)(((total - v->raw_free) * 100) / total);
     for (i = 0; i < sizeof raw_effort_ladder / sizeof raw_effort_ladder[0]; i++)
         if (pct >= raw_effort_ladder[i].fill_pct)

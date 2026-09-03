@@ -52,7 +52,7 @@
 #        scratch moves into the artifacts dir.
 set -uo pipefail
 
-REPO=/home/user/InvariantFS
+REPO="$(cd "$(dirname "$0")/.." && pwd)"
 B=$REPO/bin
 FLK=${FLAKEY_WORK:-/tmp/invfs-flakey}
 ART=$REPO/tools/flakey/artifacts

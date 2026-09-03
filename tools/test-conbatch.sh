@@ -20,7 +20,8 @@
 set -e
 set -o pipefail
 
-REPO=/home/user/InvariantFS
+REPO="$(cd "$(dirname "$0")/.." && pwd)"
+export REPO
 B=$REPO/bin
 WORK=/dev/shm/wp14cb
 IMG=wp14cb.img
@@ -77,7 +78,7 @@ print("bins.tar: %d members, %.1f MB, biggest member %.1f MB"
 
 # --- texts.tar: C sources (text parts -> PPMd batches) ---
 os.makedirs(os.path.join(d, "texts"))
-src = "/home/user/InvariantFS/tools/busybox-src"
+src = "/home/user/InvariantFS/tools/busybox-src"  # fixture input (submodule, populated in the main checkout only)
 names = []
 for root, _dirs, files in os.walk(src):
     for n in sorted(files):
@@ -159,7 +160,7 @@ int main(int argc, char **argv)
 }
 C
 gcc -std=gnu11 -O2 -I$REPO/src-extracted/VFS/src -o "$WORK/classof" "$WORK/classof.c" \
-    $REPO/build/obj/{volume,vol_cpack,vol_png,vol_seal,vol_repair,vol_rollback,vol_resize,vol_fsck,vol_crash,vol_exer,vol_dedupe,vol_textzone,vol_heat,vol_sweep,vol_read,vol_write,vol_records,vol_ast,vol_dirs,arc,crc32c,lz4,blkio,flacx,tarx,pngx,miniz,ppmd8,ppmd8enc,ppmd8dec,ppmd_codec,codec,bcj_x86,blake3,blake3_dispatch,blake3_portable,rs}.o \
+    $REPO/build/obj/{volume,vol_cpack,vol_png,vol_seal,vol_repair,vol_rollback,vol_resize,vol_fsck,vol_crash,vol_exer,vol_dedupe,vol_textzone,vol_heat,vol_sweep,vol_read,vol_write,vol_records,vol_ast,vol_dirs,vol_tier,arc,crc32c,lz4,blkio,flacx,tarx,pngx,miniz,ppmd8,ppmd8enc,ppmd8dec,ppmd_codec,codec,bcj_x86,blake3,blake3_dispatch,blake3_portable,rs}.o \
     -Wl,-l:libzstd.so.1 -lz -lpthread
 
 NB=$($B/invf-ls "$IMG" | grep -c "^")  # total lines (header+files+summary)
@@ -214,7 +215,7 @@ int main(int argc, char **argv)
 }
 C
 gcc -std=gnu11 -O2 -I$REPO/src-extracted/VFS/src -o "$WORK/cbrm" "$WORK/cbrm.c" \
-    $REPO/build/obj/{volume,vol_cpack,vol_png,vol_seal,vol_repair,vol_rollback,vol_resize,vol_fsck,vol_crash,vol_exer,vol_dedupe,vol_textzone,vol_heat,vol_sweep,vol_read,vol_write,vol_records,vol_ast,vol_dirs,arc,crc32c,lz4,blkio,flacx,tarx,pngx,miniz,ppmd8,ppmd8enc,ppmd8dec,ppmd_codec,codec,bcj_x86,blake3,blake3_dispatch,blake3_portable,rs}.o \
+    $REPO/build/obj/{volume,vol_cpack,vol_png,vol_seal,vol_repair,vol_rollback,vol_resize,vol_fsck,vol_crash,vol_exer,vol_dedupe,vol_textzone,vol_heat,vol_sweep,vol_read,vol_write,vol_records,vol_ast,vol_dirs,vol_tier,arc,crc32c,lz4,blkio,flacx,tarx,pngx,miniz,ppmd8,ppmd8enc,ppmd8dec,ppmd_codec,codec,bcj_x86,blake3,blake3_dispatch,blake3_portable,rs}.o \
     -Wl,-l:libzstd.so.1 -lz -lpthread
 "$WORK/cbrm" "$IMG" bins.tar
 # every "bins.tar!..." sibling must be gone (deletion semantics, WP14b)
