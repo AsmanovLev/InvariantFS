@@ -714,6 +714,471 @@ seeded:
 }
 
 
+/* ==================== WP25: two-device mux ====================
+ * The engine addresses the volume in the GLOBAL block space (the
+ * concatenation of dev0 + dev1; the DEVT descriptor at block 0 carries
+ * the per-device sizes). The mux is the only place that knows the split:
+ *
+ *   - [0, meta_end_bytes): the metadata span (superblock+descriptors,
+ *     bitmap, journal, inode area). Mirrored on BOTH devices at the SAME
+ *     local offsets. Writes are writethrough to both before the commit
+ *     barrier; a dev0 write failure logs + drops dev0 for the rest of the
+ *     session (its DEVT sync_seq then necessarily lags -> the next open
+ *     resyncs it from dev1, newest state wins); a dev1 failure latches
+ *     the volume (WP22c semantics: dev1 is the canonical store).
+ *   - [meta_end, dev0_blocks*4K): dev0 data (the RAW zone + the tier
+ *     arena). Read/write dev0; a failure is the caller's business (the
+ *     read path fails over to the dev1 mirror, see seg_read_checked).
+ *   - [dev0_blocks*4K, ...): dev1 data (the canonical shadow zone), local
+ *     offset = global - dev0 end.
+ *
+ * Degraded mount (dev0 absent): metadata reads come from the dev1 mirror,
+ * dev1 data reads work, anything needing dev0 fails (-1) so the engine's
+ * failover paths (RAW mirror, tier copy skip) engage; writes are refused
+ * upstream (read-only degraded mount).
+ *
+ * With ndev < 2 every call is a straight passthrough to dev0's blkio --
+ * the single-device path is byte-identical to the pre-WP25 one. */
+
+static uint64_t mux_dev0_bytes(const invfs_volume *v)
+{
+    return v->dev0_blocks * (uint64_t)INVFS_BLOCK_SIZE;
+}
+
+
+int vmux_seek(invfs_volume *v, uint64_t off)
+{
+    v->mux_pos = off;
+    return 0;
+}
+
+
+/* one non-straddling slice; vmux_read/vmux_write split at the routing
+ * boundaries (metadata span end, dev0/dev1 boundary) */
+static int vmux_pread1(invfs_volume *v, uint64_t off, void *buf, size_t len)
+{
+    if (off < v->meta_end_bytes) {
+        /* metadata: dev0 primary (unless absent or session-stale), fail
+         * over to the dev1 mirror on any io failure. The mirror sits at
+         * the SAME local offset on dev1. A session-stale mirror
+         * (dev_skip[1]: its DEVT did not check out at open) is NOT a
+         * failover source -- serving known-old metadata could resurrect
+         * superseded records; fail loudly instead. */
+        if (v->io_open[0] && !v->dev_skip[0] &&
+            blkio_pread(&v->io, off, buf, len) == 0)
+            return 0;
+        if (v->io_open[0] && !v->dev_skip[0] && !v->metaread_logged) {
+            v->metaread_logged = 1;
+            fprintf(stderr, "vol: metadata read failing over to the dev1 "
+                    "mirror (dev0 io error)\n");
+        }
+        if (v->io_open[1] && !v->dev_skip[1])
+            return blkio_pread(&v->io2, off, buf, len);
+        return -1;
+    }
+    if (off < mux_dev0_bytes(v)) {
+        /* dev0 data (RAW zone / tier arena) */
+        if (!v->io_open[0] || v->dev_skip[0])
+            return -1;   /* degraded or dead: the engine fails over */
+        return blkio_pread(&v->io, off, buf, len);
+    }
+    /* dev1 data (canonical shadow) */
+    if (!v->io_open[1] || v->dev_skip[1])
+        return -1;
+    return blkio_pread(&v->io2, off - mux_dev0_bytes(v), buf, len);
+}
+
+
+int vmux_read(invfs_volume *v, void *buf, size_t len)
+{
+    uint64_t off = v->mux_pos;
+    uint8_t *out = (uint8_t *)buf;
+
+    if (v->ndev < 2 && !v->degraded) {
+        int rc = blkio_pread(&v->io, off, buf, len);
+        if (rc == 0) v->mux_pos = off + len;
+        return rc;
+    }
+    while (len) {
+        size_t n = len;
+        if (off < v->meta_end_bytes && off + n > v->meta_end_bytes)
+            n = (size_t)(v->meta_end_bytes - off);
+        if (off < mux_dev0_bytes(v) && off + n > mux_dev0_bytes(v))
+            n = (size_t)(mux_dev0_bytes(v) - off);
+        if (vmux_pread1(v, off, out, n) != 0)
+            return -1;
+        out += n;
+        off += n;
+        len -= n;
+    }
+    v->mux_pos = off;
+    return 0;
+}
+
+
+static int vmux_pwrite1(invfs_volume *v, uint64_t off,
+                        const void *buf, size_t len)
+{
+    if (off < v->meta_end_bytes) {
+        /* metadata: writethrough mirror to BOTH devices (same local
+         * offset). dev0 fail -> log + sticky skip + continue on dev1
+         * (rule 3: not a full latch; the DEVT sync_seq bump in vol_flush
+         * then necessarily misses dev0 -> staleness is detectable).
+         * dev1 fail -> the canonical store is gone: latch (WP22c). */
+        int wrote = 0;
+        if (v->degraded) {
+            fprintf(stderr, "vol: metadata write refused: DEGRADED mount "
+                    "(dev0 absent), the volume is read-only\n");
+            return -1;
+        }
+        if (v->io_open[0] && !v->dev_skip[0]) {
+            if (blkio_pwrite(&v->io, off, buf, len) != 0) {
+                v->dev_skip[0] = 1;
+                fprintf(stderr, "vol: dev0 metadata write failed at %llu; "
+                        "continuing on dev1 (dev0 will resync at next "
+                        "open)\n", (unsigned long long)off);
+            } else {
+                wrote = 1;
+            }
+        }
+        if (v->io_open[1] && !v->dev_skip[1]) {
+            if (blkio_pwrite(&v->io2, off, buf, len) != 0) {
+                vol_io_error_latch(v, "metadata mirror write (dev1)");
+                return -1;
+            }
+            wrote = 1;
+        }
+        return wrote ? 0 : -1;
+    }
+    if (off < mux_dev0_bytes(v)) {
+        if (!v->io_open[0] || v->dev_skip[0]) {
+            /* WP25 degraded: the op needs dev0, which is absent -- fail
+             * loudly (EIO) with the plain reason */
+            if (v->degraded && !v->metaread_logged) {
+                v->metaread_logged = 1;
+                fprintf(stderr, "vol: write to device 0 refused: DEGRADED "
+                        "mount (dev0 absent) -- EIO. Reattach dev0 for "
+                        "read-write.\n");
+            }
+            return -1;
+        }
+        return blkio_pwrite(&v->io, off, buf, len);
+    }
+    if (!v->io_open[1] || v->dev_skip[1])
+        return -1;
+    return blkio_pwrite(&v->io2, off - mux_dev0_bytes(v), buf, len);
+}
+
+
+int vmux_write(invfs_volume *v, const void *buf, size_t len)
+{
+    uint64_t off = v->mux_pos;
+    const uint8_t *in = (const uint8_t *)buf;
+
+    if (v->ndev < 2 && !v->degraded) {
+        int rc = blkio_pwrite(&v->io, off, buf, len);
+        if (rc == 0) v->mux_pos = off + len;
+        return rc;
+    }
+    while (len) {
+        size_t n = len;
+        if (off < v->meta_end_bytes && off + n > v->meta_end_bytes)
+            n = (size_t)(v->meta_end_bytes - off);
+        if (off < mux_dev0_bytes(v) && off + n > mux_dev0_bytes(v))
+            n = (size_t)(mux_dev0_bytes(v) - off);
+        if (vmux_pwrite1(v, off, in, n) != 0)
+            return -1;
+        in += n;
+        off += n;
+        len -= n;
+    }
+    v->mux_pos = off;
+    return 0;
+}
+
+
+void vmux_close(invfs_volume *v)
+{
+    if (v->io_open[0]) { blkio_close(&v->io);  v->io_open[0] = 0; }
+    if (v->io_open[1]) { blkio_close(&v->io2); v->io_open[1] = 0; }
+}
+
+
+/* CRC convention: over the descriptor with the crc32c field read as zero
+ * (the RDP0 rule). */
+uint32_t devt_crc(const invfs_devt *d)
+{
+    invfs_devt t = *d;
+    t.crc32c = 0;
+    return invfs_crc32c(&t, sizeof t);
+}
+
+
+/* Persist the in-memory DEVT by read-modify-write of block 0, mirrored by
+ * the mux to every writable (non-skipped) device. */
+int vol_write_devt(invfs_volume *v)
+{
+    uint8_t blk[INVFS_BLOCK_SIZE];
+    invfs_devt t;
+    if (v->ndev != 2) return 0;
+    t = v->devt;
+    memcpy(t.magic, "DEVT", 4);
+    t.crc32c = 0;
+    t.crc32c = devt_crc(&t);
+    if (vmux_seek(v, 0) != 0 || vmux_read(v, blk, sizeof blk) != 0)
+        return -1;
+    memcpy(blk + INVFS_DEVT_OFF, &t, sizeof t);
+    if (vmux_seek(v, 0) != 0 || vmux_write(v, blk, sizeof blk) != 0)
+        return -1;
+    v->devt = t;
+    return 0;
+}
+
+
+/* Storage barrier over both present devices. 0 = all good; 1 = dev0's
+ * barrier failed (dev0 is now session-skipped and provably stale -- the
+ * DEVT bump here lands on dev1 only, so the divergence is visible at the
+ * next open and triggers the resync); -1 = dev1 failed (the caller
+ * latches: the canonical store may have lost acknowledged writes --
+ * WP22c). */
+int vmux_barrier(invfs_volume *v, const char *what)
+{
+    if (v->ndev < 2 && !v->degraded)
+        return blkio_flush(&v->io) == 0 ? 0 : -1;
+    if (v->io_open[0] && !v->dev_skip[0] && blkio_flush(&v->io) != 0) {
+        v->dev_skip[0] = 1;
+        fprintf(stderr, "vol: dev0 barrier failed (%s); continuing on "
+                "dev1, dev0 is stale until the next open resyncs it\n",
+                what ? what : "barrier");
+        v->devt.sync_seq++;
+        if (vol_write_devt(v) != 0)
+            return -1;
+    }
+    if (v->io_open[1] && blkio_flush(&v->io2) != 0)
+        return -1;
+    return v->dev_skip[0] ? 1 : 0;
+}
+
+
+/* Metadata mirror resync (WP25 rule 5): open found one device's metadata
+ * span older than the other's (sync_seq mismatch), or a write/barrier
+ * failure session-skipped a device. The whole span [0, meta_end) is
+ * copied from the newer device to the stale one (both hold it at
+ * identical local offsets); the DEVT bump in vol_flush then marks them
+ * equal. Newest state wins; the run is logged. */
+static int mirror_resync(invfs_volume *v)
+{
+    int loser = v->resync_winner ^ 1;
+    blkio *src = v->resync_winner ? &v->io2 : &v->io;
+    blkio *dst = loser ? &v->io2 : &v->io;
+    uint8_t *buf = (uint8_t *)malloc(BLKIO_BOUNCE);
+    uint64_t off = 0, end = v->meta_end_bytes;
+
+    if (!buf) return -1;
+    fprintf(stderr, "vol: mirror resync: dev%d <- dev%d (%llu bytes of "
+            "metadata; newest state wins)\n", loser, v->resync_winner,
+            (unsigned long long)end);
+    while (off < end) {
+        size_t n = (size_t)((end - off) > BLKIO_BOUNCE ? BLKIO_BOUNCE
+                                                       : end - off);
+        if (blkio_pread(src, off, buf, n) != 0) {
+            fprintf(stderr, "vol: mirror resync: read failed at %llu\n",
+                    (unsigned long long)off);
+            free(buf);
+            return -1;
+        }
+        if (blkio_pwrite(dst, off, buf, n) != 0) {
+            free(buf);
+            fprintf(stderr, "vol: mirror resync: dev%d write failed\n",
+                    loser);
+            if (loser == 1) {
+                /* the canonical store refused: WP22c territory */
+                vol_io_error_latch(v, "mirror resync write (dev1)");
+            }
+            return -1;   /* a dev0 loser stays session-skipped */
+        }
+        off += n;
+    }
+    free(buf);
+    if (blkio_flush(dst) != 0) {
+        if (loser == 1)
+            vol_io_error_latch(v, "mirror resync barrier (dev1)");
+        return -1;
+    }
+    v->dev_skip[loser] = 0;
+    v->resync_pending = 0;
+    return 0;
+}
+
+
+int vol_ndev(const invfs_volume *v)     { return v ? v->ndev : 0; }
+int vol_degraded(const invfs_volume *v) { return v && v->degraded; }
+int vol_mirror_stale(const invfs_volume *v)
+{
+    return v && (v->resync_pending || v->dev_skip[0] || v->dev_skip[1]);
+}
+
+
+/* DEVT sanity: a descriptor that claims 2 devices must agree with the
+ * superblock it sits next to. */
+static int devt_sane(const invfs_devt *d, const invfs_superblock *sb)
+{
+    if (d->version != INVFS_DEVT_VERSION) return 0;
+    if (d->dev_count != 2) return 0;
+    if (!d->dev_blocks[0] || !d->dev_blocks[1]) return 0;
+    if (d->dev_blocks[0] + d->dev_blocks[1] != sb->total_blocks) return 0;
+    if (memcmp(d->vol_uuid, sb->uuid, 16) != 0) return 0;
+    return 1;
+}
+
+
+/* Open + validate device 1 of a 2-device volume. The path comes from
+ * INVFS_DEV1 (wins) or the DEVT path hint. Returns 0 with io2 open and
+ * locked, or -1 (loud). */
+static int wp25_open_dev1(invfs_volume *v, const char *hint)
+{
+    const char *d1 = getenv("INVFS_DEV1");
+    invfs_devt d2;
+    int rc;
+
+    if (!d1 || !*d1) d1 = hint;
+    if (!d1 || !*d1) {
+        fprintf(stderr, "vol_open: %s: two-device volume, device 1 not "
+                "given (set INVFS_DEV1)\n", v->path);
+        return -1;
+    }
+    rc = blkio_open(&v->io2, d1,
+                    blkio_looks_like_device(d1) ? BLKIO_EXCLUSIVE : 0);
+    if (rc != 0) {
+        fprintf(stderr, "vol_open: %s: device 1 %s: %s\n", v->path, d1,
+                blkio_strerror(rc));
+        return -1;
+    }
+    v->io_open[1] = 1;
+#ifndef _WIN32
+    if (flock(v->io2.fd, LOCK_EX | LOCK_NB) != 0) {
+        fprintf(stderr, "vol_open: %s: device 1 %s is in use by another "
+                "process\n", v->path, d1);
+        vmux_close(v);
+        return -1;
+    }
+#endif
+    v->path2 = strdup(d1);
+    /* dev1 carries the canonical data: refuse to run without it */
+    if (blkio_capacity(&v->io2) <
+        v->devt.dev_blocks[1] * (uint64_t)INVFS_BLOCK_SIZE) {
+        fprintf(stderr, "vol_open: %s: device 1 %s is smaller than the "
+                "device table says (%llu blocks)\n", v->path, d1,
+                (unsigned long long)v->devt.dev_blocks[1]);
+        return -1;
+    }
+    if (blkio_pread(&v->io2, INVFS_DEVT_OFF, &d2, sizeof d2) != 0 ||
+        memcmp(d2.magic, "DEVT", 4) != 0 || devt_crc(&d2) != d2.crc32c ||
+        !devt_sane(&d2, &v->sb)) {
+        /* no readable table on dev1: treat it as stale (dev0's table is
+         * authoritative); the next flush resyncs dev1's metadata span
+         * wholesale, which rewrites its block 0 */
+        fprintf(stderr, "vol_open: %s: device 1 has no valid DEVT; "
+                "treating it as stale\n", v->path);
+        v->resync_pending = 1;
+        v->resync_winner = 0;
+        v->dev_skip[1] = 1;    /* metadata writes skip dev1 until resync */
+        return 0;
+    }
+    if (d2.dev_blocks[0] != v->devt.dev_blocks[0] ||
+        d2.dev_blocks[1] != v->devt.dev_blocks[1]) {
+        fprintf(stderr, "vol_open: %s: device 1 DEVT disagrees with "
+                "device 0 on the geometry; refusing to mount\n", v->path);
+        return -1;
+    }
+    if (d2.sync_seq != v->devt.sync_seq) {
+        if (d2.sync_seq > v->devt.sync_seq) {
+            /* dev1 is newer: dev0 is the stale one */
+            v->resync_pending = 1;
+            v->resync_winner = 1;
+            v->dev_skip[0] = 1;
+            fprintf(stderr, "vol_open: metadata mirror divergence: dev0 "
+                    "is stale (seq %llu < %llu); reads fail over to dev1, "
+                    "resync at the next flush\n",
+                    (unsigned long long)v->devt.sync_seq,
+                    (unsigned long long)d2.sync_seq);
+        } else {
+            v->resync_pending = 1;
+            v->resync_winner = 0;
+            fprintf(stderr, "vol_open: metadata mirror divergence: dev1 "
+                    "is stale (seq %llu < %llu); resync at the next "
+                    "flush\n",
+                    (unsigned long long)d2.sync_seq,
+                    (unsigned long long)v->devt.sync_seq);
+        }
+    }
+    return 0;
+}
+
+
+/* Degraded bootstrap (WP25 rule 5): the dev0 image is absent. With
+ * INVFS_DEV1 set we open device 1 alone, read its block 0 directly, and
+ * continue as a READ-ONLY volume serving every structure from the dev1
+ * mirror. */
+static int wp25_open_degraded(invfs_volume *v)
+{
+    const char *d1 = getenv("INVFS_DEV1");
+    uint8_t blk[INVFS_BLOCK_SIZE];
+    invfs_devt d2;
+    int rc;
+
+    if (!d1 || !*d1)
+        return -1;
+    rc = blkio_open(&v->io2, d1,
+                    blkio_looks_like_device(d1) ? BLKIO_EXCLUSIVE : 0);
+    if (rc != 0) {
+        fprintf(stderr, "vol_open: degraded open: device 1 %s: %s\n",
+                d1, blkio_strerror(rc));
+        return -1;
+    }
+    v->io_open[1] = 1;
+    if (blkio_pread(&v->io2, 0, blk, sizeof blk) != 0)
+        goto bad;
+    memcpy(&v->sb, blk, sizeof v->sb);
+    if (memcmp(v->sb.magic, INVFS_MAGIC, 8) != 0 ||
+        invfs_crc32c(&v->sb, offsetof(invfs_superblock, checksum)) !=
+            v->sb.checksum)
+        goto bad;
+    memcpy(&d2, blk + INVFS_DEVT_OFF, sizeof d2);
+    if (memcmp(d2.magic, "DEVT", 4) != 0 || devt_crc(&d2) != d2.crc32c ||
+        !devt_sane(&d2, &v->sb)) {
+        fprintf(stderr, "vol_open: degraded open: %s is not device 1 of a "
+                "two-device InvariantFS volume (no valid DEVT)\n", d1);
+        goto bad;
+    }
+    if (blkio_capacity(&v->io2) <
+        d2.dev_blocks[1] * (uint64_t)INVFS_BLOCK_SIZE) {
+        fprintf(stderr, "vol_open: degraded open: %s is smaller than the "
+                "device table says\n", d1);
+        goto bad;
+    }
+    v->path2 = strdup(d1);
+    v->devt = d2;
+    v->devt_present = 1;
+    v->ndev = 2;
+    v->dev0_present = 0;
+    v->degraded = 1;
+    v->dev0_blocks = d2.dev_blocks[0];
+    v->dev1_blocks = d2.dev_blocks[1];
+    v->meta_end_bytes = (v->sb.metadata_zone_start +
+                         v->sb.metadata_zone_blocks) *
+                        (uint64_t)INVFS_BLOCK_SIZE;
+    v->raw_mirror = (d2.flags & INVFS_DEVTF_RAW_MIRROR) != 0;
+    v->arena_start = v->sb.raw_zone_start + v->sb.raw_zone_blocks;
+    v->arena_blocks = v->dev0_blocks > v->arena_start
+                    ? v->dev0_blocks - v->arena_start : 0;
+    return 0;
+bad:
+    vmux_close(v);
+    return -1;
+}
+
+
 /* WP24-lite: vol_open_inner(path, at_ckpt, ckpt_seq, err).
  * at_ckpt == 0 is the ordinary open (vol_open). at_ckpt != 0 asks for the
  * read-only time-travel view at the live CKP0 sweep checkpoint
@@ -735,6 +1200,7 @@ static invfs_volume *vol_open_inner(const char *path, int at_ckpt,
        the normalized form, so diagnostics name what was actually opened. */
     real = blkio_normalize(path, devbuf, sizeof devbuf);
     v->path = strdup(real);
+    v->dev0_present = 1;
 
     /* A device is taken exclusively -- locked and dismounted. Two processes
        each holding their own in-memory bitmap and L2P would corrupt the
@@ -745,11 +1211,20 @@ static invfs_volume *vol_open_inner(const char *path, int at_ckpt,
     rc = blkio_open(&v->io, real,
                     blkio_looks_like_device(real) ? BLKIO_EXCLUSIVE : 0);
     if (rc != 0) {
-        fprintf(stderr, "vol_open: %s: %s\n", real, blkio_strerror(rc));
-        *err = -2;
-        free(v->path);
-        free(v);
-        return NULL;
+        /* WP25: with INVFS_DEV1 set a missing dev0 is the DEGRADED leg:
+         * open device 1 alone and serve read-only from the mirror. */
+        if (wp25_open_degraded(v) != 0) {
+            fprintf(stderr, "vol_open: %s: %s\n", real, blkio_strerror(rc));
+            *err = -2;
+            free(v->path);
+            free(v);
+            return NULL;
+        }
+        fprintf(stderr, "vol_open: DEGRADED: %s: device 0 absent; serving "
+                "READ-ONLY from the dev1 mirror %s (reattach dev0 for "
+                "read-write)\n", real, v->path2);
+    } else {
+        v->io_open[0] = 1;
     }
 #ifndef _WIN32
     /* POSIX twin of the Windows no-share open above: a lingering FUSE daemon
@@ -757,7 +1232,8 @@ static invfs_volume *vol_open_inner(const char *path, int at_ckpt,
      * the same image corrupt it between their in-memory bitmaps/L2P (seen
      * in the wild: stale-position record appends clobbering fresh records).
      * LOCK_NB: fail loudly instead of waiting. Released by close(). */
-    if (flock(v->io.fd, LOCK_EX | LOCK_NB) != 0) {
+    if ((v->io_open[0] && flock(v->io.fd, LOCK_EX | LOCK_NB) != 0) ||
+        (v->io_open[1] && flock(v->io2.fd, LOCK_EX | LOCK_NB) != 0)) {
         fprintf(stderr, "vol_open: %s: image is in use by another process\n",
                 real);
         *err = -2;
@@ -769,6 +1245,71 @@ static invfs_volume *vol_open_inner(const char *path, int at_ckpt,
     if (memcmp(v->sb.magic, INVFS_MAGIC, 8) != 0) { *err = -4; goto fail; }
     if (invfs_crc32c(&v->sb, offsetof(invfs_superblock, checksum)) != v->sb.checksum)
         { *err = -5; goto fail; }
+
+    /* WP25: the DEVT device table at 0x2A0 (block 0 reserved area, the
+     * RDP0 convention: absent = zeros = single-device). When it names two
+     * devices, open device 1 here so every structure read below (bitmap,
+     * journal, inode area) can fail over to the mirror. dev1 holds the
+     * canonical data: a volume that cannot reach dev1 is refused loudly
+     * (the degraded leg covers dev0-absent only). */
+    if (!v->devt_present) {
+        invfs_devt dt;
+        memset(&dt, 0, sizeof dt);
+        if (io_seek(&v->io, INVFS_DEVT_OFF) == 0 &&
+            io_read(&v->io, &dt, sizeof dt) == 0 &&
+            memcmp(dt.magic, "DEVT", 4) == 0) {
+            if (devt_crc(&dt) != dt.crc32c || dt.version != INVFS_DEVT_VERSION) {
+                fprintf(stderr, "vol_open: %s: DEVT device table is torn; "
+                        "cannot tell the device geometry -- refusing to "
+                        "mount (reattach both devices / run invf-fsck)\n",
+                        real);
+                *err = -5; goto fail;
+            }
+            if (dt.dev_count == 2) {
+                if (!devt_sane(&dt, &v->sb)) {
+                    fprintf(stderr, "vol_open: %s: DEVT/superblock "
+                                    "mismatch; refusing to mount\n", real);
+                    *err = -5; goto fail;
+                }
+                v->devt = dt;
+                v->devt_present = 1;
+            } else if (dt.dev_count != 1) {
+                fprintf(stderr, "vol_open: %s: DEVT dev_count %u "
+                                "unsupported\n", real, dt.dev_count);
+                *err = -5; goto fail;
+            }
+        }
+        if (v->devt_present && v->devt.dev_count == 2) {
+            v->ndev = 2;
+            v->dev0_blocks = v->devt.dev_blocks[0];
+            v->dev1_blocks = v->devt.dev_blocks[1];
+            v->meta_end_bytes = (v->sb.metadata_zone_start +
+                                 v->sb.metadata_zone_blocks) *
+                                (uint64_t)INVFS_BLOCK_SIZE;
+            v->raw_mirror = (v->devt.flags & INVFS_DEVTF_RAW_MIRROR) != 0;
+            v->arena_start = v->sb.raw_zone_start + v->sb.raw_zone_blocks;
+            v->arena_blocks = v->dev0_blocks > v->arena_start
+                            ? v->dev0_blocks - v->arena_start : 0;
+            if (blkio_capacity(&v->io) <
+                v->dev0_blocks * (uint64_t)INVFS_BLOCK_SIZE) {
+                fprintf(stderr, "vol_open: %s: device 0 is smaller than "
+                        "the device table says (%llu blocks)\n", real,
+                        (unsigned long long)v->dev0_blocks);
+                *err = -3; goto fail;
+            }
+            if (wp25_open_dev1(v, v->devt.dev1_hint) != 0) {
+                fprintf(stderr, "vol_open: %s: device 1 (the canonical "
+                        "data store) is required; refusing to mount. "
+                        "Reattach it, or for a dev0-absent READ-ONLY "
+                        "mount set INVFS_DEV1 and point the tool at the "
+                        "missing dev0 path.\n", real);
+                *err = -2; goto fail;
+            }
+        } else {
+            v->ndev = 1;
+            v->dev0_blocks = v->sb.total_blocks;
+        }
+    }
 
     /* WP20b: second block-0 read for the RDP0 redundancy descriptor at
      * 0x100 (past the 144-byte superblock struct; pre-WP20b images carry
@@ -815,12 +1356,20 @@ static invfs_volume *vol_open_inner(const char *path, int at_ckpt,
         if (io_seek(&v->io, INVFS_RSZ0_OFF) == 0 &&
             io_read(&v->io, &rz, sizeof rz) == 0 &&
             memcmp(rz.magic, "RSZ0", 4) == 0) {
-            if (rsz0_crc(&rz) != rz.crc32c || !rsz0_sane(&rz)) {
+            if (rsz0_crc(&rz) != rz.crc32c || !rsz0_sane(v, &rz)) {
                 /* torn/desc corrupt: the apply it armed never started (the
                  * arm precedes it), so the old metadata is intact -- ignore
                  * the descriptor and let the RECOVERY path below decide */
                 fprintf(stderr, "vol_open: ignoring a corrupt RSZ0 resize "
                                 "descriptor\n");
+            } else if (v->degraded) {
+                /* the roll-forward WRITES the metadata span; the dev1
+                 * mirror alone cannot run it (the mirror would diverge
+                 * from the half-moved dev0 state). Reattach dev0. */
+                fprintf(stderr, "vol_open: %s: an interrupted resize is "
+                        "pending and the volume is DEGRADED (dev0 absent); "
+                        "reattach dev0 to finish the resize\n", real);
+                *err = -10; goto fail;
             } else if (v->sb.total_blocks == rz.old_total) {
                 if (vol_rsz0_apply(v, &rz) != 0) {
                     fprintf(stderr, "vol_open: resize roll-forward failed; "
@@ -1062,6 +1611,15 @@ static invfs_volume *vol_open_inner(const char *path, int at_ckpt,
                    (unsigned long long)v->ncount, (unsigned long long)v->dcount);
     }
 
+    /* WP25: with the name/id indexes live, load the tier + RAW-mirror
+     * indexes from their owner records (2-device volumes only; a degraded
+     * mount needs the RAW mirror for reads). */
+    if (v->ndev == 2) {
+        v->tier_owner = vol_find(v, "\x01tier0");
+        v->rawm_owner = vol_find(v, "\x01rawm");
+        wp25_index_load(v);
+    }
+
     v->alloc_cursor = v->sb.raw_zone_start;
     if (v->next_inode_id == 0)
         v->next_inode_id = 1;
@@ -1275,7 +1833,13 @@ static invfs_volume *vol_open_inner(const char *path, int at_ckpt,
          * records (drop-torn mappings). The live set is consistent, but
          * the losses are unreviewed: keep the conservative manual path
          * (fsck -f quarantines them) instead of silently cleaning up. */
-        if (!ro_flag && v->scan_anomalies == 0 && v->open_cuts == 0 &&
+        if (v->degraded) {
+            fprintf(stderr, "vol_open: %s: DEGRADED read-only mount "
+                    "(device 0 absent); the recorded state 0x%02X is "
+                    "left untouched until reattach\n",
+                    real, (unsigned)v->sb.state);
+            v->needs_recovery = 1;
+        } else if (!ro_flag && v->scan_anomalies == 0 && v->open_cuts == 0 &&
             (!ar || strcmp(ar, "0") != 0)) {
             v->sb.state = INVFS_STATE_CLEAN;
             if (vol_write_sb(v) == 0)
@@ -1295,6 +1859,8 @@ static invfs_volume *vol_open_inner(const char *path, int at_ckpt,
             v->needs_recovery = 1;
         }
     }
+    if (v->degraded)
+        v->needs_recovery = 1;   /* a degraded mount is always read-only */
     return v;
 fail:
     io_close(&v->io);
@@ -1302,6 +1868,9 @@ fail:
     free(v->jops);
     free(v->j_heat);
     free(v->l2p);
+    free(v->tier);
+    free(v->rawm);
+    free(v->path2);
     free(v->path);
     free(v);
     return NULL;
@@ -1364,7 +1933,7 @@ void vol_close(invfs_volume *v)
            barrier costs a full device cache flush and the ordering above is
            what makes process death survivable either way. */
         if (getenv("INVFS_FSYNC"))
-            blkio_flush(&v->io);
+            vmux_barrier(v, "close");
     }
     io_close(&v->io);
     idx_clear(v);
@@ -1379,6 +1948,9 @@ void vol_close(invfs_volume *v)
     free(v->l2p);
     free(v->jops);
     free(v->j_heat);
+    free(v->tier);
+    free(v->rawm);
+    free(v->path2);
     free(v->path);
     free(v);
 }
@@ -1608,7 +2180,7 @@ static int jrn_compact(invfs_volume *v)
 #ifndef _WIN32
     if (jrn_abort_at("image")) { kill(getpid(), SIGKILL); }
 #endif
-    if (blkio_flush(&v->io) != 0) {
+    if (vmux_barrier(v, "journal compaction barrier") < 0) {
         vol_io_error_latch(v, "journal compaction barrier");
         return -1;
     }
@@ -1621,7 +2193,7 @@ static int jrn_compact(invfs_volume *v)
         vol_io_error_latch(v, "journal slot selector write");
         return -1;
     }
-    if (blkio_flush(&v->io) != 0) {
+    if (vmux_barrier(v, "journal slot flip barrier") < 0) {
         vol_io_error_latch(v, "journal slot flip barrier");
         return -1;
     }
@@ -1784,6 +2356,10 @@ int vol_flush(invfs_volume *v)
      * flush contract is vacuously satisfied -- and the superblock write
      * below would otherwise land on the PRESENT volume's block 0. */
     if (v->time_travel) return 0;
+    /* WP25: same for a degraded mount (dev0 absent): vol_mark_dirty
+     * refused every mutation, so nothing is pending; a flush attempt
+     * would only trip the mirror's read-only refusal. */
+    if (v->degraded) return 0;
     /* persist superblock (state / ENOSPC policy fields / READONLY flag) */
     if (vol_write_sb(v) != 0) {
         vol_io_error_latch(v, "superblock write");
@@ -1827,6 +2403,27 @@ int vol_flush(invfs_volume *v)
      * hold them. */
     if (jrn_flush(v) != 0)
         return -1;   /* the journal paths latch their own failures */
+    /* WP25: the rawm/tier owner records are rewritten here, AFTER the
+     * journal carried their (re)maps (maps durable before the record that
+     * names them -- the tz_seal rule). */
+    if (v->ndev == 2 && !v->degraded && (v->rawm_dirty || v->tier_dirty)) {
+        if (wp25_owner_sync(v) != 0) {
+            vol_io_error_latch(v, "mirror/tier owner sync");
+            return -1;
+        }
+    }
+    /* WP25: the mirror staleness resync runs inside the first flush that
+     * follows the open that detected it (newest state wins), then the
+     * DEVT sync_seq bump certifies both devices carry this state. */
+    if (v->ndev == 2 && !v->degraded) {
+        if (v->resync_pending)
+            mirror_resync(v);   /* failures keep the loser skipped */
+        v->devt.sync_seq++;
+        if (vol_write_devt(v) != 0) {
+            vol_io_error_latch(v, "DEVT write");
+            return -1;
+        }
+    }
     return 0;
 }
 
@@ -1873,7 +2470,7 @@ int vol_sync(invfs_volume *v)
         return -1;
     }
 #endif
-    if (blkio_flush(&v->io) != 0) {
+    if (vmux_barrier(v, "sync") < 0) {
         vol_io_error_latch(v, "sync");
         return -1;
     }
@@ -1897,6 +2494,11 @@ uint64_t alloc_blocks(invfs_volume *v, uint64_t zone_start, uint64_t zone_len,
     if (zone_start == v->sb.shadow_zone_start) {
         cursor = &v->shadow_cursor; zone_free = &v->shadow_free;
         fail_run = &v->shadow_fail_run;
+    } else if (v->ndev == 2 && v->arena_blocks &&
+               zone_start == v->arena_start) {
+        /* WP25: the dev0 tier arena (redundant acceleration copies only) */
+        cursor = &v->arena_cursor;  zone_free = &v->arena_free;
+        fail_run = &v->arena_fail_run;
     } else {
         cursor = &v->raw_cursor;    zone_free = &v->raw_free;
         fail_run = &v->raw_fail_run;
@@ -1999,6 +2601,15 @@ uint64_t vol_write_raw(invfs_volume *v, const uint8_t *data, size_t len)
     if (io_seek(&v->io, pba * INVFS_BLOCK_SIZE) != 0 ||
         io_write(&v->io, data, (size_t)nblocks * INVFS_BLOCK_SIZE) != 0)
         return 0;
+    /* WP25: raw-zone writes dual-write to the dev1 mirror (raw_mirror) */
+    if (v->ndev == 2 && v->raw_mirror && !v->degraded &&
+        pba >= v->sb.raw_zone_start &&
+        pba < v->sb.raw_zone_start + v->sb.raw_zone_blocks) {
+        if (wp25_rawm_write(v, pba, data, nblocks) != 0) {
+            vol_io_error_latch(v, "raw mirror write (dev1)");
+            return 0;
+        }
+    }
     return pba;
 }
 
@@ -2395,8 +3006,20 @@ void scanset_free(scan_set *ss)
 int vol_read_block(invfs_volume *v, uint64_t pba, void *buf)
 {
     if (io_seek(&v->io, pba * INVFS_BLOCK_SIZE) != 0 ||
-        io_read(&v->io, buf, INVFS_BLOCK_SIZE) != 0)
+        io_read(&v->io, buf, INVFS_BLOCK_SIZE) != 0) {
+        /* WP25: a raw-zone block on an absent/failed dev0 is served by
+         * its dev1 mirror block (mirror = 1:1 block copy) */
+        uint64_t mpba = 0, mlen = 0;
+        if (v->ndev == 2 &&
+            pba >= v->sb.raw_zone_start &&
+            pba < v->sb.raw_zone_start + v->sb.raw_zone_blocks &&
+            wp25_rawm_lookup(v, pba, &mpba, &mlen) == 0 && mlen >= 1) {
+            if (io_seek(&v->io, mpba * INVFS_BLOCK_SIZE) == 0 &&
+                io_read(&v->io, buf, INVFS_BLOCK_SIZE) == 0)
+                return 0;
+        }
         return -1;
+    }
     return 0;
 }
 
@@ -2422,8 +3045,39 @@ int write_segment_blocks(invfs_volume *v, uint64_t pba, uint8_t *buf,
     if (span > payload)
         memset(buf + payload, 0, span - payload);
     if (io_seek(&v->io, pba * INVFS_BLOCK_SIZE) != 0 ||
-        io_write(&v->io, buf, span) != 0)
+        io_write(&v->io, buf, span) != 0) {
+        /* WP25 rule 3: with raw_mirror the segment's second copy lands on
+         * dev1; a dev0 RAW write failure is logged and the mirror becomes
+         * the surviving copy (reads fail over to it) -- NOT a full latch.
+         * A dev1 (mirror) write failure latches. */
+        if (v->ndev == 2 && v->raw_mirror && !v->degraded &&
+            pba >= v->sb.raw_zone_start &&
+            pba < v->sb.raw_zone_start + v->sb.raw_zone_blocks) {
+            if (!v->rawio_logged) {
+                v->rawio_logged = 1;
+                fprintf(stderr, "vol: dev0 RAW write failed at pba %llu; "
+                        "continuing on the dev1 mirror (raw_mirror=1)\n",
+                        (unsigned long long)pba);
+            }
+            if (wp25_rawm_write(v, pba, buf, phys_blocks) != 0) {
+                vol_io_error_latch(v, "raw mirror write (dev1)");
+                return -1;
+            }
+            return 0;
+        }
         return -1;
+    }
+    /* WP25: the RAW mirror -- every raw-zone segment is dual-written to
+     * dev1 (SSD loss loses nothing). The mirror is an ordinary canonical
+     * shadow allocation owned by "\x01rawm". */
+    if (v->ndev == 2 && v->raw_mirror && !v->degraded &&
+        pba >= v->sb.raw_zone_start &&
+        pba < v->sb.raw_zone_start + v->sb.raw_zone_blocks) {
+        if (wp25_rawm_write(v, pba, buf, phys_blocks) != 0) {
+            vol_io_error_latch(v, "raw mirror write (dev1)");
+            return -1;
+        }
+    }
     /* WP20b: overwriting occupied shadow blocks dirties their stripes */
     seal_dirty_mark(v, pba, phys_blocks);
     return 0;
@@ -2525,6 +3179,8 @@ int vol_write_enabled(invfs_volume *v)
        would otherwise append records, and appending onto maps that were never
        finished is how a single crash becomes two. */
     if (v->needs_recovery) return 0;
+    /* WP25: a degraded mount (dev0 absent) is read-only by construction */
+    if (v->degraded) return 0;
     return !(v->sb.vol_flags & VOLF_READONLY);
 }
 
@@ -2615,6 +3271,11 @@ void vol_free_blocks(invfs_volume *v, uint64_t pba, uint64_t nblocks)
                 bit_set(v->retmap, i);
         return;
     }
+    /* WP25: a REAL free (retention above holds its blocks) drops the
+     * redundant second copy: the dev1 mirror of a raw-zone run, or the
+     * dev0 acceleration copy of a canonical dev1-shadow run. */
+    if (v->ndev == 2)
+        wp25_on_free(v, pba, end - pba);
     for (i = pba; i < end; i++)
         bit_clr(v->bitmap, i);
     if (end > pba) { bm_dirty(v, pba); bm_dirty(v, end - 1); }
@@ -2630,6 +3291,15 @@ void vol_free_blocks(invfs_volume *v, uint64_t pba, uint64_t nblocks)
         v->shadow_free += nblocks;
         v->shadow_fail_run = 0;
         if (pba < v->shadow_cursor) v->shadow_cursor = pba;
+    } else if (v->ndev == 2 && pba >= v->dev0_blocks &&
+               pba < v->sb.shadow_zone_start) {
+        /* WP25 reserved dev1 span (metadata mirror): never allocated,
+         * never freed -- defensive classification only */
+    } else if (v->ndev == 2 && pba >= v->arena_start &&
+               pba < v->dev0_blocks) {
+        v->arena_free += nblocks;
+        v->arena_fail_run = 0;
+        if (pba < v->arena_cursor) v->arena_cursor = pba;
     } else if (pba >= v->sb.raw_zone_start) {
         v->raw_free += nblocks;
         v->raw_fail_run = 0;
@@ -2682,6 +3352,11 @@ void alloc_state_reset(invfs_volume *v)
                                     v->sb.raw_zone_blocks);
     v->shadow_free = zone_count_free(v, v->sb.shadow_zone_start,
                                     v->sb.shadow_zone_blocks);
+    /* WP25: the dev0 tier arena (0 blocks on single-device volumes) */
+    v->arena_cursor = v->arena_start;
+    v->arena_free = v->arena_blocks
+                  ? zone_count_free(v, v->arena_start, v->arena_blocks) : 0;
+    v->arena_fail_run = 0;
     v->raw_fail_run = v->shadow_fail_run = 0;
     v->bm_lo = 1; v->bm_hi = 0;   /* on-disk bitmap matches memory */
     if (getenv("INVFS_DEBUG"))

@@ -123,14 +123,30 @@ extern uLong crc32(uLong crc, const Bytef *buf, uInt len);
    This used to be a private copy of a four-function shim over ReadFile/read.
    It now delegates to blkio, which is shared with mkfs.c and which handles
    the sector alignment a raw device demands. The io_* names are kept so the
-   ~100 call sites below read the same as before. */
-#define io_seek(c, off)       blkio_seek((c), (off))
+   ~100 call sites below read the same as before.
 
-#define io_read(c, buf, len)  blkio_read((c), (buf), (len))
+   WP25: the io_* macros now route through the volume's device MUX
+   (vmux_*, volume.c): every engine call site passes &v->io (or &c->v->io),
+   so the volume pointer is recovered from the embedded member. With one
+   device the mux is a passthrough to blkio (byte-identical single-device
+   path); with two it routes by offset range, dual-writes the metadata span
+   to both devices, and fails metadata reads over to the mirror. */
+struct invfs_volume;
+int  vmux_seek(struct invfs_volume *v, uint64_t off);
+int  vmux_read(struct invfs_volume *v, void *buf, size_t len);
+int  vmux_write(struct invfs_volume *v, const void *buf, size_t len);
+void vmux_close(struct invfs_volume *v);
+/* 0 = both present devices barriered; 1 = dev0 failed (skipped, continues
+ * on dev1, resync at next open); -1 = dev1 failed (caller latches). */
+int  vmux_barrier(struct invfs_volume *v, const char *what);
 
-#define io_write(c, buf, len) blkio_write((c), (buf), (len))
+#define io_seek(c, off)       vmux_seek(v_of_blk(c), (off))
 
-#define io_close(c)           blkio_close((c))
+#define io_read(c, buf, len)  vmux_read(v_of_blk(c), (buf), (len))
+
+#define io_write(c, buf, len) vmux_write(v_of_blk(c), (buf), (len))
+
+#define io_close(c)           vmux_close(v_of_blk(c))
 
 
 /* ---- volume ---- */
@@ -179,6 +195,16 @@ typedef struct dir_index_entry {
     uint32_t nlen;
     char name[1];          /* prefix including the trailing '/' */
 } dir_index_entry;
+
+/* WP25: one tier-arena copy / RAW-mirror index entry. key = the canonical
+ * segment's pba (tier: a dev1-shadow pba; rawm: a raw-zone pba), pba = the
+ * second copy's pba (tier: dev0 arena; rawm: dev1 shadow), plen = blocks,
+ * ord = the owner-record map key (tier: a free-list ordinal; rawm: the
+ * raw-zone-relative block index). */
+typedef struct wp25_ent {
+    uint64_t key, pba;
+    uint32_t plen, ord;
+} wp25_ent;
 
 
 /* WP10 §4: one deferred text-batching candidate. Lives only in RAM for the
@@ -412,7 +438,55 @@ typedef struct invfs_volume {
         uint64_t tombstones;   /* DELT records appended this volume life */
         uint64_t logical_bytes;/* sum of live file sizes */
     } hot;
+    /* ---- WP25: two-device volumes (DEVT descriptor, invarifs.h) ----
+     * v->io is device 0; v->io2 is device 1 (valid when ndev==2 and
+     * dev0_present... io_open[] tracks which blkio_open calls succeeded
+     * so vmux_close never closes a half-initialized backend. */
+    blkio    io2;
+    char    *path2;          /* dev1 path as opened (diagnostics) */
+    int      io_open[2];
+    int      ndev;           /* 0 while bootstrapping, then 1 or 2 */
+    int      dev0_present;   /* 0: degraded mount, serving from dev1 */
+    int      dev_skip[2];    /* session exclusion after a write/barrier
+                              * failure on that device (next open resyncs) */
+    int      degraded;       /* read-only degraded mount (dev0 absent) */
+    invfs_devt devt;         /* the device table as read/written */
+    int      devt_present;   /* a valid DEVT was read at open */
+    int      resync_pending; /* open found a stale mirror (seq mismatch) */
+    int      resync_winner;  /* device index holding the newest metadata */
+    uint64_t dev0_blocks;    /* dev0 size in blocks (== sb.total_blocks
+                              * when ndev < 2) */
+    uint64_t dev1_blocks;
+    uint64_t meta_end_bytes; /* mirrored metadata span [0, this) */
+    uint64_t mux_pos;        /* virtual cursor behind io_seek/io_read */
+    int      raw_mirror;     /* DEVTF_RAW_MIRROR */
+    int      rawio_logged;   /* one-shot "dev0 raw write failed" log */
+    int      metaread_logged;/* one-shot metadata failover log */
+    /* dev0 tier arena: [arena_start, arena_start+arena_blocks) -- the dev0
+     * tail past the RAW zone. Holds ONLY redundant acceleration copies
+     * (heat promotions): canonical data never lands there, so dev0's loss
+     * costs nothing (WP25 rule: no sole copies on dev0). */
+    uint64_t arena_start, arena_blocks;
+    uint64_t arena_free, arena_cursor, arena_fail_run;
+    /* tier (dev0 acceleration copies) + rawm (RAW mirror) indexes, both
+     * sorted by key (bsearch). key = canonical dev1 pba / raw-zone pba.
+     * Persisted through the hidden owner records "\x01tier0" / "\x01rawm"
+     * (the WP20 seal-owner pattern: ordinary L2P maps keyed by ordinal,
+     * owner AST entry block_id = ordinal, file_offset = key). */
+    struct wp25_ent *tier, *rawm;
+    size_t   tier_n, tier_cap, rawm_n, rawm_cap;
+    int      tier_dirty, rawm_dirty;
+    uint64_t tier_owner, rawm_owner;   /* live owner inode ids (0 = none) */
+    /* last vol_tier_migrate run's counters (the sweep driver prints) */
+    uint64_t tier_promoted, tier_demoted, tier_blocks;
 } invfs_volume;
+
+/* v_of_blk: recover the volume from the embedded dev0 blkio (the io_*
+ * macros' single argument). Must live after the struct definition. */
+static inline struct invfs_volume *v_of_blk(const blkio *io)
+{
+    return (struct invfs_volume *)((char *)io - offsetof(invfs_volume, io));
+}
 
 
 /* WP19 heat thresholds + pad codec (the full rules live with the heat
@@ -789,8 +863,9 @@ uint32_t rsz0_crc(const invfs_rsz0 *rz);
 
 /* The descriptor's CRC covers the embedded superblock; these are the
  * invariants the rest of vol_open relies on, verified before anything is
- * written (a descriptor failing here is ignored, never applied). */
-int rsz0_sane(const invfs_rsz0 *rz);
+ * written (a descriptor failing here is ignored, never applied).
+ * WP25: takes the volume for the device geometry. */
+int rsz0_sane(invfs_volume *v, const invfs_rsz0 *rz);
 
 /* Apply an armed resize from its staging area; commit on success.
  * Returns 0 with v->sb already the new superblock, -1 on failure. */
@@ -1297,5 +1372,63 @@ int pack_container_rebuild(invfs_volume *v, const invfs_codec *pc,
                                   const char *name,
                                   const uint8_t *recipe, size_t recipe_len,
                                   uint8_t *dst, size_t want_len);
+
+/* ---- WP25: two-device volumes ----
+ * (the mux prototypes live with the io_* macros above the struct;
+ *  vol_ndev/vol_degraded/vol_mirror_stale/vol_tier_count/vol_rawm_count
+ *  are public in volume.h) */
+
+/* CRC convention: over the full descriptor with the crc32c field read as
+ * zero (the RDP0 rule). */
+uint32_t devt_crc(const invfs_devt *d);
+
+/* Persist the DEVT descriptor by read-modify-write of block 0 (the RDP0
+ * convention), bumped sync_seq and all. vol_flush calls this LAST on
+ * 2-device volumes: the seq bump is the mirror commit record (a device the
+ * write skipped keeps the older seq -> detected as stale at the next
+ * open). */
+int vol_write_devt(invfs_volume *v);
+
+/* The volume reads with dev0 absent (degraded mount): every metadata
+ * structure comes from the dev1 mirror, all canonical data reads serve
+ * from dev1 (canonical shadow placement + the RAW mirror), ops needing
+ * dev0 fail loudly. State lives in v->degraded (public probes in
+ * volume.h). */
+
+/* Load/rebuild the tier + rawm indexes from their owner records (once per
+ * open, after the inode scan built the indexes). */
+void wp25_index_load(invfs_volume *v);
+
+/* Flush-time owner-record sync for dirty tier/rawm indexes (the maps are
+ * durable first -- jrn_flush ran; the owner record names only durable
+ * ordinals). */
+int  wp25_owner_sync(invfs_volume *v);
+
+/* The vol_free_blocks hook: a REAL free (post-retention) of a raw-zone pba
+ * drops its dev1 mirror; a free of a canonical dev1-shadow pba drops its
+ * dev0 acceleration copy (and frees the copy's arena blocks). */
+void wp25_on_free(invfs_volume *v, uint64_t pba, uint64_t nblocks);
+
+/* fsck -f rebuild hook: after the used-bitmap rebuild, drop index entries
+ * whose canonical key or copy block is no longer allocated (the rebuild
+ * never runs vol_free_blocks, so dangling copies would otherwise survive
+ * with their backing handed out from under them). */
+void wp25_fsck_prune(invfs_volume *v);
+
+/* Read-failover helpers behind seg_read_checked: the dev1 mirror of a
+ * raw-zone segment (0 = none), and the dev0 acceleration copy of a
+ * canonical dev1 segment (0 = none). */
+int  wp25_rawm_lookup(invfs_volume *v, uint64_t raw_pba,
+                      uint64_t *mpba_out, uint64_t *plen_out);
+int  wp25_tier_lookup(invfs_volume *v, uint64_t cpba,
+                      uint64_t *dpba_out, uint64_t *plen_out);
+
+/* vol_tier_migrate (the WP25 rule-9 sweep pass) is public in volume.h. */
+
+/* Mirror one freshly written raw-zone segment onto dev1 (write path of
+ * write_segment_blocks / vol_write_raw). 0 = the mirror landed (or is not
+ * needed), -1 = dev1 failed (the caller latches). */
+int  wp25_rawm_write(invfs_volume *v, uint64_t pba, const uint8_t *buf,
+                     uint64_t phys_blocks);
 
 #endif /* INVFS_VOLUME_INTERNAL_H */

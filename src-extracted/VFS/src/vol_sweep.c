@@ -1353,6 +1353,9 @@ int vol_sweep_pending(invfs_volume *v)
     /* WP19: extract any batch member the reads since the last run made
      * hot, then seal the partial text batch the drain accumulated */
     vol_heat_promote(v);
+    /* WP25 rule 9: the two-device tier migration follows decay+promotion
+     * (self-guards: single-device / degraded / read-only -> no-op) */
+    vol_tier_migrate(v);
     vol_tz_flush(v);
     return done;
 }

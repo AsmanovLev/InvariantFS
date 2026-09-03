@@ -20,6 +20,7 @@ volume.c + volume_internal.h + 18 vol_* modules).
 | vol_textzone.c | 1094 | WP10 text batches (PPMd) + WP14a binary batches (ZSTD+BCJ): accumulators, \x01tzb owner, seal-time decode+memcmp verify, GC |
 | vol_dedupe.c | 280 | WP12(h) offline per-segment dedupe (BLAKE3 over stored segments, L2P remap) |
 | vol_heat.c | 470 | WP19 heat counters (rheat/wheat in L2P pad), decay, hot-member promotion |
+| vol_tier.c | 624 | WP25 two-device second copies: RAW mirror (\x01rawm) + dev0 tier arena (\x01tier0), owner-record persistence, sweep migration pass (vol_tier_migrate) |
 | vol_seal.c | 1410 | WP20 seal: XOR parity stripes + RDP0 descriptor + dirty-reseal; stripe recovery behind seg_read_checked |
 | vol_repair.c | 688 | WP20b layer-2 (RS) repair, invf-fsck --repair engine |
 | vol_rollback.c | 588 | WP21 sweep checkpoint (CKP0) + retention registry (\x01reten), rollback/realize engine |

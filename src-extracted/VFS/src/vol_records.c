@@ -27,6 +27,16 @@ uint64_t vol_create_file(invfs_volume *v, const char *name,
         return 0;
     }
     if (name_too_long(name)) return 0;
+    /* WP25: refuse BEFORE the first segment write on a read-only volume --
+     * on a degraded mount (dev0 absent) the data write would otherwise be
+     * the first thing to fail, with a raw-zone EIO instead of the plain
+     * EROFS reason (vol_mark_dirty stays the engine-level backstop). */
+    if (!vol_write_enabled(v)) {
+        fprintf(stderr, "invarifs: %s: volume is read-only%s -- write "
+                "refused (EROFS)\n", name,
+                v->degraded ? " (DEGRADED mount: device 0 absent)" : "");
+        return 0;
+    }
     uint64_t inode_id = v->next_inode_id++;
     if (getenv("INVFS_DEBUG"))
         printf("[create_file] next_inode was %llu -> using %llu\n",
@@ -1700,11 +1710,11 @@ int vol_compact_recover(invfs_volume *v)
     }
     if (compact_apply(v, cd.stage_pba, cd.s_bytes, 0) != 0)
         return -1;
-    if (blkio_flush(&v->io) != 0)
+    if (vmux_barrier(v, "compaction roll-forward") < 0)
         return -1;
     if (compact_block0_write(v, 0, NULL) != 0)
         return -1;
-    blkio_flush(&v->io);
+    vmux_barrier(v, "compaction roll-forward");
     v->inode_area_pos = area_start + cd.s_bytes;
     v->inode_area_durable = v->inode_area_pos;
     fprintf(stderr, "compact: interrupted pass rolled forward (area now "
@@ -1914,28 +1924,28 @@ int vol_inode_compact(invfs_volume *v, uint64_t *before_out,
                 "area is untouched\n");
         goto out;
     }
-    if (blkio_flush(&v->io) != 0) goto out;
+    if (vmux_barrier(v, "compaction staging") < 0) goto out;
 #ifndef _WIN32
-    if (cmp_abort_at("staged")) { blkio_flush(&v->io); kill(getpid(), SIGKILL); }
+    if (cmp_abort_at("staged")) { vmux_barrier(v, 0); kill(getpid(), SIGKILL); }
 #endif
 
     /* ---- arm: CMP0 + the READONLY latch, one atomic block-0 write ---- */
     if (compact_block0_write(v, 1, &cd) != 0) goto out;
-    if (blkio_flush(&v->io) != 0) goto out;
+    if (vmux_barrier(v, "compaction arm") < 0) goto out;
 #ifndef _WIN32
-    if (cmp_abort_at("armed")) { blkio_flush(&v->io); kill(getpid(), SIGKILL); }
+    if (cmp_abort_at("armed")) { vmux_barrier(v, 0); kill(getpid(), SIGKILL); }
 #endif
 
     /* ---- apply: copy the verified staging over the area + guard ---- */
     if (compact_apply(v, pba, s_bytes, 1) != 0) goto out;
-    if (blkio_flush(&v->io) != 0) goto out;
+    if (vmux_barrier(v, "compaction apply") < 0) goto out;
 #ifndef _WIN32
-    if (cmp_abort_at("copied")) { blkio_flush(&v->io); kill(getpid(), SIGKILL); }
+    if (cmp_abort_at("copied")) { vmux_barrier(v, 0); kill(getpid(), SIGKILL); }
 #endif
 
     /* ---- commit: clear CMP0 + the latch, one atomic block-0 write ---- */
     if (compact_block0_write(v, 0, NULL) != 0) goto out;
-    if (blkio_flush(&v->io) != 0) goto out;
+    if (vmux_barrier(v, "compaction commit") < 0) goto out;
 
     /* ---- in-memory switch ---- */
     new_pos = area_start + s_bytes;

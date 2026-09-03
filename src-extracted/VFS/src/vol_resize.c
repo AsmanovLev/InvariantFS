@@ -25,8 +25,11 @@ uint32_t rsz0_crc(const invfs_rsz0 *rz)
 
 /* The descriptor's CRC covers the embedded superblock; these are the
  * invariants the rest of vol_open relies on, verified before anything is
- * written (a descriptor failing here is ignored, never applied). */
-int rsz0_sane(const invfs_rsz0 *rz)
+ * written (a descriptor failing here is ignored, never applied).
+ * WP25: on a two-device volume the canonical shadow starts on dev1, past
+ * the mirrored metadata span -- the single-device zone contiguity rule
+ * would misread that, so the 2-dev geometry gets its own check. */
+int rsz0_sane(invfs_volume *v, const invfs_rsz0 *rz)
 {
     const invfs_superblock *n = &rz->new_sb;
     uint64_t payload;
@@ -37,8 +40,18 @@ int rsz0_sane(const invfs_rsz0 *rz)
     if (n->block_size != INVFS_BLOCK_SIZE) return 0;
     if (n->metadata_zone_start != 1) return 0;
     if (n->raw_zone_start != 1 + n->metadata_zone_blocks) return 0;
-    if (n->shadow_zone_start != n->raw_zone_start + n->raw_zone_blocks)
-        return 0;
+    if (v->ndev == 2) {
+        /* shadow = dev1 canonical area, above the metadata mirror span;
+         * dev0's layout (metadata + RAW + tier arena) never moves */
+        uint64_t want = v->dev0_blocks + 1 + n->metadata_zone_blocks +
+                        n->raw_zone_blocks;
+        if (n->shadow_zone_start != want) return 0;
+        if (n->raw_zone_start + n->raw_zone_blocks > v->dev0_blocks)
+            return 0;
+    } else {
+        if (n->shadow_zone_start != n->raw_zone_start + n->raw_zone_blocks)
+            return 0;
+    }
     if (n->shadow_zone_start + n->shadow_zone_blocks != n->total_blocks)
         return 0;
     if (n->total_blocks == rz->old_total) return 0;   /* not a resize */
@@ -274,7 +287,7 @@ int vol_rsz0_apply(invfs_volume *v, const invfs_rsz0 *rz)
 
 #ifndef _WIN32
     if (rsz_abort_at("moved")) {
-        blkio_flush(&v->io);
+        vmux_barrier(v, 0);
         kill(getpid(), SIGKILL);
     }
 #endif
@@ -295,10 +308,22 @@ int vol_rsz0_apply(invfs_volume *v, const invfs_rsz0 *rz)
          * its staging/registry blocks are reclaimed by the next sweep's
          * defensive realize -- never freed blindly from under the L2P. */
         memset(blk + INVFS_CKP0_OFF, 0, sizeof(invfs_ckp0));
+        /* WP25: the device table follows the growth (the tail device
+         * absorbed it) -- same block-0 write, so the table and the
+         * superblock never disagree on disk. */
+        if (v->ndev == 2) {
+            invfs_devt dt = v->devt;
+            dt.dev_blocks[1] = nsb->total_blocks - dt.dev_blocks[0];
+            dt.crc32c = 0;
+            dt.crc32c = devt_crc(&dt);
+            memcpy(blk + INVFS_DEVT_OFF, &dt, sizeof dt);
+            v->devt = dt;
+            v->dev1_blocks = dt.dev_blocks[1];
+        }
         if (io_seek(&v->io, 0) != 0 || io_write(&v->io, blk, sizeof blk) != 0)
             goto out;
     }
-    blkio_flush(&v->io);
+    vmux_barrier(v, "resize commit");
     v->sb = *nsb;
     rc = 0;
 out:
