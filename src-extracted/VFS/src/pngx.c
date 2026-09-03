@@ -203,6 +203,8 @@ int pngx_extract(const uint8_t *png, size_t png_len,
     if (inflate_fn(idat, idat_len, &info->filtered, &info->filtered_len) != 0)
         goto fail;
     free(idat);
+    idat = NULL;   /* the fail path below frees idat too (16-bit/interlaced
+                      PNGs land here: filtered_len then mismatches) */
     if (info->filtered_len != (size_t)info->row_bytes * info->height)
         goto fail;
 

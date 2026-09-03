@@ -110,9 +110,13 @@ before building the disk.
   WP16e; needs cjxl/djxl installed); PMP/APE/WavPack are probe-gated
   external tools (packMP3 / mac / wavpack resolved via `$INVFS_TOOLS`,
   `/usr/lib/invfs/tools`, PATH — absent tool = codec deferred, file waits
-  in RAW). The PNG/FLAC **transcode** bodies are still `#ifdef _WIN32`
-  (WP12(c)): on Linux those files take the generic path; reading existing
-  FLACR records works when `mac` is installed.
+  in RAW). PNG (PNGR) is fully wired (WP12c: the builtin lane runs on the
+  POSIX tool layer; needs cjxl/djxl; 8-bit non-interlaced v1 guard, and
+  the IDAT deflate replica must match the grid or the file stays RAW).
+  FLAC (FLACR) is ported but gated on `mac` (Monkey's Audio) + `ffmpeg`:
+  no APE encoder exists in-tree, so absent `mac` the sweep refuses
+  cleanly (GENERIC_GUARD, file stays RAW); reading existing FLACR
+  records works when `mac` is installed.
 - Bit-rot recovery exists only via an explicit seal (`invf-sweep --seal`,
   WP20: XOR stripes + optional RS layer-2); after a sweep the RAW
   originals are gone, so an unsealed volume has no second copy.

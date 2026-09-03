@@ -40,7 +40,7 @@
 set -e
 set -o pipefail
 
-REPO=/home/user/InvariantFS
+REPO="${REPO:-$(cd "$(dirname "$0")/.." && pwd)}"
 B=$REPO/bin
 PACK=$REPO/tools/codecpacks/jxl.codecpack
 WORK=/dev/shm/wp11jxl
