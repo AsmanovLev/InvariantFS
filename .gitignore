@@ -30,3 +30,6 @@ tools/flakey/artifacts/
 video/frames/
 video/*.mp4
 video/filter.txt
+
+# local staging/VM trees (never track)
+var/
