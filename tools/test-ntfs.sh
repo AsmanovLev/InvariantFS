@@ -71,6 +71,7 @@ command -v ntfs-3g   >/dev/null || { echo "FAIL: ntfs-3g not installed"; exit 1;
 sudo -n true         2>/dev/null || { echo "FAIL: passwordless sudo required (loop mounts)"; exit 1; }
 
 echo "== build the pack (cc -O2 -Wall -Wextra -Werror; warning-free required) =="
+mkdir -p "$PACK/bin"   # bin/ is gitignored; the dir may not exist on a fresh tree
 WOUT=$(cc -std=c11 -O2 -Wall -Wextra -Werror -o "$PACK/bin/ntfs" "$PACK/ntfs.c" 2>&1) \
     || { echo "FAIL: pack build failed"; echo "$WOUT"; exit 1; }
 [ -z "$WOUT" ] || { echo "FAIL: pack build not warning-free"; echo "$WOUT"; exit 1; }
