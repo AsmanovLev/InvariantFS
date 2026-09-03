@@ -1,8 +1,13 @@
 # build artifacts
-bin/invf-*
-bin/7zz
+# bin/ holds only make output; the single tracked file is the vendored
+# static busybox consumed by tools/mkinitramfs.sh (not built by this repo).
+bin/*
+!bin/busybox-static
+build/
 *.o
 *.a
+*.d
+*.obj
 
 # volume images (never commit)
 *.img
@@ -25,6 +30,10 @@ INVARIFS-DOCS.md
 
 # WP22b flakey soak failure artifacts (backing images + logs)
 tools/flakey/artifacts/
+
+# codecpack helper binaries: rebuilt from the .c next to them by
+# tools/test-<pack>.sh (cc -std=c11 ...) on every e2e run
+tools/codecpacks/*/bin/
 
 # generated video artifacts (regenerable: video/gen-overview.py + build.sh)
 video/frames/
