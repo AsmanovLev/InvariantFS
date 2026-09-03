@@ -13,6 +13,17 @@
 #   the automatic pass; --compact forces it alone; a read-only volume is
 #   skipped with a message.
 #
+#   Leg A7 (rollback horizon): a second --compact right after a
+#   successful one is a strict no-op ("area already compact"); a
+#   checkpoint armed AFTER a compaction still rolls back bit-exact (its
+#   absolute positions name the compacted area), post-checkpoint writes
+#   vanish, fsck/verify clean.
+#
+#   Leg A8 (seal interplay): compaction under a LIVE seal proceeds (no
+#   CKP0 can exist then -- vol_ckp_begin declines under a seal) and never
+#   touches the \x01parity*-owned blocks: verify --deep reports zero
+#   parity drift and the reseal is "0 stripes updated".
+#
 #   Leg B (--fast): a .tar is NOT decomposed, text is NOT batched -- every
 #   RAW file takes only the generic per-segment recompress; a second
 #   --fast run is a pure no-op; bit-exact, fsck/verify clean.
@@ -42,9 +53,11 @@ IMG_C=wp22e-cm-c.img    # crash: staged
 IMG_D=wp22e-cm-d.img    # crash: armed
 IMG_E=wp22e-cm-e.img    # crash: copying (torn area)
 IMG_F=wp22e-cm-f.img    # crash: copied
+IMG_G=wp22e-cm-g.img    # compact twice + rollback-after-compact
+IMG_H=wp22e-cm-h.img    # compaction under a live seal
 rm -rf "$WORK" && mkdir -p "$WORK/orig" "$WORK/out"
 cd /dev/shm
-rm -f "$IMG_A" "$IMG_B" "$IMG_C" "$IMG_D" "$IMG_E" "$IMG_F"
+rm -f "$IMG_A" "$IMG_B" "$IMG_C" "$IMG_D" "$IMG_E" "$IMG_F" "$IMG_G" "$IMG_H"
 
 fail() { echo "FAIL: $*" >&2; exit 1; }
 
@@ -319,6 +332,12 @@ grep -q "inode compact: skipped (sweep checkpoint" "$WORK/compact-a2.log" \
     || { cat "$WORK/compact-a2.log"; fail "A2: no skip message"; }
 if grep -q "compacted" "$WORK/compact-a2.log"; then fail "A2: compacted under a live checkpoint"; fi
 [ "$(used_of "$IMG_A")" = "$UA1S" ] || fail "A2: area moved"
+# the refusal is total: content + structures untouched, fsck clean
+"$H" verify "$IMG_A" 40 24 || fail "A2: content wrong after the refused compact"
+$B/invf-fsck "$IMG_A" > "$WORK/fsck-a2.log" 2>&1 || true
+grep -q "^OK$" "$WORK/fsck-a2.log" \
+    || { cat "$WORK/fsck-a2.log"; fail "A2: fsck not clean under the live checkpoint"; }
+echo "  volume untouched (content bit-exact, fsck OK)"
 
 echo "== [A3] checkpoint realized -> compaction runs (auto) =="
 $B/invf-sweep "$IMG_A" --realize > "$WORK/realize-a3.log" 2>&1 \
@@ -382,6 +401,104 @@ grep -q "inode compact: skipped (volume is read-only" "$WORK/compact-a6.log" \
 "$H" readonly "$IMG_A" 0 || fail "unlatch A"
 "$H" verify "$IMG_A" 40 12 || fail "A6: content wrong"
 $B/invf-fsck "$IMG_A" | tail -1 | grep -q "^OK$" || fail "A6: fsck not clean"
+
+echo "== [A7] rollback AFTER a compaction: the later checkpoint is bit-exact =="
+INVFS_META_FRAC=8 $B/invf-mkfs "$IMG_G" 0.25 >/dev/null || fail "mkfs G"
+"$H" churn "$IMG_G" 40 24 >/dev/null || fail "churn G"
+# compaction #1: the forced pass alone, no checkpoint anywhere
+$B/invf-sweep "$IMG_G" --compact > "$WORK/compact-g1.log" 2>&1 || fail "G: compact #1 rc"
+grep -q "^inode area compacted: " "$WORK/compact-g1.log" \
+    || { cat "$WORK/compact-g1.log"; fail "G: compact #1 did not run"; }
+UG0=$(used_of "$IMG_G")
+[ "$UG0" = "$(live_of "$IMG_G")" ] || fail "G: compacted area != live set"
+
+echo "== [A7a] compact twice: the second pass is a strict no-op =="
+$B/invf-sweep "$IMG_G" --compact > "$WORK/compact-g2.log" 2>&1 || fail "G: compact #2 rc"
+grep -q "inode compact: nothing to do (area already compact" "$WORK/compact-g2.log" \
+    || { cat "$WORK/compact-g2.log"; fail "G: second compact not a no-op"; }
+if grep -q "^inode area compacted: " "$WORK/compact-g2.log"; then
+    fail "G: second compact rewrote the area"
+fi
+[ "$(used_of "$IMG_G")" = "$UG0" ] || fail "G: second compact moved the area"
+"$H" verify "$IMG_G" 40 24 || fail "G: content wrong after the no-op compact"
+echo "  idempotent: area already compact, content intact"
+
+echo "== [A7b] checkpoint armed post-compaction -> overwrite storm -> rollback =="
+$B/invf-sweep "$IMG_G" > "$WORK/sweep-g.log" 2>&1 \
+    || { cat "$WORK/sweep-g.log"; fail "G: sweep"; }
+grep -q "checkpoint: #1 armed" "$WORK/sweep-g.log" || fail "G: no checkpoint armed"
+grep -q "retained blocks held for rollback" "$WORK/sweep-g.log" \
+    || { cat "$WORK/sweep-g.log"; fail "G: checkpoint did not stay live (nothing retained)"; }
+# the rollback-horizon refusal fires on the auto pass too, post-compaction
+grep -q "inode compact: skipped (sweep checkpoint" "$WORK/sweep-g.log" \
+    || fail "G: auto-compaction not refused under the live checkpoint"
+"$H" ckp "$IMG_G" | grep -q "present=1" || fail "G: CKP0 not live"
+"$H" verify "$IMG_G" 40 24 || fail "G: content wrong post-sweep"
+# post-checkpoint writes: a brand-new file + an overwrite of a record that
+# lives in the COMPACTED area (positions the checkpoint names)
+python3 -c "import os; open('$WORK/orig/g-new.bin','wb').write(os.urandom(50000)); open('$WORK/orig/g-f000.bin','wb').write(os.urandom(60000))"
+$B/invf-cp "$IMG_G" "$WORK/orig/g-new.bin" g-new.bin >/dev/null || fail "G: cp new file"
+$B/invf-cp "$IMG_G" "$WORK/orig/g-f000.bin" f000 >/dev/null || fail "G: overwrite f000"
+$B/invf-cat "$IMG_G" g-new.bin "$WORK/out/g-new.bin" >/dev/null 2>&1 || fail "G: new file unreadable"
+cmp -s "$WORK/orig/g-new.bin" "$WORK/out/g-new.bin" || fail "G: post-checkpoint state not live"
+$B/invf-rollback "$IMG_G" > "$WORK/rb-g.log" 2>&1 \
+    || { cat "$WORK/rb-g.log"; fail "G: rollback failed"; }
+grep -q "rolled back to checkpoint #1" "$WORK/rb-g.log" || fail "G: no rollback line"
+"$H" ckp "$IMG_G" | grep -q "present=0" || fail "G: CKP0 survived the rollback"
+# bit-exact the pre-sweep state: f000's compacted version resurrected, the
+# sweep's transformations and the post-checkpoint writes all gone
+"$H" verify "$IMG_G" 40 24 || fail "G: post-rollback content not bit-exact"
+if $B/invf-ls "$IMG_G" | grep -q "g-new.bin"; then
+    fail "G: post-checkpoint file survived the rollback"
+fi
+$B/invf-fsck "$IMG_G" > "$WORK/fsck-g.log" 2>&1 || true
+grep -q "^OK$" "$WORK/fsck-g.log" || { cat "$WORK/fsck-g.log"; fail "G: fsck not clean"; }
+$B/invf-verify "$IMG_G" --deep > "$WORK/verify-g.log" 2>&1 || true
+grep -q " 0 corrupt," "$WORK/verify-g.log" || fail "G: verify --deep not clean"
+echo "  rollback over a compacted area: bit-exact, post-checkpoint writes vanish"
+
+echo "== [A8] a live seal: compaction proceeds and never touches parity =="
+INVFS_META_FRAC=8 $B/invf-mkfs "$IMG_H" 0.25 >/dev/null || fail "mkfs H"
+"$H" churn "$IMG_H" 40 24 >/dev/null || fail "churn H"
+$B/invf-sweep "$IMG_H" --seal > "$WORK/seal-h1.log" 2>&1 \
+    || { cat "$WORK/seal-h1.log"; fail "H: sweep --seal"; }
+SEAL_LINE=$(grep "^\[seal\] " "$WORK/seal-h1.log")
+STRIPES=$(echo "$SEAL_LINE" | sed 's/^\[seal\] \([0-9]*\) stripes.*/\1/')
+[ "$STRIPES" -ge 1 ] 2>/dev/null || { cat "$WORK/seal-h1.log"; fail "H: nothing sealed"; }
+"$H" ckp "$IMG_H" | grep -q "present=1" || fail "H: first sweep left no checkpoint"
+# clear the checkpoint WITHOUT compacting (the env suppresses the auto
+# pass); under the live seal the next arm declines by construction
+INVFS_NO_COMPACT=1 $B/invf-sweep "$IMG_H" --realize > "$WORK/realize-h.log" 2>&1 \
+    || { cat "$WORK/realize-h.log"; fail "H: realize"; }
+grep -q "checkpoint: previous run realized" "$WORK/realize-h.log" \
+    || fail "H: realize did not happen"
+grep -q "checkpoint: declined (a redundancy seal is live" "$WORK/realize-h.log" \
+    || { cat "$WORK/realize-h.log"; fail "H: ckp arm under a live seal did not decline"; }
+if grep -q "^inode area compacted: " "$WORK/realize-h.log"; then
+    fail "H: INVFS_NO_COMPACT=1 did not suppress the pass"
+fi
+"$H" ckp "$IMG_H" | grep -q "present=0" || fail "H: checkpoint still live"
+UH0=$(used_of "$IMG_H"); LH0=$(live_of "$IMG_H")
+[ $(( (UH0 - LH0) * 10 )) -gt $(( UH0 * 3 )) ] || fail "H: no waste to compact"
+# the forced pass under the live seal (no checkpoint can exist): compacts
+$B/invf-sweep "$IMG_H" --compact > "$WORK/compact-h.log" 2>&1 || fail "H: --compact rc"
+grep -q "^inode area compacted: " "$WORK/compact-h.log" \
+    || { cat "$WORK/compact-h.log"; fail "H: compaction under a live seal did not run"; }
+if grep -q "skipped (sweep checkpoint" "$WORK/compact-h.log"; then
+    fail "H: phantom checkpoint refusal under a seal"
+fi
+# parity provably untouched: deep verify clean, reseal reports zero drift
+$B/invf-verify "$IMG_H" --deep > "$WORK/verify-h.log" 2>&1 || true
+grep -q " 0 corrupt," "$WORK/verify-h.log" || { cat "$WORK/verify-h.log"; fail "H: corrupt files post-compact"; }
+grep -q "parity: $STRIPES sealed stripes, 0 mismatched, 0 missing, 0 extra" \
+    "$WORK/verify-h.log" || { cat "$WORK/verify-h.log"; fail "H: parity drifted"; }
+"$H" verify "$IMG_H" 40 24 || fail "H: content wrong"
+$B/invf-sweep "$IMG_H" --seal > "$WORK/seal-h2.log" 2>&1 || fail "H: reseal rc"
+grep -q "; 0 stripes updated, " "$WORK/seal-h2.log" \
+    || { cat "$WORK/seal-h2.log"; fail "H: compaction moved a sealed stripe"; }
+$B/invf-fsck "$IMG_H" > "$WORK/fsck-h.log" 2>&1 || true
+grep -q "^OK$" "$WORK/fsck-h.log" || { cat "$WORK/fsck-h.log"; fail "H: fsck not clean"; }
+echo "  compacted under the live seal; all $STRIPES parity stripes bit-identical"
 
 echo "== [B] --fast: generic only (no decomposition, no batching) =="
 python3 - <<'PY'
