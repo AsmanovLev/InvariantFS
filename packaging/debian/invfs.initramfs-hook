@@ -1,0 +1,51 @@
+#!/bin/sh
+# initramfs-tools hook for an InvariantFS rootfs (WP-PKG).
+# Installed as /usr/share/initramfs-tools/hooks/invfs.
+#
+# Stages the invf tools, the fuse kernel module and the system codecpack
+# dir into the initramfs. The runtime side lives in
+# /usr/share/initramfs-tools/scripts/local-top/invfs.
+
+PREREQ=""
+
+prereqs()
+{
+	echo "$PREREQ"
+}
+
+case "$1" in
+prereqs)
+	prereqs
+	exit 0
+	;;
+esac
+
+. /usr/share/initramfs-tools/hook-functions
+
+# kernel module for the FUSE daemon
+manual_add_modules fuse
+
+# the daemon + offline tools (fsck/verify rescue in the initramfs shell,
+# sweep + rollback for maintenance boots)
+for tool in invf-fuse invf-sweep invf-fsck invf-verify invf-rollback; do
+	if [ -x /usr/bin/"$tool" ]; then
+		copy_exec /usr/bin/"$tool" /usr/bin
+	fi
+done
+
+# the system codecpack dir, staged wholesale. copy_exec re-copies each
+# compiled helper (<pack>/bin/*) so its shared libraries are resolved;
+# manifests and scripts are plain data (a script whose interpreter is not
+# in the initramfs simply probes absent; the builtin codecs still work).
+if [ -d /usr/lib/invfs/codecpacks ]; then
+	mkdir -p "$DESTDIR/usr/lib/invfs/codecpacks"
+	cp -a /usr/lib/invfs/codecpacks/. "$DESTDIR/usr/lib/invfs/codecpacks/"
+	for helper in /usr/lib/invfs/codecpacks/*.codecpack/bin/*; do
+		[ -f "$helper" ] || continue
+		if ldd "$helper" >/dev/null 2>&1; then
+			copy_exec "$helper" "/usr/lib/invfs/codecpacks/$(basename "$(dirname "$helper")")/bin" >/dev/null
+		fi
+	done
+fi
+
+exit 0

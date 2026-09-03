@@ -1,0 +1,13 @@
+[Unit]
+Description=InvariantFS sweep of mounted volumes
+Documentation=man:invf-sweep(8) man:invf-fuse(8) man:invarifs(7)
+# Sweeping a mounted volume is the daemon's job: the engine is the only
+# safe writer. This unit asks every running invf-fuse daemon to run one
+# manual per-file sweep pass (the same trigger as
+# `setfattr -n user.invfs.sweep -v 1 /` inside a mount). Offline volumes
+# are out of scope here - run invf-sweep(8) on them directly.
+
+[Service]
+Type=oneshot
+# pkill exits 1 when no daemon runs; that is a no-op, not a failure.
+ExecStart=-/usr/bin/pkill -USR1 -x invf-fuse

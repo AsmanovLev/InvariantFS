@@ -1,0 +1,54 @@
+.TH INVF-MKFS 8 "2026-09" "InvariantFS" "System Administration"
+.SH NAME
+invf-mkfs \- create an InvariantFS volume
+.SH SYNOPSIS
+.B invf-mkfs
+.IR image | device
+.RI [ size_gb ]
+.PP
+.B invf-mkfs
+.IR dev0 " " size0_gb " " dev1 " " size1_gb
+.SH DESCRIPTION
+.B invf-mkfs
+formats a file or block device as an InvariantFS volume. InvariantFS is a
+semantic, content-addressed filesystem with a bit-exactness invariant: every
+compression is verified by decompress-and-compare before it is trusted. See
+.BR invarifs (7)
+for the format overview.
+.PP
+With a regular
+.I image
+file, the volume is
+.I size_gb
+GiB (default 4, fractional values accepted); the file is sparse. With a block
+.IR device ,
+the whole device is used unless
+.I size_gb
+caps it; the device is opened exclusively (locked and dismounted) while
+formatting.
+.PP
+The four-argument form creates a two-device volume (WP25):
+.I dev0
+is the fast device (metadata + RAW zone + tier arena) and
+.I dev1
+is the capacity device (metadata mirror + shadow). Single-device images
+created by the two-argument form stay byte-identical to the historic layout.
+.SH ENVIRONMENT
+.TP
+.B INVFS_META_FRAC
+Scale the metadata zone: the default reserves 1/64 of the volume;
+.B INVFS_META_FRAC=16
+reserves 1/16 (recommended for churny workloads).
+.SH EXIT STATUS
+0 on success; 1 on I/O or capacity errors; 2 on usage errors.
+.SH EXAMPLES
+.nf
+invf-mkfs vol.img 10          # 10 GiB sparse image
+invf-mkfs /dev/sdb            # whole partition
+invf-mkfs fast.img 4 slow.img 32   # two-device volume
+.fi
+.SH SEE ALSO
+.BR invf-fuse (8),
+.BR invf-sweep (8),
+.BR invf-verify (8),
+.BR invarifs (7)

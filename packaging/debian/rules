@@ -1,0 +1,24 @@
+#!/usr/bin/make -f
+# debian/rules for invfs (WP-PKG). The build is the root Makefile; the
+# payload layout is packaging/install.sh (single source of truth shared
+# with the RPM/Arch packaging).
+
+%:
+	dh $@
+
+override_dh_auto_build:
+	$(MAKE)
+
+override_dh_auto_install:
+	DESTDIR=$(CURDIR)/debian/tmp PREFIX=/usr \
+	WITH_DRACUT=0 WITH_MKINITCPIO=0 WITH_INITRAMFS_TOOLS=1 \
+	sh packaging/install.sh
+
+# timers stay opt-in: ship them disabled (systemctl enable invfs-sweep.timer)
+override_dh_installsystemd:
+	dh_installsystemd --no-enable
+
+# the fuse daemon must not be stripped of its build-id etc -- leave the
+# default dh_strip behaviour untouched.
+
+.PHONY: build

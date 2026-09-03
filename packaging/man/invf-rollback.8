@@ -1,0 +1,49 @@
+.TH INVF-ROLLBACK 8 "2026-09" "InvariantFS" "System Administration"
+.SH NAME
+invf-rollback \- undo the last InvariantFS sweep from its checkpoint
+.SH SYNOPSIS
+.B invf-rollback
+.I image
+.SH DESCRIPTION
+.B invf-rollback
+rolls a volume back to the checkpoint taken by the last
+.BR invf-sweep (8)
+run (WP21). It restores the checkpoint's staged journal prefix and
+decapitates the append-only inode area at the checkpoint append pointer:
+everything past it - post-sweep records, tombstones, the retention
+registry - vanishes wholesale. The ordinary fsck rebuild machinery then
+reconciles the bitmap and L2P: the pre-sweep record versions resurrect
+with their retained blocks, and the sweep's own allocations are reclaimed
+as orphans. The result is bit-exact the pre-sweep state.
+.PP
+This is an offline tool: the volume must not be mounted. The phases are
+idempotent; a killed run simply continues when re-run.
+.PP
+The rollback window is always the
+.I last
+sweep: a new sweep realizes (frees) the previous checkpoint after arming
+its own. Use
+.BR "invf-sweep \-\-realize"
+to accept a sweep without running a new one.
+.SH EXIT STATUS
+.TP
+0
+Rolled back.
+.TP
+1
+No checkpoint: nothing to roll back.
+.TP
+2
+Refused: a live redundancy seal would be invalidated. Free it first with
+.BR "invf-sweep \-\-free\-redundant" .
+.TP
+3
+The checkpoint descriptor or its journal staging failed verification; the
+post-sweep state is untouched.
+.TP
+5
+I/O or internal error; re-run.
+.SH SEE ALSO
+.BR invf-sweep (8),
+.BR invf-fsck (8),
+.BR invarifs (7)

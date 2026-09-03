@@ -1,0 +1,22 @@
+Source: invfs
+Section: admin
+Priority: optional
+Maintainer: InvariantFS Developers <invfs@localhost>
+Build-Depends: debhelper-compat (= 13), gcc, make, pkg-config, libfuse3-dev, zlib1g-dev, libzstd1
+Standards-Version: 4.6.2
+Rules-Requires-Root: no
+Homepage: https://localhost/invfs
+
+Package: invfs
+Architecture: amd64
+Depends: ${shlibs:Depends}, ${misc:Depends}, fuse3
+Recommends: libjxl-tools
+Description: semantic content-addressed filesystem (bit-exact invariant)
+ InvariantFS is a FUSE filesystem where every compression is verified by
+ decompress-and-compare before it is trusted. Containers (ZIP/TAR, disk
+ images) are decomposed into member inodes that flow through the whole
+ codec pipeline recursively; transcodes happen only where bit-exactness
+ is proven per file. Ships the CLI tools, the FUSE daemon, the system
+ codecpacks, systemd sweep/verify timers (disabled by default) and an
+ initramfs-tools hook for booting from an InvariantFS root
+ (rootfstype=invfs).

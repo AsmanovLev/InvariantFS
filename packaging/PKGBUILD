@@ -1,0 +1,36 @@
+# PKGBUILD for InvariantFS (WP-PKG).
+# Builds the current checkout (this file lives in packaging/ inside the
+# repo); run `makepkg -si` from anywhere with a readable repo tree.
+pkgname=invfs
+pkgver=0.1.0
+pkgrel=1
+pkgdesc="Semantic content-addressed filesystem with a bit-exactness invariant"
+arch=('x86_64')
+url="https://localhost/invfs"
+license=('GPL2')
+depends=('fuse3' 'zstd' 'zlib' 'glibc')
+makedepends=('gcc' 'make' 'pkgconf')
+optdepends=(
+    'libjxl: JPEG -> lossless JXL codecpack (cjxl/djxl)'
+    'p7zip: 7z containerpack (7zz)'
+    'python: script-based codecpacks (raw_image, splt_test)'
+)
+source=()
+sha256sums=()
+
+# the repo root is two levels up from packaging/PKGBUILD
+_repo_root() {
+    cd "$(dirname "$startdir/PKGBUILD")/.." && pwd
+}
+
+build() {
+    cd "$(_repo_root)"
+    make
+}
+
+package() {
+    cd "$(_repo_root)"
+    DESTDIR="$pkgdir" PREFIX=/usr \
+        WITH_SYSTEMD=1 WITH_DRACUT=0 WITH_MKINITCPIO=1 WITH_INITRAMFS_TOOLS=0 \
+        sh packaging/install.sh
+}

@@ -1,0 +1,9 @@
+[Unit]
+Description=Daily InvariantFS sweep trigger (mounted volumes)
+
+[Timer]
+OnCalendar=daily
+Persistent=true
+
+[Install]
+WantedBy=timers.target
