@@ -118,6 +118,7 @@ e2e: all
 	bash tools/run-e2e.sh tools/test-vdi.sh
 	bash tools/run-e2e.sh tools/test-resize.sh
 	bash tools/run-e2e.sh tools/test-rollback.sh
+	bash tools/run-e2e.sh tools/test-rocp.sh
 	bash tools/run-e2e.sh tools/test-p7z.sh
 	bash tools/run-e2e.sh tools/test-qcow2.sh
 	bash tools/run-e2e.sh tools/test-fuzz.sh

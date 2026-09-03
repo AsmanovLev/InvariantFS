@@ -15,6 +15,25 @@ typedef struct invfs_volume invfs_volume;
 #define INVFS_MAX_NAME 255
 
 invfs_volume *vol_open(const char *path, int *err);
+/* ---- WP24-lite: read-only time-travel view at the live sweep checkpoint
+ * (the non-destructive twin of vol_rollback). Opens the volume normally,
+ * then applies a VIRTUAL CUT: the L2P journal is replayed from the
+ * checkpoint's staged prefix (never the live post-sweep slots) and the
+ * inode-area scan stops at the checkpoint's append pointer -- the mounted
+ * view is exactly the sweep-start state, with the WP22d consistent-cut
+ * machinery hiding anything the cut cannot prove. The retention registry
+ * (live exactly while CKP0 is) keeps the post-checkpoint-freed blocks the
+ * cut references readable; the present is never written (the handle is
+ * VOLF_READONLY + every mutation path refuses at vol_mark_dirty;
+ * vol_flush/vol_sync/vol_close persist nothing).
+ * ckpt_seq == 0 names the live checkpoint (K=1: the only one that exists);
+ * a nonzero ckpt_seq must equal it.
+ * err: same codes as vol_open, plus -11 = no live checkpoint / sequence
+ * mismatch / the checkpoint's staging failed verification (the present is
+ * untouched). Returns NULL on failure. */
+invfs_volume *vol_open_at(const char *path, uint64_t ckpt_seq, int *err);
+/* 1 = this handle is a time-travel view (all write paths refuse) */
+int  vol_time_travel(const invfs_volume *v);
 void vol_close(invfs_volume *v);
 int  vol_flush(invfs_volume *v);
 /* vol_flush + a real storage barrier (fsync on image files, no-op-ish on

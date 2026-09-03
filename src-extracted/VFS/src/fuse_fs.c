@@ -33,6 +33,7 @@ static volatile int g_shutdown = 0;
 static volatile sig_atomic_t g_sweep_now = 0;
 static char g_img_path[512] = "?";
 static volatile int g_sweep_busy = 0;
+static int g_tt = 0;            /* WP24-lite: time-travel (at_checkpoint) mount */
 static double g_attr_t = 1.0;   /* -o attr_t= override; 0 = bench-honest */
 static void invf_sweep_worker(void);   /* defined below sweep thread */
 static void table_rebuild_locked(void);   /* fwd (defined below) */
@@ -114,7 +115,7 @@ static void build_file_table(void)
     const invfs_superblock *sb = vol_sb(g_vol);
     uint64_t bm = (sb->total_blocks / 8 + INVFS_BLOCK_SIZE - 1) / INVFS_BLOCK_SIZE;
     uint64_t p = (sb->metadata_zone_start + bm + INVFS_JOURNAL_BLOCKS) * INVFS_BLOCK_SIZE;
-    uint64_t end = (sb->metadata_zone_start + sb->metadata_zone_blocks) * INVFS_BLOCK_SIZE;
+    uint64_t end = vol_inode_area_pos(g_vol);
     fs_entry *recs = NULL;
     uint64_t nrecs = 0, caprecs = 0;
     /* tombstone kill list: (position-or-0, inode-id) pairs */
@@ -123,7 +124,12 @@ static void build_file_table(void)
 
     g_entries = NULL; g_nentries = 0; g_cap = 0;
 
-    /* pass 1: collect raw records */
+    /* pass 1: collect raw records. The walk stops at the engine's
+     * CRC-validated area end (vol_inode_area_pos) instead of the zone
+     * end: identical on an ordinary mount (the first non-record stops the
+     * walk anyway) and REQUIRED on a time-travel mount (WP24-lite), where
+     * the post-checkpoint records physically follow the cut but must stay
+     * invisible -- the checkpoint's consistent view ends at the cut. */
     while (p + 8 <= end) {
         uint32_t magic, rec_len;
         uint64_t inode_id, file_size, ctime;
@@ -555,6 +561,7 @@ static int invf_mkdir(const char *path, mode_t mode)
 static int invf_rmdir(const char *path)
 {
     int rc;
+    if (g_tt) return -EROFS;   /* WP24-lite: time-travel views never mutate */
     pthread_mutex_lock(&g_io_lock);
     rc = vol_rmdir(g_vol, path + 1);
     if (rc == 0) {
@@ -1074,6 +1081,7 @@ static int invf_rename(const char *from, const char *to, unsigned int flags)
     int rc;
     if (flags)
         return -EINVAL;   /* RENAME_NOREPLACE / RENAME_EXCHANGE unsupported */
+    if (g_tt) return -EROFS;   /* WP24-lite: time-travel views never mutate */
     pthread_mutex_lock(&g_io_lock);
     if (!g_vol) { pthread_mutex_unlock(&g_io_lock); return -EIO; }
     {
@@ -1555,6 +1563,11 @@ static void invf_destroy(void *private_data)
 static int invf_unlink(const char *path)
 {
     int rc;
+    /* WP24-lite: a delete is deliberately allowed under the ordinary
+     * read-only space latch (H5, it is the way out), but a time-travel
+     * view is not the present -- the tombstone would land on the live
+     * volume's post-checkpoint records. Refuse like every other write. */
+    if (g_tt) return -EROFS;
     /* H5: deliberately NOT gated on vol_write_enabled: a delete never
      * allocates data blocks, and it is the way OUT of the ENOSPC
      * READONLY latch (the engine frees the blocks, vol_free_blocks
@@ -1721,6 +1734,10 @@ int main(int argc, char *argv[])
      * unknown options make fuse_new reject the mount. */
     uint64_t arc_limit = 0, dec_mem_limit = 0;
     int have_arc = 0, have_dec = 0;
+    /* WP24-lite: -o at_checkpoint[=<seq>] mounts the read-only view at the
+     * live sweep checkpoint (no arg = the live one; K=1 contract). */
+    uint64_t ckpt_seq = 0;
+    int at_ckpt = 0;
     if (opts) {
         static char fbuf[1024];
         char tmp[1024];
@@ -1737,6 +1754,17 @@ int main(int argc, char *argv[])
                 if (parse_size_opt(tok + 14, &dec_mem_limit)) have_dec = 1;
                 else fprintf(stderr, "invf: bad -o dec_mem_limit=%s; ignored\n",
                              tok + 14);
+            } else if (strcmp(tok, "at_checkpoint") == 0) {
+                at_ckpt = 1;
+            } else if (strncmp(tok, "at_checkpoint=", 14) == 0) {
+                char *ep = NULL;
+                unsigned long long sq = strtoull(tok + 14, &ep, 10);
+                if (ep != tok + 14 && *ep == '\0' && sq > 0) {
+                    at_ckpt = 1;
+                    ckpt_seq = (uint64_t)sq;
+                } else {
+                    fprintf(stderr, "invf: bad -o %s; ignored\n", tok);
+                }
             } else if (strncmp(tok, "attr_t=", 7) == 0) {
                 /* attr/entry cache TTL in seconds (WP17); 0 restores the
                  * old bench-honest mode where every stat hits the daemon */
@@ -1758,19 +1786,35 @@ int main(int argc, char *argv[])
         opts = fl ? fbuf : NULL;
     }
 
-    g_vol = vol_open(img, &err);
+    if (at_ckpt) {
+        g_vol = vol_open_at(img, ckpt_seq, &err);
+        if (!g_vol && err == -11)
+            fprintf(stderr, "invf: %s: cannot mount at_checkpoint: no live "
+                    "sweep checkpoint (or its retention registry is gone -- "
+                    "already realized?); run invf-sweep first\n", img);
+    } else {
+        g_vol = vol_open(img, &err);
+    }
     if (!g_vol) {
         fprintf(stderr, "cannot open volume %s (err %d)\n", img, err);
         return 1;
     }
+    g_tt = vol_time_travel(g_vol);
+    if (g_tt)
+        fprintf(stderr, "invf: time-travel mount (read-only): all writes "
+                "will fail with EROFS; the live volume is untouched\n");
     if (have_arc) vol_set_arc_budget(g_vol, arc_limit);
     if (have_dec) vol_set_dec_mem_limit(g_vol, dec_mem_limit);
     snprintf(g_img_path, sizeof g_img_path, "%s", img);
     setvbuf(stderr, NULL, _IONBF, 0);
     build_file_table();
-    fprintf(stderr, "InvariantFS mounted: %d files\n", g_nentries);
+    fprintf(stderr, "InvariantFS mounted: %d files%s\n", g_nentries,
+            g_tt ? " (checkpoint view)" : "");
 
-    /* background on-demand sweep thread (drains pending list when idle) */
+    /* background on-demand sweep thread (drains pending list when idle);
+     * pointless on a time-travel view (nothing is ever pending and every
+     * mutation is refused) -- do not even start it */
+    if (!g_tt)
     {
         pthread_t tid;
         if (pthread_create(&tid, NULL, fuse_sweep_thread, NULL) == 0)
