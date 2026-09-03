@@ -4,9 +4,12 @@
 #
 # Leg 1 (heat + promotion):
 #   mkfs -> 30 texts + 2 blobs -> sweep (texts batched) -> read 3 texts 20x
-#   and one 4x via invf-cat loops -> meta_probe heat (persistence across
-#   unmount/remount) -> sweep -> hot members promoted to GENERIC{ZSTD},
-#   bit-exact; unread stay TEXT; idle sweep halves rheat (decay).
+#   and one 4x via l2ptest pump loops (one read-touch per session, persisted
+#   by that session's forced compaction -- WP-L2Q: read heat is RAM-only on
+#   the journal hot path and folds into the compaction image) -> meta_probe
+#   heat (persistence across unmount/remount) -> sweep -> hot members
+#   promoted to GENERIC{ZSTD}, bit-exact; unread stay TEXT; idle sweep
+#   halves rheat (decay).
 # Leg 2 (write-heat + INVFS_HEAT_INIT):
 #   rewrite a file 3x -> wheat carries (meta_probe) -> sweep skips the heavy
 #   codecs for it (generic floor), control file still batches; HEAT_INIT
@@ -76,14 +79,20 @@ done
 echo "all 30 texts batched (class=7 algo=2)"
 
 echo "== leg 1: read hot subset (t00-t02 x20, t03 x4) =="
+# WP-L2Q: a read touch is RAM-only in the session (no per-read journal
+# refresh); heat persists at sweep granularity, folded into the compaction
+# image. The pump stands in for "a sweep-cadence session observed the
+# reads": one full read per process (the real read path, one touch per
+# segment via heat_seen), then a forced compaction carries the pads.
 for i in $(seq 20); do
-    for f in t00.txt t01.txt t02.txt; do
-        $B/invf-cat "$IMG" "$f" >/dev/null
-    done
+    INVFS_JRN_FORCE_COMPACT=1 $B/invf-l2ptest pump "$IMG" t00.txt t01.txt t02.txt
 done
-for i in $(seq 4); do $B/invf-cat "$IMG" t03.txt >/dev/null; done
-# heat persisted across the 64 unmount/remount cycles above (each invf-cat
-# is a full open+close), and a probe run does not itself accrue heat
+for i in $(seq 4); do
+    INVFS_JRN_FORCE_COMPACT=1 $B/invf-l2ptest pump "$IMG" t03.txt
+done
+# heat persisted across the 24 unmount/remount cycles above (each pump is
+# a full open+read+compact+close), and a probe run does not itself accrue
+# heat
 R00=$(heat_max "$IMG" t00.txt rheat)
 R00B=$(heat_max "$IMG" t00.txt rheat)
 R03=$(heat_max "$IMG" t03.txt rheat)

@@ -605,6 +605,7 @@ int ckp_stage_replay(invfs_volume *v)
     v->jops_n = 0;
     v->j_heat_n = 0;
     v->j_heat_all = 0;
+    l2p_idx_reset(v);   /* WP-L2Q: the staged replay below re-seeds it */
 
     if (stage_len) {
         buf = (uint8_t *)malloc((size_t)stage_len);
