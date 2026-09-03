@@ -34,7 +34,11 @@ static volatile sig_atomic_t g_sweep_now = 0;
 static char g_img_path[512] = "?";
 static volatile int g_sweep_busy = 0;
 static double g_attr_t = 1.0;   /* -o attr_t= override; 0 = bench-honest */
-static void invf_sweep_worker(void);   /* defined below sweep thread */
+/* WP26: RAW-zone fill watermark (percent, 0 = lazy default). Set by
+ * -o raw_watermark=<pct> or INVFS_RAW_WATERMARK; when the RAW fill
+ * exceeds it the background sweep thread kicks an early sweep. */
+static int g_raw_watermark = 0;
+static void invf_sweep_worker(int arm_ckp);   /* defined below sweep thread */
 static void table_rebuild_locked(void);   /* fwd (defined below) */
 
 /* Mutations only mark the name table stale; the next consumer pays for one
@@ -893,26 +897,63 @@ static void on_sweep_signal(int sig)
  * locking (system stays responsive). Progress to stderr (= console in
  * the guest init context). Trigger: kill -USR1 $(pidof invf-fuse) or
  * /usr/local/bin/invf-sweep. INVFS_SWEEP_INTERVAL=<sec> additionally
- * enables the periodic mode. */
-static void invf_sweep_worker(void)
+ * enables the periodic mode.
+ *
+ * arm_ckp (WP26, watermark-triggered passes only): bracket the walk with
+ * the WP21 checkpoint machinery, same shape as the offline invf-sweep --
+ * vol_ckp_begin BEFORE the walk (a previous pass's checkpoint is
+ * auto-realized after the new arm, so the rollback window is always the
+ * LAST sweep) and vol_ckp_end after it (the retention registry holds the
+ * retired blocks for invf-rollback). A pass that retires nothing arms
+ * nothing (vol_ckp_end disarms an identity). The SIGUSR1 path passes 0
+ * and keeps its historic uncheckpointed behavior. */
+static void invf_sweep_worker(int arm_ckp)
 {
     uint64_t *ids = NULL;
     size_t max = 300000, n, i;
     long saved = 0, swept = 0, skipped = 0, failed = 0;
+    int armed = 0;
 
     ids = malloc(max * sizeof(*ids));
     if (!ids) return;
     pthread_mutex_lock(&g_io_lock);
     if (!g_vol) { pthread_mutex_unlock(&g_io_lock); free(ids); return; }
+    if (arm_ckp) {
+        armed = vol_ckp_begin(g_vol);   /* 1 armed, 0 declined, -1 error */
+        if (armed < 0) {
+            fprintf(stderr, "[watermark] checkpoint arm failed; sweeping "
+                            "without one\n");
+            armed = 0;
+        }
+        vol_heat_sweep_begin(g_vol);   /* one decay pass per sweep run */
+    }
     n = vol_collect_sweepables(g_vol, ids, max);
-    fprintf(stderr, "[sweep] manual pass started: %zu files\n", n);
+    fprintf(stderr, "[sweep] %s pass started: %zu files\n",
+            arm_ckp ? "watermark" : "manual", n);
     for (i = 0; i < n; i++) {
         int rc;
         if (g_shutdown || !g_vol) break;
-        rc = vol_sweep_file(g_vol, ids[i]);
-        if (rc == 0)      { swept++;   }
-        else if (rc == 1) { skipped++; }
-        else              { failed++; }
+        if (arm_ckp) {
+            /* the daemon's own driver (same as the pending drain):
+             * policy/pack-aware -- the plain vol_sweep_file floor defers
+             * everything on small images (WP16b margin) and would never
+             * relieve the watermark's pressure */
+            char nm[256];
+            if (vol_sweep_name_of(g_vol, ids[i], nm, sizeof nm)) {
+                rc = vol_sweep_one(g_vol, ids[i], nm);
+                /* one rc: 0 = nothing to do, >0 = swept/deferred, <0 = err */
+                if (rc > 0)       { swept++;   }
+                else if (rc == 0) { skipped++; }
+                else              { failed++; }
+            } else {
+                skipped++;   /* deleted between collect and walk */
+            }
+        } else {
+            rc = vol_sweep_file(g_vol, ids[i]);
+            if (rc == 0)      { swept++;   }
+            else if (rc == 1) { skipped++; }
+            else              { failed++; }
+        }
         if ((i+1) % 250 == 0)
             fprintf(stderr, "[sweep] %zu/%zu done=%ld skip=%ld fail=%ld\n",
                     i+1, n, swept, skipped, failed);
@@ -920,7 +961,22 @@ static void invf_sweep_worker(void)
         usleep(500);                       /* let the system breathe */
         pthread_mutex_lock(&g_io_lock);
     }
-    if (g_vol) vol_flush(g_vol);
+    if (g_vol) {
+        if (arm_ckp)
+            vol_heat_promote(g_vol);   /* extract read-hot batch members */
+        vol_tz_flush(g_vol);   /* seal anything the walk deferred */
+        if (armed) {
+            uint64_t rr = 0, rb = 0;
+            if (vol_ckp_end(g_vol, &rr, &rb) != 0)
+                fprintf(stderr, "[watermark] checkpoint registry write "
+                                "failed (the checkpoint itself is intact)\n");
+            else if (rb)
+                fprintf(stderr, "[watermark] checkpoint: %llu retained "
+                                "blocks held for rollback (%llu ranges)\n",
+                        (unsigned long long)rb, (unsigned long long)rr);
+        }
+        vol_flush(g_vol);
+    }
     pthread_mutex_unlock(&g_io_lock);
     fprintf(stderr, "[sweep] DONE files=%zu swept=%ld skipped=%ld failed=%ld\n",
             n, swept, skipped, failed);
@@ -934,6 +990,31 @@ static void *fuse_sweep_thread(void *arg)
     const char *iv = getenv("INVFS_SWEEP_INTERVAL");
     int interval = iv ? atoi(iv) : 0;
     int tick = 0;
+    /* WP26: RAW fill (blocks) at the end of the last watermark-kicked
+     * pass; the next kick waits for the fill to rise above it. While a
+     * pass's checkpoint is live its retention holds the retired blocks,
+     * so the fill cannot drop until a later pass's realize-after-arm --
+     * without this floor the daemon would chain passes (each
+     * auto-realizing and finally disarming the previous checkpoint) and
+     * destroy the rollback window it just created. 0 = no kick yet (or
+     * the fill dropped below the mark: re-armed). */
+    uint64_t wm_floor = 0;
+    /* A checkpoint left live by a previous mount (watermark pass or CLI
+     * sweep) still holds its retired blocks, so the fill reads high from
+     * the start. Kicking on that stale reading would run a no-op walk
+     * whose arm auto-realizes the old checkpoint and whose end disarms
+     * the new one -- the rollback window would evaporate on a plain
+     * remount. Seed the floor with the current fill instead: the next
+     * pass needs genuinely NEW pressure. */
+    if (g_raw_watermark > 0) {
+        pthread_mutex_lock(&g_io_lock);
+        if (g_vol && vol_ckp_armed(g_vol)) {
+            uint64_t rf = 0, rt = 0;
+            vol_zone_free(g_vol, &rf, &rt, NULL, NULL);
+            if (rt) wm_floor = rt - rf;
+        }
+        pthread_mutex_unlock(&g_io_lock);
+    }
     for (;;) {
         sleep(1);
         if (g_shutdown) break;
@@ -941,7 +1022,7 @@ static void *fuse_sweep_thread(void *arg)
             g_sweep_now = 0;
             if (!g_sweep_busy) {
                 g_sweep_busy = 1;
-                invf_sweep_worker();
+                invf_sweep_worker(0);
                 g_sweep_busy = 0;
                 continue;
             }
@@ -967,6 +1048,41 @@ static void *fuse_sweep_thread(void *arg)
             }
         }
         pthread_mutex_unlock(&g_io_lock);
+
+        /* WP26: watermark-triggered early sweep -- the first rung of the
+         * pressure ladder (the WP23 write path adapts effort; this rung
+         * reclaims). Checked after each drain pass: RAW fill above
+         * raw_watermark% kicks a checkpoint-armed full sweep pass. The
+         * kick rearms only on RISING fill (a new high above the last
+         * pass's exit fill); it never chains passes by itself, so the
+         * last pass's checkpoint survives as the rollback window. Default
+         * (no raw_watermark): lazy, this block is inert. */
+        if (g_raw_watermark > 0 && !g_shutdown && !g_sweep_busy) {
+            uint64_t rf = 0, rt = 0, fill = 0, after = 0;
+            pthread_mutex_lock(&g_io_lock);
+            if (g_vol) vol_zone_free(g_vol, &rf, &rt, NULL, NULL);
+            pthread_mutex_unlock(&g_io_lock);
+            if (rt) fill = rt - rf;
+            if (rt && fill * 100 <= (uint64_t)g_raw_watermark * rt) {
+                wm_floor = 0;               /* below the mark: re-arm */
+            } else if (rt && fill > wm_floor) {
+                fprintf(stderr, "[watermark] RAW fill %llu/%llu over %d%%: "
+                                "kicking a sweep pass\n",
+                        (unsigned long long)fill, (unsigned long long)rt,
+                        g_raw_watermark);
+                g_sweep_busy = 1;
+                invf_sweep_worker(1);
+                g_sweep_busy = 0;
+                pthread_mutex_lock(&g_io_lock);
+                if (g_vol) {
+                    rf = rt = 0;
+                    vol_zone_free(g_vol, &rf, &rt, NULL, NULL);
+                    if (rt) after = rt - rf;
+                }
+                pthread_mutex_unlock(&g_io_lock);
+                wm_floor = after;
+            }
+        }
     }
     return NULL;
 }
@@ -1746,6 +1862,17 @@ int main(int argc, char *argv[])
                     g_attr_t = v;
                 else
                     fprintf(stderr, "invf: bad -o attr_t=%s; ignored\n", tok + 7);
+            } else if (strncmp(tok, "raw_watermark=", 14) == 0) {
+                /* WP26: RAW-zone fill percent that makes the background
+                 * daemon kick an early (checkpoint-armed) sweep; 0 = the
+                 * lazy default */
+                char *ep = NULL;
+                long wv = strtol(tok + 14, &ep, 10);
+                if (ep != tok + 14 && *ep == '\0' && wv >= 0 && wv <= 99)
+                    g_raw_watermark = (int)wv;
+                else
+                    fprintf(stderr, "invf: bad -o raw_watermark=%s; ignored\n",
+                            tok + 14);
             } else {
                 size_t tl = strlen(tok);
                 if (fl + tl + 2 < sizeof fbuf) {
@@ -1765,6 +1892,23 @@ int main(int argc, char *argv[])
     }
     if (have_arc) vol_set_arc_budget(g_vol, arc_limit);
     if (have_dec) vol_set_dec_mem_limit(g_vol, dec_mem_limit);
+    /* WP26 env fallback (CLI sessions that cannot pass -o): the mount
+     * option wins when both are given */
+    if (!g_raw_watermark) {
+        const char *wm = getenv("INVFS_RAW_WATERMARK");
+        if (wm && *wm) {
+            char *ep = NULL;
+            long wv = strtol(wm, &ep, 10);
+            if (ep != wm && *ep == '\0' && wv > 0 && wv <= 99)
+                g_raw_watermark = (int)wv;
+            else
+                fprintf(stderr, "invf: bad INVFS_RAW_WATERMARK=%s; ignored\n",
+                        wm);
+        }
+    }
+    if (g_raw_watermark)
+        fprintf(stderr, "invf: RAW watermark sweep at >%d%% fill\n",
+                g_raw_watermark);
     snprintf(g_img_path, sizeof g_img_path, "%s", img);
     setvbuf(stderr, NULL, _IONBF, 0);
     build_file_table();

@@ -1294,6 +1294,35 @@ int vol_sweep_file_generic(invfs_volume *v, uint64_t inode_id)
 }
 
 
+/* Resolve the current name of an inode id for a sweep driver that has
+ * only the id (vol_sweep_one wants the name: class policy, pack sniffing
+ * and the live-session guard all key on it). 1 = found, 0 = deleted or
+ * unreadable. Same scan the pending drain has always used. */
+int vol_sweep_name_of(invfs_volume *v, uint64_t id, char *nm, size_t cap)
+{
+    uint64_t pos, end;
+    invfs_inode_rec rh;
+
+    if (!v || !nm || cap == 0) return 0;
+    pos = v->inode_area_start * INVFS_BLOCK_SIZE;
+    end = v->inode_area_pos;
+    while (pos + sizeof(rh) <= end) {
+        if (vol_read_raw(v, pos, &rh, sizeof(rh)) != 0) break;
+        if (rh.magic != INODE_REC_MAGIC) {
+            if (rh.magic == TOMBSTONE_MAGIC) { pos += rh.rec_len + 4; continue; }
+            break;
+        }
+        if (rh.inode_id == id && rh.name_len < cap) {
+            memcpy(nm, rh.name, rh.name_len);
+            nm[rh.name_len] = 0;
+            return 1;
+        }
+        pos += rh.rec_len + 4;
+    }
+    return 0;
+}
+
+
 /* drain the pending list (daemon background): process each pending inode
    and unmark it. Called when the daemon holds the volume exclusively
    (no open handles). Returns number of processed inodes. */
@@ -1313,26 +1342,7 @@ int vol_sweep_pending(invfs_volume *v)
         uint64_t id = v->pending[0];
         /* find the current name for this inode (may have been deleted) */
         char nm[256];
-        int found = 0;
-        {
-            uint64_t pos = v->inode_area_start * INVFS_BLOCK_SIZE;
-            uint64_t end = v->inode_area_pos;
-            invfs_inode_rec rh;
-            while (pos + sizeof(rh) <= end) {
-                if (vol_read_raw(v, pos, &rh, sizeof(rh)) != 0) break;
-                if (rh.magic != INODE_REC_MAGIC) {
-                    if (rh.magic == TOMBSTONE_MAGIC) { pos += rh.rec_len + 4; continue; }
-                    break;
-                }
-                if (rh.inode_id == id && rh.name_len < sizeof nm) {
-                    memcpy(nm, rh.name, rh.name_len);
-                    nm[rh.name_len] = 0;
-                    found = 1;
-                    break;
-                }
-                pos += rh.rec_len + 4;
-            }
-        }
+        int found = vol_sweep_name_of(v, id, nm, sizeof nm);
         vol_unmark_pending(v, id);
         if (found) {
             int rc = vol_sweep_one(v, id, nm);
