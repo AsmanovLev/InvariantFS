@@ -36,7 +36,7 @@
 set -e
 set -o pipefail
 
-REPO=/home/user/InvariantFS
+REPO="${REPO:-$(cd "$(dirname "$0")/.." && pwd)}"   # override with the worktree when testing a branch
 B=$REPO/bin
 WORK=/dev/shm/wp22a
 IMG_A=wp22a-a.img     # leg A: v2 header

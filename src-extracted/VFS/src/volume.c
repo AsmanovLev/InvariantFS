@@ -517,6 +517,8 @@ int l2p_apply(invfs_volume *v, const invfs_l2p_entry *e)
             if (!v->l2p) return -1;
         }
         v->l2p[v->l2p_count++] = *e;
+        /* WP-L2Q: replay builds the session index incrementally */
+        l2p_idx_put(v, e->inode, e->lba, (uint64_t)(v->l2p_count - 1));
     } else if (e->type == INVFS_JRN_UNMAP) {
         l2p_remove_mem(v, e->inode, e->lba);
     }
@@ -643,6 +645,7 @@ int l2p_replay(invfs_volume *v)
     v->jops_n = 0;
     v->j_heat_n = 0;
     v->j_heat_all = 0;
+    l2p_idx_reset(v);   /* WP-L2Q: the replay below re-seeds the index */
     ok[0] = jrn_read_hdr(v, 0, &h[0]) == 0;
     ok[1] = jrn_read_hdr(v, 1, &h[1]) == 0;
     if (ok[0] && ok[1]) {
@@ -665,6 +668,7 @@ int l2p_replay(invfs_volume *v)
             fprintf(stderr, "l2p_replay: slot %d image torn; falling back "
                     "to slot %d\n", pick, other);
             v->l2p_count = 0;
+            l2p_idx_reset(v);
             rc = l2p_replay_slot(v, (uint32_t)other, &h[other]);
         }
         if (rc > 0) {
@@ -679,6 +683,7 @@ int l2p_replay(invfs_volume *v)
              * entries past the slot-0 header and lands in the loud
              * both-torn branch below. */
             v->l2p_count = 0;
+            l2p_idx_reset(v);
             v->j_slotted = 0;
             if (l2p_replay_legacy(v) != 0) return -1;
             if (v->sb.pad2 == INVFS_JSEL_LEGACY || v->l2p_count > 0) {
@@ -1868,6 +1873,7 @@ fail:
     free(v->jops);
     free(v->j_heat);
     free(v->l2p);
+    free(v->l2p_idx);
     free(v->tier);
     free(v->rawm);
     free(v->path2);
@@ -1946,6 +1952,7 @@ void vol_close(invfs_volume *v)
     free(v->bz);
     free(v->bitmap);
     free(v->l2p);
+    free(v->l2p_idx);
     free(v->jops);
     free(v->j_heat);
     free(v->tier);
@@ -2220,16 +2227,10 @@ static int jrn_append_pending(invfs_volume *v)
     invfs_l2p_entry *buf;
     uint32_t prev;
     uint64_t jp;
-    mapset *hms = NULL, ms;
 
     if (!n && !v->j_heat_n) return 0;
-    /* refreshable heat pairs need their live entries; look them up through
-     * a throwaway mapset when the pending set is big enough that the
-     * per-pair newest-wins scan would hurt */
-    if (v->j_heat_n > 256 && mapset_build(v, &ms) == 0)
-        hms = &ms;
     buf = (invfs_l2p_entry *)malloc((n + v->j_heat_n) * sizeof *buf);
-    if (!buf) { mapset_free(hms); return -1; }
+    if (!buf) return -1;
     prev = v->j_last_crc;
     for (i = 0; i < n; i++) {
         buf[i] = v->jops[i];
@@ -2239,8 +2240,11 @@ static int jrn_append_pending(invfs_volume *v)
     for (i = 0; i < v->j_heat_n; i++) {
         const invfs_l2p_entry *le = NULL;
         invfs_l2p_entry *e = &buf[n];
-        if (hms) {
-            le = mapset_get(hms, v->j_heat[i][0], v->j_heat[i][1]);
+        /* refreshable heat pairs need their live entries: the WP-L2Q
+         * session index answers O(1); the fallback is the newest-wins
+         * scan it mirrors */
+        if (v->l2p_idx) {
+            le = l2p_idx_get(v, v->j_heat[i][0], v->j_heat[i][1]);
         } else {
             size_t j;
             for (j = v->l2p_count; j-- > 0; ) {
@@ -2258,7 +2262,6 @@ static int jrn_append_pending(invfs_volume *v)
         prev = e->crc;
         n++;
     }
-    mapset_free(hms);
     jp = v->journal_pos;
     if (io_seek(&v->io, jp) != 0 ||
         io_write(&v->io, buf, n * sizeof *buf) != 0) {
@@ -2614,6 +2617,17 @@ uint64_t vol_write_raw(invfs_volume *v, const uint8_t *data, size_t len)
 }
 
 
+/* (inode,lba) key mixer: shared by the WP22d consistent-cut mapset and
+ * the WP-L2Q session index (identical hash -> identical bucket choice;
+ * vol_heat.c keeps its own copy for the heat_seen set). */
+static uint64_t mapset_hash(uint64_t inode, uint64_t lba)
+{
+    uint64_t h = inode * 0x9E3779B97F4A7C15ull ^ lba;
+    h ^= h >> 29; h *= 0xBF58476D1CE4E5B9ull; h ^= h >> 32;
+    return h;
+}
+
+
 /* L2P MAP entry: inode logical block -> physical block */
 int vol_map(invfs_volume *v, uint64_t inode, uint64_t lba, uint64_t pba, uint32_t length)
 {
@@ -2662,6 +2676,9 @@ int vol_map(invfs_volume *v, uint64_t inode, uint64_t lba, uint64_t pba, uint32_
     }
     v->l2p[v->l2p_count++] = e;
     if (jrn_push_op(v, &e) != 0) { v->l2p_count--; return -1; }
+    /* WP-L2Q: the index tracks the append (a re-MAP of the same key
+     * overwrites -- newest wins) */
+    l2p_idx_put(v, inode, lba, (uint64_t)(v->l2p_count - 1));
     return 0;
 }
 
@@ -2678,6 +2695,30 @@ uint64_t vol_lookup(invfs_volume *v, uint64_t inode, uint64_t lba)
 int vol_lookup_entry(invfs_volume *v, uint64_t inode, uint64_t lba,
                      uint64_t *pba_out, uint64_t *len_out)
 {
+    /* WP-L2Q: the session index answers O(1). A miss is authoritative
+     * (the index mirrors the table); a hit is cross-checked against the
+     * table and any inconsistency falls through to the scan below. */
+    if (v->l2p_idx) {
+        size_t k = (size_t)mapset_hash(inode, lba) & v->l2p_idx_mask;
+        while (v->l2p_idx[k].inode) {
+            if (v->l2p_idx[k].inode == inode && v->l2p_idx[k].lba == lba) {
+                uint64_t slot = v->l2p_idx[k].slot;
+                if (slot < v->l2p_count) {
+                    const invfs_l2p_entry *e = &v->l2p[slot];
+                    if (e->type == INVFS_JRN_MAP && e->inode == inode &&
+                        e->lba == lba) {
+                        *pba_out = e->pba;
+                        *len_out = e->length;
+                        return 0;
+                    }
+                }
+                break;   /* diverged: scan (cannot happen) */
+            }
+            k = (k + 1) & v->l2p_idx_mask;
+        }
+        if (!v->l2p_idx[k].inode)
+            return -1;
+    }
     /* newest wins: scan from the end (L2P is append-only journal) */
     size_t i;
     for (i = v->l2p_count; i-- > 0; ) {
@@ -2700,10 +2741,15 @@ void l2p_remove_mem(invfs_volume *v, uint64_t inode, uint64_t lba)
         const invfs_l2p_entry *e = &v->l2p[i];
         if (e->type == INVFS_JRN_MAP && e->inode == inode && e->lba == lba)
             continue;  /* drop */
-        if (w != i) v->l2p[w] = v->l2p[i];
+        if (w != i) {
+            v->l2p[w] = v->l2p[i];
+            /* the moved entry may be its key's newest: fix the index */
+            l2p_idx_reslot(v, e->inode, e->lba, (uint64_t)i, (uint64_t)w);
+        }
         w++;
     }
     v->l2p_count = w;
+    l2p_idx_del(v, inode, lba);   /* every occurrence of the key died */
 }
 
 
@@ -2741,13 +2787,6 @@ void vol_l2p_remove(invfs_volume *v, uint64_t inode, uint64_t lba)
  * name falls back to its newest fully-mapped older version, or is absent.
  * "No live record references unmapped segments" is the engine invariant.
  */
-
-static uint64_t mapset_hash(uint64_t inode, uint64_t lba)
-{
-    uint64_t h = inode * 0x9E3779B97F4A7C15ull ^ lba;
-    h ^= h >> 29; h *= 0xBF58476D1CE4E5B9ull; h ^= h >> 32;
-    return h;
-}
 
 int mapset_build(const invfs_volume *v, mapset *ms)
 {
@@ -2805,6 +2844,172 @@ void mapset_free(mapset *ms)
     if (!ms) return;
     free(ms->tab);
     ms->tab = NULL;
+}
+
+
+/* ---- WP-L2Q: session-persistent L2P index ------------------------------
+ * Open addressing over (inode,lba) -> table slot (the mapset hash, but
+ * slot numbers instead of pointers: v->l2p reallocs on growth). The index
+ * is a pure cache of the newest-wins scan's answer: every table mutation
+ * keeps it in lock-step, so vol_lookup_entry answers O(1) and the scan
+ * remains only as the fallback for a disabled index. */
+
+/* 0 = on (default). A disabled index frees immediately and every hook
+ * becomes a no-op, so a half-maintained index can never be consulted. */
+static int l2p_idx_enabled(void)
+{
+    const char *e = getenv("INVFS_L2P_IDX");
+    return !e || strcmp(e, "0") != 0;
+}
+
+static void l2p_idx_disable(invfs_volume *v)
+{
+    free(v->l2p_idx);
+    v->l2p_idx = NULL;
+    v->l2p_idx_mask = v->l2p_idx_n = 0;
+}
+
+void l2p_idx_reset(invfs_volume *v)
+{
+    if (!v->l2p_idx) return;
+    memset(v->l2p_idx, 0, (v->l2p_idx_mask + 1) * sizeof *v->l2p_idx);
+    v->l2p_idx_n = 0;
+}
+
+/* grow to 2x and rehash; on allocation failure the index disables itself
+ * (the caller's table mutation already happened -- the scan fallback
+ * keeps answering correctly) */
+static void l2p_idx_grow(invfs_volume *v)
+{
+    size_t ncap = (v->l2p_idx_mask + 1) * 2, i;
+    l2p_idx_ent *nt = (l2p_idx_ent *)calloc(ncap, sizeof *nt);
+    if (!nt) { l2p_idx_disable(v); return; }
+    for (i = 0; i <= v->l2p_idx_mask; i++) {
+        if (v->l2p_idx[i].inode) {
+            size_t k = (size_t)mapset_hash(v->l2p_idx[i].inode,
+                                           v->l2p_idx[i].lba) & (ncap - 1);
+            while (nt[k].inode) k = (k + 1) & (ncap - 1);
+            nt[k] = v->l2p_idx[i];
+        }
+    }
+    free(v->l2p_idx);
+    v->l2p_idx = nt;
+    v->l2p_idx_mask = ncap - 1;
+}
+
+void l2p_idx_put(invfs_volume *v, uint64_t inode, uint64_t lba,
+                 uint64_t slot)
+{
+    size_t mask, k;
+    if (!v->l2p_idx) {
+        size_t cap = 1024;
+        if (!l2p_idx_enabled()) return;
+        v->l2p_idx = (l2p_idx_ent *)calloc(cap, sizeof *v->l2p_idx);
+        if (!v->l2p_idx) return;
+        v->l2p_idx_mask = cap - 1;
+        v->l2p_idx_n = 0;
+    }
+    if ((v->l2p_idx_n + 1) * 10 >= (v->l2p_idx_mask + 1) * 7) {
+        l2p_idx_grow(v);
+        if (!v->l2p_idx) return;   /* disabled mid-flight */
+    }
+    mask = v->l2p_idx_mask;
+    k = (size_t)mapset_hash(inode, lba) & mask;
+    while (v->l2p_idx[k].inode) {
+        if (v->l2p_idx[k].inode == inode && v->l2p_idx[k].lba == lba) {
+            v->l2p_idx[k].slot = slot;   /* a newer MAP supersedes */
+            return;
+        }
+        k = (k + 1) & mask;
+    }
+    v->l2p_idx[k].inode = inode;
+    v->l2p_idx[k].lba = lba;
+    v->l2p_idx[k].slot = slot;
+    v->l2p_idx_n++;
+}
+
+void l2p_idx_del(invfs_volume *v, uint64_t inode, uint64_t lba)
+{
+    size_t mask, k, j;
+    if (!v->l2p_idx) return;
+    mask = v->l2p_idx_mask;
+    k = (size_t)mapset_hash(inode, lba) & mask;
+    while (v->l2p_idx[k].inode) {
+        if (v->l2p_idx[k].inode == inode && v->l2p_idx[k].lba == lba)
+            break;
+        k = (k + 1) & mask;
+    }
+    if (!v->l2p_idx[k].inode) return;   /* not present */
+    /* Reinsert the rest of the cluster one past the hole (deletion by
+     * rehash -- no tombstones, lookups never pass a stale entry). */
+    v->l2p_idx[k].inode = 0;
+    v->l2p_idx_n--;
+    j = (k + 1) & mask;
+    while (v->l2p_idx[j].inode) {
+        l2p_idx_ent e = v->l2p_idx[j];
+        v->l2p_idx[j].inode = 0;
+        v->l2p_idx_n--;
+        k = (size_t)mapset_hash(e.inode, e.lba) & mask;
+        while (v->l2p_idx[k].inode) k = (k + 1) & mask;
+        v->l2p_idx[k] = e;
+        v->l2p_idx_n++;
+        j = (j + 1) & mask;
+    }
+}
+
+void l2p_idx_reslot(invfs_volume *v, uint64_t inode, uint64_t lba,
+                    uint64_t old_slot, uint64_t new_slot)
+{
+    size_t mask, k;
+    if (!v->l2p_idx) return;
+    mask = v->l2p_idx_mask;
+    k = (size_t)mapset_hash(inode, lba) & mask;
+    while (v->l2p_idx[k].inode) {
+        if (v->l2p_idx[k].inode == inode && v->l2p_idx[k].lba == lba) {
+            if (v->l2p_idx[k].slot == old_slot)
+                v->l2p_idx[k].slot = new_slot;
+            return;
+        }
+        k = (k + 1) & mask;
+    }
+}
+
+void l2p_idx_rebuild(invfs_volume *v)
+{
+    size_t i;
+    l2p_idx_reset(v);
+    for (i = 0; i < v->l2p_count; i++) {
+        const invfs_l2p_entry *e = &v->l2p[i];
+        if (e->type == INVFS_JRN_MAP)
+            l2p_idx_put(v, e->inode, e->lba, (uint64_t)i);
+        if (!v->l2p_idx) return;   /* disabled mid-rebuild */
+    }
+}
+
+const invfs_l2p_entry *l2p_idx_get(invfs_volume *v, uint64_t inode,
+                                   uint64_t lba)
+{
+    size_t mask, k;
+    if (!v->l2p_idx) return NULL;
+    mask = v->l2p_idx_mask;
+    k = (size_t)mapset_hash(inode, lba) & mask;
+    while (v->l2p_idx[k].inode) {
+        if (v->l2p_idx[k].inode == inode && v->l2p_idx[k].lba == lba) {
+            uint64_t slot = v->l2p_idx[k].slot;
+            const invfs_l2p_entry *e;
+            if (slot >= v->l2p_count) return NULL;   /* cannot happen */
+            e = &v->l2p[slot];
+            /* defensive cross-check: the index must name a live MAP for
+             * exactly this key; anything else is a bug, answered via the
+             * scan fallback by the caller treating this as "unknown" */
+            if (e->type != INVFS_JRN_MAP || e->inode != inode ||
+                e->lba != lba)
+                return NULL;
+            return e;
+        }
+        k = (k + 1) & mask;
+    }
+    return NULL;
 }
 
 

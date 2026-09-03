@@ -44,7 +44,7 @@
 set -e
 set -o pipefail
 
-REPO=/home/user/InvariantFS
+REPO="${REPO:-$(cd "$(dirname "$0")/.." && pwd)}"   # override with the worktree when testing a branch
 B=$REPO/bin
 WORK=/dev/shm/wp22c
 IMG_A=wp22c-a.img     # leg A: sync failure latch + re-anchor

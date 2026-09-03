@@ -50,7 +50,7 @@
 set -e
 set -o pipefail
 
-REPO=/home/user/InvariantFS
+REPO="${REPO:-$(cd "$(dirname "$0")/.." && pwd)}"   # override with the worktree when testing a branch
 B=$REPO/bin
 PACK=$REPO/tools/codecpacks/vdi.codecpack
 WORK=/dev/shm/wp16vdi

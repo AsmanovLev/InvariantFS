@@ -926,6 +926,10 @@ finalize:
             }
         }
         v->l2p_count = w2;
+        /* WP-L2Q: the keep test is pba-dependent, so a key can keep one
+         * duplicate while dropping another -- a by-key index delete is not
+         * provably exact here. Rebuild the index from the final table. */
+        l2p_idx_rebuild(v);
     }
     if (rep->l2_freed || rep->l2_added || rep->l2_updated) {
         if (vol_flush(v) != 0) rc = -1;
@@ -1294,6 +1298,9 @@ finalize:
             }
         }
         v->l2p_count = w2;
+        /* WP-L2Q: pba-dependent keep test -> rebuild the session index
+         * from the final table (see the layer-2 pass above). */
+        l2p_idx_rebuild(v);
     }
     if (rep->freed || rep->added || rep->updated) {
         if (vol_flush(v) != 0) rc = -1;

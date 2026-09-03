@@ -39,16 +39,18 @@ uint8_t  vol_heat_w(const invfs_l2p_entry *e) { return e ? e->pad[2] : 0; }
  * Write-hot (wheat >= 2 post-decay = rewritten at least twice inside the
  * last interval) skips the heavy codec fan-out for one sweep.
  *
- * Persistence (WP22d): the journal is append-only, so heat rides it in
- * three ways -- a MAP op carries its entry's current pad (re-read at flush
- * time); a pure read touch queues (inode,lba) into v->j_heat and the next
- * flush appends a refresh MAP with the live pad (one entry per pair per
- * session at most: heat_seen gates the touch, so reads never churn the
- * journal); a bulk change (the sweep's decay, or >64k pending refreshes)
- * sets j_heat_all and the next flush compacts, the image carrying every
- * pad. An fsck -f REBUILD reconstructs mappings from records and resets
- * heat to cold (documented: the rebuild has no history to be faithful
- * to). A crash loses only the pending touches -- heat is advisory. */
+ * Persistence (WP-L2Q): the journal is append-only, and pure reads must
+ * never write to it -- read touches update the pad in RAM only (no
+ * refresh MAP per read, no dirty mark). Heat is sweep-consumed: the
+ * sweep's decay pass sets j_heat_all, so the next flush COMPACTS and the
+ * image carries every live pad (granularity = sweep run); any other
+ * compaction (fsck rebuild, slot pressure) carries them too. Write-side
+ * heat (the vol_replace_file wheat carry, dedupe remaps) still queues
+ * refresh MAPs via jrn_heat_touch -- those flushes are paid for by the
+ * write itself. An fsck -f REBUILD reconstructs mappings from records and
+ * resets heat to cold (documented: the rebuild has no history to be
+ * faithful to). A crash loses only the pending touches -- heat is
+ * advisory. */
 
 static uint64_t heat_hash(uint64_t inode, uint64_t lba)
 {
@@ -99,32 +101,49 @@ static int heat_seen_add(invfs_volume *v, uint64_t inode, uint64_t lba)
 }
 
 
-/* +1 read-heat on the live mapping for (inode,lba), once per session.
- * Read-only sessions (READONLY flag / awaiting recovery) accrue nothing:
- * the increment must be flushable to be honest, and vol_mark_dirty is what
- * makes vol_close persist it. The newest-wins scan mirrors
- * vol_lookup_entry; each first touch costs one scan, every later touch of
- * the pair in this session is absorbed by the session set. */
-void heat_touch_read(invfs_volume *v, uint64_t inode, uint64_t lba)
+/* find the live entry for (inode,lba): the WP-L2Q session index when it
+ * is on, else the newest-wins scan it mirrors. */
+static invfs_l2p_entry *heat_find(invfs_volume *v, uint64_t inode,
+                                  uint64_t lba)
 {
     size_t i;
-    if (!vol_write_enabled(v)) return;
-    if (heat_seen_add(v, inode, lba)) return;
+    if (v->l2p_idx)
+        return (invfs_l2p_entry *)l2p_idx_get(v, inode, lba);
     for (i = v->l2p_count; i-- > 0; ) {
         invfs_l2p_entry *e = &v->l2p[i];
-        uint16_t r;
-        if (e->type != INVFS_JRN_MAP || e->inode != inode || e->lba != lba)
-            continue;
-        r = l2p_rheat(e);
-        if (r == 0xFFFFu) return;   /* saturated: nothing new to persist */
-        l2p_set_rheat(e, (uint16_t)(r + 1));
-        /* WP22d: RAM-only until the flush; the flush re-appends a refresh
-         * MAP carrying the current pad -- no rewrite of durable entries */
-        jrn_heat_touch(v, inode, lba);
-        if ((uint32_t)r + 1 >= INVFS_HEAT_HOT) v->heat_any_rhot = 1;
-        vol_mark_dirty(v);
-        return;
+        if (e->type == INVFS_JRN_MAP && e->inode == inode && e->lba == lba)
+            return e;
     }
+    return NULL;
+}
+
+
+/* +1 read-heat on the live mapping for (inode,lba), once per session.
+ * Read-only sessions (READONLY flag / awaiting recovery) accrue nothing.
+ * The newest-wins scan mirrors vol_lookup_entry; each first touch costs
+ * one lookup, every later touch of the pair in this session is absorbed
+ * by the session set.
+ *
+ * WP-L2Q: the increment is RAM-ONLY. Read touches no longer queue a
+ * refresh-MAP journal op (the old per-read journal traffic on pure-read
+ * workloads) and no longer dirty the volume. Heat is sweep-consumed: it
+ * persists inside the compaction image the sweep's decay pass forces
+ * (j_heat_all, carried pads) -- granularity = sweep run -- and a crash or
+ * a pure-read close simply loses the pending touches (heat is advisory).
+ * A pure-read session's vol_flush appends nothing: the journal stays
+ * byte-identical (tools/test-l2p.sh leg "quiet"). */
+void heat_touch_read(invfs_volume *v, uint64_t inode, uint64_t lba)
+{
+    invfs_l2p_entry *e;
+    uint16_t r;
+    if (!vol_write_enabled(v)) return;
+    if (heat_seen_add(v, inode, lba)) return;
+    e = heat_find(v, inode, lba);
+    if (!e) return;
+    r = l2p_rheat(e);
+    if (r == 0xFFFFu) return;   /* saturated */
+    l2p_set_rheat(e, (uint16_t)(r + 1));
+    if ((uint32_t)r + 1 >= INVFS_HEAT_HOT) v->heat_any_rhot = 1;
 }
 
 
@@ -160,32 +179,27 @@ void heat_file_setw(invfs_volume *v, uint64_t inode, uint8_t w)
  * (dedupe): heat keys on (inode,lba), not on the physical slot, so a pba
  * remap must carry it over rather than rebirth the entry cold */
 void heat_grab(invfs_volume *v, uint64_t inode, uint64_t lba,
-                      uint16_t *r, uint8_t *w)
+                       uint16_t *r, uint8_t *w)
 {
-    size_t i;
+    const invfs_l2p_entry *e;
     *r = 0; *w = 0;
-    for (i = v->l2p_count; i-- > 0; ) {
-        const invfs_l2p_entry *e = &v->l2p[i];
-        if (e->type == INVFS_JRN_MAP && e->inode == inode && e->lba == lba) {
-            *r = l2p_rheat(e);
-            *w = e->pad[2];
-            return;
-        }
+    e = heat_find(v, inode, lba);
+    if (e) {
+        *r = l2p_rheat(e);
+        *w = e->pad[2];
     }
 }
 
 void heat_stamp(invfs_volume *v, uint64_t inode, uint64_t lba,
-                       uint16_t r, uint8_t w)
+                        uint16_t r, uint8_t w)
 {
-    size_t i;
-    for (i = v->l2p_count; i-- > 0; ) {
-        invfs_l2p_entry *e = &v->l2p[i];
-        if (e->type == INVFS_JRN_MAP && e->inode == inode && e->lba == lba) {
-            l2p_set_rheat(e, r);
-            e->pad[2] = w;
-            jrn_heat_touch(v, inode, lba);
-            return;
-        }
+    invfs_l2p_entry *e = heat_find(v, inode, lba);
+    if (e) {
+        l2p_set_rheat(e, r);
+        e->pad[2] = w;
+        /* a WRITE path (the remap's own MAP op flushes with it): the
+         * refresh rides the journal traffic the write already pays for */
+        jrn_heat_touch(v, inode, lba);
     }
 }
 

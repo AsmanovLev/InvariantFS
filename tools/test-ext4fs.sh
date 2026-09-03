@@ -43,7 +43,7 @@
 set -e
 set -o pipefail
 
-REPO=/home/user/InvariantFS
+REPO="${REPO:-$(cd "$(dirname "$0")/.." && pwd)}"   # override with the worktree when testing a branch
 B=$REPO/bin
 PACKDIR=$REPO/tools/codecpacks/ext4fs.codecpack
 E4=$PACKDIR/bin/ext4fs

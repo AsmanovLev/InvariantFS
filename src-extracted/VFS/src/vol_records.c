@@ -441,9 +441,15 @@ static int vol_retire_inode(invfs_volume *v, uint64_t inode_id,
                     ue.lba = v->l2p[i].lba;
                     jrn_push_op(v, &ue);
                 }
+                /* WP-L2Q: every occurrence of this inode's keys dies */
+                l2p_idx_del(v, v->l2p[i].inode, v->l2p[i].lba);
                 continue;
             }
-            if (w != i) v->l2p[w] = v->l2p[i];
+            if (w != i) {
+                v->l2p[w] = v->l2p[i];
+                l2p_idx_reslot(v, v->l2p[i].inode, v->l2p[i].lba,
+                               (uint64_t)i, (uint64_t)w);
+            }
             w++;
         }
         v->l2p_count = w;

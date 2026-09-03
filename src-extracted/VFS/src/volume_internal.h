@@ -196,6 +196,21 @@ typedef struct dir_index_entry {
     char name[1];          /* prefix including the trailing '/' */
 } dir_index_entry;
 
+/* WP-L2Q: session-persistent (inode,lba) -> newest live L2P table slot.
+ * vol_lookup_entry scanned the append-only table from the end on every
+ * segment lookup -- O(live entries) per read, on the hot path. The index
+ * mirrors the table exactly: built during replay (l2p_apply), updated by
+ * vol_map / l2p_remove_mem / the bulk compaction loops (retire, sweep
+ * unwind) / rebuilt wholesale by the fsck rebuild and the seal rewrites.
+ * Values are table SLOT NUMBERS, not pointers: v->l2p reallocs on growth.
+ * inode == 0 marks an empty slot (real inode ids start at 1). The table
+ * stays the source of truth: an allocation failure disables the index and
+ * every consumer falls back to the newest-wins scan. */
+typedef struct {
+    uint64_t inode, lba;
+    uint64_t slot;            /* index into v->l2p[] */
+} l2p_idx_ent;
+
 /* WP25: one tier-arena copy / RAW-mirror index entry. key = the canonical
  * segment's pba (tier: a dev1-shadow pba; rawm: a raw-zone pba), pba = the
  * second copy's pba (tier: dev0 arena; rawm: dev1 shadow), plen = blocks,
@@ -267,13 +282,20 @@ typedef struct invfs_volume {
     /* in-memory L2P */
     invfs_l2p_entry *l2p;
     size_t l2p_count, l2p_cap;
+    /* WP-L2Q: the session hash index over the table (NULL = disabled:
+     * allocation failed or INVFS_L2P_IDX=0 -- lookups fall back to the
+     * newest-wins scan). Never diverges from the table; see the stress
+     * leg of tools/test-l2p.sh. */
+    l2p_idx_ent *l2p_idx;
+    size_t l2p_idx_mask, l2p_idx_n;
     /* WP22d: the journal is append-only within a slot (invarifs.h WP22d
      * note); the in-memory table stays the compacted newest-wins view.
      * jops[] holds the not-yet-journaled ops (MAP/UNMAP, in order) that
      * the next vol_flush appends at the active slot's log end; j_heat[]
      * holds (inode,lba) pairs whose pad bytes changed in RAM only (WP19
-     * read touches) and which the next flush re-appends as refresh MAPs
-     * (or folds into the compaction image when bulk). */
+     * WRITE-side carries -- read touches are RAM-only since WP-L2Q) and
+     * which the next flush re-appends as refresh MAPs (or folds into the
+     * compaction image when bulk). */
     invfs_l2p_entry *jops;
     size_t jops_n, jops_cap;
     uint64_t (*j_heat)[2];
@@ -952,6 +974,25 @@ void vol_readonly_unlatch(invfs_volume *v);
 void l2p_remove(invfs_volume *v, uint64_t inode, uint64_t lba);
 void l2p_remove_mem(invfs_volume *v, uint64_t inode, uint64_t lba);
 
+/* ---- WP-L2Q session L2P index ----------------------------------------
+ * All no-ops when the index is disabled (v->l2p_idx == NULL). put
+ * overwrites the slot of an existing key (newest wins); reslot rewrites
+ * the stored table slot of a key only when it currently names old_slot
+ * (a compaction moving a NON-newest duplicate must not touch the index);
+ * del removes the key (cluster rehash); reset empties the index (replay
+ * restart); rebuild derives it from the current table (fsck/seal bulk
+ * rewrites). */
+void l2p_idx_reset(invfs_volume *v);
+void l2p_idx_put(invfs_volume *v, uint64_t inode, uint64_t lba,
+                 uint64_t slot);
+void l2p_idx_del(invfs_volume *v, uint64_t inode, uint64_t lba);
+void l2p_idx_reslot(invfs_volume *v, uint64_t inode, uint64_t lba,
+                    uint64_t old_slot, uint64_t new_slot);
+void l2p_idx_rebuild(invfs_volume *v);
+/* the live entry for the key, NULL when unmapped (or the index is off) */
+const invfs_l2p_entry *l2p_idx_get(invfs_volume *v, uint64_t inode,
+                                   uint64_t lba);
+
 /* WP22d: queue one journal op for the next flush's append (MAP/UNMAP,
  * CRC restamped from the chain at write time; a MAP op's pad is re-read
  * from the live table at write time) */
@@ -1023,11 +1064,12 @@ uint64_t rec_l2p_miss(const uint8_t *rec, uint32_t rec_len, uint64_t inode_id,
                       unsigned *miss_n);
 
 /* +1 read-heat on the live mapping for (inode,lba), once per session.
- * Read-only sessions (READONLY flag / awaiting recovery) accrue nothing:
- * the increment must be flushable to be honest, and vol_mark_dirty is what
- * makes vol_close persist it. The newest-wins scan mirrors
- * vol_lookup_entry; each first touch costs one scan, every later touch of
- * the pair in this session is absorbed by the session set. */
+ * Read-only sessions (READONLY flag / awaiting recovery) accrue nothing.
+ * WP-L2Q: RAM-only -- read touches never queue journal refreshes and never
+ * dirty the volume; the pads persist inside the next compaction image
+ * (sweep-decay granularity). The lookup mirrors vol_lookup_entry (the
+ * session index answers it O(1)); every later touch of the pair in this
+ * session is absorbed by the session set. */
 void heat_touch_read(invfs_volume *v, uint64_t inode, uint64_t lba);
 
 /* max write-heat over an inode's live mappings (0 = cold/none) */

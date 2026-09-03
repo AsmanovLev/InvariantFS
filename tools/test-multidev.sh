@@ -122,7 +122,12 @@ HP=$(pba0 "$D0" hot.bin)
 echo "hot.bin canonical at pba $HP (dev1 shadow)"
 
 echo "== leg 4: heat -> dev0 acceleration copies =="
-for i in $(seq 16); do $B/invf-cat "$D0" hot.bin > /dev/null 2>&1; done
+# WP-L2Q: read heat is RAM-only per session and persists folded into a
+# compaction image (no per-read journal refreshes) -- the pump reads the
+# file once per session and force-compacts, standing in for sweep cadence.
+for i in $(seq 16); do
+    INVFS_JRN_FORCE_COMPACT=1 $B/invf-l2ptest pump "$D0" hot.bin >/dev/null 2>&1
+done
 RH=$(rheat_max "$D0" hot.bin)
 [ "$RH" -ge 16 ] || fail "hot.bin rheat $RH < 16 after 16 read sessions"
 echo "hot.bin rheat=$RH (>= 2x HOT, survives the sweep hysteresis)"
@@ -186,7 +191,9 @@ PY
     export INVFS_DEV1=$E1
     $B/invf-cp "$E0" "$WORK/orig/coldA.bin" A.bin >/dev/null 2>&1 || fail "cp A"
     $B/invf-sweep "$E0" >/dev/null 2>&1 || fail "sweep A->shadow"
-    for i in $(seq 16); do $B/invf-cat "$E0" A.bin >/dev/null 2>&1; done
+    for i in $(seq 16); do
+        INVFS_JRN_FORCE_COMPACT=1 $B/invf-l2ptest pump "$E0" A.bin >/dev/null 2>&1
+    done
     $B/invf-sweep "$E0" > "$WORK/e-sweepA.log" 2>&1 || fail "sweep promote A"
     grep -q "^tier: [1-9]" "$WORK/e-sweepA.log" || fail "A not promoted"
     TA=$($B/invf-stats "$E0" | sed -n 's/.*tier (dev0 copies): \([0-9]*\) live.*/\1/p')
@@ -196,7 +203,9 @@ PY
     for i in 1 2 3; do $B/invf-sweep "$E0" >/dev/null 2>&1 || fail "idle sweep $i"; done
     $B/invf-cp "$E0" "$WORK/orig/coldB.bin" B.bin >/dev/null 2>&1 || fail "cp B"
     $B/invf-sweep "$E0" >/dev/null 2>&1 || fail "sweep B->shadow"
-    for i in $(seq 16); do $B/invf-cat "$E0" B.bin >/dev/null 2>&1; done
+    for i in $(seq 16); do
+        INVFS_JRN_FORCE_COMPACT=1 $B/invf-l2ptest pump "$E0" B.bin >/dev/null 2>&1
+    done
     $B/invf-sweep "$E0" > "$WORK/e-sweepB.log" 2>&1 || fail "sweep promote B"
     grep "^tier: " "$WORK/e-sweepB.log" || fail "no tier line for B"
     DEM=$(sed -n 's/.*copied to dev0 (\([0-9]*\) blocks), \([0-9]*\) demoted.*/\2/p' \

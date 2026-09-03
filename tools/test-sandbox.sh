@@ -28,7 +28,7 @@
 set -e
 set -o pipefail
 
-REPO=/home/user/InvariantFS
+REPO="${REPO:-$(cd "$(dirname "$0")/.." && pwd)}"   # override with the worktree when testing a branch
 B=$REPO/bin
 WT=$(cd "$(dirname "$0")/.." && pwd)   # the checkout this script lives in
 WORK=/dev/shm/wp12dsandbox

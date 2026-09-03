@@ -696,6 +696,9 @@ int vol_fsck_scan(invfs_volume *v, invfs_fsck_report *rep, int fix)
             v->l2p_count = l2p_n;
             v->l2p_cap = l2p_n;
             newl2p = NULL;
+            /* WP-L2Q: the table was replaced wholesale -- the session
+             * index re-derives from it */
+            l2p_idx_rebuild(v);
         }
         memcpy(v->bitmap, used, used_bytes);
         v->free_blocks = vol_count_free(v);
