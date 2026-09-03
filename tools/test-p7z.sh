@@ -62,6 +62,8 @@ IMGMEM=wp16p7z-mem.img
 IMGWS=wp16p7z-ws.img
 export INVFS_CODECPACKS=$REPO/tools/codecpacks   # the sweep AND the reads
 export P7Z_7ZZ=$B/7zz                            # the encoded-header decode
+export PATH="$B:$PATH"    # the manifest's requires=7zz must resolve for the
+                          # probe and the Landlock whitelist (WP12d) too
 rm -rf "$WORK" && mkdir -p "$WORK/orig" "$WORK/out" "$WORK/nopacks" "$WORK/fsrc"
 cd /dev/shm
 rm -f "$IMG" "$IMGMEM" "$IMGWS"
@@ -287,13 +289,16 @@ for f in lzma2.7z enc.7z garbage.7z nomagic.7z trunc.7z; do
     echo "  $f: declined (rc=3)"
 done
 # degradation leg: WITHOUT 7zz the default (encoded-header) archive declines
-# cleanly and the plain-header one still works
-if env -u P7Z_7ZZ "$P" enumerate "$WORK/orig/stored.7z" "$WORK/pk.table" 2>/dev/null; then
+# cleanly and the plain-header one still works. PATH must be sanitized too:
+# the helper's last resort is PATH, and we prepended $B above for the probe
+# side (requires=7zz).
+CLEANPATH=/usr/bin:/bin
+if env -u P7Z_7ZZ PATH="$CLEANPATH" "$P" enumerate "$WORK/orig/stored.7z" "$WORK/pk.table" 2>/dev/null; then
     echo "FAIL: encoded-header archive decomposed without 7zz"; ok=0
 else
     echo "  stored.7z without 7zz: clean decline (encoded header)"
 fi
-env -u P7Z_7ZZ "$P" enumerate "$WORK/orig/nohdr.7z" "$WORK/pk.table" \
+env -u P7Z_7ZZ PATH="$CLEANPATH" "$P" enumerate "$WORK/orig/nohdr.7z" "$WORK/pk.table" \
     || { echo "FAIL: -mhc=off archive needs no 7zz"; ok=0; }
 echo "  nohdr.7z without 7zz: decomposes (plain header)"
 [ "$ok" = 1 ] || exit 1
@@ -431,7 +436,7 @@ int main(int argc, char **argv)
     return rc;
 }
 C
-CORE_O="$REPO/build/obj/volume.o $REPO/build/obj/vol_cpack.o $REPO/build/obj/vol_png.o $REPO/build/obj/vol_seal.o $REPO/build/obj/vol_repair.o $REPO/build/obj/vol_rollback.o $REPO/build/obj/vol_resize.o $REPO/build/obj/vol_fsck.o $REPO/build/obj/vol_crash.o $REPO/build/obj/vol_exer.o $REPO/build/obj/vol_dedupe.o $REPO/build/obj/vol_textzone.o $REPO/build/obj/vol_heat.o $REPO/build/obj/vol_sweep.o $REPO/build/obj/vol_read.o $REPO/build/obj/vol_write.o $REPO/build/obj/vol_records.o $REPO/build/obj/vol_ast.o $REPO/build/obj/vol_dirs.o $REPO/build/obj/arc.o $REPO/build/obj/crc32c.o $REPO/build/obj/lz4.o $REPO/build/obj/blkio.o $REPO/build/obj/flacx.o $REPO/build/obj/tarx.o $REPO/build/obj/pngx.o $REPO/build/obj/miniz.o $REPO/build/obj/ppmd8.o $REPO/build/obj/ppmd8enc.o $REPO/build/obj/ppmd8dec.o $REPO/build/obj/ppmd_codec.o $REPO/build/obj/codec.o $REPO/build/obj/bcj_x86.o $REPO/build/obj/blake3.o $REPO/build/obj/blake3_dispatch.o $REPO/build/obj/blake3_portable.o $REPO/build/obj/rs.o"
+CORE_O="$REPO/build/obj/volume.o $REPO/build/obj/vol_cpack.o $REPO/build/obj/vol_png.o $REPO/build/obj/vol_seal.o $REPO/build/obj/vol_repair.o $REPO/build/obj/vol_rollback.o $REPO/build/obj/vol_resize.o $REPO/build/obj/vol_fsck.o $REPO/build/obj/vol_crash.o $REPO/build/obj/vol_exer.o $REPO/build/obj/vol_dedupe.o $REPO/build/obj/vol_textzone.o $REPO/build/obj/vol_heat.o $REPO/build/obj/vol_sweep.o $REPO/build/obj/vol_read.o $REPO/build/obj/vol_write.o $REPO/build/obj/vol_records.o $REPO/build/obj/vol_ast.o $REPO/build/obj/vol_dirs.o $REPO/build/obj/arc.o $REPO/build/obj/crc32c.o $REPO/build/obj/lz4.o $REPO/build/obj/blkio.o $REPO/build/obj/flacx.o $REPO/build/obj/tarx.o $REPO/build/obj/pngx.o $REPO/build/obj/miniz.o $REPO/build/obj/ppmd8.o $REPO/build/obj/ppmd8enc.o $REPO/build/obj/ppmd8dec.o $REPO/build/obj/ppmd_codec.o $REPO/build/obj/codec.o $REPO/build/obj/bcj_x86.o $REPO/build/obj/blake3.o $REPO/build/obj/blake3_dispatch.o $REPO/build/obj/blake3_portable.o $REPO/build/obj/rs.o $REPO/build/obj/vol_tier.o"
 gcc -std=gnu11 -O2 -I$REPO/src-extracted/VFS/src -o "$WORK/classof" "$WORK/classof.c" \
     $CORE_O -Wl,-l:libzstd.so.1 -lz -lpthread
 gcc -std=gnu11 -O2 -I$REPO/src-extracted/VFS/src -o "$WORK/rngread" "$WORK/rngread.c" \

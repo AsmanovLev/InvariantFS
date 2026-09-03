@@ -39,6 +39,9 @@ pack_version = 1
 generation = 1
 caps = container|external
 dec_mem = 0
+# the helper execs 7zz for LZMA-encoded headers ($P7Z_7ZZ, sibling, PATH) —
+# the sandbox whitelist needs it (WP12d)
+requires = 7zz
 sniff.magic = 377ABCAF271C
 sniff.offset = 0
 sniff.ext = 7z

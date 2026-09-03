@@ -761,15 +761,24 @@ static int pack_sniff_impl(const pack_entry *p, const uint8_t *head,
     return 0;
 }
 
-/* a `requires` tool must resolve the way volume.c's tool_resolve will look
- * for it: $INVFS_TOOLS/<name> -> /usr/lib/invfs/tools/<name> -> PATH */
-static int pack_tool_resolvable(const char *tool)
+/* a `requires` tool must resolve the way the exec layer will look for it:
+ * $INVFS_TOOLS/<name> -> /usr/lib/invfs/tools/<name> -> <pack>/bin/<name>
+ * (the pack-sibling convention the helpers themselves use) -> PATH */
+static int pack_tool_resolvable(const char *pdir, const char *tool)
 {
     static const char tooldir[] = "/usr/lib/invfs/tools";
     const char *dir = getenv("INVFS_TOOLS");
+    char pbin[4096];
+    int n;
 
     if (dir && *dir && dir_has_tool(dir, strlen(dir), tool)) return 1;
     if (dir_has_tool(tooldir, sizeof tooldir - 1, tool)) return 1;
+    if (pdir) {
+        n = snprintf(pbin, sizeof pbin, "%s/bin", pdir);
+        if (n > 0 && (size_t)n < sizeof pbin &&
+            dir_has_tool(pbin, (size_t)n, tool))
+            return 1;
+    }
     return on_path(tool);
 }
 
@@ -808,7 +817,7 @@ static int pack_probe_impl(pack_entry *p)
         if (!tl || tl >= sizeof tok) return 0;
         memcpy(tok, r, tl);
         tok[tl] = '\0';
-        if (!pack_tool_resolvable(tok)) return 0;
+        if (!pack_tool_resolvable(p->dir, tok)) return 0;
         if (!comma) break;
         r = comma + 1;
     }

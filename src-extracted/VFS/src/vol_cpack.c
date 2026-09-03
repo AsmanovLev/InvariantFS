@@ -158,6 +158,10 @@ typedef struct {
     const char *ro_path;    /* RO file: the input (or rebuild recipe) */
     const char *rw_dir;     /* RW subtree: the scratch/output dir (may
                              * be NULL — the estimate child is read-only) */
+    const char *requires;   /* comma list of extra tools the pack's helpers
+                             * exec (grandchildren): each is resolved and
+                             * whitelisted RO+EXEC (e.g. p7z's 7zz living
+                             * outside /usr/bin). NULL when none. */
 } tool_sandbox;
 
 
@@ -358,6 +362,44 @@ static void landlock_apply(const tool_sandbox *sb, char *const argv[])
     ll_add_rule(rfd, ro, sb->pack_dir);
     ll_add_exe(rfd, argv[0]);
     ll_add_argv_files(rfd, argv);
+    /* grandchildren: the manifest's requires= tools (e.g. p7z's helper
+     * shells out to 7zz). Same resolution as the probe side:
+     * $INVFS_TOOLS -> /usr/lib/invfs/tools -> the pack's own bin/ ->
+     * PATH (the last via ll_add_exe's X_OK walk) */
+    if (sb->requires) {
+        char req[512];
+        char *tok, *save = NULL;
+        snprintf(req, sizeof req, "%s", sb->requires);
+        for (tok = strtok_r(req, ",", &save); tok;
+             tok = strtok_r(NULL, ",", &save)) {
+            char buf[4096];
+            const char *td = getenv("INVFS_TOOLS");
+            int n;
+            if (td && *td) {
+                n = snprintf(buf, sizeof buf, "%s/%s", td, tok);
+                if (n > 0 && (size_t)n < sizeof buf &&
+                    access(buf, X_OK) == 0) {
+                    ll_add_rule(rfd, LANDLOCK_ACCESS_FS_READ_FILE |
+                                LANDLOCK_ACCESS_FS_EXECUTE, buf);
+                    continue;
+                }
+            }
+            n = snprintf(buf, sizeof buf, "/usr/lib/invfs/tools/%s", tok);
+            if (access(buf, X_OK) == 0) {
+                ll_add_rule(rfd, LANDLOCK_ACCESS_FS_READ_FILE |
+                            LANDLOCK_ACCESS_FS_EXECUTE, buf);
+                continue;
+            }
+            n = snprintf(buf, sizeof buf, "%s/bin/%s",
+                         sb->pack_dir ? sb->pack_dir : "", tok);
+            if (sb->pack_dir && access(buf, X_OK) == 0) {
+                ll_add_rule(rfd, LANDLOCK_ACCESS_FS_READ_FILE |
+                            LANDLOCK_ACCESS_FS_EXECUTE, buf);
+                continue;
+            }
+            ll_add_exe(rfd, tok);   /* PATH */
+        }
+    }
     ll_add_rule(rfd, LANDLOCK_ACCESS_FS_READ_FILE, sb->ro_path);
     ll_add_rule(rfd, rw, sb->rw_dir);
 
@@ -675,6 +717,7 @@ int invfs_codec_pack_exec(const invfs_codec *c, int is_encode,
     sb.pack_dir = def->dir;
     sb.ro_path = in_path;
     sb.rw_dir = sb_dirname(rwbuf, sizeof rwbuf, out_path);
+    sb.requires = def->requires;   /* grandchildren tools (e.g. 7zz) */
     return tool_exec_lim(argv, tool_mem_cap_for(c), &sb);
 #endif
 }
@@ -719,6 +762,7 @@ int invfs_codec_pack_cmd(const invfs_codec *c, int cmd,
     sb.pack_dir = def->dir;
     sb.ro_path = in ? in : recipe;
     sb.rw_dir = sb_dirname(rwbuf, sizeof rwbuf, out);
+    sb.requires = def->requires;   /* grandchildren tools (e.g. 7zz) */
     return tool_exec_lim(argv, tool_mem_cap_for(c), &sb);   /* WP12(d) */
 #endif
 }
@@ -748,6 +792,7 @@ int invfs_codec_pack_estimate(const invfs_codec *c, const char *in_path,
     sb.pack_dir = def->dir;
     sb.ro_path = in_path;
     sb.rw_dir = NULL;
+    sb.requires = def->requires;
     if (tool_exec_out_lim(argv, out, sizeof out, tool_mem_cap_for(c),
                           &sb) != 0)
         return -1;   /* WP12(d): the estimate child is capped too */
@@ -2533,10 +2578,11 @@ int vol_containerpack_sweep(invfs_volume *v, uint64_t inode_id,
     invfs_meta_pub keep;
     int have_keep, rc = 0;
 
+    if (getenv("INVFS_DEBUG_PACKS")) fprintf(stderr,"[cpack] enter %s\n", name);
     if (!pc->probe || !pc->probe()) return 1;    /* tools absent: wait */
     def = invfs_codec_pack_def(pc);
-    if (!def || !def->is_container) return 0;
-    if (strlen(name) + CPACK_NAME_RESERVE > INVFS_MAX_NAME) return 0;
+    if (!def || !def->is_container) { if (getenv("INVFS_DEBUG_PACKS")) fprintf(stderr,"[cpack] not-a-container-def\n"); return 0; }
+    if (strlen(name) + CPACK_NAME_RESERVE > INVFS_MAX_NAME) { if (getenv("INVFS_DEBUG_PACKS")) fprintf(stderr,"[cpack] name too long\n"); return 0; }
     {
         /* leftover siblings can only come from a decomposition killed
          * mid-commit (a finished one is CONTAINER-stamped and never
@@ -2547,20 +2593,20 @@ int vol_containerpack_sweep(invfs_volume *v, uint64_t inode_id,
         if (vol_find(v, tn) != 0)
             vol_delete_siblings(v, name);
     }
-    if (tool_tmpdir(dir, sizeof dir) != 0) return 0;
+    if (tool_tmpdir(dir, sizeof dir) != 0) { if (getenv("INVFS_DEBUG_PACKS")) fprintf(stderr,"[cpack] tmpdir failed\n"); return 0; }
     snprintf(pin, sizeof pin, "%s/in", dir);
     snprintf(ptable, sizeof ptable, "%s/table", dir);
     snprintf(precipe, sizeof precipe, "%s/recipe", dir);
     snprintf(pout, sizeof pout, "%s/out", dir);
     snprintf(pmap, sizeof pmap, "%s/map", dir);
     snprintf(pmdir, sizeof pmdir, "%s/mbr", dir);
-    if (tool_write(pin, full, full_len) != 0) goto out;
+    if (tool_write(pin, full, full_len) != 0) { if (getenv("INVFS_DEBUG_PACKS")) fprintf(stderr,"[cpack] tool_write pin failed\n"); goto out; }
 
     /* 1. enumerate: the member table */
     if (invfs_codec_pack_cmd(pc, INVFS_PACK_CMD_ENUMERATE, pin, NULL,
                              NULL, NULL, ptable) != 0)
         { if (getenv("INVFS_DEBUG_PACKS")) fprintf(stderr,"[cpack] enumerate failed\n"); goto out; }
-    if (slurp_file(ptable, &table, &table_len) != 0) goto out;
+    if (slurp_file(ptable, &table, &table_len) != 0) { if (getenv("INVFS_DEBUG_PACKS")) fprintf(stderr,"[cpack] table slurp failed\n"); goto out; }
     if (cpack_parse_table(table, table_len, &mem, &nmem, &sum_usize) != 0 ||
         nmem == 0)
         { if (getenv("INVFS_DEBUG_PACKS")) fprintf(stderr,"[cpack] table parse failed nmem=%zu\n", nmem); goto out; }
@@ -2619,11 +2665,11 @@ int vol_containerpack_sweep(invfs_volume *v, uint64_t inode_id,
     if (invfs_codec_pack_cmd(pc, INVFS_PACK_CMD_STRIP, pin, NULL,
                              NULL, NULL, precipe) != 0)
         { if (getenv("INVFS_DEBUG_PACKS")) fprintf(stderr,"[cpack] strip failed\n"); goto out; }
-    if (slurp_file(precipe, &recipe, &recipe_len) != 0) goto out;
+    if (slurp_file(precipe, &recipe, &recipe_len) != 0) { if (getenv("INVFS_DEBUG_PACKS")) fprintf(stderr,"[cpack] recipe slurp failed\n"); goto out; }
 
     /* 4. extract every member into the scratch dir as "<idx>"; the pack
      * must produce exactly the announced byte count */
-    if (mkdir(pmdir, 0700) != 0) goto out;
+    if (mkdir(pmdir, 0700) != 0) { if (getenv("INVFS_DEBUG_PACKS")) fprintf(stderr,"[cpack] mkdir failed\n"); goto out; }
     for (i = 0; i < nmem; i++) {
         char idxbuf[16], pm[256];
         struct stat st;
