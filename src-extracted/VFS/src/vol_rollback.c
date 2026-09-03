@@ -524,6 +524,186 @@ int vol_ckp_realize(invfs_volume *v, uint64_t *freed_blocks_out)
 }
 
 
+/* ==================== WP24-lite: read-only time-travel at CKP0 ==========
+ *
+ * ckp_stage_replay is vol_rollback's non-destructive twin: same staging,
+ * same verification, but the staged journal prefix is replayed from
+ * MEMORY and nothing is written. vol_open_at calls it in place of
+ * l2p_replay; the inode-area scan then stops at the checkpoint's append
+ * pointer (see vol_open_inner), so the whole in-memory view -- L2P, name
+ * index, WP22d consistent cut -- is exactly the sweep-start state.
+ *
+ * Why this is sound while the present keeps moving: the checkpoint pins
+ * (a) the journal prefix as it was at arm time (the staging run -- a
+ * compaction REPLACES the active slot, so the live slots no longer hold
+ * it), and (b) every block the cut references: post-checkpoint frees went
+ * to retmap, never back to the allocator, and the "\x01reten" registry
+ * keeps them counted live for fsck. Both exist exactly while CKP0 lives;
+ * a realized checkpoint makes the cut unprovable, so vol_open_at refuses.
+ */
+int ckp_stage_replay(invfs_volume *v)
+{
+    uint64_t jstart, jpos, iapos, stage_len, slot_idx = 0;
+    uint64_t off, replayed = 0;
+    int stage_slotted = 0;
+    invfs_jrn_hdr sh;
+    uint8_t *buf = NULL;
+    uint32_t prev = 0;
+    int rc = -3;
+
+    if (!v || !v->ck_present) return -3;
+
+    jstart = v->journal_start * (uint64_t)INVFS_BLOCK_SIZE;
+    jpos = v->ck.journal_pos;
+    iapos = v->ck.inode_area_pos;
+
+    /* Sniff the first staged block for the JRN0 header (the rollback's
+     * rule): the stage is the used prefix of the ACTIVE slot at arm time
+     * (slot header + image + chained log), or the pre-WP22d legacy flat
+     * log for a checkpoint armed by a pre-slot build. */
+    if (v->ck.stage_blocks) {
+        if (io_seek(&v->io, v->ck.stage_pba * (uint64_t)INVFS_BLOCK_SIZE) != 0 ||
+            io_read(&v->io, &sh, sizeof sh) != 0)
+            return -1;
+        if (memcmp(sh.magic, INVFS_JRN_MAGIC, 4) == 0 &&
+            sh.version == INVFS_JRN_VERSION &&
+            invfs_crc32c(&sh, offsetof(invfs_jrn_hdr, crc32c)) == sh.crc32c)
+            stage_slotted = 1;
+    }
+    if (stage_slotted) {
+        /* the armed slot: the checkpoint's journal_pos names the append
+         * point inside it; the staged content starts at that slot's base */
+        uint64_t rel = (jpos / INVFS_BLOCK_SIZE) - v->journal_start;
+        uint64_t rem;
+        slot_idx = rel / INVFS_JRN_SLOT_BLOCKS;
+        rem = rel % INVFS_JRN_SLOT_BLOCKS;
+        if (jpos < jstart || slot_idx >= INVFS_JRN_SLOTS || rem == 0)
+            return -3;
+        stage_len = jpos - (jstart + slot_idx * INVFS_JRN_SLOT_BLOCKS *
+                            INVFS_BLOCK_SIZE);
+    } else {
+        stage_len = jpos - jstart;   /* underflow caught by the check below */
+        if (jpos < jstart ||
+            (stage_len % sizeof(invfs_l2p_entry)) != 0)
+            return -3;
+    }
+
+    /* Descriptor sanity (the CRC already proved the bytes; these bounds
+     * are what the cut relies on). Same rule as the rollback: a failure
+     * here means the descriptor or its staging was clobbered -- refuse
+     * LOUDLY; nothing was or will be written. */
+    if (stage_len > (uint64_t)INVFS_JOURNAL_BLOCKS * INVFS_BLOCK_SIZE ||
+        iapos < v->inode_area_start * (uint64_t)INVFS_BLOCK_SIZE ||
+        iapos > v->inode_area_end ||
+        (v->ck.stage_blocks &&
+         (v->ck.stage_pba >= v->sb.total_blocks ||
+          v->ck.stage_blocks > v->sb.total_blocks - v->ck.stage_pba)) ||
+        stage_len > v->ck.stage_blocks * (uint64_t)INVFS_BLOCK_SIZE)
+        return -3;
+
+    v->l2p_count = 0;
+    v->jops_n = 0;
+    v->j_heat_n = 0;
+    v->j_heat_all = 0;
+
+    if (stage_len) {
+        buf = (uint8_t *)malloc((size_t)stage_len);
+        if (!buf) return -1;
+        if (io_seek(&v->io, v->ck.stage_pba * (uint64_t)INVFS_BLOCK_SIZE) != 0 ||
+            io_read(&v->io, buf, (size_t)stage_len) != 0) {
+            free(buf);
+            return -1;
+        }
+    }
+
+    if (stage_slotted) {
+        /* verify (rollback phase 1, read-only): the slot header, the whole
+         * image's CRC, then the chained log to exactly the staged end --
+         * a reused or clobbered stage can never parse. */
+        uint64_t ib, jp2;
+        uint32_t icrc;
+        memcpy(&sh, buf, sizeof sh);
+        if (sh.image_bytes > stage_len - INVFS_BLOCK_SIZE ||
+            sh.image_bytes % sizeof(invfs_l2p_entry) != 0)
+            goto out;
+        ib = sh.image_bytes;
+        icrc = ib ? invfs_crc32c(buf + INVFS_BLOCK_SIZE, (size_t)ib) : 0;
+        if (icrc != sh.image_crc)
+            goto out;
+        /* the chain seed covers the header fields preceding image_crc
+         * (jrn_seed, static in volume.c -- keep the formula in sync) */
+        prev = invfs_crc32c(&sh, offsetof(invfs_jrn_hdr, image_crc));
+        if (ib) {
+            const invfs_l2p_entry *le = (const invfs_l2p_entry *)
+                (buf + INVFS_BLOCK_SIZE + ib - sizeof(invfs_l2p_entry));
+            prev = le->crc;
+        }
+        jp2 = INVFS_BLOCK_SIZE + ib;
+        while (jp2 + sizeof(invfs_l2p_entry) <= stage_len) {
+            const invfs_l2p_entry *e = (const invfs_l2p_entry *)(buf + jp2);
+            if (invfs_crc32c_update(prev, e,
+                    offsetof(invfs_l2p_entry, crc)) != e->crc)
+                break;
+            prev = e->crc;
+            jp2 += sizeof(*e);
+        }
+        if (jp2 != stage_len)
+            goto out;
+        /* verified: apply the image, then the log */
+        prev = invfs_crc32c(&sh, offsetof(invfs_jrn_hdr, image_crc));
+        for (off = 0; off < ib; off += sizeof(invfs_l2p_entry)) {
+            const invfs_l2p_entry *e = (const invfs_l2p_entry *)
+                (buf + INVFS_BLOCK_SIZE + off);
+            if (l2p_apply(v, e) != 0) { rc = -1; goto out; }
+            prev = e->crc;
+            replayed++;
+        }
+        for (off = INVFS_BLOCK_SIZE + ib; off < stage_len;
+             off += sizeof(invfs_l2p_entry)) {
+            const invfs_l2p_entry *e = (const invfs_l2p_entry *)(buf + off);
+            if (l2p_apply(v, e) != 0) { rc = -1; goto out; }
+            prev = e->crc;
+            replayed++;
+        }
+        v->j_slotted = 1;
+        v->j_slot = (uint32_t)slot_idx;
+        v->j_seq = sh.seq;
+        v->j_last_crc = prev;
+    } else {
+        /* legacy flat log: every staged entry must pass its bare CRC (the
+         * rollback's rule), then apply in order */
+        for (off = 0; off + sizeof(invfs_l2p_entry) <= stage_len;
+             off += sizeof(invfs_l2p_entry)) {
+            invfs_l2p_entry e;
+            memcpy(&e, buf + off, sizeof e);
+            if (invfs_crc32c(&e, offsetof(invfs_l2p_entry, crc)) != e.crc)
+                goto out;
+        }
+        for (off = 0; off + sizeof(invfs_l2p_entry) <= stage_len;
+             off += sizeof(invfs_l2p_entry)) {
+            invfs_l2p_entry e;
+            memcpy(&e, buf + off, sizeof e);
+            if (l2p_apply(v, &e) != 0) { rc = -1; goto out; }
+            replayed++;
+        }
+        v->j_slotted = 0;
+    }
+    v->journal_pos = jpos;
+    l2p_seed_heat(v);
+    if (getenv("INVFS_DEBUG"))
+        printf("[ckp_stage_replay] checkpoint #%llu: replayed %llu staged "
+               "L2P entries (%s), journal_pos=%llu\n",
+               (unsigned long long)v->ck.sweep_seq,
+               (unsigned long long)replayed,
+               stage_slotted ? "slotted" : "legacy",
+               (unsigned long long)v->journal_pos);
+    rc = 0;
+out:
+    free(buf);
+    return rc;
+}
+
+
 int vol_rollback(invfs_volume *v, uint64_t *reclaimed_out)
 {
     invfs_fsck_report rep;
