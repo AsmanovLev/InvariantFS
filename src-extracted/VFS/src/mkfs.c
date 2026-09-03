@@ -10,6 +10,10 @@
  *   RAW Zone: 20% of remaining
  *   Shadow Space: 80% of remaining
  *
+ * WP-DZ: the RAW/Shadow split written here is the ADVISORY initial policy
+ * of the allocator, not a hard region split (one shared free pool;
+ * raw-class writes prefer the raw extent and overflow into shadow blocks
+ * without changing class -- see alloc_raw_or_shadow in volume.c).
  * Backing store is either an image file or a raw block device -- see blkio.c.
  * On a device the size argument is a cap, not a setting: the partition is as
  * large as it is, and asking for more than it holds is an error rather than

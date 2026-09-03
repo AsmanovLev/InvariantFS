@@ -9,14 +9,14 @@ volume.c + volume_internal.h + 18 vol_* modules).
 
 | file | lines | contents |
 |---|---|---|
-| volume.c | 1520 | Core: vol_open/vol_close (flock, DIRTY/CLEAN + auto-recovery), superblock, bitmap allocator (zones, reserve/hard_min ENOSPC policy, READONLY latch), L2P journal replay/flush, name/id/dir indexes, vol_sync, profile/env parsing |
+| volume.c | 1520 | Core: vol_open/vol_close (flock, DIRTY/CLEAN + auto-recovery), superblock, bitmap allocator (per-extent alloc_blocks + the WP-DZ raw-class preference alloc_raw_or_shadow over the shared pool; reserve/hard_min ENOSPC policy, READONLY latch), L2P journal replay/flush, name/id/dir indexes, vol_sync, profile/env parsing |
 | volume.h | 482 | Public volume-layer API (the only header tools/FUSE include) |
 | volume_internal.h | 1126 | Shared internals of the split: invfs_volume struct, constants, small inline helpers, cross-module prototypes (ex-statics) |
 | vol_read.c | 1197 | Read path: seg_read_checked (framed segments + seal recovery), vol_read_range/vol_read_file, recursive container/zip-window reads, text-batch slice reads (TZ_ARC_TAG) |
 | vol_write.c | 740 | WP4b incremental ranged-write sessions (vol_write_begin/range/truncate/commit/abort, segment fork+alias, swept-file materialization) |
 | vol_records.c | 1161 | Inode-area records: create/retire/delete (PB7 shared-pba guard), INO2 metadata ext (vol_get/apply_meta, symlink/special creators), xattr TLVs, storage-class stamps, sibling cleanup |
 | vol_dirs.c | 649 | Virtual directories (prefix-based), vol_rename, vol_unlink(-_name), vol_hardlink, vol_replace_file, ensure_path |
-| vol_sweep.c | 1623 | Sweep walk + class predicate (vol_sweep_one), builtin container dispatch (ZIP/TAR/GZ/PNG/FLAC/PMP), codecpack sweep (vol_pack_sweep), JXL retry, pending drain, vol_compute_stats/hot counters |
+| vol_sweep.c | 1623 | Sweep walk + class predicate (vol_sweep_one), builtin container dispatch (ZIP/TAR/GZ/PNG/FLAC/PMP), codecpack sweep (vol_pack_sweep), JXL retry, pending drain, vol_compute_stats (WP-DZ: physical per-zone bytes by CONTENT CLASS via L2P, claim-once)/hot counters |
 | vol_textzone.c | 1094 | WP10 text batches (PPMd) + WP14a binary batches (ZSTD+BCJ): accumulators, \x01tzb owner, seal-time decode+memcmp verify, GC |
 | vol_dedupe.c | 280 | WP12(h) offline per-segment dedupe (BLAKE3 over stored segments, L2P remap) |
 | vol_heat.c | 470 | WP19 heat counters (rheat/wheat in L2P pad), decay, hot-member promotion |
@@ -36,7 +36,7 @@ volume.c + volume_internal.h + 18 vol_* modules).
 
 | file | lines | contents |
 |---|---|---|
-| invarifs.h | 459 | On-disk format: superblock, invfs_l2p_entry (36B journaled), inode rec + INO2 meta ext, AST entries, RDP0/RSZ0/CKP0 descriptors, INVFS_ALGO_*/INVFS_CLASS_*/ITYP enums, zone constants |
+| invarifs.h | 459 | On-disk format: superblock (zone fields = WP-DZ advisory policy), invfs_l2p_entry (36B journaled), inode rec + INO2 meta ext, AST entries, RDP0/RSZ0/CKP0/CMP0/DEVT block-0 descriptors, INVFS_ALGO_*/INVFS_CLASS_*/ITYP enums, zone constants |
 | codec.c / codec.h | 1354 / 210 | Codec registry (sniff/probe/caps/dec_mem/generation, memoized probes) + codecpack loader (INVFS_PACK_MAX=16, pack overrides, PACKONLY) + profile ladder |
 | ppmd_codec.c / ppmd_codec.h | 134 / — | PPMd8 wrapper (o=8/64MB/CUT_OFF; union Stream fix documented in AUDIT §6) |
 | bcj_x86.c / bcj_x86.h | 150 / 27 | x86 call/jump BCJ prefilter (WP14a binary batches) |
@@ -62,7 +62,7 @@ volume.c + volume_internal.h + 18 vol_* modules).
 
 | file | lines | contents |
 |---|---|---|
-| mkfs.c | 311 | invf-mkfs (layout: sb → bitmap → journal → inode area → RAW/Shadow zones; reserve/hard_min defaults; device head zeroing) |
+| mkfs.c | 311 | invf-mkfs (layout: sb → bitmap → journal → inode area → RAW/Shadow extents, the WP-DZ advisory defaults; reserve/hard_min defaults; device head zeroing; WP25 two-device form) |
 | verify.c | 265 | invf-verify (integrity check, --deep) |
 | fsck.c | 131 | invf-fsck CLI (thin driver over the vol_fsck.c engine, -f repair) |
 | resize.c | 778 | invf-resize CLI (WP18: stage metadata payload, arm RSZ0, flip RECOVERY) |

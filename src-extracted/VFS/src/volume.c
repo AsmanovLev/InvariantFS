@@ -2577,29 +2577,43 @@ uint64_t alloc_blocks(invfs_volume *v, uint64_t zone_start, uint64_t zone_len,
     return 0;  /* ENOSPC */
 }
 
+/* WP-DZ: allocate `nblocks` for RAW-class content out of the shared free
+ * pool. The zone fields of the superblock are ADVISORY POLICY, not hard
+ * regions: the raw extent is the preferred home of raw-class content (and
+ * its fair share), and once that share cannot satisfy the request the same
+ * allocation simply continues into shadow-space blocks. Either way the
+ * content class is RAW -- *zone_out is always INVFS_ZONE_RAW. Placement no
+ * longer decides what a block IS, so there is no spill path and no
+ * mixed-zone file: the sweep's RAW walk keys on the zone TAG, so every
+ * raw-class segment stays sweepable wherever it landed (pre-WP-DZ the
+ * spill tagged overflow segments BINARY, which made the sweep skip the
+ * file forever). Raw-class blocks in the shadow extent are ordinary
+ * occupants there: the seal's pba-range stripes cover them like any other
+ * occupied shadow block. The reverse crossing does not exist --
+ * shadow-class requests keep their canonical shadow-side placement (the
+ * seal's stripes are defined over the shadow extent, and on two-device
+ * volumes dev1 is the canonical side); only the RAW class is elastic.
+ * The preference costs O(1) when RAW is full: alloc_blocks short-circuits
+ * on the per-region free count / fail-run hint before touching the
+ * bitmap. */
 uint64_t alloc_raw_or_shadow(invfs_volume *v, uint64_t nblocks, int *zone_out)
 {
     uint64_t pba = alloc_blocks(v, v->sb.raw_zone_start, v->sb.raw_zone_blocks,
                                 nblocks, 0);
-    if (pba == 0) {
+    if (pba == 0)
         pba = alloc_blocks(v, v->sb.shadow_zone_start, v->sb.shadow_zone_blocks,
                            nblocks, 0);
-        if (pba) *zone_out = INVFS_ZONE_BINARY;
-    } else {
-        *zone_out = INVFS_ZONE_RAW;
-    }
+    if (zone_out) *zone_out = INVFS_ZONE_RAW;
     return pba;
 }
 
 
-/* write raw data to RAW zone, returns first pba (0 on error) */
+/* write raw-class data (RAW-preferred over the shared pool, WP-DZ);
+ * returns first pba (0 on error) */
 uint64_t vol_write_raw(invfs_volume *v, const uint8_t *data, size_t len)
 {
     uint64_t nblocks = (len + INVFS_BLOCK_SIZE - 1) / INVFS_BLOCK_SIZE;
-    uint64_t pba = alloc_blocks(v, v->sb.raw_zone_start, v->sb.raw_zone_blocks, nblocks, 0);
-    if (pba == 0)   /* RAW exhausted -> spill into SHADOW (still uncompressed) */
-        pba = alloc_blocks(v, v->sb.shadow_zone_start, v->sb.shadow_zone_blocks,
-                           nblocks, 0);
+    uint64_t pba = alloc_raw_or_shadow(v, nblocks, NULL);
     if (pba == 0) return 0;
     if (io_seek(&v->io, pba * INVFS_BLOCK_SIZE) != 0 ||
         io_write(&v->io, data, (size_t)nblocks * INVFS_BLOCK_SIZE) != 0)

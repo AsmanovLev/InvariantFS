@@ -186,6 +186,12 @@ typedef struct {
     uint64_t total_blocks;          /* 0x20 */
     uint64_t metadata_zone_start;   /* 0x28 */
     uint64_t metadata_zone_blocks;  /* 0x30 */
+    /* WP-DZ: the four zone fields are ADVISORY POLICY, not hard regions --
+     * one shared free-block pool; raw-class allocation prefers the raw
+     * extent and overflows into shadow-space blocks with the class tag
+     * unchanged (zone=0). Seal stripes stay pinned to the shadow pba
+     * extent. No format change: old volumes run with this geometry as the
+     * initial policy state. */
     uint64_t raw_zone_start;        /* 0x38 */
     uint64_t raw_zone_blocks;       /* 0x40 */
     uint64_t shadow_zone_start;     /* 0x48 */

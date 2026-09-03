@@ -61,7 +61,7 @@ int main(int argc, char **argv)
         printf("  biggest file     : %.1f KiB %s\n",
                st.biggest_size / 1024.0, st.biggest_name);
         printf("  est. ratio       : %.2fx logical/on-disk\n", ratio);
-        printf("zones detail       :\n");
+        printf("zones detail (physical used = content class, WP-DZ):\n");
         {
             double lr = st.logic_raw_bytes / 1048576.0;
             double ls = st.logic_shadow_bytes / 1048576.0;
@@ -77,9 +77,15 @@ int main(int argc, char **argv)
                        ls, ps, ps ? ls / ps : 0);
             else
                 printf("  SHADOW: empty (not swept yet)\n");
-            if (st.logic_text_bytes)
-                printf("  TEXT  : logic %8.1f MiB | shared batches (PPMd text / ZSTD binary)\n",
-                       st.logic_text_bytes / 1048576.0);
+            if (st.logic_text_bytes || st.text_used_bytes)
+                printf("  TEXT  : logic %8.1f MiB | used %8.1f MiB "
+                       "(shared batches, PPMd text / ZSTD binary)\n",
+                       st.logic_text_bytes / 1048576.0,
+                       st.text_used_bytes / 1048576.0);
+            if (st.unclaimed_used_bytes)
+                printf("  unclaimed: %.1f MiB (allocated, no live reference;"
+                       " fsck reclaims)\n",
+                       st.unclaimed_used_bytes / 1048576.0);
         }
     }
     /* WP25: two-device state -- device table, mirror freshness, the RAW

@@ -45,7 +45,7 @@
 set -e
 set -o pipefail
 
-REPO=${REPO:-/home/user/InvariantFS}   # override with the worktree when testing a branch
+REPO="$(cd "$(dirname "$0")/.." && pwd)"
 B=$REPO/bin
 WORK=/dev/shm/wp4writepath
 IMG1=wp4wp-a.img     # legs A B C D1 D2 E F

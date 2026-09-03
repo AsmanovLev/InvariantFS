@@ -2263,7 +2263,11 @@ static int invf_getxattr(const char *path, const char *name, char *value,
     }
     /* hot population counters: maintained incrementally by the index,
      * seeded automatically by the open scan. O(1) read here; the only
-     * non-trivial part is a 256KiB bitmap pass for per-zone usage. */
+     * non-trivial part is a 256KiB bitmap pass for per-zone usage.
+     * WP-DZ: the raw/shadow_used_bytes numbers are per-REGION (the
+     * advisory extents -- exactly the view the WP23/WP26 pressure ladder
+     * reads); per-CONTENT-CLASS physical usage is the offline walk in
+     * vol_compute_stats (invf-stats). */
     if (strcmp(path, "/") == 0 && strcmp(name, "user.invfs.stats") == 0) {
         char buf[1024];
         int n;

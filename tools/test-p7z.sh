@@ -54,6 +54,7 @@ set -e
 set -o pipefail
 
 REPO="${REPO:-$(cd "$(dirname "$0")/.." && pwd)}"   # override with the worktree when testing a branch
+export REPO
 B=$REPO/bin
 PACK=$REPO/tools/codecpacks/p7z.codecpack
 WORK=/dev/shm/wp16p7z
@@ -95,7 +96,7 @@ rnd = random.Random(42)
 
 # --- member content -------------------------------------------------------
 texts = []
-for root, _dirs, files in os.walk("/home/user/InvariantFS/tools/busybox-src"):
+for root, _dirs, files in os.walk(os.environ["REPO"] + "/tools/busybox-src")  # fixture input (submodule):
     for n in sorted(files):
         if n.endswith(".c"):
             p = os.path.join(root, n)

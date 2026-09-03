@@ -49,6 +49,7 @@ set -e
 set -o pipefail
 
 REPO="${REPO:-$(cd "$(dirname "$0")/.." && pwd)}"   # override with the worktree when testing a branch
+export REPO
 B=$REPO/bin
 PACK=$REPO/tools/codecpacks/qcow2.codecpack
 WORK=/dev/shm/wp16qcow2
@@ -216,7 +217,7 @@ def tile(blob, n):
 
 # content sources: a real busybox C source + a real x86-64 ELF
 text = None
-for root, _dirs, files in os.walk("/home/user/InvariantFS/tools/busybox-src"):
+for root, _dirs, files in os.walk(os.environ["REPO"] + "/tools/busybox-src")  # fixture input (submodule):
     for n in sorted(files):
         if n.endswith(".c"):
             p = os.path.join(root, n)

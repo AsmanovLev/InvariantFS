@@ -35,16 +35,17 @@ zstd/lz4/miniz/blake3/flacx, libfuse3 for the daemon.
 
 | tool | purpose |
 |---|---|
-| `invf-mkfs <img> [gb]` | format; env `INVFS_META_FRAC=N` scales metadata zone (default 64 → N=1/N of volume; 16 recommended for churny workloads) |
+| `invf-mkfs <img> [gb]` | format; env `INVFS_META_FRAC=N` scales metadata zone (default 64 → N=1/N of volume; 16 recommended for churny workloads). WP25 two-device form: `invf-mkfs <img0> <gb0> <img1> <gb1>` (dev0 fast = metadata + RAW + tier arena, dev1 = metadata mirror + canonical shadow) |
 | `invf-fsck [-f] <img>` | check; `-f` repairs orphans/bitmap/journal. Auto-recovery: a DIRTY volume with an anomaly-free scan self-heals to CLEAN+rw at mount (`INVFS_AUTO_RECOVER=0` disables) |
 | `invf-ls / cat / cp / stat` | read-side CLI (position-kill aware) |
 | `invf-import <vol> <dir>` | direct engine-level tree import (~50k files in seconds). `INVFS_IMPORT_PREFIX=a/b` imports under an existing dir; uid/gid default to 0 (`INVFS_IMPORT_KEEP_OWNER=1` keeps) |
 | `invf-sweep <img> [--dry-run] [--seal\|--unseal] [--realize]` | offline sweep driver; `--seal` re-seals shadow parity after the run (WP20), `--realize` accepts the previous sweep's checkpoint (WP21) |
-| `invf-stats <img>` | full statistics walk incl per-zone compression ratios |
-| `invf-resize <img> ...` | WP18 offline volume grow/shrink (RSZ0 roll-forward, idempotent apply at next open) |
+| `invf-stats <img>` | full statistics walk incl per-class compression ratios (WP-DZ: physical used-bytes are by CONTENT CLASS -- the AST zone tag -- not by pba region; zone extents are advisory) |
+| `invf-resize <img> ...` | WP18 offline volume grow/shrink (RSZ0 roll-forward, idempotent apply at next open); the advisory RAW share is preserved, the shadow side absorbs the delta |
 | `invf-rollback <img>` | WP21 undo the last sweep from its CKP0 checkpoint (bit-exact to pre-sweep state) |
 | `meta_probe <img> <name>` | developer probe (**mutates**: applies a test setattr) |
 | `meta_probe <img> --heat <name>` | WP19 read-only dump: storage class, per-segment AST (zone/algo), per-entry heat counters (rheat/wheat from the L2P pad) |
+| `meta_probe <img> --zonefree` | per-REGION free counters (advisory extents; what the WP23/WP26 pressure ladder reads) |
 
 ## FUSE daemon
 
@@ -57,6 +58,23 @@ zstd/lz4/miniz/blake3/flacx, libfuse3 for the daemon.
 - Background sweep is **opt-in**: `INVFS_SWEEP_INTERVAL=<sec>`.
   Manual sweep: `kill -USR1 $(pidof invf-fuse)` or, inside the mount,
   `setfattr -n user.invfs.sweep -v 1 /` (root only).
+- Pressure ladder (doc/12): the write path adapts codec effort to RAW-fill
+  (WP23: <80% LZ4, ≥80% ZSTD-3, ≥95% ZSTD-6; `INVFS_RAW_ADAPT=0` pins
+  legacy); `-o raw_watermark=<pct>` (env `INVFS_RAW_WATERMARK`, WP26)
+  kicks a checkpoint-armed full sweep pass when the RAW-region fill
+  exceeds the mark (re-arms only on rising fill, so the rollback window
+  survives). Zone extents are advisory (WP-DZ): past the RAW share,
+  raw-class writes simply continue into shadow-space blocks — no spill
+  path, the sweep still sees them.
+- `-o at_checkpoint[=<seq>]` (WP24-lite): read-only time-travel mount at
+  the live sweep checkpoint — the view is exactly the sweep-start state,
+  the present is never written.
+- Permissions (WP-A): mode/uid/gid enforced daemon-side on every entry
+  point; POSIX ACLs stored as `system.posix_acl_*` xattr blobs and
+  honored in access checks (`getfacl`/`setfacl` work).
+- Pack/tool children (codec- and containerpacks) run under RLIMIT_AS and,
+  on Linux ≥ 5.13, a Landlock whitelist sandbox (WP12d;
+  `INVFS_PACK_SANDBOX=0` opts out).
 - Control namespace on the mount root:
 
       getfattr --only-values -n user.invfs /        # RAM summary
@@ -80,8 +98,18 @@ nlink, symlink target, xattr TLVs. Directory anchors are records named
 `path/`. Hard links clone the record under a new name sharing the inode
 (no block refcounts yet -- see WP6 caveat in volume.h).
 
+Zone geometry (WP-DZ): the superblock's raw/shadow zone fields are the
+advisory initial policy (RAW = 1/5 at mkfs), not a hard split — one shared
+free pool, raw-class allocation prefers the raw extent and overflows into
+shadow-space blocks without changing class (placement ≠ tag). Seal stripes
+stay pinned to the shadow pba extent, so overflow blocks are parity-covered
+like any shadow occupant. Old volumes need no migration.
+
 Superblock flag `VOLF_META2`; old readers skip unknown ext via rec_len.
-Endianness: host LE (x86_64).
+Endianness: host LE (x86_64). Optional block-0 descriptors: RDP0 (seal
+config, WP20b), RSZ0 (in-flight resize, WP18), CKP0 (sweep checkpoint,
+WP21), CMP0 (in-flight inode compaction, WP22e), DEVT (two-device table,
+WP25) — all absent-zeros on volumes that never used the feature.
 
 ## Bootable VM (Gentoo/OpenRC root on InvariantFS)
 
@@ -124,11 +152,11 @@ before building the disk.
   filesystem itself closes CLEAN when the daemon receives SIGTERM.
 - Hot counters (`user.invfs.stats`) count unique names; `invf-stats`
   counts live record versions -- numbers converge after compaction.
+  The xattr's raw/shadow_used_bytes are per-REGION (the pressure-ladder
+  view); `invf-stats` reports physical usage per CONTENT CLASS (WP-DZ).
 
 ## Workstreams
 
 WP3 durability barriers/group-commit · WP4d recipe cache (drop per-read
-re-verification) · WP5 codec neutrality +
-version pinning (see impl_docs/WP5-codec-seekability.md) · WP6 block
-refcounts for hardlinks · compaction (online or fsck-time) · regression
-suite.
+re-verification) · WP5 codec neutrality (NoSweep pinning) · WP6 block
+refcounts for hardlinks · regression suite.
