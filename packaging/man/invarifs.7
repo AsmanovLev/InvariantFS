@@ -1,0 +1,203 @@
+.TH INVARIFS 7 "2026-09" "InvariantFS" "Miscellaneous Information"
+.SH NAME
+invarifs \- InvariantFS volume format, environment and codecpack ABI overview
+.SH DESCRIPTION
+InvariantFS is a semantic, content-addressed filesystem with a
+bit-exactness invariant: every compression is verified by
+decompress-and-compare before it is trusted; containers (ZIP/TAR, and
+external formats via containerpacks) are decomposed into member inodes
+that flow through the whole codec pipeline recursively; transcodes happen
+only where bit-exactness is proven per file. The on-disk format is the
+InvariFS volume format v2 (magic
+.RB \(dq InvariFS\e0 \(dq);
+the de-facto spec is
+.I invarifs.h
+plus
+.I volume.c
+in the source tree.
+.SH VOLUME FORMAT
+The inode area is append-only:
+.B [INOD rec_len ... CRC][DELT tombstone CRC]
+pairs; v2 tombstones kill by record position (the
+.I file_size
+field), legacy ones by inode id. Per-file metadata lives in an
+.B INO2
+extension block appended after the AST recipe inside the record: type,
+mode, uid/gid, mtime/atime, nlink, symlink target, xattr TLVs. Directory
+anchors are records named
+.RB \(dq path/ \(dq.
+Hard links clone the record under a new name sharing the inode.
+.PP
+Superblock flags:
+.B VOLF_READONLY
+(operator/tool hold),
+.B VOLF_META2
+(records may carry the INO2 ext; old readers skip unknown extensions via
+.I rec_len ),
+.B VOLF_RO_SPACE
+(the free-space latch that raises READONLY when blocks run out).
+Endianness: host little-endian (x86_64).
+.PP
+Data lives in zones: RAW (unprocessed segments), TEXT (cross-file PPMd
+batch members, ReiserFS-style packing into 4 MiB batches sorted by
+language family), BINARY (binary ZSTD(+BCJ) batches). Every file carries a
+storage-class stamp (an internal
+.B invfs.class
+xattr: UNCOMPRESSIBLE, CODEC, CONTAINER, GENERIC, GENERIC_MEMLIMIT,
+GENERIC_GUARD, TEXT, BATCHED_BIN, DEFER_ENOSPC) that records which codec
+owns it and arms the retry logic when a newer codecpack generation
+appears.
+.SH TOOLS
+.TP
+.B invf-mkfs
+format a volume
+.TP
+.B invf-fuse
+FUSE daemon (mount)
+.TP
+.B invf-sweep
+offline sweep driver (classification/transcode/seal)
+.TP
+.B invf-verify
+structural + content verification
+.TP
+.B invf-fsck
+check & repair
+.TP
+.B invf-resize
+offline grow/shrink
+.TP
+.B invf-rollback
+undo the last sweep from its checkpoint
+.TP
+.B invf-import
+engine-level tree import
+.TP
+.B invf-stats
+statistics walk incl. per-zone ratios
+.TP
+.B invf-ls, invf-cat, invf-cp, invf-stat, invf-zip
+read-side CLI
+.SH ENVIRONMENT
+.TP
+.B INVFS_META_FRAC
+mkfs: metadata zone divisor (default 64)
+.TP
+.B INVFS_SWEEP_INTERVAL
+invf-fuse: background sweep period in seconds (default: off)
+.TP
+.B INVFS_PROFILE
+codec effort: fast|balanced|dense|archive (default balanced)
+.TP
+.B INVFS_ARC_BYTES
+ARC cache budget (default 256M; see \-o arc_limit)
+.TP
+.B INVFS_DEC_MEM_LIMIT
+decoder working-set limit (default 512M)
+.TP
+.B INVFS_MIN_GAIN_PCT
+UNCOMPRESSIBLE benefit threshold (default 0.5)
+.TP
+.B INVFS_CODECPACKS
+colon-separated extra codecpack search dirs
+.TP
+.B INVFS_TOOLS
+external codec tool search dir (first priority)
+.TP
+.B INVFS_AUTO_RECOVER
+0 disables DIRTY->CLEAN auto-recovery at mount
+.TP
+.B INVFS_IMPORT_PREFIX
+invf-import: import under this directory
+.TP
+.B INVFS_IMPORT_KEEP_OWNER
+invf-import: 1 keeps source uid/gid (default 0)
+.TP
+.B INVFS_RAW_WATERMARK
+invf-fuse: RAW fill % that kicks an early sweep
+.TP
+.B INVFS_DEV1
+second device path of a two-device (WP25) volume
+.TP
+.B INVFS_DEBUG, INVFS_DEBUG_PACKS
+extra engine/pack diagnostics on stderr
+.TP
+.B INVFS_PACK_SANDBOX
+0 disables the Landlock sandbox on pack helpers
+.SH CODECPACKS
+External codecs and container formats plug in as
+.I codecpacks :
+directories
+.IB name .codecpack
+containing a
+.B manifest
+(key = value) plus helper programs. Search order:
+.BR $INVFS_CODECPACKS
+(colon-separated), then
+.BR /usr/lib/invfs/codecpacks .
+Helper binaries named in the manifest resolve through
+.BR $INVFS_TOOLS ,
+.BR /usr/lib/invfs/tools ,
+the pack's own
+.B bin/
+directory, then PATH. A pack whose tools are missing is skipped: affected
+files wait RAW and unstamped until the tool appears.
+.PP
+Manifest keys:
+.BR name ,
+.BR algo
+(6-bit on-disk id),
+.BR type
+.RB ( container
+or absent for a whole-file codec),
+.BR pack_version
+(manifest format),
+.B generation
+(encoder-set version; bumping re-arms GENERIC_GUARD/UNCOMPRESSIBLE
+retries),
+.BR caps ,
+.BR dec_mem ,
+.B sniff.magic / sniff.offset / sniff.ext ,
+and for codecs
+.BR encode / decode
+plus optional
+.BR estimate ,
+or for containers the four commands
+.BR enumerate / extract / strip / rebuild
+plus optional
+.B map
+(seekable reads without the pack) and
+.BR estimate .
+Commands are fixed argv with
+.BR {in} , {out} , {idx} , {dir} , {recipe} , {pack}
+placeholders; no shell; exit 0 = ok, anything else = refuse. The FS
+memcmps a guard rebuild against the original before committing anything;
+a lying pack simply loses the file to generic storage.
+.PP
+The full ABI (v1.1: seekable containers, DEFER_ENOSPC, codec profiles) is
+documented in
+.I impl_docs/WP16-containerpacks.md
+and
+.I impl_docs/WP10-textzone-codec-registry.md
+in the source tree (packaged as the documentation of the invfs source
+package).
+.SH FILES
+.TP
+.B /usr/lib/invfs/codecpacks
+System codecpack directory.
+.TP
+.B /usr/lib/invfs/tools
+Shared external codec tool directory.
+.TP
+.B /etc/invfs/volumes
+Volume list read by
+.BR invfs-verify.service (8)
+(one image/device path per line).
+.SH SEE ALSO
+.BR invf-mkfs (8),
+.BR invf-fuse (8),
+.BR invf-sweep (8),
+.BR invf-verify (8),
+.BR invf-fsck (8),
+.BR invf-resize (8),
+.BR invf-rollback (8)

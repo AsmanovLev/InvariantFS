@@ -1,0 +1,50 @@
+.TH INVF-FSCK 8 "2026-09" "InvariantFS" "System Administration"
+.SH NAME
+invf-fsck \- check and repair an InvariantFS volume
+.SH SYNOPSIS
+.B invf-fsck
+.I image
+.RB [ \-f | \-\-fix ]
+.RB [ \-\-repair ]
+.RB [ \-q ]
+.SH DESCRIPTION
+.B invf-fsck
+rebuilds the L2P table and the used-block bitmap from the inode area (AST
+recipes are the source of truth for block ownership) and reports orphaned
+blocks (allocated but referenced by no live AST), missing blocks
+(referenced but free), stale L2P journal entries, and bad inode records
+(CRC/length).
+.PP
+By default the tool is a read-only report.
+.B \-f
+applies the fixes: it rewrites the bitmap, the journal, and the superblock
+state to CLEAN.
+.PP
+A volume that was interrupted (superblock DIRTY) normally needs no manual
+fsck: at the next mount an anomaly-free scan self-heals it to CLEAN+rw.
+.B INVFS_AUTO_RECOVER=0
+disables that behaviour; this tool is the manual path.
+.PP
+On two-device (WP25) volumes a degraded mount (dev0 absent) is read-only:
+the report mode works from the dev1 mirror, but
+.B \-f
+is refused until dev0 is reattached.
+.SH OPTIONS
+.TP
+.BR \-f , " \-\-fix"
+Apply repairs instead of only reporting.
+.TP
+.B \-\-repair
+WP20b layer-2 RS recovery: after the structural scan, reconstruct
+CRC-failed shadow segments from the RS(32+m2, 32) parity. Stripes damaged
+beyond m2 are reported and left untouched.
+.TP
+.B \-q
+Quiet: suppress per-item progress.
+.SH EXIT STATUS
+0 when no issues were found (or all fixed); 1 on unrepairable errors or
+open failure; 2 on usage errors.
+.SH SEE ALSO
+.BR invf-verify (8),
+.BR invf-sweep (8),
+.BR invarifs (7)

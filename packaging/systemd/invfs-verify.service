@@ -1,0 +1,10 @@
+[Unit]
+Description=InvariantFS deep content verify
+Documentation=man:invf-verify(8) man:invarifs(7)
+
+[Service]
+Type=oneshot
+# Verify every volume listed (one image/device path per line, '#' comments
+# allowed) in /etc/invfs/volumes. No file / empty file = no-op success.
+# invf-verify opens read-only and never locks, so mounted volumes are fine.
+ExecStart=/usr/bin/sh -c '[ -f /etc/invfs/volumes ] || exit 0; while read -r vol; do case "$vol" in ""|"#"*) continue ;; esac; /usr/bin/invf-verify --deep "$vol" || exit 1; done < /etc/invfs/volumes'

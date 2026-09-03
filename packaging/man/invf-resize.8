@@ -1,0 +1,34 @@
+.TH INVF-RESIZE 8 "2026-09" "InvariantFS" "System Administration"
+.SH NAME
+invf-resize \- grow or shrink an InvariantFS volume offline
+.SH SYNOPSIS
+.B invf-resize
+.IR image | device
+.IR newsize [ K | M | G ]
+.SH DESCRIPTION
+.B invf-resize
+resizes an InvariantFS volume (WP18). The volume must be unmounted.
+.I newsize
+is a byte count with an optional K/M/G suffix and is rounded down to a
+whole block; the minimum volume size is 64 MiB.
+.PP
+The resize is staged as an RSZ0 record and rolled forward idempotently at
+the next volume open, so an interrupted resize simply continues.
+.PP
+For two-device (WP25) volumes
+.I newsize
+is the total across both devices; growth lands on the tail device (dev1,
+named by the
+.B INVFS_DEV1
+environment variable or the hint recorded at mkfs time). Shrinking a
+two-device volume is refused.
+.SH ENVIRONMENT
+.TP
+.B INVFS_DEV1
+Path of the second device of a two-device volume.
+.SH EXIT STATUS
+0 on success; 1 on errors (too-small target, I/O failure, refusal); 2 on
+usage errors.
+.SH SEE ALSO
+.BR invf-mkfs (8),
+.BR invarifs (7)

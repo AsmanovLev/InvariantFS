@@ -1,0 +1,38 @@
+#!/usr/bin/ash
+# mkinitcpio runtime hook for an InvariantFS rootfs (WP-PKG).
+# Installed as /usr/lib/initcpio/hooks/invfs.
+#
+# Claims the root mount when the kernel cmdline says
+#   rootfstype=invfs root=<device>     (or  root=invfs:<device>)
+# by replacing the mount handler; the rest of the boot is stock.
+
+run_hook() {
+    if [ "$rootfstype" = "invfs" ] || [ "${root%%:*}" = "invfs" ]; then
+        mount_handler=invfs_mount_handler
+    fi
+}
+
+invfs_mount_handler() {
+    local mp="$1"
+    local dev="${root#invfs:}"
+
+    modprobe fuse 2>/dev/null
+
+    dev="$(resolve_device "$dev")" || panic "invfs: cannot resolve root device '$dev'"
+
+    msg ":: mounting InvariantFS volume '$dev' on real root"
+    # rootflags (if any) ride into the daemon as -o options; libfuse
+    # understands the generic ones (ro/rw), invf-fuse parses its own
+    if [ -n "${rootflags:-}" ]; then
+        invf-fuse -o "$rootflags" "$dev" "$mp"
+    else
+        invf-fuse "$dev" "$mp"
+    fi
+    if [ $? -eq 0 ]; then
+        msg "invfs: root fs mounted ($dev)"
+    else
+        panic "invfs: failed to mount '$dev'"
+    fi
+}
+
+# vim: set ft=sh ts=4 sw=4 et:

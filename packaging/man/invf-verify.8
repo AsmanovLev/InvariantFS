@@ -1,0 +1,36 @@
+.TH INVF-VERIFY 8 "2026-09" "InvariantFS" "System Administration"
+.SH NAME
+invf-verify \- verify an InvariantFS volume's integrity
+.SH SYNOPSIS
+.B invf-verify
+.IR image | device
+.RB [ \-\-deep ]
+.SH DESCRIPTION
+.B invf-verify
+checks an InvariantFS volume for structural and content integrity. The
+volume is opened read-only and is
+.I not
+locked: a mounted InvariantFS can be verified while it runs.
+.PP
+The default pass validates the superblock (magic, checksum, block size),
+the block bitmap accounting, and the inode-area record chain. With
+.B \-\-deep
+every stored byte of every file is additionally decoded through the real
+read path - batches, container rebuilds, codec blobs - and checked, so a
+deep verify proves the volume serves bit-exact content end to end.
+.PP
+The
+.BR invfs-verify.timer (8)
+systemd unit runs a weekly deep verify over the volumes listed in
+.IR /etc/invfs/volumes .
+.SH OPTIONS
+.TP
+.B \-\-deep
+Decode and compare every file's content, not just the structures.
+.SH EXIT STATUS
+0 when the volume is clean; 1 on any failure (the failures are enumerated
+on stderr); 2 on usage errors.
+.SH SEE ALSO
+.BR invf-fsck (8),
+.BR invf-sweep (8),
+.BR invarifs (7)

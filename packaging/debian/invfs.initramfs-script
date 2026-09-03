@@ -1,0 +1,121 @@
+#!/bin/sh
+# initramfs-tools runtime script for an InvariantFS rootfs (WP-PKG).
+# Installed as /usr/share/initramfs-tools/scripts/local-top/invfs.
+#
+# initramfs-tools has no mount-helper dispatch for FUSE filesystems, so
+# this script -- which is SOURCED by local_mount_root() via local_top()
+# (verified against initramfs-tools-core 0.142) -- arms three function
+# overrides that only fire for an invfs root:
+#
+#   local_device_setup(): the stock version requires get_fstype(1) to
+#       succeed on the device; libblkid does not know the InvariFS
+#       signature, so the stock wait loop would panic after the slumber.
+#       The override waits with resolve_device() only.
+#   checkfs():  no-op for the invfs root (invf-fsck is a manual tool;
+#       a DIRTY-but-sound volume self-heals at mount).
+#   mount():    intercepts exactly the `mount -t invfs ROOT rootmnt` call
+#       local_mount_root() finishes with, and routes it to invf-fuse.
+#       Everything else delegates to the real mount binary.
+#
+# Kernel command line:
+#   rootfstype=invfs root=<device>      (or  root=invfs:<device>)
+
+PREREQ=""
+
+prereqs()
+{
+	echo "$PREREQ"
+}
+
+case "${1:-}" in
+prereqs)
+	prereqs
+	exit 0
+	;;
+esac
+
+# Not our root? Stay out of the way entirely.
+case "${ROOTFSTYPE}" in
+invfs) : ;;
+*)
+	case "${ROOT}" in
+	invfs:*) ROOT="${ROOT#invfs:}"; ROOTFSTYPE=invfs ;;
+	*) return 0 ;;
+	esac
+	;;
+esac
+
+log_begin_msg "invfs: root filesystem is InvariantFS"
+
+invfs_device_setup()
+{
+	local dev_id="$1"
+	local real_dev
+	local time_elapsed
+	local slumber
+
+	wait_for_udev 10
+
+	slumber=30
+	if [ "${ROOTDELAY:-0}" -gt "$slumber" ]; then
+		slumber=$ROOTDELAY
+	fi
+
+	while ! real_dev=$(resolve_device "${dev_id}"); do
+		sleep 1
+		time_elapsed="$(time_elapsed)"
+		if [ "${time_elapsed}" -ge "$slumber" ]; then
+			panic "ALERT!  ${dev_id} does not exist.  Dropping to a shell!"
+		fi
+	done
+
+	DEV="${real_dev}"
+}
+
+local_device_setup()
+{
+	invfs_device_setup "$@"
+}
+
+checkfs()
+{
+	# invf-fsck is a manual/offline tool; a DIRTY-but-sound volume
+	# self-heals at mount (INVFS_AUTO_RECOVER). Nothing to do here.
+	:
+}
+
+mount()
+{
+	local fstype=""
+	local dev=""
+	local dir=""
+	local next_t=0
+	local arg
+
+	# local_mount_root() finishes with exactly
+	#   mount ${roflag} -t "${FSTYPE}" ${ROOTFLAGS} "${ROOT}" "${rootmnt}"
+	# so the filesystem type is the -t payload and the device/dir are the
+	# LAST TWO positional arguments (an empty ${ROOTFLAGS} expands away).
+	for arg in "$@"; do
+		if [ "$next_t" = 1 ]; then
+			fstype="$arg"
+			next_t=0
+			continue
+		fi
+		case "$arg" in
+		-t) next_t=1 ;;
+		-*) ;;                       # roflag & co carry no payload here
+		*)  dev="$dir"; dir="$arg" ;;
+		esac
+	done
+
+	if [ "$fstype" = "invfs" ] && [ -n "$dev" ] && [ -n "$dir" ]; then
+		modprobe fuse 2>/dev/null
+		log_begin_msg "invfs: mounting $dev on $dir"
+		invf-fuse "$dev" "$dir"
+		return
+	fi
+
+	# not ours: delegate to the real mount
+	command mount "$@"
+}

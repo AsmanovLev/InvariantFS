@@ -1,0 +1,127 @@
+.TH INVF-FUSE 8 "2026-09" "InvariantFS" "System Administration"
+.SH NAME
+invf-fuse \- mount an InvariantFS volume via FUSE
+.SH SYNOPSIS
+.B invf-fuse
+.RB [ \-f ]
+.RB [ \-o
+.IR opt [, opt ...]]
+.I image mountpoint
+.SH DESCRIPTION
+.B invf-fuse
+is the InvariantFS FUSE daemon. It mounts the volume stored in
+.I image
+(a regular file or a block device) at
+.IR mountpoint .
+Without
+.B \-f
+the daemon detaches into the background after a successful mount; with
+.B \-f
+it stays in the foreground.
+.PP
+The daemon adds the mount options
+.BR attr_timeout=1 , ac_attr_timeout=1 , entry_timeout=1
+and
+.B max_read=1048576
+by default, and tags the mount source as
+.BI invfs[ basename ]
+so
+.BR mount (8)
+output and
+/proc/mounts
+identify the volume. User-supplied
+.B \-o
+options come later and win.
+.PP
+SIGTERM/SIGINT shut the daemon down cleanly: the volume is closed with a
+CLEAN superblock. A DIRTY volume with an anomaly-free scan self-heals to
+CLEAN+rw at the next mount (see
+.BR invf-fsck (8)).
+.SH OPTIONS
+In addition to the standard
+.BR fuse (8)
+options, the following InvariantFS-specific options are consumed before the
+list reaches libfuse:
+.TP
+.BI arc_limit= K | M | G
+ARC cache budget for decoded units (default 256M, or
+.BR INVFS_ARC_BYTES ).
+A whole-file decode unit larger than half the budget is refused at sweep
+time; the read path never refuses stored data.
+.TP
+.BI dec_mem_limit= K | M | G
+Per-unit decoder working-set limit (default 512M, or
+.BR INVFS_DEC_MEM_LIMIT ).
+Codecs whose decode needs more are declined at sweep time and the file falls
+back to generic storage.
+.TP
+.BR at_checkpoint [ =seq ]
+Mount the read-only view at a live sweep checkpoint (WP21/WP24). Without
+.IR seq ,
+the live checkpoint is used (K=1 contract).
+.TP
+.BI attr_t= seconds
+Attribute/entry cache TTL (default 1.0;
+.B 0
+disables kernel caching entirely so every stat hits the daemon).
+.TP
+.BI raw_watermark= pct
+RAW-zone fill percent that makes the daemon kick an early checkpoint-armed
+sweep (WP26); 0 disables. See
+.BR INVFS_RAW_WATERMARK .
+.SH ENVIRONMENT
+.TP
+.B INVFS_SWEEP_INTERVAL
+Seconds between automatic background sweeps. Unset (default) means
+.IR no
+background sweeping: automatic transcoding of a root filesystem is
+deliberately opt-in. A manual pass is triggered by
+.BR "kill \-USR1" ,
+by
+.BR setfattr " \-n user.invfs.sweep \-v 1 /"
+inside the mount (root only), or by
+.BR invf-sweep (8)
+run offline.
+.TP
+.B INVFS_PROFILE
+Codec effort profile:
+.BR fast | balanced | dense | archive
+(default
+.BR balanced ;
+an unset variable reproduces existing volumes byte-identically). The profile
+is re-exported to codecpack helper processes.
+.TP
+.B INVFS_CODECPACKS
+Colon-separated extra directories scanned for
+.B *.codecpack
+packs before
+.BR /usr/lib/invfs/codecpacks .
+.TP
+.B INVFS_TOOLS
+Directory searched first for external codec tools, before
+.B /usr/lib/invfs/tools
+and PATH.
+.TP
+.B INVFS_AUTO_RECOVER
+Set to 0 to disable the DIRTY-volume auto-recovery at mount.
+.TP
+.B INVFS_ARC_BYTES , INVFS_DEC_MEM_LIMIT
+Fallbacks for the
+.BR \-o " arc_limit" / dec_mem_limit
+mount options.
+.SH CONTROL INTERFACE
+The mount root carries a control namespace:
+.PP
+.nf
+getfattr --only-values -n user.invfs /        # RAM summary
+getfattr --only-values -n user.invfs.stats /  # hot counters + zone usage
+setfattr -n user.invfs.sweep -v 1 /           # trigger a manual sweep (root)
+.fi
+.SH EXIT STATUS
+0 on success; non-zero if the volume cannot be opened or the mount fails.
+.SH SEE ALSO
+.BR invf-mkfs (8),
+.BR invf-sweep (8),
+.BR invf-fsck (8),
+.BR invarifs (7),
+.BR fuse (8)

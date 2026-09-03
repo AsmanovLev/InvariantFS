@@ -1,0 +1,116 @@
+.TH INVF-SWEEP 8 "2026-09" "InvariantFS" "System Administration"
+.SH NAME
+invf-sweep \- InvariantFS offline sweep driver (classification, transcode, seal)
+.SH SYNOPSIS
+.B invf-sweep
+.I image
+.RB [ \-\-dry\-run ]
+.RB [ \-\-fast ]
+.RB [ \-\-compact ]
+.RB [ \-\-seal | \-\-unseal ]
+.RB [ \-\-realize ]
+.br
+.B invf-sweep
+.I image
+.RB [ \-\-redundant\-blocks
+.IR f ]
+.RB [ \-\-redundant\-paranoic
+.IR f [: rs-vm | rs-cauchy ]]
+.RB [ \-\-free\-redundant ]
+.RB [ \-\-redundant\-bench ]
+.br
+.B invf-sweep
+.I image
+.BI \-\-extract\-packs " dir"
+.SH DESCRIPTION
+.B invf-sweep
+walks every live file on an unmounted InvariantFS volume and drives it
+through the storage pipeline: content classification, cross-file PPMd text
+batching, binary ZSTD+BCJ batching, container decomposition (ZIP/TAR/GZ and
+container codecpacks), whole-file codec transcodes (e.g. JPEG -> lossless
+JXL via the jxl codecpack), offline dedupe, and the generic per-segment
+ZSTD floor. Every transform is guarded: the result is decoded back and
+compared against the original bytes before anything is committed, so the
+bit-exactness invariant holds by construction.
+.PP
+The volume must not be mounted. For mounted volumes use the daemon trigger
+.RB ( "kill \-USR1"
+on the
+.BR invf-fuse (8)
+process, or
+.BR setfattr " \-n user.invfs.sweep \-v 1 /"
+inside the mount); the
+.BR invfs-sweep.timer (8)
+systemd unit automates exactly that.
+.SH OPTIONS
+.TP
+.B \-\-dry\-run
+Report what would be done; commit nothing.
+.TP
+.B \-\-fast
+Cheap pass: RAW files take only the generic per-segment recompress - no
+classification, transcodes, decomposition, batching or dedupe.
+.TP
+.B \-\-compact
+Run only the inode-area compaction pass.
+.TP
+.B \-\-seal
+After the sweep, re-seal shadow parity (WP20: XOR stripes, optionally an RS
+layer-2). This is the bit-rot recovery layer; note the sweep retires RAW
+originals, so an unsealed volume has no second copy.
+.TP
+.B \-\-unseal , \-\-free\-redundant
+Drop the redundancy layer.
+.TP
+.BI \-\-redundant\-blocks " f"
+Fraction of the volume devoted to redundancy blocks.
+.TP
+.BI \-\-redundant\-paranoic " f"[: rs-vm | rs-cauchy ]
+Paranoid RS parity fraction and variant.
+.TP
+.B \-\-redundant\-bench
+Benchmark the redundancy encoder.
+.TP
+.B \-\-realize
+Accept the previous sweep's checkpoint: free its retention registry and
+clear CKP0. After this,
+.BR invf-rollback (8)
+can no longer undo that sweep.
+.TP
+.BI \-\-extract\-packs " dir"
+WP23 sweepboot helper: copy the volume's self-hosted codecpack directory
+(on the volume at
+.I /.invfs/codecpacks
+or
+.IR /usr/lib/invfs/codecpacks )
+to
+.IR dir ,
+engine-side, with no sweep and no FUSE mount. Used by initramfs
+maintenance boots.
+.SH ENVIRONMENT
+.TP
+.B INVFS_PROFILE
+Codec effort profile
+.BR fast | balanced | dense | archive
+(default
+.BR balanced ).
+When set, the tool logs the effective generic zstd level.
+.TP
+.B INVFS_ARC_BYTES , INVFS_DEC_MEM_LIMIT
+Admission budgets; see
+.BR invf-fuse (8).
+.TP
+.B INVFS_CODECPACKS , INVFS_TOOLS
+Codecpack and tool search paths; see
+.BR invarifs (7).
+.TP
+.B INVFS_MIN_GAIN_PCT
+Minimum compression benefit (percent, default 0.5) before a file is
+classified UNCOMPRESSIBLE.
+.SH EXIT STATUS
+0 on success (including "nothing to do"); non-zero on I/O or volume errors.
+.SH SEE ALSO
+.BR invf-fuse (8),
+.BR invf-rollback (8),
+.BR invf-verify (8),
+.BR invarifs (7)

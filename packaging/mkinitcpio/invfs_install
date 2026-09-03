@@ -1,0 +1,47 @@
+#!/bin/bash
+# mkinitcpio install hook for an InvariantFS rootfs (WP-PKG).
+# Installed as /usr/lib/initcpio/install/invfs.
+
+build() {
+    add_module fuse
+
+    # the daemon + offline tools (fsck/verify rescue, sweep for
+    # maintenance boots, rollback for the WP21 checkpoint)
+    add_binary invf-fuse
+    add_binary invf-sweep
+    add_binary invf-fsck
+    add_binary invf-verify
+    add_binary invf-rollback
+
+    # the system codecpack dir, staged wholesale. Compiled helpers
+    # (<pack>/bin/*) go through add_binary so their shared libraries are
+    # resolved; manifests and scripts ride along as plain files (a script
+    # whose interpreter is absent from the initramfs simply probes
+    # unavailable and its content waits RAW -- the builtin codecs work).
+    local pack f
+    for pack in /usr/lib/invfs/codecpacks/*.codecpack; do
+        [[ -d $pack ]] || continue
+        while IFS= read -r f; do
+            case $f in
+                */bin/*) add_binary "$f" ;;
+                *)       add_file "$f" ;;
+            esac
+        done < <(find "$pack" -type f)
+    done
+
+    add_runscript
+}
+
+help() {
+    cat <<HELPEOF
+This hook mounts an InvariantFS volume as the root filesystem via the
+invf-fuse daemon. Kernel command line:
+
+    rootfstype=invfs root=<device>
+(or the alias  root=invfs:<device>)
+
+The fuse module and the system codecpack dir are staged into the image.
+HELPEOF
+}
+
+# vim: set ft=sh ts=4 sw=4 et:
