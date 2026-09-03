@@ -23,7 +23,7 @@ invfs_mount_handler() {
     msg ":: mounting InvariantFS volume '$dev' on real root"
     # rootflags (if any) ride into the daemon as -o options; libfuse
     # understands the generic ones (ro/rw), invf-fuse parses its own
-    if [ -n "$rootflags" ]; then
+    if [ -n "${rootflags:-}" ]; then
         invf-fuse -o "$rootflags" "$dev" "$mp"
     else
         invf-fuse "$dev" "$mp"

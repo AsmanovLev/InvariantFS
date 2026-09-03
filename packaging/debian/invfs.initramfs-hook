@@ -13,7 +13,7 @@ prereqs()
 	echo "$PREREQ"
 }
 
-case "$1" in
+case "${1:-}" in
 prereqs)
 	prereqs
 	exit 0
@@ -42,8 +42,9 @@ if [ -d /usr/lib/invfs/codecpacks ]; then
 	cp -a /usr/lib/invfs/codecpacks/. "$DESTDIR/usr/lib/invfs/codecpacks/"
 	for helper in /usr/lib/invfs/codecpacks/*.codecpack/bin/*; do
 		[ -f "$helper" ] || continue
+		packdir=${helper%/bin/*}	# /usr/lib/invfs/codecpacks/<pack>
 		if ldd "$helper" >/dev/null 2>&1; then
-			copy_exec "$helper" "/usr/lib/invfs/codecpacks/$(basename "$(dirname "$helper")")/bin" >/dev/null
+			copy_exec "$helper" "$packdir/bin" >/dev/null
 		fi
 	done
 fi

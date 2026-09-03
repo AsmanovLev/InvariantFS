@@ -17,8 +17,3 @@ override_dh_auto_install:
 # timers stay opt-in: ship them disabled (systemctl enable invfs-sweep.timer)
 override_dh_installsystemd:
 	dh_installsystemd --no-enable
-
-# the fuse daemon must not be stripped of its build-id etc -- leave the
-# default dh_strip behaviour untouched.
-
-.PHONY: build

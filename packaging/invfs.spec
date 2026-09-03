@@ -1,4 +1,5 @@
-%global _dwz_low_mem_die_limit 0
+# the engine Makefile builds -O2 without -g; there is no debuginfo to split
+%global debug_package %{nil}
 
 Name:           invfs
 Version:        0.1.0

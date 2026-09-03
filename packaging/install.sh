@@ -70,6 +70,11 @@ if [ "$WITH_CODECPACKS" != "0" ]; then
                 mkdir -p "$dst/bin"
                 "$CC" -std=c11 -O2 -Wall -Wextra -o "$dst/bin/$helper" "$src"
                 chmod 755 "$dst/bin/$helper"
+            elif [ ! -x "$dst/bin/$helper" ]; then
+                # no compiler and no committed prebuilt helper: the pack
+                # ships without its tool and will probe absent at runtime
+                # (its content waits RAW; the builtin codecs still work)
+                echo "install.sh: WARNING: $name: cannot build helper '$helper' (no $CC) and no prebuilt bin/$helper -- pack will probe absent" >&2
             fi
         done
     done
