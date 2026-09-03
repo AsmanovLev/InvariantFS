@@ -82,6 +82,27 @@ int main(int argc, char **argv)
                        st.logic_text_bytes / 1048576.0);
         }
     }
+    /* WP25: two-device state -- device table, mirror freshness, the RAW
+     * mirror and the dev0 tier-arena copies. Absent on single-device
+     * volumes (the print is the compat surface). */
+    if (vol_ndev(v) == 2) {
+        uint64_t mblocks = 0, tblocks = 0, cpba = 0, dpba = 0;
+        uint64_t mcnt = vol_rawm_count(v, &mblocks);
+        uint64_t tcnt = vol_tier_count(v, &tblocks, &cpba, &dpba);
+        printf("two-device (WP25)  :\n");
+        printf("  devices          : %d%s\n", vol_ndev(v),
+               vol_degraded(v) ? " (DEGRADED: dev0 absent, read-only)" : "");
+        printf("  mirror           : %s\n",
+               vol_mirror_stale(v) ? "STALE (resync at next flush)"
+                                   : "in sync");
+        printf("  raw mirror       : %" PRIu64 " segments, %" PRIu64
+               " blocks\n", mcnt, mblocks);
+        printf("  tier (dev0 copies): %" PRIu64 " live, %" PRIu64
+               " blocks\n", tcnt, tblocks);
+        if (tcnt)
+            printf("  first tier copy  : canonical pba %" PRIu64
+                   " -> dev0 pba %" PRIu64 "\n", cpba, dpba);
+    }
     vol_close(v);
     return 0;
 }

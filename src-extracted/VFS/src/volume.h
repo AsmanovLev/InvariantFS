@@ -592,3 +592,10 @@ uint64_t vol_tier_count(invfs_volume *v, uint64_t *blocks_out,
                         uint64_t *first_cpba, uint64_t *first_dpba);
 /* RAW mirror: live mirrored segment count + blocks. */
 uint64_t vol_rawm_count(invfs_volume *v, uint64_t *blocks_out);
+/* WP25 rule 9: the sweep's tier-migration pass. After the WP19 decay +
+ * promotion: copy read-hot canonical (dev1) segments into the dev0 tier
+ * arena (canonical never moves), and demote (free) the coldest dev0
+ * copies while the arena free share is under 20%. No-op on single-device
+ * and degraded volumes. 0 = ok (the pass prints its own counts),
+ * <0 = error. */
+int  vol_tier_migrate(invfs_volume *v);

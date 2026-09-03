@@ -760,7 +760,10 @@ static int vmux_pread1(invfs_volume *v, uint64_t off, void *buf, size_t len)
     if (off < v->meta_end_bytes) {
         /* metadata: dev0 primary (unless absent or session-stale), fail
          * over to the dev1 mirror on any io failure. The mirror sits at
-         * the SAME local offset on dev1. */
+         * the SAME local offset on dev1. A session-stale mirror
+         * (dev_skip[1]: its DEVT did not check out at open) is NOT a
+         * failover source -- serving known-old metadata could resurrect
+         * superseded records; fail loudly instead. */
         if (v->io_open[0] && !v->dev_skip[0] &&
             blkio_pread(&v->io, off, buf, len) == 0)
             return 0;
@@ -769,7 +772,7 @@ static int vmux_pread1(invfs_volume *v, uint64_t off, void *buf, size_t len)
             fprintf(stderr, "vol: metadata read failing over to the dev1 "
                     "mirror (dev0 io error)\n");
         }
-        if (v->io_open[1])
+        if (v->io_open[1] && !v->dev_skip[1])
             return blkio_pread(&v->io2, off, buf, len);
         return -1;
     }
@@ -838,7 +841,7 @@ static int vmux_pwrite1(invfs_volume *v, uint64_t off,
                 wrote = 1;
             }
         }
-        if (v->io_open[1]) {
+        if (v->io_open[1] && !v->dev_skip[1]) {
             if (blkio_pwrite(&v->io2, off, buf, len) != 0) {
                 vol_io_error_latch(v, "metadata mirror write (dev1)");
                 return -1;
@@ -848,8 +851,17 @@ static int vmux_pwrite1(invfs_volume *v, uint64_t off,
         return wrote ? 0 : -1;
     }
     if (off < mux_dev0_bytes(v)) {
-        if (!v->io_open[0] || v->dev_skip[0])
+        if (!v->io_open[0] || v->dev_skip[0]) {
+            /* WP25 degraded: the op needs dev0, which is absent -- fail
+             * loudly (EIO) with the plain reason */
+            if (v->degraded && !v->metaread_logged) {
+                v->metaread_logged = 1;
+                fprintf(stderr, "vol: write to device 0 refused: DEGRADED "
+                        "mount (dev0 absent) -- EIO. Reattach dev0 for "
+                        "read-write.\n");
+            }
             return -1;
+        }
         return blkio_pwrite(&v->io, off, buf, len);
     }
     if (!v->io_open[1] || v->dev_skip[1])
@@ -2344,6 +2356,10 @@ int vol_flush(invfs_volume *v)
      * flush contract is vacuously satisfied -- and the superblock write
      * below would otherwise land on the PRESENT volume's block 0. */
     if (v->time_travel) return 0;
+    /* WP25: same for a degraded mount (dev0 absent): vol_mark_dirty
+     * refused every mutation, so nothing is pending; a flush attempt
+     * would only trip the mirror's read-only refusal. */
+    if (v->degraded) return 0;
     /* persist superblock (state / ENOSPC policy fields / READONLY flag) */
     if (vol_write_sb(v) != 0) {
         vol_io_error_latch(v, "superblock write");

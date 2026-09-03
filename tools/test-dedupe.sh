@@ -28,7 +28,7 @@
 set -e
 set -o pipefail
 
-REPO=/home/user/InvariantFS
+REPO=${REPO:-/home/user/InvariantFS}   # override with the worktree when testing a branch
 B=$REPO/bin
 WORK=/dev/shm/wp12dedupe
 IMG=wp12dedupe.img

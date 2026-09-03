@@ -1423,13 +1423,7 @@ int  wp25_rawm_lookup(invfs_volume *v, uint64_t raw_pba,
 int  wp25_tier_lookup(invfs_volume *v, uint64_t cpba,
                       uint64_t *dpba_out, uint64_t *plen_out);
 
-/* Sweep-time tiering pass (WP25 rule 9): after heat decay/promotion, copy
- * read-hot canonical (dev1) segments into the dev0 arena (rheat >= HOT
- * post-decay; canonical never moves), and demote (free the dev0 copies,
- * coldest first) while the arena free share is under the 20% watermark.
- * 0 = ok (counters in v->tier_promoted/tier_demoted/tier_blocks),
- * <0 = error. */
-int  vol_tier_migrate(invfs_volume *v);
+/* vol_tier_migrate (the WP25 rule-9 sweep pass) is public in volume.h. */
 
 /* Mirror one freshly written raw-zone segment onto dev1 (write path of
  * write_segment_blocks / vol_write_raw). 0 = the mirror landed (or is not

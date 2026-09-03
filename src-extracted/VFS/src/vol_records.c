@@ -27,6 +27,16 @@ uint64_t vol_create_file(invfs_volume *v, const char *name,
         return 0;
     }
     if (name_too_long(name)) return 0;
+    /* WP25: refuse BEFORE the first segment write on a read-only volume --
+     * on a degraded mount (dev0 absent) the data write would otherwise be
+     * the first thing to fail, with a raw-zone EIO instead of the plain
+     * EROFS reason (vol_mark_dirty stays the engine-level backstop). */
+    if (!vol_write_enabled(v)) {
+        fprintf(stderr, "invarifs: %s: volume is read-only%s -- write "
+                "refused (EROFS)\n", name,
+                v->degraded ? " (DEGRADED mount: device 0 absent)" : "");
+        return 0;
+    }
     uint64_t inode_id = v->next_inode_id++;
     if (getenv("INVFS_DEBUG"))
         printf("[create_file] next_inode was %llu -> using %llu\n",

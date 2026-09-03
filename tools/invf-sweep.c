@@ -864,6 +864,17 @@ progress:
                             "are intact)\n");
     }
 
+    /* WP25 rule 9: two-device tier migration -- canonical stays on dev1;
+     * read-hot canonical segments get a dev0 acceleration copy, arena
+     * pressure (<20% free) evicts the coldest copies. Runs after the
+     * decay + promotion so post-decay rheat governs (the WP19 hysteresis
+     * applies). No-op on a single-device volume. */
+    if (!dry && !fast && vol_ndev(vol) == 2) {
+        if (vol_tier_migrate(vol) < 0)
+            fprintf(stderr, "tier: migration pass failed (sweep results "
+                            "are intact)\n");
+    }
+
     /* WP12(h): per-segment dedupe between the walk and the text-batch GC
      * (order: walk -> dedupe -> GC -> flush). The walk's transcodes are
      * what create the duplicates worth finding -- identical content lands

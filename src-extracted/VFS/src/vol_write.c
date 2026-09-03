@@ -293,6 +293,10 @@ static int wsession_write_seg_n(invfs_wsession *s, uint32_t j,
         invfs_l2p_entry *ne = &v->l2p[v->l2p_count - 1];
         l2p_set_rheat(ne, v->heat_init);
         ne->pad[2] = s->wheat_carry;
+        /* WP25: a pre-warmed segment is born hot -- the tier-migration
+         * pass keys on this summary (the "set on the increment that
+         * crosses the threshold" convention, here: born past it) */
+        if (v->heat_init >= INVFS_HEAT_HOT) v->heat_any_rhot = 1;
         jrn_pad_sync(v, ne);   /* the queued MAP op carries the pad */
     }
     /* superseded session segment: nothing references it once the new map

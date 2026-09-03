@@ -82,21 +82,60 @@ int main(int argc, char **argv)
 
     /* 4. backing-store size. On a device this is the partition length rounded
      *    down to 4096, which is exactly what mkfs used, so the equality holds
-     *    for both a device and an image file. */
+     *    for both a device and an image file.
+     *    WP25: on a two-device volume (DEVT at 0x2A0) dev0 alone carries only
+     *    dev_blocks[0] of the global total; dev1 (INVFS_DEV1 / the hint)
+     *    carries the rest. Check each against the table. */
     file_blocks = blkio_capacity(&io) / sb.block_size;
+    {
+        invfs_devt dt;
+        memset(&dt, 0, sizeof dt);
+        if (blkio_pread(&io, INVFS_DEVT_OFF, &dt, sizeof dt) == 0 &&
+            memcmp(dt.magic, "DEVT", 4) == 0 && dt.dev_count == 2) {
+            invfs_devt t = dt;
+            t.crc32c = 0;
+            if (invfs_crc32c(&t, sizeof t) == dt.crc32c) {
+                if (file_blocks != dt.dev_blocks[0])
+                    err("device 0 holds %llu blocks, DEVT says %llu",
+                        (unsigned long long)file_blocks,
+                        (unsigned long long)dt.dev_blocks[0]);
+                file_blocks = sb.total_blocks;   /* dev0 leg checked; the
+                        total is dev0+dev1 by construction (dev1's size is
+                        verified at vol_open / by the mux) */
+            }
+        }
+    }
     if (file_blocks != sb.total_blocks)
         err("backing store %llu blocks vs superblock total_blocks %llu",
             (unsigned long long)file_blocks, (unsigned long long)sb.total_blocks);
 
-    /* 5. zone layout: no overlap, full coverage */
-    if (sb.metadata_zone_start != 1)
-        err("metadata_zone_start %llu (expected 1)", (unsigned long long)sb.metadata_zone_start);
-    if (sb.raw_zone_start != sb.metadata_zone_start + sb.metadata_zone_blocks)
-        err("raw zone not contiguous after metadata");
-    if (sb.shadow_zone_start != sb.raw_zone_start + sb.raw_zone_blocks)
-        err("shadow zone not contiguous after raw");
-    if (sb.shadow_zone_start + sb.shadow_zone_blocks != sb.total_blocks)
-        err("zones do not cover the volume");
+    /* 5. zone layout: no overlap, full coverage.
+     * WP25: on a two-device volume the canonical shadow starts on dev1,
+     * past the metadata mirror + the RAW-width reserved gap. */
+    {
+        int twodev = 0;
+        invfs_devt dt;
+        memset(&dt, 0, sizeof dt);
+        if (blkio_pread(&io, INVFS_DEVT_OFF, &dt, sizeof dt) == 0 &&
+            memcmp(dt.magic, "DEVT", 4) == 0 && dt.dev_count == 2) {
+            invfs_devt t = dt;
+            t.crc32c = 0;
+            if (invfs_crc32c(&t, sizeof t) == dt.crc32c)
+                twodev = 1;
+        }
+        if (sb.metadata_zone_start != 1)
+            err("metadata_zone_start %llu (expected 1)", (unsigned long long)sb.metadata_zone_start);
+        if (sb.raw_zone_start != sb.metadata_zone_start + sb.metadata_zone_blocks)
+            err("raw zone not contiguous after metadata");
+        if (twodev) {
+            if (sb.shadow_zone_start != dt.dev_blocks[0] +
+                    sb.raw_zone_start + sb.raw_zone_blocks)
+                err("shadow zone not contiguous after the dev1 mirror span");
+        } else if (sb.shadow_zone_start != sb.raw_zone_start + sb.raw_zone_blocks)
+            err("shadow zone not contiguous after raw");
+        if (sb.shadow_zone_start + sb.shadow_zone_blocks != sb.total_blocks)
+            err("zones do not cover the volume");
+    }
 
     /* 6. bitmap consistency
      *    - superblock + metadata zone must be allocated

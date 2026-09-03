@@ -315,6 +315,20 @@ int wp25_owner_sync(invfs_volume *v)
 
 /* ---------------- write/free hooks ---------------- */
 
+/* Lazy owner creation (the tz_owner_id pattern): a fresh two-device
+ * volume has no owner records yet -- the first mirrored RAW segment / the
+ * first promotion creates its owner as an empty record, which the next
+ * flush's wp25_owner_sync rewrites with the live entries. */
+static uint64_t wp25_owner_id(invfs_volume *v, int is_rawm)
+{
+    uint64_t *slot = is_rawm ? &v->rawm_owner : &v->tier_owner;
+    if (!*slot)
+        *slot = vol_create_file(v, is_rawm ? "\x01rawm" : "\x01tier0",
+                                NULL, 0);
+    return *slot;
+}
+
+
 /* Mirror one freshly written raw-zone segment onto dev1. The buffer is
  * the segment's full padded span (phys_blocks blocks). 0 = mirrored (or
  * gracefully unmirrored, logged); -1 = dev1 io failure (caller latches). */
@@ -325,12 +339,9 @@ int wp25_rawm_write(invfs_volume *v, uint64_t pba, const uint8_t *buf,
     const wp25_ent *old;
     size_t span = (size_t)phys_blocks * INVFS_BLOCK_SIZE;
 
-    if (!v->rawm_owner) {
-        if (!v->rawio_logged) {
-            v->rawio_logged = 1;
-            fprintf(stderr, "vol: no \\x01rawm owner record; RAW segments "
-                    "are NOT mirrored (pre-WP25 volume?)\n");
-        }
+    if (!wp25_owner_id(v, 1)) {
+        fprintf(stderr, "vol: cannot create the \\x01rawm owner record; "
+                "RAW segment left unmirrored\n");
         return 0;
     }
     rel = pba - v->sb.raw_zone_start;
@@ -486,8 +497,10 @@ static int tier_promote_one(invfs_volume *v, uint64_t cpba, uint32_t plen)
 
     if (wp25_get(v->tier, v->tier_n, cpba))
         return 1;
-    if (!v->tier_owner || !v->arena_blocks || !plen)
+    if (!v->arena_blocks || !plen)
         return 1;
+    if (!wp25_owner_id(v, 0))
+        return 1;   /* owner record refused (ENOSPC metadata): skip */
     if (v->tier_n >= 65535)
         return 1;   /* v1 cap, reported by the caller's summary */
     if (span > (size_t)64 * 1024 * 1024)
@@ -530,12 +543,22 @@ static int tier_promote_one(invfs_volume *v, uint64_t cpba, uint32_t plen)
 
 
 /* drop one copy (demotion): the copy is cache, so this is free + unmap;
- * the owner record rewrite at the next flush makes it durable. */
+ * the owner record rewrite at the next flush makes it durable.
+ * The free BYPASSES checkpoint retention (the ckp_free_direct pattern):
+ * a tier copy is engine bookkeeping created post-cut and referenced only
+ * by the tier owner -- never by a user record -- so retention cannot
+ * protect rollback-relevant content by holding it; and every copy read is
+ * framed-CRC-checked, so a rolled-back index naming a reused arena block
+ * just fails over to the canonical segment. Without the bypass the
+ * pressure loop below spins: retained frees never raise arena_free, so
+ * "demote until 20% free" would evict EVERY copy and still be short. */
 static void tier_demote_idx(invfs_volume *v, size_t idx)
 {
     wp25_ent e = v->tier[idx];
     l2p_remove(v, v->tier_owner, e.ord);
+    v->retain_release = 1;
     vol_free_blocks(v, e.pba, e.plen);
+    v->retain_release = 0;
     wp25_del(v->tier, &v->tier_n, e.key);
     v->tier_dirty = 1;
     v->tier_demoted++;
@@ -551,8 +574,8 @@ int vol_tier_migrate(invfs_volume *v)
     v->tier_promoted = v->tier_demoted = v->tier_blocks = 0;
     if (v->ndev != 2 || v->degraded || !vol_write_enabled(v))
         return 0;
-    if (!v->arena_blocks || !v->tier_owner)
-        return 0;
+    if (!v->arena_blocks)
+        return 0;   /* dev0 has no tail past the RAW zone: nothing to do */
     watermark = v->arena_blocks / 5;   /* demote below 20% free */
 
     /* ---- promotion: read-hot canonical (dev1) segments -> dev0 copy --
