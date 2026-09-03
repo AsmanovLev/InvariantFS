@@ -105,11 +105,13 @@ e2e: all
 	bash tools/run-e2e.sh tools/test-heat.sh
 	bash tools/run-e2e.sh tools/test-seal.sh
 	bash tools/run-e2e.sh tools/test-jxl.sh
+	bash tools/run-e2e.sh tools/test-pngflac.sh
 	bash tools/run-e2e.sh tools/test-rawimg.sh
 	bash tools/run-e2e.sh tools/test-binbatch.sh
 	bash tools/run-e2e.sh tools/test-conbatch.sh
 	bash tools/run-e2e.sh tools/test-exercarve.sh
 	bash tools/run-e2e.sh tools/test-containerpack.sh
+	bash tools/run-e2e.sh tools/test-sandbox.sh
 	bash tools/run-e2e.sh tools/test-rawdisk.sh
 	bash tools/run-e2e.sh tools/test-ext4fs.sh
 	bash tools/run-e2e.sh tools/test-fatfs.sh
@@ -118,10 +120,13 @@ e2e: all
 	bash tools/run-e2e.sh tools/test-vdi.sh
 	bash tools/run-e2e.sh tools/test-resize.sh
 	bash tools/run-e2e.sh tools/test-rollback.sh
+	bash tools/run-e2e.sh tools/test-watermark.sh
+	bash tools/run-e2e.sh tools/test-rocp.sh
 	bash tools/run-e2e.sh tools/test-p7z.sh
 	bash tools/run-e2e.sh tools/test-qcow2.sh
 	bash tools/run-e2e.sh tools/test-fuzz.sh
 	bash tools/run-e2e.sh tools/test-writepath.sh
+	bash tools/run-e2e.sh tools/test-acl.sh
 	bash tools/run-e2e.sh tools/test-astv2.sh
 	bash tools/run-e2e.sh tools/test-flushfail.sh
 	bash tools/run-e2e.sh tools/test-compact.sh

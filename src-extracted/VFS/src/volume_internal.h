@@ -393,6 +393,17 @@ typedef struct invfs_volume {
     int retain_release;
     uint8_t *retmap;
     uint64_t ck_stage_pba, ck_stage_blocks;
+    /* WP24-lite: this handle is a READ-ONLY time-travel view at the live
+     * CKP0 checkpoint (vol_open_at): the L2P was replayed from the
+     * checkpoint's staged journal prefix and the inode scan stopped at the
+     * checkpoint's append pointer, so the in-memory view is exactly the
+     * sweep-start state. NOTHING may be written through it -- the
+     * checkpoint pins absolute positions of the PRESENT (post-checkpoint)
+     * records, and an append at the cut would clobber them. The flag is
+     * the engine-level refusal (vol_mark_dirty fails loud; vol_flush and
+     * vol_sync are no-ops; vol_close persists nothing); the VOLF_READONLY
+     * flag is set too so every vol_write_enabled caller reports EROFS. */
+    int time_travel;
     /* Crash consistency (doc/08). `dirty` remembers that the on-disk state
        has already been set to DIRTY this session, so the mark costs one
        superblock write per mount instead of one per mutation.
@@ -816,6 +827,17 @@ int vol_write_rdp0(invfs_volume *v, const invfs_rdp0 *rd);
  * zero (the RDP0 rule). */
 uint32_t ckp0_crc(const invfs_ckp0 *ck);
 
+/* WP24-lite (definition with the checkpoint machinery in vol_rollback.c):
+ * read-only replay of the live checkpoint's staged journal prefix -- the
+ * vol_rollback twin that never writes. Verifies the staged bytes exactly
+ * the way rollback's phase 1 does (slot-header sniff, whole-image CRC,
+ * chained log walked to its end / legacy bare-CRC walk), then folds them
+ * into the in-memory L2P: the table afterwards describes precisely the
+ * checkpoint cut. Also validates the descriptor bounds the caller's
+ * cut-scan relies on. 0 = ok, -3 = descriptor/staging failed verification
+ * (the volume's on-disk state was never touched), -1 = io/alloc error. */
+int ckp_stage_replay(invfs_volume *v);
+
 /* (Re)allocate the dirty bitmap and mark every shadow block: the state
  * before that moment is simply not tracked, so the next reseal must be a
  * full pass. */
@@ -855,6 +877,12 @@ int vol_rsz0_apply(invfs_volume *v, const invfs_rsz0 *rz);
  * the checkpoint's staged journal bytes. The table allocation grows but
  * never shrinks. Returns 0, -1 on allocation failure. */
 int l2p_replay(invfs_volume *v);
+/* apply one journaled entry to the in-memory table (replay path; no op
+ * journaling). Returns -1 on allocation failure. */
+int l2p_apply(invfs_volume *v, const invfs_l2p_entry *e);
+/* reseed the WP19 hot summaries from the current in-memory table (the
+ * l2p_replay/ckp_stage_replay shared tail) */
+void l2p_seed_heat(invfs_volume *v);
 /* Persist the superblock. The checksum covers bytes 0..0x7B, and `state`
    lives at 0x18 -- inside that range -- so it has to be recomputed here.
    It was not, which was harmless only for as long as nothing inside the

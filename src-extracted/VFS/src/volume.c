@@ -507,7 +507,7 @@ static int jrn_read_hdr(invfs_volume *v, uint32_t slot, invfs_jrn_hdr *out)
 
 /* apply one journaled entry to the in-memory table (replay path; no op
  * journaling). Returns -1 on allocation failure. */
-static int l2p_apply(invfs_volume *v, const invfs_l2p_entry *e)
+int l2p_apply(invfs_volume *v, const invfs_l2p_entry *e)
 {
     if (e->type == INVFS_JRN_MAP) {
         if (v->l2p_count == v->l2p_cap) {
@@ -611,6 +611,23 @@ static int l2p_replay_legacy(invfs_volume *v)
 }
 
 
+/* WP19: seed the hot summaries from the replayed table, so a sweep right
+ * after a mount sees crossings that happened before it. The shared tail
+ * of l2p_replay and ckp_stage_replay (WP24-lite). */
+void l2p_seed_heat(invfs_volume *v)
+{
+    size_t i;
+    v->heat_any_rhot = 0;
+    v->heat_any_whot = 0;
+    for (i = 0; i < v->l2p_count; i++) {
+        const invfs_l2p_entry *e = &v->l2p[i];
+        if (e->type != INVFS_JRN_MAP) continue;
+        if (l2p_rheat(e) >= INVFS_HEAT_HOT) v->heat_any_rhot = 1;
+        if (e->pad[2] >= INVFS_WHEAT_HOT) v->heat_any_whot = 1;
+    }
+}
+
+
 /* Replay the L2P journal from disk into the in-memory table and reseed the
  * WP19 hot summaries; sets v->journal_pos to the end of the valid prefix.
  * vol_open runs this once; the WP21 rollback runs it again after restoring
@@ -621,7 +638,6 @@ int l2p_replay(invfs_volume *v)
     invfs_jrn_hdr h[2];
     int ok[2];
     int pick = -1;
-    size_t i;
 
     v->l2p_count = 0;
     v->jops_n = 0;
@@ -693,16 +709,7 @@ int l2p_replay(invfs_volume *v)
         if (l2p_replay_legacy(v) != 0) return -1;
     }
 seeded:
-    /* WP19: seed the hot summaries from the persisted heat, so a sweep
-     * right after a mount sees crossings that happened before it */
-    v->heat_any_rhot = 0;
-    v->heat_any_whot = 0;
-    for (i = 0; i < v->l2p_count; i++) {
-        const invfs_l2p_entry *e = &v->l2p[i];
-        if (e->type != INVFS_JRN_MAP) continue;
-        if (l2p_rheat(e) >= INVFS_HEAT_HOT) v->heat_any_rhot = 1;
-        if (e->pad[2] >= INVFS_WHEAT_HOT) v->heat_any_whot = 1;
-    }
+    l2p_seed_heat(v);
     return 0;
 }
 
@@ -1160,7 +1167,16 @@ bad:
 }
 
 
-invfs_volume *vol_open(const char *path, int *err)
+/* WP24-lite: vol_open_inner(path, at_ckpt, ckpt_seq, err).
+ * at_ckpt == 0 is the ordinary open (vol_open). at_ckpt != 0 asks for the
+ * read-only time-travel view at the live CKP0 sweep checkpoint
+ * (vol_open_at): the journal is replayed from the checkpoint's STAGED
+ * prefix (never the live, post-sweep slots) and the inode-area scan stops
+ * at the checkpoint's append pointer, so the in-memory view is exactly the
+ * sweep-start state; ckpt_seq != 0 pins the expected sweep sequence
+ * (K=1 contract: only the one live checkpoint exists). */
+static invfs_volume *vol_open_inner(const char *path, int at_ckpt,
+                                    uint64_t ckpt_seq, int *err)
 {
     char devbuf[64];
     const char *real;
@@ -1391,6 +1407,26 @@ invfs_volume *vol_open(const char *path, int *err)
             }
         }
     }
+    /* WP24-lite: a time-travel open requires the LIVE checkpoint -- the
+     * retention registry (which keeps the post-checkpoint-freed blocks the
+     * cut still references alive) exists exactly while CKP0 does. A
+     * realized/absent checkpoint means the old segment versions may be
+     * reused: refuse loudly, never serve a maybe-phantom view. */
+    if (at_ckpt) {
+        if (!v->ck_present) {
+            fprintf(stderr, "vol_open_at: %s: no live sweep checkpoint "
+                    "(nothing armed, or already realized)\n", real);
+            *err = -11; goto fail;
+        }
+        if (ckpt_seq && ckpt_seq != v->ck.sweep_seq) {
+            fprintf(stderr, "vol_open_at: %s: checkpoint #%llu requested, "
+                    "but the live checkpoint is #%llu (K=1: only the live "
+                    "one can be viewed)\n", real,
+                    (unsigned long long)ckpt_seq,
+                    (unsigned long long)v->ck.sweep_seq);
+            *err = -11; goto fail;
+        }
+    }
 
     v->bitmap_blocks = (v->sb.total_blocks / 8 + INVFS_BLOCK_SIZE - 1) / INVFS_BLOCK_SIZE;
     v->bitmap = (uint8_t *)calloc(1, (size_t)v->bitmap_blocks * INVFS_BLOCK_SIZE);
@@ -1407,12 +1443,30 @@ invfs_volume *vol_open(const char *path, int *err)
                         * INVFS_BLOCK_SIZE;
 
     /* replay L2P journal BEFORE the inode scan: the scan validates every
-     * record's segments against the replayed maps (the consistent cut) */
-    if (l2p_replay(v) != 0) { *err = -9; goto fail; }
+     * record's segments against the replayed maps (the consistent cut).
+     * WP24-lite: a time-travel open replays the checkpoint's STAGED prefix
+     * instead (read-only, from memory -- the live post-sweep slots are
+     * never consulted), which is exactly the checkpoint cut. */
+    if (at_ckpt) {
+        int rrc = ckp_stage_replay(v);
+        if (rrc != 0) {
+            fprintf(stderr, "vol_open_at: %s: checkpoint #%llu staging "
+                    "failed verification; the present is untouched\n",
+                    real, (unsigned long long)v->ck.sweep_seq);
+            *err = -11; goto fail;
+        }
+    } else if (l2p_replay(v) != 0) { *err = -9; goto fail; }
 
     /* scan existing inode records: find end of area + max inode id + name index */
     {
         uint64_t p = v->inode_area_pos;
+        /* WP24-lite: at a time-travel open the scan (and with it the name
+         * index and the WP22d consistent-cut fold) stops at the
+         * checkpoint's append pointer: the post-checkpoint records,
+         * tombstones and the retention registry itself stay invisible.
+         * ckp_stage_replay already validated the pointer. */
+        const uint64_t scan_end = at_ckpt ? v->ck.inode_area_pos
+                                          : v->inode_area_end;
         uint64_t found = 0;
         scan_set ss = { NULL, 0, 0 };
         mapset ms;
@@ -1420,7 +1474,7 @@ invfs_volume *vol_open(const char *path, int *err)
 
         if (idx_init(v) != 0) { *err = -6; goto fail; }
         if (mapset_build(v, &ms) != 0) { *err = -6; goto fail; }
-        while (p + sizeof(invfs_inode_rec) <= v->inode_area_end) {
+        while (p + sizeof(invfs_inode_rec) <= scan_end) {
             invfs_inode_rec rec_h;
             uint8_t *rb = NULL;
             if (io_seek(&v->io, p) != 0 ||
@@ -1430,7 +1484,7 @@ invfs_volume *vol_open(const char *path, int *err)
                 break;  /* end of records */
             if (rec_h.rec_len < sizeof(invfs_inode_rec) ||
                 rec_h.rec_len > INVFS_MAX_REC_LEN ||
-                p + rec_h.rec_len + 4 > v->inode_area_end) {
+                p + rec_h.rec_len + 4 > scan_end) {
                 v->scan_anomalies++;
                 break;  /* corrupted tail — stop */
             }
@@ -1606,6 +1660,24 @@ invfs_volume *vol_open(const char *path, int *err)
      * a delete in a session that never flushed the flag clear) must not
      * keep it read-only. In RAM only -- persisted by the first flush. */
     vol_readonly_unlatch(v);
+
+    /* WP24-lite: the time-travel handle is read-only by construction. The
+     * VOLF_READONLY latch (RAM only -- never flushed from this handle)
+     * makes every vol_write_enabled caller answer EROFS; time_travel is
+     * the engine-level backstop (vol_mark_dirty refuses loudly, vol_flush/
+     * vol_sync/vol_close write nothing). Set BEFORE the auto-recovery
+     * block below, so a dirty-at-open TT mount takes the conservative
+     * no-write path (needs_recovery) instead of the sb-writing one. */
+    if (at_ckpt) {
+        vol_set_readonly(v, 1);
+        v->time_travel = 1;
+        fprintf(stderr, "vol_open_at: %s: read-only view at sweep "
+                "checkpoint #%llu (inode area @%llu, journal @%llu); the "
+                "live volume is untouched\n", real,
+                (unsigned long long)v->ck.sweep_seq,
+                (unsigned long long)v->ck.inode_area_pos,
+                (unsigned long long)v->ck.journal_pos);
+    }
 
     /* Reconstructed-content cache.
      *
@@ -1793,6 +1865,24 @@ fail:
 }
 
 
+invfs_volume *vol_open(const char *path, int *err)
+{
+    return vol_open_inner(path, 0, 0, err);
+}
+
+
+invfs_volume *vol_open_at(const char *path, uint64_t ckpt_seq, int *err)
+{
+    return vol_open_inner(path, 1, ckpt_seq, err);
+}
+
+
+int vol_time_travel(const invfs_volume *v)
+{
+    return v && v->time_travel;
+}
+
+
 void vol_close(invfs_volume *v)
 {
     if (!v) return;
@@ -1801,8 +1891,11 @@ void vol_close(invfs_volume *v)
        tool that mutated the volume had to remember to call vol_flush itself,
        and forgetting cost the whole run silently. Only a session that
        actually dirtied the volume writes anything, so invf-ls and invf-cat
-       stay read-only. */
-    if (v->dirty) {
+       stay read-only.
+       WP24-lite: a time-travel handle skips the whole block -- it never
+       dirtied the device (vol_mark_dirty refuses), so there is nothing to
+       flush and the CLEAN mark is not this view's to write. */
+    if (v->dirty && !v->time_travel) {
         if (v->needs_recovery) {
             /* WP22c: an io error latched this session. Do NOT run the
              * usual final flush: the in-RAM journal/bitmap may reflect
@@ -2246,6 +2339,11 @@ static int jrn_flush(invfs_volume *v)
 
 int vol_flush(invfs_volume *v)
 {
+    /* WP24-lite: a time-travel handle never persists. Every mutation was
+     * already refused at vol_mark_dirty, so nothing is pending and the
+     * flush contract is vacuously satisfied -- and the superblock write
+     * below would otherwise land on the PRESENT volume's block 0. */
+    if (v->time_travel) return 0;
     /* persist superblock (state / ENOSPC policy fields / READONLY flag) */
     if (vol_write_sb(v) != 0) {
         vol_io_error_latch(v, "superblock write");
@@ -2330,6 +2428,10 @@ int vol_flush(invfs_volume *v)
 int vol_sync(invfs_volume *v)
 {
     if (!v) return -1;
+    /* WP24-lite: nothing of this handle's can be in flight (mutations are
+     * refused), so the durability contract is already met without touching
+     * the device. */
+    if (v->time_travel) return 0;
     if (vol_flush(v) != 0) return -1;   /* flush latches its own failures */
 #ifndef _WIN32
     /* WP22c test hook (tools/test-flushfail.sh): the Nth vol_sync of the

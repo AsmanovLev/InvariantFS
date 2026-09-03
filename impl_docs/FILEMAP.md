@@ -25,8 +25,8 @@ volume.c + volume_internal.h + 18 vol_* modules).
 | vol_rollback.c | 588 | WP21 sweep checkpoint (CKP0) + retention registry (\x01reten), rollback/realize engine |
 | vol_resize.c | 287 | WP18 offline-resize roll-forward (RSZ0 descriptor applied at vol_open) |
 | vol_exer.c | 466 | WP14b M2 exe-as-container carve (embedded-media scan, EXER payload parse/splice, whole-file memcmp guard) |
-| vol_cpack.c | 2520 | WP11 tool plumbing (tool_resolve/exec, RLIMIT_AS), WP13 codecpack exec + WP16 containerpack machinery, builtin transcode creators (FLAC/APE/PMP/TAR/GZ) — FLACR create stays _WIN32 |
-| vol_png.c | 503 | PNGR (PNG→JXL + IVPN recipe; transcode _WIN32-only, POSIX stubs decline) + vol_create_blob_file |
+| vol_cpack.c | 2520 | WP11 tool plumbing (tool_resolve/exec, RLIMIT_AS), WP13 codecpack exec + WP16 containerpack machinery, builtin transcode creators (FLAC/APE/PMP/TAR/GZ) — FLACR create POSIX-ported (WP12c; gated on `mac`) |
+| vol_png.c | 503 | PNGR (PNG→JXL + IVPN recipe; transcode POSIX-ported WP12c, needs cjxl/djxl) + vol_create_blob_file |
 | vol_ast.c | 404 | AST recipe/children (de)serialization, ZIP member windows (vol_zip_parse_children), vol_create_container_file |
 | vol_fsck.c | 273 | fsck engine: rebuild L2P + used-bitmap from the inode area, repair gate (l2p_miss stays read-only) |
 | vol_crash.c | 61 | Crash consistency: vol_mark_dirty / vol_pre_record |
