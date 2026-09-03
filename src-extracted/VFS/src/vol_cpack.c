@@ -1155,8 +1155,142 @@ uint64_t vol_create_flac_file(invfs_volume *v, const char *name,
     }
     return a;
 #else
-    (void)v; (void)name; (void)flac; (void)flac_len;
-    return 0;
+    /* POSIX twin of the Windows body above. Everything it needs is already
+     * in-process or on the WP11 tool layer: flacx is embedded
+     * (INVFS_EMBED_FLACX), ffmpeg/mac exec via run_tool/run_ffmpeg
+     * (invfs_ape_compress, invfs_ape_to_wav -- $INVFS_TOOLS ->
+     * /usr/lib/invfs/tools -> PATH, RLIMIT_AS-capped children). `mac`
+     * absent -> invfs_ape_compress fails -> a clean refusal: the original
+     * FLAC stays RAW and the sweep stamps GENERIC_GUARD (no partial
+     * state is ever committed). */
+    uint8_t *recipe = NULL, *ape = NULL;
+    size_t rlen = 0, ape_len = 0;
+    flacx_cover *covers = NULL;
+    uint32_t ncv = 0, i;
+    uint64_t a;
+
+    if (name_too_long_for_children(name)) return 0;
+    if (flacx_extract(flac, flac_len, &recipe, &rlen, &covers, &ncv) != 0) {
+        fprintf(stderr, "[vol] flacx_extract failed for %s\n", name);
+        return 0;
+    }
+    if (invfs_ape_compress(flac, flac_len, &ape, &ape_len) != 0) {
+        fprintf(stderr, "[vol] APE compress failed for %s\n", name);
+        for (i = 0; i < ncv; i++) free(covers[i].data);
+        free(covers); free(recipe);
+        return 0;
+    }
+    /* invariant: transcode ONLY if it actually pays off — otherwise the
+       original FLAC is kept (git-safe). On synthetic/24-bit material APE
+       -c4000 often loses to FLAC -8; on real 16-bit CD music it wins by
+       ~2-6% (B-series host benchmarks: APE = 91.1% of FLAC size). */
+    {
+        size_t cover_bytes = 0;
+        for (i = 0; i < ncv; i++) cover_bytes += covers[i].len;
+        if (!getenv("INVFS_FORCE_FLACR") && ape_len + rlen + cover_bytes >= flac_len) {
+            if (getenv("INVFS_DEBUG"))
+                fprintf(stderr, "[vol] %s: APE+recipe+covers %zu+%zu+%zu >= FLAC %zu — keep original\n",
+                        name, ape_len, rlen, cover_bytes, flac_len);
+            for (i = 0; i < ncv; i++) free(covers[i].data);
+            free(covers); free(recipe); free(ape);
+            return 0;
+        }
+    }
+    /* Full-house guard: replay the READ path before committing anything --
+     * mac -d the APE blob back to WAV, then flacx_rebuild with the recipe
+     * and covers -- and demand the original FLAC bytes bit-exactly. The
+     * cover array must be the DENSE kind=0 view the read path rebuilds
+     * ("name!coverN" numbering skips zero-PADDING slots), not the sparse
+     * extract array; >16 data covers is refused exactly like a reader
+     * would (flacx_rebuild caps at 16). */
+    {
+        uint8_t *wav = NULL, *fl = NULL;
+        size_t wav_len = 0, fl_len = 0;
+        flacx_cover dcov[16];
+        uint32_t nd = 0;
+        int vok = 0;
+        for (i = 0; i < ncv && nd <= 16; i++)
+            if (covers[i].data) {
+                if (nd == 16) { nd = 17; break; }   /* over the reader cap */
+                dcov[nd++] = covers[i];
+            }
+        if (nd <= 16 &&
+            invfs_ape_to_wav(ape, ape_len, &wav, &wav_len) == 0 && wav &&
+            flacx_rebuild(wav, wav_len, recipe, rlen, dcov, nd,
+                          &fl, &fl_len) == 0 &&
+            fl_len == flac_len && memcmp(fl, flac, flac_len) == 0)
+            vok = 1;
+        free(wav); free(fl);
+        if (!vok) {
+            fprintf(stderr, "[vol] %s: FLACR decode-back guard refused — "
+                            "keep original\n", name);
+            for (i = 0; i < ncv; i++) free(covers[i].data);
+            free(covers); free(recipe); free(ape);
+            return 0;
+        }
+    }
+    /* Children first, the name-owning record last (see the Windows body:
+     * the name only ever flips to the transcoded form once everything
+     * needed to decode it is already durable). */
+    char rname[272];
+    snprintf(rname, sizeof rname, "%s!recipe", name);
+    /* store the recipe ZSTD-compressed (repetitive frame headers shrink
+       ~2x); fall back to raw if it does not compress */
+    uint64_t b = 0;
+    {
+        size_t cbound = ZSTD_compressBound(rlen);
+        uint8_t *rc = (uint8_t *)malloc(cbound ? cbound : 1);
+        if (rc) {
+            size_t clen = ZSTD_compress(rc, cbound, recipe, rlen, 19);
+            if (!ZSTD_isError(clen) && clen < rlen) {
+                b = vol_create_blob_file(v, rname, rc, clen,
+                                         (uint64_t)rlen, INVFS_ALGO_ZSTD);
+                free(rc);
+            } else {
+                free(rc);
+            }
+        }
+        if (!b)
+            b = vol_create_blob_file(v, rname, recipe, rlen,
+                                     (uint64_t)rlen, INVFS_ALGO_NONE);
+    }
+    if (!b) {
+        fprintf(stderr, "[vol] recipe inode failed for %s\n", name);
+        for (i = 0; i < ncv; i++) free(covers[i].data);
+        free(covers); free(recipe); free(ape);
+        return vol_transcode_abort(v, name);
+    }
+    /* covers as separate inodes "name!coverN" — identical covers across
+       tracks become identical segments and are block-deduped. Only kind=0
+       slots carry payloads (kind=1 zero-PADDING has no data). */
+    uint32_t di = 0;
+    for (i = 0; i < ncv; i++) {
+        if (!covers[i].data) continue;   /* kind=1 zero-slot */
+        char cn[288];
+        snprintf(cn, sizeof cn, "%s!cover%u", name, di++);
+        uint64_t ci = vol_create_blob_file(v, cn, covers[i].data, covers[i].len,
+                                           (uint64_t)covers[i].len, INVFS_ALGO_NONE);
+        if (!ci) {
+            /* the recipe addresses this slot by name, so a dropped cover is a
+               FLAC that cannot be rebuilt -- a failed transcode, not a warning
+               to carry forward */
+            fprintf(stderr, "[vol] cover inode failed for %s!cover%u\n", name, di - 1);
+            for (i = 0; i < ncv; i++) free(covers[i].data);
+            free(covers); free(recipe); free(ape);
+            return vol_transcode_abort(v, name);
+        }
+    }
+    a = vol_create_blob_file(v, name, ape, ape_len,
+                             (uint64_t)flac_len, INVFS_ALGO_FLACR);
+    for (i = 0; i < ncv; i++) free(covers[i].data);
+    free(covers);
+    free(recipe);
+    free(ape);
+    if (!a) {
+        fprintf(stderr, "[vol] APE inode failed for %s\n", name);
+        return vol_transcode_abort(v, name);
+    }
+    return a;
 #endif
 }
 

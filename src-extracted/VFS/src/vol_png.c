@@ -10,6 +10,30 @@
 static int png_inflate(const unsigned char *in, size_t in_len,
                        unsigned char **out, size_t *out_len);
 
+#ifndef _WIN32
+/* read a whole tool-output file into a fresh buffer; 0 on success.
+ * (vol_cpack.c's slurp_file is static to that TU; the PNG lane keeps its
+ * own.) An empty/unreadable file is a failure: tools say "refused" by not
+ * producing output. */
+static int png_slurp(const char *path, uint8_t **out, size_t *out_len)
+{
+    FILE *f = fopen(path, "rb");
+    long sz;
+
+    if (!f) return -1;
+    fseek(f, 0, SEEK_END); sz = ftell(f); fseek(f, 0, SEEK_SET);
+    if (sz <= 0) { fclose(f); return -1; }
+    *out = (uint8_t *)malloc((size_t)sz);
+    if (!*out) { fclose(f); return -1; }
+    if (fread(*out, 1, (size_t)sz, f) != (size_t)sz) {
+        free(*out); *out = NULL; fclose(f); return -1;
+    }
+    fclose(f);
+    *out_len = (size_t)sz;
+    return 0;
+}
+#endif
+
 
 /* djxl: JXL blob -> PNG -> parse -> unfilter -> pixels. Returns 0 on ok. */
 int invfs_png_from_jxl(invfs_volume *v, uint64_t jxl_inode,
@@ -54,8 +78,37 @@ int invfs_png_from_jxl(invfs_volume *v, uint64_t jxl_inode,
     pngx_free(&di);
     return 0;
 #else
-    (void)v; (void)jxl_inode; (void)rgb; (void)rgb_len;
-    return -1;
+    /* POSIX: djxl via the WP11 tool layer (vol_cpack.c) -- the blob lands
+     * in a fresh /dev/shm scratch dir, the child runs under an RLIMIT_AS
+     * ceiling with a 120 s timeout, and "djxl" resolves through
+     * $INVFS_TOOLS -> /usr/lib/invfs/tools -> PATH. */
+    uint8_t *jxl = NULL, *dn = NULL;
+    size_t jxl_len = 0, dn_len = 0;
+    char dir[64], in[128], out[128];
+    pngx_info di;
+    int ok = 0;
+
+    if (vol_read_inode(v, jxl_inode, 0, &jxl, &jxl_len) != 0) return -1;
+    if (tool_tmpdir(dir, sizeof dir) != 0) { free(jxl); return -1; }
+    snprintf(in, sizeof in, "%s/in.jxl", dir);
+    snprintf(out, sizeof out, "%s/out.png", dir);
+    if (tool_write(in, jxl, jxl_len) == 0 &&
+        run_tool("djxl", in, out, "") == 0 &&
+        png_slurp(out, &dn, &dn_len) == 0) {
+        memset(&di, 0, sizeof di);
+        if (pngx_extract(dn, dn_len, NULL, 0, png_inflate, &di) == 0) {
+            *rgb = di.rgb; *rgb_len = di.rgb_len;
+            di.rgb = NULL; di.rgb_len = 0;
+            pngx_free(&di);
+            ok = 1;
+        }
+    }
+    free(jxl);
+    free(dn);
+    tool_rm(dir, "in.jxl");
+    tool_rm(dir, "out.png");
+    rmdir(dir);
+    return ok ? 0 : -1;
 #endif
 }
 
@@ -310,8 +363,259 @@ uint64_t vol_create_png_file(invfs_volume *v, const char *name,
     if (!ino) return vol_transcode_abort(v, name);
     return ino;
 #else
-    (void)v; (void)name; (void)png; (void)png_len;
-    return 0;
+    /* POSIX twin of the Windows body above, on the WP11 tool layer
+     * (vol_cpack.c): cjxl/djxl resolve via $INVFS_TOOLS ->
+     * /usr/lib/invfs/tools -> PATH and run in a fresh /dev/shm scratch dir
+     * under an RLIMIT_AS ceiling with a 120 s timeout. Same contract: the
+     * JXL round-trip must reproduce the pixels and the deflate replica the
+     * original IDAT before anything is committed; refused files keep their
+     * original RAW bytes. */
+    if (png_len < 33 || memcmp(png, "\x89PNG\r\n\x1a\n", 8) != 0) return 0;
+    if (name_too_long_for_children(name)) return 0;
+    pngx_info info;
+    memset(&info, 0, sizeof info);
+    if (pngx_extract(png, png_len, NULL, 0, png_inflate, &info) != 0) {
+        pngx_free(&info);   /* a failed extract still owns idat/idat_crc */
+        return 0;
+    }
+    if (info.bitdepth != 8 || info.interlace != 0 || info.bpp == 0) {
+        pngx_free(&info); return 0;   /* v1 guard: 8-bit non-interlaced */
+    }
+    if (info.nrows == 0 || info.rgb_len == 0) { pngx_free(&info); return 0; }
+
+    /* spool.png: original filtered rows with STORED IDAT (level 0) */
+    uint8_t *spool = NULL;
+    size_t spool_len = 0;
+    {
+        z_stream s;
+        memset(&s, 0, sizeof s);
+        if (deflateInit2(&s, 0, Z_DEFLATED, 15, 8, Z_DEFAULT_STRATEGY) != Z_OK) {
+            pngx_free(&info); return 0;
+        }
+        size_t bound = deflateBound(&s, (uLong)info.filtered_len);
+        uint8_t *stream = (uint8_t *)malloc(bound);
+        if (!stream) { deflateEnd(&s); pngx_free(&info); return 0; }
+        s.next_in = info.filtered;
+        s.avail_in = (uInt)(info.filtered_len > 0x7FFFFFFF ? 0x7FFFFFFF : info.filtered_len);
+        s.next_out = stream;
+        s.avail_out = (uInt)bound;
+        int r = deflate(&s, Z_FINISH);
+        size_t slen = (size_t)s.total_out;
+        deflateEnd(&s);
+        if (r != Z_STREAM_END) { free(stream); pngx_free(&info); return 0; }
+        /* build spool png: sig + IHDR + IDAT(stored) + IEND */
+        uint8_t ihdr[13];
+        wr32v(ihdr, info.width);
+        wr32v(ihdr + 4, info.height);
+        ihdr[8] = info.bitdepth; ihdr[9] = info.colortype; ihdr[10] = 0;
+        ihdr[11] = 0; ihdr[12] = info.interlace;
+        size_t cap = 8 + 25 + slen + 12;
+        spool = (uint8_t *)malloc(cap);
+        if (!spool) { free(stream); pngx_free(&info); return 0; }
+        size_t o = 0;
+        memcpy(spool + o, "\x89PNG\r\n\x1a\n", 8); o += 8;
+        if (pngx_chunk_append(&spool, &o, &cap, (const uint8_t *)"IHDR", ihdr, 13) ||
+            pngx_chunk_append(&spool, &o, &cap, (const uint8_t *)"IDAT", stream, slen) ||
+            pngx_chunk_append(&spool, &o, &cap, (const uint8_t *)"IEND", NULL, 0)) {
+            free(stream); free(spool); pngx_free(&info); return 0;
+        }
+        spool_len = o;
+        free(stream);
+    }
+
+    char dir[64], sp[320], jx[320], dn[320];
+    if (tool_tmpdir(dir, sizeof dir) != 0) { free(spool); pngx_free(&info); return 0; }
+    snprintf(sp, sizeof sp, "%s/spool.png", dir);
+    snprintf(jx, sizeof jx, "%s/tmp.jxl", dir);
+    snprintf(dn, sizeof dn, "%s/dn.png", dir);
+    if (tool_write(sp, spool, spool_len) != 0) {
+        free(spool); pngx_free(&info);
+        rmdir(dir);
+        return 0;
+    }
+    free(spool);
+    /* cjxl: spool.png -> JXL (lossless, effort 7) */
+    if (jxl_tool("cjxl", sp, jx, "-d 0 -e 7") != 0) {
+        tool_rm(dir, "spool.png"); tool_rm(dir, "tmp.jxl"); rmdir(dir);
+        pngx_free(&info); return 0;
+    }
+    /* djxl: verify the round-trip produces identical pixels. The matched
+     * pixels are kept for the read-path replay guard below. */
+    uint8_t *rt_rgb = NULL; size_t rt_rgb_len = 0;
+    {
+        uint8_t *dnb = NULL; size_t dn_len = 0;
+        if (jxl_tool("djxl", jx, dn, "") == 0 &&
+            png_slurp(dn, &dnb, &dn_len) == 0) {
+            pngx_info di;
+            memset(&di, 0, sizeof di);
+            if (pngx_extract(dnb, dn_len, NULL, 0, png_inflate, &di) == 0 &&
+                di.rgb_len == info.rgb_len &&
+                memcmp(di.rgb, info.rgb, info.rgb_len) == 0) {
+                rt_rgb = di.rgb; rt_rgb_len = di.rgb_len;
+                di.rgb = NULL; di.rgb_len = 0;
+            }
+            pngx_free(&di);
+        }
+        free(dnb);
+    }
+    tool_rm(dir, "spool.png"); tool_rm(dir, "dn.png");
+    if (!rt_rgb) {
+        tool_rm(dir, "tmp.jxl"); rmdir(dir);
+        pngx_free(&info); return 0;   /* JXL changed pixels: keep original */
+    }
+
+    /* brute-force deflate params reproducing the original IDAT */
+    uint8_t enc = 0, level = 0, mem = 0;
+    int found = 0;
+    /* refilter first (the JXL round-trip proved info.rgb is the pixels) */
+    uint8_t *filt = NULL; size_t filt_len = 0;
+    if (pngx_refilter(info.rgb, info.rgb_len, &info, &filt, &filt_len) != 0) {
+        free(rt_rgb); tool_rm(dir, "tmp.jxl"); rmdir(dir);
+        pngx_free(&info); return 0;
+    }
+    static const int prio[][2] = {
+        {6,8},{7,9},{6,9},{9,8},{7,8},{9,9},{6,7},{8,9},{8,8},{5,8},
+        {4,8},{3,8},{2,8},{1,8},{7,7},{8,7},{9,7},{1,9},{2,9},{3,9},{4,9},{5,9}
+    };
+    for (size_t i = 0; i < sizeof(prio) / sizeof(prio[0]) && !found; i++) {
+        z_stream s;
+        memset(&s, 0, sizeof s);
+        if (deflateInit2(&s, prio[i][0], Z_DEFLATED, 15, prio[i][1],
+                         Z_DEFAULT_STRATEGY) != Z_OK) continue;
+        size_t bound = deflateBound(&s, (uLong)filt_len);
+        uint8_t *re = (uint8_t *)malloc(bound);
+        if (!re) { deflateEnd(&s); continue; }
+        s.next_in = filt;
+        s.avail_in = (uInt)(filt_len > 0x7FFFFFFF ? 0x7FFFFFFF : filt_len);
+        s.next_out = re;
+        s.avail_out = (uInt)bound;
+        int r2 = deflate(&s, Z_FINISH);
+        size_t re_len = (size_t)s.total_out;
+        deflateEnd(&s);
+        if (r2 == Z_STREAM_END && re_len == info.idat_len &&
+            memcmp(re, info.idat, info.idat_len) == 0) {
+            enc = 0; level = (uint8_t)prio[i][0]; mem = (uint8_t)prio[i][1];
+            found = 1;
+        }
+        free(re);
+    }
+    if (!found) {
+        /* miniz tdefl levels 1..10 */
+        for (int lv = 1; lv <= 10 && !found; lv++) {
+            size_t olen = 0;
+            size_t bound = filt_len + filt_len / 4 + 4096;
+            uint8_t *re = (uint8_t *)malloc(bound);
+            if (re &&
+                mz_tdefl_compress(filt, filt_len, re, bound, lv, &olen) == 0 &&
+                olen == info.idat_len && memcmp(re, info.idat, info.idat_len) == 0) {
+                enc = 1; level = (uint8_t)lv; mem = 0;
+                found = 1;
+            }
+            free(re);
+        }
+    }
+    free(filt);
+    if (!found) {
+        free(rt_rgb); tool_rm(dir, "tmp.jxl"); rmdir(dir);
+        pngx_free(&info); return 0;   /* unknown encoder: keep original */
+    }
+
+    /* recipe + JXL blob */
+    uint8_t *recipe = NULL; size_t rlen = 0;
+    if (pngx_build_recipe(&info, enc, level, mem, &recipe, &rlen) != 0) {
+        free(rt_rgb); tool_rm(dir, "tmp.jxl"); rmdir(dir);
+        pngx_free(&info); return 0;
+    }
+    uint8_t *jxl = NULL; size_t jxl_len = 0;
+    if (png_slurp(jx, &jxl, &jxl_len) != 0) {
+        free(rt_rgb); free(recipe);
+        tool_rm(dir, "tmp.jxl"); rmdir(dir);
+        pngx_free(&info); return 0;
+    }
+    tool_rm(dir, "tmp.jxl"); rmdir(dir);
+
+    /* Full-house guard: replay the READ path end-to-end before committing
+     * anything -- recipe parse -> refilter(round-trip pixels) -> deflate
+     * replica -> pngx_rebuild -- and demand the original PNG bytes back.
+     * (The pixel and IDAT checks above verify the halves; this verifies the
+     * serialized recipe round-trips and the parts assemble to the exact
+     * file, which is what a reader will do with what we are about to
+     * store.) */
+    {
+        pngx_info pi2;
+        uint8_t *f2 = NULL, *s2 = NULL, *rb = NULL;
+        size_t f2_len = 0, s2_len = 0, rb_len = 0;
+        int vok = 0;
+
+        memset(&pi2, 0, sizeof pi2);
+        if (pngx_parse_recipe(recipe, rlen, &pi2) == 0 &&
+            pngx_refilter(rt_rgb, rt_rgb_len, &pi2, &f2, &f2_len) == 0) {
+            if (pi2.enc == 0) {
+                z_stream s;
+                memset(&s, 0, sizeof s);
+                if (deflateInit2(&s, pi2.level, Z_DEFLATED, 15, pi2.mem,
+                                 Z_DEFAULT_STRATEGY) == Z_OK) {
+                    size_t bound = deflateBound(&s, (uLong)f2_len);
+                    s2 = (uint8_t *)malloc(bound);
+                    if (s2) {
+                        s.next_in = f2;
+                        s.avail_in = (uInt)(f2_len > 0x7FFFFFFF ? 0x7FFFFFFF : f2_len);
+                        s.next_out = s2;
+                        s.avail_out = (uInt)bound;
+                        if (deflate(&s, Z_FINISH) == Z_STREAM_END) {
+                            s2_len = (size_t)s.total_out;
+                            vok = 1;
+                        }
+                    }
+                    deflateEnd(&s);
+                }
+            } else {
+                size_t bound = f2_len + f2_len / 4 + 4096;
+                s2 = (uint8_t *)malloc(bound);
+                if (s2 &&
+                    mz_tdefl_compress(f2, f2_len, s2, bound,
+                                      pi2.level, &s2_len) == 0)
+                    vok = 1;
+            }
+            if (vok) {
+                vok = (pngx_rebuild(&pi2, s2, s2_len, &rb, &rb_len) == 0 &&
+                       rb_len == png_len && memcmp(rb, png, png_len) == 0);
+            }
+        }
+        free(f2); free(s2); free(rb);
+        pngx_free(&pi2);
+        free(rt_rgb);
+        if (!vok) {
+            free(jxl); free(recipe); pngx_free(&info);
+            return 0;   /* the stored shape would not read back: refuse */
+        }
+    }
+
+    /* guard: JXL + recipe must be smaller than the original */
+    if ((size_t)jxl_len + rlen >= png_len) {
+        free(jxl); free(recipe); pngx_free(&info); return 0;
+    }
+    /* create name!jxl first, then name (atomic) */
+    char jn[320];
+    snprintf(jn, sizeof jn, "%s!jxl", name);
+    uint64_t jino = vol_create_blob_file(v, jn, jxl, (size_t)jxl_len,
+                                         (uint64_t)jxl_len, INVFS_ALGO_NONE);
+    free(jxl);
+    if (!jino) { free(recipe); pngx_free(&info);
+                 return vol_transcode_abort(v, name); }
+    size_t bound = ZSTD_compressBound(rlen);
+    uint8_t *rc = (uint8_t *)malloc(bound + 1);
+    if (!rc) { free(recipe); pngx_free(&info);
+               return vol_transcode_abort(v, name); }
+    size_t rbl = 0;
+    size_t rcl = ZSTD_compress(rc + 1, bound, recipe, rlen, 19);
+    if (!ZSTD_isError(rcl) && rcl < rlen) { rc[0] = 1; rbl = rcl + 1; }
+    else { rc[0] = 0; memcpy(rc + 1, recipe, rlen); rbl = rlen + 1; }
+    uint64_t ino = vol_create_blob_file(v, name, rc, rbl,
+                                        (uint64_t)png_len, INVFS_ALGO_PNGR);
+    free(rc); free(recipe); pngx_free(&info);
+    if (!ino) return vol_transcode_abort(v, name);
+    return ino;
 #endif
 }
 

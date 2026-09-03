@@ -105,6 +105,7 @@ e2e: all
 	bash tools/run-e2e.sh tools/test-heat.sh
 	bash tools/run-e2e.sh tools/test-seal.sh
 	bash tools/run-e2e.sh tools/test-jxl.sh
+	bash tools/run-e2e.sh tools/test-pngflac.sh
 	bash tools/run-e2e.sh tools/test-rawimg.sh
 	bash tools/run-e2e.sh tools/test-binbatch.sh
 	bash tools/run-e2e.sh tools/test-conbatch.sh
