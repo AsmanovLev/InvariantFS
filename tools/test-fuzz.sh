@@ -31,7 +31,7 @@ command -v cc >/dev/null || { echo "FAIL: cc"; exit 1; }
 echo "== build fuzz harness helpers =="
 cc -std=gnu11 -O2 -I$REPO/src-extracted/VFS/src -o "$FZ/ophelper" \
     "$FZ/ophelper.c" \
-    $OBJ/{volume,vol_cpack,vol_png,vol_seal,vol_repair,vol_rollback,vol_resize,vol_fsck,vol_crash,vol_exer,vol_dedupe,vol_textzone,vol_heat,vol_sweep,vol_read,vol_write,vol_records,vol_ast,vol_dirs,arc,crc32c,lz4,flacx,tarx,pngx,blkio,miniz,blake3,blake3_dispatch,blake3_portable,ppmd8,ppmd8enc,ppmd8dec,ppmd_codec,codec,bcj_x86,rs}.o \
+    $OBJ/{volume,vol_cpack,vol_png,vol_seal,vol_repair,vol_rollback,vol_resize,vol_fsck,vol_crash,vol_exer,vol_dedupe,vol_textzone,vol_heat,vol_sweep,vol_read,vol_write,vol_records,vol_ast,vol_dirs,arc,crc32c,lz4,flacx,tarx,pngx,blkio,miniz,blake3,blake3_dispatch,blake3_portable,ppmd8,ppmd8enc,ppmd8dec,ppmd_codec,codec,bcj_x86,rs,vol_tier}.o \
     -Wl,-l:libzstd.so.1 -lz -lpthread
 cc -std=gnu11 -O2 -I$REPO/src-extracted/VFS/src -o "$FZ/fuzz_manifest" \
     "$FZ/fuzz_manifest.c" \
