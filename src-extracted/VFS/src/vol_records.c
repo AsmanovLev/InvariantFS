@@ -1243,7 +1243,22 @@ int meta_read_record_by_id_p(invfs_volume *v, uint64_t id, uint8_t **buf, uint32
  *     rebuild reclaims the staging. A CMP0 is never armed while a CKP0
  *     sweep checkpoint is live (the compaction declines), so rollback's
  *     absolute positions and compaction's position invalidation never
- *     coexist. */
+ *     coexist. The reverse is barred too: invf-sweep refuses to run at
+ *     all while a CMP0 is pending, and invf-fsck -f refuses a live CKP0
+ *     BEFORE it would roll a CMP0 forward -- the two descriptors are
+ *     mutually exclusive by construction.
+ *
+ *   seal interplay: compaction moves NO data blocks (live records are
+ *   re-emitted verbatim and the L2P journal is untouched), so the
+ *   shadow-zone parity stripes are unaffected: the \x01parity* owner
+ *   records are ordinary live records that survive the cut byte-for-byte
+ *   (their blocks stay bitmap-allocated, never staging candidates), and
+ *   the staging run prefers the RAW zone a seal never covers (the shadow
+ *   fallback touches only FREE blocks, and the parity XOR reads free
+ *   blocks as zero -- a staged-then-freed run leaves every stripe
+ *   bit-identical). A live seal in fact guarantees the rollback-horizon
+ *   conflict cannot arise: vol_ckp_begin declines under it, so no CKP0
+ *   can be live while a seal is. */
 
 typedef struct cmp_name {
     struct cmp_name *next;
