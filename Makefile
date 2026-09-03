@@ -110,6 +110,7 @@ e2e: all
 	bash tools/run-e2e.sh tools/test-conbatch.sh
 	bash tools/run-e2e.sh tools/test-exercarve.sh
 	bash tools/run-e2e.sh tools/test-containerpack.sh
+	bash tools/run-e2e.sh tools/test-sandbox.sh
 	bash tools/run-e2e.sh tools/test-rawdisk.sh
 	bash tools/run-e2e.sh tools/test-ext4fs.sh
 	bash tools/run-e2e.sh tools/test-fatfs.sh
