@@ -5,7 +5,13 @@ SRC     := src-extracted/VFS/src
 OUT     := bin
 OBJ     := build/obj
 
-CFLAGS  := -std=gnu11 -O2 -MMD -MP -I$(SRC) -pthread \
+# Sources live in per-role subdirs under $(SRC); objects stay flat in $(OBJ)
+# (basenames are unique across subdirs, and tools/test-*.sh link lines use
+# $(OBJ)/<basename>.o).
+SRCDIRS := $(SRC)/core $(SRC)/codecs $(SRC)/recipes $(SRC)/cli $(SRC)/vendor7z $(SRC)/legacy
+vpath %.c $(SRCDIRS)
+
+CFLAGS  := -std=gnu11 -O2 -MMD -MP -I$(SRC) $(addprefix -I,$(SRCDIRS)) -pthread \
            -DINVFS_EMBED_FLACX -DMINIZ_NO_ZLIB_APIS \
            -DBLAKE3_NO_SSE2 -DBLAKE3_NO_SSE41 -DBLAKE3_NO_AVX2 -DBLAKE3_NO_AVX512
 LDLIBS  := -Wl,-l:libzstd.so.1 -lz -lpthread
@@ -29,7 +35,7 @@ all: $(TOOLS:%=$(OUT)/%)
 $(OBJ):
 	mkdir -p $@
 
-$(OBJ)/%.o: $(SRC)/%.c | $(OBJ)
+$(OBJ)/%.o: %.c | $(OBJ)
 	$(CC) $(CFLAGS) -c -o $@ $<
 
 # tools that embed their own miniz copy must not double-link ours:
@@ -41,18 +47,18 @@ $(OUT)/invf-$(1): $$(OBJ)/$(1).o $(CORE_O)
 	$$(CC) $$(CFLAGS) -o $$@ $$< $(CORE_O) $$(LDLIBS) $$(2)
 endef
 
-# CLI tools (main in src/<name>.c)
+# CLI tools (main in src/cli/<name>.c)
 CLI_MAINS := mkfs verify fsck cp cat ls stat arctest blkio_test resize
 $(foreach t,$(CLI_MAINS),$(eval $(call TOOL_RULE,$(t),)))
 
-$(OBJ)/invf-zip.o: $(SRC)/zip.c | $(OBJ)
+$(OBJ)/invf-zip.o: $(SRC)/recipes/zip.c | $(OBJ)
 	$(CC) $(CFLAGS) -c -o $@ $<
 $(OUT)/invf-zip: $(OBJ)/invf-zip.o $(filter-out $(OBJ)/miniz.o,$(CORE_O))
 	$(CC) $(CFLAGS) -o $@ $< $(filter-out $(OBJ)/miniz.o,$(CORE_O)) $(LDLIBS)
 
 $(OUT)/invf-fuse: $(OBJ)/fuse_fs.o $(CORE_O)
 	$(CC) $(CFLAGS) $(FUSE_CFLAGS) -o $@ $< $(CORE_O) $(LDLIBS) $(FUSE_LIBS)
-$(OBJ)/fuse_fs.o: $(SRC)/fuse_fs.c | $(OBJ)
+$(OBJ)/fuse_fs.o: $(SRC)/cli/fuse_fs.c | $(OBJ)
 	$(CC) $(CFLAGS) $(FUSE_CFLAGS) -c -o $@ $<
 
 $(OUT)/invf-import: $(OBJ)/invf-import.o $(CORE_O)
