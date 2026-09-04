@@ -67,7 +67,7 @@ CORE="volume vol_cpack vol_png vol_seal vol_repair vol_rollback \
       vol_heat vol_sweep vol_read vol_write vol_records vol_ast \
       vol_dirs vol_tier arc crc32c lz4 flacx tarx pngx blkio miniz blake3 \
       blake3_dispatch blake3_portable ppmd8 ppmd8enc ppmd8dec \
-      ppmd_codec codec bcj_x86 rs vol_tier"
+      ppmd_codec codec bcj_x86 rs"
 OBJS=""
 for m in $CORE; do OBJS="$OBJS $REPO/build/obj/$m.o"; done
 
