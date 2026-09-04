@@ -1,2 +1,2 @@
-__anon28f0bc380108 struct      115 /home/user/InvariantFS/src-extracted/VFS/src/stat.c typedef struct { char name[256]; uint64_t ino, fsz; uint8_t killed; } fent;
-fent             typedef     115 /home/user/InvariantFS/src-extracted/VFS/src/stat.c typedef struct { char name[256]; uint64_t ino, fsz; uint8_t killed; } fent;
+__anoncf527d9f0108 struct      115 /home/user/InvariantFS/src-extracted/VFS/src/cli/stat.c typedef struct { char name[256]; uint64_t ino, fsz; uint8_t killed; } fent;
+fent             typedef     115 /home/user/InvariantFS/src-extracted/VFS/src/cli/stat.c typedef struct { char name[256]; uint64_t ino, fsz; uint8_t killed; } fent;

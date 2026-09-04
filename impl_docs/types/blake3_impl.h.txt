@@ -1,1 +1,1 @@
-blake3_flags     enum         17 /home/user/InvariantFS/src-extracted/VFS/src/blake3_impl.h enum blake3_flags {
+blake3_flags     enum         17 /home/user/InvariantFS/src-extracted/VFS/src/codecs/blake3_impl.h enum blake3_flags {

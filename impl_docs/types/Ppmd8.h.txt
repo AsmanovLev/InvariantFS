@@ -1,9 +1,9 @@
-CPpmd8           typedef     103 /home/user/InvariantFS/src-extracted/VFS/src/Ppmd8.h } CPpmd8;
-CPpmd8_Context   typedef      44 /home/user/InvariantFS/src-extracted/VFS/src/Ppmd8.h } CPpmd8_Context;
-CPpmd8_Context_  struct       26 /home/user/InvariantFS/src-extracted/VFS/src/Ppmd8.h typedef struct CPpmd8_Context_
-CPpmd8_Context_Ref typedef      22 /home/user/InvariantFS/src-extracted/VFS/src/Ppmd8.h typedef Ppmd_Ref_Type(struct CPpmd8_Context_) CPpmd8_Context_Ref;
-__anonb84dd66a010a union        32 /home/user/InvariantFS/src-extracted/VFS/src/Ppmd8.h {
-__anonb84dd66a020a union        38 /home/user/InvariantFS/src-extracted/VFS/src/Ppmd8.h {
-__anonb84dd66a0303 enum         57 /home/user/InvariantFS/src-extracted/VFS/src/Ppmd8.h {
-__anonb84dd66a0408 struct       74 /home/user/InvariantFS/src-extracted/VFS/src/Ppmd8.h {
-__anonb84dd66a050a union        89 /home/user/InvariantFS/src-extracted/VFS/src/Ppmd8.h {
+CPpmd8           typedef     103 /home/user/InvariantFS/src-extracted/VFS/src/codecs/Ppmd8.h } CPpmd8;
+CPpmd8_Context   typedef      44 /home/user/InvariantFS/src-extracted/VFS/src/codecs/Ppmd8.h } CPpmd8_Context;
+CPpmd8_Context_  struct       26 /home/user/InvariantFS/src-extracted/VFS/src/codecs/Ppmd8.h typedef struct CPpmd8_Context_
+CPpmd8_Context_Ref typedef      22 /home/user/InvariantFS/src-extracted/VFS/src/codecs/Ppmd8.h typedef Ppmd_Ref_Type(struct CPpmd8_Context_) CPpmd8_Context_Ref;
+__anon1220514a010a union        32 /home/user/InvariantFS/src-extracted/VFS/src/codecs/Ppmd8.h {
+__anon1220514a020a union        38 /home/user/InvariantFS/src-extracted/VFS/src/codecs/Ppmd8.h {
+__anon1220514a0303 enum         57 /home/user/InvariantFS/src-extracted/VFS/src/codecs/Ppmd8.h {
+__anon1220514a0408 struct       74 /home/user/InvariantFS/src-extracted/VFS/src/codecs/Ppmd8.h {
+__anon1220514a050a union        89 /home/user/InvariantFS/src-extracted/VFS/src/codecs/Ppmd8.h {

@@ -1,11 +1,12 @@
-algo_is_whole_file function    941 /home/user/InvariantFS/src-extracted/VFS/src/vol_read.c static int algo_is_whole_file(uint32_t algo)
-seg_read_checked function     34 /home/user/InvariantFS/src-extracted/VFS/src/vol_read.c int seg_read_checked(invfs_volume *v, uint64_t pba, uint64_t plen,
-tz_batch_algo    function     10 /home/user/InvariantFS/src-extracted/VFS/src/vol_read.c static int tz_batch_algo(uint32_t algo)
-vol_name_count   function    928 /home/user/InvariantFS/src-extracted/VFS/src/vol_read.c uint64_t vol_name_count(invfs_volume *v) { return (uint64_t)v->ncount; }
-vol_read_file    function    819 /home/user/InvariantFS/src-extracted/VFS/src/vol_read.c int vol_read_file(invfs_volume *v, uint64_t inode_id, uint8_t **out, size_t *out_len)
-vol_read_inode   function    192 /home/user/InvariantFS/src-extracted/VFS/src/vol_read.c int vol_read_inode(invfs_volume *v, uint64_t inode_id, unsigned depth,
-vol_read_named   function    830 /home/user/InvariantFS/src-extracted/VFS/src/vol_read.c int vol_read_named(invfs_volume *v, const char *name, uint8_t **out, size_t *out_len)
-vol_read_range   function    965 /home/user/InvariantFS/src-extracted/VFS/src/vol_read.c int vol_read_range(invfs_volume *v, uint64_t inode_id, uint64_t offset,
-vol_read_text_slice function     95 /home/user/InvariantFS/src-extracted/VFS/src/vol_read.c static int vol_read_text_slice(invfs_volume *v, uint64_t inode_id,
-vol_stat         function    893 /home/user/InvariantFS/src-extracted/VFS/src/vol_read.c int vol_stat(invfs_volume *v, const char *name, uint64_t *size_out)
-vol_stat_full    function    904 /home/user/InvariantFS/src-extracted/VFS/src/vol_read.c int vol_stat_full(invfs_volume *v, const char *name, uint64_t *id_out,
+algo_is_whole_file function   1006 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_read.c static int algo_is_whole_file(uint32_t algo)
+seg_read_checked function     74 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_read.c int seg_read_checked(invfs_volume *v, uint64_t pba, uint64_t plen,
+seg_read_once    function     38 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_read.c static int seg_read_once(invfs_volume *v, uint64_t pba, uint64_t plen,
+tz_batch_algo    function     10 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_read.c static int tz_batch_algo(uint32_t algo)
+vol_name_count   function    993 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_read.c uint64_t vol_name_count(invfs_volume *v) { return (uint64_t)v->ncount; }
+vol_read_file    function    884 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_read.c int vol_read_file(invfs_volume *v, uint64_t inode_id, uint8_t **out, size_t *out_len)
+vol_read_inode   function    246 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_read.c int vol_read_inode(invfs_volume *v, uint64_t inode_id, unsigned depth,
+vol_read_named   function    895 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_read.c int vol_read_named(invfs_volume *v, const char *name, uint8_t **out, size_t *out_len)
+vol_read_range   function   1030 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_read.c int vol_read_range(invfs_volume *v, uint64_t inode_id, uint64_t offset,
+vol_read_text_slice function    149 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_read.c static int vol_read_text_slice(invfs_volume *v, uint64_t inode_id,
+vol_stat         function    958 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_read.c int vol_stat(invfs_volume *v, const char *name, uint64_t *size_out)
+vol_stat_full    function    969 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_read.c int vol_stat_full(invfs_volume *v, const char *name, uint64_t *id_out,

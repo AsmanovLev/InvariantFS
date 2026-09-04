@@ -1,12 +1,12 @@
-__anon4ba1ca4a0108 struct       36 /home/user/InvariantFS/src-extracted/VFS/src/flacx.c typedef struct {
-__anon4ba1ca4a0208 struct       57 /home/user/InvariantFS/src-extracted/VFS/src/flacx.c typedef struct {
-__anon4ba1ca4a0308 struct      174 /home/user/InvariantFS/src-extracted/VFS/src/flacx.c typedef struct {
-__anon4ba1ca4a0408 struct      184 /home/user/InvariantFS/src-extracted/VFS/src/flacx.c typedef struct {
-__anon4ba1ca4a0508 struct      193 /home/user/InvariantFS/src-extracted/VFS/src/flacx.c typedef struct {
-br_t             typedef      40 /home/user/InvariantFS/src-extracted/VFS/src/flacx.c } br_t;
-bw_t             typedef      61 /home/user/InvariantFS/src-extracted/VFS/src/flacx.c } bw_t;
-flacx_cover      struct      203 /home/user/InvariantFS/src-extracted/VFS/src/flacx.c struct flacx_cover { uint32_t offset, len; uint8_t kind; uint8_t *data; } *covers;
-flacx_cover      typedef     207 /home/user/InvariantFS/src-extracted/VFS/src/flacx.c typedef struct flacx_cover flacx_cover;
-frame_t          typedef     191 /home/user/InvariantFS/src-extracted/VFS/src/flacx.c } frame_t;
-recipe_t         typedef     205 /home/user/InvariantFS/src-extracted/VFS/src/flacx.c } recipe_t;
-subframe_t       typedef     182 /home/user/InvariantFS/src-extracted/VFS/src/flacx.c } subframe_t;
+__anon10bfe2a40108 struct       36 /home/user/InvariantFS/src-extracted/VFS/src/recipes/flacx.c typedef struct {
+__anon10bfe2a40208 struct       57 /home/user/InvariantFS/src-extracted/VFS/src/recipes/flacx.c typedef struct {
+__anon10bfe2a40308 struct      174 /home/user/InvariantFS/src-extracted/VFS/src/recipes/flacx.c typedef struct {
+__anon10bfe2a40408 struct      184 /home/user/InvariantFS/src-extracted/VFS/src/recipes/flacx.c typedef struct {
+__anon10bfe2a40508 struct      193 /home/user/InvariantFS/src-extracted/VFS/src/recipes/flacx.c typedef struct {
+br_t             typedef      40 /home/user/InvariantFS/src-extracted/VFS/src/recipes/flacx.c } br_t;
+bw_t             typedef      61 /home/user/InvariantFS/src-extracted/VFS/src/recipes/flacx.c } bw_t;
+flacx_cover      struct      203 /home/user/InvariantFS/src-extracted/VFS/src/recipes/flacx.c struct flacx_cover { uint32_t offset, len; uint8_t kind; uint8_t *data; } *covers;
+flacx_cover      typedef     207 /home/user/InvariantFS/src-extracted/VFS/src/recipes/flacx.c typedef struct flacx_cover flacx_cover;
+frame_t          typedef     191 /home/user/InvariantFS/src-extracted/VFS/src/recipes/flacx.c } frame_t;
+recipe_t         typedef     205 /home/user/InvariantFS/src-extracted/VFS/src/recipes/flacx.c } recipe_t;
+subframe_t       typedef     182 /home/user/InvariantFS/src-extracted/VFS/src/recipes/flacx.c } subframe_t;

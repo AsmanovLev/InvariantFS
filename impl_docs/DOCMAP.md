@@ -5,6 +5,11 @@ the script now only regenerates FUNCTIONS.md/TYPES.md/functions//types/).
 "volume.c" in an old lane means the post-split engine: volume.c + the
 vol_*.c modules (see FILEMAP.md).
 
+2026-09-04: sources moved into per-role subdirs under src-extracted/VFS/src/
+(core/ codecs/ recipes/ cli/ vendor7z/ legacy/). Basenames are unchanged, so
+the "primary sources" column below still resolves — see FILEMAP.md's Layout
+table for the directory of any file.
+
 | doc | audit lane | primary sources |
 |---|---|---|
 | 02-on-disk-format | A1 format | invarifs.h, volume.h, volume_internal.h, volume.c (open/close/alloc/journal), mkfs.c, fsck.c + vol_fsck.c |

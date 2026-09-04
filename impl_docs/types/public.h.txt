@@ -1,94 +1,94 @@
-CLEANUP_CONTEXT  typedef     222 /home/user/InvariantFS/src-extracted/VFS/src/public.h } CLEANUP_CONTEXT, *PCLEANUP_CONTEXT;
-CLOSE_CONTEXT    typedef     228 /home/user/InvariantFS/src-extracted/VFS/src/public.h } CLOSE_CONTEXT, *PCLOSE_CONTEXT;
-CREATE_CONTEXT   typedef     216 /home/user/InvariantFS/src-extracted/VFS/src/public.h } CREATE_CONTEXT, *PCREATE_CONTEXT;
-DIRECTORY_CONTEXT typedef     240 /home/user/InvariantFS/src-extracted/VFS/src/public.h } DIRECTORY_CONTEXT, *PDIRECTORY_CONTEXT;
-DOKAN_ACCESS_STATE typedef     189 /home/user/InvariantFS/src-extracted/VFS/src/public.h } DOKAN_ACCESS_STATE, *PDOKAN_ACCESS_STATE;
-DOKAN_ACCESS_STATE_INTERMEDIATE typedef     175 /home/user/InvariantFS/src-extracted/VFS/src/public.h } DOKAN_ACCESS_STATE_INTERMEDIATE, *PDOKAN_ACCESS_STATE_INTERMEDIATE;
-DOKAN_IO_SECURITY_CONTEXT typedef     205 /home/user/InvariantFS/src-extracted/VFS/src/public.h } DOKAN_IO_SECURITY_CONTEXT, *PDOKAN_IO_SECURITY_CONTEXT;
-DOKAN_IO_SECURITY_CONTEXT_INTERMEDIATE typedef     199 /home/user/InvariantFS/src-extracted/VFS/src/public.h } DOKAN_IO_SECURITY_CONTEXT_INTERMEDIATE,
-DOKAN_LOG_MESSAGE typedef     524 /home/user/InvariantFS/src-extracted/VFS/src/public.h } DOKAN_LOG_MESSAGE, *PDOKAN_LOG_MESSAGE;
-DOKAN_MOUNT_POINT_INFO typedef     514 /home/user/InvariantFS/src-extracted/VFS/src/public.h } DOKAN_MOUNT_POINT_INFO, *PDOKAN_MOUNT_POINT_INFO;
-DOKAN_NOTIFY_PATH_INTERMEDIATE typedef     147 /home/user/InvariantFS/src-extracted/VFS/src/public.h } DOKAN_NOTIFY_PATH_INTERMEDIATE, *PDOKAN_NOTIFY_PATH_INTERMEDIATE;
-DOKAN_RENAME_INFORMATION typedef     492 /home/user/InvariantFS/src-extracted/VFS/src/public.h } DOKAN_RENAME_INFORMATION, *PDOKAN_RENAME_INFORMATION;
-DOKAN_UNICODE_STRING_INTERMEDIATE typedef     133 /home/user/InvariantFS/src-extracted/VFS/src/public.h } DOKAN_UNICODE_STRING_INTERMEDIATE, *PDOKAN_UNICODE_STRING_INTERMEDIATE;
-EVENT_CONTEXT    typedef     338 /home/user/InvariantFS/src-extracted/VFS/src/public.h } EVENT_CONTEXT, *PEVENT_CONTEXT;
-EVENT_DRIVER_INFO typedef     463 /home/user/InvariantFS/src-extracted/VFS/src/public.h } EVENT_DRIVER_INFO, *PEVENT_DRIVER_INFO;
-EVENT_INFORMATION typedef     393 /home/user/InvariantFS/src-extracted/VFS/src/public.h } EVENT_INFORMATION, *PEVENT_INFORMATION;
-EVENT_START      typedef     475 /home/user/InvariantFS/src-extracted/VFS/src/public.h } EVENT_START, *PEVENT_START;
-FILEINFO_CONTEXT typedef     264 /home/user/InvariantFS/src-extracted/VFS/src/public.h } FILEINFO_CONTEXT, *PFILEINFO_CONTEXT;
-FLUSH_CONTEXT    typedef     290 /home/user/InvariantFS/src-extracted/VFS/src/public.h } FLUSH_CONTEXT, *PFLUSH_CONTEXT;
-LOCK_CONTEXT     typedef     285 /home/user/InvariantFS/src-extracted/VFS/src/public.h } LOCK_CONTEXT, *PLOCK_CONTEXT;
-PCLEANUP_CONTEXT typedef     222 /home/user/InvariantFS/src-extracted/VFS/src/public.h } CLEANUP_CONTEXT, *PCLEANUP_CONTEXT;
-PCLOSE_CONTEXT   typedef     228 /home/user/InvariantFS/src-extracted/VFS/src/public.h } CLOSE_CONTEXT, *PCLOSE_CONTEXT;
-PCREATE_CONTEXT  typedef     216 /home/user/InvariantFS/src-extracted/VFS/src/public.h } CREATE_CONTEXT, *PCREATE_CONTEXT;
-PDIRECTORY_CONTEXT typedef     240 /home/user/InvariantFS/src-extracted/VFS/src/public.h } DIRECTORY_CONTEXT, *PDIRECTORY_CONTEXT;
-PDOKAN_ACCESS_STATE typedef     189 /home/user/InvariantFS/src-extracted/VFS/src/public.h } DOKAN_ACCESS_STATE, *PDOKAN_ACCESS_STATE;
-PDOKAN_ACCESS_STATE_INTERMEDIATE typedef     175 /home/user/InvariantFS/src-extracted/VFS/src/public.h } DOKAN_ACCESS_STATE_INTERMEDIATE, *PDOKAN_ACCESS_STATE_INTERMEDIATE;
-PDOKAN_IO_SECURITY_CONTEXT typedef     205 /home/user/InvariantFS/src-extracted/VFS/src/public.h } DOKAN_IO_SECURITY_CONTEXT, *PDOKAN_IO_SECURITY_CONTEXT;
-PDOKAN_IO_SECURITY_CONTEXT_INTERMEDIATE typedef     200 /home/user/InvariantFS/src-extracted/VFS/src/public.h *PDOKAN_IO_SECURITY_CONTEXT_INTERMEDIATE;
-PDOKAN_LOG_MESSAGE typedef     524 /home/user/InvariantFS/src-extracted/VFS/src/public.h } DOKAN_LOG_MESSAGE, *PDOKAN_LOG_MESSAGE;
-PDOKAN_MOUNT_POINT_INFO typedef     514 /home/user/InvariantFS/src-extracted/VFS/src/public.h } DOKAN_MOUNT_POINT_INFO, *PDOKAN_MOUNT_POINT_INFO;
-PDOKAN_NOTIFY_PATH_INTERMEDIATE typedef     147 /home/user/InvariantFS/src-extracted/VFS/src/public.h } DOKAN_NOTIFY_PATH_INTERMEDIATE, *PDOKAN_NOTIFY_PATH_INTERMEDIATE;
-PDOKAN_RENAME_INFORMATION typedef     492 /home/user/InvariantFS/src-extracted/VFS/src/public.h } DOKAN_RENAME_INFORMATION, *PDOKAN_RENAME_INFORMATION;
-PDOKAN_UNICODE_STRING_INTERMEDIATE typedef     133 /home/user/InvariantFS/src-extracted/VFS/src/public.h } DOKAN_UNICODE_STRING_INTERMEDIATE, *PDOKAN_UNICODE_STRING_INTERMEDIATE;
-PEVENT_CONTEXT   typedef     338 /home/user/InvariantFS/src-extracted/VFS/src/public.h } EVENT_CONTEXT, *PEVENT_CONTEXT;
-PEVENT_DRIVER_INFO typedef     463 /home/user/InvariantFS/src-extracted/VFS/src/public.h } EVENT_DRIVER_INFO, *PEVENT_DRIVER_INFO;
-PEVENT_INFORMATION typedef     393 /home/user/InvariantFS/src-extracted/VFS/src/public.h } EVENT_INFORMATION, *PEVENT_INFORMATION;
-PEVENT_START     typedef     475 /home/user/InvariantFS/src-extracted/VFS/src/public.h } EVENT_START, *PEVENT_START;
-PFILEINFO_CONTEXT typedef     264 /home/user/InvariantFS/src-extracted/VFS/src/public.h } FILEINFO_CONTEXT, *PFILEINFO_CONTEXT;
-PFLUSH_CONTEXT   typedef     290 /home/user/InvariantFS/src-extracted/VFS/src/public.h } FLUSH_CONTEXT, *PFLUSH_CONTEXT;
-PLOCK_CONTEXT    typedef     285 /home/user/InvariantFS/src-extracted/VFS/src/public.h } LOCK_CONTEXT, *PLOCK_CONTEXT;
-PREAD_CONTEXT    typedef     247 /home/user/InvariantFS/src-extracted/VFS/src/public.h } READ_CONTEXT, *PREAD_CONTEXT;
-PSECURITY_CONTEXT typedef     302 /home/user/InvariantFS/src-extracted/VFS/src/public.h } SECURITY_CONTEXT, *PSECURITY_CONTEXT;
-PSETFILE_CONTEXT typedef     272 /home/user/InvariantFS/src-extracted/VFS/src/public.h } SETFILE_CONTEXT, *PSETFILE_CONTEXT;
-PSET_SECURITY_CONTEXT typedef     310 /home/user/InvariantFS/src-extracted/VFS/src/public.h } SET_SECURITY_CONTEXT, *PSET_SECURITY_CONTEXT;
-PUNMOUNT_CONTEXT typedef     295 /home/user/InvariantFS/src-extracted/VFS/src/public.h } UNMOUNT_CONTEXT, *PUNMOUNT_CONTEXT;
-PVOLUME_CONTEXT  typedef     277 /home/user/InvariantFS/src-extracted/VFS/src/public.h } VOLUME_CONTEXT, *PVOLUME_CONTEXT;
-PVOLUME_METRICS  typedef     353 /home/user/InvariantFS/src-extracted/VFS/src/public.h } VOLUME_METRICS, *PVOLUME_METRICS;
-PWRITE_CONTEXT   typedef     257 /home/user/InvariantFS/src-extracted/VFS/src/public.h } WRITE_CONTEXT, *PWRITE_CONTEXT;
-READ_CONTEXT     typedef     247 /home/user/InvariantFS/src-extracted/VFS/src/public.h } READ_CONTEXT, *PREAD_CONTEXT;
-SECURITY_CONTEXT typedef     302 /home/user/InvariantFS/src-extracted/VFS/src/public.h } SECURITY_CONTEXT, *PSECURITY_CONTEXT;
-SETFILE_CONTEXT  typedef     272 /home/user/InvariantFS/src-extracted/VFS/src/public.h } SETFILE_CONTEXT, *PSETFILE_CONTEXT;
-SET_SECURITY_CONTEXT typedef     310 /home/user/InvariantFS/src-extracted/VFS/src/public.h } SET_SECURITY_CONTEXT, *PSET_SECURITY_CONTEXT;
-UNMOUNT_CONTEXT  typedef     295 /home/user/InvariantFS/src-extracted/VFS/src/public.h } UNMOUNT_CONTEXT, *PUNMOUNT_CONTEXT;
-VOLUME_CONTEXT   typedef     277 /home/user/InvariantFS/src-extracted/VFS/src/public.h } VOLUME_CONTEXT, *PVOLUME_CONTEXT;
-VOLUME_METRICS   typedef     353 /home/user/InvariantFS/src-extracted/VFS/src/public.h } VOLUME_METRICS, *PVOLUME_METRICS;
-WRITE_CONTEXT    typedef     257 /home/user/InvariantFS/src-extracted/VFS/src/public.h } WRITE_CONTEXT, *PWRITE_CONTEXT;
-_CLEANUP_CONTEXT struct      218 /home/user/InvariantFS/src-extracted/VFS/src/public.h typedef struct _CLEANUP_CONTEXT {
-_CLOSE_CONTEXT   struct      224 /home/user/InvariantFS/src-extracted/VFS/src/public.h typedef struct _CLOSE_CONTEXT {
-_CREATE_CONTEXT  struct      207 /home/user/InvariantFS/src-extracted/VFS/src/public.h typedef struct _CREATE_CONTEXT {
-_DIRECTORY_CONTEXT struct      230 /home/user/InvariantFS/src-extracted/VFS/src/public.h typedef struct _DIRECTORY_CONTEXT {
-_DOKAN_ACCESS_STATE struct      177 /home/user/InvariantFS/src-extracted/VFS/src/public.h typedef struct _DOKAN_ACCESS_STATE {
-_DOKAN_ACCESS_STATE_INTERMEDIATE struct      154 /home/user/InvariantFS/src-extracted/VFS/src/public.h typedef struct _DOKAN_ACCESS_STATE_INTERMEDIATE {
-_DOKAN_IO_SECURITY_CONTEXT struct      202 /home/user/InvariantFS/src-extracted/VFS/src/public.h typedef struct _DOKAN_IO_SECURITY_CONTEXT {
-_DOKAN_IO_SECURITY_CONTEXT_INTERMEDIATE struct      196 /home/user/InvariantFS/src-extracted/VFS/src/public.h typedef struct _DOKAN_IO_SECURITY_CONTEXT_INTERMEDIATE {
-_DOKAN_LOG_MESSAGE struct      521 /home/user/InvariantFS/src-extracted/VFS/src/public.h typedef struct _DOKAN_LOG_MESSAGE {
-_DOKAN_MOUNT_POINT_INFO struct      501 /home/user/InvariantFS/src-extracted/VFS/src/public.h typedef struct _DOKAN_MOUNT_POINT_INFO {
-_DOKAN_NOTIFY_PATH_INTERMEDIATE struct      142 /home/user/InvariantFS/src-extracted/VFS/src/public.h typedef struct _DOKAN_NOTIFY_PATH_INTERMEDIATE {
-_DOKAN_RENAME_INFORMATION struct      481 /home/user/InvariantFS/src-extracted/VFS/src/public.h typedef struct _DOKAN_RENAME_INFORMATION {
-_DOKAN_UNICODE_STRING_INTERMEDIATE struct      129 /home/user/InvariantFS/src-extracted/VFS/src/public.h typedef struct _DOKAN_UNICODE_STRING_INTERMEDIATE {
-_EVENT_CONTEXT   struct      312 /home/user/InvariantFS/src-extracted/VFS/src/public.h typedef struct _EVENT_CONTEXT {
-_EVENT_DRIVER_INFO struct      455 /home/user/InvariantFS/src-extracted/VFS/src/public.h typedef struct _EVENT_DRIVER_INFO {
-_EVENT_INFORMATION struct      361 /home/user/InvariantFS/src-extracted/VFS/src/public.h typedef struct _EVENT_INFORMATION {
-_EVENT_START     struct      465 /home/user/InvariantFS/src-extracted/VFS/src/public.h typedef struct _EVENT_START {
-_FILEINFO_CONTEXT struct      259 /home/user/InvariantFS/src-extracted/VFS/src/public.h typedef struct _FILEINFO_CONTEXT {
-_FLUSH_CONTEXT   struct      287 /home/user/InvariantFS/src-extracted/VFS/src/public.h typedef struct _FLUSH_CONTEXT {
-_LOCK_CONTEXT    struct      279 /home/user/InvariantFS/src-extracted/VFS/src/public.h typedef struct _LOCK_CONTEXT {
-_READ_CONTEXT    struct      242 /home/user/InvariantFS/src-extracted/VFS/src/public.h typedef struct _READ_CONTEXT {
-_SECURITY_CONTEXT struct      297 /home/user/InvariantFS/src-extracted/VFS/src/public.h typedef struct _SECURITY_CONTEXT {
-_SETFILE_CONTEXT struct      266 /home/user/InvariantFS/src-extracted/VFS/src/public.h typedef struct _SETFILE_CONTEXT {
-_SET_SECURITY_CONTEXT struct      304 /home/user/InvariantFS/src-extracted/VFS/src/public.h typedef struct _SET_SECURITY_CONTEXT {
-_UNMOUNT_CONTEXT struct      292 /home/user/InvariantFS/src-extracted/VFS/src/public.h typedef struct _UNMOUNT_CONTEXT {
-_VOLUME_CONTEXT  struct      274 /home/user/InvariantFS/src-extracted/VFS/src/public.h typedef struct _VOLUME_CONTEXT {
-_VOLUME_METRICS  struct      341 /home/user/InvariantFS/src-extracted/VFS/src/public.h typedef struct _VOLUME_METRICS {
-_WRITE_CONTEXT   struct      249 /home/user/InvariantFS/src-extracted/VFS/src/public.h typedef struct _WRITE_CONTEXT {
-__anonb22a2da0010a union       322 /home/user/InvariantFS/src-extracted/VFS/src/public.h union {
-__anonb22a2da0020a union       365 /home/user/InvariantFS/src-extracted/VFS/src/public.h union {
-__anonb22a2da00308 struct      366 /home/user/InvariantFS/src-extracted/VFS/src/public.h struct {
-__anonb22a2da00408 struct      369 /home/user/InvariantFS/src-extracted/VFS/src/public.h struct {
-__anonb22a2da00508 struct      373 /home/user/InvariantFS/src-extracted/VFS/src/public.h struct {
-__anonb22a2da00608 struct      376 /home/user/InvariantFS/src-extracted/VFS/src/public.h struct {
-__anonb22a2da00708 struct      379 /home/user/InvariantFS/src-extracted/VFS/src/public.h struct {
-__anonb22a2da00808 struct      382 /home/user/InvariantFS/src-extracted/VFS/src/public.h struct {
-__anonb22a2da00908 struct      385 /home/user/InvariantFS/src-extracted/VFS/src/public.h struct {
-__anonb22a2da00a0a union       483 /home/user/InvariantFS/src-extracted/VFS/src/public.h union {
+CLEANUP_CONTEXT  typedef     222 /home/user/InvariantFS/src-extracted/VFS/src/legacy/public.h } CLEANUP_CONTEXT, *PCLEANUP_CONTEXT;
+CLOSE_CONTEXT    typedef     228 /home/user/InvariantFS/src-extracted/VFS/src/legacy/public.h } CLOSE_CONTEXT, *PCLOSE_CONTEXT;
+CREATE_CONTEXT   typedef     216 /home/user/InvariantFS/src-extracted/VFS/src/legacy/public.h } CREATE_CONTEXT, *PCREATE_CONTEXT;
+DIRECTORY_CONTEXT typedef     240 /home/user/InvariantFS/src-extracted/VFS/src/legacy/public.h } DIRECTORY_CONTEXT, *PDIRECTORY_CONTEXT;
+DOKAN_ACCESS_STATE typedef     189 /home/user/InvariantFS/src-extracted/VFS/src/legacy/public.h } DOKAN_ACCESS_STATE, *PDOKAN_ACCESS_STATE;
+DOKAN_ACCESS_STATE_INTERMEDIATE typedef     175 /home/user/InvariantFS/src-extracted/VFS/src/legacy/public.h } DOKAN_ACCESS_STATE_INTERMEDIATE, *PDOKAN_ACCESS_STATE_INTERMEDIATE;
+DOKAN_IO_SECURITY_CONTEXT typedef     205 /home/user/InvariantFS/src-extracted/VFS/src/legacy/public.h } DOKAN_IO_SECURITY_CONTEXT, *PDOKAN_IO_SECURITY_CONTEXT;
+DOKAN_IO_SECURITY_CONTEXT_INTERMEDIATE typedef     199 /home/user/InvariantFS/src-extracted/VFS/src/legacy/public.h } DOKAN_IO_SECURITY_CONTEXT_INTERMEDIATE,
+DOKAN_LOG_MESSAGE typedef     524 /home/user/InvariantFS/src-extracted/VFS/src/legacy/public.h } DOKAN_LOG_MESSAGE, *PDOKAN_LOG_MESSAGE;
+DOKAN_MOUNT_POINT_INFO typedef     514 /home/user/InvariantFS/src-extracted/VFS/src/legacy/public.h } DOKAN_MOUNT_POINT_INFO, *PDOKAN_MOUNT_POINT_INFO;
+DOKAN_NOTIFY_PATH_INTERMEDIATE typedef     147 /home/user/InvariantFS/src-extracted/VFS/src/legacy/public.h } DOKAN_NOTIFY_PATH_INTERMEDIATE, *PDOKAN_NOTIFY_PATH_INTERMEDIATE;
+DOKAN_RENAME_INFORMATION typedef     492 /home/user/InvariantFS/src-extracted/VFS/src/legacy/public.h } DOKAN_RENAME_INFORMATION, *PDOKAN_RENAME_INFORMATION;
+DOKAN_UNICODE_STRING_INTERMEDIATE typedef     133 /home/user/InvariantFS/src-extracted/VFS/src/legacy/public.h } DOKAN_UNICODE_STRING_INTERMEDIATE, *PDOKAN_UNICODE_STRING_INTERMEDIATE;
+EVENT_CONTEXT    typedef     338 /home/user/InvariantFS/src-extracted/VFS/src/legacy/public.h } EVENT_CONTEXT, *PEVENT_CONTEXT;
+EVENT_DRIVER_INFO typedef     463 /home/user/InvariantFS/src-extracted/VFS/src/legacy/public.h } EVENT_DRIVER_INFO, *PEVENT_DRIVER_INFO;
+EVENT_INFORMATION typedef     393 /home/user/InvariantFS/src-extracted/VFS/src/legacy/public.h } EVENT_INFORMATION, *PEVENT_INFORMATION;
+EVENT_START      typedef     475 /home/user/InvariantFS/src-extracted/VFS/src/legacy/public.h } EVENT_START, *PEVENT_START;
+FILEINFO_CONTEXT typedef     264 /home/user/InvariantFS/src-extracted/VFS/src/legacy/public.h } FILEINFO_CONTEXT, *PFILEINFO_CONTEXT;
+FLUSH_CONTEXT    typedef     290 /home/user/InvariantFS/src-extracted/VFS/src/legacy/public.h } FLUSH_CONTEXT, *PFLUSH_CONTEXT;
+LOCK_CONTEXT     typedef     285 /home/user/InvariantFS/src-extracted/VFS/src/legacy/public.h } LOCK_CONTEXT, *PLOCK_CONTEXT;
+PCLEANUP_CONTEXT typedef     222 /home/user/InvariantFS/src-extracted/VFS/src/legacy/public.h } CLEANUP_CONTEXT, *PCLEANUP_CONTEXT;
+PCLOSE_CONTEXT   typedef     228 /home/user/InvariantFS/src-extracted/VFS/src/legacy/public.h } CLOSE_CONTEXT, *PCLOSE_CONTEXT;
+PCREATE_CONTEXT  typedef     216 /home/user/InvariantFS/src-extracted/VFS/src/legacy/public.h } CREATE_CONTEXT, *PCREATE_CONTEXT;
+PDIRECTORY_CONTEXT typedef     240 /home/user/InvariantFS/src-extracted/VFS/src/legacy/public.h } DIRECTORY_CONTEXT, *PDIRECTORY_CONTEXT;
+PDOKAN_ACCESS_STATE typedef     189 /home/user/InvariantFS/src-extracted/VFS/src/legacy/public.h } DOKAN_ACCESS_STATE, *PDOKAN_ACCESS_STATE;
+PDOKAN_ACCESS_STATE_INTERMEDIATE typedef     175 /home/user/InvariantFS/src-extracted/VFS/src/legacy/public.h } DOKAN_ACCESS_STATE_INTERMEDIATE, *PDOKAN_ACCESS_STATE_INTERMEDIATE;
+PDOKAN_IO_SECURITY_CONTEXT typedef     205 /home/user/InvariantFS/src-extracted/VFS/src/legacy/public.h } DOKAN_IO_SECURITY_CONTEXT, *PDOKAN_IO_SECURITY_CONTEXT;
+PDOKAN_IO_SECURITY_CONTEXT_INTERMEDIATE typedef     200 /home/user/InvariantFS/src-extracted/VFS/src/legacy/public.h *PDOKAN_IO_SECURITY_CONTEXT_INTERMEDIATE;
+PDOKAN_LOG_MESSAGE typedef     524 /home/user/InvariantFS/src-extracted/VFS/src/legacy/public.h } DOKAN_LOG_MESSAGE, *PDOKAN_LOG_MESSAGE;
+PDOKAN_MOUNT_POINT_INFO typedef     514 /home/user/InvariantFS/src-extracted/VFS/src/legacy/public.h } DOKAN_MOUNT_POINT_INFO, *PDOKAN_MOUNT_POINT_INFO;
+PDOKAN_NOTIFY_PATH_INTERMEDIATE typedef     147 /home/user/InvariantFS/src-extracted/VFS/src/legacy/public.h } DOKAN_NOTIFY_PATH_INTERMEDIATE, *PDOKAN_NOTIFY_PATH_INTERMEDIATE;
+PDOKAN_RENAME_INFORMATION typedef     492 /home/user/InvariantFS/src-extracted/VFS/src/legacy/public.h } DOKAN_RENAME_INFORMATION, *PDOKAN_RENAME_INFORMATION;
+PDOKAN_UNICODE_STRING_INTERMEDIATE typedef     133 /home/user/InvariantFS/src-extracted/VFS/src/legacy/public.h } DOKAN_UNICODE_STRING_INTERMEDIATE, *PDOKAN_UNICODE_STRING_INTERMEDIATE;
+PEVENT_CONTEXT   typedef     338 /home/user/InvariantFS/src-extracted/VFS/src/legacy/public.h } EVENT_CONTEXT, *PEVENT_CONTEXT;
+PEVENT_DRIVER_INFO typedef     463 /home/user/InvariantFS/src-extracted/VFS/src/legacy/public.h } EVENT_DRIVER_INFO, *PEVENT_DRIVER_INFO;
+PEVENT_INFORMATION typedef     393 /home/user/InvariantFS/src-extracted/VFS/src/legacy/public.h } EVENT_INFORMATION, *PEVENT_INFORMATION;
+PEVENT_START     typedef     475 /home/user/InvariantFS/src-extracted/VFS/src/legacy/public.h } EVENT_START, *PEVENT_START;
+PFILEINFO_CONTEXT typedef     264 /home/user/InvariantFS/src-extracted/VFS/src/legacy/public.h } FILEINFO_CONTEXT, *PFILEINFO_CONTEXT;
+PFLUSH_CONTEXT   typedef     290 /home/user/InvariantFS/src-extracted/VFS/src/legacy/public.h } FLUSH_CONTEXT, *PFLUSH_CONTEXT;
+PLOCK_CONTEXT    typedef     285 /home/user/InvariantFS/src-extracted/VFS/src/legacy/public.h } LOCK_CONTEXT, *PLOCK_CONTEXT;
+PREAD_CONTEXT    typedef     247 /home/user/InvariantFS/src-extracted/VFS/src/legacy/public.h } READ_CONTEXT, *PREAD_CONTEXT;
+PSECURITY_CONTEXT typedef     302 /home/user/InvariantFS/src-extracted/VFS/src/legacy/public.h } SECURITY_CONTEXT, *PSECURITY_CONTEXT;
+PSETFILE_CONTEXT typedef     272 /home/user/InvariantFS/src-extracted/VFS/src/legacy/public.h } SETFILE_CONTEXT, *PSETFILE_CONTEXT;
+PSET_SECURITY_CONTEXT typedef     310 /home/user/InvariantFS/src-extracted/VFS/src/legacy/public.h } SET_SECURITY_CONTEXT, *PSET_SECURITY_CONTEXT;
+PUNMOUNT_CONTEXT typedef     295 /home/user/InvariantFS/src-extracted/VFS/src/legacy/public.h } UNMOUNT_CONTEXT, *PUNMOUNT_CONTEXT;
+PVOLUME_CONTEXT  typedef     277 /home/user/InvariantFS/src-extracted/VFS/src/legacy/public.h } VOLUME_CONTEXT, *PVOLUME_CONTEXT;
+PVOLUME_METRICS  typedef     353 /home/user/InvariantFS/src-extracted/VFS/src/legacy/public.h } VOLUME_METRICS, *PVOLUME_METRICS;
+PWRITE_CONTEXT   typedef     257 /home/user/InvariantFS/src-extracted/VFS/src/legacy/public.h } WRITE_CONTEXT, *PWRITE_CONTEXT;
+READ_CONTEXT     typedef     247 /home/user/InvariantFS/src-extracted/VFS/src/legacy/public.h } READ_CONTEXT, *PREAD_CONTEXT;
+SECURITY_CONTEXT typedef     302 /home/user/InvariantFS/src-extracted/VFS/src/legacy/public.h } SECURITY_CONTEXT, *PSECURITY_CONTEXT;
+SETFILE_CONTEXT  typedef     272 /home/user/InvariantFS/src-extracted/VFS/src/legacy/public.h } SETFILE_CONTEXT, *PSETFILE_CONTEXT;
+SET_SECURITY_CONTEXT typedef     310 /home/user/InvariantFS/src-extracted/VFS/src/legacy/public.h } SET_SECURITY_CONTEXT, *PSET_SECURITY_CONTEXT;
+UNMOUNT_CONTEXT  typedef     295 /home/user/InvariantFS/src-extracted/VFS/src/legacy/public.h } UNMOUNT_CONTEXT, *PUNMOUNT_CONTEXT;
+VOLUME_CONTEXT   typedef     277 /home/user/InvariantFS/src-extracted/VFS/src/legacy/public.h } VOLUME_CONTEXT, *PVOLUME_CONTEXT;
+VOLUME_METRICS   typedef     353 /home/user/InvariantFS/src-extracted/VFS/src/legacy/public.h } VOLUME_METRICS, *PVOLUME_METRICS;
+WRITE_CONTEXT    typedef     257 /home/user/InvariantFS/src-extracted/VFS/src/legacy/public.h } WRITE_CONTEXT, *PWRITE_CONTEXT;
+_CLEANUP_CONTEXT struct      218 /home/user/InvariantFS/src-extracted/VFS/src/legacy/public.h typedef struct _CLEANUP_CONTEXT {
+_CLOSE_CONTEXT   struct      224 /home/user/InvariantFS/src-extracted/VFS/src/legacy/public.h typedef struct _CLOSE_CONTEXT {
+_CREATE_CONTEXT  struct      207 /home/user/InvariantFS/src-extracted/VFS/src/legacy/public.h typedef struct _CREATE_CONTEXT {
+_DIRECTORY_CONTEXT struct      230 /home/user/InvariantFS/src-extracted/VFS/src/legacy/public.h typedef struct _DIRECTORY_CONTEXT {
+_DOKAN_ACCESS_STATE struct      177 /home/user/InvariantFS/src-extracted/VFS/src/legacy/public.h typedef struct _DOKAN_ACCESS_STATE {
+_DOKAN_ACCESS_STATE_INTERMEDIATE struct      154 /home/user/InvariantFS/src-extracted/VFS/src/legacy/public.h typedef struct _DOKAN_ACCESS_STATE_INTERMEDIATE {
+_DOKAN_IO_SECURITY_CONTEXT struct      202 /home/user/InvariantFS/src-extracted/VFS/src/legacy/public.h typedef struct _DOKAN_IO_SECURITY_CONTEXT {
+_DOKAN_IO_SECURITY_CONTEXT_INTERMEDIATE struct      196 /home/user/InvariantFS/src-extracted/VFS/src/legacy/public.h typedef struct _DOKAN_IO_SECURITY_CONTEXT_INTERMEDIATE {
+_DOKAN_LOG_MESSAGE struct      521 /home/user/InvariantFS/src-extracted/VFS/src/legacy/public.h typedef struct _DOKAN_LOG_MESSAGE {
+_DOKAN_MOUNT_POINT_INFO struct      501 /home/user/InvariantFS/src-extracted/VFS/src/legacy/public.h typedef struct _DOKAN_MOUNT_POINT_INFO {
+_DOKAN_NOTIFY_PATH_INTERMEDIATE struct      142 /home/user/InvariantFS/src-extracted/VFS/src/legacy/public.h typedef struct _DOKAN_NOTIFY_PATH_INTERMEDIATE {
+_DOKAN_RENAME_INFORMATION struct      481 /home/user/InvariantFS/src-extracted/VFS/src/legacy/public.h typedef struct _DOKAN_RENAME_INFORMATION {
+_DOKAN_UNICODE_STRING_INTERMEDIATE struct      129 /home/user/InvariantFS/src-extracted/VFS/src/legacy/public.h typedef struct _DOKAN_UNICODE_STRING_INTERMEDIATE {
+_EVENT_CONTEXT   struct      312 /home/user/InvariantFS/src-extracted/VFS/src/legacy/public.h typedef struct _EVENT_CONTEXT {
+_EVENT_DRIVER_INFO struct      455 /home/user/InvariantFS/src-extracted/VFS/src/legacy/public.h typedef struct _EVENT_DRIVER_INFO {
+_EVENT_INFORMATION struct      361 /home/user/InvariantFS/src-extracted/VFS/src/legacy/public.h typedef struct _EVENT_INFORMATION {
+_EVENT_START     struct      465 /home/user/InvariantFS/src-extracted/VFS/src/legacy/public.h typedef struct _EVENT_START {
+_FILEINFO_CONTEXT struct      259 /home/user/InvariantFS/src-extracted/VFS/src/legacy/public.h typedef struct _FILEINFO_CONTEXT {
+_FLUSH_CONTEXT   struct      287 /home/user/InvariantFS/src-extracted/VFS/src/legacy/public.h typedef struct _FLUSH_CONTEXT {
+_LOCK_CONTEXT    struct      279 /home/user/InvariantFS/src-extracted/VFS/src/legacy/public.h typedef struct _LOCK_CONTEXT {
+_READ_CONTEXT    struct      242 /home/user/InvariantFS/src-extracted/VFS/src/legacy/public.h typedef struct _READ_CONTEXT {
+_SECURITY_CONTEXT struct      297 /home/user/InvariantFS/src-extracted/VFS/src/legacy/public.h typedef struct _SECURITY_CONTEXT {
+_SETFILE_CONTEXT struct      266 /home/user/InvariantFS/src-extracted/VFS/src/legacy/public.h typedef struct _SETFILE_CONTEXT {
+_SET_SECURITY_CONTEXT struct      304 /home/user/InvariantFS/src-extracted/VFS/src/legacy/public.h typedef struct _SET_SECURITY_CONTEXT {
+_UNMOUNT_CONTEXT struct      292 /home/user/InvariantFS/src-extracted/VFS/src/legacy/public.h typedef struct _UNMOUNT_CONTEXT {
+_VOLUME_CONTEXT  struct      274 /home/user/InvariantFS/src-extracted/VFS/src/legacy/public.h typedef struct _VOLUME_CONTEXT {
+_VOLUME_METRICS  struct      341 /home/user/InvariantFS/src-extracted/VFS/src/legacy/public.h typedef struct _VOLUME_METRICS {
+_WRITE_CONTEXT   struct      249 /home/user/InvariantFS/src-extracted/VFS/src/legacy/public.h typedef struct _WRITE_CONTEXT {
+__anonf5dbadc4010a union       322 /home/user/InvariantFS/src-extracted/VFS/src/legacy/public.h union {
+__anonf5dbadc4020a union       365 /home/user/InvariantFS/src-extracted/VFS/src/legacy/public.h union {
+__anonf5dbadc40308 struct      366 /home/user/InvariantFS/src-extracted/VFS/src/legacy/public.h struct {
+__anonf5dbadc40408 struct      369 /home/user/InvariantFS/src-extracted/VFS/src/legacy/public.h struct {
+__anonf5dbadc40508 struct      373 /home/user/InvariantFS/src-extracted/VFS/src/legacy/public.h struct {
+__anonf5dbadc40608 struct      376 /home/user/InvariantFS/src-extracted/VFS/src/legacy/public.h struct {
+__anonf5dbadc40708 struct      379 /home/user/InvariantFS/src-extracted/VFS/src/legacy/public.h struct {
+__anonf5dbadc40808 struct      382 /home/user/InvariantFS/src-extracted/VFS/src/legacy/public.h struct {
+__anonf5dbadc40908 struct      385 /home/user/InvariantFS/src-extracted/VFS/src/legacy/public.h struct {
+__anonf5dbadc40a0a union       483 /home/user/InvariantFS/src-extracted/VFS/src/legacy/public.h union {

@@ -1,3 +1,3 @@
-__anon8ce3cb200108 struct       36 /home/user/InvariantFS/src-extracted/VFS/src/vol_exer.c typedef struct {
-__anon8ce3cb200208 struct      245 /home/user/InvariantFS/src-extracted/VFS/src/vol_exer.c struct { uint8_t *blob, *back; size_t blen; } pm[EXE_MAX_MEDIA];
-exe_region       typedef      39 /home/user/InvariantFS/src-extracted/VFS/src/vol_exer.c } exe_region;
+__anon6b33ce180108 struct       36 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_exer.c typedef struct {
+__anon6b33ce180208 struct      245 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_exer.c struct { uint8_t *blob, *back; size_t blen; } pm[EXE_MAX_MEDIA];
+exe_region       typedef      39 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_exer.c } exe_region;

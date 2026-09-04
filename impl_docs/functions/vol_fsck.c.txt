@@ -1,2 +1,5 @@
-fsck_rebuild_one function     24 /home/user/InvariantFS/src-extracted/VFS/src/vol_fsck.c static int fsck_rebuild_one(invfs_volume *v, uint64_t rec_pos, uint64_t inode_id,
-vol_fsck_scan    function     91 /home/user/InvariantFS/src-extracted/VFS/src/vol_fsck.c int vol_fsck_scan(invfs_volume *v, invfs_fsck_report *rep, int fix)
+fsck_quarantine  function    113 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_fsck.c static int fsck_quarantine(invfs_volume *v, const char *name,
+fsck_rebuild_one function     29 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_fsck.c static int fsck_rebuild_one(invfs_volume *v, uint64_t rec_pos, uint64_t inode_id,
+fsck_truncate_suffix function    146 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_fsck.c static int fsck_truncate_suffix(invfs_volume *v, const mapset *ms,
+rec_content_bad  function    240 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_fsck.c static int rec_content_bad(invfs_volume *v, uint64_t rec_pos,
+vol_fsck_scan    function    315 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_fsck.c int vol_fsck_scan(invfs_volume *v, invfs_fsck_report *rep, int fix)

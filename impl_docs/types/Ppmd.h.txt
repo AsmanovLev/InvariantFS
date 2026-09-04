@@ -1,11 +1,11 @@
-CPpmd_Byte_Ref   typedef     122 /home/user/InvariantFS/src-extracted/VFS/src/Ppmd.h typedef Ppmd_Ref_Type(Byte) CPpmd_Byte_Ref;
-CPpmd_See        typedef      49 /home/user/InvariantFS/src-extracted/VFS/src/Ppmd.h } CPpmd_See;
-CPpmd_State      typedef      63 /home/user/InvariantFS/src-extracted/VFS/src/Ppmd.h } CPpmd_State;
-CPpmd_State2     typedef      69 /home/user/InvariantFS/src-extracted/VFS/src/Ppmd.h } CPpmd_State2;
-CPpmd_State2_    struct       65 /home/user/InvariantFS/src-extracted/VFS/src/Ppmd.h typedef struct CPpmd_State2_
-CPpmd_State4     typedef      75 /home/user/InvariantFS/src-extracted/VFS/src/Ppmd.h } CPpmd_State4;
-CPpmd_State4_    struct       71 /home/user/InvariantFS/src-extracted/VFS/src/Ppmd.h typedef struct CPpmd_State4_
-CPpmd_State_Ref  typedef     120 /home/user/InvariantFS/src-extracted/VFS/src/Ppmd.h typedef Ppmd_Ref_Type(CPpmd_State) CPpmd_State_Ref;
-CPpmd_Void_Ref   typedef     121 /home/user/InvariantFS/src-extracted/VFS/src/Ppmd.h typedef Ppmd_Ref_Type(void) CPpmd_Void_Ref;
-__anond70a1cb20108 struct       45 /home/user/InvariantFS/src-extracted/VFS/src/Ppmd.h {
-__anond70a1cb20208 struct       58 /home/user/InvariantFS/src-extracted/VFS/src/Ppmd.h {
+CPpmd_Byte_Ref   typedef     122 /home/user/InvariantFS/src-extracted/VFS/src/codecs/Ppmd.h typedef Ppmd_Ref_Type(Byte) CPpmd_Byte_Ref;
+CPpmd_See        typedef      49 /home/user/InvariantFS/src-extracted/VFS/src/codecs/Ppmd.h } CPpmd_See;
+CPpmd_State      typedef      63 /home/user/InvariantFS/src-extracted/VFS/src/codecs/Ppmd.h } CPpmd_State;
+CPpmd_State2     typedef      69 /home/user/InvariantFS/src-extracted/VFS/src/codecs/Ppmd.h } CPpmd_State2;
+CPpmd_State2_    struct       65 /home/user/InvariantFS/src-extracted/VFS/src/codecs/Ppmd.h typedef struct CPpmd_State2_
+CPpmd_State4     typedef      75 /home/user/InvariantFS/src-extracted/VFS/src/codecs/Ppmd.h } CPpmd_State4;
+CPpmd_State4_    struct       71 /home/user/InvariantFS/src-extracted/VFS/src/codecs/Ppmd.h typedef struct CPpmd_State4_
+CPpmd_State_Ref  typedef     120 /home/user/InvariantFS/src-extracted/VFS/src/codecs/Ppmd.h typedef Ppmd_Ref_Type(CPpmd_State) CPpmd_State_Ref;
+CPpmd_Void_Ref   typedef     121 /home/user/InvariantFS/src-extracted/VFS/src/codecs/Ppmd.h typedef Ppmd_Ref_Type(void) CPpmd_Void_Ref;
+__anonf108bb920108 struct       45 /home/user/InvariantFS/src-extracted/VFS/src/codecs/Ppmd.h {
+__anonf108bb920208 struct       58 /home/user/InvariantFS/src-extracted/VFS/src/codecs/Ppmd.h {

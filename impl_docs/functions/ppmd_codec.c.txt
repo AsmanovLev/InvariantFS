@@ -1,7 +1,7 @@
-Inv_InRead       function     27 /home/user/InvariantFS/src-extracted/VFS/src/ppmd_codec.c static Byte Inv_InRead(IByteInPtr pp)
-Inv_OutWrite     function     35 /home/user/InvariantFS/src-extracted/VFS/src/ppmd_codec.c static void Inv_OutWrite(IByteOutPtr pp, Byte b)
-PutProps         function     42 /home/user/InvariantFS/src-extracted/VFS/src/ppmd_codec.c static void PutProps(Byte *p, unsigned order, unsigned memMb, unsigned restor)
-SzAlloc          function     20 /home/user/InvariantFS/src-extracted/VFS/src/ppmd_codec.c static void *SzAlloc(const ISzAlloc *p, size_t size) { (void)p; return calloc(1, size); }
-SzFree           function     21 /home/user/InvariantFS/src-extracted/VFS/src/ppmd_codec.c static void SzFree(const ISzAlloc *p, void *a) { (void)p; free(a); }
-invfs_ppmd_decode function     92 /home/user/InvariantFS/src-extracted/VFS/src/ppmd_codec.c int invfs_ppmd_decode(const uint8_t *in, size_t inlen,
-invfs_ppmd_encode function     52 /home/user/InvariantFS/src-extracted/VFS/src/ppmd_codec.c int invfs_ppmd_encode(const uint8_t *in, size_t inlen,
+Inv_InRead       function     27 /home/user/InvariantFS/src-extracted/VFS/src/codecs/ppmd_codec.c static Byte Inv_InRead(IByteInPtr pp)
+Inv_OutWrite     function     35 /home/user/InvariantFS/src-extracted/VFS/src/codecs/ppmd_codec.c static void Inv_OutWrite(IByteOutPtr pp, Byte b)
+PutProps         function     42 /home/user/InvariantFS/src-extracted/VFS/src/codecs/ppmd_codec.c static void PutProps(Byte *p, unsigned order, unsigned memMb, unsigned restor)
+SzAlloc          function     20 /home/user/InvariantFS/src-extracted/VFS/src/codecs/ppmd_codec.c static void *SzAlloc(const ISzAlloc *p, size_t size) { (void)p; return calloc(1, size); }
+SzFree           function     21 /home/user/InvariantFS/src-extracted/VFS/src/codecs/ppmd_codec.c static void SzFree(const ISzAlloc *p, void *a) { (void)p; free(a); }
+invfs_ppmd_decode function     92 /home/user/InvariantFS/src-extracted/VFS/src/codecs/ppmd_codec.c int invfs_ppmd_decode(const uint8_t *in, size_t inlen,
+invfs_ppmd_encode function     52 /home/user/InvariantFS/src-extracted/VFS/src/codecs/ppmd_codec.c int invfs_ppmd_encode(const uint8_t *in, size_t inlen,

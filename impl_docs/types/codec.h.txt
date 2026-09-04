@@ -1,6 +1,6 @@
-__anon6be996df0103 enum        119 /home/user/InvariantFS/src-extracted/VFS/src/codec.h enum {
-__anon6be996df0203 enum        152 /home/user/InvariantFS/src-extracted/VFS/src/codec.h enum {
-invfs_codec      struct       44 /home/user/InvariantFS/src-extracted/VFS/src/codec.h typedef struct invfs_codec {
-invfs_codec      typedef      54 /home/user/InvariantFS/src-extracted/VFS/src/codec.h } invfs_codec;
-invfs_pack_def   struct       69 /home/user/InvariantFS/src-extracted/VFS/src/codec.h typedef struct invfs_pack_def {
-invfs_pack_def   typedef      95 /home/user/InvariantFS/src-extracted/VFS/src/codec.h } invfs_pack_def;
+__anonc5bc11bf0103 enum        119 /home/user/InvariantFS/src-extracted/VFS/src/codecs/codec.h enum {
+__anonc5bc11bf0203 enum        152 /home/user/InvariantFS/src-extracted/VFS/src/codecs/codec.h enum {
+invfs_codec      struct       44 /home/user/InvariantFS/src-extracted/VFS/src/codecs/codec.h typedef struct invfs_codec {
+invfs_codec      typedef      54 /home/user/InvariantFS/src-extracted/VFS/src/codecs/codec.h } invfs_codec;
+invfs_pack_def   struct       69 /home/user/InvariantFS/src-extracted/VFS/src/codecs/codec.h typedef struct invfs_pack_def {
+invfs_pack_def   typedef      95 /home/user/InvariantFS/src-extracted/VFS/src/codecs/codec.h } invfs_pack_def;

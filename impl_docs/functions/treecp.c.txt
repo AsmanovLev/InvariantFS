@@ -1,4 +1,4 @@
-main             function    124 /home/user/InvariantFS/src-extracted/VFS/src/treecp.c int main(int argc, char **argv)
-now_ms           function     29 /home/user/InvariantFS/src-extracted/VFS/src/treecp.c static double now_ms(void)
-slurp            function     39 /home/user/InvariantFS/src-extracted/VFS/src/treecp.c static uint8_t *slurp(const char *path, size_t *len_out)
-walk             function     59 /home/user/InvariantFS/src-extracted/VFS/src/treecp.c static void walk(const char *host, const char *vname)
+main             function    124 /home/user/InvariantFS/src-extracted/VFS/src/legacy/treecp.c int main(int argc, char **argv)
+now_ms           function     29 /home/user/InvariantFS/src-extracted/VFS/src/legacy/treecp.c static double now_ms(void)
+slurp            function     39 /home/user/InvariantFS/src-extracted/VFS/src/legacy/treecp.c static uint8_t *slurp(const char *path, size_t *len_out)
+walk             function     59 /home/user/InvariantFS/src-extracted/VFS/src/legacy/treecp.c static void walk(const char *host, const char *vname)

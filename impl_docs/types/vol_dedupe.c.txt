@@ -1,2 +1,2 @@
-__anonb0341ca30108 struct       46 /home/user/InvariantFS/src-extracted/VFS/src/vol_dedupe.c typedef struct {
-dedup_seg        typedef      50 /home/user/InvariantFS/src-extracted/VFS/src/vol_dedupe.c } dedup_seg;
+__anon6290bd9b0108 struct       46 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_dedupe.c typedef struct {
+dedup_seg        typedef      50 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_dedupe.c } dedup_seg;

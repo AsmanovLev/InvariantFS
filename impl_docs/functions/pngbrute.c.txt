@@ -1,2 +1,2 @@
-main             function     24 /home/user/InvariantFS/src-extracted/VFS/src/pngbrute.c int main(int argc, char **argv)
-read_file        function     11 /home/user/InvariantFS/src-extracted/VFS/src/pngbrute.c static unsigned char *read_file(const char *path, size_t *len)
+main             function     24 /home/user/InvariantFS/src-extracted/VFS/src/legacy/pngbrute.c int main(int argc, char **argv)
+read_file        function     11 /home/user/InvariantFS/src-extracted/VFS/src/legacy/pngbrute.c static unsigned char *read_file(const char *path, size_t *len)

@@ -1,4 +1,4 @@
-ls_find          function     28 /home/user/InvariantFS/src-extracted/VFS/src/ls.c static int ls_find(ls_bucket **tab, size_t mask, char (*names)[256],
-ls_hash          function     20 /home/user/InvariantFS/src-extracted/VFS/src/ls.c static uint64_t ls_hash(const char *s)
-ls_insert        function     39 /home/user/InvariantFS/src-extracted/VFS/src/ls.c static int ls_insert(ls_bucket ***tabp, size_t *maskp, size_t *countp,
-main             function     76 /home/user/InvariantFS/src-extracted/VFS/src/ls.c int main(int argc, char **argv)
+ls_find          function     28 /home/user/InvariantFS/src-extracted/VFS/src/cli/ls.c static int ls_find(ls_bucket **tab, size_t mask, char (*names)[256],
+ls_hash          function     20 /home/user/InvariantFS/src-extracted/VFS/src/cli/ls.c static uint64_t ls_hash(const char *s)
+ls_insert        function     39 /home/user/InvariantFS/src-extracted/VFS/src/cli/ls.c static int ls_insert(ls_bucket ***tabp, size_t *maskp, size_t *countp,
+main             function     76 /home/user/InvariantFS/src-extracted/VFS/src/cli/ls.c int main(int argc, char **argv)

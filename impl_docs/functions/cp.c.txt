@@ -1,2 +1,2 @@
-main             function     32 /home/user/InvariantFS/src-extracted/VFS/src/cp.c int main(int argc, char **argv)
-read_file        function     15 /home/user/InvariantFS/src-extracted/VFS/src/cp.c static unsigned char *read_file(const char *path, size_t *len)
+main             function     32 /home/user/InvariantFS/src-extracted/VFS/src/cli/cp.c int main(int argc, char **argv)
+read_file        function     15 /home/user/InvariantFS/src-extracted/VFS/src/cli/cp.c static unsigned char *read_file(const char *path, size_t *len)

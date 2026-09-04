@@ -1,1 +1,1 @@
-deep_ent         struct      167 /home/user/InvariantFS/src-extracted/VFS/src/verify.c struct deep_ent { uint64_t id, fsz; char nm[256]; } *ents = NULL;
+deep_ent         struct      206 /home/user/InvariantFS/src-extracted/VFS/src/cli/verify.c struct deep_ent { uint64_t id, fsz; char nm[256]; } *ents = NULL;

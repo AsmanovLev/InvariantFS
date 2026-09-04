@@ -1,2 +1,2 @@
-__anon0f5a27ae0108 struct       55 /home/user/InvariantFS/src-extracted/VFS/src/blake3.c typedef struct {
-output_t         typedef      61 /home/user/InvariantFS/src-extracted/VFS/src/blake3.c } output_t;
+__anona37bfe8e0108 struct       55 /home/user/InvariantFS/src-extracted/VFS/src/codecs/blake3.c typedef struct {
+output_t         typedef      61 /home/user/InvariantFS/src-extracted/VFS/src/codecs/blake3.c } output_t;

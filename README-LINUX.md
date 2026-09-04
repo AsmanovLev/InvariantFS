@@ -11,7 +11,9 @@ entire root on an InvariantFS volume (see `tools/mkdisk.sh`, `vm/`).
 
 ## Layout
 
-    src-extracted/VFS/src/   engine + FUSE daemon + CLI tools (C11)
+    src-extracted/VFS/src/   engine + FUSE daemon + CLI tools (C11), in
+                             per-role subdirs: core/ codecs/ recipes/ cli/
+                             vendor7z/ legacy/ (see impl_docs/FILEMAP.md)
     src-extracted/VFS/doc/   original design docs (18 files; aspirational
                              in parts -- see impl_docs/AUDIT.md for the
                              code-vs-docs reconciliation)

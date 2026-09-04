@@ -1,4 +1,4 @@
-__anon0f5a27b30108 struct       42 /home/user/InvariantFS/src-extracted/VFS/src/blake3.h typedef struct {
-__anon0f5a27b30208 struct       51 /home/user/InvariantFS/src-extracted/VFS/src/blake3.h typedef struct {
-blake3_chunk_state typedef      49 /home/user/InvariantFS/src-extracted/VFS/src/blake3.h } blake3_chunk_state;
-blake3_hasher    typedef      61 /home/user/InvariantFS/src-extracted/VFS/src/blake3.h } blake3_hasher;
+__anona37bfe930108 struct       42 /home/user/InvariantFS/src-extracted/VFS/src/codecs/blake3.h typedef struct {
+__anona37bfe930208 struct       51 /home/user/InvariantFS/src-extracted/VFS/src/codecs/blake3.h typedef struct {
+blake3_chunk_state typedef      49 /home/user/InvariantFS/src-extracted/VFS/src/codecs/blake3.h } blake3_chunk_state;
+blake3_hasher    typedef      61 /home/user/InvariantFS/src-extracted/VFS/src/codecs/blake3.h } blake3_hasher;

@@ -1,1 +1,1 @@
-cpu_feature      enum         93 /home/user/InvariantFS/src-extracted/VFS/src/blake3_dispatch.c enum cpu_feature {
+cpu_feature      enum         93 /home/user/InvariantFS/src-extracted/VFS/src/codecs/blake3_dispatch.c enum cpu_feature {

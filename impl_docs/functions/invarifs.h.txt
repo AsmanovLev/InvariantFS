@@ -1,0 +1,2 @@
+invfs_ast_hdr_parse function    560 /home/user/InvariantFS/src-extracted/VFS/src/core/invarifs.h static inline int invfs_ast_hdr_parse(const void *buf, size_t avail,
+invfs_ast_hdr_write function    609 /home/user/InvariantFS/src-extracted/VFS/src/core/invarifs.h static inline size_t invfs_ast_hdr_write(void *buf, uint64_t file_size,

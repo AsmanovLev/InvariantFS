@@ -1,3 +1,5 @@
-div_ceil         function     58 /home/user/InvariantFS/src-extracted/VFS/src/mkfs.c static uint64_t div_ceil(uint64_t a, uint64_t b) { return (a + b - 1) / b; }
-gen_uuid         function     39 /home/user/InvariantFS/src-extracted/VFS/src/mkfs.c static void gen_uuid(uint8_t u[16])
-main             function     60 /home/user/InvariantFS/src-extracted/VFS/src/mkfs.c int main(int argc, char **argv)
+dev_erase_meta   function     86 /home/user/InvariantFS/src-extracted/VFS/src/cli/mkfs.c static int dev_erase_meta(blkio *io, uint64_t size_bytes,
+div_ceil         function     72 /home/user/InvariantFS/src-extracted/VFS/src/cli/mkfs.c static uint64_t div_ceil(uint64_t a, uint64_t b) { return (a + b - 1) / b; }
+gen_uuid         function     53 /home/user/InvariantFS/src-extracted/VFS/src/cli/mkfs.c static void gen_uuid(uint8_t u[16])
+main             function    134 /home/user/InvariantFS/src-extracted/VFS/src/cli/mkfs.c int main(int argc, char **argv)
+size_arg_gb      function     75 /home/user/InvariantFS/src-extracted/VFS/src/cli/mkfs.c static uint64_t size_arg_gb(const char *s)

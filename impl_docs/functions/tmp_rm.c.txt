@@ -1,1 +1,1 @@
-main             function      4 /home/user/InvariantFS/src-extracted/VFS/src/tmp_rm.c int main(int argc, char **argv) {
+main             function      4 /home/user/InvariantFS/src-extracted/VFS/src/legacy/tmp_rm.c int main(int argc, char **argv) {

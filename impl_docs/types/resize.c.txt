@@ -1,2 +1,4 @@
-__anone284cf6e0108 struct      143 /home/user/InvariantFS/src-extracted/VFS/src/resize.c typedef struct { uint64_t pos, id; } rsz_owner;
-rsz_owner        typedef     143 /home/user/InvariantFS/src-extracted/VFS/src/resize.c typedef struct { uint64_t pos, id; } rsz_owner;
+__anona85c86950108 struct      230 /home/user/InvariantFS/src-extracted/VFS/src/cli/resize.c typedef struct { uint64_t pos, id; } rsz_owner;
+__anona85c86950208 struct      344 /home/user/InvariantFS/src-extracted/VFS/src/cli/resize.c typedef struct {
+rsz_owner        typedef     230 /home/user/InvariantFS/src-extracted/VFS/src/cli/resize.c typedef struct { uint64_t pos, id; } rsz_owner;
+rzio             typedef     348 /home/user/InvariantFS/src-extracted/VFS/src/cli/resize.c } rzio;

@@ -1,2 +1,2 @@
-__anon21880a9e0108 struct        8 /home/user/InvariantFS/src-extracted/VFS/src/pngx.h typedef struct {
-pngx_info        typedef      22 /home/user/InvariantFS/src-extracted/VFS/src/pngx.h } pngx_info;
+__anon00b77fb80108 struct        8 /home/user/InvariantFS/src-extracted/VFS/src/recipes/pngx.h typedef struct {
+pngx_info        typedef      22 /home/user/InvariantFS/src-extracted/VFS/src/recipes/pngx.h } pngx_info;

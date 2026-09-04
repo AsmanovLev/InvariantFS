@@ -1,11 +1,11 @@
-find_inode       function    123 /home/user/InvariantFS/src-extracted/VFS/src/zip.c static uint64_t find_inode(invfs_volume *vol, const char *name)
-main             function    134 /home/user/InvariantFS/src-extracted/VFS/src/zip.c int main(int argc, char **argv)
-member_data      function     80 /home/user/InvariantFS/src-extracted/VFS/src/zip.c static int member_data(const uint8_t *z, size_t zlen, const zip_member *m,
-rd16             function     38 /home/user/InvariantFS/src-extracted/VFS/src/zip.c static uint16_t rd16(const uint8_t *p) {
-rd32             function     35 /home/user/InvariantFS/src-extracted/VFS/src/zip.c static uint32_t rd32(const uint8_t *p) {
-vol_close        function    120 /home/user/InvariantFS/src-extracted/VFS/src/zip.c void vol_close(invfs_volume *vol) { (void)vol; }
-vol_find         function    118 /home/user/InvariantFS/src-extracted/VFS/src/zip.c uint64_t vol_find(invfs_volume *vol, const char *name) { (void)vol; (void)name; return 0; }
-vol_open         function    115 /home/user/InvariantFS/src-extracted/VFS/src/zip.c invfs_volume *vol_open(const char *p, int *e) { (void)p; (void)e; return 0; }
-vol_read_file    function    116 /home/user/InvariantFS/src-extracted/VFS/src/zip.c int vol_read_file(invfs_volume *vol, uint64_t ino, uint8_t **out, size_t *outlen) { (void)vol;(void)ino;(void)out;(void)outlen; return -1; }
-vol_stat         function    119 /home/user/InvariantFS/src-extracted/VFS/src/zip.c int vol_stat(invfs_volume *vol, const char *name, uint64_t *sz) { (void)vol;(void)name;(void)sz; return -1; }
-zip_parse        function     43 /home/user/InvariantFS/src-extracted/VFS/src/zip.c static int zip_parse(const uint8_t *z, size_t zlen, zip_member *m, int maxm, int *nm)
+find_inode       function    123 /home/user/InvariantFS/src-extracted/VFS/src/recipes/zip.c static uint64_t find_inode(invfs_volume *vol, const char *name)
+main             function    134 /home/user/InvariantFS/src-extracted/VFS/src/recipes/zip.c int main(int argc, char **argv)
+member_data      function     80 /home/user/InvariantFS/src-extracted/VFS/src/recipes/zip.c static int member_data(const uint8_t *z, size_t zlen, const zip_member *m,
+rd16             function     38 /home/user/InvariantFS/src-extracted/VFS/src/recipes/zip.c static uint16_t rd16(const uint8_t *p) {
+rd32             function     35 /home/user/InvariantFS/src-extracted/VFS/src/recipes/zip.c static uint32_t rd32(const uint8_t *p) {
+vol_close        function    120 /home/user/InvariantFS/src-extracted/VFS/src/recipes/zip.c void vol_close(invfs_volume *vol) { (void)vol; }
+vol_find         function    118 /home/user/InvariantFS/src-extracted/VFS/src/recipes/zip.c uint64_t vol_find(invfs_volume *vol, const char *name) { (void)vol; (void)name; return 0; }
+vol_open         function    115 /home/user/InvariantFS/src-extracted/VFS/src/recipes/zip.c invfs_volume *vol_open(const char *p, int *e) { (void)p; (void)e; return 0; }
+vol_read_file    function    116 /home/user/InvariantFS/src-extracted/VFS/src/recipes/zip.c int vol_read_file(invfs_volume *vol, uint64_t ino, uint8_t **out, size_t *outlen) { (void)vol;(void)ino;(void)out;(void)outlen; return -1; }
+vol_stat         function    119 /home/user/InvariantFS/src-extracted/VFS/src/recipes/zip.c int vol_stat(invfs_volume *vol, const char *name, uint64_t *sz) { (void)vol;(void)name;(void)sz; return -1; }
+zip_parse        function     43 /home/user/InvariantFS/src-extracted/VFS/src/recipes/zip.c static int zip_parse(const uint8_t *z, size_t zlen, zip_member *m, int maxm, int *nm)

@@ -1,111 +1,111 @@
-FILE_ACCESS_INFORMATION typedef     903 /home/user/InvariantFS/src-extracted/VFS/src/fileinfo.h } FILE_ACCESS_INFORMATION, *PFILE_ACCESS_INFORMATION;
-FILE_ALIGNMENT_INFORMATION typedef     179 /home/user/InvariantFS/src-extracted/VFS/src/fileinfo.h } FILE_ALIGNMENT_INFORMATION, *PFILE_ALIGNMENT_INFORMATION;
-FILE_ALLOCATION_INFORMATION typedef     965 /home/user/InvariantFS/src-extracted/VFS/src/fileinfo.h } FILE_ALLOCATION_INFORMATION, *PFILE_ALLOCATION_INFORMATION;
-FILE_ALL_INFORMATION typedef     951 /home/user/InvariantFS/src-extracted/VFS/src/fileinfo.h } FILE_ALL_INFORMATION, *PFILE_ALL_INFORMATION;
-FILE_ATTRIBUTE_TAG_INFORMATION typedef     215 /home/user/InvariantFS/src-extracted/VFS/src/fileinfo.h } FILE_ATTRIBUTE_TAG_INFORMATION, *PFILE_ATTRIBUTE_TAG_INFORMATION;
-FILE_BASIC_INFORMATION typedef     312 /home/user/InvariantFS/src-extracted/VFS/src/fileinfo.h } FILE_BASIC_INFORMATION, *PFILE_BASIC_INFORMATION;
-FILE_BOTH_DIR_INFORMATION typedef     642 /home/user/InvariantFS/src-extracted/VFS/src/fileinfo.h } FILE_BOTH_DIR_INFORMATION, *PFILE_BOTH_DIR_INFORMATION;
-FILE_DIRECTORY_INFORMATION typedef     420 /home/user/InvariantFS/src-extracted/VFS/src/fileinfo.h } FILE_DIRECTORY_INFORMATION, *PFILE_DIRECTORY_INFORMATION;
-FILE_DISPOSITION_INFORMATION typedef     230 /home/user/InvariantFS/src-extracted/VFS/src/fileinfo.h } FILE_DISPOSITION_INFORMATION, *PFILE_DISPOSITION_INFORMATION;
-FILE_DISPOSITION_INFORMATION_EX typedef     255 /home/user/InvariantFS/src-extracted/VFS/src/fileinfo.h } FILE_DISPOSITION_INFORMATION_EX, *PFILE_DISPOSITION_INFORMATION_EX;
-FILE_EA_INFORMATION typedef     889 /home/user/InvariantFS/src-extracted/VFS/src/fileinfo.h } FILE_EA_INFORMATION, *PFILE_EA_INFORMATION;
-FILE_END_OF_FILE_INFORMATION typedef     268 /home/user/InvariantFS/src-extracted/VFS/src/fileinfo.h } FILE_END_OF_FILE_INFORMATION, *PFILE_END_OF_FILE_INFORMATION;
-FILE_FS_ATTRIBUTE_INFORMATION typedef    1190 /home/user/InvariantFS/src-extracted/VFS/src/fileinfo.h } FILE_FS_ATTRIBUTE_INFORMATION, *PFILE_FS_ATTRIBUTE_INFORMATION;
-FILE_FS_FULL_SIZE_INFORMATION typedef    1163 /home/user/InvariantFS/src-extracted/VFS/src/fileinfo.h } FILE_FS_FULL_SIZE_INFORMATION, *PFILE_FS_FULL_SIZE_INFORMATION;
-FILE_FS_LABEL_INFORMATION typedef    1076 /home/user/InvariantFS/src-extracted/VFS/src/fileinfo.h } FILE_FS_LABEL_INFORMATION, *PFILE_FS_LABEL_INFORMATION;
-FILE_FS_SIZE_INFORMATION typedef    1132 /home/user/InvariantFS/src-extracted/VFS/src/fileinfo.h } FILE_FS_SIZE_INFORMATION, *PFILE_FS_SIZE_INFORMATION;
-FILE_FS_VOLUME_INFORMATION typedef    1105 /home/user/InvariantFS/src-extracted/VFS/src/fileinfo.h } FILE_FS_VOLUME_INFORMATION, *PFILE_FS_VOLUME_INFORMATION;
-FILE_FULL_DIR_INFORMATION typedef     490 /home/user/InvariantFS/src-extracted/VFS/src/fileinfo.h } FILE_FULL_DIR_INFORMATION, *PFILE_FULL_DIR_INFORMATION;
-FILE_ID_BOTH_DIR_INFORMATION typedef     724 /home/user/InvariantFS/src-extracted/VFS/src/fileinfo.h } FILE_ID_BOTH_DIR_INFORMATION, *PFILE_ID_BOTH_DIR_INFORMATION;
-FILE_ID_EXTD_BOTH_DIR_INFORMATION typedef     809 /home/user/InvariantFS/src-extracted/VFS/src/fileinfo.h } FILE_ID_EXTD_BOTH_DIR_INFORMATION, *PFILE_ID_EXTD_BOTH_DIR_INFORMATION;
-FILE_ID_FULL_DIR_INFORMATION typedef     565 /home/user/InvariantFS/src-extracted/VFS/src/fileinfo.h } FILE_ID_FULL_DIR_INFORMATION, *PFILE_ID_FULL_DIR_INFORMATION;
-FILE_ID_INFORMATION typedef     876 /home/user/InvariantFS/src-extracted/VFS/src/fileinfo.h } FILE_ID_INFORMATION, *PFILE_ID_INFORMATION;
-FILE_INFORMATION_CLASS typedef     148 /home/user/InvariantFS/src-extracted/VFS/src/fileinfo.h } FILE_INFORMATION_CLASS,
-FILE_INTERNAL_INFORMATION typedef     856 /home/user/InvariantFS/src-extracted/VFS/src/fileinfo.h } FILE_INTERNAL_INFORMATION, *PFILE_INTERNAL_INFORMATION;
-FILE_LINK_INFORMATION typedef     997 /home/user/InvariantFS/src-extracted/VFS/src/fileinfo.h } FILE_LINK_INFORMATION, *PFILE_LINK_INFORMATION;
-FILE_MODE_INFORMATION typedef     924 /home/user/InvariantFS/src-extracted/VFS/src/fileinfo.h } FILE_MODE_INFORMATION, *PFILE_MODE_INFORMATION;
-FILE_NAMES_INFORMATION typedef     834 /home/user/InvariantFS/src-extracted/VFS/src/fileinfo.h } FILE_NAMES_INFORMATION, *PFILE_NAMES_INFORMATION;
-FILE_NAME_INFORMATION typedef     196 /home/user/InvariantFS/src-extracted/VFS/src/fileinfo.h } FILE_NAME_INFORMATION, *PFILE_NAME_INFORMATION;
-FILE_NETWORK_OPEN_INFORMATION typedef    1232 /home/user/InvariantFS/src-extracted/VFS/src/fileinfo.h } FILE_NETWORK_OPEN_INFORMATION, *PFILE_NETWORK_OPEN_INFORMATION;
-FILE_NETWORK_PHYSICAL_NAME_INFORMATION typedef    1249 /home/user/InvariantFS/src-extracted/VFS/src/fileinfo.h } FILE_NETWORK_PHYSICAL_NAME_INFORMATION,
-FILE_POSITION_INFORMATION typedef     354 /home/user/InvariantFS/src-extracted/VFS/src/fileinfo.h } FILE_POSITION_INFORMATION, *PFILE_POSITION_INFORMATION;
-FILE_RENAME_INFORMATION typedef    1028 /home/user/InvariantFS/src-extracted/VFS/src/fileinfo.h } FILE_RENAME_INFORMATION, *PFILE_RENAME_INFORMATION;
-FILE_STANDARD_INFORMATION typedef     341 /home/user/InvariantFS/src-extracted/VFS/src/fileinfo.h } FILE_STANDARD_INFORMATION, *PFILE_STANDARD_INFORMATION;
-FILE_STREAM_INFORMATION typedef    1059 /home/user/InvariantFS/src-extracted/VFS/src/fileinfo.h } FILE_STREAM_INFORMATION, *PFILE_STREAM_INFORMATION;
-FILE_VALID_DATA_LENGTH_INFORMATION typedef     282 /home/user/InvariantFS/src-extracted/VFS/src/fileinfo.h } FILE_VALID_DATA_LENGTH_INFORMATION, *PFILE_VALID_DATA_LENGTH_INFORMATION;
-FS_INFORMATION_CLASS typedef     163 /home/user/InvariantFS/src-extracted/VFS/src/fileinfo.h } FS_INFORMATION_CLASS,
-PFILE_ACCESS_INFORMATION typedef     903 /home/user/InvariantFS/src-extracted/VFS/src/fileinfo.h } FILE_ACCESS_INFORMATION, *PFILE_ACCESS_INFORMATION;
-PFILE_ALIGNMENT_INFORMATION typedef     179 /home/user/InvariantFS/src-extracted/VFS/src/fileinfo.h } FILE_ALIGNMENT_INFORMATION, *PFILE_ALIGNMENT_INFORMATION;
-PFILE_ALLOCATION_INFORMATION typedef     965 /home/user/InvariantFS/src-extracted/VFS/src/fileinfo.h } FILE_ALLOCATION_INFORMATION, *PFILE_ALLOCATION_INFORMATION;
-PFILE_ALL_INFORMATION typedef     951 /home/user/InvariantFS/src-extracted/VFS/src/fileinfo.h } FILE_ALL_INFORMATION, *PFILE_ALL_INFORMATION;
-PFILE_ATTRIBUTE_TAG_INFORMATION typedef     215 /home/user/InvariantFS/src-extracted/VFS/src/fileinfo.h } FILE_ATTRIBUTE_TAG_INFORMATION, *PFILE_ATTRIBUTE_TAG_INFORMATION;
-PFILE_BASIC_INFORMATION typedef     312 /home/user/InvariantFS/src-extracted/VFS/src/fileinfo.h } FILE_BASIC_INFORMATION, *PFILE_BASIC_INFORMATION;
-PFILE_BOTH_DIR_INFORMATION typedef     642 /home/user/InvariantFS/src-extracted/VFS/src/fileinfo.h } FILE_BOTH_DIR_INFORMATION, *PFILE_BOTH_DIR_INFORMATION;
-PFILE_DIRECTORY_INFORMATION typedef     420 /home/user/InvariantFS/src-extracted/VFS/src/fileinfo.h } FILE_DIRECTORY_INFORMATION, *PFILE_DIRECTORY_INFORMATION;
-PFILE_DISPOSITION_INFORMATION typedef     230 /home/user/InvariantFS/src-extracted/VFS/src/fileinfo.h } FILE_DISPOSITION_INFORMATION, *PFILE_DISPOSITION_INFORMATION;
-PFILE_DISPOSITION_INFORMATION_EX typedef     255 /home/user/InvariantFS/src-extracted/VFS/src/fileinfo.h } FILE_DISPOSITION_INFORMATION_EX, *PFILE_DISPOSITION_INFORMATION_EX;
-PFILE_EA_INFORMATION typedef     889 /home/user/InvariantFS/src-extracted/VFS/src/fileinfo.h } FILE_EA_INFORMATION, *PFILE_EA_INFORMATION;
-PFILE_END_OF_FILE_INFORMATION typedef     268 /home/user/InvariantFS/src-extracted/VFS/src/fileinfo.h } FILE_END_OF_FILE_INFORMATION, *PFILE_END_OF_FILE_INFORMATION;
-PFILE_FS_ATTRIBUTE_INFORMATION typedef    1190 /home/user/InvariantFS/src-extracted/VFS/src/fileinfo.h } FILE_FS_ATTRIBUTE_INFORMATION, *PFILE_FS_ATTRIBUTE_INFORMATION;
-PFILE_FS_FULL_SIZE_INFORMATION typedef    1163 /home/user/InvariantFS/src-extracted/VFS/src/fileinfo.h } FILE_FS_FULL_SIZE_INFORMATION, *PFILE_FS_FULL_SIZE_INFORMATION;
-PFILE_FS_LABEL_INFORMATION typedef    1076 /home/user/InvariantFS/src-extracted/VFS/src/fileinfo.h } FILE_FS_LABEL_INFORMATION, *PFILE_FS_LABEL_INFORMATION;
-PFILE_FS_SIZE_INFORMATION typedef    1132 /home/user/InvariantFS/src-extracted/VFS/src/fileinfo.h } FILE_FS_SIZE_INFORMATION, *PFILE_FS_SIZE_INFORMATION;
-PFILE_FS_VOLUME_INFORMATION typedef    1105 /home/user/InvariantFS/src-extracted/VFS/src/fileinfo.h } FILE_FS_VOLUME_INFORMATION, *PFILE_FS_VOLUME_INFORMATION;
-PFILE_FULL_DIR_INFORMATION typedef     490 /home/user/InvariantFS/src-extracted/VFS/src/fileinfo.h } FILE_FULL_DIR_INFORMATION, *PFILE_FULL_DIR_INFORMATION;
-PFILE_ID_BOTH_DIR_INFORMATION typedef     724 /home/user/InvariantFS/src-extracted/VFS/src/fileinfo.h } FILE_ID_BOTH_DIR_INFORMATION, *PFILE_ID_BOTH_DIR_INFORMATION;
-PFILE_ID_EXTD_BOTH_DIR_INFORMATION typedef     809 /home/user/InvariantFS/src-extracted/VFS/src/fileinfo.h } FILE_ID_EXTD_BOTH_DIR_INFORMATION, *PFILE_ID_EXTD_BOTH_DIR_INFORMATION;
-PFILE_ID_FULL_DIR_INFORMATION typedef     565 /home/user/InvariantFS/src-extracted/VFS/src/fileinfo.h } FILE_ID_FULL_DIR_INFORMATION, *PFILE_ID_FULL_DIR_INFORMATION;
-PFILE_ID_INFORMATION typedef     876 /home/user/InvariantFS/src-extracted/VFS/src/fileinfo.h } FILE_ID_INFORMATION, *PFILE_ID_INFORMATION;
-PFILE_INFORMATION_CLASS typedef     149 /home/user/InvariantFS/src-extracted/VFS/src/fileinfo.h *PFILE_INFORMATION_CLASS;
-PFILE_INTERNAL_INFORMATION typedef     856 /home/user/InvariantFS/src-extracted/VFS/src/fileinfo.h } FILE_INTERNAL_INFORMATION, *PFILE_INTERNAL_INFORMATION;
-PFILE_LINK_INFORMATION typedef     997 /home/user/InvariantFS/src-extracted/VFS/src/fileinfo.h } FILE_LINK_INFORMATION, *PFILE_LINK_INFORMATION;
-PFILE_MODE_INFORMATION typedef     924 /home/user/InvariantFS/src-extracted/VFS/src/fileinfo.h } FILE_MODE_INFORMATION, *PFILE_MODE_INFORMATION;
-PFILE_NAMES_INFORMATION typedef     834 /home/user/InvariantFS/src-extracted/VFS/src/fileinfo.h } FILE_NAMES_INFORMATION, *PFILE_NAMES_INFORMATION;
-PFILE_NAME_INFORMATION typedef     196 /home/user/InvariantFS/src-extracted/VFS/src/fileinfo.h } FILE_NAME_INFORMATION, *PFILE_NAME_INFORMATION;
-PFILE_NETWORK_OPEN_INFORMATION typedef    1232 /home/user/InvariantFS/src-extracted/VFS/src/fileinfo.h } FILE_NETWORK_OPEN_INFORMATION, *PFILE_NETWORK_OPEN_INFORMATION;
-PFILE_NETWORK_PHYSICAL_NAME_INFORMATION typedef    1250 /home/user/InvariantFS/src-extracted/VFS/src/fileinfo.h *PFILE_NETWORK_PHYSICAL_NAME_INFORMATION;
-PFILE_POSITION_INFORMATION typedef     354 /home/user/InvariantFS/src-extracted/VFS/src/fileinfo.h } FILE_POSITION_INFORMATION, *PFILE_POSITION_INFORMATION;
-PFILE_RENAME_INFORMATION typedef    1028 /home/user/InvariantFS/src-extracted/VFS/src/fileinfo.h } FILE_RENAME_INFORMATION, *PFILE_RENAME_INFORMATION;
-PFILE_STANDARD_INFORMATION typedef     341 /home/user/InvariantFS/src-extracted/VFS/src/fileinfo.h } FILE_STANDARD_INFORMATION, *PFILE_STANDARD_INFORMATION;
-PFILE_STREAM_INFORMATION typedef    1059 /home/user/InvariantFS/src-extracted/VFS/src/fileinfo.h } FILE_STREAM_INFORMATION, *PFILE_STREAM_INFORMATION;
-PFILE_VALID_DATA_LENGTH_INFORMATION typedef     282 /home/user/InvariantFS/src-extracted/VFS/src/fileinfo.h } FILE_VALID_DATA_LENGTH_INFORMATION, *PFILE_VALID_DATA_LENGTH_INFORMATION;
-PFS_INFORMATION_CLASS typedef     164 /home/user/InvariantFS/src-extracted/VFS/src/fileinfo.h *PFS_INFORMATION_CLASS;
-PUNICODE_STRING  typedef    1357 /home/user/InvariantFS/src-extracted/VFS/src/fileinfo.h } UNICODE_STRING, *PUNICODE_STRING;
-UNICODE_STRING   typedef    1357 /home/user/InvariantFS/src-extracted/VFS/src/fileinfo.h } UNICODE_STRING, *PUNICODE_STRING;
-_FILE_ACCESS_INFORMATION struct      897 /home/user/InvariantFS/src-extracted/VFS/src/fileinfo.h typedef struct _FILE_ACCESS_INFORMATION {
-_FILE_ALIGNMENT_INFORMATION struct      172 /home/user/InvariantFS/src-extracted/VFS/src/fileinfo.h typedef struct _FILE_ALIGNMENT_INFORMATION {
-_FILE_ALLOCATION_INFORMATION struct      959 /home/user/InvariantFS/src-extracted/VFS/src/fileinfo.h typedef struct _FILE_ALLOCATION_INFORMATION {
-_FILE_ALL_INFORMATION struct      932 /home/user/InvariantFS/src-extracted/VFS/src/fileinfo.h typedef struct _FILE_ALL_INFORMATION {
-_FILE_ATTRIBUTE_TAG_INFORMATION struct      204 /home/user/InvariantFS/src-extracted/VFS/src/fileinfo.h typedef struct _FILE_ATTRIBUTE_TAG_INFORMATION {
-_FILE_BASIC_INFORMATION struct      290 /home/user/InvariantFS/src-extracted/VFS/src/fileinfo.h typedef struct _FILE_BASIC_INFORMATION {
-_FILE_BOTH_DIR_INFORMATION struct      571 /home/user/InvariantFS/src-extracted/VFS/src/fileinfo.h typedef struct _FILE_BOTH_DIR_INFORMATION {
-_FILE_DIRECTORY_INFORMATION struct      360 /home/user/InvariantFS/src-extracted/VFS/src/fileinfo.h typedef struct _FILE_DIRECTORY_INFORMATION {
-_FILE_DISPOSITION_INFORMATION struct      223 /home/user/InvariantFS/src-extracted/VFS/src/fileinfo.h typedef struct _FILE_DISPOSITION_INFORMATION {
-_FILE_DISPOSITION_INFORMATION_EX struct      244 /home/user/InvariantFS/src-extracted/VFS/src/fileinfo.h typedef struct _FILE_DISPOSITION_INFORMATION_EX {
-_FILE_EA_INFORMATION struct      884 /home/user/InvariantFS/src-extracted/VFS/src/fileinfo.h typedef struct _FILE_EA_INFORMATION {
-_FILE_END_OF_FILE_INFORMATION struct      263 /home/user/InvariantFS/src-extracted/VFS/src/fileinfo.h typedef struct _FILE_END_OF_FILE_INFORMATION {
-_FILE_FS_ATTRIBUTE_INFORMATION struct     1171 /home/user/InvariantFS/src-extracted/VFS/src/fileinfo.h typedef struct _FILE_FS_ATTRIBUTE_INFORMATION {
-_FILE_FS_FULL_SIZE_INFORMATION struct     1140 /home/user/InvariantFS/src-extracted/VFS/src/fileinfo.h typedef struct _FILE_FS_FULL_SIZE_INFORMATION {
-_FILE_FS_LABEL_INFORMATION struct     1067 /home/user/InvariantFS/src-extracted/VFS/src/fileinfo.h typedef struct _FILE_FS_LABEL_INFORMATION {
-_FILE_FS_SIZE_INFORMATION struct     1113 /home/user/InvariantFS/src-extracted/VFS/src/fileinfo.h typedef struct _FILE_FS_SIZE_INFORMATION {
-_FILE_FS_VOLUME_INFORMATION struct     1084 /home/user/InvariantFS/src-extracted/VFS/src/fileinfo.h typedef struct _FILE_FS_VOLUME_INFORMATION {
-_FILE_FULL_DIR_INFORMATION struct      426 /home/user/InvariantFS/src-extracted/VFS/src/fileinfo.h typedef struct _FILE_FULL_DIR_INFORMATION {
-_FILE_ID_BOTH_DIR_INFORMATION struct      648 /home/user/InvariantFS/src-extracted/VFS/src/fileinfo.h typedef struct _FILE_ID_BOTH_DIR_INFORMATION {
-_FILE_ID_EXTD_BOTH_DIR_INFORMATION struct      730 /home/user/InvariantFS/src-extracted/VFS/src/fileinfo.h typedef struct _FILE_ID_EXTD_BOTH_DIR_INFORMATION {
-_FILE_ID_FULL_DIR_INFORMATION struct      496 /home/user/InvariantFS/src-extracted/VFS/src/fileinfo.h typedef struct _FILE_ID_FULL_DIR_INFORMATION {
-_FILE_ID_INFORMATION struct      866 /home/user/InvariantFS/src-extracted/VFS/src/fileinfo.h typedef struct _FILE_ID_INFORMATION {
-_FILE_INFORMATION_CLASS enum         62 /home/user/InvariantFS/src-extracted/VFS/src/fileinfo.h typedef enum _FILE_INFORMATION_CLASS {
-_FILE_INTERNAL_INFORMATION struct      850 /home/user/InvariantFS/src-extracted/VFS/src/fileinfo.h typedef struct _FILE_INTERNAL_INFORMATION {
-_FILE_LINK_INFORMATION struct      973 /home/user/InvariantFS/src-extracted/VFS/src/fileinfo.h typedef struct _FILE_LINK_INFORMATION {
-_FILE_MODE_INFORMATION struct      911 /home/user/InvariantFS/src-extracted/VFS/src/fileinfo.h typedef struct _FILE_MODE_INFORMATION {
-_FILE_NAMES_INFORMATION struct      815 /home/user/InvariantFS/src-extracted/VFS/src/fileinfo.h typedef struct _FILE_NAMES_INFORMATION {
-_FILE_NAME_INFORMATION struct      187 /home/user/InvariantFS/src-extracted/VFS/src/fileinfo.h typedef struct _FILE_NAME_INFORMATION {
-_FILE_NETWORK_OPEN_INFORMATION struct     1198 /home/user/InvariantFS/src-extracted/VFS/src/fileinfo.h typedef struct _FILE_NETWORK_OPEN_INFORMATION {
-_FILE_NETWORK_PHYSICAL_NAME_INFORMATION struct     1240 /home/user/InvariantFS/src-extracted/VFS/src/fileinfo.h typedef struct _FILE_NETWORK_PHYSICAL_NAME_INFORMATION {
-_FILE_POSITION_INFORMATION struct      349 /home/user/InvariantFS/src-extracted/VFS/src/fileinfo.h typedef struct _FILE_POSITION_INFORMATION {
-_FILE_RENAME_INFORMATION struct     1005 /home/user/InvariantFS/src-extracted/VFS/src/fileinfo.h typedef struct _FILE_RENAME_INFORMATION {
-_FILE_STANDARD_INFORMATION struct      320 /home/user/InvariantFS/src-extracted/VFS/src/fileinfo.h typedef struct _FILE_STANDARD_INFORMATION {
-_FILE_STREAM_INFORMATION struct     1036 /home/user/InvariantFS/src-extracted/VFS/src/fileinfo.h typedef struct _FILE_STREAM_INFORMATION {
-_FILE_VALID_DATA_LENGTH_INFORMATION struct      276 /home/user/InvariantFS/src-extracted/VFS/src/fileinfo.h typedef struct _FILE_VALID_DATA_LENGTH_INFORMATION {
-_FSINFOCLASS     enum        151 /home/user/InvariantFS/src-extracted/VFS/src/fileinfo.h typedef enum _FSINFOCLASS {
-_UNICODE_STRING  struct     1344 /home/user/InvariantFS/src-extracted/VFS/src/fileinfo.h typedef struct _UNICODE_STRING {
+FILE_ACCESS_INFORMATION typedef     903 /home/user/InvariantFS/src-extracted/VFS/src/legacy/fileinfo.h } FILE_ACCESS_INFORMATION, *PFILE_ACCESS_INFORMATION;
+FILE_ALIGNMENT_INFORMATION typedef     179 /home/user/InvariantFS/src-extracted/VFS/src/legacy/fileinfo.h } FILE_ALIGNMENT_INFORMATION, *PFILE_ALIGNMENT_INFORMATION;
+FILE_ALLOCATION_INFORMATION typedef     965 /home/user/InvariantFS/src-extracted/VFS/src/legacy/fileinfo.h } FILE_ALLOCATION_INFORMATION, *PFILE_ALLOCATION_INFORMATION;
+FILE_ALL_INFORMATION typedef     951 /home/user/InvariantFS/src-extracted/VFS/src/legacy/fileinfo.h } FILE_ALL_INFORMATION, *PFILE_ALL_INFORMATION;
+FILE_ATTRIBUTE_TAG_INFORMATION typedef     215 /home/user/InvariantFS/src-extracted/VFS/src/legacy/fileinfo.h } FILE_ATTRIBUTE_TAG_INFORMATION, *PFILE_ATTRIBUTE_TAG_INFORMATION;
+FILE_BASIC_INFORMATION typedef     312 /home/user/InvariantFS/src-extracted/VFS/src/legacy/fileinfo.h } FILE_BASIC_INFORMATION, *PFILE_BASIC_INFORMATION;
+FILE_BOTH_DIR_INFORMATION typedef     642 /home/user/InvariantFS/src-extracted/VFS/src/legacy/fileinfo.h } FILE_BOTH_DIR_INFORMATION, *PFILE_BOTH_DIR_INFORMATION;
+FILE_DIRECTORY_INFORMATION typedef     420 /home/user/InvariantFS/src-extracted/VFS/src/legacy/fileinfo.h } FILE_DIRECTORY_INFORMATION, *PFILE_DIRECTORY_INFORMATION;
+FILE_DISPOSITION_INFORMATION typedef     230 /home/user/InvariantFS/src-extracted/VFS/src/legacy/fileinfo.h } FILE_DISPOSITION_INFORMATION, *PFILE_DISPOSITION_INFORMATION;
+FILE_DISPOSITION_INFORMATION_EX typedef     255 /home/user/InvariantFS/src-extracted/VFS/src/legacy/fileinfo.h } FILE_DISPOSITION_INFORMATION_EX, *PFILE_DISPOSITION_INFORMATION_EX;
+FILE_EA_INFORMATION typedef     889 /home/user/InvariantFS/src-extracted/VFS/src/legacy/fileinfo.h } FILE_EA_INFORMATION, *PFILE_EA_INFORMATION;
+FILE_END_OF_FILE_INFORMATION typedef     268 /home/user/InvariantFS/src-extracted/VFS/src/legacy/fileinfo.h } FILE_END_OF_FILE_INFORMATION, *PFILE_END_OF_FILE_INFORMATION;
+FILE_FS_ATTRIBUTE_INFORMATION typedef    1190 /home/user/InvariantFS/src-extracted/VFS/src/legacy/fileinfo.h } FILE_FS_ATTRIBUTE_INFORMATION, *PFILE_FS_ATTRIBUTE_INFORMATION;
+FILE_FS_FULL_SIZE_INFORMATION typedef    1163 /home/user/InvariantFS/src-extracted/VFS/src/legacy/fileinfo.h } FILE_FS_FULL_SIZE_INFORMATION, *PFILE_FS_FULL_SIZE_INFORMATION;
+FILE_FS_LABEL_INFORMATION typedef    1076 /home/user/InvariantFS/src-extracted/VFS/src/legacy/fileinfo.h } FILE_FS_LABEL_INFORMATION, *PFILE_FS_LABEL_INFORMATION;
+FILE_FS_SIZE_INFORMATION typedef    1132 /home/user/InvariantFS/src-extracted/VFS/src/legacy/fileinfo.h } FILE_FS_SIZE_INFORMATION, *PFILE_FS_SIZE_INFORMATION;
+FILE_FS_VOLUME_INFORMATION typedef    1105 /home/user/InvariantFS/src-extracted/VFS/src/legacy/fileinfo.h } FILE_FS_VOLUME_INFORMATION, *PFILE_FS_VOLUME_INFORMATION;
+FILE_FULL_DIR_INFORMATION typedef     490 /home/user/InvariantFS/src-extracted/VFS/src/legacy/fileinfo.h } FILE_FULL_DIR_INFORMATION, *PFILE_FULL_DIR_INFORMATION;
+FILE_ID_BOTH_DIR_INFORMATION typedef     724 /home/user/InvariantFS/src-extracted/VFS/src/legacy/fileinfo.h } FILE_ID_BOTH_DIR_INFORMATION, *PFILE_ID_BOTH_DIR_INFORMATION;
+FILE_ID_EXTD_BOTH_DIR_INFORMATION typedef     809 /home/user/InvariantFS/src-extracted/VFS/src/legacy/fileinfo.h } FILE_ID_EXTD_BOTH_DIR_INFORMATION, *PFILE_ID_EXTD_BOTH_DIR_INFORMATION;
+FILE_ID_FULL_DIR_INFORMATION typedef     565 /home/user/InvariantFS/src-extracted/VFS/src/legacy/fileinfo.h } FILE_ID_FULL_DIR_INFORMATION, *PFILE_ID_FULL_DIR_INFORMATION;
+FILE_ID_INFORMATION typedef     876 /home/user/InvariantFS/src-extracted/VFS/src/legacy/fileinfo.h } FILE_ID_INFORMATION, *PFILE_ID_INFORMATION;
+FILE_INFORMATION_CLASS typedef     148 /home/user/InvariantFS/src-extracted/VFS/src/legacy/fileinfo.h } FILE_INFORMATION_CLASS,
+FILE_INTERNAL_INFORMATION typedef     856 /home/user/InvariantFS/src-extracted/VFS/src/legacy/fileinfo.h } FILE_INTERNAL_INFORMATION, *PFILE_INTERNAL_INFORMATION;
+FILE_LINK_INFORMATION typedef     997 /home/user/InvariantFS/src-extracted/VFS/src/legacy/fileinfo.h } FILE_LINK_INFORMATION, *PFILE_LINK_INFORMATION;
+FILE_MODE_INFORMATION typedef     924 /home/user/InvariantFS/src-extracted/VFS/src/legacy/fileinfo.h } FILE_MODE_INFORMATION, *PFILE_MODE_INFORMATION;
+FILE_NAMES_INFORMATION typedef     834 /home/user/InvariantFS/src-extracted/VFS/src/legacy/fileinfo.h } FILE_NAMES_INFORMATION, *PFILE_NAMES_INFORMATION;
+FILE_NAME_INFORMATION typedef     196 /home/user/InvariantFS/src-extracted/VFS/src/legacy/fileinfo.h } FILE_NAME_INFORMATION, *PFILE_NAME_INFORMATION;
+FILE_NETWORK_OPEN_INFORMATION typedef    1232 /home/user/InvariantFS/src-extracted/VFS/src/legacy/fileinfo.h } FILE_NETWORK_OPEN_INFORMATION, *PFILE_NETWORK_OPEN_INFORMATION;
+FILE_NETWORK_PHYSICAL_NAME_INFORMATION typedef    1249 /home/user/InvariantFS/src-extracted/VFS/src/legacy/fileinfo.h } FILE_NETWORK_PHYSICAL_NAME_INFORMATION,
+FILE_POSITION_INFORMATION typedef     354 /home/user/InvariantFS/src-extracted/VFS/src/legacy/fileinfo.h } FILE_POSITION_INFORMATION, *PFILE_POSITION_INFORMATION;
+FILE_RENAME_INFORMATION typedef    1028 /home/user/InvariantFS/src-extracted/VFS/src/legacy/fileinfo.h } FILE_RENAME_INFORMATION, *PFILE_RENAME_INFORMATION;
+FILE_STANDARD_INFORMATION typedef     341 /home/user/InvariantFS/src-extracted/VFS/src/legacy/fileinfo.h } FILE_STANDARD_INFORMATION, *PFILE_STANDARD_INFORMATION;
+FILE_STREAM_INFORMATION typedef    1059 /home/user/InvariantFS/src-extracted/VFS/src/legacy/fileinfo.h } FILE_STREAM_INFORMATION, *PFILE_STREAM_INFORMATION;
+FILE_VALID_DATA_LENGTH_INFORMATION typedef     282 /home/user/InvariantFS/src-extracted/VFS/src/legacy/fileinfo.h } FILE_VALID_DATA_LENGTH_INFORMATION, *PFILE_VALID_DATA_LENGTH_INFORMATION;
+FS_INFORMATION_CLASS typedef     163 /home/user/InvariantFS/src-extracted/VFS/src/legacy/fileinfo.h } FS_INFORMATION_CLASS,
+PFILE_ACCESS_INFORMATION typedef     903 /home/user/InvariantFS/src-extracted/VFS/src/legacy/fileinfo.h } FILE_ACCESS_INFORMATION, *PFILE_ACCESS_INFORMATION;
+PFILE_ALIGNMENT_INFORMATION typedef     179 /home/user/InvariantFS/src-extracted/VFS/src/legacy/fileinfo.h } FILE_ALIGNMENT_INFORMATION, *PFILE_ALIGNMENT_INFORMATION;
+PFILE_ALLOCATION_INFORMATION typedef     965 /home/user/InvariantFS/src-extracted/VFS/src/legacy/fileinfo.h } FILE_ALLOCATION_INFORMATION, *PFILE_ALLOCATION_INFORMATION;
+PFILE_ALL_INFORMATION typedef     951 /home/user/InvariantFS/src-extracted/VFS/src/legacy/fileinfo.h } FILE_ALL_INFORMATION, *PFILE_ALL_INFORMATION;
+PFILE_ATTRIBUTE_TAG_INFORMATION typedef     215 /home/user/InvariantFS/src-extracted/VFS/src/legacy/fileinfo.h } FILE_ATTRIBUTE_TAG_INFORMATION, *PFILE_ATTRIBUTE_TAG_INFORMATION;
+PFILE_BASIC_INFORMATION typedef     312 /home/user/InvariantFS/src-extracted/VFS/src/legacy/fileinfo.h } FILE_BASIC_INFORMATION, *PFILE_BASIC_INFORMATION;
+PFILE_BOTH_DIR_INFORMATION typedef     642 /home/user/InvariantFS/src-extracted/VFS/src/legacy/fileinfo.h } FILE_BOTH_DIR_INFORMATION, *PFILE_BOTH_DIR_INFORMATION;
+PFILE_DIRECTORY_INFORMATION typedef     420 /home/user/InvariantFS/src-extracted/VFS/src/legacy/fileinfo.h } FILE_DIRECTORY_INFORMATION, *PFILE_DIRECTORY_INFORMATION;
+PFILE_DISPOSITION_INFORMATION typedef     230 /home/user/InvariantFS/src-extracted/VFS/src/legacy/fileinfo.h } FILE_DISPOSITION_INFORMATION, *PFILE_DISPOSITION_INFORMATION;
+PFILE_DISPOSITION_INFORMATION_EX typedef     255 /home/user/InvariantFS/src-extracted/VFS/src/legacy/fileinfo.h } FILE_DISPOSITION_INFORMATION_EX, *PFILE_DISPOSITION_INFORMATION_EX;
+PFILE_EA_INFORMATION typedef     889 /home/user/InvariantFS/src-extracted/VFS/src/legacy/fileinfo.h } FILE_EA_INFORMATION, *PFILE_EA_INFORMATION;
+PFILE_END_OF_FILE_INFORMATION typedef     268 /home/user/InvariantFS/src-extracted/VFS/src/legacy/fileinfo.h } FILE_END_OF_FILE_INFORMATION, *PFILE_END_OF_FILE_INFORMATION;
+PFILE_FS_ATTRIBUTE_INFORMATION typedef    1190 /home/user/InvariantFS/src-extracted/VFS/src/legacy/fileinfo.h } FILE_FS_ATTRIBUTE_INFORMATION, *PFILE_FS_ATTRIBUTE_INFORMATION;
+PFILE_FS_FULL_SIZE_INFORMATION typedef    1163 /home/user/InvariantFS/src-extracted/VFS/src/legacy/fileinfo.h } FILE_FS_FULL_SIZE_INFORMATION, *PFILE_FS_FULL_SIZE_INFORMATION;
+PFILE_FS_LABEL_INFORMATION typedef    1076 /home/user/InvariantFS/src-extracted/VFS/src/legacy/fileinfo.h } FILE_FS_LABEL_INFORMATION, *PFILE_FS_LABEL_INFORMATION;
+PFILE_FS_SIZE_INFORMATION typedef    1132 /home/user/InvariantFS/src-extracted/VFS/src/legacy/fileinfo.h } FILE_FS_SIZE_INFORMATION, *PFILE_FS_SIZE_INFORMATION;
+PFILE_FS_VOLUME_INFORMATION typedef    1105 /home/user/InvariantFS/src-extracted/VFS/src/legacy/fileinfo.h } FILE_FS_VOLUME_INFORMATION, *PFILE_FS_VOLUME_INFORMATION;
+PFILE_FULL_DIR_INFORMATION typedef     490 /home/user/InvariantFS/src-extracted/VFS/src/legacy/fileinfo.h } FILE_FULL_DIR_INFORMATION, *PFILE_FULL_DIR_INFORMATION;
+PFILE_ID_BOTH_DIR_INFORMATION typedef     724 /home/user/InvariantFS/src-extracted/VFS/src/legacy/fileinfo.h } FILE_ID_BOTH_DIR_INFORMATION, *PFILE_ID_BOTH_DIR_INFORMATION;
+PFILE_ID_EXTD_BOTH_DIR_INFORMATION typedef     809 /home/user/InvariantFS/src-extracted/VFS/src/legacy/fileinfo.h } FILE_ID_EXTD_BOTH_DIR_INFORMATION, *PFILE_ID_EXTD_BOTH_DIR_INFORMATION;
+PFILE_ID_FULL_DIR_INFORMATION typedef     565 /home/user/InvariantFS/src-extracted/VFS/src/legacy/fileinfo.h } FILE_ID_FULL_DIR_INFORMATION, *PFILE_ID_FULL_DIR_INFORMATION;
+PFILE_ID_INFORMATION typedef     876 /home/user/InvariantFS/src-extracted/VFS/src/legacy/fileinfo.h } FILE_ID_INFORMATION, *PFILE_ID_INFORMATION;
+PFILE_INFORMATION_CLASS typedef     149 /home/user/InvariantFS/src-extracted/VFS/src/legacy/fileinfo.h *PFILE_INFORMATION_CLASS;
+PFILE_INTERNAL_INFORMATION typedef     856 /home/user/InvariantFS/src-extracted/VFS/src/legacy/fileinfo.h } FILE_INTERNAL_INFORMATION, *PFILE_INTERNAL_INFORMATION;
+PFILE_LINK_INFORMATION typedef     997 /home/user/InvariantFS/src-extracted/VFS/src/legacy/fileinfo.h } FILE_LINK_INFORMATION, *PFILE_LINK_INFORMATION;
+PFILE_MODE_INFORMATION typedef     924 /home/user/InvariantFS/src-extracted/VFS/src/legacy/fileinfo.h } FILE_MODE_INFORMATION, *PFILE_MODE_INFORMATION;
+PFILE_NAMES_INFORMATION typedef     834 /home/user/InvariantFS/src-extracted/VFS/src/legacy/fileinfo.h } FILE_NAMES_INFORMATION, *PFILE_NAMES_INFORMATION;
+PFILE_NAME_INFORMATION typedef     196 /home/user/InvariantFS/src-extracted/VFS/src/legacy/fileinfo.h } FILE_NAME_INFORMATION, *PFILE_NAME_INFORMATION;
+PFILE_NETWORK_OPEN_INFORMATION typedef    1232 /home/user/InvariantFS/src-extracted/VFS/src/legacy/fileinfo.h } FILE_NETWORK_OPEN_INFORMATION, *PFILE_NETWORK_OPEN_INFORMATION;
+PFILE_NETWORK_PHYSICAL_NAME_INFORMATION typedef    1250 /home/user/InvariantFS/src-extracted/VFS/src/legacy/fileinfo.h *PFILE_NETWORK_PHYSICAL_NAME_INFORMATION;
+PFILE_POSITION_INFORMATION typedef     354 /home/user/InvariantFS/src-extracted/VFS/src/legacy/fileinfo.h } FILE_POSITION_INFORMATION, *PFILE_POSITION_INFORMATION;
+PFILE_RENAME_INFORMATION typedef    1028 /home/user/InvariantFS/src-extracted/VFS/src/legacy/fileinfo.h } FILE_RENAME_INFORMATION, *PFILE_RENAME_INFORMATION;
+PFILE_STANDARD_INFORMATION typedef     341 /home/user/InvariantFS/src-extracted/VFS/src/legacy/fileinfo.h } FILE_STANDARD_INFORMATION, *PFILE_STANDARD_INFORMATION;
+PFILE_STREAM_INFORMATION typedef    1059 /home/user/InvariantFS/src-extracted/VFS/src/legacy/fileinfo.h } FILE_STREAM_INFORMATION, *PFILE_STREAM_INFORMATION;
+PFILE_VALID_DATA_LENGTH_INFORMATION typedef     282 /home/user/InvariantFS/src-extracted/VFS/src/legacy/fileinfo.h } FILE_VALID_DATA_LENGTH_INFORMATION, *PFILE_VALID_DATA_LENGTH_INFORMATION;
+PFS_INFORMATION_CLASS typedef     164 /home/user/InvariantFS/src-extracted/VFS/src/legacy/fileinfo.h *PFS_INFORMATION_CLASS;
+PUNICODE_STRING  typedef    1357 /home/user/InvariantFS/src-extracted/VFS/src/legacy/fileinfo.h } UNICODE_STRING, *PUNICODE_STRING;
+UNICODE_STRING   typedef    1357 /home/user/InvariantFS/src-extracted/VFS/src/legacy/fileinfo.h } UNICODE_STRING, *PUNICODE_STRING;
+_FILE_ACCESS_INFORMATION struct      897 /home/user/InvariantFS/src-extracted/VFS/src/legacy/fileinfo.h typedef struct _FILE_ACCESS_INFORMATION {
+_FILE_ALIGNMENT_INFORMATION struct      172 /home/user/InvariantFS/src-extracted/VFS/src/legacy/fileinfo.h typedef struct _FILE_ALIGNMENT_INFORMATION {
+_FILE_ALLOCATION_INFORMATION struct      959 /home/user/InvariantFS/src-extracted/VFS/src/legacy/fileinfo.h typedef struct _FILE_ALLOCATION_INFORMATION {
+_FILE_ALL_INFORMATION struct      932 /home/user/InvariantFS/src-extracted/VFS/src/legacy/fileinfo.h typedef struct _FILE_ALL_INFORMATION {
+_FILE_ATTRIBUTE_TAG_INFORMATION struct      204 /home/user/InvariantFS/src-extracted/VFS/src/legacy/fileinfo.h typedef struct _FILE_ATTRIBUTE_TAG_INFORMATION {
+_FILE_BASIC_INFORMATION struct      290 /home/user/InvariantFS/src-extracted/VFS/src/legacy/fileinfo.h typedef struct _FILE_BASIC_INFORMATION {
+_FILE_BOTH_DIR_INFORMATION struct      571 /home/user/InvariantFS/src-extracted/VFS/src/legacy/fileinfo.h typedef struct _FILE_BOTH_DIR_INFORMATION {
+_FILE_DIRECTORY_INFORMATION struct      360 /home/user/InvariantFS/src-extracted/VFS/src/legacy/fileinfo.h typedef struct _FILE_DIRECTORY_INFORMATION {
+_FILE_DISPOSITION_INFORMATION struct      223 /home/user/InvariantFS/src-extracted/VFS/src/legacy/fileinfo.h typedef struct _FILE_DISPOSITION_INFORMATION {
+_FILE_DISPOSITION_INFORMATION_EX struct      244 /home/user/InvariantFS/src-extracted/VFS/src/legacy/fileinfo.h typedef struct _FILE_DISPOSITION_INFORMATION_EX {
+_FILE_EA_INFORMATION struct      884 /home/user/InvariantFS/src-extracted/VFS/src/legacy/fileinfo.h typedef struct _FILE_EA_INFORMATION {
+_FILE_END_OF_FILE_INFORMATION struct      263 /home/user/InvariantFS/src-extracted/VFS/src/legacy/fileinfo.h typedef struct _FILE_END_OF_FILE_INFORMATION {
+_FILE_FS_ATTRIBUTE_INFORMATION struct     1171 /home/user/InvariantFS/src-extracted/VFS/src/legacy/fileinfo.h typedef struct _FILE_FS_ATTRIBUTE_INFORMATION {
+_FILE_FS_FULL_SIZE_INFORMATION struct     1140 /home/user/InvariantFS/src-extracted/VFS/src/legacy/fileinfo.h typedef struct _FILE_FS_FULL_SIZE_INFORMATION {
+_FILE_FS_LABEL_INFORMATION struct     1067 /home/user/InvariantFS/src-extracted/VFS/src/legacy/fileinfo.h typedef struct _FILE_FS_LABEL_INFORMATION {
+_FILE_FS_SIZE_INFORMATION struct     1113 /home/user/InvariantFS/src-extracted/VFS/src/legacy/fileinfo.h typedef struct _FILE_FS_SIZE_INFORMATION {
+_FILE_FS_VOLUME_INFORMATION struct     1084 /home/user/InvariantFS/src-extracted/VFS/src/legacy/fileinfo.h typedef struct _FILE_FS_VOLUME_INFORMATION {
+_FILE_FULL_DIR_INFORMATION struct      426 /home/user/InvariantFS/src-extracted/VFS/src/legacy/fileinfo.h typedef struct _FILE_FULL_DIR_INFORMATION {
+_FILE_ID_BOTH_DIR_INFORMATION struct      648 /home/user/InvariantFS/src-extracted/VFS/src/legacy/fileinfo.h typedef struct _FILE_ID_BOTH_DIR_INFORMATION {
+_FILE_ID_EXTD_BOTH_DIR_INFORMATION struct      730 /home/user/InvariantFS/src-extracted/VFS/src/legacy/fileinfo.h typedef struct _FILE_ID_EXTD_BOTH_DIR_INFORMATION {
+_FILE_ID_FULL_DIR_INFORMATION struct      496 /home/user/InvariantFS/src-extracted/VFS/src/legacy/fileinfo.h typedef struct _FILE_ID_FULL_DIR_INFORMATION {
+_FILE_ID_INFORMATION struct      866 /home/user/InvariantFS/src-extracted/VFS/src/legacy/fileinfo.h typedef struct _FILE_ID_INFORMATION {
+_FILE_INFORMATION_CLASS enum         62 /home/user/InvariantFS/src-extracted/VFS/src/legacy/fileinfo.h typedef enum _FILE_INFORMATION_CLASS {
+_FILE_INTERNAL_INFORMATION struct      850 /home/user/InvariantFS/src-extracted/VFS/src/legacy/fileinfo.h typedef struct _FILE_INTERNAL_INFORMATION {
+_FILE_LINK_INFORMATION struct      973 /home/user/InvariantFS/src-extracted/VFS/src/legacy/fileinfo.h typedef struct _FILE_LINK_INFORMATION {
+_FILE_MODE_INFORMATION struct      911 /home/user/InvariantFS/src-extracted/VFS/src/legacy/fileinfo.h typedef struct _FILE_MODE_INFORMATION {
+_FILE_NAMES_INFORMATION struct      815 /home/user/InvariantFS/src-extracted/VFS/src/legacy/fileinfo.h typedef struct _FILE_NAMES_INFORMATION {
+_FILE_NAME_INFORMATION struct      187 /home/user/InvariantFS/src-extracted/VFS/src/legacy/fileinfo.h typedef struct _FILE_NAME_INFORMATION {
+_FILE_NETWORK_OPEN_INFORMATION struct     1198 /home/user/InvariantFS/src-extracted/VFS/src/legacy/fileinfo.h typedef struct _FILE_NETWORK_OPEN_INFORMATION {
+_FILE_NETWORK_PHYSICAL_NAME_INFORMATION struct     1240 /home/user/InvariantFS/src-extracted/VFS/src/legacy/fileinfo.h typedef struct _FILE_NETWORK_PHYSICAL_NAME_INFORMATION {
+_FILE_POSITION_INFORMATION struct      349 /home/user/InvariantFS/src-extracted/VFS/src/legacy/fileinfo.h typedef struct _FILE_POSITION_INFORMATION {
+_FILE_RENAME_INFORMATION struct     1005 /home/user/InvariantFS/src-extracted/VFS/src/legacy/fileinfo.h typedef struct _FILE_RENAME_INFORMATION {
+_FILE_STANDARD_INFORMATION struct      320 /home/user/InvariantFS/src-extracted/VFS/src/legacy/fileinfo.h typedef struct _FILE_STANDARD_INFORMATION {
+_FILE_STREAM_INFORMATION struct     1036 /home/user/InvariantFS/src-extracted/VFS/src/legacy/fileinfo.h typedef struct _FILE_STREAM_INFORMATION {
+_FILE_VALID_DATA_LENGTH_INFORMATION struct      276 /home/user/InvariantFS/src-extracted/VFS/src/legacy/fileinfo.h typedef struct _FILE_VALID_DATA_LENGTH_INFORMATION {
+_FSINFOCLASS     enum        151 /home/user/InvariantFS/src-extracted/VFS/src/legacy/fileinfo.h typedef enum _FSINFOCLASS {
+_UNICODE_STRING  struct     1344 /home/user/InvariantFS/src-extracted/VFS/src/legacy/fileinfo.h typedef struct _UNICODE_STRING {

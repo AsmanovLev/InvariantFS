@@ -1,4 +1,4 @@
-__anon92894a6e0108 struct      229 /home/user/InvariantFS/src-extracted/VFS/src/vol_heat.c typedef struct {
-__anon92894a6e0208 struct      247 /home/user/InvariantFS/src-extracted/VFS/src/vol_heat.c typedef struct { uint64_t inode; uint16_t r; } heat_max_ent;
-heat_cand        typedef     233 /home/user/InvariantFS/src-extracted/VFS/src/vol_heat.c } heat_cand;
-heat_max_ent     typedef     247 /home/user/InvariantFS/src-extracted/VFS/src/vol_heat.c typedef struct { uint64_t inode; uint16_t r; } heat_max_ent;
+__anon70d94d660108 struct      254 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_heat.c typedef struct {
+__anon70d94d660208 struct      272 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_heat.c typedef struct { uint64_t inode; uint16_t r; } heat_max_ent;
+heat_cand        typedef     258 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_heat.c } heat_cand;
+heat_max_ent     typedef     272 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_heat.c typedef struct { uint64_t inode; uint16_t r; } heat_max_ent;

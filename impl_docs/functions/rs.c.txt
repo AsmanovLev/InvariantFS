@@ -1,17 +1,17 @@
-gf_inv           function     97 /home/user/InvariantFS/src-extracted/VFS/src/rs.c static uint8_t gf_inv(uint8_t a)
-gf_mul           function     92 /home/user/InvariantFS/src-extracted/VFS/src/rs.c static uint8_t gf_mul(uint8_t a, uint8_t b)
-gf_pow           function    102 /home/user/InvariantFS/src-extracted/VFS/src/rs.c static uint8_t gf_pow(uint8_t a, unsigned e)
-rs_algo_name     function    250 /home/user/InvariantFS/src-extracted/VFS/src/rs.c const char *rs_algo_name(int algo)
-rs_bench         function    501 /home/user/InvariantFS/src-extracted/VFS/src/rs.c int rs_bench(unsigned k, unsigned m, size_t block_size, unsigned nstripes,
-rs_bench_one     function    415 /home/user/InvariantFS/src-extracted/VFS/src/rs.c static double rs_bench_one(int algo, unsigned k, unsigned m,
-rs_decode        function    323 /home/user/InvariantFS/src-extracted/VFS/src/rs.c int rs_decode(int algo, unsigned k, unsigned m, size_t block_size,
-rs_encode        function    259 /home/user/InvariantFS/src-extracted/VFS/src/rs.c int rs_encode(int algo, unsigned k, unsigned m, size_t block_size,
-rs_gf_init       function     72 /home/user/InvariantFS/src-extracted/VFS/src/rs.c static void rs_gf_init(void)
-rs_gf_mat_inv    function    281 /home/user/InvariantFS/src-extracted/VFS/src/rs.c static int rs_gf_mat_inv(uint8_t *m, unsigned n)
-rs_mac           function    241 /home/user/InvariantFS/src-extracted/VFS/src/rs.c static void rs_mac(int algo, uint8_t *dst, const uint8_t *src, uint8_t c,
-rs_mac_cauchy    function    218 /home/user/InvariantFS/src-extracted/VFS/src/rs.c static void rs_mac_cauchy(uint8_t *dst, const uint8_t *src, uint8_t c,
-rs_mac_vm        function    195 /home/user/InvariantFS/src-extracted/VFS/src/rs.c static void rs_mac_vm(uint8_t *dst, const uint8_t *src, uint8_t c, size_t n)
-rs_matrix        function    112 /home/user/InvariantFS/src-extracted/VFS/src/rs.c static int rs_matrix(int algo, unsigned k, unsigned m, uint8_t *P)
-rs_now           function    390 /home/user/InvariantFS/src-extracted/VFS/src/rs.c static double rs_now(void)
-rs_rng           function    406 /home/user/InvariantFS/src-extracted/VFS/src/rs.c static uint64_t rs_rng(void)
-rs_roundtrip     function    453 /home/user/InvariantFS/src-extracted/VFS/src/rs.c static int rs_roundtrip(int algo, unsigned k, unsigned m, size_t block_size,
+gf_inv           function     97 /home/user/InvariantFS/src-extracted/VFS/src/codecs/rs.c static uint8_t gf_inv(uint8_t a)
+gf_mul           function     92 /home/user/InvariantFS/src-extracted/VFS/src/codecs/rs.c static uint8_t gf_mul(uint8_t a, uint8_t b)
+gf_pow           function    102 /home/user/InvariantFS/src-extracted/VFS/src/codecs/rs.c static uint8_t gf_pow(uint8_t a, unsigned e)
+rs_algo_name     function    250 /home/user/InvariantFS/src-extracted/VFS/src/codecs/rs.c const char *rs_algo_name(int algo)
+rs_bench         function    501 /home/user/InvariantFS/src-extracted/VFS/src/codecs/rs.c int rs_bench(unsigned k, unsigned m, size_t block_size, unsigned nstripes,
+rs_bench_one     function    415 /home/user/InvariantFS/src-extracted/VFS/src/codecs/rs.c static double rs_bench_one(int algo, unsigned k, unsigned m,
+rs_decode        function    323 /home/user/InvariantFS/src-extracted/VFS/src/codecs/rs.c int rs_decode(int algo, unsigned k, unsigned m, size_t block_size,
+rs_encode        function    259 /home/user/InvariantFS/src-extracted/VFS/src/codecs/rs.c int rs_encode(int algo, unsigned k, unsigned m, size_t block_size,
+rs_gf_init       function     72 /home/user/InvariantFS/src-extracted/VFS/src/codecs/rs.c static void rs_gf_init(void)
+rs_gf_mat_inv    function    281 /home/user/InvariantFS/src-extracted/VFS/src/codecs/rs.c static int rs_gf_mat_inv(uint8_t *m, unsigned n)
+rs_mac           function    241 /home/user/InvariantFS/src-extracted/VFS/src/codecs/rs.c static void rs_mac(int algo, uint8_t *dst, const uint8_t *src, uint8_t c,
+rs_mac_cauchy    function    218 /home/user/InvariantFS/src-extracted/VFS/src/codecs/rs.c static void rs_mac_cauchy(uint8_t *dst, const uint8_t *src, uint8_t c,
+rs_mac_vm        function    195 /home/user/InvariantFS/src-extracted/VFS/src/codecs/rs.c static void rs_mac_vm(uint8_t *dst, const uint8_t *src, uint8_t c, size_t n)
+rs_matrix        function    112 /home/user/InvariantFS/src-extracted/VFS/src/codecs/rs.c static int rs_matrix(int algo, unsigned k, unsigned m, uint8_t *P)
+rs_now           function    390 /home/user/InvariantFS/src-extracted/VFS/src/codecs/rs.c static double rs_now(void)
+rs_rng           function    406 /home/user/InvariantFS/src-extracted/VFS/src/codecs/rs.c static uint64_t rs_rng(void)
+rs_roundtrip     function    453 /home/user/InvariantFS/src-extracted/VFS/src/codecs/rs.c static int rs_roundtrip(int algo, unsigned k, unsigned m, size_t block_size,

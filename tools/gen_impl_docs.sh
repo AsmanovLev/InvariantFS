@@ -18,9 +18,18 @@ OUT="$ROOT/impl_docs"
 rm -rf "$OUT/functions" "$OUT/types" "$OUT/FUNCTIONS.md" "$OUT/TYPES.md"
 mkdir -p "$OUT/functions" "$OUT/types"
 
+# 2026-09-04 restructure: sources live in per-role subdirs (core/ codecs/
+# recipes/ cli/ vendor7z/ legacy/); the top level only keeps vendored zstd.h
+# and the zlib/, zstd-1.5.6/, examples/ trees (still out of scope, as before).
+shopt -s nullglob
+SRCFILES=("$SRC"/*.c "$SRC"/*.h)
+for d in core codecs recipes cli vendor7z legacy; do
+  SRCFILES+=("$SRC/$d"/*.c "$SRC/$d"/*.h)
+done
+
 # Function index: every source file (the post-split vol_*.c modules are
 # covered by the same glob).
-for f in "$SRC"/*.c "$SRC"/*.h; do
+for f in "${SRCFILES[@]}"; do
   b=$(basename "$f")
   ctags -x --c-kinds=f "$f" > "$OUT/functions/${b}.txt" || true
 done
@@ -38,7 +47,7 @@ done
 # Type index: headers AND all .c files — post-split, module-local structs
 # live in the vol_*.c units (e.g. vol_sweep.c's sweep_seed), not just in
 # volume.c/fuse_fs.c/blkio.c as the old list assumed.
-for f in "$SRC"/*.h "$SRC"/*.c; do
+for f in "${SRCFILES[@]}"; do
   b=$(basename "$f")
   ctags -x --c-kinds=stgu "$f" > "$OUT/types/${b}.txt" || true
 done

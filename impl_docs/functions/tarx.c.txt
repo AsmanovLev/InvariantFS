@@ -1,11 +1,11 @@
-tarx_build_recipe function    170 /home/user/InvariantFS/src-extracted/VFS/src/tarx.c int tarx_build_recipe(const tarx_member *m, size_t n,
-tarx_check_checksum function     89 /home/user/InvariantFS/src-extracted/VFS/src/tarx.c static int tarx_check_checksum(const uint8_t *h)
-tarx_extract     function    108 /home/user/InvariantFS/src-extracted/VFS/src/tarx.c int tarx_extract(const uint8_t *tar, size_t tar_len,
-tarx_parse_recipe function    205 /home/user/InvariantFS/src-extracted/VFS/src/tarx.c int tarx_parse_recipe(const uint8_t *r, size_t rlen,
-tarx_parse_size  function     70 /home/user/InvariantFS/src-extracted/VFS/src/tarx.c static uint64_t tarx_parse_size(const uint8_t *h)
-tarx_rd16        function     56 /home/user/InvariantFS/src-extracted/VFS/src/tarx.c static uint16_t tarx_rd16(const uint8_t *p)
-tarx_rd64        function     44 /home/user/InvariantFS/src-extracted/VFS/src/tarx.c static uint64_t tarx_rd64(const uint8_t *p)
-tarx_rebuild     function    250 /home/user/InvariantFS/src-extracted/VFS/src/tarx.c int tarx_rebuild(const tarx_member *m, size_t n,
-tarx_recipe_num_parts function    242 /home/user/InvariantFS/src-extracted/VFS/src/tarx.c int tarx_recipe_num_parts(const uint8_t *r, size_t rlen)
-tarx_wr16        function     61 /home/user/InvariantFS/src-extracted/VFS/src/tarx.c static void tarx_wr16(uint8_t *p, uint16_t v)
-tarx_wr64        function     51 /home/user/InvariantFS/src-extracted/VFS/src/tarx.c static void tarx_wr64(uint8_t *p, uint64_t v)
+tarx_build_recipe function    170 /home/user/InvariantFS/src-extracted/VFS/src/recipes/tarx.c int tarx_build_recipe(const tarx_member *m, size_t n,
+tarx_check_checksum function     89 /home/user/InvariantFS/src-extracted/VFS/src/recipes/tarx.c static int tarx_check_checksum(const uint8_t *h)
+tarx_extract     function    108 /home/user/InvariantFS/src-extracted/VFS/src/recipes/tarx.c int tarx_extract(const uint8_t *tar, size_t tar_len,
+tarx_parse_recipe function    205 /home/user/InvariantFS/src-extracted/VFS/src/recipes/tarx.c int tarx_parse_recipe(const uint8_t *r, size_t rlen,
+tarx_parse_size  function     70 /home/user/InvariantFS/src-extracted/VFS/src/recipes/tarx.c static uint64_t tarx_parse_size(const uint8_t *h)
+tarx_rd16        function     56 /home/user/InvariantFS/src-extracted/VFS/src/recipes/tarx.c static uint16_t tarx_rd16(const uint8_t *p)
+tarx_rd64        function     44 /home/user/InvariantFS/src-extracted/VFS/src/recipes/tarx.c static uint64_t tarx_rd64(const uint8_t *p)
+tarx_rebuild     function    250 /home/user/InvariantFS/src-extracted/VFS/src/recipes/tarx.c int tarx_rebuild(const tarx_member *m, size_t n,
+tarx_recipe_num_parts function    242 /home/user/InvariantFS/src-extracted/VFS/src/recipes/tarx.c int tarx_recipe_num_parts(const uint8_t *r, size_t rlen)
+tarx_wr16        function     61 /home/user/InvariantFS/src-extracted/VFS/src/recipes/tarx.c static void tarx_wr16(uint8_t *p, uint16_t v)
+tarx_wr64        function     51 /home/user/InvariantFS/src-extracted/VFS/src/recipes/tarx.c static void tarx_wr64(uint8_t *p, uint64_t v)

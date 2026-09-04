@@ -1,8 +1,9 @@
-bit_clr          function    538 /home/user/InvariantFS/src-extracted/VFS/src/volume_internal.h static inline void bit_clr(uint8_t *b, uint64_t i) { b[i / 8] &= (uint8_t)~(1u << (i % 8)); }
-bit_get          function    534 /home/user/InvariantFS/src-extracted/VFS/src/volume_internal.h static inline int bit_get(const uint8_t *b, uint64_t i) { return (b[i / 8] >> (i % 8)) & 1; }
-bit_set          function    536 /home/user/InvariantFS/src-extracted/VFS/src/volume_internal.h static inline void bit_set(uint8_t *b, uint64_t i) { b[i / 8] |= (uint8_t)(1u << (i % 8)); }
-l2p_rheat        function    496 /home/user/InvariantFS/src-extracted/VFS/src/volume_internal.h static inline uint16_t l2p_rheat(const invfs_l2p_entry *e)
-l2p_set_rheat    function    501 /home/user/InvariantFS/src-extracted/VFS/src/volume_internal.h static inline void l2p_set_rheat(invfs_l2p_entry *e, uint16_t r)
-name_too_long    function    507 /home/user/InvariantFS/src-extracted/VFS/src/volume_internal.h static inline int name_too_long(const char *name)
-name_too_long_for_children function    516 /home/user/InvariantFS/src-extracted/VFS/src/volume_internal.h static inline int name_too_long_for_children(const char *name)
-rec_set_name     function    525 /home/user/InvariantFS/src-extracted/VFS/src/volume_internal.h static inline void rec_set_name(invfs_inode_rec *rh, const char *name)
+bit_clr          function    702 /home/user/InvariantFS/src-extracted/VFS/src/core/volume_internal.h static inline void bit_clr(uint8_t *b, uint64_t i) { b[i / 8] &= (uint8_t)~(1u << (i % 8)); }
+bit_get          function    698 /home/user/InvariantFS/src-extracted/VFS/src/core/volume_internal.h static inline int bit_get(const uint8_t *b, uint64_t i) { return (b[i / 8] >> (i % 8)) & 1; }
+bit_set          function    700 /home/user/InvariantFS/src-extracted/VFS/src/core/volume_internal.h static inline void bit_set(uint8_t *b, uint64_t i) { b[i / 8] |= (uint8_t)(1u << (i % 8)); }
+l2p_rheat        function    660 /home/user/InvariantFS/src-extracted/VFS/src/core/volume_internal.h static inline uint16_t l2p_rheat(const invfs_l2p_entry *e)
+l2p_set_rheat    function    665 /home/user/InvariantFS/src-extracted/VFS/src/core/volume_internal.h static inline void l2p_set_rheat(invfs_l2p_entry *e, uint16_t r)
+name_too_long    function    671 /home/user/InvariantFS/src-extracted/VFS/src/core/volume_internal.h static inline int name_too_long(const char *name)
+name_too_long_for_children function    680 /home/user/InvariantFS/src-extracted/VFS/src/core/volume_internal.h static inline int name_too_long_for_children(const char *name)
+rec_set_name     function    689 /home/user/InvariantFS/src-extracted/VFS/src/core/volume_internal.h static inline void rec_set_name(invfs_inode_rec *rh, const char *name)
+v_of_blk         function    508 /home/user/InvariantFS/src-extracted/VFS/src/core/volume_internal.h static inline struct invfs_volume *v_of_blk(const blkio *io)

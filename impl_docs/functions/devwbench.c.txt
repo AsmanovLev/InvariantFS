@@ -1,3 +1,3 @@
-main             function     88 /home/user/InvariantFS/src-extracted/VFS/src/devwbench.c int main(int argc, char **argv)
-now_ms           function     31 /home/user/InvariantFS/src-extracted/VFS/src/devwbench.c static double now_ms(void)
-run              function     39 /home/user/InvariantFS/src-extracted/VFS/src/devwbench.c static int run(const char *dev, size_t chunk, int write_through, double *out_ms)
+main             function     88 /home/user/InvariantFS/src-extracted/VFS/src/legacy/devwbench.c int main(int argc, char **argv)
+now_ms           function     31 /home/user/InvariantFS/src-extracted/VFS/src/legacy/devwbench.c static double now_ms(void)
+run              function     39 /home/user/InvariantFS/src-extracted/VFS/src/legacy/devwbench.c static int run(const char *dev, size_t chunk, int write_through, double *out_ms)

@@ -1,4 +1,4 @@
-rsz0_crc         function     18 /home/user/InvariantFS/src-extracted/VFS/src/vol_resize.c uint32_t rsz0_crc(const invfs_rsz0 *rz)
-rsz0_sane        function     29 /home/user/InvariantFS/src-extracted/VFS/src/vol_resize.c int rsz0_sane(const invfs_rsz0 *rz)
-rsz_abort_at     function     59 /home/user/InvariantFS/src-extracted/VFS/src/vol_resize.c static int rsz_abort_at(const char *stage)
-vol_rsz0_apply   function     70 /home/user/InvariantFS/src-extracted/VFS/src/vol_resize.c int vol_rsz0_apply(invfs_volume *v, const invfs_rsz0 *rz)
+rsz0_crc         function     18 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_resize.c uint32_t rsz0_crc(const invfs_rsz0 *rz)
+rsz0_sane        function     32 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_resize.c int rsz0_sane(invfs_volume *v, const invfs_rsz0 *rz)
+rsz_abort_at     function     72 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_resize.c static int rsz_abort_at(const char *stage)
+vol_rsz0_apply   function     83 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_resize.c int vol_rsz0_apply(invfs_volume *v, const invfs_rsz0 *rz)

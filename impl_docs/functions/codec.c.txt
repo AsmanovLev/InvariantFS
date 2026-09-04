@@ -1,63 +1,63 @@
-content_is_text  function    130 /home/user/InvariantFS/src-extracted/VFS/src/codec.c static int content_is_text(const uint8_t *head, size_t head_len)
-dir_has_tool     function    519 /home/user/InvariantFS/src-extracted/VFS/src/codec.c static int dir_has_tool(const char *dir, size_t dlen, const char *tool)
-executable       function    513 /home/user/InvariantFS/src-extracted/VFS/src/codec.c static int executable(const char *path)
-ext_eq           function    117 /home/user/InvariantFS/src-extracted/VFS/src/codec.c static int ext_eq(const char *got, const char *want)
-hex_nib          function    374 /home/user/InvariantFS/src-extracted/VFS/src/codec.c static int hex_nib(int c)
-invfs_binary_family function    184 /home/user/InvariantFS/src-extracted/VFS/src/codec.c int invfs_binary_family(const uint8_t *head, size_t head_len, const char *name)
-invfs_codec_all  function   1291 /home/user/InvariantFS/src-extracted/VFS/src/codec.c const invfs_codec *invfs_codec_all(size_t *count)
-invfs_codec_by_algo function   1282 /home/user/InvariantFS/src-extracted/VFS/src/codec.c const invfs_codec *invfs_codec_by_algo(uint32_t algo)
-invfs_codec_pack_def function   1271 /home/user/InvariantFS/src-extracted/VFS/src/codec.c const invfs_pack_def *invfs_codec_pack_def(const invfs_codec *c)
-invfs_codec_probe_reset function    997 /home/user/InvariantFS/src-extracted/VFS/src/codec.c void invfs_codec_probe_reset(void)
-invfs_profile_generic_algo function   1347 /home/user/InvariantFS/src-extracted/VFS/src/codec.c int invfs_profile_generic_algo(int p)
-invfs_profile_name function   1323 /home/user/InvariantFS/src-extracted/VFS/src/codec.c const char *invfs_profile_name(int p)
-invfs_profile_parse function   1314 /home/user/InvariantFS/src-extracted/VFS/src/codec.c int invfs_profile_parse(const char *s)
-invfs_profile_zstd_level function   1335 /home/user/InvariantFS/src-extracted/VFS/src/codec.c int invfs_profile_zstd_level(int p)
-invfs_registry_generation function   1298 /home/user/InvariantFS/src-extracted/VFS/src/codec.c uint16_t invfs_registry_generation(void)
-invfs_text_family function    145 /home/user/InvariantFS/src-extracted/VFS/src/codec.c int invfs_text_family(const char *name, const uint8_t *head, size_t head_len)
-list_has_tool    function    531 /home/user/InvariantFS/src-extracted/VFS/src/codec.c static int list_has_tool(const char *dirs, const char *tool)
-lz4c_decode      function     57 /home/user/InvariantFS/src-extracted/VFS/src/codec.c static int lz4c_decode(const uint8_t *in, size_t inlen,
-lz4c_encode      function     45 /home/user/InvariantFS/src-extracted/VFS/src/codec.c static int lz4c_encode(const uint8_t *in, size_t inlen,
-magic_at         function    232 /home/user/InvariantFS/src-extracted/VFS/src/codec.c static int magic_at(const uint8_t *head, size_t head_len,
-manifest_tool_ok function    556 /home/user/InvariantFS/src-extracted/VFS/src/codec.c static int manifest_tool_ok(const char *packdir, const char *argv)
-none_decode      function     35 /home/user/InvariantFS/src-extracted/VFS/src/codec.c static int none_decode(const uint8_t *in, size_t inlen,
-none_encode      function     26 /home/user/InvariantFS/src-extracted/VFS/src/codec.c static int none_encode(const uint8_t *in, size_t inlen,
-on_path          function    546 /home/user/InvariantFS/src-extracted/VFS/src/codec.c static int on_path(const char *tool)
-pack_buffer_io   function    861 /home/user/InvariantFS/src-extracted/VFS/src/codec.c static int pack_buffer_io(pack_entry *p, int is_encode,
-pack_decode_io   function    891 /home/user/InvariantFS/src-extracted/VFS/src/codec.c static int pack_decode_io(pack_entry *p, const uint8_t *in, size_t inlen,
-pack_entry_free  function    965 /home/user/InvariantFS/src-extracted/VFS/src/codec.c static void pack_entry_free(pack_entry *p)
-pack_probe_impl  function    780 /home/user/InvariantFS/src-extracted/VFS/src/codec.c static int pack_probe_impl(pack_entry *p)
-pack_register    function   1072 /home/user/InvariantFS/src-extracted/VFS/src/codec.c static void pack_register(const char *dir, const struct pack_manifest *m)
-pack_scan_all    function   1226 /home/user/InvariantFS/src-extracted/VFS/src/codec.c static void pack_scan_all(void)
-pack_scan_dir    function   1194 /home/user/InvariantFS/src-extracted/VFS/src/codec.c static void pack_scan_dir(const char *dir, size_t dlen)
-pack_slurp       function    843 /home/user/InvariantFS/src-extracted/VFS/src/codec.c static int pack_slurp(const char *path, uint8_t **out, size_t *out_len)
-pack_sniff_impl  function    729 /home/user/InvariantFS/src-extracted/VFS/src/codec.c static int pack_sniff_impl(const pack_entry *p, const uint8_t *head,
-pack_strdup      function    957 /home/user/InvariantFS/src-extracted/VFS/src/codec.c static char *pack_strdup(const char *s)
-pack_tmpdir      function    822 /home/user/InvariantFS/src-extracted/VFS/src/codec.c static int pack_tmpdir(char *dir, size_t cap)
-pack_tool_resolvable function    766 /home/user/InvariantFS/src-extracted/VFS/src/codec.c static int pack_tool_resolvable(const char *tool)
-pack_write       function    835 /home/user/InvariantFS/src-extracted/VFS/src/codec.c static int pack_write(const char *path, const uint8_t *data, size_t len)
-packs_ensure     function   1246 /home/user/InvariantFS/src-extracted/VFS/src/codec.c static void packs_ensure(void)
-parse_caps       function    396 /home/user/InvariantFS/src-extracted/VFS/src/codec.c static uint32_t parse_caps(const char *s)
-parse_hex_bytes  function    383 /home/user/InvariantFS/src-extracted/VFS/src/codec.c static size_t parse_hex_bytes(const char *s, uint8_t *out, size_t cap)
-parse_manifest   function    428 /home/user/InvariantFS/src-extracted/VFS/src/codec.c static int parse_manifest(const char *path, struct pack_manifest *m)
-probe_ape        function   1010 /home/user/InvariantFS/src-extracted/VFS/src/codec.c static int probe_ape(void) { return probe_cached(INVFS_ALGO_APE, "ape", "mac"); }
-probe_cached     function    983 /home/user/InvariantFS/src-extracted/VFS/src/codec.c static int probe_cached(uint32_t algo, const char *name, const char *tool)
-probe_external   function    661 /home/user/InvariantFS/src-extracted/VFS/src/codec.c static int probe_external(const char *name, const char *tool)
-probe_jxl        function   1009 /home/user/InvariantFS/src-extracted/VFS/src/codec.c static int probe_jxl(void) { return probe_cached(INVFS_ALGO_JXL, "jxl", "cjxl"); }
-probe_pack_dir   function    594 /home/user/InvariantFS/src-extracted/VFS/src/codec.c static int probe_pack_dir(const char *dir, size_t dlen, const char *name)
-probe_pmp        function   1008 /home/user/InvariantFS/src-extracted/VFS/src/codec.c static int probe_pmp(void) { return probe_cached(INVFS_ALGO_PMP, "pmp", "packMP3"); }
-probe_wv         function   1011 /home/user/InvariantFS/src-extracted/VFS/src/codec.c static int probe_wv(void) { return probe_cached(INVFS_ALGO_WV, "wv", "wavpack"); }
-sniff_ape        function    297 /home/user/InvariantFS/src-extracted/VFS/src/codec.c static int sniff_ape(const uint8_t *head, size_t head_len, const char *name)
-sniff_exer       function    316 /home/user/InvariantFS/src-extracted/VFS/src/codec.c static int sniff_exer(const uint8_t *head, size_t head_len, const char *name)
-sniff_flacr      function    267 /home/user/InvariantFS/src-extracted/VFS/src/codec.c static int sniff_flacr(const uint8_t *head, size_t head_len, const char *name)
-sniff_gzr        function    253 /home/user/InvariantFS/src-extracted/VFS/src/codec.c static int sniff_gzr(const uint8_t *head, size_t head_len, const char *name)
-sniff_jxl        function    283 /home/user/InvariantFS/src-extracted/VFS/src/codec.c static int sniff_jxl(const uint8_t *head, size_t head_len, const char *name)
-sniff_pmp        function    274 /home/user/InvariantFS/src-extracted/VFS/src/codec.c static int sniff_pmp(const uint8_t *head, size_t head_len, const char *name)
-sniff_pngr       function    260 /home/user/InvariantFS/src-extracted/VFS/src/codec.c static int sniff_pngr(const uint8_t *head, size_t head_len, const char *name)
-sniff_ppmd       function    164 /home/user/InvariantFS/src-extracted/VFS/src/codec.c static int sniff_ppmd(const uint8_t *head, size_t head_len, const char *name)
-sniff_tarr       function    246 /home/user/InvariantFS/src-extracted/VFS/src/codec.c static int sniff_tarr(const uint8_t *head, size_t head_len, const char *name)
-sniff_wv         function    304 /home/user/InvariantFS/src-extracted/VFS/src/codec.c static int sniff_wv(const uint8_t *head, size_t head_len, const char *name)
-sniff_zip        function    239 /home/user/InvariantFS/src-extracted/VFS/src/codec.c static int sniff_zip(const uint8_t *head, size_t head_len, const char *name)
-str_copy         function    366 /home/user/InvariantFS/src-extracted/VFS/src/codec.c static void str_copy(char *dst, size_t cap, const char *src)
-tool_self_describes function    620 /home/user/InvariantFS/src-extracted/VFS/src/codec.c static int tool_self_describes(const char *tool)
-zstdc_decode     function     76 /home/user/InvariantFS/src-extracted/VFS/src/codec.c static int zstdc_decode(const uint8_t *in, size_t inlen,
-zstdc_encode     function     67 /home/user/InvariantFS/src-extracted/VFS/src/codec.c static int zstdc_encode(const uint8_t *in, size_t inlen,
+content_is_text  function    130 /home/user/InvariantFS/src-extracted/VFS/src/codecs/codec.c static int content_is_text(const uint8_t *head, size_t head_len)
+dir_has_tool     function    519 /home/user/InvariantFS/src-extracted/VFS/src/codecs/codec.c static int dir_has_tool(const char *dir, size_t dlen, const char *tool)
+executable       function    513 /home/user/InvariantFS/src-extracted/VFS/src/codecs/codec.c static int executable(const char *path)
+ext_eq           function    117 /home/user/InvariantFS/src-extracted/VFS/src/codecs/codec.c static int ext_eq(const char *got, const char *want)
+hex_nib          function    374 /home/user/InvariantFS/src-extracted/VFS/src/codecs/codec.c static int hex_nib(int c)
+invfs_binary_family function    184 /home/user/InvariantFS/src-extracted/VFS/src/codecs/codec.c int invfs_binary_family(const uint8_t *head, size_t head_len, const char *name)
+invfs_codec_all  function   1300 /home/user/InvariantFS/src-extracted/VFS/src/codecs/codec.c const invfs_codec *invfs_codec_all(size_t *count)
+invfs_codec_by_algo function   1291 /home/user/InvariantFS/src-extracted/VFS/src/codecs/codec.c const invfs_codec *invfs_codec_by_algo(uint32_t algo)
+invfs_codec_pack_def function   1280 /home/user/InvariantFS/src-extracted/VFS/src/codecs/codec.c const invfs_pack_def *invfs_codec_pack_def(const invfs_codec *c)
+invfs_codec_probe_reset function   1006 /home/user/InvariantFS/src-extracted/VFS/src/codecs/codec.c void invfs_codec_probe_reset(void)
+invfs_profile_generic_algo function   1356 /home/user/InvariantFS/src-extracted/VFS/src/codecs/codec.c int invfs_profile_generic_algo(int p)
+invfs_profile_name function   1332 /home/user/InvariantFS/src-extracted/VFS/src/codecs/codec.c const char *invfs_profile_name(int p)
+invfs_profile_parse function   1323 /home/user/InvariantFS/src-extracted/VFS/src/codecs/codec.c int invfs_profile_parse(const char *s)
+invfs_profile_zstd_level function   1344 /home/user/InvariantFS/src-extracted/VFS/src/codecs/codec.c int invfs_profile_zstd_level(int p)
+invfs_registry_generation function   1307 /home/user/InvariantFS/src-extracted/VFS/src/codecs/codec.c uint16_t invfs_registry_generation(void)
+invfs_text_family function    145 /home/user/InvariantFS/src-extracted/VFS/src/codecs/codec.c int invfs_text_family(const char *name, const uint8_t *head, size_t head_len)
+list_has_tool    function    531 /home/user/InvariantFS/src-extracted/VFS/src/codecs/codec.c static int list_has_tool(const char *dirs, const char *tool)
+lz4c_decode      function     57 /home/user/InvariantFS/src-extracted/VFS/src/codecs/codec.c static int lz4c_decode(const uint8_t *in, size_t inlen,
+lz4c_encode      function     45 /home/user/InvariantFS/src-extracted/VFS/src/codecs/codec.c static int lz4c_encode(const uint8_t *in, size_t inlen,
+magic_at         function    232 /home/user/InvariantFS/src-extracted/VFS/src/codecs/codec.c static int magic_at(const uint8_t *head, size_t head_len,
+manifest_tool_ok function    556 /home/user/InvariantFS/src-extracted/VFS/src/codecs/codec.c static int manifest_tool_ok(const char *packdir, const char *argv)
+none_decode      function     35 /home/user/InvariantFS/src-extracted/VFS/src/codecs/codec.c static int none_decode(const uint8_t *in, size_t inlen,
+none_encode      function     26 /home/user/InvariantFS/src-extracted/VFS/src/codecs/codec.c static int none_encode(const uint8_t *in, size_t inlen,
+on_path          function    546 /home/user/InvariantFS/src-extracted/VFS/src/codecs/codec.c static int on_path(const char *tool)
+pack_buffer_io   function    870 /home/user/InvariantFS/src-extracted/VFS/src/codecs/codec.c static int pack_buffer_io(pack_entry *p, int is_encode,
+pack_decode_io   function    900 /home/user/InvariantFS/src-extracted/VFS/src/codecs/codec.c static int pack_decode_io(pack_entry *p, const uint8_t *in, size_t inlen,
+pack_entry_free  function    974 /home/user/InvariantFS/src-extracted/VFS/src/codecs/codec.c static void pack_entry_free(pack_entry *p)
+pack_probe_impl  function    789 /home/user/InvariantFS/src-extracted/VFS/src/codecs/codec.c static int pack_probe_impl(pack_entry *p)
+pack_register    function   1081 /home/user/InvariantFS/src-extracted/VFS/src/codecs/codec.c static void pack_register(const char *dir, const struct pack_manifest *m)
+pack_scan_all    function   1235 /home/user/InvariantFS/src-extracted/VFS/src/codecs/codec.c static void pack_scan_all(void)
+pack_scan_dir    function   1203 /home/user/InvariantFS/src-extracted/VFS/src/codecs/codec.c static void pack_scan_dir(const char *dir, size_t dlen)
+pack_slurp       function    852 /home/user/InvariantFS/src-extracted/VFS/src/codecs/codec.c static int pack_slurp(const char *path, uint8_t **out, size_t *out_len)
+pack_sniff_impl  function    729 /home/user/InvariantFS/src-extracted/VFS/src/codecs/codec.c static int pack_sniff_impl(const pack_entry *p, const uint8_t *head,
+pack_strdup      function    966 /home/user/InvariantFS/src-extracted/VFS/src/codecs/codec.c static char *pack_strdup(const char *s)
+pack_tmpdir      function    831 /home/user/InvariantFS/src-extracted/VFS/src/codecs/codec.c static int pack_tmpdir(char *dir, size_t cap)
+pack_tool_resolvable function    767 /home/user/InvariantFS/src-extracted/VFS/src/codecs/codec.c static int pack_tool_resolvable(const char *pdir, const char *tool)
+pack_write       function    844 /home/user/InvariantFS/src-extracted/VFS/src/codecs/codec.c static int pack_write(const char *path, const uint8_t *data, size_t len)
+packs_ensure     function   1255 /home/user/InvariantFS/src-extracted/VFS/src/codecs/codec.c static void packs_ensure(void)
+parse_caps       function    396 /home/user/InvariantFS/src-extracted/VFS/src/codecs/codec.c static uint32_t parse_caps(const char *s)
+parse_hex_bytes  function    383 /home/user/InvariantFS/src-extracted/VFS/src/codecs/codec.c static size_t parse_hex_bytes(const char *s, uint8_t *out, size_t cap)
+parse_manifest   function    428 /home/user/InvariantFS/src-extracted/VFS/src/codecs/codec.c static int parse_manifest(const char *path, struct pack_manifest *m)
+probe_ape        function   1019 /home/user/InvariantFS/src-extracted/VFS/src/codecs/codec.c static int probe_ape(void) { return probe_cached(INVFS_ALGO_APE, "ape", "mac"); }
+probe_cached     function    992 /home/user/InvariantFS/src-extracted/VFS/src/codecs/codec.c static int probe_cached(uint32_t algo, const char *name, const char *tool)
+probe_external   function    661 /home/user/InvariantFS/src-extracted/VFS/src/codecs/codec.c static int probe_external(const char *name, const char *tool)
+probe_jxl        function   1018 /home/user/InvariantFS/src-extracted/VFS/src/codecs/codec.c static int probe_jxl(void) { return probe_cached(INVFS_ALGO_JXL, "jxl", "cjxl"); }
+probe_pack_dir   function    594 /home/user/InvariantFS/src-extracted/VFS/src/codecs/codec.c static int probe_pack_dir(const char *dir, size_t dlen, const char *name)
+probe_pmp        function   1017 /home/user/InvariantFS/src-extracted/VFS/src/codecs/codec.c static int probe_pmp(void) { return probe_cached(INVFS_ALGO_PMP, "pmp", "packMP3"); }
+probe_wv         function   1020 /home/user/InvariantFS/src-extracted/VFS/src/codecs/codec.c static int probe_wv(void) { return probe_cached(INVFS_ALGO_WV, "wv", "wavpack"); }
+sniff_ape        function    297 /home/user/InvariantFS/src-extracted/VFS/src/codecs/codec.c static int sniff_ape(const uint8_t *head, size_t head_len, const char *name)
+sniff_exer       function    316 /home/user/InvariantFS/src-extracted/VFS/src/codecs/codec.c static int sniff_exer(const uint8_t *head, size_t head_len, const char *name)
+sniff_flacr      function    267 /home/user/InvariantFS/src-extracted/VFS/src/codecs/codec.c static int sniff_flacr(const uint8_t *head, size_t head_len, const char *name)
+sniff_gzr        function    253 /home/user/InvariantFS/src-extracted/VFS/src/codecs/codec.c static int sniff_gzr(const uint8_t *head, size_t head_len, const char *name)
+sniff_jxl        function    283 /home/user/InvariantFS/src-extracted/VFS/src/codecs/codec.c static int sniff_jxl(const uint8_t *head, size_t head_len, const char *name)
+sniff_pmp        function    274 /home/user/InvariantFS/src-extracted/VFS/src/codecs/codec.c static int sniff_pmp(const uint8_t *head, size_t head_len, const char *name)
+sniff_pngr       function    260 /home/user/InvariantFS/src-extracted/VFS/src/codecs/codec.c static int sniff_pngr(const uint8_t *head, size_t head_len, const char *name)
+sniff_ppmd       function    164 /home/user/InvariantFS/src-extracted/VFS/src/codecs/codec.c static int sniff_ppmd(const uint8_t *head, size_t head_len, const char *name)
+sniff_tarr       function    246 /home/user/InvariantFS/src-extracted/VFS/src/codecs/codec.c static int sniff_tarr(const uint8_t *head, size_t head_len, const char *name)
+sniff_wv         function    304 /home/user/InvariantFS/src-extracted/VFS/src/codecs/codec.c static int sniff_wv(const uint8_t *head, size_t head_len, const char *name)
+sniff_zip        function    239 /home/user/InvariantFS/src-extracted/VFS/src/codecs/codec.c static int sniff_zip(const uint8_t *head, size_t head_len, const char *name)
+str_copy         function    366 /home/user/InvariantFS/src-extracted/VFS/src/codecs/codec.c static void str_copy(char *dst, size_t cap, const char *src)
+tool_self_describes function    620 /home/user/InvariantFS/src-extracted/VFS/src/codecs/codec.c static int tool_self_describes(const char *tool)
+zstdc_decode     function     76 /home/user/InvariantFS/src-extracted/VFS/src/codecs/codec.c static int zstdc_decode(const uint8_t *in, size_t inlen,
+zstdc_encode     function     67 /home/user/InvariantFS/src-extracted/VFS/src/codecs/codec.c static int zstdc_encode(const uint8_t *in, size_t inlen,

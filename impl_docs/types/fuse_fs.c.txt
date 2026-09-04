@@ -1,4 +1,6 @@
-__anon762b32870108 struct       76 /home/user/InvariantFS/src-extracted/VFS/src/fuse_fs.c typedef struct {
-fs_entry         typedef      83 /home/user/InvariantFS/src-extracted/VFS/src/fuse_fs.c } fs_entry;
-wctx             struct      576 /home/user/InvariantFS/src-extracted/VFS/src/fuse_fs.c typedef struct wctx {
-wctx             typedef     586 /home/user/InvariantFS/src-extracted/VFS/src/fuse_fs.c } wctx;
+__anonf6f9ce8e0108 struct       83 /home/user/InvariantFS/src-extracted/VFS/src/cli/fuse_fs.c typedef struct {
+acreds           struct      561 /home/user/InvariantFS/src-extracted/VFS/src/cli/fuse_fs.c typedef struct acreds {
+acreds           typedef     567 /home/user/InvariantFS/src-extracted/VFS/src/cli/fuse_fs.c } acreds;
+fs_entry         typedef      90 /home/user/InvariantFS/src-extracted/VFS/src/cli/fuse_fs.c } fs_entry;
+wctx             struct     1164 /home/user/InvariantFS/src-extracted/VFS/src/cli/fuse_fs.c typedef struct wctx {
+wctx             typedef    1174 /home/user/InvariantFS/src-extracted/VFS/src/cli/fuse_fs.c } wctx;

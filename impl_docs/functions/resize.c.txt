@@ -1,11 +1,15 @@
-abort_at         function     88 /home/user/InvariantFS/src-extracted/VFS/src/resize.c static int abort_at(const char *stage)
-bit_get          function     81 /home/user/InvariantFS/src-extracted/VFS/src/resize.c static int bit_get(const uint8_t *b, uint64_t i) { return (b[i / 8] >> (i % 8)) & 1; }
-bm_blocks        function     76 /home/user/InvariantFS/src-extracted/VFS/src/resize.c static uint64_t bm_blocks(uint64_t total)
-copy_crc         function    245 /home/user/InvariantFS/src-extracted/VFS/src/resize.c static int copy_crc(blkio *io, uint64_t src, uint64_t dst, uint64_t len,
-div_ceil         function     73 /home/user/InvariantFS/src-extracted/VFS/src/resize.c static uint64_t div_ceil(uint64_t a, uint64_t b) { return (a + b - 1) / b; }
-find_free_run    function    229 /home/user/InvariantFS/src-extracted/VFS/src/resize.c static uint64_t find_free_run(const uint8_t *bitmap, uint64_t lo,
-is_parity_name   function    145 /home/user/InvariantFS/src-extracted/VFS/src/resize.c static int is_parity_name(const char *nm)
-main             function    261 /home/user/InvariantFS/src-extracted/VFS/src/resize.c int main(int argc, char **argv)
-parse_size       function     98 /home/user/InvariantFS/src-extracted/VFS/src/resize.c static uint64_t parse_size(const char *s)
-scan_inode_area  function    152 /home/user/InvariantFS/src-extracted/VFS/src/resize.c static int scan_inode_area(blkio *io, uint64_t area_byte, uint64_t area_end,
-scan_journal     function    125 /home/user/InvariantFS/src-extracted/VFS/src/resize.c static int scan_journal(blkio *io, uint64_t js_byte, uint64_t *used_out)
+abort_at         function     88 /home/user/InvariantFS/src-extracted/VFS/src/cli/resize.c static int abort_at(const char *stage)
+bit_get          function     81 /home/user/InvariantFS/src-extracted/VFS/src/cli/resize.c static int bit_get(const uint8_t *b, uint64_t i) { return (b[i / 8] >> (i % 8)) & 1; }
+bm_blocks        function     76 /home/user/InvariantFS/src-extracted/VFS/src/cli/resize.c static uint64_t bm_blocks(uint64_t total)
+copy_crc         function    399 /home/user/InvariantFS/src-extracted/VFS/src/cli/resize.c static int copy_crc(blkio *io, uint64_t src, uint64_t dst, uint64_t len,
+copy_crc2        function    382 /home/user/InvariantFS/src-extracted/VFS/src/cli/resize.c static int copy_crc2(rzio *rz, uint64_t src, uint64_t dst, uint64_t len,
+div_ceil         function     73 /home/user/InvariantFS/src-extracted/VFS/src/cli/resize.c static uint64_t div_ceil(uint64_t a, uint64_t b) { return (a + b - 1) / b; }
+find_free_run    function    316 /home/user/InvariantFS/src-extracted/VFS/src/cli/resize.c static uint64_t find_free_run(const uint8_t *bitmap, uint64_t lo,
+is_parity_name   function    232 /home/user/InvariantFS/src-extracted/VFS/src/cli/resize.c static int is_parity_name(const char *nm)
+main             function    415 /home/user/InvariantFS/src-extracted/VFS/src/cli/resize.c int main(int argc, char **argv)
+parse_size       function     98 /home/user/InvariantFS/src-extracted/VFS/src/cli/resize.c static uint64_t parse_size(const char *s)
+rz_flush         function    374 /home/user/InvariantFS/src-extracted/VFS/src/cli/resize.c static int rz_flush(rzio *r)
+rz_pread         function    350 /home/user/InvariantFS/src-extracted/VFS/src/cli/resize.c static int rz_pread(rzio *r, uint64_t off, void *buf, size_t len)
+rz_pwrite        function    359 /home/user/InvariantFS/src-extracted/VFS/src/cli/resize.c static int rz_pwrite(rzio *r, uint64_t off, const void *buf, size_t len)
+scan_inode_area  function    239 /home/user/InvariantFS/src-extracted/VFS/src/cli/resize.c static int scan_inode_area(blkio *io, uint64_t area_byte, uint64_t area_end,
+scan_journal     function    129 /home/user/InvariantFS/src-extracted/VFS/src/cli/resize.c static int scan_journal(blkio *io, uint64_t js_byte, uint64_t *src_out,

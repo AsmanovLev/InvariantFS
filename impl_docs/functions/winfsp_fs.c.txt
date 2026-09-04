@@ -1,16 +1,16 @@
-InvFspClose      function    183 /home/user/InvariantFS/src-extracted/VFS/src/winfsp_fs.c static NTSTATUS InvFspClose(FSP_FILE_SYSTEM *FileSystem, PVOID FileContext)
-InvFspGetFileInfo function    189 /home/user/InvariantFS/src-extracted/VFS/src/winfsp_fs.c static NTSTATUS InvFspGetFileInfo(FSP_FILE_SYSTEM *FileSystem, PVOID FileContext,
-InvFspGetSecurityByName function    137 /home/user/InvariantFS/src-extracted/VFS/src/winfsp_fs.c static NTSTATUS InvFspGetSecurityByName(FSP_FILE_SYSTEM *FileSystem, PCWSTR FileName,
-InvFspGetVolumeInfo function    120 /home/user/InvariantFS/src-extracted/VFS/src/winfsp_fs.c static NTSTATUS InvFspGetVolumeInfo(FSP_FILE_SYSTEM *FileSystem,
-InvFspOpen       function    161 /home/user/InvariantFS/src-extracted/VFS/src/winfsp_fs.c static NTSTATUS InvFspOpen(FSP_FILE_SYSTEM *FileSystem, PCWSTR FileName,
-InvFspRead       function    206 /home/user/InvariantFS/src-extracted/VFS/src/winfsp_fs.c static NTSTATUS InvFspRead(FSP_FILE_SYSTEM *FileSystem, PVOID FileContext,
-InvFspReadDirectory function    224 /home/user/InvariantFS/src-extracted/VFS/src/winfsp_fs.c static NTSTATUS InvFspReadDirectory(FSP_FILE_SYSTEM *FileSystem, PVOID FileContext,
-build_file_table function     59 /home/user/InvariantFS/src-extracted/VFS/src/winfsp_fs.c static void build_file_table(void)
-fill_file_info   function    100 /home/user/InvariantFS/src-extracted/VFS/src/winfsp_fs.c static void fill_file_info(fs_entry *e, FSP_FSCTL_FILE_INFO *fi)
-fill_root_info   function    112 /home/user/InvariantFS/src-extracted/VFS/src/winfsp_fs.c static NTSTATUS fill_root_info(FSP_FSCTL_FILE_INFO *fi)
-find_entry       function     49 /home/user/InvariantFS/src-extracted/VFS/src/winfsp_fs.c static fs_entry *find_entry(const wchar_t *name)
-init_interface   function    259 /home/user/InvariantFS/src-extracted/VFS/src/winfsp_fs.c static void init_interface(void)
-usage            function    272 /home/user/InvariantFS/src-extracted/VFS/src/winfsp_fs.c static void usage(const char *prog)
-utf16_to_utf8    function     44 /home/user/InvariantFS/src-extracted/VFS/src/winfsp_fs.c static void utf16_to_utf8(const wchar_t *utf16, char *utf8, int max)
-utf8_to_utf16    function     39 /home/user/InvariantFS/src-extracted/VFS/src/winfsp_fs.c static void utf8_to_utf16(const char *utf8, wchar_t *utf16, int max)
-wmain            function    279 /home/user/InvariantFS/src-extracted/VFS/src/winfsp_fs.c int wmain(int argc, wchar_t **argv)
+InvFspClose      function    183 /home/user/InvariantFS/src-extracted/VFS/src/legacy/winfsp_fs.c static NTSTATUS InvFspClose(FSP_FILE_SYSTEM *FileSystem, PVOID FileContext)
+InvFspGetFileInfo function    189 /home/user/InvariantFS/src-extracted/VFS/src/legacy/winfsp_fs.c static NTSTATUS InvFspGetFileInfo(FSP_FILE_SYSTEM *FileSystem, PVOID FileContext,
+InvFspGetSecurityByName function    137 /home/user/InvariantFS/src-extracted/VFS/src/legacy/winfsp_fs.c static NTSTATUS InvFspGetSecurityByName(FSP_FILE_SYSTEM *FileSystem, PCWSTR FileName,
+InvFspGetVolumeInfo function    120 /home/user/InvariantFS/src-extracted/VFS/src/legacy/winfsp_fs.c static NTSTATUS InvFspGetVolumeInfo(FSP_FILE_SYSTEM *FileSystem,
+InvFspOpen       function    161 /home/user/InvariantFS/src-extracted/VFS/src/legacy/winfsp_fs.c static NTSTATUS InvFspOpen(FSP_FILE_SYSTEM *FileSystem, PCWSTR FileName,
+InvFspRead       function    206 /home/user/InvariantFS/src-extracted/VFS/src/legacy/winfsp_fs.c static NTSTATUS InvFspRead(FSP_FILE_SYSTEM *FileSystem, PVOID FileContext,
+InvFspReadDirectory function    224 /home/user/InvariantFS/src-extracted/VFS/src/legacy/winfsp_fs.c static NTSTATUS InvFspReadDirectory(FSP_FILE_SYSTEM *FileSystem, PVOID FileContext,
+build_file_table function     59 /home/user/InvariantFS/src-extracted/VFS/src/legacy/winfsp_fs.c static void build_file_table(void)
+fill_file_info   function    100 /home/user/InvariantFS/src-extracted/VFS/src/legacy/winfsp_fs.c static void fill_file_info(fs_entry *e, FSP_FSCTL_FILE_INFO *fi)
+fill_root_info   function    112 /home/user/InvariantFS/src-extracted/VFS/src/legacy/winfsp_fs.c static NTSTATUS fill_root_info(FSP_FSCTL_FILE_INFO *fi)
+find_entry       function     49 /home/user/InvariantFS/src-extracted/VFS/src/legacy/winfsp_fs.c static fs_entry *find_entry(const wchar_t *name)
+init_interface   function    259 /home/user/InvariantFS/src-extracted/VFS/src/legacy/winfsp_fs.c static void init_interface(void)
+usage            function    272 /home/user/InvariantFS/src-extracted/VFS/src/legacy/winfsp_fs.c static void usage(const char *prog)
+utf16_to_utf8    function     44 /home/user/InvariantFS/src-extracted/VFS/src/legacy/winfsp_fs.c static void utf16_to_utf8(const wchar_t *utf16, char *utf8, int max)
+utf8_to_utf16    function     39 /home/user/InvariantFS/src-extracted/VFS/src/legacy/winfsp_fs.c static void utf8_to_utf16(const char *utf8, wchar_t *utf16, int max)
+wmain            function    279 /home/user/InvariantFS/src-extracted/VFS/src/legacy/winfsp_fs.c int wmain(int argc, wchar_t **argv)

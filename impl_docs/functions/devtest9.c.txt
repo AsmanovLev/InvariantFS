@@ -1,2 +1,2 @@
-nt_open          function      5 /home/user/InvariantFS/src-extracted/VFS/src/devtest9.c static void nt_open(const wchar_t *path) {
-wmain            function     18 /home/user/InvariantFS/src-extracted/VFS/src/devtest9.c int wmain(void) {
+nt_open          function      5 /home/user/InvariantFS/src-extracted/VFS/src/legacy/devtest9.c static void nt_open(const wchar_t *path) {
+wmain            function     18 /home/user/InvariantFS/src-extracted/VFS/src/legacy/devtest9.c int wmain(void) {

@@ -1,7 +1,7 @@
-__anonb65e1f0f0108 struct       42 /home/user/InvariantFS/src-extracted/VFS/src/vol_repair.c typedef struct {
-__anonb65e1f0f0208 struct       68 /home/user/InvariantFS/src-extracted/VFS/src/vol_repair.c typedef struct {
-__anonb65e1f0f0308 struct      285 /home/user/InvariantFS/src-extracted/VFS/src/vol_repair.c typedef struct { uint64_t pba; uint32_t plen; } segcand;
-lr_ent           struct      282 /home/user/InvariantFS/src-extracted/VFS/src/vol_repair.c struct lr_ent { uint64_t id; } *ents = NULL;
-seal2_ctx        typedef      85 /home/user/InvariantFS/src-extracted/VFS/src/vol_repair.c } seal2_ctx;
-seal2_segref     typedef      47 /home/user/InvariantFS/src-extracted/VFS/src/vol_repair.c } seal2_segref;
-segcand          typedef     285 /home/user/InvariantFS/src-extracted/VFS/src/vol_repair.c typedef struct { uint64_t pba; uint32_t plen; } segcand;
+__anon68bac0070108 struct       42 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_repair.c typedef struct {
+__anon68bac0070208 struct       68 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_repair.c typedef struct {
+__anon68bac0070308 struct      285 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_repair.c typedef struct { uint64_t pba; uint32_t plen; } segcand;
+lr_ent           struct      282 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_repair.c struct lr_ent { uint64_t id; } *ents = NULL;
+seal2_ctx        typedef      85 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_repair.c } seal2_ctx;
+seal2_segref     typedef      47 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_repair.c } seal2_segref;
+segcand          typedef     285 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_repair.c typedef struct { uint64_t pba; uint32_t plen; } segcand;

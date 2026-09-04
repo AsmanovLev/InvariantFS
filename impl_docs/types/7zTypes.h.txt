@@ -1,45 +1,45 @@
-BoolInt          typedef     261 /home/user/InvariantFS/src-extracted/VFS/src/7zTypes.h typedef int BoolInt;
-Byte             typedef     173 /home/user/InvariantFS/src-extracted/VFS/src/7zTypes.h typedef unsigned char Byte;
-CLookToRead2     typedef     421 /home/user/InvariantFS/src-extracted/VFS/src/7zTypes.h } CLookToRead2;
-CSecToLook       typedef     432 /home/user/InvariantFS/src-extracted/VFS/src/7zTypes.h } CSecToLook;
-CSecToRead       typedef     442 /home/user/InvariantFS/src-extracted/VFS/src/7zTypes.h } CSecToRead;
-DWORD            typedef     196 /home/user/InvariantFS/src-extracted/VFS/src/7zTypes.h typedef UINT32 DWORD;
-DWORD_PTR        typedef     209 /home/user/InvariantFS/src-extracted/VFS/src/7zTypes.h typedef unsigned long DWORD_PTR;
-ESzSeek          typedef     371 /home/user/InvariantFS/src-extracted/VFS/src/7zTypes.h } ESzSeek;
-INT              typedef     188 /home/user/InvariantFS/src-extracted/VFS/src/7zTypes.h typedef int INT;
-INT32            typedef     189 /home/user/InvariantFS/src-extracted/VFS/src/7zTypes.h typedef Int32 INT32;
-INT_PTR          typedef     206 /home/user/InvariantFS/src-extracted/VFS/src/7zTypes.h typedef long INT_PTR;
-ISzAlloc         struct      461 /home/user/InvariantFS/src-extracted/VFS/src/7zTypes.h struct ISzAlloc
-ISzAlloc         typedef     458 /home/user/InvariantFS/src-extracted/VFS/src/7zTypes.h typedef struct ISzAlloc ISzAlloc;
-ISzAllocPtr      typedef     459 /home/user/InvariantFS/src-extracted/VFS/src/7zTypes.h typedef const ISzAlloc * ISzAllocPtr;
-Int16            typedef     174 /home/user/InvariantFS/src-extracted/VFS/src/7zTypes.h typedef short Int16;
-Int32            typedef     178 /home/user/InvariantFS/src-extracted/VFS/src/7zTypes.h typedef long Int32;
-Int32            typedef     181 /home/user/InvariantFS/src-extracted/VFS/src/7zTypes.h typedef int Int32;
-Int64            typedef     221 /home/user/InvariantFS/src-extracted/VFS/src/7zTypes.h typedef long Int64;
-Int64            typedef     227 /home/user/InvariantFS/src-extracted/VFS/src/7zTypes.h typedef __int64 Int64;
-Int64            typedef     232 /home/user/InvariantFS/src-extracted/VFS/src/7zTypes.h typedef int64_t Int64;
-Int64            typedef     235 /home/user/InvariantFS/src-extracted/VFS/src/7zTypes.h typedef long long int Int64;
-LONG             typedef     192 /home/user/InvariantFS/src-extracted/VFS/src/7zTypes.h typedef INT32 LONG; // LONG, ULONG and DWORD must be 32-bit for _WIN32 compatibility
-LONG_PTR         typedef     208 /home/user/InvariantFS/src-extracted/VFS/src/7zTypes.h typedef long LONG_PTR;
-LPVOID           typedef     202 /home/user/InvariantFS/src-extracted/VFS/src/7zTypes.h typedef void *LPVOID;
-SIZE_T           typedef     211 /home/user/InvariantFS/src-extracted/VFS/src/7zTypes.h typedef size_t SIZE_T;
-SRes             typedef      45 /home/user/InvariantFS/src-extracted/VFS/src/7zTypes.h typedef int SRes;
-SizeT            typedef     247 /home/user/InvariantFS/src-extracted/VFS/src/7zTypes.h typedef unsigned int SizeT;
-SizeT            typedef     249 /home/user/InvariantFS/src-extracted/VFS/src/7zTypes.h typedef size_t SizeT;
-UINT             typedef     190 /home/user/InvariantFS/src-extracted/VFS/src/7zTypes.h typedef unsigned int UINT;
-UINT32           typedef     191 /home/user/InvariantFS/src-extracted/VFS/src/7zTypes.h typedef UInt32 UINT32;
-UINT_PTR         typedef     207 /home/user/InvariantFS/src-extracted/VFS/src/7zTypes.h typedef unsigned long UINT_PTR;
-UInt16           typedef     175 /home/user/InvariantFS/src-extracted/VFS/src/7zTypes.h typedef unsigned short UInt16;
-UInt32           typedef     179 /home/user/InvariantFS/src-extracted/VFS/src/7zTypes.h typedef unsigned long UInt32;
-UInt32           typedef     182 /home/user/InvariantFS/src-extracted/VFS/src/7zTypes.h typedef unsigned int UInt32;
-UInt64           typedef     222 /home/user/InvariantFS/src-extracted/VFS/src/7zTypes.h typedef unsigned long UInt64;
-UInt64           typedef     228 /home/user/InvariantFS/src-extracted/VFS/src/7zTypes.h typedef unsigned __int64 UInt64;
-UInt64           typedef     233 /home/user/InvariantFS/src-extracted/VFS/src/7zTypes.h typedef uint64_t UInt64;
-UInt64           typedef     236 /home/user/InvariantFS/src-extracted/VFS/src/7zTypes.h typedef unsigned long long int UInt64;
-ULONG            typedef     193 /home/user/InvariantFS/src-extracted/VFS/src/7zTypes.h typedef UINT32 ULONG;
-WRes             typedef      69 /home/user/InvariantFS/src-extracted/VFS/src/7zTypes.h typedef unsigned WRes;
-WRes             typedef      77 /home/user/InvariantFS/src-extracted/VFS/src/7zTypes.h typedef int WRes;
-__anon8e2881270103 enum        367 /home/user/InvariantFS/src-extracted/VFS/src/7zTypes.h {
-__anon8e2881270208 struct      411 /home/user/InvariantFS/src-extracted/VFS/src/7zTypes.h {
-__anon8e2881270308 struct      429 /home/user/InvariantFS/src-extracted/VFS/src/7zTypes.h {
-__anon8e2881270408 struct      439 /home/user/InvariantFS/src-extracted/VFS/src/7zTypes.h {
+BoolInt          typedef     261 /home/user/InvariantFS/src-extracted/VFS/src/vendor7z/7zTypes.h typedef int BoolInt;
+Byte             typedef     173 /home/user/InvariantFS/src-extracted/VFS/src/vendor7z/7zTypes.h typedef unsigned char Byte;
+CLookToRead2     typedef     421 /home/user/InvariantFS/src-extracted/VFS/src/vendor7z/7zTypes.h } CLookToRead2;
+CSecToLook       typedef     432 /home/user/InvariantFS/src-extracted/VFS/src/vendor7z/7zTypes.h } CSecToLook;
+CSecToRead       typedef     442 /home/user/InvariantFS/src-extracted/VFS/src/vendor7z/7zTypes.h } CSecToRead;
+DWORD            typedef     196 /home/user/InvariantFS/src-extracted/VFS/src/vendor7z/7zTypes.h typedef UINT32 DWORD;
+DWORD_PTR        typedef     209 /home/user/InvariantFS/src-extracted/VFS/src/vendor7z/7zTypes.h typedef unsigned long DWORD_PTR;
+ESzSeek          typedef     371 /home/user/InvariantFS/src-extracted/VFS/src/vendor7z/7zTypes.h } ESzSeek;
+INT              typedef     188 /home/user/InvariantFS/src-extracted/VFS/src/vendor7z/7zTypes.h typedef int INT;
+INT32            typedef     189 /home/user/InvariantFS/src-extracted/VFS/src/vendor7z/7zTypes.h typedef Int32 INT32;
+INT_PTR          typedef     206 /home/user/InvariantFS/src-extracted/VFS/src/vendor7z/7zTypes.h typedef long INT_PTR;
+ISzAlloc         struct      461 /home/user/InvariantFS/src-extracted/VFS/src/vendor7z/7zTypes.h struct ISzAlloc
+ISzAlloc         typedef     458 /home/user/InvariantFS/src-extracted/VFS/src/vendor7z/7zTypes.h typedef struct ISzAlloc ISzAlloc;
+ISzAllocPtr      typedef     459 /home/user/InvariantFS/src-extracted/VFS/src/vendor7z/7zTypes.h typedef const ISzAlloc * ISzAllocPtr;
+Int16            typedef     174 /home/user/InvariantFS/src-extracted/VFS/src/vendor7z/7zTypes.h typedef short Int16;
+Int32            typedef     178 /home/user/InvariantFS/src-extracted/VFS/src/vendor7z/7zTypes.h typedef long Int32;
+Int32            typedef     181 /home/user/InvariantFS/src-extracted/VFS/src/vendor7z/7zTypes.h typedef int Int32;
+Int64            typedef     221 /home/user/InvariantFS/src-extracted/VFS/src/vendor7z/7zTypes.h typedef long Int64;
+Int64            typedef     227 /home/user/InvariantFS/src-extracted/VFS/src/vendor7z/7zTypes.h typedef __int64 Int64;
+Int64            typedef     232 /home/user/InvariantFS/src-extracted/VFS/src/vendor7z/7zTypes.h typedef int64_t Int64;
+Int64            typedef     235 /home/user/InvariantFS/src-extracted/VFS/src/vendor7z/7zTypes.h typedef long long int Int64;
+LONG             typedef     192 /home/user/InvariantFS/src-extracted/VFS/src/vendor7z/7zTypes.h typedef INT32 LONG; // LONG, ULONG and DWORD must be 32-bit for _WIN32 compatibility
+LONG_PTR         typedef     208 /home/user/InvariantFS/src-extracted/VFS/src/vendor7z/7zTypes.h typedef long LONG_PTR;
+LPVOID           typedef     202 /home/user/InvariantFS/src-extracted/VFS/src/vendor7z/7zTypes.h typedef void *LPVOID;
+SIZE_T           typedef     211 /home/user/InvariantFS/src-extracted/VFS/src/vendor7z/7zTypes.h typedef size_t SIZE_T;
+SRes             typedef      45 /home/user/InvariantFS/src-extracted/VFS/src/vendor7z/7zTypes.h typedef int SRes;
+SizeT            typedef     247 /home/user/InvariantFS/src-extracted/VFS/src/vendor7z/7zTypes.h typedef unsigned int SizeT;
+SizeT            typedef     249 /home/user/InvariantFS/src-extracted/VFS/src/vendor7z/7zTypes.h typedef size_t SizeT;
+UINT             typedef     190 /home/user/InvariantFS/src-extracted/VFS/src/vendor7z/7zTypes.h typedef unsigned int UINT;
+UINT32           typedef     191 /home/user/InvariantFS/src-extracted/VFS/src/vendor7z/7zTypes.h typedef UInt32 UINT32;
+UINT_PTR         typedef     207 /home/user/InvariantFS/src-extracted/VFS/src/vendor7z/7zTypes.h typedef unsigned long UINT_PTR;
+UInt16           typedef     175 /home/user/InvariantFS/src-extracted/VFS/src/vendor7z/7zTypes.h typedef unsigned short UInt16;
+UInt32           typedef     179 /home/user/InvariantFS/src-extracted/VFS/src/vendor7z/7zTypes.h typedef unsigned long UInt32;
+UInt32           typedef     182 /home/user/InvariantFS/src-extracted/VFS/src/vendor7z/7zTypes.h typedef unsigned int UInt32;
+UInt64           typedef     222 /home/user/InvariantFS/src-extracted/VFS/src/vendor7z/7zTypes.h typedef unsigned long UInt64;
+UInt64           typedef     228 /home/user/InvariantFS/src-extracted/VFS/src/vendor7z/7zTypes.h typedef unsigned __int64 UInt64;
+UInt64           typedef     233 /home/user/InvariantFS/src-extracted/VFS/src/vendor7z/7zTypes.h typedef uint64_t UInt64;
+UInt64           typedef     236 /home/user/InvariantFS/src-extracted/VFS/src/vendor7z/7zTypes.h typedef unsigned long long int UInt64;
+ULONG            typedef     193 /home/user/InvariantFS/src-extracted/VFS/src/vendor7z/7zTypes.h typedef UINT32 ULONG;
+WRes             typedef      69 /home/user/InvariantFS/src-extracted/VFS/src/vendor7z/7zTypes.h typedef unsigned WRes;
+WRes             typedef      77 /home/user/InvariantFS/src-extracted/VFS/src/vendor7z/7zTypes.h typedef int WRes;
+__anon575337550103 enum        367 /home/user/InvariantFS/src-extracted/VFS/src/vendor7z/7zTypes.h {
+__anon575337550208 struct      411 /home/user/InvariantFS/src-extracted/VFS/src/vendor7z/7zTypes.h {
+__anon575337550308 struct      429 /home/user/InvariantFS/src-extracted/VFS/src/vendor7z/7zTypes.h {
+__anon575337550408 struct      439 /home/user/InvariantFS/src-extracted/VFS/src/vendor7z/7zTypes.h {

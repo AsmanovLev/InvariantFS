@@ -1,2 +1,3 @@
-invfs_wsession   struct        8 /home/user/InvariantFS/src-extracted/VFS/src/vol_write.c struct invfs_wsession {
-invfs_wsession   typedef       6 /home/user/InvariantFS/src-extracted/VFS/src/vol_write.c typedef struct invfs_wsession invfs_wsession;
+__anon2d91412f0108 struct      155 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_write.c static const struct { unsigned fill_pct; int zlevel; } raw_effort_ladder[] = {
+invfs_wsession   struct        8 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_write.c struct invfs_wsession {
+invfs_wsession   typedef       6 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_write.c typedef struct invfs_wsession invfs_wsession;

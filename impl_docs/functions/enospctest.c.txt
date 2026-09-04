@@ -1,1 +1,1 @@
-main             function      7 /home/user/InvariantFS/src-extracted/VFS/src/enospctest.c int main(int argc, char **argv)
+main             function      7 /home/user/InvariantFS/src-extracted/VFS/src/legacy/enospctest.c int main(int argc, char **argv)

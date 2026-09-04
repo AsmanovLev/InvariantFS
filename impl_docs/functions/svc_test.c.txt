@@ -1,1 +1,1 @@
-wmain            function      4 /home/user/InvariantFS/src-extracted/VFS/src/svc_test.c int wmain(void) {
+wmain            function      4 /home/user/InvariantFS/src-extracted/VFS/src/legacy/svc_test.c int wmain(void) {

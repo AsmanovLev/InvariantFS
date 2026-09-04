@@ -1,6 +1,6 @@
-__anonc1e743120103 enum         32 /home/user/InvariantFS/src-extracted/VFS/src/arc.c enum { L_NONE = 0, L_T1, L_T2, L_B1, L_B2 };
-__anonc1e743120208 struct       44 /home/user/InvariantFS/src-extracted/VFS/src/arc.c typedef struct {
-arc_list         typedef      48 /home/user/InvariantFS/src-extracted/VFS/src/arc.c } arc_list;
-arc_node         struct       34 /home/user/InvariantFS/src-extracted/VFS/src/arc.c typedef struct arc_node {
-arc_node         typedef      42 /home/user/InvariantFS/src-extracted/VFS/src/arc.c } arc_node;
-invfs_arc        struct       50 /home/user/InvariantFS/src-extracted/VFS/src/arc.c struct invfs_arc {
+__anon17f38b0a0103 enum         32 /home/user/InvariantFS/src-extracted/VFS/src/core/arc.c enum { L_NONE = 0, L_T1, L_T2, L_B1, L_B2 };
+__anon17f38b0a0208 struct       44 /home/user/InvariantFS/src-extracted/VFS/src/core/arc.c typedef struct {
+arc_list         typedef      48 /home/user/InvariantFS/src-extracted/VFS/src/core/arc.c } arc_list;
+arc_node         struct       34 /home/user/InvariantFS/src-extracted/VFS/src/core/arc.c typedef struct arc_node {
+arc_node         typedef      42 /home/user/InvariantFS/src-extracted/VFS/src/core/arc.c } arc_node;
+invfs_arc        struct       50 /home/user/InvariantFS/src-extracted/VFS/src/core/arc.c struct invfs_arc {

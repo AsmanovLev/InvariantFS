@@ -1,2 +1,2 @@
-blkio            struct       59 /home/user/InvariantFS/src-extracted/VFS/src/blkio.h typedef struct blkio {
-blkio            typedef      86 /home/user/InvariantFS/src-extracted/VFS/src/blkio.h } blkio;
+blkio            struct       59 /home/user/InvariantFS/src-extracted/VFS/src/core/blkio.h typedef struct blkio {
+blkio            typedef      86 /home/user/InvariantFS/src-extracted/VFS/src/core/blkio.h } blkio;
