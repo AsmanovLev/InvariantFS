@@ -118,7 +118,7 @@ if [ -n "$INVFS_BASELINE_DIR" ]; then
           ppmd_codec codec bcj_x86 rs"
     OBJS=""
     for m in $CORE; do OBJS="$OBJS $BD/build/obj/$m.o"; done
-    cc -std=gnu11 -O2 -I"$BD/src-extracted/VFS/src" -o "$WORK/l2ptest.base" \
+    cc -std=gnu11 -O2 -I"$BD/src-extracted/VFS/src" -I"$BD/src-extracted/VFS/src/core" -I"$BD/src-extracted/VFS/src/codecs" -I"$BD/src-extracted/VFS/src/recipes" -I"$BD/src-extracted/VFS/src/vendor7z" -o "$WORK/l2ptest.base" \
         "$REPO/tools/l2ptest.c" $OBJS -Wl,-l:libzstd.so.1 -lz -lpthread
     echo "-- baseline (pre-WP-L2Q build, $BD)"
     T_BASE=$("$WORK/l2ptest.base" readall "$IMGB" 50000 | tee /dev/stderr | \

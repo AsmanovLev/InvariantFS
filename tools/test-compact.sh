@@ -296,7 +296,7 @@ int main(int argc, char **argv)
 }
 EOF
 
-gcc -std=gnu11 -O2 -I$REPO/src-extracted/VFS/src -o "$WORK/cpharness" \
+gcc -std=gnu11 -O2 -I$REPO/src-extracted/VFS/src -I$REPO/src-extracted/VFS/src/core -I$REPO/src-extracted/VFS/src/codecs -I$REPO/src-extracted/VFS/src/recipes -I$REPO/src-extracted/VFS/src/vendor7z -o "$WORK/cpharness" \
     "$WORK/cpharness.c" $OBJS -Wl,-l:libzstd.so.1 -lz -lpthread \
     || fail "harness build"
 H=$WORK/cpharness
