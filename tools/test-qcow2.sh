@@ -217,7 +217,7 @@ def tile(blob, n):
 
 # content sources: a real busybox C source + a real x86-64 ELF
 text = None
-for root, _dirs, files in os.walk(os.environ["REPO"] + "/tools/busybox-src")  # fixture input (submodule):
+for root, _dirs, files in os.walk(os.environ["REPO"] + "/tools/busybox-src"):  # fixture input (submodule)
     for n in sorted(files):
         if n.endswith(".c"):
             p = os.path.join(root, n)
