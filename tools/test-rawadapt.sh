@@ -48,7 +48,8 @@ rm -f "$IMG1" "$IMG2"
 
 fail() { echo "FAIL: $*" >&2; exit 1; }
 
-# physical blocks a file occupies (L2P entry lens, summed) and the list
+# physical blocks a file occupies (the per-segment extents, derived from
+# the framed headers) and the list
 # of per-segment AST algos -- both read-only probes of a closed volume.
 # blocks_of_raw counts only RAW-zone segments (pba within the zone):
 # the daemon's background sweep drains files RAW->SHADOW between the fill
@@ -56,11 +57,11 @@ fail() { echo "FAIL: $*" >&2; exit 1; }
 # blocks ONLY -- an any-zone count drifts from the truth the engine uses
 # (the WP22d merge made the drain fire inside the oscillation legs).
 blocks_of() { $B/meta_probe "$1" --heat "$2" 2>/dev/null \
-    | awk '/^entry /{for(i=1;i<=NF;i++) if ($i ~ /^len=/) {sub("len=","",$i); s+=$i}} END {print s+0}'; }
+    | awk '/^ast /{for(i=1;i<=NF;i++) if ($i ~ /^phys=/) {sub("phys=","",$i); s+=$i}} END {print s+0}'; }
 blocks_of_raw() { $B/meta_probe "$1" --heat "$2" 2>/dev/null \
-    | awk -v lo="$RAW_LO" -v hi="$RAW_HI" '/^entry /{p=0; l=0;
+    | awk -v lo="$RAW_LO" -v hi="$RAW_HI" '/^ast /{p=0; l=0;
         for(i=1;i<=NF;i++) { if ($i ~ /^pba=/) {sub("pba=","",$i); p=$i+0}
-                             if ($i ~ /^len=/) {sub("len=","",$i); l=$i+0} }
+                             if ($i ~ /^phys=/) {sub("phys=","",$i); l=$i+0} }
         if (p >= lo && p < hi) s+=l} END {print s+0}'; }
 algos_of() { $B/meta_probe "$1" --heat "$2" 2>/dev/null \
     | awk '/^ast /{for(i=1;i<=NF;i++) if ($i ~ /^algo=/) {sub("algo=","",$i); printf "%s ", $i}}'; }

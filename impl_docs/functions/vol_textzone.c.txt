@@ -1,23 +1,23 @@
 acc_defer        function     47 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_textzone.c static int acc_defer(tz_candidate **arr, size_t *np, size_t *capp,
 bz_defer         function     81 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_textzone.c int bz_defer(invfs_volume *v, uint64_t inode_id, const char *name,
-tz_commit_member function    413 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_textzone.c static int tz_commit_member(tz_ctx *c, tz_member *m, const tz_candidate *cand)
-tz_commit_ready  function    509 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_textzone.c static int tz_commit_ready(tz_ctx *c, const tz_candidate *cands,
+tz_commit_member function    421 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_textzone.c static int tz_commit_member(tz_ctx *c, tz_member *m, const tz_candidate *cand)
+tz_commit_ready  function    527 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_textzone.c static int tz_commit_ready(tz_ctx *c, const tz_candidate *cands,
 tz_defer         function     71 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_textzone.c int tz_defer(invfs_volume *v, uint64_t inode_id, const char *name,
-tz_flush_class_ok function    770 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_textzone.c static int tz_flush_class_ok(int binary, uint8_t cc)
-tz_flush_one     function    785 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_textzone.c static int tz_flush_one(invfs_volume *v, int binary)
-tz_member_oversized function    266 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_textzone.c int tz_member_oversized(invfs_volume *v, uint64_t inode_id,
-tz_order_cmp     function    753 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_textzone.c static int tz_order_cmp(const void *a, const void *b)
+tz_flush_class_ok function    787 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_textzone.c static int tz_flush_class_ok(int binary, uint8_t cc)
+tz_flush_one     function    802 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_textzone.c static int tz_flush_one(invfs_volume *v, int binary)
+tz_member_oversized function    273 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_textzone.c int tz_member_oversized(invfs_volume *v, uint64_t inode_id,
+tz_order_cmp     function    770 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_textzone.c static int tz_order_cmp(const void *a, const void *b)
 tz_owner_free    function    146 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_textzone.c void tz_owner_free(tz_owner *o)
-tz_owner_id      function    235 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_textzone.c static uint64_t tz_owner_id(invfs_volume *v)
+tz_owner_id      function    242 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_textzone.c static uint64_t tz_owner_id(invfs_volume *v)
 tz_owner_load    function     93 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_textzone.c int tz_owner_load(invfs_volume *v, uint64_t owner, tz_owner *o)
-tz_owner_total   function    551 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_textzone.c static uint64_t tz_owner_total(const tz_owner *o)
+tz_owner_total   function    567 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_textzone.c static uint64_t tz_owner_total(const tz_owner *o)
 tz_owner_write   function    160 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_textzone.c int tz_owner_write(invfs_volume *v, uint64_t owner, const char *name,
-tz_seal          function    569 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_textzone.c static int tz_seal(tz_ctx *c, const tz_candidate *cands,
-tz_sealed_find   function    397 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_textzone.c static const tz_sealed *tz_sealed_find(const tz_ctx *c, uint64_t seq)
-tz_slice_push    function    378 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_textzone.c static int tz_slice_push(tz_member *m, uint64_t seq, uint64_t file_off,
-tz_sniff_any     function    248 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_textzone.c int tz_sniff_any(invfs_volume *v, uint64_t inode_id, const char *name)
-tz_u32_cmp       function    984 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_textzone.c static int tz_u32_cmp(const void *a, const void *b)
-vol_acc_pending  function    976 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_textzone.c size_t vol_acc_pending(const invfs_volume *v, int binary)
-vol_store_generic function    320 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_textzone.c int vol_store_generic(invfs_volume *v, uint64_t inode_id,
-vol_tz_flush     function    962 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_textzone.c int vol_tz_flush(invfs_volume *v)
-vol_tz_gc        function   1000 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_textzone.c int vol_tz_gc(invfs_volume *v)
+tz_seal          function    585 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_textzone.c static int tz_seal(tz_ctx *c, const tz_candidate *cands,
+tz_sealed_find   function    405 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_textzone.c static const tz_sealed *tz_sealed_find(const tz_ctx *c, uint64_t seq)
+tz_slice_push    function    386 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_textzone.c static int tz_slice_push(tz_member *m, uint64_t seq, uint64_t file_off,
+tz_sniff_any     function    255 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_textzone.c int tz_sniff_any(invfs_volume *v, uint64_t inode_id, const char *name)
+tz_u32_cmp       function   1001 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_textzone.c static int tz_u32_cmp(const void *a, const void *b)
+vol_acc_pending  function    993 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_textzone.c size_t vol_acc_pending(const invfs_volume *v, int binary)
+vol_store_generic function    328 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_textzone.c int vol_store_generic(invfs_volume *v, uint64_t inode_id,
+vol_tz_flush     function    979 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_textzone.c int vol_tz_flush(invfs_volume *v)
+vol_tz_gc        function   1017 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_textzone.c int vol_tz_gc(invfs_volume *v)

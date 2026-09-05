@@ -1,23 +1,23 @@
-seal2_map_load   function    602 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_seal.c void seal2_map_load(const invfs_volume *v, const seal_view *sv,
+seal2_map_load   function    644 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_seal.c void seal2_map_load(const invfs_volume *v, const seal_view *sv,
 seal2_shard_name function    137 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_seal.c static void seal2_shard_name(uint64_t shard, char *out, size_t cap)
 seal2_shard_stripes function    147 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_seal.c uint64_t seal2_shard_stripes(uint32_t m2)
-seal2_shard_sync function    626 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_seal.c static int seal2_shard_sync(invfs_volume *v, uint64_t owner, uint64_t shard,
+seal2_shard_sync function    668 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_seal.c static int seal2_shard_sync(invfs_volume *v, uint64_t owner, uint64_t shard,
 seal_dirty_mark  function     23 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_seal.c void seal_dirty_mark(invfs_volume *v, uint64_t pba, uint64_t n)
 seal_dirty_reset function     10 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_seal.c void seal_dirty_reset(invfs_volume *v)
 seal_excluded    function    164 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_seal.c int seal_excluded(const seal_view *sv, uint64_t b)
-seal_recover_segment function    335 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_seal.c int seal_recover_segment(invfs_volume *v, uint64_t pba, uint64_t plen,
+seal_recover_segment function    341 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_seal.c int seal_recover_segment(invfs_volume *v, uint64_t pba, uint64_t plen,
 seal_seg_verify  function    314 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_seal.c int seal_seg_verify(const uint8_t *seg, uint64_t plen,
 seal_shard_name  function    128 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_seal.c static void seal_shard_name(uint64_t shard, char *out, size_t cap)
-seal_shard_sync  function    502 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_seal.c static int seal_shard_sync(invfs_volume *v, uint64_t owner, uint64_t shard,
+seal_shard_sync  function    541 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_seal.c static int seal_shard_sync(invfs_volume *v, uint64_t owner, uint64_t shard,
 seal_stripe_dirty function     41 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_seal.c static int seal_stripe_dirty(const invfs_volume *v, uint64_t stripe,
 seal_stripe_xor  function    260 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_seal.c static int seal_stripe_xor(invfs_volume *v, const seal_view *sv,
 seal_syndrome    function    291 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_seal.c static int seal_syndrome(invfs_volume *v, const seal_view *sv,
 seal_view_free   function    152 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_seal.c void seal_view_free(seal_view *sv)
 seal_view_load   function    169 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_seal.c int seal_view_load(invfs_volume *v, seal_view *sv)
 seal_xor_block   function    247 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_seal.c static void seal_xor_block(uint8_t *acc, const uint8_t *blk)
-vol_redun_config function    556 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_seal.c void vol_redun_config(invfs_volume *v, uint32_t k1, int l2_algo, uint32_t m2)
-vol_redun_state  function    589 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_seal.c int vol_redun_state(const invfs_volume *v, uint32_t *k1, int *l2_algo,
-vol_seal         function   1035 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_seal.c int vol_seal(invfs_volume *v, int unseal, invfs_seal_report *rep)
-vol_seal2_verify_leg function    957 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_seal.c static int vol_seal2_verify_leg(invfs_volume *v, const seal_view *sv,
-vol_seal_l2      function    688 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_seal.c static int vol_seal_l2(invfs_volume *v, seal_view *sv, invfs_seal_report *rep)
-vol_seal_verify  function   1354 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_seal.c int vol_seal_verify(invfs_volume *v, invfs_seal_verify *out)
+vol_redun_config function    598 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_seal.c void vol_redun_config(invfs_volume *v, uint32_t k1, int l2_algo, uint32_t m2)
+vol_redun_state  function    631 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_seal.c int vol_redun_state(const invfs_volume *v, uint32_t *k1, int *l2_algo,
+vol_seal         function   1078 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_seal.c int vol_seal(invfs_volume *v, int unseal, invfs_seal_report *rep)
+vol_seal2_verify_leg function   1000 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_seal.c static int vol_seal2_verify_leg(invfs_volume *v, const seal_view *sv,
+vol_seal_l2      function    731 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_seal.c static int vol_seal_l2(invfs_volume *v, seal_view *sv, invfs_seal_report *rep)
+vol_seal_verify  function   1397 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_seal.c int vol_seal_verify(invfs_volume *v, invfs_seal_verify *out)

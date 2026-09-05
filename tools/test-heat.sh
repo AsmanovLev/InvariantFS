@@ -37,9 +37,10 @@ rm -f "$IMG" "$IMG2" "$IMG3"
 
 cls() { $B/meta_probe "$1" --heat "$2" | grep "^class="; }
 ast0() { $B/meta_probe "$1" --heat "$2" | grep "^ast i=0"; }
-heat_max() { # max of a heat field (rheat|wheat) over a file's entries
-    $B/meta_probe "$1" --heat "$2" | grep "^entry " |
-      sed "s/.*$3=//" | awk '{if($1>m)m=$1} END{print m+0}';
+heat_max() { # the file's heat field (rheat|wheat); WP27: heat is per-file
+    $B/meta_probe "$1" --heat "$2" | awk -v f="$3" \
+        '/^heat /{for(i=1;i<=NF;i++) if ($i ~ "^" f "=") {sub(".*=","",$i); print $i; found=1}}
+         END{if(!found) print 0}';
 }
 
 echo "== leg 1: generate tree =="
@@ -79,16 +80,17 @@ done
 echo "all 30 texts batched (class=7 algo=2)"
 
 echo "== leg 1: read hot subset (t00-t02 x20, t03 x4) =="
-# WP-L2Q: a read touch is RAM-only in the session (no per-read journal
-# refresh); heat persists at sweep granularity, folded into the compaction
-# image. The pump stands in for "a sweep-cadence session observed the
-# reads": one full read per process (the real read path, one touch per
-# segment via heat_seen), then a forced compaction carries the pads.
+# WP27: a read touch is RAM-only in the session (no per-read journal
+# traffic, and no journal pad to carry it any more); heat persists via
+# the record's TLV when the pump calls vol_heat_persist before closing.
+# The pump stands in for "a sweep-cadence session observed the reads":
+# one full read per process (the real read path, one touch per segment),
+# then the persist folds the accrual into the record.
 for i in $(seq 20); do
-    INVFS_JRN_FORCE_COMPACT=1 $B/invf-l2ptest pump "$IMG" t00.txt t01.txt t02.txt
+    $B/invf-l2ptest pump "$IMG" t00.txt t01.txt t02.txt
 done
 for i in $(seq 4); do
-    INVFS_JRN_FORCE_COMPACT=1 $B/invf-l2ptest pump "$IMG" t03.txt
+    $B/invf-l2ptest pump "$IMG" t03.txt
 done
 # heat persisted across the 24 unmount/remount cycles above (each pump is
 # a full open+read+compact+close), and a probe run does not itself accrue

@@ -613,21 +613,8 @@ static int l2p_replay_legacy(invfs_volume *v)
 }
 
 
-/* WP19: seed the hot summaries from the replayed table, so a sweep right
- * after a mount sees crossings that happened before it. The shared tail
- * of l2p_replay and ckp_stage_replay (WP24-lite). */
-void l2p_seed_heat(invfs_volume *v)
-{
-    size_t i;
-    v->heat_any_rhot = 0;
-    v->heat_any_whot = 0;
-    for (i = 0; i < v->l2p_count; i++) {
-        const invfs_l2p_entry *e = &v->l2p[i];
-        if (e->type != INVFS_JRN_MAP) continue;
-        if (l2p_rheat(e) >= INVFS_HEAT_HOT) v->heat_any_rhot = 1;
-        if (e->pad[2] >= INVFS_WHEAT_HOT) v->heat_any_whot = 1;
-    }
-}
+/* WP27: the journal no longer carries heat (it moved into the records'
+ * INO2 ext), so replay has no summaries to reseed. */
 
 
 /* Replay the L2P journal from disk into the in-memory table and reseed the
@@ -643,8 +630,6 @@ int l2p_replay(invfs_volume *v)
 
     v->l2p_count = 0;
     v->jops_n = 0;
-    v->j_heat_n = 0;
-    v->j_heat_all = 0;
     l2p_idx_reset(v);   /* WP-L2Q: the replay below re-seeds the index */
     ok[0] = jrn_read_hdr(v, 0, &h[0]) == 0;
     ok[1] = jrn_read_hdr(v, 1, &h[1]) == 0;
@@ -682,39 +667,39 @@ int l2p_replay(invfs_volume *v)
              * slotted volume whose slots both died) just walks zero
              * entries past the slot-0 header and lands in the loud
              * both-torn branch below. */
-            v->l2p_count = 0;
-            l2p_idx_reset(v);
-            v->j_slotted = 0;
-            if (l2p_replay_legacy(v) != 0) return -1;
-            if (v->sb.pad2 == INVFS_JSEL_LEGACY || v->l2p_count > 0) {
-                fprintf(stderr, "l2p_replay: no intact slot; recovered "
-                        "%llu entr%s from the pre-migration flat log\n",
-                        (unsigned long long)v->l2p_count,
-                        v->l2p_count == 1 ? "y" : "ies");
-                goto seeded;
-            }
-            /* both slots torn: no trustworthy mapping anywhere. Loud,
-             * empty, and the next flush recompacts a clean slot; the
-             * consistent cut will hide what the maps no longer cover. */
-            fprintf(stderr, "l2p_replay: BOTH journal slots torn; "
-                    "starting with an empty L2P (run invf-fsck -f)\n");
-            v->l2p_count = 0;
-            v->j_slotted = 1;
-            v->j_slot = 0;
-            v->j_seq = h[0].seq > h[1].seq ? h[0].seq : h[1].seq;
-            v->journal_pos = jrn_slot_base(v, 0) + INVFS_BLOCK_SIZE;
-            v->j_last_crc = 0;
-            v->j_compact = 1;
-            v->scan_anomalies++;
+        v->l2p_count = 0;
+        l2p_idx_reset(v);
+        v->j_slotted = 0;
+        if (l2p_replay_legacy(v) != 0) return -1;
+        if (v->sb.pad2 == INVFS_JSEL_LEGACY || v->l2p_count > 0) {
+            fprintf(stderr, "l2p_replay: no intact slot; recovered "
+                    "%llu entr%s from the pre-migration flat log\n",
+                    (unsigned long long)v->l2p_count,
+                    v->l2p_count == 1 ? "y" : "ies");
             return 0;
         }
-        if (rc != 0) return -1;
+        /* both slots torn: no trustworthy mapping anywhere. Loud,
+         * empty, and the next flush recompacts a clean slot. WP27: the
+         * owner WAL is redundant with the owner records' AST pbas, so
+         * this loses the WAL (seal stripe maps, batch GC maps) only;
+         * fsck -f rebuilds it from the owner records. */
+        fprintf(stderr, "l2p_replay: BOTH journal slots torn; "
+                "starting with an empty WAL (run invf-fsck -f)\n");
+        v->l2p_count = 0;
+        v->j_slotted = 1;
+        v->j_slot = 0;
+        v->j_seq = h[0].seq > h[1].seq ? h[0].seq : h[1].seq;
+        v->journal_pos = jrn_slot_base(v, 0) + INVFS_BLOCK_SIZE;
+        v->j_last_crc = 0;
+        v->j_compact = 1;
+        v->scan_anomalies++;
+        return 0;
+    }
+    if (rc != 0) return -1;
     } else {
         v->j_slotted = 0;
         if (l2p_replay_legacy(v) != 0) return -1;
     }
-seeded:
-    l2p_seed_heat(v);
     return 0;
 }
 
@@ -1149,6 +1134,12 @@ static int wp25_open_degraded(invfs_volume *v)
         invfs_crc32c(&v->sb, offsetof(invfs_superblock, checksum)) !=
             v->sb.checksum)
         goto bad;
+    if (!(v->sb.vol_flags & VOLF_ASTV2)) {
+        fprintf(stderr, "vol_open: %s: format v1 volume (no VOLF_ASTV2): "
+                "this build reads format v2 only. Convert it offline "
+                "first: invf-migrate-v2 <dev0>\n", d1);
+        goto bad;
+    }
     memcpy(&d2, blk + INVFS_DEVT_OFF, sizeof d2);
     if (memcmp(d2.magic, "DEVT", 4) != 0 || devt_crc(&d2) != d2.crc32c ||
         !devt_sane(&d2, &v->sb)) {
@@ -1250,6 +1241,23 @@ static invfs_volume *vol_open_inner(const char *path, int at_ckpt,
     if (memcmp(v->sb.magic, INVFS_MAGIC, 8) != 0) { *err = -4; goto fail; }
     if (invfs_crc32c(&v->sb, offsetof(invfs_superblock, checksum)) != v->sb.checksum)
         { *err = -5; goto fail; }
+
+    /* WP27: format v2 reads v2 only. A volume without VOLF_ASTV2 is format
+     * v1: its records' AST entries are 24B and carry no physical addresses
+     * (they live in the v1 L2P journal). There are deliberately NO dual
+     * readers -- convert the volume offline instead. */
+    if (!(v->sb.vol_flags & VOLF_ASTV2)) {
+        fprintf(stderr,
+                "vol_open: %s: format v1 volume (no VOLF_ASTV2): this build "
+                "reads format v2 (INVFS_VERSION=%u) only.\n"
+                "  Convert it offline first:  invf-migrate-v2 %s\n"
+                "  (invf-migrate-v2 rewrites the records with resolved "
+                "addresses, in place, crash-safe; run it on an unmounted, "
+                "cleanly-closed volume)\n",
+                real, INVFS_VERSION, real);
+        *err = -12;
+        goto fail;
+    }
 
     /* WP25: the DEVT device table at 0x2A0 (block 0 reserved area, the
      * RDP0 convention: absent = zeros = single-device). When it names two
@@ -1459,11 +1467,11 @@ static invfs_volume *vol_open_inner(const char *path, int at_ckpt,
     v->inode_area_end = (v->sb.metadata_zone_start + v->sb.metadata_zone_blocks)
                         * INVFS_BLOCK_SIZE;
 
-    /* replay L2P journal BEFORE the inode scan: the scan validates every
-     * record's segments against the replayed maps (the consistent cut).
-     * WP24-lite: a time-travel open replays the checkpoint's STAGED prefix
-     * instead (read-only, from memory -- the live post-sweep slots are
-     * never consulted), which is exactly the checkpoint cut. */
+    /* replay the owner-WAL journal BEFORE the inode scan. WP27: file
+     * records carry their own pbas and need no mapping; the WAL resolves
+     * only the owner-referenced shapes (batches / seal parity / retention
+     * ranges / device sidecars). WP24-lite: a time-travel open replays the
+     * checkpoint's STAGED prefix instead (read-only, from memory). */
     if (at_ckpt) {
         int rrc = ckp_stage_replay(v);
         if (rrc != 0) {
@@ -1486,11 +1494,9 @@ static invfs_volume *vol_open_inner(const char *path, int at_ckpt,
                                           : v->inode_area_end;
         uint64_t found = 0;
         scan_set ss = { NULL, 0, 0 };
-        mapset ms;
         size_t si;
 
         if (idx_init(v) != 0) { *err = -6; goto fail; }
-        if (mapset_build(v, &ms) != 0) { *err = -6; goto fail; }
         while (p + sizeof(invfs_inode_rec) <= scan_end) {
             invfs_inode_rec rec_h;
             uint8_t *rb = NULL;
@@ -1539,12 +1545,11 @@ static invfs_volume *vol_open_inner(const char *path, int at_ckpt,
                CRC-verified here, so the set inherits the exact same
                skip-the-corrupt-record semantics for free. A separate pass
                would stop at the first bad record and hide every name after
-               it. WP22d: an INOD whose segments lack mappings (a drop
-               window ate them) is BROKEN -- recorded as a version but never
-               live; the name falls back to its newest fully-mapped version.
-               A DELT still applies (position-kill), except the kill of a
-               broken replacement's predecessor is skipped (torn retire:
-               keep the fallback). */
+               it. WP27: an INOD whose entries carry an invalid pba is
+               BROKEN -- recorded as a version but never live; the name
+               falls back to its newest valid version. A DELT still applies
+               (position-kill), except the kill of a broken replacement's
+               predecessor is skipped (torn retire: keep the fallback). */
             {
                 size_t nl = rec_h.name_len < sizeof(rec_h.name)
                           ? rec_h.name_len : sizeof(rec_h.name) - 1;
@@ -1555,13 +1560,13 @@ static invfs_volume *vol_open_inner(const char *path, int at_ckpt,
                      * loud log happens at fold time for the names that
                      * actually lose content (a properly retired old
                      * version is broken too -- and nothing was lost) */
-                    uint64_t miss = rec_l2p_miss(rb, rec_h.rec_len,
-                                                 rec_h.inode_id, &ms,
+                    uint64_t miss = rec_pba_miss(rb, rec_h.rec_len,
+                                                 v->sb.total_blocks,
                                                  moff, mlen, &mn);
                     if (scanset_inod(&ss, rec_h.name, nl, rec_h.inode_id, p,
                                      rec_h.file_size, rec_h.ctime,
                                      miss) != 0) {
-                        free(rb); scanset_free(&ss); mapset_free(&ms);
+                        free(rb); scanset_free(&ss);
                         *err = -6; goto fail;
                     }
                 } else {
@@ -1585,10 +1590,10 @@ static invfs_volume *vol_open_inner(const char *path, int at_ckpt,
                 const scan_ver *lv = scanset_live(e);
                 if (!lv) {
                     /* nvers == 0 is a properly deleted name -- silent.
-                     * Only a name whose every version lost its mappings
-                     * is a genuine cut. */
+                     * Only a name whose every version is broken is a
+                     * genuine cut. */
                     if (e->nvers) {
-                        fprintf(stderr, "vol_open: l2p cut: %s: no readable "
+                        fprintf(stderr, "vol_open: record cut: %s: no valid "
                                 "version remains; the file is hidden (run "
                                 "invf-fsck -f)\n", e->name);
                         v->open_cuts++;
@@ -1596,8 +1601,8 @@ static invfs_volume *vol_open_inner(const char *path, int at_ckpt,
                     continue;
                 }
                 if (e->vers[e->nvers - 1].broken) {
-                    fprintf(stderr, "vol_open: l2p cut: %s: fell back to "
-                            "record @%llu (newest version lost)\n",
+                    fprintf(stderr, "vol_open: record cut: %s: fell back to "
+                            "record @%llu (newest version invalid)\n",
                             e->name, (unsigned long long)lv->pos);
                     v->open_cuts++;
                 }
@@ -1607,7 +1612,6 @@ static invfs_volume *vol_open_inner(const char *path, int at_ckpt,
             }
         }
         scanset_free(&ss);
-        mapset_free(&ms);
         if (getenv("INVFS_DEBUG"))
             printf("[vol_open] scanned %llu inode recs, next_inode=%llu, area_pos=%llu, "
                    "index=%llu names/%llu dirs\n",
@@ -1635,19 +1639,16 @@ static invfs_volume *vol_open_inner(const char *path, int at_ckpt,
         v->sb.hard_min_blocks = (uint32_t)(v->sb.total_blocks / 1024 + 16);
     v->free_blocks = vol_count_free(v);
     alloc_state_reset(v);
-    /* WP22d: bitmap/journal divergence guard. The flush writes the dirty
-     * bitmap range and the journal append as separate pages under one
-     * barrier; a drop window can take the bitmap pages and spare the
-     * journal's, leaving the disk bitmap calling a MAPPED block free --
-     * and the next allocation hands it out from under its live file (the
-     * leg-5 soak's clobbered-segment case). The fsck -f rebuild does the
-     * full two-sided reconcile; at open we do the cheap one-sided
-     * direction: every journal-mapped block is forced USED in the runtime
-     * bitmap, never cleared. A false positive here is a leak fsck
-     * reclaims; a false negative would be corruption. Runs AFTER
-     * alloc_state_reset so the repaired range stays dirty for the first
-     * flush (the divergence converges on disk instead of being re-found
-     * at every open). */
+    /* WP22d/WP27: bitmap divergence guard. The bitmap is a CACHE of the
+     * records + the owner WAL (fsck rebuilds it wholesale); the flush
+     * writes the dirty bitmap range, the WAL append and the record appends
+     * as separate units under one barrier, so a drop window can tear them
+     * apart. The fsck -f rebuild does the full two-sided reconcile; at
+     * open we do the cheap one-sided direction: every WAL-mapped block is
+     * forced USED in the runtime bitmap, never cleared. A false positive
+     * is a leak fsck reclaims; a false negative would be corruption.
+     * Runs AFTER alloc_state_reset so the repaired range stays dirty for
+     * the first flush. */
     {
         size_t bi;
         uint64_t fixed = 0;
@@ -1671,6 +1672,81 @@ static invfs_volume *vol_open_inner(const char *path, int at_ckpt,
             fprintf(stderr, "vol_open: bitmap/journal divergence: %llu "
                     "mapped block%s were marked free; forced used\n",
                     (unsigned long long)fixed, fixed == 1 ? "" : "s");
+    }
+    /* WP27: and the record side of the same divergence: on a NOT-cleanly
+     * closed volume the on-disk bitmap may predate landed records (the
+     * record append is the commit point; the bitmap covering its pbas was
+     * flushed first, but a drop window can take bitmap pages and spare the
+     * record's). Reconcile one-sidedly: force every live record's segment
+     * extent USED. Extents derive from the segments' framed headers
+     * (seg_extent) -- one 8-byte read per segment, on the recovery path
+     * only (a clean close flushed a consistent bitmap and skips this). A
+     * segment whose header is unreadable is content-torn; its first block
+     * is pinned and the file's reads fail loudly at CRC, exactly like
+     * before -- fsck's content cut arbitrates. */
+    if (v->sb.state != INVFS_STATE_CLEAN && !at_ckpt && v->nbuck) {
+        uint64_t fixed = 0, pinned = 0;
+        size_t b;
+        for (b = 0; b <= v->nmask; b++) {
+            const name_index_entry *ne;
+            for (ne = v->nbuck[b]; ne; ne = ne->next) {
+                uint8_t *rec = NULL;
+                uint32_t rl = 0;
+                invfs_ast_hdr ah;
+                const invfs_ast_block_entry *ents;
+                size_t base = sizeof(invfs_inode_rec);
+                uint32_t i;
+                if (meta_read_record_by_id(v, ne->inode_id, &rec, &rl,
+                                           NULL, 0, NULL) != 0)
+                    continue;
+                if (rl < base + INVFS_AST_HDR_V1_LEN ||
+                    invfs_ast_hdr_parse(rec + base, rl - base, &ah) != 0 ||
+                    rl < base + ah.hdr_len +
+                         (size_t)ah.num_blocks * sizeof(*ents)) {
+                    free(rec);
+                    continue;
+                }
+                ents = (const invfs_ast_block_entry *)(rec + base +
+                                                       ah.hdr_len);
+                for (i = 0; i < ah.num_blocks; i++) {
+                    uint64_t pba = ents[i].pba, plen = 0, k, bend;
+                    if (!pba || pba >= v->sb.total_blocks) continue;
+                    /* "\x01reten*" registry entries carry BLOCKS in
+                     * length (never read as files); everyone else's
+                     * extent derives from the framed segment header */
+                    if (ne->nlen >= 6 && ne->name[0] == 0x01 &&
+                        memcmp(ne->name + 1, "reten", 5) == 0) {
+                        plen = ents[i].length;
+                    } else if (seg_extent(v, pba, NULL, &plen) != 0) {
+                        plen = 1;   /* torn header: pin the first block */
+                        pinned++;
+                    }
+                    if (!plen) continue;
+                    bend = pba + plen;
+                    if (bend > v->sb.total_blocks)
+                        bend = v->sb.total_blocks;
+                    for (k = pba; k < bend; k++) {
+                        if (!bit_get(v->bitmap, k)) {
+                            bit_set(v->bitmap, k);
+                            bm_dirty(v, k);
+                            v->free_blocks--;
+                            if (k >= v->sb.shadow_zone_start)
+                                v->shadow_free--;
+                            else if (k >= v->sb.raw_zone_start)
+                                v->raw_free--;
+                            fixed++;
+                        }
+                    }
+                }
+                free(rec);
+            }
+        }
+        if (fixed || pinned)
+            fprintf(stderr, "vol_open: bitmap/record divergence: %llu "
+                    "referenced block%s were marked free; forced used "
+                    "(%llu torn segment header%s pinned by first block)\n",
+                    (unsigned long long)fixed, fixed == 1 ? "" : "s",
+                    (unsigned long long)pinned, pinned == 1 ? "" : "s");
     }
     /* H5: a volume whose latch persisted in the superblock re-evaluates it
      * at open: space freed while it was offline (fsck reclaim, a resize,
@@ -1820,6 +1896,17 @@ static invfs_volume *vol_open_inner(const char *path, int at_ckpt,
      * pass, what happened while unmounted is unknowable). */
     if (v->rd_present && (v->rd.l1_algo || v->rd.l2_algo))
         seal_dirty_reset(v);
+    /* WP27: seed the heat summaries conservative-hot; the sweep's decay
+     * pass recomputes the truth from the records' TLVs. */
+    l2p_seed_heat(v);
+    /* WP27: build the pba reference map at open: the map must count the
+     * live set EXACTLY for the retire/dedupe free gates, and building it
+     * from the records the open scan just CRC-validated is free I/O.
+     * Building it lazily (the first retire) would lose records superseded
+     * between open and that first use, and a retire's -1 on a
+     * never-counted record would drive a live sharer's count to zero. */
+    if (!v->time_travel)
+        pba_ref_ensure(v);
     *err = 0;
     /* Unclean shutdown. Reading always works -- that is how you find out
      * what survived. For WRITES the old behavior was a hard latch: every
@@ -1871,7 +1958,8 @@ fail:
     io_close(&v->io);
     if (v->bitmap) free(v->bitmap);
     free(v->jops);
-    free(v->j_heat);
+    free(v->heat_tab);
+    free(v->pba_ref);
     free(v->l2p);
     free(v->l2p_idx);
     free(v->tier);
@@ -1904,6 +1992,11 @@ int vol_time_travel(const invfs_volume *v)
 void vol_close(invfs_volume *v)
 {
     if (!v) return;
+    /* WP27: read heat accrues per session in RAM and persists at the
+     * sweep's decay pass (or an explicit vol_heat_persist) -- never here:
+     * a close that appended record rewrites per read file would churn the
+     * inode area on every read-only mount, and under a live checkpoint
+     * (compaction barred) the churn can fill the area outright. */
     /* Close is the only place that can honestly write CLEAN, and it can only
        do so after the maps are down. There was no flush here at all: every
        tool that mutated the volume had to remember to call vol_flush itself,
@@ -1945,7 +2038,8 @@ void vol_close(invfs_volume *v)
     idx_clear(v);
     arc_destroy(v->arc);
     cpack_map_cache_reset(v);
-    free(v->heat_seen);
+    free(v->heat_tab);
+    free(v->pba_ref);
     free(v->seal_dirty);
     free(v->retmap);
     free(v->tz);
@@ -1954,7 +2048,6 @@ void vol_close(invfs_volume *v)
     free(v->l2p);
     free(v->l2p_idx);
     free(v->jops);
-    free(v->j_heat);
     free(v->tier);
     free(v->rawm);
     free(v->path2);
@@ -2051,51 +2144,6 @@ int jrn_push_op(invfs_volume *v, const invfs_l2p_entry *e)
     }
     v->jops[v->jops_n++] = *e;
     return 0;
-}
-
-
-/* Queue a heat-refresh for (inode,lba): at flush the pair's live entry is
- * re-appended with its current pad bytes. Once-per-session gating happens
- * upstream (heat_seen), so the pending set stays small; an overflow falls
- * back to a full compaction (the image carries every pad). */
-void jrn_heat_touch(invfs_volume *v, uint64_t inode, uint64_t lba)
-{
-    if (v->j_heat_all) return;
-    if (v->j_heat_n == 65536) {
-        v->j_heat_all = 1;
-        return;
-    }
-    if (v->j_heat_n == v->j_heat_cap) {
-        size_t ncap = v->j_heat_cap ? v->j_heat_cap * 2 : 256;
-        uint64_t (*nh)[2] =
-            (uint64_t (*)[2])realloc(v->j_heat, ncap * sizeof *nh);
-        if (!nh) { v->j_heat_all = 1; return; }
-        v->j_heat = nh;
-        v->j_heat_cap = ncap;
-    }
-    v->j_heat[v->j_heat_n][0] = inode;
-    v->j_heat[v->j_heat_n][1] = lba;
-    v->j_heat_n++;
-}
-
-
-/* A MAP's heat was set in the table right after its op was queued (the
- * create paths stamp the just-mapped entry): keep the queued op's pad in
- * sync so the journaled entry carries the heat -- the pad rides inside
- * the CRC region, so it must be right BEFORE the op's crc is computed at
- * flush time. Falls back to a refresh op when the tail jop is some other
- * key's (defensive; the create sites never interleave). */
-void jrn_pad_sync(invfs_volume *v, const invfs_l2p_entry *e)
-{
-    if (v->jops_n) {
-        invfs_l2p_entry *t = &v->jops[v->jops_n - 1];
-        if (t->type == INVFS_JRN_MAP && t->inode == e->inode &&
-            t->lba == e->lba && t->pba == e->pba) {
-            memcpy(t->pad, e->pad, sizeof t->pad);
-            return;
-        }
-    }
-    jrn_heat_touch(v, e->inode, e->lba);
 }
 
 
@@ -2211,14 +2259,12 @@ static int jrn_compact(invfs_volume *v)
     v->j_slot = target;
     v->j_seq = seq;
     v->jops_n = 0;         /* the image covers every pending op */
-    v->j_heat_n = 0;
-    v->j_heat_all = 0;
     v->j_compact = 0;
     return 0;
 }
 
 
-/* Append the pending ops + heat refreshes at the active slot's log end.
+/* Append the pending ops at the active slot's log end.
  * One write, chained from j_last_crc; a drop window can only punch a hole
  * that replay stops at -- durable prefixes are never rewritten. */
 static int jrn_append_pending(invfs_volume *v)
@@ -2228,39 +2274,14 @@ static int jrn_append_pending(invfs_volume *v)
     uint32_t prev;
     uint64_t jp;
 
-    if (!n && !v->j_heat_n) return 0;
-    buf = (invfs_l2p_entry *)malloc((n + v->j_heat_n) * sizeof *buf);
+    if (!n) return 0;
+    buf = (invfs_l2p_entry *)malloc(n * sizeof *buf);
     if (!buf) return -1;
     prev = v->j_last_crc;
     for (i = 0; i < n; i++) {
         buf[i] = v->jops[i];
         buf[i].crc = jrn_chain(prev, &buf[i]);
         prev = buf[i].crc;
-    }
-    for (i = 0; i < v->j_heat_n; i++) {
-        const invfs_l2p_entry *le = NULL;
-        invfs_l2p_entry *e = &buf[n];
-        /* refreshable heat pairs need their live entries: the WP-L2Q
-         * session index answers O(1); the fallback is the newest-wins
-         * scan it mirrors */
-        if (v->l2p_idx) {
-            le = l2p_idx_get(v, v->j_heat[i][0], v->j_heat[i][1]);
-        } else {
-            size_t j;
-            for (j = v->l2p_count; j-- > 0; ) {
-                const invfs_l2p_entry *t = &v->l2p[j];
-                if (t->type == INVFS_JRN_MAP &&
-                    t->inode == v->j_heat[i][0] && t->lba == v->j_heat[i][1]) {
-                    le = t;
-                    break;
-                }
-            }
-        }
-        if (!le) continue;   /* the key was unmapped since -- no refresh */
-        *e = *le;
-        e->crc = jrn_chain(prev, e);
-        prev = e->crc;
-        n++;
     }
     jp = v->journal_pos;
     if (io_seek(&v->io, jp) != 0 ||
@@ -2273,7 +2294,6 @@ static int jrn_append_pending(invfs_volume *v)
     v->journal_pos = jp + n * sizeof *buf;
     v->j_last_crc = prev;
     v->jops_n = 0;
-    v->j_heat_n = 0;
     return 0;
 }
 
@@ -2321,7 +2341,6 @@ static int jrn_append_legacy(invfs_volume *v)
     }
     v->journal_pos = jp;
     v->jops_n = 0;
-    v->j_heat_n = 0;   /* legacy-append drops heat refreshes (advisory) */
     return 0;
 }
 
@@ -2342,10 +2361,10 @@ static int jrn_flush(invfs_volume *v)
     if (!v->j_slotted)
         return jrn_compact(v) < 0 ? -1 :
                (v->j_slotted ? 0 : jrn_append_legacy(v));
-    need = (uint64_t)(v->jops_n + v->j_heat_n) * sizeof(invfs_l2p_entry);
+    need = (uint64_t)v->jops_n * sizeof(invfs_l2p_entry);
     slot_end = jrn_slot_base(v, v->j_slot) +
                (uint64_t)INVFS_JRN_SLOT_BLOCKS * INVFS_BLOCK_SIZE;
-    if (v->j_compact || v->j_heat_all || force ||
+    if (v->j_compact || force ||
         v->journal_pos + need > slot_end)
         return jrn_compact(v) == 0 ? 0 : -1;
     return jrn_append_pending(v);
@@ -2631,9 +2650,9 @@ uint64_t vol_write_raw(invfs_volume *v, const uint8_t *data, size_t len)
 }
 
 
-/* (inode,lba) key mixer: shared by the WP22d consistent-cut mapset and
- * the WP-L2Q session index (identical hash -> identical bucket choice;
- * vol_heat.c keeps its own copy for the heat_seen set). */
+/* (inode,lba) key mixer: shared by the WP-L2Q session index and
+ * vol_heat.c's per-inode table (identical hash -> identical bucket
+ * choice). */
 static uint64_t mapset_hash(uint64_t inode, uint64_t lba)
 {
     uint64_t h = inode * 0x9E3779B97F4A7C15ull ^ lba;
@@ -2795,69 +2814,48 @@ void vol_l2p_remove(invfs_volume *v, uint64_t inode, uint64_t lba)
 
 
 /* ---- WP22d: consistent-cut machinery ------------------------------------
- * After replay + the inode scan, every live record must have all its AST
- * segments covered by the replayed maps; a record that fails (a drop
- * window ate its mappings after they were acknowledged) is hidden: the
- * name falls back to its newest fully-mapped older version, or is absent.
- * "No live record references unmapped segments" is the engine invariant.
+ * WP27: file records carry their segments' pbas, so "the record is the
+ * map": a live record can never name an unmapped segment any more. The
+ * cut's per-version "broken" test degrades to an entry-pba sanity check
+ * (rec_pba_miss); drop-torn DATA is content-level (segment CRC at read
+ * time; fsck's INVFS_FSCK_CONTENT pass) exactly as it always was.
  */
 
-int mapset_build(const invfs_volume *v, mapset *ms)
+/* Count a record's AST entries whose pba is invalid (0, or past the volume
+ * end); the first few lost ranges are collected for the loud log
+ * (miss_off/miss_len, up to *miss_n... in: capacity is 4, out: stored
+ * count). An entry with length 0 never references data. */
+uint64_t rec_pba_miss(const uint8_t *rec, uint32_t rec_len,
+                      uint64_t total_blocks, uint64_t *miss_off,
+                      uint64_t *miss_len, unsigned *miss_n)
 {
-    size_t cap = 256, i;
-    ms->tab = NULL;
-    while (cap < v->l2p_count * 2) cap *= 2;
-    ms->tab = (mapset_ent *)calloc(cap, sizeof *ms->tab);
-    if (!ms->tab) return -1;
-    ms->mask = cap - 1;
-    for (i = 0; i < v->l2p_count; i++) {
-        const invfs_l2p_entry *e = &v->l2p[i];
-        size_t k;
-        if (e->type != INVFS_JRN_MAP) continue;
-        k = (size_t)mapset_hash(e->inode, e->lba) & ms->mask;
-        while (ms->tab[k].inode) {
-            if (ms->tab[k].inode == e->inode && ms->tab[k].lba == e->lba)
-                break;
-            k = (k + 1) & ms->mask;
+    invfs_ast_hdr ah;
+    size_t off;
+    uint32_t i;
+    uint64_t miss = 0;
+
+    *miss_n = 0;
+    off = sizeof(invfs_inode_rec);
+    if (off + INVFS_AST_HDR_V1_LEN > rec_len ||
+        invfs_ast_hdr_parse(rec + off, rec_len - off, &ah) != 0)
+        return 1;   /* unparseable header: treat as broken */
+    off += ah.hdr_len;
+    for (i = 0; i < ah.num_blocks; i++) {
+        invfs_ast_block_entry e;
+        if (off + sizeof(e) > rec_len) { miss++; break; }
+        memcpy(&e, rec + off, sizeof(e));
+        off += sizeof(e);
+        if (e.length == 0) continue;
+        if (e.pba == 0 || e.pba >= total_blocks) {
+            if (*miss_n < 4) {
+                miss_off[*miss_n] = e.file_offset;
+                miss_len[*miss_n] = e.length;
+                (*miss_n)++;
+            }
+            miss++;
         }
-        ms->tab[k].inode = e->inode;
-        ms->tab[k].lba = e->lba;
-        ms->tab[k].e = e;   /* later duplicates overwrite: newest wins */
     }
-    return 0;
-}
-
-int mapset_has(const mapset *ms, uint64_t inode, uint64_t lba)
-{
-    size_t k;
-    if (!ms || !ms->tab) return 0;
-    k = (size_t)mapset_hash(inode, lba) & ms->mask;
-    while (ms->tab[k].inode) {
-        if (ms->tab[k].inode == inode && ms->tab[k].lba == lba) return 1;
-        k = (k + 1) & ms->mask;
-    }
-    return 0;
-}
-
-const invfs_l2p_entry *mapset_get(const mapset *ms, uint64_t inode,
-                                  uint64_t lba)
-{
-    size_t k;
-    if (!ms || !ms->tab) return NULL;
-    k = (size_t)mapset_hash(inode, lba) & ms->mask;
-    while (ms->tab[k].inode) {
-        if (ms->tab[k].inode == inode && ms->tab[k].lba == lba)
-            return ms->tab[k].e;
-        k = (k + 1) & ms->mask;
-    }
-    return NULL;
-}
-
-void mapset_free(mapset *ms)
-{
-    if (!ms) return;
-    free(ms->tab);
-    ms->tab = NULL;
+    return miss;
 }
 
 
@@ -3024,42 +3022,6 @@ const invfs_l2p_entry *l2p_idx_get(invfs_volume *v, uint64_t inode,
         k = (k + 1) & mask;
     }
     return NULL;
-}
-
-
-/* Count a record's AST segments with no mapping in ms; the first few lost
- * ranges are collected for the loud log (miss_off/miss_len, up to
- * *miss_n... in: capacity is 4, out: stored count). */
-uint64_t rec_l2p_miss(const uint8_t *rec, uint32_t rec_len, uint64_t inode_id,
-                      const mapset *ms, uint64_t *miss_off, uint64_t *miss_len,
-                      unsigned *miss_n)
-{
-    invfs_ast_hdr ah;
-    size_t off;
-    uint32_t i;
-    uint64_t miss = 0;
-
-    *miss_n = 0;
-    off = sizeof(invfs_inode_rec);
-    if (off + INVFS_AST_HDR_V1_LEN > rec_len ||
-        invfs_ast_hdr_parse(rec + off, rec_len - off, &ah) != 0)
-        return 1;   /* unparseable header: treat as unmapped (broken) */
-    off += ah.hdr_len;
-    for (i = 0; i < ah.num_blocks; i++) {
-        invfs_ast_block_entry e;
-        if (off + sizeof(e) > rec_len) { miss++; break; }
-        memcpy(&e, rec + off, sizeof(e));
-        off += sizeof(e);
-        if (!mapset_has(ms, inode_id, e.block_id)) {
-            if (*miss_n < 4) {
-                miss_off[*miss_n] = e.file_offset;
-                miss_len[*miss_n] = e.length;
-                (*miss_n)++;
-            }
-            miss++;
-        }
-    }
-    return miss;
 }
 
 
@@ -3299,6 +3261,194 @@ int write_segment_blocks(invfs_volume *v, uint64_t pba, uint8_t *buf,
     }
     /* WP20b: overwriting occupied shadow blocks dirties their stripes */
     seal_dirty_mark(v, pba, phys_blocks);
+    return 0;
+}
+
+
+/* ---- WP27: segment extents --------------------------------------------
+ * The 32-byte AST entry carries the pba but no physical block count (the
+ * wire format has no room); a framed segment's extent derives from its own
+ * 8-byte header: [4B csize LE][4B crc32c] at pba, plen = ceil((csize+8)/
+ * 4096). csize == 0 never names a written segment (an empty file has no
+ * entries; blob creators refuse empty blobs), so it reads as "unknown". */
+int seg_extent(invfs_volume *v, uint64_t pba, uint32_t *csize_out,
+               uint64_t *plen_out)
+{
+    uint8_t hdr[8];
+    uint32_t csize;
+    uint64_t plen;
+    if (!pba || pba >= v->sb.total_blocks) return -1;
+    if (io_seek(&v->io, pba * (uint64_t)INVFS_BLOCK_SIZE) != 0 ||
+        io_read(&v->io, hdr, 8) != 0)
+        return -1;
+    memcpy(&csize, hdr, 4);
+    if (!csize) return -1;
+    plen = ((uint64_t)csize + 8 + INVFS_BLOCK_SIZE - 1) / INVFS_BLOCK_SIZE;
+    if (plen > v->sb.total_blocks - pba) return -1;
+    if (csize_out) *csize_out = csize;
+    if (plen_out) *plen_out = plen;
+    return 0;
+}
+
+
+/* The destructive-free gate: derive the extent AND prove the whole derived
+ * run is still marked allocated in the in-memory bitmap (a segment's
+ * blocks are one contiguous exclusively-owned run). A torn header almost
+ * certainly fails one of the two checks; the failure mode is a leak
+ * (fsck reclaims), never an over-free. */
+int seg_extent_checked(invfs_volume *v, uint64_t pba, uint64_t *plen_out)
+{
+    uint64_t plen = 0, b;
+    if (seg_extent(v, pba, NULL, &plen) != 0)
+        return -1;
+    for (b = pba; b < pba + plen; b++)
+        if (!bit_get(v->bitmap, b))
+            return -1;
+    *plen_out = plen;
+    return 0;
+}
+
+
+/* ---- WP27: pba reference map (PB7 without the L2P) --------------------
+ * Counts, per segment pba, how many LIVE records' AST entries name it
+ * (dedupe shares, WP4b session aliases, hardlink twin records). Only
+ * non-owner records' non-TEXT entries count: owner records ("\x01...")
+ * free through the owner WAL, and TEXT member entries name owner-owned
+ * batch blocks the member's retire must never free (the WP10 §7 gate). */
+static uint64_t pba_ref_hash(uint64_t pba)
+{
+    pba ^= pba >> 30; pba *= 0xbf58476d1ce4e5b9ULL;
+    pba ^= pba >> 27; pba *= 0x94d049bb133111ebULL;
+    return pba ^ (pba >> 31);
+}
+
+static void pba_ref_free(invfs_volume *v)
+{
+    free(v->pba_ref);
+    v->pba_ref = NULL;
+    v->pba_ref_mask = 0;
+    v->pba_ref_on = 0;
+}
+
+/* drop the map (a path that rewrote records without the apply hooks --
+ * the in-place sweep fallback, the fsck rebuild); the next retire/dedupe
+ * rebuilds it lazily from the live set */
+void pba_ref_reset(invfs_volume *v)
+{
+    pba_ref_free(v);
+}
+
+/* grow to 2x and rehash; failure drops the whole map (the callers' free
+ * decisions then run WITHOUT sharing knowledge -- the pre-PB7 leak
+ * direction, never corruption: a refcount can only be lost, and a count
+ * that reads 0 for a shared pba would over-free, so the map DEGRADES TO
+ * "never free" instead: pba_ref_count returns 2 on a missing map). */
+static int pba_ref_grow(invfs_volume *v)
+{
+    size_t ncap = (v->pba_ref_mask + 1) * 2, i;
+    pba_ref_ent *nt = (pba_ref_ent *)calloc(ncap, sizeof *nt);
+    if (!nt) { pba_ref_free(v); return -1; }
+    for (i = 0; i <= v->pba_ref_mask; i++) {
+        if (v->pba_ref[i].pba) {
+            size_t k = (size_t)pba_ref_hash(v->pba_ref[i].pba) & (ncap - 1);
+            while (nt[k].pba) k = (k + 1) & (ncap - 1);
+            nt[k] = v->pba_ref[i];
+        }
+    }
+    free(v->pba_ref);
+    v->pba_ref = nt;
+    v->pba_ref_mask = ncap - 1;
+    return 0;
+}
+
+/* delta = +1 (record appended) / -1 (record killed). Owner records and
+ * TEXT entries are skipped (see the section comment). Decrement floors at
+ * 0: a record absent from the build (dead before the map existed) must not
+ * drive counts negative. */
+void pba_ref_apply(invfs_volume *v, const uint8_t *rec, uint32_t rec_len,
+                   int delta)
+{
+    invfs_ast_hdr ah;
+    const invfs_inode_rec *rh;
+    size_t base = sizeof(invfs_inode_rec), off;
+    uint32_t i;
+    size_t ncount = 0;
+
+    if (!v->pba_ref_on || !v->pba_ref) return;
+    if (rec_len < base + INVFS_AST_HDR_V1_LEN) return;
+    rh = (const invfs_inode_rec *)rec;
+    if (rh->magic != INODE_REC_MAGIC) return;
+    if (rh->name_len && rh->name[0] == 0x01) return;   /* owner: WAL-owned */
+    if (invfs_ast_hdr_parse(rec + base, rec_len - base, &ah) != 0) return;
+    off = base + ah.hdr_len;
+    if ((size_t)ah.num_blocks * sizeof(invfs_ast_block_entry) >
+        rec_len - off)
+        return;
+    for (i = 0; i < ah.num_blocks; i++) {
+        const invfs_ast_block_entry *e = (const invfs_ast_block_entry *)
+            (rec + off + (size_t)i * sizeof(*e));
+        size_t k;
+        if (e->zone == INVFS_ZONE_TEXT || !e->pba) continue;
+        if (e->pba >= v->sb.total_blocks) continue;   /* invalid: never
+                                                         * counted */
+        if (v->pba_ref_n * 10 >= (v->pba_ref_mask + 1) * 7 &&
+            pba_ref_grow(v) != 0)
+            return;
+        k = (size_t)pba_ref_hash(e->pba) & v->pba_ref_mask;
+        while (v->pba_ref[k].pba && v->pba_ref[k].pba != e->pba)
+            k = (k + 1) & v->pba_ref_mask;
+        if (v->pba_ref[k].pba) {
+            if (delta > 0) v->pba_ref[k].n++;
+            else if (v->pba_ref[k].n) v->pba_ref[k].n--;
+        } else if (delta > 0) {
+            v->pba_ref[k].pba = e->pba;
+            v->pba_ref[k].n = 1;
+            v->pba_ref_n++;
+            ncount++;
+        }
+    }
+    (void)ncount;
+}
+
+uint32_t pba_ref_count(invfs_volume *v, uint64_t pba)
+{
+    size_t k;
+    if (!v->pba_ref_on || !v->pba_ref) return 2;   /* unknown: never free */
+    k = (size_t)pba_ref_hash(pba) & v->pba_ref_mask;
+    while (v->pba_ref[k].pba) {
+        if (v->pba_ref[k].pba == pba) return v->pba_ref[k].n;
+        k = (k + 1) & v->pba_ref_mask;
+    }
+    return 0;
+}
+
+/* Build the map from the live name-index set (one read per live record).
+ * Idempotent. Runs lazily on the first retire/dedupe of a session; the
+ * open path does not pay for it. */
+int pba_ref_ensure(invfs_volume *v)
+{
+    size_t b;
+    if (v->pba_ref_on) return 0;
+    v->pba_ref_mask = 1023;
+    v->pba_ref = (pba_ref_ent *)calloc(v->pba_ref_mask + 1,
+                                     sizeof *v->pba_ref);
+    if (!v->pba_ref) { v->pba_ref_mask = 0; return -1; }
+    v->pba_ref_n = 0;
+    v->pba_ref_on = 1;
+    for (b = 0; b <= v->nmask; b++) {
+        const name_index_entry *ne;
+        for (ne = v->nbuck[b]; ne; ne = ne->next) {
+            uint8_t *rec = NULL;
+            uint32_t rl = 0;
+            if (!ne->nlen || ne->name[ne->nlen - 1] == '/') continue;
+            if (!ne->nlen || ne->name[0] == 0x01) continue;   /* owners */
+            if (meta_read_record_by_id(v, ne->inode_id, &rec, &rl,
+                                       NULL, 0, NULL) != 0)
+                continue;
+            pba_ref_apply(v, rec, rl, +1);
+            free(rec);
+        }
+    }
     return 0;
 }
 

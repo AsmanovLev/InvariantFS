@@ -3,8 +3,8 @@ jxl_tool         function    154 /home/user/InvariantFS/src-extracted/VFS/src/co
 mz_tdefl_compress function    117 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_png.c int mz_tdefl_compress(const uint8_t *in, size_t in_len,
 png_inflate      function    131 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_png.c static int png_inflate(const unsigned char *in, size_t in_len,
 png_slurp        function     18 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_png.c static int png_slurp(const char *path, uint8_t **out, size_t *out_len)
-vol_create_ape_file function    795 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_png.c uint64_t vol_create_ape_file(invfs_volume *v, const char *name,
+vol_create_ape_file function    794 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_png.c uint64_t vol_create_ape_file(invfs_volume *v, const char *name,
 vol_create_blob_file function    625 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_png.c uint64_t vol_create_blob_file(invfs_volume *v, const char *name,
-vol_create_jxl_file function    787 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_png.c uint64_t vol_create_jxl_file(invfs_volume *v, const char *name,
-vol_create_pmp_file function    803 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_png.c uint64_t vol_create_pmp_file(invfs_volume *v, const char *name,
+vol_create_jxl_file function    786 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_png.c uint64_t vol_create_jxl_file(invfs_volume *v, const char *name,
+vol_create_pmp_file function    802 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_png.c uint64_t vol_create_pmp_file(invfs_volume *v, const char *name,
 vol_create_png_file function    167 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_png.c uint64_t vol_create_png_file(invfs_volume *v, const char *name,

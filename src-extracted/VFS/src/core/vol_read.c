@@ -128,16 +128,16 @@ int seg_read_checked(invfs_volume *v, uint64_t pba, uint64_t plen,
 
 
 /* WP10 §5 + WP14a: read a slice of a shared batch. A member AST entry
- * (zone=TEXT) names its batch by block_id: the member's L2P dup entry maps
- * it to the batch pba, and block_offset is the slice's offset in the
- * DECODED batch. The batch segment carries a [4B usize LE] sub-header in
- * front of the codec blob (PPMd: [2B props][stream]; binary: one zstd
- * frame), usize = decoded batch size, under the usual [4B csize]
- * [4B crc32c] framing. The decoded batch is cached in the ARC keyed by the
- * TAGGED pba (pba | TZ_ARC_TAG), not inode id: one batch is shared by many
- * member inodes, and the segment is freed only by GC (which invalidates the
- * tagged pba key first). Batches reach 4 MB, so this is heap-only -- never
- * the callers' stack segment buffer.
+ * (zone=TEXT) names its batch by block_id (= the owner's batch_seq, the
+ * WAL key) and carries the batch's pba directly (WP27); block_offset is
+ * the slice's offset in the DECODED batch. The batch segment carries a
+ * [4B usize LE] sub-header in front of the codec blob (PPMd: [2B props]
+ * [stream]; binary: one zstd frame), usize = decoded batch size, under
+ * the usual [4B csize][4B crc32c] framing. The decoded batch is cached in
+ * the ARC keyed by the TAGGED pba (pba | TZ_ARC_TAG), not inode id: one
+ * batch is shared by many member inodes, and the segment is freed only by
+ * GC (which invalidates the tagged pba key first). Batches reach 4 MB, so
+ * this is heap-only -- never the callers' stack segment buffer.
  *
  * WP14a BCJ: an algo==ZSTD_BCJ batch holds member slices that were each
  * x86-BCJ-prefiltered STANDALONE (pc=0, state=0) before concatenation. The
@@ -150,7 +150,7 @@ static int vol_read_text_slice(invfs_volume *v, uint64_t inode_id,
                                const invfs_ast_block_entry *e,
                                uint64_t slice_off, uint8_t *dst, size_t want)
 {
-    uint64_t pba = 0, plen = 0;
+    uint64_t pba = e->pba;
     const uint8_t *batch = NULL;
     uint8_t *fresh = NULL;
     size_t batch_len = 0;
@@ -159,21 +159,21 @@ static int vol_read_text_slice(invfs_volume *v, uint64_t inode_id,
     if (want == 0) return 0;
     if (slice_off + want > e->length)
         return -1;   /* window runs past the member's slice */
-    if (vol_lookup_entry(v, inode_id, e->block_id, &pba, &plen) != 0 ||
-        pba == 0) {
-        fprintf(stderr, "L2P miss: inode %llu text seg %u\n",
+    if (pba == 0 || pba >= v->sb.total_blocks) {
+        fprintf(stderr, "pba invalid: inode %llu text seg %u\n",
                 (unsigned long long)inode_id, e->block_id);
         return -1;
     }
-    heat_touch_read(v, inode_id, e->block_id);   /* WP19: member dup heat */
+    heat_touch_read(v, inode_id, e->block_id);   /* WP19: member heat */
     if (!arc_get(v->arc, pba | TZ_ARC_TAG, &batch, &batch_len)) {
         uint32_t csize, usize;
         uint8_t *blob;
 
         /* framed read, CRC-verified inside (payload holds at least
          * [4B usize][2B props]); on failure the WP20 seal parity gets one
-         * recovery attempt before the error propagates */
-        if (seg_read_checked(v, pba, plen, 4 + 2, &csize, &blob) != 0) {
+         * recovery attempt before the error propagates. WP27: plen is not
+         * stored in the entry -- 0 = derived from the segment header. */
+        if (seg_read_checked(v, pba, 0, 4 + 2, &csize, &blob) != 0) {
             fprintf(stderr, "segment CRC mismatch: text batch pba %llu\n",
                     (unsigned long long)pba);
             return -1;
@@ -317,7 +317,7 @@ int vol_read_inode(invfs_volume *v, uint64_t inode_id, unsigned depth,
 
             for (i = 0; i < ast_h.num_blocks; i++) {
                 const invfs_ast_block_entry *e = &ents[i];
-                uint64_t pba = 0, phys_len = 0;
+                uint64_t pba = 0;
                 uint32_t hdr;
                 uint8_t *blob;
                 size_t dst_off = (size_t)e->file_offset;
@@ -334,9 +334,11 @@ int vol_read_inode(invfs_volume *v, uint64_t inode_id, unsigned depth,
                     continue;
                 }
 
-                /* segment physical location via L2P */
-                if (vol_lookup_entry(v, inode_id, e->block_id, &pba, &phys_len) != 0) {
-                    fprintf(stderr, "L2P miss: inode %llu seg %u\n",
+                /* segment physical location: the entry's own pba (WP27);
+                 * plen derives from the segment header (0 = unknown) */
+                pba = e->pba;
+                if (pba == 0 || pba >= v->sb.total_blocks) {
+                    fprintf(stderr, "pba invalid: inode %llu seg %u\n",
                             (unsigned long long)inode_id, e->block_id);
                     free(data); free(rec); return -1;
                 }
@@ -344,7 +346,7 @@ int vol_read_inode(invfs_volume *v, uint64_t inode_id, unsigned depth,
                 /* framed segment [4B csize][4B crc32c][payload]: CRC-verified
                  * read; a shadow-zone failure gets one WP20 seal-parity
                  * recovery attempt inside before the error propagates */
-                if (seg_read_checked(v, pba, phys_len, 1, &hdr, &blob) != 0) {
+                if (seg_read_checked(v, pba, 0, 1, &hdr, &blob) != 0) {
                     fprintf(stderr, "segment CRC mismatch: inode %llu seg %u (corrupt)\n",
                             (unsigned long long)inode_id, e->block_id);
                     free(data); free(rec); return -1;
@@ -1190,7 +1192,7 @@ int vol_read_range(invfs_volume *v, uint64_t inode_id, uint64_t offset,
 
         /* decode whole segment */
         {
-            uint64_t pba = 0, plen = 0;
+            uint64_t pba;
             uint32_t hdr;
             uint8_t *blob;
             if (e->length > sizeof tmp) {
@@ -1198,14 +1200,17 @@ int vol_read_range(invfs_volume *v, uint64_t inode_id, uint64_t offset,
                 if (!segheap) { free(rec); return -1; }
                 segbuf = segheap;
             }
-            if (vol_lookup_entry(v, inode_id, e->block_id, &pba, &plen) != 0) {
+            /* WP27: the entry carries the pba; plen derives from the
+             * segment header (0 = unknown) */
+            pba = e->pba;
+            if (pba == 0 || pba >= v->sb.total_blocks) {
                 free(segheap); free(rec); return -1;
             }
             heat_touch_read(v, inode_id, e->block_id);   /* WP19 */
             /* framed segment read, CRC-verified inside; a shadow-zone
              * failure gets one WP20 seal-parity recovery attempt before
              * the error propagates */
-            if (seg_read_checked(v, pba, plen, 1, &hdr, &blob) != 0) {
+            if (seg_read_checked(v, pba, 0, 1, &hdr, &blob) != 0) {
                 fprintf(stderr, "segment CRC mismatch: inode %llu seg %u\n",
                         (unsigned long long)inode_id, e->block_id);
                 free(segheap); free(rec); return -1;

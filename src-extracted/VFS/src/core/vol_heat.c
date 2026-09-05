@@ -1,252 +1,503 @@
-/* vol_heat.c — WP19 heat counters + decay + promotion.
- * Split from volume.c. */
-
-#include "volume_internal.h"
-
-
-/* public decode helpers for tools (meta_probe) */
-uint16_t vol_heat_r(const invfs_l2p_entry *e) { return e ? l2p_rheat(e) : 0; }
-
-uint8_t  vol_heat_w(const invfs_l2p_entry *e) { return e ? e->pad[2] : 0; }
-
-
-/* ==================== WP19: heat counters ====================
+/* vol_heat.c — WP27 heat counters + decay + promotion.
  *
- * Heat lives in invfs_l2p_entry.pad (invarifs.h): pad[0..1] = u16 LE
- * read-heat, pad[2] = u8 write-heat. Keyed by (inode,lba), so it follows
- * the mapping across pba remaps (dedupe re-keys carry it over); new
- * entries (rewrites, transcodes, batch commits) start cold -- read-heat
- * RESETS on rewrite by design, write-heat is the one counter carried
- * across rewrites (old+1), because "rewritten often" is exactly the
- * history a rewrite destroys.
+ * Heat lives in the record's INO2 ext as the "invfs.heat" xattr TLV
+ * (invarifs.h): [u16 LE rheat][u8 wheat][u8 reserved]. It moved out of the
+ * L2P journal pads with format v2 -- the journal is the owner-scoped WAL
+ * now, and the read path never touches it.
  *
- * Increment rules:
- *  - read:  +1 the FIRST time a (inode,lba) is touched by a vol_read_*
- *           path within this process (the engine has no per-open hook a
- *           workstream-free file can reach -- fuse_fs.c owns the FUSE
- *           open callback -- so "open-session" = process lifetime here,
- *           tracked in v->heat_seen). Saturates at 0xFFFF.
- *  - write: entries born in vol_create_file get wheat=1; vol_replace_file
- *           carries max(old)+1 onto the replacement's entries. Saturates
- *           at 0xFF.
+ * Semantics (unchanged from WP19):
+ *  - read:  +1 the FIRST time an inode is touched by a vol_read_* path
+ *           within this process (open-session == process lifetime, tracked
+ *           in v->heat_tab). Saturates at 0xFFFF. Persistence: the accrual
+ *           is RAM-only; it folds into the record's TLV at vol_close and
+ *           at the sweep's decay pass. A crash loses pending touches --
+ *           heat is advisory.
+ *  - write: a fresh record is born wheat 0 (an absent TLV reads as
+ *           (0,0) -- "no heat history"); a rewrite carries max(old)+1
+ *           into the replacement record (vol_write_commit /
+ *           vol_replace_file). Saturates at 0xFF. (v1's pads were born
+ *           wheat 1; the carry is old+1 either way, so the observable
+ *           chain is identical, and absent-as-zero means the decay pass
+ *           never stamps a never-heated file -- zero churn on cold
+ *           volumes, which matters now that a stamp is a record append.)
  *
- * Decay (vol_heat_sweep_begin, once per sweep RUN): rheat >>= 1,
- * wheat -= 1 (floor 0). Hysteresis math: the promotion check runs AFTER
- * the decay, so a single read burst of H promotes only if H survives
- * exactly one halving (H >= 2*HOT); sustained reading of R files-per-
- * interval stabilises rheat at R (h' = (h+R)/2 -> R). HOT=8: one hot
+ * Decay (vol_heat_sweep_begin, once per sweep RUN): the session's accrued
+ * reads fold in, then rheat >>= 1, wheat -= 1 (floor 0), persisted into
+ * the records (a sweep rewrites records anyway). Hysteresis math: the
+ * promotion check runs AFTER the decay, so a single read burst of H
+ * promotes iff H survives exactly one halving (H >= 2*HOT); sustained
+ * reading of R touches-per-interval stabilises rheat at R. HOT=8: one hot
  * weekend (16+ opens) promotes once, casual 8..15-open bursts decay away.
  * Write-hot (wheat >= 2 post-decay = rewritten at least twice inside the
  * last interval) skips the heavy codec fan-out for one sweep.
- *
- * Persistence (WP-L2Q): the journal is append-only, and pure reads must
- * never write to it -- read touches update the pad in RAM only (no
- * refresh MAP per read, no dirty mark). Heat is sweep-consumed: the
- * sweep's decay pass sets j_heat_all, so the next flush COMPACTS and the
- * image carries every live pad (granularity = sweep run); any other
- * compaction (fsck rebuild, slot pressure) carries them too. Write-side
- * heat (the vol_replace_file wheat carry, dedupe remaps) still queues
- * refresh MAPs via jrn_heat_touch -- those flushes are paid for by the
- * write itself. An fsck -f REBUILD reconstructs mappings from records and
- * resets heat to cold (documented: the rebuild has no history to be
- * faithful to). A crash loses only the pending touches -- heat is
- * advisory. */
+ */
 
-static uint64_t heat_hash(uint64_t inode, uint64_t lba)
+#include "volume_internal.h"
+
+/* 64-bit mix (splitmix64 finalizer) for the per-inode tables */
+static uint64_t idx_mix_heat(uint64_t x)
 {
-    uint64_t h = inode * 0x9E3779B97F4A7C15ull ^ lba;
-    h ^= h >> 29; h *= 0xBF58476D1CE4E5B9ull; h ^= h >> 32;
-    return h;
+    x ^= x >> 30; x *= 0xbf58476d1ce4e5b9ULL;
+    x ^= x >> 27; x *= 0x94d049bb133111ebULL;
+    return x ^ (x >> 31);
 }
 
 
-/* add (inode,lba) to the session set; 1 = already counted. On allocation
- * failure it answers "already counted" -- a missed increment is a colder
- * file, never a wrong one. */
-static int heat_seen_add(invfs_volume *v, uint64_t inode, uint64_t lba)
+/* per-inode accrued read touches this session. heat_tab doubles as the
+ * once-per-session seen set: presence == counted. On allocation failure a
+ * touch is silently dropped -- a colder file, never a wrong one. */
+static int heat_tab_touch(invfs_volume *v, uint64_t inode)
 {
     size_t mask, i, j;
-    if (!v->heat_seen_cap) {
-        v->heat_seen = (uint64_t (*)[2])calloc(256, sizeof *v->heat_seen);
-        if (!v->heat_seen) return 1;
-        v->heat_seen_cap = 256;
-    } else if ((v->heat_seen_n + 1) * 10 >= v->heat_seen_cap * 7) {
-        size_t nc = v->heat_seen_cap * 2;
+    if (!v->heat_tab) {
+        v->heat_tab = (uint64_t (*)[2])calloc(256, sizeof *v->heat_tab);
+        if (!v->heat_tab) return 1;
+        v->heat_tab_mask = 255;
+    } else if ((v->heat_tab_n + 1) * 10 >= (v->heat_tab_mask + 1) * 7) {
+        size_t nc = (v->heat_tab_mask + 1) * 2;
         uint64_t (*ns)[2] = (uint64_t (*)[2])calloc(nc, sizeof *ns);
         if (!ns) return 1;
-        for (j = 0; j < v->heat_seen_cap; j++) {
-            if (v->heat_seen[j][0]) {
-                size_t k = (size_t)heat_hash(v->heat_seen[j][0],
-                                             v->heat_seen[j][1]) & (nc - 1);
+        for (j = 0; j <= v->heat_tab_mask; j++) {
+            if (v->heat_tab[j][0]) {
+                size_t k = (size_t)(idx_mix_heat(v->heat_tab[j][0])) & (nc - 1);
                 while (ns[k][0]) k = (k + 1) & (nc - 1);
-                ns[k][0] = v->heat_seen[j][0];
-                ns[k][1] = v->heat_seen[j][1];
+                ns[k][0] = v->heat_tab[j][0];
+                ns[k][1] = v->heat_tab[j][1];
             }
         }
-        free(v->heat_seen);
-        v->heat_seen = ns;
-        v->heat_seen_cap = nc;
+        free(v->heat_tab);
+        v->heat_tab = ns;
+        v->heat_tab_mask = nc - 1;
     }
-    mask = v->heat_seen_cap - 1;
-    i = (size_t)heat_hash(inode, lba) & mask;
-    while (v->heat_seen[i][0]) {
-        if (v->heat_seen[i][0] == inode && v->heat_seen[i][1] == lba)
-            return 1;
+    mask = v->heat_tab_mask;
+    i = (size_t)idx_mix_heat(inode) & mask;
+    while (v->heat_tab[i][0]) {
+        if (v->heat_tab[i][0] == inode)
+            return 1;   /* already counted this session */
         i = (i + 1) & mask;
     }
-    v->heat_seen[i][0] = inode;
-    v->heat_seen[i][1] = lba;
-    v->heat_seen_n++;
+    v->heat_tab[i][0] = inode;
+    v->heat_tab[i][1] = 1;
+    v->heat_tab_n++;
+    return 0;
+}
+
+/* accrued reads of `inode` this session (0 when none) */
+static uint16_t heat_tab_get(const invfs_volume *v, uint64_t inode)
+{
+    size_t i;
+    if (!v->heat_tab) return 0;
+    i = (size_t)idx_mix_heat(inode) & v->heat_tab_mask;
+    while (v->heat_tab[i][0]) {
+        if (v->heat_tab[i][0] == inode)
+            return v->heat_tab[i][1] > 0xFFFF ? 0xFFFF
+                                              : (uint16_t)v->heat_tab[i][1];
+        i = (i + 1) & v->heat_tab_mask;
+    }
+    return 0;
+}
+
+/* remove + return the session's accrued reads of `inode` (the write-commit
+ * carry transfers the old id's pending touches onto the replacement) */
+static uint16_t heat_tab_take(invfs_volume *v, uint64_t inode)
+{
+    size_t i;
+    uint16_t r;
+    if (!v->heat_tab) return 0;
+    i = (size_t)idx_mix_heat(inode) & v->heat_tab_mask;
+    while (v->heat_tab[i][0]) {
+        if (v->heat_tab[i][0] == inode) {
+            r = v->heat_tab[i][1] > 0xFFFF ? 0xFFFF
+                                           : (uint16_t)v->heat_tab[i][1];
+            v->heat_tab[i][0] = 0;
+            v->heat_tab[i][1] = 0;
+            v->heat_tab_n--;
+            /* no tombstone compaction: the map is rebuilt by the fold */
+            return r;
+        }
+        i = (i + 1) & v->heat_tab_mask;
+    }
     return 0;
 }
 
 
-/* find the live entry for (inode,lba): the WP-L2Q session index when it
- * is on, else the newest-wins scan it mirrors. */
-static invfs_l2p_entry *heat_find(invfs_volume *v, uint64_t inode,
-                                  uint64_t lba)
-{
-    size_t i;
-    if (v->l2p_idx)
-        return (invfs_l2p_entry *)l2p_idx_get(v, inode, lba);
-    for (i = v->l2p_count; i-- > 0; ) {
-        invfs_l2p_entry *e = &v->l2p[i];
-        if (e->type == INVFS_JRN_MAP && e->inode == inode && e->lba == lba)
-            return e;
-    }
-    return NULL;
-}
-
-
-/* +1 read-heat on the live mapping for (inode,lba), once per session.
- * Read-only sessions (READONLY flag / awaiting recovery) accrue nothing.
- * The newest-wins scan mirrors vol_lookup_entry; each first touch costs
- * one lookup, every later touch of the pair in this session is absorbed
- * by the session set.
- *
- * WP-L2Q: the increment is RAM-ONLY. Read touches no longer queue a
- * refresh-MAP journal op (the old per-read journal traffic on pure-read
- * workloads) and no longer dirty the volume. Heat is sweep-consumed: it
- * persists inside the compaction image the sweep's decay pass forces
- * (j_heat_all, carried pads) -- granularity = sweep run -- and a crash or
- * a pure-read close simply loses the pending touches (heat is advisory).
- * A pure-read session's vol_flush appends nothing: the journal stays
- * byte-identical (tools/test-l2p.sh leg "quiet"). */
+/* +1 accrued read on the inode, once per session. Read-only sessions
+ * accrue nothing. RAM-only: folds at close / sweep-decay time. */
 void heat_touch_read(invfs_volume *v, uint64_t inode, uint64_t lba)
 {
-    invfs_l2p_entry *e;
-    uint16_t r;
+    (void)lba;   /* WP27: per-file counters; the segment index is kept in
+                  * the signature for the call sites' shape */
     if (!vol_write_enabled(v)) return;
-    if (heat_seen_add(v, inode, lba)) return;
-    e = heat_find(v, inode, lba);
-    if (!e) return;
-    r = l2p_rheat(e);
-    if (r == 0xFFFFu) return;   /* saturated */
-    l2p_set_rheat(e, (uint16_t)(r + 1));
-    if ((uint32_t)r + 1 >= INVFS_HEAT_HOT) v->heat_any_rhot = 1;
+    if (!inode) return;
+    if (heat_tab_touch(v, inode)) return;   /* already counted */
+    /* conservative summary: the promotion walk gates on it */
+    v->heat_any_rhot = 1;
+}
+
+uint16_t heat_session_take(invfs_volume *v, uint64_t inode)
+{
+    return heat_tab_take(v, inode);
 }
 
 
-/* max write-heat over an inode's live mappings (0 = cold/none) */
+/* ---- the TLV ---- */
+
+/* parse the "invfs.heat" TLV out of a raw record buffer. Fills *r/*w
+ * (either may be NULL). 0 = found, -1 = absent/corrupt. */
+int heat_read_tlv(const uint8_t *rec, uint32_t rec_len,
+                  uint16_t *r, uint8_t *w)
+{
+    const uint8_t *ext, *p;
+    size_t elen = 0, rem;
+    size_t ast;
+    invfs_meta_ext_hdr h;
+    size_t base = sizeof(invfs_inode_rec);
+
+    if (r) *r = 0;
+    if (w) *w = 0;
+    ext = meta_locate_ext(rec, rec_len, &elen);
+    if (!ext) return -1;
+    if (elen < sizeof(h)) return -1;
+    memcpy(&h, ext, sizeof h);
+    if (h.magic != INVFS_META_MAGIC || h.ext_len > elen ||
+        (size_t)sizeof(h) + h.target_len > h.ext_len)
+        return -1;
+    p = ext + sizeof(h) + h.target_len;
+    rem = h.ext_len - sizeof(h) - h.target_len;
+    while (rem >= 4) {
+        uint16_t nl, vl;
+        memcpy(&nl, p, 2);
+        memcpy(&vl, p + 2 + nl, 2);
+        if ((size_t)2 + nl + 2 + vl > rem || nl == 0) break;
+        if (nl == strlen(INVFS_XATTR_HEAT) &&
+            memcmp(p + 2, INVFS_XATTR_HEAT, nl) == 0 && vl >= 3) {
+            if (r) *r = (uint16_t)(p[2 + nl + 2] |
+                                   ((uint16_t)p[2 + nl + 3] << 8));
+            if (w) *w = p[2 + nl + 4];
+            return 0;
+        }
+        p += 2 + nl + 2 + vl;
+        rem -= 2 + nl + 2 + vl;
+    }
+    return -1;
+}
+
+/* stored heat of an inode's live record (0/0 when the TLV is absent) */
+static int heat_get(invfs_volume *v, uint64_t inode, uint16_t *r, uint8_t *w)
+{
+    uint8_t *rec = NULL;
+    uint32_t rl = 0;
+    int rc;
+    if (meta_read_record_by_id(v, inode, &rec, &rl, NULL, 0, NULL) != 0)
+        return -1;
+    rc = heat_read_tlv(rec, rl, r, w);
+    free(rec);
+    return rc;
+}
+
+/* effective read heat: stored + this session's accrued, saturated */
+uint16_t heat_file_r(const invfs_volume *v, uint64_t inode)
+{
+    uint16_t r = 0;
+    uint32_t s;
+    invfs_volume *vv = (invfs_volume *)v;
+    if (heat_get(vv, inode, &r, NULL) != 0)
+        r = 0;
+    s = (uint32_t)r + heat_tab_get(v, inode);
+    return s > 0xFFFF ? 0xFFFF : (uint16_t)s;
+}
+
+/* write heat: the stored counter verbatim; an absent TLV reads as (0,0) --
+ * "no heat history". (v1's pads were born wheat=1; under v2 the rewrite
+ * carry is old+1, so born-0 keeps the observable chain identical: create
+ * -> 0, first rewrite -> 1, ... and the absent rule means the decay pass
+ * never has to stamp a never-heated file -- zero churn on cold volumes.) */
 uint8_t heat_file_maxw(invfs_volume *v, uint64_t inode)
 {
     uint8_t w = 0;
-    size_t i;
-    for (i = 0; i < v->l2p_count; i++) {
-        const invfs_l2p_entry *e = &v->l2p[i];
-        if (e->type == INVFS_JRN_MAP && e->inode == inode && e->pad[2] > w)
-            w = e->pad[2];
-    }
+    if (heat_get(v, inode, NULL, &w) != 0)
+        return 0;
     return w;
 }
 
-
-/* set write-heat on every live mapping of an inode (the rewrite carry) */
+/* persist a write-heat value on the file's live record (no-op when
+ * unchanged -- the stamp check-then-write rule) */
 void heat_file_setw(invfs_volume *v, uint64_t inode, uint8_t w)
 {
-    size_t i;
-    for (i = 0; i < v->l2p_count; i++) {
-        invfs_l2p_entry *e = &v->l2p[i];
-        if (e->type == INVFS_JRN_MAP && e->inode == inode) {
-            e->pad[2] = w;
-            jrn_heat_touch(v, e->inode, e->lba);
+    uint16_t r = 0;
+    uint8_t cur = 0;
+    int have = heat_get(v, inode, &r, &cur) == 0;
+    uint8_t val[4];
+    if (have && cur == w)
+        return;
+    val[0] = (uint8_t)r;
+    val[1] = (uint8_t)(r >> 8);
+    val[2] = w;
+    val[3] = 0;
+    if (vol_set_xattr(v, inode, INVFS_XATTR_HEAT, val, sizeof val) != 0 &&
+        getenv("INVFS_DEBUG"))
+        fprintf(stderr, "[heat] inode %llu: heat stamp failed\n",
+                (unsigned long long)inode);
+}
+
+/* persist read+write heat on the file's live record */
+static void heat_write(invfs_volume *v, uint64_t inode, uint16_t r, uint8_t w)
+{
+    uint8_t val[4];
+    val[0] = (uint8_t)r;
+    val[1] = (uint8_t)(r >> 8);
+    val[2] = w;
+    val[3] = 0;
+    if (vol_set_xattr(v, inode, INVFS_XATTR_HEAT, val, sizeof val) != 0 &&
+        getenv("INVFS_DEBUG"))
+        fprintf(stderr, "[heat] inode %llu: heat stamp failed\n",
+                (unsigned long long)inode);
+}
+
+
+/* Build the INO2 ext blob for a fresh/rewritten record: old ext carried
+ * verbatim with the heat TLV inserted/replaced. NULL old_ext fabricates a
+ * minimal defaults ext (the WP27 rule: there is always something to carry
+ * on a rewrite, and absent-ext + heat-init is the pre-warm create). The
+ * blob is malloc'd (NULL = allocation failure; callers keep the old ext --
+ * heat lost, never corrupt). */
+uint8_t *heat_ext_merge(const invfs_volume *v, const uint8_t *old_ext,
+                        uint32_t old_len, int is_dir, uint16_t rheat,
+                        uint8_t wheat, uint32_t *len_out)
+{
+    static const char HN[] = INVFS_XATTR_HEAT;
+    const size_t hn = sizeof(HN) - 1;
+    invfs_meta_ext_hdr h;
+    invfs_meta_pub pub;
+    const uint8_t *xattrs = NULL;
+    size_t xlen = 0;
+    uint8_t *out, *w;
+    size_t keep = 0, out_len, tlen;
+    const uint8_t *p;
+    size_t rem;
+
+    memset(&pub, 0, sizeof pub);
+    if (old_ext && old_len >= sizeof h) {
+        memcpy(&h, old_ext, sizeof h);
+        if (h.magic == INVFS_META_MAGIC && h.ext_len <= old_len &&
+            (size_t)sizeof h + h.target_len <= h.ext_len) {
+            pub.type = h.type;
+            pub.mode = h.mode;
+            pub.uid = h.uid;
+            pub.gid = h.gid;
+            pub.mtime = h.mtime;
+            pub.atime = h.atime;
+            pub.nlink = h.nlink;
+            pub.rdev = h.rdev;
+            if (h.target_len && h.target_len < sizeof pub.target)
+                memcpy(pub.target, old_ext + sizeof h, h.target_len);
+            xattrs = old_ext + sizeof h + h.target_len;
+            xlen = h.ext_len - sizeof h - h.target_len;
+        } else {
+            old_ext = NULL;   /* unreadable ext: rebuild from defaults */
         }
     }
-}
-
-
-/* grab/restamp one mapping's heat around an l2p_remove+vol_map remap
- * (dedupe): heat keys on (inode,lba), not on the physical slot, so a pba
- * remap must carry it over rather than rebirth the entry cold */
-void heat_grab(invfs_volume *v, uint64_t inode, uint64_t lba,
-                       uint16_t *r, uint8_t *w)
-{
-    const invfs_l2p_entry *e;
-    *r = 0; *w = 0;
-    e = heat_find(v, inode, lba);
-    if (e) {
-        *r = l2p_rheat(e);
-        *w = e->pad[2];
+    if (!old_ext) {
+        pub.type = is_dir ? INVFS_ITYP_DIR : INVFS_ITYP_REG;
+        pub.mode = is_dir ? 0755 : 0644;
+        pub.nlink = is_dir ? 2 : 1;
+        xattrs = NULL;
+        xlen = 0;
     }
-}
-
-void heat_stamp(invfs_volume *v, uint64_t inode, uint64_t lba,
-                        uint16_t r, uint8_t w)
-{
-    invfs_l2p_entry *e = heat_find(v, inode, lba);
-    if (e) {
-        l2p_set_rheat(e, r);
-        e->pad[2] = w;
-        /* a WRITE path (the remap's own MAP op flushes with it): the
-         * refresh rides the journal traffic the write already pays for */
-        jrn_heat_touch(v, inode, lba);
+    /* keep every TLV except the one being replaced */
+    p = xattrs;
+    rem = xlen;
+    while (rem >= 4) {
+        uint16_t nl, vl;
+        size_t tsz;
+        memcpy(&nl, p, 2);
+        memcpy(&vl, p + 2 + nl, 2);
+        tsz = (size_t)2 + nl + 2 + vl;
+        if (tsz > rem || nl == 0) break;
+        if (!(nl == hn && memcmp(p + 2, HN, hn) == 0))
+            keep += tsz;
+        p += tsz;
+        rem -= tsz;
     }
+    tlen = strlen(pub.target);
+    out_len = sizeof h + tlen + keep + (2 + hn + 2 + 4);
+    if (out_len > INVFS_META_SLACK) return NULL;
+    out = (uint8_t *)malloc(out_len);
+    if (!out) return NULL;
+    memset(&h, 0, sizeof h);
+    h.magic = INVFS_META_MAGIC;
+    h.version = 2;
+    h.ext_len = (uint16_t)out_len;
+    h.type = pub.type;
+    h.mode = pub.mode;
+    h.uid = pub.uid;
+    h.gid = pub.gid;
+    h.mtime = pub.mtime;
+    h.atime = pub.atime;
+    h.nlink = pub.nlink;
+    h.rdev = pub.rdev;
+    h.target_len = (uint16_t)tlen;
+    w = out;
+    memcpy(w, &h, sizeof h); w += sizeof h;
+    if (tlen) { memcpy(w, pub.target, tlen); w += tlen; }
+    /* re-copy the kept TLVs (they were counted above) */
+    p = xattrs;
+    rem = xlen;
+    while (rem >= 4) {
+        uint16_t nl, vl;
+        size_t tsz;
+        memcpy(&nl, p, 2);
+        memcpy(&vl, p + 2 + nl, 2);
+        tsz = (size_t)2 + nl + 2 + vl;
+        if (tsz > rem || nl == 0) break;
+        if (!(nl == hn && memcmp(p + 2, HN, hn) == 0)) {
+            memcpy(w, p, tsz);
+            w += tsz;
+        }
+        p += tsz;
+        rem -= tsz;
+    }
+    {
+        uint16_t nl16 = (uint16_t)hn, vl16 = 4;
+        memcpy(w, &nl16, 2); w += 2;
+        memcpy(w, HN, hn); w += hn;
+        memcpy(w, &vl16, 2); w += 2;
+        *w++ = (uint8_t)rheat;
+        *w++ = (uint8_t)(rheat >> 8);
+        *w++ = wheat;
+        *w++ = 0;
+    }
+    *len_out = (uint32_t)out_len;
+    (void)v;
+    return out;
 }
 
 
-/* ---- WP19: heat decay + promotion ------------------------------
- *
- * One decay pass per sweep RUN (vol_heat_sweep_begin at run start):
- * rheat >>= 1 (exponential), wheat saturating-down by 1. The promotion
- * check runs AFTER the decay, which is the hysteresis: a single read
- * burst of H promotes only when H >= 2*INVFS_HEAT_HOT (it survives
- * exactly one halving); sustained reading at rate R/interval stabilises
- * rheat near R, so genuinely hot files re-qualify every sweep. See the
- * WP19 block comment by the L2P helpers for the full rules. */
+/* v1 kept the WP19 hot summaries in the journal pads; v2 stores heat in
+ * the records, so an open starts conservative (1/1 = "maybe hot") and the
+ * sweep's decay pass recomputes the truth from the TLVs. */
+void l2p_seed_heat(invfs_volume *v)
+{
+    v->heat_any_rhot = 1;
+    v->heat_any_whot = 1;
+}
+
+
+/* Fold the session's accrued read touches into the records' TLVs.
+ * Best-effort per file: a record that died mid-session (rewritten) is
+ * skipped; heat is advisory, so a lost touch is a colder file, never a
+ * wrong one. The liveness test is the NAME index (idx_id_live): the id
+ * index is never pruned by design (vol_read_inode must still find
+ * tombstoned records), so it cannot tell a retired id from a live one --
+ * and meta-rewriting a retired id would re-add its name to the live
+ * index (the fold-then-resurrect bug). */void heat_fold(invfs_volume *v)
+{
+    size_t i;
+    if (!v->heat_tab) return;
+    for (i = 0; i <= v->heat_tab_mask; i++) {
+        uint64_t inode = v->heat_tab[i][0];
+        uint64_t n;
+        uint16_t r = 0, nr;
+        uint8_t w = 0;
+        if (!inode) continue;
+        n = v->heat_tab[i][1];
+        if (!n) continue;
+        if (!idx_id_live(v, inode)) continue;   /* dead id (rewritten) */
+        if (heat_get(v, inode, &r, &w) != 0) { r = 0; w = 0; }
+        /* absent TLV == (0,0): "no heat history"; the fold writes only
+         * when the accrual changes the stored value */
+        nr = (uint64_t)r + n > 0xFFFF ? 0xFFFF : (uint16_t)(r + n);
+        if (nr == r) continue;
+        heat_write(v, inode, nr, w);
+    }
+    /* the touches are persisted: the table resets (a long-lived process
+     * folding twice must not double-count) */
+    memset(v->heat_tab, 0, (v->heat_tab_mask + 1) * sizeof *v->heat_tab);
+    v->heat_tab_n = 0;
+    v->heat_folded = 1;
+}
+
+
+/* WP27 heat persistence entry for drivers that want to persist read
+ * touches WITHOUT a sweep run (the pump in the test suites, a daemon
+ * flush point): the sweep's decay pass does this plus the halving; this
+ * folds only. */
+void vol_heat_persist(invfs_volume *v)
+{
+    if (!v || !vol_write_enabled(v)) return;
+    if (!v->heat_tab_n) return;
+    if (vol_mark_dirty(v) != 0) return;
+    heat_fold(v);
+}
+
+
+/* ---- decay + promotion ------------------------------
+ * One decay pass per sweep RUN: fold the session's accruals, then
+ * rheat >>= 1 (exponential), wheat saturating-down by 1, persisted into
+ * the records. The promotion check runs AFTER the decay (the hysteresis).
+ * See the section comment at the top for the full rules. */
 void vol_heat_sweep_begin(invfs_volume *v)
 {
-    size_t i;
-    int changed = 0, any_r = 0, any_w = 0;
+    uint64_t pos, end;
+    int any_r = 0, any_w = 0;
+    /* the fold first: reads this process observed count into the decayed
+     * totals exactly once */
+    heat_fold(v);
 
-    if (!v) return;
-    for (i = 0; i < v->l2p_count; i++) {
-        invfs_l2p_entry *e = &v->l2p[i];
-        uint16_t r;
-        uint8_t w;
-        if (e->type != INVFS_JRN_MAP) continue;
-        r = l2p_rheat(e);
-        w = e->pad[2];
-        if (r) {
-            l2p_set_rheat(e, (uint16_t)(r >> 1));
-            changed = 1;
+    if (!v || !vol_write_enabled(v)) return;
+    /* walk the live records; collect warm files (stored TLV != 0), then
+     * persist their decayed counters (rewriting while walking the area is
+     * fine: appends land past the walk end, but collect-then-apply keeps
+     * it obviously sound) */
+    pos = v->inode_area_start * INVFS_BLOCK_SIZE;
+    end = v->inode_area_pos;
+    while (pos + sizeof(invfs_inode_rec) <= end) {
+        invfs_inode_rec h;
+        uint16_t r = 0;
+        uint8_t w = 0;
+        if (io_seek(&v->io, pos) != 0 || io_read(&v->io, &h, sizeof h) != 0)
+            break;
+        if (h.magic != INODE_REC_MAGIC && h.magic != TOMBSTONE_MAGIC) break;
+        if (h.rec_len < sizeof h || h.rec_len > INVFS_MAX_REC_LEN ||
+            pos + h.rec_len + 4 > end)
+            break;
+        if (h.magic == INODE_REC_MAGIC && h.name_len &&
+            (uint8_t)h.name[0] != 0x01 &&
+            vol_find(v, h.name) == h.inode_id) {
+            /* the live version only (position-kill chains share the id) */
+            uint64_t ip = idx_get_id(v, h.inode_id);
+            if (ip == pos) {
+                uint8_t *rec = (uint8_t *)malloc(h.rec_len);
+                if (rec) {
+                    uint32_t crc_stored;
+                    if (io_seek(&v->io, pos) == 0 &&
+                        io_read(&v->io, rec, h.rec_len) == 0 &&
+                        io_read(&v->io, &crc_stored, 4) == 0 &&
+                        invfs_crc32c(rec, h.rec_len) == crc_stored) {
+                        /* absent TLV == (0,0) and decays to itself: the
+                         * pass never stamps a never-heated file (zero
+                         * churn on cold volumes -- a format-v2 property,
+                         * since a stamp is a record append now) */
+                        uint16_t nr;
+                        uint8_t nw;
+                        if (heat_read_tlv(rec, h.rec_len, &r, &w) == 0) {
+                            nr = (uint16_t)(r >> 1);
+                            nw = w ? (uint8_t)(w - 1) : 0;
+                            if (nr != r || nw != w)
+                                heat_write(v, h.inode_id, nr, nw);
+                            if (nr >= INVFS_HEAT_HOT) any_r = 1;
+                            if (nw >= INVFS_WHEAT_HOT) any_w = 1;
+                        }
+                    }
+                    free(rec);
+                }
+            }
         }
-        if (w) {
-            e->pad[2] = (uint8_t)(w - 1);
-            changed = 1;
-        }
-        if ((uint32_t)(r >> 1) >= INVFS_HEAT_HOT) any_r = 1;
-        if (w && (uint32_t)(w - 1) >= INVFS_WHEAT_HOT) any_w = 1;
+        pos += (uint64_t)h.rec_len + 4;
     }
     v->heat_any_rhot = any_r;
     v->heat_any_whot = any_w;
-    if (changed) {
-        /* WP22d: the decay touched every entry at once -- persisting it is
-         * a bulk change, so the next flush compacts (the image carries the
-         * whole table's pads) instead of appending per-entry refreshes */
-        v->j_heat_all = 1;
-        if (vol_write_enabled(v))
-            vol_mark_dirty(v);   /* the caller's vol_flush persists the decay */
-    }
+    (void)v;
 }
 
 
@@ -261,121 +512,24 @@ typedef struct {
 static int heat_cand_cmp(const void *a, const void *b)
 {
     const heat_cand *x = (const heat_cand *)a, *y = (const heat_cand *)b;
-    if (x->r != y->r) return x->r > y->r ? -1 : 1;   /* hottest first */
+    if (x->r != y->r) return x->r > y->r ? -1 : 1;
     return x->inode < y->inode ? -1 : x->inode > y->inode;
-}
-
-
-/* per-inode max read-heat, open addressing (inode 0 = empty slot; real
- * inode ids start at 1). Built in ONE L2P scan so the record walk below
- * costs O(1) per member instead of a scan. */
-typedef struct { uint64_t inode; uint16_t r; } heat_max_ent;
-
-
-static int heat_max_put(heat_max_ent **tp, size_t *capp, size_t *np,
-                        uint64_t inode, uint16_t r)
-{
-    size_t mask, i, j;
-    heat_max_ent *t = *tp;
-    if (!*capp) {
-        *capp = 256;
-        t = (heat_max_ent *)calloc(*capp, sizeof *t);
-        if (!t) { *capp = 0; return -1; }
-        *tp = t;
-    } else if ((*np + 1) * 10 >= *capp * 7) {
-        size_t nc = *capp * 2;
-        heat_max_ent *nt = (heat_max_ent *)calloc(nc, sizeof *nt);
-        if (!nt) return -1;
-        for (j = 0; j < *capp; j++) {
-            if (t[j].inode) {
-                size_t k = (size_t)heat_hash(t[j].inode, 0) & (nc - 1);
-                while (nt[k].inode) k = (k + 1) & (nc - 1);
-                nt[k] = t[j];
-            }
-        }
-        free(t);
-        t = *tp = nt;
-        *capp = nc;
-    }
-    mask = *capp - 1;
-    i = (size_t)heat_hash(inode, 0) & mask;
-    while (t[i].inode) {
-        if (t[i].inode == inode) {
-            if (r > t[i].r) t[i].r = r;   /* keep the max */
-            return 0;
-        }
-        i = (i + 1) & mask;
-    }
-    t[i].inode = inode;
-    t[i].r = r;
-    (*np)++;
-    return 0;
-}
-
-
-static uint16_t heat_max_get(const heat_max_ent *t, size_t cap,
-                             uint64_t inode)
-{
-    size_t mask, i;
-    if (!cap) return 0;
-    mask = cap - 1;
-    i = (size_t)heat_hash(inode, 0) & mask;
-    while (t[i].inode) {
-        if (t[i].inode == inode) return t[i].r;
-        i = (i + 1) & mask;
-    }
-    return 0;
-}
-
-
-/* Dedup-shared guard (WP19: NEVER promote a pba referenced by >1 live MAP
- * entry). Two-pass L2P scan per candidate: for every block range the
- * member maps, any OTHER live entry overlapping it must be a batch-sibling
- * dup -- proven by the owner mapping that entry's lba to exactly the same
- * pba (that is what a member dup IS). Batch blocks are never dedupe
- * canon/loser candidates (dedupe skips zone==TEXT outright), so a foreign
- * overlap "cannot happen" -- this check is the belt-and-braces the spec
- * asks for, and it also refuses on any L2P corruption. */
-static int heat_member_shared(invfs_volume *v, uint64_t member, uint64_t owner)
-{
-    size_t i, j;
-    for (i = 0; i < v->l2p_count; i++) {
-        const invfs_l2p_entry *m = &v->l2p[i];
-        uint64_t mp, ml;
-        if (m->type != INVFS_JRN_MAP || m->inode != member) continue;
-        mp = m->pba;
-        ml = m->length ? m->length : 1;
-        for (j = 0; j < v->l2p_count; j++) {
-            const invfs_l2p_entry *e = &v->l2p[j];
-            uint64_t el, op = 0, ol = 0;
-            if (e->type != INVFS_JRN_MAP) continue;
-            if (e->inode == member || e->inode == owner) continue;
-            el = e->length ? e->length : 1;
-            if (e->pba + el <= mp || e->pba >= mp + ml) continue;
-            if (vol_lookup_entry(v, owner, e->lba, &op, &ol) == 0 &&
-                op == e->pba)
-                continue;   /* a batch sibling's dup: hole semantics, fine */
-            return 1;       /* foreign reference: shared (or corrupt) */
-        }
-    }
-    return 0;
 }
 
 
 /* WP19 tiering, promotion direction (demotion has no in-tree backend since
  * zstd-22 was dropped): extract read-hot PPMd batch members to standalone
  * per-segment ZSTD (the generic sweep machinery on the decoded content),
- * stamp GENERIC{ZSTD}. BATCHED_BIN members never promote (already fast);
- * dedup-shared members never promote; space/dec_mem admission mirrors the
- * generic sweep's (DEFER_ENOSPC pricing). Top-K by rheat within the
+ * stamp GENERIC{ZSTD}. BATCHED_BIN members never promote (already fast).
+ * WP27: a member's dedupe-shared guard from v1 is gone by construction --
+ * dedupe never merges TEXT entries, and the promotion abandons the batch
+ * slice (a hole for the GC), it never frees it. Top-K by rheat within the
  * per-sweep budget: min(64, 10% of live TEXT members).
  * Runs between the sweep walk and vol_sweep_dedupe in the driver, after
  * the run's decay pass. Returns the number of promotions, <0 on error. */
 int vol_heat_promote(invfs_volume *v)
 {
     uint64_t owner, pos, end;
-    heat_max_ent *hmax = NULL;
-    size_t hmax_cap = 0, hmax_n = 0;
     heat_cand *cand = NULL;
     size_t n_cand = 0, cap_cand = 0, text_members = 0, budget = 0, i;
     int promoted = 0;
@@ -385,20 +539,7 @@ int vol_heat_promote(invfs_volume *v)
     owner = vol_find(v, TZ_OWNER_NAME);
     if (!owner) return 0;
 
-    /* pass 1: inode -> max read-heat, one L2P scan */
-    for (i = 0; i < v->l2p_count; i++) {
-        const invfs_l2p_entry *e = &v->l2p[i];
-        uint16_t r;
-        if (e->type != INVFS_JRN_MAP) continue;
-        r = l2p_rheat(e);
-        if (r >= INVFS_HEAT_HOT &&
-            heat_max_put(&hmax, &hmax_cap, &hmax_n, e->inode, r) != 0)
-            goto out;
-    }
-    if (!hmax_n) { v->heat_any_rhot = 0; goto out; }  /* decayed below HOT */
-
-    /* pass 2: walk live records; TEXT class + hot -> candidate. The walk
-     * mirrors vol_tz_gc's mark pass (newest-wins + position check). */
+    /* walk live records; TEXT class + hot -> candidate */
     pos = v->inode_area_start * INVFS_BLOCK_SIZE;
     end = v->inode_area_pos;
     while (pos + sizeof(invfs_inode_rec) <= end) {
@@ -426,7 +567,7 @@ int vol_heat_promote(invfs_volume *v)
         if (cc != INVFS_CLASS_TEXT)
             continue;   /* BATCHED_BIN (fast already) never promotes */
         text_members++;
-        r = heat_max_get(hmax, hmax_cap, h.inode_id);
+        r = heat_file_r(v, h.inode_id);
         if (r < INVFS_HEAT_HOT) continue;
         if (n_cand == cap_cand) {
             size_t nc = cap_cand ? cap_cand * 2 : 16;
@@ -440,6 +581,11 @@ int vol_heat_promote(invfs_volume *v)
         memcpy(cand[n_cand].name, nm, nl + 1);
         n_cand++;
     }
+    /* NOTE: heat_any_rhot is NOT reset when the walk finds no TEXT
+     * candidate: the summary means "some file is read-hot", and the tier
+     * migration (vol_tier_migrate) keys on exactly that for
+     * non-TEXT-classed segments. The decay pass recomputes the truth
+     * every run, so a genuinely cold volume re-cools on its own. */
 
     if (text_members) {
         budget = text_members / 10;              /* 10% of live members */
@@ -451,12 +597,6 @@ int vol_heat_promote(invfs_volume *v)
     for (i = 0; i < n_cand && (size_t)promoted < budget; i++) {
         uint64_t fsz = 0, nseg;
         const invfs_codec *zc;
-        if (heat_member_shared(v, cand[i].inode, owner)) {
-            if (getenv("INVFS_DEBUG"))
-                fprintf(stderr, "[heat] %s: dedup-shared, not promoted\n",
-                        cand[i].name);
-            continue;
-        }
         /* admission: same worst-case pricing as the generic sweep's
          * DEFER_ENOSPC path -- the promoted shape coexists with the batch
          * hole until GC, so promotion temporarily costs space */
@@ -489,7 +629,6 @@ out:
     printf("heat: %zu hot text member(s), %d promoted "
            "(budget %zu of %zu live)\n", n_cand, promoted, budget,
            text_members);
-    free(hmax);
     free(cand);
     return promoted;
 }

@@ -12,49 +12,28 @@ int sweep_enospc(invfs_volume *v, uint64_t need_bytes)
 }
 
 
-/* Give back everything the atomic sweep path allocated under `new_id` before
-   it gave up. Safe to call with new_id == 0 (the in-place path) or with no
-   maps yet. Nothing has been made durable at this point -- no record names
-   new_id, no flush has happened -- so this is pure in-memory bookkeeping plus
-   bitmap bits, and the file is left exactly as it was found. */
-static void sweep_unwind(invfs_volume *v, uint64_t new_id)
+/* Give back everything the atomic sweep path allocated for the new record
+ * before it gave up: the segments this run wrote sit in the entry table
+ * (zone flipped to BINARY at write time); their extents derive from the
+ * framed headers. Safe to call with ents == NULL (nothing written) or when
+ * nothing was swept. Nothing has been made durable at this point -- no
+ * record names the new pbas, no flush has happened -- so this is pure
+ * in-memory bookkeeping plus bitmap bits, and the file is left exactly as
+ * it was found. */
+static void sweep_unwind(invfs_volume *v, invfs_ast_block_entry *ents,
+                         uint32_t nents)
 {
-    size_t i, w = 0;
-    if (!new_id) return;
-    for (i = 0; i < v->l2p_count; i++) {
-        const invfs_l2p_entry *e = &v->l2p[i];
-        if (e->type == INVFS_JRN_MAP && e->inode == new_id) {
-            uint64_t nblk = e->length;
-            if (nblk && e->pba < v->sb.total_blocks &&
-                nblk <= v->sb.total_blocks - e->pba)
-                vol_free_blocks(v, e->pba, nblk);
-        }
-    }
-    for (i = 0; i < v->l2p_count; i++) {
-        if (v->l2p[i].inode == new_id) {
-            /* WP22d: queue the UNMAP op; an earlier flush of this same
-             * session may already have made the MAP durable, so the cancel
-             * must reach the journal too (append-only, never rewritten) */
-            if (v->l2p[i].type == INVFS_JRN_MAP) {
-                invfs_l2p_entry ue;
-                memset(&ue, 0, sizeof ue);
-                ue.type = INVFS_JRN_UNMAP;
-                ue.inode = v->l2p[i].inode;
-                ue.lba = v->l2p[i].lba;
-                jrn_push_op(v, &ue);
-            }
-            /* WP-L2Q: every occurrence of this inode's keys dies */
-            l2p_idx_del(v, v->l2p[i].inode, v->l2p[i].lba);
+    uint32_t i;
+    if (!ents) return;
+    for (i = 0; i < nents; i++) {
+        uint64_t plen = 0;
+        if (ents[i].zone != INVFS_ZONE_BINARY || !ents[i].pba)
             continue;
-        }
-        if (w != i) {
-            v->l2p[w] = v->l2p[i];
-            l2p_idx_reslot(v, v->l2p[i].inode, v->l2p[i].lba,
-                           (uint64_t)i, (uint64_t)w);
-        }
-        w++;
+        if (seg_extent_checked(v, ents[i].pba, &plen) == 0)
+            vol_free_blocks(v, ents[i].pba, plen);
+        ents[i].pba = 0;
+        ents[i].zone = INVFS_ZONE_RAW;
     }
-    v->l2p_count = w;
 }
 
 
@@ -331,45 +310,49 @@ int vol_sweep_file_inner(invfs_volume *v, uint64_t inode_id,
 
         if (e->zone != INVFS_ZONE_RAW)
             continue;  /* already swept */
-        /* 1. read old segment */
-        if (vol_lookup_entry(v, inode_id, e->block_id, &pba_old, &phys_len_old) != 0) {
-            fprintf(stderr, "sweep: L2P miss seg %u\n", e->block_id);
-            sweep_unwind(v, new_id); free(rec); return -1;
+        /* 1. read old segment. WP27: the entry carries the pba; the
+         * physical length derives from the segment's framed header. */
+        pba_old = e->pba;
+        if (pba_old == 0 || pba_old >= v->sb.total_blocks) {
+            fprintf(stderr, "sweep: invalid pba seg %u\n", e->block_id);
+            sweep_unwind(v, new_id ? ents : NULL, ast_h.num_blocks); free(rec); return -1;
         }
         {
             uint8_t hdrb[8];
             if (io_seek(&v->io, pba_old * INVFS_BLOCK_SIZE) != 0 ||
-                io_read(&v->io, hdrb, 8) != 0) { sweep_unwind(v, new_id); free(rec); return -1; }
+                io_read(&v->io, hdrb, 8) != 0) { sweep_unwind(v, new_id ? ents : NULL, ast_h.num_blocks); free(rec); return -1; }
             memcpy(&hdr_old, hdrb, 4);
             memcpy(&crc_old, hdrb + 4, 4);
         }
+        phys_len_old = ((uint64_t)hdr_old + 8 + INVFS_BLOCK_SIZE - 1) /
+                       INVFS_BLOCK_SIZE;
         blob_old = (uint8_t *)malloc(hdr_old);
-        if (!blob_old) { sweep_unwind(v, new_id); free(rec); return -1; }
+        if (!blob_old) { sweep_unwind(v, new_id ? ents : NULL, ast_h.num_blocks); free(rec); return -1; }
         if (io_seek(&v->io, pba_old * INVFS_BLOCK_SIZE + 8) != 0 ||
-            io_read(&v->io, blob_old, hdr_old) != 0) { free(blob_old); sweep_unwind(v, new_id); free(rec); return -1; }
+            io_read(&v->io, blob_old, hdr_old) != 0) { free(blob_old); sweep_unwind(v, new_id ? ents : NULL, ast_h.num_blocks); free(rec); return -1; }
         /* deep protection: verify segment CRC32C */
         if (crc_old != 0 && invfs_crc32c(blob_old, hdr_old) != crc_old) {
             fprintf(stderr, "sweep: segment CRC mismatch inode %llu seg %u\n",
                     (unsigned long long)inode_id, e->block_id);
-            free(blob_old); sweep_unwind(v, new_id); free(rec); return -1;
+            free(blob_old); sweep_unwind(v, new_id ? ents : NULL, ast_h.num_blocks); free(rec); return -1;
         }
 
         /* 2. decompress to original */
         orig = (uint8_t *)malloc(orig_len ? orig_len : 1);
-        if (!orig) { free(blob_old); sweep_unwind(v, new_id); free(rec); return -1; }
+        if (!orig) { free(blob_old); sweep_unwind(v, new_id ? ents : NULL, ast_h.num_blocks); free(rec); return -1; }
         if (e->algo == INVFS_ALGO_LZ4) {
             int got = LZ4_decompress_safe((const char *)blob_old, (char *)orig,
                                           (int)hdr_old, (int)orig_len);
-            if (got != (int)orig_len) { free(blob_old); free(orig); sweep_unwind(v, new_id); free(rec); return -1; }
+            if (got != (int)orig_len) { free(blob_old); free(orig); sweep_unwind(v, new_id ? ents : NULL, ast_h.num_blocks); free(rec); return -1; }
         } else if (e->algo == INVFS_ALGO_ZSTD) {
             /* WP23 (cross-lane touch, flagged for the WP22e lane): a RAW
              * segment written under fill pressure is ZSTD -- decode it
              * with the same per-segment dispatch the read paths already
              * had, or the sweep would mis-decode it as verbatim NONE. */
             size_t got = ZSTD_decompress(orig, orig_len, blob_old, hdr_old);
-            if (ZSTD_isError(got) || got != orig_len) { free(blob_old); free(orig); sweep_unwind(v, new_id); free(rec); return -1; }
+            if (ZSTD_isError(got) || got != orig_len) { free(blob_old); free(orig); sweep_unwind(v, new_id ? ents : NULL, ast_h.num_blocks); free(rec); return -1; }
         } else {  /* NONE */
-            if (hdr_old != orig_len) { free(blob_old); free(orig); sweep_unwind(v, new_id); free(rec); return -1; }
+            if (hdr_old != orig_len) { free(blob_old); free(orig); sweep_unwind(v, new_id ? ents : NULL, ast_h.num_blocks); free(rec); return -1; }
             memcpy(orig, blob_old, orig_len);
         }
         free(blob_old);
@@ -382,7 +365,7 @@ int vol_sweep_file_inner(invfs_volume *v, uint64_t inode_id,
                ? LZ4_compressBound((int)orig_len)
                : (int)ZSTD_compressBound(orig_len);
         cbuf_new = (uint8_t *)malloc((size_t)cbound + 8 + INVFS_BLOCK_SIZE);
-        if (!cbuf_new) { free(orig); sweep_unwind(v, new_id); free(rec); return -1; }
+        if (!cbuf_new) { free(orig); sweep_unwind(v, new_id ? ents : NULL, ast_h.num_blocks); free(rec); return -1; }
         switch (invfs_profile_generic_algo(v->profile)) {
         case INVFS_ALGO_NONE:      /* turbo: verbatim, segment-aligned */
             csize_new = (uint32_t)orig_len;
@@ -422,7 +405,7 @@ int vol_sweep_file_inner(invfs_volume *v, uint64_t inode_id,
         phys_blocks_new = ((uint64_t)csize_new + 8 + INVFS_BLOCK_SIZE - 1) / INVFS_BLOCK_SIZE;
         pba_new = alloc_blocks(v, v->sb.shadow_zone_start, v->sb.shadow_zone_blocks,
                                phys_blocks_new, 1);
-        if (pba_new == 0) { free(cbuf_new); free(orig); sweep_unwind(v, new_id); free(rec); return -1; }
+        if (pba_new == 0) { free(cbuf_new); free(orig); sweep_unwind(v, new_id ? ents : NULL, ast_h.num_blocks); free(rec); return -1; }
         hdr4[0] = (uint8_t)(csize_new & 0xFF);
         hdr4[1] = (uint8_t)((csize_new >> 8) & 0xFF);
         hdr4[2] = (uint8_t)((csize_new >> 16) & 0xFF);
@@ -435,43 +418,23 @@ int vol_sweep_file_inner(invfs_volume *v, uint64_t inode_id,
         new_bytes += (uint64_t)csize_new + 8;   /* WP10 gain accounting */
         if (write_segment_blocks(v, pba_new, cbuf_new, (size_t)csize_new + 8,
                                  phys_blocks_new) != 0) {
-            free(cbuf_new); free(orig); sweep_unwind(v, new_id); free(rec); return -1;
+            free(cbuf_new); free(orig); sweep_unwind(v, new_id ? ents : NULL, ast_h.num_blocks); free(rec); return -1;
         }
         free(cbuf_new);
 
-        /* 5. L2P: map the new segment -- in memory only, same as vol_map.
-         * The UNMAP record used to be written straight to the device here.
-         * It was redundant twice over: vol_flush rebuilds the journal from
-         * the in-memory table, which l2p_remove has already updated, and
-         * that table holds only MAP entries, so a compacted journal never
-         * contains UNMAP at all (replay applies them, flush never emits
-         * them). It also landed on top of the terminator -- see vol_map.
-         *
-         * On the atomic path the new mapping goes under new_id and the old
-         * inode keeps its own maps untouched, so the file stays fully
-         * readable from its old record until the new one is durable. */
-        if (new_id) {
-            if (vol_map(v, new_id, e->block_id, pba_new, (uint32_t)phys_blocks_new) != 0) {
-                free(orig); sweep_unwind(v, new_id); free(rec); return -1;
-            }
-        } else {
-            l2p_remove(v, inode_id, e->block_id);
-            if (vol_map(v, inode_id, e->block_id, pba_new, (uint32_t)phys_blocks_new) != 0) {
-                free(orig); free(rec); return -1;
-            }
+        /* 5. WP27: the entry carries the new segment's address -- no map,
+         * no journal traffic. On the atomic path the new pba lands in the
+         * in-memory copy of the record and the old record stays readable
+         * until the new one is published. */
+        e->pba = pba_new;
+        if (!new_id) {
             /* 6. free old RAW blocks (in-place path only; the atomic path
              * leaves them to vol_delete_inode of the old id, which is what
              * makes the old record readable until the new one lands).
              *
-             * Free exactly what was allocated: the L2P entry's length is the
-             * phys_blocks the write path asked alloc_blocks for. Recomputing
-             * it from the payload used "hdr_old + 4" against a segment written
-             * as csize + 8, so whenever those two straddled a block boundary
-             * the last block was never returned to the bitmap -- allocated,
-             * owned by no record, which is exactly what fsck calls an orphan.
-             * A sweep of ~1900 segments leaked about one, matching the
-             * ~4-in-4096 chance that the 4-byte discrepancy crosses a
-             * boundary. */
+             * Free exactly what was allocated: the physical block count
+             * derives from the segment's framed header (csize+8, padded to
+             * whole blocks -- the write_segment_blocks contract). */
             vol_free_blocks(v, pba_old, phys_len_old);
         }
         free(orig);
@@ -499,23 +462,25 @@ int vol_sweep_file_inner(invfs_volume *v, uint64_t inode_id,
 
         nh->inode_id = new_id;
         crc_calc = invfs_crc32c(rec, rec_h.rec_len);
-        if (v->inode_area_pos + rec_h.rec_len + 4 +
-            sizeof(invfs_inode_rec) + 4 > v->inode_area_end) {
+        if (inode_area_make_room(v, rec_h.rec_len + 4 +
+                sizeof(invfs_inode_rec) + 4) != 0) {
             /* no room for the record AND the tombstone that must follow it */
             fprintf(stderr, "sweep: inode area full (%s)\n", name);
-            sweep_unwind(v, new_id); free(rec); return -1;
+            sweep_unwind(v, new_id ? ents : NULL, ast_h.num_blocks); free(rec); return -1;
         }
-        if (vol_pre_record(v) != 0) { sweep_unwind(v, new_id); free(rec); return -1; }
+        if (vol_pre_record(v) != 0) { sweep_unwind(v, new_id ? ents : NULL, ast_h.num_blocks); free(rec); return -1; }
         if (io_seek(&v->io, v->inode_area_pos) != 0 ||
             io_write(&v->io, rec, rec_h.rec_len) != 0 ||
             io_write(&v->io, &crc_calc, 4) != 0) {
-            sweep_unwind(v, new_id); free(rec); return -1;
+            sweep_unwind(v, new_id ? ents : NULL, ast_h.num_blocks); free(rec); return -1;
         }
         v->inode_area_pos += rec_h.rec_len + 4;
         idx_put(v, name, nlen, new_id, v->inode_area_pos - rec_h.rec_len - 4,
                 nh->file_size, nh->ctime);
         idx_put_id(v, new_id, v->inode_area_pos - rec_h.rec_len - 4);
-        /* frees the old RAW blocks: they are still mapped to the old id */
+        pba_ref_apply(v, rec, rec_h.rec_len, +1);
+        /* frees the old RAW blocks: they are still referenced by the old
+         * record until the retire drops it */
         if (vol_delete_inode(v, inode_id, name) != 0)
             fprintf(stderr, "sweep: %s transcoded but the old record survived; "
                             "invf-fsck -f will reclaim it\n", name);
@@ -525,8 +490,10 @@ int vol_sweep_file_inner(invfs_volume *v, uint64_t inode_id,
         if (io_seek(&v->io, rec_pos) != 0 ||
             io_write(&v->io, rec, rec_h.rec_len) != 0 ||
             io_write(&v->io, &crc_calc, 4) != 0) { free(rec); return -1; }
+        pba_ref_reset(v);   /* the record mutated in place; the pba map
+                             * rebuilds lazily from the live set */
     } else {
-        sweep_unwind(v, new_id);   /* nothing swept: give the id's maps back */
+        sweep_unwind(v, new_id ? ents : NULL, ast_h.num_blocks);   /* nothing swept: give the id's maps back */
     }
     /* WP10 §2: stamp the outcome class. A codec guard that refused the file
      * pins GENERIC_GUARD (retried when that codec's generation grows past the
@@ -1574,22 +1541,18 @@ int vol_compute_stats(invfs_volume *v, invfs_volume_stats *out)
 {
     uint64_t pos, end;
     /* WP-DZ: physical per-zone attribution is by CONTENT CLASS (the AST
-     * entry's zone tag resolved through the L2P), never by pba region --
-     * zone boundaries are advisory, so raw-class blocks legitimately live
-     * in the shadow extent. `claimed` (one bit per block) makes each
-     * physical block count exactly once no matter how many live records
-     * reference it (dedupe shares, the TEXT owner/member double maps). */
-    mapset ms;
+     * entry's zone tag over its own pba), never by pba region -- zone
+     * boundaries are advisory, so raw-class blocks legitimately live in
+     * the shadow extent. `claimed` (one bit per block) makes each physical
+     * block count exactly once no matter how many live records reference
+     * it (dedupe shares, the TEXT owner/member double references). */
     uint8_t *claimed = NULL;
     int have_ms = 0;
     if (!v || !out) return -1;
     memset(out, 0, sizeof(*out));
-    memset(&ms, 0, sizeof ms);
     claimed = (uint8_t *)calloc((size_t)(v->sb.total_blocks + 7) / 8, 1);
-    if (claimed && mapset_build(v, &ms) == 0)
-        have_ms = 1;
-    else
-        free(claimed), claimed = NULL;   /* degrade: physical zeros, not a lie */
+    if (claimed)
+        have_ms = 1;   /* degrade: physical zeros, not a lie */
     pos = v->inode_area_start * INVFS_BLOCK_SIZE;
     end = v->inode_area_pos;
     while (pos + sizeof(invfs_inode_rec) <= end) {
@@ -1625,7 +1588,11 @@ int vol_compute_stats(invfs_volume *v, invfs_volume_stats *out)
         /* WP-DZ: physical attribution by content class, for EVERY live
          * record including the 0x01 internal owners (their blocks -- text
          * batches, seal parity, the retention registry -- are real used
-         * bytes; the 0x01 exclusion below stays logical-only). */
+         * bytes; the 0x01 exclusion below stays logical-only).
+         * WP27: the extent comes from the entry's pba; the physical
+         * length derives from the segment's framed header (owner classes
+         * carry it in the entry: reten length = blocks, tier/rawm length
+         * = bytes, parity = one block). */
         if (have_ms) {
             size_t pbase = sizeof(invfs_inode_rec);
             invfs_ast_hdr pah;
@@ -1636,20 +1603,39 @@ int vol_compute_stats(invfs_volume *v, invfs_volume_stats *out)
                                   sizeof(invfs_ast_block_entry)) {
                 const uint8_t *ep = rb + pbase + pah.hdr_len;
                 uint32_t pi;
+                int is_ret = h.name_len && (uint8_t)h.name[0] == 0x01 &&
+                             h.name_len >= 6 &&
+                             memcmp(h.name + 1, "reten", 5) == 0;
                 for (pi = 0; pi < pah.num_blocks; pi++) {
                     const uint8_t *e = ep + (size_t)pi *
                                             sizeof(invfs_ast_block_entry);
-                    uint32_t zab, zone, bid;
-                    const invfs_l2p_entry *me;
-                    uint64_t b, bend;
+                    uint32_t zab, zone;
+                    uint64_t pba, plen = 0, b, bend;
                     memcpy(&zab, e + 16, 4);   /* zone:2 | algo:6 | bid:24 */
                     zone = zab & 3;
-                    bid = zab >> 8;
-                    me = mapset_get(&ms, h.inode_id, bid);
-                    if (!me || !me->pba || !me->length) continue;
-                    bend = me->pba + me->length;
+                    memcpy(&pba, e + 24, 8);
+                    if (!pba || pba >= v->sb.total_blocks) continue;
+                    if (is_ret) {
+                        uint64_t l;
+                        memcpy(&l, e + 8, 8);
+                        plen = l;              /* reten: BLOCKS */
+                    } else if (h.name_len && (uint8_t)h.name[0] == 0x01) {
+                        /* seal parity: one block; tier/rawm: the copy's
+                         * span in bytes; tzb: length is the DECODED size
+                         * -- the batch's extent derives from its frame */
+                        uint64_t l;
+                        memcpy(&l, e + 8, 8);
+                        if (!(h.name_len >= 4 &&
+                              memcmp(h.name + 1, "tzb", 3) == 0) &&
+                            l && l % INVFS_BLOCK_SIZE == 0)
+                            plen = l / INVFS_BLOCK_SIZE;   /* parity/tier/rawm */
+                        else if (seg_extent(v, pba, NULL, &plen) != 0)
+                            continue;                        /* tzb batch */
+                    } else if (seg_extent(v, pba, NULL, &plen) != 0)
+                        continue;   /* torn header: attribute nothing */
+                    bend = pba + plen;
                     if (bend > v->sb.total_blocks) bend = v->sb.total_blocks;
-                    for (b = me->pba; b < bend; b++) {
+                    for (b = pba; b < bend; b++) {
                         if (bit_get(claimed, b)) continue;
                         bit_set(claimed, b);
                         if (zone == INVFS_ZONE_TEXT)
@@ -1700,7 +1686,8 @@ int vol_compute_stats(invfs_volume *v, invfs_volume_stats *out)
                         invfs_ast_hdr_parse(rb + base, h.rec_len - base,
                                             &ah) == 0) {
                         hl = ah.hdr_len;
-                        if (h.rec_len < base + hl + (size_t)ah.num_blocks * 24)
+                        if (h.rec_len < base + hl + (size_t)ah.num_blocks *
+                                                  sizeof(invfs_ast_block_entry))
                             nb = 0;     /* truncated recipe: attribute nothing */
                         else
                             nb = ah.num_blocks;
@@ -1709,7 +1696,8 @@ int vol_compute_stats(invfs_volume *v, invfs_volume_stats *out)
                         uint64_t remain = h.file_size;
                         uint32_t i;
                         for (i = 0; i < nb && remain > 0; i++) {
-                            uint8_t *e = rb + base + hl + (size_t)i * 24;
+                            uint8_t *e = rb + base + hl +
+                                (size_t)i * sizeof(invfs_ast_block_entry);
                             uint32_t zone = e[16] & 3;   /* zone:2 LSB */
                             uint64_t seg;
                             /* TEXT entries are arbitrary-length slices of a
@@ -1761,7 +1749,6 @@ int vol_compute_stats(invfs_volume *v, invfs_volume_stats *out)
         }
         out->unclaimed_used_bytes = used > cl ? used - cl : 0;
     }
-    mapset_free(&ms);
     free(claimed);
     return 0;
 }

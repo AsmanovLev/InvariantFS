@@ -1,0 +1,4 @@
+__anon8d21bff80108 struct      488 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_tier.c typedef struct { uint64_t pba; uint16_t r; } tier_heat_ent;
+__anon8d21bff80208 struct      490 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_tier.c typedef struct {
+tier_heat_ent    typedef     488 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_tier.c typedef struct { uint64_t pba; uint16_t r; } tier_heat_ent;
+tier_heat_map    typedef     493 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_tier.c } tier_heat_map;

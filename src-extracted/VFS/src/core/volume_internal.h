@@ -196,16 +196,24 @@ typedef struct dir_index_entry {
     char name[1];          /* prefix including the trailing '/' */
 } dir_index_entry;
 
+/* WP27: per-file heat session state. The durable home is the record's
+ * "invfs.heat" xattr TLV (see invarifs.h); in RAM, read touches accrue
+ * per-inode (the read path never touches the journal any more) and fold
+ * into the records at vol_close / the sweep's decay pass. heat_tab is an
+ * open-addressing map inode -> accrued read count this session ([0]=inode,
+ * 0 = empty slot; inode ids start at 1). */
+/* WP27: the PB7 answer without the L2P: a session-scoped reference map
+ * pba -> number of live records' AST entries naming it. Built lazily on
+ * first use (retire/dedupe) from the live name-index set, then maintained
+ * incrementally by the record append/kill hooks (pba_ref_apply). Only
+ * non-owner records' non-TEXT entries count: those are the self-owned
+ * segments; batch members reference owner-owned batches (never freed by
+ * the member's retire), and owner records free through the owner WAL. */
+typedef struct { uint64_t pba; uint32_t n; } pba_ref_ent;
+
 /* WP-L2Q: session-persistent (inode,lba) -> newest live L2P table slot.
- * vol_lookup_entry scanned the append-only table from the end on every
- * segment lookup -- O(live entries) per read, on the hot path. The index
- * mirrors the table exactly: built during replay (l2p_apply), updated by
- * vol_map / l2p_remove_mem / the bulk compaction loops (retire, sweep
- * unwind) / rebuilt wholesale by the fsck rebuild and the seal rewrites.
- * Values are table SLOT NUMBERS, not pointers: v->l2p reallocs on growth.
- * inode == 0 marks an empty slot (real inode ids start at 1). The table
- * stays the source of truth: an allocation failure disables the index and
- * every consumer falls back to the newest-wins scan. */
+ * WP27: the table is now the owner-scoped WAL (few entries), but the
+ * index stays -- the seal/tier hot paths query it per stripe. */
 typedef struct {
     uint64_t inode, lba;
     uint64_t slot;            /* index into v->l2p[] */
@@ -298,15 +306,12 @@ typedef struct invfs_volume {
      * compaction image when bulk). */
     invfs_l2p_entry *jops;
     size_t jops_n, jops_cap;
-    uint64_t (*j_heat)[2];
-    size_t j_heat_n, j_heat_cap;
     int j_slotted;            /* 0 = legacy flat log, 1 = slot format */
     uint32_t j_slot;          /* active slot index when slotted (0/1) */
     uint64_t j_seq;           /* active slot image's sequence number */
     uint32_t j_last_crc;      /* chain crc of the last journaled entry
                                * (the slot header's crc when the log is bare) */
     int j_compact;            /* next flush compacts (fsck rebuild) */
-    int j_heat_all;           /* bulk heat change (decay) -> compact */
     uint64_t open_cuts;       /* consistent-cut hides at mount (WP22d) */
     uint64_t next_inode_id;
     /* on-demand sweep pending list (RAM) */
@@ -353,19 +358,23 @@ typedef struct invfs_volume {
      * (invfs_profile_zstd_level); the effective name is also published back
      * to the environment so pack subprocesses inherit it. */
     uint8_t profile;
-    /* WP19: heat (invfs_l2p_entry.pad, see invarifs.h). heat_init seeds the
-     * read-heat of newly created entries (INVFS_HEAT_INIT, default 0).
-     * heat_any_rhot/whot are "some entry sits at/above the hot threshold"
-     * summaries -- they let the sweep skip the promotion walk / write-hot
-     * scans on cold volumes (recomputed by every decay pass; set on the
-     * increment that crosses a threshold). heat_seen is the process-
-     * lifetime "counted this session" set behind the once-per-open-session
-     * read increment (open addressing of (inode,lba) pairs, [0]=inode --
-     * 0 = empty slot; inode ids start at 1). */
+    /* WP27: heat (the "invfs.heat" INO2-ext TLV, see invarifs.h).
+     * heat_init seeds the read-heat of newly created records
+     * (INVFS_HEAT_INIT, default 0). heat_any_rhot/whot are "some file sits
+     * at/above the hot threshold" summaries -- they let the sweep skip the
+     * promotion walk / write-hot scans on cold volumes. heat_tab is the
+     * session's per-inode accrued read counts (see the typedef note). */
     uint16_t heat_init;
     int heat_any_rhot, heat_any_whot;
-    uint64_t (*heat_seen)[2];
-    size_t heat_seen_cap, heat_seen_n;
+    uint64_t (*heat_tab)[2];       /* [0]=inode (0=empty), [1]=accrued reads */
+    size_t heat_tab_mask, heat_tab_n;
+    int heat_folded;               /* close-fold already ran */
+    /* WP27: pba reference map (PB7 without the L2P). pba_ref_on = the map
+     * exists (built lazily by pba_ref_ensure, kept current by
+     * pba_ref_apply from the record append/kill hooks). */
+    pba_ref_ent *pba_ref;
+    size_t pba_ref_mask, pba_ref_n;
+    int pba_ref_on;
     /* WP16b: parsed !mbrmap cache (local-splice reads of seekable
      * containers). Filled on first map read of a container, invalidated
      * when its name (or a "name!..." sibling) is retired, freed at
@@ -657,17 +666,6 @@ typedef struct {
     uint8_t *is_ret;
 } seal_view;
 
-static inline uint16_t l2p_rheat(const invfs_l2p_entry *e)
-{
-    return (uint16_t)(e->pad[0] | ((uint16_t)e->pad[1] << 8));
-}
-
-static inline void l2p_set_rheat(invfs_l2p_entry *e, uint16_t r)
-{
-    e->pad[0] = (uint8_t)r;
-    e->pad[1] = (uint8_t)(r >> 8);
-}
-
 static inline int name_too_long(const char *name)
 {
     size_t n = strlen(name);
@@ -902,8 +900,9 @@ int l2p_replay(invfs_volume *v);
 /* apply one journaled entry to the in-memory table (replay path; no op
  * journaling). Returns -1 on allocation failure. */
 int l2p_apply(invfs_volume *v, const invfs_l2p_entry *e);
-/* reseed the WP19 hot summaries from the current in-memory table (the
- * l2p_replay/ckp_stage_replay shared tail) */
+/* reseed the WP19 hot summaries: v1 replayed them from the journal pads;
+ * v2 stores heat in the records, so an open starts conservative (1/1 =
+ * "maybe hot") and the sweep's decay pass recomputes the truth. */
 void l2p_seed_heat(invfs_volume *v);
 /* Persist the superblock. The checksum covers bytes 0..0x7B, and `state`
    lives at 0x18 -- inside that range -- so it has to be recomputed here.
@@ -999,48 +998,52 @@ const invfs_l2p_entry *l2p_idx_get(invfs_volume *v, uint64_t inode,
                                    uint64_t lba);
 
 /* WP22d: queue one journal op for the next flush's append (MAP/UNMAP,
- * CRC restamped from the chain at write time; a MAP op's pad is re-read
- * from the live table at write time) */
+ * CRC restamped from the chain at write time) */
 int jrn_push_op(invfs_volume *v, const invfs_l2p_entry *e);
 
 /* absolute byte offset of slot `slot`'s header block */
 uint64_t jrn_slot_base(const invfs_volume *v, uint32_t slot);
 
-/* WP22d: remember a heat-only change for the next flush (appended as a
- * refresh MAP, or folded into the compaction image when the pending set
- * overflows) */
-void jrn_heat_touch(invfs_volume *v, uint64_t inode, uint64_t lba);
-/* a MAP's heat was set in the table right after its op was queued (the
- * create paths): keep the queued op's pad in sync when it is the tail,
- * else queue a refresh */
-void jrn_pad_sync(invfs_volume *v, const invfs_l2p_entry *e);
+/* ---- WP27: segment extents --------------------------------------------
+ * AST entries carry pba but no physical length (the 32B wire format has
+ * no room); a framed segment's extent is derivable from its own 8-byte
+ * header ([4B csize][4B crc32c] at pba -> plen = ceil((csize+8)/4096)).
+ * seg_extent derives (0 on success; -1 when the header is unreadable or
+ * csize is out of volume bounds). seg_extent_checked additionally
+ * cross-checks that every block of the derived run is marked used in the
+ * in-memory bitmap -- the destructive-free gate: a torn header degrades
+ * to a leak (fsck reclaims), never an over-free. */
+int seg_extent(invfs_volume *v, uint64_t pba, uint32_t *csize_out,
+               uint64_t *plen_out);
+int seg_extent_checked(invfs_volume *v, uint64_t pba, uint64_t *plen_out);
 
-/* WP22d consistent-cut mapset: the set of (inode,lba) keys the replayed
- * journal maps. Built once per open/fsck; O(1) membership. */
-typedef struct {
-    uint64_t inode, lba;          /* inode==0 = empty */
-    const invfs_l2p_entry *e;     /* the newest entry with this key */
-} mapset_ent;
-typedef struct { mapset_ent *tab; size_t mask; } mapset;
-int  mapset_build(const invfs_volume *v, mapset *ms);
-int  mapset_has(const mapset *ms, uint64_t inode, uint64_t lba);
-/* the newest live entry for the key, NULL when unmapped */
-const invfs_l2p_entry *mapset_get(const mapset *ms, uint64_t inode,
-                                  uint64_t lba);
-void mapset_free(mapset *ms);
+/* ---- WP27: pba reference map (PB7 without the L2P) --------------------
+ * pba_ref_ensure builds the map from the live name-index set (idempotent,
+ * cheap after the first build); pba_ref_apply walks a just-written or
+ * just-killed record buffer and adjusts counts (no-op until the map
+ * exists); pba_ref_count answers "how many live entries name this pba". */
+int  pba_ref_ensure(invfs_volume *v);
+void pba_ref_apply(invfs_volume *v, const uint8_t *rec, uint32_t rec_len,
+                   int delta);
+uint32_t pba_ref_count(invfs_volume *v, uint64_t pba);
+/* drop the map; the next pba_ref_ensure rebuilds it from the live set */
+void pba_ref_reset(invfs_volume *v);
 
 /* WP22d consistent-cut scan set: per-name version stack built by the
- * open/fsck inode-area scan. A version is "broken" when some AST segment
- * has no mapping in the replayed journal (a drop window ate it). The live
- * version of a name is the newest non-broken one; a position-kill DELT
- * removes its version UNLESS that version's successor is broken (a torn
- * retire transaction: keep the fallback), and a DELT naming the newest
- * version ever seen kills the name outright (a user delete must not
- * resurrect older versions). */
+ * open/fsck inode-area scan. WP27: a version is "broken" when some AST
+ * entry carries an invalid pba (0 or past the volume end -- block 0 is the
+ * superblock, never a segment, and the record CRC covers the recipe, so a
+ * landed record's pbas are trustworthy; an invalid one means the record
+ * body itself was torn/rewritten underneath). The live version of a name
+ * is the newest non-broken one; a position-kill DELT removes its version
+ * UNLESS that version's successor is broken (a torn retire transaction:
+ * keep the fallback), and a DELT naming the newest version ever seen
+ * kills the name outright (a user delete must not resurrect older
+ * versions). */
 typedef struct {
     uint64_t pos, id;
     uint64_t size, ctime;
-    uint64_t miss;        /* AST segments without a mapping (0 = valid) */
+    uint64_t miss;        /* AST segments with an invalid pba (0 = valid) */
     uint8_t  broken;      /* miss != 0, or the header failed to parse */
 } scan_ver;
 typedef struct scan_name {
@@ -1062,34 +1065,44 @@ void scanset_delt(scan_set *ss, const char *name, size_t nlen,
 /* newest non-broken version, NULL when the name is lost */
 const scan_ver *scanset_live(const scan_name *e);
 void scanset_free(scan_set *ss);
-/* count the record's AST segments missing from the mapset; fills the
- * first few lost ranges for the loud log. Returns the miss count. */
-uint64_t rec_l2p_miss(const uint8_t *rec, uint32_t rec_len, uint64_t inode_id,
-                      const mapset *ms, uint64_t *miss_off, uint64_t *miss_len,
-                      unsigned *miss_n);
+/* WP27: count the record's AST entries whose pba is invalid (0 or past
+ * total_blocks); fills the first few lost ranges for the loud log.
+ * Returns the miss count. */
+uint64_t rec_pba_miss(const uint8_t *rec, uint32_t rec_len,
+                      uint64_t total_blocks, uint64_t *miss_off,
+                      uint64_t *miss_len, unsigned *miss_n);
 
-/* +1 read-heat on the live mapping for (inode,lba), once per session.
- * Read-only sessions (READONLY flag / awaiting recovery) accrue nothing.
- * WP-L2Q: RAM-only -- read touches never queue journal refreshes and never
- * dirty the volume; the pads persist inside the next compaction image
- * (sweep-decay granularity). The lookup mirrors vol_lookup_entry (the
- * session index answers it O(1)); every later touch of the pair in this
- * session is absorbed by the session set. */
+/* WP27 heat: +1 accrued read on the inode, once per session per inode
+ * (the lba argument is kept for the call sites' shape; only the inode
+ * keys the per-file counters now). Read-only sessions accrue nothing.
+ * The accrual is RAM-ONLY: it folds into the record's "invfs.heat" TLV
+ * at vol_close / the sweep's decay pass (the read path never touches the
+ * journal or the inode area). */
 void heat_touch_read(invfs_volume *v, uint64_t inode, uint64_t lba);
 
-/* max write-heat over an inode's live mappings (0 = cold/none) */
+/* stored heat of a record (0/0 when the TLV is absent) */
+int  heat_read_tlv(const uint8_t *rec, uint32_t rec_len,
+                   uint16_t *r, uint8_t *w);
+/* effective heat: stored + this session's accrued reads */
+uint16_t heat_file_r(const invfs_volume *v, uint64_t inode);
+/* max write-heat the file carries (0 = cold/none) */
 uint8_t heat_file_maxw(invfs_volume *v, uint64_t inode);
-
-/* set write-heat on every live mapping of an inode (the rewrite carry) */
+/* persist a write-heat value on the file's live record (the rewrite
+ * carry); no-op when the value is unchanged */
 void heat_file_setw(invfs_volume *v, uint64_t inode, uint8_t w);
-
-/* grab/restamp one mapping's heat around an l2p_remove+vol_map remap
- * (dedupe): heat keys on (inode,lba), not on the physical slot, so a pba
- * remap must carry it over rather than rebirth the entry cold */
-void heat_grab(invfs_volume *v, uint64_t inode, uint64_t lba,
-                      uint16_t *r, uint8_t *w);
-void heat_stamp(invfs_volume *v, uint64_t inode, uint64_t lba,
-                       uint16_t r, uint8_t w);
+/* build the INO2 ext blob for a fresh/rewritten record: old ext carried
+ * verbatim with the heat TLV inserted/replaced. Returns malloc'd blob
+ * (NULL = keep no ext), *len_out its length. When old_ext is NULL a
+ * minimal defaults ext is fabricated ONLY when there is heat to store. */
+uint8_t *heat_ext_merge(const invfs_volume *v, const uint8_t *old_ext,
+                        uint32_t old_len, int is_dir, uint16_t rheat,
+                        uint8_t wheat, uint32_t *len_out);
+/* fold the session's accrued reads into the records (vol_close / the
+ * sweep's decay pass); marks the volume dirty when anything changed */
+void heat_fold(invfs_volume *v);
+/* remove + return the session's accrued reads of `inode` (the write-commit
+ * carry moves the old id's pending touches onto the replacement record) */
+uint16_t heat_session_take(invfs_volume *v, uint64_t inode);
 
 /* Write one segment as whole blocks.
  *
@@ -1256,7 +1269,16 @@ uint64_t vol_transcode_abort(invfs_volume *v, const char *name);
 
 /* locate the ext inside a raw record; NULL when absent (v1 record) */
 const uint8_t *meta_locate_ext(const uint8_t *rec, size_t rec_len,
-                                      size_t *ext_len_out);
+                                       size_t *ext_len_out);
+
+/* WP27 fold-churn backstop behind the record append sites (defined in
+ * vol_records.c): when an append would overflow the inode area, compact
+ * the dead prefix online first (vol_inode_compact's own gates: never
+ * under a live checkpoint / read-only / a pending CMP0). Returns 0 when
+ * `need` bytes fit afterwards. Callers that hold a record position (a
+ * position-kill target) must RE-READ it after a successful call --
+ * compaction moves every record. */
+int  inode_area_make_room(invfs_volume *v, uint64_t need);
 
 /* read the latest live record for an inode id; returns malloc'd buffer and
  * optionally its name/position. Walks forward from the index hint so stale

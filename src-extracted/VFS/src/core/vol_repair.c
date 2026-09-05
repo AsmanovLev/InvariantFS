@@ -402,10 +402,22 @@ int vol_seal2_repair(invfs_volume *v, invfs_seal2_repair *rep)
         be = (const invfs_ast_block_entry *)(buf + base + ah.hdr_len);
         for (bi = 0; bi < ah.num_blocks; bi++) {
             uint64_t pba = 0, plen = 0;
-            if (vol_lookup_entry(v, ents[i].id, be[bi].block_id,
-                                 &pba, &plen) != 0 || !pba)
-                continue;
-            if (!plen) plen = 1;
+            /* WP27: the entry carries the pba; the extent derives from
+             * the segment's framed header -- and a TORN header is exactly
+             * the case this pass exists for, so there the span falls back
+             * to the contiguous allocated run (the seal stripe repair is
+             * arbitrated by the segment's own CRC once repaired, never by
+             * the derived span) */
+            pba = be[bi].pba;
+            if (!pba) continue;
+            if (seg_extent(v, pba, NULL, &plen) != 0 || !plen) {
+                uint64_t b;
+                plen = 0;
+                for (b = pba; b < v->sb.total_blocks &&
+                                bit_get(v->bitmap, b); b++)
+                    plen++;
+                if (!plen) continue;
+            }
             if (pba < ss || pba + plen > zone_end) continue;
             if (plen > 8192) continue;   /* beyond any legit segment */
             if (ncand == capcand) {

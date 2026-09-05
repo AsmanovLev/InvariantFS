@@ -141,7 +141,7 @@ int main(int argc, char **argv)
                sb->state == INVFS_STATE_RECOVERY ? "RECOVERY" : "UNKNOWN");
         printf("  live files:   %llu\n", (unsigned long long)rep.live_files);
         printf("  l2p entries:  %llu\n", (unsigned long long)rep.l2p_entries);
-        printf("  l2p misses:   %llu (AST segments without L2P - data lost)\n",
+        printf("  l2p misses:   %llu (AST segments with an invalid pba/extent - data lost)\n",
                (unsigned long long)rep.l2p_miss);
         printf("  cut records:  %llu (torn newest versions, fallback live)%s\n",
                (unsigned long long)rep.cut_records,

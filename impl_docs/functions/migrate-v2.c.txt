@@ -1,0 +1,23 @@
+abort_at         function     78 /home/user/InvariantFS/src-extracted/VFS/src/cli/migrate-v2.c static int abort_at(const char *stage)
+bit_get          function     70 /home/user/InvariantFS/src-extracted/VFS/src/cli/migrate-v2.c static int bit_get(const uint8_t *b, uint64_t i) { return (b[i / 8] >> (i % 8)) & 1; }
+bit_set          function     71 /home/user/InvariantFS/src-extracted/VFS/src/cli/migrate-v2.c static void bit_set(uint8_t *b, uint64_t i) { b[i / 8] |= (uint8_t)(1u << (i % 8)); }
+cv_flush         function    119 /home/user/InvariantFS/src-extracted/VFS/src/cli/migrate-v2.c static int cv_flush(cvio *r)
+cv_pread         function     96 /home/user/InvariantFS/src-extracted/VFS/src/cli/migrate-v2.c static int cv_pread(cvio *r, uint64_t off, void *buf, size_t len)
+cv_pwrite        function    105 /home/user/InvariantFS/src-extracted/VFS/src/cli/migrate-v2.c static int cv_pwrite(cvio *r, uint64_t off, const void *buf, size_t len)
+cvt_ext_merge    function    474 /home/user/InvariantFS/src-extracted/VFS/src/cli/migrate-v2.c static uint8_t *cvt_ext_merge(const uint8_t *old_ext, uint32_t old_len,
+cvt_extent       function    581 /home/user/InvariantFS/src-extracted/VFS/src/cli/migrate-v2.c static int cvt_extent(cvio *cv, const char *name, uint64_t pba,
+cvt_one          function    619 /home/user/InvariantFS/src-extracted/VFS/src/cli/migrate-v2.c static int cvt_one(cvt *c, uint64_t rec_pos)
+div_ceil         function    825 /home/user/InvariantFS/src-extracted/VFS/src/cli/migrate-v2.c static uint64_t div_ceil(uint64_t a, uint64_t b) { return (a + b - 1) / b; }
+find_free_run    function    810 /home/user/InvariantFS/src-extracted/VFS/src/cli/migrate-v2.c static uint64_t find_free_run(const uint8_t *bitmap, uint64_t lo,
+main             function    827 /home/user/InvariantFS/src-extracted/VFS/src/cli/migrate-v2.c int main(int argc, char **argv)
+v1_apply         function    229 /home/user/InvariantFS/src-extracted/VFS/src/cli/migrate-v2.c static int v1_apply(v1_map *m, const invfs_l2p_entry *e)
+v1_del           function    189 /home/user/InvariantFS/src-extracted/VFS/src/cli/migrate-v2.c static void v1_del(v1_map *m, uint64_t inode, uint64_t lba)
+v1_delt          function    420 /home/user/InvariantFS/src-extracted/VFS/src/cli/migrate-v2.c static void v1_delt(v1_live *L, const char *name, uint32_t nlen,
+v1_find          function    381 /home/user/InvariantFS/src-extracted/VFS/src/cli/migrate-v2.c static v1_name *v1_find(v1_live *L, const char *name, uint32_t nlen)
+v1_get           function    215 /home/user/InvariantFS/src-extracted/VFS/src/cli/migrate-v2.c static const v1_ent *v1_get(const v1_map *m, uint64_t inode, uint64_t lba)
+v1_inod          function    390 /home/user/InvariantFS/src-extracted/VFS/src/cli/migrate-v2.c static int v1_inod(v1_live *L, const char *name, uint32_t nlen,
+v1_is_live       function    461 /home/user/InvariantFS/src-extracted/VFS/src/cli/migrate-v2.c static int v1_is_live(const v1_live *L, const char *name, uint32_t nlen,
+v1_journal_load  function    253 /home/user/InvariantFS/src-extracted/VFS/src/cli/migrate-v2.c static int v1_journal_load(cvio *cv, uint64_t jbase, v1_map *m,
+v1_live_free     function    451 /home/user/InvariantFS/src-extracted/VFS/src/cli/migrate-v2.c static void v1_live_free(v1_live *L)
+v1_mix           function    142 /home/user/InvariantFS/src-extracted/VFS/src/cli/migrate-v2.c static uint64_t v1_mix(uint64_t inode, uint64_t lba)
+v1_put           function    151 /home/user/InvariantFS/src-extracted/VFS/src/cli/migrate-v2.c static int v1_put(v1_map *m, const v1_ent *e)

@@ -1,36 +1,34 @@
 __anon7f4cf80d0108 struct       51 /home/user/InvariantFS/src-extracted/VFS/src/core/volume_internal.h typedef struct { uint32_t offset, len; uint8_t kind; uint8_t *data; } flacx_cover;
 __anon7f4cf80d0208 struct       60 /home/user/InvariantFS/src-extracted/VFS/src/core/volume_internal.h typedef struct {
-__anon7f4cf80d0308 struct      209 /home/user/InvariantFS/src-extracted/VFS/src/core/volume_internal.h typedef struct {
-__anon7f4cf80d0408 struct      228 /home/user/InvariantFS/src-extracted/VFS/src/core/volume_internal.h typedef struct {
-__anon7f4cf80d0508 struct      457 /home/user/InvariantFS/src-extracted/VFS/src/core/volume_internal.h struct {
-__anon7f4cf80d0608 struct      581 /home/user/InvariantFS/src-extracted/VFS/src/core/volume_internal.h typedef struct {
-__anon7f4cf80d0708 struct      632 /home/user/InvariantFS/src-extracted/VFS/src/core/volume_internal.h typedef struct {
-__anon7f4cf80d0808 struct      646 /home/user/InvariantFS/src-extracted/VFS/src/core/volume_internal.h typedef struct {
-__anon7f4cf80d0908 struct     1020 /home/user/InvariantFS/src-extracted/VFS/src/core/volume_internal.h typedef struct {
-__anon7f4cf80d0a08 struct     1024 /home/user/InvariantFS/src-extracted/VFS/src/core/volume_internal.h typedef struct { mapset_ent *tab; size_t mask; } mapset;
-__anon7f4cf80d0b08 struct     1040 /home/user/InvariantFS/src-extracted/VFS/src/core/volume_internal.h typedef struct {
-__anon7f4cf80d0c08 struct     1053 /home/user/InvariantFS/src-extracted/VFS/src/core/volume_internal.h typedef struct {
+__anon7f4cf80d0308 struct      212 /home/user/InvariantFS/src-extracted/VFS/src/core/volume_internal.h typedef struct { uint64_t pba; uint32_t n; } pba_ref_ent;
+__anon7f4cf80d0408 struct      217 /home/user/InvariantFS/src-extracted/VFS/src/core/volume_internal.h typedef struct {
+__anon7f4cf80d0508 struct      236 /home/user/InvariantFS/src-extracted/VFS/src/core/volume_internal.h typedef struct {
+__anon7f4cf80d0608 struct      466 /home/user/InvariantFS/src-extracted/VFS/src/core/volume_internal.h struct {
+__anon7f4cf80d0708 struct      590 /home/user/InvariantFS/src-extracted/VFS/src/core/volume_internal.h typedef struct {
+__anon7f4cf80d0808 struct      641 /home/user/InvariantFS/src-extracted/VFS/src/core/volume_internal.h typedef struct {
+__anon7f4cf80d0908 struct      655 /home/user/InvariantFS/src-extracted/VFS/src/core/volume_internal.h typedef struct {
+__anon7f4cf80d0a08 struct     1043 /home/user/InvariantFS/src-extracted/VFS/src/core/volume_internal.h typedef struct {
+__anon7f4cf80d0b08 struct     1056 /home/user/InvariantFS/src-extracted/VFS/src/core/volume_internal.h typedef struct {
 dir_index_entry  struct      192 /home/user/InvariantFS/src-extracted/VFS/src/core/volume_internal.h typedef struct dir_index_entry {
 dir_index_entry  typedef     197 /home/user/InvariantFS/src-extracted/VFS/src/core/volume_internal.h } dir_index_entry;
-exer_row         typedef     584 /home/user/InvariantFS/src-extracted/VFS/src/core/volume_internal.h } exer_row;
+exer_row         typedef     593 /home/user/InvariantFS/src-extracted/VFS/src/core/volume_internal.h } exer_row;
 flacx_cover      typedef      51 /home/user/InvariantFS/src-extracted/VFS/src/core/volume_internal.h typedef struct { uint32_t offset, len; uint8_t kind; uint8_t *data; } flacx_cover;
 id_index_entry   struct      184 /home/user/InvariantFS/src-extracted/VFS/src/core/volume_internal.h typedef struct id_index_entry {
 id_index_entry   typedef     189 /home/user/InvariantFS/src-extracted/VFS/src/core/volume_internal.h } id_index_entry;
-invfs_name_fits  typedef     548 /home/user/InvariantFS/src-extracted/VFS/src/core/volume_internal.h typedef char invfs_name_fits[
-invfs_volume     struct      242 /home/user/InvariantFS/src-extracted/VFS/src/core/volume_internal.h typedef struct invfs_volume {
-invfs_volume     typedef     504 /home/user/InvariantFS/src-extracted/VFS/src/core/volume_internal.h } invfs_volume;
-l2p_idx_ent      typedef     212 /home/user/InvariantFS/src-extracted/VFS/src/core/volume_internal.h } l2p_idx_ent;
-mapset           typedef    1024 /home/user/InvariantFS/src-extracted/VFS/src/core/volume_internal.h typedef struct { mapset_ent *tab; size_t mask; } mapset;
-mapset_ent       typedef    1023 /home/user/InvariantFS/src-extracted/VFS/src/core/volume_internal.h } mapset_ent;
+invfs_name_fits  typedef     557 /home/user/InvariantFS/src-extracted/VFS/src/core/volume_internal.h typedef char invfs_name_fits[
+invfs_volume     struct      250 /home/user/InvariantFS/src-extracted/VFS/src/core/volume_internal.h typedef struct invfs_volume {
+invfs_volume     typedef     513 /home/user/InvariantFS/src-extracted/VFS/src/core/volume_internal.h } invfs_volume;
+l2p_idx_ent      typedef     220 /home/user/InvariantFS/src-extracted/VFS/src/core/volume_internal.h } l2p_idx_ent;
 name_index_entry struct      163 /home/user/InvariantFS/src-extracted/VFS/src/core/volume_internal.h typedef struct name_index_entry {
 name_index_entry typedef     175 /home/user/InvariantFS/src-extracted/VFS/src/core/volume_internal.h } name_index_entry;
-scan_name        struct     1046 /home/user/InvariantFS/src-extracted/VFS/src/core/volume_internal.h typedef struct scan_name {
-scan_name        typedef    1052 /home/user/InvariantFS/src-extracted/VFS/src/core/volume_internal.h } scan_name;
-scan_set         typedef    1056 /home/user/InvariantFS/src-extracted/VFS/src/core/volume_internal.h } scan_set;
-scan_ver         typedef    1045 /home/user/InvariantFS/src-extracted/VFS/src/core/volume_internal.h } scan_ver;
-seal_view        typedef     658 /home/user/InvariantFS/src-extracted/VFS/src/core/volume_internal.h } seal_view;
+pba_ref_ent      typedef     212 /home/user/InvariantFS/src-extracted/VFS/src/core/volume_internal.h typedef struct { uint64_t pba; uint32_t n; } pba_ref_ent;
+scan_name        struct     1049 /home/user/InvariantFS/src-extracted/VFS/src/core/volume_internal.h typedef struct scan_name {
+scan_name        typedef    1055 /home/user/InvariantFS/src-extracted/VFS/src/core/volume_internal.h } scan_name;
+scan_set         typedef    1059 /home/user/InvariantFS/src-extracted/VFS/src/core/volume_internal.h } scan_set;
+scan_ver         typedef    1048 /home/user/InvariantFS/src-extracted/VFS/src/core/volume_internal.h } scan_ver;
+seal_view        typedef     667 /home/user/InvariantFS/src-extracted/VFS/src/core/volume_internal.h } seal_view;
 tarx_member      typedef      66 /home/user/InvariantFS/src-extracted/VFS/src/core/volume_internal.h } tarx_member;
-tz_candidate     typedef     233 /home/user/InvariantFS/src-extracted/VFS/src/core/volume_internal.h } tz_candidate;
-tz_owner         typedef     640 /home/user/InvariantFS/src-extracted/VFS/src/core/volume_internal.h } tz_owner;
-wp25_ent         struct      219 /home/user/InvariantFS/src-extracted/VFS/src/core/volume_internal.h typedef struct wp25_ent {
-wp25_ent         typedef     222 /home/user/InvariantFS/src-extracted/VFS/src/core/volume_internal.h } wp25_ent;
+tz_candidate     typedef     241 /home/user/InvariantFS/src-extracted/VFS/src/core/volume_internal.h } tz_candidate;
+tz_owner         typedef     649 /home/user/InvariantFS/src-extracted/VFS/src/core/volume_internal.h } tz_owner;
+wp25_ent         struct      227 /home/user/InvariantFS/src-extracted/VFS/src/core/volume_internal.h typedef struct wp25_ent {
+wp25_ent         typedef     230 /home/user/InvariantFS/src-extracted/VFS/src/core/volume_internal.h } wp25_ent;

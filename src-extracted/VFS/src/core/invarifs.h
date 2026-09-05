@@ -18,7 +18,14 @@
    If it ever moves, it moves in format v2 with a compatibility path. */
 #define INVFS_MAGIC       "InvariFS\0"   /* 8 bytes */
 #define INVFS_BLOCK_SIZE  4096
-#define INVFS_VERSION     1
+/* Format version 2 (WP27): AST block entries carry the physical block
+ * address (24B -> 32B), the L2P journal shrinks to the owner-scoped WAL,
+ * heat lives in the INO2 ext, and the bitmap is a rebuildable cache of
+ * records+WAL. The on-disk signal is VOLF_ASTV2 in sb.vol_flags (outside
+ * the checksum, the v0.9 policy-field convention); a v2 reader refuses a
+ * volume without it, loudly, pointing at invf-migrate-v2 (no dual
+ * readers). */
+#define INVFS_VERSION     2
 #define INVFS_JOURNAL_BLOCKS 8192  /* 32MB total: two 16MB journal slots (WP22d) */
 
 /* ---- WP22d: crash-atomic L2P journal (double-buffered slots) ----
@@ -212,6 +219,13 @@ typedef struct {
 /* volume flags (sb.vol_flags) */
 #define VOLF_READONLY 0x00000001
 #define VOLF_META2    0x00000002  /* records may carry "INO2" metadata ext */
+/* WP27: format v2 -- AST entries are 32B and carry the segment pba (the
+ * L2P journal is the owner-scoped WAL only). Set by mkfs from format v2 on
+ * and by invf-convert on a converted v1 volume; a v2 reader refuses a
+ * volume without it (no dual readers -- invf-migrate-v2 is the bridge).
+ * Old binaries ignore the bit (it sits outside the superblock checksum)
+ * and read the volume as-is, which fails loudly at the first 32B entry. */
+#define VOLF_ASTV2    0x00000008
 /* WP22a/H5: WHY the volume is read-only. alloc_blocks raises VOLF_READONLY
  * together with VOLF_RO_SPACE when the free count hits hard_min (the space
  * latch); an operator/tool hold (vol_set_readonly) sets VOLF_READONLY alone.
@@ -479,7 +493,90 @@ typedef struct {
 } invfs_cmps;                   /* 24 bytes, block-padded */
 #pragma pack(pop)
 
+/* ---- WP27: CVT0 v1->v2 conversion descriptor (block 0 reserved area) ---
+ * Lives at byte offset 0x360 of block 0, past the superblock, RDP0
+ * (0x100), RSZ0 (0x140), CKP0 (0x220), CMP0 (0x260) and DEVT (0x2A0).
+ * Volumes that never saw a converter carry zeros there ("absent").
+ *
+ * invf-migrate-v2 rewrites a v1 volume in place: records grow 8 bytes per
+ * segment (the pba), so the converted inode stream can overlap the one it
+ * replaces. The conversion therefore runs the house stage -> arm -> apply
+ * -> commit protocol: the v2 products (new inode stream + rebuilt
+ * owner-WAL slot image + derived bitmap) are staged contiguously in free
+ * space and CRC-verified, then this descriptor arms the conversion (the
+ * superblock goes RECOVERY in the same block-0 write), then the payloads
+ * are copied home (idempotent: the apply reads only the staging area), and
+ * the commit (superblock with VOLF_ASTV2 + cleared descriptor, one block-0
+ * write) lands last. A crash anywhere before the commit re-enters the
+ * apply at the next invf-migrate-v2 run -- or `invf-migrate-v2 --abort`
+ * disarms a conversion whose apply never started.
+ *
+ *   0x360  char magic[4]        "CVT0"
+ *   0x364  u32 version          1
+ *   0x368  u64 stage_pba        staging run: CVTS header block + payload
+ *   0x370  u64 stage_blocks
+ *   0x378  u64 stream_bytes     v2 inode stream bytes
+ *   0x380  u64 jrn_bytes        owner-WAL slot image bytes (0 = empty)
+ *   0x388  u64 bm_bytes         derived bitmap bytes
+ *   0x390  u64 jrn_seq          sequence the rewritten journal carries
+ *   0x398  u32 crc32c           over the descriptor with this field 0
+ * 64 bytes total; the rest of block 0 stays reserved-zero. */
+#define INVFS_CVT0_OFF 0x360
+#pragma pack(push, 1)
+typedef struct {
+    char     magic[4];          /* 0x360 "CVT0" */
+    uint32_t version;           /* 0x364 */
+    uint64_t stage_pba;         /* 0x368 */
+    uint64_t stage_blocks;      /* 0x370 */
+    uint64_t stream_bytes;      /* 0x378 */
+    uint64_t jrn_bytes;         /* 0x380 */
+    uint64_t bm_bytes;          /* 0x388 */
+    uint64_t jrn_seq;           /* 0x390 */
+    uint32_t crc32c;            /* 0x398 */
+} invfs_cvt0;                   /* 0x39C - 0x360 = 60 bytes, pad to 64 */
+#pragma pack(pop)
+
+/* The conversion staging run's own header, one block at stage_pba; the
+ * payload follows contiguously: stream_bytes of v2 inode records, then
+ * jrn_bytes of journal-slot image, then bm_bytes of bitmap. payload_crc
+ * covers exactly those stream+jrn+bm bytes (the RSZS rule). */
+#pragma pack(push, 1)
+typedef struct {
+    char     magic[4];          /* "CVTS" */
+    uint32_t version;           /* 1 */
+    uint64_t stream_bytes;
+    uint64_t jrn_bytes;
+    uint64_t bm_bytes;
+    uint32_t payload_crc;
+    uint32_t crc32c;            /* over the header with this field 0 */
+} invfs_cvts;                   /* 40 bytes, block-padded */
+#pragma pack(pop)
+
+/* WP27: per-file heat counters live in the INO2 ext as an xattr TLV of
+ * this name (moved out of the L2P journal pads -- the read path never
+ * touches the journal any more). Value, 4 bytes:
+ *   [u16 LE rheat][u8 wheat][u8 reserved]
+ * Persistence: read touches accrue per-inode in RAM and fold into the
+ * records at the sweep's decay pass (or an explicit vol_heat_persist);
+ * rewrites carry wheat+1 into the replacement record. Heat is advisory:
+ * a crash (or a close without a persist) loses only the pending
+ * touches. */
+#define INVFS_XATTR_HEAT "invfs.heat"
+
 /* AST block entry — one byte-range mapping (kernel binary format).
+ *
+ * WP27 (format v2): 24B -> 32B, adding the physical block address.
+ * Readers resolve segments directly from the entry's pba; the L2P journal
+ * is no longer consulted for file data (it survives only as the
+ * owner-scoped WAL: "\x01tzb" batches, "\x01parity*" seal, "\x01reten"
+ * retention, "\x01rawm"/"\x01tier0" device sidecars).
+ *
+ * There is deliberately NO stored physical-block-count field: a segment's
+ * extent is derivable from its own framed header ([4B csize][4B crc] at
+ * pba -> plen = ceil((csize+8)/4096)). Destructive frees cross-check the
+ * derived extent against the bitmap (a contiguous allocated run starting
+ * at pba) plus the entry's logical length for the per-segment codecs, so
+ * a torn header degrades to a leak (fsck-reclaimable), never an over-free.
  *
  * block_id is 24 bits: at most 2^24 segments per file. At the 64 KB
  * SEGMENT_SIZE that is exactly 2^24 * 2^16 = 2^40 bytes == MAX_FILE_SIZE,
@@ -487,15 +584,33 @@ typedef struct {
  * sanity bound are mutually consistent -- 64 KB segments never need a
  * wider block_id. (Files that large SHOULD rather use fewer, bigger
  * segments; the format simply allows the 64 KB worst case -- a 1 TB file
- * is a ~384 MB recipe, rec_len is u32 and holds it. See doc/02.) */
+ * is a ~384 MB recipe, rec_len is u32 and holds it. See doc/02.)
+ *
+ * block_id REMAINS the semantic slot id: the owner-WAL key for
+ * owner-referenced shapes (a batch member's block_id is its batch_seq,
+ * block_offset its offset in the DECODED batch; pba duplicates the batch's
+ * address so reads never touch the journal). */
 typedef struct {
     uint64_t file_offset;           /* offset in original file */
     uint64_t length;                /* length of range */
     uint32_t zone : 2;              /* 0=raw 1=text 2=binary */
     uint32_t algo : 6;              /* 0=none 1=zstd 2=ppmd 3=ape 4=jxl */
-    uint32_t block_id : 24;         /* block number in zone */
-    uint32_t block_offset;          /* offset within block */
-} invfs_ast_block_entry;            /* 24 bytes */
+    uint32_t block_id : 24;         /* segment index / owner map key */
+    uint32_t block_offset;          /* offset within the decoded batch */
+    uint64_t pba;                   /* physical block address (WP27) */
+} invfs_ast_block_entry;            /* 32 bytes */
+
+/* The format-v1 entry (24B, no pba): physical addresses lived only in the
+ * L2P journal, keyed (inode, block_id). Read now only by invf-convert,
+ * which resolves pbas from the v1 journal and rewrites the records. */
+typedef struct {
+    uint64_t file_offset;
+    uint64_t length;
+    uint32_t zone : 2;
+    uint32_t algo : 6;
+    uint32_t block_id : 24;
+    uint32_t block_offset;
+} invfs_ast_block_entry_v1;         /* 24 bytes */
 
 /* recursion / allocation guards (deep protection) */
 #define MAX_AST_CHILDREN      65536u   /* max members per container */
@@ -759,17 +874,16 @@ typedef struct invfs_meta_ext_hdr {
 
 /* L2P journal entry (append-only)
  *
- * pad[3] is the WP19 heat home (it rides inside the CRC region, so the
- * counters are as durable as the mapping itself):
- *   pad[0..1] = u16 LE read-heat  -- saturating, +1 per open-session that
- *               touches the entry, >>= 1 per sweep run (exponential decay)
- *   pad[2]    = u8 write-heat     -- saturating, born 1 on create, old+1
- *               carried across a rewrite, -1 per sweep run
- * Keyed by (inode,lba) by construction, so it survives pba remaps (dedupe
- * re-keys preserve it). New entries (rewrites, transcodes) start cold:
- * read-heat resets (seeded by INVFS_HEAT_INIT at create), write-heat
- * accumulates across rewrites only. 0,0,0 on pre-WP19 volumes = cold --
- * no migration, nothing asserts pad==0.
+ * WP27: the journal is now the OWNER-SCOPED WAL only: it maps
+ * (owner_inode, ordinal) -> (pba, blocks) for the hidden owner records
+ * ("\x01tzb" batches, "\x01parity*" seal, "\x01reten" retention,
+ * "\x01rawm"/"\x01tier0" device sidecars). File data segments resolve
+ * from their records' AST entries (the pba field); the read path never
+ * consults this table.
+ *
+ * pad[3]: WP19 used to keep the heat counters here; format v2 moved them
+ * into the records' INO2 ext (INVFS_XATTR_HEAT). The bytes stay in the
+ * wire format (the journal layout is unchanged) but carry 0.
  *
  * crc: in the legacy flat log (pad2 == 0) a bare CRC32C over
  * entry[0..offsetof(crc)]; in slotted mode chained from the previous

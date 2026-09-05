@@ -443,6 +443,8 @@ int vol_ckp_end(invfs_volume *v, uint64_t *ranges_out, uint64_t *blocks_out)
             e->algo = INVFS_ALGO_NONE;
             e->block_id = (uint32_t)(i - base);
             e->block_offset = 0;
+            e->pba = ent[2 * i];   /* WP27: self-describing (fsck derives
+                                    * the bitmap from records) */
             if (vol_map(v, oid, i - base, ent[2 * i],
                         (uint32_t)ent[2 * i + 1]) != 0) { rc = -1; break; }
         }
@@ -603,8 +605,6 @@ int ckp_stage_replay(invfs_volume *v)
 
     v->l2p_count = 0;
     v->jops_n = 0;
-    v->j_heat_n = 0;
-    v->j_heat_all = 0;
     l2p_idx_reset(v);   /* WP-L2Q: the staged replay below re-seeds it */
 
     if (stage_len) {
@@ -883,20 +883,38 @@ int vol_rollback(invfs_volume *v, uint64_t *reclaimed_out)
                 io_write(&v->io, &z, sizeof z) != 0)
                 return -1;
         }
-        /* decapitate: zero the guard so every record scan (vol_open AND
-         * fsck's full-tail pass) stops exactly at the checkpoint; the
-         * pre-sweep prefix is byte-intact (append-only), the post-sweep
-         * bytes past the guard are dead space future appends overwrite */
+        /* decapitate: zero the whole dead tail [iapos, old append
+         * pointer), not just one guard block. The one-block guard was the
+         * pre-WP27 shape: with nothing ever appended post-rollback, the
+         * scan stopped at the zeros forever. WP27's close-time heat fold
+         * DOES append in later read-only sessions, and once the appended
+         * stream crosses a single guard block it can resync into the old
+         * tail (the fold's [INOD][DELT] pairs share the sweep-era pairs'
+         * sizes, so an exact record-boundary landing is likely, not
+         * freak): the whole post-sweep history would resurrect. A fully
+         * zeroed tail can never parse again. */
         {
-            uint8_t z[INVFS_BLOCK_SIZE];
+            uint8_t *z;
+            uint64_t zpos = iapos;
             uint64_t room = v->inode_area_end - iapos;
-            memset(z, 0, sizeof z);
-            if (room > 0) {
-                if (room > sizeof z) room = sizeof z;
-                if (io_seek(&v->io, iapos) != 0 ||
-                    io_write(&v->io, z, (size_t)room) != 0)
+            uint64_t dead = v->inode_area_pos > iapos
+                          ? v->inode_area_pos - iapos : 0;
+            if (dead > room) dead = room;
+            z = (uint8_t *)malloc(INVFS_BLOCK_SIZE);
+            if (!z) return -1;
+            memset(z, 0, INVFS_BLOCK_SIZE);
+            while (dead) {
+                size_t n = dead > INVFS_BLOCK_SIZE ? INVFS_BLOCK_SIZE
+                                                   : (size_t)dead;
+                if (io_seek(&v->io, zpos) != 0 ||
+                    io_write(&v->io, z, n) != 0) {
+                    free(z);
                     return -1;
+                }
+                zpos += n;
+                dead -= n;
             }
+            free(z);
         }
 #ifndef _WIN32
         if (rb_abort_at("restored")) {

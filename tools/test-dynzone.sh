@@ -101,7 +101,7 @@ zones_of() { $B/meta_probe "$1" --heat "$2" 2>/dev/null \
            END{for(k in z) printf "zone=%s:%d ", k, z[k]}'; }
 # 0 = the file has at least one L2P entry at pba >= $3
 has_pba_past() { $B/meta_probe "$1" --heat "$2" 2>/dev/null \
-    | awk -v lo="$3" '/^entry /{for(i=1;i<=NF;i++) if ($i ~ /^pba=/)
+    | awk -v lo="$3" '/^ast /{for(i=1;i<=NF;i++) if ($i ~ /^pba=/)
         {sub("pba=","",$i); if ($i+0 >= lo) found=1}} END{exit !found}'; }
 
 echo "== build the dzpick helper (public API only; sealpick convention) =="
@@ -141,19 +141,46 @@ int main(int argc, char **argv)
         return rc ? 1 : 0;
     }
     if (strcmp(argv[2], "firstshadow") == 0) {
+        /* WP27: the file's segments live in its record's AST entries
+         * (pbas inline); the WAL is owner-only, so this reads the live
+         * record directly (the meta_probe pattern) */
         const invfs_superblock *sb = vol_sb(v);
         uint64_t id = vol_find(v, argv[3]);
-        const invfs_l2p_entry *l2p;
-        size_t n = 0, i;
+        uint64_t pos;
         if (!id) { vol_close(v); return 1; }
-        l2p = vol_l2p(v, &n);
-        for (i = 0; i < n; i++)
-            if (l2p[i].type == INVFS_JRN_MAP && l2p[i].inode == id &&
-                l2p[i].pba >= sb->shadow_zone_start) {
-                printf("%llu\n", (unsigned long long)l2p[i].pba);
-                vol_close(v);
-                return 0;
+        pos = vol_inode_area_start(v);
+        while (pos) {
+            uint32_t magic, rl;
+            uint64_t ino, fsz, np;
+            np = vol_inode_next(v, pos, &magic, &ino, &fsz, NULL, 0, &rl);
+            if (!np) break;
+            pos = np;
+            if (magic != INODE_REC_MAGIC || ino != id) continue;
+            {
+                uint8_t *rb = malloc(rl);
+                invfs_ast_hdr ah;
+                size_t base = sizeof(invfs_inode_rec);
+                uint32_t k;
+                int done = 0;
+                if (rb && vol_read_raw(v, np - rl - 4, rb, rl) == 0 &&
+                    invfs_ast_hdr_parse(rb + base, rl - base, &ah) == 0) {
+                    for (k = 0; k < ah.num_blocks; k++) {
+                        const invfs_ast_block_entry *e =
+                            (const invfs_ast_block_entry *)
+                            (rb + base + ah.hdr_len +
+                             (size_t)k * sizeof(*e));
+                        if (e->length && e->pba >= sb->shadow_zone_start) {
+                            printf("%llu\n", (unsigned long long)e->pba);
+                            free(rb);
+                            vol_close(v);
+                            return 0;
+                        }
+                    }
+                }
+                free(rb);
+                (void)done;
             }
+        }
         vol_close(v);
         return 1;   /* no shadow-extent block */
     }

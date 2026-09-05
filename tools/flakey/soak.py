@@ -265,7 +265,7 @@ class Soak:
             self.log("op rename %s->%s -> ERR %s (mode=%s)"
                      % (src, dst, e.strerror or e, self.mode))
             return
-        ent = self.model.pop(src)
+        ent = self.model[src]
         # rename onto an existing name keeps the victim's history around
         # (the victim is overwritten; its old versions stay acceptable)
         victim = self.model.get(dst)
@@ -273,9 +273,12 @@ class Soak:
             ent["hist"] = ent["hist"] + victim["hist"]
         ent["deleted"] = False
         self.model[dst] = ent
+        # the source is gone from the live volume, but a rollback can
+        # legitimately resurrect it (WP21 time travel): keep its history
+        # marked-deleted so a resurrection is recognized, never a ghost
+        self.model[src] = {"hist": list(ent["hist"]), "deleted": True}
         self.n_ops += 1
         self.log("op rename %s->%s ok (mode=%s)" % (src, dst, self.mode))
-
     def op_delete(self):
         live = [n for n, e in self.model.items() if not e["deleted"]
                 and n.startswith(("s", "r"))]

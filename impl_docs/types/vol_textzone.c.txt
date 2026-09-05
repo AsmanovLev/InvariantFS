@@ -1,8 +1,8 @@
 __anoncab5b9a50108 struct       11 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_textzone.c typedef struct {
 __anoncab5b9a50208 struct       20 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_textzone.c typedef struct {
 __anoncab5b9a50308 struct       35 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_textzone.c typedef struct {
-__anoncab5b9a50408 struct      352 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_textzone.c typedef struct {
-tz_ctx           typedef     375 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_textzone.c } tz_ctx;
+__anoncab5b9a50408 struct      360 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_textzone.c typedef struct {
+tz_ctx           typedef     383 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_textzone.c } tz_ctx;
 tz_member        typedef      31 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_textzone.c } tz_member;
 tz_sealed        typedef      39 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_textzone.c } tz_sealed;
 tz_slice         typedef      16 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_textzone.c } tz_slice;

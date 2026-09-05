@@ -1,45 +1,46 @@
-cmp0_crc         function   1478 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_records.c static uint32_t cmp0_crc(const invfs_cmp0 *cd)
-cmp0_read        function   1503 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_records.c static int cmp0_read(invfs_volume *v, invfs_cmp0 *out)
-cmp_abort_at     function   1559 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_records.c static int cmp_abort_at(const char *stage)
-cmp_drop         function   1351 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_records.c static void cmp_drop(cmp_nameset *s, const char *name, size_t nlen)
-cmp_entry_cmp    function   1451 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_records.c static int cmp_entry_cmp(const void *a, const void *b)
-cmp_find         function   1292 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_records.c static cmp_name *cmp_find(const cmp_nameset *s, const char *name, size_t nlen)
-cmp_free         function   1363 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_records.c static void cmp_free(cmp_nameset *s)
-cmp_grow         function   1302 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_records.c static void cmp_grow(cmp_nameset *s)
-cmp_put          function   1321 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_records.c static void cmp_put(cmp_nameset *s, const char *name, size_t nlen,
-collect_text_lbas function    261 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_records.c static size_t collect_text_lbas(invfs_volume *v, uint64_t inode_id,
-compact_apply    function   1573 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_records.c static int compact_apply(invfs_volume *v, uint64_t stage_pba,
-compact_block0_write function   1523 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_records.c static int compact_block0_write(invfs_volume *v, int latch,
-compact_desc_sane function   1670 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_records.c static int compact_desc_sane(invfs_volume *v, const invfs_cmp0 *cd)
-compact_repoint  function   1737 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_records.c static int compact_repoint(invfs_volume *v, uint64_t s_bytes)
-compact_scan_live function   1381 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_records.c static uint64_t compact_scan_live(invfs_volume *v, cmp_nameset *live,
-compact_stage_verify function   1627 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_records.c static int compact_stage_verify(invfs_volume *v, const invfs_cmp0 *cd)
-meta_locate_ext  function    654 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_records.c const uint8_t *meta_locate_ext(const uint8_t *rec, size_t rec_len,
-meta_parse_ext   function    619 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_records.c static int meta_parse_ext(const uint8_t *p, size_t n,
-meta_pub_from_hdr_defaults function    742 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_records.c static void meta_pub_from_hdr_defaults(invfs_meta_pub *m, uint8_t type)
-meta_read_record_by_id function    674 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_records.c int meta_read_record_by_id(invfs_volume *v, uint64_t inode_id,
-meta_read_record_by_id_p function   1205 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_records.c int meta_read_record_by_id_p(invfs_volume *v, uint64_t id, uint8_t **buf, uint32_t *rl)
-meta_rewrite     function    769 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_records.c static uint64_t meta_rewrite(invfs_volume *v, uint64_t inode_id,
-meta_serialize   function    713 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_records.c static size_t meta_serialize(const invfs_meta_pub *m,
-record_owns_siblings function   1160 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_records.c int record_owns_siblings(const uint8_t *rec, uint32_t rl)
-vol_apply_meta   function    861 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_records.c uint64_t vol_apply_meta(invfs_volume *v, const char *name,
-vol_ast_blob_len function    580 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_records.c static size_t vol_ast_blob_len(const uint8_t *rec, size_t rec_len)
-vol_compact_pending function   1489 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_records.c int vol_compact_pending(invfs_volume *v)
-vol_compact_recover function   1698 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_records.c int vol_compact_recover(invfs_volume *v)
+cmp0_crc         function   1505 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_records.c static uint32_t cmp0_crc(const invfs_cmp0 *cd)
+cmp0_read        function   1530 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_records.c static int cmp0_read(invfs_volume *v, invfs_cmp0 *out)
+cmp_abort_at     function   1586 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_records.c static int cmp_abort_at(const char *stage)
+cmp_drop         function   1378 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_records.c static void cmp_drop(cmp_nameset *s, const char *name, size_t nlen)
+cmp_entry_cmp    function   1478 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_records.c static int cmp_entry_cmp(const void *a, const void *b)
+cmp_find         function   1319 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_records.c static cmp_name *cmp_find(const cmp_nameset *s, const char *name, size_t nlen)
+cmp_free         function   1390 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_records.c static void cmp_free(cmp_nameset *s)
+cmp_grow         function   1329 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_records.c static void cmp_grow(cmp_nameset *s)
+cmp_put          function   1348 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_records.c static void cmp_put(cmp_nameset *s, const char *name, size_t nlen,
+compact_apply    function   1600 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_records.c static int compact_apply(invfs_volume *v, uint64_t stage_pba,
+compact_block0_write function   1550 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_records.c static int compact_block0_write(invfs_volume *v, int latch,
+compact_desc_sane function   1714 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_records.c static int compact_desc_sane(invfs_volume *v, const invfs_cmp0 *cd)
+compact_repoint  function   1781 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_records.c static int compact_repoint(invfs_volume *v, uint64_t s_bytes)
+compact_scan_live function   1408 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_records.c static uint64_t compact_scan_live(invfs_volume *v, cmp_nameset *live,
+compact_stage_verify function   1671 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_records.c static int compact_stage_verify(invfs_volume *v, const invfs_cmp0 *cd)
+inode_area_make_room function   1292 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_records.c int inode_area_make_room(invfs_volume *v, uint64_t need)
+meta_locate_ext  function    649 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_records.c const uint8_t *meta_locate_ext(const uint8_t *rec, size_t rec_len,
+meta_parse_ext   function    614 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_records.c static int meta_parse_ext(const uint8_t *p, size_t n,
+meta_pub_from_hdr_defaults function    737 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_records.c static void meta_pub_from_hdr_defaults(invfs_meta_pub *m, uint8_t type)
+meta_read_record_by_id function    669 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_records.c int meta_read_record_by_id(invfs_volume *v, uint64_t inode_id,
+meta_read_record_by_id_p function   1212 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_records.c int meta_read_record_by_id_p(invfs_volume *v, uint64_t id, uint8_t **buf, uint32_t *rl)
+meta_rewrite     function    764 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_records.c static uint64_t meta_rewrite(invfs_volume *v, uint64_t inode_id,
+meta_serialize   function    708 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_records.c static size_t meta_serialize(const invfs_meta_pub *m,
+record_owns_siblings function   1167 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_records.c int record_owns_siblings(const uint8_t *rec, uint32_t rl)
+retire_free_file_blocks function    295 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_records.c static void retire_free_file_blocks(invfs_volume *v, uint64_t inode_id,
+vol_apply_meta   function    868 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_records.c uint64_t vol_apply_meta(invfs_volume *v, const char *name,
+vol_ast_blob_len function    575 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_records.c static size_t vol_ast_blob_len(const uint8_t *rec, size_t rec_len)
+vol_compact_pending function   1516 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_records.c int vol_compact_pending(invfs_volume *v)
+vol_compact_recover function   1742 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_records.c int vol_compact_recover(invfs_volume *v)
 vol_create_file  function     10 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_records.c uint64_t vol_create_file(invfs_volume *v, const char *name,
-vol_create_special function    898 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_records.c uint64_t vol_create_special(invfs_volume *v, const char *name,
-vol_create_symlink function    872 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_records.c uint64_t vol_create_symlink(invfs_volume *v, const char *name,
-vol_delete_inode function    485 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_records.c int vol_delete_inode(invfs_volume *v, uint64_t inode_id, const char *name)
-vol_delete_siblings function    502 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_records.c int vol_delete_siblings(invfs_volume *v, const char *name)
-vol_get_class    function   1112 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_records.c int vol_get_class(invfs_volume *v, uint64_t inode_id,
-vol_get_meta     function    752 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_records.c int vol_get_meta(invfs_volume *v, uint64_t inode_id, invfs_meta_pub *out)
-vol_get_xattr    function    926 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_records.c int vol_get_xattr(invfs_volume *v, uint64_t inode_id, const char *xn,
-vol_inode_compact function   1766 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_records.c int vol_inode_compact(invfs_volume *v, uint64_t *before_out,
-vol_inode_live_bytes function   1464 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_records.c uint64_t vol_inode_live_bytes(invfs_volume *v)
-vol_list_xattr   function   1073 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_records.c int vol_list_xattr(invfs_volume *v, uint64_t inode_id,
-vol_remove_xattr function   1026 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_records.c int vol_remove_xattr(invfs_volume *v, uint64_t inode_id, const char *xn)
-vol_retire_inode function    322 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_records.c static int vol_retire_inode(invfs_volume *v, uint64_t inode_id,
-vol_set_xattr    function    968 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_records.c int vol_set_xattr(invfs_volume *v, uint64_t inode_id, const char *xn,
-vol_stamp_class  function   1127 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_records.c int vol_stamp_class(invfs_volume *v, uint64_t inode_id,
-vol_transcode_abort function    552 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_records.c uint64_t vol_transcode_abort(invfs_volume *v, const char *name)
-xattr_tlv_size   function    608 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_records.c static size_t xattr_tlv_size(const uint8_t *p, size_t avail)
+vol_create_special function    905 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_records.c uint64_t vol_create_special(invfs_volume *v, const char *name,
+vol_create_symlink function    879 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_records.c uint64_t vol_create_symlink(invfs_volume *v, const char *name,
+vol_delete_inode function    480 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_records.c int vol_delete_inode(invfs_volume *v, uint64_t inode_id, const char *name)
+vol_delete_siblings function    497 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_records.c int vol_delete_siblings(invfs_volume *v, const char *name)
+vol_get_class    function   1119 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_records.c int vol_get_class(invfs_volume *v, uint64_t inode_id,
+vol_get_meta     function    747 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_records.c int vol_get_meta(invfs_volume *v, uint64_t inode_id, invfs_meta_pub *out)
+vol_get_xattr    function    933 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_records.c int vol_get_xattr(invfs_volume *v, uint64_t inode_id, const char *xn,
+vol_inode_compact function   1810 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_records.c int vol_inode_compact(invfs_volume *v, uint64_t *before_out,
+vol_inode_live_bytes function   1491 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_records.c uint64_t vol_inode_live_bytes(invfs_volume *v)
+vol_list_xattr   function   1080 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_records.c int vol_list_xattr(invfs_volume *v, uint64_t inode_id,
+vol_remove_xattr function   1033 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_records.c int vol_remove_xattr(invfs_volume *v, uint64_t inode_id, const char *xn)
+vol_retire_inode function    343 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_records.c static int vol_retire_inode(invfs_volume *v, uint64_t inode_id,
+vol_set_xattr    function    975 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_records.c int vol_set_xattr(invfs_volume *v, uint64_t inode_id, const char *xn,
+vol_stamp_class  function   1134 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_records.c int vol_stamp_class(invfs_volume *v, uint64_t inode_id,
+vol_transcode_abort function    547 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_records.c uint64_t vol_transcode_abort(invfs_volume *v, const char *name)
+xattr_tlv_size   function    603 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_records.c static size_t xattr_tlv_size(const uint8_t *p, size_t avail)

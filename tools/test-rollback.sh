@@ -463,7 +463,7 @@ $RP "$IMGG" ckp | grep -q "present=1" || fail "G: no live checkpoint"
 python3 -c "open('$WORK/edit/fill.bin','wb').write(__import__('os').urandom(120*1024*1024))"
 $B/invf-cp "$IMGG" "$WORK/edit/fill.bin" fill.bin >/dev/null || fail "G: fill.bin"
 $B/meta_probe "$IMGG" --heat fill.bin > "$WORK/probe-g.txt" 2>/dev/null
-awk -v lo="$SHADOW_LO" '/^entry /{for(i=1;i<=NF;i++) if ($i ~ /^pba=/) \
+awk -v lo="$SHADOW_LO" '/^ast /{for(i=1;i<=NF;i++) if ($i ~ /^pba=/) \
     {sub("pba=","",$i); if ($i+0 >= lo) found=1}} END{exit !found}' \
     "$WORK/probe-g.txt" \
     || fail "G: RAW share never exceeded (no overflow into shadow space)"

@@ -46,15 +46,16 @@ export INVFS_DEV1=$D1   # the device-1 locator (wins over the DEVT hint)
 
 fail() { echo "FAIL: $*"; exit 1; }
 
-# max rheat over a file's live entries (newest journal entry per lba wins
-# in meta_probe output order: the LAST matching line carries the live value)
+# the file's read heat (WP27: per-file, from the record's heat TLV;
+# awk-only: grep would fail the pipeline on an absent TLV under pipefail)
 rheat_max() {
-    $B/meta_probe "$1" --heat "$2" | grep "^entry " |
-      sed "s/.*rheat=//" | awk '{print $1}' | sort -n | tail -1
+    $B/meta_probe "$1" --heat "$2" | awk \
+        '/^heat /{for(i=1;i<=NF;i++) if ($i ~ /^rheat=/) {sub("rheat=","",$i); print $i; found=1}}
+         END{if(!found) print 0}'
 }
 # first segment's pba for a file
 pba0() {
-    $B/meta_probe "$1" --heat "$2" | grep "^entry lba=0 " |
+    $B/meta_probe "$1" --heat "$2" | grep "^ast i=0 " |
       tail -1 | sed "s/.*pba=//" | awk '{print $1}'
 }
 
@@ -122,9 +123,9 @@ HP=$(pba0 "$D0" hot.bin)
 echo "hot.bin canonical at pba $HP (dev1 shadow)"
 
 echo "== leg 4: heat -> dev0 acceleration copies =="
-# WP-L2Q: read heat is RAM-only per session and persists folded into a
-# compaction image (no per-read journal refreshes) -- the pump reads the
-# file once per session and force-compacts, standing in for sweep cadence.
+# WP27: read heat accrues RAM-only per session; the pump persists it via
+# vol_heat_persist (the sweep-cadence fold, without the sweep's decay):
+# it reads the file once per session, standing in for sweep cadence.
 for i in $(seq 16); do
     INVFS_JRN_FORCE_COMPACT=1 $B/invf-l2ptest pump "$D0" hot.bin >/dev/null 2>&1
 done

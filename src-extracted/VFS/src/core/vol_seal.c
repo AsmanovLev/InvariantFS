@@ -331,7 +331,13 @@ int seal_seg_verify(const uint8_t *seg, uint64_t plen,
  * the whole segment (plen blocks), tries the stripe-syndrome repairs and
  * returns the verified payload (malloc'd, *csize_out bytes). On success the
  * restored block is written back when the volume is writable and the
- * recovery is logged. -1 = no recovery: the caller's original error. */
+ * recovery is logged. -1 = no recovery: the caller's original error.
+ *
+ * WP27: callers no longer carry the extent (the 32B AST entry has pba but
+ * no length field): plen == 0 derives it from the segment's own framed
+ * header (csize at pba), capped by the shadow zone's end. When even the
+ * header block is torn the derivation fails and the recovery refuses --
+ * loud, like any unrecoverable read. */
 int seal_recover_segment(invfs_volume *v, uint64_t pba, uint64_t plen,
                                 uint32_t *csize_out, uint8_t **blob_out)
 {
@@ -347,10 +353,43 @@ int seal_recover_segment(invfs_volume *v, uint64_t pba, uint64_t plen,
     int syn_have = 0, syn_live = 0;
     int rc = -1;
 
-    if (!plen || pba < v->sb.shadow_zone_start ||
+    ss = v->sb.shadow_zone_start;
+    if (!plen) {
+        /* WP27: derive from the framed header. When even the header block
+         * is torn (format v2 stores no length anywhere), fall back to the
+         * bitmap: the segment's blocks are one contiguous allocated run
+         * starting at pba. An overestimate (adjacent live segments merge
+         * into one run) is safe here: the segment's own framed CRC
+         * arbitrates every repair attempt, and the write-back touches
+         * only the healed blocks. */
+        uint8_t hb[8];
+        uint32_t hc;
+        if (io_seek(&v->io, pba * INVFS_BLOCK_SIZE) != 0 ||
+            io_read(&v->io, hb, 8) != 0)
+            return -1;
+        memcpy(&hc, hb, 4);
+        if (hc)
+            plen = ((uint64_t)hc + 8 + INVFS_BLOCK_SIZE - 1) /
+                   INVFS_BLOCK_SIZE;
+        if (!plen || plen > v->sb.total_blocks - pba ||
+            pba + plen > ss + v->sb.shadow_zone_blocks) {
+            /* torn header: bound the span by the contiguous allocated
+             * run (never past the shadow zone's end) */
+            uint64_t b, lim = ss + v->sb.shadow_zone_blocks;
+            if (pba < ss || pba >= lim)
+                return -1;
+            plen = 0;
+            for (b = pba; b < lim && bit_get(v->bitmap, b); b++)
+                plen++;
+            if (!plen)
+                return -1;
+        }
+    }
+    if (!plen || pba < ss ||
         plen > v->sb.total_blocks - pba)
         return -1;
-    ss = v->sb.shadow_zone_start;
+    if (pba + plen > ss + v->sb.shadow_zone_blocks)
+        return -1;   /* the seal covers the shadow zone only */
     if (seal_view_load(v, &sv) != 0)
         return -1;
     if (sv.nshards == 0) { seal_view_free(&sv); return -1; }  /* never sealed */
@@ -545,6 +584,9 @@ static int seal_shard_sync(invfs_volume *v, uint64_t owner, uint64_t shard,
         e->algo = INVFS_ALGO_NONE;
         e->block_id = (uint32_t)(s - base);
         e->block_offset = 0;
+        e->pba = par_pba[s];   /* WP27: the owner record is self-describing
+                                * (fsck derives the bitmap from records);
+                                * the WAL map stays the WAL */
     }
     seal_shard_name(shard, nm, sizeof nm);
     return tz_owner_write(v, owner, nm, o);
@@ -672,6 +714,7 @@ static int seal2_shard_sync(invfs_volume *v, uint64_t owner, uint64_t shard,
             e->algo = INVFS_ALGO_NONE;
             e->block_id = (uint32_t)((s - base) * m2 + j);
             e->block_offset = 0;
+            e->pba = par[s * m2 + j];   /* WP27: self-describing */
         }
     }
     seal2_shard_name(shard, nm, sizeof nm);

@@ -1,16 +1,19 @@
-heat_cand_cmp    function    261 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_heat.c static int heat_cand_cmp(const void *a, const void *b)
-heat_file_maxw   function    151 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_heat.c uint8_t heat_file_maxw(invfs_volume *v, uint64_t inode)
-heat_file_setw   function    165 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_heat.c void heat_file_setw(invfs_volume *v, uint64_t inode, uint8_t w)
-heat_find        function    106 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_heat.c static invfs_l2p_entry *heat_find(invfs_volume *v, uint64_t inode,
-heat_grab        function    181 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_heat.c void heat_grab(invfs_volume *v, uint64_t inode, uint64_t lba,
-heat_hash        function     55 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_heat.c static uint64_t heat_hash(uint64_t inode, uint64_t lba)
-heat_max_get     function    316 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_heat.c static uint16_t heat_max_get(const heat_max_ent *t, size_t cap,
-heat_max_put     function    275 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_heat.c static int heat_max_put(heat_max_ent **tp, size_t *capp, size_t *np,
-heat_member_shared function    339 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_heat.c static int heat_member_shared(invfs_volume *v, uint64_t member, uint64_t owner)
-heat_seen_add    function     66 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_heat.c static int heat_seen_add(invfs_volume *v, uint64_t inode, uint64_t lba)
-heat_stamp       function    193 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_heat.c void heat_stamp(invfs_volume *v, uint64_t inode, uint64_t lba,
-heat_touch_read  function    135 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_heat.c void heat_touch_read(invfs_volume *v, uint64_t inode, uint64_t lba)
-vol_heat_promote function    374 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_heat.c int vol_heat_promote(invfs_volume *v)
-vol_heat_r       function      8 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_heat.c uint16_t vol_heat_r(const invfs_l2p_entry *e) { return e ? l2p_rheat(e) : 0; }
-vol_heat_sweep_begin function    216 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_heat.c void vol_heat_sweep_begin(invfs_volume *v)
-vol_heat_w       function     10 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_heat.c uint8_t vol_heat_w(const invfs_l2p_entry *e) { return e ? e->pad[2] : 0; }
+heat_cand_cmp    function    512 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_heat.c static int heat_cand_cmp(const void *a, const void *b)
+heat_ext_merge   function    264 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_heat.c uint8_t *heat_ext_merge(const invfs_volume *v, const uint8_t *old_ext,
+heat_file_maxw   function    215 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_heat.c uint8_t heat_file_maxw(invfs_volume *v, uint64_t inode)
+heat_file_r      function    199 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_heat.c uint16_t heat_file_r(const invfs_volume *v, uint64_t inode)
+heat_file_setw   function    225 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_heat.c void heat_file_setw(invfs_volume *v, uint64_t inode, uint8_t w)
+heat_fold        function    393 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_heat.c * index (the fold-then-resurrect bug). */void heat_fold(invfs_volume *v)
+heat_get         function    186 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_heat.c static int heat_get(invfs_volume *v, uint64_t inode, uint16_t *r, uint8_t *w)
+heat_read_tlv    function    147 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_heat.c int heat_read_tlv(const uint8_t *rec, uint32_t rec_len,
+heat_session_take function    137 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_heat.c uint16_t heat_session_take(invfs_volume *v, uint64_t inode)
+heat_tab_get     function     86 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_heat.c static uint16_t heat_tab_get(const invfs_volume *v, uint64_t inode)
+heat_tab_take    function    102 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_heat.c static uint16_t heat_tab_take(invfs_volume *v, uint64_t inode)
+heat_tab_touch   function     49 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_heat.c static int heat_tab_touch(invfs_volume *v, uint64_t inode)
+heat_touch_read  function    126 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_heat.c void heat_touch_read(invfs_volume *v, uint64_t inode, uint64_t lba)
+heat_write       function    244 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_heat.c static void heat_write(invfs_volume *v, uint64_t inode, uint16_t r, uint8_t w)
+idx_mix_heat     function     38 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_heat.c static uint64_t idx_mix_heat(uint64_t x)
+l2p_seed_heat    function    379 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_heat.c void l2p_seed_heat(invfs_volume *v)
+vol_heat_persist function    425 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_heat.c void vol_heat_persist(invfs_volume *v)
+vol_heat_promote function    530 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_heat.c int vol_heat_promote(invfs_volume *v)
+vol_heat_sweep_begin function    439 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_heat.c void vol_heat_sweep_begin(invfs_volume *v)

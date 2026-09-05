@@ -1,0 +1,14 @@
+__anonef42db210108 struct       90 /home/user/InvariantFS/src-extracted/VFS/src/cli/migrate-v2.c typedef struct {
+__anonef42db210208 struct      129 /home/user/InvariantFS/src-extracted/VFS/src/cli/migrate-v2.c typedef struct {
+__anonef42db210308 struct      137 /home/user/InvariantFS/src-extracted/VFS/src/cli/migrate-v2.c typedef struct {
+__anonef42db210408 struct      365 /home/user/InvariantFS/src-extracted/VFS/src/cli/migrate-v2.c typedef struct {
+__anonef42db210508 struct      369 /home/user/InvariantFS/src-extracted/VFS/src/cli/migrate-v2.c typedef struct {
+__anonef42db210608 struct      376 /home/user/InvariantFS/src-extracted/VFS/src/cli/migrate-v2.c typedef struct {
+__anonef42db210708 struct      565 /home/user/InvariantFS/src-extracted/VFS/src/cli/migrate-v2.c typedef struct {
+cvio             typedef      94 /home/user/InvariantFS/src-extracted/VFS/src/cli/migrate-v2.c } cvio;
+cvt              typedef     577 /home/user/InvariantFS/src-extracted/VFS/src/cli/migrate-v2.c } cvt;
+v1_ent           typedef     135 /home/user/InvariantFS/src-extracted/VFS/src/cli/migrate-v2.c } v1_ent;
+v1_live          typedef     379 /home/user/InvariantFS/src-extracted/VFS/src/cli/migrate-v2.c } v1_live;
+v1_map           typedef     140 /home/user/InvariantFS/src-extracted/VFS/src/cli/migrate-v2.c } v1_map;
+v1_name          typedef     374 /home/user/InvariantFS/src-extracted/VFS/src/cli/migrate-v2.c } v1_name;
+v1_ver           typedef     367 /home/user/InvariantFS/src-extracted/VFS/src/cli/migrate-v2.c } v1_ver;

@@ -184,14 +184,24 @@ static int wp25_owner_write(invfs_volume *v, uint64_t owner,
         ae[i].length = (uint64_t)ents[i].plen * INVFS_BLOCK_SIZE;
         ae[i].zone = INVFS_ZONE_BINARY;    /* physical home; NOT TEXT */
         ae[i].algo = INVFS_ALGO_NONE;
-        ae[i].block_id = ents[i].ord;      /* the L2P map key */
+        ae[i].block_id = ents[i].ord;      /* the WAL map key */
         ae[i].block_offset = 0;
+        ae[i].pba = ents[i].pba;   /* WP27: the copy's pba rides in the
+                                    * record too (fsck derives the bitmap
+                                    * from records; the WAL map stays the
+                                    * operational truth for the index) */
         run += ae[i].length;
     }
     ahlen = invfs_ast_hdr_write(ah, run, (uint32_t)n, 0);
     if (!ahlen) { free(ae); return -1; }
 
     rec_len = sizeof(invfs_inode_rec) + ahlen + n * sizeof(*ae);
+    total = rec_len + 4 + sizeof(tomb) + 4;
+    /* churn backstop, before the position-kill target is read: the
+     * compaction moves every record, so old_pos comes after it */
+    if (v->inode_area_pos + total > v->inode_area_end &&
+        inode_area_make_room(v, total) != 0)
+        { free(ae); return -1; }
     old_pos = idx_get_id(v, owner);
     total = rec_len + 4 + (old_pos ? sizeof(tomb) + 4 : 0);
     combo = (uint8_t *)calloc(1, total);
@@ -224,7 +234,6 @@ static int wp25_owner_write(invfs_volume *v, uint64_t owner,
         memcpy(combo + rec_len + 4 + sizeof tomb, &crc_tomb, 4);
     }
 
-    if (v->inode_area_pos + total > v->inode_area_end) { free(combo); return -1; }
     if (vol_mark_dirty(v) != 0) { free(combo); return -1; }
     new_pos = v->inode_area_pos;
     if (io_seek(&v->io, new_pos) != 0 ||
@@ -466,22 +475,150 @@ void wp25_fsck_prune(invfs_volume *v)
  * After the WP19 decay + promotion: copy read-hot canonical segments to
  * the dev0 arena (promotion), then while the arena free share is under
  * the 20% watermark evict the coldest copies (demotion). Canonical
- * placement never changes (NEVER move). */
+ * placement never changes (NEVER move).
+ *
+ * WP27: heat lives in the records' INO2 TLVs and the journal no longer
+ * carries file segments, so the pass walks the live records once and
+ * builds a pba -> rheat map (the hottest live reference to a segment
+ * wins). Promotion reads its candidates straight from the map; demotion
+ * answers "how hot is the canonical segment behind this copy" from it
+ * (absent = cold). A build failure degrades the run to "cold": nothing
+ * promotes, nothing demotes -- the safe direction. */
 
-/* current rheat of the hottest live map pointing at pba (the copy's
- * justification); 0 when nothing maps it any more */
-static uint16_t tier_heat_of(const invfs_volume *v, uint64_t pba)
+typedef struct { uint64_t pba; uint16_t r; } tier_heat_ent;
+
+typedef struct {
+    tier_heat_ent *t;
+    size_t mask, n;
+} tier_heat_map;
+
+static uint64_t tier_heat_mix(uint64_t x)
 {
-    size_t i;
-    uint16_t r = 0;
-    for (i = 0; i < v->l2p_count; i++) {
-        const invfs_l2p_entry *e = &v->l2p[i];
-        if (e->type == INVFS_JRN_MAP && e->pba == pba) {
-            uint16_t er = l2p_rheat(e);
-            if (er > r) r = er;
+    x ^= x >> 30; x *= 0xbf58476d1ce4e5b9ULL;
+    x ^= x >> 27; x *= 0x94d049bb133111ebULL;
+    return x ^ (x >> 31);
+}
+
+/* max-merge one (pba, rheat) reference; 0 ok, -1 alloc failure */
+static int tier_heat_put(tier_heat_map *m, uint64_t pba, uint16_t r)
+{
+    size_t k, i;
+    if (!m->t) {
+        m->t = (tier_heat_ent *)calloc(1024, sizeof *m->t);
+        if (!m->t) return -1;
+        m->mask = 1023;
+    } else if ((m->n + 1) * 10 >= (m->mask + 1) * 7) {
+        size_t nc = (m->mask + 1) * 2;
+        tier_heat_ent *nt = (tier_heat_ent *)calloc(nc, sizeof *nt);
+        if (!nt) return -1;
+        for (i = 0; i <= m->mask; i++) {
+            if (m->t[i].pba) {
+                size_t j = (size_t)tier_heat_mix(m->t[i].pba) & (nc - 1);
+                while (nt[j].pba) j = (j + 1) & (nc - 1);
+                nt[j] = m->t[i];
+            }
         }
+        free(m->t);
+        m->t = nt;
+        m->mask = nc - 1;
     }
-    return r;
+    k = (size_t)tier_heat_mix(pba) & m->mask;
+    while (m->t[k].pba && m->t[k].pba != pba)
+        k = (k + 1) & m->mask;
+    if (m->t[k].pba) {
+        if (r > m->t[k].r) m->t[k].r = r;
+    } else {
+        m->t[k].pba = pba;
+        m->t[k].r = r;
+        m->n++;
+    }
+    return 0;
+}
+
+/* current rheat of the hottest live reference to pba (the copy's
+ * justification); 0 when nothing references it any more */
+static uint16_t tier_heat_of(const tier_heat_map *m, uint64_t pba)
+{
+    size_t k;
+    if (!m->t) return 0;
+    k = (size_t)tier_heat_mix(pba) & m->mask;
+    while (m->t[k].pba) {
+        if (m->t[k].pba == pba) return m->t[k].r;
+        k = (k + 1) & m->mask;
+    }
+    return 0;
+}
+
+
+/* Build the run's pba -> rheat map: one walk of the live records (the
+ * vol_heat_promote liveness rule), taking every canonical-shadow segment
+ * a live non-owner record names. Owner records ("\x01...") are skipped:
+ * their blocks (parity stripes, batches, the tier/rawm copies themselves)
+ * are engine bookkeeping, never promotion candidates. */
+static int tier_heat_build(invfs_volume *v, tier_heat_map *m)
+{
+    uint64_t pos = v->inode_area_start * INVFS_BLOCK_SIZE;
+    uint64_t end = v->inode_area_pos;
+
+    while (pos + sizeof(invfs_inode_rec) <= end) {
+        invfs_inode_rec h;
+        uint64_t rec_pos = pos, ip;
+        size_t nl, base = sizeof(invfs_inode_rec), ent0;
+        char nm[INVFS_MAX_NAME + 1];
+        uint16_t r;
+        uint8_t *rec = NULL;
+        uint32_t crc_stored;
+        invfs_ast_hdr ah;
+        uint32_t j;
+
+        if (io_seek(&v->io, pos) != 0 ||
+            io_read(&v->io, &h, sizeof h) != 0) break;
+        if (h.magic != INODE_REC_MAGIC && h.magic != TOMBSTONE_MAGIC) break;
+        if (h.rec_len < sizeof h || h.rec_len > INVFS_MAX_REC_LEN ||
+            pos + h.rec_len + 4 > end) break;
+        pos += (uint64_t)h.rec_len + 4;
+        if (h.magic == TOMBSTONE_MAGIC) continue;
+        if (!h.name_len || (uint8_t)h.name[0] == 0x01) continue;
+        nl = h.name_len < INVFS_MAX_NAME ? h.name_len : INVFS_MAX_NAME;
+        memcpy(nm, h.name, nl);
+        nm[nl] = 0;
+        if (nl && nm[nl - 1] == '/') continue;   /* directory anchors */
+        ip = idx_get_id(v, h.inode_id);
+        if (vol_find(v, nm) != h.inode_id || (ip && ip != rec_pos))
+            continue;   /* superseded version: not the live record */
+        r = heat_file_r(v, h.inode_id);
+        if (!r) continue;
+        rec = (uint8_t *)malloc(h.rec_len);
+        if (!rec) return -1;
+        if (io_seek(&v->io, rec_pos) != 0 ||
+            io_read(&v->io, rec, h.rec_len) != 0 ||
+            io_read(&v->io, &crc_stored, 4) != 0 ||
+            invfs_crc32c(rec, h.rec_len) != crc_stored) {
+            free(rec);
+            continue;   /* unreadable mid-walk: contributes nothing */
+        }
+        if (invfs_ast_hdr_parse(rec + base, h.rec_len - base, &ah) != 0 ||
+            h.rec_len < base + ah.hdr_len +
+                 (size_t)ah.num_blocks * sizeof(invfs_ast_block_entry)) {
+            free(rec);
+            continue;
+        }
+        ent0 = base + ah.hdr_len;
+        for (j = 0; j < ah.num_blocks; j++) {
+            const invfs_ast_block_entry *e =
+                (const invfs_ast_block_entry *)
+                (rec + ent0 + (size_t)j * sizeof(*e));
+            if (!e->pba || e->pba < v->sb.shadow_zone_start ||
+                e->pba >= v->sb.total_blocks)
+                continue;   /* only canonical (dev1) shadow segments */
+            if (tier_heat_put(m, e->pba, r) != 0) {
+                free(rec);
+                return -1;
+            }
+        }
+        free(rec);
+    }
+    return 0;
 }
 
 
@@ -569,6 +706,7 @@ int vol_tier_migrate(invfs_volume *v)
 {
     uint64_t watermark;
     size_t i;
+    tier_heat_map hm;
     int rc = 0;
 
     v->tier_promoted = v->tier_demoted = v->tier_blocks = 0;
@@ -578,27 +716,31 @@ int vol_tier_migrate(invfs_volume *v)
         return 0;   /* dev0 has no tail past the RAW zone: nothing to do */
     watermark = v->arena_blocks / 5;   /* demote below 20% free */
 
+    memset(&hm, 0, sizeof hm);
+    if ((v->heat_any_rhot || v->tier_n) &&
+        tier_heat_build(v, &hm) != 0) {
+        free(hm.t);
+        memset(&hm, 0, sizeof hm);   /* cold-run fallback (see above) */
+    }
+
     /* ---- promotion: read-hot canonical (dev1) segments -> dev0 copy --
      * the WP19 hysteresis applies: the sweep's decay ran first, so a
      * burst promotes only when it survives exactly one halving. */
-    if (v->heat_any_rhot) {
-        size_t n = v->l2p_count;
-        for (i = 0; i < n; i++) {
-            const invfs_l2p_entry *e = &v->l2p[i];
+    if (v->heat_any_rhot && hm.t) {
+        for (i = 0; i <= hm.mask; i++) {
+            uint64_t plen = 0;
             int prc;
-            if (e->type != INVFS_JRN_MAP) continue;
-            if (l2p_rheat(e) < INVFS_HEAT_HOT) continue;
-            if (e->inode == v->tier_owner || e->inode == v->rawm_owner)
-                continue;   /* the engine's own second copies */
-            if (!e->length || e->pba < v->sb.shadow_zone_start)
-                continue;   /* only canonical (dev1) shadow segments */
-            if (e->pba + e->length > v->sb.total_blocks)
+            if (!hm.t[i].pba || hm.t[i].r < INVFS_HEAT_HOT) continue;
+            /* the physical extent derives from the segment's own framed
+             * header (WP27: nothing else stores it); an unreadable header
+             * is never copied blind */
+            if (seg_extent(v, hm.t[i].pba, NULL, &plen) != 0 || !plen)
                 continue;
-            prc = tier_promote_one(v, e->pba, e->length);
+            prc = tier_promote_one(v, hm.t[i].pba, (uint32_t)plen);
             if (prc < 0) { rc = -1; goto out; }
             if (prc == 0) {
                 v->tier_promoted++;
-                v->tier_blocks += e->length;
+                v->tier_blocks += plen;
             }
         }
     }
@@ -608,12 +750,13 @@ int vol_tier_migrate(invfs_volume *v)
         size_t coldest = 0;
         uint16_t minr = 0xFFFF;
         for (i = 0; i < v->tier_n; i++) {
-            uint16_t r = tier_heat_of(v, v->tier[i].key);
+            uint16_t r = tier_heat_of(&hm, v->tier[i].key);
             if (r < minr) { minr = r; coldest = i; }
         }
         tier_demote_idx(v, coldest);
     }
 out:
+    free(hm.t);
     if (v->tier_promoted || v->tier_demoted || v->tier_n)
         printf("tier: %llu hot segment(s) copied to dev0 (%llu blocks), "
                "%llu demoted; %zu copies live\n",

@@ -387,7 +387,7 @@ static int rename_one(invfs_volume *v, const char *from, const char *to)
     invfs_inode_rec rh, *nh;
     uint8_t *rec;
     uint32_t crc;
-    size_t i, tolen = strlen(to), fromlen = strlen(from);
+    size_t tolen = strlen(to), fromlen = strlen(from);
     const name_index_entry *ie;
 
     (void)fromlen;
@@ -403,10 +403,22 @@ static int rename_one(invfs_volume *v, const char *from, const char *to)
     if (rh.rec_len < sizeof(invfs_inode_rec)) return -1;
 
     /* room for the copy AND the tombstone that follows it — running out
-       between the two would leave the file reachable under both names */
+       between the two would leave the file reachable under both names.
+       WP27 churn backstop: compact the dead prefix first; the compaction
+       moves every record, so the live position is re-resolved after it. */
     if (v->inode_area_pos + rh.rec_len + 4 +
-        sizeof(invfs_inode_rec) + 4 > v->inode_area_end)
-        return -3;   /* inode area full */
+        sizeof(invfs_inode_rec) + 4 > v->inode_area_end) {
+        if (inode_area_make_room(v, rh.rec_len + 4 +
+                sizeof(invfs_inode_rec) + 4) != 0)
+            return -3;   /* inode area full */
+        ie = idx_get(v, from, fromlen);
+        if (!ie) return -1;
+        rec_pos = ie->pos;
+        if (rec_pos == 0) return -1;
+        if (io_seek(&v->io, rec_pos) != 0 ||
+            io_read(&v->io, &rh, sizeof rh) != 0) return -1;
+        if (rh.rec_len < sizeof(invfs_inode_rec)) return -1;
+    }
 
     rec = (uint8_t *)malloc(rh.rec_len);
     if (!rec) return -1;
@@ -421,30 +433,13 @@ static int rename_one(invfs_volume *v, const char *from, const char *to)
     memcpy(nh->name, to, tolen);
     crc = invfs_crc32c(rec, rh.rec_len);
 
-    /* Hand the blocks over BEFORE the record that needs them: copy the old
-       id's mappings under the new id and make them durable (vol_pre_record
-       -- crash rule 2). The old entries stay until vol_delete_inode below,
-       so a crash mid-rename leaves the old name fully readable, and the
-       delete frees nothing the copy still references (the PB7 sharer
-       check). This used to re-key the table in RAM AFTER the append, so
-       the re-key persisted only at the next flush: a crash (or a dropped
-       writeback) between left the new record live with mappings nobody
-       had ever written -- present-but-unreadable, the F2 shape. */
-    {
-        size_t n0 = v->l2p_count;
-        for (i = 0; i < n0; i++) {
-            invfs_l2p_entry e = v->l2p[i];   /* by value: vol_map may realloc */
-            if (e.type == INVFS_JRN_MAP && e.inode == old_id) {
-                if (vol_map(v, new_id, e.lba, e.pba, e.length) != 0) {
-                    free(rec);
-                    return -1;
-                }
-                /* a rename is not a rewrite: the carried mapping keeps its
-                 * heat (the in-place re-key preserved it implicitly) */
-                memcpy(v->l2p[v->l2p_count - 1].pad, e.pad, sizeof e.pad);
-            }
-        }
-    }
+    /* WP27: the copied record carries the pbas verbatim -- the rename needs
+     * no map re-key at all. The blocks' durability is the same as on the
+     * day the original record landed, and vol_pre_record's flush ordering
+     * (bitmap durable before the record that names its pbas) is kept. The
+     * old entries stay until vol_delete_inode below, so a crash mid-rename
+     * leaves the old name fully readable, and the delete frees nothing the
+     * copy still references (the pba_ref sharer count). */
     if (vol_pre_record(v) != 0 ||
         io_seek(&v->io, v->inode_area_pos) != 0 ||
         io_write(&v->io, rec, rh.rec_len) != 0 ||
@@ -453,6 +448,7 @@ static int rename_one(invfs_volume *v, const char *from, const char *to)
     idx_put(v, to, tolen, new_id, v->inode_area_pos - rh.rec_len - 4,
             nh->file_size, nh->ctime);
     idx_put_id(v, new_id, v->inode_area_pos - rh.rec_len - 4);
+    pba_ref_apply(v, rec, rh.rec_len, +1);
     free(rec);
 
     return vol_delete_inode(v, old_id, from);

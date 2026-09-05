@@ -1,19 +1,19 @@
-cpack_map_cache_free_ent function   2429 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_cpack.c static void cpack_map_cache_free_ent(struct cpack_map_cache *m)
-cpack_map_cache_invalidate function   2453 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_cpack.c void cpack_map_cache_invalidate(invfs_volume *v, const char *name)
-cpack_map_cache_reset function   2438 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_cpack.c void cpack_map_cache_reset(invfs_volume *v)
-cpack_map_get    function   2477 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_cpack.c static const struct cpack_map_cache *cpack_map_get(invfs_volume *v,
-cpack_map_guard  function   2372 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_cpack.c static int cpack_map_guard(invfs_volume *v, const char *name,
+cpack_map_cache_free_ent function   2445 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_cpack.c static void cpack_map_cache_free_ent(struct cpack_map_cache *m)
+cpack_map_cache_invalidate function   2469 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_cpack.c void cpack_map_cache_invalidate(invfs_volume *v, const char *name)
+cpack_map_cache_reset function   2454 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_cpack.c void cpack_map_cache_reset(invfs_volume *v)
+cpack_map_get    function   2493 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_cpack.c static const struct cpack_map_cache *cpack_map_get(invfs_volume *v,
+cpack_map_guard  function   2388 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_cpack.c static int cpack_map_guard(invfs_volume *v, const char *name,
 cpack_map_parse  function   2171 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_cpack.c static int cpack_map_parse(const uint8_t *blob, size_t blob_len,
-cpack_map_read   function   2553 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_cpack.c int cpack_map_read(invfs_volume *v, const char *name, uint64_t ino,
-cpack_map_serve  function   2326 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_cpack.c static int cpack_map_serve(invfs_volume *v, const char *name,
+cpack_map_read   function   2569 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_cpack.c int cpack_map_read(invfs_volume *v, const char *name, uint64_t ino,
+cpack_map_serve  function   2342 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_cpack.c static int cpack_map_serve(invfs_volume *v, const char *name,
 cpack_map_validate function   2237 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_cpack.c static int cpack_map_validate(const cpack_map_ent *e, size_t n,
 cpack_mbr_name   function   2024 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_cpack.c static void cpack_mbr_name(char *out, size_t cap, const char *base,
 cpack_member_find function   2220 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_cpack.c static const cpack_member *cpack_member_find(const cpack_member *mem,
 cpack_member_idx_cmp function   2200 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_cpack.c static int cpack_member_idx_cmp(const void *a, const void *b)
-cpack_member_read function   2295 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_cpack.c static int cpack_member_read(invfs_volume *v, const char *name,
+cpack_member_read function   2311 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_cpack.c static int cpack_member_read(invfs_volume *v, const char *name,
 cpack_members_sorted function   2210 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_cpack.c static cpack_member *cpack_members_sorted(const cpack_member *mem, size_t n)
 cpack_parse_table function   2045 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_cpack.c static int cpack_parse_table(const uint8_t *text, size_t len,
-cpack_recipe_seg function   2271 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_cpack.c static int cpack_recipe_seg(invfs_volume *v, uint64_t ino,
+cpack_recipe_seg function   2272 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_cpack.c static int cpack_recipe_seg(invfs_volume *v, uint64_t ino,
 cpack_sanitize   function   2007 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_cpack.c static size_t cpack_sanitize(char *dst, const char *src, size_t n)
 flac_bits_per_sample function   1212 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_cpack.c static int flac_bits_per_sample(const uint8_t *flac, size_t n)
 invfs_ape_compress function   1225 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_cpack.c int invfs_ape_compress(const uint8_t *flac, size_t flac_len,
@@ -31,7 +31,7 @@ ll_add_argv_files function    289 /home/user/InvariantFS/src-extracted/VFS/src/c
 ll_add_exe       function    249 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_cpack.c static void ll_add_exe(int rfd, const char *argv0)
 ll_add_rule      function    230 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_cpack.c static void ll_add_rule(int rfd, uint64_t rights, const char *path)
 pack_argv_build  function    639 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_cpack.c static int pack_argv_build(const invfs_pack_def *def, const char *tmpl,
-pack_container_rebuild function   2948 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_cpack.c int pack_container_rebuild(invfs_volume *v, const invfs_codec *pc,
+pack_container_rebuild function   2964 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_cpack.c int pack_container_rebuild(invfs_volume *v, const invfs_codec *pc,
 pack_sandbox_mode function    175 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_cpack.c static int pack_sandbox_mode(void)
 pack_subst       function    608 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_cpack.c static size_t pack_subst(char *dst, size_t cap, const char *tok,
 run_ffmpeg       function    870 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_cpack.c static int run_ffmpeg(const char *a1, const char *a2, const char *opts)
@@ -51,7 +51,7 @@ tool_rm          function    504 /home/user/InvariantFS/src-extracted/VFS/src/co
 tool_slurp_out   function    524 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_cpack.c static int tool_slurp_out(const char *path, uint8_t **out, size_t *out_len)
 tool_tmpdir      function    491 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_cpack.c int tool_tmpdir(char *dir, size_t cap)
 tool_write       function    513 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_cpack.c int tool_write(const char *path, const uint8_t *data, size_t len)
-vol_containerpack_sweep function   2577 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_cpack.c int vol_containerpack_sweep(invfs_volume *v, uint64_t inode_id,
+vol_containerpack_sweep function   2593 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_cpack.c int vol_containerpack_sweep(invfs_volume *v, uint64_t inode_id,
 vol_create_flac_file function   1427 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_cpack.c uint64_t vol_create_flac_file(invfs_volume *v, const char *name,
 vol_create_gz_file function   1776 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_cpack.c uint64_t vol_create_gz_file(invfs_volume *v, const char *name,
 vol_create_tar_file function   1680 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_cpack.c uint64_t vol_create_tar_file(invfs_volume *v, const char *name,

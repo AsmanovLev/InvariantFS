@@ -152,16 +152,16 @@ uint64_t vol_create_container_file(invfs_volume *v, const char *name,
         pba = alloc_raw_or_shadow(v, phys_blocks, NULL);
         if (pba == 0) {
             fprintf(stderr, "[create] ENOSPC seg %zu\n", i);
-            /* reclaim already-written segments (no orphans) */
+            /* reclaim already-written segments (no orphans). WP27: the
+             * pba/extent come from this session's own entry table. */
             {
                 size_t k;
                 for (k = 0; k < i; k++) {
-                    uint64_t pba_k = 0, len_k = 0;
-                    if (vol_lookup_entry(v, inode_id, (uint64_t)k,
-                                         &pba_k, &len_k) == 0 && pba_k) {
-                        vol_free_blocks(v, pba_k, len_k);
-                        l2p_remove(v, inode_id, (uint64_t)k);
-                    }
+                    uint64_t len_k = ((uint64_t)seg_csize[k] + 8 +
+                                      INVFS_BLOCK_SIZE - 1) /
+                                     INVFS_BLOCK_SIZE;
+                    if (entries[k].pba)
+                        vol_free_blocks(v, entries[k].pba, len_k);
                 }
             }
             free(cbuf); free(entries); free(seg_lz4); free(seg_csize); free(children_blob);
@@ -174,17 +174,14 @@ uint64_t vol_create_container_file(invfs_volume *v, const char *name,
             return 0;
         }
         free(cbuf);
-        if (vol_map(v, inode_id, (uint64_t)i, pba, (uint32_t)phys_blocks) != 0) {
-            fprintf(stderr, "[create] L2P fail seg %zu\n", i);
-            free(entries); free(seg_lz4); free(seg_csize); free(children_blob);
-            return 0;
-        }
+        /* WP27: no L2P map -- the entry itself carries the address */
         entries[i].file_offset = (uint64_t)i * SEGMENT_SIZE;
         entries[i].length = slen;
         entries[i].zone = INVFS_ZONE_RAW;
         entries[i].algo = seg_lz4[i] ? INVFS_ALGO_LZ4 : INVFS_ALGO_NONE;
         entries[i].block_id = (uint32_t)i;
         entries[i].block_offset = 0;
+        entries[i].pba = pba;
     }
     free(seg_lz4);
     free(seg_csize);
@@ -219,7 +216,7 @@ uint64_t vol_create_container_file(invfs_volume *v, const char *name,
     free(children_blob);
 
     crc_rec = invfs_crc32c(rec, rec_size);
-    if (v->inode_area_pos + rec_size + 4 > v->inode_area_end) {
+    if (inode_area_make_room(v, (uint64_t)rec_size + 4) != 0) {
         fprintf(stderr, "inode area full\n");
         free(rec);
         return 0;
@@ -235,6 +232,7 @@ uint64_t vol_create_container_file(invfs_volume *v, const char *name,
     idx_put(v, name, strlen(name), inode_id, v->inode_area_pos - rec_size - 4,
             rec_h->file_size, rec_h->ctime);
     idx_put_id(v, inode_id, v->inode_area_pos - rec_size - 4);
+    pba_ref_apply(v, rec, (uint32_t)rec_size, +1);
     free(rec);
     return inode_id;
 }

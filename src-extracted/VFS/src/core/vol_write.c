@@ -190,12 +190,14 @@ static int raw_effort_zlevel(const invfs_volume *v)
 }
 
 
-/* Encode + write + map one segment for the session: enc_len plaintext
+/* Encode + write + register one segment for the session: enc_len plaintext
  * bytes (the entry's length -- the read path decompresses with length as
  * the output cap, so the stored payload must decode to exactly enc_len).
  * In-session writes always pass SEGMENT_SIZE; the commit's tail fix
- * passes the exact final tail. On re-touch the session's previous pba is
- * freed only after the new one is fully written and mapped.
+ * passes the exact final tail. WP27: the segment's address lives in the
+ * session's own entry (s->ents[j].pba); nothing touches the journal. On
+ * re-touch the session's previous pba is freed only after the new one is
+ * fully written.
  * 0 ok, -1 io/logic error, -2 ENOSPC. */
 static int wsession_write_seg_n(invfs_wsession *s, uint32_t j,
                                 const uint8_t *plain, size_t enc_len)
@@ -208,7 +210,7 @@ static int wsession_write_seg_n(invfs_wsession *s, uint32_t j,
     uint8_t *cbuf;
     uint8_t hdr[8];
     uint32_t csize = 0, seg_crc;
-    uint64_t pba, phys_blocks, prev_pba = 0, prev_len = 0;
+    uint64_t pba, phys_blocks, prev_pba = 0;
     int zone, algo_used = INVFS_ALGO_NONE, have_prev = 0;
     {
         size_t zb = ZSTD_compressBound(enc_len);
@@ -263,10 +265,15 @@ static int wsession_write_seg_n(invfs_wsession *s, uint32_t j,
 
     phys_blocks = ((uint64_t)csize + 8 + INVFS_BLOCK_SIZE - 1) /
                   INVFS_BLOCK_SIZE;
-    if (j < s->touched_cap && s->touched[j] &&
-        vol_lookup_entry(v, s->new_id, j, &prev_pba, &prev_len) == 0 &&
-        prev_pba)
+    /* A re-touch supersedes the session's OWN earlier write of j -- free
+     * it once the replacement is down. An ALIASED segment's pba belongs to
+     * the old record: never freed here (the commit's retire drops the old
+     * record's reference and frees exactly what the new record does not
+     * keep). */
+    if (j < s->touched_cap && s->touched[j] && s->ents[j].pba) {
+        prev_pba = s->ents[j].pba;
         have_prev = 1;
+    }
     pba = alloc_raw_or_shadow(v, phys_blocks, &zone);
     if (pba == 0) { free(cbuf); return -2; }
     if (write_segment_blocks(v, pba, cbuf, (size_t)csize + 8,
@@ -277,32 +284,13 @@ static int wsession_write_seg_n(invfs_wsession *s, uint32_t j,
         return -1;
     }
     free(cbuf);
-    /* re-mapping must REPLACE, not pile up: a superseded (new_id,j) entry
-     * would sit in the journal forever and its pba would be "referenced"
-     * at retire time -- an orphan block leak (newest-wins hides it from
-     * reads, but not from the bitmap accounting) */
-    l2p_remove(v, s->new_id, j);
-    if (vol_map(v, s->new_id, j, pba, (uint32_t)phys_blocks) != 0) {
-        vol_free_blocks(v, pba, phys_blocks);
-        return -1;
+    /* superseded session segment: nothing references it once the entry
+     * moves, so free it now instead of leaving it for fsck */
+    if (have_prev) {
+        uint64_t plen = 0;
+        if (seg_extent_checked(v, prev_pba, &plen) == 0)
+            vol_free_blocks(v, prev_pba, plen);
     }
-    /* WP19: session-born segments start read-cold (INVFS_HEAT_INIT may
-     * pre-warm) and carry the file's write history (old max + 1); the
-     * untouched aliases kept their old entries' heat at load time */
-    {
-        invfs_l2p_entry *ne = &v->l2p[v->l2p_count - 1];
-        l2p_set_rheat(ne, v->heat_init);
-        ne->pad[2] = s->wheat_carry;
-        /* WP25: a pre-warmed segment is born hot -- the tier-migration
-         * pass keys on this summary (the "set on the increment that
-         * crosses the threshold" convention, here: born past it) */
-        if (v->heat_init >= INVFS_HEAT_HOT) v->heat_any_rhot = 1;
-        jrn_pad_sync(v, ne);   /* the queued MAP op carries the pad */
-    }
-    /* superseded session segment: nothing references it once the new map
-     * landed, so free it now instead of leaving it for fsck */
-    if (have_prev)
-        vol_free_blocks(v, prev_pba, prev_len);
 
     s->ents[j].file_offset = (uint64_t)j * SEGMENT_SIZE;
     s->ents[j].length = (uint64_t)enc_len;
@@ -310,6 +298,7 @@ static int wsession_write_seg_n(invfs_wsession *s, uint32_t j,
     s->ents[j].algo = (uint32_t)algo_used;
     s->ents[j].block_id = j;
     s->ents[j].block_offset = 0;
+    s->ents[j].pba = pba;
     if (j >= s->n_ents) s->n_ents = j + 1;
     s->touched[j] = 1;
     if (j + 1 > s->mat_upto) s->mat_upto = j + 1;
@@ -327,24 +316,31 @@ static int wsession_write_seg(invfs_wsession *s, uint32_t j,
 
 /* Current plaintext of segment j, zero-padded to SEGMENT_SIZE: the
  * session's own rewrite when touched, the old file's bytes when aliased,
- * zeros beyond both. 0 ok, -1 unreadable. */
+ * zeros beyond both. WP27: both resolve through the session's own entry
+ * table -- a touched entry names the session's fresh pba, an aliased one
+ * still carries the old record's pba (its block stays alive until the
+ * commit's retire; the sweep is locked out of this file by
+ * vol_write_active_name). 0 ok, -1 unreadable. */
 static int wsession_seg_current(invfs_wsession *s, uint32_t j,
                                 uint8_t *plain)
 {
     memset(plain, 0, SEGMENT_SIZE);
     if (j >= s->n_ents) return 0;
-    if (j < s->touched_cap && s->touched[j]) {
-        uint64_t pba = 0, plen = 0;
+    if ((j < s->touched_cap && s->touched[j]) ||
+        (s->have_old && j < s->aliased_n)) {
+        uint64_t pba = s->ents[j].pba;
         uint32_t csize = 0;
         uint8_t *blob = NULL;
         int rc;
-        if (vol_lookup_entry(s->v, s->new_id, j, &pba, &plen) != 0 || !pba)
+        if (!pba || pba >= s->v->sb.total_blocks)
             return -1;
-        if (seg_read_checked(s->v, pba, plen, 1, &csize, &blob) != 0)
+        if (seg_read_checked(s->v, pba, 0, 1, &csize, &blob) != 0)
             return -1;
         if (s->ents[j].algo == INVFS_ALGO_LZ4) {
             /* in-session payloads are whole-segment encodes (the tail
-             * fix runs at commit, after the last possible read-back) */
+             * fix runs at commit, after the last possible read-back);
+             * an aliased segment is the old record's plain per-segment
+             * chunk (wsession_simple_old guaranteed the shape) */
             rc = LZ4_decompress_safe((const char *)blob, (char *)plain,
                                      (int)csize, (int)SEGMENT_SIZE)
                  == (int)s->ents[j].length ? 0 : -1;
@@ -352,7 +348,8 @@ static int wsession_seg_current(invfs_wsession *s, uint32_t j,
                 memset(plain + s->ents[j].length, 0,
                        SEGMENT_SIZE - (size_t)s->ents[j].length);
         } else if (s->ents[j].algo == INVFS_ALGO_ZSTD) {
-            /* WP23: this session's own pressure-rung segment */
+            /* WP23: this session's own pressure-rung segment, or an
+             * aliased adaptive-effort segment of the old record */
             size_t zg = ZSTD_decompress((char *)plain, SEGMENT_SIZE,
                                         blob, csize);
             rc = (!ZSTD_isError(zg) && zg == s->ents[j].length) ? 0 : -1;
@@ -364,40 +361,6 @@ static int wsession_seg_current(invfs_wsession *s, uint32_t j,
             if (rc == 0) memcpy(plain, blob, csize);
             if (rc == 0 && csize < SEGMENT_SIZE)
                 memset(plain + csize, 0, SEGMENT_SIZE - csize);
-        }
-        free(blob);
-        return rc;
-    }
-    if (s->have_old && j < s->aliased_n) {
-        /* Aliased segment: read through the session's OWN (new_id,j) map.
-         * Same pba the old record uses, but independent of the old
-         * record's lifetime: a concurrent retire of old_id (unlink while
-         * the handle is open -- the sweep is session-guarded) drops the
-         * old id's maps, and resolving through old_id would miss or,
-         * worse, the map could be gone after its blocks were reallocated.
-         * ents[j] is the old record's entry (plain NONE/LZ4, its own
-         * index -- wsession_simple_old guaranteed it). */
-        uint64_t pba = 0, plen = 0;
-        uint32_t csize = 0;
-        uint8_t *blob = NULL;
-        int rc;
-        if (vol_lookup_entry(s->v, s->new_id, j, &pba, &plen) != 0 || !pba)
-            return -1;
-        if (seg_read_checked(s->v, pba, plen, 1, &csize, &blob) != 0)
-            return -1;
-        if (s->ents[j].algo == INVFS_ALGO_LZ4) {
-            rc = LZ4_decompress_safe((const char *)blob, (char *)plain,
-                                     (int)csize, (int)SEGMENT_SIZE)
-                 == (int)s->ents[j].length ? 0 : -1;
-        } else if (s->ents[j].algo == INVFS_ALGO_ZSTD) {
-            /* WP23: an aliased adaptive-effort segment of the old record
-             * (plain[] is zeroed up front, so the tail needs no pad) */
-            size_t zg = ZSTD_decompress((char *)plain, SEGMENT_SIZE,
-                                        blob, csize);
-            rc = (!ZSTD_isError(zg) && zg == s->ents[j].length) ? 0 : -1;
-        } else {
-            rc = csize == s->ents[j].length ? 0 : -1;
-            if (rc == 0) memcpy(plain, blob, csize);
         }
         free(blob);
         return rc;
@@ -486,23 +449,11 @@ static int wsession_load_old(invfs_wsession *s)
         if (!s->touched) { free(buf); return -1; }
     }
     if (wsession_simple_old(&ah, s->ents)) {
-        /* alias old segments into the new id's L2P (no data copies) */
-        for (i = 0; i < s->n_ents; i++) {
-            uint64_t pba = 0, plen = 0;
-            uint16_t r;
-            uint8_t w;
-            if (vol_lookup_entry(s->v, s->old_id, i, &pba, &plen) != 0 ||
-                !pba) {
-                free(buf);
-                return -1;   /* L2P hole: cannot fork safely */
-            }
-            heat_grab(s->v, s->old_id, i, &r, &w);
-            if (vol_map(s->v, s->new_id, i, pba, (uint32_t)plen) != 0) {
-                free(buf);
-                return -1;
-            }
-            heat_stamp(s->v, s->new_id, i, r, w);
-        }
+        /* WP27: aliasing IS the copied entries -- they carry the old
+         * segments' pbas verbatim, so the fork needs no maps at all. The
+         * old record stays live (and its blocks allocated) until the
+         * commit's retire; the refcount map then keeps exactly the blocks
+         * the new record still names. */
         s->aliased_n = s->n_ents;
     } else if (s->n_ents) {
         /* swept / container / batched content: a write is an implicit
@@ -622,15 +573,15 @@ int vol_write_truncate(invfs_wsession *ws, uint64_t len)
 
     if (keep < s->n_ents) {
         /* shrink: drop tail segments. Session-owned pbas are freed;
-         * aliases are only unmapped -- the old record keeps owning them
-         * (the commit's retire frees the ones the new record dropped). */
+         * aliases are only dropped from the entry table -- the old record
+         * keeps owning them (the commit's retire frees the ones the new
+         * record dropped). WP27: the pba rides in the session's entry. */
         for (j = keep; j < s->n_ents; j++) {
-            uint64_t pba = 0, plen = 0;
-            if (j < s->touched_cap && s->touched[j] &&
-                vol_lookup_entry(s->v, s->new_id, j, &pba, &plen) == 0 &&
-                pba)
-                vol_free_blocks(s->v, pba, plen);
-            l2p_remove(s->v, s->new_id, j);
+            if (j < s->touched_cap && s->touched[j] && s->ents[j].pba) {
+                uint64_t plen = 0;
+                if (seg_extent_checked(s->v, s->ents[j].pba, &plen) == 0)
+                    vol_free_blocks(s->v, s->ents[j].pba, plen);
+            }
         }
         s->n_ents = keep;
         if (s->mat_upto > keep) s->mat_upto = keep;
@@ -729,11 +680,11 @@ int vol_write_commit(invfs_wsession *ws)
     while (s->n_ents > 0 &&
            (uint64_t)(s->n_ents - 1) * SEGMENT_SIZE >= s->logical_size) {
         uint32_t j = s->n_ents - 1;
-        uint64_t pba = 0, plen = 0;
-        if (j < s->touched_cap && s->touched[j] &&
-            vol_lookup_entry(v, s->new_id, j, &pba, &plen) == 0 && pba)
-            vol_free_blocks(v, pba, plen);
-        l2p_remove(v, s->new_id, j);
+        if (j < s->touched_cap && s->touched[j] && s->ents[j].pba) {
+            uint64_t plen = 0;
+            if (seg_extent_checked(v, s->ents[j].pba, &plen) == 0)
+                vol_free_blocks(v, s->ents[j].pba, plen);
+        }
         s->n_ents--;
     }
     /* entry.length is the decoded-payload size (the read path
@@ -759,6 +710,41 @@ int vol_write_commit(invfs_wsession *ws)
      * to the pre-WP22a record. */
     hdr_len = invfs_ast_hdr_write(ah, s->logical_size, s->n_ents, 0);
     if (!hdr_len) return -1;
+
+    /* WP19/WP27 heat carry: the replacement record keeps the old file's
+     * read history (plus this session's touches of the old id) and bumps
+     * the write-heat -- "rewritten often" is the history a rewrite
+     * destroys, so it is the one counter that must survive. */
+    {
+        uint32_t ext_len = 0;
+        uint8_t *ext;
+        uint16_t r_old = 0, r_sess = 0;
+        uint8_t w_new = s->wheat_carry;
+        if (s->have_old) {
+            uint8_t *ob = NULL;
+            uint32_t orl = 0;
+            if (meta_read_record_by_id(v, s->old_id, &ob, &orl,
+                                       NULL, 0, NULL) == 0) {
+                heat_read_tlv(ob, orl, &r_old, NULL);
+                free(ob);
+            }
+            r_sess = heat_session_take(v, s->old_id);
+        }
+        /* stamp when there is anything to carry; otherwise the old ext
+         * rides verbatim. A rewrite (have_old) always stamps: the wheat
+         * carry is what the sweep's write-hot skip reads. */
+        if (s->have_old || v->heat_init || r_sess || r_old) {
+            uint32_t r = (uint32_t)r_old + r_sess + v->heat_init;
+            if (r > 0xFFFF) r = 0xFFFF;
+            ext = heat_ext_merge(v, s->old_ext, s->old_ext_len,
+                                 0, (uint16_t)r, w_new, &ext_len);
+            if (ext) {
+                free(s->old_ext);
+                s->old_ext = ext;
+                s->old_ext_len = (uint16_t)ext_len;
+            }
+        }
+    }
 
     rec_size = sizeof(invfs_inode_rec) + hdr_len
              + (size_t)s->n_ents * sizeof(invfs_ast_block_entry)
@@ -805,6 +791,7 @@ int vol_write_commit(invfs_wsession *ws)
     idx_put(v, s->name, strlen(s->name), s->new_id,
             v->inode_area_pos - rec_size - 4, s->logical_size, now);
     idx_put_id(v, s->new_id, v->inode_area_pos - rec_size - 4);
+    pba_ref_apply(v, rec, (uint32_t)rec_size, +1);
     free(rec);
 
     /* The vol_replace_file ordering: the new record is live first, then
@@ -844,16 +831,15 @@ void vol_write_abort(invfs_wsession *ws)
     wsession_unlink(s);   /* drop the sweep guard BEFORE freeing: the volume
                            * list must never name a dead session */
     if (!s->committed) {
+        /* free exactly the segments this session itself wrote (touched);
+         * aliased entries belong to the old record, which stays live */
         for (i = 0; s->touched && i < s->n_ents && i < s->touched_cap; i++) {
-            uint64_t pba = 0, plen = 0;
-            if (s->touched[i] &&
-                vol_lookup_entry(s->v, s->new_id, i, &pba, &plen) == 0 && pba) {
-                vol_free_blocks(s->v, pba, plen);
-                l2p_remove(s->v, s->new_id, i);
+            if (s->touched[i] && s->ents[i].pba) {
+                uint64_t plen = 0;
+                if (seg_extent_checked(s->v, s->ents[i].pba, &plen) == 0)
+                    vol_free_blocks(s->v, s->ents[i].pba, plen);
             }
         }
-        for (i = 0; i < s->aliased_n; i++)
-            l2p_remove(s->v, s->new_id, i);
     }
     free(s->ents);
     free(s->touched);

@@ -363,6 +363,16 @@ grep -q "^OK$" "$WORK/fsck-a3.log" || { cat "$WORK/fsck-a3.log"; fail "A3: fsck 
 echo "  live files bit-exact, batched text + subtree intact, fsck/verify clean"
 
 echo "== [A4] quiescent re-sweep: no waste, no compaction =="
+# WP27: the churn legs left every file write-hot (wheat ~= #rounds). The
+# next sweeps do real decay work -- one record append per heat-carrying
+# file per run (v1 hid exactly that churn in the journal pads; format v2
+# carries heat in the records themselves, so the dead versions pile up in
+# the inode area and the auto-compaction legitimately reclaims them).
+# Cool the heat with idle sweeps first; the final re-sweep must be
+# quiescent (nothing to decay, nothing to sweep) and compact nothing.
+for i in $(seq 30); do
+    $B/invf-sweep "$IMG_A" >/dev/null 2>&1 || fail "A4 cooling sweep $i"
+done
 $B/invf-sweep "$IMG_A" > "$WORK/sweep-a4.log" 2>&1 || fail "sweep A4"
 if grep -q "^inode area compacted: " "$WORK/sweep-a4.log"; then
     fail "A4: compaction refired on a compact area"

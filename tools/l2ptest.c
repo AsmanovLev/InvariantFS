@@ -213,7 +213,12 @@ static int do_pump(const char *img, int nfiles, char **files, int do_flush)
     int i, rc = 0;
     for (i = 0; i < nfiles; i++)
         if (read_one(v, files[i]) != 0) rc = 1;
-    if (!rc && do_flush && vol_flush(v) != 0) {
+    /* WP27: the pump stands in for "a sweep-cadence session observed the
+     * reads" -- persist the session's accrued read heat explicitly (the
+     * fold, no decay); plain closes never write for reads alone. */
+    if (!rc && do_flush == 2)
+        vol_heat_persist(v);
+    if (!rc && do_flush == 1 && vol_flush(v) != 0) {
         fprintf(stderr, "l2ptest: flush failed\n");
         rc = 1;
     }
@@ -318,7 +323,7 @@ int main(int argc, char **argv)
         return do_stress(argv[2], strtoull(argv[3], NULL, 10),
                          strtoull(argv[4], NULL, 10));
     if (strcmp(argv[1], "pump") == 0 && argc >= 4)
-        return do_pump(argv[2], argc - 3, argv + 3, 1);
+        return do_pump(argv[2], argc - 3, argv + 3, 2);
     if (strcmp(argv[1], "readflush") == 0 && argc >= 3)
         return do_pump(argv[2], argc - 3, argv + 3, 1);
     if (strcmp(argv[1], "mkfiles") == 0 && argc == 5)

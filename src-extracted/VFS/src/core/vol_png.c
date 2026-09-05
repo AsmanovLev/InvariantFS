@@ -704,7 +704,7 @@ uint64_t vol_create_blob_file(invfs_volume *v, const char *name,
         rh->ctime = (uint64_t)time(NULL);
         rec_set_name(rh, name);
         crc = invfs_crc32c(rec, rec_size);
-        if (v->inode_area_pos + rec_size + 4 > v->inode_area_end) { free(rec); return 0; }
+        if (inode_area_make_room(v, (uint64_t)rec_size + 4) != 0) { free(rec); return 0; }
         if (vol_pre_record(v) != 0) { free(rec); return 0; }
         if (io_seek(&v->io, v->inode_area_pos) != 0 ||
             io_write(&v->io, rec, rec_size) != 0 ||
@@ -741,17 +741,15 @@ uint64_t vol_create_blob_file(invfs_volume *v, const char *name,
         vol_free_blocks(v, pba, phys_blocks);
         return 0;
     }
-    if (vol_map(v, inode_id, 0, pba, (uint32_t)phys_blocks) != 0) {
-        vol_free_blocks(v, pba, phys_blocks);
-        return 0;
-    }
 
+    /* WP27: no L2P map -- the entry itself carries the address */
     memset(&e, 0, sizeof e);
     e.file_offset = 0;
     e.length = orig_size;
     e.zone = INVFS_ZONE_BINARY;
     e.algo = algo;
     e.block_id = 0;
+    e.pba = pba;
 
     /* v2 recipe header only when orig_size overflows v1's u32 (WP22a) */
     ast_hlen = invfs_ast_hdr_write(ast_h, orig_size, 1, 0);
@@ -770,7 +768,7 @@ uint64_t vol_create_blob_file(invfs_volume *v, const char *name,
     memcpy(rec + sizeof(invfs_inode_rec) + ast_hlen, &e, sizeof e);
     crc = invfs_crc32c(rec, rec_size);
 
-    if (v->inode_area_pos + rec_size + 4 > v->inode_area_end) { free(rec); return 0; }
+    if (inode_area_make_room(v, (uint64_t)rec_size + 4) != 0) { free(rec); return 0; }
     if (vol_pre_record(v) != 0) { free(rec); return 0; }
     if (io_seek(&v->io, v->inode_area_pos) != 0 ||
         io_write(&v->io, rec, rec_size) != 0 ||
@@ -779,6 +777,7 @@ uint64_t vol_create_blob_file(invfs_volume *v, const char *name,
     idx_put(v, name, strlen(name), inode_id, v->inode_area_pos - rec_size - 4,
             rh->file_size, rh->ctime);
     idx_put_id(v, inode_id, v->inode_area_pos - rec_size - 4);
+    pba_ref_apply(v, rec, (uint32_t)rec_size, +1);
     free(rec);
     return inode_id;
 }

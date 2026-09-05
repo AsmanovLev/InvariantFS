@@ -1,2 +1,4 @@
-__anon6290bd9b0108 struct       46 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_dedupe.c typedef struct {
-dedup_seg        typedef      50 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_dedupe.c } dedup_seg;
+__anon6290bd9b0108 struct       57 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_dedupe.c typedef struct {
+__anon6290bd9b0208 struct      123 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_dedupe.c typedef struct {
+dedup_seg        typedef      60 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_dedupe.c } dedup_seg;
+merge_ent        typedef     125 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_dedupe.c } merge_ent;

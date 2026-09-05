@@ -1,3 +1,6 @@
-dedup_cmp        function     53 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_dedupe.c static int dedup_cmp(const void *a, const void *b)
-dedup_is_deferred function     66 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_dedupe.c static int dedup_is_deferred(const invfs_volume *v, uint64_t inode_id)
-vol_sweep_dedupe function     77 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_dedupe.c int vol_sweep_dedupe(invfs_volume *v)
+dedup_cmp        function     63 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_dedupe.c static int dedup_cmp(const void *a, const void *b)
+dedup_cur_pba    function     92 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_dedupe.c static uint64_t dedup_cur_pba(invfs_volume *v, uint64_t inode, uint64_t lba)
+dedup_is_deferred function     76 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_dedupe.c static int dedup_is_deferred(const invfs_volume *v, uint64_t inode_id)
+dedup_remap_file function    146 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_dedupe.c static int dedup_remap_file(invfs_volume *v, uint64_t inode,
+merge_ent_cmp    function    127 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_dedupe.c static int merge_ent_cmp(const void *a, const void *b)
+vol_sweep_dedupe function    285 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_dedupe.c int vol_sweep_dedupe(invfs_volume *v)

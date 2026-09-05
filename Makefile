@@ -28,7 +28,7 @@ B3      := blake3 blake3_dispatch blake3_portable
 
 TOOLS   := invf-mkfs invf-verify invf-fsck invf-cp invf-cat invf-ls invf-stat \
            invf-zip invf-arctest invf-blkio_test invf-fuse invf-import invf-sweep meta_probe \
-           invf-stats invf-resize invf-rollback invf-l2ptest
+           invf-stats invf-resize invf-rollback invf-l2ptest invf-migrate-v2
 
 all: $(TOOLS:%=$(OUT)/%)
 
@@ -48,7 +48,7 @@ $(OUT)/invf-$(1): $$(OBJ)/$(1).o $(CORE_O)
 endef
 
 # CLI tools (main in src/cli/<name>.c)
-CLI_MAINS := mkfs verify fsck cp cat ls stat arctest blkio_test resize
+CLI_MAINS := mkfs verify fsck cp cat ls stat arctest blkio_test resize migrate-v2
 $(foreach t,$(CLI_MAINS),$(eval $(call TOOL_RULE,$(t),)))
 
 $(OBJ)/invf-zip.o: $(SRC)/recipes/zip.c | $(OBJ)
@@ -143,6 +143,7 @@ e2e: all
 	bash tools/run-e2e.sh tools/test-flushfail.sh
 	bash tools/run-e2e.sh tools/test-compact.sh
 	bash tools/run-e2e.sh tools/test-multidev.sh
+	bash tools/run-e2e.sh tools/test-migrate-v2.sh
 
 # WP22b flakey tier: power-loss / unstable-device soak on dm-flakey over a
 # loop device. Standalone on purpose (needs passwordless sudo + dm-flakey,

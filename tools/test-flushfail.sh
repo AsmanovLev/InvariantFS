@@ -224,33 +224,86 @@ static int cmd_f2mkdangle(const char *img)
     return 0;
 }
 
-/* the drop-window analogue (WP22d: the on-disk journal is no longer
- * rewriteable test collateral, so the maps are dropped through the
- * engine): the victim's name is deleted (the shared-id guard keeps the
- * maps), then the shared id's mappings are UNMAP-journaled away. The
- * survivor's record stays live with no mappings -- exactly what the
- * leg-5 artifact held. */
+/* WP27: there are no file maps in the journal to drop -- the dangling
+ * shape is the live record whose entries carry invalid pbas. Offline:
+ * delete the victim's name through the engine (the id's blocks stay
+ * referenced by the survivor twin's record), then zero the survivor's
+ * live record's entry pbas in the image + restamp its CRC. The open
+ * scan's consistent cut hides the record (never live); fsck counts the
+ * invalid-pba entries as the miss and -f quarantines. */
 static int cmd_f2sabotage(const char *img, uint64_t victim_id)
 {
     int err = 0;
     invfs_volume *v = vol_open(img, &err);
-    const invfs_l2p_entry *t;
-    size_t n = 0, i, nl = 0;
-    uint64_t *lbas;
     if (!v) die("open");
+    (void)victim_id;
     if (vol_delete_file(v, "victimV.bin") != 0) die("delete victim");
-    t = vol_l2p(v, &n);
-    lbas = malloc(n * sizeof *lbas);
-    if (!lbas) die("oom");
-    for (i = 0; i < n; i++)
-        if (t[i].type == INVFS_JRN_MAP && t[i].inode == victim_id)
-            lbas[nl++] = t[i].lba;
-    if (!nl) die("no victim mappings found");
-    for (i = 0; i < nl; i++)
-        vol_l2p_remove(v, victim_id, lbas[i]);
-    free(lbas);
     if (vol_flush(v) != 0) die("flush");
     vol_close(v);
+
+    /* offline: zero the survivor record's entry pbas + restamp its CRC */
+    {
+        FILE *f = fopen(img, "r+b");
+        invfs_superblock sb;
+        uint64_t bm_blocks, iarea, iend, p, last_pos = 0;
+        if (!f) die("fopen");
+        if (fread(&sb, sizeof sb, 1, f) != 1) die("sb read");
+        bm_blocks = (sb.total_blocks / 8 + INVFS_BLOCK_SIZE - 1) /
+                    INVFS_BLOCK_SIZE;
+        iarea = (sb.metadata_zone_start + bm_blocks + INVFS_JOURNAL_BLOCKS)
+                * (uint64_t)INVFS_BLOCK_SIZE;
+        iend = (sb.metadata_zone_start + sb.metadata_zone_blocks) *
+               (uint64_t)INVFS_BLOCK_SIZE;
+        p = iarea;
+        while (p + sizeof(invfs_inode_rec) <= iend) {
+            invfs_inode_rec rh;
+            if (fseek(f, (long)p, SEEK_SET) != 0 ||
+                fread(&rh, sizeof rh, 1, f) != 1) die("walk read");
+            if (rh.magic != INODE_REC_MAGIC && rh.magic != TOMBSTONE_MAGIC)
+                break;
+            if (rh.rec_len < sizeof rh || rh.rec_len > INVFS_MAX_REC_LEN ||
+                p + rh.rec_len + 4 > iend)
+                break;
+            if (rh.magic == INODE_REC_MAGIC && rh.name_len &&
+                strcmp(rh.name, "survivorS.bin") == 0)
+                last_pos = p;
+            p += (uint64_t)rh.rec_len + 4;
+        }
+        if (!last_pos) die("survivor record not found");
+        {
+            uint8_t *rb;
+            invfs_inode_rec rh;
+            invfs_ast_hdr ah;
+            size_t base = sizeof(invfs_inode_rec), ent0;
+            uint32_t i, ncrc;
+            if (fseek(f, (long)last_pos, SEEK_SET) != 0) die("seek");
+            if (fread(&rh, sizeof rh, 1, f) != 1) die("rec head");
+            if (rh.rec_len < sizeof rh || rh.rec_len > INVFS_MAX_REC_LEN)
+                die("rec_len");
+            rb = malloc(rh.rec_len);
+            if (!rb) die("oom");
+            if (fseek(f, (long)last_pos, SEEK_SET) != 0 ||
+                fread(rb, rh.rec_len, 1, f) != 1) die("rec read");
+            if (invfs_ast_hdr_parse(rb + base, rh.rec_len - base, &ah) != 0)
+                die("recipe parse");
+            ent0 = base + ah.hdr_len;
+            if (ent0 + (size_t)ah.num_blocks *
+                    sizeof(invfs_ast_block_entry) > rh.rec_len)
+                die("entries oob");
+            for (i = 0; i < ah.num_blocks; i++) {
+                invfs_ast_block_entry *e = (invfs_ast_block_entry *)
+                    (rb + ent0 + (size_t)i * sizeof *e);
+                e->pba = 0;
+            }
+            ncrc = invfs_crc32c(rb, rh.rec_len);
+            if (fseek(f, (long)last_pos, SEEK_SET) != 0 ||
+                fwrite(rb, rh.rec_len, 1, f) != 1 ||
+                fwrite(&ncrc, 4, 1, f) != 1)
+                die("rec rewrite");
+            free(rb);
+        }
+        fclose(f);
+    }
     printf("F2SABOTAGE-OK\n");
     return 0;
 }
@@ -320,18 +373,39 @@ static int cmd_f4mkdiv(const char *img)
 {
     int err = 0;
     invfs_volume *v = vol_open(img, &err);
-    uint64_t id, pba = 0, len;
-    size_t n = 0, i;
-    const invfs_l2p_entry *t;
+    uint64_t id, pba = 0;
     if (!v) die("open");
     id = create_pattern(v, "survivorS.bin", 192 * 1024, 55);
     if (vol_sync(v) != 0) die("sync");
-    t = vol_l2p(v, &n);
-    for (i = 0; i < n; i++)
-        if (t[i].type == INVFS_JRN_MAP && t[i].inode == id) {
-            pba = t[i].pba; break;
+    /* WP27: the segment's pba lives in the record's AST entry now; the
+     * WAL is owner-only and never carries file maps */
+    {
+        uint64_t pos = vol_inode_area_start(v);
+        while (pos) {
+            uint32_t magic, rl;
+            uint64_t ino, fsz, np;
+            np = vol_inode_next(v, pos, &magic, &ino, &fsz, NULL, 0, &rl);
+            if (!np) break;
+            pos = np;
+            if (magic != INODE_REC_MAGIC || ino != id) continue;
+            {
+                uint8_t *rb = malloc(rl);
+                invfs_ast_hdr ah;
+                size_t base = sizeof(invfs_inode_rec);
+                if (rb && vol_read_raw(v, np - rl - 4, rb, rl) == 0 &&
+                    invfs_ast_hdr_parse(rb + base, rl - base, &ah) == 0 &&
+                    ah.num_blocks >= 1) {
+                    const invfs_ast_block_entry *e =
+                        (const invfs_ast_block_entry *)(rb + base + ah.hdr_len);
+                    if (e->length && e->pba)
+                        pba = e->pba;
+                }
+                free(rb);
+            }
+            if (pba) break;
         }
-    if (!pba) die("no mapping for the survivor");
+    }
+    if (!pba) die("no segment pba for the survivor");
     printf("F4MKDIV-OK pba=%llu\n", (unsigned long long)pba);
     vol_close(v);
     return 0;
@@ -351,6 +425,25 @@ static int cmd_f4checkdiv(const char *img)
     assert_file(v, "attackerA.bin", 256 * 1024, 66);
     vol_close(v);
     printf("F4CHECKDIV-OK\n");
+    return 0;
+}
+
+/* WP27: mark the volume DIRTY with a valid CRC (the drop-window crash
+ * shape; python lacks crc32c, so this runs here where invfs_crc32c is
+ * linked in) */
+static int cmd_f4dirty(const char *img)
+{
+    FILE *f = fopen(img, "r+b");
+    invfs_superblock sb;
+    if (!f) die("fopen");
+    if (fseek(f, 0, SEEK_SET) != 0 ||
+        fread(&sb, sizeof sb, 1, f) != 1) die("sb read");
+    sb.state = INVFS_STATE_DIRTY;
+    sb.checksum = invfs_crc32c(&sb, offsetof(invfs_superblock, checksum));
+    if (fseek(f, 0, SEEK_SET) != 0 ||
+        fwrite(&sb, sizeof sb, 1, f) != 1) die("sb write");
+    fclose(f);
+    printf("F4DIRTY-OK\n");
     return 0;
 }
 
@@ -477,6 +570,8 @@ int main(int argc, char **argv)
         return cmd_f4mkdiv(argv[2]);
     if (strcmp(argv[1], "f4checkdiv") == 0 && argc == 3)
         return cmd_f4checkdiv(argv[2]);
+    if (strcmp(argv[1], "f4dirty") == 0 && argc == 3)
+        return cmd_f4dirty(argv[2]);
     if (strcmp(argv[1], "f2cp") == 0 && argc == 5)
         return cmd_f2cp(argv[2], argv[3], argv[4]);
     if (strcmp(argv[1], "f2mvrefuse") == 0 && argc == 5)
@@ -547,7 +642,7 @@ VID=$("$H" f2mkdangle $IMG_D | sed -n 's/.*victim_id=//p')
 $B/invf-ls $IMG_D >"$WORK/ls-d.log" 2>"$WORK/ls-d.err" || true
 grep -q "survivorS.bin" "$WORK/ls-d.log" && { cat "$WORK/ls-d.log"; fail "dangling survivor is listed"; }
 grep -q "bystanderB.bin" "$WORK/ls-d.log" || { cat "$WORK/ls-d.log"; fail "bystander lost too"; }
-grep -q "l2p cut: survivorS.bin" "$WORK/ls-d.err" \
+grep -q "record cut: survivorS.bin" "$WORK/ls-d.err" \
     || { cat "$WORK/ls-d.err"; fail "open did not log the cut"; }
 set +e
 $B/invf-fsck $IMG_D >"$WORK/fsck-d.log" 2>&1
@@ -817,12 +912,16 @@ else
     echo "== leg H: SKIPPED (no pre-WP22d binaries at $OLDB) =="
 fi
 
-# ---- leg I: WP22d bitmap/journal divergence reconcile at open ---------
-# A drop window can take a flush's bitmap pages and spare its journal
-# append; the disk bitmap then calls a MAPPED block free, and the next
+# ---- leg I: WP22d/WP27 bitmap divergence: reconcile at open + persist ---
+# A drop window can take a flush's bitmap pages and spare the record they
+# cover; the disk bitmap then calls a REFERENCED block free, and the next
 # allocation would hand it out from under its live file (the leg-5
-# soak's clobbered-segment case). vol_open reconciles the one-sided
-# direction: every journal-mapped block is forced used (never cleared).
+# soak's clobbered-segment case). WP27: the bitmap is a derived cache of
+# the records + the owner WAL; the open-time guard (the record side, on
+# the not-cleanly-closed path) forces every live record's extent used,
+# and the session's first flush persists the repaired bitmap wholesale.
+# The sabotage clears the survivor's bit AND marks the volume DIRTY (the
+# crash shape: the drop window's death never closed clean).
 echo "== leg I: a dropped bitmap bit is reconciled at open, no clobber =="
 IMGI=wp22d-i.img
 rm -f "$IMGI"
@@ -841,13 +940,16 @@ with open(img, "r+b") as f:
     f.seek(mzs * 4096 + pba // 8)
     f.write(bytes([byte & ~(1 << (pba % 8))]))
 PY
-# the open inside f4checkdiv must log the divergence repair
+# the drop window is a crash: the volume never closed CLEAN
+"$H" f4dirty $IMGI || fail "I: mark DIRTY"
+# the open inside f4checkdiv must log the divergence repair (the
+# auto-recovery then clears DIRTY so the write leg proceeds)
 "$H" f4checkdiv $IMGI >"$WORK/f4check.log" 2>&1 || { cat "$WORK/f4check.log"; fail "f4checkdiv"; }
-grep -q "bitmap/journal divergence" "$WORK/f4check.log" \
+grep -q "bitmap/record divergence" "$WORK/f4check.log" \
     || { cat "$WORK/f4check.log"; fail "I: open did not reconcile the dropped bit"; }
 $B/invf-fsck $IMGI >"$WORK/fsck-i.log" 2>&1 || true
 grep -q "^OK$" "$WORK/fsck-i.log" || { cat "$WORK/fsck-i.log"; fail "fsck I not OK"; }
-echo "   mapped block's dropped used-bit repaired at open; attacker write went elsewhere; fsck OK"
+echo "   referenced block's dropped used-bit repaired at open; attacker write went elsewhere; fsck OK"
 
 
 echo "PASS: WP22c (flush/sync failure latch + rename/retire/fsck liveness)"

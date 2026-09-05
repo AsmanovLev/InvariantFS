@@ -1,20 +1,23 @@
-tier_demote_idx  function    555 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_tier.c static void tier_demote_idx(invfs_volume *v, size_t idx)
-tier_heat_of     function    473 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_tier.c static uint16_t tier_heat_of(const invfs_volume *v, uint64_t pba)
-tier_promote_one function    490 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_tier.c static int tier_promote_one(invfs_volume *v, uint64_t cpba, uint32_t plen)
+tier_demote_idx  function    692 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_tier.c static void tier_demote_idx(invfs_volume *v, size_t idx)
+tier_heat_build  function    558 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_tier.c static int tier_heat_build(invfs_volume *v, tier_heat_map *m)
+tier_heat_mix    function    495 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_tier.c static uint64_t tier_heat_mix(uint64_t x)
+tier_heat_of     function    540 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_tier.c static uint16_t tier_heat_of(const tier_heat_map *m, uint64_t pba)
+tier_heat_put    function    503 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_tier.c static int tier_heat_put(tier_heat_map *m, uint64_t pba, uint16_t r)
+tier_promote_one function    627 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_tier.c static int tier_promote_one(invfs_volume *v, uint64_t cpba, uint32_t plen)
 vol_rawm_count   function    147 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_tier.c uint64_t vol_rawm_count(invfs_volume *v, uint64_t *blocks_out)
 vol_tier_count   function    129 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_tier.c uint64_t vol_tier_count(invfs_volume *v, uint64_t *blocks_out,
-vol_tier_migrate function    568 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_tier.c int vol_tier_migrate(invfs_volume *v)
+vol_tier_migrate function    705 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_tier.c int vol_tier_migrate(invfs_volume *v)
 wp25_del         function     88 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_tier.c static int wp25_del(wp25_ent *t, size_t *np, uint64_t key)
-wp25_fsck_prune  function    436 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_tier.c void wp25_fsck_prune(invfs_volume *v)
+wp25_fsck_prune  function    445 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_tier.c void wp25_fsck_prune(invfs_volume *v)
 wp25_get         function     99 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_tier.c static const wp25_ent *wp25_get(const wp25_ent *t, size_t n, uint64_t key)
-wp25_index_load  function    283 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_tier.c void wp25_index_load(invfs_volume *v)
-wp25_index_load_one function    245 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_tier.c static void wp25_index_load_one(invfs_volume *v, uint64_t owner,
+wp25_index_load  function    292 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_tier.c void wp25_index_load(invfs_volume *v)
+wp25_index_load_one function    254 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_tier.c static void wp25_index_load_one(invfs_volume *v, uint64_t owner,
 wp25_lower       function     44 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_tier.c static size_t wp25_lower(const wp25_ent *t, size_t n, uint64_t key,
-wp25_on_free     function    398 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_tier.c void wp25_on_free(invfs_volume *v, uint64_t pba, uint64_t nblocks)
-wp25_owner_id    function    322 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_tier.c static uint64_t wp25_owner_id(invfs_volume *v, int is_rawm)
-wp25_owner_sync  function    298 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_tier.c int wp25_owner_sync(invfs_volume *v)
+wp25_on_free     function    407 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_tier.c void wp25_on_free(invfs_volume *v, uint64_t pba, uint64_t nblocks)
+wp25_owner_id    function    331 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_tier.c static uint64_t wp25_owner_id(invfs_volume *v, int is_rawm)
+wp25_owner_sync  function    307 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_tier.c int wp25_owner_sync(invfs_volume *v)
 wp25_owner_write function    166 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_tier.c static int wp25_owner_write(invfs_volume *v, uint64_t owner,
 wp25_put         function     59 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_tier.c static int wp25_put(wp25_ent **tp, size_t *np, size_t *cp,
 wp25_rawm_lookup function    118 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_tier.c int wp25_rawm_lookup(invfs_volume *v, uint64_t raw_pba,
-wp25_rawm_write  function    335 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_tier.c int wp25_rawm_write(invfs_volume *v, uint64_t pba, const uint8_t *buf,
+wp25_rawm_write  function    344 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_tier.c int wp25_rawm_write(invfs_volume *v, uint64_t pba, const uint8_t *buf,
 wp25_tier_lookup function    107 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_tier.c int wp25_tier_lookup(invfs_volume *v, uint64_t cpba,

@@ -8,17 +8,16 @@
 #   the table. Two seeds, plus a run with INVFS_JRN_FORCE_COMPACT=1 (every
 #   flush flips journal slots mid-stream) and one with INVFS_L2P_IDX=0
 #   (the index disabled -> pure fallback path must still answer).
-# Leg 2 (quiet): a pure-read loop (separate invf-cat processes + an
-#   explicit vol_flush via the harness) leaves the whole image
-#   byte-identical -- the journal included: no refresh MAPs, slot seq
-#   unchanged. A writing session MUST change the image (the leg can tell).
-# Leg 3 (pump): read heat still persists -- folded into the compaction
-#   image (WP-L2Q sweep-granularity persistence), never per-read journal
-#   appends. 4 pumped reads of one file -> rheat 4 after remount.
-# Leg 4 (bench): a 50k-file volume; full-tree read wall time with the
-#   session index vs INVFS_L2P_IDX=0 (the old linear scan, same binary),
-#   plus a pre-WP-L2Q baseline binary when INVFS_BASELINE_DIR points at a
-#   build tree of HEAD^. Prints numbers; asserts the indexed run wins.
+# Leg 2 (quiet): pure reads never touch the WAL -- the metadata prefix
+#   (superblock + bitmap + journal) stays byte-identical while read heat
+#   folds into the inode-area records at close (the WP27 persistence
+#   point). A writing session MUST change the image (the leg can tell).
+# Leg 3 (pump): read heat persists across sessions via the close fold.
+#   4 pumped reads of one file -> rheat 4 after remount.
+# Leg 4 (bench): a 50k-file volume full-tree read wall time (the WP27
+#   read path is record-direct: no WAL consult to toggle, so the
+#   INVFS_L2P_IDX=0 arm is a same-path control; the assertion is
+#   anti-pathology, not a win).
 #
 # Run from the repo root after `make`:  bash tools/run-e2e.sh tools/test-l2p.sh
 set -e
@@ -46,7 +45,7 @@ INVFS_L2P_IDX=0 $B/invf-l2ptest stress "$IMG" 30000 4242 \
     || fail "stress with index disabled (fallback scan)"
 echo "leg 1 OK"
 
-echo "== leg 2: pure reads leave the journal byte-identical =="
+echo "== leg 2: pure reads leave the image byte-identical =="
 $B/invf-mkfs "$IMGQ" 0.2 >/dev/null
 python3 - <<'PY'
 import random
@@ -68,6 +67,10 @@ for i in $(seq 3); do
 done
 # ... plus an explicit vol_flush inside a read-only session
 $B/invf-l2ptest readflush "$IMGQ" q0.txt q1.txt q2.txt q3.txt >/dev/null
+# WP27: the read path never consults the owner WAL, and heat folds only
+# at the sweep's decay pass / an explicit vol_heat_persist -- so a pure
+# read session writes NOTHING (the same quiet-image guarantee the WP-L2Q
+# leg pinned, now for the whole image: journal AND inode area).
 cmp "$IMGQ" "$WORK/q.before" \
     || fail "pure-read session changed the image (journal/superblock)"
 echo "image byte-identical after pure reads + vol_flush"
@@ -79,55 +82,43 @@ if cmp -s "$IMGQ" "$WORK/q.before"; then
 fi
 echo "write session did change the image (control OK)"
 
-echo "== leg 3: read heat persists via compaction fold (pump) =="
-# 4 pumped reads (open + read + forced-compact flush + close per round):
-# the WP-L2Q persistence path. rheat must read 4 after the remounts.
+echo "== leg 3: read heat persists via the close-fold (pump) =="
+# 4 pumped reads (open + read + close per round): each close folds the
+# session's accrued touch into the record's heat TLV. rheat must read 4
+# after the remounts.
 for i in $(seq 4); do
-    INVFS_JRN_FORCE_COMPACT=1 $B/invf-l2ptest pump "$IMGQ" q1.txt >/dev/null
+    $B/invf-l2ptest pump "$IMGQ" q1.txt >/dev/null
 done
-RH=$($B/meta_probe "$IMGQ" --heat q1.txt | grep "^entry " |
-     sed "s/.*rheat=//" | awk '{if($1>m)m=$1} END{print m+0}')
+RH=$($B/meta_probe "$IMGQ" --heat q1.txt | grep "^heat " | sed "s/.*rheat=//" | awk '{print $1+0}')
 [ "$RH" = "4" ] || fail "q1.txt rheat $RH != 4 after 4 pumped reads"
 # a pure read-only probe accrues nothing (and writes nothing)
 $B/meta_probe "$IMGQ" --heat q1.txt >/dev/null
-RH=$($B/meta_probe "$IMGQ" --heat q1.txt | grep "^entry " |
-     sed "s/.*rheat=//" | awk '{if($1>m)m=$1} END{print m+0}')
+RH=$($B/meta_probe "$IMGQ" --heat q1.txt | grep "^heat " | sed "s/.*rheat=//" | awk '{print $1+0}')
 [ "$RH" = "4" ] || fail "probe run changed rheat ($RH != 4)"
-echo "leg 3 OK (rheat=4 persisted through compaction images only)"
+echo "leg 3 OK (rheat=4 persisted through close-folds only)"
 
 echo "== leg 4: read microbench (50k files) =="
 INVFS_META_FRAC=32 $B/invf-mkfs "$IMGB" 1.5 >/dev/null
 $B/invf-l2ptest mkfiles "$IMGB" 50000 2048
 cp --sparse=always "$IMGB" "$IMGB".ref
-echo "-- indexed (WP-L2Q session index)"
+# WP27: the read path resolves pbas from the records directly -- there is
+# no per-read WAL consult to toggle, so the WP-L2Q-era indexed-vs-scan
+# comparison is one path measured twice. Keep the numbers visible (the
+# wall time IS the regression signal), with the session-index env arm
+# kept as the no-op control.
+echo "-- default (WP27: record-direct reads)"
 T_IDX=$($B/invf-l2ptest readall "$IMGB" 50000 | tee /dev/stderr | \
         sed -n 's/.*loop_ms=\([0-9.]*\).*/\1/p')
 cp "$IMGB".ref "$IMGB"   # same start state for every run
-echo "-- fallback scan (INVFS_L2P_IDX=0, same binary)"
+echo "-- control (INVFS_L2P_IDX=0, same binary)"
 T_OFF=$(INVFS_L2P_IDX=0 $B/invf-l2ptest readall "$IMGB" 50000 | \
         tee /dev/stderr | sed -n 's/.*loop_ms=\([0-9.]*\).*/\1/p')
 cp "$IMGB".ref "$IMGB"
-if [ -n "$INVFS_BASELINE_DIR" ]; then
-    # the same harness built against the pre-WP-L2Q objects (HEAD^)
-    BD="$INVFS_BASELINE_DIR"
-    CORE="volume vol_cpack vol_png vol_seal vol_repair vol_rollback \
-          vol_resize vol_fsck vol_crash vol_exer vol_dedupe vol_textzone \
-          vol_heat vol_sweep vol_read vol_write vol_records vol_ast \
-          vol_dirs vol_tier arc crc32c lz4 flacx tarx pngx blkio miniz \
-          blake3 blake3_dispatch blake3_portable ppmd8 ppmd8enc ppmd8dec \
-          ppmd_codec codec bcj_x86 rs"
-    OBJS=""
-    for m in $CORE; do OBJS="$OBJS $BD/build/obj/$m.o"; done
-    cc -std=gnu11 -O2 -I"$BD/src-extracted/VFS/src" -I"$BD/src-extracted/VFS/src/core" -I"$BD/src-extracted/VFS/src/codecs" -I"$BD/src-extracted/VFS/src/recipes" -I"$BD/src-extracted/VFS/src/vendor7z" -o "$WORK/l2ptest.base" \
-        "$REPO/tools/l2ptest.c" $OBJS -Wl,-l:libzstd.so.1 -lz -lpthread
-    echo "-- baseline (pre-WP-L2Q build, $BD)"
-    T_BASE=$("$WORK/l2ptest.base" readall "$IMGB" 50000 | tee /dev/stderr | \
-             sed -n 's/.*loop_ms=\([0-9.]*\).*/\1/p')
-    cp "$IMGB".ref "$IMGB"
-fi
-awk "BEGIN{exit !($T_IDX < $T_OFF)}" \
-    || fail "indexed read ($T_IDX ms) not faster than the scan ($T_OFF ms)"
-echo "bench: indexed=${T_IDX}ms scan=${T_OFF}ms${T_BASE:+ baseline=${T_BASE}ms}"
+echo "bench: readall=${T_IDX}ms control=${T_OFF}ms"
+# both arms are the same v2 code path: assert no pathological divergence
+# (3x) rather than a strict win
+awk "BEGIN{exit !($T_IDX < $T_OFF * 3)}" \
+    || fail "readall pathologies: ${T_IDX} ms vs ${T_OFF} ms"
 echo "leg 4 OK"
 
 echo "ALL L2P L2Q LEGS PASS"

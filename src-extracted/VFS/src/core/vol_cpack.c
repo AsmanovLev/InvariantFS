@@ -2267,20 +2267,36 @@ static int cpack_map_validate(const cpack_map_ent *e, size_t n,
 
 
 /* Read the recipe blob = the single stored segment of record `ino`
- * (block_id 0), framing + CRC32C verified. Returns the malloc'd payload. */
+ * (block_id 0), framing + CRC32C verified. WP27: the pba comes from the
+ * record's own AST entry. Returns the malloc'd payload. */
 static int cpack_recipe_seg(invfs_volume *v, uint64_t ino,
                             uint8_t **out, size_t *out_len)
 {
-    uint64_t pba = 0, plen = 0;
+    uint64_t pba = 0;
     uint32_t csize;
     uint8_t *blob;
+    uint8_t *rec = NULL;
+    uint32_t rl = 0;
+    invfs_ast_hdr ah;
+    size_t base = sizeof(invfs_inode_rec);
 
     *out = NULL;
     *out_len = 0;
-    if (vol_lookup_entry(v, ino, 0, &pba, &plen) != 0 || !pba) return -1;
+    if (meta_read_record_by_id(v, ino, &rec, &rl, NULL, 0, NULL) != 0)
+        return -1;
+    if (rl >= base + INVFS_AST_HDR_V1_LEN &&
+        invfs_ast_hdr_parse(rec + base, rl - base, &ah) == 0 &&
+        ah.num_blocks >= 1 &&
+        rl >= base + ah.hdr_len + sizeof(invfs_ast_block_entry)) {
+        const invfs_ast_block_entry *e =
+            (const invfs_ast_block_entry *)(rec + base + ah.hdr_len);
+        pba = e->pba;
+    }
+    free(rec);
+    if (!pba || pba >= v->sb.total_blocks) return -1;
     /* framed read, CRC-verified inside (an empty recipe is legal);
      * a shadow-zone failure gets one WP20 seal-parity recovery attempt */
-    if (seg_read_checked(v, pba, plen, 0, &csize, &blob) != 0)
+    if (seg_read_checked(v, pba, 0, 0, &csize, &blob) != 0)
         return -1;
     *out = blob;
     *out_len = csize;

@@ -13,15 +13,18 @@
  *    CLEAN, no mount contradicted it, and a volume that died mid-write opened
  *    as though nothing had happened.
  *
- * 2. Maps durable before the record that needs them. An inode record names
- *    its data by *segment index* -- invfs_ast_block_entry.block_id is the L2P
- *    key, not a physical block -- so physical addresses exist only in the
- *    journal. A record that is durable while its L2P is not is not merely
- *    stale, it is unreadable and unrebuildable: fsck reports l2p_miss and has
- *    nothing to reconstruct the mapping from. Data blocks themselves are
- *    already durable (io_write at allocation time); only the bitmap and the
- *    journal were lazy, and invf-sweep flushed once at the *end of the whole
- *    run* -- so an interrupted sweep lost every file it had transcoded.
+ * 2. The covering bitmap durable before the record that names the pbas.
+ *    WP27: an inode record names its data by physical address (the 32B
+ *    AST entry's pba), so the commit ordering is: data blocks (io_write
+ *    at allocation) -> bitmap (vol_flush's dirty range) -> owner-WAL ops
+ *    (if any) -> the record append itself (vol_pre_record = mark dirty +
+ *    flush). A record durable while the bitmap bits covering its pbas are
+ *    not lets a later allocation hand a referenced block out from under
+ *    its file; the open-time divergence guard and the fsck rebuild
+ *    reconcile that (records are the truth, the bitmap a cache), but the
+ *    ordering is what keeps the common crash boring. Owner-class maps
+ *    (batches, parity, retention) keep the v1 rule: the WAL map is
+ *    durable before the record that names it -- same vol_pre_record.
  *
  * 3. Tombstones are the exception: they must be durable BEFORE the frees they
  *    authorize, never after, or a crash leaves a live record whose blocks are
@@ -67,8 +70,9 @@ int vol_mark_dirty(invfs_volume *v)
 }
 
 
-/* Call before appending an inode record: mark dirty, then make the maps
-   durable so the record about to land is backed by something readable. */
+/* Call before appending an inode record: mark dirty, then make the dirty
+   bitmap range and the pending owner-WAL ops durable, so the record about
+   to land is backed by blocks nobody else can be handed. */
 int vol_pre_record(invfs_volume *v)
 {
     if (vol_mark_dirty(v) != 0) return -1;

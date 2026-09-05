@@ -183,6 +183,14 @@ int tz_owner_write(invfs_volume *v, uint64_t owner, const char *name,
     rec_len = sizeof(invfs_inode_rec) + ahlen +
               (size_t)o->n * sizeof(invfs_ast_block_entry) + o->ext_len;
     total = rec_len + 4 + (o->pos ? sizeof(tomb) + 4 : 0);
+    /* churn backstop, before the combo is built: the compaction moves
+     * every record, so the position-kill target is re-derived after it */
+    if (v->inode_area_pos + total > v->inode_area_end) {
+        if (inode_area_make_room(v, total) != 0)
+            return -1;
+        o->pos = idx_get_id(v, owner);
+        total = rec_len + 4 + (o->pos ? sizeof(tomb) + 4 : 0);
+    }
     combo = (uint8_t *)calloc(1, total);
     if (!combo) return -1;
 
@@ -217,7 +225,6 @@ int tz_owner_write(invfs_volume *v, uint64_t owner, const char *name,
         memcpy(combo + off + sizeof tomb, &crc_tomb, 4);
     }
 
-    if (v->inode_area_pos + total > v->inode_area_end) { free(combo); return -1; }
     if (vol_mark_dirty(v) != 0) { free(combo); return -1; }
     new_pos = v->inode_area_pos;
     if (io_seek(&v->io, new_pos) != 0 ||
@@ -288,12 +295,13 @@ int tz_member_oversized(invfs_volume *v, uint64_t inode_id,
     }
     ents = (const invfs_ast_block_entry *)(buf + base + ah.hdr_len);
     for (i = 0; i < ah.num_blocks && !over; i++) {
-        uint64_t pba = 0, plen = 0;
+        uint64_t pba = 0;
         uint8_t hb[12];
         uint32_t usize;
         if (ents[i].zone != INVFS_ZONE_TEXT) continue;
-        if (vol_lookup_entry(v, inode_id, ents[i].block_id, &pba, &plen) != 0 ||
-            !pba) continue;
+        /* WP27: the member's entry carries the batch's pba */
+        pba = ents[i].pba;
+        if (!pba || pba >= v->sb.total_blocks) continue;
         if (io_seek(&v->io, pba * INVFS_BLOCK_SIZE) != 0 ||
             io_read(&v->io, hb, sizeof hb) != 0) continue;
         memcpy(&usize, hb + 8, 4);
@@ -465,15 +473,24 @@ static int tz_commit_member(tz_ctx *c, tz_member *m, const tz_candidate *cand)
         ne[i].algo = s->algo;              /* PPMD / ZSTD / ZSTD_BCJ */
         ne[i].block_id = (uint32_t)m->slices[i].batch_seq;
         ne[i].block_offset = m->slices[i].batch_off;
+        /* WP27: the member's entry names the batch's pba directly --
+         * the v1 L2P dup is gone; the owner-WAL map (written at seal)
+         * stays as the batch's durability/GC record */
+        ne[i].pba = s->pba;
     }
     if (ext_len)
         memcpy(rec + rec_size - ext_len, ext, ext_len);
     crc = invfs_crc32c(rec, rec_size);
 
-    /* room for the record AND the tombstone the retire appends */
-    if (v->inode_area_pos + rec_size + 4 + sizeof(invfs_inode_rec) + 4 >
-        v->inode_area_end)
-        goto out;
+    /* room for the record AND the tombstone the retire appends (the
+     * churn backstop reclaims the dead prefix first; the retire's
+     * tombstone is an id-kill, and `old` rides content-only, so the
+     * compaction's position moves touch nothing held here). Area-full
+     * with compaction impossible (a live checkpoint) is a SOFT skip:
+     * the member stays RAW and retries next sweep. */
+    if (inode_area_make_room(v, (uint64_t)rec_size + 4 +
+                             sizeof(invfs_inode_rec) + 4) != 0)
+        { rc = 1; goto out; }
     if (io_seek(&v->io, v->inode_area_pos) != 0 ||
         io_write(&v->io, rec, rec_size) != 0 ||
         io_write(&v->io, &crc, 4) != 0)
@@ -502,10 +519,11 @@ out:
 
 
 /* Commit every complete, non-fallback member whose slices all live in
- * sealed batches. Two phases: allocate new ids + write the L2P dup maps
- * for ALL ready members, ONE journal flush so the dups are durable, then
- * the record rewrites (crash ordering, WP10 §4: batch segments and owner
- * maps are already durable from the seal). */
+ * sealed batches. WP27: the member record carries the batch pba in each
+ * entry, so there are no dup maps to write: the batch segment and the
+ * owner record landed durable at seal time (vol_pre_record there), and
+ * the bitmap was flushed before the member record names the batch (the
+ * pre-commit flush below). */
 static int tz_commit_ready(tz_ctx *c, const tz_candidate *cands,
                            tz_member *members, size_t n)
 {
@@ -524,23 +542,21 @@ static int tz_commit_ready(tz_ctx *c, const tz_candidate *cands,
                 break;
         if (j < m->n_slices) continue;   /* still feeding an open batch */
         m->new_id = v->next_inode_id++;
-        for (j = 0; j < m->n_slices; j++) {
-            const tz_sealed *s = tz_sealed_find(c, m->slices[j].batch_seq);
-            if (vol_map(v, m->new_id, m->slices[j].batch_seq, s->pba,
-                        s->phys) != 0)
-                return -1;
-        }
         any = 1;
     }
     if (any && vol_pre_record(v) != 0)
         return -1;
     for (i = 0; i < n; i++) {
         tz_member *m = &members[i];
+        int crc;
         if (!m->new_id || m->committed) continue;
-        if (tz_commit_member(c, m, &cands[i]) != 0) {
+        crc = tz_commit_member(c, m, &cands[i]);
+        if (crc < 0) {
             fprintf(stderr, "tz: commit failed for %s\n", cands[i].name);
             rc = -1;   /* the old record is untouched; the member stays RAW */
         }
+        /* crc > 0: soft-skipped (area full, compaction impossible) --
+         * the member stays RAW and retries next sweep */
         m->committed = 1;
     }
     return rc;
@@ -710,6 +726,7 @@ static int tz_seal(tz_ctx *c, const tz_candidate *cands,
         e->algo = c->open_algo;           /* PPMD / ZSTD / ZSTD_BCJ */
         e->block_id = (uint32_t)c->open_seq;
         e->block_offset = 0;
+        e->pba = pba;   /* WP27: the owner record is self-describing too */
         c->owner.n++;
     }
     if (tz_owner_write(v, c->owner_id, TZ_OWNER_NAME, &c->owner) != 0) {

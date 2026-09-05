@@ -12,20 +12,21 @@
 #include "volume.h"
 #include "invarifs.h"
 
-/* WP19: dump the file's storage class, its AST block entries (zone/algo
- * per segment) and the heat counters of every live L2P mapping it owns.
+/* WP27: dump the file's storage class, its AST block entries (zone/algo/
+ * pba per segment) and the per-file heat counters from the "invfs.heat"
+ * TLV (format v2: heat moved out of the journal pads into the record).
  * Read-only: nothing here touches the vol_read_* paths, so no heat
  * accrues and the volume closes clean. */
 static int heat_dump(invfs_volume *v, const char *name)
 {
     uint64_t id = vol_find(v, name);
-    const invfs_l2p_entry *l2p;
-    size_t n = 0, i, shown = 0;
+    size_t shown = 0;
     uint8_t cls = 0, algo = 0;
     uint16_t gen = 0;
     uint64_t pos, p;
     uint8_t *rec = NULL;
     uint32_t rl = 0, rec_rl = 0;
+    const invfs_superblock *sb = vol_sb(v);
 
     printf("find(%s)=%llu\n", name, (unsigned long long)id);
     if (!id) return 1;
@@ -33,6 +34,18 @@ static int heat_dump(invfs_volume *v, const char *name)
         printf("class=%u algo=%u gen=%u\n", cls, algo, gen);
     else
         printf("class=absent\n");
+
+    /* the heat TLV (0/0 when absent) */
+    {
+        uint8_t hv[4] = {0, 0, 0, 0};
+        size_t hl = sizeof hv;
+        if (vol_get_xattr(v, id, INVFS_XATTR_HEAT, hv, &hl) == 0 && hl >= 3)
+            printf("heat rheat=%u wheat=%u\n",
+                   (unsigned)(hv[0] | ((unsigned)hv[1] << 8)),
+                   (unsigned)hv[2]);
+        else
+            printf("heat=absent\n");
+    }
 
     /* AST entries of the LIVE record (newest version with this id) */
     pos = vol_inode_area_start(v);
@@ -61,28 +74,33 @@ static int heat_dump(invfs_volume *v, const char *name)
             uint32_t k;
             ents = (const invfs_ast_block_entry *)(rec + base + ah.hdr_len);
             for (k = 0; k < ah.num_blocks; k++) {
+                /* the physical extent derives from the segment's framed
+                 * header (WP27: the entry stores no length) */
+                uint64_t phys = 0;
+                uint8_t hb[8];
+                uint32_t cs;
+                if (ents[k].pba && ents[k].pba < sb->total_blocks &&
+                    vol_read_raw(v, ents[k].pba * INVFS_BLOCK_SIZE,
+                                 hb, 8) == 0) {
+                    memcpy(&cs, hb, 4);
+                    if (cs)
+                        phys = ((uint64_t)cs + 8 + INVFS_BLOCK_SIZE - 1) /
+                               INVFS_BLOCK_SIZE;
+                }
                 if (base + ah.hdr_len + (size_t)(k + 1) * sizeof(*ents) > rec_rl)
                     break;
                 printf("ast i=%u off=%llu len=%llu zone=%u algo=%u "
-                       "bid=%u boff=%u\n", k,
+                       "bid=%u boff=%u pba=%llu phys=%llu\n", k,
                        (unsigned long long)ents[k].file_offset,
                        (unsigned long long)ents[k].length,
                        ents[k].zone, ents[k].algo,
-                       ents[k].block_id, ents[k].block_offset);
+                       ents[k].block_id, ents[k].block_offset,
+                       (unsigned long long)ents[k].pba,
+                       (unsigned long long)phys);
+                shown++;
             }
         }
         free(rec);
-    }
-
-    l2p = vol_l2p(v, &n);
-    for (i = 0; i < n; i++) {
-        const invfs_l2p_entry *e = &l2p[i];
-        if (e->type != INVFS_JRN_MAP || e->inode != id) continue;
-        printf("entry lba=%llu pba=%llu len=%u rheat=%u wheat=%u\n",
-               (unsigned long long)e->lba,
-               (unsigned long long)e->pba, e->length,
-               vol_heat_r(e), vol_heat_w(e));
-        shown++;
     }
     printf("entries=%zu\n", shown);
     return 0;

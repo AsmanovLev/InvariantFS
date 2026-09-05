@@ -70,7 +70,7 @@ uint64_t vol_create_file(invfs_volume *v, const char *name,
         rh0->ctime = (uint64_t)time(NULL);
         rec_set_name(rh0, name);
         crc0 = invfs_crc32c(rec0, rec_size0);
-        if (v->inode_area_pos + rec_size0 + 4 > v->inode_area_end) { free(rec0); return 0; }
+        if (inode_area_make_room(v, (uint64_t)rec_size0 + 4) != 0) { free(rec0); return 0; }
         if (vol_pre_record(v) != 0) { free(rec0); return 0; }
         if (io_seek(&v->io, v->inode_area_pos) != 0 ||
             io_write(&v->io, rec0, rec_size0) != 0 ||
@@ -153,16 +153,17 @@ uint64_t vol_create_file(invfs_volume *v, const char *name,
         if (pba == 0) {
             fprintf(stderr, "[create] ENOSPC seg %zu\n", i);
             /* reclaim already-written segments so ENOSPC leaves no
-             * orphans (no inode record -> blocks would leak until fsck) */
+             * orphans (no inode record -> blocks would leak until fsck).
+             * WP27: the pba/extent come from this session's own entry
+             * table -- nothing was ever mapped. */
             {
                 size_t k;
                 for (k = 0; k < i; k++) {
-                    uint64_t pba_k = 0, len_k = 0;
-                    if (vol_lookup_entry(v, inode_id, (uint64_t)k,
-                                         &pba_k, &len_k) == 0 && pba_k) {
-                        vol_free_blocks(v, pba_k, len_k);
-                        l2p_remove(v, inode_id, (uint64_t)k);
-                    }
+                    uint64_t len_k = ((uint64_t)seg_csize[k] + 8 +
+                                      INVFS_BLOCK_SIZE - 1) /
+                                     INVFS_BLOCK_SIZE;
+                    if (entries[k].pba)
+                        vol_free_blocks(v, entries[k].pba, len_k);
                 }
             }
             free(cbuf); free(entries); free(seg_lz4); free(seg_csize); return 0;
@@ -181,26 +182,14 @@ uint64_t vol_create_file(invfs_volume *v, const char *name,
         }
         free(cbuf);
 
-        /* L2P: segment index -> physical start */
-        if (vol_map(v, inode_id, (uint64_t)i, pba, (uint32_t)phys_blocks) != 0) {
-            fprintf(stderr, "[create] L2P fail seg %zu\n", i);
-            free(entries); free(seg_lz4); free(seg_csize); return 0;
-        }
-        /* WP19: the new entry is born write-hot 1 and read-cold
-         * (INVFS_HEAT_INIT may pre-warm the read side) */
-        {
-            invfs_l2p_entry *ne = &v->l2p[v->l2p_count - 1];
-            l2p_set_rheat(ne, v->heat_init);
-            ne->pad[2] = 1;
-            jrn_pad_sync(v, ne);   /* the queued MAP op carries the pad */
-        }
-
+        /* WP27: no L2P map -- the entry itself carries the address */
         entries[i].file_offset = (uint64_t)i * SEGMENT_SIZE;
         entries[i].length = slen;
         entries[i].zone = (uint32_t)seg_zone;
         entries[i].algo = seg_lz4[i] ? INVFS_ALGO_LZ4 : INVFS_ALGO_NONE;
-        entries[i].block_id = (uint32_t)i;   /* segment index (L2P lba) */
+        entries[i].block_id = (uint32_t)i;   /* segment index */
         entries[i].block_offset = 0;
+        entries[i].pba = pba;
     }
     free(seg_lz4);
     free(seg_csize);
@@ -210,10 +199,21 @@ uint64_t vol_create_file(invfs_volume *v, const char *name,
     ast_hlen = invfs_ast_hdr_write(ast_h, len, (uint32_t)ast_entries, 0);
     if (!ast_hlen) { free(entries); return 0; }
 
+    /* WP19/WP27: INVFS_HEAT_INIT pre-warms the new record's read-heat
+     * (born wheat 1) via the INO2 ext's "invfs.heat" TLV; no init, no
+     * ext -- the absent TLV reads as born (0,1) for free. */
+    uint8_t *heat_ext = NULL;
+    uint32_t heat_ext_len = 0;
+    if (v->heat_init) {
+        heat_ext = heat_ext_merge(v, NULL, 0, 0, v->heat_init, 1,
+                                  &heat_ext_len);
+    }
+
     /* 3. assemble record: header + name + ast_header + entries */
-    rec_size = sizeof(invfs_inode_rec) + ast_hlen + ast_entries * sizeof(invfs_ast_block_entry);
+    rec_size = sizeof(invfs_inode_rec) + ast_hlen + ast_entries * sizeof(invfs_ast_block_entry)
+             + heat_ext_len;
     rec = (uint8_t *)calloc(1, rec_size);
-    if (!rec) { free(entries); return 0; }
+    if (!rec) { free(heat_ext); free(entries); return 0; }
     rec_h = (invfs_inode_rec *)rec;
     rec_h->magic = INODE_REC_MAGIC;
     rec_h->rec_len = (uint32_t)rec_size;
@@ -225,11 +225,18 @@ uint64_t vol_create_file(invfs_volume *v, const char *name,
     memcpy(rec + sizeof(invfs_inode_rec), ast_h, ast_hlen);
     memcpy(rec + sizeof(invfs_inode_rec) + ast_hlen,
            entries, ast_entries * sizeof(invfs_ast_block_entry));
+    if (heat_ext)
+        memcpy(rec + sizeof(invfs_inode_rec) + ast_hlen +
+               ast_entries * sizeof(invfs_ast_block_entry),
+               heat_ext, heat_ext_len);
+    free(heat_ext);
     free(entries);
 
+    /* WP27: append is the commit point; the bitmap covering the entries'
+     * pbas must be durable first (vol_pre_record flushes it). */
     crc_rec = invfs_crc32c(rec, rec_size);
     /* append record with trailing CRC32C (4 bytes) */
-    if (v->inode_area_pos + rec_size + 4 > v->inode_area_end) {
+    if (inode_area_make_room(v, (uint64_t)rec_size + 4) != 0) {
         fprintf(stderr, "inode area full\n");
         free(rec);
         return 0;
@@ -247,55 +254,15 @@ uint64_t vol_create_file(invfs_volume *v, const char *name,
     idx_put(v, name, strlen(name), inode_id, v->inode_area_pos - rec_size - 4,
             rec_h->file_size, rec_h->ctime);
     idx_put_id(v, inode_id, v->inode_area_pos - rec_size - 4);
+    pba_ref_apply(v, rec, (uint32_t)rec_size, +1);
     free(rec);
     return inode_id;
 }
 
 
-/* Collect the block_ids of an inode's zone==TEXT AST entries (WP10 §7).
- * Those segments are shared PPMd batches owned by the internal "\x01tzb"
- * inode; the retiring inode holds only duplicate L2P mappings to them, so
- * the blocks must survive the retire. *out is malloc'd (NULL when 0). A
- * parse failure yields 0/NULL, which just disables the skip -- the same
- * behaviour the retire path always had for a record it cannot read. */
-static size_t collect_text_lbas(invfs_volume *v, uint64_t inode_id,
-                                uint32_t **out)
-{
-    uint8_t *buf = NULL;
-    uint32_t rl = 0;
-    invfs_ast_hdr ah;
-    const invfs_ast_block_entry *ents;
-    uint32_t *ids = NULL;
-    size_t n = 0;
-    uint32_t i;
-
-    *out = NULL;
-    if (meta_read_record_by_id(v, inode_id, &buf, &rl, NULL, 0, NULL) != 0)
-        return 0;
-    if (rl >= sizeof(invfs_inode_rec) + INVFS_AST_HDR_V1_LEN &&
-        invfs_ast_hdr_parse(buf + sizeof(invfs_inode_rec),
-                            rl - sizeof(invfs_inode_rec), &ah) == 0 &&
-        rl >= sizeof(invfs_inode_rec) + ah.hdr_len +
-              (size_t)ah.num_blocks * sizeof(invfs_ast_block_entry)) {
-        ids = (uint32_t *)malloc(ah.num_blocks
-                                 ? (size_t)ah.num_blocks * sizeof(uint32_t) : 1);
-        if (ids) {
-            ents = (const invfs_ast_block_entry *)
-                   (buf + sizeof(invfs_inode_rec) + ah.hdr_len);
-            for (i = 0; i < ah.num_blocks; i++)
-                if (ents[i].zone == INVFS_ZONE_TEXT)
-                    ids[n++] = ents[i].block_id;
-        }
-    }
-    free(buf);
-    *out = ids;
-    return n;
-}
-
-
 /*
- * Delete a file: free its data blocks, unmap L2P, append tombstone.
- * Returns 0 on success, -1 if not found.
+ * Delete a file: free its data blocks, drop its owner-WAL maps, append
+ * tombstone. Returns 0 on success, -1 if not found.
  */
 /* delete the specific inode (NOT by name — safe for atomic sweeps:
  * create-new-first then delete-old; the new inode stays untouched). */
@@ -319,6 +286,60 @@ static size_t collect_text_lbas(invfs_volume *v, uint64_t inode_id,
  * the frees it authorizes. The reverse order would let a crash leave a live
  * record whose blocks are free and reusable.
  */
+/* WP27 retire-time free, file-class records: the dying record's own AST
+ * entries name the blocks. Sharing (dedupe merges, WP4b aliases, hardlink
+ * twins) is answered by the session pba reference map; the physical
+ * extent derives from the segment's framed header, cross-checked against
+ * the bitmap before anything is freed (a torn header degrades to a leak,
+ * never an over-free). */
+static void retire_free_file_blocks(invfs_volume *v, uint64_t inode_id,
+                                    const char *name)
+{
+    uint8_t *rec = NULL;
+    uint32_t rl = 0;
+    invfs_ast_hdr ah;
+    size_t base = sizeof(invfs_inode_rec), off;
+    uint32_t ei;
+
+    pba_ref_ensure(v);
+    if (meta_read_record_by_id(v, inode_id, &rec, &rl, NULL, 0, NULL) != 0)
+        return;   /* unreadable: fsck reconciles the leak */
+    if (rl < base + INVFS_AST_HDR_V1_LEN ||
+        invfs_ast_hdr_parse(rec + base, rl - base, &ah) != 0 ||
+        rl < base + ah.hdr_len +
+             (size_t)ah.num_blocks * sizeof(invfs_ast_block_entry)) {
+        free(rec);
+        return;
+    }
+    off = base + ah.hdr_len;
+    /* drop this record's own references first, then free exactly the
+     * extents whose LAST live reference just died. The map is exact by
+     * construction: it is built at open from the live set and every
+     * record birth/death applies a +1/-1 hook, so the dying record's
+     * contribution is always in it and the -1 removes exactly that. */
+    pba_ref_apply(v, rec, rl, -1);
+    for (ei = 0; ei < ah.num_blocks; ei++) {
+        const invfs_ast_block_entry *e = (const invfs_ast_block_entry *)
+            (rec + off + (size_t)ei * sizeof(*e));
+        uint64_t plen = 0;
+        if (e->zone == INVFS_ZONE_TEXT || !e->pba)
+            continue;   /* batch member: owner-owned (the WP10 §7 gate) */
+        if (e->pba >= v->sb.total_blocks)
+            continue;
+        if (pba_ref_count(v, e->pba) != 0)
+            continue;   /* a live sharer remains (dedupe/alias/hardlink) */
+        if (seg_extent_checked(v, e->pba, &plen) != 0) {
+            fprintf(stderr, "vol: retire: %s seg %u: extent of pba %llu "
+                    "unreadable; leaked (fsck reclaims)\n", name,
+                    e->block_id, (unsigned long long)e->pba);
+            continue;
+        }
+        vol_free_blocks(v, e->pba, plen);
+    }
+    free(rec);
+}
+
+
 static int vol_retire_inode(invfs_volume *v, uint64_t inode_id,
                             const char *name, int free_data)
 {
@@ -359,72 +380,40 @@ static int vol_retire_inode(invfs_volume *v, uint64_t inode_id,
      * the container it belongs to. */
     cpack_map_cache_invalidate(v, name);
 
-    /* free all blocks mapped to this inode.
-     * L2P length is the PHYSICAL block count of each segment (written at
-     * map time), so no header reads here — safe against stale/reallocated
-     * blocks. */
+    /* free all blocks the retiring record owns. WP27: file-class records
+     * carry their pbas in the AST (retire_free_file_blocks); owner-class
+     * records (the hidden "\x01..." owners) free through the owner WAL
+     * (the v1 rule, now over the owner-scoped journal only). */
     if (free_data && !shared) {
-        /* WP10 §7 (anti-PB7): never free blocks a zone==TEXT AST entry
-         * names. The member holds only an L2P dup into the shared batch,
-         * which belongs to the hidden owner inode; freeing here would punch
-         * a hole in every other member. GC reclaims dead batches. The dup
-         * mappings themselves are dropped with the inode below, as usual. */
-        uint32_t *text_lbas = NULL;
-        size_t n_text = collect_text_lbas(v, inode_id, &text_lbas), t, j;
-        /* PB7 (dedupe sharers): a segment merged by vol_sweep_dedupe is
-         * mapped under EVERY sharer; freeing it with one retiring inode
-         * leaves the survivors dangling (fsck "missing"). Skip any pba
-         * another live MAP entry still references. Two pba-indexed bitmaps
-         * make the check O(l2p) once per retire instead of O(own x l2p);
-         * the second bitmap also stops double-frees when a file's own
-         * entries share a pba (same-file dedupe). Costs 2 x total_blocks/8
-         * bytes per delete. */
-        uint8_t *refd = calloc((size_t)(v->sb.total_blocks + 7) / 8, 1);
-        uint8_t *done = calloc((size_t)(v->sb.total_blocks + 7) / 8, 1);
-        if (refd) {
-            for (j = 0; j < v->l2p_count; j++) {
-                const invfs_l2p_entry *o = &v->l2p[j];
-                uint64_t b, bend;
-                if (o->type != INVFS_JRN_MAP || o->inode == inode_id)
-                    continue;
-                if (o->pba >= v->sb.total_blocks) continue;
-                bend = o->pba + o->length;
-                if (bend > v->sb.total_blocks) bend = v->sb.total_blocks;
-                for (b = o->pba; b < bend; b++)
-                    refd[b >> 3] |= (uint8_t)(1u << (b & 7));
-            }
-        }
-        for (i = 0; i < v->l2p_count; i++) {
-            const invfs_l2p_entry *e = &v->l2p[i];
-            if (e->type == INVFS_JRN_MAP && e->inode == inode_id) {
-                uint64_t nblk = e->length, b, bend;
-                int shared = 0;
-                for (t = 0; t < n_text; t++)
-                    if (text_lbas[t] == e->lba) { shared = 1; break; }
-                if (shared) continue;
-                if (nblk == 0 || e->pba >= v->sb.total_blocks ||
-                    nblk > v->sb.total_blocks - e->pba)
-                    continue;  /* stale entry — never free out of bounds */
-                bend = e->pba + nblk;
-                shared = 0;
-                for (b = e->pba; b < bend; b++) {
-                    if (refd && (refd[b >> 3] & (1u << (b & 7)))) {
-                        shared = 1; break;   /* another live inode maps it */
-                    }
-                    if (done && (done[b >> 3] & (1u << (b & 7)))) {
-                        shared = 1; break;   /* already freed this retire */
-                    }
-                }
-                if (shared) continue;
-                vol_free_blocks(v, e->pba, nblk);
-                if (done)
+        if (name && (uint8_t)name[0] == 0x01) {
+            /* owner-WAL-driven free; the WP10 batch-member gate never
+             * applies to owners (their entries are the OWNER side), and
+             * cross-owner sharing does not exist, so the only guard needed
+             * is against double-freeing one range twice */
+            uint8_t *done = calloc((size_t)(v->sb.total_blocks + 7) / 8, 1);
+            for (i = 0; i < v->l2p_count; i++) {
+                const invfs_l2p_entry *e = &v->l2p[i];
+                if (e->type == INVFS_JRN_MAP && e->inode == inode_id) {
+                    uint64_t nblk = e->length, b, bend;
+                    int dup = 0;
+                    if (nblk == 0 || e->pba >= v->sb.total_blocks ||
+                        nblk > v->sb.total_blocks - e->pba)
+                        continue;  /* stale entry — never free out of bounds */
+                    bend = e->pba + nblk;
                     for (b = e->pba; b < bend; b++)
-                        done[b >> 3] |= (uint8_t)(1u << (b & 7));
+                        if (done && (done[b >> 3] & (1u << (b & 7))))
+                            { dup = 1; break; }
+                    if (dup) continue;
+                    vol_free_blocks(v, e->pba, nblk);
+                    if (done)
+                        for (b = e->pba; b < bend; b++)
+                            done[b >> 3] |= (uint8_t)(1u << (b & 7));
+                }
             }
+            free(done);
+        } else {
+            retire_free_file_blocks(v, inode_id, name);
         }
-        free(refd);
-        free(done);
-        free(text_lbas);
     }
     /* rewrite L2P in-memory: drop this inode's maps, and queue one UNMAP
      * op per dropped entry -- the on-disk journal is append-only (WP22d),
@@ -458,8 +447,14 @@ static int vol_retire_inode(invfs_volume *v, uint64_t inode_id,
     /* append tombstone record */
     pos = v->inode_area_pos;
     end = v->inode_area_end;
-    if (pos + sizeof(invfs_inode_rec) + 4 > end)
-        return -1;
+    if (pos + sizeof(invfs_inode_rec) + 4 > end) {
+        /* WP27 churn backstop: reclaim the dead prefix, then retry.
+         * The tombstone is an id-kill (file_size=0): no position held,
+         * so the compaction's position moves touch nothing here. */
+        if (inode_area_make_room(v, sizeof(invfs_inode_rec) + 4) != 0)
+            return -1;
+        pos = v->inode_area_pos;
+    }
     {
         invfs_inode_rec rec;
         uint32_t crc;
@@ -783,7 +778,9 @@ static uint64_t meta_rewrite(invfs_volume *v, uint64_t inode_id,
     invfs_meta_pub cur;
     invfs_inode_rec tomb;
     uint32_t crc_nu, crc_tb;
+    int tried_compact = 0;
 
+retry:
     if (meta_read_record_by_id(v, inode_id, &oldbuf, &rl, name, sizeof(name),
                                &old_pos) != 0)
         return 0;
@@ -838,7 +835,17 @@ static uint64_t meta_rewrite(invfs_volume *v, uint64_t inode_id,
     }
     free(oldbuf);
 
-    if (v->inode_area_pos + total > v->inode_area_end) { free(combo); return 0; }
+    if (v->inode_area_pos + total > v->inode_area_end) {
+        /* WP27 churn backstop: reclaim the dead prefix, then RE-READ --
+         * the compaction moves every record, so the position-kill target
+         * (old_pos) and the ext pointers are all rebuilt fresh. */
+        free(combo);
+        if (!tried_compact && inode_area_make_room(v, total) == 0) {
+            tried_compact = 1;
+            goto retry;
+        }
+        return 0;
+    }
     if (vol_mark_dirty(v) != 0) { free(combo); return 0; }
     {
         uint64_t rec_start = v->inode_area_pos;
@@ -1276,6 +1283,26 @@ int meta_read_record_by_id_p(invfs_volume *v, uint64_t id, uint8_t **buf, uint32
  *   conflict cannot arise: vol_ckp_begin declines under it, so no CKP0
  *   can be live while a seal is. */
 
+/* WP27 fold-churn backstop: the inode area is append-only and format v2
+ * churns it harder than v1 ever did (every rewrite/meta-stamp/heat fold
+ * appends). An append that would overflow used to just fail; now the
+ * dead prefix is reclaimed online first (vol_inode_compact's own gates
+ * apply: never under a live checkpoint / read-only / a pending CMP0),
+ * and the caller re-checks. Returns 0 when `need` bytes fit. */
+int inode_area_make_room(invfs_volume *v, uint64_t need)
+{
+    if (v->inode_area_pos + need <= v->inode_area_end)
+        return 0;
+    /* the compaction's own gates, pre-checked quietly (the backstop is a
+     * routine path -- never the place for the decline reason spam) */
+    if (v->time_travel || v->ck_present || !vol_write_enabled(v) ||
+        vol_compact_pending(v))
+        return -1;
+    if (vol_inode_compact(v, NULL, NULL) < 0)
+        return -1;
+    return v->inode_area_pos + need <= v->inode_area_end ? 0 : -1;
+}
+
 typedef struct cmp_name {
     struct cmp_name *next;
     uint64_t id, pos;
@@ -1602,18 +1629,35 @@ static int compact_apply(invfs_volume *v, uint64_t stage_pba,
         first = 0;
     }
     free(buf);
-    /* the guard: zero up to one block past the stream end; shorter (down
-     * to nothing) at the area end is fine -- the scan's own bounds check
-     * stops there (the rollback decapitation arithmetic) */
+    /* the guard: zero the whole dead tail past the compacted stream, not
+     * just one block. The one-block guard was enough while nothing ever
+     * appended into it, but the area is append-only and WP27's heat fold
+     * appends in every read session: once the new stream crosses a single
+     * guard block it can resync into the old stream's tail (the fold's
+     * [INOD][DELT] pairs share the old stream's record sizes, so an exact
+     * boundary landing is likely, not freak) and the pre-compaction
+     * versions would resurrect. Zeroes never parse again. */
     {
-        uint64_t room = v->inode_area_end - (dst + s_bytes);
-        uint8_t z[INVFS_BLOCK_SIZE];
-        memset(z, 0, sizeof z);
-        if (room > sizeof z) room = sizeof z;
-        if (room > 0 &&
-            (io_seek(&v->io, dst + s_bytes) != 0 ||
-             io_write(&v->io, z, (size_t)room) != 0))
-            return -1;
+        /* only [new end, old append pointer) was ever written; past the
+         * old pointer the area is mkfs zeros already */
+        uint64_t zpos = dst + s_bytes;
+        uint64_t room = v->inode_area_pos > zpos
+                      ? v->inode_area_pos - zpos : 0;
+        uint8_t *z = (uint8_t *)malloc(INVFS_BLOCK_SIZE);
+        if (!z) return -1;
+        memset(z, 0, INVFS_BLOCK_SIZE);
+        while (room) {
+            size_t n = room > INVFS_BLOCK_SIZE ? INVFS_BLOCK_SIZE
+                                               : (size_t)room;
+            if (io_seek(&v->io, zpos) != 0 ||
+                io_write(&v->io, z, n) != 0) {
+                free(z);
+                return -1;
+            }
+            zpos += n;
+            room -= n;
+        }
+        free(z);
     }
     return 0;
 }

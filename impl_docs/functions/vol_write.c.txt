@@ -1,18 +1,18 @@
 raw_adapt_enabled function    164 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_write.c static int raw_adapt_enabled(void)
 raw_effort_zlevel function    176 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_write.c static int raw_effort_zlevel(const invfs_volume *v)
-vol_write_abort  function    839 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_write.c void vol_write_abort(invfs_wsession *ws)
+vol_write_abort  function    826 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_write.c void vol_write_abort(invfs_wsession *ws)
 vol_write_active_name function     34 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_write.c int vol_write_active_name(invfs_volume *v, const char *name)
 vol_write_begin  function     44 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_write.c uint64_t vol_write_begin(invfs_volume *v, const char *name, int truncate,
-vol_write_commit function    708 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_write.c int vol_write_commit(invfs_wsession *ws)
-vol_write_range  function    541 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_write.c int vol_write_range(invfs_wsession *ws, uint64_t offset,
-vol_write_read   function    680 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_write.c int vol_write_read(invfs_wsession *ws, uint64_t offset,
-vol_write_truncate function    609 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_write.c int vol_write_truncate(invfs_wsession *ws, uint64_t len)
-wsession_filled  function    428 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_write.c static uint32_t wsession_filled(const invfs_wsession *s)
+vol_write_commit function    659 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_write.c int vol_write_commit(invfs_wsession *ws)
+vol_write_range  function    492 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_write.c int vol_write_range(invfs_wsession *ws, uint64_t offset,
+vol_write_read   function    631 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_write.c int vol_write_read(invfs_wsession *ws, uint64_t offset,
+vol_write_truncate function    560 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_write.c int vol_write_truncate(invfs_wsession *ws, uint64_t len)
+wsession_filled  function    391 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_write.c static uint32_t wsession_filled(const invfs_wsession *s)
 wsession_grow    function    107 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_write.c static int wsession_grow(invfs_wsession *s, uint32_t count)
-wsession_load_old function    434 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_write.c static int wsession_load_old(invfs_wsession *s)
-wsession_seg_current function    331 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_write.c static int wsession_seg_current(invfs_wsession *s, uint32_t j,
+wsession_load_old function    397 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_write.c static int wsession_load_old(invfs_wsession *s)
+wsession_seg_current function    324 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_write.c static int wsession_seg_current(invfs_wsession *s, uint32_t j,
 wsession_simple_old function     90 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_write.c static int wsession_simple_old(const invfs_ast_hdr *ah,
 wsession_unlink  function     74 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_write.c static void wsession_unlink(invfs_wsession *s)
-wsession_write_seg function    321 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_write.c static int wsession_write_seg(invfs_wsession *s, uint32_t j,
-wsession_write_seg_n function    200 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_write.c static int wsession_write_seg_n(invfs_wsession *s, uint32_t j,
-wsession_zero_fill function    410 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_write.c static int wsession_zero_fill(invfs_wsession *s, uint32_t from, uint32_t to)
+wsession_write_seg function    310 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_write.c static int wsession_write_seg(invfs_wsession *s, uint32_t j,
+wsession_write_seg_n function    202 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_write.c static int wsession_write_seg_n(invfs_wsession *s, uint32_t j,
+wsession_zero_fill function    373 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_write.c static int wsession_zero_fill(invfs_wsession *s, uint32_t from, uint32_t to)

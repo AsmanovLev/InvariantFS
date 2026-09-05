@@ -2,15 +2,15 @@ __anond7d350310108 struct       46 /home/user/InvariantFS/src-extracted/VFS/src/
 __anond7d350310208 struct      106 /home/user/InvariantFS/src-extracted/VFS/src/core/volume.h typedef struct {
 __anond7d350310308 struct      163 /home/user/InvariantFS/src-extracted/VFS/src/core/volume.h typedef struct {
 __anond7d350310408 struct      226 /home/user/InvariantFS/src-extracted/VFS/src/core/volume.h typedef struct {
-__anond7d350310508 struct      422 /home/user/InvariantFS/src-extracted/VFS/src/core/volume.h typedef struct {
-__anond7d350310608 struct      466 /home/user/InvariantFS/src-extracted/VFS/src/core/volume.h typedef struct {
-__anond7d350310708 struct      488 /home/user/InvariantFS/src-extracted/VFS/src/core/volume.h typedef struct {
+__anond7d350310508 struct      425 /home/user/InvariantFS/src-extracted/VFS/src/core/volume.h typedef struct {
+__anond7d350310608 struct      469 /home/user/InvariantFS/src-extracted/VFS/src/core/volume.h typedef struct {
+__anond7d350310708 struct      491 /home/user/InvariantFS/src-extracted/VFS/src/core/volume.h typedef struct {
 invfs_dirent     typedef     111 /home/user/InvariantFS/src-extracted/VFS/src/core/volume.h } invfs_dirent;
 invfs_fsck_report typedef      69 /home/user/InvariantFS/src-extracted/VFS/src/core/volume.h } invfs_fsck_report;
 invfs_meta_pub   typedef     173 /home/user/InvariantFS/src-extracted/VFS/src/core/volume.h } invfs_meta_pub;
-invfs_seal2_repair typedef     494 /home/user/InvariantFS/src-extracted/VFS/src/core/volume.h } invfs_seal2_repair;
-invfs_seal_report typedef     446 /home/user/InvariantFS/src-extracted/VFS/src/core/volume.h } invfs_seal_report;
-invfs_seal_verify typedef     476 /home/user/InvariantFS/src-extracted/VFS/src/core/volume.h } invfs_seal_verify;
+invfs_seal2_repair typedef     497 /home/user/InvariantFS/src-extracted/VFS/src/core/volume.h } invfs_seal2_repair;
+invfs_seal_report typedef     449 /home/user/InvariantFS/src-extracted/VFS/src/core/volume.h } invfs_seal_report;
+invfs_seal_verify typedef     479 /home/user/InvariantFS/src-extracted/VFS/src/core/volume.h } invfs_seal_verify;
 invfs_volume     typedef       8 /home/user/InvariantFS/src-extracted/VFS/src/core/volume.h typedef struct invfs_volume invfs_volume;
 invfs_volume_stats typedef     245 /home/user/InvariantFS/src-extracted/VFS/src/core/volume.h } invfs_volume_stats;
 invfs_wsession   typedef     212 /home/user/InvariantFS/src-extracted/VFS/src/core/volume.h typedef struct invfs_wsession invfs_wsession;

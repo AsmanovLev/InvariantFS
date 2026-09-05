@@ -60,7 +60,7 @@ cat > "$WORK/tools/sealpick.c" <<'SEALPICK_EOF'
 /* sealpick — WP20/WP20b test helper (uses only the public volume.h API).
  *
  *   sealpick <img> zone          -> "shadow_start total_blocks"
- *   sealpick <img> first <name>  -> "pba len" of the file's first map
+ *   sealpick <img> first <name>  -> "pba len" of the file's first segment
  *   sealpick <img> pair          -> "pba1 pba2 name": two occupied blocks of
  *                                   ONE stripe belonging to one user file
  *   sealpick <img> blocks <n>    -> "pba1..pbaN name": N occupied blocks of
@@ -73,6 +73,11 @@ cat > "$WORK/tools/sealpick.c" <<'SEALPICK_EOF'
  *                                   (full pass), create+sweep a compressible
  *                                   binary file, seal again (dirty-only),
  *                                   print both reports
+ *
+ * WP27: a file's segments live in its record's AST entries (the pba is
+ * inline); the L2P table is the owner-scoped WAL (the "parity" mode below
+ * still reads it -- parity maps ARE owner maps). File modes walk the inode
+ * area and parse the live records directly (the meta_probe pattern).
  */
 #include <stdio.h>
 #include <stdlib.h>
@@ -82,44 +87,101 @@ cat > "$WORK/tools/sealpick.c" <<'SEALPICK_EOF'
 
 static invfs_volume *v;
 
-/* live user-file id -> name map (internal 0x01-prefixed owners excluded) */
-typedef struct { uint64_t id; char name[256]; } idname;
-static idname *g_map;
-static size_t   g_n, g_cap;
+/* one segment of a live user file: pba + physical extent (blocks) */
+typedef struct { uint64_t pba, plen; char name[256]; } fseg;
+static fseg *g_segs;
+static size_t   g_sn, g_scap;
 
-static const char *name_of(uint64_t id)
+/* the framed extent (blocks) of the segment at pba, 0 = unreadable */
+static uint64_t seg_plen(uint64_t pba)
 {
-    size_t i;
-    for (i = 0; i < g_n; i++)
-        if (g_map[i].id == id) return g_map[i].name;
-    return NULL;
+    uint8_t hb[8];
+    uint32_t csize;
+    if (vol_read_raw(v, pba * (uint64_t)INVFS_BLOCK_SIZE, hb, 8) != 0)
+        return 0;
+    memcpy(&csize, hb, 4);
+    if (!csize) return 0;
+    return ((uint64_t)csize + 8 + INVFS_BLOCK_SIZE - 1) / INVFS_BLOCK_SIZE;
 }
 
-static void build_map(void)
+/* collect every live user-file segment (the live version per name only) */
+static void collect_segs(void)
 {
+    /* pass 1: the live position per name */
     uint64_t pos = vol_inode_area_start(v);
+    typedef struct { char name[256]; uint64_t pos, id; } live_ent;
+    live_ent *le = NULL;
+    size_t ln = 0, lc = 0, i;
     while (pos) {
         uint32_t magic, rl;
         uint64_t ino, fsz, np;
         char nm[256];
         np = vol_inode_next(v, pos, &magic, &ino, &fsz, nm, sizeof nm, &rl);
         if (!np) break;
-        pos = np;
-        if (magic != INODE_REC_MAGIC) continue;
-        if ((uint8_t)nm[0] == 0x01) continue;      /* internal owners */
-        if (vol_find(v, nm) != ino) continue;      /* superseded */
-        if (name_of(ino)) continue;
-        if (g_n == g_cap) {
-            size_t nc = g_cap ? g_cap * 2 : 256;
-            void *p = realloc(g_map, nc * sizeof *g_map);
-            if (!p) return;
-            g_map = p;
-            g_cap = nc;
+        if (magic == INODE_REC_MAGIC && (uint8_t)nm[0] != 0x01) {
+            size_t k;
+            for (k = 0; k < ln; k++)
+                if (!strcmp(le[k].name, nm)) break;
+            if (k == ln) {
+                if (ln == lc) {
+                    size_t nc = lc ? lc * 2 : 256;
+                    void *p = realloc(le, nc * sizeof *le);
+                    if (!p) return;
+                    le = p; lc = nc;
+                }
+                snprintf(le[ln].name, sizeof le[ln].name, "%s", nm);
+                ln++;
+            }
+            le[k].pos = pos;   /* newest wins */
+            le[k].id = ino;
         }
-        g_map[g_n].id = ino;
-        snprintf(g_map[g_n].name, sizeof g_map[g_n].name, "%s", nm);
-        g_n++;
+        pos = np;
     }
+    /* pass 2: entries of the live records */
+    for (i = 0; i < ln; i++) {
+        uint8_t *rb;
+        uint32_t rl = 0, k;
+        invfs_ast_hdr ah;
+        size_t base = sizeof(invfs_inode_rec);
+        uint64_t pos0 = le[i].pos;
+        /* rec_len comes from the record header at pos0 */
+        invfs_inode_rec rh;
+        if (vol_read_raw(v, pos0, &rh, sizeof rh) != 0) continue;
+        if (vol_find(v, le[i].name) != le[i].id) continue;  /* dead */
+        rl = rh.rec_len;
+        if (rl < base + INVFS_AST_HDR_V1_LEN || rl > INVFS_MAX_REC_LEN)
+            continue;
+        rb = malloc(rl);
+        if (!rb) continue;
+        if (vol_read_raw(v, pos0, rb, rl) == 0 &&
+            invfs_ast_hdr_parse(rb + base, rl - base, &ah) == 0 &&
+            rl >= base + ah.hdr_len +
+                   (size_t)ah.num_blocks * sizeof(invfs_ast_block_entry)) {
+            for (k = 0; k < ah.num_blocks; k++) {
+                const invfs_ast_block_entry *e =
+                    (const invfs_ast_block_entry *)
+                    (rb + base + ah.hdr_len +
+                     (size_t)k * sizeof(*e));
+                uint64_t plen;
+                if (!e->length || !e->pba) continue;
+                plen = seg_plen(e->pba);
+                if (!plen) continue;
+                if (g_sn == g_scap) {
+                    size_t nc = g_scap ? g_scap * 2 : 256;
+                    void *p = realloc(g_segs, nc * sizeof *g_segs);
+                    if (!p) break;
+                    g_segs = p; g_scap = nc;
+                }
+                g_segs[g_sn].pba = e->pba;
+                g_segs[g_sn].plen = plen;
+                snprintf(g_segs[g_sn].name, sizeof g_segs[g_sn].name,
+                         "%s", le[i].name);
+                g_sn++;
+            }
+        }
+        free(rb);
+    }
+    free(le);
 }
 
 int main(int argc, char **argv)
@@ -195,15 +257,12 @@ int main(int argc, char **argv)
         return 0;
     }
 
-    l2p = vol_l2p(v, &n);
-
     if (!strcmp(argv[2], "first") && argc == 4) {
-        uint64_t id = vol_find(v, argv[3]);
-        if (!id) { vol_close(v); return 1; }
-        for (i = n; i-- > 0;)
-            if (l2p[i].type == INVFS_JRN_MAP && l2p[i].inode == id) {
-                printf("%llu %u\n", (unsigned long long)l2p[i].pba,
-                       l2p[i].length);
+        collect_segs();
+        for (i = 0; i < g_sn; i++)
+            if (!strcmp(g_segs[i].name, argv[3])) {
+                printf("%llu %llu\n", (unsigned long long)g_segs[i].pba,
+                       (unsigned long long)g_segs[i].plen);
                 vol_close(v);
                 return 0;
             }
@@ -211,11 +270,13 @@ int main(int argc, char **argv)
         return 1;
     }
     if (!strcmp(argv[2], "parity")) {
+        /* owner-class maps live in the WAL (vol_l2p) exactly as before */
         uint64_t owner;
         char nm[32];
         snprintf(nm, sizeof nm, "\x01parity");
         owner = vol_find(v, nm);
         if (!owner) { vol_close(v); return 1; }
+        l2p = vol_l2p(v, &n);
         for (i = 0; i < n; i++)
             if (l2p[i].type == INVFS_JRN_MAP && l2p[i].inode == owner) {
                 printf("%llu\n", (unsigned long long)l2p[i].pba);
@@ -227,21 +288,16 @@ int main(int argc, char **argv)
     }
     if (!strcmp(argv[2], "pair")) {
         uint64_t ss = sb->shadow_zone_start;
-        build_map();
-        for (i = 0; i < n; i++) {
-            uint64_t pba, len, k;
-            const char *nm;
-            if (l2p[i].type != INVFS_JRN_MAP) continue;
-            nm = name_of(l2p[i].inode);
-            if (!nm) continue;               /* owner / dead: not a victim */
-            pba = l2p[i].pba;
-            len = l2p[i].length ? l2p[i].length : 1;
+        collect_segs();
+        for (i = 0; i < g_sn; i++) {
+            uint64_t pba = g_segs[i].pba, len = g_segs[i].plen, k;
             if (pba < ss) continue;          /* RAW zone: not sealed */
             for (k = 0; k + 1 < len; k++) {
                 if ((pba + k - ss) / 32 == (pba + k + 1 - ss) / 32) {
                     printf("%llu %llu %s\n",
                            (unsigned long long)(pba + k),
-                           (unsigned long long)(pba + k + 1), nm);
+                           (unsigned long long)(pba + k + 1),
+                           g_segs[i].name);
                     vol_close(v);
                     return 0;
                 }
@@ -254,16 +310,10 @@ int main(int argc, char **argv)
         /* N occupied blocks of one 32-stripe belonging to one user file */
         uint64_t ss = sb->shadow_zone_start;
         int want = atoi(argv[3]);
-        build_map();
+        collect_segs();
         if (want < 2 || want > 16) { vol_close(v); return 2; }
-        for (i = 0; i < n; i++) {
-            uint64_t pba, len, k;
-            const char *nm;
-            if (l2p[i].type != INVFS_JRN_MAP) continue;
-            nm = name_of(l2p[i].inode);
-            if (!nm) continue;
-            pba = l2p[i].pba;
-            len = l2p[i].length ? l2p[i].length : 1;
+        for (i = 0; i < g_sn; i++) {
+            uint64_t pba = g_segs[i].pba, len = g_segs[i].plen, k;
             if (pba < ss || len < (uint64_t)want) continue;
             for (k = 0; k + want <= len; k++) {
                 uint64_t s0 = (pba + k - ss) / 32;
@@ -273,7 +323,7 @@ int main(int argc, char **argv)
                 if (j == want) {
                     for (j = 0; j < want; j++)
                         printf("%llu ", (unsigned long long)(pba + k + j));
-                    printf("%s\n", nm);
+                    printf("%s\n", g_segs[i].name);
                     vol_close(v);
                     return 0;
                 }

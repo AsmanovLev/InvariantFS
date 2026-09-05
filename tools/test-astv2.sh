@@ -21,8 +21,9 @@
 #   then delete files -- the latch must auto-release above
 #   hard_min + 2% and the release must persist across a reopen.
 #
-#   Leg C (H6): destroy one journal mapping + its bitmap bits offline
-#   (a torn journal tail: pure l2p_miss, no orphans/missing), mark the
+#   Leg C (H6): zero the victim record's tail-entry pba offline + clear
+#   the lost segment's bitmap bits (the WP27 shape of a lost mapping:
+#   pure l2p_miss, no orphans/missing), mark the
 #   volume DIRTY, then invf-fsck -f must repair anyway (the old gate
 #   refused and the volume stayed read-only forever), listing the victim
 #   by name + lost range. Repair = truncation to the longest fully-mapped
@@ -350,143 +351,108 @@ static int cmd_mkh6(const char *img)
     return 0;
 }
 
-/* offline sabotage (volume CLOSED): kill the victim's tail map. WP22d
- * slotted-journal aware: pick the active slot (highest valid-seq header),
- * walk image + chained log; zero the last live log entry (chain breaks
- * there) or, when the map sits at the image tail (log empty), shorten the
- * image by one entry and restamp image_crc + header crc (a whole-image
- * zero would invalidate image_crc and just fail over to the other slot).
- * Legacy flat journals keep the old walk. Then clear the lost segment's
- * bitmap bits (no orphan would mask the l2p_miss-only scenario) and mark
- * the volume DIRTY. */
+/* offline sabotage (volume CLOSED): kill the victim's tail segment's
+ * address. WP27: file segments carry no journal map any more -- the
+ * address lives in the record's AST entry -- so the sabotage zeroes the
+ * tail entry's pba INSIDE the live record and restamps the record CRC
+ * (the v2 shape of "the record names a segment nobody can locate"). Then
+ * clear the lost segment's bitmap bits (no orphan would mask the
+ * l2p_miss-only scenario) and mark the volume DIRTY. */
 static int cmd_sabotage(const char *img, uint64_t victim_id)
 {
     FILE *f = fopen(img, "r+b");
     invfs_superblock sb;
-    uint64_t bitmap_blocks, journal_off, jp;
-    invfs_l2p_entry last;
-    int found = 0;
+    uint64_t bitmap_blocks, iarea, iend, p, last_pos = 0;
+    uint64_t lost_pba = 0, lost_plen = 0;
+    uint32_t lost_lba = 0;
     if (!f) die("fopen");
     if (fread(&sb, sizeof sb, 1, f) != 1) die("sb read");
     bitmap_blocks = (sb.total_blocks / 8 + INVFS_BLOCK_SIZE - 1) /
                     INVFS_BLOCK_SIZE;
-    journal_off = (sb.metadata_zone_start + bitmap_blocks) *
-                  INVFS_BLOCK_SIZE;
+    iarea = (sb.metadata_zone_start + bitmap_blocks + INVFS_JOURNAL_BLOCKS)
+            * (uint64_t)INVFS_BLOCK_SIZE;
+    iend = (sb.metadata_zone_start + sb.metadata_zone_blocks) *
+           (uint64_t)INVFS_BLOCK_SIZE;
 
-    /* WP22d: is the journal slotted? pick the slot whose header validates
-     * with the highest seq (mirrors l2p_replay's choice) */
-    {
-        invfs_jrn_hdr best;
-        uint64_t best_seq = 0, slot_base = 0;
-        int s, use_slot = -1;
-        memset(&best, 0, sizeof best);
-        for (s = 0; s < 2; s++) {
-            invfs_jrn_hdr h;
-            uint64_t off = journal_off +
-                (uint64_t)s * INVFS_JRN_SLOT_BLOCKS * INVFS_BLOCK_SIZE;
-            uint32_t saved;
-            if (fseek(f, (long)off, SEEK_SET) != 0 ||
-                fread(&h, sizeof h, 1, f) != 1) continue;
-            if (memcmp(h.magic, INVFS_JRN_MAGIC, 4) != 0 ||
-                h.version != INVFS_JRN_VERSION) continue;
-            saved = h.crc32c; h.crc32c = 0;
-            if (invfs_crc32c(&h, offsetof(invfs_jrn_hdr, crc32c)) != saved)
-                continue;
-            h.crc32c = saved;
-            if (use_slot < 0 || h.seq > best_seq) {
-                best = h; best_seq = h.seq; use_slot = s; slot_base = off;
-            }
+    /* find the victim's live record (the newest INOD with its id) */
+    p = iarea;
+    while (p + sizeof(invfs_inode_rec) <= iend) {
+        invfs_inode_rec rh;
+        uint32_t cs, cc;
+        uint8_t *rb;
+        if (fseek(f, (long)p, SEEK_SET) != 0 ||
+            fread(&rh, sizeof rh, 1, f) != 1) die("walk read");
+        if (rh.magic != INODE_REC_MAGIC && rh.magic != TOMBSTONE_MAGIC)
+            break;
+        if (rh.rec_len < sizeof rh || rh.rec_len > INVFS_MAX_REC_LEN ||
+            p + rh.rec_len + 4 > iend)
+            break;
+        if (rh.magic == INODE_REC_MAGIC && rh.inode_id == victim_id) {
+            rb = malloc(rh.rec_len);
+            if (!rb) die("oom");
+            if (fseek(f, (long)p, SEEK_SET) != 0 ||
+                fread(rb, rh.rec_len, 1, f) != 1) die("rec read");
+            if (fread(&cs, 4, 1, f) != 1) die("crc read");
+            cc = invfs_crc32c(rb, rh.rec_len);
+            free(rb);
+            if (cc == cs) last_pos = p;   /* newest CRC-valid version */
         }
-        if (use_slot >= 0) {
-            /* walk image (wholesale-crc'd) then the chained log, tracking
-             * the last MAP entry and whether it sits in the image tail */
-            uint32_t prev = invfs_crc32c(&best,
-                                offsetof(invfs_jrn_hdr, image_crc));
-            uint64_t n_img = best.image_bytes / sizeof(invfs_l2p_entry);
-            uint64_t i, last_img = 0;
-            uint64_t last_log_off = 0;
-            jp = slot_base + INVFS_BLOCK_SIZE;
-            for (i = 0; i < n_img; i++) {
-                invfs_l2p_entry e;
-                if (fseek(f, (long)jp, SEEK_SET) != 0 ||
-                    fread(&e, sizeof e, 1, f) != 1) break;
-                if (invfs_crc32c_update(prev, &e,
-                        offsetof(invfs_l2p_entry, crc)) != e.crc) break;
-                prev = e.crc;
-                if (e.type == INVFS_JRN_MAP) { last = e; found = 1; last_img = 1; }
-                jp += sizeof e;
-            }
-            for (;;) {
-                invfs_l2p_entry e;
-                if (fseek(f, (long)jp, SEEK_SET) != 0 ||
-                    fread(&e, sizeof e, 1, f) != 1) break;
-                if (invfs_crc32c_update(prev, &e,
-                        offsetof(invfs_l2p_entry, crc)) != e.crc) break;
-                prev = e.crc;
-                if (e.type == INVFS_JRN_MAP) {
-                    last = e; found = 1; last_img = 0; last_log_off = jp;
-                }
-                jp += sizeof e;
-            }
-            if (!found) die("no live journal entries (slotted)");
-            if (last.inode != victim_id) die("last entry is not the victim's");
-            if (last_img == 0) {
-                /* last map is a log entry: zero it, the chain breaks */
-                uint8_t z[sizeof(invfs_l2p_entry)];
-                memset(z, 0, sizeof z);
-                if (fseek(f, (long)last_log_off, SEEK_SET) != 0 ||
-                    fwrite(z, sizeof z, 1, f) != 1) die("entry zero");
-            } else {
-                /* last map is the image tail with an empty log: shorten
-                 * the image by one entry and restamp both CRCs */
-                uint64_t nb = best.image_bytes - sizeof(invfs_l2p_entry);
-                uint8_t *ib = (uint8_t *)malloc((size_t)nb);
-                if (!ib) die("oom");
-                if (fseek(f, (long)(slot_base + INVFS_BLOCK_SIZE),
-                          SEEK_SET) != 0 ||
-                    fread(ib, (size_t)nb, 1, f) != 1) die("image read");
-                best.image_bytes = nb;
-                best.image_crc = nb ? invfs_crc32c(ib, (size_t)nb) : 0;
-                best.crc32c = 0;
-                best.crc32c = invfs_crc32c(&best,
-                                offsetof(invfs_jrn_hdr, crc32c));
-                if (fseek(f, (long)slot_base, SEEK_SET) != 0 ||
-                    fwrite(&best, sizeof best, 1, f) != 1)
-                    die("header restamp");
-                free(ib);
-            }
-            goto bitmap;
-        }
+        p += (uint64_t)rh.rec_len + 4;
     }
+    if (!last_pos) die("victim record not found");
 
-    /* legacy flat journal (pre-migration) */
-    jp = journal_off;
-    for (;;) {
-        invfs_l2p_entry e;
-        if (fseek(f, (long)jp, SEEK_SET) != 0 ||
-            fread(&e, sizeof e, 1, f) != 1) break;
-        if (invfs_crc32c(&e, offsetof(invfs_l2p_entry, crc)) != e.crc)
-            break;   /* terminator: end of the live journal */
-        if (e.type == INVFS_JRN_MAP) { last = e; found = 1; }
-        jp += sizeof e;
-    }
-    if (!found) die("no live journal entries");
-    if (last.inode != victim_id) die("last entry is not the victim's");
-    /* zero the entry (its CRC then fails: replay stops one entry short) */
+    /* zero the TAIL entry's pba, restamp the record */
     {
-        uint8_t z[sizeof(invfs_l2p_entry)];
-        memset(z, 0, sizeof z);
-        if (fseek(f, (long)(jp - sizeof last), SEEK_SET) != 0 ||
-            fwrite(z, sizeof z, 1, f) != 1) die("entry zero");
+        uint8_t *rb;
+        invfs_inode_rec rh;
+        invfs_ast_hdr ah;
+        size_t base = sizeof(invfs_inode_rec), ent0;
+        invfs_ast_block_entry *e;
+        uint32_t ncrc;
+        if (fseek(f, (long)last_pos, SEEK_SET) != 0 ||
+            fread(&rh, sizeof rh, 1, f) != 1) die("rec head");
+        if (rh.rec_len < sizeof rh || rh.rec_len > INVFS_MAX_REC_LEN)
+            die("rec_len");
+        rb = malloc(rh.rec_len);
+        if (!rb) die("oom");
+        if (fseek(f, (long)last_pos, SEEK_SET) != 0 ||
+            fread(rb, rh.rec_len, 1, f) != 1) die("rec read2");
+        if (invfs_ast_hdr_parse(rb + base, rh.rec_len - base, &ah) != 0 ||
+            ah.num_blocks < 1)
+            die("recipe parse");
+        ent0 = base + ah.hdr_len;
+        if (ent0 + (size_t)ah.num_blocks * sizeof(*e) > rh.rec_len)
+            die("entries oob");
+        e = (invfs_ast_block_entry *)
+            (rb + ent0 + (size_t)(ah.num_blocks - 1) * sizeof(*e));
+        lost_lba = e->block_id;
+        lost_pba = e->pba;
+        if (!lost_pba) die("tail pba already 0");
+        /* the segment's extent from its framed header */
+        {
+            uint8_t hb[8];
+            uint32_t csize;
+            if (fseek(f, (long)(lost_pba * INVFS_BLOCK_SIZE), SEEK_SET) ||
+                fread(hb, 8, 1, f) != 1) die("frame read");
+            memcpy(&csize, hb, 4);
+            if (!csize) die("frame csize");
+            lost_plen = ((uint64_t)csize + 8 + INVFS_BLOCK_SIZE - 1) /
+                        INVFS_BLOCK_SIZE;
+        }
+        e->pba = 0;
+        ncrc = invfs_crc32c(rb, rh.rec_len);
+        if (fseek(f, (long)last_pos, SEEK_SET) != 0 ||
+            fwrite(rb, rh.rec_len, 1, f) != 1 ||
+            fwrite(&ncrc, 4, 1, f) != 1)
+            die("rec rewrite");
+        free(rb);
     }
 
-bitmap:
     /* clear the lost segment's bitmap bits (no orphan would otherwise
      * mask the l2p_miss-only scenario) */
     {
         uint64_t b;
-        for (b = last.pba; b < last.pba + (last.length ? last.length : 1);
-             b++) {
+        for (b = lost_pba; b < lost_pba + lost_plen; b++) {
             uint8_t byte;
             uint64_t off = sb.metadata_zone_start * INVFS_BLOCK_SIZE +
                            b / 8;
@@ -503,10 +469,9 @@ bitmap:
     if (fseek(f, 0, SEEK_SET) != 0 ||
         fwrite(&sb, sizeof sb, 1, f) != 1) die("sb write");
     fclose(f);
-    fprintf(stderr, "sabotage: killed (inode %llu, lba %llu, pba %llu, "
-            "len %u)\n", (unsigned long long)last.inode,
-            (unsigned long long)last.lba, (unsigned long long)last.pba,
-            last.length);
+    fprintf(stderr, "sabotage: killed (inode %llu, lba %u, pba %llu, "
+            "len %llu)\n", (unsigned long long)victim_id, lost_lba,
+            (unsigned long long)lost_pba, (unsigned long long)lost_plen);
     return 0;
 }
 

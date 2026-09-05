@@ -1,4 +1,4 @@
-__anonb8a232360108 struct     1287 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_records.c typedef struct {
-cmp_name         struct     1279 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_records.c typedef struct cmp_name {
-cmp_name         typedef    1285 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_records.c } cmp_name;
-cmp_nameset      typedef    1290 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_records.c } cmp_nameset;
+__anonb8a232360108 struct     1314 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_records.c typedef struct {
+cmp_name         struct     1306 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_records.c typedef struct cmp_name {
+cmp_name         typedef    1312 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_records.c } cmp_name;
+cmp_nameset      typedef    1317 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_records.c } cmp_nameset;
