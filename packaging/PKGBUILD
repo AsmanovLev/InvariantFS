@@ -2,7 +2,7 @@
 # Builds the current checkout (this file lives in packaging/ inside the
 # repo); run `makepkg -si` from anywhere with a readable repo tree.
 pkgname=invfs
-pkgver=0.2.0
+pkgver=0.2.1
 pkgrel=1
 pkgdesc="Semantic content-addressed filesystem with a bit-exactness invariant"
 arch=('x86_64')

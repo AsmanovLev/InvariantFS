@@ -1,3 +1,12 @@
+invfs (0.2.1-1) unstable; urgency=medium
+
+  * WP28: embed INO2 metadata in vol_create_file for 2x import speedup.
+  * WP29: deferred flush with watermarks in vol_pre_record (115x import speedup).
+  * mkfs: cap RAW zone at dev0 capacity in multi-device mode.
+  * All unit + e2e + crash-fail tests pass.
+
+ -- InvariantFS Developers <invfs@localhost>  Mon, 14 Sep 2026 00:00:00 +0000
+
 invfs (0.2.0-1) unstable; urgency=medium
 
   * Legacy cleanup: removed 36 dead Windows-only files from legacy/.

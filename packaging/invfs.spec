@@ -2,7 +2,7 @@
 %global debug_package %{nil}
 
 Name:           invfs
-Version:        0.2.0
+Version:        0.2.1
 Release:        1%{?dist}
 Summary:        Semantic content-addressed filesystem with a bit-exactness invariant
 
@@ -77,6 +77,12 @@ install -Dm644 README-RU.md %{buildroot}%{_docdir}/%{name}/README-RU.md
 /usr/lib/dracut/modules.d/90invfs/
 
 %changelog
+* Mon Sep 14 2026 InvariantFS Developers <invfs@localhost> - 0.2.1-1
+- WP28: embed INO2 metadata in vol_create_file for 2x import speedup
+- WP29: deferred flush with watermarks in vol_pre_record (115x import speedup)
+- mkfs: cap RAW zone at dev0 capacity in multi-device mode
+- All unit + e2e + crash-fail tests pass
+
 * Sun Sep 13 2026 InvariantFS Developers <invfs@localhost> - 0.2.0-1
 - Legacy cleanup: removed 36 dead Windows-only files from legacy/
 - New man pages: invf-stats, invf-import, invf-migrate-v2, invf-ls (read-side)
