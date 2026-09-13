@@ -294,17 +294,16 @@ int main(int argc, char **argv)
     if (twodev) {
         /* dev0 = metadata + RAW + tier arena (its tail); dev1 = the
          * metadata mirror + a RAW-width reserved gap + the canonical
-         * shadow (see the DEVT comment in invarifs.h) */
-        if (1 + metadata_blocks + raw_blocks > dev0_blocks) {
-            fprintf(stderr, "device 0 too small: metadata (%llu blocks) + "
-                    "RAW (%llu blocks) = %llu, dev0 has %llu\n",
-                    (unsigned long long)(1 + metadata_blocks),
-                    (unsigned long long)raw_blocks,
-                    (unsigned long long)(1 + metadata_blocks + raw_blocks),
-                    (unsigned long long)dev0_blocks);
-            blkio_close(&io2);
-            blkio_close(&io);
-            return 1;
+         * shadow (see the DEVT comment in invarifs.h).
+         * WP28: cap the RAW zone at what fits on dev0 instead of scaling
+         * it with total volume size — the RAW zone is an acceleration
+         * tier, not a capacity tier, so its size should reflect the fast
+         * device, not the sum of both. */
+        {
+            uint64_t raw_cap = dev0_blocks > 1 + metadata_blocks
+                             ? dev0_blocks - 1 - metadata_blocks : 0;
+            if (raw_blocks > raw_cap)
+                raw_blocks = raw_cap;
         }
         if (1 + metadata_blocks + raw_blocks >= dev1_blocks) {
             fprintf(stderr, "device 1 too small: the mirror span + gap "
