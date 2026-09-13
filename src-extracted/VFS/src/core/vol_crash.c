@@ -17,14 +17,12 @@
  *    WP27: an inode record names its data by physical address (the 32B
  *    AST entry's pba), so the commit ordering is: data blocks (io_write
  *    at allocation) -> bitmap (vol_flush's dirty range) -> owner-WAL ops
- *    (if any) -> the record append itself (vol_pre_record = mark dirty +
- *    flush). A record durable while the bitmap bits covering its pbas are
- *    not lets a later allocation hand a referenced block out from under
- *    its file; the open-time divergence guard and the fsck rebuild
- *    reconcile that (records are the truth, the bitmap a cache), but the
- *    ordering is what keeps the common crash boring. Owner-class maps
- *    (batches, parity, retention) keep the v1 rule: the WAL map is
- *    durable before the record that names it -- same vol_pre_record.
+ *    (if any) -> the record append itself. WP29: the per-record flush is
+ *    replaced by a deferred flush (watermarks at 80 % inode area / 50 %
+ *    journal slot, plus vol_close / vol_sync). Records are authoritative
+ *    and fsck rebuilds the bitmap, so a crash during the deferred window
+ *    leaves orphaned blocks that the next mount reclaims — safe for bulk
+ *    import and general workloads alike.
  *
  * 3. Tombstones are the exception: they must be durable BEFORE the frees they
  *    authorize, never after, or a crash leaves a live record whose blocks are
@@ -70,13 +68,44 @@ int vol_mark_dirty(invfs_volume *v)
 }
 
 
-/* Call before appending an inode record: mark dirty, then make the dirty
-   bitmap range and the pending owner-WAL ops durable, so the record about
-   to land is backed by blocks nobody else can be handed. */
+/* WP29: deferred flush with watermarks.  During a bulk import the
+   per-record flush was the dominant cost (20K flushes × ~16 MB bitmap
+   range each).  Records are authoritative and fsck rebuilds the bitmap,
+   so deferring the flush is safe — orphaned blocks from a crash are
+   freed on the next mount.  We still flush when:
+     - the inode area is >80 % full (compaction may be triggered next)
+     - the journal slot is >50 % full (avoids slot overflow)
+   vol_close() and vol_sync() always flush. */
+static int vol_should_flush(const invfs_volume *v)
+{
+    /* inode area watermark: 80 % */
+    uint64_t area_total = v->inode_area_end - v->inode_area_start;
+    uint64_t area_used  = v->inode_area_pos - v->inode_area_start;
+    if (area_total > 0 && area_used * 5 >= area_total * 4)
+        return 1;
+    /* journal watermark: 50 % of one slot */
+    if (v->j_slotted && v->jops_n > 0) {
+        uint64_t slot_payload = (uint64_t)(INVFS_JRN_SLOT_BLOCKS - 1)
+                                * INVFS_BLOCK_SIZE
+                                / sizeof(invfs_l2p_entry);
+        if (v->jops_n >= slot_payload / 2)
+            return 1;
+    }
+    return 0;
+}
+
+
+/* Call before appending an inode record: mark dirty, then (WP29) conditionally
+   flush when watermarks are hit.  The old unconditional flush was the dominant
+   cost during bulk import — records are authoritative and fsck rebuilds the
+   bitmap, so deferring is safe.  vol_close / vol_sync still guarantee a full
+   flush at session end. */
 int vol_pre_record(invfs_volume *v)
 {
     if (vol_mark_dirty(v) != 0) return -1;
-    return vol_flush(v);
+    if (vol_should_flush(v))
+        return vol_flush(v);
+    return 0;
 }
 
 

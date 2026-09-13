@@ -946,8 +946,9 @@ int vol_write_sb(invfs_volume *v);
  */
 int vol_mark_dirty(invfs_volume *v);
 
-/* Call before appending an inode record: mark dirty, then make the maps
-   durable so the record about to land is backed by something readable. */
+/* Call before appending an inode record: mark dirty, then conditionally flush
+   when watermarks are hit (WP29: 80 % inode area or 50 % journal slot).
+   vol_close / vol_sync still guarantee a full flush. */
 int vol_pre_record(invfs_volume *v);
 
 /* WP22c/F1: a flush/sync failed -- some buffered writes may never reach
