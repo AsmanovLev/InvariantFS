@@ -111,21 +111,6 @@ getfattr --only-values -n user.invfs.stats /  # hot counters + zone usage
 **Permissions (WP-A):** mode/uid/gid enforced daemon-side. POSIX ACLs stored as
 `system.posix_acl_*` xattr blobs and honored in access checks.
 
-## Volume format v2
-
-Append-only inode area: `[INOD rec_len ... CRC][DELT tombstone CRC]`
-pairs; v2 tombstones kill by record position, legacy ones by inode id.
-Metadata in `INO2` ext block: type, mode, uid/gid, mtime/atime, nlink,
-symlink target, xattr TLVs, heat counters.
-
-Zone geometry (WP-DZ): advisory initial policy (RAW = 1/5 at mkfs), not a hard
-split — one shared free pool. AST v2 entries (32B) embed PBA directly for
-faster reads without L2P journal lookup.
-
-Optional block-0 descriptors: RDP0 (seal config), RSZ0 (resize), CKP0 (sweep
-checkpoint), CMP0 (compaction), DEVT (two-device table), CVT0 (v1->v2
-conversion).
-
 ## Bootable VM
 
 ```sh

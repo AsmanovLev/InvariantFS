@@ -115,21 +115,6 @@ getfattr --only-values -n user.invfs.stats /  # Счётчики + зоны
 **Права (WP-A):** mode/uid/gid проверяются демоном. POSIX ACL хранятся как
 `system.posix_acl_*` xattr-блобы и учитываются при проверке доступа.
 
-## Формат тома v2
-
-Append-only область inode: `[INOD rec_len ... CRC][DELT tombstone CRC]`;
-v2-тамстуны убивают по позиции записи, legacy — по inode id.
-Метаданные в `INO2`: тип, mode, uid/gid, mtime/atime, nlink,
-символическая ссылка, xattr-TLV, счётчики тепла.
-
-Геометрия зон (WP-DZ): рекомендательная начальная политика (RAW = 1/5 при mkfs),
-общий пул свободных блоков. AST v2 (32B) встраивает PBA напрямую для
-ускоренного чтения без L2P-lookup.
-
-Необязательные дескрипторы блока-0: RDP0 (seal), RSZ0 (resize),
-CKP0 (checkpoint sweep), CMP0 (компактификация), DEVT (двух-устройство),
-CVT0 (конвертер v1->v2).
-
 ## Загружаемая VM
 
 ```sh
