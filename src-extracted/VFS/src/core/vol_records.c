@@ -3,6 +3,9 @@
 
 #include "volume_internal.h"
 
+static size_t meta_serialize(const invfs_meta_pub *m,
+                             const uint8_t *xattrs, size_t xlen,
+                             uint8_t *dst);
 
 /* ---- inode area (append-only records) ---- */
 
@@ -243,6 +246,208 @@ uint64_t vol_create_file(invfs_volume *v, const char *name,
     }
     /* Maps first: block_id in the AST is a segment index, so this record is
        readable only if its L2P is already on disk (see vol_pre_record). */
+    if (vol_pre_record(v) != 0) { free(rec); return 0; }
+    if (io_seek(&v->io, v->inode_area_pos) != 0 ||
+        io_write(&v->io, rec, rec_size) != 0 ||
+        io_write(&v->io, &crc_rec, 4) != 0) {
+        free(rec);
+        return 0;
+    }
+    v->inode_area_pos += rec_size + 4;
+    idx_put(v, name, strlen(name), inode_id, v->inode_area_pos - rec_size - 4,
+            rec_h->file_size, rec_h->ctime);
+    idx_put_id(v, inode_id, v->inode_area_pos - rec_size - 4);
+    pba_ref_apply(v, rec, (uint32_t)rec_size, +1);
+    free(rec);
+    return inode_id;
+}
+
+
+/* create_file + embed INO2 metadata in one record append.
+ * Combines the file creation and vol_apply_meta into a single inode-area
+ * write + vol_pre_record flush, cutting import cost from 2 appends to 1. */
+uint64_t vol_create_file_with_meta(invfs_volume *v, const char *name,
+                                   const uint8_t *data, size_t len,
+                                   const invfs_meta_pub *meta)
+{
+    size_t i, ast_entries;
+    uint8_t ast_h[INVFS_AST_HDR_V2_LEN];
+    size_t ast_hlen = 0;
+    size_t rec_size;
+    uint8_t *rec;
+    invfs_inode_rec *rec_h;
+    invfs_ast_block_entry *entries;
+    uint32_t crc_rec;
+    int *seg_lz4 = NULL;
+    uint32_t *seg_csize = NULL;
+    /* meta ext */
+    uint8_t meta_buf[512];
+    uint32_t meta_ext_len = 0;
+
+    if (!meta) return vol_create_file(v, name, data, len);
+    if (len > MAX_FILE_SIZE ||
+        (len + SEGMENT_SIZE - 1) / SEGMENT_SIZE > MAX_SEGMENTS_V2) {
+        fprintf(stderr, "invarifs: %s: %llu bytes exceeds the format limit\n",
+                name, (unsigned long long)len);
+        return 0;
+    }
+    if (name_too_long(name)) return 0;
+    if (!vol_write_enabled(v)) {
+        fprintf(stderr, "invarifs: %s: volume is read-only\n", name);
+        return 0;
+    }
+
+    /* serialize the INO2 ext */
+    meta_ext_len = (uint32_t)meta_serialize(meta, NULL, 0, meta_buf);
+    if (meta_ext_len == 0 || meta_ext_len > sizeof(meta_buf)) return 0;
+
+    uint64_t inode_id = v->next_inode_id++;
+
+    if (len == 0) {
+        size_t ext_len = meta_ext_len;
+        size_t rec_size0 = sizeof(invfs_inode_rec) + INVFS_AST_HDR_V1_LEN
+                         + ext_len;
+        uint8_t *rec0 = (uint8_t *)calloc(1, rec_size0);
+        invfs_inode_rec *rh0 = (invfs_inode_rec *)rec0;
+        uint32_t crc0;
+        if (!rec0) return 0;
+        if (invfs_ast_hdr_write(rec0 + sizeof(invfs_inode_rec), 0, 0, 0) == 0) {
+            free(rec0);
+            return 0;
+        }
+        memcpy(rec0 + sizeof(invfs_inode_rec) + INVFS_AST_HDR_V1_LEN,
+               meta_buf, meta_ext_len);
+        rh0->magic = INODE_REC_MAGIC;
+        rh0->rec_len = (uint32_t)rec_size0;
+        rh0->inode_id = inode_id;
+        rh0->file_size = 0;
+        rh0->ctime = (uint64_t)time(NULL);
+        rec_set_name(rh0, name);
+        crc0 = invfs_crc32c(rec0, rec_size0);
+        if (inode_area_make_room(v, (uint64_t)rec_size0 + 4) != 0) { free(rec0); return 0; }
+        if (vol_pre_record(v) != 0) { free(rec0); return 0; }
+        if (io_seek(&v->io, v->inode_area_pos) != 0 ||
+            io_write(&v->io, rec0, rec_size0) != 0 ||
+            io_write(&v->io, &crc0, 4) != 0) { free(rec0); return 0; }
+        v->inode_area_pos += rec_size0 + 4;
+        idx_put(v, name, strlen(name), inode_id,
+                v->inode_area_pos - rec_size0 - 4, rh0->file_size, rh0->ctime);
+        idx_put_id(v, inode_id, v->inode_area_pos - rec_size0 - 4);
+        free(rec0);
+        return inode_id;
+    }
+
+    /* split + compress segments (same as vol_create_file) */
+    ast_entries = (len + SEGMENT_SIZE - 1) / SEGMENT_SIZE;
+    entries = (invfs_ast_block_entry *)calloc(ast_entries, sizeof(invfs_ast_block_entry));
+    seg_lz4 = (int *)calloc(ast_entries, sizeof(int));
+    seg_csize = (uint32_t *)calloc(ast_entries, sizeof(uint32_t));
+    if (!entries || !seg_lz4 || !seg_csize) { free(entries); free(seg_lz4); free(seg_csize); return 0; }
+    {
+        uint64_t need = (len + INVFS_BLOCK_SIZE - 1) / INVFS_BLOCK_SIZE + ast_entries;
+        if (v->free_blocks <= v->sb.reserved_blocks + v->sb.hard_min_blocks + need) {
+            free(entries); free(seg_lz4); free(seg_csize); return 0;
+        }
+    }
+
+    for (i = 0; i < ast_entries; i++) {
+        const uint8_t *src = data + (size_t)i * SEGMENT_SIZE;
+        size_t slen = (i + 1 == ast_entries) ? len - (size_t)i * SEGMENT_SIZE : SEGMENT_SIZE;
+        int cbound = LZ4_compressBound((int)slen);
+        uint8_t *cbuf = (uint8_t *)malloc((size_t)cbound + 8 + INVFS_BLOCK_SIZE);
+        uint8_t hdr[8];
+        uint64_t pba, phys_blocks; int seg_zone;
+        uint32_t csize, seg_crc;
+
+        if (!cbuf) { free(entries); free(seg_lz4); free(seg_csize); return 0; }
+        if (v->profile == INVFS_PROFILE_TURBO) {
+            csize = 0;
+        } else {
+            csize = (uint32_t)LZ4_compress_default((const char *)src,
+                                                   (char *)(cbuf + 8),
+                                                   (int)slen, cbound);
+        }
+        if (csize == 0 || csize >= slen) {
+            csize = (uint32_t)slen;
+            memcpy(cbuf + 8, src, slen);
+            seg_lz4[i] = 0;
+        } else {
+            seg_lz4[i] = 1;
+        }
+        seg_csize[i] = csize;
+        seg_crc = invfs_crc32c(cbuf + 8, csize);
+
+        hdr[0] = (uint8_t)(csize & 0xFF);
+        hdr[1] = (uint8_t)((csize >> 8) & 0xFF);
+        hdr[2] = (uint8_t)((csize >> 16) & 0xFF);
+        hdr[3] = (uint8_t)((csize >> 24) & 0xFF);
+        hdr[4] = (uint8_t)(seg_crc & 0xFF);
+        hdr[5] = (uint8_t)((seg_crc >> 8) & 0xFF);
+        hdr[6] = (uint8_t)((seg_crc >> 16) & 0xFF);
+        hdr[7] = (uint8_t)((seg_crc >> 24) & 0xFF);
+        memcpy(cbuf, hdr, 8);
+
+        phys_blocks = ((uint64_t)csize + 8 + INVFS_BLOCK_SIZE - 1) / INVFS_BLOCK_SIZE;
+        pba = alloc_raw_or_shadow(v, phys_blocks, &seg_zone);
+        if (pba == 0) {
+            size_t k;
+            for (k = 0; k < i; k++) {
+                uint64_t len_k = ((uint64_t)seg_csize[k] + 8 +
+                                  INVFS_BLOCK_SIZE - 1) / INVFS_BLOCK_SIZE;
+                if (entries[k].pba)
+                    vol_free_blocks(v, entries[k].pba, len_k);
+            }
+            free(cbuf); free(entries); free(seg_lz4); free(seg_csize); return 0;
+        }
+        if (write_segment_blocks(v, pba, cbuf, (size_t)csize + 8, phys_blocks) != 0) {
+            free(cbuf); free(entries); free(seg_lz4); free(seg_csize); return 0;
+        }
+        free(cbuf);
+
+        entries[i].file_offset = (uint64_t)i * SEGMENT_SIZE;
+        entries[i].length = slen;
+        entries[i].zone = (uint32_t)seg_zone;
+        entries[i].algo = seg_lz4[i] ? INVFS_ALGO_LZ4 : INVFS_ALGO_NONE;
+        entries[i].block_id = (uint32_t)i;
+        entries[i].block_offset = 0;
+        entries[i].pba = pba;
+    }
+    free(seg_lz4);
+    free(seg_csize);
+
+    /* AST recipe header */
+    ast_hlen = invfs_ast_hdr_write(ast_h, len, (uint32_t)ast_entries, 0);
+    if (!ast_hlen) { free(entries); return 0; }
+
+    /* assemble record: header + ast + entries + INO2 ext (no separate heat
+     * ext needed — the INO2 meta block carries everything) */
+    rec_size = sizeof(invfs_inode_rec) + ast_hlen
+             + ast_entries * sizeof(invfs_ast_block_entry)
+             + meta_ext_len;
+    rec = (uint8_t *)calloc(1, rec_size);
+    if (!rec) { free(entries); return 0; }
+    rec_h = (invfs_inode_rec *)rec;
+    rec_h->magic = INODE_REC_MAGIC;
+    rec_h->rec_len = (uint32_t)rec_size;
+    rec_h->inode_id = inode_id;
+    rec_h->file_size = len;
+    rec_h->ctime = (uint64_t)time(NULL);
+    rec_set_name(rec_h, name);
+
+    memcpy(rec + sizeof(invfs_inode_rec), ast_h, ast_hlen);
+    memcpy(rec + sizeof(invfs_inode_rec) + ast_hlen,
+           entries, ast_entries * sizeof(invfs_ast_block_entry));
+    memcpy(rec + sizeof(invfs_inode_rec) + ast_hlen +
+           ast_entries * sizeof(invfs_ast_block_entry),
+           meta_buf, meta_ext_len);
+    free(entries);
+
+    crc_rec = invfs_crc32c(rec, rec_size);
+    if (inode_area_make_room(v, (uint64_t)rec_size + 4) != 0) {
+        fprintf(stderr, "inode area full\n");
+        free(rec);
+        return 0;
+    }
     if (vol_pre_record(v) != 0) { free(rec); return 0; }
     if (io_seek(&v->io, v->inode_area_pos) != 0 ||
         io_write(&v->io, rec, rec_size) != 0 ||

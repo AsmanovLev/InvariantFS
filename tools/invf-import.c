@@ -81,6 +81,7 @@ static void import_file(const char *spath, const char *vname)
     size_t len = 0, cap = 0;
     ssize_t r;
     struct stat st;
+    invfs_meta_pub m;
 
     if (lstat(spath, &st) != 0) { n_skipped++; return; }
     if ((uint64_t)st.st_size > MAX_FILE_SIZE) { n_skipped++; return; }
@@ -107,15 +108,22 @@ static void import_file(const char *spath, const char *vname)
     }
     close(fd);
 
-    vol_ensure_path(vol, vname);   /* create missing parent dirs */
-    if (vol_replace_file(vol, vname, buf, len) == 0 && !buf) {
-        /* replace_file with NULL/0 only overwrites an existing name; ensure
-         * creation for fresh empty entries too */
+    /* build metadata for inline embedding */
+    memset(&m, 0, sizeof(m));
+    m.type  = INVFS_ITYP_REG;
+    m.mode  = st.st_mode & 07777;
+    m.uid   = getenv("INVFS_IMPORT_KEEP_OWNER") ? st.st_uid : 0;
+    m.gid   = getenv("INVFS_IMPORT_KEEP_OWNER") ? st.st_gid : 0;
+    m.mtime = (int64_t)st.st_mtim.tv_sec;
+    m.atime = (int64_t)st.st_atim.tv_sec;
+    m.nlink = 1;
+
+    vol_ensure_path(vol, vname);
+    if (vol_replace_file_with_meta(vol, vname, buf, len, &m) == 0 && !buf) {
         if (vol_find(vol, vname) == 0)
-            vol_create_file(vol, vname, NULL, 0);
+            vol_create_file_with_meta(vol, vname, NULL, 0, &m);
     }
     free(buf);
-    apply_meta_or_die(vname, &st, NULL);
     n_files++;
 }
 
@@ -151,12 +159,24 @@ static void import_entry(const char *spath, const char *vname, int depth)
         break;
     case S_IFLNK: {
         char tgt[1024];
+        invfs_meta_pub m;
         ssize_t tl = readlink(spath, tgt, sizeof(tgt) - 1);
         if (tl < 0) { n_skipped++; return; }
         tgt[tl] = 0;
-        if (vol_create_symlink(vol, vname, tgt) == 0) { n_skipped++; return; }
-        /* keep the real target through the metadata restamp */
-        apply_meta_or_die(vname, &st, tgt);
+        memset(&m, 0, sizeof(m));
+        m.type  = INVFS_ITYP_LNK;
+        m.mode  = 0777;
+        if (getenv("INVFS_IMPORT_KEEP_OWNER")) {
+            m.uid   = st.st_uid;
+            m.gid   = st.st_gid;
+        }
+        m.mtime = (int64_t)st.st_mtim.tv_sec;
+        m.atime = (int64_t)st.st_atim.tv_sec;
+        m.nlink = 1;
+        snprintf(m.target, sizeof(m.target), "%s", tgt);
+        if (vol_create_file_with_meta(vol, vname, NULL, 0, &m) == 0) {
+            n_skipped++; return;
+        }
         n_links++;
         break;
     }

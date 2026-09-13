@@ -180,6 +180,17 @@ int      vol_get_meta(invfs_volume *v, uint64_t inode_id, invfs_meta_pub *out);
  * Returns the new inode id, or 0 on failure (volume untouched). */
 uint64_t vol_apply_meta(invfs_volume *v, const char *name,
                         const invfs_meta_pub *meta);
+/* create + embed metadata (INO2 ext) in one record append — avoids the
+ * separate vol_apply_meta rewrite for callers that already know the POSIX
+ * identity (e.g. bulk import). NULL meta falls back to vol_create_file. */
+uint64_t vol_create_file_with_meta(invfs_volume *v, const char *name,
+                                   const uint8_t *data, size_t len,
+                                   const invfs_meta_pub *meta);
+/* overwrite (or create) a file with inline metadata: same as vol_replace_file
+ * but embeds the INO2 ext in one append (no separate vol_apply_meta). */
+uint64_t vol_replace_file_with_meta(invfs_volume *v, const char *name,
+                                    const uint8_t *data, size_t len,
+                                    const invfs_meta_pub *meta);
 /* create a symlink (target stored in the record's meta ext) or a special
  * node (FIFO/SOCK/CHR/BLK; no data segments). Return inode id / 0. */
 uint64_t vol_create_symlink(invfs_volume *v, const char *name,

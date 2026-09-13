@@ -270,6 +270,37 @@ uint64_t vol_replace_file(invfs_volume *v, const char *name,
 }
 
 
+uint64_t vol_replace_file_with_meta(invfs_volume *v, const char *name,
+                                    const uint8_t *data, size_t len,
+                                    const invfs_meta_pub *meta)
+{
+    uint64_t old_id, nid;
+
+    if (v->sb.vol_flags & VOLF_READONLY) return 0;
+    old_id = vol_find(v, name);
+    {
+        uint8_t wold = old_id ? heat_file_maxw(v, old_id) : 0;
+        nid = vol_create_file_with_meta(v, name, data, len, meta);
+        if (nid == 0) return 0;
+        if (old_id != 0)
+            heat_file_setw(v, nid, wold == 0xFF ? 0xFF : (uint8_t)(wold + 1));
+    }
+    if (old_id != 0) {
+        int owns_siblings = 1;
+        uint8_t *obuf = NULL;
+        uint32_t orl = 0;
+        if (meta_read_record_by_id(v, old_id, &obuf, &orl, NULL, 0, NULL) == 0) {
+            owns_siblings = record_owns_siblings(obuf, orl);
+            free(obuf);
+        }
+        vol_delete_inode(v, old_id, name);
+        if (owns_siblings)
+            vol_delete_siblings(v, name);
+    }
+    return nid;
+}
+
+
 int vol_delete_file(invfs_volume *v, const char *name)
 {
     uint64_t inode_id;
