@@ -382,6 +382,37 @@ PY
 
 # -------------------------------------------------------------- legs ----
 
+# WP27 regression (leg3 gate failure): a re-mkfs of a device that previously
+# held a volume must render the OLD volume's journal completely dead, or the
+# fresh volume's first flush replays the stale owner-WAL tail into its bitmap
+# as phantom maps -- "orphans after mkfs+import" (3412 on the leg3 gate run).
+# Sequence here is the minimal trigger: import+sweep writes owner maps (TARR
+# batches / checkpoint WAL) into the journal at seq 1, then a fresh mkfs + a
+# fresh import must come up with 0 orphans.
+leg0() {
+    LEG=leg0-remkfs-orphans
+    say "[0] re-mkfs stale-journal gate: mkfs+import+sweep, then re-mkfs+import must be orphan-free"
+    mkfs_fresh
+    gen_corpus "$FLK/orig0" "$SEED" small
+    import_all "$FLK/orig0"
+    $B/invf-sweep "$DM" >"$FLK/sweep0.log" 2>&1 \
+        || { cat "$FLK/sweep0.log"; fail "leg0 sweep"; }
+    mkfs_fresh                                   # the re-mkfs under test
+    gen_corpus "$FLK/orig0b" $((SEED + 70)) small
+    import_all "$FLK/orig0b"
+    $B/invf-fsck "$DM" >"$FLK/fsck0.log" 2>&1 \
+        || { cat "$FLK/fsck0.log"; fail "leg0 fsck"; }
+    if grep -q "orphans:" "$FLK/fsck0.log" &&
+       ! grep -q "orphans:      0" "$FLK/fsck0.log"; then
+        echo "  re-mkfs+import leaked orphans (stale journal replayed into the fresh bitmap):"
+        cat "$FLK/fsck0.log"
+        fail "leg0 re-mkfs orphan gate"
+    fi
+    grep -q "^OK$" "$FLK/fsck0.log" \
+        || { cat "$FLK/fsck0.log"; fail "leg0 fsck not clean"; }
+    echo "  re-mkfs + import: 0 orphans (stale journal fully erased)"
+}
+
 leg1() {
     LEG=leg1-baseline
     say "[1] baseline sanity: mkfs on the flakey device, ~200MB corpus, sweep"
@@ -770,6 +801,7 @@ mkdir -p "$ART"
 dev_create
 exec > >(tee "$FLK/run.log") 2>&1
 
+want_leg 0 && leg0
 want_leg 1 && leg1
 want_leg 2 && leg2
 want_leg 3 && leg3
@@ -778,5 +810,5 @@ want_leg 5 && leg5
 want_leg 6 && leg6
 
 say "FLAKEY E2E: PASS  (seed=$SEED, $((SECONDS - T0))s total)"
-echo "  legs: baseline / error-storm / torn-sweep / mid-seal kill / ${SOAK_S}s soak / compact-flip chaos"
+echo "  legs: re-mkfs-orphans / baseline / error-storm / torn-sweep / mid-seal kill / ${SOAK_S}s soak / compact-flip chaos"
 echo "  scratch $FLK cleaned; on failure the image + logs land in $ART"
