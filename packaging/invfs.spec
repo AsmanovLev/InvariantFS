@@ -7,7 +7,7 @@ Release:        1%{?dist}
 Summary:        Semantic content-addressed filesystem with a bit-exactness invariant
 
 License:        GPLv2
-URL:            https://github.com/anomalyco/InvariantFS
+URL:            https://github.com/AsmanovLev/InvariantFS
 Source0:        %{name}-%{version}.tar.gz
 
 # the engine is C11 + bundled zstd/lz4/miniz/blake3/flacx; the FUSE daemon
@@ -38,6 +38,7 @@ InvariantFS root (rootfstype=invfs).
 %autosetup
 
 %build
+mkdir -p bin
 %make_build
 
 %install
@@ -46,6 +47,8 @@ InvariantFS root (rootfstype=invfs).
 DESTDIR=%{buildroot} PREFIX=%{_prefix} \
     WITH_SYSTEMD=1 WITH_DRACUT=1 WITH_MKINITCPIO=0 WITH_INITRAMFS_TOOLS=0 \
     sh packaging/install.sh
+install -Dm644 README.md %{buildroot}%{_docdir}/%{name}/README.md
+install -Dm644 README-RU.md %{buildroot}%{_docdir}/%{name}/README-RU.md
 
 %post
 %systemd_post invfs-sweep.timer invfs-verify.timer
@@ -58,7 +61,7 @@ DESTDIR=%{buildroot} PREFIX=%{_prefix} \
 
 %files
 %license src-extracted/VFS/LICENSE
-%doc README-LINUX.md impl_docs/WP5-codec-seekability.md impl_docs/WP10-textzone-codec-registry.md impl_docs/WP11-jxl-posix.md impl_docs/WP16-containerpacks.md
+%doc README.md README-RU.md
 %{_bindir}/invf-*
 /usr/lib/invfs/codecpacks/
 %{_mandir}/man7/invarifs.7*
