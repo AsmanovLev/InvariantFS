@@ -1,7 +1,11 @@
 usr/bin/invf-*
 usr/lib/invfs/codecpacks
+usr/share/man/man1/invf-*.1
 usr/share/man/man7/invarifs.7
 usr/share/man/man8/invf-*.8
+usr/share/man/*/man1/invf-*.1
+usr/share/man/*/man7/invarifs.7
+usr/share/man/*/man8/invf-*.8
 usr/lib/systemd/system/invfs-*
 usr/share/initramfs-tools/hooks/invfs
 usr/share/initramfs-tools/scripts/local-top/invfs

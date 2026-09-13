@@ -5,10 +5,10 @@ Maintainer: InvariantFS Developers <invfs@localhost>
 Build-Depends: debhelper-compat (= 13), gcc, make, pkg-config, libfuse3-dev, zlib1g-dev, libzstd1
 Standards-Version: 4.6.2
 Rules-Requires-Root: no
-Homepage: https://localhost/invfs
+Homepage: https://github.com/anomalyco/InvariantFS
 
 Package: invfs
-Architecture: amd64
+Architecture: any
 Depends: ${shlibs:Depends}, ${misc:Depends}, fuse3
 Recommends: libjxl-tools
 Description: semantic content-addressed filesystem (bit-exact invariant)

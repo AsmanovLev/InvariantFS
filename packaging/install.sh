@@ -81,14 +81,21 @@ if [ "$WITH_CODECPACKS" != "0" ]; then
 fi
 
 # ---- man pages -------------------------------------------------------------
-for m in "$ROOT"/packaging/man/*.8; do
-    [ -f "$m" ] || continue
-    install -Dm644 "$m" "$DESTDIR$MANDIR/man8/${m##*/}"
+for sec in 1 7 8; do
+    for m in "$ROOT"/packaging/man/*."$sec"; do
+        [ -f "$m" ] || continue
+        install -Dm644 "$m" "$DESTDIR$MANDIR/man${sec}/${m##*/}"
+    done
 done
-for m in "$ROOT"/packaging/man/*.7; do
-    [ -f "$m" ] || continue
-    install -Dm644 "$m" "$DESTDIR$MANDIR/man7/${m##*/}"
-done
+# Russian translations
+if [ -d "$ROOT/packaging/man/ru" ]; then
+    for sec in 1 7 8; do
+        for m in "$ROOT"/packaging/man/ru/*."$sec"; do
+            [ -f "$m" ] || continue
+            install -Dm644 "$m" "$DESTDIR$MANDIR/man${sec}/ru/${m##*/}"
+        done
+    done
+fi
 
 # ---- systemd units (off by default: nothing enables the timers) ------------
 if [ "$WITH_SYSTEMD" = "1" ]; then

@@ -1,0 +1,36 @@
+.TH INVF-IMPORT 8 "2026-09" "InvariantFS" "System Administration"
+.SH NAME
+invf\-import \- bulk tree importer for InvariantFS volumes
+.SH SYNOPSIS
+.B invf\-import
+.I volume
+.I src\-dir
+.RI [ exclude\-dir\-name ...]
+.SH DESCRIPTION
+.B invf\-import
+recursively imports a host directory tree into an unmounted InvariantFS
+volume at the engine level (no FUSE mount required). It creates
+directories, regular files, symlinks, and special nodes (FIFO, socket,
+character, block) with full format\-v2 metadata (type, mode, uid/gid,
+mtime/atime).
+.PP
+Optional trailing arguments name directories to exclude from the walk
+(e.g.
+.BR \.git " " node_modules ).
+Maximum recursion depth is 32.
+.SH ENVIRONMENT
+.TP
+.B INVFS_IMPORT_PREFIX
+If set, imports under an existing volume subdirectory instead of the root.
+The target directory must already exist.
+.TP
+.B INVFS_IMPORT_KEEP_OWNER
+If set to 1, preserves the source file\(aqs uid/gid. The default (0) creates
+all files as root (uid=0, gid=0).
+.SH EXIT STATUS
+0 on success (skipped entries are non\-fatal); 1 on open or
+bad\-superblock errors; 2 on usage errors.
+.SH SEE ALSO
+.BR invf\-mkfs (8),
+.BR invf\-sweep (8),
+.BR invarifs (7)

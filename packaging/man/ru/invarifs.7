@@ -1,0 +1,204 @@
+.TH INVARIFS 7 "2026-09" "InvariantFS" "Miscellaneous Information"
+.SH ИМЯ
+invarifs \(em обзор формата тома InvariantFS, переменных окружения и ABI кодекпаков
+.SH ОПИСАНИЕ
+InvariantFS \(em семантическая, адресуемая по содержимому файловая система
+с инвариантом бит\-в\-бит: каждое сжатие проверяется декодированием и
+сравнением перед доверием; контейнеры (ZIP/TAR и внешние форматы через
+контейнерпаки) декомпозируются на\-inode\-ные записи\-члены, которые
+проходят через весь конвейер кодеков рекурсивно; транскодировки
+происходят только там, где доказана бит\-точность для каждого файла.
+Формат диска \(em InvariFS volume format v2 (магия
+.RB \(dq InvariFS\e0 \(dq);
+де\-факто спецификация \(em
+.I invarifs.h
+плюс
+.I volume.c
+в дереве исходников.
+.SH ФОРМАТ ТОМА
+Область инодов \(em только добавление:
+.B [INOD rec_len ... CRC][DELT tombstone CRC]
+пары; tombstones v2 убивают по позиции записи (поле
+.IR file_size ),
+устаревшие \(em по id иноды. Метаданные каждого файла находятся в
+расширении
+.B INO2
+, добавляемом после рецепта AST в записи: тип, режим, uid/gid,
+mtime/atime, nlink, цель символической ссылки, TLVs xattr. Якоря
+каталогов \(em записи с именами
+.RB \(dq path/ \(dq.
+Жёсткие ссылки клонируют запись под новым именем, разделяя иноду.
+.PP
+Флаги суперблока:
+.B VOLF_READONLY
+(удержание оператором/инструментом),
+.B VOLF_META2
+(записи могут содержать расширение INO2; старые читатели пропускают
+неизвестные расширения через
+.IR rec_len ),
+.B VOLF_RO_SPACE
+(захват свободного места, который повышает READONLY при нехватке блоков).
+Порядок байтов: хостовый little\-endian (x86_64).
+.PP
+Данные живут в зонах: RAW (необработанные сегменты), TEXT (межфайловые
+PPMd\-пакеты, упаковка в стиле ReiserFS в 4 MiB\-пакеты, сортированные
+по языковой семье), BINARY (бинарные ZSTD(+BCJ)\-пакеты). Каждый файл
+несёт штамп класса хранения (внутренний xattr
+.BR invfs.class :
+UNCOMPRESSIBLE, CODEC, CONTAINER, GENERIC, GENERIC_MEMLIMIT,
+GENERIC_GUARD, TEXT, BATCHED_BIN, DEFER_ENOSPC), который записывает,
+какой кодек владеет файлом и активирует логику повтора при появлении
+нового поколения кодекпака.
+.SH ИНСТРУМЕНТЫ
+.TP
+.B invf\-mkfs
+форматирование тома
+.TP
+.B invf\-fuse
+FUSE\-демон (монтирование)
+.TP
+.B invf\-sweep
+драйвер оффлайн\-sweep (классификация/транскодирование/запечатывание)
+.TP
+.B invf\-verify
+структурная и контентная верификация
+.TP
+.B invf\-fsck
+проверка и восстановление
+.TP
+.B invf\-resize
+оффлайн\-увеличение/уменьшение
+.TP
+.B invf\-rollback
+откат последнего sweep по контрольной точке
+.TP
+.B invf\-import
+массовый импорт дерева на уровне движка
+.TP
+.B invf\-stats
+статистика с коэффициентами по зонам
+.TP
+.B invf\-ls, invf\-cat, invf\-cp, invf\-stat, invf\-zip
+утилиты чтения
+.SH ПЕРЕМЕННЫЕ ОКРУЖЕНИЯ
+.TP
+.B INVFS_META_FRAC
+mkfs: делитель зоны метаданных (по умолчанию 64)
+.TP
+.B INVFS_SWEEP_INTERVAL
+invf\-fuse: период фонового sweep в секундах (по умолчанию: выкл)
+.TP
+.B INVFS_PROFILE
+усилие кодека: fast|balanced|dense|archive (по умолчанию balanced)
+.TP
+.B INVFS_ARC_BYTES
+бюджет кэша ARC (по умолчанию 256M; см. \-o arc_limit)
+.TP
+.B INVFS_DEC_MEM_LIMIT
+лимит рабочего набора декодера (по умолчанию 512M)
+.TP
+.B INVFS_MIN_GAIN_PCT
+порог преимущества UNCOMPRESSIBLE (по умолчанию 0.5)
+.TP
+.B INVFS_CODECPACKS
+двоеточием\-разделённые доп. каталоги поиска кодекпаков
+.TP
+.B INVFS_TOOLS
+каталог поиска внешних инструментов кодеков (первый приоритет)
+.TP
+.B INVFS_AUTO_RECOVER
+0 отключает автовосстановление DIRTY \(-> CLEAN при монтировании
+.TP
+.B INVFS_IMPORT_PREFIX
+invf\-import: импорт в подкаталог
+.TP
+.B INVFS_IMPORT_KEEP_OWNER
+invf\-import: 1 сохраняет uid/gid источника (по умолчанию 0)
+.TP
+.B INVFS_RAW_WATERMARK
+invf\-fuse: заполнение RAW в %, запускающее ранний sweep
+.TP
+.B INVFS_DEV1
+путь второго устройства двух\-устройственного тома (WP25)
+.TP
+.B INVFS_DEBUG, INVFS_DEBUG_PACKS
+доп. диагностика движка/пакетов в stderr
+.TP
+.B INVFS_PACK_SANDBOX
+0 отключает Landlock\-песочницу для вспомогательных программ пакетов
+.SH КОДЕКПАКИ
+Внешние кодеки и форматы контейнеров подключаются как
+.I кодекпаки :
+каталоги
+.IB name .codecpack
+, содержащие
+.B manifest
+(ключ = значение) плюс вспомогательные программы. Порядок поиска:
+.RB $INVFS_CODECPACKS
+(двоеточием\-разделённые), затем
+.RB /usr/lib/invfs/codecpacks .
+Вспомогательные бинарники, указанные в манифесте, разрешаются через
+.RB $INVFS_TOOLS ,
+.RB /usr/lib/invfs/tools ,
+собственный каталог
+.B bin/
+пакета, затем PATH. Пакет с отсутствующими инструментами пропускается:
+затронутые файлы остаются RAW и без штампа до появления инструмента.
+.PP
+Ключи манифеста:
+.BR name ,
+.BR algo
+(6\-битный id на диске),
+.BR type
+.RB ( container
+или отсутствует для кодека целого файла),
+.BR pack_version
+(формат манифеста),
+.B generation
+(версия набора кодировщиков; увеличение повторно\-активирует GENERIC_GUARD/
+UNCOMPRESSIBLE\-повторы),
+.BR caps ,
+.BR dec_mem ,
+.B sniff.magic / sniff.offset / sniff.ext ,
+а для кодеков
+.BR encode / decode
+плюс опционально
+.BR estimate ,
+или для контейнеров четыре команды
+.BR enumerate / extract / strip / rebuild
+плюс опционально
+.B map
+(чтения без пакета с произвольным доступом) и
+.BR estimate .
+Команды \(em фиксированные argv с плейсхолдерами
+.BR {in} , {out} , {idx} , {dir} , {recipe} , {pack} ;
+без shell; выход 0 = ок, всё остальное = отказ. ФС memcmp\-ом проверяет
+rebuild\-Guard против оригинала перед коммитом; лживый пакет просто
+теряет файл в generic\-хранилище.
+.PP
+Полный ABI (v1.1: семантические контейнеры, DEFER_ENOSPC, профили
+кодеков) задокументирован в
+.I impl_docs/WP16\-containerpacks.md
+и
+.I impl_docs/WP10\-textzone\-codec\-registry.md
+в дереве исходников (входит в пакет документации invfs source package).
+.SH ФАЙЛЫ
+.TP
+.B /usr/lib/invfs/codecpacks
+Системный каталог кодекпаков.
+.TP
+.B /usr/lib/invfs/tools
+Общий каталог внешних инструментов кодеков.
+.TP
+.B /etc/invfs/volumes
+Список томов, читаемый
+.BR invfs\-verify.service (8)
+(по одному пути к образу/устройству на строку).
+.SH СМОТРИТЕ ТАКЖЕ
+.BR invf\-mkfs (8),
+.BR invf\-fuse (8),
+.BR invf\-sweep (8),
+.BR invf\-verify (8),
+.BR invf\-fsck (8),
+.BR invf\-resize (8),
+.BR invf\-rollback (8)

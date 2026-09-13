@@ -1,0 +1,49 @@
+.TH INVF-LS 1 "2026-09" "InvariantFS" "User Commands"
+.SH NAME
+invf\-ls, invf\-cat, invf\-cp, invf\-stat \- read\-side CLI utilities for InvariantFS volumes
+.SH SYNOPSIS
+.B invf\-ls
+.I image
+.br
+.B invf\-cat
+.I image
+.I name
+.RI [ output\-file ]
+.br
+.B invf\-cp
+.I image
+.I host\-file
+.RI [ name\-in\-volume ]
+.br
+.B invf\-stat
+.I image
+.RB [ \-\-files ]
+.SH DESCRIPTION
+These tools read data from an InvariantFS volume without requiring a FUSE
+mount. They operate directly on the volume image or block device.
+.SS invf\-ls
+Lists every live file on the volume with its size, inode number, and name.
+Container members (virtual windows) are listed when present.
+.SS invf\-cat
+Extracts a named file from the volume to
+.IR output\-file ,
+or to stdout if omitted. For container members containing
+.BR ! ,
+tries inode lookup first, then falls back to container\-member extraction.
+.SS invf\-cp
+Copies a host file into the volume. If
+.I name\-in\-volume
+is omitted, the host filename is used. If the name already exists, the
+old content is overwritten.
+.SS invf\-stat
+Displays a console\-level space inspector with ANSI\-colored block
+category bars (RAW, semantic, dedup, free) and population counts.
+.IP "\fB\-\-files\fR" 4
+Additionally list each file with its policy tag and size.
+.SH EXIT STATUS
+All four tools exit 0 on success, 1 on I/O or volume errors, 2 on
+usage errors.
+.SH SEE ALSO
+.BR invf\-fuse (8),
+.BR invf\-sweep (8),
+.BR invarifs (7)

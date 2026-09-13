@@ -1,3 +1,14 @@
+invfs (0.2.0-1) unstable; urgency=medium
+
+  * Legacy cleanup: removed 36 dead Windows-only files from legacy/.
+  * New man pages: invf-stats, invf-import, invf-migrate-v2, invf-ls.
+  * Russian man page translations in packaging/man/ru/.
+  * Gentoo install guide (docs/GENTOO-INSTALL.md).
+  * Packaging polish: debian/copyright, Homepage, Architecture: any.
+  * configure-guest.sh bug fix ($MNT -> $M on line 156).
+
+ -- InvariantFS Developers <invfs@localhost>  Sun, 13 Sep 2026 12:00:00 +0000
+
 invfs (0.1.0-1) unstable; urgency=medium
 
   * Initial packaging (WP-PKG): CLI tools, FUSE daemon, system codecpacks,

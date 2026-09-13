@@ -2,12 +2,12 @@
 %global debug_package %{nil}
 
 Name:           invfs
-Version:        0.1.0
+Version:        0.2.0
 Release:        1%{?dist}
 Summary:        Semantic content-addressed filesystem with a bit-exactness invariant
 
 License:        GPLv2
-URL:            https://localhost/invfs
+URL:            https://github.com/anomalyco/InvariantFS
 Source0:        %{name}-%{version}.tar.gz
 
 # the engine is C11 + bundled zstd/lz4/miniz/blake3/flacx; the FUSE daemon
@@ -62,7 +62,11 @@ DESTDIR=%{buildroot} PREFIX=%{_prefix} \
 %{_bindir}/invf-*
 /usr/lib/invfs/codecpacks/
 %{_mandir}/man7/invarifs.7*
+%{_mandir}/man1/invf-*.1*
 %{_mandir}/man8/invf-*.8*
+%{_mandir}/man*/ru/invf-*.8*
+%{_mandir}/man*/ru/invf-*.1*
+%{_mandir}/man*/ru/invarifs.7*
 %{_unitdir}/invfs-sweep.service
 %{_unitdir}/invfs-sweep.timer
 %{_unitdir}/invfs-verify.service
@@ -70,6 +74,14 @@ DESTDIR=%{buildroot} PREFIX=%{_prefix} \
 /usr/lib/dracut/modules.d/90invfs/
 
 %changelog
+* Sun Sep 13 2026 InvariantFS Developers <invfs@localhost> - 0.2.0-1
+- Legacy cleanup: removed 36 dead Windows-only files from legacy/
+- New man pages: invf-stats, invf-import, invf-migrate-v2, invf-ls (read-side)
+- Russian man page translations
+- Gentoo install guide (docs/GENTOO-INSTALL.md)
+- Packaging polish: debian/copyright, Homepage URLs, Architecture: any
+- configure-guest.sh bug fix ($MNT -> $M)
+
 * Fri Sep 04 2026 InvariantFS Developers <invfs@localhost> - 0.1.0-1
 - Initial packaging (WP-PKG): CLI tools, FUSE daemon, system codecpacks,
   man pages, systemd sweep/verify timers (disabled by default), and a

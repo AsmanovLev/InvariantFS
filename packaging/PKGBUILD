@@ -2,11 +2,11 @@
 # Builds the current checkout (this file lives in packaging/ inside the
 # repo); run `makepkg -si` from anywhere with a readable repo tree.
 pkgname=invfs
-pkgver=0.1.0
+pkgver=0.2.0
 pkgrel=1
 pkgdesc="Semantic content-addressed filesystem with a bit-exactness invariant"
 arch=('x86_64')
-url="https://localhost/invfs"
+url="https://github.com/anomalyco/InvariantFS"
 license=('GPL2')
 depends=('fuse3' 'zstd' 'zlib' 'glibc')
 makedepends=('gcc' 'make' 'pkgconf')

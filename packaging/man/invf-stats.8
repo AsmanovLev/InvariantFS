@@ -1,0 +1,47 @@
+.TH INVF-STATS 8 "2026-09" "InvariantFS" "System Administration"
+.SH NAME
+invf\-stats \- InvariantFS volume statistics and zone overview
+.SH SYNOPSIS
+.B invf\-stats
+.RB [ \-h | \-\-help ]
+.IR image | device
+.SH DESCRIPTION
+.B invf\-stats
+opens an unmounted InvariantFS volume and prints a human-readable summary of
+its population, zone layout, compression ratios, and (for two-device volumes)
+tier/mirror status.
+.PP
+The volume must not be actively mounted by
+.BR invf\-fuse (8).
+.SH OPTIONS
+.TP
+.BR \-h ", " \-\-help
+Print a short usage message and exit.
+.SH OUTPUT
+The output includes:
+.IP \(bu 2
+Volume state
+.RB ( CLEAN " or " DIRTY )
+and capacity (total blocks \(mu 4 KiB).
+.IP \(bu 2
+Zone sizes: metadata, RAW, shadow (in MiB).
+.IP \(bu 2
+Used/free space.
+.IP \(bu 2
+Population: files, directories, symlinks, special nodes, tombstones, bad
+records.
+.IP \(bu 2
+Data statistics: logical bytes, biggest file, estimated compression ratio.
+.IP \(bu 2
+Per-zone detail with logical/physical sizes and ratios (RAW, SHADOW, TEXT,
+unclaimed).
+.IP \(bu 2
+Two-device (WP25) info when applicable: device count, mirror status, raw
+mirror segments, tier copies.
+.SH EXIT STATUS
+0 on success; 1 on open or walk errors; 2 on usage errors.
+.SH SEE ALSO
+.BR invf\-fuse (8),
+.BR invf\-sweep (8),
+.BR invf\-verify (8),
+.BR invarifs (7)
