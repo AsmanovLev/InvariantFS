@@ -25,6 +25,7 @@
 
 #include "invarifs.h"
 #include "volume.h"
+#include "tmpstore.h"
 
 static invfs_volume *g_vol;
 static pthread_mutex_t g_io_lock = PTHREAD_MUTEX_INITIALIZER;
@@ -41,6 +42,8 @@ static double g_attr_t = 1.0;   /* -o attr_t= override; 0 = bench-honest */
  * -o raw_watermark=<pct> or INVFS_RAW_WATERMARK; when the RAW fill
  * exceeds it the background sweep thread kicks an early sweep. */
 static int g_raw_watermark = 0;
+static tmp_area_mode g_tmp_area = TMP_AREA_AUTO;
+static size_t g_tmp_max_bytes = 128 * 1024 * 1024;
 static void invf_sweep_worker(int arm_ckp);   /* defined below sweep thread */
 static void table_rebuild_locked(void);   /* fwd (defined below) */
 
@@ -54,6 +57,12 @@ static void table_mark_stale(void) { g_table_stale = 1; }
 static void table_upsert_locked(const char *name, uint64_t ino,
                                 uint64_t size, uint64_t ctime);
 static void table_remove_name(const char *name);
+
+static int is_temp_path(const char *path)
+{
+    return strstr(path, "/tmp/") != NULL ||
+           strstr(path, "/var/tmp/") != NULL;
+}
 
 static void table_sync_one(const char *name)
 {
@@ -114,6 +123,14 @@ static int cmp_entry_name_pos(const void *pa, const void *pb)
 static int cmp_entry_key(const void *key, const void *element)
 {
     return strcmp((const char *)key, ((const fs_entry *)element)->name);
+}
+
+static int cmp_u64(const void *pa, const void *pb)
+{
+    const uint64_t *a = (const uint64_t *)pa, *b = (const uint64_t *)pb;
+    if (*a < *b) return -1;
+    if (*a > *b) return 1;
+    return 0;
 }
 
 static void build_file_table(void)
@@ -188,6 +205,24 @@ static void build_file_table(void)
 
     /* pass 2: apply tombstones (records sorted by pos for bsearch) */
     qsort(recs, (size_t)nrecs, sizeof(fs_entry), cmp_entry_pos);
+
+    /* Build hash set for legacy tombstones (inode-id kill) to avoid O(T×N) scan */
+    uint64_t *legacy_kill_ids = NULL;
+    uint64_t nlegacy = 0, caplegacy = 0;
+    for (uint64_t t = 0; t < ntomb; t++) {
+        if (tpos[t] == 0) {
+            if (nlegacy == caplegacy) {
+                caplegacy = caplegacy ? caplegacy * 2 : 256;
+                legacy_kill_ids = (uint64_t *)realloc(legacy_kill_ids, caplegacy * sizeof(uint64_t));
+                if (!legacy_kill_ids) goto done;
+            }
+            legacy_kill_ids[nlegacy++] = tid[t];
+        }
+    }
+
+    /* Sort legacy kill ids for faster lookup */
+    qsort(legacy_kill_ids, (size_t)nlegacy, sizeof(uint64_t), cmp_u64);
+
     for (uint64_t t = 0; t < ntomb; t++) {
         if (tpos[t] != 0) {
             /* v2 position kill: exact record offset */
@@ -198,12 +233,33 @@ static void build_file_table(void)
                 else hi = mid;
             }
             if (lo < nrecs && recs[lo].pos == tpos[t]) recs[lo].inode_id = UINT64_MAX; /* dead */
-        } else {
-            /* legacy kill-by-id: retire every version of this inode */
-            for (uint64_t r = 0; r < nrecs; r++)
-                if (recs[r].inode_id == tid[t]) recs[r].inode_id = UINT64_MAX;
         }
+        /* Legacy kill now handled in pass 3 via hash set */
     }
+
+    /* pass 3: drop dead, then last-write-wins per name.
+     * Also apply legacy kills using the sorted id array (binary search). */
+    {
+        uint64_t w = 0, r;
+        for (r = 0; r < nrecs; r++) {
+            int dead = 0;
+            if (recs[r].inode_id == UINT64_MAX) {
+                dead = 1;
+            } else if (nlegacy > 0) {
+                /* Binary search in legacy_kill_ids */
+                uint64_t lo = 0, hi = nlegacy;
+                while (lo < hi) {
+                    uint64_t mid = (lo + hi) / 2;
+                    if (legacy_kill_ids[mid] < recs[r].inode_id) lo = mid + 1;
+                    else hi = mid;
+                }
+                if (lo < nlegacy && legacy_kill_ids[lo] == recs[r].inode_id) dead = 1;
+            }
+            if (!dead) recs[w++] = recs[r];
+        }
+        nrecs = w;
+    }
+    free(legacy_kill_ids); legacy_kill_ids = NULL;
 
     /* pass 3: drop dead, then last-write-wins per name */
     {
@@ -1173,6 +1229,12 @@ typedef struct wctx {
     struct wctx *next_dirty;   /* g_dirty list link (live sessions) */
 } wctx;
 
+typedef struct tctx {
+    char name[256];
+    int have_meta;
+    invfs_meta_pub meta;
+} tctx;
+
 /* Active write sessions, newest first: lets invf_read serve .write data
  * before commit (a clean page the kernel evicted must never come back
  * stale). Requires g_io_lock for all list ops. */
@@ -1244,6 +1306,7 @@ static int invf_read(const char *path, char *buf, size_t size, off_t offset,
     int got;
     wctx *w;
     (void)fi;
+    (void)is_temp_path;
     pthread_mutex_lock(&g_io_lock);
     if (!g_vol) { pthread_mutex_unlock(&g_io_lock); return -EIO; }
     /* WP22c: on an io-latched volume (a flush/sync failed THIS session)
@@ -1257,7 +1320,7 @@ static int invf_read(const char *path, char *buf, size_t size, off_t offset,
     }
     /* a live write session for this path owns the freshest bytes:
      * .write data must stay readable before commit even if the kernel
-     * evicted a clean (already-written-back) page. Flush staged tails of
+     * evicted a clean (already-writtenback) page. Flush staged tails of
      * every session on this name first so the session view is complete. */
     for (w = g_dirty; w; w = w->next_dirty)
         if (strcmp(w->name, path + 1) == 0)
@@ -1363,11 +1426,14 @@ static int invf_open(const char *path, struct fuse_file_info *fi)
 
 static int invf_create(const char *path, mode_t mode, struct fuse_file_info *fi)
 {
+    int temp = is_temp_path(path);
+    fprintf(stderr, "invf_create: path=%s temp=%d mode=%o fi->flags=%o\n", path, temp, mode, fi->flags);
     wctx *c;
     struct fuse_context *ctx = fuse_get_context();
     uint8_t aacl[INVFS_META_XATTR_MAX];
     size_t aalen = 0;
     mode_t cmode = mode & 07777;
+    (void)temp;
     if (!vol_write_enabled(g_vol))
         return -EROFS;
     fprintf(stderr, "[create] %s\n", path);
@@ -1391,6 +1457,8 @@ static int invf_create(const char *path, mode_t mode, struct fuse_file_info *fi)
             }
         }
     }
+    if ((fi->flags & O_EXCL) && snapshot_entry(path + 1, NULL, NULL, NULL))
+        return -EEXIST;
     /* default-ACL inheritance: child access ACL = parent's default,
      * masked by the create mode (posix_acl_create_masq) */
     {
@@ -1453,6 +1521,7 @@ static int invf_write(const char *path, const char *buf, size_t size, off_t offs
 {
     wctx *c = (wctx *)(uintptr_t)fi->fh;
     size_t done = 0;
+    (void)is_temp_path;
     if (!vol_write_enabled(g_vol))
         return -ENOSPC;
     /* WP22a: the 4 GB wall is gone -- the commit writes a v2 recipe header
@@ -1774,6 +1843,7 @@ static int invf_flush(const char *path, struct fuse_file_info *fi)
 {
     wctx *c = (wctx *)(uintptr_t)fi->fh;
     (void)path;
+    (void)is_temp_path;
     return commit_wctx(c);
 }
 
@@ -1808,10 +1878,8 @@ static int invf_release(const char *path, struct fuse_file_info *fi)
 {
     wctx *c = (wctx *)(uintptr_t)fi->fh;
     (void)path;
+    (void)is_temp_path;
     if (c) {
-        /* mmap writeback can dirty pages after the last close()/flush()
-         * (the mapping pins the file, so release is the last word):
-         * commit whatever the session still holds */
         commit_wctx(c);
         free(c->tail);
         free(c);
@@ -1958,6 +2026,7 @@ static int invf_truncate(const char *path, off_t len, struct fuse_file_info *fi)
 {
     wctx *c = fi ? (wctx *)(uintptr_t)fi->fh : NULL;
     int rc;
+    (void)is_temp_path;
     if (!vol_write_enabled(g_vol))
         return -EROFS;
     if (len < 0)
@@ -2455,12 +2524,14 @@ static void invf_destroy(void *private_data)
         fprintf(stderr, "invf: volume closed cleanly\n");
     }
     pthread_mutex_unlock(&g_io_lock);
+    tmpstore_destroy();
 }
 
 static int invf_unlink(const char *path)
 {
     int rc;
     struct acreds c;
+    (void)is_temp_path;
     /* WP24-lite: a delete is deliberately allowed under the ordinary
      * read-only space latch (H5, it is the way out), but a time-travel
      * view is not the present -- the tombstone would land on the live
@@ -2541,7 +2612,9 @@ static void *invf_init(struct fuse_conn_info *conn, struct fuse_config *cfg)
     conn->max_read = 1048576;
     conn->max_write = 1048576;
     conn->max_readahead = 1048576;
-    fprintf(stderr, "invf: conn max_read=%u max_write=%u max_readahead=%u splice=%c%c%c wbc=%c\n",
+    if (g_tmp_area != TMP_AREA_VOLUME)
+        tmpstore_init(g_tmp_max_bytes, g_tmp_area);
+    fprintf(stderr, "invf: conn max_read=%u max_write=%u max_readahead=%u splice=%c%c%c wbc=%c tmp_area=%d\n",
             conn->max_read, conn->max_write, conn->max_readahead,
             (conn->want & FUSE_CAP_SPLICE_READ)  ? 'r' : '-',
             (conn->want & FUSE_CAP_SPLICE_MOVE)  ? 'm' : '-',
@@ -2689,6 +2762,23 @@ int main(int argc, char *argv[])
                     g_raw_watermark = (int)wv;
                 else
                     fprintf(stderr, "invf: bad -o raw_watermark=%s; ignored\n",
+                            tok + 14);
+            } else if (strncmp(tok, "tmp_area=", 9) == 0) {
+                const char *mode = tok + 9;
+                if (strcmp(mode, "ram") == 0)
+                    g_tmp_area = TMP_AREA_RAM;
+                else if (strcmp(mode, "volume") == 0)
+                    g_tmp_area = TMP_AREA_VOLUME;
+                else if (strcmp(mode, "auto") == 0)
+                    g_tmp_area = TMP_AREA_AUTO;
+                else
+                    fprintf(stderr, "invf: bad -o tmp_area=%s; ignored\n", mode);
+            } else if (strncmp(tok, "tmp_max_bytes=", 14) == 0) {
+                uint64_t mb = 0;
+                if (parse_size_opt(tok + 14, &mb))
+                    g_tmp_max_bytes = mb;
+                else
+                    fprintf(stderr, "invf: bad -o tmp_max_bytes=%s; ignored\n",
                             tok + 14);
             } else {
                 size_t tl = strlen(tok);
