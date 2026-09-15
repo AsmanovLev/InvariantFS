@@ -562,19 +562,28 @@ int vol_meta_merge_run(invfs_volume *v)
 {
     if (!vol_meta_merge_needed(v)) return 0;
 
+    /* WP30 Phase 6: set merge-in-progress flag to block concurrent metadata
+     * operations until merge completes and mapper is flushed */
+    v->merge_in_progress = 1;
+
     int rc;
     uint32_t iterations = 0;
     const uint32_t max_iterations = 16;  /* cap per sweep run */
 
     while (iterations < max_iterations && vol_meta_merge_needed(v)) {
         rc = vol_meta_merge_step(v);
-        if (rc < 0) return rc;
+        if (rc < 0) {
+            v->merge_in_progress = 0;
+            return rc;
+        }
         if (rc > 0) break;  /* nothing more to merge */
         iterations++;
     }
 
-    /* persist mapper changes */
-    return meta_mapper_flush(v);
+    /* persist mapper changes before clearing flag */
+    rc = meta_mapper_flush(v);
+    v->merge_in_progress = 0;
+    return rc;
 }
 
 /* ---- WP30 Phase 3: dynamic metadata extent append path -------------- */
@@ -619,6 +628,11 @@ int meta_get_append_pos(invfs_volume *v, uint64_t rec_size,
         *offset_out = 0;
         return 0;
     }
+
+    /* WP30 Phase 6: check merge-in-progress flag to prevent concurrent
+     * metadata operations from reading partially-updated mapper state */
+    if (v->merge_in_progress)
+        return -EAGAIN;
 
     /* Dynamic extent path */
     uint64_t extent_idx = v->met0.active_extent;

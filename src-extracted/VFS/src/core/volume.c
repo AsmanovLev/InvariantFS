@@ -2580,8 +2580,6 @@ uint64_t alloc_blocks(invfs_volume *v, uint64_t zone_start, uint64_t zone_len,
      * end to end for every 64 KB segment. */
     uint64_t *cursor, *zone_free, *fail_run;
 
-    (void)type;  /* WP30: type parameter for future meta tracking */
-
     if (zone_start == v->sb.shadow_zone_start) {
         cursor = &v->shadow_cursor; zone_free = &v->shadow_free;
         fail_run = &v->shadow_fail_run;
@@ -2628,6 +2626,14 @@ uint64_t alloc_blocks(invfs_volume *v, uint64_t zone_start, uint64_t zone_len,
             }
             return 0;  /* ENOSPC */
         }
+    }
+
+    /* WP30 Phase 4: data allocations must respect metadata reservation */
+    if (type == INVFS_ALLOC_DATA && v->sb.meta_reserved_pct > 0) {
+        uint64_t meta_reserve =
+            (v->sb.total_blocks * v->sb.meta_reserved_pct) / 100;
+        if (v->free_blocks - n < meta_reserve)
+            return 0;  /* ENOSPC */
     }
 
     i = *cursor;

@@ -775,6 +775,7 @@ int vol_write_commit(invfs_wsession *ws)
     int pos_rc = meta_get_append_pos(v, total_rec_size, &abs_pba, &offset);
     if (pos_rc != 0) {
         free(rec);
+        if (pos_rc == -EAGAIN) return -EAGAIN;
         return pos_rc == -2 ? -2 : -1;
     }
     /* the version live RIGHT NOW, before our record lands: normally the

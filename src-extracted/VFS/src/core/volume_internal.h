@@ -522,6 +522,11 @@ typedef struct invfs_volume {
     uint64_t meta_active_offset;    /* byte offset within active extent */
     uint64_t meta_free_blocks;      /* metadata free block counter */
     uint8_t *meta_type_bitmap;      /* per-block type (DATA=0/META=1), allocated */
+    /* WP30 Phase 6: merge-in-progress flag for concurrency safety.
+     * Set during vol_meta_merge_run, checked in meta_get_append_pos to
+     * prevent concurrent metadata operations from reading partially-updated
+     * mapper state. */
+    int merge_in_progress;
 } invfs_volume;
 
 /* v_of_blk: recover the volume from the embedded dev0 blkio (the io_*
