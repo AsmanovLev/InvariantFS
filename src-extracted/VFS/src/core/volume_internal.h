@@ -1041,6 +1041,12 @@ int meta_mapper_flush(invfs_volume *v);
 uint64_t meta_mapper_get(const invfs_volume *v, size_t i);
 void meta_mapper_set(invfs_volume *v, size_t i, uint64_t entry);
 
+/* WP30 Phase 3: dynamic metadata extent append path */
+uint32_t meta_met0_crc(const invfs_met0 *m);
+int meta_met0_persist(invfs_volume *v);
+int meta_get_append_pos(invfs_volume *v, uint64_t rec_size,
+                        uint64_t *pba_out, uint64_t *offset_out);
+
 /* WP30 Phase 5: metadata extent journal helpers (in volume.c) */
 int meta_journal_alloc(invfs_volume *v, uint16_t ext_idx, uint64_t pba,
                        uint8_t size_class);

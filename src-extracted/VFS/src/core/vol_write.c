@@ -766,13 +766,16 @@ int vol_write_commit(invfs_wsession *ws)
         memcpy(rec + rec_size - s->old_ext_len, s->old_ext, s->old_ext_len);
     crc_rec = invfs_crc32c(rec, rec_size);
 
-    /* room for the record AND the retire tombstone(s) that must follow:
-     * running out between the two would strand the old version live */
-    if (v->inode_area_pos + rec_size + 4 +
-        (s->have_old ? 2 * (sizeof(invfs_inode_rec) + 4) : 0)
-            > v->inode_area_end) {
+    /* WP30 Phase 3: room for the record AND the retire tombstone(s) that
+     * must follow: running out between the two would strand the old version live.
+     * When VOLF_META_DYN is set, use the dynamic extent append path. */
+    uint64_t total_rec_size = rec_size + 4 +
+        (s->have_old ? 2 * (sizeof(invfs_inode_rec) + 4) : 0);
+    uint64_t abs_pba, offset;
+    int pos_rc = meta_get_append_pos(v, total_rec_size, &abs_pba, &offset);
+    if (pos_rc != 0) {
         free(rec);
-        return -2;
+        return pos_rc == -2 ? -2 : -1;
     }
     /* the version live RIGHT NOW, before our record lands: normally the
      * one begin() saw, but a concurrent session may have committed a
@@ -781,16 +784,23 @@ int vol_write_commit(invfs_wsession *ws)
     cur = vol_find(v, s->name);
 
     if (vol_pre_record(v) != 0 ||
-        io_seek(&v->io, v->inode_area_pos) != 0 ||
+        io_seek(&v->io, (off_t)(abs_pba + offset)) != 0 ||
         io_write(&v->io, rec, rec_size) != 0 ||
         io_write(&v->io, &crc_rec, 4) != 0) {
         free(rec);
         return -1;
     }
-    v->inode_area_pos += rec_size + 4;
+    /* WP30 Phase 3: update dynamic extent offset if using met0 path */
+    uint64_t rec_pos = abs_pba + offset;
+    if ((v->sb.vol_flags & VOLF_META_DYN) && v->met0_present) {
+        v->met0.active_offset += rec_size + 4;
+        v->inode_area_pos = rec_pos + rec_size + 4;
+    } else {
+        v->inode_area_pos += rec_size + 4;
+    }
     idx_put(v, s->name, strlen(s->name), s->new_id,
-            v->inode_area_pos - rec_size - 4, s->logical_size, now);
-    idx_put_id(v, s->new_id, v->inode_area_pos - rec_size - 4);
+            rec_pos, s->logical_size, now);
+    idx_put_id(v, s->new_id, rec_pos);
     pba_ref_apply(v, rec, (uint32_t)rec_size, +1);
     free(rec);
 

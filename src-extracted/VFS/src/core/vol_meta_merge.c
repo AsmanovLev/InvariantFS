@@ -576,3 +576,107 @@ int vol_meta_merge_run(invfs_volume *v)
     /* persist mapper changes */
     return meta_mapper_flush(v);
 }
+
+/* ---- WP30 Phase 3: dynamic metadata extent append path -------------- */
+
+uint32_t meta_met0_crc(const invfs_met0 *m)
+{
+    return invfs_crc32c(m, offsetof(invfs_met0, crc32c));
+}
+
+/* Persist the MET0 descriptor to block 0 at INVFS_MET0_OFF.
+ * Returns 0 on success, -1 on error. */
+int meta_met0_persist(invfs_volume *v)
+{
+    if (!(v->sb.vol_flags & VOLF_META_DYN) || !v->met0_present)
+        return 0;
+
+    invfs_met0 m = v->met0;
+    m.crc32c = 0;
+    m.crc32c = meta_met0_crc(&m);
+
+    if (io_seek(&v->io, INVFS_MET0_OFF) != 0 ||
+        io_write(&v->io, &m, sizeof(m)) != 0)
+        return -1;
+    return 0;
+}
+
+/* Get the current append position for a record of rec_size bytes.
+ * When VOLF_META_DYN is set, uses the met0-based dynamic extent system.
+ * Returns 0 on success, -1 on error, -2 if ENOSPC.
+ * Sets *pba_out to absolute byte PBA, *offset_out to byte offset within extent. */
+int meta_get_append_pos(invfs_volume *v, uint64_t rec_size,
+                        uint64_t *pba_out, uint64_t *offset_out)
+{
+    *pba_out = 0;
+    *offset_out = 0;
+
+    /* Legacy path: use flat inode_area_pos */
+    if (!(v->sb.vol_flags & VOLF_META_DYN) || !v->met0_present) {
+        if (v->inode_area_pos + rec_size > v->inode_area_end)
+            return -2;
+        *pba_out = v->inode_area_pos;
+        *offset_out = 0;
+        return 0;
+    }
+
+    /* Dynamic extent path */
+    uint64_t extent_idx = v->met0.active_extent;
+    uint64_t offset = v->met0.active_offset;
+
+    /* Check if current extent has room */
+    uint64_t entry = meta_mapper_get(v, (size_t)extent_idx);
+    if (!entry) {
+        fprintf(stderr, "meta_get_append_pos: active extent %llu has no mapper entry\n",
+                (unsigned long long)extent_idx);
+        return -1;
+    }
+
+    uint64_t extent_size = invfs_meta_ext_size(entry);
+    uint64_t pba = invfs_meta_ext_pba(entry);
+
+    if (offset + rec_size > extent_size) {
+        /* Need a new extent */
+        uint8_t size_class = INVFS_META_EXT_MIN_SIZE_CLASS;
+        uint64_t new_idx = alloc_meta_extent(v, size_class);
+        if (new_idx == 0) {
+            /* Try to extend the current extent first */
+            uint8_t cur_class = invfs_meta_ext_class(entry);
+            if (cur_class < INVFS_META_EXT_SIZE_CLASS_MAX) {
+                uint8_t try_class = cur_class + 1;
+                while (try_class <= INVFS_META_EXT_SIZE_CLASS_MAX) {
+                    if (extend_meta_extent(v, extent_idx, try_class) == 1) {
+                        entry = meta_mapper_get(v, (size_t)extent_idx);
+                        extent_size = invfs_meta_ext_size(entry);
+                        pba = invfs_meta_ext_pba(entry);
+                        break;
+                    }
+                    try_class++;
+                }
+            }
+            if (offset + rec_size > extent_size) {
+                return -2;  /* ENOSPC */
+            }
+        } else {
+            /* New extent allocated */
+            extent_idx = new_idx - 1;  /* alloc_meta_extent returns 1-based */
+            v->met0.active_extent = extent_idx;
+            v->met0.active_offset = 0;
+            v->met0.extent_count++;
+
+            entry = meta_mapper_get(v, (size_t)extent_idx);
+            if (!entry) return -1;
+            pba = invfs_meta_ext_pba(entry);
+            extent_size = invfs_meta_ext_size(entry);
+            offset = 0;
+
+            /* Persist MET0 after switching to a new extent */
+            if (meta_met0_persist(v) != 0)
+                return -1;
+        }
+    }
+
+    *pba_out = pba * INVFS_BLOCK_SIZE;
+    *offset_out = offset;
+    return 0;
+}

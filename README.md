@@ -12,8 +12,12 @@ is proven per file.
 
 **Not yet tested on real hardware. Use at your own risk. Do backups.**
 
-A Gentoo/OpenRC system runs with its entire root on an InvariantFS volume
-(see `tools/mkdisk.sh`, `vm/`). Current release: **v0.2.0**.
+A Gentoo/OpenRC system runs with its entire root on an InvariantFS volume.
+Two installation paths are supported:
+- **QEMU/VM**: `tools/mkdisk.sh`, `vm/` — virtual disk with OVMF/GRUB
+- **Bare-metal**: real hardware via SSH + live CD (see `docs/GENTOO-INSTALL.md`)
+
+Current release: **v0.2.1**.
 
 ## Architecture
 

@@ -1324,6 +1324,25 @@ static invfs_volume *vol_open_inner(const char *path, int at_ckpt,
         }
     }
 
+    /* WP30 Phase 3: load MET0 descriptor at 0x3A0 if VOLF_META_DYN is set.
+     * MET0 points to the dynamic metadata extent mapper table. */
+    if (v->sb.vol_flags & VOLF_META_DYN) {
+        invfs_met0 m0;
+        if (io_seek(&v->io, INVFS_MET0_OFF) == 0 &&
+            io_read(&v->io, &m0, sizeof(m0)) == 0 &&
+            memcmp(m0.magic, "MET0", 4) == 0) {
+            if (meta_met0_crc(&m0) == m0.crc32c && m0.version == 1) {
+                v->met0 = m0;
+                v->met0_present = 1;
+                v->meta_active_extent = m0.active_extent;
+                v->meta_active_offset = m0.active_offset;
+            } else {
+                fprintf(stderr, "vol_open: MET0 descriptor CRC/version "
+                                "mismatch; ignoring dynamic metadata extents\n");
+            }
+        }
+    }
+
     /* WP20b: second block-0 read for the RDP0 redundancy descriptor at
      * 0x100 (past the 144-byte superblock struct; pre-WP20b images carry
      * zeros there -> absent). Valid magic+crc loads the persisted
