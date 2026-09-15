@@ -720,7 +720,7 @@ uint64_t vol_create_blob_file(invfs_volume *v, const char *name,
     inode_id = v->next_inode_id++;
     phys_blocks = (blob_len + 8 + INVFS_BLOCK_SIZE - 1) / INVFS_BLOCK_SIZE;
     pba = alloc_blocks(v, v->sb.shadow_zone_start, v->sb.shadow_zone_blocks,
-                       phys_blocks, 1);
+                       phys_blocks, 1, INVFS_ALLOC_DATA);
 
     if (pba == 0) return 0;
     hdr4[0] = (uint8_t)(blob_len & 0xFF);

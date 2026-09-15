@@ -624,3 +624,16 @@ uint64_t vol_rawm_count(invfs_volume *v, uint64_t *blocks_out);
  * and degraded volumes. 0 = ok (the pass prints its own counts),
  * <0 = error. */
 int  vol_tier_migrate(invfs_volume *v);
+
+/* ---- WP30 Phase 5: metadata extent merge/consolidation -------------------
+ * Triggered when metadata_footprint > INVFS_META_MERGE_FOOTPRINT_PCT (default 70%),
+ * extent_count > INVFS_META_MERGE_EXTENT_COUNT_MAX (default 128), or
+ * dead_record_fraction > INVFS_META_MERGE_DEAD_FRACTION_PCT (default 30%).
+ *
+ * vol_meta_merge_needed: check if merge should run (0=no, 1=yes)
+ * vol_meta_merge_step: run one incremental merge step (one pair of extents)
+ * vol_meta_merge_run: run merge phase until thresholds satisfied or nothing left
+ * Returns: 0 = nothing to do or merge completed, <0 = error. */
+int vol_meta_merge_needed(invfs_volume *v);
+int vol_meta_merge_step(invfs_volume *v);
+int vol_meta_merge_run(invfs_volume *v);

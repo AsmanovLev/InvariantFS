@@ -2112,10 +2112,10 @@ int vol_inode_compact(invfs_volume *v, uint64_t *before_out,
      * honest home (a seal never covers RAW); shadow is the fallback for a
      * nearly-full RAW zone (the ckp_begin convention) */
     pba = alloc_blocks(v, v->sb.raw_zone_start, v->sb.raw_zone_blocks,
-                       stage_blocks, 1);
+                       stage_blocks, 1, INVFS_ALLOC_DATA);
     if (!pba)
         pba = alloc_blocks(v, v->sb.shadow_zone_start,
-                           v->sb.shadow_zone_blocks, stage_blocks, 1);
+                           v->sb.shadow_zone_blocks, stage_blocks, 1, INVFS_ALLOC_DATA);
     if (!pba) {
         fprintf(stderr, "inode compact: declined (no %llu-block run for "
                 "the staging)\n", (unsigned long long)stage_blocks);

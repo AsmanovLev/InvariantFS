@@ -648,7 +648,7 @@ static int tz_seal(tz_ctx *c, const tz_candidate *cands,
         csize = (uint32_t)(4 + enc_len);
         phys = ((uint64_t)csize + 8 + INVFS_BLOCK_SIZE - 1) / INVFS_BLOCK_SIZE;
         pba = alloc_blocks(v, v->sb.shadow_zone_start, v->sb.shadow_zone_blocks,
-                           phys, 1);
+                           phys, 1, INVFS_ALLOC_DATA);
         if (!pba) {
             fail = 1;
         } else {

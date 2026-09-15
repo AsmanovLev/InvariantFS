@@ -306,6 +306,9 @@ typedef struct invfs_volume {
      * compaction image when bulk). */
     invfs_l2p_entry *jops;
     size_t jops_n, jops_cap;
+    /* WP30: metadata extent WAL entries (META_ALLOC/META_EXTEND/SHRINK/FREE/MERGE) */
+    invfs_meta_wal *mjops;
+    size_t mjops_n, mjops_cap;
     int j_slotted;            /* 0 = legacy flat log, 1 = slot format */
     uint32_t j_slot;          /* active slot index when slotted (0/1) */
     uint64_t j_seq;           /* active slot image's sequence number */
@@ -510,6 +513,15 @@ typedef struct invfs_volume {
     uint64_t tier_owner, rawm_owner;   /* live owner inode ids (0 = none) */
     /* last vol_tier_migrate run's counters (the sweep driver prints) */
     uint64_t tier_promoted, tier_demoted, tier_blocks;
+    /* WP30: dynamic metadata extent state */
+    invfs_met0 met0;                /* MET0 descriptor (loaded from disk) */
+    int met0_present;               /* MET0 was present at open */
+    uint64_t *meta_mapper;          /* in-memory mapper table cache (16384 entries) */
+    size_t meta_mapper_n;           /* number of valid entries */
+    uint64_t meta_active_extent;    /* index of active extent */
+    uint64_t meta_active_offset;    /* byte offset within active extent */
+    uint64_t meta_free_blocks;      /* metadata free block counter */
+    uint8_t *meta_type_bitmap;      /* per-block type (DATA=0/META=1), allocated */
 } invfs_volume;
 
 /* v_of_blk: recover the volume from the embedded dev0 blkio (the io_*
@@ -965,8 +977,13 @@ void vol_io_error_latch(invfs_volume *v, const char *what);
  * canonical extent directly (shadow class never crosses into the raw
  * extent: the seal stripes are defined over the shadow pba range). */
 uint64_t alloc_blocks(invfs_volume *v, uint64_t zone_start, uint64_t zone_len,
-                              uint64_t n, int use_reserve);
+                              uint64_t n, int use_reserve, int type);
 uint64_t alloc_raw_or_shadow(invfs_volume *v, uint64_t nblocks, int *zone_out);
+
+/* WP30: dynamic metadata extent allocation
+ * type parameter: 0 = DATA blocks, 1 = METADATA blocks */
+#define INVFS_ALLOC_DATA  0
+#define INVFS_ALLOC_META  1
 
 /* H5: release the hard_min space latch (VOLF_READONLY) once free space is
  * back above hard_min + 2% of the volume. Runs from vol_free_blocks, the
@@ -1001,9 +1018,47 @@ const invfs_l2p_entry *l2p_idx_get(invfs_volume *v, uint64_t inode,
 /* WP22d: queue one journal op for the next flush's append (MAP/UNMAP,
  * CRC restamped from the chain at write time) */
 int jrn_push_op(invfs_volume *v, const invfs_l2p_entry *e);
+int jrn_push_meta_op(invfs_volume *v, const invfs_meta_wal *w);
+
+/* WP30: dynamic metadata extent allocation */
+uint64_t alloc_meta_extent(invfs_volume *v, uint8_t size_class);
+int extend_meta_extent(invfs_volume *v, uint64_t extent_idx, uint8_t new_size_class);
+int meta_journal_alloc(invfs_volume *v, uint16_t ext_idx, uint64_t pba, uint8_t size_class);
+int meta_journal_extend(invfs_volume *v, uint16_t ext_idx, uint8_t size_class, uint8_t aux);
+int meta_journal_shrink(invfs_volume *v, uint16_t ext_idx, uint8_t size_class);
+int meta_journal_free(invfs_volume *v, uint16_t ext_idx);
+int meta_journal_merge(invfs_volume *v, uint16_t dst_idx, uint16_t src_idx);
+
+/* WP30: queue one metadata extent WAL op for the next flush's append */
+int jrn_push_meta_op(invfs_volume *v, const invfs_meta_wal *w);
 
 /* absolute byte offset of slot `slot`'s header block */
 uint64_t jrn_slot_base(const invfs_volume *v, uint32_t slot);
+
+/* ---- WP30: metadata extent mapper ----------------------------------------- */
+int meta_mapper_load(invfs_volume *v);
+int meta_mapper_flush(invfs_volume *v);
+uint64_t meta_mapper_get(const invfs_volume *v, size_t i);
+void meta_mapper_set(invfs_volume *v, size_t i, uint64_t entry);
+
+/* WP30 Phase 5: metadata extent journal helpers (in volume.c) */
+int meta_journal_alloc(invfs_volume *v, uint16_t ext_idx, uint64_t pba,
+                       uint8_t size_class);
+int meta_journal_extend(invfs_volume *v, uint16_t ext_idx,
+                        uint8_t size_class, uint8_t aux);
+int meta_journal_shrink(invfs_volume *v, uint16_t ext_idx, uint8_t size_class);
+int meta_journal_free(invfs_volume *v, uint16_t ext_idx);
+int meta_journal_merge(invfs_volume *v, uint16_t dst_idx, uint16_t src_idx);
+
+/* WP30 Phase 5: metadata extent merge/consolidation.
+ * In-place shrink: drop dead records, rewrite with smaller size_class.
+ * Packing: move live records to target's free tail, free source extent.
+ * Returns 0 on success, <0 on error, 1 if nothing to do. */
+int vol_meta_extent_shrink(invfs_volume *v, uint16_t ext_idx);
+int vol_meta_extent_merge(invfs_volume *v, uint16_t src_idx, uint16_t tgt_idx);
+int vol_meta_merge_needed(invfs_volume *v);
+int vol_meta_merge_step(invfs_volume *v);
+int vol_meta_merge_run(invfs_volume *v);
 
 /* ---- WP27: segment extents --------------------------------------------
  * AST entries carry pba but no physical length (the 32B wire format has

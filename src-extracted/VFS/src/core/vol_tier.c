@@ -373,7 +373,7 @@ int wp25_rawm_write(invfs_volume *v, uint64_t pba, const uint8_t *buf,
         return 0;
     }
     mpba = alloc_blocks(v, v->sb.shadow_zone_start,
-                        v->sb.shadow_zone_blocks, phys_blocks, 0);
+                        v->sb.shadow_zone_blocks, phys_blocks, 0, INVFS_ALLOC_DATA);
     if (!mpba) {
         fprintf(stderr, "vol: no shadow space for the RAW mirror of pba "
                 "%llu; segment unmirrored (ENOSPC policy)\n",
@@ -650,7 +650,7 @@ static int tier_promote_one(invfs_volume *v, uint64_t cpba, uint32_t plen)
         if (!used) break;
     }
     if (ord == 65535) return 1;
-    dpba = alloc_blocks(v, v->arena_start, v->arena_blocks, plen, 0);
+    dpba = alloc_blocks(v, v->arena_start, v->arena_blocks, plen, 0, INVFS_ALLOC_DATA);
     if (!dpba)
         return 1;   /* arena pressure: the demote pass below manages */
     buf = (uint8_t *)malloc(span);

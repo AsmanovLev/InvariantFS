@@ -27,6 +27,7 @@
  * readers). */
 #define INVFS_VERSION     2
 #define INVFS_JOURNAL_BLOCKS 8192  /* 32MB total: two 16MB journal slots (WP22d) */
+#define INVFS_META_RESERVED_PCT_DFLT 10  /* WP30: default 10% free pool for metadata */
 
 /* ---- WP22d: crash-atomic L2P journal (double-buffered slots) ----
  * The journal area is split into two equal slots of INVFS_JRN_SLOT_BLOCKS
@@ -178,6 +179,13 @@ typedef struct {
 #define INVFS_JRN_SWEEP     0x03
 #define INVFS_JRN_CHECKPOINT 0xFF
 
+/* WP30: metadata extent WAL record types (owner-scoped, like L2P) */
+#define INVFS_JRN_META_ALLOC  0x10
+#define INVFS_JRN_META_EXTEND 0x11
+#define INVFS_JRN_META_SHRINK 0x12
+#define INVFS_JRN_META_FREE   0x13
+#define INVFS_JRN_META_MERGE  0x14
+
 /* Default zone fractions (of volume after superblock+metadata) */
 #define INVFS_RAW_FRACTION_NUM 1   /* RAW = 20% */
 #define INVFS_RAW_FRACTION_DEN 5
@@ -214,11 +222,17 @@ typedef struct {
                                      * (INVFS_JSEL_*; 0 = legacy flat log).
                                      * Outside the checksum like the other
                                      * policy fields -> 0 on old images. */
-} invfs_superblock;                 /* 0x90 = 144 bytes */
+    /* WP30: dynamic metadata extents (outside checksum - 0 on old images) */
+    uint32_t meta_reserved_pct;     /* 0x90 min free pool % for metadata */
+    uint64_t meta_mapper_pba;       /* 0x94 pba of metadata mapper table (0=absent) */
+    uint32_t meta_mapper_blocks;     /* 0x9C blocks for mapper table */
+    uint32_t meta_extent_min;       /* 0xA0 min extent size class (default 1=128KB) */
+} invfs_superblock;                 /* 0xA4 = 164 bytes */
 
 /* volume flags (sb.vol_flags) */
 #define VOLF_READONLY 0x00000001
 #define VOLF_META2    0x00000002  /* records may carry "INO2" metadata ext */
+#define VOLF_META_DYN 0x00000010  /* dynamic metadata extents (WP30) */
 /* WP27: format v2 -- AST entries are 32B and carry the segment pba (the
  * L2P journal is the owner-scoped WAL only). Set by mkfs from format v2 on
  * and by invf-convert on a converted v1 volume; a v2 reader refuses a
@@ -551,6 +565,57 @@ typedef struct {
     uint32_t crc32c;            /* over the header with this field 0 */
 } invfs_cvts;                   /* 40 bytes, block-padded */
 #pragma pack(pop)
+
+/* WP30: MET0 dynamic metadata extent mapper descriptor (block 0 reserved area)
+ * Lives at byte offset 0x3A0 of block 0, past the superblock (0x00..0x90),
+ * RDP0 (0x100), RSZ0 (0x140), CKP0 (0x220), CMP0 (0x260), DEVT (0x2A0)
+ * and CVT0 (0x360). Volumes that never saw dynamic metadata carry zeros there
+ * ("absent" - magic mismatch with MET0 magic).
+ *
+ * The mapper table is stored in the metadata zone (not block 0), and this
+ * descriptor points to it. The mapper table format:
+ *   - 16384 entries x 8 bytes = 131072 bytes = 32 blocks
+ *   - Entry: bits [0,59] = absolute pba, bits [60,63] = size_class (4 bits)
+ *   - size_class i = 64KB * 2^i (i=0..15, so 64KB..2GB)
+ *   - Entry 0 is always the active extent (appending there)
+ *
+ * MET0 fields:
+ *   0x3A0  char magic[4]        "MET0"
+ *   0x3A4  u32 version          1
+ *   0x3A8  u64 active_extent    index of active extent in mapper (0=first)
+ *   0x3B0  u64 active_offset    byte offset within the active extent
+ *   0x3B8  u64 extent_count    number of allocated extents
+ *   0x3C0  u32 crc32c           over the descriptor with this field 0
+ * 36 bytes total; the rest of block 0 stays reserved-zero. */
+#define INVFS_MET0_OFF 0x3A0
+#pragma pack(push, 1)
+typedef struct {
+    char     magic[4];          /* 0x3A0 "MET0" */
+    uint32_t version;          /* 0x3A4 */
+    uint64_t active_extent;     /* 0x3A8 index of active extent */
+    uint64_t active_offset;    /* 0x3B0 byte offset within active extent */
+    uint64_t extent_count;     /* 0x3B8 number of allocated extents */
+    uint32_t crc32c;           /* 0x3C0 over descriptor with this field 0 */
+} invfs_met0;                  /* 0x3C4 - 0x3A0 = 36 bytes, rounded to 64 */
+#pragma pack(pop)
+
+/* WP30: Metadata extent entry in the mapper table (8 bytes)
+ * Encoded as: bits [0,59] = absolute pba, bits [60,63] = size_class
+ * size_class 0..15: extent_size = 64KB << size_class
+ * Free entries have pba=0 and size_class=0 (both zero = invalid pba)
+ * Entry 0 in the mapper is always the initial/active extent. */
+#define INVFS_META_EXT_SIZE_CLASS_MAX 15
+#define INVFS_META_EXT_ENTRIES 16384
+#define INVFS_META_EXT_BLOCKS 32  /* 16384 * 8 / 4096 */
+#define INVFS_META_EXT_MIN_SIZE_CLASS 1  /* 128KB default min (class 1 = 128KB) */
+
+/* Decode/encode mapper entry */
+static inline uint64_t invfs_meta_ext_pba(uint64_t entry) { return entry & 0x0FFFFFFFFFFFFFFFULL; }
+static inline uint8_t  invfs_meta_ext_class(uint64_t entry) { return (uint8_t)((entry >> 60) & 0xF); }
+static inline uint64_t invfs_meta_ext_size(uint64_t entry) { return 65536ULL << invfs_meta_ext_class(entry); }
+static inline uint64_t invfs_meta_ext_encode(uint64_t pba, uint8_t size_class) {
+    return pba | ((uint64_t)(size_class & 0xF) << 60);
+}
 
 /* WP27: per-file heat counters live in the INO2 ext as an xattr TLV of
  * this name (moved out of the L2P journal pads -- the read path never
@@ -899,6 +964,24 @@ typedef struct {
     uint32_t length;                /* blocks */
     uint32_t crc;                   /* CRC32C of entry */
 } invfs_l2p_entry;                  /* 36 bytes */
+
+/* WP30: metadata extent WAL entry (owner-scoped like L2P)
+ * Wire format: 24 bytes
+ *   [u8 type][u8 pad][u16 ext_idx][u64 pba][u8 size_class][u8 aux][u16 crc]
+ * type = INVFS_JRN_META_* (0x10..0x14)
+ * ext_idx = mapper table entry index
+ * pba = physical block address (0 for SHRINK/FREE)
+ * size_class = extent size class (0..15, 64KB << class)
+ * aux = used by MERGE (source extent index) or extended size_class for EXTEND */
+typedef struct {
+    uint8_t  type;                  /* INVFS_JRN_META_* */
+    uint8_t  pad[3];                /* reserved zero */
+    uint16_t ext_idx;               /* mapper table entry index */
+    uint64_t pba;                   /* physical block address */
+    uint8_t  size_class;            /* extent size class */
+    uint8_t  aux;                   /* type-specific auxiliary */
+    uint16_t crc;                   /* CRC16-CCITT over bytes 0..21 */
+} invfs_meta_wal;                   /* 24 bytes */
 
 #pragma pack(pop)
 

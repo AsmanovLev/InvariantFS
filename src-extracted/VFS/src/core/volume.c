@@ -1460,6 +1460,9 @@ static invfs_volume *vol_open_inner(const char *path, int at_ckpt,
         io_read(&v->io, v->bitmap, (size_t)v->bitmap_blocks * INVFS_BLOCK_SIZE) != 0)
         { *err = -7; goto fail; }
 
+    /* WP30 Phase 5: load metadata extent mapper table */
+    if (meta_mapper_load(v) != 0) { *err = -7; goto fail; }
+
     v->journal_start = v->sb.metadata_zone_start + v->bitmap_blocks;
     v->journal_pos = v->journal_start * INVFS_BLOCK_SIZE;
     v->inode_area_start = v->journal_start + JOURNAL_BLOCKS;
@@ -1958,6 +1961,8 @@ fail:
     io_close(&v->io);
     if (v->bitmap) free(v->bitmap);
     free(v->jops);
+    free(v->mjops);
+    free(v->meta_mapper);
     free(v->heat_tab);
     free(v->pba_ref);
     free(v->l2p);
@@ -2048,6 +2053,8 @@ void vol_close(invfs_volume *v)
     free(v->l2p);
     free(v->l2p_idx);
     free(v->jops);
+    free(v->mjops);
+    free(v->meta_mapper);
     free(v->tier);
     free(v->rawm);
     free(v->path2);
@@ -2143,6 +2150,22 @@ int jrn_push_op(invfs_volume *v, const invfs_l2p_entry *e)
         v->jops_cap = ncap;
     }
     v->jops[v->jops_n++] = *e;
+    return 0;
+}
+
+
+/* WP30: queue one metadata extent WAL op for the next flush's append.
+ * The entry's CRC16-CCITT is computed at push time. */
+int jrn_push_meta_op(invfs_volume *v, const invfs_meta_wal *w)
+{
+    if (v->mjops_n == v->mjops_cap) {
+        size_t ncap = v->mjops_cap ? v->mjops_cap * 2 : 64;
+        invfs_meta_wal *nj = (invfs_meta_wal *)realloc(v->mjops, ncap * sizeof *nj);
+        if (!nj) return -1;
+        v->mjops = nj;
+        v->mjops_cap = ncap;
+    }
+    v->mjops[v->mjops_n++] = *w;
     return 0;
 }
 
@@ -2266,7 +2289,8 @@ static int jrn_compact(invfs_volume *v)
 
 /* Append the pending ops at the active slot's log end.
  * One write, chained from j_last_crc; a drop window can only punch a hole
- * that replay stops at -- durable prefixes are never rewritten. */
+ * that replay stops at -- durable prefixes are never rewritten.
+ * Also appends pending metadata extent WAL entries (mjops) after L2P entries. */
 static int jrn_append_pending(invfs_volume *v)
 {
     size_t n = v->jops_n, i;
@@ -2274,26 +2298,48 @@ static int jrn_append_pending(invfs_volume *v)
     uint32_t prev;
     uint64_t jp;
 
-    if (!n) return 0;
-    buf = (invfs_l2p_entry *)malloc(n * sizeof *buf);
-    if (!buf) return -1;
-    prev = v->j_last_crc;
-    for (i = 0; i < n; i++) {
-        buf[i] = v->jops[i];
-        buf[i].crc = jrn_chain(prev, &buf[i]);
-        prev = buf[i].crc;
-    }
-    jp = v->journal_pos;
-    if (io_seek(&v->io, jp) != 0 ||
-        io_write(&v->io, buf, n * sizeof *buf) != 0) {
+    if (!n && !v->mjops_n) return 0;
+
+    /* Append L2P entries first */
+    if (n) {
+        buf = (invfs_l2p_entry *)malloc(n * sizeof *buf);
+        if (!buf) return -1;
+        prev = v->j_last_crc;
+        for (i = 0; i < n; i++) {
+            buf[i] = v->jops[i];
+            buf[i].crc = jrn_chain(prev, &buf[i]);
+            prev = buf[i].crc;
+        }
+        jp = v->journal_pos;
+        if (io_seek(&v->io, jp) != 0 ||
+            io_write(&v->io, buf, n * sizeof *buf) != 0) {
+            free(buf);
+            vol_io_error_latch(v, "journal append");
+            return -1;
+        }
         free(buf);
-        vol_io_error_latch(v, "journal append");
-        return -1;
+        v->journal_pos = jp + n * sizeof *buf;
+        v->j_last_crc = prev;
+        v->jops_n = 0;
     }
-    free(buf);
-    v->journal_pos = jp + n * sizeof *buf;
-    v->j_last_crc = prev;
-    v->jops_n = 0;
+
+    /* Append metadata extent WAL entries (mjops) */
+    if (v->mjops_n) {
+        size_t mn = v->mjops_n;
+        uint8_t *mbuf = (uint8_t *)malloc(mn * sizeof(invfs_meta_wal));
+        if (!mbuf) return -1;
+        memcpy(mbuf, v->mjops, mn * sizeof(invfs_meta_wal));
+        jp = v->journal_pos;
+        if (io_seek(&v->io, jp) != 0 ||
+            io_write(&v->io, mbuf, mn * sizeof(invfs_meta_wal)) != 0) {
+            free(mbuf);
+            vol_io_error_latch(v, "metadata WAL append");
+            return -1;
+        }
+        free(mbuf);
+        v->journal_pos = jp + mn * sizeof(invfs_meta_wal);
+        v->mjops_n = 0;
+    }
     return 0;
 }
 
@@ -2501,9 +2547,11 @@ int vol_sync(invfs_volume *v)
 }
 
 
-/* allocate n consecutive free blocks in a zone; returns start block or 0 */
+/* allocate n consecutive free blocks in a zone; returns start block or 0.
+ * type: INVFS_ALLOC_DATA (0) = data blocks, INVFS_ALLOC_META (1) = metadata blocks.
+ * WP30: metadata allocations are tracked separately in meta_type_bitmap. */
 uint64_t alloc_blocks(invfs_volume *v, uint64_t zone_start, uint64_t zone_len,
-                             uint64_t n, int use_reserve)
+                             uint64_t n, int use_reserve, int type)
 {
     uint64_t zone_end = zone_start + zone_len;
     uint64_t i, count = 0, start = 0;
@@ -2512,6 +2560,8 @@ uint64_t alloc_blocks(invfs_volume *v, uint64_t zone_start, uint64_t zone_len,
      * next RAW attempt to the zone head, so a full RAW zone was rescanned
      * end to end for every 64 KB segment. */
     uint64_t *cursor, *zone_free, *fail_run;
+
+    (void)type;  /* WP30: type parameter for future meta tracking */
 
     if (zone_start == v->sb.shadow_zone_start) {
         cursor = &v->shadow_cursor; zone_free = &v->shadow_free;
@@ -2571,7 +2621,12 @@ uint64_t alloc_blocks(invfs_volume *v, uint64_t zone_start, uint64_t zone_len,
             if (start == 0) start = i;
             if (i - start + 1 == n) {
                 uint64_t k;
-                for (k = start; k <= i; k++) bit_set(v->bitmap, k);
+                for (k = start; k <= i; k++) {
+                    bit_set(v->bitmap, k);
+                    /* WP30: track metadata allocations separately */
+                    if (type == INVFS_ALLOC_META && v->meta_type_bitmap)
+                        bit_set(v->meta_type_bitmap, k);
+                }
                 bm_dirty(v, start);
                 bm_dirty(v, i);
                 /* WP20b: fresh shadow content invalidates its stripes'
@@ -2581,6 +2636,9 @@ uint64_t alloc_blocks(invfs_volume *v, uint64_t zone_start, uint64_t zone_len,
                 *cursor = (i + 1 < zone_end) ? i + 1 : zone_start;
                 v->free_blocks -= n;
                 *zone_free -= n;
+                /* WP30: track metadata free blocks separately */
+                if (type == INVFS_ALLOC_META)
+                    v->meta_free_blocks -= n;
                 return start;
             }
         } else {
@@ -2618,12 +2676,181 @@ uint64_t alloc_blocks(invfs_volume *v, uint64_t zone_start, uint64_t zone_len,
 uint64_t alloc_raw_or_shadow(invfs_volume *v, uint64_t nblocks, int *zone_out)
 {
     uint64_t pba = alloc_blocks(v, v->sb.raw_zone_start, v->sb.raw_zone_blocks,
-                                nblocks, 0);
+                                nblocks, 0, INVFS_ALLOC_DATA);
     if (pba == 0)
         pba = alloc_blocks(v, v->sb.shadow_zone_start, v->sb.shadow_zone_blocks,
-                           nblocks, 0);
+                           nblocks, 0, INVFS_ALLOC_DATA);
     if (zone_out) *zone_out = INVFS_ZONE_RAW;
     return pba;
+}
+
+/* ==================== WP30: Dynamic Metadata Extents ==================== */
+
+static uint16_t meta_crc16(const invfs_meta_wal *e)
+{
+    return invfs_crc32c(e, offsetof(invfs_meta_wal, crc)) & 0xFFFFu;
+}
+
+int meta_journal_alloc(invfs_volume *v, uint16_t ext_idx, uint64_t pba,
+                       uint8_t size_class)
+{
+    invfs_meta_wal e;
+    memset(&e, 0, sizeof e);
+    e.type = INVFS_JRN_META_ALLOC;
+    e.ext_idx = ext_idx;
+    e.pba = pba;
+    e.size_class = size_class;
+    e.crc = meta_crc16(&e);
+    return jrn_push_meta_op(v, &e);
+}
+
+int meta_journal_extend(invfs_volume *v, uint16_t ext_idx,
+                        uint8_t size_class, uint8_t aux)
+{
+    invfs_meta_wal e;
+    memset(&e, 0, sizeof e);
+    e.type = INVFS_JRN_META_EXTEND;
+    e.ext_idx = ext_idx;
+    e.size_class = size_class;
+    e.aux = aux;
+    e.crc = meta_crc16(&e);
+    return jrn_push_meta_op(v, &e);
+}
+
+int meta_journal_shrink(invfs_volume *v, uint16_t ext_idx, uint8_t size_class)
+{
+    invfs_meta_wal e;
+    memset(&e, 0, sizeof e);
+    e.type = INVFS_JRN_META_SHRINK;
+    e.ext_idx = ext_idx;
+    e.size_class = size_class;
+    e.crc = meta_crc16(&e);
+    return jrn_push_meta_op(v, &e);
+}
+
+int meta_journal_free(invfs_volume *v, uint16_t ext_idx)
+{
+    invfs_meta_wal e;
+    memset(&e, 0, sizeof e);
+    e.type = INVFS_JRN_META_FREE;
+    e.ext_idx = ext_idx;
+    e.crc = meta_crc16(&e);
+    return jrn_push_meta_op(v, &e);
+}
+
+int meta_journal_merge(invfs_volume *v, uint16_t dst_idx, uint16_t src_idx)
+{
+    invfs_meta_wal e;
+    memset(&e, 0, sizeof e);
+    e.type = INVFS_JRN_META_MERGE;
+    e.ext_idx = dst_idx;
+    e.aux = (uint8_t)src_idx;
+    e.crc = meta_crc16(&e);
+    return jrn_push_meta_op(v, &e);
+}
+
+/* WP30: allocate a metadata extent from the free pool.
+ * size_class: 0=64KB, 1=128KB, 2=256KB... up to 15=2GB
+ * Returns mapper entry index (0 on error). */
+uint64_t alloc_meta_extent(invfs_volume *v, uint8_t size_class)
+{
+    uint64_t extent_size = 65536ULL << size_class;
+    uint64_t nblocks = extent_size / INVFS_BLOCK_SIZE;
+    uint64_t pba;
+
+    if (!(v->sb.vol_flags & VOLF_META_DYN))
+        return 0;
+
+    /* Check meta reservation: ensure free_blocks won't drop below
+     * (meta_reserved_pct of total) after this allocation */
+    if (v->sb.meta_reserved_pct > 0) {
+        uint64_t meta_reserve = (v->sb.total_blocks * v->sb.meta_reserved_pct) / 100;
+        if (v->free_blocks - nblocks < meta_reserve)
+            return 0;  /* Would violate meta reservation */
+    }
+
+    pba = alloc_blocks(v, v->sb.shadow_zone_start, v->sb.shadow_zone_blocks,
+                       nblocks, 0, INVFS_ALLOC_META);
+    if (pba == 0)
+        return 0;
+
+    /* Find a free mapper entry */
+    if (!v->meta_mapper || v->meta_mapper_n >= INVFS_META_EXT_ENTRIES)
+        return 0;
+
+    uint64_t idx = 0;
+    for (idx = 0; idx < INVFS_META_EXT_ENTRIES; idx++) {
+        if (invfs_meta_ext_pba(v->meta_mapper[idx]) == 0)
+            break;
+    }
+    if (idx >= INVFS_META_EXT_ENTRIES)
+        return 0;
+
+    v->meta_mapper[idx] = invfs_meta_ext_encode(pba, size_class);
+    if (idx >= v->meta_mapper_n)
+        v->meta_mapper_n = idx + 1;
+
+    meta_journal_alloc(v, (uint16_t)idx, pba, size_class);
+    return idx + 1;  /* 1-based index for callers */
+}
+
+/* WP30: try to extend the active extent in-place if physically adjacent
+ * run is free. Returns 1 if extended, 0 if not possible, -1 on error. */
+int extend_meta_extent(invfs_volume *v, uint64_t extent_idx, uint8_t new_size_class)
+{
+    uint64_t old_entry, old_pba, old_size;
+    uint8_t old_class;
+    uint64_t old_blocks, new_blocks;
+    uint64_t adj_pba, adj_blocks;
+
+    if (!(v->sb.vol_flags & VOLF_META_DYN))
+        return 0;
+
+    if (extent_idx >= INVFS_META_EXT_ENTRIES || extent_idx >= v->meta_mapper_n)
+        return 0;
+
+    old_entry = v->meta_mapper[extent_idx];
+    old_pba = invfs_meta_ext_pba(old_entry);
+    old_class = invfs_meta_ext_class(old_entry);
+    old_size = invfs_meta_ext_size(old_entry);
+    old_blocks = old_size / INVFS_BLOCK_SIZE;
+
+    if (new_size_class <= old_class)
+        return 0;  /* Can only extend, not shrink */
+
+    new_blocks = (65536ULL << new_size_class) / INVFS_BLOCK_SIZE;
+    if (new_blocks <= old_blocks)
+        return 0;
+
+    adj_blocks = new_blocks - old_blocks;
+    adj_pba = old_pba + old_blocks;
+
+    if (bit_get(v->bitmap, adj_pba) == 0) {
+        uint64_t k;
+        int can_extend = 1;
+        for (k = 1; k < adj_blocks; k++) {
+            if (bit_get(v->bitmap, adj_pba + k) != 0) {
+                can_extend = 0;
+                break;
+            }
+        }
+        if (can_extend) {
+            for (k = 0; k < adj_blocks; k++) {
+                bit_set(v->bitmap, adj_pba + k);
+                if (v->meta_type_bitmap)
+                    bit_set(v->meta_type_bitmap, adj_pba + k);
+            }
+            bm_dirty(v, old_pba);
+            bm_dirty(v, adj_pba + adj_blocks - 1);
+            v->free_blocks -= adj_blocks;
+            v->meta_free_blocks -= adj_blocks;
+
+            v->meta_mapper[extent_idx] = invfs_meta_ext_encode(old_pba, new_size_class);
+            meta_journal_extend(v, (uint16_t)extent_idx, new_size_class, adj_blocks);
+            return 1;
+        }
+    }
+    return 0;  /* Adjacent run not free */
 }
 
 

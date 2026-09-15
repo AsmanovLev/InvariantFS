@@ -439,26 +439,32 @@ int main(int argc, char **argv)
     uint64_t dev0_blocks = 0, dev1_blocks = 0;
     char dev1_path[128];
 
-    if (argc != 3) {
+    if (argc < 3 || argc > 4) {
         fprintf(stderr, "usage: invf-resize <image|device> <newsize[K|M|G]>\n"
+                        "       invf-resize <image|device> --max\n"
                         "  offline volume resize (grow/shrink); the volume "
                         "must be unmounted\n"
                         "  two-device volumes (WP25): newsize is the TOTAL;\n"
                         "  growth lands on the tail device (dev1, set\n"
-                        "  INVFS_DEV1); shrink is refused\n");
+                        "  INVFS_DEV1); shrink is refused\n"
+                        "  --max: grow to fill all available device space\n");
         return 2;
     }
     path = blkio_normalize(argv[1], devbuf, sizeof devbuf);
-    want_bytes = parse_size(argv[2]);
-    if (!want_bytes) {
-        fprintf(stderr, "invf-resize: \"%s\" is not a size\n", argv[2]);
-        return 2;
-    }
-    want_bytes -= want_bytes % INVFS_BLOCK_SIZE;
-    if (want_bytes < RSZ_MIN_BYTES) {
-        fprintf(stderr, "invf-resize: volume too small: %llu bytes "
-                "(min 64MB)\n", (unsigned long long)want_bytes);
-        return 1;
+    if (strcmp(argv[2], "--max") == 0) {
+        want_bytes = 0;  /* computed later from device capacities */
+    } else {
+        want_bytes = parse_size(argv[2]);
+        if (!want_bytes) {
+            fprintf(stderr, "invf-resize: \"%s\" is not a size\n", argv[2]);
+            return 2;
+        }
+        want_bytes -= want_bytes % INVFS_BLOCK_SIZE;
+        if (want_bytes < RSZ_MIN_BYTES) {
+            fprintf(stderr, "invf-resize: volume too small: %llu bytes "
+                    "(min 64MB)\n", (unsigned long long)want_bytes);
+            return 1;
+        }
     }
 
     rc = blkio_open(&io, path,
@@ -646,6 +652,31 @@ int main(int argc, char **argv)
         rz2.dev0_bytes = dev0_blocks * (uint64_t)INVFS_BLOCK_SIZE;
         rz2.meta_end = (sb.metadata_zone_start + meta_blocks) *
                        (uint64_t)INVFS_BLOCK_SIZE;
+    }
+
+    /* --max: compute target from device capacities */
+    if (want_bytes == 0) {
+        if (twodev) {
+            uint64_t cap1 = blkio_capacity(&io2);
+            want_bytes = dev0_blocks * (uint64_t)INVFS_BLOCK_SIZE + cap1;
+            printf("invf-resize: --max: dev0=%llu MiB + dev1=%llu MiB "
+                   "= total %llu MiB\n",
+                   (unsigned long long)(dev0_blocks * INVFS_BLOCK_SIZE /
+                                        (1024ull * 1024)),
+                   (unsigned long long)(cap1 / (1024ull * 1024)),
+                   (unsigned long long)(want_bytes / (1024ull * 1024)));
+        } else {
+            want_bytes = blkio_capacity(&io);
+            printf("invf-resize: --max: device capacity = %llu MiB\n",
+                   (unsigned long long)(want_bytes / (1024ull * 1024)));
+        }
+        want_bytes -= want_bytes % INVFS_BLOCK_SIZE;
+        if (want_bytes < RSZ_MIN_BYTES) {
+            fprintf(stderr, "invf-resize: volume too small after --max "
+                    "computation: %llu bytes\n",
+                    (unsigned long long)want_bytes);
+            goto fail;
+        }
     }
 
     bitmap = (uint8_t *)malloc((size_t)(bm_old * INVFS_BLOCK_SIZE));

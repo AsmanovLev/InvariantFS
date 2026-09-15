@@ -235,10 +235,10 @@ int vol_ckp_begin(invfs_volume *v)
          * can never dirty a parity stripe); shadow is the fallback for a
          * nearly-full RAW zone */
         pba = alloc_blocks(v, v->sb.raw_zone_start,
-                           v->sb.raw_zone_blocks, sblocks, 1);
+                           v->sb.raw_zone_blocks, sblocks, 1, INVFS_ALLOC_DATA);
         if (!pba)
             pba = alloc_blocks(v, v->sb.shadow_zone_start,
-                               v->sb.shadow_zone_blocks, sblocks, 1);
+                               v->sb.shadow_zone_blocks, sblocks, 1, INVFS_ALLOC_DATA);
         if (!pba) {
             fprintf(stderr, "checkpoint: declined (no %llu-block run for "
                             "the journal staging)\n",

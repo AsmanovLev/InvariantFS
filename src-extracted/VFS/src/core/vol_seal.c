@@ -829,7 +829,7 @@ static int vol_seal_l2(invfs_volume *v, seal_view *sv, invfs_seal_report *rep)
         for (j = 0; j < m2; j++) {
             uint64_t pba;
             if (par[s * m2 + j]) continue;
-            pba = alloc_blocks(v, ss, snb, 1, 1);
+            pba = alloc_blocks(v, ss, snb, 1, 1, INVFS_ALLOC_DATA);
             if (!pba) {
                 fprintf(stderr, "seal2: ENOSPC for parity %llu of stripe "
                         "%llu\n", (unsigned long long)j,
@@ -1225,7 +1225,7 @@ int vol_seal(invfs_volume *v, int unseal, invfs_seal_report *rep)
             }
             sv.nshards++;
         }
-        pba = alloc_blocks(v, ss, snb, 1, 1);
+        pba = alloc_blocks(v, ss, snb, 1, 1, INVFS_ALLOC_DATA);
         if (!pba) {
             fprintf(stderr, "seal: ENOSPC for parity of stripe %llu\n",
                     (unsigned long long)s);

@@ -404,7 +404,7 @@ int vol_sweep_file_inner(invfs_volume *v, uint64_t inode_id,
         /* 4. write to Shadow zone */
         phys_blocks_new = ((uint64_t)csize_new + 8 + INVFS_BLOCK_SIZE - 1) / INVFS_BLOCK_SIZE;
         pba_new = alloc_blocks(v, v->sb.shadow_zone_start, v->sb.shadow_zone_blocks,
-                               phys_blocks_new, 1);
+                               phys_blocks_new, 1, INVFS_ALLOC_DATA);
         if (pba_new == 0) { free(cbuf_new); free(orig); sweep_unwind(v, new_id ? ents : NULL, ast_h.num_blocks); free(rec); return -1; }
         hdr4[0] = (uint8_t)(csize_new & 0xFF);
         hdr4[1] = (uint8_t)((csize_new >> 8) & 0xFF);
@@ -1330,6 +1330,13 @@ int vol_sweep_pending(invfs_volume *v)
      * (self-guards: single-device / degraded / read-only -> no-op) */
     vol_tier_migrate(v);
     vol_tz_flush(v);
+    /* WP30 Phase 5: metadata extent merge/consolidation. Runs after sweep
+     * walk as a trailing phase. Triggered when metadata footprint > threshold,
+     * extent_count > threshold, or dead_record_fraction > threshold.
+     * Checkpoint bracketing: caller should have called vol_ckp_end before
+     * this, then call vol_ckp_end again after if merge ran. */
+    if (vol_meta_merge_run(v) < 0)
+        fprintf(stderr, "[sweep] warning: metadata merge failed\n");
     return done;
 }
 
