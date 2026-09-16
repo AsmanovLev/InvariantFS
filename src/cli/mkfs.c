@@ -163,6 +163,26 @@ int main(int argc, char **argv)
     int is_dev2 = 0, twodev = 0;
     invfs_devt devt;
 
+    for (int i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) {
+            fprintf(stderr,
+                "usage: %s <image|device> [size_gb]\n"
+                "  %s vol.img 10    10 GB sparse image file\n"
+                "  %s W:            the whole W: partition\n"
+                "two devices (WP25):\n"
+                "  %s dev0.img <size0_gb> dev1.img <size1_gb>\n"
+                "  dev0 = fast (metadata + RAW + tier arena),\n"
+                "  dev1 = capacity (metadata mirror + shadow)\n",
+                argv[0], argv[0], argv[0], argv[0]);
+            return 2;
+        }
+        if (strcmp(argv[i], "-v") == 0 || strcmp(argv[i], "--version") == 0) {
+            fprintf(stderr, "%s version %s (build %s)\n  Author: %s\n  License: %s\n",
+                    argv[0], INVFS_VERSION_STRING, INVFS_BUILD_DATE, INVFS_AUTHOR_NAME, INVFS_LICENSE);
+            return 0;
+        }
+    }
+
     if (argc < 2 || argc == 4 || argc > 5) {
         fprintf(stderr, "usage: invf-mkfs <image|device> [size_gb]\n"
                         "  invf-mkfs vol.img 10    10 GB sparse image file\n"

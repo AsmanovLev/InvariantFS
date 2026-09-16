@@ -2687,6 +2687,15 @@ int main(int argc, char *argv[])
     int fg = 0, err, i;
 
     for (i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) {
+            fprintf(stderr, "usage: invf-fuse [-f] [-o opt,opt] <image> <mountpoint>\n");
+            return 2;
+        }
+        if (strcmp(argv[i], "-v") == 0 || strcmp(argv[i], "--version") == 0) {
+            fprintf(stderr, "%s version %s (build %s)\n  Author: %s\n  License: %s\n",
+                    argv[0], INVFS_VERSION_STRING, INVFS_BUILD_DATE, INVFS_AUTHOR_NAME, INVFS_LICENSE);
+            return 0;
+        }
         if (strcmp(argv[i], "-f") == 0 || strcmp(argv[i], "-d") == 0)
             fg = 1;
         else if (strcmp(argv[i], "-o") == 0 && i + 1 < argc) {

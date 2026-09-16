@@ -4,6 +4,11 @@ CC      ?= gcc
 SRC     := src
 OUT     := bin
 OBJ     := build/obj
+VERSION := $(shell git describe --always --tags 2>/dev/null | sed 's/-.*//' || echo "unknown")
+BUILD_DATE := $(shell date '+%Y-%m-%d')
+AUTHOR_NAME := Lev_Asmanov
+AUTHOR_EMAIL := asmanovlev@gmail.com
+LICENSE := GPL-2.0-only
 
 # Sources live in per-role subdirs under $(SRC); objects stay flat in $(OBJ)
 # (basenames are unique across subdirs, and tools/test-*.sh link lines use
@@ -13,7 +18,11 @@ vpath %.c $(SRCDIRS)
 
 CFLAGS  := -std=gnu11 -O2 -MMD -MP -I$(SRC) $(addprefix -I,$(SRCDIRS)) -pthread \
            -DINVFS_EMBED_FLACX -DMINIZ_NO_ZLIB_APIS \
-           -DBLAKE3_NO_SSE2 -DBLAKE3_NO_SSE41 -DBLAKE3_NO_AVX2 -DBLAKE3_NO_AVX512
+           -DBLAKE3_NO_SSE2 -DBLAKE3_NO_SSE41 -DBLAKE3_NO_AVX2 -DBLAKE3_NO_AVX512 \
+           -DINVFS_VERSION_STRING=\"$(VERSION)\" \
+           -DINVFS_BUILD_DATE=\"$(BUILD_DATE)\" \
+           -DINVFS_AUTHOR_NAME=\"$(AUTHOR_NAME)\" \
+           -DINVFS_LICENSE=\"$(LICENSE)\"
 LDLIBS  := -Wl,-l:libzstd.so.1 -lz -lpthread
 FUSE_CFLAGS := $(shell pkg-config --cflags fuse3)
 FUSE_LIBS   := $(shell pkg-config --libs fuse3)
