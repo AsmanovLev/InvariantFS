@@ -117,9 +117,9 @@ int main(int argc, char **argv)
         return 1;
     }
     sb = vol_sb(vol);
-    bm = (sb->total_blocks / 8 + INVFS_BLOCK_SIZE - 1) / INVFS_BLOCK_SIZE;
-    inode_area_start = (sb->metadata_zone_start + bm + INVFS_META_EXT_BLOCKS + INVFS_JOURNAL_BLOCKS) * INVFS_BLOCK_SIZE;
-    inode_area_end = vol_inode_area_pos(vol);  /* CRC-validated extent */
+    (void)sb;
+    inode_area_start = vol_inode_area_start(vol);  /* WP30: respects active extent */
+    inode_area_end = vol_inode_area_pos(vol);      /* CRC-validated extent */
     p = inode_area_start;
 
     printf("files in %s:\n", img);
@@ -128,7 +128,15 @@ int main(int argc, char **argv)
         char name[257];
         uint32_t crc_stored, crc_calc;
         if (vol_read_raw(vol, p, &h, sizeof(h)) != 0) break;
-        if (h.magic != INODE_REC_MAGIC && h.magic != TOMBSTONE_MAGIC) break;
+        /* WP30: a mapper extent can start with zeros (gap between the
+         * legacy inode-area start and the first record position). Skip
+         * whole blocks past zero regions rather than aborting the walk. */
+        if (h.magic != INODE_REC_MAGIC && h.magic != TOMBSTONE_MAGIC) {
+            uint64_t next = (p + INVFS_BLOCK_SIZE) & ~(uint64_t)(INVFS_BLOCK_SIZE - 1);
+            if (next <= p || next >= inode_area_end) break;
+            p = next;
+            continue;
+        }
         /* rec_len must at least cover the header. Without the lower bound a
            record claiming 0 advanced p by 4 bytes and the walk crawled the
            whole area at 4 bytes a step. vol_open has the same guard. */

@@ -140,10 +140,12 @@ static void import_entry(const char *spath, const char *vname, int depth)
     if (strlen(vname) >= VNAMESZ - 2) { n_skipped++; return; }
 
     switch (st.st_mode & S_IFMT) {
-    case S_IFDIR:
-        /* vol_mkdir appends the trailing slash itself; passing an anchor
-         * form would create records named "dir//" */
-        if (vol_mkdir(vol, vname) != 0 && vol_is_dir(vol, vname) == 0) {
+    case S_IFDIR: {
+        /* vol_mkdir returns 0 on failure; the old condition was inverted
+         * (tested success as failure), silently skipping the error and
+         * proceeding to apply_meta_or_die on a non-existent anchor. */
+        uint64_t mid = vol_mkdir(vol, vname);
+        if (mid == 0 && !vol_is_dir(vol, vname)) {
             fprintf(stderr, "mkdir failed: %s\n", vname);
             n_skipped++;
             return;
@@ -154,6 +156,7 @@ static void import_entry(const char *spath, const char *vname, int depth)
         if (depth < 32) import_dir(spath, vname, depth + 1);
         else fprintf(stderr, "too deep: %s\n", spath);
         break;
+    }
     case S_IFREG:
         import_file(spath, vname);
         break;

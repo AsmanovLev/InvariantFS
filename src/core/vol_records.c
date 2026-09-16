@@ -75,13 +75,20 @@ uint64_t vol_create_file(invfs_volume *v, const char *name,
         crc0 = invfs_crc32c(rec0, rec_size0);
         if (inode_area_make_room(v, (uint64_t)rec_size0 + 4) != 0) { free(rec0); return 0; }
         if (vol_pre_record(v) != 0) { free(rec0); return 0; }
-        if (io_seek(&v->io, v->inode_area_pos) != 0 ||
-            io_write(&v->io, rec0, rec_size0) != 0 ||
-            io_write(&v->io, &crc0, 4) != 0) { free(rec0); return 0; }
-        v->inode_area_pos += rec_size0 + 4;
-        idx_put(v, name, strlen(name), inode_id,
-                v->inode_area_pos - rec_size0 - 4, rh0->file_size, rh0->ctime);
-        idx_put_id(v, inode_id, v->inode_area_pos - rec_size0 - 4);
+        {
+            uint64_t abs_pba, offset;
+            int rc = meta_get_append_pos(v, rec_size0 + 4, &abs_pba, &offset);
+            if (rc != 0) { free(rec0); return 0; }
+            uint64_t rec_pos = abs_pba + offset;
+            if (io_seek(&v->io, rec_pos) != 0 ||
+                io_write(&v->io, rec0, rec_size0) != 0 ||
+                io_write(&v->io, &crc0, 4) != 0) { free(rec0); return 0; }
+            v->met0.active_offset = offset + rec_size0 + 4;
+            v->inode_area_pos = rec_pos + rec_size0 + 4;
+            idx_put(v, name, strlen(name), inode_id,
+                    rec_pos, rh0->file_size, rh0->ctime);
+            idx_put_id(v, inode_id, rec_pos);
+        }
         free(rec0);
         return inode_id;
     }
@@ -247,16 +254,23 @@ uint64_t vol_create_file(invfs_volume *v, const char *name,
     /* Maps first: block_id in the AST is a segment index, so this record is
        readable only if its L2P is already on disk (see vol_pre_record). */
     if (vol_pre_record(v) != 0) { free(rec); return 0; }
-    if (io_seek(&v->io, v->inode_area_pos) != 0 ||
-        io_write(&v->io, rec, rec_size) != 0 ||
-        io_write(&v->io, &crc_rec, 4) != 0) {
-        free(rec);
-        return 0;
+    {
+        uint64_t abs_pba, offset;
+        int rc = meta_get_append_pos(v, rec_size + 4, &abs_pba, &offset);
+        if (rc != 0) { free(rec); return 0; }
+        uint64_t rec_pos = abs_pba + offset;
+        if (io_seek(&v->io, rec_pos) != 0 ||
+            io_write(&v->io, rec, rec_size) != 0 ||
+            io_write(&v->io, &crc_rec, 4) != 0) {
+            free(rec);
+            return 0;
+        }
+        v->met0.active_offset = offset + rec_size + 4;
+        v->inode_area_pos = rec_pos + rec_size + 4;
+        idx_put(v, name, strlen(name), inode_id, rec_pos,
+                rec_h->file_size, rec_h->ctime);
+        idx_put_id(v, inode_id, rec_pos);
     }
-    v->inode_area_pos += rec_size + 4;
-    idx_put(v, name, strlen(name), inode_id, v->inode_area_pos - rec_size - 4,
-            rec_h->file_size, rec_h->ctime);
-    idx_put_id(v, inode_id, v->inode_area_pos - rec_size - 4);
     pba_ref_apply(v, rec, (uint32_t)rec_size, +1);
     free(rec);
     return inode_id;
@@ -326,13 +340,20 @@ uint64_t vol_create_file_with_meta(invfs_volume *v, const char *name,
         crc0 = invfs_crc32c(rec0, rec_size0);
         if (inode_area_make_room(v, (uint64_t)rec_size0 + 4) != 0) { free(rec0); return 0; }
         if (vol_pre_record(v) != 0) { free(rec0); return 0; }
-        if (io_seek(&v->io, v->inode_area_pos) != 0 ||
-            io_write(&v->io, rec0, rec_size0) != 0 ||
-            io_write(&v->io, &crc0, 4) != 0) { free(rec0); return 0; }
-        v->inode_area_pos += rec_size0 + 4;
-        idx_put(v, name, strlen(name), inode_id,
-                v->inode_area_pos - rec_size0 - 4, rh0->file_size, rh0->ctime);
-        idx_put_id(v, inode_id, v->inode_area_pos - rec_size0 - 4);
+        {
+            uint64_t abs_pba, offset;
+            int rc = meta_get_append_pos(v, rec_size0 + 4, &abs_pba, &offset);
+            if (rc != 0) { free(rec0); return 0; }
+            uint64_t rec_pos = abs_pba + offset;
+            if (io_seek(&v->io, rec_pos) != 0 ||
+                io_write(&v->io, rec0, rec_size0) != 0 ||
+                io_write(&v->io, &crc0, 4) != 0) { free(rec0); return 0; }
+            v->met0.active_offset = offset + rec_size0 + 4;
+            v->inode_area_pos = rec_pos + rec_size0 + 4;
+            idx_put(v, name, strlen(name), inode_id,
+                    rec_pos, rh0->file_size, rh0->ctime);
+            idx_put_id(v, inode_id, rec_pos);
+        }
         free(rec0);
         return inode_id;
     }
@@ -449,16 +470,23 @@ uint64_t vol_create_file_with_meta(invfs_volume *v, const char *name,
         return 0;
     }
     if (vol_pre_record(v) != 0) { free(rec); return 0; }
-    if (io_seek(&v->io, v->inode_area_pos) != 0 ||
-        io_write(&v->io, rec, rec_size) != 0 ||
-        io_write(&v->io, &crc_rec, 4) != 0) {
-        free(rec);
-        return 0;
+    {
+        uint64_t abs_pba, offset;
+        int rc = meta_get_append_pos(v, rec_size + 4, &abs_pba, &offset);
+        if (rc != 0) { free(rec); return 0; }
+        uint64_t rec_pos = abs_pba + offset;
+        if (io_seek(&v->io, rec_pos) != 0 ||
+            io_write(&v->io, rec, rec_size) != 0 ||
+            io_write(&v->io, &crc_rec, 4) != 0) {
+            free(rec);
+            return 0;
+        }
+        v->met0.active_offset = offset + rec_size + 4;
+        v->inode_area_pos = rec_pos + rec_size + 4;
+        idx_put(v, name, strlen(name), inode_id, rec_pos,
+                rec_h->file_size, rec_h->ctime);
+        idx_put_id(v, inode_id, rec_pos);
     }
-    v->inode_area_pos += rec_size + 4;
-    idx_put(v, name, strlen(name), inode_id, v->inode_area_pos - rec_size - 4,
-            rec_h->file_size, rec_h->ctime);
-    idx_put_id(v, inode_id, v->inode_area_pos - rec_size - 4);
     pba_ref_apply(v, rec, (uint32_t)rec_size, +1);
     free(rec);
     return inode_id;
@@ -1040,10 +1068,48 @@ retry:
     }
     free(oldbuf);
 
+    /* WP30: use meta_get_append_pos for the correct extent position.
+     * The old inode_area_pos/inode_area_end check is extent-ignorant. */
+    if (v->met0_present && v->meta_mapper) {
+        uint64_t abs_pba, offset;
+        int rc = meta_get_append_pos(v, total, &abs_pba, &offset);
+        if (rc == -1) {
+            free(combo);
+            if (!tried_compact && inode_area_make_room(v, total) == 0) {
+                tried_compact = 1;
+                goto retry;
+            }
+            return 0;
+        }
+        if (rc == -2) {
+            free(combo);
+            if (!tried_compact && inode_area_make_room(v, total) == 0) {
+                tried_compact = 1;
+                goto retry;
+            }
+            return 0;
+        }
+        if (vol_mark_dirty(v) != 0) { free(combo); return 0; }
+        {
+            uint64_t rec_start = abs_pba + offset;
+            if (io_seek(&v->io, rec_start) != 0 ||
+                io_write(&v->io, combo, total) != 0) {
+                free(combo);
+                return 0;
+            }
+            if (new_pos_out) *new_pos_out = rec_start;
+            v->met0.active_offset = offset + total;
+            v->inode_area_pos = rec_start + total;
+            idx_put(v, name, strlen(name), inode_id, rec_start,
+                    nh->file_size, nh->ctime);
+            idx_put_id(v, inode_id, rec_start);
+        }
+        free(combo);
+        return inode_id;
+    }
+
+    /* Legacy path (format_version=0, no mapper) */
     if (v->inode_area_pos + total > v->inode_area_end) {
-        /* WP27 churn backstop: reclaim the dead prefix, then RE-READ --
-         * the compaction moves every record, so the position-kill target
-         * (old_pos) and the ext pointers are all rebuilt fresh. */
         free(combo);
         if (!tried_compact && inode_area_make_room(v, total) == 0) {
             tried_compact = 1;

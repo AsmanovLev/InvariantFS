@@ -1511,6 +1511,24 @@ static invfs_volume *vol_open_inner(const char *path, int at_ckpt,
     v->inode_area_end = (v->sb.metadata_zone_start + v->sb.metadata_zone_blocks)
                         * INVFS_BLOCK_SIZE;
 
+    /* WP30: on a mapper volume the append cursor is extent-relative.
+     * Rebase the cursor onto the active extent so writers append inside
+     * extent 0 and readers find what was written there. */
+    if (v->met0_present && v->meta_mapper &&
+        v->met0.extent_count > 0 &&
+        v->met0.active_extent < (uint64_t)v->met0.extent_count) {
+        uint64_t act = meta_mapper_get(v, (size_t)v->met0.active_extent);
+        if (act) {
+            uint64_t esz = invfs_meta_ext_size(act);
+            uint64_t off = v->met0.active_offset < esz ? v->met0.active_offset : esz;
+            uint64_t first_pba = invfs_meta_ext_pba(act);
+            v->inode_area_pos = first_pba * (uint64_t)INVFS_BLOCK_SIZE + off;
+            v->inode_area_start = first_pba;
+            if (v->inode_area_end < first_pba * (uint64_t)INVFS_BLOCK_SIZE + esz)
+                v->inode_area_end = first_pba * (uint64_t)INVFS_BLOCK_SIZE + esz;
+        }
+    }
+
     /* replay the owner-WAL journal BEFORE the inode scan. WP27: file
      * records carry their own pbas and need no mapping; the WAL resolves
      * only the owner-referenced shapes (batches / seal parity / retention
