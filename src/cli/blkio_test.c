@@ -46,6 +46,18 @@ int main(int argc, char **argv)
     size_t len;
     int i;
 
+    for (int j = 1; j < argc; j++) {
+        if (strcmp(argv[j], "-h") == 0 || strcmp(argv[j], "--help") == 0) {
+            fprintf(stderr, "usage: invf-blkio_test [image]\n");
+            return 2;
+        }
+        if (strcmp(argv[j], "-v") == 0 || strcmp(argv[j], "--version") == 0) {
+            fprintf(stderr, "%s version %s (build %s)\n  Author: %s\n  License: %s\n",
+                    argv[0], INVFS_VERSION_STRING, INVFS_BUILD_DATE, INVFS_AUTHOR_NAME, INVFS_LICENSE);
+            return 0;
+        }
+    }
+
     printf("blkio alignment tests (%s)\n", path);
 
     model = (unsigned char *)malloc(IMG_SIZE);

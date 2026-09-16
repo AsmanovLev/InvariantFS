@@ -360,6 +360,33 @@ int main(int argc, char **argv)
     size_t tmask = 0, tcount = 0;
     int i;
 
+    for (int j = 1; j < argc; j++) {
+        if (strcmp(argv[j], "-h") == 0 || strcmp(argv[j], "--help") == 0) {
+            fprintf(stderr,
+                "usage: %s <image> [--dry-run] [--fast] [--compact]\n"
+                "           [--seal|--unseal]\n"
+                "           [--redundant-blocks <f>]\n"
+                "           [--redundant-paranoic <f>[:rs-vm|rs-cauchy]]\n"
+                "           [--free-redundant] [--redundant-bench]\n"
+                "           [--realize]  (accept the last sweep: free its\n"
+                "                         retention registry, clear CKP0)\n"
+                "  --fast      cheap pass: RAW files take the generic\n"
+                "              per-segment recompress only (no classification,\n"
+                "              transcodes, decomposition, batching or dedupe)\n"
+                "  --compact   run only the inode-area compaction pass\n"
+                "           [--extract-packs <dir>]  (WP23 sweepboot: copy the\n"
+                "                         volume's codepack dir to <dir>,\n"
+                "                         engine-side, no sweep, no FUSE)\n",
+                argv[0]);
+            return 2;
+        }
+        if (strcmp(argv[j], "-v") == 0 || strcmp(argv[j], "--version") == 0) {
+            fprintf(stderr, "%s version %s (build %s)\n  Author: %s\n  License: %s\n",
+                    argv[0], INVFS_VERSION_STRING, INVFS_BUILD_DATE, INVFS_AUTHOR_NAME, INVFS_LICENSE);
+            return 0;
+        }
+    }
+
     if (argc < 2) {
         fprintf(stderr,
                 "usage: %s <image> [--dry-run] [--fast] [--compact]\n"

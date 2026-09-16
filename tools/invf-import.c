@@ -228,6 +228,18 @@ int main(int argc, char **argv)
     struct timespec t0, t1;
     struct stat root_st;
 
+    for (int i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) {
+            fprintf(stderr, "usage: %s <volume> <src-dir> [exclude]...\n", argv[0]);
+            return 2;
+        }
+        if (strcmp(argv[i], "-v") == 0 || strcmp(argv[i], "--version") == 0) {
+            fprintf(stderr, "%s version %s (build %s)\n  Author: %s\n  License: %s\n",
+                    argv[0], INVFS_VERSION_STRING, INVFS_BUILD_DATE, INVFS_AUTHOR_NAME, INVFS_LICENSE);
+            return 0;
+        }
+    }
+
     if (argc < 3) {
         fprintf(stderr, "usage: %s <volume> <src-dir> [exclude]...\n", argv[0]);
         return 2;
