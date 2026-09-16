@@ -11,7 +11,7 @@
 set -euo pipefail
 
 ROOT="/home/user/InvariantFS"
-SRC="$ROOT/src-extracted/VFS/src"
+SRC="$ROOT/src"
 OUT="$ROOT/impl_docs"
 
 # Wipe and rebuild ONLY the generated artifacts.

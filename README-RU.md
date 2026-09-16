@@ -176,7 +176,7 @@ Gate-тесты в `tools/`:
 ## Структура
 
 ```
-src-extracted/VFS/src/   движок + CLI (C11): core/ codecs/ recipes/ cli/
+src/   движок + CLI (C11): core/ codecs/ recipes/ cli/
 tools/                   скрипты сборки, конфигурация гостя, тесты
 packaging/               install.sh, debian/, RPM, Arch, systemd, man pages
 docs/                    руководство по установке Gentoo

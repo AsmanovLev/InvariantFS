@@ -4,7 +4,7 @@
 # Usage: tools/build_native.sh [tool ...]   (default: all portable tools)
 set -u
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-SRC="$ROOT/src-extracted/VFS"
+SRC="$ROOT/src"
 OUT="$ROOT/bin"
 LOG="$ROOT/logs/build_native.log"
 mkdir -p "$OUT" "$ROOT/logs"

@@ -556,7 +556,7 @@ int main(int argc, char **argv)
 }
 EOF
 
-gcc -std=gnu11 -O2 -I$REPO/src-extracted/VFS/src -I$REPO/src-extracted/VFS/src/core -I$REPO/src-extracted/VFS/src/codecs -I$REPO/src-extracted/VFS/src/recipes -I$REPO/src-extracted/VFS/src/vendor7z -o "$WORK/astv2_harness" \
+gcc -std=gnu11 -O2 -I$REPO/src -I$REPO/src/core -I$REPO/src/codecs -I$REPO/src/recipes -I$REPO/src/vendor7z -o "$WORK/astv2_harness" \
     "$WORK/astv2_harness.c" $OBJS -Wl,-l:libzstd.so.1 -lz -lpthread \
     || fail "harness build"
 H=$WORK/astv2_harness

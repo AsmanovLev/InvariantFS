@@ -7,7 +7,7 @@
  *   ophelper <image> rm-nonexistent <name>      delete must FAIL (rc 2)
  *
  * Build (tools/test-fuzz.sh does this):
- *   gcc -std=gnu11 -O2 -I src-extracted/VFS/src -o ophelper ophelper.c \
+ *   gcc -std=gnu11 -O2 -I src -o ophelper ophelper.c \
  *       build/obj/{volume,arc,crc32c,lz4,flacx,tarx,pngx,blkio,miniz,blake3,
  *       blake3_dispatch,blake3_portable,ppmd8,ppmd8enc,ppmd8dec,ppmd_codec,
  *       codec,bcj_x86,rs}.o -Wl,-l:libzstd.so.1 -lz -lpthread

@@ -29,11 +29,11 @@ command -v python3 >/dev/null || { echo "FAIL: python3"; exit 1; }
 command -v cc >/dev/null || { echo "FAIL: cc"; exit 1; }
 
 echo "== build fuzz harness helpers =="
-cc -std=gnu11 -O2 -I$REPO/src-extracted/VFS/src -I$REPO/src-extracted/VFS/src/core -I$REPO/src-extracted/VFS/src/codecs -I$REPO/src-extracted/VFS/src/recipes -I$REPO/src-extracted/VFS/src/vendor7z -o "$FZ/ophelper" \
+cc -std=gnu11 -O2 -I$REPO/src -I$REPO/src/core -I$REPO/src/codecs -I$REPO/src/recipes -I$REPO/src/vendor7z -o "$FZ/ophelper" \
     "$FZ/ophelper.c" \
     $OBJ/{volume,vol_cpack,vol_png,vol_seal,vol_repair,vol_rollback,vol_resize,vol_fsck,vol_crash,vol_exer,vol_dedupe,vol_textzone,vol_heat,vol_sweep,vol_meta_merge,vol_read,vol_write,vol_records,vol_ast,vol_dirs,arc,crc32c,lz4,flacx,tarx,pngx,blkio,miniz,blake3,blake3_dispatch,blake3_portable,ppmd8,ppmd8enc,ppmd8dec,ppmd_codec,codec,bcj_x86,rs,vol_tier}.o \
     -Wl,-l:libzstd.so.1 -lz -lpthread
-cc -std=gnu11 -O2 -I$REPO/src-extracted/VFS/src -I$REPO/src-extracted/VFS/src/core -I$REPO/src-extracted/VFS/src/codecs -I$REPO/src-extracted/VFS/src/recipes -I$REPO/src-extracted/VFS/src/vendor7z -o "$FZ/fuzz_manifest" \
+cc -std=gnu11 -O2 -I$REPO/src -I$REPO/src/core -I$REPO/src/codecs -I$REPO/src/recipes -I$REPO/src/vendor7z -o "$FZ/fuzz_manifest" \
     "$FZ/fuzz_manifest.c" \
     $OBJ/{codec,ppmd8,ppmd8enc,ppmd8dec,ppmd_codec,lz4,bcj_x86}.o \
     -Wl,-l:libzstd.so.1 -lz -lpthread

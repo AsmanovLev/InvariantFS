@@ -1,7 +1,7 @@
 # InvariantFS — native Linux build (incremental).
 # Mirrors tools/build_native.sh flags; `make` builds everything, `make invf-fuse` one target.
 CC      ?= gcc
-SRC     := src-extracted/VFS/src
+SRC     := src
 OUT     := bin
 OBJ     := build/obj
 

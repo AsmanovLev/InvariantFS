@@ -60,7 +60,7 @@ install -Dm644 README-RU.md %{buildroot}%{_docdir}/%{name}/README-RU.md
 %systemd_postun_with_reload invfs-sweep.timer invfs-verify.timer
 
 %files
-%license src-extracted/VFS/LICENSE
+%license src/LICENSE
 %doc README.md README-RU.md
 %{_bindir}/invf-*
 /usr/lib/invfs/codecpacks/

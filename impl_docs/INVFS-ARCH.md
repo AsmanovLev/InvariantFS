@@ -91,8 +91,8 @@ typedef struct {
 
 | File | Purpose |
 |------|---------|
-| `src-extracted/VFS/src/cli/fuse_fs.c` | Main FUSE daemon (`invf-fuse`) |
-| `src-extracted/VFS/src/core/vol_tier.c` | Two-device tiering + RAW mirror |
-| `src-extracted/VFS/src/core/volume.c` | Core volume engine (open, read, write, alloc) |
-| `src-extracted/VFS/src/core/volume.h` | Public API |
-| `src-extracted/VFS/src/core/invarifs.h` | On-disk format (superblock, AST, zones) |
+| `src/cli/fuse_fs.c` | Main FUSE daemon (`invf-fuse`) |
+| `src/core/vol_tier.c` | Two-device tiering + RAW mirror |
+| `src/core/volume.c` | Core volume engine (open, read, write, alloc) |
+| `src/core/volume.h` | Public API |
+| `src/core/invarifs.h` | On-disk format (superblock, AST, zones) |

@@ -49,7 +49,7 @@ set -o pipefail
 
 REPO="${REPO:-$(cd "$(dirname "$0")/.." && pwd)}"
 B=$REPO/bin
-SRC=$REPO/src-extracted/VFS/src
+SRC=$REPO/src
 WORK=/dev/shm/w12cpngflac
 trap 'rm -rf "$WORK" /dev/shm/w12cpngflac*.img' EXIT
 IMG=w12cpngflac.img        # leg 1: transcodable PNGs

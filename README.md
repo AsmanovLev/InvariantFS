@@ -178,7 +178,7 @@ invariant doing its job.
 ## Layout
 
 ```
-src-extracted/VFS/src/   engine + CLI (C11): core/ codecs/ recipes/ cli/
+src/   engine + CLI (C11): core/ codecs/ recipes/ cli/
 tools/                   build scripts, guest config, test harnesses
 packaging/               install.sh, debian/, RPM, Arch, systemd, man pages
 docs/                    Gentoo install guide

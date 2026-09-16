@@ -17,12 +17,9 @@ MAX_BYTES=$((1024 * 1024))
 # Allowlist (gitignore-style prefix match on the tracked path):
 #  - bin/busybox-static: vendored static busybox consumed by
 #    tools/mkinitramfs.sh; not a build output of this repo.
-#  - src-extracted/VFS/build*/ : legacy Windows-port debug logs kept as
 #    port history (impl_docs/DOCMAP.md row A5); trace.log exceeds 1 MiB.
 ALLOWLIST=(
     "bin/busybox-static"
-    "src-extracted/VFS/build/"
-    "src-extracted/VFS/build_linux/"
 )
 
 allowlisted() {

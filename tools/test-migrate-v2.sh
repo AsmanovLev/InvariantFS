@@ -802,7 +802,7 @@ int main(int argc, char **argv)
 }
 EOF
 
-cc -std=gnu11 -O2 -I$REPO/src-extracted/VFS/src $(printf -- "-I$REPO/src-extracted/VFS/src/%s " core codecs recipes cli vendor7z legacy) -pthread \
+cc -std=gnu11 -O2 -I$REPO/src $(printf -- "-I$REPO/src/%s " core codecs recipes cli vendor7z legacy) -pthread \
    -DINVFS_EMBED_FLACX -DMINIZ_NO_ZLIB_APIS -DBLAKE3_NO_SSE2 -DBLAKE3_NO_SSE41 -DBLAKE3_NO_AVX2 -DBLAKE3_NO_AVX512 \
    -o "$WORK/mig2_harness" "$WORK/mig2_harness.c" $OBJS -Wl,-l:libzstd.so.1 -lz -lpthread || fail "harness build"
 H=$WORK/mig2_harness

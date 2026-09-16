@@ -2,8 +2,8 @@
  * codec_test.c — exercise the codec registry (WP10).
  *
  * Standalone, NOT wired into the Makefile; build by hand:
- *   gcc -std=gnu11 -O2 -I src-extracted/VFS/src -o /tmp/codec_test \
- *       src-extracted/VFS/src/codec_test.c build/obj/codec.o \
+ *   gcc -std=gnu11 -O2 -I src -o /tmp/codec_test \
+ *       src/codec_test.c build/obj/codec.o \
  *       build/obj/ppmd8.o build/obj/ppmd8enc.o build/obj/ppmd8dec.o \
  *       build/obj/ppmd_codec.o build/obj/lz4.o \
  *       -Wl,-l:libzstd.so.1 -lz -lpthread

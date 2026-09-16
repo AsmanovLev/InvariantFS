@@ -1,7 +1,0 @@
-==== unmount ====
-SUCCESS: The process "invf-dokan.exe" with PID 9924 has been terminated.
-==== rebuild ====
-Build OK: D:\VFS\build
-==== mount ====
-MOUNT TIMEOUT
-InvariFS mounted via Dokan: 332 names

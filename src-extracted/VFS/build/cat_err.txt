@@ -1,1 +1,0 @@
-vol_open: corrupt inode record at 33562624, skipping (rec_len=548)

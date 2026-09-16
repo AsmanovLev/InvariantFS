@@ -1,2 +1,0 @@
-[main] rebuild D:\VFS\build\t.wav D:\VFS\build\t.rcp D:\VFS\build\t_rcb.flac
-[main] w=000001F3E786A040 r=000001F3E5A35970 wlen=5292078 rlen=44101
