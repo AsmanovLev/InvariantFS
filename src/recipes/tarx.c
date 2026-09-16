@@ -139,8 +139,11 @@ int tarx_extract(const uint8_t *tar, size_t tar_len,
         m[n].pad_kind = 1;
         if (pad) {
             const uint8_t *p = tar + pos + 512 + (size_t)dlen;
-            for (uint16_t j = 0; j < pad; j++)
-                if (p[j]) { m[n].pad_kind = 0; break; }
+            size_t avail = (pos + 512 + (size_t)dlen <= tar_len) ? tar_len - (pos + 512 + (size_t)dlen) : 0;
+            if (avail >= pad) {
+                for (uint16_t j = 0; j < pad; j++)
+                    if (p[j]) { m[n].pad_kind = 0; break; }
+            }
         }
         n++;
         pos += 512 + (size_t)dlen + pad;

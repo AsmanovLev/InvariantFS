@@ -42,6 +42,7 @@ static uint16_t rd16(const uint8_t *p) {
 /* parse EOCD + central directory from a full ZIP buffer */
 static int zip_parse(const uint8_t *z, size_t zlen, zip_member *m, int maxm, int *nm)
 {
+    if (zlen < 22) { fprintf(stderr, "zip: buffer too small for EOCD\n"); return -1; }
     size_t eocd = zlen >= 22 ? zlen - 22 : 0;
     while (eocd > 0 && rd32(z + eocd) != ZIP_EOCD) eocd--;
     if (rd32(z + eocd) != ZIP_EOCD) { fprintf(stderr, "zip: EOCD not found\n"); return -1; }
@@ -62,6 +63,7 @@ static int zip_parse(const uint8_t *z, size_t zlen, zip_member *m, int maxm, int
         uint16_t clen = rd16(z + p + 32);
         uint32_t local_off = rd32(z + p + 42);
         if (n < maxm && nlen < sizeof(m[n].name)) {
+            if (p + 46 + nlen > zlen) { fprintf(stderr, "zip: CEN name extends past buffer\n"); return -1; }
             memcpy(m[n].name, z + p + 46, nlen);
             m[n].name[nlen] = 0;
             m[n].method = method;
@@ -86,14 +88,28 @@ static int member_data(const uint8_t *z, size_t zlen, const zip_member *m,
     }
     uint16_t nlen = rd16(z + m->local_off + 26);
     uint16_t elen = rd16(z + m->local_off + 28);
+    if (m->local_off + 30 + (size_t)nlen + (size_t)elen > zlen) {
+        fprintf(stderr, "zip: local header extends past buffer "
+                "(off=%zu nlen=%u elen=%u zlen=%zu)\n",
+                m->local_off, nlen, elen, zlen);
+        return -1;
+    }
     const uint8_t *data = z + m->local_off + 30 + nlen + elen;
     if (m->method == 0) {  /* stored */
+        if ((size_t)m->usize > zlen - (size_t)(data - z)) {
+            fprintf(stderr, "zip: stored member out of bounds\n");
+            return -1;
+        }
         *out = (uint8_t *)malloc(m->usize ? m->usize : 1);
         memcpy(*out, data, m->usize);
         *outlen = m->usize;
         return 0;
     }
     if (m->method == 8) {  /* deflate — raw stream in ZIP */
+        if ((size_t)m->csize > zlen - (size_t)(data - z)) {
+            fprintf(stderr, "zip: deflate stream out of bounds\n");
+            return -1;
+        }
         size_t want = m->usize ? m->usize : (size_t)m->csize * 4 + 64;
         *out = (uint8_t *)malloc(want ? want : 1);
         size_t got = tinfl_decompress_mem_to_mem(*out, want, data, m->csize,

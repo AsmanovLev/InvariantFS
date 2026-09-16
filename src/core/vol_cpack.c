@@ -66,6 +66,49 @@ static const char *tool_resolve(const char *name, char *buf, size_t cap)
     return name;
 }
 
+/* WP33: INVFS_REQUIRE_HELPER_PATH check.
+ * Default: ON for root (uid 0), OFF for non-root.
+ * Explicit INVFS_REQUIRE_HELPER_PATH=1 forces ON; =0 forces OFF. */
+static int tool_enforce_strict_path(void)
+{
+    const char *e = getenv("INVFS_REQUIRE_HELPER_PATH");
+    if (e) {
+        if (strcmp(e, "1") == 0) return 1;
+        if (strcmp(e, "0") == 0) return 0;
+    }
+    return getuid() == 0 ? 1 : 0;
+}
+
+/* WP33: strict tool resolution for builtin lanes (cjxl, ffmpeg, MAC, packMP3).
+ * Only resolves to absolute paths in $INVFS_TOOLS or /usr/lib/invfs/tools.
+ * Returns NULL if not found; sets *err to 1 if enforcement is active. */
+static const char *tool_resolve_strict(const char *name, char *buf,
+                                       size_t cap, int *err)
+{
+    const char *td = getenv("INVFS_TOOLS");
+    int n;
+
+    *err = 0;
+    if (td && *td) {
+        n = snprintf(buf, cap, "%s/%s", td, name);
+        if (n > 0 && (size_t)n < cap && access(buf, X_OK) == 0)
+            return buf;
+    }
+    n = snprintf(buf, cap, "/usr/lib/invfs/tools/%s", name);
+    if (n > 0 && (size_t)n < cap && access(buf, X_OK) == 0)
+        return buf;
+    if (tool_enforce_strict_path()) {
+        fprintf(stderr,
+            "invfs: helper %s not found in $INVFS_TOOLS or "
+            "/usr/lib/invfs/tools; refusing to search PATH\n", name);
+        *err = 1;
+    } else {
+        fprintf(stderr,
+            "invfs: WARNING resolving %s via PATH (untrusted)\n", name);
+    }
+    return NULL;
+}
+
 
 static uint64_t tool_now_ms(void)
 {
@@ -482,6 +525,54 @@ static int tool_exec_lim(char *const argv[], uint64_t mem_cap,
     return WEXITSTATUS(st);
 }
 
+/* WP33: strict tool exec for builtin lanes. Uses execv (no PATH search)
+ * and enforces that the helper was found in $INVFS_TOOLS or
+ * /usr/lib/invfs/tools when INVFS_REQUIRE_HELPER_PATH is active.
+ * Returns -2 if helper not found in strict mode, -1 on other errors. */
+static int tool_exec_strict(char *const argv[], uint64_t mem_cap)
+{
+    pid_t pid;
+    int st = 0, sbmode;
+    uint64_t t0;
+
+    if (!argv || !argv[0]) return -1;
+    sbmode = 0;
+    pid = fork();
+    if (pid < 0) return -1;
+    if (pid == 0) {
+        int dn = open("/dev/null", O_RDWR);
+        if (dn >= 0) {
+            dup2(dn, STDIN_FILENO);
+            dup2(dn, STDOUT_FILENO);
+            dup2(dn, STDERR_FILENO);
+        }
+        tool_child_memlimit(mem_cap);
+        tool_child_sandbox(NULL, sbmode, argv);
+        execv(argv[0], argv);
+        _exit(127);
+    }
+    t0 = tool_now_ms();
+    for (;;) {
+        pid_t r = waitpid(pid, &st, WNOHANG);
+        if (r == pid) break;
+        if (r < 0) {
+            if (errno == EINTR) continue;
+            return -1;
+        }
+        if (tool_now_ms() - t0 > TOOL_TIMEOUT_MS) {
+            kill(pid, SIGKILL);
+            while (waitpid(pid, &st, 0) < 0 && errno == EINTR)
+                ;
+            fprintf(stderr, "tool_exec: %s killed after %llus\n", argv[0],
+                    (unsigned long long)(TOOL_TIMEOUT_MS / 1000));
+            return -1;
+        }
+        usleep(5000);
+    }
+    if (!WIFEXITED(st)) return -1;
+    return WEXITSTATUS(st);
+}
+
 
 static int tool_exec(char *const argv[])
 {
@@ -848,12 +939,14 @@ int run_tool(const char *exe, const char *a1, const char *a2, const char *opts)
 #else
     /* "<tool> <in> <out> <opts...>" — opts is a compile-time literal at
      * every call site ("--lossless_jpeg=1", "-d 0 -e 7", ...), split on
-     * whitespace into a fixed argv; no shell, no quoting. */
+     * whitespace into a fixed argv; no shell, no quoting.
+     * WP33: builtin lanes use strict resolution (execv, no PATH fallback). */
     char exeb[512], obuf[256];
     char *argv[16], *save = NULL, *tok;
-    int ac = 0;
+    int ac = 0, err;
 
-    argv[ac++] = (char *)tool_resolve(exe, exeb, sizeof exeb);
+    argv[ac++] = (char *)tool_resolve_strict(exe, exeb, sizeof exeb, &err);
+    if (err) return -1;
     argv[ac++] = (char *)a1;
     argv[ac++] = (char *)a2;
     snprintf(obuf, sizeof obuf, "%s", opts ? opts : "");
@@ -861,7 +954,7 @@ int run_tool(const char *exe, const char *a1, const char *a2, const char *opts)
          tok = strtok_r(NULL, " \t", &save))
         argv[ac++] = tok;
     argv[ac] = NULL;
-    return tool_exec(argv);
+    return tool_exec_strict(argv, TOOL_MEM_CAP_DEFAULT);
 #endif
 }
 
@@ -900,12 +993,13 @@ static int run_ffmpeg(const char *a1, const char *a2, const char *opts)
 #else
     /* ffmpeg -loglevel error -i <a1> <opts...> <a2> — options MUST come
      * before the output file: ffmpeg 8.x ignores -c:a/-sample_fmt placed
-     * after the output (silently emits 16-bit) */
+     * after the output (silently emits 16-bit). WP33: strict resolution. */
     char exeb[512], obuf[256];
     char *argv[20], *save = NULL, *tok;
-    int ac = 0, rc;
+    int ac = 0, rc, err;
 
-    argv[ac++] = (char *)tool_resolve("ffmpeg", exeb, sizeof exeb);
+    argv[ac++] = (char *)tool_resolve_strict("ffmpeg", exeb, sizeof exeb, &err);
+    if (err) return -1;
     argv[ac++] = (char *)"-loglevel";
     argv[ac++] = (char *)"error";
     argv[ac++] = (char *)"-i";
@@ -916,7 +1010,7 @@ static int run_ffmpeg(const char *a1, const char *a2, const char *opts)
         argv[ac++] = tok;
     argv[ac++] = (char *)a2;
     argv[ac] = NULL;
-    rc = tool_exec(argv);
+    rc = tool_exec_strict(argv, TOOL_MEM_CAP_DEFAULT);
     if (rc != 0)
         fprintf(stderr, "run_ffmpeg: exit code %d\n", rc);
     return rc;
@@ -1089,13 +1183,15 @@ static int run_packmp3(const char *path)
 #else
     char exeb[512];
     char *argv[5];
+    int err;
 
-    argv[0] = (char *)tool_resolve("packMP3", exeb, sizeof exeb);
+    argv[0] = (char *)tool_resolve_strict("packMP3", exeb, sizeof exeb, &err);
+    if (err) return -1;
     argv[1] = (char *)"-np";   /* never block on "press any key" */
     argv[2] = (char *)"-o";    /* overwrite, else foo_.pmp is invented */
     argv[3] = (char *)path;
     argv[4] = NULL;
-    return tool_exec(argv);
+    return tool_exec_strict(argv, TOOL_MEM_CAP_DEFAULT);
 #endif
 }
 

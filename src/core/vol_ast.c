@@ -243,6 +243,7 @@ uint64_t vol_create_container_file(invfs_volume *v, const char *name,
 int vol_zip_parse_children(const uint8_t *z, size_t zlen,
                            invfs_ast_child_entry *ch, size_t maxch)
 {
+    if (zlen < 22) return -1;
     size_t eocd = zlen >= 22 ? zlen - 22 : 0;
     uint16_t ncen;
     uint32_t cen_off;

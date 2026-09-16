@@ -1074,6 +1074,7 @@ int main(int argc, char **argv)
            (unsigned long long)free_old, (unsigned long long)free_new);
     printf("invf-resize: OK\n");
     blkio_close(&io);
+    rz2.io2 = NULL;
     free(bitmap);
     free(buf);
     free(blk);

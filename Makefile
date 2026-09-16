@@ -106,6 +106,10 @@ $(OUT)/invf-fuzz: $(OBJ)/fuzz_invfs.o $(FUZZ_O)
 
 fuzz: $(OUT)/invf-fuzz
 
+# CI target: 10k iterations (faster than fuzz's default 100k)
+fuzz-ci: $(OUT)/invf-fuzz
+	$(OUT)/invf-fuzz 10000 0x1CF51EE5
+
 test: $(OUT)/invf-arctest $(OUT)/invf-blkio_test $(OUT)/invf-codec_test
 	$(OUT)/invf-arctest
 	$(OUT)/invf-blkio_test

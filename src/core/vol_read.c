@@ -49,7 +49,8 @@ static int seg_read_once(invfs_volume *v, uint64_t pba, uint64_t plen,
         { *bad_out = 0; return -1; }
     memcpy(&csize, hdrb, 4);
     if (csize < min_csize ||
-        (plen && (uint64_t)csize + 8 > plen * INVFS_BLOCK_SIZE)) {
+        (plen && (uint64_t)csize + 8 > plen * INVFS_BLOCK_SIZE) ||
+        (!plen && csize > (1u << 24))) {
         bad = 1;            /* header out of bounds: never a legit segment */
     } else {
         uint32_t crc_hdr;
@@ -274,6 +275,11 @@ int vol_read_inode(invfs_volume *v, uint64_t inode_id, unsigned depth,
         if (rec_h.inode_id != inode_id) { pos += rec_h.rec_len + 4; continue; }
 
         /* read full record + crc, verify */
+        if (rec_h.rec_len < sizeof(rec_h) || rec_h.rec_len > INVFS_MAX_REC_LEN) {
+            fprintf(stderr, "inode %llu: rec_len %u outside valid range\n",
+                    (unsigned long long)inode_id, rec_h.rec_len);
+            return -1;
+        }
         rec = (uint8_t *)malloc(rec_h.rec_len);
         if (!rec) return -1;
         if (io_seek(&v->io, pos) != 0 ||
@@ -314,6 +320,28 @@ int vol_read_inode(invfs_volume *v, uint64_t inode_id, unsigned depth,
             len = (size_t)ast_h.file_size;
             data = (uint8_t *)malloc(len ? len : 1);
             if (!data) { free(rec); return -1; }
+
+            for (i = 0; i < ast_h.num_blocks; i++) {
+                const invfs_ast_block_entry *e = &ents[i];
+                uint64_t end = e->file_offset + e->length;
+                if (e->file_offset > ast_h.file_size ||
+                    end > ast_h.file_size ||
+                    end < e->file_offset) {
+                    fprintf(stderr, "inode %llu seg %u: entry out of bounds "
+                            "(off=%llu len=%llu size=%llu)\n",
+                            (unsigned long long)inode_id, e->block_id,
+                            (unsigned long long)e->file_offset,
+                            (unsigned long long)e->length,
+                            (unsigned long long)ast_h.file_size);
+                    free(data); free(rec); return -1;
+                }
+                if (i > 0 && e->file_offset < ents[i-1].file_offset +
+                                          ents[i-1].length) {
+                    fprintf(stderr, "inode %llu seg %u: overlapping entry\n",
+                            (unsigned long long)inode_id, e->block_id);
+                    free(data); free(rec); return -1;
+                }
+            }
 
             for (i = 0; i < ast_h.num_blocks; i++) {
                 const invfs_ast_block_entry *e = &ents[i];
@@ -614,6 +642,12 @@ int vol_read_inode(invfs_volume *v, uint64_t inode_id, unsigned depth,
                         ok = 0;
                     for (int pi = 0; pi < np; pi++) free(parts[pi]);
                     free(parts); free(plens); free(members); free(trailer);
+                    if (tar_len > UINT32_MAX) {
+                        fprintf(stderr, "GZR rebuild: tar too large (%llu > UINT32_MAX)\n",
+                                (unsigned long long)tar_len);
+                        free(tar);
+                        free(rcp_own); free(blob); free(data); free(rec); return -1;
+                    }
                     uint8_t *fl = NULL; size_t fl_len = 0;
                     if (ok) {
                         /* reproduce deflate stream bit-exactly, wrap gzip */
