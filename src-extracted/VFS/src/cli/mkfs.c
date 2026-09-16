@@ -340,6 +340,8 @@ int main(int argc, char **argv)
     sb.hard_min_blocks = (uint32_t)(sb.total_blocks / 1024 + 16);
     sb.vol_flags = VOLF_META2 | VOLF_ASTV2;   /* fresh volumes are format v2 */
     sb.pad2 = 0;
+    sb.format_version = 1;  /* v0.3.0: dynamic metadata extents mandatory */
+    sb.pad3[0] = sb.pad3[1] = sb.pad3[2] = 0;
     sb.checksum = invfs_crc32c(&sb, offsetof(invfs_superblock, checksum));
 
     /* WP25: the DEVT device table (block 0 at 0x2A0), written on both
@@ -442,6 +444,45 @@ int main(int argc, char **argv)
         return 1;
     }
 
+    /* v0.3.0: pre-allocate mapper table after bitmap in metadata zone.
+     * Mapper is at fixed location after bitmap. Entry 0 = 0 (no first extent yet).
+     * First extent is allocated on first write (lazy allocation).
+     * Mapper is NOT marked in bitmap (system reserved, not normal allocation).
+     * This ensures volume is ready from first mount. */
+    uint64_t bitmap_blocks_mkfs = (total_blocks / 8 + INVFS_BLOCK_SIZE - 1) / INVFS_BLOCK_SIZE;
+    uint64_t mapper_pba = sb.metadata_zone_start + bitmap_blocks_mkfs;
+    uint64_t first_extent_pba = sb.shadow_zone_start;  /* Not pre-allocated */
+    uint64_t extent_blocks = 0;  /* Not pre-allocated */
+
+    /* Initialize MET0 with active_extent=0, extent_count=0 (first extent allocated on first write) */
+    {
+        invfs_met0 m0;
+        memset(&m0, 0, sizeof m0);
+        memcpy(m0.magic, "MET0", 4);
+        m0.version = 1;
+        m0.active_extent = 0;
+        m0.active_offset = 0;
+        m0.extent_count = 0;
+        m0.crc32c = 0;
+        m0.crc32c = invfs_crc32c(&m0, offsetof(invfs_met0, crc32c));
+        if (blkio_seek(&io, INVFS_MET0_OFF) != 0 ||
+            blkio_write(&io, &m0, sizeof m0) != 0) {
+            fprintf(stderr, "MET0 descriptor write failed\n");
+            if (twodev) blkio_close(&io2);
+            blkio_close(&io);
+            return 1;
+        }
+        if (twodev) {
+            if (blkio_seek(&io2, INVFS_MET0_OFF) != 0 ||
+                blkio_write(&io2, &m0, sizeof m0) != 0) {
+                fprintf(stderr, "MET0 descriptor write failed on dev1\n");
+                blkio_close(&io2);
+                blkio_close(&io);
+                return 1;
+            }
+        }
+    }
+
     /* ---- bitmap: mark superblock + metadata zone allocated ---- */
     bitmap_bytes = (size_t)bitmap_blocks * INVFS_BLOCK_SIZE;
     bitmap = (uint8_t *)calloc(1, bitmap_bytes);
@@ -454,12 +495,19 @@ int main(int argc, char **argv)
     for (i = 0; i <= metadata_blocks; i++) {  /* block 0..metadata end */
         bitmap[i / 8] |= (uint8_t)(1u << (i % 8));
     }
+    /* v0.3.0: mapper blocks are in the metadata zone which is already
+     * marked allocated by the loop above (blocks 0..metadata_blocks).
+     * fsck treats the metadata zone as always-allocated, so the mapper
+     * bits must stay set to avoid being reported as "missing". */
     if (twodev) {
         /* the dev1 reserved span (metadata mirror + RAW-width gap) is
          * allocated by construction -- never handed out */
         for (i = dev0_blocks; i < sb.shadow_zone_start; i++)
-            bitmap[i / 8] |= (uint8_t)(1u << (i % 8));
+            bitmap[i / 8] |= (uint8_t)(1u << ((i) % 8));
     }
+    /* v0.3.0: mark first metadata extent only (mapper is system reserved, not in bitmap) */
+    for (i = 0; i < extent_blocks; i++)
+        bitmap[(first_extent_pba + i) / 8] |= (uint8_t)(1u << ((first_extent_pba + i) % 8));
     if (blkio_seek(&io, sb.metadata_zone_start * INVFS_BLOCK_SIZE) != 0 ||
         blkio_write(&io, bitmap, bitmap_bytes) != 0) {
         fprintf(stderr, "bitmap write failed\n");
@@ -468,6 +516,45 @@ int main(int argc, char **argv)
         blkio_close(&io);
         return 1;
     }
+
+    /* v0.3.0: write mapper table after bitmap */
+    {
+        uint64_t mapper_bytes = INVFS_META_EXT_BLOCKS * INVFS_BLOCK_SIZE;
+        uint64_t *mapper = calloc(1, (size_t)mapper_bytes);
+        if (!mapper) {
+            fprintf(stderr, "out of memory for mapper table\n");
+            free(bitmap);
+            if (twodev) blkio_close(&io2);
+            blkio_close(&io);
+            return 1;
+        }
+        mapper[0] = 0;  /* No first extent pre-allocated - allocated on first write */
+        if (blkio_seek(&io, mapper_pba * INVFS_BLOCK_SIZE) != 0 ||
+            blkio_write(&io, mapper, (size_t)mapper_bytes) != 0) {
+            fprintf(stderr, "mapper table write failed\n");
+            free(mapper);
+            free(bitmap);
+            if (twodev) blkio_close(&io2);
+            blkio_close(&io);
+            return 1;
+        }
+        if (twodev) {
+            if (blkio_seek(&io2, mapper_pba * INVFS_BLOCK_SIZE) != 0 ||
+                blkio_write(&io2, mapper, (size_t)mapper_bytes) != 0) {
+                fprintf(stderr, "mapper table write failed on dev1\n");
+                free(mapper);
+                free(bitmap);
+                blkio_close(&io2);
+                blkio_close(&io);
+                return 1;
+            }
+        }
+        free(mapper);
+    }
+
+    /* v0.3.0: update superblock with mapper location before final write */
+    sb.meta_mapper_pba = mapper_pba;
+    sb.meta_mapper_blocks = INVFS_META_EXT_BLOCKS;
 
     /* ---- mark clean ---- */
     sb.state = INVFS_STATE_CLEAN;

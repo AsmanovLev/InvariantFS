@@ -106,7 +106,7 @@ int main(int argc, char **argv)
     }
     sb = vol_sb(vol);
     bm = (sb->total_blocks / 8 + INVFS_BLOCK_SIZE - 1) / INVFS_BLOCK_SIZE;
-    inode_area_start = (sb->metadata_zone_start + bm + INVFS_JOURNAL_BLOCKS) * INVFS_BLOCK_SIZE;
+    inode_area_start = (sb->metadata_zone_start + bm + INVFS_META_EXT_BLOCKS + INVFS_JOURNAL_BLOCKS) * INVFS_BLOCK_SIZE;
     inode_area_end = vol_inode_area_pos(vol);  /* CRC-validated extent */
     p = inode_area_start;
 

@@ -1324,9 +1324,15 @@ static invfs_volume *vol_open_inner(const char *path, int at_ckpt,
         }
     }
 
-    /* WP30 Phase 3: load MET0 descriptor at 0x3A0 if VOLF_META_DYN is set.
-     * MET0 points to the dynamic metadata extent mapper table. */
-    if (v->sb.vol_flags & VOLF_META_DYN) {
+    /* WP30 Phase 3: load MET0 descriptor at 0x3A0.
+     * v0.3.0+: dynamic metadata extents are mandatory.
+     * format_version 0 = legacy volume (no dynamic extents support). */
+    if (v->sb.format_version == 0) {
+        fprintf(stderr, "vol_open: volume format version 0 (pre-v0.3.0) not supported; "
+                        "dynamic metadata extents are mandatory\n");
+        goto fail;
+    }
+    {
         invfs_met0 m0;
         if (io_seek(&v->io, INVFS_MET0_OFF) == 0 &&
             io_read(&v->io, &m0, sizeof(m0)) == 0 &&
@@ -1338,8 +1344,13 @@ static invfs_volume *vol_open_inner(const char *path, int at_ckpt,
                 v->meta_active_offset = m0.active_offset;
             } else {
                 fprintf(stderr, "vol_open: MET0 descriptor CRC/version "
-                                "mismatch; ignoring dynamic metadata extents\n");
+                                "mismatch; volume may be corrupted\n");
+                goto fail;
             }
+        } else {
+            fprintf(stderr, "vol_open: MET0 descriptor not found at offset 0x%llX\n",
+                    (unsigned long long)INVFS_MET0_OFF);
+            goto fail;
         }
     }
 
@@ -1482,7 +1493,7 @@ static invfs_volume *vol_open_inner(const char *path, int at_ckpt,
     /* WP30 Phase 5: load metadata extent mapper table */
     if (meta_mapper_load(v) != 0) { *err = -7; goto fail; }
 
-    v->journal_start = v->sb.metadata_zone_start + v->bitmap_blocks;
+    v->journal_start = v->sb.metadata_zone_start + v->bitmap_blocks + INVFS_META_EXT_BLOCKS;
     v->journal_pos = v->journal_start * INVFS_BLOCK_SIZE;
     v->inode_area_start = v->journal_start + JOURNAL_BLOCKS;
     v->inode_area_pos = v->inode_area_start * INVFS_BLOCK_SIZE;
@@ -2775,6 +2786,7 @@ int meta_journal_merge(invfs_volume *v, uint16_t dst_idx, uint16_t src_idx)
 }
 
 /* WP30: allocate a metadata extent from the free pool.
+ * v0.3.0+: mapper table is pre-allocated at mkfs; just find a free slot.
  * size_class: 0=64KB, 1=128KB, 2=256KB... up to 15=2GB
  * Returns mapper entry index (0 on error). */
 uint64_t alloc_meta_extent(invfs_volume *v, uint8_t size_class)
@@ -2783,8 +2795,8 @@ uint64_t alloc_meta_extent(invfs_volume *v, uint8_t size_class)
     uint64_t nblocks = extent_size / INVFS_BLOCK_SIZE;
     uint64_t pba;
 
-    if (!(v->sb.vol_flags & VOLF_META_DYN))
-        return 0;
+    if (!v->meta_mapper)
+        return 0;  /* Mapper not loaded - should not happen after vol_open */
 
     /* Check meta reservation: ensure free_blocks won't drop below
      * (meta_reserved_pct of total) after this allocation */
@@ -2800,7 +2812,7 @@ uint64_t alloc_meta_extent(invfs_volume *v, uint8_t size_class)
         return 0;
 
     /* Find a free mapper entry */
-    if (!v->meta_mapper || v->meta_mapper_n >= INVFS_META_EXT_ENTRIES)
+    if (v->meta_mapper_n >= INVFS_META_EXT_ENTRIES)
         return 0;
 
     uint64_t idx = 0;
@@ -2827,9 +2839,6 @@ int extend_meta_extent(invfs_volume *v, uint64_t extent_idx, uint8_t new_size_cl
     uint8_t old_class;
     uint64_t old_blocks, new_blocks;
     uint64_t adj_pba, adj_blocks;
-
-    if (!(v->sb.vol_flags & VOLF_META_DYN))
-        return 0;
 
     if (extent_idx >= INVFS_META_EXT_ENTRIES || extent_idx >= v->meta_mapper_n)
         return 0;

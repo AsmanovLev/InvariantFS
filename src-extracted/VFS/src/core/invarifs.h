@@ -218,21 +218,19 @@ typedef struct {
     uint32_t reserved_blocks;       /* 0x80 reserve for sweep/transcodes */
     uint32_t hard_min_blocks;       /* 0x84 below this -> READONLY */
     uint32_t vol_flags;             /* 0x88 bit0 = VOLF_READONLY */
-    uint32_t pad2;                  /* 0x8C WP22d: journal slot selector
-                                     * (INVFS_JSEL_*; 0 = legacy flat log).
-                                     * Outside the checksum like the other
-                                     * policy fields -> 0 on old images. */
+    uint32_t pad2;                  /* 0x8C unused (was journal slot selector) */
+    uint8_t  format_version;       /* 0x90 format version: 0=legacy, 1=v0.3.0 */
+    uint8_t  pad3[3];              /* 0x91 padding */
     /* WP30: dynamic metadata extents (outside checksum - 0 on old images) */
-    uint32_t meta_reserved_pct;     /* 0x90 min free pool % for metadata */
-    uint64_t meta_mapper_pba;       /* 0x94 pba of metadata mapper table (0=absent) */
-    uint32_t meta_mapper_blocks;     /* 0x9C blocks for mapper table */
-    uint32_t meta_extent_min;       /* 0xA0 min extent size class (default 1=128KB) */
-} invfs_superblock;                 /* 0xA4 = 164 bytes */
+    uint32_t meta_reserved_pct;     /* 0x94 min free pool % for metadata */
+    uint64_t meta_mapper_pba;       /* 0x98 pba of metadata mapper table (0=absent) */
+    uint32_t meta_mapper_blocks;     /* 0xA0 blocks for mapper table */
+    uint32_t meta_extent_min;       /* 0xA4 min extent size class (default 1=128KB) */
+} invfs_superblock;                /* 0xA8 = 168 bytes */
 
 /* volume flags (sb.vol_flags) */
 #define VOLF_READONLY 0x00000001
 #define VOLF_META2    0x00000002  /* records may carry "INO2" metadata ext */
-#define VOLF_META_DYN 0x00000010  /* dynamic metadata extents (WP30) */
 /* WP27: format v2 -- AST entries are 32B and carry the segment pba (the
  * L2P journal is the owner-scoped WAL only). Set by mkfs from format v2 on
  * and by invf-convert on a converted v1 volume; a v2 reader refuses a

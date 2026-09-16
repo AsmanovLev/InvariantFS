@@ -137,7 +137,7 @@ static void build_file_table(void)
 {
     const invfs_superblock *sb = vol_sb(g_vol);
     uint64_t bm = (sb->total_blocks / 8 + INVFS_BLOCK_SIZE - 1) / INVFS_BLOCK_SIZE;
-    uint64_t p = (sb->metadata_zone_start + bm + INVFS_JOURNAL_BLOCKS) * INVFS_BLOCK_SIZE;
+    uint64_t p = (sb->metadata_zone_start + bm + INVFS_META_EXT_BLOCKS + INVFS_JOURNAL_BLOCKS) * INVFS_BLOCK_SIZE;
     uint64_t end = vol_inode_area_pos(g_vol);
     fs_entry *recs = NULL;
     uint64_t nrecs = 0, caprecs = 0;

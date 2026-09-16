@@ -791,14 +791,10 @@ int vol_write_commit(invfs_wsession *ws)
         free(rec);
         return -1;
     }
-    /* WP30 Phase 3: update dynamic extent offset if using met0 path */
+    /* WP30 Phase 3: update dynamic extent offset */
     uint64_t rec_pos = abs_pba + offset;
-    if ((v->sb.vol_flags & VOLF_META_DYN) && v->met0_present) {
-        v->met0.active_offset += rec_size + 4;
-        v->inode_area_pos = rec_pos + rec_size + 4;
-    } else {
-        v->inode_area_pos += rec_size + 4;
-    }
+    v->met0.active_offset += rec_size + 4;
+    v->inode_area_pos = rec_pos + rec_size + 4;
     idx_put(v, s->name, strlen(s->name), s->new_id,
             rec_pos, s->logical_size, now);
     idx_put_id(v, s->new_id, rec_pos);

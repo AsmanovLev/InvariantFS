@@ -1610,14 +1610,15 @@ static void cmp_free(cmp_nameset *s)
  * healthy area), fills *live (heap-allocated set; caller cmp_frees),
  * *live_bytes (sum of rec_len+4 over the live records) and *bad_out
  * (CRC-damaged records skipped on the way). */
-static uint64_t compact_scan_live(invfs_volume *v, cmp_nameset *live,
-                                  uint64_t *live_bytes, uint64_t *bad_out)
+/* Scan a single range [start, end) for records, accumulating into live.
+ * Returns the position where the scan stopped (== end if all records valid,
+ * < end if a non-record or damage boundary was hit). */
+static uint64_t compact_scan_range(invfs_volume *v, uint64_t start, uint64_t end,
+                                   cmp_nameset *live, uint64_t *bad_out)
 {
-    uint64_t pos = v->inode_area_start * INVFS_BLOCK_SIZE;
-    uint64_t end = v->inode_area_pos;
-    uint64_t bytes = 0, bad = 0;
+    uint64_t pos = start;
+    uint64_t bad = 0;
 
-    memset(live, 0, sizeof *live);
     while (pos + sizeof(invfs_inode_rec) <= end) {
         invfs_inode_rec h;
         uint8_t *rb;
@@ -1663,8 +1664,66 @@ static uint64_t compact_scan_live(invfs_volume *v, cmp_nameset *live,
         }
         pos += (uint64_t)h.rec_len + 4;
     }
-    /* the byte total is recomputed from the final set, not accumulated
-     * (a replaced version's bytes must leave the sum with the record) */
+    if (bad_out) *bad_out += bad;
+    return pos;
+}
+
+static uint64_t compact_scan_live(invfs_volume *v, cmp_nameset *live,
+                                  uint64_t *live_bytes, uint64_t *bad_out)
+{
+    uint64_t end = v->inode_area_pos;
+    uint64_t bytes = 0, bad = 0;
+    uint64_t last_stop = end;
+
+    memset(live, 0, sizeof *live);
+
+    /* WP30 Phase 6+ (v0.3.0+): records live in dynamic metadata extents.
+     * Scan each active extent separately -- extents may not be contiguous.
+     * The damage check ("stop != inode_area_pos") only fires for the
+     * extent containing the tail (where the last record sits). */
+    if (v->meta_mapper && v->met0.extent_count > 0) {
+        size_t i;
+        int tail_extent = -1;
+        for (i = 0; i < (size_t)v->met0.extent_count; i++) {
+            uint64_t entry = meta_mapper_get(v, i);
+            if (!entry) break;
+            uint64_t pba = invfs_meta_ext_pba(entry);
+            uint64_t sz = invfs_meta_ext_size(entry);
+            uint64_t start = pba * INVFS_BLOCK_SIZE;
+            uint64_t stop = start + sz;
+            /* which extent holds inode_area_pos? */
+            if (end >= start && end <= stop) tail_extent = (int)i;
+        }
+        for (i = 0; i < (size_t)v->met0.extent_count; i++) {
+            uint64_t entry = meta_mapper_get(v, i);
+            if (!entry) break;
+            uint64_t pba = invfs_meta_ext_pba(entry);
+            uint64_t sz = invfs_meta_ext_size(entry);
+            uint64_t start = pba * INVFS_BLOCK_SIZE;
+            uint64_t stop = start + sz;
+            if ((int)i == tail_extent && stop > end) stop = end;
+            if (stop <= start) continue;
+            uint64_t s = compact_scan_range(v, start, stop, live, &bad);
+            if ((int)i == tail_extent) last_stop = s;
+        }
+        if (bad_out) *bad_out = bad;
+        if (live_bytes) {
+            if (live->buck) {
+                size_t bi;
+                for (bi = 0; bi <= live->mask; bi++) {
+                    cmp_name *e;
+                    for (e = live->buck[bi]; e; e = e->next)
+                        bytes += (uint64_t)e->rec_len + 4;
+                }
+            }
+            *live_bytes = bytes;
+        }
+        return last_stop;
+    }
+
+    /* legacy / pre-WP30 path: contiguous inode area */
+    last_stop = compact_scan_range(v, v->inode_area_start * INVFS_BLOCK_SIZE,
+                                   end, live, &bad);
     if (live->buck) {
         size_t bi;
         for (bi = 0; bi <= live->mask; bi++) {
@@ -1673,9 +1732,9 @@ static uint64_t compact_scan_live(invfs_volume *v, cmp_nameset *live,
                 bytes += (uint64_t)e->rec_len + 4;
         }
     }
-    if (live_bytes) *live_bytes = bytes;
     if (bad_out) *bad_out = bad;
-    return pos;
+    if (live_bytes) *live_bytes = bytes;
+    return last_stop;
 }
 
 
