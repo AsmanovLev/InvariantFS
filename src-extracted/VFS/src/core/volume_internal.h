@@ -30,6 +30,7 @@
 #include <sys/resource.h>
 #include <errno.h>
 #include <signal.h>
+#include <pthread.h>
 #endif
 
 #include "invarifs.h"
@@ -527,6 +528,12 @@ typedef struct invfs_volume {
      * prevent concurrent metadata operations from reading partially-updated
      * mapper state. */
     int merge_in_progress;
+    /* WP30 Phase 6+: rwlock protecting meta_mapper and MET0 state.
+     * Readers hold shared lock (pthread_rwlock_rdlock); writers hold
+     * exclusive lock (pthread_rwlock_wrlock). Protects: meta_mapper_get,
+     * meta_mapper_set, meta_mapper_flush, meta_met0_persist, and all
+     * mutation paths in meta_get_append_pos. */
+    pthread_rwlock_t meta_lock;
 } invfs_volume;
 
 /* v_of_blk: recover the volume from the embedded dev0 blkio (the io_*

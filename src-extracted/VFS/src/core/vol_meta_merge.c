@@ -103,14 +103,17 @@ int meta_mapper_flush(invfs_volume *v)
     return 0;
 }
 
-/* Get mapper entry at index i */
+/* Get mapper entry at index i — read-locked */
 uint64_t meta_mapper_get(const invfs_volume *v, size_t i)
 {
     if (!v->meta_mapper || i >= v->meta_mapper_n) return 0;
-    return v->meta_mapper[i];
+    pthread_rwlock_rdlock(&((invfs_volume *)v)->meta_lock);
+    uint64_t val = v->meta_mapper[i];
+    pthread_rwlock_unlock(&((invfs_volume *)v)->meta_lock);
+    return val;
 }
 
-/* Set mapper entry at index i */
+/* Set mapper entry at index i — caller must hold meta_lock write-locked */
 void meta_mapper_set(invfs_volume *v, size_t i, uint64_t entry)
 {
     if (!v->meta_mapper || i >= v->meta_mapper_n) return;
@@ -620,8 +623,14 @@ int meta_get_append_pos(invfs_volume *v, uint64_t rec_size,
 
     /* WP30 Phase 6: check merge-in-progress flag to prevent concurrent
      * metadata operations from reading partially-updated mapper state */
-    if (v->merge_in_progress)
+    if (v->merge_in_progress) {
+        pthread_rwlock_unlock(&v->meta_lock);
         return -EAGAIN;
+    }
+
+    /* WP30 Phase 6+: hold exclusive lock for the full write-path duration
+     * (all paths that mutate mapper/MET0 state). */
+    pthread_rwlock_wrlock(&v->meta_lock);
 
     /* Dynamic extent path */
     uint64_t extent_idx = v->met0.active_extent;
@@ -633,10 +642,10 @@ int meta_get_append_pos(invfs_volume *v, uint64_t rec_size,
     uint64_t entry = meta_mapper_get(v, (size_t)extent_idx);
     if (!entry && extent_idx == 0 && v->met0.extent_count == 0) {
         uint64_t new_idx = alloc_meta_extent(v, INVFS_META_EXT_MIN_SIZE_CLASS);
-        if (new_idx == 0) return -1;
+        if (new_idx == 0) { pthread_rwlock_unlock(&v->meta_lock); return -1; }
         v->met0.extent_count = 1;
         entry = meta_mapper_get(v, (size_t)extent_idx);
-        if (!entry) return -1;
+        if (!entry) { pthread_rwlock_unlock(&v->meta_lock); return -1; }
         /* Persist mapper + MET0 so the new extent survives reopen. */
         meta_mapper_flush(v);
         meta_met0_persist(v);
@@ -648,9 +657,9 @@ int meta_get_append_pos(invfs_volume *v, uint64_t rec_size,
             v->met0.active_extent = extent_idx;
             offset = v->met0.active_offset;
             entry = meta_mapper_get(v, (size_t)extent_idx);
-            if (!entry) return -1;
+            if (!entry) { pthread_rwlock_unlock(&v->meta_lock); return -1; }
         } else {
-            return -1;
+            pthread_rwlock_unlock(&v->meta_lock); return -1;
         }
     }
 
@@ -682,7 +691,7 @@ int meta_get_append_pos(invfs_volume *v, uint64_t rec_size,
                 }
             }
             if (offset + rec_size > extent_size) {
-                return -2;  /* ENOSPC */
+                pthread_rwlock_unlock(&v->meta_lock); return -2;  /* ENOSPC */
             }
         } else {
             /* New extent allocated */
@@ -692,7 +701,7 @@ int meta_get_append_pos(invfs_volume *v, uint64_t rec_size,
             v->met0.extent_count++;
 
             entry = meta_mapper_get(v, (size_t)extent_idx);
-            if (!entry) return -1;
+            if (!entry) { pthread_rwlock_unlock(&v->meta_lock); return -1; }
             pba = invfs_meta_ext_pba(entry);
             extent_size = invfs_meta_ext_size(entry);
             offset = 0;
@@ -707,16 +716,20 @@ int meta_get_append_pos(invfs_volume *v, uint64_t rec_size,
                 entry = meta_mapper_get(v, (size_t)extent_idx);
                 extent_size = invfs_meta_ext_size(entry);
             }
-            if (extent_size < rec_size) return -2;  /* ENOSPC */
+            if (extent_size < rec_size) {
+                pthread_rwlock_unlock(&v->meta_lock); return -2;  /* ENOSPC */
+            }
 
             /* Persist mapper + MET0 so the new extent survives reopen. */
             meta_mapper_flush(v);
-            if (meta_met0_persist(v) != 0)
-                return -1;
+            if (meta_met0_persist(v) != 0) {
+                pthread_rwlock_unlock(&v->meta_lock); return -1;
+            }
         }
     }
 
     *pba_out = pba * INVFS_BLOCK_SIZE;
     *offset_out = offset;
+    pthread_rwlock_unlock(&v->meta_lock);
     return 0;
 }

@@ -1191,6 +1191,7 @@ static invfs_volume *vol_open_inner(const char *path, int at_ckpt,
     int rc;
     invfs_volume *v = (invfs_volume *)calloc(1, sizeof(invfs_volume));
     if (!v) { *err = -1; return NULL; }
+    (void)pthread_rwlock_init(&v->meta_lock, NULL);
 
     /* "W:" is the shorthand a user types; CreateFileW needs "\\.\W:". Store
        the normalized form, so diagnostics name what was actually opened. */
@@ -1326,13 +1327,16 @@ static invfs_volume *vol_open_inner(const char *path, int at_ckpt,
 
     /* WP30 Phase 3: load MET0 descriptor at 0x3A0.
      * v0.3.0+: dynamic metadata extents are mandatory.
-     * format_version 0 = legacy volume (no dynamic extents support). */
+     * format_version 0 = legacy volume (no dynamic extents support):
+     * allow read-only fallback so users can mount and extract data.
+     * Writes are disabled via VOLF_READONLY (every mutation path refuses). */
     if (v->sb.format_version == 0) {
-        fprintf(stderr, "vol_open: volume format version 0 (pre-v0.3.0) not supported; "
-                        "dynamic metadata extents are mandatory\n");
-        goto fail;
-    }
-    {
+        fprintf(stderr, "vol_open: volume format version 0 (pre-v0.3.0) opened in "
+                        "READ-ONLY mode; dynamic metadata extents are unavailable. "
+                        "Reformat with invf-mkfs to upgrade.\n");
+        v->sb.vol_flags |= VOLF_READONLY;
+        v->met0_present = 0;
+    } else {
         invfs_met0 m0;
         if (io_seek(&v->io, INVFS_MET0_OFF) == 0 &&
             io_read(&v->io, &m0, sizeof(m0)) == 0 &&
@@ -1490,10 +1494,17 @@ static invfs_volume *vol_open_inner(const char *path, int at_ckpt,
         io_read(&v->io, v->bitmap, (size_t)v->bitmap_blocks * INVFS_BLOCK_SIZE) != 0)
         { *err = -7; goto fail; }
 
-    /* WP30 Phase 5: load metadata extent mapper table */
-    if (meta_mapper_load(v) != 0) { *err = -7; goto fail; }
-
-    v->journal_start = v->sb.metadata_zone_start + v->bitmap_blocks + INVFS_META_EXT_BLOCKS;
+    /* WP30 Phase 5: load metadata extent mapper table (v0.3.0+ only).
+     * For format_version=0 (read-only legacy) there is no MET0/mapper and
+     * the legacy contiguous inode area scan in compact_scan_live runs. */
+    if (v->met0_present) {
+        if (meta_mapper_load(v) != 0) { *err = -7; goto fail; }
+        v->journal_start = v->sb.metadata_zone_start + v->bitmap_blocks +
+                           INVFS_META_EXT_BLOCKS;
+    } else {
+        /* Legacy layout: journal starts right after the bitmap */
+        v->journal_start = v->sb.metadata_zone_start + v->bitmap_blocks;
+    }
     v->journal_pos = v->journal_start * INVFS_BLOCK_SIZE;
     v->inode_area_start = v->journal_start + JOURNAL_BLOCKS;
     v->inode_area_pos = v->inode_area_start * INVFS_BLOCK_SIZE;
@@ -1989,6 +2000,7 @@ static invfs_volume *vol_open_inner(const char *path, int at_ckpt,
     return v;
 fail:
     io_close(&v->io);
+    pthread_rwlock_destroy(&v->meta_lock);
     if (v->bitmap) free(v->bitmap);
     free(v->jops);
     free(v->mjops);
@@ -2070,6 +2082,7 @@ void vol_close(invfs_volume *v)
             vmux_barrier(v, "close");
     }
     io_close(&v->io);
+    pthread_rwlock_destroy(&v->meta_lock);
     idx_clear(v);
     arc_destroy(v->arc);
     cpack_map_cache_reset(v);
@@ -3760,34 +3773,86 @@ uint64_t vol_inode_next(invfs_volume *v, uint64_t pos, uint32_t *magic_out,
                         char *name_out, size_t name_cap, uint32_t *rec_len_out)
 {
     invfs_inode_rec rec_h;
-    /* scan only the CRC-validated extent (vol_open truncated at the first
-     * torn/corrupt record); never step into garbage past area_pos */
-    uint64_t end = v->inode_area_pos;
-    while (pos + sizeof(rec_h) <= end) {
-        if (vol_read_raw(v, pos, &rec_h, sizeof(rec_h)) != 0)
-            break;
-        if (rec_h.magic != INODE_REC_MAGIC && rec_h.magic != TOMBSTONE_MAGIC)
-            break;  /* end of valid records */
-        if (rec_h.rec_len < sizeof(rec_h) || rec_h.rec_len > INVFS_MAX_REC_LEN)
-            break;
-        if (magic_out)  *magic_out = rec_h.magic;
-        if (inode_out)  *inode_out = rec_h.inode_id;
-        if (size_out)   *size_out = rec_h.file_size;
-        if (rec_len_out) *rec_len_out = rec_h.rec_len;
-        if (name_out && name_cap) {
-            /* name_len comes off disk, so clamp against the field it indexes
-               as well as the caller's buffer: name is the last member of the
-               record header, and a caller with a buffer bigger than the field
-               would otherwise let a corrupt length read past it. */
-            size_t n = rec_h.name_len;
-            if (n > INVFS_MAX_NAME) n = INVFS_MAX_NAME;
-            if (n > name_cap - 1) n = name_cap - 1;
-            memcpy(name_out, rec_h.name, n);  /* name lives inside rec */
-            name_out[n] = 0;
+    /* WP30 (v0.3.0+): records live in dynamic metadata extents tracked by
+     * the Mapper. The scan walks one extent at a time; bounds are defined
+     * by the extent sizes, NOT by inode_area_end. inode_area_pos still
+     * marks the CRC-validated tail of the active extent (vol_open trims at
+     * the first torn record). For legacy format_version=0 the contiguous
+     * inode area is still valid, so we fall back to it. */
+    for (;;) {
+        uint64_t end;
+        size_t cur_ei = 0;
+        int in_mapper = 0;
+        if (v->met0_present && v->meta_mapper) {
+            size_t ei;
+            int found = 0;
+            pthread_rwlock_rdlock(&v->meta_lock);
+            for (ei = 0; ei < (size_t)v->met0.extent_count; ei++) {
+                uint64_t entry = meta_mapper_get(v, ei);
+                if (!entry) break;
+                uint64_t pba = invfs_meta_ext_pba(entry);
+                uint64_t sz = invfs_meta_ext_size(entry);
+                uint64_t start = pba * INVFS_BLOCK_SIZE;
+                uint64_t stop = start + sz;
+                if ((int)ei == (int)v->met0.active_extent && stop > v->inode_area_pos)
+                    stop = v->inode_area_pos;
+                if (pos >= start && pos < stop) {
+                    end = stop;
+                    cur_ei = ei;
+                    found = 1;
+                    in_mapper = 1;
+                    break;
+                }
+                if (pos < start) {
+                    pos = start;
+                    end = stop;
+                    cur_ei = ei;
+                    found = 1;
+                    in_mapper = 1;
+                    break;
+                }
+            }
+            pthread_rwlock_unlock(&v->meta_lock);
+            if (!found) return 0;
+        } else {
+            end = v->inode_area_pos;
         }
-        return pos + rec_h.rec_len + 4;  /* +4: trailing CRC32C */
+        while (pos + sizeof(rec_h) <= end) {
+            if (vol_read_raw(v, pos, &rec_h, sizeof(rec_h)) != 0)
+                break;
+            if (rec_h.magic != INODE_REC_MAGIC && rec_h.magic != TOMBSTONE_MAGIC)
+                break;  /* end of valid records in this extent */
+            if (rec_h.rec_len < sizeof(rec_h) || rec_h.rec_len > INVFS_MAX_REC_LEN)
+                break;
+            if (magic_out)  *magic_out = rec_h.magic;
+            if (inode_out)  *inode_out = rec_h.inode_id;
+            if (size_out)   *size_out = rec_h.file_size;
+            if (rec_len_out) *rec_len_out = rec_h.rec_len;
+            if (name_out && name_cap) {
+                /* name_len comes off disk, so clamp against the field it indexes
+                   as well as the caller's buffer: name is the last member of the
+                   record header, and a caller with a buffer bigger than the field
+                   would otherwise let a corrupt length read past it. */
+                size_t n = rec_h.name_len;
+                if (n > INVFS_MAX_NAME) n = INVFS_MAX_NAME;
+                if (n > name_cap - 1) n = name_cap - 1;
+                memcpy(name_out, rec_h.name, n);  /* name lives inside rec */
+                name_out[n] = 0;
+            }
+            return pos + rec_h.rec_len + 4;  /* +4: trailing CRC32C */
+        }
+        /* Out of records in this extent. Continue to next extent. */
+        if (!in_mapper) return 0;
+        size_t next_ei = cur_ei + 1;
+        pthread_rwlock_rdlock(&v->meta_lock);
+        uint64_t ne = (next_ei < (size_t)v->met0.extent_count)
+                      ? meta_mapper_get(v, next_ei) : 0;
+        uint64_t next_pos = ne ? invfs_meta_ext_pba(ne) * INVFS_BLOCK_SIZE : 0;
+        pthread_rwlock_unlock(&v->meta_lock);
+        if (!ne) return 0;
+        pos = next_pos;
+        /* loop and scan the next extent */
     }
-    return 0;
 }
 
 

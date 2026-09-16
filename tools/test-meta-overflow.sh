@@ -79,6 +79,23 @@ done
 echo "  fsck after overflow writes"
 fsck_ok "$IMG"
 
+# P2: verify fsck treats the mapper region correctly. The metadata zone
+# (which includes the mapper blocks 5-36) is pre-marked as "always allocated"
+# by fsck, so the mapper region MUST NOT show up as orphans. Otherwise
+# `fsck -f` would try to free those blocks and destroy the mapper.
+echo "  fsck detail: check orphan/missing counts around mapper region"
+FSCK_REPORT=$($B/invf-fsck "$IMG" 2>&1)
+echo "$FSCK_REPORT" | grep -E "^  (orphans|missing|live files):" || fail "fsck report incomplete"
+ORPHANS=$(echo "$FSCK_REPORT" | grep -E "^  orphans:" | awk '{print $2}')
+MISSING=$(echo "$FSCK_REPORT" | grep -E "^  missing:" | awk '{print $2}')
+LIVE=$(echo "$FSCK_REPORT" | grep -E "^  live files:" | awk '{print $3}')
+[ "${ORPHANS:-0}" = "0" ] || fail "fsck reports $ORPHANS orphans; mapper region must NOT show as orphans"
+# Missing count for the mapper region would mean fsck treats it as
+# "referenced but free" -- correct, but on a fresh volume the count must
+# be 0 (mapper is system-reserved, never reaches the bitmap).
+[ "${MISSING:-0}" = "0" ] || fail "fsck reports $MISSING missing blocks (incl mapper region?); expected 0"
+echo "  orphans=0, missing=0, live_files=$LIVE"
+
 # Verify files are still visible via invf-ls (sanity)
 LS_OUT=$($B/invf-ls "$IMG" | tail -1)
 echo "  invf-ls reports: $LS_OUT"
@@ -98,6 +115,28 @@ for i in $(seq 1 "$N_IMPORTED"); do
 done
 [ "$N_CAT_OK" -eq "$N_IMPORTED" ] || fail "after reopen: $((N_IMPORTED - N_CAT_OK)) files not bit-exact"
 echo "  all $N_CAT_OK files bit-exact after reopen"
+
+# P2 (continued): run `invf-fsck -f` (the dangerous one) on a fresh volume.
+# The mapper blocks 5-36 are NOT marked in the bitmap at mkfs time (they
+# are "system reserved", part of the metadata zone). fsck pre-marks the
+# whole metadata zone as used before the orphan check, so it MUST NOT
+# report mapper blocks as orphans, and MUST NOT free them under -f.
+# Verify the volume is still readable after -f.
+echo "  invf-fsck -f (verifies mapper blocks aren't freed by fix mode)"
+$B/invf-fsck -f "$IMG" >"$WORK/fsck-fix.log" 2>&1 || fail "fsck -f failed"
+# After -f, all files must still be readable
+N_FIX_OK=0
+for i in $(seq 1 "$N_IMPORTED"); do
+  if $B/invf-cat "$IMG" "file_$i.dat" "$WORK/out/file_$i.dat" >/dev/null 2>&1 && \
+     cmp -s "$WORK/ref/file_$i.dat" "$WORK/out/file_$i.dat"; then
+    N_FIX_OK=$((N_FIX_OK + 1))
+  fi
+done
+[ "$N_FIX_OK" -eq "$N_IMPORTED" ] || fail "after fsck -f: $((N_IMPORTED - N_FIX_OK)) files not bit-exact (mapper may have been freed!)"
+echo "  all $N_IMPORTED files still bit-exact after fsck -f"
+# invf-ls must still report all files
+LS_AFTER=$($B/invf-ls "$IMG" | tail -1)
+echo "  invf-ls after fsck -f: $LS_AFTER"
 
 echo "  leg A PASS"
 

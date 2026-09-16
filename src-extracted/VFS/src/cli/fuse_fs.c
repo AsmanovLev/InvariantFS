@@ -2893,8 +2893,6 @@ int main(int argc, char *argv[])
             fuse_argv[fuse_argc++] = (char *)opts;
         }
         fuse_argv[fuse_argc] = NULL;
-        for (k = 0; k < fuse_argc; k++)
-            fprintf(stderr, "[fuse_arg %d] %s\n", k, fuse_argv[k]);
 
         fa.argc = fuse_argc;
         fa.argv = fuse_argv;

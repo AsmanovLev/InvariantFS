@@ -1496,8 +1496,27 @@ int meta_read_record_by_id_p(invfs_volume *v, uint64_t id, uint8_t **buf, uint32
  * and the caller re-checks. Returns 0 when `need` bytes fit. */
 int inode_area_make_room(invfs_volume *v, uint64_t need)
 {
-    if (v->inode_area_pos + need <= v->inode_area_end)
+    /* WP30: for v0.3.0+ the "inode area" is a sequence of dynamic metadata
+     * extents tracked by the Mapper. Bounds are defined by the EXTENTS
+     * themselves, NOT a single linear address range. The pre-check asks:
+     * "can the next append land somewhere?" -- which means either
+     *   (a) the active extent has room for `need` more bytes, OR
+     *   (b) we can allocate a fresh extent (mapper + shadow zone free).
+     * For legacy format_version=0 we fall back to the linear-end check. */
+    if (v->met0_present && v->meta_mapper) {
+        uint64_t entry = meta_mapper_get(v, (size_t)v->met0.active_extent);
+        if (entry && (v->met0.active_offset + need) <=
+                     invfs_meta_ext_size(entry))
+            return 0;
+        /* active extent exists but full: ok as long as we can allocate a
+         * new extent. Active extent doesn't exist yet (extent_count==0):
+         * meta_get_append_pos will lazy-allocate on first write -- ok too.
+         * The genuine ENOSPC is "no mapper slots left" or "no shadow free". */
+        if (v->met0.extent_count >= INVFS_META_EXT_ENTRIES)
+            return -1;
+    } else if (v->inode_area_pos + need <= v->inode_area_end) {
         return 0;
+    }
     /* the compaction's own gates, pre-checked quietly (the backstop is a
      * routine path -- never the place for the decline reason spam) */
     if (v->time_travel || v->ck_present || !vol_write_enabled(v) ||
@@ -1505,6 +1524,13 @@ int inode_area_make_room(invfs_volume *v, uint64_t need)
         return -1;
     if (vol_inode_compact(v, NULL, NULL) < 0)
         return -1;
+    /* after compaction: re-check. */
+    if (v->met0_present && v->meta_mapper) {
+        uint64_t entry = meta_mapper_get(v, (size_t)v->met0.active_extent);
+        return ((entry && (v->met0.active_offset + need) <=
+                          invfs_meta_ext_size(entry)) ||
+                v->met0.extent_count < INVFS_META_EXT_ENTRIES) ? 0 : -1;
+    }
     return v->inode_area_pos + need <= v->inode_area_end ? 0 : -1;
 }
 
@@ -1684,6 +1710,7 @@ static uint64_t compact_scan_live(invfs_volume *v, cmp_nameset *live,
     if (v->meta_mapper && v->met0.extent_count > 0) {
         size_t i;
         int tail_extent = -1;
+        pthread_rwlock_rdlock(&v->meta_lock);
         for (i = 0; i < (size_t)v->met0.extent_count; i++) {
             uint64_t entry = meta_mapper_get(v, i);
             if (!entry) break;
@@ -1706,6 +1733,7 @@ static uint64_t compact_scan_live(invfs_volume *v, cmp_nameset *live,
             uint64_t s = compact_scan_range(v, start, stop, live, &bad);
             if ((int)i == tail_extent) last_stop = s;
         }
+        pthread_rwlock_unlock(&v->meta_lock);
         if (bad_out) *bad_out = bad;
         if (live_bytes) {
             if (live->buck) {

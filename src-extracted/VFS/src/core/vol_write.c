@@ -793,7 +793,9 @@ int vol_write_commit(invfs_wsession *ws)
     }
     /* WP30 Phase 3: update dynamic extent offset */
     uint64_t rec_pos = abs_pba + offset;
+    pthread_rwlock_wrlock(&v->meta_lock);
     v->met0.active_offset += rec_size + 4;
+    pthread_rwlock_unlock(&v->meta_lock);
     v->inode_area_pos = rec_pos + rec_size + 4;
     idx_put(v, s->name, strlen(s->name), s->new_id,
             rec_pos, s->logical_size, now);
