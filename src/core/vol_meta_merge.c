@@ -621,42 +621,38 @@ int meta_get_append_pos(invfs_volume *v, uint64_t rec_size,
     *pba_out = 0;
     *offset_out = 0;
 
-    /* WP30 Phase 6: check merge-in-progress flag to prevent concurrent
-     * metadata operations from reading partially-updated mapper state */
-    if (v->merge_in_progress) {
-        pthread_rwlock_unlock(&v->meta_lock);
+    /* WP30 Phase 6: check merge-in-progress flag */
+    if (v->merge_in_progress)
         return -EAGAIN;
-    }
 
-    /* WP30 Phase 6+: hold exclusive lock for the full write-path duration
-     * (all paths that mutate mapper/MET0 state). */
+    /* WP30 Phase 6+: hold exclusive lock for the full write-path duration */
     pthread_rwlock_wrlock(&v->meta_lock);
 
-    /* Dynamic extent path */
+    /* Direct mapper access (no meta_mapper_get — caller holds write lock).
+     * meta_mapper_get uses a read-lock which would deadlock here. */
     uint64_t extent_idx = v->met0.active_extent;
     uint64_t offset = v->met0.active_offset;
 
-    /* v0.3.0+: mapper is pre-allocated at mkfs but the first extent is
-     * lazily allocated on first metadata write. If entry 0 is unset,
-     * allocate it now. */
-    uint64_t entry = meta_mapper_get(v, (size_t)extent_idx);
+    uint64_t entry = (v->meta_mapper && extent_idx < v->meta_mapper_n)
+                     ? v->meta_mapper[extent_idx] : 0;
+
+    /* Lazy allocation of extent 0 on first write */
     if (!entry && extent_idx == 0 && v->met0.extent_count == 0) {
         uint64_t new_idx = alloc_meta_extent(v, INVFS_META_EXT_MIN_SIZE_CLASS);
         if (new_idx == 0) { pthread_rwlock_unlock(&v->meta_lock); return -1; }
         v->met0.extent_count = 1;
-        entry = meta_mapper_get(v, (size_t)extent_idx);
+        entry = (v->meta_mapper && extent_idx < v->meta_mapper_n)
+                ? v->meta_mapper[extent_idx] : 0;
         if (!entry) { pthread_rwlock_unlock(&v->meta_lock); return -1; }
-        /* Persist mapper + MET0 so the new extent survives reopen. */
         meta_mapper_flush(v);
         meta_met0_persist(v);
     } else if (!entry) {
-        /* self-heal: if the active extent pointer is past extent_count,
-         * reset it to the last valid extent. */
         if (extent_idx >= v->met0.extent_count && v->met0.extent_count > 0) {
             extent_idx = v->met0.extent_count - 1;
             v->met0.active_extent = extent_idx;
             offset = v->met0.active_offset;
-            entry = meta_mapper_get(v, (size_t)extent_idx);
+            entry = (v->meta_mapper && extent_idx < v->meta_mapper_n)
+                    ? v->meta_mapper[extent_idx] : 0;
             if (!entry) { pthread_rwlock_unlock(&v->meta_lock); return -1; }
         } else {
             pthread_rwlock_unlock(&v->meta_lock); return -1;
@@ -681,7 +677,8 @@ int meta_get_append_pos(invfs_volume *v, uint64_t rec_size,
                 uint8_t try_class = cur_class + 1;
                 while (try_class <= INVFS_META_EXT_SIZE_CLASS_MAX) {
                     if (extend_meta_extent(v, extent_idx, try_class) == 1) {
-                        entry = meta_mapper_get(v, (size_t)extent_idx);
+                        entry = (v->meta_mapper && extent_idx < v->meta_mapper_n)
+                                ? v->meta_mapper[extent_idx] : 0;
                         extent_size = invfs_meta_ext_size(entry);
                         pba = invfs_meta_ext_pba(entry);
                         meta_mapper_flush(v);
@@ -700,7 +697,8 @@ int meta_get_append_pos(invfs_volume *v, uint64_t rec_size,
             v->met0.active_offset = 0;
             v->met0.extent_count++;
 
-            entry = meta_mapper_get(v, (size_t)extent_idx);
+            entry = (v->meta_mapper && extent_idx < v->meta_mapper_n)
+                    ? v->meta_mapper[extent_idx] : 0;
             if (!entry) { pthread_rwlock_unlock(&v->meta_lock); return -1; }
             pba = invfs_meta_ext_pba(entry);
             extent_size = invfs_meta_ext_size(entry);
@@ -713,7 +711,8 @@ int meta_get_append_pos(invfs_volume *v, uint64_t rec_size,
                    invfs_meta_ext_class(entry) < INVFS_META_EXT_SIZE_CLASS_MAX) {
                 uint8_t cur = invfs_meta_ext_class(entry);
                 if (extend_meta_extent(v, extent_idx, cur + 1) != 1) break;
-                entry = meta_mapper_get(v, (size_t)extent_idx);
+                entry = (v->meta_mapper && extent_idx < v->meta_mapper_n)
+                        ? v->meta_mapper[extent_idx] : 0;
                 extent_size = invfs_meta_ext_size(entry);
             }
             if (extent_size < rec_size) {
