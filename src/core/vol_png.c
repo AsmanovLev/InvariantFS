@@ -706,13 +706,18 @@ uint64_t vol_create_blob_file(invfs_volume *v, const char *name,
         crc = invfs_crc32c(rec, rec_size);
         if (inode_area_make_room(v, (uint64_t)rec_size + 4) != 0) { free(rec); return 0; }
         if (vol_pre_record(v) != 0) { free(rec); return 0; }
-        if (io_seek(&v->io, v->inode_area_pos) != 0 ||
-            io_write(&v->io, rec, rec_size) != 0 ||
-            io_write(&v->io, &crc, 4) != 0) { free(rec); return 0; }
-        v->inode_area_pos += rec_size + 4;
-        idx_put(v, name, strlen(name), inode_id, v->inode_area_pos - rec_size - 4,
-                rh->file_size, rh->ctime);
-        idx_put_id(v, inode_id, v->inode_area_pos - rec_size - 4);
+        /* Bug J: route the append through the mapper */
+        {
+            uint64_t npos;
+            int rc2 = vol_append_slot(v, (uint64_t)rec_size + 4, &npos);
+            if (rc2 != 0) { free(rec); return 0; }
+            if (io_seek(&v->io, npos) != 0 ||
+                io_write(&v->io, rec, rec_size) != 0 ||
+                io_write(&v->io, &crc, 4) != 0) { free(rec); return 0; }
+            idx_put(v, name, strlen(name), inode_id, npos,
+                    rh->file_size, rh->ctime);
+            idx_put_id(v, inode_id, npos);
+        }
         free(rec);
         return inode_id;
     }
@@ -770,13 +775,18 @@ uint64_t vol_create_blob_file(invfs_volume *v, const char *name,
 
     if (inode_area_make_room(v, (uint64_t)rec_size + 4) != 0) { free(rec); return 0; }
     if (vol_pre_record(v) != 0) { free(rec); return 0; }
-    if (io_seek(&v->io, v->inode_area_pos) != 0 ||
-        io_write(&v->io, rec, rec_size) != 0 ||
-        io_write(&v->io, &crc, 4) != 0) { free(rec); return 0; }
-    v->inode_area_pos += rec_size + 4;
-    idx_put(v, name, strlen(name), inode_id, v->inode_area_pos - rec_size - 4,
-            rh->file_size, rh->ctime);
-    idx_put_id(v, inode_id, v->inode_area_pos - rec_size - 4);
+    /* Bug J: route the append through the mapper */
+    {
+        uint64_t npos;
+        int rc2 = vol_append_slot(v, (uint64_t)rec_size + 4, &npos);
+        if (rc2 != 0) { free(rec); return 0; }
+        if (io_seek(&v->io, npos) != 0 ||
+            io_write(&v->io, rec, rec_size) != 0 ||
+            io_write(&v->io, &crc, 4) != 0) { free(rec); return 0; }
+        idx_put(v, name, strlen(name), inode_id, npos,
+                rh->file_size, rh->ctime);
+        idx_put_id(v, inode_id, npos);
+    }
     pba_ref_apply(v, rec, (uint32_t)rec_size, +1);
     free(rec);
     return inode_id;

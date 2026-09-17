@@ -365,11 +365,17 @@ int vol_unlink_name(invfs_volume *v, const char *name)
     rec.file_size = pos;                    /* v2 position-kill */
     rec_set_name(&rec, name);
     crc = invfs_crc32c((const uint8_t *)&rec, sizeof(rec));
-    if (io_seek(&v->io, v->inode_area_pos) != 0 ||
-        io_write(&v->io, &rec, sizeof(rec)) != 0 ||
-        io_write(&v->io, &crc, 4) != 0)
-        return -1;
-    v->inode_area_pos += sizeof(rec) + 4;
+    /* Bug J: route the tombstone append through the mapper (extents own
+     * records past the metadata zone on v0.3.0+ volumes) */
+    {
+        uint64_t tpos;
+        int rc2 = vol_append_slot(v, (uint64_t)sizeof(rec) + 4, &tpos);
+        if (rc2 != 0) return rc2;
+        if (io_seek(&v->io, tpos) != 0 ||
+            io_write(&v->io, &rec, sizeof(rec)) != 0 ||
+            io_write(&v->io, &crc, 4) != 0)
+            return -1;
+    }
     idx_del_at(v, name, nl, pos);
     idx_bump_dirs(v, name, nl, -1);
     return 0;
@@ -470,15 +476,21 @@ static int rename_one(invfs_volume *v, const char *from, const char *to)
      * (bitmap durable before the record that names its pbas) is kept. The
      * old entries stay until vol_delete_inode below, so a crash mid-rename
      * leaves the old name fully readable, and the delete frees nothing the
-     * copy still references (the pba_ref sharer count). */
-    if (vol_pre_record(v) != 0 ||
-        io_seek(&v->io, v->inode_area_pos) != 0 ||
-        io_write(&v->io, rec, rh.rec_len) != 0 ||
-        io_write(&v->io, &crc, 4) != 0) { free(rec); return -1; }
-    v->inode_area_pos += rh.rec_len + 4;
-    idx_put(v, to, tolen, new_id, v->inode_area_pos - rh.rec_len - 4,
-            nh->file_size, nh->ctime);
-    idx_put_id(v, new_id, v->inode_area_pos - rh.rec_len - 4);
+     * copy still references (the pba_ref sharer count).
+     * Bug J: route the append through the mapper (extents own records past
+     * the metadata zone on v0.3.0+ volumes). */
+    {
+        uint64_t npos;
+        int rc2;
+        if (vol_pre_record(v) != 0) { free(rec); return -1; }
+        rc2 = vol_append_slot(v, (uint64_t)rh.rec_len + 4, &npos);
+        if (rc2 != 0) { free(rec); return rc2; }
+        if (io_seek(&v->io, npos) != 0 ||
+            io_write(&v->io, rec, rh.rec_len) != 0 ||
+            io_write(&v->io, &crc, 4) != 0) { free(rec); return -1; }
+        idx_put(v, to, tolen, new_id, npos, nh->file_size, nh->ctime);
+        idx_put_id(v, new_id, npos);
+    }
     pba_ref_apply(v, rec, rh.rec_len, +1);
     free(rec);
 
@@ -693,14 +705,17 @@ int vol_hardlink(invfs_volume *v, const char *from, const char *to)
 
     if (vol_mark_dirty(v) != 0) { free(buf); return -1; }
     crc = invfs_crc32c(buf, rl);
-    if (io_seek(&v->io, v->inode_area_pos) != 0 ||
-        io_write(&v->io, buf, rl) != 0 ||
-        io_write(&v->io, &crc, 4) != 0) {
-        free(buf);
-        return -1;
+    /* Bug J: route the hardlink record append through the mapper */
+    {
+        int rc2 = vol_append_slot(v, (uint64_t)rl + 4, &pos);
+        if (rc2 != 0) { free(buf); return rc2; }
+        if (io_seek(&v->io, pos) != 0 ||
+            io_write(&v->io, buf, rl) != 0 ||
+            io_write(&v->io, &crc, 4) != 0) {
+            free(buf);
+            return -1;
+        }
     }
-    pos = v->inode_area_pos;
-    v->inode_area_pos += (uint64_t)rl + 4;
     idx_put(v, nh->name, nl, id, pos, nh->file_size, nh->ctime);
     idx_put_id(v, id, pos);
     /* the second name is a live child of its parent directories; without

@@ -491,13 +491,17 @@ static int tz_commit_member(tz_ctx *c, tz_member *m, const tz_candidate *cand)
     if (inode_area_make_room(v, (uint64_t)rec_size + 4 +
                              sizeof(invfs_inode_rec) + 4) != 0)
         { rc = 1; goto out; }
-    if (io_seek(&v->io, v->inode_area_pos) != 0 ||
-        io_write(&v->io, rec, rec_size) != 0 ||
-        io_write(&v->io, &crc, 4) != 0)
-        goto out;
-    idx_put(v, name, strlen(name), new_id, v->inode_area_pos, fsize, ctime);
-    idx_put_id(v, new_id, v->inode_area_pos);
-    v->inode_area_pos += rec_size + 4;
+    {
+        uint64_t npos;
+        int rc2 = vol_append_slot(v, (uint64_t)rec_size + 4, &npos);
+        if (rc2 != 0) { rc = 1; goto out; }
+        if (io_seek(&v->io, npos) != 0 ||
+            io_write(&v->io, rec, rec_size) != 0 ||
+            io_write(&v->io, &crc, 4) != 0)
+            goto out;
+        idx_put(v, name, strlen(name), new_id, npos, fsize, ctime);
+        idx_put_id(v, new_id, npos);
+    }
 
     /* the retire frees the old RAW/generic blocks; the record had no TEXT
      * entries, so the batch gate does not engage */

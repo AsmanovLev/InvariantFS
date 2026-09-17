@@ -1059,6 +1059,16 @@ int meta_met0_persist(invfs_volume *v);
 int meta_get_append_pos(invfs_volume *v, uint64_t rec_size,
                         uint64_t *pba_out, uint64_t *offset_out);
 
+/* Bug J companion: route every record-en-area append through the mapper.
+ * On a v0.3.0+ mapper volume this wraps meta_get_append_pos and returns
+ * the absolute byte position in *rec_pos_out (the caller then io_seek()
+ * there, writes, bumps v->met0.active_offset + v->inode_area_pos).
+ * On a legacy (format_version=0) volume it falls back to inode_area_pos
+ * so the old linear inode area keeps working. rc 0 = ok, -1 = error
+ * (mapper missing), -2 = ENOSPC. */
+int vol_append_slot(invfs_volume *v, uint64_t rec_size,
+                    uint64_t *rec_pos_out);
+
 /* WP30 Phase 5: metadata extent journal helpers (in volume.c) */
 int meta_journal_alloc(invfs_volume *v, uint16_t ext_idx, uint64_t pba,
                        uint8_t size_class);

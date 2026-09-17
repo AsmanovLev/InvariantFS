@@ -469,15 +469,21 @@ int vol_sweep_file_inner(invfs_volume *v, uint64_t inode_id,
             sweep_unwind(v, new_id ? ents : NULL, ast_h.num_blocks); free(rec); return -1;
         }
         if (vol_pre_record(v) != 0) { sweep_unwind(v, new_id ? ents : NULL, ast_h.num_blocks); free(rec); return -1; }
-        if (io_seek(&v->io, v->inode_area_pos) != 0 ||
-            io_write(&v->io, rec, rec_h.rec_len) != 0 ||
-            io_write(&v->io, &crc_calc, 4) != 0) {
-            sweep_unwind(v, new_id ? ents : NULL, ast_h.num_blocks); free(rec); return -1;
+        /* Bug J: route the append through the mapper */
+        {
+            uint64_t npos;
+            int rc2 = vol_append_slot(v, (uint64_t)rec_h.rec_len + 4, &npos);
+            if (rc2 != 0) {
+                sweep_unwind(v, new_id ? ents : NULL, ast_h.num_blocks); free(rec); return -1;
+            }
+            if (io_seek(&v->io, npos) != 0 ||
+                io_write(&v->io, rec, rec_h.rec_len) != 0 ||
+                io_write(&v->io, &crc_calc, 4) != 0) {
+                sweep_unwind(v, new_id ? ents : NULL, ast_h.num_blocks); free(rec); return -1;
+            }
+            idx_put(v, name, nlen, new_id, npos, nh->file_size, nh->ctime);
+            idx_put_id(v, new_id, npos);
         }
-        v->inode_area_pos += rec_h.rec_len + 4;
-        idx_put(v, name, nlen, new_id, v->inode_area_pos - rec_h.rec_len - 4,
-                nh->file_size, nh->ctime);
-        idx_put_id(v, new_id, v->inode_area_pos - rec_h.rec_len - 4);
         pba_ref_apply(v, rec, rec_h.rec_len, +1);
         /* frees the old RAW blocks: they are still referenced by the old
          * record until the retire drops it */

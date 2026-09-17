@@ -222,16 +222,22 @@ uint64_t vol_create_container_file(invfs_volume *v, const char *name,
         return 0;
     }
     if (vol_pre_record(v) != 0) { free(rec); return 0; }
-    if (io_seek(&v->io, v->inode_area_pos) != 0 ||
-        io_write(&v->io, rec, rec_size) != 0 ||
-        io_write(&v->io, &crc_rec, 4) != 0) {
-        free(rec);
-        return 0;
+    /* Bug J: route the append through the mapper (extents own records
+     * past the metadata zone on v0.3.0+ volumes). */
+    {
+        uint64_t npos;
+        int rc2 = vol_append_slot(v, (uint64_t)rec_size + 4, &npos);
+        if (rc2 != 0) { free(rec); return 0; }
+        if (io_seek(&v->io, npos) != 0 ||
+            io_write(&v->io, rec, rec_size) != 0 ||
+            io_write(&v->io, &crc_rec, 4) != 0) {
+            free(rec);
+            return 0;
+        }
+        idx_put(v, name, strlen(name), inode_id, npos,
+                rec_h->file_size, rec_h->ctime);
+        idx_put_id(v, inode_id, npos);
     }
-    v->inode_area_pos += rec_size + 4;
-    idx_put(v, name, strlen(name), inode_id, v->inode_area_pos - rec_size - 4,
-            rec_h->file_size, rec_h->ctime);
-    idx_put_id(v, inode_id, v->inode_area_pos - rec_size - 4);
     pba_ref_apply(v, rec, (uint32_t)rec_size, +1);
     free(rec);
     return inode_id;

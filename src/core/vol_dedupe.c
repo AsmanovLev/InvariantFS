@@ -235,22 +235,24 @@ retry:
         rc = 2;
         goto out;
     }
-    if (io_seek(&v->io, v->inode_area_pos) != 0 ||
-        io_write(&v->io, combo, total) != 0) {
-        goto out;
-    }
     {
-        invfs_inode_rec *nh = (invfs_inode_rec *)combo;
-        char nm[INVFS_MAX_NAME + 1];
-        size_t nlen = nh->name_len < INVFS_MAX_NAME ? nh->name_len
-                                                    : INVFS_MAX_NAME;
-        memcpy(nm, nh->name, nlen);
-        nm[nlen] = 0;
-        idx_put(v, nm, nlen, inode, v->inode_area_pos,
-                nh->file_size, nh->ctime);
-        idx_put_id(v, inode, v->inode_area_pos);
+        uint64_t npos;
+        int rc2 = vol_append_slot(v, (uint64_t)total, &npos);
+        if (rc2 != 0) goto out;
+        if (io_seek(&v->io, npos) != 0 ||
+            io_write(&v->io, combo, total) != 0)
+            goto out;
+        {
+            invfs_inode_rec *nh = (invfs_inode_rec *)combo;
+            char nm[INVFS_MAX_NAME + 1];
+            size_t nlen = nh->name_len < INVFS_MAX_NAME ? nh->name_len
+                                                        : INVFS_MAX_NAME;
+            memcpy(nm, nh->name, nlen);
+            nm[nlen] = 0;
+            idx_put(v, nm, nlen, inode, npos, nh->file_size, nh->ctime);
+            idx_put_id(v, inode, npos);
+        }
     }
-    v->inode_area_pos += total;
     /* the refcount move: the old version's references die with it, the
      * new version's (the winners among them) arrive with it */
     pba_ref_apply(v, rec, rl, -1);

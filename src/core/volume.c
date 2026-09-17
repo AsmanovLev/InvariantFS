@@ -3983,6 +3983,30 @@ uint64_t vol_inode_next(invfs_volume *v, uint64_t pos, uint32_t *magic_out,
 }
 
 
+/* Bug J companion: route any record-area append through the mapper.
+ * On a v0.3.0+ mapper volume the append position comes from
+ * meta_get_append_pos (extents grow automatically); on a legacy volume
+ * the caller's inode_area_pos is the continue-position as before. The
+ * callers then io_seek(*rec_pos_out), write, and bump active_offset /
+ * inode_area_pos. rc 0 = ok, -1 = error, -2 = ENOSPC. */
+int vol_append_slot(invfs_volume *v, uint64_t rec_size,
+                    uint64_t *rec_pos_out)
+{
+    if (v->met0_present && v->meta_mapper) {
+        uint64_t abs_pba, offset;
+        int rc = meta_get_append_pos(v, rec_size, &abs_pba, &offset);
+        if (rc != 0) return rc;
+        *rec_pos_out = abs_pba + offset;
+        v->met0.active_offset = offset + rec_size;
+        /* bump the cursor so concurrent appends stay ahead of us */
+        v->inode_area_pos = *rec_pos_out + rec_size;
+        return 0;
+    }
+    *rec_pos_out = v->inode_area_pos;
+    return 0;
+}
+
+
 /* raw byte-range read at absolute volume offset (for tools) */
 int vol_read_raw(invfs_volume *v, uint64_t offset, void *buf, size_t len)
 {
