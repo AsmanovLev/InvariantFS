@@ -1,7 +1,12 @@
 # Gentoo on InvariantFS — Install Guide
 
-This guide covers two installation paths:
-- **QEMU/VM** (Step 1–7): virtual machine with virtual disks
+This guide covers three installation paths:
+- **Verified bootstrap (v0.3)**: the currently proven path; two-device
+  InvFS root under QEMU with a direct-kernel boot
+  (see "Verified Bootstrap Path" below)
+- **QEMU/VM legacy path** (Step 1–7): older virtual-machine recipe with
+  OVMF + GRUB; superseded for VMs by the verified bootstrap — kept for
+  historical reference only
 - **Bare-metal** (Step 8): real hardware, SSH-based install, multi-device
 
 ## Prerequisites
@@ -10,9 +15,237 @@ This guide covers two installation paths:
 - InvariantFS binaries (`bin/invf-*`) built from this tree.
 - Sufficient disk space for the volume (~10 GiB recommended for VM).
 
+## Verified Bootstrap Path (Sep 2026)
+
+This is the path actually used for a full Gentoo boot on Sep 17–18 2026
+(OpenRC reached runlevel 3, root autologin on ttyS0, SSH at host port
+2222, `invfs` mounted as `/`, network devices enp0s2 UP). Use it; the
+legacy QEMU steps below are superseded.
+
+### Why this differs from the old path
+
+- **Kernel boot is direct (`-kernel`/`-initrd`), NOT OVMF/UKI.** OVMF
+  4M builds refuse a 25 MB UKI loaded from a FAT32 ESP (tested across
+  virtio-blk/scsi/IDE/AHCI as well as raw FAT16/32 images); that path
+  was abandoned. On real hardware with a mainstream UEFI the OVMF-only
+  failure does not reproduce, so OVMF+GRUB remains listed for bare
+  metal — for VMs the `-kernel` direct boot is the way in.
+- **`switch_root` cannot enter a FUSE root.** The initramfs leaves the
+  InvFS mount at `/mnt/invfs` and does `exec chroot /mnt/invfs /sbin/init`
+  instead (Ersei's "fuse-root" recipe). PID 1 survives the transition,
+  so OpenRC owns the console and reparents correctly.
+- **Write metadata through `invf-import`, not tar through FUSE.**
+  A tar extract onto a mounted InvFS volume died with
+  `Cannot utime: No space left on device` + `Directory renamed before
+  its status could be extracted` on a first-generation stage3 import.
+  `invf-import` on the unmounted volume does the same 66k-object tree in
+  ~35 s cleanly.
+
+### Step V1: Format the volume (two devices)
+
+```bash
+truncate -s 15G /mnt/sde/invfs-root.img
+truncate -s 20G /mnt/sde/invfs-shadow.img
+
+# meta_frac: rootfs-sized metadata zone (16 works for ~65k files;
+# AGENTS.md says 16–24 for rootfs-class workload)
+INVFS_META_FRAC=16 bin/invf-mkfs /mnt/sde/invfs-root.img 15
+```
+
+`INVFS_DEV1` (the shadow device) is passed as an env var to every
+tool that opens the volume (`invf-fuse`, `invf-import`, `invf-ls`, …).
+
+### Step V2: Import the stage3 tree offline
+
+Extract stage3 to an ordinary directory first, then import:
+
+```bash
+mkdir stage3-root
+tar xJpf stage3-amd64-openrc-*.tar.xz -C stage3-root
+
+INVFS_DEV1=/mnt/sde/invfs-shadow.img \
+  bin/invf-import /mnt/sde/invfs-root.img ./stage3-root
+# imported: 3076 dirs, 54026 files, 8986 symlinks ... in ~35 s
+```
+
+Verify after import (offline, no FUSE needed):
+
+```bash
+INVFS_DEV1=/mnt/sde/invfs-shadow.img bin/invf-ls /mnt/sde/invfs-root.img | wc -l
+# expect 66088 on a clean stage3 (54026 + 3076 + 8986)
+```
+
+> Do NOT extract through the FUSE mount. Stage3 ships FHS symlinks at
+> `/bin /sbin /lib /lib64` pointing into `usr/*`; import preserves
+> them, and the guest kernel resolves them natively.
+
+### Step V3: Volumes over which the guest sees four disks
+
+Disk 1 (10 GB GPT): p1 = 256 MiB FAT32 ESP, p2 = 2 GiB swap,
+p3 = shadow half of the InvFS pair. Disk 2 (15 GB): raw InvFS volume
+(`invfs-root.img` above). The init script picks `sda3` as `INVFS_DEV1`
+and `sdb` as `INVFS_RAW`.
+
+Build /mnt/sde/invfs-uki/: the `vmlinuz` (built with `CONFIG_FUSE_FS=y`,
+`CONFIG_VIRTIO=y`, `CONFIG_VIRTIO_NET=m`, `CONFIG_AHCI=y`) and
+`initramfs/` described in the next step, plus a cpio wrapper:
+
+```bash
+(cd /mnt/sde/invfs-uki/initramfs && find . | sort \
+  | cpio -o -H newc --owner=0:0 2>/dev/null) | gzip \
+  > /mnt/sde/invfs-uki/initramfs.img
+```
+
+### Step V4: The initramfs init (full text that works)
+
+```sh
+#!/bin/sh
+export PATH=/sbin:/bin:/usr/sbin:/usr/bin
+
+mount -t devtmpfs devtmpfs /dev 2>/dev/null
+mount -t proc proc /proc
+mount -t sysfs sysfs /sys
+sleep 1
+
+# Fallback nodes if devtmpfs has not settled
+[ -e /dev/sda ] || mknod /dev/sda b 8 0
+[ -e /dev/sda3 ] || mknod /dev/sda3 b 8 3
+[ -e /dev/sdb ] || mknod /dev/sdb b 8 16
+[ -e /dev/vda ] || mknod /dev/vda b 252 0
+[ -e /dev/vda3 ] || mknod /dev/vda3 b 252 3
+[ -e /dev/vdb ] || mknod /dev/vdb b 252 16
+
+# Disk1 p3 = shadow (INVFS_DEV1), Disk2 = raw volume (INVFS_RAW)
+if [ -b /dev/sda3 ]; then
+    INVFS_DEV1=/dev/sda3; INVFS_RAW=/dev/sdb
+elif [ -b /dev/vda3 ]; then
+    INVFS_DEV1=/dev/vda3; INVFS_RAW=/dev/vdb
+elif [ -b /dev/sda ]; then
+    INVFS_DEV1=""; INVFS_RAW=/dev/sda
+elif [ -b /dev/vda ]; then
+    INVFS_DEV1=""; INVFS_RAW=/dev/vda
+else
+    INVFS_DEV1=""; INVFS_RAW=""
+fi
+
+mkdir -p /tmp /mnt/invfs
+if [ -n "$INVFS_DEV1" ]; then
+    INVFS_DEV1="$INVFS_DEV1" invf-fuse -f "$INVFS_RAW" /mnt/invfs \
+        >/tmp/fuse.log 2>&1 &
+else
+    invf-fuse -f "$INVFS_RAW" /mnt/invfs >/tmp/fuse.log 2>&1 &
+fi
+
+# The file table build for ~66k records takes a few seconds; wait for it
+READY=""
+i=0
+while [ "$i" -lt 120 ]; do
+    grep -q "InvariantFS mounted" /tmp/fuse.log 2>/dev/null && { READY=1; break; }
+    sleep 1
+    i=$((i + 1))
+done
+[ "$READY" = "1" ] || { echo "invf-fuse did not mount"; cat /tmp/fuse.log; sh; }
+
+# rbind essential filesystems into the new root BEFORE chroot
+mount --rbind /proc /mnt/invfs/proc 2>/dev/null
+mount --rbind /sys  /mnt/invfs/sys  2>/dev/null
+mount --rbind /dev  /mnt/invfs/dev  2>/dev/null
+
+# Guest NIC (kernel CONFIG_VIRTIO_NET=m): load deps IN ORDER first
+busybox insmod /lib/modules/failover.ko      2>/dev/null
+busybox insmod /lib/modules/net_failover.ko  2>/dev/null
+busybox insmod /lib/modules/virtio_net.ko    2>/dev/null
+
+exec chroot /mnt/invfs /sbin/init
+```
+
+The initramfs directory also carries `bin/busybox` (+ sh/chroot/mount
+applet symlinks), `sbin/invf-fuse`, and
+`lib/modules/{failover,net_failover,virtio_net}.ko` — those are the
+modules for the exact `bzImage` in use (build them from the same tree;
+out-of-tree module builds will produce `Unknown symbol` at insmod).
+
+### Step V5: In-guest settings
+
+Edit through the host FUSE mount each time (volume unmounted when
+the guest is not running). Script the edits — plain `cat > file`
+overwrites are reliable; `sed -i` created a half-alive shadow record
+once, so read files back after any write.
+
+1. Serial console getty with autologin — `etc/inittab`:
+
+   ```
+   s0:12345:respawn:/sbin/agetty --autologin root -L -w 115200 ttyS0 vt100
+   ```
+
+2. Root password — rewrite `etc/shadow` from scratch (stage3 ships it
+   locked as `root:*:`) and verify the read-back:
+
+   ```bash
+   HASH=$(openssl passwd -6 root)   # pick your own policy in production
+   awk -v h="$HASH" 'BEGIN{FS=OFS=":"} $1=="root"{$2=h} {print}' \
+       shadow-source > etc/shadow
+   chmod 600 etc/shadow
+   head -1 etc/shadow   # MUST show the hash; an empty read is a broken record
+   ```
+
+3. Network + SSH end-up (done inside the guest once, they persist):
+
+   ```bash
+   rc-update add dhcpcd default && rc-service dhcpcd start
+   rc-update add sshd default  && rc-service sshd start
+   printf 'ssh-ed25519 <host pubkey> opencode@host\n' > /root/.ssh/authorized_keys
+   ```
+
+### Step V6: Boot
+
+```bash
+qemu-system-x86_64 -machine q35,accel=kvm -m 4G -cpu host -smp 2 \
+  -kernel /mnt/sde/invfs-uki/vmlinuz \
+  -initrd /mnt/sde/invfs-uki/initramfs.img \
+  -append console=ttyS0,115200 \
+  -drive id=disk1,file=/mnt/sde/invfs-disk1.img,format=raw,if=ide \
+  -drive id=raw_vol,file=/mnt/sde/invfs-root.img,format=raw,if=ide \
+  -drive id=shadow,file=/mnt/sde/invfs-shadow.img,format=raw,if=ide \
+  -netdev user,id=net0,hostfwd=tcp::2222-:22 -device virtio-net-pci,netdev=net0 \
+  -display none -serial stdio -monitor none -no-reboot
+```
+
+Expected console markers:
+
+```
+INVFS_RAW=/dev/sdb DEV1=/dev/sda3
+InvariantFS mounted: 66088 files
+Chrooting to InvFS root...
+INIT: version 3.15 booting
+OpenRC 0.63.3 is starting up Gentoo Linux (x86_64)
+INIT: Entering runlevel: 3
+This is localhost (Linux x86_64 7.3.0-rc2)
+localhost login: root (automatic login)
+```
+
+Then from the host: `ssh -p 2222 root@localhost` (dhcpcd assigns
+10.0.2.15; `mount | grep ' / '` shows `invfs[sdb] on / type fuse`).
+
+### Known pitfalls found during this bootstrap
+
+| Symptom | Cause | Fix |
+|---|---|---|
+| `INIT: cannot execute "/sbin/agetty"` | respawn target lost or broken in `inittab` (or stale FUSE record) | rewrite the full file (`cat >`), never `sed -i` alone |
+| `unix_chkpwd: password check failed for user (root)` | `etc/shadow` record truncated by the FUSE edit | rewrite shadow from scratch, verify read-back |
+| DHCP: `no valid interfaces found` | `virtio_net` is `=m` and nothing insmods it | initramfs `insmod`s failover/net_failover/virtio_net in that order before chroot |
+| ENOSPC mid-extract through FUSE | tar on a live InvFS mount does not handle the dcache ghost face | import offline with `invf-import` |
+| getty prints nothing on ttyS0 | `--noclear` and legacy 38400 defaults lose the serial line | use the `s0` line above with `-L -w 115200` |
+| ring_"respawning too fast" | exec failed 6+ times in a row | look for the first `cannot execute` message above it |
+
 ## QEMU/VM Path
 
-### Step 1: Create and format the volume
+### (Legacy) Step 1: Create and format the volume
+
+> SUPERSEDED for VMs by the Verified Bootstrap Path above. Kept for
+historical reference: some steps (chroot+kernel build recipes,
+configure-guest.sh) still help the bare-metal install.
+
 
 ```bash
 # Create a 10 GiB sparse InvariantFS image
