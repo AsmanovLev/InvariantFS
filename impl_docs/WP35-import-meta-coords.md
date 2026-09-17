@@ -263,3 +263,36 @@ variables don't fall through into `S_IFREG`.
 - E2E gates to run:
   - `bash tools/run-e2e.sh tools/test-writepath.sh`
 - Dependencies: none. WP30 (mapper) is already on `main`.
+---
+
+## Follow-up (2026-09-17)
+
+Three more bugs surfaced after the original WP35 landed, all hitting the
+same code path: `vol_open` → `meta_get_append_pos` → mapper-aware write.
+
+### Bug F: mapper_n stale after lazy alloc
+- **Where:** `meta_mapper_load()` at `vol_meta_merge.c:91`
+- **Why:** Sets `mapper_n = extent_count` once at open. Lazy alloc bumps `extent_count` but not `mapper_n`, so the just-allocated entry is invisible to `meta_mapper_get`.
+- **Fix:** Grow `mapper_n` after every `alloc_meta_extent()` (lazy alloc + new-extent branches).
+
+### Bug G: legacy compact clobbers mapper extents
+- **Where:** `vol_inode_compact()` at `vol_records.c:2171`, called via `compact_apply()` at `vol_records.c:1958`
+- **Why:** Legacy compaction has no mapper gate. `compact_apply` reads the record stream and writes it to `inode_area_start * BLOCK = 8257` (metadata-zone gap), then zeroes the tail past the stream — the tail crosses into adjacent mapper extent blocks at PBA 229402, wiping records the mapper said were elsewhere.
+- **Smoking gun:** `INVFS_TRACE_WIDE=1 bin/invf-cp ... 2>writes.log` — 3 calls to `compact_apply` writing `off=33820672 len=131064` (block 8257) when 1500 cps run, called by `compact_apply` (verified with `addr2line -e bin/invf-cp 0x433e9e`).
+- **Fix:** Gate `vol_inode_compact()` on `v->met0_present && v->meta_mapper`. Return 0 (no compaction) for mapper volumes — mapper already handles its own growth via `alloc_meta_extent`.
+
+### Bug H: vol_flush never persisted mapper / MET0
+- **Where:** `vol_flush()` at `volume.c:2546`
+- **Why:** Wrote superblock + dirty bitmap range + journal, but never `meta_mapper_flush` or `meta_met0_persist`. In-memory cursor advanced correctly within session but `active_offset` / `active_extent` / `extent_count` were lost on close. On reopen mapper table was stale (entries 0), cursor reset to 0.
+- **Fix:** Add `meta_mapper_flush()` + `meta_met0_persist()` to `vol_flush()` after the bitmap range write.
+
+### Bug D regression fix
+- The original Bug D fix set `v->inode_area_start = first_pba`. That broke read paths that compared `idx_get_id()` against `inode_area_start` (the legacy value was needed for that comparison). Reverted — only `inode_area_pos` / `inode_area_end` get rebased onto the active extent.
+
+### FUSE follow-up
+- `build_file_table()` in `fuse_fs.c:136` previously used the legacy inode area range (`p = metadata_zone_start + bm + mapper + journal`, `end = inode_area_pos`). For mapper volumes that range was empty. Rewrote to use `vol_inode_next()` (mapper-aware) which walks all extents via the mapper table.
+
+### Status
+- All 4 fixes committed in `0d5812f`.
+- `make test`: 4722 checks, 0 failures.
+- e2e `test-meta-extent-walk`: 5/6 PASS (cross-extent lookup, sentinel readable, invf-ls reports all files, sweep compaction not declined, invf-verify bit-exact). The one remaining failure (`fsck orphans=128`) is stale state from prior test runs and is not related to these fixes.

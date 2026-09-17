@@ -244,3 +244,45 @@ The 76K orphans consume metadata space, causing `vol_apply_meta()` to return 0 (
 - Avoid rsync to InvFS FUSE mounts — use `invf-import` for bulk data
 - If using rsync, ensure temp file operations work (mkstemp fix in commit `da08ed6`)
 - Monitor orphan count via `invf-fsck` regularly
+
+---
+
+## WP35 follow-up — Mapper Persist + Compact Skip + Mapper_n Growth
+
+**Date:** Sep 17, 2026  
+**Severity:** Critical (data loss on v0.3.0+ volumes after enough writes)  
+**Impact:** `invf-cp` / `invf-import` silently lost records after the active mapper extent filled; e2e `test-meta-extent-walk` reported `358/1501` files findable. Affects every mapper-volume write that crosses an extent boundary.
+
+### Symptom
+- `invf-ls` reports files, but only a fraction survive across reopen (e.g. 357 of 1500 cps).
+- On disk, records appear in `inode_area_start` (block 8257, metadata-zone gap) instead of the mapper extents (`PBA 229402+`).
+- The mapper table on disk correctly names the extents, but those blocks are zero.
+- Smoking gun: `INVFS_TRACE_WIDE=1 bin/invf-cp ... 2>writes.log` shows 3 calls to `compact_apply` writing `off=33820672 len=131064` (block 8257) when 1500 cp iterations run.
+
+### Root Cause
+Three independent bugs landed together; each blocked independently, but only the combination was visible:
+
+**Bug F — `meta_mapper_n` stale after lazy alloc.** `meta_mapper_load()` sets `v->meta_mapper_n = v->met0.extent_count` once at open. `meta_get_append_pos()` then lazy-allocates the first extent, bumps `extent_count` to 1, but never bumps `mapper_n`. Result: `meta_mapper_get(0)` returns zero, the lazy-allocated entry is invisible to subsequent lookups, and the write falls through to the legacy path (`offset + rec_size > extent_size` triggers `ENOSPC` because `extent_size` is read from `entry=0`).
+
+**Bug G — legacy compact runs on mapper volumes.** `vol_inode_compact()` and its `compact_apply()` are gated only on write/read-only + checkpoint checks. They have no mapper check. For mapper volumes they read the record stream (mostly empty in the legacy area), then `compact_apply()` writes the live stream to `inode_area_start * BLOCK = 8257` (legacy metadata-zone gap, not where mapper records live), and finally zeroes the tail — which spills over into adjacent mapper extent blocks (`PBA 229402..229529`), wiping the just-written records.
+
+**Bug H — `vol_flush()` never persisted mapper / MET0.** `vol_flush()` wrote superblock + dirty bitmap range + journal, but never `meta_mapper_flush()` or `meta_met0_persist()`. After `Bug D` rebased the in-memory cursor onto the active extent, the cursor advanced correctly within a session but `active_offset` / `active_extent` / `extent_count` were lost on close. On reopen the mapper table was empty (stale flush since set 0), the cursor reset to 0, and all records appeared "mga will write to PBA=0" — i.e. the legacy area.
+
+Plus a Bug D regression fix: my earlier fix set `v->inode_area_start = first_pba`, which broke the read path that compared `idx_get_id()` against `inode_area_start`. Reverted — only `inode_area_pos` / `inode_area_end` get rebased onto the active extent.
+
+### Fix
+- `vol_meta_merge.c:651,712` — grow `mapper_n` after every lazy alloc / new-extent allocation
+- `vol_records.c:2213` — gate `vol_inode_compact()` on `v->met0_present && v->meta_mapper` (return 0, no compaction for mapper volumes; the mapper already handles its own growth via `alloc_meta_extent`)
+- `vol_records.c:1598` — `inode_area_make_room` no longer falls through to `vol_inode_compact` for mapper volumes (the gate handles it)
+- `volume.c:2624-2638` — `vol_flush()` now calls `meta_mapper_flush()` + `meta_met0_persist()` so the cursor survives close/reopen
+- `volume.c:1524` — revert the buggy `inode_area_start = first_pba` from Bug D (read path was using it for `idx_get_id` bounds)
+- `fuse_fs.c:136-208` — `build_file_table()` rewritten to use `vol_inode_next()` (mapper-aware) instead of legacy inode area range
+- All new debug prints gated behind `#ifdef INVFS_DEBUG_META_EXTENTS` to avoid Heisenbug risk on future perf work
+
+### Result
+- `make test`: 4722 checks, 0 failures
+- `invf-cp` loop 1500/1500: all records land in mapper extents, `invf-ls` reports all 1500
+- e2e `test-meta-extent-walk`: cross-extent lookup PASS, sentinel readable PASS, `invf-ls` reports all files PASS, sweep compaction not declined PASS, `invf-verify` PASS (5/6; the fsck-orphan fail is pre-existing state from prior runs)
+- rsync of `/usr/lib64` (2932 files, 154MB) via `invf-fuse`: 100% MD5 match against the source tree
+- `invf-ls` on `/mnt/sde/invfs-root.img`: 65804 files visible through mapper scan
+- Commit: `0d5812f`
