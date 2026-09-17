@@ -3895,6 +3895,53 @@ uint64_t vol_inode_area_free(invfs_volume *v)
 }
 
 
+/* WP40: mapper-aware valid-record walker. One implementation for every
+ * statistic/sweep/dedupe/heat/pass so the "records live in dynamic
+ * extents" era does not need seven near-identical CRC loops. Torn
+ * records (CRC mismatch) are skipped exactly like vol_open does, so a
+ * half-written append cannot hide every name after it from any of the
+ * passes; stops cleanly when the mapper chain yields no extent
+ * containing a probe position or on a legacy non-record byte. */
+int vol_records_walk(invfs_volume *v,
+                     int (*cb)(void *ctx, uint64_t rec_pos,
+                               const invfs_inode_rec *h,
+                               const uint8_t *rec),
+                     void *ctx)
+{
+    int mapper;
+    uint64_t pos;
+    if (!v || !cb) return -1;
+    mapper = v->met0_present && v->meta_mapper && v->met0.extent_count > 0;
+    pos = mapper ? 0 : v->inode_area_start * INVFS_BLOCK_SIZE;
+    for (;;) {
+        uint32_t rl = 0, magic = 0;
+        uint64_t np, rec_pos;
+        uint8_t *buf;
+        invfs_inode_rec h;
+        uint32_t stored, calc;
+
+        /* vol_inode_next unifies both worlds: on a mapper volume it hops
+         * across extents (pos==0 probes the map), on legacy it bounds
+         * the walk to [inode_area_start, inode_area_pos) */
+        np = vol_inode_next(v, pos, &magic, NULL, NULL, NULL, 0, &rl);
+        if (!np) return 0;
+        rec_pos = np - (uint64_t)rl - 4;
+        buf = (uint8_t *)malloc((size_t)rl + 4);
+        if (!buf) return -1;
+        if (vol_read_raw(v, rec_pos, buf, (size_t)rl + 4) != 0) {
+            free(buf); return -1;
+        }
+        memcpy(&stored, buf + rl, 4);
+        calc = invfs_crc32c(buf, rl);
+        if (calc != stored) { free(buf); pos = np; continue; }
+        memcpy(&h, buf, sizeof(h));
+        if (cb(ctx, rec_pos, &h, buf) != 0) { free(buf); return -1; }
+        free(buf);
+        pos = np;
+    }
+}
+
+
 uint64_t vol_inode_next(invfs_volume *v, uint64_t pos, uint32_t *magic_out,
                         uint64_t *inode_out, uint64_t *size_out,
                         char *name_out, size_t name_cap, uint32_t *rec_len_out)

@@ -300,6 +300,22 @@ uint64_t vol_inode_next(invfs_volume *v, uint64_t pos, uint32_t *magic_out,
                         uint64_t *inode_out, uint64_t *size_out,
                         char *name_out, size_t name_cap, uint32_t *rec_len_out);
 
+/* WP40: walk-every-record callback used by all mapper-aware record
+ * passes (stats, sweep collector, dedupe hasher, heat persist/promote,
+ * rename/sibling collectors). CB receives a record buffer that INCLUDES
+ * the trailing CRC32C and has been CRC-verified on behalf of the
+ * caller; torn records are skipped by the walker itself so the caller
+ * only sees valid ones. The walk reads the mapper extents via
+ * vol_inode_next on mapper volumes and the plain [inode_area_start,
+ * inode_area_pos) region on legacy volumes. cb returns 0 = continue,
+ * nonzero = abort the walk (value becomes vol_records_walk's result).
+ * Passing NULL the name/ctx is legal. */
+int vol_records_walk(invfs_volume *v,
+                     int (*cb)(void *ctx, uint64_t rec_pos,
+                               const invfs_inode_rec *h,
+                               const uint8_t *rec),
+                     void *ctx);
+
 #endif
 uint64_t vol_count_free(invfs_volume *v);
 /* per-REGION free counters (maintained incrementally by alloc/free):
