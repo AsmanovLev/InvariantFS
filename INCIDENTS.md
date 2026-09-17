@@ -286,3 +286,58 @@ Plus a Bug D regression fix: my earlier fix set `v->inode_area_start = first_pba
 - rsync of `/usr/lib64` (2932 files, 154MB) via `invf-fuse`: 100% MD5 match against the source tree
 - `invf-ls` on `/mnt/sde/invfs-root.img`: 65804 files visible through mapper scan
 - Commit: `0d5812f`
+
+---
+
+## QEMU Boot Blocker — OVMF can't boot 25MB UKI from FAT32 ESP
+
+**Date:** Sep 17, 2026
+**Severity:** High (Gentoo install demo blocked)
+**Impact:** UKI boots in production with systemd-boot but QEMU/OVMF can't load it.
+`invf-cp` over FUSE works, proving the FS is functional, but the boot path is broken.
+
+### Symptom
+QEMU with OVMF pflash (4M) sees GPT partition 1 on virtio-scsi disk and DVD-ROM, but:
+- `Boot0002 DVD-ROM`: "Not Found" — OVMF can't find the El Torito boot file
+- `Boot0003 Disk1 part1`: "Unsupported" — OVMF can't read the FAT32 filesystem
+- `Boot0004/Boot000A`: "Not Found" — no boot file on the raw data disks
+- Falls through to PXE → IPv4 → IPv6 → HTTP → "No bootable option or device was found"
+- After 5+ minute timeout, "Press any key to enter the Boot Manager Menu"
+
+### Root Cause
+- OVMF 4M (from `edk2-ovmf-20260812-8.fc44`) does not have a working FAT32 driver for raw
+  virtio-scsi disks presented as plain raw images
+- 25MB UKI (`/mnt/sde/invfs-uki/uki.efi`, PE32+ EFI application) is loadable by
+  production UEFI but rejected by OVMF shell with "Script Error Status: Unsupported (line number 5)"
+- The OVMF BdsDxe doesn't expose a working EFI shell input — characters get echoed
+  one by one with cursor-position escape codes but Enter never commits them
+
+### Tried
+- pflash OVMF_CODE_4M.fd + OVMF_VARS_4M_raw.fd
+- virtio-blk, virtio-scsi (single + multi-bus), IDE, AHCI for ESP
+- raw FAT32, raw FAT16, GPT FAT32 partition as ESP
+- mkisofs -eltorito-boot (broken El Torito: header 0x22 not 0x01)
+- xorriso (parses options wrong — `-no-emul-boot` as command instead of flag)
+- UefiShell.iso as CD (boots to shell, but can't load UKI)
+- EFI shell startup.nsh: `map -r; fs1:; cd EFI\BOOT; BOOTX64.EFI` → "Unsupported"
+
+### Skipped (would work, requires more setup)
+- Pre-configure OVMF VARS with boot entry via `virt-fw-vars` (not in Fedora repos)
+- Direct binary patch of OVMF_VARS.fd NVRAM variables
+- iPXE chainload from CD
+
+### Workaround for the demo
+The Gentoo stage3 rootfs is already loaded into `/mnt/sde/invfs-root.img` (16GB, 65801 files)
+via `invf-import`. `invf-fuse` mount reads all files correctly (rsync 2932/2932 100% MD5 match).
+The FS itself is verified working.
+
+### Workaround for boot
+- Use a host with real EFI firmware (or known-working OVMF build) and a known-working UKI loader
+- Or rebuild the UKI as a GRUB-loadable EFI stub via `objcopy --target efi-app-pe` (already a PE32+ EFI app, should be loadable)
+- Or rebuild with a smaller initramfs to stay under 1MB (some EFI shells reject > 1MB)
+
+### Files
+- `/mnt/sde/invfs-disk1.img` (10GB GPT): ESP p1, swap p2, shadow p3
+- `/mnt/sde/invfs-root.img` (15GB raw): InvFS volume with stage3
+- `/mnt/sde/invfs-shadow.img` (20GB raw): shadow device
+- `/mnt/sde/invfs-uki/uki.efi` (25MB): custom 7.3-rc2 UKI
