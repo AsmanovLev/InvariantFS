@@ -864,6 +864,17 @@ int vmux_write(invfs_volume *v, const void *buf, size_t len)
 {
     uint64_t off = v->mux_pos;
     const uint8_t *in = (const uint8_t *)buf;
+#ifdef INVFS_DEBUG_META_EXTENTS
+    static int n_writes = 0;
+    if (n_writes++ < 5000) {
+        fprintf(stderr, "[vmux.write] off=%llu len=%zu (block=%llu)\n",
+                (unsigned long long)off, len, (unsigned long long)(off / INVFS_BLOCK_SIZE));
+        if (off >= 33820672 && off < 33951736 + 4096) {
+            fprintf(stderr, "  [vmux.write] CALLER INFO: caller=%p buf=%p\n",
+                    __builtin_return_address(0), buf);
+        }
+    }
+#endif
 
     if (v->ndev < 2 && !v->degraded) {
         int rc = blkio_pwrite(&v->io, off, buf, len);
@@ -1513,7 +1524,10 @@ static invfs_volume *vol_open_inner(const char *path, int at_ckpt,
 
     /* WP30: on a mapper volume the append cursor is extent-relative.
      * Rebase the cursor onto the active extent so writers append inside
-     * extent 0 and readers find what was written there. */
+     * extent 0 and readers find what was written there. inode_area_start
+     * stays at the legacy position so legacy read paths that compare
+     * idx_get_id() against inode_area_start still fall through (idx
+     * positions sit in shadow extents, past legacy_start). */
     if (v->met0_present && v->meta_mapper &&
         v->met0.extent_count > 0 &&
         v->met0.active_extent < (uint64_t)v->met0.extent_count) {
@@ -1523,7 +1537,6 @@ static invfs_volume *vol_open_inner(const char *path, int at_ckpt,
             uint64_t off = v->met0.active_offset < esz ? v->met0.active_offset : esz;
             uint64_t first_pba = invfs_meta_ext_pba(act);
             v->inode_area_pos = first_pba * (uint64_t)INVFS_BLOCK_SIZE + off;
-            v->inode_area_start = first_pba;
             if (v->inode_area_end < first_pba * (uint64_t)INVFS_BLOCK_SIZE + esz)
                 v->inode_area_end = first_pba * (uint64_t)INVFS_BLOCK_SIZE + esz;
         }
@@ -1544,34 +1557,106 @@ static invfs_volume *vol_open_inner(const char *path, int at_ckpt,
         }
     } else if (l2p_replay(v) != 0) { *err = -9; goto fail; }
 
-    /* scan existing inode records: find end of area + max inode id + name index */
+    /* scan existing inode records: find end of area + max inode id + name index.
+     * WP30: on a mapper volume the records span ALL extents, not just the active
+     * one. The active extent's end is where NEW writes go (the CRC-validated
+     * tail), but the scan must walk earlier extents in full. We split the walk
+     * into per-extent segments with the active extent trimmed at inode_area_pos. */
     {
         uint64_t p = v->inode_area_pos;
-        /* WP24-lite: at a time-travel open the scan (and with it the name
-         * index and the WP22d consistent-cut fold) stops at the
-         * checkpoint's append pointer: the post-checkpoint records,
-         * tombstones and the retention registry itself stay invisible.
-         * ckp_stage_replay already validated the pointer. */
-        const uint64_t scan_end = at_ckpt ? v->ck.inode_area_pos
-                                          : v->inode_area_end;
+        const uint64_t scan_end_at_ckpt = at_ckpt ? v->ck.inode_area_pos : 0;
         uint64_t found = 0;
         scan_set ss = { NULL, 0, 0 };
         size_t si;
+        int done = 0;
 
         if (idx_init(v) != 0) { *err = -6; goto fail; }
-        while (p + sizeof(invfs_inode_rec) <= scan_end) {
+        /* extent sequence to walk: when a mapper exists, every extent 0..N-1
+         * with the active extent's end trimmed at inode_area_pos; otherwise
+         * the legacy contiguous region from inode_area_start..inode_area_end. */
+        size_t scan_ext_idx = 0;
+        uint64_t scan_ext_end = 0;
+        if (v->met0_present && v->meta_mapper && v->met0.extent_count > 0) {
+            uint64_t e0 = meta_mapper_get(v, 0);
+            if (e0) {
+                uint64_t pba0 = invfs_meta_ext_pba(e0);
+                uint64_t sz0 = invfs_meta_ext_size(e0);
+                p = pba0 * INVFS_BLOCK_SIZE;
+                scan_ext_idx = 0;
+                scan_ext_end = pba0 * INVFS_BLOCK_SIZE + sz0;
+                /* For the active extent: scan the full extent. The cursor
+                 * (v->inode_area_pos) names where NEW writes go, but the
+                 * active_offset field is not persisted at every record
+                 * append -- on reopen it may be 0 even though records exist
+                 * from offset 0 upward. The CRC validation per-record
+                 * prevents us from reading past the last valid record. */
+                if (at_ckpt && scan_ext_end > scan_end_at_ckpt)
+                    scan_ext_end = scan_end_at_ckpt;
+            }
+        } else {
+            scan_ext_end = v->inode_area_end;
+            if (at_ckpt && scan_ext_end > scan_end_at_ckpt)
+                scan_ext_end = scan_end_at_ckpt;
+        }
+        
+
+        for (;;) {
+            if (done) break;
+            /* extent-advancement at the TOP of the inner loop: when the
+             * previous iteration left us at an extent boundary (either by
+             * a record's tail, or by magic=0/IO error forcing p =
+             * scan_ext_end), try to move on to the next extent. at_ckpt
+             * truncates each extent at the checkpoint's append pointer
+             * (WP24-lite). */
+            if (p >= scan_ext_end) {
+                int advanced = 0;
+                while (scan_ext_idx + 1 < (size_t)v->met0.extent_count) {
+                    uint64_t next_e = meta_mapper_get(v, scan_ext_idx + 1);
+                    if (!next_e) break;
+                    uint64_t next_pba = invfs_meta_ext_pba(next_e);
+                    uint64_t next_sz = invfs_meta_ext_size(next_e);
+                    scan_ext_idx++;
+                    p = next_pba * INVFS_BLOCK_SIZE;
+                    scan_ext_end = next_pba * INVFS_BLOCK_SIZE + next_sz;
+                    if (at_ckpt && scan_ext_end > scan_end_at_ckpt)
+                        scan_ext_end = scan_end_at_ckpt;
+                    if (p + sizeof(invfs_inode_rec) <= scan_ext_end) {
+                        advanced = 1;
+                        break;
+                    }
+                }
+                if (!advanced) { done = 1; break; }
+            }
+            if (p + sizeof(invfs_inode_rec) > scan_ext_end) {
+                /* Not enough room for even one more record header in this
+                 * extent -- a clean extent has zero bytes before any
+                 * record; advance to the next extent. Continue (not
+                 * break) so we don't fall out of for(;;). */
+                p = scan_ext_end;
+                continue;
+            }
             invfs_inode_rec rec_h;
             uint8_t *rb = NULL;
             if (io_seek(&v->io, p) != 0 ||
-                io_read(&v->io, &rec_h, sizeof(rec_h)) != 0)
-                break;
-            if (rec_h.magic != INODE_REC_MAGIC && rec_h.magic != TOMBSTONE_MAGIC)
-                break;  /* end of records */
+                io_read(&v->io, &rec_h, sizeof(rec_h)) != 0) {
+                p = scan_ext_end;
+                continue;  /* restart loop, advancement will run */
+            }
+            if (rec_h.magic != INODE_REC_MAGIC && rec_h.magic != TOMBSTONE_MAGIC) {
+                /* end of records in this extent: a clean extent has zero
+                 * bytes before any record; advance to the next extent. */
+                p = scan_ext_end;
+                continue;  /* restart loop, advancement will run */
+            }
             if (rec_h.rec_len < sizeof(invfs_inode_rec) ||
                 rec_h.rec_len > INVFS_MAX_REC_LEN ||
-                p + rec_h.rec_len + 4 > scan_end) {
+                p + rec_h.rec_len + 4 > scan_ext_end) {
                 v->scan_anomalies++;
-                break;  /* corrupted tail — stop */
+                /* corrupt or out-of-extent tail: stop scanning this extent
+                 * and let the top-of-loop advancement move on to the next.
+                 * Continue (not break) so we don't fall out of for(;;). */
+                p = scan_ext_end;
+                continue;
             }
             /* torn-write protection: verify trailing CRC32C; a record
              * whose CRC fails is a half-written append (crash/SIGPIPE),
@@ -1636,14 +1721,16 @@ static invfs_volume *vol_open_inner(const char *path, int at_ckpt,
                                  rec_h.file_size);
                 }
             }
-            free(rb);
+free(rb);
             p += rec_h.rec_len + 4;
             found++;
         }
-        v->inode_area_pos = p;
-        /* everything the scan just walked is on the device already: the
-         * first barrier anchor (WP22c/F1) */
-        v->inode_area_durable = p;
+    /* everything the scan just walked is on the device already: the
+     * first barrier anchor (WP22c/F1) */
+    v->inode_area_durable = p;
+    /* everything the scan just walked is on the device already: the
+     * first barrier anchor (WP22c/F1) */
+    v->inode_area_durable = p;
         /* fold the consistent cut into the live index: per name, the newest
          * non-broken version; a name with none is absent (logged loudly) */
         for (si = 0; ss.buck && si <= ss.mask; si++) {
@@ -2494,6 +2581,23 @@ int vol_flush(invfs_volume *v)
         vol_io_error_latch(v, "superblock write");
         return -1;
     }
+    /* WP30: persist the dynamic metadata extent mapper (MET0 descriptor
+     * + mapper table). Without this the cursor (active_offset, active_extent,
+     * extent_count) is lost on close: every record append advances
+     * active_offset but never persists it; on reopen the cursor points at
+     * the START of the active extent, hiding all the records the prior
+     * session wrote there. Bug D fix relied on the on-disk cursor; this
+     * closes the loop. */
+    if (v->met0_present && v->meta_mapper) {
+        if (meta_mapper_flush(v) != 0) {
+            vol_io_error_latch(v, "mapper flush");
+            return -1;
+        }
+        if (meta_met0_persist(v) != 0) {
+            vol_io_error_latch(v, "MET0 persist");
+            return -1;
+        }
+    }
     /* Persist only the part of the bitmap that changed. Dokan flushes on
      * every file close and the device is unbuffered write-through, so the
      * old unconditional full-bitmap write cost a synchronous 480 KB per
@@ -2511,6 +2615,11 @@ int vol_flush(invfs_volume *v)
             lo -= lo % INVFS_BLOCK_SIZE;
             hi = ((hi + INVFS_BLOCK_SIZE - 1) / INVFS_BLOCK_SIZE) * INVFS_BLOCK_SIZE;
             if (hi > bm_bytes) hi = bm_bytes;
+#ifdef INVFS_DEBUG_META_EXTENTS
+            fprintf(stderr, "[flush.bm] write offset=%llu len=%llu (lo=%llu hi=%llu bm_bytes=%llu)\n",
+                    (unsigned long long)(base + lo), (unsigned long long)(hi - lo),
+                    (unsigned long long)lo, (unsigned long long)hi, (unsigned long long)bm_bytes);
+#endif
             if (hi > lo) {
                 if (io_seek(&v->io, base + lo) != 0 ||
                     io_write(&v->io, v->bitmap + lo, (size_t)(hi - lo)) != 0) {

@@ -136,8 +136,19 @@ static int cmp_u64(const void *pa, const void *pb)
 static void build_file_table(void)
 {
     const invfs_superblock *sb = vol_sb(g_vol);
-    uint64_t bm = (sb->total_blocks / 8 + INVFS_BLOCK_SIZE - 1) / INVFS_BLOCK_SIZE;
-    uint64_t p = (sb->metadata_zone_start + bm + INVFS_META_EXT_BLOCKS + INVFS_JOURNAL_BLOCKS) * INVFS_BLOCK_SIZE;
+    /* WP30: records live in dynamic mapper extents. Walk them with
+     * vol_inode_next, which is mapper-aware (handles extent boundaries
+     * across the active extent and the older sealed extents). The legacy
+     * "metadata zone + bitmap + journal" calculation is only used as a
+     * starting hint for format_version=0 volumes; for v0.3.0+ the
+     * mapper is authoritative. */
+    uint64_t p;
+    uint32_t magic0;
+    uint64_t inode0, size0;
+    uint32_t rec_len0;
+    char name0[256];
+    /* find the first record in the mapper extents */
+    p = vol_inode_next(g_vol, 0, &magic0, &inode0, &size0, name0, sizeof(name0), &rec_len0);
     uint64_t end = vol_inode_area_pos(g_vol);
     fs_entry *recs = NULL;
     uint64_t nrecs = 0, caprecs = 0;
@@ -153,22 +164,15 @@ static void build_file_table(void)
      * walk anyway) and REQUIRED on a time-travel mount (WP24-lite), where
      * the post-checkpoint records physically follow the cut but must stay
      * invisible -- the checkpoint's consistent view ends at the cut. */
-    while (p + 8 <= end) {
-        uint32_t magic, rec_len;
-        uint64_t inode_id, file_size, ctime;
-        uint32_t name_len;
-        char name[257];
+    while (p != 0 && p <= end) {
+        uint32_t magic = magic0, rec_len = rec_len0;
+        uint64_t inode_id = inode0, file_size = size0, ctime = 0;
+        uint32_t name_len = (uint32_t)strlen(name0);
+        char *name = name0;
+        uint64_t cur_pos = p - (uint64_t)rec_len - 4;  /* record starts here */
 
-        if (vol_read_raw(g_vol, p, &magic, 4) != 0) break;
-        if (magic != 0x444F4E49u && magic != 0x544C4544u) break;  /* INOD | DELT */
-        if (vol_read_raw(g_vol, p + 4, &rec_len, 4) != 0) break;
-        if (vol_read_raw(g_vol, p + 8, &inode_id, 8) != 0) break;
-        if (vol_read_raw(g_vol, p + 16, &file_size, 8) != 0) break;
-        if (vol_read_raw(g_vol, p + 24, &ctime, 8) != 0) break;
-        if (vol_read_raw(g_vol, p + 32, &name_len, 4) != 0) break;
-        if (name_len > 256) break;
-        if (vol_read_raw(g_vol, p + 36, name, name_len) != 0) break;
-        name[name_len] = 0;
+        /* read ctime from disk at the same offset the old loop did */
+        if (vol_read_raw(g_vol, cur_pos + 24, &ctime, 8) != 0) break;
 
         if (magic == 0x544C4544u) {  /* tombstone */
             if (ntomb == captomb) {
@@ -182,7 +186,7 @@ static void build_file_table(void)
             tpos[ntomb] = file_size;
             tid[ntomb] = inode_id;
             ntomb++;
-            p += (uint64_t)rec_len + 4;
+            p = vol_inode_next(g_vol, p, &magic0, &inode0, &size0, name0, sizeof(name0), &rec_len0);
             continue;
         }
 
@@ -198,9 +202,9 @@ static void build_file_table(void)
         recs[nrecs].inode_id = inode_id;
         recs[nrecs].size = file_size;
         recs[nrecs].ctime = ctime;
-        recs[nrecs].pos = p;
+        recs[nrecs].pos = cur_pos;
         nrecs++;
-        p += (uint64_t)rec_len + 4;
+        p = vol_inode_next(g_vol, p, &magic0, &inode0, &size0, name0, sizeof(name0), &rec_len0);
     }
 
     /* pass 2: apply tombstones (records sorted by pos for bsearch) */

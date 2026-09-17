@@ -97,6 +97,10 @@ int meta_mapper_flush(invfs_volume *v)
 {
     if (!v->meta_mapper || v->sb.meta_mapper_pba == 0) return 0;
     uint64_t bytes = INVFS_META_EXT_BLOCKS * INVFS_BLOCK_SIZE;
+#ifdef INVFS_DEBUG_META_EXTENTS
+    fprintf(stderr, "[flush.mapper] write at pba=%llu bytes=%llu\n",
+            (unsigned long long)v->sb.meta_mapper_pba, (unsigned long long)bytes);
+#endif
     if (io_seek(&v->io, v->sb.meta_mapper_pba * INVFS_BLOCK_SIZE) != 0 ||
         io_write(&v->io, v->meta_mapper, (size_t)bytes) != 0)
         return -1;
@@ -604,7 +608,11 @@ int meta_met0_persist(invfs_volume *v)
     invfs_met0 m = v->met0;
     m.crc32c = 0;
     m.crc32c = meta_met0_crc(&m);
-
+#ifdef INVFS_DEBUG_META_EXTENTS
+    fprintf(stderr, "[flush.met0] write ext_count=%llu active_extent=%llu active_offset=%llu\n",
+            (unsigned long long)m.extent_count, (unsigned long long)m.active_extent,
+            (unsigned long long)m.active_offset);
+#endif
     if (io_seek(&v->io, INVFS_MET0_OFF) != 0 ||
         io_write(&v->io, &m, sizeof(m)) != 0)
         return -1;
@@ -633,6 +641,12 @@ int meta_get_append_pos(invfs_volume *v, uint64_t rec_size,
     uint64_t extent_idx = v->met0.active_extent;
     uint64_t offset = v->met0.active_offset;
 
+#ifdef INVFS_DEBUG_META_EXTENTS
+    fprintf(stderr, "[mga] in: extent_idx=%llu off=%llu mapper_n=%zu ec=%llu\n",
+            (unsigned long long)extent_idx, (unsigned long long)offset,
+            v->meta_mapper_n, (unsigned long long)v->met0.extent_count);
+#endif
+
     uint64_t entry = (v->meta_mapper && extent_idx < v->meta_mapper_n)
                      ? v->meta_mapper[extent_idx] : 0;
 
@@ -641,6 +655,10 @@ int meta_get_append_pos(invfs_volume *v, uint64_t rec_size,
         uint64_t new_idx = alloc_meta_extent(v, INVFS_META_EXT_MIN_SIZE_CLASS);
         if (new_idx == 0) { pthread_rwlock_unlock(&v->meta_lock); return -1; }
         v->met0.extent_count = 1;
+        /* mapper_n must cover the new entry -- meta_mapper_load sets it
+         * from extent_count ONCE at open; lazy alloc must grow it. */
+        if (v->meta_mapper_n < (size_t)v->met0.extent_count)
+            v->meta_mapper_n = (size_t)v->met0.extent_count;
         entry = (v->meta_mapper && extent_idx < v->meta_mapper_n)
                 ? v->meta_mapper[extent_idx] : 0;
         if (!entry) { pthread_rwlock_unlock(&v->meta_lock); return -1; }
@@ -661,6 +679,11 @@ int meta_get_append_pos(invfs_volume *v, uint64_t rec_size,
 
     uint64_t extent_size = invfs_meta_ext_size(entry);
     uint64_t pba = invfs_meta_ext_pba(entry);
+#ifdef INVFS_DEBUG_META_EXTENTS
+    fprintf(stderr, "[mga] post: pba=%llu esz=%llu off=%llu rec_size=%llu\n",
+            (unsigned long long)pba, (unsigned long long)extent_size,
+            (unsigned long long)offset, (unsigned long long)rec_size);
+#endif
 
     if (offset + rec_size > extent_size) {
         /* Need a new extent. Size it so it can hold rec_size. */
@@ -688,14 +711,23 @@ int meta_get_append_pos(invfs_volume *v, uint64_t rec_size,
                 }
             }
             if (offset + rec_size > extent_size) {
+#ifdef INVFS_DEBUG_META_EXTENTS
+                fprintf(stderr, "[mga] alloc failed AND no ext worked, ENOSPC\n");
+#endif
                 pthread_rwlock_unlock(&v->meta_lock); return -2;  /* ENOSPC */
             }
         } else {
+#ifdef INVFS_DEBUG_META_EXTENTS
+            fprintf(stderr, "[mga] alloc_meta_extent returned 0, trying extend\n");
+#endif
             /* New extent allocated */
             extent_idx = new_idx - 1;  /* alloc_meta_extent returns 1-based */
             v->met0.active_extent = extent_idx;
             v->met0.active_offset = 0;
             v->met0.extent_count++;
+            /* grow mapper_n so meta_mapper_get sees the new entry */
+            if (v->meta_mapper_n < (size_t)v->met0.extent_count)
+                v->meta_mapper_n = (size_t)v->met0.extent_count;
 
             entry = (v->meta_mapper && extent_idx < v->meta_mapper_n)
                     ? v->meta_mapper[extent_idx] : 0;

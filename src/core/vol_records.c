@@ -1588,6 +1588,11 @@ int inode_area_make_room(invfs_volume *v, uint64_t need)
     if (v->time_travel || v->ck_present || !vol_write_enabled(v) ||
         vol_compact_pending(v))
         return -1;
+#ifdef INVFS_DEBUG_META_EXTENTS
+    fprintf(stderr, "[make_room] COMPACTING: need=%llu active_off=%llu ext_count=%llu\n",
+            (unsigned long long)need, (unsigned long long)v->met0.active_offset,
+            (unsigned long long)v->met0.extent_count);
+#endif
     if (vol_inode_compact(v, NULL, NULL) < 0)
         return -1;
     /* after compaction: re-check. */
@@ -2189,6 +2194,14 @@ int vol_inode_compact(invfs_volume *v, uint64_t *before_out,
     if (!vol_write_enabled(v)) {
         fprintf(stderr, "inode compact: skipped (volume is read-only or "
                 "awaiting recovery)\n");
+        return 0;
+    }
+    /* WP30 (v0.3.0+): mapper volumes use dynamic metadata extents. The
+     * legacy "linear inode area" compaction has no place to write -- the
+     * active extent is appended-to via meta_get_append_pos. Allocation
+     * comes from the shadow zone. Refuse compaction here rather than
+     * rewriting records into the metadata-zone gap. */
+    if (v->met0_present && v->meta_mapper) {
         return 0;
     }
     if (v->ck_present) {
