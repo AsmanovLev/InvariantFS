@@ -2074,6 +2074,9 @@ static int invf_utimens(const char *path, const struct timespec tv[2],
     invfs_meta_pub patch;
     int rc = perm_check_traversal(path);
     if (rc) return rc;
+    /* the mount root has no record to patch (rsync utimens(".") first);
+     * succeed silently instead of a bogus ENOSPC (see invf_chown). */
+    if (strcmp(path, "/") == 0) return 0;
     memset(&patch, 0, sizeof patch);
     patch.mtime = tv[1].tv_sec;   /* [0]=atime, [1]=mtime */
     patch.atime = tv[0].tv_sec;
@@ -2115,6 +2118,9 @@ static int invf_chmod(const char *path, mode_t mode, struct fuse_file_info *fi)
             }
         }
     }
+    /* the mount root has no record to patch; POSIX: chmod on "." = ENOSYS
+     * is loud but rsync fires it first -- succeed silently instead. */
+    if (strcmp(path, "/") == 0) return 0;
     pthread_mutex_unlock(&g_io_lock);
     memset(&patch, 0, sizeof patch);
     patch.mode = mode & 07777;
@@ -2128,6 +2134,10 @@ static int invf_chown(const char *path, uid_t uid, gid_t gid,
     char ename[300];
     invfs_meta_pub cur;
     struct acreds c;
+    /* rsync/tar chgrp the MOUNT ROOT ("/") as their first op; the root has
+     * no record, so meta_apply_patch would report ENOSPC. POSIX chown on
+     * "." succeeds silently (nothing to persist) -- return 0 here. */
+    if (strcmp(path, "/") == 0) return 0;
     int rc = perm_check_traversal(path);
     if (rc) return rc;
     if (!meta_for_path(path, ename, sizeof ename, &cur))
