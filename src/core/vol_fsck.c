@@ -387,20 +387,40 @@ int vol_fsck_scan(invfs_volume *v, invfs_fsck_report *rep, int fix)
     /* pass 1: ordered replay of the area -- the name-keyed live set, with
      * the consistent cut applied per record (broken = some AST segment has
      * no mapping in the replayed journal).
-     * Scan the FULL metadata zone tail, not just v->inode_area_pos
-     * (vol_open truncates the area at the first corrupt record). */
+     * WP30: on a mapper volume the records live in dynamic extents, so the
+     * walk goes through vol_inode_next (mapper-aware). On a legacy volume
+     * the full metadata-zone tail scan applies unchanged. */
+    int mapper_walk = v->met0_present && v->meta_mapper;
+    uint64_t seek_pos = 0;               /* arg to vol_inode_next */
+    /* Legacy range: the whole metadata-zone tail (incl. unflushed tail). */
     end = (v->sb.metadata_zone_start + v->sb.metadata_zone_blocks)
           * INVFS_BLOCK_SIZE;
     pos = v->inode_area_start * INVFS_BLOCK_SIZE;
-    while (pos + sizeof(invfs_inode_rec) <= end) {
+    for (;;) {
         invfs_inode_rec rh;
         uint32_t crc_stored, crc_calc;
         uint8_t *rec = NULL;
+        if (!mapper_walk && pos + sizeof(invfs_inode_rec) > end) break;
+        if (mapper_walk) {
+            uint32_t magic, rec_len;
+            uint64_t inode_id, file_size;
+            char nm[256];
+            uint64_t nxt = vol_inode_next(v, seek_pos, &magic, &inode_id,
+                                          &file_size, nm, sizeof(nm),
+                                          &rec_len);
+            if (nxt == 0) break;     /* records exhausted */
+            pos = nxt - (uint64_t)rec_len - 4;   /* the record's start */
+            seek_pos = nxt;
+        }
         if (io_seek(&v->io, pos) != 0 ||
-            io_read(&v->io, &rh, sizeof(rh)) != 0) break;
-        if (rh.magic != INODE_REC_MAGIC && rh.magic != TOMBSTONE_MAGIC) break;
+            io_read(&v->io, &rh, sizeof(rh)) != 0) {
+            break;
+        }
+        if (rh.magic != INODE_REC_MAGIC && rh.magic != TOMBSTONE_MAGIC) {
+            break;
+        }
         if (rh.rec_len < sizeof(invfs_inode_rec) ||
-            pos + rh.rec_len + 4 > end) {
+            (!mapper_walk && pos + rh.rec_len + 4 > end)) {
             rep->bad_recs++;
             break;
         }
@@ -417,7 +437,7 @@ int vol_fsck_scan(invfs_volume *v, invfs_fsck_report *rep, int fix)
             /* corrupt record: report, skip past it, keep scanning */
             rep->bad_recs++;
             free(rec);
-            pos += rh.rec_len + 4;
+            if (!mapper_walk) pos += (uint64_t)rh.rec_len + 4;
             continue;
         }
         {
@@ -446,7 +466,7 @@ int vol_fsck_scan(invfs_volume *v, invfs_fsck_report *rep, int fix)
             }
         }
         free(rec);
-        pos += rh.rec_len + 4;
+        if (!mapper_walk) pos += (uint64_t)rh.rec_len + 4;
     }
 
     /* pass 1b: the cut accounting + (fix) quarantine. Per name: the live
