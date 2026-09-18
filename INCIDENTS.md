@@ -341,3 +341,57 @@ The FS itself is verified working.
 - `/mnt/sde/invfs-root.img` (15GB raw): InvFS volume with stage3
 - `/mnt/sde/invfs-shadow.img` (20GB raw): shadow device
 - `/mnt/sde/invfs-uki/uki.efi` (25MB): custom 7.3-rc2 UKI
+
+---
+
+## WP40-WP47 — Mapper-aware record-walker sweep
+
+**Date:** Sep 18, 2026
+**Severity:** Critical (silent no-op of sweep/stats/heat/dedupe on v0.3.0+ volumes)
+**Impact:** On every v0.3.0+ mapper volume (records live in dynamic meta
+extents, not the legacy contiguous inode area) a whole class of engine
+components walked the legacy `[inode_area_start, inode_area_pos)` range and
+saw ZERO records. Verified on the 15 GiB stage3 volume (66182 live records
+over 214 extents): `invf-sweep` printed `live entries: 0 (of 0 walked)`,
+`invf-stats` reported 0 files / 0 dirs / 0 logical bytes, heat and dedupe
+were no-ops. The e2e suite never caught it because every fixture fit inside
+a single mapper extent.
+
+### Root cause
+Each component had its own linear record loop bounded by
+`v->inode_area_pos`. On mapper volumes that cursor is the active-extent
+append point, so the loops either saw nothing or rejected valid
+mapper-extent positions through the `idx_get_id` hint validation
+(`ip <= v->inode_area_pos`).
+
+### Fix
+- **WP40** `9ce8cf8`: shared `vol_records_walk(v, cb, ctx)` iterator
+  (mapper extents via `vol_inode_next`, legacy fallback; CRC-verified
+  records, torn records skipped).
+- **WP41** `a77ad98`: `vol_compute_stats` via the walker.
+- **WP42** `ed6f599`: `invf-sweep` collector + 5 sweep-engine walks.
+- **WP43** `b058dbb`: heat decay/promote walks.
+- **WP44** `827efa6`: dedupe pass-1 hasher.
+- **WP45** `f37a63b`: big-volume (30k-object) fixture + self-gating
+  stats/sweep/heat suites.
+- **WP46** `5d1e4d5`: suite expectation fixes (heat pump batching bug,
+  stats population/invf-ls/unclaimed semantics).
+- **WP47** `f924473`: remaining walkers — tier/ast hint validation, read
+  fallback, dirs rename/sibling, records delete_siblings, textzone GC mark.
+
+### Result
+`invf-stats` on the stage3 volume: 54089 files / 3104 dirs / 8988
+symlinks, 1084.0 MiB logical (was 0/0/0). make test 4722/0;
+bigvol fixture 3/0; test-meta-extent-walk 6/0; test-stats-mapper 6/0;
+test-heat-mapper 4/0 (100/100 touched); test-sweep-mapper 6/0.
+
+### Follow-ups (open)
+- **WP48**: re-enable cross-file batch deferral on mapper volumes.
+  Routing `tz_owner_write`/`wp25_owner_write` through `vol_append_slot`
+  makes the flush-time owner sync append into dev1 shadow extents and fail
+  (io-error latch -> READ-ONLY; big-volume import regressed at ~8k files).
+  Owner appends reverted; WP42's mapper gate keeps files on the generic
+  sweep floor until a flush-safe owner append exists.
+- Pre-existing `invf-fsck` orphan count / exit-3 quirk seen by
+  `tools/test-dedupe.sh` and historically by `test-meta-extent-walk.sh`
+  Leg C (128 orphans) — needs its own WP.
