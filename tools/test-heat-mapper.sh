@@ -99,21 +99,15 @@ ok "mount, 100 touched names x 3 read sessions, unmount"
 
 # ---- leg B: heat persist pass -------------------------------------------
 call_pump() {
-    # pass names in batches to keep argv sane
-    _rc=0
-    _batch=0
-    while [ "$_batch" -lt 100 ]; do
-        _args=""
-        _k=0
-        while [ "$_k" -lt 10 ] && IFS= read -r _name; do
-            _args="$_args $_name"
-            _k=$((_k+1))
-        done < "$TOUCHED"
-        [ -n "$_args" ] || break
-        "$B/invf-l2ptest" pump "$IMG" $_args >"$WORK/pump.$_batch.log" 2>&1 || _rc=1
-        _batch=$((_batch+1))
-    done
-    return $_rc
+    # WP46: pump ALL touched names in one invocation. The previous loop
+    # reopened $TOUCHED on every batch (the inner `while read` had its own
+    # redirection), so only the first 10 names ever reached the pump.
+    set --
+    while IFS= read -r _name; do
+        set -- "$@" "$_name"
+    done < "$TOUCHED"
+    [ "$#" -gt 0 ] || return 1
+    "$B/invf-l2ptest" pump "$IMG" "$@" >"$WORK/pump.log" 2>&1
 }
 call_pump && ok "heat persist pass (pump over all touched names)" \
              || bad "heat persist pass (pump) failed"
