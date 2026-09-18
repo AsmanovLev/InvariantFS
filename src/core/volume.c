@@ -2129,6 +2129,7 @@ fail:
     free(v->jops);
     free(v->mjops);
     free(v->meta_mapper);
+    free(v->meta_type_bitmap);
     free(v->heat_tab);
     free(v->pba_ref);
     free(v->l2p);
@@ -4127,10 +4128,54 @@ int vol_append_slot(invfs_volume *v, uint64_t rec_size,
         uint64_t abs_pba, offset;
         int rc = meta_get_append_pos(v, rec_size, &abs_pba, &offset);
         if (rc != 0) return rc;
+        /* WP52: never hand out a slot that runs past its extent. The
+         * sizing in meta_get_append_pos must already guarantee this; the
+         * check turns a silent cross-extent write (the owner-record
+         * overflow class) into a clean, latched failure instead. */
+        {
+            uint64_t entry = meta_mapper_get(v, (size_t)v->met0.active_extent);
+            uint64_t esz = entry ? invfs_meta_ext_size(entry) : 0;
+            uint64_t epba = entry ? invfs_meta_ext_pba(entry) : 0;
+            if (!entry || abs_pba != epba * INVFS_BLOCK_SIZE ||
+                offset > esz || rec_size > esz - offset) {
+                fprintf(stderr, "vol_append_slot: %llu-byte record does not "
+                        "fit its metadata extent (off=%llu size=%llu); "
+                        "refusing\n",
+                        (unsigned long long)rec_size,
+                        (unsigned long long)offset,
+                        (unsigned long long)esz);
+                return -1;
+            }
+        }
         *rec_pos_out = abs_pba + offset;
         v->met0.active_offset = offset + rec_size;
         /* bump the cursor so concurrent appends stay ahead of us */
         v->inode_area_pos = *rec_pos_out + rec_size;
+        return 0;
+    }
+    *rec_pos_out = v->inode_area_pos;
+    return 0;
+}
+
+
+/* WP52: append slot for the large owner records. On a mapper volume the
+ * record gets its own dedicated, size-classed extent (meta_get_owner_append_pos)
+ * and the shared file-record cursor is left untouched -- so the owner's
+ * per-flush rewrite neither overflows an extent nor drags the record stream
+ * into a flush storm. On a legacy volume this is the same contiguous-cursor
+ * append as vol_append_slot. Never bumps inode_area_pos on a mapper volume:
+ * that cursor is the file-record tail the walker trims the active extent at,
+ * and the owner record no longer lives in the active extent. rc 0 = ok,
+ * -1 = error, -2 = ENOSPC. */
+int vol_append_owner_slot(invfs_volume *v, uint64_t rec_size,
+                          uint64_t *ext_slot, uint64_t *rec_pos_out)
+{
+    if (v->met0_present && v->meta_mapper) {
+        uint64_t pba = 0, offset = 0;
+        int rc = meta_get_owner_append_pos(v, rec_size, ext_slot,
+                                           &pba, &offset);
+        if (rc != 0) return rc;
+        *rec_pos_out = pba + offset;
         return 0;
     }
     *rec_pos_out = v->inode_area_pos;
@@ -4335,6 +4380,27 @@ void alloc_state_reset(invfs_volume *v)
                   ? zone_count_free(v, v->arena_start, v->arena_blocks) : 0;
     v->arena_fail_run = 0;
     v->raw_fail_run = v->shadow_fail_run = 0;
+    /* WP52 Bug: meta_free_blocks/meta_type_bitmap were declared and mutated
+     * (v->meta_free_blocks -= n in alloc_blocks, extend_meta_extent) but
+     * NEVER initialized or allocated anywhere in the tree. meta_free_blocks
+     * therefore started at 0 and underflowed on the first META allocation
+     * (observed 18446744073709238208); meta_type_bitmap stayed NULL, so the
+     * per-block META/DATA classification was silently a no-op. The counter
+     * has no consumer today, so the only visible effect was the absur+
+     * value; initialize both here so the metadata-accounting fields mean
+     * what their comments say. Initializing meta_free_blocks is also what
+     * keeps the deferred flush watermark path (vol_should_flush) from a
+     * bogus value once metadata accounting is ever wired into a decision. */
+    {
+        uint64_t meta_lo = (uint64_t)v->sb.metadata_zone_start;
+        uint64_t meta_hi = meta_lo + v->sb.metadata_zone_blocks;
+        if (meta_hi > v->sb.total_blocks) meta_hi = v->sb.total_blocks;
+        if (!v->meta_type_bitmap && v->bitmap)
+            v->meta_type_bitmap = (uint8_t *)calloc(
+                1, (size_t)v->bitmap_blocks * INVFS_BLOCK_SIZE);
+        v->meta_free_blocks = (meta_hi > meta_lo)
+                            ? zone_count_free(v, meta_lo, meta_hi - meta_lo) : 0;
+    }
     v->bm_lo = 1; v->bm_hi = 0;   /* on-disk bitmap matches memory */
     if (getenv("INVFS_DEBUG"))
         fprintf(stderr, "[alloc_state_reset] raw_free=%llu/%llu shadow_free=%llu/%llu\n",

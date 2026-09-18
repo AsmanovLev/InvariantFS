@@ -533,13 +533,36 @@ dev1 and was reverted.)
 Consequences: readers/`vol_records_walk` stop at the extent boundary, so
 such records are effectively invisible; fsck now flags them.
 
-### Fix (follow-up WP52)
-Route the owner append through the extent allocator **flush-safely**:
-`meta_get_append_pos` at flush time must not itself flush/persist
-re-entrantly (the WP47 failure). Likely shape: an append helper that
-allocates/extends an extent without recursing into `vol_flush`, resized to
-the record (`size_class` from `rec_size`), used by `wp25_owner_write` and
-`tz_owner_write`; then re-enable WP42's batch deferral on mapper volumes.
+### Fix (WP52 — landed)
+`wp25_owner_write` and `tz_owner_write` now append through a dedicated,
+extent-sized, flush-safe path (`vol_append_owner_slot` ->
+`meta_get_owner_append_pos`): the record's `size_class` is chosen from its
+total size and the extent is grown in place until the whole record fits, so
+it can never run past its extent. The owner lives in **its own** mapper
+extent; the shared file-record cursor is left untouched, so the record
+stream keeps packing and flushes no longer fire per append.
+
+Three companion bugs surfaced while landing this:
+- `vol_should_flush`'s inode-area watermark was meaningless on a mapper
+  volume (it compared a block count against byte offsets), so *every*
+  append flushed; each flush rewrote the growing owner record into a fresh
+  extent and exhausted shadow (~8k files, the WP47 regression). The
+  watermark now measures the mapper's active extent.
+- An in-place owner rewrite (`new_pos == old_pos`) must not emit the
+  position-kill tombstone: it would name the record it just wrote and kill
+  it. Both owner writes write only record+CRC when reused in place.
+- `vol_tz_gc` freed dead batches via the owner-WAL lookup, which can be
+  empty after a delete cycle; it now frees from the self-describing owner
+  entry's pba (seg_extent), so dead batches are actually reclaimed. Stats
+  also stopped counting `\x01` owner records as regular files.
+
+WP42's mapper gate is removed: cross-file batch deferral (PPMd text /
+ZSTD+BCJ binary) is unconditional again. Legacy `format_version=0` is
+unchanged.
+
+Verified: `make test` 4722/0; `test-sweep-mapper` 6/0 (fsck bad records 0);
+`test-binbatch`, `test-textzone` PASS; `test-meta-extent-walk` 6/0;
+`invf-fsck` on the swept bigvol fixture: bad records 0.
 
 Until then `tools/test-sweep-mapper.sh` is RED on the fsck leg (bad
 records: 2) — intentionally, as the first regression signal for WP52.

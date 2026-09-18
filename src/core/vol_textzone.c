@@ -183,11 +183,16 @@ int tz_owner_write(invfs_volume *v, uint64_t owner, const char *name,
     rec_len = sizeof(invfs_inode_rec) + ahlen +
               (size_t)o->n * sizeof(invfs_ast_block_entry) + o->ext_len;
     total = rec_len + 4 + (o->pos ? sizeof(tomb) + 4 : 0);
-    /* churn backstop, before the combo is built: the compaction moves
-     * every record, so the position-kill target is re-derived after it */
-    if (v->inode_area_pos + total > v->inode_area_end) {
+    /* WP52: on a mapper volume meta_get_append_pos sizes (or grows) the
+     * active extent to hold the whole record+tombstone, so no legacy room
+     * pre-check applies. The legacy contiguous area keeps the online churn
+     * backstop, before the combo is built: the compaction moves every
+     * record, so the position-kill target is re-derived after it. */
+    if (!(v->met0_present && v->meta_mapper) &&
+        v->inode_area_pos + total > v->inode_area_end) {
         if (inode_area_make_room(v, total) != 0)
-            return -1;        o->pos = idx_get_id(v, owner);
+            return -1;
+        o->pos = idx_get_id(v, owner);
         total = rec_len + 4 + (o->pos ? sizeof(tomb) + 4 : 0);
     }
     combo = (uint8_t *)calloc(1, total);
@@ -225,10 +230,26 @@ int tz_owner_write(invfs_volume *v, uint64_t owner, const char *name,
     }
 
     if (vol_mark_dirty(v) != 0) { free(combo); return -1; }
-    new_pos = v->inode_area_pos;
-    if (io_seek(&v->io, new_pos) != 0 ||
-        io_write(&v->io, combo, total) != 0) { free(combo); return -1; }
-    v->inode_area_pos = new_pos + total;
+    /* WP52: one extent-sized append for the whole record+tombstone. On a
+     * mapper volume vol_append_slot refuses a slot that would run past its
+     * extent (sizing inside meta_get_append_pos); on a legacy volume it is
+     * the contiguous cursor, bumped below. */
+    {
+        int arc = vol_append_owner_slot(v, total, &o->ext_idx, &new_pos);
+        if (arc != 0) { free(combo); return -1; }
+    }
+    /* WP52: an in-place rewrite (dedicated extent reused, new_pos == the
+     * previous position) has nothing to position-kill; a self-tombstone
+     * would kill the record just written. Write only the record+CRC. */
+    {
+        size_t wlen = (o->pos && new_pos == o->pos) ? rec_len + 4 : total;
+        if (io_seek(&v->io, new_pos) != 0 ||
+            io_write(&v->io, combo, wlen) != 0) { free(combo); return -1; }
+    }
+    /* on a mapper volume the owner lives in its own extent and the shared
+     * file-record cursor must NOT be dragged to it */
+    if (!(v->met0_present && v->meta_mapper))
+        v->inode_area_pos = new_pos + total;
     free(combo);
     idx_put(v, name, strlen(name), owner, new_pos, run, o->ctime);
     idx_put_id(v, owner, new_pos);
@@ -1135,7 +1156,24 @@ int vol_tz_gc(invfs_volume *v)
         }
         {
             uint64_t pba = 0, plen = 0;
-            if (vol_lookup_entry(v, owner, seq, &pba, &plen) == 0 && pba) {
+            /* WP52: the owner entry is SELF-DESCRIBING (WP27: e.pba names
+             * the batch; e.length is the DECODED size). Free from that
+             * directly -- the batch's physical span comes from its frame --
+             * instead of relying on the owner-WAL map, which is gone for a
+             * batch whose members were all deleted (the retire drops the
+             * member's maps, not the batch's, but a rebuild/GC cycle can
+             * leave the lookup empty and the old code then reported freed=0
+             * while still dropping the entry, so the test saw "GC reclaimed
+             * nothing" even though dead batches were reclaimed). Fall back
+             * to the WAL lookup if the entry carries no pba. */
+            pba = o.ents[i].pba;
+            if (pba && pba < v->sb.total_blocks &&
+                seg_extent(v, pba, NULL, &plen) == 0 && plen) {
+                arc_invalidate(v->arc, pba | TZ_ARC_TAG);
+                vol_free_blocks(v, pba, plen);
+                freed++;
+            } else if (vol_lookup_entry(v, owner, seq, &pba, &plen) == 0 &&
+                       pba) {
                 arc_invalidate(v->arc, pba | TZ_ARC_TAG);
                 vol_free_blocks(v, pba, plen);
                 freed++;

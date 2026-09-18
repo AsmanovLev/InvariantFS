@@ -53,10 +53,22 @@ echo "$SWEEP_OUT" | tail -20
 
 SWEPT=$(printf '%s\n' "$SWEEP_OUT" | sed -n 's/^sweep: \([0-9]*\) swept.*/\1/p')
 HASHED=$(printf '%s\n' "$SWEEP_OUT" | sed -n 's/^dedupe: hashed \([0-9]*\) live segments.*/\1/p')
-[ "${SWEPT:-0}" -gt 0 ] && ok "sweep reported $SWEPT swept (nonzero)" \
-                        || bad "sweep reported ${SWEPT:-0} swept (walk saw nothing)"
-[ "${HASHED:-0}" -gt 0 ] && ok "dedupe hashed $HASHED live segments (nonzero)" \
-                          || bad "dedupe hashed ${HASHED:-0} segments (walk saw nothing)"
+# WP52: cross-file batch deferral is enabled again on mapper volumes, so an
+# all-text fixture is batched (text -> PPMd) rather than moved to Shadow one
+# file at a time. That is the walker WORKING, not seeing nothing: the genome
+# this suite guards (WP45) is "the sweep walk saw the records". A batched run
+# proves it via the deferred counter; dedupe legitimately hashes 0 because
+# every live entry is a TEXT batch slice (dedupe skips those: the batches are
+# shared and owner-owned). Accept either the pre-deferral generic floor
+# (swept/hashed nonzero) OR the deferred-batch path (deferred nonzero).
+DEFERRED=$(printf '%s\n' "$SWEEP_OUT" | sed -n 's/^text batches flushed (\([0-9]*\) deferred).*/\1/p')
+DEFERRED=${DEFERRED:-0}
+[ "${SWEPT:-0}" -gt 0 ] || [ "$DEFERRED" -gt 0 ] \
+    && ok "sweep processed records (swept=$SWEPT deferred=$DEFERRED; walker saw the volume)" \
+    || bad "sweep reported ${SWEPT:-0} swept and 0 deferred (walk saw nothing)"
+[ "${HASHED:-0}" -gt 0 ] || [ "$DEFERRED" -gt 0 ] \
+    && ok "dedupe walk saw segments (hashed=$HASHED deferred=$DEFERRED)" \
+    || bad "dedupe hashed ${HASHED:-0} segments and 0 deferred (walk saw nothing)"
 
 # ---- post-condition: logical bytes preserved by the physical moves -------
 STATS2=$("$B/invf-stats" "$WORK/dev0.img" 2>&1) || fail "invf-stats rerun"

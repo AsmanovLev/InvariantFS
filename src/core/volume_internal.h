@@ -518,6 +518,10 @@ typedef struct invfs_volume {
     size_t   tier_n, tier_cap, rawm_n, rawm_cap;
     int      tier_dirty, rawm_dirty;
     uint64_t tier_owner, rawm_owner;   /* live owner inode ids (0 = none) */
+    /* WP52: the owners' dedicated mapper extents (1-based; 0 = none). The
+     * per-flush owner rewrite reuses/frees these instead of allocating a
+     * fresh extent each time. */
+    uint64_t tier_owner_ext, rawm_owner_ext;
     /* last vol_tier_migrate run's counters (the sweep driver prints) */
     uint64_t tier_promoted, tier_demoted, tier_blocks;
     /* WP30: dynamic metadata extent state */
@@ -674,6 +678,10 @@ typedef struct {
     uint8_t *ext;            /* INO2 ext blob, carried verbatim (usually none) */
     uint32_t ext_len;
     uint64_t pos;            /* current record position (position-kill target) */
+    uint64_t ext_idx;        /* WP52: this owner's dedicated mapper extent
+                              * on a mapper volume (0 = none yet); reused and
+                              * freed on supersede so owner rewrites do not
+                              * accumulate dead extents */
     uint64_t ctime;
     uint64_t next_seq;       /* max block_id + 1 -- strictly monotone */
 } tz_owner;
@@ -1070,15 +1078,38 @@ int meta_met0_persist(invfs_volume *v);
 int meta_get_append_pos(invfs_volume *v, uint64_t rec_size,
                         uint64_t *pba_out, uint64_t *offset_out);
 
+/* WP52: append position for the large owner records. On a mapper volume the
+ * record is placed in its OWN dedicated, size-classed extent (never the
+ * shared file-record cursor), so per-flush owner rewrites cannot overflow an
+ * extent or force the record stream into a flush storm. Falls back to
+ * meta_get_append_pos on a legacy volume. rc 0 = ok, -1 = error, -2 = ENOSPC. */
+int meta_get_owner_append_pos(invfs_volume *v, uint64_t rec_size,
+                              uint64_t *ext_slot, uint64_t *pba_out,
+                              uint64_t *offset_out);
+
 /* Bug J companion: route every record-en-area append through the mapper.
  * On a v0.3.0+ mapper volume this wraps meta_get_append_pos and returns
  * the absolute byte position in *rec_pos_out (the caller then io_seek()
  * there, writes, bumps v->met0.active_offset + v->inode_area_pos).
  * On a legacy (format_version=0) volume it falls back to inode_area_pos
  * so the old linear inode area keeps working. rc 0 = ok, -1 = error
- * (mapper missing), -2 = ENOSPC. */
+ * (mapper missing / record does not fit its extent), -2 = ENOSPC.
+ *
+ * Flush-safety (WP52): meta_get_append_pos sizes the active extent (or
+ * allocates/extends one) to hold the whole record, so the returned slot
+ * never runs past its extent and the caller's write stays inside a single
+ * backing device; the mapper/MET0 persistence it may do is an ordinary
+ * io_write that never recurses into vol_flush. Safe from wp25_owner_sync
+ * (itself called from vol_flush) and from tz_owner_write. */
 int vol_append_slot(invfs_volume *v, uint64_t rec_size,
                     uint64_t *rec_pos_out);
+
+/* WP52: owner-record append slot. Like vol_append_slot, but on a mapper
+ * volume it uses a dedicated extent and leaves the file-record cursor
+ * (inode_area_pos / met0.active_offset) untouched. rc 0 = ok, -1 = error,
+ * -2 = ENOSPC. */
+int vol_append_owner_slot(invfs_volume *v, uint64_t rec_size,
+                          uint64_t *ext_slot, uint64_t *rec_pos_out);
 
 /* WP30 Phase 5: metadata extent journal helpers (in volume.c) */
 int meta_journal_alloc(invfs_volume *v, uint16_t ext_idx, uint64_t pba,

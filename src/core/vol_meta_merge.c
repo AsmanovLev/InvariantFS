@@ -764,3 +764,136 @@ int meta_get_append_pos(invfs_volume *v, uint64_t rec_size,
     pthread_rwlock_unlock(&v->meta_lock);
     return 0;
 }
+
+/* WP52: dedicated append for the large, monotonically-growing owner records
+ * (\x01rawm / \x01tier0 / \x01parity* / the text-zone owner).
+ *
+ * The shared append cursor (met0.active_extent/active_offset) is the FILE
+ * record stream. Routing an owner rewrite through it mixed two very
+ * different lifetimes: on every flush the owner record was re-appended,
+ * and because it immediately filled whatever extent the cursor pointed at,
+ * the next record (and the next flush) kept allocating fresh extents. On
+ * the 30k-file bigvol import that consumed the whole shadow zone (the WP47
+ * regression). The owner record belongs in its own extent: allocate one
+ * sized for the WHOLE record, write it there, and leave the file-record
+ * cursor exactly where it was, so ordinary record appends keep packing and
+ * flushes stay on the journal watermark instead of firing per record.
+ *
+ * The allocated extent is registered in the mapper (so vol_records_walk and
+ * the open scan see the record) and MET0 is persisted. *pba_out is the
+ * absolute byte offset of the extent, *offset_out is 0. Returns 0 on
+ * success, -1 on error, -2 on ENOSPC. Flush-safe: alloc_meta_extent and the
+ * persistence helpers are ordinary io_writes; nothing here recurses into
+ * vol_flush. */
+int meta_get_owner_append_pos(invfs_volume *v, uint64_t rec_size,
+                              uint64_t *ext_slot, uint64_t *pba_out,
+                              uint64_t *offset_out)
+{
+    *pba_out = 0;
+    *offset_out = 0;
+    if (!(v->met0_present && v->meta_mapper))
+        return meta_get_append_pos(v, rec_size, pba_out, offset_out);
+    if (v->merge_in_progress)
+        return -EAGAIN;
+
+    pthread_rwlock_wrlock(&v->meta_lock);
+
+    /* Reuse the owner's dedicated extent while the whole record still
+     * fits. When the owner has grown past it, EXTEND it in place by size
+     * class (consuming only the adjacent free delta) rather than moving
+     * to a fresh extent: the old extent is never abandoned, and -- just as
+     * important -- no mapper slot is freed, because a zeroed slot in the
+     * middle of the table truncates the open scan / vol_inode_next walks
+     * (they stop at the first !entry). One extending extent per owner. */
+    uint64_t extent_idx = *ext_slot;   /* 1-based; 0 = none */
+    uint64_t entry = 0;
+    int have = 0;
+    if (extent_idx && extent_idx <= v->meta_mapper_n) {
+        entry = v->meta_mapper[extent_idx - 1];
+        have = entry != 0;
+    }
+    if (!have) {
+        extent_idx = 0;
+        entry = 0;
+    }
+
+    if (!have) {
+        uint8_t size_class = INVFS_META_EXT_MIN_SIZE_CLASS;
+        while (size_class < INVFS_META_EXT_SIZE_CLASS_MAX &&
+               (65536ULL << size_class) < rec_size)
+            size_class++;
+        uint64_t new_idx = alloc_meta_extent(v, size_class);
+        if (new_idx == 0) {
+            pthread_rwlock_unlock(&v->meta_lock);
+            return -2;   /* ENOSPC: no shadow run / mapper slot */
+        }
+        extent_idx = new_idx;   /* alloc_meta_extent is 1-based */
+        v->meta_mapper_n = v->meta_mapper_n < (size_t)extent_idx
+                         ? (size_t)extent_idx : v->meta_mapper_n;
+        if (v->met0.extent_count < extent_idx)
+            v->met0.extent_count = extent_idx;
+        entry = v->meta_mapper[extent_idx - 1];
+        if (!entry) { pthread_rwlock_unlock(&v->meta_lock); return -1; }
+    }
+
+    uint64_t extent_size = invfs_meta_ext_size(entry);
+    /* the allocator can hand back a smaller class than requested when the
+     * requested one ran out of contiguous space: grow in place until the
+     * whole record fits, else fail rather than write past the extent */
+    while (extent_size < rec_size &&
+           invfs_meta_ext_class(entry) < INVFS_META_EXT_SIZE_CLASS_MAX) {
+        uint8_t cur = invfs_meta_ext_class(entry);
+        if (extend_meta_extent(v, extent_idx - 1, cur + 1) != 1) break;
+        entry = (extent_idx <= v->meta_mapper_n)
+              ? v->meta_mapper[extent_idx - 1] : 0;
+        if (!entry) { pthread_rwlock_unlock(&v->meta_lock); return -1; }
+        extent_size = invfs_meta_ext_size(entry);
+    }
+    if (extent_size < rec_size) {
+        /* Could not make room in the owner's own extent (no adjacent free
+         * run): allocate a fresh, dedicated extent sized for the whole
+         * record. The old extent is left in place (its slot stays valid,
+         * so scans are not truncated); it is small next to the record and
+         * the abandoned case is rare. */
+        uint8_t sc = INVFS_META_EXT_MIN_SIZE_CLASS;
+        while (sc < INVFS_META_EXT_SIZE_CLASS_MAX &&
+               (65536ULL << sc) < rec_size)
+            sc++;
+        uint64_t ni = alloc_meta_extent(v, sc);
+        if (ni == 0) {
+            pthread_rwlock_unlock(&v->meta_lock);
+            return -2;   /* ENOSPC */
+        }
+        extent_idx = ni;
+        v->meta_mapper_n = v->meta_mapper_n < (size_t)extent_idx
+                         ? (size_t)extent_idx : v->meta_mapper_n;
+        if (v->met0.extent_count < extent_idx)
+            v->met0.extent_count = extent_idx;
+        entry = v->meta_mapper[extent_idx - 1];
+        if (!entry) { pthread_rwlock_unlock(&v->meta_lock); return -1; }
+        while (invfs_meta_ext_size(entry) < rec_size &&
+               invfs_meta_ext_class(entry) < INVFS_META_EXT_SIZE_CLASS_MAX) {
+            uint8_t cur = invfs_meta_ext_class(entry);
+            if (extend_meta_extent(v, extent_idx - 1, cur + 1) != 1) break;
+            entry = (extent_idx <= v->meta_mapper_n)
+                  ? v->meta_mapper[extent_idx - 1] : 0;
+            if (!entry) { pthread_rwlock_unlock(&v->meta_lock); return -1; }
+        }
+        if (invfs_meta_ext_size(entry) < rec_size) {
+            pthread_rwlock_unlock(&v->meta_lock);
+            return -2;   /* ENOSPC */
+        }
+    }
+
+    meta_mapper_flush(v);
+    if (meta_met0_persist(v) != 0) {
+        pthread_rwlock_unlock(&v->meta_lock);
+        return -1;
+    }
+
+    *ext_slot = extent_idx;
+    *pba_out = invfs_meta_ext_pba(entry) * INVFS_BLOCK_SIZE;
+    *offset_out = 0;
+    pthread_rwlock_unlock(&v->meta_lock);
+    return 0;
+}

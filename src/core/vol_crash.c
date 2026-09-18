@@ -78,11 +78,30 @@ int vol_mark_dirty(invfs_volume *v)
    vol_close() and vol_sync() always flush. */
 static int vol_should_flush(const invfs_volume *v)
 {
-    /* inode area watermark: 80 % */
-    uint64_t area_total = v->inode_area_end - v->inode_area_start;
-    uint64_t area_used  = v->inode_area_pos - v->inode_area_start;
-    if (area_total > 0 && area_used * 5 >= area_total * 4)
-        return 1;
+    /* inode area watermark: 80 %.
+     * WP52: on a v0.3.0+ mapper volume the inode area is a SEQUENCE of
+     * dynamic extents, not the legacy [inode_area_start, inode_area_end)
+     * region. Those legacy byte/block fields describe the pre-mapper
+     * layout and make the ratio meaningless (inode_area_start is a block
+     * count subtracted from a byte count, and inode_area_pos sits in a
+     * shadow extent while inode_area_end names the first extent). The
+     * broken ratio read "full" from the first record, so EVERY append
+     * flushed -- and the flush-time owner-record rewrite then allocated a
+     * fresh extent each time (the WP47 bigvol regression: ~8k files
+     * exhausted the 1.2 GiB shadow). The mapper's active extent is the
+     * real "inode area" here: flush when IT is >80 % full. The journal
+     * watermark below is layout-independent and still applies. */
+    if (v->met0_present && v->meta_mapper) {
+        uint64_t entry = meta_mapper_get(v, (size_t)v->met0.active_extent);
+        uint64_t esz = entry ? invfs_meta_ext_size(entry) : 0;
+        if (esz && v->met0.active_offset * 5 >= esz * 4)
+            return 1;
+    } else {
+        uint64_t area_total = v->inode_area_end - v->inode_area_start;
+        uint64_t area_used  = v->inode_area_pos - v->inode_area_start;
+        if (area_total > 0 && area_used * 5 >= area_total * 4)
+            return 1;
+    }
     /* journal watermark: 50 % of one slot */
     if (v->j_slotted && v->jops_n > 0) {
         uint64_t slot_payload = (uint64_t)(INVFS_JRN_SLOT_BLOCKS - 1)

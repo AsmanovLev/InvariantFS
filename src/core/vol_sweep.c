@@ -12,17 +12,13 @@ int sweep_enospc(invfs_volume *v, uint64_t need_bytes)
 }
 
 
-/* WP42: the text/binary batch owner records are appended through a
- * mapper-unaware path (vol_textzone's tz_owner_write), so on a v0.3.0+
- * mapper volume a deferral cannot be sealed once the active metadata
- * extent fills -- the flush fails and the deferred files stay RAW with no
- * record rewritten. Until that append path is mapper-aware (follow-up WP),
- * keep files on the generic floor, which drains RAW into Shadow through
- * the mapper-aware vol_append_slot. Legacy format_version=0 is unchanged. */
-static int sweep_batch_defer_ok(invfs_volume *v)
-{
-    return !(v->met0_present && v->meta_mapper);
-}
+/* WP52: the WP42 gate that kept text/binary batch deferrals off mapper
+ * volumes is gone -- vol_textzone's tz_owner_write (and the WP25 owner
+ * appends) now go through the extent-sized, flush-safe vol_append_slot, so
+ * a sealed batch's owner record can land in a dynamic metadata extent of
+ * the right size. Batch deferral is once again unconditional; only the
+ * PPMd decode-memory policy keeps a file on the generic floor. Legacy
+ * format_version=0 behaviour is unchanged. */
 
 
 /* Give back everything the atomic sweep path allocated for the new record
@@ -760,8 +756,7 @@ void defer_container_parts(invfs_volume *v, const char *name)
             continue;
         bfam = invfs_binary_family(head, (size_t)got, pn);
         if (bfam > 0) {
-            if (sweep_batch_defer_ok(v) &&
-                bz_defer(v, pino, pn, fsz, (uint32_t)bfam) == 0) n_bin++;
+            if (bz_defer(v, pino, pn, fsz, (uint32_t)bfam) == 0) n_bin++;
             continue;
         }
         tfam = invfs_text_family(pn, head, (size_t)got);
@@ -770,8 +765,7 @@ void defer_container_parts(invfs_volume *v, const char *name)
             if (pc && pc->dec_mem_bytes > vol_get_dec_mem_limit(v))
                 vol_stamp_class(v, pino, INVFS_CLASS_GENERIC_MEMLIMIT,
                                 INVFS_ALGO_PPMD, pc->generation);
-            else if (sweep_batch_defer_ok(v) &&
-                     tz_defer(v, pino, pn, fsz, (uint32_t)tfam) == 0)
+            else if (tz_defer(v, pino, pn, fsz, (uint32_t)tfam) == 0)
                 n_text++;
         }
     }
@@ -976,7 +970,7 @@ int vol_sweep_one(invfs_volume *v, uint64_t inode_id, const char *name)
                         vol_stat_full(v, name, NULL, &fsz, NULL) == 0 &&
                         fsz) {
                         bfam = invfs_binary_family(head, (size_t)got, name);
-                        if (bfam > 0 && sweep_batch_defer_ok(v) &&
+                        if (bfam > 0 &&
                             bz_defer(v, inode_id, name, fsz,
                                      (uint32_t)bfam) == 0)
                             return 10;   /* part -> ZSTD batch */
@@ -990,8 +984,7 @@ int vol_sweep_one(invfs_volume *v, uint64_t inode_id, const char *name)
                                                 INVFS_CLASS_GENERIC_MEMLIMIT,
                                                 INVFS_ALGO_PPMD,
                                                 pc->generation);
-                            } else if (sweep_batch_defer_ok(v) &&
-                                       tz_defer(v, inode_id, name, fsz,
+                            } else if (tz_defer(v, inode_id, name, fsz,
                                                 (uint32_t)tfam) == 0) {
                                 return 9;   /* part -> PPMd batch */
                             }
@@ -1271,8 +1264,7 @@ int vol_sweep_one(invfs_volume *v, uint64_t inode_id, const char *name)
                  * text path without waiting for a generation bump. */
                 vol_stamp_class(v, inode_id, INVFS_CLASS_GENERIC_MEMLIMIT,
                                 INVFS_ALGO_PPMD, pc->generation);
-            } else if (sweep_batch_defer_ok(v) &&
-                       tz_defer(v, inode_id, name, full_len,
+            } else if (tz_defer(v, inode_id, name, full_len,
                                 (uint32_t)fam) == 0) {
                 free(full);
                 return 9;   /* text -> PPMd batch (deferred to flush) */
@@ -1309,7 +1301,7 @@ int vol_sweep_one(invfs_volume *v, uint64_t inode_id, const char *name)
      * sibling exclusion as text. */
     if (!strchr(name, '!') && !exer_no_bz) {
         int bfam = invfs_binary_family(full, full_len, name);
-        if (bfam > 0 && sweep_batch_defer_ok(v) &&
+        if (bfam > 0 &&
             bz_defer(v, inode_id, name, full_len, (uint32_t)bfam) == 0) {
             free(full);
             return 10;   /* binary -> ZSTD batch (deferred to flush) */
@@ -1716,19 +1708,21 @@ static int wstats_cb(void *ctx_, uint64_t rec_pos,
         case INVFS_ITYP_FIFO: case INVFS_ITYP_SOCK:
         case INVFS_ITYP_CHR:  case INVFS_ITYP_BLK: out->special++; break;
         default: {
-            out->files++;
-            /* WP12(a): internal owner records ("\x01tzb") carry
-             * file_size = the sum of their sealed batches, and every
-             * TEXT member counts its own slices -- counting the owner
-             * too doubles the text-zone logical bytes (the Silesia
-             * image showed 309 MiB logical vs a 202 MiB corpus). The
-             * members carry the logical truth, so 0x01-prefixed
-             * internal names contribute nothing to ANY logical field
-             * (zone attribution, logical_bytes, biggest). Physical
-             * used-bytes accounting is the class-based pass above and
-             * DOES include the internal owners. */
+            /* WP12(a)/WP52: internal owner records ("\x01tzb", "\x01rawm",
+             * "\x01tier0", "\x01parityN", "\x01reten") are engine
+             * bookkeeping, not regular files. They carry file_size = the
+             * sum of their sealed batches / mirror spans, so counting the
+             * owner as well as its members doubles the logical bytes (the
+             * Silesia image showed 309 MiB logical vs a 202 MiB corpus).
+             * With WP52's deferral re-enabled on mapper volumes these
+             * owners are now visible to the mapper-aware walk, so the
+             * exclusion must cover the file COUNT too -- otherwise the
+             * population grows by the owner records across a sweep.
+             * Physical used-bytes accounting is the class-based pass above
+             * and DOES include the internal owners. */
             if (h.name_len && (uint8_t)h.name[0] == 0x01)
                 break;
+            out->files++;
             /* attribute logical size across the AST's zones */
             {
                 /* record layout: rec header | AST header (v1 16B /

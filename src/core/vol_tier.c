@@ -164,8 +164,8 @@ uint64_t vol_rawm_count(invfs_volume *v, uint64_t *blocks_out)
  * position-kill of the previous version] as one write; the owner keeps
  * its inode id so the L2P maps stay valid. */
 static int wp25_owner_write(invfs_volume *v, uint64_t owner,
-                            const char *name, const wp25_ent *ents,
-                            size_t n)
+                            uint64_t *ext_slot, const char *name,
+                            const wp25_ent *ents, size_t n)
 {
     invfs_ast_block_entry *ae = NULL;
     uint8_t ah[INVFS_AST_HDR_V2_LEN];
@@ -196,14 +196,19 @@ static int wp25_owner_write(invfs_volume *v, uint64_t owner,
     if (!ahlen) { free(ae); return -1; }
 
     rec_len = sizeof(invfs_inode_rec) + ahlen + n * sizeof(*ae);
-    total = rec_len + 4 + sizeof(tomb) + 4;
-    /* churn backstop, before the position-kill target is read: the
-     * compaction moves every record, so old_pos comes after it */
-    if (v->inode_area_pos + total > v->inode_area_end &&
-        inode_area_make_room(v, total) != 0)
-        { free(ae); return -1; }
     old_pos = idx_get_id(v, owner);
     total = rec_len + 4 + (old_pos ? sizeof(tomb) + 4 : 0);
+    /* WP52: on a mapper volume meta_get_append_pos sizes (or grows) the
+     * active extent to hold the whole record+tombstone, so no legacy room
+     * pre-check applies. The legacy contiguous area keeps the online churn
+     * backstop, before the position-kill target is read: the compaction
+     * moves every record, so old_pos is re-derived after it. */
+    if (!(v->met0_present && v->meta_mapper) &&
+        v->inode_area_pos + total > v->inode_area_end) {
+        if (inode_area_make_room(v, total) != 0) { free(ae); return -1; }
+        old_pos = idx_get_id(v, owner);
+        total = rec_len + 4 + (old_pos ? sizeof(tomb) + 4 : 0);
+    }
     combo = (uint8_t *)calloc(1, total);
     if (!combo) { free(ae); return -1; }
 
@@ -235,10 +240,29 @@ static int wp25_owner_write(invfs_volume *v, uint64_t owner,
     }
 
     if (vol_mark_dirty(v) != 0) { free(combo); return -1; }
-    new_pos = v->inode_area_pos;
-    if (io_seek(&v->io, new_pos) != 0 ||
-        io_write(&v->io, combo, total) != 0) { free(combo); return -1; }
-    v->inode_area_pos = new_pos + total;
+    /* WP52: one extent-sized append for the whole record+tombstone. On a
+     * mapper volume vol_append_slot refuses a slot that would run past its
+     * extent (sizing inside meta_get_append_pos); on a legacy volume it is
+     * the contiguous cursor, bumped below. Flush-safe: no re-entrant flush,
+     * and the write stays inside the extent's own device. */
+    {
+        int arc = vol_append_owner_slot(v, total, ext_slot, &new_pos);
+        if (arc != 0) { free(combo); return -1; }
+    }
+    /* WP52: when the owner record is rewritten IN PLACE (its dedicated
+     * extent is reused, new_pos == the previous position) there is nothing
+     * to position-kill -- the old version is overwritten. Emitting the
+     * tombstone anyway would name new_pos and kill the record we just
+     * wrote. Write just the record+CRC in that case. */
+    {
+        size_t wlen = (old_pos && new_pos == old_pos) ? rec_len + 4 : total;
+        if (io_seek(&v->io, new_pos) != 0 ||
+            io_write(&v->io, combo, wlen) != 0) { free(combo); return -1; }
+    }
+    /* on a mapper volume the owner lives in its own extent and the shared
+     * file-record cursor must NOT be dragged to it */
+    if (!(v->met0_present && v->meta_mapper))
+        v->inode_area_pos = new_pos + total;
     free(combo);
     idx_put(v, name, strlen(name), owner, new_pos, run,
             (uint64_t)time(NULL));
@@ -307,14 +331,14 @@ void wp25_index_load(invfs_volume *v)
 int wp25_owner_sync(invfs_volume *v)
 {
     if (v->rawm_dirty) {
-        if (wp25_owner_write(v, v->rawm_owner, "\x01rawm", v->rawm,
-                             v->rawm_n) != 0)
+        if (wp25_owner_write(v, v->rawm_owner, &v->rawm_owner_ext,
+                             "\x01rawm", v->rawm, v->rawm_n) != 0)
             return -1;
         v->rawm_dirty = 0;
     }
     if (v->tier_dirty) {
-        if (wp25_owner_write(v, v->tier_owner, "\x01tier0", v->tier,
-                             v->tier_n) != 0)
+        if (wp25_owner_write(v, v->tier_owner, &v->tier_owner_ext,
+                             "\x01tier0", v->tier, v->tier_n) != 0)
             return -1;
         v->tier_dirty = 0;
     }
