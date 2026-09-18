@@ -369,6 +369,43 @@ static int rec_content_bad(invfs_volume *v, uint64_t rec_pos,
 }
 
 
+/* WP49: mapper-volume pass-1 body fed by the bounded vol_records_walk_ex
+ * (position-driven vol_inode_next can cycle on a non-monotonic mapper
+ * table). bad_cb keeps fsck's torn/CRC-bad record accounting. */
+typedef struct {
+    invfs_volume *v;
+    invfs_fsck_report *rep;
+    scan_set *live;
+} fscan_ctx;
+
+static int fscan_cb(void *ctx_, uint64_t pos,
+                    const invfs_inode_rec *rh, const uint8_t *rec)
+{
+    fscan_ctx *c = (fscan_ctx *)ctx_;
+    size_t nl = rh->name_len < 256 ? rh->name_len : 256;
+    if (!nl) return 0;
+    if (rh->magic == INODE_REC_MAGIC) {
+        uint64_t moff[4], mlen[4];
+        unsigned mn = 0;
+        uint64_t miss = rec_pba_miss(rec, rh->rec_len, c->v->sb.total_blocks,
+                                     moff, mlen, &mn);
+        if (scanset_inod(c->live, rh->name, nl, rh->inode_id, pos,
+                         rh->file_size, rh->ctime, miss) != 0)
+            return 1;
+    } else {
+        /* v2 tombstones kill by record position; legacy ones by id */
+        scanset_delt(c->live, rh->name, nl, rh->inode_id, rh->file_size);
+    }
+    return 0;
+}
+
+static void fscan_bad(void *ctx_, uint64_t pos)
+{
+    fscan_ctx *c = (fscan_ctx *)ctx_;
+    (void)pos;
+    c->rep->bad_recs++;
+}
+
 int vol_fsck_scan(invfs_volume *v, invfs_fsck_report *rep, int fix)
 {
     uint64_t pos, end;
@@ -391,27 +428,26 @@ int vol_fsck_scan(invfs_volume *v, invfs_fsck_report *rep, int fix)
      * walk goes through vol_inode_next (mapper-aware). On a legacy volume
      * the full metadata-zone tail scan applies unchanged. */
     int mapper_walk = v->met0_present && v->meta_mapper;
-    uint64_t seek_pos = 0;               /* arg to vol_inode_next */
     /* Legacy range: the whole metadata-zone tail (incl. unflushed tail). */
     end = (v->sb.metadata_zone_start + v->sb.metadata_zone_blocks)
           * INVFS_BLOCK_SIZE;
     pos = v->inode_area_start * INVFS_BLOCK_SIZE;
+
+    if (mapper_walk) {
+        /* WP49: index-ordered, bounded, cycle-proof; torn records are
+         * reported through bad_cb instead of silently skipped. */
+        fscan_ctx fc;
+        fc.v = v; fc.rep = rep; fc.live = &live;
+        if (vol_records_walk_ex(v, fscan_cb, &fc, fscan_bad) != 0) {
+            free(used); scanset_free(&live);
+            return -1;
+        }
+    } else {
     for (;;) {
         invfs_inode_rec rh;
         uint32_t crc_stored, crc_calc;
         uint8_t *rec = NULL;
-        if (!mapper_walk && pos + sizeof(invfs_inode_rec) > end) break;
-        if (mapper_walk) {
-            uint32_t magic, rec_len;
-            uint64_t inode_id, file_size;
-            char nm[256];
-            uint64_t nxt = vol_inode_next(v, seek_pos, &magic, &inode_id,
-                                          &file_size, nm, sizeof(nm),
-                                          &rec_len);
-            if (nxt == 0) break;     /* records exhausted */
-            pos = nxt - (uint64_t)rec_len - 4;   /* the record's start */
-            seek_pos = nxt;
-        }
+        if (pos + sizeof(invfs_inode_rec) > end) break;
         if (io_seek(&v->io, pos) != 0 ||
             io_read(&v->io, &rh, sizeof(rh)) != 0) {
             break;
@@ -420,7 +456,7 @@ int vol_fsck_scan(invfs_volume *v, invfs_fsck_report *rep, int fix)
             break;
         }
         if (rh.rec_len < sizeof(invfs_inode_rec) ||
-            (!mapper_walk && pos + rh.rec_len + 4 > end)) {
+            pos + rh.rec_len + 4 > end) {
             rep->bad_recs++;
             break;
         }
@@ -437,7 +473,7 @@ int vol_fsck_scan(invfs_volume *v, invfs_fsck_report *rep, int fix)
             /* corrupt record: report, skip past it, keep scanning */
             rep->bad_recs++;
             free(rec);
-            if (!mapper_walk) pos += (uint64_t)rh.rec_len + 4;
+            pos += (uint64_t)rh.rec_len + 4;
             continue;
         }
         {
@@ -466,7 +502,8 @@ int vol_fsck_scan(invfs_volume *v, invfs_fsck_report *rep, int fix)
             }
         }
         free(rec);
-        if (!mapper_walk) pos += (uint64_t)rh.rec_len + 4;
+        pos += (uint64_t)rh.rec_len + 4;
+    }
     }
 
     /* pass 1b: the cut accounting + (fix) quarantine. Per name: the live

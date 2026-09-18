@@ -133,23 +133,61 @@ static int cmp_u64(const void *pa, const void *pb)
     return 0;
 }
 
+/* WP49: pass-1 collector fed by the bounded, index-ordered
+ * vol_records_walk (a position-driven vol_inode_next loop can cycle when
+ * the mapper table is not pba monotonic). */
+typedef struct {
+    fs_entry *recs;
+    uint64_t nrecs, caprecs;
+    uint64_t *tpos, *tid;
+    uint64_t ntomb, captomb;
+    int oom;
+} bft_ctx;
+
+static int bft_cb(void *ctx_, uint64_t rec_pos,
+                  const invfs_inode_rec *h, const uint8_t *rec)
+{
+    bft_ctx *c = (bft_ctx *)ctx_;
+    (void)rec;
+    if (h->magic == TOMBSTONE_MAGIC) {   /* DELT */
+        if (c->ntomb == c->captomb) {
+            uint64_t nc = c->captomb ? c->captomb * 2 : 64;
+            uint64_t *tp = (uint64_t *)realloc(c->tpos, nc * sizeof(uint64_t));
+            uint64_t *ti = (uint64_t *)realloc(c->tid, nc * sizeof(uint64_t));
+            if (!tp || !ti) { c->oom = 1; if (tp) c->tpos = tp; if (ti) c->tid = ti; return 1; }
+            c->tpos = tp; c->tid = ti; c->captomb = nc;
+        }
+        /* v2 kills by position (file_size); legacy by inode id (0) */
+        c->tpos[c->ntomb] = h->file_size;
+        c->tid[c->ntomb] = h->inode_id;
+        c->ntomb++;
+        return 0;
+    }
+    if (c->nrecs == c->caprecs) {
+        uint64_t nc = c->caprecs ? c->caprecs * 2 : 1024;
+        fs_entry *nr = (fs_entry *)realloc(c->recs, nc * sizeof(fs_entry));
+        if (!nr) { c->oom = 1; return 1; }
+        c->recs = nr; c->caprecs = nc;
+    }
+    memset(&c->recs[c->nrecs], 0, sizeof(fs_entry));
+    {
+        size_t nl = h->name_len < 255 ? h->name_len : 255;
+        memcpy(c->recs[c->nrecs].name, h->name, nl);
+        c->recs[c->nrecs].name[nl] = 0;
+    }
+    c->recs[c->nrecs].inode_id = h->inode_id;
+    c->recs[c->nrecs].size = h->file_size;
+    c->recs[c->nrecs].ctime = h->ctime;
+    c->recs[c->nrecs].pos = rec_pos;
+    c->nrecs++;
+    return 0;
+}
+
 static void build_file_table(void)
 {
     const invfs_superblock *sb = vol_sb(g_vol);
-    /* WP30: records live in dynamic mapper extents. Walk them with
-     * vol_inode_next, which is mapper-aware (handles extent boundaries
-     * across the active extent and the older sealed extents). The legacy
-     * "metadata zone + bitmap + journal" calculation is only used as a
-     * starting hint for format_version=0 volumes; for v0.3.0+ the
-     * mapper is authoritative. */
-    uint64_t p;
-    uint32_t magic0;
-    uint64_t inode0, size0;
-    uint32_t rec_len0;
-    char name0[256];
-    /* find the first record in the mapper extents */
-    p = vol_inode_next(g_vol, 0, &magic0, &inode0, &size0, name0, sizeof(name0), &rec_len0);
-    uint64_t end = vol_inode_area_pos(g_vol);
+    (void)sb;
+    bft_ctx c;
     fs_entry *recs = NULL;
     uint64_t nrecs = 0, caprecs = 0;
     /* tombstone kill list: (position-or-0, inode-id) pairs */
@@ -158,54 +196,14 @@ static void build_file_table(void)
 
     g_entries = NULL; g_nentries = 0; g_cap = 0;
 
-    /* pass 1: collect raw records. The walk stops at the engine's
-     * CRC-validated area end (vol_inode_area_pos) instead of the zone
-     * end: identical on an ordinary mount (the first non-record stops the
-     * walk anyway) and REQUIRED on a time-travel mount (WP24-lite), where
-     * the post-checkpoint records physically follow the cut but must stay
-     * invisible -- the checkpoint's consistent view ends at the cut. */
-    while (p != 0 && p <= end) {
-        uint32_t magic = magic0, rec_len = rec_len0;
-        uint64_t inode_id = inode0, file_size = size0, ctime = 0;
-        uint32_t name_len = (uint32_t)strlen(name0);
-        char *name = name0;
-        uint64_t cur_pos = p - (uint64_t)rec_len - 4;  /* record starts here */
-
-        /* read ctime from disk at the same offset the old loop did */
-        if (vol_read_raw(g_vol, cur_pos + 24, &ctime, 8) != 0) break;
-
-        if (magic == 0x544C4544u) {  /* tombstone */
-            if (ntomb == captomb) {
-                captomb = captomb ? captomb * 2 : 64;
-                tpos = (uint64_t *)realloc(tpos, captomb * sizeof(uint64_t));
-                tid = (uint64_t *)realloc(tid, captomb * sizeof(uint64_t));
-                if (!tpos || !tid) goto done;
-            }
-            /* v2: file_size carries the killed record's byte position;
-             * legacy tombstones carry 0 there and kill by inode id */
-            tpos[ntomb] = file_size;
-            tid[ntomb] = inode_id;
-            ntomb++;
-            p = vol_inode_next(g_vol, p, &magic0, &inode0, &size0, name0, sizeof(name0), &rec_len0);
-            continue;
-        }
-
-        if (nrecs == caprecs) {
-            fs_entry *nr;
-            caprecs = caprecs ? caprecs * 2 : 1024;
-            nr = (fs_entry *)realloc(recs, caprecs * sizeof(fs_entry));
-            if (!nr) goto done;
-            recs = nr;
-        }
-        memset(&recs[nrecs], 0, sizeof(fs_entry));
-        strncpy(recs[nrecs].name, name, 255);
-        recs[nrecs].inode_id = inode_id;
-        recs[nrecs].size = file_size;
-        recs[nrecs].ctime = ctime;
-        recs[nrecs].pos = cur_pos;
-        nrecs++;
-        p = vol_inode_next(g_vol, p, &magic0, &inode0, &size0, name0, sizeof(name0), &rec_len0);
+    /* pass 1: collect raw records. vol_records_walk is mapper-aware
+     * (dynamic extents via the mapper) and bounded for legacy volumes. */
+    memset(&c, 0, sizeof c);
+    if (vol_records_walk(g_vol, bft_cb, &c) != 0 && !c.oom) {
+        /* walk error: fall through with whatever was collected */
     }
+    recs = c.recs; nrecs = c.nrecs; caprecs = c.caprecs;
+    tpos = c.tpos; tid = c.tid; ntomb = c.ntomb; captomb = c.captomb;
 
     /* pass 2: apply tombstones (records sorted by pos for bsearch) */
     qsort(recs, (size_t)nrecs, sizeof(fs_entry), cmp_entry_pos);

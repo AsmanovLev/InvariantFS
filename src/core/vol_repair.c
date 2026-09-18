@@ -270,6 +270,44 @@ static int seal2_repair_stripe(seal2_ctx *c, uint64_t E0, uint32_t pool,
 }
 
 
+/* WP49: live-id collector fed by the bounded vol_records_walk (the old
+ * position-driven vol_inode_next loop can cycle on a non-monotonic mapper
+ * table). */
+struct lr_ent { uint64_t id; };
+
+typedef struct {
+    invfs_volume *v;
+    struct lr_ent *ents;
+    size_t nents, capents;
+    int oom;
+} lr_scan_ctx;
+
+static int lr_scan_cb(void *ctx_, uint64_t rec_pos,
+                      const invfs_inode_rec *h, const uint8_t *rec)
+{
+    lr_scan_ctx *c = (lr_scan_ctx *)ctx_;
+    char nm[256];
+    size_t i, nl;
+    (void)rec_pos; (void)rec;
+    if (h->magic != INODE_REC_MAGIC || !h->name_len) return 0;
+    if ((uint8_t)h->name[0] == 0x01) return 0;      /* internal owners */
+    nl = h->name_len < 255 ? h->name_len : 255;
+    memcpy(nm, h->name, nl);
+    nm[nl] = 0;
+    if (vol_find(c->v, nm) != h->inode_id) return 0;   /* superseded */
+    for (i = 0; i < c->nents; i++)
+        if (c->ents[i].id == h->inode_id) return 0;    /* name chain seen */
+    if (c->nents == c->capents) {
+        size_t nc = c->capents ? c->capents * 2 : 256;
+        void *ne = realloc(c->ents, nc * sizeof *c->ents);
+        if (!ne) { c->oom = 1; return 1; }
+        c->ents = (struct lr_ent *)ne;
+        c->capents = nc;
+    }
+    c->ents[c->nents++].id = h->inode_id;
+    return 0;
+}
+
 int vol_seal2_repair(invfs_volume *v, invfs_seal2_repair *rep)
 {
     const uint32_t k2 = SEAL2_K;
@@ -279,7 +317,7 @@ int vol_seal2_repair(invfs_volume *v, invfs_seal2_repair *rep)
     int algo;
     int rc = 0;
     /* live-record walk (the verify --deep pattern: newest id per name) */
-    struct lr_ent { uint64_t id; } *ents = NULL;
+    struct lr_ent *ents = NULL;
     size_t nents = 0, capents = 0;
     /* candidate segments (deduped by pba) and the failed ones */
     typedef struct { uint64_t pba; uint32_t plen; } segcand;
@@ -346,30 +384,13 @@ int vol_seal2_repair(invfs_volume *v, invfs_seal2_repair *rep)
 
     /* ---- pass 1: live files' shadow segments -> framing-CRC check ---- */
     {
-        uint64_t pos = v->inode_area_start * INVFS_BLOCK_SIZE;
-        while (pos) {
-            uint32_t magic, rl;
-            uint64_t ino, fsz, np;
-            char nm[256];
-            np = vol_inode_next(v, pos, &magic, &ino, &fsz, nm, sizeof nm,
-                                &rl);
-            if (!np) break;
-            pos = np;
-            if (magic != INODE_REC_MAGIC) continue;
-            if ((uint8_t)nm[0] == 0x01) continue;   /* internal owners */
-            if (vol_find(v, nm) != ino) continue;   /* superseded */
-            for (i = 0; i < nents; i++)
-                if (ents[i].id == ino) break;
-            if (i < nents) continue;               /* seen (name chain) */
-            if (nents == capents) {
-                size_t nc = capents ? capents * 2 : 256;
-                void *ne = realloc(ents, nc * sizeof *ents);
-                if (!ne) { rc = -1; goto out; }
-                ents = (struct lr_ent *)ne;
-                capents = nc;
-            }
-            ents[nents++].id = ino;
+        lr_scan_ctx lc;
+        memset(&lc, 0, sizeof lc);
+        lc.v = v;
+        if (vol_records_walk(v, lr_scan_cb, &lc) != 0 && lc.oom) {
+            rc = -1; goto out;
         }
+        ents = lc.ents; nents = lc.nents; capents = lc.capents;
     }
     for (i = 0; i < nents; i++) {
         uint8_t *buf = NULL;

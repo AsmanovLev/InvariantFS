@@ -3944,6 +3944,7 @@ typedef struct {
     invfs_volume *v;
     int (*cb)(void *, uint64_t, const invfs_inode_rec *, const uint8_t *);
     void *ctx;
+    void (*bad_cb)(void *, uint64_t);
 } rec_walk_state;
 
 /* scan [start,end) of one extent, feeding cb; return -1 on fatal error */
@@ -3959,8 +3960,10 @@ static int rec_walk_span(rec_walk_state *w, uint64_t start, uint64_t end)
         if (h.magic != INODE_REC_MAGIC && h.magic != TOMBSTONE_MAGIC)
             break;                                  /* end of this extent */
         if (h.rec_len < sizeof h || h.rec_len > INVFS_MAX_REC_LEN ||
-            p + (uint64_t)h.rec_len + 4 > end)
-            break;                                  /* torn/garbage tail */
+            p + (uint64_t)h.rec_len + 4 > end) {
+            if (w->bad_cb) w->bad_cb(w->ctx, p);    /* torn/garbage tail */
+            break;
+        }
         buf = (uint8_t *)malloc((size_t)h.rec_len + 4);
         if (!buf) return -1;
         if (vol_read_raw(v, p, buf, (size_t)h.rec_len + 4) != 0) {
@@ -3972,6 +3975,8 @@ static int rec_walk_span(rec_walk_state *w, uint64_t start, uint64_t end)
             invfs_inode_rec rh;
             memcpy(&rh, buf, sizeof rh);
             if (w->cb(w->ctx, p, &rh, buf) != 0) { free(buf); return -1; }
+        } else if (w->bad_cb) {
+            w->bad_cb(w->ctx, p);
         }
         free(buf);
         p += (uint64_t)h.rec_len + 4;
@@ -3979,17 +3984,19 @@ static int rec_walk_span(rec_walk_state *w, uint64_t start, uint64_t end)
     return 0;
 }
 
-int vol_records_walk(invfs_volume *v,
-                     int (*cb)(void *ctx, uint64_t rec_pos,
-                               const invfs_inode_rec *h,
-                               const uint8_t *rec),
-                     void *ctx)
+int vol_records_walk_ex(invfs_volume *v,
+                        int (*cb)(void *ctx, uint64_t rec_pos,
+                                  const invfs_inode_rec *h,
+                                  const uint8_t *rec),
+                        void *ctx,
+                        void (*bad_cb)(void *ctx, uint64_t rec_pos))
 {
     rec_walk_state w;
     if (!v || !cb) return -1;
     w.v = v;
     w.cb = cb;
     w.ctx = ctx;
+    w.bad_cb = bad_cb;
     if (v->met0_present && v->meta_mapper && v->met0.extent_count > 0) {
         size_t ei, n = (size_t)v->met0.extent_count;
         uint64_t active = v->met0.active_extent;
@@ -4007,6 +4014,15 @@ int vol_records_walk(invfs_volume *v,
     }
     return rec_walk_span(&w, v->inode_area_start * INVFS_BLOCK_SIZE,
                          v->inode_area_pos);
+}
+
+int vol_records_walk(invfs_volume *v,
+                     int (*cb)(void *ctx, uint64_t rec_pos,
+                               const invfs_inode_rec *h,
+                               const uint8_t *rec),
+                     void *ctx)
+{
+    return vol_records_walk_ex(v, cb, ctx, NULL);
 }
 
 
