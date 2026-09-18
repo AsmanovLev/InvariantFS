@@ -543,3 +543,48 @@ the record (`size_class` from `rec_size`), used by `wp25_owner_write` and
 
 Until then `tools/test-sweep-mapper.sh` is RED on the fsck leg (bad
 records: 2) — intentionally, as the first regression signal for WP52.
+
+---
+
+## WP53 — "checkpoint registry write failed" at sweep end
+
+**Date:** Sep 19, 2026
+**Severity:** Medium (sweep checkpoint contract / rollback diagnostics)
+**Impact:** A full offline sweep of a large mapper volume printed
+`checkpoint: registry write failed (the checkpoint itself is intact)`
+(and exited 0, hiding it). Reproduced deterministically on the WP45
+fixture at ~73 files: the sweep's last append left the active metadata
+extent with 309 bytes free, then `vol_ckp_end`'s `\x01reten` owner create
+failed.
+
+### Root cause
+`inode_area_make_room` (`vol_records.c`) fell through to the legacy
+compaction gate on a mapper volume whenever the active extent had no room
+for the record. A live sweep checkpoint (CKP0) makes that gate refuse, so
+the registry owner's `vol_create_file` failed before the record was even
+built. The mapper branch should report "a new extent can be allocated"
+(the append allocator, `meta_get_append_pos`, sizes it); only a full
+mapper table is genuine ENOSPC.
+
+### Fix
+- `inode_area_make_room`: on a mapper volume, return 0 when the table is
+  not full instead of falling through to the checkpoint refusal.
+- `tools/invf-sweep.c`: a genuine `vol_ckp_end` failure now sets
+  `reg_failed` and the run exits nonzero (previously exit 0).
+
+### Shared with WP52 (not fixed here)
+The legacy owner writers (`tz_owner_write`, `wp25_owner_write`) still
+append at `inode_area_pos` rather than through the extent allocator, so a
+record larger than the active extent can still run past its end — the
+WP49 `bad records: 2` finding. Routes that go through
+`meta_get_append_pos`/`vol_append_slot` are safe; the extent-sized
+flush-safe owner append is WP52.
+
+### Verified
+- Pre-fix: `invf-sweep` at N=73 prints the warning and exits 0; post-fix:
+  no warning, exit 0, `invf-fsck` CLEAN (`bad records: 0`), `--realize`
+  frees the retained ranges, `invf-rollback` bit-exact.
+- `make test`: 4722 checks, 0 failures.
+- `tools/test-meta-extent-walk.sh`: 6/0.
+- `test-rollback.sh` / `test-sweepboot.sh` remain RED on `main` (WP52
+  batch deferral; pre-existing seal parity mismatch) — unchanged here.

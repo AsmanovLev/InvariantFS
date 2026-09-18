@@ -440,6 +440,7 @@ int main(int argc, char **argv)
     int auto_reseal = 0;
     uint64_t rec_bytes = 0;   /* WP42: record bytes walked (compaction trigger) */
     int count = 0, cap = 0, swept = 0, skipped = 0, failed = 0;
+    int reg_failed = 0;   /* WP53: retention-registry write failed */
     char (*names)[256] = NULL;
     uint64_t *inodes = NULL;
     uint64_t *sizes = NULL;
@@ -984,13 +985,17 @@ progress:
      * checkpoint live + retained blocks held, until invf-rollback or the
      * next realize. A registry failure does NOT invalidate the checkpoint
      * (rollback never reads the registry); the realize of an unregistered
-     * range is just deferred to the fsck after the next realize. */
+     * range is just deferred to the fsck after the next realize, and the
+     * run exits nonzero so the failure is not silently swallowed. */
     if (!dry) {
         uint64_t rr = 0, rb = 0;
-        if (vol_ckp_end(vol, &rr, &rb) != 0)
+        if (vol_ckp_end(vol, &rr, &rb) != 0) {
             fprintf(stderr, "checkpoint: registry write failed (the "
                             "checkpoint itself is intact)\n");
-        else if (rb)
+            /* WP53: a genuine registry-write failure is a real failure --
+             * surface it in the exit status. */
+            reg_failed = 1;
+        } else if (rb)
             fprintf(stderr, "checkpoint: %llu retained blocks held for "
                     "rollback (%llu ranges)\n",
                     (unsigned long long)rb, (unsigned long long)rr);
@@ -1088,5 +1093,5 @@ progress:
     }
 
     vol_close(vol);
-    return failed ? 1 : 0;
+    return (failed || reg_failed) ? 1 : 0;
 }

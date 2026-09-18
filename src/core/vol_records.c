@@ -1669,12 +1669,23 @@ int inode_area_make_room(invfs_volume *v, uint64_t need)
         if (entry && (v->met0.active_offset + need) <=
                      invfs_meta_ext_size(entry))
             return 0;
-        /* active extent exists but full: ok as long as we can allocate a
-         * new extent. Active extent doesn't exist yet (extent_count==0):
-         * meta_get_append_pos will lazy-allocate on first write -- ok too.
-         * The genuine ENOSPC is "no mapper slots left" or "no shadow free". */
-        if (v->met0.extent_count >= INVFS_META_EXT_ENTRIES)
-            return -1;
+        /* WP53: the active extent is full, or none exists yet
+         * (extent_count==0). On a mapper volume the append allocator
+         * (meta_get_append_pos) grows the extents itself, sized for the
+         * record, so this is NOT a compaction case and must not fall
+         * through to the checkpoint refusal below -- that path is what
+         * made vol_ckp_end's retention-registry write fail at the end of
+         * a sweep (vol_create_file calls this before meta_get_append_pos,
+         * and a live sweep checkpoint then refused). The genuine ENOSPC
+         * is "no mapper slots left".
+         *
+         * NOTE (shared with WP52): callers that then append through the
+         * extent allocator (meta_get_append_pos / vol_append_slot) are
+         * safe. The two legacy owner writers (`tz_owner_write`,
+         * `wp25_owner_write`) still append at `inode_area_pos` instead,
+         * so a record larger than the active extent still runs past its
+         * end here; that overflow is WP52's scope, not this one. */
+        return v->met0.extent_count < INVFS_META_EXT_ENTRIES ? 0 : -1;
     } else if (v->inode_area_pos + need <= v->inode_area_end) {
         return 0;
     }
