@@ -452,3 +452,48 @@ position-driven walk cycled.
   kill-mid-sweep path has not been re-exercised; add a targeted crash leg.
 - `sweep: checkpoint registry write failed (the checkpoint itself is
   intact)` warning at the end of the full sweep — investigate.
+
+---
+
+## WP50 — Volume identity by uuid (and guest-config FUSE pitfalls)
+
+**Date:** Sep 19, 2026
+**Severity:** High (single-device boot broken; wrong volume selected)
+**Impact:** After the WP48 sweep, booting the swept volume as the only disk
+failed: the initramfs init unconditionally `mknod`ed `/dev/sda3`, so its
+name-based `[ -b /dev/sda3 ]` probe saw a partition that does not exist,
+selected the multi-device layout, and tried to mount a missing `/dev/sdb`.
+The initramfs busybox has no `dd`/`od`, so shell-side superblock probing is
+not an option.
+
+### Fix
+- `invf-fuse --probe-uuid <dev>`: reads superblock magic (`InvariFS` @0x00)
+  and the 16-byte uuid (@0x08); prints the uuid hex, exits 0; else exits 1.
+- `tools/initramfs-init.sh` (installed by `tools/mkinitramfs.sh` as `/init`):
+  probes every block device with `--probe-uuid`; first InvFS volume is
+  `INVFS_RAW`, a second distinct one `INVFS_DEV1`; optional kernel-cmdline
+  `invfs.raw_uuid=` / `invfs.dev1_uuid=` overrides. No partition mknod.
+- `docs/GENTOO-INSTALL.md` Step V4 rewritten.
+
+### Verified
+Swept stage3 volume (66089 live records, 2.14x shadow ratio) boots
+single-device via direct kernel+initramfs: `InvariantFS mounted` → OpenRC
+0.63.3 runlevel 3 → serial root login → ssh :2222 key auth →
+`invfs[sda] on / type fuse rw`, 15G/2.4G; sha256 of wcurl / cc1plus (43 MiB)
+/ etc/passwd match the stage3 source.
+
+### Guest-config pitfalls found (configure-guest.sh still has them)
+- **`sed -i` does not work on the FUSE mount**: it renames a temp file and
+  the rename fails (`Device or resource busy` / `Operation not permitted`),
+  so `sed -i 's/^root:[^:]*:/root::/'` left `/etc/shadow` locked. Edit files
+  in place (open/truncate/write) instead.
+- **Files created via a host-side FUSE mount are owned by the mount user
+  (uid 1000)**, not root. sshd `StrictModes yes` then refuses
+  `/root/.ssh/authorized_keys` (owner 1000). Fix: `chown -R root:root
+  /root/.ssh` in the guest, or run the config mount as root.
+- configure-guest.sh's `ln -sf` into `/etc/runlevels/default` also failed
+  on FUSE; create the symlinks in-guest (or via python) instead.
+
+### Follow-ups (open)
+- Port configure-guest.sh to in-place writes + root ownership + real
+  runlevel symlinks so a fresh import can be provisioned in one pass.
