@@ -1,23 +1,108 @@
 # InvariantFS
 
-Semantic content-addressed filesystem with a bit-exactness invariant:
-every compression is verified by decompress-and-compare before it is
-trusted; containers (ZIP/TAR) are stored byte-original with members
-exposed as on-demand windows; transcodes happen only where bit-exactness
-is proven per file.
+A content-addressed filesystem with one hard guarantee:
 
 > **What is written comes back bit-for-bit identical. Always.**
 
-## State: experimental
+Every codec application is verified by decompress-and-compare before it is
+trusted. Containers (ZIP/TAR/7z) are stored byte-original with members exposed
+as on-demand windows. Transcodes happen only where bit-exactness is proven per
+file; where it is not proven, the bytes are stored verbatim.
 
-**Not yet tested on real hardware. Use at your own risk. Do backups.**
+**State: experimental.** Not tested on arbitrary real hardware. No power-loss
+durability guarantee (see [Known limitations](#known-limitations)). Use backups.
 
-A Gentoo/OpenRC system runs with its entire root on an InvariantFS volume.
-Two installation paths are supported:
-- **QEMU/VM**: `tools/mkdisk.sh`, `vm/` — virtual disk with OVMF/GRUB
-- **Bare-metal**: real hardware via SSH + live CD (see `docs/GENTOO-INSTALL.md`)
+Current format: **v0.3.x** (dynamic metadata extents; see
+[Metadata model](#metadata-model-v03x)). Release string: `v0.2.1`.
 
-Current release: **v0.2.1**.
+## What it is / is not
+
+**It is:** an append-oriented, single-host FUSE filesystem for archives,
+read-mostly roots (container/VM bases, build roots, Gentoo stage3), and any
+workload that values byte-preservation and deduplication over write throughput.
+
+**It is not:** a drop-in ext4 replacement, a network/SAN filesystem, a
+high-throughput write store, or a filesystem for millions of empty files
+(metadata-space dominated). Writing directly to the backing image without going
+through the volume is not supported.
+
+## Feature tour
+
+### Bit-exactness
+- Per-segment codecs with a **decompress-and-compare** gate before a transcode
+  is trusted; otherwise the segment stays verbatim.
+- Bit-exact transcode families so far: **FLAC** (`FLACR`), **TAR** (`TARR`),
+  **gzip** (`GZR`, deflate parameter brute-force), **PNG** (`PNGR`, lossless JXL
+  + row-filter/deflate recipe), **PE/EXE** (`EXER`, x86 BCJ + ZSTD).
+- `invf-verify [--deep]` proves content; `invf-cat` is the ground-truth reader.
+
+### Tiered storage + codecs
+- **Raw** landing zone (write path) → **Shadow** consolidated zone (sweep).
+- Codecs: LZ4 (write path), ZSTD, PPMd (text zone), BLAKE3 (content hash),
+  plus the bit-exact families above. Bundled: zstd, lz4, miniz, blake3, flacx,
+  rs (Reed–Solomon), ppmd8, bcj_x86.
+- Cross-file **batching** in the text/binary zones (PPMd text batches,
+  ZSTD+BCJ binary batches) for better ratios than per-file coding.
+
+### Content addressing & deduplication
+- Segments are content-hashed (BLAKE3) and **deduplicated with refcounts**.
+- Online dedupe pass (`vol_dedupe`) merges duplicate stored segments.
+
+### Containers & partial reads
+- **AST recipe** per file maps original byte ranges to `(zone, pba, offset)`
+  tuples; the recipe is a tree, so containers nest (bounded depth).
+- Partial reads touch only the needed segments: reading a FLAC's tags never
+  decompresses the audio; ZIP/TAR members are extracted on demand.
+- Container packs + `invf-zip` for ZIP inspection/extraction.
+
+### Text/Binary classing & heat
+- Segments are classified (text vs binary) and clustered by the sweep.
+- **Read/write heat** (`rheat`/`wheat`, a per-inode TLV) drives promotion of hot
+  text members into batches and decays exponentially per sweep run. Heat is
+  session-accrued and **persisted at a sweep run's decay pass** (or an explicit
+  `vol_heat_persist`), not on every close.
+
+### Sweep worker
+`invf-sweep` (offline) or the FUSE background sweep:
+1. Drains **RAW → Shadow**, re-encoding per content class.
+2. Re-clusters text/binary.
+3. Runs **dedupe** and text-zone **GC**.
+4. Optionally re-encodes with stronger codecs when bit-exactness is proven.
+5. **Inode-area compaction** (tombstone reclamation), gated on a consistent cut.
+6. Optional **parity seals** (`--seal`) for bit-rot recovery.
+
+### Checkpoints, rollback & time-travel
+- A sweep can arm a **checkpoint** (CKP0): `invf-rollback` undoes the last sweep;
+  `invf-sweep --realize` accepts it and releases retained ranges.
+- `vol_open_at` supports a read-only **time-travel** view at a checkpoint cut.
+
+### Recovery & integrity
+- Append-only **owner WAL** journal (MAP/UNMAP/SWEEP/CHECKPOINT), double-buffered
+  slots; replay on mount; superblock state `CLEAN`/`DIRTY`/`RECOVERY`.
+- `invf-fsck [-f]`: mapper-aware record walk, quarantine of torn versions,
+  orphan reclamation, repair.
+- Auto-recovery: a DIRTY volume with an anomaly-free scan returns to CLEAN
+  read-write (`INVFS_AUTO_RECOVER=0` opts out).
+
+### Multi-device
+- Two-device volumes: **dev0** = metadata + RAW, **dev1** = Shadow/canonical
+  (used for mirroring/acceleration and canonical placement).
+- **Volume identity by UUID**: `invf-fuse --probe-uuid <dev>` prints the volume
+  UUID from the superblock; used by the initramfs to pick devices by content
+  instead of unstable kernel names.
+
+### POSIX layer
+- mode/uid/gid enforced daemon-side; **POSIX.1e ACLs** stored as
+  `system.posix_acl_*` xattr blobs and honored in access checks.
+- xattrs stored as opaque blobs (cap 4096 bytes/inode); no `security.*` /
+  `trusted.*`; no NFSv4 ACLs.
+- mtime truncated to seconds.
+
+### Capacity policy
+- ENOSPC ladder with a metadata reservation and a hard-min floor; breaching the
+  floor flips the volume to READ-ONLY (`VOLF_RO_SPACE`), recoverable after a
+  sweep/f`invf-resize`.
+- `INVFS_META_FRAC=N` sizes the metadata zone at mkfs (rootfs images want `16`).
 
 ## Architecture
 
@@ -25,67 +110,66 @@ Current release: **v0.2.1**.
 
 | Zone | Role |
 |---|---|
-| **RAW** | Linear landing area. New writes go here immediately, LZ4-compressed, cheap and fast. |
-| **Shadow** | Optimized storage, split into **Text** and **Binary** zones so similar data is consolidated. |
-| **Metadata** | Superblock, block bitmap, L2P journal, inode area. |
+| **Metadata** | Superblock, block bitmap, metadata mapper (MET0), owner WAL journal, inode records |
+| **RAW** | Linear landing area for new writes (LZ4 or verbatim) |
+| **Shadow** | Consolidated storage (text/binary clustered), optional parity seals |
 
-Writes are decoupled from compression. Data lands in RAW at write speed; the
-**sweep worker** later moves it to Shadow under the appropriate codec. Expensive
-analysis therefore never sits on the write path.
+### Metadata model (v0.3.x)
+
+Inode records no longer live in one contiguous area. They are stored in
+**dynamic metadata extents** tracked by a **mapper table** (`[pba, size_class]`
+pairs, 64 KiB … 2 GiB class) plus the **MET0** descriptor (`active_extent`,
+`active_offset`, `extent_count`) in block 0. Appends go through
+`meta_get_append_pos`; the mapper + MET0 are persisted on flush. The name and
+id indexes are rebuilt at mount from a single extent-ordered record walk
+(`vol_records_walk`).
+
+Legacy `format_version=0` volumes keep the contiguous inode area; use
+`invf-migrate-v2` to upgrade.
 
 ### AST recipe
 
-Each file carries a recipe that maps byte ranges of the *original* file onto
-`(zone, block, offset)` tuples. Segments are stored as
-`[4B csize][4B crc32c][data]`.
-
-- **Partial reads are cheap.** Reading a FLAC file's tags touches only the text
-  segments; the audio blocks are never decompressed.
-- **Containers nest.** The recipe is a tree, so a zip-in-a-tar mirrors its real
-  structure (bounded at depth 16).
-
-### Journal
-
-An append-only L2P journal (`MAP` / `UNMAP` / `SWEEP` / `CHECKPOINT`) persists the
-logical-to-physical mapping. Mount replays from the last checkpoint. The
-superblock carries a state byte (`CLEAN` / `DIRTY` / `RECOVERY`) driving recovery.
-
-### Deduplication
-
-Content addressing via BLAKE3. Identical blocks are stored once and refcounted.
+Segments are `[4B csize][4B crc32c][payload]`; a file's recipe maps original
+byte ranges to stored segments. Records carry their own segment `pba`s, so a
+record is self-describing and needs no separate mapping to be read.
 
 ## Building
 
 ```sh
 make                # all tools -> bin/
 make bin/invf-fuse  # single target
+make docs           # ctags indexes + doxygen HTML (impl_docs/doxygen/, graphviz)
 ```
 
-Requires `gcc`, `libfuse3-dev`, `zlib1g-dev`, `libzstd-dev`. Bundled codecs:
-zstd, lz4, miniz, blake3, flacx, rs, ppmd, bcj_x86.
+Requires `gcc`, `libfuse3-dev`, `zlib1g-dev`, `libzstd-dev` (doxygen+graphviz
+optional, for `make docs`). If the default `cc` in your environment is a broken
+ccache symlink, use `make CC=gcc`.
 
 ## Tools
 
 | Tool | Purpose |
 |---|---|
-| `invf-mkfs <img> [gb]` | Format a volume. Env `INVFS_META_FRAC=N` scales metadata zone |
-| `invf-fsck [-f] <img>` | Check and repair. `-f` forces repair; auto-recovery on DIRTY volumes |
-| `invf-fuse [-o opts] <vol> <mnt>` | FUSE daemon (see below) |
-| `invf-ls <img>` | List files in a volume |
-| `invf-cat <img> <name> [out]` | Extract a file |
-| `invf-cp <img> <file> [name]` | Copy a host file into a volume |
-| `invf-stat <img> [--files]` | Space inspector with zone bars |
-| `invf-import <vol> <dir>` | Bulk tree import (~50k files/sec) |
-| `invf-sweep <img> [--dry-run] [--seal]` | Offline sweep (RAW -> Shadow, transcodes) |
-| `invf-stats <img>` | Full statistics walk with per-class ratios |
-| `invf-resize <img> ...` | Offline volume grow/shrink |
-| `invf-rollback <img>` | Undo last sweep from checkpoint |
+| `invf-mkfs <img> [gb] [dev1 [gb]]` | Format a volume (single- or two-device). `INVFS_META_FRAC=N` |
+| `invf-fuse [-f] [-o opt] <vol> <mnt>` | FUSE daemon (below) |
+| `invf-fuse --probe-uuid <dev>` | Print the volume UUID if `<dev>` is an InvFS volume |
+| `invf-import <vol> <dir>` | Bulk tree import |
+| `invf-ls <img>` | List live records |
+| `invf-cat <img> <name> [out]` | Read a file byte-exact |
+| `invf-cp <img> <file> [name]` | Copy one host file in |
+| `invf-stat <img>` | Space/zone inspector |
+| `invf-stats <img>` | Full statistics (population, per-class ratios, zones) |
+| `invf-sweep <img> [--dry-run] [--seal] [--realize]` | Offline sweep / checkpoint accept |
+| `invf-fsck [-f] <img>` | Check/repair |
 | `invf-verify [--deep] <img>` | Content verification |
-| `invf-migrate-v2 <img>` | Format v1 -> v2 conversion |
-| `invf-zip list\|get <img> <zip>` | ZIP container inspection |
-| `invf-zip get <img> <zip> <member> <out>` | Extract ZIP member |
+| `invf-rollback <img>` | Undo the last swept checkpoint |
+| `invf-resize <img> ...` | Offline grow/shrink |
+| `invf-migrate-v2 <img>` | v1 → dynamic-extent format |
+| `invf-zip list\|get <img> ...` | ZIP container inspection/extraction |
 | `meta_probe <img> <name>` | Developer probe (mutates) |
 | `meta_probe <img> --heat <name>` | Read-only heat/class dump |
+
+Tools take the second device via `INVFS_DEV1=<dev1>` when the volume is
+two-device.
 
 ## FUSE daemon
 
@@ -93,96 +177,105 @@ zstd, lz4, miniz, blake3, flacx, rs, ppmd, bcj_x86.
 invf-fuse [-f] [-o opt[,opt]] <volume> <mountpoint>
 ```
 
-**Mount options:**
+Mount options: `attr_timeout=0,ac_attr_timeout=0` (default),
+`raw_watermark=<pct>` (background-sweep kick), `arc_limit=<MB>` (decoded-unit
+cache, default 256), `dec_mem_limit=<MB>`, `dev1=<dev>` (or `INVFS_DEV1`).
 
-- `attr_timeout=0,ac_attr_timeout=0` — no kernel attr caching (default)
-- `raw_watermark=<pct>` — kick background sweep when RAW fill exceeds mark (WP26)
-- `arc_limit=<MB>` — decoded-unit cache limit (default 256)
-- `dec_mem_limit=<MB>` — decompression memory limit
+Background sweep: opt in with `INVFS_SWEEP_INTERVAL=<sec>`; or trigger manually
+with `kill -USR1 $(pidof invf-fuse)` / `setfattr -n user.invfs.sweep -v 1 <mnt>`.
 
-**Background sweep:**
-
-- Opt-in: `INVFS_SWEEP_INTERVAL=<sec>`
-- Manual: `kill -USR1 $(pidof invf-fuse)` or `setfattr -n user.invfs.sweep -v 1 /`
-
-**Control namespace on mount root:**
-
+Control xattrs on the mount root:
 ```sh
-getfattr --only-values -n user.invfs /        # RAM summary
-getfattr --only-values -n user.invfs.stats /  # hot counters + zone usage
+getfattr --only-values -n user.invfs /         # RAM summary
+getfattr --only-values -n user.invfs.stats /   # hot counters + zone usage
 ```
 
-**Permissions (WP-A):** mode/uid/gid enforced daemon-side. POSIX ACLs stored as
-`system.posix_acl_*` xattr blobs and honored in access checks.
+## Booting a Gentoo rootfs (verified path)
 
-## Bootable VM
+The verified path is a **direct kernel + initramfs** boot (OVMF+UKI/GRUB is
+known-blocked in the current firmware, see `INCIDENTS.md`). The initramfs
+mounts the volume, waits for `InvariantFS mounted`, `rbind`s `/proc /sys /dev`,
+loads the virtio-net module chain, and `chroot`s into the guest (`switch_root`
+refuses a FUSE root).
 
-```sh
-tools/mkdisk.sh <volume.img>     # GPT: ESP + volume as p2
-qemu-system-x86_64 -enable-kvm -cpu host -m 2048 -nographic \
-  -drive if=pflash,format=raw,readonly=on,file=/usr/share/edk2/ovmf/OVMF_CODE.fd \
-  -drive if=pflash,format=raw,file=vm/OVMF_VARS.fd \
-  -drive file=vm/disk.img,format=raw,if=virtio \
-  -netdev user,id=n0,hostfwd=tcp::2222-:22 -device virtio-net-pci,netdev=n0
-```
+1. **Format + populate**
+   ```sh
+   truncate -s 15G root.img
+   INVFS_META_FRAC=16 bin/invf-mkfs root.img 15
+   bin/invf-import root.img /path/to/stage3-root
+   ```
+2. **Provision the guest** (FUSE-portable): `tools/configure-guest.sh <mnt>` —
+   sets `root` empty password, ttyS0 getty, sshd+dhcpcd runlevels, ssh host keys,
+   binhost stub.
+3. **Initramfs**: `tools/mkinitramfs.sh` installs `tools/initramfs-init.sh` as
+   `/init`. Device selection is by **content**: it probes each block device with
+   `invf-fuse --probe-uuid`; optional kernel cmdline `invfs.raw_uuid=` /
+   `invfs.dev1_uuid=`.
+4. **Run**
+   ```sh
+   qemu-system-x86_64 -machine q35,accel=kvm -cpu host -m 4G \
+     -kernel vmlinuz -initrd initramfs.img -append console=ttyS0,115200 \
+     -drive id=vol,file=root.img,format=raw,if=ide \
+     -netdev user,id=n0,hostfwd=tcp::2222-:22 -device virtio-net-pci,netdev=n0 \
+     -display none -serial stdio -no-reboot
+   ```
+   Expect `InvariantFS mounted: N files` → OpenRC runlevel 3 → serial login →
+   `ssh -p 2222 root@localhost`.
 
-Chain: OVMF -> GRUB (ESP) -> initramfs (busybox + fuse.ko + invf-fuse)
--> switch_root into Gentoo. See `docs/GENTOO-INSTALL.md` for full guide.
+Full guide and pitfalls: `docs/GENTOO-INSTALL.md`.
 
 ## Testing
 
 ```sh
-make test    # 4722 unit checks (core + codecs + recipes + CLI)
-make e2e     # 38 end-to-end FUSE tests
-make flakey  # chaos/soak tests (torn sweep, error storm, compact-flip)
+make test     # 4722 unit checks (core + codecs + recipes + CLI)
+make e2e      # serialized end-to-end FUSE suites (flock-protected)
+make flakey   # chaos/soak (torn sweep, error storm, compact-flip)
 ```
 
-Gate tests in `tools/`:
+Mapper-era suites worth knowing: `tools/test-meta-extent-walk.sh`,
+`tools/test-stats-mapper.sh`, `tools/test-sweep-mapper.sh`,
+`tools/test-heat-mapper.sh`, `tools/test-fixture-bigvol.sh` (30k-object
+multi-extent fixture), `tools/test-mapper-crash.sh` (kill-mid-import/sweep,
+rollback, realize). Run any suite through `tools/run-e2e.sh` (it serializes via
+`/tmp/invfs-e2e.lock`); use `--bg` + `--wait` when the lock is busy.
 
-| Script | Coverage |
-|---|---|
-| `bench-gate-b.sh` | v2 vs v1 read benchmark |
-| `test-gate-c.sh` | ENOSPC stress (floor breach, race, sweep interlock) |
-| `test-gate-d1.sh` | ACL/xattr edge cases (4096 boundary, listxattr, full-volume, concurrent create) |
-| `test-gate-d2.sh` | Parallel writes (same-file, multi-file, sweep-during-writes) |
+## Debug env vars
 
-## Codecs
-
-**General purpose:** LZ4 (write path), ZSTD, PPMd (text zone), BLAKE3 (dedup).
-
-**Bit-exact transcode families:**
-
-| Tag | Family | Reproduction method |
-|---|---|---|
-| `FLACR` | FLAC | PCM as APE + frame recipe rebuilding exact FLAC bitstream |
-| `TARR` | TAR | Members split; `IVFT` recipe restores headers, padding, alignment |
-| `GZR` | gzip | Deflate replicated by brute-forcing zlib parameters |
-| `PNGR` | PNG | Lossless JXL + `IVPN` recipe for row filters and deflate params |
-| `EXER` | PE/EXE | x86 BCJ filter + ZSTD, recipe reproduces original |
-
-Where replication fails, the file stays in its original form. That is the
-invariant doing its job.
+- `INVFS_DEBUG=1` — general trace in several paths.
+- `INVFS_DEBUG_META_EXTENTS` (compile-time) — mapper/MET0/flush trace.
+- `INVFS_AUTO_RECOVER=0` — disable DIRTY→CLEAN auto-recovery.
+- `INVFS_META_FRAC`, `INVFS_DEV1`, `INVFS_TOOLS`, `INVFS_REQUIRE_HELPER_PATH`,
+  `INVFS_SWEEP_INTERVAL`.
 
 ## Known limitations
 
-- Per-op write barriers/group-commit still open (WP3); durability contract is
-  fsync/close (`vol_sync`).
-- mmap read/write supported via FUSE writeback cache (WP4a).
-- Codecs: JPEG->JXL needs `cjxl`/`djxl`; FLAC needs `mac` + `ffmpeg`;
-  absent tools = file stays RAW.
-- Bit-rot recovery only via explicit seal (`invf-sweep --seal`, WP20).
-- xattr storage capped at 4096 bytes per inode (`INVFS_META_XATTR_MAX`).
-- No NFSv4 ACLs (POSIX.1e only).
-- No `security.*`/`trusted.*` xattr namespaces.
+- **No power-loss durability guarantee.** Crash recovery is good for normal
+  shutdown/SIGKILL; arbitrary power loss is not covered (`make flakey` is a soak,
+  not a contract).
+- **Format is still evolving** (v0.3.x mapper work landed recently); no frozen
+  on-disk compatibility promise yet.
+- **Owner/batch paths were just repaired** (WP52); a fresh durability suite
+  (`test-mapper-crash`) currently reports a full-sweep batch-commit failure and
+  an `--realize` orphan leak being investigated.
+- **Heat accounting** persists only at a sweep run (by default the FUSE
+  background sweep is off), so read heat from short guest sessions is not
+  accumulated.
+- Transcode helpers (`cjxl`/`djxl`, `mac`+`ffmpeg`) absent ⇒ file stays RAW;
+  helper lookup is restricted by default (root) — see `docs/SECURITY.md`.
+- Bit-rot recovery only via explicit `invf-sweep --seal` parities.
+- xattr cap 4096 B/inode; no `security.*`/`trusted.*`; no NFSv4 ACLs.
+- OVMF/UKI/GRUB boot path blocked in current firmware; direct kernel+initramfs is
+  the supported boot.
 
 ## Layout
 
 ```
-src/   engine + CLI (C11): core/ codecs/ recipes/ cli/
-tools/                   build scripts, guest config, test harnesses
-packaging/               install.sh, debian/, RPM, Arch, systemd, man pages
-docs/                    Gentoo install guide
-vm/                      initramfs tree, disk builder inputs
+src/         engine + CLI (C11): core/ codecs/ recipes/ cli/ legacy/
+tools/       build scripts, guest config, test harnesses, import/sweep tools
+docs/        Gentoo install guide, SECURITY.md
+impl_docs/   architecture, FILEMAP, AUDIT, FUNCTIONS/TYPES (ctags), WP*.md
+packaging/   install.sh, distro packaging, systemd units, man pages
+Doxyfile     doxygen config for `make docs`
 ```
 
 ## License

@@ -611,3 +611,28 @@ flush-safe owner append is WP52.
 - `tools/test-meta-extent-walk.sh`: 6/0.
 - `test-rollback.sh` / `test-sweepboot.sh` remain RED on `main` (WP52
   batch deferral; pre-existing seal parity mismatch) — unchanged here.
+
+---
+
+## WP56 (candidate) — batch-commit failure, duplicate pba, --realize leak
+
+**Date:** Sep 19, 2026
+**Severity:** High (fresh red signal after WP52)
+**Impact:** On a small two-device mapper fixture, `tools/test-mapper-crash.sh`
+leg 4 (a full offline sweep) fails:
+```
+tz: commit failed for d03/f00001
+tz: commit failed for d03/f00029
+batch flush failed (rc=-1)
+sweep done: swept=0 skipped=49 failed=1        -> sweep rc=1
+```
+and afterwards the mapper table carries **1 duplicate pba** while
+`invf-sweep --realize` leaves **457 orphan blocks** (strict fsck-clean SKIPped).
+`tools/test-sweep-mapper.sh` still passes 6/0 on the 30k fixture, so the
+failure is content/fixture-dependent — likely in the text/binary batch commit
+path re-enabled by WP52 interacting with the new owner-extent allocation
+(duplicate pba) and the checkpoint retained-range release (realize leak).
+
+Open. Needs: reproduce with the crash-suite fixture, fix `tz_commit_member`/
+batch flush failure, ensure owner-extent allocation cannot duplicate a pba,
+and make `--realize` free the checkpoint's retained ranges (ties to WP53).
