@@ -576,7 +576,6 @@ static void retire_free_file_blocks(invfs_volume *v, uint64_t inode_id,
 static int vol_retire_inode(invfs_volume *v, uint64_t inode_id,
                             const char *name, int free_data)
 {
-    uint64_t pos, end;
     size_t i;
 
     if (inode_id == 0)
@@ -677,20 +676,26 @@ static int vol_retire_inode(invfs_volume *v, uint64_t inode_id,
         v->l2p_count = w;
     }
 
-    /* append tombstone record */
-    pos = v->inode_area_pos;
-    end = v->inode_area_end;
-    if (pos + sizeof(invfs_inode_rec) + 4 > end) {
+    /* append tombstone record. WP47: route the append through the mapper
+     * (vol_append_slot) -- the legacy direct at-inode_area_pos write landed
+     * in the wrong place once the active metadata extent filled, so the
+     * tombstone never became visible and the name resurrected on reopen. */
+    if (!(v->met0_present && v->meta_mapper) &&
+        v->inode_area_pos + sizeof(invfs_inode_rec) + 4 > v->inode_area_end) {
         /* WP27 churn backstop: reclaim the dead prefix, then retry.
          * The tombstone is an id-kill (file_size=0): no position held,
-         * so the compaction's position moves touch nothing here. */
+         * so the compaction's position moves touch nothing here. On a
+         * mapper volume vol_append_slot grows the extents instead, so the
+         * compact pre-check (which a live sweep checkpoint blocks) is
+         * skipped, mirroring the WP42 sweep path. */
         if (inode_area_make_room(v, sizeof(invfs_inode_rec) + 4) != 0)
             return -1;
-        pos = v->inode_area_pos;
     }
     {
         invfs_inode_rec rec;
         uint32_t crc;
+        uint64_t tpos;
+        int trc;
         memset(&rec, 0, sizeof(rec));
         rec.magic = TOMBSTONE_MAGIC;
     v->hot.tombstones++;
@@ -699,11 +704,14 @@ static int vol_retire_inode(invfs_volume *v, uint64_t inode_id,
         rec.file_size = 0;
         rec_set_name(&rec, name);
         crc = invfs_crc32c(&rec, sizeof(rec));
-        if (io_seek(&v->io, pos) != 0 ||
+        trc = vol_append_slot(v, sizeof(rec) + 4, &tpos);
+        if (trc != 0)
+            return trc;
+        if (io_seek(&v->io, tpos) != 0 ||
             io_write(&v->io, &rec, sizeof(rec)) != 0 ||
             io_write(&v->io, &crc, 4) != 0)
             return -1;
-        v->inode_area_pos = pos + sizeof(rec) + 4;
+        v->inode_area_pos = tpos + sizeof(rec) + 4;
         idx_del(v, name, strlen(name), inode_id);
     }
     return 0;
@@ -726,42 +734,64 @@ int vol_delete_inode(invfs_volume *v, uint64_t inode_id, const char *name)
  * FLAC overwritten by 15 bytes of text stranded a 36 KB !recipe permanently.
  *
  * Collect the names first: vol_delete_inode appends a tombstone, so a live
- * scan would walk into records it had just written. */
+ * scan would walk into records it had just written. WP47: the collection
+ * goes through the shared mapper-aware vol_records_walk() so siblings in
+ * dynamic metadata extents are found on v0.3.0+ volumes; the per-record
+ * policy (prefix-match, supersede check, first-name-wins) is unchanged. */
+typedef struct {
+    invfs_volume *v;
+    char (*names)[256];
+    size_t n, cap, nlen;
+    const char *name;
+    int oom;
+} del_siblings_ctx;
+
+static int del_siblings_cb(void *ctx_, uint64_t rec_pos,
+                           const invfs_inode_rec *h, const uint8_t *rec)
+{
+    del_siblings_ctx *c = (del_siblings_ctx *)ctx_;
+    char nm[257];
+    size_t nl, i;
+    (void)rec_pos;
+    (void)rec;
+    if (h->magic != INODE_REC_MAGIC) return 0;   /* tombstones */
+    nl = h->name_len < 256 ? h->name_len : 256;
+    memcpy(nm, h->name, nl);
+    nm[nl] = 0;
+    if (nl <= c->nlen + 1 || strncmp(nm, c->name, c->nlen) != 0 ||
+        nm[c->nlen] != '!')
+        return 0;
+    if (vol_find(c->v, nm) == 0) return 0;       /* already superseded */
+    for (i = 0; i < c->n; i++)
+        if (strcmp(c->names[i], nm) == 0) return 0;   /* older, same name */
+    if (c->n == c->cap) {
+        size_t ncap = c->cap ? c->cap * 2 : 8;
+        void *nn = realloc(c->names, ncap * sizeof(*c->names));
+        if (!nn) { c->oom = 1; return 1; }       /* purge what we gathered */
+        c->names = (char (*)[256])nn;
+        c->cap = ncap;
+    }
+    memcpy(c->names[c->n++], nm, nl + 1);
+    return 0;
+}
+
 int vol_delete_siblings(invfs_volume *v, const char *name)
 {
     char (*names)[256] = NULL;
-    size_t n = 0, cap = 0, nlen = strlen(name), i;
-    uint64_t pos = v->inode_area_start * INVFS_BLOCK_SIZE;
-    uint64_t end = v->inode_area_pos;
+    size_t n = 0, cap = 0, i;
+    del_siblings_ctx c;
 
-    while (pos + sizeof(invfs_inode_rec) <= end) {
-        invfs_inode_rec h;
-        char nm[257];
-        size_t nl;
-        if (io_seek(&v->io, pos) != 0 || io_read(&v->io, &h, sizeof h) != 0) break;
-        if (h.magic != INODE_REC_MAGIC && h.magic != TOMBSTONE_MAGIC) break;
-        if (h.rec_len < sizeof(invfs_inode_rec) ||
-            h.rec_len > INVFS_MAX_REC_LEN) break;
-        pos += (uint64_t)h.rec_len + 4;
-        if (h.magic != INODE_REC_MAGIC) continue;
-        nl = h.name_len < 256 ? h.name_len : 256;
-        memcpy(nm, h.name, nl);
-        nm[nl] = 0;
-        if (nl <= nlen + 1 || strncmp(nm, name, nlen) != 0 || nm[nlen] != '!')
-            continue;
-        if (vol_find(v, nm) == 0) continue;      /* already superseded */
-        for (i = 0; i < n; i++)
-            if (strcmp(names[i], nm) == 0) break;
-        if (i < n) continue;                     /* older record, same name */
-        if (n == cap) {
-            size_t ncap = cap ? cap * 2 : 8;
-            void *nn = realloc(names, ncap * sizeof(*names));
-            if (!nn) break;                      /* purge what we gathered */
-            names = (char (*)[256])nn;
-            cap = ncap;
-        }
-        memcpy(names[n++], nm, nl + 1);
-    }
+    memset(&c, 0, sizeof c);
+    c.v = v;
+    c.name = name;
+    c.nlen = strlen(name);
+    /* on OOM/IO abort the walk stops early; whatever was gathered is still
+     * purged, matching the legacy break-and-purge behavior. */
+    vol_records_walk(v, del_siblings_cb, &c);
+    names = c.names;
+    n = c.n;
+    cap = c.cap;
+    (void)cap;
 
     for (i = 0; i < n; i++)
         vol_delete_file(v, names[i]);

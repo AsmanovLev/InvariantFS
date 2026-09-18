@@ -312,6 +312,57 @@ int vol_zip_parse_children(const uint8_t *z, size_t zlen,
 }
 
 
+/* WP47: is `ip` a plausible record position? On a v0.3.0+ mapper volume
+ * records live inside dynamic metadata extents (idx_get_id returns the
+ * absolute extent offset), so the legacy [inode_area_start, inode_area_pos)
+ * bound rejected every valid hint. Accept any position inside any mapper
+ * extent (mirroring vol_inode_next), or inside the legacy contiguous
+ * region; anything else falls back to vol_records_walk(). */
+static int ast_hint_valid(invfs_volume *v, uint64_t ip)
+{
+    const uint64_t rs = sizeof(invfs_inode_rec);
+    if (!ip) return 0;
+    if (v->met0_present && v->meta_mapper) {
+        size_t ei;
+        int ok = 0;
+        pthread_rwlock_rdlock(&v->meta_lock);
+        for (ei = 0; ei < (size_t)v->met0.extent_count; ei++) {
+            uint64_t entry = meta_mapper_get(v, ei);
+            uint64_t start, stop;
+            if (!entry) break;
+            start = invfs_meta_ext_pba(entry) * INVFS_BLOCK_SIZE;
+            stop = start + invfs_meta_ext_size(entry);
+            if ((int)ei == (int)v->met0.active_extent &&
+                stop > v->inode_area_pos)
+                stop = v->inode_area_pos;
+            if (ip >= start && ip + rs <= stop) { ok = 1; break; }
+        }
+        pthread_rwlock_unlock(&v->meta_lock);
+        return ok;
+    }
+    return ip >= v->inode_area_start * INVFS_BLOCK_SIZE &&
+           ip + rs <= v->inode_area_pos;
+}
+
+typedef struct {
+    uint64_t want;
+    uint64_t pos;
+    uint32_t rl;
+    int found;
+} ast_child_locate_ctx;
+
+static int ast_child_locate_cb(void *ctx_, uint64_t rec_pos,
+                               const invfs_inode_rec *h, const uint8_t *rec)
+{
+    ast_child_locate_ctx *c = (ast_child_locate_ctx *)ctx_;
+    (void)rec;
+    if (h->magic != INODE_REC_MAGIC || h->inode_id != c->want) return 0;
+    c->pos = rec_pos;
+    c->rl = h->rec_len;
+    c->found = 1;
+    return 1;   /* found: stop the walk */
+}
+
 /* read children from an inode record (bounded); 0 = none, -1 = corrupt */
 int vol_get_children(invfs_volume *v, uint64_t inode_id,
                      invfs_ast_child_entry **out, size_t *n_out)
@@ -320,55 +371,66 @@ int vol_get_children(invfs_volume *v, uint64_t inode_id,
     uint8_t *rec = NULL;
     size_t rec_len;
     uint32_t nblocks;
-    uint64_t p;
-    uint32_t magic;
-    uint64_t ino, fsz;
-    uint32_t rl;
+    uint64_t p = 0;
+    uint32_t rl = 0;
 
     *out = NULL;
     *n_out = 0;
-    p = vol_inode_area_start(v);
     /* Jump straight to the record. This used to scan the whole inode area for
        every call, and invf-ls calls it once per listed file -- listing 40k
        files meant 40k full-area scans. 0 means not indexed; fall back to the
-       scan, which is also what keeps the old semantics for a stale id. */
+       scan, which is also what keeps the old semantics for a stale id.
+       WP47: the fallback is the mapper-aware vol_records_walk() so records in
+       dynamic meta extents are found; the hint check accepts extent
+       positions. */
     {
         uint64_t ip = idx_get_id(v, inode_id);
-        if (ip >= p && ip + sizeof(invfs_inode_rec) <= v->inode_area_pos)
-            p = ip;
-    }
-    while ((p = vol_inode_next(v, p, &magic, &ino, &fsz, NULL, 0, &rl)) != 0) {
-        if (magic != INODE_REC_MAGIC || ino != inode_id) continue;
-        rec = (uint8_t *)malloc(rl);
-        if (!rec) return -1;
-        if (vol_read_raw(v, p - rl - 4, rec, rl) != 0) { free(rec); return -1; }
-        rec_len = rl;
-        if (rec_len < sizeof(invfs_inode_rec) + INVFS_AST_HDR_V1_LEN ||
-            invfs_ast_hdr_parse(rec + sizeof(invfs_inode_rec),
-                                rec_len - sizeof(invfs_inode_rec),
-                                &ast_h) != 0) {
-            free(rec);
-            return -1;
+        if (ast_hint_valid(v, ip)) {
+            invfs_inode_rec h;
+            if (vol_read_raw(v, ip, &h, sizeof h) == 0 &&
+                h.magic == INODE_REC_MAGIC && h.inode_id == inode_id) {
+                p = ip;
+                rl = h.rec_len;
+            }
         }
-        nblocks = ast_h.num_blocks;
-        if (rec_len < sizeof(invfs_inode_rec) + ast_h.hdr_len +
-                      (size_t)nblocks * sizeof(invfs_ast_block_entry)) {
-            free(rec);
-            return -1;
-        }
-        if (ast_h.num_children == 0) { free(rec); *out = NULL; *n_out = 0; return 0; }
-        {
-            const uint8_t *children_blob = rec + sizeof(invfs_inode_rec) +
-                                           ast_h.hdr_len +
-                                           (size_t)nblocks * sizeof(invfs_ast_block_entry);
-            int rc = vol_deserialize_children(children_blob,
-                                              rec_len - (size_t)(children_blob - rec),
-                                              out, n_out);
-            free(rec);
-            return rc;
+        if (!p) {
+            ast_child_locate_ctx lc;
+            memset(&lc, 0, sizeof lc);
+            lc.want = inode_id;
+            vol_records_walk(v, ast_child_locate_cb, &lc);
+            if (!lc.found) return -1;   /* inode not found */
+            p = lc.pos;
+            rl = lc.rl;
         }
     }
-    return -1;  /* inode not found */
+    rec = (uint8_t *)malloc(rl);
+    if (!rec) return -1;
+    if (vol_read_raw(v, p, rec, rl) != 0) { free(rec); return -1; }
+    rec_len = rl;
+    if (rec_len < sizeof(invfs_inode_rec) + INVFS_AST_HDR_V1_LEN ||
+        invfs_ast_hdr_parse(rec + sizeof(invfs_inode_rec),
+                            rec_len - sizeof(invfs_inode_rec),
+                            &ast_h) != 0) {
+        free(rec);
+        return -1;
+    }
+    nblocks = ast_h.num_blocks;
+    if (rec_len < sizeof(invfs_inode_rec) + ast_h.hdr_len +
+                  (size_t)nblocks * sizeof(invfs_ast_block_entry)) {
+        free(rec);
+        return -1;
+    }
+    if (ast_h.num_children == 0) { free(rec); *out = NULL; *n_out = 0; return 0; }
+    {
+        const uint8_t *children_blob = rec + sizeof(invfs_inode_rec) +
+                                       ast_h.hdr_len +
+                                       (size_t)nblocks * sizeof(invfs_ast_block_entry);
+        int rc = vol_deserialize_children(children_blob,
+                                          rec_len - (size_t)(children_blob - rec),
+                                          out, n_out);
+        free(rec);
+        return rc;
+    }
 }
 
 

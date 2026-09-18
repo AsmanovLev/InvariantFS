@@ -498,6 +498,56 @@ static int rename_one(invfs_volume *v, const char *from, const char *to)
 }
 
 
+/* WP47: collector for the rename walk. vol_records_walk() drives the
+ * mapper-aware scan (dynamic meta extents on v0.3.0+); the callback keeps
+ * the legacy per-record policy: prefix / "name!" matching, supersede
+ * filtering, and first-name-wins ordering. Collection happens BEFORE any
+ * rename_one append, so the walk never sees records it just wrote. */
+typedef struct {
+    invfs_volume *v;
+    char (*names)[256];
+    size_t n, cap;
+    const char *from;
+    const char *pre;
+    size_t pren, flen;
+    int dir;
+    int oom;
+} rename_collect_ctx;
+
+static int rename_collect_cb(void *ctx_, uint64_t rec_pos,
+                             const invfs_inode_rec *h, const uint8_t *rec)
+{
+    rename_collect_ctx *c = (rename_collect_ctx *)ctx_;
+    char nm[257];
+    size_t nl, i;
+    (void)rec_pos;
+    (void)rec;
+    if (h->magic != INODE_REC_MAGIC) return 0;   /* tombstones */
+    nl = h->name_len < 256 ? h->name_len : 256;
+    memcpy(nm, h->name, nl);
+    nm[nl] = 0;
+    if (c->dir) {
+        if (nl < c->pren || strncmp(nm, c->pre, c->pren) != 0) return 0;
+    } else {
+        /* the file itself, plus its "name!..." siblings */
+        if (nl < c->flen || strncmp(nm, c->from, c->flen) != 0) return 0;
+        if (nm[c->flen] != 0 && nm[c->flen] != '!') return 0;
+    }
+    if (vol_find(c->v, nm) == 0) return 0;       /* superseded/tombstoned */
+    for (i = 0; i < c->n; i++)
+        if (strcmp(c->names[i], nm) == 0) return 0;   /* older, same name */
+    if (c->n == c->cap) {
+        size_t ncap = c->cap ? c->cap * 2 : 16;
+        void *nn = realloc(c->names, ncap * sizeof(*c->names));
+        if (!nn) { c->oom = 1; return 1; }
+        c->names = (char (*)[256])nn;
+        c->cap = ncap;
+    }
+    memcpy(c->names[c->n++], nm, nl + 1);
+    return 0;
+}
+
+
 /* Rename a file or directory.
  *
  * Transcoded files keep their payload in sibling records ("name!recipe",
@@ -516,7 +566,6 @@ int vol_rename(invfs_volume *v, const char *from, const char *to)
     char (*names)[256] = NULL;
     char pre[300];
     size_t n = 0, cap = 0, pren = 0, flen, i;
-    uint64_t pos, end;
     int dir, rc = 0;
 
     if (v->sb.vol_flags & VOLF_READONLY) return -1;   /* EROFS */
@@ -594,42 +643,24 @@ int vol_rename(invfs_volume *v, const char *from, const char *to)
 
     /* Collect every record the move touches BEFORE appending anything:
        each rename_one extends the inode area, and a live scan would then
-       walk into the records it had just written. */
-    pos = v->inode_area_start * INVFS_BLOCK_SIZE;
-    end = v->inode_area_pos;
-    while (pos + sizeof(invfs_inode_rec) <= end) {
-        invfs_inode_rec h;
-        char nm[257];
-        size_t nl;
-        if (io_seek(&v->io, pos) != 0 || io_read(&v->io, &h, sizeof h) != 0) {
-            rc = -1; break;
-        }
-        if (h.magic != INODE_REC_MAGIC && h.magic != TOMBSTONE_MAGIC) break;
-        if (h.rec_len < sizeof(invfs_inode_rec)) break;
-        pos += h.rec_len + 4;
-        if (h.magic != INODE_REC_MAGIC) continue;
-        nl = h.name_len < 256 ? h.name_len : 256;
-        memcpy(nm, h.name, nl);
-        nm[nl] = 0;
-        if (dir) {
-            if (nl < pren || strncmp(nm, pre, pren) != 0) continue;
-        } else {
-            /* the file itself, plus its "name!..." siblings */
-            if (nl < flen || strncmp(nm, from, flen) != 0) continue;
-            if (nm[flen] != 0 && nm[flen] != '!') continue;
-        }
-        if (vol_find(v, nm) == 0) continue;   /* superseded/tombstoned */
-        for (i = 0; i < n; i++)
-            if (strcmp(names[i], nm) == 0) break;
-        if (i < n) continue;                  /* older record for same name */
-        if (n == cap) {
-            size_t ncap = cap ? cap * 2 : 16;
-            void *nn = realloc(names, ncap * sizeof(*names));
-            if (!nn) { free(names); return -1; }
-            names = (char (*)[256])nn;
-            cap = ncap;
-        }
-        memcpy(names[n++], nm, nl + 1);
+       walk into the records it had just written. WP47: the shared
+       mapper-aware walker drives the collection (records in dynamic meta
+       extents were invisible to the legacy contiguous loop). */
+    {
+        rename_collect_ctx c;
+        int wrc;
+        memset(&c, 0, sizeof c);
+        c.v = v;
+        c.from = from;
+        c.pre = pre;
+        c.pren = pren;
+        c.flen = flen;
+        c.dir = dir;
+        wrc = vol_records_walk(v, rename_collect_cb, &c);
+        names = c.names;
+        n = c.n;
+        cap = c.cap;
+        if (wrc != 0) { free(names); return -1; }   /* OOM / IO error */
     }
 
     if (rc == 0 && n == 0) rc = -1;   /* nothing matched */

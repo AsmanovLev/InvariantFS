@@ -187,8 +187,7 @@ int tz_owner_write(invfs_volume *v, uint64_t owner, const char *name,
      * every record, so the position-kill target is re-derived after it */
     if (v->inode_area_pos + total > v->inode_area_end) {
         if (inode_area_make_room(v, total) != 0)
-            return -1;
-        o->pos = idx_get_id(v, owner);
+            return -1;        o->pos = idx_get_id(v, owner);
         total = rec_len + 4 + (o->pos ? sizeof(tomb) + 4 : 0);
     }
     combo = (uint8_t *)calloc(1, total);
@@ -488,7 +487,8 @@ static int tz_commit_member(tz_ctx *c, tz_member *m, const tz_candidate *cand)
      * compaction's position moves touch nothing held here). Area-full
      * with compaction impossible (a live checkpoint) is a SOFT skip:
      * the member stays RAW and retries next sweep. */
-    if (inode_area_make_room(v, (uint64_t)rec_size + 4 +
+    if (!(v->met0_present && v->meta_mapper) &&
+        inode_area_make_room(v, (uint64_t)rec_size + 4 +
                              sizeof(invfs_inode_rec) + 4) != 0)
         { rc = 1; goto out; }
     {
@@ -1009,6 +1009,65 @@ static int tz_u32_cmp(const void *a, const void *b)
 }
 
 
+/* WP47: GC mark pass over the shared mapper-aware walker. The legacy
+ * contiguous loop saw no records on a v0.3.0+ mapper volume, so the mark
+ * set came back empty and GC would free every live batch. The callback
+ * keeps the exact legacy policy: skip tombstones and the owner record,
+ * only the LIVE record of a name marks, and TEXT-zone entries contribute
+ * their batch_seq (block_id). */
+typedef struct {
+    invfs_volume *v;
+    uint64_t owner;
+    uint32_t *live;
+    size_t n_live, cap_live;
+    int oom;
+} tz_gc_mark_ctx;
+
+static int tz_gc_mark_cb(void *ctx_, uint64_t rec_pos,
+                         const invfs_inode_rec *h, const uint8_t *rec)
+{
+    tz_gc_mark_ctx *c = (tz_gc_mark_ctx *)ctx_;
+    invfs_volume *v = c->v;
+    invfs_ast_hdr ah;
+    size_t base = sizeof(invfs_inode_rec);
+    uint32_t nb, j;
+    (void)rec_pos;
+
+    if (h->magic != INODE_REC_MAGIC) return 0;   /* tombstones */
+    if (h->inode_id == c->owner) return 0;
+    {
+        size_t nl = h->name_len < sizeof(h->name)
+                  ? h->name_len : sizeof(h->name) - 1;
+        char nm[257];
+        memcpy(nm, h->name, nl);
+        nm[nl] = 0;
+        /* only the LIVE record of a name marks anything (superseded ones
+         * may still carry TEXT entries of an older batching generation) */
+        if (vol_find(v, nm) != h->inode_id) return 0;
+    }
+    if (invfs_ast_hdr_parse(rec + base, h->rec_len - base, &ah) != 0)
+        return 0;
+    nb = ah.num_blocks;
+    if (h->rec_len < base + ah.hdr_len +
+            (size_t)nb * sizeof(invfs_ast_block_entry))
+        return 0;
+    for (j = 0; j < nb; j++) {
+        const invfs_ast_block_entry *e =
+            (const invfs_ast_block_entry *)
+            (rec + base + ah.hdr_len + (size_t)j * sizeof(*e));
+        if (e->zone != INVFS_ZONE_TEXT) continue;
+        if (c->n_live == c->cap_live) {
+            size_t nc = c->cap_live ? c->cap_live * 2 : 64;
+            uint32_t *nl2 = (uint32_t *)realloc(c->live, nc * sizeof *nl2);
+            if (!nl2) { c->oom = 1; return -1; }
+            c->live = nl2;
+            c->cap_live = nc;
+        }
+        c->live[c->n_live++] = e->block_id;
+    }
+    return 0;
+}
+
 /* Text-zone GC (WP10 §7): mark-and-sweep over the owner AST. A batch is
  * live iff at least one LIVE member record has a zone==TEXT entry naming
  * its batch_seq (marking by block_id rather than pba keeps the mark set
@@ -1024,7 +1083,6 @@ int vol_tz_gc(invfs_volume *v)
     uint64_t owner;
     uint32_t *live = NULL;     /* sorted live batch_seqs */
     size_t n_live = 0, cap_live = 0;
-    uint64_t pos, end;
     uint32_t i;
     size_t w;
     int freed = 0;
@@ -1037,61 +1095,21 @@ int vol_tz_gc(invfs_volume *v)
     if (o.n == 0) { tz_owner_free(&o); return 0; }
     if (!vol_write_enabled(v)) { tz_owner_free(&o); return 0; }
 
-    /* mark: walk live records, collect block_ids of zone==TEXT entries */
-    pos = v->inode_area_start * INVFS_BLOCK_SIZE;
-    end = v->inode_area_pos;
-    while (pos + sizeof(invfs_inode_rec) <= end) {
-        invfs_inode_rec h;
-        uint8_t hbuf[INVFS_AST_HDR_V2_LEN];
-        invfs_ast_hdr ah;
-        invfs_ast_block_entry e;
-        uint64_t apos;
-        uint32_t nb, j, ver;
-        size_t hl;
-        size_t nl;
-        if (io_seek(&v->io, pos) != 0 ||
-            io_read(&v->io, &h, sizeof h) != 0) break;
-        if (h.magic != INODE_REC_MAGIC && h.magic != TOMBSTONE_MAGIC) break;
-        if (h.rec_len < sizeof h || pos + h.rec_len + 4 > end) break;
-        if (h.magic == TOMBSTONE_MAGIC) { pos += h.rec_len + 4; continue; }
-        if (h.inode_id == owner) { pos += h.rec_len + 4; continue; }
-        nl = h.name_len < sizeof(h.name) ? h.name_len : sizeof(h.name) - 1;
-        /* only the LIVE record of a name marks anything (superseded ones
-         * may still carry TEXT entries of an older batching generation) */
-        {
-            char nm[257];
-            memcpy(nm, h.name, nl);
-            nm[nl] = 0;
-            if (vol_find(v, nm) != h.inode_id) { pos += h.rec_len + 4; continue; }
-        }
-        apos = pos + sizeof h;
-        /* the recipe header length is version-dependent (16 B v1 / 24 B
-         * v2): read the version word, then the header it implies */
-        if (io_seek(&v->io, apos) != 0 ||
-            io_read(&v->io, &ver, 4) != 0) break;
-        if (ver != INVFS_AST_VERSION_V1 && ver != INVFS_AST_VERSION_V2)
-            break;
-        hl = ver == INVFS_AST_VERSION_V1 ? INVFS_AST_HDR_V1_LEN
-                                         : INVFS_AST_HDR_V2_LEN;
-        if (io_seek(&v->io, apos) != 0 ||
-            io_read(&v->io, hbuf, hl) != 0) break;
-        if (invfs_ast_hdr_parse(hbuf, hl, &ah) != 0) break;
-        nb = ah.num_blocks;
-        for (j = 0; j < nb; j++) {
-            if (io_seek(&v->io, apos + hl +
-                        (uint64_t)j * sizeof e) != 0 ||
-                io_read(&v->io, &e, sizeof e) != 0) { rc = -1; goto out; }
-            if (e.zone != INVFS_ZONE_TEXT) continue;
-            if (n_live == cap_live) {
-                size_t nc = cap_live ? cap_live * 2 : 64;
-                uint32_t *nl2 = (uint32_t *)realloc(live, nc * sizeof *nl2);
-                if (!nl2) { rc = -1; goto out; }
-                live = nl2;
-                cap_live = nc;
-            }
-            live[n_live++] = e.block_id;
-        }
-        pos += h.rec_len + 4;
+    /* mark: walk live records, collect block_ids of zone==TEXT entries.
+     * WP47: through the shared mapper-aware walker (the legacy contiguous
+     * loop saw zero records on a mapper volume -> empty mark -> batch GC
+     * would free live batches). */
+    {
+        tz_gc_mark_ctx mc;
+        int wrc;
+        memset(&mc, 0, sizeof mc);
+        mc.v = v;
+        mc.owner = owner;
+        wrc = vol_records_walk(v, tz_gc_mark_cb, &mc);
+        live = mc.live;
+        n_live = mc.n_live;
+        cap_live = mc.cap_live;
+        if (wrc != 0) { rc = -1; goto out; }
     }
     /* sort for the membership queries below */
     if (n_live > 1)

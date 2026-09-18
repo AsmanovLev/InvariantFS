@@ -244,22 +244,90 @@ static int vol_read_text_slice(invfs_volume *v, uint64_t inode_id,
     return rc;
 }
 
+/* WP47: is `ip` a plausible record position? On a v0.3.0+ mapper volume
+ * idx_get_id returns an absolute offset inside a dynamic metadata extent,
+ * which the legacy [inode_area_start, inode_area_pos) bound rejected. Accept
+ * any position inside any mapper extent (mirroring vol_inode_next), or the
+ * legacy contiguous region; anything else falls back to vol_records_walk(). */
+static int read_hint_valid(invfs_volume *v, uint64_t ip)
+{
+    const uint64_t rs = sizeof(invfs_inode_rec);
+    if (!ip) return 0;
+    if (v->met0_present && v->meta_mapper) {
+        size_t ei;
+        int ok = 0;
+        pthread_rwlock_rdlock(&v->meta_lock);
+        for (ei = 0; ei < (size_t)v->met0.extent_count; ei++) {
+            uint64_t entry = meta_mapper_get(v, ei);
+            uint64_t start, stop;
+            if (!entry) break;
+            start = invfs_meta_ext_pba(entry) * INVFS_BLOCK_SIZE;
+            stop = start + invfs_meta_ext_size(entry);
+            if ((int)ei == (int)v->met0.active_extent &&
+                stop > v->inode_area_pos)
+                stop = v->inode_area_pos;
+            if (ip >= start && ip + rs <= stop) { ok = 1; break; }
+        }
+        pthread_rwlock_unlock(&v->meta_lock);
+        return ok;
+    }
+    return ip >= v->inode_area_start * INVFS_BLOCK_SIZE &&
+           ip + rs <= v->inode_area_pos;
+}
+
+typedef struct {
+    uint64_t want;
+    uint64_t pos;
+    int found;
+} read_locate_ctx;
+
+static int read_locate_cb(void *ctx_, uint64_t rec_pos,
+                          const invfs_inode_rec *h, const uint8_t *rec)
+{
+    read_locate_ctx *c = (read_locate_ctx *)ctx_;
+    (void)rec;
+    if (h->magic != INODE_REC_MAGIC || h->inode_id != c->want) return 0;
+    c->pos = rec_pos;
+    c->found = 1;
+    return 1;   /* found: stop the walk */
+}
+
+/* Locate the live INOD for inode_id: the O(1) index hint when it is valid
+ * and names a record for this id, else the mapper-aware vol_records_walk().
+ * Returns the record position, or 0 when absent. */
+static uint64_t read_locate_record(invfs_volume *v, uint64_t inode_id)
+{
+    uint64_t ip = idx_get_id(v, inode_id);
+    if (read_hint_valid(v, ip)) {
+        invfs_inode_rec h;
+        if (vol_read_raw(v, ip, &h, sizeof h) == 0 &&
+            h.magic == INODE_REC_MAGIC && h.inode_id == inode_id)
+            return ip;
+    }
+    {
+        read_locate_ctx lc;
+        memset(&lc, 0, sizeof lc);
+        lc.want = inode_id;
+        vol_records_walk(v, read_locate_cb, &lc);
+        return lc.found ? lc.pos : 0;
+    }
+}
+
 int vol_read_inode(invfs_volume *v, uint64_t inode_id, unsigned depth,
                           uint8_t **out, size_t *out_len)
 {
-    uint64_t pos = v->inode_area_start * INVFS_BLOCK_SIZE;
-    uint64_t end = v->inode_area_pos;
+    uint64_t pos, end;
     uint8_t *data = NULL;
     size_t len = 0;
 
     /* The id index knows where this record is; without it every read of every
        file re-read the whole inode area, which is what kept reads quadratic
        after the name index landed. 0 means "not indexed" -- fall back to the
-       scan below, which is still the authority. */
-    {
-        uint64_t ip = idx_get_id(v, inode_id);
-        if (ip >= pos && ip + sizeof(invfs_inode_rec) <= end) pos = ip;
-    }
+       scan below, which is still the authority. WP47: the hint is valid in any
+       mapper extent, and the fallback is the shared mapper-aware walker. */
+    pos = read_locate_record(v, inode_id);
+    if (!pos) return -1;
+    end = pos + sizeof(invfs_inode_rec);
 
     while (pos + sizeof(invfs_inode_rec) <= end) {
         invfs_inode_rec rec_h;
@@ -1066,18 +1134,17 @@ static int algo_is_whole_file(uint32_t algo)
 int vol_read_range(invfs_volume *v, uint64_t inode_id, uint64_t offset,
                    size_t len, void *buf)
 {
-    uint64_t pos = v->inode_area_start * INVFS_BLOCK_SIZE;
-    uint64_t end = v->inode_area_pos;
+    uint64_t pos, end;
     invfs_ast_hdr ast_h;
     invfs_ast_block_entry *ents = NULL;
     uint8_t *rec = NULL;
     uint32_t i;
     size_t got = 0;
 
-    {   /* jump straight to the record; 0 = not indexed, keep the full scan */
-        uint64_t ip = idx_get_id(v, inode_id);
-        if (ip >= pos && ip + sizeof(invfs_inode_rec) <= end) pos = ip;
-    }
+    /* WP47: hint jump when the index position is valid (mapper extent or
+     * legacy region); otherwise locate through the mapper-aware walker. */
+    pos = read_locate_record(v, inode_id);
+    end = pos ? pos + sizeof(invfs_inode_rec) : 0;
 
     while (pos + sizeof(invfs_inode_rec) <= end) {
         invfs_inode_rec rec_h;

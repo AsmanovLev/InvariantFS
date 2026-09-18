@@ -554,71 +554,63 @@ static uint16_t tier_heat_of(const tier_heat_map *m, uint64_t pba)
  * vol_heat_promote liveness rule), taking every canonical-shadow segment
  * a live non-owner record names. Owner records ("\x01...") are skipped:
  * their blocks (parity stripes, batches, the tier/rawm copies themselves)
- * are engine bookkeeping, never promotion candidates. */
-static int tier_heat_build(invfs_volume *v, tier_heat_map *m)
+ * are engine bookkeeping, never promotion candidates.
+ *
+ * WP47: the walk goes through the shared mapper-aware vol_records_walk(),
+ * so records living in dynamic metadata extents are seen too (the legacy
+ * [inode_area_start, inode_area_pos) loop saw none on v0.3.0+ volumes and
+ * left the promotion map empty). */
+typedef struct {
+    invfs_volume *v;
+    tier_heat_map *m;
+} tier_heat_ctx;
+
+static int tier_heat_cb(void *ctx_, uint64_t rec_pos,
+                        const invfs_inode_rec *h, const uint8_t *rec)
 {
-    uint64_t pos = v->inode_area_start * INVFS_BLOCK_SIZE;
-    uint64_t end = v->inode_area_pos;
+    tier_heat_ctx *c = (tier_heat_ctx *)ctx_;
+    invfs_volume *v = c->v;
+    size_t nl, base = sizeof(invfs_inode_rec), ent0;
+    char nm[INVFS_MAX_NAME + 1];
+    uint16_t r;
+    invfs_ast_hdr ah;
+    uint32_t j;
+    uint64_t ip;
 
-    while (pos + sizeof(invfs_inode_rec) <= end) {
-        invfs_inode_rec h;
-        uint64_t rec_pos = pos, ip;
-        size_t nl, base = sizeof(invfs_inode_rec), ent0;
-        char nm[INVFS_MAX_NAME + 1];
-        uint16_t r;
-        uint8_t *rec = NULL;
-        uint32_t crc_stored;
-        invfs_ast_hdr ah;
-        uint32_t j;
-
-        if (io_seek(&v->io, pos) != 0 ||
-            io_read(&v->io, &h, sizeof h) != 0) break;
-        if (h.magic != INODE_REC_MAGIC && h.magic != TOMBSTONE_MAGIC) break;
-        if (h.rec_len < sizeof h || h.rec_len > INVFS_MAX_REC_LEN ||
-            pos + h.rec_len + 4 > end) break;
-        pos += (uint64_t)h.rec_len + 4;
-        if (h.magic == TOMBSTONE_MAGIC) continue;
-        if (!h.name_len || (uint8_t)h.name[0] == 0x01) continue;
-        nl = h.name_len < INVFS_MAX_NAME ? h.name_len : INVFS_MAX_NAME;
-        memcpy(nm, h.name, nl);
-        nm[nl] = 0;
-        if (nl && nm[nl - 1] == '/') continue;   /* directory anchors */
-        ip = idx_get_id(v, h.inode_id);
-        if (vol_find(v, nm) != h.inode_id || (ip && ip != rec_pos))
-            continue;   /* superseded version: not the live record */
-        r = heat_file_r(v, h.inode_id);
-        if (!r) continue;
-        rec = (uint8_t *)malloc(h.rec_len);
-        if (!rec) return -1;
-        if (io_seek(&v->io, rec_pos) != 0 ||
-            io_read(&v->io, rec, h.rec_len) != 0 ||
-            io_read(&v->io, &crc_stored, 4) != 0 ||
-            invfs_crc32c(rec, h.rec_len) != crc_stored) {
-            free(rec);
-            continue;   /* unreadable mid-walk: contributes nothing */
-        }
-        if (invfs_ast_hdr_parse(rec + base, h.rec_len - base, &ah) != 0 ||
-            h.rec_len < base + ah.hdr_len +
-                 (size_t)ah.num_blocks * sizeof(invfs_ast_block_entry)) {
-            free(rec);
-            continue;
-        }
-        ent0 = base + ah.hdr_len;
-        for (j = 0; j < ah.num_blocks; j++) {
-            const invfs_ast_block_entry *e =
-                (const invfs_ast_block_entry *)
-                (rec + ent0 + (size_t)j * sizeof(*e));
-            if (!e->pba || e->pba < v->sb.shadow_zone_start ||
-                e->pba >= v->sb.total_blocks)
-                continue;   /* only canonical (dev1) shadow segments */
-            if (tier_heat_put(m, e->pba, r) != 0) {
-                free(rec);
-                return -1;
-            }
-        }
-        free(rec);
+    if (h->magic != INODE_REC_MAGIC) return 0;   /* tombstones */
+    if (!h->name_len || (uint8_t)h->name[0] == 0x01) return 0;
+    nl = h->name_len < INVFS_MAX_NAME ? h->name_len : INVFS_MAX_NAME;
+    memcpy(nm, h->name, nl);
+    nm[nl] = 0;
+    if (nl && nm[nl - 1] == '/') return 0;       /* directory anchors */
+    ip = idx_get_id(v, h->inode_id);
+    if (vol_find(v, nm) != h->inode_id || (ip && ip != rec_pos))
+        return 0;   /* superseded version: not the live record */
+    r = heat_file_r(v, h->inode_id);
+    if (!r) return 0;
+    if (invfs_ast_hdr_parse(rec + base, h->rec_len - base, &ah) != 0 ||
+        h->rec_len < base + ah.hdr_len +
+             (size_t)ah.num_blocks * sizeof(invfs_ast_block_entry))
+        return 0;
+    ent0 = base + ah.hdr_len;
+    for (j = 0; j < ah.num_blocks; j++) {
+        const invfs_ast_block_entry *e =
+            (const invfs_ast_block_entry *)
+            (rec + ent0 + (size_t)j * sizeof(*e));
+        if (!e->pba || e->pba < v->sb.shadow_zone_start ||
+            e->pba >= v->sb.total_blocks)
+            continue;   /* only canonical (dev1) shadow segments */
+        if (tier_heat_put(c->m, e->pba, r) != 0) return -1;
     }
     return 0;
+}
+
+static int tier_heat_build(invfs_volume *v, tier_heat_map *m)
+{
+    tier_heat_ctx c;
+    c.v = v;
+    c.m = m;
+    return vol_records_walk(v, tier_heat_cb, &c);
 }
 
 
