@@ -379,6 +379,12 @@ typedef struct invfs_volume {
     pba_ref_ent *pba_ref;
     size_t pba_ref_mask, pba_ref_n;
     int pba_ref_on;
+    /* WP48: set once the id->position index has been reconciled against
+     * the (authoritative) name index after a stale hint was detected.
+     * Record compaction/rewrites during a session can leave the id index
+     * pointing at a vacated position; one O(N) repair from the name index
+     * fixes every live id, so the fallback full walk never runs per-call. */
+    int id_idx_checked;
     /* WP16b: parsed !mbrmap cache (local-splice reads of seekable
      * containers). Filled on first map read of a container, invalidated
      * when its name (or a "name!..." sibling) is retired, freed at
@@ -819,6 +825,11 @@ void idx_put_id(invfs_volume *v, uint64_t id, uint64_t pos);
 
 /* 0 = unknown; callers fall back to a scan */
 uint64_t idx_get_id(invfs_volume *v, uint64_t id);
+
+/* WP48: reconcile the id->position index with the authoritative name index
+ * in one O(N) pass (name entries carry the live record position). Called
+ * once per volume after a stale id hint is detected; idempotent. */
+void idx_repair_ids_from_names(invfs_volume *v);
 
 /* live name-index entries currently pointing at this id (the rename fast
    path shares one id between two names; the retire path reads this to keep

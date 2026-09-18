@@ -20,7 +20,10 @@ RECURSIVE              = YES
 FILE_PATTERNS          = *.c *.h *.md
 EXTENSION_MAPPING      = md=Markdown
 EXCLUDE                = src/vendor7z src/zlib src/zstd-1.5.6 src/zstd.h \
-                         src/examples build bin tools/7-Zip-zstd impl_docs/doxygen
+                         src/examples build bin tools/7-Zip-zstd impl_docs/doxygen \
+                         tools/busybox-src tools/codecpacks tools/flakey tools/fuzz
+EXCLUDE_PATTERNS       = */vendor7z/* */zlib/* */zstd-1.5.6/* */examples/* \
+                         src/codecs/ChangeLog.md src/codecs/readme.md
 
 # ---- extraction ----------------------------------------------------------
 # The codebase is heavily narratively commented (/* ... */) rather than
@@ -63,7 +66,7 @@ DOT_IMAGE_FORMAT       = svg
 INTERACTIVE_SVG        = YES
 CALL_GRAPH             = YES
 CALLER_GRAPH           = YES
-DOT_GRAPH_MAX_NODES    = 50
+DOT_GRAPH_MAX_NODES    = 80
 MAX_DOT_GRAPH_DEPTH    = 2
 DOT_CLEANUP            = YES
 

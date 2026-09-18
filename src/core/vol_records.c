@@ -926,45 +926,110 @@ const uint8_t *meta_locate_ext(const uint8_t *rec, size_t rec_len,
 }
 
 
+/* WP48: fallback locator for meta_read_record_by_id. Fed by the bounded,
+ * index-ordered vol_records_walk; captures the first record whose id
+ * matches (the walker's semantics; the caller only needs a version of that
+ * id). */
+typedef struct {
+    uint64_t want;
+    uint8_t *buf;
+    uint32_t rl;
+    uint64_t pos;
+} byid_ctx;
+
+static int byid_cb(void *ctx_, uint64_t rec_pos,
+                   const invfs_inode_rec *h, const uint8_t *rec)
+{
+    byid_ctx *c = (byid_ctx *)ctx_;
+    if (h->magic != INODE_REC_MAGIC) return 0;
+    if (h->inode_id != c->want) return 0;
+    if (!c->buf) {
+        c->buf = (uint8_t *)malloc(h->rec_len);
+        if (!c->buf) return 0;
+        memcpy(c->buf, rec, h->rec_len);
+        c->rl = h->rec_len;
+        c->pos = rec_pos;
+    }
+    return 0;   /* keep walking: vol_records_walk treats nonzero as error */
+}
+
+
 /* read the latest live record for an inode id; returns malloc'd buffer and
- * optionally its name/position. Walks forward from the index hint so stale
- * hints degrade to a full-area scan instead of wrong answers. */
+ * optionally its name/position. Uses the id-index hint when valid, repairs
+ * the index once if stale, and otherwise falls back to a bounded walk. */
 int meta_read_record_by_id(invfs_volume *v, uint64_t inode_id,
                                   uint8_t **buf_out, uint32_t *rl_out,
                                   char *name_out, size_t name_cap,
                                   uint64_t *pos_out)
 {
-    uint64_t p, hint;
+    uint64_t hint;
+    int attempt;
 
-    hint = idx_get_id(v, inode_id);
-    p = vol_inode_area_start(v);
-    if (hint >= p && hint + sizeof(invfs_inode_rec) <= v->inode_area_pos)
-        p = hint;
-    /* vol_inode_next returns the NEXT scan position; the record it described
-     * sits at p - rl - 4. Same pattern as vol_get_children. */
-    while ((p = vol_inode_next(v, p, NULL, NULL, NULL, NULL, 0, rl_out)) != 0) {
-        invfs_inode_rec rh;
-        uint8_t *buf;
-        if (vol_read_raw(v, p - *rl_out - 4, &rh, sizeof(rh)) != 0)
-            break;
-        if (rh.magic == TOMBSTONE_MAGIC) continue;
-        if (rh.inode_id != inode_id) continue;
-        buf = (uint8_t *)malloc(*rl_out);
-        if (!buf) return -1;
-        if (vol_read_raw(v, p - *rl_out - 4, buf, *rl_out) != 0) {
-            free(buf);
-            return -1;
+    /* WP48: a valid id-index hint IS a record position. Accept it whenever
+     * the header there matches, regardless of where it sits in the address
+     * space (the old legacy-area bound rejected hints in older mapper
+     * extents and forced a full walk per lookup -- O(N^2)). If the hint is
+     * stale (compaction may have vacated the position), reconcile the id
+     * index with the authoritative name index ONCE, then retry. */
+    for (attempt = 0; attempt < 2; attempt++) {
+        hint = idx_get_id(v, inode_id);
+        if (hint) {
+            invfs_inode_rec rh;
+            if (vol_read_raw(v, hint, &rh, sizeof rh) == 0 &&
+                rh.magic == INODE_REC_MAGIC && rh.inode_id == inode_id &&
+                rh.rec_len >= sizeof(rh) && rh.rec_len <= INVFS_MAX_REC_LEN) {
+                uint8_t *buf = (uint8_t *)malloc(rh.rec_len);
+                if (!buf) return -1;
+                if (vol_read_raw(v, hint, buf, rh.rec_len) != 0) {
+                    free(buf);
+                    return -1;
+                }
+                if (name_out && name_cap) {
+                    size_t nl = rh.name_len < name_cap - 1
+                              ? rh.name_len : name_cap - 1;
+                    memcpy(name_out, rh.name, nl);
+                    name_out[nl] = 0;
+                }
+                if (pos_out) *pos_out = hint;
+                *buf_out = buf;
+                if (rl_out) *rl_out = rh.rec_len;
+                return 0;
+            }
         }
+        if (attempt == 0 && !v->id_idx_checked) {
+            idx_repair_ids_from_names(v);
+            v->id_idx_checked = 1;
+            continue;   /* retry with the repaired hint */
+        }
+        break;
+    }
+
+    /* Fallback: a bounded, index-ordered walk. NOT vol_inode_next (its
+     * position-driven hopping cycles when the mapper table is not pba
+     * monotonic). */
+    {
+        byid_ctx c;
+        c.want = inode_id;
+        c.buf = NULL;
+        c.rl = 0;
+        c.pos = 0;
+        vol_records_walk(v, byid_cb, &c);
+        if (!c.buf) return -1;
         if (name_out && name_cap) {
-            size_t nl = rh.name_len < name_cap - 1 ? rh.name_len : name_cap - 1;
-            memcpy(name_out, rh.name, nl);
-            name_out[nl] = 0;
+            invfs_inode_rec rh;
+            memcpy(&rh, c.buf, sizeof rh);
+            {
+                size_t nl = rh.name_len < name_cap - 1
+                          ? rh.name_len : name_cap - 1;
+                memcpy(name_out, rh.name, nl);
+                name_out[nl] = 0;
+            }
         }
-        if (pos_out) *pos_out = p - *rl_out - 4;
-        *buf_out = buf;
+        if (pos_out) *pos_out = c.pos;
+        *buf_out = c.buf;
+        if (rl_out) *rl_out = c.rl;
         return 0;
     }
-    return -1;
 }
 
 

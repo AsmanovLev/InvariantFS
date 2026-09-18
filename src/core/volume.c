@@ -184,6 +184,25 @@ uint64_t idx_get_id(invfs_volume *v, uint64_t id)
 }
 
 
+/* WP48: reconcile the id->position index with the authoritative name index.
+ * Every live name entry carries its record's current position, so one pass
+ * over the buckets repairs every stale id hint (compaction/rewrite during a
+ * session can vacate a position the id index still names). Idempotent;
+ * callers guard it with v->id_idx_checked so it runs at most once. */
+void idx_repair_ids_from_names(invfs_volume *v)
+{
+    size_t b;
+    if (!v->nbuck || !v->ibuck) return;
+    for (b = 0; b <= v->nmask; b++) {
+        const name_index_entry *e;
+        for (e = v->nbuck[b]; e; e = e->next) {
+            if (!e->nlen) continue;
+            idx_put_id(v, e->inode_id, e->pos);
+        }
+    }
+}
+
+
 /* Shared-id bookkeeping (WP22c/F2): the rename fast path hardlinks the
  * copy onto the old id, so two live records can resolve through one id's
  * L2P mappings, and a torn drop can leave such a pair behind too. Tracked
@@ -3826,9 +3845,35 @@ uint32_t pba_ref_count(invfs_volume *v, uint64_t pba)
 /* Build the map from the live name-index set (one read per live record).
  * Idempotent. Runs lazily on the first retire/dedupe of a session; the
  * open path does not pay for it. */
+/* WP48: single-pass pba reference build. The previous implementation
+ * iterated the name index and called meta_read_record_by_id() per name;
+ * on a mapper volume every record whose id-index hint sat in an older
+ * extent was re-found by a FULL extent walk, i.e. O(N^2) reads (observed
+ * as a 7-hour spin with ~1.3e10 read syscalls on a 66k-record volume).
+ * The shared walker visits each live record exactly once. */
+typedef struct { invfs_volume *v; } pba_ref_ensure_ctx;
+
+static int pba_ref_ensure_cb(void *ctx_, uint64_t rec_pos,
+                             const invfs_inode_rec *h, const uint8_t *rec)
+{
+    pba_ref_ensure_ctx *c = (pba_ref_ensure_ctx *)ctx_;
+    invfs_volume *v = c->v;
+
+    if (h->magic != INODE_REC_MAGIC) return 0;
+    if (!h->name_len) return 0;
+    if ((uint8_t)h->name[0] == 0x01) return 0;         /* owners: WAL-owned */
+    if (h->name[h->name_len - 1] == '/') return 0;     /* dir anchor */
+    /* live version only: the name index must point at this very record
+     * (superseded/tombstoned versions carry the same id) */
+    if (vol_find(v, h->name) != h->inode_id) return 0;
+    if (idx_get_id(v, h->inode_id) != rec_pos) return 0;
+    pba_ref_apply(v, rec, h->rec_len, +1);
+    return 0;
+}
+
 int pba_ref_ensure(invfs_volume *v)
 {
-    size_t b;
+    pba_ref_ensure_ctx c;
     if (v->pba_ref_on) return 0;
     v->pba_ref_mask = 1023;
     v->pba_ref = (pba_ref_ent *)calloc(v->pba_ref_mask + 1,
@@ -3836,20 +3881,8 @@ int pba_ref_ensure(invfs_volume *v)
     if (!v->pba_ref) { v->pba_ref_mask = 0; return -1; }
     v->pba_ref_n = 0;
     v->pba_ref_on = 1;
-    for (b = 0; b <= v->nmask; b++) {
-        const name_index_entry *ne;
-        for (ne = v->nbuck[b]; ne; ne = ne->next) {
-            uint8_t *rec = NULL;
-            uint32_t rl = 0;
-            if (!ne->nlen || ne->name[ne->nlen - 1] == '/') continue;
-            if (!ne->nlen || ne->name[0] == 0x01) continue;   /* owners */
-            if (meta_read_record_by_id(v, ne->inode_id, &rec, &rl,
-                                       NULL, 0, NULL) != 0)
-                continue;
-            pba_ref_apply(v, rec, rl, +1);
-            free(rec);
-        }
-    }
+    c.v = v;
+    vol_records_walk(v, pba_ref_ensure_cb, &c);
     return 0;
 }
 
@@ -3895,50 +3928,85 @@ uint64_t vol_inode_area_free(invfs_volume *v)
 }
 
 
-/* WP40: mapper-aware valid-record walker. One implementation for every
- * statistic/sweep/dedupe/heat/pass so the "records live in dynamic
- * extents" era does not need seven near-identical CRC loops. Torn
- * records (CRC mismatch) are skipped exactly like vol_open does, so a
- * half-written append cannot hide every name after it from any of the
- * passes; stops cleanly when the mapper chain yields no extent
- * containing a probe position or on a legacy non-record byte. */
+/* WP40/WP48: mapper-aware valid-record walker. One implementation for
+ * every statistic/sweep/dedupe/heat/pass so the "records live in dynamic
+ * extents" era does not need seven near-identical CRC loops.
+ *
+ * WP48: iterate the mapper table by EXTENT INDEX, not by absolute
+ * position. Allocating extents reuses free mapper slots, so the pba order
+ * of the entries is NOT monotonic; a position-driven walk
+ * (vol_inode_next's "find the extent containing pos") then hops between
+ * disjoint regions and revisits records forever -- observed as an
+ * unbounded spin on a 66k-record volume whose table had grown/merged
+ * across sweep runs. Index order visits each extent exactly once.
+ * Torn records (CRC mismatch) are skipped exactly like vol_open does. */
+typedef struct {
+    invfs_volume *v;
+    int (*cb)(void *, uint64_t, const invfs_inode_rec *, const uint8_t *);
+    void *ctx;
+} rec_walk_state;
+
+/* scan [start,end) of one extent, feeding cb; return -1 on fatal error */
+static int rec_walk_span(rec_walk_state *w, uint64_t start, uint64_t end)
+{
+    invfs_volume *v = w->v;
+    uint64_t p = start;
+    while (p + sizeof(invfs_inode_rec) + 4 <= end) {
+        invfs_inode_rec h;
+        uint8_t *buf;
+        uint32_t stored, calc;
+        if (vol_read_raw(v, p, &h, sizeof h) != 0) break;
+        if (h.magic != INODE_REC_MAGIC && h.magic != TOMBSTONE_MAGIC)
+            break;                                  /* end of this extent */
+        if (h.rec_len < sizeof h || h.rec_len > INVFS_MAX_REC_LEN ||
+            p + (uint64_t)h.rec_len + 4 > end)
+            break;                                  /* torn/garbage tail */
+        buf = (uint8_t *)malloc((size_t)h.rec_len + 4);
+        if (!buf) return -1;
+        if (vol_read_raw(v, p, buf, (size_t)h.rec_len + 4) != 0) {
+            free(buf); return -1;
+        }
+        memcpy(&stored, buf + h.rec_len, 4);
+        calc = invfs_crc32c(buf, h.rec_len);
+        if (calc == stored) {
+            invfs_inode_rec rh;
+            memcpy(&rh, buf, sizeof rh);
+            if (w->cb(w->ctx, p, &rh, buf) != 0) { free(buf); return -1; }
+        }
+        free(buf);
+        p += (uint64_t)h.rec_len + 4;
+    }
+    return 0;
+}
+
 int vol_records_walk(invfs_volume *v,
                      int (*cb)(void *ctx, uint64_t rec_pos,
                                const invfs_inode_rec *h,
                                const uint8_t *rec),
                      void *ctx)
 {
-    int mapper;
-    uint64_t pos;
+    rec_walk_state w;
     if (!v || !cb) return -1;
-    mapper = v->met0_present && v->meta_mapper && v->met0.extent_count > 0;
-    pos = mapper ? 0 : v->inode_area_start * INVFS_BLOCK_SIZE;
-    for (;;) {
-        uint32_t rl = 0, magic = 0;
-        uint64_t np, rec_pos;
-        uint8_t *buf;
-        invfs_inode_rec h;
-        uint32_t stored, calc;
-
-        /* vol_inode_next unifies both worlds: on a mapper volume it hops
-         * across extents (pos==0 probes the map), on legacy it bounds
-         * the walk to [inode_area_start, inode_area_pos) */
-        np = vol_inode_next(v, pos, &magic, NULL, NULL, NULL, 0, &rl);
-        if (!np) return 0;
-        rec_pos = np - (uint64_t)rl - 4;
-        buf = (uint8_t *)malloc((size_t)rl + 4);
-        if (!buf) return -1;
-        if (vol_read_raw(v, rec_pos, buf, (size_t)rl + 4) != 0) {
-            free(buf); return -1;
+    w.v = v;
+    w.cb = cb;
+    w.ctx = ctx;
+    if (v->met0_present && v->meta_mapper && v->met0.extent_count > 0) {
+        size_t ei, n = (size_t)v->met0.extent_count;
+        uint64_t active = v->met0.active_extent;
+        for (ei = 0; ei < n; ei++) {
+            uint64_t e = meta_mapper_get(v, ei);
+            uint64_t start, end;
+            if (!e) continue;                       /* free mapper slot */
+            start = invfs_meta_ext_pba(e) * (uint64_t)INVFS_BLOCK_SIZE;
+            end = start + invfs_meta_ext_size(e);
+            if (ei == (size_t)active && end > v->inode_area_pos)
+                end = v->inode_area_pos;            /* trimmed live tail */
+            if (rec_walk_span(&w, start, end) != 0) return -1;
         }
-        memcpy(&stored, buf + rl, 4);
-        calc = invfs_crc32c(buf, rl);
-        if (calc != stored) { free(buf); pos = np; continue; }
-        memcpy(&h, buf, sizeof(h));
-        if (cb(ctx, rec_pos, &h, buf) != 0) { free(buf); return -1; }
-        free(buf);
-        pos = np;
+        return 0;
     }
+    return rec_walk_span(&w, v->inode_area_start * INVFS_BLOCK_SIZE,
+                         v->inode_area_pos);
 }
 
 
