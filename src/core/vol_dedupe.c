@@ -59,6 +59,21 @@ typedef struct {
     uint64_t inode, lba, pba;
 } dedup_seg;
 
+/* WP44: pass-1 walk state. The shared vol_records_walk owns the record
+ * scan (mapper extents or the legacy area) and its CRC verification; this
+ * carries the accumulator and error/stop flags the callback reports. */
+typedef struct {
+    invfs_volume *v;
+    dedup_seg *segs;
+    size_t n, cap;
+    uint8_t *blob;
+    size_t blobcap;
+    blake3_hasher *hx;
+    int stop;   /* an unparsable record: stop the walk, keep pass 1's
+                 * findings (the old linear scan's `break`) */
+    int err;    /* OOM: abort the pass */
+} dedup_hash_ctx;
+
 
 static int dedup_cmp(const void *a, const void *b)
 {
@@ -215,7 +230,14 @@ retry:
     memcpy(combo + rl + 4, &tomb, sizeof tomb);
     memcpy(combo + rl + 4 + sizeof tomb, &crc_tb, 4);
 
-    if (v->inode_area_pos + total > v->inode_area_end) {
+    /* Room for [new version][CRC][tombstone][CRC]. On a v0.3.0+ mapper
+     * volume the "area" is dynamic extents and meta_get_append_pos grows
+     * them on demand, so the legacy inode_area_pos/end bound does not
+     * apply (it would always trip here); the append's own failure is the
+     * real ENOSPC. On legacy format_version=0 the linear bound still
+     * gates, with the churn backstop's compaction/retry. */
+    if (!(v->met0_present && v->meta_mapper) &&
+        v->inode_area_pos + total > v->inode_area_end) {
         /* churn backstop: reclaim the dead prefix and RE-READ (the
          * compaction moves every record: old_pos and the entry offsets
          * are rebuilt fresh) */
@@ -238,7 +260,14 @@ retry:
     {
         uint64_t npos;
         int rc2 = vol_append_slot(v, (uint64_t)total, &npos);
-        if (rc2 != 0) goto out;
+        if (rc2 != 0) {
+            /* mapper volume out of extents/space (or a legacy write
+             * refusal): stop the pass cleanly, keeping what merged */
+            if (getenv("INVFS_DEBUG"))
+                fprintf(stderr, "[dedupe] append slot failed (%d)\n", rc2);
+            rc = 2;
+            goto out;
+        }
         if (io_seek(&v->io, npos) != 0 ||
             io_write(&v->io, combo, total) != 0)
             goto out;
@@ -284,14 +313,113 @@ out:
 }
 
 
+/* pass-1 record callback. The walker has already CRC-verified `rec`
+ * (a full [record][CRC] buffer) and skipped torn appends, so the skip
+ * rules here are exactly the linear scan's minus its own CRC/bounds
+ * plumbing: TOMBSTONE and bad-name records are skipped, only the LIVE
+ * newest record version is eligible, and the \x01 internal-owner records
+ * are excluded. `rec_pos` is the record's absolute offset (what
+ * idx_put_id stores), so the position-kill check is unchanged. */
+static int dedup_hash_cb(void *ctx_, uint64_t rec_pos,
+                         const invfs_inode_rec *h, const uint8_t *rec)
+{
+    dedup_hash_ctx *ctx = (dedup_hash_ctx *)ctx_;
+    invfs_volume *v = ctx->v;
+    invfs_ast_hdr ah;
+    size_t base;
+    uint32_t i;
+
+    if (h->magic == TOMBSTONE_MAGIC)
+        return 0;
+    if (h->name_len >= sizeof(h->name))
+        return 0;
+    {
+        /* newest-wins + position-kill: only the LIVE record version
+         * describes segments that may be remapped */
+        uint64_t ip = idx_get_id(v, h->inode_id);
+        if (dedup_is_deferred(v, h->inode_id) ||
+            vol_find(v, h->name) != h->inode_id || (ip && ip != rec_pos))
+            return 0;
+    }
+    /* internal owner records ("\x01tzb", the WP20 "\x01parityN" seal
+     * owners): tzb entries are zone==TEXT and skipped below anyway, and
+     * parity blocks are NOT framed segments -- hashing them would merge
+     * stripes with identical content onto one shared parity block,
+     * which a later re-seal write would corrupt for the other sharers */
+    if (h->name_len && (uint8_t)h->name[0] == 0x01)
+        return 0;
+    base = sizeof(invfs_inode_rec);
+    if (h->rec_len < base + INVFS_AST_HDR_V1_LEN ||
+        invfs_ast_hdr_parse(rec + base, h->rec_len - base, &ah) != 0) {
+        ctx->stop = 1;
+        return 1;
+    }
+    if (h->rec_len < base + ah.hdr_len +
+                     (size_t)ah.num_blocks * sizeof(invfs_ast_block_entry)) {
+        ctx->stop = 1;
+        return 1;
+    }
+    for (i = 0; i < ah.num_blocks; i++) {
+        invfs_ast_block_entry e;
+        uint64_t pba = 0;
+        uint8_t hdrb[8];
+        uint32_t csize;
+
+        memcpy(&e, rec + base + ah.hdr_len +
+               (size_t)i * sizeof(e), sizeof(e));
+        if (e.zone == INVFS_ZONE_TEXT)
+            continue;   /* WP10 §11: shared PPMd batches, owner-owned */
+        if (e.algo == INVFS_ALGO_JXL || e.algo == INVFS_ALGO_APE ||
+            e.algo == INVFS_ALGO_EXER)
+            continue;   /* whole-file blobs: unique by construction */
+        pba = e.pba;
+        if (pba == 0 || pba >= v->sb.total_blocks)
+            continue;
+        if (io_seek(&v->io, pba * INVFS_BLOCK_SIZE) != 0 ||
+            io_read(&v->io, hdrb, 8) != 0)
+            continue;
+        memcpy(&csize, hdrb, 4);
+        /* the payload must fit inside the volume; 0 is never a real
+         * segment's size */
+        if (csize == 0 ||
+            (uint64_t)csize + 8 >
+                (v->sb.total_blocks - pba) * INVFS_BLOCK_SIZE)
+            continue;
+        if (csize > ctx->blobcap) {
+            uint8_t *nb = (uint8_t *)realloc(ctx->blob, csize);
+            if (!nb) { ctx->err = 1; return -1; }
+            ctx->blob = nb;
+            ctx->blobcap = csize;
+        }
+        if (io_seek(&v->io, pba * INVFS_BLOCK_SIZE + 8) != 0 ||
+            io_read(&v->io, ctx->blob, csize) != 0)
+            continue;
+        blake3_hasher_init(ctx->hx);
+        blake3_hasher_update(ctx->hx, hdrb, 8);
+        blake3_hasher_update(ctx->hx, ctx->blob, csize);
+        blake3_hasher_finalize(ctx->hx, ctx->segs[ctx->n].hash, 32);
+        ctx->segs[ctx->n].inode = h->inode_id;
+        ctx->segs[ctx->n].lba = e.block_id;
+        ctx->segs[ctx->n].pba = pba;
+        if (++ctx->n >= ctx->cap) {
+            dedup_seg *ns;
+            size_t ncap = ctx->cap * 2;
+            ns = (dedup_seg *)realloc(ctx->segs, ncap * sizeof(dedup_seg));
+            if (!ns) { ctx->err = 1; return -1; }
+            ctx->segs = ns;
+            ctx->cap = ncap;
+        }
+    }
+    return 0;
+}
+
+
 int vol_sweep_dedupe(invfs_volume *v)
 {
-    uint64_t pos, end;
     size_t n = 0, cap = 1 << 16;
     dedup_seg *segs;
     blake3_hasher hx;
     uint8_t *blob = NULL;
-    size_t blobcap = 0;
     size_t merged = 0;
     uint64_t freed_blocks = 0;
     int marked = 0;             /* vol_mark_dirty done (first real merge) */
@@ -305,119 +433,32 @@ int vol_sweep_dedupe(invfs_volume *v)
 
     /* pass 1: hash the stored bytes of every live, dedup-eligible segment.
      * WP27: the address comes from the record's entry; the physical
-     * extent derives from the segment's own framed header. */
-    pos = v->inode_area_start * INVFS_BLOCK_SIZE;
-    end = v->inode_area_pos;
-    while (pos + sizeof(invfs_inode_rec) <= end) {
-        invfs_inode_rec h;
-        invfs_ast_hdr ah;
-        uint8_t *rec;
-        uint32_t crc_stored, crc_calc;
-        uint32_t i;
-        size_t base;
-
-        if (io_seek(&v->io, pos) != 0 ||
-            io_read(&v->io, &h, sizeof(h)) != 0) break;
-        if (h.magic != INODE_REC_MAGIC && h.magic != TOMBSTONE_MAGIC) break;
-        if (h.rec_len < sizeof(h) || h.rec_len > INVFS_MAX_REC_LEN ||
-            pos + h.rec_len + 4 > end) break;
-        if (h.magic == TOMBSTONE_MAGIC) { pos += (uint64_t)h.rec_len + 4; continue; }
-        if (h.name_len >= sizeof(h.name)) { pos += (uint64_t)h.rec_len + 4; continue; }
-
-        rec = (uint8_t *)malloc(h.rec_len);
-        if (!rec) { rc = -1; goto out; }
-        if (io_seek(&v->io, pos) != 0 ||
-            io_read(&v->io, rec, h.rec_len) != 0 ||
-            io_read(&v->io, &crc_stored, 4) != 0) { free(rec); rc = -1; goto out; }
-        crc_calc = invfs_crc32c(rec, h.rec_len);
-        if (crc_calc != crc_stored) {
-            /* torn append: skip it, keep scanning (vol_open's rule) */
-            free(rec);
-            pos += (uint64_t)h.rec_len + 4;
-            continue;
-        }
-        {
-            /* newest-wins + position-kill: only the LIVE record version
-             * describes segments that may be remapped */
-            uint64_t ip = idx_get_id(v, h.inode_id);
-            if (dedup_is_deferred(v, h.inode_id) ||
-                vol_find(v, h.name) != h.inode_id || (ip && ip != pos)) {
-                free(rec);
-                pos += (uint64_t)h.rec_len + 4;
-                continue;
-            }
-        }
-        /* internal owner records ("\x01tzb", the WP20 "\x01parityN" seal
-         * owners): tzb entries are zone==TEXT and skipped below anyway, and
-         * parity blocks are NOT framed segments -- hashing them would merge
-         * stripes with identical content onto one shared parity block,
-         * which a later re-seal write would corrupt for the other sharers */
-        if (h.name_len && (uint8_t)h.name[0] == 0x01) {
-            free(rec);
-            pos += (uint64_t)h.rec_len + 4;
-            continue;
-        }
-        base = sizeof(invfs_inode_rec);
-        if (h.rec_len < base + INVFS_AST_HDR_V1_LEN ||
-            invfs_ast_hdr_parse(rec + base, h.rec_len - base, &ah) != 0) {
-            free(rec); break;
-        }
-        if (h.rec_len < base + ah.hdr_len +
-                         (size_t)ah.num_blocks * sizeof(invfs_ast_block_entry)) {
-            free(rec); break;
-        }
-        for (i = 0; i < ah.num_blocks; i++) {
-            invfs_ast_block_entry e;
-            uint64_t pba = 0;
-            uint8_t hdrb[8];
-            uint32_t csize;
-
-            memcpy(&e, rec + base + ah.hdr_len +
-                   (size_t)i * sizeof(e), sizeof(e));
-            if (e.zone == INVFS_ZONE_TEXT)
-                continue;   /* WP10 §11: shared PPMd batches, owner-owned */
-            if (e.algo == INVFS_ALGO_JXL || e.algo == INVFS_ALGO_APE ||
-                e.algo == INVFS_ALGO_EXER)
-                continue;   /* whole-file blobs: unique by construction */
-            pba = e.pba;
-            if (pba == 0 || pba >= v->sb.total_blocks)
-                continue;
-            if (io_seek(&v->io, pba * INVFS_BLOCK_SIZE) != 0 ||
-                io_read(&v->io, hdrb, 8) != 0)
-                continue;
-            memcpy(&csize, hdrb, 4);
-            /* the payload must fit inside the volume; 0 is never a real
-             * segment's size */
-            if (csize == 0 ||
-                (uint64_t)csize + 8 >
-                    (v->sb.total_blocks - pba) * INVFS_BLOCK_SIZE)
-                continue;
-            if (csize > blobcap) {
-                uint8_t *nb = (uint8_t *)realloc(blob, csize);
-                if (!nb) { rc = -1; goto out; }
-                blob = nb;
-                blobcap = csize;
-            }
-            if (io_seek(&v->io, pba * INVFS_BLOCK_SIZE + 8) != 0 ||
-                io_read(&v->io, blob, csize) != 0)
-                continue;
-            blake3_hasher_init(&hx);
-            blake3_hasher_update(&hx, hdrb, 8);
-            blake3_hasher_update(&hx, blob, csize);
-            blake3_hasher_finalize(&hx, segs[n].hash, 32);
-            segs[n].inode = h.inode_id;
-            segs[n].lba = e.block_id;
-            segs[n].pba = pba;
-            if (++n >= cap) {
-                dedup_seg *ns;
-                cap *= 2;
-                ns = (dedup_seg *)realloc(segs, cap * sizeof(dedup_seg));
-                if (!ns) { rc = -1; goto out; }
-                segs = ns;
-            }
-        }
-        free(rec);
-        pos += (uint64_t)h.rec_len + 4;
+     * extent derives from the segment's own framed header.
+     * WP44: the scan is the shared vol_records_walk -- on a v0.3.0+
+     * mapper volume that visits every dynamic metadata extent, on a
+     * legacy format_version=0 volume it falls back to the contiguous
+     * [inode_area_start, inode_area_pos) region. The walker CRC-verifies
+     * each record and skips torn appends itself (vol_open's rule), so
+     * dedup_hash_cb sees only valid records. */
+    {
+        dedup_hash_ctx ctx;
+        int wrc;
+        ctx.v = v;
+        ctx.segs = segs;
+        ctx.n = 0;
+        ctx.cap = cap;
+        ctx.blob = NULL;
+        ctx.blobcap = 0;
+        ctx.hx = &hx;
+        ctx.stop = 0;
+        ctx.err = 0;
+        wrc = vol_records_walk(v, dedup_hash_cb, &ctx);
+        segs = ctx.segs;        /* the callback may have grown the array */
+        blob = ctx.blob;
+        n = ctx.n;
+        /* a structural stop still runs pass 2 on what was collected;
+         * OOM or a walker failure aborts the pass */
+        if (ctx.err || (wrc != 0 && !ctx.stop)) { rc = -1; goto out; }
     }
     printf("dedupe: hashed %zu live segments\n", n);
 
