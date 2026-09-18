@@ -395,3 +395,60 @@ test-heat-mapper 4/0 (100/100 touched); test-sweep-mapper 6/0.
 - Pre-existing `invf-fsck` orphan count / exit-3 quirk seen by
   `tools/test-dedupe.sh` and historically by `test-meta-extent-walk.sh`
   Leg C (128 orphans) — needs its own WP.
+
+---
+
+## WP48 — Open-time O(N^2) + cyclic walker on large mapper volumes
+
+**Date:** Sep 18, 2026
+**Severity:** Critical (invf-stats / invf-sweep effectively unusable; corrupts volume on kill)
+**Impact:** On the 15 GiB stage3 volume (66k records, 214 extents) `invf-stats`
+and `invf-sweep` spun for 7.5 h at 99% CPU — ~1.3e10 read syscalls, almost
+no writes — and killing the sweep mid-checkpoint left the mapper table with
+duplicate pba entries (idx 243/244/245 == idx 0/1/2), after which every
+position-driven walk cycled.
+
+### Root cause (three compounding faults)
+1. `vol_records_walk` iterated the mapper by **absolute position** through
+   `vol_inode_next`. Extent allocation reuses free mapper slots, so entry
+   pba order is not monotonic (and the corrupted table even carried
+   duplicate pbAs); the position-driven walk hopped between disjoint
+   regions and revisited records forever.
+2. `pba_ref_ensure` iterated the name index and called
+   `meta_read_record_by_id()` per name — O(N) per lookup on a mapper
+   volume, i.e. O(N^2) at open.
+3. `meta_read_record_by_id` rejected any id-index hint outside
+   `[inode_area_start, inode_area_pos)` (the legacy area), so hints in
+   older mapper extents always degraded to a full walk; its fallback used
+   the cycling `vol_inode_next`.
+
+### Fix
+- `vol_records_walk` now iterates extents by **index** (each exactly once,
+  active extent trimmed at `inode_area_pos`); CRC-skip semantics kept.
+- `pba_ref_ensure` is a single `vol_records_walk` pass.
+- `meta_read_record_by_id` accepts a hint whenever the header there
+  matches, repairs the id index once from the authoritative name index
+  (`idx_repair_ids_from_names`, guarded by `v->id_idx_checked`) when a hint
+  is stale, and falls back to the bounded index-ordered walk.
+
+### Result (re-imported clean stage3 volume)
+- `invf-stats`: 7.5 h -> 0.6 s; 54026 files / 3076 dirs / 8986 symlinks.
+- Full sweep: swept=51053 skipped=15035 failed=0; SHADOW 1045.6 MiB
+  logical -> 489.5 MiB physical (2.14x); overall 0.45x; mapper 833
+  extents, 0 duplicates, 0 descending; population unchanged.
+- Bit-exact: wcurl / ld-linux / cc1plus (43 MiB) match stage3 source.
+- `invf-fsck`: CLEAN, 66089 live files, 0 orphans/missing/lost/bad, 7.1 s.
+- make test 4722/0; test-meta-extent-walk 6/0; test-stats-mapper 6/0;
+  test-sweep-mapper 6/0; test-heat-mapper 4/0.
+
+### Follow-ups (open)
+- WP49: remaining `vol_inode_next` loops (vol_fsck.c, vol_repair.c,
+  fuse_fs.c build_file_table, sizes.c/stat.c/verify.c/meta_probe.c) should
+  move to `vol_records_walk` for robustness against a future non-monotonic
+  table.
+- Interrupted-sweep durability: a kill mid-checkpoint/compaction used to
+  leave duplicate mapper entries. A full clean sweep no longer reproduces
+  it (the cyclic walker was the likely writer of the duplicates), but the
+  kill-mid-sweep path has not been re-exercised; add a targeted crash leg.
+- `sweep: checkpoint registry write failed (the checkpoint itself is
+  intact)` warning at the end of the full sweep — investigate.
