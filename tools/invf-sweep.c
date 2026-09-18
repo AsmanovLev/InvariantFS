@@ -338,6 +338,96 @@ static void sw_insert(sw_bucket ***tabp, size_t *maskp, size_t *countp,
     (*countp)++;
 }
 
+/* WP42: per-record collector state for the sweep walk. The shared
+ * vol_records_walk() owns the scan (all mapper extents on v0.3.0+, the
+ * legacy contiguous area otherwise) and its CRC verification; the callback
+ * keeps the legacy collector policy (tombstone position-kill, newest record
+ * per name, name snapshots) and accumulates the walked record bytes for the
+ * compaction trigger. The arrays are reached through their addresses because
+ * the callback may realloc them. */
+typedef struct {
+    char (**names)[256];
+    uint64_t **inodes, **sizes, **poss;
+    sw_bucket ***tab;
+    size_t *tmask, *tcount;
+    int *count, *cap;
+    uint64_t rec_bytes;
+    int oom;
+} sweep_collect_ctx;
+
+static int sweep_collect_cb(void *ctx_, uint64_t rec_pos,
+                            const invfs_inode_rec *h, const uint8_t *rec)
+{
+    sweep_collect_ctx *c = (sweep_collect_ctx *)ctx_;
+    char (*names)[256] = *c->names;
+    uint64_t *inodes = *c->inodes;
+    uint64_t *sizes = *c->sizes;
+    uint64_t *poss = *c->poss;
+    char name[257];
+    size_t nl;
+
+    (void)rec;
+    /* same corrupt-record guards the legacy loop broke on */
+    if (h->magic != INODE_REC_MAGIC && h->magic != TOMBSTONE_MAGIC)
+        return 1;
+    if (h->name_len > 256 || h->rec_len < sizeof(*h) ||
+        h->rec_len > INVFS_MAX_REC_LEN)
+        return 1;
+    nl = h->name_len;
+    memcpy(name, h->name, nl);
+    name[nl] = 0;
+    c->rec_bytes += (uint64_t)h->rec_len + 4;
+
+    if (h->magic == TOMBSTONE_MAGIC) {
+        int i = sw_find(*c->tab, *c->tmask, names, name);
+        if (h->file_size == 0) {   /* legacy kill-by-id */
+            if (i >= 0 && inodes[i] == h->inode_id) inodes[i] = 0;
+        } else if (i >= 0 && poss[i] == (uint64_t)h->file_size) {
+            /* v2 position kill: retires exactly the record at that
+             * position -- the name dies only if its current version IS
+             * that record */
+            inodes[i] = 0;
+        }
+        return 0;
+    }
+
+    {
+        int i = sw_find(*c->tab, *c->tmask, names, name);
+        if (i >= 0) {
+            inodes[i] = h->inode_id; sizes[i] = h->file_size;
+            poss[i] = rec_pos;
+        } else {
+            if (*c->count == *c->cap) {
+                int ncap = *c->cap ? *c->cap * 2 : 512;
+                char (*nn)[256] =
+                    (char (*)[256])realloc(names, (size_t)ncap * 256);
+                uint64_t *ni =
+                    (uint64_t *)realloc(inodes, (size_t)ncap * sizeof *ni);
+                uint64_t *ns =
+                    (uint64_t *)realloc(sizes, (size_t)ncap * sizeof *ns);
+                uint64_t *np =
+                    (uint64_t *)realloc(poss, (size_t)ncap * sizeof *np);
+                if (nn) names = nn;
+                if (ni) inodes = ni;
+                if (ns) sizes = ns;
+                if (np) poss = np;
+                *c->names = names; *c->inodes = inodes;
+                *c->sizes = sizes; *c->poss = poss;
+                *c->cap = ncap;
+                if (!nn || !ni || !ns || !np) { c->oom = 1; return 1; }
+            }
+            strncpy(names[*c->count], name, 256);
+            names[*c->count][255] = 0;
+            inodes[*c->count] = h->inode_id;
+            sizes[*c->count] = h->file_size;
+            poss[*c->count] = rec_pos;
+            sw_insert(c->tab, c->tmask, c->tcount, names, *c->count);
+            (*c->count)++;
+        }
+    }
+    return 0;
+}
+
 int main(int argc, char **argv)
 {
     invfs_volume *vol;
@@ -348,7 +438,7 @@ int main(int argc, char **argv)
     double rb_f = -1.0, rp_f = -1.0;   /* <0: flag absent */
     int rp_algo = 0;                   /* explicit :rs-vm/:rs-cauchy suffix */
     int auto_reseal = 0;
-    uint64_t bm, area_start, area_end, p;
+    uint64_t rec_bytes = 0;   /* WP42: record bytes walked (compaction trigger) */
     int count = 0, cap = 0, swept = 0, skipped = 0, failed = 0;
     char (*names)[256] = NULL;
     uint64_t *inodes = NULL;
@@ -701,83 +791,25 @@ int main(int argc, char **argv)
                             "one\n");
     }
 
-    bm = (sb->total_blocks / 8 + INVFS_BLOCK_SIZE - 1) / INVFS_BLOCK_SIZE;
-    area_start = (sb->metadata_zone_start + bm + INVFS_JOURNAL_BLOCKS)
-                 * INVFS_BLOCK_SIZE;
-    area_end = vol_inode_area_pos(vol);
-    p = area_start;
-
-    /* collect live regular files */
-    while (p + sizeof(invfs_inode_rec) <= area_end) {
-        invfs_inode_rec h;
-        char name[257];
-        uint32_t crc_stored, crc_calc;
-        uint8_t *rb;
-
-        if (vol_read_raw(vol, p, &h, sizeof(h)) != 0) break;
-        if (h.magic != INODE_REC_MAGIC && h.magic != TOMBSTONE_MAGIC) break;
-        if (h.name_len > 256 || h.rec_len < sizeof(invfs_inode_rec) ||
-            h.rec_len > INVFS_MAX_REC_LEN) break;
-        if (vol_read_raw(vol, p + offsetof(invfs_inode_rec, name),
-                         name, h.name_len) != 0) break;
-        name[h.name_len] = 0;
-        rb = (uint8_t *)malloc((size_t)h.rec_len + 4);
-        if (!rb) break;
-        if (vol_read_raw(vol, p, rb, (size_t)h.rec_len + 4) != 0) { free(rb); break; }
-        memcpy(&crc_stored, rb + h.rec_len, 4);
-        crc_calc = invfs_crc32c(rb, h.rec_len);
-        free(rb);
-        p += (uint64_t)h.rec_len + 4;
-        if (crc_calc != crc_stored) continue;
-
-        if (h.magic == TOMBSTONE_MAGIC) {
-            int i = sw_find(tab, tmask, names, name);
-            if (h.file_size == 0) {   /* legacy kill-by-id */
-                if (i >= 0 && inodes[i] == h.inode_id) inodes[i] = 0;
-            } else if (i >= 0 && poss[i] == (uint64_t)h.file_size) {
-                /* v2 position kill: retires exactly the record at that
-                 * position -- the name dies only if its current version IS
-                 * that record (an unlink/rename kill names the last one;
-                 * a meta_rewrite's names the already-superseded one) */
-                inodes[i] = 0;
-            }
-            continue;
+    /* WP42: collect live regular files through the shared mapper-aware
+     * record walker. On a v0.3.0+ mapper volume the records live in dynamic
+     * metadata extents; the old contiguous [area_start, inode_area_pos)
+     * loop saw none and the sweep silently no-op'd. rec_bytes is the walked
+     * record footprint used by the compaction trigger below and, unlike
+     * pos-minus-start, cannot underflow on a mapper volume. */
+    {
+        sweep_collect_ctx cc;
+        memset(&cc, 0, sizeof cc);
+        cc.names = &names; cc.inodes = &inodes;
+        cc.sizes = &sizes; cc.poss = &poss;
+        cc.tab = &tab; cc.tmask = &tmask; cc.tcount = &tcount;
+        cc.count = &count; cc.cap = &cap;
+        vol_records_walk(vol, sweep_collect_cb, &cc);
+        if (cc.oom) {
+            fprintf(stderr, "out of memory\n");
+            return 1;
         }
-
-        {
-            int i = sw_find(tab, tmask, names, name);
-            if (i >= 0) { inodes[i] = h.inode_id; sizes[i] = h.file_size;
-                          poss[i] = p - h.rec_len - 4; }   /* p advanced already */
-            else {
-                if (count == cap) {
-                    int ncap = cap ? cap * 2 : 512;
-                    char (*nn)[256] =
-                        (char (*)[256])realloc(names, (size_t)ncap * 256);
-                    uint64_t *ni =
-                        (uint64_t *)realloc(inodes, (size_t)ncap * sizeof *ni);
-                    uint64_t *ns =
-                        (uint64_t *)realloc(sizes, (size_t)ncap * sizeof *ns);
-                    uint64_t *np =
-                        (uint64_t *)realloc(poss, (size_t)ncap * sizeof *np);
-                    if (nn) names = nn;
-                    if (ni) inodes = ni;
-                    if (ns) sizes = ns;
-                    if (np) poss = np;
-                    if (!nn || !ni || !ns || !np) {
-                        fprintf(stderr, "out of memory\n");
-                        return 1;
-                    }
-                    cap = ncap;
-                }
-                strncpy(names[count], name, 256);
-                names[count][255] = 0;
-                inodes[count] = h.inode_id;
-                sizes[count] = h.file_size;
-                poss[count] = p - h.rec_len - 4;   /* p advanced already */
-                sw_insert(&tab, &tmask, &tcount, names, count);
-                count++;
-            }
-        }
+        rec_bytes = cc.rec_bytes;
     }
 
     /* WP22d: the walk above collects the newest record per name, but the
@@ -943,6 +975,9 @@ progress:
 
     fprintf(stderr, "sweep done: swept=%d skipped=%d failed=%d\n",
             swept, skipped, failed);
+    /* WP42: the CLI-style summary line the big-volume e2e parses
+     * (`sweep: N swept`); mirrors src/cli/sweep.c's report. */
+    fprintf(stderr, "sweep: %d swept\n", swept);
 
     /* WP21: seal the retention registry (the "\x01reten" owner) holding
      * every block this run retired. From here the volume's end-state is:
@@ -980,7 +1015,7 @@ progress:
         int compact_off = nc && strcmp(nc, "0") != 0;   /* =1 (or any
                         non-"0" value) disables the automatic pass */
         if (!compact_off) {
-            uint64_t used = vol_inode_area_pos(vol) - vol_inode_area_start(vol);
+            uint64_t used = rec_bytes;   /* WP42: walked record footprint */
             uint64_t live = vol_inode_live_bytes(vol);
             if (live && used > live && (used - live) * 10 > used * 3) {
                 uint64_t before = 0, after = 0;

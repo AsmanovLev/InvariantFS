@@ -12,6 +12,19 @@ int sweep_enospc(invfs_volume *v, uint64_t need_bytes)
 }
 
 
+/* WP42: the text/binary batch owner records are appended through a
+ * mapper-unaware path (vol_textzone's tz_owner_write), so on a v0.3.0+
+ * mapper volume a deferral cannot be sealed once the active metadata
+ * extent fills -- the flush fails and the deferred files stay RAW with no
+ * record rewritten. Until that append path is mapper-aware (follow-up WP),
+ * keep files on the generic floor, which drains RAW into Shadow through
+ * the mapper-aware vol_append_slot. Legacy format_version=0 is unchanged. */
+static int sweep_batch_defer_ok(invfs_volume *v)
+{
+    return !(v->met0_present && v->meta_mapper);
+}
+
+
 /* Give back everything the atomic sweep path allocated for the new record
  * before it gave up: the segments this run wrote sit in the entry table
  * (zone flipped to BINARY at write time); their extents derive from the
@@ -99,6 +112,79 @@ uint64_t jpeg_raw_estimate(const uint8_t *j, size_t n)
 }
 
 
+/* WP42: per-id record locator for the sweep engine. idx_get_id stores the
+ * absolute offset of an id's newest record; on a v0.3.0+ mapper volume that
+ * is an extent position, so the legacy [inode_area_start, inode_area_pos)
+ * bound rejected every hint and each lookup came back empty (the sweep saw
+ * no files at all). Mapper volumes try the index hint first, then fall back
+ * to the shared vol_records_walk(); legacy volumes keep the contiguous scan
+ * byte-for-byte. Returns the record position and fills *h, or 0 if absent. */
+typedef struct {
+    uint64_t want;
+    uint64_t rec_pos;
+    invfs_inode_rec h;
+    char name[257];
+    int found;
+} sweep_locate_ctx;
+
+static int sweep_locate_cb(void *ctx_, uint64_t rec_pos,
+                           const invfs_inode_rec *h, const uint8_t *rec)
+{
+    sweep_locate_ctx *c = (sweep_locate_ctx *)ctx_;
+    size_t nl;
+    (void)rec;
+    if (h->magic != INODE_REC_MAGIC || h->inode_id != c->want)
+        return 0;
+    c->h = *h;
+    c->rec_pos = rec_pos;
+    nl = h->name_len < sizeof(c->name) - 1
+       ? h->name_len : sizeof(c->name) - 1;
+    memcpy(c->name, h->name, nl);
+    c->name[nl] = 0;
+    c->found = 1;
+    return 1;   /* found: stop the walk */
+}
+
+static uint64_t sweep_locate_record(invfs_volume *v, uint64_t inode_id,
+                                    invfs_inode_rec *h)
+{
+    if (v->met0_present && v->meta_mapper && v->met0.extent_count > 0) {
+        uint64_t ip = idx_get_id(v, inode_id);
+        if (ip && vol_read_raw(v, ip, h, sizeof(*h)) == 0 &&
+            h->magic == INODE_REC_MAGIC && h->inode_id == inode_id)
+            return ip;
+        {
+            sweep_locate_ctx lc;
+            memset(&lc, 0, sizeof lc);
+            lc.want = inode_id;
+            vol_records_walk(v, sweep_locate_cb, &lc);
+            if (lc.found) { *h = lc.h; return lc.rec_pos; }
+        }
+        return 0;
+    }
+    {
+        uint64_t start = v->inode_area_start * INVFS_BLOCK_SIZE;
+        uint64_t end = v->inode_area_pos;
+        uint64_t pos = start;
+        uint64_t ip = idx_get_id(v, inode_id);
+        if (ip >= start && ip + sizeof(invfs_inode_rec) <= end) pos = ip;
+        while (pos + sizeof(invfs_inode_rec) <= end) {
+            invfs_inode_rec rh;
+            if (io_seek(&v->io, pos) != 0 ||
+                io_read(&v->io, &rh, sizeof rh) != 0)
+                return 0;
+            if (rh.magic == TOMBSTONE_MAGIC) {
+                pos += (uint64_t)rh.rec_len + 4;
+                continue;
+            }
+            if (rh.magic != INODE_REC_MAGIC) return 0;
+            if (rh.inode_id == inode_id) { *h = rh; return pos; }
+            pos += (uint64_t)rh.rec_len + 4;
+        }
+    }
+    return 0;
+}
+
 int vol_sweep_file(invfs_volume *v, uint64_t inode_id)
 {
     invfs_meta_pub keep;
@@ -109,11 +195,17 @@ int vol_sweep_file(invfs_volume *v, uint64_t inode_id)
     have_keep = vol_get_meta(v, inode_id, &keep) == 0;
     {
         uint64_t pos = idx_get_id(v, inode_id);
-        if (pos >= v->inode_area_start * INVFS_BLOCK_SIZE &&
-            pos + sizeof(invfs_inode_rec) <= v->inode_area_pos) {
+        int in_area;
+        /* WP42: mapper volumes locate records by the absolute index hint;
+         * only legacy volumes are bounded by the contiguous area. */
+        if (v->met0_present && v->meta_mapper)
+            in_area = (pos != 0);
+        else
+            in_area = pos >= v->inode_area_start * INVFS_BLOCK_SIZE &&
+                      pos + sizeof(invfs_inode_rec) <= v->inode_area_pos;
+        if (in_area) {
             invfs_inode_rec h;
-            if (io_seek(&v->io, pos) == 0 &&
-                io_read(&v->io, &h, sizeof h) == 0 &&
+            if (vol_read_raw(v, pos, &h, sizeof h) == 0 &&
                 h.magic == INODE_REC_MAGIC && h.inode_id == inode_id) {
                 size_t nl = h.name_len < sizeof(name) - 1
                           ? h.name_len : sizeof(name) - 1;
@@ -145,8 +237,6 @@ int vol_sweep_file(invfs_volume *v, uint64_t inode_id)
 int vol_sweep_file_inner(invfs_volume *v, uint64_t inode_id,
                                 int generic_only)
 {
-    uint64_t pos = v->inode_area_start * INVFS_BLOCK_SIZE;
-    uint64_t end = v->inode_area_pos;
     uint64_t rec_pos = 0;
     invfs_inode_rec rec_h;
     uint8_t *rec = NULL;
@@ -168,25 +258,11 @@ int vol_sweep_file_inner(invfs_volume *v, uint64_t inode_id,
     uint64_t new_bytes = 0;
     uint32_t guard_algo = 0;
 
-    /* locate the inode record */
-    {   /* jump straight to it; 0 = not indexed, keep the full scan */
-        uint64_t ip = idx_get_id(v, inode_id);
-        if (ip >= pos && ip + sizeof(invfs_inode_rec) <= end) pos = ip;
+    /* locate the inode record (mapper-aware, WP42) */
+    {
+        rec_pos = sweep_locate_record(v, inode_id, &rec_h);
+        if (rec_pos == 0) return -1;
     }
-    while (pos + sizeof(invfs_inode_rec) <= end) {
-        if (io_seek(&v->io, pos) != 0 || io_read(&v->io, &rec_h, sizeof(rec_h)) != 0)
-            return -1;
-        if (rec_h.magic != INODE_REC_MAGIC) {
-            if (rec_h.magic == TOMBSTONE_MAGIC) {
-                pos += rec_h.rec_len + 4;
-                continue;
-            }
-            return -1;
-        }
-        if (rec_h.inode_id == inode_id) { rec_pos = pos; break; }
-        pos += rec_h.rec_len + 4;
-    }
-    if (rec_pos == 0) return -1;
 
     rec = (uint8_t *)malloc(rec_h.rec_len);
     if (!rec) return -1;
@@ -462,7 +538,8 @@ int vol_sweep_file_inner(invfs_volume *v, uint64_t inode_id,
 
         nh->inode_id = new_id;
         crc_calc = invfs_crc32c(rec, rec_h.rec_len);
-        if (inode_area_make_room(v, rec_h.rec_len + 4 +
+        if (!(v->met0_present && v->meta_mapper) &&
+            inode_area_make_room(v, rec_h.rec_len + 4 +
                 sizeof(invfs_inode_rec) + 4) != 0) {
             /* no room for the record AND the tombstone that must follow it */
             fprintf(stderr, "sweep: inode area full (%s)\n", name);
@@ -580,25 +657,16 @@ size_t vol_pending_count(invfs_volume *v)
    blob has no sibling, so it checks the zone directly. */
 int vol_inode_first_zone(invfs_volume *v, uint64_t inode_id)
 {
-    uint64_t pos = v->inode_area_start * INVFS_BLOCK_SIZE;
-    uint64_t end = v->inode_area_pos;
+    uint64_t pos;
     invfs_inode_rec rec_h;
     uint8_t hb[INVFS_AST_HDR_V2_LEN];
     invfs_ast_hdr ast_h;
     invfs_ast_block_entry e0;
-    uint64_t ip = idx_get_id(v, inode_id);
     uint32_t ver;
 
-    if (ip >= pos && ip + sizeof(invfs_inode_rec) <= end) pos = ip;
-    while (pos + sizeof(invfs_inode_rec) <= end) {
-        if (io_seek(&v->io, pos) != 0 ||
-            io_read(&v->io, &rec_h, sizeof rec_h) != 0) return -1;
-        if (rec_h.magic == TOMBSTONE_MAGIC) { pos += rec_h.rec_len + 4; continue; }
-        if (rec_h.magic != INODE_REC_MAGIC) return -1;
-        if (rec_h.inode_id == inode_id) break;
-        pos += rec_h.rec_len + 4;
-    }
-    if (pos + sizeof(invfs_inode_rec) > end) return -1;
+    /* WP42: mapper-aware locate; legacy volumes keep the contiguous scan */
+    pos = sweep_locate_record(v, inode_id, &rec_h);
+    if (pos == 0) return -1;
     /* recipe header length is version-dependent (16 B v1 / 24 B v2):
      * read the version word first, then the full header, then entry 0
      * behind it */
@@ -692,7 +760,8 @@ void defer_container_parts(invfs_volume *v, const char *name)
             continue;
         bfam = invfs_binary_family(head, (size_t)got, pn);
         if (bfam > 0) {
-            if (bz_defer(v, pino, pn, fsz, (uint32_t)bfam) == 0) n_bin++;
+            if (sweep_batch_defer_ok(v) &&
+                bz_defer(v, pino, pn, fsz, (uint32_t)bfam) == 0) n_bin++;
             continue;
         }
         tfam = invfs_text_family(pn, head, (size_t)got);
@@ -701,7 +770,8 @@ void defer_container_parts(invfs_volume *v, const char *name)
             if (pc && pc->dec_mem_bytes > vol_get_dec_mem_limit(v))
                 vol_stamp_class(v, pino, INVFS_CLASS_GENERIC_MEMLIMIT,
                                 INVFS_ALGO_PPMD, pc->generation);
-            else if (tz_defer(v, pino, pn, fsz, (uint32_t)tfam) == 0)
+            else if (sweep_batch_defer_ok(v) &&
+                     tz_defer(v, pino, pn, fsz, (uint32_t)tfam) == 0)
                 n_text++;
         }
     }
@@ -906,7 +976,7 @@ int vol_sweep_one(invfs_volume *v, uint64_t inode_id, const char *name)
                         vol_stat_full(v, name, NULL, &fsz, NULL) == 0 &&
                         fsz) {
                         bfam = invfs_binary_family(head, (size_t)got, name);
-                        if (bfam > 0 &&
+                        if (bfam > 0 && sweep_batch_defer_ok(v) &&
                             bz_defer(v, inode_id, name, fsz,
                                      (uint32_t)bfam) == 0)
                             return 10;   /* part -> ZSTD batch */
@@ -920,7 +990,8 @@ int vol_sweep_one(invfs_volume *v, uint64_t inode_id, const char *name)
                                                 INVFS_CLASS_GENERIC_MEMLIMIT,
                                                 INVFS_ALGO_PPMD,
                                                 pc->generation);
-                            } else if (tz_defer(v, inode_id, name, fsz,
+                            } else if (sweep_batch_defer_ok(v) &&
+                                       tz_defer(v, inode_id, name, fsz,
                                                 (uint32_t)tfam) == 0) {
                                 return 9;   /* part -> PPMd batch */
                             }
@@ -1200,7 +1271,8 @@ int vol_sweep_one(invfs_volume *v, uint64_t inode_id, const char *name)
                  * text path without waiting for a generation bump. */
                 vol_stamp_class(v, inode_id, INVFS_CLASS_GENERIC_MEMLIMIT,
                                 INVFS_ALGO_PPMD, pc->generation);
-            } else if (tz_defer(v, inode_id, name, full_len,
+            } else if (sweep_batch_defer_ok(v) &&
+                       tz_defer(v, inode_id, name, full_len,
                                 (uint32_t)fam) == 0) {
                 free(full);
                 return 9;   /* text -> PPMd batch (deferred to flush) */
@@ -1237,7 +1309,7 @@ int vol_sweep_one(invfs_volume *v, uint64_t inode_id, const char *name)
      * sibling exclusion as text. */
     if (!strchr(name, '!') && !exer_no_bz) {
         int bfam = invfs_binary_family(full, full_len, name);
-        if (bfam > 0 &&
+        if (bfam > 0 && sweep_batch_defer_ok(v) &&
             bz_defer(v, inode_id, name, full_len, (uint32_t)bfam) == 0) {
             free(full);
             return 10;   /* binary -> ZSTD batch (deferred to flush) */
@@ -1279,26 +1351,18 @@ int vol_sweep_file_generic(invfs_volume *v, uint64_t inode_id)
  * unreadable. Same scan the pending drain has always used. */
 int vol_sweep_name_of(invfs_volume *v, uint64_t id, char *nm, size_t cap)
 {
-    uint64_t pos, end;
-    invfs_inode_rec rh;
+    sweep_locate_ctx lc;
 
     if (!v || !nm || cap == 0) return 0;
-    pos = v->inode_area_start * INVFS_BLOCK_SIZE;
-    end = v->inode_area_pos;
-    while (pos + sizeof(rh) <= end) {
-        if (vol_read_raw(v, pos, &rh, sizeof(rh)) != 0) break;
-        if (rh.magic != INODE_REC_MAGIC) {
-            if (rh.magic == TOMBSTONE_MAGIC) { pos += rh.rec_len + 4; continue; }
-            break;
-        }
-        if (rh.inode_id == id && rh.name_len < cap) {
-            memcpy(nm, rh.name, rh.name_len);
-            nm[rh.name_len] = 0;
-            return 1;
-        }
-        pos += rh.rec_len + 4;
-    }
-    return 0;
+    /* WP42: the shared mapper-aware walker replaces the legacy contiguous
+     * scan; on a mapper volume the record for `id` lives in a meta extent */
+    memset(&lc, 0, sizeof lc);
+    lc.want = id;
+    vol_records_walk(v, sweep_locate_cb, &lc);
+    if (!lc.found || lc.h.name_len >= cap) return 0;
+    memcpy(nm, lc.h.name, lc.h.name_len);
+    nm[lc.h.name_len] = 0;
+    return 1;
 }
 
 
@@ -1474,67 +1538,61 @@ static int vol_pack_sweep(invfs_volume *v, uint64_t inode_id, const char *name,
  * and progress reporting. CRC-validated scan, same rules as open. */
 typedef struct { char name[256]; uint64_t id; } sweep_seed;
 
+/* WP42: per-record body of the sweepable collector, fed by the shared
+ * mapper-aware vol_records_walk(). Last record per name wins, exactly the
+ * legacy contiguous scan's rule; torn records are already skipped by the
+ * walker. An OOM aborts the walk and keeps what was collected so far. */
+typedef struct {
+    sweep_seed *seen;
+    size_t seen_n, seen_cap;
+} sweep_seen_ctx;
+
+static int sweep_seen_cb(void *ctx_, uint64_t rec_pos,
+                         const invfs_inode_rec *h, const uint8_t *rec)
+{
+    sweep_seen_ctx *c = (sweep_seen_ctx *)ctx_;
+    size_t nl, s;
+    (void)rec_pos; (void)rec;
+    if (h->magic != INODE_REC_MAGIC) return 0;   /* tombstone */
+    if (h->file_size == 0) return 0;             /* nothing to move */
+    nl = h->name_len < sizeof(h->name) ? h->name_len : sizeof(h->name) - 1;
+    for (s = 0; s < c->seen_n; s++)
+        if (strncmp(c->seen[s].name, h->name, sizeof(c->seen[s].name)) == 0) {
+            c->seen[s].id = h->inode_id;   /* last record wins */
+            return 0;
+        }
+    if (c->seen_n == c->seen_cap) {
+        sweep_seed *ns;
+        c->seen_cap = c->seen_cap ? c->seen_cap * 2 : 4096;
+        ns = realloc(c->seen, c->seen_cap * sizeof(*ns));
+        if (!ns) return 1;   /* OOM: stop, resolve what we have */
+        c->seen = ns;
+    }
+    memset(c->seen[c->seen_n].name, 0, sizeof(c->seen[c->seen_n].name));
+    memcpy(c->seen[c->seen_n].name, h->name, nl);
+    c->seen[c->seen_n].id = h->inode_id;
+    c->seen_n++;
+    return 0;
+}
+
 
 size_t vol_collect_sweepables(invfs_volume *v, uint64_t *ids, size_t max)
 {
-    sweep_seed *seen = NULL;
-    size_t seen_n = 0, seen_cap = 0;
-    size_t out = 0;
-    uint64_t pos, end;
-    size_t s;
+    sweep_seen_ctx c;
+    size_t out = 0, s;
 
     if (!v || !ids || max == 0) return 0;
-    pos = v->inode_area_start * INVFS_BLOCK_SIZE;
-    end = v->inode_area_pos;
-    while (pos + sizeof(invfs_inode_rec) <= end && out < max) {
-        invfs_inode_rec h;
-        if (io_seek(&v->io, pos) != 0 ||
-            io_read(&v->io, &h, sizeof(h)) != 0) break;
-        if (h.magic != INODE_REC_MAGIC && h.magic != TOMBSTONE_MAGIC) break;
-        if (h.rec_len < sizeof(h) || h.rec_len > INVFS_MAX_REC_LEN ||
-            pos + h.rec_len + 4 > end) break;
-        {
-            uint8_t *rb = (uint8_t *)malloc((size_t)h.rec_len + 4);
-            uint32_t stored, calc;
-            int bad = 0;
-            if (!rb) break;
-            if (io_seek(&v->io, pos) != 0 ||
-                io_read(&v->io, rb, (size_t)h.rec_len + 4) != 0) { free(rb); break; }
-            memcpy(&stored, rb + h.rec_len, 4);
-            calc = invfs_crc32c(rb, h.rec_len);
-            free(rb);
-            if (calc != stored) bad = 1;   /* torn: skip, keep scanning */
-            if (bad) { pos += (uint64_t)h.rec_len + 4; continue; }
-        }
-        pos += (uint64_t)h.rec_len + 4;
-        if (h.magic != INODE_REC_MAGIC) continue;
-        if (h.file_size == 0) continue;               /* nothing to move */
-        {
-            size_t nl = h.name_len < sizeof(h.name) ? h.name_len : sizeof(h.name)-1;
-            int dup = 0;
-            for (s = 0; s < seen_n; s++)
-                if (strncmp(seen[s].name, h.name, sizeof(seen[s].name)) == 0)
-                    { seen[s].id = h.inode_id; dup = 1; break; }
-            if (dup) continue;
-            if (seen_n == seen_cap) {
-                sweep_seed *ns;
-                seen_cap = seen_cap ? seen_cap*2 : 4096;
-                ns = realloc(seen, seen_cap * sizeof(*seen));
-                if (!ns) break;
-                seen = ns;
-            }
-            memset(seen[seen_n].name, 0, sizeof(seen[seen_n].name));
-            memcpy(seen[seen_n].name, h.name, nl);
-            seen[seen_n].id = h.inode_id;
-            seen_n++;
-        }
-    }
+    memset(&c, 0, sizeof c);
+    /* WP42: the walker hops every mapper extent on v0.3.0+ volumes (the
+     * legacy loop saw only the empty contiguous area) and still bounds
+     * itself to [inode_area_start, inode_area_pos) on legacy volumes */
+    vol_records_walk(v, sweep_seen_cb, &c);
     /* resolve through the live index: tombstoned seeds drop out here */
-    for (s = 0; s < seen_n && out < max; s++) {
-        uint64_t id = vol_find(v, seen[s].name);
+    for (s = 0; s < c.seen_n && out < max; s++) {
+        uint64_t id = vol_find(v, c.seen[s].name);
         if (id != 0) ids[out++] = id;
     }
-    free(seen);
+    free(c.seen);
     return out;
 }
 
