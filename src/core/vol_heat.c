@@ -436,67 +436,73 @@ void vol_heat_persist(invfs_volume *v)
  * rheat >>= 1 (exponential), wheat saturating-down by 1, persisted into
  * the records. The promotion check runs AFTER the decay (the hysteresis).
  * See the section comment at the top for the full rules. */
+
+/* WP43: per-record body of the decay pass, fed by vol_records_walk().
+ * `end` is the walk bound frozen before the pass started: heat_write()
+ * stamps persist as NEW record versions (a stamp is a record append),
+ * and each append bumps the active-extent cursor, so an unfrozen walk
+ * would see its own stamps and decay them again -- a runaway append
+ * loop. Records at or past the frozen end were appended by this pass;
+ * aborting there keeps exactly one decay per stored value. */
+typedef struct {
+    invfs_volume *v;
+    uint64_t      end;
+    int           any_r;
+    int           any_w;
+} heat_decay_ctx;
+
+static int heat_decay_cb(void *ctx_, uint64_t rec_pos,
+                         const invfs_inode_rec *h, const uint8_t *rec)
+{
+    heat_decay_ctx *ctx = (heat_decay_ctx *)ctx_;
+    invfs_volume *v = ctx->v;
+    uint16_t r = 0;
+    uint8_t w = 0;
+
+    if (rec_pos >= ctx->end) return 1;   /* an append made during the pass */
+    if (h->magic != INODE_REC_MAGIC || !h->name_len ||
+        (uint8_t)h->name[0] == 0x01 ||
+        vol_find(v, h->name) != h->inode_id)
+        return 0;
+    if (idx_get_id(v, h->inode_id) != rec_pos)
+        return 0;   /* the live version only (position-kill chains share the id) */
+    /* absent TLV == (0,0) and decays to itself: the pass never stamps a
+     * never-heated file (zero churn on cold volumes -- a format-v2
+     * property, since a stamp is a record append now). The record came
+     * off the walker CRC-verified, so heat_read_tlv sees the same bytes
+     * the legacy loop's seek/read/CRC sequence did. */
+    if (heat_read_tlv(rec, h->rec_len, &r, &w) != 0)
+        return 0;
+    {
+        uint16_t nr = (uint16_t)(r >> 1);
+        uint8_t nw = w ? (uint8_t)(w - 1) : 0;
+        if (nr != r || nw != w)
+            heat_write(v, h->inode_id, nr, nw);
+        if (nr >= INVFS_HEAT_HOT) ctx->any_r = 1;
+        if (nw >= INVFS_WHEAT_HOT) ctx->any_w = 1;
+    }
+    return 0;
+}
+
 void vol_heat_sweep_begin(invfs_volume *v)
 {
-    uint64_t pos, end;
-    int any_r = 0, any_w = 0;
+    heat_decay_ctx ctx;
     /* the fold first: reads this process observed count into the decayed
      * totals exactly once */
     heat_fold(v);
 
     if (!v || !vol_write_enabled(v)) return;
-    /* walk the live records; collect warm files (stored TLV != 0), then
-     * persist their decayed counters (rewriting while walking the area is
-     * fine: appends land past the walk end, but collect-then-apply keeps
-     * it obviously sound) */
-    pos = v->inode_area_start * INVFS_BLOCK_SIZE;
-    end = v->inode_area_pos;
-    while (pos + sizeof(invfs_inode_rec) <= end) {
-        invfs_inode_rec h;
-        uint16_t r = 0;
-        uint8_t w = 0;
-        if (io_seek(&v->io, pos) != 0 || io_read(&v->io, &h, sizeof h) != 0)
-            break;
-        if (h.magic != INODE_REC_MAGIC && h.magic != TOMBSTONE_MAGIC) break;
-        if (h.rec_len < sizeof h || h.rec_len > INVFS_MAX_REC_LEN ||
-            pos + h.rec_len + 4 > end)
-            break;
-        if (h.magic == INODE_REC_MAGIC && h.name_len &&
-            (uint8_t)h.name[0] != 0x01 &&
-            vol_find(v, h.name) == h.inode_id) {
-            /* the live version only (position-kill chains share the id) */
-            uint64_t ip = idx_get_id(v, h.inode_id);
-            if (ip == pos) {
-                uint8_t *rec = (uint8_t *)malloc(h.rec_len);
-                if (rec) {
-                    uint32_t crc_stored;
-                    if (io_seek(&v->io, pos) == 0 &&
-                        io_read(&v->io, rec, h.rec_len) == 0 &&
-                        io_read(&v->io, &crc_stored, 4) == 0 &&
-                        invfs_crc32c(rec, h.rec_len) == crc_stored) {
-                        /* absent TLV == (0,0) and decays to itself: the
-                         * pass never stamps a never-heated file (zero
-                         * churn on cold volumes -- a format-v2 property,
-                         * since a stamp is a record append now) */
-                        uint16_t nr;
-                        uint8_t nw;
-                        if (heat_read_tlv(rec, h.rec_len, &r, &w) == 0) {
-                            nr = (uint16_t)(r >> 1);
-                            nw = w ? (uint8_t)(w - 1) : 0;
-                            if (nr != r || nw != w)
-                                heat_write(v, h.inode_id, nr, nw);
-                            if (nr >= INVFS_HEAT_HOT) any_r = 1;
-                            if (nw >= INVFS_WHEAT_HOT) any_w = 1;
-                        }
-                    }
-                    free(rec);
-                }
-            }
-        }
-        pos += (uint64_t)h.rec_len + 4;
-    }
-    v->heat_any_rhot = any_r;
-    v->heat_any_whot = any_w;
+    /* walk the live records (mapper extents via the shared walker on
+     * v0.3.0+, the legacy area otherwise); collect warm files (stored
+     * TLV != 0), then persist their decayed counters -- collect-in-cb,
+     * stamps land past the frozen walk end */
+    ctx.v = v;
+    ctx.end = v->inode_area_pos;
+    ctx.any_r = 0;
+    ctx.any_w = 0;
+    vol_records_walk(v, heat_decay_cb, &ctx);
+    v->heat_any_rhot = ctx.any_r;
+    v->heat_any_whot = ctx.any_w;
     (void)v;
 }
 
@@ -527,11 +533,62 @@ static int heat_cand_cmp(const void *a, const void *b)
  * per-sweep budget: min(64, 10% of live TEXT members).
  * Runs between the sweep walk and vol_sweep_dedupe in the driver, after
  * the run's decay pass. Returns the number of promotions, <0 on error. */
+/* WP43: per-record body of the promotion candidate collection, fed by
+ * vol_records_walk(). Collection only reads (liveness, class, heat);
+ * the records are rewritten by the promotion itself, after the walk. */
+typedef struct {
+    invfs_volume *v;
+    heat_cand *cand;
+    size_t n_cand, cap_cand;
+    size_t text_members;
+    int err;
+} heat_cand_ctx;
+
+static int heat_promote_cb(void *ctx_, uint64_t rec_pos,
+                           const invfs_inode_rec *h, const uint8_t *rec)
+{
+    heat_cand_ctx *ctx = (heat_cand_ctx *)ctx_;
+    invfs_volume *v = ctx->v;
+    size_t nl;
+    char nm[257];
+    uint64_t ip;
+    uint8_t cc = 0, ca = 0;
+    uint16_t cg = 0, r;
+
+    (void)rec;
+    if (h->magic == TOMBSTONE_MAGIC) return 0;
+    nl = h->name_len < sizeof(h->name) ? h->name_len : sizeof(h->name) - 1;
+    memcpy(nm, h->name, nl);
+    nm[nl] = 0;
+    ip = idx_get_id(v, h->inode_id);
+    if (vol_find(v, nm) != h->inode_id || (ip && ip != rec_pos))
+        return 0;   /* superseded version: not the live record */
+    if (vol_get_class(v, h->inode_id, &cc, &ca, &cg) != 0)
+        return 0;
+    if (cc != INVFS_CLASS_TEXT)
+        return 0;   /* BATCHED_BIN (fast already) never promotes */
+    ctx->text_members++;
+    r = heat_file_r(v, h->inode_id);
+    if (r < INVFS_HEAT_HOT) return 0;
+    if (ctx->n_cand == ctx->cap_cand) {
+        size_t nc = ctx->cap_cand ? ctx->cap_cand * 2 : 16;
+        heat_cand *nc2 = (heat_cand *)realloc(ctx->cand, nc * sizeof *nc2);
+        if (!nc2) { ctx->err = 1; return 1; }
+        ctx->cand = nc2;
+        ctx->cap_cand = nc;
+    }
+    ctx->cand[ctx->n_cand].inode = h->inode_id;
+    ctx->cand[ctx->n_cand].r = r;
+    memcpy(ctx->cand[ctx->n_cand].name, nm, nl + 1);
+    ctx->n_cand++;
+    return 0;
+}
+
 int vol_heat_promote(invfs_volume *v)
 {
-    uint64_t owner, pos, end;
-    heat_cand *cand = NULL;
-    size_t n_cand = 0, cap_cand = 0, text_members = 0, budget = 0, i;
+    uint64_t owner;
+    heat_cand_ctx ctx;
+    size_t budget = 0, i;
     int promoted = 0;
 
     if (!v || !vol_write_enabled(v)) return 0;
@@ -539,73 +596,37 @@ int vol_heat_promote(invfs_volume *v)
     owner = vol_find(v, TZ_OWNER_NAME);
     if (!owner) return 0;
 
-    /* walk live records; TEXT class + hot -> candidate */
-    pos = v->inode_area_start * INVFS_BLOCK_SIZE;
-    end = v->inode_area_pos;
-    while (pos + sizeof(invfs_inode_rec) <= end) {
-        invfs_inode_rec h;
-        size_t nl;
-        char nm[257];
-        uint64_t ip, rec_pos = pos;
-        uint8_t cc = 0, ca = 0;
-        uint16_t cg = 0, r;
-        if (io_seek(&v->io, pos) != 0 ||
-            io_read(&v->io, &h, sizeof h) != 0) break;
-        if (h.magic != INODE_REC_MAGIC && h.magic != TOMBSTONE_MAGIC) break;
-        if (h.rec_len < sizeof h || h.rec_len > INVFS_MAX_REC_LEN ||
-            pos + h.rec_len + 4 > end) break;
-        pos += (uint64_t)h.rec_len + 4;
-        if (h.magic == TOMBSTONE_MAGIC) continue;
-        nl = h.name_len < sizeof(h.name) ? h.name_len : sizeof(h.name) - 1;
-        memcpy(nm, h.name, nl);
-        nm[nl] = 0;
-        ip = idx_get_id(v, h.inode_id);
-        if (vol_find(v, nm) != h.inode_id || (ip && ip != rec_pos))
-            continue;   /* superseded version: not the live record */
-        if (vol_get_class(v, h.inode_id, &cc, &ca, &cg) != 0)
-            continue;
-        if (cc != INVFS_CLASS_TEXT)
-            continue;   /* BATCHED_BIN (fast already) never promotes */
-        text_members++;
-        r = heat_file_r(v, h.inode_id);
-        if (r < INVFS_HEAT_HOT) continue;
-        if (n_cand == cap_cand) {
-            size_t nc = cap_cand ? cap_cand * 2 : 16;
-            heat_cand *nc2 = (heat_cand *)realloc(cand, nc * sizeof *nc2);
-            if (!nc2) goto out;
-            cand = nc2;
-            cap_cand = nc;
-        }
-        cand[n_cand].inode = h.inode_id;
-        cand[n_cand].r = r;
-        memcpy(cand[n_cand].name, nm, nl + 1);
-        n_cand++;
-    }
+    /* walk live records (mapper extents via the shared walker on v0.3.0+,
+     * the legacy area otherwise); TEXT class + hot -> candidate */
+    memset(&ctx, 0, sizeof ctx);
+    ctx.v = v;
+    vol_records_walk(v, heat_promote_cb, &ctx);
+    if (ctx.err) goto out;   /* realloc failed mid-collection (legacy: goto out) */
     /* NOTE: heat_any_rhot is NOT reset when the walk finds no TEXT
      * candidate: the summary means "some file is read-hot", and the tier
      * migration (vol_tier_migrate) keys on exactly that for
      * non-TEXT-classed segments. The decay pass recomputes the truth
      * every run, so a genuinely cold volume re-cools on its own. */
 
-    if (text_members) {
-        budget = text_members / 10;              /* 10% of live members */
+    if (ctx.text_members) {
+        budget = ctx.text_members / 10;          /* 10% of live members */
         if (budget > INVFS_HEAT_PROMOTE_MAX) budget = INVFS_HEAT_PROMOTE_MAX;
     }
-    if (n_cand > 1)
-        qsort(cand, n_cand, sizeof *cand, heat_cand_cmp);
+    if (ctx.n_cand > 1)
+        qsort(ctx.cand, ctx.n_cand, sizeof *ctx.cand, heat_cand_cmp);
 
-    for (i = 0; i < n_cand && (size_t)promoted < budget; i++) {
+    for (i = 0; i < ctx.n_cand && (size_t)promoted < budget; i++) {
         uint64_t fsz = 0, nseg;
         const invfs_codec *zc;
         /* admission: same worst-case pricing as the generic sweep's
          * DEFER_ENOSPC path -- the promoted shape coexists with the batch
          * hole until GC, so promotion temporarily costs space */
-        if (vol_stat_full(v, cand[i].name, NULL, &fsz, NULL) != 0 || !fsz)
+        if (vol_stat_full(v, ctx.cand[i].name, NULL, &fsz, NULL) != 0 || !fsz)
             continue;
         nseg = (fsz + SEGMENT_SIZE - 1) / SEGMENT_SIZE;
         if (sweep_enospc(v, fsz + nseg * 8 + INVFS_ENOSPC_MARGIN)) {
             fprintf(stderr, "[heat] %s: promotion deferred (ENOSPC)\n",
-                    cand[i].name);
+                    ctx.cand[i].name);
             continue;
         }
         /* dec_mem: the generic floor is always admitted -- checked anyway,
@@ -613,22 +634,22 @@ int vol_heat_promote(invfs_volume *v)
         zc = invfs_codec_by_algo(INVFS_ALGO_ZSTD);
         if (zc && zc->dec_mem_bytes > vol_get_dec_mem_limit(v))
             continue;
-        if (vol_store_generic(v, cand[i].inode, cand[i].name,
+        if (vol_store_generic(v, ctx.cand[i].inode, ctx.cand[i].name,
                               INVFS_CLASS_GENERIC,
                               INVFS_ALGO_ZSTD) != 0) {
             fprintf(stderr, "[heat] %s: promotion failed (member left "
-                            "batched, intact)\n", cand[i].name);
+                            "batched, intact)\n", ctx.cand[i].name);
             continue;
         }
         promoted++;
         if (getenv("INVFS_DEBUG"))
             fprintf(stderr, "[heat] %s: rheat %u -> extracted to generic "
-                            "ZSTD\n", cand[i].name, cand[i].r);
+                            "ZSTD\n", ctx.cand[i].name, ctx.cand[i].r);
     }
 out:
     printf("heat: %zu hot text member(s), %d promoted "
-           "(budget %zu of %zu live)\n", n_cand, promoted, budget,
-           text_members);
-    free(cand);
+           "(budget %zu of %zu live)\n", ctx.n_cand, promoted, budget,
+           ctx.text_members);
+    free(ctx.cand);
     return promoted;
 }
