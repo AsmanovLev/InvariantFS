@@ -54,6 +54,10 @@ for mod in failover net_failover virtio_net; do
     esac
 done
 
+# init: UUID-aware device discovery (probes each block device for the
+# InvariantFS superblock via `invf-fuse --probe-uuid`; kernel names like
+# sda/sdb are not stable and a stale mknod can make a name look present).
+cp "$ROOT/tools/initramfs-init.sh" init
 chmod 755 init
 
 find . | cpio -o -H newc --quiet | gzip -1 > "$ROOT/vm/initramfs.cpio.gz"

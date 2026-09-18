@@ -2700,6 +2700,25 @@ int main(int argc, char *argv[])
     const char *img = NULL, *mnt = NULL, *opts = NULL;
     int fg = 0, err, i;
 
+    /* WP50: --probe-uuid <dev> — print the volume's 16-byte uuid as hex if
+     * <dev> carries an InvariantFS superblock, else exit nonzero. Reads
+     * only the superblock magic (0x00) and uuid (0x08); no mount, no scan.
+     * The initramfs uses it to identify volumes by uuid instead of unstable
+     * kernel names (sda/sdb) and a stale mknod. */
+    if (argc >= 3 && strcmp(argv[1], "--probe-uuid") == 0) {
+        unsigned char sb[8 + 16];
+        ssize_t n;
+        int fd = open(argv[2], O_RDONLY);
+        if (fd < 0) return 1;
+        n = pread(fd, sb, sizeof sb, 0);
+        close(fd);
+        if (n != (ssize_t)sizeof sb || memcmp(sb, "InvariFS", 8) != 0)
+            return 1;
+        for (i = 0; i < 16; i++) printf("%02x", sb[8 + i]);
+        printf("\n");
+        return 0;
+    }
+
     for (i = 1; i < argc; i++) {
         if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) {
             fprintf(stderr, "usage: invf-fuse [-f] [-o opt,opt] <image> <mountpoint>\n");

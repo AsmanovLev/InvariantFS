@@ -96,74 +96,39 @@ Build /mnt/sde/invfs-uki/: the `vmlinuz` (built with `CONFIG_FUSE_FS=y`,
   > /mnt/sde/invfs-uki/initramfs.img
 ```
 
-### Step V4: The initramfs init (full text that works)
+### Step V4: The initramfs init
 
-```sh
-#!/bin/sh
-export PATH=/sbin:/bin:/usr/sbin:/usr/bin
+The init script is versioned at **`tools/initramfs-init.sh`** (the same
+file `tools/mkinitramfs.sh` installs as `/init`). Its key property:
 
-mount -t devtmpfs devtmpfs /dev 2>/dev/null
-mount -t proc proc /proc
-mount -t sysfs sysfs /sys
-sleep 1
+**Volumes are identified by content, not by kernel device name.** The
+script probes every block device with `invf-fuse --probe-uuid <dev>`,
+which reads the InvariantFS superblock magic (`InvariFS` at 0x00) and
+prints the 16-byte volume uuid (0x08). Kernel names (`sda`/`sdb`/`vda`)
+are not stable, and — as hit in practice — an unconditional
+`mknod /dev/sda3` fallback makes a *nonexistent* partition look present,
+so the old name-based `[ -b ... ]` branch picked the wrong layout and the
+mount failed on a single-device volume.
 
-# Fallback nodes if devtmpfs has not settled
-[ -e /dev/sda ] || mknod /dev/sda b 8 0
-[ -e /dev/sda3 ] || mknod /dev/sda3 b 8 3
-[ -e /dev/sdb ] || mknod /dev/sdb b 8 16
-[ -e /dev/vda ] || mknod /dev/vda b 252 0
-[ -e /dev/vda3 ] || mknod /dev/vda3 b 252 3
-[ -e /dev/vdb ] || mknod /dev/vdb b 252 16
+Selection rules:
+- first probed InvFS device → `INVFS_RAW`;
+- a second distinct one → `INVFS_DEV1` (shadow/mirror);
+- optional kernel cmdline overrides `invfs.raw_uuid=<hex>` /
+  `invfs.dev1_uuid=<hex>` pin exact volumes.
 
-# Disk1 p3 = shadow (INVFS_DEV1), Disk2 = raw volume (INVFS_RAW)
-if [ -b /dev/sda3 ]; then
-    INVFS_DEV1=/dev/sda3; INVFS_RAW=/dev/sdb
-elif [ -b /dev/vda3 ]; then
-    INVFS_DEV1=/dev/vda3; INVFS_RAW=/dev/vdb
-elif [ -b /dev/sda ]; then
-    INVFS_DEV1=""; INVFS_RAW=/dev/sda
-elif [ -b /dev/vda ]; then
-    INVFS_DEV1=""; INVFS_RAW=/dev/vda
-else
-    INVFS_DEV1=""; INVFS_RAW=""
-fi
-
-mkdir -p /tmp /mnt/invfs
-if [ -n "$INVFS_DEV1" ]; then
-    INVFS_DEV1="$INVFS_DEV1" invf-fuse -f "$INVFS_RAW" /mnt/invfs \
-        >/tmp/fuse.log 2>&1 &
-else
-    invf-fuse -f "$INVFS_RAW" /mnt/invfs >/tmp/fuse.log 2>&1 &
-fi
-
-# The file table build for ~66k records takes a few seconds; wait for it
-READY=""
-i=0
-while [ "$i" -lt 120 ]; do
-    grep -q "InvariantFS mounted" /tmp/fuse.log 2>/dev/null && { READY=1; break; }
-    sleep 1
-    i=$((i + 1))
-done
-[ "$READY" = "1" ] || { echo "invf-fuse did not mount"; cat /tmp/fuse.log; sh; }
-
-# rbind essential filesystems into the new root BEFORE chroot
-mount --rbind /proc /mnt/invfs/proc 2>/dev/null
-mount --rbind /sys  /mnt/invfs/sys  2>/dev/null
-mount --rbind /dev  /mnt/invfs/dev  2>/dev/null
-
-# Guest NIC (kernel CONFIG_VIRTIO_NET=m): load deps IN ORDER first
-busybox insmod /lib/modules/failover.ko      2>/dev/null
-busybox insmod /lib/modules/net_failover.ko  2>/dev/null
-busybox insmod /lib/modules/virtio_net.ko    2>/dev/null
-
-exec chroot /mnt/invfs /sbin/init
-```
+After the mount it waits for `InvariantFS mounted` in `/tmp/fuse.log`,
+`rbind`s `/proc /sys /dev` into the new root, `insmod`s
+`failover` → `net_failover` → `virtio_net` in that order (the guest
+kernel ships virtio-net as a module), and `exec chroot /mnt/invfs
+/sbin/init` (`switch_root` refuses a FUSE root).
 
 The initramfs directory also carries `bin/busybox` (+ sh/chroot/mount
 applet symlinks), `sbin/invf-fuse`, and
 `lib/modules/{failover,net_failover,virtio_net}.ko` — those are the
 modules for the exact `bzImage` in use (build them from the same tree;
 out-of-tree module builds will produce `Unknown symbol` at insmod).
+Note the initramfs busybox has **no `dd`/`od`** applets, which is why
+device probing lives in `invf-fuse` rather than in the shell.
 
 ### Step V5: In-guest settings
 
