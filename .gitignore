@@ -43,3 +43,6 @@ video/filter.txt
 # local staging/VM trees (never track)
 var/
 *.d
+
+# doxygen output (generated; make docs)
+impl_docs/doxygen/

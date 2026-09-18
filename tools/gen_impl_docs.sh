@@ -8,6 +8,10 @@
 # never do that again. FILEMAP.md/DOCMAP.md used to be generated here; they
 # are curated documents now (FILEMAP describes the post-split vol_* module
 # layout, which a wc -l listing cannot).
+#
+# 2026-09-18: the script additionally drives doxygen (repo-root Doxyfile) to
+# produce impl_docs/doxygen/html. That tree is gitignored and additive; the
+# four ctags artifacts above stay the committed, hand-diffable index.
 set -euo pipefail
 
 ROOT="/home/user/InvariantFS"
@@ -63,3 +67,16 @@ done
 } > "$OUT/TYPES.md"
 
 ls "$OUT"
+
+# ---- doxygen HTML browser (additive) -------------------------------------
+# ctags gives the flat FUNCTIONS/TYPES indexes above; doxygen gives the
+# browsable tree + call graphs. Output goes to impl_docs/doxygen/ (gitignored)
+# and is driven by the repo-root Doxyfile. Skip quietly when doxygen is not
+# installed or INVFS_DOCS_NO_DOXYGEN=1 (e.g. minimal CI images).
+if [ "${INVFS_DOCS_NO_DOXYGEN:-0}" != 1 ] && command -v doxygen >/dev/null 2>&1 \
+   && [ -f "$ROOT/Doxyfile" ]; then
+    ( cd "$ROOT" && doxygen Doxyfile )
+    echo "doxygen: impl_docs/doxygen/html/index.html"
+else
+    echo "doxygen: skipped (not installed or INVFS_DOCS_NO_DOXYGEN=1)"
+fi

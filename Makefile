@@ -172,7 +172,18 @@ e2e: all
 flakey:
 	bash tools/test-flakey.sh
 
-.PHONY: all clean test e2e fuzz flakey
+# ---- docs -----------------------------------------------------------------
+# ctags index (impl_docs/FUNCTIONS.md, TYPES.md, functions/, types/) plus the
+# doxygen HTML browser (impl_docs/doxygen/html, gitignored). Requires doxygen
+# (and graphviz for the call graphs).
+docs:
+	bash tools/gen_impl_docs.sh
+	doxygen Doxyfile
+
+docs-clean:
+	rm -rf impl_docs/doxygen
+
+.PHONY: all clean test e2e fuzz flakey docs docs-clean
 -include $(wildcard $(OBJ)/*.d)
 
 $(OUT)/invf-stats: $(OBJ)/invf-stats.o $(CORE_O)

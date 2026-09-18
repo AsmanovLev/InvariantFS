@@ -1,0 +1,76 @@
+# Doxyfile — InvariantFS API/architecture browser
+#
+# Generate with:   make docs        (or: doxygen Doxyfile)
+# Output:          impl_docs/doxygen/html/index.html (gitignored)
+# Maintained config only; the generated tree is never committed.
+
+PROJECT_NAME           = "InvariantFS"
+PROJECT_BRIEF          = "Content-addressed filesystem with a bit-exactness invariant"
+PROJECT_NUMBER         = v0.2.1
+
+OUTPUT_DIRECTORY       = impl_docs/doxygen
+CREATE_SUBDIRS         = NO
+OUTPUT_LANGUAGE        = English
+
+# ---- input ---------------------------------------------------------------
+# Library (src/, incl. the markdown architecture pages under src/doc/) and
+# the CLI tools (tools/). Vendored trees and generated artifacts excluded.
+INPUT                  = src tools README.md impl_docs/INVFS-ARCH.md
+RECURSIVE              = YES
+FILE_PATTERNS          = *.c *.h *.md
+EXTENSION_MAPPING      = md=Markdown
+EXCLUDE                = src/vendor7z src/zlib src/zstd-1.5.6 src/zstd.h \
+                         src/examples build bin tools/7-Zip-zstd impl_docs/doxygen
+
+# ---- extraction ----------------------------------------------------------
+# The codebase is heavily narratively commented (/* ... */) rather than
+# javadoc-commented; extract everything so signatures, types, file pages and
+# the call graphs are useful today, and future /** */ blocks render fully.
+EXTRACT_ALL            = YES
+EXTRACT_PRIVATE        = YES
+EXTRACT_STATIC         = YES
+EXTRACT_LOCAL_CLASSES  = YES
+JAVADOC_AUTOBRIEF      = YES
+QT_AUTOBRIEF           = NO
+TYPEDEF_HIDES_STRUCT   = YES
+HIDE_UNDOC_MEMBERS     = NO
+HIDE_UNDOC_CLASSES     = NO
+
+# ---- preprocessor --------------------------------------------------------
+# Mirror the Makefile's -D set so #ifdef'd code is not silently dropped.
+ENABLE_PREPROCESSING   = YES
+MACRO_EXPANSION        = YES
+EXPAND_ONLY_PREDEF     = NO
+PREDEFINED             = INVFS_EMBED_FLACX \
+                         MINIZ_NO_ZLIB_APIS \
+                         BLAKE3_NO_SSE2 BLAKE3_NO_SSE41 BLAKE3_NO_AVX2 BLAKE3_NO_AVX512 \
+                         INVFS_VERSION_STRING=\"v0.2.1\" \
+                         INVFS_BUILD_DATE=\"2026-09-18\"
+
+# ---- source + navigation -------------------------------------------------
+SOURCE_BROWSER         = YES
+INLINE_SOURCES         = NO
+REFERENCED_BY_RELATION = YES
+REFERENCES_RELATION    = YES
+GENERATE_TREEVIEW      = YES
+FULL_SIDEBAR           = NO
+SEARCHENGINE           = YES
+USE_MDFILE_AS_MAINPAGE = README.md
+
+# ---- graphs (graphviz) ---------------------------------------------------
+HAVE_DOT               = YES
+DOT_IMAGE_FORMAT       = svg
+INTERACTIVE_SVG        = YES
+CALL_GRAPH             = YES
+CALLER_GRAPH           = YES
+DOT_GRAPH_MAX_NODES    = 50
+MAX_DOT_GRAPH_DEPTH    = 2
+DOT_CLEANUP            = YES
+
+# ---- output hygiene ------------------------------------------------------
+GENERATE_LATEX         = NO
+GENERATE_MAN           = NO
+QUIET                  = YES
+WARN_IF_UNDOCUMENTED   = NO
+WARN_IF_DOC_ERROR      = YES
+WARN_LOGFILE           = impl_docs/doxygen/warnings.log
