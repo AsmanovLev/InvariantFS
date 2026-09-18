@@ -1550,9 +1550,192 @@ uint64_t vol_zone_used_bytes(invfs_volume *v, uint64_t start_blk, uint64_t end_b
 }
 
 
+/* WP41: shared per-record analysis body for vol_compute_stats, driven by
+ * the WP40 mapper-aware walker vol_records_walk() so statistics cover
+ * v0.3.0+ volumes whose inode records live in dynamic meta extents (the
+ * legacy contiguous walk saw zero records there). ctx carries the
+ * claimed bitmap and the stats accumulator; rb INCLUDES the trailing
+ * CRC and is owned by the walker (never freed here). */
+typedef struct {
+    invfs_volume *v;
+    invfs_volume_stats *out;
+    uint8_t *claimed;
+    int have_ms;
+} wstats_ctx;
+
+static int wstats_cb(void *ctx_, uint64_t rec_pos,
+                     const invfs_inode_rec *hp, const uint8_t *rb)
+{
+    wstats_ctx *ctx = (wstats_ctx *)ctx_;
+    invfs_volume *v = ctx->v;
+    invfs_volume_stats *out = ctx->out;
+    uint8_t *claimed = ctx->claimed;
+    int have_ms = ctx->have_ms;
+    invfs_inode_rec h = *hp;
+
+    if (h.magic == TOMBSTONE_MAGIC) { out->tombstones++; return 0; }
+    /* count each file once, at its live version: the name resolves to
+     * the current id and the id index points at the newest record.
+     * Older same-id versions (meta rewrites, class stamps, batch-owner
+     * growth) and replaced/deleted records would otherwise inflate every
+     * counter below. The position check uses rec_pos -- this record's
+     * own offset -- exactly what the legacy loop compared with
+     * pos - rec_len - 4 after advancing. */
+    {
+        uint64_t ip = idx_get_id(v, h.inode_id);
+        if (vol_find(v, h.name) != h.inode_id || (ip && ip != rec_pos))
+            return 0;
+    }
+    /* WP-DZ: physical attribution by content class, for EVERY live
+     * record including the 0x01 internal owners (their blocks -- text
+     * batches, seal parity, the retention registry -- are real used
+     * bytes; the 0x01 exclusion below stays logical-only).
+     * WP27: the extent comes from the entry's pba; the physical
+     * length derives from the segment's framed header (owner classes
+     * carry it in the entry: reten length = blocks, tier/rawm length
+     * = bytes, parity = one block). */
+    if (have_ms) {
+        size_t pbase = sizeof(invfs_inode_rec);
+        invfs_ast_hdr pah;
+        if (h.rec_len >= pbase + INVFS_AST_HDR_V1_LEN &&
+            invfs_ast_hdr_parse(rb + pbase, h.rec_len - pbase, &pah) == 0 &&
+            h.rec_len >= pbase + pah.hdr_len +
+                          (size_t)pah.num_blocks *
+                              sizeof(invfs_ast_block_entry)) {
+            const uint8_t *ep = rb + pbase + pah.hdr_len;
+            uint32_t pi;
+            int is_ret = h.name_len && (uint8_t)h.name[0] == 0x01 &&
+                         h.name_len >= 6 &&
+                         memcmp(h.name + 1, "reten", 5) == 0;
+            for (pi = 0; pi < pah.num_blocks; pi++) {
+                const uint8_t *e = ep + (size_t)pi *
+                                        sizeof(invfs_ast_block_entry);
+                uint32_t zab, zone;
+                uint64_t pba, plen = 0, b, bend;
+                memcpy(&zab, e + 16, 4);   /* zone:2 | algo:6 | bid:24 */
+                zone = zab & 3;
+                memcpy(&pba, e + 24, 8);
+                if (!pba || pba >= v->sb.total_blocks) continue;
+                if (is_ret) {
+                    uint64_t l;
+                    memcpy(&l, e + 8, 8);
+                    plen = l;              /* reten: BLOCKS */
+                } else if (h.name_len && (uint8_t)h.name[0] == 0x01) {
+                    /* seal parity: one block; tier/rawm: the copy's
+                     * span in bytes; tzb: length is the DECODED size
+                     * -- the batch's extent derives from its frame */
+                    uint64_t l;
+                    memcpy(&l, e + 8, 8);
+                    if (!(h.name_len >= 4 &&
+                          memcmp(h.name + 1, "tzb", 3) == 0) &&
+                        l && l % INVFS_BLOCK_SIZE == 0)
+                        plen = l / INVFS_BLOCK_SIZE;   /* parity/tier/rawm */
+                    else if (seg_extent(v, pba, NULL, &plen) != 0)
+                        continue;                        /* tzb batch */
+                } else if (seg_extent(v, pba, NULL, &plen) != 0)
+                    continue;   /* torn header: attribute nothing */
+                bend = pba + plen;
+                if (bend > v->sb.total_blocks) bend = v->sb.total_blocks;
+                for (b = pba; b < bend; b++) {
+                    if (bit_get(claimed, b)) continue;
+                    bit_set(claimed, b);
+                    if (zone == INVFS_ZONE_TEXT)
+                        out->text_used_bytes += INVFS_BLOCK_SIZE;
+                    else if (zone == INVFS_ZONE_BINARY)
+                        out->shadow_used_bytes += INVFS_BLOCK_SIZE;
+                    else
+                        out->raw_used_bytes += INVFS_BLOCK_SIZE;
+                }
+            }
+        }
+    }
+    {
+        invfs_meta_pub m;
+        int type = (vol_get_meta(v, h.inode_id, &m) == 0) ? m.type : -1;
+        switch (type) {
+        case INVFS_ITYP_DIR:  out->dirs++; break;
+        case INVFS_ITYP_LNK:  out->links++; break;
+        case INVFS_ITYP_FIFO: case INVFS_ITYP_SOCK:
+        case INVFS_ITYP_CHR:  case INVFS_ITYP_BLK: out->special++; break;
+        default: {
+            out->files++;
+            /* WP12(a): internal owner records ("\x01tzb") carry
+             * file_size = the sum of their sealed batches, and every
+             * TEXT member counts its own slices -- counting the owner
+             * too doubles the text-zone logical bytes (the Silesia
+             * image showed 309 MiB logical vs a 202 MiB corpus). The
+             * members carry the logical truth, so 0x01-prefixed
+             * internal names contribute nothing to ANY logical field
+             * (zone attribution, logical_bytes, biggest). Physical
+             * used-bytes accounting is the class-based pass above and
+             * DOES include the internal owners. */
+            if (h.name_len && (uint8_t)h.name[0] == 0x01)
+                break;
+            /* attribute logical size across the AST's zones */
+            {
+                /* record layout: rec header | AST header (v1 16B /
+                 * v2 24B -- WP22a; the parsed view carries the length)
+                 * | entries | children | INO2 ext. (An earlier version
+                 * of this loop added the whole AST blob length to the
+                 * base and read past it.) */
+                size_t base = sizeof(invfs_inode_rec);
+                invfs_ast_hdr ah;
+                uint32_t nb = 0;
+                size_t hl = 0;
+                if (h.rec_len >= base + INVFS_AST_HDR_V1_LEN &&
+                    h.file_size > 0 &&
+                    invfs_ast_hdr_parse(rb + base, h.rec_len - base,
+                                        &ah) == 0) {
+                    hl = ah.hdr_len;
+                    if (h.rec_len < base + hl + (size_t)ah.num_blocks *
+                                              sizeof(invfs_ast_block_entry))
+                        nb = 0;     /* truncated recipe: attribute nothing */
+                    else
+                        nb = ah.num_blocks;
+                }
+                {
+                    uint64_t remain = h.file_size;
+                    uint32_t i;
+                    for (i = 0; i < nb && remain > 0; i++) {
+                        const uint8_t *e = rb + base + hl +
+                            (size_t)i * sizeof(invfs_ast_block_entry);
+                        uint32_t zone = e[16] & 3;   /* zone:2 LSB */
+                        uint64_t seg;
+                        /* TEXT entries are arbitrary-length slices of a
+                         * shared batch (not 64 KB segments): use the
+                         * entry's own length */
+                        if (zone == INVFS_ZONE_TEXT) {
+                            memcpy(&seg, e + 8, 8);
+                            if (seg > remain) seg = remain;
+                        } else {
+                            seg = remain > 65536 ? 65536 : remain;
+                        }
+                        remain -= seg;
+                        if (zone == INVFS_ZONE_TEXT)
+                            out->logic_text_bytes += seg;
+                        else if (zone == INVFS_ZONE_BINARY)
+                            out->logic_shadow_bytes += seg;
+                        else
+                            out->logic_raw_bytes += seg;
+                    }
+                }
+            }
+            if (h.file_size && vol_find(v, h.name) == h.inode_id) {
+                out->logical_bytes += h.file_size;
+                if (h.file_size > out->biggest_size) {
+                    out->biggest_size = h.file_size;
+                    snprintf(out->biggest_name, sizeof(out->biggest_name),
+                             "%s", h.name);
+                }
+            }
+        }
+        }
+    }
+    return 0;
+}
+
 int vol_compute_stats(invfs_volume *v, invfs_volume_stats *out)
 {
-    uint64_t pos, end;
     /* WP-DZ: physical per-zone attribution is by CONTENT CLASS (the AST
      * entry's zone tag over its own pba), never by pba region -- zone
      * boundaries are advisory, so raw-class blocks legitimately live in
@@ -1566,183 +1749,45 @@ int vol_compute_stats(invfs_volume *v, invfs_volume_stats *out)
     claimed = (uint8_t *)calloc((size_t)(v->sb.total_blocks + 7) / 8, 1);
     if (claimed)
         have_ms = 1;   /* degrade: physical zeros, not a lie */
-    pos = v->inode_area_start * INVFS_BLOCK_SIZE;
-    end = v->inode_area_pos;
-    while (pos + sizeof(invfs_inode_rec) <= end) {
-        invfs_inode_rec h;
-        uint8_t *rb;
-        uint32_t stored, calc;
-        if (io_seek(&v->io, pos) != 0 ||
-            io_read(&v->io, &h, sizeof(h)) != 0) break;
-        if (h.magic != INODE_REC_MAGIC && h.magic != TOMBSTONE_MAGIC) break;
-        if (h.rec_len < sizeof(h) || h.rec_len > INVFS_MAX_REC_LEN ||
-            pos + h.rec_len + 4 > end) { out->bad_records++; break; }
-        rb = malloc((size_t)h.rec_len + 4);
-        if (!rb) break;
-        if (io_seek(&v->io, pos) != 0 ||
-            io_read(&v->io, rb, (size_t)h.rec_len + 4) != 0) { free(rb); break; }
-        memcpy(&stored, rb + h.rec_len, 4);
-        calc = invfs_crc32c(rb, h.rec_len);
-        if (calc != stored) { free(rb); out->bad_records++; pos += (uint64_t)h.rec_len + 4; continue; }
-        pos += (uint64_t)h.rec_len + 4;
-        if (h.magic == TOMBSTONE_MAGIC) { free(rb); out->tombstones++; continue; }
-        /* count each file once, at its live version: the name resolves to
-         * the current id and the id index points at the newest record.
-         * Older same-id versions (meta rewrites, class stamps, batch-owner
-         * growth) and replaced/deleted records would otherwise inflate every
-         * counter below. */
-        {
-            uint64_t ip = idx_get_id(v, h.inode_id);
-            if (vol_find(v, h.name) != h.inode_id || (ip && ip != pos - ((uint64_t)h.rec_len + 4))) {
+    {
+        wstats_ctx c;
+        c.v = v; c.out = out; c.claimed = claimed; c.have_ms = have_ms;
+        if (v->met0_present && v->meta_mapper && v->met0.extent_count > 0) {
+            /* WP41: mapper volume -- records live in dynamic meta
+             * extents (MET0 + mapper table). vol_records_walk() hops
+             * across every extent via vol_inode_next; the legacy
+             * contiguous walk saw zero records here (66182 files on the
+             * 15 GiB stage3 volume reported as 0). The walker
+             * CRC-verifies each record and skips torn ones silently. */
+            vol_records_walk(v, wstats_cb, &c);
+        } else {
+            /* legacy format_version=0: direct contiguous loop, kept
+             * byte-for-byte so regressions in the shared branch cannot
+             * leak into legacy handling. The per-record body is shared
+             * with the walker callback above. */
+            uint64_t pos, end;
+            pos = v->inode_area_start * INVFS_BLOCK_SIZE;
+            end = v->inode_area_pos;
+            while (pos + sizeof(invfs_inode_rec) <= end) {
+                invfs_inode_rec h;
+                uint8_t *rb;
+                uint32_t stored, calc;
+                if (io_seek(&v->io, pos) != 0 ||
+                    io_read(&v->io, &h, sizeof(h)) != 0) break;
+                if (h.magic != INODE_REC_MAGIC && h.magic != TOMBSTONE_MAGIC) break;
+                if (h.rec_len < sizeof(h) || h.rec_len > INVFS_MAX_REC_LEN ||
+                    pos + h.rec_len + 4 > end) { out->bad_records++; break; }
+                rb = malloc((size_t)h.rec_len + 4);
+                if (!rb) break;
+                if (io_seek(&v->io, pos) != 0 ||
+                    io_read(&v->io, rb, (size_t)h.rec_len + 4) != 0) { free(rb); break; }
+                memcpy(&stored, rb + h.rec_len, 4);
+                calc = invfs_crc32c(rb, h.rec_len);
+                if (calc != stored) { free(rb); out->bad_records++; pos += (uint64_t)h.rec_len + 4; continue; }
+                pos += (uint64_t)h.rec_len + 4;
+                (void)wstats_cb(&c, pos - ((uint64_t)h.rec_len + 4), &h, rb);
                 free(rb);
-                continue;
             }
-        }
-        /* WP-DZ: physical attribution by content class, for EVERY live
-         * record including the 0x01 internal owners (their blocks -- text
-         * batches, seal parity, the retention registry -- are real used
-         * bytes; the 0x01 exclusion below stays logical-only).
-         * WP27: the extent comes from the entry's pba; the physical
-         * length derives from the segment's framed header (owner classes
-         * carry it in the entry: reten length = blocks, tier/rawm length
-         * = bytes, parity = one block). */
-        if (have_ms) {
-            size_t pbase = sizeof(invfs_inode_rec);
-            invfs_ast_hdr pah;
-            if (h.rec_len >= pbase + INVFS_AST_HDR_V1_LEN &&
-                invfs_ast_hdr_parse(rb + pbase, h.rec_len - pbase, &pah) == 0 &&
-                h.rec_len >= pbase + pah.hdr_len +
-                              (size_t)pah.num_blocks *
-                                  sizeof(invfs_ast_block_entry)) {
-                const uint8_t *ep = rb + pbase + pah.hdr_len;
-                uint32_t pi;
-                int is_ret = h.name_len && (uint8_t)h.name[0] == 0x01 &&
-                             h.name_len >= 6 &&
-                             memcmp(h.name + 1, "reten", 5) == 0;
-                for (pi = 0; pi < pah.num_blocks; pi++) {
-                    const uint8_t *e = ep + (size_t)pi *
-                                            sizeof(invfs_ast_block_entry);
-                    uint32_t zab, zone;
-                    uint64_t pba, plen = 0, b, bend;
-                    memcpy(&zab, e + 16, 4);   /* zone:2 | algo:6 | bid:24 */
-                    zone = zab & 3;
-                    memcpy(&pba, e + 24, 8);
-                    if (!pba || pba >= v->sb.total_blocks) continue;
-                    if (is_ret) {
-                        uint64_t l;
-                        memcpy(&l, e + 8, 8);
-                        plen = l;              /* reten: BLOCKS */
-                    } else if (h.name_len && (uint8_t)h.name[0] == 0x01) {
-                        /* seal parity: one block; tier/rawm: the copy's
-                         * span in bytes; tzb: length is the DECODED size
-                         * -- the batch's extent derives from its frame */
-                        uint64_t l;
-                        memcpy(&l, e + 8, 8);
-                        if (!(h.name_len >= 4 &&
-                              memcmp(h.name + 1, "tzb", 3) == 0) &&
-                            l && l % INVFS_BLOCK_SIZE == 0)
-                            plen = l / INVFS_BLOCK_SIZE;   /* parity/tier/rawm */
-                        else if (seg_extent(v, pba, NULL, &plen) != 0)
-                            continue;                        /* tzb batch */
-                    } else if (seg_extent(v, pba, NULL, &plen) != 0)
-                        continue;   /* torn header: attribute nothing */
-                    bend = pba + plen;
-                    if (bend > v->sb.total_blocks) bend = v->sb.total_blocks;
-                    for (b = pba; b < bend; b++) {
-                        if (bit_get(claimed, b)) continue;
-                        bit_set(claimed, b);
-                        if (zone == INVFS_ZONE_TEXT)
-                            out->text_used_bytes += INVFS_BLOCK_SIZE;
-                        else if (zone == INVFS_ZONE_BINARY)
-                            out->shadow_used_bytes += INVFS_BLOCK_SIZE;
-                        else
-                            out->raw_used_bytes += INVFS_BLOCK_SIZE;
-                    }
-                }
-            }
-        }
-        {
-            invfs_meta_pub m;
-            int type = (vol_get_meta(v, h.inode_id, &m) == 0) ? m.type : -1;
-            switch (type) {
-            case INVFS_ITYP_DIR:  out->dirs++; break;
-            case INVFS_ITYP_LNK:  out->links++; break;
-            case INVFS_ITYP_FIFO: case INVFS_ITYP_SOCK:
-            case INVFS_ITYP_CHR:  case INVFS_ITYP_BLK: out->special++; break;
-            default: {
-                out->files++;
-                /* WP12(a): internal owner records ("\x01tzb") carry
-                 * file_size = the sum of their sealed batches, and every
-                 * TEXT member counts its own slices -- counting the owner
-                 * too doubles the text-zone logical bytes (the Silesia
-                 * image showed 309 MiB logical vs a 202 MiB corpus). The
-                 * members carry the logical truth, so 0x01-prefixed
-                 * internal names contribute nothing to ANY logical field
-                 * (zone attribution, logical_bytes, biggest). Physical
-                 * used-bytes accounting is the class-based pass above and
-                 * DOES include the internal owners. */
-                if (h.name_len && (uint8_t)h.name[0] == 0x01)
-                    break;
-                /* attribute logical size across the AST's zones */
-                {
-                    /* record layout: rec header | AST header (v1 16B /
-                     * v2 24B -- WP22a; the parsed view carries the length)
-                     * | entries | children | INO2 ext. (An earlier version
-                     * of this loop added the whole AST blob length to the
-                     * base and read past it.) */
-                    size_t base = sizeof(invfs_inode_rec);
-                    invfs_ast_hdr ah;
-                    uint32_t nb = 0;
-                    size_t hl = 0;
-                    if (h.rec_len >= base + INVFS_AST_HDR_V1_LEN &&
-                        h.file_size > 0 &&
-                        invfs_ast_hdr_parse(rb + base, h.rec_len - base,
-                                            &ah) == 0) {
-                        hl = ah.hdr_len;
-                        if (h.rec_len < base + hl + (size_t)ah.num_blocks *
-                                                  sizeof(invfs_ast_block_entry))
-                            nb = 0;     /* truncated recipe: attribute nothing */
-                        else
-                            nb = ah.num_blocks;
-                    }
-                    {
-                        uint64_t remain = h.file_size;
-                        uint32_t i;
-                        for (i = 0; i < nb && remain > 0; i++) {
-                            uint8_t *e = rb + base + hl +
-                                (size_t)i * sizeof(invfs_ast_block_entry);
-                            uint32_t zone = e[16] & 3;   /* zone:2 LSB */
-                            uint64_t seg;
-                            /* TEXT entries are arbitrary-length slices of a
-                             * shared batch (not 64 KB segments): use the
-                             * entry's own length */
-                            if (zone == INVFS_ZONE_TEXT) {
-                                memcpy(&seg, e + 8, 8);
-                                if (seg > remain) seg = remain;
-                            } else {
-                                seg = remain > 65536 ? 65536 : remain;
-                            }
-                            remain -= seg;
-                            if (zone == INVFS_ZONE_TEXT)
-                                out->logic_text_bytes += seg;
-                            else if (zone == INVFS_ZONE_BINARY)
-                                out->logic_shadow_bytes += seg;
-                            else
-                                out->logic_raw_bytes += seg;
-                        }
-                    }
-                }
-                if (h.file_size && vol_find(v, h.name) == h.inode_id) {
-                    out->logical_bytes += h.file_size;
-                    if (h.file_size > out->biggest_size) {
-                        out->biggest_size = h.file_size;
-                        snprintf(out->biggest_name, sizeof(out->biggest_name),
-                                 "%s", h.name);
-                    }
-                }
-            }
-            }
-            free(rb);
         }
     }
     /* unattributed data-region blocks: used in the bitmap but claimed by
