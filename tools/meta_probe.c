@@ -17,15 +17,41 @@
  * TLV (format v2: heat moved out of the journal pads into the record).
  * Read-only: nothing here touches the vol_read_* paths, so no heat
  * accrues and the volume closes clean. */
+/* WP49b: per-record body fed by the bounded, index-ordered
+ * vol_records_walk (the old position-driven vol_inode_next loop can cycle
+ * on a non-monotonic mapper table). Keeps the last matching INOD seen. */
+typedef struct {
+    uint64_t id;
+    uint8_t *rec;
+    uint32_t rec_rl;
+} heat_ctx;
+
+static int heat_cb(void *ctx_, uint64_t rec_pos,
+                   const invfs_inode_rec *h, const uint8_t *rec)
+{
+    heat_ctx *c = (heat_ctx *)ctx_;
+    uint8_t *buf;
+    (void)rec_pos;
+
+    if (h->magic == TOMBSTONE_MAGIC || h->inode_id != c->id) return 0;
+    buf = (uint8_t *)malloc(h->rec_len);
+    if (!buf) return 1;
+    memcpy(buf, rec, h->rec_len);
+    free(c->rec);
+    c->rec = buf;   /* keep the last match: newest wins */
+    c->rec_rl = h->rec_len;
+    return 0;
+}
+
 static int heat_dump(invfs_volume *v, const char *name)
 {
     uint64_t id = vol_find(v, name);
     size_t shown = 0;
     uint8_t cls = 0, algo = 0;
     uint16_t gen = 0;
-    uint64_t pos, p;
     uint8_t *rec = NULL;
-    uint32_t rl = 0, rec_rl = 0;
+    uint32_t rec_rl = 0;
+    heat_ctx hc;
     const invfs_superblock *sb = vol_sb(v);
 
     printf("find(%s)=%llu\n", name, (unsigned long long)id);
@@ -48,22 +74,11 @@ static int heat_dump(invfs_volume *v, const char *name)
     }
 
     /* AST entries of the LIVE record (newest version with this id) */
-    pos = vol_inode_area_start(v);
-    while ((p = vol_inode_next(v, pos, NULL, NULL, NULL, NULL, 0, &rl)) != 0) {
-        uint8_t *buf;
-        invfs_inode_rec rh;
-        if (vol_read_raw(v, p - rl - 4, &rh, sizeof rh) != 0) break;
-        if (rh.magic == TOMBSTONE_MAGIC || rh.inode_id != id) { pos = p; continue; }
-        buf = (uint8_t *)malloc(rl);
-        if (buf && vol_read_raw(v, p - rl - 4, buf, rl) == 0) {
-            free(rec);
-            rec = buf;   /* keep the last match: newest wins */
-            rec_rl = rl;
-        } else {
-            free(buf);
-        }
-        pos = p;
-    }
+    memset(&hc, 0, sizeof hc);
+    hc.id = id;
+    vol_records_walk(v, heat_cb, &hc);
+    rec = hc.rec;
+    rec_rl = hc.rec_rl;
     if (rec) {
         invfs_ast_hdr ah;
         size_t base = sizeof(invfs_inode_rec);

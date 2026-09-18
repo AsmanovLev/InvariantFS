@@ -157,6 +157,71 @@ static int fent_insert(uint32_t **hbp, size_t *hmaskp, const fent *tbl,
     return 0;
 }
 
+/* WP49b: per-record body of the inode walk, fed by the bounded,
+ * index-ordered vol_records_walk (the old position-driven vol_inode_next
+ * loop can cycle on a non-monotonic mapper table). */
+typedef struct {
+    fent *tbl;
+    size_t nfiles, fcap;
+    uint32_t *hb;
+    size_t hmask;
+    uint64_t recs, tombs, max_live_ino;
+} stat_ctx;
+
+static int stat_cb(void *ctx_, uint64_t rec_pos,
+                   const invfs_inode_rec *h, const uint8_t *rec)
+{
+    stat_ctx *c = (stat_ctx *)ctx_;
+    char nm[256];
+    size_t nl, slot;
+    (void)rec_pos; (void)rec;
+
+    c->recs++;
+    if (h->magic == TOMBSTONE_MAGIC) c->tombs++;
+    if (h->magic == INODE_REC_MAGIC && h->inode_id > c->max_live_ino)
+        c->max_live_ino = h->inode_id;
+    /* h->name is not NUL-terminated */
+    nl = h->name_len < 255 ? h->name_len : 255;
+    memcpy(nm, h->name, nl);
+    nm[nl] = 0;
+
+    slot = fent_find(c->hb, c->hmask, c->tbl, nm);
+    if (slot == (size_t)-1) {
+        if (c->nfiles == c->fcap) {
+            size_t ncap = c->fcap ? c->fcap * 2 : 4096;
+            fent *nt = (fent *)realloc(c->tbl, ncap * sizeof(fent));
+            if (!nt) {
+                fprintf(stderr, "out of memory at %llu names\n",
+                        (unsigned long long)c->nfiles);
+                return 1;
+            }
+            c->tbl = nt; c->fcap = ncap;
+        }
+        memset(&c->tbl[c->nfiles], 0, sizeof(fent));
+        memcpy(c->tbl[c->nfiles].name, nm, nl + 1);
+        slot = c->nfiles++;
+        if (fent_insert(&c->hb, &c->hmask, c->tbl, slot, c->nfiles) != 0) {
+            fprintf(stderr, "out of memory at %llu names\n",
+                    (unsigned long long)c->nfiles);
+            return 1;
+        }
+    }
+    if (h->magic == INODE_REC_MAGIC) {
+        c->tbl[slot].ino = h->inode_id;
+        c->tbl[slot].fsz = h->file_size;
+        c->tbl[slot].killed = 0;
+    } else {
+        /* tombstone: kills only the matching version. A v2 position kill
+         * (file_size = retired record's offset, != 0) names a version that
+         * was already superseded by a same-id INOD seen above -- ls.c skips
+         * these; counting them here marked every meta-rewritten
+         * (class-stamped) file as deleted. */
+        if (h->file_size == 0 && c->tbl[slot].ino == h->inode_id)
+            c->tbl[slot].killed = 1;
+    }
+    return 0;
+}
+
 int main(int argc, char **argv)
 {
     for (int i = 1; i < argc; i++) {
@@ -190,7 +255,6 @@ int main(int argc, char **argv)
     /* walk inode area; version-aware: a tombstone kills only the inode
      * version it references (sweep appends create-first, then the OLD
      * tombstone — the newer live record sits BEFORE the tombstone). */
-    uint64_t pos = vol_inode_area_start(vol);
     /* Was a fixed calloc(65536) with a silent `nfiles < MAX_FILES` cutoff, so
        a 146k-file image reported "65536 live of 65536 names" -- a number that
        looks like a real total and is not. Grown on demand instead.
@@ -199,49 +263,16 @@ int main(int argc, char **argv)
        so far; at 146k names that is ~10^10 comparisons and stat never returns.
        Same fix ls.c already carries: hash the name to a slot. */
     fent *tbl = NULL;
-    size_t nfiles = 0, fcap = 0;
+    size_t nfiles = 0;
     uint32_t *hb = NULL;           /* name -> slot+1, open addressed */
-    size_t hmask = 0;
-    uint64_t recs = 0, tombs = 0, max_live_ino = 0;
-    while (1) {
-        uint32_t magic; uint64_t ino, fsz; uint32_t rl; char nm[256];
-        uint64_t np = vol_inode_next(vol, pos, &magic, &ino, &fsz, nm, sizeof nm, &rl);
-        if (!np) break;
-        pos = np;
-        recs++;
-        if (magic == TOMBSTONE_MAGIC) tombs++;
-        if (magic == INODE_REC_MAGIC && ino > max_live_ino) max_live_ino = ino;
-        {
-            size_t slot = fent_find(hb, hmask, tbl, nm);
-            if (slot == (size_t)-1) {
-                if (nfiles == fcap) {
-                    size_t ncap = fcap ? fcap * 2 : 4096;
-                    fent *nt = (fent *)realloc(tbl, ncap * sizeof(fent));
-                    if (!nt) { fprintf(stderr, "out of memory at %llu names\n",
-                                       (unsigned long long)nfiles); break; }
-                    tbl = nt; fcap = ncap;
-                }
-                memset(&tbl[nfiles], 0, sizeof(fent));
-                strncpy(tbl[nfiles].name, nm, 255);
-                slot = nfiles++;
-                if (fent_insert(&hb, &hmask, tbl, slot, nfiles) != 0) {
-                    fprintf(stderr, "out of memory at %llu names\n",
-                            (unsigned long long)nfiles);
-                    break;
-                }
-            }
-            if (magic == INODE_REC_MAGIC) {
-                tbl[slot].ino = ino; tbl[slot].fsz = fsz; tbl[slot].killed = 0;
-            } else {
-                /* tombstone: kills only the matching version. A v2 position
-                 * kill (file_size = retired record's offset, != 0) names a
-                 * version that was already superseded by a same-id INOD seen
-                 * above -- ls.c skips these; counting them here marked every
-                 * meta-rewritten (class-stamped) file as deleted. */
-                if (fsz == 0 && tbl[slot].ino == ino) tbl[slot].killed = 1;
-            }
-        }
-    }
+    uint64_t tombs = 0, max_live_ino = 0;
+    stat_ctx sc;
+    memset(&sc, 0, sizeof sc);
+    vol_records_walk(vol, stat_cb, &sc);
+    tbl = sc.tbl; nfiles = sc.nfiles;
+    hb = sc.hb;
+    tombs = sc.tombs; max_live_ino = sc.max_live_ino;
+
     /* live inode set: per-name newest version that is not killed */
     uint8_t *live = (uint8_t *)calloc((size_t)max_live_ino + 1, 1);
     for (size_t j = 0; j < nfiles; j++)

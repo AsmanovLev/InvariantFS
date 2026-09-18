@@ -35,6 +35,58 @@ static void err(const char *fmt, ...)
 
 static int fail(const char *msg, int code) { fprintf(stderr, "FAIL: %s\n", msg); return code; }
 
+/* WP49b: one row per live inode id. Same-id record chains (meta rewrites,
+ * the text-batch owner's growing record) appear once per version in the
+ * area walk, and a read resolves to the LATEST version for all of them --
+ * so reading per record would compare new bytes against a stale fsz.
+ * Collect the live id -> (fsz,name) map first, then read each id once. */
+typedef struct { uint64_t id, fsz; char nm[256]; } deep_ent;
+
+typedef struct {
+    invfs_volume *vol;
+    deep_ent *ents;
+    size_t nents, capents;
+} deep_ctx;
+
+/* WP49b: per-record body fed by the bounded, index-ordered
+ * vol_records_walk (the old position-driven vol_inode_next loop can cycle
+ * on a non-monotonic mapper table). */
+static int deep_cb(void *ctx_, uint64_t rec_pos,
+                   const invfs_inode_rec *h, const uint8_t *rec)
+{
+    deep_ctx *c = (deep_ctx *)ctx_;
+    uint64_t ino = h->inode_id, fsz = h->file_size;
+    char nm[256];
+    size_t k, nl;
+    (void)rec_pos; (void)rec;
+
+    if (h->magic != INODE_REC_MAGIC) return 0;
+    /* h->name is not NUL-terminated */
+    nl = h->name_len < 255 ? h->name_len : 255;
+    memcpy(nm, h->name, nl);
+    nm[nl] = 0;
+    if ((uint8_t)nm[0] == 0x01) return 0;  /* internal owners
+            ("\x01tzb", WP20 "\x01parityN"): not user files; the
+            parity leg below checks the seal owners' real payload */
+    if (vol_find(c->vol, nm) != ino) return 0;  /* superseded */
+    for (k = 0; k < c->nents; k++)
+        if (c->ents[k].id == ino) break;
+    if (k == c->nents) {
+        if (c->nents == c->capents) {
+            size_t nc = c->capents ? c->capents * 2 : 256;
+            void *ne = realloc(c->ents, nc * sizeof *c->ents);
+            if (!ne) return 1;
+            c->ents = (deep_ent *)ne;
+            c->capents = nc;
+        }
+        k = c->nents++;
+    }
+    c->ents[k].id = ino;
+    c->ents[k].fsz = fsz;
+    memcpy(c->ents[k].nm, nm, sizeof c->ents[k].nm);
+    return 0;
+}
+
 int main(int argc, char **argv)
 {
     blkio io;
@@ -206,52 +258,23 @@ int main(int argc, char **argv)
      * verified on the read path, so silent corruption is caught here */
     if (argc > 2 && strcmp(argv[2], "--deep") == 0) {
         invfs_volume *vol;
-        uint64_t pos, live = 0, bad = 0;
+        uint64_t live = 0, bad = 0;
         uint64_t total_bytes = 0;
         int parity_bad = 0;
-        /* One row per live inode id. Same-id record chains (meta rewrites,
-         * the text-batch owner's growing record) appear once per version in
-         * the area walk, and a read resolves to the LATEST version for all
-         * of them -- so reading per record would compare new bytes against
-         * a stale fsz. Collect the live id -> (fsz,name) map first (last
-         * record per id wins, matching the index), then read each id once. */
-        struct deep_ent { uint64_t id, fsz; char nm[256]; } *ents = NULL;
-        size_t nents = 0, capents = 0;
+        deep_ent *ents = NULL;
+        size_t nents = 0;
+        deep_ctx dc;
         /* Close first: vol_open takes a device exclusively (lock + dismount),
            which cannot succeed while this handle is still open. */
         blkio_close(&io);
         int open_err = 0;   /* vol_open's out-param; must NOT clobber errors */
         vol = vol_open(path, &open_err);
         if (!vol) { fprintf(stderr, "deep: cannot open volume (err %d)\n", open_err); return 1; }
-        pos = vol_inode_area_start(vol);
         printf("deep: reading all live files...\n");
-        while (1) {
-            uint32_t magic; uint64_t ino, fsz; uint32_t rl; char nm[256];
-            uint64_t np = vol_inode_next(vol, pos, &magic, &ino, &fsz, nm, sizeof nm, &rl);
-            size_t k;
-            if (!np) break;
-            pos = np;
-            if (magic != INODE_REC_MAGIC) continue;
-            if ((uint8_t)nm[0] == 0x01) continue;  /* internal owners
-                    ("\x01tzb", WP20 "\x01parityN"): not user files; the
-                    parity leg below checks the seal owners' real payload */
-            if (vol_find(vol, nm) != ino) continue;  /* superseded */
-            for (k = 0; k < nents; k++)
-                if (ents[k].id == ino) break;
-            if (k == nents) {
-                if (nents == capents) {
-                    size_t nc = capents ? capents * 2 : 256;
-                    void *ne = realloc(ents, nc * sizeof *ents);
-                    if (!ne) break;
-                    ents = (struct deep_ent *)ne;
-                    capents = nc;
-                }
-                k = nents++;
-            }
-            ents[k].id = ino;
-            ents[k].fsz = fsz;
-            memcpy(ents[k].nm, nm, sizeof ents[k].nm);
-        }
+        memset(&dc, 0, sizeof dc);
+        dc.vol = vol;
+        vol_records_walk(vol, deep_cb, &dc);
+        ents = dc.ents; nents = dc.nents;
         for (size_t k = 0; k < nents; k++) {
             uint64_t ino = ents[k].id, fsz = ents[k].fsz;
             const char *nm = ents[k].nm;

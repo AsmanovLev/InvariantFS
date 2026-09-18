@@ -48,12 +48,74 @@ static const char *algo_name(uint32_t a)
     }
 }
 
+/* WP49b: per-record body fed by the bounded, index-ordered
+ * vol_records_walk (the old position-driven vol_inode_next loop can cycle
+ * on a non-monotonic mapper table). The walker hands a CRC-verified full
+ * record buffer, so the old local read/CRC dance is gone. */
+typedef struct {
+    invfs_volume *vol;
+    uint64_t total_blob, total_orig;
+} sizes_ctx;
+
+static int sizes_cb(void *ctx_, uint64_t rec_pos,
+                    const invfs_inode_rec *h, const uint8_t *rec)
+{
+    sizes_ctx *c = (sizes_ctx *)ctx_;
+    uint64_t ino = h->inode_id, fsz = h->file_size;
+    uint32_t rl = h->rec_len;
+    char nm[256];
+    size_t nl;
+    (void)rec_pos;
+
+    if (h->magic != INODE_REC_MAGIC) return 0;
+    /* h->name is not NUL-terminated */
+    nl = h->name_len < 255 ? h->name_len : 255;
+    memcpy(nm, h->name, nl);
+    nm[nl] = 0;
+    if (vol_find(c->vol, nm) != ino) return 0;  /* superseded version */
+
+    /* read AST from the record buffer */
+    {
+        invfs_ast_hdr ast_h;
+        invfs_ast_block_entry *ents;
+        uint64_t blob = 0;
+        const char *algo = "?";
+
+        /* WP22a: v1/v2 recipe header — the entry offset follows the
+         * parsed header length, never a fixed 16 */
+        if (invfs_ast_hdr_parse(rec + sizeof(rec_hdr_t),
+                                rl - sizeof(rec_hdr_t), &ast_h) != 0 ||
+            (size_t)ast_h.num_blocks * sizeof(invfs_ast_block_entry) >
+                rl - sizeof(rec_hdr_t) - ast_h.hdr_len) {
+            return 0;
+        }
+        ents = (invfs_ast_block_entry *)(rec + sizeof(rec_hdr_t) +
+                                         ast_h.hdr_len);
+        if (ast_h.num_blocks > 0) {
+            uint32_t bits;
+            memcpy(&bits, (uint8_t *)&ents[0] + 16, 4);
+            algo = algo_name((bits >> 2) & 0x3F);
+            {
+                uint64_t pba = 0, plen = 0;
+                uint32_t csz = 0;
+                if (vol_lookup_entry(c->vol, ino, bits >> 8, &pba, &plen) == 0) {
+                    vol_read_raw(c->vol, pba * INVFS_BLOCK_SIZE, &csz, 4);
+                }
+                blob = csz;
+            }
+        }
+        printf("%-40s %-4s %12llu %12llu\n", nm, algo,
+               (unsigned long long)fsz, (unsigned long long)blob);
+        c->total_blob += blob;
+        c->total_orig += fsz;
+    }
+    return 0;
+}
+
 int main(int argc, char **argv)
 {
     invfs_volume *vol;
-    const invfs_superblock *sb;
     int err;
-    uint64_t pos, end;
     uint64_t total_blob = 0, total_orig = 0;
 
     for (int i = 1; i < argc; i++) {
@@ -74,62 +136,14 @@ int main(int argc, char **argv)
     }
     vol = vol_open(argv[1], &err);
     if (!vol) { fprintf(stderr, "open fail (%d)\n", err); return 1; }
-    sb = vol_sb(vol);
-    pos = vol_inode_area_start(vol);
-    end = vol_inode_area_pos(vol);
 
-    while (pos + 4 <= end) {
-        uint32_t magic; uint64_t ino, fsz; uint32_t rl; char nm[256];
-        uint64_t np = vol_inode_next(vol, pos, &magic, &ino, &fsz, nm, sizeof nm, &rl);
-        if (!np) break;
-        pos = np;
-        if (magic != INODE_REC_MAGIC) continue;
-        if (vol_find(vol, nm) != ino) continue;  /* superseded version */
-
-        /* read AST from the record */
-        {
-            uint8_t *rec = (uint8_t *)malloc(rl);
-            uint32_t crc_stored, crc_calc;
-            invfs_ast_hdr ast_h;
-            invfs_ast_block_entry *ents;
-            uint64_t blob = 0;
-            const char *algo = "?";
-
-            if (!rec) { vol_close(vol); return 1; }
-            if (vol_read_raw(vol, np - rl - 4, rec, rl) != 0 ||
-                vol_read_raw(vol, np - 4, &crc_stored, 4) != 0) { free(rec); break; }
-            crc_calc = invfs_crc32c(rec, rl);
-            if (crc_calc != crc_stored) { free(rec); continue; }
-            /* WP22a: v1/v2 recipe header — the entry offset follows the
-             * parsed header length, never a fixed 16 */
-            if (invfs_ast_hdr_parse(rec + sizeof(rec_hdr_t),
-                                    rl - sizeof(rec_hdr_t), &ast_h) != 0 ||
-                (size_t)ast_h.num_blocks * sizeof(invfs_ast_block_entry) >
-                    rl - sizeof(rec_hdr_t) - ast_h.hdr_len) {
-                free(rec);
-                continue;
-            }
-            ents = (invfs_ast_block_entry *)(rec + sizeof(rec_hdr_t) +
-                                             ast_h.hdr_len);
-            if (ast_h.num_blocks > 0) {
-                uint32_t bits;
-                memcpy(&bits, (uint8_t *)&ents[0] + 16, 4);
-                algo = algo_name((bits >> 2) & 0x3F);
-                {
-                    uint64_t pba = 0, plen = 0;
-                    uint32_t csz = 0;
-                    if (vol_lookup_entry(vol, ino, bits >> 8, &pba, &plen) == 0) {
-                        vol_read_raw(vol, pba * INVFS_BLOCK_SIZE, &csz, 4);
-                    }
-                    blob = csz;
-                }
-            }
-            free(rec);
-            printf("%-40s %-4s %12llu %12llu\n", nm, algo,
-                   (unsigned long long)fsz, (unsigned long long)blob);
-            total_blob += blob;
-            total_orig += fsz;
-        }
+    {
+        sizes_ctx sc;
+        memset(&sc, 0, sizeof sc);
+        sc.vol = vol;
+        vol_records_walk(vol, sizes_cb, &sc);
+        total_blob = sc.total_blob;
+        total_orig = sc.total_orig;
     }
     printf("TOTAL%43s %12llu %12llu\n", "",
            (unsigned long long)total_orig, (unsigned long long)total_blob);
