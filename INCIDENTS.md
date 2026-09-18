@@ -497,3 +497,49 @@ single-device via direct kernel+initramfs: `InvariantFS mounted` → OpenRC
 ### Follow-ups (open)
 - Port configure-guest.sh to in-place writes + root ownership + real
   runlevel symlinks so a fresh import can be provisioned in one pass.
+
+---
+
+## WP49 — remaining record walks + the owner-record extent overflow
+
+**Date:** Sep 19, 2026
+**Severity:** Medium (robustness/perf) + the finding below is High
+**Impact:** The last position-driven `vol_inode_next` loops (fsck pass-1,
+seal2 repair, FUSE build_file_table, stat/sizes/verify/meta_probe) could
+cycle on a mapper table that is not pba monotonic — the same failure mode
+that produced the 7.5 h spin (WP48).
+
+### Fix
+- `vol_records_walk_ex(v, cb, ctx, bad_cb)` added (bad_cb lets fsck keep
+  counting torn/CRC-bad records); `vol_records_walk()` wraps it with NULL.
+- Converted: `vol_fsck.c` pass-1 (mapper volumes), `vol_repair.c` seal2
+  live-id scan, `fuse_fs.c` build_file_table, `stat.c`, `sizes.c`,
+  `verify.c`, `tools/meta_probe.c`. Legacy (format_version=0) paths are
+  unchanged. Commits `32fe8b3` (core) and `1704513` (CLI).
+
+### Found: owner records overflow their mapper extent
+WP49's stricter fsck reports `bad records: 2` on the swept bigvol
+fixture. The two records are `\x01rawm` OWNER records of ~516 KiB whose
+trailing CRC is VALID (`CRCOK`), yet they sit inside a **128 KiB** mapper
+extent (fixture mapper idx 49, pba 483059, class 1) and run past its end.
+Root cause: on mapper volumes the owner append still writes through the
+legacy cursor — `wp25_owner_write` (vol_tier.c) uses
+`v->inode_area_pos` instead of `meta_get_append_pos`, so a large owner
+record is placed inside whatever extent the cursor points at and
+overflows it. (This is the same path WP47 tried to route through
+`vol_append_slot`; that attempt made the flush-time owner sync fail into
+dev1 and was reverted.)
+
+Consequences: readers/`vol_records_walk` stop at the extent boundary, so
+such records are effectively invisible; fsck now flags them.
+
+### Fix (follow-up WP52)
+Route the owner append through the extent allocator **flush-safely**:
+`meta_get_append_pos` at flush time must not itself flush/persist
+re-entrantly (the WP47 failure). Likely shape: an append helper that
+allocates/extends an extent without recursing into `vol_flush`, resized to
+the record (`size_class` from `rec_size`), used by `wp25_owner_write` and
+`tz_owner_write`; then re-enable WP42's batch deferral on mapper volumes.
+
+Until then `tools/test-sweep-mapper.sh` is RED on the fsck leg (bad
+records: 2) — intentionally, as the first regression signal for WP52.
