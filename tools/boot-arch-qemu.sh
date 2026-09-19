@@ -9,6 +9,11 @@
 # Usage:
 #   tools/boot-arch-qemu.sh --single <root.img>
 #   tools/boot-arch-qemu.sh --multi  <root.img> <shadow.img>
+#   tools/boot-arch-qemu.sh --bootloader <disk.img>     # OVMF + GRUB from ESP
+#
+# The --bootloader mode uses OVMF firmware and boots a GPT disk image built
+# by mkdisk-arch.sh (ESP with GRUB + kernel + initramfs, InvFS partition).
+# The default --single/--multi modes use -kernel/-initrd (host kernel).
 #
 # Env overrides:
 #   ARCH_PORT      host ssh forward port        (default 2322)
@@ -20,6 +25,8 @@
 #   ARCH_SSH_PASS  root password                (default root)
 #   ARCH_TIMEOUT   seconds to wait for markers  (default 300)
 #   ARCH_REBOOT_WAIT seconds to wait for qemu   (default 30)
+#   ARCH_OVMF      OVMF firmware path           (auto-detected if unset)
+#   ARCH_DISK      disk image for --bootloader  (overrides positional arg)
 set -u
 set -o pipefail
 
@@ -28,12 +35,17 @@ REPO="$(cd "$(dirname "$0")/.." && pwd)"
 # (run-e2e.sh --bg cannot forward arguments, only the environment).
 MODE="${ARCH_MODE:-}"; IMG="${ARCH_IMG:-}"; SHADOW="${ARCH_SHADOW:-}"
 
+BOOTLOADER=0
+OVMF=""
+DISK_IMG="${ARCH_DISK:-}"
+
 if [ "$#" -gt 0 ]; then
     case "$1" in
       --single) MODE=single; IMG="${2:-}"; shift 2 2>/dev/null || true;;
       --multi)  MODE=multi;  IMG="${2:-}"; SHADOW="${3:-}"; shift 3 2>/dev/null || true;;
-      -h|--help) sed -n '2,20p' "$0"; exit 0;;
-      *) echo "usage: $0 --single <root.img> | --multi <root.img> <shadow.img>"; exit 2;;
+      --bootloader) MODE=bootloader; BOOTLOADER=1; DISK_IMG="${DISK_IMG:-${2:-}}"; shift 2 2>/dev/null || true;;
+      -h|--help) sed -n '2,30p' "$0"; exit 0;;
+      *) echo "usage: $0 --single <root.img> | --multi <root.img> <shadow.img> | --bootloader <disk.img>"; exit 2;;
     esac
 fi
 [ -n "$MODE" ] || MODE=single
@@ -57,38 +69,77 @@ else
     SSH="$SSH_BASE -i $KEY -o IdentitiesOnly=yes -o PreferredAuthentications=publickey"
 fi
 
+# -- OVMF firmware (only needed for --bootloader) ----------------------------
+if [ "$BOOTLOADER" = 1 ]; then
+    if [ -z "$OVMF" ]; then
+        for p in /usr/share/OVMF/OVMF_CODE.fd \
+                 /usr/share/edk2/ovmf/OVMF_CODE.fd \
+                 /usr/share/edk2/OVMF_CODE.fd \
+                 /usr/share/qemu/OVMF_CODE.fd; do
+            [ -r "$p" ] && { OVMF="$p"; break; }
+        done
+    fi
+    [ -n "$OVMF" ] || { echo "FAIL: OVMF firmware not found (set ARCH_OVMF)"; exit 1; }
+    [ -n "$DISK_IMG" ] || { echo "FAIL: --bootloader requires a disk image (set ARCH_DISK or pass arg)"; exit 1; }
+    [ -f "$DISK_IMG" ] || { echo "FAIL: disk image not found: $DISK_IMG"; exit 1; }
+fi
+
 fail() { echo "FAIL($MODE): $*"; FAILED=$((FAILED+1)); }
 note() { echo ":: $*"; }
 
 FAILED=0
-[ -f "$IMG" ] || { echo "FAIL: no such volume: $IMG"; exit 1; }
-if [ "$MODE" = multi ]; then
-    [ -f "$SHADOW" ] || { echo "FAIL: no such shadow volume: $SHADOW"; exit 1; }
+if [ "$BOOTLOADER" = 1 ]; then
+    [ -f "$DISK_IMG" ] || { echo "FAIL: no such disk: $DISK_IMG"; exit 1; }
+else
+    [ -f "$IMG" ] || { echo "FAIL: no such volume: $IMG"; exit 1; }
+    if [ "$MODE" = multi ]; then
+        [ -f "$SHADOW" ] || { echo "FAIL: no such shadow volume: $SHADOW"; exit 1; }
+    fi
+    [ -r "$KERNEL" ] || { echo "FAIL: no kernel: $KERNEL"; exit 1; }
+    [ -r "$INITRD" ] || { echo "FAIL: no initramfs: $INITRD"; exit 1; }
 fi
-[ -r "$KERNEL" ] || { echo "FAIL: no kernel: $KERNEL"; exit 1; }
-[ -r "$INITRD" ] || { echo "FAIL: no initramfs: $INITRD"; exit 1; }
 command -v qemu-system-x86_64 >/dev/null || { echo "FAIL: qemu not found"; exit 1; }
 
 rm -f "$LOG" "$SSHLOG"
 : > "$LOG"      # so early log_grep[] reads do not race qemu -serial file:
 : > "$SSHLOG"
 
-DRIVES=(-drive "id=root,file=$IMG,format=raw,if=ide")
-if [ "$MODE" = multi ]; then
-    DRIVES+=(-drive "id=shadow,file=$SHADOW,format=raw,if=ide")
+# -- build QEMU arguments ----------------------------------------------------
+if [ "$BOOTLOADER" = 1 ]; then
+    # --bootloader: OVMF + GRUB reading the ESP from the GPT disk image.
+    # The disk image has p1=ESP(FAT32) with GRUB+kernel+initramfs,
+    # p2=InvFS raw volume.
+    note "booting via OVMF+GRUB from disk: $DISK_IMG"
+    note "OVMF=$OVMF ram=${RAM}M port=$PORT"
+    QEMU_ARGS=(
+        -machine q35,accel=kvm -cpu host -m "$RAM" -smp 2
+        -drive "if=pflash,format=raw,readonly=on,file=$OVMF"
+        -drive "id=root,file=$DISK_IMG,format=raw,if=ide"
+        -append "console=ttyS0,115200"
+        -netdev user,id=net0,hostfwd=tcp::${PORT}-:22
+        -device virtio-net-pci,netdev=net0
+        -display none -serial "file:$LOG" -monitor none -no-reboot
+    )
+else
+    # --single/--multi: direct -kernel/-initrd boot (host kernel).
+    DRIVES=(-drive "id=root,file=$IMG,format=raw,if=ide")
+    if [ "$MODE" = multi ]; then
+        DRIVES+=(-drive "id=shadow,file=$SHADOW,format=raw,if=ide")
+    fi
+    note "booting $MODE volume(s): IMG=$IMG${SHADOW:+ SHADOW=$SHADOW}"
+    note "kernel=$KERNEL initrd=$INITRD ram=${RAM}M port=$PORT"
+    QEMU_ARGS=(
+        -machine q35,accel=kvm -cpu host -m "$RAM" -smp 2
+        -kernel "$KERNEL" -initrd "$INITRD"
+        -append "console=ttyS0,115200 invfs.init=/bin/invfs-init"
+        "${DRIVES[@]}"
+        -netdev user,id=net0,hostfwd=tcp::${PORT}-:22
+        -device virtio-net-pci,netdev=net0
+        -display none -serial "file:$LOG" -monitor none -no-reboot
+    )
 fi
 
-note "booting $MODE volume(s): IMG=$IMG${SHADOW:+ SHADOW=$SHADOW}"
-note "kernel=$KERNEL initrd=$INITRD ram=${RAM}M port=$PORT"
-qemu-system-x86_64 \
-    -machine q35,accel=kvm -cpu host -m "$RAM" -smp 2 \
-    -kernel "$KERNEL" -initrd "$INITRD" \
-    -append "console=ttyS0,115200 invfs.init=/bin/invfs-init" \
-    "${DRIVES[@]}" \
-    -netdev user,id=net0,hostfwd=tcp::${PORT}-:22 \
-    -device virtio-net-pci,netdev=net0 \
-    -display none -serial "file:$LOG" -monitor none -no-reboot \
-    >/dev/null 2>&1 &
+qemu-system-x86_64 "${QEMU_ARGS[@]}" >/dev/null 2>&1 &
 QPID=$!
 cleanup() { kill "$QPID" 2>/dev/null; wait "$QPID" 2>/dev/null; }
 trap cleanup EXIT
@@ -193,10 +244,18 @@ trap - EXIT
 
 echo
 if [ "$FAILED" = 0 ]; then
-    echo "PASS: Arch-on-InvariantFS boot ($MODE) — serial + SSH + root mount ok"
+    if [ "$BOOTLOADER" = 1 ]; then
+        echo "PASS: Arch-on-InvariantFS OVMF+GRUB boot ($DISK_IMG) -- serial + SSH + root mount ok"
+    else
+        echo "PASS: Arch-on-InvariantFS boot ($MODE) -- serial + SSH + root mount ok"
+    fi
     exit 0
 else
-    echo "FAIL: Arch-on-InvariantFS boot ($MODE): $FAILED assertion(s) failed"
+    if [ "$BOOTLOADER" = 1 ]; then
+        echo "FAIL: Arch-on-InvariantFS OVMF+GRUB boot ($DISK_IMG): $FAILED assertion(s) failed"
+    else
+        echo "FAIL: Arch-on-InvariantFS boot ($MODE): $FAILED assertion(s) failed"
+    fi
     echo "--- serial tail ($LOG) ---"
     tail -40 "$LOG" 2>/dev/null
     exit 1

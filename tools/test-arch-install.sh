@@ -1,5 +1,5 @@
 #!/bin/bash
-# test-arch-install.sh — WP63 regression: build an Arch Linux root once,
+# test-arch-install.sh — WP63+WP68 regression: build an Arch Linux root once,
 # then package it into a single-device and a two-device InvariantFS volume
 # *offline* with invf-import, and check the invariants that mattered during
 # the bring-up. NO boot and NO FUSE mount: this is the fast, deterministic
@@ -12,6 +12,7 @@
 #   * invf-verify --deep          => 0 corrupt
 #   * invf-ls entry count matches the imported entry count
 #   * bit-exact invf-cat of a few representative files
+#   * /boot/vmlinuz-linux + /boot/initramfs-linux.img exist and are bit-exact
 #   * two-device metadata mirror in sync (invf-stats)
 #
 # Environment
@@ -79,12 +80,12 @@ build_stage() {
     $SUDO mount --rbind /sys "$STAGE/sys"
     $SUDO mount --rbind /dev "$STAGE/dev"
     trap '$SUDO umount -R "$STAGE/proc" "$STAGE/sys" "$STAGE/dev" 2>/dev/null || true' EXIT
-    note "pacman-key + base + openssh + dhcpcd"
+    note "pacman-key + base + linux + mkinitcpio + openssh + dhcpcd"
     $SUDO chroot "$STAGE" /bin/bash -c '
         pacman-key --init >/dev/null 2>&1
         pacman-key --populate archlinux >/dev/null 2>&1
         pacman -Sy --noconfirm >/dev/null 2>&1
-        pacman -S --noconfirm --needed base openssh dhcpcd iproute2 iputils >/dev/null 2>&1
+        pacman -S --noconfirm --needed base linux linux-firmware mkinitcpio openssh dhcpcd iproute2 iputils >/dev/null 2>&1
     ' || fail "pacman install"
     $SUDO umount -R "$STAGE/proc" "$STAGE/sys" "$STAGE/dev" 2>/dev/null || true
     trap - EXIT
@@ -208,6 +209,19 @@ rm -rf "$VOL"; mkdir -p "$VOL"
 cleanup() { [ "${KEEP:-0}" = 1 ] || rm -rf "$VOL"; }
 trap cleanup EXIT
 
+# Create a minimal initramfs for /boot assertions.  We cannot run
+# mkinitcpio offline (no kernel modules to build against), but the
+# test needs /boot/initramfs-linux.img to exist so we can verify it is
+# bit-exact through invf-cat.
+if [ ! -f "$STAGE/boot/initramfs-linux.img" ]; then
+    note "creating dummy initramfs-linux.img for /boot assertions"
+    _tmp_cpio=$(mktemp /tmp/invfs-initrd-XXXXXX.cpio)
+    ( echo "INVFS_INITRD_MARKER" | cpio -o --format=newc 2>/dev/null ) > "$_tmp_cpio" || true
+    $SUDO mkdir -p "$STAGE/boot"
+    $SUDO cp "$_tmp_cpio" "$STAGE/boot/initramfs-linux.img"
+    rm -f "$_tmp_cpio"
+fi
+
 entries_of() {  # $1 = import output
     printf '%s\n' "$1" | sed -n \
         's/.*imported: \([0-9]*\) dirs, \([0-9]*\) files, \([0-9]*\) symlinks, \([0-9]*\) specials.*/\1 \2 \3 \4/p' \
@@ -263,6 +277,27 @@ run_case() {  # $1 = label
     done
     [ "$rc" = 0 ] || fail "$label: bit-exact reads"
     echo "   $label: 4 files bit-exact"
+
+    # -- WP68: /boot kernel + initramfs bit-exact assertions ----------------
+    note "$label: /boot kernel + initramfs"
+    local boot_rc=0
+    for f in boot/vmlinuz-linux boot/initramfs-linux.img; do
+        if [ ! -f "$STAGE/$f" ]; then
+            echo "   SKIP: $f not in staging tree"
+            continue
+        fi
+        out="$VOL/cat-$(basename "$f")"
+        if env "${envdev[@]}" "$B/invf-cat" "$img" "$f" "$out" >/dev/null 2>&1; then
+            if cmp -s "$STAGE/$f" "$out"; then
+                echo "   ok: $f bit-exact ($(wc -c < "$STAGE/$f") bytes)"
+            else
+                echo "   MISMATCH: $f"; boot_rc=1
+            fi
+        else
+            echo "   cat failed: $f"; boot_rc=1
+        fi
+    done
+    [ "$boot_rc" = 0 ] || fail "$label: /boot bit-exact reads"
 }
 
 run_case single

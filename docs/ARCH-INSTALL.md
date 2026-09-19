@@ -310,7 +310,134 @@ ssh -i ~/.ssh/id_ed25519 -p 2222 root@localhost \
 Both boots were verified on 2026-09-19: serial autologin, `dhcpcd` lease
 `10.0.2.15`, sshd listening, password and key login as root.
 
-## 9. Pitfalls found during this bring-up
+## 9. Standard guide — bootable GPT disk with OVMF + GRUB (WP68)
+
+The direct `-kernel`/`-initrd` path above is useful for testing, but a
+real install needs a **bootloader that reads kernel and initramfs from a
+filesystem the firmware understands**. The bootloader (GRUB/EFI) cannot
+read InvariantFS — there is no kernel driver or EFI driver for the
+format. Therefore the kernel and initramfs must live on an **ESP (FAT32
+partition)**, and the InvFS root is a separate partition reached by the
+initramfs hook (WP67).
+
+**Hard constraint:** the bootloader cannot read InvFS. There is no
+kernel driver and no EFI driver for the format. Kernel + initramfs must
+live on a filesystem the firmware understands (ESP/FAT32 and/or a small
+ext4 `/boot`), and the InvFS volume is a separate partition/device
+reached by the initramfs hook.
+
+### 9.1. Disk layout
+
+| Partition | Filesystem | Size | Role |
+|-----------|-----------|------|------|
+| p1 | FAT32 (ESP) | 512 MiB | GRUB EFI + `/boot/vmlinuz-linux` + `/boot/initramfs-linux.img` |
+| p2 | raw (InvFS) | remainder | `invf-mkfs`'d root volume |
+
+### 9.2. Creating the disk image
+
+At step 1.10 of the Arch install guide (**Format the partitions**),
+instead of `mkfs.ext4 /dev/sda2`:
+
+```bash
+# Format the ESP
+mkfs.vfat -F32 -n INVFS_ESP /dev/sda1
+
+# Create an InvFS root volume (using the helper script)
+BIN=/path/to/InvariantFS/bin
+truncate -s 15G /dev/sda2
+INVFS_META_FRAC=16 $BIN/invf-mkfs /dev/sda2 15
+
+# Import the staging tree offline
+sudo env INVFS_IMPORT_KEEP_OWNER=1 \
+    $BIN/invf-import /dev/sda2 /path/to/staging-tree
+
+# Repair orphans
+$BIN/invf-fsck /dev/sda2 -f
+$BIN/invf-fsck /dev/sda2
+```
+
+Or use `tools/mkdisk-arch.sh` to assemble a complete GPT disk image:
+
+```bash
+tools/mkdisk-arch.sh --volume root.img \
+    --kernel /boot/vmlinuz-linux \
+    --initrd /boot/initramfs-linux.img \
+    --output vm/disk-arch.img
+```
+
+### 9.3. Installing the kernel and initramfs
+
+```bash
+# Mount the ESP
+mount /dev/sda1 /mnt/efi
+
+# Copy kernel + initramfs to ESP /boot
+cp /mnt/invfs/boot/vmlinuz-linux /mnt/efi/boot/
+cp /mnt/invfs/boot/initramfs-linux.img /mnt/efi/boot/
+
+# Install GRUB to ESP (standalone EFI binary)
+grub-mkimage -O x86_64-efi \
+    -o /mnt/efi/EFI/BOOT/BOOTX64.EFI \
+    -p /boot/grub \
+    fat part_gpt part_msdos normal linux configfile \
+    search search_label search_fs_uuid reboot echo test \
+    all_video loadenv
+```
+
+> `grub-install` fails on FUSE mounts ("failed to get canonical path
+> of invfs"). Use `grub-mkimage` manually to build the EFI binary.
+
+### 9.4. grub.cfg (on the ESP, FAT32)
+
+```grub
+set default=0
+set timeout=3
+set gfxpayload=keep
+
+menuentry "Arch Linux (InvariantFS)" {
+    insmod part_gpt
+    insmod fat
+    linux /boot/vmlinuz-linux console=ttyS0,115200 rootfstype=invfs root=/dev/sda2 rw
+    initrd /boot/initramfs-linux.img
+}
+```
+
+> **Put grub.cfg on the EFI partition** (FAT32), not the InvFS root.
+> GRUB looks for its config relative to the EFI binary's location. The
+> `root=invfs:/dev/sda2` parameter is consumed by the initramfs hook
+> (WP67) which mounts the InvFS volume via FUSE and pivots to it.
+
+### 9.5. The initramfs hook
+
+The WP67 `invfs` hook in `mkinitcpio` handles:
+
+1. Loading `fuse.ko`
+2. Starting `invf-fuse` on the raw InvFS partition
+3. Pivoting to the FUSE root as `/`
+
+Add the hook to `/etc/mkinitcpio.conf`:
+
+```
+HOOKS=(base udev modconf block filesystems invfs keyboard)
+```
+
+Then regenerate the initramfs:
+
+```bash
+mkinitcpio -p linux
+```
+
+### 9.6. QEMU verification (OVMF + GRUB)
+
+```bash
+tools/boot-arch-qemu.sh --bootloader vm/disk-arch.img
+```
+
+This uses OVMF firmware and boots through GRUB, validating the full
+boot chain. Requires OVMF (`/usr/share/OVMF/OVMF_CODE.fd` or set
+`ARCH_OVMF`).
+
+## 10. Pitfalls found during this bring-up
 
 | Symptom | Cause | Fix |
 |---|---|---|
@@ -323,10 +450,12 @@ Both boots were verified on 2026-09-19: serial autologin, `dhcpcd` lease
 | two-device: `cat`/`agetty` give `EINVAL`/`ENOTDIR` after first write | FUSE write on a two-device volume | tmpfs volatile dirs; see §7 |
 | import shows thousands of orphans | superseded records left by `invf-import` | `invf-fsck -f` once, then `invf-fsck` is `OK` |
 
-## 10. What is not claimed
+## 11. What is not claimed
 
-- Not a bootable-on-arbitrary-hardware install. The verified path uses a
-  direct `-kernel`/`-initrd` QEMU boot; OVMF/GRUB was not exercised.
+- Not a bootable-on-arbitrary-hardware install. The OVMF+GRUB path is
+  scripted (`tools/mkdisk-arch.sh` + `tools/boot-arch-qemu.sh
+  --bootloader`) but requires real hardware to fully validate. The
+  direct `-kernel`/`-initrd` QEMU path is the verified fallback.
 - systemd as PID 1 is partially supported after WP66's H1+H3 fixes
   (`/run` tmpfs + cgroup2 in initramfs, fallocate/ioctl stubs). Remaining
   blockers (H2 lookup corruption, H4 remount) need a live boot to confirm.
