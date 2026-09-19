@@ -37,6 +37,23 @@ static int excluded(const char *base)
     return 0;
 }
 
+/* WP59a: pin config/codecpack files so they stay builtin-readable. */
+static int is_anchored_path(const char *vname)
+{
+    return strncmp(vname, ".invariantfs/config/", 20) == 0 ||
+           strncmp(vname, ".invariantfs/codecpacks/", 24) == 0;
+}
+
+static void set_anchor_if_needed(const char *vname)
+{
+    uint64_t ino;
+    uint8_t val = 1;
+    if (!is_anchored_path(vname)) return;
+    ino = vol_find(vol, vname);
+    if (ino)
+        vol_set_xattr(vol, ino, INVFS_XATTR_ANCHOR, &val, sizeof val);
+}
+
 static void apply_meta_or_die(const char *vname, const struct stat *st,
                               const char *target)
 {
@@ -123,6 +140,7 @@ static void import_file(const char *spath, const char *vname)
         if (vol_find(vol, vname) == 0)
             vol_create_file_with_meta(vol, vname, NULL, 0, &m);
     }
+    set_anchor_if_needed(vname);
     free(buf);
     n_files++;
 }

@@ -619,6 +619,10 @@ static int tier_heat_cb(void *ctx_, uint64_t rec_pos,
     ip = idx_get_id(v, h->inode_id);
     if (vol_find(v, nm) != h->inode_id || (ip && ip != rec_pos))
         return 0;   /* superseded version: not the live record */
+    /* WP59a: anchored files are never promoted/demoted -- their segments
+     * stay pinned to avoid re-encoding through a pack codec. */
+    if (invfs_inode_is_anchored(v, h->inode_id))
+        return 0;
     r = heat_file_r(v, h->inode_id);
     if (!r) return 0;
     if (h->rec_len < base + INVFS_AST_HDR_V1_LEN ||

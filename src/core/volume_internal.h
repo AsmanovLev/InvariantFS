@@ -828,6 +828,17 @@ static inline void bit_clr(uint8_t *b, uint64_t i) { b[i / 8] &= (uint8_t)~(1u <
 
 /* WP21 (definition with the checkpoint machinery, below) */
 
+/* WP59a: is this inode anchored?  Checks the "invfs.anchor" INO2-ext xattr
+ * (presence = anchored, value ignored).  Used by sweep, dedup and tier to
+ * skip pack/container transcoding, dedup remap and tier demotion. */
+static inline int invfs_inode_is_anchored(invfs_volume *v, uint64_t inode_id)
+{
+    uint8_t val;
+    size_t vlen = sizeof(val);
+    return vol_get_xattr(v, inode_id, INVFS_XATTR_ANCHOR,
+                         &val, &vlen) == 0 && vlen >= 1;
+}
+
 /* ---- name index ---------------------------------------------------- */
 
 uint64_t idx_hash(const char *s, size_t n);

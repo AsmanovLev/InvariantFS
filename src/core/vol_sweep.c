@@ -905,6 +905,16 @@ int vol_sweep_one(invfs_volume *v, uint64_t inode_id, const char *name)
                  * absent stamp): admitted when the free blocks suffice,
                  * re-stamped (a check-then-write no-op) when they do not. */
                 break;
+            case INVFS_CLASS_ANCHORED:
+                /* WP59a: anchored files must never be transcoded by a
+                 * pack/container codec (the chicken-and-egg: you need packs
+                 * to read pack-coded files, but the packs themselves must
+                 * be readable without packs).  Leave the file alone;
+                 * builtin LZ4/ZSTD/PPMd-via-batch remain admissible if the
+                 * file enters the full path through the absent-stamp branch
+                 * (a fresh sweep), but this class stamp prevents the sweep
+                 * from re-entering the full path on subsequent runs. */
+                return 0;
             default: {
                 /* TEXT/BATCHED_BIN/CODEC/CONTAINER/GENERIC: policy
                  * compliance. The generic floor codecs (NONE/LZ4/ZSTD) are
@@ -1031,6 +1041,16 @@ int vol_sweep_one(invfs_volume *v, uint64_t inode_id, const char *name)
     if (vol_read_file(v, inode_id, &full, &full_len) != 0 || full_len < 4) {
         free(full);
         return 0;
+    }
+
+    /* WP59a: anchored files must never be claimed by a pack/container codec.
+     * If the file reached the full path without a class stamp (first sweep
+     * after creation), skip every codec/container branch and go straight to
+     * the generic floor (builtin LZ4/ZSTD).  The class stamp set by the
+     * creation path prevents re-entry on subsequent sweeps. */
+    if (invfs_inode_is_anchored(v, inode_id)) {
+        vol_stamp_class(v, inode_id, INVFS_CLASS_ANCHORED, 0, 0);
+        goto generic_floor;
     }
 
     /* WP19: a write-hot file (rewritten at least twice inside the last

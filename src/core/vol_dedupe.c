@@ -363,6 +363,10 @@ static int dedup_hash_cb(void *ctx_, uint64_t rec_pos,
             (ip && ip != rec_pos))
             return 0;
     }
+    /* WP59a: anchored files are never dedup-remapped.  Their segments stay
+     * pinned to avoid re-encoding through a pack codec. */
+    if (invfs_inode_is_anchored(v, h->inode_id))
+        return 0;
     /* internal owner records ("\x01tzb", the WP20 "\x01parityN" seal
      * owners): tzb entries are zone==TEXT and skipped below anyway, and
      * parity blocks are NOT framed segments -- hashing them would merge

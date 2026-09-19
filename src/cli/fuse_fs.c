@@ -68,6 +68,17 @@ static int is_temp_path(const char *path)
            strstr(path, "/var/tmp/") != NULL;
 }
 
+/* WP59a: files under /.invariantfs/config/* or /.invariantfs/codecpacks/**
+ * must be anchored so they stay builtin-readable. */
+static int is_anchored_path(const char *path)
+{
+    if (strncmp(path, "/.invariantfs/config/", 21) == 0)
+        return 1;
+    if (strncmp(path, "/.invariantfs/codecpacks/", 25) == 0)
+        return 1;
+    return 0;
+}
+
 static void table_sync_one(const char *name)
 {
     uint64_t id = 0, sz = 0, ct = 0;
@@ -1500,6 +1511,16 @@ static int invf_create(const char *path, mode_t mode, struct fuse_file_info *fi)
             if (ino2 &&
                 vol_set_xattr(g_vol, ino2, XATTR_ACL_ACCESS, aacl, aalen) != 0)
                 fprintf(stderr, "invf: create ACL inherit FAILED %s\n", path);
+        }
+        /* WP59a: pin /.invariantfs/config/* and /.invariantfs/codecpacks/**
+         * so they stay builtin-readable (never pack-container coded). */
+        if (is_anchored_path(path)) {
+            uint8_t anchor_val = 1;
+            uint64_t ino2 = vol_find(g_vol, path + 1);
+            if (ino2 &&
+                vol_set_xattr(g_vol, ino2, INVFS_XATTR_ANCHOR,
+                              &anchor_val, sizeof anchor_val) != 0)
+                fprintf(stderr, "invf: anchor set FAILED %s\n", path);
         }
         table_sync_one_locked(path + 1);
     }

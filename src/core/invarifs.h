@@ -158,10 +158,14 @@ enum {
                                        * algo = ZSTD (plain binary batch) or
                                        * ZSTD_BCJ (x86-prefiltered batch).
                                        * Same compliance/GC semantics as TEXT */
-    INVFS_CLASS_DEFER_ENOSPC     = 9  /* sweep deferred for free space (WP16b):
+    INVFS_CLASS_DEFER_ENOSPC     = 9, /* sweep deferred for free space (WP16b):
                                        * the file waits RAW and is
                                        * re-evaluated EVERY sweep; stamped
                                        * {algo,gen} of the declining codec */
+    INVFS_CLASS_ANCHORED         = 10 /* WP59a: pinned builtin-readable
+                                       * (/.invariantfs/**).  Never assigned
+                                       * a pack/container codec; skip dedup
+                                       * remap and tier demotion. */
 };
 
 #pragma pack(push, 1)
@@ -669,6 +673,10 @@ static inline uint64_t invfs_meta_ext_size(uint64_t entry) { return 65536ULL << 
 static inline uint64_t invfs_meta_ext_encode(uint64_t pba, uint8_t size_class) {
     return pba | ((uint64_t)(size_class & 0xF) << 60);
 }
+
+/* WP59a: per-file anchor flag in the INO2 ext xattr TLVs.  1-byte value;
+ * presence alone is the signal (any non-zero value means anchored). */
+#define INVFS_XATTR_ANCHOR "invfs.anchor"
 
 /* WP27: per-file heat counters live in the INO2 ext as an xattr TLV of
  * this name (moved out of the L2P journal pads -- the read path never
