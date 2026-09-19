@@ -598,14 +598,19 @@ int vol_rename(invfs_volume *v, const char *from, const char *to)
     int dir, rc = 0;
 
     if (v->sb.vol_flags & VOLF_READONLY) return -1;   /* EROFS */
-    /* WP21/WP22c: refuse to rename while a sweep checkpoint is live. The
-     * rollback decapitates the inode area at the checkpoint's append
-     * pointer, discarding the whole rename pair -- the copy dies AND the
-     * tombstone dies, so the source name resurrects: a file nobody
-     * deleted reappearing out of nowhere is the one outcome the crash
-     * contract cannot allow (the chaos soak reads it as a ghost). Resolve
-     * the checkpoint first (invf-rollback / invf-sweep --realize). */
-    if (v->ck_present) return -4;
+    /* WP65: a rename under a live sweep checkpoint realizes the
+     * checkpoint first. The rollback would decapitate the inode area at
+     * the checkpoint's append pointer and discard the whole rename pair
+     * -- the copy dies AND the tombstone dies, so the source name
+     * resurrects. Realizing is the point of no return (invf-sweep
+     * --realize), after which the pair is an ordinary post-checkpoint
+     * write; refusing was the only ck_present gate on any mutator and it
+     * broke package-manager atomic renames. If the realize fails the
+     * rename still refuses with -4 (EBUSY). */
+    if (v->ck_present) {
+        uint64_t freed = 0;
+        if (vol_ckp_realize(v, &freed) < 0) return -4;
+    }
     if (!v || !from || !to || !from[0] || !to[0]) return -1;
     if (strcmp(from, to) == 0) return 0;
     flen = strlen(from);

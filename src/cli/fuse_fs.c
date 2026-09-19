@@ -1894,10 +1894,11 @@ static int invf_release(const char *path, struct fuse_file_info *fi)
  * aware); audit PB8: it was simply never wired into this ops table */
 static int invf_rename(const char *from, const char *to, unsigned int flags)
 {
-    int rc;
+    int rc, noreplace = 0;
     struct acreds c;
-    if (flags)
-        return -EINVAL;   /* RENAME_NOREPLACE / RENAME_EXCHANGE unsupported */
+    if (flags & ~(unsigned int)RENAME_NOREPLACE)
+        return -EOPNOTSUPP;   /* RENAME_EXCHANGE / RENAME_WHITEOUT */
+    if (flags & RENAME_NOREPLACE) noreplace = 1;
     if (g_tt) return -EROFS;   /* WP24-lite: time-travel views never mutate */
     acreds_get(&c);
     if (!c.bypass) {
@@ -1921,6 +1922,18 @@ static int invf_rename(const char *from, const char *to, unsigned int flags)
     if (!g_vol) { pthread_mutex_unlock(&g_io_lock); return -EIO; }
     {
         int was_dir = vol_is_dir(g_vol, from + 1);
+        if (noreplace && strcmp(from, to) != 0) {
+            /* WP65: RENAME_NOREPLACE must not clobber the destination.
+             * Checked under g_io_lock so it is atomic with the move. */
+            if (vol_is_dir(g_vol, to + 1)) {
+                pthread_mutex_unlock(&g_io_lock);
+                return -ENOTEMPTY;
+            }
+            if (vol_find(g_vol, to + 1) != 0) {
+                pthread_mutex_unlock(&g_io_lock);
+                return -EEXIST;
+            }
+        }
         rc = vol_rename(g_vol, from + 1, to + 1);
         if (rc == 0) {
             /* WP22c: a rename that reports OK must never silently vanish.
