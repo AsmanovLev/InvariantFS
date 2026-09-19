@@ -1394,6 +1394,454 @@ int vol_v3_base_root(invfs_volume *v, invfs_blkptr *out)
     return v3_base_root(v, out);
 }
 
+/* ------------------------------------------------------------------ */
+/* WP-M7: v3 xattr tree (base B+-tree namespace)                       */
+/*                                                                    */
+/* Key (frozen by the WP-M7 doc):                                      */
+/*   0x03 || inode_id:u64 BE || name_len:u16 BE || name               */
+/* Value: the raw xattr value bytes (the name is in the key). One      */
+/* inode's xattrs are therefore a contiguous key range (ordered by      */
+/* name_len then name, like WP-M6's dirent keys), so listxattr is a     */
+/* single btree_scan and get/remove are point ops. The list adapter     */
+/* re-sorts by name because listxattr consumers expect it.             */
+/*                                                                    */
+/* A base page is 4 KiB, so one leaf record holds only a few KB. For   */
+/* values that do not fit, chunk 0 stays at the frozen canonical key   */
+/* and continuation chunks reuse the same key with a 0x00 marker and a */
+/* u16 BE chunk index appended:                                        */
+/*   ... || name || 0x00 || chunk:u16 BE                               */
+/* xattr names cannot contain NUL, so the two key shapes are           */
+/* unambiguous and each name's keys stay contiguous (the frozen        */
+/* canonical key is unchanged). This extends the WP doc, whose         */
+/* "large/streamed xattr values" are out of scope but whose e2e gate   */
+/* requires a value larger than one page -- TODO(wp-M7): fold this     */
+/* into the delta key encoding when WP-M12 lands.                      */
+/*                                                                    */
+/* Mutations are COW and publish once through the WP-M2 double slot.   */
+/* unlink/rmdir at nlink 0 reaches the cascade through                  */
+/* vol_v3_inode_delete, which drops the whole xattr range.             */
+/* ------------------------------------------------------------------ */
+
+#define V3_XATTR_FIXED       11u   /* 0x03 + u64 BE + u16 BE */
+#define V3_XATTR_CHUNK_EXTRA  3u   /* 0x00 marker + u16 BE chunk index */
+/* Continuation records are capped well below a page so WP-M3's splitter can
+ * always rebalance a leaf that holds several of them (a record near a full
+ * page cannot be partitioned between two siblings). 64 KiB / 1 KiB = 64
+ * chunks worst case for one xattr. */
+#define V3_XATTR_CHUNK_DATA  1024u
+#define V3_XATTR_MAX_CHUNKS  130u
+#define V3_XATTR_MAX_TOTAL   (64u * 1024u)
+
+static uint16_t v3_xattr_key(uint8_t *kb, uint64_t ino,
+                             const char *name, size_t nlen)
+{
+    int i;
+    kb[0] = (uint8_t)INVFS_V3_XATTR_KEY_PREFIX;
+    for (i = 0; i < 8; i++)
+        kb[1 + i] = (uint8_t)(ino >> (56 - 8 * i));
+    kb[9]  = (uint8_t)(nlen >> 8);
+    kb[10] = (uint8_t)(nlen & 0xFF);
+    if (nlen)
+        memcpy(kb + V3_XATTR_FIXED, name, nlen);
+    return (uint16_t)(V3_XATTR_FIXED + nlen);
+}
+
+static uint16_t v3_xattr_chunk_key(uint8_t *kb, uint64_t ino,
+                                   const char *name, size_t nlen, uint16_t idx)
+{
+    uint16_t n = v3_xattr_key(kb, ino, name, nlen);
+    kb[n]     = 0x00;
+    kb[n + 1] = (uint8_t)(idx >> 8);
+    kb[n + 2] = (uint8_t)(idx & 0xFF);
+    return (uint16_t)(n + V3_XATTR_CHUNK_EXTRA);
+}
+
+/* Validate one key in the 0x03 namespace. 1 = canonical (chunk 0) or
+ * continuation chunk, 0 = not an xattr key. */
+static int v3_xattr_key_decode(const uint8_t *p, uint16_t n,
+                               const uint8_t **name_out, uint16_t *nlen_out,
+                               int *chunk_out, uint16_t *idx_out)
+{
+    uint16_t nl, base;
+    if (n < V3_XATTR_FIXED || p[0] != (uint8_t)INVFS_V3_XATTR_KEY_PREFIX)
+        return 0;
+    nl = (uint16_t)(((uint16_t)p[9] << 8) | p[10]);
+    if (nl == 0 || nl > INVFS_MAX_NAME)
+        return 0;
+    base = (uint16_t)(V3_XATTR_FIXED + nl);
+    if (n == base) {
+        if (chunk_out) *chunk_out = 0;
+        if (idx_out)   *idx_out = 0;
+    } else if (n == base + V3_XATTR_CHUNK_EXTRA && p[base] == 0x00) {
+        if (chunk_out) *chunk_out = 1;
+        if (idx_out)
+            *idx_out = (uint16_t)(((uint16_t)p[base + 1] << 8) | p[base + 2]);
+    } else {
+        return 0;
+    }
+    if (name_out) *name_out = p + V3_XATTR_FIXED;
+    if (nlen_out) *nlen_out = nl;
+    return 1;
+}
+
+/* Largest value an inline / continuation record can hold for this name. */
+static uint16_t v3_xattr_inline_cap(uint16_t nlen)
+{
+    uint32_t used = (uint32_t)sizeof(invfs_page_hdr) + 4u
+                    + (V3_XATTR_FIXED + (uint32_t)nlen);
+    return (uint16_t)(INVFS_BLOCK_SIZE - used);
+}
+static uint16_t v3_xattr_chunk_cap(uint16_t nlen)
+{
+    return (uint16_t)(v3_xattr_inline_cap(nlen) - V3_XATTR_CHUNK_EXTRA);
+}
+
+/* A chained mutation: COW upserts/deletes update `root` without publishing
+ * until commit. On failure the disk root is untouched (pages leak, as in
+ * WP-M5/M6 -- reclaim is WP-M15). */
+typedef struct {
+    invfs_volume *v;
+    invfs_blkptr  root;
+    uint64_t      old_gen;
+    int           changed;
+} v3_xmut;
+
+static int v3_xmut_upsert(v3_xmut *m, bt_key k, bt_val val)
+{
+    invfs_blkptr nr;
+    if (btree_upsert(m->v, m->root, k, val, &nr) != 0)
+        return -1;
+    m->root = nr;
+    m->changed = 1;
+    return 0;
+}
+
+static int v3_xmut_delete(v3_xmut *m, bt_key k, int *found)
+{
+    invfs_blkptr nr;
+    bt_val val;
+    int f = 0;
+    if (btree_search(m->v, m->root, k, &val, &f) != 0)
+        return -1;
+    if (found) *found = f;
+    if (!f)
+        return 0;
+    if (btree_delete(m->v, m->root, k, &nr) != 0)
+        return -1;
+    m->root = nr;
+    m->changed = 1;
+    return 0;
+}
+
+static int v3_xmut_commit(v3_xmut *m)
+{
+    if (!m->changed)
+        return 0;
+    return v3_publish(m->v, m->root, m->old_gen);
+}
+
+/* Delete the canonical key and every continuation chunk for one name. */
+static int v3_xattr_delete_name(v3_xmut *m, uint64_t ino,
+                                const char *name, size_t nl, int *removed)
+{
+    uint8_t kb[V3_XATTR_FIXED + INVFS_MAX_NAME + V3_XATTR_CHUNK_EXTRA];
+    uint16_t kn, idx;
+    int found = 0, any = 0;
+
+    kn = v3_xattr_key(kb, ino, name, nl);
+    if (v3_xmut_delete(m, (bt_key){kb, kn}, &found) != 0)
+        return -1;
+    if (found)
+        any = 1;
+    for (idx = 1; idx <= V3_XATTR_MAX_CHUNKS; idx++) {
+        kn = v3_xattr_chunk_key(kb, ino, name, nl, idx);
+        if (v3_xmut_delete(m, (bt_key){kb, kn}, &found) != 0)
+            return -1;
+        if (!found)
+            break;
+        any = 1;
+    }
+    if (removed) *removed = any;
+    return 0;
+}
+
+int vol_v3_xattr_set(invfs_volume *v, uint64_t inode_id, const char *name,
+                     const void *val, size_t vlen)
+{
+    uint8_t kb[V3_XATTR_FIXED + INVFS_MAX_NAME + V3_XATTR_CHUNK_EXTRA];
+    invfs_blkptr root;
+    v3_xmut m;
+    size_t nl, off = 0;
+    uint16_t cap, kn, idx = 0;
+
+    if (!v || !name)
+        return -1;
+    if (v->sb.vol_flags & VOLF_READONLY)
+        return -1;
+    nl = strlen(name);
+    if (nl == 0 || nl > INVFS_MAX_NAME)
+        return -1;
+    if (vlen > V3_XATTR_MAX_TOTAL)
+        return -2;
+    if (vlen && !val)
+        return -1;
+    if (v3_ready(v) != 0)
+        return -1;
+    if (v3_base_root(v, &root) != 0)
+        return -1;
+    m.v = v; m.root = root; m.old_gen = root.gen; m.changed = 0;
+
+    /* replace: drop any previous inline/chunked representation */
+    if (v3_xattr_delete_name(&m, inode_id, name, nl, NULL) != 0)
+        return -1;
+
+    cap = v3_xattr_chunk_cap((uint16_t)nl);
+    if (cap > V3_XATTR_CHUNK_DATA)
+        cap = (uint16_t)V3_XATTR_CHUNK_DATA;
+    if (cap == 0)
+        return -1;
+    if (vlen <= cap) {
+        /* fits one (sub-page) record: the frozen key/value shape, raw bytes */
+        kn = v3_xattr_key(kb, inode_id, name, nl);
+        if (v3_xmut_upsert(&m, (bt_key){kb, kn},
+                           (bt_val){val ? (const uint8_t *)val : NULL,
+                                    (uint16_t)vlen}) != 0)
+            return -1;
+        return v3_xmut_commit(&m);
+    }
+    do {
+        size_t chunk = vlen - off;
+        if (chunk > cap)
+            chunk = cap;
+        if (idx == 0)
+            kn = v3_xattr_key(kb, inode_id, name, nl);
+        else
+            kn = v3_xattr_chunk_key(kb, inode_id, name, nl, idx);
+        if (v3_xmut_upsert(&m, (bt_key){kb, kn},
+                           (bt_val){val ? (const uint8_t *)val + off : NULL,
+                                    (uint16_t)chunk}) != 0)
+            return -1;
+        off += chunk;
+        idx++;
+    } while (off < vlen && idx <= V3_XATTR_MAX_CHUNKS);
+    if (off < vlen)
+        return -2;   /* would need more chunks than the format allows */
+    return v3_xmut_commit(&m);
+}
+
+int vol_v3_xattr_del(invfs_volume *v, uint64_t inode_id, const char *name)
+{
+    invfs_blkptr root;
+    v3_xmut m;
+    size_t nl;
+    int removed = 0;
+
+    if (!v || !name)
+        return -1;
+    if (v->sb.vol_flags & VOLF_READONLY)
+        return -1;
+    nl = strlen(name);
+    if (nl == 0 || nl > INVFS_MAX_NAME)
+        return -1;
+    if (v3_ready(v) != 0)
+        return -1;
+    if (v3_base_root(v, &root) != 0)
+        return -1;
+    m.v = v; m.root = root; m.old_gen = root.gen; m.changed = 0;
+    if (v3_xattr_delete_name(&m, inode_id, name, nl, &removed) != 0)
+        return -1;
+    if (!removed)
+        return -1;                       /* ENODATA */
+    return v3_xmut_commit(&m);
+}
+
+int vol_v3_xattr_get(invfs_volume *v, uint64_t inode_id, const char *name,
+                     void *val, size_t *vlen)
+{
+    uint8_t kb[V3_XATTR_FIXED + INVFS_MAX_NAME + V3_XATTR_CHUNK_EXTRA];
+    invfs_blkptr root;
+    bt_val bv;
+    uint8_t *acc = NULL;
+    size_t nl, total = 0, cap = 0;
+    uint16_t kn, idx;
+    int found = 0;
+
+    if (!v || !name || !vlen)
+        return -1;
+    nl = strlen(name);
+    if (nl == 0 || nl > INVFS_MAX_NAME)
+        return -1;
+    if (v3_ready(v) != 0)
+        return -1;
+    if (v3_base_root(v, &root) != 0)
+        return -1;
+    kn = v3_xattr_key(kb, inode_id, name, nl);
+    if (btree_search(v, root, (bt_key){kb, kn}, &bv, &found) != 0)
+        return -1;
+    if (!found)
+        return -1;                       /* ENODATA */
+
+    /* bv points into a per-thread buffer, invalidated by the next search:
+     * copy chunk 0 before probing the continuation keys. */
+    for (idx = 0; ; idx++) {
+        size_t add = bv.n;
+        if (total + add > V3_XATTR_MAX_TOTAL) {
+            free(acc);
+            return -1;
+        }
+        if (total + add > cap) {
+            size_t ncap = cap ? cap * 2 : 1024;
+            uint8_t *na;
+            while (ncap < total + add)
+                ncap *= 2;
+            na = (uint8_t *)realloc(acc, ncap);
+            if (!na) { free(acc); return -1; }
+            acc = na;
+            cap = ncap;
+        }
+        if (add)
+            memcpy(acc + total, bv.p, add);
+        total += add;
+        if (idx >= V3_XATTR_MAX_CHUNKS)
+            break;
+        kn = v3_xattr_chunk_key(kb, inode_id, name, nl, (uint16_t)(idx + 1));
+        if (btree_search(v, root, (bt_key){kb, kn}, &bv, &found) != 0) {
+            free(acc);
+            return -1;
+        }
+        if (!found)
+            break;
+    }
+    if (*vlen == 0) {                    /* size query */
+        *vlen = total;
+        free(acc);
+        return 0;
+    }
+    if (*vlen < total) {
+        free(acc);
+        return -2;                       /* ERANGE */
+    }
+    if (total)
+        memcpy(val, acc, total);
+    *vlen = total;
+    free(acc);
+    return 0;
+}
+
+typedef struct {
+    vol_v3_xattr_cb cb;
+    void           *ctx;
+} v3_xattr_scan_state;
+
+static int v3_xattr_scan_cb(void *ctx_, bt_key k, bt_val val)
+{
+    v3_xattr_scan_state *s = (v3_xattr_scan_state *)ctx_;
+    const uint8_t *name;
+    uint16_t nl;
+    char nbuf[INVFS_MAX_NAME + 1];
+    int chunk;
+    (void)val;
+
+    if (!v3_xattr_key_decode(k.p, k.n, &name, &nl, &chunk, NULL))
+        return 0;
+    if (chunk)
+        return 0;                        /* continuation: chunk 0 named it */
+    memcpy(nbuf, name, nl);
+    nbuf[nl] = 0;
+    return s->cb(s->ctx, nbuf, nl);
+}
+
+int vol_v3_xattr_scan(invfs_volume *v, uint64_t inode_id,
+                      vol_v3_xattr_cb cb, void *ctx)
+{
+    uint8_t lo[V3_XATTR_FIXED], hi[V3_XATTR_FIXED];
+    invfs_blkptr root;
+    v3_xattr_scan_state s;
+
+    if (!v || !cb)
+        return -1;
+    if (v3_ready(v) != 0)
+        return -1;
+    if (v3_base_root(v, &root) != 0)
+        return -1;
+    v3_xattr_key(lo, inode_id, NULL, 0);         /* name_len 0: smallest */
+    v3_xattr_key(hi, inode_id + 1, NULL, 0);
+    s.cb = cb;
+    s.ctx = ctx;
+    return btree_scan(v, root, (bt_key){lo, V3_XATTR_FIXED},
+                      (bt_key){hi, V3_XATTR_FIXED}, v3_xattr_scan_cb, &s);
+}
+
+/* Collect every key in one inode's xattr range, then delete them all. Used
+ * by vol_v3_inode_delete: a dying inode must not strand its xattrs. */
+typedef struct {
+    uint8_t *buf;
+    size_t   len, cap;
+} v3_keybuf;
+
+static int v3_xattr_collect_cb(void *ctx_, bt_key k, bt_val val)
+{
+    v3_keybuf *b = (v3_keybuf *)ctx_;
+    const uint8_t *name;
+    uint16_t nl;
+    int chunk;
+    (void)val;
+
+    if (!v3_xattr_key_decode(k.p, k.n, &name, &nl, &chunk, NULL))
+        return 0;
+    if (b->len + 2 + k.n > b->cap) {
+        size_t ncap = b->cap ? b->cap * 2 : 4096;
+        uint8_t *nb;
+        while (ncap < b->len + 2 + k.n)
+            ncap *= 2;
+        nb = (uint8_t *)realloc(b->buf, ncap);
+        if (!nb)
+            return -1;                   /* abort the scan */
+        b->buf = nb;
+        b->cap = ncap;
+    }
+    b->buf[b->len]     = (uint8_t)(k.n >> 8);
+    b->buf[b->len + 1] = (uint8_t)(k.n & 0xFF);
+    memcpy(b->buf + b->len + 2, k.p, k.n);
+    b->len += 2 + k.n;
+    return 0;
+}
+
+static int v3_xattr_remove_all(v3_xmut *m, uint64_t inode_id)
+{
+    uint8_t lo[V3_XATTR_FIXED], hi[V3_XATTR_FIXED];
+    v3_keybuf b;
+    size_t off = 0;
+    int rc;
+
+    b.buf = NULL;
+    b.len = 0;
+    b.cap = 0;
+    v3_xattr_key(lo, inode_id, NULL, 0);
+    v3_xattr_key(hi, inode_id + 1, NULL, 0);
+    rc = btree_scan(m->v, m->root, (bt_key){lo, V3_XATTR_FIXED},
+                    (bt_key){hi, V3_XATTR_FIXED}, v3_xattr_collect_cb, &b);
+    if (rc != 0) {
+        free(b.buf);
+        return -1;
+    }
+    while (off + 2 <= b.len) {
+        uint16_t kl = (uint16_t)(((uint16_t)b.buf[off] << 8) | b.buf[off + 1]);
+        off += 2;
+        if ((size_t)off + kl > b.len) {
+            free(b.buf);
+            return -1;
+        }
+        if (v3_xmut_delete(m, (bt_key){b.buf + off, kl}, NULL) != 0) {
+            free(b.buf);
+            return -1;
+        }
+        off += kl;
+    }
+    free(b.buf);
+    return 0;
+}
+
 int vol_v3_inode_get(invfs_volume *v, uint64_t inode_id, invfs_v3_inode *out)
 {
     uint8_t kb[8];
@@ -1447,7 +1895,7 @@ int vol_v3_inode_put(invfs_volume *v, uint64_t inode_id,
 int vol_v3_inode_delete(invfs_volume *v, uint64_t inode_id)
 {
     uint8_t kb[8];
-    invfs_blkptr root, nr;
+    invfs_blkptr root;
     bt_val val;
     int found = 0;
     uint64_t old_gen;
@@ -1464,9 +1912,19 @@ int vol_v3_inode_delete(invfs_volume *v, uint64_t inode_id)
     if (!found)
         return 0;   /* absent: nothing to do */
     old_gen = root.gen;
-    if (btree_delete(v, root, (bt_key){kb, 8}, &nr) != 0)
-        return -1;
-    return v3_publish(v, nr, old_gen);
+    /* WP-M7 cascade: a dying inode must not strand its xattr keys. */
+    {
+        v3_xmut m;
+        m.v = v;
+        m.root = root;
+        m.old_gen = old_gen;
+        m.changed = 0;
+        if (v3_xattr_remove_all(&m, inode_id) != 0)
+            return -1;
+        if (v3_xmut_delete(&m, (bt_key){kb, 8}, NULL) != 0)
+            return -1;
+        return v3_xmut_commit(&m);
+    }
 }
 
 

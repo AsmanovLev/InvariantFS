@@ -293,6 +293,34 @@ int vol_v3_ensure_path(invfs_volume *v, const char *name);
 typedef int (*vol_v3_walk_cb)(void *ctx, const char *path, uint64_t ino,
                               uint32_t type, uint64_t size, int64_t mtime);
 int vol_v3_walk(invfs_volume *v, vol_v3_walk_cb cb, void *ctx);
+
+/* ---- WP-M7: v3 xattr tree (base B+-tree namespace) ------------------
+ * Named xattrs are keyed by
+ *     0x03 || inode_id:u64 BE || name_len:u16 BE || name
+ * and carry the raw value bytes (name is in the key), so one inode's xattrs
+ * are a contiguous key range (ordered by name_len, then name). This replaces the v2 INO2 TLV
+ * area for VOLF_V3 volumes; the v2 path is untouched when VOLF_V3 is clear.
+ * Mutations go straight to the base tree (no delta yet) and publish the root
+ * through the WP-M2 double slot. `vol_v3_inode_delete` drops the whole xattr
+ * range, which is how unlink/rmdir at nlink 0 reclaims an inode's keys.
+ * These are the engine behind the `vol_*_xattr` (volume.h) dispatch. */
+/* getxattr(2) semantics: 0 = ok with *vlen set; *vlen == 0 on input is a
+ * size query; -1 = ENODATA; -2 = ERANGE (buffer too small). */
+int vol_v3_xattr_get(invfs_volume *v, uint64_t inode_id, const char *name,
+                     void *val, size_t *vlen);
+/* Insert or replace. 0 = ok, -1 = error, -2 = ERANGE (value too large). */
+int vol_v3_xattr_set(invfs_volume *v, uint64_t inode_id, const char *name,
+                     const void *val, size_t vlen);
+/* Physical delete of the named xattr. An absent name is -1 (ENODATA). */
+int vol_v3_xattr_del(invfs_volume *v, uint64_t inode_id, const char *name);
+/* Ordered scan of an inode's xattr names (one callback per name, no
+ * duplicates, in key order: name_len then name). The name is NUL-terminated
+ * and valid only for the duration of the callback; a non-zero return aborts
+ * the scan and is propagated. 0 = complete. */
+typedef int (*vol_v3_xattr_cb)(void *ctx, const char *name, size_t nlen);
+int vol_v3_xattr_scan(invfs_volume *v, uint64_t inode_id,
+                      vol_v3_xattr_cb cb, void *ctx);
+
 /* rewrite `name`'s record carrying `meta` (xattrs preserved); data blocks and
  * the AST are untouched — the L2P keys move to the new inode id internally.
  * Returns the new inode id, or 0 on failure (volume untouched). */

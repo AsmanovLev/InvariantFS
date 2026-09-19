@@ -1094,6 +1094,18 @@ typedef struct {
 #define INVFS_V3_INODE_ROW_FIXED ((uint32_t)sizeof(invfs_v3_inode_row))
 #pragma pack(pop)
 
+/* WP-M7: xattr key prefix. Named xattrs live in the base B+-tree under a
+ * third key namespace, keyed by
+ *     0x03 || inode_id:u64 BE || name_len:u16 BE || name
+ * (design-meta-v3.md §12/§15.2; key frozen by the WP-M7 doc). The 0x03 first
+ * byte keeps xattr keys disjoint from and after WP-M5's 8-byte inode keys and
+ * WP-M6's `parent:u64 BE || name_len || name` dirent keys, whose first byte is
+ * the (small) high byte of an inode id. The value is the raw xattr value
+ * bytes; the name is in the key, so one inode's xattrs are a contiguous key
+ * range (ordered by name_len, then name -- the same shape as WP-M6 dirents)
+ * and listxattr is a single ordered scan. */
+#define INVFS_V3_XATTR_KEY_PREFIX 0x03u
+
 /* Longest record this format can produce: the header, the (v2) recipe
    header, the most segments a v2 num_blocks can count, and the largest
    children blob the writer will build. A record longer than this was not

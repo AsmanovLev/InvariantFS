@@ -1427,6 +1427,9 @@ int vol_get_xattr(invfs_volume *v, uint64_t inode_id, const char *xn,
     size_t xl = 0, nlen = strlen(xn), rem, got = 0;
     const uint8_t *p;
     if (!vlen) return -1;
+    /* WP-M7: v3 named xattrs live in the base B+-tree, not the INO2 ext. */
+    if (v && (v->sb.vol_flags & VOLF_V3))
+        return vol_v3_xattr_get(v, inode_id, xn, val, vlen);
     if (meta_read_record_by_id(v, inode_id, &buf, &rl, NULL, 0, NULL) != 0)
         return -1;
     if (!meta_locate_ext(buf, rl, &xl)) { free(buf); return -1; }
@@ -1473,6 +1476,8 @@ int vol_set_xattr(invfs_volume *v, uint64_t inode_id, const char *xn,
     char name[256];
     int rc = -1;
 
+    if (v && (v->sb.vol_flags & VOLF_V3))
+        return vol_v3_xattr_set(v, inode_id, xn, val, vlen);
     if (v->sb.vol_flags & VOLF_READONLY) return -1;
     if (nlen == 0 || nlen > 255) return -1;
     if (meta_read_record_by_id(v, inode_id, &buf, &rl, name, sizeof(name),
@@ -1529,6 +1534,8 @@ int vol_remove_xattr(invfs_volume *v, uint64_t inode_id, const char *xn)
     char name[256];
     int found = 0, rc;
 
+    if (v && (v->sb.vol_flags & VOLF_V3))
+        return vol_v3_xattr_del(v, inode_id, xn);
     if (v->sb.vol_flags & VOLF_READONLY) return -1;
     if (meta_read_record_by_id(v, inode_id, &buf, &rl, name, sizeof(name),
                                NULL) != 0)
@@ -1566,6 +1573,50 @@ int vol_remove_xattr(invfs_volume *v, uint64_t inode_id, const char *xn)
 }
 
 
+/* WP-M7: listxattr adapter over the v3 xattr tree. The tree orders keys by
+ * (name_len, name), so collect and sort by name to match the v2 listing
+ * expectation, then apply the v2 buffer semantics: positive = total bytes
+ * needed, -2 = buffer too small. */
+typedef struct {
+    char **names;
+    size_t n, cap;
+    int    oom;
+} v3_xattr_namevec;
+
+static int v3_xattr_collect_name_cb(void *ctx_, const char *name, size_t nlen)
+{
+    v3_xattr_namevec *c = (v3_xattr_namevec *)ctx_;
+    char *s;
+    if (c->n == c->cap) {
+        size_t ncap = c->cap ? c->cap * 2 : 16;
+        char **nv = (char **)realloc(c->names, ncap * sizeof *nv);
+        if (!nv) { c->oom = 1; return 1; }
+        c->names = nv;
+        c->cap = ncap;
+    }
+    s = (char *)malloc(nlen + 1);
+    if (!s) { c->oom = 1; return 1; }
+    memcpy(s, name, nlen);
+    s[nlen] = 0;
+    c->names[c->n++] = s;
+    return 0;
+}
+
+static int v3_xattr_name_cmp(const void *a, const void *b)
+{
+    return strcmp(*(const char *const *)a, *(const char *const *)b);
+}
+
+static void v3_xattr_namevec_free(v3_xattr_namevec *c)
+{
+    size_t i;
+    for (i = 0; i < c->n; i++)
+        free(c->names[i]);
+    free(c->names);
+    c->names = NULL;
+    c->n = 0;
+}
+
 int vol_list_xattr(invfs_volume *v, uint64_t inode_id,
                    char *buf, size_t bcap)
 {
@@ -1573,6 +1624,32 @@ int vol_list_xattr(invfs_volume *v, uint64_t inode_id,
     uint32_t rl;
     size_t xl = 0, rem, used = 0;
     const uint8_t *p;
+    if (v && (v->sb.vol_flags & VOLF_V3)) {
+        v3_xattr_namevec c;
+        size_t i;
+        int rc, overflow = 0;
+        memset(&c, 0, sizeof c);
+        rc = vol_v3_xattr_scan(v, inode_id, v3_xattr_collect_name_cb, &c);
+        if ((rc != 0 && rc != 1) || c.oom) {
+            v3_xattr_namevec_free(&c);
+            return -1;
+        }
+        if (c.n > 1)
+            qsort(c.names, c.n, sizeof *c.names, v3_xattr_name_cmp);
+        for (i = 0; i < c.n; i++) {
+            size_t nl = strlen(c.names[i]);
+            if (buf) {
+                if (used + nl + 1 > bcap) { overflow = 1; break; }
+                memcpy(buf + used, c.names[i], nl);
+                buf[used + nl] = 0;
+            }
+            used += nl + 1;
+        }
+        v3_xattr_namevec_free(&c);
+        if (overflow)
+            return -2;
+        return (int)used;
+    }
     if (meta_read_record_by_id(v, inode_id, &rb, &rl, NULL, 0, NULL) != 0)
         return -1;
     if (!meta_locate_ext(rb, rl, &xl)) { free(rb); return 0; }  /* none */
