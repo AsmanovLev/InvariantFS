@@ -98,10 +98,12 @@ int main(int argc, char **argv)
     uint64_t file_blocks, free_blocks = 0, alloc_blocks = 0, i;
     size_t bitmap_bytes;
     uint8_t *bitmap;
+    int deep = 0;
+    int ignore_missing_codecs = 0;
 
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) {
-            fprintf(stderr, "usage: invf-verify <image|device> [--deep]\n");
+            fprintf(stderr, "usage: invf-verify [--ignore-missing-codecs] <image|device> [--deep]\n");
             return 2;
         }
         if (strcmp(argv[i], "-v") == 0 || strcmp(argv[i], "--version") == 0) {
@@ -109,16 +111,31 @@ int main(int argc, char **argv)
                     argv[0], INVFS_VERSION_STRING, INVFS_BUILD_DATE, INVFS_AUTHOR_NAME, INVFS_LICENSE);
             return 0;
         }
+        if (strcmp(argv[i], "--ignore-missing-codecs") == 0)
+            ignore_missing_codecs = 1;
+        if (strcmp(argv[i], "--deep") == 0)
+            deep = 1;
     }
 
-    if (argc < 2 || argc > 3 || (argc == 3 && strcmp(argv[2], "--deep") != 0)) {
-        fprintf(stderr, "usage: invf-verify <image|device> [--deep]\n");
-        return 2;
+    /* count positional args (skip flags) */
+    {
+        int positional = 0;
+        for (int i = 1; i < argc; i++) {
+            if (argv[i][0] != '-') positional++;
+        }
+        if (positional < 1 || positional > 2) {
+            fprintf(stderr, "usage: invf-verify [--ignore-missing-codecs] <image|device> [--deep]\n");
+            return 2;
+        }
     }
 
     /* Read-only inspection, so the volume is not locked or dismounted: a
        mounted InvariantFS can be checked while it runs. */
-    path = blkio_normalize(argv[1], devbuf, sizeof devbuf);
+    {
+        int pi = 1;
+        while (pi < argc && argv[pi][0] == '-') pi++;
+        path = blkio_normalize(argv[pi], devbuf, sizeof devbuf);
+    }
     rc = blkio_open(&io, path, 0);
     if (rc != 0) {
         fprintf(stderr, "FAIL: cannot open %s: %s\n", path, blkio_strerror(rc));
@@ -143,6 +160,28 @@ int main(int argc, char **argv)
     /* 3. block size */
     if (sb.block_size != INVFS_BLOCK_SIZE)
         err("block_size %u (expected %u)", sb.block_size, INVFS_BLOCK_SIZE);
+
+    /* WP59: codec-policy gate (PCK0 at 0x3C4).
+     * verify is a gated tool per the spec: refuse if no PCK0 and not
+     * --ignore-missing-codecs. BASIC_ONLY volumes pass automatically. */
+    {
+        invfs_pck0 pk;
+        memset(&pk, 0, sizeof pk);
+        if (blkio_pread(&io, INVFS_PCK0_OFF, &pk, sizeof pk) == 0 &&
+            memcmp(pk.magic, "PCK0", 4) == 0) {
+            if (pck0_crc(&pk) != pk.crc32c) {
+                err("PCK0 CRC mismatch");
+            } else if (!(pk.policy_flags & INVFS_PCK0_BASIC_ONLY) &&
+                       pk.n_codecs > 0 && !ignore_missing_codecs) {
+                err("PCK0 requires %u codec pack(s); "
+                    "use --ignore-missing-codecs to proceed",
+                    (unsigned)pk.n_codecs);
+            }
+        } else if (!ignore_missing_codecs) {
+            err("no codec policy (PCK0); "
+                "use --ignore-missing-codecs to proceed");
+        }
+    }
 
     /* 4. backing-store size. On a device this is the partition length rounded
      *    down to 4096, which is exactly what mkfs used, so the equality holds
@@ -256,7 +295,7 @@ int main(int argc, char **argv)
 
     /* --deep: read every live file end-to-end; per-segment CRC32C is
      * verified on the read path, so silent corruption is caught here */
-    if (argc > 2 && strcmp(argv[2], "--deep") == 0) {
+    if (deep) {
         invfs_volume *vol;
         uint64_t live = 0, bad = 0;
         uint64_t total_bytes = 0;

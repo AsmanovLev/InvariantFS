@@ -594,7 +594,62 @@ typedef struct {
     uint64_t active_offset;    /* 0x3B0 byte offset within active extent */
     uint64_t extent_count;     /* 0x3B8 number of allocated extents */
     uint32_t crc32c;           /* 0x3C0 over descriptor with this field 0 */
-} invfs_met0;                  /* 0x3C4 - 0x3A0 = 36 bytes, rounded to 64 */
+} invfs_met0;                  /* 0x3C4 - 0x3A0 = 36 bytes */
+#pragma pack(pop)
+
+/* ---- WP59: PCK0 codec-policy descriptor (block 0 reserved area) ----
+ * Lives at byte offset 0x3C4 of block 0, past MET0 (0x3A0..0x3C4).
+ * Volumes that were mkfs'd before WP59 carry zeros there ("absent").
+ *
+ * Records the codec-pack configuration a volume was written with, so the
+ * engine can gate mount/read paths on whether the required decoders are
+ * installed. Written by mkfs (always; BASIC_ONLY when no packs configured);
+ * read and validated at vol_open.
+ *
+ *   0x3C4  char     magic[4]        "PCK0"
+ *   0x3C8  u32      version         1
+ *   0x3CC  u32      n_codecs        0..63
+ *   0x3D0  u32      policy_flags    bit0 = BASIC_ONLY (no pack required)
+ *   0x3D4  u64      conf_hash       BLAKE3 low 8B of packs.conf (0=none)
+ *   0x3DC  u32      conf_len        length of packs.conf (0=none)
+ *   0x3E0  u8       conf_encoding   INVFS_ALGO_* used to store packs.conf
+ *   0x3E1  u8       _pad[3]         reserved zero
+ *   0x3E4  [n_codecs] codec refs (24 B each, sorted by codec_id):
+ *               u32 codec_id      stable id, independent of pack version
+ *               u32 algo          INVFS_ALGO_* registry value
+ *               u16 version       pack version installed at write time
+ *               u16 min_read      minimum reader version that can decode
+ *               u8  pack_id[12]   NUL-padded pack name
+ *   0x...  u32      crc32c           over the descriptor with this field 0
+ *
+ * Max 63 codecs: 0x3C4 + 28 (fixed) + 63*24 = 0x3C4 + 1540 = 0x9CC
+ * (fits in one block; block 0 is 4096 bytes). */
+#define INVFS_PCK0_OFF      0x3C4
+#define INVFS_PCK0_VERSION  1
+#define INVFS_PCK0_MAX_CODECS 63
+#define INVFS_PCK0_BASIC_ONLY 0x00000001u
+
+#pragma pack(push, 1)
+typedef struct {
+    uint32_t codec_id;          /* stable id, independent of pack version */
+    uint32_t algo;              /* INVFS_ALGO_* registry value */
+    uint16_t version;           /* pack version at write time */
+    uint16_t min_read;          /* minimum reader version to decode */
+    char     pack_id[12];       /* NUL-padded pack name (e.g. "raw_image") */
+} invfs_codec_ref;              /* 24 bytes */
+
+typedef struct {
+    char     magic[4];          /* 0x3C4 "PCK0" */
+    uint32_t version;           /* 0x3C8 INVFS_PCK0_VERSION */
+    uint32_t n_codecs;          /* 0x3CC 0..63 */
+    uint32_t policy_flags;      /* 0x3D0 bit0 = BASIC_ONLY */
+    uint64_t conf_hash;         /* 0x3D4 BLAKE3 low 8B of packs.conf */
+    uint32_t conf_len;          /* 0x3DC length of packs.conf (0=none) */
+    uint8_t  conf_encoding;     /* 0x3E0 INVFS_ALGO_* for packs.conf */
+    uint8_t  _pad[3];           /* 0x3E1 reserved zero */
+    invfs_codec_ref codecs[63]; /* 0x3E4 */
+    uint32_t crc32c;            /* over the descriptor with this field 0 */
+} invfs_pck0;                   /* ~1548 bytes; ends well within block 0 */
 #pragma pack(pop)
 
 /* WP30: Metadata extent entry in the mapper table (8 bytes)
@@ -1008,5 +1063,14 @@ uint32_t invfs_crc32c_update(uint32_t crc, const void *data, size_t len);
 #define invfs_le16(x) (x)
 #define invfs_le32(x) (x)
 #define invfs_le64(x) (x)
+
+/* WP59: CRC convention for PCK0: over the descriptor with crc32c read as
+ * zero (the RDP0 rule). Placed here after invfs_crc32c is declared. */
+static inline uint32_t pck0_crc(const invfs_pck0 *p)
+{
+    invfs_pck0 t = *p;
+    t.crc32c = 0;
+    return invfs_crc32c(&t, sizeof t);
+}
 
 #endif /* INVARIFS_H */

@@ -503,6 +503,40 @@ int main(int argc, char **argv)
         }
     }
 
+    /* WP59: write PCK0 codec-policy descriptor (always; BASIC_ONLY when
+     * no packs configured). INVFS_CODECPACKS env at mkfs time populates
+     * codec refs from pack manifests; without it, n_codecs=0 + BASIC_ONLY
+     * is the safe default (builtin codecs only, no packs needed). */
+    {
+        invfs_pck0 pk;
+        memset(&pk, 0, sizeof pk);
+        memcpy(pk.magic, "PCK0", 4);
+        pk.version = INVFS_PCK0_VERSION;
+        pk.n_codecs = 0;
+        pk.policy_flags = INVFS_PCK0_BASIC_ONLY;
+        pk.conf_hash = 0;
+        pk.conf_len = 0;
+        pk.conf_encoding = 0;
+        pk.crc32c = 0;
+        pk.crc32c = pck0_crc(&pk);
+        if (blkio_seek(&io, INVFS_PCK0_OFF) != 0 ||
+            blkio_write(&io, &pk, sizeof pk) != 0) {
+            fprintf(stderr, "PCK0 descriptor write failed\n");
+            if (twodev) blkio_close(&io2);
+            blkio_close(&io);
+            return 1;
+        }
+        if (twodev) {
+            if (blkio_seek(&io2, INVFS_PCK0_OFF) != 0 ||
+                blkio_write(&io2, &pk, sizeof pk) != 0) {
+                fprintf(stderr, "PCK0 descriptor write failed on dev1\n");
+                blkio_close(&io2);
+                blkio_close(&io);
+                return 1;
+            }
+        }
+    }
+
     /* ---- bitmap: mark superblock + metadata zone allocated ---- */
     bitmap_bytes = (size_t)bitmap_blocks * INVFS_BLOCK_SIZE;
     bitmap = (uint8_t *)calloc(1, bitmap_bytes);

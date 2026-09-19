@@ -29,6 +29,7 @@ int main(int argc, char **argv)
     size_t len = 0;
     int err;
     const char *out = NULL;
+    int ignore_missing_codecs = 0;
 
 #ifdef _WIN32
     /* stdout must not convert LF -> CRLF on binary file dumps */
@@ -38,7 +39,7 @@ int main(int argc, char **argv)
 
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) {
-            fprintf(stderr, "usage: invf-cat <image> <name> [output-file]\n");
+            fprintf(stderr, "usage: invf-cat [--ignore-missing-codecs] <image> <name> [output-file]\n");
             return 2;
         }
         if (strcmp(argv[i], "-v") == 0 || strcmp(argv[i], "--version") == 0) {
@@ -46,19 +47,36 @@ int main(int argc, char **argv)
                     argv[0], INVFS_VERSION_STRING, INVFS_BUILD_DATE, INVFS_AUTHOR_NAME, INVFS_LICENSE);
             return 0;
         }
+        if (strcmp(argv[i], "--ignore-missing-codecs") == 0) {
+            ignore_missing_codecs = 1;
+            continue;
+        }
     }
 
-    if (argc < 3 || argc > 4) {
-        fprintf(stderr, "usage: invf-cat <image> <name> [output-file]\n");
+    if (argc < 3 || argc > 5) {
+        fprintf(stderr, "usage: invf-cat [--ignore-missing-codecs] <image> <name> [output-file]\n");
         return 2;
     }
-    img = argv[1];
-    name = argv[2];
-    if (argc == 4) out = argv[3];
+    /* skip past --ignore-missing-codecs to find positional args */
+    {
+        int ai = 1;
+        while (ai < argc && strcmp(argv[ai], "--ignore-missing-codecs") == 0) ai++;
+        img = argv[ai++];
+        name = argv[ai++];
+        if (ai < argc) out = argv[ai];
+    }
 
     vol = vol_open(img, &err);
     if (!vol) {
         fprintf(stderr, "cannot open volume %s (err %d)\n", img, err);
+        return 1;
+    }
+
+    /* WP59: codec-policy gate. Refuse if no PCK0 and not --ignore-missing-codecs */
+    if (!vol_pck0_present(vol) && !ignore_missing_codecs) {
+        fprintf(stderr, "invf-cat: no codec policy (PCK0); "
+                "use --ignore-missing-codecs to proceed\n");
+        vol_close(vol);
         return 1;
     }
 

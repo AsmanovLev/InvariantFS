@@ -1388,6 +1388,27 @@ static invfs_volume *vol_open_inner(const char *path, int at_ckpt,
         }
     }
 
+    /* WP59: PCK0 codec-policy descriptor at 0x3C4 (past MET0).
+     * Valid magic+CRC loads the descriptor; anything else reads as absent.
+     * A CRC mismatch is a torn write -- treated as absent (the volume was
+     * written without a known policy; the gate logic handles this). */
+    {
+        invfs_pck0 pk;
+        if (io_seek(&v->io, INVFS_PCK0_OFF) == 0 &&
+            io_read(&v->io, &pk, sizeof pk) == 0 &&
+            memcmp(pk.magic, "PCK0", 4) == 0) {
+            if (pck0_crc(&pk) == pk.crc32c &&
+                pk.version == INVFS_PCK0_VERSION &&
+                pk.n_codecs <= INVFS_PCK0_MAX_CODECS) {
+                v->pk = pk;
+                v->pk_present = 1;
+            } else {
+                fprintf(stderr, "vol_open: PCK0 descriptor CRC/version "
+                                "mismatch; treated as absent\n");
+            }
+        }
+    }
+
     /* WP20b: second block-0 read for the RDP0 redundancy descriptor at
      * 0x100 (past the 144-byte superblock struct; pre-WP20b images carry
      * zeros there -> absent). Valid magic+crc loads the persisted
@@ -3908,6 +3929,28 @@ int pba_ref_ensure(invfs_volume *v)
 const invfs_superblock *vol_sb(invfs_volume *v)
 {
     return &v->sb;
+}
+
+
+/* WP59: codec-policy accessors */
+int vol_pck0_present(const invfs_volume *v)
+{
+    return v && v->pk_present;
+}
+
+const invfs_pck0 *vol_pck0(const invfs_volume *v)
+{
+    return (v && v->pk_present) ? &v->pk : NULL;
+}
+
+int vol_pck0_gate_failed(const invfs_volume *v)
+{
+    return v && v->pk_gate_failed;
+}
+
+const char *vol_pck0_gate_msg(const invfs_volume *v)
+{
+    return v ? v->pk_gate_msg : "";
 }
 
 

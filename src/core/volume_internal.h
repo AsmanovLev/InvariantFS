@@ -527,6 +527,11 @@ typedef struct invfs_volume {
     /* WP30: dynamic metadata extent state */
     invfs_met0 met0;                /* MET0 descriptor (loaded from disk) */
     int met0_present;               /* MET0 was present at open */
+    /* WP59: codec-policy descriptor (PCK0 at block-0 offset 0x3C4) */
+    invfs_pck0 pk;                  /* PCK0 descriptor (loaded from disk) */
+    int pk_present;                 /* PCK0 was present and CRC-valid at open */
+    int pk_gate_failed;             /* mount gate refused (missing codecs) */
+    char pk_gate_msg[256];          /* gate refusal reason */
     uint64_t *meta_mapper;          /* in-memory mapper table cache (16384 entries) */
     size_t meta_mapper_n;           /* number of valid entries */
     uint64_t meta_active_extent;    /* index of active extent */

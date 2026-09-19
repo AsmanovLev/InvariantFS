@@ -44,6 +44,10 @@ static double g_attr_t = 1.0;   /* -o attr_t= override; 0 = bench-honest */
 static int g_raw_watermark = 0;
 static tmp_area_mode g_tmp_area = TMP_AREA_AUTO;
 static size_t g_tmp_max_bytes = 128 * 1024 * 1024;
+/* WP59: codec-policy mount gate flags (-o ignore-missing-codecs,
+ * -o ignore-codec-versions) */
+static int g_ignore_missing_codecs = 0;
+static int g_ignore_codec_versions = 0;
 static void invf_sweep_worker(int arm_ckp);   /* defined below sweep thread */
 static void table_rebuild_locked(void);   /* fwd (defined below) */
 
@@ -2833,6 +2837,10 @@ int main(int argc, char *argv[])
                 else
                     fprintf(stderr, "invf: bad -o tmp_max_bytes=%s; ignored\n",
                             tok + 14);
+            } else if (strcmp(tok, "ignore-missing-codecs") == 0) {
+                g_ignore_missing_codecs = 1;
+            } else if (strcmp(tok, "ignore-codec-versions") == 0) {
+                g_ignore_codec_versions = 1;
             } else {
                 size_t tl = strlen(tok);
                 if (fl + tl + 2 < sizeof fbuf) {
@@ -2862,6 +2870,40 @@ int main(int argc, char *argv[])
     if (g_tt)
         fprintf(stderr, "invf: time-travel mount (read-only): all writes "
                 "will fail with EROFS; the live volume is untouched\n");
+
+    /* WP59: codec-policy mount gate.
+     * - No PCK0 (legacy volume): refuse unless -o ignore-missing-codecs.
+     * - BASIC_ONLY: pass (builtin codecs only, no packs required).
+     * - Non-BASIC_ONLY with n_codecs > 0: refuse if codec packs are not
+     *   installed (resolution deferred to WP60; for now refuse loudly).
+     * The gate is skipped on time-travel (read-only) mounts. */
+    if (!g_tt) {
+        const invfs_pck0 *pk = vol_pck0(g_vol);
+        if (!pk) {
+            if (!g_ignore_missing_codecs) {
+                fprintf(stderr, "invf: no codec policy (PCK0) on volume %s; "
+                        "use -o ignore-missing-codecs to mount anyway\n", img);
+                g_shutdown = 1;
+                vol_close(g_vol);
+                g_vol = NULL;
+                return 1;
+            }
+            fprintf(stderr, "invf: WARNING: no codec policy; some reads "
+                    "may fail with EIO\n");
+        } else if (pk->policy_flags & INVFS_PCK0_BASIC_ONLY) {
+            /* BASIC_ONLY: no packs required; mount succeeds */
+        } else if (pk->n_codecs > 0 && !g_ignore_missing_codecs) {
+            fprintf(stderr, "invf: volume %s requires %u codec pack%s "
+                    "(policy not BASIC_ONLY); use -o ignore-missing-codecs "
+                    "to mount anyway\n", img,
+                    (unsigned)pk->n_codecs,
+                    pk->n_codecs == 1 ? "" : "s");
+            g_shutdown = 1;
+            vol_close(g_vol);
+            g_vol = NULL;
+            return 1;
+        }
+    }
     if (have_arc) vol_set_arc_budget(g_vol, arc_limit);
     if (have_dec) vol_set_dec_mem_limit(g_vol, dec_mem_limit);
     /* WP26 env fallback (CLI sessions that cannot pass -o): the mount

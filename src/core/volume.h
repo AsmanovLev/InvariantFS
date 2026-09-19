@@ -272,6 +272,16 @@ int vol_list_xattr(invfs_volume *v, uint64_t inode_id,
 /* accessors for tools */
 const invfs_superblock *vol_sb(invfs_volume *v);
 
+/* WP59: codec-policy descriptor (PCK0).
+ * vol_pck0_present: 1 = a valid PCK0 was loaded at open.
+ * vol_pck0: returns a pointer to the loaded descriptor (NULL if absent).
+ * vol_pck0_gate_failed: 1 if the mount gate refused the volume.
+ * vol_pck0_gate_msg: the refusal reason (empty string if gate passed). */
+int  vol_pck0_present(const invfs_volume *v);
+const invfs_pck0 *vol_pck0(const invfs_volume *v);
+int  vol_pck0_gate_failed(const invfs_volume *v);
+const char *vol_pck0_gate_msg(const invfs_volume *v);
+
 /* Reconstructed-content cache (arc.h). Reported rather than hidden because
    "the cache is present" and "the cache is being used" are different claims,
    and only the counters can tell them apart -- a ranged read that silently

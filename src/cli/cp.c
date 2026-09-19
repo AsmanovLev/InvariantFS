@@ -37,10 +37,11 @@ int main(int argc, char **argv)
     invfs_volume *vol;
     int err;
     uint64_t inode_id;
+    int ignore_missing_codecs = 0;
 
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) {
-            fprintf(stderr, "usage: invf-cp <image> <host-file> [name]\n");
+            fprintf(stderr, "usage: invf-cp [--ignore-missing-codecs] <image> <host-file> [name]\n");
             return 2;
         }
         if (strcmp(argv[i], "-v") == 0 || strcmp(argv[i], "--version") == 0) {
@@ -48,15 +49,22 @@ int main(int argc, char **argv)
                     argv[0], INVFS_VERSION_STRING, INVFS_BUILD_DATE, INVFS_AUTHOR_NAME, INVFS_LICENSE);
             return 0;
         }
+        if (strcmp(argv[i], "--ignore-missing-codecs") == 0) {
+            ignore_missing_codecs = 1;
+        }
     }
 
-    if (argc < 3 || argc > 4) {
-        fprintf(stderr, "usage: invf-cp <image> <host-file> [name]\n");
+    if (argc < 3 || argc > 5) {
+        fprintf(stderr, "usage: invf-cp [--ignore-missing-codecs] <image> <host-file> [name]\n");
         return 2;
     }
-    img = argv[1];
-    host = argv[2];
-    name = (argc == 4) ? argv[3] : host;
+    {
+        int ai = 1;
+        while (ai < argc && strcmp(argv[ai], "--ignore-missing-codecs") == 0) ai++;
+        img = argv[ai++];
+        host = argv[ai++];
+        name = (ai < argc) ? argv[ai] : host;
+    }
 
     data = read_file(host, &len);
     if (!data) {
@@ -67,6 +75,15 @@ int main(int argc, char **argv)
     vol = vol_open(img, &err);
     if (!vol) {
         fprintf(stderr, "cannot open volume %s (err %d)\n", img, err);
+        free(data);
+        return 1;
+    }
+
+    /* WP59: codec-policy gate */
+    if (!vol_pck0_present(vol) && !ignore_missing_codecs) {
+        fprintf(stderr, "invf-cp: no codec policy (PCK0); "
+                "use --ignore-missing-codecs to proceed\n");
+        vol_close(vol);
         free(data);
         return 1;
     }
