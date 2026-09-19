@@ -25,8 +25,17 @@
 name = qcow2
 type = container
 algo = 22
+codec_id = 22
 pack_version = 1
+version = 1
+min_read = 1
 generation = 1
+family = container
+category = primary
+provides = container
+replaces =
+conflicts =
+priority = 100
 caps = container|external
 dec_mem = 0
 sniff.offset = 0

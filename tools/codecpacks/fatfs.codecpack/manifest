@@ -16,8 +16,17 @@
 name = fatfs
 type = container
 algo = 18
+codec_id = 18
 pack_version = 1
+version = 1
+min_read = 1
 generation = 1
+family = container
+category = primary
+provides = container
+replaces =
+conflicts =
+priority = 100
 caps = container|external
 dec_mem = 0
 sniff.magic = 55AA

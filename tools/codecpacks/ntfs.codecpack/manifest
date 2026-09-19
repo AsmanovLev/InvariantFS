@@ -21,8 +21,17 @@
 name = ntfs
 type = container
 algo = 20
+codec_id = 20
 pack_version = 1
+version = 1
+min_read = 1
 generation = 1
+family = container
+category = primary
+provides = container
+replaces =
+conflicts =
+priority = 100
 caps = container|external
 dec_mem = 0
 # "NTFS    " lives at offset 3 in the boot sector (after the jump EB 52 90)

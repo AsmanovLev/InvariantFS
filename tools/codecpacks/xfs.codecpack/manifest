@@ -18,8 +18,17 @@
 name = xfs
 type = container
 algo = 19
+codec_id = 19
 pack_version = 1
+version = 1
+min_read = 1
 generation = 1
+family = container
+category = primary
+provides = container
+replaces =
+conflicts =
+priority = 100
 caps = container|external
 dec_mem = 0
 sniff.magic = 58465342

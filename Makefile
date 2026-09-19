@@ -37,7 +37,7 @@ B3      := blake3 blake3_dispatch blake3_portable
 
 TOOLS   := invf-mkfs invf-verify invf-fsck invf-cp invf-cat invf-ls invf-stat \
            invf-zip invf-arctest invf-blkio_test invf-fuse invf-import invf-sweep meta_probe \
-           invf-stats invf-resize invf-rollback invf-l2ptest invf-migrate-v2
+           invf-stats invf-resize invf-rollback invf-l2ptest invf-migrate-v2 invfs-pack
 
 all: $(TOOLS:%=$(OUT)/%)
 
@@ -59,6 +59,12 @@ endef
 # CLI tools (main in src/cli/<name>.c)
 CLI_MAINS := mkfs verify fsck cp cat ls stat arctest blkio_test resize migrate-v2
 $(foreach t,$(CLI_MAINS),$(eval $(call TOOL_RULE,$(t),)))
+
+# WP60: invfs-pack is named differently (invfs- not invf-)
+$(OUT)/invfs-pack: $(OBJ)/pack.o $(CORE_O)
+	$(CC) $(CFLAGS) -o $@ $< $(CORE_O) $(LDLIBS)
+$(OBJ)/pack.o: $(SRC)/cli/pack.c | $(OBJ)
+	$(CC) $(CFLAGS) -c -o $@ $<
 
 $(OBJ)/invf-zip.o: $(SRC)/recipes/zip.c | $(OBJ)
 	$(CC) $(CFLAGS) -c -o $@ $<

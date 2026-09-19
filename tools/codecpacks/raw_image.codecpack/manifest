@@ -6,8 +6,17 @@
 # pixels, so rebuild is byte-exact by construction (see raw_image.py).
 name = raw_image
 algo = 13
+codec_id = 13
 pack_version = 1
+version = 1
+min_read = 1
 generation = 1
+family = raw_image
+category = primary
+provides = raw_image
+replaces =
+conflicts =
+priority = 100
 caps = wholefile|external
 dec_mem = 0
 requires = cjxl,djxl

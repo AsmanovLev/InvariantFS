@@ -20,8 +20,17 @@
 name = rawdisk
 type = container
 algo = 16
+codec_id = 16
 pack_version = 1
+version = 1
+min_read = 1
 generation = 1
+family = container
+category = primary
+provides = container
+replaces =
+conflicts =
+priority = 100
 caps = container|external
 dec_mem = 0
 # GPT: "EFI PART" at LBA1. MBR: 0x55AA at 510 (weak on purpose -- the
