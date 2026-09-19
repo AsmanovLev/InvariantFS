@@ -1,32 +1,49 @@
 #!/bin/bash
-# mkinitcpio install hook for an InvariantFS rootfs (WP-PKG).
+# mkinitcpio install hook for an InvariantFS rootfs (WP67).
 # Installed as /usr/lib/initcpio/install/invfs.
+
+# Stage one codecpack directory tree. Compiled helpers (<pack>/bin/*) go
+# through add_binary so their shared libraries are resolved; manifests and
+# scripts ride along as plain files (a script whose interpreter is absent
+# from the initramfs simply probes unavailable and its content waits RAW --
+# the builtin codecs still work). Recursing in-shell (rather than piping
+# `find`) keeps add_binary's error bookkeeping in the current shell.
+invfs_stage_pack() {
+    local dir="$1" f
+    for f in "$dir"/* "$dir"/.[!.]* "$dir"/..?*; do
+        [ -e "$f" ] || continue
+        if [ -d "$f" ]; then
+            invfs_stage_pack "$f"
+        else
+            case $f in
+                */bin/*) add_binary "$f" ;;
+                *)       add_file "$f" ;;
+            esac
+        fi
+    done
+}
 
 build() {
     add_module fuse
 
-    # the daemon + offline tools (fsck/verify rescue, sweep for
-    # maintenance boots, rollback for the WP21 checkpoint)
+    # the daemon, the chroot hand-off helper, and the offline tools
+    # (fsck/verify rescue, sweep for maintenance boots, rollback for the
+    # WP21 checkpoint). chroot carries the FUSE-root hand-off because
+    # busybox switch_root cannot enter a FUSE mount (see invfs_hook).
     add_binary invf-fuse
     add_binary invf-sweep
     add_binary invf-fsck
     add_binary invf-verify
     add_binary invf-rollback
+    add_binary chroot
 
-    # the system codecpack dir, staged wholesale. Compiled helpers
-    # (<pack>/bin/*) go through add_binary so their shared libraries are
-    # resolved; manifests and scripts ride along as plain files (a script
-    # whose interpreter is absent from the initramfs simply probes
-    # unavailable and its content waits RAW -- the builtin codecs work).
-    local pack f
-    for pack in /usr/lib/invfs/codecpacks/*.codecpack; do
-        [[ -d $pack ]] || continue
-        while IFS= read -r f; do
-            case $f in
-                */bin/*) add_binary "$f" ;;
-                *)       add_file "$f" ;;
-            esac
-        done < <(find "$pack" -type f)
+    # the system codecpack dir, staged wholesale. INVFS_CODECPACK_DIR
+    # overrides the source root for staged installs and the regression test.
+    local packdir="${INVFS_CODECPACK_DIR:-/usr/lib/invfs/codecpacks}"
+    local pack
+    for pack in "$packdir"/*.codecpack; do
+        [ -d "$pack" ] || continue
+        invfs_stage_pack "$pack"
     done
 
     add_runscript
@@ -40,7 +57,15 @@ invf-fuse daemon. Kernel command line:
     rootfstype=invfs root=<device>
 (or the alias  root=invfs:<device>)
 
-The fuse module and the system codecpack dir are staged into the image.
+Optional:
+    invfs.raw_uuid=<hex>    pin the root volume by superblock uuid
+    invfs.dev1=<device>     second (shadow/mirror) device
+    invfs.dev1_uuid=<hex>   second device by superblock uuid
+    invfs.init=<path>       PID 1 inside the new root (default /sbin/init)
+
+The fuse module, the invf-fuse daemon, chroot and the system codecpack
+dir are staged into the image. switch_root cannot enter a FUSE root, so
+the runtime hook chroots into the mounted volume and execs invfs.init.
 HELPEOF
 }
 

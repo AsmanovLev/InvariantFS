@@ -103,3 +103,98 @@ and align it with the direct-boot kit's proven cmdline contract.
 - direct-boot kit: `tools/mkinitramfs.sh`, `tools/initramfs-init.sh:54-67,108-163`
 - dracut equivalent: `packaging/dracut/90invfs/module-setup.sh`
 - stale init: `vm/initramfs/init` (WP69)
+
+---
+
+## Results
+
+**Status:** done — hook hardened, non-boot regression added, engine untouched.
+
+### switch_root finding (WP Work item 2)
+
+mkinitcpio's runtime `/init` (upstream `init` + `init_functions`) ends with:
+
+```sh
+exec env -i "TERM=$TERM" /usr/bin/switch_root /sysroot "$init" "$@"
+```
+
+and immediately before that it guards the mount with
+`[ "$(stat -c %D /)" = "$(stat -c %D /sysroot)" ]` (drop to an emergency
+shell on equality). `/usr/bin/switch_root` is the busybox applet; its source
+(`util-linux/switch_root.c`, busybox 1.39) does:
+
+```c
+xchdir(newroot);
+xstat("/", &st); rootdev = st.st_dev;
+xstat(".", &st);
+if (st.st_dev == rootdev)
+    bb_show_usage();          /* "new root must be a mountpoint" */
+```
+
+i.e. it rejects the new root when the mount and the initramfs rootfs report
+the same `st_dev`. A FUSE root reports the initramfs rootfs device, so both
+mkinitcpio's own guard and busybox `switch_root` bail before PID 1 can enter
+it. The final `exec env -i ...` also strips every exported variable, so
+`INVFS_DEV1` could never reach PID 1 through that path.
+
+**Conclusion** (confirms the direct-boot kit's comment): generic
+`switch_root` cannot enter a FUSE root. The handler therefore performs the
+proven `exec chroot` hand-off itself, exactly like
+`tools/initramfs-init.sh`: rbind `/proc /sys /dev` into the mounted volume,
+export `INVFS_DEV1`, then `exec chroot <mp> <invfs.init>`. PID 1 survives and
+the environment is preserved.
+
+`/usr/lib/initcpio/init` was **not** present on the build host (no mkinitcpio
+installed); the upstream source was fetched and the assumption recorded here.
+
+### Changes
+
+- `packaging/mkinitcpio/invfs_hook`
+  - two-device support: `invfs.dev1=<dev>` / `invfs.dev1_uuid=<hex>` (the
+    latter via `invf-fuse --probe-uuid`), exported as `INVFS_DEV1`;
+  - `invfs.init=` passthrough (also honours the plain `init=`);
+  - `invfs.raw_uuid=` root pinning, for parity with the direct-boot kit;
+  - `rootflags` passthrough (`invf-fuse -o <rootflags>`);
+  - keeps `rootfstype=invfs` / `root=invfs:<dev>` selection, and sets
+    `fastboot=y` so mkinitcpio does not hand the InvariantFS device to the
+    host `fsck`;
+  - `invfs_die` fallback (current mkinitcpio defines `err`/
+    `launch_interactive_shell`, **not** `panic`, which the old hook called);
+  - chroot hand-off described above; `chroot` is staged by the install hook.
+- `packaging/mkinitcpio/invfs_install`
+  - stages `chroot` (needed by the hand-off);
+  - `INVFS_CODECPACK_DIR` overrides the codecpack source root (staged
+    installs + regression test); the codecpack walk is now an in-shell
+    recursive function (keeps `add_binary`'s error bookkeeping in the
+    current shell, and stays `sh -n` clean);
+  - help text documents the new cmdline.
+- `tools/test-mkinitcpio-hook.sh` (new) — 25 non-boot checks.
+- `packaging/install.sh` — **not changed**: the `WITH_MKINITCPIO=0` default
+  is intentional (PKGBUILD sets 1) and the 0644 install mode is harmless
+  (`type -P` finds non-executable files, and `add_runscript` copies the
+  runtime hook into the image as 0755).
+
+### Validation
+
+```text
+$ sh -n packaging/mkinitcpio/invfs_hook packaging/mkinitcpio/invfs_install
+(clean)
+$ ./bin/busybox-static ash -n packaging/mkinitcpio/invfs_hook
+(clean)
+$ bash tools/test-mkinitcpio-hook.sh
+mkinitcpio-hook test: 25 passed, 0 failed
+$ make test
+bin/invf-arctest: 4467 checks, 0 failure(s)
+bin/invf-blkio_test: 86 checks, 0 failure(s)
+bin/invf-codec_test: 169 checks, 0 failure(s)
+bin/invf-helper_exec_test: 22 checks, 0 failure(s), 1 skip -> PASS
+$ INVFS_E2E_AGENT=wp67-mkinitcpio-hook bash tools/run-e2e.sh tools/test-bootstrap.sh
+bootstrap test: 34 passed, 0 failed
+```
+
+No initramfs was actually built (no mkinitcpio on the build host); the mock
+harness is the deliverable. Boot hand-off remains WP66/WP68.
+
+**Remaining TODOs:** none in scope. `invfs.raw_uuid` has no device-settle
+poll (same as the direct-boot kit); a future WP could add `poll_device`-style
+waiting.

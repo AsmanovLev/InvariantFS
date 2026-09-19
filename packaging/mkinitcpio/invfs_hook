@@ -1,38 +1,145 @@
 #!/usr/bin/ash
-# mkinitcpio runtime hook for an InvariantFS rootfs (WP-PKG).
+# mkinitcpio runtime hook for an InvariantFS rootfs (WP67).
 # Installed as /usr/lib/initcpio/hooks/invfs.
 #
-# Claims the root mount when the kernel cmdline says
+# Claims the root mount when the kernel command line says
 #   rootfstype=invfs root=<device>     (or  root=invfs:<device>)
-# by replacing the mount handler; the rest of the boot is stock.
+# by replacing mkinitcpio's mount handler.
+#
+# Supported kernel command line (parity with tools/initramfs-init.sh):
+#   rootfstype=invfs root=<dev>   select InvariantFS as the root fs
+#   invfs.raw_uuid=<hex>          pin the root device by superblock uuid
+#   invfs.dev1=<dev>              second (shadow/mirror) device
+#   invfs.dev1_uuid=<hex>         second device by superblock uuid
+#   invfs.init=<path>             PID 1 inside the new root (default
+#                                 /sbin/init; alias for the plain init=)
+#   rootflags=<opts>              passed through to invf-fuse as -o <opts>
+#
+# Hand-off: mkinitcpio's /init ends with
+#     exec env -i TERM=$TERM /usr/bin/switch_root /sysroot "$init" "$@"
+# busybox switch_root cannot enter a FUSE root: its mount-point sanity check
+# compares st_dev(".") with st_dev("/") and bails with bb_show_usage() when
+# they match (a FUSE mount reports the initramfs rootfs device). mkinitcpio's
+# own pre-switch guard -- `stat -c %D / == stat -c %D /sysroot` -- drops to an
+# emergency shell for the same reason. So the handler performs the proven
+# direct-boot hand-off itself (tools/initramfs-init.sh): rbind /proc /sys /dev
+# into the new root, export INVFS_DEV1, then `exec chroot` into it. PID 1
+# survives; generic switch_root is bypassed entirely. The chroot binary is
+# staged by the matching install hook (invfs_install).
+
+# Candidate block devices probed for an InvFS superblock uuid. Overridable
+# for unusual layouts and for the non-boot regression test.
+INVFS_BLOCK_GLOBS="${INVFS_BLOCK_GLOBS:-/dev/sd? /dev/sd?? /dev/vd? /dev/vd?? /dev/sd?[0-9] /dev/sd??[0-9] /dev/vd?[0-9] /dev/vd??[0-9]}"
 
 run_hook() {
+    local i
     if [ "$rootfstype" = "invfs" ] || [ "${root%%:*}" = "invfs" ]; then
         mount_handler=invfs_mount_handler
+        # fsck has no meaning for a FUSE root; skip mkinitcpio's generic pass
+        # (otherwise root=<dev> would be handed to the host fsck, which cannot
+        # know the InvariantFS on-disk format)
+        fastboot=y
+        i="$(invfs_getarg invfs.init)"
+        [ -n "$i" ] && init="$i"
     fi
+}
+
+invfs_die() {
+    if command -v panic >/dev/null 2>&1; then
+        panic "invfs: $*"
+    else
+        err "invfs: $*"
+        launch_interactive_shell --exec
+    fi
+}
+
+# cmdline lookup: prefer mkinitcpio's getarg (/tmp/cmdline cache), else read
+# /proc/cmdline directly (direct/standalone use).
+invfs_getarg() {
+    local key="$1" w
+    if command -v getarg >/dev/null 2>&1; then
+        getarg "$key"
+        return
+    fi
+    for w in $(cat /proc/cmdline 2>/dev/null); do
+        case "$w" in
+            "$key"=*) printf '%s' "${w#*=}"; return;;
+        esac
+    done
+}
+
+# print the block device carrying the wanted InvFS superblock uuid, if any
+invfs_probe_uuid() {
+    local want="$1" d uuid
+    for d in $INVFS_BLOCK_GLOBS; do
+        [ -b "$d" ] || continue
+        uuid="$(invf-fuse --probe-uuid "$d" 2>/dev/null)" || continue
+        [ "$uuid" = "$want" ] && { printf '%s' "$d"; return 0; }
+    done
+    return 1
 }
 
 invfs_mount_handler() {
     local mp="$1"
     local dev="${root#invfs:}"
+    local raw_uuid dev1 invfs_init
 
     modprobe fuse 2>/dev/null
 
-    dev="$(resolve_device "$dev")" || panic "invfs: cannot resolve root device '$dev'"
+    # root device: invfs.raw_uuid pins it; else root= / root=invfs:<dev>
+    raw_uuid="$(invfs_getarg invfs.raw_uuid)"
+    if [ -n "$raw_uuid" ]; then
+        dev="$(invfs_probe_uuid "$raw_uuid")" \
+            || invfs_die "no InvariantFS device with uuid $raw_uuid"
+    elif [ -n "$dev" ]; then
+        dev="$(resolve_device "$dev")" \
+            || invfs_die "cannot resolve root device '$dev'"
+    else
+        invfs_die "root device not set (need root=<dev> or root=invfs:<dev>)"
+    fi
+
+    # second device: invfs.dev1=<dev> wins, else invfs.dev1_uuid=<hex>
+    dev1="$(invfs_getarg invfs.dev1)"
+    if [ -n "$dev1" ]; then
+        dev1="$(resolve_device "$dev1")" \
+            || invfs_die "cannot resolve dev1 device '$dev1'"
+    else
+        dev1="$(invfs_getarg invfs.dev1_uuid)"
+        if [ -n "$dev1" ]; then
+            dev1="$(invfs_probe_uuid "$dev1")" \
+                || invfs_die "no InvariantFS device with uuid $dev1"
+        fi
+    fi
+    if [ -n "$dev1" ]; then
+        export INVFS_DEV1="$dev1"
+        msg "invfs: second device $dev1 (INVFS_DEV1)"
+    fi
 
     msg ":: mounting InvariantFS volume '$dev' on real root"
-    # rootflags (if any) ride into the daemon as -o options; libfuse
-    # understands the generic ones (ro/rw), invf-fuse parses its own
+    # rootflags ride into the daemon as -o options; invf-fuse pulls out its
+    # own keys (arc_limit=, at_checkpoint, ...) and passes the rest to libfuse
     if [ -n "${rootflags:-}" ]; then
         invf-fuse -o "$rootflags" "$dev" "$mp"
     else
         invf-fuse "$dev" "$mp"
     fi
-    if [ $? -eq 0 ]; then
-        msg "invfs: root fs mounted ($dev)"
-    else
-        panic "invfs: failed to mount '$dev'"
-    fi
+    [ $? -eq 0 ] || invfs_die "failed to mount '$dev'"
+    msg "invfs: root fs mounted ($dev)"
+
+    # chroot hand-off: switch_root cannot enter a FUSE root (see header)
+    invfs_init="$(invfs_getarg invfs.init)"
+    [ -n "$invfs_init" ] || invfs_init="${init:-/sbin/init}"
+    [ -n "$invfs_init" ] || invfs_init=/sbin/init
+    [ -x "$mp$invfs_init" ] \
+        || invfs_die "init '$invfs_init' not found under $mp (set invfs.init=)"
+
+    mkdir -p "$mp/proc" "$mp/sys" "$mp/dev"
+    mount --rbind /proc "$mp/proc" 2>/dev/null
+    mount --rbind /sys  "$mp/sys"  2>/dev/null
+    mount --rbind /dev  "$mp/dev"  2>/dev/null
+
+    msg "invfs: chroot hand-off -> $invfs_init"
+    exec chroot "$mp" "$invfs_init"
 }
 
 # vim: set ft=sh ts=4 sw=4 et:
