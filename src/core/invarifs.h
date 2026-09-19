@@ -736,6 +736,62 @@ typedef struct {
 } invfs_blkptr;                 /* 24 bytes */
 #pragma pack(pop)
 
+/* ---- WP-M10: v3 delta-log wire format (design §4/§12, decision D1) ----
+ * The recent tier is an append-only, coalescing log of namespace mutations
+ * (create/unlink/rename/attr/xattr). Records are written back-to-back after
+ * a per-segment header; segments chain oldest <- newest through prev_pba and
+ * the active (newest) segment is named by RT30.delta_pba. On mount the log
+ * is replayed in chain order into an in-memory index keyed by namespace key
+ * (D1: append log + in-memory index). Overlay reads are WP-M11, mutation
+ * wiring is WP-M12, mount replay is WP-M13 and fold is WP-M14; this WP is
+ * the log + index + replay engine only.
+ *
+ * Record (frozen by WP-M10; all length fields are big-endian on disk):
+ *   key_len:u16 BE | val_len:u16 BE | flags:u16 BE | crc32c:u32 | key | val
+ * crc32c is CRC32C over key||val (the field itself is not covered). flags
+ * bit0 marks a delete record (shadows the base; value absent, val_len == 0);
+ * other bits are reserved 0 and a new WP must claim one. A zeroed record
+ * header is the clean end of the log (padding after the last live record),
+ * not a zero-length record.
+ *
+ * Segment header (WP-M10; stripe size is this WP's decision). 32 blocks =
+ * 128 KiB, large enough to hold the largest metadata record this path is
+ * expected to carry (a WP-M7 xattr value is capped at 64 KiB) plus framing,
+ * while keeping a mount-time replay buffer bounded:
+ *   magic "DSG3" | version | hdr_size | seg_blocks | seg_seq | prev_pba |
+ *   next_pba | crc32c
+ * prev_pba walks toward the oldest segment (that is replay order). next_pba
+ * is reserved 0 for a future forward walk (WP-M15 reclaim); it is not read
+ * by this WP. All multi-byte header fields are big-endian on disk except the
+ * CRC, which follows the RT30/page native-u32 convention. */
+#define INVFS_DELTA_SEG_MAGIC     "DSG3"
+#define INVFS_DELTA_SEG_VERSION   1u
+#define INVFS_DELTA_FLAG_DELETE   0x0001u
+#define INVFS_DELTA_REC_HDR_LEN   10u
+#define INVFS_DELTA_SEG_BLOCKS    32u   /* 128 KiB stripe (this WP's decision) */
+#define INVFS_DELTA_SEG_BYTES     ((uint64_t)INVFS_DELTA_SEG_BLOCKS * INVFS_BLOCK_SIZE)
+#define INVFS_DELTA_SEG_HDR_LEN   44u   /* sizeof(invfs_delta_seg_hdr) */
+
+#pragma pack(push, 1)
+typedef struct {
+    uint16_t key_len;           /* big-endian on disk */
+    uint16_t val_len;           /* big-endian; 0 for a delete record */
+    uint16_t flags;             /* INVFS_DELTA_FLAG_* (big-endian) */
+    uint32_t crc32c;            /* CRC32C over key||val (native) */
+} invfs_delta_rec_hdr;          /* 10 bytes */
+
+typedef struct {
+    char     magic[4];          /* "DSG3" */
+    uint32_t version;           /* INVFS_DELTA_SEG_VERSION */
+    uint32_t hdr_size;          /* INVFS_DELTA_SEG_HDR_LEN */
+    uint32_t seg_blocks;        /* segment capacity in 4 KiB blocks */
+    uint64_t seg_seq;           /* monotone segment sequence (newest highest) */
+    uint64_t prev_pba;          /* older segment pba (0 = oldest) */
+    uint64_t next_pba;          /* newer segment pba (0 = active; reserved 0) */
+    uint32_t crc32c;            /* CRC32C over header with this field read 0 */
+} invfs_delta_seg_hdr;          /* 44 bytes */
+#pragma pack(pop)
+
 /* WP30: Metadata extent entry in the mapper table (8 bytes)
  * Encoded as: bits [0,59] = absolute pba, bits [60,63] = size_class
  * size_class 0..15: extent_size = 64KB << size_class

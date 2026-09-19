@@ -561,6 +561,26 @@ typedef struct invfs_volume {
     uint64_t mb_boot_end;           /* one past the reserved root-area pages */
     uint64_t mb_alloc_cursor;       /* free-space cursor within the meta zone */
     uint64_t mb_alloc_fail_run;     /* smallest proven-unavailable run (0=?) */
+    /* ---- WP-M10: metadata-v3 delta-log state (recent tier) ------------
+     * The append-only delta segment chain holds coalescing namespace
+     * mutations; delta_index maps a namespace key to the winning record
+     * {segment, offset, seq} (D1: append log + in-memory index). Mount
+     * replays the chain into the index (vol_delta_mount), bounded by the
+     * fold cadence (D2). Overlay reads are WP-M11 and fold is WP-M14; this
+     * WP appends, indexes and replays only. delta_index is opaque here so
+     * volume_internal.h needs no vol_delta.h include. delta_bump is the
+     * next free byte in the active segment; on a fresh segment it starts
+     * at INVFS_DELTA_SEG_HDR_LEN. All counters are per-handle diagnostics
+     * and are not persisted. */
+    struct delta_index *delta_index;   /* coalescing key index (NULL = none) */
+    uint64_t delta_seg_pba;            /* active (newest) segment pba (0=none) */
+    uint64_t delta_seg_gen;            /* highest segment seq seen/allocated */
+    uint64_t delta_bump;               /* next free byte in the active segment */
+    uint64_t delta_seq;                /* monotone record sequence counter */
+    uint64_t delta_records;            /* live records indexed */
+    uint64_t delta_segments;           /* segments in the chain */
+    uint64_t delta_bytes;              /* record payload bytes appended */
+    int      delta_ready;              /* mount replay done for this handle */
     /* WP30 Phase 6: merge-in-progress flag for concurrency safety.
      * Set during vol_meta_merge_run, checked in meta_get_append_pos to
      * prevent concurrent metadata operations from reading partially-updated

@@ -30,7 +30,7 @@ FUSE_LIBS   := $(shell pkg-config --libs fuse3)
 CORE    := volume vol_cpack helper_exec vol_png vol_seal vol_repair vol_rollback \
            vol_resize vol_fsck vol_crash vol_exer vol_dedupe vol_textzone \
            vol_heat vol_sweep vol_read vol_write vol_records vol_ast \
-           vol_dirs vol_tier vol_meta_merge vol_metabuf vol_btree \
+           vol_dirs vol_tier vol_meta_merge vol_metabuf vol_btree vol_delta \
            arc crc32c lz4 flacx tarx pngx blkio miniz blake3 blake3_dispatch blake3_portable ppmd8 ppmd8enc ppmd8dec ppmd_codec codec bcj_x86 rs
 CORE_O  := $(addprefix $(OBJ)/,$(addsuffix .o,$(CORE)))
 B3      := blake3 blake3_dispatch blake3_portable
@@ -108,7 +108,7 @@ $(OBJ)/meta_probe.o: tools/meta_probe.c | $(OBJ)
 clean:
 	rm -rf $(OBJ) $(TOOLS:%=$(OUT)/%) $(OUT)/invf-codec_test \
 	       $(OUT)/invf-helper_exec_test $(OUT)/invf-metabuf_test \
-	       $(OUT)/invf-btree_test \
+	       $(OUT)/invf-btree_test $(OUT)/invf-delta_test \
 	       $(OUT)/invf-fuzz
 
 # ---- tests ---------------------------------------------------------------
@@ -119,6 +119,12 @@ $(OUT)/invf-codec_test: $(OBJ)/codec_test.o $(OBJ)/codec.o $(OBJ)/ppmd8.o $(OBJ)
 # WP61: unit coverage for the shared helper containment launcher.
 $(OUT)/invf-helper_exec_test: $(OBJ)/helper_exec_test.o $(OBJ)/helper_exec.o
 	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
+
+# WP-M10: delta-log unit harness + offline e2e driver (tools/, not src/cli).
+$(OUT)/invf-delta_test: $(OBJ)/delta_test.o $(CORE_O)
+	$(CC) $(CFLAGS) -Itools -o $@ $< $(CORE_O) $(LDLIBS)
+$(OBJ)/delta_test.o: tools/delta_test.c | $(OBJ)
+	$(CC) $(CFLAGS) -c -o $@ $<
 
 # fuzz tier: on-demand property/fuzz harness for the pure/parsing layers.
 # NOT part of `make test` -- `make fuzz` only builds it, run it by hand:
@@ -135,13 +141,15 @@ fuzz-ci: $(OUT)/invf-fuzz
 	$(OUT)/invf-fuzz 10000 0x1CF51EE5
 
 test: $(OUT)/invf-arctest $(OUT)/invf-blkio_test $(OUT)/invf-codec_test \
-      $(OUT)/invf-helper_exec_test $(OUT)/invf-metabuf_test $(OUT)/invf-btree_test
+      $(OUT)/invf-helper_exec_test $(OUT)/invf-metabuf_test $(OUT)/invf-btree_test \
+      $(OUT)/invf-delta_test
 	$(OUT)/invf-arctest
 	$(OUT)/invf-blkio_test
 	$(OUT)/invf-codec_test
 	$(OUT)/invf-helper_exec_test
 	$(OUT)/invf-metabuf_test
 	$(OUT)/invf-btree_test
+	$(OUT)/invf-delta_test
 
 # e2e tier: tmpfs images under /dev/shm; test-jxl needs cjxl/djxl installed
 e2e: all

@@ -16,6 +16,7 @@
 
 #include "volume_internal.h"
 #include "vol_metabuf.h"
+#include "vol_delta.h"
 
 
 static const uint64_t JOURNAL_BLOCKS = INVFS_JOURNAL_BLOCKS;
@@ -1667,6 +1668,11 @@ static invfs_volume *vol_open_inner(const char *path, int at_ckpt,
         v->v3_mbuf_ready = 1;
         v->needs_recovery = 1;
         v->sb.vol_flags &= ~(VOLF_READONLY | VOLF_RO_SPACE);
+        /* WP-M10: replay the append-only delta chain named by RT30 into the
+         * in-memory index (D1). Overlay reads are WP-M11 and fold is WP-M14;
+         * this only reconstructs the recent tier so a crash/remount keeps
+         * it. A torn tail is truncated inside vol_delta_mount. */
+        if (vol_delta_mount(v) != 0) { *err = -6; goto fail; }
         fprintf(stderr, "vol_open: %s: format v3 (metadata-v3 inode tree): "
                 "base root engine up, v2 paths refused\n", real);
     } else
@@ -2225,6 +2231,7 @@ free(rb);
         v->needs_recovery = 1;   /* a degraded mount is always read-only */
     return v;
 fail:
+    vol_delta_close(v);   /* WP-M10: free any replay index (no-op if none) */
     io_close(&v->io);
     pthread_rwlock_destroy(&v->meta_lock);
     if (v->bitmap) free(v->bitmap);
@@ -2308,6 +2315,9 @@ void vol_close(invfs_volume *v)
         if (getenv("INVFS_FSYNC"))
             vmux_barrier(v, "close");
     }
+    /* WP-M10: drop the in-memory delta index (the log itself is already
+     * durable; no flush is needed). No-op for a v2 handle. */
+    vol_delta_close(v);
     io_close(&v->io);
     pthread_rwlock_destroy(&v->meta_lock);
     idx_clear(v);
