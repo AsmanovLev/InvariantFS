@@ -14,6 +14,8 @@
 # device. Optional kernel cmdline:
 #   invfs.raw_uuid=<hex>   force the raw volume
 #   invfs.dev1_uuid=<hex>  force the second (shadow/mirror) volume
+#   invfs.sweepboot        maintenance boot (WP23): sweep engine-side and
+#                          reboot, never FUSE-mounting the volume
 # Without them the first InvFS device is RAW; a second distinct one is DEV1.
 
 export PATH=/usr/local/bin:/sbin:/bin:/usr/sbin:/usr/bin
@@ -101,6 +103,21 @@ echo "INVFS_RAW=$INVFS_RAW DEV1=$INVFS_DEV1"
 if [ -z "$INVFS_RAW" ]; then
     echo "ERROR: no InvariantFS volume found on any block device"
     sh
+fi
+
+# ---- WP23 sweepboot: maintenance boot --------------------------------------
+# `invfs.sweepboot` on the cmdline turns this boot into a maintenance pass:
+# the sweep runs ENGINE-SIDE (the volume is never FUSE-mounted here), then
+# reboot -f hands back to the normal entry. /sweepboot-init.sh is staged by
+# mkinitramfs.sh and NEVER blocks the fall-through to a normal boot.
+SWEEPBOOT=0
+for a in $(cat /proc/cmdline 2>/dev/null); do
+    case "$a" in invfs.sweepboot) SWEEPBOOT=1 ;; esac
+done
+if [ "$SWEEPBOOT" = 1 ] && [ -f /sweepboot-init.sh ]; then
+    echo "[init] invfs.sweepboot: maintenance boot for $INVFS_RAW"
+    . /sweepboot-init.sh "$INVFS_RAW"
+    echo "[init] sweepboot returned without rebooting; NORMAL boot continues"
 fi
 
 # ---- mount -----------------------------------------------------------------

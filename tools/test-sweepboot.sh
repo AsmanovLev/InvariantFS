@@ -4,8 +4,10 @@
 # exercised against a loop-file image exactly as tools/sweepboot-init.sh
 # issues them.
 #
-#   Leg 0: sweepboot-init.sh is syntax-clean (bash -n; the initramfs
-#          runs busybox sh, and bash -n is the available proxy)
+#   Leg 0: the real init source (tools/initramfs-init.sh, copied to /init
+#          by mkinitramfs.sh) is syntax-clean (bash -n; the initramfs runs
+#          busybox sh, and bash -n is the available proxy) and carries the
+#          invfs.sweepboot branch + sources /sweepboot-init.sh
 #   Leg 1: rootfs-ish image: /usr/lib/invfs/codecpacks fixture (the
 #          splt_test pack) + corpus imported; invf-sweep --extract-packs
 #          materializes the packs OUT of the unmounted volume, bit-exact
@@ -43,15 +45,27 @@ fail() { echo "FAIL: $*" >&2; exit 1; }
 fsck_ok() { $B/invf-fsck "$1" | tee "$WORK/fsck.last" | grep -q "^OK$" \
     || { cat "$WORK/fsck.last"; fail "fsck not clean: $1"; }; }
 
-deep_ok() { $B/invf-verify "$1" --deep | tail -1 | grep -q " 0 corrupt," \
-    || fail "verify --deep not clean: $1"; }
+# invf-verify exits nonzero on pre-existing seal-parity drift
+# (INCIDENTS.md:612-613) as well as on corrupt files. Parity is owned by
+# tools/test-seal.sh; here we assert the sweepboot-relevant invariant --
+# file integrity -- and echo the parity line for visibility. The `|| true`
+# mirrors tools/test-compact.sh:466.
+deep_ok() { $B/invf-verify "$1" --deep > "$WORK/verify.last" 2>&1 || true
+    grep -q "^parity:" "$WORK/verify.last" && grep "^parity:" "$WORK/verify.last"
+    grep -q " 0 corrupt," "$WORK/verify.last" \
+        || { cat "$WORK/verify.last"; fail "verify --deep not clean: $1"; }; }
 
-echo "== [0] sweepboot-init.sh syntax (bash -n) =="
+echo "== [0] init source syntax + sweepboot branch (the BUILT init) =="
 bash -n "$REPO/tools/sweepboot-init.sh" || fail "sweepboot-init.sh syntax"
-bash -n "$REPO/vm/initramfs/init" || fail "vm/initramfs/init syntax"
-grep -q "invfs.sweepboot" "$REPO/vm/initramfs/init" \
-    || fail "/init lost the invfs.sweepboot branch"
-echo "  scripts parse; /init carries the invfs.sweepboot branch"
+# Test the real artifact: mkinitramfs.sh copies tools/initramfs-init.sh to
+# /init in the image. The stale tracked vm/initramfs/init (WP23b, switch_root)
+# was retired in WP69; grepping it made this test lie.
+bash -n "$REPO/tools/initramfs-init.sh" || fail "tools/initramfs-init.sh syntax"
+grep -q "invfs.sweepboot" "$REPO/tools/initramfs-init.sh" \
+    || fail "tools/initramfs-init.sh lost the invfs.sweepboot branch"
+grep -q "sweepboot-init.sh" "$REPO/tools/initramfs-init.sh" \
+    || fail "tools/initramfs-init.sh does not source /sweepboot-init.sh"
+echo "  scripts parse; built /init carries the invfs.sweepboot branch"
 
 echo
 echo "== [1] extract-packs materializes the on-volume packs, bit-exact =="

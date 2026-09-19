@@ -7,11 +7,13 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 IR="$ROOT/vm/initramfs"
 KVER="$(uname -r)"
 
+mkdir -p "$IR"
 cd "$IR"
 rm -f "$ROOT/vm/initramfs.cpio.gz"
 
-# vm/ is gitignored, so a fresh checkout has only the tracked /init; create
-# the directory skeleton the recipe writes into (WP64: reproducible builds).
+# vm/ is gitignored, so a fresh checkout has no vm/initramfs tree at all;
+# create the directory skeleton the recipe writes into (WP64: reproducible
+# builds, WP69: the stale tracked /init was retired).
 mkdir -p bin sbin usr/local/bin usr/local/lib lib64 modules \
          proc sys dev tmp mnt/invfs run
 
