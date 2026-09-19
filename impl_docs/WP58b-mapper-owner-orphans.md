@@ -25,9 +25,10 @@ meta_mapper`) bugs. **Bug A is fixed and committed; Bug B is open.**
   volume, and `test-rollback.sh` failed even earlier (at `[C] --realize`).
 
 - **Bug B — appends after a rollback are invisible on a mapper volume.**
-  OPEN. This is the current `tools/test-rollback.sh` E2 failure:
-  `'a.c.v2' not found`. Isolated and reproduced; root cause narrowed but
-  not fixed. Details in “Bug B” below.
+  **FIXED** (working-tree commit, see “Bug B” below). Root cause was the
+  extent-relative append cursor `met0.active_offset` not being rebased on
+  rollback. `tools/test-rollback.sh` is now fully **PASS** (A1–G, E2/E3
+  included).
 
 ---
 
@@ -118,53 +119,77 @@ after `cd /dev/shm` (as `tools/test-rollback.sh` does).
 
 ---
 
-## Bug B — appends after a rollback are invisible on a mapper volume (OPEN)
+## Bug B — appends after a rollback are invisible on a mapper volume (FIXED)
 
-**Symptoms:** `tools/test-rollback.sh` E2 fails with
+**Symptoms:** `tools/test-rollback.sh` E2 failed with
 `'a.c.v2' not found` after `INVFS_ROLLBACK_ABORT_AT=rebuilt` + re-run of
-`invf-rollback`. Earlier legs A1–D and E1 pass.
+`invf-rollback`. Earlier legs A1–D and E1 passed.
 
-**Isolation (proven):**
+**Minimal repro (mapper volume):**
 
 ```bash
-# after E1's rollback on a mapper volume:
-$ bin/invf-cp <img> <host>/a.c a.c.v2
-stored 'a.c.v2' as inode 13: 120000 bytes -> RAW zone   # rc=0
-$ bin/invf-ls <img>
-    120000 bytes  inode 1  a.c                          # a.c.v2 is NOT listed
+bin/invf-mkfs m.img 0.5
+bin/invf-cp m.img a.c a.c          # inode record 124 B at extent0 off 0
+bin/invf-cp m.img b.bin b.bin      # ... off 124..218
+bin/invf-sweep m.img               # rewrites into extent0, grows extent
+                                   # table, active_offset 218 -> 1092
+bin/invf-rollback m.img
+bin/invf-cp m.img a.c new.txt      # rc=0, "stored ... as inode 3"
+bin/invf-ls m.img                  # new.txt MISSING
 ```
 
-- A **plain** rollback (no preceding E1) preserves pre-existing `.v2`
-  names correctly: before sweep v2=7, after sweep v2=9, after rollback
-  v2=7. So the rollback itself restores the pre-sweep view.
-- The problem is **writes issued after a rollback**: `vol_write`/`invf-cp`
-  creates the record (inode id allocated, “stored”), but the record is not
-  found by the subsequent open's `vol_records_walk` / name index. Likely
-  the append cursor (`v->inode_area_pos`, `v->met0.active_extent`,
-  `v->met0.active_offset`) or the mapper table is left inconsistent by the
-  rollback's phase-1 truncation (`v->inode_area_pos = iapos`; zeroing
-  `[iapos, inode_area_pos)`) / phase-2 rebuild, so the new record lands
-  outside the extents the walk revisits.
+**Root cause (proven with `-DINVFS_DEBUG_META_EXTENTS`):** on a mapper
+volume the file-record append cursor is extent-relative —
+`v->met0.active_extent` / `v->met0.active_offset` — and the sweep moves
+it forward (it rewrites records into the active extent and may create a
+new extent). `vol_rollback`'s phase 1 restored `v->inode_area_pos` to the
+checkpoint's `iapos` and **zeroed the dead tail `[iapos, old_pos)`**, but
+left `met0.active_offset` at the sweep's end. Debug trace after rollback
+of the repro:
 
-**Why it matters:** any write after `invf-rollback` (or after the crash
-recovery path that shares this code) on a mapper volume can be silently
-lost from the namespace — a correctness bug, not just a leak.
+```
+[flush.met0] write ext_count=2 active_extent=0 active_offset=1092
+[mga] in: extent_idx=0 off=1092 ...      <- stale sweep cursor
+```
 
-**Next steps to investigate:**
+The next `vol_append_slot` therefore handed out `extent0_pba*BS + 1092`,
+which sits **past** the zeroed region (pre-sweep records end at
+offset 218). The record stream became
+`[a.c][b.bin] 0x00...0x00 [new.txt]`; `vol_records_walk_ex` /
+`vol_inode_next` stop at the first non-magic bytes, so the new record
+was written but never found on reopen (verified: `invf-cp` is happy, but
+this walk stops at 218 and `invf-ls` shows only the pre-sweep names).
 
-1. In `vol_rollback` phase 1 (`src/core/vol_rollback.c`, around the
-   `v->inode_area_pos = iapos;` line and the tail-zeroing block), print
-   `iapos`, the pre-rollback `v->inode_area_pos`, `met0.active_extent`,
-   `met0.active_offset`, `extent_count`, and the mapper table before/after.
-2. Check whether `vol_append_slot` after rollback resolves the active
-   extent via a stale `active_offset`/`active_extent` (the extent may have
-   been freed/trimmed), so the write goes past the extent end or into an
-   unreferenced slot.
-3. Reproduce minimally on a mapper volume: mkfs → cp file(s) → sweep →
-   rollback → cp a new name → reopen → `invf-ls`. Add a regression to
-   `tools/test-rollback.sh` or a new small suite once fixed.
-4. Compare against the legacy (non-mapper) path, where the same sequence
-   works — the difference is the extent cursor vs the linear cursor.
+**Fix** (`src/core/vol_rollback.c`, phase 1, right after
+`v->inode_area_pos = iapos`): rebase the extent-relative cursor onto the
+restored pre-sweep append pointer.
+
+```c
+if (v->met0_present && v->meta_mapper &&
+    v->met0.active_extent < (uint64_t)v->meta_mapper_n) {
+    uint64_t e = meta_mapper_get(v, (size_t)v->met0.active_extent);
+    if (e) {
+        uint64_t base = invfs_meta_ext_pba(e) * (uint64_t)INVFS_BLOCK_SIZE;
+        v->met0.active_offset = iapos > base ? iapos - base : 0;
+    }
+}
+```
+
+**Verification:**
+
+- Minimal repro now shows `new.txt` in `invf-ls`, bit-exact.
+- `bash tools/run-e2e.sh tools/test-rollback.sh` → **ROLLBACK E2E: PASS**
+  (A1–G; E2/E3 crash legs green).
+- Regression: `bash /tmp/opencode/orph-repro.sh` still
+  `orphans=0 missing=0`, bit-exact 5/5; `make test` PASS
+  (4467/86/169/22).
+- `tools/test-mapper-crash.sh` → 21 passed, 3 failed; the 3 failures are
+  **pre-existing** (reproduced with the fix stashed on `ecf66ff`: leg3/leg4
+  report “1 descending step”, leg1 identical). Not caused by this change.
+
+**Why it mattered:** any write after `invf-rollback` (or after the crash
+recovery path that shares this code) on a mapper volume was silently lost
+from the namespace — a correctness bug, not just a leak.
 
 ---
 

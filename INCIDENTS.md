@@ -667,12 +667,15 @@ sweep had already freed. Observed on a 5-file volume as
 Verified: `orphans=0 missing=0` through 4 sweeps + realize, files
 bit-exact 5/5; `make test` PASS (4467/86/169/22, 0 failures).
 
-**OPEN (same area, separate bug):** on a mapper volume, appends issued
-**after a rollback** are created but invisible to
-`vol_records_walk`/`invf-ls`. `test-rollback.sh` E2 fails with
-`'a.c.v2' not found`; a plain rollback preserves pre-existing names, but
-`invf-cp` right after a rollback reports "stored ... as inode N" yet the
-name never shows in the reopening scan. Likely a stale append cursor
-(`met0.active_extent`/`active_offset`/`inode_area_pos`) left by the
-rollback's phase-1 truncation. Tracked in
-`impl_docs/WP58b-mapper-owner-orphans.md` (Bug B).
+**FIXED (Bug B too):** on a mapper volume the sweep moves the
+extent-relative append cursor (`met0.active_offset`); `vol_rollback`
+restored `inode_area_pos` and zeroed the dead tail but left
+`active_offset` at the sweep's end, so the next append landed *past* the
+zeroed region and the record stream split at a run of zeros (the walk
+stops at the first bad magic). `vol_rollback` now rebases
+`met0.active_offset` onto the restored `iapos`. Verified:
+`tools/test-rollback.sh` **ROLLBACK E2E: PASS** (E2/E3 green); minimal
+mapper repro (mkfs→cp×2→sweep→rollback→cp new→ls) shows the new name
+bit-exact; Bug A regression still `orphans=0 missing=0`, `make test`
+PASS. `test-mapper-crash.sh` leg3/leg4 “1 descending step” is
+**pre-existing** (reproduced with the fix stashed).

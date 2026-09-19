@@ -1045,6 +1045,26 @@ int vol_rollback(invfs_volume *v, uint64_t *reclaimed_out)
         }
 #endif
         v->inode_area_pos = iapos;
+        /* On a mapper volume the file-record append cursor is
+         * extent-relative (met0.active_extent/active_offset) and the
+         * sweep moved it forward (it rewrote records into the active
+         * extent and possibly grew the extent table). Restoring only
+         * inode_area_pos leaves active_offset pointing at the sweep's
+         * end; the next append then lands PAST the zeroed dead tail
+         * [iapos, old_pos), splitting the record stream at a run of
+         * zeros. vol_records_walk stops at the first bad magic, so the
+         * newly appended record is never found again (test-rollback.sh
+         * E2: "stored 'a.c.v2' ... " then 'a.c.v2' not found). Rebase
+         * active_offset onto the restored pre-sweep append pointer. */
+        if (v->met0_present && v->meta_mapper &&
+            v->met0.active_extent < (uint64_t)v->meta_mapper_n) {
+            uint64_t e = meta_mapper_get(v, (size_t)v->met0.active_extent);
+            if (e) {
+                uint64_t base = invfs_meta_ext_pba(e) *
+                                (uint64_t)INVFS_BLOCK_SIZE;
+                v->met0.active_offset = iapos > base ? iapos - base : 0;
+            }
+        }
         if (l2p_replay(v) != 0) return -1;
     }
 
