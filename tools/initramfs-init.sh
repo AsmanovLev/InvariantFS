@@ -29,13 +29,14 @@ mount -t proc proc /proc
 mount -t sysfs sysfs /sys
 sleep 1
 
-# FUSE is a loadable module on distro kernels (CONFIG_FUSE_FS=m): load the
-# matching fuse.ko the initramfs carries at /fuse.ko BEFORE invf-fuse opens
-# /dev/fuse. Without this the mount never appears and we drop to a shell
-# after the 120s wait below.
+# FUSE is a loadable module on mainstream distro kernels (Fedora, Arch,
+# CONFIG_FUSE_FS=m): load the matching fuse.ko the initramfs carries at
+# /fuse.ko BEFORE invf-fuse opens /dev/fuse. Without this the mount never
+# appears and we drop to a shell after the 120s wait below.
 if [ ! -e /dev/fuse ]; then
     busybox insmod /fuse.ko 2>/dev/null || true
     [ -e /dev/fuse ] || busybox mknod /dev/fuse c 10 229 2>/dev/null || true
+    [ -e /dev/fuse ] && chmod 666 /dev/fuse 2>/dev/null
 fi
 
 # ---- cmdline options -----------------------------------------------------
@@ -149,4 +150,9 @@ done
 
 echo "Chrooting to InvFS root..."
 export INVFS_DEV1
-exec chroot /mnt/invfs /sbin/init
+# Optional alternate init (documented cmdline option; used by the Arch
+# bring-up because systemd is not usable as PID1 on a FUSE root -- see
+# docs/ARCH-INSTALL.md). Defaults to /sbin/init.
+INIT=$(get_opt invfs.init)
+[ -n "$INIT" ] || INIT=/sbin/init
+exec chroot /mnt/invfs "$INIT"

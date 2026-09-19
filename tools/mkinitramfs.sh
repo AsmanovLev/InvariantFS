@@ -14,6 +14,14 @@ rm -f "$ROOT/vm/initramfs.cpio.gz"
 cp "$ROOT/bin/busybox-static" bin/busybox
 chmod 755 bin/busybox
 ln -sf busybox bin/sh
+# Applet symlinks: tools/initramfs-init.sh invokes mount/grep/cat/sleep/
+# mkdir/chroot as bare commands, and busybox only exposes an applet when
+# argv[0] (or a symlink) names it. Without these the initramfs dies at the
+# first `mount -t proc`. Harmless for the sweepboot branch.
+for a in mount umount cat grep sed awk cut head tail sort find mkdir \
+         chroot insmod ls cp mv rm sleep dmesg printf switch_root; do
+    ln -sf busybox "bin/$a"
+done
 
 # engine daemon + shared libs (host paths -> /usr/local)
 cp "$ROOT/bin/invf-fuse" usr/local/bin/
