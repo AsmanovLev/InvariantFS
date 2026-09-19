@@ -157,6 +157,13 @@ mount --rbind /proc /mnt/invfs/proc 2>/dev/null
 mount --rbind /sys  /mnt/invfs/sys  2>/dev/null
 mount --rbind /dev  /mnt/invfs/dev  2>/dev/null
 
+# WP66 H1: systemd expects /run as tmpfs and cgroup2 before PID1 starts.
+# Without these, early-mount units fail and daemon startup hangs.
+mkdir -p /mnt/invfs/run
+mount -t tmpfs tmpfs /mnt/invfs/run 2>/dev/null
+mkdir -p /mnt/invfs/sys/fs/cgroup
+mount -t cgroup2 cgroup2 /mnt/invfs/sys/fs/cgroup 2>/dev/null || true
+
 # Kernel modules: the guest kernel has virtio-net as a module; initramfs
 # carries net_failover + virtio_net built from the same tree. insmod BEFORE
 # the chroot owns the network devices (idempotent if already loaded near
@@ -172,9 +179,9 @@ done
 
 echo "Chrooting to InvFS root..."
 export INVFS_DEV1
-# Optional alternate init (documented cmdline option; used by the Arch
-# bring-up because systemd is not usable as PID1 on a FUSE root -- see
-# docs/ARCH-INSTALL.md). Defaults to /sbin/init.
+# Optional alternate init (documented cmdline option; can be used by the
+# Arch bring-up -- systemd may need additional fixes beyond WP66's H1;
+# see docs/ARCH-INSTALL.md). Defaults to /sbin/init.
 INIT=$(get_opt invfs.init)
 [ -n "$INIT" ] || INIT=/sbin/init
 exec chroot /mnt/invfs "$INIT"

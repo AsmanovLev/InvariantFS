@@ -6,8 +6,9 @@ single-device and a two-device InvariantFS root under QEMU (3 GB RAM,
 `docs/GENTOO-INSTALL.md`; the verified-bootstrap shape is the same
 (direct kernel + initramfs, offline `invf-import`, no `switch_root`,
 chroot into the FUSE root), with one important difference: **systemd
-cannot be PID 1 on the FUSE root**, so the verified path uses a
-busybox-init fallback (see "systemd on a FUSE root").
+as PID 1 requires H1 fixes** (see "systemd on a FUSE root") — the
+verified path uses a busybox-init fallback if those fixes are not in
+place.
 
 Regression for the packaging half (no boot, no FUSE):
 `tools/test-arch-install.sh`.
@@ -164,11 +165,12 @@ bring-up (all in `tools/`, no engine changes):
    implemented (the script hardcoded `/sbin/init`); it now selects the
    PID1 binary and defaults to `/sbin/init`.
 
-## 6. systemd on a FUSE root — the finding
+## 6. systemd on a FUSE root — WP66 findings
 
 `systemd 261` *does* start as PID 1 after `chroot /mnt/invfs /sbin/init`:
 it enumerates units and runs jobs, reaches timer units, and reacts to
-failures. But the base services it needs do not come up on the FUSE root:
+failures. The original boot (2026-09-19) showed a cascade of failures
+because the initramfs never set up `/run` as tmpfs or `cgroup2`:
 
 ```
 [FAILED] Failed to start Journal Service.
@@ -178,19 +180,41 @@ failures. But the base services it needs do not come up on the FUSE root:
 [FAILED] Failed to start D-Bus System Message Bus.
 ```
 
-Because `systemd-udevd` fails, `dev-ttyS0.device` is never populated and
-`serial-getty@ttyS0.service` dies on its device dependency:
+### WP66 H1 fix (initramfs)
 
-```
-systemd[1]: dev-ttyS0.device: Job dev-ttyS0.device/start timed out.
-systemd[1]: Dependency failed for Serial Getty on ttyS0.
+The root cause is that systemd's early-mount units expect `/run` (tmpfs)
+and `/sys/fs/cgroup` (cgroup2) to exist before PID 1 starts. The
+initramfs (`tools/initramfs-init.sh`) only rbinded `/proc /sys /dev`
+and never mounted either. WP66 adds:
+
+```sh
+mkdir -p /mnt/invfs/run
+mount -t tmpfs tmpfs /mnt/invfs/run 2>/dev/null
+mkdir -p /mnt/invfs/sys/fs/cgroup
+mount -t cgroup2 cgroup2 /mnt/invfs/sys/fs/cgroup 2>/dev/null || true
 ```
 
-There is no login prompt, and journald's failure makes the boot hang on
-`Journal Log Access Socket`. With `systemd.log_level=debug` PID 1 exits
-and the kernel panics (`Attempted to kill init`). Conclusion: **systemd
-is not usable as PID 1 on this FUSE root with the current engine; use a
-minimal init.**
+before the `exec chroot`.
+
+### WP66 H3 fix (FUSE ops)
+
+journald also needs `fallocate()` and `FS_IOC_SETFLAGS` (chattr +C) on
+newly created journal files. Without `.fallocate` the kernel returns
+EOPNOTSUPP; without `.ioctl` for `FS_IOC_SETFLAGS` it returns ENOTTY.
+WP66 adds no-op stubs for both (see `src/cli/fuse_fs.c`).
+
+### Remaining blockers (not fixed in WP66)
+
+Without a live QEMU boot of the H1+H3-fixed initramfs, the following
+are **suspected** but unconfirmed:
+
+- **H2 (runtime lookup corruption):** the two-device first-write bug
+  (`docs/ARCH-INSTALL.md` §7) and fresh-import+`fsck -f` orphans can
+  make udevd/journald/exec lookups return ENOENT/ENOTDIR spuriously.
+  These are engine-level bugs, not initramfs issues.
+- **H4 (mount constraints):** root is always `nosuid,nodev`; systemd's
+  shutdown/remount path re-enters `/sbin/mount.fuse` and exits 127.
+  Affects shutdown, not startup.
 
 ### Verified fallback: busybox init + getty
 
@@ -303,8 +327,10 @@ Both boots were verified on 2026-09-19: serial autologin, `dhcpcd` lease
 
 - Not a bootable-on-arbitrary-hardware install. The verified path uses a
   direct `-kernel`/`-initrd` QEMU boot; OVMF/GRUB was not exercised.
-- systemd is not supported as PID 1 on the volume (see §6). The userspace
-  is still the full Arch `base`; only the init/rc path is minimal.
+- systemd as PID 1 is partially supported after WP66's H1+H3 fixes
+  (`/run` tmpfs + cgroup2 in initramfs, fallocate/ioctl stubs). Remaining
+  blockers (H2 lookup corruption, H4 remount) need a live boot to confirm.
+  The busybox-init fallback remains the verified safe path.
 - No package management through FUSE. As with Gentoo, build packages on a
   normal filesystem and import; FUSE `rename`/exec-bit quirks make
   `pacman`/`emerge` inside the mount unreliable.

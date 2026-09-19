@@ -2610,6 +2610,40 @@ static int invf_unlink(const char *path)
     return vol_write_enabled(g_vol) ? -ENOENT : -EROFS;
 }
 
+/* WP66 H3: fallocate stub. journald calls fallocate() on its journal
+ * files; without this the kernel returns EOPNOTSUPP and journald gives
+ * up. We return 0 (no-op) — the volume doesn't support hole-punch or
+ * preallocation, but callers that only need "file exists and is long
+ * enough" are satisfied. */
+static int invf_fallocate(const char *path, int mode, off_t offset,
+                          off_t length, struct fuse_file_info *fi)
+{
+    (void)path; (void)mode; (void)offset; (void)length; (void)fi;
+    return 0;
+}
+
+/* WP66 H3: ioctl stub for FS_IOC_GETFLAGS / FS_IOC_SETFLAGS.
+ * systemd-journald uses chattr +C (FS_IOC_SETFLAGS, clears
+ * FS_NOCOMP_FL) on newly created journal files; without this the
+ * kernel returns ENOTTY and journald falls back — but some versions
+ * abort the journal entirely. We silently ignore the flags. */
+#include <linux/fs.h>
+static int invf_ioctl(const char *path, int cmd, void *arg,
+                      struct fuse_file_info *fi, unsigned int flags,
+                      void *data)
+{
+    (void)path; (void)fi; (void)flags;
+    switch (cmd) {
+    case FS_IOC_GETFLAGS:
+    case FS_IOC_SETFLAGS:
+        /* Accept silently; flags are not stored on the volume. */
+        memset(data, 0, sizeof(long));
+        return 0;
+    default:
+        return -ENOTTY;
+    }
+}
+
 /* Negotiate transport features (WP17). Splice moves read payload
  * /dev/fuse -> page cache without a userspace copy; async_read keeps
  * kernel readahead concurrent (libfuse default, stated explicitly).
@@ -2681,6 +2715,8 @@ static const struct fuse_operations invf_ops = {
     .setxattr = invf_setxattr,
     .listxattr = invf_listxattr,
     .removexattr = invf_removexattr,
+    .fallocate = invf_fallocate,
+    .ioctl = invf_ioctl,
     .destroy = invf_destroy,
 };
 

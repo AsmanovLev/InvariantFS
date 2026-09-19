@@ -133,3 +133,57 @@ root causes. Do not re-attempt a blind boot; capture evidence.
   `docs/ARCH-INSTALL.md:220-242`
 - claims: `docs/ARCH-INSTALL.md:167-193`, `impl_docs/WP63-arch.md:81-93`,
   `README.md:138-139`
+
+---
+
+## Results (WP66 subagent, 2026-09-19)
+
+### Changes made
+
+1. **`tools/initramfs-init.sh`** — H1 fix: added `/run` tmpfs and
+   `cgroup2` mounts before `exec chroot`. After the rbind of
+   `/proc /sys /dev` and before the kernel module loading block.
+   The mounts use `2>/dev/null` / `|| true` so they degrade
+   gracefully if the host kernel lacks cgroup2.
+
+2. **`src/cli/fuse_fs.c`** — H3 fix: added `invf_fallocate()` (no-op,
+   returns 0) and `invf_ioctl()` (accepts `FS_IOC_GETFLAGS` /
+   `FS_IOC_SETFLAGS`, returns `-ENOTTY` for anything else). Both wired
+   into `invf_ops`.
+
+3. **`docs/ARCH-INSTALL.md`** — §6 rewritten: replaced "systemd cannot
+   be PID 1" with the WP66 findings (H1 root cause, H3 journald ops,
+   remaining H2/H4 blockers). Updated header and §10 accordingly.
+
+### Evidence (static analysis only)
+
+- No QEMU/KVM available in the subagent worktree environment.
+- The H1 fix addresses the **confirmed** WP63 finding: `/run` was never
+  a tmpfs and cgroup2 was never mounted before PID 1. systemd's
+  `sysinit.target` early-mount units (`systemd-tmpfiles-setup.service`,
+  `systemd-journald.socket`) require both.
+- The H3 stubs address journald's `fallocate()` and `chattr +C`
+  (`FS_IOC_SETFLAGS`) calls, which the original boot log showed as
+  failures but which were not diagnosed as missing ops.
+
+### Is H1 alone sufficient?
+
+**Unknown — requires a live QEMU boot to confirm.** H1 is the most
+likely root cause (systemd's early-mount units need `/run` tmpfs before
+PID 1). H3 is a secondary fix (journald journal file creation). H2
+(lookup corruption on two-device volumes) is engine-level and may still
+block udevd/dbus on two-device boots. H4 (remount/`nosuid,nodev`) only
+affects shutdown.
+
+### Remaining TODOs
+
+- **Boot-test with H1+H3 fixes:** rebuild initramfs, boot single-device
+  Arch volume with `systemd.log_level=debug`, capture serial log.
+  Confirm journald/udevd/dbus come up; report `systemctl --failed`.
+- **H2 investigation:** if udevd still fails after H1+H3, strace the
+  failing exec to classify ENOENT/ENOTDIR (H2) vs EOPNOTSUPP (H3).
+- **Two-device boot:** same test on two-device volume to confirm H2 is
+  (or isn't) triggered.
+- **WP67 packaging:** the initramfs hook needs the same H1 fix shared
+  with dracut/initramfs-tools hooks.
+- **README.md:138** claim update once live boot confirms.
