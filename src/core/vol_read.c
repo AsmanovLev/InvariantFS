@@ -1231,6 +1231,170 @@ static int algo_is_whole_file(uint32_t algo)
 }
 
 
+/* WP-M9: ranged read of a v3 file. Fetch + BLAKE3-verify the recipe blob
+ * once (O(segments), never O(filesize)), then decode only the entries that
+ * overlap [offset, offset+len). A plain per-segment codec (NONE/LZ4/ZSTD)
+ * decodes one bounded segment; a shared text batch is sliced through
+ * vol_read_text_slice; a whole-file unit (codecpack/container) has no
+ * cheaper read than the full reconstruction, so it falls back to
+ * vol_read_inode once and slices the window. Returns bytes read or -1. */
+static int v3_read_range(invfs_volume *v, uint64_t inode_id, uint64_t offset,
+                         size_t len, void *buf)
+{
+    static const uint8_t zero_addr[INVFS_V3_RECIPE_ADDR_LEN];
+    invfs_v3_inode in;
+    invfs_ast_hdr ah;
+    const invfs_ast_block_entry *ents = NULL;
+    size_t n_ents = 0, i, got = 0;
+    uint8_t *blob = NULL, *all = NULL;
+    size_t blen = 0, all_len = 0;
+    int rc;
+
+    rc = vol_v3_inode_get(v, inode_id, &in);
+    if (rc != 1)
+        return -1;
+    if (in.size == 0 ||
+        memcmp(in.recipe_addr, zero_addr, INVFS_V3_RECIPE_ADDR_LEN) == 0)
+        return 0;
+    if (offset >= in.size)
+        return 0;
+    if ((uint64_t)len > in.size - offset)
+        len = (size_t)(in.size - offset);
+    if (len == 0)
+        return 0;
+
+    if (vol_v3_recipe_load(v, in.recipe_addr, &blob, &blen) != 0)
+        return -1;
+    if (vol_ast_recipe_parse(blob, blen, &ah, &ents, &n_ents) != 0 ||
+        ah.file_size != in.size) {
+        free(blob);
+        return -1;
+    }
+    /* bound every entry against the row's size before allocating for it */
+    for (i = 0; i < n_ents; i++) {
+        uint64_t end = ents[i].file_offset + ents[i].length;
+        if (ents[i].file_offset > in.size || end > in.size ||
+            end < ents[i].file_offset) {
+            free(blob);
+            return -1;
+        }
+    }
+
+    for (i = 0; i < n_ents; i++) {
+        const invfs_ast_block_entry *e = &ents[i];
+        uint64_t seg_lo = e->file_offset;
+        uint64_t seg_hi = e->file_offset + e->length;
+        uint64_t req_lo = offset, req_hi = offset + len;
+        uint64_t lo, hi;
+        uint8_t tmp[SEGMENT_SIZE];
+        uint8_t *segbuf = tmp, *segheap = NULL;
+        size_t want;
+
+        if (seg_hi <= req_lo || seg_lo >= req_hi)
+            continue;
+        lo = req_lo > seg_lo ? req_lo : seg_lo;
+        hi = req_hi < seg_hi ? req_hi : seg_hi;
+        if (lo >= hi)
+            continue;
+
+        /* shared batch member: slice it (heap + pba-keyed ARC) */
+        if (e->zone == INVFS_ZONE_TEXT && tz_batch_algo(e->algo)) {
+            want = (size_t)(hi - lo);
+            if (vol_read_text_slice(v, inode_id, e, lo - seg_lo,
+                                    (uint8_t *)buf + (size_t)(lo - offset),
+                                    want) != 0) {
+                free(blob);
+                return -1;
+            }
+            got += want;
+            continue;
+        }
+
+        /* whole-file unit (codecpack / container): no bounded segment
+         * decode exists -- rebuild once and slice the requested window */
+        if (algo_is_whole_file(e->algo)) {
+            if (!all) {
+                if (vol_read_inode(v, inode_id, 0, &all, &all_len) != 0) {
+                    free(blob);
+                    return -1;
+                }
+            }
+            want = (size_t)(hi - lo);
+            if (lo < all_len) {
+                size_t take = want;
+                if (lo + take > all_len)
+                    take = (size_t)(all_len - lo);
+                memcpy((uint8_t *)buf + (size_t)(lo - offset), all + lo, take);
+                got += take;
+            }
+            continue;
+        }
+
+        /* plain per-segment codec: decode the one segment, copy the window */
+        if (e->length > sizeof tmp) {
+            segheap = (uint8_t *)malloc((size_t)e->length);
+            if (!segheap) { free(all); free(blob); return -1; }
+            segbuf = segheap;
+        }
+        {
+            uint64_t pba = e->pba;
+            uint32_t hdr;
+            uint8_t *sblob;
+            if (pba == 0 || pba >= v->sb.total_blocks) {
+                free(segheap); free(all); free(blob);
+                return -1;
+            }
+            heat_touch_read(v, inode_id, e->block_id);
+            if (seg_read_checked(v, pba, 0, 1, &hdr, &sblob) != 0) {
+                fprintf(stderr, "segment CRC mismatch: inode %llu seg %u\n",
+                        (unsigned long long)inode_id, e->block_id);
+                free(segheap); free(all); free(blob);
+                return -1;
+            }
+            if (e->algo == INVFS_ALGO_LZ4) {
+                int d = LZ4_decompress_safe((const char *)sblob,
+                                            (char *)segbuf, (int)hdr,
+                                            (int)e->length);
+                if (d != (int)e->length) {
+                    free(sblob); free(segheap); free(all); free(blob);
+                    return -1;
+                }
+            } else if (e->algo == INVFS_ALGO_ZSTD) {
+                size_t d = ZSTD_decompress(segbuf, e->length, sblob, hdr);
+                if (ZSTD_isError(d) || d != e->length) {
+                    free(sblob); free(segheap); free(all); free(blob);
+                    return -1;
+                }
+            } else if (e->algo == INVFS_ALGO_NONE) {
+                if (hdr != e->length) {
+                    free(sblob); free(segheap); free(all); free(blob);
+                    return -1;
+                }
+                memcpy(segbuf, sblob, e->length);
+            } else {
+                /* the v3 recipe writer emits only the plain codecs; any
+                 * other algo here is corruption -- fail loudly, never serve
+                 * unverified bytes */
+                fprintf(stderr, "v3 ranged read: inode %llu seg %u: "
+                        "unexpected algo %u\n",
+                        (unsigned long long)inode_id, e->block_id,
+                        (unsigned)e->algo);
+                free(sblob); free(segheap); free(all); free(blob);
+                return -1;
+            }
+            free(sblob);
+        }
+        want = (size_t)(hi - lo);
+        memcpy((uint8_t *)buf + (size_t)(lo - offset),
+               segbuf + (size_t)(lo - seg_lo), want);
+        free(segheap);
+        got += want;
+    }
+    free(all);
+    free(blob);
+    return (int)got;
+}
+
 int vol_read_range(invfs_volume *v, uint64_t inode_id, uint64_t offset,
                    size_t len, void *buf)
 {
@@ -1241,23 +1405,10 @@ int vol_read_range(invfs_volume *v, uint64_t inode_id, uint64_t offset,
     uint32_t i;
     size_t got = 0;
 
-    /* WP-M8: a v3 file resolves through its content-addressed recipe blob,
-     * not the v2 record stream. WP-M8 reads the whole file and slices the
-     * requested window (a ranged segment decoder is a WP-M9 follow-up);
-     * vol_read_inode already verifies the blob BLAKE3 before decoding. */
-    if (v->sb.vol_flags & VOLF_V3) {
-        uint8_t *all = NULL;
-        size_t all_len = 0;
-        int rc = vol_read_inode(v, inode_id, 0, &all, &all_len);
-        if (rc != 0)
-            return -1;
-        if (offset >= all_len) { free(all); return 0; }
-        if (offset + len > all_len)
-            len = (size_t)(all_len - offset);
-        memcpy(buf, all + offset, len);
-        free(all);
-        return (int)len;
-    }
+    /* WP-M9: a v3 file resolves through its content-addressed recipe blob
+     * and decodes only the segments the window needs. */
+    if (v->sb.vol_flags & VOLF_V3)
+        return v3_read_range(v, inode_id, offset, len, buf);
 
     /* WP47: hint jump when the index position is valid (mapper extent or
      * legacy region); otherwise locate through the mapper-aware walker. */

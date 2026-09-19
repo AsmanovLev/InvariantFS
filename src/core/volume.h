@@ -282,6 +282,12 @@ int vol_v3_path_stat(invfs_volume *v, const char *name, uint64_t *id_out,
                      uint64_t *size_out, uint64_t *ctime_out);
 uint64_t vol_v3_create_node(invfs_volume *v, const char *name,
                             const invfs_meta_pub *meta);
+/* WP-M9: create/replace `name` with a row that already carries its content
+ * address and size, then insert the dirent (row before dirent). Used by the
+ * v3 write commit. Returns the inode id, 0 on failure. */
+uint64_t vol_v3_create_content_node(invfs_volume *v, const char *name,
+                                    uint64_t size,
+                                    const uint8_t recipe_addr[INVFS_V3_RECIPE_ADDR_LEN]);
 uint64_t vol_v3_set_meta(invfs_volume *v, const char *name,
                          const invfs_meta_pub *meta);
 uint64_t vol_v3_mkdir(invfs_volume *v, const char *name);

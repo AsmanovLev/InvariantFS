@@ -355,6 +355,63 @@ uint64_t vol_v3_create_node(invfs_volume *v, const char *name,
     return id;
 }
 
+/* WP-M9: create (or replace) `name` with a row that already carries its
+ * content address and logical size, then insert the dirent. The write
+ * commit publishes the inode row BEFORE the dirent (design §4 durability
+ * ordering), so a crash between the two leaves an orphaned row, never a
+ * dirent that names an empty or partial inode. Returns the inode id, or 0
+ * with the volume untouched. */
+uint64_t vol_v3_create_content_node(invfs_volume *v, const char *name,
+                                    uint64_t size,
+                                    const uint8_t recipe_addr[INVFS_V3_RECIPE_ADDR_LEN])
+{
+    char parent[600], leaf[INVFS_MAX_NAME + 1];
+    uint64_t pino, id, existing = 0;
+    invfs_v3_inode in;
+    int rc;
+
+    if (!v || !recipe_addr)
+        return 0;
+    if (v->sb.vol_flags & VOLF_READONLY)
+        return 0;
+    if (v3_split_path(name, parent, sizeof parent, leaf, sizeof leaf) != 0)
+        return 0;
+    if (vol_v3_path_lookup(v, parent, &pino) != 1)
+        return 0;
+    if (!vol_v3_path_is_dir(v, parent))
+        return 0;
+    rc = vol_v3_dirent_get(v, pino, leaf, &existing);
+    if (rc < 0)
+        return 0;
+    if (rc == 1) {
+        id = existing;
+        if (vol_v3_inode_get(v, id, &in) != 1)
+            memset(&in, 0, sizeof in);
+    } else {
+        id = vol_v3_inode_alloc(v);
+        if (!id)
+            return 0;
+        memset(&in, 0, sizeof in);
+    }
+    if (in.type == 0)
+        in.type = INVFS_ITYP_REG;
+    if (in.mode == 0)
+        in.mode = 0644;
+    if (in.nlink == 0)
+        in.nlink = 1;
+    in.mtime = in.atime = (int64_t)time(NULL);
+    in.size = size;
+    memset(&in.recipe, 0, sizeof in.recipe);
+    memcpy(in.recipe_addr, recipe_addr, INVFS_V3_RECIPE_ADDR_LEN);
+    /* row first, dirent second: a torn create is an orphan, not a dangling
+     * name. An already-present dirent is left in place (replace-in-place). */
+    if (vol_v3_inode_put(v, id, &in) != 0)
+        return 0;
+    if (rc != 1 && vol_v3_dirent_put(v, pino, leaf, id) != 0)
+        return 0;
+    return id;
+}
+
 uint64_t vol_v3_set_meta(invfs_volume *v, const char *name,
                          const invfs_meta_pub *meta)
 {

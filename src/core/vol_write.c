@@ -656,6 +656,11 @@ int vol_write_truncate(invfs_wsession *ws, uint64_t len)
                 uint64_t plen = 0;
                 if (seg_extent_checked(s->v, s->ents[j].pba, &plen) == 0)
                     vol_free_blocks(s->v, s->ents[j].pba, plen);
+                /* WP-M9: the session's pba is gone -- clear the entry so a
+                 * later extend/write of this segment cannot free it a second
+                 * time (the shrink+extend matrix hits exactly this). */
+                s->ents[j].pba = 0;
+                s->touched[j] = 0;
             }
         }
         s->n_ents = keep;
@@ -776,39 +781,48 @@ static int vol_write_commit_v3(invfs_wsession *s)
             if (rc != 0) return rc;
         }
     }
-    if (vol_ast_recipe_serialize(s->logical_size, s->ents, s->n_ents,
-                                 &blob, &blen) != 0)
-        return -1;   /* TODO(WP-M8): recipe larger than one base page */
-    if (vol_v3_recipe_store(v, blob, blen, addr) != 0) {
+    /* An empty file has no content address: the read path keys off size 0,
+     * so storing a header-only blob would just leak a page. */
+    if (s->logical_size == 0) {
+        memset(addr, 0, sizeof addr);
+    } else {
+        if (vol_ast_recipe_serialize(s->logical_size, s->ents, s->n_ents,
+                                     &blob, &blen) != 0)
+            return -1;   /* TODO(WP-M9): recipe larger than one base page
+                          * (multi-page/streamed blob) -- deferred. */
+        if (vol_v3_recipe_store(v, blob, blen, addr) != 0) {
+            free(blob);
+            return -1;
+        }
         free(blob);
-        return -1;
     }
-    free(blob);
 
     if (s->have_old) {
+        /* in-place update: the row keeps its id, so the dirent (and any
+         * hardlink) stays pointed at it. */
         if (vol_v3_inode_get(v, s->old_id, &in) != 1)
             return -1;
         id = s->old_id;
+        in.size = s->logical_size;
+        memcpy(in.recipe_addr, addr, INVFS_V3_RECIPE_ADDR_LEN);
+        memset(&in.recipe, 0, sizeof in.recipe);
+        if (in.nlink == 0)
+            in.nlink = 1;
+        in.mtime = now;
+        if (vol_v3_inode_put(v, id, &in) != 0)
+            return -1;
     } else {
-        id = vol_v3_create_node(v, s->name, NULL);
+        /* new name: row (with content) first, then the dirent */
+        id = vol_v3_create_content_node(v, s->name, s->logical_size, addr);
         if (!id)
             return -1;
-        if (vol_v3_inode_get(v, id, &in) != 1)
-            return -1;
     }
-    in.size = s->logical_size;
-    memcpy(in.recipe_addr, addr, INVFS_V3_RECIPE_ADDR_LEN);
-    memset(&in.recipe, 0, sizeof in.recipe);
-    if (in.nlink == 0)
-        in.nlink = 1;
-    in.mtime = now;
-    if (vol_v3_inode_put(v, id, &in) != 0)
-        return -1;
 
-    /* Free old data segments the new recipe no longer names. A touched
-     * segment's old pba was already freed by wsession_write_seg_n; an
-     * untouched (aliased) one is still owned by the old recipe, so it is
-     * freed only when the new entry table dropped it. The superseded
+    /* Free old data segments the new recipe no longer names. A segment
+     * the session re-wrote has a fresh pba; its OLD pba still belongs to
+     * the retired recipe and was never freed by wsession_write_seg_n (that
+     * only frees the session's own superseded writes), so it must be freed
+     * here whenever the new entry table does not keep it. The superseded
      * recipe blob page itself is left for WP-M15. */
     if (s->old_pbas) {
         for (i = 0; i < s->old_n_ents; i++) {
@@ -816,8 +830,6 @@ static int vol_write_commit_v3(invfs_wsession *s)
             int keep = 0;
             if (!pba)
                 continue;
-            if (i < s->touched_cap && s->touched[i])
-                continue;   /* superseded in-session: already freed */
             for (k = 0; k < i; k++)
                 if (s->old_pbas[k] == pba) { keep = 1; break; }
             if (!keep)
