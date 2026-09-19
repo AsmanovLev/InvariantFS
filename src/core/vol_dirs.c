@@ -485,16 +485,19 @@ int vol_v3_unlink(invfs_volume *v, const char *name)
         return -1;                        /* EISDIR: use rmdir */
     if (vol_v3_path_lookup(v, parent, &pino) != 1)
         return -1;
-    if (in.nlink > 1) {
-        in.nlink--;
-        if (vol_v3_inode_put(v, id, &in) != 0)
-            return -1;
-    }
-    /* name first: a dirent must never point at a deleted inode */
+    /* WP-M17 frozen transition (design §4): drop the dirent, then the
+     * count; only nlink == 0 frees the row (and, via inode_delete, the
+     * xattr keys). Name-first means a crash between the two leaves nlink
+     * >= the live name count -- an inode may leak, but a live dirent can
+     * never point at a freed row. */
     if (vol_v3_dirent_del(v, pino, leaf) != 0)
         return -1;
     if (in.nlink <= 1) {
         if (vol_v3_inode_delete(v, id) != 0)
+            return -1;
+    } else {
+        in.nlink--;
+        if (vol_v3_inode_put(v, id, &in) != 0)
             return -1;
     }
     return 0;
@@ -545,7 +548,13 @@ int vol_v3_rename(invfs_volume *v, const char *from, const char *to)
             return -2;                    /* EEXIST: dir destination */
         if (f_in.type == INVFS_ITYP_DIR)
             return -1;                    /* dir over file */
-        /* the victim loses its name and a link (vol_rename v2 semantics) */
+        /* the victim loses its name and a link (WP-M17: only the count
+         * reaching 0 retires the row + its xattrs, so another name of a
+         * hardlinked victim survives this overwrite).
+         * TODO(WP-M17): POSIX says rename(old,new) where both names are
+         * hardlinks to the SAME inode is a no-op; the doc is silent and
+         * M6's rename mechanics would drop one name, so the pre-existing
+         * (non-POSIX, non-lossy) behaviour is kept here. */
         if (vol_v3_dirent_del(v, t_pino, tleaf) != 0)
             return -1;
         if (t_in.nlink > 1) {
@@ -1261,6 +1270,57 @@ int vol_rename(invfs_volume *v, const char *from, const char *to)
 }
 
 
+/* WP-M17: hard link on the v3 namespace. A second (parent, name) dirent
+ * points at the SAME inode id; the shared row's nlink is incremented so
+ * unlinking one name leaves the row (and its xattrs) for the survivors,
+ * and only the last unlink frees it. No block refcounts: the data plane is
+ * refcount-free reachability (WP-M15), which is why the nlink==0 gate is
+ * the only inode-free condition. */
+static int vol_v3_hardlink(invfs_volume *v, const char *from, const char *to)
+{
+    char tparent[600], tleaf[INVFS_MAX_NAME + 1];
+    uint64_t id, t_pino = 0, existing = 0;
+    invfs_v3_inode in;
+    int rc;
+
+    if (!v || !from || !to || !from[0] || !to[0])
+        return -1;
+    if (v->sb.vol_flags & VOLF_READONLY)
+        return -1;                              /* EROFS */
+    if (v3_split_path(to, tparent, sizeof tparent, tleaf, sizeof tleaf) != 0)
+        return -1;
+    if (vol_v3_path_lookup(v, from, &id) != 1)
+        return -1;                              /* ENOENT */
+    if (vol_v3_inode_get(v, id, &in) != 1)
+        return -1;
+    if (in.type == INVFS_ITYP_DIR)
+        return -3;                              /* EPERM: dirs cannot link */
+    if (vol_v3_path_lookup(v, tparent, &t_pino) != 1)
+        return -1;                              /* destination parent missing */
+    if (!vol_v3_path_is_dir(v, tparent))
+        return -1;
+    rc = vol_v3_dirent_get(v, t_pino, tleaf, &existing);
+    if (rc < 0)
+        return -1;
+    if (rc == 1)
+        return -2;                              /* EEXIST */
+    if (in.nlink == 0 || in.nlink == 0xFFFFFFFFu)
+        return -1;                              /* malformed / would wrap */
+    /* nlink++ BEFORE the new name is visible: a crash between the two
+     * leaves a count >= the name count, never a dirent whose inode is
+     * under-counted and could be freed by a later unlink. */
+    in.nlink++;
+    if (vol_v3_inode_put(v, id, &in) != 0)
+        return -1;
+    if (vol_v3_dirent_put(v, t_pino, tleaf, id) != 0) {
+        in.nlink--;                             /* roll back the count */
+        vol_v3_inode_put(v, id, &in);
+        return -1;
+    }
+    return 0;
+}
+
+
 /* Hard link: a second NAME record sharing the same inode_id (and thus the
  * same AST/L2P blocks). LIMITATION: no block refcounts yet -- unlinking
  * EITHER name retires the shared blocks and dangles the survivor
@@ -1275,9 +1335,10 @@ int vol_hardlink(invfs_volume *v, const char *from, const char *to)
 
     if (!v || !from || !to || !from[0] || !to[0]) return -1;
     if (v->sb.vol_flags & VOLF_READONLY) return -1;
-    /* hardlinks are WP-M17; refuse rather than silently emit v2 records on
-     * a v3 namespace. */
-    if (v->sb.vol_flags & VOLF_V3) return -1;
+    /* WP-M17: the v3 namespace tracks hardlinks through the shared inode
+     * row's nlink; only the v2 record-clone path below is limited. */
+    if (v->sb.vol_flags & VOLF_V3)
+        return vol_v3_hardlink(v, from, to);
     nl = strlen(to);
     if (nl > INVFS_MAX_NAME) return -1;
 

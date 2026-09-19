@@ -344,10 +344,14 @@ uint64_t vol_create_symlink(invfs_volume *v, const char *name,
                             const char *target);
 uint64_t vol_create_special(invfs_volume *v, const char *name,
                             uint8_t type, uint16_t mode, uint64_t rdev);
-/* hard link: second name for the same inode (record clone with new name).
- * CAVEAT: no block refcounts yet -- unlinking EITHER name retires the
- * shared blocks and dangles the survivor (WP6). Intended for transient
- * locks/atomic-replace patterns (portage), not permanent aliasing. */
+/* hard link: a second name for the same inode. On a v3 (VOLF_V3) volume
+ * the shared inode row's nlink is incremented, so unlinking one name
+ * leaves the row, its xattrs and its data reachable through the survivors;
+ * the row is deleted only at nlink == 0. On v2 the old record-clone path
+ * is unchanged and still carries the no-block-refcount caveat: unlinking
+ * EITHER name retires the shared blocks and dangles the survivor (WP6),
+ * so v2 links stay intended for transient locks/atomic-replace patterns
+ * (portage), not permanent aliasing (cleanup is WP-M21). */
 int vol_hardlink(invfs_volume *v, const char *from, const char *to);
 size_t vol_collect_sweepables(invfs_volume *v, uint64_t *ids, size_t max);
 

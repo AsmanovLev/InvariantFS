@@ -2333,15 +2333,20 @@ static int invf_link(const char *from, const char *dest)
      * rebuild here (mark_stale) made every later negative lookup cost
      * O(area). The new name is one upsert. */
     if (rc == 0) {
-        /* both names share blocks now: record nlink=2 so unlinking ONE
-         * name takes the name-only path instead of retiring blocks */
-        const char *names[2] = { from + 1, dest + 1 };
-        for (int q = 0; q < 2; q++) {
-            invfs_meta_pub mm;
-            uint64_t nid2 = vol_find(g_vol, names[q]);
-            if (nid2 && vol_get_meta(g_vol, nid2, &mm) == 0) {
-                mm.nlink = 2;
-                vol_apply_meta(g_vol, names[q], &mm);
+        /* v2 needs this patch: both names share blocks, so record nlink=2
+         * to make unlinking ONE name take the name-only path instead of
+         * retiring blocks. On v3 vol_hardlink already maintains the shared
+         * row's nlink; forcing it back to 2 here would corrupt a third or
+         * later link. */
+        if (!(vol_sb(g_vol)->vol_flags & VOLF_V3)) {
+            const char *names[2] = { from + 1, dest + 1 };
+            for (int q = 0; q < 2; q++) {
+                invfs_meta_pub mm;
+                uint64_t nid2 = vol_find(g_vol, names[q]);
+                if (nid2 && vol_get_meta(g_vol, nid2, &mm) == 0) {
+                    mm.nlink = 2;
+                    vol_apply_meta(g_vol, names[q], &mm);
+                }
             }
         }
         table_sync_one_locked(dest + 1);
