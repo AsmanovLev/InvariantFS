@@ -1205,6 +1205,36 @@ bad:
 }
 
 
+/* WP-M1: read + validate the RT30 v3 root-area descriptor and log it. The
+ * metadata-v3 base/delta engine lands in WP-M2/M3; this WP only proves the
+ * descriptor round-trips. A missing or torn descriptor is treated as an
+ * empty root (warning, not fatal) -- the RDP0 "absent" convention, and it
+ * keeps a v3 mkfs interrupted before the RT30 write openable. Nothing is
+ * stored on the volume struct yet: the field belongs in volume_internal.h,
+ * which is out of this WP's scope. TODO(WP-M2): persist v->rt30. */
+static void v3_probe_rt30(invfs_volume *v)
+{
+    invfs_rt30 rt;
+    if (io_seek(&v->io, INVFS_RT30_OFF) != 0 ||
+        io_read(&v->io, &rt, sizeof rt) != 0 ||
+        memcmp(rt.magic, "RT30", 4) != 0 ||
+        rt.version != INVFS_RT30_VERSION ||
+        invfs_crc32c(&rt, offsetof(invfs_rt30, crc32c)) != rt.crc32c) {
+        fprintf(stderr, "vol_open: %s: RT30 v3 root descriptor absent or "
+                "torn; presenting an empty namespace\n", v->path);
+        return;
+    }
+    if (getenv("INVFS_DEBUG"))
+        fprintf(stderr, "vol_open: v3 root descriptor: page_size=%u "
+                "seq=%llu root_slot=%llu/%llu delta_pba=%llu\n",
+                (unsigned)rt.page_size,
+                (unsigned long long)rt.seq,
+                (unsigned long long)rt.root_slot[0],
+                (unsigned long long)rt.root_slot[1],
+                (unsigned long long)rt.delta_pba);
+}
+
+
 /* WP24-lite: vol_open_inner(path, at_ckpt, ckpt_seq, err).
  * at_ckpt == 0 is the ordinary open (vol_open). at_ckpt != 0 asks for the
  * read-only time-travel view at the live CKP0 sweep checkpoint
@@ -1219,6 +1249,7 @@ static invfs_volume *vol_open_inner(const char *path, int at_ckpt,
     char devbuf[64];
     const char *real;
     int rc;
+    int is_v3 = 0;
     invfs_volume *v = (invfs_volume *)calloc(1, sizeof(invfs_volume));
     if (!v) { *err = -1; return NULL; }
     (void)pthread_rwlock_init(&v->meta_lock, NULL);
@@ -1273,11 +1304,16 @@ static invfs_volume *vol_open_inner(const char *path, int at_ckpt,
     if (invfs_crc32c(&v->sb, offsetof(invfs_superblock, checksum)) != v->sb.checksum)
         { *err = -5; goto fail; }
 
+    /* WP-M1: format v3 is the metadata-v3 two-tier engine. VOLF_V3 is the
+     * authoritative marker and is checked BEFORE the v2 reader gate below:
+     * a v3 volume carries no invfs_inode_rec stream / owner WAL. */
+    is_v3 = (v->sb.vol_flags & VOLF_V3) != 0;
+
     /* WP27: format v2 reads v2 only. A volume without VOLF_ASTV2 is format
      * v1: its records' AST entries are 24B and carry no physical addresses
      * (they live in the v1 L2P journal). There are deliberately NO dual
      * readers -- convert the volume offline instead. */
-    if (!(v->sb.vol_flags & VOLF_ASTV2)) {
+    if (!is_v3 && !(v->sb.vol_flags & VOLF_ASTV2)) {
         fprintf(stderr,
                 "vol_open: %s: format v1 volume (no VOLF_ASTV2): this build "
                 "reads format v2 (INVFS_VERSION=%u) only.\n"
@@ -1595,13 +1631,33 @@ static invfs_volume *vol_open_inner(const char *path, int at_ckpt,
                     real, (unsigned long long)v->ck.sweep_seq);
             *err = -11; goto fail;
         }
-    } else if (l2p_replay(v) != 0) { *err = -9; goto fail; }
+    } else if (!is_v3 && l2p_replay(v) != 0) { *err = -9; goto fail; }
 
     /* scan existing inode records: find end of area + max inode id + name index.
      * WP30: on a mapper volume the records span ALL extents, not just the active
      * one. The active extent's end is where NEW writes go (the CRC-validated
      * tail), but the scan must walk earlier extents in full. We split the walk
      * into per-extent segments with the active extent trimmed at inode_area_pos. */
+    if (is_v3) {
+        /* WP-M1: a v3 volume has no v2 record stream. Present an empty
+         * namespace: idx_init gives lookup/readdir their (empty) tables
+         * and next_inode_id starts at 1 below. The RT30 descriptor is
+         * validated for the round-trip. The v2 write engine does not apply
+         * to a v3 namespace, so refuse all mutations until WP-M2 wires the
+         * v3 engine -- a v2 append must never graft itself onto a v3
+         * volume. VOLF_READONLY answers EROFS on the standard paths;
+         * needs_recovery is the engine-level backstop for the paths that
+         * deliberately bypass the flag (e.g. unlink), because vol_mark_dirty
+         * refuses a needs_recovery volume. Both are RAM-only (vol_flush is
+         * a no-op for v3), so nothing is persisted; the on-disk state stays
+         * CLEAN. */
+        if (idx_init(v) != 0) { *err = -6; goto fail; }
+        v3_probe_rt30(v);
+        v->sb.vol_flags |= VOLF_READONLY;
+        v->needs_recovery = 1;
+        fprintf(stderr, "vol_open: %s: format v3 (metadata-v3 skeleton): "
+                "empty namespace, read-only until WP-M2\n", real);
+    } else
     {
         uint64_t p = v->inode_area_pos;
         const uint64_t scan_end_at_ckpt = at_ckpt ? v->ck.inode_area_pos : 0;
@@ -2626,6 +2682,10 @@ int vol_flush(invfs_volume *v)
      * flush contract is vacuously satisfied -- and the superblock write
      * below would otherwise land on the PRESENT volume's block 0. */
     if (v->time_travel) return 0;
+    /* WP-M1: an empty v3 skeleton has nothing to persist (mutations are
+     * refused at vol_write_enabled; the RT30/root state is owned by the
+     * WP-M2 engine). */
+    if (v->sb.vol_flags & VOLF_V3) return 0;
     /* WP25: same for a degraded mount (dev0 absent): vol_mark_dirty
      * refused every mutation, so nothing is pending; a flush attempt
      * would only trip the mirror's read-only refusal. */
@@ -2736,6 +2796,9 @@ int vol_flush(invfs_volume *v)
 int vol_sync(invfs_volume *v)
 {
     if (!v) return -1;
+    /* WP-M1: the v3 skeleton is empty/read-only -- nothing in flight, so
+     * the durability contract is already met without touching the device. */
+    if (v->sb.vol_flags & VOLF_V3) return 0;
     /* WP24-lite: nothing of this handle's can be in flight (mutations are
      * refused), so the durability contract is already met without touching
      * the device. */

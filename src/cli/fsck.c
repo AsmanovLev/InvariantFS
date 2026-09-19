@@ -63,6 +63,21 @@ int main(int argc, char **argv)
         return 1;
     }
 
+    /* WP-M1: accept a format-v3 volume. The v3 namespace is empty in the
+     * skeleton (no base tree / delta yet), so the volume is trivially
+     * clean; the real v3 checker is WP-M4. Report-only or -f both exit 0
+     * without touching the v2 rebuild path. */
+    if (vol_sb(v)->vol_flags & VOLF_V3) {
+        if (!quiet)
+            printf("InvariantFS fsck: %s\n"
+                   "  state:        CLEAN\n"
+                   "  format:       v3 (metadata-v3 skeleton; empty)\n"
+                   "  live files:   0\n"
+                   "OK\n", img);
+        vol_close(v);
+        return 0;
+    }
+
     /* WP25: a degraded mount (dev0 absent) is read-only -- report mode
      * works (every structure reads from the dev1 mirror), but -f mutates:
      * the mirror would diverge with dev0 absent. Reattach dev0 first. */

@@ -162,6 +162,9 @@ int main(int argc, char **argv)
     uint64_t size2_bytes = 0, dev0_blocks = 0, dev1_blocks = 0;
     int is_dev2 = 0, twodev = 0;
     invfs_devt devt;
+    /* WP-M1: INVFS_V3=1 selects the metadata-v3 on-disk skeleton (RT30 root
+     * descriptor + zeroed root area). Default stays byte-identical v2. */
+    int v3 = 0;
 
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) {
@@ -194,6 +197,15 @@ int main(int argc, char **argv)
         return 2;
     }
     twodev = (argc == 5);
+    {
+        const char *v3e = getenv("INVFS_V3");
+        v3 = (v3e && *v3e && strcmp(v3e, "0") != 0);
+    }
+    if (v3 && twodev) {
+        fprintf(stderr, "invf-mkfs: INVFS_V3=1 does not support the "
+                        "two-device form yet (WP-M1 skeleton)\n");
+        return 2;
+    }
     path = blkio_normalize(argv[1], devbuf, sizeof devbuf);
     is_dev = blkio_looks_like_device(path);
 
@@ -358,9 +370,9 @@ int main(int argc, char **argv)
      * ordinary writes must keep (reserved + hard_min) free */
     sb.reserved_blocks = (uint32_t)(sb.total_blocks / 128 + 64);
     sb.hard_min_blocks = (uint32_t)(sb.total_blocks / 1024 + 16);
-    sb.vol_flags = VOLF_META2 | VOLF_ASTV2;   /* fresh volumes are format v2 */
+    sb.vol_flags = VOLF_META2 | VOLF_ASTV2 | (v3 ? VOLF_V3 : 0);
     sb.pad2 = 0;
-    sb.format_version = 1;  /* v0.3.0: dynamic metadata extents mandatory */
+    sb.format_version = v3 ? 3 : 1;  /* 3 = metadata-v3 skeleton (WP-M1) */
     sb.pad3[0] = sb.pad3[1] = sb.pad3[2] = 0;
     sb.checksum = invfs_crc32c(&sb, offsetof(invfs_superblock, checksum));
 
@@ -610,6 +622,38 @@ int main(int argc, char **argv)
     sb.meta_mapper_pba = mapper_pba;
     sb.meta_mapper_blocks = INVFS_META_EXT_BLOCKS;
 
+    /* WP-M1: v3 root area. Reserve two metadata pages immediately after
+     * the mapper table -- the first free metadata blocks, i.e. vol_open's
+     * journal_start on a v2 layout (a v3 volume skips the v2 WAL replay,
+     * so those blocks are free) -- and zero them, making the span durable
+     * before the RT30 descriptor that anchors the root area is written. On
+     * an empty volume both root slots stay 0 (empty per the wire
+     * convention); the WP-M2 page allocator owns handing these pages to
+     * the double-slot base root and setting the pointers. Until then the
+     * reserved location is implicit:
+     * root_pba = mapper_pba + INVFS_META_EXT_BLOCKS. */
+    uint64_t v3_root_pba = 0;
+    if (v3) {
+        uint8_t *rz = (uint8_t *)calloc(1, 2u * INVFS_BLOCK_SIZE);
+        v3_root_pba = mapper_pba + INVFS_META_EXT_BLOCKS;
+        if (!rz) {
+            fprintf(stderr, "out of memory\n");
+            free(bitmap);
+            blkio_close(&io);
+            return 1;
+        }
+        if (blkio_seek(&io, v3_root_pba * INVFS_BLOCK_SIZE) != 0 ||
+            blkio_write(&io, rz, 2u * INVFS_BLOCK_SIZE) != 0) {
+            fprintf(stderr, "v3 root-area write failed\n");
+            free(rz);
+            free(bitmap);
+            blkio_close(&io);
+            return 1;
+        }
+        free(rz);
+        blkio_flush(&io);   /* root area durable BEFORE the RT30 descriptor */
+    }
+
     /* ---- mark clean ---- */
     sb.state = INVFS_STATE_CLEAN;
     sb.checksum = invfs_crc32c(&sb, offsetof(invfs_superblock, checksum));
@@ -620,6 +664,29 @@ int main(int argc, char **argv)
         if (twodev) blkio_close(&io2);
         blkio_close(&io);
         return 1;
+    }
+
+    /* WP-M1: RT30 root-area descriptor, written LAST (after the root area
+     * and the clean superblock are durable). seq=0, empty root slots, no
+     * delta: an empty v3 namespace. */
+    if (v3) {
+        invfs_rt30 rt;
+        memset(&rt, 0, sizeof rt);
+        memcpy(rt.magic, "RT30", 4);
+        rt.version = INVFS_RT30_VERSION;
+        rt.page_size = INVFS_V3_PAGE_SIZE_DEFAULT;
+        rt.root_slot[0] = 0;   /* empty base root slot A */
+        rt.root_slot[1] = 0;   /* empty base root slot B */
+        rt.delta_pba = 0;      /* no delta segment yet */
+        rt.seq = 0;
+        rt.crc32c = invfs_crc32c(&rt, offsetof(invfs_rt30, crc32c));
+        if (blkio_seek(&io, INVFS_RT30_OFF) != 0 ||
+            blkio_write(&io, &rt, sizeof rt) != 0) {
+            fprintf(stderr, "RT30 root descriptor write failed\n");
+            free(bitmap);
+            blkio_close(&io);
+            return 1;
+        }
     }
 
     /* WP25: the metadata span is byte-identical on BOTH devices (the
@@ -689,6 +756,12 @@ int main(int argc, char **argv)
                "redundant copies only)\n",
                (unsigned long long)(sb.raw_zone_start + raw_blocks),
                (unsigned long long)(dev0_blocks - 1));
+    if (v3)
+        printf("  format: v3 metadata skeleton (VOLF_V3; RT30 @0x%X, "
+               "root area blocks %llu..%llu)\n",
+               (unsigned)INVFS_RT30_OFF,
+               (unsigned long long)v3_root_pba,
+               (unsigned long long)(v3_root_pba + 1));
     printf("  state: CLEAN, uuid: ");
     for (i = 0; i < 16; i++)
         printf("%02x", sb.uuid[i]);

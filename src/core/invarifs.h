@@ -242,6 +242,14 @@ typedef struct {
  * Old binaries ignore the bit (it sits outside the superblock checksum)
  * and read the volume as-is, which fails loudly at the first 32B entry. */
 #define VOLF_ASTV2    0x00000008
+/* WP-M1: format v3 (metadata-v3 programme, design-meta-v3.md). A v3 volume
+ * replaces the v2 append-only inode records + owner WAL with a two-tier
+ * metadata store (immutable B+-tree base + append-only delta). VOLF_V3 is
+ * the authoritative format marker: vol_open checks it BEFORE the VOLF_ASTV2
+ * reader gate, because a v3 volume carries no v2 record stream. Lives
+ * outside the superblock checksum, like every other policy flag. The v3
+ * on-disk skeleton is the RT30 root-area descriptor (block 0, 0x9D0). */
+#define VOLF_V3       0x00000010
 /* WP22a/H5: WHY the volume is read-only. alloc_blocks raises VOLF_READONLY
  * together with VOLF_RO_SPACE when the free count hits hard_min (the space
  * latch); an operator/tool hold (vol_set_readonly) sets VOLF_READONLY alone.
@@ -654,6 +662,78 @@ typedef struct {
     invfs_codec_ref codecs[63]; /* 0x3E4 */
     uint32_t crc32c;            /* over the descriptor with this field 0 */
 } invfs_pck0;                   /* ~1548 bytes; ends well within block 0 */
+#pragma pack(pop)
+
+/* ---- WP-M1: RT30 v3 root-area descriptor (block 0 reserved area) ----
+ * Lives at byte offset 0x9D0 of block 0 -- the first FREE 16-byte-aligned
+ * offset after the existing descriptors. Used ranges (read from this
+ * header, not invented): superblock 0x00..0x90, RDP0 0x100..0x118,
+ * RSZ0 0x140..0x20C, CKP0 0x220..0x258, CMP0 0x260..0x290,
+ * DEVT 0x2A0..0x35C, CVT0 0x360..0x39C, MET0 0x3A0..0x3C4, and PCK0
+ * 0x3C4..0x9D0. PCK0 is a fixed-size struct (63 codec refs max), so it
+ * always ends at exactly 0x9D0, which is 16-byte aligned; a pre-v3 image
+ * carries zeros there, which read as "absent" (magic mismatch) -- the
+ * RDP0 convention. The descriptor is 48 bytes and ends at 0xA00, still
+ * well inside block 0.
+ *
+ * The descriptor anchors the metadata-v3 base root (double-slot A/B) and
+ * the active delta segment. `seq` is the root generation and the atomicity
+ * anchor: on recovery the highest CRC-valid seq wins (the l2p_replay
+ * idiom). mkfs writes seq=0 with empty root slots and no delta; the
+ * B+-tree/delta engine that fills these lands in WP-M2/M3.
+ *
+ *   0x9D0  char magic[4]       "RT30"
+ *   0x9D4  u32  version        1
+ *   0x9D8  u32  page_size      metadata base-page size (default 4096)
+ *   0x9DC  u64  root_slot[2]   pba of base root slot A / B (0 = empty)
+ *   0x9EC  u64  delta_pba      pba of the active delta segment (0 = none)
+ *   0x9F4  u64  seq            root generation (monotone; higher = newer)
+ *   0x9FC  u32  crc32c         over the descriptor with this field read 0
+ * 48 bytes total; the rest of block 0 stays reserved-zero. */
+#define INVFS_RT30_OFF      0x9D0
+#define INVFS_RT30_VERSION  1
+#define INVFS_V3_PAGE_SIZE_DEFAULT 4096
+#pragma pack(push, 1)
+typedef struct {
+    char     magic[4];          /* 0x9D0 "RT30" */
+    uint32_t version;           /* 0x9D4 INVFS_RT30_VERSION */
+    uint32_t page_size;         /* 0x9D8 metadata base-page size */
+    uint64_t root_slot[2];      /* 0x9DC base root slot A/B pba (0=empty) */
+    uint64_t delta_pba;         /* 0x9EC active delta segment pba (0=none) */
+    uint64_t seq;               /* 0x9F4 root generation (monotone) */
+    uint32_t crc32c;            /* 0x9FC over descriptor, this field 0 */
+} invfs_rt30;                   /* 0x9D0 + 48 -> ends 0xA00 */
+#pragma pack(pop)
+
+/* ---- WP-M1: v3 base-page + block-pointer wire format (design §12) ----
+ * Frozen here so WP-M2 (page format + allocator) and WP-M3 (delta/fold)
+ * share one definition instead of each inventing its own. A base page is a
+ * fixed page_size blob:
+ *     [invfs_page_hdr][invfs_blkptr child[] | packed leaf entries]
+ * Internal nodes store invfs_blkptr children (extent-relative addressing
+ * lands in WP-M2); leaf entries are key/value records appended after the
+ * header. `gen` is the COW generation the page was written at (`checksum`
+ * is CRC32C over the whole page with the checksum field read as zero).
+ * Nothing in this WP parses a page -- these are wire-only declarations. */
+#define INVFS_PAGE_MAGIC      "BPG3"
+#define INVFS_PAGE_LEVEL_LEAF 0
+#pragma pack(push, 1)
+typedef struct {
+    char     magic[4];          /* "BPG3" */
+    uint64_t gen;               /* COW generation this page was written at */
+    uint16_t level;             /* INVFS_PAGE_LEVEL_LEAF or deeper */
+    uint16_t nentries;          /* live entries following the header */
+    uint32_t checksum;          /* CRC32C over page with this field 0 */
+} invfs_page_hdr;               /* 20 bytes */
+
+/* Pointer to a child page / extent. flags is reserved for the page
+ * allocator (leaf/internal, pinned, ...); WP-M2 defines its values. */
+typedef struct {
+    uint64_t pba;               /* physical block address of the target */
+    uint32_t checksum;          /* CRC32C of the referenced page */
+    uint64_t gen;               /* generation of the referenced page */
+    uint32_t flags;             /* reserved; WP-M2 defines */
+} invfs_blkptr;                 /* 24 bytes */
 #pragma pack(pop)
 
 /* WP30: Metadata extent entry in the mapper table (8 bytes)

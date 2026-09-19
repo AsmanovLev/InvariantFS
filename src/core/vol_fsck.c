@@ -442,6 +442,12 @@ int vol_fsck_scan(invfs_volume *v, invfs_fsck_report *rep, int fix)
     scan_set live = { NULL, 0, 0 };
 
     memset(rep, 0, sizeof(*rep));
+    /* WP-M1: a format-v3 volume carries no v2 inode-record stream / owner
+     * WAL, so there is nothing for the v2 rebuild to scan. The namespace is
+     * empty, which is trivially consistent. The real v3 checker (base tree,
+     * delta, fold, reclaim) is WP-M4. */
+    if (v->sb.vol_flags & VOLF_V3)
+        return 0;
     used_bytes = (size_t)v->bitmap_blocks * INVFS_BLOCK_SIZE;
     used = (uint8_t *)calloc(1, used_bytes);
     if (!used) return -1;
