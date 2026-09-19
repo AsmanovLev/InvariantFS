@@ -201,11 +201,6 @@ int main(int argc, char **argv)
         const char *v3e = getenv("INVFS_V3");
         v3 = (v3e && *v3e && strcmp(v3e, "0") != 0);
     }
-    if (v3 && twodev) {
-        fprintf(stderr, "invf-mkfs: INVFS_V3=1 does not support the "
-                        "two-device form yet (WP-M1 skeleton)\n");
-        return 2;
-    }
     path = blkio_normalize(argv[1], devbuf, sizeof devbuf);
     is_dev = blkio_looks_like_device(path);
 
@@ -485,6 +480,13 @@ int main(int argc, char **argv)
     uint64_t mapper_pba = sb.metadata_zone_start + bitmap_blocks_mkfs;
     uint64_t first_extent_pba = sb.shadow_zone_start;  /* Not pre-allocated */
     uint64_t extent_blocks = 0;  /* Not pre-allocated */
+    /* WP-M19: the reserved v3 root-area location. On a two-device volume
+     * the region AFTER it is left free in the bitmap so the v3 metadata
+     * allocator (mbuf_alloc/mb_alloc_meta_zone) hands out dev0-resident
+     * base pages -- inside the mirrored metadata span the mux dual-writes.
+     * Single-device v3 keeps the whole metadata zone allocated (byte-
+     * identical to WP-M1). */
+    uint64_t v3_root_pba = v3 ? mapper_pba + INVFS_META_EXT_BLOCKS : 0;
 
     /* Initialize MET0 with active_extent=0, extent_count=0 (first extent allocated on first write) */
     {
@@ -571,6 +573,17 @@ int main(int argc, char **argv)
         for (i = dev0_blocks; i < sb.shadow_zone_start; i++)
             bitmap[i / 8] |= (uint8_t)(1u << ((i) % 8));
     }
+    /* WP-M19: v3 two-device leaves the metadata-zone tail free so the v3
+     * base-page allocator draws from dev0's metadata span (mirrored by the
+     * mux), instead of the dev1 shadow fallback. The reserved root area
+     * (mb_boot_cursor) stays marked used -- it is skipped at open and must
+     * never be re-handed. Single-device v3 keeps every bit set. */
+    if (v3 && twodev) {
+        uint64_t base_lo = v3_root_pba + 2;
+        uint64_t base_hi = sb.metadata_zone_start + metadata_blocks;
+        for (i = base_lo; i < base_hi; i++)
+            bitmap[i / 8] &= (uint8_t)~(1u << (i % 8));
+    }
     /* v0.3.0: mark first metadata extent only (mapper is system reserved, not in bitmap) */
     for (i = 0; i < extent_blocks; i++)
         bitmap[(first_extent_pba + i) / 8] |= (uint8_t)(1u << ((first_extent_pba + i) % 8));
@@ -631,11 +644,11 @@ int main(int argc, char **argv)
      * convention); the WP-M2 page allocator owns handing these pages to
      * the double-slot base root and setting the pointers. Until then the
      * reserved location is implicit:
-     * root_pba = mapper_pba + INVFS_META_EXT_BLOCKS. */
-    uint64_t v3_root_pba = 0;
+     * root_pba = mapper_pba + INVFS_META_EXT_BLOCKS.
+     * WP-M19: on a two-device volume the same zeroed span lands on dev1
+     * too -- the metadata mirror is byte-identical from the first mount. */
     if (v3) {
         uint8_t *rz = (uint8_t *)calloc(1, 2u * INVFS_BLOCK_SIZE);
-        v3_root_pba = mapper_pba + INVFS_META_EXT_BLOCKS;
         if (!rz) {
             fprintf(stderr, "out of memory\n");
             free(bitmap);
@@ -650,8 +663,19 @@ int main(int argc, char **argv)
             blkio_close(&io);
             return 1;
         }
+        if (twodev &&
+            (blkio_seek(&io2, v3_root_pba * INVFS_BLOCK_SIZE) != 0 ||
+             blkio_write(&io2, rz, 2u * INVFS_BLOCK_SIZE) != 0)) {
+            fprintf(stderr, "v3 root-area write failed on dev1\n");
+            free(rz);
+            free(bitmap);
+            blkio_close(&io2);
+            blkio_close(&io);
+            return 1;
+        }
         free(rz);
         blkio_flush(&io);   /* root area durable BEFORE the RT30 descriptor */
+        if (twodev) blkio_flush(&io2);
     }
 
     /* ---- mark clean ---- */
@@ -684,6 +708,17 @@ int main(int argc, char **argv)
             blkio_write(&io, &rt, sizeof rt) != 0) {
             fprintf(stderr, "RT30 root descriptor write failed\n");
             free(bitmap);
+            blkio_close(&io);
+            return 1;
+        }
+        /* WP-M19: mirror the descriptor onto dev1 (degraded open reads it
+         * from there when dev0 is absent). */
+        if (twodev &&
+            (blkio_seek(&io2, INVFS_RT30_OFF) != 0 ||
+             blkio_write(&io2, &rt, sizeof rt) != 0)) {
+            fprintf(stderr, "RT30 root descriptor write failed on dev1\n");
+            free(bitmap);
+            blkio_close(&io2);
             blkio_close(&io);
             return 1;
         }

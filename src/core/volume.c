@@ -1667,7 +1667,14 @@ static invfs_volume *vol_open_inner(const char *path, int at_ckpt,
         v->mb_boot_cursor = v->mb_boot_end;
         v->v3_mbuf_ready = 1;
         v->needs_recovery = 1;
-        v->sb.vol_flags &= ~(VOLF_READONLY | VOLF_RO_SPACE);
+        /* WP-M19: a degraded v3 mount (dev0 absent) serves only from the
+         * dev1 metadata mirror; keep it READ-ONLY, exactly like the v2
+         * degraded leg. A full two-device v3 mount needs the READONLY bit
+         * clear so the shared metadata allocator can hand out base pages. */
+        if (v->degraded)
+            v->sb.vol_flags |= VOLF_READONLY;
+        else
+            v->sb.vol_flags &= ~(VOLF_READONLY | VOLF_RO_SPACE);
         /* WP-M10: replay the append-only delta chain named by RT30 into the
          * in-memory index (D1). Overlay reads are WP-M11 and fold is WP-M14;
          * this only reconstructs the recent tier so a crash/remount keeps
@@ -4350,9 +4357,11 @@ int vol_write_enabled(invfs_volume *v)
     /* WP-M6: a v3 volume has no v2 record stream; the M5 backstop keeps
      * needs_recovery set so the v2 mutators still refuse (they call
      * vol_mark_dirty), but the v3 base-tree namespace (dirents + inode rows)
-     * must be writable through FUSE now. Only the READONLY latch applies. */
+     * must be writable through FUSE now. Only the READONLY latch applies.
+     * WP-M19: a degraded v3 mount (dev0 absent) is read-only by
+     * construction too -- it is serving from the dev1 metadata mirror. */
     if (v->sb.vol_flags & VOLF_V3)
-        return !(v->sb.vol_flags & VOLF_READONLY);
+        return !(v->sb.vol_flags & VOLF_READONLY) && !v->degraded;
     /* A volume awaiting recovery is read-only for the same reason a
        READONLY-flagged one is: the callers that check this are the ones that
        would otherwise append records, and appending onto maps that were never
