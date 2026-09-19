@@ -328,6 +328,28 @@ typedef int (*vol_v3_xattr_cb)(void *ctx, const char *name, size_t nlen);
 int vol_v3_xattr_scan(invfs_volume *v, uint64_t inode_id,
                       vol_v3_xattr_cb cb, void *ctx);
 
+/* ---- WP-M12: delta-backed mutations (the recent tier) ----------------
+ * The WP-M5/M6/M7 entry points above stay the base-only path (COW + root
+ * publish) so the fold (WP-M14) and the WP-M11 overlay driver keep using
+ * them. These *_delta_* variants append the same key/value to the delta log
+ * instead, leaving the base immutable between folds; the WP-M11 overlay
+ * (delta first, then base) makes them read-visible immediately. Delete
+ * variants append INVFS_DELTA_FLAG_DELETE records; a delta delete at an
+ * inode cascades the inode's xattr keys. Return 0 = ok, -1 = error, and
+ * the xattr set's -2 = value too large. All are no-ops/errors on a v2
+ * volume, and honour VOLF_READONLY like vol_delta_append. */
+int vol_v3_inode_delta_put(invfs_volume *v, uint64_t inode_id,
+                           const invfs_v3_inode *in);
+int vol_v3_inode_delta_delete(invfs_volume *v, uint64_t inode_id);
+int vol_v3_dirent_delta_put(invfs_volume *v, uint64_t parent,
+                            const char *name, uint64_t child);
+int vol_v3_dirent_delta_del(invfs_volume *v, uint64_t parent,
+                            const char *name);
+int vol_v3_xattr_delta_set(invfs_volume *v, uint64_t inode_id,
+                           const char *name, const void *val, size_t vlen);
+int vol_v3_xattr_delta_del(invfs_volume *v, uint64_t inode_id,
+                           const char *name);
+
 /* rewrite `name`'s record carrying `meta` (xattrs preserved); data blocks and
  * the AST are untouched — the L2P keys move to the new inode id internally.
  * Returns the new inode id, or 0 on failure (volume untouched). */

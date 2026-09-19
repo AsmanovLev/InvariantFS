@@ -809,7 +809,7 @@ static int vol_write_commit_v3(invfs_wsession *s)
         if (in.nlink == 0)
             in.nlink = 1;
         in.mtime = now;
-        if (vol_v3_inode_put(v, id, &in) != 0)
+        if (vol_v3_inode_delta_put(v, id, &in) != 0)
             return -1;
     } else {
         /* new name: row (with content) first, then the dirent */

@@ -1477,7 +1477,7 @@ int vol_set_xattr(invfs_volume *v, uint64_t inode_id, const char *xn,
     int rc = -1;
 
     if (v && (v->sb.vol_flags & VOLF_V3))
-        return vol_v3_xattr_set(v, inode_id, xn, val, vlen);
+        return vol_v3_xattr_delta_set(v, inode_id, xn, val, vlen);
     if (v->sb.vol_flags & VOLF_READONLY) return -1;
     if (nlen == 0 || nlen > 255) return -1;
     if (meta_read_record_by_id(v, inode_id, &buf, &rl, name, sizeof(name),
@@ -1535,7 +1535,7 @@ int vol_remove_xattr(invfs_volume *v, uint64_t inode_id, const char *xn)
     int found = 0, rc;
 
     if (v && (v->sb.vol_flags & VOLF_V3))
-        return vol_v3_xattr_del(v, inode_id, xn);
+        return vol_v3_xattr_delta_del(v, inode_id, xn);
     if (v->sb.vol_flags & VOLF_READONLY) return -1;
     if (meta_read_record_by_id(v, inode_id, &buf, &rl, name, sizeof(name),
                                NULL) != 0)

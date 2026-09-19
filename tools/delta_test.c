@@ -505,6 +505,81 @@ static void test_rollover(const char *dir)
     remove(img);
 }
 
+/* WP-M12: a namespace mutation must land in the delta and leave the base
+ * root untouched (the base stays immutable between folds). Drives the public
+ * v3 mutation entry points on a synthetic volume whose base tree is empty, so
+ * "base unchanged" is exactly "the base root blkptr did not move". */
+static void test_v3_metadata_delta(const char *dir)
+{
+    char img[512];
+    invfs_volume *v;
+    invfs_v3_inode in;
+    invfs_blkptr b0, b1;
+    uint64_t child = 0;
+    char vbuf[16];
+    size_t vlen;
+
+    printf("v3 metadata mutations append to the delta (base untouched)\n");
+    snprintf(img, sizeof img, "%s/invf-delta_v3mut.img", dir);
+    if (image_make(img, FB_TOTAL) != 0) { ok(0, "make v3mut image"); return; }
+    v = (invfs_volume *)calloc(1, sizeof *v);
+    if (!v) { ok(0, "calloc v3mut volume"); return; }
+    if (synth_open(v, img) != 0) {
+        ok(0, "open v3mut volume");
+        free(v);
+        return;
+    }
+    if (vol_v3_base_root(v, &b0) != 0) {
+        ok(0, "read base root before mutations");
+        vol_delta_close(v);
+        fake_vol_close(v);
+        free(v);
+        return;
+    }
+
+    memset(&in, 0, sizeof in);
+    in.type = INVFS_ITYP_REG;
+    in.mode = 0640;
+    in.uid = in.gid = 1000;
+    in.nlink = 1;
+    in.size = 0;
+
+    ok(vol_v3_inode_delta_put(v, 42, &in) == 0, "delta put inode 42");
+    ok(vol_v3_inode_get(v, 42, &in) == 1 && in.mode == 0640,
+       "overlay reads the delta inode row");
+    ok(vol_v3_dirent_delta_put(v, 77, "a", 42) == 0, "delta put dirent");
+    ok(vol_v3_dirent_get(v, 77, "a", &child) == 1 && child == 42,
+       "overlay reads the delta dirent");
+    ok(vol_v3_xattr_delta_set(v, 42, "user.k", "v", 1) == 0,
+       "delta set xattr");
+    vlen = sizeof vbuf;
+    ok(vol_v3_xattr_get(v, 42, "user.k", vbuf, &vlen) == 0 &&
+       vlen == 1 && vbuf[0] == 'v', "overlay reads the delta xattr");
+    ok(vol_v3_inode_alloc(v) == 43,
+       "id allocator resumes above the delta-only inode");
+
+    ok(vol_v3_dirent_delta_del(v, 77, "a") == 0, "delta delete dirent");
+    ok(vol_v3_dirent_get(v, 77, "a", &child) == 0, "deleted dirent hidden");
+    ok(vol_v3_inode_delta_delete(v, 42) == 0, "delta delete inode");
+    ok(vol_v3_inode_get(v, 42, &in) == 0, "deleted inode hidden");
+    vlen = sizeof vbuf;
+    ok(vol_v3_xattr_get(v, 42, "user.k", vbuf, &vlen) == -1,
+       "inode delete cascaded the xattr keys");
+
+    if (vol_v3_base_root(v, &b1) != 0) {
+        ok(0, "read base root after mutations");
+    } else {
+        ok(b1.pba == b0.pba && b1.gen == b0.gen,
+           "base root unchanged after every mutation");
+    }
+    ok(vol_delta_count(v) > 0, "the recent tier is non-empty");
+
+    vol_delta_close(v);
+    fake_vol_close(v);
+    free(v);
+    remove(img);
+}
+
 static void run_unit(const char *dir)
 {
     char img[512];
@@ -542,6 +617,7 @@ static void run_unit(const char *dir)
 
     test_crc_truncation(dir);
     test_rollover(dir);
+    test_v3_metadata_delta(dir);
 
     printf("%d checks, %d failure(s)\n", checks, failures);
 }

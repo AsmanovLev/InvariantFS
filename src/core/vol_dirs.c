@@ -346,12 +346,12 @@ uint64_t vol_v3_create_node(invfs_volume *v, const char *name,
     in.size = 0;                          /* WP-M8: content cleared */
     memset(&in.recipe, 0, sizeof in.recipe);
     memset(in.recipe_addr, 0, sizeof in.recipe_addr);
-    if (vol_v3_inode_put(v, id, &in) != 0)
+    if (vol_v3_inode_delta_put(v, id, &in) != 0)
         return 0;
-    if (vol_v3_dirent_put(v, pino, leaf, id) != 0)
+    if (vol_v3_dirent_delta_put(v, pino, leaf, id) != 0)
         return 0;
     if (in.type == INVFS_ITYP_DIR)
-        vol_v3_dirent_put(v, id, "", id);  /* directory anchor */
+        vol_v3_dirent_delta_put(v, id, "", id);  /* directory anchor */
     return id;
 }
 
@@ -405,9 +405,9 @@ uint64_t vol_v3_create_content_node(invfs_volume *v, const char *name,
     memcpy(in.recipe_addr, recipe_addr, INVFS_V3_RECIPE_ADDR_LEN);
     /* row first, dirent second: a torn create is an orphan, not a dangling
      * name. An already-present dirent is left in place (replace-in-place). */
-    if (vol_v3_inode_put(v, id, &in) != 0)
+    if (vol_v3_inode_delta_put(v, id, &in) != 0)
         return 0;
-    if (rc != 1 && vol_v3_dirent_put(v, pino, leaf, id) != 0)
+    if (rc != 1 && vol_v3_dirent_delta_put(v, pino, leaf, id) != 0)
         return 0;
     return id;
 }
@@ -438,10 +438,10 @@ uint64_t vol_v3_set_meta(invfs_volume *v, const char *name,
     if (meta->nlink)
         in.nlink = meta->nlink;
     in.rdev = meta->rdev;
-    if (vol_v3_inode_put(v, id, &in) != 0)
+    if (vol_v3_inode_delta_put(v, id, &in) != 0)
         return 0;
     if (in.type == INVFS_ITYP_DIR)
-        vol_v3_dirent_put(v, id, "", id);  /* ensure the anchor */
+        vol_v3_dirent_delta_put(v, id, "", id);  /* ensure the anchor */
     return id;
 }
 
@@ -475,11 +475,11 @@ uint64_t vol_v3_mkdir(invfs_volume *v, const char *name)
     in.mode = 0755;
     in.nlink = 2;
     in.mtime = in.atime = (int64_t)time(NULL);
-    if (vol_v3_inode_put(v, id, &in) != 0)
+    if (vol_v3_inode_delta_put(v, id, &in) != 0)
         return 0;
-    if (vol_v3_dirent_put(v, id, "", id) != 0)     /* anchor */
+    if (vol_v3_dirent_delta_put(v, id, "", id) != 0)     /* anchor */
         return 0;
-    if (vol_v3_dirent_put(v, pino, leaf, id) != 0)
+    if (vol_v3_dirent_delta_put(v, pino, leaf, id) != 0)
         return 0;
     return id;
 }
@@ -515,11 +515,11 @@ int vol_v3_rmdir(invfs_volume *v, const char *name)
         return -2;                        /* ENOTEMPTY */
     if (vol_v3_path_lookup(v, parent, &pino) != 1)
         return -1;
-    if (vol_v3_dirent_del(v, pino, leaf) != 0)
+    if (vol_v3_dirent_delta_del(v, pino, leaf) != 0)
         return -1;
-    if (vol_v3_dirent_del(v, id, "") != 0)
+    if (vol_v3_dirent_delta_del(v, id, "") != 0)
         return -1;
-    if (vol_v3_inode_delete(v, id) != 0)
+    if (vol_v3_inode_delta_delete(v, id) != 0)
         return -1;
     return 0;
 }
@@ -547,14 +547,14 @@ int vol_v3_unlink(invfs_volume *v, const char *name)
      * xattr keys). Name-first means a crash between the two leaves nlink
      * >= the live name count -- an inode may leak, but a live dirent can
      * never point at a freed row. */
-    if (vol_v3_dirent_del(v, pino, leaf) != 0)
+    if (vol_v3_dirent_delta_del(v, pino, leaf) != 0)
         return -1;
     if (in.nlink <= 1) {
-        if (vol_v3_inode_delete(v, id) != 0)
+        if (vol_v3_inode_delta_delete(v, id) != 0)
             return -1;
     } else {
         in.nlink--;
-        if (vol_v3_inode_put(v, id, &in) != 0)
+        if (vol_v3_inode_delta_put(v, id, &in) != 0)
             return -1;
     }
     return 0;
@@ -612,24 +612,24 @@ int vol_v3_rename(invfs_volume *v, const char *from, const char *to)
          * hardlinks to the SAME inode is a no-op; the doc is silent and
          * M6's rename mechanics would drop one name, so the pre-existing
          * (non-POSIX, non-lossy) behaviour is kept here. */
-        if (vol_v3_dirent_del(v, t_pino, tleaf) != 0)
+        if (vol_v3_dirent_delta_del(v, t_pino, tleaf) != 0)
             return -1;
         if (t_in.nlink > 1) {
             t_in.nlink--;
-            if (vol_v3_inode_put(v, t_id, &t_in) != 0)
+            if (vol_v3_inode_delta_put(v, t_id, &t_in) != 0)
                 return -1;
-        } else if (vol_v3_inode_delete(v, t_id) != 0) {
+        } else if (vol_v3_inode_delta_delete(v, t_id) != 0) {
             return -1;
         }
     }
     /* insert the new dirent BEFORE deleting the old (add-before-remove,
      * design §3): a crash between the two leaves the file under both names,
      * never under neither. */
-    if (vol_v3_dirent_put(v, t_pino, tleaf, f_id) != 0)
+    if (vol_v3_dirent_delta_put(v, t_pino, tleaf, f_id) != 0)
         return -1;
     if (vol_v3_path_lookup(v, fparent, &f_pino) != 1)
         return -1;
-    if (vol_v3_dirent_del(v, f_pino, fleaf) != 0)
+    if (vol_v3_dirent_delta_del(v, f_pino, fleaf) != 0)
         return -1;
     return 0;
 }
@@ -1367,11 +1367,11 @@ static int vol_v3_hardlink(invfs_volume *v, const char *from, const char *to)
      * leaves a count >= the name count, never a dirent whose inode is
      * under-counted and could be freed by a later unlink. */
     in.nlink++;
-    if (vol_v3_inode_put(v, id, &in) != 0)
+    if (vol_v3_inode_delta_put(v, id, &in) != 0)
         return -1;
-    if (vol_v3_dirent_put(v, t_pino, tleaf, id) != 0) {
+    if (vol_v3_dirent_delta_put(v, t_pino, tleaf, id) != 0) {
         in.nlink--;                             /* roll back the count */
-        vol_v3_inode_put(v, id, &in);
+        vol_v3_inode_delta_put(v, id, &in);
         return -1;
     }
     return 0;

@@ -1425,6 +1425,99 @@ static int v3_overlay_lookup(invfs_volume *v, const uint8_t *key, uint16_t klen,
 }
 
 /* ------------------------------------------------------------------ */
+/* WP-M12: delta-backed mutations (the write half of the overlay)       */
+/*                                                                     */
+/* Every v3 namespace mutation appends a record to the recent tier      */
+/* instead of COW-upserting the base B+-tree: the base stays immutable  */
+/* between folds (design §4/§13), so a create/unlink/rename/chmod/xattr */
+/* is O(1) append + index, never a base-root publish. The base-only     */
+/* helpers (vol_v3_inode_put/... above) are kept unchanged for the fold */
+/* (WP-M14) and the WP-M11 overlay driver; the *_delta_* entry points   */
+/* below are what the production namespace/attr paths call. The record  */
+/* shapes are exactly the ones the WP-M11 overlay already interprets:   */
+/* inode row = the frozen invfs_v3_inode_row, dirent = u64 BE child,    */
+/* xattr = the raw value at the WP-M7 key (chunked as in the base).     */
+/*                                                                     */
+/* Ordering (load-bearing): appends are made in the durability order the */
+/* WP-M9 chain fixes -- data/recipe -> inode row -> dirent -- and rename */
+/* keeps add-before-remove. A delete record is a value at the overlay    */
+/* layer (INVFS_DELTA_FLAG_DELETE) that shadows the base entry.          */
+/* ------------------------------------------------------------------ */
+
+static int v3_delta_put(invfs_volume *v, const uint8_t *key, uint16_t klen,
+                        const uint8_t *val, uint16_t vlen)
+{
+    return vol_delta_append(v, key, klen, val, vlen, 0);
+}
+
+static int v3_delta_del(invfs_volume *v, const uint8_t *key, uint16_t klen)
+{
+    return vol_delta_append(v, key, klen, NULL, 0, INVFS_DELTA_FLAG_DELETE);
+}
+
+/* Overlay existence: 1 = present (delta value or base entry), 0 = absent
+ * (delta miss + base miss, or a delta delete shadowing the base), -1 = error. */
+static int v3_overlay_exists(invfs_volume *v, const uint8_t *key, uint16_t klen)
+{
+    delta_ref dr;
+    int drc = v3_overlay_lookup(v, key, klen, &dr);
+    if (drc < 0)
+        return -1;
+    if (drc == 1)
+        return (dr.flags & INVFS_DELTA_FLAG_DELETE) ? 0 : 1;
+    {
+        invfs_blkptr root;
+        bt_val val;
+        int found = 0;
+        if (v3_base_root(v, &root) != 0)
+            return -1;
+        if (btree_search(v, root, (bt_key){key, klen}, &val, &found) != 0)
+            return -1;
+        return found;
+    }
+}
+
+/* Overlay point value: 1 = present (value copied to buf, *vlen_out set),
+ * 0 = absent (delta delete or neither tier), -1 = error/too small. */
+static int v3_overlay_get_key(invfs_volume *v, const uint8_t *key, uint16_t klen,
+                              uint8_t *buf, size_t cap, uint16_t *vlen_out)
+{
+    delta_ref dr;
+    int drc = v3_overlay_lookup(v, key, klen, &dr);
+    if (drc < 0)
+        return -1;
+    if (drc == 1) {
+        if (dr.flags & INVFS_DELTA_FLAG_DELETE)
+            return 0;
+        if (dr.vlen > cap)
+            return -1;
+        if (vlen_out)
+            *vlen_out = 0;
+        if (vol_delta_read_value(v, &dr, buf, cap, vlen_out) != 0)
+            return -1;
+        return 1;
+    }
+    {
+        invfs_blkptr root;
+        bt_val val;
+        int found = 0;
+        if (v3_base_root(v, &root) != 0)
+            return -1;
+        if (btree_search(v, root, (bt_key){key, klen}, &val, &found) != 0)
+            return -1;
+        if (!found)
+            return 0;
+        if (val.n > cap)
+            return -1;
+        if (val.n)
+            memcpy(buf, val.p, val.n);
+        if (vlen_out)
+            *vlen_out = val.n;
+        return 1;
+    }
+}
+
+/* ------------------------------------------------------------------ */
 /* WP-M7: v3 xattr tree (base B+-tree namespace)                       */
 /*                                                                    */
 /* Key (frozen by the WP-M7 doc):                                      */
@@ -1601,6 +1694,121 @@ static int v3_xattr_delete_name(v3_xmut *m, uint64_t ino,
     return 0;
 }
 
+/* WP-M12: append the new representation BEFORE shadowing any longer old
+ * tail (add-before-remove), so a crash mid-replace never loses the value.
+ * The key/value shapes mirror the base chunking exactly, so a later fold is
+ * a per-key upsert (WP-M14) and the read overlay walks both tiers with one
+ * rule. Returns 0 ok, -1 error, -2 ERANGE (too large). */
+int vol_v3_xattr_delta_set(invfs_volume *v, uint64_t inode_id,
+                           const char *name, const void *val, size_t vlen)
+{
+    uint8_t kb[V3_XATTR_FIXED + INVFS_MAX_NAME + V3_XATTR_CHUNK_EXTRA];
+    size_t nl, off = 0;
+    uint16_t cap, kn, idx = 0;
+
+    if (!v || !name)
+        return -1;
+    if (v->sb.vol_flags & VOLF_READONLY)
+        return -1;
+    nl = strlen(name);
+    if (nl == 0 || nl > INVFS_MAX_NAME)
+        return -1;
+    if (vlen > V3_XATTR_MAX_TOTAL)
+        return -2;
+    if (vlen && !val)
+        return -1;
+    if (v3_ready(v) != 0)
+        return -1;
+
+    cap = v3_xattr_chunk_cap((uint16_t)nl);
+    if (cap > V3_XATTR_CHUNK_DATA)
+        cap = (uint16_t)V3_XATTR_CHUNK_DATA;
+    if (cap == 0)
+        return -1;
+
+    if (vlen <= cap) {
+        /* one (sub-page) record: the frozen canonical key, raw bytes; an
+         * empty value is a present record with vlen 0, not a delete. */
+        kn = v3_xattr_key(kb, inode_id, name, nl);
+        if (v3_delta_put(v, kb, kn, val ? (const uint8_t *)val : NULL,
+                         (uint16_t)vlen) != 0)
+            return -1;
+        idx = 1;
+    } else {
+        do {
+            size_t chunk = vlen - off;
+            if (chunk > cap)
+                chunk = cap;
+            if (idx == 0)
+                kn = v3_xattr_key(kb, inode_id, name, nl);
+            else
+                kn = v3_xattr_chunk_key(kb, inode_id, name, nl, idx);
+            if (v3_delta_put(v, kb, kn, (const uint8_t *)val + off,
+                             (uint16_t)chunk) != 0)
+                return -1;
+            off += chunk;
+            idx++;
+        } while (off < vlen && idx <= V3_XATTR_MAX_CHUNKS);
+        if (off < vlen)
+            return -2;   /* more chunks than the format allows */
+    }
+
+    /* shadow any continuation key past the new representation's last chunk:
+     * the canonical/new chunks already win at their own keys, so only a
+     * longer OLD value leaves a stale tail to delete. */
+    while (idx <= V3_XATTR_MAX_CHUNKS) {
+        int ex;
+        kn = v3_xattr_chunk_key(kb, inode_id, name, nl, idx);
+        ex = v3_overlay_exists(v, kb, kn);
+        if (ex < 0)
+            return -1;
+        if (!ex)
+            break;
+        if (v3_delta_del(v, kb, kn) != 0)
+            return -1;
+        idx++;
+    }
+    return 0;
+}
+
+int vol_v3_xattr_delta_del(invfs_volume *v, uint64_t inode_id, const char *name)
+{
+    uint8_t kb[V3_XATTR_FIXED + INVFS_MAX_NAME + V3_XATTR_CHUNK_EXTRA];
+    size_t nl;
+    uint16_t kn, idx;
+    int ex;
+
+    if (!v || !name)
+        return -1;
+    if (v->sb.vol_flags & VOLF_READONLY)
+        return -1;
+    nl = strlen(name);
+    if (nl == 0 || nl > INVFS_MAX_NAME)
+        return -1;
+    if (v3_ready(v) != 0)
+        return -1;
+
+    kn = v3_xattr_key(kb, inode_id, name, nl);
+    ex = v3_overlay_exists(v, kb, kn);
+    if (ex < 0)
+        return -1;
+    if (ex == 0)
+        return -1;                       /* ENODATA */
+    if (v3_delta_del(v, kb, kn) != 0)
+        return -1;
+    for (idx = 1; idx <= V3_XATTR_MAX_CHUNKS; idx++) {
+        kn = v3_xattr_chunk_key(kb, inode_id, name, nl, idx);
+        ex = v3_overlay_exists(v, kb, kn);
+        if (ex < 0)
+            return -1;
+        if (!ex)
+            break;
+        if (v3_delta_del(v, kb, kn) != 0)
+            return -1;
+    }
+    return 0;
+}
+
 int vol_v3_xattr_set(invfs_volume *v, uint64_t inode_id, const char *name,
                      const void *val, size_t vlen)
 {
@@ -1695,12 +1903,10 @@ int vol_v3_xattr_get(invfs_volume *v, uint64_t inode_id, const char *name,
                      void *val, size_t *vlen)
 {
     uint8_t kb[V3_XATTR_FIXED + INVFS_MAX_NAME + V3_XATTR_CHUNK_EXTRA];
-    invfs_blkptr root;
-    bt_val bv;
+    uint8_t one[V3_XATTR_CHUNK_DATA + 1];
     uint8_t *acc = NULL;
     size_t nl, total = 0, cap = 0;
     uint16_t kn, idx;
-    int found = 0;
 
     if (!v || !name || !vlen)
         return -1;
@@ -1709,18 +1915,34 @@ int vol_v3_xattr_get(invfs_volume *v, uint64_t inode_id, const char *name,
         return -1;
     if (v3_ready(v) != 0)
         return -1;
-    if (v3_base_root(v, &root) != 0)
-        return -1;
-    kn = v3_xattr_key(kb, inode_id, name, nl);
-    if (btree_search(v, root, (bt_key){kb, kn}, &bv, &found) != 0)
-        return -1;
-    if (!found)
-        return -1;                       /* ENODATA */
 
-    /* bv points into a per-thread buffer, invalidated by the next search:
-     * copy chunk 0 before probing the continuation keys. */
+    /* WP-M12: walk the canonical + continuation keys through the overlay
+     * (delta first, then base) so a value written since the last fold is
+     * visible. A delta delete at any key ends the walk; a delta miss falls
+     * through to the base chunk. Each per-key value is <= V3_XATTR_CHUNK_DATA
+     * (the WP-M7 writer caps every chunk), so `one` is always large enough. */
     for (idx = 0; ; idx++) {
-        size_t add = bv.n;
+        uint16_t got = 0;
+        size_t add;
+        int rc;
+
+        if (idx == 0)
+            kn = v3_xattr_key(kb, inode_id, name, nl);
+        else
+            kn = v3_xattr_chunk_key(kb, inode_id, name, nl, idx);
+        rc = v3_overlay_get_key(v, kb, kn, one, sizeof one, &got);
+        if (rc < 0) {
+            free(acc);
+            return -1;
+        }
+        if (rc == 0) {
+            if (idx == 0) {              /* ENODATA */
+                free(acc);
+                return -1;
+            }
+            break;                       /* end of the chunk chain */
+        }
+        add = got;
         if (total + add > V3_XATTR_MAX_TOTAL) {
             free(acc);
             return -1;
@@ -1736,17 +1958,11 @@ int vol_v3_xattr_get(invfs_volume *v, uint64_t inode_id, const char *name,
             cap = ncap;
         }
         if (add)
-            memcpy(acc + total, bv.p, add);
+            memcpy(acc + total, one, add);
         total += add;
+
         if (idx >= V3_XATTR_MAX_CHUNKS)
-            break;
-        kn = v3_xattr_chunk_key(kb, inode_id, name, nl, (uint16_t)(idx + 1));
-        if (btree_search(v, root, (bt_key){kb, kn}, &bv, &found) != 0) {
-            free(acc);
-            return -1;
-        }
-        if (!found)
-            break;
+            break;                       /* chain length cap (defensive) */
     }
     if (*vlen == 0) {                    /* size query */
         *vlen = total;
@@ -1764,27 +1980,115 @@ int vol_v3_xattr_get(invfs_volume *v, uint64_t inode_id, const char *name,
     return 0;
 }
 
+/* WP-M12: xattr scan = base canonical names + delta canonical names, with a
+ * delta delete suppressing the base name (and a delta value adding one).
+ * Only canonical (chunk 0) keys name an xattr; the delta writer always
+ * appends the canonical record first, so a chunk-only delta entry never
+ * names a value on its own. Duplicates are collapsed so a name present in
+ * both tiers is emitted once (delta wins). */
 typedef struct {
-    vol_v3_xattr_cb cb;
-    void           *ctx;
-} v3_xattr_scan_state;
+    char name[INVFS_MAX_NAME + 1];
+    int  deleted;
+} v3_xa_ent;
 
-static int v3_xattr_scan_cb(void *ctx_, bt_key k, bt_val val)
+typedef struct {
+    v3_xa_ent *e;
+    size_t     n, cap;
+    int        oom;
+} v3_xa_list;
+
+static void v3_xa_free(v3_xa_list *l)
 {
-    v3_xattr_scan_state *s = (v3_xattr_scan_state *)ctx_;
+    free(l->e);
+    l->e = NULL;
+    l->n = l->cap = 0;
+}
+
+static v3_xa_ent *v3_xa_find(v3_xa_list *l, const char *nm)
+{
+    size_t i;
+    for (i = 0; i < l->n; i++)
+        if (strcmp(l->e[i].name, nm) == 0)
+            return &l->e[i];
+    return NULL;
+}
+
+static v3_xa_ent *v3_xa_add(v3_xa_list *l, const char *nm)
+{
+    v3_xa_ent *e;
+    if (l->n == l->cap) {
+        size_t ncap = l->cap ? l->cap * 2 : 16;
+        v3_xa_ent *ne = (v3_xa_ent *)realloc(l->e, ncap * sizeof *ne);
+        if (!ne) {
+            l->oom = 1;
+            return NULL;
+        }
+        l->e = ne;
+        l->cap = ncap;
+    }
+    e = &l->e[l->n++];
+    snprintf(e->name, sizeof e->name, "%s", nm);
+    e->deleted = 0;
+    return e;
+}
+
+static int v3_xa_canon_name(const uint8_t *key, uint16_t klen,
+                            char nbuf[INVFS_MAX_NAME + 1], uint16_t *nlen_out)
+{
     const uint8_t *name;
     uint16_t nl;
-    char nbuf[INVFS_MAX_NAME + 1];
     int chunk;
-    (void)val;
 
-    if (!v3_xattr_key_decode(k.p, k.n, &name, &nl, &chunk, NULL))
+    if (!v3_xattr_key_decode(key, klen, &name, &nl, &chunk, NULL) || chunk)
         return 0;
-    if (chunk)
-        return 0;                        /* continuation: chunk 0 named it */
     memcpy(nbuf, name, nl);
     nbuf[nl] = 0;
-    return s->cb(s->ctx, nbuf, nl);
+    if (nlen_out)
+        *nlen_out = nl;
+    return 1;
+}
+
+static int v3_xa_delta_cb(void *ctx_, const uint8_t *key, uint16_t klen,
+                          const delta_ref *ref)
+{
+    v3_xa_list *l = (v3_xa_list *)ctx_;
+    char nbuf[INVFS_MAX_NAME + 1];
+    v3_xa_ent *e;
+
+    if (!v3_xa_canon_name(key, klen, nbuf, NULL))
+        return 0;
+    e = v3_xa_find(l, nbuf);
+    if (!e)
+        e = v3_xa_add(l, nbuf);
+    if (!e)
+        return 1;                        /* OOM: abort the cursor */
+    e->deleted = (ref->flags & INVFS_DELTA_FLAG_DELETE) ? 1 : 0;
+    return 0;
+}
+
+static int v3_xa_base_cb(void *ctx_, bt_key k, bt_val val)
+{
+    v3_xa_list *l = (v3_xa_list *)ctx_;
+    char nbuf[INVFS_MAX_NAME + 1];
+    (void)val;
+
+    if (!v3_xa_canon_name(k.p, k.n, nbuf, NULL))
+        return 0;
+    if (v3_xa_find(l, nbuf))
+        return 0;                        /* a delta record owns the name */
+    if (!v3_xa_add(l, nbuf))
+        return 1;                        /* OOM: abort the scan */
+    return 0;
+}
+
+static int v3_xa_ent_cmp(const void *pa, const void *pb)
+{
+    const v3_xa_ent *a = (const v3_xa_ent *)pa;
+    const v3_xa_ent *b = (const v3_xa_ent *)pb;
+    size_t an = strlen(a->name), bn = strlen(b->name);
+    if (an != bn)
+        return an < bn ? -1 : 1;
+    return strcmp(a->name, b->name);
 }
 
 int vol_v3_xattr_scan(invfs_volume *v, uint64_t inode_id,
@@ -1792,20 +2096,49 @@ int vol_v3_xattr_scan(invfs_volume *v, uint64_t inode_id,
 {
     uint8_t lo[V3_XATTR_FIXED], hi[V3_XATTR_FIXED];
     invfs_blkptr root;
-    v3_xattr_scan_state s;
+    v3_xa_list l;
+    size_t i;
+    int rc;
 
     if (!v || !cb)
         return -1;
     if (v3_ready(v) != 0)
         return -1;
-    if (v3_base_root(v, &root) != 0)
-        return -1;
+    memset(&l, 0, sizeof l);
     v3_xattr_key(lo, inode_id, NULL, 0);         /* name_len 0: smallest */
     v3_xattr_key(hi, inode_id + 1, NULL, 0);
-    s.cb = cb;
-    s.ctx = ctx;
-    return btree_scan(v, root, (bt_key){lo, V3_XATTR_FIXED},
-                      (bt_key){hi, V3_XATTR_FIXED}, v3_xattr_scan_cb, &s);
+
+    rc = vol_delta_range(v, lo, V3_XATTR_FIXED, hi, V3_XATTR_FIXED,
+                         v3_xa_delta_cb, &l);
+    if (rc != 0 || l.oom) {
+        v3_xa_free(&l);
+        return -1;
+    }
+    if (v3_base_root(v, &root) != 0) {
+        v3_xa_free(&l);
+        return -1;
+    }
+    rc = btree_scan(v, root, (bt_key){lo, V3_XATTR_FIXED},
+                    (bt_key){hi, V3_XATTR_FIXED}, v3_xa_base_cb, &l);
+    if (rc != 0 || l.oom) {
+        v3_xa_free(&l);
+        return -1;
+    }
+
+    /* the documented key order is name_len then name; the only in-tree
+     * caller sorts anyway but the contract is kept. */
+    if (l.n > 1)
+        qsort(l.e, l.n, sizeof *l.e, v3_xa_ent_cmp);
+    rc = 0;
+    for (i = 0; i < l.n; i++) {
+        if (l.e[i].deleted)
+            continue;
+        rc = cb(ctx, l.e[i].name, strlen(l.e[i].name));
+        if (rc)
+            break;
+    }
+    v3_xa_free(&l);
+    return rc;
 }
 
 /* Collect every key in one inode's xattr range, then delete them all. Used
@@ -1814,6 +2147,27 @@ typedef struct {
     uint8_t *buf;
     size_t   len, cap;
 } v3_keybuf;
+
+/* Append one raw key with a u16 length prefix. 0 = ok, -1 = OOM. */
+static int v3_keybuf_append(v3_keybuf *b, const uint8_t *k, uint16_t kn)
+{
+    if (b->len + 2 + kn > b->cap) {
+        size_t ncap = b->cap ? b->cap * 2 : 4096;
+        uint8_t *nb;
+        while (ncap < b->len + 2 + kn)
+            ncap *= 2;
+        nb = (uint8_t *)realloc(b->buf, ncap);
+        if (!nb)
+            return -1;
+        b->buf = nb;
+        b->cap = ncap;
+    }
+    b->buf[b->len]     = (uint8_t)(kn >> 8);
+    b->buf[b->len + 1] = (uint8_t)(kn & 0xFF);
+    memcpy(b->buf + b->len + 2, k, kn);
+    b->len += 2 + kn;
+    return 0;
+}
 
 static int v3_xattr_collect_cb(void *ctx_, bt_key k, bt_val val)
 {
@@ -1825,21 +2179,67 @@ static int v3_xattr_collect_cb(void *ctx_, bt_key k, bt_val val)
 
     if (!v3_xattr_key_decode(k.p, k.n, &name, &nl, &chunk, NULL))
         return 0;
-    if (b->len + 2 + k.n > b->cap) {
-        size_t ncap = b->cap ? b->cap * 2 : 4096;
-        uint8_t *nb;
-        while (ncap < b->len + 2 + k.n)
-            ncap *= 2;
-        nb = (uint8_t *)realloc(b->buf, ncap);
-        if (!nb)
-            return -1;                   /* abort the scan */
-        b->buf = nb;
-        b->cap = ncap;
+    return v3_keybuf_append(b, k.p, k.n) == 0 ? 0 : -1;
+}
+
+/* vol_delta_range callback for the same collection (WP-M12): the delta side
+ * of an inode's xattr keys, including keys already shadowed by a delete. */
+static int v3_xattr_collect_delta_cb(void *ctx_, const uint8_t *key,
+                                     uint16_t klen, const delta_ref *ref)
+{
+    v3_keybuf *b = (v3_keybuf *)ctx_;
+    (void)ref;
+    return v3_keybuf_append(b, key, klen) == 0 ? 0 : 1;
+}
+
+/* WP-M12: append a delete for EVERY xattr key of `inode_id` in both tiers,
+ * so a dying inode leaves no stranded key for a later fold (WP-M14). The
+ * base keys are scanned first, then the delta's; a key present in both is
+ * coalesced by the append. Returns 0 ok, -1 error. */
+static int v3_delta_shadow_xattr_keys(invfs_volume *v, uint64_t inode_id)
+{
+    uint8_t lo[V3_XATTR_FIXED], hi[V3_XATTR_FIXED];
+    invfs_blkptr root;
+    v3_keybuf b;
+    size_t off = 0;
+    int rc;
+
+    b.buf = NULL;
+    b.len = 0;
+    b.cap = 0;
+    v3_xattr_key(lo, inode_id, NULL, 0);
+    v3_xattr_key(hi, inode_id + 1, NULL, 0);
+
+    if (v3_base_root(v, &root) != 0) {
+        free(b.buf);
+        return -1;
     }
-    b->buf[b->len]     = (uint8_t)(k.n >> 8);
-    b->buf[b->len + 1] = (uint8_t)(k.n & 0xFF);
-    memcpy(b->buf + b->len + 2, k.p, k.n);
-    b->len += 2 + k.n;
+    rc = btree_scan(v, root, (bt_key){lo, V3_XATTR_FIXED},
+                    (bt_key){hi, V3_XATTR_FIXED}, v3_xattr_collect_cb, &b);
+    if (rc != 0) {
+        free(b.buf);
+        return -1;
+    }
+    rc = vol_delta_range(v, lo, V3_XATTR_FIXED, hi, V3_XATTR_FIXED,
+                         v3_xattr_collect_delta_cb, &b);
+    if (rc != 0) {
+        free(b.buf);
+        return -1;
+    }
+    while (off + 2 <= b.len) {
+        uint16_t kl = (uint16_t)(((uint16_t)b.buf[off] << 8) | b.buf[off + 1]);
+        off += 2;
+        if ((size_t)off + kl > b.len) {
+            free(b.buf);
+            return -1;
+        }
+        if (v3_delta_del(v, b.buf + off, kl) != 0) {
+            free(b.buf);
+            return -1;
+        }
+        off += kl;
+    }
+    free(b.buf);
     return 0;
 }
 
@@ -1985,6 +2385,50 @@ int vol_v3_inode_delete(invfs_volume *v, uint64_t inode_id)
             return -1;
         return v3_xmut_commit(&m);
     }
+}
+
+/* WP-M12: the delta-backed inode mutations the namespace paths call. The
+ * base helpers above stay the fold/base path (WP-M14 + the WP-M11 driver). */
+int vol_v3_inode_delta_put(invfs_volume *v, uint64_t inode_id,
+                           const invfs_v3_inode *in)
+{
+    uint8_t kb[8];
+    uint8_t vb[INVFS_V3_INODE_ROW_FIXED];
+    uint16_t vl;
+
+    if (!v || !in || in->nlink == 0)
+        return -1;                        /* a zero-nlink row is deleted */
+    if (v3_ready(v) != 0)
+        return -1;
+    v3_ino_key(inode_id, kb);
+    vl = v3_ino_encode(in, vb);
+    return v3_delta_put(v, kb, sizeof kb, vb, vl);
+}
+
+/* Delete the row and shadow its xattr keys. The xattr deletes are appended
+ * BEFORE the row delete so a crash cannot expose a live row whose xattrs
+ * have vanished; the reverse order would strand the keys. The inode needs
+ * no base check: a delete for an absent (base or delta) row is harmless,
+ * but an overlay-absent row is a no-op to match vol_v3_inode_delete. */
+int vol_v3_inode_delta_delete(invfs_volume *v, uint64_t inode_id)
+{
+    uint8_t kb[8];
+
+    if (!v)
+        return -1;
+    if (v3_ready(v) != 0)
+        return -1;
+    v3_ino_key(inode_id, kb);
+    {
+        int ex = v3_overlay_exists(v, kb, sizeof kb);
+        if (ex < 0)
+            return -1;
+        if (ex == 0)
+            return 0;                     /* absent: nothing to do */
+    }
+    if (v3_delta_shadow_xattr_keys(v, inode_id) != 0)
+        return -1;
+    return v3_delta_del(v, kb, sizeof kb);
 }
 
 
@@ -2312,6 +2756,47 @@ int vol_v3_dirent_del(invfs_volume *v, uint64_t parent, const char *name)
     return v3_publish(v, nr, old_gen);
 }
 
+/* WP-M12: the delta-backed dirent mutations. The value is the same u64 BE
+ * child id the base stores, so the WP-M11 merge treats both streams alike;
+ * the insert is always appended BEFORE the source delete on rename
+ * (add-before-remove, design §3). */
+int vol_v3_dirent_delta_put(invfs_volume *v, uint64_t parent,
+                            const char *name, uint64_t child)
+{
+    uint8_t kb[V3_DIRENT_KEY_FIXED + INVFS_MAX_NAME];
+    uint8_t vb[8];
+    uint16_t kn;
+    size_t nlen = name ? strlen(name) : 0;
+
+    if (!v || nlen > INVFS_MAX_NAME || child == 0)
+        return -1;
+    if (v3_ready(v) != 0)
+        return -1;
+    kn = v3_dirent_key(kb, parent, name, nlen);
+    v3_dirent_val(vb, child);
+    return v3_delta_put(v, kb, kn, vb, sizeof vb);
+}
+
+int vol_v3_dirent_delta_del(invfs_volume *v, uint64_t parent, const char *name)
+{
+    uint8_t kb[V3_DIRENT_KEY_FIXED + INVFS_MAX_NAME];
+    uint16_t kn;
+    size_t nlen = name ? strlen(name) : 0;
+    int ex;
+
+    if (!v || nlen > INVFS_MAX_NAME)
+        return -1;
+    if (v3_ready(v) != 0)
+        return -1;
+    kn = v3_dirent_key(kb, parent, name, nlen);
+    ex = v3_overlay_exists(v, kb, kn);
+    if (ex < 0)
+        return -1;
+    if (ex == 0)
+        return 0;   /* absent: nothing to do */
+    return v3_delta_del(v, kb, kn);
+}
+
 /* Decode one raw dirent key + child id and hand the user callback the
  * NUL-terminated name. Malformed keys and the anchor (name_len 0) are
  * skipped. Shared by the base stream and the delta stream of the merge. */
@@ -2541,6 +3026,28 @@ static int v3_max_inode_cb(void *ctx, bt_key k, bt_val val)
     return 0;
 }
 
+/* WP-M12: the delta side of the resume scan. Inode rows written since the
+ * last fold live only in the recent tier, so without this an id that exists
+ * solely as a delta row would be handed out again after a remount and two
+ * inodes would alias. klen 8 is the inode namespace (dirents >= 10, xattrs
+ * >= 11, recipes 33). A delete record still names the id, which is exactly
+ * what we want (never reuse an id that a tombstone shadows). */
+static int v3_max_inode_delta_cb(void *ctx, const uint8_t *key, uint16_t klen,
+                                 const delta_ref *ref)
+{
+    uint64_t *max = (uint64_t *)ctx;
+    uint64_t id = 0;
+    int i;
+    (void)ref;
+    if (klen != 8)
+        return 0;
+    for (i = 0; i < 8; i++)
+        id = (id << 8) | key[i];
+    if (id > *max)
+        *max = id;
+    return 0;
+}
+
 uint64_t vol_v3_inode_alloc(invfs_volume *v)
 {
     if (!v)
@@ -2552,12 +3059,13 @@ uint64_t vol_v3_inode_alloc(invfs_volume *v)
             return 0;
         if (v3_base_root(v, &root) != 0)
             return 0;
-        /* TODO(WP-M12): the resume scan reads the base only, so an inode id
-         * that exists solely as a delta row would be reused after a remount.
-         * WP-M12 (which wires inode creation into the delta) must extend this
-         * with a vol_delta_range pass over the 8-byte key range. */
         if (btree_scan(v, root, (bt_key){NULL, 0}, (bt_key){NULL, 0},
                        v3_max_inode_cb, &max) != 0)
+            return 0;
+        /* WP-M12: a create since the last fold is delta-only, so the base
+         * scan alone would miss it. Unbounded range; only 8-byte keys count. */
+        if (vol_delta_range(v, NULL, 0, NULL, 0,
+                            v3_max_inode_delta_cb, &max) != 0)
             return 0;
         v->next_inode_id = max + 1;
         if (v->next_inode_id <= INVFS_V3_ROOT_INO)
