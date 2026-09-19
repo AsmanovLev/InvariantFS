@@ -429,11 +429,29 @@ static int sweep_collect_cb(void *ctx_, uint64_t rec_pos,
     return 0;
 }
 
+/* WP64: graceful Ctrl+C — finish the current file, then exit cleanly. */
+static volatile sig_atomic_t g_stop = 0;
+
+#ifndef _WIN32
+static void on_sigint(int sig)
+{
+    if (g_stop) {          /* second Ctrl+C: restore default, die now */
+        signal(sig, SIG_DFL);
+        raise(sig);
+        return;
+    }
+    g_stop = 1;
+    fprintf(stderr, "\n^C  stopping after the current file"
+                    " (Ctrl+C again aborts now, losing it)\n");
+}
+#endif
+
 int main(int argc, char **argv)
 {
     invfs_volume *vol;
     const invfs_superblock *sb;
     int err, dry = 0, seal = 0, unseal = 0, bench = 0, realize = 0;
+    int no_realize = 0, stopped = 0;
     int fast = 0, compact_only = 0;
     const char *extract_dir = NULL;    /* WP23 --extract-packs mode */
     double rb_f = -1.0, rp_f = -1.0;   /* <0: flag absent */
@@ -462,6 +480,8 @@ int main(int argc, char **argv)
                 "           [--free-redundant] [--redundant-bench]\n"
                 "           [--realize]  (accept the last sweep: free its\n"
                 "                         retention registry, clear CKP0)\n"
+                "           [--no-realize] (keep the previous checkpoint live;\n"
+                "                         blocks stay held until the next sweep)\n"
                 "  --fast      cheap pass: RAW files take the generic\n"
                 "              per-segment recompress only (no classification,\n"
                 "              transcodes, decomposition, batching or dedupe)\n"
@@ -488,6 +508,8 @@ int main(int argc, char **argv)
                 "           [--free-redundant] [--redundant-bench]\n"
                 "           [--realize]  (accept the last sweep: free its\n"
                 "                         retention registry, clear CKP0)\n"
+                "           [--no-realize] (keep the previous checkpoint live;\n"
+                "                         blocks stay held until the next sweep)\n"
                 "  --fast      cheap pass: RAW files take the generic\n"
                 "              per-segment recompress only (no classification,\n"
                 "              transcodes, decomposition, batching or dedupe)\n"
@@ -505,6 +527,8 @@ int main(int argc, char **argv)
             dry = 1;
         } else if (strcmp(a, "--realize") == 0) {
             realize = 1;
+        } else if (strcmp(a, "--no-realize") == 0) {
+            no_realize = 1;
         } else if (strcmp(a, "--fast") == 0) {
             fast = 1;
         } else if (strcmp(a, "--compact") == 0) {
@@ -578,6 +602,10 @@ int main(int argc, char **argv)
     /* per-file lines go to stdout, the summary to stderr: unbuffered, or a
      * redirected log tears a line at every 4 KB flush boundary */
     setvbuf(stdout, NULL, _IONBF, 0);
+#ifndef _WIN32
+    signal(SIGINT, on_sigint);
+    signal(SIGTERM, on_sigint);
+#endif
 
     /* WP20b --redundant-bench: synthetic head-to-head, no volume needed
      * (k=32, m=4, 64 MiB of data in RAM) */
@@ -788,7 +816,7 @@ int main(int argc, char **argv)
             else
                 fprintf(stderr, "checkpoint: nothing to realize\n");
         }
-        if (vol_ckp_begin(vol) < 0)
+        if (vol_ckp_begin(vol, no_realize) < 0)
             fprintf(stderr, "checkpoint: arm failed; sweeping without "
                             "one\n");
     }
@@ -841,6 +869,7 @@ int main(int argc, char **argv)
     /* sweep candidates: regular files with actual payload */
     for (int i = 0; i < count; i++) {
 #ifndef _WIN32
+        if (g_stop) { stopped = 1; break; }
         /* WP21 test hook (tools/test-rollback.sh): die mid-walk, after N
          * candidates, with the checkpoint armed and retention half-filled
          * -- the crash-mid-sweep rollback leg. (Keyed on the walk index:
@@ -975,8 +1004,9 @@ progress:
         }
     }
 
-    fprintf(stderr, "sweep done: swept=%d skipped=%d failed=%d\n",
-            swept, skipped, failed);
+    fprintf(stderr, "sweep done: swept=%d skipped=%d failed=%d%s\n",
+            swept, skipped, failed,
+            stopped ? " (stopped by Ctrl+C)" : "");
     /* WP42: the CLI-style summary line the big-volume e2e parses
      * (`sweep: N swept`); mirrors src/cli/sweep.c's report. */
     fprintf(stderr, "sweep: %d swept\n", swept);

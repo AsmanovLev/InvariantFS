@@ -1627,7 +1627,7 @@ static void invf_sweep_worker(int arm_ckp)
     pthread_mutex_lock(&g_io_lock);
     if (!g_vol) { pthread_mutex_unlock(&g_io_lock); free(ids); return; }
     if (arm_ckp) {
-        armed = vol_ckp_begin(g_vol);   /* 1 armed, 0 declined, -1 error */
+        armed = vol_ckp_begin(g_vol, 0);   /* 1 armed, 0 declined, -1 error */
         if (armed < 0) {
             fprintf(stderr, "[watermark] checkpoint arm failed; sweeping "
                             "without one\n");

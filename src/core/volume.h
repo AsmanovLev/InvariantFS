@@ -574,7 +574,7 @@ int  vol_ckp_info(const invfs_volume *v, invfs_ckp0 *out);
  * read-only/recovering, a redundancy seal is live, or the environment
  * opted out), -1 = hard error. Declined is NOT an error: the sweep runs
  * uncheckpointed. */
-int  vol_ckp_begin(invfs_volume *v);
+int  vol_ckp_begin(invfs_volume *v, int no_realize);
 /* sweep end: write the retention registry (the "\x01reten" owner + L2P
  * maps, sharded like the seal owners). 0 = ok (or nothing armed). */
 int  vol_ckp_end(invfs_volume *v, uint64_t *ranges_out, uint64_t *blocks_out);

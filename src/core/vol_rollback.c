@@ -173,7 +173,7 @@ static int rb_abort_at(const char *stage)
 #endif
 
 
-int vol_ckp_begin(invfs_volume *v)
+int vol_ckp_begin(invfs_volume *v, int no_realize)
 {
     uint64_t jstart, jused, sblocks, pba = 0;
     uint64_t old_stage_pba = 0, old_stage_blocks = 0;
@@ -330,6 +330,10 @@ int vol_ckp_begin(invfs_volume *v)
      * the new checkpoint live with the old registry intact (the defensive
      * pre-sweep realize or a rollback reconciles it). */
     if (had_ck) {
+        if (no_realize) {
+            fprintf(stderr, "checkpoint: --no-realize: previous "
+                    "checkpoint kept live\n");
+        } else {
         uint64_t rfree = 0;
         v->retain_release = 1;
         rrc = ret_registry_delete(v, &rfree);
@@ -360,6 +364,7 @@ int vol_ckp_begin(invfs_volume *v)
                         (unsigned long long)old_stage_blocks,
                         (unsigned long long)old_stage_pba);
         }
+        } /* !no_realize */
     }
 
     /* retention engages only from here on: anything freed earlier this
