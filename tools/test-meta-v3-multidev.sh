@@ -112,13 +112,16 @@ touch "$MNT/hello.txt" "$MNT/dir/sub/deep"
 echo "created: hello.txt + dir/sub/deep"
 mnt_down
 
-# base root pages must resolve inside the mirrored metadata span (dev0 base)
+# The live v3 metadata anchor must resolve inside the mirrored dev0 span.
+# WP-M12 makes create/unlink/rename append to the DELTA (the base root stays
+# empty until a fold), so after a create the anchor is the delta segment; a
+# volume whose base has folded anchors on the base root slot instead.
 read -r RS0 RS1 DELTA SEQ < <(rtslot "$D0")
-[ "$RS0" -gt 0 ] && [ "$RS0" -lt "$META_SPAN" ] \
-    || fail "root slot 0 pba $RS0 outside the metadata span (base not dev0-resident)"
-[ "$RS1" -gt 0 ] && [ "$RS1" -lt "$META_SPAN" ] \
-    || fail "root slot 1 pba $RS1 outside the metadata span (base not dev0-resident)"
-echo "base root slots $RS0/$RS1 live in the dev0 metadata span (mirrored)"
+ANCHOR=$RS0; ANCHOR_NAME="base root slot 0"
+if [ "$RS0" -eq 0 ]; then ANCHOR=$DELTA; ANCHOR_NAME="delta"; fi
+[ "$ANCHOR" -gt 0 ] && [ "$ANCHOR" -lt "$META_SPAN" ] \
+    || fail "$ANCHOR_NAME pba $ANCHOR outside the metadata span (metadata not dev0-resident)"
+echo "live v3 metadata anchor ($ANCHOR_NAME) pba $ANCHOR in the dev0 metadata span (mirrored)"
 
 echo "== leg 4: remount, namespace persists =="
 mnt_up
