@@ -86,6 +86,7 @@ uint64_t vol_create_container_file(invfs_volume *v, const char *name,
     uint64_t inode_id = v->next_inode_id++;
     uint8_t ast_h[INVFS_AST_HDR_V2_LEN];
     size_t ast_hlen;
+    size_t nlen = strlen(name);
     size_t rec_size, children_blob_len = 0;
     uint8_t *rec, *children_blob = NULL;
     invfs_inode_rec *rec_h;
@@ -193,7 +194,7 @@ uint64_t vol_create_container_file(invfs_volume *v, const char *name,
                                               0xFFFF : nchildren));
     if (!ast_hlen) { free(entries); free(children_blob); return 0; }
 
-    rec_size = sizeof(invfs_inode_rec) + ast_hlen +
+    rec_size = INVFS_REC_HDR_LEN + nlen + 1 + ast_hlen +
                ast_entries * sizeof(invfs_ast_block_entry) + children_blob_len;
     rec = (uint8_t *)calloc(1, rec_size);
     if (!rec) { free(entries); free(children_blob); return 0; }
@@ -205,11 +206,11 @@ uint64_t vol_create_container_file(invfs_volume *v, const char *name,
     rec_h->ctime = (uint64_t)time(NULL);
     rec_set_name(rec_h, name);
 
-    memcpy(rec + sizeof(invfs_inode_rec), ast_h, ast_hlen);
-    memcpy(rec + sizeof(invfs_inode_rec) + ast_hlen,
+    memcpy(invfs_rec_body(rec_h), ast_h, ast_hlen);
+    memcpy(invfs_rec_body(rec_h) + ast_hlen,
            entries, ast_entries * sizeof(invfs_ast_block_entry));
     if (children_blob_len)
-        memcpy(rec + sizeof(invfs_inode_rec) + ast_hlen +
+        memcpy(invfs_rec_body(rec_h) + ast_hlen +
                ast_entries * sizeof(invfs_ast_block_entry),
                children_blob, children_blob_len);
     free(entries);
@@ -369,7 +370,7 @@ int vol_get_children(invfs_volume *v, uint64_t inode_id,
 {
     invfs_ast_hdr ast_h;
     uint8_t *rec = NULL;
-    size_t rec_len;
+    size_t rec_len, base;
     uint32_t nblocks;
     uint64_t p = 0;
     uint32_t rl = 0;
@@ -407,22 +408,21 @@ int vol_get_children(invfs_volume *v, uint64_t inode_id,
     if (!rec) return -1;
     if (vol_read_raw(v, p, rec, rl) != 0) { free(rec); return -1; }
     rec_len = rl;
-    if (rec_len < sizeof(invfs_inode_rec) + INVFS_AST_HDR_V1_LEN ||
-        invfs_ast_hdr_parse(rec + sizeof(invfs_inode_rec),
-                            rec_len - sizeof(invfs_inode_rec),
-                            &ast_h) != 0) {
+    base = (size_t)(invfs_rec_cbody((const invfs_inode_rec *)rec) - rec);
+    if (base > rec_len || rec_len - base < INVFS_AST_HDR_V1_LEN ||
+        invfs_ast_hdr_parse(rec + base, rec_len - base, &ast_h) != 0) {
         free(rec);
         return -1;
     }
     nblocks = ast_h.num_blocks;
-    if (rec_len < sizeof(invfs_inode_rec) + ast_h.hdr_len +
+    if (rec_len < base + ast_h.hdr_len +
                   (size_t)nblocks * sizeof(invfs_ast_block_entry)) {
         free(rec);
         return -1;
     }
     if (ast_h.num_children == 0) { free(rec); *out = NULL; *n_out = 0; return 0; }
     {
-        const uint8_t *children_blob = rec + sizeof(invfs_inode_rec) +
+        const uint8_t *children_blob = rec + base +
                                        ast_h.hdr_len +
                                        (size_t)nblocks * sizeof(invfs_ast_block_entry);
         int rc = vol_deserialize_children(children_blob,

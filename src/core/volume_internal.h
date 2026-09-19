@@ -589,7 +589,7 @@ static inline struct invfs_volume *v_of_blk(const blkio *io)
    INVFS_MAX_NAME is declared in volume.h so name-building callers can check
    before they start; this asserts it still matches the field it describes. */
 typedef char invfs_name_fits[
-    (INVFS_MAX_NAME == sizeof(((invfs_inode_rec *)0)->name) - 1) ? 1 : -1];
+    (INVFS_MAX_NAME + 1 == (int)INVFS_NAME_CAP) ? 1 : -1];
 
 
 /* A decomposed file also has to name its children: "<name>!part<n>",

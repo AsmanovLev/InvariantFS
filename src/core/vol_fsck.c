@@ -71,6 +71,8 @@ static int fsck_rebuild_one(invfs_volume *v, uint64_t rec_pos, uint64_t inode_id
     (void)used; (void)used_bytes;
     if (io_seek(&v->io, rec_pos) != 0 ||
         io_read(&v->io, &rh, sizeof(rh)) != 0) return -1;
+    if (rh.rec_len < INVFS_REC_HDR_LEN + 1 ||
+        rh.rec_len > INVFS_MAX_REC_LEN) return -1;
     rec = (uint8_t *)malloc(rh.rec_len);
     if (!rec) return -1;
     if (io_seek(&v->io, rec_pos) != 0 ||
@@ -79,7 +81,7 @@ static int fsck_rebuild_one(invfs_volume *v, uint64_t rec_pos, uint64_t inode_id
     crc_calc = invfs_crc32c(rec, rh.rec_len);
     if (crc_calc != crc_stored) { rep->bad_recs++; free(rec); return 0; }
 
-    off = sizeof(invfs_inode_rec);   /* name[] lives inside the header */
+    off = (size_t)(invfs_rec_cbody((const invfs_inode_rec *)rec) - rec);
     if (off + INVFS_AST_HDR_V1_LEN > rh.rec_len ||
         invfs_ast_hdr_parse(rec + off, rh.rec_len - off, &ast_h) != 0) {
         free(rec);
@@ -161,33 +163,43 @@ static int fsck_rebuild_one(invfs_volume *v, uint64_t rec_pos, uint64_t inode_id
 static int fsck_quarantine(invfs_volume *v, const char *name,
                            uint64_t killpos, uint64_t id)
 {
-    invfs_inode_rec rec;
+    invfs_inode_rec *rec;
+    uint8_t *rb;
     uint32_t crc;
     uint64_t pos = v->inode_area_pos;
     uint8_t *old = NULL;
     uint32_t orl = 0;
+    size_t nlen = strlen(name);
+    size_t rlen;
 
-    if (pos + sizeof(rec) + 4 > v->inode_area_end)
+    if (nlen > INVFS_MAX_NAME) nlen = INVFS_MAX_NAME;
+    rlen = INVFS_REC_HDR_LEN + nlen + 1;   /* name + NUL, no body */
+    if (pos + rlen + 4 > v->inode_area_end)
         return -1;
-    memset(&rec, 0, sizeof rec);
-    rec.magic = TOMBSTONE_MAGIC;
+    rb = (uint8_t *)calloc(1, rlen);
+    if (!rb) return -1;
+    rec = (invfs_inode_rec *)rb;
+    rec->magic = TOMBSTONE_MAGIC;
     v->hot.tombstones++;
-    rec.rec_len = (uint32_t)sizeof rec;
-    rec.inode_id = id;
-    rec.file_size = killpos;      /* v2 position kill */
-    rec_set_name(&rec, name);
-    crc = invfs_crc32c(&rec, sizeof rec);
+    rec->rec_len = (uint32_t)rlen;
+    rec->inode_id = id;
+    rec->file_size = killpos;      /* v2 position kill */
+    rec_set_name(rec, name);
+    crc = invfs_crc32c(rb, (uint32_t)rlen);
     if (io_seek(&v->io, pos) != 0 ||
-        io_write(&v->io, &rec, sizeof rec) != 0 ||
-        io_write(&v->io, &crc, 4) != 0)
+        io_write(&v->io, rb, (uint32_t)rlen) != 0 ||
+        io_write(&v->io, &crc, 4) != 0) {
+        free(rb);
         return -1;
+    }
     /* WP27: the killed record's pba references leave the map (the bitmap
      * rebuild below decides their fate from the SURVIVING records) */
     if (meta_read_record_by_id(v, id, &old, &orl, NULL, 0, NULL) == 0) {
         pba_ref_apply(v, old, orl, -1);
         free(old);
     }
-    v->inode_area_pos = pos + sizeof rec + 4;
+    v->inode_area_pos = pos + rlen + 4;
+    free(rb);
     return 0;
 }
 
@@ -214,14 +226,14 @@ static int fsck_truncate_suffix(invfs_volume *v,
 
     if (io_seek(&v->io, pos) != 0 || io_read(&v->io, &rh, sizeof rh) != 0)
         return -1;
-    if (rh.magic != INODE_REC_MAGIC || rh.rec_len < sizeof rh ||
+    if (rh.magic != INODE_REC_MAGIC || rh.rec_len < INVFS_REC_HDR_LEN + 1 ||
         rh.rec_len > INVFS_MAX_REC_LEN)
         return 1;
     rec = (uint8_t *)malloc(rh.rec_len);
     if (!rec) return -1;
     if (io_seek(&v->io, pos) != 0 || io_read(&v->io, rec, rh.rec_len) != 0)
         { free(rec); return -1; }
-    off = sizeof(invfs_inode_rec);
+    off = (size_t)(invfs_rec_cbody((const invfs_inode_rec *)rec) - rec);
     if (invfs_ast_hdr_parse(rec + off, rh.rec_len - off, &ah) != 0)
         { free(rec); return 1; }
     if (ah.num_children != 0) { free(rec); return 1; }  /* container: quarantine */
@@ -252,19 +264,25 @@ static int fsck_truncate_suffix(invfs_volume *v,
     {
         size_t hl = (new_size > 0xFFFFFFFFu || k > 0xFFFFu)
                     ? INVFS_AST_HDR_V2_LEN : INVFS_AST_HDR_V1_LEN;
+        size_t nlen = ((const invfs_inode_rec *)rec)->name_len;
+        size_t present = (size_t)rh.rec_len - INVFS_REC_HDR_LEN - 1;
         uint32_t crc;
         uint64_t p;
-        body = sizeof(invfs_inode_rec) + hl +
+        if (nlen > INVFS_MAX_NAME) nlen = INVFS_MAX_NAME;
+        if (nlen > present) nlen = present;
+        body = INVFS_REC_HDR_LEN + nlen + 1 + hl +
                (size_t)k * sizeof(invfs_ast_block_entry) + ext_len;
         if (v->inode_area_pos + body + 4 > v->inode_area_end)
             { free(rec); return -1; }
         nr = (uint8_t *)malloc(body);
         if (!nr) { free(rec); return -1; }
         memset(nr, 0, body);
-        memcpy(nr, rec, sizeof(invfs_inode_rec));   /* header incl. name */
+        memcpy(nr, rec, INVFS_REC_HDR_LEN + nlen + 1);  /* header + name */
+        ((invfs_inode_rec *)nr)->name_len = (uint32_t)nlen;
+        nr[INVFS_REC_HDR_LEN + nlen] = 0;
         ((invfs_inode_rec *)nr)->rec_len = (uint32_t)body;
         ((invfs_inode_rec *)nr)->file_size = new_size;
-        w = nr + sizeof(invfs_inode_rec);
+        w = nr + INVFS_REC_HDR_LEN + nlen + 1;
         if (invfs_ast_hdr_write(w, new_size, k, 0) != hl)
             { free(rec); free(nr); return -1; }
         w += hl;
@@ -307,13 +325,14 @@ static int rec_content_bad(invfs_volume *v, uint64_t rec_pos,
     if (io_seek(&v->io, rec_pos) != 0 ||
         io_read(&v->io, &rh, sizeof rh) != 0)
         return 1;
-    if (rh.rec_len < sizeof rh || rh.rec_len > INVFS_MAX_REC_LEN)
+    if (rh.rec_len < INVFS_REC_HDR_LEN + 1 ||
+        rh.rec_len > INVFS_MAX_REC_LEN)
         return 1;
     rec = (uint8_t *)malloc(rh.rec_len);
     if (!rec) return 1;
     if (io_seek(&v->io, rec_pos) != 0 ||
         io_read(&v->io, rec, rh.rec_len) != 0) { free(rec); return 1; }
-    off = sizeof(invfs_inode_rec);
+    off = (size_t)(invfs_rec_cbody((const invfs_inode_rec *)rec) - rec);
     if (off + INVFS_AST_HDR_V1_LEN > rh.rec_len ||
         invfs_ast_hdr_parse(rec + off, rh.rec_len - off, &ah) != 0) {
         free(rec); return 1;
@@ -382,7 +401,10 @@ static int fscan_cb(void *ctx_, uint64_t pos,
                     const invfs_inode_rec *rh, const uint8_t *rec)
 {
     fscan_ctx *c = (fscan_ctx *)ctx_;
-    size_t nl = rh->name_len < 256 ? rh->name_len : 256;
+    size_t present = (size_t)rh->rec_len - INVFS_REC_HDR_LEN - 1;
+    size_t nl = rh->name_len < INVFS_MAX_NAME
+              ? rh->name_len : INVFS_MAX_NAME;
+    if (nl > present) nl = present;
     if (!nl) return 0;
     if (rh->magic == INODE_REC_MAGIC) {
         uint64_t moff[4], mlen[4];
@@ -447,7 +469,7 @@ int vol_fsck_scan(invfs_volume *v, invfs_fsck_report *rep, int fix)
         invfs_inode_rec rh;
         uint32_t crc_stored, crc_calc;
         uint8_t *rec = NULL;
-        if (pos + sizeof(invfs_inode_rec) > end) break;
+        if (pos + INVFS_REC_HDR_LEN > end) break;
         if (io_seek(&v->io, pos) != 0 ||
             io_read(&v->io, &rh, sizeof(rh)) != 0) {
             break;
@@ -455,7 +477,7 @@ int vol_fsck_scan(invfs_volume *v, invfs_fsck_report *rep, int fix)
         if (rh.magic != INODE_REC_MAGIC && rh.magic != TOMBSTONE_MAGIC) {
             break;
         }
-        if (rh.rec_len < sizeof(invfs_inode_rec) ||
+        if (rh.rec_len < INVFS_REC_HDR_LEN + 1 ||
             pos + rh.rec_len + 4 > end) {
             rep->bad_recs++;
             break;
@@ -477,7 +499,13 @@ int vol_fsck_scan(invfs_volume *v, invfs_fsck_report *rep, int fix)
             continue;
         }
         {
-            size_t nl = rh.name_len < 256 ? rh.name_len : 256;
+            /* the name lives in the full record buffer rec, not in the
+             * 36-byte prefix copy rh */
+            const invfs_inode_rec *rr = (const invfs_inode_rec *)rec;
+            size_t present = (size_t)rh.rec_len - INVFS_REC_HDR_LEN - 1;
+            size_t nl = rr->name_len < INVFS_MAX_NAME
+                      ? rr->name_len : INVFS_MAX_NAME;
+            if (nl > present) nl = present;
             if (rh.magic == INODE_REC_MAGIC) {
                 if (nl) {
                     uint64_t moff[4], mlen[4];
@@ -485,7 +513,7 @@ int vol_fsck_scan(invfs_volume *v, invfs_fsck_report *rep, int fix)
                     uint64_t miss = rec_pba_miss(rec, rh.rec_len,
                                                  v->sb.total_blocks,
                                                  moff, mlen, &mn);
-                    if (scanset_inod(&live, rh.name, nl, rh.inode_id, pos,
+                    if (scanset_inod(&live, rr->name, nl, rh.inode_id, pos,
                                      rh.file_size, rh.ctime,
                                      miss) != 0) {
                         free(rec); free(used); scanset_free(&live);
@@ -497,7 +525,7 @@ int vol_fsck_scan(invfs_volume *v, invfs_fsck_report *rep, int fix)
                  * id -- the scan-set applies them with the consistent-cut
                  * rules (a kill whose successor is broken is skipped) */
                 if (nl)
-                    scanset_delt(&live, rh.name, nl, rh.inode_id,
+                    scanset_delt(&live, rr->name, nl, rh.inode_id,
                                  rh.file_size);
             }
         }
@@ -555,7 +583,7 @@ int vol_fsck_scan(invfs_volume *v, invfs_fsck_report *rep, int fix)
                         rep->l2p_miss += miss;
                         if (io_seek(&v->io, e->vers[newest].pos) == 0 &&
                             io_read(&v->io, &rh, sizeof rh) == 0 &&
-                            rh.rec_len >= sizeof rh &&
+                            rh.rec_len >= INVFS_REC_HDR_LEN + 1 &&
                             rh.rec_len <= INVFS_MAX_REC_LEN &&
                             (rec2 = malloc(rh.rec_len)) != NULL &&
                             io_seek(&v->io, e->vers[newest].pos) == 0 &&

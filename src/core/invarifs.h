@@ -850,11 +850,23 @@ typedef struct invfs_inode_rec {
     uint64_t inode_id;
     uint64_t file_size;
     uint64_t ctime;
-    uint32_t name_len;
-    char     name[256];
+    uint32_t name_len;     /* 0..INVFS_MAX_NAME (255) */
+    char     name[];       /* WP58a v3: name_len bytes, NUL at name[name_len] */
     /* followed by: recipe header (v1 16B / v2 24B) + entries[] [+ children] */
 } invfs_inode_rec;
 #pragma pack(pop)
+
+/* WP58a v3: the record is a 36-byte fixed prefix + a variable-length name
+ * (flexible array member, raw bytes, NUL-terminated at name[name_len]) + the
+ * body (recipe header / entries / children / INO2). The body begins at
+ * invfs_rec_body(rec); sizeof(invfs_inode_rec) is only the prefix, never the
+ * body offset. Max name slot is INVFS_MAX_NAME + 1 bytes. */
+#define INVFS_REC_HDR_LEN ((uint32_t)sizeof(invfs_inode_rec))
+#define INVFS_NAME_CAP    (256u)   /* INVFS_MAX_NAME + 1 (NUL) */
+static inline uint8_t       *invfs_rec_body (invfs_inode_rec *r)
+    { return (uint8_t *)r->name + r->name_len + 1; }
+static inline const uint8_t *invfs_rec_cbody(const invfs_inode_rec *r)
+    { return (const uint8_t *)r->name + r->name_len + 1; }
 
 /* META2 extension block — format v2 per-inode metadata. Sits AFTER the AST
    recipe (+ children blob), still covered by the record's trailing CRC32C and
@@ -919,7 +931,7 @@ typedef struct invfs_meta_ext_hdr {
     (sizeof(invfs_meta_ext_hdr) + (size_t)INVFS_META_TARGET_MAX + INVFS_META_XATTR_MAX)
 
 #define INVFS_MAX_REC_LEN \
-    (sizeof(invfs_inode_rec) + INVFS_AST_HDR_V2_LEN + \
+    (sizeof(invfs_inode_rec) + INVFS_NAME_CAP + INVFS_AST_HDR_V2_LEN + \
      (size_t)MAX_SEGMENTS_V2 * sizeof(invfs_ast_block_entry) + \
      (size_t)INVFS_MAX_CHILD_BLOB + INVFS_META_SLACK)
 
@@ -931,7 +943,7 @@ typedef struct invfs_meta_ext_hdr {
    hypothetical 1 TB file's 384 MB recipe would refuse tiny writes on small
    volumes. */
 #define INVFS_INODE_REC_MAX \
-    (sizeof(invfs_inode_rec) + INVFS_AST_HDR_V1_LEN + \
+    (sizeof(invfs_inode_rec) + INVFS_NAME_CAP + INVFS_AST_HDR_V1_LEN + \
      (size_t)MAX_SEGMENTS * sizeof(invfs_ast_block_entry) + \
      (size_t)INVFS_MAX_CHILD_BLOB + INVFS_META_SLACK)
 

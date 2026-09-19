@@ -136,7 +136,7 @@ static uint32_t extent_live_count(invfs_volume *v, uint64_t pba,
     uint64_t end = v->inode_area_pos;
     uint32_t count = 0;
 
-    while (pos + sizeof(invfs_inode_rec) <= end) {
+    while (pos + INVFS_REC_HDR_LEN + 1 <= end) {
         invfs_inode_rec rh;
         uint8_t *rb = NULL;
         uint32_t stored, calc;
@@ -146,7 +146,7 @@ static uint32_t extent_live_count(invfs_volume *v, uint64_t pba,
             break;
         if (rh.magic != INODE_REC_MAGIC && rh.magic != TOMBSTONE_MAGIC)
             break;
-        if (rh.rec_len < sizeof(rh) || rh.rec_len > INVFS_MAX_REC_LEN ||
+        if (rh.rec_len < INVFS_REC_HDR_LEN + 1 || rh.rec_len > INVFS_MAX_REC_LEN ||
             pos + rh.rec_len + 4 > end) break;
 
         rb = (uint8_t *)malloc((size_t)rh.rec_len + 4);
@@ -165,7 +165,8 @@ static uint32_t extent_live_count(invfs_volume *v, uint64_t pba,
 
         /* check if this record's AST entries reference blocks in this extent */
         {
-            size_t base = sizeof(invfs_inode_rec);
+            size_t base =
+                (size_t)(invfs_rec_cbody((const invfs_inode_rec *)rb) - rb);
             invfs_ast_hdr ah;
             if (rh.rec_len >= base + INVFS_AST_HDR_V1_LEN &&
                 invfs_ast_hdr_parse(rb + base, rh.rec_len - base, &ah) == 0 &&
@@ -197,7 +198,7 @@ static uint32_t extent_dead_fraction(invfs_volume *v, uint64_t pba,
     uint64_t end = v->inode_area_pos;
     uint32_t total = 0, dead = 0;
 
-    while (pos + sizeof(invfs_inode_rec) <= end) {
+    while (pos + INVFS_REC_HDR_LEN + 1 <= end) {
         invfs_inode_rec rh;
         uint8_t *rb = NULL;
         uint32_t stored, calc;
@@ -208,7 +209,7 @@ static uint32_t extent_dead_fraction(invfs_volume *v, uint64_t pba,
             break;
         if (rh.magic != INODE_REC_MAGIC && rh.magic != TOMBSTONE_MAGIC)
             break;
-        if (rh.rec_len < sizeof(rh) || rh.rec_len > INVFS_MAX_REC_LEN ||
+        if (rh.rec_len < INVFS_REC_HDR_LEN + 1 || rh.rec_len > INVFS_MAX_REC_LEN ||
             pos + rh.rec_len + 4 > end) break;
 
         rb = (uint8_t *)malloc((size_t)rh.rec_len + 4);
@@ -227,11 +228,17 @@ static uint32_t extent_dead_fraction(invfs_volume *v, uint64_t pba,
             dead++;
             total++;
         } else if (rh.magic == INODE_REC_MAGIC) {
+            if (rh.name_len > INVFS_MAX_NAME ||
+                rh.rec_len < INVFS_REC_HDR_LEN + rh.name_len + 1) {
+                free(rb);
+                continue;
+            }
             total++;
             /* check if live version */
             uint64_t ip = idx_get_id(v, rh.inode_id);
             uint64_t expected_pos = pos - ((uint64_t)rh.rec_len + 4);
-            if (vol_find(v, rh.name) == rh.inode_id &&
+            if (vol_find(v, ((const invfs_inode_rec *)rb)->name) ==
+                    rh.inode_id &&
                 ip && ip == expected_pos) {
                 is_live = 1;
             }
@@ -266,7 +273,7 @@ int vol_meta_extent_shrink(invfs_volume *v, uint16_t ext_idx)
     uint32_t live_count = 0, total_count = 0;
     uint64_t live_bytes = 0;
 
-    while (pos + sizeof(invfs_inode_rec) <= end) {
+    while (pos + INVFS_REC_HDR_LEN + 1 <= end) {
         invfs_inode_rec rh;
         uint8_t *rb = NULL;
         uint32_t stored, calc;
@@ -276,7 +283,7 @@ int vol_meta_extent_shrink(invfs_volume *v, uint16_t ext_idx)
             break;
         if (rh.magic != INODE_REC_MAGIC && rh.magic != TOMBSTONE_MAGIC)
             break;
-        if (rh.rec_len < sizeof(rh) || rh.rec_len > INVFS_MAX_REC_LEN ||
+        if (rh.rec_len < INVFS_REC_HDR_LEN + 1 || rh.rec_len > INVFS_MAX_REC_LEN ||
             pos + rh.rec_len + 4 > end) break;
 
         rb = (uint8_t *)malloc((size_t)rh.rec_len + 4);
@@ -296,16 +303,23 @@ int vol_meta_extent_shrink(invfs_volume *v, uint16_t ext_idx)
             continue;
         }
         if (rh.magic != INODE_REC_MAGIC) { free(rb); continue; }
+        if (rh.name_len > INVFS_MAX_NAME ||
+            rh.rec_len < INVFS_REC_HDR_LEN + rh.name_len + 1) {
+            free(rb);
+            continue;
+        }
 
         /* check if live version of this record */
         uint64_t ip = idx_get_id(v, rh.inode_id);
         uint64_t expected_pos = pos - ((uint64_t)rh.rec_len + 4);
-        int is_live = (vol_find(v, rh.name) == rh.inode_id &&
-                       ip && ip == expected_pos);
+        int is_live =
+            (vol_find(v, ((const invfs_inode_rec *)rb)->name) == rh.inode_id &&
+             ip && ip == expected_pos);
 
         /* check if record references blocks in this extent */
         {
-            size_t base = sizeof(invfs_inode_rec);
+            size_t base =
+                (size_t)(invfs_rec_cbody((const invfs_inode_rec *)rb) - rb);
             invfs_ast_hdr ah;
             int refs_extent = 0;
             if (rh.rec_len >= base + INVFS_AST_HDR_V1_LEN &&
@@ -422,8 +436,9 @@ int vol_meta_extent_merge(invfs_volume *v, uint16_t src_idx, uint16_t tgt_idx)
 
     /* find where target's free space starts (approximate: assume 75% utilization) */
     uint32_t live_in_tgt = extent_live_count(v, tgt_pba, tgt_blocks);
-    uint32_t tgt_used_blocks = (live_in_tgt * (sizeof(invfs_inode_rec) + 4) +
-                                 INVFS_BLOCK_SIZE - 1) / INVFS_BLOCK_SIZE;
+    uint32_t tgt_used_blocks =
+        (live_in_tgt * (INVFS_REC_HDR_LEN + INVFS_NAME_CAP + 4) +
+         INVFS_BLOCK_SIZE - 1) / INVFS_BLOCK_SIZE;
     if (tgt_used_blocks >= tgt_blocks) return -1;
 
     uint32_t tgt_free_start = tgt_used_blocks;

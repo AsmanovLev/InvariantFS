@@ -151,7 +151,6 @@ int heat_read_tlv(const uint8_t *rec, uint32_t rec_len,
     size_t elen = 0, rem;
     size_t ast;
     invfs_meta_ext_hdr h;
-    size_t base = sizeof(invfs_inode_rec);
 
     if (r) *r = 0;
     if (w) *w = 0;
@@ -461,8 +460,10 @@ static int heat_decay_cb(void *ctx_, uint64_t rec_pos,
 
     if (rec_pos >= ctx->end) return 1;   /* an append made during the pass */
     if (h->magic != INODE_REC_MAGIC || !h->name_len ||
-        (uint8_t)h->name[0] == 0x01 ||
-        vol_find(v, h->name) != h->inode_id)
+        h->name_len > INVFS_MAX_NAME ||
+        h->rec_len < INVFS_REC_HDR_LEN + h->name_len + 1 ||
+        (uint8_t)((const invfs_inode_rec *)rec)->name[0] == 0x01 ||
+        vol_find(v, ((const invfs_inode_rec *)rec)->name) != h->inode_id)
         return 0;
     if (idx_get_id(v, h->inode_id) != rec_pos)
         return 0;   /* the live version only (position-kill chains share the id) */
@@ -555,10 +556,11 @@ static int heat_promote_cb(void *ctx_, uint64_t rec_pos,
     uint8_t cc = 0, ca = 0;
     uint16_t cg = 0, r;
 
-    (void)rec;
     if (h->magic == TOMBSTONE_MAGIC) return 0;
-    nl = h->name_len < sizeof(h->name) ? h->name_len : sizeof(h->name) - 1;
-    memcpy(nm, h->name, nl);
+    if (h->name_len > INVFS_MAX_NAME ||
+        h->rec_len < INVFS_REC_HDR_LEN + h->name_len + 1) return 0;
+    nl = h->name_len < INVFS_MAX_NAME ? h->name_len : INVFS_MAX_NAME;
+    memcpy(nm, ((const invfs_inode_rec *)rec)->name, nl);
     nm[nl] = 0;
     ip = idx_get_id(v, h->inode_id);
     if (vol_find(v, nm) != h->inode_id || (ip && ip != rec_pos))

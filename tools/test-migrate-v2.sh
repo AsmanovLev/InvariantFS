@@ -406,7 +406,7 @@ static void downgrade(const char *v2path, const char *v1path)
 
     /* pass 1: the live set (v2 walk, CRC-filtered) */
     p = iarea;
-    while (p + sizeof(invfs_inode_rec) <= iarea_end) {
+    while (p + INVFS_REC_HDR_LEN <= iarea_end) {
         invfs_inode_rec rh;
         uint8_t *rb;
         uint32_t cs, cc;
@@ -414,7 +414,8 @@ static void downgrade(const char *v2path, const char *v1path)
         if (blkio_pread(&v2, p, &rh, sizeof rh) != 0) die("walk read");
         if (rh.magic != INODE_REC_MAGIC && rh.magic != TOMBSTONE_MAGIC)
             break;
-        if (rh.rec_len < sizeof rh || rh.rec_len > INVFS_MAX_REC_LEN ||
+        if (rh.rec_len < INVFS_REC_HDR_LEN + 1 ||
+            rh.rec_len > INVFS_MAX_REC_LEN ||
             p + rh.rec_len + 4 > iarea_end)
             break;
         rb = malloc((size_t)rh.rec_len + 4);
@@ -423,16 +424,17 @@ static void downgrade(const char *v2path, const char *v1path)
             die("walk rec read");
         memcpy(&cs, rb + rh.rec_len, 4);
         cc = invfs_crc32c(rb, rh.rec_len);
-        free(rb);
-        if (cc == cs && rh.name_len) {
-            nl = rh.name_len < sizeof rh.name ? rh.name_len
-                                              : sizeof rh.name;
+        if (cc == cs && rh.name_len && rh.name_len <= INVFS_MAX_NAME &&
+            (size_t)rh.rec_len >= (size_t)INVFS_REC_HDR_LEN + rh.name_len + 1) {
+            const char *nm = ((const invfs_inode_rec *)rb)->name;
+            nl = rh.name_len < INVFS_MAX_NAME ? rh.name_len : INVFS_MAX_NAME;
             if (rh.magic == INODE_REC_MAGIC)
-                dg_inod(&live, rh.name, (uint32_t)nl, rh.inode_id, p);
+                dg_inod(&live, nm, (uint32_t)nl, rh.inode_id, p);
             else
-                dg_delt(&live, rh.name, (uint32_t)nl, rh.inode_id,
+                dg_delt(&live, nm, (uint32_t)nl, rh.inode_id,
                         rh.file_size);
         }
+        free(rb);
         p += (uint64_t)rh.rec_len + 4;
     }
 
@@ -443,7 +445,7 @@ static void downgrade(const char *v2path, const char *v1path)
     jn = 0;
     v1pos = iarea;
     p = iarea;
-    while (p + sizeof(invfs_inode_rec) <= iarea_end) {
+    while (p + INVFS_REC_HDR_LEN <= iarea_end) {
         invfs_inode_rec rh;
         uint8_t *rb, *nb;
         uint32_t cs, cc;
@@ -452,7 +454,8 @@ static void downgrade(const char *v2path, const char *v1path)
         if (blkio_pread(&v2, p, &rh, sizeof rh) != 0) die("walk2 read");
         if (rh.magic != INODE_REC_MAGIC && rh.magic != TOMBSTONE_MAGIC)
             break;
-        if (rh.rec_len < sizeof rh || rh.rec_len > INVFS_MAX_REC_LEN ||
+        if (rh.rec_len < INVFS_REC_HDR_LEN + 1 ||
+            rh.rec_len > INVFS_MAX_REC_LEN ||
             p + rh.rec_len + 4 > iarea_end)
             break;
         rb = malloc((size_t)rh.rec_len + 4);
@@ -462,7 +465,7 @@ static void downgrade(const char *v2path, const char *v1path)
         memcpy(&cs, rb + rh.rec_len, 4);
         cc = invfs_crc32c(rb, rh.rec_len);
         if (cc != cs) { free(rb); p += (uint64_t)rh.rec_len + 4; continue; }
-        nl = rh.name_len < sizeof rh.name ? rh.name_len : sizeof rh.name;
+        nl = rh.name_len < INVFS_MAX_NAME ? rh.name_len : INVFS_MAX_NAME;
 
         if (rh.magic == TOMBSTONE_MAGIC) {
             /* the position kill maps onto the v1 stream position */
@@ -489,7 +492,7 @@ static void downgrade(const char *v2path, const char *v1path)
         /* INOD: convert the entries 32B -> 24B */
         {
             invfs_ast_hdr ah;
-            size_t base = sizeof(invfs_inode_rec), ent0, off, choff;
+            size_t base, ent0, off, choff;
             size_t ext_off, ext_len = 0;
             uint8_t *extp = NULL;
             uint32_t i;
@@ -499,6 +502,7 @@ static void downgrade(const char *v2path, const char *v1path)
             dg_name *ne;
             int live_now;
 
+            base = (size_t)(invfs_rec_cbody((const invfs_inode_rec *)rb) - rb);
             if (rh.rec_len < base + INVFS_AST_HDR_V1_LEN ||
                 invfs_ast_hdr_parse(rb + base, rh.rec_len - base, &ah) != 0)
                 die("v2 recipe parse");
@@ -527,10 +531,13 @@ static void downgrade(const char *v2path, const char *v1path)
                 }
             }
 
-            ne = dg_find(&live, rh.name, (uint32_t)nl);
+            ne = dg_find(&live, ((const invfs_inode_rec *)rb)->name,
+                         (uint32_t)nl);
             live_now = ne && ne->nvers &&
                        ne->vers[ne->nvers - 1].pos == p;
-            is_hot = nl == 7 && memcmp(rh.name, "hot.bin", 7) == 0;
+            is_hot = nl == 7 &&
+                     memcmp(((const invfs_inode_rec *)rb)->name,
+                            "hot.bin", 7) == 0;
 
             /* build the v1 record */
             nlen2 = base + ah.hdr_len +

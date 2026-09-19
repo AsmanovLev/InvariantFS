@@ -96,7 +96,7 @@ int tz_owner_load(invfs_volume *v, uint64_t owner, tz_owner *o)
     uint32_t rl = 0;
     invfs_ast_hdr ah;
     const invfs_ast_block_entry *ents;
-    size_t base = sizeof(invfs_inode_rec);
+    size_t base;
     size_t elen = 0;
     uint32_t i;
 
@@ -106,6 +106,7 @@ int tz_owner_load(invfs_volume *v, uint64_t owner, tz_owner *o)
         free(buf);
         return -1;
     }
+    base = (size_t)(invfs_rec_cbody((const invfs_inode_rec *)buf) - buf);
     if (rl < base + INVFS_AST_HDR_V1_LEN ||
         invfs_ast_hdr_parse(buf + base, rl - base, &ah) != 0) {
         free(buf);
@@ -160,9 +161,9 @@ void tz_owner_free(tz_owner *o)
 int tz_owner_write(invfs_volume *v, uint64_t owner, const char *name,
                           tz_owner *o)
 {
-    size_t rec_len, total, off;
+    size_t rec_len, total, off, nlen, tomb_len;
     uint8_t *combo;
-    invfs_inode_rec *rh, tomb;
+    invfs_inode_rec *rh;
     uint8_t ah[INVFS_AST_HDR_V2_LEN];
     size_t ahlen;
     uint32_t crc_rec, crc_tomb;
@@ -180,9 +181,12 @@ int tz_owner_write(invfs_volume *v, uint64_t owner, const char *name,
     ahlen = invfs_ast_hdr_write(ah, run, o->n, 0);
     if (!ahlen) return -1;
 
-    rec_len = sizeof(invfs_inode_rec) + ahlen +
+    nlen = strlen(name);
+    if (nlen > INVFS_MAX_NAME) nlen = INVFS_MAX_NAME;
+    tomb_len = INVFS_REC_HDR_LEN + nlen + 1;
+    rec_len = INVFS_REC_HDR_LEN + nlen + 1 + ahlen +
               (size_t)o->n * sizeof(invfs_ast_block_entry) + o->ext_len;
-    total = rec_len + 4 + (o->pos ? sizeof(tomb) + 4 : 0);
+    total = rec_len + 4 + (o->pos ? tomb_len + 4 : 0);
     /* WP52: on a mapper volume meta_get_append_pos sizes (or grows) the
      * active extent to hold the whole record+tombstone, so no legacy room
      * pre-check applies. The legacy contiguous area keeps the online churn
@@ -193,7 +197,7 @@ int tz_owner_write(invfs_volume *v, uint64_t owner, const char *name,
         if (inode_area_make_room(v, total) != 0)
             return -1;
         o->pos = idx_get_id(v, owner);
-        total = rec_len + 4 + (o->pos ? sizeof(tomb) + 4 : 0);
+        total = rec_len + 4 + (o->pos ? tomb_len + 4 : 0);
     }
     combo = (uint8_t *)calloc(1, total);
     if (!combo) return -1;
@@ -205,10 +209,13 @@ int tz_owner_write(invfs_volume *v, uint64_t owner, const char *name,
     rh->file_size = run;
     rh->ctime = o->ctime;
     rec_set_name(rh, name);
-    memcpy(combo + sizeof(invfs_inode_rec), ah, ahlen);
-    if (o->n)
-        memcpy(combo + sizeof(invfs_inode_rec) + ahlen, o->ents,
-               (size_t)o->n * sizeof(invfs_ast_block_entry));
+    {
+        uint8_t *body = invfs_rec_body(rh);
+        memcpy(body, ah, ahlen);
+        if (o->n)
+            memcpy(body + ahlen, o->ents,
+                   (size_t)o->n * sizeof(invfs_ast_block_entry));
+    }
     if (o->ext_len)
         memcpy(combo + rec_len - o->ext_len, o->ext, o->ext_len);
     crc_rec = invfs_crc32c(combo, rec_len);
@@ -216,17 +223,15 @@ int tz_owner_write(invfs_volume *v, uint64_t owner, const char *name,
 
     off = rec_len + 4;
     if (o->pos) {
-        memset(&tomb, 0, sizeof tomb);
-        tomb.magic = TOMBSTONE_MAGIC;
+        invfs_inode_rec *th = (invfs_inode_rec *)(combo + off);
+        th->magic = TOMBSTONE_MAGIC;
         v->hot.tombstones++;
-        tomb.rec_len = (uint32_t)sizeof(tomb);
-        tomb.inode_id = owner;
-        tomb.file_size = o->pos;        /* v2 position kill */
-        tomb.name_len = (uint32_t)strlen(name);
-        memcpy(tomb.name, name, strlen(name));
-        crc_tomb = invfs_crc32c((uint8_t *)&tomb, sizeof tomb);
-        memcpy(combo + off, &tomb, sizeof tomb);
-        memcpy(combo + off + sizeof tomb, &crc_tomb, 4);
+        th->rec_len = (uint32_t)tomb_len;
+        th->inode_id = owner;
+        th->file_size = o->pos;         /* v2 position kill */
+        rec_set_name(th, name);
+        crc_tomb = invfs_crc32c((uint8_t *)th, tomb_len);
+        memcpy(combo + off + tomb_len, &crc_tomb, 4);
     }
 
     if (vol_mark_dirty(v) != 0) { free(combo); return -1; }
@@ -297,12 +302,13 @@ int tz_member_oversized(invfs_volume *v, uint64_t inode_id,
     uint32_t rl = 0;
     invfs_ast_hdr ah;
     const invfs_ast_block_entry *ents;
-    size_t base = sizeof(invfs_inode_rec);
+    size_t base;
     uint32_t i;
     int over = 0;
 
     if (meta_read_record_by_id(v, inode_id, &buf, &rl, NULL, 0, NULL) != 0)
         return 0;   /* unreadable: not GC/policy business here */
+    base = (size_t)(invfs_rec_cbody((const invfs_inode_rec *)buf) - buf);
     if (rl < base + INVFS_AST_HDR_V1_LEN ||
         invfs_ast_hdr_parse(buf + base, rl - base, &ah) != 0) {
         free(buf);
@@ -448,7 +454,7 @@ static int tz_commit_member(tz_ctx *c, tz_member *m, const tz_candidate *cand)
     const uint8_t *ext;
     size_t ext_len = 0;
     uint64_t new_id, fsize, ctime;
-    size_t rec_size, i;
+    size_t rec_size, i, nlen, tomb_len;
     uint8_t *rec;
     invfs_inode_rec *rh;
     uint8_t ah[INVFS_AST_HDR_V2_LEN];
@@ -469,7 +475,10 @@ static int tz_commit_member(tz_ctx *c, tz_member *m, const tz_candidate *cand)
      * v2 recipe header; the helper picks, 0 = past the format caps */
     ahlen = invfs_ast_hdr_write(ah, fsize, (uint32_t)m->n_slices, 0);
     if (!ahlen) { free(old); return -1; }
-    rec_size = sizeof(invfs_inode_rec) + ahlen +
+    nlen = strlen(name);
+    if (nlen > INVFS_MAX_NAME) nlen = INVFS_MAX_NAME;
+    tomb_len = INVFS_REC_HDR_LEN + nlen + 1;
+    rec_size = INVFS_REC_HDR_LEN + nlen + 1 + ahlen +
                m->n_slices * sizeof(invfs_ast_block_entry) + ext_len;
     rec = (uint8_t *)calloc(1, rec_size);
     if (!rec) { free(old); return -1; }
@@ -481,8 +490,8 @@ static int tz_commit_member(tz_ctx *c, tz_member *m, const tz_candidate *cand)
     rh->file_size = fsize;
     rh->ctime = ctime;
     rec_set_name(rh, name);
-    memcpy(rec + sizeof(invfs_inode_rec), ah, ahlen);
-    ne = (invfs_ast_block_entry *)(rec + sizeof(invfs_inode_rec) + ahlen);
+    memcpy(invfs_rec_body(rh), ah, ahlen);
+    ne = (invfs_ast_block_entry *)(invfs_rec_body(rh) + ahlen);
     for (i = 0; i < m->n_slices; i++) {
         const tz_sealed *s = tz_sealed_find(c, m->slices[i].batch_seq);
         if (!s) goto out;   /* can only be a bug in the flush */
@@ -510,7 +519,7 @@ static int tz_commit_member(tz_ctx *c, tz_member *m, const tz_candidate *cand)
      * the member stays RAW and retries next sweep. */
     if (!(v->met0_present && v->meta_mapper) &&
         inode_area_make_room(v, (uint64_t)rec_size + 4 +
-                             sizeof(invfs_inode_rec) + 4) != 0)
+                             tomb_len + 4) != 0)
         { rc = 1; goto out; }
     {
         uint64_t npos;
@@ -1050,15 +1059,17 @@ static int tz_gc_mark_cb(void *ctx_, uint64_t rec_pos,
     tz_gc_mark_ctx *c = (tz_gc_mark_ctx *)ctx_;
     invfs_volume *v = c->v;
     invfs_ast_hdr ah;
-    size_t base = sizeof(invfs_inode_rec);
+    size_t base = (size_t)(invfs_rec_cbody((const invfs_inode_rec *)rec) - rec);
     uint32_t nb, j;
     (void)rec_pos;
 
     if (h->magic != INODE_REC_MAGIC) return 0;   /* tombstones */
     if (h->inode_id == c->owner) return 0;
+    if (h->name_len > INVFS_MAX_NAME ||
+        h->rec_len < INVFS_REC_HDR_LEN + h->name_len + 1)
+        return 0;
     {
-        size_t nl = h->name_len < sizeof(h->name)
-                  ? h->name_len : sizeof(h->name) - 1;
+        size_t nl = h->name_len;
         char nm[257];
         memcpy(nm, h->name, nl);
         nm[nl] = 0;
@@ -1066,6 +1077,8 @@ static int tz_gc_mark_cb(void *ctx_, uint64_t rec_pos,
          * may still carry TEXT entries of an older batching generation) */
         if (vol_find(v, nm) != h->inode_id) return 0;
     }
+    if (h->rec_len < base + INVFS_AST_HDR_V1_LEN)
+        return 0;
     if (invfs_ast_hdr_parse(rec + base, h->rec_len - base, &ah) != 0)
         return 0;
     nb = ah.num_blocks;

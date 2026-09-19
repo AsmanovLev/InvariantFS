@@ -688,21 +688,21 @@ uint64_t vol_create_blob_file(invfs_volume *v, const char *name,
             return 0;
         }
         inode_id = v->next_inode_id++;
-        rec_size = sizeof(invfs_inode_rec) + INVFS_AST_HDR_V1_LEN;
+        rec_size = INVFS_REC_HDR_LEN + strlen(name) + 1 + INVFS_AST_HDR_V1_LEN;
         rec = (uint8_t *)calloc(1, rec_size);
         if (!rec) return 0;
+        rh = (invfs_inode_rec *)rec;
+        rec_set_name(rh, name);
         /* empty file, v1 header by definition (nothing overflows it) */
-        if (invfs_ast_hdr_write(rec + sizeof(invfs_inode_rec), 0, 0, 0) == 0) {
+        if (invfs_ast_hdr_write(invfs_rec_body(rh), 0, 0, 0) == 0) {
             free(rec);
             return 0;
         }
-        rh = (invfs_inode_rec *)rec;
         rh->magic = INODE_REC_MAGIC;
         rh->rec_len = (uint32_t)rec_size;
         rh->inode_id = inode_id;
         rh->file_size = 0;
         rh->ctime = (uint64_t)time(NULL);
-        rec_set_name(rh, name);
         crc = invfs_crc32c(rec, rec_size);
         if (inode_area_make_room(v, (uint64_t)rec_size + 4) != 0) { free(rec); return 0; }
         if (vol_pre_record(v) != 0) { free(rec); return 0; }
@@ -759,7 +759,7 @@ uint64_t vol_create_blob_file(invfs_volume *v, const char *name,
     /* v2 recipe header only when orig_size overflows v1's u32 (WP22a) */
     ast_hlen = invfs_ast_hdr_write(ast_h, orig_size, 1, 0);
     if (!ast_hlen) return 0;
-    rec_size = sizeof(invfs_inode_rec) + ast_hlen + sizeof(e);
+    rec_size = INVFS_REC_HDR_LEN + strlen(name) + 1 + ast_hlen + sizeof(e);
     rec = (uint8_t *)calloc(1, rec_size);
     if (!rec) return 0;
     rh = (invfs_inode_rec *)rec;
@@ -769,8 +769,8 @@ uint64_t vol_create_blob_file(invfs_volume *v, const char *name,
     rh->file_size = orig_size;
     rh->ctime = (uint64_t)time(NULL);
     rec_set_name(rh, name);
-    memcpy(rec + sizeof(invfs_inode_rec), ast_h, ast_hlen);
-    memcpy(rec + sizeof(invfs_inode_rec) + ast_hlen, &e, sizeof e);
+    memcpy(invfs_rec_body(rh), ast_h, ast_hlen);
+    memcpy(invfs_rec_body(rh) + ast_hlen, &e, sizeof e);
     crc = invfs_crc32c(rec, rec_size);
 
     if (inode_area_make_room(v, (uint64_t)rec_size + 4) != 0) { free(rec); return 0; }

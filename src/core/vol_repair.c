@@ -286,12 +286,14 @@ static int lr_scan_cb(void *ctx_, uint64_t rec_pos,
                       const invfs_inode_rec *h, const uint8_t *rec)
 {
     lr_scan_ctx *c = (lr_scan_ctx *)ctx_;
-    char nm[256];
-    size_t i, nl;
+    char nm[INVFS_MAX_NAME + 1];
+    size_t i, nl, present;
     (void)rec_pos; (void)rec;
     if (h->magic != INODE_REC_MAGIC || !h->name_len) return 0;
     if ((uint8_t)h->name[0] == 0x01) return 0;      /* internal owners */
-    nl = h->name_len < 255 ? h->name_len : 255;
+    present = (size_t)h->rec_len - INVFS_REC_HDR_LEN - 1;
+    nl = h->name_len < INVFS_MAX_NAME ? h->name_len : INVFS_MAX_NAME;
+    if (nl > present) nl = present;
     memcpy(nm, h->name, nl);
     nm[nl] = 0;
     if (vol_find(c->v, nm) != h->inode_id) return 0;   /* superseded */
@@ -399,7 +401,7 @@ int vol_seal2_repair(invfs_volume *v, invfs_seal2_repair *rep)
         uint32_t crc_stored;
         invfs_ast_hdr ah;
         const invfs_ast_block_entry *be;
-        size_t base = sizeof(invfs_inode_rec);
+        size_t base;
         uint32_t bi;
 
         if (meta_read_record_by_id(v, ents[i].id, &buf, &rl, NULL, 0,
@@ -410,7 +412,12 @@ int vol_seal2_repair(invfs_volume *v, invfs_seal2_repair *rep)
         if (io_seek(&v->io, rpos + rl) != 0 ||
             io_read(&v->io, &crc_stored, 4) != 0 ||
             invfs_crc32c(buf, rl) != crc_stored ||
-            rl < base + INVFS_AST_HDR_V1_LEN ||
+            rl < INVFS_REC_HDR_LEN + 1) {
+            free(buf);
+            continue;
+        }
+        base = (size_t)(invfs_rec_cbody((const invfs_inode_rec *)buf) - buf);
+        if (rl < base + INVFS_AST_HDR_V1_LEN ||
             invfs_ast_hdr_parse(buf + base, rl - base, &ah) != 0) {
             free(buf);
             continue;

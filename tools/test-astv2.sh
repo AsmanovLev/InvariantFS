@@ -226,6 +226,7 @@ static int cmd_hdrcheck(const char *img, const char *name, uint32_t want_ver)
     invfs_ast_hdr ah;
     uint8_t *rec = NULL;
     int found = 0;
+    size_t base;
     if (!v) die("open");
     id = vol_find(v, name);
     if (!id) die("find");
@@ -245,8 +246,8 @@ static int cmd_hdrcheck(const char *img, const char *name, uint32_t want_ver)
         found = 1;   /* newest match wins (append-only area) */
     }
     if (!found) die("record not found");
-    if (invfs_ast_hdr_parse(rec + sizeof(invfs_inode_rec),
-                            rec_rl - sizeof(invfs_inode_rec), &ah) != 0)
+    base = (size_t)(invfs_rec_cbody((const invfs_inode_rec *)rec) - rec);
+    if (invfs_ast_hdr_parse(rec + base, rec_rl - base, &ah) != 0)
         die("header parse");
     printf("HDR %s version=%u file_size=%llu num_blocks=%u hdr_len=%u\n",
            name, ah.version, (unsigned long long)ah.file_size,
@@ -376,7 +377,7 @@ static int cmd_sabotage(const char *img, uint64_t victim_id)
 
     /* find the victim's live record (the newest INOD with its id) */
     p = iarea;
-    while (p + sizeof(invfs_inode_rec) <= iend) {
+    while (p + INVFS_REC_HDR_LEN <= iend) {
         invfs_inode_rec rh;
         uint32_t cs, cc;
         uint8_t *rb;
@@ -384,8 +385,8 @@ static int cmd_sabotage(const char *img, uint64_t victim_id)
             fread(&rh, sizeof rh, 1, f) != 1) die("walk read");
         if (rh.magic != INODE_REC_MAGIC && rh.magic != TOMBSTONE_MAGIC)
             break;
-        if (rh.rec_len < sizeof rh || rh.rec_len > INVFS_MAX_REC_LEN ||
-            p + rh.rec_len + 4 > iend)
+        if (rh.rec_len < INVFS_REC_HDR_LEN + 1 ||
+            rh.rec_len > INVFS_MAX_REC_LEN || p + rh.rec_len + 4 > iend)
             break;
         if (rh.magic == INODE_REC_MAGIC && rh.inode_id == victim_id) {
             rb = malloc(rh.rec_len);
@@ -406,17 +407,19 @@ static int cmd_sabotage(const char *img, uint64_t victim_id)
         uint8_t *rb;
         invfs_inode_rec rh;
         invfs_ast_hdr ah;
-        size_t base = sizeof(invfs_inode_rec), ent0;
+        size_t base, ent0;
         invfs_ast_block_entry *e;
         uint32_t ncrc;
         if (fseek(f, (long)last_pos, SEEK_SET) != 0 ||
             fread(&rh, sizeof rh, 1, f) != 1) die("rec head");
-        if (rh.rec_len < sizeof rh || rh.rec_len > INVFS_MAX_REC_LEN)
+        if (rh.rec_len < INVFS_REC_HDR_LEN + 1 ||
+            rh.rec_len > INVFS_MAX_REC_LEN)
             die("rec_len");
         rb = malloc(rh.rec_len);
         if (!rb) die("oom");
         if (fseek(f, (long)last_pos, SEEK_SET) != 0 ||
             fread(rb, rh.rec_len, 1, f) != 1) die("rec read2");
+        base = (size_t)(invfs_rec_cbody((const invfs_inode_rec *)rb) - rb);
         if (invfs_ast_hdr_parse(rb + base, rh.rec_len - base, &ah) != 0 ||
             ah.num_blocks < 1)
             die("recipe parse");

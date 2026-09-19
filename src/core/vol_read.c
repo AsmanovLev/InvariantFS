@@ -251,7 +251,7 @@ static int vol_read_text_slice(invfs_volume *v, uint64_t inode_id,
  * legacy contiguous region; anything else falls back to vol_records_walk(). */
 static int read_hint_valid(invfs_volume *v, uint64_t ip)
 {
-    const uint64_t rs = sizeof(invfs_inode_rec);
+    const uint64_t rs = INVFS_REC_HDR_LEN;
     if (!ip) return 0;
     if (v->met0_present && v->meta_mapper) {
         size_t ei;
@@ -319,6 +319,7 @@ int vol_read_inode(invfs_volume *v, uint64_t inode_id, unsigned depth,
     uint64_t pos, end;
     uint8_t *data = NULL;
     size_t len = 0;
+    char rec_name[INVFS_MAX_NAME + 1];
 
     /* The id index knows where this record is; without it every read of every
        file re-read the whole inode area, which is what kept reads quadratic
@@ -327,9 +328,9 @@ int vol_read_inode(invfs_volume *v, uint64_t inode_id, unsigned depth,
        mapper extent, and the fallback is the shared mapper-aware walker. */
     pos = read_locate_record(v, inode_id);
     if (!pos) return -1;
-    end = pos + sizeof(invfs_inode_rec);
+    end = pos + INVFS_REC_HDR_LEN;
 
-    while (pos + sizeof(invfs_inode_rec) <= end) {
+    while (pos + INVFS_REC_HDR_LEN <= end) {
         invfs_inode_rec rec_h;
         uint32_t crc_stored, crc_calc;
         uint8_t *rec;
@@ -343,7 +344,8 @@ int vol_read_inode(invfs_volume *v, uint64_t inode_id, unsigned depth,
         if (rec_h.inode_id != inode_id) { pos += rec_h.rec_len + 4; continue; }
 
         /* read full record + crc, verify */
-        if (rec_h.rec_len < sizeof(rec_h) || rec_h.rec_len > INVFS_MAX_REC_LEN) {
+        if (rec_h.rec_len < INVFS_REC_HDR_LEN + 1 ||
+            rec_h.rec_len > INVFS_MAX_REC_LEN) {
             fprintf(stderr, "inode %llu: rec_len %u outside valid range\n",
                     (unsigned long long)inode_id, rec_h.rec_len);
             return -1;
@@ -364,12 +366,26 @@ int vol_read_inode(invfs_volume *v, uint64_t inode_id, unsigned depth,
             return -1;
         }
 
+        /* the name lives in the full CRC-verified record, not in the
+         * 36-byte prefix copy rec_h; materialize a bounded NUL-terminated
+         * copy so every "%s" sibling-name build below is safe. */
+        {
+            const invfs_inode_rec *rr = (const invfs_inode_rec *)rec;
+            size_t n = rr->name_len;
+            size_t present = (size_t)rec_h.rec_len - INVFS_REC_HDR_LEN - 1;
+            if (n > INVFS_MAX_NAME) n = INVFS_MAX_NAME;
+            if (n > present) n = present;
+            memcpy(rec_name, rr->name, n);
+            rec_name[n] = 0;
+        }
+
         /* parse AST: header + entries after rec header */
         {
             invfs_ast_hdr ast_h;
             const invfs_ast_block_entry *ents;
             uint32_t i;
-            size_t off = sizeof(invfs_inode_rec);
+            size_t off = (size_t)(invfs_rec_cbody((const invfs_inode_rec *)rec)
+                                  - rec);
             if (invfs_ast_hdr_parse(rec + off, rec_h.rec_len - off,
                                     &ast_h) != 0) {
                 fprintf(stderr, "inode %llu: unsupported/corrupt AST recipe "
@@ -527,7 +543,7 @@ int vol_read_inode(invfs_volume *v, uint64_t inode_id, unsigned depth,
                     if (invfs_pmp_decompress(blob, hdr, &m, &m_len) != 0 ||
                         m_len != e->length) {
                         fprintf(stderr, "PMP decompress error (%s: got %zu, want %llu)\n",
-                                rec_h.name, m_len, (unsigned long long)e->length);
+                                rec_name, m_len, (unsigned long long)e->length);
                         free(m); free(blob); free(data); free(rec); return -1;
                     }
                     memcpy(data + dst_off, m, m_len);
@@ -540,10 +556,10 @@ int vol_read_inode(invfs_volume *v, uint64_t inode_id, unsigned depth,
                     size_t wav_len = 0, rcp_len = 0, fl_len = 0;
                     char rname[272];
                     if (invfs_ape_to_wav(blob, hdr, &wav, &wav_len) != 0) {
-                        fprintf(stderr, "FLACR: APE->WAV failed for %s\n", rec_h.name);
+                        fprintf(stderr, "FLACR: APE->WAV failed for %s\n", rec_name);
                         free(blob); free(data); free(rec); return -1;
                     }
-                    snprintf(rname, sizeof rname, "%s!recipe", rec_h.name);
+                    snprintf(rname, sizeof rname, "%s!recipe", rec_name);
                     uint64_t rino = vol_find(v, rname);
                     if (rino == 0) {
                         fprintf(stderr, "FLACR: recipe inode '%s' not found\n", rname);
@@ -560,7 +576,7 @@ int vol_read_inode(invfs_volume *v, uint64_t inode_id, unsigned depth,
                     int ok = 1;
                     for (int ci = 0; ci < ncv && ci < 16; ci++) {
                         char cn[288];
-                        snprintf(cn, sizeof cn, "%s!cover%d", rec_h.name, ci);
+                        snprintf(cn, sizeof cn, "%s!cover%d", rec_name, ci);
                         uint64_t cino = vol_find(v, cn);
                         size_t clen = 0;
                         cdata[ci] = NULL;
@@ -611,7 +627,7 @@ int vol_read_inode(invfs_volume *v, uint64_t inode_id, unsigned depth,
                     tarx_member *members = NULL; size_t n = 0;
                     uint8_t *trailer = NULL; size_t tlen = 0;
                     if (tarx_parse_recipe(rcp, rcp_len, &members, &n, &trailer, &tlen) != 0) {
-                        fprintf(stderr, "TARR: bad recipe for %s\n", rec_h.name);
+                        fprintf(stderr, "TARR: bad recipe for %s\n", rec_name);
                         free(rcp_own); free(blob); free(data); free(rec); return -1;
                     }
                     int np = tarx_recipe_num_parts(rcp, rcp_len);
@@ -620,7 +636,7 @@ int vol_read_inode(invfs_volume *v, uint64_t inode_id, unsigned depth,
                     int ok = 1;
                     for (int pi = 0; pi < np; pi++) {
                         char pn[320];
-                        snprintf(pn, sizeof pn, "%s!part%u", rec_h.name, pi);
+                        snprintf(pn, sizeof pn, "%s!part%u", rec_name, pi);
                         uint64_t pino = vol_find(v, pn);
                         if (!pino) {
                             fprintf(stderr, "TARR: part '%s' missing\n", pn);
@@ -666,7 +682,7 @@ int vol_read_inode(invfs_volume *v, uint64_t inode_id, unsigned depth,
                         rcp = blob + 1; rcp_len = hdr - 1;
                     }
                     if (rcp_len < 20 || memcmp(rcp, "IVGZ", 4) != 0 || rcp[4] != 1) {
-                        fprintf(stderr, "GZR: bad recipe for %s\n", rec_h.name);
+                        fprintf(stderr, "GZR: bad recipe for %s\n", rec_name);
                         free(rcp_own); free(blob); free(data); free(rec); return -1;
                     }
                     int glevel = rcp[5];
@@ -686,7 +702,7 @@ int vol_read_inode(invfs_volume *v, uint64_t inode_id, unsigned depth,
                     tarx_member *members = NULL; size_t n = 0;
                     uint8_t *trailer = NULL; size_t tlen = 0;
                     if (tarx_parse_recipe(ivft, ivft_len, &members, &n, &trailer, &tlen) != 0) {
-                        fprintf(stderr, "GZR: bad IVFT for %s\n", rec_h.name);
+                        fprintf(stderr, "GZR: bad IVFT for %s\n", rec_name);
                         free(rcp_own); free(blob); free(data); free(rec); return -1;
                     }
                     int np = tarx_recipe_num_parts(ivft, ivft_len);
@@ -695,7 +711,7 @@ int vol_read_inode(invfs_volume *v, uint64_t inode_id, unsigned depth,
                     int ok = 1;
                     for (int pi = 0; pi < np; pi++) {
                         char pn[320];
-                        snprintf(pn, sizeof pn, "%s!part%u", rec_h.name, pi);
+                        snprintf(pn, sizeof pn, "%s!part%u", rec_name, pi);
                         uint64_t pino = vol_find(v, pn);
                         if (!pino) {
                             fprintf(stderr, "GZR: part '%s' missing\n", pn);
@@ -749,7 +765,7 @@ int vol_read_inode(invfs_volume *v, uint64_t inode_id, unsigned depth,
                                     fl[ghl + stream_len + 7] = (uint8_t)((gisz >> 24) & 0xFF);
                                     fl_len = ghl + stream_len + 8;
                                     if ((unsigned)(c & 0xFFFFFFFFu) != gcrc) {
-                                        fprintf(stderr, "GZR: crc mismatch for %s\n", rec_h.name);
+                                        fprintf(stderr, "GZR: crc mismatch for %s\n", rec_name);
                                         ok = 0;
                                     }
                                 } else ok = 0;
@@ -792,7 +808,7 @@ int vol_read_inode(invfs_volume *v, uint64_t inode_id, unsigned depth,
                     memset(&pi, 0, sizeof pi);
                     if (pngx_parse_recipe(rcp, rcp_len, &pi) != 0) {
                         fprintf(stderr, "PNGR: bad recipe for %s (len %zu)\n",
-                                rec_h.name, rcp_len);
+                                rec_name, rcp_len);
                         fprintf(stderr, "PNGR: recipe head: %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x\n",
                                 rcp_len > 0 ? rcp[0] : 0, rcp_len > 1 ? rcp[1] : 0,
                                 rcp_len > 2 ? rcp[2] : 0, rcp_len > 3 ? rcp[3] : 0,
@@ -805,13 +821,13 @@ int vol_read_inode(invfs_volume *v, uint64_t inode_id, unsigned depth,
                     uint8_t *rgb = NULL; size_t rgb_len = 0;
                     {
                         char jn[320];
-                        snprintf(jn, sizeof jn, "%s!jxl", rec_h.name);
+                        snprintf(jn, sizeof jn, "%s!jxl", rec_name);
                         uint64_t jino = vol_find(v, jn);
                         if (!jino) {
                             fprintf(stderr, "PNGR: jxl '%s' missing\n", jn);
                             ok = 0;
                         } else if (invfs_png_from_jxl(v, jino, &rgb, &rgb_len) != 0) {
-                            fprintf(stderr, "PNGR: djxl failed for %s\n", rec_h.name);
+                            fprintf(stderr, "PNGR: djxl failed for %s\n", rec_name);
                             ok = 0;
                         }
                     }
@@ -890,7 +906,7 @@ int vol_read_inode(invfs_volume *v, uint64_t inode_id, unsigned depth,
                         char pn[288];
                         uint64_t pino;
                         size_t plen = 0;
-                        snprintf(pn, sizeof pn, "%s!exr%zu", rec_h.name, pi);
+                        snprintf(pn, sizeof pn, "%s!exr%zu", rec_name, pi);
                         pino = vol_find(v, pn);
                         if (!pino ||
                             vol_read_file(v, pino, &parts[pi], &plen) != 0 ||
@@ -907,7 +923,7 @@ int vol_read_inode(invfs_volume *v, uint64_t inode_id, unsigned depth,
                     free(rows);
                     if (!ok) {
                         fprintf(stderr, "EXER: rebuild failed for %s\n",
-                                rec_h.name);
+                                rec_name);
                         free(blob); free(data); free(rec); return -1;
                     }
                 } else if (e->algo == INVFS_ALGO_NONE) {
@@ -926,19 +942,19 @@ int vol_read_inode(invfs_volume *v, uint64_t inode_id, unsigned depth,
                     if ((pd && pd->is_container &&
                          (pc->caps & INVFS_CODEC_CAP_SEEK)) || !pc) {
                         char mbn[288];
-                        snprintf(mbn, sizeof mbn, "%s!mbrmap", rec_h.name);
+                        snprintf(mbn, sizeof mbn, "%s!mbrmap", rec_name);
                         mapped = vol_find(v, mbn) != 0;
                     }
                     if (mapped) {
                         /* cpack_map_read returns the byte count (the
                          * vol_read_range convention): < 0 is the failure */
-                        if (cpack_map_read(v, rec_h.name, inode_id,
+                        if (cpack_map_read(v, rec_name, inode_id,
                                            (uint64_t)e->length,
                                            e->file_offset, data + dst_off,
                                            (size_t)e->length) < 0) {
                             fprintf(stderr, "%s: mapped container read "
                                     "failed for %s\n",
-                                    pc ? pc->name : "codecpack", rec_h.name);
+                                    pc ? pc->name : "codecpack", rec_name);
                             free(blob); free(data); free(rec); return -1;
                         }
                     } else if (pd && pd->is_container) {
@@ -949,12 +965,12 @@ int vol_read_inode(invfs_volume *v, uint64_t inode_id, unsigned depth,
                          * container no longer exists), then spliced by the
                          * pack's rebuild command. A missing/corrupt member
                          * fails the read LOUDLY (the 1:1 invariant). */
-                        if (pack_container_rebuild(v, pc, rec_h.name,
+                        if (pack_container_rebuild(v, pc, rec_name,
                                                    blob, hdr,
                                                    data + dst_off,
                                                    (size_t)e->length) != 0) {
                             fprintf(stderr, "%s: container rebuild failed "
-                                    "for %s\n", pc->name, rec_h.name);
+                                    "for %s\n", pc->name, rec_name);
                             free(blob); free(data); free(rec); return -1;
                         }
                     } else if (!pc || !pc->decode) {
@@ -1144,9 +1160,9 @@ int vol_read_range(invfs_volume *v, uint64_t inode_id, uint64_t offset,
     /* WP47: hint jump when the index position is valid (mapper extent or
      * legacy region); otherwise locate through the mapper-aware walker. */
     pos = read_locate_record(v, inode_id);
-    end = pos ? pos + sizeof(invfs_inode_rec) : 0;
+    end = pos ? pos + INVFS_REC_HDR_LEN : 0;
 
-    while (pos + sizeof(invfs_inode_rec) <= end) {
+    while (pos + INVFS_REC_HDR_LEN <= end) {
         invfs_inode_rec rec_h;
         uint32_t crc_stored, crc_calc;
         if (io_seek(&v->io, pos) != 0 || io_read(&v->io, &rec_h, sizeof(rec_h)) != 0)
@@ -1156,6 +1172,12 @@ int vol_read_range(invfs_volume *v, uint64_t inode_id, uint64_t offset,
         }
         if (rec_h.magic == TOMBSTONE_MAGIC) { pos += rec_h.rec_len + 4; continue; }
         if (rec_h.inode_id != inode_id) { pos += rec_h.rec_len + 4; continue; }
+        if (rec_h.rec_len < INVFS_REC_HDR_LEN + 1 ||
+            rec_h.rec_len > INVFS_MAX_REC_LEN) {
+            fprintf(stderr, "[rr] inode %llu: rec_len %u outside valid range\n",
+                    (unsigned long long)inode_id, rec_h.rec_len);
+            return -1;
+        }
         rec = (uint8_t *)malloc(rec_h.rec_len);
         if (!rec) return -1;
         if (io_seek(&v->io, pos) != 0 || io_read(&v->io, rec, rec_h.rec_len) != 0 ||
@@ -1163,18 +1185,20 @@ int vol_read_range(invfs_volume *v, uint64_t inode_id, uint64_t offset,
         crc_calc = invfs_crc32c(rec, rec_h.rec_len);
         if (crc_calc != crc_stored) { free(rec); return -1; }
 
-        if (invfs_ast_hdr_parse(rec + sizeof(invfs_inode_rec),
-                                rec_h.rec_len - sizeof(invfs_inode_rec),
-                                &ast_h) != 0 ||
-            (size_t)ast_h.num_blocks * sizeof(invfs_ast_block_entry) >
-                rec_h.rec_len - sizeof(invfs_inode_rec) - ast_h.hdr_len) {
-            fprintf(stderr, "[rr] inode %llu: unsupported/corrupt AST recipe "
-                    "header\n", (unsigned long long)inode_id);
-            free(rec);
-            return -1;
+        {
+            size_t base = (size_t)(invfs_rec_cbody((const invfs_inode_rec *)rec)
+                                   - rec);
+            if (invfs_ast_hdr_parse(rec + base, rec_h.rec_len - base,
+                                    &ast_h) != 0 ||
+                (size_t)ast_h.num_blocks * sizeof(invfs_ast_block_entry) >
+                    rec_h.rec_len - base - ast_h.hdr_len) {
+                fprintf(stderr, "[rr] inode %llu: unsupported/corrupt AST recipe "
+                        "header\n", (unsigned long long)inode_id);
+                free(rec);
+                return -1;
+            }
+            ents = (invfs_ast_block_entry *)(rec + base + ast_h.hdr_len);
         }
-        ents = (invfs_ast_block_entry *)(rec + sizeof(invfs_inode_rec) +
-                                         ast_h.hdr_len);
         break;
     }
     if (!rec) { fprintf(stderr,"[rr] record not found id=%llu\n",
@@ -1183,9 +1207,11 @@ int vol_read_range(invfs_volume *v, uint64_t inode_id, uint64_t offset,
         /* the record's own name (rec_h was loop-local): sibling names
          * ("<name>!mbrmap") resolve by it */
         const invfs_inode_rec *rrh = (const invfs_inode_rec *)rec;
+        size_t rpresent = (size_t)rrh->rec_len - INVFS_REC_HDR_LEN - 1;
         size_t rnl = rrh->name_len < INVFS_MAX_NAME
                    ? rrh->name_len : INVFS_MAX_NAME;
         char rname[INVFS_MAX_NAME + 1];
+        if (rnl > rpresent) rnl = rpresent;
         memcpy(rname, rrh->name, rnl);
         rname[rnl] = 0;
         /* WP16b: a seekable containerpack record (the pack's algo + a map

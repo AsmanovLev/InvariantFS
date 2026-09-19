@@ -1639,14 +1639,14 @@ static invfs_volume *vol_open_inner(const char *path, int at_ckpt,
                     scan_ext_end = next_pba * INVFS_BLOCK_SIZE + next_sz;
                     if (at_ckpt && scan_ext_end > scan_end_at_ckpt)
                         scan_ext_end = scan_end_at_ckpt;
-                    if (p + sizeof(invfs_inode_rec) <= scan_ext_end) {
+                    if (p + INVFS_REC_HDR_LEN <= scan_ext_end) {
                         advanced = 1;
                         break;
                     }
                 }
                 if (!advanced) { done = 1; break; }
             }
-            if (p + sizeof(invfs_inode_rec) > scan_ext_end) {
+            if (p + INVFS_REC_HDR_LEN > scan_ext_end) {
                 /* Not enough room for even one more record header in this
                  * extent -- a clean extent has zero bytes before any
                  * record; advance to the next extent. Continue (not
@@ -1667,7 +1667,7 @@ static invfs_volume *vol_open_inner(const char *path, int at_ckpt,
                 p = scan_ext_end;
                 continue;  /* restart loop, advancement will run */
             }
-            if (rec_h.rec_len < sizeof(invfs_inode_rec) ||
+            if (rec_h.rec_len < INVFS_REC_HDR_LEN + 1 ||
                 rec_h.rec_len > INVFS_MAX_REC_LEN ||
                 p + rec_h.rec_len + 4 > scan_ext_end) {
                 v->scan_anomalies++;
@@ -1717,8 +1717,15 @@ static invfs_volume *vol_open_inner(const char *path, int at_ckpt,
                (position-kill), except the kill of a broken replacement's
                predecessor is skipped (torn retire: keep the fallback). */
             {
-                size_t nl = rec_h.name_len < sizeof(rec_h.name)
-                          ? rec_h.name_len : sizeof(rec_h.name) - 1;
+                /* the name lives in the full (CRC-verified) record buffer,
+                 * never in the 36-byte prefix copy rec_h; clamp the on-disk
+                 * name_len to both the field cap and the bytes actually
+                 * present before the body/CRC. */
+                const invfs_inode_rec *rr = (const invfs_inode_rec *)rb;
+                size_t ncap = rec_h.rec_len - INVFS_REC_HDR_LEN - 1;
+                size_t nl = rr->name_len < INVFS_MAX_NAME
+                          ? rr->name_len : INVFS_MAX_NAME;
+                if (nl > ncap) nl = ncap;
                 if (rec_h.magic == INODE_REC_MAGIC) {
                     uint64_t moff[4], mlen[4];
                     unsigned mn = 0;
@@ -1729,14 +1736,14 @@ static invfs_volume *vol_open_inner(const char *path, int at_ckpt,
                     uint64_t miss = rec_pba_miss(rb, rec_h.rec_len,
                                                  v->sb.total_blocks,
                                                  moff, mlen, &mn);
-                    if (scanset_inod(&ss, rec_h.name, nl, rec_h.inode_id, p,
+                    if (scanset_inod(&ss, rr->name, nl, rec_h.inode_id, p,
                                      rec_h.file_size, rec_h.ctime,
                                      miss) != 0) {
                         free(rb); scanset_free(&ss);
                         *err = -6; goto fail;
                     }
                 } else {
-                    scanset_delt(&ss, rec_h.name, nl, rec_h.inode_id,
+                    scanset_delt(&ss, rr->name, nl, rec_h.inode_id,
                                  rec_h.file_size);
                 }
             }
@@ -1862,11 +1869,17 @@ free(rb);
                 uint32_t rl = 0;
                 invfs_ast_hdr ah;
                 const invfs_ast_block_entry *ents;
-                size_t base = sizeof(invfs_inode_rec);
+                size_t base;
                 uint32_t i;
                 if (meta_read_record_by_id(v, ne->inode_id, &rec, &rl,
                                            NULL, 0, NULL) != 0)
                     continue;
+                if (rl < INVFS_REC_HDR_LEN + 1) {
+                    free(rec);
+                    continue;
+                }
+                base = (size_t)(invfs_rec_cbody((const invfs_inode_rec *)rec)
+                                - rec);
                 if (rl < base + INVFS_AST_HDR_V1_LEN ||
                     invfs_ast_hdr_parse(rec + base, rl - base, &ah) != 0 ||
                     rl < base + ah.hdr_len +
@@ -3256,7 +3269,9 @@ uint64_t rec_pba_miss(const uint8_t *rec, uint32_t rec_len,
     uint64_t miss = 0;
 
     *miss_n = 0;
-    off = sizeof(invfs_inode_rec);
+    if (rec_len < INVFS_REC_HDR_LEN + 1)
+        return 1;   /* no room for a name byte */
+    off = (size_t)(invfs_rec_cbody((const invfs_inode_rec *)rec) - rec);
     if (off + INVFS_AST_HDR_V1_LEN > rec_len ||
         invfs_ast_hdr_parse(rec + off, rec_len - off, &ah) != 0)
         return 1;   /* unparseable header: treat as broken */
@@ -3791,15 +3806,17 @@ void pba_ref_apply(invfs_volume *v, const uint8_t *rec, uint32_t rec_len,
 {
     invfs_ast_hdr ah;
     const invfs_inode_rec *rh;
-    size_t base = sizeof(invfs_inode_rec), off;
+    size_t base, off;
     uint32_t i;
     size_t ncount = 0;
 
     if (!v->pba_ref_on || !v->pba_ref) return;
-    if (rec_len < base + INVFS_AST_HDR_V1_LEN) return;
+    if (rec_len < INVFS_REC_HDR_LEN + 1) return;
     rh = (const invfs_inode_rec *)rec;
     if (rh->magic != INODE_REC_MAGIC) return;
     if (rh->name_len && rh->name[0] == 0x01) return;   /* owner: WAL-owned */
+    base = (size_t)(invfs_rec_cbody(rh) - rec);
+    if (rec_len < base + INVFS_AST_HDR_V1_LEN) return;
     if (invfs_ast_hdr_parse(rec + base, rec_len - base, &ah) != 0) return;
     off = base + ah.hdr_len;
     if ((size_t)ah.num_blocks * sizeof(invfs_ast_block_entry) >
@@ -3920,8 +3937,8 @@ uint64_t vol_journal_pos(invfs_volume *v)   { return v->journal_pos; }
 /* Bytes left for new inode records. The area is append-only, so this is what
    stands between the volume and "create silently returns 0": callers that can
    still report an error to the application should check it before accepting
-   data, not after. A record is sizeof(invfs_inode_rec) + the AST recipe, so
-   this is an upper bound on what will fit, not a file count. */
+   data, not after. A record is INVFS_REC_HDR_LEN + the name + the AST recipe,
+   so this is an upper bound on what will fit, not a file count. */
 uint64_t vol_inode_area_free(invfs_volume *v)
 {
     return v->inode_area_pos < v->inode_area_end
@@ -3953,14 +3970,14 @@ static int rec_walk_span(rec_walk_state *w, uint64_t start, uint64_t end)
 {
     invfs_volume *v = w->v;
     uint64_t p = start;
-    while (p + sizeof(invfs_inode_rec) + 4 <= end) {
+    while (p + INVFS_REC_HDR_LEN + 4 <= end) {
         invfs_inode_rec h;
         uint8_t *buf;
         uint32_t stored, calc;
         if (vol_read_raw(v, p, &h, sizeof h) != 0) break;
         if (h.magic != INODE_REC_MAGIC && h.magic != TOMBSTONE_MAGIC)
             break;                                  /* end of this extent */
-        if (h.rec_len < sizeof h || h.rec_len > INVFS_MAX_REC_LEN ||
+        if (h.rec_len < INVFS_REC_HDR_LEN + 1 || h.rec_len > INVFS_MAX_REC_LEN ||
             p + (uint64_t)h.rec_len + 4 > end) {
             if (w->bad_cb) w->bad_cb(w->ctx, p);    /* torn/garbage tail */
             break;
@@ -3973,9 +3990,11 @@ static int rec_walk_span(rec_walk_state *w, uint64_t start, uint64_t end)
         memcpy(&stored, buf + h.rec_len, 4);
         calc = invfs_crc32c(buf, h.rec_len);
         if (calc == stored) {
-            invfs_inode_rec rh;
-            memcpy(&rh, buf, sizeof rh);
-            if (w->cb(w->ctx, p, &rh, buf) != 0) { free(buf); return -1; }
+            /* hand the callback the full record; its variable-length name
+             * lives in buf, not in a 36-byte prefix copy */
+            if (w->cb(w->ctx, p, (const invfs_inode_rec *)buf, buf) != 0) {
+                free(buf); return -1;
+            }
         } else if (w->bad_cb) {
             w->bad_cb(w->ctx, p);
         }
@@ -4076,26 +4095,30 @@ uint64_t vol_inode_next(invfs_volume *v, uint64_t pos, uint32_t *magic_out,
         } else {
             end = v->inode_area_pos;
         }
-        while (pos + sizeof(rec_h) <= end) {
+        while (pos + INVFS_REC_HDR_LEN <= end) {
             if (vol_read_raw(v, pos, &rec_h, sizeof(rec_h)) != 0)
                 break;
             if (rec_h.magic != INODE_REC_MAGIC && rec_h.magic != TOMBSTONE_MAGIC)
                 break;  /* end of valid records in this extent */
-            if (rec_h.rec_len < sizeof(rec_h) || rec_h.rec_len > INVFS_MAX_REC_LEN)
+            if (rec_h.rec_len < INVFS_REC_HDR_LEN + 1 ||
+                rec_h.rec_len > INVFS_MAX_REC_LEN)
                 break;
             if (magic_out)  *magic_out = rec_h.magic;
             if (inode_out)  *inode_out = rec_h.inode_id;
             if (size_out)   *size_out = rec_h.file_size;
             if (rec_len_out) *rec_len_out = rec_h.rec_len;
             if (name_out && name_cap) {
-                /* name_len comes off disk, so clamp against the field it indexes
-                   as well as the caller's buffer: name is the last member of the
-                   record header, and a caller with a buffer bigger than the field
-                   would otherwise let a corrupt length read past it. */
+                /* name_len comes off disk, so clamp against the field it
+                   indexes, the bytes actually present before the body, and the
+                   caller's buffer. The name is at offset INVFS_REC_HDR_LEN in
+                   the on-disk record, not in the 36-byte prefix copy rec_h. */
                 size_t n = rec_h.name_len;
+                size_t present = (size_t)rec_h.rec_len - INVFS_REC_HDR_LEN - 1;
                 if (n > INVFS_MAX_NAME) n = INVFS_MAX_NAME;
+                if (n > present) n = present;
                 if (n > name_cap - 1) n = name_cap - 1;
-                memcpy(name_out, rec_h.name, n);  /* name lives inside rec */
+                if (vol_read_raw(v, pos + INVFS_REC_HDR_LEN, name_out, n) != 0)
+                    n = 0;
                 name_out[n] = 0;
             }
             return pos + rec_h.rec_len + 4;  /* +4: trailing CRC32C */

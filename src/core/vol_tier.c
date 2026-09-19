@@ -169,10 +169,10 @@ static int wp25_owner_write(invfs_volume *v, uint64_t owner,
 {
     invfs_ast_block_entry *ae = NULL;
     uint8_t ah[INVFS_AST_HDR_V2_LEN];
-    size_t ahlen, rec_len, total;
+    size_t ahlen, rec_len, total, nlen, tomb_len;
     uint64_t run = 0, old_pos, new_pos;
     uint8_t *combo;
-    invfs_inode_rec *rh, tomb;
+    invfs_inode_rec *rh;
     uint32_t crc_rec, crc_tomb;
     size_t i;
 
@@ -195,9 +195,12 @@ static int wp25_owner_write(invfs_volume *v, uint64_t owner,
     ahlen = invfs_ast_hdr_write(ah, run, (uint32_t)n, 0);
     if (!ahlen) { free(ae); return -1; }
 
-    rec_len = sizeof(invfs_inode_rec) + ahlen + n * sizeof(*ae);
+    nlen = strlen(name);
+    if (nlen > INVFS_MAX_NAME) nlen = INVFS_MAX_NAME;
+    tomb_len = INVFS_REC_HDR_LEN + nlen + 1;
+    rec_len = INVFS_REC_HDR_LEN + nlen + 1 + ahlen + n * sizeof(*ae);
     old_pos = idx_get_id(v, owner);
-    total = rec_len + 4 + (old_pos ? sizeof(tomb) + 4 : 0);
+    total = rec_len + 4 + (old_pos ? tomb_len + 4 : 0);
     /* WP52: on a mapper volume meta_get_append_pos sizes (or grows) the
      * active extent to hold the whole record+tombstone, so no legacy room
      * pre-check applies. The legacy contiguous area keeps the online churn
@@ -207,7 +210,7 @@ static int wp25_owner_write(invfs_volume *v, uint64_t owner,
         v->inode_area_pos + total > v->inode_area_end) {
         if (inode_area_make_room(v, total) != 0) { free(ae); return -1; }
         old_pos = idx_get_id(v, owner);
-        total = rec_len + 4 + (old_pos ? sizeof(tomb) + 4 : 0);
+        total = rec_len + 4 + (old_pos ? tomb_len + 4 : 0);
     }
     combo = (uint8_t *)calloc(1, total);
     if (!combo) { free(ae); return -1; }
@@ -219,24 +222,25 @@ static int wp25_owner_write(invfs_volume *v, uint64_t owner,
     rh->file_size = run;
     rh->ctime = (uint64_t)time(NULL);
     rec_set_name(rh, name);
-    memcpy(combo + sizeof(invfs_inode_rec), ah, ahlen);
-    if (n)
-        memcpy(combo + sizeof(invfs_inode_rec) + ahlen, ae,
-               n * sizeof(*ae));
+    {
+        uint8_t *body = invfs_rec_body(rh);
+        memcpy(body, ah, ahlen);
+        if (n)
+            memcpy(body + ahlen, ae, n * sizeof(*ae));
+    }
     free(ae);
     crc_rec = invfs_crc32c(combo, rec_len);
     memcpy(combo + rec_len, &crc_rec, 4);
     if (old_pos) {
-        memset(&tomb, 0, sizeof tomb);
-        tomb.magic = TOMBSTONE_MAGIC;
+        invfs_inode_rec *th = (invfs_inode_rec *)(combo + rec_len + 4);
+        th->magic = TOMBSTONE_MAGIC;
         v->hot.tombstones++;
-        tomb.rec_len = (uint32_t)sizeof tomb;
-        tomb.inode_id = owner;
-        tomb.file_size = old_pos;       /* v2 position kill */
-        rec_set_name(&tomb, name);
-        crc_tomb = invfs_crc32c(&tomb, sizeof tomb);
-        memcpy(combo + rec_len + 4, &tomb, sizeof tomb);
-        memcpy(combo + rec_len + 4 + sizeof tomb, &crc_tomb, 4);
+        th->rec_len = (uint32_t)tomb_len;
+        th->inode_id = owner;
+        th->file_size = old_pos;        /* v2 position kill */
+        rec_set_name(th, name);
+        crc_tomb = invfs_crc32c((uint8_t *)th, tomb_len);
+        memcpy(combo + rec_len + 4 + tomb_len, &crc_tomb, 4);
     }
 
     if (vol_mark_dirty(v) != 0) { free(combo); return -1; }
@@ -283,13 +287,14 @@ static void wp25_index_load_one(invfs_volume *v, uint64_t owner,
     uint32_t rl = 0;
     invfs_ast_hdr ah;
     const invfs_ast_block_entry *ents;
-    size_t base = sizeof(invfs_inode_rec);
+    size_t base;
     uint32_t i;
 
     *np = 0;
     if (!owner) return;
     if (meta_read_record_by_id(v, owner, &buf, &rl, NULL, 0, NULL) != 0)
         return;
+    base = (size_t)(invfs_rec_cbody((const invfs_inode_rec *)buf) - buf);
     if (rl < base + INVFS_AST_HDR_V1_LEN ||
         invfs_ast_hdr_parse(buf + base, rl - base, &ah) != 0 ||
         rl < base + ah.hdr_len +
@@ -594,7 +599,8 @@ static int tier_heat_cb(void *ctx_, uint64_t rec_pos,
 {
     tier_heat_ctx *c = (tier_heat_ctx *)ctx_;
     invfs_volume *v = c->v;
-    size_t nl, base = sizeof(invfs_inode_rec), ent0;
+    size_t nl, ent0;
+    size_t base = (size_t)(invfs_rec_cbody((const invfs_inode_rec *)rec) - rec);
     char nm[INVFS_MAX_NAME + 1];
     uint16_t r;
     invfs_ast_hdr ah;
@@ -602,8 +608,11 @@ static int tier_heat_cb(void *ctx_, uint64_t rec_pos,
     uint64_t ip;
 
     if (h->magic != INODE_REC_MAGIC) return 0;   /* tombstones */
+    if (h->name_len > INVFS_MAX_NAME ||
+        h->rec_len < INVFS_REC_HDR_LEN + h->name_len + 1)
+        return 0;
     if (!h->name_len || (uint8_t)h->name[0] == 0x01) return 0;
-    nl = h->name_len < INVFS_MAX_NAME ? h->name_len : INVFS_MAX_NAME;
+    nl = h->name_len;
     memcpy(nm, h->name, nl);
     nm[nl] = 0;
     if (nl && nm[nl - 1] == '/') return 0;       /* directory anchors */
@@ -612,7 +621,8 @@ static int tier_heat_cb(void *ctx_, uint64_t rec_pos,
         return 0;   /* superseded version: not the live record */
     r = heat_file_r(v, h->inode_id);
     if (!r) return 0;
-    if (invfs_ast_hdr_parse(rec + base, h->rec_len - base, &ah) != 0 ||
+    if (h->rec_len < base + INVFS_AST_HDR_V1_LEN ||
+        invfs_ast_hdr_parse(rec + base, h->rec_len - base, &ah) != 0 ||
         h->rec_len < base + ah.hdr_len +
              (size_t)ah.num_blocks * sizeof(invfs_ast_block_entry))
         return 0;

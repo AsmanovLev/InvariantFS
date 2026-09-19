@@ -142,12 +142,14 @@ static void collect_segs(void)
         uint8_t *rb;
         uint32_t rl = 0, k;
         invfs_ast_hdr ah;
-        size_t base = sizeof(invfs_inode_rec);
+        size_t base;
         uint64_t pos0 = le[i].pos;
         /* rec_len comes from the record header at pos0 */
         invfs_inode_rec rh;
         if (vol_read_raw(v, pos0, &rh, sizeof rh) != 0) continue;
         if (vol_find(v, le[i].name) != le[i].id) continue;  /* dead */
+        if (rh.name_len > INVFS_MAX_NAME) continue;
+        base = (size_t)INVFS_REC_HDR_LEN + rh.name_len + 1;
         rl = rh.rec_len;
         if (rl < base + INVFS_AST_HDR_V1_LEN || rl > INVFS_MAX_REC_LEN)
             continue;

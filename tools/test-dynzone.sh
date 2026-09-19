@@ -159,21 +159,24 @@ int main(int argc, char **argv)
             {
                 uint8_t *rb = malloc(rl);
                 invfs_ast_hdr ah;
-                size_t base = sizeof(invfs_inode_rec);
                 uint32_t k;
                 int done = 0;
-                if (rb && vol_read_raw(v, np - rl - 4, rb, rl) == 0 &&
-                    invfs_ast_hdr_parse(rb + base, rl - base, &ah) == 0) {
-                    for (k = 0; k < ah.num_blocks; k++) {
-                        const invfs_ast_block_entry *e =
-                            (const invfs_ast_block_entry *)
-                            (rb + base + ah.hdr_len +
-                             (size_t)k * sizeof(*e));
-                        if (e->length && e->pba >= sb->shadow_zone_start) {
-                            printf("%llu\n", (unsigned long long)e->pba);
-                            free(rb);
-                            vol_close(v);
-                            return 0;
+                if (rb && vol_read_raw(v, np - rl - 4, rb, rl) == 0) {
+                    size_t base = (size_t)(invfs_rec_cbody(
+                                       (const invfs_inode_rec *)rb) - rb);
+                    if (invfs_ast_hdr_parse(rb + base, rl - base, &ah) == 0) {
+                        for (k = 0; k < ah.num_blocks; k++) {
+                            const invfs_ast_block_entry *e =
+                                (const invfs_ast_block_entry *)
+                                (rb + base + ah.hdr_len +
+                                 (size_t)k * sizeof(*e));
+                            if (e->length &&
+                                e->pba >= sb->shadow_zone_start) {
+                                printf("%llu\n", (unsigned long long)e->pba);
+                                free(rb);
+                                vol_close(v);
+                                return 0;
+                            }
                         }
                     }
                 }

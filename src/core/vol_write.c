@@ -401,7 +401,7 @@ static int wsession_load_old(invfs_wsession *s)
     invfs_ast_hdr ah;
     const uint8_t *ext;
     size_t ext_len = 0;
-    size_t base = sizeof(invfs_inode_rec);
+    size_t base;
 
     if (s->loaded) return 0;
     s->loaded = 1;
@@ -409,7 +409,8 @@ static int wsession_load_old(invfs_wsession *s)
     if (meta_read_record_by_id(s->v, s->old_id, &buf, &rl, NULL, 0,
                                NULL) != 0)
         return -1;
-    if (rl < base + INVFS_AST_HDR_V1_LEN ||
+    base = (size_t)(invfs_rec_cbody((const invfs_inode_rec *)buf) - buf);
+    if (base > rl || rl - base < INVFS_AST_HDR_V1_LEN ||
         invfs_ast_hdr_parse(buf + base, rl - base, &ah) != 0) {
         free(buf);
         return -1;
@@ -663,6 +664,7 @@ int vol_write_commit(invfs_wsession *ws)
     size_t rec_size, hdr_len;
     uint8_t *rec;
     invfs_inode_rec *rh;
+    size_t nlen;
     uint8_t ah[INVFS_AST_HDR_V2_LEN];
     uint32_t crc_rec;
     uint64_t now = (uint64_t)time(NULL);
@@ -746,7 +748,8 @@ int vol_write_commit(invfs_wsession *ws)
         }
     }
 
-    rec_size = sizeof(invfs_inode_rec) + hdr_len
+    nlen = strlen(s->name);
+    rec_size = INVFS_REC_HDR_LEN + nlen + 1 + hdr_len
              + (size_t)s->n_ents * sizeof(invfs_ast_block_entry)
              + s->old_ext_len;
     rec = calloc(1, rec_size);
@@ -758,9 +761,9 @@ int vol_write_commit(invfs_wsession *ws)
     rh->file_size = s->logical_size;
     rh->ctime = now;
     rec_set_name(rh, s->name);
-    memcpy(rec + sizeof(invfs_inode_rec), ah, hdr_len);
+    memcpy(invfs_rec_body(rh), ah, hdr_len);
     if (s->n_ents)
-        memcpy(rec + sizeof(invfs_inode_rec) + hdr_len, s->ents,
+        memcpy(invfs_rec_body(rh) + hdr_len, s->ents,
                (size_t)s->n_ents * sizeof(invfs_ast_block_entry));
     if (s->old_ext_len)
         memcpy(rec + rec_size - s->old_ext_len, s->old_ext, s->old_ext_len);
@@ -770,7 +773,7 @@ int vol_write_commit(invfs_wsession *ws)
      * must follow: running out between the two would strand the old version live.
      * When VOLF_META_DYN is set, use the dynamic extent append path. */
     uint64_t total_rec_size = rec_size + 4 +
-        (s->have_old ? 2 * (sizeof(invfs_inode_rec) + 4) : 0);
+        (s->have_old ? 2 * (INVFS_REC_HDR_LEN + nlen + 1 + 4) : 0);
     uint64_t abs_pba, offset;
     int pos_rc = meta_get_append_pos(v, total_rec_size, &abs_pba, &offset);
     if (pos_rc != 0) {

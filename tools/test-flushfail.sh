@@ -255,18 +255,25 @@ static int cmd_f2sabotage(const char *img, uint64_t victim_id)
         iend = (sb.metadata_zone_start + sb.metadata_zone_blocks) *
                (uint64_t)INVFS_BLOCK_SIZE;
         p = iarea;
-        while (p + sizeof(invfs_inode_rec) <= iend) {
+        while (p + INVFS_REC_HDR_LEN <= iend) {
             invfs_inode_rec rh;
             if (fseek(f, (long)p, SEEK_SET) != 0 ||
                 fread(&rh, sizeof rh, 1, f) != 1) die("walk read");
             if (rh.magic != INODE_REC_MAGIC && rh.magic != TOMBSTONE_MAGIC)
                 break;
-            if (rh.rec_len < sizeof rh || rh.rec_len > INVFS_MAX_REC_LEN ||
-                p + rh.rec_len + 4 > iend)
+            if (rh.rec_len < INVFS_REC_HDR_LEN + 1 ||
+                rh.rec_len > INVFS_MAX_REC_LEN || p + rh.rec_len + 4 > iend)
                 break;
             if (rh.magic == INODE_REC_MAGIC && rh.name_len &&
-                strcmp(rh.name, "survivorS.bin") == 0)
-                last_pos = p;
+                rh.name_len <= INVFS_MAX_NAME &&
+                rh.rec_len >= INVFS_REC_HDR_LEN + rh.name_len + 1) {
+                char nm[INVFS_MAX_NAME + 1];
+                if (fseek(f, (long)(p + INVFS_REC_HDR_LEN), SEEK_SET) != 0 ||
+                    fread(nm, rh.name_len, 1, f) != 1) die("name read");
+                nm[rh.name_len] = 0;
+                if (strcmp(nm, "survivorS.bin") == 0)
+                    last_pos = p;
+            }
             p += (uint64_t)rh.rec_len + 4;
         }
         if (!last_pos) die("survivor record not found");
@@ -274,16 +281,18 @@ static int cmd_f2sabotage(const char *img, uint64_t victim_id)
             uint8_t *rb;
             invfs_inode_rec rh;
             invfs_ast_hdr ah;
-            size_t base = sizeof(invfs_inode_rec), ent0;
+            size_t base, ent0;
             uint32_t i, ncrc;
             if (fseek(f, (long)last_pos, SEEK_SET) != 0) die("seek");
             if (fread(&rh, sizeof rh, 1, f) != 1) die("rec head");
-            if (rh.rec_len < sizeof rh || rh.rec_len > INVFS_MAX_REC_LEN)
+            if (rh.rec_len < INVFS_REC_HDR_LEN + 1 ||
+                rh.rec_len > INVFS_MAX_REC_LEN)
                 die("rec_len");
             rb = malloc(rh.rec_len);
             if (!rb) die("oom");
             if (fseek(f, (long)last_pos, SEEK_SET) != 0 ||
                 fread(rb, rh.rec_len, 1, f) != 1) die("rec read");
+            base = (size_t)(invfs_rec_cbody((const invfs_inode_rec *)rb) - rb);
             if (invfs_ast_hdr_parse(rb + base, rh.rec_len - base, &ah) != 0)
                 die("recipe parse");
             ent0 = base + ah.hdr_len;
@@ -391,14 +400,17 @@ static int cmd_f4mkdiv(const char *img)
             {
                 uint8_t *rb = malloc(rl);
                 invfs_ast_hdr ah;
-                size_t base = sizeof(invfs_inode_rec);
-                if (rb && vol_read_raw(v, np - rl - 4, rb, rl) == 0 &&
-                    invfs_ast_hdr_parse(rb + base, rl - base, &ah) == 0 &&
-                    ah.num_blocks >= 1) {
-                    const invfs_ast_block_entry *e =
-                        (const invfs_ast_block_entry *)(rb + base + ah.hdr_len);
-                    if (e->length && e->pba)
-                        pba = e->pba;
+                if (rb && vol_read_raw(v, np - rl - 4, rb, rl) == 0) {
+                    size_t base = (size_t)(invfs_rec_cbody(
+                                       (const invfs_inode_rec *)rb) - rb);
+                    if (invfs_ast_hdr_parse(rb + base, rl - base, &ah) == 0 &&
+                        ah.num_blocks >= 1) {
+                        const invfs_ast_block_entry *e =
+                            (const invfs_ast_block_entry *)
+                            (rb + base + ah.hdr_len);
+                        if (e->length && e->pba)
+                            pba = e->pba;
+                    }
                 }
                 free(rb);
             }

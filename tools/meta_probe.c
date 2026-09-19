@@ -81,7 +81,8 @@ static int heat_dump(invfs_volume *v, const char *name)
     rec_rl = hc.rec_rl;
     if (rec) {
         invfs_ast_hdr ah;
-        size_t base = sizeof(invfs_inode_rec);
+        size_t base =
+            (size_t)(invfs_rec_cbody((const invfs_inode_rec *)rec) - rec);
         /* WP22a: v1/v2 recipe header -- entries follow hdr_len */
         if (rec_rl >= base + INVFS_AST_HDR_V1_LEN &&
             invfs_ast_hdr_parse(rec + base, rec_rl - base, &ah) == 0) {

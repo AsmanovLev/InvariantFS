@@ -140,7 +140,8 @@ int main(int argc, char **argv)
         /* rec_len must at least cover the header. Without the lower bound a
            record claiming 0 advanced p by 4 bytes and the walk crawled the
            whole area at 4 bytes a step. vol_open has the same guard. */
-        if (h.name_len > 256 || h.rec_len < sizeof(invfs_inode_rec) ||
+        if (h.name_len > INVFS_MAX_NAME ||
+            h.rec_len < INVFS_REC_HDR_LEN + h.name_len + 1 ||
             h.rec_len > INVFS_MAX_REC_LEN) break;
         if (vol_read_raw(vol, p + offsetof(invfs_inode_rec, name), name, h.name_len) != 0) break;
         name[h.name_len] = 0;

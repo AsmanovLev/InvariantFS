@@ -234,7 +234,8 @@ int vol_rsz0_apply(invfs_volume *v, const invfs_rsz0 *rz)
             goto out;
         if (rh.magic != INODE_REC_MAGIC && rh.magic != TOMBSTONE_MAGIC)
             goto out;
-        if (rh.rec_len < sizeof(rh) || rh.rec_len > INVFS_MAX_REC_LEN ||
+        if (rh.rec_len < INVFS_REC_HDR_LEN + 1 ||
+            rh.rec_len > INVFS_MAX_REC_LEN ||
             (uint64_t)rh.rec_len + 4 > rz->i_bytes - icons)
             goto out;
         rl = rh.rec_len;

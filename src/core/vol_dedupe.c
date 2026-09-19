@@ -110,11 +110,19 @@ static uint64_t dedup_cur_pba(invfs_volume *v, uint64_t inode, uint64_t lba)
     uint32_t rl = 0;
     uint64_t pba = 0;
     invfs_ast_hdr ah;
-    size_t base = sizeof(invfs_inode_rec), ent0;
+    size_t base, ent0;
     uint32_t j;
 
     if (meta_read_record_by_id(v, inode, &rec, &rl, NULL, 0, NULL) != 0)
         return 0;
+    if (rl < INVFS_REC_HDR_LEN ||
+        ((const invfs_inode_rec *)rec)->name_len > INVFS_MAX_NAME ||
+        rl < INVFS_REC_HDR_LEN +
+             ((const invfs_inode_rec *)rec)->name_len + 1) {
+        free(rec);
+        return 0;
+    }
+    base = (size_t)(invfs_rec_cbody((const invfs_inode_rec *)rec) - rec);
     if (rl >= base + INVFS_AST_HDR_V1_LEN &&
         invfs_ast_hdr_parse(rec + base, rl - base, &ah) == 0 &&
         rl >= base + ah.hdr_len +
@@ -162,14 +170,13 @@ static int dedup_remap_file(invfs_volume *v, uint64_t inode,
                             const merge_ent *ms, size_t nm,
                             uint64_t *freed_out, size_t *applied_out)
 {
-    uint8_t *rec = NULL, *combo = NULL;
+    uint8_t *rec = NULL, *combo = NULL, *tomb = NULL;
     uint32_t rl = 0;
     uint64_t old_pos = 0;
     invfs_ast_hdr ah;
-    size_t base = sizeof(invfs_inode_rec), ent0, total;
+    size_t base, ent0, total, tomb_size;
     uint32_t j;
     size_t m, applied = 0;
-    invfs_inode_rec tomb;
     uint32_t crc_nu, crc_tb;
     int rc = -1;
     int tried_compact = 0;
@@ -184,6 +191,12 @@ retry:
                     "failed\n", (unsigned long long)inode);
         return -1;
     }
+    if (rl < INVFS_REC_HDR_LEN ||
+        ((const invfs_inode_rec *)rec)->name_len > INVFS_MAX_NAME ||
+        rl < INVFS_REC_HDR_LEN +
+             ((const invfs_inode_rec *)rec)->name_len + 1)
+        goto out;
+    base = (size_t)(invfs_rec_cbody((const invfs_inode_rec *)rec) - rec);
     if (rl < base + INVFS_AST_HDR_V1_LEN ||
         invfs_ast_hdr_parse(rec + base, rl - base, &ah) != 0 ||
         rl < base + ah.hdr_len +
@@ -194,7 +207,9 @@ retry:
     /* build the new record version: the old one copied verbatim (name,
      * times, the ext with its heat) with every intent's entry patched
      * onto its winner's pba */
-    total = (size_t)rl + 4 + sizeof(tomb) + 4;
+    tomb_size = INVFS_REC_HDR_LEN +
+                ((const invfs_inode_rec *)rec)->name_len + 1;
+    total = (size_t)rl + 4 + tomb_size + 4;
     combo = (uint8_t *)malloc(total);
     if (!combo) goto out;
     memcpy(combo, rec, rl);
@@ -215,20 +230,22 @@ retry:
 
     crc_nu = invfs_crc32c(combo, rl);
     memcpy(combo + rl, &crc_nu, 4);
-    memset(&tomb, 0, sizeof tomb);
-    tomb.magic = TOMBSTONE_MAGIC;
+    tomb = (uint8_t *)calloc(1, tomb_size);
+    if (!tomb) goto out;
+    ((invfs_inode_rec *)tomb)->magic = TOMBSTONE_MAGIC;
     v->hot.tombstones++;
-    tomb.rec_len = (uint32_t)sizeof tomb;
-    tomb.inode_id = inode;
-    tomb.file_size = old_pos;      /* v2 position kill */
+    ((invfs_inode_rec *)tomb)->rec_len = (uint32_t)tomb_size;
+    ((invfs_inode_rec *)tomb)->inode_id = inode;
+    ((invfs_inode_rec *)tomb)->file_size = old_pos;   /* v2 position kill */
     {
         invfs_inode_rec *oh = (invfs_inode_rec *)rec;
-        tomb.name_len = oh->name_len;
-        memcpy(tomb.name, oh->name, sizeof tomb.name);
+        invfs_inode_rec *th = (invfs_inode_rec *)tomb;
+        th->name_len = oh->name_len;
+        memcpy(th->name, oh->name, oh->name_len);
     }
-    crc_tb = invfs_crc32c((uint8_t *)&tomb, sizeof tomb);
-    memcpy(combo + rl + 4, &tomb, sizeof tomb);
-    memcpy(combo + rl + 4 + sizeof tomb, &crc_tb, 4);
+    crc_tb = invfs_crc32c(tomb, tomb_size);
+    memcpy(combo + rl + 4, tomb, tomb_size);
+    memcpy(combo + rl + 4 + tomb_size, &crc_tb, 4);
 
     /* Room for [new version][CRC][tombstone][CRC]. On a v0.3.0+ mapper
      * volume the "area" is dynamic extents and meta_get_append_pos grows
@@ -243,8 +260,10 @@ retry:
          * are rebuilt fresh) */
         free(combo);
         free(rec);
+        free(tomb);
         rec = NULL;
         combo = NULL;
+        tomb = NULL;
         if (getenv("INVFS_DEBUG"))
             fprintf(stderr, "[dedupe] area full, compacting\n");
         if (!tried_compact && inode_area_make_room(v, total) == 0) {
@@ -309,6 +328,7 @@ retry:
 out:
     free(combo);
     free(rec);
+    free(tomb);
     return rc;
 }
 
@@ -331,14 +351,16 @@ static int dedup_hash_cb(void *ctx_, uint64_t rec_pos,
 
     if (h->magic == TOMBSTONE_MAGIC)
         return 0;
-    if (h->name_len >= sizeof(h->name))
+    if (h->name_len > INVFS_MAX_NAME ||
+        h->rec_len < INVFS_REC_HDR_LEN + h->name_len + 1)
         return 0;
     {
         /* newest-wins + position-kill: only the LIVE record version
          * describes segments that may be remapped */
         uint64_t ip = idx_get_id(v, h->inode_id);
         if (dedup_is_deferred(v, h->inode_id) ||
-            vol_find(v, h->name) != h->inode_id || (ip && ip != rec_pos))
+            vol_find(v, ((const invfs_inode_rec *)rec)->name) != h->inode_id ||
+            (ip && ip != rec_pos))
             return 0;
     }
     /* internal owner records ("\x01tzb", the WP20 "\x01parityN" seal
@@ -346,9 +368,9 @@ static int dedup_hash_cb(void *ctx_, uint64_t rec_pos,
      * parity blocks are NOT framed segments -- hashing them would merge
      * stripes with identical content onto one shared parity block,
      * which a later re-seal write would corrupt for the other sharers */
-    if (h->name_len && (uint8_t)h->name[0] == 0x01)
+    if (h->name_len && (uint8_t)((const invfs_inode_rec *)rec)->name[0] == 0x01)
         return 0;
-    base = sizeof(invfs_inode_rec);
+    base = (size_t)(invfs_rec_cbody((const invfs_inode_rec *)rec) - rec);
     if (h->rec_len < base + INVFS_AST_HDR_V1_LEN ||
         invfs_ast_hdr_parse(rec + base, h->rec_len - base, &ah) != 0) {
         ctx->stop = 1;

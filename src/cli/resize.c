@@ -253,7 +253,8 @@ static int scan_inode_area(blkio *io, uint64_t area_byte, uint64_t area_end,
             goto out;
         if (rh.magic != INODE_REC_MAGIC && rh.magic != TOMBSTONE_MAGIC)
             break;  /* end of records */
-        if (rh.rec_len < sizeof rh || rh.rec_len > INVFS_MAX_REC_LEN ||
+        if (rh.rec_len < INVFS_REC_HDR_LEN + 1 ||
+            rh.rec_len > INVFS_MAX_REC_LEN ||
             p + rh.rec_len + 4 > area_end) {
             (*anomalies_out)++;
             break;  /* corrupted tail -- stop (vol_open's rule) */
@@ -266,23 +267,27 @@ static int scan_inode_area(blkio *io, uint64_t area_byte, uint64_t area_end,
         }
         memcpy(&crc_stored, rb + rh.rec_len, 4);
         crc_calc = invfs_crc32c(rb, rh.rec_len);
-        free(rb);
         if (crc_calc != crc_stored) {
             (*anomalies_out)++;
+            free(rb);
             p += (uint64_t)rh.rec_len + 4;   /* skip, keep scanning */
             continue;
         }
         if (rh.magic == INODE_REC_MAGIC) {
-            char nm[sizeof(rh.name) + 1];
-            size_t nl = rh.name_len < sizeof(rh.name)
-                      ? rh.name_len : sizeof(rh.name);
-            memcpy(nm, rh.name, nl);
+            const invfs_inode_rec *rf = (const invfs_inode_rec *)rb;
+            char nm[INVFS_MAX_NAME + 1];
+            size_t nl = 0;
+            if ((size_t)INVFS_REC_HDR_LEN + rf->name_len + 1 <=
+                (size_t)rh.rec_len)
+                nl = rf->name_len < INVFS_MAX_NAME ? rf->name_len
+                                                   : INVFS_MAX_NAME;
+            memcpy(nm, rf->name, nl);
             nm[nl] = 0;
             if (is_parity_name(nm)) {
                 if (own_n == own_cap) {
                     size_t nc = own_cap ? own_cap * 2 : 16;
                     void *np = realloc(own, nc * sizeof *own);
-                    if (!np) goto out;
+                    if (!np) { free(rb); goto out; }
                     own = (rsz_owner *)np;
                     own_cap = nc;
                 }
@@ -301,6 +306,7 @@ static int scan_inode_area(blkio *io, uint64_t area_byte, uint64_t area_end,
                     i++;
             }
         }
+        free(rb);
         p += (uint64_t)rh.rec_len + 4;
     }
     *used_out = p - area_byte;

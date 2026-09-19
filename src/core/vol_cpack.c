@@ -2374,12 +2374,20 @@ static int cpack_recipe_seg(invfs_volume *v, uint64_t ino,
     uint8_t *rec = NULL;
     uint32_t rl = 0;
     invfs_ast_hdr ah;
-    size_t base = sizeof(invfs_inode_rec);
+    size_t base;
 
     *out = NULL;
     *out_len = 0;
     if (meta_read_record_by_id(v, ino, &rec, &rl, NULL, 0, NULL) != 0)
         return -1;
+    if (rl < INVFS_REC_HDR_LEN ||
+        ((const invfs_inode_rec *)rec)->name_len > INVFS_MAX_NAME ||
+        rl < INVFS_REC_HDR_LEN +
+             ((const invfs_inode_rec *)rec)->name_len + 1) {
+        free(rec);
+        return -1;
+    }
+    base = (size_t)(invfs_rec_cbody((const invfs_inode_rec *)rec) - rec);
     if (rl >= base + INVFS_AST_HDR_V1_LEN &&
         invfs_ast_hdr_parse(rec + base, rl - base, &ah) == 0 &&
         ah.num_blocks >= 1 &&

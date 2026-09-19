@@ -370,7 +370,8 @@ static int sweep_collect_cb(void *ctx_, uint64_t rec_pos,
     /* same corrupt-record guards the legacy loop broke on */
     if (h->magic != INODE_REC_MAGIC && h->magic != TOMBSTONE_MAGIC)
         return 1;
-    if (h->name_len > 256 || h->rec_len < sizeof(*h) ||
+    if (h->name_len > INVFS_MAX_NAME ||
+        h->rec_len < INVFS_REC_HDR_LEN + h->name_len + 1 ||
         h->rec_len > INVFS_MAX_REC_LEN)
         return 1;
     nl = h->name_len;

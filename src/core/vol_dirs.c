@@ -325,14 +325,16 @@ int vol_unlink_name(invfs_volume *v, const char *name)
 {
     uint64_t id, pos = 0;
     uint32_t crc;
-    size_t nl;
-    invfs_inode_rec rec;
+    size_t nl, tomb_size;
+    uint8_t *tbuf;
+    invfs_inode_rec *tomb;
     const name_index_entry *e;
 
     /* H5: allowed under the VOLF_READONLY space latch (tombstone only,
      * blocks stay alive for the surviving names -- see vol_delete_file) */
     if (v->needs_recovery) return -1;
     nl = strlen(name);
+    tomb_size = INVFS_REC_HDR_LEN + nl + 1;
     e = idx_get(v, name, nl);
     if (!e) return -1;
     id = e->inode_id;
@@ -349,33 +351,38 @@ int vol_unlink_name(invfs_volume *v, const char *name)
      * vol_forget_name ghost pattern) */
     if (!pos ||
         pos < v->inode_area_start * INVFS_BLOCK_SIZE ||
-        pos + sizeof(rec) > v->inode_area_pos)
+        pos + INVFS_REC_HDR_LEN > v->inode_area_pos)
         return -1;
-    if (io_seek(&v->io, pos) != 0 || io_read(&v->io, &rec, sizeof(rec)) != 0)
-        return -1;
-    if (rec.magic != INODE_REC_MAGIC || rec.inode_id != id)
-        return -1;
+    {
+        invfs_inode_rec h;
+        if (io_seek(&v->io, pos) != 0 || io_read(&v->io, &h, sizeof h) != 0)
+            return -1;
+        if (h.magic != INODE_REC_MAGIC || h.inode_id != id)
+            return -1;
+    }
     if (vol_mark_dirty(v) != 0)
         return -1;
-    memset(&rec, 0, sizeof(rec));
-    rec.magic = TOMBSTONE_MAGIC;
+    tbuf = (uint8_t *)calloc(1, tomb_size);
+    if (!tbuf) return -1;
+    tomb = (invfs_inode_rec *)tbuf;
+    tomb->magic = TOMBSTONE_MAGIC;
     v->hot.tombstones++;
-    rec.rec_len = (uint32_t)sizeof(rec);
-    rec.inode_id = id;
-    rec.file_size = pos;                    /* v2 position-kill */
-    rec_set_name(&rec, name);
-    crc = invfs_crc32c((const uint8_t *)&rec, sizeof(rec));
+    tomb->rec_len = (uint32_t)tomb_size;
+    tomb->inode_id = id;
+    tomb->file_size = pos;                    /* v2 position-kill */
+    rec_set_name(tomb, name);
+    crc = invfs_crc32c(tbuf, tomb_size);
     /* Bug J: route the tombstone append through the mapper (extents own
      * records past the metadata zone on v0.3.0+ volumes) */
     {
         uint64_t tpos;
-        int rc2 = vol_append_slot(v, (uint64_t)sizeof(rec) + 4, &tpos);
-        if (rc2 != 0) return rc2;
+        int rc2 = vol_append_slot(v, (uint64_t)tomb_size + 4, &tpos);
+        if (rc2 != 0) { free(tbuf); return rc2; }
         if (io_seek(&v->io, tpos) != 0 ||
-            io_write(&v->io, &rec, sizeof(rec)) != 0 ||
-            io_write(&v->io, &crc, 4) != 0)
-            return -1;
+            io_write(&v->io, tbuf, tomb_size) != 0 ||
+            io_write(&v->io, &crc, 4) != 0) { free(tbuf); return -1; }
     }
+    free(tbuf);
     idx_del_at(v, name, nl, pos);
     idx_bump_dirs(v, name, nl, -1);
     return 0;
@@ -422,13 +429,15 @@ static int rename_one(invfs_volume *v, const char *from, const char *to)
 {
     uint64_t old_id, new_id, rec_pos = 0;
     invfs_inode_rec rh, *nh;
-    uint8_t *rec;
+    uint8_t *old = NULL, *nrec;
     uint32_t crc;
     size_t tolen = strlen(to), fromlen = strlen(from);
+    size_t old_base, body, new_rec_len, tomb_size;
     const name_index_entry *ie;
 
-    (void)fromlen;
-    if (tolen >= sizeof(rh.name)) return -1;
+    if (tolen > INVFS_MAX_NAME) return -1;
+    /* the retire tombstone carries the OLD name */
+    tomb_size = INVFS_REC_HDR_LEN + fromlen + 1;
     ie = idx_get(v, from, fromlen);
     if (!ie) return -1;
     old_id = ie->inode_id;
@@ -437,38 +446,53 @@ static int rename_one(invfs_volume *v, const char *from, const char *to)
 
     if (io_seek(&v->io, rec_pos) != 0 ||
         io_read(&v->io, &rh, sizeof rh) != 0) return -1;
-    if (rh.rec_len < sizeof(invfs_inode_rec)) return -1;
+    if (rh.rec_len < INVFS_REC_HDR_LEN + 1 ||
+        rh.name_len > rh.rec_len - INVFS_REC_HDR_LEN - 1) return -1;
 
-    /* room for the copy AND the tombstone that follows it — running out
-       between the two would leave the file reachable under both names.
-       WP27 churn backstop: compact the dead prefix first; the compaction
-       moves every record, so the live position is re-resolved after it. */
-    if (v->inode_area_pos + rh.rec_len + 4 +
-        sizeof(invfs_inode_rec) + 4 > v->inode_area_end) {
-        if (inode_area_make_room(v, rh.rec_len + 4 +
-                sizeof(invfs_inode_rec) + 4) != 0)
-            return -3;   /* inode area full */
-        ie = idx_get(v, from, fromlen);
-        if (!ie) return -1;
-        rec_pos = ie->pos;
-        if (rec_pos == 0) return -1;
-        if (io_seek(&v->io, rec_pos) != 0 ||
-            io_read(&v->io, &rh, sizeof rh) != 0) return -1;
-        if (rh.rec_len < sizeof(invfs_inode_rec)) return -1;
+    /* The copy is rebuilt under the new name, so its size tracks the name
+       delta (old slot name_len+1 -> tolen+1). Room for the copy AND the
+       tombstone that follows it — running out between the two would leave
+       the file reachable under both names. WP27 churn backstop: compact the
+       dead prefix first; the compaction moves every record, so the live
+       position is re-resolved after it. */
+    {
+        size_t new_len = rh.rec_len - (size_t)rh.name_len + tolen;
+        if (v->inode_area_pos + new_len + 4 + tomb_size + 4 >
+            v->inode_area_end) {
+            if (inode_area_make_room(v, new_len + 4 + tomb_size + 4) != 0)
+                return -3;   /* inode area full */
+            ie = idx_get(v, from, fromlen);
+            if (!ie) return -1;
+            rec_pos = ie->pos;
+            if (rec_pos == 0) return -1;
+            if (io_seek(&v->io, rec_pos) != 0 ||
+                io_read(&v->io, &rh, sizeof rh) != 0) return -1;
+            if (rh.rec_len < INVFS_REC_HDR_LEN + 1) return -1;
+        }
     }
 
-    rec = (uint8_t *)malloc(rh.rec_len);
-    if (!rec) return -1;
+    old = (uint8_t *)malloc(rh.rec_len);
+    if (!old) return -1;
     if (io_seek(&v->io, rec_pos) != 0 ||
-        io_read(&v->io, rec, rh.rec_len) != 0) { free(rec); return -1; }
+        io_read(&v->io, old, rh.rec_len) != 0) { free(old); return -1; }
 
+    /* the record is variable-length: rebuild it with the new name while
+     * keeping the AST payload (and INO2 ext) verbatim behind it. */
+    old_base = INVFS_REC_HDR_LEN + rh.name_len + 1;
+    if (old_base > rh.rec_len) { free(old); return -1; }
+    body = rh.rec_len - old_base;
+    new_rec_len = INVFS_REC_HDR_LEN + tolen + 1 + body;
+    nrec = (uint8_t *)calloc(1, new_rec_len);
+    if (!nrec) { free(old); return -1; }
+    memcpy(nrec, old, INVFS_REC_HDR_LEN);
+    nh = (invfs_inode_rec *)nrec;
     new_id = v->next_inode_id++;
-    nh = (invfs_inode_rec *)rec;
     nh->inode_id = new_id;
-    nh->name_len = (uint32_t)tolen;
-    memset(nh->name, 0, sizeof nh->name);
-    memcpy(nh->name, to, tolen);
-    crc = invfs_crc32c(rec, rh.rec_len);
+    rec_set_name(nh, to);
+    memcpy(nrec + INVFS_REC_HDR_LEN + tolen + 1, old + old_base, body);
+    nh->rec_len = (uint32_t)new_rec_len;
+    crc = invfs_crc32c(nrec, new_rec_len);
+    free(old);
 
     /* WP27: the copied record carries the pbas verbatim -- the rename needs
      * no map re-key at all. The blocks' durability is the same as on the
@@ -482,17 +506,17 @@ static int rename_one(invfs_volume *v, const char *from, const char *to)
     {
         uint64_t npos;
         int rc2;
-        if (vol_pre_record(v) != 0) { free(rec); return -1; }
-        rc2 = vol_append_slot(v, (uint64_t)rh.rec_len + 4, &npos);
-        if (rc2 != 0) { free(rec); return rc2; }
+        if (vol_pre_record(v) != 0) { free(nrec); return -1; }
+        rc2 = vol_append_slot(v, (uint64_t)new_rec_len + 4, &npos);
+        if (rc2 != 0) { free(nrec); return rc2; }
         if (io_seek(&v->io, npos) != 0 ||
-            io_write(&v->io, rec, rh.rec_len) != 0 ||
-            io_write(&v->io, &crc, 4) != 0) { free(rec); return -1; }
+            io_write(&v->io, nrec, new_rec_len) != 0 ||
+            io_write(&v->io, &crc, 4) != 0) { free(nrec); return -1; }
         idx_put(v, to, tolen, new_id, npos, nh->file_size, nh->ctime);
         idx_put_id(v, new_id, npos);
     }
-    pba_ref_apply(v, rec, rh.rec_len, +1);
-    free(rec);
+    pba_ref_apply(v, nrec, (uint32_t)new_rec_len, +1);
+    free(nrec);
 
     return vol_delete_inode(v, old_id, from);
 }
@@ -523,7 +547,12 @@ static int rename_collect_cb(void *ctx_, uint64_t rec_pos,
     (void)rec_pos;
     (void)rec;
     if (h->magic != INODE_REC_MAGIC) return 0;   /* tombstones */
-    nl = h->name_len < 256 ? h->name_len : 256;
+    {
+        size_t maxnl = h->rec_len > INVFS_REC_HDR_LEN + 1
+                     ? h->rec_len - INVFS_REC_HDR_LEN - 1 : 0;
+        if (maxnl > INVFS_MAX_NAME) maxnl = INVFS_MAX_NAME;
+        nl = h->name_len < maxnl ? h->name_len : maxnl;
+    }
     memcpy(nm, h->name, nl);
     nm[nl] = 0;
     if (c->dir) {
@@ -691,7 +720,8 @@ int vol_hardlink(invfs_volume *v, const char *from, const char *to)
 
     if (!v || !from || !to || !from[0] || !to[0]) return -1;
     if (v->sb.vol_flags & VOLF_READONLY) return -1;
-    if (strlen(to) >= 256) return -1;
+    nl = strlen(to);
+    if (nl > INVFS_MAX_NAME) return -1;
 
     id = vol_find(v, from);
     if (!id) return -1;                              /* ENOENT */
@@ -725,34 +755,47 @@ int vol_hardlink(invfs_volume *v, const char *from, const char *to)
 
     if (meta_read_record_by_id(v, id, &buf, &rl, NULL, 0, NULL) != 0)
         return -1;
-    if (rl < sizeof(invfs_inode_rec)) { free(buf); return -1; }
+    if (rl < INVFS_REC_HDR_LEN + 1) { free(buf); return -1; }
 
-    /* name[] is a fixed 256-byte field: record size is unchanged */
-    nh = (invfs_inode_rec *)buf;
-    nl = strlen(to);
-    memset(nh->name, 0, sizeof(nh->name));
-    memcpy(nh->name, to, nl);
-    nh->name_len = (uint32_t)nl;
-
-    if (vol_mark_dirty(v) != 0) { free(buf); return -1; }
-    crc = invfs_crc32c(buf, rl);
-    /* Bug J: route the hardlink record append through the mapper */
+    /* the record is variable-length: rebuild it under the new name with the
+     * body (AST + INO2 ext) verbatim behind it. */
     {
-        int rc2 = vol_append_slot(v, (uint64_t)rl + 4, &pos);
-        if (rc2 != 0) { free(buf); return rc2; }
-        if (io_seek(&v->io, pos) != 0 ||
-            io_write(&v->io, buf, rl) != 0 ||
-            io_write(&v->io, &crc, 4) != 0) {
-            free(buf);
-            return -1;
+        const invfs_inode_rec *ob = (const invfs_inode_rec *)buf;
+        size_t old_base = INVFS_REC_HDR_LEN + ob->name_len + 1;
+        size_t body, new_rl;
+        uint8_t *nrec;
+        if (old_base > rl) { free(buf); return -1; }
+        body = rl - old_base;
+        new_rl = INVFS_REC_HDR_LEN + nl + 1 + body;
+        nrec = (uint8_t *)calloc(1, new_rl);
+        if (!nrec) { free(buf); return -1; }
+        memcpy(nrec, buf, INVFS_REC_HDR_LEN);
+        nh = (invfs_inode_rec *)nrec;
+        rec_set_name(nh, to);
+        memcpy(nrec + INVFS_REC_HDR_LEN + nl + 1, buf + old_base, body);
+        nh->rec_len = (uint32_t)new_rl;
+        crc = invfs_crc32c(nrec, new_rl);
+
+        if (vol_mark_dirty(v) != 0) { free(nrec); free(buf); return -1; }
+        /* Bug J: route the hardlink record append through the mapper */
+        {
+            int rc2 = vol_append_slot(v, (uint64_t)new_rl + 4, &pos);
+            if (rc2 != 0) { free(nrec); free(buf); return rc2; }
+            if (io_seek(&v->io, pos) != 0 ||
+                io_write(&v->io, nrec, new_rl) != 0 ||
+                io_write(&v->io, &crc, 4) != 0) {
+                free(nrec); free(buf);
+                return -1;
+            }
         }
+        idx_put(v, nh->name, nl, id, pos, nh->file_size, nh->ctime);
+        idx_put_id(v, id, pos);
+        /* the second name is a live child of its parent directories; without
+         * this bump, unlinking it later drives parent counts negative and
+         * rmdir starts refusing empty dirs ("Directory not empty") */
+        idx_bump_dirs(v, to, nl, +1);
+        free(nrec);
     }
-    idx_put(v, nh->name, nl, id, pos, nh->file_size, nh->ctime);
-    idx_put_id(v, id, pos);
-    /* the second name is a live child of its parent directories; without
-     * this bump, unlinking it later drives parent counts negative and
-     * rmdir starts refusing empty dirs ("Directory not empty") */
-    idx_bump_dirs(v, to, nl, +1);
     free(buf);
     return 0;
 }

@@ -622,7 +622,8 @@ static int cvt_one(cvt *c, uint64_t rec_pos)
     invfs_inode_rec rh;
     uint32_t crc_stored;
     invfs_ast_hdr ah;
-    size_t base = sizeof(invfs_inode_rec), ent0, choff, off;
+    size_t base, ent0, choff, off;
+    const char *rname;
     size_t ext_len = 0;
     const uint8_t *ext = NULL;
     uint8_t *newrec = NULL, *newext = NULL;
@@ -635,7 +636,8 @@ static int cvt_one(cvt *c, uint64_t rec_pos)
 
     if (cv_pread(c->cv, rec_pos, &rh, sizeof rh) != 0)
         return -1;
-    if (rh.rec_len < sizeof rh || rh.rec_len > INVFS_MAX_REC_LEN)
+    if (rh.rec_len < INVFS_REC_HDR_LEN + 1 ||
+        rh.rec_len > INVFS_MAX_REC_LEN)
         return -1;
     rec = (uint8_t *)malloc(rh.rec_len);
     if (!rec) return -1;
@@ -644,6 +646,11 @@ static int cvt_one(cvt *c, uint64_t rec_pos)
         goto out;
     if (invfs_crc32c(rec, rh.rec_len) != crc_stored)
         goto out;   /* torn record: the live set never names it */
+    if (rh.rec_len < INVFS_REC_HDR_LEN ||
+        ((const invfs_inode_rec *)rec)->name_len > INVFS_MAX_NAME)
+        goto out;
+    base = (size_t)(invfs_rec_cbody((const invfs_inode_rec *)rec) - rec);
+    rname = ((const invfs_inode_rec *)rec)->name;
     if (rh.rec_len < base + INVFS_AST_HDR_V1_LEN ||
         invfs_ast_hdr_parse(rec + base, rh.rec_len - base, &ah) != 0)
         goto out;
@@ -672,8 +679,8 @@ static int cvt_one(cvt *c, uint64_t rec_pos)
         }
     }
 
-    is_owner = rh.name_len && rh.name[0] == 0x01;
-    is_dir = rh.name_len && rh.name[rh.name_len - 1] == '/';
+    is_owner = rh.name_len && rname[0] == 0x01;
+    is_dir = rh.name_len && rname[rh.name_len - 1] == '/';
 
     /* the converted entries + the per-file heat fold */
     new_len = base + ah.hdr_len +
@@ -712,16 +719,16 @@ static int cvt_one(cvt *c, uint64_t rec_pos)
             fprintf(stderr, "invf-migrate-v2: %.64s: segment %u has no "
                     "journal mapping (the v1 SPoF case) -- refusing to "
                     "convert; review with the OLD build's invf-fsck "
-                    "first\n", rh.name, e1->block_id);
+                    "first\n", rname, e1->block_id);
             c->missing++;
             continue;
         }
-        xrc = cvt_extent(c->cv, rh.name, jm->pba, jm->len, &plen);
+        xrc = cvt_extent(c->cv, rname, jm->pba, jm->len, &plen);
         if (xrc == -2) { rc = -2; goto out; }
         if (xrc != 0 || !plen || plen > c->total_blocks - jm->pba) {
             fprintf(stderr, "invf-migrate-v2: %.64s: segment %u at pba "
                     "%llu: extent underivable -- refusing to convert\n",
-                    rh.name, e1->block_id, (unsigned long long)jm->pba);
+                    rname, e1->block_id, (unsigned long long)jm->pba);
             c->missing++;
             continue;
         }
@@ -1121,7 +1128,8 @@ int main(int argc, char **argv)
             if (rh.magic != INODE_REC_MAGIC &&
                 rh.magic != TOMBSTONE_MAGIC)
                 break;
-            if (rh.rec_len < sizeof rh || rh.rec_len > INVFS_MAX_REC_LEN ||
+            if (rh.rec_len < INVFS_REC_HDR_LEN + 1 ||
+                rh.rec_len > INVFS_MAX_REC_LEN ||
                 p + rh.rec_len + 4 > iarea_end)
                 break;
             rb = (uint8_t *)malloc((size_t)rh.rec_len + 4);
@@ -1133,21 +1141,27 @@ int main(int argc, char **argv)
             memcpy(&crc_stored, rb + rh.rec_len, 4);
             crc_calc = invfs_crc32c(rb, rh.rec_len);
             good = crc_calc == crc_stored;
-            free(rb);
             if (good) {
-                nl = rh.name_len < sizeof rh.name ?
-                     rh.name_len : sizeof rh.name;
+                const invfs_inode_rec *rf = (const invfs_inode_rec *)rb;
+                nl = 0;
+                if ((size_t)INVFS_REC_HDR_LEN + rf->name_len + 1 <=
+                    (size_t)rh.rec_len)
+                    nl = rf->name_len < INVFS_MAX_NAME ? rf->name_len
+                                                       : INVFS_MAX_NAME;
                 if (nl) {
                     if (rh.magic == INODE_REC_MAGIC) {
-                        if (v1_inod(&live, rh.name, (uint32_t)nl,
-                                    rh.inode_id, p) != 0)
+                        if (v1_inod(&live, rf->name, (uint32_t)nl,
+                                    rh.inode_id, p) != 0) {
+                            free(rb);
                             goto fail;
+                        }
                     } else {
-                        v1_delt(&live, rh.name, (uint32_t)nl,
+                        v1_delt(&live, rf->name, (uint32_t)nl,
                                 rh.inode_id, rh.file_size);
                     }
                 }
             }
+            free(rb);
             p += (uint64_t)rh.rec_len + 4;
         }
     }
@@ -1177,15 +1191,24 @@ int main(int argc, char **argv)
             if (rh.magic != INODE_REC_MAGIC &&
                 rh.magic != TOMBSTONE_MAGIC)
                 break;
-            if (rh.rec_len < sizeof rh || rh.rec_len > INVFS_MAX_REC_LEN ||
+            if (rh.rec_len < INVFS_REC_HDR_LEN + 1 ||
+                rh.rec_len > INVFS_MAX_REC_LEN ||
                 p + rh.rec_len + 4 > iarea_end)
                 break;
             if (rh.magic == INODE_REC_MAGIC && rh.name_len) {
-                nl = rh.name_len < sizeof rh.name ?
-                     rh.name_len : sizeof rh.name;
-                if (v1_is_live(&live, rh.name, (uint32_t)nl, p) &&
-                    cvt_one(&c, p) != 0)
-                    goto fail;
+                char nm[INVFS_MAX_NAME + 1];
+                nl = rh.name_len < INVFS_MAX_NAME ? rh.name_len
+                                                  : INVFS_MAX_NAME;
+                if ((size_t)INVFS_REC_HDR_LEN + nl > (size_t)rh.rec_len)
+                    nl = 0;
+                if (nl) {
+                    if (cv_pread(&cv, p + INVFS_REC_HDR_LEN, nm, nl) != 0)
+                        goto fail;
+                    nm[nl] = 0;
+                    if (v1_is_live(&live, nm, (uint32_t)nl, p) &&
+                        cvt_one(&c, p) != 0)
+                        goto fail;
+                }
             }
             p += (uint64_t)rh.rec_len + 4;
         }

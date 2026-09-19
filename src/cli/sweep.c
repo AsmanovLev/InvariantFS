@@ -185,6 +185,7 @@ static int sweep_dedupe(invfs_volume *vol, uint64_t p, uint64_t inode_area_end)
         invfs_inode_rec h;
         uint8_t *rec = NULL;
         uint32_t num_blocks = 0, rec_size, ast_hdr_len = 0;
+        size_t base;
         uint64_t i;
         if (vol_read_raw(vol, p, &h, sizeof(h)) != 0) break;
         if (dbg)
@@ -194,19 +195,24 @@ static int sweep_dedupe(invfs_volume *vol, uint64_t p, uint64_t inode_area_end)
             if (h.magic == 0x544C4544u) { p += (uint64_t)h.rec_len + 4; continue; }
             break;
         }
-        if (h.name_len >= sizeof(h.name)) { p += (uint64_t)h.rec_len + 4; continue; }
-        if (vol_find(vol, h.name) != h.inode_id) { p += (uint64_t)h.rec_len + 4; continue; }
+        if (h.name_len > INVFS_MAX_NAME) { p += (uint64_t)h.rec_len + 4; continue; }
+        if (h.rec_len < INVFS_REC_HDR_LEN + h.name_len + 1 ||
+            h.rec_len > INVFS_MAX_REC_LEN) { p += (uint64_t)h.rec_len + 4; continue; }
 
         rec = (uint8_t *)malloc(h.rec_len);
         if (!rec) { free(segs); return -1; }
         if (vol_read_raw(vol, p, rec, h.rec_len) != 0) { free(rec); free(segs); return -1; }
+        base = (size_t)(invfs_rec_body((invfs_inode_rec *)rec) - rec);
+        if (vol_find(vol, ((invfs_inode_rec *)rec)->name) != h.inode_id) {
+            free(rec);
+            p += (uint64_t)h.rec_len + 4;
+            continue;
+        }
         /* WP22a: the recipe header is v1 (16 B) or v2 (24 B) -- parse it,
          * never pun fixed offsets */
         {
             invfs_ast_hdr ah;
-            if (invfs_ast_hdr_parse(rec + sizeof(invfs_inode_rec),
-                                    h.rec_len - sizeof(invfs_inode_rec),
-                                    &ah) != 0) {
+            if (invfs_ast_hdr_parse(rec + base, h.rec_len - base, &ah) != 0) {
                 free(rec);
                 p += (uint64_t)h.rec_len + 4;
                 continue;
@@ -214,7 +220,7 @@ static int sweep_dedupe(invfs_volume *vol, uint64_t p, uint64_t inode_area_end)
             num_blocks = ah.num_blocks;
             ast_hdr_len = ah.hdr_len;
         }
-        rec_size = (uint32_t)sizeof(invfs_inode_rec) + ast_hdr_len +
+        rec_size = (uint32_t)base + ast_hdr_len +
                    (uint32_t)num_blocks * 24;
         if (rec_size > h.rec_len) {   /* truncated recipe: not ours */
             free(rec);
@@ -223,7 +229,7 @@ static int sweep_dedupe(invfs_volume *vol, uint64_t p, uint64_t inode_area_end)
         }
         for (i = 0; i < num_blocks; i++) {
             uint32_t *e = (uint32_t *)((uint8_t *)rec +
-                          sizeof(invfs_inode_rec) + ast_hdr_len + i * 24);
+                          base + ast_hdr_len + i * 24);
             uint64_t pba, len;
             uint8_t *blob;
             uint32_t hdr4;
@@ -376,6 +382,7 @@ static void sweep_survey(invfs_volume *vol, uint64_t p, uint64_t end,
 
     while (p + sizeof(invfs_inode_rec) <= end) {
         invfs_inode_rec h;
+        char name[INVFS_MAX_NAME + 1];
         if (scan_read(&r, p, &h, sizeof(h)) != 0) break;
         if (p >= next_tick && span) {
             printf("\r       scanned %3llu%%",
@@ -387,13 +394,18 @@ static void sweep_survey(invfs_volume *vol, uint64_t p, uint64_t end,
             if (h.magic == TOMBSTONE_MAGIC) { p += (uint64_t)h.rec_len + 4; continue; }
             break;
         }
-        if (h.name_len >= sizeof(h.name)) { p += (uint64_t)h.rec_len + 4; continue; }
-        h.name[h.name_len] = 0;
-        if (!want_dirs && is_dir_anchor(h.name, h.name_len)) {
+        if (h.name_len > INVFS_MAX_NAME) { p += (uint64_t)h.rec_len + 4; continue; }
+        if (h.rec_len < INVFS_REC_HDR_LEN + h.name_len + 1) {
             p += (uint64_t)h.rec_len + 4;
             continue;
         }
-        if (vol_find(vol, h.name) == h.inode_id) {
+        if (scan_read(&r, p + INVFS_REC_HDR_LEN, name, h.name_len) != 0) break;
+        name[h.name_len] = 0;
+        if (!want_dirs && is_dir_anchor(name, h.name_len)) {
+            p += (uint64_t)h.rec_len + 4;
+            continue;
+        }
+        if (vol_find(vol, name) == h.inode_id) {
             files++;
             bytes += h.file_size;
             /* Stop where the main loop will stop, or --limit 2 counts two
@@ -525,6 +537,7 @@ int main(int argc, char **argv)
 
     while (p + sizeof(invfs_inode_rec) <= inode_area_end) {
         invfs_inode_rec h;
+        char name[INVFS_MAX_NAME + 1];
         int rc;
         double t0, dt;
         uint64_t before, after;
@@ -539,19 +552,24 @@ int main(int argc, char **argv)
             break;
         }
         /* ensure name is NUL-terminated and safe for strlen/strcmp */
-        if (h.name_len >= sizeof(h.name)) {
+        if (h.name_len > INVFS_MAX_NAME) {
             p += (uint64_t)h.rec_len + 4;
             continue;
         }
-        h.name[h.name_len] = 0;
+        if (h.rec_len < INVFS_REC_HDR_LEN + h.name_len + 1) {
+            p += (uint64_t)h.rec_len + 4;
+            continue;
+        }
+        if (vol_read_raw(vol, p + INVFS_REC_HDR_LEN, name, h.name_len) != 0) break;
+        name[h.name_len] = 0;
         /* Directory anchors carry no data; the survey already left them out
            of the denominator, so processing them here would print "[412/410]". */
-        if (!want_dirs && is_dir_anchor(h.name, h.name_len)) {
+        if (!want_dirs && is_dir_anchor(name, h.name_len)) {
             p += (uint64_t)h.rec_len + 4;
             continue;
         }
         /* only process the latest version of a name (idempotent sweep) */
-        if (vol_find(vol, h.name) != h.inode_id) {
+        if (vol_find(vol, name) != h.inode_id) {
             p += (uint64_t)h.rec_len + 4;
             continue;
         }
@@ -562,13 +580,13 @@ int main(int argc, char **argv)
            a 50 MB FLAC takes tens of seconds, and a progress display that
            only prints on completion looks identical to a hang. */
         printf("[%3d/%3d] %s  %s\n", seen, total_files,
-               human(h.file_size), shortname(h.name, nb, sizeof nb));
+               human(h.file_size), shortname(name, nb, sizeof nb));
 
         before = vol_free_blocks_cached(vol);
         t0 = now_ms();
         /* unified per-inode core: ZIP explode / FLAC / TAR / GZ / PNG /
            generic shadow move (vol_sweep_one) */
-        rc = vol_sweep_one(vol, h.inode_id, h.name);
+        rc = vol_sweep_one(vol, h.inode_id, name);
         dt = now_ms() - t0;
         after = vol_free_blocks_cached(vol);
         delta = (int64_t)after - (int64_t)before;   /* + means space reclaimed */
