@@ -30,9 +30,34 @@ write access to the trusted helper directories.
 
 Pack children (codecpack helpers invoked via `invfs_codec_pack_exec`,
 `invfs_codec_pack_cmd`, and `invfs_codec_pack_estimate`) are **not**
-affected by this change. They continue to use `execvp` with `PATH` fallback
-and are protected by the Landlock sandbox whitelist that restricts which
-directories their children can access.
+affected by this change. A bare manifest tool name is resolved in the
+daemon (INVFS_TOOLS -> `/usr/lib/invfs/tools` -> `$PATH`) before the child
+is spawned, so the strict/minimal child environment (WP61) does not change
+which helper runs.
+
+### Helper child containment (WP61)
+
+Every helper child — codecpack helpers *and* the builtin transcode lanes
+(cjxl/djxl, ffmpeg, MAC, packMP3) — is launched through one shared
+implementation, `invfs_helper_exec()` in `src/core/helper_exec.c`. The
+WP12d Landlock whitelist is unchanged and additive to the controls below:
+
+| Control | Behaviour | Knob |
+|---------|-----------|------|
+| **Privilege drop** | When the daemon runs as root the child `setuid`s to a dedicated uid/gid (`nobody` by default; the scratch tree is chowned first so the helper can still work) | `INVFS_HELPER_UID`, `INVFS_HELPER_GID` |
+| **Network isolation** | The child creates a `CLONE_NEWNET` namespace; unprivileged launches bootstrap a mapped user namespace first. Netlink/loopback only — no route to the host or the Internet | (none) |
+| **Resource caps** | `RLIMIT_CPU` (deadline + slack), `RLIMIT_AS` (the pack's `dec_mem`, as before), `RLIMIT_NOFILE`, `RLIMIT_NPROC`, `RLIMIT_FSIZE` | `INVFS_HELPER_NOFILE`, `INVFS_HELPER_NPROC`, `INVFS_HELPER_FSIZE_MB` |
+| **Deadline** | A wall-clock timeout `SIGKILL`s the child's whole process group (grandchildren included) | `INVFS_HELPER_TIMEOUT_MS` (default 120000) |
+| **Environment scrub** | The child environment is rebuilt: minimal `PATH` (`/usr/local/bin:/usr/bin:/bin`), sandbox `TMPDIR`, `LANG`/`LC_*`; `LD_*`, `HOME` and tokens are dropped. Named variables can be passed through explicitly | `INVFS_HELPER_PATH`, `INVFS_HELPER_KEEPENV` |
+
+`INVFS_HELPER_KEEPENV` is a comma/space list of variables copied into the
+child (never `LD_*`). It exists for legitimate tool overrides such as the
+p7z pack's `P7Z_7ZZ`; leave it unset in production unless a pack needs it.
+
+If the namespace operations are unavailable (an old kernel or a locked-down
+container), the launcher degrades to the other controls and Landlock; it
+never falls back to an unrestricted child. The controls are covered by the
+`invf-helper_exec_test` unit binary and `tools/test-helper-isolation.sh`.
 
 ### Windows behaviour (future work — NOT YET HARDENED)
 
@@ -59,6 +84,13 @@ a deferred fix — the Windows build is not the primary target of WP33.
 | `INVFS_TOOLS` | Primary helper directory | (unset) |
 | `INVFS_REQUIRE_HELPER_PATH` | Strict mode for builtin lanes | 1 for root, 0 for non-root |
 | `INVFS_PACK_SANDBOX` | Landlock sandbox for pack children (0=off, unset=auto) | auto |
+| `INVFS_HELPER_UID` / `INVFS_HELPER_GID` | uid/gid the helper drops to when the daemon is root | `nobody` |
+| `INVFS_HELPER_TIMEOUT_MS` | Wall-clock deadline, then SIGKILL the process group | 120000 |
+| `INVFS_HELPER_NPROC` | `RLIMIT_NPROC` for the helper | 256 |
+| `INVFS_HELPER_NOFILE` | `RLIMIT_NOFILE` for the helper | 1024 |
+| `INVFS_HELPER_FSIZE_MB` | `RLIMIT_FSIZE` (MiB per file) | 8192 |
+| `INVFS_HELPER_PATH` | Overrides the child's minimal `PATH` | system path |
+| `INVFS_HELPER_KEEPENV` | Comma/space list of parent vars copied into the child (never `LD_*`) | (unset) |
 
 ## Other security considerations
 

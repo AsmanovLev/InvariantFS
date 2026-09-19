@@ -59,7 +59,7 @@ rm -f "$IMG_A" "$IMG_B" "$IMG_C" "$IMG_D" "$IMG_E"
 fail() { echo "FAIL: $*" >&2; exit 1; }
 
 # ---- the engine harness ------------------------------------------------
-CORE="volume vol_cpack vol_png vol_seal vol_repair vol_rollback \
+CORE="volume vol_cpack helper_exec vol_png vol_seal vol_repair vol_rollback \
       vol_resize vol_fsck vol_crash vol_exer vol_dedupe vol_textzone \
       vol_heat vol_sweep vol_read vol_write vol_records vol_ast \
       vol_dirs arc crc32c lz4 flacx tarx pngx blkio miniz blake3 \

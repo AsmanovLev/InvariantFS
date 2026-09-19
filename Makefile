@@ -27,7 +27,7 @@ LDLIBS  := -Wl,-l:libzstd.so.1 -lz -lpthread
 FUSE_CFLAGS := $(shell pkg-config --cflags fuse3)
 FUSE_LIBS   := $(shell pkg-config --libs fuse3)
 
-CORE    := volume vol_cpack vol_png vol_seal vol_repair vol_rollback \
+CORE    := volume vol_cpack helper_exec vol_png vol_seal vol_repair vol_rollback \
            vol_resize vol_fsck vol_crash vol_exer vol_dedupe vol_textzone \
            vol_heat vol_sweep vol_read vol_write vol_records vol_ast \
            vol_dirs vol_tier vol_meta_merge \
@@ -98,11 +98,16 @@ $(OBJ)/meta_probe.o: tools/meta_probe.c | $(OBJ)
 	$(CC) $(CFLAGS) -c -o $@ $<
 
 clean:
-	rm -rf $(OBJ) $(TOOLS:%=$(OUT)/%) $(OUT)/invf-codec_test $(OUT)/invf-fuzz
+	rm -rf $(OBJ) $(TOOLS:%=$(OUT)/%) $(OUT)/invf-codec_test \
+	       $(OUT)/invf-helper_exec_test $(OUT)/invf-fuzz
 
 # ---- tests ---------------------------------------------------------------
 # unit tier: fast, no I/O images
 $(OUT)/invf-codec_test: $(OBJ)/codec_test.o $(OBJ)/codec.o $(OBJ)/ppmd8.o $(OBJ)/ppmd8enc.o $(OBJ)/ppmd8dec.o $(OBJ)/ppmd_codec.o $(OBJ)/lz4.o $(OBJ)/bcj_x86.o
+	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
+
+# WP61: unit coverage for the shared helper containment launcher.
+$(OUT)/invf-helper_exec_test: $(OBJ)/helper_exec_test.o $(OBJ)/helper_exec.o
 	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
 
 # fuzz tier: on-demand property/fuzz harness for the pure/parsing layers.
@@ -119,10 +124,12 @@ fuzz: $(OUT)/invf-fuzz
 fuzz-ci: $(OUT)/invf-fuzz
 	$(OUT)/invf-fuzz 10000 0x1CF51EE5
 
-test: $(OUT)/invf-arctest $(OUT)/invf-blkio_test $(OUT)/invf-codec_test
+test: $(OUT)/invf-arctest $(OUT)/invf-blkio_test $(OUT)/invf-codec_test \
+      $(OUT)/invf-helper_exec_test
 	$(OUT)/invf-arctest
 	$(OUT)/invf-blkio_test
 	$(OUT)/invf-codec_test
+	$(OUT)/invf-helper_exec_test
 
 # e2e tier: tmpfs images under /dev/shm; test-jxl needs cjxl/djxl installed
 e2e: all
@@ -138,6 +145,7 @@ e2e: all
 	bash tools/run-e2e.sh tools/test-exercarve.sh
 	bash tools/run-e2e.sh tools/test-containerpack.sh
 	bash tools/run-e2e.sh tools/test-sandbox.sh
+	bash tools/run-e2e.sh tools/test-helper-isolation.sh
 	bash tools/run-e2e.sh tools/test-rawdisk.sh
 	bash tools/run-e2e.sh tools/test-ext4fs.sh
 	bash tools/run-e2e.sh tools/test-fatfs.sh

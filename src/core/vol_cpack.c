@@ -7,27 +7,11 @@
 #define _GNU_SOURCE
 #endif
 #include "volume_internal.h"
+#include "helper_exec.h"
 
-/* WP12d completion: the pack-child fs sandbox needs prctl() on every
- * Linux (the degrade path) and the Landlock UAPI when the build host's
- * kernel headers carry it (a runtime probe decides whether it is actually
- * enforced — an old kernel at run time gets the degrade path). */
-#if defined(__linux__)
-#  include <sys/prctl.h>
-#  include <sys/syscall.h>
-#  if defined(__has_include)
-#    if __has_include(<linux/landlock.h>)
-#      include <linux/landlock.h>
-#      if defined(SYS_landlock_create_ruleset) && \
-          defined(SYS_landlock_add_rule) && defined(SYS_landlock_restrict_self)
-#        define INVFS_HAVE_LANDLOCK 1
-#      endif
-#    endif
-#  endif
-#endif
+/* WP61: the pack-child containment (Landlock + namespaces + rlimits +
+ * timeout + privdrop + env scrub) lives in src/core/helper_exec.c. */
 
-
-/*
 /*
  * JXL helpers: transcode JPEG -> JXL (lossless) and back via subprocesses.
  * Returns 0 on success. Out buffers are malloc'd.
@@ -49,10 +33,15 @@ static int slurp_file(const char *path, uint8_t **out, size_t *out_len);
 
 
 /* Tool search order: $INVFS_TOOLS/<name> -> /usr/lib/invfs/tools/<name> ->
- * the bare name (execvp's PATH search). No other absolute paths. */
+ * the daemon's $PATH (resolved to an absolute path). WP61 resolves the PATH
+ * hit in the parent so the child does not need an inherited PATH at all —
+ * its environment is scrubbed to the minimal system path before exec. An
+ * unresolved name stays bare (execvp then reports the failure). No other
+ * absolute paths. */
 static const char *tool_resolve(const char *name, char *buf, size_t cap)
 {
     const char *dir = getenv("INVFS_TOOLS");
+    const char *path;
     int n;
 
     if (dir && *dir) {
@@ -63,6 +52,25 @@ static const char *tool_resolve(const char *name, char *buf, size_t cap)
     n = snprintf(buf, cap, "/usr/lib/invfs/tools/%s", name);
     if (n > 0 && (size_t)n < cap && access(buf, X_OK) == 0)
         return buf;
+    path = getenv("PATH");
+    if (path && *path) {
+        const char *p = path;
+        for (;;) {
+            const char *c = strchr(p, ':');
+            size_t dl = c ? (size_t)(c - p) : strlen(p);
+            size_t nl = strlen(name);
+            if (!dl) { p = "."; dl = 1; }
+            if (dl + 1 + nl + 1 <= cap) {
+                memcpy(buf, p, dl);
+                buf[dl] = '/';
+                memcpy(buf + dl + 1, name, nl + 1);
+                if (access(buf, X_OK) == 0)
+                    return buf;
+            }
+            if (!c) break;
+            p = c + 1;
+        }
+    }
     return name;
 }
 
@@ -110,17 +118,6 @@ static const char *tool_resolve_strict(const char *name, char *buf,
 }
 
 
-static uint64_t tool_now_ms(void)
-{
-    struct timespec ts;
-    clock_gettime(CLOCK_MONOTONIC, &ts);
-    return (uint64_t)ts.tv_sec * 1000 + (uint64_t)ts.tv_nsec / 1000000;
-}
-
-
-#define TOOL_TIMEOUT_MS (120ull * 1000ull)
-
-
 /* WP12(d): every tool child runs under an RLIMIT_AS address-space ceiling,
  * set between fork and execvp. WP10 §10: "RLIMIT_AS=dec_mem_limit gives
  * real runtime memory enforcement (exceed -> killed -> guard -> generic
@@ -150,101 +147,9 @@ static uint64_t tool_mem_cap_for(const invfs_codec *c)
 }
 
 
-static void tool_child_memlimit(uint64_t mem_cap)
-{
-    struct rlimit rl;
-    if (!mem_cap) return;
-    rl.rlim_cur = (rlim_t)mem_cap;
-    rl.rlim_max = (rlim_t)mem_cap;
-    setrlimit(RLIMIT_AS, &rl);
-}
-
-
-/* ---- WP12d completion: Landlock sandbox for codecpack children ----
- *
- * Every codecpack exec (encode/decode via invfs_codec_pack_exec, the five
- * container commands via invfs_codec_pack_cmd, the estimate hook via
- * invfs_codec_pack_estimate) runs its helper under a per-exec Landlock
- * ruleset, applied between fork and execvp:
- *
- *   RO + EXEC:  the pack dir itself, the runtime trees (/usr/lib,
- *               /usr/lib64, /lib, /lib64 for the loader and shared libs;
- *               /usr/bin, /bin, /usr/local/bin for the interpreter/tools),
- *               $INVFS_TOOLS when set, the resolved argv[0], and every
- *               realpath'd argv token (a fixture pack may symlink its
- *               helper script — Landlock checks the RESOLVED path);
- *   RO file:    /etc/ld.so.cache, /etc/localtime, the input (or rebuild
- *               recipe) path;
- *   RW file:    /dev/null (stdio plumbing);
- *   RW subtree: the mkdtemp scratch dir (the {out} file's parent — tools
- *               may create temp siblings or rename over the output;
- *               TMPDIR is pointed there too so tempfile.mkdtemp() & co
- *               stay inside the whitelist). The estimate command has no
- *               {out}: its scratch is the input file's parent (always a
- *               fresh mkdtemp dir at the call sites), so a whitelisted
- *               grandchild (a requires= tool, e.g. p7z's 7zz) still gets a
- *               TMPDIR it can stage temp files in;
- *   everything else denied (all FS rights the running ABI knows are
- *   handled; network rights are out of scope for this layer).
- *
- * The ruleset is a whitelist by construction, so a refused path fails
- * with EACCES, the pack command fails, and the sweep/read guard falls
- * back exactly like any other tool failure (never an FS error).
- *
- * Degrade ladder (per process, probed once — see pack_sandbox_mode):
- *   INVFS_PACK_SANDBOX=0  -> sandbox off entirely (escape hatch);
- *   Landlock absent       -> prctl(PR_SET_NO_NEW_PRIVS) + RLIMIT_AS only,
- *                            logged once under INVFS_DEBUG;
- *   Landlock present      -> no_new_privs + the whitelist above.
- * Builtin tool children (cjxl direct, ffmpeg, mac, packMP3 — the WP11
- * lanes) pass a NULL spec and keep their pre-WP12d behavior: RLIMIT_AS
- * only. Their runtime needs are wider (ffmpeg hw probing et al.) and the
- * WP12d goal is the pack boundary. */
-typedef struct {
-    const char *pack_dir;   /* RO+EXEC subtree: the pack's own files */
-    const char *ro_path;    /* RO file: the input (or rebuild recipe) */
-    const char *rw_dir;     /* RW subtree: the scratch/output dir (may
-                             * be NULL — the estimate child is read-only) */
-    const char *requires;   /* comma list of extra tools the pack's helpers
-                             * exec (grandchildren): each is resolved and
-                             * whitelisted RO+EXEC (e.g. p7z's 7zz living
-                             * outside /usr/bin). NULL when none. */
-} tool_sandbox;
-
-
-/* 0 = sandbox off (env), 1 = Landlock absent (NNP + RLIMIT_AS only),
- * 2 = Landlock enforced. Probed once per process; the degrade is logged
- * once, here in the parent, where stderr still reaches the user. */
-static int pack_sandbox_mode(void)
-{
-    static int mode = -1;
-
-    if (mode >= 0) return mode;
-    {
-        const char *e = getenv("INVFS_PACK_SANDBOX");
-        if (e && !strcmp(e, "0")) {
-            mode = 0;
-            return mode;
-        }
-    }
-    mode = 1;
-#ifdef INVFS_HAVE_LANDLOCK
-    {
-        int abi = (int)syscall(SYS_landlock_create_ruleset, NULL, 0,
-                               LANDLOCK_CREATE_RULESET_VERSION);
-        if (abi >= 1) {
-            mode = 2;
-            if (getenv("INVFS_DEBUG"))
-                fprintf(stderr, "[vol] pack sandbox: Landlock ABI v%d\n",
-                        abi);
-        }
-    }
-#endif
-    if (mode == 1 && getenv("INVFS_DEBUG"))
-        fprintf(stderr, "[vol] pack sandbox: Landlock unavailable — "
-                "no_new_privs + RLIMIT_AS only\n");
-    return mode;
-}
+/* WP61: the Landlock sandbox, namespaces, rlimits, timeout and privilege
+ * drop for pack children live in src/core/helper_exec.c (invfs_helper_exec).
+ * The whitelist itself is unchanged from WP12d; see helper_exec.c. */
 
 
 /* dirname(path) into buf; NULL when path is NULL or carries no '/' */
@@ -265,318 +170,25 @@ static const char *sb_dirname(char *buf, size_t cap, const char *path)
 }
 
 
-#ifdef INVFS_HAVE_LANDLOCK
-/* Add one PATH_BENEATH rule; a path that cannot be opened (absent on this
- * box — /usr/local/bin, an optional file) is skipped. If a rule that
- * SHOULD have been there fails to attach, the helper is denied the access
- * later and the guard falls back — the failure direction stays closed. */
-static void ll_add_rule(int rfd, uint64_t rights, const char *path)
-{
-    struct landlock_path_beneath_attr a;
-    int pfd;
-
-    if (!path || !*path) return;
-    pfd = open(path, O_PATH | O_CLOEXEC);
-    if (pfd < 0) return;
-    a.allowed_access = rights;
-    a.parent_fd = pfd;
-    (void)syscall(SYS_landlock_add_rule, rfd, LANDLOCK_RULE_PATH_BENEATH,
-                  &a, 0);
-    close(pfd);
-}
-
-/* argv[0] the way execvp will find it: a slash path is used as-is, a bare
- * name is walked down $PATH (first X_OK hit — execvp's own rule; empty
- * elements mean "."). The exec target needs EXECUTE (the execve itself)
- * and READ_FILE (a script's shebang re-read, the loader's open). */
-static void ll_add_exe(int rfd, const char *argv0)
-{
-    char buf[4096];
-    const char *path, *p;
-
-    if (!argv0 || !*argv0) return;
-    if (strchr(argv0, '/')) {
-        ll_add_rule(rfd, LANDLOCK_ACCESS_FS_READ_FILE |
-                         LANDLOCK_ACCESS_FS_EXECUTE, argv0);
-        return;
-    }
-    path = getenv("PATH");
-    if (!path || !*path) path = "/usr/bin:/bin";
-    p = path;
-    for (;;) {
-        const char *c = strchr(p, ':');
-        size_t dl = c ? (size_t)(c - p) : strlen(p);
-        size_t nl = strlen(argv0);
-        if (!dl) { p = "."; dl = 1; }   /* empty PATH element == cwd */
-        if (dl + 1 + nl + 1 <= sizeof buf) {
-            memcpy(buf, p, dl);
-            buf[dl] = '/';
-            memcpy(buf + dl + 1, argv0, nl + 1);
-            if (access(buf, X_OK) == 0) {
-                ll_add_rule(rfd, LANDLOCK_ACCESS_FS_READ_FILE |
-                                 LANDLOCK_ACCESS_FS_EXECUTE, buf);
-                return;
-            }
-        }
-        if (!c) break;
-        p = c + 1;
-    }
-}
-
-/* Landlock checks the RESOLVED path, so a pack helper reached through a
- * symlink (the splt_nomap fixture links splt.py into its pack dir) is not
- * covered by the pack-dir rule. Rule every realpath'd argv token that
- * names a file — those are exactly the files the parent intends the child
- * to use. Missing files (the not-yet-created {out}) skip; the scratch-dir
- * RW rule covers them. */
-static void ll_add_argv_files(int rfd, char *const argv[])
-{
-    char rb[4096];
-    size_t i;
-
-    for (i = 0; argv[i]; i++) {
-        if (!strchr(argv[i], '/')) continue;
-        if (realpath(argv[i], rb))
-            ll_add_rule(rfd, LANDLOCK_ACCESS_FS_READ_FILE |
-                             LANDLOCK_ACCESS_FS_EXECUTE, rb);
-    }
-}
-
-static void landlock_apply(const tool_sandbox *sb, char *const argv[])
-{
-    static const char *rt_dirs[] = {
-        "/usr/lib", "/usr/lib64", "/lib", "/lib64",
-        "/usr/bin", "/bin", "/usr/local/bin",
-    };
-    struct landlock_ruleset_attr attr;
-    uint64_t handled, ro, rw;
-    int abi, rfd;
-    size_t i;
-
-    abi = (int)syscall(SYS_landlock_create_ruleset, NULL, 0,
-                       LANDLOCK_CREATE_RULESET_VERSION);
-    if (abi < 1) return;    /* raced the parent probe: NNP is still on */
-
-    /* handle every FS right the running ABI knows ("deny everything
-     * else"), conditionalized so the same source builds against older
-     * landlock.h too */
-    handled = LANDLOCK_ACCESS_FS_EXECUTE | LANDLOCK_ACCESS_FS_READ_FILE |
-              LANDLOCK_ACCESS_FS_READ_DIR | LANDLOCK_ACCESS_FS_WRITE_FILE |
-              LANDLOCK_ACCESS_FS_REMOVE_DIR | LANDLOCK_ACCESS_FS_REMOVE_FILE |
-              LANDLOCK_ACCESS_FS_MAKE_CHAR | LANDLOCK_ACCESS_FS_MAKE_DIR |
-              LANDLOCK_ACCESS_FS_MAKE_REG | LANDLOCK_ACCESS_FS_MAKE_SOCK |
-              LANDLOCK_ACCESS_FS_MAKE_FIFO | LANDLOCK_ACCESS_FS_MAKE_BLOCK |
-              LANDLOCK_ACCESS_FS_MAKE_SYM;
-#ifdef LANDLOCK_ACCESS_FS_REFER
-    if (abi >= 2) handled |= LANDLOCK_ACCESS_FS_REFER;
-#endif
-#ifdef LANDLOCK_ACCESS_FS_TRUNCATE
-    if (abi >= 3) handled |= LANDLOCK_ACCESS_FS_TRUNCATE;
-#endif
-#ifdef LANDLOCK_ACCESS_FS_IOCTL_DEV
-    if (abi >= 5) handled |= LANDLOCK_ACCESS_FS_IOCTL_DEV;
-#endif
-    memset(&attr, 0, sizeof attr);
-    attr.handled_access_fs = handled;
-    rfd = (int)syscall(SYS_landlock_create_ruleset, &attr, sizeof attr, 0);
-    if (rfd < 0) return;
-
-    ro = LANDLOCK_ACCESS_FS_READ_FILE | LANDLOCK_ACCESS_FS_READ_DIR |
-         LANDLOCK_ACCESS_FS_EXECUTE;
-    rw = LANDLOCK_ACCESS_FS_READ_FILE | LANDLOCK_ACCESS_FS_READ_DIR |
-         LANDLOCK_ACCESS_FS_WRITE_FILE | LANDLOCK_ACCESS_FS_MAKE_REG |
-         LANDLOCK_ACCESS_FS_MAKE_DIR | LANDLOCK_ACCESS_FS_REMOVE_FILE |
-         LANDLOCK_ACCESS_FS_REMOVE_DIR;
-#ifdef LANDLOCK_ACCESS_FS_REFER
-    if (abi >= 2) rw |= LANDLOCK_ACCESS_FS_REFER;    /* rename inside scratch */
-#endif
-#ifdef LANDLOCK_ACCESS_FS_TRUNCATE
-    if (abi >= 3) rw |= LANDLOCK_ACCESS_FS_TRUNCATE; /* open(O_TRUNC) rewrites */
-#endif
-
-    /* the runtime: interpreter + shared libraries + the loader cache */
-    for (i = 0; i < sizeof rt_dirs / sizeof rt_dirs[0]; i++)
-        ll_add_rule(rfd, ro, rt_dirs[i]);
-    ll_add_rule(rfd, LANDLOCK_ACCESS_FS_READ_FILE, "/etc/ld.so.cache");
-    ll_add_rule(rfd, LANDLOCK_ACCESS_FS_READ_FILE, "/etc/localtime");
-    ll_add_rule(rfd, LANDLOCK_ACCESS_FS_READ_FILE |
-                     LANDLOCK_ACCESS_FS_WRITE_FILE, "/dev/null");
-    {
-        const char *td = getenv("INVFS_TOOLS");
-        if (td && *td) ll_add_rule(rfd, ro, td);   /* a valid tool source */
-    }
-    /* the pack's own files, the exec target, the data paths */
-    ll_add_rule(rfd, ro, sb->pack_dir);
-    ll_add_exe(rfd, argv[0]);
-    ll_add_argv_files(rfd, argv);
-    /* grandchildren: the manifest's requires= tools (e.g. p7z's helper
-     * shells out to 7zz). Same resolution as the probe side:
-     * $INVFS_TOOLS -> /usr/lib/invfs/tools -> the pack's own bin/ ->
-     * PATH (the last via ll_add_exe's X_OK walk) */
-    if (sb->requires) {
-        char req[512];
-        char *tok, *save = NULL;
-        snprintf(req, sizeof req, "%s", sb->requires);
-        for (tok = strtok_r(req, ",", &save); tok;
-             tok = strtok_r(NULL, ",", &save)) {
-            char buf[4096];
-            const char *td = getenv("INVFS_TOOLS");
-            int n;
-            if (td && *td) {
-                n = snprintf(buf, sizeof buf, "%s/%s", td, tok);
-                if (n > 0 && (size_t)n < sizeof buf &&
-                    access(buf, X_OK) == 0) {
-                    ll_add_rule(rfd, LANDLOCK_ACCESS_FS_READ_FILE |
-                                LANDLOCK_ACCESS_FS_EXECUTE, buf);
-                    continue;
-                }
-            }
-            n = snprintf(buf, sizeof buf, "/usr/lib/invfs/tools/%s", tok);
-            if (access(buf, X_OK) == 0) {
-                ll_add_rule(rfd, LANDLOCK_ACCESS_FS_READ_FILE |
-                            LANDLOCK_ACCESS_FS_EXECUTE, buf);
-                continue;
-            }
-            n = snprintf(buf, sizeof buf, "%s/bin/%s",
-                         sb->pack_dir ? sb->pack_dir : "", tok);
-            if (sb->pack_dir && access(buf, X_OK) == 0) {
-                ll_add_rule(rfd, LANDLOCK_ACCESS_FS_READ_FILE |
-                            LANDLOCK_ACCESS_FS_EXECUTE, buf);
-                continue;
-            }
-            ll_add_exe(rfd, tok);   /* PATH */
-        }
-    }
-    ll_add_rule(rfd, LANDLOCK_ACCESS_FS_READ_FILE, sb->ro_path);
-    ll_add_rule(rfd, rw, sb->rw_dir);
-
-    (void)syscall(SYS_landlock_restrict_self, rfd, 0);
-    close(rfd);
-}
-#endif /* INVFS_HAVE_LANDLOCK */
-
-
-/* The child-side hook, called between fork and execvp (after the stdio
- * plumbing and RLIMIT_AS). A NULL spec (builtin tool lanes) or mode 0
- * (INVFS_PACK_SANDBOX=0) leaves the child exactly as WP12d shipped it. */
-static void tool_child_sandbox(const tool_sandbox *sb, int mode,
-                               char *const argv[])
-{
-#ifdef __linux__
-    if (!sb || !mode) return;
-    prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0);
-    /* tempfile.mkdtemp() & co must land inside the whitelist */
-    if (sb->rw_dir) setenv("TMPDIR", sb->rw_dir, 1);
-#ifdef INVFS_HAVE_LANDLOCK
-    if (mode == 2) landlock_apply(sb, argv);
-#endif
-#else
-    (void)sb; (void)mode; (void)argv;
-#endif
-}
-
-
-/* fork/execvp, wait with a timeout. The child is muted (stdin/out/err to
- * /dev/null), matching the CREATE_NO_WINDOW processes on the Windows side.
- * sb (NULL for the builtin tool lanes) selects the pack sandbox. Returns
- * the child's exit code, or -1 on fork failure, a kill, or expiry. */
+/* WP61: thin parent-side wrappers over the shared containment launcher
+ * (helper_exec.c). sb (NULL for builtin lanes) selects the Landlock pack
+ * sandbox; work_dir is the scratch dir handed to the dropped uid when the
+ * daemon is root. */
 static int tool_exec_lim(char *const argv[], uint64_t mem_cap,
-                         const tool_sandbox *sb)
+                         const invfs_helper_sandbox *sb,
+                         const char *work_dir)
 {
-    pid_t pid;
-    int st = 0, sbmode;
-    uint64_t t0;
-
-    if (!argv || !argv[0]) return -1;
-    sbmode = sb ? pack_sandbox_mode() : 0;   /* parent side: log-once works */
-    pid = fork();
-    if (pid < 0) return -1;
-    if (pid == 0) {
-        int dn = open("/dev/null", O_RDWR);
-        if (dn >= 0) {
-            dup2(dn, STDIN_FILENO);
-            dup2(dn, STDOUT_FILENO);
-            dup2(dn, STDERR_FILENO);
-        }
-        tool_child_memlimit(mem_cap);
-        tool_child_sandbox(sb, sbmode, argv);
-        execvp(argv[0], argv);
-        _exit(127);
-    }
-    t0 = tool_now_ms();
-    for (;;) {
-        pid_t r = waitpid(pid, &st, WNOHANG);
-        if (r == pid) break;
-        if (r < 0) {
-            if (errno == EINTR) continue;
-            return -1;
-        }
-        if (tool_now_ms() - t0 > TOOL_TIMEOUT_MS) {
-            kill(pid, SIGKILL);
-            while (waitpid(pid, &st, 0) < 0 && errno == EINTR)
-                ;
-            fprintf(stderr, "tool_exec: %s killed after %llus\n", argv[0],
-                    (unsigned long long)(TOOL_TIMEOUT_MS / 1000));
-            return -1;
-        }
-        usleep(5000);
-    }
-    if (!WIFEXITED(st)) return -1;
-    return WEXITSTATUS(st);
+    return invfs_helper_exec(argv, mem_cap, sb, work_dir, 0, NULL, 0, 0);
 }
 
 /* WP33: strict tool exec for builtin lanes. Uses execv (no PATH search)
  * and enforces that the helper was found in $INVFS_TOOLS or
  * /usr/lib/invfs/tools when INVFS_REQUIRE_HELPER_PATH is active.
  * Returns -2 if helper not found in strict mode, -1 on other errors. */
-static int tool_exec_strict(char *const argv[], uint64_t mem_cap)
+static int tool_exec_strict(char *const argv[], uint64_t mem_cap,
+                            const char *work_dir)
 {
-    pid_t pid;
-    int st = 0, sbmode;
-    uint64_t t0;
-
-    if (!argv || !argv[0]) return -1;
-    sbmode = 0;
-    pid = fork();
-    if (pid < 0) return -1;
-    if (pid == 0) {
-        int dn = open("/dev/null", O_RDWR);
-        if (dn >= 0) {
-            dup2(dn, STDIN_FILENO);
-            dup2(dn, STDOUT_FILENO);
-            dup2(dn, STDERR_FILENO);
-        }
-        tool_child_memlimit(mem_cap);
-        tool_child_sandbox(NULL, sbmode, argv);
-        execv(argv[0], argv);
-        _exit(127);
-    }
-    t0 = tool_now_ms();
-    for (;;) {
-        pid_t r = waitpid(pid, &st, WNOHANG);
-        if (r == pid) break;
-        if (r < 0) {
-            if (errno == EINTR) continue;
-            return -1;
-        }
-        if (tool_now_ms() - t0 > TOOL_TIMEOUT_MS) {
-            kill(pid, SIGKILL);
-            while (waitpid(pid, &st, 0) < 0 && errno == EINTR)
-                ;
-            fprintf(stderr, "tool_exec: %s killed after %llus\n", argv[0],
-                    (unsigned long long)(TOOL_TIMEOUT_MS / 1000));
-            return -1;
-        }
-        usleep(5000);
-    }
-    if (!WIFEXITED(st)) return -1;
-    return WEXITSTATUS(st);
-}
-
-
-static int tool_exec(char *const argv[])
-{
-    return tool_exec_lim(argv, TOOL_MEM_CAP_DEFAULT, NULL);
+    return invfs_helper_exec(argv, mem_cap, NULL, work_dir, 1, NULL, 0, 0);
 }
 
 int tool_tmpdir(char *dir, size_t cap)
@@ -626,66 +238,15 @@ static int tool_slurp_out(const char *path, uint8_t **out, size_t *out_len)
 }
 
 
-/* like tool_exec_lim, but the child's stdout lands in buf (NUL-terminated,
+/* Like tool_exec_lim, but the child's stdout lands in buf (NUL-terminated,
  * truncated at cap-1, overflow drained and discarded so the child never
  * blocks on a full pipe). Used by the codecpack estimate hook. */
 static int tool_exec_out_lim(char *const argv[], char *buf, size_t cap,
-                             uint64_t mem_cap, const tool_sandbox *sb)
+                             uint64_t mem_cap,
+                             const invfs_helper_sandbox *sb,
+                             const char *work_dir)
 {
-    int pfd[2], st = 0, exited = 0, sbmode;
-    pid_t pid;
-    uint64_t t0;
-    size_t got = 0;
-
-    if (cap) buf[0] = '\0';
-    sbmode = sb ? pack_sandbox_mode() : 0;
-    if (pipe(pfd) != 0) return -1;
-    pid = fork();
-    if (pid < 0) { close(pfd[0]); close(pfd[1]); return -1; }
-    if (pid == 0) {
-        int dn = open("/dev/null", O_RDWR);
-        if (dn >= 0) {
-            dup2(dn, STDIN_FILENO);
-            dup2(dn, STDERR_FILENO);
-        }
-        dup2(pfd[1], STDOUT_FILENO);
-        close(pfd[0]);
-        close(pfd[1]);
-        tool_child_memlimit(mem_cap);
-        tool_child_sandbox(sb, sbmode, argv);
-        execvp(argv[0], argv);
-        _exit(127);
-    }
-    close(pfd[1]);
-    fcntl(pfd[0], F_SETFL, fcntl(pfd[0], F_GETFL, 0) | O_NONBLOCK);
-    t0 = tool_now_ms();
-    for (;;) {
-        pid_t w;
-        for (;;) {   /* drain what there is; discard past cap */
-            char junk[256];
-            char *dst = got + 1 < cap ? buf + got : junk;
-            size_t room = dst == junk ? sizeof junk : cap - 1 - got;
-            ssize_t r = read(pfd[0], dst, room);
-            if (r <= 0) break;
-            if (dst != junk) got += (size_t)r;
-        }
-        if (exited) break;      /* reaped and drained */
-        w = waitpid(pid, &st, WNOHANG);
-        if (w == pid) { exited = 1; continue; }
-        if (w < 0 && errno != EINTR) { close(pfd[0]); return -1; }
-        if (tool_now_ms() - t0 > TOOL_TIMEOUT_MS) {
-            kill(pid, SIGKILL);
-            while (waitpid(pid, &st, 0) < 0 && errno == EINTR)
-                ;
-            close(pfd[0]);
-            return -1;
-        }
-        usleep(5000);
-    }
-    close(pfd[0]);
-    if (cap) buf[got < cap ? got : cap - 1] = '\0';
-    if (!WIFEXITED(st)) return -1;
-    return WEXITSTATUS(st);
+    return invfs_helper_exec(argv, mem_cap, sb, work_dir, 0, buf, cap, 0);
 }
 
 #endif /* !_WIN32 */
@@ -796,7 +357,7 @@ int invfs_codec_pack_exec(const invfs_codec *c, int is_encode,
     const char *tmpl;
     char *argv[24];
     char arena[4096];
-    tool_sandbox sb;
+    invfs_helper_sandbox sb;
     char rwbuf[4096];
 
     if (!def) return -1;
@@ -813,7 +374,7 @@ int invfs_codec_pack_exec(const invfs_codec *c, int is_encode,
     sb.ro_path = in_path;
     sb.rw_dir = sb_dirname(rwbuf, sizeof rwbuf, out_path);
     sb.requires = def->requires;   /* grandchildren tools (e.g. 7zz) */
-    return tool_exec_lim(argv, tool_mem_cap_for(c), &sb);
+    return tool_exec_lim(argv, tool_mem_cap_for(c), &sb, sb.rw_dir);
 #endif
 }
 
@@ -834,7 +395,7 @@ int invfs_codec_pack_cmd(const invfs_codec *c, int cmd,
     const char *tmpl;
     char *argv[24];
     char arena[4096];
-    tool_sandbox sb;
+    invfs_helper_sandbox sb;
     char rwbuf[4096];
 
     if (!def || !def->is_container) return -1;
@@ -858,7 +419,7 @@ int invfs_codec_pack_cmd(const invfs_codec *c, int cmd,
     sb.ro_path = in ? in : recipe;
     sb.rw_dir = sb_dirname(rwbuf, sizeof rwbuf, out);
     sb.requires = def->requires;   /* grandchildren tools (e.g. 7zz) */
-    return tool_exec_lim(argv, tool_mem_cap_for(c), &sb);   /* WP12(d) */
+    return tool_exec_lim(argv, tool_mem_cap_for(c), &sb, sb.rw_dir);
 #endif
 }
 
@@ -876,7 +437,7 @@ int invfs_codec_pack_estimate(const invfs_codec *c, const char *in_path,
     char out[256];
     char *endp = NULL;
     unsigned long long v;
-    tool_sandbox sb;
+    invfs_helper_sandbox sb;
     char rwbuf[4096];
 
     if (!def || !def->estimate || !in_path) return -1;
@@ -888,15 +449,14 @@ int invfs_codec_pack_estimate(const invfs_codec *c, const char *in_path,
      * scratch (it is the caller's fresh mkdtemp dir at every call site):
      * a pack whose estimate parses through a whitelisted grandchild (p7z's
      * encoded-header decode stages a temp file for 7zz) needs a TMPDIR
-     * inside the whitelist, and tool_child_sandbox only points TMPDIR at
-     * rw_dir. Without this the grandchild's mkstemp hits EACCES and the
+     * inside the whitelist, and the launcher only points TMPDIR at rw_dir. Without this the grandchild's mkstemp hits EACCES and the
      * estimate fails closed (GENERIC_GUARD) on a file the pack accepts. */
     sb.pack_dir = def->dir;
     sb.ro_path = in_path;
     sb.rw_dir = sb_dirname(rwbuf, sizeof rwbuf, in_path);
     sb.requires = def->requires;
     if (tool_exec_out_lim(argv, out, sizeof out, tool_mem_cap_for(c),
-                          &sb) != 0)
+                          &sb, sb.rw_dir) != 0)
         return -1;   /* WP12(d): the estimate child is capped too */
     errno = 0;
     v = strtoull(out, &endp, 10);
@@ -941,7 +501,7 @@ int run_tool(const char *exe, const char *a1, const char *a2, const char *opts)
      * every call site ("--lossless_jpeg=1", "-d 0 -e 7", ...), split on
      * whitespace into a fixed argv; no shell, no quoting.
      * WP33: builtin lanes use strict resolution (execv, no PATH fallback). */
-    char exeb[512], obuf[256];
+    char exeb[512], obuf[256], wdbuf[4096];
     char *argv[16], *save = NULL, *tok;
     int ac = 0, err;
 
@@ -954,7 +514,8 @@ int run_tool(const char *exe, const char *a1, const char *a2, const char *opts)
          tok = strtok_r(NULL, " \t", &save))
         argv[ac++] = tok;
     argv[ac] = NULL;
-    return tool_exec_strict(argv, TOOL_MEM_CAP_DEFAULT);
+    return tool_exec_strict(argv, TOOL_MEM_CAP_DEFAULT,
+                            sb_dirname(wdbuf, sizeof wdbuf, a1));
 #endif
 }
 
@@ -994,7 +555,7 @@ static int run_ffmpeg(const char *a1, const char *a2, const char *opts)
     /* ffmpeg -loglevel error -i <a1> <opts...> <a2> — options MUST come
      * before the output file: ffmpeg 8.x ignores -c:a/-sample_fmt placed
      * after the output (silently emits 16-bit). WP33: strict resolution. */
-    char exeb[512], obuf[256];
+    char exeb[512], obuf[256], wdbuf[4096];
     char *argv[20], *save = NULL, *tok;
     int ac = 0, rc, err;
 
@@ -1010,7 +571,8 @@ static int run_ffmpeg(const char *a1, const char *a2, const char *opts)
         argv[ac++] = tok;
     argv[ac++] = (char *)a2;
     argv[ac] = NULL;
-    rc = tool_exec_strict(argv, TOOL_MEM_CAP_DEFAULT);
+    rc = tool_exec_strict(argv, TOOL_MEM_CAP_DEFAULT,
+                          sb_dirname(wdbuf, sizeof wdbuf, a1));
     if (rc != 0)
         fprintf(stderr, "run_ffmpeg: exit code %d\n", rc);
     return rc;
@@ -1181,7 +743,7 @@ static int run_packmp3(const char *path)
     CloseHandle(pi.hProcess);
     return (int)code;
 #else
-    char exeb[512];
+    char exeb[512], wdbuf[4096];
     char *argv[5];
     int err;
 
@@ -1191,7 +753,8 @@ static int run_packmp3(const char *path)
     argv[2] = (char *)"-o";    /* overwrite, else foo_.pmp is invented */
     argv[3] = (char *)path;
     argv[4] = NULL;
-    return tool_exec_strict(argv, TOOL_MEM_CAP_DEFAULT);
+    return tool_exec_strict(argv, TOOL_MEM_CAP_DEFAULT,
+                            sb_dirname(wdbuf, sizeof wdbuf, path));
 #endif
 }
 
