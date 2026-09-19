@@ -140,7 +140,7 @@ typedef struct {
 /* Storage-class flag (WP10): persisted as internal xattr "invfs.class" in the
  * INO2 ext block, value = invfs_class_tlv. Records WHY a file is stored the
  * way it is so sweep can skip/retry without re-deriving from content.
- * See impl_docs/WP10-textzone-codec-registry.md §2. */
+ * See impl_docs/old_docs/WP10-textzone-codec-registry.md §2. */
 #define INVFS_XATTR_CLASS "invfs.class"
 
 enum {

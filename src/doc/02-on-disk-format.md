@@ -103,7 +103,7 @@ PPMd даёт 2.484× при случайном порядке и 3.146× при
 на блоки; `size < block` — мелкие копятся в один блок, **отсортированные**
 перед сжатием.
 
-**Статус: реализовано (WP10, ff84bf8; спека — impl_docs/WP10-textzone-codec-registry.md).**
+**Статус: реализовано (WP10, ff84bf8; спека — impl_docs/old_docs/WP10-textzone-codec-registry.md).**
 `INVFS_ZONE_TEXT` и `INVFS_ALGO_PPMD` (`invarifs.h:29,35`) больше не мёртвые
 константы. Устройство хранилища:
 
@@ -157,7 +157,7 @@ PNGR живёт только на Windows). Главная запись — ZSTD
 (`algo` = id пакета, целофайловая форма), члены — сиблинги
 `name!mbrNNNN[-имя]` + таблица членов `name!mbrt`; чтение — rebuild
 пакета из рецепта и членов, удаление контейнера каскадно сносит всех
-сиблингов. Спека: `impl_docs/WP16-containerpacks.md`.
+сиблингов. Спека: `impl_docs/old_docs/WP16-containerpacks.md`.
 
 ABI v1.1 (WP16b): у пакета с командой `map` появляется сиблинг
 `name!mbrmap` — бинарная карта «MRMP»: разбиение байтов исходного

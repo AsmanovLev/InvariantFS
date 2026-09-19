@@ -14,7 +14,7 @@
 
 Sources of work, in rough order of priority:
 
-- `impl_docs/AUDIT.md` — security / correctness audit findings.
+- `impl_docs/old_docs/AUDIT.md` — security / correctness audit findings.
 - `INCIDENTS.md` — production incidents, including unresolved ones.
 - `tools/test-*.sh` failures.
 - Fuzz harness crashes (`make fuzz`).
@@ -151,7 +151,7 @@ Remaining TODOs: none
   rules sometimes break.
 - Running an e2e suite without acquiring the lock.
 - Reaching into another WP's worktree to "fix one small thing".
-- Touching `INCIDENTS.md` / `impl_docs/AUDIT.md` without updating the
+- Touching `INCIDENTS.md` / `impl_docs/old_docs/AUDIT.md` without updating the
   status fields — these files are the source of truth for what's been
   fixed and what hasn't.
 
@@ -341,10 +341,10 @@ When to **do** use it:
 ### 2.12 Getting help
 
 - `INCIDENTS.md` — production issues and their fixes.
-- `impl_docs/AUDIT.md` — security / correctness audit findings.
+- `impl_docs/old_docs/AUDIT.md` — security / correctness audit findings.
 - `docs/GENTOO-INSTALL.md` — full install guide (VM + bare metal).
 - `tools/test-*.sh` — executable examples of every operation.
-- `impl_docs/WP*.md` — design rationale for non-trivial features.
+- `impl_docs/old_docs/WP*.md` — design rationale for non-trivial features.
 - For new contributors: pick a `WP*` from the discovery list above,
   open a draft, ask for review.
 
