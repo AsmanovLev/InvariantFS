@@ -232,6 +232,67 @@ int vol_v3_inode_delete(invfs_volume *v, uint64_t inode_id);
 /* The current base root (pba/gen/checksum); pba == 0 for an empty tree.
  * WP-M6/M11 read it to scan the namespace. 0 = ok, -1 = error. */
 int vol_v3_base_root(invfs_volume *v, invfs_blkptr *out);
+
+/* ---- WP-M6: v3 dirent tree (base B+-tree namespace) -----------------
+ * The v3 namespace maps (parent_inode_id, name) -> child_inode_id. The key
+ * is frozen here (WP-M6, per the WP doc) as
+ *     parent_inode_id:u64 BE || name_len:u16 BE || name bytes
+ * so one directory's entries are a contiguous ordered key range. A name_len
+ * of 0 is the directory's own anchor entry (parent == the directory inode,
+ * value == that inode); it lets mkdir/rmdir and readdir bound a directory's
+ * range self-containedly. The value is the child inode id as u64 BE.
+ *
+ * The root directory is INVFS_V3_ROOT_INO; it has no row and no anchor.
+ * These helpers are the stable-tier engine WP-M6's path layer is built on;
+ * WP-M7's delta keys reuse this encoding so an overlay merge shares one
+ * ordering. All mutations COW the tree and publish the root through the
+ * WP-M2 double slot (no delta yet). */
+#define INVFS_V3_ROOT_INO 1ULL
+/* 1 = present (*child_out filled), 0 = absent, -1 = I/O / malformed. */
+int vol_v3_dirent_get(invfs_volume *v, uint64_t parent, const char *name,
+                      uint64_t *child_out);
+/* Insert or replace (parent, name) -> child. 0 = ok, -1 = error/ENOSPC. */
+int vol_v3_dirent_put(invfs_volume *v, uint64_t parent, const char *name,
+                      uint64_t child);
+/* Physical delete (no tombstone). An absent key is not an error.
+ * 0 = ok, -1 = error. */
+int vol_v3_dirent_del(invfs_volume *v, uint64_t parent, const char *name);
+/* Ordered range scan of a directory's children (name_len >= 1; the anchor is
+ * skipped). The callback receives a NUL-terminated name and the child id and
+ * runs under btree_scan's lifetime rules (name valid only for the call). A
+ * non-zero return aborts the scan and is propagated. 0 = complete. */
+typedef int (*vol_v3_dirent_cb)(void *ctx, const char *name, size_t nlen,
+                                uint64_t child);
+int vol_v3_dirent_scan(invfs_volume *v, uint64_t parent,
+                       vol_v3_dirent_cb cb, void *ctx);
+/* Allocate a fresh, never-reused inode id. The on-disk counter is not
+ * persisted in WP-M6 (RT30 has no field for it), so the first allocation
+ * after a mount scans the base tree once for the highest inode id and
+ * resumes above it. Ids 0 and 1 (root) are reserved. Returns 0 on error
+ * (an id is never 0 for a live inode). */
+uint64_t vol_v3_inode_alloc(invfs_volume *v);
+/* Path-level namespace entry points. `name` is a mount-relative path
+ * ("dir/file"; a trailing '/' is accepted and ignored). */
+int vol_v3_path_lookup(invfs_volume *v, const char *name, uint64_t *ino_out);
+int vol_v3_path_is_dir(invfs_volume *v, const char *name);
+int vol_v3_path_list_dir(invfs_volume *v, const char *dir,
+                         invfs_dirent *ents, int max);
+int vol_v3_path_stat(invfs_volume *v, const char *name, uint64_t *id_out,
+                     uint64_t *size_out, uint64_t *ctime_out);
+uint64_t vol_v3_create_node(invfs_volume *v, const char *name,
+                            const invfs_meta_pub *meta);
+uint64_t vol_v3_set_meta(invfs_volume *v, const char *name,
+                         const invfs_meta_pub *meta);
+uint64_t vol_v3_mkdir(invfs_volume *v, const char *name);
+int vol_v3_rmdir(invfs_volume *v, const char *name);
+int vol_v3_unlink(invfs_volume *v, const char *name);
+int vol_v3_rename(invfs_volume *v, const char *from, const char *to);
+int vol_v3_ensure_path(invfs_volume *v, const char *name);
+/* Enumerate the whole namespace (for the FUSE name table): one callback per
+ * dirent, with the mount-relative path and the child row. */
+typedef int (*vol_v3_walk_cb)(void *ctx, const char *path, uint64_t ino,
+                              uint32_t type, uint64_t size, int64_t mtime);
+int vol_v3_walk(invfs_volume *v, vol_v3_walk_cb cb, void *ctx);
 /* rewrite `name`'s record carrying `meta` (xattrs preserved); data blocks and
  * the AST are untouched — the L2P keys move to the new inode id internally.
  * Returns the new inode id, or 0 on failure (volume untouched). */

@@ -440,7 +440,15 @@ uint64_t vol_find(invfs_volume *v, const char *name)
     /* O(1) via the in-memory index; last-record-wins and the
        tombstone-kills-only-its-own-version rule are applied when the
        index is built and maintained, not re-derived here. */
-    const name_index_entry *e = idx_get(v, name, strlen(name));
+    const name_index_entry *e;
+    if (v->sb.vol_flags & VOLF_V3) {
+        /* WP-M6: v3 has no name index; resolve through the dirent tree. */
+        uint64_t ino = 0;
+        if (vol_v3_path_lookup(v, name, &ino) != 1)
+            return 0;
+        return ino;
+    }
+    e = idx_get(v, name, strlen(name));
     return e ? e->inode_id : 0;
 }
 
@@ -451,7 +459,14 @@ uint64_t vol_find(invfs_volume *v, const char *name)
 uint64_t vol_find_ex(invfs_volume *v, const char *name,
                      uint64_t *size_out, uint64_t *ctime_out)
 {
-    const name_index_entry *e = idx_get(v, name, strlen(name));
+    const name_index_entry *e;
+    if (v->sb.vol_flags & VOLF_V3) {
+        uint64_t ino = 0;
+        if (vol_v3_path_stat(v, name, &ino, size_out, ctime_out) != 0)
+            return 0;
+        return ino;
+    }
+    e = idx_get(v, name, strlen(name));
     if (!e) return 0;
     if (size_out) *size_out = e->size;
     if (ctime_out) *ctime_out = e->ctime;

@@ -1112,7 +1112,11 @@ int vol_stat(invfs_volume *v, const char *name, uint64_t *size_out)
 int vol_stat_full(invfs_volume *v, const char *name, uint64_t *id_out,
                   uint64_t *size_out, uint64_t *ctime_out)
 {
-    const name_index_entry *e = idx_get(v, name, strlen(name));
+    const name_index_entry *e;
+    /* WP-M6: v3 resolves names through the dirent tree / inode rows. */
+    if (v->sb.vol_flags & VOLF_V3)
+        return vol_v3_path_stat(v, name, id_out, size_out, ctime_out);
+    e = idx_get(v, name, strlen(name));
 
     /* The old scan walked from the start of the area and returned -1 on the
        first record that was not an INOD, so a single deleted file made stat

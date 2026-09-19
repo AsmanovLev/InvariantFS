@@ -198,12 +198,71 @@ static int bft_cb(void *ctx_, uint64_t rec_pos,
     return 0;
 }
 
+/* WP-M6: a v3 volume has no v2 record stream, so the table is built from
+ * the dirent tree via vol_v3_walk. Files land under their path; directories
+ * additionally land under "path/" so meta_for_path's anchor lookup (shared
+ * with the v2 path) finds them. pos is unused after the build. */
+typedef struct { fs_entry *v; int n, cap; } v3_bft_ctx;
+
+static int v3_bft_add(v3_bft_ctx *c, const char *name, uint64_t ino,
+                      uint64_t size, uint64_t ctime)
+{
+    if (c->n == c->cap) {
+        int ncap = c->cap ? c->cap * 2 : 1024;
+        fs_entry *ne = (fs_entry *)realloc(c->v, (size_t)ncap * sizeof *ne);
+        if (!ne)
+            return -1;
+        c->v = ne;
+        c->cap = ncap;
+    }
+    memset(&c->v[c->n], 0, sizeof c->v[c->n]);
+    strncpy(c->v[c->n].name, name, sizeof c->v[c->n].name - 1);
+    c->v[c->n].inode_id = ino;
+    c->v[c->n].size = size;
+    c->v[c->n].ctime = ctime;
+    c->n++;
+    return 0;
+}
+
+static int v3_bft_cb(void *ctx_, const char *path, uint64_t ino,
+                     uint32_t type, uint64_t size, int64_t mtime)
+{
+    v3_bft_ctx *c = (v3_bft_ctx *)ctx_;
+    if (v3_bft_add(c, path, ino, type == INVFS_ITYP_DIR ? 0 : size,
+                   (uint64_t)mtime) != 0)
+        return 1;
+    if (type == INVFS_ITYP_DIR) {
+        char anchor[300];
+        snprintf(anchor, sizeof anchor, "%s/", path);
+        if (v3_bft_add(c, anchor, ino, 0, (uint64_t)mtime) != 0)
+            return 1;
+    }
+    return 0;
+}
+
+static void build_file_table_v3(void)
+{
+    v3_bft_ctx c;
+    memset(&c, 0, sizeof c);
+    vol_v3_walk(g_vol, v3_bft_cb, &c);
+    if (c.n > 1)
+        qsort(c.v, (size_t)c.n, sizeof *c.v, cmp_entry_name_pos);
+    g_entries = c.v;
+    g_nentries = c.n;
+    g_cap = c.cap;
+}
+
 static void build_file_table(void)
 {
     const invfs_superblock *sb = vol_sb(g_vol);
     (void)sb;
     bft_ctx c;
     fs_entry *recs = NULL;
+
+    if (sb->vol_flags & VOLF_V3) {
+        build_file_table_v3();
+        return;
+    }
     uint64_t nrecs = 0, caprecs = 0;
     /* tombstone kill list: (position-or-0, inode-id) pairs */
     uint64_t *tpos = NULL, *tid = NULL;

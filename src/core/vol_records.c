@@ -14,6 +14,9 @@ uint64_t vol_create_file(invfs_volume *v, const char *name,
                          const uint8_t *data, size_t len)
 {
     size_t i, ast_entries;
+    /* WP-M6: a v3 node is a dirent + inode row; content is WP-M8. */
+    if (v->sb.vol_flags & VOLF_V3)
+        return (data && len) ? 0 : vol_v3_create_node(v, name, NULL);
     /* Hard format limits: the AST recipe header's widest form (v2) stores
        file_size as u64 (capped at MAX_FILE_SIZE = 1 TB by policy) and
        num_blocks as u32 (capped by the entries' 24-bit block_id at 2^24).
@@ -300,6 +303,8 @@ uint64_t vol_create_file_with_meta(invfs_volume *v, const char *name,
     uint8_t meta_buf[512];
     uint32_t meta_ext_len = 0;
 
+    if (v->sb.vol_flags & VOLF_V3)
+        return (data && len) ? 0 : vol_v3_create_node(v, name, meta);
     if (!meta) return vol_create_file(v, name, data, len);
     if (len > MAX_FILE_SIZE ||
         (len + SEGMENT_SIZE - 1) / SEGMENT_SIZE > MAX_SEGMENTS_V2) {
@@ -1348,6 +1353,9 @@ uint64_t vol_apply_meta(invfs_volume *v, const char *name,
                         const invfs_meta_pub *meta)
 {
     uint64_t id;
+    /* WP-M6: update the v3 inode row behind the name (no INO2 ext). */
+    if (v->sb.vol_flags & VOLF_V3)
+        return vol_v3_set_meta(v, name, meta);
     if (v->sb.vol_flags & VOLF_READONLY) return 0;
     id = vol_find(v, name);
     if (id == 0) return 0;
@@ -1363,6 +1371,7 @@ uint64_t vol_create_symlink(invfs_volume *v, const char *name,
     uint64_t nid;
 
     if (v->sb.vol_flags & VOLF_READONLY) return 0;
+    if (v->sb.vol_flags & VOLF_V3) return 0;   /* WP-M8: recipe target */
     if (name_too_long(name)) return 0;
     tl = strlen(target);
     if (tl == 0 || tl >= INVFS_META_TARGET_MAX) return 0;
@@ -1388,6 +1397,7 @@ uint64_t vol_create_special(invfs_volume *v, const char *name,
     uint64_t nid;
 
     if (v->sb.vol_flags & VOLF_READONLY) return 0;
+    if (v->sb.vol_flags & VOLF_V3) return 0;   /* out of WP-M6 scope */
     if (name_too_long(name)) return 0;
     if (type != INVFS_ITYP_FIFO && type != INVFS_ITYP_SOCK &&
         type != INVFS_ITYP_CHR && type != INVFS_ITYP_BLK)

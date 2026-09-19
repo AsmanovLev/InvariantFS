@@ -1471,3 +1471,229 @@ int vol_v3_inode_delete(invfs_volume *v, uint64_t inode_id)
 
 
 
+
+
+/* ------------------------------------------------------------------ */
+/* WP-M6: v3 dirent tree (base B+-tree namespace)                      */
+/*                                                                    */
+/* Key layout (frozen here; WP-M7's delta keys must reuse it):        */
+/*   parent_inode_id:u64 BE || name_len:u16 BE || name bytes          */
+/* Value: child_inode_id:u64 BE (8 bytes).                            */
+/*                                                                    */
+/* A directory's own anchor entry has name_len == 0 (parent == the     */
+/* directory inode, value == that inode). It sorts first inside the    */
+/* directory's key range and separates "the directory exists" from     */
+/* "this directory has children", which is what readdir/rmdir need.   */
+/*                                                                    */
+/* Writes go straight to the base tree (no delta yet, WP-M7) and      */
+/* publish the new root through the WP-M2 double slot, exactly like    */
+/* WP-M5's inode rows.                                                 */
+/* ------------------------------------------------------------------ */
+
+/* Escapes outside the listed set must not collide with the 8-byte inode
+ * keys: a dirent key is always >= 10 bytes, so an inode key can never equal
+ * it, and byte-lexicographic order keeps the two namespaces disjoint. */
+#define V3_DIRENT_KEY_FIXED 10u
+
+/* Build a key; returns its length. `kb` must hold 10 + name_len bytes. */
+static uint16_t v3_dirent_key(uint8_t *kb, uint64_t parent,
+                              const char *name, size_t nlen)
+{
+    int i;
+    for (i = 0; i < 8; i++)
+        kb[i] = (uint8_t)(parent >> (56 - 8 * i));
+    kb[8] = (uint8_t)(nlen >> 8);
+    kb[9] = (uint8_t)(nlen & 0xFF);
+    if (nlen)
+        memcpy(kb + V3_DIRENT_KEY_FIXED, name, nlen);
+    return (uint16_t)(V3_DIRENT_KEY_FIXED + nlen);
+}
+
+static uint16_t v3_dirent_key_len(const uint8_t *kb)
+{
+    return (uint16_t)(V3_DIRENT_KEY_FIXED +
+                      (((uint16_t)kb[8] << 8) | kb[9]));
+}
+
+static void v3_dirent_val(uint8_t vb[8], uint64_t child)
+{
+    int i;
+    for (i = 0; i < 8; i++)
+        vb[i] = (uint8_t)(child >> (56 - 8 * i));
+}
+
+static uint64_t v3_dirent_val_get(const uint8_t *p, uint16_t n)
+{
+    uint64_t id = 0;
+    int i;
+    if (!p || n < 8)
+        return 0;
+    for (i = 0; i < 8; i++)
+        id = (id << 8) | p[i];
+    return id;
+}
+
+int vol_v3_dirent_get(invfs_volume *v, uint64_t parent, const char *name,
+                      uint64_t *child_out)
+{
+    uint8_t kb[V3_DIRENT_KEY_FIXED + INVFS_MAX_NAME];
+    invfs_blkptr root;
+    bt_val val;
+    uint16_t kn;
+    size_t nlen = name ? strlen(name) : 0;
+    int found = 0;
+
+    if (!v || nlen > INVFS_MAX_NAME)
+        return -1;
+    if (v3_ready(v) != 0)
+        return -1;
+    if (v3_base_root(v, &root) != 0)
+        return -1;
+    kn = v3_dirent_key(kb, parent, name, nlen);
+    if (btree_search(v, root, (bt_key){kb, kn}, &val, &found) != 0)
+        return -1;
+    if (!found)
+        return 0;
+    if (child_out)
+        *child_out = v3_dirent_val_get(val.p, val.n);
+    return 1;
+}
+
+int vol_v3_dirent_put(invfs_volume *v, uint64_t parent, const char *name,
+                      uint64_t child)
+{
+    uint8_t kb[V3_DIRENT_KEY_FIXED + INVFS_MAX_NAME];
+    uint8_t vb[8];
+    invfs_blkptr root, nr;
+    uint16_t kn;
+    size_t nlen = name ? strlen(name) : 0;
+    uint64_t old_gen;
+
+    if (!v || nlen > INVFS_MAX_NAME || child == 0)
+        return -1;
+    if (v3_ready(v) != 0)
+        return -1;
+    if (v3_base_root(v, &root) != 0)
+        return -1;
+    old_gen = root.gen;
+    kn = v3_dirent_key(kb, parent, name, nlen);
+    v3_dirent_val(vb, child);
+    if (btree_upsert(v, root, (bt_key){kb, kn}, (bt_val){vb, 8}, &nr) != 0)
+        return -1;
+    return v3_publish(v, nr, old_gen);
+}
+
+int vol_v3_dirent_del(invfs_volume *v, uint64_t parent, const char *name)
+{
+    uint8_t kb[V3_DIRENT_KEY_FIXED + INVFS_MAX_NAME];
+    invfs_blkptr root, nr;
+    bt_val val;
+    uint16_t kn;
+    size_t nlen = name ? strlen(name) : 0;
+    int found = 0;
+    uint64_t old_gen;
+
+    if (!v || nlen > INVFS_MAX_NAME)
+        return -1;
+    if (v3_ready(v) != 0)
+        return -1;
+    if (v3_base_root(v, &root) != 0)
+        return -1;
+    kn = v3_dirent_key(kb, parent, name, nlen);
+    if (btree_search(v, root, (bt_key){kb, kn}, &val, &found) != 0)
+        return -1;
+    if (!found)
+        return 0;   /* absent: nothing to do */
+    old_gen = root.gen;
+    if (btree_delete(v, root, (bt_key){kb, kn}, &nr) != 0)
+        return -1;
+    return v3_publish(v, nr, old_gen);
+}
+
+/* Scan state shared with the btree_scan callback. */
+typedef struct {
+    vol_v3_dirent_cb cb;
+    void             *ctx;
+} v3_dirent_scan_state;
+
+static int v3_dirent_scan_cb(void *ctx_, bt_key k, bt_val val)
+{
+    v3_dirent_scan_state *s = (v3_dirent_scan_state *)ctx_;
+    char name[INVFS_MAX_NAME + 1];
+    uint16_t nlen;
+
+    if (k.n < V3_DIRENT_KEY_FIXED)
+        return 0;
+    if (v3_dirent_key_len(k.p) != k.n)
+        return 0;   /* malformed: not one of our keys */
+    nlen = (uint16_t)(((uint16_t)k.p[8] << 8) | k.p[9]);
+    if (nlen == 0 || nlen > INVFS_MAX_NAME)
+        return 0;   /* anchor (or malformed) */
+    memcpy(name, k.p + V3_DIRENT_KEY_FIXED, nlen);
+    name[nlen] = 0;
+    return s->cb(s->ctx, name, nlen, v3_dirent_val_get(val.p, val.n));
+}
+
+int vol_v3_dirent_scan(invfs_volume *v, uint64_t parent,
+                       vol_v3_dirent_cb cb, void *ctx)
+{
+    uint8_t lo[V3_DIRENT_KEY_FIXED], hi[V3_DIRENT_KEY_FIXED];
+    invfs_blkptr root;
+    v3_dirent_scan_state s;
+
+    if (!v || !cb)
+        return -1;
+    if (v3_ready(v) != 0)
+        return -1;
+    if (v3_base_root(v, &root) != 0)
+        return -1;
+    /* [parent||0x0000, (parent+1)||0x0000): the anchor first, then every
+     * child, all under one contiguous parent prefix. */
+    v3_dirent_key(lo, parent, NULL, 0);
+    v3_dirent_key(hi, parent + 1, NULL, 0);
+    s.cb = cb;
+    s.ctx = ctx;
+    return btree_scan(v, root, (bt_key){lo, V3_DIRENT_KEY_FIXED},
+                      (bt_key){hi, V3_DIRENT_KEY_FIXED},
+                      v3_dirent_scan_cb, &s);
+}
+
+/* Highest 8-byte inode key currently in the base tree (0 = none). Used to
+ * resume the id allocator after a reopen: RT30 carries no counter, and
+ * reusing an id would alias two inodes. One full scan per mount, not per
+ * create. */
+static int v3_max_inode_cb(void *ctx, bt_key k, bt_val val)
+{
+    uint64_t *max = (uint64_t *)ctx;
+    uint64_t id = 0;
+    int i;
+    (void)val;
+    if (k.n != 8)
+        return 0;   /* a dirent key is >= 10 bytes: inode rows only */
+    for (i = 0; i < 8; i++)
+        id = (id << 8) | k.p[i];
+    if (id > *max)
+        *max = id;
+    return 0;
+}
+
+uint64_t vol_v3_inode_alloc(invfs_volume *v)
+{
+    if (!v)
+        return 0;
+    if (v->next_inode_id <= INVFS_V3_ROOT_INO) {
+        invfs_blkptr root;
+        uint64_t max = 0;
+        if (v3_ready(v) != 0)
+            return 0;
+        if (v3_base_root(v, &root) != 0)
+            return 0;
+        if (btree_scan(v, root, (bt_key){NULL, 0}, (bt_key){NULL, 0},
+                       v3_max_inode_cb, &max) != 0)
+            return 0;
+        v->next_inode_id = max + 1;
+        if (v->next_inode_id <= INVFS_V3_ROOT_INO)
+            v->next_inode_id = INVFS_V3_ROOT_INO + 1;
+    }
+    return v->next_inode_id++;
+}

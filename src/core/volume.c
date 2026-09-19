@@ -4337,6 +4337,12 @@ int vol_read_raw(invfs_volume *v, uint64_t offset, void *buf, size_t len)
 /* ENOSPC policy helpers */
 int vol_write_enabled(invfs_volume *v)
 {
+    /* WP-M6: a v3 volume has no v2 record stream; the M5 backstop keeps
+     * needs_recovery set so the v2 mutators still refuse (they call
+     * vol_mark_dirty), but the v3 base-tree namespace (dirents + inode rows)
+     * must be writable through FUSE now. Only the READONLY latch applies. */
+    if (v->sb.vol_flags & VOLF_V3)
+        return !(v->sb.vol_flags & VOLF_READONLY);
     /* A volume awaiting recovery is read-only for the same reason a
        READONLY-flagged one is: the callers that check this are the ones that
        would otherwise append records, and appending onto maps that were never
