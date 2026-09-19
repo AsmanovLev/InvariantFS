@@ -66,6 +66,19 @@ typedef struct {
      * counted as issues, and reclaimed by fsck -f after the checkpoint is
      * gone (report mode then shows them as orphans again). */
     uint64_t held_ckpt;
+    /* WP-M4: metadata-v3 base-tree validation (VOLF_V3 volumes only; all
+     * zero for the v2 path). The v3 checker detects and reports, it does
+     * not repair. `v3_*` are additive: no v2 field changes meaning. */
+    uint64_t v3_pages_walked;   /* reachable base pages verified */
+    uint64_t v3_keys;           /* live leaf entries seen */
+    uint64_t v3_slots_torn;     /* RT30 root slots whose page failed CRC/gen */
+    uint64_t v3_bad_pages;      /* reachable pages that failed validation */
+    uint64_t v3_cycles;         /* cycles / shared children detected */
+    uint64_t v3_root_seq;       /* RT30 seq as read */
+    uint64_t v3_rt30_bad;       /* RT30 magic/version/CRC failed */
+    uint64_t v3_slots_ambiguous;/* both slots valid at equal gen */
+    uint64_t v3_reachable_free; /* reachable page free in the metadata bitmap */
+    int      v3_damaged;        /* 1 = any v3 structural damage found */
 } invfs_fsck_report;
 int vol_fsck_scan(invfs_volume *v, invfs_fsck_report *rep, int fix);
 int  vol_map(invfs_volume *v, uint64_t inode, uint64_t lba, uint64_t pba, uint32_t length);

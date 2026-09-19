@@ -2,11 +2,17 @@
  * area. Split from volume.c. */
 
 #include "volume_internal.h"
+#include "vol_metabuf.h"
+#include "vol_btree.h"
 
 
 /* The batch accumulator and the real vol_tz_flush/vol_tz_gc live with the
  * rest of the WP10 write path, right after the storage-class helpers (they
  * need meta_rewrite/vol_stamp_class/vol_delete_inode). */
+
+/* WP-M4: the v3 validation path (RT30 + base-tree walk). Defined after the
+ * v2 helpers; vol_fsck_scan dispatches to it for VOLF_V3 volumes. */
+static int fsck_v3_scan(invfs_volume *v, invfs_fsck_report *rep, int fix);
 
 /* ================= fsck / repair =================
  * WP27 note on physical addressing: AST entries store the segment's pba
@@ -442,12 +448,14 @@ int vol_fsck_scan(invfs_volume *v, invfs_fsck_report *rep, int fix)
     scan_set live = { NULL, 0, 0 };
 
     memset(rep, 0, sizeof(*rep));
-    /* WP-M1: a format-v3 volume carries no v2 inode-record stream / owner
-     * WAL, so there is nothing for the v2 rebuild to scan. The namespace is
-     * empty, which is trivially consistent. The real v3 checker (base tree,
-     * delta, fold, reclaim) is WP-M4. */
+    /* WP-M4: a format-v3 volume carries no v2 inode-record stream / owner
+     * WAL, so the v2 rebuild below does not apply. The v3 checker validates
+     * the RT30 root descriptor and walks the base B+-tree instead. This is
+     * detection-only: v3 repair is a follow-up WP, so `fix` is ignored
+     * (refuse, never mutate). v2 behavior is untouched when VOLF_V3 is
+     * clear. */
     if (v->sb.vol_flags & VOLF_V3)
-        return 0;
+        return fsck_v3_scan(v, rep, fix);
     used_bytes = (size_t)v->bitmap_blocks * INVFS_BLOCK_SIZE;
     used = (uint8_t *)calloc(1, used_bytes);
     if (!used) return -1;
@@ -913,5 +921,216 @@ int vol_fsck_scan(invfs_volume *v, invfs_fsck_report *rep, int fix)
     }
     free(used);
     free(newl2p);
+    return 0;
+}
+
+/* ================= WP-M4: metadata-v3 fsck (detect only) =================
+ * A v3 volume's namespace lives in the immutable base B+-tree anchored by the
+ * RT30 root descriptor (design-meta-v3.md §7/§12/§16). This checker validates
+ * the root double-slot and walks every reachable base page. It DETECTS and
+ * REPORTS only: v3 repair (re-derive a root, quarantine a torn page) is a
+ * follow-up WP, so `fix` is deliberately ignored here -- a damaged v3 volume
+ * is reported DAMAGED with a nonzero exit, never silently "repaired".
+ *
+ * A page whose blkptr.checksum/gen does not match its bytes is treated as a
+ * hard read error (mbuf_read_ptr), exactly like the read path. That means a
+ * torn child fails the walk at the first bad page; we report the damage and
+ * keep going where we can (a torn root slot falls back to the other slot). */
+
+static void fsck_v3_note(invfs_fsck_report *rep, const char *msg)
+{
+    rep->v3_damaged = 1;
+    fprintf(stderr, "fsck(v3): %s\n", msg);
+}
+
+/* Validate the RT30 descriptor itself (magic/version/page_size/CRC). Returns
+ * 0 = valid, 1 = absent/torn (empty root, the RDP0 convention), -1 = io
+ * error. On success v->rt30 is populated via mbuf_rt30_load. */
+static int fsck_v3_rt30(invfs_volume *v, invfs_fsck_report *rep)
+{
+    int rc = mbuf_rt30_load(v);
+    if (rc < 0) {
+        fsck_v3_note(rep, "RT30 root descriptor unreadable (io error)");
+        return -1;
+    }
+    if (rc == 1) {
+        rep->v3_rt30_bad = 1;
+        fsck_v3_note(rep, "RT30 root descriptor absent or torn "
+                          "(magic/version/CRC) -- treating the base as empty");
+        return 1;
+    }
+    rep->v3_root_seq = v->rt30.seq;
+    if (v->rt30.page_size != INVFS_BLOCK_SIZE) {
+        char b[128];
+        rep->v3_rt30_bad = 1;
+        snprintf(b, sizeof b, "RT30 page_size=%u is not the supported "
+                 "%u-byte page (D3)",
+                 (unsigned)v->rt30.page_size, (unsigned)INVFS_BLOCK_SIZE);
+        fsck_v3_note(rep, b);
+        return 1;
+    }
+    if (v->rt30.delta_pba && v->rt30.delta_pba >= v->sb.total_blocks) {
+        fsck_v3_note(rep, "RT30 delta_pba is out of range");
+    }
+    return 0;
+}
+
+/* Read a root slot page and check it against the RT30 slot value. A slot
+ * naming a page that does not validate is "torn". Returns 0 = valid (fills
+ * *gen_out), 1 = empty slot, 2 = torn, -1 = io error.
+ *
+ * TODO(WP-M4): RT30 stores only a pba per slot, not a blkptr, so the WP
+ * doc's "blkptr.checksum does not match" cannot be checked literally; the
+ * page's own self-CRC is the available check. A slot-level checksum/gen
+ * would catch a slot repointed at a different-but-valid page, and belongs
+ * with the root-publish format if the design wants it. */
+static int fsck_v3_slot_page(invfs_volume *v, uint64_t pba,
+                             uint64_t *gen_out)
+{
+    uint8_t page[INVFS_BLOCK_SIZE];
+    const invfs_page_hdr *h;
+    if (!pba)
+        return 1;
+    if (pba >= v->sb.total_blocks)
+        return 2;               /* out of range: torn/foreign slot */
+    if (mbuf_read(v, pba, page) != 0)
+        return -1;
+    h = mbuf_page_chdr(page);
+    if (!mbuf_page_validate(page))
+        return 2;
+    if (gen_out)
+        *gen_out = h->gen;
+    return 0;
+}
+
+/* Select the winning root from the RT30 double slot. A slot is a candidate
+ * only when its page validates; among candidates the higher header gen wins,
+ * tie -> the slot seq parity points at (the most recently published). A
+ * non-empty slot whose page does not validate is torn and reported. Returns
+ * 0 = ok (possibly empty, *root_out.pba == 0), -1 = io error. */
+static int fsck_v3_root(invfs_volume *v, invfs_fsck_report *rep,
+                        invfs_blkptr *root_out)
+{
+    uint64_t best_pba = 0, best_gen = 0;
+    uint8_t page[INVFS_BLOCK_SIZE];
+    int have = 0, i;
+    memset(root_out, 0, sizeof *root_out);
+
+    for (i = 0; i < 2; i++) {
+        uint64_t pba = v->rt30.root_slot[i];
+        uint64_t gen = 0;
+        int rc = fsck_v3_slot_page(v, pba, &gen);
+        if (rc == 1)
+            continue;               /* empty slot */
+        if (rc < 0)
+            return -1;
+        if (rc == 2) {
+            char b[160];
+            rep->v3_slots_torn++;
+            snprintf(b, sizeof b, "root_slot[%d] pba %llu is torn "
+                     "(bad page CRC/magic) -- slot ignored",
+                     i, (unsigned long long)pba);
+            fsck_v3_note(rep, b);
+            continue;
+        }
+        if (!have || gen > best_gen) {
+            have = 1;
+            best_pba = pba;
+            best_gen = gen;
+        } else if (gen == best_gen) {
+            /* Both slots validate at the same gen: the publication order is
+             * not observable, so the choice is ambiguous (design §7). The
+             * seq parity names the most recently published slot; flag it. */
+            rep->v3_slots_ambiguous++;
+            fsck_v3_note(rep, "both RT30 root slots valid at the same gen "
+                              "(ambiguous publish; seq parity used)");
+            if ((uint32_t)i == (uint32_t)(v->rt30.seq & 1u))
+                best_pba = pba;
+        }
+    }
+    if (!have)
+        return 0;                   /* empty base: clean */
+    /* Re-read the winning page to seed its blkptr checksum/flags. */
+    if (mbuf_read(v, best_pba, page) != 0)
+        return -1;
+    mbuf_ptr_set(root_out, best_pba, page,
+                 mbuf_page_chdr(page)->level == INVFS_PAGE_LEVEL_LEAF
+                 ? INVFS_BP_ROOT | INVFS_BP_LEAF
+                 : INVFS_BP_ROOT | INVFS_BP_INTERNAL);
+    return 0;
+}
+
+/* Allocator cross-check: a reachable page must be marked allocated in the
+ * metadata bitmap (the v2 "bitmap divergence" analogue). */
+static void fsck_v3_bitmap_check(invfs_volume *v, invfs_fsck_report *rep,
+                                 uint64_t pba)
+{
+    if (v->bitmap && !bit_get(v->bitmap, pba)) {
+        char b[128];
+        rep->v3_reachable_free++;
+        snprintf(b, sizeof b, "reachable base page pba %llu is FREE in the "
+                 "metadata bitmap", (unsigned long long)pba);
+        fsck_v3_note(rep, b);
+    }
+}
+
+static int fsck_v3_scan(invfs_volume *v, invfs_fsck_report *rep, int fix)
+{
+    invfs_blkptr root;
+    bt_stat st;
+    char err[128];
+    int rc;
+
+    (void)fix;   /* detection only; v3 repair is a follow-up WP */
+    rc = fsck_v3_rt30(v, rep);
+    if (rc < 0)
+        return -1;
+    if (rc != 0) {
+        /* RT30 absent/torn or a page size this build cannot address: the
+         * base is not walkable. Damage is already recorded; report and
+         * stop rather than read 4 KiB pages under a 16 KiB descriptor. */
+        return 0;
+    }
+    if (fsck_v3_root(v, rep, &root) < 0)
+        return -1;
+
+    if (root.pba == 0) {
+        /* Empty base. A non-empty RT30 delta would be a later-WP concern;
+         * in the WP-M4 skeleton the namespace is empty and clean. */
+        if (!rep->v3_damaged)
+            fprintf(stderr, "fsck(v3): base tree empty (clean)\n");
+        return 0;
+    }
+
+    err[0] = 0;
+    rc = btree_check(v, root, &st, err, sizeof err);
+    rep->v3_pages_walked = st.n_pages;
+    rep->v3_keys = st.nkeys;
+    if (rc != 0) {
+        char b[256];
+        if (err[0])
+            snprintf(b, sizeof b, "base tree walk failed: %s", err);
+        else
+            snprintf(b, sizeof b, "base tree walk failed (io error)");
+        fsck_v3_note(rep, b);
+        /* btree_check's error text distinguishes a cycle/shared child from
+         * a torn page or a structural (ordering/level) failure; count the
+         * former as cycles, everything else as bad pages. */
+        if (strstr(err, "cycle or shared child"))
+            rep->v3_cycles++;
+        else
+            rep->v3_bad_pages++;
+        return 0;
+    }
+
+    /* Allocator cross-check: a reachable page must be marked allocated in
+     * the metadata bitmap (the v2 "bitmap divergence" analogue). Only the
+     * root page is checked here: btree_check validates reachability but
+     * does not expose its visited set, and btree_reclaim (which could mark
+     * it) frees pages, which is out of scope. A full reachable-set diff
+     * needs a non-mutating mark walk; that lands with the reclaim WP.
+     * TODO(WP-M4): full reachable-set/bitmap cross-check. */
+    fsck_v3_bitmap_check(v, rep, root.pba);
+
     return 0;
 }

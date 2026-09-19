@@ -63,19 +63,50 @@ int main(int argc, char **argv)
         return 1;
     }
 
-    /* WP-M1: accept a format-v3 volume. The v3 namespace is empty in the
-     * skeleton (no base tree / delta yet), so the volume is trivially
-     * clean; the real v3 checker is WP-M4. Report-only or -f both exit 0
-     * without touching the v2 rebuild path. */
+    /* WP-M4: a format-v3 volume uses the metadata-v3 base tree, not the v2
+     * inode-record stream. vol_fsck_scan dispatches to the v3 checker (RT30
+     * root double-slot + base-tree walk). It detects and reports only -- v3
+     * repair is a follow-up WP -- so -f changes nothing here; damage exits
+     * nonzero. The v2 path below is untouched. */
     if (vol_sb(v)->vol_flags & VOLF_V3) {
-        if (!quiet)
-            printf("InvariantFS fsck: %s\n"
-                   "  state:        CLEAN\n"
-                   "  format:       v3 (metadata-v3 skeleton; empty)\n"
-                   "  live files:   0\n"
-                   "OK\n", img);
+        const invfs_superblock *sb = vol_sb(v);
+        if (vol_fsck_scan(v, &rep, fix) != 0) {
+            fprintf(stderr, "invf-fsck: v3 scan failed\n");
+            vol_close(v);
+            return 1;
+        }
+        if (!quiet) {
+            printf("InvariantFS fsck: %s\n", img);
+            printf("  state:        %s\n",
+                   sb->state == INVFS_STATE_CLEAN ? "CLEAN" :
+                   sb->state == INVFS_STATE_DIRTY ? "DIRTY" :
+                   sb->state == INVFS_STATE_RECOVERY ? "RECOVERY" : "UNKNOWN");
+            printf("  format:       v3 (metadata-v3 base tree)\n");
+            if (rep.v3_rt30_bad)
+                printf("  root desc:    TORN (magic/version/CRC)\n");
+            printf("  root seq:     %llu\n",
+                   (unsigned long long)rep.v3_root_seq);
+            printf("  pages walked: %llu\n",
+                   (unsigned long long)rep.v3_pages_walked);
+            printf("  base keys:    %llu\n",
+                   (unsigned long long)rep.v3_keys);
+            printf("  torn slots:   %llu\n",
+                   (unsigned long long)rep.v3_slots_torn);
+            if (rep.v3_slots_ambiguous)
+                printf("  ambiguous slots: %llu (both root slots valid at "
+                       "the same gen)\n",
+                       (unsigned long long)rep.v3_slots_ambiguous);
+            printf("  bad pages:    %llu\n",
+                   (unsigned long long)rep.v3_bad_pages);
+            printf("  cycles/shared: %llu\n",
+                   (unsigned long long)rep.v3_cycles);
+            if (rep.v3_reachable_free)
+                printf("  reachable-but-free pages: %llu (bitmap divergence)\n",
+                       (unsigned long long)rep.v3_reachable_free);
+            printf("%s\n", rep.v3_damaged ? "DAMAGED" : "OK");
+        }
         vol_close(v);
-        return 0;
+        return rep.v3_damaged ? 3 : 0;
     }
 
     /* WP25: a degraded mount (dev0 absent) is read-only -- report mode
