@@ -51,6 +51,52 @@ contract. Not a replacement for ext4/XFS on general workloads.
 * **POSIX layer** — mode/uid/gid enforced daemon-side, POSIX.1e ACLs stored as
   `system.posix_acl_*` xattr blobs, xattrs as opaque blobs.
 
+## Why FUSE?
+
+InvariantFS stores files as content segments + recipes. Reads traverse
+an AST, decompress segments through codecs (ZSTD, PPMd, FLAC, ...), and
+re-assemble byte ranges on demand. This is inherently user-space work:
+you cannot put ZSTD seekable, FLAC decode, or container windowing into a
+kernel module without pulling an entire codec ecosystem into ring-0.
+
+FUSE gives this for free. The alternatives are worse:
+
+* **In-kernel LKM** — you'd rewrite the FUSE daemon as a kernel module
+  that still calls user-space for every compressed segment. Two code
+  bases, kernel panics on AST parse bugs, and the same context switches
+  with extra ioctl marshalling. Not simpler, just harder to debug.
+* **ublk / block-device layer** — adds ext4/XFS on top, doubling the
+  metadata overhead and the page cache, for no measurable gain on a
+  content-addressed store that doesn't have fixed block semantics.
+* **eBPF hot-path** — the kernel verifier limits instruction count and
+  memory allocations; it cannot hold 512 MiB ZSTD dictionaries or run
+  multi-millisecond FLAC decode loops. Good for stats, not data-plane.
+* **Native library (libinvfs.so)** — forces every consumer (Jellyfin,
+  compilers, package managers) to link against a proprietary SDK,
+  defeating the point of a POSIX filesystem.
+
+The real overhead is not the FUSE protocol (libfuse3 uses io_uring for
+/dev/fuse I/O and is very fast). It is how the daemon handles requests
+internally. The optimizations that matter:
+
+* **FUSE writeback cache** (`FUSE_CAP_WRITEBACK_CACHE`) — kernel
+  aggregates small writes into large aligned chunks; the daemon receives
+  ideal 1 MiB+ sequential I/O for its append-only RAW layer.
+* **In-memory AST cache** — recipes loaded once at open, resolved from
+  RAM on every subsequent read. Zero disk metadata lookups in steady
+  state.
+* **Split thread pools** — fast-path pool for stat/lookup/readlink,
+  separate codec pool for decompression. A slow PPMd batch never blocks
+  an `ls -l`.
+* **Pre-fetching** — io_uring readahead on the next AST segment while
+  the current one is still decompressing.
+* **Inline data** — files under ~2 KiB skip the recipe entirely; data
+  lives in the inode record. Eliminates Shadow-zone reads for millions
+  of small files.
+
+With these, FUSE overhead becomes negligible compared to disk I/O and
+codec CPU cost.
+
 ## Non-features
 
 * Not a drop-in ext4/XFS/ZFS replacement for general workloads.
@@ -135,8 +181,10 @@ through `tools/run-e2e.sh` (serialized via `/tmp/invfs-e2e.lock`).
 
 ## Known issues
 
-* **systemd as PID 1 on a FUSE root is degraded** — journald/udevd/dbus fail;
-  use the busybox/OpenRC/runit fallback (documented per distro).
+* **systemd as PID 1 on a FUSE root is partially working** — WP66 added
+  `/run` tmpfs + cgroup2 pre-mount (H1) and fallocate/ioctl stubs (H3).
+  Remaining: runtime lookup corruption on two-device volumes (H2) needs
+  investigation; use the busybox/OpenRC/runit fallback meanwhile.
 * **`invf-fsck -f` after a fresh import** can break runtime FUSE directory
   lookups; offline reads stay fine. Under investigation.
 * **Two-device FUSE:** the first write can poison symlink-directory lookups
