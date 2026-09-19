@@ -159,14 +159,19 @@ static int fsck_rebuild_one(invfs_volume *v, uint64_t rec_pos, uint64_t inode_id
 
 /* Append a quarantine tombstone (v2 position-kill) for one broken record.
  * The record stays in the append-only area but every future scan drops it
- * from the name's version stack, which is what makes the cut permanent. */
+ * from the name's version stack, which is what makes the cut permanent.
+ * WP70: route through vol_append_slot so mapper volumes update both
+ * met0.active_offset and inode_area_pos -- a bare io_write at
+ * inode_area_pos left met0.active_offset stale, and the next vol_open
+ * reset inode_area_pos from met0.active_offset, trimming the active
+ * extent before the tombstone and making the walk miss it. */
 static int fsck_quarantine(invfs_volume *v, const char *name,
                            uint64_t killpos, uint64_t id)
 {
     invfs_inode_rec *rec;
     uint8_t *rb;
     uint32_t crc;
-    uint64_t pos = v->inode_area_pos;
+    uint64_t pos;
     uint8_t *old = NULL;
     uint32_t orl = 0;
     size_t nlen = strlen(name);
@@ -174,7 +179,7 @@ static int fsck_quarantine(invfs_volume *v, const char *name,
 
     if (nlen > INVFS_MAX_NAME) nlen = INVFS_MAX_NAME;
     rlen = INVFS_REC_HDR_LEN + nlen + 1;   /* name + NUL, no body */
-    if (pos + rlen + 4 > v->inode_area_end)
+    if (vol_append_slot(v, rlen + 4, &pos) != 0)
         return -1;
     rb = (uint8_t *)calloc(1, rlen);
     if (!rb) return -1;
@@ -198,7 +203,6 @@ static int fsck_quarantine(invfs_volume *v, const char *name,
         pba_ref_apply(v, old, orl, -1);
         free(old);
     }
-    v->inode_area_pos = pos + rlen + 4;
     free(rb);
     return 0;
 }
@@ -272,7 +276,7 @@ static int fsck_truncate_suffix(invfs_volume *v,
         if (nlen > present) nlen = present;
         body = INVFS_REC_HDR_LEN + nlen + 1 + hl +
                (size_t)k * sizeof(invfs_ast_block_entry) + ext_len;
-        if (v->inode_area_pos + body + 4 > v->inode_area_end)
+        if (vol_append_slot(v, body + 4, &p) != 0)
             { free(rec); return -1; }
         nr = (uint8_t *)malloc(body);
         if (!nr) { free(rec); return -1; }
@@ -295,7 +299,6 @@ static int fsck_truncate_suffix(invfs_volume *v,
             io_write(&v->io, nr, (uint32_t)body) != 0 ||
             io_write(&v->io, &crc, 4) != 0)
             { free(rec); free(nr); return -1; }
-        v->inode_area_pos = p + body + 4;
         newp = p;
         pba_ref_apply(v, nr, (uint32_t)body, +1);
     }

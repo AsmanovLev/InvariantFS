@@ -235,48 +235,37 @@ static int cmd_f2sabotage(const char *img, uint64_t victim_id)
 {
     int err = 0;
     invfs_volume *v = vol_open(img, &err);
+    uint64_t last_pos = 0;
     if (!v) die("open");
     (void)victim_id;
     if (vol_delete_file(v, "victimV.bin") != 0) die("delete victim");
     if (vol_flush(v) != 0) die("flush");
+
+    /* WP70: use vol_inode_next (mapper-aware) to locate the survivor record.
+     * The legacy linear scan of the contiguous inode area missed records that
+     * live in dynamic mapper extents (WP30). */
+    {
+        uint64_t pos = vol_inode_area_start(v);
+        for (;;) {
+            uint32_t magic, rl;
+            uint64_t id, sz;
+            char nm[INVFS_MAX_NAME + 1];
+            uint64_t next = vol_inode_next(v, pos, &magic, &id, &sz,
+                                           nm, sizeof nm, &rl);
+            if (!next) break;
+            if (magic == INODE_REC_MAGIC && strcmp(nm, "survivorS.bin") == 0)
+                last_pos = pos;
+            pos = next;
+        }
+    }
     vol_close(v);
+
+    if (!last_pos) die("survivor record not found");
 
     /* offline: zero the survivor record's entry pbas + restamp its CRC */
     {
         FILE *f = fopen(img, "r+b");
-        invfs_superblock sb;
-        uint64_t bm_blocks, iarea, iend, p, last_pos = 0;
         if (!f) die("fopen");
-        if (fread(&sb, sizeof sb, 1, f) != 1) die("sb read");
-        bm_blocks = (sb.total_blocks / 8 + INVFS_BLOCK_SIZE - 1) /
-                    INVFS_BLOCK_SIZE;
-        iarea = (sb.metadata_zone_start + bm_blocks + INVFS_JOURNAL_BLOCKS)
-                * (uint64_t)INVFS_BLOCK_SIZE;
-        iend = (sb.metadata_zone_start + sb.metadata_zone_blocks) *
-               (uint64_t)INVFS_BLOCK_SIZE;
-        p = iarea;
-        while (p + INVFS_REC_HDR_LEN <= iend) {
-            invfs_inode_rec rh;
-            if (fseek(f, (long)p, SEEK_SET) != 0 ||
-                fread(&rh, sizeof rh, 1, f) != 1) die("walk read");
-            if (rh.magic != INODE_REC_MAGIC && rh.magic != TOMBSTONE_MAGIC)
-                break;
-            if (rh.rec_len < INVFS_REC_HDR_LEN + 1 ||
-                rh.rec_len > INVFS_MAX_REC_LEN || p + rh.rec_len + 4 > iend)
-                break;
-            if (rh.magic == INODE_REC_MAGIC && rh.name_len &&
-                rh.name_len <= INVFS_MAX_NAME &&
-                rh.rec_len >= INVFS_REC_HDR_LEN + rh.name_len + 1) {
-                char nm[INVFS_MAX_NAME + 1];
-                if (fseek(f, (long)(p + INVFS_REC_HDR_LEN), SEEK_SET) != 0 ||
-                    fread(nm, rh.name_len, 1, f) != 1) die("name read");
-                nm[rh.name_len] = 0;
-                if (strcmp(nm, "survivorS.bin") == 0)
-                    last_pos = p;
-            }
-            p += (uint64_t)rh.rec_len + 4;
-        }
-        if (!last_pos) die("survivor record not found");
         {
             uint8_t *rb;
             invfs_inode_rec rh;
