@@ -1,0 +1,142 @@
+.TH INVF-PACK 8 "2026-09" "InvariantFS" "System Administration"
+.SH NAME
+invf-pack \- InvariantFS codecpack registry manager
+.SH SYNOPSIS
+.B invf-pack
+.RB [ \-\-repo
+.IR file://DIR | https://RAW_BASE ]
+.RB [ \-\-root
+.IR DIR ]
+.RB [ \-\-on\-volume
+.IR MNT ]
+.I command
+.RI [ args ]
+.SH DESCRIPTION
+.B invf-pack
+installs, removes, updates and verifies InvariantFS codec packs from a pack
+repository, and manages the per-family encoder alternatives. A pack is a
+directory
+.IR <name>/<version>/ "
+holding a
+.IR manifest ,
+helper source and a
+.I sha256
+file; the repository also ships a machine
+.I index.json
+built by
+.BR gen-index.py .
+.PP
+The repository source may be a local checkout
+.RB ( file://DIR )
+or a raw HTTP(S) base URL. Packs are installed into the host pack root
+(default
+.IR /.invariantfs/codecpacks ,
+override with
+.B \-\-root
+or
+.IR INVFS_PACK_ROOT ).
+.SH COMMANDS
+.TP
+.B list [family]
+List installed and available packs, optionally filtered by family.
+.TP
+.B search \fIterm\fR
+Substring match over pack name, format id, provided family and description.
+.TP
+.B info \fIpack\fR
+Print the manifest fields and, when installed, the install directory.
+.TP
+.B install \fIpack\fR
+Install a pack and report missing external tools. The default conflict
+policy is to
+.B install but not touch an existing pack
+that covers the same family; both remain and
+.B alternatives
+shows which is primary.
+.TP
+.B remove \fIpack\fR
+Uninstall every installed version of the pack (and its legacy symlink).
+.TP
+.B update [\fIpack\fR]
+Install newer versions for one pack or all installed packs.
+.TP
+.B verify [\fIpack\fR]
+Recompute the sha256 of every installed pack file and compare it against the
+pack's
+.I sha256
+manifest. A tampered pack fails. Signatures, when present, are recorded but
+.B not
+enforced.
+.TP
+.B alternatives \fIfamily\fR
+List the packs that provide a family (installed and available), their
+priority, and the current primary. The primary is the pack named by
+.B use
+if present, otherwise the highest-priority installed pack (then the
+highest-priority available one).
+.TP
+.B use \fIfamily pack\fR
+Set the primary pack for a family. This affects
+.B future sweeps only
+\- existing files are never re-encoded.
+.TP
+.B where
+Print the resolved repository, install root and the pack search order.
+.SH OPTIONS
+.TP
+.BI \-\-repo " spec"
+Repository location:
+.I file:///path
+or
+.IR https://host/raw\-base .
+Defaults to
+.IR INVFS_PACK_REPO ,
+then the upstream GitHub raw URL.
+.TP
+.BI \-\-root " dir"
+Install root (host). Default
+.IR /.invariantfs/codecpacks .
+.TP
+.BI \-\-on\-volume " mnt"
+Install under
+.IR <mnt>/.invariantfs/codecpacks
+for self-hosting / root-mode boots. The argument must be a mounted directory;
+mount the volume image first.
+.TP
+.B \-\-version " v"
+Select an exact pack version at install time.
+.SH FILES
+.TP
+.I /.invariantfs/codecpacks
+Host pack root (trusted, admin-provided). Each pack lands at
+.IR <root>/<name>/<version>/ ;
+a legacy
+.I <root>/<name>.codecpack
+symlink is created for the v1 engine probe.
+.TP
+.I /.invariantfs/codecpacks/alternatives.conf
+Per-family primary selection written by
+.BR use .
+.TP
+.I $INVFS_CODECPACKS
+Colon-separated additional pack search directories (engine side).
+.SH ENVIRONMENT
+.TP
+.B INVFS_PACK_REPO
+Default repository when
+.B \-\-repo
+is omitted.
+.TP
+.B INVFS_PACK_ROOT
+Default install root when
+.B \-\-root
+and
+.B \-\-on\-volume
+are omitted.
+.SH EXIT STATUS
+0 on success; non-zero when a pack is not found, a sha256 check fails, an
+external dependency check refuses, or an I/O error occurs.
+.SH SEE ALSO
+.BR invf-sweep (8),
+.BR invf-fuse (8),
+.BR invarifs (7)
