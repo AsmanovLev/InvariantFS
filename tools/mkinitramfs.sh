@@ -10,18 +10,20 @@ KVER="$(uname -r)"
 cd "$IR"
 rm -f "$ROOT/vm/initramfs.cpio.gz"
 
+# vm/ is gitignored, so a fresh checkout has only the tracked /init; create
+# the directory skeleton the recipe writes into (WP64: reproducible builds).
+mkdir -p bin sbin usr/local/bin usr/local/lib lib64 modules \
+         proc sys dev tmp mnt/invfs run
+
 # busybox
 cp "$ROOT/bin/busybox-static" bin/busybox
 chmod 755 bin/busybox
 ln -sf busybox bin/sh
-# Applet symlinks: tools/initramfs-init.sh invokes mount/grep/cat/sleep/
-# mkdir/chroot as bare commands, and busybox only exposes an applet when
-# argv[0] (or a symlink) names it. Without these the initramfs dies at the
-# first `mount -t proc`. Harmless for the sweepboot branch.
-for a in mount umount cat grep sed awk cut head tail sort find mkdir \
-         chroot insmod ls cp mv rm sleep dmesg printf switch_root; do
-    ln -sf busybox "bin/$a"
-done
+# Applet symlinks: /init calls mount/grep/cat/insmod/chroot/... by name, so
+# install the full applet set (the tracked tree has no skeleton symlinks).
+# `busybox --install -s` records the build-time absolute path as the link
+# target, which does not exist in the guest; create relative links instead.
+for a in $(./bin/busybox --list); do ln -sf busybox "bin/$a"; done
 
 # engine daemon + shared libs (host paths -> /usr/local)
 cp "$ROOT/bin/invf-fuse" usr/local/bin/
