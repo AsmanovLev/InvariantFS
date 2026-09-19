@@ -1,3 +1,13 @@
+invfs (0.4.0-1) unstable; urgency=medium
+
+  * WP58a: v3 inode record — variable-length names (36-byte prefix + FAM).
+  * WP60: codec-pack registry + invfs-pack manager.
+  * WP62: host bootstrap installer (curl|sh) + make release.
+  * WP63/WP64: Arch and Void rootfs install + boot on InvariantFS.
+  * README rewritten as a feature overview.
+
+ -- InvariantFS Developers <invfs@localhost>  Sat, 19 Sep 2026 00:00:00 +0000
+
 invfs (0.2.1-1) unstable; urgency=medium
 
   * WP28: embed INO2 metadata in vol_create_file for 2x import speedup.

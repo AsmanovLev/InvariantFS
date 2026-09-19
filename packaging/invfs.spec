@@ -2,7 +2,7 @@
 %global debug_package %{nil}
 
 Name:           invfs
-Version:        0.2.1
+Version:        0.4.0
 Release:        1%{?dist}
 Summary:        Semantic content-addressed filesystem with a bit-exactness invariant
 
