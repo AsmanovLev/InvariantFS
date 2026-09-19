@@ -30,7 +30,7 @@ FUSE_LIBS   := $(shell pkg-config --libs fuse3)
 CORE    := volume vol_cpack helper_exec vol_png vol_seal vol_repair vol_rollback \
            vol_resize vol_fsck vol_crash vol_exer vol_dedupe vol_textzone \
            vol_heat vol_sweep vol_read vol_write vol_records vol_ast \
-           vol_dirs vol_tier vol_meta_merge \
+           vol_dirs vol_tier vol_meta_merge vol_metabuf \
            arc crc32c lz4 flacx tarx pngx blkio miniz blake3 blake3_dispatch blake3_portable ppmd8 ppmd8enc ppmd8dec ppmd_codec codec bcj_x86 rs
 CORE_O  := $(addprefix $(OBJ)/,$(addsuffix .o,$(CORE)))
 B3      := blake3 blake3_dispatch blake3_portable
@@ -57,7 +57,8 @@ $(OUT)/invf-$(1): $$(OBJ)/$(1).o $(CORE_O)
 endef
 
 # CLI tools (main in src/cli/<name>.c)
-CLI_MAINS := mkfs verify fsck cp cat ls stat arctest blkio_test resize migrate-v2
+CLI_MAINS := mkfs verify fsck cp cat ls stat arctest blkio_test resize migrate-v2 \
+             metabuf_test
 $(foreach t,$(CLI_MAINS),$(eval $(call TOOL_RULE,$(t),)))
 
 # WP60: invfs-pack is named differently (invfs- not invf-)
@@ -105,7 +106,8 @@ $(OBJ)/meta_probe.o: tools/meta_probe.c | $(OBJ)
 
 clean:
 	rm -rf $(OBJ) $(TOOLS:%=$(OUT)/%) $(OUT)/invf-codec_test \
-	       $(OUT)/invf-helper_exec_test $(OUT)/invf-fuzz
+	       $(OUT)/invf-helper_exec_test $(OUT)/invf-metabuf_test \
+	       $(OUT)/invf-fuzz
 
 # ---- tests ---------------------------------------------------------------
 # unit tier: fast, no I/O images
@@ -131,11 +133,12 @@ fuzz-ci: $(OUT)/invf-fuzz
 	$(OUT)/invf-fuzz 10000 0x1CF51EE5
 
 test: $(OUT)/invf-arctest $(OUT)/invf-blkio_test $(OUT)/invf-codec_test \
-      $(OUT)/invf-helper_exec_test
+      $(OUT)/invf-helper_exec_test $(OUT)/invf-metabuf_test
 	$(OUT)/invf-arctest
 	$(OUT)/invf-blkio_test
 	$(OUT)/invf-codec_test
 	$(OUT)/invf-helper_exec_test
+	$(OUT)/invf-metabuf_test
 
 # e2e tier: tmpfs images under /dev/shm; test-jxl needs cjxl/djxl installed
 e2e: all

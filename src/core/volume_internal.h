@@ -538,6 +538,25 @@ typedef struct invfs_volume {
     uint64_t meta_active_offset;    /* byte offset within active extent */
     uint64_t meta_free_blocks;      /* metadata free block counter */
     uint8_t *meta_type_bitmap;      /* per-block type (DATA=0/META=1), allocated */
+    /* ---- WP-M2: metadata-v3 base-page state (design §12, D3) ----------
+     * rt30 is the RT30 root-area descriptor as loaded from block 0 and
+     * CRC-validated (mbuf_rt30_load); rt30_present is 1 exactly when that
+     * validation passed. The descriptor's root_slot[2] is the double-slot
+     * base root and seq is the monotone publication generation; recovery
+     * picks the slot whose page validates and carries the higher gen
+     * (mbuf_root_read). WP-M1's v3_probe_rt30 still does its own read for
+     * the skeleton log line -- wiring it to mbuf_rt30_load belongs to the
+     * WP that makes v3 writable, because volume.c is outside WP-M2's file
+     * scope. The allocator's bootstrap cursor hands out the two root-area
+     * pages WP-M1 reserved after the mapper table before falling through
+     * to the free-space pool; mb_alloc_cursor/fail_run are the per-pool
+     * cursors mirroring the v2 raw/shadow pair. */
+    invfs_rt30 rt30;
+    int      rt30_present;
+    uint64_t mb_boot_cursor;        /* next reserved root-area pba */
+    uint64_t mb_boot_end;           /* one past the reserved root-area pages */
+    uint64_t mb_alloc_cursor;       /* free-space cursor within the meta zone */
+    uint64_t mb_alloc_fail_run;     /* smallest proven-unavailable run (0=?) */
     /* WP30 Phase 6: merge-in-progress flag for concurrency safety.
      * Set during vol_meta_merge_run, checked in meta_get_append_pos to
      * prevent concurrent metadata operations from reading partially-updated
