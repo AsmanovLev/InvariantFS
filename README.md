@@ -145,6 +145,39 @@ Requires `gcc`, `libfuse3-dev`, `zlib1g-dev`, `libzstd-dev` (doxygen+graphviz
 optional, for `make docs`). If the default `cc` in your environment is a broken
 ccache symlink, use `make CC=gcc`.
 
+## Install (host bootstrap)
+
+`packaging/bootstrap.sh` installs the `invf-*` host tools from a GitHub Release
+(or builds from source). It never installs runtime libraries and never silently
+escalates to root: if it needs root it prints the `sudo sh` command and exits.
+
+```sh
+# release (picked automatically when assets exist); prompts unless --yes
+curl -fsSL https://github.com/AsmanovLev/InvariantFS/releases/latest/download/bootstrap.sh \
+  | sudo sh -s -- --yes
+
+# pin a release / choose a prefix
+curl -fsSL .../bootstrap.sh | sudo sh -s -- --version v0.3.0 --prefix /usr/local
+
+# from a local checkout (no network); add --dry-run to just print the plan
+sh packaging/bootstrap.sh --source --prefix /usr/local
+
+# offline / inspect-before-run, then execute in two steps
+sh packaging/bootstrap.sh --file invfs-v0.3.0-x86_64.tar.zst --download-only
+sh packaging/bootstrap.sh --file invfs-v0.3.0-x86_64.tar.zst --run
+```
+
+The release tarball is verified against `SHA256SUMS` **before** it is unpacked
+or executed, every installed path is recorded in
+`$PREFIX/lib/invfs/installed.manifest`, and `--uninstall` removes exactly those
+paths. The runtime deps (`fuse3`, `zstd`, `zlib`) come from your package
+manager; the script prints the right command for Debian/Arch/Gentoo/Void/Fedora
+via `/etc/os-release` but does not install them. `--list`, `--dry-run`,
+`--no-systemd`, `--no-dracut`, `--no-mkinitcpio` and `--no-initramfs-tools` are
+also supported. `make release` produces
+`dist/invfs-<ver>-<arch>.tar.zst` + `dist/SHA256SUMS`; regression coverage is
+`tools/test-bootstrap.sh`.
+
 ## Tools
 
 | Tool | Purpose |
@@ -230,6 +263,7 @@ Full guide and pitfalls: `docs/GENTOO-INSTALL.md`.
 make test     # 4722 unit checks (core + codecs + recipes + CLI)
 make e2e      # serialized end-to-end FUSE suites (flock-protected)
 make flakey   # chaos/soak (torn sweep, error storm, compact-flip)
+bash tools/test-bootstrap.sh   # host bootstrap: release+sha256+manifest+uninstall
 ```
 
 Mapper-era suites worth knowing: `tools/test-meta-extent-walk.sh`,

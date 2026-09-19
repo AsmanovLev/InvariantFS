@@ -18,11 +18,25 @@
 
 export PATH=/usr/local/bin:/sbin:/bin:/usr/sbin:/usr/bin
 
+# The initramfs ships only bin/busybox + bin/sh; install the remaining
+# applet symlinks (mount, sleep, grep, insmod, chroot, ...). Without this
+# /init dies at "mount: not found" before it can even probe block devices.
+/bin/busybox --install -s /bin 2>/dev/null || true
+
 # Mount essential filesystems
 mount -t devtmpfs devtmpfs /dev 2>/dev/null
 mount -t proc proc /proc
 mount -t sysfs sysfs /sys
 sleep 1
+
+# FUSE is a loadable module on distro kernels (CONFIG_FUSE_FS=m): load the
+# matching fuse.ko the initramfs carries at /fuse.ko BEFORE invf-fuse opens
+# /dev/fuse. Without this the mount never appears and we drop to a shell
+# after the 120s wait below.
+if [ ! -e /dev/fuse ]; then
+    busybox insmod /fuse.ko 2>/dev/null || true
+    [ -e /dev/fuse ] || busybox mknod /dev/fuse c 10 229 2>/dev/null || true
+fi
 
 # ---- cmdline options -----------------------------------------------------
 get_opt() {  # $1 = key
@@ -123,10 +137,15 @@ mount --rbind /dev  /mnt/invfs/dev  2>/dev/null
 
 # Kernel modules: the guest kernel has virtio-net as a module; initramfs
 # carries net_failover + virtio_net built from the same tree. insmod BEFORE
-# the chroot owns the network devices.
-busybox insmod /lib/modules/failover.ko 2>/dev/null
-busybox insmod /lib/modules/net_failover.ko 2>/dev/null
-busybox insmod /lib/modules/virtio_net.ko 2>/dev/null
+# the chroot owns the network devices. Accept either layout (mkinitramfs.sh
+# writes /lib/modules; older skeletons used /modules).
+for mod in failover net_failover virtio_net; do
+    for p in "/lib/modules/$mod.ko" "/modules/$mod.ko"; do
+        if [ -f "$p" ]; then
+            busybox insmod "$p" 2>/dev/null && break
+        fi
+    done
+done
 
 echo "Chrooting to InvFS root..."
 export INVFS_DEV1

@@ -13,6 +13,9 @@ build/
 *.img
 vm/
 
+# release artifacts (make release)
+dist/
+
 # runtime logs
 logs/
 

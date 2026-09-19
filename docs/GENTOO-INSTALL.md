@@ -39,7 +39,41 @@ legacy QEMU steps below are superseded.
   `Cannot utime: No space left on device` + `Directory renamed before
   its status could be extracted` on a first-generation stage3 import.
   `invf-import` on the unmounted volume does the same 66k-object tree in
-  ~35 s cleanly.
+   ~35 s cleanly.
+
+### Single-device volume (WP62 re-run, Sep 2026)
+
+The two-device layout below is the general case; a **single-device** volume is
+the minimal form (no `INVFS_DEV1`, no shadow disk) and is what the direct-boot
+path was re-verified on. Exact sequence:
+
+```bash
+truncate -s 15G root.img
+INVFS_META_FRAC=16 bin/invf-mkfs root.img 15
+# extract stage3 into an ordinary directory, then import offline:
+bin/invf-import root.img /path/to/stage3-root   # 3076 dirs, 54026 files, 8986 symlinks
+bin/invf-fuse root.img /mnt/invfs
+tools/configure-guest.sh /mnt/invfs
+fusermount3 -u /mnt/invfs
+tools/mkinitramfs.sh                            # -> vm/initramfs.cpio.gz
+# direct boot, single volume, 3 GB RAM:
+qemu-system-x86_64 -machine q35,accel=kvm -m 3G -cpu host -smp 2 \
+  -kernel /boot/vmlinuz-$(uname -r) -initrd vm/initramfs.cpio.gz \
+  -append console=ttyS0,115200 \
+  -drive id=vol,file=root.img,format=raw,if=ide \
+  -netdev user,id=net0,hostfwd=tcp::2222-:22 -device virtio-net-pci,netdev=net0 \
+  -display none -serial stdio -monitor none -no-reboot
+```
+
+The initramfs carries `fuse.ko` plus the guest NIC modules. `tools/mkinitramfs.sh`
+writes the latter under **`/lib/modules/`**, and `tools/initramfs-init.sh` must
+(a) install the busybox applet symlinks (`/bin/busybox --install -s /bin`) and
+(b) `insmod /fuse.ko` before `invf-fuse` opens `/dev/fuse` — a distro kernel
+ships FUSE as a module (`CONFIG_FUSE_FS=m`). `switch_root` is still not used:
+the init `chroot`s into the FUSE mount.
+
+**Do not run `invf-fsck -f` on a freshly imported volume** — see the pitfalls
+table; the repair path can drop the live top-level usr-merge symlinks.
 
 ### Step V1: Format the volume (two devices)
 
@@ -202,6 +236,9 @@ Then from the host: `ssh -p 2222 root@localhost` (dhcpcd assigns
 | ENOSPC mid-extract through FUSE | tar on a live InvFS mount does not handle the dcache ghost face | import offline with `invf-import` |
 | getty prints nothing on ttyS0 | `--noclear` and legacy 38400 defaults lose the serial line | use the `s0` line above with `-L -w 115200` |
 | ring_"respawning too fast" | exec failed 6+ times in a row | look for the first `cannot execute` message above it |
+| `/init: line 23: mount: not found` / `sleep: not found` | the initramfs ships only `bin/busybox` + `bin/sh`, no applet symlinks | `initramfs-init.sh` runs `/bin/busybox --install -s /bin` before any command |
+| `chroot: can't execute '/sbin/init': No such file or directory` | guest usr-merge (`/sbin -> usr/bin`, `/lib64 -> usr/lib64`); if those top-level symlinks are absent the ELF loader is lost and execve returns ENOENT | verify the top-level symlinks imported; do **not** run `invf-fsck -f` (below) |
+| `invf-fsck -f` reports `orphans: N -> freed` and afterwards the root lacks `/bin /sbin /lib /lib64 /boot /dev` | on a fresh stage3 import `invf-fsck -f` mis-classifies live top-level entries as orphans and removes them | use plain read-only `invf-fsck` on a fresh import; defer `-f` until the engine bug is fixed |
 
 ## QEMU/VM Path
 

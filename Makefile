@@ -172,6 +172,31 @@ e2e: all
 flakey:
 	bash tools/test-flakey.sh
 
+# ---- release --------------------------------------------------------------
+# Build the host-installer release artifact consumed by packaging/bootstrap.sh:
+#   dist/invfs-<ver>-<arch>.tar.zst   (bin + codecpacks + packaging tree)
+#   dist/SHA256SUMS
+# bootstrap.sh downloads both and verifies SHA256 before unpack/exec.
+ARCH ?= $(shell uname -m)
+RELEASE_VERSION ?= $(VERSION)
+RELEASE_NAME := invfs-$(RELEASE_VERSION)-$(ARCH)
+DIST := dist
+RELEASE_DIR := $(DIST)/$(RELEASE_NAME)
+
+release: all
+	rm -rf $(RELEASE_DIR) $(DIST)/$(RELEASE_NAME).tar.zst $(DIST)/SHA256SUMS
+	mkdir -p $(RELEASE_DIR)/tools
+	cp -a bin $(RELEASE_DIR)/bin
+	rm -f $(RELEASE_DIR)/bin/invf-codec_test $(RELEASE_DIR)/bin/invf-fuzz
+	cp -a packaging $(RELEASE_DIR)/packaging
+	cp -a tools/codecpacks $(RELEASE_DIR)/tools/codecpacks
+	printf '%s\n' '$(RELEASE_VERSION)' > $(RELEASE_DIR)/VERSION
+	tar -C $(DIST) -cf - $(RELEASE_NAME) \
+		| zstd -q -T0 -19 -f -o $(DIST)/$(RELEASE_NAME).tar.zst
+	( cd $(DIST) && sha256sum $(RELEASE_NAME).tar.zst > SHA256SUMS )
+	@echo "release: $(DIST)/$(RELEASE_NAME).tar.zst"
+	@cat $(DIST)/SHA256SUMS
+
 # ---- docs -----------------------------------------------------------------
 # ctags index (impl_docs/FUNCTIONS.md, TYPES.md, functions/, types/) plus the
 # doxygen HTML browser (impl_docs/doxygen/html, gitignored). Requires doxygen
@@ -183,7 +208,7 @@ docs:
 docs-clean:
 	rm -rf impl_docs/doxygen
 
-.PHONY: all clean test e2e fuzz flakey docs docs-clean
+.PHONY: all clean test e2e fuzz flakey docs docs-clean release
 -include $(wildcard $(OBJ)/*.d)
 
 $(OUT)/invf-stats: $(OBJ)/invf-stats.o $(CORE_O)
