@@ -183,11 +183,55 @@ typedef struct {
     uint32_t nlink;
     uint64_t rdev;                 /* CHR/BLK device number */
     char     target[INVFS_META_TARGET_MAX];  /* symlink target (NUL-terminated) */
+    /* ---- WP-M5 (v3) additive tail ------------------------------------
+     * v2 callers get 0 (meta_parse_ext memsets the struct first). For a v3
+     * volume `size` is the inode row's logical size and `recipe` is the
+     * WP-M2 blkptr to the immutable AST blob (zero until WP-M8). target[]
+     * stays empty for v3: the symlink target rides in the recipe blob. */
+    uint64_t size;
+    invfs_blkptr recipe;
 } invfs_meta_pub;
 
 /* read metadata for an inode: 0 = found, -1 = none/corrupt/not indexed.
  * target is only filled for INVFS_ITYP_LNK. */
 int      vol_get_meta(invfs_volume *v, uint64_t inode_id, invfs_meta_pub *out);
+
+/* ---- WP-M5: v3 inode tree (metadata-v3 base B+-tree) ----------------
+ * The v3 stable tier stores one row per inode keyed by inode_id (design
+ * §12). This is the engine-level surface WP-M6/M8 build the namespace and
+ * recipe paths on; until then it is what makes a v3 volume writable enough
+ * to create and stat an inode. Mutations go straight into the base tree
+ * (no delta yet, WP-M7) and publish the root through the WP-M2 double
+ * slot. `recipe` is an opaque content-addressed reference (0 = empty /
+ * no content); WP-M5 does not decode it (WP-M8), and xattrs are not
+ * exposed here (WP-M7). */
+typedef struct {
+    uint32_t     type;      /* INVFS_ITYP_* */
+    uint16_t     mode;
+    uint32_t     uid;
+    uint32_t     gid;
+    int64_t      mtime;
+    int64_t      atime;
+    uint32_t     nlink;
+    uint64_t     rdev;
+    uint64_t     size;
+    invfs_blkptr recipe;    /* immutable AST blob ref (0 = none) */
+} invfs_v3_inode;
+
+/* Read the row for inode_id. Returns 1 = present (*out filled), 0 = absent,
+ * -1 = I/O / malformed row. */
+int vol_v3_inode_get(invfs_volume *v, uint64_t inode_id, invfs_v3_inode *out);
+/* Insert or replace the row. `in->nlink` must be >= 1 (a zero-nlink row is
+ * deleted, not stored). COW-writes the base pages, makes them durable, then
+ * publishes the new root. 0 = ok, -1 = error/ENOSPC. */
+int vol_v3_inode_put(invfs_volume *v, uint64_t inode_id,
+                     const invfs_v3_inode *in);
+/* Physical delete of the row (no tombstone). An absent id is not an error.
+ * 0 = ok, -1 = error. */
+int vol_v3_inode_delete(invfs_volume *v, uint64_t inode_id);
+/* The current base root (pba/gen/checksum); pba == 0 for an empty tree.
+ * WP-M6/M11 read it to scan the namespace. 0 = ok, -1 = error. */
+int vol_v3_base_root(invfs_volume *v, invfs_blkptr *out);
 /* rewrite `name`'s record carrying `meta` (xattrs preserved); data blocks and
  * the AST are untouched — the L2P keys move to the new inode id internally.
  * Returns the new inode id, or 0 on failure (volume untouched). */

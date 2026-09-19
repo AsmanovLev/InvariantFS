@@ -1046,6 +1046,54 @@ typedef struct invfs_meta_ext_hdr {
 } invfs_meta_ext_hdr;    /* 48 bytes */
 #pragma pack(pop)
 
+/* ---- WP-M5: metadata-v3 inode row (base B+-tree value) ----------------
+ * The v3 stable tier keeps one row per inode in the base B+-tree, keyed by
+ * inode_id. WP-M5 freezes the key as u64 big-endian (byte-lexicographic
+ * order == numeric order; see vol_btree.c); WP-M6's dirent keys are a
+ * separate namespace and never collide with it.
+ *
+ * This value layout is versioned so WP-M6/M7 extend it by appending fields
+ * (and bumping row_version) -- existing fields are never repurposed. All
+ * values are little-endian (host LE, like the INO2 ext). The row carries
+ * core attributes, nlink and a content-addressed recipe *reference*; the
+ * recipe itself is an immutable AST blob (WP-M8), not inlined, so the row
+ * stays small and cacheable. The symlink target lives in the recipe blob,
+ * as v2 kept it in the INO2 ext.
+ *
+ *   u32 row_version   = INVFS_V3_INODE_ROW_VERSION
+ *   u32 type          INVFS_ITYP_* (invarifs.h)
+ *   u16 mode          permission bits
+ *   u32 uid, gid
+ *   i64 mtime, atime
+ *   u32 nlink
+ *   u64 rdev
+ *   u64 size
+ *   invfs_blkptr recipe   -> immutable AST blob (0 = no content yet)
+ *   u32 xattr_len     TLVs, same encoding as the INO2 ext
+ *   [xattr bytes]
+ *
+ * WP-M5 always writes xattr_len == 0: the xattr tree is WP-M7. The field
+ * is frozen here so that WP does not need a format break. */
+#define INVFS_V3_INODE_ROW_VERSION 1u
+#define INVFS_V3_INODE_XATTR_MAX   4096u
+#pragma pack(push, 1)
+typedef struct {
+    uint32_t     row_version;
+    uint32_t     type;
+    uint16_t     mode;
+    uint32_t     uid;
+    uint32_t     gid;
+    int64_t      mtime;
+    int64_t      atime;
+    uint32_t     nlink;
+    uint64_t     rdev;
+    uint64_t     size;
+    invfs_blkptr recipe;
+    uint32_t     xattr_len;
+} invfs_v3_inode_row;    /* 82 bytes; [xattr bytes] follow */
+#define INVFS_V3_INODE_ROW_FIXED ((uint32_t)sizeof(invfs_v3_inode_row))
+#pragma pack(pop)
+
 /* Longest record this format can produce: the header, the (v2) recipe
    header, the most segments a v2 num_blocks can count, and the largest
    children blob the writer will build. A record longer than this was not

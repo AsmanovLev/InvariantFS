@@ -1208,5 +1208,266 @@ int btree_reclaim(invfs_volume *v, invfs_blkptr old_root, invfs_blkptr keep_root
     return (int)freed;
 }
 
+/* ------------------------------------------------------------------ */
+/* WP-M5: v3 inode row codec + get/put/delete                          */
+/*                                                                    */
+/* The stable tier keeps one row per inode in the base B+-tree. The key */
+/* is inode_id as u64 big-endian so the tree's byte-lexicographic order  */
+/* equals numeric inode order (WP-M5 freezes this; WP-M6's dirent keys   */
+/* live in a separate prefix namespace). The value is the versioned      */
+/* invfs_v3_inode_row from invarifs.h.                                   */
+/*                                                                    */
+/* This WP does NOT free superseded pages (COW; the reachability diff    */
+/* is btree_reclaim, scheduled by WP-M15) and does NOT implement the     */
+/* delta tier (WP-M7): every put/delete rewrites the base tree and       */
+/* publishes the root via the WP-M2 double slot.                         */
+/* ------------------------------------------------------------------ */
+
+/* Inode key: u64 big-endian, 8 bytes. */
+static void v3_ino_key(uint64_t id, uint8_t k[8])
+{
+    int i;
+    for (i = 0; i < 8; i++)
+        k[i] = (uint8_t)(id >> (56 - 8 * i));
+}
+
+/* Encode the fixed row prefix. WP-M5 writes xattr_len == 0 (the xattr tree
+ * is WP-M7); the field is frozen so that WP needs no format break. */
+static uint16_t v3_ino_encode(const invfs_v3_inode *in, uint8_t *buf)
+{
+    invfs_v3_inode_row r;
+    memset(&r, 0, sizeof r);
+    r.row_version = INVFS_V3_INODE_ROW_VERSION;
+    r.type        = in->type;
+    r.mode        = in->mode;
+    r.uid         = in->uid;
+    r.gid         = in->gid;
+    r.mtime       = in->mtime;
+    r.atime       = in->atime;
+    r.nlink       = in->nlink;
+    r.rdev        = in->rdev;
+    r.size        = in->size;
+    r.recipe      = in->recipe;
+    r.xattr_len   = 0;
+    memcpy(buf, &r, sizeof r);
+    return (uint16_t)sizeof r;
+}
+
+static int v3_ino_decode(const uint8_t *buf, uint16_t len, invfs_v3_inode *out)
+{
+    invfs_v3_inode_row r;
+    if (len < INVFS_V3_INODE_ROW_FIXED)
+        return -1;
+    memcpy(&r, buf, sizeof r);
+    if (r.row_version != INVFS_V3_INODE_ROW_VERSION)
+        return -1;   /* a newer format: fail loudly, never misread */
+    if (r.xattr_len > (uint32_t)(len - INVFS_V3_INODE_ROW_FIXED))
+        return -1;
+    out->type   = r.type;
+    out->mode   = r.mode;
+    out->uid    = r.uid;
+    out->gid    = r.gid;
+    out->mtime  = r.mtime;
+    out->atime  = r.atime;
+    out->nlink  = r.nlink;
+    out->rdev   = r.rdev;
+    out->size   = r.size;
+    out->recipe = r.recipe;
+    return 0;
+}
+
+/* Bring the v3 base engine up once per handle. mbuf_init resets the
+ * bootstrap cursor, so calling it per operation would re-hand out the
+ * reserved root-area pages; the open path sets v3_mbuf_ready after calling
+ * it, and this guard covers callers that reach the API another way. */
+static int v3_ready(invfs_volume *v)
+{
+    if (!v)
+        return -1;
+    if (!v->v3_mbuf_ready) {
+        mbuf_init(v);
+        /* WP-M5: do NOT draw base pages from the WP-M2 bootstrap pool (the
+         * two pages WP-M1 reserved after the mapper table). mbuf_init resets
+         * that cursor on every open, so handing the same pair out again in a
+         * later session would let a COW write overwrite a page the current
+         * root still references (an untouched sibling leaf, say). Base pages
+         * come from the shared allocator instead, which is bitmap-tracked
+         * and durable across reopen. TODO(WP-M5/v3-mkfs): WP-M2 records that
+         * a v3 mkfs should leave a base-page region free; until then the
+         * reserved pair stays unused. */
+        v->mb_boot_cursor = v->mb_boot_end;
+        v->v3_mbuf_ready = 1;
+    }
+    return 0;
+}
+
+/* Current base root as a verified blkptr (pba/gen/checksum). pba == 0 means
+ * the tree is empty. */
+static int v3_base_root(invfs_volume *v, invfs_blkptr *out)
+{
+    uint8_t page[INVFS_BLOCK_SIZE];
+    uint64_t pba = 0, gen = 0;
+    int rc;
+
+    if (!out)
+        return -1;
+    memset(out, 0, sizeof *out);
+    rc = mbuf_root_read(v, &pba, &gen);
+    if (rc < 0)
+        return -1;
+    if (rc == 1)
+        return 0;   /* no live root slot: empty tree */
+    if (mbuf_read(v, pba, page) != 0)
+        return -1;
+    mbuf_ptr_set(out, pba, page, INVFS_BP_ROOT);
+    return 0;
+}
+
+/* Persist the dirty bitmap range. Base pages come from the shared allocator
+ * (WP-M2 falls back to the shadow pool because a v3 mkfs still marks the
+ * whole metadata zone allocated); their bits must land before RT30 names a
+ * page, or a reopen could hand the same block out again. Mirrors the v2
+ * partial-bitmap write in vol_flush. */
+static int v3_bitmap_flush(invfs_volume *v)
+{
+    uint64_t bm_bytes = (uint64_t)v->bitmap_blocks * INVFS_BLOCK_SIZE;
+    uint64_t base = v->sb.metadata_zone_start * INVFS_BLOCK_SIZE;
+    uint64_t lo, hi;
+
+    if (v->bm_lo > v->bm_hi)
+        return 0;   /* clean */
+    lo = v->bm_lo;
+    hi = v->bm_hi;
+    if (hi > bm_bytes)
+        hi = bm_bytes;
+    /* round out to whole blocks: the unbuffered path must not partially
+     * read-modify-write a bitmap block */
+    lo -= lo % INVFS_BLOCK_SIZE;
+    hi = ((hi + INVFS_BLOCK_SIZE - 1) / INVFS_BLOCK_SIZE) * INVFS_BLOCK_SIZE;
+    if (hi > bm_bytes)
+        hi = bm_bytes;
+    if (hi > lo) {
+        if (io_seek(&v->io, base + lo) != 0 ||
+            io_write(&v->io, v->bitmap + lo, (size_t)(hi - lo)) != 0)
+            return -1;
+    }
+    v->bm_lo = 1;
+    v->bm_hi = 0;
+    return 0;
+}
+
+/* Make the new tree durable, then publish its root. `old_gen` is the gen of
+ * the pre-mutation root (0 for an empty tree). An empty result (delete of
+ * the last inode) is represented by a fresh empty leaf so RT30 never has to
+ * name pba 0. TODO(WP-M4/M5): the M4 fsck walker must accept an empty leaf
+ * as the empty-tree root (btree_check currently rejects it); alternatively
+ * M6+ can store the empty base as a null root slot. */
+static int v3_publish(invfs_volume *v, invfs_blkptr root, uint64_t old_gen)
+{
+    if (root.pba == 0) {
+        uint8_t page[INVFS_BLOCK_SIZE];
+        uint64_t gen = old_gen + 1, pba;
+
+        pba = mbuf_alloc(v, gen);
+        if (!pba)
+            return -1;
+        mbuf_page_init(page, INVFS_PAGE_LEVEL_LEAF, gen);
+        if (mbuf_write(v, pba, page) != 0) {
+            mbuf_free(v, pba);
+            return -1;
+        }
+        mbuf_ptr_set(&root, pba, page, INVFS_BP_LEAF | INVFS_BP_ROOT);
+    }
+    /* structure-before-reference (WP-M3): the COW pages + the allocation
+     * bitmap are durable before RT30 points at the new root. */
+    if (v3_bitmap_flush(v) != 0)
+        return -1;
+    if (vmux_barrier(v, "v3 inode pages") < 0)
+        return -1;
+    return mbuf_root_publish(v, root.pba, root.gen);
+}
+
+int vol_v3_base_root(invfs_volume *v, invfs_blkptr *out)
+{
+    if (v3_ready(v) != 0)
+        return -1;
+    return v3_base_root(v, out);
+}
+
+int vol_v3_inode_get(invfs_volume *v, uint64_t inode_id, invfs_v3_inode *out)
+{
+    uint8_t kb[8];
+    invfs_blkptr root;
+    bt_val val;
+    int found = 0;
+
+    if (!v || !out)
+        return -1;
+    if (v3_ready(v) != 0)
+        return -1;
+    if (v3_base_root(v, &root) != 0)
+        return -1;
+    v3_ino_key(inode_id, kb);
+    if (btree_search(v, root, (bt_key){kb, 8}, &val, &found) != 0)
+        return -1;
+    if (!found)
+        return 0;
+    if (v3_ino_decode(val.p, val.n, out) != 0)
+        return -1;
+    return 1;
+}
+
+int vol_v3_inode_put(invfs_volume *v, uint64_t inode_id,
+                     const invfs_v3_inode *in)
+{
+    uint8_t kb[8];
+    uint8_t vb[INVFS_V3_INODE_ROW_FIXED];
+    invfs_blkptr root, nr;
+    bt_val val;
+    uint16_t vl;
+    uint64_t old_gen;
+
+    if (!v || !in || in->nlink == 0)
+        return -1;
+    if (v3_ready(v) != 0)
+        return -1;
+    if (v3_base_root(v, &root) != 0)
+        return -1;
+    old_gen = root.gen;
+
+    v3_ino_key(inode_id, kb);
+    vl = v3_ino_encode(in, vb);
+    val.p = vb;
+    val.n = vl;
+    if (btree_upsert(v, root, (bt_key){kb, 8}, val, &nr) != 0)
+        return -1;
+    return v3_publish(v, nr, old_gen);
+}
+
+int vol_v3_inode_delete(invfs_volume *v, uint64_t inode_id)
+{
+    uint8_t kb[8];
+    invfs_blkptr root, nr;
+    bt_val val;
+    int found = 0;
+    uint64_t old_gen;
+
+    if (!v)
+        return -1;
+    if (v3_ready(v) != 0)
+        return -1;
+    if (v3_base_root(v, &root) != 0)
+        return -1;
+    v3_ino_key(inode_id, kb);
+    if (btree_search(v, root, (bt_key){kb, 8}, &val, &found) != 0)
+        return -1;
+    if (!found)
+        return 0;   /* absent: nothing to do */
+    old_gen = root.gen;
+    if (btree_delete(v, root, (bt_key){kb, 8}, &nr) != 0)
+        return -1;
+    return v3_publish(v, nr, old_gen);
+}
+
 
 

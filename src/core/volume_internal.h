@@ -553,6 +553,10 @@ typedef struct invfs_volume {
      * cursors mirroring the v2 raw/shadow pair. */
     invfs_rt30 rt30;
     int      rt30_present;
+    /* WP-M5: the metadata-v3 base-tree engine has been brought up on this
+     * handle (mbuf_init called once). mbuf_init resets the bootstrap
+     * cursor, so it must not run per operation. */
+    int      v3_mbuf_ready;
     uint64_t mb_boot_cursor;        /* next reserved root-area pba */
     uint64_t mb_boot_end;           /* one past the reserved root-area pages */
     uint64_t mb_alloc_cursor;       /* free-space cursor within the meta zone */

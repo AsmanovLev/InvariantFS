@@ -1167,6 +1167,28 @@ int vol_get_meta(invfs_volume *v, uint64_t inode_id, invfs_meta_pub *out)
     const uint8_t *ext;
     size_t elen = 0;
     if (!out) return -1;
+    /* WP-M5: a v3 volume has no INO2 ext -- the row in the base tree is the
+     * authority. Map it onto the same public view (size/recipe included);
+     * the symlink target rides in the recipe blob (WP-M8), so target stays
+     * empty for now. */
+    if (v->sb.vol_flags & VOLF_V3) {
+        invfs_v3_inode in;
+        int rc = vol_v3_inode_get(v, inode_id, &in);
+        if (rc != 1)
+            return -1;
+        memset(out, 0, sizeof(*out));
+        out->type  = (uint8_t)in.type;
+        out->mode  = in.mode;
+        out->uid   = in.uid;
+        out->gid   = in.gid;
+        out->mtime = in.mtime;
+        out->atime = in.atime;
+        out->nlink = in.nlink;
+        out->rdev  = in.rdev;
+        out->size  = in.size;
+        out->recipe = in.recipe;
+        return 0;
+    }
     if (meta_read_record_by_id(v, inode_id, &buf, &rl, NULL, 0, NULL) != 0)
         return -1;
     ext = meta_locate_ext(buf, rl, &elen);

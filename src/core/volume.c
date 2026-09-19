@@ -15,6 +15,7 @@
  */
 
 #include "volume_internal.h"
+#include "vol_metabuf.h"
 
 
 static const uint64_t JOURNAL_BLOCKS = INVFS_JOURNAL_BLOCKS;
@@ -1642,21 +1643,32 @@ static invfs_volume *vol_open_inner(const char *path, int at_ckpt,
         /* WP-M1: a v3 volume has no v2 record stream. Present an empty
          * namespace: idx_init gives lookup/readdir their (empty) tables
          * and next_inode_id starts at 1 below. The RT30 descriptor is
-         * validated for the round-trip. The v2 write engine does not apply
-         * to a v3 namespace, so refuse all mutations until WP-M2 wires the
-         * v3 engine -- a v2 append must never graft itself onto a v3
-         * volume. VOLF_READONLY answers EROFS on the standard paths;
-         * needs_recovery is the engine-level backstop for the paths that
-         * deliberately bypass the flag (e.g. unlink), because vol_mark_dirty
-         * refuses a needs_recovery volume. Both are RAM-only (vol_flush is
-         * a no-op for v3), so nothing is persisted; the on-disk state stays
-         * CLEAN. */
+         * validated for the round-trip.
+         *
+         * WP-M5: bring the metadata-v3 base-tree engine up. The root lives
+         * in RT30 and the allocator + dirty-bitmap flush are owned by
+         * vol_metabuf/vol_btree; the inode API (vol_v3_inode_*) writes the
+         * base tree directly (no delta yet). The v2 write engine still does
+         * not apply to a v3 namespace, so refuse its mutations: keep
+         * needs_recovery = 1 (the engine-level backstop vol_write_enabled /
+         * vol_mark_dirty consult). VOLF_READONLY is cleared *only* so the
+         * shared metadata allocator (alloc_blocks) can hand out base pages;
+         * the inode path persists the dirty bitmap before it publishes a
+         * root, the superblock is never rewritten, so the on-disk READONLY
+         * state is untouched. */
         if (idx_init(v) != 0) { *err = -6; goto fail; }
         v3_probe_rt30(v);
-        v->sb.vol_flags |= VOLF_READONLY;
+        if (mbuf_rt30_load(v) < 0) { *err = -6; goto fail; }
+        mbuf_init(v);
+        /* WP-M5: skip the WP-M2 bootstrap pool (see v3_ready in
+         * vol_btree.c) -- its cursor resets every open, so reusing it would
+         * let a COW write clobber a live page from a previous session. */
+        v->mb_boot_cursor = v->mb_boot_end;
+        v->v3_mbuf_ready = 1;
         v->needs_recovery = 1;
-        fprintf(stderr, "vol_open: %s: format v3 (metadata-v3 skeleton): "
-                "empty namespace, read-only until WP-M2\n", real);
+        v->sb.vol_flags &= ~(VOLF_READONLY | VOLF_RO_SPACE);
+        fprintf(stderr, "vol_open: %s: format v3 (metadata-v3 inode tree): "
+                "base root engine up, v2 paths refused\n", real);
     } else
     {
         uint64_t p = v->inode_area_pos;

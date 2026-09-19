@@ -321,6 +321,29 @@ int vol_read_inode(invfs_volume *v, uint64_t inode_id, unsigned depth,
     size_t len = 0;
     char rec_name[INVFS_MAX_NAME + 1];
 
+    /* WP-M5: a v3 volume has no append-only record stream. The inode row in
+     * the base tree carries the recipe *reference*; WP-M8 fetches and
+     * CRC-verifies the immutable recipe blob and reuses the v2 segment
+     * decoder below. Until then a v3 inode can only be empty (recipe 0),
+     * which is exactly the "create an empty file" case M5 unblocks. */
+    if (v->sb.vol_flags & VOLF_V3) {
+        invfs_v3_inode in;
+        int rc = vol_v3_inode_get(v, inode_id, &in);
+        if (rc != 1)
+            return -1;
+        if (in.recipe.pba != 0) {
+            fprintf(stderr, "vol_read_inode: v3 inode %llu has a recipe "
+                    "blob; recipe reads land in WP-M8\n",
+                    (unsigned long long)inode_id);
+            return -1;
+        }
+        *out = (uint8_t *)malloc(1);
+        if (!*out)
+            return -1;
+        *out_len = 0;
+        return 0;
+    }
+
     /* The id index knows where this record is; without it every read of every
        file re-read the whole inode area, which is what kept reads quadratic
        after the name index landed. 0 means "not indexed" -- fall back to the
