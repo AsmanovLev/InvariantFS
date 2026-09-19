@@ -22,6 +22,8 @@ struct invfs_wsession {
     uint32_t mat_upto;       /* highest contiguously materialized seg +1 */
     uint64_t logical_size;
     int      dirty;          /* any write/truncate landed */
+    uint64_t *old_pbas;      /* WP-M8 v3: pbas owned by the old recipe */
+    uint32_t old_n_ents;     /* WP-M8 v3: old entry count */
     invfs_wsession *next;    /* v->wsessions link (live sessions) */
 };
 
@@ -394,6 +396,72 @@ static uint32_t wsession_filled(const invfs_wsession *s)
 }
 
 
+/* WP-M8: load a v3 file's previous content into the session from its
+ * content-addressed recipe blob. Mirrors wsession_load_old's contract:
+ * entries are copied into s->ents and aliased (their pbas stay owned by the
+ * old recipe until commit, which frees the dropped ones). A missing/empty
+ * recipe is an empty old file. */
+static int wsession_load_old_v3(invfs_wsession *s)
+{
+    static const uint8_t zero_addr[INVFS_V3_RECIPE_ADDR_LEN];
+    invfs_v3_inode in;
+    invfs_ast_hdr ah;
+    const invfs_ast_block_entry *ents = NULL;
+    size_t nents = 0, i;
+    uint8_t *blob = NULL;
+    size_t blen = 0;
+
+    if (!s->have_old)
+        return 0;
+    if (vol_v3_inode_get(s->v, s->old_id, &in) != 1)
+        return -1;
+    s->old_size = in.size;
+    s->wheat_carry = 1;   /* heat is not part of the v3 row (WP-M9) */
+    if (in.size == 0 ||
+        memcmp(in.recipe_addr, zero_addr, INVFS_V3_RECIPE_ADDR_LEN) == 0)
+        return 0;         /* empty old content: nothing to alias */
+
+    if (vol_v3_recipe_load(s->v, in.recipe_addr, &blob, &blen) != 0)
+        return -1;
+    if (vol_ast_recipe_parse(blob, blen, &ah, &ents, &nents) != 0) {
+        free(blob);
+        return -1;
+    }
+    if (ah.file_size != in.size) {
+        free(blob);
+        return -1;        /* row/blob disagreement: corruption */
+    }
+
+    /* snapshot the old pbas so commit can free whatever the new recipe
+     * drops (the v3 path has no v2 refcount map to do it) */
+    s->old_n_ents = (uint32_t)nents;
+    if (nents) {
+        s->old_pbas = (uint64_t *)malloc(nents * sizeof(uint64_t));
+        if (!s->old_pbas) { free(blob); return -1; }
+        for (i = 0; i < nents; i++)
+            s->old_pbas[i] = ents[i].pba;
+    }
+    if (s->truncating) {   /* content dropped; commit frees the old pbas */
+        free(blob);
+        return 0;
+    }
+
+    s->logical_size = ah.file_size;
+    s->n_ents = (uint32_t)nents;
+    if (nents) {
+        s->cap_ents = (uint32_t)nents;
+        s->ents = (invfs_ast_block_entry *)malloc(s->cap_ents * sizeof(*s->ents));
+        s->touched_cap = (uint32_t)nents;
+        s->touched = (uint8_t *)calloc(s->touched_cap, 1);
+        if (!s->ents || !s->touched) { free(blob); return -1; }
+        memcpy(s->ents, ents, nents * sizeof(*s->ents));
+        s->aliased_n = (uint32_t)nents;
+        s->mat_upto = (uint32_t)nents;
+    }
+    free(blob);
+    return 0;
+}
+
 static int wsession_load_old(invfs_wsession *s)
 {
     uint8_t *buf = NULL;
@@ -405,6 +473,12 @@ static int wsession_load_old(invfs_wsession *s)
 
     if (s->loaded) return 0;
     s->loaded = 1;
+    /* WP-M8: a v3 file's previous content lives in an immutable recipe
+     * blob, not a v2 record. Load it into the session's entry table so
+     * ranged writes/truncate alias and re-encode exactly like the v2
+     * path. */
+    if (s->v->sb.vol_flags & VOLF_V3)
+        return wsession_load_old_v3(s);
     if (!s->have_old) return 0;
     if (meta_read_record_by_id(s->v, s->old_id, &buf, &rl, NULL, 0,
                                NULL) != 0)
@@ -657,6 +731,113 @@ int vol_write_read(invfs_wsession *ws, uint64_t offset,
 }
 
 
+/* WP-M8: commit a v3 write session. The session's segment table becomes an
+ * immutable, content-addressed recipe blob; the inode row behind the name
+ * gets the new address + size (same inode id, so the dirent is untouched).
+ * Data segments already landed through the normal write path. No delta,
+ * no v2 record: the base tree is the authority. */
+static int vol_write_commit_v3(invfs_wsession *s)
+{
+    invfs_volume *v = s->v;
+    uint8_t *blob = NULL;
+    size_t blen = 0;
+    uint8_t addr[INVFS_V3_RECIPE_ADDR_LEN];
+    invfs_v3_inode in;
+    uint64_t id, now = (uint64_t)time(NULL);
+    uint32_t i, k;
+    int rc;
+
+    if (s->logical_size > MAX_FILE_SIZE || s->n_ents > MAX_SEGMENTS_V2)
+        return -1;
+    /* Drop any segment that lives entirely past the logical end, then
+     * re-encode an unaligned tail at its exact length -- the same two
+     * fixes the v2 commit applies, so entry.length always equals the
+     * decoded payload size the reader expects. */
+    while (s->n_ents > 0 &&
+           (uint64_t)(s->n_ents - 1) * SEGMENT_SIZE >= s->logical_size) {
+        uint32_t j = s->n_ents - 1;
+        if (j < s->touched_cap && s->touched[j] && s->ents[j].pba) {
+            uint64_t plen = 0;
+            if (seg_extent_checked(v, s->ents[j].pba, &plen) == 0)
+                vol_free_blocks(v, s->ents[j].pba, plen);
+        }
+        s->n_ents--;
+    }
+    if (s->n_ents > 0) {
+        uint32_t j = s->n_ents - 1;
+        uint64_t base = (uint64_t)j * SEGMENT_SIZE;
+        uint64_t tail = s->logical_size - base;
+        if (tail > SEGMENT_SIZE) tail = SEGMENT_SIZE;
+        if (s->ents[j].length != tail) {
+            uint8_t plain[SEGMENT_SIZE];
+            rc = wsession_seg_current(s, j, plain);
+            if (rc != 0) return rc;
+            rc = wsession_write_seg_n(s, j, plain, (size_t)tail);
+            if (rc != 0) return rc;
+        }
+    }
+    if (vol_ast_recipe_serialize(s->logical_size, s->ents, s->n_ents,
+                                 &blob, &blen) != 0)
+        return -1;   /* TODO(WP-M8): recipe larger than one base page */
+    if (vol_v3_recipe_store(v, blob, blen, addr) != 0) {
+        free(blob);
+        return -1;
+    }
+    free(blob);
+
+    if (s->have_old) {
+        if (vol_v3_inode_get(v, s->old_id, &in) != 1)
+            return -1;
+        id = s->old_id;
+    } else {
+        id = vol_v3_create_node(v, s->name, NULL);
+        if (!id)
+            return -1;
+        if (vol_v3_inode_get(v, id, &in) != 1)
+            return -1;
+    }
+    in.size = s->logical_size;
+    memcpy(in.recipe_addr, addr, INVFS_V3_RECIPE_ADDR_LEN);
+    memset(&in.recipe, 0, sizeof in.recipe);
+    if (in.nlink == 0)
+        in.nlink = 1;
+    in.mtime = now;
+    if (vol_v3_inode_put(v, id, &in) != 0)
+        return -1;
+
+    /* Free old data segments the new recipe no longer names. A touched
+     * segment's old pba was already freed by wsession_write_seg_n; an
+     * untouched (aliased) one is still owned by the old recipe, so it is
+     * freed only when the new entry table dropped it. The superseded
+     * recipe blob page itself is left for WP-M15. */
+    if (s->old_pbas) {
+        for (i = 0; i < s->old_n_ents; i++) {
+            uint64_t pba = s->old_pbas[i];
+            int keep = 0;
+            if (!pba)
+                continue;
+            if (i < s->touched_cap && s->touched[i])
+                continue;   /* superseded in-session: already freed */
+            for (k = 0; k < i; k++)
+                if (s->old_pbas[k] == pba) { keep = 1; break; }
+            if (!keep)
+                for (k = 0; k < s->n_ents; k++)
+                    if (s->ents[k].pba == pba) { keep = 1; break; }
+            if (!keep) {
+                uint64_t plen = 0;
+                if (seg_extent_checked(v, pba, &plen) == 0)
+                    vol_free_blocks(v, pba, plen);
+            }
+        }
+    }
+    free(s->old_pbas);
+    s->old_pbas = NULL;
+
+    wsession_unlink(s);
+    s->committed = 1;
+    return 0;
+}
+
 int vol_write_commit(invfs_wsession *ws)
 {
     invfs_wsession *s = ws;
@@ -674,6 +855,9 @@ int vol_write_commit(invfs_wsession *ws)
     if (!s || s->committed) return -1;
     rc = wsession_load_old(s);
     if (rc != 0) return rc;
+    /* WP-M8: v3 content lives in a recipe blob + inode row, not a record. */
+    if (v && (v->sb.vol_flags & VOLF_V3))
+        return vol_write_commit_v3(s);
     if (s->logical_size > MAX_FILE_SIZE || s->n_ents > MAX_SEGMENTS_V2)
         return -1;
 
@@ -856,5 +1040,6 @@ void vol_write_abort(invfs_wsession *ws)
     free(s->ents);
     free(s->touched);
     free(s->old_ext);
+    free(s->old_pbas);
     free(s);
 }

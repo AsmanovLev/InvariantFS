@@ -1248,6 +1248,7 @@ static uint16_t v3_ino_encode(const invfs_v3_inode *in, uint8_t *buf)
     r.rdev        = in->rdev;
     r.size        = in->size;
     r.recipe      = in->recipe;
+    memcpy(r.recipe_addr, in->recipe_addr, INVFS_V3_RECIPE_ADDR_LEN);
     r.xattr_len   = 0;
     memcpy(buf, &r, sizeof r);
     return (uint16_t)sizeof r;
@@ -1273,6 +1274,7 @@ static int v3_ino_decode(const uint8_t *buf, uint16_t len, invfs_v3_inode *out)
     out->rdev   = r.rdev;
     out->size   = r.size;
     out->recipe = r.recipe;
+    memcpy(out->recipe_addr, r.recipe_addr, INVFS_V3_RECIPE_ADDR_LEN);
     return 0;
 }
 
@@ -1925,6 +1927,132 @@ int vol_v3_inode_delete(invfs_volume *v, uint64_t inode_id)
             return -1;
         return v3_xmut_commit(&m);
     }
+}
+
+
+/* ------------------------------------------------------------------ */
+/* WP-M8: content-addressed recipe blobs (base B+-tree keyspace)       */
+/*                                                                    */
+/* The immutable AST recipe (header + entries, exactly the bytes a v2  */
+/* record carries after its name) lives in the base tree under         */
+/*     0x04 || blake3_256(blob)[32]                                    */
+/* not inline in the inode row. Identical recipes map to one key, so   */
+/* a rewrite of unchanged content stores only the reference. The inode */
+/* row's recipe_addr is the content address; the reader recomputes the */
+/* hash and refuses on mismatch (design §12/§16: a bad recipe must     */
+/* never be trusted). The tree's own page CRC (mbuf_read_ptr) is the   */
+/* first line of defence; BLAKE3 is the second.                        */
+/*                                                                    */
+/* A blob must fit one base page. WP-M8 caps it at 3800 bytes (header  */
+/* + 32 B/segment => ~7.7 MiB of file at 64 KiB segments); larger      */
+/* recipes need a multi-page/streamed blob, deferred to WP-M9/WP-M15   */
+/* (TODO). The row never points at a leaf directly: a later COW split  */
+/* can move the key, so the lookup always goes through the tree.       */
+/* ------------------------------------------------------------------ */
+
+#define V3_RECIPE_KEY_LEN      (1u + INVFS_V3_RECIPE_ADDR_LEN)   /* 33 */
+/* One page = 4096; header 20 + key record (2+33) + value record (2+n)
+ * must fit, with headroom so a split can always partition two records. */
+#define V3_RECIPE_BLOB_MAX     INVFS_V3_RECIPE_BLOB_MAX
+
+static void v3_recipe_key(uint8_t kb[V3_RECIPE_KEY_LEN],
+                          const uint8_t addr[INVFS_V3_RECIPE_ADDR_LEN])
+{
+    kb[0] = (uint8_t)INVFS_V3_RECIPE_KEY_PREFIX;
+    memcpy(kb + 1, addr, INVFS_V3_RECIPE_ADDR_LEN);
+}
+
+static void v3_blake3(const uint8_t *buf, size_t len,
+                      uint8_t out[INVFS_V3_RECIPE_ADDR_LEN])
+{
+    blake3_hasher hx;
+    blake3_hasher_init(&hx);
+    blake3_hasher_update(&hx, buf, len);
+    blake3_hasher_finalize(&hx, out, INVFS_V3_RECIPE_ADDR_LEN);
+}
+
+/* Store `blob` (immutable) under its content address. On success
+ * addr_out holds BLAKE3-256(blob). Identical bytes already present are a
+ * no-op (dedup) and return the same address. 0 = ok, -1 = error. */
+int vol_v3_recipe_store(invfs_volume *v, const uint8_t *blob, size_t blen,
+                        uint8_t addr_out[INVFS_V3_RECIPE_ADDR_LEN])
+{
+    uint8_t kb[V3_RECIPE_KEY_LEN], addr[INVFS_V3_RECIPE_ADDR_LEN];
+    invfs_blkptr root, nr;
+    bt_val val;
+    int found = 0;
+
+    if (!v || !blob || blen == 0 || blen > V3_RECIPE_BLOB_MAX)
+        return -1;
+    if (v3_ready(v) != 0)
+        return -1;
+    if (v3_base_root(v, &root) != 0)
+        return -1;
+    v3_blake3(blob, blen, addr);
+    v3_recipe_key(kb, addr);
+    /* Dedup: an identical recipe is already immutable, so the reference
+     * alone is the whole write. */
+    if (btree_search(v, root, (bt_key){kb, V3_RECIPE_KEY_LEN}, &val,
+                     &found) != 0)
+        return -1;
+    if (!found) {
+        uint64_t old_gen = root.gen;
+        val.p = blob;
+        val.n = (uint16_t)blen;
+        if (btree_upsert(v, root, (bt_key){kb, V3_RECIPE_KEY_LEN}, val,
+                         &nr) != 0)
+            return -1;
+        if (v3_publish(v, nr, old_gen) != 0)
+            return -1;
+    }
+    if (addr_out)
+        memcpy(addr_out, addr, INVFS_V3_RECIPE_ADDR_LEN);
+    return 0;
+}
+
+/* Fetch and VERIFY the recipe blob named by `addr`. On success *blob_out is
+ * a malloc'd copy the caller frees. 0 = ok, -1 = absent, unreadable, or a
+ * BLAKE3 mismatch (hard error -- never returns unverified bytes). */
+int vol_v3_recipe_load(invfs_volume *v, const uint8_t addr[INVFS_V3_RECIPE_ADDR_LEN],
+                       uint8_t **blob_out, size_t *blen_out)
+{
+    uint8_t kb[V3_RECIPE_KEY_LEN], chk[INVFS_V3_RECIPE_ADDR_LEN];
+    invfs_blkptr root;
+    bt_val val;
+    uint8_t *blob;
+    int found = 0;
+
+    if (!v || !addr || !blob_out || !blen_out)
+        return -1;
+    *blob_out = NULL;
+    *blen_out = 0;
+    if (v3_ready(v) != 0)
+        return -1;
+    if (v3_base_root(v, &root) != 0)
+        return -1;
+    v3_recipe_key(kb, addr);
+    if (btree_search(v, root, (bt_key){kb, V3_RECIPE_KEY_LEN}, &val,
+                     &found) != 0)
+        return -1;
+    if (!found)
+        return -1;
+    /* btree_search's value points into a per-thread buffer valid only until
+     * the next search: copy it out before doing anything else. */
+    blob = (uint8_t *)malloc(val.n ? val.n : 1);
+    if (!blob)
+        return -1;
+    if (val.n)
+        memcpy(blob, val.p, val.n);
+    v3_blake3(blob, val.n, chk);
+    if (memcmp(chk, addr, INVFS_V3_RECIPE_ADDR_LEN) != 0) {
+        fprintf(stderr, "v3 recipe blob %p: BLAKE3 mismatch (corrupt or "
+                "forged); refusing the read\n", (const void *)addr);
+        free(blob);
+        return -1;
+    }
+    *blob_out = blob;
+    *blen_out = val.n;
+    return 0;
 }
 
 

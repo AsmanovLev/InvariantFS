@@ -1068,14 +1068,26 @@ typedef struct invfs_meta_ext_hdr {
  *   u32 nlink
  *   u64 rdev
  *   u64 size
- *   invfs_blkptr recipe   -> immutable AST blob (0 = no content yet)
+ *   invfs_blkptr recipe   -> reserved 0 (WP-M8: the address below is the
+ *                            authority; the blkptr is kept for the frozen
+ *                            layout and future direct-page use)
  *   u32 xattr_len     TLVs, same encoding as the INO2 ext
+ *   u8  recipe_addr[32]  BLAKE3-256 of the immutable recipe blob (all-zero
+ *                        = no content). WP-M8 appends this and bumps
+ *                        row_version to 2; it is the content address that
+ *                        keys the recipe blob (design §12).
  *   [xattr bytes]
  *
  * WP-M5 always writes xattr_len == 0: the xattr tree is WP-M7. The field
  * is frozen here so that WP does not need a format break. */
-#define INVFS_V3_INODE_ROW_VERSION 1u
+#define INVFS_V3_INODE_ROW_VERSION 2u
 #define INVFS_V3_INODE_XATTR_MAX   4096u
+#define INVFS_V3_RECIPE_ADDR_LEN   32u
+/* WP-M8: a recipe blob must fit one base page (4096 B). Header 20 +
+ * key record (2+33) + value record (2+n) must fit with split headroom;
+ * 3800 B is ~7.7 MiB of file at 64 KiB segments. Larger recipes need a
+ * multi-page/streamed blob (TODO WP-M9/WP-M15). */
+#define INVFS_V3_RECIPE_BLOB_MAX   3800u
 #pragma pack(push, 1)
 typedef struct {
     uint32_t     row_version;
@@ -1090,7 +1102,8 @@ typedef struct {
     uint64_t     size;
     invfs_blkptr recipe;
     uint32_t     xattr_len;
-} invfs_v3_inode_row;    /* 82 bytes; [xattr bytes] follow */
+    uint8_t      recipe_addr[INVFS_V3_RECIPE_ADDR_LEN];
+} invfs_v3_inode_row;    /* 114 bytes; [xattr bytes] follow */
 #define INVFS_V3_INODE_ROW_FIXED ((uint32_t)sizeof(invfs_v3_inode_row))
 #pragma pack(pop)
 
@@ -1105,6 +1118,16 @@ typedef struct {
  * range (ordered by name_len, then name -- the same shape as WP-M6 dirents)
  * and listxattr is a single ordered scan. */
 #define INVFS_V3_XATTR_KEY_PREFIX 0x03u
+
+/* WP-M8: recipe-blob key prefix. Immutable AST recipes are content-addressed
+ * and stored in the base B+-tree under
+ *     0x04 || blake3_256(serialized recipe)[32]
+ * so identical recipes dedup to one key. The 0x04 first byte keeps the
+ * keyspace disjoint from the 8-byte inode keys (whose first byte is the
+ * small high byte of an inode id), WP-M6 dirent keys (>= 10 bytes) and
+ * WP-M7 xattr keys (0x03). Read recomputes BLAKE3 and compares to the key;
+ * a mismatch is a hard error, never a best-effort decode (design §16). */
+#define INVFS_V3_RECIPE_KEY_PREFIX 0x04u
 
 /* Longest record this format can produce: the header, the (v2) recipe
    header, the most segments a v2 num_blocks can count, and the largest

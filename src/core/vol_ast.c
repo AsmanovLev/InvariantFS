@@ -5,6 +5,67 @@
 
 
 
+/* ---- WP-M8: immutable recipe blob serialize / deserialize -----------
+ * A v3 recipe blob is exactly the bytes a v2 inode record carries after
+ * its name: the AST header (v1 or v2) followed by the block entries. The
+ * writer builds it from the session's entry table; the reader parses it
+ * and hands the entries to the shared segment decoder. Children blobs are
+ * v2 container metadata and are not part of a v3 recipe (WP-M8 scope:
+ * plain per-segment files); num_children is always 0 here. */
+
+int vol_ast_recipe_serialize(uint64_t file_size,
+                             const invfs_ast_block_entry *ents, uint32_t n,
+                             uint8_t **blob_out, size_t *blen_out)
+{
+    uint8_t hdr[INVFS_AST_HDR_V2_LEN];
+    size_t hlen, total;
+    uint8_t *blob;
+
+    if (!blob_out || !blen_out || (n && !ents))
+        return -1;
+    if (file_size > MAX_FILE_SIZE || n > MAX_SEGMENTS_V2)
+        return -1;
+    hlen = invfs_ast_hdr_write(hdr, file_size, n, 0);
+    if (!hlen)
+        return -1;
+    total = hlen + (size_t)n * sizeof(*ents);
+    if (total > INVFS_V3_RECIPE_BLOB_MAX)
+        return -1;   /* TODO(WP-M8): multi-page recipe blobs */
+    blob = (uint8_t *)malloc(total ? total : 1);
+    if (!blob)
+        return -1;
+    memcpy(blob, hdr, hlen);
+    if (n)
+        memcpy(blob + hlen, ents, (size_t)n * sizeof(*ents));
+    *blob_out = blob;
+    *blen_out = total;
+    return 0;
+}
+
+/* Parse a recipe blob. On success *hdr_out is filled and *ents_out points
+ * INTO `blob` (valid while the caller keeps it); *nents_out is the entry
+ * count. 0 = ok, -1 = malformed/truncated. */
+int vol_ast_recipe_parse(const uint8_t *blob, size_t blen,
+                         invfs_ast_hdr *hdr_out,
+                         const invfs_ast_block_entry **ents_out,
+                         size_t *nents_out)
+{
+    if (!blob || !hdr_out)
+        return -1;
+    if (invfs_ast_hdr_parse(blob, blen, hdr_out) != 0)
+        return -1;
+    if ((size_t)hdr_out->num_blocks * sizeof(invfs_ast_block_entry) >
+        blen - hdr_out->hdr_len)
+        return -1;
+    if (ents_out)
+        *ents_out = (const invfs_ast_block_entry *)(blob + hdr_out->hdr_len);
+    if (nents_out)
+        *nents_out = hdr_out->num_blocks;
+    return 0;
+}
+
+
+
 /* ---- AST children: serialize / deserialize / container creation ---- */
 
 /* serialize children after the block entries; malloc'd buf or NULL */

@@ -313,6 +313,609 @@ static uint64_t read_locate_record(invfs_volume *v, uint64_t inode_id)
     }
 }
 
+/* WP-M8: decode a parsed AST recipe (header + entries) into a caller-
+ * allocated `data` of ast_h->file_size bytes. Shared verbatim by the v2
+ * record path and the v3 content-addressed recipe-blob path so both
+ * reconstruct with exactly the same segment codecs (bit-exactness).
+ * 0 = complete, -1 = corrupt/unreadable. `data` is caller-owned; on
+ * error its contents are undefined and the caller frees it. */
+static int vol_decode_ast_entries(invfs_volume *v, uint64_t inode_id,
+                                  const char *rec_name,
+                                  const invfs_ast_hdr *ast_h,
+                                  const invfs_ast_block_entry *ents,
+                                  uint8_t *data)
+{
+    uint32_t i;
+
+            for (i = 0; i < ast_h->num_blocks; i++) {
+                const invfs_ast_block_entry *e = &ents[i];
+                uint64_t end = e->file_offset + e->length;
+                if (e->file_offset > ast_h->file_size ||
+                    end > ast_h->file_size ||
+                    end < e->file_offset) {
+                    fprintf(stderr, "inode %llu seg %u: entry out of bounds "
+                            "(off=%llu len=%llu size=%llu)\n",
+                            (unsigned long long)inode_id, e->block_id,
+                            (unsigned long long)e->file_offset,
+                            (unsigned long long)e->length,
+                            (unsigned long long)ast_h->file_size);
+                    return -1;
+                }
+                if (i > 0 && e->file_offset < ents[i-1].file_offset +
+                                          ents[i-1].length) {
+                    fprintf(stderr, "inode %llu seg %u: overlapping entry\n",
+                            (unsigned long long)inode_id, e->block_id);
+                    return -1;
+                }
+            }
+
+            for (i = 0; i < ast_h->num_blocks; i++) {
+                const invfs_ast_block_entry *e = &ents[i];
+                uint64_t pba = 0;
+                uint32_t hdr;
+                uint8_t *blob;
+                size_t dst_off = (size_t)e->file_offset;
+
+                /* Batch member: a slice of a shared batch (PPMd text,
+                 * ZSTD/ZSTD_BCJ binary), decoded and cached by pba (heap
+                 * only -- see vol_read_text_slice) */
+                if (e->zone == INVFS_ZONE_TEXT && tz_batch_algo(e->algo)) {
+                    if (vol_read_text_slice(v, inode_id, e, 0,
+                                            data + dst_off,
+                                            (size_t)e->length) != 0) {
+                        return -1;
+                    }
+                    continue;
+                }
+
+                /* segment physical location: the entry's own pba (WP27);
+                 * plen derives from the segment header (0 = unknown) */
+                pba = e->pba;
+                if (pba == 0 || pba >= v->sb.total_blocks) {
+                    fprintf(stderr, "pba invalid: inode %llu seg %u\n",
+                            (unsigned long long)inode_id, e->block_id);
+                    return -1;
+                }
+                heat_touch_read(v, inode_id, e->block_id);   /* WP19 */
+                /* framed segment [4B csize][4B crc32c][payload]: CRC-verified
+                 * read; a shadow-zone failure gets one WP20 seal-parity
+                 * recovery attempt inside before the error propagates */
+                if (seg_read_checked(v, pba, 0, 1, &hdr, &blob) != 0) {
+                    fprintf(stderr, "segment CRC mismatch: inode %llu seg %u (corrupt)\n",
+                            (unsigned long long)inode_id, e->block_id);
+                    return -1;
+                }
+                if (e->algo == INVFS_ALGO_NONE) {
+                    if (hdr != e->length) {
+                        fprintf(stderr, "raw segment header corrupt (csize %u, want %llu)\n",
+                                hdr, (unsigned long long)e->length);
+                        free(blob); return -1;
+                    }
+                } else if (e->algo == INVFS_ALGO_LZ4 || e->algo == INVFS_ALGO_ZSTD) {
+                    /* compressed-in-place segments: csize < usize is required */
+                    if (hdr >= e->length || hdr == 0) {
+                        fprintf(stderr, "lz4 segment header corrupt (csize %u)\n", hdr);
+                        free(blob); return -1;
+                    }
+                }
+                /* whole-file blobs (JXL/APE/FLACR) keep csize unrelated to the
+                   logical size: the transcoder may be smaller OR larger */
+                if (e->algo == INVFS_ALGO_LZ4) {
+                    int got = LZ4_decompress_safe((const char *)blob,
+                                                  (char *)(data + dst_off),
+                                                  (int)hdr, (int)e->length);
+                    if (got != (int)e->length) {
+                        fprintf(stderr, "LZ4 decompress error: got %d, want %llu\n",
+                                got, (unsigned long long)e->length);
+                        free(blob); return -1;
+                    }
+                } else if (e->algo == INVFS_ALGO_ZSTD) {
+                    size_t got = ZSTD_decompress(data + dst_off, e->length, blob, hdr);
+                    if (ZSTD_isError(got) || got != e->length) {
+                        fprintf(stderr, "ZSTD decompress error: %s\n",
+                                ZSTD_isError(got) ? ZSTD_getErrorName(got) : "size mismatch");
+                        free(blob); return -1;
+                    }
+                } else if (e->algo == INVFS_ALGO_JXL) {
+                    /* whole file is one JXL blob -> decode to jpeg.
+                     * WP16e: the lane is pack-owned -- with the jxl
+                     * codecpack loaded the registry entry for algo 4 IS the
+                     * pack, so decode routes through the pack trampoline
+                     * exactly like any other pack algo. With no pack loaded
+                     * the builtin placeholder has no decode: the builtin
+                     * djxl wrapper answers, so pre-migration blobs and
+                     * EXER-carved JXL parts (which never needed a pack)
+                     * stay readable. */
+                    const invfs_codec *jc = invfs_codec_by_algo(INVFS_ALGO_JXL);
+                    if (jc && jc->decode) {
+                        if (jc->decode(blob, hdr, data + dst_off,
+                                       (size_t)e->length) != 0) {
+                            fprintf(stderr, "JXL pack decode error\n");
+                            free(blob); return -1;
+                        }
+                    } else {
+                        uint8_t *jpg = NULL;
+                        size_t jpg_len = 0;
+                        if (invfs_jxl_decompress(blob, hdr, &jpg, &jpg_len) != 0 ||
+                            jpg_len != e->length) {
+                            fprintf(stderr, "JXL decompress error\n");
+                            free(blob); return -1;
+                        }
+                        memcpy(data + dst_off, jpg, jpg_len);
+                        free(jpg);
+                    }
+                } else if (e->algo == INVFS_ALGO_APE) {
+                    /* whole file is one APE blob -> decode to flac */
+                    uint8_t *fl = NULL;
+                    size_t fl_len = 0;
+                    if (invfs_ape_decompress(blob, hdr, &fl, &fl_len) != 0) {
+                        fprintf(stderr, "APE decompress error\n");
+                        free(blob); return -1;
+                    }
+                    memcpy(data + dst_off, fl, fl_len < e->length ? fl_len : e->length);
+                    free(fl);
+                } else if (e->algo == INVFS_ALGO_PMP) {
+                    /* whole file is one PMP blob -> decode back to mp3.
+                       Length is checked, not clamped: packMP3 is bit-exact
+                       or it is nothing, so a short/long result means the
+                       blob is corrupt and returning partial audio would
+                       break the 1:1 invariant silently. */
+                    uint8_t *m = NULL;
+                    size_t m_len = 0;
+                    if (invfs_pmp_decompress(blob, hdr, &m, &m_len) != 0 ||
+                        m_len != e->length) {
+                        fprintf(stderr, "PMP decompress error (%s: got %zu, want %llu)\n",
+                                rec_name, m_len, (unsigned long long)e->length);
+                        free(m); free(blob); return -1;
+                    }
+                    memcpy(data + dst_off, m, m_len);
+                    free(m);
+                } else if (e->algo == INVFS_ALGO_FLACR) {
+                    /* whole file is an APE(PCM) blob; sibling inode
+                       "name!recipe" holds the frame recipe. Rebuild the
+                       ORIGINAL FLAC bit-exactly: APE->WAV->flacx_rebuild. */
+                    uint8_t *wav = NULL, *rcp = NULL, *fl = NULL;
+                    size_t wav_len = 0, rcp_len = 0, fl_len = 0;
+                    char rname[272];
+                    if (invfs_ape_to_wav(blob, hdr, &wav, &wav_len) != 0) {
+                        fprintf(stderr, "FLACR: APE->WAV failed for %s\n", rec_name);
+                        free(blob); return -1;
+                    }
+                    snprintf(rname, sizeof rname, "%s!recipe", rec_name);
+                    uint64_t rino = vol_find(v, rname);
+                    if (rino == 0) {
+                        fprintf(stderr, "FLACR: recipe inode '%s' not found\n", rname);
+                        free(wav); free(blob); return -1;
+                    }
+                    if (vol_read_inode(v, rino, 0, &rcp, &rcp_len) != 0) {
+                        fprintf(stderr, "FLACR: cannot read recipe '%s'\n", rname);
+                        free(wav); free(blob); return -1;
+                    }
+                    /* cover payloads: "name!coverN" (v2 recipes) */
+                    int ncv = flacx_recipe_num_covers(rcp, rcp_len);
+                    flacx_cover covers[16];
+                    uint8_t *cdata[16];
+                    int ok = 1;
+                    for (int ci = 0; ci < ncv && ci < 16; ci++) {
+                        char cn[288];
+                        snprintf(cn, sizeof cn, "%s!cover%d", rec_name, ci);
+                        uint64_t cino = vol_find(v, cn);
+                        size_t clen = 0;
+                        cdata[ci] = NULL;
+                        if (cino == 0 ||
+                            vol_read_inode(v, cino, 0, &cdata[ci], &clen) != 0 ||
+                            clen > 0x7FFFFFFF) {
+                            fprintf(stderr, "FLACR: cover '%s' missing\n", cn);
+                            ok = 0;
+                            break;
+                        }
+                        covers[ci].data = cdata[ci];
+                        covers[ci].len = (uint32_t)clen;
+                        covers[ci].offset = 0;
+                    }
+                    if (ok && flacx_rebuild(wav, wav_len, rcp, rcp_len, covers,
+                                            (uint32_t)ncv, &fl, &fl_len) != 0)
+                        ok = 0;
+                    for (int ci = 0; ci < ncv && ci < 16; ci++) free(cdata[ci]);
+                    if (!ok || fl_len != e->length) {
+                        fprintf(stderr, "FLACR: rebuild error (got %zu want %llu)\n",
+                                fl_len, (unsigned long long)e->length);
+                        free(wav); free(rcp); free(blob); return -1;
+                    }
+                    memcpy(data + dst_off, fl, fl_len);
+                    free(fl); free(wav); free(rcp);
+                } else if (e->algo == INVFS_ALGO_TARR) {
+                    /* blob = recipe: [0x01][zstd...] or [0x00][raw IVFT] */
+                    const uint8_t *rcp; size_t rcp_len;
+                    uint8_t *rcp_own = NULL;
+                    if (hdr > 1 && blob[0] == 1) {
+                        size_t rsize = ZSTD_getFrameContentSize(blob + 1, hdr - 1);
+                        if (rsize == ZSTD_CONTENTSIZE_ERROR ||
+                            rsize == ZSTD_CONTENTSIZE_UNKNOWN || rsize > (1u << 28)) {
+                            fprintf(stderr, "TARR: bad recipe frame\n");
+                            free(blob); return -1;
+                        }
+                        rcp_own = (uint8_t *)malloc(rsize ? rsize : 1);
+                        if (!rcp_own) { free(blob); return -1; }
+                        size_t rr = ZSTD_decompress(rcp_own, rsize, blob + 1, hdr - 1);
+                        if (ZSTD_isError(rr)) {
+                            fprintf(stderr, "TARR: recipe decompress fail\n");
+                            free(rcp_own); free(blob); return -1;
+                        }
+                        rcp = rcp_own; rcp_len = rr;
+                    } else {
+                        rcp = blob + 1; rcp_len = hdr - 1;
+                    }
+                    tarx_member *members = NULL; size_t n = 0;
+                    uint8_t *trailer = NULL; size_t tlen = 0;
+                    if (tarx_parse_recipe(rcp, rcp_len, &members, &n, &trailer, &tlen) != 0) {
+                        fprintf(stderr, "TARR: bad recipe for %s\n", rec_name);
+                        free(rcp_own); free(blob); return -1;
+                    }
+                    int np = tarx_recipe_num_parts(rcp, rcp_len);
+                    uint8_t **parts = (uint8_t **)calloc(np > 0 ? (size_t)np : 1, sizeof(void *));
+                    size_t *plens = (size_t *)calloc(np > 0 ? (size_t)np : 1, sizeof(size_t));
+                    int ok = 1;
+                    for (int pi = 0; pi < np; pi++) {
+                        char pn[320];
+                        snprintf(pn, sizeof pn, "%s!part%u", rec_name, pi);
+                        uint64_t pino = vol_find(v, pn);
+                        if (!pino) {
+                            fprintf(stderr, "TARR: part '%s' missing\n", pn);
+                            ok = 0; break;
+                        }
+                        if (vol_read_inode(v, pino, 0, &parts[pi], &plens[pi]) != 0) { ok = 0; break; }
+                    }
+                    uint8_t *fl = NULL; size_t fl_len = 0;
+                    if (ok && tarx_rebuild(members, n, trailer, tlen,
+                                           (const uint8_t *const *)parts, plens,
+                                           &fl, &fl_len) != 0)
+                        ok = 0;
+                    for (int pi = 0; pi < np; pi++) free(parts[pi]);
+                    free(parts); free(plens); free(members); free(trailer);
+                    if (!ok || fl_len != e->length) {
+                        fprintf(stderr, "TARR: rebuild error (got %zu want %llu)\n",
+                                fl_len, (unsigned long long)e->length);
+                        free(rcp_own); free(blob); free(fl); return -1;
+                    }
+                    memcpy(data + dst_off, fl, fl_len);
+                    free(fl); free(rcp_own);
+                } else if (e->algo == INVFS_ALGO_GZR) {
+                    /* blob = recipe: [0x01][zstd] or [0x00][raw]; recipe =
+                       [IVGZ][ver][level][mem][crc32][isize][hlen(2)][header] + IVFT */
+                    const uint8_t *rcp; size_t rcp_len;
+                    uint8_t *rcp_own = NULL;
+                    if (hdr > 1 && blob[0] == 1) {
+                        size_t rsize = ZSTD_getFrameContentSize(blob + 1, hdr - 1);
+                        if (rsize == ZSTD_CONTENTSIZE_ERROR ||
+                            rsize == ZSTD_CONTENTSIZE_UNKNOWN || rsize > (1u << 28)) {
+                            fprintf(stderr, "GZR: bad recipe frame\n");
+                            free(blob); return -1;
+                        }
+                        rcp_own = (uint8_t *)malloc(rsize ? rsize : 1);
+                        if (!rcp_own) { free(blob); return -1; }
+                        size_t rr = ZSTD_decompress(rcp_own, rsize, blob + 1, hdr - 1);
+                        if (ZSTD_isError(rr)) {
+                            fprintf(stderr, "GZR: recipe decompress fail\n");
+                            free(rcp_own); free(blob); return -1;
+                        }
+                        rcp = rcp_own; rcp_len = rr;
+                    } else {
+                        rcp = blob + 1; rcp_len = hdr - 1;
+                    }
+                    if (rcp_len < 20 || memcmp(rcp, "IVGZ", 4) != 0 || rcp[4] != 1) {
+                        fprintf(stderr, "GZR: bad recipe for %s\n", rec_name);
+                        free(rcp_own); free(blob); return -1;
+                    }
+                    int glevel = rcp[5];
+                    int gmem = rcp[6];
+                    unsigned gcrc = (unsigned)rcp[7] | ((unsigned)rcp[8] << 8) |
+                                    ((unsigned)rcp[9] << 16) | ((unsigned)rcp[10] << 24);
+                    unsigned gisz = (unsigned)rcp[11] | ((unsigned)rcp[12] << 8) |
+                                     ((unsigned)rcp[13] << 16) | ((unsigned)rcp[14] << 24);
+                    unsigned ghl = (unsigned)rcp[15] | ((unsigned)rcp[16] << 8);
+                    if (17 + ghl + 17 > rcp_len) {
+                        fprintf(stderr, "GZR: short recipe\n");
+                        free(rcp_own); free(blob); return -1;
+                    }
+                    const uint8_t *ghdr = rcp + 17;
+                    const uint8_t *ivft = rcp + 17 + ghl;
+                    size_t ivft_len = rcp_len - 17 - ghl;
+                    tarx_member *members = NULL; size_t n = 0;
+                    uint8_t *trailer = NULL; size_t tlen = 0;
+                    if (tarx_parse_recipe(ivft, ivft_len, &members, &n, &trailer, &tlen) != 0) {
+                        fprintf(stderr, "GZR: bad IVFT for %s\n", rec_name);
+                        free(rcp_own); free(blob); return -1;
+                    }
+                    int np = tarx_recipe_num_parts(ivft, ivft_len);
+                    uint8_t **parts = (uint8_t **)calloc(np > 0 ? (size_t)np : 1, sizeof(void *));
+                    size_t *plens = (size_t *)calloc(np > 0 ? (size_t)np : 1, sizeof(size_t));
+                    int ok = 1;
+                    for (int pi = 0; pi < np; pi++) {
+                        char pn[320];
+                        snprintf(pn, sizeof pn, "%s!part%u", rec_name, pi);
+                        uint64_t pino = vol_find(v, pn);
+                        if (!pino) {
+                            fprintf(stderr, "GZR: part '%s' missing\n", pn);
+                            ok = 0; break;
+                        }
+                        if (vol_read_inode(v, pino, 0, &parts[pi], &plens[pi]) != 0) { ok = 0; break; }
+                    }
+                    uint8_t *tar = NULL; size_t tar_len = 0;
+                    if (ok && tarx_rebuild(members, n, trailer, tlen,
+                                           (const uint8_t *const *)parts, plens,
+                                           &tar, &tar_len) != 0)
+                        ok = 0;
+                    for (int pi = 0; pi < np; pi++) free(parts[pi]);
+                    free(parts); free(plens); free(members); free(trailer);
+                    if (tar_len > UINT32_MAX) {
+                        fprintf(stderr, "GZR rebuild: tar too large (%llu > UINT32_MAX)\n",
+                                (unsigned long long)tar_len);
+                        free(tar);
+                        free(rcp_own); free(blob); return -1;
+                    }
+                    uint8_t *fl = NULL; size_t fl_len = 0;
+                    if (ok) {
+                        /* reproduce deflate stream bit-exactly, wrap gzip */
+                        z_stream s;
+                        memset(&s, 0, sizeof s);
+                        if (deflateInit2(&s, glevel, Z_DEFLATED, -15, gmem,
+                                         Z_DEFAULT_STRATEGY) == Z_OK) {
+                            size_t bound = deflateBound(&s, (uLong)tar_len);
+                            uint8_t *stream = (uint8_t *)malloc(bound);
+                            s.next_in = tar;
+                            s.avail_in = (uInt)(tar_len > 0x7FFFFFFF ? 0x7FFFFFFF : tar_len);
+                            s.next_out = stream;
+                            s.avail_out = (uInt)bound;
+                            int r2 = deflate(&s, Z_FINISH);
+                            size_t stream_len = (size_t)s.total_out;
+                            deflateEnd(&s);
+                            if (r2 == Z_STREAM_END) {
+                                fl = (uint8_t *)malloc(ghl + stream_len + 8);
+                                if (fl) {
+                                    memcpy(fl, ghdr, ghl);
+                                    memcpy(fl + ghl, stream, stream_len);
+                                    uLong c = crc32(0L, Z_NULL, 0);
+                                    c = crc32(c, tar, (uInt)(tar_len > 0x7FFFFFFF ? 0x7FFFFFFF : tar_len));
+                                    fl[ghl + stream_len + 0] = (uint8_t)(c & 0xFF);
+                                    fl[ghl + stream_len + 1] = (uint8_t)((c >> 8) & 0xFF);
+                                    fl[ghl + stream_len + 2] = (uint8_t)((c >> 16) & 0xFF);
+                                    fl[ghl + stream_len + 3] = (uint8_t)((c >> 24) & 0xFF);
+                                    fl[ghl + stream_len + 4] = (uint8_t)(gisz & 0xFF);
+                                    fl[ghl + stream_len + 5] = (uint8_t)((gisz >> 8) & 0xFF);
+                                    fl[ghl + stream_len + 6] = (uint8_t)((gisz >> 16) & 0xFF);
+                                    fl[ghl + stream_len + 7] = (uint8_t)((gisz >> 24) & 0xFF);
+                                    fl_len = ghl + stream_len + 8;
+                                    if ((unsigned)(c & 0xFFFFFFFFu) != gcrc) {
+                                        fprintf(stderr, "GZR: crc mismatch for %s\n", rec_name);
+                                        ok = 0;
+                                    }
+                                } else ok = 0;
+                            } else ok = 0;
+                            free(stream);
+                        } else ok = 0;
+                    }
+                    free(tar);
+                    if (!ok || fl_len != e->length) {
+                        fprintf(stderr, "GZR: rebuild error (got %zu want %llu)\n",
+                                fl_len, (unsigned long long)e->length);
+                        free(fl); free(rcp_own); free(blob); return -1;
+                    }
+                    memcpy(data + dst_off, fl, fl_len);
+                    free(fl); free(rcp_own);
+                } else if (e->algo == INVFS_ALGO_PNGR) {
+                    /* blob = recipe [0x01][zstd] or [0x00][raw IVPN];
+                       pixels from sibling "name!jxl" (djxl -> PNG). */
+                    const uint8_t *rcp; size_t rcp_len;
+                    uint8_t *rcp_own = NULL;
+                    if (hdr > 1 && blob[0] == 1) {
+                        size_t rsize = ZSTD_getFrameContentSize(blob + 1, hdr - 1);
+                        if (rsize == ZSTD_CONTENTSIZE_ERROR ||
+                            rsize == ZSTD_CONTENTSIZE_UNKNOWN || rsize > (1u << 28)) {
+                            fprintf(stderr, "PNGR: bad recipe frame\n");
+                            free(blob); return -1;
+                        }
+                        rcp_own = (uint8_t *)malloc(rsize ? rsize : 1);
+                        if (!rcp_own) { free(blob); return -1; }
+                        size_t rr = ZSTD_decompress(rcp_own, rsize, blob + 1, hdr - 1);
+                        if (ZSTD_isError(rr)) {
+                            fprintf(stderr, "PNGR: recipe decompress fail\n");
+                            free(rcp_own); free(blob); return -1;
+                        }
+                        rcp = rcp_own; rcp_len = rr;
+                    } else {
+                        rcp = blob + 1; rcp_len = hdr - 1;
+                    }
+                    pngx_info pi;
+                    memset(&pi, 0, sizeof pi);
+                    if (pngx_parse_recipe(rcp, rcp_len, &pi) != 0) {
+                        fprintf(stderr, "PNGR: bad recipe for %s (len %zu)\n",
+                                rec_name, rcp_len);
+                        fprintf(stderr, "PNGR: recipe head: %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x\n",
+                                rcp_len > 0 ? rcp[0] : 0, rcp_len > 1 ? rcp[1] : 0,
+                                rcp_len > 2 ? rcp[2] : 0, rcp_len > 3 ? rcp[3] : 0,
+                                rcp_len > 4 ? rcp[4] : 0, rcp_len > 5 ? rcp[5] : 0,
+                                rcp_len > 6 ? rcp[6] : 0, rcp_len > 7 ? rcp[7] : 0,
+                                rcp_len > 8 ? rcp[8] : 0, rcp_len > 9 ? rcp[9] : 0);
+                        free(rcp_own); free(blob); return -1;
+                    }
+                    int ok = 1;
+                    uint8_t *rgb = NULL; size_t rgb_len = 0;
+                    {
+                        char jn[320];
+                        snprintf(jn, sizeof jn, "%s!jxl", rec_name);
+                        uint64_t jino = vol_find(v, jn);
+                        if (!jino) {
+                            fprintf(stderr, "PNGR: jxl '%s' missing\n", jn);
+                            ok = 0;
+                        } else if (invfs_png_from_jxl(v, jino, &rgb, &rgb_len) != 0) {
+                            fprintf(stderr, "PNGR: djxl failed for %s\n", rec_name);
+                            ok = 0;
+                        }
+                    }
+                    uint8_t *filt = NULL; size_t filt_len = 0;
+                    uint8_t *stream = NULL; size_t stream_len = 0;
+                    uint8_t *fl = NULL; size_t fl_len = 0;
+                    if (ok && pngx_refilter(rgb, rgb_len, &pi, &filt, &filt_len) != 0)
+                        ok = 0;
+                    if (ok) {
+                        /* deflate replica (zlib or miniz) */
+                        if (pi.enc == 0) {
+                            z_stream s;
+                            memset(&s, 0, sizeof s);
+                            if (deflateInit2(&s, pi.level, Z_DEFLATED, 15, pi.mem,
+                                             Z_DEFAULT_STRATEGY) == Z_OK) {
+                                size_t bound = deflateBound(&s, (uLong)filt_len);
+                                stream = (uint8_t *)malloc(bound);
+                                s.next_in = filt;
+                                s.avail_in = (uInt)(filt_len > 0x7FFFFFFF ? 0x7FFFFFFF : filt_len);
+                                s.next_out = stream;
+                                s.avail_out = (uInt)bound;
+                                int r2 = deflate(&s, Z_FINISH);
+                                stream_len = (size_t)s.total_out;
+                                deflateEnd(&s);
+                                if (r2 != Z_STREAM_END) ok = 0;
+                            } else ok = 0;
+                        } else {
+                            size_t bound = filt_len + filt_len / 4 + 4096;
+                            stream = (uint8_t *)malloc(bound);
+                            if (mz_tdefl_compress(filt, filt_len, stream, bound,
+                                                  pi.level, &stream_len) != 0)
+                                ok = 0;
+                        }
+                    }
+                    if (ok && pngx_rebuild(&pi, stream, stream_len, &fl, &fl_len) != 0)
+                        ok = 0;
+                    free(rgb); free(filt); free(stream);
+                    if (!ok || fl_len != e->length) {
+                        fprintf(stderr, "PNGR: rebuild error (got %zu want %llu)\n",
+                                fl_len, (unsigned long long)e->length);
+                        pngx_free(&pi); free(fl); free(rcp_own); free(blob); return -1;
+                    }
+                    memcpy(data + dst_off, fl, fl_len);
+                    pngx_free(&pi); free(fl); free(rcp_own);
+                } else if (e->algo == INVFS_ALGO_EXER) {
+                    /* WP14b M2: exe-as-container. The blob is ZSTD-19 of
+                     * the EXER payload (header + part table + glue); each
+                     * member's bytes live in a "name!exrN" sibling read
+                     * through the normal path (a JXL sibling decodes to the
+                     * member, a ZSTD one just inflates). Splice the members
+                     * back over the glue at the table offsets. The payload
+                     * is disk input: exer_payload_parse validates every
+                     * bound before anything is copied. */
+                    uint8_t *pay = NULL;
+                    exer_row *rows = NULL;
+                    uint8_t *parts[EXE_MAX_MEDIA];
+                    size_t n = 0, pi;
+                    int ok = 0;
+                    size_t dsize = ZSTD_getFrameContentSize(blob, hdr);
+
+                    memset(parts, 0, sizeof parts);
+                    if (dsize != ZSTD_CONTENTSIZE_ERROR &&
+                        dsize != ZSTD_CONTENTSIZE_UNKNOWN &&
+                        dsize >= 8 + 17 &&
+                        dsize <= (uint64_t)e->length + 8 + 17 * EXE_MAX_MEDIA)
+                        pay = (uint8_t *)malloc(dsize);
+                    rows = (exer_row *)malloc(EXE_MAX_MEDIA * sizeof *rows);
+                    if (pay && rows) {
+                        size_t d = ZSTD_decompress(pay, dsize, blob, hdr);
+                        if (!ZSTD_isError(d) && d == dsize &&
+                            exer_payload_parse(pay, dsize, e->length,
+                                               rows, EXE_MAX_MEDIA, &n) == 0)
+                            ok = 1;
+                    }
+                    for (pi = 0; ok && pi < n; pi++) {
+                        char pn[288];
+                        uint64_t pino;
+                        size_t plen = 0;
+                        snprintf(pn, sizeof pn, "%s!exr%zu", rec_name, pi);
+                        pino = vol_find(v, pn);
+                        if (!pino ||
+                            vol_read_file(v, pino, &parts[pi], &plen) != 0 ||
+                            plen != (size_t)rows[pi].len) {
+                            fprintf(stderr, "EXER: part '%s' unreadable\n", pn);
+                            ok = 0;
+                            break;
+                        }
+                    }
+                    if (ok)
+                        exer_splice(pay, rows, n, parts, data, e->length);
+                    for (pi = 0; pi < n; pi++) free(parts[pi]);
+                    free(pay);
+                    free(rows);
+                    if (!ok) {
+                        fprintf(stderr, "EXER: rebuild failed for %s\n",
+                                rec_name);
+                        free(blob); return -1;
+                    }
+                } else if (e->algo == INVFS_ALGO_NONE) {
+                    memcpy(data + dst_off, blob, hdr);
+                } else {
+                    const invfs_codec *pc = invfs_codec_by_algo(e->algo);
+                    const invfs_pack_def *pd =
+                        pc ? invfs_codec_pack_def(pc) : NULL;
+                    /* WP16b: a seekable pack container (map command ->
+                     * CAP_SEEK) with its !mbrmap sibling splices locally --
+                     * no pack exec, ever. The same read works with the pack
+                     * ABSENT (pc == NULL): the map is self-describing, the
+                     * sibling alone decides. Missing map: the pack's rebuild
+                     * exec answers, as before. */
+                    int mapped = 0;
+                    if ((pd && pd->is_container &&
+                         (pc->caps & INVFS_CODEC_CAP_SEEK)) || !pc) {
+                        char mbn[288];
+                        snprintf(mbn, sizeof mbn, "%s!mbrmap", rec_name);
+                        mapped = vol_find(v, mbn) != 0;
+                    }
+                    if (mapped) {
+                        /* cpack_map_read returns the byte count (the
+                         * vol_read_range convention): < 0 is the failure */
+                        if (cpack_map_read(v, rec_name, inode_id,
+                                           (uint64_t)e->length,
+                                           e->file_offset, data + dst_off,
+                                           (size_t)e->length) < 0) {
+                            fprintf(stderr, "%s: mapped container read "
+                                    "failed for %s\n",
+                                    pc ? pc->name : "codecpack", rec_name);
+                            free(blob); return -1;
+                        }
+                    } else if (pd && pd->is_container) {
+                        /* WP16a: the blob is the pack's recipe; the members
+                         * live in "!mbrNNNN" sibling inodes and are read
+                         * through their CURRENT stored form (vol_read_file
+                         * -- the pack's extract cannot help, the original
+                         * container no longer exists), then spliced by the
+                         * pack's rebuild command. A missing/corrupt member
+                         * fails the read LOUDLY (the 1:1 invariant). */
+                        if (pack_container_rebuild(v, pc, rec_name,
+                                                   blob, hdr,
+                                                   data + dst_off,
+                                                   (size_t)e->length) != 0) {
+                            fprintf(stderr, "%s: container rebuild failed "
+                                    "for %s\n", pc->name, rec_name);
+                            free(blob); return -1;
+                        }
+                    } else if (!pc || !pc->decode) {
+                        /* WP13: an algo this build cannot decode (pack not
+                         * loaded) fails LOUDLY -- the historical raw copy
+                         * would serve the blob as if it were the file,
+                         * silently breaking the 1:1 invariant. */
+                        fprintf(stderr, "inode %llu: algo %u requires a "
+                                "codecpack that is not loaded\n",
+                                (unsigned long long)inode_id, e->algo);
+                        free(blob); return -1;
+                    } else if (pc->decode(blob, hdr, data + dst_off,
+                                          (size_t)e->length) != 0) {
+                        fprintf(stderr, "%s: pack decode error\n", pc->name);
+                        free(blob); return -1;
+                    }
+                }
+                free(blob);
+            }
+    return 0;
+}
+
+
 int vol_read_inode(invfs_volume *v, uint64_t inode_id, unsigned depth,
                           uint8_t **out, size_t *out_len)
 {
@@ -321,26 +924,62 @@ int vol_read_inode(invfs_volume *v, uint64_t inode_id, unsigned depth,
     size_t len = 0;
     char rec_name[INVFS_MAX_NAME + 1];
 
-    /* WP-M5: a v3 volume has no append-only record stream. The inode row in
-     * the base tree carries the recipe *reference*; WP-M8 fetches and
-     * CRC-verifies the immutable recipe blob and reuses the v2 segment
-     * decoder below. Until then a v3 inode can only be empty (recipe 0),
-     * which is exactly the "create an empty file" case M5 unblocks. */
+    /* WP-M8: a v3 volume has no append-only record stream. The inode row in
+     * the base tree carries a content-addressed recipe *reference*; fetch
+     * and BLAKE3-verify the immutable blob, then decode its segments with
+     * the exact same codec code as the v2 path (vol_decode_ast_entries).
+     * An empty file (size 0 / no address) is the "no content" case. */
     if (v->sb.vol_flags & VOLF_V3) {
         invfs_v3_inode in;
+        invfs_ast_hdr ah;
+        const invfs_ast_block_entry *ents = NULL;
+        size_t n_ents = 0;
+        uint8_t *blob = NULL;
+        size_t blen = 0;
         int rc = vol_v3_inode_get(v, inode_id, &in);
+        static const uint8_t zero_addr[INVFS_V3_RECIPE_ADDR_LEN];
+
         if (rc != 1)
             return -1;
-        if (in.recipe.pba != 0) {
-            fprintf(stderr, "vol_read_inode: v3 inode %llu has a recipe "
-                    "blob; recipe reads land in WP-M8\n",
-                    (unsigned long long)inode_id);
+        if (in.size == 0 ||
+            memcmp(in.recipe_addr, zero_addr, INVFS_V3_RECIPE_ADDR_LEN) == 0) {
+            *out = (uint8_t *)malloc(1);
+            if (!*out)
+                return -1;
+            *out_len = 0;
+            return 0;
+        }
+        if (vol_v3_recipe_load(v, in.recipe_addr, &blob, &blen) != 0) {
+            fprintf(stderr, "vol_read_inode: v3 inode %llu: recipe blob "
+                    "missing/corrupt\n", (unsigned long long)inode_id);
             return -1;
         }
-        *out = (uint8_t *)malloc(1);
-        if (!*out)
+        if (vol_ast_recipe_parse(blob, blen, &ah, &ents, &n_ents) != 0) {
+            fprintf(stderr, "vol_read_inode: v3 inode %llu: corrupt recipe "
+                    "blob\n", (unsigned long long)inode_id);
+            free(blob);
             return -1;
-        *out_len = 0;
+        }
+        /* the row's size and the blob's header must agree; a disagreement
+         * is corruption, not something to paper over with a clamp */
+        if (ah.file_size != in.size) {
+            fprintf(stderr, "vol_read_inode: v3 inode %llu: row size %llu != "
+                    "recipe size %llu\n", (unsigned long long)inode_id,
+                    (unsigned long long)in.size,
+                    (unsigned long long)ah.file_size);
+            free(blob);
+            return -1;
+        }
+        len = (size_t)ah.file_size;
+        data = (uint8_t *)malloc(len ? len : 1);
+        if (!data) { free(blob); return -1; }
+        if (vol_decode_ast_entries(v, inode_id, "", &ah, ents, data) != 0) {
+            free(data); free(blob);
+            return -1;
+        }
+        free(blob);
+        *out = data;
+        *out_len = len;
         return 0;
     }
 
@@ -406,7 +1045,6 @@ int vol_read_inode(invfs_volume *v, uint64_t inode_id, unsigned depth,
         {
             invfs_ast_hdr ast_h;
             const invfs_ast_block_entry *ents;
-            uint32_t i;
             size_t off = (size_t)(invfs_rec_cbody((const invfs_inode_rec *)rec)
                                   - rec);
             if (invfs_ast_hdr_parse(rec + off, rec_h.rec_len - off,
@@ -428,590 +1066,9 @@ int vol_read_inode(invfs_volume *v, uint64_t inode_id, unsigned depth,
             data = (uint8_t *)malloc(len ? len : 1);
             if (!data) { free(rec); return -1; }
 
-            for (i = 0; i < ast_h.num_blocks; i++) {
-                const invfs_ast_block_entry *e = &ents[i];
-                uint64_t end = e->file_offset + e->length;
-                if (e->file_offset > ast_h.file_size ||
-                    end > ast_h.file_size ||
-                    end < e->file_offset) {
-                    fprintf(stderr, "inode %llu seg %u: entry out of bounds "
-                            "(off=%llu len=%llu size=%llu)\n",
-                            (unsigned long long)inode_id, e->block_id,
-                            (unsigned long long)e->file_offset,
-                            (unsigned long long)e->length,
-                            (unsigned long long)ast_h.file_size);
-                    free(data); free(rec); return -1;
-                }
-                if (i > 0 && e->file_offset < ents[i-1].file_offset +
-                                          ents[i-1].length) {
-                    fprintf(stderr, "inode %llu seg %u: overlapping entry\n",
-                            (unsigned long long)inode_id, e->block_id);
-                    free(data); free(rec); return -1;
-                }
-            }
-
-            for (i = 0; i < ast_h.num_blocks; i++) {
-                const invfs_ast_block_entry *e = &ents[i];
-                uint64_t pba = 0;
-                uint32_t hdr;
-                uint8_t *blob;
-                size_t dst_off = (size_t)e->file_offset;
-
-                /* Batch member: a slice of a shared batch (PPMd text,
-                 * ZSTD/ZSTD_BCJ binary), decoded and cached by pba (heap
-                 * only -- see vol_read_text_slice) */
-                if (e->zone == INVFS_ZONE_TEXT && tz_batch_algo(e->algo)) {
-                    if (vol_read_text_slice(v, inode_id, e, 0,
-                                            data + dst_off,
-                                            (size_t)e->length) != 0) {
-                        free(data); free(rec); return -1;
-                    }
-                    continue;
-                }
-
-                /* segment physical location: the entry's own pba (WP27);
-                 * plen derives from the segment header (0 = unknown) */
-                pba = e->pba;
-                if (pba == 0 || pba >= v->sb.total_blocks) {
-                    fprintf(stderr, "pba invalid: inode %llu seg %u\n",
-                            (unsigned long long)inode_id, e->block_id);
-                    free(data); free(rec); return -1;
-                }
-                heat_touch_read(v, inode_id, e->block_id);   /* WP19 */
-                /* framed segment [4B csize][4B crc32c][payload]: CRC-verified
-                 * read; a shadow-zone failure gets one WP20 seal-parity
-                 * recovery attempt inside before the error propagates */
-                if (seg_read_checked(v, pba, 0, 1, &hdr, &blob) != 0) {
-                    fprintf(stderr, "segment CRC mismatch: inode %llu seg %u (corrupt)\n",
-                            (unsigned long long)inode_id, e->block_id);
-                    free(data); free(rec); return -1;
-                }
-                if (e->algo == INVFS_ALGO_NONE) {
-                    if (hdr != e->length) {
-                        fprintf(stderr, "raw segment header corrupt (csize %u, want %llu)\n",
-                                hdr, (unsigned long long)e->length);
-                        free(blob); free(data); free(rec); return -1;
-                    }
-                } else if (e->algo == INVFS_ALGO_LZ4 || e->algo == INVFS_ALGO_ZSTD) {
-                    /* compressed-in-place segments: csize < usize is required */
-                    if (hdr >= e->length || hdr == 0) {
-                        fprintf(stderr, "lz4 segment header corrupt (csize %u)\n", hdr);
-                        free(blob); free(data); free(rec); return -1;
-                    }
-                }
-                /* whole-file blobs (JXL/APE/FLACR) keep csize unrelated to the
-                   logical size: the transcoder may be smaller OR larger */
-                if (e->algo == INVFS_ALGO_LZ4) {
-                    int got = LZ4_decompress_safe((const char *)blob,
-                                                  (char *)(data + dst_off),
-                                                  (int)hdr, (int)e->length);
-                    if (got != (int)e->length) {
-                        fprintf(stderr, "LZ4 decompress error: got %d, want %llu\n",
-                                got, (unsigned long long)e->length);
-                        free(blob); free(data); free(rec); return -1;
-                    }
-                } else if (e->algo == INVFS_ALGO_ZSTD) {
-                    size_t got = ZSTD_decompress(data + dst_off, e->length, blob, hdr);
-                    if (ZSTD_isError(got) || got != e->length) {
-                        fprintf(stderr, "ZSTD decompress error: %s\n",
-                                ZSTD_isError(got) ? ZSTD_getErrorName(got) : "size mismatch");
-                        free(blob); free(data); free(rec); return -1;
-                    }
-                } else if (e->algo == INVFS_ALGO_JXL) {
-                    /* whole file is one JXL blob -> decode to jpeg.
-                     * WP16e: the lane is pack-owned -- with the jxl
-                     * codecpack loaded the registry entry for algo 4 IS the
-                     * pack, so decode routes through the pack trampoline
-                     * exactly like any other pack algo. With no pack loaded
-                     * the builtin placeholder has no decode: the builtin
-                     * djxl wrapper answers, so pre-migration blobs and
-                     * EXER-carved JXL parts (which never needed a pack)
-                     * stay readable. */
-                    const invfs_codec *jc = invfs_codec_by_algo(INVFS_ALGO_JXL);
-                    if (jc && jc->decode) {
-                        if (jc->decode(blob, hdr, data + dst_off,
-                                       (size_t)e->length) != 0) {
-                            fprintf(stderr, "JXL pack decode error\n");
-                            free(blob); free(data); free(rec); return -1;
-                        }
-                    } else {
-                        uint8_t *jpg = NULL;
-                        size_t jpg_len = 0;
-                        if (invfs_jxl_decompress(blob, hdr, &jpg, &jpg_len) != 0 ||
-                            jpg_len != e->length) {
-                            fprintf(stderr, "JXL decompress error\n");
-                            free(blob); free(data); free(rec); return -1;
-                        }
-                        memcpy(data + dst_off, jpg, jpg_len);
-                        free(jpg);
-                    }
-                } else if (e->algo == INVFS_ALGO_APE) {
-                    /* whole file is one APE blob -> decode to flac */
-                    uint8_t *fl = NULL;
-                    size_t fl_len = 0;
-                    if (invfs_ape_decompress(blob, hdr, &fl, &fl_len) != 0) {
-                        fprintf(stderr, "APE decompress error\n");
-                        free(blob); free(data); free(rec); return -1;
-                    }
-                    memcpy(data + dst_off, fl, fl_len < e->length ? fl_len : e->length);
-                    free(fl);
-                } else if (e->algo == INVFS_ALGO_PMP) {
-                    /* whole file is one PMP blob -> decode back to mp3.
-                       Length is checked, not clamped: packMP3 is bit-exact
-                       or it is nothing, so a short/long result means the
-                       blob is corrupt and returning partial audio would
-                       break the 1:1 invariant silently. */
-                    uint8_t *m = NULL;
-                    size_t m_len = 0;
-                    if (invfs_pmp_decompress(blob, hdr, &m, &m_len) != 0 ||
-                        m_len != e->length) {
-                        fprintf(stderr, "PMP decompress error (%s: got %zu, want %llu)\n",
-                                rec_name, m_len, (unsigned long long)e->length);
-                        free(m); free(blob); free(data); free(rec); return -1;
-                    }
-                    memcpy(data + dst_off, m, m_len);
-                    free(m);
-                } else if (e->algo == INVFS_ALGO_FLACR) {
-                    /* whole file is an APE(PCM) blob; sibling inode
-                       "name!recipe" holds the frame recipe. Rebuild the
-                       ORIGINAL FLAC bit-exactly: APE->WAV->flacx_rebuild. */
-                    uint8_t *wav = NULL, *rcp = NULL, *fl = NULL;
-                    size_t wav_len = 0, rcp_len = 0, fl_len = 0;
-                    char rname[272];
-                    if (invfs_ape_to_wav(blob, hdr, &wav, &wav_len) != 0) {
-                        fprintf(stderr, "FLACR: APE->WAV failed for %s\n", rec_name);
-                        free(blob); free(data); free(rec); return -1;
-                    }
-                    snprintf(rname, sizeof rname, "%s!recipe", rec_name);
-                    uint64_t rino = vol_find(v, rname);
-                    if (rino == 0) {
-                        fprintf(stderr, "FLACR: recipe inode '%s' not found\n", rname);
-                        free(wav); free(blob); free(data); free(rec); return -1;
-                    }
-                    if (vol_read_inode(v, rino, 0, &rcp, &rcp_len) != 0) {
-                        fprintf(stderr, "FLACR: cannot read recipe '%s'\n", rname);
-                        free(wav); free(blob); free(data); free(rec); return -1;
-                    }
-                    /* cover payloads: "name!coverN" (v2 recipes) */
-                    int ncv = flacx_recipe_num_covers(rcp, rcp_len);
-                    flacx_cover covers[16];
-                    uint8_t *cdata[16];
-                    int ok = 1;
-                    for (int ci = 0; ci < ncv && ci < 16; ci++) {
-                        char cn[288];
-                        snprintf(cn, sizeof cn, "%s!cover%d", rec_name, ci);
-                        uint64_t cino = vol_find(v, cn);
-                        size_t clen = 0;
-                        cdata[ci] = NULL;
-                        if (cino == 0 ||
-                            vol_read_inode(v, cino, 0, &cdata[ci], &clen) != 0 ||
-                            clen > 0x7FFFFFFF) {
-                            fprintf(stderr, "FLACR: cover '%s' missing\n", cn);
-                            ok = 0;
-                            break;
-                        }
-                        covers[ci].data = cdata[ci];
-                        covers[ci].len = (uint32_t)clen;
-                        covers[ci].offset = 0;
-                    }
-                    if (ok && flacx_rebuild(wav, wav_len, rcp, rcp_len, covers,
-                                            (uint32_t)ncv, &fl, &fl_len) != 0)
-                        ok = 0;
-                    for (int ci = 0; ci < ncv && ci < 16; ci++) free(cdata[ci]);
-                    if (!ok || fl_len != e->length) {
-                        fprintf(stderr, "FLACR: rebuild error (got %zu want %llu)\n",
-                                fl_len, (unsigned long long)e->length);
-                        free(wav); free(rcp); free(blob); free(data); free(rec); return -1;
-                    }
-                    memcpy(data + dst_off, fl, fl_len);
-                    free(fl); free(wav); free(rcp);
-                } else if (e->algo == INVFS_ALGO_TARR) {
-                    /* blob = recipe: [0x01][zstd...] or [0x00][raw IVFT] */
-                    const uint8_t *rcp; size_t rcp_len;
-                    uint8_t *rcp_own = NULL;
-                    if (hdr > 1 && blob[0] == 1) {
-                        size_t rsize = ZSTD_getFrameContentSize(blob + 1, hdr - 1);
-                        if (rsize == ZSTD_CONTENTSIZE_ERROR ||
-                            rsize == ZSTD_CONTENTSIZE_UNKNOWN || rsize > (1u << 28)) {
-                            fprintf(stderr, "TARR: bad recipe frame\n");
-                            free(blob); free(data); free(rec); return -1;
-                        }
-                        rcp_own = (uint8_t *)malloc(rsize ? rsize : 1);
-                        if (!rcp_own) { free(blob); free(data); free(rec); return -1; }
-                        size_t rr = ZSTD_decompress(rcp_own, rsize, blob + 1, hdr - 1);
-                        if (ZSTD_isError(rr)) {
-                            fprintf(stderr, "TARR: recipe decompress fail\n");
-                            free(rcp_own); free(blob); free(data); free(rec); return -1;
-                        }
-                        rcp = rcp_own; rcp_len = rr;
-                    } else {
-                        rcp = blob + 1; rcp_len = hdr - 1;
-                    }
-                    tarx_member *members = NULL; size_t n = 0;
-                    uint8_t *trailer = NULL; size_t tlen = 0;
-                    if (tarx_parse_recipe(rcp, rcp_len, &members, &n, &trailer, &tlen) != 0) {
-                        fprintf(stderr, "TARR: bad recipe for %s\n", rec_name);
-                        free(rcp_own); free(blob); free(data); free(rec); return -1;
-                    }
-                    int np = tarx_recipe_num_parts(rcp, rcp_len);
-                    uint8_t **parts = (uint8_t **)calloc(np > 0 ? (size_t)np : 1, sizeof(void *));
-                    size_t *plens = (size_t *)calloc(np > 0 ? (size_t)np : 1, sizeof(size_t));
-                    int ok = 1;
-                    for (int pi = 0; pi < np; pi++) {
-                        char pn[320];
-                        snprintf(pn, sizeof pn, "%s!part%u", rec_name, pi);
-                        uint64_t pino = vol_find(v, pn);
-                        if (!pino) {
-                            fprintf(stderr, "TARR: part '%s' missing\n", pn);
-                            ok = 0; break;
-                        }
-                        if (vol_read_inode(v, pino, 0, &parts[pi], &plens[pi]) != 0) { ok = 0; break; }
-                    }
-                    uint8_t *fl = NULL; size_t fl_len = 0;
-                    if (ok && tarx_rebuild(members, n, trailer, tlen,
-                                           (const uint8_t *const *)parts, plens,
-                                           &fl, &fl_len) != 0)
-                        ok = 0;
-                    for (int pi = 0; pi < np; pi++) free(parts[pi]);
-                    free(parts); free(plens); free(members); free(trailer);
-                    if (!ok || fl_len != e->length) {
-                        fprintf(stderr, "TARR: rebuild error (got %zu want %llu)\n",
-                                fl_len, (unsigned long long)e->length);
-                        free(rcp_own); free(blob); free(data); free(rec); free(fl); return -1;
-                    }
-                    memcpy(data + dst_off, fl, fl_len);
-                    free(fl); free(rcp_own);
-                } else if (e->algo == INVFS_ALGO_GZR) {
-                    /* blob = recipe: [0x01][zstd] or [0x00][raw]; recipe =
-                       [IVGZ][ver][level][mem][crc32][isize][hlen(2)][header] + IVFT */
-                    const uint8_t *rcp; size_t rcp_len;
-                    uint8_t *rcp_own = NULL;
-                    if (hdr > 1 && blob[0] == 1) {
-                        size_t rsize = ZSTD_getFrameContentSize(blob + 1, hdr - 1);
-                        if (rsize == ZSTD_CONTENTSIZE_ERROR ||
-                            rsize == ZSTD_CONTENTSIZE_UNKNOWN || rsize > (1u << 28)) {
-                            fprintf(stderr, "GZR: bad recipe frame\n");
-                            free(blob); free(data); free(rec); return -1;
-                        }
-                        rcp_own = (uint8_t *)malloc(rsize ? rsize : 1);
-                        if (!rcp_own) { free(blob); free(data); free(rec); return -1; }
-                        size_t rr = ZSTD_decompress(rcp_own, rsize, blob + 1, hdr - 1);
-                        if (ZSTD_isError(rr)) {
-                            fprintf(stderr, "GZR: recipe decompress fail\n");
-                            free(rcp_own); free(blob); free(data); free(rec); return -1;
-                        }
-                        rcp = rcp_own; rcp_len = rr;
-                    } else {
-                        rcp = blob + 1; rcp_len = hdr - 1;
-                    }
-                    if (rcp_len < 20 || memcmp(rcp, "IVGZ", 4) != 0 || rcp[4] != 1) {
-                        fprintf(stderr, "GZR: bad recipe for %s\n", rec_name);
-                        free(rcp_own); free(blob); free(data); free(rec); return -1;
-                    }
-                    int glevel = rcp[5];
-                    int gmem = rcp[6];
-                    unsigned gcrc = (unsigned)rcp[7] | ((unsigned)rcp[8] << 8) |
-                                    ((unsigned)rcp[9] << 16) | ((unsigned)rcp[10] << 24);
-                    unsigned gisz = (unsigned)rcp[11] | ((unsigned)rcp[12] << 8) |
-                                     ((unsigned)rcp[13] << 16) | ((unsigned)rcp[14] << 24);
-                    unsigned ghl = (unsigned)rcp[15] | ((unsigned)rcp[16] << 8);
-                    if (17 + ghl + 17 > rcp_len) {
-                        fprintf(stderr, "GZR: short recipe\n");
-                        free(rcp_own); free(blob); free(data); free(rec); return -1;
-                    }
-                    const uint8_t *ghdr = rcp + 17;
-                    const uint8_t *ivft = rcp + 17 + ghl;
-                    size_t ivft_len = rcp_len - 17 - ghl;
-                    tarx_member *members = NULL; size_t n = 0;
-                    uint8_t *trailer = NULL; size_t tlen = 0;
-                    if (tarx_parse_recipe(ivft, ivft_len, &members, &n, &trailer, &tlen) != 0) {
-                        fprintf(stderr, "GZR: bad IVFT for %s\n", rec_name);
-                        free(rcp_own); free(blob); free(data); free(rec); return -1;
-                    }
-                    int np = tarx_recipe_num_parts(ivft, ivft_len);
-                    uint8_t **parts = (uint8_t **)calloc(np > 0 ? (size_t)np : 1, sizeof(void *));
-                    size_t *plens = (size_t *)calloc(np > 0 ? (size_t)np : 1, sizeof(size_t));
-                    int ok = 1;
-                    for (int pi = 0; pi < np; pi++) {
-                        char pn[320];
-                        snprintf(pn, sizeof pn, "%s!part%u", rec_name, pi);
-                        uint64_t pino = vol_find(v, pn);
-                        if (!pino) {
-                            fprintf(stderr, "GZR: part '%s' missing\n", pn);
-                            ok = 0; break;
-                        }
-                        if (vol_read_inode(v, pino, 0, &parts[pi], &plens[pi]) != 0) { ok = 0; break; }
-                    }
-                    uint8_t *tar = NULL; size_t tar_len = 0;
-                    if (ok && tarx_rebuild(members, n, trailer, tlen,
-                                           (const uint8_t *const *)parts, plens,
-                                           &tar, &tar_len) != 0)
-                        ok = 0;
-                    for (int pi = 0; pi < np; pi++) free(parts[pi]);
-                    free(parts); free(plens); free(members); free(trailer);
-                    if (tar_len > UINT32_MAX) {
-                        fprintf(stderr, "GZR rebuild: tar too large (%llu > UINT32_MAX)\n",
-                                (unsigned long long)tar_len);
-                        free(tar);
-                        free(rcp_own); free(blob); free(data); free(rec); return -1;
-                    }
-                    uint8_t *fl = NULL; size_t fl_len = 0;
-                    if (ok) {
-                        /* reproduce deflate stream bit-exactly, wrap gzip */
-                        z_stream s;
-                        memset(&s, 0, sizeof s);
-                        if (deflateInit2(&s, glevel, Z_DEFLATED, -15, gmem,
-                                         Z_DEFAULT_STRATEGY) == Z_OK) {
-                            size_t bound = deflateBound(&s, (uLong)tar_len);
-                            uint8_t *stream = (uint8_t *)malloc(bound);
-                            s.next_in = tar;
-                            s.avail_in = (uInt)(tar_len > 0x7FFFFFFF ? 0x7FFFFFFF : tar_len);
-                            s.next_out = stream;
-                            s.avail_out = (uInt)bound;
-                            int r2 = deflate(&s, Z_FINISH);
-                            size_t stream_len = (size_t)s.total_out;
-                            deflateEnd(&s);
-                            if (r2 == Z_STREAM_END) {
-                                fl = (uint8_t *)malloc(ghl + stream_len + 8);
-                                if (fl) {
-                                    memcpy(fl, ghdr, ghl);
-                                    memcpy(fl + ghl, stream, stream_len);
-                                    uLong c = crc32(0L, Z_NULL, 0);
-                                    c = crc32(c, tar, (uInt)(tar_len > 0x7FFFFFFF ? 0x7FFFFFFF : tar_len));
-                                    fl[ghl + stream_len + 0] = (uint8_t)(c & 0xFF);
-                                    fl[ghl + stream_len + 1] = (uint8_t)((c >> 8) & 0xFF);
-                                    fl[ghl + stream_len + 2] = (uint8_t)((c >> 16) & 0xFF);
-                                    fl[ghl + stream_len + 3] = (uint8_t)((c >> 24) & 0xFF);
-                                    fl[ghl + stream_len + 4] = (uint8_t)(gisz & 0xFF);
-                                    fl[ghl + stream_len + 5] = (uint8_t)((gisz >> 8) & 0xFF);
-                                    fl[ghl + stream_len + 6] = (uint8_t)((gisz >> 16) & 0xFF);
-                                    fl[ghl + stream_len + 7] = (uint8_t)((gisz >> 24) & 0xFF);
-                                    fl_len = ghl + stream_len + 8;
-                                    if ((unsigned)(c & 0xFFFFFFFFu) != gcrc) {
-                                        fprintf(stderr, "GZR: crc mismatch for %s\n", rec_name);
-                                        ok = 0;
-                                    }
-                                } else ok = 0;
-                            } else ok = 0;
-                            free(stream);
-                        } else ok = 0;
-                    }
-                    free(tar);
-                    if (!ok || fl_len != e->length) {
-                        fprintf(stderr, "GZR: rebuild error (got %zu want %llu)\n",
-                                fl_len, (unsigned long long)e->length);
-                        free(fl); free(rcp_own); free(blob); free(data); free(rec); return -1;
-                    }
-                    memcpy(data + dst_off, fl, fl_len);
-                    free(fl); free(rcp_own);
-                } else if (e->algo == INVFS_ALGO_PNGR) {
-                    /* blob = recipe [0x01][zstd] or [0x00][raw IVPN];
-                       pixels from sibling "name!jxl" (djxl -> PNG). */
-                    const uint8_t *rcp; size_t rcp_len;
-                    uint8_t *rcp_own = NULL;
-                    if (hdr > 1 && blob[0] == 1) {
-                        size_t rsize = ZSTD_getFrameContentSize(blob + 1, hdr - 1);
-                        if (rsize == ZSTD_CONTENTSIZE_ERROR ||
-                            rsize == ZSTD_CONTENTSIZE_UNKNOWN || rsize > (1u << 28)) {
-                            fprintf(stderr, "PNGR: bad recipe frame\n");
-                            free(blob); free(data); free(rec); return -1;
-                        }
-                        rcp_own = (uint8_t *)malloc(rsize ? rsize : 1);
-                        if (!rcp_own) { free(blob); free(data); free(rec); return -1; }
-                        size_t rr = ZSTD_decompress(rcp_own, rsize, blob + 1, hdr - 1);
-                        if (ZSTD_isError(rr)) {
-                            fprintf(stderr, "PNGR: recipe decompress fail\n");
-                            free(rcp_own); free(blob); free(data); free(rec); return -1;
-                        }
-                        rcp = rcp_own; rcp_len = rr;
-                    } else {
-                        rcp = blob + 1; rcp_len = hdr - 1;
-                    }
-                    pngx_info pi;
-                    memset(&pi, 0, sizeof pi);
-                    if (pngx_parse_recipe(rcp, rcp_len, &pi) != 0) {
-                        fprintf(stderr, "PNGR: bad recipe for %s (len %zu)\n",
-                                rec_name, rcp_len);
-                        fprintf(stderr, "PNGR: recipe head: %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x\n",
-                                rcp_len > 0 ? rcp[0] : 0, rcp_len > 1 ? rcp[1] : 0,
-                                rcp_len > 2 ? rcp[2] : 0, rcp_len > 3 ? rcp[3] : 0,
-                                rcp_len > 4 ? rcp[4] : 0, rcp_len > 5 ? rcp[5] : 0,
-                                rcp_len > 6 ? rcp[6] : 0, rcp_len > 7 ? rcp[7] : 0,
-                                rcp_len > 8 ? rcp[8] : 0, rcp_len > 9 ? rcp[9] : 0);
-                        free(rcp_own); free(blob); free(data); free(rec); return -1;
-                    }
-                    int ok = 1;
-                    uint8_t *rgb = NULL; size_t rgb_len = 0;
-                    {
-                        char jn[320];
-                        snprintf(jn, sizeof jn, "%s!jxl", rec_name);
-                        uint64_t jino = vol_find(v, jn);
-                        if (!jino) {
-                            fprintf(stderr, "PNGR: jxl '%s' missing\n", jn);
-                            ok = 0;
-                        } else if (invfs_png_from_jxl(v, jino, &rgb, &rgb_len) != 0) {
-                            fprintf(stderr, "PNGR: djxl failed for %s\n", rec_name);
-                            ok = 0;
-                        }
-                    }
-                    uint8_t *filt = NULL; size_t filt_len = 0;
-                    uint8_t *stream = NULL; size_t stream_len = 0;
-                    uint8_t *fl = NULL; size_t fl_len = 0;
-                    if (ok && pngx_refilter(rgb, rgb_len, &pi, &filt, &filt_len) != 0)
-                        ok = 0;
-                    if (ok) {
-                        /* deflate replica (zlib or miniz) */
-                        if (pi.enc == 0) {
-                            z_stream s;
-                            memset(&s, 0, sizeof s);
-                            if (deflateInit2(&s, pi.level, Z_DEFLATED, 15, pi.mem,
-                                             Z_DEFAULT_STRATEGY) == Z_OK) {
-                                size_t bound = deflateBound(&s, (uLong)filt_len);
-                                stream = (uint8_t *)malloc(bound);
-                                s.next_in = filt;
-                                s.avail_in = (uInt)(filt_len > 0x7FFFFFFF ? 0x7FFFFFFF : filt_len);
-                                s.next_out = stream;
-                                s.avail_out = (uInt)bound;
-                                int r2 = deflate(&s, Z_FINISH);
-                                stream_len = (size_t)s.total_out;
-                                deflateEnd(&s);
-                                if (r2 != Z_STREAM_END) ok = 0;
-                            } else ok = 0;
-                        } else {
-                            size_t bound = filt_len + filt_len / 4 + 4096;
-                            stream = (uint8_t *)malloc(bound);
-                            if (mz_tdefl_compress(filt, filt_len, stream, bound,
-                                                  pi.level, &stream_len) != 0)
-                                ok = 0;
-                        }
-                    }
-                    if (ok && pngx_rebuild(&pi, stream, stream_len, &fl, &fl_len) != 0)
-                        ok = 0;
-                    free(rgb); free(filt); free(stream);
-                    if (!ok || fl_len != e->length) {
-                        fprintf(stderr, "PNGR: rebuild error (got %zu want %llu)\n",
-                                fl_len, (unsigned long long)e->length);
-                        pngx_free(&pi); free(fl); free(rcp_own); free(blob); free(data); free(rec); return -1;
-                    }
-                    memcpy(data + dst_off, fl, fl_len);
-                    pngx_free(&pi); free(fl); free(rcp_own);
-                } else if (e->algo == INVFS_ALGO_EXER) {
-                    /* WP14b M2: exe-as-container. The blob is ZSTD-19 of
-                     * the EXER payload (header + part table + glue); each
-                     * member's bytes live in a "name!exrN" sibling read
-                     * through the normal path (a JXL sibling decodes to the
-                     * member, a ZSTD one just inflates). Splice the members
-                     * back over the glue at the table offsets. The payload
-                     * is disk input: exer_payload_parse validates every
-                     * bound before anything is copied. */
-                    uint8_t *pay = NULL;
-                    exer_row *rows = NULL;
-                    uint8_t *parts[EXE_MAX_MEDIA];
-                    size_t n = 0, pi;
-                    int ok = 0;
-                    size_t dsize = ZSTD_getFrameContentSize(blob, hdr);
-
-                    memset(parts, 0, sizeof parts);
-                    if (dsize != ZSTD_CONTENTSIZE_ERROR &&
-                        dsize != ZSTD_CONTENTSIZE_UNKNOWN &&
-                        dsize >= 8 + 17 &&
-                        dsize <= (uint64_t)e->length + 8 + 17 * EXE_MAX_MEDIA)
-                        pay = (uint8_t *)malloc(dsize);
-                    rows = (exer_row *)malloc(EXE_MAX_MEDIA * sizeof *rows);
-                    if (pay && rows) {
-                        size_t d = ZSTD_decompress(pay, dsize, blob, hdr);
-                        if (!ZSTD_isError(d) && d == dsize &&
-                            exer_payload_parse(pay, dsize, e->length,
-                                               rows, EXE_MAX_MEDIA, &n) == 0)
-                            ok = 1;
-                    }
-                    for (pi = 0; ok && pi < n; pi++) {
-                        char pn[288];
-                        uint64_t pino;
-                        size_t plen = 0;
-                        snprintf(pn, sizeof pn, "%s!exr%zu", rec_name, pi);
-                        pino = vol_find(v, pn);
-                        if (!pino ||
-                            vol_read_file(v, pino, &parts[pi], &plen) != 0 ||
-                            plen != (size_t)rows[pi].len) {
-                            fprintf(stderr, "EXER: part '%s' unreadable\n", pn);
-                            ok = 0;
-                            break;
-                        }
-                    }
-                    if (ok)
-                        exer_splice(pay, rows, n, parts, data, e->length);
-                    for (pi = 0; pi < n; pi++) free(parts[pi]);
-                    free(pay);
-                    free(rows);
-                    if (!ok) {
-                        fprintf(stderr, "EXER: rebuild failed for %s\n",
-                                rec_name);
-                        free(blob); free(data); free(rec); return -1;
-                    }
-                } else if (e->algo == INVFS_ALGO_NONE) {
-                    memcpy(data + dst_off, blob, hdr);
-                } else {
-                    const invfs_codec *pc = invfs_codec_by_algo(e->algo);
-                    const invfs_pack_def *pd =
-                        pc ? invfs_codec_pack_def(pc) : NULL;
-                    /* WP16b: a seekable pack container (map command ->
-                     * CAP_SEEK) with its !mbrmap sibling splices locally --
-                     * no pack exec, ever. The same read works with the pack
-                     * ABSENT (pc == NULL): the map is self-describing, the
-                     * sibling alone decides. Missing map: the pack's rebuild
-                     * exec answers, as before. */
-                    int mapped = 0;
-                    if ((pd && pd->is_container &&
-                         (pc->caps & INVFS_CODEC_CAP_SEEK)) || !pc) {
-                        char mbn[288];
-                        snprintf(mbn, sizeof mbn, "%s!mbrmap", rec_name);
-                        mapped = vol_find(v, mbn) != 0;
-                    }
-                    if (mapped) {
-                        /* cpack_map_read returns the byte count (the
-                         * vol_read_range convention): < 0 is the failure */
-                        if (cpack_map_read(v, rec_name, inode_id,
-                                           (uint64_t)e->length,
-                                           e->file_offset, data + dst_off,
-                                           (size_t)e->length) < 0) {
-                            fprintf(stderr, "%s: mapped container read "
-                                    "failed for %s\n",
-                                    pc ? pc->name : "codecpack", rec_name);
-                            free(blob); free(data); free(rec); return -1;
-                        }
-                    } else if (pd && pd->is_container) {
-                        /* WP16a: the blob is the pack's recipe; the members
-                         * live in "!mbrNNNN" sibling inodes and are read
-                         * through their CURRENT stored form (vol_read_file
-                         * -- the pack's extract cannot help, the original
-                         * container no longer exists), then spliced by the
-                         * pack's rebuild command. A missing/corrupt member
-                         * fails the read LOUDLY (the 1:1 invariant). */
-                        if (pack_container_rebuild(v, pc, rec_name,
-                                                   blob, hdr,
-                                                   data + dst_off,
-                                                   (size_t)e->length) != 0) {
-                            fprintf(stderr, "%s: container rebuild failed "
-                                    "for %s\n", pc->name, rec_name);
-                            free(blob); free(data); free(rec); return -1;
-                        }
-                    } else if (!pc || !pc->decode) {
-                        /* WP13: an algo this build cannot decode (pack not
-                         * loaded) fails LOUDLY -- the historical raw copy
-                         * would serve the blob as if it were the file,
-                         * silently breaking the 1:1 invariant. */
-                        fprintf(stderr, "inode %llu: algo %u requires a "
-                                "codecpack that is not loaded\n",
-                                (unsigned long long)inode_id, e->algo);
-                        free(blob); free(data); free(rec); return -1;
-                    } else if (pc->decode(blob, hdr, data + dst_off,
-                                          (size_t)e->length) != 0) {
-                        fprintf(stderr, "%s: pack decode error\n", pc->name);
-                        free(blob); free(data); free(rec); return -1;
-                    }
-                }
-                free(blob);
+            if (vol_decode_ast_entries(v, inode_id, rec_name, &ast_h,
+                                       ents, data) != 0) {
+                free(data); free(rec); return -1;
             }
         }
         free(rec);
@@ -1183,6 +1240,24 @@ int vol_read_range(invfs_volume *v, uint64_t inode_id, uint64_t offset,
     uint8_t *rec = NULL;
     uint32_t i;
     size_t got = 0;
+
+    /* WP-M8: a v3 file resolves through its content-addressed recipe blob,
+     * not the v2 record stream. WP-M8 reads the whole file and slices the
+     * requested window (a ranged segment decoder is a WP-M9 follow-up);
+     * vol_read_inode already verifies the blob BLAKE3 before decoding. */
+    if (v->sb.vol_flags & VOLF_V3) {
+        uint8_t *all = NULL;
+        size_t all_len = 0;
+        int rc = vol_read_inode(v, inode_id, 0, &all, &all_len);
+        if (rc != 0)
+            return -1;
+        if (offset >= all_len) { free(all); return 0; }
+        if (offset + len > all_len)
+            len = (size_t)(all_len - offset);
+        memcpy(buf, all + offset, len);
+        free(all);
+        return (int)len;
+    }
 
     /* WP47: hint jump when the index position is valid (mapper extent or
      * legacy region); otherwise locate through the mapper-aware walker. */

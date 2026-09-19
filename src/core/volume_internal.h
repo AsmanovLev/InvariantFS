@@ -1332,6 +1332,21 @@ int seg_read_checked(invfs_volume *v, uint64_t pba, uint64_t plen,
                             uint8_t **blob_out);
 int vol_read_inode(invfs_volume *v, uint64_t inode_id, unsigned depth,
                           uint8_t **out, size_t *out_len);
+
+/* WP-M8: content-addressed immutable recipe blobs (vol_btree.c). */
+int vol_v3_recipe_store(invfs_volume *v, const uint8_t *blob, size_t blen,
+                        uint8_t addr_out[INVFS_V3_RECIPE_ADDR_LEN]);
+int vol_v3_recipe_load(invfs_volume *v,
+                       const uint8_t addr[INVFS_V3_RECIPE_ADDR_LEN],
+                       uint8_t **blob_out, size_t *blen_out);
+/* WP-M8: recipe blob serialize/parse (vol_ast.c). */
+int vol_ast_recipe_serialize(uint64_t file_size,
+                             const invfs_ast_block_entry *ents, uint32_t n,
+                             uint8_t **blob_out, size_t *blen_out);
+int vol_ast_recipe_parse(const uint8_t *blob, size_t blen,
+                         invfs_ast_hdr *hdr_out,
+                         const invfs_ast_block_entry **ents_out,
+                         size_t *nents_out);
 int sweep_enospc(invfs_volume *v, uint64_t need_bytes);
 uint16_t tz_codec_gen(uint32_t algo);
 

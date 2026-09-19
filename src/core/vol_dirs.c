@@ -343,8 +343,9 @@ uint64_t vol_v3_create_node(invfs_volume *v, const char *name,
     }
     if (in.nlink == 0)
         in.nlink = 1;
-    in.size = 0;                          /* no recipe blobs yet (WP-M8) */
+    in.size = 0;                          /* WP-M8: content cleared */
     memset(&in.recipe, 0, sizeof in.recipe);
+    memset(in.recipe_addr, 0, sizeof in.recipe_addr);
     if (vol_v3_inode_put(v, id, &in) != 0)
         return 0;
     if (vol_v3_dirent_put(v, pino, leaf, id) != 0)

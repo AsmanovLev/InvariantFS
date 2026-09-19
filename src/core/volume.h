@@ -215,7 +215,8 @@ typedef struct {
     uint32_t     nlink;
     uint64_t     rdev;
     uint64_t     size;
-    invfs_blkptr recipe;    /* immutable AST blob ref (0 = none) */
+    invfs_blkptr recipe;    /* reserved 0 (WP-M8 keeps the layout) */
+    uint8_t      recipe_addr[INVFS_V3_RECIPE_ADDR_LEN];  /* WP-M8 BLAKE3 */
 } invfs_v3_inode;
 
 /* Read the row for inode_id. Returns 1 = present (*out filled), 0 = absent,
