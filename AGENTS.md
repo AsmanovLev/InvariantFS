@@ -84,46 +84,60 @@ Subagent responsibilities they do **not** have:
 
 ### 1.5 E2E test coordination
 
-E2E suites share `/dev/shm` image names — running two in parallel
-corrupts each other's state. The lock infrastructure already exists
-at `tools/run-e2e.sh` and serialises suites with `flock` on
-`/tmp/invfs-e2e.lock`.
+E2E suites use `/dev/shm` image names. The runner at `tools/run-e2e.sh`
+is **parallel-safe**: it isolates each suite in its own private mount
+namespace with a fresh tmpfs on `/dev/shm`, so the same suite can run
+concurrently in different worktrees (parallel subagents) without
+colliding on images.
+
+**Two execution modes (chosen automatically per suite):**
+
+- **ISOLATED** (default): suites that do not need the real uid/root and do
+  not touch shared `/tmp` paths run in a private `unshare -rm` namespace
+  with their own `/dev/shm`. Fully parallel, bounded by
+  `INVFS_E2E_SLOTS` (default 4).
+- **LOCKED**: suites that use `sudo`/`losetup`/loop mounts, check the uid,
+  or use generic `/tmp` paths are serialised on the legacy global lock
+  (`/tmp/invfs-e2e.lock`) and run as the invoking user. `/tmp` is not
+  isolated because AGENTS worktrees live under `/tmp`.
 
 **Three invocation modes:**
 
 ```bash
-# Foreground (blocks until the lock is free, then runs)
+# Foreground (waits only if the suite is LOCKED and the lock is held)
 bash tools/run-e2e.sh tools/test-writepath.sh
 
-# Background (returns immediately; log goes to /tmp/invfs-e2e-bg/<name>.log)
+# Background (returns immediately; log /tmp/invfs-e2e-bg/<name>.<pid>.log)
 bash tools/run-e2e.sh --bg tools/test-writepath.sh
 
-# Wait (blocks until the lock is free AND all background suites finish;
-# prints results)
+# Wait (blocks until all background suites finish; prints results)
 bash tools/run-e2e.sh --wait
 ```
 
 **Subagent ID attribution:** every subagent sets
-`INVFS_E2E_AGENT=<wp-id>` before invoking e2e. The runner reads it
-and includes it in `/tmp/invfs-e2e.lock.info` so concurrent runs are
-distinguishable in `who_running` output.
+`INVFS_E2E_AGENT=<wp-id>` before invoking e2e. The runner records it with
+the suite/pid/branch in the holder info (`/tmp/invfs-e2e-slots/slot<N>.info`
+for isolated runs, `/tmp/invfs-e2e.lock.info` for locked runs).
 
 Example:
 ```bash
 INVFS_E2E_AGENT=wp31-readpath-bounds bash tools/run-e2e.sh tools/test-writepath.sh
 ```
 
-**If the lock is held when a subagent wants to run e2e:**
+**If a LOCKED suite is queued behind the global lock:**
 
-- Subagent MUST NOT skip the lock and run the suite directly (corrupts
-  shared state).
+- Subagent MUST NOT skip the runner and invoke the suite directly
+  (corrupts shared `/dev/shm` or `/tmp` state).
 - Subagent MUST NOT busy-loop or poll aggressively.
 - Subagent SHOULD call `bash tools/run-e2e.sh --bg <suite>` and record
-  the log path; the suite runs in order when the lock frees.
+  the log path; it runs when the lock frees.
 - Subagent SHOULD report back to the orchestrator that e2e is queued,
   with the log path so the orchestrator can check it.
 
 A "hang" in e2e is acceptable; a corrupted `/dev/shm` is not.
+
+**Knobs:** `INVFS_E2E_SLOTS=N`, `INVFS_E2E_NO_NS=1` (force the locked
+path), `INVFS_E2E_FORCE_NS=1`, `INVFS_E2E_FORCE_LOCK=1`.
 
 ### 1.6 Reporting back
 
