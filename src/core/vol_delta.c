@@ -21,10 +21,23 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 /* Chain walk guard: a corrupt prev_pba cycle must not loop forever. A log
  * this long (128 GiB) is far past any fold trigger the design intends. */
 #define DELTA_MAX_SEGMENTS (1u << 20)
+
+/* WP-M14: the oldest-live-record age is the third D2 fold trigger component.
+ * It is a handle clock (CLOCK_MONOTONIC seconds), not a wall clock, so a
+ * system time change can neither fire nor suppress a fold. Replayed records
+ * get the mount time; a live session gets the append time. */
+static uint64_t dl_now_s(void)
+{
+    struct timespec ts;
+    if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0)
+        return 0;
+    return (uint64_t)ts.tv_sec;
+}
 
 /* ------------------------------------------------------------------ */
 /* 1. record + segment wire codecs                                    */
@@ -525,6 +538,17 @@ int vol_delta_append(invfs_volume *v, const uint8_t *key, uint16_t klen,
     if (di_put(v->delta_index, key, klen, v->delta_seg_pba, v->delta_bump, seq,
                flags, vlen, &inserted) != 0)
         return -1;   /* OOM: the record is durable, the index is behind */
+    /* WP-M14: the first live record anchors the age trigger (delta_oldest_seq
+     * == 0 means no record has been tracked yet). A coalesced update to an
+     * existing key leaves the anchor alone: that key's record is still live,
+     * and an old disjoint record must still be able to age the log out even
+     * if a hot key is rewritten. A replay has already set the anchor when the
+     * chain was non-empty, so this only fires on the first append of a
+     * session with an empty recent tier. */
+    if (v->delta_oldest_seq == 0) {
+        v->delta_oldest_seq = seq;
+        v->delta_oldest_when = dl_now_s();
+    }
     v->delta_bytes += rl;
     v->delta_bump += rl;
     if (inserted)
@@ -796,6 +820,8 @@ int vol_delta_mount(invfs_volume *v)
     v->delta_segments = 0;
     v->delta_bytes = 0;
     v->delta_seg_gen = 0;
+    v->delta_oldest_seq = 0;
+    v->delta_oldest_when = 0;
 
     if (!v->rt30_present || v->rt30.delta_pba == 0) {
         v->delta_ready = 1;              /* empty recent tier */
@@ -869,6 +895,15 @@ int vol_delta_mount(invfs_volume *v)
     }
     v->delta_segments = nchain;
     v->delta_ready = 1;
+    /* WP-M14: replay assigns delta_seq in ascending order, so the first live
+     * record seen has the lowest seq -- the oldest anchor for the age trigger.
+     * Its real append time predates this mount; use the mount time, which
+     * understates the age by at most one session and keeps the trigger from
+     * firing spuriously on a volume that was idle. */
+    if (v->delta_seq > 0) {
+        v->delta_oldest_seq = 1;
+        v->delta_oldest_when = dl_now_s();
+    }
     rc = 0;
 out:
     free(chain);
@@ -896,4 +931,6 @@ void vol_delta_close(invfs_volume *v)
     v->delta_bytes = 0;
     v->delta_seq = 0;
     v->delta_seg_gen = 0;
+    v->delta_oldest_seq = 0;
+    v->delta_oldest_when = 0;
 }

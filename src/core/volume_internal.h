@@ -581,6 +581,15 @@ typedef struct invfs_volume {
     uint64_t delta_segments;           /* segments in the chain */
     uint64_t delta_bytes;              /* record payload bytes appended */
     int      delta_ready;              /* mount replay done for this handle */
+    /* ---- WP-M14: fold trigger accounting (D2) --------------------------
+     * The design gives no numeric thresholds; vol_fold.c measures replay
+     * latency and fixes them (recorded there and in the WP-M14 doc). These
+     * are the raw observations the trigger consults: the sequence number of
+     * the oldest live delta record and the handle clock timestamp of its
+     * append (or of mount replay, for records that predate this session).
+     * Both restart at 0 when the delta is reset, exactly like delta_seq. */
+    uint64_t delta_oldest_seq;         /* seq of the oldest live record (0=none) */
+    uint64_t delta_oldest_when;        /* CLOCK_MONOTONIC seconds of that record */
     /* WP30 Phase 6: merge-in-progress flag for concurrency safety.
      * Set during vol_meta_merge_run, checked in meta_get_append_pos to
      * prevent concurrent metadata operations from reading partially-updated

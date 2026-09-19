@@ -301,6 +301,30 @@ typedef int (*vol_v3_walk_cb)(void *ctx, const char *path, uint64_t ino,
                               uint32_t type, uint64_t size, int64_t mtime);
 int vol_v3_walk(invfs_volume *v, vol_v3_walk_cb cb, void *ctx);
 
+/* ---- WP-M14: v3 fold (merge delta into base, atomic publish, reset) --
+ * Fold applies every live delta record to a COW copy of the base B+-tree,
+ * publishes the new root through the WP-M2 double slot, and only then resets
+ * the delta (design §5, the add-before-remove rule). The base is immutable
+ * between folds, so readers need no lock; the reset-after-publish ordering is
+ * what makes a lock-free reader that reads delta-then-base stay consistent.
+ * Fold is not required for correctness -- the delta can grow to a threshold --
+ * but bounds mount latency and space (D1/D2). Reclaim of the displaced base
+ * pages is WP-M15; the pre-fold root pin is WP-M16. */
+/* Merge the delta into the base and reset the recent tier. 0 = ok (or a
+ * no-op when the delta is empty), -1 = error (the volume is left at its
+ * pre-fold state, or at the published-but-not-reset state on an error after
+ * publish, which replay handles idempotently). */
+int vol_v3_fold(invfs_volume *v);
+/* Fold only when the D2 trigger fires (delta byte threshold, record count,
+ * or oldest-record age); otherwise a no-op. Returns 1 = folded, 0 = below
+ * threshold / empty, -1 = error. This is what WP-M18's sweep calls. */
+int vol_v3_fold_request(invfs_volume *v);
+/* Force the next fold regardless of the age component of the trigger (used
+ * by tests and by an explicit operator sweep). */
+void vol_v3_fold_reset_age(invfs_volume *v);
+/* Fold trigger thresholds (D2; measured in vol_fold.c). */
+void vol_v3_fold_trigger(uint64_t *bytes, uint64_t *records, uint64_t *age_s);
+
 /* ---- WP-M7: v3 xattr tree (base B+-tree namespace) ------------------
  * Named xattrs are keyed by
  *     0x03 || inode_id:u64 BE || name_len:u16 BE || name

@@ -31,6 +31,7 @@ CORE    := volume vol_cpack helper_exec vol_png vol_seal vol_repair vol_rollback
            vol_resize vol_fsck vol_crash vol_exer vol_dedupe vol_textzone \
            vol_heat vol_sweep vol_read vol_write vol_records vol_ast \
            vol_dirs vol_tier vol_meta_merge vol_metabuf vol_btree vol_delta \
+           vol_fold \
            arc crc32c lz4 flacx tarx pngx blkio miniz blake3 blake3_dispatch blake3_portable ppmd8 ppmd8enc ppmd8dec ppmd_codec codec bcj_x86 rs
 CORE_O  := $(addprefix $(OBJ)/,$(addsuffix .o,$(CORE)))
 B3      := blake3 blake3_dispatch blake3_portable
@@ -59,7 +60,7 @@ endef
 
 # CLI tools (main in src/cli/<name>.c)
 CLI_MAINS := mkfs verify fsck cp cat ls stat arctest blkio_test resize migrate-v2 \
-             metabuf_test btree_test v3inode overlay_test
+             metabuf_test btree_test v3inode overlay_test fold_test
 $(foreach t,$(CLI_MAINS),$(eval $(call TOOL_RULE,$(t),)))
 
 # WP60: invfs-pack is named differently (invfs- not invf-)

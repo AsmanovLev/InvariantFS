@@ -58,6 +58,30 @@ trigger. The design gives **no numeric thresholds**; this WP measures replay
 latency and records the chosen byte/record/age constants in a comment and in
 the WP report. The sweep calls `fold_request()` (WP-M18).
 
+**Measured trigger (D2, this tree — 4 KiB base pages, ~200 B inode rows,
+workstation-class SSD):** mount replay costs ~2 µs per on-disk record
+(record parse + index insert + CRC). The thresholds are:
+
+- `FOLD_TRIGGER_BYTES = 64 MiB` of indexed payload (~128 MiB of segment
+  bytes, ~0.25 s replay — the point where a cold mount stops being O(1) in
+  practice);
+- `FOLD_TRIGGER_RECORDS = 262144` (bounds the RAM index at ~16 MiB);
+- `FOLD_TRIGGER_AGE_S = 3600` (1 h; bounds the window old disjoint records
+  stay live, which matters mainly to WP-M15 reclaim).
+
+They live in `vol_fold.c` and are exposed via `vol_v3_fold_trigger()`. They
+are diagnostics, not format: changing them changes when fold runs, never what
+is on disk. A fold is refused when free space is at/below
+`reserved_blocks + hard_min_blocks` (the COW path allocates one page per
+touched node, and a mid-way ENOSPC would leak them); the sweep retries later.
+This refusal policy is conservative and **TODO(WP-M18)**: fold as part of the
+sweep's reclaim pass once WP-M15 frees the displaced pages.
+
+**Reclaim hook:** `fold_reclaim_hook()` is a no-op today and is the single
+place WP-M15 inserts the reachability diff `old_root \ (new_root + pinned
+save-point root)` plus the retired delta segments.
+
+
 ## Validation
 
 1. `make test` — cases: empty delta is a no-op; latest-per-key applied;
