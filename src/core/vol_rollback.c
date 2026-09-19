@@ -176,6 +176,7 @@ static int rb_abort_at(const char *stage)
 int vol_ckp_begin(invfs_volume *v)
 {
     uint64_t jstart, jused, sblocks, pba = 0;
+    uint64_t old_stage_pba = 0, old_stage_blocks = 0;
     invfs_ckp0 ck;
     int had_ck, rrc;
 
@@ -216,6 +217,17 @@ int vol_ckp_begin(invfs_volume *v)
     if (vol_flush(v) != 0)
         return -1;
     had_ck = v->ck_present;
+    /* WP59/WP58a follow-up: remember the OUTGOING checkpoint's journal
+     * staging run. The old runs are deleted below (they were freed for
+     * real), but the old CKP0 also owns a staging allocation that the new
+     * CKP0 no longer names -- without freeing it here it becomes an
+     * orphan the moment the descriptor is overwritten (observed: two
+     * 32-33-block runs per realizing sweep). Capture before
+     * vol_write_ckp0 clobbers v->ck. */
+    if (had_ck) {
+        old_stage_pba = v->ck.stage_pba;
+        old_stage_blocks = v->ck.stage_blocks;
+    }
 
     /* Stage the used journal prefix of the ACTIVE slot (see the section
      * comment for why the inode area needs no staging). The staged bytes
@@ -329,6 +341,25 @@ int vol_ckp_begin(invfs_volume *v)
         else if (rfree)
             fprintf(stderr, "checkpoint: previous run realized (%llu "
                     "retained blocks freed)\n", (unsigned long long)rfree);
+        /* Persist the registry delete (the retire queued UNMAPs) so a later
+         * fsck/journal replay does not resurrect the owner's maps. */
+        if (vol_flush(v) != 0)
+            fprintf(stderr, "checkpoint: realize flush failed\n");
+        /* free the outgoing checkpoint's journal staging run: the new CKP0
+         * is live, so the old stage is unreachable -- the descriptor used
+         * to be the only reference to it. Guard the scratch allocation
+         * against the incoming one: alloc_blocks never hands back a live
+         * block, and this free runs before the next arm, so a collision is
+         * impossible; the check is belt-and-braces. */
+        if (old_stage_blocks && old_stage_pba &&
+            !(pba == old_stage_pba && sblocks == old_stage_blocks)) {
+            ckp_free_direct(v, old_stage_pba, old_stage_blocks);
+            if (getenv("INVFS_DEBUG"))
+                fprintf(stderr, "checkpoint: previous staging run freed "
+                        "(%llu blocks @%llu)\n",
+                        (unsigned long long)old_stage_blocks,
+                        (unsigned long long)old_stage_pba);
+        }
     }
 
     /* retention engages only from here on: anything freed earlier this
@@ -462,6 +493,67 @@ int vol_ckp_end(invfs_volume *v, uint64_t *ranges_out, uint64_t *blocks_out)
 }
 
 
+/* WP58b: a rollback on a mapper volume must also discard the SWEEP's other
+ * derived owner records. They live in dedicated metadata extents that the
+ * phase-1 linear truncation cannot reach, so a pre-existing or
+ * sweep-rewritten "\x01tzb" (text-zone batch owner), "\x01tier*", "\x01rawm"
+ * survive with their post-sweep ASTs and keep mapping sweep segments -- which
+ * phase 2 then counts used while the rebuilt journal supersedes them, leaving
+ * bitmap/journal divergence and orphans (observed: E2 left 23 orphan
+ * segments mapped by "\x01tzb"). Owners are derived state: the next sweep
+ * regenerates them, and their now-unreferenced blocks are reclaimed by the
+ * phase-2 rebuild. Collect names first (the deletes append records, so a live
+ * walk would see them mid-iteration; owner overwrites are in-place, but the
+ * generic collect-first shape is kept for safety). */
+typedef struct {
+    invfs_volume *v;
+    char (*names)[INVFS_NAME_CAP];
+    size_t n, cap;
+} owner_purge_ctx;
+
+static int owner_purge_cb(void *ctx_, uint64_t rec_pos,
+                          const invfs_inode_rec *h, const uint8_t *rec)
+{
+    owner_purge_ctx *c = (owner_purge_ctx *)ctx_;
+    char nm[INVFS_NAME_CAP];
+    size_t nl, maxnl, i;
+    (void)rec_pos; (void)rec;
+    if (h->magic != INODE_REC_MAGIC) return 0;    /* tombstones */
+    maxnl = h->rec_len > INVFS_REC_HDR_LEN + 1
+          ? h->rec_len - INVFS_REC_HDR_LEN - 1 : 0;
+    if (maxnl > INVFS_MAX_NAME) maxnl = INVFS_MAX_NAME;
+    nl = h->name_len < maxnl ? h->name_len : maxnl;
+    if (nl < 2 || h->name[0] != 0x01) return 0;   /* not an owner */
+    memcpy(nm, h->name, nl); nm[nl] = 0;
+    for (i = 0; i < c->n; i++)
+        if (strcmp(c->names[i], nm) == 0) return 0;   /* older, same name */
+    if (c->n == c->cap) {
+        size_t ncap = c->cap ? c->cap * 2 : 8;
+        void *nn = realloc(c->names, ncap * sizeof(*c->names));
+        if (!nn) return 1;                        /* purge what we gathered */
+        c->names = (char (*)[INVFS_NAME_CAP])nn;
+        c->cap = ncap;
+    }
+    memcpy(c->names[c->n++], nm, nl + 1);
+    return 0;
+}
+
+static void rollback_purge_owners(invfs_volume *v)
+{
+    owner_purge_ctx c;
+    size_t i;
+    memset(&c, 0, sizeof c);
+    c.v = v;
+    vol_records_walk(v, owner_purge_cb, &c);
+    for (i = 0; i < c.n; i++) {
+        if (getenv("INVFS_DEBUG"))
+            fprintf(stderr, "rollback: purging owner %s\n", c.names[i] + 1);
+        vol_delete_file(v, c.names[i]);
+    }
+    free(c.names);
+}
+
+
 /* Delete every registry shard ("\x01reten*"): the retire path frees
  * exactly the ranges the shard maps (zone==BINARY entries, so the
  * batch-owner gate does not hold them). Its PB7 sharer check can find no
@@ -478,14 +570,38 @@ static int ret_registry_delete(invfs_volume *v, uint64_t *freed_out)
         char nm[32];
         uint64_t oid;
         size_t j;
+        tz_owner o;
+        int have_o = 0;
         ret_shard_name(shard, nm, sizeof nm);
         oid = vol_find(v, nm);
         if (!oid) break;   /* shards exist contiguously (the seal rule) */
         if (!vol_write_enabled(v)) return -1;
-        for (j = 0; j < v->l2p_count; j++) {
-            const invfs_l2p_entry *e = &v->l2p[j];
-            if (e->type == INVFS_JRN_MAP && e->inode == oid)
-                freed += e->length;
+        /* Free the retained ranges from the shard's OWN self-describing AST
+         * (WP27 entries carry pba). Relying on vol_delete_file's L2P scan
+         * alone is not enough: an entry's owner-WAL map can already be
+         * gone (a rebuilt/compacted journal), and then the delete removed
+         * the registry record while its blocks stayed allocated -- the
+         * realize-time "orphans" (observed: 64/realizing sweep). Freeing
+         * from the AST is idempotent with the retire's own L2P pass (the
+         * bitmap clear is per-block), so both may run. */
+        if (tz_owner_load(v, oid, &o) == 0) {
+            for (j = 0; j < o.n; j++) {
+                uint64_t pba = o.ents[j].pba, len = o.ents[j].length;
+                if (len && pba < v->sb.total_blocks &&
+                    len <= v->sb.total_blocks - pba) {
+                    vol_free_blocks(v, pba, len);
+                    freed += len;
+                }
+            }
+            have_o = 1;
+            tz_owner_free(&o);
+        }
+        if (!have_o) {
+            for (j = 0; j < v->l2p_count; j++) {
+                const invfs_l2p_entry *e = &v->l2p[j];
+                if (e->type == INVFS_JRN_MAP && e->inode == oid)
+                    freed += e->length;
+            }
         }
         if (vol_delete_file(v, nm) != 0) {
             fprintf(stderr, "checkpoint: realize: could not delete %s\n",
@@ -517,7 +633,13 @@ int vol_ckp_realize(invfs_volume *v, uint64_t *freed_blocks_out)
     if (rrc < 0) return -1;
     did = rrc;
     if (v->ck_present) {
+        /* WP59/WP58a follow-up: the cleared CKP0 was the only reference to
+         * the checkpoint's journal staging run -- free it with the
+         * descriptor, or the blocks orphan (observed before this fix). */
+        uint64_t spba = v->ck.stage_pba, sblocks = v->ck.stage_blocks;
         if (vol_write_ckp0(v, NULL) != 0) return -1;
+        if (spba && sblocks)
+            ckp_free_direct(v, spba, sblocks);
         did = 1;
     }
     if (did && vol_flush(v) != 0) return -1;
@@ -941,6 +1063,26 @@ int vol_rollback(invfs_volume *v, uint64_t *reclaimed_out)
      * while CKP0 lives) must not classify this run's garbage as "held" --
      * clear the in-memory ck_present before the scan (the on-disk CKP0 is
      * cleared below, after the rebuild succeeded). */
+    /* Phase 1b: discard the checkpoint's retention registry ("\x01reten*").
+     * The registry is the SWEEP's output (it lists what the sweep retained),
+     * so rolling back must remove it. On a legacy volume it used to die with
+     * the linear inode area: the phase-1 truncation zeroes [iapos,
+     * inode_area_pos). On a mapper volume the owner record lives in its own
+     * dynamic metadata extent, OUTSIDE that truncation, so it survives and
+     * the phase-2 rebuild counts its AST ranges (the checkpoint staging run
+     * included) as referenced -- the staging run then reads as `missing`
+     * once it is freed, and the resurrected (pre-sweep) state is not what
+     * the rebuild sees. Delete the registry records here; their blocks are
+     * reclaimed by the phase-2 rebuild exactly like the sweep's other
+     * garbage. Retention for THIS dismantling is off (real frees). */
+    v->retain = 0;
+    v->retain_release = 1;
+    ret_registry_delete(v, NULL);
+    /* and every other sweep-derived owner ("\x01tzb"/tier/rawm): same reason,
+     * same mapper-extent survival (see rollback_purge_owners). */
+    rollback_purge_owners(v);
+    v->retain_release = 0;
+
     v->ck_present = 0;
     if (vol_fsck_scan(v, &rep, 1) != 0) {
         fprintf(stderr, "rollback: the fsck rebuild failed; the volume is "
@@ -961,9 +1103,19 @@ int vol_rollback(invfs_volume *v, uint64_t *reclaimed_out)
     }
 #endif
 
-    /* The point of no return has passed: clear the checkpoint last. */
-    if (vol_write_ckp0(v, NULL) != 0)
-        return -1;
+    /* The point of no return has passed: clear the checkpoint last.
+     * The cleared CKP0 was the only reference to the checkpoint's journal
+     * staging run, so free it with the descriptor (same rule as
+     * vol_ckp_realize). Without this an aborted-then-resumed rollback
+     * (INVFS_ROLLBACK_ABORT_AT=rebuilt) left the staging run allocated and
+     * unreferenced -- the observed E2 "orphans: 1" on block 10310. */
+    {
+        uint64_t spba = v->ck.stage_pba, sblocks = v->ck.stage_blocks;
+        if (vol_write_ckp0(v, NULL) != 0)
+            return -1;
+        if (spba && sblocks)
+            ckp_free_direct(v, spba, sblocks);
+    }
     if (vol_flush(v) != 0)
         return -1;
     if (reclaimed_out) *reclaimed_out = rep.orphans;

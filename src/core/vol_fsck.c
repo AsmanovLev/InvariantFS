@@ -775,6 +775,31 @@ int vol_fsck_scan(invfs_volume *v, invfs_fsck_report *rep, int fix)
             bit_set(used, b);
     }
 
+    /* WP30 mapper volumes: the inode records live in dynamic metadata
+     * extents allocated from the shadow zone (alloc_meta_extent, class
+     * INVFS_ALLOC_META), NOT in the metadata zone and NOT as a live
+     * record's AST data. The rebuild above derives used blocks from live
+     * records' AST extents only, so a mapper extent whose records were all
+     * superseded/tombstoned (the "\x01reten" retention registry is the
+     * canonical case: written, then deleted by --realize) was counted as
+     * an orphan even though the extent is still registered in the mapper
+     * and allocated. Mark every live mapper extent. */
+    if (v->met0_present && v->meta_mapper) {
+        size_t mi;
+        for (mi = 0; mi < v->meta_mapper_n; mi++) {
+            uint64_t entry = v->meta_mapper[mi];
+            uint64_t mpba, mblocks, mb;
+            if (!entry) continue;
+            mpba = invfs_meta_ext_pba(entry);
+            mblocks = invfs_meta_ext_size(entry) / INVFS_BLOCK_SIZE;
+            if (!mpba || mpba >= v->sb.total_blocks) continue;
+            if (mblocks > v->sb.total_blocks - mpba)
+                mblocks = v->sb.total_blocks - mpba;
+            for (mb = 0; mb < mblocks; mb++)
+                bit_set(used, mpba + mb);
+        }
+    }
+
     /* WP25: on a two-device volume the dev1 span below the shadow zone --
      * [dev0_total, shadow_zone_start) -- is the reserved metadata mirror
      * (and never holds allocatable data); it is allocated by construction,

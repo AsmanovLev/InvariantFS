@@ -576,6 +576,42 @@ static void retire_free_file_blocks(invfs_volume *v, uint64_t inode_id,
 }
 
 
+/* WP58b: overwrite an owner-class record in its dedicated mapper extent with
+ * a v2 position-kill tombstone. Owner extents hold exactly one record and are
+ * rewritten in place (tz_owner_write / vol_append_owner_slot), so the delete
+ * must write the DELT at the owner's own position -- appending to the shared
+ * file-record extent lands before the owner in walk order and the kill is
+ * lost (see the comment at the tombstone site). The tombstone is smaller than
+ * the owner INOD it replaces (no AST body), so the write stays inside the
+ * extent; the record's rec_len governs the next boundary. */
+static int vol_delete_owner_overwrite(invfs_volume *v, const char *name,
+                                      uint64_t inode_id, uint64_t pos)
+{
+    size_t tomb_size = INVFS_REC_HDR_LEN + strlen(name) + 1;
+    uint8_t *tbuf;
+    invfs_inode_rec *rec;
+    uint32_t crc;
+
+    if (!pos) return -1;
+    if (vol_mark_dirty(v) != 0) return -1;
+    tbuf = (uint8_t *)calloc(1, tomb_size);
+    if (!tbuf) return -1;
+    rec = (invfs_inode_rec *)tbuf;
+    rec->magic = TOMBSTONE_MAGIC;
+    v->hot.tombstones++;
+    rec->rec_len = (uint32_t)tomb_size;
+    rec->inode_id = inode_id;
+    rec->file_size = pos;              /* v2 position kill */
+    rec_set_name(rec, name);
+    crc = invfs_crc32c(tbuf, tomb_size);
+    if (io_seek(&v->io, pos) != 0 ||
+        io_write(&v->io, tbuf, tomb_size) != 0 ||
+        io_write(&v->io, &crc, 4) != 0) { free(tbuf); return -1; }
+    free(tbuf);
+    return 0;
+}
+
+
 static int vol_retire_inode(invfs_volume *v, uint64_t inode_id,
                             const char *name, int free_data)
 {
@@ -682,7 +718,20 @@ static int vol_retire_inode(invfs_volume *v, uint64_t inode_id,
     /* append tombstone record. WP47: route the append through the mapper
      * (vol_append_slot) -- the legacy direct at-inode_area_pos write landed
      * in the wrong place once the active metadata extent filled, so the
-     * tombstone never became visible and the name resurrected on reopen. */
+     * tombstone never became visible and the name resurrected on reopen.
+     *
+     * WP58b: owner-class records ("\x01...") live in their OWN dedicated
+     * mapper extent (meta_get_owner_append_pos / vol_append_owner_slot), which
+     * sits at a higher mapper slot than the shared file-record extent. The
+     * walker visits extents in slot order, so a tombstone appended to the
+     * shared extent is scanned BEFORE the owner record it must kill: the kill
+     * is applied to nothing and the superseded owner resurrects as live,
+     * pinning blocks the sweep already freed (observed: the sweep's
+     * "\x01reten" registry, missing=66 on a mapper volume). Owner records are
+     * single-record overwrite-in-place extents, so the delete overwrites the
+     * owner's own position with a position-kill tombstone: after the rewrite
+     * the extent holds the DELT where the INOD was, and the name is never
+     * re-added. */
     {
         size_t tomb_size = INVFS_REC_HDR_LEN + strlen(name) + 1;
         uint8_t *tbuf;
@@ -690,8 +739,25 @@ static int vol_retire_inode(invfs_volume *v, uint64_t inode_id,
         uint32_t crc;
         uint64_t tpos;
         int trc;
+        int owner_class = (name && (uint8_t)name[0] == 0x01);
+        int mapper = (v->met0_present && v->meta_mapper) != 0;
 
-        if (!(v->met0_present && v->meta_mapper) &&
+        if (owner_class && mapper) {
+            /* the live owner record's own position (its dedicated extent) */
+            const name_index_entry *oe = idx_get(v, name, strlen(name));
+            tpos = oe ? oe->pos : 0;
+            if (!tpos || (trc = vol_delete_owner_overwrite(v, name,
+                           inode_id, tpos)) != 0) {
+                if (tpos)
+                    fprintf(stderr, "vol_retire_inode: owner tombstone for "
+                            "%s failed\n", name + 1);
+                return -1;
+            }
+            idx_del(v, name, strlen(name), inode_id);
+            return 0;
+        }
+
+        if (!mapper &&
             v->inode_area_pos + tomb_size + 4 > v->inode_area_end) {
             /* WP27 churn backstop: reclaim the dead prefix, then retry.
              * The tombstone is an id-kill (file_size=0): no position held,
