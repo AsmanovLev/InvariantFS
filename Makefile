@@ -59,7 +59,7 @@ endef
 
 # CLI tools (main in src/cli/<name>.c)
 CLI_MAINS := mkfs verify fsck cp cat ls stat arctest blkio_test resize migrate-v2 \
-             metabuf_test btree_test v3inode
+             metabuf_test btree_test v3inode overlay_test
 $(foreach t,$(CLI_MAINS),$(eval $(call TOOL_RULE,$(t),)))
 
 # WP60: invfs-pack is named differently (invfs- not invf-)

@@ -928,7 +928,10 @@ int vol_read_inode(invfs_volume *v, uint64_t inode_id, unsigned depth,
      * the base tree carries a content-addressed recipe *reference*; fetch
      * and BLAKE3-verify the immutable blob, then decode its segments with
      * the exact same codec code as the v2 path (vol_decode_ast_entries).
-     * An empty file (size 0 / no address) is the "no content" case. */
+     * An empty file (size 0 / no address) is the "no content" case.
+     * WP-M11: vol_v3_inode_get and vol_v3_recipe_load resolve through the
+     * delta overlay (delta first, then base), so a read observes the recent
+     * tier without this function knowing about it. */
     if (v->sb.vol_flags & VOLF_V3) {
         invfs_v3_inode in;
         invfs_ast_hdr ah;

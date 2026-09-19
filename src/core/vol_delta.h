@@ -95,6 +95,24 @@ typedef int (*vol_delta_iter_cb)(void *ctx, const uint8_t *key, uint16_t klen,
                                  const delta_ref *ref);
 int vol_delta_iter(invfs_volume *v, vol_delta_iter_cb cb, void *ctx);
 
+/* ---- WP-M11: ordered range cursor (the readdir merge's delta stream) --- */
+
+/* Visit every indexed key in the half-open byte range [lo, hi) in ascending
+ * byte-lexicographic order (the same ordering btree_scan uses), one callback
+ * per key (the index already coalesces to the latest record). A zero-length
+ * `lo` is unbounded below and a zero-length `hi` is unbounded above -- the
+ * btree_scan convention; keys are never empty. cb returns non-zero to abort
+ * and that value is propagated. 0 = complete, -1 = bad arguments. The key
+ * pointer passed to cb is the index's owned copy and is valid for the whole
+ * call; it must not be retained after the cursor returns. O(k log k) in the
+ * number of matching keys, so a small recent tier stays cheap. */
+typedef int (*vol_delta_range_cb)(void *ctx, const uint8_t *key, uint16_t klen,
+                                  const delta_ref *ref);
+int vol_delta_range(invfs_volume *v,
+                    const uint8_t *lo, uint16_t lolen,
+                    const uint8_t *hi, uint16_t hilen,
+                    vol_delta_range_cb cb, void *ctx);
+
 /* Distinct keys currently indexed. */
 uint64_t vol_delta_count(const invfs_volume *v);
 /* records indexed / segments in the chain / payload bytes appended. */

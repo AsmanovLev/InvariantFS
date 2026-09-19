@@ -611,6 +611,93 @@ int vol_delta_iter(invfs_volume *v, vol_delta_iter_cb cb, void *ctx)
     return 0;
 }
 
+/* WP-M11: byte-lexicographic compare of two keys (shorter prefix first),
+ * matching btree_scan / bt_cmp, so the delta stream and the base stream
+ * merge under one ordering. */
+static int dl_key_cmp(const uint8_t *a, uint16_t an,
+                      const uint8_t *b, uint16_t bn)
+{
+    uint16_t m = an < bn ? an : bn;
+    int c = m ? memcmp(a, b, m) : 0;
+    if (c)
+        return c < 0 ? -1 : 1;
+    if (an < bn)
+        return -1;
+    if (an > bn)
+        return 1;
+    return 0;
+}
+
+/* One collected key + its winning ref, for the ordered range cursor. */
+typedef struct {
+    const uint8_t *key;   /* borrowed from the index slot */
+    uint16_t       klen;
+    delta_ref      ref;
+} dl_rentry;
+
+static int dl_rentry_cmp(const void *pa, const void *pb)
+{
+    const dl_rentry *a = (const dl_rentry *)pa;
+    const dl_rentry *b = (const dl_rentry *)pb;
+    return dl_key_cmp(a->key, a->klen, b->key, b->klen);
+}
+
+int vol_delta_range(invfs_volume *v,
+                    const uint8_t *lo, uint16_t lolen,
+                    const uint8_t *hi, uint16_t hilen,
+                    vol_delta_range_cb cb, void *ctx)
+{
+    struct delta_index *di;
+    dl_rentry *arr = NULL;
+    size_t n = 0, cap = 0, i;
+    int rc = 0;
+
+    if (!v || !cb)
+        return -1;
+    if ((lolen && !lo) || (hilen && !hi))
+        return -1;
+    di = v->delta_index;
+    if (!di)
+        return 0;                        /* empty recent tier */
+
+    for (i = 0; i < di->cap; i++) {
+        const delta_slot *s = &di->slot[i];
+        if (!s->key)
+            continue;
+        if (lolen && dl_key_cmp(s->key, s->klen, lo, lolen) < 0)
+            continue;
+        if (hilen && dl_key_cmp(s->key, s->klen, hi, hilen) >= 0)
+            continue;
+        if (n == cap) {
+            size_t ncap = cap ? cap * 2 : 32;
+            dl_rentry *na = (dl_rentry *)realloc(arr, ncap * sizeof *na);
+            if (!na) {
+                free(arr);
+                return -1;
+            }
+            arr = na;
+            cap = ncap;
+        }
+        arr[n].key = s->key;
+        arr[n].klen = s->klen;
+        arr[n].ref.seg = s->seg;
+        arr[n].ref.off = s->off;
+        arr[n].ref.seq = s->seq;
+        arr[n].ref.flags = s->flags;
+        arr[n].ref.vlen = s->vlen;
+        n++;
+    }
+    if (n > 1)
+        qsort(arr, n, sizeof *arr, dl_rentry_cmp);
+    for (i = 0; i < n; i++) {
+        rc = cb(ctx, arr[i].key, arr[i].klen, &arr[i].ref);
+        if (rc)
+            break;
+    }
+    free(arr);
+    return rc;                           /* 0 = complete, else propagated */
+}
+
 uint64_t vol_delta_count(const invfs_volume *v)
 {
     return (v && v->delta_index) ? (uint64_t)v->delta_index->used : 0;

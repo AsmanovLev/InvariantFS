@@ -44,6 +44,7 @@
 #include "volume_internal.h"
 #include "vol_btree.h"
 #include "vol_metabuf.h"
+#include "vol_delta.h"
 
 #include <stddef.h>
 #include <stdint.h>
@@ -1397,6 +1398,33 @@ int vol_v3_base_root(invfs_volume *v, invfs_blkptr *out)
 }
 
 /* ------------------------------------------------------------------ */
+/* WP-M11: overlay read primitive (delta first, then base)             */
+/*                                                                    */
+/* Every v3 point read resolves its key through the recent tier first: */
+/* the delta coalescing index returns the single latest record for the */
+/* key (WP-M10), and only a miss falls through to the immutable base    */
+/* B+-tree. A delete record is a value at the overlay layer -- it       */
+/* shadows a base row/entry rather than falling through -- so the       */
+/* caller must test INVFS_DELTA_FLAG_DELETE before the base.            */
+/*                                                                    */
+/* Ordering with a concurrent fold (design §3/§5): fold writes the key  */
+/* into the new base BEFORE removing it from the delta. Consulting the  */
+/* delta first is therefore correct under any interleaving and needs no  */
+/* read lock: if the delta no longer owns the key the new base already  */
+/* has it; if it still does, the delta copy is the same (or newer)      */
+/* value. This helper freezes that delta-before-base order -- callers   */
+/* must not read the base first.                                        */
+/* ------------------------------------------------------------------ */
+
+/* 1 = delta wins (*ref filled; a DELETE flag means "shadowed/absent"),
+ * 0 = delta miss (the caller must consult the base), -1 = error. */
+static int v3_overlay_lookup(invfs_volume *v, const uint8_t *key, uint16_t klen,
+                             delta_ref *ref)
+{
+    return vol_delta_lookup(v, key, klen, ref);
+}
+
+/* ------------------------------------------------------------------ */
 /* WP-M7: v3 xattr tree (base B+-tree namespace)                       */
 /*                                                                    */
 /* Key (frozen by the WP-M7 doc):                                      */
@@ -1422,6 +1450,12 @@ int vol_v3_base_root(invfs_volume *v, invfs_blkptr *out)
 /* Mutations are COW and publish once through the WP-M2 double slot.   */
 /* unlink/rmdir at nlink 0 reaches the cascade through                  */
 /* vol_v3_inode_delete, which drops the whole xattr range.             */
+/*                                                                    */
+/* TODO(WP-M12): xattr get/scan still read the base only. WP-M11's      */
+/* overlay covers inode rows, dirents and recipes (lookup/getattr/read) */
+/* as the WP-M11 doc scopes it; xattr delta records do not exist yet,   */
+/* so the overlay for the 0x03 namespace is deferred to the WP that      */
+/* starts writing them.                                                 */
 /* ------------------------------------------------------------------ */
 
 #define V3_XATTR_FIXED       11u   /* 0x03 + u64 BE + u16 BE */
@@ -1855,9 +1889,33 @@ int vol_v3_inode_get(invfs_volume *v, uint64_t inode_id, invfs_v3_inode *out)
         return -1;
     if (v3_ready(v) != 0)
         return -1;
+    v3_ino_key(inode_id, kb);
+
+    /* WP-M11: delta first -- a delta row (or delete) shadows the base. */
+    {
+        delta_ref dr;
+        int drc = v3_overlay_lookup(v, kb, sizeof kb, &dr);
+        uint8_t rb[INVFS_V3_INODE_ROW_FIXED];
+        uint16_t rlen = 0;
+        if (drc < 0)
+            return -1;
+        if (drc == 1) {
+            if (dr.flags & INVFS_DELTA_FLAG_DELETE)
+                return 0;                /* hidden by a delta delete */
+            /* The delta value is the frozen fixed row. TODO(WP-M12): if a
+             * later writer inlines xattr bytes (xattr_len > 0) the value can
+             * exceed INVFS_V3_INODE_ROW_FIXED; size the buffer from dr.vlen
+             * then. Today only the fixed row can appear. */
+            if (vol_delta_read_value(v, &dr, rb, sizeof rb, &rlen) != 0)
+                return -1;
+            if (v3_ino_decode(rb, rlen, out) != 0)
+                return -1;
+            return 1;
+        }
+    }
+
     if (v3_base_root(v, &root) != 0)
         return -1;
-    v3_ino_key(inode_id, kb);
     if (btree_search(v, root, (bt_key){kb, 8}, &val, &found) != 0)
         return -1;
     if (!found)
@@ -2028,9 +2086,45 @@ int vol_v3_recipe_load(invfs_volume *v, const uint8_t addr[INVFS_V3_RECIPE_ADDR_
     *blen_out = 0;
     if (v3_ready(v) != 0)
         return -1;
+    v3_recipe_key(kb, addr);
+
+    /* WP-M11: the delta owns the key if it was rewritten since the fold;
+     * a delete shadows the base blob. The BLAKE3 check below still governs
+     * whatever bytes the delta returns (content-addressing is immutable). */
+    {
+        delta_ref dr;
+        int drc = v3_overlay_lookup(v, kb, V3_RECIPE_KEY_LEN, &dr);
+        if (drc < 0)
+            return -1;
+        if (drc == 1) {
+            if (dr.flags & INVFS_DELTA_FLAG_DELETE)
+                return -1;               /* hidden by a delta delete */
+            blob = (uint8_t *)malloc(dr.vlen ? dr.vlen : 1);
+            if (!blob)
+                return -1;
+            {
+                uint16_t got = 0;
+                if (vol_delta_read_value(v, &dr, blob, dr.vlen, &got) != 0 ||
+                    got != dr.vlen) {
+                    free(blob);
+                    return -1;
+                }
+            }
+            v3_blake3(blob, dr.vlen, chk);
+            if (memcmp(chk, addr, INVFS_V3_RECIPE_ADDR_LEN) != 0) {
+                fprintf(stderr, "v3 recipe blob (delta): BLAKE3 mismatch "
+                        "(corrupt or forged); refusing the read\n");
+                free(blob);
+                return -1;
+            }
+            *blob_out = blob;
+            *blen_out = dr.vlen;
+            return 0;
+        }
+    }
+
     if (v3_base_root(v, &root) != 0)
         return -1;
-    v3_recipe_key(kb, addr);
     if (btree_search(v, root, (bt_key){kb, V3_RECIPE_KEY_LEN}, &val,
                      &found) != 0)
         return -1;
@@ -2133,9 +2227,31 @@ int vol_v3_dirent_get(invfs_volume *v, uint64_t parent, const char *name,
         return -1;
     if (v3_ready(v) != 0)
         return -1;
+    kn = v3_dirent_key(kb, parent, name, nlen);
+
+    /* WP-M11: delta first; a delete shadows the base dirent. */
+    {
+        delta_ref dr;
+        int drc = v3_overlay_lookup(v, kb, kn, &dr);
+        if (drc < 0)
+            return -1;
+        if (drc == 1) {
+            uint8_t vb[8];
+            uint16_t got = 0;
+            if (dr.flags & INVFS_DELTA_FLAG_DELETE)
+                return 0;
+            if (dr.vlen != 8 ||
+                vol_delta_read_value(v, &dr, vb, sizeof vb, &got) != 0 ||
+                got != 8)
+                return -1;
+            if (child_out)
+                *child_out = v3_dirent_val_get(vb, got);
+            return 1;
+        }
+    }
+
     if (v3_base_root(v, &root) != 0)
         return -1;
-    kn = v3_dirent_key(kb, parent, name, nlen);
     if (btree_search(v, root, (bt_key){kb, kn}, &val, &found) != 0)
         return -1;
     if (!found)
@@ -2196,28 +2312,158 @@ int vol_v3_dirent_del(invfs_volume *v, uint64_t parent, const char *name)
     return v3_publish(v, nr, old_gen);
 }
 
-/* Scan state shared with the btree_scan callback. */
-typedef struct {
-    vol_v3_dirent_cb cb;
-    void             *ctx;
-} v3_dirent_scan_state;
-
-static int v3_dirent_scan_cb(void *ctx_, bt_key k, bt_val val)
+/* Decode one raw dirent key + child id and hand the user callback the
+ * NUL-terminated name. Malformed keys and the anchor (name_len 0) are
+ * skipped. Shared by the base stream and the delta stream of the merge. */
+static int v3_emit_dirent(vol_v3_dirent_cb cb, void *ctx,
+                          const uint8_t *kp, uint16_t klen, uint64_t child)
 {
-    v3_dirent_scan_state *s = (v3_dirent_scan_state *)ctx_;
     char name[INVFS_MAX_NAME + 1];
     uint16_t nlen;
 
-    if (k.n < V3_DIRENT_KEY_FIXED)
+    if (klen < V3_DIRENT_KEY_FIXED)
         return 0;
-    if (v3_dirent_key_len(k.p) != k.n)
+    if (v3_dirent_key_len(kp) != klen)
         return 0;   /* malformed: not one of our keys */
-    nlen = (uint16_t)(((uint16_t)k.p[8] << 8) | k.p[9]);
+    nlen = (uint16_t)(((uint16_t)kp[8] << 8) | kp[9]);
     if (nlen == 0 || nlen > INVFS_MAX_NAME)
         return 0;   /* anchor (or malformed) */
-    memcpy(name, k.p + V3_DIRENT_KEY_FIXED, nlen);
+    memcpy(name, kp + V3_DIRENT_KEY_FIXED, nlen);
     name[nlen] = 0;
-    return s->cb(s->ctx, name, nlen, v3_dirent_val_get(val.p, val.n));
+    return cb(ctx, name, nlen, child);
+}
+
+/* ------------------------------------------------------------------ */
+/* WP-M11: readdir = merge of the delta's key range and the base's      */
+/*                                                                    */
+/* The delta is small (§16), so its matching entries are snapshotted    */
+/* (keys copied, values read) BEFORE the base scan runs: the merge then */
+/* touches only memory and never issues delta I/O from inside a          */
+/* btree_scan callback. On an equal key the delta wins -- the tie-break  */
+/* frozen here and reused by WP-M14's fold. A delta delete removes the   */
+/* key from the merged stream entirely. Collecting the delta first also  */
+/* makes the merge correct under a concurrent fold's add-before-remove:  */
+/* a key the fold already published into the base but has not yet        */
+/* removed from the delta appears in both (delta wins); one already       */
+/* removed from the delta is present in the new base.                    */
+/* ------------------------------------------------------------------ */
+
+typedef struct {
+    uint8_t *key;       /* owned copy of the raw dirent key */
+    uint16_t klen;
+    uint8_t  deleted;   /* delete record / anchor / malformed: never emitted */
+    uint64_t child;
+} v3_merge_ent;
+
+typedef struct {
+    v3_merge_ent *ent;
+    size_t        n, cap;
+    int           oom;
+} v3_merge_list;
+
+static void v3_merge_list_free(v3_merge_list *l)
+{
+    size_t i;
+    for (i = 0; i < l->n; i++)
+        free(l->ent[i].key);
+    free(l->ent);
+    l->ent = NULL;
+    l->n = l->cap = 0;
+}
+
+/* vol_delta_range callback: snapshot one delta dirent into the list. */
+/* The volume is not reachable from a pure delta_ref, so the collect
+ * callback needs it through the list struct. */
+typedef struct {
+    invfs_volume  *v;
+    v3_merge_list *l;
+} v3_merge_collect_ctx;
+
+static int v3_merge_collect(void *ctx_, const uint8_t *key, uint16_t klen,
+                            const delta_ref *ref)
+{
+    v3_merge_collect_ctx *c = (v3_merge_collect_ctx *)ctx_;
+    v3_merge_list *l = c->l;
+    v3_merge_ent *e;
+    uint16_t nlen;
+
+    if (l->n == l->cap) {
+        size_t ncap = l->cap ? l->cap * 2 : 16;
+        v3_merge_ent *ne = (v3_merge_ent *)realloc(l->ent, ncap * sizeof *ne);
+        if (!ne) {
+            l->oom = 1;
+            return 1;                    /* abort the cursor */
+        }
+        l->ent = ne;
+        l->cap = ncap;
+    }
+    e = &l->ent[l->n];
+    memset(e, 0, sizeof *e);
+    e->key = (uint8_t *)malloc(klen ? klen : 1);
+    if (!e->key) {
+        l->oom = 1;
+        return 1;
+    }
+    if (klen)
+        memcpy(e->key, key, klen);
+    e->klen = klen;
+    e->deleted = 1;                      /* anchor/malformed/delete default */
+    l->n++;                              /* owned by the list from here */
+    if (klen >= V3_DIRENT_KEY_FIXED && v3_dirent_key_len(key) == klen) {
+        nlen = (uint16_t)(((uint16_t)key[8] << 8) | key[9]);
+        if (nlen >= 1 && nlen <= INVFS_MAX_NAME &&
+            !(ref->flags & INVFS_DELTA_FLAG_DELETE) && ref->vlen == 8) {
+            uint8_t vb[8];
+            uint16_t got = 0;
+            if (vol_delta_read_value(c->v, ref, vb, sizeof vb, &got) != 0 ||
+                got != 8) {
+                l->oom = 1;
+                return 1;
+            }
+            e->child = v3_dirent_val_get(vb, got);
+            e->deleted = 0;
+        }
+    }
+    return 0;
+}
+
+/* Merge cursor: the delta snapshot `ent[0..n)` at index `i`. */
+typedef struct {
+    vol_v3_dirent_cb     cb;
+    void                *ctx;
+    const v3_merge_ent  *ent;
+    size_t               n, i;
+} v3_merge_scan;
+
+static int v3_merge_emit(v3_merge_scan *m, const v3_merge_ent *e)
+{
+    if (e->deleted)
+        return 0;
+    return v3_emit_dirent(m->cb, m->ctx, e->key, e->klen, e->child);
+}
+
+/* btree_scan callback: emit delta keys ordered before this base key, then
+ * either the delta copy (delta wins on an equal key) or the base entry. */
+static int v3_merge_base_cb(void *ctx_, bt_key k, bt_val val)
+{
+    v3_merge_scan *m = (v3_merge_scan *)ctx_;
+
+    while (m->i < m->n &&
+           bt_cmp(m->ent[m->i].key, m->ent[m->i].klen, k.p, k.n) < 0) {
+        int rc = v3_merge_emit(m, &m->ent[m->i]);
+        m->i++;
+        if (rc)
+            return rc;
+    }
+    if (m->i < m->n &&
+        bt_cmp(m->ent[m->i].key, m->ent[m->i].klen, k.p, k.n) == 0) {
+        /* equal key: the delta copy shadows the base one (frozen rule) */
+        int rc = v3_merge_emit(m, &m->ent[m->i]);
+        m->i++;
+        return rc;
+    }
+    return v3_emit_dirent(m->cb, m->ctx, k.p, k.n,
+                          v3_dirent_val_get(val.p, val.n));
 }
 
 int vol_v3_dirent_scan(invfs_volume *v, uint64_t parent,
@@ -2225,23 +2471,55 @@ int vol_v3_dirent_scan(invfs_volume *v, uint64_t parent,
 {
     uint8_t lo[V3_DIRENT_KEY_FIXED], hi[V3_DIRENT_KEY_FIXED];
     invfs_blkptr root;
-    v3_dirent_scan_state s;
+    v3_merge_list list;
+    v3_merge_collect_ctx cc;
+    v3_merge_scan m;
+    int rc;
 
     if (!v || !cb)
         return -1;
     if (v3_ready(v) != 0)
         return -1;
-    if (v3_base_root(v, &root) != 0)
-        return -1;
     /* [parent||0x0000, (parent+1)||0x0000): the anchor first, then every
      * child, all under one contiguous parent prefix. */
     v3_dirent_key(lo, parent, NULL, 0);
     v3_dirent_key(hi, parent + 1, NULL, 0);
-    s.cb = cb;
-    s.ctx = ctx;
-    return btree_scan(v, root, (bt_key){lo, V3_DIRENT_KEY_FIXED},
-                      (bt_key){hi, V3_DIRENT_KEY_FIXED},
-                      v3_dirent_scan_cb, &s);
+
+    memset(&list, 0, sizeof list);
+    cc.v = v;
+    cc.l = &list;
+    rc = vol_delta_range(v, lo, V3_DIRENT_KEY_FIXED, hi, V3_DIRENT_KEY_FIXED,
+                         v3_merge_collect, &cc);
+    if (rc != 0 || list.oom) {
+        v3_merge_list_free(&list);
+        return -1;
+    }
+
+    if (v3_base_root(v, &root) != 0) {
+        v3_merge_list_free(&list);
+        return -1;
+    }
+    m.cb = cb;
+    m.ctx = ctx;
+    m.ent = list.ent;
+    m.n = list.n;
+    m.i = 0;
+    rc = btree_scan(v, root, (bt_key){lo, V3_DIRENT_KEY_FIXED},
+                    (bt_key){hi, V3_DIRENT_KEY_FIXED},
+                    v3_merge_base_cb, &m);
+    if (rc == 0) {
+        /* flush the delta tail (keys after the last base key) */
+        while (m.i < m.n) {
+            int erc = v3_merge_emit(&m, &m.ent[m.i]);
+            m.i++;
+            if (erc) {
+                rc = erc;
+                break;
+            }
+        }
+    }
+    v3_merge_list_free(&list);
+    return rc;
 }
 
 /* Highest 8-byte inode key currently in the base tree (0 = none). Used to
@@ -2274,6 +2552,10 @@ uint64_t vol_v3_inode_alloc(invfs_volume *v)
             return 0;
         if (v3_base_root(v, &root) != 0)
             return 0;
+        /* TODO(WP-M12): the resume scan reads the base only, so an inode id
+         * that exists solely as a delta row would be reused after a remount.
+         * WP-M12 (which wires inode creation into the delta) must extend this
+         * with a vol_delta_range pass over the 8-byte key range. */
         if (btree_scan(v, root, (bt_key){NULL, 0}, (bt_key){NULL, 0},
                        v3_max_inode_cb, &max) != 0)
             return 0;
