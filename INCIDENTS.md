@@ -636,3 +636,43 @@ path re-enabled by WP52 interacting with the new owner-extent allocation
 Open. Needs: reproduce with the crash-suite fixture, fix `tz_commit_member`/
 batch flush failure, ensure owner-extent allocation cannot duplicate a pba,
 and make `--realize` free the checkpoint's retained ranges (ties to WP53).
+
+---
+
+## WP58b — mapper-volume owner orphans (FIXED) + append-after-rollback (OPEN)
+
+**Date:** Sep 19, 2026
+**Severity:** High (silent space leak + false fsck damage; data stayed bit-exact)
+**Impact:** On WP30 mapper volumes (`format_version>=1`,
+`met0_present && meta_mapper`) the hidden owner records (`\x01reten`
+retention registry, `\x01tzb` text-zone owner, tier/rawm owners) live in
+dedicated metadata extents at **higher mapper slots** than the shared
+file-record extent, and `vol_records_walk` visits extents in slot order.
+A delete tombstone appended to the shared extent was therefore scanned
+**before** the owner record it had to kill: the id-kill hit nothing, the
+owner INOD re-added itself, and the resurrected owner pinned blocks the
+sweep had already freed. Observed on a 5-file volume as
+`orphans=64 / missing=66` after sweep2+ (fsck); no file corruption.
+
+**FIXED (committed `ecf66ff`):**
+- `vol_records.c`: `vol_delete_owner_overwrite()` writes a v2
+  position-kill tombstone in place at the owner's own position;
+  `vol_retire_inode` routes `\x01*` deletes through it.
+- `vol_fsck.c`: mark live mapper extents used in the bitmap rebuild.
+- `vol_rollback.c`: free the CKP0 staging run on clear; delete the
+  retention registry before the phase-2 rebuild; purge the sweep's other
+  derived owners (`\x01tzb`/tier/rawm) so their post-sweep ASTs stop
+  pinning swept segments; free shard ranges from the owner AST.
+
+Verified: `orphans=0 missing=0` through 4 sweeps + realize, files
+bit-exact 5/5; `make test` PASS (4467/86/169/22, 0 failures).
+
+**OPEN (same area, separate bug):** on a mapper volume, appends issued
+**after a rollback** are created but invisible to
+`vol_records_walk`/`invf-ls`. `test-rollback.sh` E2 fails with
+`'a.c.v2' not found`; a plain rollback preserves pre-existing names, but
+`invf-cp` right after a rollback reports "stored ... as inode N" yet the
+name never shows in the reopening scan. Likely a stale append cursor
+(`met0.active_extent`/`active_offset`/`inode_area_pos`) left by the
+rollback's phase-1 truncation. Tracked in
+`impl_docs/WP58b-mapper-owner-orphans.md` (Bug B).
