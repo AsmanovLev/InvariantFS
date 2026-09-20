@@ -25,7 +25,7 @@ int spt0_load(invfs_volume *v)
         return -1;
     v->savepoint_live = 0;
     memset(&v->spt0, 0, sizeof v->spt0);
-    v->pinned_root = 0;
+    memset(&v->pinned_root, 0, sizeof v->pinned_root);
 
     if (io_seek(&v->io, INVFS_SPT0_OFF) != 0)
         return -1;
@@ -38,7 +38,10 @@ int spt0_load(invfs_volume *v)
 
     v->spt0 = s;
     v->savepoint_live = 1;
-    v->pinned_root = s.base_root;
+    v->pinned_root.pba = s.base_root;
+    v->pinned_root.checksum = 0;
+    v->pinned_root.gen = 0;
+    v->pinned_root.flags = 0;
     return 0;
 }
 
@@ -107,7 +110,10 @@ int spt0_capture(invfs_volume *v)
         v->spt0.delta_end = delta_bytes;
     }
 
-    v->pinned_root = v->spt0.base_root;
+    v->pinned_root.pba = v->spt0.base_root;
+    v->pinned_root.checksum = 0;
+    v->pinned_root.gen = 0;
+    v->pinned_root.flags = 0;
     v->savepoint_live = 1;
 
     if (spt0_store(v) != 0)
@@ -152,7 +158,7 @@ int spt0_restore(invfs_volume *v)
 
     memset(&v->spt0, 0, sizeof v->spt0);
     v->savepoint_live = 0;
-    v->pinned_root = 0;
+    memset(&v->pinned_root, 0, sizeof v->pinned_root);
 
     rc = spt0_store(v);
     if (rc != 0)
@@ -172,7 +178,7 @@ int spt0_drop(invfs_volume *v)
     was_live = v->savepoint_live;
 
     v->savepoint_live = 0;
-    v->pinned_root = 0;
+    memset(&v->pinned_root, 0, sizeof v->pinned_root);
     memset(&v->spt0, 0, sizeof v->spt0);
 
     if (spt0_store(v) != 0)
