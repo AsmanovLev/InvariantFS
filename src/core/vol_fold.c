@@ -261,7 +261,10 @@ static int fold_persist_bitmap(invfs_volume *v)
 /* Leaves room for WP-M15 to reclaim the pages the pre-fold root referenced
  * once the old root is no longer reachable from a save point or a reader.
  * WP-M14 deliberately frees nothing (see the file header); the arguments
- * survive so M15 changes only this function body. */
+ * survive so M15 changes only this function body.
+ *
+ * WP-M16: v->pinned_root holds the save-point's base_root if a save point
+ * is live; folds must NOT reclaim pages reachable from pinned_root. */
 static void fold_reclaim_hook(invfs_volume *v, invfs_blkptr old_root,
                               invfs_blkptr new_root)
 {

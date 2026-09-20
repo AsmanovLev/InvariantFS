@@ -25,7 +25,7 @@
 
 /* Chain walk guard: a corrupt prev_pba cycle must not loop forever. A log
  * this long (128 GiB) is far past any fold trigger the design intends. */
-#define DELTA_MAX_SEGMENTS (1u << 20)
+/* DELTA_MAX_SEGMENTS is now in vol_delta.h */
 
 /* WP-M14: the oldest-live-record age is the third D2 fold trigger component.
  * It is a handle clock (CLOCK_MONOTONIC seconds), not a wall clock, so a
@@ -206,7 +206,7 @@ static void delta_hdr_encode(uint8_t *raw, uint64_t seg_seq, uint64_t prev_pba)
     }
 }
 
-static int delta_read_hdr(invfs_volume *v, uint64_t pba,
+int delta_read_hdr(invfs_volume *v, uint64_t pba,
                           invfs_delta_seg_hdr *out)
 {
     uint8_t raw[INVFS_DELTA_SEG_HDR_LEN];
@@ -914,6 +914,182 @@ out:
         v->delta_index = NULL;
         v->delta_ready = 0;
     }
+    return rc;
+}
+
+/* ---- WP-M16: delta truncation for save-point rollback ----------------- */
+
+int vol_delta_truncate(invfs_volume *v, uint64_t delta_end)
+{
+    uint64_t *chain = NULL;
+    size_t nchain = 0, cap = 0;
+    uint64_t *newer = NULL;
+    size_t n_newer = 0, cap_newer = 0;
+    uint64_t offset;
+    size_t i;
+    int rc = -1;
+
+    if (!v)
+        return -1;
+    if (delta_end == 0) {
+        delta_end = INVFS_DELTA_SEG_HDR_LEN;
+    }
+
+    if (v->delta_seg_pba == 0)
+        return 0;
+
+    chain = NULL;
+    nchain = cap = 0;
+
+    {
+        uint64_t cur = v->delta_seg_pba;
+        while (cur && nchain < DELTA_MAX_SEGMENTS) {
+            invfs_delta_seg_hdr h;
+            if (delta_read_hdr(v, cur, &h) != 0)
+                break;
+            if (nchain >= cap) {
+                size_t ncap = cap ? cap * 2 : 8;
+                uint64_t *nc = (uint64_t *)realloc(chain, ncap * sizeof *nc);
+                if (!nc)
+                    goto out;
+                chain = nc;
+                cap = ncap;
+            }
+            chain[nchain++] = cur;
+            if (h.prev_pba == cur)
+                break;
+            cur = h.prev_pba;
+        }
+    }
+
+    if (nchain == 0) {
+        rc = 0;
+        goto out;
+    }
+
+    offset = 0;
+    newer = NULL;
+    n_newer = 0;
+    cap_newer = 0;
+
+    for (i = 0; i < nchain; i++) {
+        uint64_t seg_pba = chain[nchain - 1 - i];
+        uint64_t seg_bytes = (i == 0) ? v->delta_bump : INVFS_DELTA_SEG_BYTES;
+
+        if (offset + seg_bytes > delta_end) {
+            uint64_t keep_bytes = (i == 0) ? v->delta_bump : INVFS_DELTA_SEG_BYTES;
+            uint64_t trunc_off;
+            invfs_delta_seg_hdr h;
+            uint8_t *buf = NULL;
+            uint64_t old_prev_pba;
+
+            if (delta_read_hdr(v, seg_pba, &h) != 0)
+                goto out;
+
+            old_prev_pba = h.prev_pba;
+
+            for (size_t j = i + 1; j < nchain; j++) {
+                uint64_t npba = chain[nchain - 1 - j];
+                if (n_newer >= cap_newer) {
+                    size_t ncap = cap_newer ? cap_newer * 2 : 8;
+                    uint64_t *nn = (uint64_t *)realloc(newer, ncap * sizeof *nn);
+                    if (!nn)
+                        goto out;
+                    newer = nn;
+                    cap_newer = ncap;
+                }
+                newer[n_newer++] = npba;
+            }
+
+            trunc_off = delta_end - offset;
+            if (trunc_off < INVFS_DELTA_SEG_HDR_LEN)
+                trunc_off = INVFS_DELTA_SEG_HDR_LEN;
+
+            buf = (uint8_t *)malloc((size_t)INVFS_DELTA_SEG_BYTES);
+            if (!buf)
+                goto out;
+
+            if (io_seek(&v->io, seg_pba * (uint64_t)INVFS_BLOCK_SIZE) != 0 ||
+                io_read(&v->io, buf, (size_t)INVFS_DELTA_SEG_BYTES) != 0) {
+                free(buf);
+                goto out;
+            }
+
+            memset(buf + trunc_off, 0, (size_t)(INVFS_DELTA_SEG_BYTES - trunc_off));
+
+            delta_hdr_encode(buf, h.seg_seq, old_prev_pba);
+
+            if (io_seek(&v->io, seg_pba * (uint64_t)INVFS_BLOCK_SIZE) != 0 ||
+                io_write(&v->io, buf, (size_t)INVFS_DELTA_SEG_BYTES) != 0) {
+                free(buf);
+                goto out;
+            }
+            free(buf);
+
+            v->delta_seg_pba = seg_pba;
+            v->delta_bump = trunc_off;
+
+            for (size_t j = 0; j < n_newer; j++) {
+                invfs_delta_seg_hdr nh;
+                if (delta_read_hdr(v, newer[j], &nh) == 0) {
+                    vol_free_blocks(v, newer[j], INVFS_DELTA_SEG_BLOCKS);
+                }
+            }
+
+            if (vmux_barrier(v, "delta truncate") < 0)
+                goto out;
+
+            rc = 0;
+            goto out;
+        }
+        offset += seg_bytes;
+    }
+
+    if (offset < delta_end && nchain > 0) {
+        uint64_t last_pba = chain[0];
+        invfs_delta_seg_hdr h;
+
+        if (delta_read_hdr(v, last_pba, &h) != 0)
+            goto out;
+
+        for (i = 1; i < nchain; i++) {
+            uint64_t npba = chain[nchain - i];
+            if (n_newer >= cap_newer) {
+                size_t ncap = cap_newer ? cap_newer * 2 : 8;
+                uint64_t *nn = (uint64_t *)realloc(newer, ncap * sizeof *nn);
+                if (!nn)
+                    goto out;
+                newer = nn;
+                cap_newer = ncap;
+            }
+            newer[n_newer++] = npba;
+        }
+
+        v->delta_seg_pba = last_pba;
+        v->delta_bump = h.prev_pba == last_pba
+                       ? INVFS_DELTA_SEG_HDR_LEN
+                       : delta_end - offset + INVFS_DELTA_SEG_HDR_LEN;
+        if (v->delta_bump > INVFS_DELTA_SEG_BYTES)
+            v->delta_bump = INVFS_DELTA_SEG_BYTES;
+
+        for (size_t j = 0; j < n_newer; j++) {
+            invfs_delta_seg_hdr nh;
+            if (delta_read_hdr(v, newer[j], &nh) == 0) {
+                vol_free_blocks(v, newer[j], INVFS_DELTA_SEG_BLOCKS);
+            }
+        }
+
+        if (vmux_barrier(v, "delta truncate") < 0)
+            goto out;
+
+        rc = 0;
+        goto out;
+    }
+
+    rc = 0;
+out:
+    free(chain);
+    free(newer);
     return rc;
 }
 

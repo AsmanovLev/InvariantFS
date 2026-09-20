@@ -590,10 +590,14 @@ typedef struct invfs_volume {
      * Both restart at 0 when the delta is reset, exactly like delta_seq. */
     uint64_t delta_oldest_seq;         /* seq of the oldest live record (0=none) */
     uint64_t delta_oldest_when;        /* CLOCK_MONOTONIC seconds of that record */
-    /* WP-M15: the save-point base root. WP-M16 sets this to a non-zero value
-     * when a save-point is active; until then fold_reclaim_hook diffs only
-     * against the current base root (pinned_root == {0,0}). */
-    invfs_blkptr pinned_root;
+    /* ---- WP-M16: v3 save-point state (SPT0 descriptor) --------------- */
+    /* savepoint_live: SPT0 was present and CRC-valid at open. */
+    /* pinned_root: the base_root pba captured at save-point creation. */
+    /* The pin is permanent until the save point is dropped or rolled back; */
+    /* folds while a save point is live do NOT update it. */
+    invfs_spt0 spt0;                   /* SPT0 descriptor (loaded from disk) */
+    int      savepoint_live;            /* SPT0 was present and CRC-valid */
+    invfs_blkptr pinned_root;           /* base_root at capture (zeroed = none) */
     /* WP30 Phase 6: merge-in-progress flag for concurrency safety.
      * Set during vol_meta_merge_run, checked in meta_get_append_pos to
      * prevent concurrent metadata operations from reading partially-updated

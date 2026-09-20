@@ -705,6 +705,38 @@ typedef struct {
 } invfs_rt30;                   /* 0x9D0 + 48 -> ends 0xA00 */
 #pragma pack(pop)
 
+/* ---- WP-M16: SPT0 v3 save-point descriptor (block 0 reserved area) ----
+ * Lives at byte offset 0xA00 of block 0, past the superblock (0x00..0x90),
+ * RDP0 (0x100), RSZ0 (0x140), CKP0 (0x220), CMP0 (0x260), DEVT (0x2A0),
+ * CVT0 (0x360), MET0 (0x3A0), PCK0 (0x3C4..0x9CC) and RT30 (0x9D0..0xA00).
+ * Volumes that never captured a save point carry zeros there ("absent").
+ *
+ * The save point records {base_root, delta_end} at capture time. base_root
+ * is the pinned RT30 root pba at capture; delta_end is the byte offset
+ * within the delta segment chain at capture. Rollback publishes base_root
+ * via RT30 double-slot, truncates the delta to delta_end, and replays.
+ * K=1: refuse a second save point while one is live.
+ *
+ *   0xA00  char magic[4]       "SPT0"
+ *   0xA04  u32  version        1
+ *   0xA08  u32  flags          0 (reserved)
+ *   0xA0C  u64  base_root      pinned RT30 root pba at capture
+ *   0xA14  u64  delta_end      delta byte offset at capture
+ *   0xA1C  u32  crc32c         over descriptor with this field 0
+ * 32 bytes total; the rest of block 0 stays reserved-zero. */
+#define INVFS_SPT0_OFF      0xA00
+#define INVFS_SPT0_VERSION  1
+#pragma pack(push, 1)
+typedef struct {
+    char     magic[4];          /* 0xA00 "SPT0" */
+    uint32_t version;           /* 0xA04 INVFS_SPT0_VERSION */
+    uint32_t flags;             /* 0xA08 reserved */
+    uint64_t base_root;         /* 0xA0C pinned RT30 root pba */
+    uint64_t delta_end;         /* 0xA14 delta byte offset at capture */
+    uint32_t crc32c;            /* 0xA1C over descriptor with this field 0 */
+} invfs_spt0;                   /* 0xA00 + 32 -> ends 0xA20 */
+#pragma pack(pop)
+
 /* ---- WP-M1: v3 base-page + block-pointer wire format (design §12) ----
  * Frozen here so WP-M2 (page format + allocator) and WP-M3 (delta/fold)
  * share one definition instead of each inventing its own. A base page is a

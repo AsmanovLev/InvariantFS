@@ -17,6 +17,7 @@
 #include "volume_internal.h"
 #include "vol_metabuf.h"
 #include "vol_delta.h"
+#include "vol_spt0.h"
 
 
 static const uint64_t JOURNAL_BLOCKS = INVFS_JOURNAL_BLOCKS;
@@ -1680,6 +1681,8 @@ static invfs_volume *vol_open_inner(const char *path, int at_ckpt,
          * this only reconstructs the recent tier so a crash/remount keeps
          * it. A torn tail is truncated inside vol_delta_mount. */
         if (vol_delta_mount(v) != 0) { *err = -6; goto fail; }
+        /* WP-M16: load the save-point descriptor if one exists. */
+        if (spt0_load(v) < 0) { *err = -6; goto fail; }
         fprintf(stderr, "vol_open: %s: format v3 (metadata-v3 inode tree): "
                 "base root engine up, v2 paths refused\n", real);
     } else

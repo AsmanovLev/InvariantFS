@@ -43,6 +43,9 @@
  * it twice. */
 typedef struct invfs_volume invfs_volume;
 
+/* Chain walk guard: a corrupt prev_pba cycle must not loop forever. */
+#define DELTA_MAX_SEGMENTS (1u << 20)
+
 /* A reference to the winning on-disk record for one key. `seg` is the
  * segment pba and `off` the byte offset of the record header within it; use
  * vol_delta_read_value to fetch the value bytes. `seq` is the monotone
@@ -118,6 +121,17 @@ uint64_t vol_delta_count(const invfs_volume *v);
 /* records indexed / segments in the chain / payload bytes appended. */
 void vol_delta_stats(const invfs_volume *v, uint64_t *records,
                      uint64_t *segments, uint64_t *bytes);
+
+/* ---- WP-M16: delta truncation for save-point rollback ----------------- */
+
+/* Truncate the delta chain to `delta_end` bytes from the chain start.
+ * This drops all records appended after the save point was captured.
+ * After truncation, the delta index is reset and must be rebuilt via
+ * vol_delta_mount. 0 = ok, -1 = io error. */
+int vol_delta_truncate(invfs_volume *v, uint64_t delta_end);
+
+/* Read a delta segment header. Returns 0 on success, -1 on error. */
+int delta_read_hdr(invfs_volume *v, uint64_t pba, invfs_delta_seg_hdr *out);
 
 /* ---- pure record parser (unit tests + fuzz; no volume) ---------------- */
 
