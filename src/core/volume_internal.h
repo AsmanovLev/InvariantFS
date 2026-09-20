@@ -318,6 +318,10 @@ typedef struct invfs_volume {
     int j_compact;            /* next flush compacts (fsck rebuild) */
     uint64_t open_cuts;       /* consistent-cut hides at mount (WP22d) */
     uint64_t next_inode_id;
+    /* WP-M18: the pre-fold root stored at vol_v3_fold_request start so that
+     * fold_reclaim_hook (called after fold) can diff old vs new. Cleared
+     * after reclaim runs. */
+    invfs_blkptr fold_pre_root;
     /* on-demand sweep pending list (RAM) */
     uint64_t *pending;
     size_t n_pending, cap_pending;

@@ -265,8 +265,8 @@ static int fold_persist_bitmap(invfs_volume *v)
  *
  * WP-M16: v->pinned_root holds the save-point's base_root if a save point
  * is live; folds must NOT reclaim pages reachable from pinned_root. */
-static void fold_reclaim_hook(invfs_volume *v, invfs_blkptr old_root,
-                              invfs_blkptr new_root)
+void fold_reclaim_hook(invfs_volume *v, invfs_blkptr old_root,
+                      invfs_blkptr new_root)
 {
     /* wait for in-flight readers (g_fold_epoch drain) */
     (void)vol_reclaim_drain(v);
@@ -444,6 +444,8 @@ int vol_v3_fold_request(invfs_volume *v)
 {
     uint64_t bytes = 0, records = 0, now;
     int need = 0;
+    invfs_blkptr new_root;
+    int rc;
 
     if (!v || !(v->sb.vol_flags & VOLF_V3))
         return -1;
@@ -462,11 +464,42 @@ int vol_v3_fold_request(invfs_volume *v)
     }
     if (!need)
         return 0;
-    return vol_v3_fold(v) == 0 ? 1 : -1;
+
+    /* WP-M18: capture pre-fold root for reclaim_hook (called after fold) */
+    if (vol_v3_base_root(v, &v->fold_pre_root) != 0)
+        return -1;
+
+    rc = vol_v3_fold(v);
+    if (rc != 0)
+        return -1;
+
+    /* fold succeeded: call the reclaim hook with old and new roots */
+    if (vol_v3_base_root(v, &new_root) == 0)
+        fold_reclaim_hook(v, v->fold_pre_root, new_root);
+
+    return 1;
 }
 
 void vol_v3_fold_reset_age(invfs_volume *v)
 {
     if (v)
         v->delta_oldest_when = 0;
+}
+
+/* WP-M18: public reclaim trigger (M15 hook). Called by sweep integration
+ * after a sweep pass + fold. Currently a no-op stub; M15 implements the
+ * reachability diff. Idempotent: safe to call even if fold_request was
+ * not called or fold was not needed. */
+void vol_reclaim_schedule(invfs_volume *v)
+{
+    invfs_blkptr new_root;
+
+    if (!v)
+        return;
+    if (v->fold_pre_root.pba == 0)
+        return;
+    if (vol_v3_base_root(v, &new_root) != 0)
+        return;
+    fold_reclaim_hook(v, v->fold_pre_root, new_root);
+    v->fold_pre_root.pba = 0;
 }

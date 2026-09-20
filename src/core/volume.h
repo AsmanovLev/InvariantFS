@@ -301,6 +301,23 @@ typedef int (*vol_v3_walk_cb)(void *ctx, const char *path, uint64_t ino,
                               uint32_t type, uint64_t size, int64_t mtime);
 int vol_v3_walk(invfs_volume *v, vol_v3_walk_cb cb, void *ctx);
 
+/* ---- WP-M18: live-set iteration for sweep driver ---------------------
+ * Walk the base B-tree inode range, consult the delta overlay for each
+ * key (DELETE = skip), and invoke the callback for each live inode.
+ * For nlink > 1 inodes the visited set ensures the callback fires once
+ * per inode, not once per hardlink name. The callback receives the name
+ * (may be NULL if not found via dirent). Returns 0 complete, -1 error,
+ * callback non-zero propagated. */
+int vol_v3_iter_live_inodes(invfs_volume *v,
+    int (*cb)(invfs_volume *v, uint64_t inode_id, const char *name, void *ctx),
+    void *ctx);
+/* Reverse dirent lookup: find one name mapping to `inode_id`. For
+ * nlink > 1 any name suffices; for nlink == 1 it is unique. Returns
+ * 1 found (*name filled, *parent_out set), 0 absent, -1 error. */
+int vol_v3_name_of(invfs_volume *v, uint64_t inode_id,
+                   char *name, size_t name_cap,
+                   uint64_t *parent_out);
+
 /* ---- WP-M14: v3 fold (merge delta into base, atomic publish, reset) --
  * Fold applies every live delta record to a COW copy of the base B+-tree,
  * publishes the new root through the WP-M2 double slot, and only then resets
@@ -322,6 +339,10 @@ int vol_v3_fold_request(invfs_volume *v);
 /* Force the next fold regardless of the age component of the trigger (used
  * by tests and by an explicit operator sweep). */
 void vol_v3_fold_reset_age(invfs_volume *v);
+/* WP-M18: M15 reclaim hook. Called after fold (or stand-alone) to diff
+ * old vs new root and free unreferenced pages. Currently a stub; M15 fills it.
+ * Idempotent: safe to call even if fold has not run. */
+void vol_reclaim_schedule(invfs_volume *v);
 /* Fold trigger thresholds (D2; measured in vol_fold.c). */
 void vol_v3_fold_trigger(uint64_t *bytes, uint64_t *records, uint64_t *age_s);
 

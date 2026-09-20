@@ -3073,3 +3073,188 @@ uint64_t vol_v3_inode_alloc(invfs_volume *v)
     }
     return v->next_inode_id++;
 }
+
+/* ------------------------------------------------------------------ */
+/* WP-M18: reverse dirent lookup (inode id -> name for sweep driver)  */
+/* ------------------------------------------------------------------ */
+
+typedef struct {
+    uint64_t target;
+    char    *name;
+    size_t   name_cap;
+    uint64_t *parent_out;
+    int      found;
+} v3_name_of_ctx;
+
+static int v3_name_of_walk_cb(void *ctx_, const char *path, uint64_t ino,
+                              uint32_t type, uint64_t size, int64_t mtime)
+{
+    v3_name_of_ctx *c = (v3_name_of_ctx *)ctx_;
+    (void)type; (void)size; (void)mtime;
+    if (ino == c->target) {
+        size_t n = strlen(path);
+        if (n >= c->name_cap)
+            return -1;
+        memcpy(c->name, path, n + 1);
+        c->found = 1;
+        return 1;
+    }
+    return 0;
+}
+
+/* Reverse dirent lookup: find one name that maps to `inode_id`.
+ * For nlink == 1 this is unique; for nlink > 1 any name suffices.
+ * Returns 1 found, 0 absent, -1 error. *name may be "": absent.
+ * *parent_out is set to the parent inode on success (may be NULL). */
+int vol_v3_name_of(invfs_volume *v, uint64_t inode_id,
+                   char *name, size_t name_cap,
+                   uint64_t *parent_out)
+{
+    v3_name_of_ctx c;
+    invfs_v3_inode in;
+
+    if (!v || !name || name_cap == 0)
+        return -1;
+    name[0] = 0;
+    if (parent_out)
+        *parent_out = 0;
+
+    if (vol_v3_inode_get(v, inode_id, &in) != 1)
+        return 0;
+
+    c.target = inode_id;
+    c.name = name;
+    c.name_cap = name_cap;
+    c.parent_out = parent_out;
+    c.found = 0;
+
+    (void)vol_v3_walk(v, v3_name_of_walk_cb, &c);
+    return c.found ? 1 : 0;
+}
+
+/* ------------------------------------------------------------------ */
+/* WP-M18: live-set iteration for the sweep driver                     */
+/* ------------------------------------------------------------------ */
+
+typedef struct {
+    invfs_volume *v;
+    int (*cb)(invfs_volume *v, uint64_t inode_id, const char *name, void *ctx);
+    void *ctx;
+    uint64_t *visited;
+    size_t visited_cap;
+    size_t visited_n;
+    int oom;
+} v3_iter_ctx;
+
+static int v3_iter_base_cb(void *ctx_, bt_key k, bt_val val)
+{
+    v3_iter_ctx *ic = (v3_iter_ctx *)ctx_;
+    uint64_t inode_id = 0;
+    int i;
+
+    if (k.n != 8)
+        return 0;
+    for (i = 0; i < 8; i++)
+        inode_id = (inode_id << 8) | k.p[i];
+
+    /* consult delta overlay: DELETE flag = skip this inode */
+    {
+        delta_ref dr;
+        int drc = vol_delta_lookup(ic->v, k.p, 8, &dr);
+        if (drc < 0)
+            return -1;
+        if (drc == 1 && (dr.flags & INVFS_DELTA_FLAG_DELETE))
+            return 0;
+    }
+
+    /* nlink > 1: visited set to avoid calling the sweep once per hardlink */
+    {
+        invfs_v3_inode in;
+        if (vol_v3_inode_get(ic->v, inode_id, &in) == 1 && in.nlink > 1) {
+            size_t h, j;
+            h = inode_id & (ic->visited_cap ? ic->visited_cap - 1 : 7);
+            for (;;) {
+                for (j = 0; j < ic->visited_n; j++) {
+                    if (ic->visited[h] == inode_id)
+                        return 0;
+                    h = (h + 1) & (ic->visited_cap ? ic->visited_cap - 1 : 7);
+                }
+                if (ic->visited_n < ic->visited_cap)
+                    break;
+                {
+                    size_t nc = ic->visited_cap ? ic->visited_cap * 2 : 64;
+                    uint64_t *nv = (uint64_t *)realloc(ic->visited, nc * sizeof *nv);
+                    if (!nv) { ic->oom = 1; return -1; }
+                    ic->visited = nv;
+                    ic->visited_cap = nc;
+                }
+            }
+            ic->visited[ic->visited_n++] = inode_id;
+        }
+    }
+
+    /* resolve name via dirent lookup */
+    {
+        char name[INVFS_MAX_NAME + 1];
+        uint64_t parent;
+        int got;
+
+        name[0] = 0;
+        got = vol_v3_name_of(ic->v, inode_id, name, sizeof name, &parent);
+        (void)parent;
+
+        return ic->cb(ic->v, inode_id, got > 0 ? name : NULL, ic->ctx);
+    }
+}
+
+/* Public entry point. Callback is invoked once per live inode (nlink > 1
+ * visited once). Callback receives name (may be NULL if not found via
+ * dirent). Returns 0 complete, -1 error, callback non-zero propagated. */
+int vol_v3_iter_live_inodes(invfs_volume *v,
+    int (*cb)(invfs_volume *v, uint64_t inode_id, const char *name, void *ctx),
+    void *ctx)
+{
+    invfs_blkptr root;
+    v3_iter_ctx ic;
+    uint64_t max_id = 0;
+    uint8_t lo[8], hi[8];
+    int rc;
+
+    if (!v || !cb)
+        return -1;
+    if (v3_ready(v) != 0)
+        return -1;
+
+    /* find the highest inode id currently allocated so the scan range
+     * upper bound is tight */
+    {
+        uint64_t m = 0;
+        (void)vol_delta_range(v, NULL, 0, NULL, 0,
+                              v3_max_inode_delta_cb, &m);
+        max_id = m;
+    }
+    if (v3_base_root(v, &root) == 0 && root.pba != 0) {
+        uint64_t m = 0;
+        (void)btree_scan(v, root, (bt_key){NULL, 0}, (bt_key){NULL, 0},
+                         v3_max_inode_cb, &m);
+        if (m > max_id)
+            max_id = m;
+    }
+    if (max_id == 0)
+        max_id = INVFS_V3_ROOT_INO;
+
+    v3_ino_key(INVFS_V3_ROOT_INO, lo);
+    v3_ino_key(max_id + 1, hi);
+
+    memset(&ic, 0, sizeof ic);
+    ic.v = v;
+    ic.cb = cb;
+    ic.ctx = ctx;
+
+    rc = btree_scan(v, root, (bt_key){lo, 8}, (bt_key){hi, 8},
+                    v3_iter_base_cb, &ic);
+    if (rc != 0 || ic.oom)
+        rc = -1;
+    free(ic.visited);
+    return rc;
+}

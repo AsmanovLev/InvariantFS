@@ -1388,21 +1388,29 @@ int vol_sweep_file_generic(invfs_volume *v, uint64_t inode_id)
  * unreadable. Same scan the pending drain has always used. */
 int vol_sweep_name_of(invfs_volume *v, uint64_t id, char *nm, size_t cap)
 {
-    sweep_locate_ctx lc;
-
     if (!v || !nm || cap == 0) return 0;
-    /* WP42: the shared mapper-aware walker replaces the legacy contiguous
-     * scan; on a mapper volume the record for `id` lives in a meta extent */
-    memset(&lc, 0, sizeof lc);
-    lc.want = id;
-    vol_records_walk(v, sweep_locate_cb, &lc);
-    if (!lc.found) return 0;
-    {
-        size_t nl = strlen(lc.name);
-        if (nl >= cap) return 0;
-        memcpy(nm, lc.name, nl + 1);
+
+    /* WP-M18: v3 volumes use the dirent tree (delta-first) */
+    if (v->sb.vol_flags & VOLF_V3) {
+        uint64_t parent;
+        int rc = vol_v3_name_of(v, id, nm, cap, &parent);
+        return (rc > 0) ? 1 : 0;
     }
-    return 1;
+
+    /* v2: shared mapper-aware walker */
+    {
+        sweep_locate_ctx lc;
+        memset(&lc, 0, sizeof lc);
+        lc.want = id;
+        vol_records_walk(v, sweep_locate_cb, &lc);
+        if (!lc.found) return 0;
+        {
+            size_t nl = strlen(lc.name);
+            if (nl >= cap) return 0;
+            memcpy(nm, lc.name, nl + 1);
+        }
+        return 1;
+    }
 }
 
 
@@ -1447,6 +1455,12 @@ int vol_sweep_pending(invfs_volume *v)
      * this, then call vol_ckp_end again after if merge ran. */
     if (vol_meta_merge_run(v) < 0)
         fprintf(stderr, "[sweep] warning: metadata merge failed\n");
+    /* WP-M18: after sweep walk + meta merge, try to fold the delta and then
+     * schedule reclaim. Both are idempotent stubs in this WP; M15 fills them. */
+    if ((v->sb.vol_flags & VOLF_V3) && !(v->sb.vol_flags & VOLF_READONLY)) {
+        (void)vol_v3_fold_request(v);
+        (void)vol_reclaim_schedule(v);
+    }
     return done;
 }
 
