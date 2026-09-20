@@ -423,10 +423,14 @@ int vol_v3_fold(invfs_volume *v)
 
     /* (3) reset the delta only after the new base is durable and named. A
      * failure here leaves base+delta both carrying the keys, which replay
-     * resolves idempotently; a later fold_request retries. */
+     * resolves idempotently; a later fold_request retries.
+     * WP-M20: hold g_delta_lock so concurrent lock-free readers see either
+     * the old delta_index or the new empty one -- never a half-freed pointer. */
     uint64_t old_delta_pba = v->rt30.delta_pba;
+    vol_delta_lock();
     if (fold_delta_reset(v) != 0)
         failed_reset = 1;
+    vol_delta_unlock();
 
     /* WP-M15: free superseded delta segments (saved before reset cleared them) */
     (void)vol_reclaim_delta_segments(v, old_delta_pba, 0);

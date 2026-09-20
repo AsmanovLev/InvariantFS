@@ -60,7 +60,7 @@ endef
 
 # CLI tools (main in src/cli/<name>.c)
 CLI_MAINS := mkfs verify fsck cp cat ls stat arctest blkio_test resize migrate-v2 \
-             metabuf_test btree_test v3inode overlay_test fold_test
+             metabuf_test btree_test v3inode overlay_test fold_test concurrency_test
 $(foreach t,$(CLI_MAINS),$(eval $(call TOOL_RULE,$(t),)))
 
 # WP60: invfs-pack is named differently (invfs- not invf-)
@@ -143,7 +143,7 @@ fuzz-ci: $(OUT)/invf-fuzz
 
 test: $(OUT)/invf-arctest $(OUT)/invf-blkio_test $(OUT)/invf-codec_test \
       $(OUT)/invf-helper_exec_test $(OUT)/invf-metabuf_test $(OUT)/invf-btree_test \
-      $(OUT)/invf-delta_test
+      $(OUT)/invf-delta_test $(OUT)/invf-concurrency_test
 	$(OUT)/invf-arctest
 	$(OUT)/invf-blkio_test
 	$(OUT)/invf-codec_test
@@ -151,6 +151,7 @@ test: $(OUT)/invf-arctest $(OUT)/invf-blkio_test $(OUT)/invf-codec_test \
 	$(OUT)/invf-metabuf_test
 	$(OUT)/invf-btree_test
 	$(OUT)/invf-delta_test
+	$(OUT)/invf-concurrency_test /tmp
 
 # e2e tier: tmpfs images under /dev/shm; test-jxl needs cjxl/djxl installed
 e2e: all

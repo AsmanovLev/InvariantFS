@@ -89,6 +89,15 @@ int vol_delta_lookup(invfs_volume *v, const uint8_t *key, uint16_t klen,
 int vol_delta_read_value(invfs_volume *v, const delta_ref *ref,
                          uint8_t *buf, size_t cap, uint16_t *vlen_out);
 
+/* ---- locking helpers (for callers that mutate delta state) ------------- */
+
+/* Lock the delta append mutex. Call before vol_v3_fold or any operation
+ * that rebuilds the delta_index. */
+void vol_delta_lock(void);
+
+/* Unlock the delta append mutex. */
+void vol_delta_unlock(void);
+
 /* ---- introspection (tests / diagnostics) ------------------------------ */
 
 /* Iterate every indexed key in unspecified order. cb returns non-zero to

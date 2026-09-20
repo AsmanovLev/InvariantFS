@@ -1140,18 +1140,15 @@ static int invf_getattr(const char *path, struct stat *st, struct fuse_file_info
         /* symlink targets must NOT be followed here: getattr on the link
          * itself is how the kernel discovers S_IFLNK */
         const char *name = path[0] == '/' ? path + 1 : path;
+        /* WP-M20: base reads are lock-free (immutable base, delta published atomically) */
         if (!snapshot_entry(name, NULL, &size, &ctime)) {
             int is_dir = 0;
-            pthread_mutex_lock(&g_io_lock);
             is_dir = g_vol ? vol_is_dir(g_vol, name) : 0;
-            pthread_mutex_unlock(&g_io_lock);
             if (!is_dir) return -ENOENT;
         }
         if (!meta_for_path(path, ename, sizeof ename, &m)) {
             int isd;
-            pthread_mutex_lock(&g_io_lock);
             isd = g_vol ? vol_is_dir(g_vol, name) : 0;
-            pthread_mutex_unlock(&g_io_lock);
             meta_defaults(name, size, &m);
             if (isd) { m.type = INVFS_ITYP_DIR; m.nlink = 2; }
         }
@@ -1177,21 +1174,19 @@ static int invf_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
      * truncation) dropped entries in large dirs like /usr/share (audit H7) */
     int cap = 1024, n = 0;
     invfs_dirent *ents = NULL;
-    pthread_mutex_lock(&g_io_lock);
-    if (!g_vol) { pthread_mutex_unlock(&g_io_lock); return -EIO; }
+    /* WP-M20: base reads are lock-free (immutable base, delta published atomically) */
+    if (!g_vol) return -EIO;
     if (dir[0] && !vol_is_dir(g_vol, dir)) {
-        pthread_mutex_unlock(&g_io_lock);
         return -ENOENT;
     }
     for (;;) {
         free(ents);
         ents = (invfs_dirent *)malloc((size_t)cap * sizeof(invfs_dirent));
-        if (!ents) { pthread_mutex_unlock(&g_io_lock); return -ENOMEM; }
+        if (!ents) return -ENOMEM;
         n = vol_list_dir(g_vol, dir, ents, cap);
         if (n < cap || n < 0) break;
         cap *= 2;   /* possibly truncated: retry with a bigger buffer */
     }
-    pthread_mutex_unlock(&g_io_lock);
     int i;
     filler(buf, ".", NULL, 0, 0);
     filler(buf, "..", NULL, 0, 0);
@@ -1383,6 +1378,8 @@ static int invf_read(const char *path, char *buf, size_t size, off_t offset,
     wctx *w;
     (void)fi;
     (void)is_temp_path;
+    /* WP-M20: base reads are lock-free (immutable base, delta published atomically).
+     * The lock still protects the dirty session list and data path. */
     pthread_mutex_lock(&g_io_lock);
     if (!g_vol) { pthread_mutex_unlock(&g_io_lock); return -EIO; }
     /* WP22c: on an io-latched volume (a flush/sync failed THIS session)
@@ -1408,10 +1405,12 @@ static int invf_read(const char *path, char *buf, size_t size, off_t offset,
         return got < 0 ? -EIO : got;
     }
     pthread_mutex_unlock(&g_io_lock);
+    /* Metadata read: lock-free base path */
     if (!snapshot_entry(path + 1, &ino, &size64, &ctime))
         return -ENOENT;
     if ((uint64_t)offset >= size64)
         return 0;
+    /* Data read: still needs g_io_lock for g_vol check + data path consistency */
     pthread_mutex_lock(&g_io_lock);
     if (!g_vol) { pthread_mutex_unlock(&g_io_lock); return -EIO; }
     got = vol_read_range(g_vol, ino, (uint64_t)offset, size, buf);
@@ -2058,11 +2057,10 @@ static int invf_statfs(const char *path, struct statvfs *st)
     const invfs_superblock *sb;
     uint64_t free_blocks;
     (void)path;
-    pthread_mutex_lock(&g_io_lock);
-    if (!g_vol) { pthread_mutex_unlock(&g_io_lock); return -EIO; }
+    /* WP-M20: base reads are lock-free (immutable base, delta published atomically) */
+    if (!g_vol) return -EIO;
     sb = vol_sb(g_vol);
     free_blocks = vol_free_blocks_cached(g_vol);
-    pthread_mutex_unlock(&g_io_lock);
     memset(st, 0, sizeof(*st));
     st->f_bsize = INVFS_BLOCK_SIZE;
     st->f_frsize = INVFS_BLOCK_SIZE;

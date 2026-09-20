@@ -23,6 +23,22 @@
 #include <string.h>
 #include <time.h>
 
+/* WP-M20: delta append lock — guards the only writer critical section.
+ * Base reads are lock-free (immutable base pages); delta reads are lock-free
+ * (index published atomically after record bytes written). Only delta append
+ * needs serialization. */
+static pthread_mutex_t g_delta_lock = PTHREAD_MUTEX_INITIALIZER;
+
+void vol_delta_lock(void)
+{
+    pthread_mutex_lock(&g_delta_lock);
+}
+
+void vol_delta_unlock(void)
+{
+    pthread_mutex_unlock(&g_delta_lock);
+}
+
 /* Chain walk guard: a corrupt prev_pba cycle must not loop forever. A log
  * this long (128 GiB) is far past any fold trigger the design intends. */
 /* DELTA_MAX_SEGMENTS is now in vol_delta.h */
@@ -477,11 +493,15 @@ int vol_delta_append(invfs_volume *v, const uint8_t *key, uint16_t klen,
     if (rl > INVFS_DELTA_SEG_BYTES - INVFS_DELTA_SEG_HDR_LEN)
         return -1;   /* single record larger than a segment (TODO: WP-M12) */
 
+    pthread_mutex_lock(&g_delta_lock);
+
     if (v->delta_seg_pba == 0 ||
         v->delta_bump + rl > INVFS_DELTA_SEG_BYTES) {
         uint64_t pba = delta_new_segment(v, v->delta_seg_pba);
-        if (!pba)
+        if (!pba) {
+            pthread_mutex_unlock(&g_delta_lock);
             return -1;
+        }
         /* structure-before-reference: the segment (header + zeroed payload)
          * is durable before RT30 names it as the active segment. */
         v->rt30.delta_pba = pba;
@@ -497,10 +517,14 @@ int vol_delta_append(invfs_volume *v, const uint8_t *key, uint16_t klen,
             v->rt30_present = 1;
             v->rt30.delta_pba = pba;
         }
-        if (mbuf_rt30_store(v) != 0)
+        if (mbuf_rt30_store(v) != 0) {
+            pthread_mutex_unlock(&g_delta_lock);
             return -1;
-        if (vmux_barrier(v, "delta segment publish") < 0)
+        }
+        if (vmux_barrier(v, "delta segment publish") < 0) {
+            pthread_mutex_unlock(&g_delta_lock);
             return -1;
+        }
         v->delta_segments++;
         v->delta_seg_pba = pba;
         v->delta_bump = INVFS_DELTA_SEG_HDR_LEN;
@@ -508,8 +532,10 @@ int vol_delta_append(invfs_volume *v, const uint8_t *key, uint16_t klen,
     }
 
     rec = (uint8_t *)malloc(rl);
-    if (!rec)
+    if (!rec) {
+        pthread_mutex_unlock(&g_delta_lock);
         return -1;
+    }
     dl_wr16be(rec, klen);
     dl_wr16be(rec + 2, vlen);
     dl_wr16be(rec + 4, flags);
@@ -525,19 +551,25 @@ int vol_delta_append(invfs_volume *v, const uint8_t *key, uint16_t klen,
     if (io_seek(&v->io, abs) != 0 ||
         io_write(&v->io, rec, rl) != 0) {
         free(rec);
+        pthread_mutex_unlock(&g_delta_lock);
         return -1;
     }
     free(rec);
     /* The append is the writer's critical section (design §9): make the
      * record durable before it becomes the indexed winner. */
-    if (vmux_barrier(v, "delta append") < 0)
+    if (vmux_barrier(v, "delta append") < 0) {
+        pthread_mutex_unlock(&g_delta_lock);
         return -1;
+    }
 
     seq = ++v->delta_seq;
     /* off is segment-relative: read_value/addressing re-add seg*blocksize. */
     if (di_put(v->delta_index, key, klen, v->delta_seg_pba, v->delta_bump, seq,
-               flags, vlen, &inserted) != 0)
-        return -1;   /* OOM: the record is durable, the index is behind */
+               flags, vlen, &inserted) != 0) {
+        /* OOM: the record is durable, the index is behind */
+        pthread_mutex_unlock(&g_delta_lock);
+        return -1;
+    }
     /* WP-M14: the first live record anchors the age trigger (delta_oldest_seq
      * == 0 means no record has been tracked yet). A coalesced update to an
      * existing key leaves the anchor alone: that key's record is still live,
@@ -553,6 +585,7 @@ int vol_delta_append(invfs_volume *v, const uint8_t *key, uint16_t klen,
     v->delta_bump += rl;
     if (inserted)
         v->delta_records++;
+    pthread_mutex_unlock(&g_delta_lock);
     return 0;
 }
 
@@ -564,11 +597,16 @@ int vol_delta_lookup(invfs_volume *v, const uint8_t *key, uint16_t klen,
 
     if (!v || !key || klen == 0)
         return -1;
-    if (!v->delta_index)
+    pthread_mutex_lock(&g_delta_lock);
+    if (!v->delta_index) {
+        pthread_mutex_unlock(&g_delta_lock);
         return 0;
+    }
     i = di_find(v->delta_index, key, klen);
-    if (i == (size_t)-1)
+    if (i == (size_t)-1) {
+        pthread_mutex_unlock(&g_delta_lock);
         return 0;
+    }
     s = &v->delta_index->slot[i];
     if (out) {
         out->seg = s->seg;
@@ -577,6 +615,7 @@ int vol_delta_lookup(invfs_volume *v, const uint8_t *key, uint16_t klen,
         out->flags = s->flags;
         out->vlen = s->vlen;
     }
+    pthread_mutex_unlock(&g_delta_lock);
     return 1;
 }
 
