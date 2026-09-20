@@ -18,11 +18,14 @@ B=$REPO/bin
 WORK=/dev/shm/metav3
 IMG=metav3.img
 MNT=$WORK/mnt
-rm -rf "$WORK" && mkdir -p "$MNT"
+rm -rf "$WORK" && mkdir -p "$MNT" "$WORK/ref"
 cd /dev/shm
 rm -f "$IMG"
 
 fail() { echo "FAIL: $*" >&2; exit 1; }
+
+fsck_ok() { $B/invf-fsck "$1" 2>&1 | grep -q "^OK$" \
+    || { $B/invf-fsck "$1" 2>&1; fail "fsck not clean: $1"; }; }
 
 mnt_up() {
     $B/invf-fuse "$IMG" "$MNT" 2>"$WORK/fuse.log"
@@ -113,4 +116,53 @@ echo "$FSCK" | grep -q "format:       v3" \
     || { echo "$FSCK"; fail "fsck did not report v3"; }
 
 echo "leg 0 OK: v3 skeleton round-trips (mkfs -> mount -> empty -> clean -> fsck)"
+
+echo
+echo "== leg 1: mount replay (write -> unmount -> remount -> verify) =="
+
+# Re-use the same IMG but first re-mkfs to get a fresh v3 volume
+rm -f "$IMG"
+INVFS_V3=1 $B/invf-mkfs "$IMG" 0.2 >"$WORK/mkfs2.log" 2>&1 \
+    || { cat "$WORK/mkfs2.log"; fail "INVFS_V3=1 mkfs failed"; }
+
+mnt_up
+# Write files through the v3 mount
+echo "hello v3 world" > "$MNT/test.txt"
+mkdir -p "$MNT/subdir"
+echo "content in subdir" > "$MNT/subdir/file.txt"
+head -c 102400 /dev/urandom > "$WORK/ref/random.bin"
+cp "$WORK/ref/random.bin" "$MNT/random.bin"
+# Capture checksums before unmount
+SHA1=$(sha256sum "$MNT/test.txt" | awk '{print $1}')
+SHA2=$(sha256sum "$MNT/subdir/file.txt" | awk '{print $1}')
+SHA3=$(sha256sum "$MNT/random.bin" | awk '{print $1}')
+echo "  pre-unmount: test.txt sha=$SHA1"
+echo "  pre-unmount: subdir/file.txt sha=$SHA2"
+echo "  pre-unmount: random.bin sha=$SHA3"
+mnt_down
+
+# Remount and verify files are still correct (delta replay test)
+mnt_up
+SHA1B=$(sha256sum "$MNT/test.txt" | awk '{print $1}')
+SHA2B=$(sha256sum "$MNT/subdir/file.txt" | awk '{print $1}')
+SHA3B=$(sha256sum "$MNT/random.bin" | awk '{print $1}')
+echo "  post-remount: test.txt sha=$SHA1B"
+echo "  post-remount: subdir/file.txt sha=$SHA2B"
+echo "  post-remount: random.bin sha=$SHA3B"
+[ "$SHA1" = "$SHA1B" ] || fail "test.txt checksum mismatch after remount"
+[ "$SHA2" = "$SHA2B" ] || fail "subdir/file.txt checksum mismatch after remount"
+[ "$SHA3" = "$SHA3B" ] || fail "random.bin checksum mismatch after remount"
+
+# Verify directory structure is intact
+[ -d "$MNT/subdir" ] || fail "subdir disappeared after remount"
+LS_OUT=$(ls -la "$MNT")
+echo "  remounted root: $LS_OUT"
+mnt_down
+
+# fsck clean after mount-replay cycle
+fsck_out=$($B/invf-fsck "$IMG" 2>&1) || { echo "$fsck_out"; fail "fsck failed after remount"; }
+echo "$fsck_out" | grep -q "^OK$" || { echo "$fsck_out"; fail "fsck not OK after remount"; }
+
+echo "leg 1 OK: delta replay survives mount cycle (write -> remount -> bit-exact)"
+
 echo "ALL META-V3 LEGS PASS"
