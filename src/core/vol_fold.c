@@ -56,6 +56,7 @@
 #include "vol_btree.h"
 #include "vol_delta.h"
 #include "vol_metabuf.h"
+#include "vol_reclaim.h"
 
 #include <stddef.h>
 #include <stdint.h>
@@ -264,11 +265,11 @@ static int fold_persist_bitmap(invfs_volume *v)
 static void fold_reclaim_hook(invfs_volume *v, invfs_blkptr old_root,
                               invfs_blkptr new_root)
 {
-    (void)v;
-    (void)old_root;
-    (void)new_root;
-    /* TODO(WP-M15): reachability diff old_root \ (new_root + pinned root)
-     * via btree_reclaim, plus the retired delta segments. */
+    /* wait for in-flight readers (g_fold_epoch drain) */
+    (void)vol_reclaim_drain(v);
+    /* reachability diff: free base pages in old_root not reachable from
+     * new_root or the pinned save-point root */
+    (void)vol_reclaim_mark_and_free(v, old_root, new_root, v->pinned_root);
 }
 
 /* Reset the recent tier to empty: an empty index and RT30 no longer naming a
@@ -420,9 +421,15 @@ int vol_v3_fold(invfs_volume *v)
     /* (3) reset the delta only after the new base is durable and named. A
      * failure here leaves base+delta both carrying the keys, which replay
      * resolves idempotently; a later fold_request retries. */
+    uint64_t old_delta_pba = v->rt30.delta_pba;
     if (fold_delta_reset(v) != 0)
         failed_reset = 1;
 
+    /* WP-M15: free superseded delta segments (saved before reset cleared them) */
+    (void)vol_reclaim_delta_segments(v, old_delta_pba, 0);
+
+    /* WP-M15: bump epoch for reader drain, then reclaim base pages */
+    (void)vol_reclaim_bump_epoch();
     fold_reclaim_hook(v, old_root, root);
     fold_list_free(&list);
     return failed_reset ? -1 : 0;
