@@ -23,7 +23,7 @@
 set -e
 set -o pipefail
 
-REPO=${REPO:-/home/user/InvariantFS}   # override with the worktree when testing a branch
+REPO="${REPO:-$(cd "$(dirname "$0")/.." && pwd)}"   # WP71: was a hardcoded author-machine path
 B=$REPO/bin
 WORK=/dev/shm/l2q
 IMG=l2q_stress.img
