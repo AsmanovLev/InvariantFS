@@ -162,9 +162,13 @@ int main(int argc, char **argv)
     uint64_t size2_bytes = 0, dev0_blocks = 0, dev1_blocks = 0;
     int is_dev2 = 0, twodev = 0;
     invfs_devt devt;
-    /* WP-M1: INVFS_V3=1 selects the metadata-v3 on-disk skeleton (RT30 root
-     * descriptor + zeroed root area). Default stays byte-identical v2. */
-    int v3 = 0;
+    /* WP-M21b (cutover, per the WP-M21 frozen rule "after this WP mkfs
+     * writes v3 by default"): metadata-v3 (RT30 root descriptor + B+-tree
+     * base + delta log) is the DEFAULT format. The v2 skeleton stays
+     * reachable via INVFS_V2=1 only as the interim escape hatch for the
+     * not-yet-rewritten v2-era suites; it dies with the WP-M21 deletion
+     * of the v2 branch. INVFS_V3=1 is still accepted (idempotent). */
+    int v3 = 1;
 
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) {
@@ -198,8 +202,12 @@ int main(int argc, char **argv)
     }
     twodev = (argc == 5);
     {
+        const char *v2e = getenv("INVFS_V2");
+        if (v2e && *v2e && strcmp(v2e, "0") != 0)
+            v3 = 0;   /* interim escape hatch until the v2 branch is deleted */
         const char *v3e = getenv("INVFS_V3");
-        v3 = (v3e && *v3e && strcmp(v3e, "0") != 0);
+        if (v3e && *v3e && strcmp(v3e, "0") == 0)
+            v3 = 0;   /* explicit INVFS_V3=0 also honored */
     }
     path = blkio_normalize(argv[1], devbuf, sizeof devbuf);
     is_dev = blkio_looks_like_device(path);

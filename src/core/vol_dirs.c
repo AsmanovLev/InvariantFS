@@ -840,10 +840,10 @@ uint64_t vol_replace_file(invfs_volume *v, const char *name,
     uint64_t old_id, nid;
 
     /* WP-M6: a v3 namespace node is the dirent tree + inode row. Content
-     * (recipe blobs) is WP-M8, so only the empty create/replace case is
-     * supported; a data write is refused, not silently stored as v2. */
+     * goes through the WP-M9 session path (WP-M21b glue). */
     if (v->sb.vol_flags & VOLF_V3)
-        return (data && len) ? 0 : vol_v3_create_node(v, name, NULL);
+        return (data && len) ? vol_v3_write_bulk(v, name, data, len, NULL)
+                             : vol_v3_create_node(v, name, NULL);
     if (v->sb.vol_flags & VOLF_READONLY) return 0;   /* EROFS */
     old_id = vol_find(v, name);
     /* WP19: write-heat is the one counter a rewrite must NOT reset --
@@ -887,7 +887,8 @@ uint64_t vol_replace_file_with_meta(invfs_volume *v, const char *name,
     uint64_t old_id, nid;
 
     if (v->sb.vol_flags & VOLF_V3)
-        return (data && len) ? 0 : vol_v3_create_node(v, name, meta);
+        return (data && len) ? vol_v3_write_bulk(v, name, data, len, meta)
+                             : vol_v3_create_node(v, name, meta);
     if (v->sb.vol_flags & VOLF_READONLY) return 0;
     old_id = vol_find(v, name);
     {

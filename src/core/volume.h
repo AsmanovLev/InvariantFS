@@ -290,6 +290,11 @@ uint64_t vol_v3_create_content_node(invfs_volume *v, const char *name,
                                     const uint8_t recipe_addr[INVFS_V3_RECIPE_ADDR_LEN]);
 uint64_t vol_v3_set_meta(invfs_volume *v, const char *name,
                          const invfs_meta_pub *meta);
+/* WP-M21b: bulk content write on v3 through the WP-M9 session path (the
+ * offline CLI glue; node-first then begin/range/commit). id or 0. */
+uint64_t vol_v3_write_bulk(invfs_volume *v, const char *name,
+                           const uint8_t *data, size_t len,
+                           const invfs_meta_pub *meta);
 uint64_t vol_v3_mkdir(invfs_volume *v, const char *name);
 int vol_v3_rmdir(invfs_volume *v, const char *name);
 int vol_v3_unlink(invfs_volume *v, const char *name);

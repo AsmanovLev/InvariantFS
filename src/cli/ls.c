@@ -118,6 +118,75 @@ int main(int argc, char **argv)
     }
     sb = vol_sb(vol);
     (void)sb;
+
+    /* WP-M21b: on a v3 volume there is no v2 record stream to scan -- the
+     * namespace IS the dirent tree. Walk it recursively (vol_list_dir is
+     * v3-aware via vol_v3_path_list_dir) and keep the listing contract
+     * byte-shaped as before: "  %8llu bytes  inode %llu  %s" per live
+     * name, directory anchors as "0 bytes ... name/", and the live count
+     * as the final "N file(s)" line. Container-member lines are v2-AST
+     * machinery (vol_get_children); on v3 they are omitted until the
+     * recipe-blob member listing lands. */
+    if (sb->vol_flags & VOLF_V3) {
+        struct ls3_stack { char path[INVFS_MAX_NAME + 2]; } *st = NULL;
+        size_t st_n = 0, st_cap = 0;
+        uint64_t live = 0;
+        printf("files in %s:\n", img);
+        /* seed with the root */
+        st_cap = 16;
+        st = (struct ls3_stack *)malloc(st_cap * sizeof *st);
+        if (!st) { vol_close(vol); return 1; }
+        st[0].path[0] = 0;
+        st_n = 1;
+        while (st_n) {
+            char dir[INVFS_MAX_NAME + 2];
+            invfs_dirent *ents;
+            int n;
+            snprintf(dir, sizeof dir, "%s", st[--st_n].path);
+            ents = (invfs_dirent *)calloc(4096, sizeof *ents);
+            if (!ents) { free(st); vol_close(vol); return 1; }
+            n = vol_list_dir(vol, dir, ents, 4096);
+            if (n < 0) n = 0;
+            if (n == 4096)
+                fprintf(stderr, "warning: %s%s truncated at 4096 entries\n",
+                        dir, dir[0] ? "/" : "");
+            for (int i = 0; i < n; i++) {
+                char full[INVFS_MAX_NAME + 2];
+                if (dir[0])
+                    snprintf(full, sizeof full, "%s/%s", dir, ents[i].name);
+                else
+                    snprintf(full, sizeof full, "%s", ents[i].name);
+                if (ents[i].is_dir) {
+                    uint64_t id = vol_find(vol, full);
+                    printf("  %8llu bytes  inode %llu  %s/\n",
+                           0ull, (unsigned long long)id, full);
+                    /* push the subdir */
+                    if (st_n == st_cap) {
+                        size_t nc = st_cap * 2;
+                        void *ns = realloc(st, nc * sizeof *st);
+                        if (!ns) break;
+                        st = (struct ls3_stack *)ns;
+                        st_cap = nc;
+                    }
+                    snprintf(st[st_n].path, sizeof st[st_n].path, "%s", full);
+                    st_n++;
+                } else {
+                    uint64_t id = vol_find(vol, full);
+                    if (!id) continue;   /* raced away / shadowed */
+                    printf("  %8llu bytes  inode %llu  %s\n",
+                           (unsigned long long)ents[i].size,
+                           (unsigned long long)id, full);
+                    live++;
+                }
+            }
+            free(ents);
+        }
+        free(st);
+        printf("%llu file(s)\n", (unsigned long long)live);
+        vol_close(vol);
+        return 0;
+    }
+
     inode_area_start = vol_inode_area_start(vol);  /* WP30: respects active extent */
     inode_area_end = vol_inode_area_pos(vol);      /* CRC-validated extent */
     p = inode_area_start;

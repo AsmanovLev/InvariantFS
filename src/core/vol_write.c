@@ -1055,3 +1055,59 @@ void vol_write_abort(invfs_wsession *ws)
     free(s->old_pbas);
     free(s);
 }
+
+
+/* WP-M21b: bulk content write on a v3 volume through the WP-M9 session
+ * path. This is the missing glue between the offline CLI tools (invf-cp,
+ * invf-import -- they call the whole-buffer vol_create_file/replace_file
+ * family) and the v3 metadata model: the WP-M6 stubs answered 0 for
+ * "content on v3", so every offline write failed with a misleading
+ * "write failed (volume full?)". Order mirrors the FUSE create+write
+ * pattern the M9 legs exercised: node first (dirent + inode row), then
+ * the streaming session (begin/range/commit). meta, when given, is
+ * applied after the commit (the row rewrite is a delta append; commit
+ * carries the created row's fields, set_meta is the authoritative
+ * last word for mode/uid/gid/times). Returns the live inode id or 0. */
+uint64_t vol_v3_write_bulk(invfs_volume *v, const char *name,
+                           const uint8_t *data, size_t len,
+                           const invfs_meta_pub *meta)
+{
+    invfs_wsession *ws = NULL;
+    uint64_t nid;
+    int rc;
+
+    if (!v || !name || !(v->sb.vol_flags & VOLF_V3)) return 0;
+    if (len > MAX_FILE_SIZE) {
+        fprintf(stderr, "invarifs: %s: %llu bytes exceeds the format "
+                "limit (%llu bytes)\n", name, (unsigned long long)len,
+                (unsigned long long)MAX_FILE_SIZE);
+        return 0;
+    }
+    if (!vol_write_enabled(v)) {
+        fprintf(stderr, "invarifs: volume is read-only%s -- write refused "
+                "(EROFS)\n", v->degraded ? " (DEGRADED)" : "");
+        return 0;
+    }
+    nid = vol_find(v, name);
+    if (!nid) {
+        nid = vol_v3_create_node(v, name, meta);
+        if (!nid) return 0;
+    }
+    if (vol_write_begin(v, name, 1, &ws) == 0 || !ws)
+        return 0;
+    rc = len ? vol_write_range(ws, 0, data, len) : 0;
+    if (rc != 0) {
+        fprintf(stderr, "invarifs: %s: v3 write session failed (rc=%d%s)\n",
+                name, rc, rc == -2 ? ", ENOSPC" : "");
+        vol_write_abort(ws);
+        return 0;
+    }
+    if (vol_write_commit(ws) != 0) {
+        vol_write_abort(ws);
+        return 0;
+    }
+    if (meta && vol_v3_set_meta(v, name, meta) == 0)
+        fprintf(stderr, "invarifs: %s: warning: metadata apply failed "
+                "(content is committed)\n", name);
+    return vol_find(v, name);
+}
