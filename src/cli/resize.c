@@ -430,6 +430,7 @@ int main(int argc, char **argv)
     uint8_t *bitmap = NULL, *buf = NULL, *blk = NULL;
     uint64_t want_bytes, old_total, new_total;
     uint64_t bm_old, bm_new, js_old, is_old, iend_old, meta_blocks;
+    uint64_t map_old = 0, map_new = 0, m_bytes = 0, new_mapper_pba = 0;
     uint64_t new_js, new_is, new_iend;
     uint64_t j_used = 0, i_used = 0, anomalies = 0;
     uint64_t j_src = 0;             /* active slot base when slotted */
@@ -613,7 +614,13 @@ int main(int argc, char **argv)
     old_total = sb.total_blocks;
     meta_blocks = sb.metadata_zone_blocks;
     bm_old = bm_blocks(old_total);
-    js_old = sb.metadata_zone_start + bm_old;
+    /* WP71: on a mapper volume (sb.meta_mapper_pba != 0) the mkfs layout is
+     * [sb][bitmap][mapper table: INVFS_META_EXT_BLOCKS][journal][inode area]
+     * -- the pre-WP71 formulas skipped the mapper slot, scanned the mapper
+     * table as the journal head and then relocated the journal ON TOP of the
+     * mapper, destroying the namespace on grow. */
+    map_old = sb.meta_mapper_pba ? INVFS_META_EXT_BLOCKS : 0;
+    js_old = sb.metadata_zone_start + bm_old + map_old;
     is_old = js_old + INVFS_JOURNAL_BLOCKS;
     iend_old = sb.metadata_zone_start + meta_blocks;   /* blocks */
 
@@ -767,7 +774,13 @@ int main(int argc, char **argv)
         goto fail;
     }
     bm_new = bm_blocks(new_total);
-    new_js = sb.metadata_zone_start + bm_new;
+    /* WP71: the mapper slot moves with the bitmap growth; the mapper table
+     * itself is staged and re-landed by the apply (m_bytes component). */
+    map_new = sb.meta_mapper_pba ? INVFS_META_EXT_BLOCKS : 0;
+    new_mapper_pba = sb.meta_mapper_pba
+                   ? sb.metadata_zone_start + bm_new : 0;
+    m_bytes = map_new * (uint64_t)INVFS_BLOCK_SIZE;
+    new_js = sb.metadata_zone_start + bm_new + map_new;
     new_is = new_js + INVFS_JOURNAL_BLOCKS;
     new_iend = iend_old;   /* the metadata zone's block count does not move */
 
@@ -836,11 +849,54 @@ int main(int argc, char **argv)
                 blocked++;
             }
         if (blocked) {
-            fprintf(stderr, "invf-resize: %s: cannot shrink to %llu blocks: "
-                    "%llu live block(s) at/above the new boundary (first at "
-                    "block %llu)\n  no compaction in v1 -- free the tail "
-                    "(delete files, then invf-sweep + invf-fsck -f) and "
-                    "retry\n",
+            /* WP71: tell live DATA apart from live METADATA-EXTENT blocks.
+             * Mapper extents are allocated from the shadow zone and can
+             * legitimately pin the tail; relocating records across extents
+             * (with position-kill re-anchoring) is the extent-GC work
+             * package, not v1 shrink -- so refuse with the exact reason. */
+            uint64_t meta_blocked = 0;
+            if (sb.meta_mapper_pba) {
+                uint64_t *mt = (uint64_t *)malloc(INVFS_META_EXT_ENTRIES *
+                                                  sizeof *mt);
+                if (mt &&
+                    blkio_pread(&io,
+                                sb.meta_mapper_pba *
+                                    (uint64_t)INVFS_BLOCK_SIZE,
+                                mt, INVFS_META_EXT_ENTRIES * sizeof *mt) == 0) {
+                    uint64_t k;
+                    for (k = 0; k < INVFS_META_EXT_ENTRIES; k++) {
+                        uint64_t ep = invfs_meta_ext_pba(mt[k]);
+                        uint64_t eend, b, from;
+                        if (!ep) continue;
+                        eend = ep + invfs_meta_ext_size(mt[k]) /
+                                        INVFS_BLOCK_SIZE;
+                        from = ep > new_total ? ep : new_total;
+                        for (b = from; b < eend && b < old_total; b++)
+                            meta_blocked++;
+                    }
+                }
+                free(mt);
+            }
+            if (meta_blocked)
+                fprintf(stderr, "invf-resize: %s: cannot shrink to %llu "
+                        "blocks: %llu live block(s) at/above the new "
+                        "boundary (first at block %llu), %llu of them "
+                        "metadata-extent blocks\n  no compaction in v1 -- "
+                        "metadata extents are not relocatable yet (extent "
+                        "GC is a separate work package) -- grow instead, or "
+                        "free the tail (delete files, then invf-sweep + "
+                        "invf-fsck -f) and retry; a metadata-extent tail "
+                        "will keep refusing until extent relocation lands\n",
+                        path, (unsigned long long)new_total,
+                        (unsigned long long)blocked,
+                        (unsigned long long)first_bad,
+                        (unsigned long long)meta_blocked);
+            else
+                fprintf(stderr, "invf-resize: %s: cannot shrink to %llu "
+                        "blocks: %llu live block(s) at/above the new "
+                        "boundary (first at block %llu)\n  no compaction in "
+                        "v1 -- free the tail (delete files, then invf-sweep "
+                        "+ invf-fsck -f) and retry\n",
                     path, (unsigned long long)new_total,
                     (unsigned long long)blocked,
                     (unsigned long long)first_bad);
@@ -849,7 +905,7 @@ int main(int argc, char **argv)
     }
 
     /* ---- staging location ---- */
-    payload = bm_old * (uint64_t)INVFS_BLOCK_SIZE + j_used + i_used;
+    payload = bm_old * (uint64_t)INVFS_BLOCK_SIZE + j_used + i_used + m_bytes;
     stage_blocks = 1 + div_ceil(payload, INVFS_BLOCK_SIZE);
     if (grow && stage_blocks <= new_total - old_total) {
         stage_start = old_total;   /* the grown tail: free by construction */
@@ -878,10 +934,11 @@ int main(int argc, char **argv)
            (unsigned long long)(old_total * INVFS_BLOCK_SIZE),
            (unsigned long long)(new_total * INVFS_BLOCK_SIZE),
            (unsigned long long)old_total, (unsigned long long)new_total);
-    printf("  metadata payload: bitmap %llu + journal %llu + inode %llu = "
-           "%llu bytes\n",
+    printf("  metadata payload: bitmap %llu + journal %llu + inode %llu + "
+           "mapper %llu = %llu bytes\n",
            (unsigned long long)(bm_old * (uint64_t)INVFS_BLOCK_SIZE),
            (unsigned long long)j_used, (unsigned long long)i_used,
+           (unsigned long long)m_bytes,
            (unsigned long long)payload);
     printf("  staging: %llu blocks at %llu%s\n",
            (unsigned long long)stage_blocks, (unsigned long long)stage_start,
@@ -927,13 +984,22 @@ int main(int argc, char **argv)
             fprintf(stderr, "invf-resize: staging write failed (inodes)\n");
             goto fail;
         }
+        off += i_used;
+        /* WP71: the mapper table is the fourth payload component */
+        if (m_bytes &&
+            copy_crc2(&rz2, sb.meta_mapper_pba * (uint64_t)INVFS_BLOCK_SIZE,
+                      off, m_bytes, buf, &pcrc) != 0) {
+            fprintf(stderr, "invf-resize: staging write failed (mapper)\n");
+            goto fail;
+        }
 
         memset(blk, 0, INVFS_BLOCK_SIZE);
         memcpy(sh.magic, "RSZS", 4);
-        sh.version = 1;
+        sh.version = 2;
         sh.bm_bytes = bm_old * (uint64_t)INVFS_BLOCK_SIZE;
         sh.j_bytes = j_used;
         sh.i_bytes = i_used;
+        sh.m_bytes = m_bytes;
         sh.payload_crc = pcrc;
         sh.crc32c = 0;
         sh.crc32c = invfs_crc32c(&sh, sizeof sh);
@@ -993,6 +1059,8 @@ int main(int argc, char **argv)
     nsb.total_blocks = new_total;
     /* zone boundaries do not move; the shadow zone absorbs the delta */
     nsb.shadow_zone_blocks = new_total - nsb.shadow_zone_start;
+    /* WP71: the mapper table follows the bitmap growth */
+    nsb.meta_mapper_pba = new_mapper_pba;
     /* the ENOSPC policy scales with the volume (mkfs's formulas) */
     nsb.reserved_blocks = (uint32_t)(new_total / 128 + 64);
     nsb.hard_min_blocks = (uint32_t)(new_total / 1024 + 16);
@@ -1013,13 +1081,15 @@ int main(int argc, char **argv)
     }
     memset(&rz, 0, sizeof rz);
     memcpy(rz.magic, "RSZ0", 4);
-    rz.version = 1;
+    rz.version = 2;
     rz.stage_start = stage_start;
     rz.stage_blocks = stage_blocks;
     rz.bm_bytes = bm_old * (uint64_t)INVFS_BLOCK_SIZE;
     rz.j_bytes = j_used;
     rz.i_bytes = i_used;
     rz.old_total = old_total;
+    rz.m_bytes = m_bytes;
+    rz.new_mapper_pba = new_mapper_pba;
     rz.new_sb = nsb;
     rz.crc32c = 0;
     {

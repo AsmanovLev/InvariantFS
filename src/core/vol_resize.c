@@ -9,7 +9,8 @@
  * bitmap grows into the journal's head whenever total_blocks crosses a
  * 32768-block boundary, so the post-resize locations overlap the metadata
  * they replace. The tool therefore stages the whole payload (bitmap + used
- * journal + used inode records) in a collision-free region, arms RSZ0 and
+ * journal + used inode records + WP71: the mapper table) in a
+ * collision-free region, arms RSZ0 and
  * flips the superblock to RECOVERY -- and the apply runs HERE, at the next
  * open, whether that open is the tool's own or any later one after a crash.
  * The apply reads only the staging area, so re-entering it after a crash
@@ -32,8 +33,15 @@ uint32_t rsz0_crc(const invfs_rsz0 *rz)
 int rsz0_sane(invfs_volume *v, const invfs_rsz0 *rz)
 {
     const invfs_superblock *n = &rz->new_sb;
-    uint64_t payload;
-    if (rz->version != 1) return 0;
+    uint64_t payload, m_bytes;
+    if (rz->version != 1 && rz->version != 2) return 0;
+    /* WP71: a v1 descriptor was staged by a pre-mapper-aware binary whose
+     * layout math skipped the mapper slot; applying it to a mapper volume
+     * would relocate the journal on top of the mapper table and destroy the
+     * namespace. Never apply v1 to a mapper volume -- leave it ignored (the
+     * RECOVERY path below keeps the volume read-only for invf-fsck -f). */
+    if (rz->version == 1 && v->sb.meta_mapper_pba != 0) return 0;
+    m_bytes = rz->version >= 2 ? rz->m_bytes : 0;
     if (memcmp(n->magic, INVFS_MAGIC, 8) != 0) return 0;
     if (invfs_crc32c(n, offsetof(invfs_superblock, checksum)) != n->checksum)
         return 0;
@@ -55,10 +63,27 @@ int rsz0_sane(invfs_volume *v, const invfs_rsz0 *rz)
     if (n->shadow_zone_start + n->shadow_zone_blocks != n->total_blocks)
         return 0;
     if (n->total_blocks == rz->old_total) return 0;   /* not a resize */
-    payload = rz->bm_bytes + rz->j_bytes + rz->i_bytes;
+    payload = rz->bm_bytes + rz->j_bytes + rz->i_bytes + m_bytes;
     if (!rz->stage_blocks ||
         payload > (rz->stage_blocks - 1) * (uint64_t)INVFS_BLOCK_SIZE)
         return 0;
+    /* WP71: a mapper volume's descriptor must carry the mapper component,
+     * and its destination must be the new post-bitmap slot; a legacy
+     * volume's must not. */
+    if (rz->version >= 2) {
+        int want_mapper = n->meta_mapper_pba != 0;
+        if (want_mapper) {
+            uint64_t bm_new = (n->total_blocks / 8 + INVFS_BLOCK_SIZE - 1) /
+                              INVFS_BLOCK_SIZE;
+            if (m_bytes != INVFS_META_EXT_BLOCKS * (uint64_t)INVFS_BLOCK_SIZE)
+                return 0;
+            if (n->meta_mapper_pba != n->metadata_zone_start + bm_new)
+                return 0;
+            if (rz->new_mapper_pba != n->meta_mapper_pba) return 0;
+        } else if (m_bytes != 0 || rz->new_mapper_pba != 0) {
+            return 0;
+        }
+    }
     return 1;
 }
 
@@ -87,9 +112,15 @@ int vol_rsz0_apply(invfs_volume *v, const invfs_rsz0 *rz)
                       INVFS_BLOCK_SIZE;
     uint64_t new_bm = (nsb->total_blocks / 8 + INVFS_BLOCK_SIZE - 1) /
                       INVFS_BLOCK_SIZE;
-    uint64_t new_js = nsb->metadata_zone_start + new_bm;
+    /* WP71: the mapper slot sits between the bitmap and the journal on a
+     * mapper volume (mkfs layout); legacy volumes keep the old adjacency. */
+    uint64_t map_old = v->sb.meta_mapper_pba ? INVFS_META_EXT_BLOCKS : 0;
+    uint64_t map_new = nsb->meta_mapper_pba ? INVFS_META_EXT_BLOCKS : 0;
+    uint64_t m_bytes = rz->version >= 2 ? rz->m_bytes : 0;
+    uint64_t new_js = nsb->metadata_zone_start + new_bm + map_new;
     uint64_t new_is = new_js + INVFS_JOURNAL_BLOCKS;
-    uint64_t old_is = v->sb.metadata_zone_start + old_bm + INVFS_JOURNAL_BLOCKS;
+    uint64_t old_is = v->sb.metadata_zone_start + old_bm + map_old +
+                      INVFS_JOURNAL_BLOCKS;
     int64_t rec_delta = ((int64_t)new_is - (int64_t)old_is) * INVFS_BLOCK_SIZE;
     uint64_t new_iend = (nsb->metadata_zone_start + nsb->metadata_zone_blocks)
                         * (uint64_t)INVFS_BLOCK_SIZE;
@@ -112,19 +143,44 @@ int vol_rsz0_apply(invfs_volume *v, const invfs_rsz0 *rz)
         if (io_seek(&v->io, rz->stage_start * (uint64_t)INVFS_BLOCK_SIZE) != 0 ||
             io_read(&v->io, buf, INVFS_BLOCK_SIZE) != 0)
             goto out;
-        memcpy(&sh, buf, sizeof sh);
-        if (memcmp(sh.magic, "RSZS", 4) != 0 || sh.version != 1 ||
-            sh.bm_bytes != rz->bm_bytes || sh.j_bytes != rz->j_bytes ||
-            sh.i_bytes != rz->i_bytes)
-            goto out;
-        {
-            invfs_rszs t = sh;
-            uint32_t want = sh.crc32c;
-            t.crc32c = 0;
-            if (invfs_crc32c(&t, sizeof t) != want)
+        memset(&sh, 0, sizeof sh);
+        if (rz->version == 1) {
+            /* legacy 40-byte header: [magic4][ver4][bm8][j8][i8][pcrc4][crc4]
+             * -- parse positionally, never through the v2 struct. The v1
+             * CRC covered all 40 bytes with the crc field zeroed. */
+            const uint8_t *hb = buf;
+            uint8_t v1h[40];
+            uint32_t v1_crc_want, v1_crc_calc;
+            if (memcmp(hb, "RSZS", 4) != 0) goto out;
+            memcpy(&sh.magic, hb, 4);
+            sh.version = 1;
+            memcpy(&sh.bm_bytes, hb + 8, 8);
+            memcpy(&sh.j_bytes,  hb + 16, 8);
+            memcpy(&sh.i_bytes,  hb + 24, 8);
+            memcpy(&sh.payload_crc, hb + 32, 4);
+            memcpy(&v1_crc_want, hb + 36, 4);
+            sh.m_bytes = 0;
+            sh.crc32c = v1_crc_want;
+            memcpy(v1h, hb, 40);
+            memset(v1h + 36, 0, 4);
+            v1_crc_calc = invfs_crc32c(v1h, 40);
+            if (v1_crc_calc != v1_crc_want) goto out;
+        } else {
+            memcpy(&sh, buf, sizeof sh);
+            if (memcmp(sh.magic, "RSZS", 4) != 0 || sh.version != 2)
                 goto out;
+            {
+                invfs_rszs t = sh;
+                uint32_t want = sh.crc32c;
+                t.crc32c = 0;
+                if (invfs_crc32c(&t, sizeof t) != want)
+                    goto out;
+            }
         }
-        left = rz->bm_bytes + rz->j_bytes + rz->i_bytes;
+        if (sh.bm_bytes != rz->bm_bytes || sh.j_bytes != rz->j_bytes ||
+            sh.i_bytes != rz->i_bytes || sh.m_bytes != m_bytes)
+            goto out;
+        left = rz->bm_bytes + rz->j_bytes + rz->i_bytes + m_bytes;
         off = sbase;
         while (left) {
             size_t n = left > BLKIO_BOUNCE ? BLKIO_BOUNCE : (size_t)left;
@@ -167,6 +223,28 @@ int vol_rsz0_apply(invfs_volume *v, const invfs_rsz0 *rz)
         if (io_seek(&v->io, nsb->metadata_zone_start * (uint64_t)INVFS_BLOCK_SIZE) != 0 ||
             io_write(&v->io, bm, (size_t)new_bm_bytes) != 0)
             goto out;
+    }
+
+    /* -- WP71: mapper table -- staged bytes verbatim at the new slot
+     *    (metadata_zone_start + new bitmap blocks). Must land BEFORE the
+     *    journal: the journal's new base sits right past the mapper slot,
+     *    and the pre-WP71 bug was exactly this overlap destroying the
+     *    table. Entries are absolute pbas; a single-device grow/shrink
+     *    never moves data-zone blocks, so the table stays valid as-is. -- */
+    if (m_bytes) {
+        uint64_t left = m_bytes;
+        uint64_t off = sbase + rz->bm_bytes + rz->j_bytes + rz->i_bytes;
+        uint64_t dst = nsb->meta_mapper_pba * (uint64_t)INVFS_BLOCK_SIZE;
+        if (nsb->meta_mapper_pba == 0) goto out;   /* descriptor inconsistency */
+        while (left) {
+            size_t n = left > BLKIO_BOUNCE ? BLKIO_BOUNCE : (size_t)left;
+            if (io_seek(&v->io, off) != 0 || io_read(&v->io, buf, n) != 0 ||
+                io_seek(&v->io, dst) != 0 || io_write(&v->io, buf, n) != 0)
+                goto out;
+            off += n;
+            dst += n;
+            left -= n;
+        }
     }
 
     /* -- journal: staged bytes verbatim, then a fresh terminator (the

@@ -313,16 +313,23 @@ typedef struct {
  * block-0 rewrite) is the last write.
  *
  *   0x140  char magic[4]             "RSZ0"
- *   0x144  u32 version               1
+ *   0x144  u32 version               2 (WP71; v1 = no mapper fields, only
+ *                                    valid on pre-mapper legacy volumes)
  *   0x148  u64 stage_start           first staging block
  *   0x150  u64 stage_blocks          staging span, blocks
  *   0x158  u64 bm_bytes              staged bitmap bytes
  *   0x160  u64 j_bytes               staged journal bytes
  *   0x168  u64 i_bytes               staged inode-area bytes
  *   0x170  u64 old_total             pre-resize total_blocks (sanity)
- *   0x178  invfs_superblock new_sb   the post-resize superblock image
- *   0x208  u32 crc32c                over the descriptor with this field 0
- * 204 bytes total (0x140..0x20C); the rest of block 0 stays reserved-zero. */
+ *   0x178  u64 m_bytes               WP71: staged mapper-table bytes
+ *                                    (INVFS_META_EXT_BLOCKS * 4096 on a
+ *                                    mapper volume, 0 on a legacy one)
+ *   0x180  u64 new_mapper_pba        WP71: post-resize mapper-table pba
+ *                                    (= metadata_zone_start + new bitmap
+ *                                    blocks; 0 = no mapper)
+ *   0x188  invfs_superblock new_sb   the post-resize superblock image
+ *   0x218  u32 crc32c                over the descriptor with this field 0
+ * 220 bytes total (0x140..0x21C); the rest of block 0 stays reserved-zero. */
 #define INVFS_RSZ0_OFF 0x140
 #pragma pack(push, 1)
 typedef struct {
@@ -334,25 +341,29 @@ typedef struct {
     uint64_t j_bytes;           /* 0x160 */
     uint64_t i_bytes;           /* 0x168 */
     uint64_t old_total;         /* 0x170 */
-    invfs_superblock new_sb;    /* 0x178 */
-    uint32_t crc32c;            /* 0x208 */
-} invfs_rsz0;                   /* 0x140 + 204 bytes -> ends 0x20C */
+    uint64_t m_bytes;           /* 0x178 WP71: mapper-table component */
+    uint64_t new_mapper_pba;    /* 0x180 WP71: mapper destination pba */
+    invfs_superblock new_sb;    /* 0x188 */
+    uint32_t crc32c;            /* 0x218 */
+} invfs_rsz0;                   /* 0x140 + 220 bytes -> ends 0x21C */
 #pragma pack(pop)
 
 /* The staging area's own header, one block at stage_start. The payload
  * follows contiguously: bm_bytes of bitmap, then j_bytes of journal, then
- * i_bytes of inode-area records. payload_crc covers exactly those
- * bm+j+i bytes; the descriptor cross-checks the three lengths. */
+ * i_bytes of inode-area records, then m_bytes of mapper table (WP71).
+ * payload_crc covers exactly those bm+j+i+m bytes; the descriptor
+ * cross-checks the four lengths. */
 #pragma pack(push, 1)
 typedef struct {
     char     magic[4];          /* "RSZS" */
-    uint32_t version;           /* 1 */
+    uint32_t version;           /* 2 (WP71; 1 = no m_bytes field) */
     uint64_t bm_bytes;
     uint64_t j_bytes;
     uint64_t i_bytes;
+    uint64_t m_bytes;           /* WP71: mapper-table component (0=legacy) */
     uint32_t payload_crc;
     uint32_t crc32c;            /* over the header with this field 0 */
-} invfs_rszs;                   /* 40 bytes, block-padded */
+} invfs_rszs;                   /* 48 bytes, block-padded */
 #pragma pack(pop)
 
 /* ---- WP21: CKP0 sweep-checkpoint descriptor (block 0 reserved area) ----
