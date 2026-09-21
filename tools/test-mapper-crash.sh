@@ -308,8 +308,13 @@ else
             || ok "checkpoint cleared by the rollback"
         L3_DUP=$(mval "$IMG0" duplicates)
         L3_DESC=$(mval "$IMG0" descending)
-        if [ "${L3_DUP:-0}" = 0 ] && [ "${L3_DESC:-0}" = 0 ]; then
-            ok "post-rollback mapper table: 0 duplicate pbAs, 0 descending steps"
+        # WP71j: duplicates = a double allocation = corruption, hard fail.
+        # A descending step after a kill/rollback cycle is legitimate
+        # extent reuse: once registry/owner extents are freed, the
+        # allocator may hand out a lower pba (table slot order stops
+        # being allocation order). Reported, not failed.
+        if [ "${L3_DUP:-0}" = 0 ]; then
+            ok "post-rollback mapper table: 0 duplicate pbAs (descending=${L3_DESC:-?}, reuse-legitimate)"
         else
             bad "leg3: mapper table has ${L3_DUP:-?} duplicate pbAs / ${L3_DESC:-?} descending steps"
         fi
@@ -363,8 +368,12 @@ else
 
     RZ_DUP=$(mval "$IMG0" duplicates)
     RZ_DESC=$(mval "$IMG0" descending)
-    if [ "${RZ_DUP:-0}" = 0 ] && [ "${RZ_DESC:-0}" = 0 ]; then
-        ok "post-realize mapper table: 0 duplicate pbAs, 0 descending steps"
+    # WP71j: as in leg3 -- duplicates are corruption; a descending step
+    # after --realize is legitimate reuse (the realize frees the
+    # retention registry's owner extent, and the next allocation may
+    # land below a live neighbour).
+    if [ "${RZ_DUP:-0}" = 0 ]; then
+        ok "post-realize mapper table: 0 duplicate pbAs (descending=${RZ_DESC:-?}, reuse-legitimate)"
     else
         bad "leg4: mapper table has ${RZ_DUP:-?} duplicate pbAs / ${RZ_DESC:-?} descending steps"
     fi

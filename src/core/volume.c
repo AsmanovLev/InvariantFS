@@ -2149,6 +2149,44 @@ free(rb);
                     (unsigned long long)fixed, fixed == 1 ? "" : "s",
                     (unsigned long long)pinned, pinned == 1 ? "" : "s");
     }
+    /* WP71j: mapper extents are STRUCTURALLY used, and the record-based
+     * repair above cannot see them (extents hold records, they are not
+     * named by any AST). A deferred bitmap flush (WP29) lost their bits
+     * on a SIGKILL between alloc_meta_extent and the next flush: the
+     * stale bitmap called a live record extent free, fsck reported
+     * missing=extent_blocks, and -- worse -- the allocator could hand
+     * the extent to new data, silently overwriting live records. Force
+     * every live extent's span used, with the same accounting. No-op on
+     * a clean volume (bits already set); cheap (extent_count spans). */
+    if (v->met0_present && v->meta_mapper) {
+        uint64_t ext_fixed = 0;
+        size_t mi;
+        for (mi = 0; mi < v->meta_mapper_n; mi++) {
+            uint64_t ent = v->meta_mapper[mi];
+            uint64_t ep = invfs_meta_ext_pba(ent);
+            uint64_t eb, eend;
+            if (!ep) continue;
+            eend = ep + invfs_meta_ext_size(ent) / INVFS_BLOCK_SIZE;
+            if (eend > v->sb.total_blocks) eend = v->sb.total_blocks;
+            for (eb = ep; eb < eend; eb++) {
+                if (!bit_get(v->bitmap, eb)) {
+                    bit_set(v->bitmap, eb);
+                    bm_dirty(v, eb);
+                    v->free_blocks--;
+                    if (eb >= v->sb.shadow_zone_start)
+                        v->shadow_free--;
+                    else if (eb >= v->sb.raw_zone_start)
+                        v->raw_free--;
+                    ext_fixed++;
+                }
+            }
+        }
+        if (ext_fixed)
+            fprintf(stderr, "vol_open: bitmap/mapper divergence: %llu "
+                    "metadata-extent block(s) were marked free; forced "
+                    "used (a deferred bitmap flush lost them)\n",
+                    (unsigned long long)ext_fixed);
+    }
     /* H5: a volume whose latch persisted in the superblock re-evaluates it
      * at open: space freed while it was offline (fsck reclaim, a resize,
      * a delete in a session that never flushed the flag clear) must not
