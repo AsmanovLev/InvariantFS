@@ -33,8 +33,8 @@ contract. Not a replacement for ext4/XFS on general workloads.
   byte-original with members exposed as on-demand windows.
 * **Append-only zones + offline sweep** — writes land in RAW, then the sweep
   drains them into a type-clustered Shadow zone, re-encoding where proven.
-* **Dynamic metadata extents** — inode records grow with the tree (mapper table
-  + `MET0`) instead of a pre-sized inode table.
+* **Meta-v3 Metadata Architecture** — B+ tree base metadata + append-only Delta
+  Log with background fold worker and lock-free reads.
 * **Deduplication** — segment-level, BLAKE3, with an online pass in the sweep.
 * **Checkpoints, rollback, time travel** — undo the last sweep, or mount a
   read-only view at a past checkpoint.
@@ -112,29 +112,32 @@ codec CPU cost.
 
 ## How it works
 
-A volume has three zones: **Metadata** (superblock, bitmap, mapper, owner WAL,
-inode records), **RAW** (linear landing area for new writes), and **Shadow**
+A volume has three primary zones: **Metadata** (superblock, RT30 B+ tree base,
+Delta Log, bitmap), **RAW** (linear landing area for new writes), and **Shadow**
 (consolidated, type-clustered storage).
 
 ```
-write()  ->  RAW (LZ4 or verbatim)  ->  append inode record + CRC
+write()   ->  RAW (LZ4 or verbatim)  ->  append delta mutation (inode + dirent)
 ```
 
-A file is one record: a 36-byte prefix, a variable-length name, and an **AST
-recipe** mapping original byte ranges to `(zone, pba, offset)` windows. Stored
-segments are framed `[4B csize][4B crc32c][payload]`; the recipe is self-
-describing, so a record can be read without a separate mapping table.
+Reads check the in-memory delta index first; if absent, they read the immutable
+B+ tree base without lock contention. Periodic background **fold** merges
+accumulated delta records into the B+ tree and atomically updates the RT30
+double-slot descriptor.
 
 The **sweep** (`invf-sweep`, or the FUSE background sweep) drains RAW into
 Shadow, re-clusters text/binary, runs dedupe and text-zone GC, re-encodes where
 bit-exactness is proven, and optionally writes parity seals.
 
 ```
-unlink()  ->  tombstone appended; blocks freed at the next sweep
+unlink()  ->  delta delete entry appended; space reclaimed at next fold + sweep
 ```
 
-Deletes do not free immediately: a volume that sees many writes-then-deletes
-fills up until the sweep runs. This is expected, not a bug.
+For complete architecture specifications, see:
+* [Architecture Overview](docs/architecture/OVERVIEW.md)
+* [Meta-v3 Specification](docs/architecture/META-V3.md)
+* [Architecture Decision Records (ADRs)](docs/adr/README.md)
+* [CLI Usage Guide](docs/guides/CLI-USAGE.md)
 
 ## Comparison
 
