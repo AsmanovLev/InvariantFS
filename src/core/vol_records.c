@@ -2459,8 +2459,15 @@ int vol_inode_compact(invfs_volume *v, uint64_t *before_out,
      * legacy "linear inode area" compaction has no place to write -- the
      * active extent is appended-to via meta_get_append_pos. Allocation
      * comes from the shadow zone. Refuse compaction here rather than
-     * rewriting records into the metadata-zone gap. */
+     * rewriting records into the metadata-zone gap. WP71h: refuse LOUDLY
+     * -- the silent return made test-compact's checkpoint-skip assertion
+     * undiagnosable and hid the fact that the mapper-era consolidation is
+     * the sweep's meta-merge (vol_meta_merge_run), not this pass. */
     if (v->met0_present && v->meta_mapper) {
+        fprintf(stderr, "inode compact: skipped (mapper volume -- records "
+                "live in dynamic metadata extents; consolidation runs "
+                "through the sweep's meta-merge, not the legacy linear "
+                "compaction)\n");
         return 0;
     }
     if (v->ck_present) {
