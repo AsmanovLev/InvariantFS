@@ -681,6 +681,36 @@ int vol_inode_first_zone(invfs_volume *v, uint64_t inode_id)
     invfs_ast_block_entry e0;
     uint32_t ver;
 
+    /* WP-M21b: v3 -- no record stream to locate; the zone of entry 0
+     * comes from the content-addressed recipe blob (same parse the read
+     * path uses). Without this the absent-class branch of vol_sweep_one
+     * saw fz == -1 != RAW for EVERY v3 file and skipped the whole live
+     * set ("sweep done: swept=0 skipped=N"). */
+    if (v->sb.vol_flags & VOLF_V3) {
+        invfs_v3_inode in;
+        invfs_ast_hdr ah;
+        const invfs_ast_block_entry *ents = NULL;
+        size_t n_ents = 0;
+        uint8_t *blob = NULL;
+        size_t blen = 0;
+        int zone = -1;
+        static const uint8_t zero_addr[INVFS_V3_RECIPE_ADDR_LEN];
+
+        if (vol_v3_inode_get(v, inode_id, &in) != 1)
+            return -1;
+        if (in.size == 0 ||
+            memcmp(in.recipe_addr, zero_addr,
+                   INVFS_V3_RECIPE_ADDR_LEN) == 0)
+            return -1;                  /* empty file: no zone */
+        if (vol_v3_recipe_load(v, in.recipe_addr, &blob, &blen) != 0)
+            return -1;
+        if (vol_ast_recipe_parse(blob, blen, &ah, &ents, &n_ents) == 0 &&
+            n_ents > 0)
+            zone = ents[0].zone;
+        free(blob);
+        return zone;
+    }
+
     /* WP42: mapper-aware locate; legacy volumes keep the contiguous scan */
     pos = sweep_locate_record(v, inode_id, &rec_h);
     if (pos == 0) return -1;
@@ -844,6 +874,127 @@ int vol_jxl_retry(invfs_volume *v, uint64_t inode_id, const char *name)
 }
 
 
+/* WP-M21b: the v3 sweep path. The v2 full path below operates on the
+ * record stream (sweep_locate_record, L2P maps, atomic new-id records)
+ * which does not exist on a v3 volume -- it fails every file with -1
+ * (measured: "sweep done: failed=5" on a 5-file v3 volume). The v3
+ * drain with the same invariants: read the whole file (M8 recipe read)
+ * -> ZSTD encode -> decode round-trip guard (publish only bit-exact)
+ * -> publish via vol_create_blob_file's v3 branch (content-addressed
+ * recipe blob + in-place row supersede; the dropped recipe/segments go
+ * unreachable and the WP-M15 reachability reclaim reclaims them).
+ * Class stamps (v3 xattrs, WP-M7) keep the WP10 policy: drained files
+ * skip, uncompressible files are generation-gated, ENOSPC defers.
+ * Deliberate M18-remainder gaps (v2 owner-record machinery, not yet
+ * re-expressed on the v3 trees): per-segment Shadow clustering (the
+ * whole-file entry is arc-budget bounded instead), text PPMd / binary
+ * ZSTD batching, and container-pack transcode dispatch. Text and
+ * binary both take generic ZSTD -- a weaker ratio than batching,
+ * invariant-preserving. Returns follow vol_sweep_one's convention. */
+static int vol_sweep_one_v3(invfs_volume *v, uint64_t inode_id,
+                            const char *name)
+{
+    uint8_t ccls = 0, calgo = 0;
+    uint16_t cgen = 0;
+    invfs_v3_inode in;
+    uint8_t *full = NULL, *enc = NULL, *back = NULL;
+    size_t full_len = 0, enc_cap, enc_len = 0;
+    const invfs_codec *zc;
+    uint64_t newino;
+    int fz;
+
+    if (!name || !name[0])
+        return 0;
+
+    /* class policy: a stamp means drained-or-gated (subset of the WP10
+     * table that needs no v2 record surgery) */
+    if (vol_get_class(v, inode_id, &ccls, &calgo, &cgen) == 0) {
+        switch (ccls) {
+        case INVFS_CLASS_UNCOMPRESSIBLE:
+            if (invfs_registry_generation() <= cgen)
+                return 0;       /* retry only when the registry grew */
+            break;
+        case INVFS_CLASS_DEFER_ENOSPC:
+            break;              /* space is a property of NOW: retry */
+        default:
+            return 0;           /* GENERIC/CODEC/TEXT/...: already swept */
+        }
+    }
+
+    if (vol_v3_inode_get(v, inode_id, &in) != 1)
+        return -1;
+    if (in.size == 0)
+        return 1;               /* nothing to drain */
+    fz = vol_inode_first_zone(v, inode_id);
+    if (fz != INVFS_ZONE_RAW)
+        return 1;               /* already blob-stored; unreadable: leave */
+    if (v->arc_budget && in.size > v->arc_budget)
+        return 1;               /* whole-file entries must fit the budget */
+
+    zc = invfs_codec_by_algo(INVFS_ALGO_ZSTD);
+    if (!zc || !zc->encode || !zc->decode)
+        return -1;
+
+    if (vol_read_inode(v, inode_id, 0, &full, &full_len) != 0 || !full)
+        return -1;
+    if (full_len != (size_t)in.size) {
+        free(full);
+        return -1;              /* row/recipe disagree: do not touch */
+    }
+
+    if (sweep_enospc(v, (uint64_t)full_len + full_len / 4 + 65536 +
+                        INVFS_ENOSPC_MARGIN)) {
+        free(full);
+        vol_stamp_class(v, inode_id, INVFS_CLASS_DEFER_ENOSPC,
+                        INVFS_ALGO_ZSTD, invfs_registry_generation());
+        return 1;
+    }
+
+    enc_cap = full_len + full_len / 4 + 65536;
+    enc = (uint8_t *)malloc(enc_cap);
+    if (!enc) { free(full); return -1; }
+    if (zc->encode(full, full_len, enc, enc_cap, &enc_len) != 0 ||
+        enc_len == 0 || enc_len >= full_len) {
+        /* no gain: generation-gated skip until the registry grows */
+        free(enc);
+        free(full);
+        vol_stamp_class(v, inode_id, INVFS_CLASS_UNCOMPRESSIBLE, 0,
+                        invfs_registry_generation());
+        return 1;
+    }
+    back = (uint8_t *)malloc(full_len ? full_len : 1);
+    if (!back || zc->decode(enc, enc_len, back, full_len) != 0 ||
+        memcmp(back, full, full_len) != 0) {
+        /* the round-trip guard refused: stay RAW, unstamped, retry */
+        free(back);
+        free(enc);
+        free(full);
+        return 0;
+    }
+    free(back);
+
+    {   /* carry published metadata across the supersede, as the
+         * codecpack flow does */
+        invfs_meta_pub keep;
+        int have_keep = vol_get_meta(v, inode_id, &keep) == 0;
+
+        newino = vol_create_blob_file(v, name, enc, enc_len, full_len,
+                                      INVFS_ALGO_ZSTD);
+        free(enc);
+        free(full);
+        if (!newino)
+            return 0;           /* store failed (ENOSPC): stay RAW */
+        if (have_keep) {
+            invfs_meta_pub chk;
+            if (vol_get_meta(v, newino, &chk) != 0)
+                vol_apply_meta(v, name, &keep);
+        }
+        vol_stamp_class(v, newino, INVFS_CLASS_GENERIC, INVFS_ALGO_ZSTD,
+                        invfs_registry_generation());
+    }
+    return 1;
+}
+
 /* process a single inode: container explode / transcode / shadow move.
    Returns 1 if the inode was replaced/transcoded, 0 if not applicable,
    -1 on hard error (caller keeps it pending or aborts). */
@@ -861,6 +1012,11 @@ int vol_sweep_one(invfs_volume *v, uint64_t inode_id, const char *name)
      * it now would retire the old record mid-session. Skip; the commit
      * re-marks the file pending, so the next drain picks it up. */
     if (vol_write_active_name(v, name)) return 0;
+
+    /* WP-M21b: v3 volumes take the blob-store path; everything below
+     * this line is v2 record surgery. */
+    if (v->sb.vol_flags & VOLF_V3)
+        return vol_sweep_one_v3(v, inode_id, name);
 
     /* WP10 §2: class-aware walk predicate. A present class flag decides
      * skip/retry/downgrade without touching content; absent = the legacy
@@ -1547,7 +1703,12 @@ static int vol_pack_sweep(invfs_volume *v, uint64_t inode_id, const char *name,
             uint64_t newino = vol_create_blob_file(v, name, enc, enc_len,
                                                    full_len, pc->algo);
             if (newino) {
-                vol_delete_inode(v, inode_id, name);
+                /* WP-M21b: on v3 the blob creator superseded the row in
+                 * place (same id, delta-first) -- deleting it here would
+                 * destroy the fresh blob. On v2 the stale record is
+                 * retired as before. */
+                if (!(v->sb.vol_flags & VOLF_V3))
+                    vol_delete_inode(v, inode_id, name);
                 /* the fresh blob record has no ext; carry the old meta
                  * across, like the vol_jxl_retry flow does */
                 if (have_keep) {
@@ -1628,12 +1789,40 @@ static int sweep_seen_cb(void *ctx_, uint64_t rec_pos,
 }
 
 
+/* WP-M21b: collector callback for the v3 live-set iterator. Internal
+ * (\x01) rows and nameless rows are not sweep targets; the iterator has
+ * already dropped deleted rows and de-duplicated nlink-shared inodes. */
+struct v3_sweep_ids { uint64_t *ids; size_t max, n; };
+
+static int collect_sweepables_v3_cb(invfs_volume *v, uint64_t id,
+                                    const char *name, void *ctx)
+{
+    struct v3_sweep_ids *c = (struct v3_sweep_ids *)ctx;
+    (void)v;
+    if (!name || !name[0] || (unsigned char)name[0] == 0x01)
+        return 0;
+    if (c->n >= c->max)
+        return 1;                       /* full: stop the iteration */
+    c->ids[c->n++] = id;
+    return 0;
+}
+
 size_t vol_collect_sweepables(invfs_volume *v, uint64_t *ids, size_t max)
 {
     sweep_seen_ctx c;
     size_t out = 0, s;
 
     if (!v || !ids || max == 0) return 0;
+
+    /* WP-M21b: on v3 the live set is the base inode tree + delta overlay
+     * (M18 iterator) -- the v2 record walk below finds nothing there. */
+    if (v->sb.vol_flags & VOLF_V3) {
+        struct v3_sweep_ids vc;
+        vc.ids = ids; vc.max = max; vc.n = 0;
+        (void)vol_v3_iter_live_inodes(v, collect_sweepables_v3_cb, &vc);
+        return vc.n;
+    }
+
     memset(&c, 0, sizeof c);
     /* WP42: the walker hops every mapper extent on v0.3.0+ volumes (the
      * legacy loop saw only the empty contiguous area) and still bounds
@@ -1850,6 +2039,38 @@ static int wstats_cb(void *ctx_, uint64_t rec_pos,
     return 0;
 }
 
+/* WP-M21b: per-inode body of the v3 stats pass -- type straight from the
+ * row (invfs_v3_inode.type), logical bytes from the row size. Internal
+ * \x01 owners are excluded from the file count (the v2 body's rule). */
+static int wstats_v3_cb(invfs_volume *v, uint64_t inode_id,
+                        const char *name, void *ctx_)
+{
+    invfs_volume_stats *out = (invfs_volume_stats *)ctx_;
+    invfs_v3_inode in;
+
+    if (vol_v3_inode_get(v, inode_id, &in) != 1)
+        return 0;
+    switch (in.type) {
+    case INVFS_ITYP_DIR:
+        out->dirs++;
+        return 0;
+    case INVFS_ITYP_LNK:
+        out->links++;
+        return 0;
+    case INVFS_ITYP_FIFO: case INVFS_ITYP_SOCK:
+    case INVFS_ITYP_CHR:  case INVFS_ITYP_BLK:
+        out->special++;
+        return 0;
+    default:
+        break;
+    }
+    if (name && (unsigned char)name[0] == 0x01)
+        return 0;               /* engine bookkeeping, not a user file */
+    out->files++;
+    out->logical_bytes += in.size;
+    return 0;
+}
+
 int vol_compute_stats(invfs_volume *v, invfs_volume_stats *out)
 {
     /* WP-DZ: physical per-zone attribution is by CONTENT CLASS (the AST
@@ -1865,6 +2086,26 @@ int vol_compute_stats(invfs_volume *v, invfs_volume_stats *out)
     claimed = (uint8_t *)calloc((size_t)(v->sb.total_blocks + 7) / 8, 1);
     if (claimed)
         have_ms = 1;   /* degrade: physical zeros, not a lie */
+
+    /* WP-M21b: v3 -- population from the live-set iterator (type comes
+     * from the inode row itself), physical from the zone bitmaps: the v3
+     * data plane still allocates RAW segments into the RAW zone and
+     * blob/drain segments into Shadow, so region attribution is exact.
+     * The per-class physical breakdown and the per-zone logical split
+     * would need a recipe parse per live inode -- reported as zeros
+     * rather than guessed at (M18-remainder). */
+    if (v->sb.vol_flags & VOLF_V3) {
+        (void)vol_v3_iter_live_inodes(v, wstats_v3_cb, out);
+        out->raw_used_bytes = vol_zone_used_bytes(v,
+            v->sb.raw_zone_start,
+            v->sb.raw_zone_start + v->sb.raw_zone_blocks);
+        out->shadow_used_bytes = vol_zone_used_bytes(v,
+            v->sb.shadow_zone_start,
+            v->sb.shadow_zone_start + v->sb.shadow_zone_blocks);
+        free(claimed);
+        return 0;
+    }
+
     {
         wstats_ctx c;
         c.v = v; c.out = out; c.claimed = claimed; c.have_ms = have_ms;

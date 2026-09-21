@@ -674,6 +674,76 @@ uint64_t vol_create_blob_file(invfs_volume *v, const char *name,
     }
     if (name_too_long(name)) return 0;
 
+    /* WP-M21b: v3 volumes publish blobs as a content-addressed recipe
+     * blob + inode row (same segment layout, same AST entries, same
+     * reader -- only the metadata publication differs). The v2 record
+     * append below is refused on v3 (vol_records.c guards), and nothing
+     * would read the record stream anyway. An existing name's row is
+     * superseded in place (create_content_node reuses the id, delta-first
+     * resolution), so v3 callers must NOT vol_delete_inode() the old id
+     * afterwards -- that would destroy the fresh blob. The dropped
+     * recipe/segments become unreachable and are reclaimed by the WP-M15
+     * reachability reclaim after a fold. */
+    if (v->sb.vol_flags & VOLF_V3) {
+        uint8_t addr[INVFS_V3_RECIPE_ADDR_LEN];
+        uint8_t *rblob = NULL;
+        size_t rlen = 0;
+
+        if (blob_len == 0 && orig_size != 0) {
+            fprintf(stderr, "invarifs: %s: empty blob for %llu-byte "
+                    "original -- refused\n",
+                    name, (unsigned long long)orig_size);
+            return 0;
+        }
+        if (blob_len == 0) {
+            /* empty file: zero recipe addr; the read path keys off size 0 */
+            memset(addr, 0, sizeof addr);
+        } else {
+            uint32_t bcrc;
+            phys_blocks = (blob_len + 8 + INVFS_BLOCK_SIZE - 1) /
+                          INVFS_BLOCK_SIZE;
+            pba = alloc_blocks(v, v->sb.shadow_zone_start,
+                               v->sb.shadow_zone_blocks, phys_blocks, 1,
+                               INVFS_ALLOC_DATA);
+            if (pba == 0) return 0;
+            hdr4[0] = (uint8_t)(blob_len & 0xFF);
+            hdr4[1] = (uint8_t)((blob_len >> 8) & 0xFF);
+            hdr4[2] = (uint8_t)((blob_len >> 16) & 0xFF);
+            hdr4[3] = (uint8_t)((blob_len >> 24) & 0xFF);
+            bcrc = invfs_crc32c(blob, blob_len);
+            hdr4[4] = (uint8_t)(bcrc & 0xFF);
+            hdr4[5] = (uint8_t)((bcrc >> 8) & 0xFF);
+            hdr4[6] = (uint8_t)((bcrc >> 16) & 0xFF);
+            hdr4[7] = (uint8_t)((bcrc >> 24) & 0xFF);
+            if (io_seek(&v->io, pba * INVFS_BLOCK_SIZE) != 0 ||
+                io_write(&v->io, hdr4, 8) != 0 ||
+                io_write(&v->io, blob, blob_len) != 0) {
+                vol_free_blocks(v, pba, phys_blocks);
+                return 0;
+            }
+            /* WP27: no L2P map -- the entry itself carries the address */
+            memset(&e, 0, sizeof e);
+            e.file_offset = 0;
+            e.length = orig_size;
+            e.zone = INVFS_ZONE_BINARY;
+            e.algo = algo;
+            e.block_id = 0;
+            e.pba = pba;
+            if (vol_ast_recipe_serialize(orig_size, &e, 1, &rblob,
+                                         &rlen) != 0) {
+                vol_free_blocks(v, pba, phys_blocks);
+                return 0;
+            }
+            if (vol_v3_recipe_store(v, rblob, rlen, addr) != 0) {
+                free(rblob);
+                vol_free_blocks(v, pba, phys_blocks);
+                return 0;
+            }
+            free(rblob);
+        }
+        return vol_v3_create_content_node(v, name, orig_size, addr);
+    }
+
     /* Empty member (e.g. a zero-length TAR part): the generic guard stores
      * such a blob verbatim as csize=0, and the read path (seg_read_checked,
      * min_csize=1) would then reject our own segment forever. An empty

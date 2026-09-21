@@ -429,6 +429,84 @@ static int sweep_collect_cb(void *ctx_, uint64_t rec_pos,
     return 0;
 }
 
+/* WP-M21b: v3 live-set collector, fed by vol_v3_iter_live_inodes (the
+ * M18 iterator: base tree + delta overlay, deletes skipped, nlink-shared
+ * rows visited once). A v3 volume has no record stream to walk, so the
+ * WP42 walker above finds nothing and the sweep silently no-ops; this
+ * feeds the same arrays instead. Sizes come from the inode row via
+ * vol_stat; record positions stay 0 (nothing consumes them on v3 -- the
+ * fold replaces the linear compaction that rec_bytes triggered). */
+typedef struct {
+    invfs_volume *vol;
+    char (**names)[256];
+    uint64_t **inodes, **sizes, **poss;
+    sw_bucket ***tab;
+    size_t *tmask, *tcount;
+    int *count, *cap;
+    int oom;
+} v3_collect_ctx;
+
+static int v3_collect_cb(invfs_volume *v, uint64_t inode_id,
+                         const char *name, void *ctx_)
+{
+    v3_collect_ctx *c = (v3_collect_ctx *)ctx_;
+    char (*names)[256] = *c->names;
+    uint64_t *inodes = *c->inodes;
+    uint64_t *sizes = *c->sizes;
+    uint64_t *poss = *c->poss;
+    char full[300 * 4];         /* composed "dir/.../leaf" path */
+    uint64_t size = 0;
+    int i;
+    (void)v;
+    /* owner/internal rows carry \x01-prefixed names and are not sweep
+     * targets; a NULL name (dirent lost) cannot be swept either */
+    if (!name || !name[0] || (unsigned char)name[0] == 0x01)
+        return 0;
+    /* the iterator hands out the LEAF name; every name-keyed consumer
+     * here (vol_stat, the dedupe table, vol_sweep_one) wants the full
+     * relative path, same shape as v2 record names */
+    if (vol_v3_path_of(c->vol, inode_id, full, sizeof full) != 1)
+        return 0;                       /* unlinked/unresolvable: skip */
+    if (strlen(full) > 255)
+        return 0;                       /* collector slots hold 256 B */
+    if (vol_stat(c->vol, full, &size) != 0)
+        return 0;                       /* unresolved (raced away): skip */
+    name = full;
+
+    i = sw_find(*c->tab, *c->tmask, names, name);
+    if (i >= 0) {
+        inodes[i] = inode_id; sizes[i] = size; poss[i] = 0;
+        return 0;
+    }
+    if (*c->count == *c->cap) {
+        int ncap = *c->cap ? *c->cap * 2 : 512;
+        char (*nn)[256] =
+            (char (*)[256])realloc(names, (size_t)ncap * 256);
+        uint64_t *ni =
+            (uint64_t *)realloc(inodes, (size_t)ncap * sizeof *ni);
+        uint64_t *ns =
+            (uint64_t *)realloc(sizes, (size_t)ncap * sizeof *ns);
+        uint64_t *np =
+            (uint64_t *)realloc(poss, (size_t)ncap * sizeof *np);
+        if (nn) names = nn;
+        if (ni) inodes = ni;
+        if (ns) sizes = ns;
+        if (np) poss = np;
+        *c->names = names; *c->inodes = inodes;
+        *c->sizes = sizes; *c->poss = poss;
+        *c->cap = ncap;
+        if (!nn || !ni || !ns || !np) { c->oom = 1; return 1; }
+    }
+    strncpy(names[*c->count], name, 256);
+    names[*c->count][255] = 0;
+    inodes[*c->count] = inode_id;
+    sizes[*c->count] = size;
+    poss[*c->count] = 0;
+    sw_insert(c->tab, c->tmask, c->tcount, names, *c->count);
+    (*c->count)++;
+    return 0;
+}
+
 /* WP64: graceful Ctrl+C — finish the current file, then exit cleanly. */
 static volatile sig_atomic_t g_stop = 0;
 
@@ -798,18 +876,38 @@ int main(int argc, char **argv)
      * record footprint used by the compaction trigger below and, unlike
      * pos-minus-start, cannot underflow on a mapper volume. */
     {
-        sweep_collect_ctx cc;
-        memset(&cc, 0, sizeof cc);
-        cc.names = &names; cc.inodes = &inodes;
-        cc.sizes = &sizes; cc.poss = &poss;
-        cc.tab = &tab; cc.tmask = &tmask; cc.tcount = &tcount;
-        cc.count = &count; cc.cap = &cap;
-        vol_records_walk(vol, sweep_collect_cb, &cc);
-        if (cc.oom) {
-            fprintf(stderr, "out of memory\n");
-            return 1;
+        if (vol_sb(vol)->vol_flags & VOLF_V3) {
+            /* WP-M21b: v3 volumes iterate the live inode set (base tree
+             * + delta overlay) instead of the record stream. */
+            v3_collect_ctx vc;
+            memset(&vc, 0, sizeof vc);
+            vc.vol = vol;
+            vc.names = &names; vc.inodes = &inodes;
+            vc.sizes = &sizes; vc.poss = &poss;
+            vc.tab = &tab; vc.tmask = &tmask; vc.tcount = &tcount;
+            vc.count = &count; vc.cap = &cap;
+            if (vol_v3_iter_live_inodes(vol, v3_collect_cb, &vc) < 0)
+                fprintf(stderr, "warning: v3 live-set iteration did not "
+                                "complete\n");
+            if (vc.oom) {
+                fprintf(stderr, "out of memory\n");
+                return 1;
+            }
+            rec_bytes = 0;   /* the fold bounds the delta; no compaction */
+        } else {
+            sweep_collect_ctx cc;
+            memset(&cc, 0, sizeof cc);
+            cc.names = &names; cc.inodes = &inodes;
+            cc.sizes = &sizes; cc.poss = &poss;
+            cc.tab = &tab; cc.tmask = &tmask; cc.tcount = &tcount;
+            cc.count = &count; cc.cap = &cap;
+            vol_records_walk(vol, sweep_collect_cb, &cc);
+            if (cc.oom) {
+                fprintf(stderr, "out of memory\n");
+                return 1;
+            }
+            rec_bytes = cc.rec_bytes;
         }
-        rec_bytes = cc.rec_bytes;
     }
 
     /* WP22d: the walk above collects the newest record per name, but the
@@ -951,8 +1049,11 @@ progress:
      * batches (one vol_tz_flush drains both accumulators). The deferred
      * counts come from the accumulators themselves: parts deferred at
      * container-explode time (WP14b) never produced a walk line.
-     * --fast deferred nothing, so the GC/flush are skipped with it. */
-    if (!dry && !fast) {
+     * --fast deferred nothing, so the GC/flush are skipped with it.
+     * WP-M21b: v3 volumes have no tz owner records and the v3 sweep path
+     * never defers (text takes generic ZSTD too), so GC/flush would only
+     * fail on the v2-append refusals -- skipped entirely. */
+    if (!dry && !fast && !(vol_sb(vol)->vol_flags & VOLF_V3)) {
         int gcrc = vol_tz_gc(vol);
         size_t tzp = vol_acc_pending(vol, 0);
         size_t bzp = vol_acc_pending(vol, 1);

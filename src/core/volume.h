@@ -322,6 +322,11 @@ int vol_v3_iter_live_inodes(invfs_volume *v,
 int vol_v3_name_of(invfs_volume *v, uint64_t inode_id,
                    char *name, size_t name_cap,
                    uint64_t *parent_out);
+/* WP-M21b: compose the full relative path ("dir/sub/file") of an inode
+ * by walking parent inodes to the root. Returns 1 composed, 0 not
+ * found, -1 error (too deep/cyclic/buffer too small). */
+int vol_v3_path_of(invfs_volume *v, uint64_t inode_id, char *buf,
+                   size_t cap);
 
 /* ---- WP-M14: v3 fold (merge delta into base, atomic publish, reset) --
  * Fold applies every live delta record to a COW copy of the base B+-tree,

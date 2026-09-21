@@ -3132,6 +3132,59 @@ int vol_v3_name_of(invfs_volume *v, uint64_t inode_id,
     return c.found ? 1 : 0;
 }
 
+/* WP-M21b: compose the full "dir/sub/file" path of an inode by walking
+ * parent inodes up to the root (vol_v3_name_of gives one leaf + its
+ * parent per hop). v2 record names are full relative paths and every
+ * name-keyed consumer (vol_stat/vol_find/create_blob_file, the sweep
+ * collector's dedupe table) expects that shape, while the v3 dirent
+ * tree only stores leaves. Returns 1 composed, 0 not found, -1 error
+ * (too deep / cyclic / buffer too small). Each hop is a full reverse
+ * dirent walk, so this is O(depth x live) -- fine for the offline
+ * tools, and the sweep collector's per-file vol_stat is the same order.
+ * A dirent-index (id -> path) would be the v3-native optimization. */
+int vol_v3_path_of(invfs_volume *v, uint64_t inode_id, char *buf,
+                   size_t cap)
+{
+    char parts[32][INVFS_MAX_NAME + 1];
+    uint64_t chain[32];
+    uint64_t cur = inode_id;
+    int n = 0, i;
+    size_t total = 0;
+
+    if (!v || !buf || cap == 0)
+        return -1;
+    buf[0] = 0;
+    if (inode_id == INVFS_V3_ROOT_INO)
+        return 0;                       /* root has no name */
+    while (cur != INVFS_V3_ROOT_INO && cur != 0) {
+        uint64_t parent = 0;
+        if (n >= 32)
+            return -1;                  /* too deep: refuse, never loop */
+        if (vol_v3_name_of(v, cur, parts[n], sizeof parts[n],
+                           &parent) != 1)
+            return 0;                   /* unlinked between hops */
+        chain[n] = cur;
+        n++;
+        cur = parent;
+        for (i = 0; i < n - 1; i++)
+            if (chain[i] == cur)
+                return -1;              /* cyclic dirent: corruption */
+    }
+    for (i = n - 1; i >= 0; i--) {
+        size_t l = strlen(parts[i]);
+        if (l == 0 || l > INVFS_MAX_NAME)
+            return -1;
+        if (total + l + (total ? 1 : 0) + 1 > cap)
+            return -1;                  /* buffer too small */
+        if (total)
+            buf[total++] = '/';
+        memcpy(buf + total, parts[i], l);
+        total += l;
+        buf[total] = 0;
+    }
+    return n > 0 ? 1 : 0;
+}
+
 /* ------------------------------------------------------------------ */
 /* WP-M18: live-set iteration for the sweep driver                     */
 /* ------------------------------------------------------------------ */
@@ -3145,6 +3198,59 @@ typedef struct {
     size_t visited_n;
     int oom;
 } v3_iter_ctx;
+
+/* WP-M21b: the visited set became a real open-addressed table (0 = empty;
+ * inode id 0 is never live). The original append-anywhere + fixed-window
+ * probe was a probabilistic dedupe -- fine for the rare nlink>1 double
+ * visit, not fine for the delta pass below, which must reliably tell
+ * "this delta row already reported from base" apart from "delta-only
+ * row". Load factor is kept <= 0.5 with rehash on growth. */
+static int v3_iter_seen(const v3_iter_ctx *ic, uint64_t id)
+{
+    size_t h;
+    if (!ic->visited_cap)
+        return 0;
+    h = id & (ic->visited_cap - 1);
+    while (ic->visited[h] != 0) {
+        if (ic->visited[h] == id)
+            return 1;
+        h = (h + 1) & (ic->visited_cap - 1);
+    }
+    return 0;
+}
+
+/* Returns 1 on success (already present counts as success), 0 on OOM
+ * (sets ic->oom). */
+static int v3_iter_mark(v3_iter_ctx *ic, uint64_t id)
+{
+    size_t h;
+
+    if (v3_iter_seen(ic, id))
+        return 1;
+    if (ic->visited_n * 2 >= ic->visited_cap) {
+        size_t nc = ic->visited_cap ? ic->visited_cap * 2 : 64;
+        size_t i;
+        uint64_t *nv = (uint64_t *)calloc(nc, sizeof *nv);
+        if (!nv) { ic->oom = 1; return 0; }
+        for (i = 0; i < ic->visited_cap; i++) {
+            if (ic->visited[i]) {
+                size_t hh = ic->visited[i] & (nc - 1);
+                while (nv[hh])
+                    hh = (hh + 1) & (nc - 1);
+                nv[hh] = ic->visited[i];
+            }
+        }
+        free(ic->visited);
+        ic->visited = nv;
+        ic->visited_cap = nc;
+    }
+    h = id & (ic->visited_cap - 1);
+    while (ic->visited[h])
+        h = (h + 1) & (ic->visited_cap - 1);
+    ic->visited[h] = id;
+    ic->visited_n++;
+    return 1;
+}
 
 static int v3_iter_base_cb(void *ctx_, bt_key k, bt_val val)
 {
@@ -3167,31 +3273,11 @@ static int v3_iter_base_cb(void *ctx_, bt_key k, bt_val val)
             return 0;
     }
 
-    /* nlink > 1: visited set to avoid calling the sweep once per hardlink */
-    {
-        invfs_v3_inode in;
-        if (vol_v3_inode_get(ic->v, inode_id, &in) == 1 && in.nlink > 1) {
-            size_t h, j;
-            h = inode_id & (ic->visited_cap ? ic->visited_cap - 1 : 7);
-            for (;;) {
-                for (j = 0; j < ic->visited_n; j++) {
-                    if (ic->visited[h] == inode_id)
-                        return 0;
-                    h = (h + 1) & (ic->visited_cap ? ic->visited_cap - 1 : 7);
-                }
-                if (ic->visited_n < ic->visited_cap)
-                    break;
-                {
-                    size_t nc = ic->visited_cap ? ic->visited_cap * 2 : 64;
-                    uint64_t *nv = (uint64_t *)realloc(ic->visited, nc * sizeof *nv);
-                    if (!nv) { ic->oom = 1; return -1; }
-                    ic->visited = nv;
-                    ic->visited_cap = nc;
-                }
-            }
-            ic->visited[ic->visited_n++] = inode_id;
-        }
-    }
+    /* every base id is marked visited: nlink > 1 hardlinks share one row
+     * (one key in the inode range, so no intra-base dupes) and the delta
+     * pass below skips rows whose id was already reported from base */
+    if (!v3_iter_mark(ic, inode_id))
+        return -1;
 
     /* resolve name via dirent lookup */
     {
@@ -3205,6 +3291,38 @@ static int v3_iter_base_cb(void *ctx_, bt_key k, bt_val val)
 
         return ic->cb(ic->v, inode_id, got > 0 ? name : NULL, ic->ctx);
     }
+}
+
+/* WP-M21b: delta pass. Rows created (or recreated) since the last fold
+ * live ONLY in the delta -- the base scan above never sees their keys,
+ * so a fresh v3 volume (or any volume swept between folds) iterated as
+ * empty: measured, invf-cp of 5 files then sweep reported "live entries:
+ * 0 (of 0 walked)". Visit every delta PUT in the inode range whose id
+ * the base pass did not already report. */
+static int v3_iter_delta_cb(void *ctx_, const uint8_t *key, uint16_t klen,
+                            const delta_ref *ref)
+{
+    v3_iter_ctx *ic = (v3_iter_ctx *)ctx_;
+    uint64_t inode_id = 0;
+    char name[INVFS_MAX_NAME + 1];
+    uint64_t parent;
+    int got, i;
+
+    if (klen != 8)
+        return 0;
+    for (i = 0; i < 8; i++)
+        inode_id = (inode_id << 8) | key[i];
+    if (ref->flags & INVFS_DELTA_FLAG_DELETE)
+        return 0;                   /* created and deleted between folds */
+    if (v3_iter_seen(ic, inode_id))
+        return 0;                   /* base row (possibly updated): done */
+    if (!v3_iter_mark(ic, inode_id))
+        return -1;
+
+    name[0] = 0;
+    got = vol_v3_name_of(ic->v, inode_id, name, sizeof name, &parent);
+    (void)parent;
+    return ic->cb(ic->v, inode_id, got > 0 ? name : NULL, ic->ctx);
 }
 
 /* Public entry point. Callback is invoked once per live inode (nlink > 1
@@ -3255,6 +3373,14 @@ int vol_v3_iter_live_inodes(invfs_volume *v,
                     v3_iter_base_cb, &ic);
     if (rc != 0 || ic.oom)
         rc = -1;
+    /* WP-M21b: rows created since the last fold exist only in the delta;
+     * visit the ones the base pass did not already report. Same key range
+     * (max_id above already accounts for the delta's highest id). */
+    if (rc == 0) {
+        int drc = vol_delta_range(v, lo, 8, hi, 8, v3_iter_delta_cb, &ic);
+        if (drc != 0 || ic.oom)
+            rc = -1;
+    }
     free(ic.visited);
     return rc;
 }

@@ -87,6 +87,43 @@ static int deep_cb(void *ctx_, uint64_t rec_pos,
     return 0;
 }
 
+/* WP-M21b: v3 collector for the deep pass -- same deep_ent array, fed by
+ * the M18 live-set iterator instead of the (absent) v2 record stream.
+ * The iterator already yields live rows only, so the superseded check
+ * deep_cb needs is moot; sizes come straight from the inode row. */
+static int deep_v3_cb(invfs_volume *v, uint64_t inode_id, const char *name,
+                      void *ctx_)
+{
+    deep_ctx *c = (deep_ctx *)ctx_;
+    invfs_v3_inode in;
+    char full[1024];
+    size_t k;
+    (void)name;
+
+    if (vol_v3_inode_get(v, inode_id, &in) != 1)
+        return 0;
+    if (vol_v3_path_of(v, inode_id, full, sizeof full) != 1)
+        return 0;                       /* unlinked mid-pass: skip */
+    if ((unsigned char)full[0] == 0x01)
+        return 0;                       /* internal owners: not user files */
+    for (k = 0; k < c->nents; k++)
+        if (c->ents[k].id == inode_id) break;
+    if (k == c->nents) {
+        if (c->nents == c->capents) {
+            size_t nc = c->capents ? c->capents * 2 : 256;
+            void *ne = realloc(c->ents, nc * sizeof *c->ents);
+            if (!ne) return 1;
+            c->ents = (deep_ent *)ne;
+            c->capents = nc;
+        }
+        k = c->nents++;
+    }
+    c->ents[k].id = inode_id;
+    c->ents[k].fsz = in.size;
+    snprintf(c->ents[k].nm, sizeof c->ents[k].nm, "%s", full);
+    return 0;
+}
+
 int main(int argc, char **argv)
 {
     blkio io;
@@ -312,7 +349,12 @@ int main(int argc, char **argv)
         printf("deep: reading all live files...\n");
         memset(&dc, 0, sizeof dc);
         dc.vol = vol;
-        vol_records_walk(vol, deep_cb, &dc);
+        /* WP-M21b: v3 live set comes from the M18 iterator (base tree +
+         * delta overlay); the record walk below finds nothing there. */
+        if (vol_sb(vol)->vol_flags & VOLF_V3)
+            (void)vol_v3_iter_live_inodes(vol, deep_v3_cb, &dc);
+        else
+            vol_records_walk(vol, deep_cb, &dc);
         ents = dc.ents; nents = dc.nents;
         for (size_t k = 0; k < nents; k++) {
             uint64_t ino = ents[k].id, fsz = ents[k].fsz;
