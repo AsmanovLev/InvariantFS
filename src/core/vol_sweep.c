@@ -1448,13 +1448,8 @@ int vol_sweep_pending(invfs_volume *v)
      * (self-guards: single-device / degraded / read-only -> no-op) */
     vol_tier_migrate(v);
     vol_tz_flush(v);
-    /* WP30 Phase 5: metadata extent merge/consolidation. Runs after sweep
-     * walk as a trailing phase. Triggered when metadata footprint > threshold,
-     * extent_count > threshold, or dead_record_fraction > threshold.
-     * Checkpoint bracketing: caller should have called vol_ckp_end before
-     * this, then call vol_ckp_end again after if merge ran. */
-    if (vol_meta_merge_run(v) < 0)
-        fprintf(stderr, "[sweep] warning: metadata merge failed\n");
+    /* WP-M21: extent shrink/merge run was retired (the mapper is pre-allocated
+     * at mkfs; fold is the reclaim path now). */
     /* WP-M18: after sweep walk + meta merge, try to fold the delta and then
      * schedule reclaim. Both are idempotent stubs in this WP; M15 fills them. */
     if ((v->sb.vol_flags & VOLF_V3) && !(v->sb.vol_flags & VOLF_READONLY)) {

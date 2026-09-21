@@ -602,11 +602,6 @@ typedef struct invfs_volume {
     invfs_spt0 spt0;                   /* SPT0 descriptor (loaded from disk) */
     int      savepoint_live;            /* SPT0 was present and CRC-valid */
     invfs_blkptr pinned_root;           /* base_root at capture (zeroed = none) */
-    /* WP30 Phase 6: merge-in-progress flag for concurrency safety.
-     * Set during vol_meta_merge_run, checked in meta_get_append_pos to
-     * prevent concurrent metadata operations from reading partially-updated
-     * mapper state. */
-    int merge_in_progress;
     /* WP30 Phase 6+: rwlock protecting meta_mapper and MET0 state.
      * Readers hold shared lock (pthread_rwlock_rdlock); writers hold
      * exclusive lock (pthread_rwlock_wrlock). Protects: meta_mapper_get,
@@ -1136,9 +1131,6 @@ uint64_t alloc_meta_extent(invfs_volume *v, uint8_t size_class);
 int extend_meta_extent(invfs_volume *v, uint64_t extent_idx, uint8_t new_size_class);
 int meta_journal_alloc(invfs_volume *v, uint16_t ext_idx, uint64_t pba, uint8_t size_class);
 int meta_journal_extend(invfs_volume *v, uint16_t ext_idx, uint8_t size_class, uint8_t aux);
-int meta_journal_shrink(invfs_volume *v, uint16_t ext_idx, uint8_t size_class);
-int meta_journal_free(invfs_volume *v, uint16_t ext_idx);
-int meta_journal_merge(invfs_volume *v, uint16_t dst_idx, uint16_t src_idx);
 
 /* WP30: queue one metadata extent WAL op for the next flush's append */
 int jrn_push_meta_op(invfs_volume *v, const invfs_meta_wal *w);
@@ -1196,19 +1188,7 @@ int meta_journal_alloc(invfs_volume *v, uint16_t ext_idx, uint64_t pba,
                        uint8_t size_class);
 int meta_journal_extend(invfs_volume *v, uint16_t ext_idx,
                         uint8_t size_class, uint8_t aux);
-int meta_journal_shrink(invfs_volume *v, uint16_t ext_idx, uint8_t size_class);
-int meta_journal_free(invfs_volume *v, uint16_t ext_idx);
-int meta_journal_merge(invfs_volume *v, uint16_t dst_idx, uint16_t src_idx);
-
-/* WP30 Phase 5: metadata extent merge/consolidation.
- * In-place shrink: drop dead records, rewrite with smaller size_class.
- * Packing: move live records to target's free tail, free source extent.
- * Returns 0 on success, <0 on error, 1 if nothing to do. */
-int vol_meta_extent_shrink(invfs_volume *v, uint16_t ext_idx);
-int vol_meta_extent_merge(invfs_volume *v, uint16_t src_idx, uint16_t tgt_idx);
-int vol_meta_merge_needed(invfs_volume *v);
-int vol_meta_merge_step(invfs_volume *v);
-int vol_meta_merge_run(invfs_volume *v);
+/* WP-M21: meta_journal_free / meta_journal_merge retired. */
 
 /* ---- WP27: segment extents --------------------------------------------
  * AST entries carry pba but no physical length (the 32B wire format has
@@ -1492,13 +1472,10 @@ uint64_t vol_transcode_abort(invfs_volume *v, const char *name);
 const uint8_t *meta_locate_ext(const uint8_t *rec, size_t rec_len,
                                        size_t *ext_len_out);
 
-/* WP27 fold-churn backstop behind the record append sites (defined in
- * vol_records.c): when an append would overflow the inode area, compact
- * the dead prefix online first (vol_inode_compact's own gates: never
- * under a live checkpoint / read-only / a pending CMP0). Returns 0 when
- * `need` bytes fit afterwards. Callers that hold a record position (a
- * position-kill target) must RE-READ it after a successful call --
- * compaction moves every record. */
+/* WP-M21: no online compaction step remains. inode_area_make_room now
+ * refuses ENOSPC on the legacy (format_version=0) inode area (which is
+ * read-only on mount anyway); on v0.3.0+ it decides purely from the
+ * metadata mapper (active extent's free tail OR an allocatable slot). */
 int  inode_area_make_room(invfs_volume *v, uint64_t need);
 
 /* read the latest live record for an inode id; returns malloc'd buffer and

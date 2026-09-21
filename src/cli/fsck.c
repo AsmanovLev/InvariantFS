@@ -133,30 +133,9 @@ int main(int argc, char **argv)
         return 1;
     }
 
-    /* WP22e: an interrupted inode-area compaction (CMP0 armed + the
-     * read-only latch) must be completed BEFORE any scan -- the area may
-     * be torn mid-copy and only the staging run holds the compacted
-     * stream. -f rolls the staging in (idempotent; verified before
-     * anything is overwritten) and clears descriptor+latch; the staging
-     * run then reads as an ordinary orphan for the rebuild below, exactly
-     * like a stranded one from a pre-arm crash. Report mode notes it and
-     * scans what is there (inspection). */
-    if (vol_compact_pending(v)) {
-        if (!fix) {
-            fprintf(stderr, "invf-fsck: %s: an interrupted inode-area "
-                    "compaction is pending; the scan below may be partial "
-                    "-- run invf-fsck -f %s to finish it\n", img, img);
-        } else {
-            if (vol_compact_recover(v) < 0) {
-                fprintf(stderr, "invf-fsck: %s: compaction roll-forward "
-                        "failed; the volume is left for review\n", img);
-                vol_close(v);
-                return 1;
-            }
-            if (!quiet)
-                printf("  compaction: interrupted pass rolled forward\n");
-        }
-    }
+    /* WP-M21: CMP0/CMPS retired with online compaction. No descriptor is
+     * ever armed, no staging run can be stranded. The fall-through scan
+     * (below) is the only thing needed. */
 
     if (vol_fsck_scan(v, &rep, fix) != 0) {
         fprintf(stderr, "invf-fsck: scan failed\n");

@@ -452,7 +452,7 @@ int main(int argc, char **argv)
     const invfs_superblock *sb;
     int err, dry = 0, seal = 0, unseal = 0, bench = 0, realize = 0;
     int no_realize = 0, stopped = 0;
-    int fast = 0, compact_only = 0;
+    int fast = 0;
     const char *extract_dir = NULL;    /* WP23 --extract-packs mode */
     double rb_f = -1.0, rp_f = -1.0;   /* <0: flag absent */
     int rp_algo = 0;                   /* explicit :rs-vm/:rs-cauchy suffix */
@@ -532,7 +532,7 @@ int main(int argc, char **argv)
         } else if (strcmp(a, "--fast") == 0) {
             fast = 1;
         } else if (strcmp(a, "--compact") == 0) {
-            compact_only = 1;
+            /* retired in WP-M21; accepted silently as a no-op */
         } else if (strcmp(a, "--extract-packs") == 0 && i + 1 < argc) {
             extract_dir = argv[++i];
         } else if (strcmp(a, "--seal") == 0) {
@@ -591,13 +591,8 @@ int main(int argc, char **argv)
         fprintf(stderr, "--seal conflicts with --redundant-*\n");
         return 2;
     }
-    /* --compact is the pass alone: no walk, no checkpoint, no seal */
-    if (compact_only &&
-        (dry || fast || seal || unseal || bench || realize ||
-         rb_f >= 0 || rp_f >= 0)) {
-        fprintf(stderr, "--compact conflicts with the sweep/seal flags\n");
-        return 2;
-    }
+    /* WP-M21: --compact retired; the fold (vol_v3_fold_request) is the
+     * only reclaim path, and it always runs as part of a normal sweep. */
 
     /* per-file lines go to stdout, the summary to stderr: unbuffered, or a
      * redirected log tears a line at every 4 KB flush boundary */
@@ -674,35 +669,10 @@ int main(int argc, char **argv)
     }
     sb = vol_sb(vol);
 
-    /* WP22e: an interrupted inode-area compaction left CMP0 armed and the
-     * volume latched read-only -- sweeping on it would append onto a
-     * possibly torn area. invf-fsck -f rolls the staged stream in
-     * (idempotent) and clears the latch. */
-    if (vol_compact_pending(vol)) {
-        fprintf(stderr, "invf-sweep: %s: an interrupted inode-area "
-                "compaction is pending; run invf-fsck -f %s to finish it "
-                "first\n", img, img);
-        vol_close(vol);
-        return 1;
-    }
-
-    /* WP22e --compact: the compaction pass alone (no realize, no
-     * checkpoint, no walk, no seal). The engine prints the outcome or the
-     * decline reason (a live CKP0 checkpoint bars compaction: rollback
-     * truncates to its absolute positions). */
-    if (compact_only) {
-        int crc;
-        uint64_t before = 0, after = 0;
-        crc = vol_inode_compact(vol, &before, &after);
-        if (crc > 0) {
-            printf("inode area compacted: %llu -> %llu bytes\n",
-                   (unsigned long long)before, (unsigned long long)after);
-            if (vol_flush(vol) != 0)
-                fprintf(stderr, "warning: final flush failed\n");
-        }
-        vol_close(vol);
-        return crc < 0 ? 1 : 0;
-    }
+    /* WP-M21: the inline inode-area compaction + the CMP0 recovery preflight
+     * both retired; --compact is now a recognised-but-removed flag (we
+     * accept "invf-sweep --compact foo.img" as a synonym for a normal
+     * sweep of foo.img, since the fold is unconditional inside the run). */
 
     /* WP23 --extract-packs: a standalone, read-only, engine-side mode for
      * the sweepboot maintenance boot (tools/sweepboot-init.sh). No sweep,
@@ -1037,35 +1007,12 @@ progress:
             fprintf(stderr, "warning: final flush failed\n");
     }
 
-    /* WP22e: hot tail pruning. The sweep appends a fresh record version +
-     * tombstone per rewritten/stamped file, so the inode area's dead share
-     * climbs; past ~30% dead bytes, compact the area online (live records
-     * verbatim, id order, tombstones dropped; the CMP0 crash protocol makes
-     * a mid-pass kill recoverable). NEVER while a CKP0 checkpoint is live
-     * -- rollback truncates the area to the checkpoint's absolute
-     * positions -- and never on a read-only volume; the engine prints the
-     * skip reason. INVFS_NO_COMPACT=1 opts out (the --compact form is the
-     * manual override). A failure here never invalidates the sweep. */
-    if (!dry) {
-        const char *nc = getenv("INVFS_NO_COMPACT");
-        int compact_off = nc && strcmp(nc, "0") != 0;   /* =1 (or any
-                        non-"0" value) disables the automatic pass */
-        if (!compact_off) {
-            uint64_t used = rec_bytes;   /* WP42: walked record footprint */
-            uint64_t live = vol_inode_live_bytes(vol);
-            if (live && used > live && (used - live) * 10 > used * 3) {
-                uint64_t before = 0, after = 0;
-                int crc = vol_inode_compact(vol, &before, &after);
-                if (crc > 0)
-                    printf("inode area compacted: %llu -> %llu bytes\n",
-                           (unsigned long long)before,
-                           (unsigned long long)after);
-                else if (crc < 0)
-                    fprintf(stderr, "inode compact: pass failed (sweep "
-                                    "results are intact)\n");
-            }
-        }
-    }
+    /* WP-M21: hot-tail pruning retired with on-line compaction. The fold
+     * (vol_v3_fold_request) replaces it -- it always runs as part of the
+     * sweep, idempotently, and never invalidates a sweep that already
+     * succeeded. INVFS_NO_COMPACT=1 (and the --compact flag) is accepted
+     * but ignored. */
+    (void)rec_bytes;
 
     /* WP20 --seal / WP20b: (re)seal the shadow-zone parity AFTER the sweep
      * is fully flushed -- the parity covers the post-sweep state.

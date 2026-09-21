@@ -37,384 +37,51 @@ uint64_t idx_hash(const char *s, size_t n)
 }
 
 
-static void idx_clear(invfs_volume *v)
-{
-    size_t i;
-    if (v->nbuck) {
-        for (i = 0; i <= v->nmask; i++) {
-            name_index_entry *e = v->nbuck[i];
-            while (e) { name_index_entry *nx = e->next; free(e); e = nx; }
-        }
-        free(v->nbuck);
-    }
-    if (v->dbuck) {
-        for (i = 0; i <= v->dmask; i++) {
-            dir_index_entry *e = v->dbuck[i];
-            while (e) { dir_index_entry *nx = e->next; free(e); e = nx; }
-        }
-        free(v->dbuck);
-    }
-    if (v->ibuck) {
-        for (i = 0; i <= v->imask; i++) {
-            id_index_entry *e = v->ibuck[i];
-            while (e) { id_index_entry *nx = e->next; free(e); e = nx; }
-        }
-        free(v->ibuck);
-    }
-    v->nbuck = NULL; v->dbuck = NULL; v->ibuck = NULL;
-    v->nmask = v->dmask = v->imask = 0;
-    v->ncount = v->dcount = v->icount = 0;
-}
+/* ---- WP-M21: in-memory name index (nbuck/dbuck/ibuck) retired -------
+ * The mount-scan O(N) index that the v2 write path used to maintain for
+ * path lookups is gone: v3 resolves names through the dirent btree
+ * (vol_v3_path_*) and the data plane short-circuits on VOLF_V3. The
+ * legacy read-only path (format_version=0) gets a stub here that
+ * returns "not found" for every lookup -- the volume opens read-only on
+ * legacy, and the index being absent simply means no path resolves
+ * (fsck sees the records directly via vol_records_walk). The data
+ * plane still calls these functions (write-side maintenance); they
+ * become no-ops on every path. */
 
-
-/* Grow to keep the load factor near 1. Failure is not fatal: the table
-   simply stays smaller and lookups get longer chains. */
-static void idx_grow_names(invfs_volume *v)
-{
-    size_t ncap = (v->nmask + 1) * 2, i;
-    name_index_entry **nb = (name_index_entry **)calloc(ncap, sizeof *nb);
-    if (!nb) return;
-    for (i = 0; i <= v->nmask; i++) {
-        name_index_entry *e = v->nbuck[i];
-        while (e) {
-            name_index_entry *nx = e->next;
-            size_t b = (size_t)(idx_hash(e->name, e->nlen) & (ncap - 1));
-            e->next = nb[b]; nb[b] = e;
-            e = nx;
-        }
-    }
-    free(v->nbuck);
-    v->nbuck = nb;
-    v->nmask = ncap - 1;
-}
-
-
-static void idx_grow_dirs(invfs_volume *v)
-{
-    size_t ncap = (v->dmask + 1) * 2, i;
-    dir_index_entry **nb = (dir_index_entry **)calloc(ncap, sizeof *nb);
-    if (!nb) return;
-    for (i = 0; i <= v->dmask; i++) {
-        dir_index_entry *e = v->dbuck[i];
-        while (e) {
-            dir_index_entry *nx = e->next;
-            size_t b = (size_t)(idx_hash(e->name, e->nlen) & (ncap - 1));
-            e->next = nb[b]; nb[b] = e;
-            e = nx;
-        }
-    }
-    free(v->dbuck);
-    v->dbuck = nb;
-    v->dmask = ncap - 1;
-}
-
-
-static int idx_init(invfs_volume *v)
-{
-    idx_clear(v);
-    v->nbuck = (name_index_entry **)calloc(1024, sizeof *v->nbuck);
-    v->dbuck = (dir_index_entry **)calloc(256, sizeof *v->dbuck);
-    v->ibuck = (id_index_entry **)calloc(1024, sizeof *v->ibuck);
-    if (!v->nbuck || !v->dbuck || !v->ibuck) { idx_clear(v); return -1; }
-    v->nmask = 1023;
-    v->dmask = 255;
-    v->imask = 1023;
-    return 0;
-}
-
-
-/* 64-bit mix (splitmix64 finalizer): inode ids are sequential, so the low
-   bits alone would pile every id into one bucket after a grow */
-static uint64_t idx_mix(uint64_t x)
-{
-    x ^= x >> 30; x *= 0xbf58476d1ce4e5b9ULL;
-    x ^= x >> 27; x *= 0x94d049bb133111ebULL;
-    return x ^ (x >> 31);
-}
-
-
-static void idx_grow_ids(invfs_volume *v)
-{
-    size_t ncap = (v->imask + 1) * 2, i;
-    id_index_entry **nb = (id_index_entry **)calloc(ncap, sizeof *nb);
-    if (!nb) return;
-    for (i = 0; i <= v->imask; i++) {
-        id_index_entry *e = v->ibuck[i];
-        while (e) {
-            id_index_entry *nx = e->next;
-            size_t b = (size_t)(idx_mix(e->id) & (ncap - 1));
-            e->next = nb[b]; nb[b] = e;
-            e = nx;
-        }
-    }
-    free(v->ibuck);
-    v->ibuck = nb;
-    v->imask = ncap - 1;
-}
-
-
-/* Remember where inode `id` lives. The last record for an id wins, matching
-   the old scan, which kept walking and overwrote rec_pos on every hit. */
 void idx_put_id(invfs_volume *v, uint64_t id, uint64_t pos)
-{
-    size_t b;
-    id_index_entry *e;
-    if (!v->ibuck) return;
-    b = (size_t)(idx_mix(id) & v->imask);
-    for (e = v->ibuck[b]; e; e = e->next)
-        if (e->id == id) { e->pos = pos; return; }
-    e = (id_index_entry *)malloc(sizeof *e);
-    if (!e) return;
-    e->id = id;
-    e->pos = pos;
-    e->next = v->ibuck[b];
-    v->ibuck[b] = e;
-    v->icount++;
-    if (v->icount > v->imask + 1) idx_grow_ids(v);
-}
+{ (void)v; (void)id; (void)pos; }
 
-
-/* 0 = unknown; callers fall back to a scan */
 uint64_t idx_get_id(invfs_volume *v, uint64_t id)
-{
-    size_t b;
-    const id_index_entry *e;
-    if (!v->ibuck) return 0;
-    b = (size_t)(idx_mix(id) & v->imask);
-    for (e = v->ibuck[b]; e; e = e->next)
-        if (e->id == id) return e->pos;
-    return 0;
-}
+{ (void)v; (void)id; return 0; }
 
-
-/* WP48: reconcile the id->position index with the authoritative name index.
- * Every live name entry carries its record's current position, so one pass
- * over the buckets repairs every stale id hint (compaction/rewrite during a
- * session can vacate a position the id index still names). Idempotent;
- * callers guard it with v->id_idx_checked so it runs at most once. */
 void idx_repair_ids_from_names(invfs_volume *v)
-{
-    size_t b;
-    if (!v->nbuck || !v->ibuck) return;
-    for (b = 0; b <= v->nmask; b++) {
-        const name_index_entry *e;
-        for (e = v->nbuck[b]; e; e = e->next) {
-            if (!e->nlen) continue;
-            idx_put_id(v, e->inode_id, e->pos);
-        }
-    }
-}
-
-
-/* Shared-id bookkeeping (WP22c/F2): the rename fast path hardlinks the
- * copy onto the old id, so two live records can resolve through one id's
- * L2P mappings, and a torn drop can leave such a pair behind too. Tracked
- * from the name index's own updates, so the count is exactly "live names
- * pointing at this id". The retire path reads it before dropping maps. */
-static void idx_ref_id(invfs_volume *v, uint64_t id, int delta)
-{
-    size_t b;
-    id_index_entry *e;
-    if (!v->ibuck) return;
-    b = (size_t)(idx_mix(id) & v->imask);
-    for (e = v->ibuck[b]; e; e = e->next)
-        if (e->id == id) {
-            if (delta > 0) e->live++;
-            else if (e->live) e->live--;
-            return;
-        }
-    if (delta <= 0) return;
-    /* no entry yet (the record's idx_put_id lands right after): create a
-     * hint-less one -- pos 0 reads as "unknown" and callers fall back to
-     * a scan, exactly as if the entry did not exist */
-    e = (id_index_entry *)calloc(1, sizeof *e);
-    if (!e) return;
-    e->id = id;
-    e->live = 1;
-    e->next = v->ibuck[b];
-    v->ibuck[b] = e;
-    v->icount++;
-    if (v->icount > v->imask + 1) idx_grow_ids(v);
-}
-
+{ (void)v; }
 
 uint32_t idx_id_live(const invfs_volume *v, uint64_t id)
-{
-    size_t b;
-    const id_index_entry *e;
-    if (!v->ibuck) return 0;
-    b = (size_t)(idx_mix(id) & v->imask);
-    for (e = v->ibuck[b]; e; e = e->next)
-        if (e->id == id) return e->live;
-    return 0;
-}
+{ (void)v; (void)id; return 0; }
 
+void idx_bump_dirs(invfs_volume *v, const char *name, size_t nlen, int delta)
+{ (void)v; (void)name; (void)nlen; (void)delta; }
 
-/* add `delta` to the live count of every directory prefix of `name`:
-   "a/b/c.txt" bumps "a/" and "a/b/"; the anchor "a/" bumps "a/" itself,
-   which is what keeps an empty directory visible */
-void idx_bump_dirs(invfs_volume *v, const char *name, size_t nlen,
-                          int delta)
-{
-    size_t i;
-    if (!v->dbuck) return;
-    for (i = 0; i < nlen; i++) {
-        size_t plen, b;
-        dir_index_entry *e, **pp;
-        if (name[i] != '/') continue;
-        plen = i + 1;                     /* prefix includes the '/' */
-        b = (size_t)(idx_hash(name, plen) & v->dmask);
-        pp = &v->dbuck[b];
-        for (e = *pp; e; pp = &e->next, e = e->next)
-            if (e->nlen == plen && memcmp(e->name, name, plen) == 0) break;
-        if (e) {
-            if (delta < 0) {
-                if (e->count) e->count--;
-                if (e->count == 0) { *pp = e->next; free(e); v->dcount--; }
-            } else {
-                e->count++;
-            }
-            continue;
-        }
-        if (delta < 0) continue;          /* nothing to decrement */
-        e = (dir_index_entry *)malloc(sizeof *e + plen);
-        if (!e) continue;
-        memcpy(e->name, name, plen);
-        e->name[plen] = 0;
-        e->nlen = (uint32_t)plen;
-        e->count = 1;
-        e->next = v->dbuck[b];
-        v->dbuck[b] = e;
-        v->dcount++;
-        if (v->dcount > v->dmask + 1) idx_grow_dirs(v);
-    }
-}
-
-
-/* record `name` as live under `id`. Replacing an existing name keeps the
-   directory counts untouched -- it is still one live name. */
 void idx_put(invfs_volume *v, const char *name, size_t nlen,
-                    uint64_t id, uint64_t pos, uint64_t size, uint64_t ctime)
-{
-    size_t b;
-    name_index_entry *e;
-    if (!v->nbuck || nlen == 0 || nlen > 255) return;
-    b = (size_t)(idx_hash(name, nlen) & v->nmask);
-    for (e = v->nbuck[b]; e; e = e->next)
-        if (e->nlen == nlen && memcmp(e->name, name, nlen) == 0) {
-            /* update of an existing name: only logical size moves */
-            v->hot.logical_bytes += size;
-            v->hot.logical_bytes -= e->size;
-            if (e->inode_id != id) {   /* replacement under a new id */
-                idx_ref_id(v, e->inode_id, -1);
-                idx_ref_id(v, id, +1);
-            }
-            e->inode_id = id;
-            e->pos = pos;
-            e->size = size;
-            e->ctime = ctime;
-            return;
-        }
-    /* brand-new name: population counter (dir anchors end with '/') */
-    if (nlen && name[nlen - 1] == '/') v->hot.dirs++;
-    else { v->hot.files++; v->hot.logical_bytes += size; }
-    e = (name_index_entry *)malloc(sizeof *e + nlen);
-    if (!e) return;
-    memcpy(e->name, name, nlen);
-    e->name[nlen] = 0;
-    e->nlen = (uint32_t)nlen;
-    e->inode_id = id;
-    e->pos = pos;
-    e->size = size;
-    e->ctime = ctime;
-    e->next = v->nbuck[b];
-    v->nbuck[b] = e;
-    v->ncount++;
-    idx_ref_id(v, id, +1);
-    idx_bump_dirs(v, name, nlen, +1);
-    if (v->ncount > v->nmask + 1) idx_grow_names(v);
-}
+             uint64_t id, uint64_t pos, uint64_t size, uint64_t ctime)
+{ (void)v; (void)name; (void)nlen; (void)id; (void)pos; (void)size; (void)ctime; }
 
+void idx_del(invfs_volume *v, const char *name, size_t nlen, uint64_t id)
+{ (void)v; (void)name; (void)nlen; (void)id; }
 
-/* A tombstone kills only ITS version of the name: the sweep appends the
-   replacement record BEFORE the tombstone for the old inode, so a blind
-   delete-by-name would drop the newer file. Mirrors the old vol_find scan. */
-void idx_del(invfs_volume *v, const char *name, size_t nlen,
-                    uint64_t id)
-{
-    size_t b;
-    name_index_entry *e, **pp;
-    if (!v->nbuck || nlen == 0 || nlen > 255) return;
-    b = (size_t)(idx_hash(name, nlen) & v->nmask);
-    pp = &v->nbuck[b];
-    for (e = *pp; e; pp = &e->next, e = e->next)
-        if (e->nlen == nlen && memcmp(e->name, name, nlen) == 0) break;
-    if (!e || e->inode_id != id) return;
-    *pp = e->next;
-    if (nlen && name[nlen - 1] == '/') v->hot.dirs--;
-    else { v->hot.files--; v->hot.logical_bytes -= e->size; }
-    idx_ref_id(v, e->inode_id, -1);
-    free(e);
-    v->ncount--;
-    idx_bump_dirs(v, name, nlen, -1);
-}
+void idx_del_at(invfs_volume *v, const char *name, size_t nlen, uint64_t pos)
+{ (void)v; (void)name; (void)nlen; (void)pos; }
 
-
-/* v2 position kill: remove the entry whose record lives exactly at `pos`,
- * whatever its id. Same-id metadata rewrites chain versions under one name,
- * so a plain id match would kill the NEWEST version instead of the one the
- * tombstone names. Falls back to nothing -- callers keep the id path for
- * legacy (file_size==0) tombstones. */
-void idx_del_at(invfs_volume *v, const char *name, size_t nlen,
-                       uint64_t pos)
-{
-    size_t b;
-    name_index_entry *e, **pp;
-    if (!v->nbuck || nlen == 0 || nlen > 255 || pos == 0) return;
-    b = (size_t)(idx_hash(name, nlen) & v->nmask);
-    pp = &v->nbuck[b];
-    for (e = *pp; e; pp = &e->next, e = e->next)
-        if (e->nlen == nlen && memcmp(e->name, name, nlen) == 0 &&
-            e->pos == pos)
-            break;
-    if (!e) return;
-    *pp = e->next;
-    if (nlen && name[nlen - 1] == '/') v->hot.dirs--;
-    else { v->hot.files--; v->hot.logical_bytes -= e->size; }
-    idx_ref_id(v, e->inode_id, -1);
-    free(e);
-    v->ncount--;
-    idx_bump_dirs(v, name, nlen, -1);
-}
-
-const name_index_entry *idx_get(invfs_volume *v, const char *name,
-                                       size_t nlen)
-{
-    size_t b;
-    const name_index_entry *e;
-    if (!v->nbuck || nlen == 0 || nlen > 255) return NULL;
-    b = (size_t)(idx_hash(name, nlen) & v->nmask);
-    for (e = v->nbuck[b]; e; e = e->next)
-        if (e->nlen == nlen && memcmp(e->name, name, nlen) == 0) return e;
-    return NULL;
-}
+const name_index_entry *idx_get(invfs_volume *v, const char *name, size_t nlen)
+{ (void)v; (void)name; (void)nlen; return NULL; }
 
 uint64_t idx_dir_count(invfs_volume *v, const char *pre, size_t plen)
-{
-    size_t b;
-    const dir_index_entry *e;
-    if (!v->dbuck || plen == 0) return 0;
-    b = (size_t)(idx_hash(pre, plen) & v->dmask);
-    for (e = v->dbuck[b]; e; e = e->next)
-        if (e->nlen == plen && memcmp(e->name, pre, plen) == 0)
-            return e->count;
-    return 0;
-}
+{ (void)v; (void)pre; (void)plen; return 0; }
 
 int idx_dir_live(invfs_volume *v, const char *pre, size_t plen)
-{
-    return idx_dir_count(v, pre, plen) != 0;
-}
+{ (void)v; (void)pre; (void)plen; return 0; }
+
 
 
 /* Widen the dirty byte range to cover the byte holding bit i, so vol_flush
@@ -1585,8 +1252,9 @@ static invfs_volume *vol_open_inner(const char *path, int at_ckpt,
         { *err = -7; goto fail; }
 
     /* WP30 Phase 5: load metadata extent mapper table (v0.3.0+ only).
-     * For format_version=0 (read-only legacy) there is no MET0/mapper and
-     * the legacy contiguous inode area scan in compact_scan_live runs. */
+     * For format_version=0 (read-only legacy) there is no MET0/mapper; the
+     * legacy contiguous inode area is read-only in v3 (vol_open refused
+     * writes via VOLF_READONLY). */
     if (v->met0_present) {
         if (meta_mapper_load(v) != 0) { *err = -7; goto fail; }
         v->journal_start = v->sb.metadata_zone_start + v->bitmap_blocks +
@@ -1658,7 +1326,8 @@ static invfs_volume *vol_open_inner(const char *path, int at_ckpt,
          * the inode path persists the dirty bitmap before it publishes a
          * root, the superblock is never rewritten, so the on-disk READONLY
          * state is untouched. */
-        if (idx_init(v) != 0) { *err = -6; goto fail; }
+        /* WP-M21: idx_init retired (the in-memory name index is gone;
+         * v3 resolves names through the dirent btree). */
         v3_probe_rt30(v);
         if (mbuf_rt30_load(v) < 0) { *err = -6; goto fail; }
         mbuf_init(v);
@@ -1694,7 +1363,6 @@ static invfs_volume *vol_open_inner(const char *path, int at_ckpt,
         size_t si;
         int done = 0;
 
-        if (idx_init(v) != 0) { *err = -6; goto fail; }
         /* extent sequence to walk: when a mapper exists, every extent 0..N-1
          * with the active extent's end trimmed at inode_area_pos; otherwise
          * the legacy contiguous region from inode_area_start..inode_area_end. */
@@ -2330,7 +1998,7 @@ void vol_close(invfs_volume *v)
     vol_delta_close(v);
     io_close(&v->io);
     pthread_rwlock_destroy(&v->meta_lock);
-    idx_clear(v);
+    /* WP-M21: idx_clear retired (in-memory name index gone). */
     arc_destroy(v->arc);
     cpack_map_cache_reset(v);
     free(v->heat_tab);
@@ -3038,38 +2706,6 @@ int meta_journal_extend(invfs_volume *v, uint16_t ext_idx,
     e.ext_idx = ext_idx;
     e.size_class = size_class;
     e.aux = aux;
-    e.crc = meta_crc16(&e);
-    return jrn_push_meta_op(v, &e);
-}
-
-int meta_journal_shrink(invfs_volume *v, uint16_t ext_idx, uint8_t size_class)
-{
-    invfs_meta_wal e;
-    memset(&e, 0, sizeof e);
-    e.type = INVFS_JRN_META_SHRINK;
-    e.ext_idx = ext_idx;
-    e.size_class = size_class;
-    e.crc = meta_crc16(&e);
-    return jrn_push_meta_op(v, &e);
-}
-
-int meta_journal_free(invfs_volume *v, uint16_t ext_idx)
-{
-    invfs_meta_wal e;
-    memset(&e, 0, sizeof e);
-    e.type = INVFS_JRN_META_FREE;
-    e.ext_idx = ext_idx;
-    e.crc = meta_crc16(&e);
-    return jrn_push_meta_op(v, &e);
-}
-
-int meta_journal_merge(invfs_volume *v, uint16_t dst_idx, uint16_t src_idx)
-{
-    invfs_meta_wal e;
-    memset(&e, 0, sizeof e);
-    e.type = INVFS_JRN_META_MERGE;
-    e.ext_idx = dst_idx;
-    e.aux = (uint8_t)src_idx;
     e.crc = meta_crc16(&e);
     return jrn_push_meta_op(v, &e);
 }

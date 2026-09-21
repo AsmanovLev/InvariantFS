@@ -205,20 +205,11 @@ int seal_view_load(invfs_volume *v, seal_view *sv)
         sv->shard2_id[shard] = id;
     }
     sv->nshards2 = (size_t)shard;
-    /* WP21: retention-registry shards ("\x01reten", "\x01reten1", ...) */
-    for (shard = 0;; shard++) {
-        char nm[32];
-        uint64_t id;
-        uint64_t *ns;
-        ret_shard_name(shard, nm, sizeof nm);
-        id = vol_find(v, nm);
-        if (!id) break;
-        ns = (uint64_t *)realloc(ret_id, (shard + 1) * sizeof *ret_id);
-        if (!ns) { free(ret_id); seal_view_free(sv); return -1; }
-        ret_id = ns;
-        ret_id[shard] = id;
-    }
-    nret = (size_t)shard;
+    /* WP-M21: retention-registry shards ("\x01reten", ...) are RETIRED.
+     * The checkpoint machinery that produced them is gone, so there are
+     * never any reten records to load. nret stays 0 and is_ret is never
+     * set below; the is_par bitmap alone describes the seal exclusion. */
+    nret = 0;
     for (i = 0; i < v->l2p_count; i++) {
         const invfs_l2p_entry *e = &v->l2p[i];
         uint64_t b, bend;

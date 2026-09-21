@@ -185,12 +185,8 @@ e2e: all
 	bash tools/run-e2e.sh tools/test-writepath.sh
 	bash tools/run-e2e.sh tools/test-acl.sh
 	bash tools/run-e2e.sh tools/test-flushfail.sh
-	bash tools/run-e2e.sh tools/test-compact.sh
 	bash tools/run-e2e.sh tools/test-multidev.sh
 	bash tools/run-e2e.sh tools/test-mkstemp.sh
-	bash tools/run-e2e.sh tools/test-meta-extent.sh
-	bash tools/run-e2e.sh tools/test-meta-extent-walk.sh
-	bash tools/run-e2e.sh tools/test-meta-overflow.sh
 
 # WP22b flakey tier: power-loss / unstable-device soak on dm-flakey over a
 # loop device. Standalone on purpose (needs passwordless sudo + dm-flakey,

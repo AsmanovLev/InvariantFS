@@ -822,37 +822,13 @@ int  vol_ckp_realize(invfs_volume *v, uint64_t *freed_blocks_out);
  * *reclaimed_out (optional) takes the orphan-block count the rebuild freed. */
 int  vol_rollback(invfs_volume *v, uint64_t *reclaimed_out);
 
-/* ---- WP22e: online inode-area compaction (hot tail pruning) ----
- * The append-only inode area accumulates dead record versions and
- * tombstones; compaction rewrites it with just the live records (verbatim,
- * same inode ids, id order, tombstones dropped) and cuts the dead tail.
- * Crash protocol: the compacted stream is staged in free space (CMPS
- * header + payload CRC, verified by read-back), the CMP0 descriptor AND
- * the VOLF_READONLY latch are armed in one block-0 write, the staging is
- * copied over the area, a zero guard terminates it, and descriptor+latch
- * are cleared in one write. A crash before the arm leaves the old area
- * intact (the stranded staging run is an fsck orphan); a crash after the
- * arm is rolled forward by invf-fsck -f (vol_compact_recover). Never runs
- * while a CKP0 sweep checkpoint is live (rollback truncates to absolute
- * checkpoint positions), nor on read-only/recovering volumes.
- *
- * vol_inode_live_bytes: sum of rec_len+4 over the live records (what the
- * area would compact to); 0 on an empty area or a troubled scan -- never
- * trigger on it.
- * vol_inode_compact: 1 = compacted (the out params take the used bytes
- * before and after), 0 = declined (reason on stderr; the run is fine),
- * -1 = hard error.
- * vol_compact_pending: 1 = a CMP0 descriptor is armed (an interrupted
- * compaction is pending; write tools should refuse and point at fsck).
- * vol_compact_recover: 1 = rolled an interrupted pass forward (idempotent),
- * 0 = none pending, -1 = the descriptor/staging failed verification (the
- * area is left untouched for review). fsck-side only; the staging run is
- * left for the rebuild to reclaim as an orphan. */
-uint64_t vol_inode_live_bytes(invfs_volume *v);
-int  vol_inode_compact(invfs_volume *v, uint64_t *before_out,
-                       uint64_t *after_out);
-int  vol_compact_pending(invfs_volume *v);
-int  vol_compact_recover(invfs_volume *v);
+/* WP-M21: inode-area compaction retired. The v3 inode area lives in
+ * dynamic metadata extents (WP30), and dead-record reclaim happens via
+ * the fold (vol_v3_fold, vol_reclaim_schedule). Per-extent reclaim runs
+ * inside invf-sweep via vol_v3_fold_request; readers see no difference
+ * from the old cut-and-replay shape, but no on-line cut has to keep an
+ * absolute-position tombstone alive. The CMP0/CMPS descriptors + their
+ * reserved block-0 slots are gone. */
 
 /* WP22e --fast sweep mode: the per-file decision narrowed to "generic or
  * nothing" -- RAW segments are recompressed per-segment at the volume's
@@ -885,15 +861,5 @@ uint64_t vol_rawm_count(invfs_volume *v, uint64_t *blocks_out);
  * <0 = error. */
 int  vol_tier_migrate(invfs_volume *v);
 
-/* ---- WP30 Phase 5: metadata extent merge/consolidation -------------------
- * Triggered when metadata_footprint > INVFS_META_MERGE_FOOTPRINT_PCT (default 70%),
- * extent_count > INVFS_META_MERGE_EXTENT_COUNT_MAX (default 128), or
- * dead_record_fraction > INVFS_META_MERGE_DEAD_FRACTION_PCT (default 30%).
- *
- * vol_meta_merge_needed: check if merge should run (0=no, 1=yes)
- * vol_meta_merge_step: run one incremental merge step (one pair of extents)
- * vol_meta_merge_run: run merge phase until thresholds satisfied or nothing left
- * Returns: 0 = nothing to do or merge completed, <0 = error. */
-int vol_meta_merge_needed(invfs_volume *v);
-int vol_meta_merge_step(invfs_volume *v);
-int vol_meta_merge_run(invfs_volume *v);
+/* WP-M21: extent shrink/merge run retired. The mapper is pre-allocated at
+ * mkfs; fold (vol_v3_fold) is the reclaim path. */

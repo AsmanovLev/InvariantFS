@@ -24,10 +24,11 @@
 #          fill -> pass 2 auto-realizes #1 and arms #2. No third kick.
 #          After unmount: RAW fill < 25% (dropped via the daemon's own
 #          passes), fsck reports sweep #2 live.
-#   Leg 2 (task leg c): with the watermark checkpoint live, compaction
-#          refuses (the rule is already in the tree,
-#          vol_records.c:vol_inode_compact — asserted here, not
-#          reimplemented).
+#   Leg 2 (task leg c): with the watermark checkpoint live, vol_inode_compact
+#          would have refused; this is asserted by the design (the rule
+#          lived in vol_records.c, retired in WP-M21; the test still
+#          exercises the live-checkpoint case but the assertion is now in
+#          the fold path).
 #   Leg 3 (task leg b): rollback reaches checkpoint #2 only — pass-1
 #          sweep results SURVIVE (fillers stay out of RAW), pass-2
 #          results are undone (the post-#1 files are RAW again and
