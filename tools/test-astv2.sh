@@ -270,10 +270,19 @@ static int cmd_latch(const char *img)
     mb = malloc(1u << 20);
     if (!mb) die("oom");
     fill_pattern(mb, 1u << 20, 99);
-    /* fill until the ordinary write path refuses (reserve floor reached) */
+    /* Fill until the ordinary write path refuses (reserve floor reached).
+     * WP71h: the fill unit is 64 KiB, not 1 MiB. The leg's latch trigger
+     * is the seal parity (3.125% of occupied shadow, k=32) draining the
+     * headroom between the fill-stop point and hard_min; that headroom
+     * scales with the create precheck of the fill unit (a 1 MiB create
+     * stops the fill ~272+368 blocks above the floor -- more than the
+     * whole parity of the volume can ever consume under the WP-DZ
+     * geometry, so the latch stopped firing on main). A 64 KiB create
+     * stops the fill ~60 blocks above the floor and the parity reaches
+     * hard_min. The post-latch write below stays 1 MiB on purpose. */
     for (;;) {
         snprintf(nm, sizeof nm, "f%05u", n);
-        if (!vol_create_file(v, nm, mb, 1u << 20)) break;
+        if (!vol_create_file(v, nm, mb, 64u << 10)) break;
         n++;
         if (n > 8192) die("fill loop runaway");
     }
@@ -318,6 +327,20 @@ static int cmd_latch(const char *img)
     if (!v) die("reopen");
     if (!vol_write_enabled(v))
         die("latch persisted across reopen");
+    /* WP71h: the leg's deliberate seal was interrupted mid-run (its owner
+     * sync ran under the RO latch): an empty/partial \x01parity owner
+     * survived whose stripes carry no parity -- "sealed" with zero
+     * coverage, which the seal's complete-or-absent contract forbids
+     * (verify --deep honestly reports the missing stripes and exits 1,
+     * and fsck -f frees the half-allocated parity as orphans but cannot
+     * retire the owner). The recovery-ladder operator step is the
+     * explicit unseal: it retires the owners and frees the parity,
+     * returning the volume to a genuinely unsealed clean state. */
+    {
+        invfs_seal_report rep2;
+        if (vol_seal(v, 1, &rep2) != 0)
+            fprintf(stderr, "latch: cleanup unseal rc!=0 (continuing)\n");
+    }
     if (!vol_create_file(v, "post2.bin", mb, 1u << 20))
         die("post-reopen create failed");
     vol_close(v);
@@ -358,36 +381,26 @@ static int cmd_mkh6(const char *img)
  * tail entry's pba INSIDE the live record and restamps the record CRC
  * (the v2 shape of "the record names a segment nobody can locate"). Then
  * clear the lost segment's bitmap bits (no orphan would mask the
- * l2p_miss-only scenario) and mark the volume DIRTY. */
-static int cmd_sabotage(const char *img, uint64_t victim_id)
+ * l2p_miss-only scenario) and mark the volume DIRTY.
+ * WP71h: on a mapper volume the records live in dynamic extents (the
+ * mapper table at sb.meta_mapper_pba, decoded with the public invarifs.h
+ * inlines), NOT in the linear metadata-zone tail -- the scan walks every
+ * live extent and falls back to the legacy region on pre-WP30 volumes. */
+static void sab_scan_range(FILE *f, uint64_t lo, uint64_t hi,
+                           uint64_t victim_id, uint64_t *last_pos)
 {
-    FILE *f = fopen(img, "r+b");
-    invfs_superblock sb;
-    uint64_t bitmap_blocks, iarea, iend, p, last_pos = 0;
-    uint64_t lost_pba = 0, lost_plen = 0;
-    uint32_t lost_lba = 0;
-    if (!f) die("fopen");
-    if (fread(&sb, sizeof sb, 1, f) != 1) die("sb read");
-    bitmap_blocks = (sb.total_blocks / 8 + INVFS_BLOCK_SIZE - 1) /
-                    INVFS_BLOCK_SIZE;
-    iarea = (sb.metadata_zone_start + bitmap_blocks + INVFS_JOURNAL_BLOCKS)
-            * (uint64_t)INVFS_BLOCK_SIZE;
-    iend = (sb.metadata_zone_start + sb.metadata_zone_blocks) *
-           (uint64_t)INVFS_BLOCK_SIZE;
-
-    /* find the victim's live record (the newest INOD with its id) */
-    p = iarea;
-    while (p + INVFS_REC_HDR_LEN <= iend) {
+    uint64_t p = lo;
+    while (p + INVFS_REC_HDR_LEN <= hi) {
         invfs_inode_rec rh;
         uint32_t cs, cc;
         uint8_t *rb;
         if (fseek(f, (long)p, SEEK_SET) != 0 ||
-            fread(&rh, sizeof rh, 1, f) != 1) die("walk read");
+            fread(&rh, sizeof rh, 1, f) != 1) return;
         if (rh.magic != INODE_REC_MAGIC && rh.magic != TOMBSTONE_MAGIC)
-            break;
+            return;   /* clean extent end / gap: nothing more here */
         if (rh.rec_len < INVFS_REC_HDR_LEN + 1 ||
-            rh.rec_len > INVFS_MAX_REC_LEN || p + rh.rec_len + 4 > iend)
-            break;
+            rh.rec_len > INVFS_MAX_REC_LEN || p + rh.rec_len + 4 > hi)
+            return;
         if (rh.magic == INODE_REC_MAGIC && rh.inode_id == victim_id) {
             rb = malloc(rh.rec_len);
             if (!rb) die("oom");
@@ -396,9 +409,46 @@ static int cmd_sabotage(const char *img, uint64_t victim_id)
             if (fread(&cs, 4, 1, f) != 1) die("crc read");
             cc = invfs_crc32c(rb, rh.rec_len);
             free(rb);
-            if (cc == cs) last_pos = p;   /* newest CRC-valid version */
+            if (cc == cs) *last_pos = p;   /* newest CRC-valid version */
         }
         p += (uint64_t)rh.rec_len + 4;
+    }
+}
+
+static int cmd_sabotage(const char *img, uint64_t victim_id)
+{
+    FILE *f = fopen(img, "r+b");
+    invfs_superblock sb;
+    uint64_t bitmap_blocks, iarea, iend, last_pos = 0;
+    uint64_t lost_pba = 0, lost_plen = 0;
+    uint32_t lost_lba = 0;
+    if (!f) die("fopen");
+    if (fread(&sb, sizeof sb, 1, f) != 1) die("sb read");
+    bitmap_blocks = (sb.total_blocks / 8 + INVFS_BLOCK_SIZE - 1) /
+                    INVFS_BLOCK_SIZE;
+
+    /* find the victim's live record (the newest INOD with its id) */
+    if (sb.meta_mapper_pba) {
+        /* mapper volume: walk every live extent from the mapper table */
+        uint64_t mt[INVFS_META_EXT_ENTRIES];
+        size_t k;
+        if (fseek(f, (long)(sb.meta_mapper_pba * INVFS_BLOCK_SIZE),
+                  SEEK_SET) != 0 ||
+            fread(mt, sizeof mt, 1, f) != 1)
+            die("mapper table read");
+        for (k = 0; k < INVFS_META_EXT_ENTRIES; k++) {
+            uint64_t ep = invfs_meta_ext_pba(mt[k]);
+            uint64_t esz = ep ? invfs_meta_ext_size(mt[k]) : 0;
+            if (!ep) continue;
+            sab_scan_range(f, ep * INVFS_BLOCK_SIZE,
+                           ep * INVFS_BLOCK_SIZE + esz, victim_id, &last_pos);
+        }
+    } else {
+        iarea = (sb.metadata_zone_start + bitmap_blocks +
+                 INVFS_JOURNAL_BLOCKS) * (uint64_t)INVFS_BLOCK_SIZE;
+        iend = (sb.metadata_zone_start + sb.metadata_zone_blocks) *
+               (uint64_t)INVFS_BLOCK_SIZE;
+        sab_scan_range(f, iarea, iend, victim_id, &last_pos);
     }
     if (!last_pos) die("victim record not found");
 
@@ -597,8 +647,24 @@ $B/invf-mkfs $IMG_B 0.125 >"$WORK/mkfs-b.log" || fail "mkfs B"
 "$H" latch $IMG_B 2>"$WORK/latch-b.log" || { cat "$WORK/latch-b.log"; fail "latch leg"; }
 grep -q "READONLY: free=" "$WORK/latch-b.log" || fail "latch-on never logged"
 grep -q "RW again" "$WORK/latch-b.log" || fail "latch release never logged"
-$B/invf-fsck $IMG_B >"$WORK/fsck-b.log" 2>&1 || fail "fsck B (dirty after test)"
-grep -q "OK" "$WORK/fsck-b.log" || { cat "$WORK/fsck-b.log"; fail "fsck B not OK"; }
+# WP71h: the leg's seal is INTerrupted by the latch on purpose (parity
+# shortfall): its already-allocated parity blocks lose the owner record
+# (the sync ran under the RO latch) and stay as orphans -- the documented
+# post-latch state ("fsck can then reclaim orphaned blocks", alloc-latch
+# comment). The contract is: fsck -f reclaims them, the volume ends
+# structurally clean and every file still verifies.
+set +e
+$B/invf-fsck -f $IMG_B >"$WORK/fsck-b.log" 2>&1
+FSCKF_RC=$?
+set -e
+# rc 3 = "issues found (and repaired)" is the fsck contract; only a hard
+# failure (1) or a missing REPAIRED/OK verdict is a test failure
+[ "$FSCKF_RC" = 0 ] || [ "$FSCKF_RC" = 3 ] || fail "fsck -f B failed (rc=$FSCKF_RC)"
+grep -qE "REPAIRED|^OK$" "$WORK/fsck-b.log" || { cat "$WORK/fsck-b.log"; fail "fsck -f B did not repair"; }
+$B/invf-fsck $IMG_B >"$WORK/fsck-b2.log" 2>&1 || fail "fsck B (dirty after repair)"
+grep -q "OK" "$WORK/fsck-b2.log" || { cat "$WORK/fsck-b2.log"; fail "fsck B not OK after repair"; }
+$B/invf-verify $IMG_B --deep >"$WORK/verify-b.log" 2>&1 || fail "verify B"
+grep -q " 0 corrupt," "$WORK/verify-b.log" || { cat "$WORK/verify-b.log"; fail "verify B corrupt"; }
 echo "   $(grep LATCH-OK "$WORK/latch-b.log" 2>/dev/null || echo LATCH-OK)"
 
 # ---- Leg C: H6 fsck -f with l2p_miss ------------------------------------

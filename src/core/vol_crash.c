@@ -173,6 +173,9 @@ int vol_needs_recovery(invfs_volume *v)
 void vol_io_error_latch(invfs_volume *v, const char *what)
 {
     if (!v) return;
+    if (getenv("INVFS_TRACE_LATCH"))
+        fprintf(stderr, "[latch] op='%s' (needs_recovery was %d)\n",
+                what, (int)v->needs_recovery);
     if (!v->needs_recovery)
         fprintf(stderr, "vol: %s failed; volume latched until "
                 "remount+fsck (inode-area tail re-anchored %llu -> %llu)\n",

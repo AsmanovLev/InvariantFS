@@ -81,8 +81,9 @@ int main(int argc, char **argv)
     }
 
     if (strchr(name, '!')) {
-        /* prefer a real inode (e.g. "name!recipe" FLAC sibling); fall back
-           to container-member extraction (ZIP) if no such inode exists */
+        /* container members stay on the whole-member extraction path
+           (bounded by the member's own size; vol_read_named splices the
+           window) */
         inode_id = vol_find(vol, name);
         if (inode_id != 0) {
             if (vol_read_file(vol, inode_id, &data, &len) != 0) {
@@ -95,36 +96,95 @@ int main(int argc, char **argv)
             vol_close(vol);
             return 1;
         }
-    } else {
-        inode_id = vol_find(vol, name);
+        if (out) {
+            FILE *f = fopen(out, "wb");
+            if (!f) { fprintf(stderr, "cannot write %s\n", out); free(data); vol_close(vol); return 1; }
+            if (fwrite(data, 1, len, f) != len || fclose(f) != 0) {
+                fprintf(stderr, "write failed: %s\n", out);
+                free(data); vol_close(vol); return 1;
+            }
+            printf("extracted '%s' -> %s (%zu bytes)\n", name, out, len);
+        } else {
+            if (fwrite(data, 1, len, stdout) != len || fflush(stdout) != 0) {
+                fprintf(stderr, "write failed: stdout\n");
+                free(data); vol_close(vol); return 1;
+            }
+        }
+        free(data);
+        vol_close(vol);
+        return 0;
+    }
+
+    /* WP71h: regular files stream through vol_read_range in bounded
+     * chunks. The old whole-file slurp (vol_read_file) needed RAM >=
+     * file size on a filesystem whose format allows 1 TB files: on a
+     * small-RAM host a healthy 4 GiB file "failed to read" (malloc),
+     * and invf-verify --deep even mislabelled that OOM as CORRUPT. The
+     * engine's windowed read is the sanctioned big-file path (the
+     * test-astv2 verify-big harness has always used it). */
+    {
+        uint64_t size = 0;
+        const uint64_t CHUNK = 4ull << 20;
+        uint8_t *cbuf;
+        uint64_t off = 0;
+        FILE *f = NULL;
+        int rc = 0;
+
+        inode_id = vol_find_ex(vol, name, &size, NULL);
         if (inode_id == 0) {
             fprintf(stderr, "'%s' not found\n", name);
             vol_close(vol);
             return 1;
         }
-        if (vol_read_file(vol, inode_id, &data, &len) != 0) {
-            fprintf(stderr, "read failed\n");
+        if (out) {
+            f = fopen(out, "wb");
+            if (!f) {
+                fprintf(stderr, "cannot write %s\n", out);
+                vol_close(vol);
+                return 1;
+            }
+        }
+        cbuf = (uint8_t *)malloc((size_t)CHUNK);
+        if (!cbuf) {
+            fprintf(stderr, "invf-cat: out of memory for the %llu-byte "
+                    "read chunk (NOT a volume error)\n",
+                    (unsigned long long)CHUNK);
+            if (f) fclose(f);
             vol_close(vol);
             return 1;
         }
-    }
-
-    if (out) {
-        FILE *f = fopen(out, "wb");
-        if (!f) { fprintf(stderr, "cannot write %s\n", out); free(data); vol_close(vol); return 1; }
-        if (fwrite(data, 1, len, f) != len || fclose(f) != 0) {
-            fprintf(stderr, "write failed: %s\n", out);
-            free(data); vol_close(vol); return 1;
+        while (off < size) {
+            size_t n = (size_t)((size - off > CHUNK) ? CHUNK : (size - off));
+            int rd = vol_read_range(vol, inode_id, off, n, cbuf);
+            if (rd < 0 || (size_t)rd != n) {
+                fprintf(stderr, "read failed at offset %llu (segment CRC "
+                        "mismatch, short read or io error -- the volume "
+                        "reports details above)\n",
+                        (unsigned long long)off);
+                rc = 1;
+                break;
+            }
+            if (fwrite(cbuf, 1, n, f ? f : stdout) != n) {
+                fprintf(stderr, "write failed: %s\n", out ? out : "stdout");
+                rc = 1;
+                break;
+            }
+            off += (uint64_t)rd;
         }
-        printf("extracted '%s' -> %s (%zu bytes)\n", name, out, len);
-    } else {
-        if (fwrite(data, 1, len, stdout) != len || fflush(stdout) != 0) {
+        free(cbuf);
+        if (f) {
+            if (fclose(f) != 0 && rc == 0) {
+                fprintf(stderr, "write failed: %s (close)\n", out);
+                rc = 1;
+            }
+        } else if (fflush(stdout) != 0 && rc == 0) {
             fprintf(stderr, "write failed: stdout\n");
-            free(data); vol_close(vol); return 1;
+            rc = 1;
         }
+        if (rc == 0 && out)
+            printf("extracted '%s' -> %s (%llu bytes)\n", name, out,
+                   (unsigned long long)size);
+        vol_close(vol);
+        return rc;
     }
-
-    free(data);
-    vol_close(vol);
-    return 0;
 }

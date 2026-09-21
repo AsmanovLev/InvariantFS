@@ -203,6 +203,9 @@ static int fsck_quarantine(invfs_volume *v, const char *name,
         pba_ref_apply(v, old, orl, -1);
         free(old);
     }
+    /* WP71h: the legacy cursor must follow the append (on mapper volumes
+     * vol_append_slot already set it to exactly this -- a no-op) */
+    v->inode_area_pos = pos + rlen + 4;
     free(rb);
     return 0;
 }
@@ -294,12 +297,24 @@ static int fsck_truncate_suffix(invfs_volume *v,
         w += (size_t)k * sizeof(invfs_ast_block_entry);
         if (ext_len) memcpy(w, rec + ext_off, ext_len);
         crc = invfs_crc32c(nr, (uint32_t)body);
-        p = v->inode_area_pos;
+        /* WP71h: write at the RESERVED slot (vol_append_slot's return).
+         * The pre-fix code reassigned p = v->inode_area_pos here -- the
+         * same value on legacy, but on a mapper volume append_slot has
+         * ALREADY advanced the cursor past the slot, so the record
+         * landed one record-size beyond the reserved window (unvalidated
+         * against the extent bound) and the follow-up quarantine
+         * tombstone -- written at the reserved slot, correctly --
+         * OVERWROTE the record it protects: pass 2 then parsed a
+         * tombstone as an AST record and died a silent -1 ("scan
+         * failed"). The explicit cursor bump below is the legacy
+         * convention (a no-op on mapper: append_slot set the same
+         * value). */
         if (io_seek(&v->io, p) != 0 ||
             io_write(&v->io, nr, (uint32_t)body) != 0 ||
             io_write(&v->io, &crc, 4) != 0)
             { free(rec); free(nr); return -1; }
         newp = p;
+        v->inode_area_pos = p + body + 4;
         pba_ref_apply(v, nr, (uint32_t)body, +1);
     }
     free(rec); free(nr);
@@ -761,6 +776,7 @@ int vol_fsck_scan(invfs_volume *v, invfs_fsck_report *rep, int fix)
                                      &newl2p, &l2p_n, &l2p_cap,
                                      used, used_bytes, rep,
                                      e->name, e->nlen) != 0) {
+                    fprintf(stderr, "[fscktrace] rebuild_one failed: %s\n", e->name);
                     free(used); scanset_free(&live);
                     free(newl2p);
                     return -1;
@@ -892,11 +908,13 @@ int vol_fsck_scan(invfs_volume *v, invfs_fsck_report *rep, int fix)
         v->jops_n = 0;
         v->j_compact = 1;
         if (vol_flush(v) != 0) {
+            fprintf(stderr, "[fscktrace] rebuild flush #1 failed\n");
             free(used); free(newl2p);
             return -1;
         }
         v->sb.state = INVFS_STATE_CLEAN;
         if (vol_flush(v) != 0) {
+            fprintf(stderr, "[fscktrace] rebuild flush #2 failed\n");
             free(used); free(newl2p);
             return -1;
         }

@@ -314,23 +314,46 @@ int main(int argc, char **argv)
         dc.vol = vol;
         vol_records_walk(vol, deep_cb, &dc);
         ents = dc.ents; nents = dc.nents;
-        for (size_t k = 0; k < nents; k++) {
-            uint64_t ino = ents[k].id, fsz = ents[k].fsz;
-            const char *nm = ents[k].nm;
-            if (fsz > MAX_FILE_SIZE) { printf("  BAD size %s: %llu\n", nm, (unsigned long long)fsz); bad++; continue; }
-            {
-                uint8_t *buf = NULL;
-                size_t blen = 0;
-                if (vol_read_file(vol, ino, &buf, &blen) != 0) {
+        /* WP71h: stream every file through vol_read_range in bounded
+         * chunks instead of slurping it whole (vol_read_file needed RAM
+         * >= the biggest file; on a small-RAM host a healthy 4 GiB v2
+         * file malloc-failed and was MISLABELLED as CORRUPT -- an OOM is
+         * a verifier condition, not volume damage). */
+        {
+            const uint64_t VCHUNK = 4ull << 20;
+            uint8_t *cbuf = (uint8_t *)malloc((size_t)VCHUNK);
+            if (!cbuf) {
+                fprintf(stderr, "deep: out of memory for the %llu-byte "
+                        "read chunk (NOT a volume error)\n",
+                        (unsigned long long)VCHUNK);
+                vol_close(vol);
+                return 1;
+            }
+            for (size_t k = 0; k < nents; k++) {
+                uint64_t ino = ents[k].id, fsz = ents[k].fsz;
+                const char *nm = ents[k].nm;
+                uint64_t off = 0;
+                int bad_read = 0;
+                if (fsz > MAX_FILE_SIZE) { printf("  BAD size %s: %llu\n", nm, (unsigned long long)fsz); bad++; continue; }
+                while (off < fsz) {
+                    size_t n = (size_t)((fsz - off > VCHUNK) ? VCHUNK
+                                                             : (fsz - off));
+                    int rd = vol_read_range(vol, ino, off, n, cbuf);
+                    if (rd < 0 || (size_t)rd != n) {
+                        bad_read = 1;
+                        break;
+                    }
+                    off += (uint64_t)rd;
+                }
+                if (bad_read || off != fsz) {
                     printf("  CORRUPT: %s\n", nm);
                     bad++;
                     continue;
                 }
-                if (blen != fsz) { printf("  SIZE MISMATCH: %s (%zu vs %llu)\n", nm, blen, (unsigned long long)fsz); bad++; }
-                free(buf);
                 total_bytes += fsz;
                 live++;
             }
+            free(cbuf);
         }
         free(ents);
         /* WP20: when the volume is sealed, recompute every parity stripe
