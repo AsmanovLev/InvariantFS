@@ -10,8 +10,10 @@
  *
  * Metadata zone layout:
  *   [0 .. bitmap_blocks):            block bitmap
- *   [bitmap_blocks .. +journal):     L2P journal (append-only)
- *   [bitmap_blocks+journal .. end):  inode/AST area (append-only)
+ *   [bitmap_blocks .. +32):          WP30 metadata mapper table (mapper
+ *                                    volumes only: sb.meta_mapper_pba)
+ *   [+mapper .. +journal):           L2P journal (append-only)
+ *   [bitmap_blocks+mapper+journal .. end): inode/AST area (append-only)
  */
 
 #include "volume_internal.h"
@@ -787,14 +789,32 @@ static int vmux_pread1(invfs_volume *v, uint64_t off, void *buf, size_t len)
     }
     if (off < mux_dev0_bytes(v)) {
         /* dev0 data (RAW zone / tier arena) */
-        if (!v->io_open[0] || v->dev_skip[0])
+        if (!v->io_open[0] || v->dev_skip[0]) {
+            if (getenv("INVFS_TRACE_OPEN"))
+                fprintf(stderr, "[trace] pread1 DEV0-NEEDED off=%llu len=%zu "
+                        "io_open0=%d dev_skip0=%d\n",
+                        (unsigned long long)off, len,
+                        v->io_open[0], v->dev_skip[0]);
             return -1;   /* degraded or dead: the engine fails over */
+        }
         return blkio_pread(&v->io, off, buf, len);
     }
     /* dev1 data (canonical shadow) */
-    if (!v->io_open[1] || v->dev_skip[1])
+    if (!v->io_open[1] || v->dev_skip[1]) {
+        if (getenv("INVFS_TRACE_OPEN"))
+            fprintf(stderr, "[trace] pread1 DEV1-ABSENT off=%llu len=%zu "
+                    "io_open1=%d dev_skip1=%d\n",
+                    (unsigned long long)off, len, v->io_open[1], v->dev_skip[1]);
         return -1;
-    return blkio_pread(&v->io2, off - mux_dev0_bytes(v), buf, len);
+    }
+    {
+        int trc = blkio_pread(&v->io2, off - mux_dev0_bytes(v), buf, len);
+        if (getenv("INVFS_TRACE_OPEN") && trc != 0)
+            fprintf(stderr, "[trace] pread1 DEV1-FAIL off=%llu local=%llu "
+                    "len=%zu rc=%d\n", (unsigned long long)off,
+                    (unsigned long long)(off - mux_dev0_bytes(v)), len, trc);
+        return trc;
+    }
 }
 
 
@@ -1388,6 +1408,21 @@ static invfs_volume *vol_open_inner(const char *path, int at_ckpt,
         }
     }
 
+    if (getenv("INVFS_TRACE_OPEN")) {
+        fprintf(stderr, "[trace] met0_present=%d extent_count=%llu active_extent=%llu "
+                "active_offset=%llu mapper_pba=%llu mapper_blocks=%llu format_version=%u "
+                "degraded=%d ndev=%d meta_end_bytes=%llu\n",
+                v->met0_present,
+                (unsigned long long)v->met0.extent_count,
+                (unsigned long long)v->met0.active_extent,
+                (unsigned long long)v->met0.active_offset,
+                (unsigned long long)v->sb.meta_mapper_pba,
+                (unsigned long long)v->sb.meta_mapper_blocks,
+                (unsigned)v->sb.format_version,
+                v->degraded, v->ndev,
+                (unsigned long long)v->meta_end_bytes);
+    }
+
     /* WP59: PCK0 codec-policy descriptor at 0x3C4 (past MET0).
      * Valid magic+CRC loads the descriptor; anything else reads as absent.
      * A CRC mismatch is a torn write -- treated as absent (the volume was
@@ -1552,6 +1587,16 @@ static invfs_volume *vol_open_inner(const char *path, int at_ckpt,
         if (meta_mapper_load(v) != 0) { *err = -7; goto fail; }
         v->journal_start = v->sb.metadata_zone_start + v->bitmap_blocks +
                            INVFS_META_EXT_BLOCKS;
+        if (getenv("INVFS_TRACE_OPEN")) {
+            fprintf(stderr, "[trace] mapper loaded: n=%zu journal_start=%llu\n",
+                    v->meta_mapper_n, (unsigned long long)v->journal_start);
+            for (size_t ti = 0; ti < v->meta_mapper_n && ti < 4; ti++) {
+                uint64_t te = v->meta_mapper[ti];
+                fprintf(stderr, "[trace]   ext[%zu]: pba=%llu size=%llu\n", ti,
+                        (unsigned long long)invfs_meta_ext_pba(te),
+                        (unsigned long long)invfs_meta_ext_size(te));
+            }
+        }
     } else {
         /* Legacy layout: journal starts right after the bitmap */
         v->journal_start = v->sb.metadata_zone_start + v->bitmap_blocks;
@@ -1618,6 +1663,9 @@ static invfs_volume *vol_open_inner(const char *path, int at_ckpt,
         uint64_t scan_ext_end = 0;
         if (v->met0_present && v->meta_mapper && v->met0.extent_count > 0) {
             uint64_t e0 = meta_mapper_get(v, 0);
+            if (getenv("INVFS_TRACE_OPEN"))
+                fprintf(stderr, "[trace] scan: mapper branch e0=%llu p=%llu\n",
+                        (unsigned long long)e0, (unsigned long long)p);
             if (e0) {
                 uint64_t pba0 = invfs_meta_ext_pba(e0);
                 uint64_t sz0 = invfs_meta_ext_size(e0);
@@ -1634,6 +1682,13 @@ static invfs_volume *vol_open_inner(const char *path, int at_ckpt,
                     scan_ext_end = scan_end_at_ckpt;
             }
         } else {
+            if (getenv("INVFS_TRACE_OPEN"))
+                fprintf(stderr, "[trace] scan: LEGACY branch (met0_present=%d mapper=%p "
+                        "extent_count=%llu) area=[%llu,%llu)\n",
+                        v->met0_present, (void *)v->meta_mapper,
+                        (unsigned long long)v->met0.extent_count,
+                        (unsigned long long)v->inode_area_start,
+                        (unsigned long long)v->inode_area_end);
             scan_ext_end = v->inode_area_end;
             if (at_ckpt && scan_ext_end > scan_end_at_ckpt)
                 scan_ext_end = scan_end_at_ckpt;
@@ -1679,12 +1734,23 @@ static invfs_volume *vol_open_inner(const char *path, int at_ckpt,
             uint8_t *rb = NULL;
             if (io_seek(&v->io, p) != 0 ||
                 io_read(&v->io, &rec_h, sizeof(rec_h)) != 0) {
+                if (getenv("INVFS_TRACE_OPEN"))
+                    fprintf(stderr, "[trace] scan: record header read FAILED "
+                            "at p=%llu (extent end %llu)\n",
+                            (unsigned long long)p,
+                            (unsigned long long)scan_ext_end);
                 p = scan_ext_end;
                 continue;  /* restart loop, advancement will run */
             }
             if (rec_h.magic != INODE_REC_MAGIC && rec_h.magic != TOMBSTONE_MAGIC) {
                 /* end of records in this extent: a clean extent has zero
                  * bytes before any record; advance to the next extent. */
+                if (getenv("INVFS_TRACE_OPEN")) {
+                    const uint8_t *mb = (const uint8_t *)&rec_h.magic;
+                    fprintf(stderr, "[trace] scan: magic mismatch at p=%llu "
+                            "(%02x %02x %02x %02x) -- treating as extent end\n",
+                            (unsigned long long)p, mb[0], mb[1], mb[2], mb[3]);
+                }
                 p = scan_ext_end;
                 continue;  /* restart loop, advancement will run */
             }

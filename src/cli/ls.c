@@ -2,6 +2,19 @@
  * ls.c — list files in an InvariantFS volume
  *
  *   invf-ls <image>
+ *
+ * WP71: the listing walks records through the shared mapper-aware
+ * vol_records_walk() instead of a private positional scan of
+ * [inode_area_start, inode_area_pos). The private scan broke on
+ * two-device volumes in DEGRADED mode (dev0 absent): on a mapper
+ * volume that byte range spans the dev0 RAW zone between the legacy
+ * inode-area start and the extent cursor, the first dev0 read failed
+ * and the walk aborted, listing an empty filesystem even though the
+ * engine's name index was fully populated. The shared walker visits
+ * exactly the live record extents, is CRC-verified, skips torn
+ * records, and reads through the vmux failover like everything else.
+ * Liveness/id/size are still deferred to the name index (the
+ * consistent cut), exactly as before.
  */
 #define _CRT_SECURE_NO_WARNINGS
 
@@ -73,25 +86,78 @@ static int ls_insert(ls_bucket ***tabp, size_t *maskp, size_t *countp,
     return 0;
 }
 
+/* ---- record walk: collect distinct user-visible names ------------------ */
+
+typedef struct {
+    char (*names)[256];
+    uint64_t *sizes;
+    uint64_t *inodes;
+    int count, cap;
+    ls_bucket **tab;
+    size_t tmask, tcount;
+    int oom;
+} ls_walk_ctx;
+
+static int ls_rec_cb(void *ctx_, uint64_t rec_pos,
+                     const invfs_inode_rec *h, const uint8_t *rec)
+{
+    ls_walk_ctx *c = (ls_walk_ctx *)ctx_;
+    char name[257];
+    size_t nl;
+    (void)rec_pos; (void)rec;
+
+    /* Tombstones need no handling here: the print pass defers liveness to
+       the name index, so a killed name simply resolves to id 0. */
+    if (h->magic != INODE_REC_MAGIC) return 0;
+
+    /* h->name is not NUL-terminated */
+    nl = h->name_len < 255 ? h->name_len : 255;
+    memcpy(name, h->name, nl);
+    name[nl] = 0;
+
+    /* internal control-prefixed names (the WP10 batch owner "\x01tzb",
+     * WP25 "\x01rawm"/"\x01tier0") are not directory content -- same
+     * filter as vol_list_dir */
+    if ((uint8_t)name[0] == 0x01) return 0;
+
+    if (ls_find(c->tab, c->tmask, c->names, name) >= 0)
+        return 0;   /* name already collected (an older version) */
+
+    if (c->count == c->cap) {
+        int ncap = c->cap ? c->cap * 2 : 512;
+        char (*nn)[256] = (char (*)[256])realloc(c->names, (size_t)ncap * 256);
+        uint64_t *ns = (uint64_t *)realloc(c->sizes, (size_t)ncap * sizeof *ns);
+        uint64_t *ni = (uint64_t *)realloc(c->inodes,
+                                           (size_t)ncap * sizeof *ni);
+        if (!nn || !ns || !ni) {
+            /* keep the old arrays alive on failure; report and abort */
+            if (nn) c->names = nn;
+            if (ns) c->sizes = ns;
+            if (ni) c->inodes = ni;
+            c->oom = 1;
+            return 1;
+        }
+        c->names = nn; c->sizes = ns; c->inodes = ni;
+        c->cap = ncap;
+    }
+    strncpy(c->names[c->count], name, 255);
+    c->names[c->count][255] = 0;
+    c->sizes[c->count] = h->file_size;      /* advisory; the index wins */
+    c->inodes[c->count] = h->inode_id;
+    if (ls_insert(&c->tab, &c->tmask, &c->tcount, c->names, c->count) != 0) {
+        c->oom = 1;
+        return 1;
+    }
+    c->count++;
+    return 0;
+}
+
 int main(int argc, char **argv)
 {
     invfs_volume *vol;
-    const invfs_superblock *sb;
     int err;
-    uint64_t bm, inode_area_start, inode_area_end, p;
-    int count = 0, cap = 0;
     const char *img;
-    /* Grown on demand. These used to be fixed 512-entry arrays with a silent
-       `count < 512` cutoff, so a volume with more files than that listed the
-       first 512 and reported that as the total -- a 6241-file image printed
-       "512 file(s)" and looked like data loss. */
-    char (*names)[256] = NULL;
-    uint64_t *sizes = NULL;
-    uint64_t *inodes = NULL;
-    uint64_t *poss = NULL;   /* each name's current record position
-                                (v2 position-kill matching) */
-    ls_bucket **tab = NULL;
-    size_t tmask = 0, tcount = 0;
+    ls_walk_ctx ctx;
 
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) {
@@ -100,7 +166,8 @@ int main(int argc, char **argv)
         }
         if (strcmp(argv[i], "-v") == 0 || strcmp(argv[i], "--version") == 0) {
             fprintf(stderr, "%s version %s (build %s)\n  Author: %s\n  License: %s\n",
-                    argv[0], INVFS_VERSION_STRING, INVFS_BUILD_DATE, INVFS_AUTHOR_NAME, INVFS_LICENSE);
+                    argv[0], INVFS_VERSION_STRING, INVFS_BUILD_DATE,
+                    INVFS_AUTHOR_NAME, INVFS_LICENSE);
             return 0;
         }
     }
@@ -116,128 +183,31 @@ int main(int argc, char **argv)
         fprintf(stderr, "cannot open volume %s (err %d)\n", img, err);
         return 1;
     }
-    sb = vol_sb(vol);
-    (void)sb;
-    inode_area_start = vol_inode_area_start(vol);  /* WP30: respects active extent */
-    inode_area_end = vol_inode_area_pos(vol);      /* CRC-validated extent */
-    p = inode_area_start;
+
+    memset(&ctx, 0, sizeof ctx);
 
     printf("files in %s:\n", img);
-    while (p + sizeof(invfs_inode_rec) <= inode_area_end) {
-        invfs_inode_rec h;
-        char name[257];
-        uint32_t crc_stored, crc_calc;
-        if (vol_read_raw(vol, p, &h, sizeof(h)) != 0) break;
-        /* WP30: a mapper extent can start with zeros (gap between the
-         * legacy inode-area start and the first record position). Skip
-         * whole blocks past zero regions rather than aborting the walk. */
-        if (h.magic != INODE_REC_MAGIC && h.magic != TOMBSTONE_MAGIC) {
-            uint64_t next = (p + INVFS_BLOCK_SIZE) & ~(uint64_t)(INVFS_BLOCK_SIZE - 1);
-            if (next <= p || next >= inode_area_end) break;
-            p = next;
-            continue;
-        }
-        /* rec_len must at least cover the header. Without the lower bound a
-           record claiming 0 advanced p by 4 bytes and the walk crawled the
-           whole area at 4 bytes a step. vol_open has the same guard. */
-        if (h.name_len > INVFS_MAX_NAME ||
-            h.rec_len < INVFS_REC_HDR_LEN + h.name_len + 1 ||
-            h.rec_len > INVFS_MAX_REC_LEN) break;
-        if (vol_read_raw(vol, p + offsetof(invfs_inode_rec, name), name, h.name_len) != 0) break;
-        name[h.name_len] = 0;
-        /* internal control-prefixed names (the WP10 batch owner "\x01tzb")
-         * are not directory content -- same filter as vol_list_dir */
-        if ((uint8_t)name[0] == 0x01) { p += (uint64_t)h.rec_len + 4; continue; }
-        /* torn-write guard: stop at the first CRC-broken record */
-        if (vol_read_raw(vol, p + h.rec_len, &crc_stored, 4) != 0) break;
-        crc_calc = 0;
-        /* recompute over the full record (header + ast) */
-        {
-            uint8_t *rb = (uint8_t *)malloc((size_t)h.rec_len);
-            if (!rb) break;
-            if (vol_read_raw(vol, p, rb, h.rec_len) != 0) { free(rb); break; }
-            crc_calc = invfs_crc32c(rb, h.rec_len);
-            free(rb);
-        }
-        if (crc_calc != crc_stored) {
-            /* corrupt record: skip past it, keep listing */
-            p += h.rec_len + 4;
-            continue;
-        }
-        if (h.magic == TOMBSTONE_MAGIC) {  /* tombstone: remove only its version */
-            int i = ls_find(tab, tmask, names, name);
-            if (i >= 0) {
-                if (h.file_size != 0) {
-                    /* v2 position kill: retires exactly the record at that
-                     * position. Kill the name only when its CURRENT version
-                     * is that record: a meta_rewrite's kill names the OLD
-                     * version (already superseded by the combo's INOD), but
-                     * an unlink/rename kill (vol_unlink_name) names the LAST
-                     * one -- skipping those listed renamed-away files as
-                     * live (WP22c: the flakey soak's GHOST). */
-                    if (poss[i] == h.file_size) {
-                        sizes[i] = 0;
-                        inodes[i] = 0;
-                    }
-                } else if (inodes[i] == h.inode_id) {
-                    sizes[i] = 0;
-                    inodes[i] = 0;
-                }
-            }
-        } else {
-            int i = ls_find(tab, tmask, names, name);
-            if (i >= 0) {
-                sizes[i] = h.file_size;
-                inodes[i] = h.inode_id;
-                poss[i] = p;
-            } else {
-                if (count == cap) {
-                    int ncap = cap ? cap * 2 : 512;
-                    char (*nn)[256] = (char (*)[256])realloc(names,
-                        (size_t)ncap * 256);
-                    uint64_t *ns = (uint64_t *)realloc(sizes,
-                        (size_t)ncap * sizeof *ns);
-                    uint64_t *ni = (uint64_t *)realloc(inodes,
-                        (size_t)ncap * sizeof *ni);
-                    uint64_t *np = (uint64_t *)realloc(poss,
-                        (size_t)ncap * sizeof *np);
-                    if (nn) names = nn;
-                    if (ns) sizes = ns;
-                    if (ni) inodes = ni;
-                    if (np) poss = np;
-                    if (!nn || !ns || !ni || !np) {
-                        fprintf(stderr, "out of memory at %d names\n", count);
-                        break;
-                    }
-                    cap = ncap;
-                }
-                strncpy(names[count], name, 255);
-                names[count][255] = 0;
-                sizes[count] = h.file_size;
-                inodes[count] = h.inode_id;
-                poss[count] = p;
-                if (ls_insert(&tab, &tmask, &tcount, names, count) != 0) {
-                    fprintf(stderr, "out of memory at %d names\n", count);
-                    break;
-                }
-                count++;
-            }
-        }
-        p += (uint64_t)h.rec_len + 4;  /* + trailing crc */
-    }
+    if (vol_records_walk(vol, ls_rec_cb, &ctx) != 0 && !ctx.oom)
+        fprintf(stderr, "warning: record walk aborted early\n");
+    if (ctx.oom)
+        fprintf(stderr, "out of memory at %d names\n", ctx.count);
+
+    int count = ctx.count;
+    char (*names)[256] = ctx.names;
+    uint64_t *sizes = ctx.sizes;
+    uint64_t *inodes = ctx.inodes;
+
     for (int i = 0; i < count; i++) {
-        if (inodes[i] != 0) {
-            /* WP22d: the walk above sees every record version; the live
-             * answer is the name index's consistent cut (a torn newest
-             * version is hidden, the name falls back to an older one).
-             * Defer to it for both liveness and the reported id/size. */
-            uint64_t id = vol_find_ex(vol, names[i], &sizes[i], NULL);
-            if (!id) { inodes[i] = 0; continue; }
-            inodes[i] = id;
-            printf("  %8llu bytes  inode %llu  %s\n",
-                   (unsigned long long)sizes[i],
-                   (unsigned long long)inodes[i], names[i]);
-        }
+        /* WP22d: the walk sees every record version; the live answer is
+           the name index's consistent cut (a torn newest version is
+           hidden, the name falls back to an older one). Defer to it for
+           both liveness and the reported id/size. */
+        uint64_t id = vol_find_ex(vol, names[i], &sizes[i], NULL);
+        if (!id) { inodes[i] = 0; continue; }
+        inodes[i] = id;
+        printf("  %8llu bytes  inode %llu  %s\n",
+               (unsigned long long)sizes[i],
+               (unsigned long long)inodes[i], names[i]);
     }
     /* container members (virtual windows into the original archive) */
     {
@@ -272,14 +242,13 @@ int main(int argc, char **argv)
     free(names);
     free(sizes);
     free(inodes);
-    free(poss);
-    if (tab) {
+    if (ctx.tab) {
         size_t i;
-        for (i = 0; i <= tmask; i++) {
-            ls_bucket *b = tab[i];
+        for (i = 0; i <= ctx.tmask; i++) {
+            ls_bucket *b = ctx.tab[i];
             while (b) { ls_bucket *nx = b->next; free(b); b = nx; }
         }
-        free(tab);
+        free(ctx.tab);
     }
     vol_close(vol);
     return 0;
