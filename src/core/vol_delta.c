@@ -633,14 +633,12 @@ int vol_delta_read_value(invfs_volume *v, const delta_ref *ref,
         return 0;                        /* delete / empty value */
     if (!buf || cap < ref->vlen)
         return -1;
-    if (io_seek(&v->io, ref->seg * (uint64_t)INVFS_BLOCK_SIZE + ref->off) != 0 ||
-        io_read(&v->io, hdr, sizeof hdr) != 0)
+    if (io_pread(&v->io, ref->seg * (uint64_t)INVFS_BLOCK_SIZE + ref->off,
+                 hdr, sizeof hdr) != 0)
         return -1;
     kl = dl_rd16be(hdr);
-    if (io_seek(&v->io, ref->seg * (uint64_t)INVFS_BLOCK_SIZE + ref->off +
-                        INVFS_DELTA_REC_HDR_LEN + kl) != 0)
-        return -1;
-    if (io_read(&v->io, buf, ref->vlen) != 0)
+    if (io_pread(&v->io, ref->seg * (uint64_t)INVFS_BLOCK_SIZE + ref->off +
+                 INVFS_DELTA_REC_HDR_LEN + kl, buf, ref->vlen) != 0)
         return -1;
     if (vlen_out)
         *vlen_out = ref->vlen;

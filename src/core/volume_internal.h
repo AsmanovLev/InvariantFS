@@ -136,6 +136,8 @@ struct invfs_volume;
 int  vmux_seek(struct invfs_volume *v, uint64_t off);
 int  vmux_read(struct invfs_volume *v, void *buf, size_t len);
 int  vmux_write(struct invfs_volume *v, const void *buf, size_t len);
+int  vmux_pread(struct invfs_volume *v, uint64_t off, void *buf, size_t len);
+int  vmux_pwrite(struct invfs_volume *v, uint64_t off, const void *buf, size_t len);
 void vmux_close(struct invfs_volume *v);
 /* 0 = both present devices barriered; 1 = dev0 failed (skipped, continues
  * on dev1, resync at next open); -1 = dev1 failed (caller latches). */
@@ -146,6 +148,10 @@ int  vmux_barrier(struct invfs_volume *v, const char *what);
 #define io_read(c, buf, len)  vmux_read(v_of_blk(c), (buf), (len))
 
 #define io_write(c, buf, len) vmux_write(v_of_blk(c), (buf), (len))
+
+#define io_pread(c, off, buf, len)  vmux_pread(v_of_blk(c), (off), (buf), (len))
+
+#define io_pwrite(c, off, buf, len) vmux_pwrite(v_of_blk(c), (off), (buf), (len))
 
 #define io_close(c)           vmux_close(v_of_blk(c))
 

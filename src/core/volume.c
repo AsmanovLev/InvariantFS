@@ -468,15 +468,12 @@ static int vmux_pread1(invfs_volume *v, uint64_t off, void *buf, size_t len)
 }
 
 
-int vmux_read(invfs_volume *v, void *buf, size_t len)
+int vmux_pread(invfs_volume *v, uint64_t off, void *buf, size_t len)
 {
-    uint64_t off = v->mux_pos;
     uint8_t *out = (uint8_t *)buf;
 
     if (v->ndev < 2 && !v->degraded) {
-        int rc = blkio_pread(&v->io, off, buf, len);
-        if (rc == 0) v->mux_pos = off + len;
-        return rc;
+        return blkio_pread(&v->io, off, buf, len);
     }
     while (len) {
         size_t n = len;
@@ -490,8 +487,16 @@ int vmux_read(invfs_volume *v, void *buf, size_t len)
         off += n;
         len -= n;
     }
-    v->mux_pos = off;
     return 0;
+}
+
+
+int vmux_read(invfs_volume *v, void *buf, size_t len)
+{
+    uint64_t off = v->mux_pos;
+    int rc = vmux_pread(v, off, buf, len);
+    if (rc == 0) v->mux_pos = off + len;
+    return rc;
 }
 
 
@@ -549,26 +554,12 @@ static int vmux_pwrite1(invfs_volume *v, uint64_t off,
 }
 
 
-int vmux_write(invfs_volume *v, const void *buf, size_t len)
+int vmux_pwrite(invfs_volume *v, uint64_t off, const void *buf, size_t len)
 {
-    uint64_t off = v->mux_pos;
     const uint8_t *in = (const uint8_t *)buf;
-#ifdef INVFS_DEBUG_META_EXTENTS
-    static int n_writes = 0;
-    if (n_writes++ < 5000) {
-        fprintf(stderr, "[vmux.write] off=%llu len=%zu (block=%llu)\n",
-                (unsigned long long)off, len, (unsigned long long)(off / INVFS_BLOCK_SIZE));
-        if (off >= 33820672 && off < 33951736 + 4096) {
-            fprintf(stderr, "  [vmux.write] CALLER INFO: caller=%p buf=%p\n",
-                    __builtin_return_address(0), buf);
-        }
-    }
-#endif
 
     if (v->ndev < 2 && !v->degraded) {
-        int rc = blkio_pwrite(&v->io, off, buf, len);
-        if (rc == 0) v->mux_pos = off + len;
-        return rc;
+        return blkio_pwrite(&v->io, off, buf, len);
     }
     while (len) {
         size_t n = len;
@@ -582,8 +573,16 @@ int vmux_write(invfs_volume *v, const void *buf, size_t len)
         off += n;
         len -= n;
     }
-    v->mux_pos = off;
     return 0;
+}
+
+
+int vmux_write(invfs_volume *v, const void *buf, size_t len)
+{
+    uint64_t off = v->mux_pos;
+    int rc = vmux_pwrite(v, off, buf, len);
+    if (rc == 0) v->mux_pos = off + len;
+    return rc;
 }
 
 

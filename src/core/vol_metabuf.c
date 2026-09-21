@@ -90,9 +90,7 @@ int mbuf_read(invfs_volume *v, uint64_t pba, uint8_t *page_out)
         return -1;
     if (pba == 0 || pba >= v->sb.total_blocks)
         return -1;
-    if (io_seek(&v->io, pba * (uint64_t)INVFS_BLOCK_SIZE) != 0)
-        return -1;
-    if (io_read(&v->io, page_out, INVFS_BLOCK_SIZE) != 0)
+    if (io_pread(&v->io, pba * (uint64_t)INVFS_BLOCK_SIZE, page_out, INVFS_BLOCK_SIZE) != 0)
         return -1;
     return 0;
 }
@@ -106,9 +104,7 @@ int mbuf_write(invfs_volume *v, uint64_t pba, uint8_t *page)
     if (pba == 0 || pba >= v->sb.total_blocks)
         return -1;
     mbuf_page_seal(page);
-    if (io_seek(&v->io, pba * (uint64_t)INVFS_BLOCK_SIZE) != 0)
-        return -1;
-    if (io_write(&v->io, page, INVFS_BLOCK_SIZE) != 0)
+    if (io_pwrite(&v->io, pba * (uint64_t)INVFS_BLOCK_SIZE, page, INVFS_BLOCK_SIZE) != 0)
         return -1;
     return 0;
 }
