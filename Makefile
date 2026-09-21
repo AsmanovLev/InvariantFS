@@ -37,7 +37,7 @@ B3      := blake3 blake3_dispatch blake3_portable
 
 TOOLS   := invf-mkfs invf-verify invf-fsck invf-cp invf-cat invf-ls invf-stat \
            invf-zip invf-arctest invf-blkio_test invf-fuse invf-import invf-sweep meta_probe \
-           invf-stats invf-resize invf-rollback invf-l2ptest invf-migrate-v2 invfs-pack
+           invf-stats invf-resize invf-rollback invf-l2ptest invfs-pack
 
 all: $(TOOLS:%=$(OUT)/%)
 
@@ -57,7 +57,7 @@ $(OUT)/invf-$(1): $$(OBJ)/$(1).o $(CORE_O)
 endef
 
 # CLI tools (main in src/cli/<name>.c)
-CLI_MAINS := mkfs verify fsck cp cat ls stat arctest blkio_test resize migrate-v2
+CLI_MAINS := mkfs verify fsck cp cat ls stat arctest blkio_test resize
 $(foreach t,$(CLI_MAINS),$(eval $(call TOOL_RULE,$(t),)))
 
 # WP60: invfs-pack is named differently (invfs- not invf-)
@@ -172,7 +172,6 @@ e2e: all
 	bash tools/run-e2e.sh tools/test-flushfail.sh
 	bash tools/run-e2e.sh tools/test-compact.sh
 	bash tools/run-e2e.sh tools/test-multidev.sh
-	bash tools/run-e2e.sh tools/test-migrate-v2.sh
 	bash tools/run-e2e.sh tools/test-mkstemp.sh
 	bash tools/run-e2e.sh tools/test-meta-extent.sh
 	bash tools/run-e2e.sh tools/test-meta-extent-walk.sh

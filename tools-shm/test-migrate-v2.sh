@@ -22,16 +22,16 @@
 #     (superblock CLEAN, no ASTV2) -> a fresh conversion succeeds.
 #
 # Run from the repo root after `make`:  bash tools/test-migrate-v2.sh
-# Uses /dev/shm (tmpfs) like the other soak scripts; image paths are
+# Uses /tmp/invfs-e2e (tmpfs) like the other soak scripts; image paths are
 # RELATIVE (blkio treats /dev/* as raw devices).
 set -e
 set -o pipefail
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 B=$REPO/bin
-WORK=/dev/shm/wp27migrate
+WORK=/tmp/invfs-e2e/wp27migrate
 rm -rf "$WORK" && mkdir -p "$WORK"
-cd /dev/shm
+cd /tmp/invfs-e2e
 rm -f wp27m-*.img
 
 fail() { echo "FAIL: $*" >&2; exit 1; }

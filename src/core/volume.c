@@ -1319,8 +1319,9 @@ static int wp25_open_degraded(invfs_volume *v)
         goto bad;
     if (!(v->sb.vol_flags & VOLF_ASTV2)) {
         fprintf(stderr, "vol_open: %s: format v1 volume (no VOLF_ASTV2): "
-                "this build reads format v2 only. Convert it offline "
-                "first: invf-migrate-v2 <dev0>\n", d1);
+                "this build reads format v2 only; the v1->v2 converter "
+                "(invf-migrate-v2) was removed -- use an invfs <= v0.4.x "
+                "build to convert or extract it offline\n", d1);
         goto bad;
     }
     memcpy(&d2, blk + INVFS_DEVT_OFF, sizeof d2);
@@ -1434,11 +1435,10 @@ static invfs_volume *vol_open_inner(const char *path, int at_ckpt,
         fprintf(stderr,
                 "vol_open: %s: format v1 volume (no VOLF_ASTV2): this build "
                 "reads format v2 (INVFS_VERSION=%u) only.\n"
-                "  Convert it offline first:  invf-migrate-v2 %s\n"
-                "  (invf-migrate-v2 rewrites the records with resolved "
-                "addresses, in place, crash-safe; run it on an unmounted, "
-                "cleanly-closed volume)\n",
-                real, INVFS_VERSION, real);
+                "  The offline v1->v2 converter (invf-migrate-v2) was "
+                "removed from the tree: use an invfs <= v0.4.x build to "
+                "convert or extract the volume\n",
+                real, INVFS_VERSION);
         *err = -12;
         goto fail;
     }

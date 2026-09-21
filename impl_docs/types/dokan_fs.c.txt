@@ -1,6 +1,0 @@
-__anonfb24ee450108 struct       23 /home/user/InvariantFS/src-extracted/VFS/src/legacy/dokan_fs.c typedef struct {
-__anonfb24ee450203 enum         53 /home/user/InvariantFS/src-extracted/VFS/src/legacy/dokan_fs.c enum { PF_LOOKUP, PF_READBACK, PF_FIND, PF_DELETE, PF_CREATE, PF_FLUSH, PF_N };
-__anonfb24ee450303 enum         81 /home/user/InvariantFS/src-extracted/VFS/src/legacy/dokan_fs.c enum { CB_CREATE, CB_GETINFO, CB_FIND, CB_READ, CB_WRITE, CB_CLOSE,
-__anonfb24ee450408 struct      176 /home/user/InvariantFS/src-extracted/VFS/src/legacy/dokan_fs.c typedef struct {
-fs_entry         typedef      28 /home/user/InvariantFS/src-extracted/VFS/src/legacy/dokan_fs.c } fs_entry;
-wctx             typedef     197 /home/user/InvariantFS/src-extracted/VFS/src/legacy/dokan_fs.c } wctx;

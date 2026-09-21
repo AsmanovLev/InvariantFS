@@ -177,11 +177,11 @@ typedef struct {
 } invfs_class_tlv;   /* 4 bytes */
 #pragma pack(pop)
 
-/* L2P journal entry types */
+/* L2P journal entry types. (0x03 SWEEP and 0xFF CHECKPOINT were design-
+ * era constants never written by any code -- removed in the legacy nuke,
+ * WP73; sweep checkpoints are the CKP0 descriptor, not journal entries.) */
 #define INVFS_JRN_MAP       0x01
 #define INVFS_JRN_UNMAP     0x02
-#define INVFS_JRN_SWEEP     0x03
-#define INVFS_JRN_CHECKPOINT 0xFF
 
 /* WP30: metadata extent WAL record types (owner-scoped, like L2P) */
 #define INVFS_JRN_META_ALLOC  0x10
@@ -520,48 +520,11 @@ typedef struct {
 } invfs_cmps;                   /* 24 bytes, block-padded */
 #pragma pack(pop)
 
-/* ---- WP27: CVT0 v1->v2 conversion descriptor (block 0 reserved area) ---
- * Lives at byte offset 0x360 of block 0, past the superblock, RDP0
- * (0x100), RSZ0 (0x140), CKP0 (0x220), CMP0 (0x260) and DEVT (0x2A0).
- * Volumes that never saw a converter carry zeros there ("absent").
- *
- * invf-migrate-v2 rewrites a v1 volume in place: records grow 8 bytes per
- * segment (the pba), so the converted inode stream can overlap the one it
- * replaces. The conversion therefore runs the house stage -> arm -> apply
- * -> commit protocol: the v2 products (new inode stream + rebuilt
- * owner-WAL slot image + derived bitmap) are staged contiguously in free
- * space and CRC-verified, then this descriptor arms the conversion (the
- * superblock goes RECOVERY in the same block-0 write), then the payloads
- * are copied home (idempotent: the apply reads only the staging area), and
- * the commit (superblock with VOLF_ASTV2 + cleared descriptor, one block-0
- * write) lands last. A crash anywhere before the commit re-enters the
- * apply at the next invf-migrate-v2 run -- or `invf-migrate-v2 --abort`
- * disarms a conversion whose apply never started.
- *
- *   0x360  char magic[4]        "CVT0"
- *   0x364  u32 version          1
- *   0x368  u64 stage_pba        staging run: CVTS header block + payload
- *   0x370  u64 stage_blocks
- *   0x378  u64 stream_bytes     v2 inode stream bytes
- *   0x380  u64 jrn_bytes        owner-WAL slot image bytes (0 = empty)
- *   0x388  u64 bm_bytes         derived bitmap bytes
- *   0x390  u64 jrn_seq          sequence the rewritten journal carries
- *   0x398  u32 crc32c           over the descriptor with this field 0
- * 64 bytes total; the rest of block 0 stays reserved-zero. */
-#define INVFS_CVT0_OFF 0x360
-#pragma pack(push, 1)
-typedef struct {
-    char     magic[4];          /* 0x360 "CVT0" */
-    uint32_t version;           /* 0x364 */
-    uint64_t stage_pba;         /* 0x368 */
-    uint64_t stage_blocks;      /* 0x370 */
-    uint64_t stream_bytes;      /* 0x378 */
-    uint64_t jrn_bytes;         /* 0x380 */
-    uint64_t bm_bytes;          /* 0x388 */
-    uint64_t jrn_seq;           /* 0x390 */
-    uint32_t crc32c;            /* 0x398 */
-} invfs_cvt0;                   /* 0x39C - 0x360 = 60 bytes, pad to 64 */
-#pragma pack(pop)
+/* Block 0 offsets 0x360..0x39F: FORMERLY the CVT0 v1->v2 conversion
+ * descriptor. invf-migrate-v2 and CVT0 were removed in the legacy nuke
+ * (WP73): the format is pre-freeze and v1 volumes are served by
+ * invfs <= v0.4.x builds. The range stays RESERVED-ZERO so an old
+ * armed CVT0 can never be mistaken for a new descriptor. */
 
 /* The conversion staging run's own header, one block at stage_pba; the
  * payload follows contiguously: stream_bytes of v2 inode records, then

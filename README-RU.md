@@ -80,7 +80,6 @@ make bin/invf-fuse  # один файл
 | `invf-resize <img> ...` | Офлайн-изменение размера |
 | `invf-rollback <img>` | Откат последнего sweep по чекпоинту |
 | `invf-verify [--deep] <img>` | Проверка целостности |
-| `invf-migrate-v2 <img>` | Конвертация формата v1 -> v2 |
 | `invf-zip list\|get <img> <zip>` | Инспекция ZIP-контейнера |
 | `invf-zip get <img> <zip> <member> <out>` | Извлечение компонента ZIP |
 | `meta_probe <img> <name>` | Разработка (мутирует) |

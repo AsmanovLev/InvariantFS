@@ -17,6 +17,8 @@ table for the directory of any file.
 | 07-read-write-path, 15-caching | A3 IO/cache | vol_read.c, vol_write.c, vol_records.c, vol_dirs.c, blkio.c/h, arc.c/h, fuse_fs.c |
 | 08-crash-recovery, 12-enospc-strategy | A4 recovery | vol_crash.c, vol_fsck.c, vol_rollback.c (WP21), vol_resize.c (WP18), vol_repair.c + vol_seal.c (WP20), fsck.c, enospctest.c |
 | 13-linux-rootfs + ChangeLog + build_linux.sh + f6*.log + tests_fuse.ps1 | A5 port-critical | fuse_fs.c vs doc recipe; tools/mkinitramfs.sh, tools/configure-guest.sh, tools/busybox-src |
-| 10-deduplication, 11-security-and-permissions, 18-test-coverage | A6 dedup/security/tests | vol_dedupe.c, vol_records.c (INO2 meta/xattrs), fuse_fs.c, dokan_fs.c, winfsp_fs.c, tests.ps1, devtest*.c |
+| 10-deduplication, 11-security-and-permissions, 18-test-coverage | A6 dedup/security/tests | vol_dedupe.c, vol_records.c (INO2 meta/xattrs), fuse_fs.c |
 
-Skipped per scope: 09-windows-port, 14-windows-io-deep, 16-benchmarks, 17-template-zone
+Skipped per scope: 16-benchmarks, 17-template-zone (WP73: the Windows-port docs
+09/14, the dokan/winfsp/devtest doc remnants and the phantom tools/busybox-src
+gitlink were removed with the legacy nuke)
