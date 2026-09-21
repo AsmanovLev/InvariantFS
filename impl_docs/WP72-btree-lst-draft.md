@@ -402,3 +402,128 @@ v3 lands: v1/v2 AST recipe readers + test-astv2, INOD v1 shapes, the
 superblock sweep_cursor field (layout churn for zero pre-freeze gain),
 harmless _WIN32 ifdefs in shared code. Build green, unit 4722/4722,
 fuzz/conbatch/resize/multidev re-run PASS.
+
+---
+
+## 9. Consultation round 2 — decisions and the gen-based checkpoint design
+
+Author's answers: (1) "wait, do you propose doing ALL of A/B/C?" — NO, see
+9.1; (2) gen/epochs preferred over rebase — adopted, see 9.2 for the full
+design and its two non-obvious consequences (position-kill retirement,
+staging retention); (3) meta-WAL deletion approved, "replace it with
+something?" — no, see 9.3; (5) frame unification downsides — real ones
+exist, the scope narrows to the JOURNAL only, see 9.4.
+
+### 9.1 Not A+B+C. The plan is B + C; A is shelved with a trigger
+
+- **B (name index)** — do it. It is the only item that removes an O(n)
+  from every open/lookup on the rootfs-scale path the project targets.
+  Derived/rebuildable ⇒ shippable pre-freeze behind BT0.
+- **C (content index)** — do it after B (reuses B's page machinery).
+  Dedup is a headline feature; paying O(volume) BLAKE3 per sweep for it
+  is the measured status quo. Advisory-only semantics keep PB7's
+  "no refcounts" correctness stance intact.
+- **A (extent/recipe tree)** — SHELVE, do not build speculatively. Its
+  only present-day motivator is the 1 TB-file/384 MB-recipe worst case,
+  and that has a 20-line cheaper answer the docs themselves hint at
+  ("such files SHOULD use larger segments — future policy"): a
+  segment-size policy in the sweep/write path (e.g. 64 KB segments up to
+  16 MB, 256 KB up to 256 MB, 1 MB above) shrinks the worst recipe 16x
+  (384 MB -> 24 MB) with zero format change (block_id:24 still bounds
+  it; MAX_FILE_SIZE check stays coherent). A becomes worth its surgery
+  only if a real workload appears that needs random in-place range
+  writes or btrfs-style snapshots/clones — neither is in this FS's
+  stated profile ("append-oriented, no high write throughput, checkpoint
+  + rollback only"). Trigger condition, re-evaluate then.
+- D (one tree over everything) stays rejected.
+
+### 9.2 gen/epochs, fully designed (chosen over rebase)
+
+Records carry `u64 gen` from a volume-wide monotonic counter.
+
+- **Counter recovery needs no persistence**: open already scans every
+  record; `gen_next = max(gen seen) + 1`. No block-0 write per append,
+  no WAL for it. (This is also why the deleted meta-WAL needs no
+  replacement — §9.3.)
+- **Fold** (`scanset_live`): per name, live = the newest version with
+  `gen <= cutoff` that is not broken and not killed by a DELT with
+  `gen <= cutoff`; `cutoff = UINT64_MAX` for the present. scan_ver gains
+  the field; the existing version-stack machinery is untouched.
+- **DELT retires position-kill**: a tombstone kills `(inode_id, gen)` —
+  exact version semantics WITHOUT naming a physical position. (The
+  v2 position-kill exists only because id-kill could not distinguish
+  versions — WP22c's rename-ghost fix. gen distinguishes them natively.)
+  Consequence: after gen lands, NO durable metadata cross-reference
+  names a record position any more. That is the actual unlock:
+- **CKP0 v2** = `{gen_cutoff, staged journal prefix (unchanged!),
+  retention registry (unchanged!)}`. The `inode_area_pos` pin and the
+  area-zeroing on rollback disappear; rollback = set the fold cutoff,
+  restore the journal prefix, done. Records with gen > cutoff are simply
+  invisible (later reclaimed by pruning as ordinary dead versions).
+- **Pruning becomes unblocked with NO rebase machinery**: moving a
+  record preserves its gen; nothing pins its position. The rebase-table
+  option (§3.2-2) is cancelled — building it now would be throwaway
+  work against a v3 that lands gen anyway. Until v3: status quo
+  (refuse) remains correct and safe.
+- **Time-travel mount** (`vol_open_at`) gets simpler and sturdier: the
+  position-truncated extent scan (vol_open_inner's scan_end_at_ckpt
+  clamps) is replaced by the same gen filter — no dependence on append
+  order or extent layout at all.
+- **Journal side keeps the staged prefix**: journal entries are owner-WAL
+  maps without versions; the checkpoint's staged copy stays their cut
+  mechanism. (If journal frames land — §9.4 — entries MAY additionally
+  carry gen and a future compaction could preserve per-gen images, but
+  that is an optimization, not part of the core design.)
+- **Journal compaction vs checkpoints**: unchanged rule — a live
+  checkpoint forbids compaction of the slot its staging was taken from
+  (today compaction refuses under CKP0 for the inode area; the journal
+  staging copy already decouples the prefix). No new interaction.
+- Migration: gen is a v3 record field (author's WIP owns the record
+  layout — this is a field request, not a parallel format). Pre-gen
+  volumes: refuse-with-pointer, per the v3 policy.
+
+### 9.3 meta-WAL: delete, replace with nothing
+
+The window it could protect (alloc -> table -> MET0 -> bitmap landing
+partially) is closed by synchronous table+MET0 persistence at alloc time
+plus WP71j's open-time extent force-used. gen (§9.2) needs no WAL
+(scan-recovered counter). The owner-WAL (L2P journal) STAYS — it is
+load-bearing for batch/parity/retention/sidecar maps and is the
+checkpoint's journal-cut mechanism. If the B/C trees ever want a
+page-commit log, design it with the trees (BT0's root flip is already
+the commit point; a WAL would only accelerate multi-page split
+recovery). Do not build it speculatively.
+
+### 9.4 Frame unification: downsides, and the scope narrows to the journal
+
+Honest cons of the full (journal + records) unification:
+1. **u24 payload_len caps frames at 16 MB — records legally reach ~384 MB**
+   (the 1 TB recipe worst case; rec_len is u32 by design). A record
+   frame format would need u48 lengths (+4 B/record) or continuation
+   frames (walker complexity returns through the back door). FATAL for
+   the records half, moot for the journal half (journal payloads are
+   fixed small structs).
+2. Record reframing touches ~15 call sites keyed on INVFS_REC_HDR_LEN /
+   rec_len semantics (open scan, fsck, quarantine, the WP71h padded
+   tombstone, rollback staging, compaction copies, every test harness
+   that parses records raw — sabotage, astv2, mapper audit). High churn,
+   collides with the author's v3 record work.
+3. One-time format break either way: existing volumes (incl. the bootable
+   VM images) need rebuild; pre-freeze that is policy-acceptable, but it
+   must be ONE break (fold into v3, not a separate event).
+4. Journal capacity: framed MAP/UNMAP = 40 B vs 36 B (-10% entries per
+   32 MB slot, ~930k -> ~840k). Acceptable; the slot-flip compaction
+   watermark already handles pressure.
+5. Crash-leg re-baselining: flakey/rollback/writepath legs assert on
+   journal wire bytes in places (torn-tail fixtures, INVFS_JRN_FORCE_
+   COMPACT legs); they need regeneration, not redesign.
+
+**Decision: frame the JOURNAL only** (`[u8 type][u24 len][payload]
+[crc32c]`, types 0x01 MAP / 0x02 UNMAP / 0x30+ reserved; the chain-CRC
+stays as the second layer). Records already self-describe (rec_len +
+CRC + magic) — their only mixed-stride risk was the journal's, now gone
+with the meta-WAL deletion (§9.3), so record reframing buys cosmetics at
+the price of con 2. If v3 wants a type byte in records anyway, take it
+opportunistically there; do not build a wave around it. This still kills
+the whole WP71f bug class (it was entirely journal-walkers) at ~20% of
+the cost.
