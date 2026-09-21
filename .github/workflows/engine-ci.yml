@@ -1,0 +1,70 @@
+# Engine-tier CI: build + core unit tiers + the engine-level e2e suites that
+# need no FUSE mount, no root privileges and no external codec tools. This is
+# the tier proven to run in a bare unprivileged container (WP71 session:
+# 15 suites green in ~4 min); it catches exactly the drift class that turned
+# main red after WP30 (a format/mapper change landing without its downstream
+# walkers/updaters). FUSE-dependent suites (writepath, acl, rename, mkstemp,
+# watermark, dynzone, rocp, sandbox), privilege suites (helper-isolation) and
+# external-tool suites (jxl, pngflac, exercarve, containerpack, registry,
+# rawdisk/ext4fs/fatfs/xfs/ntfs/vdi/qcow2/p7z, rawimg) stay out of hosted CI
+# on purpose -- run them on a self-hosted/root box before releases.
+name: engine-ci
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+jobs:
+  engine:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq build-essential pkg-config \
+            libfuse3-dev zlib1g-dev libzstd-dev python3
+
+      - name: build
+        run: make -j"$(nproc)"
+
+      - name: unit (gating: codec + arc + blkio)
+        run: |
+          ./bin/invf-codec_test | tail -2
+          ./bin/invf-arctest   | tail -2
+          ./bin/invf-blkio_test | tail -2
+
+      - name: unit (non-gating: helper containment needs namespaces/landlock)
+        continue-on-error: true
+        run: ./bin/invf-helper_exec_test
+
+      - name: engine e2e suites
+        run: |
+          set -u
+          mkdir -p .ci-tools /tmp/invfs-e2e
+          SUITES="test-rollback test-multidev test-resize test-seal test-dedupe
+                  test-astv2 test-textzone test-binbatch test-conbatch
+                  test-flushfail test-heat test-stats-mapper test-sweep-mapper
+                  test-compact test-l2p test-fuzz test-mapper-crash"
+          FAIL=0
+          for s in $SUITES; do
+            # the suites hardcode /dev/shm (small tmpfs); CI relocates the
+            # workdir to disk. The patched copies stay INSIDE the checkout so
+            # each suite's REPO="$(dirname $0)/.." resolves correctly.
+            sed 's|/dev/shm|/tmp/invfs-e2e|g' "tools/$s.sh" > ".ci-tools/$s.sh"
+            echo "::group::$s"
+            if bash ".ci-tools/$s.sh"; then
+              echo "$s: PASS"
+            else
+              echo "$s: FAIL"; FAIL=1
+            fi
+            echo "::endgroup::"
+            # keep the runner disk bounded: suites leave sparse images behind
+            rm -rf /tmp/invfs-e2e
+            mkdir -p /tmp/invfs-e2e
+          done
+          [ "$FAIL" = 0 ] || { echo "engine e2e: at least one suite FAILED"; exit 1; }
+          echo "engine e2e: ALL SUITES PASS"

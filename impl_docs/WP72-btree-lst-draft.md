@@ -626,3 +626,69 @@ the JOURNAL only (inode records already carry their own length — they
 were never the problem); cost ~150 lines + regenerating the crash-leg
 fixtures that assert on journal bytes; rides inside the v3 wave because
 it is a wire-format change and v3 is the last free one.
+
+### 10.4 Frames: the three design options, resolved (round 3, item 5)
+
+The author's framing of the choice: "shrink the frame, grow the frame, or
+write down in advance who must know what." All three are real options;
+they compose as follows.
+
+- **"Grow the frame" (u48 length, 8-byte head)** — rejected. It exists
+  only to admit >16 MB payloads, and the ONLY >16 MB records in the
+  system are inode records (the 384 MB recipe worst case). Records are
+  already self-describing (rec_len u32 + trailing CRC + magic) and were
+  never part of the WP71f bug class. Paying +4 B per journal entry
+  (36->44, -18% slot capacity) and reframing 15 record-parsing sites
+  (colliding with the v3 WIP) to unify with a stream that needs no
+  unification is a bad trade.
+- **"Shrink the frame" (bound what may enter a framed stream)** — this
+  is the actual decision, understood correctly: not bounding data, but
+  SCOPING framing to streams whose payloads are small by construction —
+  the journal (fixed structs, <= a few hundred bytes) and any future
+  page-commit log (tree pages are 4 KB). For those, a u24 length (16 MB
+  cap) is not a limit, it is headroom of three orders of magnitude. The
+  record stream keeps its own existing self-description untouched.
+- **"Write down in advance" (type registry)** — kept, in the ONLY form
+  that does not recreate the disease: the registry is a human/compile-
+  time artifact (one table in invarifs.h: type value -> payload struct
+  -> static size assert), NOT runtime walker knowledge. The wire stays
+  self-describing per frame; walkers never consult the table. The
+  current illness is precisely a registry that lives only in five
+  walkers' hardcoded strides.
+
+Wire format (journal v2, rides the v3 break; JRN0 slot header version
+bumps to 2; pre-freeze policy = NO dual readers, a v1 slot on a v3 build
+is refused with a pointer to the last v0.4.x release):
+
+    [u8 type][u24 payload_len LE]        <- 4-byte head
+    [payload: payload_len bytes]
+    [u32 crc32c over head+payload]       <- 8 B overhead per frame
+
+    chain layer (kept): entry.crc-style rolling crc32c over the whole
+    frame bytes, seed = slot header (jrn_chain generalization); torn
+    tail = first frame failing frame-CRC or chain, replay stops there.
+
+Type registry (initial):
+
+    0x01 JF_MAP    {u64 inode, u64 lba, u64 pba, u32 length,
+                    u16 heat_r, u8 heat_w, u8 flags}      (35 B)
+    0x02 JF_UNMAP  {u64 inode, u64 lba}                   (16 B)
+    0x03 JF_GEN    {u64 gen_watermark}  reserved for §9.2 journal-side
+                   optimizations; not written by v3 initially
+    0x10-0x14      RETIRED (the deleted meta-WAL range stays reserved-
+                   dead so old mixed streams can never parse as valid)
+    0x30+          reserved: tree page-commit markers, gen bumps
+
+Code delta (the point of the exercise): ONE shared stepper
+`jf_next(reader, &off, end, &frame)` in volume.c replaces the
+stride-36 knowledge currently living in FIVE files (vol_crash.c
+watermark math, vol_fsck.c journal rebuild, vol_rollback.c staging
+verify+replay (the WP71f ckp_* helpers collapse into it), volume.c
+replay, cli/resize.c scan_journal). Adding a journal op becomes:
+assign a type, add the payload struct + static assert, teach the
+single stepper's apply switch. Walkers: zero edits, forever.
+
+Migration/test delta: crash-leg fixtures that assert on raw journal
+bytes regenerate once (flakey leg 6, rollback staging legs, writepath
+journal-tail legs); INVFS_JRN_FORCE_COMPACT semantics unchanged.
+Estimate: ~150 LOC engine + fixture regeneration, inside the v3 wave.
