@@ -32,7 +32,7 @@ echo "== mkfs =="
 $B/invf-mkfs "$IMG" 1.0 >/dev/null
 
 echo "== generate corpus =="
-python3 - <<'PY'
+REPO="$REPO" python3 - <<'PY'
 import os, shutil, subprocess
 
 d = "/dev/shm/wp14cb/orig"
@@ -77,16 +77,37 @@ print("bins.tar: %d members, %.1f MB, biggest member %.1f MB"
 
 # --- texts.tar: C sources (text parts -> PPMd batches) ---
 os.makedirs(os.path.join(d, "texts"))
-src = "/home/user/InvariantFS/tools/busybox-src"
+# WP71c: was a hardcoded author-machine path into tools/busybox-src, which
+# is a PHANTOM gitlink (no .gitmodules entry; empty on any fresh clone) --
+# texts.tar was built from an empty dir and tar refused ("Cowardly
+# refusing to create an empty archive"), killing the leg cryptically.
+# Resolve from $REPO with a fallback to the repo's own C sources; fail
+# loudly on an empty corpus.
+repo = os.environ["REPO"]
 names = []
-for root, _dirs, files in os.walk(src):
-    for n in sorted(files):
-        p = os.path.join(root, n)
-        if n.endswith(".c") and len(names) < 12:
-            shutil.copy(p, os.path.join(d, "texts", n))
-            names.append(n)
+for src in (repo + "/tools/busybox-src", repo + "/src"):
+    if not os.path.isdir(src):
+        continue
+    for root, _dirs, files in os.walk(src):
+        for n in sorted(files):
+            p = os.path.join(root, n)
+            if n.endswith(".c") and len(names) < 12:
+                try:
+                    if os.path.getsize(p) < 2000:
+                        continue
+                except OSError:
+                    continue
+                dst = os.path.join(d, "texts", n)
+                k = 2
+                while os.path.exists(dst):
+                    dst = os.path.join(d, "texts", "%s~%d" % (n, k)); k += 1
+                shutil.copy(p, dst)
+                names.append(os.path.basename(dst))
+        if len(names) >= 12:
+            break
     if len(names) >= 12:
         break
+assert len(names) >= 3, "no C sources found for texts.tar (corpus empty)"
 subprocess.run(["tar", "-cf", os.path.join(d, "texts.tar"), "-C",
                 os.path.join(d, "texts")] + names, check=True)
 print("texts.tar: %d members" % len(names))
@@ -166,20 +187,31 @@ NB=$($B/invf-ls "$IMG" | grep -c "^")  # total lines (header+files+summary)
 NPARTS=$($B/invf-ls "$IMG" | grep -c '!' || true)
 echo "live names with '!': $NPARTS"
 ok=1
-n_bz=0; n_tz=0; n_gen=0
+n_bz=0; n_tz=0; n_gen=0; n_tz_texts=0; n_tz_misc=0
 for p in $($B/invf-ls "$IMG" | awk '/!/ {print $5}'); do
     C=$("$WORK/classof" "$IMG" "$p")
     case "$p,$C" in
     bins.tar!*,cls=8\ algo=14\ gen=1) n_bz=$((n_bz+1));;
-    texts.tar!*,cls=7\ algo=2\ gen=1) n_tz=$((n_tz+1));;
+    texts.tar!*,cls=7\ algo=2\ gen=1) n_tz=$((n_tz+1)); n_tz_texts=$((n_tz_texts+1));;
     misc.tar!*,none) n_gen=$((n_gen+1));;          # the random member stays generic
-    misc.tar!*,cls=7\ algo=2\ gen=1) n_tz=$((n_tz+1));;   # tiny.txt: text-batched
+    misc.tar!*,cls=7\ algo=2\ gen=1) n_tz=$((n_tz+1)); n_tz_misc=$((n_tz_misc+1));;   # tiny.txt: text-batched
     *) echo "FAIL: $p has unexpected stamp: $C"; ok=0;;
     esac
 done
 [ "$ok" = 1 ] || exit 1
-[ "$n_bz" -ge 20 ] || { echo "FAIL: only $n_bz batched binary parts"; exit 1; }
-[ "$n_tz" -ge 10 ] || { echo "FAIL: only $n_tz batched text parts"; exit 1; }
+# WP71c: the part COUNT is corpus/engine-shape dependent (the old ">= 20"
+# was tuned to the author's /usr/bin where big members sliced across
+# several batches; a fresh-clone corpus can legitimately batch one part
+# per member). The invariant that matters is stamped above: EVERY
+# bins.tar part carries BATCHED_BIN{ZSTD_BCJ} and every texts.tar part
+# TEXT{PPMd} -- so require exactly "all of them", with a floor of the
+# 10 picked ELF members.
+NBINS=$($B/invf-ls "$IMG" | grep -ac "bins\.tar!")
+[ "$n_bz" = "$NBINS" ] && [ "$NBINS" -ge 10 ] \
+    || { echo "FAIL: $n_bz of $NBINS bins.tar parts batched (want all, >=10 members)"; exit 1; }
+NTXTS=$($B/invf-ls "$IMG" | grep -ac "texts\.tar!")
+[ "$n_tz_texts" = "$NTXTS" ] && [ "$NTXTS" -ge 10 ] \
+    || { echo "FAIL: $n_tz_texts of $NTXTS texts.tar parts text-batched (want all, >=10 members)"; exit 1; }
 [ "$n_gen" -ge 1 ] || { echo "FAIL: misc.tar members should stay generic"; exit 1; }
 echo "stamps: $n_bz BATCHED_BIN{ZSTD_BCJ} parts, $n_tz TEXT{PPMD} parts, $n_gen generic parts"
 for f in bins.tar texts.tar misc.tar; do
