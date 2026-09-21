@@ -912,3 +912,30 @@ int meta_get_owner_append_pos(invfs_volume *v, uint64_t rec_size,
     pthread_rwlock_unlock(&v->meta_lock);
     return 0;
 }
+
+/* WP71g: public mapper-footprint stats (invf-stats printout; the
+ * test-dedupe accounting leg). Counts live extents and their total block
+ * footprint from the loaded mapper table. 0 with *n_out=0 on a legacy
+ * (non-mapper) volume, -1 when the mapper could not be consulted. */
+int vol_meta_extent_stats(invfs_volume *v, uint64_t *n_out,
+                          uint64_t *blocks_out)
+{
+    uint64_t n = 0, b = 0;
+    size_t k;
+    if (n_out) *n_out = 0;
+    if (blocks_out) *blocks_out = 0;
+    if (!v) return -1;
+    if (!v->met0_present) return 0;          /* legacy volume: no extents */
+    if (!v->meta_mapper && meta_mapper_load(v) != 0) return -1;
+    if (!v->meta_mapper) return 0;
+    for (k = 0; k < v->meta_mapper_n; k++) {
+        uint64_t ent = v->meta_mapper[k];
+        uint64_t ep = invfs_meta_ext_pba(ent);
+        if (!ep) continue;
+        n++;
+        b += invfs_meta_ext_size(ent) / INVFS_BLOCK_SIZE;
+    }
+    if (n_out) *n_out = n;
+    if (blocks_out) *blocks_out = b;
+    return 0;
+}

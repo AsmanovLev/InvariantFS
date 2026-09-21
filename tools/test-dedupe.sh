@@ -38,6 +38,10 @@ cd /dev/shm
 rm -f "$IMG" "$IMGT"
 
 free_blocks() { $B/invf-fsck "$1" | awk '/free blocks:/ {print $3}'; }
+# WP71g: mapper-extent footprint in blocks (0 on legacy volumes / no line)
+extent_blocks() { $B/invf-stats "$1" 2>/dev/null | \
+    sed -n 's/^meta extents (WP30): [0-9]* extent(s), \([0-9]*\) blocks.*/\1/p' | \
+    head -1 | sed 's/^$/0/'; }
 
 echo "== generate tree (leg 1) =="
 python3 - <<'PY'
@@ -67,6 +71,7 @@ for f in $FILES; do
     $B/invf-cp "$IMG" "$WORK/orig/$f" "$f" >/dev/null
 done
 FREE0=$(free_blocks "$IMG")
+EXT0=$(extent_blocks "$IMG")
 echo "free blocks after import: $FREE0"
 
 echo "== sweep #1 (walk -> dedupe -> GC -> flush) =="
@@ -81,14 +86,22 @@ FREED=$(echo "$DEDUP_LINE" | awk '{print $6}')
 # merged blocks must be back in the bitmap: free-after == free-before + freed
 # WP21: the sweep held its frees in the retention registry (the live
 # checkpoint); realize it first so the bitmap reflects the dedupe (the
-# no-op re-sweep inside --realize leaves no new checkpoint behind).
+# no-op re-sweep inside --realize disarms its checkpoint when nothing
+# was retained).
 $B/invf-sweep "$IMG" --realize >> "$WORK/sweep1.log" 2>&1 || {
     cat "$WORK/sweep1.log"; exit 1; }
 FREE1=$(free_blocks "$IMG")
-echo "free blocks after sweep: $FREE1 (freed by dedupe: $FREED)"
-[ "$((FREE0 + FREED))" = "$FREE1" ] || {
-    echo "FAIL: free-block delta $((FREE1 - FREE0)) != freed $FREED"; exit 1; }
-echo "bitmap cross-check OK: +$FREED blocks returned"
+EXT1=$(extent_blocks "$IMG")
+echo "free blocks after sweep: $FREE1 (freed by dedupe: $FREED, meta extents $EXT0 -> $EXT1 blocks)"
+# WP71g mapper-era accounting: on a mapper volume the record churn of the
+# sweep (class stamps, owner rewrites) can allocate metadata extents from
+# the SAME free pool the dedupe returns blocks to, so the exact pre-mapper
+# equation is delta == freed - extent-growth. (Pre-WP30 the records landed
+# in the pre-allocated linear inode area inside the metadata zone and the
+# pool moved by exactly `freed`.)
+if [ "$((FREE0 + FREED - (EXT1 - EXT0)))" != "$FREE1" ]; then
+    echo "FAIL: free-block delta $((FREE1 - FREE0)) != freed $FREED - extent growth $((EXT1 - EXT0))"; exit 1; fi
+echo "bitmap cross-check OK: +$FREED blocks returned (-$((EXT1 - EXT0)) extent growth)"
 
 echo "== verify --deep =="
 $B/invf-verify "$IMG" --deep | tee "$WORK/verify1.log"

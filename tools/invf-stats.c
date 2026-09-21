@@ -104,6 +104,17 @@ int main(int argc, char **argv)
                        st.unclaimed_used_bytes / 1048576.0);
         }
     }
+    /* WP71g: the WP30 mapper footprint -- dynamic metadata extents are
+     * allocated from the shared free pool, so record churn (sweep class
+     * stamps, owner rewrites) consumes data blocks; make that visible. */
+    {
+        uint64_t nx = 0, xb = 0;
+        if (vol_meta_extent_stats(v, &nx, &xb) == 0 && nx)
+            printf("meta extents (WP30): %llu extent(s), %llu blocks "
+                   "(%.1f MiB of the free pool)\n",
+                   (unsigned long long)nx, (unsigned long long)xb,
+                   (double)(xb * 4096) / 1048576.0);
+    }
     /* WP25: two-device state -- device table, mirror freshness, the RAW
      * mirror and the dev0 tier-arena copies. Absent on single-device
      * volumes (the print is the compat surface). */

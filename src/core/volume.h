@@ -673,3 +673,6 @@ int  vol_tier_migrate(invfs_volume *v);
 int vol_meta_merge_needed(invfs_volume *v);
 int vol_meta_merge_step(invfs_volume *v);
 int vol_meta_merge_run(invfs_volume *v);
+/* WP71g: live metadata extents + their total block footprint (0 on legacy) */
+int vol_meta_extent_stats(invfs_volume *v, uint64_t *n_out,
+                          uint64_t *blocks_out);
