@@ -670,6 +670,97 @@ int vol_ckp_realize(invfs_volume *v, uint64_t *freed_blocks_out)
  * keeps them counted live for fsck. Both exist exactly while CKP0 lives;
  * a realized checkpoint makes the cut unprovable, so vol_open_at refuses.
  */
+/* WP71f: in-buffer walkers for the MIXED journal stream. The staged
+ * prefix is a byte copy of the live journal, and jrn_append_pending
+ * interleaves 24-byte metadata-extent WAL records (type 0x10..0x14,
+ * CRC16-checked) between the 36-byte L2P entries. A walker that strides
+ * 36B blindly mis-parses the first meta record: the chain check trips
+ * and the whole stage is refused ("journal staging" verification) even
+ * though every byte is sound -- rollback/time-travel died on any mapper
+ * volume whose checkpoint window contained extent activity. These
+ * helpers step over meta records without touching the L2P chain. */
+static int ckp_buf_step_meta(const uint8_t *buf, uint64_t *off, uint64_t end)
+{
+    const invfs_meta_wal *mw;
+    uint8_t t;
+    if (*off >= end) return 0;
+    t = buf[*off];
+    if (t < INVFS_JRN_META_ALLOC || t > INVFS_JRN_META_MERGE)
+        return 0;
+    if (*off + sizeof(invfs_meta_wal) > end)
+        return -2;
+    mw = (const invfs_meta_wal *)(buf + *off);
+    if ((uint16_t)invfs_crc32c(mw, offsetof(invfs_meta_wal, crc)) != mw->crc)
+        return -2;
+    *off += sizeof(invfs_meta_wal);
+    return 1;
+}
+
+/* Verify the chained-log span [start,end): every byte must belong to a
+ * chain-valid L2P entry or a valid meta-wal record; *prev_io carries the
+ * chain seed in and the final crc out. 0 = fully consumed, -3 = corrupt. */
+static int ckp_verify_chain(const uint8_t *buf, uint64_t start, uint64_t end,
+                            uint32_t *prev_io)
+{
+    uint64_t off = start;
+    while (off < end) {
+        const invfs_l2p_entry *e;
+        int st = ckp_buf_step_meta(buf, &off, end);
+        if (st == 1) continue;
+        if (st < 0) return -3;
+        if (off + sizeof(invfs_l2p_entry) > end) return -3;
+        e = (const invfs_l2p_entry *)(buf + off);
+        if (invfs_crc32c_update(*prev_io, e,
+                offsetof(invfs_l2p_entry, crc)) != e->crc)
+            return -3;
+        *prev_io = e->crc;
+        off += sizeof *e;
+    }
+    return 0;
+}
+
+/* Verify the legacy (bare-CRC) span [start,end) meta-aware. */
+static int ckp_verify_legacy(const uint8_t *buf, uint64_t start, uint64_t end)
+{
+    uint64_t off = start;
+    while (off < end) {
+        invfs_l2p_entry e;
+        int st = ckp_buf_step_meta(buf, &off, end);
+        if (st == 1) continue;
+        if (st < 0) return -3;
+        if (off + sizeof e > end) return -3;
+        memcpy(&e, buf + off, sizeof e);
+        if (invfs_crc32c(&e, offsetof(invfs_l2p_entry, crc)) != e.crc)
+            return -3;
+        off += sizeof e;
+    }
+    return 0;
+}
+
+/* Apply the span [start,end) to the in-memory table, skipping meta-wal
+ * records. 0 = ok, -1 = alloc, -3 = malformed (post-verify: cannot
+ * happen on a verified stage). */
+static int ckp_apply_stream(invfs_volume *v, const uint8_t *buf,
+                            uint64_t start, uint64_t end,
+                            uint64_t *replayed_out, uint32_t *prev_out)
+{
+    uint64_t off = start;
+    while (off < end) {
+        const invfs_l2p_entry *e;
+        int st = ckp_buf_step_meta(buf, &off, end);
+        if (st == 1) continue;
+        if (st < 0) return -3;
+        if (off + sizeof(invfs_l2p_entry) > end) return -3;
+        e = (const invfs_l2p_entry *)(buf + off);
+        if (l2p_apply(v, e) != 0) return -1;
+        if (prev_out) *prev_out = e->crc;
+        if (replayed_out) (*replayed_out)++;
+        off += sizeof *e;
+    }
+    return 0;
+}
+
+
 int ckp_stage_replay(invfs_volume *v)
 {
     uint64_t jstart, jpos, iapos, stage_len, slot_idx = 0;
@@ -712,9 +803,10 @@ int ckp_stage_replay(invfs_volume *v)
                             INVFS_BLOCK_SIZE);
     } else {
         stage_len = jpos - jstart;   /* underflow caught by the check below */
-        if (jpos < jstart ||
-            (stage_len % sizeof(invfs_l2p_entry)) != 0)
+        if (jpos < jstart)
             return -3;
+        /* WP71f: no %36 alignment rule -- the flat log can interleave
+         * 24B meta-wal records; the CRC walk verifies every byte. */
     }
 
     /* Descriptor sanity (the CRC already proved the bytes; these bounds
@@ -767,15 +859,9 @@ int ckp_stage_replay(invfs_volume *v)
             prev = le->crc;
         }
         jp2 = INVFS_BLOCK_SIZE + ib;
-        while (jp2 + sizeof(invfs_l2p_entry) <= stage_len) {
-            const invfs_l2p_entry *e = (const invfs_l2p_entry *)(buf + jp2);
-            if (invfs_crc32c_update(prev, e,
-                    offsetof(invfs_l2p_entry, crc)) != e->crc)
-                break;
-            prev = e->crc;
-            jp2 += sizeof(*e);
-        }
-        if (jp2 != stage_len)
+        /* WP71f: full-consumption check over the mixed stream (meta-wal
+         * records step aside without touching the chain) */
+        if (ckp_verify_chain(buf, jp2, stage_len, &prev) != 0)
             goto out;
         /* verified: apply the image, then the log */
         prev = invfs_crc32c(&sh, offsetof(invfs_jrn_hdr, image_crc));
@@ -786,12 +872,10 @@ int ckp_stage_replay(invfs_volume *v)
             prev = e->crc;
             replayed++;
         }
-        for (off = INVFS_BLOCK_SIZE + ib; off < stage_len;
-             off += sizeof(invfs_l2p_entry)) {
-            const invfs_l2p_entry *e = (const invfs_l2p_entry *)(buf + off);
-            if (l2p_apply(v, e) != 0) { rc = -1; goto out; }
-            prev = e->crc;
-            replayed++;
+        {
+            int arc2 = ckp_apply_stream(v, buf, INVFS_BLOCK_SIZE + ib,
+                                        stage_len, &replayed, &prev);
+            if (arc2 != 0) { rc = arc2; goto out; }
         }
         v->j_slotted = 1;
         v->j_slot = (uint32_t)slot_idx;
@@ -799,20 +883,13 @@ int ckp_stage_replay(invfs_volume *v)
         v->j_last_crc = prev;
     } else {
         /* legacy flat log: every staged entry must pass its bare CRC (the
-         * rollback's rule), then apply in order */
-        for (off = 0; off + sizeof(invfs_l2p_entry) <= stage_len;
-             off += sizeof(invfs_l2p_entry)) {
-            invfs_l2p_entry e;
-            memcpy(&e, buf + off, sizeof e);
-            if (invfs_crc32c(&e, offsetof(invfs_l2p_entry, crc)) != e.crc)
-                goto out;
-        }
-        for (off = 0; off + sizeof(invfs_l2p_entry) <= stage_len;
-             off += sizeof(invfs_l2p_entry)) {
-            invfs_l2p_entry e;
-            memcpy(&e, buf + off, sizeof e);
-            if (l2p_apply(v, &e) != 0) { rc = -1; goto out; }
-            replayed++;
+         * rollback's rule, WP71f: meta-wal aware), then apply in order */
+        if (ckp_verify_legacy(buf, 0, stage_len) != 0)
+            goto out;
+        {
+            int arc2 = ckp_apply_stream(v, buf, 0, stage_len, &replayed,
+                                        NULL);
+            if (arc2 != 0) { rc = arc2; goto out; }
         }
         v->j_slotted = 0;
     }
@@ -875,9 +952,10 @@ int vol_rollback(invfs_volume *v, uint64_t *reclaimed_out)
                             INVFS_BLOCK_SIZE);
     } else {
         stage_len = jpos - jstart;   /* underflow caught by the check below */
-        if (jpos < jstart ||
-            (stage_len % sizeof(invfs_l2p_entry)) != 0)
+        if (jpos < jstart)
             return -3;
+        /* WP71f: no %36 alignment rule -- the flat log can interleave
+         * 24B meta-wal records; the CRC walk verifies every byte. */
     }
 
     /* Descriptor sanity (the CRC already proved the bytes; these bounds
@@ -937,15 +1015,11 @@ int vol_rollback(invfs_volume *v, uint64_t *reclaimed_out)
                     prev = le->crc;
                 }
                 jp2 = INVFS_BLOCK_SIZE + ib;
-                while (jp2 + sizeof(invfs_l2p_entry) <= stage_len) {
-                    const invfs_l2p_entry *e = (const invfs_l2p_entry *)(buf + jp2);
-                    if (invfs_crc32c_update(prev, e,
-                            offsetof(invfs_l2p_entry, crc)) != e->crc)
-                        break;
-                    prev = e->crc;
-                    jp2 += sizeof(*e);
+                /* WP71f: mixed-stream verification (meta-wal aware) */
+                if (ckp_verify_chain(buf, jp2, stage_len, &prev) != 0) {
+                    free(buf);
+                    return -3;
                 }
-                if (jp2 != stage_len) { free(buf); return -3; }
                 /* both slots get the staged bytes: a half-restored pair
                  * is still consistent (the staged header sequence is the
                  * same in both; a crash mid-restore is re-entered with
@@ -965,14 +1039,10 @@ int vol_rollback(invfs_volume *v, uint64_t *reclaimed_out)
                 v->sb.pad2 = INVFS_JSEL_SLOT0;
                 if (vol_write_sb(v) != 0) return -1;
             } else {
-                for (off = 0; off + sizeof(invfs_l2p_entry) <= stage_len;
-                     off += sizeof(invfs_l2p_entry)) {
-                    invfs_l2p_entry e;
-                    memcpy(&e, buf + off, sizeof e);
-                    if (invfs_crc32c(&e, offsetof(invfs_l2p_entry, crc)) != e.crc) {
-                        free(buf);
-                        return -3;
-                    }
+                /* WP71f: mixed-stream verification (meta-wal aware) */
+                if (ckp_verify_legacy(buf, 0, stage_len) != 0) {
+                    free(buf);
+                    return -3;
                 }
                 /* kill any live slot headers first: the restored bytes
                  * are the legacy flat log and must REPLAY as legacy */

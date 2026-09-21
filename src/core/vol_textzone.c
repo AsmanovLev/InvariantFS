@@ -243,6 +243,12 @@ int tz_owner_write(invfs_volume *v, uint64_t owner, const char *name,
         int arc = vol_append_owner_slot(v, total, &o->ext_idx, &new_pos);
         if (arc != 0) { free(combo); return -1; }
     }
+    if (getenv("INVFS_TRACE_OWNER"))
+        fprintf(stderr, "[owner] write '%s': old_pos=%llu new_pos=%llu "
+                "in_place=%d n=%u rec_len=%zu\n", name,
+                (unsigned long long)o->pos, (unsigned long long)new_pos,
+                (int)(o->pos && new_pos == o->pos), (unsigned)o->n,
+                (size_t)rec_len);
     /* WP52: an in-place rewrite (dedicated extent reused, new_pos == the
      * previous position) has nothing to position-kill; a self-tombstone
      * would kill the record just written. Write only the record+CRC. */

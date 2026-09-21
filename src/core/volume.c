@@ -547,6 +547,41 @@ int l2p_apply(invfs_volume *v, const invfs_l2p_entry *e)
 }
 
 
+/* WP71f: step over a WP30 metadata-extent WAL record at *jp, if one is
+ * there. Returns 1 and advances *jp past it (24B, type 0x10..0x14,
+ * self-checked with its CRC16), 0 when the record at *jp is not a
+ * meta-wal entry, -1 on io error, -2 on a torn/corrupt meta record at
+ * the tail.
+ *
+ * jrn_append_pending appends BOTH queues per flush (36B L2P entries,
+ * then the 24B meta-wal entries), so a live journal is a mixed stream.
+ * The meta records have no replay consumer today (the mapper table is
+ * persisted wholesale by meta_mapper_flush; the WAL is the not-yet-built
+ * raw-side LST's pruning log), so the ONLY correct behavior for every
+ * journal walker is to step over them without breaking the L2P chain.
+ * Before this, l2p_replay read them as 36B L2P records, the chain check
+ * misfired, and replay silently truncated EVERYTHING past the first
+ * interleaved meta record -- that is how seal parity maps (and any owner
+ * WAL maps appended after extent activity) were lost on every reopen. */
+static int jrn_step_meta_wal(invfs_volume *v, uint64_t *jp, uint64_t jend)
+{
+    uint8_t t;
+    invfs_meta_wal mw;
+    if (io_seek(&v->io, *jp) != 0 || io_read(&v->io, &t, 1) != 0)
+        return -1;
+    if (t < INVFS_JRN_META_ALLOC || t > INVFS_JRN_META_MERGE)
+        return 0;
+    if (*jp + sizeof mw > jend)
+        return -2;
+    if (io_seek(&v->io, *jp) != 0 || io_read(&v->io, &mw, sizeof mw) != 0)
+        return -1;
+    if ((uint16_t)invfs_crc32c(&mw, offsetof(invfs_meta_wal, crc)) != mw.crc)
+        return -2;
+    *jp += sizeof mw;
+    return 1;
+}
+
+
 /* Replay one slot whose header validated: image (wholesale CRC) then the
  * chained log until the first chain break. -1 = io/alloc failure, +1 =
  * image torn (slot unusable, caller tries the other slot). */
@@ -582,6 +617,9 @@ static int l2p_replay_slot(invfs_volume *v, uint32_t slot,
     }
     while (jp + sizeof(invfs_l2p_entry) <= jend) {
         invfs_l2p_entry e;
+        int stepped = jrn_step_meta_wal(v, &jp, jend);   /* WP71f */
+        if (stepped == 1) continue;
+        if (stepped < 0) break;   /* io error / torn meta record: the tail */
         if (io_seek(&v->io, jp) != 0 ||
             io_read(&v->io, &e, sizeof(e)) != 0)
             break;
@@ -616,6 +654,9 @@ static int l2p_replay_legacy(invfs_volume *v)
 
     while (jp + sizeof(invfs_l2p_entry) <= jend) {
         invfs_l2p_entry e;
+        int stepped = jrn_step_meta_wal(v, &jp, jend);   /* WP71f */
+        if (stepped == 1) continue;
+        if (stepped < 0) break;   /* io error / torn meta record: the tail */
         if (io_seek(&v->io, jp) != 0 ||
             io_read(&v->io, &e, sizeof(e)) != 0)
             break;
@@ -2501,6 +2542,11 @@ static int jrn_abort_at(const char *stage)
  * after the op was queued). */
 int jrn_push_op(invfs_volume *v, const invfs_l2p_entry *e)
 {
+    if (getenv("INVFS_TRACE_JRN"))
+        fprintf(stderr, "[jrn] op type=%02x inode=%llu lba=%llu pba=%llu "
+                "len=%u\n", e->type, (unsigned long long)e->inode,
+                (unsigned long long)e->lba, (unsigned long long)e->pba,
+                e->length);
     if (v->jops_n == v->jops_cap) {
         size_t ncap = v->jops_cap ? v->jops_cap * 2 : 256;
         invfs_l2p_entry *nj =

@@ -155,15 +155,38 @@ void seal_view_free(seal_view *sv)
     free(sv->shard2_id);
     free(sv->is_par);
     free(sv->is_ret);
+    free(sv->is_meta);
     memset(sv, 0, sizeof *sv);
 }
 
 
 /* the seal's data-membership rule: occupied in the bitmap, never in the
- * exclusion set (parity of both layers + the retention registry) */
+ * exclusion set (parity of both layers + the retention registry + the
+ * WP30 metadata extents, WP71f). Extents are checked BOTH from the
+ * load-time snapshot bitmap AND from the live mapper: the seal run's own
+ * owner-record syncs append records and can allocate a fresh extent
+ * mid-run (seal2 leg 12: writer counted the new extent's blocks as data
+ * members -- 21+11 blocks in stripes 7-8 -- while the next open's view
+ * excluded them: "2 extra"). A live extent check keeps the writer and
+ * every later verifier on the same membership. */
 int seal_excluded(const seal_view *sv, uint64_t b)
 {
-    return bit_get(sv->is_par, b) || (sv->is_ret && bit_get(sv->is_ret, b));
+    if (bit_get(sv->is_par, b) ||
+        (sv->is_ret && bit_get(sv->is_ret, b)) ||
+        (sv->is_meta && bit_get(sv->is_meta, b)))
+        return 1;
+    if (sv->vol && sv->vol->met0_present && sv->vol->meta_mapper) {
+        size_t k, n = sv->vol->meta_mapper_n;
+        for (k = 0; k < n; k++) {
+            uint64_t ent = meta_mapper_get(sv->vol, k);
+            uint64_t ep = invfs_meta_ext_pba(ent);
+            if (!ep) continue;
+            if (b >= ep &&
+                b < ep + invfs_meta_ext_size(ent) / INVFS_BLOCK_SIZE)
+                return 1;
+        }
+    }
+    return 0;
 }
 
 int seal_view_load(invfs_volume *v, seal_view *sv)
@@ -174,9 +197,27 @@ int seal_view_load(invfs_volume *v, seal_view *sv)
     size_t nret = 0;
 
     memset(sv, 0, sizeof *sv);
+    sv->vol = v;   /* WP71f: live mapper queries from seal_excluded */
     sv->is_par = (uint8_t *)calloc((size_t)(v->sb.total_blocks + 7) / 8, 1);
     sv->is_ret = (uint8_t *)calloc((size_t)(v->sb.total_blocks + 7) / 8, 1);
     if (!sv->is_par || !sv->is_ret) { free(ret_id); return -1; }
+    /* WP71f: mark every live metadata-extent span as excluded (see the
+     * seal_view comment). Freed extents carry pba 0 and drop out. */
+    sv->is_meta = (uint8_t *)calloc((size_t)(v->sb.total_blocks + 7) / 8, 1);
+    if (!sv->is_meta) { free(ret_id); seal_view_free(sv); return -1; }
+    if (v->met0_present && v->meta_mapper) {
+        size_t k;
+        for (k = 0; k < v->meta_mapper_n; k++) {
+            uint64_t ent = v->meta_mapper[k];
+            uint64_t ep = invfs_meta_ext_pba(ent);
+            uint64_t eb, eend;
+            if (!ep) continue;
+            eend = ep + invfs_meta_ext_size(ent) / INVFS_BLOCK_SIZE;
+            if (eend > v->sb.total_blocks) eend = v->sb.total_blocks;
+            for (eb = ep; eb < eend; eb++)
+                bit_set(sv->is_meta, eb);
+        }
+    }
     for (shard = 0;; shard++) {
         char nm[32];
         uint64_t id;
@@ -785,6 +826,9 @@ static int vol_seal_l2(invfs_volume *v, seal_view *sv, invfs_seal_report *rep)
             want[s / 8] |= (uint8_t)(1u << (s % 8));
             occupied += cnt;
         }
+        if (getenv("INVFS_TRACE_SEAL") && cnt)
+            fprintf(stderr, "[seal2.want] s=%llu cnt=%llu\n",
+                    (unsigned long long)s, (unsigned long long)cnt);
     }
 
     /* allocate the parity slots a wanted stripe is missing */
@@ -1032,6 +1076,10 @@ static int vol_seal2_verify_leg(invfs_volume *v, const seal_view *sv,
             if (bit_get(v->bitmap, b) && !seal_excluded(sv, b)) cnt++;
         for (j = 0; j < m2; j++)
             if (par[s * m2 + j]) mapped++;
+        if (getenv("INVFS_TRACE_SEAL") && (cnt || mapped))
+            fprintf(stderr, "[seal2.verify] s=%llu cnt=%llu mapped=%llu\n",
+                    (unsigned long long)s, (unsigned long long)cnt,
+                    (unsigned long long)mapped);
         if (cnt && !mapped) { out->missing2++; continue; }
         if (!cnt && mapped) { out->extra2++; continue; }
         if (!cnt) continue;

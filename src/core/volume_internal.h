@@ -707,6 +707,18 @@ typedef struct {
      * rollback is REFUSED under a live seal, so covering them would only
      * churn the stripes they sit in when a realize frees them. */
     uint8_t *is_ret;
+    /* WP71f: bitmap over total_blocks: 1 = a WP30 metadata-extent block.
+     * Extents are allocated from the shadow zone and marked in the bitmap,
+     * but they are NOT seal members: record appends mutate them at every
+     * flush -- including the seal run's own owner-record sync -- so a
+     * stripe covering an extent drifts the moment it is sealed, and an
+     * extent growing into an unsealed stripe reads as "missing" at the
+     * next verify. Records carry their own CRC32C; the parity layer's job
+     * is file data. NOTE: this bitmap is a load-time snapshot; the seal's
+     * OWN owner syncs allocate further extents mid-run, so seal_excluded
+     * also live-queries the mapper through `vol`. */
+    uint8_t *is_meta;
+    invfs_volume *vol;    /* WP71f: live mapper access for seal_excluded */
 } seal_view;
 
 static inline int name_too_long(const char *name)

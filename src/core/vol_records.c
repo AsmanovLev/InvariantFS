@@ -581,32 +581,70 @@ static void retire_free_file_blocks(invfs_volume *v, uint64_t inode_id,
  * rewritten in place (tz_owner_write / vol_append_owner_slot), so the delete
  * must write the DELT at the owner's own position -- appending to the shared
  * file-record extent lands before the owner in walk order and the kill is
- * lost (see the comment at the tombstone site). The tombstone is smaller than
- * the owner INOD it replaces (no AST body), so the write stays inside the
- * extent; the record's rec_len governs the next boundary. */
+ * lost (see the comment at the tombstone site).
+ *
+ * WP71f: the overwrite MUST preserve the original record's rec_len. The
+ * original wrote a minimal 44-byte DELT over a possibly much longer INOD:
+ * the walker strides by rec_len, so the short DELT left the rest of the
+ * old body parsing as garbage -- "end of records in this extent" -- and
+ * every record AFTER the overwritten one in the same extent became
+ * unreachable. The tz combo layout puts the partner DELT (the one that
+ * kills the PREVIOUS owner version) right behind the INOD, so deleting an
+ * owner after a re-seal resurrected the superseded version with its AST
+ * pointing at freed parity blocks (test-seal leg 10: fsck missing:25).
+ * The tombstone now keeps the footprint: [DELT header + name + NUL][zero
+ * padding to the old rec_len][CRC over rec_len] -- the chain stays intact
+ * and the partner DELT is still walked. */
 static int vol_delete_owner_overwrite(invfs_volume *v, const char *name,
                                       uint64_t inode_id, uint64_t pos)
 {
-    size_t tomb_size = INVFS_REC_HDR_LEN + strlen(name) + 1;
+    size_t name_len = strlen(name);
+    size_t tomb_min = INVFS_REC_HDR_LEN + name_len + 1;
+    invfs_inode_rec old_h;
     uint8_t *tbuf;
     invfs_inode_rec *rec;
     uint32_t crc;
+    size_t rec_len;
 
     if (!pos) return -1;
+    /* read the record being replaced: it must be this owner's live INOD,
+     * and its rec_len is the footprint we must preserve */
+    if (io_seek(&v->io, pos) != 0 ||
+        io_read(&v->io, &old_h, sizeof old_h) != 0)
+        return -1;
+    if (old_h.magic == TOMBSTONE_MAGIC)
+        return 0;   /* already deleted (idempotent) */
+    if (old_h.magic != INODE_REC_MAGIC || old_h.inode_id != inode_id) {
+        fprintf(stderr, "vol: owner delete: no live record for id %llu at "
+                "pos %llu (magic %08x)\n",
+                (unsigned long long)inode_id, (unsigned long long)pos,
+                old_h.magic);
+        return -1;
+    }
+    rec_len = old_h.rec_len;
+    if (rec_len < tomb_min || rec_len > INVFS_MAX_REC_LEN)
+        return -1;
     if (vol_mark_dirty(v) != 0) return -1;
-    tbuf = (uint8_t *)calloc(1, tomb_size);
+    tbuf = (uint8_t *)calloc(1, rec_len + 4);
     if (!tbuf) return -1;
     rec = (invfs_inode_rec *)tbuf;
     rec->magic = TOMBSTONE_MAGIC;
     v->hot.tombstones++;
-    rec->rec_len = (uint32_t)tomb_size;
+    rec->rec_len = (uint32_t)rec_len;   /* WP71f: preserve the footprint */
     rec->inode_id = inode_id;
     rec->file_size = pos;              /* v2 position kill */
     rec_set_name(rec, name);
-    crc = invfs_crc32c(tbuf, tomb_size);
+    /* the padding past the name stays zero (calloc); the CRC covers the
+     * full preserved rec_len, exactly like any record */
+    crc = invfs_crc32c(tbuf, rec_len);
+    memcpy(tbuf + rec_len, &crc, 4);
+    if (getenv("INVFS_TRACE_OWNER"))
+        fprintf(stderr, "[owner] delete-overwrite '%s': id=%llu pos=%llu "
+                "rec_len=%zu (preserved)\n", name,
+                (unsigned long long)inode_id, (unsigned long long)pos,
+                rec_len);
     if (io_seek(&v->io, pos) != 0 ||
-        io_write(&v->io, tbuf, tomb_size) != 0 ||
-        io_write(&v->io, &crc, 4) != 0) { free(tbuf); return -1; }
+        io_write(&v->io, tbuf, rec_len + 4) != 0) { free(tbuf); return -1; }
     free(tbuf);
     return 0;
 }

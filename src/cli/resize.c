@@ -125,7 +125,31 @@ static uint64_t parse_size(const char *s)
  * payload worth staging is the winning slot's [header + image + chained
  * log]; *src_out moves to that slot's base. Otherwise the area is the
  * legacy flat log: entries until the first CRC failure (replay's rule)
- * from js_byte. */
+ * from js_byte.
+ * WP71f: the stream is MIXED -- jrn_append_pending interleaves 24-byte
+ * metadata-extent WAL records (type 0x10..0x14, CRC16) between the 36B
+ * L2P entries. Both walkers below must step over them (exactly like
+ * l2p_replay's jrn_step_meta_wal) or the staged "used" length truncates
+ * at the first meta record and the resize silently drops every L2P entry
+ * past it (seal parity maps, owner WAL appends). */
+static int jrn_step_meta_wal_raw(blkio *io, uint64_t *jp, uint64_t jend)
+{
+    invfs_meta_wal mw;
+    uint8_t t;
+    if (blkio_pread(io, *jp, &t, 1) != 0)
+        return -1;
+    if (t < INVFS_JRN_META_ALLOC || t > INVFS_JRN_META_MERGE)
+        return 0;
+    if (*jp + sizeof mw > jend)
+        return -2;
+    if (blkio_pread(io, *jp, &mw, sizeof mw) != 0)
+        return -1;
+    if ((uint16_t)invfs_crc32c(&mw, offsetof(invfs_meta_wal, crc)) != mw.crc)
+        return -2;
+    *jp += sizeof mw;
+    return 1;
+}
+
 static int scan_journal(blkio *io, uint64_t js_byte, uint64_t *src_out,
                         uint64_t *used_out, int *slotted_out)
 {
@@ -190,6 +214,9 @@ static int scan_journal(blkio *io, uint64_t js_byte, uint64_t *src_out,
             }
             while (jp + sizeof(invfs_l2p_entry) <= jend) {
                 invfs_l2p_entry e;
+                int stepped = jrn_step_meta_wal_raw(io, &jp, jend);
+                if (stepped == 1) continue;
+                if (stepped < 0) break;
                 if (blkio_pread(io, jp, &e, sizeof e) != 0)
                     return -1;
                 if (invfs_crc32c_update(prev, &e,
@@ -212,6 +239,9 @@ static int scan_journal(blkio *io, uint64_t js_byte, uint64_t *src_out,
                         INVFS_BLOCK_SIZE;
         while (jp + sizeof(invfs_l2p_entry) <= jend) {
             invfs_l2p_entry e;
+            int stepped = jrn_step_meta_wal_raw(io, &jp, jend);
+            if (stepped == 1) continue;
+            if (stepped < 0) break;
             if (blkio_pread(io, jp, &e, sizeof e) != 0)
                 return -1;
             if (invfs_crc32c(&e, offsetof(invfs_l2p_entry, crc)) != e.crc)
