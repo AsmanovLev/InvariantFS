@@ -1045,6 +1045,80 @@ static int mirror_resync(invfs_volume *v)
             vol_io_error_latch(v, "mirror resync barrier (dev1)");
         return -1;
     }
+
+    /* WP71d: the metadata span is NOT the whole divergence. While a device
+     * is session-stale (dev_skip), vmux also refuses its DATA writes: a
+     * dev0 RAW segment write skipped under rule 3 survives only as its
+     * dev1 mirror copy ("reads fail over to it" -- but only while the
+     * session skip is set; once the resync clears dev_skip[0], reads go
+     * back to dev0 and find whatever stale bytes the block held before:
+     * silent corruption, seen as leg7-resync -> leg8-resize -> verify
+     * 'raw segment header corrupt' in test-multidev). Heal the RAW zone
+     * from the mirror index in the same pass: loser=dev0 restores every
+     * mirrored RAW segment dev1 -> dev0; loser=dev1 refreshes the mirror
+     * copies dev0 -> dev1. Idempotent: re-copying an already-correct
+     * segment is byte-wise a no-op. Tier-arena copies are dev0-local
+     * caches and are NOT part of this (a stale arena copy fails its own
+     * CRC and is dropped by the tier read path). */
+    if (v->raw_mirror && v->rawm_n) {
+        uint64_t restored = 0, failed = 0;
+        buf = (uint8_t *)malloc(BLKIO_BOUNCE);
+        if (!buf) return -1;
+        for (size_t i = 0; i < v->rawm_n; i++) {
+            uint64_t left = (uint64_t)v->rawm[i].plen * INVFS_BLOCK_SIZE;
+            uint64_t roff = v->rawm[i].key * INVFS_BLOCK_SIZE;   /* dev0 raw */
+            uint64_t moff = (v->rawm[i].pba - v->dev0_blocks) *
+                            INVFS_BLOCK_SIZE;                    /* dev1 mirr */
+            int bad = 0;
+            if (v->rawm[i].pba < v->dev0_blocks ||
+                v->rawm[i].pba >= v->dev0_blocks + v->dev1_blocks) {
+                failed++;
+                continue;
+            }
+            while (left) {
+                size_t n = left > BLKIO_BOUNCE ? BLKIO_BOUNCE : (size_t)left;
+                if (loser == 0) {
+                    /* dev0 lost its RAW writes: dev1 mirror -> dev0 */
+                    if (blkio_pread(&v->io2, moff, buf, n) != 0 ||
+                        blkio_pwrite(&v->io, roff, buf, n) != 0) {
+                        bad = 1;
+                        break;
+                    }
+                } else {
+                    /* dev1's mirror copies are stale: dev0 -> dev1 */
+                    if (blkio_pread(&v->io, roff, buf, n) != 0 ||
+                        blkio_pwrite(&v->io2, moff, buf, n) != 0) {
+                        bad = 1;
+                        break;
+                    }
+                }
+                moff += n;
+                roff += n;
+                left -= n;
+            }
+            if (bad) failed++;
+            else restored++;
+        }
+        fprintf(stderr, "vol: mirror resync: %llu RAW mirror segment(s) "
+                "restored on dev%d\n",
+                (unsigned long long)restored, loser);
+        if (failed) {
+            fprintf(stderr, "vol: mirror resync: %llu RAW segment(s) could "
+                    "NOT be restored -- dev%d stays session-skipped (reads "
+                    "keep failing over; retried at the next flush)\n",
+                    (unsigned long long)failed, loser);
+            free(buf);
+            return -1;   /* keep dev_skip[loser] + resync_pending set */
+        }
+        if (blkio_flush(loser ? &v->io2 : &v->io) != 0) {
+            if (loser == 1)
+                vol_io_error_latch(v, "mirror resync RAW barrier (dev1)");
+            free(buf);
+            return -1;
+        }
+        free(buf);
+    }
+
     v->dev_skip[loser] = 0;
     v->resync_pending = 0;
     return 0;
@@ -1112,12 +1186,30 @@ static int wp25_open_dev1(invfs_volume *v, const char *hint)
                 (unsigned long long)v->devt.dev_blocks[1]);
         return -1;
     }
+    if (blkio_pread(&v->io2, INVFS_DEVT_OFF, &d2, sizeof d2) == 0 &&
+        memcmp(d2.magic, "DEVT", 4) == 0 &&
+        devt_crc(&d2) == d2.crc32c &&
+        d2.version == INVFS_DEVT_VERSION &&
+        memcmp(d2.vol_uuid, v->sb.uuid, 16) != 0) {
+        /* WP71e: a CRC-valid DEVT of a DIFFERENT volume. Treating this as
+         * "stale" (the blank-dev1 provisioning path) would let the next
+         * flush's mirror resync OVERWRITE another volume's device with
+         * this volume's metadata -- cross-volume destruction on a simple
+         * INVFS_DEV1 mix-up. Refuse the pairing loudly instead. */
+        fprintf(stderr, "vol_open: %s: device 1 %s carries the DEVT of a "
+                "DIFFERENT InvariantFS volume (UUID mismatch); refusing to "
+                "pair -- check INVFS_DEV1 / the DEVT dev1_hint (pairing it "
+                "would overwrite that device at the next resync)\n",
+                v->path, d1);
+        return -1;
+    }
     if (blkio_pread(&v->io2, INVFS_DEVT_OFF, &d2, sizeof d2) != 0 ||
         memcmp(d2.magic, "DEVT", 4) != 0 || devt_crc(&d2) != d2.crc32c ||
         !devt_sane(&d2, &v->sb)) {
-        /* no readable table on dev1: treat it as stale (dev0's table is
-         * authoritative); the next flush resyncs dev1's metadata span
-         * wholesale, which rewrites its block 0 */
+        /* no readable table on dev1 (blank/unprovisioned, or a torn DEVT of
+         * THIS volume -- uuid unverifiable): treat it as stale (dev0's
+         * table is authoritative); the next flush resyncs dev1's metadata
+         * span wholesale, which rewrites its block 0 */
         fprintf(stderr, "vol_open: %s: device 1 has no valid DEVT; "
                 "treating it as stale\n", v->path);
         v->resync_pending = 1;

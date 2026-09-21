@@ -310,8 +310,21 @@ $B/invf-fsck "$D0" > "$WORK/fsck1.log" 2>&1 || fail "fsck"
 grep -q "OK" "$WORK/fsck1.log" || { cat "$WORK/fsck1.log"; fail "fsck not clean"; }
 $B/invf-fsck "$D0" -f > "$WORK/fsckf.log" 2>&1 || fail "fsck -f"
 grep -q "OK" "$WORK/fsckf.log" || { cat "$WORK/fsckf.log"; fail "fsck -f not clean"; }
-$B/invf-fsck "$E0" > "$WORK/fsck-e.log" 2>&1 || fail "fsck E"
+# WP71e: E0's fsck must run with E0's OWN dev1 (the global INVFS_DEV1 still
+# points at $D1 here; before the wrong-pair refusal landed, this silently
+# opened E0 dev0-only and reported its whole namespace as orphans -- and a
+# flushing tool could have resynced E0's metadata ONTO D1).
+INVFS_DEV1=$E1 $B/invf-fsck "$E0" > "$WORK/fsck-e.log" 2>&1 || fail "fsck E"
 grep -q "OK" "$WORK/fsck-e.log" || { cat "$WORK/fsck-e.log"; fail "fsck E not clean"; }
+# the wrong pairing itself must now be refused loudly, not silently degraded
+set +e
+INVFS_DEV1=$D1 $B/invf-fsck "$E0" > "$WORK/fsck-epair.log" 2>&1
+EPAIR_RC=$?
+set -e
+[ "$EPAIR_RC" != 0 ] || fail "wrong dev1 pairing was NOT refused"
+grep -q "DIFFERENT InvariantFS volume" "$WORK/fsck-epair.log" \
+    || { cat "$WORK/fsck-epair.log"; fail "wrong-pair refusal is not loud"; }
+echo "  wrong-pair (E0 x D1) refused loudly; E0 fsck clean with its own dev1"
 # single-device: no DEVT, the pre-WP25 layout byte-for-byte
 $B/invf-mkfs "$S0" 0.0625 > /dev/null 2>&1 || fail "single-device mkfs"
 if dd if="$S0" bs=1 skip=672 count=4 status=none | grep -q DEVT; then
