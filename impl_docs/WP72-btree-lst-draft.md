@@ -527,3 +527,102 @@ the price of con 2. If v3 wants a type byte in records anyway, take it
 opportunistically there; do not build a wave around it. This still kills
 the whole WP71f bug class (it was entirely journal-walkers) at ~20% of
 the cost.
+
+---
+
+## 10. Round 3 — scope accounting, control instruments, and frames in plain words
+
+Author's round-3 input: (1) A stays in the plan as a trigger-gated item —
+the real trigger named by the author: **hosting live VM disk images as
+files** (guest FS does constant random in-place range writes); (3) the
+architecture feels like it is growing out of control — this section is the
+answer with numbers; (5) frame unification was not understood — §10.3
+re-explains it from the bytes up.
+
+### 10.1 Why A-after-freeze is right even with the VM trigger
+
+A live VM image file under the guest = continuous random range writes.
+Today each write session commits by rewriting the WHOLE recipe record:
+a 100 GiB image on 64 KB segments = ~1.6 M AST entries = ~50 MB record
+rewrite per commit; with the §9.1 segment-size policy (1 MB segments)
+~3 MB per commit — still O(file size) per write session, plus the
+downgrade-to-RAW + re-sweep cycle on every boot storm. Option A makes
+each ranged write O(log n). So the VM-image workload is exactly A's
+trigger, and the segment policy is only a mitigation, not a cure. Order
+stands: A after the v4 freeze (it changes the source of truth), B+C
+before it (they are derived structures and independently useful — C
+also dedupes VM images at segment level, and the qcow2/vdi container
+packs already window image MEMBERS; A is about images written through
+the mount as plain files).
+
+### 10.2 The plan SHRINKS the system (accounting, not vibes)
+
+Measured today: src/core = 31.5k LOC, src/cli = 10.3k, five files
+encode the journal's 36-byte stride (vol_crash, vol_fsck, vol_rollback,
+volume, cli/resize).
+
+| | removes | adds (est.) |
+|---|---|---|
+| done this session (WP71/73) | migrate-v2 + CVT0 (1657 LOC + man + test), Windows doc remnants (~30 files), dead journal constants, phantom gitlink | fix wave (net +~1k incl. tests/steppers, most is test text) |
+| v3 wave (author + frames + gen) | meta-WAL writers (~60), position-kill semantics in DELT (fold + rename-ghost special cases), rollback's area-zeroing + cursor rebase (vol_rollback −200..300), open's position-clamped time-travel scan (−50) | journal frames (+~150: one parser replaces stride knowledge in 5 files), gen field + fold filter + CKP0 v2 (+~250) |
+| post-v3 | CMP0 linear compaction (dead on mapper since WP30): vol_records compact + fsck roll-forward + suite (−~500) | — |
+| B (BT0 name index) | the per-open full extent scan stays ONLY as the rebuild fallback | +~1.2–1.8k (pages, tree ops, build, fsck verify/rebuild, lookup integration) |
+| C (CT0 content index) | the per-sweep O(volume) BLAKE3 re-hash | +~0.8–1.2k (advisory index + retire-guard interplay) |
+| A (only on trigger, post-freeze) | recipe-in-record worst case, write=full-record-rewrite | largest single item; scoped separately when triggered |
+
+Net through C: core LOC roughly FLAT (−~3k removed vs +~3k added), while
+the mechanism count strictly DROPS: one journal stride instead of two
+(and five memorized copies of it), one consolidation story instead of
+two (merge, not merge+CMP0), checkpoints without positions, no meta-WAL,
+no position-kills. The sprawl feeling comes from sediment — WP20 seal,
+WP21 checkpoints, WP22d slots, WP25 tiering, WP30 mapper, WP52 owners,
+WP58 v3 — each locally reasonable, none of them updated its neighbors
+(the entire WP71 wave was exactly that bill). The cure is consistency
+discipline, not a halt.
+
+Control instruments (cheap, none is a new mechanism):
+1. **CI over the engine-level suites** (~4 min in a bare container, no
+   root/FUSE needed — proven in this session). This is the single item
+   that would have caught every WP30-drift bug at commit time.
+2. **One-page invariant list** (bit-exactness; records authoritative;
+   derived structures rebuildable; streams self-describing; fail loud;
+   after gen: no durable metadata names a record position). Every WP
+   doc references it; review checks against it.
+3. **Block-0 descriptor alley registry**: a table in invarifs.h of every
+   offset (RDP0/RSZ0/CKP0/CMP0*/DEVT/MET0/PCK0, *CMP0 pending removal),
+   the absent=zeros convention, and a rule: a new descriptor reserves an
+   offset there or does not land.
+4. **The replacement rule**: a new mechanism names what it retires
+   (gen retires position-kill + rebase + zeroing; frames retire five
+   stride copies; BT0 retires the open scan as the hot path). Anything
+   that cannot name its retiree is a red flag in review.
+
+### 10.3 Frames in plain words (what it is, why it exists)
+
+The journal is one long stream of entries written back to back. TODAY
+every entry is exactly 36 bytes, so the only way to find where the next
+entry starts is "count 36 bytes" — and that number 36 is memorized in
+five source files. WP30 started appending a second kind of entry (the
+24-byte mapper records) into the SAME stream. Nothing announced it: a
+reader counting 36 lands mid-entry, its CRC check fails, and — depending
+on the file — it silently drops everything past that point (replay lost
+the seal parity maps), or refuses a perfectly good rollback staging
+("journal staging verification"), or stages a truncated journal at
+resize. Five files, five different failures, one root cause: **the
+stream did not say where its records end; five places in the code each
+remembered it themselves.** This session patched all five with
+type-peeking steppers (WP71f) — correct, but the disease remains: the
+next new journal entry type re-infects all five.
+
+Framing moves the boundary knowledge from code into the stream:
+
+    today:  [36B entry][36B entry][24B entry][36B entry]...   <- reader must already KNOW
+    framed: [4B head: type+len][payload][crc] [4B head][payload][crc] ...
+
+A reader reads the 4-byte head, learns the type and the exact length,
+verifies the CRC, steps. Adding a new journal op = assigning a type
+number; zero reader edits, forever. That is the whole proposal. Scope:
+the JOURNAL only (inode records already carry their own length — they
+were never the problem); cost ~150 lines + regenerating the crash-leg
+fixtures that assert on journal bytes; rides inside the v3 wave because
+it is a wire-format change and v3 is the last free one.
