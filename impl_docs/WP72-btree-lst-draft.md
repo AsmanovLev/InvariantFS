@@ -291,3 +291,114 @@ external tools (cjxl/djxl/ffmpeg).
 5. Frame unification (§4) is a small format break that would have
    prevented the whole WP71f bug class — fold it into v3 while the format
    is open?
+
+---
+
+## 8. Elaborations (added after the author's consultation answers)
+
+### 8.1 Option B on-disk shape (the recommended first tree)
+
+B+tree over raw name bytes (the namespace is flat: name == path, so a
+byte-ordered tree gives readdir as a leaf-range scan for free; a hashed
+tree would need a side list for listing).
+
+- Page = 4096 B: `[BT0P magic][u16 level][u16 count][crc32c][entries]`.
+  Interior entry: `name-prefix + child pba`. Leaf entry:
+  `name + inode_id + record locator (extent idx, offset) + gen` (gen =
+  §8.2 hook, zero until epochs land).
+- Root lives in a block-0 descriptor **BT0** at the first free 0x20
+  boundary (0x3E0+ is PCK0-conflicted; pick past PCK0's max extent or
+  extend the descriptor alley): `{magic, version, root_pba, epoch,
+  name_count, crc32c}` -- the RDP0/CKP0 convention exactly.
+- Update protocol = their house pattern generalized: allocate COW pages
+  bottom-up, write them, barrier, then ONE block-0 write flips
+  (root_pba, epoch). A crash before the flip leaves the old epoch fully
+  valid; a torn new page is caught by its CRC and is unreachable from
+  the old root. Freeing superseded pages: lazy, via the same retention
+  discipline as sweep (never free a page an older epoch can reach while
+  a checkpoint/time-travel view pins it).
+- Transactional pairing with records: the record append is the commit
+  point (it is CRC-framed and authoritative); the tree insert follows.
+  Lookup: tree hit -> verify the record at the locator (CRC + name +
+  live under the fold); verify fail or tree miss -> fall back to the
+  extent walk (correct, slower). A stale tree entry is therefore a
+  performance event, never a correctness one -- this is what makes B
+  shippable pre-freeze.
+- Rebuild: one full extent walk (today's open cost) -> write pages ->
+  flip BT0. fsck -f gains "tree missing/divergent -> rebuild".
+
+### 8.2 Rebase vs epochs, concretely
+
+Checkpoint pins: `inode_area_pos` + `journal_pos` (absolute) + staged
+journal prefix + retention registry. Pruning moves live records, so:
+
+- **Rebase table (option 2):** the prune pass appends, into the
+  checkpoint's staging, a translation run `(old_pos -> new_pos)` for
+  every live record it moved, CRC-framed like the journal. Rollback
+  loads the translation before decapitating: pinned `inode_area_pos`
+  maps through it; per-record position-kills in the restored prefix map
+  through it too (a kill naming a moved record must kill its NEW
+  position). Chaining: a second prune under the same checkpoint appends
+  a second run; rollback folds runs in order. Crash-safety: the
+  translation run is written and barriered BEFORE the prune rewrites the
+  destination extent (staging-first, the RSZ0 rule); a crash mid-prune
+  leaves old records intact (append-only source) and the translation
+  covers exactly what moved.
+- **Epochs (option 3):** every record carries `gen` (u64, allocated
+  from a volume counter persisted in MET0/superblock). CKP0 pins
+  `gen_cutoff` + the journal prefix as today. Rollback = fold the
+  record stream keeping only versions with gen <= cutoff (position
+  truncation disappears; so does the rebase problem -- moving a record
+  preserves its gen). Pruning, merges, even whole-extent rewrites become
+  checkpoint-transparent. Cost: a v3 record field (the author's WIP owns
+  it), rollback changes from O(1) truncate to a filtered fold (bounded
+  by the name index once B exists), and time-travel views (`vol_open_at`)
+  re-implement their scan stop as a gen filter.
+
+They compose: ship rebase now (contained in vol_rollback + merge), fold
+epochs into the v3/freeze wave and delete the rebase machinery there.
+
+### 8.3 meta-WAL: delete, with the reasoning
+
+The only crash window a mapper WAL could cover is (extent alloc ->
+table entry -> MET0 cursor -> bitmap bits) landing partially. Audit of
+what actually guards each step today: table+MET0 persist at alloc time
+(meta_get_append_pos does both, synchronously); the bitmap lag is now
+covered at open by WP71j (extent spans forced used from the table --
+the mapper-crash suite kills mid-import at extent boundaries and checks
+exactly this). So the WAL has no window left to protect, and no reader
+ever shipped. Deleting it: jrn_push_meta_op/meta_journal_* become
+no-ops (then removed), the journal stream returns to single-stride,
+the WP71f steppers stay as defense-in-depth. If B/C trees later want a
+page-commit WAL, design it for pages (§8.1's flip is already the commit
+point; a WAL would only speed up multi-page split recovery).
+
+### 8.4 Frame unification (fold into v3 -- recommended: yes)
+
+`[u8 type][u24 payload_len LE][payload][u32 crc32c over type..payload]`
+for BOTH append streams (journal entries and inode records). Types:
+0x01 MAP, 0x02 UNMAP, 0x20 INOD, 0x21 DELT, 0x30+ reserved (btree page
+commit markers, gen-counter bumps, future ops). Rules: a walker reads
+the 4-byte head, knows the stride, verifies CRC, steps; the first bad
+frame is the torn tail (today's replay convention, now stride-agnostic);
+the journal's chain-CRC stays as a second layer over frames. Overhead:
++4 B per journal entry vs today (records keep their existing 4 B CRC;
+rec_len folds into payload_len). This retires the entire WP71f bug
+class (five walkers across replay/rollback/resize/fsck mis-striding a
+mixed stream) and makes "add a new op" a type value instead of a
+walker rewrite in N places. It is a format break -- which is exactly why
+it belongs inside the author's v3 wave while the format is open, not
+after the freeze.
+
+### 8.5 Nuke wave status (Q4 answered "go")
+
+Branch `nuke/legacy-wave-1`, commit WP73: invf-migrate-v2 + CVT0 (block-0
+0x360 stays reserved-zero) + man/test/Makefile entries; v1 open-refusals
+re-pointed at invfs <= v0.4.x; phantom tools/busybox-src gitlink removed
+(suites fall back to repo sources since WP71c/c2); Windows doc remnants
+(doc 09/14, dokan/winfsp/devtest doc files, DOCMAP lanes); dead journal
+constants SWEEP/CHECKPOINT. NOT touched, by design, until the author's
+v3 lands: v1/v2 AST recipe readers + test-astv2, INOD v1 shapes, the
+superblock sweep_cursor field (layout churn for zero pre-freeze gain),
+harmless _WIN32 ifdefs in shared code. Build green, unit 4722/4722,
+fuzz/conbatch/resize/multidev re-run PASS.
