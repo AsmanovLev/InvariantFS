@@ -20,6 +20,9 @@ int sweep_enospc(invfs_volume *v, uint64_t need_bytes)
  * PPMd decode-memory policy keeps a file on the generic floor. Legacy
  * format_version=0 behaviour is unchanged. */
 
+static int vol_sweep_one_v3(invfs_volume *v, uint64_t inode_id,
+                            const char *name);
+
 
 /* Give back everything the atomic sweep path allocated for the new record
  * before it gave up: the segments this run wrote sit in the entry table
@@ -190,6 +193,20 @@ int vol_sweep_file(invfs_volume *v, uint64_t inode_id)
     int have_keep;
     char name[256] = "";
     int rc;
+
+    if (!v || !inode_id) return -1;
+
+    /* WP-M23: v3 volumes route directly to the id-keyed v3 sweep.
+     * vol_sweep_one_v3 returns: 1 = swept, 0 = skipped/noop, -1 = err.
+     * vol_sweep_file returns: 0 = swept, 1 = skipped/noop, -1 = err. */
+    if (v->sb.vol_flags & VOLF_V3) {
+        if (vol_write_active_id(v, inode_id))
+            return 1;   /* skipped -- active write session */
+        rc = vol_sweep_one_v3(v, inode_id, NULL);
+        if (rc > 0) return 0;
+        if (rc == 0) return 1;
+        return -1;
+    }
 
     have_keep = vol_get_meta(v, inode_id, &keep) == 0;
     {
@@ -903,7 +920,13 @@ static int vol_sweep_one_v3(invfs_volume *v, uint64_t inode_id,
     uint64_t newino;
     int fz;
 
-    if (!name || !name[0])
+    if (!v || !inode_id)
+        return 0;
+
+    /* WP-M23: active write session guard by inode_id and name */
+    if (vol_write_active_id(v, inode_id))
+        return 0;
+    if (name && name[0] && vol_write_active_name(v, name))
         return 0;
 
     /* class policy: a stamp means drained-or-gated (subset of the WP10
@@ -925,6 +948,8 @@ static int vol_sweep_one_v3(invfs_volume *v, uint64_t inode_id,
         return -1;
     if (in.size == 0)
         return 1;               /* nothing to drain */
+    if (in.type != 0 && in.type != INVFS_ITYP_REG)
+        return 1;               /* only regular files are drained */
     fz = vol_inode_first_zone(v, inode_id);
     if (fz != INVFS_ZONE_RAW)
         return 1;               /* already blob-stored; unreadable: leave */
@@ -973,25 +998,18 @@ static int vol_sweep_one_v3(invfs_volume *v, uint64_t inode_id,
     }
     free(back);
 
-    {   /* carry published metadata across the supersede, as the
-         * codecpack flow does */
-        invfs_meta_pub keep;
-        int have_keep = vol_get_meta(v, inode_id, &keep) == 0;
+    /* WP-M23: id-keyed publication directly supersedes the inode's recipe address.
+     * All metadata (mode, uid, gid, mtime, atime) and all dirents (nested,
+     * root, hardlinks) remain completely preserved without path resolution. */
+    newino = vol_v3_publish_blob_inode(v, inode_id, enc, enc_len, full_len,
+                                       INVFS_ALGO_ZSTD);
+    free(enc);
+    free(full);
+    if (!newino)
+        return 0;           /* store failed (ENOSPC): stay RAW */
 
-        newino = vol_create_blob_file(v, name, enc, enc_len, full_len,
-                                      INVFS_ALGO_ZSTD);
-        free(enc);
-        free(full);
-        if (!newino)
-            return 0;           /* store failed (ENOSPC): stay RAW */
-        if (have_keep) {
-            invfs_meta_pub chk;
-            if (vol_get_meta(v, newino, &chk) != 0)
-                vol_apply_meta(v, name, &keep);
-        }
-        vol_stamp_class(v, newino, INVFS_CLASS_GENERIC, INVFS_ALGO_ZSTD,
-                        invfs_registry_generation());
-    }
+    vol_stamp_class(v, inode_id, INVFS_CLASS_GENERIC, INVFS_ALGO_ZSTD,
+                    invfs_registry_generation());
     return 1;
 }
 
@@ -1004,19 +1022,20 @@ int vol_sweep_one(invfs_volume *v, uint64_t inode_id, const char *name)
     uint8_t *full = NULL;
     size_t full_len = 0;
 
-    if (!name || strlen(name) > 240 || inode_id == 0) return 0;
-    /* internal control names (the "\x01tzb" batch owner) are never swept */
-    if ((uint8_t)name[0] == 0x01) return 0;
-    /* WP4ab: a live write session has forked this file's segment layout
-     * (old-record blocks aliased under the session's new id). Transcoding
-     * it now would retire the old record mid-session. Skip; the commit
-     * re-marks the file pending, so the next drain picks it up. */
-    if (vol_write_active_name(v, name)) return 0;
+    if (!v || inode_id == 0) return 0;
+
+    /* WP-M23: active session guard by id and name */
+    if (vol_write_active_id(v, inode_id)) return 0;
+    if (name && name[0] && vol_write_active_name(v, name)) return 0;
 
     /* WP-M21b: v3 volumes take the blob-store path; everything below
      * this line is v2 record surgery. */
     if (v->sb.vol_flags & VOLF_V3)
         return vol_sweep_one_v3(v, inode_id, name);
+
+    if (!name || strlen(name) > 240) return 0;
+    /* internal control names (the "\x01tzb" batch owner) are never swept */
+    if ((uint8_t)name[0] == 0x01) return 0;
 
     /* WP10 §2: class-aware walk predicate. A present class flag decides
      * skip/retry/downgrade without touching content; absent = the legacy
@@ -1534,6 +1553,9 @@ generic_floor:
  * for. */
 int vol_sweep_file_generic(invfs_volume *v, uint64_t inode_id)
 {
+    if (!v || !inode_id) return -1;
+    if (v->sb.vol_flags & VOLF_V3)
+        return vol_sweep_file(v, inode_id);
     return vol_sweep_file_inner(v, inode_id, 1);
 }
 
@@ -1700,22 +1722,22 @@ static int vol_pack_sweep(invfs_volume *v, uint64_t inode_id, const char *name,
             memcmp(back, full, full_len) == 0) {
             invfs_meta_pub keep;
             int have_keep = vol_get_meta(v, inode_id, &keep) == 0;
-            uint64_t newino = vol_create_blob_file(v, name, enc, enc_len,
+            uint64_t newino;
+            if (v->sb.vol_flags & VOLF_V3) {
+                newino = vol_v3_publish_blob_inode(v, inode_id, enc, enc_len,
                                                    full_len, pc->algo);
-            if (newino) {
-                /* WP-M21b: on v3 the blob creator superseded the row in
-                 * place (same id, delta-first) -- deleting it here would
-                 * destroy the fresh blob. On v2 the stale record is
-                 * retired as before. */
-                if (!(v->sb.vol_flags & VOLF_V3))
+            } else {
+                newino = vol_create_blob_file(v, name, enc, enc_len,
+                                               full_len, pc->algo);
+                if (newino)
                     vol_delete_inode(v, inode_id, name);
-                /* the fresh blob record has no ext; carry the old meta
-                 * across, like the vol_jxl_retry flow does */
                 if (have_keep) {
                     invfs_meta_pub chk;
                     if (vol_get_meta(v, newino, &chk) != 0)
                         vol_apply_meta(v, name, &keep);
                 }
+            }
+            if (newino) {
                 vol_stamp_class(v, newino, INVFS_CLASS_CODEC,
                                 (uint8_t)pc->algo, pc->generation);
                 free(back);

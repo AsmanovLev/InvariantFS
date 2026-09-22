@@ -715,9 +715,8 @@ uint64_t vol_create_blob_file(invfs_volume *v, const char *name,
             hdr4[5] = (uint8_t)((bcrc >> 8) & 0xFF);
             hdr4[6] = (uint8_t)((bcrc >> 16) & 0xFF);
             hdr4[7] = (uint8_t)((bcrc >> 24) & 0xFF);
-            if (io_seek(&v->io, pba * INVFS_BLOCK_SIZE) != 0 ||
-                io_write(&v->io, hdr4, 8) != 0 ||
-                io_write(&v->io, blob, blob_len) != 0) {
+            if (io_pwrite(&v->io, pba * INVFS_BLOCK_SIZE, hdr4, 8) != 0 ||
+                io_pwrite(&v->io, pba * INVFS_BLOCK_SIZE + 8, blob, blob_len) != 0) {
                 vol_free_blocks(v, pba, phys_blocks);
                 return 0;
             }
@@ -859,6 +858,92 @@ uint64_t vol_create_blob_file(invfs_volume *v, const char *name,
     }
     pba_ref_apply(v, rec, (uint32_t)rec_size, +1);
     free(rec);
+    return inode_id;
+}
+
+
+/* WP-M23: supersede an existing v3 inode's recipe address with a newly
+ * packed blob in Shadow, completely by inode id. Dirents, attributes, and
+ * hardlinks are untouched. */
+uint64_t vol_v3_publish_blob_inode(invfs_volume *v, uint64_t inode_id,
+                                   const uint8_t *blob, size_t blob_len,
+                                   uint64_t orig_size, uint32_t algo)
+{
+    uint64_t phys_blocks, pba;
+    uint8_t hdr4[8];
+    invfs_ast_block_entry e;
+    invfs_v3_inode in;
+    uint8_t addr[INVFS_V3_RECIPE_ADDR_LEN];
+    uint8_t *rblob = NULL;
+    size_t rlen = 0;
+
+    if (!v || !inode_id) return 0;
+    if (v->sb.vol_flags & VOLF_READONLY) return 0;
+    if (blob_len > 0xFFFFFFFFu || orig_size > MAX_FILE_SIZE) {
+        fprintf(stderr, "invarifs: inode %llu: blob %llu / original %llu bytes "
+                "exceeds the format limit\n", (unsigned long long)inode_id,
+                (unsigned long long)blob_len, (unsigned long long)orig_size);
+        return 0;
+    }
+    if (blob_len == 0 && orig_size != 0) {
+        fprintf(stderr, "invarifs: inode %llu: empty blob for %llu-byte original\n",
+                (unsigned long long)inode_id, (unsigned long long)orig_size);
+        return 0;
+    }
+
+    if (vol_v3_inode_get(v, inode_id, &in) != 1)
+        return 0;
+
+    if (blob_len == 0) {
+        memset(addr, 0, sizeof addr);
+    } else {
+        uint32_t bcrc;
+        phys_blocks = (blob_len + 8 + INVFS_BLOCK_SIZE - 1) / INVFS_BLOCK_SIZE;
+        pba = alloc_blocks(v, v->sb.shadow_zone_start,
+                           v->sb.shadow_zone_blocks, phys_blocks, 1,
+                           INVFS_ALLOC_DATA);
+        if (pba == 0) return 0;
+        hdr4[0] = (uint8_t)(blob_len & 0xFF);
+        hdr4[1] = (uint8_t)((blob_len >> 8) & 0xFF);
+        hdr4[2] = (uint8_t)((blob_len >> 16) & 0xFF);
+        hdr4[3] = (uint8_t)((blob_len >> 24) & 0xFF);
+        bcrc = invfs_crc32c(blob, blob_len);
+        hdr4[4] = (uint8_t)(bcrc & 0xFF);
+        hdr4[5] = (uint8_t)((bcrc >> 8) & 0xFF);
+        hdr4[6] = (uint8_t)((bcrc >> 16) & 0xFF);
+        hdr4[7] = (uint8_t)((bcrc >> 24) & 0xFF);
+        if (io_pwrite(&v->io, pba * INVFS_BLOCK_SIZE, hdr4, 8) != 0 ||
+            io_pwrite(&v->io, pba * INVFS_BLOCK_SIZE + 8, blob, blob_len) != 0) {
+            vol_free_blocks(v, pba, phys_blocks);
+            return 0;
+        }
+        memset(&e, 0, sizeof e);
+        e.file_offset = 0;
+        e.length = orig_size;
+        e.zone = INVFS_ZONE_BINARY;
+        e.algo = algo;
+        e.block_id = 0;
+        e.pba = pba;
+        if (vol_ast_recipe_serialize(orig_size, &e, 1, &rblob, &rlen) != 0) {
+            vol_free_blocks(v, pba, phys_blocks);
+            return 0;
+        }
+        if (vol_v3_recipe_store(v, rblob, rlen, addr) != 0) {
+            free(rblob);
+            vol_free_blocks(v, pba, phys_blocks);
+            return 0;
+        }
+        free(rblob);
+    }
+
+    /* Supersede the recipe in place without touching dirents, type, mode,
+     * uid, gid, nlink, or timestamps */
+    in.size = orig_size;
+    memset(&in.recipe, 0, sizeof in.recipe);
+    memcpy(in.recipe_addr, addr, INVFS_V3_RECIPE_ADDR_LEN);
+    if (vol_v3_inode_delta_put(v, inode_id, &in) != 0)
+        return 0;
+
     return inode_id;
 }
 

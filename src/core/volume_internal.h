@@ -1319,6 +1319,7 @@ int write_segment_blocks(invfs_volume *v, uint64_t pba, uint8_t *buf,
  * id's L2P maps the session's aliases resolve through, and the in-place
  * sweep path would free blocks the aliases still name. */
 int vol_write_active_name(invfs_volume *v, const char *name);
+int vol_write_active_id(invfs_volume *v, uint64_t inode_id);
 
 /* Parse + validate an EXER payload. Disk input, never trusted: magic, part
  * count (1..EXE_MAX_MEDIA), ascending non-overlapping ranges inside
@@ -1611,6 +1612,9 @@ int mz_tdefl_compress(const uint8_t *in, size_t in_len,
 uint64_t vol_create_blob_file(invfs_volume *v, const char *name,
                                      const uint8_t *blob, size_t blob_len,
                                      uint64_t orig_size, uint32_t algo);
+uint64_t vol_v3_publish_blob_inode(invfs_volume *v, uint64_t inode_id,
+                                   const uint8_t *blob, size_t blob_len,
+                                   uint64_t orig_size, uint32_t algo);
 void cpack_map_cache_reset(invfs_volume *v);
 
 /* Retiring `name` kills the map cached for it, and retiring a "name!..."

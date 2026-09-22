@@ -288,6 +288,12 @@ uint64_t vol_v3_create_node(invfs_volume *v, const char *name,
 uint64_t vol_v3_create_content_node(invfs_volume *v, const char *name,
                                     uint64_t size,
                                     const uint8_t recipe_addr[INVFS_V3_RECIPE_ADDR_LEN]);
+/* WP-M23: publish a blob to an existing v3 inode by id (supersedes the
+ * inode's recipe address in place; dirents, attributes, and hardlinks stay intact).
+ * Used by the v3 sweep engine. Returns inode_id on success, 0 on failure. */
+uint64_t vol_v3_publish_blob_inode(invfs_volume *v, uint64_t inode_id,
+                                   const uint8_t *blob, size_t blob_len,
+                                   uint64_t orig_size, uint32_t algo);
 uint64_t vol_v3_set_meta(invfs_volume *v, const char *name,
                          const invfs_meta_pub *meta);
 /* WP-M21b: bulk content write on v3 through the WP-M9 session path (the
@@ -466,6 +472,8 @@ int  vol_write_read(invfs_wsession *ws, uint64_t offset,
                     uint8_t *buf, size_t len);
 int  vol_write_commit(invfs_wsession *ws);
 void vol_write_abort(invfs_wsession *ws);
+int  vol_write_active_name(invfs_volume *v, const char *name);
+int  vol_write_active_id(invfs_volume *v, uint64_t inode_id);
 
 /* whole-volume statistics for tools/UIs (read-only walk). */
 typedef struct {

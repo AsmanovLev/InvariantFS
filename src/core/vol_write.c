@@ -36,8 +36,20 @@ struct invfs_wsession {
 int vol_write_active_name(invfs_volume *v, const char *name)
 {
     const invfs_wsession *s;
+    if (!v || !name) return 0;
     for (s = v->wsessions; s; s = s->next)
         if (strcmp(s->name, name) == 0)
+            return 1;
+    return 0;
+}
+
+/* WP-M23: check active write session by inode id (both old_id and new_id) */
+int vol_write_active_id(invfs_volume *v, uint64_t inode_id)
+{
+    const invfs_wsession *s;
+    if (!v || !inode_id) return 0;
+    for (s = v->wsessions; s; s = s->next)
+        if (s->old_id == inode_id || s->new_id == inode_id)
             return 1;
     return 0;
 }
