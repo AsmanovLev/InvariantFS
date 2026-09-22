@@ -49,7 +49,7 @@ static int seg_read_once(invfs_volume *v, uint64_t pba, uint64_t plen,
     memcpy(&csize, hdrb, 4);
     if (csize < min_csize ||
         (plen && (uint64_t)csize + 8 > plen * INVFS_BLOCK_SIZE) ||
-        (!plen && csize > (1u << 24))) {
+        (!plen && ((uint64_t)csize + 8 > (v->sb.total_blocks - pba) * (uint64_t)INVFS_BLOCK_SIZE))) {
         bad = 1;            /* header out of bounds: never a legit segment */
     } else {
         uint32_t crc_hdr;
