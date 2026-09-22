@@ -2464,6 +2464,17 @@ static void v3_recipe_key(uint8_t kb[V3_RECIPE_KEY_LEN],
     memcpy(kb + 1, addr, INVFS_V3_RECIPE_ADDR_LEN);
 }
 
+static void v3_recipe_chunk_key(uint8_t kb[INVFS_V3_RECIPE_CHUNK_KEY_LEN],
+                                const uint8_t addr[INVFS_V3_RECIPE_ADDR_LEN],
+                                uint16_t chunk_idx)
+{
+    kb[0] = (uint8_t)INVFS_V3_RECIPE_KEY_PREFIX;
+    memcpy(kb + 1, addr, INVFS_V3_RECIPE_ADDR_LEN);
+    kb[33] = 0x00;
+    kb[34] = (uint8_t)(chunk_idx >> 8);
+    kb[35] = (uint8_t)(chunk_idx & 0xFF);
+}
+
 static void v3_blake3(const uint8_t *buf, size_t len,
                       uint8_t out[INVFS_V3_RECIPE_ADDR_LEN])
 {
@@ -2475,7 +2486,10 @@ static void v3_blake3(const uint8_t *buf, size_t len,
 
 /* Store `blob` (immutable) under its content address. On success
  * addr_out holds BLAKE3-256(blob). Identical bytes already present are a
- * no-op (dedup) and return the same address. 0 = ok, -1 = error. */
+ * no-op (dedup) and return the same address. 0 = ok, -1 = error.
+ * Recipes <= V3_RECIPE_BLOB_MAX (3800 B) fit directly in one page value.
+ * Larger recipes (> 3800 B, up to INVFS_V3_RECIPE_STREAM_MAX) are chunked
+ * across multiple keys: descriptor at 0x04||addr, chunks at 0x04||addr||0x00||idx. */
 int vol_v3_recipe_store(invfs_volume *v, const uint8_t *blob, size_t blen,
                         uint8_t addr_out[INVFS_V3_RECIPE_ADDR_LEN])
 {
@@ -2484,7 +2498,7 @@ int vol_v3_recipe_store(invfs_volume *v, const uint8_t *blob, size_t blen,
     bt_val val;
     int found = 0;
 
-    if (!v || !blob || blen == 0 || blen > V3_RECIPE_BLOB_MAX)
+    if (!v || !blob || blen == 0 || blen > INVFS_V3_RECIPE_STREAM_MAX)
         return -1;
     if (v3_ready(v) != 0)
         return -1;
@@ -2499,13 +2513,49 @@ int vol_v3_recipe_store(invfs_volume *v, const uint8_t *blob, size_t blen,
         return -1;
     if (!found) {
         uint64_t old_gen = root.gen;
-        val.p = blob;
-        val.n = (uint16_t)blen;
-        if (btree_upsert(v, root, (bt_key){kb, V3_RECIPE_KEY_LEN}, val,
-                         &nr) != 0)
-            return -1;
-        if (v3_publish(v, nr, old_gen) != 0)
-            return -1;
+        if (blen <= V3_RECIPE_BLOB_MAX) {
+            val.p = blob;
+            val.n = (uint16_t)blen;
+            if (btree_upsert(v, root, (bt_key){kb, V3_RECIPE_KEY_LEN}, val,
+                             &nr) != 0)
+                return -1;
+            if (v3_publish(v, nr, old_gen) != 0)
+                return -1;
+        } else {
+            uint32_t n_chunks = (uint32_t)((blen + INVFS_V3_RECIPE_CHUNK_DATA - 1) /
+                                           INVFS_V3_RECIPE_CHUNK_DATA);
+            if (n_chunks > 0xFFFFu)
+                return -1;
+            invfs_v3_recipe_desc desc;
+            desc.magic = INVFS_V3_RECIPE_MAGIC_RMC1;
+            desc.total_len = (uint32_t)blen;
+            desc.n_chunks = (uint16_t)n_chunks;
+
+            invfs_blkptr cur_root = root;
+            for (uint32_t i = 0; i < n_chunks; i++) {
+                uint8_t ckb[INVFS_V3_RECIPE_CHUNK_KEY_LEN];
+                size_t off = (size_t)i * INVFS_V3_RECIPE_CHUNK_DATA;
+                size_t clen = (blen - off > INVFS_V3_RECIPE_CHUNK_DATA)
+                            ? INVFS_V3_RECIPE_CHUNK_DATA
+                            : (blen - off);
+                v3_recipe_chunk_key(ckb, addr, (uint16_t)i);
+                val.p = blob + off;
+                val.n = (uint16_t)clen;
+                if (btree_upsert(v, cur_root,
+                                 (bt_key){ckb, INVFS_V3_RECIPE_CHUNK_KEY_LEN},
+                                 val, &nr) != 0)
+                    return -1;
+                cur_root = nr;
+            }
+            /* Insert multi-chunk descriptor under main key */
+            val.p = (const uint8_t *)&desc;
+            val.n = (uint16_t)sizeof(desc);
+            if (btree_upsert(v, cur_root, (bt_key){kb, V3_RECIPE_KEY_LEN},
+                             val, &nr) != 0)
+                return -1;
+            if (v3_publish(v, nr, old_gen) != 0)
+                return -1;
+        }
     }
     if (addr_out)
         memcpy(addr_out, addr, INVFS_V3_RECIPE_ADDR_LEN);
@@ -2574,6 +2624,48 @@ int vol_v3_recipe_load(invfs_volume *v, const uint8_t addr[INVFS_V3_RECIPE_ADDR_
         return -1;
     if (!found)
         return -1;
+
+    /* WP-M25: check if this is an RMC1 multi-chunk descriptor */
+    if (val.n == sizeof(invfs_v3_recipe_desc)) {
+        invfs_v3_recipe_desc desc;
+        memcpy(&desc, val.p, sizeof(desc));
+        if (desc.magic == INVFS_V3_RECIPE_MAGIC_RMC1) {
+            uint32_t total_len = desc.total_len;
+            uint16_t n_chunks = desc.n_chunks;
+            if (total_len == 0 || total_len > INVFS_V3_RECIPE_STREAM_MAX)
+                return -1;
+            blob = (uint8_t *)malloc(total_len);
+            if (!blob)
+                return -1;
+            for (uint16_t i = 0; i < n_chunks; i++) {
+                uint8_t ckb[INVFS_V3_RECIPE_CHUNK_KEY_LEN];
+                bt_val cval;
+                int cfound = 0;
+                size_t off = (size_t)i * INVFS_V3_RECIPE_CHUNK_DATA;
+                size_t exp_len = (total_len - off > INVFS_V3_RECIPE_CHUNK_DATA)
+                               ? INVFS_V3_RECIPE_CHUNK_DATA
+                               : (total_len - off);
+                v3_recipe_chunk_key(ckb, addr, i);
+                if (btree_search(v, root, (bt_key){ckb, INVFS_V3_RECIPE_CHUNK_KEY_LEN},
+                                 &cval, &cfound) != 0 || !cfound || cval.n != exp_len) {
+                    free(blob);
+                    return -1;
+                }
+                memcpy(blob + off, cval.p, exp_len);
+            }
+            v3_blake3(blob, total_len, chk);
+            if (memcmp(chk, addr, INVFS_V3_RECIPE_ADDR_LEN) != 0) {
+                fprintf(stderr, "v3 recipe blob %p: BLAKE3 mismatch (corrupt or "
+                        "forged); refusing the read\n", (const void *)addr);
+                free(blob);
+                return -1;
+            }
+            *blob_out = blob;
+            *blen_out = total_len;
+            return 0;
+        }
+    }
+
     /* btree_search's value points into a per-thread buffer valid only until
      * the next search: copy it out before doing anything else. */
     blob = (uint8_t *)malloc(val.n ? val.n : 1);

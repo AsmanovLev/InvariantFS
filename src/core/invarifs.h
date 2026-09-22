@@ -1121,6 +1121,19 @@ typedef struct invfs_meta_ext_hdr {
  * 3800 B is ~7.7 MiB of file at 64 KiB segments. Larger recipes need a
  * multi-page/streamed blob (TODO WP-M9/WP-M15). */
 #define INVFS_V3_RECIPE_BLOB_MAX   3800u
+/* WP-M25: streamed / multi-chunk recipe blobs for large files (> 7.7 MiB) */
+#define INVFS_V3_RECIPE_STREAM_MAX (64u * 1024u * 1024u)  /* 64 MiB recipe cap */
+#define INVFS_V3_RECIPE_CHUNK_DATA 3072u                  /* 3 KiB per chunk */
+#define INVFS_V3_RECIPE_CHUNK_KEY_LEN (1u + INVFS_V3_RECIPE_ADDR_LEN + 3u) /* 36 B */
+#define INVFS_V3_RECIPE_MAGIC_RMC1 0x31434D52u            /* 'RMC1' */
+
+#pragma pack(push, 1)
+typedef struct {
+    uint32_t     magic;      /* INVFS_V3_RECIPE_MAGIC_RMC1 */
+    uint32_t     total_len;  /* Total unchunked recipe byte length */
+    uint16_t     n_chunks;   /* Number of 3072-byte chunks */
+} invfs_v3_recipe_desc;
+#pragma pack(pop)
 #pragma pack(push, 1)
 typedef struct {
     uint32_t     row_version;

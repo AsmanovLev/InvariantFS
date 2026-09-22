@@ -29,8 +29,8 @@ int vol_ast_recipe_serialize(uint64_t file_size,
     if (!hlen)
         return -1;
     total = hlen + (size_t)n * sizeof(*ents);
-    if (total > INVFS_V3_RECIPE_BLOB_MAX)
-        return -1;   /* TODO(WP-M8): multi-page recipe blobs */
+    if (total > INVFS_V3_RECIPE_STREAM_MAX)
+        return -1;   /* WP-M25: recipe stream capped at 64 MiB */
     blob = (uint8_t *)malloc(total ? total : 1);
     if (!blob)
         return -1;
