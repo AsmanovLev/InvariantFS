@@ -986,18 +986,20 @@ static int vol_sweep_one_v3(invfs_volume *v, uint64_t inode_id,
         return 1;
     }
 
-    enc_cap = full_len + full_len / 4 + 65536;
+    int zlevel = invfs_profile_zstd_level(v->profile);
+    enc_cap = ZSTD_compressBound(full_len);
     enc = (uint8_t *)malloc(enc_cap);
     if (!enc) { free(full); return -1; }
-    if (zc->encode(full, full_len, enc, enc_cap, &enc_len) != 0 ||
-        enc_len == 0 || enc_len >= full_len) {
-        /* no gain: generation-gated skip until the registry grows */
+    size_t zrc = ZSTD_compress(enc, enc_cap, full, full_len, zlevel);
+    if (ZSTD_isError(zrc) || zrc == 0 || zrc >= full_len || zrc > 0xFFFFFFFFu) {
+        /* no gain or exceeds blob cap: generation-gated skip until the registry grows */
         free(enc);
         free(full);
         vol_stamp_class(v, inode_id, INVFS_CLASS_UNCOMPRESSIBLE, 0,
                         invfs_registry_generation());
         return 1;
     }
+    enc_len = zrc;
     back = (uint8_t *)malloc(full_len ? full_len : 1);
     if (!back || zc->decode(enc, enc_len, back, full_len) != 0 ||
         memcmp(back, full, full_len) != 0) {
