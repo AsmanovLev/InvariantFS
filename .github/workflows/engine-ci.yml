@@ -1,0 +1,53 @@
+name: engine-ci
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+jobs:
+  engine:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq build-essential pkg-config \
+            libfuse3-dev zlib1g-dev libzstd-dev python3
+
+      - name: build
+        run: make -j"$(nproc)"
+
+      - name: unit tests
+        run: make test
+
+      - name: engine e2e suites
+        run: |
+          set -u
+          mkdir -p .ci-tools /tmp/invfs-e2e
+          SUITES="test-rollback test-multidev test-resize test-seal test-dedupe \
+                  test-textzone test-binbatch test-conbatch test-flushfail \
+                  test-heat test-fuzz test-meta-v3 test-meta-v3-write test-meta-v3-fold"
+          FAIL=0
+          for s in $SUITES; do
+            if [ ! -f "tools/$s.sh" ]; then
+              echo "warning: tools/$s.sh not found, skipping"
+              continue
+            fi
+            # relocate dev/shm to disk to keep CI tmpfs bounded
+            sed 's|/dev/shm|/tmp/invfs-e2e|g' "tools/$s.sh" > ".ci-tools/$s.sh"
+            echo "::group::$s"
+            if bash ".ci-tools/$s.sh"; then
+              echo "$s: PASS"
+            else
+              echo "$s: FAIL"; FAIL=1
+            fi
+            echo "::endgroup::"
+            rm -rf /tmp/invfs-e2e
+            mkdir -p /tmp/invfs-e2e
+          done
+          [ "$FAIL" = 0 ] || { echo "engine e2e: at least one suite FAILED"; exit 1; }
+          echo "engine e2e: ALL SUITES PASS"
