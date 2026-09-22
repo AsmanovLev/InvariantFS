@@ -944,6 +944,20 @@ int vol_read_inode(invfs_volume *v, uint64_t inode_id, unsigned depth,
 
         if (rc != 1)
             return -1;
+        if (in.type == INVFS_ITYP_LNK) {
+            if (in.size == 0 ||
+                memcmp(in.recipe_addr, zero_addr, INVFS_V3_RECIPE_ADDR_LEN) == 0) {
+                *out = (uint8_t *)calloc(1, 1);
+                if (!*out) return -1;
+                *out_len = 0;
+                return 0;
+            }
+            if (vol_v3_recipe_load(v, in.recipe_addr, &blob, &blen) != 0)
+                return -1;
+            *out = blob;
+            *out_len = blen;
+            return 0;
+        }
         if (in.size == 0 ||
             memcmp(in.recipe_addr, zero_addr, INVFS_V3_RECIPE_ADDR_LEN) == 0) {
             *out = (uint8_t *)malloc(1);

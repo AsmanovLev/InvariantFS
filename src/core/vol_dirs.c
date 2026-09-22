@@ -343,9 +343,22 @@ uint64_t vol_v3_create_node(invfs_volume *v, const char *name,
     }
     if (in.nlink == 0)
         in.nlink = 1;
-    in.size = 0;                          /* WP-M8: content cleared */
-    memset(&in.recipe, 0, sizeof in.recipe);
-    memset(in.recipe_addr, 0, sizeof in.recipe_addr);
+    if (in.type == INVFS_ITYP_LNK && meta && meta->target[0]) {
+        size_t tl = strlen(meta->target);
+        if (tl < INVFS_META_TARGET_MAX &&
+            vol_v3_recipe_store(v, (const uint8_t *)meta->target, tl, in.recipe_addr) == 0) {
+            in.size = tl;
+            memset(&in.recipe, 0, sizeof in.recipe);
+        } else {
+            in.size = 0;
+            memset(&in.recipe, 0, sizeof in.recipe);
+            memset(in.recipe_addr, 0, sizeof in.recipe_addr);
+        }
+    } else {
+        in.size = 0;                          /* WP-M8: content cleared */
+        memset(&in.recipe, 0, sizeof in.recipe);
+        memset(in.recipe_addr, 0, sizeof in.recipe_addr);
+    }
     if (vol_v3_inode_delta_put(v, id, &in) != 0)
         return 0;
     if (vol_v3_dirent_delta_put(v, pino, leaf, id) != 0)
@@ -438,6 +451,16 @@ uint64_t vol_v3_set_meta(invfs_volume *v, const char *name,
     if (meta->nlink)
         in.nlink = meta->nlink;
     in.rdev = meta->rdev;
+    if (in.type == INVFS_ITYP_LNK && meta->target[0]) {
+        size_t tl = strlen(meta->target);
+        if (tl < INVFS_META_TARGET_MAX) {
+            uint8_t addr[INVFS_V3_RECIPE_ADDR_LEN];
+            if (vol_v3_recipe_store(v, (const uint8_t *)meta->target, tl, addr) == 0) {
+                memcpy(in.recipe_addr, addr, INVFS_V3_RECIPE_ADDR_LEN);
+                in.size = tl;
+            }
+        }
+    }
     if (vol_v3_inode_delta_put(v, id, &in) != 0)
         return 0;
     if (in.type == INVFS_ITYP_DIR)

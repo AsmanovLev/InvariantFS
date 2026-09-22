@@ -203,11 +203,15 @@ int main(int argc, char **argv)
     twodev = (argc == 5);
     {
         const char *v2e = getenv("INVFS_V2");
-        if (v2e && *v2e && strcmp(v2e, "0") != 0)
-            v3 = 0;   /* interim escape hatch until the v2 branch is deleted */
+        if (v2e && *v2e && strcmp(v2e, "0") != 0) {
+            fprintf(stderr, "invf-mkfs: v2 metadata format is deprecated and retired in v0.5.0; only v3 is supported\n");
+            return 2;
+        }
         const char *v3e = getenv("INVFS_V3");
-        if (v3e && *v3e && strcmp(v3e, "0") == 0)
-            v3 = 0;   /* explicit INVFS_V3=0 also honored */
+        if (v3e && *v3e && strcmp(v3e, "0") == 0) {
+            fprintf(stderr, "invf-mkfs: v2 metadata format is deprecated and retired in v0.5.0; only v3 is supported\n");
+            return 2;
+        }
     }
     path = blkio_normalize(argv[1], devbuf, sizeof devbuf);
     is_dev = blkio_looks_like_device(path);

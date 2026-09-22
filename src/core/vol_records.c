@@ -1175,10 +1175,9 @@ int vol_get_meta(invfs_volume *v, uint64_t inode_id, invfs_meta_pub *out)
     const uint8_t *ext;
     size_t elen = 0;
     if (!out) return -1;
-    /* WP-M5: a v3 volume has no INO2 ext -- the row in the base tree is the
+    /* WP-M5/WP-M24: a v3 volume has no INO2 ext -- the row in the base tree is the
      * authority. Map it onto the same public view (size/recipe included);
-     * the symlink target rides in the recipe blob (WP-M8), so target stays
-     * empty for now. */
+     * the symlink target rides in the recipe blob (WP-M8/WP-M24). */
     if (v->sb.vol_flags & VOLF_V3) {
         invfs_v3_inode in;
         int rc = vol_v3_inode_get(v, inode_id, &in);
@@ -1195,6 +1194,16 @@ int vol_get_meta(invfs_volume *v, uint64_t inode_id, invfs_meta_pub *out)
         out->rdev  = in.rdev;
         out->size  = in.size;
         out->recipe = in.recipe;
+        if (in.type == INVFS_ITYP_LNK && in.size > 0) {
+            uint8_t *blob = NULL;
+            size_t blen = 0;
+            if (vol_v3_recipe_load(v, in.recipe_addr, &blob, &blen) == 0 && blob) {
+                size_t cpsz = blen < sizeof(out->target) - 1 ? blen : sizeof(out->target) - 1;
+                memcpy(out->target, blob, cpsz);
+                out->target[cpsz] = '\0';
+                free(blob);
+            }
+        }
         return 0;
     }
     if (meta_read_record_by_id(v, inode_id, &buf, &rl, NULL, 0, NULL) != 0)
@@ -1373,11 +1382,20 @@ uint64_t vol_create_symlink(invfs_volume *v, const char *name,
     size_t tl;
     uint64_t nid;
 
+    if (!v || !name || !target) return 0;
     if (v->sb.vol_flags & VOLF_READONLY) return 0;
-    if (v->sb.vol_flags & VOLF_V3) return 0;   /* WP-M8: recipe target */
     if (name_too_long(name)) return 0;
     tl = strlen(target);
     if (tl == 0 || tl >= INVFS_META_TARGET_MAX) return 0;
+
+    if (v->sb.vol_flags & VOLF_V3) {
+        meta_pub_from_hdr_defaults(&m, INVFS_ITYP_LNK);
+        m.mode = 0777;
+        m.size = tl;
+        memcpy(m.target, target, tl + 1);
+        m.mtime = m.atime = (int64_t)time(NULL);
+        return vol_v3_create_node(v, name, &m);
+    }
 
     nid = vol_create_file(v, name, NULL, 0);
     if (nid == 0) return 0;
@@ -1399,12 +1417,20 @@ uint64_t vol_create_special(invfs_volume *v, const char *name,
     invfs_meta_pub m;
     uint64_t nid;
 
+    if (!v || !name) return 0;
     if (v->sb.vol_flags & VOLF_READONLY) return 0;
-    if (v->sb.vol_flags & VOLF_V3) return 0;   /* out of WP-M6 scope */
     if (name_too_long(name)) return 0;
     if (type != INVFS_ITYP_FIFO && type != INVFS_ITYP_SOCK &&
         type != INVFS_ITYP_CHR && type != INVFS_ITYP_BLK)
         return 0;
+
+    if (v->sb.vol_flags & VOLF_V3) {
+        meta_pub_from_hdr_defaults(&m, type);
+        m.mode = mode;
+        m.rdev = rdev;
+        m.mtime = m.atime = (int64_t)time(NULL);
+        return vol_v3_create_node(v, name, &m);
+    }
 
     nid = vol_create_file(v, name, NULL, 0);
     if (nid == 0) return 0;

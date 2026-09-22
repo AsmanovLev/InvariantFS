@@ -543,8 +543,10 @@ static void fill_stat_from_meta(struct stat *st, const invfs_meta_pub *m,
                           st->st_size = (off_t)strlen(m->target); break;
     case INVFS_ITYP_FIFO: st->st_mode = S_IFIFO | (m->mode & 07777); break;
     case INVFS_ITYP_SOCK: st->st_mode = S_IFSOCK | (m->mode & 07777); break;
-    case INVFS_ITYP_CHR:  st->st_mode = S_IFCHR | (m->mode & 07777); break;
-    case INVFS_ITYP_BLK:  st->st_mode = S_IFBLK | (m->mode & 07777); break;
+    case INVFS_ITYP_CHR:  st->st_mode = S_IFCHR | (m->mode & 07777);
+                          st->st_rdev = (dev_t)m->rdev; break;
+    case INVFS_ITYP_BLK:  st->st_mode = S_IFBLK | (m->mode & 07777);
+                          st->st_rdev = (dev_t)m->rdev; break;
     default:              st->st_mode = S_IFREG | (m->mode & 07777); break;
     }
     st->st_uid = m->uid;
