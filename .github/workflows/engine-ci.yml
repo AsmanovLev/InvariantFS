@@ -28,9 +28,10 @@ jobs:
         run: |
           set -u
           mkdir -p .ci-tools /tmp/invfs-e2e
-          SUITES="test-rollback test-multidev test-resize test-seal test-dedupe \
-                  test-textzone test-binbatch test-conbatch test-flushfail \
-                  test-heat test-fuzz test-meta-v3 test-meta-v3-write test-meta-v3-fold"
+          SUITES="test-meta-v3 test-meta-v3-delta test-meta-v3-dirent test-meta-v3-fold \
+                  test-meta-v3-fsck test-meta-v3-hardlink test-meta-v3-inode \
+                  test-meta-v3-multidev test-meta-v3-mut test-meta-v3-overlay \
+                  test-meta-v3-recipe test-meta-v3-write test-meta-v3-xattr"
           FAIL=0
           for s in $SUITES; do
             if [ ! -f "tools/$s.sh" ]; then

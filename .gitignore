@@ -18,6 +18,7 @@ dist/
 
 # runtime logs
 logs/
+.ci-tools/
 
 # external clone with own .git
 tools/7-Zip-zstd/
