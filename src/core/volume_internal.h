@@ -1217,6 +1217,7 @@ int seg_extent_checked(invfs_volume *v, uint64_t pba, uint64_t *plen_out);
 int  pba_ref_ensure(invfs_volume *v);
 void pba_ref_apply(invfs_volume *v, const uint8_t *rec, uint32_t rec_len,
                    int delta);
+void pba_ref_modify(invfs_volume *v, uint64_t pba, int delta);
 uint32_t pba_ref_count(invfs_volume *v, uint64_t pba);
 /* drop the map; the next pba_ref_ensure rebuilds it from the live set */
 void pba_ref_reset(invfs_volume *v);

@@ -1965,7 +1965,7 @@ void vol_close(invfs_volume *v)
        dirtied the device (vol_mark_dirty refuses), so there is nothing to
        flush and the CLEAN mark is not this view's to write. */
     if (v->dirty && !v->time_travel) {
-        if (v->needs_recovery) {
+        if (v->needs_recovery && !(v->sb.vol_flags & VOLF_V3)) {
             /* WP22c: an io error latched this session. Do NOT run the
              * usual final flush: the in-RAM journal/bitmap may reflect
              * mutations whose records never reached the device (the
@@ -3547,6 +3547,27 @@ static int pba_ref_grow(invfs_volume *v)
     return 0;
 }
 
+void pba_ref_modify(invfs_volume *v, uint64_t pba, int delta)
+{
+    size_t k;
+    if (!v->pba_ref_on || !v->pba_ref || !pba || pba >= v->sb.total_blocks)
+        return;
+    if (delta > 0 && v->pba_ref_n * 10 >= (v->pba_ref_mask + 1) * 7 &&
+        pba_ref_grow(v) != 0)
+        return;
+    k = (size_t)pba_ref_hash(pba) & v->pba_ref_mask;
+    while (v->pba_ref[k].pba && v->pba_ref[k].pba != pba)
+        k = (k + 1) & v->pba_ref_mask;
+    if (v->pba_ref[k].pba) {
+        if (delta > 0) v->pba_ref[k].n++;
+        else if (v->pba_ref[k].n) v->pba_ref[k].n--;
+    } else if (delta > 0) {
+        v->pba_ref[k].pba = pba;
+        v->pba_ref[k].n = 1;
+        v->pba_ref_n++;
+    }
+}
+
 /* delta = +1 (record appended) / -1 (record killed). Owner records and
  * TEXT entries are skipped (see the section comment). Decrement floors at
  * 0: a record absent from the build (dead before the map existed) must not
@@ -3558,7 +3579,6 @@ void pba_ref_apply(invfs_volume *v, const uint8_t *rec, uint32_t rec_len,
     const invfs_inode_rec *rh;
     size_t base, off;
     uint32_t i;
-    size_t ncount = 0;
 
     if (!v->pba_ref_on || !v->pba_ref) return;
     if (rec_len < INVFS_REC_HDR_LEN + 1) return;
@@ -3575,27 +3595,9 @@ void pba_ref_apply(invfs_volume *v, const uint8_t *rec, uint32_t rec_len,
     for (i = 0; i < ah.num_blocks; i++) {
         const invfs_ast_block_entry *e = (const invfs_ast_block_entry *)
             (rec + off + (size_t)i * sizeof(*e));
-        size_t k;
         if (e->zone == INVFS_ZONE_TEXT || !e->pba) continue;
-        if (e->pba >= v->sb.total_blocks) continue;   /* invalid: never
-                                                         * counted */
-        if (v->pba_ref_n * 10 >= (v->pba_ref_mask + 1) * 7 &&
-            pba_ref_grow(v) != 0)
-            return;
-        k = (size_t)pba_ref_hash(e->pba) & v->pba_ref_mask;
-        while (v->pba_ref[k].pba && v->pba_ref[k].pba != e->pba)
-            k = (k + 1) & v->pba_ref_mask;
-        if (v->pba_ref[k].pba) {
-            if (delta > 0) v->pba_ref[k].n++;
-            else if (v->pba_ref[k].n) v->pba_ref[k].n--;
-        } else if (delta > 0) {
-            v->pba_ref[k].pba = e->pba;
-            v->pba_ref[k].n = 1;
-            v->pba_ref_n++;
-            ncount++;
-        }
+        pba_ref_modify(v, e->pba, delta);
     }
-    (void)ncount;
 }
 
 uint32_t pba_ref_count(invfs_volume *v, uint64_t pba)
@@ -3639,6 +3641,35 @@ static int pba_ref_ensure_cb(void *ctx_, uint64_t rec_pos,
     return 0;
 }
 
+static int pba_ref_v3_walk_cb(void *ctx_, const char *path, uint64_t inode_id,
+                              uint32_t type, uint64_t size, int64_t mtime)
+{
+    pba_ref_ensure_ctx *c = (pba_ref_ensure_ctx *)ctx_;
+    invfs_volume *v = c->v;
+    invfs_v3_inode in;
+    uint8_t *blob = NULL;
+    size_t blen = 0;
+    invfs_ast_hdr ah;
+    const invfs_ast_block_entry *ents = NULL;
+    size_t n_ents = 0, i;
+    (void)path; (void)size; (void)mtime;
+
+    if (type == INVFS_ITYP_DIR || !inode_id) return 0;
+    if (path && (unsigned char)path[0] == 0x01) return 0;
+    if (vol_v3_inode_get(v, inode_id, &in) != 1) return 0;
+    if (in.size == 0) return 0;
+    if (vol_v3_recipe_load(v, in.recipe_addr, &blob, &blen) != 0 || !blob) return 0;
+    if (vol_ast_recipe_parse(blob, blen, &ah, &ents, &n_ents) == 0 && ents) {
+        for (i = 0; i < n_ents; i++) {
+            if (ents[i].zone != INVFS_ZONE_TEXT && ents[i].pba) {
+                pba_ref_modify(v, ents[i].pba, +1);
+            }
+        }
+    }
+    free(blob);
+    return 0;
+}
+
 int pba_ref_ensure(invfs_volume *v)
 {
     pba_ref_ensure_ctx c;
@@ -3650,7 +3681,10 @@ int pba_ref_ensure(invfs_volume *v)
     v->pba_ref_n = 0;
     v->pba_ref_on = 1;
     c.v = v;
-    vol_records_walk(v, pba_ref_ensure_cb, &c);
+    if (v->sb.vol_flags & VOLF_V3)
+        vol_v3_walk(v, pba_ref_v3_walk_cb, &c);
+    else
+        vol_records_walk(v, pba_ref_ensure_cb, &c);
     return 0;
 }
 

@@ -113,6 +113,28 @@ static uint64_t dedup_cur_pba(invfs_volume *v, uint64_t inode, uint64_t lba)
     size_t base, ent0;
     uint32_t j;
 
+    if (v->sb.vol_flags & VOLF_V3) {
+        invfs_v3_inode in;
+        uint8_t *blob = NULL;
+        size_t blen = 0;
+        const invfs_ast_block_entry *ents = NULL;
+        size_t n_ents = 0;
+        if (vol_v3_inode_get(v, inode, &in) != 1)
+            return 0;
+        if (vol_v3_recipe_load(v, in.recipe_addr, &blob, &blen) != 0 || !blob)
+            return 0;
+        if (vol_ast_recipe_parse(blob, blen, &ah, &ents, &n_ents) == 0 && ents) {
+            for (j = 0; j < n_ents; j++) {
+                if (ents[j].block_id == lba) {
+                    pba = ents[j].pba;
+                    break;
+                }
+            }
+        }
+        free(blob);
+        return pba;
+    }
+
     if (meta_read_record_by_id(v, inode, &rec, &rl, NULL, 0, NULL) != 0)
         return 0;
     if (rl < INVFS_REC_HDR_LEN ||
@@ -166,10 +188,103 @@ static int merge_ent_cmp(const void *a, const void *b)
  * under a live checkpoint -- the caller stops the pass cleanly, keeping
  * what merged); -1 = error. *freed_out takes the reclaimed block count,
  * *applied_out the count of intents actually applied. */
+static int dedup_remap_file_v3(invfs_volume *v, uint64_t inode,
+                               const merge_ent *ms, size_t nm,
+                               uint64_t *freed_out, size_t *applied_out)
+{
+    invfs_v3_inode in;
+    uint8_t *blob = NULL;
+    size_t blen = 0;
+    invfs_ast_hdr ah;
+    const invfs_ast_block_entry *ents = NULL;
+    size_t n_ents = 0;
+    invfs_ast_block_entry *new_ents = NULL;
+    size_t applied = 0;
+    uint64_t freed = 0;
+    size_t m, j;
+    uint8_t *new_blob = NULL;
+    size_t new_blen = 0;
+    uint8_t new_addr[INVFS_V3_RECIPE_ADDR_LEN];
+
+    *freed_out = 0;
+    *applied_out = 0;
+
+    if (vol_v3_inode_get(v, inode, &in) != 1) return -1;
+    if (vol_v3_recipe_load(v, in.recipe_addr, &blob, &blen) != 0 || !blob) return -1;
+    if (vol_ast_recipe_parse(blob, blen, &ah, &ents, &n_ents) != 0 || !ents) {
+        free(blob);
+        return -1;
+    }
+    new_ents = (invfs_ast_block_entry *)malloc(n_ents * sizeof(*new_ents));
+    if (!new_ents) { free(blob); return -1; }
+    memcpy(new_ents, ents, n_ents * sizeof(*new_ents));
+
+    for (m = 0; m < nm; m++) {
+        for (j = 0; j < n_ents; j++) {
+            if (new_ents[j].block_id == ms[m].lba) {
+                if (new_ents[j].pba == ms[m].cur_pba && ms[m].cur_pba != ms[m].canon_pba) {
+                    new_ents[j].pba = ms[m].canon_pba;
+                    applied++;
+                    pba_ref_modify(v, ms[m].cur_pba, -1);
+                    pba_ref_modify(v, ms[m].canon_pba, +1);
+                }
+                break;
+            }
+        }
+    }
+    free(blob);
+
+    if (!applied) {
+        free(new_ents);
+        return 1;
+    }
+
+    if (vol_ast_recipe_serialize(in.size, new_ents, (uint32_t)n_ents,
+                                 &new_blob, &new_blen) != 0) {
+        free(new_ents);
+        return -1;
+    }
+    free(new_ents);
+
+    if (vol_v3_recipe_store(v, new_blob, new_blen, new_addr) != 0) {
+        free(new_blob);
+        return -1;
+    }
+    free(new_blob);
+
+    memcpy(in.recipe_addr, new_addr, sizeof(new_addr));
+    if (vol_v3_inode_delta_put(v, inode, &in) != 0)
+        return -1;
+
+    /* Free loser extents if their refcount dropped to 0 */
+    for (m = 0; m < nm; m++) {
+        size_t k;
+        int seen = 0;
+        for (k = 0; k < m; k++) {
+            if (ms[k].cur_pba == ms[m].cur_pba) { seen = 1; break; }
+        }
+        if (seen) continue;
+        if (pba_ref_count(v, ms[m].cur_pba) == 0) {
+            uint64_t plen = 0;
+            if (seg_extent_checked(v, ms[m].cur_pba, &plen) == 0 && plen > 0) {
+                vol_free_blocks(v, ms[m].cur_pba, plen);
+                freed += plen;
+            }
+        }
+    }
+
+    *freed_out = freed;
+    *applied_out = applied;
+    return 0;
+}
+
 static int dedup_remap_file(invfs_volume *v, uint64_t inode,
                             const merge_ent *ms, size_t nm,
                             uint64_t *freed_out, size_t *applied_out)
 {
+    if (v->sb.vol_flags & VOLF_V3)
+        return dedup_remap_file_v3(v, inode, ms, nm, freed_out, applied_out);
+
     uint8_t *rec = NULL, *combo = NULL, *tomb = NULL;
     uint32_t rl = 0;
     uint64_t old_pos = 0;
@@ -440,6 +555,78 @@ static int dedup_hash_cb(void *ctx_, uint64_t rec_pos,
 }
 
 
+static int dedup_v3_walk_cb(void *ctx_, const char *path, uint64_t inode_id,
+                            uint32_t type, uint64_t size, int64_t mtime)
+{
+    dedup_hash_ctx *ctx = (dedup_hash_ctx *)ctx_;
+    invfs_volume *v = ctx->v;
+    invfs_v3_inode in;
+    uint8_t *blob = NULL;
+    size_t blen = 0;
+    invfs_ast_hdr ah;
+    const invfs_ast_block_entry *ents = NULL;
+    size_t n_ents = 0;
+    uint32_t i;
+    (void)path; (void)size; (void)mtime;
+
+    if (type == INVFS_ITYP_DIR || !inode_id) return 0;
+    if (path && (unsigned char)path[0] == 0x01) return 0;
+    if (vol_v3_inode_get(v, inode_id, &in) != 1) return 0;
+    if (in.size == 0) return 0;
+    if (vol_v3_recipe_load(v, in.recipe_addr, &blob, &blen) != 0 || !blob) return 0;
+    if (vol_ast_recipe_parse(blob, blen, &ah, &ents, &n_ents) != 0 || !ents) {
+        free(blob);
+        return 0;
+    }
+
+    for (i = 0; i < n_ents; i++) {
+        invfs_ast_block_entry e = ents[i];
+        uint64_t pba;
+        uint8_t hdrb[8];
+        uint32_t csize;
+
+        if (e.zone == INVFS_ZONE_TEXT) continue;
+        if (e.algo == INVFS_ALGO_JXL || e.algo == INVFS_ALGO_APE || e.algo == INVFS_ALGO_EXER)
+            continue;
+        pba = e.pba;
+        if (pba == 0 || pba >= v->sb.total_blocks) continue;
+
+        if (io_pread(&v->io, pba * INVFS_BLOCK_SIZE, hdrb, 8) != 0) continue;
+        memcpy(&csize, hdrb, 4);
+        if (csize == 0 || (uint64_t)csize + 8 > (v->sb.total_blocks - pba) * INVFS_BLOCK_SIZE)
+            continue;
+        if (csize > 16u * 1024u * 1024u)
+            continue; /* skip giant monolithic blobs from segment dedupe */
+        if (csize > ctx->blobcap) {
+            uint8_t *nb = (uint8_t *)realloc(ctx->blob, csize);
+            if (!nb) { free(blob); ctx->err = 1; return 1; }
+            ctx->blob = nb;
+            ctx->blobcap = csize;
+        }
+        if (io_pread(&v->io, pba * INVFS_BLOCK_SIZE + 8, ctx->blob, csize) != 0)
+            continue;
+
+        blake3_hasher_init(ctx->hx);
+        blake3_hasher_update(ctx->hx, hdrb, 8);
+        blake3_hasher_update(ctx->hx, ctx->blob, csize);
+        blake3_hasher_finalize(ctx->hx, ctx->segs[ctx->n].hash, 32);
+        ctx->segs[ctx->n].inode = inode_id;
+        ctx->segs[ctx->n].lba = e.block_id;
+        ctx->segs[ctx->n].pba = pba;
+        if (++ctx->n >= ctx->cap) {
+            dedup_seg *ns;
+            size_t ncap = ctx->cap * 2;
+            ns = (dedup_seg *)realloc(ctx->segs, ncap * sizeof(dedup_seg));
+            if (!ns) { free(blob); ctx->err = 1; return 1; }
+            ctx->segs = ns;
+            ctx->cap = ncap;
+        }
+    }
+    free(blob);
+    return 0;
+}
+
+
 int vol_sweep_dedupe(invfs_volume *v)
 {
     size_t n = 0, cap = 1 << 16;
@@ -478,7 +665,10 @@ int vol_sweep_dedupe(invfs_volume *v)
         ctx.hx = &hx;
         ctx.stop = 0;
         ctx.err = 0;
-        wrc = vol_records_walk(v, dedup_hash_cb, &ctx);
+        if (v->sb.vol_flags & VOLF_V3)
+            wrc = vol_v3_walk(v, dedup_v3_walk_cb, &ctx);
+        else
+            wrc = vol_records_walk(v, dedup_hash_cb, &ctx);
         segs = ctx.segs;        /* the callback may have grown the array */
         blob = ctx.blob;
         n = ctx.n;
@@ -530,6 +720,8 @@ int vol_sweep_dedupe(invfs_volume *v)
             }
             i = j;
         }
+        if (getenv("INVFS_DEBUG"))
+            fprintf(stderr, "[dedupe] pass 2: n=%zu, duplicate candidates nmi=%zu\n", n, nmi);
         if (nmi > 1)
             qsort(mi, nmi, sizeof *mi, merge_ent_cmp);
         i = 0;

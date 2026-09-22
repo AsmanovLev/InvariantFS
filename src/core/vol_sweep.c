@@ -953,6 +953,146 @@ static int vol_sweep_one_v3(invfs_volume *v, uint64_t inode_id,
     fz = vol_inode_first_zone(v, inode_id);
     if (fz != INVFS_ZONE_RAW)
         return 0;               /* already blob-stored; unreadable: skip */
+
+    uint8_t *blob = NULL;
+    size_t blen = 0;
+    invfs_ast_hdr ah;
+    const invfs_ast_block_entry *ents = NULL;
+    size_t n_ents = 0;
+    if (vol_v3_recipe_load(v, in.recipe_addr, &blob, &blen) != 0 || !blob)
+        return -1;
+    if (vol_ast_recipe_parse(blob, blen, &ah, &ents, &n_ents) != 0 || !ents || n_ents == 0) {
+        free(blob);
+        return -1;
+    }
+
+    int zlevel = invfs_profile_zstd_level(v->profile);
+
+    /* For multi-segment files: per-segment recompression preserves
+     * segment boundaries for fast random I/O and enables intra- and
+     * inter-file deduplication in vol_sweep_dedupe. */
+    if (n_ents > 1) {
+        invfs_ast_block_entry *new_ents = (invfs_ast_block_entry *)malloc(n_ents * sizeof(*new_ents));
+        uint8_t *cbuf_new = (uint8_t *)malloc(SEGMENT_SIZE + 128 + INVFS_BLOCK_SIZE);
+        uint8_t *orig = (uint8_t *)malloc(SEGMENT_SIZE);
+        int any_swept = 0;
+
+        if (!new_ents || !cbuf_new || !orig) {
+            free(blob); free(new_ents); free(cbuf_new); free(orig);
+            return -1;
+        }
+        memcpy(new_ents, ents, n_ents * sizeof(*new_ents));
+
+        for (size_t i = 0; i < n_ents; i++) {
+            invfs_ast_block_entry *e = &new_ents[i];
+            uint64_t old_pba = e->pba;
+            uint32_t csize_old = 0;
+            uint8_t *blob_old = NULL;
+            uint64_t old_plen = 0;
+            size_t orig_len = (size_t)e->length;
+            size_t zrc;
+            uint32_t csize_new = 0, crc_new = 0;
+            uint64_t pba_new = 0, phys_blocks_new = 0;
+            uint8_t hdr4[8];
+
+            if (e->zone != INVFS_ZONE_RAW || old_pba == 0)
+                continue;
+
+            /* Check if this exact old_pba was already remapped earlier in this pass */
+            int already_mapped = 0;
+            for (size_t k = 0; k < i; k++) {
+                if (ents[k].pba == old_pba && new_ents[k].pba != old_pba) {
+                    e->pba = new_ents[k].pba;
+                    e->zone = new_ents[k].zone;
+                    e->algo = new_ents[k].algo;
+                    already_mapped = 1;
+                    any_swept = 1;
+                    break;
+                }
+            }
+            if (already_mapped)
+                continue;
+
+            if (seg_extent_checked(v, old_pba, &old_plen) != 0)
+                continue;
+            if (seg_read_checked(v, old_pba, old_plen, 1, &csize_old, &blob_old) != 0 || !blob_old)
+                continue;
+
+            if (e->algo == INVFS_ALGO_LZ4) {
+                int got = LZ4_decompress_safe((const char *)blob_old, (char *)orig,
+                                              (int)csize_old, (int)orig_len);
+                free(blob_old);
+                if (got != (int)orig_len) continue;
+            } else if (e->algo == INVFS_ALGO_ZSTD) {
+                size_t got = ZSTD_decompress(orig, orig_len, blob_old, csize_old);
+                free(blob_old);
+                if (ZSTD_isError(got) || got != orig_len) continue;
+            } else {
+                memcpy(orig, blob_old, orig_len);
+                free(blob_old);
+            }
+
+            /* Recompress with ZSTD */
+            zrc = ZSTD_compress(cbuf_new + 8, SEGMENT_SIZE + 64, orig, orig_len, zlevel);
+            if (!ZSTD_isError(zrc) && zrc > 0 && zrc < orig_len) {
+                csize_new = (uint32_t)zrc;
+                e->algo = INVFS_ALGO_ZSTD;
+            } else {
+                csize_new = (uint32_t)orig_len;
+                memcpy(cbuf_new + 8, orig, orig_len);
+                e->algo = INVFS_ALGO_NONE;
+            }
+            crc_new = invfs_crc32c(cbuf_new + 8, csize_new);
+            hdr4[0] = (uint8_t)(csize_new & 0xFF);
+            hdr4[1] = (uint8_t)((csize_new >> 8) & 0xFF);
+            hdr4[2] = (uint8_t)((csize_new >> 16) & 0xFF);
+            hdr4[3] = (uint8_t)((csize_new >> 24) & 0xFF);
+            hdr4[4] = (uint8_t)(crc_new & 0xFF);
+            hdr4[5] = (uint8_t)((crc_new >> 8) & 0xFF);
+            hdr4[6] = (uint8_t)((crc_new >> 16) & 0xFF);
+            hdr4[7] = (uint8_t)((crc_new >> 24) & 0xFF);
+            memcpy(cbuf_new, hdr4, 8);
+
+            phys_blocks_new = ((uint64_t)csize_new + 8 + INVFS_BLOCK_SIZE - 1) / INVFS_BLOCK_SIZE;
+            pba_new = alloc_blocks(v, v->sb.shadow_zone_start, v->sb.shadow_zone_blocks,
+                                   phys_blocks_new, 1, INVFS_ALLOC_DATA);
+            if (pba_new == 0)
+                continue; /* Shadow full: leave segment in RAW */
+
+            if (io_pwrite(&v->io, pba_new * INVFS_BLOCK_SIZE, cbuf_new, (size_t)csize_new + 8) != 0) {
+                vol_free_blocks(v, pba_new, phys_blocks_new);
+                continue;
+            }
+
+            vol_free_blocks(v, old_pba, old_plen);
+            e->pba = pba_new;
+            e->zone = INVFS_ZONE_BINARY;
+            any_swept = 1;
+        }
+
+        free(orig);
+        free(cbuf_new);
+        free(blob);
+
+        if (any_swept) {
+            uint8_t *new_blob = NULL;
+            size_t new_blen = 0;
+            uint8_t new_addr[INVFS_V3_RECIPE_ADDR_LEN];
+            if (vol_ast_recipe_serialize(in.size, new_ents, (uint32_t)n_ents, &new_blob, &new_blen) == 0) {
+                if (vol_v3_recipe_store(v, new_blob, new_blen, new_addr) == 0) {
+                    memcpy(in.recipe_addr, new_addr, sizeof(new_addr));
+                    vol_v3_inode_delta_put(v, inode_id, &in);
+                    vol_stamp_class(v, inode_id, INVFS_CLASS_GENERIC, INVFS_ALGO_ZSTD, invfs_registry_generation());
+                }
+                free(new_blob);
+            }
+        }
+        free(new_ents);
+        return any_swept ? 1 : 0;
+    }
+
+    free(blob);
+
     {
         uint64_t max_sweep_size = 256ULL * 1024ULL * 1024ULL; /* 256 MiB default */
         const char *env_max = getenv("INVFS_SWEEP_MAX_FILE");
@@ -986,7 +1126,6 @@ static int vol_sweep_one_v3(invfs_volume *v, uint64_t inode_id,
         return 0;
     }
 
-    int zlevel = invfs_profile_zstd_level(v->profile);
     enc_cap = ZSTD_compressBound(full_len);
     enc = (uint8_t *)malloc(enc_cap);
     if (!enc) { free(full); return -1; }

@@ -38,22 +38,22 @@
  */
 int vol_mark_dirty(invfs_volume *v)
 {
-    /* WP24-lite: the time-travel view is read-only by construction -- its
-     * append cursors sit AT the checkpoint cut, so an append from this
-     * handle would overwrite the first post-checkpoint record of the
-     * PRESENT volume. This is the funnel every mutation path passes
-     * (DIRTY-before-first-write, rule 1), so the refusal here is the
-     * engine-level guarantee; drivers also see EROFS earlier through
-     * vol_write_enabled (the handle carries VOLF_READONLY). */
     if (v->time_travel) {
         fprintf(stderr, "vol: write refused: this is a read-only "
                 "time-travel view of sweep checkpoint #%llu\n",
                 (unsigned long long)v->ck.sweep_seq);
         return -1;
     }
+    if (v->sb.vol_flags & VOLF_V3) {
+        if (!vol_write_enabled(v))
+            return -1;
+        if (v->dirty) return 0;
+        v->sb.state = INVFS_STATE_DIRTY;
+        if (vol_write_sb(v) != 0) return -1;
+        v->dirty = 1;
+        return 0;
+    }
     if (v->needs_recovery) {
-        /* WP25: name the degraded case -- it is a mount state, not
-         * damage, so the refusal says so plainly (loud EROFS). */
         if (v->degraded)
             fprintf(stderr, "vol: write refused: DEGRADED mount (device 0 "
                     "absent) -- the volume is read-only (EROFS). Reattach "
@@ -62,7 +62,9 @@ int vol_mark_dirty(invfs_volume *v)
     }
     if (v->dirty) return 0;
     v->sb.state = INVFS_STATE_DIRTY;
-    if (vol_write_sb(v) != 0) return -1;
+    if (vol_write_sb(v) != 0) {
+        return -1;
+    }
     v->dirty = 1;
     return 0;
 }
