@@ -69,7 +69,7 @@ echo "  qemu-img: $(qemu-img --version | head -1)"
 
 echo "== build the pack (the -Wall -Wextra -Werror gate) =="
 mkdir -p "$PACK/bin"
-WARN=$(cc -std=c11 -O2 -Wall -Wextra -Werror -o "$PACK/bin/qcow2" "$PACK/qcow2.c" 2>&1) \
+WARN=$(cc -std=c11 -O2 -Wall -Wextra -Werror -o "$PACK/bin/qcow2" "$PACK/qcow2.c" -lz 2>&1) \
     || { echo "FAIL: pack build failed"; echo "$WARN"; exit 1; }
 [ -z "$WARN" ] || { echo "FAIL: pack build not warning-clean:"; echo "$WARN"; exit 1; }
 echo "  bin/qcow2 built, -Wall -Wextra -Werror clean"
@@ -544,12 +544,22 @@ sys.exit(0)
 PY
     echo "  $f.qcow2: enumerate/extract/strip/map/rebuild/estimate OK, rebuild + map verified"
 done
-for f in badmagic backed snap compc extl2 enc cbits dupcl pasteof incompat rb32 empty; do
+# test compc roundtrip explicitly (compressed clusters supported in Q2R2)
+rm -rf "$WORK/pk" && mkdir -p "$WORK/pk/mbr"
+"$Q" enumerate "$WORK/orig/compc.qcow2" "$WORK/pk/table" || { echo "FAIL: enumerate compc"; ok=0; }
+"$Q" extract "$WORK/orig/compc.qcow2" 1 "$WORK/pk/mbr/1" || { echo "FAIL: extract compc"; ok=0; }
+"$Q" strip "$WORK/orig/compc.qcow2" "$WORK/pk/recipe" || { echo "FAIL: strip compc"; ok=0; }
+"$Q" map "$WORK/orig/compc.qcow2" "$WORK/pk/map" || { echo "FAIL: map compc"; ok=0; }
+"$Q" rebuild "$WORK/pk/recipe" "$WORK/pk/mbr" "$WORK/pk/rebuilt.qcow2" || { echo "FAIL: rebuild compc"; ok=0; }
+cmp -s "$WORK/orig/compc.qcow2" "$WORK/pk/rebuilt.qcow2" || { echo "FAIL: compc rebuild mismatch"; ok=0; }
+echo "  compc.qcow2: compressed cluster round-trip verified bit-exact"
+
+for f in badmagic backed snap extl2 enc cbits dupcl pasteof incompat rb32 empty; do
     if "$Q" enumerate "$WORK/orig/$f.qcow2" "$WORK/pk.table" 2>/dev/null; then
         echo "FAIL: $f.qcow2 was NOT declined"; ok=0
     fi
 done
-echo "  all 12 decline fixtures refused"
+echo "  all 11 decline fixtures refused"
 [ "$ok" = 1 ] || exit 1
 
 echo "== fuzz-lite: 30 random hand-built layouts, bit-exact =="
@@ -763,7 +773,7 @@ out:
     return rc;
 }
 C
-CORE_O="$REPO/build/obj/volume.o $REPO/build/obj/vol_cpack.o $REPO/build/obj/helper_exec.o $REPO/build/obj/vol_png.o $REPO/build/obj/vol_seal.o $REPO/build/obj/vol_repair.o $REPO/build/obj/vol_rollback.o $REPO/build/obj/vol_resize.o $REPO/build/obj/vol_fsck.o $REPO/build/obj/vol_crash.o $REPO/build/obj/vol_exer.o $REPO/build/obj/vol_dedupe.o $REPO/build/obj/vol_textzone.o $REPO/build/obj/vol_heat.o $REPO/build/obj/vol_sweep.o $REPO/build/obj/vol_meta_merge.o $REPO/build/obj/vol_read.o $REPO/build/obj/vol_write.o $REPO/build/obj/vol_records.o $REPO/build/obj/vol_ast.o $REPO/build/obj/vol_dirs.o $REPO/build/obj/arc.o $REPO/build/obj/crc32c.o $REPO/build/obj/lz4.o $REPO/build/obj/blkio.o $REPO/build/obj/flacx.o $REPO/build/obj/tarx.o $REPO/build/obj/pngx.o $REPO/build/obj/miniz.o $REPO/build/obj/ppmd8.o $REPO/build/obj/ppmd8enc.o $REPO/build/obj/ppmd8dec.o $REPO/build/obj/ppmd_codec.o $REPO/build/obj/codec.o $REPO/build/obj/bcj_x86.o $REPO/build/obj/blake3.o $REPO/build/obj/blake3_dispatch.o $REPO/build/obj/blake3_portable.o $REPO/build/obj/rs.o $REPO/build/obj/vol_tier.o"
+CORE_O="$REPO/build/obj/volume.o $REPO/build/obj/vol_cpack.o $REPO/build/obj/helper_exec.o $REPO/build/obj/vol_png.o $REPO/build/obj/vol_seal.o $REPO/build/obj/vol_repair.o $REPO/build/obj/vol_rollback.o $REPO/build/obj/vol_resize.o $REPO/build/obj/vol_fsck.o $REPO/build/obj/vol_crash.o $REPO/build/obj/vol_exer.o $REPO/build/obj/vol_dedupe.o $REPO/build/obj/vol_textzone.o $REPO/build/obj/vol_heat.o $REPO/build/obj/vol_sweep.o $REPO/build/obj/vol_meta_merge.o $REPO/build/obj/vol_read.o $REPO/build/obj/vol_write.o $REPO/build/obj/vol_records.o $REPO/build/obj/vol_ast.o $REPO/build/obj/vol_dirs.o $REPO/build/obj/vol_btree.o $REPO/build/obj/vol_delta.o $REPO/build/obj/vol_fold.o $REPO/build/obj/vol_reclaim.o $REPO/build/obj/vol_spt0.o $REPO/build/obj/vol_metabuf.o $REPO/build/obj/arc.o $REPO/build/obj/crc32c.o $REPO/build/obj/lz4.o $REPO/build/obj/blkio.o $REPO/build/obj/flacx.o $REPO/build/obj/tarx.o $REPO/build/obj/pngx.o $REPO/build/obj/miniz.o $REPO/build/obj/ppmd8.o $REPO/build/obj/ppmd8enc.o $REPO/build/obj/ppmd8dec.o $REPO/build/obj/ppmd_codec.o $REPO/build/obj/codec.o $REPO/build/obj/bcj_x86.o $REPO/build/obj/blake3.o $REPO/build/obj/blake3_dispatch.o $REPO/build/obj/blake3_portable.o $REPO/build/obj/rs.o $REPO/build/obj/vol_tier.o"
 gcc -std=gnu11 -O2 -I$REPO/src -I$REPO/src/core -I$REPO/src/codecs -I$REPO/src/recipes -I$REPO/src/vendor7z -o "$WORK/classof" "$WORK/classof.c" \
     $CORE_O -Wl,-l:libzstd.so.1 -lz -lpthread
 gcc -std=gnu11 -O2 -I$REPO/src -I$REPO/src/core -I$REPO/src/codecs -I$REPO/src/recipes -I$REPO/src/vendor7z -o "$WORK/rngread" "$WORK/rngread.c" \

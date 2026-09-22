@@ -689,6 +689,13 @@ int vol_sweep_dedupe(invfs_volume *v)
         merge_ent *mi = NULL;
         size_t nmi = 0, capmi = 0;
         size_t i = 0;
+        uint64_t last_inode = 0;
+        uint8_t *cur_blob = NULL;
+        size_t cur_blen = 0;
+        invfs_ast_hdr cur_ah;
+        const invfs_ast_block_entry *cur_ents = NULL;
+        size_t cur_nents = 0;
+
         while (i < n) {
             size_t j = i + 1;
             while (j < n && memcmp(segs[i].hash, segs[j].hash, 32) == 0) j++;
@@ -697,17 +704,44 @@ int vol_sweep_dedupe(invfs_volume *v)
                 size_t k;
                 for (k = i + 1; k < j; k++) {
                     const dedup_seg *s = &segs[k];
-                    uint64_t cur_pba;
-                    /* re-read the CURRENT record: a segment deduped earlier
-                     * in this same run already points at its winner, and a
-                     * record that moved on is not ours to touch */
-                    cur_pba = dedup_cur_pba(v, s->inode, s->lba);
+                    uint64_t cur_pba = 0;
+
+                    if (v->sb.vol_flags & VOLF_V3) {
+                        if (s->inode != last_inode) {
+                            free(cur_blob);
+                            cur_blob = NULL;
+                            last_inode = s->inode;
+                            invfs_v3_inode in;
+                            if (vol_v3_inode_get(v, s->inode, &in) == 1) {
+                                if (vol_v3_recipe_load(v, in.recipe_addr, &cur_blob, &cur_blen) == 0 && cur_blob) {
+                                    if (vol_ast_recipe_parse(cur_blob, cur_blen, &cur_ah, &cur_ents, &cur_nents) != 0) {
+                                        free(cur_blob); cur_blob = NULL;
+                                    }
+                                }
+                            }
+                        }
+                        if (cur_blob && cur_ents) {
+                            if (s->lba < cur_nents && cur_ents[s->lba].block_id == s->lba) {
+                                cur_pba = cur_ents[s->lba].pba;
+                            } else {
+                                for (size_t ent_idx = 0; ent_idx < cur_nents; ent_idx++) {
+                                    if (cur_ents[ent_idx].block_id == s->lba) {
+                                        cur_pba = cur_ents[ent_idx].pba;
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                    } else {
+                        cur_pba = dedup_cur_pba(v, s->inode, s->lba);
+                    }
+
                     if (!cur_pba || cur_pba == canon_pba)
                         continue;   /* already shared / moved on */
                     if (nmi == capmi) {
                         size_t nc = capmi ? capmi * 2 : 256;
                         merge_ent *nm2 = (merge_ent *)realloc(mi, nc * sizeof *nm2);
-                        if (!nm2) { free(mi); rc = -1; goto out; }
+                        if (!nm2) { free(cur_blob); free(mi); rc = -1; goto out; }
                         mi = nm2;
                         capmi = nc;
                     }
@@ -720,6 +754,7 @@ int vol_sweep_dedupe(invfs_volume *v)
             }
             i = j;
         }
+        free(cur_blob);
         if (getenv("INVFS_DEBUG"))
             fprintf(stderr, "[dedupe] pass 2: n=%zu, duplicate candidates nmi=%zu\n", n, nmi);
         if (nmi > 1)

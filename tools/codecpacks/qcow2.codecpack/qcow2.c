@@ -141,6 +141,7 @@
 #include <unistd.h>
 #include <sys/stat.h>
 #include <sys/types.h>
+#include <zlib.h>
 
 /* ---- qcow2 header field offsets (all values in the file are BE) -------- */
 #define QC_VERSION_OFF    0x04u
@@ -177,16 +178,23 @@
 #define MEMBER_IDX       1u
 #define MEMBER_SNAME     "diskimg"
 
-/* recipe (Q2R1) constants */
+/* recipe (Q2R1/Q2R2) constants */
 #define QR_MAGIC         "Q2R1"
+#define QR2_MAGIC        "Q2R2"
 #define QR_HDR_LEN       32u             /* fixed header before the table */
 #define QR_ENT_LEN       16u             /* { u64 file_off, u64 mem_off } */
+#define QR2_ENT_LEN      20u             /* { u64 file_off, u64 mem_off, u32 csize } */
 
 typedef struct {
     uint64_t off;      /* file offset of the data cluster */
     uint32_t rank;     /* guest-stream rank: mem_off = rank * cluster_size */
-    uint32_t pad;
+    uint32_t csize;    /* 0 = uncompressed cluster of cs bytes; >0 = compressed stream byte length */
 } qc_ext;
+
+typedef struct {
+    uint64_t off;      /* file offset of cluster */
+    uint32_t csize;    /* 0 = uncompressed, >0 = compressed */
+} qc_entry;
 
 typedef struct {
     uint64_t file_size;
@@ -195,8 +203,8 @@ typedef struct {
     uint32_t cluster_bits;
     uint32_t version;
     uint32_t n_alloc;
-    uint64_t *alloc;        /* n_alloc data-cluster offsets, GUEST order */
-    qc_ext  *fext;          /* n_alloc extents, FILE order (sorted by off) */
+    qc_entry *alloc;        /* n_alloc data clusters, GUEST order */
+    qc_ext   *fext;         /* n_alloc extents, FILE order (sorted by off) */
 } qc_img;
 
 static uint32_t get32be(const uint8_t *p)
@@ -393,27 +401,84 @@ static int qc_parse_fd(int fd, uint64_t file_size, qc_img *v)
             for (j = 0; j < l2_per; j++) {
                 uint64_t le = get64be(l2t + (size_t)j * 8);
                 uint64_t off;
+                uint32_t csize = 0;
                 if (!le) continue;              /* unallocated: no bytes */
-                if (le & QCOW_OFLAG_COMPRESSED) goto out;   /* refuse */
-                if (le & QCOW_OFLAG_ZERO) {     /* known-zero cluster */
+                if (le & QCOW_OFLAG_COMPRESSED) {
+                    /* QCOW2 compressed cluster: sector count occupies (cluster_bits - 8) bits */
+                    unsigned csize_shift = 62u - (v->cluster_bits - 8u);
+                    uint64_t csize_mask = (1ull << (v->cluster_bits - 8u)) - 1ull;
+                    uint64_t offset_mask = (1ull << csize_shift) - 1ull;
+                    size_t dataSize = (size_t)(((le >> csize_shift) & csize_mask) + 1u) * 512u;
+                    off = le & offset_mask;
+                    if (off > file_size) {
+                        fprintf(stderr, "qcow2: compressed off out of bounds\n");
+                        goto out;
+                    }
+                    if (dataSize > file_size - off)
+                        dataSize = (size_t)(file_size - off);
+                    /* Read compressed stream to determine exact consumed bytes */
+                    uint8_t *comp_peek = (uint8_t *)malloc(dataSize);
+                    if (!comp_peek) goto out;
+                    if (pread_full(fd, comp_peek, dataSize, off) != 0) {
+                        fprintf(stderr, "qcow2: pread comp_peek failed\n");
+                        free(comp_peek);
+                        goto out;
+                    }
+                    z_stream zst;
+                    memset(&zst, 0, sizeof zst);
+                    if (inflateInit2(&zst, -12) != Z_OK) {
+                        fprintf(stderr, "qcow2: inflateInit2 failed\n");
+                        free(comp_peek);
+                        goto out;
+                    }
+                    uint8_t dummy_out[512];
+                    zst.next_in = comp_peek;
+                    zst.avail_in = (uInt)dataSize;
+                    zst.next_out = dummy_out;
+                    zst.avail_out = sizeof dummy_out;
+                    /* inflate until stream ends to discover exact compressed length */
+                    while (zst.avail_in) {
+                        int zr = inflate(&zst, Z_NO_FLUSH);
+                        if (zr == Z_STREAM_END) break;
+                        if (zr != Z_OK && zr != Z_BUF_ERROR) {
+                            fprintf(stderr, "qcow2: inflate failed with %d\n", zr);
+                            inflateEnd(&zst);
+                            free(comp_peek);
+                            goto out;
+                        }
+                        zst.next_out = dummy_out;
+                        zst.avail_out = sizeof dummy_out;
+                    }
+                    csize = (uint32_t)(dataSize - zst.avail_in);
+                    inflateEnd(&zst);
+                    free(comp_peek);
+                    if (csize == 0) {
+                        fprintf(stderr, "qcow2: csize is 0\n");
+                        goto out;
+                    }
+                } else if (le & QCOW_OFLAG_ZERO) {     /* known-zero cluster */
                     if (version == 2) goto out; /* reserved bit in v2 */
                     continue;                   /* stays RECIPE bytes */
+                } else {
+                    off = le & QC_L2_OFFMASK;
+                    if (!off || (off & (v->cs - 1)) != 0 ||
+                        off > file_size || v->cs > file_size - off)
+                        goto out;
+                    csize = 0;
                 }
-                off = le & QC_L2_OFFMASK;
-                if (!off || (off & (v->cs - 1)) != 0 ||
-                    off > file_size || v->cs > file_size - off)
-                    goto out;
                 if (v->n_alloc == cap) {
-                    uint64_t *na;
+                    qc_entry *na;
                     if (cap >= QC_MAX_ALLOC) goto out;
                     cap = cap ? cap * 2 : 4096;
                     if (cap > QC_MAX_ALLOC) cap = QC_MAX_ALLOC;
-                    na = (uint64_t *)realloc(v->alloc,
+                    na = (qc_entry *)realloc(v->alloc,
                                              (size_t)cap * sizeof *na);
                     if (!na) goto out;
                     v->alloc = na;
                 }
-                v->alloc[v->n_alloc++] = off;
+                v->alloc[v->n_alloc].off = off;
+                v->alloc[v->n_alloc].csize = csize;
+                v->n_alloc++;
             }
         }
     }
@@ -425,9 +490,9 @@ static int qc_parse_fd(int fd, uint64_t file_size, qc_img *v)
     v->fext = (qc_ext *)malloc((size_t)v->n_alloc * sizeof *v->fext);
     if (!v->fext) goto out;
     for (i = 0; i < v->n_alloc; i++) {
-        v->fext[i].off = v->alloc[i];
+        v->fext[i].off = v->alloc[i].off;
+        v->fext[i].csize = v->alloc[i].csize;
         v->fext[i].rank = i;
-        v->fext[i].pad = 0;
     }
     qsort(v->fext, v->n_alloc, sizeof *v->fext, ext_cmp);
     for (i = 1; i < v->n_alloc; i++)
@@ -438,10 +503,11 @@ static int qc_parse_fd(int fd, uint64_t file_size, qc_img *v)
         uint64_t n_ents = 0, pos = 0;
         i = 0;
         while (i < v->n_alloc) {
-            uint64_t run_off = v->fext[i].off, run_len = v->cs;
+            uint64_t run_off = v->fext[i].off;
+            uint64_t run_len = v->fext[i].csize ? (uint64_t)v->fext[i].csize : v->cs;
             uint64_t run_mem = (uint64_t)v->fext[i].rank * v->cs;
             i++;
-            while (i < v->n_alloc &&
+            while (i < v->n_alloc && !v->fext[i - 1].csize && !v->fext[i].csize &&
                    v->fext[i].off == run_off + run_len &&
                    (uint64_t)v->fext[i].rank * v->cs == run_mem + run_len) {
                 run_len += v->cs;
@@ -531,8 +597,40 @@ static int cmd_extract(const char *in, const char *idx_s, const char *out)
     buf = (uint8_t *)malloc(COPY_CAP);
     if (fd_in < 0 || fd_out < 0 || !buf) goto out;
     /* the member stream = allocated clusters in GUEST (table walk) order */
-    for (i = 0; i < v.n_alloc; i++)
-        if (copy_range(fd_in, fd_out, v.alloc[i], v.cs, buf) != 0) goto out;
+    for (i = 0; i < v.n_alloc; i++) {
+        if (v.alloc[i].csize) {
+            /* Decompress zlib cluster into full cluster_size member bytes */
+            uint8_t *comp_buf = (uint8_t *)malloc(v.alloc[i].csize);
+            uint8_t *dec_buf = (uint8_t *)malloc(v.cs);
+            if (!comp_buf || !dec_buf) {
+                free(comp_buf); free(dec_buf); goto out;
+            }
+            if (pread_full(fd_in, comp_buf, v.alloc[i].csize, v.alloc[i].off) != 0) {
+                free(comp_buf); free(dec_buf); goto out;
+            }
+            z_stream zst;
+            memset(&zst, 0, sizeof zst);
+            if (inflateInit2(&zst, -12) != Z_OK) {
+                free(comp_buf); free(dec_buf); goto out;
+            }
+            zst.next_in = comp_buf;
+            zst.avail_in = (uInt)v.alloc[i].csize;
+            zst.next_out = dec_buf;
+            zst.avail_out = (uInt)v.cs;
+            int zr = inflate(&zst, Z_FINISH);
+            inflateEnd(&zst);
+            free(comp_buf);
+            if (zr != Z_STREAM_END && zr != Z_OK) {
+                free(dec_buf); goto out;
+            }
+            if (write_full(fd_out, dec_buf, v.cs) != 0) {
+                free(dec_buf); goto out;
+            }
+            free(dec_buf);
+        } else {
+            if (copy_range(fd_in, fd_out, v.alloc[i].off, v.cs, buf) != 0) goto out;
+        }
+    }
     rc = 0;
 out:
     if (fd_in >= 0) close(fd_in);
@@ -554,33 +652,40 @@ static int cmd_strip(const char *in, const char *out)
     int fd_in = -1, fd_out = -1, rc = 3;
 
     if (qc_parse(in, &v) != 0) return 3;
-    tab = (uint8_t *)malloc((size_t)v.n_alloc * QR_ENT_LEN);
+    tab = (uint8_t *)malloc((size_t)v.n_alloc * QR2_ENT_LEN);
     buf = (uint8_t *)malloc(COPY_CAP);
     if (!tab || !buf) goto out_free;
     for (i = 0; i < v.n_alloc; i++) {
-        put64le(tab + (size_t)i * QR_ENT_LEN, v.fext[i].off);
-        put64le(tab + (size_t)i * QR_ENT_LEN + 8,
+        put64le(tab + (size_t)i * QR2_ENT_LEN, v.fext[i].off);
+        put64le(tab + (size_t)i * QR2_ENT_LEN + 8,
                 (uint64_t)v.fext[i].rank * v.cs);
+        put32le(tab + (size_t)i * QR2_ENT_LEN + 16, v.fext[i].csize);
     }
     fd_in = open(in, O_RDONLY);
     fd_out = open_out(out);
     if (fd_in < 0 || fd_out < 0) goto out;
-    memcpy(hdr, QR_MAGIC, 4);
+    memcpy(hdr, QR2_MAGIC, 4);
     put32le(hdr + 4, v.n_alloc);
     put64le(hdr + 8, v.file_size);
     put64le(hdr + 16, v.member_size);
     put32le(hdr + 24, v.cluster_bits);
     put32le(hdr + 28, 0);
     if (write_full(fd_out, hdr, sizeof hdr) != 0 ||
-        write_full(fd_out, tab, (size_t)v.n_alloc * QR_ENT_LEN) != 0)
+        write_full(fd_out, tab, (size_t)v.n_alloc * QR2_ENT_LEN) != 0)
         goto out;
-    /* the gap bytes: every non-extent byte, in file order (junk-filled
-     * holes included — nothing is seek-skipped) */
+    /* the gap bytes: every non-member byte, in file order (junk-filled
+     * holes and compressed cluster bytes included) */
     for (i = 0; i < v.n_alloc; i++) {
         uint64_t ext = v.fext[i].off;
+        uint64_t elen = v.fext[i].csize ? (uint64_t)v.fext[i].csize : v.cs;
         if (ext > pos && copy_range(fd_in, fd_out, pos, ext - pos, buf) != 0)
             goto out;
-        pos = ext + v.cs;
+        if (v.fext[i].csize) {
+            /* compressed cluster: written into recipe gap so rebuild reproduces it verbatim */
+            if (copy_range(fd_in, fd_out, ext, elen, buf) != 0)
+                goto out;
+        }
+        pos = ext + elen;
     }
     if (v.file_size > pos &&
         copy_range(fd_in, fd_out, pos, v.file_size - pos, buf) != 0)
@@ -611,10 +716,12 @@ static int cmd_map(const char *in, const char *out)
     /* count the exact entry number first (the parse already capped it) */
     i = 0;
     while (i < v.n_alloc) {
-        uint64_t run_off = v.fext[i].off, run_len = v.cs;
+        uint64_t run_off = v.fext[i].off;
+        uint64_t run_len = v.fext[i].csize ? (uint64_t)v.fext[i].csize : v.cs;
         uint64_t run_mem = (uint64_t)v.fext[i].rank * v.cs;
+        int is_comp = (v.fext[i].csize != 0);
         i++;
-        while (i < v.n_alloc &&
+        while (i < v.n_alloc && !is_comp && !v.fext[i].csize &&
                v.fext[i].off == run_off + run_len &&
                (uint64_t)v.fext[i].rank * v.cs == run_mem + run_len) {
             run_len += v.cs;
@@ -630,14 +737,16 @@ static int cmd_map(const char *in, const char *out)
 
     pos = 0;
     n_ents = 0;
-    recipe_off = QR_HDR_LEN + (uint64_t)v.n_alloc * QR_ENT_LEN;
+    recipe_off = QR_HDR_LEN + (uint64_t)v.n_alloc * QR2_ENT_LEN;
     i = 0;
     while (i < v.n_alloc) {
-        uint64_t run_off = v.fext[i].off, run_len = v.cs;
+        uint64_t run_off = v.fext[i].off;
+        uint64_t run_len = v.fext[i].csize ? (uint64_t)v.fext[i].csize : v.cs;
         uint64_t run_mem = (uint64_t)v.fext[i].rank * v.cs;
         uint8_t *p;
+        int is_comp = (v.fext[i].csize != 0);
         i++;
-        while (i < v.n_alloc &&
+        while (i < v.n_alloc && !is_comp && !v.fext[i].csize &&
                v.fext[i].off == run_off + run_len &&
                (uint64_t)v.fext[i].rank * v.cs == run_mem + run_len) {
             run_len += v.cs;
@@ -653,12 +762,21 @@ static int cmd_map(const char *in, const char *out)
             recipe_off += run_off - pos;
             n_ents++;
         }
-        p = ent + (size_t)n_ents * 29;          /* MEMBER run */
+        p = ent + (size_t)n_ents * 29;
         put64le(p, run_off);
         put64le(p + 8, run_len);
-        p[16] = 1;                              /* kind MEMBER */
-        put32le(p + 17, MEMBER_IDX);
-        put64le(p + 21, run_mem);
+        if (is_comp) {
+            /* Compressed cluster: raw bytes ride in RECIPE gap for seekable read */
+            p[16] = 0;                          /* kind RECIPE */
+            put32le(p + 17, 0);
+            put64le(p + 21, recipe_off);
+            recipe_off += run_len;
+        } else {
+            /* Uncompressed cluster: member stream */
+            p[16] = 1;                          /* kind MEMBER */
+            put32le(p + 17, MEMBER_IDX);
+            put64le(p + 21, run_mem);
+        }
         n_ents++;
         pos = run_off + run_len;
     }
@@ -672,19 +790,24 @@ static int cmd_map(const char *in, const char *out)
         n_ents++;
     }
     fd_out = open_out(out);
-    if (fd_out < 0) goto out_free;
+    if (fd_out < 0) { free(ent); qc_free(&v); return 3; }
     memcpy(hdr, "MRMP", 4);
     put32le(hdr + 4, (uint32_t)n_ents);
     if (write_full(fd_out, hdr, 8) != 0 ||
-        write_full(fd_out, ent, (size_t)n_ents * 29) != 0)
-        goto out;
-    rc = 0;
-out:
-    if (fd_out >= 0 && close(fd_out) != 0) rc = 3;
-out_free:
+        write_full(fd_out, ent, (size_t)n_ents * 29) != 0) {
+        close(fd_out);
+        free(ent);
+        qc_free(&v);
+        return 3;
+    }
+    rc = (close(fd_out) == 0) ? 0 : 3;
     free(ent);
     qc_free(&v);
     return rc;
+out_free:
+    free(ent);
+    qc_free(&v);
+    return 3;
 }
 
 /* ---- rebuild ------------------------------------------------------------ */
@@ -705,6 +828,8 @@ static int cmd_rebuild(const char *recipe, const char *dir, const char *out)
     uint32_t n_ext, cluster_bits, i;
     char mpath[4096];
     int fd_r = -1, fd_m = -1, fd_out = -1, rc = 3;
+    int is_q2r2 = 0;
+    size_t ent_sz;
 
     if (stat(recipe, &rst) != 0) return 3;
     if (snprintf(mpath, sizeof mpath, "%s/%u", dir, MEMBER_IDX) >=
@@ -715,7 +840,15 @@ static int cmd_rebuild(const char *recipe, const char *dir, const char *out)
     fd_r = open(recipe, O_RDONLY);
     if (fd_r < 0) return 3;
     if (pread_full(fd_r, hdr, sizeof hdr, 0) != 0) goto out;
-    if (memcmp(hdr, QR_MAGIC, 4) != 0) goto out;
+    if (memcmp(hdr, QR_MAGIC, 4) == 0) {
+        is_q2r2 = 0;
+        ent_sz = QR_ENT_LEN;
+    } else if (memcmp(hdr, QR2_MAGIC, 4) == 0) {
+        is_q2r2 = 1;
+        ent_sz = QR2_ENT_LEN;
+    } else {
+        goto out;
+    }
     n_ext = get32le(hdr + 4);
     file_size = get64le(hdr + 8);
     member_size = get64le(hdr + 16);
@@ -726,32 +859,35 @@ static int cmd_rebuild(const char *recipe, const char *dir, const char *out)
     cs = 1ull << cluster_bits;
     if (n_ext < 1) goto out;
     if (member_size / cs != n_ext || member_size % cs != 0) goto out;
-    if (file_size < member_size || file_size < QC_HDR_NEED) goto out;
-    /* the recipe must be EXACTLY header + table + the gap bytes */
-    if ((uint64_t)rst.st_size !=
-        QR_HDR_LEN + (uint64_t)n_ext * QR_ENT_LEN + (file_size - member_size))
-        goto out;
-    /* ... and the member must be exactly the announced stream (the FS feeds
-     * it from the table; a size mismatch = corrupt input, fail loudly) */
+    if (file_size < QC_HDR_NEED) goto out;
     if ((uint64_t)mst.st_size != member_size) goto out;
 
-    tab = (uint8_t *)malloc((size_t)n_ext * QR_ENT_LEN);
+    tab = (uint8_t *)malloc((size_t)n_ext * ent_sz);
     chk = (uint8_t *)malloc((size_t)n_ext * 8);
     buf = (uint8_t *)malloc(COPY_CAP);
     if (!tab || !chk || !buf) goto out;
-    if (pread_full(fd_r, tab, (size_t)n_ext * QR_ENT_LEN, QR_HDR_LEN) != 0)
+    if (pread_full(fd_r, tab, (size_t)n_ext * ent_sz, QR_HDR_LEN) != 0)
         goto out;
+
+    uint64_t uncomp_extent_bytes = 0;
     for (i = 0; i < n_ext; i++) {
-        uint64_t foff = get64le(tab + (size_t)i * QR_ENT_LEN);
-        uint64_t moff = get64le(tab + (size_t)i * QR_ENT_LEN + 8);
-        if (foff > file_size || cs > file_size - foff) goto out;
-        if (i && foff < get64le(tab + (size_t)(i - 1) * QR_ENT_LEN) + cs)
-            goto out;                    /* unsorted or overlapping extents */
+        uint64_t foff = get64le(tab + (size_t)i * ent_sz);
+        uint64_t moff = get64le(tab + (size_t)i * ent_sz + 8);
+        uint32_t csize = is_q2r2 ? get32le(tab + (size_t)i * ent_sz + 16) : 0;
+        uint64_t elen = csize ? (uint64_t)csize : cs;
+        if (foff > file_size || elen > file_size - foff) goto out;
+        if (i && foff < get64le(tab + (size_t)(i - 1) * ent_sz))
+            goto out;
         if (moff % cs != 0 || moff >= member_size) goto out;
         put64le(chk + (size_t)i * 8, moff);
+        if (!csize)
+            uncomp_extent_bytes += cs;
     }
-    /* the mem_offs must be a permutation of the member stream (each cluster
-     * slot of the member used exactly once) */
+    if ((uint64_t)rst.st_size !=
+        QR_HDR_LEN + (uint64_t)n_ext * ent_sz + (file_size - uncomp_extent_bytes))
+        goto out;
+
+    /* permutation check */
     qsort(chk, n_ext, 8, u64_cmp);
     for (i = 0; i < n_ext; i++)
         if (get64le(chk + (size_t)i * 8) != (uint64_t)i * cs) goto out;
@@ -759,22 +895,40 @@ static int cmd_rebuild(const char *recipe, const char *dir, const char *out)
     fd_m = open(mpath, O_RDONLY);
     fd_out = open_out(out);
     if (fd_m < 0 || fd_out < 0) goto out;
-    gap_off = QR_HDR_LEN + (uint64_t)n_ext * QR_ENT_LEN;
+    gap_off = QR_HDR_LEN + (uint64_t)n_ext * ent_sz;
     for (i = 0; i < n_ext; i++) {
-        uint64_t foff = get64le(tab + (size_t)i * QR_ENT_LEN);
-        uint64_t moff = get64le(tab + (size_t)i * QR_ENT_LEN + 8);
+        uint64_t foff = get64le(tab + (size_t)i * ent_sz);
+        uint64_t moff = get64le(tab + (size_t)i * ent_sz + 8);
+        uint32_t csize = is_q2r2 ? get32le(tab + (size_t)i * ent_sz + 16) : 0;
+        uint64_t elen = csize ? (uint64_t)csize : cs;
         if (foff > pos) {                /* gap: from the recipe */
-            if (copy_range(fd_r, fd_out, gap_off, foff - pos, buf) != 0)
+            if (copy_range(fd_r, fd_out, gap_off, foff - pos, buf) != 0) {
+                fprintf(stderr, "qcow2: rebuild copy gap failed\n");
                 goto out;
+            }
             gap_off += foff - pos;
         }
-        /* extent: from the member stream at its recorded slot */
-        if (copy_range(fd_m, fd_out, moff, cs, buf) != 0) goto out;
-        pos = foff + cs;
+        if (csize) {
+            /* compressed cluster: verbatim from recipe gap */
+            if (copy_range(fd_r, fd_out, gap_off, elen, buf) != 0) {
+                fprintf(stderr, "qcow2: rebuild copy comp cluster failed\n");
+                goto out;
+            }
+            gap_off += elen;
+        } else {
+            /* uncompressed cluster: from member stream */
+            if (copy_range(fd_m, fd_out, moff, cs, buf) != 0) {
+                fprintf(stderr, "qcow2: rebuild copy member cluster failed\n");
+                goto out;
+            }
+        }
+        pos = foff + elen;
     }
     if (file_size > pos &&
-        copy_range(fd_r, fd_out, gap_off, file_size - pos, buf) != 0)
+        copy_range(fd_r, fd_out, gap_off, file_size - pos, buf) != 0) {
+        fprintf(stderr, "qcow2: rebuild copy tail gap failed\n");
         goto out;
+    }
     rc = 0;
 out:
     if (fd_r >= 0) close(fd_r);
