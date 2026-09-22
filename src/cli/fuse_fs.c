@@ -2767,7 +2767,8 @@ static void *invf_init(struct fuse_conn_info *conn, struct fuse_config *cfg)
             (conn->want & FUSE_CAP_SPLICE_READ)  ? 'r' : '-',
             (conn->want & FUSE_CAP_SPLICE_MOVE)  ? 'm' : '-',
             (conn->want & FUSE_CAP_SPLICE_WRITE) ? 'w' : '-',
-            (conn->want & FUSE_CAP_WRITEBACK_CACHE) ? '+' : '-');
+            (conn->want & FUSE_CAP_WRITEBACK_CACHE) ? '+' : '-',
+            (int)g_tmp_area);
     return NULL;
 }
 

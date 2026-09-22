@@ -91,7 +91,7 @@ static int member_data(const uint8_t *z, size_t zlen, const zip_member *m,
     if (m->local_off + 30 + (size_t)nlen + (size_t)elen > zlen) {
         fprintf(stderr, "zip: local header extends past buffer "
                 "(off=%zu nlen=%u elen=%u zlen=%zu)\n",
-                m->local_off, nlen, elen, zlen);
+                (size_t)m->local_off, nlen, elen, zlen);
         return -1;
     }
     const uint8_t *data = z + m->local_off + 30 + nlen + elen;

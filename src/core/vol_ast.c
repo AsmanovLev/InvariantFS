@@ -64,6 +64,47 @@ int vol_ast_recipe_parse(const uint8_t *blob, size_t blen,
     return 0;
 }
 
+int vol_v3_free_recipe_blocks(invfs_volume *v,
+                             const uint8_t recipe_addr[INVFS_V3_RECIPE_ADDR_LEN],
+                             uint64_t keep_pba)
+{
+    static const uint8_t zero_addr[INVFS_V3_RECIPE_ADDR_LEN] = {0};
+    uint8_t *blob = NULL;
+    size_t blen = 0;
+    invfs_ast_hdr ah;
+    const invfs_ast_block_entry *ents = NULL;
+    size_t n_ents = 0;
+    size_t i, k;
+
+    if (!v || !recipe_addr)
+        return -1;
+    if (memcmp(recipe_addr, zero_addr, sizeof zero_addr) == 0)
+        return 0;
+    if (vol_v3_recipe_load(v, recipe_addr, &blob, &blen) != 0 || !blob)
+        return -1;
+    if (vol_ast_recipe_parse(blob, blen, &ah, &ents, &n_ents) == 0 && ents) {
+        for (i = 0; i < n_ents; i++) {
+            uint64_t pba = ents[i].pba;
+            int dup = 0;
+            if (!pba || pba == keep_pba)
+                continue;
+            for (k = 0; k < i; k++) {
+                if (ents[k].pba == pba) {
+                    dup = 1;
+                    break;
+                }
+            }
+            if (!dup) {
+                uint64_t plen = 0;
+                if (seg_extent_checked(v, pba, &plen) == 0 && plen > 0)
+                    vol_free_blocks(v, pba, plen);
+            }
+        }
+    }
+    free(blob);
+    return 0;
+}
+
 
 
 /* ---- AST children: serialize / deserialize / container creation ---- */

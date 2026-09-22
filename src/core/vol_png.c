@@ -873,6 +873,7 @@ uint64_t vol_v3_publish_blob_inode(invfs_volume *v, uint64_t inode_id,
     invfs_ast_block_entry e;
     invfs_v3_inode in;
     uint8_t addr[INVFS_V3_RECIPE_ADDR_LEN];
+    uint8_t old_addr[INVFS_V3_RECIPE_ADDR_LEN];
     uint8_t *rblob = NULL;
     size_t rlen = 0;
 
@@ -892,6 +893,7 @@ uint64_t vol_v3_publish_blob_inode(invfs_volume *v, uint64_t inode_id,
 
     if (vol_v3_inode_get(v, inode_id, &in) != 1)
         return 0;
+    memcpy(old_addr, in.recipe_addr, sizeof old_addr);
 
     if (blob_len == 0) {
         memset(addr, 0, sizeof addr);
@@ -942,6 +944,9 @@ uint64_t vol_v3_publish_blob_inode(invfs_volume *v, uint64_t inode_id,
     memcpy(in.recipe_addr, addr, INVFS_V3_RECIPE_ADDR_LEN);
     if (vol_v3_inode_delta_put(v, inode_id, &in) != 0)
         return 0;
+
+    /* WP-N1: targeted free of old RAW/shadow data blocks superseded by the new blob */
+    vol_v3_free_recipe_blocks(v, old_addr, pba);
 
     return inode_id;
 }

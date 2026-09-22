@@ -2,7 +2,7 @@
 %global debug_package %{nil}
 
 Name:           invfs
-Version:        0.4.0
+Version:        0.5.0
 Release:        1%{?dist}
 Summary:        Semantic content-addressed filesystem with a bit-exactness invariant
 
@@ -77,6 +77,14 @@ install -Dm644 README-RU.md %{buildroot}%{_docdir}/%{name}/README-RU.md
 /usr/lib/dracut/modules.d/90invfs/
 
 %changelog
+* Tue Sep 22 2026 InvariantFS Developers <invfs@localhost> - 0.5.0-1
+- Meta-v3 default cutover: B+-tree base + append-only delta architecture
+- Inode-id-keyed sweep publication and RAW block reclamation
+- Native symlinks and special files (FIFO/SOCK/CHR/BLK with rdev)
+- Thread-safe pread/pwrite concurrency model
+- Hierarchical directory walk with full path resolution
+- Automated CI testing matrix
+
 * Mon Sep 14 2026 InvariantFS Developers <invfs@localhost> - 0.2.1-1
 - WP28: embed INO2 metadata in vol_create_file for 2x import speedup
 - WP29: deferred flush with watermarks in vol_pre_record (115x import speedup)

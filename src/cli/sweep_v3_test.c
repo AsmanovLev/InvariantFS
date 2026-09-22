@@ -116,11 +116,13 @@ int main(int argc, char **argv)
     vol_mark_pending(v, id_other);
     ok(vol_pending_count(v) == 3, "pending count is 3");
 
+    uint64_t raw_free_before = v->raw_free;
     /* 7. Drain pending queue via vol_sweep_pending */
     {
         int swept = vol_sweep_pending(v);
         ok(swept == 3, "vol_sweep_pending processed 3 files");
     }
+    ok(v->raw_free > raw_free_before, "RAW zone reclaimed freed blocks after sweep");
 
     /* 8. Assert all files are now in Shadow (BINARY) zone */
     ok(vol_inode_first_zone(v, id_nested) == INVFS_ZONE_BINARY,
@@ -231,6 +233,11 @@ int main(int argc, char **argv)
            memcmp(read_back, buf_nested, sizeof buf_nested) == 0,
            "durable remount: dir1/sub2/photo.jpg bit-exact");
         free(read_back);
+
+        /* 14. Unlink test: verify data blocks are reclaimed */
+        uint64_t free_before_unlink = v->free_blocks;
+        ok(vol_v3_unlink(v, "photo.jpg") == 0, "unlink photo.jpg");
+        ok(v->free_blocks > free_before_unlink, "free blocks increased after unlink");
 
         vol_close(v);
     }

@@ -21,6 +21,9 @@ jobs:
       - name: build
         run: make -j"$(nproc)"
 
+      - name: repo hygiene
+        run: bash tools/check-repo-hygiene.sh
+
       - name: unit tests
         run: make test
 
@@ -35,7 +38,8 @@ jobs:
           FAIL=0
           for s in $SUITES; do
             if [ ! -f "tools/$s.sh" ]; then
-              echo "warning: tools/$s.sh not found, skipping"
+              echo "error: tools/$s.sh not found!"
+              FAIL=1
               continue
             fi
             # relocate dev/shm to disk to keep CI tmpfs bounded

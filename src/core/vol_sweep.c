@@ -898,8 +898,8 @@ int vol_jxl_retry(invfs_volume *v, uint64_t inode_id, const char *name)
  * drain with the same invariants: read the whole file (M8 recipe read)
  * -> ZSTD encode -> decode round-trip guard (publish only bit-exact)
  * -> publish via vol_create_blob_file's v3 branch (content-addressed
- * recipe blob + in-place row supersede; the dropped recipe/segments go
- * unreachable and the WP-M15 reachability reclaim reclaims them).
+ * recipe blob + in-place row supersede; the superseded RAW data segments
+ * are reclaimed immediately via targeted free vol_v3_free_recipe_blocks).
  * Class stamps (v3 xattrs, WP-M7) keep the WP10 policy: drained files
  * skip, uncompressible files are generation-gated, ENOSPC defers.
  * Deliberate M18-remainder gaps (v2 owner-record machinery, not yet
@@ -1626,7 +1626,7 @@ int vol_sweep_pending(invfs_volume *v)
         vol_unmark_pending(v, id);
         if (found) {
             int rc = vol_sweep_one(v, id, nm);
-            if (rc != 0) done++;
+            if (rc > 0) done++;
         }
         n = v->n_pending;   /* re-read (list may shrink) */
     }

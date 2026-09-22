@@ -87,6 +87,15 @@ static int deep_cb(void *ctx_, uint64_t rec_pos,
     return 0;
 }
 
+static int cmp_deep_ent_id(const void *a, const void *b)
+{
+    const deep_ent *ea = (const deep_ent *)a;
+    const deep_ent *eb = (const deep_ent *)b;
+    if (ea->id < eb->id) return -1;
+    if (ea->id > eb->id) return 1;
+    return 0;
+}
+
 /* WP-M21b: v3 collector for the deep pass -- same deep_ent array, fed by
  * vol_v3_walk in a single O(n) hierarchical walk instead of reverse-resolving
  * leaves. Sizes come straight from the inode row. */
@@ -101,12 +110,6 @@ static int deep_v3_walk_cb(void *ctx_, const char *path, uint64_t inode_id,
         return 0;                       /* directories don't have file content */
     if ((unsigned char)path[0] == 0x01)
         return 0;                       /* internal owners: not user files */
-
-    /* Quick check for duplicate inode if hardlinks exist */
-    for (k = 0; k < c->nents; k++) {
-        if (c->ents[k].id == inode_id)
-            return 0;
-    }
 
     if (c->nents == c->capents) {
         size_t nc = c->capents ? c->capents * 2 : 256;
@@ -348,10 +351,23 @@ int main(int argc, char **argv)
         memset(&dc, 0, sizeof dc);
         dc.vol = vol;
         /* WP-M21b: v3 live set walked hierarchically in O(n) */
-        if (vol_sb(vol)->vol_flags & VOLF_V3)
+        if (vol_sb(vol)->vol_flags & VOLF_V3) {
             (void)vol_v3_walk(vol, deep_v3_walk_cb, &dc);
-        else
+            if (dc.nents > 1) {
+                qsort(dc.ents, dc.nents, sizeof *dc.ents, cmp_deep_ent_id);
+                size_t w = 0;
+                for (size_t r = 0; r < dc.nents; r++) {
+                    if (w == 0 || dc.ents[r].id != dc.ents[w - 1].id) {
+                        if (w != r)
+                            dc.ents[w] = dc.ents[r];
+                        w++;
+                    }
+                }
+                dc.nents = w;
+            }
+        } else {
             vol_records_walk(vol, deep_cb, &dc);
+        }
         ents = dc.ents; nents = dc.nents;
         for (size_t k = 0; k < nents; k++) {
             uint64_t ino = ents[k].id, fsz = ents[k].fsz;

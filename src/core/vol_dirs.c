@@ -320,6 +320,8 @@ uint64_t vol_v3_create_node(invfs_volume *v, const char *name,
         id = existing;
         if (vol_v3_inode_get(v, id, &in) != 1)
             memset(&in, 0, sizeof in);
+        else if (in.type == INVFS_ITYP_REG && in.size > 0)
+            vol_v3_free_recipe_blocks(v, in.recipe_addr, 0);
     } else {
         id = vol_v3_inode_alloc(v);
         if (!id)
@@ -345,15 +347,12 @@ uint64_t vol_v3_create_node(invfs_volume *v, const char *name,
         in.nlink = 1;
     if (in.type == INVFS_ITYP_LNK && meta && meta->target[0]) {
         size_t tl = strlen(meta->target);
-        if (tl < INVFS_META_TARGET_MAX &&
-            vol_v3_recipe_store(v, (const uint8_t *)meta->target, tl, in.recipe_addr) == 0) {
-            in.size = tl;
-            memset(&in.recipe, 0, sizeof in.recipe);
-        } else {
-            in.size = 0;
-            memset(&in.recipe, 0, sizeof in.recipe);
-            memset(in.recipe_addr, 0, sizeof in.recipe_addr);
-        }
+        if (tl >= INVFS_META_TARGET_MAX)
+            return 0;
+        if (vol_v3_recipe_store(v, (const uint8_t *)meta->target, tl, in.recipe_addr) != 0)
+            return 0;
+        in.size = tl;
+        memset(&in.recipe, 0, sizeof in.recipe);
     } else {
         in.size = 0;                          /* WP-M8: content cleared */
         memset(&in.recipe, 0, sizeof in.recipe);
@@ -453,13 +452,13 @@ uint64_t vol_v3_set_meta(invfs_volume *v, const char *name,
     in.rdev = meta->rdev;
     if (in.type == INVFS_ITYP_LNK && meta->target[0]) {
         size_t tl = strlen(meta->target);
-        if (tl < INVFS_META_TARGET_MAX) {
-            uint8_t addr[INVFS_V3_RECIPE_ADDR_LEN];
-            if (vol_v3_recipe_store(v, (const uint8_t *)meta->target, tl, addr) == 0) {
-                memcpy(in.recipe_addr, addr, INVFS_V3_RECIPE_ADDR_LEN);
-                in.size = tl;
-            }
-        }
+        if (tl >= INVFS_META_TARGET_MAX)
+            return 0;
+        uint8_t addr[INVFS_V3_RECIPE_ADDR_LEN];
+        if (vol_v3_recipe_store(v, (const uint8_t *)meta->target, tl, addr) != 0)
+            return 0;
+        memcpy(in.recipe_addr, addr, INVFS_V3_RECIPE_ADDR_LEN);
+        in.size = tl;
     }
     if (vol_v3_inode_delta_put(v, id, &in) != 0)
         return 0;
@@ -575,6 +574,9 @@ int vol_v3_unlink(invfs_volume *v, const char *name)
     if (in.nlink <= 1) {
         if (vol_v3_inode_delta_delete(v, id) != 0)
             return -1;
+        /* WP-N1: targeted free of unlinked file data blocks */
+        if (in.type == INVFS_ITYP_REG)
+            vol_v3_free_recipe_blocks(v, in.recipe_addr, 0);
     } else {
         in.nlink--;
         if (vol_v3_inode_delta_put(v, id, &in) != 0)
@@ -643,6 +645,10 @@ int vol_v3_rename(invfs_volume *v, const char *from, const char *to)
                 return -1;
         } else if (vol_v3_inode_delta_delete(v, t_id) != 0) {
             return -1;
+        } else {
+            /* WP-N1: targeted free of overwritten destination data blocks */
+            if (t_in.type == INVFS_ITYP_REG)
+                vol_v3_free_recipe_blocks(v, t_in.recipe_addr, 0);
         }
     }
     /* insert the new dirent BEFORE deleting the old (add-before-remove,
@@ -708,10 +714,16 @@ static int v3_walk_dir(invfs_volume *v, const char *dir,
         uint64_t ino;
         invfs_v3_inode in;
 
+        int pr;
         if (dir[0])
-            snprintf(path, sizeof path, "%s/%s", dir, ents[i].name);
+            pr = snprintf(path, sizeof path, "%s/%s", dir, ents[i].name);
         else
-            snprintf(path, sizeof path, "%s", ents[i].name);
+            pr = snprintf(path, sizeof path, "%s", ents[i].name);
+        if (pr < 0 || (size_t)pr >= sizeof path) {
+            fprintf(stderr, "v3_walk_dir: path exceeds buffer capacity (%s/%s)\n",
+                    dir, ents[i].name);
+            continue;
+        }
         if (vol_v3_path_lookup(v, path, &ino) != 1)
             continue;
         if (vol_v3_inode_get(v, ino, &in) != 1)
@@ -720,8 +732,13 @@ static int v3_walk_dir(invfs_volume *v, const char *dir,
             free(ents);
             return 1;
         }
-        if (in.type == INVFS_ITYP_DIR)
-            v3_walk_dir(v, path, cb, ctx, depth + 1);
+        if (in.type == INVFS_ITYP_DIR) {
+            int sub_rc = v3_walk_dir(v, path, cb, ctx, depth + 1);
+            if (sub_rc != 0) {
+                free(ents);
+                return sub_rc;
+            }
+        }
     }
     free(ents);
     return 0;

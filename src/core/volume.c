@@ -1895,7 +1895,7 @@ free(rb);
                 v->needs_recovery = 1;
         } else {
             fprintf(stderr,
-                    "vol_open: %s was not closed cleanly (state=0x%02X%s); "
+                    "vol_open: %s was not closed cleanly (state=0x%02X%s%s); "
                     "read-only until recovery. Run `invf-fsck -f %s`.\n",
                     real, (unsigned)v->sb.state,
                     v->scan_anomalies ? ", damaged records" : "",
@@ -3465,8 +3465,7 @@ int seg_extent(invfs_volume *v, uint64_t pba, uint32_t *csize_out,
     uint32_t csize;
     uint64_t plen;
     if (!pba || pba >= v->sb.total_blocks) return -1;
-    if (io_seek(&v->io, pba * (uint64_t)INVFS_BLOCK_SIZE) != 0 ||
-        io_read(&v->io, hdr, 8) != 0)
+    if (io_pread(&v->io, pba * (uint64_t)INVFS_BLOCK_SIZE, hdr, 8) != 0)
         return -1;
     memcpy(&csize, hdr, 4);
     if (!csize) return -1;

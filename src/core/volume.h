@@ -319,12 +319,16 @@ int vol_v3_walk(invfs_volume *v, vol_v3_walk_cb cb, void *ctx);
  * per inode, not once per hardlink name. The callback receives the name
  * (may be NULL if not found via dirent). Returns 0 complete, -1 error,
  * callback non-zero propagated. */
+/* Enumerate live inodes with their resolved path. On v3, `name` is the
+ * full canonical path from root ("dir/sub/file.txt"), or NULL if the inode
+ * has no dirent reference. Returns 0 complete, -1 error, or non-zero callback
+ * return code propagated. */
 int vol_v3_iter_live_inodes(invfs_volume *v,
     int (*cb)(invfs_volume *v, uint64_t inode_id, const char *name, void *ctx),
     void *ctx);
-/* Reverse dirent lookup: find one name mapping to `inode_id`. For
- * nlink > 1 any name suffices; for nlink == 1 it is unique. Returns
- * 1 found (*name filled, *parent_out set), 0 absent, -1 error. */
+/* Reverse lookup: find the canonical full path ("dir/sub/file.txt") mapping
+ * to `inode_id`. Returns 1 found (*name filled with full path, *parent_out set),
+ * 0 absent, -1 error. */
 int vol_v3_name_of(invfs_volume *v, uint64_t inode_id,
                    char *name, size_t name_cap,
                    uint64_t *parent_out);

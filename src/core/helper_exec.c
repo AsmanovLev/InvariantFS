@@ -236,7 +236,8 @@ static void helper_write_file(const char *path, const char *val)
 {
     int fd = open(path, O_WRONLY);
     if (fd < 0) return;
-    (void)write(fd, val, strlen(val));
+    ssize_t w = write(fd, val, strlen(val));
+    (void)w;
     close(fd);
 }
 #endif
@@ -284,7 +285,8 @@ static void helper_chown_tree(const char *path, uid_t uid, gid_t gid,
     struct dirent *e;
 
     if (depth > 8 || !helper_scratch_path(path)) return;
-    (void)lchown(path, uid, gid);
+    int cr = lchown(path, uid, gid);
+    (void)cr;
     d = opendir(path);
     if (!d) return;
     while ((e = readdir(d)) != NULL) {
@@ -296,7 +298,8 @@ static void helper_chown_tree(const char *path, uid_t uid, gid_t gid,
         n = snprintf(child, sizeof child, "%s/%s", path, e->d_name);
         if (n <= 0 || (size_t)n >= sizeof child) continue;
         if (lstat(child, &st) != 0) continue;
-        (void)lchown(child, uid, gid);
+        cr = lchown(child, uid, gid);
+        (void)cr;
         if (S_ISDIR(st.st_mode) && !S_ISLNK(st.st_mode))
             helper_chown_tree(child, uid, gid, depth + 1);
     }
@@ -307,7 +310,10 @@ static int helper_drop_privs(const char *work_dir, const char *ro_path,
                              uid_t uid, gid_t gid)
 {
     if (work_dir) helper_chown_tree(work_dir, uid, gid, 0);
-    if (helper_scratch_path(ro_path)) (void)lchown(ro_path, uid, gid);
+    if (helper_scratch_path(ro_path)) {
+        int cr = lchown(ro_path, uid, gid);
+        (void)cr;
+    }
 
     if (setgroups(0, NULL) != 0) return -1;
     if (setgid(gid) != 0) return -1;

@@ -1,3 +1,14 @@
+invfs (0.5.0-1) unstable; urgency=medium
+
+  * Meta-v3 cutover: B+-tree base + append-only delta metadata architecture.
+  * Inode-id-keyed sweep publication and RAW data-block reclamation.
+  * Native symlinks and special files (FIFO/SOCK/CHR/BLK with rdev).
+  * Lock-free base reads with position-explicit pread/pwrite concurrency.
+  * Hierarchical directory walk with full path resolution.
+  * Full bit-exactness verification and automated CI test matrix.
+
+ -- InvariantFS Developers <invfs@localhost>  Tue, 22 Sep 2026 00:00:00 +0000
+
 invfs (0.4.0-1) unstable; urgency=medium
 
   * WP58a: v3 inode record — variable-length names (36-byte prefix + FAM).
