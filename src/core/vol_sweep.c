@@ -947,12 +947,12 @@ static int vol_sweep_one_v3(invfs_volume *v, uint64_t inode_id,
     if (vol_v3_inode_get(v, inode_id, &in) != 1)
         return -1;
     if (in.size == 0)
-        return 1;               /* nothing to drain */
+        return 0;               /* nothing to drain: skip */
     if (in.type != 0 && in.type != INVFS_ITYP_REG)
-        return 1;               /* only regular files are drained */
+        return 0;               /* only regular files are drained: skip */
     fz = vol_inode_first_zone(v, inode_id);
     if (fz != INVFS_ZONE_RAW)
-        return 1;               /* already blob-stored; unreadable: leave */
+        return 0;               /* already blob-stored; unreadable: skip */
     {
         uint64_t max_sweep_size = 256ULL * 1024ULL * 1024ULL; /* 256 MiB default */
         const char *env_max = getenv("INVFS_SWEEP_MAX_FILE");
@@ -960,11 +960,11 @@ static int vol_sweep_one_v3(invfs_volume *v, uint64_t inode_id,
             unsigned long long sz = strtoull(env_max, NULL, 10);
             if (sz > 0)
                 max_sweep_size = sz;
-        }
-        if (v->arc_budget && v->arc_budget < max_sweep_size)
+        } else if (v->arc_budget && v->arc_budget < max_sweep_size) {
             max_sweep_size = v->arc_budget;
+        }
         if (in.size > max_sweep_size)
-            return 1;           /* whole-file buffering must fit memory safety cap */
+            return 0;           /* whole-file buffering exceeds memory safety cap: skip */
     }
 
     zc = invfs_codec_by_algo(INVFS_ALGO_ZSTD);
@@ -983,7 +983,7 @@ static int vol_sweep_one_v3(invfs_volume *v, uint64_t inode_id,
         free(full);
         vol_stamp_class(v, inode_id, INVFS_CLASS_DEFER_ENOSPC,
                         INVFS_ALGO_ZSTD, invfs_registry_generation());
-        return 1;
+        return 0;
     }
 
     int zlevel = invfs_profile_zstd_level(v->profile);
@@ -997,7 +997,7 @@ static int vol_sweep_one_v3(invfs_volume *v, uint64_t inode_id,
         free(full);
         vol_stamp_class(v, inode_id, INVFS_CLASS_UNCOMPRESSIBLE, 0,
                         invfs_registry_generation());
-        return 1;
+        return 0;
     }
     enc_len = zrc;
     back = (uint8_t *)malloc(full_len ? full_len : 1);
