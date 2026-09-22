@@ -101,9 +101,7 @@ static int reclaim_delta_read_hdr(invfs_volume *v, uint64_t pba,
 
     if (pba == 0 || pba >= v->sb.total_blocks)
         return -1;
-    if (io_seek(&v->io, pba * (uint64_t)INVFS_BLOCK_SIZE) != 0)
-        return -1;
-    if (io_read(&v->io, raw, sizeof raw) != 0)
+    if (io_pread(&v->io, pba * (uint64_t)INVFS_BLOCK_SIZE, raw, sizeof raw) != 0)
         return -1;
     if (memcmp(raw, INVFS_DELTA_SEG_MAGIC, 4) != 0)
         return -1;

@@ -44,8 +44,7 @@ static int seg_read_once(invfs_volume *v, uint64_t pba, uint64_t plen,
     uint8_t *blob = NULL;
     int bad = 0;
 
-    if (io_seek(&v->io, pba * INVFS_BLOCK_SIZE) != 0 ||
-        io_read(&v->io, hdrb, 8) != 0)
+    if (io_pread(&v->io, pba * INVFS_BLOCK_SIZE, hdrb, 8) != 0)
         { *bad_out = 0; return -1; }
     memcpy(&csize, hdrb, 4);
     if (csize < min_csize ||
@@ -58,8 +57,7 @@ static int seg_read_once(invfs_volume *v, uint64_t pba, uint64_t plen,
         blob = (uint8_t *)malloc(csize ? (size_t)csize : 1);
         if (!blob) return -1;
         if (csize &&
-            (io_seek(&v->io, pba * INVFS_BLOCK_SIZE + 8) != 0 ||
-             io_read(&v->io, blob, csize) != 0)) {
+            io_pread(&v->io, pba * INVFS_BLOCK_SIZE + 8, blob, csize) != 0) {
             bad = 1;
         } else if (crc_hdr != 0 && invfs_crc32c(blob, csize) != crc_hdr) {
             bad = 1;        /* deep protection: payload CRC32C mismatch */
@@ -1014,8 +1012,7 @@ int vol_read_inode(invfs_volume *v, uint64_t inode_id, unsigned depth,
         uint32_t crc_stored, crc_calc;
         uint8_t *rec;
 
-        if (io_seek(&v->io, pos) != 0 ||
-            io_read(&v->io, &rec_h, sizeof(rec_h)) != 0)
+        if (io_pread(&v->io, pos, &rec_h, sizeof(rec_h)) != 0)
             return -1;
         if (rec_h.magic != INODE_REC_MAGIC && rec_h.magic != TOMBSTONE_MAGIC)
             return -1;
@@ -1031,9 +1028,8 @@ int vol_read_inode(invfs_volume *v, uint64_t inode_id, unsigned depth,
         }
         rec = (uint8_t *)malloc(rec_h.rec_len);
         if (!rec) return -1;
-        if (io_seek(&v->io, pos) != 0 ||
-            io_read(&v->io, rec, rec_h.rec_len) != 0 ||
-            io_read(&v->io, &crc_stored, 4) != 0) {
+        if (io_pread(&v->io, pos, rec, rec_h.rec_len) != 0 ||
+            io_pread(&v->io, pos + rec_h.rec_len, &crc_stored, 4) != 0) {
             free(rec);
             return -1;
         }

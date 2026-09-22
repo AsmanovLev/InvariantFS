@@ -88,6 +88,9 @@ int main(int argc, char **argv)
         return 1;
     }
 
+    /* Ensure parent directories exist */
+    vol_ensure_path(vol, name);
+
     /* Copying onto a name that already exists is an overwrite, not a second
        file. Appending a bare INOD record reads back correctly -- the scans keep
        the newest version per name -- but the old inode's blocks and any sweep

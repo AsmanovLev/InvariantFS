@@ -3145,8 +3145,8 @@ int vol_v3_name_of(invfs_volume *v, uint64_t inode_id,
 int vol_v3_path_of(invfs_volume *v, uint64_t inode_id, char *buf,
                    size_t cap)
 {
-    char parts[32][INVFS_MAX_NAME + 1];
-    uint64_t chain[32];
+    char parts[64][INVFS_MAX_NAME + 1];
+    uint64_t chain[64];
     uint64_t cur = inode_id;
     int n = 0, i;
     size_t total = 0;
@@ -3158,7 +3158,7 @@ int vol_v3_path_of(invfs_volume *v, uint64_t inode_id, char *buf,
         return 0;                       /* root has no name */
     while (cur != INVFS_V3_ROOT_INO && cur != 0) {
         uint64_t parent = 0;
-        if (n >= 32)
+        if (n >= 64)
             return -1;                  /* too deep: refuse, never loop */
         if (vol_v3_name_of(v, cur, parts[n], sizeof parts[n],
                            &parent) != 1)

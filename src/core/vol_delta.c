@@ -228,9 +228,7 @@ int delta_read_hdr(invfs_volume *v, uint64_t pba,
     uint8_t raw[INVFS_DELTA_SEG_HDR_LEN];
     if (pba == 0 || pba >= v->sb.total_blocks)
         return -1;
-    if (io_seek(&v->io, pba * (uint64_t)INVFS_BLOCK_SIZE) != 0)
-        return -1;
-    if (io_read(&v->io, raw, sizeof raw) != 0)
+    if (io_pread(&v->io, pba * (uint64_t)INVFS_BLOCK_SIZE, raw, sizeof raw) != 0)
         return -1;
     return delta_hdr_decode(raw, sizeof raw, out);
 }
@@ -451,8 +449,7 @@ static uint64_t delta_new_segment(invfs_volume *v, uint64_t prev)
         return 0;
     }
     delta_hdr_encode(seg, ++v->delta_seg_gen, prev);
-    if (io_seek(&v->io, pba * (uint64_t)INVFS_BLOCK_SIZE) != 0 ||
-        io_write(&v->io, seg, (size_t)INVFS_DELTA_SEG_BYTES) != 0) {
+    if (io_pwrite(&v->io, pba * (uint64_t)INVFS_BLOCK_SIZE, seg, (size_t)INVFS_DELTA_SEG_BYTES) != 0) {
         free(seg);
         vol_free_blocks(v, pba, INVFS_DELTA_SEG_BLOCKS);
         return 0;
@@ -548,8 +545,7 @@ int vol_delta_append(invfs_volume *v, const uint8_t *key, uint16_t klen,
         memcpy(rec + INVFS_DELTA_REC_HDR_LEN + klen, val, vlen);
 
     abs = v->delta_seg_pba * (uint64_t)INVFS_BLOCK_SIZE + v->delta_bump;
-    if (io_seek(&v->io, abs) != 0 ||
-        io_write(&v->io, rec, rl) != 0) {
+    if (io_pwrite(&v->io, abs, rec, rl) != 0) {
         free(rec);
         pthread_mutex_unlock(&g_delta_lock);
         return -1;
@@ -793,8 +789,7 @@ static int delta_replay_segment(invfs_volume *v, uint64_t pba,
     buf = (uint8_t *)malloc((size_t)INVFS_DELTA_SEG_BYTES);
     if (!buf)
         return -1;
-    if (io_seek(&v->io, pba * (uint64_t)INVFS_BLOCK_SIZE) != 0 ||
-        io_read(&v->io, buf, (size_t)INVFS_DELTA_SEG_BYTES) != 0) {
+    if (io_pread(&v->io, pba * (uint64_t)INVFS_BLOCK_SIZE, buf, (size_t)INVFS_DELTA_SEG_BYTES) != 0) {
         free(buf);
         return -1;
     }
@@ -1046,8 +1041,7 @@ int vol_delta_truncate(invfs_volume *v, uint64_t delta_end)
             if (!buf)
                 goto out;
 
-            if (io_seek(&v->io, seg_pba * (uint64_t)INVFS_BLOCK_SIZE) != 0 ||
-                io_read(&v->io, buf, (size_t)INVFS_DELTA_SEG_BYTES) != 0) {
+            if (io_pread(&v->io, seg_pba * (uint64_t)INVFS_BLOCK_SIZE, buf, (size_t)INVFS_DELTA_SEG_BYTES) != 0) {
                 free(buf);
                 goto out;
             }
@@ -1056,8 +1050,7 @@ int vol_delta_truncate(invfs_volume *v, uint64_t delta_end)
 
             delta_hdr_encode(buf, h.seg_seq, old_prev_pba);
 
-            if (io_seek(&v->io, seg_pba * (uint64_t)INVFS_BLOCK_SIZE) != 0 ||
-                io_write(&v->io, buf, (size_t)INVFS_DELTA_SEG_BYTES) != 0) {
+            if (io_pwrite(&v->io, seg_pba * (uint64_t)INVFS_BLOCK_SIZE, buf, (size_t)INVFS_DELTA_SEG_BYTES) != 0) {
                 free(buf);
                 goto out;
             }

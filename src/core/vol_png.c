@@ -809,9 +809,8 @@ uint64_t vol_create_blob_file(invfs_volume *v, const char *name,
         hdr4[7] = (uint8_t)((bcrc >> 24) & 0xFF);
     }
 
-    if (io_seek(&v->io, pba * INVFS_BLOCK_SIZE) != 0 ||
-        io_write(&v->io, hdr4, 8) != 0 ||
-        io_write(&v->io, blob, blob_len) != 0) {
+    if (io_pwrite(&v->io, pba * INVFS_BLOCK_SIZE, hdr4, 8) != 0 ||
+        io_pwrite(&v->io, pba * INVFS_BLOCK_SIZE + 8, blob, blob_len) != 0) {
         vol_free_blocks(v, pba, phys_blocks);
         return 0;
     }

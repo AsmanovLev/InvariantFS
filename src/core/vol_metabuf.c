@@ -296,9 +296,7 @@ int mbuf_rt30_load(invfs_volume *v)
         return -1;
     v->rt30_present = 0;
     memset(&v->rt30, 0, sizeof v->rt30);
-    if (io_seek(&v->io, INVFS_RT30_OFF) != 0)
-        return -1;
-    if (io_read(&v->io, &rt, sizeof rt) != 0)
+    if (io_pread(&v->io, INVFS_RT30_OFF, &rt, sizeof rt) != 0)
         return -1;
     if (memcmp(rt.magic, "RT30", 4) != 0 ||
         rt.version != INVFS_RT30_VERSION ||
@@ -314,9 +312,7 @@ int mbuf_rt30_store(invfs_volume *v)
     if (!v)
         return -1;
     v->rt30.crc32c = invfs_crc32c(&v->rt30, offsetof(invfs_rt30, crc32c));
-    if (io_seek(&v->io, INVFS_RT30_OFF) != 0)
-        return -1;
-    if (io_write(&v->io, &v->rt30, sizeof v->rt30) != 0)
+    if (io_pwrite(&v->io, INVFS_RT30_OFF, &v->rt30, sizeof v->rt30) != 0)
         return -1;
     return 0;
 }

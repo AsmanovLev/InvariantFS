@@ -429,13 +429,11 @@ static int sweep_collect_cb(void *ctx_, uint64_t rec_pos,
     return 0;
 }
 
-/* WP-M21b: v3 live-set collector, fed by vol_v3_iter_live_inodes (the
- * M18 iterator: base tree + delta overlay, deletes skipped, nlink-shared
- * rows visited once). A v3 volume has no record stream to walk, so the
+/* WP-M21b: v3 live-set collector, fed by vol_v3_walk in a single O(n)
+ * hierarchical pass. A v3 volume has no record stream to walk, so the
  * WP42 walker above finds nothing and the sweep silently no-ops; this
- * feeds the same arrays instead. Sizes come from the inode row via
- * vol_stat; record positions stay 0 (nothing consumes them on v3 -- the
- * fold replaces the linear compaction that rec_bytes triggered). */
+ * feeds the same arrays instead. Sizes come directly from the inode row;
+ * record positions stay 0 (the fold replaces linear compaction). */
 typedef struct {
     invfs_volume *vol;
     char (**names)[256];
@@ -446,34 +444,25 @@ typedef struct {
     int oom;
 } v3_collect_ctx;
 
-static int v3_collect_cb(invfs_volume *v, uint64_t inode_id,
-                         const char *name, void *ctx_)
+static int v3_sweep_walk_cb(void *ctx_, const char *path, uint64_t inode_id,
+                            uint32_t type, uint64_t size, int64_t mtime)
 {
     v3_collect_ctx *c = (v3_collect_ctx *)ctx_;
     char (*names)[256] = *c->names;
     uint64_t *inodes = *c->inodes;
     uint64_t *sizes = *c->sizes;
     uint64_t *poss = *c->poss;
-    char full[300 * 4];         /* composed "dir/.../leaf" path */
-    uint64_t size = 0;
     int i;
-    (void)v;
-    /* owner/internal rows carry \x01-prefixed names and are not sweep
-     * targets; a NULL name (dirent lost) cannot be swept either */
-    if (!name || !name[0] || (unsigned char)name[0] == 0x01)
-        return 0;
-    /* the iterator hands out the LEAF name; every name-keyed consumer
-     * here (vol_stat, the dedupe table, vol_sweep_one) wants the full
-     * relative path, same shape as v2 record names */
-    if (vol_v3_path_of(c->vol, inode_id, full, sizeof full) != 1)
-        return 0;                       /* unlinked/unresolvable: skip */
-    if (strlen(full) > 255)
-        return 0;                       /* collector slots hold 256 B */
-    if (vol_stat(c->vol, full, &size) != 0)
-        return 0;                       /* unresolved (raced away): skip */
-    name = full;
+    (void)mtime;
 
-    i = sw_find(*c->tab, *c->tmask, names, name);
+    if (type == INVFS_ITYP_DIR)
+        return 0;                       /* directories don't have file content */
+    if (!path || !path[0] || (unsigned char)path[0] == 0x01)
+        return 0;
+    if (strlen(path) > 255)
+        return 0;                       /* collector slots hold 256 B */
+
+    i = sw_find(*c->tab, *c->tmask, names, path);
     if (i >= 0) {
         inodes[i] = inode_id; sizes[i] = size; poss[i] = 0;
         return 0;
@@ -497,7 +486,7 @@ static int v3_collect_cb(invfs_volume *v, uint64_t inode_id,
         *c->cap = ncap;
         if (!nn || !ni || !ns || !np) { c->oom = 1; return 1; }
     }
-    strncpy(names[*c->count], name, 256);
+    strncpy(names[*c->count], path, 256);
     names[*c->count][255] = 0;
     inodes[*c->count] = inode_id;
     sizes[*c->count] = size;
@@ -886,8 +875,8 @@ int main(int argc, char **argv)
             vc.sizes = &sizes; vc.poss = &poss;
             vc.tab = &tab; vc.tmask = &tmask; vc.tcount = &tcount;
             vc.count = &count; vc.cap = &cap;
-            if (vol_v3_iter_live_inodes(vol, v3_collect_cb, &vc) < 0)
-                fprintf(stderr, "warning: v3 live-set iteration did not "
+            if (vol_v3_walk(vol, v3_sweep_walk_cb, &vc) < 0)
+                fprintf(stderr, "warning: v3 directory walk did not "
                                 "complete\n");
             if (vc.oom) {
                 fprintf(stderr, "out of memory\n");

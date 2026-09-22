@@ -27,9 +27,7 @@ int spt0_load(invfs_volume *v)
     memset(&v->spt0, 0, sizeof v->spt0);
     memset(&v->pinned_root, 0, sizeof v->pinned_root);
 
-    if (io_seek(&v->io, INVFS_SPT0_OFF) != 0)
-        return -1;
-    if (io_read(&v->io, &s, sizeof s) != 0)
+    if (io_pread(&v->io, INVFS_SPT0_OFF, &s, sizeof s) != 0)
         return -1;
     if (memcmp(s.magic, "SPT0", 4) != 0 ||
         s.version != INVFS_SPT0_VERSION ||
@@ -53,9 +51,7 @@ int spt0_store(invfs_volume *v)
     s = v->spt0;
     s.crc32c = 0;
     s.crc32c = spt0_crc(&s);
-    if (io_seek(&v->io, INVFS_SPT0_OFF) != 0)
-        return -1;
-    if (io_write(&v->io, &s, sizeof s) != 0)
+    if (io_pwrite(&v->io, INVFS_SPT0_OFF, &s, sizeof s) != 0)
         return -1;
     return 0;
 }

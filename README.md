@@ -24,21 +24,22 @@ contract. Not a replacement for ext4/XFS on general workloads.
 * **Per-file recipe (AST)** — a tree mapping original byte ranges to stored
   segments, so partial reads touch only what is needed (reading a FLAC's tags
   never decompresses the audio).
-* **Per-content codecs** — text and binary are classified and clustered, then
-  batched across files (PPMd text batches, ZSTD+BCJ binary batches). In-tree:
-  LZ4, ZSTD, PPMd, BLAKE3, FLAC, BCJ-x86, miniz, Reed–Solomon.
+* **Per-content codecs** — writes land LZ4-compressed (or verbatim) in RAW,
+  then offline sweep re-encodes into ZSTD Shadow where bit-exactness is proven.
+  In-tree codecs: LZ4, ZSTD, BLAKE3, FLAC, BCJ-x86, miniz, Reed–Solomon.
 * **Verified transcode families** — FLAC (`FLACR`), TAR (`TARR`), gzip (`GZR`),
   PNG (`PNGR`), PE/EXE (`EXER`).
 * **Containers kept original** — ZIP/TAR/7z/VDI/qcow2/... are stored
   byte-original with members exposed as on-demand windows.
 * **Append-only zones + offline sweep** — writes land in RAW, then the sweep
-  drains them into a type-clustered Shadow zone, re-encoding where proven.
+  drains them into Shadow, re-encoding where proven bit-exact.
 * **Meta-v3 Metadata Architecture** — B+ tree base metadata + append-only Delta
   Log with background fold worker and lock-free reads.
-* **Deduplication** — segment-level, BLAKE3, with an online pass in the sweep.
-* **Checkpoints, rollback, time travel** — undo the last sweep, or mount a
-  read-only view at a past checkpoint.
-* **Recovery tooling** — append-only owner WAL with replay; `invf-fsck [-f]`
+* **Content Addressing & Dedup** — immutable recipes and shadow blobs are
+  BLAKE3-addressed with deduplication.
+* **Savepoints & Rollback** — durable metadata savepoints (SPT0) provide instant
+  rollback via `invf-rollback`.
+* **Recovery tooling** — append-only WAL with replay; `invf-fsck [-f]`
   walks, quarantines and repairs.
 * **Two-device volumes** — dev0 (metadata + RAW) and dev1 (canonical Shadow),
   with metadata mirroring; volumes identified by UUID, not kernel name.
@@ -126,8 +127,8 @@ accumulated delta records into the B+ tree and atomically updates the RT30
 double-slot descriptor.
 
 The **sweep** (`invf-sweep`, or the FUSE background sweep) drains RAW into
-Shadow, re-clusters text/binary, runs dedupe and text-zone GC, re-encodes where
-bit-exactness is proven, and optionally writes parity seals.
+Shadow, re-encodes with ZSTD where bit-exactness is proven, and updates recipes
+via inode-id-keyed publication.
 
 ```
 unlink()  ->  delta delete entry appended; space reclaimed at next fold + sweep
@@ -146,9 +147,9 @@ For complete architecture specifications, see:
 | Unit of storage | fixed blocks | blocks + COW | content segments + recipe |
 | Write model | in-place | COW | append-only zones, offline consolidation |
 | Compression | no / opt | opt, not bit-exact-checked | per-segment, **proven** bit-exact |
-| Deduplication | no | btrfs yes | built-in, segment-level, BLAKE3 |
-| Metadata | fixed inode table / B-tree | B-tree | dynamic extents + mapper |
-| Snapshots | no / LVM | yes (COW) | checkpoint + rollback + view |
+| Deduplication | no | btrfs yes | content-addressed recipe & shadow blobs (BLAKE3) |
+| Metadata | fixed inode table / B-tree | B-tree | Meta-v3 (B+ tree + Delta Log) |
+| Snapshots | no / LVM | yes (COW) | savepoints + rollback (`invf-rollback`) |
 | Containers | opaque | opaque | stored original, members on demand |
 | Codecs | in-kernel | in-kernel | external versioned packs |
 | Best at | general workloads | general + snapshots | archives, read-mostly roots, dedup |
