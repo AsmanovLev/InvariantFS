@@ -1293,7 +1293,23 @@ static int v3_read_range(invfs_volume *v, uint64_t inode_id, uint64_t offset,
         }
     }
 
-    for (i = 0; i < n_ents; i++) {
+    /* Find starting entry. Entries are sorted by file_offset.
+     * Use binary search to find the first entry whose seg_hi > offset. */
+    size_t start_idx = 0;
+    if (n_ents > 8) {
+        size_t l = 0, r = n_ents;
+        while (l < r) {
+            size_t m = l + (r - l) / 2;
+            uint64_t seg_hi = ents[m].file_offset + ents[m].length;
+            if (seg_hi <= offset)
+                l = m + 1;
+            else
+                r = m;
+        }
+        start_idx = l;
+    }
+
+    for (i = start_idx; i < n_ents; i++) {
         const invfs_ast_block_entry *e = &ents[i];
         uint64_t seg_lo = e->file_offset;
         uint64_t seg_hi = e->file_offset + e->length;
@@ -1303,7 +1319,9 @@ static int v3_read_range(invfs_volume *v, uint64_t inode_id, uint64_t offset,
         uint8_t *segbuf = tmp, *segheap = NULL;
         size_t want;
 
-        if (seg_hi <= req_lo || seg_lo >= req_hi)
+        if (seg_lo >= req_hi)
+            break;  /* past the requested window: stop early */
+        if (seg_hi <= req_lo)
             continue;
         lo = req_lo > seg_lo ? req_lo : seg_lo;
         hi = req_hi < seg_hi ? req_hi : seg_hi;
