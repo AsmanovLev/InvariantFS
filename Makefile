@@ -27,7 +27,7 @@ LDLIBS  := -Wl,-l:libzstd.so.1 -lz -lpthread
 FUSE_CFLAGS := $(shell pkg-config --cflags fuse3)
 FUSE_LIBS   := $(shell pkg-config --libs fuse3)
 
-CORE    := volume vol_cpack helper_exec vol_png vol_seal vol_repair vol_rollback \
+CORE    := volume vol_cpack helper_exec vol_plugin_client vol_png vol_seal vol_repair vol_rollback \
            vol_resize vol_fsck vol_crash vol_exer vol_dedupe vol_textzone \
            vol_heat vol_sweep vol_read vol_write vol_records vol_ast \
            vol_dirs vol_tier vol_meta_merge vol_metabuf vol_btree vol_delta \
@@ -39,7 +39,7 @@ B3      := blake3 blake3_dispatch blake3_portable
 TOOLS   := invf-mkfs invf-verify invf-fsck invf-cp invf-cat invf-ls invf-stat \
            invf-zip invf-arctest invf-blkio_test invf-fuse invf-import invf-sweep meta_probe \
            invf-stats invf-resize invf-rollback invf-l2ptest invfs-pack \
-           invf-v3inode
+           invf-v3inode invf-plugin-host
 
 all: $(TOOLS:%=$(OUT)/%)
 
@@ -61,7 +61,8 @@ endef
 # CLI tools (main in src/cli/<name>.c)
 CLI_MAINS := mkfs verify fsck cp cat ls stat arctest blkio_test resize \
              metabuf_test btree_test v3inode overlay_test fold_test concurrency_test \
-             sweep_v3_test symlink_v3_test large_file_v3_test dedupe_v3_test deflate_repro_test
+             sweep_v3_test symlink_v3_test large_file_v3_test dedupe_v3_test deflate_repro_test \
+             plugin_host_test
 $(foreach t,$(CLI_MAINS),$(eval $(call TOOL_RULE,$(t),)))
 
 # WP60: invfs-pack is named differently (invfs- not invf-)
@@ -102,6 +103,11 @@ $(OUT)/invf-l2ptest: $(OBJ)/l2ptest.o $(CORE_O)
 $(OBJ)/l2ptest.o: tools/l2ptest.c | $(OBJ)
 	$(CC) $(CFLAGS) -c -o $@ $<
 
+$(OUT)/invf-plugin-host: $(OBJ)/invf-plugin-host.o $(CORE_O)
+	$(CC) $(CFLAGS) -Itools -o $@ $< $(CORE_O) $(LDLIBS) -ldl
+$(OBJ)/invf-plugin-host.o: tools/invf-plugin-host.c | $(OBJ)
+	$(CC) $(CFLAGS) -c -o $@ $<
+
 $(OUT)/meta_probe: $(OBJ)/meta_probe.o $(CORE_O)
 	$(CC) $(CFLAGS) -Itools -o $@ $< $(CORE_O) $(LDLIBS)
 $(OBJ)/meta_probe.o: tools/meta_probe.c | $(OBJ)
@@ -111,6 +117,8 @@ clean:
 	rm -rf $(OBJ) $(TOOLS:%=$(OUT)/%) $(OUT)/invf-codec_test \
 	       $(OUT)/invf-helper_exec_test $(OUT)/invf-metabuf_test \
 	       $(OUT)/invf-btree_test $(OUT)/invf-delta_test \
+	       $(OUT)/invf-plugin_host_test tools/codecpacks/qcow2.codecpack/libqcow2.so \
+	       tools/invf-plugin-host \
 	       $(OUT)/invf-fuzz
 
 # ---- tests ---------------------------------------------------------------
@@ -146,7 +154,7 @@ test: $(OUT)/invf-arctest $(OUT)/invf-blkio_test $(OUT)/invf-codec_test \
       $(OUT)/invf-helper_exec_test $(OUT)/invf-metabuf_test $(OUT)/invf-btree_test \
       $(OUT)/invf-delta_test $(OUT)/invf-concurrency_test $(OUT)/invf-sweep_v3_test \
       $(OUT)/invf-symlink_v3_test $(OUT)/invf-large_file_v3_test $(OUT)/invf-dedupe_v3_test \
-      $(OUT)/invf-deflate_repro_test
+      $(OUT)/invf-deflate_repro_test $(OUT)/invf-plugin_host_test
 	$(OUT)/invf-arctest
 	$(OUT)/invf-blkio_test
 	$(OUT)/invf-codec_test
@@ -160,6 +168,7 @@ test: $(OUT)/invf-arctest $(OUT)/invf-blkio_test $(OUT)/invf-codec_test \
 	$(OUT)/invf-large_file_v3_test /tmp
 	$(OUT)/invf-dedupe_v3_test /tmp
 	$(OUT)/invf-deflate_repro_test
+	$(OUT)/invf-plugin_host_test
 
 # e2e tier: tmpfs images under /dev/shm; test-jxl needs cjxl/djxl installed
 e2e: all

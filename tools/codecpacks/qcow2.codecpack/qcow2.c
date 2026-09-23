@@ -142,6 +142,11 @@
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <zlib.h>
+#if __has_include("ivpack_api.h")
+#include "ivpack_api.h"
+#elif __has_include("../../../src/include/ivpack_api.h")
+#include "../../../src/include/ivpack_api.h"
+#endif
 #if __has_include("deflate_repro.h")
 #include "deflate_repro.h"
 #elif __has_include("../../../src/codecs/deflate_repro.h")
@@ -964,8 +969,64 @@ static int cmd_estimate(const char *in)
     return 0;
 }
 
+/* ---- ivpack plugin C ABI export ------------------------------------------ */
+
+static const ivpack_desc s_qcow2_desc = {
+    .api_version = IVPACK_API_VERSION,
+    .name = "qcow2",
+    .version = "1.1.0",
+    .pack_class = "containerpack",
+    .flags = 0,
+};
+
+const ivpack_desc *ivpack_get_desc(void)
+{
+    return &s_qcow2_desc;
+}
+
+int ivpack_container_cmd(const ivpack_container_args *args)
+{
+    if (!args) return -1;
+    switch (args->cmd) {
+    case 1: /* ENUMERATE */
+        if (!args->in_path || !args->out_path) return -2;
+        return cmd_enumerate(args->in_path, args->out_path);
+    case 2: /* EXTRACT */
+        if (!args->in_path || !args->recipe_path || !args->mbr_dir) return -2;
+        return cmd_extract(args->in_path, args->recipe_path, args->mbr_dir);
+    case 3: /* STRIP */
+        if (!args->in_path || !args->out_path) return -2;
+        return cmd_strip(args->in_path, args->out_path);
+    case 4: /* REBUILD */
+        if (!args->recipe_path || !args->mbr_dir || !args->out_path) return -2;
+        return cmd_rebuild(args->recipe_path, args->mbr_dir, args->out_path);
+    case 5: /* MAP */
+        if (!args->recipe_path || !args->out_path) return -2;
+        return cmd_map(args->recipe_path, args->out_path);
+    default:
+        return -3;
+    }
+}
+
+int ivpack_container_estimate(const char *in_path, ivpack_estimate_res *res)
+{
+    qc_img v;
+    if (!in_path || !res) return -1;
+    memset(res, 0, sizeof(*res));
+    if (qc_parse(in_path, &v) != 0) {
+        res->eligible = 0;
+        return 3;
+    }
+    res->eligible = 1;
+    res->mbr_size = v.member_size + EST_MARGIN;
+    res->orig_size = v.file_size;
+    qc_free(&v);
+    return 0;
+}
+
 /* ---- main ---------------------------------------------------------------- */
 
+#ifndef IVPACK_SHARED_LIB
 int main(int argc, char **argv)
 {
     const char *cmd;
@@ -986,3 +1047,4 @@ int main(int argc, char **argv)
         return cmd_estimate(argv[2]);
     return 2;
 }
+#endif

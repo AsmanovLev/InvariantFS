@@ -6,8 +6,10 @@ bin/*
 build/
 *.o
 *.a
+*.so
 *.d
 *.obj
+*.ivpack
 
 # volume images (never commit)
 *.img

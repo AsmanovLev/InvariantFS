@@ -8,6 +8,7 @@
 #endif
 #include "volume_internal.h"
 #include "helper_exec.h"
+#include "vol_plugin_client.h"
 
 
 /* WP61: the pack-child containment (Landlock + namespaces + rlimits +
@@ -405,6 +406,29 @@ int invfs_codec_pack_cmd(const invfs_codec *c, int cmd,
     char rwbuf[4096];
 
     if (!def || !def->is_container) return -1;
+
+    /* ADR-007: Try worker pool daemon first if plugin pool is available */
+    if (invfs_plugin_pool_is_available() && c && c->name) {
+        char so_path[512];
+        snprintf(so_path, sizeof(so_path), "%s/lib%s.so", def->dir, c->name);
+        if (access(so_path, R_OK) == 0) {
+            int pcmd = 0;
+            switch (cmd) {
+            case INVFS_PACK_CMD_ENUMERATE: pcmd = 1; break;
+            case INVFS_PACK_CMD_EXTRACT:   pcmd = 2; break;
+            case INVFS_PACK_CMD_STRIP:     pcmd = 3; break;
+            case INVFS_PACK_CMD_REBUILD:   pcmd = 4; break;
+            case INVFS_PACK_CMD_MAP:       pcmd = 5; break;
+            default: break;
+            }
+            if (pcmd > 0) {
+                int prc = invfs_plugin_pool_container_cmd(c->name, so_path, pcmd, in, out, recipe, dir);
+                if (prc >= 0) return prc; /* Success or authoritative error from worker */
+                /* prc < 0 means pool dispatch failed; fall back to CLI */
+            }
+        }
+    }
+
     switch (cmd) {
     case INVFS_PACK_CMD_ENUMERATE: tmpl = def->enumerate; break;
     case INVFS_PACK_CMD_EXTRACT:   tmpl = def->extract;   break;
@@ -447,6 +471,19 @@ int invfs_codec_pack_estimate(const invfs_codec *c, const char *in_path,
     char rwbuf[4096];
 
     if (!def || !def->estimate || !in_path) return -1;
+
+    /* ADR-007: Try worker pool daemon first for estimate */
+    if (invfs_plugin_pool_is_available() && c && c->name) {
+        char so_path[512];
+        snprintf(so_path, sizeof(so_path), "%s/lib%s.so", def->dir, c->name);
+        if (access(so_path, R_OK) == 0) {
+            uint64_t est_sz = 0;
+            if (invfs_plugin_pool_container_estimate(c->name, so_path, in_path, &est_sz) == 0) {
+                if (out_bytes) *out_bytes = est_sz;
+                return 0;
+            }
+        }
+    }
     if (pack_argv_build(def, def->estimate, in_path, NULL, NULL, NULL, NULL,
                         argv, 24, arena, sizeof arena) != 0)
         return -1;
