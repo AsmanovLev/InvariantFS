@@ -10,7 +10,21 @@
 #include <stdint.h>
 #include <stddef.h>
 
-#define IVPACK_API_VERSION 1
+/* ABI history:
+ *   1 — original: desc + container_cmd(ENUMERATE/STRIP/REBUILD/MAP) + estimate.
+ *   2 — appended extract_idx and self_path to ivpack_container_args, so
+ *       EXTRACT can name a member and a pack can resolve its own pack dir
+ *       (p7z's 7zz sibling). The host fills the v2 fields only for a plugin
+ *       whose desc->api_version >= 2; a v1 plugin keeps working unchanged. */
+#define IVPACK_API_VERSION 2
+#define IVPACK_API_VERSION_MIN 1
+
+/* ivpack_desc.flags */
+#define IVPACK_F_NO_FORK 0x1u   /* plugin is safe to call in-process (no
+                                 * exit()/die() on any path). No pack sets
+                                 * this yet: every containerpack declines with
+                                 * a bare exit(3), so the glue in
+                                 * ivpack_impl.h fork-guards each call. */
 
 #ifdef __cplusplus
 extern "C" {
@@ -43,6 +57,12 @@ typedef struct ivpack_container_args {
     /* Error reporting */
     char *err_msg;
     size_t err_msg_cap;
+
+    /* --- appended in ABI v2 (host fills these only when desc->api_version
+     * >= 2; a v1 plugin never reads them) --- */
+    const char *extract_idx;    /* EXTRACT: member index string, CLI argv[3] */
+    const char *self_path;      /* absolute path of the loaded .so, so a pack
+                                 * can find pack-dir siblings (p7z -> 7zz) */
 } ivpack_container_args;
 
 /* Containerpack estimate results */

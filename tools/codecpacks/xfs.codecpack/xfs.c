@@ -65,6 +65,24 @@
 #include <sys/types.h>
 #include <unistd.h>
 
+/* ADR-007: this file doubles as a .so plugin (lib<name>.so, built with
+ * -fPIC -shared -DIVPACK_SHARED_LIB). The plugin glue below is compiled in
+ * BOTH builds -- the CLI build simply never calls it, and main() is what
+ * -DIVPACK_SHARED_LIB drops -- so the .so and the CLI can never drift apart.
+ * The headers are declarations + macros only: no new dependencies, no -ldl,
+ * and the pack still builds with plain `cc -std=c11 -Wall -Wextra -Werror`. */
+#if __has_include("ivpack_api.h")
+#include "ivpack_api.h"
+#elif __has_include("../../../src/include/ivpack_api.h")
+#include "../../../src/include/ivpack_api.h"
+#endif
+#if __has_include("ivpack_impl.h")
+#include "ivpack_impl.h"
+#elif __has_include("../../../src/include/ivpack_impl.h")
+#include "../../../src/include/ivpack_impl.h"
+#endif
+
+
 /* ------------------------------ constants ------------------------------ */
 
 #define XFS_SB_MAGIC    0x58465342u   /* "XFSB" */
@@ -1167,6 +1185,36 @@ static void cmd_rebuild(const char *recipe, const char *dir, const char *out)
 
 /* -------------------------------- main --------------------------------- */
 
+
+/* ---- ivpack plugin C ABI export (ADR-007) --------------------------------
+ * Built as libxfs.so with -DIVPACK_SHARED_LIB -fPIC -shared; the fork
+ * guard in ivpack_impl.h keeps the CLI's exit(3)=decline / exit(1)=error
+ * contract intact inside a long-lived worker. See ivpack_impl.h. */
+static const ivpack_desc s_xfs_desc = {
+    IVPACK_API_VERSION, "xfs", "1.0.0", "containerpack", 0
+};
+
+const ivpack_desc *ivpack_get_desc(void) { return &s_xfs_desc; }
+
+/* xfs's cmd_* are void and signal every refusal with exit(3)/die(), which is
+ * exactly why the call runs in the forked child (see ivpack_impl.h). */
+static int xfs_iv_call_enumerate(const ivpack_container_args *a)
+{ cmd_enumerate(a->in_path, a->out_path); return 0; }
+static int xfs_iv_call_extract(const ivpack_container_args *a)
+{ cmd_extract(a->in_path, a->extract_idx, a->out_path); return 0; }
+static int xfs_iv_call_strip(const ivpack_container_args *a)
+{ cmd_strip(a->in_path, a->out_path); return 0; }
+static int xfs_iv_call_rebuild(const ivpack_container_args *a)
+{ cmd_rebuild(a->recipe_path, a->mbr_dir, a->out_path); return 0; }
+static int xfs_iv_call_map(const ivpack_container_args *a)
+{ cmd_map(a->in_path, a->out_path); return 0; }
+
+IVPACK_DEFINE_CONTAINER_CMD(xfs, IVPACK_GLUE_NONE())
+
+IVPACK_DEFINE_CONTAINER_ESTIMATE(xfs, IVPACK_GLUE_NONE(),
+                             cmd_estimate(a); rc = 0;)
+
+#ifndef IVPACK_SHARED_LIB
 int main(int argc, char **argv)
 {
     if (argc < 3) return 2;
@@ -1186,3 +1234,5 @@ int main(int argc, char **argv)
         return 2;
     return 0;
 }
+#endif /* !IVPACK_SHARED_LIB */
+

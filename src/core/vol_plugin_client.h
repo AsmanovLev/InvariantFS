@@ -24,14 +24,27 @@ int invfs_plugin_pool_connect(void);
 /* Disconnect from the pool */
 void invfs_plugin_pool_disconnect(void);
 
-/* Try to execute a containerpack command via worker pool.
- * Returns 0 on success, positive error code from worker, or -1 if worker pool
- * is unavailable or does not support the request (signaling fallback to CLI exec).
+/* Run one containerpack command through the worker pool.
+ *
+ * The four parameters are the pack CLI's operands and mean exactly what they
+ * mean on the command line -- which command consumes which is the caller's
+ * business (see invfs_codec_pack_cmd):
+ *   ENUMERATE/STRIP  in_path=image  out_path=result
+ *   EXTRACT          in_path=image  idx=member  out_path=result
+ *   REBUILD          recipe_path + mbr_dir -> out_path
+ *   MAP              in_path=image  out_path=result  (the pack recomputes
+ *                                       the recipe layout from the image)
+ *
+ * Returns the pack's exit status (0 ok, 3 decline, 1 error) -- an
+ * authoritative answer from the plugin -- or a NEGATIVE code when the pool
+ * itself could not carry the request, which is the caller's cue to fall back
+ * to the CLI exec path.
  */
 int invfs_plugin_pool_container_cmd(const char *pack_name,
                                     const char *pack_so_path,
                                     int cmd,
                                     const char *in_path,
+                                    const char *idx,
                                     const char *out_path,
                                     const char *recipe_path,
                                     const char *mbr_dir);

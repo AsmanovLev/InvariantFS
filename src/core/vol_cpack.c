@@ -407,24 +407,43 @@ int invfs_codec_pack_cmd(const invfs_codec *c, int cmd,
 
     if (!def || !def->is_container) return -1;
 
-    /* ADR-007: Try worker pool daemon first if plugin pool is available */
+    /* ADR-007: the worker pool daemon runs the pack's .so in RAM instead of
+     * fork()+execve()'ing the CLI helper. The operands are routed exactly the
+     * way the manifest template would route them, so the plugin sees the same
+     * four strings the exec path would have handed the binary:
+     *   enumerate {in} {out}          -> in_path, out_path
+     *   extract   {in} {idx} {out}    -> in_path, extract_idx, out_path
+     *   strip     {in} {out}          -> in_path, out_path
+     *   rebuild   {recipe} {dir} {out}-> recipe_path, mbr_dir, out_path
+     *   map       {in} {out}          -> in_path, out_path   (`in` is the IMAGE:
+     *                                    the pack recomputes the recipe layout
+     *                                    it would have written, see cmd_map)
+     * A non-negative return is the pack's own exit status (0/1/3) and is
+     * authoritative; a negative one means the pool could not carry the call,
+     * which falls through to the CLI exec below. */
     if (invfs_plugin_pool_is_available() && c && c->name) {
         char so_path[512];
         snprintf(so_path, sizeof(so_path), "%s/lib%s.so", def->dir, c->name);
         if (access(so_path, R_OK) == 0) {
             int pcmd = 0;
+            const char *p_in = NULL, *p_out = NULL;
+            const char *p_recipe = NULL, *p_dir = NULL, *p_idx = NULL;
             switch (cmd) {
-            case INVFS_PACK_CMD_ENUMERATE: pcmd = 1; break;
-            case INVFS_PACK_CMD_EXTRACT:   pcmd = 2; break;
-            case INVFS_PACK_CMD_STRIP:     pcmd = 3; break;
-            case INVFS_PACK_CMD_REBUILD:   pcmd = 4; break;
-            case INVFS_PACK_CMD_MAP:       pcmd = 5; break;
+            case INVFS_PACK_CMD_ENUMERATE: pcmd = 1; p_in = in;  p_out = out; break;
+            case INVFS_PACK_CMD_EXTRACT:   pcmd = 2; p_in = in;  p_out = out;
+                                           p_idx = idx;                        break;
+            case INVFS_PACK_CMD_STRIP:     pcmd = 3; p_in = in;  p_out = out; break;
+            case INVFS_PACK_CMD_REBUILD:   pcmd = 4; p_recipe = recipe;
+                                           p_dir = dir;          p_out = out; break;
+            case INVFS_PACK_CMD_MAP:       pcmd = 5; p_in = in;  p_out = out; break;
             default: break;
             }
             if (pcmd > 0) {
-                int prc = invfs_plugin_pool_container_cmd(c->name, so_path, pcmd, in, out, recipe, dir);
-                if (prc >= 0) return prc; /* Success or authoritative error from worker */
-                /* prc < 0 means pool dispatch failed; fall back to CLI */
+                int prc = invfs_plugin_pool_container_cmd(c->name, so_path, pcmd,
+                                                          p_in, p_idx, p_out,
+                                                          p_recipe, p_dir);
+                if (prc >= 0) return prc;
+                /* prc < 0: pool dispatch failed; fall back to the CLI */
             }
         }
     }

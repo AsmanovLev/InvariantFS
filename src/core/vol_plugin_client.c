@@ -155,6 +155,7 @@ int invfs_plugin_pool_container_cmd(const char *pack_name,
                                     const char *pack_so_path,
                                     int cmd,
                                     const char *in_path,
+                                    const char *idx,
                                     const char *out_path,
                                     const char *recipe_path,
                                     const char *mbr_dir)
@@ -178,6 +179,7 @@ int invfs_plugin_pool_container_cmd(const char *pack_name,
         strncpy(req->pack_path, pack_so_path, sizeof(req->pack_path) - 1);
 
     if (in_path) strncpy(req->in_path, in_path, sizeof(req->in_path) - 1);
+    if (idx) strncpy(req->extract_idx, idx, sizeof(req->extract_idx) - 1);
     if (out_path) strncpy(req->out_path, out_path, sizeof(req->out_path) - 1);
     if (recipe_path) strncpy(req->recipe_path, recipe_path, sizeof(req->recipe_path) - 1);
     if (mbr_dir) strncpy(req->mbr_dir, mbr_dir, sizeof(req->mbr_dir) - 1);

@@ -22,6 +22,7 @@
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <sys/wait.h>
+#include <sys/statvfs.h>
 #include <sys/eventfd.h>
 #include <sys/socket.h>
 #include <sys/un.h>
@@ -43,6 +44,7 @@ typedef struct worker_plugin {
     char path[INVF_PLUGIN_PATH_MAX];
     void *handle;
     const ivpack_desc *desc;
+    uint32_t api_version;       /* desc->api_version, 0 when the desc is absent */
     ivpack_container_cmd_fn cmd_fn;
     ivpack_container_estimate_fn est_fn;
 } worker_plugin;
@@ -81,7 +83,18 @@ static worker_plugin *find_or_load_plugin(const char *name, const char *path)
     p->handle = h;
 
     ivpack_get_desc_fn desc_fn = (ivpack_get_desc_fn)dlsym(h, "ivpack_get_desc");
-    if (desc_fn) p->desc = desc_fn();
+    if (desc_fn) {
+        p->desc = desc_fn();
+        if (p->desc) p->api_version = p->desc->api_version;
+    }
+    if (p->api_version < IVPACK_API_VERSION_MIN) {
+        fprintf(stderr, "invf-plugin-host: plugin %s reports api_version %u "
+                        "(need >= %u); refusing to load\n",
+                name, p->api_version, (unsigned)IVPACK_API_VERSION_MIN);
+        g_num_plugins--;
+        dlclose(h);
+        return NULL;
+    }
     p->cmd_fn = (ivpack_container_cmd_fn)dlsym(h, "ivpack_container_cmd");
     p->est_fn = (ivpack_container_estimate_fn)dlsym(h, "ivpack_container_estimate");
 
@@ -124,7 +137,12 @@ static void worker_loop(int slot_idx, invf_plugin_slot *slot, int req_efd, int r
                     .recipe_path = req->recipe_path[0] ? req->recipe_path : NULL,
                     .mbr_dir = req->mbr_dir[0] ? req->mbr_dir : NULL,
                     .err_msg = resp->err_msg,
-                    .err_msg_cap = sizeof(resp->err_msg)
+                    .err_msg_cap = sizeof(resp->err_msg),
+                    .extract_idx = req->extract_idx[0] ? req->extract_idx : NULL,
+                    /* Only a v2 plugin knows these fields exist; writing them
+                     * for a v1 plugin would scribble past the struct it was
+                     * compiled against. */
+                    .self_path = (p->api_version >= 2) ? p->path : NULL
                 };
                 resp->status = p->cmd_fn(&cargs);
                 resp->msg_type = (resp->status == 0) ? INVF_MSG_RESPONSE : INVF_MSG_ERROR;
@@ -244,6 +262,40 @@ int main(int argc, char **argv)
     signal(SIGINT, sig_handler);
     signal(SIGPIPE, SIG_IGN);
 
+    /* Size the pool to the tmpfs that actually backs /dev/shm BEFORE creating
+     * anything: a slot is a flat 64 MiB, so the pool is num_workers * 64 MiB,
+     * and a container's default 64 MiB /dev/shm cannot hold even one slot plus
+     * the header. Measure first, then decide -- creating the object and
+     * ftruncate()ing it only to fail leaves a full-size turd behind that fills
+     * the tmpfs for everyone after us. */
+    {
+        struct statvfs sfs;
+        if (statvfs("/dev/shm", &sfs) == 0) {
+            uint64_t avail = (uint64_t)sfs.f_bavail * (uint64_t)sfs.f_frsize;
+            /* keep 1/16 of the tmpfs for everyone else, and pay for the header */
+            uint64_t budget = avail - (avail / 16);
+            size_t fit = (budget > sizeof(invf_plugin_pool_hdr))
+                             ? (size_t)((budget - sizeof(invf_plugin_pool_hdr)) /
+                                        sizeof(invf_plugin_slot))
+                             : 0;
+            if (fit < (size_t)num_workers) {
+                fprintf(stderr, "invf-plugin-host: /dev/shm has %llu MiB free, "
+                                "a slot is %llu MiB: workers %d -> %zu\n",
+                        (unsigned long long)(avail >> 20),
+                        (unsigned long long)(sizeof(invf_plugin_slot) >> 20),
+                        num_workers, fit);
+                num_workers = (int)fit;
+            }
+        }
+    }
+    if (num_workers < 1) {
+        fprintf(stderr, "invf-plugin-host: /dev/shm is too small for even one "
+                        "%llu MiB slot (mount a bigger tmpfs on /dev/shm, or "
+                        "build with a smaller INVF_PLUGIN_SLOT_SIZE)\n",
+                (unsigned long long)(sizeof(invf_plugin_slot) >> 20));
+        return 1;
+    }
+
     /* Allocate shared memory */
     shm_unlink(shm_name);
     int shm_fd = shm_open(shm_name, O_CREAT | O_RDWR | O_EXCL, 0666);
@@ -253,14 +305,19 @@ int main(int argc, char **argv)
     }
 
     size_t total_size = sizeof(invf_plugin_pool_hdr) + (size_t)num_workers * sizeof(invf_plugin_slot);
-    if (ftruncate(shm_fd, total_size) < 0) {
-        perror("ftruncate");
+    if (ftruncate(shm_fd, (off_t)total_size) < 0) {
+        fprintf(stderr, "invf-plugin-host: ftruncate(%s, %zu): %s\n",
+                shm_name, total_size, strerror(errno));
+        close(shm_fd);
+        shm_unlink(shm_name);
         return 1;
     }
 
     void *pool_mem = mmap(NULL, total_size, PROT_READ | PROT_WRITE, MAP_SHARED, shm_fd, 0);
     if (pool_mem == MAP_FAILED) {
-        perror("mmap");
+        fprintf(stderr, "invf-plugin-host: mmap(%zu): %s\n", total_size, strerror(errno));
+        close(shm_fd);
+        shm_unlink(shm_name);
         return 1;
     }
 
