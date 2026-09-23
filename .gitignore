@@ -50,3 +50,7 @@ var/
 
 # doxygen output (generated; make docs)
 impl_docs/doxygen/
+
+# LSP compilation database and editor configs
+compile_commands.json
+.clangd

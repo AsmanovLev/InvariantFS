@@ -9,6 +9,7 @@
 #include "volume_internal.h"
 #include "helper_exec.h"
 
+
 /* WP61: the pack-child containment (Landlock + namespaces + rlimits +
  * timeout + privdrop + env scrub) lives in src/core/helper_exec.c. */
 
@@ -2305,7 +2306,6 @@ int vol_containerpack_sweep(invfs_volume *v, uint64_t inode_id,
     cpack_member *mem_sorted = NULL;   /* idx-sorted copy for the map paths */
     invfs_meta_pub keep;
     int have_keep, rc = 0;
-
     if (getenv("INVFS_DEBUG_PACKS")) fprintf(stderr,"[cpack] enter %s\n", name);
     if (!pc->probe || !pc->probe()) return 1;    /* tools absent: wait */
     def = invfs_codec_pack_def(pc);
@@ -2348,16 +2348,18 @@ int vol_containerpack_sweep(invfs_volume *v, uint64_t inode_id,
      * is not in hand yet (strip runs next), and the container's size
      * bounds it -- the default covers the read path's true peak (the
      * whole-file output buffer plus one member in flight). */
-    if (!def->map && v->arc_budget && (uint64_t)full_len > v->arc_budget) {
+    if (v->arc_budget && (uint64_t)full_len > v->arc_budget) {
         vol_stamp_class(v, inode_id, INVFS_CLASS_GENERIC_MEMLIMIT,
                         (uint8_t)pc->algo, pc->generation);
         goto out;
     }
     ws = pc->dec_mem_bytes;
-    if (def->estimate) {
+    if (def->estimate && !def->map) {
         /* a pack that cannot size the job refuses the file (the WP13
          * estimate convention: GENERIC_GUARD, re-armed by a generation
-         * bump) */
+         * bump). Seekable containers (with a map) never buffer the whole
+         * archive in RAM -- the bytes stream through the read path --
+         * so the size guard only applies to non-seekable decomposers. */
         if (invfs_codec_pack_estimate(pc, pin, &ws) != 0) {
             if (getenv("INVFS_DEBUG_PACKS")) fprintf(stderr,"[cpack] estimate failed\n");
             vol_stamp_class(v, inode_id, INVFS_CLASS_GENERIC_GUARD,
@@ -2365,9 +2367,12 @@ int vol_containerpack_sweep(invfs_volume *v, uint64_t inode_id,
             goto out;
         }
     } else if (!ws) {
-        ws = sum_usize + (uint64_t)full_len;
+        if (def->map)
+            ws = 0;   /* seekable: streaming read; no whole-file buffer */
+        else
+            ws = sum_usize + (uint64_t)full_len;
     }
-    if (ws && ws > vol_get_dec_mem_limit(v)) {
+    if (ws && ws > vol_get_dec_mem_limit(v) && !def->map) {
         vol_stamp_class(v, inode_id, INVFS_CLASS_GENERIC_MEMLIMIT,
                         (uint8_t)pc->algo, pc->generation);
         goto out;
@@ -2382,8 +2387,11 @@ int vol_containerpack_sweep(invfs_volume *v, uint64_t inode_id,
      * which also covers the recipe/table/map and the records. Under it:
      * wait RAW, re-evaluated every sweep (the class predicate's
      * DEFER_ENOSPC case), never fall to generic. rc 1 = the same silent
-     * "wait RAW" the tools-absent case uses. */
-    if (sweep_enospc(v, sum_usize / 2 + INVFS_ENOSPC_MARGIN)) {
+     * "wait RAW" the tools-absent case uses.
+     * Seekable containers read each member once via a ranged MRMP splice
+     * -- they don't double the on-disk cost during the commit, so the
+     * admission gate does not apply to them either. */
+    if (!def->map && sweep_enospc(v, sum_usize / 2 + INVFS_ENOSPC_MARGIN)) {
         vol_stamp_class(v, inode_id, INVFS_CLASS_DEFER_ENOSPC,
                         (uint8_t)pc->algo, pc->generation);
         rc = 1;

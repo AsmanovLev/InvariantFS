@@ -142,6 +142,12 @@
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <zlib.h>
+#if __has_include("deflate_repro.h")
+#include "deflate_repro.h"
+#elif __has_include("../../../src/codecs/deflate_repro.h")
+#include "../../../src/codecs/deflate_repro.h"
+#endif
+
 
 /* ---- qcow2 header field offsets (all values in the file are BE) -------- */
 #define QC_VERSION_OFF    0x04u
@@ -178,17 +184,23 @@
 #define MEMBER_IDX       1u
 #define MEMBER_SNAME     "diskimg"
 
-/* recipe (Q2R1/Q2R2) constants */
+/* recipe (Q2R1/Q2R2/Q2R3) constants */
 #define QR_MAGIC         "Q2R1"
 #define QR2_MAGIC        "Q2R2"
+#define QR3_MAGIC        "Q2R3"
 #define QR_HDR_LEN       32u             /* fixed header before the table */
 #define QR_ENT_LEN       16u             /* { u64 file_off, u64 mem_off } */
 #define QR2_ENT_LEN      20u             /* { u64 file_off, u64 mem_off, u32 csize } */
+#define QR3_ENT_LEN      24u             /* { u64 file_off, u64 mem_off, u32 csize, u8 repro, u8 level, u8 mem, u8 strat } */
 
 typedef struct {
     uint64_t off;      /* file offset of the data cluster */
     uint32_t rank;     /* guest-stream rank: mem_off = rank * cluster_size */
     uint32_t csize;    /* 0 = uncompressed cluster of cs bytes; >0 = compressed stream byte length */
+    uint8_t  repro;    /* 1 = reproducible via deflate_repro; 0 = verbatim in recipe gap */
+    uint8_t  level;    /* deflate level */
+    uint8_t  mem;      /* deflate memLevel */
+    uint8_t  strat;    /* deflate strategy */
 } qc_ext;
 
 typedef struct {

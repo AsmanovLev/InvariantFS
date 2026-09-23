@@ -4,6 +4,7 @@
 
 #include "volume_internal.h"
 
+
 int sweep_enospc(invfs_volume *v, uint64_t need_bytes)
 {
     uint64_t need_blocks =
@@ -931,7 +932,7 @@ static int vol_sweep_one_v3(invfs_volume *v, uint64_t inode_id,
 
     /* class policy: a stamp means drained-or-gated (subset of the WP10
      * table that needs no v2 record surgery) */
-    if (vol_get_class(v, inode_id, &ccls, &calgo, &cgen) == 0) {
+    if (vol_get_class(v, inode_id, &ccls, &calgo, &cgen) == 0 && ccls != 0) {
         switch (ccls) {
         case INVFS_CLASS_UNCOMPRESSIBLE:
             if (invfs_registry_generation() <= cgen)
@@ -939,6 +940,22 @@ static int vol_sweep_one_v3(invfs_volume *v, uint64_t inode_id,
             break;
         case INVFS_CLASS_DEFER_ENOSPC:
             break;              /* space is a property of NOW: retry */
+        case INVFS_CLASS_GENERIC_MEMLIMIT: {
+            const invfs_codec *cc = invfs_codec_by_algo(calgo);
+            /* WP-M26 / WP16b: a seekable container with a map
+             * (!mbrmap) doesn't need whole-file ARC buffering, so the
+             * arc_budget gate never applied to it. If the stamp comes
+             * from that path, retry unconditionally on the next sweep:
+             * the new sweep just runs through the seekable MRMP path. */
+            if (cc && cc->sniff && (cc->caps & INVFS_CODEC_CAP_CONTAINER)) {
+                if (!invfs_codec_pack_def(cc) ||
+                    invfs_codec_pack_def(cc)->map != NULL)
+                    break;
+            }
+            if (!cc || (cc->dec_mem_bytes && cc->dec_mem_bytes > vol_get_dec_mem_limit(v)))
+                return 0;
+            break;              /* memory limit raised or now admits: retry */
+        }
         default:
             return 0;           /* GENERIC/CODEC/TEXT/...: already swept */
         }
@@ -975,8 +992,14 @@ static int vol_sweep_one_v3(invfs_volume *v, uint64_t inode_id,
                 if (pc->sniff(head, (size_t)head_len, name) <= 0)
                     continue;
                 if (vol_read_inode(v, inode_id, 0, &full, &full_len) == 0 && full) {
+                    if (getenv("INVFS_DEBUG_PACKS"))
+                        fprintf(stderr, "[sweep-v3] %s: trying containerpack %s (len=%zu)\n",
+                                name, pc->name, full_len);
                     prc = vol_containerpack_sweep(v, inode_id, name, pc, full, full_len);
                     free(full);
+                    if (getenv("INVFS_DEBUG_PACKS"))
+                        fprintf(stderr, "[sweep-v3] %s: pack %s finished prc=%d\n",
+                                name, pc->name, prc);
                     if (prc >= 100) return prc;
                     uint8_t chk_cls = 0;
                     if (vol_get_class(v, inode_id, &chk_cls, NULL, NULL) == 0 &&
@@ -1000,6 +1023,11 @@ static int vol_sweep_one_v3(invfs_volume *v, uint64_t inode_id,
     }
 
     int zlevel = invfs_profile_zstd_level(v->profile);
+    const char *env_zlvl = getenv("INVFS_SWEEP_ZSTD_LEVEL");
+    if (env_zlvl && *env_zlvl) {
+        int zl = atoi(env_zlvl);
+        if (zl >= 1 && zl <= 22) zlevel = zl;
+    }
 
     /* For multi-segment files: per-segment recompression preserves
      * segment boundaries for fast random I/O and enables intra- and
@@ -1010,11 +1038,18 @@ static int vol_sweep_one_v3(invfs_volume *v, uint64_t inode_id,
         uint8_t *orig = (uint8_t *)malloc(SEGMENT_SIZE);
         int any_swept = 0;
 
-        if (!new_ents || !cbuf_new || !orig) {
-            free(blob); free(new_ents); free(cbuf_new); free(orig);
+        /* O(1) hash map for tracking remapped duplicate pbas within the file */
+        size_t map_cap = 64;
+        while (map_cap < n_ents * 2) map_cap *= 2;
+        typedef struct { uint64_t old_pba; uint64_t new_pba; uint32_t algo; uint8_t zone; } pba_map_t;
+        pba_map_t *pmap = (pba_map_t *)calloc(map_cap, sizeof(*pmap));
+
+        if (!new_ents || !cbuf_new || !orig || !pmap) {
+            free(blob); free(new_ents); free(cbuf_new); free(orig); free(pmap);
             return -1;
         }
         memcpy(new_ents, ents, n_ents * sizeof(*new_ents));
+        pba_ref_ensure(v);
 
         for (size_t i = 0; i < n_ents; i++) {
             invfs_ast_block_entry *e = &new_ents[i];
@@ -1033,15 +1068,17 @@ static int vol_sweep_one_v3(invfs_volume *v, uint64_t inode_id,
 
             /* Check if this exact old_pba was already remapped earlier in this pass */
             int already_mapped = 0;
-            for (size_t k = 0; k < i; k++) {
-                if (ents[k].pba == old_pba && new_ents[k].pba != old_pba) {
-                    e->pba = new_ents[k].pba;
-                    e->zone = new_ents[k].zone;
-                    e->algo = new_ents[k].algo;
+            size_t h = (size_t)((old_pba * 11400714819323198485ull) & (map_cap - 1));
+            while (pmap[h].old_pba) {
+                if (pmap[h].old_pba == old_pba) {
+                    e->pba = pmap[h].new_pba;
+                    e->zone = pmap[h].zone;
+                    e->algo = pmap[h].algo;
                     already_mapped = 1;
                     any_swept = 1;
                     break;
                 }
+                h = (h + 1) & (map_cap - 1);
             }
             if (already_mapped)
                 continue;
@@ -1097,7 +1134,6 @@ static int vol_sweep_one_v3(invfs_volume *v, uint64_t inode_id,
                 continue;
             }
 
-            pba_ref_ensure(v);
             pba_ref_modify(v, old_pba, -1);
             pba_ref_modify(v, pba_new, +1);
             if (pba_ref_count(v, old_pba) == 0) {
@@ -1106,8 +1142,18 @@ static int vol_sweep_one_v3(invfs_volume *v, uint64_t inode_id,
             e->pba = pba_new;
             e->zone = INVFS_ZONE_BINARY;
             any_swept = 1;
+
+            /* record in pmap for subsequent segments sharing old_pba */
+            size_t inh = (size_t)((old_pba * 11400714819323198485ull) & (map_cap - 1));
+            while (pmap[inh].old_pba && pmap[inh].old_pba != old_pba)
+                inh = (inh + 1) & (map_cap - 1);
+            pmap[inh].old_pba = old_pba;
+            pmap[inh].new_pba = pba_new;
+            pmap[inh].algo = e->algo;
+            pmap[inh].zone = e->zone;
         }
 
+        free(pmap);
         free(orig);
         free(cbuf_new);
         free(blob);

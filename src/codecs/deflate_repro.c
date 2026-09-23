@@ -177,17 +177,22 @@ int invfs_deflate_repro_find(const uint8_t *raw, size_t raw_len,
         }
     }
 
-    /* 2. Check levels 1..9 with memLevel 9 and 7 */
+    /* 2. Check levels with memLevel 9 and 7 */
     static const int alt_mems[] = { 9, 7 };
     for (size_t m = 0; m < sizeof(alt_mems)/sizeof(alt_mems[0]); m++) {
-        for (int lv = 1; lv <= 9; lv++) {
+        for (size_t i = 0; i < sizeof(common_levels)/sizeof(common_levels[0]); i++) {
             if (try_candidate(raw, raw_len, target_stream, target_len, scratch, scratch_cap,
-                              lv, alt_mems[m], Z_DEFAULT_STRATEGY, wbits, out_params)) {
+                              common_levels[i], alt_mems[m], Z_DEFAULT_STRATEGY, wbits, out_params)) {
                 found = 1;
                 goto done;
             }
         }
     }
+
+    /* For QCOW2 (-12): QEMU only ever uses Z_DEFAULT_STRATEGY with mem 7..9.
+     * Skip deeper searches to keep per-cluster throughput in the hundreds of thousands/sec. */
+    if (wbits == -12)
+        goto done;
 
     /* 3. Check remaining memLevels 1..6 with default strategy */
     for (int mm = 6; mm >= 1; mm--) {

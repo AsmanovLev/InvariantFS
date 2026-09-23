@@ -69,7 +69,7 @@ echo "  qemu-img: $(qemu-img --version | head -1)"
 
 echo "== build the pack (the -Wall -Wextra -Werror gate) =="
 mkdir -p "$PACK/bin"
-WARN=$(cc -std=c11 -O2 -Wall -Wextra -Werror -o "$PACK/bin/qcow2" "$PACK/qcow2.c" -lz 2>&1) \
+WARN=$(cc -std=c11 -O2 -Wall -Wextra -Werror -I"$REPO/src/codecs" -o "$PACK/bin/qcow2" "$PACK/qcow2.c" "$REPO/src/codecs/deflate_repro.c" -lz 2>&1) \
     || { echo "FAIL: pack build failed"; echo "$WARN"; exit 1; }
 [ -z "$WARN" ] || { echo "FAIL: pack build not warning-clean:"; echo "$WARN"; exit 1; }
 echo "  bin/qcow2 built, -Wall -Wextra -Werror clean"

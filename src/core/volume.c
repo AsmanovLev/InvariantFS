@@ -913,8 +913,10 @@ static void v3_probe_rt30(invfs_volume *v)
  * sweep-start state; ckpt_seq != 0 pins the expected sweep sequence
  * (K=1 contract: only the one live checkpoint exists). */
 static invfs_volume *vol_open_inner(const char *path, int at_ckpt,
-                                    uint64_t ckpt_seq, int *err)
+                                    uint64_t ckpt_seq, int *err_out)
 {
+    int dummy_err = 0;
+    int *err = err_out ? err_out : &dummy_err;
     char devbuf[64];
     const char *real;
     int rc;

@@ -13,11 +13,16 @@
 #define _CRT_SECURE_NO_WARNINGS
 
 
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#if __has_include("miniz.h")
 #include "miniz.h"
+#elif __has_include("../codecs/miniz.h")
+#include "../codecs/miniz.h"
+#endif
 
 #ifdef _WIN32
 #include <windows.h>
@@ -37,14 +42,38 @@
 #include "volume.h"
 #include "blkio.h"
 #include "arc.h"
+#if __has_include("lz4.h")
 #include "lz4.h"
+#elif __has_include("../codecs/lz4.h")
+#include "../codecs/lz4.h"
+#endif
 #include "zstd.h"
 #include "zlib.h"
+#if __has_include("ppmd_codec.h")
 #include "ppmd_codec.h"
+#elif __has_include("../codecs/ppmd_codec.h")
+#include "../codecs/ppmd_codec.h"
+#endif
+#if __has_include("codec.h")
 #include "codec.h"
+#elif __has_include("../codecs/codec.h")
+#include "../codecs/codec.h"
+#endif
+#if __has_include("bcj_x86.h")
 #include "bcj_x86.h"
+#elif __has_include("../codecs/bcj_x86.h")
+#include "../codecs/bcj_x86.h"
+#endif
+#if __has_include("blake3.h")
 #include "blake3.h"
+#elif __has_include("../codecs/blake3.h")
+#include "../codecs/blake3.h"
+#endif
+#if __has_include("rs.h")
 #include "rs.h"
+#elif __has_include("../codecs/rs.h")
+#include "../codecs/rs.h"
+#endif
 
 
 /* flacx.c — FLAC frame recipe extract/rebuild (bit-exact). */
@@ -81,7 +110,11 @@ int tarx_rebuild(const tarx_member *m, size_t n,
                  uint8_t **out, size_t *olen);
 
 /* pngx.c — PNG repack (JXL lossless + IVPN recipe, bit-exact). */
+#if __has_include("pngx.h")
 #include "pngx.h"
+#elif __has_include("../recipes/pngx.h")
+#include "../recipes/pngx.h"
+#endif
 
 /* zlib (deflate replica for bit-exact gzip rebuild); inflate for split. */
 int deflateInit2_(z_streamp strm, int level, int method, int windowBits,
