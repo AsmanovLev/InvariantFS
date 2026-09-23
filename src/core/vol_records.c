@@ -861,16 +861,49 @@ static int del_siblings_cb(void *ctx_, uint64_t rec_pos,
     return 0;
 }
 
+static int del_siblings_v3_cb(void *ctx_, const char *path, uint64_t ino,
+                              uint32_t type, uint64_t size, int64_t mtime)
+{
+    del_siblings_ctx *c = (del_siblings_ctx *)ctx_;
+    size_t pl;
+    (void)ino; (void)type; (void)size; (void)mtime;
+    if (strncmp(path, c->name, c->nlen) != 0 || path[c->nlen] != '!')
+        return 0;
+    pl = strlen(path);
+    if (pl >= 256) return 0;
+    if (c->n >= c->cap) {
+        size_t ncap = c->cap ? c->cap * 2 : 16;
+        char (*nn)[256] = (char (*)[256])realloc(c->names, ncap * sizeof(*nn));
+        if (!nn) { c->oom = 1; return 1; }
+        c->names = nn;
+        c->cap = ncap;
+    }
+    memcpy(c->names[c->n++], path, pl + 1);
+    return 0;
+}
+
 int vol_delete_siblings(invfs_volume *v, const char *name)
 {
     char (*names)[256] = NULL;
     size_t n = 0, cap = 0, i;
     del_siblings_ctx c;
 
+    if (!v || !name) return 0;
     memset(&c, 0, sizeof c);
     c.v = v;
     c.name = name;
     c.nlen = strlen(name);
+
+    if (v->sb.vol_flags & VOLF_V3) {
+        vol_v3_walk(v, del_siblings_v3_cb, &c);
+        names = c.names;
+        n = c.n;
+        for (i = 0; i < n; i++)
+            vol_v3_unlink(v, names[i]);
+        free(names);
+        return (int)n;
+    }
+
     /* on OOM/IO abort the walk stops early; whatever was gathered is still
      * purged, matching the legacy break-and-purge behavior. */
     vol_records_walk(v, del_siblings_cb, &c);

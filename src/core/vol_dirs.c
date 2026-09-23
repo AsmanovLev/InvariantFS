@@ -577,6 +577,9 @@ int vol_v3_unlink(invfs_volume *v, const char *name)
         /* WP-N1: targeted free of unlinked file data blocks */
         if (in.type == INVFS_ITYP_REG)
             vol_v3_free_recipe_blocks(v, in.recipe_addr, 0);
+        /* Cascade delete container/transcode siblings if main file is unlinked */
+        if (strchr(name, '!') == NULL)
+            vol_delete_siblings(v, name);
     } else {
         in.nlink--;
         if (vol_v3_inode_delta_put(v, id, &in) != 0)

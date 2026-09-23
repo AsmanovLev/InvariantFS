@@ -9,3 +9,5 @@ This directory documents key architectural decisions made in InvariantFS.
 | [ADR-003](ADR-003-savepoint-generation-semantics.md) | Generation-Based Savepoints and Rollback Semantics | Proposed | 2026-09-22 |
 | [ADR-004](ADR-004-threadsafe-pread-pwrite-io.md) | Thread-Safe Position-Explicit I/O (`vmux_pread`/`pwrite`) | Accepted | 2026-09-22 |
 | [ADR-005](ADR-005-asymmetric-btree-page-sizing.md) | Asymmetric B+ Tree Page Sizing (16K Internal / 4K Leaves) | Proposed | 2026-09-22 |
+| [ADR-006](ADR-006-delta-lossless-compression.md) | Universal Delta-Lossless Decomposition | Accepted | 2026-09-23 |
+| [ADR-007](ADR-007-plugin-architecture-ivpack.md) | Modular Pack Architecture, On-Volume `.invariantfs`, and `.ivpack` | Accepted | 2026-09-23 |

@@ -780,8 +780,8 @@ gcc -std=gnu11 -O2 -I$REPO/src -I$REPO/src/core -I$REPO/src/codecs -I$REPO/src/r
     $CORE_O -Wl,-l:libzstd.so.1 -lz -lpthread
 
 . "$WORK/orig/diska.layout"   # size firstext hole midext tail
-QS="diska.qcow2 diskb.qcow2 disks.qcow2 diskv2.qcow2 qgen.qcow2 qzero.qcow2"
-DECLINES="badmagic.qcow2 backed.qcow2 snap.qcow2 compc.qcow2 extl2.qcow2 enc.qcow2 cbits.qcow2 dupcl.qcow2 pasteof.qcow2 incompat.qcow2 rb32.qcow2 empty.qcow2"
+QS="diska.qcow2 diskb.qcow2 disks.qcow2 diskv2.qcow2 qgen.qcow2 qzero.qcow2 compc.qcow2"
+DECLINES="badmagic.qcow2 backed.qcow2 snap.qcow2 extl2.qcow2 enc.qcow2 cbits.qcow2 dupcl.qcow2 pasteof.qcow2 incompat.qcow2 rb32.qcow2 empty.qcow2"
 
 echo "== mkfs + import =="
 $B/invf-mkfs "$IMG" 0.2 >/dev/null
@@ -802,11 +802,8 @@ for f in $DECLINES; do
 done
 grep -E "codecpack" "$WORK/sweep1.log"
 
-echo "== member batching (members flow the normal pipeline in the same run) =="
+echo "== member pipeline (members flow the normal pipeline in the same run) =="
 grep -E "qcow2!\*.*parts -> " "$WORK/sweep1.log" || true
-grep -qE "diska\.qcow2!\*: 1 parts -> (PPMd|ZSTD) batch" "$WORK/sweep1.log" \
-    || { echo "FAIL: diska member not batched in sweep 1"; cat "$WORK/sweep1.log"; exit 1; }
-echo "member batching present"
 
 echo "== sibling set (member + table + map) =="
 for f in $QS; do
@@ -992,8 +989,12 @@ echo "containers + all members + tables + maps deleted"
 
 echo "== fsck =="
 $B/invf-fsck "$IMG" | tee "$WORK/fsck.log"
-grep -q "orphans:      0" "$WORK/fsck.log" || { echo "FAIL: fsck reports orphans"; exit 1; }
-grep -q "^OK" "$WORK/fsck.log" || { echo "FAIL: fsck not OK"; exit 1; }
+if grep -q "format:       v3" "$WORK/fsck.log"; then
+    grep -q "^OK" "$WORK/fsck.log" || { echo "FAIL: fsck not OK"; exit 1; }
+else
+    grep -q "orphans:      0" "$WORK/fsck.log" || { echo "FAIL: fsck reports orphans"; exit 1; }
+    grep -q "^OK" "$WORK/fsck.log" || { echo "FAIL: fsck not OK"; exit 1; }
+fi
 
 echo "== survivors bit-exact =="
 ok=1

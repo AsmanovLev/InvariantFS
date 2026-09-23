@@ -954,6 +954,39 @@ static int vol_sweep_one_v3(invfs_volume *v, uint64_t inode_id,
     if (fz != INVFS_ZONE_RAW)
         return 0;               /* already blob-stored; unreadable: skip */
 
+    /* WP16a / WP-M26: container codecpacks (manifest type=container) -- decompose a
+     * container into "!mbrNNNN" member inodes that flow through the whole
+     * normal pipeline. */
+    if (name && name[0] && !strstr(name, "!mbrt") && !strstr(name, "!mbrmap")) {
+        size_t cn = 0, ci;
+        const invfs_codec *all = invfs_codec_all(&cn);
+        uint8_t head[8192];
+        int head_len = vol_read_range(v, inode_id, 0, sizeof head, head);
+        if (head_len > 0) {
+            for (ci = 0; ci < cn; ci++) {
+                const invfs_codec *pc = &all[ci];
+                const invfs_pack_def *pd;
+                int prc;
+                if (!pc->sniff || !(pc->caps & INVFS_CODEC_CAP_CONTAINER))
+                    continue;
+                pd = invfs_codec_pack_def(pc);
+                if (!pd || !pd->is_container)
+                    continue;
+                if (pc->sniff(head, (size_t)head_len, name) <= 0)
+                    continue;
+                if (vol_read_inode(v, inode_id, 0, &full, &full_len) == 0 && full) {
+                    prc = vol_containerpack_sweep(v, inode_id, name, pc, full, full_len);
+                    free(full);
+                    if (prc >= 100) return prc;
+                    uint8_t chk_cls = 0;
+                    if (vol_get_class(v, inode_id, &chk_cls, NULL, NULL) == 0 &&
+                        chk_cls == INVFS_CLASS_GENERIC_MEMLIMIT)
+                        return 0;
+                }
+            }
+        }
+    }
+
     uint8_t *blob = NULL;
     size_t blen = 0;
     invfs_ast_hdr ah;
@@ -1064,7 +1097,12 @@ static int vol_sweep_one_v3(invfs_volume *v, uint64_t inode_id,
                 continue;
             }
 
-            vol_free_blocks(v, old_pba, old_plen);
+            pba_ref_ensure(v);
+            pba_ref_modify(v, old_pba, -1);
+            pba_ref_modify(v, pba_new, +1);
+            if (pba_ref_count(v, old_pba) == 0) {
+                vol_free_blocks(v, old_pba, old_plen);
+            }
             e->pba = pba_new;
             e->zone = INVFS_ZONE_BINARY;
             any_swept = 1;

@@ -96,8 +96,12 @@ int vol_v3_free_recipe_blocks(invfs_volume *v,
             }
             if (!dup) {
                 uint64_t plen = 0;
-                if (seg_extent_checked(v, pba, &plen) == 0 && plen > 0)
-                    vol_free_blocks(v, pba, plen);
+                pba_ref_ensure(v);
+                pba_ref_modify(v, pba, -1);
+                if (pba_ref_count(v, pba) == 0) {
+                    if (seg_extent_checked(v, pba, &plen) == 0 && plen > 0)
+                        vol_free_blocks(v, pba, plen);
+                }
             }
         }
     }

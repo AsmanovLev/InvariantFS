@@ -318,12 +318,17 @@ static int pack_argv_build(const invfs_pack_def *def, const char *tmpl,
         if (argc == 0 && !strchr(arena + used, '/')) {
             /* WP16e: a bare argv[0] resolves exactly the way the pack
              * probe (codec.c pack_tool_resolvable) and the builtin tool
-             * layer do: $INVFS_TOOLS/<name> -> /usr/lib/invfs/tools/<name>
-             * -> bare name (execvp's PATH search). Without this the probe
-             * could pass on INVFS_TOOLS while execvp still ran the PATH
-             * tool of the same name. */
+             * layer do: <pack>/bin/<name> -> $INVFS_TOOLS/<name> ->
+             * /usr/lib/invfs/tools/<name> -> bare name (execvp's PATH search). */
             char rb[4096];
-            const char *rp = tool_resolve(arena + used, rb, sizeof rb);
+            const char *rp = NULL;
+            if (def && def->dir) {
+                int n = snprintf(rb, sizeof rb, "%s/bin/%s", def->dir, arena + used);
+                if (n > 0 && (size_t)n < sizeof rb && access(rb, X_OK) == 0)
+                    rp = rb;
+            }
+            if (!rp)
+                rp = tool_resolve(arena + used, rb, sizeof rb);
             size_t rl = strlen(rp);
             if (rl + 1 > acap - used) return -1;
             if (rp != arena + used) memcpy(arena + used, rp, rl + 1);
@@ -1941,6 +1946,29 @@ static int cpack_recipe_seg(invfs_volume *v, uint64_t ino,
 
     *out = NULL;
     *out_len = 0;
+
+    if (v->sb.vol_flags & VOLF_V3) {
+        invfs_v3_inode in;
+        if (vol_v3_inode_get(v, ino, &in) != 1)
+            return -1;
+        uint8_t *rblob = NULL;
+        size_t rblen = 0;
+        if (vol_v3_recipe_load(v, in.recipe_addr, &rblob, &rblen) != 0 || !rblob)
+            return -1;
+        const invfs_ast_block_entry *ents = NULL;
+        size_t n_ents = 0;
+        if (vol_ast_recipe_parse(rblob, rblen, &ah, &ents, &n_ents) == 0 && n_ents >= 1) {
+            pba = ents[0].pba;
+        }
+        free(rblob);
+        if (!pba || pba >= v->sb.total_blocks) return -1;
+        if (seg_read_checked(v, pba, 0, 0, &csize, &blob) != 0)
+            return -1;
+        *out = blob;
+        *out_len = csize;
+        return 0;
+    }
+
     if (meta_read_record_by_id(v, ino, &rec, &rl, NULL, 0, NULL) != 0)
         return -1;
     if (rl < INVFS_REC_HDR_LEN ||
@@ -2522,7 +2550,8 @@ int vol_containerpack_sweep(invfs_volume *v, uint64_t inode_id,
                         (uint64_t)full_len, old_ctime);
             goto out;
         }
-        vol_delete_inode(v, inode_id, name);
+        if (!(v->sb.vol_flags & VOLF_V3) || newino != inode_id)
+            vol_delete_inode(v, inode_id, name);
         /* the fresh blob record has no ext; carry the old meta across
          * (the vol_pack_sweep flow) */
         if (have_keep) {
@@ -2544,7 +2573,8 @@ int vol_containerpack_sweep(invfs_volume *v, uint64_t inode_id,
             vol_transcode_abort(v, name);
             goto out;
         }
-        vol_delete_inode(v, inode_id, name);
+        if (!(v->sb.vol_flags & VOLF_V3) || newino != inode_id)
+            vol_delete_inode(v, inode_id, name);
         /* the fresh blob record has no ext; carry the old meta across
          * (the vol_pack_sweep flow) */
         if (have_keep) {

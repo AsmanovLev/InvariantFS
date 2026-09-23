@@ -988,7 +988,10 @@ int vol_read_inode(invfs_volume *v, uint64_t inode_id, unsigned depth,
         len = (size_t)ah.file_size;
         data = (uint8_t *)malloc(len ? len : 1);
         if (!data) { free(blob); return -1; }
-        if (vol_decode_ast_entries(v, inode_id, "", &ah, ents, data) != 0) {
+        char iname[600];
+        iname[0] = 0;
+        vol_v3_path_of(v, inode_id, iname, sizeof iname);
+        if (vol_decode_ast_entries(v, inode_id, iname, &ah, ents, data) != 0) {
             free(data); free(blob);
             return -1;
         }
@@ -1290,6 +1293,25 @@ static int v3_read_range(invfs_volume *v, uint64_t inode_id, uint64_t offset,
             end < ents[i].file_offset) {
             free(blob);
             return -1;
+        }
+    }
+
+    /* WP16b: check for seekable container with !mbrmap sibling */
+    if (n_ents >= 1) {
+        const invfs_codec *pc = invfs_codec_by_algo(ents[0].algo);
+        const invfs_pack_def *pd = pc ? invfs_codec_pack_def(pc) : NULL;
+        int seek = pd && pd->is_container && (pc->caps & INVFS_CODEC_CAP_SEEK) != 0;
+        if (seek || !pc) {
+            char iname[600];
+            iname[0] = 0;
+            if (vol_v3_path_of(v, inode_id, iname, sizeof iname) > 0 && iname[0]) {
+                char mbn[640];
+                snprintf(mbn, sizeof mbn, "%s!mbrmap", iname);
+                if (vol_find(v, mbn) != 0) {
+                    free(blob);
+                    return cpack_map_read(v, iname, inode_id, in.size, offset, (uint8_t *)buf, len);
+                }
+            }
         }
     }
 

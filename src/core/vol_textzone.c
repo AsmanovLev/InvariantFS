@@ -71,6 +71,7 @@ static int acc_defer(tz_candidate **arr, size_t *np, size_t *capp,
 int tz_defer(invfs_volume *v, uint64_t inode_id, const char *name,
                     uint64_t size, uint32_t family)
 {
+    if (v && (v->sb.vol_flags & VOLF_V3)) return -1;
     return acc_defer(&v->tz, &v->tz_n, &v->tz_cap, inode_id, name, size,
                      family);
 }
@@ -81,6 +82,7 @@ int tz_defer(invfs_volume *v, uint64_t inode_id, const char *name,
 int bz_defer(invfs_volume *v, uint64_t inode_id, const char *name,
                     uint64_t size, uint32_t family)
 {
+    if (v && (v->sb.vol_flags & VOLF_V3)) return -1;
     return acc_defer(&v->bz, &v->bz_n, &v->bz_cap, inode_id, name, size,
                      family);
 }
@@ -1015,6 +1017,7 @@ int vol_tz_flush(invfs_volume *v)
     int rt, rb;
 
     if (!v) return -1;
+    if (v->sb.vol_flags & VOLF_V3) return 1; /* v3 uses per-segment Shadow ZSTD + dedupe, not v2 textzone batches */
     /* text first, then binary: two independent accumulators, one shared
      * owner inode (batch_seq space is handed out by tz_owner_load) */
     rt = tz_flush_one(v, 0);
