@@ -2348,7 +2348,7 @@ int vol_containerpack_sweep(invfs_volume *v, uint64_t inode_id,
      * is not in hand yet (strip runs next), and the container's size
      * bounds it -- the default covers the read path's true peak (the
      * whole-file output buffer plus one member in flight). */
-    if (v->arc_budget && (uint64_t)full_len > v->arc_budget) {
+    if (!def->map && v->arc_budget && (uint64_t)full_len > v->arc_budget) {
         vol_stamp_class(v, inode_id, INVFS_CLASS_GENERIC_MEMLIMIT,
                         (uint8_t)pc->algo, pc->generation);
         goto out;
