@@ -38,6 +38,7 @@ int main(int argc, char **argv)
     /* Start daemon in background */
     pid_t daemon_pid = fork();
     if (daemon_pid == 0) {
+        execl("bin/invf-plugin-host", "invf-plugin-host", "-n", "2", NULL);
         execl("tools/invf-plugin-host", "invf-plugin-host", "-n", "2", NULL);
         _exit(127);
     }

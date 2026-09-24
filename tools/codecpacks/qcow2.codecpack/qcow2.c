@@ -720,6 +720,113 @@ out_free:
 
 /* ---- map (MRMP: RECIPE gaps + coalesced MEMBER runs partition the file) - */
 
+/* In-memory buffer version of map: reads recipe file or buffer, writes MRMP directly to out_buf */
+static int cmd_map_mem(const char *in_path, uint8_t *out_buf, size_t out_cap, size_t *out_len)
+{
+    qc_img v;
+    uint8_t *ent = NULL;
+    uint64_t pos = 0, recipe_off, n_ents = 0;
+    uint32_t i;
+    int rc = 3;
+    uint8_t hdr[8];
+
+    if (!out_buf || out_cap < 8 || !out_len) return 3;
+    if (qc_parse(in_path, &v) != 0) return 3;
+
+    /* count the exact entry number first (the parse already capped it) */
+    i = 0;
+    while (i < v.n_alloc) {
+        uint64_t run_off = v.fext[i].off;
+        uint64_t run_len = v.fext[i].csize ? (uint64_t)v.fext[i].csize : v.cs;
+        uint64_t run_mem = (uint64_t)v.fext[i].rank * v.cs;
+        int is_comp = (v.fext[i].csize != 0);
+        i++;
+        while (i < v.n_alloc && !is_comp && !v.fext[i].csize &&
+               v.fext[i].off == run_off + run_len &&
+               (uint64_t)v.fext[i].rank * v.cs == run_mem + run_len) {
+            run_len += v.cs;
+            i++;
+        }
+        if (run_off > pos) n_ents++;
+        n_ents++;
+        pos = run_off + run_len;
+    }
+    if (pos < v.file_size) n_ents++;
+
+    size_t total_needed = 8 + (size_t)n_ents * 29;
+    if (out_cap < total_needed) {
+        qc_free(&v);
+        return 3; /* buffer too small */
+    }
+
+    ent = (uint8_t *)malloc((size_t)n_ents * 29);
+    if (!ent) { qc_free(&v); return 3; }
+
+    pos = 0;
+    n_ents = 0;
+    recipe_off = QR_HDR_LEN + (uint64_t)v.n_alloc * QR2_ENT_LEN;
+    i = 0;
+    while (i < v.n_alloc) {
+        uint64_t run_off = v.fext[i].off;
+        uint64_t run_len = v.fext[i].csize ? (uint64_t)v.fext[i].csize : v.cs;
+        uint64_t run_mem = (uint64_t)v.fext[i].rank * v.cs;
+        uint8_t *p;
+        int is_comp = (v.fext[i].csize != 0);
+        i++;
+        while (i < v.n_alloc && !is_comp && !v.fext[i].csize &&
+               v.fext[i].off == run_off + run_len &&
+               (uint64_t)v.fext[i].rank * v.cs == run_mem + run_len) {
+            run_len += v.cs;
+            i++;
+        }
+        if (run_off > pos) {                    /* RECIPE gap */
+            p = ent + (size_t)n_ents * 29;
+            put64le(p, pos);
+            put64le(p + 8, run_off - pos);
+            p[16] = 0;                          /* kind RECIPE */
+            put32le(p + 17, 0);
+            put64le(p + 21, recipe_off);
+            recipe_off += run_off - pos;
+            n_ents++;
+        }
+        p = ent + (size_t)n_ents * 29;
+        put64le(p, run_off);
+        put64le(p + 8, run_len);
+        if (is_comp) {
+            p[16] = 0;
+            put32le(p + 17, 0);
+            put64le(p + 21, recipe_off);
+            recipe_off += run_len;
+        } else {
+            p[16] = 1;
+            put32le(p + 17, MEMBER_IDX);
+            put64le(p + 21, run_mem);
+        }
+        n_ents++;
+        pos = run_off + run_len;
+    }
+    if (v.file_size > pos) {                    /* trailing RECIPE gap */
+        uint8_t *p = ent + (size_t)n_ents * 29;
+        put64le(p, pos);
+        put64le(p + 8, v.file_size - pos);
+        p[16] = 0;
+        put32le(p + 17, 0);
+        put64le(p + 21, recipe_off);
+        n_ents++;
+    }
+
+    memcpy(hdr, "MRMP", 4);
+    put32le(hdr + 4, (uint32_t)n_ents);
+    memcpy(out_buf, hdr, 8);
+    memcpy(out_buf + 8, ent, (size_t)n_ents * 29);
+    *out_len = total_needed;
+    rc = 0;
+
+    free(ent);
+    qc_free(&v);
+    return rc;
+}
+
 static int cmd_map(const char *in, const char *out)
 {
     qc_img v;
@@ -1001,6 +1108,11 @@ int ivpack_container_cmd(const ivpack_container_args *args)
         if (!args->recipe_path || !args->mbr_dir || !args->out_path) return -2;
         return cmd_rebuild(args->recipe_path, args->mbr_dir, args->out_path);
     case 5: /* MAP */
+        if (args->out_buf && args->out_cap > 0 && args->out_len) {
+            /* Direct in-memory buffer execution */
+            return cmd_map_mem(args->recipe_path ? args->recipe_path : args->in_path,
+                               args->out_buf, args->out_cap, args->out_len);
+        }
         if (!args->recipe_path || !args->out_path) return -2;
         return cmd_map(args->recipe_path, args->out_path);
     default:

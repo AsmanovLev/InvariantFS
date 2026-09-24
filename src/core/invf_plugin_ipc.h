@@ -1,8 +1,8 @@
 /* invf_plugin_ipc.h — High-performance SPSC shared-memory ring buffer IPC
  * for InvariantFS out-of-process worker pool (ADR-007).
  *
- * Provides sub-microsecond command dispatch and data transfer between the
- * InvariantFS engine (client) and sandboxed worker pool daemon (invf-plugin-host).
+ * Provides sub-microsecond command dispatch and direct in-memory data transfer
+ * between multi-threaded InvariantFS engines and sandboxed worker pool daemons.
  */
 #ifndef INVF_PLUGIN_IPC_H
 #define INVF_PLUGIN_IPC_H
@@ -12,7 +12,7 @@
 #include <sys/types.h>
 
 #define INVF_PLUGIN_IPC_MAGIC        0x504F4F4C49564653ULL /* "POOLIVFS" */
-#define INVF_PLUGIN_IPC_VERSION      1
+#define INVF_PLUGIN_IPC_VERSION      2
 #define INVF_PLUGIN_DEFAULT_SHM_NAME "/invfs_plugin_pool"
 #define INVF_PLUGIN_MAX_WORKERS      16
 #define INVF_PLUGIN_SLOT_SIZE        (64 * 1024 * 1024) /* 64 MiB per slot */
@@ -39,6 +39,9 @@ enum invf_container_cmd_type {
     INVF_CPACK_CMD_MAP       = 5,
 };
 
+#define INVF_SLOT_HEADER_SIZE 4096
+#define INVF_SLOT_DATA_CAP    (INVF_PLUGIN_SLOT_SIZE - INVF_SLOT_HEADER_SIZE)
+
 #pragma pack(push, 8)
 
 /* Request payload inside slot */
@@ -49,13 +52,15 @@ typedef struct invf_plugin_req {
     char     pack_name[INVF_PLUGIN_NAME_MAX]; /* e.g. "qcow2" */
     char     pack_path[INVF_PLUGIN_PATH_MAX]; /* path to .so or .ivpack */
     
-    /* File-path parameters (for disk-based operations) */
+    /* File-path parameters (for disk-based operations or when spilled to disk) */
     char     in_path[INVF_PLUGIN_PATH_MAX];
     char     out_path[INVF_PLUGIN_PATH_MAX];
     char     recipe_path[INVF_PLUGIN_PATH_MAX];
     char     mbr_dir[INVF_PLUGIN_PATH_MAX];
     
-    /* In-memory buffer parameters (data follows header in slot payload) */
+    /* In-memory buffer parameters (data lives in slot data area) */
+    uint32_t is_in_memory;    /* 1 = use in_buf/out_buf offsets, 0 = use file paths */
+    uint32_t is_spilled;      /* 1 = payload was too large for slot, spilled to disk in_path */
     uint64_t in_buf_offset;   /* offset relative to slot data area */
     uint64_t in_buf_len;
     uint64_t out_buf_offset;  /* offset relative to slot data area where out should be written */
@@ -79,17 +84,17 @@ typedef struct invf_plugin_resp {
 
 /* Single slot shared between 1 client thread and 1 worker process */
 typedef struct invf_plugin_slot {
-    /* Eventfd descriptors are passed or inherited out-of-band / via unix socket */
     volatile uint32_t client_seq;  /* client increments after writing req */
     volatile uint32_t worker_seq;  /* worker increments after writing resp */
     volatile uint32_t state;       /* 0=IDLE, 1=BUSY, 2=DONE, 3=ERROR */
-    uint32_t          reserved;
+    volatile uint32_t lock;        /* client-side slot checkout lock (CAS) */
 
     invf_plugin_req   req;
     invf_plugin_resp  resp;
+    uint8_t           pad[INVF_SLOT_HEADER_SIZE - sizeof(invf_plugin_req) - sizeof(invf_plugin_resp) - 16];
 
-    /* Raw data buffer area (64MB - header size) */
-    uint8_t           data[INVF_PLUGIN_SLOT_SIZE - sizeof(invf_plugin_req) - sizeof(invf_plugin_resp) - 64];
+    /* Raw data buffer area (64MB - 4KB header) */
+    uint8_t           data[INVF_SLOT_DATA_CAP];
 } invf_plugin_slot;
 
 /* Master header at start of shared memory */

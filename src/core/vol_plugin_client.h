@@ -1,5 +1,8 @@
 /* vol_plugin_client.h — Client library for dispatching containerpack and codecpack
  * operations to the invf-plugin-host worker pool daemon over SPSC shm / eventfd.
+ *
+ * Supports multi-threaded concurrent execution, direct in-memory buffers,
+ * and automatic spill-to-disk on oversized payloads.
  */
 #ifndef VOL_PLUGIN_CLIENT_H
 #define VOL_PLUGIN_CLIENT_H
@@ -18,16 +21,13 @@ extern "C" {
 /* Check if the plugin worker pool daemon is available */
 bool invfs_plugin_pool_is_available(void);
 
-/* Connect to the plugin pool (returns 0 on success, negative on error) */
+/* Connect to the plugin pool (thread-safe, initializes pool mappings) */
 int invfs_plugin_pool_connect(void);
 
 /* Disconnect from the pool */
 void invfs_plugin_pool_disconnect(void);
 
-/* Try to execute a containerpack command via worker pool.
- * Returns 0 on success, positive error code from worker, or -1 if worker pool
- * is unavailable or does not support the request (signaling fallback to CLI exec).
- */
+/* Multi-threaded command dispatch (file paths) */
 int invfs_plugin_pool_container_cmd(const char *pack_name,
                                     const char *pack_so_path,
                                     int cmd,
@@ -36,7 +36,21 @@ int invfs_plugin_pool_container_cmd(const char *pack_name,
                                     const char *recipe_path,
                                     const char *mbr_dir);
 
-/* Estimate via worker pool. Returns 0 on success, or -1 if unavailable */
+/* Multi-threaded direct in-memory buffer execution with spill-to-disk fallback.
+ * If in_len or out_cap exceeds slot capacity (64MB), automatically writes to a temporary
+ * disk spill file, runs the command, and reads the result back.
+ */
+int invfs_plugin_pool_container_cmd_mem(const char *pack_name,
+                                        const char *pack_so_path,
+                                        int cmd,
+                                        const char *recipe_path,
+                                        const uint8_t *in_buf,
+                                        size_t in_len,
+                                        uint8_t *out_buf,
+                                        size_t out_cap,
+                                        size_t *out_len);
+
+/* Estimate via worker pool */
 int invfs_plugin_pool_container_estimate(const char *pack_name,
                                          const char *pack_so_path,
                                          const char *in_path,

@@ -117,16 +117,23 @@ static void worker_loop(int slot_idx, invf_plugin_slot *slot, int req_efd, int r
                 resp->msg_type = INVF_MSG_ERROR;
                 snprintf(resp->err_msg, sizeof(resp->err_msg), "plugin %s not loaded or lacks cmd_fn", req->pack_name);
             } else {
+                size_t out_len = 0;
                 ivpack_container_args cargs = {
                     .cmd = req->cmd,
                     .in_path = req->in_path[0] ? req->in_path : NULL,
                     .out_path = req->out_path[0] ? req->out_path : NULL,
                     .recipe_path = req->recipe_path[0] ? req->recipe_path : NULL,
                     .mbr_dir = req->mbr_dir[0] ? req->mbr_dir : NULL,
+                    .in_buf = (req->is_in_memory && req->in_buf_len > 0) ? (slot->data + req->in_buf_offset) : NULL,
+                    .in_len = req->in_buf_len,
+                    .out_buf = (req->is_in_memory && req->out_buf_cap > 0) ? (slot->data + req->out_buf_offset) : NULL,
+                    .out_cap = req->out_buf_cap,
+                    .out_len = &out_len,
                     .err_msg = resp->err_msg,
                     .err_msg_cap = sizeof(resp->err_msg)
                 };
                 resp->status = p->cmd_fn(&cargs);
+                resp->out_buf_len = out_len;
                 resp->msg_type = (resp->status == 0) ? INVF_MSG_RESPONSE : INVF_MSG_ERROR;
             }
         } else if (req->msg_type == INVF_MSG_CONTAINER_EST) {
