@@ -1969,7 +1969,13 @@ void vol_close(invfs_volume *v)
        dirtied the device (vol_mark_dirty refuses), so there is nothing to
        flush and the CLEAN mark is not this view's to write. */
     if (v->dirty && !v->time_travel) {
-        if (v->needs_recovery && !(v->sb.vol_flags & VOLF_V3)) {
+        /* WP80/A: v3 sets needs_recovery unconditionally at open (the M5
+         * backstop), so it cannot distinguish a real this-session io error
+         * there -- io_latched can. A latched volume must never write CLEAN:
+         * its in-RAM state may sit past bytes that never reached the device. */
+        int latched = v->io_latched ||
+                      (v->needs_recovery && !(v->sb.vol_flags & VOLF_V3));
+        if (latched) {
             /* WP22c: an io error latched this session. Do NOT run the
              * usual final flush: the in-RAM journal/bitmap may reflect
              * mutations whose records never reached the device (the
@@ -1981,20 +1987,32 @@ void vol_close(invfs_volume *v)
                     "session; the final flush is skipped and the volume "
                     "stays dirty for recovery at the next mount\n");
         } else if (vol_flush(v) == 0) {
-            v->sb.state = INVFS_STATE_CLEAN;
-            if (vol_write_sb(v) != 0)
-                fprintf(stderr, "vol_close: could not mark volume clean; "
-                                "next mount will recover\n");
+            /* WP80/B: the CLEAN superblock describes the state vol_flush
+             * just persisted, so it must never be written before that state
+             * is durable. Barrier BEFORE the CLEAN write -- not after, and
+             * not opt-in. A buffered image file needs it for power-loss
+             * safety; a device-backed mount needs it to order the device
+             * cache. The documented opt-out (INVFS_CLOSE_NOBARRIER=1) is
+             * for buffered image files on hosts where the barrier cost is
+             * unacceptable; the flush ordering above still makes process
+             * death survivable either way. */
+            const char *nb = getenv("INVFS_CLOSE_NOBARRIER");
+            if ((!nb || strcmp(nb, "0") == 0) &&
+                vmux_barrier(v, "close") < 0) {
+                vol_io_error_latch(v, "close barrier");
+                fprintf(stderr, "vol_close: barrier before CLEAN failed; "
+                        "volume stays dirty and will be recovered at the "
+                        "next mount\n");
+            } else {
+                v->sb.state = INVFS_STATE_CLEAN;
+                if (vol_write_sb(v) != 0)
+                    fprintf(stderr, "vol_close: could not mark volume clean; "
+                                    "next mount will recover\n");
+            }
         } else {
             fprintf(stderr, "vol_close: final flush failed; volume stays "
                             "dirty and will be recovered at next mount\n");
         }
-        /* A buffered image file needs a real barrier for power-loss safety;
-           a device is already write-through. Off by default because the
-           barrier costs a full device cache flush and the ordering above is
-           what makes process death survivable either way. */
-        if (getenv("INVFS_FSYNC"))
-            vmux_barrier(v, "close");
     }
     /* WP-M10: drop the in-memory delta index (the log itself is already
      * durable; no flush is needed). No-op for a v2 handle. */
@@ -2510,19 +2528,27 @@ int vol_flush(invfs_volume *v)
 int vol_sync(invfs_volume *v)
 {
     if (!v) return -1;
-    /* WP-M1: the v3 skeleton is empty/read-only -- nothing in flight, so
-     * the durability contract is already met without touching the device. */
-    if (v->sb.vol_flags & VOLF_V3) return 0;
     /* WP24-lite: nothing of this handle's can be in flight (mutations are
      * refused), so the durability contract is already met without touching
      * the device. */
     if (v->time_travel) return 0;
+    /* WP80/A: v3 is the default full format now, not the empty/read-only
+     * skeleton the WP-M1 comment described. Its pending state is the dirty
+     * block bitmap, which vol_flush persists (WP75); the delta records are
+     * already barriered at append (see Bug C in docs/architecture/META-V3.md)
+     * and the data segments they name are written before that barrier, so a
+     * vol_flush + one barrier covers the whole fsync contract exactly as the
+     * v2 path does. Returning early here silently made FUSE .fsync a no-op. */
     if (vol_flush(v) != 0) return -1;   /* flush latches its own failures */
 #ifndef _WIN32
     /* WP22c test hook (tools/test-flushfail.sh): the Nth vol_sync of the
      * process simulates the error window -- the un-barriered inode-area
      * tail dies in "writeback" (zeroed on the image) and the barrier
-     * reports EIO. */
+     * reports EIO. WP80: the hook now runs on v3 too (the early return
+     * above used to hide it). v3 has no v2 inode area, so the zeroing is a
+     * no-op there -- but the latch, the refused later mutations and the
+     * no-CLEAN close are exercised on v3, which is the failure path that
+     * matters now. */
     if (v->sync_fail_at && --v->sync_fail_at == 0) {
         if (v->inode_area_pos > v->inode_area_durable) {
             static const uint8_t z[INVFS_BLOCK_SIZE];
@@ -4041,13 +4067,19 @@ int vol_read_raw(invfs_volume *v, uint64_t offset, void *buf, size_t len)
 int vol_write_enabled(invfs_volume *v)
 {
     /* WP-M6: a v3 volume has no v2 record stream; the M5 backstop keeps
-     * needs_recovery set so the v2 mutators still refuse (they call
-     * vol_mark_dirty), but the v3 base-tree namespace (dirents + inode rows)
-     * must be writable through FUSE now. Only the READONLY latch applies.
+     * needs_recovery set for the whole session (vol_open sets it
+     * unconditionally), so it cannot be the gate here -- an inherited DIRTY
+     * state is replayed at open and the namespace must be writable through
+     * FUSE. Only the READONLY latch applies.
      * WP-M19: a degraded v3 mount (dev0 absent) is read-only by
-     * construction too -- it is serving from the dev1 metadata mirror. */
+     * construction too -- it is serving from the dev1 metadata mirror.
+     * WP80/A: io_latched is different from needs_recovery -- it means a
+     * flush/sync barrier failed THIS session, so the append tail is past
+     * unpersisted bytes. The v3 namespace must refuse mutations then just
+     * like v2, or a latched volume keeps appending into the hole. */
     if (v->sb.vol_flags & VOLF_V3)
-        return !(v->sb.vol_flags & VOLF_READONLY) && !v->degraded;
+        return !(v->sb.vol_flags & VOLF_READONLY) && !v->degraded &&
+               !v->io_latched;
     /* A volume awaiting recovery is read-only for the same reason a
        READONLY-flagged one is: the callers that check this are the ones that
        would otherwise append records, and appending onto maps that were never

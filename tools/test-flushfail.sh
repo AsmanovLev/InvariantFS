@@ -11,7 +11,12 @@
 #   latches (later mutations refused), the append cursor is re-anchored
 #   at the last barriered position, and after a clean close + reopen the
 #   barriered file is present and bit-exact while the un-barriered one is
-#   absent (complete-or-absent, never silently lost after an ack).
+#   absent on v2 (complete-or-absent, never silently lost after an ack).
+#   WP80: v3 is the only format mkfs writes now. Its delta append is
+#   itself barriered (see docs/architecture/META-V3.md), so the second
+#   create is durable BEFORE the failing sync; the failure still latches
+#   and refuses later mutations, and the file comes back bit-exact
+#   (complete-or-absent, here: complete).
 #
 #   Leg B (F2 rename): a fast-path rename must kill the SOURCE name's own
 #   record (the pre-fix tombstone named the shared id's newest record --
@@ -58,6 +63,19 @@ rm -f "$IMG_A" "$IMG_B" "$IMG_C" "$IMG_D" "$IMG_E"
 
 fail() { echo "FAIL: $*" >&2; exit 1; }
 
+# WP80: on-disk format probe (format_version byte at 0x90; 3 = Meta-v3).
+img_is_v3() {
+    python3 - "$1" <<'PY'
+import sys
+try:
+    with open(sys.argv[1], "rb") as f:
+        sb = f.read(0x91)
+except OSError:
+    sys.exit(1)
+sys.exit(0 if len(sb) >= 0x91 and sb[0x90] == 3 else 1)
+PY
+}
+
 # ---- the engine harness ------------------------------------------------
 # canonical core object list emitted by `make all` (build/core_objs.txt)
 OBJS="$(sed "s|^|$REPO/|" "$REPO/build/core_objs.txt")"
@@ -101,6 +119,20 @@ static void assert_file(invfs_volume *v, const char *name, size_t len,
     if (memcmp(want, buf, len) != 0) die("assert_file: content mismatch");
     free(want);
     free(buf);
+}
+
+/* WP80: the leg-A post-crash assertion depends on the format. On v3 the
+ * delta append is barriered, so an un-fsync'd create is already durable;
+ * on v2 it is not. Read the on-disk format marker directly. */
+static int img_is_v3(const char *img)
+{
+    FILE *f = fopen(img, "rb");
+    invfs_superblock sb;
+    int v3 = 0;
+    if (f && fread(&sb, sizeof sb, 1, f) == 1)
+        v3 = (sb.vol_flags & VOLF_V3) != 0;
+    if (f) fclose(f);
+    return v3;
 }
 
 static uint64_t create_pattern(invfs_volume *v, const char *name,
@@ -151,7 +183,14 @@ static int cmd_f1check(const char *img)
     invfs_volume *v = vol_open(img, &err);
     if (!v) die("open");
     assert_file(v, "pin1.bin", 100 * 1024, 11);
-    if (vol_find(v, "hole1.bin")) die("hole1.bin survived a failed sync");
+    /* complete-or-absent: never torn, never silently lost after an ack.
+     * v3's per-append barrier makes the un-fsync'd create durable, so it
+     * must be present and bit-exact; v2 loses the un-barriered tail. */
+    if (img_is_v3(img)) {
+        assert_file(v, "hole1.bin", 200 * 1024, 22);
+    } else if (vol_find(v, "hole1.bin")) {
+        die("hole1.bin survived a failed sync");
+    }
     if (vol_find(v, "post.bin"))  die("post.bin exists");
     vol_close(v);
     printf("F1CHECK-OK\n");
@@ -623,15 +662,17 @@ H=$WORK/ff_harness
 # ---- leg A: F1 -- failed sync latches + re-anchors ----------------------
 echo "== leg A: failed barrier -> latch, re-anchor, complete-or-absent =="
 $B/invf-mkfs $IMG_A 0.0625 >"$WORK/mkfs-a.log" || fail "mkfs A"
-# the 2nd vol_sync of the process drops the un-barriered tail + reports EIO
+# the 2nd vol_sync of the process reports EIO (and drops the un-barriered
+# v2 inode-area tail; on v3 the delta append is already barriered)
 INVFS_SYNC_FAIL_AT=2 "$H" f1run $IMG_A 2>"$WORK/f1run.log" || {
     cat "$WORK/f1run.log"; fail "f1run"; }
 grep -q "latched" "$WORK/f1run.log" || { cat "$WORK/f1run.log"; fail "no latch log"; }
 "$H" f1check $IMG_A || fail "f1check"
 # recovery ladder: the volume stayed DIRTY (the latch persisted), the
-# holed file's blocks are reclaimed, the volume ends structurally clean
-# (fsck -f exits 3 -- "issues found" -- for the orphans it just freed;
-# the honest answer to a real loss, not a crash)
+# un-barriered tail's blocks (if any) are reclaimed, the volume ends
+# structurally clean. On v2 fsck -f exits 3 ("issues found") for the
+# orphans it just freed -- the honest answer to a real loss; on v3 nothing
+# was lost, so the ladder simply comes back clean.
 set +e
 $B/invf-fsck $IMG_A -f >"$WORK/fsck-a1.log" 2>&1
 set -e
@@ -639,7 +680,7 @@ $B/invf-fsck $IMG_A >"$WORK/fsck-a2.log" 2>&1 || true
 grep -q "^OK$" "$WORK/fsck-a2.log" || { cat "$WORK/fsck-a2.log"; fail "fsck not clean post-recovery"; }
 $B/invf-verify $IMG_A --deep >"$WORK/verify-a.log" 2>&1 || fail "verify A"
 grep -q " 0 corrupt," "$WORK/verify-a.log" || fail "verify A reported corrupt"
-echo "   pinned file bit-exact, holed file absent, latch held, fsck clean"
+echo "   pinned file bit-exact, complete-or-absent held, latch held, fsck clean"
 
 # ---- leg B: F2 -- the rename kills the source's own record --------------
 echo "== leg B: fast-path rename retires the source name =="
@@ -660,6 +701,21 @@ grep -q "^OK$" "$WORK/fsck-c.log" || { cat "$WORK/fsck-c.log"; fail "fsck C not 
 $B/invf-verify $IMG_C --deep >"$WORK/verify-c.log" 2>&1 || fail "verify C"
 grep -q " 0 corrupt," "$WORK/verify-c.log" || fail "verify C reported corrupt"
 echo "   survivor bit-exact in-session and after reopen; fsck/verify clean"
+
+# ---- WP80: v2-only legs D-I are skipped on a Meta-v3 volume ------------
+# invf-mkfs writes Meta-v3 only (v2 is retired in v0.5.0). Legs D-I below
+# exercise the retired v2 machinery: the contiguous inode-area record
+# stream and its vol_inode_next walk (D, I), the flat/slotted v2 journal
+# and mid-compaction crash stages (F, G, G2, H), and the CKP0 sweep
+# checkpoint that f2mvlive arms (E). None of that exists on a v3 volume,
+# so they cannot run. The v3 equivalents of rename/retire/fsck honesty are
+# covered by tools/test-meta-v3.sh, test-meta-v3-fold.sh and
+# test-meta-v3-delta.sh. Legs A-C above run on the live format.
+if img_is_v3 "$IMG_A"; then
+    echo "== legs D-I: SKIP (v2-only machinery retired on Meta-v3; see test-meta-v3*.sh) =="
+    echo "PASS: WP22c (v3: flush/sync failure latch + rename/retire)"
+    exit 0
+fi
 
 # ---- leg D: WP22d -- the dangling live record is cut + quarantined ------
 # (pre-WP22d this leg asserted fsck only COUNTED the miss; the consistent

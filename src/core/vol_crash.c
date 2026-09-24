@@ -33,8 +33,10 @@
  * What "durable" buys depends on the backing store. A device is opened
  * FILE_FLAG_NO_BUFFERING|FILE_FLAG_WRITE_THROUGH (blkio.c), so write ordering
  * there survives power loss. An image file is buffered, so ordering survives
- * process death -- which is what the crash tests inject -- but power loss
- * needs an actual barrier; INVFS_FSYNC=1 adds one at close.
+ * process death -- which is what the crash tests inject. WP80: power loss is
+ * covered by default -- vol_close now issues a barrier before it writes the
+ * CLEAN superblock (INVFS_CLOSE_NOBARRIER=1 is the documented opt-out), and
+ * vol_sync does the same on v3 as on v2.
  */
 int vol_mark_dirty(invfs_volume *v)
 {
@@ -175,7 +177,11 @@ int vol_needs_recovery(invfs_volume *v)
 void vol_io_error_latch(invfs_volume *v, const char *what)
 {
     if (!v) return;
-    if (!v->needs_recovery)
+    /* WP80/A: io_latched is the "failed THIS session" flag. needs_recovery
+     * cannot gate the message on v3 -- vol_open sets it unconditionally for
+     * the whole session, so the latch would be silent exactly where it is
+     * most important. */
+    if (!v->io_latched)
         fprintf(stderr, "vol: %s failed; volume latched until "
                 "remount+fsck (inode-area tail re-anchored %llu -> %llu)\n",
                 what,

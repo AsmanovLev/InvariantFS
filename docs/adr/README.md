@@ -12,3 +12,4 @@ This directory documents key architectural decisions made in InvariantFS.
 | [ADR-006](ADR-006-delta-lossless-compression.md) | Universal Delta-Lossless Decomposition | Accepted | 2026-09-23 |
 | [ADR-007](ADR-007-plugin-architecture-ivpack.md) | Modular Pack Architecture, On-Volume `.invariantfs`, and `.ivpack` | Accepted | 2026-09-23 |
 | [ADR-008](ADR-008-fuse-vs-kernel.md) | FUSE Userspace Daemon vs. In-Kernel Filesystem (VFS) | Accepted | 2026-09-24 |
+| [ADR-009](ADR-009-v3-durability-contract.md) | Meta-v3 Durability Contract (fsync, close, per-append barrier) | Accepted | 2026-09-24 |

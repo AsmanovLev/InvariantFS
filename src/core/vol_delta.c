@@ -485,6 +485,8 @@ int vol_delta_append(invfs_volume *v, const uint8_t *key, uint16_t klen,
         return -1;
     if (!v->delta_ready && vol_delta_mount(v) != 0)
         return -1;
+    if (vol_mark_dirty(v) != 0)
+        return -1;
 
     rl = (size_t)INVFS_DELTA_REC_HDR_LEN + (size_t)klen + (size_t)vlen;
     if (rl > INVFS_DELTA_SEG_BYTES - INVFS_DELTA_SEG_HDR_LEN)

@@ -509,7 +509,9 @@ typedef struct invfs_volume {
      * every inode-area byte appended since the last successful barrier
      * dies in "writeback" (zeroed on the image) and the barrier reports
      * EIO. The engine must latch + re-anchor, and every later mutation
-     * must fail loudly. 0 = off. */
+     * must fail loudly. 0 = off. WP80: the hook runs on v3 too; v3 has no
+     * v2 inode area, so there the zeroing is a no-op and the latch + the
+     * refused mutations are what is exercised. */
     uint64_t sync_fail_at;
     /* hot population counters, maintained incrementally by idx_put /
      * idx_del_at / idx_del (insert vs update vs removal) and bumped once
@@ -1098,8 +1100,10 @@ int vol_write_sb(invfs_volume *v);
  * What "durable" buys depends on the backing store. A device is opened
  * FILE_FLAG_NO_BUFFERING|FILE_FLAG_WRITE_THROUGH (blkio.c), so write ordering
  * there survives power loss. An image file is buffered, so ordering survives
- * process death -- which is what the crash tests inject -- but power loss
- * needs an actual barrier; INVFS_FSYNC=1 adds one at close.
+ * process death -- which is what the crash tests inject. WP80: power loss is
+ * covered by default -- vol_close now issues a barrier before it writes the
+ * CLEAN superblock (INVFS_CLOSE_NOBARRIER=1 is the documented opt-out), and
+ * vol_sync does the same on v3 as on v2.
  */
 int vol_mark_dirty(invfs_volume *v);
 
