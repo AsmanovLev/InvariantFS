@@ -1331,7 +1331,7 @@ static int v3_base_root(invfs_volume *v, invfs_blkptr *out)
  * whole metadata zone allocated); their bits must land before RT30 names a
  * page, or a reopen could hand the same block out again. Mirrors the v2
  * partial-bitmap write in vol_flush. */
-static int v3_bitmap_flush(invfs_volume *v)
+int vol_v3_bitmap_flush(invfs_volume *v)
 {
     uint64_t bm_bytes = (uint64_t)v->bitmap_blocks * INVFS_BLOCK_SIZE;
     uint64_t base = v->sb.metadata_zone_start * INVFS_BLOCK_SIZE;
@@ -1383,7 +1383,7 @@ static int v3_publish(invfs_volume *v, invfs_blkptr root, uint64_t old_gen)
     }
     /* structure-before-reference (WP-M3): the COW pages + the allocation
      * bitmap are durable before RT30 points at the new root. */
-    if (v3_bitmap_flush(v) != 0)
+    if (vol_v3_bitmap_flush(v) != 0)
         return -1;
     if (vmux_barrier(v, "v3 inode pages") < 0)
         return -1;

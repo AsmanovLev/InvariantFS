@@ -1395,6 +1395,11 @@ int seg_read_checked(invfs_volume *v, uint64_t pba, uint64_t plen,
 int vol_read_inode(invfs_volume *v, uint64_t inode_id, unsigned depth,
                           uint8_t **out, size_t *out_len);
 
+/* WP75: persist the dirty range of the v3 block bitmap (vol_btree.c). Called
+ * by v3_publish before it names a page, and by vol_flush so allocations and
+ * frees that land after the last publish are not dropped at close. */
+int vol_v3_bitmap_flush(invfs_volume *v);
+
 /* WP-M8: content-addressed immutable recipe blobs (vol_btree.c). */
 int vol_v3_recipe_store(invfs_volume *v, const uint8_t *blob, size_t blen,
                         uint8_t addr_out[INVFS_V3_RECIPE_ADDR_LEN]);

@@ -32,12 +32,32 @@ REPO="$(cd "$(dirname "$0")/.." && pwd)"
 B=$REPO/bin
 WORK=/dev/shm/wp12dedupe
 IMG=wp12dedupe.img
+IMGCTL=wp12dedupe-ctl.img
 IMGT=wp12dedupe-tz.img
-rm -rf "$WORK" && mkdir -p "$WORK/orig" "$WORK/out"
+rm -rf "$WORK" && mkdir -p "$WORK/orig" "$WORK/origctl" "$WORK/out"
 cd /dev/shm
-rm -f "$IMG" "$IMGT"
+rm -f "$IMG" "$IMGCTL" "$IMGT"
 
 free_blocks() { $B/invf-fsck "$1" | awk '/free blocks:/ {print $3}'; }
+
+# v3 fsck reports base-tree health (bad pages / cycles) rather than the v2
+# orphan/missing counters; accept either report shape but require a clean
+# verdict (WP75: the test now reaches this section on the default v3 format).
+fsck_clean() {
+    local log=$1
+    if grep -q "format:       v3" "$log"; then
+        grep -q "bad pages:    0" "$log" &&
+        grep -q "cycles/shared: 0" "$log" &&
+        grep -q "^OK$" "$log"
+    else
+        grep -q "orphans:      0" "$log" &&
+        grep -q "missing:      0" "$log"
+    fi
+}
+
+# Meta-v3 stores text as generic ZSTD (no deferred PPMd batches), so the
+# leg-2 expectations differ between formats. Meta-v3 is the default.
+is_v3() { $B/invf-fsck "$1" 2>/dev/null | grep -q "format:       v3"; }
 
 echo "== generate tree (leg 1) =="
 python3 - <<'PY'
@@ -58,6 +78,26 @@ w("dup2.bin", D)
 w("uniq.bin", random.randbytes(96*K))
 for f in sorted(os.listdir(d)):
     print(" ", f, os.path.getsize(os.path.join(d, f)), "bytes")
+
+# Control tree: byte-identical to the dedupe tree except every would-be
+# shared 64 KB segment has one byte flipped, so the dedupe pass merges
+# nothing. Keeping the rest identical keeps the sweep's non-dedupe metadata
+# footprint (and compression geometry) the same, so the control image
+# captures the metadata allocations that make the naive
+# FREE0+FREED==FREE1 identity false on Meta-v3 (WP75 Bug C).
+import shutil
+c = "/dev/shm/wp12dedupe/origctl"
+def copy_flip(src, dst, offs):
+    b = bytearray(open(os.path.join(d, src), "rb").read())
+    for off in offs:
+        b[off] ^= 0xFF
+    open(os.path.join(c, dst), "wb").write(bytes(b))
+shutil.copy(os.path.join(d, "a1.bin"), os.path.join(c, "a1.bin"))
+copy_flip("a2.bin", "a2.bin", [65536])          # break a1/a2 shared middle
+shutil.copy(os.path.join(d, "dup1.bin"), os.path.join(c, "dup1.bin"))
+copy_flip("dup2.bin", "dup2.bin", [0, 65536, 131072])   # break all 3 dup segments
+shutil.copy(os.path.join(d, "uniq.bin"), os.path.join(c, "uniq.bin"))
+print("control tree: same geometry, no shared segments")
 PY
 
 FILES=$(cd "$WORK/orig" && ls)
@@ -78,7 +118,19 @@ MERGED=$(echo "$DEDUP_LINE" | awk '{print $3}')
 FREED=$(echo "$DEDUP_LINE" | awk '{print $6}')
 # 1 shared middle segment (a1/a2) + 3 fully-shared segments (dup1/dup2)
 [ "$MERGED" = "4" ] || { echo "FAIL: expected 4 merged segments, got $MERGED"; exit 1; }
-# merged blocks must be back in the bitmap: free-after == free-before + freed
+# merged blocks must be back in the bitmap. On Meta-v3 the sweep also
+# allocates metadata (recipe/base/delta pages), so the naive
+# FREE0 + FREED == FREE1 identity is false. Compare against a no-dedupe
+# control image with identical geometry: the control captures the sweep's
+# non-dedupe metadata allocations, so
+#   (FREE1_dup - FREE0_dup) - (FREE1_ctl - FREE0_ctl)
+# recovers the blocks dedupe returned minus the handful of pages it
+# allocates to rewrite the losing inodes (one recipe/inode page per merged
+# file on v3). The residual must therefore be small and non-negative --
+# before WP75 the bitmap flush was missing, so the residual would have been
+# ~FREED (the frees simply never reached disk). DEDUPE_META_MAX bounds the
+# rewrite metadata for this fixture.
+DEDUPE_META_MAX=4
 # WP21: the sweep held its frees in the retention registry (the live
 # checkpoint); realize it first so the bitmap reflects the dedupe (the
 # no-op re-sweep inside --realize leaves no new checkpoint behind).
@@ -86,9 +138,33 @@ $B/invf-sweep "$IMG" --realize >> "$WORK/sweep1.log" 2>&1 || {
     cat "$WORK/sweep1.log"; exit 1; }
 FREE1=$(free_blocks "$IMG")
 echo "free blocks after sweep: $FREE1 (freed by dedupe: $FREED)"
-[ "$((FREE0 + FREED))" = "$FREE1" ] || {
-    echo "FAIL: free-block delta $((FREE1 - FREE0)) != freed $FREED"; exit 1; }
-echo "bitmap cross-check OK: +$FREED blocks returned"
+
+echo "== control image (no shared segments; identical geometry) =="
+$B/invf-mkfs "$IMGCTL" 0.5 >/dev/null
+CFILES=$(cd "$WORK/origctl" && ls)
+for f in $CFILES; do
+    $B/invf-cp "$IMGCTL" "$WORK/origctl/$f" "$f" >/dev/null
+done
+FREE0_CTL=$(free_blocks "$IMGCTL")
+echo "free blocks after control import: $FREE0_CTL"
+$B/invf-sweep "$IMGCTL" > "$WORK/sweepctl.log" 2>&1 || {
+    cat "$WORK/sweepctl.log"; exit 1; }
+DEDUP_CTL=$(grep "dedupe: merged" "$WORK/sweepctl.log" || true)
+echo "${DEDUP_CTL:-FAIL: control ran no dedupe pass}"
+echo "$DEDUP_CTL" | grep -q "merged 0 segments" || {
+    echo "FAIL: control tree still has shared segments"; exit 1; }
+$B/invf-sweep "$IMGCTL" --realize >> "$WORK/sweepctl.log" 2>&1 || {
+    cat "$WORK/sweepctl.log"; exit 1; }
+FREE1_CTL=$(free_blocks "$IMGCTL")
+DUP_DELTA=$((FREE1 - FREE0))
+CTL_DELTA=$((FREE1_CTL - FREE0_CTL))
+RESIDUAL=$((FREED - (DUP_DELTA - CTL_DELTA)))
+echo "control free blocks after sweep: $FREE1_CTL " \
+     "(dup delta $DUP_DELTA, control delta $CTL_DELTA, residual $RESIDUAL)"
+[ "$RESIDUAL" -ge 0 ] && [ "$RESIDUAL" -le "$DEDUPE_META_MAX" ] || {
+    echo "FAIL: dedupe free-block delta $((DUP_DELTA - CTL_DELTA)) not within " \
+         "$DEDUPE_META_MAX of freed $FREED (residual $RESIDUAL)"; exit 1; }
+echo "bitmap cross-check OK: +$FREED blocks returned vs control"
 
 echo "== verify --deep =="
 $B/invf-verify "$IMG" --deep | tee "$WORK/verify1.log"
@@ -112,8 +188,7 @@ echo "$DEDUP2" | grep -q "merged 0 segments, freed 0 blocks" || {
 
 echo "== fsck =="
 $B/invf-fsck "$IMG" | tee "$WORK/fsck1.log"
-grep -q "orphans:      0" "$WORK/fsck1.log" || { echo "FAIL: orphans"; exit 1; }
-grep -q "missing:      0" "$WORK/fsck1.log" || { echo "FAIL: missing"; exit 1; }
+fsck_clean "$WORK/fsck1.log" || { echo "FAIL: fsck issues"; exit 1; }
 
 echo
 echo "== leg 2: TEXT-safety =="
@@ -146,20 +221,30 @@ for f in $TFILES; do
     $B/invf-cp "$IMGT" "$WORK/orig2/$f" "$f" >/dev/null
 done
 
-echo "== sweep (texts batch; dedupe must skip TEXT + deferred) =="
+echo "== sweep (v3: generic text; v2: texts batch) =="
 $B/invf-sweep "$IMGT" > "$WORK/sweept1.log" 2>&1 || { cat "$WORK/sweept1.log"; exit 1; }
 TZL=$(grep -c "text -> PPMd batch" "$WORK/sweept1.log" || true)
-echo "text->PPMd lines: $TZL"
-[ "$TZL" -ge 3 ] || { echo "FAIL: expected >=3 deferred texts"; exit 1; }
 DEDUPT=$(grep "dedupe: " "$WORK/sweept1.log" || true)
 echo "$DEDUPT"
-# only blob.bin is non-TEXT content: 2 segments hashed, nothing merged.
-# (Without the deferred-candidate skip, the two identical texts WOULD
-#  merge here and the flush's retire would corrupt the canonical copy.)
-echo "$DEDUPT" | grep -q "hashed 2 live segments" || {
-    echo "FAIL: dedupe hashed more than the 2 non-TEXT segments"; exit 1; }
-echo "$DEDUPT" | grep -q "merged 0 segments, freed 0 blocks" || {
-    echo "FAIL: dedupe touched deferred/TEXT content"; exit 1; }
+if is_v3 "$IMGT"; then
+    echo "text->PPMd lines: $TZL (v3 stores text as generic ZSTD)"
+    # v3 has no deferred text batches: the two identical texts are ordinary
+    # generic segments, so dedupe is expected to merge them (safely -- there
+    # is no batch flush whose retire could corrupt the canonical copy).
+    [ "$TZL" -eq 0 ] || { echo "FAIL: unexpected text batching on v3"; exit 1; }
+    echo "$DEDUPT" | grep -qE "merged [1-9][0-9]* segments" || {
+        echo "FAIL: v3 dedupe did not merge the identical texts"; exit 1; }
+else
+    echo "text->PPMd lines: $TZL"
+    [ "$TZL" -ge 3 ] || { echo "FAIL: expected >=3 deferred texts"; exit 1; }
+    # only blob.bin is non-TEXT content: 2 segments hashed, nothing merged.
+    # (Without the deferred-candidate skip, the two identical texts WOULD
+    #  merge here and the flush's retire would corrupt the canonical copy.)
+    echo "$DEDUPT" | grep -q "hashed 2 live segments" || {
+        echo "FAIL: dedupe hashed more than the 2 non-TEXT segments"; exit 1; }
+    echo "$DEDUPT" | grep -q "merged 0 segments, freed 0 blocks" || {
+        echo "FAIL: dedupe touched deferred/TEXT content"; exit 1; }
+fi
 
 echo "== members bit-exact + stats + verify =="
 ok=1
@@ -169,10 +254,14 @@ for f in $TFILES; do
 done
 [ "$ok" = 1 ] || exit 1
 echo "all $(echo "$TFILES" | wc -w) files bit-exact"
-$B/invf-stats "$IMGT" | grep "TEXT  :" || { echo "FAIL: no TEXT stats line"; exit 1; }
+if is_v3 "$IMGT"; then
+    echo "v3: no TEXT class line (generic ZSTD), skipping stats check"
+else
+    $B/invf-stats "$IMGT" | grep "TEXT  :" || { echo "FAIL: no TEXT stats line"; exit 1; }
+fi
 $B/invf-verify "$IMGT" --deep | tail -1
 
-echo "== re-sweep (idempotent; TEXT entries never hashed) =="
+echo "== re-sweep (idempotent) =="
 $B/invf-sweep "$IMGT" > "$WORK/sweept2.log" 2>&1 || { cat "$WORK/sweept2.log"; exit 1; }
 DEDUPT2=$(grep "dedupe: merged" "$WORK/sweept2.log" || true)
 echo "${DEDUPT2:-FAIL: no dedupe line on text re-sweep}"
@@ -187,7 +276,6 @@ done
 
 echo "== fsck (text volume) =="
 $B/invf-fsck "$IMGT" | tee "$WORK/fsck2.log"
-grep -q "orphans:      0" "$WORK/fsck2.log" || { echo "FAIL: orphans"; exit 1; }
-grep -q "missing:      0" "$WORK/fsck2.log" || { echo "FAIL: missing"; exit 1; }
+fsck_clean "$WORK/fsck2.log" || { echo "FAIL: fsck issues"; exit 1; }
 
 echo "DEDUPE E2E: PASS"

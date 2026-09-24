@@ -100,6 +100,10 @@ int main(int argc, char **argv)
                    (unsigned long long)rep.v3_bad_pages);
             printf("  cycles/shared: %llu\n",
                    (unsigned long long)rep.v3_cycles);
+            /* WP75: the v3 branch used to return before the v2 free-block
+             * line, so free-block accounting was invisible on v3 volumes. */
+            printf("  free blocks:  %llu\n",
+                   (unsigned long long)vol_free_blocks_cached(v));
             if (rep.v3_reachable_free)
                 printf("  reachable-but-free pages: %llu (bitmap divergence)\n",
                        (unsigned long long)rep.v3_reachable_free);

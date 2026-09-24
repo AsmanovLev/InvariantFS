@@ -2385,10 +2385,21 @@ int vol_flush(invfs_volume *v)
      * flush contract is vacuously satisfied -- and the superblock write
      * below would otherwise land on the PRESENT volume's block 0. */
     if (v->time_travel) return 0;
-    /* WP-M1: an empty v3 skeleton has nothing to persist (mutations are
-     * refused at vol_write_enabled; the RT30/root state is owned by the
-     * WP-M2 engine). */
-    if (v->sb.vol_flags & VOLF_V3) return 0;
+    /* WP75: v3 keeps its block bitmap dirty in RAM between publishes --
+     * v3_publish (via vol_v3_bitmap_flush) is the only other writer. A
+     * flush must persist it too, or the sweep's post-publish dedupe frees
+     * (and any allocation after the last publish) are dropped at close and
+     * a reopen can re-hand those blocks. Structure-before-reference: make
+     * the bitmap durable before returning, mirroring v3_publish. */
+    if (v->sb.vol_flags & VOLF_V3) {
+        if (vol_v3_bitmap_flush(v) != 0) {
+            vol_io_error_latch(v, "v3 bitmap flush");
+            return -1;
+        }
+        if (vmux_barrier(v, "v3 bitmap") < 0)
+            return -1;
+        return 0;
+    }
     /* WP25: same for a degraded mount (dev0 absent): vol_mark_dirty
      * refused every mutation, so nothing is pending; a flush attempt
      * would only trip the mirror's read-only refusal. */
