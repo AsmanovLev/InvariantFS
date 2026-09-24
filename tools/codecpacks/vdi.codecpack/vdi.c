@@ -102,6 +102,24 @@
 #include <sys/stat.h>
 #include <sys/types.h>
 
+/* ADR-007: this file doubles as a .so plugin (lib<name>.so, built with
+ * -fPIC -shared -DIVPACK_SHARED_LIB). The plugin glue below is compiled in
+ * BOTH builds -- the CLI build simply never calls it, and main() is what
+ * -DIVPACK_SHARED_LIB drops -- so the .so and the CLI can never drift apart.
+ * The headers are declarations + macros only: no new dependencies, no -ldl,
+ * and the pack still builds with plain `cc -std=c11 -Wall -Wextra -Werror`. */
+#if __has_include("ivpack_api.h")
+#include "ivpack_api.h"
+#elif __has_include("../../../src/include/ivpack_api.h")
+#include "../../../src/include/ivpack_api.h"
+#endif
+#if __has_include("ivpack_impl.h")
+#include "ivpack_impl.h"
+#elif __has_include("../../../src/include/ivpack_impl.h")
+#include "../../../src/include/ivpack_impl.h"
+#endif
+
+
 /* ---- VDI v1.1 header field offsets ------------------------------------ */
 #define VDI_SIG_OFF       0x40u
 #define VDI_SIGNATURE     0xBEDA107Fu
@@ -588,6 +606,25 @@ static int cmd_estimate(const char *in)
 
 /* ---- main ---------------------------------------------------------------- */
 
+
+/* ---- ivpack plugin C ABI export (ADR-007) --------------------------------
+ * Built as libvdi.so with -DIVPACK_SHARED_LIB -fPIC -shared; the fork
+ * guard in ivpack_impl.h keeps the CLI's exit(3)=decline / exit(1)=error
+ * contract intact inside a long-lived worker. See ivpack_impl.h. */
+static const ivpack_desc s_vdi_desc = {
+    IVPACK_API_VERSION, "vdi", "1.0.0", "containerpack", 0
+};
+
+const ivpack_desc *ivpack_get_desc(void) { return &s_vdi_desc; }
+
+IVPACK_CANON_CALLS(vdi)
+
+IVPACK_DEFINE_CONTAINER_CMD(vdi, IVPACK_GLUE_NONE())
+
+IVPACK_DEFINE_CONTAINER_ESTIMATE(vdi, IVPACK_GLUE_NONE(),
+                             rc = (int)cmd_estimate(a);)
+
+#ifndef IVPACK_SHARED_LIB
 int main(int argc, char **argv)
 {
     const char *cmd;
@@ -608,3 +645,5 @@ int main(int argc, char **argv)
         return cmd_estimate(argv[2]);
     return 2;
 }
+#endif /* !IVPACK_SHARED_LIB */
+

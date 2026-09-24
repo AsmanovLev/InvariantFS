@@ -1,5 +1,97 @@
 # InvariantFS Incidents & Fixes
 
+## WP71-A — Plugin EXTRACT could not name a member (wrong operand order)
+
+**Date:** Sep 24, 2026  
+**Severity:** High (silent data corruption)  
+**Impact:** Every containerpack EXTRACT dispatched through the ADR-007 worker
+pool extracted the wrong member, or failed; introduced by `1175fe7`, never
+reachable in production because no `.so` other than qcow2's existed and the pool
+is opt-in  
+
+### Symptom
+`invfs_codec_pack_cmd()` handed the pool `(in, out, recipe, dir)` positionally and
+had nowhere to put `idx`, so a plugin's EXTRACT could not be told *which* member
+to extract. qcow2's export papered over the gap with
+`cmd_extract(args->in_path, args->recipe_path, args->mbr_dir)` — i.e. the recipe
+**path** as the member index and the member **directory** as the output file.
+
+### Root Cause
+`cmd_extract(in, idx_s, out)` runs `strtoul(idx_s)`: a path parses to 0, so the
+plugin extracted member 0 (or declined), and wrote it to a directory path.
+Because the pool returns a *negative* code only for transport failures, a
+positive pack status (`0`, `3`) was passed back as authoritative — the CLI
+fallback never triggered, and the sweep's own "extracted size must equal the
+announced size" guard was the only thing standing between this and a committed
+decomposition.
+
+### Fix
+`invf_plugin_req` gained `extract_idx[32]` (IPC v2), `ivpack_container_args`
+gained `extract_idx` (ABI v2), `invfs_plugin_pool_container_cmd()` gained an
+`idx` parameter, and `vol_cpack.c` now routes operands **per command** instead of
+positionally. `tools/test-ivpacks.sh`'s round-trip leg (extract every member →
+rebuild → `cmp` against the original, plus a byte-for-byte comparison with the
+CLI's output) is the regression gate.
+
+### Result
+- `rawdisk`/`qcow2`/`vdi`/`ext4fs` round trips bit-exact through the plugin ABI
+  and identical to the CLI, member for member
+- `tools/plugin-daemon-smoke.sh` drives the same cycle through the real daemon
+- See `impl_docs/WP71-ivpack-all-packs.md`
+
+---
+
+## WP71-B — Plugin MAP was handed the recipe instead of the image
+
+**Date:** Sep 24, 2026  
+**Severity:** Medium (lost capability, no corruption)  
+**Impact:** `CAP_SEEK` lost for any image decomposed through the pool  
+
+### Symptom
+qcow2's `ivpack_container_cmd` case 5 called `cmd_map(args->recipe_path, …)`.
+
+### Root Cause
+Every containerpack's `map` takes the **image**: it re-runs the pack's
+`analyze()` and derives the recipe layout from it (`rawdisk.c:cmd_map`'s `src_off`
+counters are computed from the plan, not read from a recipe).
+`tools/test-rawdisk.sh` and `vol_cpack.c:2466` both pass the image. A recipe path
+is not a disk image, so the plugin's MAP always declined — and a decline is a
+positive return code, which the caller treated as authoritative instead of
+falling back to the CLI.
+
+### Fix
+`map {in} {out}` → `in_path`/`out_path` in the shared glue and in the routing
+table; the routing comment in `vol_cpack.c` now states that `in` for MAP is the
+image.
+
+---
+
+## WP71-C — `invf-plugin-host` segfaulted / leaked shm on a small `/dev/shm`
+
+**Date:** Sep 24, 2026  
+**Severity:** Medium (daemon cannot start; misleading diagnostics)  
+**Impact:** Any host with the container-default 64 MiB `/dev/shm`
+
+### Symptom
+`invf-plugin-host -n 1` → *dumped core*; `plugin_host_test` reported only
+`daemon failed to become available`, and a 64 MiB `/dev/shm/invfs_plugin_pool`
+was left behind, filling the tmpfs for everything after it.
+
+### Root Cause
+A slot is a flat 64 MiB, so the pool is `num_workers * 64 MiB`. `ftruncate()`
+failed with `ENOSPC` and returned **without `shm_unlink()`**; the `mmap` failure
+path left `pool_mem == MAP_FAILED` reachable by the `memset(hdr, …)` on the next
+line.
+
+### Fix
+`statvfs("/dev/shm")` up front: shrink `num_workers` to what the tmpfs holds and
+log it; if not even one slot fits, exit 1 with an actionable message after
+closing and unlinking. `ftruncate`/`mmap` failures now print `errno`, close the
+fd and unlink. `plugin_host_test` degrades to SKIP (exit 0) when the host cannot
+hold two slots, matching this repo's "environment legs SKIP, never FAIL" rule.
+
+---
+
 ## WP28 — Embed Metadata in vol_create_file
 
 **Date:** Sep 13, 2026  

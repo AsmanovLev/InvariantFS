@@ -12,7 +12,7 @@
 #include <sys/types.h>
 
 #define INVF_PLUGIN_IPC_MAGIC        0x504F4F4C49564653ULL /* "POOLIVFS" */
-#define INVF_PLUGIN_IPC_VERSION      2
+#define INVF_PLUGIN_IPC_VERSION      2   /* v2: + req.extract_idx, in-memory buffers, CAS slot lock */
 #define INVF_PLUGIN_DEFAULT_SHM_NAME "/invfs_plugin_pool"
 #define INVF_PLUGIN_MAX_WORKERS      16
 #define INVF_PLUGIN_SLOT_SIZE        (64 * 1024 * 1024) /* 64 MiB per slot */
@@ -57,6 +57,7 @@ typedef struct invf_plugin_req {
     char     out_path[INVF_PLUGIN_PATH_MAX];
     char     recipe_path[INVF_PLUGIN_PATH_MAX];
     char     mbr_dir[INVF_PLUGIN_PATH_MAX];
+    char     extract_idx[32];   /* EXTRACT: the member index string (argv[3]) */
     
     /* In-memory buffer parameters (data lives in slot data area) */
     uint32_t is_in_memory;    /* 1 = use in_buf/out_buf offsets, 0 = use file paths */

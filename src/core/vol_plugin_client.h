@@ -27,11 +27,21 @@ int invfs_plugin_pool_connect(void);
 /* Disconnect from the pool */
 void invfs_plugin_pool_disconnect(void);
 
-/* Multi-threaded command dispatch (file paths) */
+/* Multi-threaded command dispatch through the worker pool.
+ *
+ * Operands match the pack CLI:
+ *   ENUMERATE/STRIP  in_path=image  out_path=result
+ *   EXTRACT          in_path=image  idx=member  out_path=result
+ *   REBUILD          recipe_path + mbr_dir -> out_path
+ *   MAP              in_path=image  out_path=result
+ *
+ * Returns pack status (0 ok, 3 decline, 1 error) or negative if pool unavailable.
+ */
 int invfs_plugin_pool_container_cmd(const char *pack_name,
                                     const char *pack_so_path,
                                     int cmd,
                                     const char *in_path,
+                                    const char *idx,
                                     const char *out_path,
                                     const char *recipe_path,
                                     const char *mbr_dir);

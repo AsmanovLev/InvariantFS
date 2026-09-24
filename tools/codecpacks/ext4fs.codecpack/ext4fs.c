@@ -109,6 +109,24 @@
 #include <sys/types.h>
 #include <unistd.h>
 
+/* ADR-007: this file doubles as a .so plugin (lib<name>.so, built with
+ * -fPIC -shared -DIVPACK_SHARED_LIB). The plugin glue below is compiled in
+ * BOTH builds -- the CLI build simply never calls it, and main() is what
+ * -DIVPACK_SHARED_LIB drops -- so the .so and the CLI can never drift apart.
+ * The headers are declarations + macros only: no new dependencies, no -ldl,
+ * and the pack still builds with plain `cc -std=c11 -Wall -Wextra -Werror`. */
+#if __has_include("ivpack_api.h")
+#include "ivpack_api.h"
+#elif __has_include("../../../src/include/ivpack_api.h")
+#include "../../../src/include/ivpack_api.h"
+#endif
+#if __has_include("ivpack_impl.h")
+#include "ivpack_impl.h"
+#elif __has_include("../../../src/include/ivpack_impl.h")
+#include "../../../src/include/ivpack_impl.h"
+#endif
+
+
 #define EX_DECLINE 3        /* honest refusal: unsupported / unprovable */
 #define EX_ERROR   1        /* content error (rebuild mismatch, junk)   */
 #define EX_USAGE   2        /* argv error                              */
@@ -1664,6 +1682,25 @@ out:
     return rc;
 }
 
+
+/* ---- ivpack plugin C ABI export (ADR-007) --------------------------------
+ * Built as libext4fs.so with -DIVPACK_SHARED_LIB -fPIC -shared; the fork
+ * guard in ivpack_impl.h keeps the CLI's exit(3)=decline / exit(1)=error
+ * contract intact inside a long-lived worker. See ivpack_impl.h. */
+static const ivpack_desc s_ext4fs_desc = {
+    IVPACK_API_VERSION, "ext4fs", "1.0.0", "containerpack", 0
+};
+
+const ivpack_desc *ivpack_get_desc(void) { return &s_ext4fs_desc; }
+
+IVPACK_CANON_CALLS(ext4fs)
+
+IVPACK_DEFINE_CONTAINER_CMD(ext4fs, IVPACK_GLUE_NONE())
+
+IVPACK_DEFINE_CONTAINER_ESTIMATE(ext4fs, IVPACK_GLUE_NONE(),
+                             rc = (int)cmd_estimate(a);)
+
+#ifndef IVPACK_SHARED_LIB
 int main(int argc, char **argv)
 {
     g_verbose = getenv("EXT4FS_DEBUG") != NULL;
@@ -1682,3 +1719,5 @@ int main(int argc, char **argv)
         return cmd_estimate(argv[2]);
     return EX_USAGE;
 }
+#endif /* !IVPACK_SHARED_LIB */
+

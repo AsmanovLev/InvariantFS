@@ -142,10 +142,19 @@
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <zlib.h>
+/* ADR-007: this file doubles as a .so plugin (libqcow2.so, built with
+ * -fPIC -shared -DIVPACK_SHARED_LIB). The plugin glue is compiled in BOTH
+ * builds -- the CLI build simply never calls it, and main() is what
+ * -DIVPACK_SHARED_LIB drops -- so the .so and the CLI can never drift apart. */
 #if __has_include("ivpack_api.h")
 #include "ivpack_api.h"
 #elif __has_include("../../../src/include/ivpack_api.h")
 #include "../../../src/include/ivpack_api.h"
+#endif
+#if __has_include("ivpack_impl.h")
+#include "ivpack_impl.h"
+#elif __has_include("../../../src/include/ivpack_impl.h")
+#include "../../../src/include/ivpack_impl.h"
 #endif
 #if __has_include("deflate_repro.h")
 #include "deflate_repro.h"
@@ -1076,65 +1085,20 @@ static int cmd_estimate(const char *in)
     return 0;
 }
 
-/* ---- ivpack plugin C ABI export ------------------------------------------ */
+/* ---- ivpack plugin C ABI export (ADR-007) --------------------------------
+ * Built as libqcow2.so with -DIVPACK_SHARED_LIB -fPIC -shared; the fork guard
+ * in ivpack_impl.h keeps the CLI's exit(3)=decline / exit(1)=error contract
+ * intact inside a long-lived worker, and routes the estimate through the same
+ * stdout the CLI prints. Shared with the other containerpacks: see
+ * src/include/ivpack_impl.h. */
+IVPACK_DEFINE_DESC(s_qcow2_desc, "qcow2", "1.1.0")
 
-static const ivpack_desc s_qcow2_desc = {
-    .api_version = IVPACK_API_VERSION,
-    .name = "qcow2",
-    .version = "1.1.0",
-    .pack_class = "containerpack",
-    .flags = 0,
-};
+IVPACK_CANON_CALLS(qcow2)
 
-const ivpack_desc *ivpack_get_desc(void)
-{
-    return &s_qcow2_desc;
-}
+IVPACK_DEFINE_CONTAINER_CMD(qcow2, IVPACK_GLUE_NONE())
 
-int ivpack_container_cmd(const ivpack_container_args *args)
-{
-    if (!args) return -1;
-    switch (args->cmd) {
-    case 1: /* ENUMERATE */
-        if (!args->in_path || !args->out_path) return -2;
-        return cmd_enumerate(args->in_path, args->out_path);
-    case 2: /* EXTRACT */
-        if (!args->in_path || !args->recipe_path || !args->mbr_dir) return -2;
-        return cmd_extract(args->in_path, args->recipe_path, args->mbr_dir);
-    case 3: /* STRIP */
-        if (!args->in_path || !args->out_path) return -2;
-        return cmd_strip(args->in_path, args->out_path);
-    case 4: /* REBUILD */
-        if (!args->recipe_path || !args->mbr_dir || !args->out_path) return -2;
-        return cmd_rebuild(args->recipe_path, args->mbr_dir, args->out_path);
-    case 5: /* MAP */
-        if (args->out_buf && args->out_cap > 0 && args->out_len) {
-            /* Direct in-memory buffer execution */
-            return cmd_map_mem(args->recipe_path ? args->recipe_path : args->in_path,
-                               args->out_buf, args->out_cap, args->out_len);
-        }
-        if (!args->recipe_path || !args->out_path) return -2;
-        return cmd_map(args->recipe_path, args->out_path);
-    default:
-        return -3;
-    }
-}
-
-int ivpack_container_estimate(const char *in_path, ivpack_estimate_res *res)
-{
-    qc_img v;
-    if (!in_path || !res) return -1;
-    memset(res, 0, sizeof(*res));
-    if (qc_parse(in_path, &v) != 0) {
-        res->eligible = 0;
-        return 3;
-    }
-    res->eligible = 1;
-    res->mbr_size = v.member_size + EST_MARGIN;
-    res->orig_size = v.file_size;
-    qc_free(&v);
-    return 0;
-}
+IVPACK_DEFINE_CONTAINER_ESTIMATE(qcow2, IVPACK_GLUE_NONE(),
+                                 rc = (int)cmd_estimate(a);)
 
 /* ---- main ---------------------------------------------------------------- */
 

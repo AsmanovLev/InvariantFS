@@ -65,6 +65,10 @@ CLI_MAINS := mkfs verify fsck cp cat ls stat arctest blkio_test resize \
              plugin_host_test plugin_mt_test
 $(foreach t,$(CLI_MAINS),$(eval $(call TOOL_RULE,$(t),)))
 
+# WP71: loads every containerpack .so through dlmopen/dlopen -> needs -ldl,
+# and resolves tools/codecpacks/... relative to the repo root.
+$(eval $(call TOOL_RULE,ivpack_packs_test,-ldl))
+
 # WP60: invfs-pack is named differently (invfs- not invf-)
 $(OUT)/invfs-pack: $(OBJ)/pack.o $(CORE_O)
 	$(CC) $(CFLAGS) -o $@ $< $(CORE_O) $(LDLIBS)
@@ -108,6 +112,37 @@ $(OUT)/invf-plugin-host: $(OBJ)/invf-plugin-host.o $(CORE_O)
 $(OBJ)/invf-plugin-host.o: tools/invf-plugin-host.c | $(OBJ)
 	$(CC) $(CFLAGS) -c -o $@ $<
 
+# ---- ADR-007 containerpack plugins (.so) ----------------------------------
+# Every C containerpack ships as BOTH a CLI helper (bin/<name>, built by its
+# tools/test-<pack>.sh with cc -std=c11 -Wall -Wextra -Werror) and a shared
+# object (lib<name>.so, -DIVPACK_SHARED_LIB) that invf-plugin-host dlmopen()s.
+# Both come from the same .c, and the plugin glue is compiled into the CLI
+# build too (unused there), so the two can never drift apart.
+CPACKS      := qcow2 ext4fs fatfs ntfs rawdisk vdi xfs p7z
+PACKDIR      = tools/codecpacks/$(1).codecpack
+PLUGIN_CFLAGS := -std=gnu11 -O2 -fPIC -shared -Wall -Wextra -Werror \
+                 -I$(SRC)/include -I$(SRC)/codecs -DIVPACK_SHARED_LIB
+# qcow2 is the only pack that links a repo codec (deflate_repro) today.
+PLUGIN_EXTRA_qcow2 := $(SRC)/codecs/deflate_repro.c
+
+define PLUGIN_SO_RULE
+$(call PACKDIR,$(1))/lib$(1).so: $(call PACKDIR,$(1))/$(1).c $(SRC)/include/ivpack_api.h $(SRC)/include/ivpack_impl.h
+	$(CC) $(PLUGIN_CFLAGS) -o $$@ $$< $(PLUGIN_EXTRA_$(1)) -lz -ldl
+endef
+$(foreach p,$(CPACKS),$(eval $(call PLUGIN_SO_RULE,$(p))))
+
+PLUGIN_SO := $(foreach p,$(CPACKS),$(call PACKDIR,$(p))/lib$(p).so)
+plugin-so: $(PLUGIN_SO)
+
+# .ivpack bundles (ADR-007 §3: uncompressed ZIP-0, manifest + sha256 +
+# lib/<name>.so + bin/<name> CLI fallback). Artifacts land in dist/ivpack/.
+IVPACKS := $(foreach p,$(CPACKS),dist/ivpack/$(p).ivpack)
+ivpacks: plugin-so $(IVPACKS)
+dist/ivpack/%.ivpack: $(PLUGIN_SO) | dist/ivpack
+	bash tools/pack-ivpack.sh tools/codecpacks/$*.codecpack $@
+dist/ivpack:
+	mkdir -p $@
+
 $(OUT)/meta_probe: $(OBJ)/meta_probe.o $(CORE_O)
 	$(CC) $(CFLAGS) -Itools -o $@ $< $(CORE_O) $(LDLIBS)
 $(OBJ)/meta_probe.o: tools/meta_probe.c | $(OBJ)
@@ -117,7 +152,12 @@ clean:
 	rm -rf $(OBJ) $(TOOLS:%=$(OUT)/%) $(OUT)/invf-codec_test \
 	       $(OUT)/invf-helper_exec_test $(OUT)/invf-metabuf_test \
 	       $(OUT)/invf-btree_test $(OUT)/invf-delta_test \
+<<<<<<< HEAD
 	       $(OUT)/invf-plugin_host_test $(OUT)/invf-plugin_mt_test tools/codecpacks/qcow2.codecpack/libqcow2.so \
+=======
+	       $(OUT)/invf-plugin_host_test $(OUT)/invf-ivpack_packs_test \
+	       $(PLUGIN_SO) dist/ivpack \
+>>>>>>> origin/wp/71-ivpack-all-packs
 	       tools/invf-plugin-host \
 	       $(OUT)/invf-fuzz
 
@@ -154,7 +194,8 @@ test: $(OUT)/invf-arctest $(OUT)/invf-blkio_test $(OUT)/invf-codec_test \
       $(OUT)/invf-helper_exec_test $(OUT)/invf-metabuf_test $(OUT)/invf-btree_test \
       $(OUT)/invf-delta_test $(OUT)/invf-concurrency_test $(OUT)/invf-sweep_v3_test \
       $(OUT)/invf-symlink_v3_test $(OUT)/invf-large_file_v3_test $(OUT)/invf-dedupe_v3_test \
-      $(OUT)/invf-deflate_repro_test $(OUT)/invf-plugin_host_test $(OUT)/invf-plugin_mt_test
+      $(OUT)/invf-deflate_repro_test $(OUT)/invf-plugin_host_test $(OUT)/invf-plugin_mt_test \
+      $(OUT)/invf-ivpack_packs_test plugin-so
 	$(OUT)/invf-arctest
 	$(OUT)/invf-blkio_test
 	$(OUT)/invf-codec_test
@@ -170,6 +211,7 @@ test: $(OUT)/invf-arctest $(OUT)/invf-blkio_test $(OUT)/invf-codec_test \
 	$(OUT)/invf-deflate_repro_test
 	$(OUT)/invf-plugin_host_test
 	$(OUT)/invf-plugin_mt_test
+	$(OUT)/invf-ivpack_packs_test
 
 # e2e tier: tmpfs images under /dev/shm; test-jxl needs cjxl/djxl installed
 e2e: all
@@ -199,6 +241,7 @@ e2e: all
 	bash tools/run-e2e.sh tools/test-rocp.sh
 	bash tools/run-e2e.sh tools/test-p7z.sh
 	bash tools/run-e2e.sh tools/test-qcow2.sh
+	bash tools/run-e2e.sh tools/test-ivpacks.sh
 	bash tools/run-e2e.sh tools/test-fuzz.sh
 	bash tools/run-e2e.sh tools/test-writepath.sh
 	bash tools/run-e2e.sh tools/test-acl.sh

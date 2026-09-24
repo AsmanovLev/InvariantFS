@@ -116,6 +116,24 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
+/* ADR-007: this file doubles as a .so plugin (lib<name>.so, built with
+ * -fPIC -shared -DIVPACK_SHARED_LIB). The plugin glue below is compiled in
+ * BOTH builds -- the CLI build simply never calls it, and main() is what
+ * -DIVPACK_SHARED_LIB drops -- so the .so and the CLI can never drift apart.
+ * The headers are declarations + macros only: no new dependencies, no -ldl,
+ * and the pack still builds with plain `cc -std=c11 -Wall -Wextra -Werror`. */
+#if __has_include("ivpack_api.h")
+#include "ivpack_api.h"
+#elif __has_include("../../../src/include/ivpack_api.h")
+#include "../../../src/include/ivpack_api.h"
+#endif
+#if __has_include("ivpack_impl.h")
+#include "ivpack_impl.h"
+#elif __has_include("../../../src/include/ivpack_impl.h")
+#include "../../../src/include/ivpack_impl.h"
+#endif
+
+
 #define COPY_BUF_SZ   (8u << 20)        /* 8 MiB streaming window */
 #define MAX_FILES     65536u            /* FS member bound (table rows) */
 #define CPACK_MAX_IDX_PLUS1 65536u      /* recipe member record cap */
@@ -1508,6 +1526,100 @@ static int cmd_estimate(const char *argv0, const char *in)
     return 0;
 }
 
+
+/* Where is this .so? The newest plugin host hands the loaded object's path
+ * down in args->self_path (ABI v2); older hosts do not, so fall back to the
+ * first lib*.so mapping in /proc/self/maps. Both are best-effort: resolve_7zz
+ * still has $P7Z_7ZZ and PATH, so a NULL argv0 only loses the pack-dir
+ * sibling lookup. C11 + POSIX only (the pack builds with -std=c11 -Werror). */
+static int p7z_self_path(const ivpack_container_args *args,
+                         char *buf, size_t cap)
+{
+    char line[1024];
+    char path[900];
+    FILE *fp;
+
+    if (args && args->self_path && args->self_path[0]) {
+        snprintf(buf, cap, "%s", args->self_path);
+        return 0;
+    }
+    fp = fopen("/proc/self/maps", "r");
+    if (!fp) return -1;
+    while (fgets(line, sizeof line, fp)) {
+        const char *sl = strrchr(line, '/');
+        const char *e;
+        size_t dlen;
+        if (!sl) continue;
+        if (strncmp(sl + 1, "lib", 3) != 0) continue;
+        e = strstr(sl, ".so");
+        if (!e) continue;
+        dlen = (size_t)(sl - line);              /* the directory part */
+        if (dlen == 0 || dlen >= sizeof path) continue;
+        memcpy(path, line, dlen);
+        path[dlen] = '\0';
+        snprintf(buf, cap, "%s%s", path, sl + 1);
+        fclose(fp);
+        return 0;
+    }
+    fclose(fp);
+    return -1;
+}
+
+static const char *p7z_self_argv0(const ivpack_container_args *args,
+                                  char *buf, size_t cap)
+{
+    if (p7z_self_path(args, buf, cap) != 0) return NULL;
+    return buf;
+}
+
+/* p7z's main() allocates the 8 MiB streaming window; the forked worker child
+ * needs the same (it leaves through _exit(), so nothing to free). */
+static int ivpack_glue_p7z(void)
+{
+    if (!g_buf) g_buf = (uint8_t *)malloc(COPY_BUF_SZ);
+    return g_buf ? 0 : IVPACK_RC_ERROR;
+}
+
+/* The estimate macro hands the body the image path as `a`, so argv0 has to be
+ * resolved here rather than off ivpack_container_args. */
+static int p7z_iv_estimate(const char *in)
+{
+    char a0[1024];
+    return (int)cmd_estimate(p7z_self_argv0(NULL, a0, sizeof a0), in);
+}
+
+/* ---- ivpack plugin C ABI export (ADR-007) --------------------------------
+ * Built as libp7z.so with -DIVPACK_SHARED_LIB -fPIC -shared; the fork
+ * guard in ivpack_impl.h keeps the CLI's exit(3)=decline / exit(1)=error
+ * contract intact inside a long-lived worker. See ivpack_impl.h. */
+static const ivpack_desc s_p7z_desc = {
+    IVPACK_API_VERSION, "p7z", "1.0.0", "containerpack", 0
+};
+
+const ivpack_desc *ivpack_get_desc(void) { return &s_p7z_desc; }
+
+/* p7z's cmd_* take argv0 first: the CLI resolves a sibling "7zz" off
+ * /proc/self/exe. Inside a worker /proc/self/exe is the daemon, so the glue
+ * hands down the loaded .so path instead (host ABI v2) and falls back to
+ * scanning /proc/self/maps. argv0 NULL is fine: resolve_7zz() then uses
+ * $P7Z_7ZZ or PATH. */
+static int p7z_iv_call_enumerate(const ivpack_container_args *a)
+{ char a0[1024]; return (int)cmd_enumerate(p7z_self_argv0(a, a0, sizeof a0), a->in_path, a->out_path); }
+static int p7z_iv_call_extract(const ivpack_container_args *a)
+{ char a0[1024]; return (int)cmd_extract(p7z_self_argv0(a, a0, sizeof a0), a->in_path, a->extract_idx, a->out_path); }
+static int p7z_iv_call_strip(const ivpack_container_args *a)
+{ char a0[1024]; return (int)cmd_strip(p7z_self_argv0(a, a0, sizeof a0), a->in_path, a->out_path); }
+static int p7z_iv_call_rebuild(const ivpack_container_args *a)
+{ return (int)cmd_rebuild(a->recipe_path, a->mbr_dir, a->out_path); }
+static int p7z_iv_call_map(const ivpack_container_args *a)
+{ char a0[1024]; return (int)cmd_map(p7z_self_argv0(a, a0, sizeof a0), a->in_path, a->out_path); }
+
+IVPACK_DEFINE_CONTAINER_CMD(p7z, ivpack_glue_p7z())
+
+IVPACK_DEFINE_CONTAINER_ESTIMATE(p7z, ivpack_glue_p7z(),
+                             rc = p7z_iv_estimate(a);)
+
+#ifndef IVPACK_SHARED_LIB
 int main(int argc, char **argv)
 {
     const char *cmd;
@@ -1533,3 +1645,5 @@ int main(int argc, char **argv)
     free(g_buf);
     return rc;
 }
+#endif /* !IVPACK_SHARED_LIB */
+
