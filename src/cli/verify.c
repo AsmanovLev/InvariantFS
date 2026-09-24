@@ -20,6 +20,7 @@
 #include "invarifs.h"
 #include "volume.h"
 #include "blkio.h"
+#include "vol_metabuf.h"   /* WP76: INVFS_MBUF_BOOT_PAGES */
 
 static int errors = 0;
 
@@ -297,19 +298,33 @@ int main(int argc, char **argv)
         else
             free_blocks++;
     }
-    /* metadata region (superblock + metadata zone) must be fully allocated */
-    for (i = 0; i < sb.metadata_zone_start + sb.metadata_zone_blocks; i++) {
+    /* metadata region (superblock + metadata zone) must be fully allocated.
+     * WP76: on a Meta-v3 volume the metadata-zone tail is deliberately left
+     * free as the dev0-resident v3 base-page pool (WP-M19, mkfs.c); the
+     * base-page allocator hands those blocks out on demand. The region that
+     * must already be allocated ends just past the mapper table plus the two
+     * reserved boot pages (INVFS_MBUF_BOOT_PAGES), which sit at
+     * meta_mapper_pba + meta_mapper_blocks. Non-v3 volumes, and v3 volumes
+     * with no mapper recorded, keep the whole-region rule. */
+    uint64_t meta_reserved_end = sb.metadata_zone_start + sb.metadata_zone_blocks;
+    if ((sb.vol_flags & VOLF_V3) && sb.meta_mapper_pba && sb.meta_mapper_blocks) {
+        uint64_t root_end = sb.meta_mapper_pba + sb.meta_mapper_blocks
+                          + INVFS_MBUF_BOOT_PAGES;
+        if (root_end < meta_reserved_end)
+            meta_reserved_end = root_end;
+    }
+    for (i = 0; i < meta_reserved_end; i++) {
         if (!(bitmap[i / 8] & (1u << (i % 8)))) {
             err("block %llu in metadata region is free (should be allocated)",
                 (unsigned long long)i);
             break;
         }
     }
-    /* allocated count must be >= metadata region (data blocks on top) */
-    if (alloc_blocks < sb.metadata_zone_start + sb.metadata_zone_blocks) {
+    /* allocated count must be >= the reserved metadata region (data blocks on top) */
+    if (alloc_blocks < meta_reserved_end) {
         err("bitmap marks %llu blocks allocated, expected >= %llu (superblock+metadata)",
             (unsigned long long)alloc_blocks,
-            (unsigned long long)(sb.metadata_zone_start + sb.metadata_zone_blocks));
+            (unsigned long long)meta_reserved_end);
     }
     free(bitmap);
 
