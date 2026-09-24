@@ -317,6 +317,57 @@ static uint64_t read_locate_record(invfs_volume *v, uint64_t inode_id)
  * reconstruct with exactly the same segment codecs (bit-exactness).
  * 0 = complete, -1 = corrupt/unreadable. `data` is caller-owned; on
  * error its contents are undefined and the caller frees it. */
+typedef struct {
+    invfs_volume *v;
+    uint64_t inode_id;
+    const invfs_ast_block_entry *ents;
+    uint8_t *data;
+    size_t start;
+    size_t end;
+    int err;
+} decode_worker_arg;
+
+static void *decode_thread_worker(void *arg_) {
+    decode_worker_arg *a = (decode_worker_arg *)arg_;
+    for (size_t i = a->start; i < a->end; i++) {
+        const invfs_ast_block_entry *e = &a->ents[i];
+        uint32_t hdr;
+        uint8_t *blob;
+        size_t dst_off = (size_t)e->file_offset;
+
+        uint64_t pba = e->pba;
+        if (pba == 0 || pba >= a->v->sb.total_blocks) {
+            a->err = -1;
+            return NULL;
+        }
+
+        if (seg_read_checked(a->v, pba, 0, 1, &hdr, &blob) != 0) {
+            a->err = -1;
+            return NULL;
+        }
+
+        if (e->algo == INVFS_ALGO_NONE) {
+            memcpy(a->data + dst_off, blob, (size_t)e->length);
+            free(blob);
+        } else if (e->algo == INVFS_ALGO_LZ4) {
+            int got = LZ4_decompress_safe((const char *)blob,
+                                          (char *)(a->data + dst_off),
+                                          (int)hdr, (int)e->length);
+            free(blob);
+            if (got != (int)e->length) { a->err = -1; return NULL; }
+        } else if (e->algo == INVFS_ALGO_ZSTD) {
+            size_t got = ZSTD_decompress(a->data + dst_off, e->length, blob, hdr);
+            free(blob);
+            if (ZSTD_isError(got) || got != e->length) { a->err = -1; return NULL; }
+        } else {
+            free(blob);
+            a->err = -1;
+            return NULL;
+        }
+    }
+    return NULL;
+}
+
 static int vol_decode_ast_entries(invfs_volume *v, uint64_t inode_id,
                                   const char *rec_name,
                                   const invfs_ast_hdr *ast_h,
@@ -345,6 +396,59 @@ static int vol_decode_ast_entries(invfs_volume *v, uint64_t inode_id,
                             (unsigned long long)inode_id, e->block_id);
                     return -1;
                 }
+            }
+
+            /* Fast path: multi-threaded parallel segment decode for large multi-block files */
+            uint32_t nblocks = ast_h->num_blocks;
+            int has_complex_codecs = 0;
+            for (i = 0; i < nblocks; i++) {
+                if (ents[i].zone != INVFS_ZONE_RAW && ents[i].zone != INVFS_ZONE_BINARY) {
+                    has_complex_codecs = 1;
+                    break;
+                }
+                if (ents[i].algo != INVFS_ALGO_NONE &&
+                    ents[i].algo != INVFS_ALGO_LZ4 &&
+                    ents[i].algo != INVFS_ALGO_ZSTD) {
+                    has_complex_codecs = 1;
+                    break;
+                }
+            }
+
+            if (!has_complex_codecs && nblocks >= 16) {
+                int n_threads = 6;
+                const char *et = getenv("INVFS_READ_THREADS");
+                if (et && *et) {
+                    int t = atoi(et);
+                    if (t >= 1 && t <= 32) n_threads = t;
+                }
+                if ((uint32_t)n_threads > nblocks) n_threads = (int)nblocks;
+
+                pthread_t th[32];
+                decode_worker_arg args[32];
+                size_t per_th = (nblocks + n_threads - 1) / n_threads;
+
+                for (int t = 0; t < n_threads; t++) {
+                    args[t].v = v;
+                    args[t].inode_id = inode_id;
+                    args[t].ents = ents;
+                    args[t].data = data;
+                    args[t].start = t * per_th;
+                    args[t].end = (t + 1) * per_th;
+                    if (args[t].end > nblocks) args[t].end = nblocks;
+                    args[t].err = 0;
+                    if (args[t].start < args[t].end)
+                        pthread_create(&th[t], NULL, decode_thread_worker, &args[t]);
+                    else
+                        th[t] = 0;
+                }
+                int any_err = 0;
+                for (int t = 0; t < n_threads; t++) {
+                    if (th[t]) {
+                        pthread_join(th[t], NULL);
+                        if (args[t].err != 0) any_err = -1;
+                    }
+                }
+                if (any_err == 0) return 0;
             }
 
             for (i = 0; i < ast_h->num_blocks; i++) {

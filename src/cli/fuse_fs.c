@@ -1413,11 +1413,8 @@ static int invf_read(const char *path, char *buf, size_t size, off_t offset,
         return -ENOENT;
     if ((uint64_t)offset >= size64)
         return 0;
-    /* Data read: still needs g_io_lock for g_vol check + data path consistency */
-    pthread_mutex_lock(&g_io_lock);
-    if (!g_vol) { pthread_mutex_unlock(&g_io_lock); return -EIO; }
+    /* Data read: thread-safe pread via io_pread in vol_read_range (no g_io_lock needed) */
     got = vol_read_range(g_vol, ino, (uint64_t)offset, size, buf);
-    pthread_mutex_unlock(&g_io_lock);
     if (got < 0)
         return -EIO;
     return got;

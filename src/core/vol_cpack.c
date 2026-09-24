@@ -2395,16 +2395,10 @@ int vol_containerpack_sweep(invfs_volume *v, uint64_t inode_id,
         nmem == 0)
         { if (getenv("INVFS_DEBUG_PACKS")) fprintf(stderr,"[cpack] table parse failed nmem=%zu\n", nmem); goto out; }
 
-    /* 2. admission (WP10 §12; sweep-time only): the rebuild is a
-     * whole-file read into the inode-keyed ARC, so the container obeys
-     * the whole-file arc rule; the decode working set comes from the
-     * pack's estimate command when it has one (header-derived, never a
-     * trial decode), else the manifest dec_mem constant, else the ABI
-     * default: sum(member usize) + the container's own size. The recipe
-     * is not in hand yet (strip runs next), and the container's size
-     * bounds it -- the default covers the read path's true peak (the
-     * whole-file output buffer plus one member in flight). */
-    if (v->arc_budget && (uint64_t)full_len > v->arc_budget) {
+    /* 2. admission: decompression memory is governed by dec_mem_limit
+     * (INVFS_DEC_MEM_LIMIT), not the read cache (arc_budget). Only check
+     * arc_budget if the user explicitly set INVFS_ARC_BYTES. */
+    if (getenv("INVFS_ARC_BYTES") && v->arc_budget && (uint64_t)full_len > v->arc_budget) {
         vol_stamp_class(v, inode_id, INVFS_CLASS_GENERIC_MEMLIMIT,
                         (uint8_t)pc->algo, pc->generation);
         goto out;
@@ -2614,7 +2608,7 @@ int vol_containerpack_sweep(invfs_volume *v, uint64_t inode_id,
                         (uint64_t)full_len, old_ctime);
             goto out;
         }
-        if (!(v->sb.vol_flags & VOLF_V3) || newino != inode_id)
+        if (!(v->sb.vol_flags & VOLF_V3))
             vol_delete_inode(v, inode_id, name);
         /* the fresh blob record has no ext; carry the old meta across
          * (the vol_pack_sweep flow) */
@@ -2637,7 +2631,7 @@ int vol_containerpack_sweep(invfs_volume *v, uint64_t inode_id,
             vol_transcode_abort(v, name);
             goto out;
         }
-        if (!(v->sb.vol_flags & VOLF_V3) || newino != inode_id)
+        if (!(v->sb.vol_flags & VOLF_V3))
             vol_delete_inode(v, inode_id, name);
         /* the fresh blob record has no ext; carry the old meta across
          * (the vol_pack_sweep flow) */

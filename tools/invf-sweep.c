@@ -978,6 +978,7 @@ int main(int argc, char **argv)
         if (inodes[i] == 0 || sizes[i] == 0) { skipped++; continue; }
         if (dry) { printf("would sweep %s (%llu bytes)\n",
                           names[i], (unsigned long long)sizes[i]); continue; }
+        fprintf(stderr, "  sweeping %s (%llu bytes)...\n", names[i], (unsigned long long)sizes[i]);
         {
             /* vol_sweep_one: 0 = nothing to do, >0 = transcoded/swept,
              * 7 = JPEG->JXL, 9 = text deferred into the batch accumulator,

@@ -1220,6 +1220,73 @@ static void v3_stamp_generic(invfs_volume *v, uint64_t id, uint8_t cls,
  * ZSTD batching, and container-pack transcode dispatch. Text and
  * binary both take generic ZSTD -- a weaker ratio than batching,
  * invariant-preserving. Returns follow vol_sweep_one's convention. */
+#define SWEEP_BATCH_SIZE 128
+typedef struct {
+    uint64_t old_pba;
+    uint64_t old_plen;
+    size_t orig_len;
+    uint32_t csize_old;
+    uint32_t old_algo;
+    uint8_t *blob_old;
+
+    /* Result */
+    uint32_t csize_new;
+    uint32_t algo_new;
+    uint32_t crc_new;
+    uint8_t cbuf[SEGMENT_SIZE + 128 + INVFS_BLOCK_SIZE];
+    int valid;
+} sweep_task_t;
+
+struct sweep_worker_arg {
+    sweep_task_t *tasks;
+    size_t start;
+    size_t end;
+    int zlevel;
+};
+
+static void *sweep_thread_worker(void *arg_) {
+    struct sweep_worker_arg *a = (struct sweep_worker_arg *)arg_;
+    uint8_t orig[SEGMENT_SIZE];
+    for (size_t k = a->start; k < a->end; k++) {
+        if (!a->tasks[k].valid) continue;
+        size_t orig_len = a->tasks[k].orig_len;
+
+        if (a->tasks[k].old_algo == INVFS_ALGO_LZ4) {
+            int got = LZ4_decompress_safe((const char *)a->tasks[k].blob_old, (char *)orig,
+                                          (int)a->tasks[k].csize_old, (int)orig_len);
+            free(a->tasks[k].blob_old); a->tasks[k].blob_old = NULL;
+            if (got != (int)orig_len) { a->tasks[k].valid = 0; continue; }
+        } else if (a->tasks[k].old_algo == INVFS_ALGO_ZSTD) {
+            size_t got = ZSTD_decompress(orig, orig_len, a->tasks[k].blob_old, a->tasks[k].csize_old);
+            free(a->tasks[k].blob_old); a->tasks[k].blob_old = NULL;
+            if (ZSTD_isError(got) || got != orig_len) { a->tasks[k].valid = 0; continue; }
+        } else {
+            memcpy(orig, a->tasks[k].blob_old, orig_len);
+            free(a->tasks[k].blob_old); a->tasks[k].blob_old = NULL;
+        }
+
+        size_t zrc = ZSTD_compress(a->tasks[k].cbuf + 8, SEGMENT_SIZE + 64, orig, orig_len, a->zlevel);
+        if (!ZSTD_isError(zrc) && zrc > 0 && zrc < orig_len) {
+            a->tasks[k].csize_new = (uint32_t)zrc;
+            a->tasks[k].algo_new = INVFS_ALGO_ZSTD;
+        } else {
+            a->tasks[k].csize_new = (uint32_t)orig_len;
+            memcpy(a->tasks[k].cbuf + 8, orig, orig_len);
+            a->tasks[k].algo_new = INVFS_ALGO_NONE;
+        }
+        a->tasks[k].crc_new = invfs_crc32c(a->tasks[k].cbuf + 8, a->tasks[k].csize_new);
+        a->tasks[k].cbuf[0] = (uint8_t)(a->tasks[k].csize_new & 0xFF);
+        a->tasks[k].cbuf[1] = (uint8_t)((a->tasks[k].csize_new >> 8) & 0xFF);
+        a->tasks[k].cbuf[2] = (uint8_t)((a->tasks[k].csize_new >> 16) & 0xFF);
+        a->tasks[k].cbuf[3] = (uint8_t)((a->tasks[k].csize_new >> 24) & 0xFF);
+        a->tasks[k].cbuf[4] = (uint8_t)(a->tasks[k].crc_new & 0xFF);
+        a->tasks[k].cbuf[5] = (uint8_t)((a->tasks[k].crc_new >> 8) & 0xFF);
+        a->tasks[k].cbuf[6] = (uint8_t)((a->tasks[k].crc_new >> 16) & 0xFF);
+        a->tasks[k].cbuf[7] = (uint8_t)((a->tasks[k].crc_new >> 24) & 0xFF);
+    }
+    return NULL;
+}
+
 static int vol_sweep_one_v3(invfs_volume *v, uint64_t inode_id,
                             const char *name)
 {
@@ -1236,6 +1303,8 @@ static int vol_sweep_one_v3(invfs_volume *v, uint64_t inode_id,
         return 0;
 
     /* WP-M23: active write session guard by inode_id and name */
+    fprintf(stderr, "[sweep-v3] checking inode %llu (%s)...\n", (unsigned long long)inode_id, name ? name : "NULL");
+    fflush(stderr);
     if (vol_write_active_id(v, inode_id))
         return 0;
     if (name && name[0] && vol_write_active_name(v, name))
@@ -1378,11 +1447,10 @@ static int vol_sweep_one_v3(invfs_volume *v, uint64_t inode_id,
 
     /* For multi-segment files: per-segment recompression preserves
      * segment boundaries for fast random I/O and enables intra- and
-     * inter-file deduplication in vol_sweep_dedupe. */
+     * inter-file deduplication in vol_sweep_dedupe.
+     * WP83: Parallel multi-threaded segment sweep with bounded batch size (constant O(1) RAM). */
     if (n_ents > 1) {
         invfs_ast_block_entry *new_ents = (invfs_ast_block_entry *)malloc(n_ents * sizeof(*new_ents));
-        uint8_t *cbuf_new = (uint8_t *)malloc(SEGMENT_SIZE + 128 + INVFS_BLOCK_SIZE);
-        uint8_t *orig = (uint8_t *)malloc(SEGMENT_SIZE);
         int any_swept = 0;
         uint64_t new_total = 0;   /* sum of rewritten segment csizes (+framing) */
 
@@ -1392,119 +1460,146 @@ static int vol_sweep_one_v3(invfs_volume *v, uint64_t inode_id,
         typedef struct { uint64_t old_pba; uint64_t new_pba; uint32_t algo; uint8_t zone; } pba_map_t;
         pba_map_t *pmap = (pba_map_t *)calloc(map_cap, sizeof(*pmap));
 
-        if (!new_ents || !cbuf_new || !orig || !pmap) {
-            free(blob); free(new_ents); free(cbuf_new); free(orig); free(pmap);
+        if (!new_ents || !pmap) {
+            free(blob); free(new_ents); free(pmap);
             return -1;
         }
         memcpy(new_ents, ents, n_ents * sizeof(*new_ents));
         pba_ref_ensure(v);
 
-        for (size_t i = 0; i < n_ents; i++) {
-            invfs_ast_block_entry *e = &new_ents[i];
-            uint64_t old_pba = e->pba;
-            uint32_t csize_old = 0;
-            uint8_t *blob_old = NULL;
-            uint64_t old_plen = 0;
-            size_t orig_len = (size_t)e->length;
-            size_t zrc;
-            uint32_t csize_new = 0, crc_new = 0;
-            uint64_t pba_new = 0, phys_blocks_new = 0;
-            uint8_t hdr4[8];
-
-            if (e->zone != INVFS_ZONE_RAW || old_pba == 0)
-                continue;
-
-            /* Check if this exact old_pba was already remapped earlier in this pass */
-            int already_mapped = 0;
-            size_t h = (size_t)((old_pba * 11400714819323198485ull) & (map_cap - 1));
-            while (pmap[h].old_pba) {
-                if (pmap[h].old_pba == old_pba) {
-                    e->pba = pmap[h].new_pba;
-                    e->zone = pmap[h].zone;
-                    e->algo = pmap[h].algo;
-                    already_mapped = 1;
-                    any_swept = 1;
-                    break;
-                }
-                h = (h + 1) & (map_cap - 1);
-            }
-            if (already_mapped)
-                continue;
-
-            if (seg_extent_checked(v, old_pba, &old_plen) != 0)
-                continue;
-            if (seg_read_checked(v, old_pba, old_plen, 1, &csize_old, &blob_old) != 0 || !blob_old)
-                continue;
-
-            if (e->algo == INVFS_ALGO_LZ4) {
-                int got = LZ4_decompress_safe((const char *)blob_old, (char *)orig,
-                                              (int)csize_old, (int)orig_len);
-                free(blob_old);
-                if (got != (int)orig_len) continue;
-            } else if (e->algo == INVFS_ALGO_ZSTD) {
-                size_t got = ZSTD_decompress(orig, orig_len, blob_old, csize_old);
-                free(blob_old);
-                if (ZSTD_isError(got) || got != orig_len) continue;
-            } else {
-                memcpy(orig, blob_old, orig_len);
-                free(blob_old);
-            }
-
-            /* Recompress with ZSTD */
-            zrc = ZSTD_compress(cbuf_new + 8, SEGMENT_SIZE + 64, orig, orig_len, zlevel);
-            if (!ZSTD_isError(zrc) && zrc > 0 && zrc < orig_len) {
-                csize_new = (uint32_t)zrc;
-                e->algo = INVFS_ALGO_ZSTD;
-            } else {
-                csize_new = (uint32_t)orig_len;
-                memcpy(cbuf_new + 8, orig, orig_len);
-                e->algo = INVFS_ALGO_NONE;
-            }
-            crc_new = invfs_crc32c(cbuf_new + 8, csize_new);
-            hdr4[0] = (uint8_t)(csize_new & 0xFF);
-            hdr4[1] = (uint8_t)((csize_new >> 8) & 0xFF);
-            hdr4[2] = (uint8_t)((csize_new >> 16) & 0xFF);
-            hdr4[3] = (uint8_t)((csize_new >> 24) & 0xFF);
-            hdr4[4] = (uint8_t)(crc_new & 0xFF);
-            hdr4[5] = (uint8_t)((crc_new >> 8) & 0xFF);
-            hdr4[6] = (uint8_t)((crc_new >> 16) & 0xFF);
-            hdr4[7] = (uint8_t)((crc_new >> 24) & 0xFF);
-            memcpy(cbuf_new, hdr4, 8);
-
-            phys_blocks_new = ((uint64_t)csize_new + 8 + INVFS_BLOCK_SIZE - 1) / INVFS_BLOCK_SIZE;
-            pba_new = alloc_blocks(v, v->sb.shadow_zone_start, v->sb.shadow_zone_blocks,
-                                   phys_blocks_new, 1, INVFS_ALLOC_DATA);
-            if (pba_new == 0)
-                continue; /* Shadow full: leave segment in RAW */
-
-            if (io_pwrite(&v->io, pba_new * INVFS_BLOCK_SIZE, cbuf_new, (size_t)csize_new + 8) != 0) {
-                vol_free_blocks(v, pba_new, phys_blocks_new);
-                continue;
-            }
-
-            pba_ref_modify(v, old_pba, -1);
-            pba_ref_modify(v, pba_new, +1);
-            if (pba_ref_count(v, old_pba) == 0) {
-                vol_free_blocks(v, old_pba, old_plen);
-            }
-            e->pba = pba_new;
-            e->zone = INVFS_ZONE_BINARY;
-            any_swept = 1;
-            new_total += (uint64_t)csize_new + 8;
-
-            /* record in pmap for subsequent segments sharing old_pba */
-            size_t inh = (size_t)((old_pba * 11400714819323198485ull) & (map_cap - 1));
-            while (pmap[inh].old_pba && pmap[inh].old_pba != old_pba)
-                inh = (inh + 1) & (map_cap - 1);
-            pmap[inh].old_pba = old_pba;
-            pmap[inh].new_pba = pba_new;
-            pmap[inh].algo = e->algo;
-            pmap[inh].zone = e->zone;
+        /* Parallel worker pool context: process in bounded chunks (e.g. 128 segments = 8 MiB)
+         * to strictly bound memory regardless of file size (handles 32GB files on 8GB RAM). */
+        int num_threads = 6;
+        const char *env_threads = getenv("INVFS_SWEEP_THREADS");
+        if (env_threads && *env_threads) {
+            int t = atoi(env_threads);
+            if (t >= 1 && t <= 64) num_threads = t;
         }
 
+        sweep_task_t *tasks = (sweep_task_t *)calloc(SWEEP_BATCH_SIZE, sizeof(*tasks));
+        if (!tasks) {
+            free(blob); free(new_ents); free(pmap);
+            return -1;
+        }
+
+        for (size_t batch_start = 0; batch_start < n_ents; batch_start += SWEEP_BATCH_SIZE) {
+            size_t batch_end = batch_start + SWEEP_BATCH_SIZE;
+            if (batch_end > n_ents) batch_end = n_ents;
+            size_t batch_len = batch_end - batch_start;
+
+            /* 1. Filter and pre-read batch segments */
+            for (size_t k = 0; k < batch_len; k++) {
+                size_t i = batch_start + k;
+                invfs_ast_block_entry *e = &new_ents[i];
+                uint64_t old_pba = e->pba;
+                tasks[k].valid = 0;
+
+                if (e->zone != INVFS_ZONE_RAW || old_pba == 0)
+                    continue;
+
+                /* Check if already remapped */
+                int already_mapped = 0;
+                size_t h = (size_t)((old_pba * 11400714819323198485ull) & (map_cap - 1));
+                while (pmap[h].old_pba) {
+                    if (pmap[h].old_pba == old_pba) {
+                        e->pba = pmap[h].new_pba;
+                        e->zone = pmap[h].zone;
+                        e->algo = pmap[h].algo;
+                        already_mapped = 1;
+                        any_swept = 1;
+                        break;
+                    }
+                    h = (h + 1) & (map_cap - 1);
+                }
+                if (already_mapped)
+                    continue;
+
+                if (seg_extent_checked(v, old_pba, &tasks[k].old_plen) != 0)
+                    continue;
+                if (seg_read_checked(v, old_pba, tasks[k].old_plen, 1, &tasks[k].csize_old, &tasks[k].blob_old) != 0 || !tasks[k].blob_old)
+                    continue;
+
+                tasks[k].old_pba = old_pba;
+                tasks[k].orig_len = (size_t)e->length;
+                tasks[k].old_algo = e->algo;
+                tasks[k].valid = 1;
+            }
+
+            /* 2. Parallel decompress and ZSTD recompress across threads using pthreads */
+            if (num_threads <= 1 || batch_len < 4) {
+                struct sweep_worker_arg single_arg = { tasks, 0, batch_len, zlevel };
+                sweep_thread_worker(&single_arg);
+            } else {
+                int active_threads = num_threads;
+                if ((size_t)active_threads > batch_len) active_threads = (int)batch_len;
+                pthread_t th[64];
+                struct sweep_worker_arg wargs[64];
+                size_t per_th = (batch_len + active_threads - 1) / active_threads;
+
+                for (int t = 0; t < active_threads; t++) {
+                    wargs[t].tasks = tasks;
+                    wargs[t].start = t * per_th;
+                    wargs[t].end = (t + 1) * per_th;
+                    if (wargs[t].end > batch_len) wargs[t].end = batch_len;
+                    wargs[t].zlevel = zlevel;
+                    if (wargs[t].start < wargs[t].end)
+                        pthread_create(&th[t], NULL, sweep_thread_worker, &wargs[t]);
+                    else
+                        th[t] = 0;
+                }
+                for (int t = 0; t < active_threads; t++) {
+                    if (th[t]) pthread_join(th[t], NULL);
+                }
+            }
+
+            /* 3. Sequential allocate, write, refcount, and map update */
+            if (batch_start % 2560 == 0 || batch_end == n_ents) {
+                fprintf(stderr, "    [sweep] processed %zu / %zu segments (%.1f%%)...\n",
+                        batch_end, n_ents, (batch_end * 100.0) / n_ents);
+                fflush(stderr);
+            }
+            for (size_t k = 0; k < batch_len; k++) {
+                if (!tasks[k].valid) continue;
+                size_t i = batch_start + k;
+                invfs_ast_block_entry *e = &new_ents[i];
+                uint64_t old_pba = tasks[k].old_pba;
+                uint64_t old_plen = tasks[k].old_plen;
+                uint32_t csize_new = tasks[k].csize_new;
+
+                uint64_t phys_blocks_new = ((uint64_t)csize_new + 8 + INVFS_BLOCK_SIZE - 1) / INVFS_BLOCK_SIZE;
+                uint64_t pba_new = alloc_blocks(v, v->sb.shadow_zone_start, v->sb.shadow_zone_blocks,
+                                                phys_blocks_new, 1, INVFS_ALLOC_DATA);
+                if (pba_new == 0)
+                    continue;
+
+                if (io_pwrite(&v->io, pba_new * INVFS_BLOCK_SIZE, tasks[k].cbuf, (size_t)csize_new + 8) != 0) {
+                    vol_free_blocks(v, pba_new, phys_blocks_new);
+                    continue;
+                }
+
+                pba_ref_modify(v, old_pba, -1);
+                pba_ref_modify(v, pba_new, +1);
+                if (pba_ref_count(v, old_pba) == 0) {
+                    vol_free_blocks(v, old_pba, old_plen);
+                }
+                e->pba = pba_new;
+                e->algo = tasks[k].algo_new;
+                e->zone = INVFS_ZONE_BINARY;
+                any_swept = 1;
+                new_total += (uint64_t)csize_new + 8;
+
+                size_t inh = (size_t)((old_pba * 11400714819323198485ull) & (map_cap - 1));
+                while (pmap[inh].old_pba && pmap[inh].old_pba != old_pba)
+                    inh = (inh + 1) & (map_cap - 1);
+                pmap[inh].old_pba = old_pba;
+                pmap[inh].new_pba = pba_new;
+                pmap[inh].algo = e->algo;
+                pmap[inh].zone = e->zone;
+            }
+        }
+
+        free(tasks);
         free(pmap);
-        free(orig);
-        free(cbuf_new);
         free(blob);
 
         if (any_swept) {
