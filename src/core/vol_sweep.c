@@ -892,6 +892,317 @@ int vol_jxl_retry(invfs_volume *v, uint64_t inode_id, const char *name)
 }
 
 
+/* WP78: shared per-file transcode decision. Both the v2 record path and the
+ * v3 blob path read the whole file and hand it here; every bit-exactness
+ * guard lives in the helpers this dispatches to (containerpack/pack sweeps
+ * decode-back-and-memcmp, the builtin container builders carry their own
+ * rebuild guards). `v3` selects v3-safe publication: on a v3 volume
+ * vol_create_blob_file supersedes the inode row IN PLACE (same id), so the
+ * caller must NOT vol_delete_inode() the old id afterwards. Returns
+ * SWEEP_DECLINED when no lane claimed the content -- the caller then runs
+ * its own generic floor. Never frees `full`; the caller owns it. */
+#define SWEEP_DECLINED (-2)
+
+static int sweep_dispatch(invfs_volume *v, uint64_t inode_id,
+                          const char *name, const uint8_t *full,
+                          size_t full_len, int v3)
+{
+    char rname[272], p0name[272], jn[272];
+
+    if (!name || !name[0] || !full || full_len < 4)
+        return SWEEP_DECLINED;
+
+    /* WP59a: anchored files must never be claimed by a pack/container codec.
+     * If the file reached the full path without a class stamp (first sweep
+     * after creation), skip every codec/container branch and go straight to
+     * the generic floor (builtin LZ4/ZSTD). The class stamp set by the
+     * creation path prevents re-entry on subsequent sweeps. */
+    if (invfs_inode_is_anchored(v, inode_id)) {
+        vol_stamp_class(v, inode_id, INVFS_CLASS_ANCHORED, 0, 0);
+        return SWEEP_DECLINED;
+    }
+
+    /* WP19: a write-hot file (rewritten at least twice inside the last
+     * sweep interval -- wheat survives rewrites, see vol_replace_file)
+     * churns too fast to amortize containers, transcodes or batching:
+     * skip the heavy fan-out for this run and take the generic floor. */
+    if (v->heat_any_whot && heat_file_maxw(v, inode_id) >= INVFS_WHEAT_HOT)
+        return SWEEP_DECLINED;
+
+    /* ZIP container: explode into AST children (keep original bytes).
+     * WP78: vol_create_container_file still writes a v2 record, so a v3
+     * volume leaves ZIP to the generic floor (parity TODO). */
+    if (!v3 && full[0] == 'P' && full[1] == 'K' &&
+        ((full[2] == 3 && full[3] == 4) || (full[2] == 5 && full[3] == 6))) {
+        invfs_ast_child_entry *ch =
+            (invfs_ast_child_entry *)calloc(MAX_AST_CHILDREN, sizeof(*ch));
+        if (ch) {
+            int n = vol_zip_parse_children(full, full_len, ch, MAX_AST_CHILDREN);
+            if (n > 0) {
+                uint64_t nino = vol_create_container_file(v, name, full, full_len,
+                                                          ch, (size_t)n);
+                if (nino) {
+                    vol_delete_inode(v, inode_id, name);
+                    vol_stamp_class(v, nino, INVFS_CLASS_CONTAINER,
+                                    INVFS_ALGO_ZIPR, tz_codec_gen(INVFS_ALGO_ZIPR));
+                    free(ch);
+                    return 1;
+                }
+                /* recognized but refused: retry only on a new generation */
+                vol_stamp_class(v, inode_id, INVFS_CLASS_GENERIC_GUARD,
+                                INVFS_ALGO_ZIPR, tz_codec_gen(INVFS_ALGO_ZIPR));
+            }
+            free(ch);
+        }
+        return 0;
+    }
+
+    /* FLAC -> APE(PCM) + frame recipe (bit-exact) */
+    if (full_len >= 4 && memcmp(full, "fLaC", 4) == 0) {
+        snprintf(rname, sizeof rname, "%s!recipe", name);
+        if (vol_find(v, rname) != 0) return 0;
+        uint64_t nino = vol_create_flac_file(v, name, full, full_len);
+        if (!nino) {
+            vol_stamp_class(v, inode_id, INVFS_CLASS_GENERIC_GUARD,
+                            INVFS_ALGO_FLACR, tz_codec_gen(INVFS_ALGO_FLACR));
+            return 0;
+        }
+        if (!v3 && vol_delete_inode(v, inode_id, name) != 0) return -1;
+        vol_stamp_class(v, nino, INVFS_CLASS_CONTAINER,
+                        INVFS_ALGO_FLACR, tz_codec_gen(INVFS_ALGO_FLACR));
+        return 2;   /* FLAC */
+    }
+
+    /* TAR -> members + IVFT recipe (bit-exact) */
+    if (full_len >= 512 && full[0] != 0 && full[0] != 1 &&
+        memcmp(full + 257, "ustar", 5) == 0) {
+        snprintf(p0name, sizeof p0name, "%s!part0", name);
+        if (vol_find(v, p0name) != 0) return 0;
+        uint64_t nino = vol_create_tar_file(v, name, full, full_len);
+        if (!nino) {
+            vol_stamp_class(v, inode_id, INVFS_CLASS_GENERIC_GUARD,
+                            INVFS_ALGO_TARR, tz_codec_gen(INVFS_ALGO_TARR));
+            return 0;
+        }
+        if (!v3 && vol_delete_inode(v, inode_id, name) != 0) return -1;
+        vol_stamp_class(v, nino, INVFS_CLASS_CONTAINER,
+                        INVFS_ALGO_TARR, tz_codec_gen(INVFS_ALGO_TARR));
+        defer_container_parts(v, name);   /* WP14b: batch parts this run */
+        return 3;   /* TAR */
+    }
+
+    /* GZIP (tar.gz) -> members + IVGZ recipe (bit-exact deflate) */
+    if (full_len >= 18 && full[0] != 0 && full[0] != 1 &&
+        full[0] == 0x1F && full[1] == 0x8B) {
+        snprintf(p0name, sizeof p0name, "%s!part0", name);
+        if (vol_find(v, p0name) != 0) return 0;
+        uint64_t nino = vol_create_gz_file(v, name, full, full_len);
+        if (!nino) {
+            vol_stamp_class(v, inode_id, INVFS_CLASS_GENERIC_GUARD,
+                            INVFS_ALGO_GZR, tz_codec_gen(INVFS_ALGO_GZR));
+            return 0;
+        }
+        if (!v3 && vol_delete_inode(v, inode_id, name) != 0) return -1;
+        vol_stamp_class(v, nino, INVFS_CLASS_CONTAINER,
+                        INVFS_ALGO_GZR, tz_codec_gen(INVFS_ALGO_GZR));
+        defer_container_parts(v, name);   /* WP14b: batch parts this run */
+        return 4;   /* GZIP */
+    }
+
+    /* PNG -> JXL lossless + IVPN recipe (bit-exact) */
+    if (full_len >= 33 && memcmp(full, "\x89PNG\r\n\x1a\n", 8) == 0) {
+        snprintf(jn, sizeof jn, "%s!jxl", name);
+        if (vol_find(v, jn) != 0) return 0;
+        /* WP10 §12.2: admission needs the DECODE working set, derivable from
+         * IHDR without a trial decode: raw pixels ~= h * (1 + ceil(w*ch*bd/8))
+         * (unfiltered rows + per-row filter byte). Beyond the limit the file
+         * stays admissible to generic ZSTD but never to PNGR. */
+        {
+            uint32_t w = ((uint32_t)full[16] << 24) | ((uint32_t)full[17] << 16) |
+                         ((uint32_t)full[18] << 8) | (uint32_t)full[19];
+            uint32_t h = ((uint32_t)full[20] << 24) | ((uint32_t)full[21] << 16) |
+                         ((uint32_t)full[22] << 8) | (uint32_t)full[23];
+            unsigned bd = full[24], ct = full[25];
+            static const uint8_t chans[7] = { 1, 0, 3, 1, 2, 0, 4 };
+            unsigned ch = ct < sizeof chans ? chans[ct] : 0;
+            if (w && h && ch) {
+                uint64_t raw = (uint64_t)h *
+                               (1 + (((uint64_t)w * ch * bd) + 7) / 8);
+                if (raw > vol_get_dec_mem_limit(v)) {
+                    vol_stamp_class(v, inode_id, INVFS_CLASS_GENERIC_MEMLIMIT,
+                                    INVFS_ALGO_PNGR, tz_codec_gen(INVFS_ALGO_PNGR));
+                    return 0;
+                }
+            }
+        }
+        uint64_t nino = vol_create_png_file(v, name, full, full_len);
+        if (!nino) {
+            vol_stamp_class(v, inode_id, INVFS_CLASS_GENERIC_GUARD,
+                            INVFS_ALGO_PNGR, tz_codec_gen(INVFS_ALGO_PNGR));
+            return 0;
+        }
+        if (!v3 && vol_delete_inode(v, inode_id, name) != 0) return -1;
+        vol_stamp_class(v, nino, INVFS_CLASS_CONTAINER,
+                        INVFS_ALGO_PNGR, tz_codec_gen(INVFS_ALGO_PNGR));
+        return 5;   /* PNG */
+    }
+
+    /* MP3 -> PMP (packMP3, bit-exact). Matches an ID3v2 tag or a bare
+       frame sync; packMP3 re-checks the content itself and refuses
+       MPEG-2/2.5 Layer III, which we detect by a missing blob rather
+       than by exit code (it exits 0 on refusal). */
+    if (full_len >= 4 &&
+        ((full[0] == 'I' && full[1] == 'D' && full[2] == '3') ||
+         (full[0] == 0xFF && (full[1] & 0xE0) == 0xE0))) {
+        uint8_t *pmp = NULL;
+        size_t pmp_len = 0;
+        int prc = invfs_pmp_compress(full, full_len, &pmp, &pmp_len);
+        if (getenv("INVFS_DEBUG"))
+            fprintf(stderr, "[sweep] %s: PMP rc=%d pmp_len=%zu (mp3 %zu)\n",
+                    name, prc, pmp_len, full_len);
+        if (prc == 0 && pmp_len > 0 && pmp_len < full_len) {
+            uint64_t nino = vol_create_pmp_file(v, name, pmp, pmp_len,
+                                                (uint64_t)full_len);
+            free(pmp);
+            if (!nino) return 0;
+            if (!v3 && vol_delete_inode(v, inode_id, name) != 0) return -1;
+            vol_stamp_class(v, nino, INVFS_CLASS_CODEC,
+                            INVFS_ALGO_PMP, tz_codec_gen(INVFS_ALGO_PMP));
+            return 8;   /* MP3 */
+        }
+        free(pmp);
+        vol_stamp_class(v, inode_id, INVFS_CLASS_GENERIC_GUARD,
+                        INVFS_ALGO_PMP, tz_codec_gen(INVFS_ALGO_PMP));
+    }
+
+    /* WP16a: container codecpacks (manifest type=container) -- decompose a
+     * container into "!mbrNNNN" member inodes that flow through the whole
+     * normal pipeline. Placed AFTER every builtin container magic above
+     * (ZIP/TAR/GZ/PNG/FLAC, and the MP3 codec branch) and BEFORE the WP13
+     * whole-file codec-pack loop / text / generic. */
+    {
+        size_t cn = 0, ci;
+        const invfs_codec *all = invfs_codec_all(&cn);
+        int deferred = 0;
+        for (ci = 0; ci < cn; ci++) {
+            const invfs_codec *pc = &all[ci];
+            const invfs_pack_def *pd;
+            int prc;
+            if (!pc->sniff || !(pc->caps & INVFS_CODEC_CAP_CONTAINER))
+                continue;
+            pd = invfs_codec_pack_def(pc);
+            if (!pd || !pd->is_container)
+                continue;
+            if (pc->sniff(full, full_len, name) <= 0)
+                continue;
+            prc = vol_containerpack_sweep(v, inode_id, name, pc, full,
+                                          full_len);
+            if (getenv("INVFS_DEBUG_PACKS"))
+                fprintf(stderr, "[packdbg] %s on %s -> prc=%d\n",
+                        pc->name, name, prc);
+            if (prc >= 100) return prc;   /* decomposed */
+            if (prc == 1) { deferred = 1; continue; }   /* defer: try next */
+        }
+        if (deferred) return 0;   /* a later sweep may claim */
+    }
+
+    /* WP13: codecpack codecs -- the registry's dynamic EXTERNAL entries, the
+     * only ones carrying encode/decode trampolines (builtin externals have
+     * NULL fn pointers and their own branches above). First sniff hit wins;
+     * a declined pack stamps and falls through to text/generic. */
+    {
+        size_t cn = 0, ci;
+        const invfs_codec *all = invfs_codec_all(&cn);
+        int packless_claim = 0;
+        for (ci = 0; ci < cn; ci++) {
+            const invfs_codec *pc = &all[ci];
+            int prc;
+            if (!(pc->caps & INVFS_CODEC_CAP_EXTERNAL) || !pc->sniff)
+                continue;
+            if (pc->sniff(full, full_len, name) <= 0)
+                continue;
+            if (!pc->encode || !pc->decode) {
+                if (pc->caps & INVFS_CODEC_CAP_PACKONLY)
+                    packless_claim = 1;
+                continue;
+            }
+            prc = vol_pack_sweep(v, inode_id, name, pc, full, full_len);
+            if (prc == 1) return 0;   /* tool absent: defer */
+            if (prc >= 100) return prc;   /* transcoded */
+            packless_claim = 0;
+            break;   /* declined: stamps applied; text/generic still run */
+        }
+        if (packless_claim) return 0;   /* wait for the pack */
+    }
+
+    /* WP10 §4: every magic dispatch above declined -- classify text. Text
+     * DEFERS into the sweep-run accumulator (sealed into shared PPMd batches
+     * by vol_tz_flush at the end of the run); "!" sibling parts stay with
+     * their container in v1 (WP10 §12.7). */
+    if (!strchr(name, '!')) {
+        int fam = invfs_text_family(name, full, full_len);
+        if (fam > 0) {
+            const invfs_codec *pc = invfs_codec_by_algo(INVFS_ALGO_PPMD);
+            if (pc && pc->dec_mem_bytes > vol_get_dec_mem_limit(v)) {
+                vol_stamp_class(v, inode_id, INVFS_CLASS_GENERIC_MEMLIMIT,
+                                INVFS_ALGO_PPMD, pc->generation);
+            } else if (tz_defer(v, inode_id, name, full_len,
+                                (uint32_t)fam) == 0) {
+                return 9;   /* text -> PPMd batch (deferred to flush) */
+            }
+        }
+    }
+
+    /* WP14b M2: exe-as-container carving, BEFORE the binary-batch
+     * deferral -- a carved exe is strictly better than a batched one (the
+     * embedded media gets a real codec, the glue still gets ZSTD-19).
+     * '!'-sibling parts are never carved (WP10 §12.7). A MEMLIMIT refusal
+     * (rc 2) skips batching too. */
+    int exer_no_bz = 0;
+    if (!strchr(name, '!') &&
+        invfs_binary_family(full, full_len, name) > 0) {
+        uint32_t nparts = 0;
+        int erc = vol_exer_carve(v, inode_id, name, full, full_len, &nparts);
+        if (erc == 1) {
+            v->last_exer_parts = nparts;   /* invf-sweep reports the count */
+            return 11;   /* exe media -> JXL container */
+        }
+        exer_no_bz = (erc == 2);
+    }
+
+    /* WP14a: not text either -- executable binaries (ELF/PE/Mach-O by
+     * magic, >= 4 KB) defer into the BINARY accumulator and are sealed
+     * into shared ZSTD batches (x86 members BCJ-prefiltered first). */
+    if (!strchr(name, '!') && !exer_no_bz) {
+        int bfam = invfs_binary_family(full, full_len, name);
+        if (bfam > 0 &&
+            bz_defer(v, inode_id, name, full_len, (uint32_t)bfam) == 0) {
+            return 10;   /* binary -> ZSTD batch (deferred to flush) */
+        }
+    }
+
+    return SWEEP_DECLINED;
+}
+
+
+/* WP78: the v3 generic floor stores the file as a whole-file ZSTD blob. A
+ * class stamp a declined codec/container pack set during the dispatch
+ * (GENERIC_MEMLIMIT / GENERIC_GUARD) carries retry semantics the gain
+ * verdict knows nothing about, so it must win -- mirrors
+ * vol_sweep_file_inner's rule. */
+static void v3_stamp_generic(invfs_volume *v, uint64_t id, uint8_t cls,
+                             uint8_t algo)
+{
+    uint8_t oc = 0, oa = 0;
+    uint16_t og = 0;
+    int havec = vol_get_class(v, id, &oc, &oa, &og) == 0;
+    if (havec && (oc == INVFS_CLASS_GENERIC_MEMLIMIT ||
+                  oc == INVFS_CLASS_GENERIC_GUARD))
+        return;
+    vol_stamp_class(v, id, cls, algo, invfs_registry_generation());
+}
+
+
 /* WP-M21b: the v3 sweep path. The v2 full path below operates on the
  * record stream (sweep_locate_record, L2P maps, atomic new-id records)
  * which does not exist on a v3 volume -- it fails every file with -1
@@ -954,7 +1265,20 @@ static int vol_sweep_one_v3(invfs_volume *v, uint64_t inode_id,
             }
             if (!cc || (cc->dec_mem_bytes && cc->dec_mem_bytes > vol_get_dec_mem_limit(v)))
                 return 0;
+            /* WP78 / WP12(b): a JXL stamp lives behind generic storage now
+             * -- the RAW-gated dispatch can never see it again, so retry
+             * through the codecpack's own attempt on the current bytes. */
+            if (calgo == INVFS_ALGO_JXL)
+                return vol_jxl_retry(v, inode_id, name);
             break;              /* memory limit raised or now admits: retry */
+        }
+        case INVFS_CLASS_GENERIC_GUARD: {
+            const invfs_codec *cc = invfs_codec_by_algo(calgo);
+            if (!cc || cc->generation <= cgen)
+                return 0;       /* retry only when the codec's gen grew */
+            if (calgo == INVFS_ALGO_JXL)
+                return vol_jxl_retry(v, inode_id, name);
+            break;              /* new sub-encoder: retry via the dispatch */
         }
         default:
             return 0;           /* GENERIC/CODEC/TEXT/...: already swept */
@@ -971,40 +1295,63 @@ static int vol_sweep_one_v3(invfs_volume *v, uint64_t inode_id,
     if (fz != INVFS_ZONE_RAW)
         return 0;               /* already blob-stored; unreadable: skip */
 
-    /* WP16a / WP-M26: container codecpacks (manifest type=container) -- decompose a
-     * container into "!mbrNNNN" member inodes that flow through the whole
-     * normal pipeline. */
-    if (name && name[0] && !strstr(name, "!mbrt") && !strstr(name, "!mbrmap")) {
-        size_t cn = 0, ci;
-        const invfs_codec *all = invfs_codec_all(&cn);
-        uint8_t head[8192];
-        int head_len = vol_read_range(v, inode_id, 0, sizeof head, head);
-        if (head_len > 0) {
-            for (ci = 0; ci < cn; ci++) {
-                const invfs_codec *pc = &all[ci];
-                const invfs_pack_def *pd;
-                int prc;
-                if (!pc->sniff || !(pc->caps & INVFS_CODEC_CAP_CONTAINER))
-                    continue;
-                pd = invfs_codec_pack_def(pc);
-                if (!pd || !pd->is_container)
-                    continue;
-                if (pc->sniff(head, (size_t)head_len, name) <= 0)
-                    continue;
-                if (vol_read_inode(v, inode_id, 0, &full, &full_len) == 0 && full) {
-                    if (getenv("INVFS_DEBUG_PACKS"))
-                        fprintf(stderr, "[sweep-v3] %s: trying containerpack %s (len=%zu)\n",
-                                name, pc->name, full_len);
-                    prc = vol_containerpack_sweep(v, inode_id, name, pc, full, full_len);
+    /* WP78: whole-file transcode dispatch -- the same decision the v2 path
+     * runs (builtin containers, codec/container packs, text/binary batching,
+     * EXER carve), so a v3 volume gets full sweep parity. Above the
+     * whole-file memory cap only the container packs still get a head
+     * sniff (their prior v3 behavior). */
+    {
+        uint64_t max_sweep_size = 256ULL * 1024ULL * 1024ULL;
+        const char *env_max = getenv("INVFS_SWEEP_MAX_FILE");
+        if (env_max && *env_max) {
+            unsigned long long sz = strtoull(env_max, NULL, 10);
+            if (sz > 0) max_sweep_size = sz;
+        } else if (v->arc_budget && v->arc_budget < max_sweep_size) {
+            max_sweep_size = v->arc_budget;
+        }
+
+        if (in.size <= max_sweep_size) {
+            if (vol_read_inode(v, inode_id, 0, &full, &full_len) == 0 && full) {
+                if (full_len == (size_t)in.size) {
+                    int drc = sweep_dispatch(v, inode_id, name, full,
+                                             full_len, 1);
                     free(full);
-                    if (getenv("INVFS_DEBUG_PACKS"))
-                        fprintf(stderr, "[sweep-v3] %s: pack %s finished prc=%d\n",
-                                name, pc->name, prc);
-                    if (prc >= 100) return prc;
-                    uint8_t chk_cls = 0;
-                    if (vol_get_class(v, inode_id, &chk_cls, NULL, NULL) == 0 &&
-                        chk_cls == INVFS_CLASS_GENERIC_MEMLIMIT)
-                        return 0;
+                    full = NULL;
+                    if (drc != SWEEP_DECLINED)
+                        return drc;
+                } else {
+                    free(full);
+                    full = NULL;
+                }
+            }
+        } else if (name && name[0] && !strstr(name, "!mbrt") &&
+                   !strstr(name, "!mbrmap")) {
+            size_t cn = 0, ci;
+            const invfs_codec *all = invfs_codec_all(&cn);
+            uint8_t head[8192];
+            int head_len = vol_read_range(v, inode_id, 0, sizeof head, head);
+            if (head_len > 0) {
+                for (ci = 0; ci < cn; ci++) {
+                    const invfs_codec *pc = &all[ci];
+                    const invfs_pack_def *pd;
+                    int prc;
+                    if (!pc->sniff || !(pc->caps & INVFS_CODEC_CAP_CONTAINER))
+                        continue;
+                    pd = invfs_codec_pack_def(pc);
+                    if (!pd || !pd->is_container)
+                        continue;
+                    if (pc->sniff(head, (size_t)head_len, name) <= 0)
+                        continue;
+                    if (vol_read_inode(v, inode_id, 0, &full, &full_len) == 0 && full) {
+                        prc = vol_containerpack_sweep(v, inode_id, name, pc, full, full_len);
+                        free(full);
+                        full = NULL;
+                        if (prc >= 100) return prc;
+                        uint8_t chk_cls = 0;
+                        if (vol_get_class(v, inode_id, &chk_cls, NULL, NULL) == 0 &&
+                            chk_cls == INVFS_CLASS_GENERIC_MEMLIMIT)
+                            return 0;
+                    }
                 }
             }
         }
@@ -1037,6 +1384,7 @@ static int vol_sweep_one_v3(invfs_volume *v, uint64_t inode_id,
         uint8_t *cbuf_new = (uint8_t *)malloc(SEGMENT_SIZE + 128 + INVFS_BLOCK_SIZE);
         uint8_t *orig = (uint8_t *)malloc(SEGMENT_SIZE);
         int any_swept = 0;
+        uint64_t new_total = 0;   /* sum of rewritten segment csizes (+framing) */
 
         /* O(1) hash map for tracking remapped duplicate pbas within the file */
         size_t map_cap = 64;
@@ -1142,6 +1490,7 @@ static int vol_sweep_one_v3(invfs_volume *v, uint64_t inode_id,
             e->pba = pba_new;
             e->zone = INVFS_ZONE_BINARY;
             any_swept = 1;
+            new_total += (uint64_t)csize_new + 8;
 
             /* record in pmap for subsequent segments sharing old_pba */
             size_t inh = (size_t)((old_pba * 11400714819323198485ull) & (map_cap - 1));
@@ -1166,7 +1515,17 @@ static int vol_sweep_one_v3(invfs_volume *v, uint64_t inode_id,
                 if (vol_v3_recipe_store(v, new_blob, new_blen, new_addr) == 0) {
                     memcpy(in.recipe_addr, new_addr, sizeof(new_addr));
                     vol_v3_inode_delta_put(v, inode_id, &in);
-                    vol_stamp_class(v, inode_id, INVFS_CLASS_GENERIC, INVFS_ALGO_ZSTD, invfs_registry_generation());
+                    /* WP78: the same gain verdict the v2 generic floor uses
+                     * (the per-segment sum vs the file size), so a wholly
+                     * incompressible multi-segment file is stamped
+                     * UNCOMPRESSIBLE rather than GENERIC. */
+                    if ((double)new_total >=
+                        (double)in.size * (1.0 - vol_min_gain_pct() / 100.0))
+                        v3_stamp_generic(v, inode_id,
+                                         INVFS_CLASS_UNCOMPRESSIBLE, 0);
+                    else
+                        v3_stamp_generic(v, inode_id,
+                                         INVFS_CLASS_GENERIC, INVFS_ALGO_ZSTD);
                 }
                 free(new_blob);
             }
@@ -1218,8 +1577,7 @@ static int vol_sweep_one_v3(invfs_volume *v, uint64_t inode_id,
         /* no gain or exceeds blob cap: generation-gated skip until the registry grows */
         free(enc);
         free(full);
-        vol_stamp_class(v, inode_id, INVFS_CLASS_UNCOMPRESSIBLE, 0,
-                        invfs_registry_generation());
+        v3_stamp_generic(v, inode_id, INVFS_CLASS_UNCOMPRESSIBLE, 0);
         return 0;
     }
     enc_len = zrc;
@@ -1244,8 +1602,7 @@ static int vol_sweep_one_v3(invfs_volume *v, uint64_t inode_id,
     if (!newino)
         return 0;           /* store failed (ENOSPC): stay RAW */
 
-    vol_stamp_class(v, inode_id, INVFS_CLASS_GENERIC, INVFS_ALGO_ZSTD,
-                    invfs_registry_generation());
+    v3_stamp_generic(v, inode_id, INVFS_CLASS_GENERIC, INVFS_ALGO_ZSTD);
     return 1;
 }
 
@@ -1254,7 +1611,6 @@ static int vol_sweep_one_v3(invfs_volume *v, uint64_t inode_id,
    -1 on hard error (caller keeps it pending or aborts). */
 int vol_sweep_one(invfs_volume *v, uint64_t inode_id, const char *name)
 {
-    char rname[272], p0name[272], jn[272];
     uint8_t *full = NULL;
     size_t full_len = 0;
 
@@ -1453,319 +1809,13 @@ int vol_sweep_one(invfs_volume *v, uint64_t inode_id, const char *name)
         free(full);
         return 0;
     }
-
-    /* WP59a: anchored files must never be claimed by a pack/container codec.
-     * If the file reached the full path without a class stamp (first sweep
-     * after creation), skip every codec/container branch and go straight to
-     * the generic floor (builtin LZ4/ZSTD).  The class stamp set by the
-     * creation path prevents re-entry on subsequent sweeps. */
-    if (invfs_inode_is_anchored(v, inode_id)) {
-        vol_stamp_class(v, inode_id, INVFS_CLASS_ANCHORED, 0, 0);
-        goto generic_floor;
-    }
-
-    /* WP19: a write-hot file (rewritten at least twice inside the last
-     * sweep interval -- wheat survives rewrites, see vol_replace_file)
-     * churns too fast to amortize containers, transcodes or batching:
-     * skip the heavy fan-out for this run and take the generic floor.
-     * The volume-wide summary keeps cold volumes from paying the scan. */
-    if (v->heat_any_whot && heat_file_maxw(v, inode_id) >= INVFS_WHEAT_HOT) {
-        free(full);
-        full = NULL;
-        goto generic_floor;
-    }
-
-    /* ZIP container: explode into AST children (keep original bytes) */
-    if (full[0] == 'P' && full[1] == 'K' &&
-        ((full[2] == 3 && full[3] == 4) || (full[2] == 5 && full[3] == 6))) {
-        invfs_ast_child_entry *ch =
-            (invfs_ast_child_entry *)calloc(MAX_AST_CHILDREN, sizeof(*ch));
-        if (ch) {
-            int n = vol_zip_parse_children(full, full_len, ch, MAX_AST_CHILDREN);
-            if (n > 0) {
-                uint64_t nino = vol_create_container_file(v, name, full, full_len,
-                                                          ch, (size_t)n);
-                if (nino) {
-                    vol_delete_inode(v, inode_id, name);
-                    vol_stamp_class(v, nino, INVFS_CLASS_CONTAINER,
-                                    INVFS_ALGO_ZIPR, tz_codec_gen(INVFS_ALGO_ZIPR));
-                    free(ch); free(full);
-                    return 1;
-                }
-                /* recognized but refused: retry only on a new generation */
-                vol_stamp_class(v, inode_id, INVFS_CLASS_GENERIC_GUARD,
-                                INVFS_ALGO_ZIPR, tz_codec_gen(INVFS_ALGO_ZIPR));
-            }
-            free(ch);
-        }
-        free(full);
-        return 0;
-    }
-
-    /* FLAC -> APE(PCM) + frame recipe (bit-exact) */
-    if (full_len >= 4 && memcmp(full, "fLaC", 4) == 0) {
-        snprintf(rname, sizeof rname, "%s!recipe", name);
-        if (vol_find(v, rname) != 0) { free(full); return 0; }
-        uint64_t nino = vol_create_flac_file(v, name, full, full_len);
-        free(full);
-        if (!nino) {
-            vol_stamp_class(v, inode_id, INVFS_CLASS_GENERIC_GUARD,
-                            INVFS_ALGO_FLACR, tz_codec_gen(INVFS_ALGO_FLACR));
-            return 0;
-        }
-        if (vol_delete_inode(v, inode_id, name) != 0) return -1;
-        vol_stamp_class(v, nino, INVFS_CLASS_CONTAINER,
-                        INVFS_ALGO_FLACR, tz_codec_gen(INVFS_ALGO_FLACR));
-        return 2;   /* FLAC */
-    }
-
-    /* TAR -> members + IVFT recipe (bit-exact) */
-    if (full_len >= 512 && full[0] != 0 && full[0] != 1 &&
-        memcmp(full + 257, "ustar", 5) == 0) {
-        snprintf(p0name, sizeof p0name, "%s!part0", name);
-        if (vol_find(v, p0name) != 0) { free(full); return 0; }
-        uint64_t nino = vol_create_tar_file(v, name, full, full_len);
-        free(full);
-        if (!nino) {
-            vol_stamp_class(v, inode_id, INVFS_CLASS_GENERIC_GUARD,
-                            INVFS_ALGO_TARR, tz_codec_gen(INVFS_ALGO_TARR));
-            return 0;
-        }
-        if (vol_delete_inode(v, inode_id, name) != 0) return -1;
-        vol_stamp_class(v, nino, INVFS_CLASS_CONTAINER,
-                        INVFS_ALGO_TARR, tz_codec_gen(INVFS_ALGO_TARR));
-        defer_container_parts(v, name);   /* WP14b: batch parts this run */
-        return 3;   /* TAR */
-    }
-
-    /* GZIP (tar.gz) -> members + IVGZ recipe (bit-exact deflate) */
-    if (full_len >= 18 && full[0] != 0 && full[0] != 1 &&
-        full[0] == 0x1F && full[1] == 0x8B) {
-        snprintf(p0name, sizeof p0name, "%s!part0", name);
-        if (vol_find(v, p0name) != 0) { free(full); return 0; }
-        uint64_t nino = vol_create_gz_file(v, name, full, full_len);
-        free(full);
-        if (!nino) {
-            vol_stamp_class(v, inode_id, INVFS_CLASS_GENERIC_GUARD,
-                            INVFS_ALGO_GZR, tz_codec_gen(INVFS_ALGO_GZR));
-            return 0;
-        }
-        if (vol_delete_inode(v, inode_id, name) != 0) return -1;
-        vol_stamp_class(v, nino, INVFS_CLASS_CONTAINER,
-                        INVFS_ALGO_GZR, tz_codec_gen(INVFS_ALGO_GZR));
-        defer_container_parts(v, name);   /* WP14b: batch parts this run */
-        return 4;   /* GZIP */
-    }
-
-    /* PNG -> JXL lossless + IVPN recipe (bit-exact) */
-    if (full_len >= 33 && memcmp(full, "\x89PNG\r\n\x1a\n", 8) == 0) {
-        snprintf(jn, sizeof jn, "%s!jxl", name);
-        if (vol_find(v, jn) != 0) { free(full); return 0; }
-        /* WP10 §12.2: admission needs the DECODE working set, derivable from
-         * IHDR without a trial decode: raw pixels ~= h * (1 + ceil(w*ch*bd/8))
-         * (unfiltered rows + per-row filter byte). Beyond the limit the file
-         * stays admissible to generic ZSTD but never to PNGR. */
-        {
-            uint32_t w = ((uint32_t)full[16] << 24) | ((uint32_t)full[17] << 16) |
-                         ((uint32_t)full[18] << 8) | (uint32_t)full[19];
-            uint32_t h = ((uint32_t)full[20] << 24) | ((uint32_t)full[21] << 16) |
-                         ((uint32_t)full[22] << 8) | (uint32_t)full[23];
-            unsigned bd = full[24], ct = full[25];
-            static const uint8_t chans[7] = { 1, 0, 3, 1, 2, 0, 4 };
-            unsigned ch = ct < sizeof chans ? chans[ct] : 0;
-            if (w && h && ch) {
-                uint64_t raw = (uint64_t)h *
-                               (1 + (((uint64_t)w * ch * bd) + 7) / 8);
-                if (raw > vol_get_dec_mem_limit(v)) {
-                    vol_stamp_class(v, inode_id, INVFS_CLASS_GENERIC_MEMLIMIT,
-                                    INVFS_ALGO_PNGR, tz_codec_gen(INVFS_ALGO_PNGR));
-                    free(full);
-                    return 0;
-                }
-            }
-        }
-        uint64_t nino = vol_create_png_file(v, name, full, full_len);
-        free(full);
-        if (!nino) {
-            vol_stamp_class(v, inode_id, INVFS_CLASS_GENERIC_GUARD,
-                            INVFS_ALGO_PNGR, tz_codec_gen(INVFS_ALGO_PNGR));
-            return 0;
-        }
-        if (vol_delete_inode(v, inode_id, name) != 0) return -1;
-        vol_stamp_class(v, nino, INVFS_CLASS_CONTAINER,
-                        INVFS_ALGO_PNGR, tz_codec_gen(INVFS_ALGO_PNGR));
-        return 5;   /* PNG */
-    }
-
-    /* MP3 -> PMP (packMP3, bit-exact). Matches an ID3v2 tag or a bare
-       frame sync; packMP3 re-checks the content itself and refuses
-       MPEG-2/2.5 Layer III, which we detect by a missing blob rather
-       than by exit code (it exits 0 on refusal). */
-    if (full_len >= 4 &&
-        ((full[0] == 'I' && full[1] == 'D' && full[2] == '3') ||
-         (full[0] == 0xFF && (full[1] & 0xE0) == 0xE0))) {
-        uint8_t *pmp = NULL;
-        size_t pmp_len = 0;
-        int prc = invfs_pmp_compress(full, full_len, &pmp, &pmp_len);
-        if (getenv("INVFS_DEBUG"))
-            fprintf(stderr, "[sweep] %s: PMP rc=%d pmp_len=%zu (mp3 %zu)\n",
-                    name, prc, pmp_len, full_len);
-        /* only if it pays: a refused MPEG-2 file leaves pmp NULL, and a
-           rare expansion must not cost space either. Either way we fall
-           through and the generic ZSTD-19 path still gets the file. */
-        if (prc == 0 && pmp_len > 0 && pmp_len < full_len) {
-            uint64_t nino = vol_create_pmp_file(v, name, pmp, pmp_len,
-                                                (uint64_t)full_len);
-            free(pmp); free(full);
-            if (!nino) return 0;
-            if (vol_delete_inode(v, inode_id, name) != 0) return -1;
-            vol_stamp_class(v, nino, INVFS_CLASS_CODEC,
-                            INVFS_ALGO_PMP, tz_codec_gen(INVFS_ALGO_PMP));
-            return 8;   /* MP3 */
-        }
-        free(pmp);
-        /* Refused (MPEG-2/2.5, or a rare expansion). The generic path below
-         * still runs; the GUARD stamp survives it (inner re-reads the record
-         * and its gain-stamp yields to GUARD), so a new packMP3 generation
-         * is what re-arms this file. */
-        vol_stamp_class(v, inode_id, INVFS_CLASS_GENERIC_GUARD,
-                        INVFS_ALGO_PMP, tz_codec_gen(INVFS_ALGO_PMP));
-    }
-
-    /* WP16a: container codecpacks (manifest type=container) -- decompose a
-     * container into "!mbrNNNN" member inodes that flow through the whole
-     * normal pipeline. Placed AFTER every builtin container magic above
-     * (ZIP/TAR/GZ/PNG/FLAC, and the MP3 codec branch) and BEFORE the WP13
-     * whole-file codec-pack loop / text / generic. Every sniff-positive pack
-     * gets its chance in registry order: a decline tries the NEXT pack (weak
-     * magics overlap — e.g. rawdisk vs fatfs both sniff 55AA@510); a defer
-     * (tools absent / DEFER_ENOSPC) is remembered and wins over declines. */
+    /* WP78: one shared transcode decision for both the v2 and v3 paths */
     {
-        size_t cn = 0, ci;
-        const invfs_codec *all = invfs_codec_all(&cn);
-        int deferred = 0;
-        for (ci = 0; ci < cn; ci++) {
-            const invfs_codec *pc = &all[ci];
-            const invfs_pack_def *pd;
-            int prc;
-            if (!pc->sniff || !(pc->caps & INVFS_CODEC_CAP_CONTAINER))
-                continue;
-            pd = invfs_codec_pack_def(pc);
-            if (!pd || !pd->is_container)
-                continue;
-            if (pc->sniff(full, full_len, name) <= 0)
-                continue;
-            prc = vol_containerpack_sweep(v, inode_id, name, pc, full,
-                                          full_len);
-            if (getenv("INVFS_DEBUG_PACKS"))
-                fprintf(stderr, "[packdbg] %s on %s -> prc=%d\n",
-                        pc->name, name, prc);
-            if (prc >= 100) { free(full); return prc; }   /* decomposed */
-            if (prc == 1) { deferred = 1; continue; }     /* defer: try next */
-            /* declined: stamps carry the retry semantics; try next pack */
-        }
-        if (deferred) { free(full); return 0; }   /* a later sweep may claim */
+        int drc = sweep_dispatch(v, inode_id, name, full, full_len, 0);
+        free(full);
+        if (drc != SWEEP_DECLINED)
+            return drc;
     }
-
-    /* WP13: codecpack codecs — the registry's dynamic EXTERNAL entries, the
-     * only ones carrying encode/decode trampolines (builtin externals have
-     * NULL fn pointers and their own branches above). First sniff hit wins;
-     * a declined pack stamps and falls through to text/generic.
-     * WP16e: a builtin EXTERNAL entry whose transcode was retired to a pack
-     * (CAP_PACKONLY, today: JXL) and which no loaded pack has overridden
-     * still OWNS its content's sniff -- but builtins sit BEFORE the packs
-     * in registry order, so the hit is only remembered here and the defer
-     * fires when NO later pack claimed the content: the file waits RAW and
-     * unstamped rather than falling to the generic floor, whose stamp would
-     * be terminal (the class predicate never re-arms plain GENERIC for a
-     * codec). The first sweep with the pack installed picks it up; this is
-     * the same "wait RAW" semantics the tool-absent case has below. */
-    {
-        size_t cn = 0, ci;
-        const invfs_codec *all = invfs_codec_all(&cn);
-        int packless_claim = 0;
-        for (ci = 0; ci < cn; ci++) {
-            const invfs_codec *pc = &all[ci];
-            int prc;
-            if (!(pc->caps & INVFS_CODEC_CAP_EXTERNAL) || !pc->sniff)
-                continue;
-            if (pc->sniff(full, full_len, name) <= 0)
-                continue;
-            if (!pc->encode || !pc->decode) {
-                if (pc->caps & INVFS_CODEC_CAP_PACKONLY)
-                    packless_claim = 1;   /* placeholder: a later pack may
-                                           * still claim -- decide below */
-                continue;       /* other placeholders keep builtin branches */
-            }
-            prc = vol_pack_sweep(v, inode_id, name, pc, full, full_len);
-            if (prc == 1) { free(full); return 0; }   /* tool absent: defer */
-            if (prc >= 100) { free(full); return prc; }   /* transcoded */
-            packless_claim = 0;   /* a real pack tried: its stamps rule */
-            break;   /* declined: stamps applied; text/generic still run */
-        }
-        if (packless_claim) { free(full); return 0; }   /* wait for the pack */
-    }
-
-    /* WP10 §4: every magic dispatch above declined -- classify text. Text
-     * DEFERS into the sweep-run accumulator (sealed into shared PPMd batches
-     * by vol_tz_flush at the end of the run); "!" sibling parts stay with
-     * their container in v1 (WP10 §12.7). */
-    if (!strchr(name, '!')) {
-        int fam = invfs_text_family(name, full, full_len);
-        if (fam > 0) {
-            const invfs_codec *pc = invfs_codec_by_algo(INVFS_ALGO_PPMD);
-            if (pc && pc->dec_mem_bytes > vol_get_dec_mem_limit(v)) {
-                /* PPMd's model exceeds the decode-memory policy: store
-                 * generic (below), stamped so a raised limit re-tries the
-                 * text path without waiting for a generation bump. */
-                vol_stamp_class(v, inode_id, INVFS_CLASS_GENERIC_MEMLIMIT,
-                                INVFS_ALGO_PPMD, pc->generation);
-            } else if (tz_defer(v, inode_id, name, full_len,
-                                (uint32_t)fam) == 0) {
-                free(full);
-                return 9;   /* text -> PPMd batch (deferred to flush) */
-            }
-        }
-    }
-
-    /* WP14b M2: exe-as-container carving, BEFORE the binary-batch
-     * deferral -- a carved exe is strictly better than a batched one (the
-     * embedded media gets a real codec, the glue still gets ZSTD-19).
-     * '!'-sibling parts are never carved (WP10 §12.7). A MEMLIMIT refusal
-     * (rc 2) skips batching too: the retry must re-arm from generic
-     * storage, not from inside a batch. */
-    int exer_no_bz = 0;
-    if (!strchr(name, '!') &&
-        invfs_binary_family(full, full_len, name) > 0) {
-        uint32_t nparts = 0;
-        int erc = vol_exer_carve(v, inode_id, name, full, full_len, &nparts);
-        if (erc == 1) {
-            v->last_exer_parts = nparts;   /* invf-sweep reports the count */
-            free(full);
-            return 11;   /* exe media -> JXL container */
-        }
-        exer_no_bz = (erc == 2);
-    }
-
-    /* WP14a: not text either -- executable binaries (ELF/PE/Mach-O by
-     * magic, >= 4 KB) defer into the BINARY accumulator and are sealed
-     * into shared ZSTD batches (x86 members BCJ-prefiltered first) by the
-     * same vol_tz_flush. No dec_mem gate on purpose: the batch payload
-     * codec is ZSTD, the generic floor itself -- a policy tight enough to
-     * reject it would reject the floor it falls back to, and the batch
-     * unit is already bounded by arc_budget/2 at seal time. Same "!"
-     * sibling exclusion as text. */
-    if (!strchr(name, '!') && !exer_no_bz) {
-        int bfam = invfs_binary_family(full, full_len, name);
-        if (bfam > 0 &&
-            bz_defer(v, inode_id, name, full_len, (uint32_t)bfam) == 0) {
-            free(full);
-            return 10;   /* binary -> ZSTD batch (deferred to flush) */
-        }
-    }
-
-generic_floor:
-    free(full);
 
     /* generic: recompress RAW -> Shadow (profile codec). (WP16e: JPEG -> JXL
      * no longer lands here -- the jxl codecpack's WP13 branch above owns it
@@ -2299,12 +2349,27 @@ static int wstats_cb(void *ctx_, uint64_t rec_pos,
 
 /* WP-M21b: per-inode body of the v3 stats pass -- type straight from the
  * row (invfs_v3_inode.type), logical bytes from the row size. Internal
- * \x01 owners are excluded from the file count (the v2 body's rule). */
+ * \x01 owners are excluded from the file count (the v2 body's rule).
+ * WP78: a live recipe's zone==TEXT entries also feed the TEXT accounting
+ * (logic = slice lengths, physical = each shared batch extent once), so the
+ * text/binary batch zones show up in invf-stats like they do on v2. */
+typedef struct {
+    invfs_volume *v;
+    invfs_volume_stats *out;
+    uint8_t *claimed;
+} wstats_v3_ctx;
+
 static int wstats_v3_cb(invfs_volume *v, uint64_t inode_id,
                         const char *name, void *ctx_)
 {
-    invfs_volume_stats *out = (invfs_volume_stats *)ctx_;
+    wstats_v3_ctx *c = (wstats_v3_ctx *)ctx_;
+    invfs_volume_stats *out = c->out;
     invfs_v3_inode in;
+    uint8_t *blob = NULL;
+    size_t blen = 0;
+    invfs_ast_hdr ah;
+    const invfs_ast_block_entry *ents = NULL;
+    size_t ne = 0, i;
 
     if (vol_v3_inode_get(v, inode_id, &in) != 1)
         return 0;
@@ -2326,6 +2391,37 @@ static int wstats_v3_cb(invfs_volume *v, uint64_t inode_id,
         return 0;               /* engine bookkeeping, not a user file */
     out->files++;
     out->logical_bytes += in.size;
+    if (in.size == 0)
+        return 0;
+    if (vol_v3_recipe_load(v, in.recipe_addr, &blob, &blen) != 0 || !blob) {
+        free(blob);
+        return 0;
+    }
+    if (vol_ast_recipe_parse(blob, blen, &ah, &ents, &ne) == 0 && ents) {
+        for (i = 0; i < ne; i++) {
+            if (ents[i].zone == INVFS_ZONE_TEXT) {
+                out->logic_text_bytes += ents[i].length;
+                if (c->claimed && ents[i].pba &&
+                    ents[i].pba < v->sb.total_blocks) {
+                    uint64_t plen = 0;
+                    if (seg_extent(v, ents[i].pba, NULL, &plen) == 0) {
+                        uint64_t b, bend = ents[i].pba + plen;
+                        if (bend > v->sb.total_blocks) bend = v->sb.total_blocks;
+                        for (b = ents[i].pba; b < bend; b++) {
+                            if (bit_get(c->claimed, b)) continue;
+                            bit_set(c->claimed, b);
+                            out->text_used_bytes += INVFS_BLOCK_SIZE;
+                        }
+                    }
+                }
+            } else if (ents[i].zone == INVFS_ZONE_BINARY) {
+                out->logic_shadow_bytes += ents[i].length;
+            } else {
+                out->logic_raw_bytes += ents[i].length;
+            }
+        }
+    }
+    free(blob);
     return 0;
 }
 
@@ -2353,7 +2449,9 @@ int vol_compute_stats(invfs_volume *v, invfs_volume_stats *out)
      * would need a recipe parse per live inode -- reported as zeros
      * rather than guessed at (M18-remainder). */
     if (v->sb.vol_flags & VOLF_V3) {
-        (void)vol_v3_iter_live_inodes(v, wstats_v3_cb, out);
+        wstats_v3_ctx vc;
+        vc.v = v; vc.out = out; vc.claimed = claimed;
+        (void)vol_v3_iter_live_inodes(v, wstats_v3_cb, &vc);
         out->raw_used_bytes = vol_zone_used_bytes(v,
             v->sb.raw_zone_start,
             v->sb.raw_zone_start + v->sb.raw_zone_blocks);
