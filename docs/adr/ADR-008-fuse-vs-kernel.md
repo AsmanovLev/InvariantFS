@@ -16,7 +16,7 @@ actually *caused by FUSE* matters:
 | Blocker | FUSE-specific? | Fixable in userspace? |
 |---|---|---|
 | Durability contract (`fsync` → on-disk) | no | yes (barriers/flush policy) |
-| `security.*` / `trusted.*` xattr, file capabilities | no | yes (daemon forwards xattr; engine is namespace-agnostic — see `vol_records.c:1544`, `fuse_fs.c:2533`) |
+| `security.*` / `trusted.*` xattr, file capabilities | no | yes (daemon forwards any xattr; engine is namespace-agnostic. VFS requires root/CAP_SYS_ADMIN for `trusted.*`/`security.*`, and mount without `nosuid` for `security.capability`) |
 | systemd as PID 1 on a FUSE root | no | yes (mount propagation, `/run`, cgroup2; WP66 started) |
 | `invf-fsck` reliability after fresh import | no | yes |
 | metadata scaling / package-manager churn | no | yes |

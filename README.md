@@ -108,8 +108,10 @@ codec CPU cost.
 * No snapshots/CoW clones in the btrfs/ZFS sense — savepoints/rollback only.
 * No frozen on-disk format yet; the v3 record layout is a deliberate break.
 * Not for metadata-space-dominated sets (millions of empty files).
-* No `security.*`/`trusted.*` xattrs, no NFSv4 ACLs; xattr cap 4096 B/inode,
-  mtime truncated to seconds.
+* No NFSv4 ACLs; on v2 format xattr cap is 4096 B/inode (v3 xattrs use dedicated
+  xattr B+ tree supporting up to 64 KiB per attribute matching Linux VFS);
+  `trusted.*`/`security.*` require root with capabilities (`CAP_SYS_ADMIN`),
+  `security.capability` requires mounting without `nosuid`; mtime truncated to seconds.
 
 ## How it works
 
