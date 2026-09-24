@@ -68,10 +68,9 @@ uint64_t vol_reclaim_bump_epoch(void)
 /* ------------------------------------------------------------------ */
 
 /* Public: reachability diff mark + free for base pages.
- * Frees pages in old_root that are not reachable from keep_root.
- * pinned_root is passed but not yet used (WP-M16): until a save-point
- * is active, pinned_root.pba == 0 and this falls back to the single-root
- * btree_reclaim. */
+ * Frees pages in old_root that are not reachable from keep_root or from
+ * the live save point's pinned_root. A restored base must still be able
+ * to reference its pages, so the pinned root is a second mark root. */
 int vol_reclaim_mark_and_free(invfs_volume *v, invfs_blkptr old_root,
                               invfs_blkptr keep_root,
                               invfs_blkptr pinned_root)
@@ -79,11 +78,9 @@ int vol_reclaim_mark_and_free(invfs_volume *v, invfs_blkptr old_root,
     if (!v)
         return -1;
 
-    /* Until WP-M16 implements save-point pinning, pinned_root is NULL.
-     * btree_reclaim handles the single-root case correctly. */
-    (void)pinned_root;
-
-    return btree_reclaim(v, old_root, keep_root);
+    /* WP77: pinned_root.pba == 0 when no save point is live; the
+     * multi-root walk then degenerates to the single-root btree_reclaim. */
+    return btree_reclaim_pinned(v, old_root, keep_root, pinned_root);
 }
 
 /* ------------------------------------------------------------------ */

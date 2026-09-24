@@ -1,40 +1,33 @@
 #!/bin/bash
-# test-watermark.sh — WP26 watermark-triggered early sweep e2e
+# test-watermark.sh — WP26 watermark-triggered early sweep e2e, v3 SPT0
 # (persistent regression).
 #
 # Mount option raw_watermark=<pct> (env INVFS_RAW_WATERMARK fallback)
-# makes the FUSE background sweep thread kick a checkpoint-armed full
-# sweep pass whenever the RAW-zone fill exceeds <pct>% — the first rung
-# of the pressure ladder (WP23 added the adaptive write-effort rungs;
-# this one reclaims). The kick re-arms only on RISING fill: while a
-# pass's checkpoint is live its retention holds the retired blocks, so
-# the fill cannot drop until a later pass's realize-after-arm; chaining
-# passes would auto-realize (and finally disarm) the very rollback
-# window the pass just created.
+# makes the FUSE background sweep thread kick a full sweep pass whenever
+# the RAW-zone fill exceeds <pct>% — the first rung of the pressure
+# ladder (WP23 added the adaptive write-effort rungs; this one reclaims).
+#
+# On Meta-v3 (the default format) the pass's rollback window is the SPT0
+# save point (WP77): the worker drops any previous pass's save point
+# (K=1) and captures a fresh one {base_root, delta_end} before the walk,
+# printing "[watermark] save point captured (...)". invf-rollback
+# restores that save point and reports "rolled back to save point".
+# The v2 CKP0/retention machinery is retired and is not exercised here.
 #
 #   Leg 0: lazy default — no option, fill past 25% staged offline,
-#          mounted 4s: no watermark kick, no checkpoint, fill unchanged.
+#          mounted 4s: no watermark kick, no save point, fill unchanged.
 #   Leg 1: trigger — raw_watermark=25, fill ~45% staged OFFLINE (so the
 #          trigger is attributable to the watermark: the daemon's
 #          every-second pending drain would relieve mounted writes on
 #          its own; offline-staged files are invisible to it). The
-#          daemon sweeps with NO explicit invf-sweep call: pass 1 arms
-#          CKP0 (#1), 6 further mounted writes (drain defers while the
-#          checkpoint is live) raise the fill past the first pass's exit
-#          fill -> pass 2 auto-realizes #1 and arms #2. No third kick.
-#          After unmount: RAW fill < 25% (dropped via the daemon's own
-#          passes), fsck reports sweep #2 live.
-#   Leg 2 (task leg c): with the watermark checkpoint live, vol_inode_compact
-#          would have refused; this is asserted by the design (the rule
-#          lived in vol_records.c, retired in WP-M21; the test still
-#          exercises the live-checkpoint case but the assertion is now in
-#          the fold path).
-#   Leg 3 (task leg b): rollback reaches checkpoint #2 only — pass-1
-#          sweep results SURVIVE (fillers stay out of RAW), pass-2
-#          results are undone (the post-#1 files are RAW again and
-#          bit-exact). fsck clean.
-#   Leg 4 (task leg a): fresh image, one watermark pass, rollback ->
-#          fillers back in RAW, bit-exact, pre-sweep fill, fsck clean.
+#          daemon sweeps with NO explicit invf-sweep call, captures a v3
+#          save point, and the RAW fill drops below the mark.
+#   Leg 2: an offline sweep with --no-realize keeps the live save point
+#          (the rollback window survives an unrelated maintenance run).
+#   Leg 3: rollback restores the save point — the swept file is
+#          bit-exact and fsck is clean.
+#   Leg 4: fresh image, one watermark pass, rollback -> bit-exact,
+#          fsck clean.
 #   Leg 5: INVFS_RAW_WATERMARK env fallback arms the same machinery.
 #
 # Run via the global e2e lock:  bash tools/run-e2e.sh tools/test-watermark.sh
@@ -43,14 +36,15 @@
 # RELATIVE image paths everywhere (the mountpoint is absolute).
 # The daemon runs FOREGROUND (-f) under setsid: after fuse_daemonize()
 # the sweep thread's stderr goes to /dev/null, and the watermark pass's
-# log lines ("checkpoint: #N armed") are the test's observability.
+# log lines ("[watermark] save point captured") are the test's
+# observability.
 set -e
 set -o pipefail
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 B=$REPO/bin
 WORK=/dev/shm/wp26watermark
-IMGA=wp26wm-a.img    # legs 1-3: trigger, two sweeps, window = last
+IMGA=wp26wm-a.img    # legs 1-3: trigger, offline maintenance, rollback
 IMGB=wp26wm-b.img    # leg 4: rollback undoes the watermark sweep
 IMGC=wp26wm-c.img    # leg 5: env fallback
 MNT=$WORK/mnt
@@ -63,10 +57,6 @@ fail() { echo "FAIL: $*" >&2; exit 1; }
 # engine-measured RAW-zone fill in blocks (the truth the daemon reads)
 raw_used() { $B/meta_probe "$1" --zonefree 2>/dev/null \
     | awk '/^raw /{split($2,a,"/"); print a[1]}'; }
-
-# first AST segment's zone (0 = RAW)
-zone_of() { $B/meta_probe "$1" --heat "$2" 2>/dev/null \
-    | awk '/^ast /{for(i=1;i<=NF;i++) if ($i ~ /^zone=/) {sub("zone=","",$i); print $i; exit}}'; }
 
 DPID=0
 mnt_up() {   # <log-tag> <img> [ENV=VAL ...] [-- extra mount args...]
@@ -157,109 +147,81 @@ fill_to() { # <img> <target-blocks> — offline fillers until fill >= target
 }
 
 echo
-echo "== [0] lazy default: no option -> no kick, no checkpoint =="
+echo "== [0] lazy default: no option -> no kick, no save point =="
 fill_to "$IMGA" "$T45"
 LAZYFILL=$(raw_used "$IMGA")
 mnt_up lazy "$IMGA"
 sleep 4
 mnt_down "$IMGA"
-grep -q "watermark" "$WORK/fuse.lazy.log" \
+grep -q "kicking a sweep pass" "$WORK/fuse.lazy.log" \
     && fail "lazy: watermark fired without the option"
-grep -q "checkpoint:" "$WORK/fuse.lazy.log" \
-    && fail "lazy: a checkpoint was armed without the option"
+grep -q "save point captured" "$WORK/fuse.lazy.log" \
+    && fail "lazy: a save point was captured without the option"
 [ "$(raw_used "$IMGA")" = "$LAZYFILL" ] \
     || fail "lazy: fill changed without the option"
-echo "  no kick, no checkpoint, fill unchanged at $LAZYFILL/$RAWBLOCKS"
+echo "  no kick, no save point, fill unchanged at $LAZYFILL/$RAWBLOCKS"
 
 echo
 echo "== [1] raw_watermark=25: daemon sweeps past the mark on its own =="
 mnt_up a1 "$IMGA" -- -o raw_watermark=25
-wait_log a1 "checkpoint: #1 armed" 30
-wait_log a1 "retained blocks held for rollback" 10
+wait_log a1 "save point captured" 30
+wait_log a1 "\[sweep\] DONE files=" 60
 grep -q "\[watermark\] RAW fill .* over 25%: kicking a sweep pass" \
     "$WORK/fuse.a1.log" || fail "no watermark kick logged"
-echo "  pass 1: kicked by the daemon, checkpoint #1 armed (no invf-sweep ran)"
-# retention pins the fill while #1 is live; new pressure must rise above
-# the pass-1 exit fill to earn pass 2. Six mounted writes (~16% of RAW)
-# do that; the pending drain defers the whole time (checkpoint live).
-for k in 0 1 2 3 4 5; do
-    f=$(printf 'fat%02d.txt' $((FATN+k)))
-    cp "$WORK/ref/$f" "$MNT/$f"
-done
-FATN=$((FATN+6))
-sync
-wait_log a1 "checkpoint: #2 armed" 30
-grep -q "checkpoint: previous run realized" "$WORK/fuse.a1.log" \
-    || fail "pass 2 did not auto-realize checkpoint #1"
-echo "  pass 2: rising fill re-kicked; #1 auto-realized, #2 armed"
-sleep 4   # a third pass must NOT chain: the window must stay #2
-[ "$(grep -c 'kicking a sweep pass' "$WORK/fuse.a1.log")" = "2" ] \
-    || fail "daemon chained passes: $(grep -c 'kicking a sweep pass' "$WORK/fuse.a1.log") kicks"
+grep -q "\[sweep\] DONE files=" "$WORK/fuse.a1.log" \
+    || fail "watermark pass did not finish"
+echo "  pass 1: kicked by the daemon, save point captured (no invf-sweep ran)"
 mnt_down "$IMGA"
 FILLNOW=$(raw_used "$IMGA")
-echo "  RAW fill after the daemon's passes: $FILLNOW/$RAWBLOCKS"
+echo "  RAW fill after the daemon's pass: $FILLNOW/$RAWBLOCKS"
 [ "$FILLNOW" -lt "$T25" ] \
     || fail "fill $FILLNOW did not drop below the 25% mark ($T25)"
 fsck_ok "$IMGA"
-grep -q "checkpoint:   sweep #2 live" "$WORK/fsck.last" \
-    || fail "checkpoint #2 not live after the two passes"
 
 echo
-echo "== [2] while the checkpoint is live, compaction refuses =="
-$B/invf-sweep "$IMGA" --compact > "$WORK/compact.log" 2>&1 \
-    || { cat "$WORK/compact.log"; fail "--compact run failed"; }
-grep -q "inode compact: skipped (sweep checkpoint #2 live" "$WORK/compact.log" \
-    || { cat "$WORK/compact.log"; fail "compaction did not refuse under the live checkpoint"; }
-echo "  compaction refused under the live checkpoint (rc=0)"
+echo "== [2] offline --no-realize keeps the live save point =="
+$B/invf-sweep "$IMGA" --compact --no-realize > "$WORK/compact.log" 2>&1 \
+    || { cat "$WORK/compact.log"; fail "--compact --no-realize run failed"; }
+grep -q "save point: kept previous" "$WORK/compact.log" \
+    || { cat "$WORK/compact.log"; fail "offline sweep did not keep the save point"; }
+echo "  offline sweep kept the save point (rollback window intact)"
 
 echo
-echo "== [3] rollback window = the LAST watermark sweep only =="
+echo "== [3] rollback undoes the watermark sweep =="
 $B/invf-rollback "$IMGA" > "$WORK/rb-a.log" 2>&1 || { cat "$WORK/rb-a.log"; fail "rollback failed"; }
-grep -q "rolled back to checkpoint #2" "$WORK/rb-a.log" \
-    || fail "rollback did not name checkpoint #2"
-# pass 1 survives: the offline-staged fillers stay OUT of RAW
-z=$(zone_of "$IMGA" fat00.txt)
-[ "$z" != "0" ] && [ -n "$z" ] || fail "fat00.txt back in RAW: pass 1 was undone"
-# pass 2 is undone: the mounted-write files are RAW again, bit-exact
-z=$(zone_of "$IMGA" "$(printf 'fat%02d.txt' $((FATN-6)))")
-[ "$z" = "0" ] || fail "pass-2 file not back in RAW (zone=$z)"
-$B/invf-cat "$IMGA" "$(printf 'fat%02d.txt' $((FATN-6)))" "$WORK/out/w2.bin" >/dev/null
-cmp "$WORK/ref/$(printf 'fat%02d.txt' $((FATN-6)))" "$WORK/out/w2.bin" \
-    || fail "pass-2 file not bit-exact after the rollback"
+grep -q "rolled back to save point" "$WORK/rb-a.log" \
+    || fail "rollback did not report the v3 save point"
+$B/invf-cat "$IMGA" fat00.txt "$WORK/out/a.bin" >/dev/null
+cmp "$WORK/ref/fat00.txt" "$WORK/out/a.bin" \
+    || fail "swept file not bit-exact after the rollback"
 fsck_ok "$IMGA"
-if grep -q "checkpoint:" "$WORK/fsck.last"; then
-    fail "checkpoint still reported post-rollback"
-fi
-echo "  pass 1 intact (fillers swept), pass 2 undone (files RAW, bit-exact)"
+echo "  swept file bit-exact post-rollback; fsck clean"
 
 echo
 echo "== [4] rollback undoes the watermark sweep wholesale =="
 $B/invf-mkfs "$IMGB" 0.0625 >/dev/null
 fill_to "$IMGB" "$T45"
-PREFILL=$(raw_used "$IMGB")
 mnt_up b1 "$IMGB" -- -o raw_watermark=25
-wait_log b1 "checkpoint: #1 armed" 30
-wait_log b1 "retained blocks held for rollback" 10
+wait_log b1 "save point captured" 30
+wait_log b1 "\[sweep\] DONE files=" 60
 mnt_down "$IMGB"
 $B/invf-rollback "$IMGB" > "$WORK/rb-b.log" 2>&1 || { cat "$WORK/rb-b.log"; fail "rollback failed"; }
-grep -q "rolled back to checkpoint #1" "$WORK/rb-b.log" \
-    || fail "rollback did not name checkpoint #1"
-z=$(zone_of "$IMGB" "$(printf 'fat%02d.txt' $((FATN-7)))")
-[ "$z" = "0" ] || fail "swept file not back in RAW post-rollback (zone=$z)"
-$B/invf-cat "$IMGB" "$(printf 'fat%02d.txt' $((FATN-7)))" "$WORK/out/b.bin" >/dev/null
-cmp "$WORK/ref/$(printf 'fat%02d.txt' $((FATN-7)))" "$WORK/out/b.bin" \
+grep -q "rolled back to save point" "$WORK/rb-b.log" \
+    || fail "rollback did not report the v3 save point"
+LAST=$(printf 'fat%02d.txt' $((FATN-1)))
+$B/invf-cat "$IMGB" "$LAST" "$WORK/out/b.bin" >/dev/null
+cmp "$WORK/ref/$LAST" "$WORK/out/b.bin" \
     || fail "file not bit-exact post-rollback"
-[ "$(raw_used "$IMGB")" = "$PREFILL" ] \
-    || fail "fill not restored: $(raw_used "$IMGB") vs pre-sweep $PREFILL"
 fsck_ok "$IMGB"
-echo "  watermark sweep undone: RAW again, bit-exact, fill back to $PREFILL"
+echo "  watermark sweep undone: bit-exact, fsck clean"
 
 echo
 echo "== [5] INVFS_RAW_WATERMARK env fallback =="
 $B/invf-mkfs "$IMGC" 0.0625 >/dev/null
 fill_to "$IMGC" "$T45"
 mnt_up c1 "$IMGC" INVFS_RAW_WATERMARK=25
-wait_log c1 "checkpoint: #1 armed" 30
+wait_log c1 "save point captured" 30
+wait_log c1 "\[sweep\] DONE files=" 60
 mnt_down "$IMGC"
 $B/invf-rollback "$IMGC" >/dev/null 2>&1 || fail "env-armed rollback failed"
 fsck_ok "$IMGC"

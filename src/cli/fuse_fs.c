@@ -25,6 +25,7 @@
 
 #include "invarifs.h"
 #include "volume.h"
+#include "vol_spt0.h"
 #include "tmpstore.h"
 
 static invfs_volume *g_vol;
@@ -1693,30 +1694,52 @@ static void on_sweep_signal(int sig)
  * enables the periodic mode.
  *
  * arm_ckp (WP26, watermark-triggered passes only): bracket the walk with
- * the WP21 checkpoint machinery, same shape as the offline invf-sweep --
- * vol_ckp_begin BEFORE the walk (a previous pass's checkpoint is
- * auto-realized after the new arm, so the rollback window is always the
- * LAST sweep) and vol_ckp_end after it (the retention registry holds the
- * retired blocks for invf-rollback). A pass that retires nothing arms
- * nothing (vol_ckp_end disarms an identity). The SIGUSR1 path passes 0
- * and keeps its historic uncheckpointed behavior. */
+ * the rollback window. On v2 that is the WP21 checkpoint machinery
+ * (vol_ckp_begin BEFORE the walk, vol_ckp_end after it); on v3 (WP77) it
+ * is the SPT0 save point: a live previous pass's save point is dropped
+ * (K=1), then spt0_capture records {base_root, delta_end} before the walk
+ * and stays live as the rollback window after it. A pass that retires
+ * nothing arms nothing on v2 (vol_ckp_end disarms an identity). The
+ * SIGUSR1 path passes 0 and keeps its historic uncheckpointed behavior. */
 static void invf_sweep_worker(int arm_ckp)
 {
     uint64_t *ids = NULL;
     size_t max = 300000, n, i;
     long saved = 0, swept = 0, skipped = 0, failed = 0;
     int armed = 0;
+    int is_v3 = 0;
 
     ids = malloc(max * sizeof(*ids));
     if (!ids) return;
     pthread_mutex_lock(&g_io_lock);
     if (!g_vol) { pthread_mutex_unlock(&g_io_lock); free(ids); return; }
+    is_v3 = (vol_sb(g_vol)->vol_flags & VOLF_V3) != 0;
     if (arm_ckp) {
-        armed = vol_ckp_begin(g_vol, 0);   /* 1 armed, 0 declined, -1 error */
-        if (armed < 0) {
-            fprintf(stderr, "[watermark] checkpoint arm failed; sweeping "
-                            "without one\n");
-            armed = 0;
+        if (is_v3) {
+            /* WP77: v3 rollback window is the SPT0 save point. K=1: a
+             * previous pass's save point is dropped first, so the live
+             * window is always the LAST watermark sweep. */
+            invfs_spt0 sp;
+            if (spt0_info(g_vol, NULL))
+                (void)spt0_drop(g_vol);
+            if (spt0_capture(g_vol) == 0) {
+                armed = 1;
+                if (spt0_info(g_vol, &sp))
+                    fprintf(stderr, "[watermark] save point captured "
+                                    "(base_root=%llu delta_end=%llu)\n",
+                            (unsigned long long)sp.base_root,
+                            (unsigned long long)sp.delta_end);
+            } else {
+                fprintf(stderr, "[watermark] save point capture failed; "
+                                "sweeping without one\n");
+            }
+        } else {
+            armed = vol_ckp_begin(g_vol, 0);   /* 1 armed, 0 declined, -1 error */
+            if (armed < 0) {
+                fprintf(stderr, "[watermark] checkpoint arm failed; sweeping "
+                                "without one\n");
+                armed = 0;
+            }
         }
         vol_heat_sweep_begin(g_vol);   /* one decay pass per sweep run */
     }
@@ -1758,7 +1781,7 @@ static void invf_sweep_worker(int arm_ckp)
         if (arm_ckp)
             vol_heat_promote(g_vol);   /* extract read-hot batch members */
         vol_tz_flush(g_vol);   /* seal anything the walk deferred */
-        if (armed) {
+        if (armed && !is_v3) {
             uint64_t rr = 0, rb = 0;
             if (vol_ckp_end(g_vol, &rr, &rb) != 0)
                 fprintf(stderr, "[watermark] checkpoint registry write "

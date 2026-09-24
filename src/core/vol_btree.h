@@ -93,4 +93,10 @@ int btree_check(invfs_volume *v, invfs_blkptr root,
  * decide when a reader has drained an old root. */
 int btree_reclaim(invfs_volume *v, invfs_blkptr old_root, invfs_blkptr keep_root);
 
+/* WP77: reachability diff that also keeps every page reachable from
+ * pinned_root (a live save point's base). pinned_root.pba == 0 behaves
+ * exactly like btree_reclaim. */
+int btree_reclaim_pinned(invfs_volume *v, invfs_blkptr old_root,
+                         invfs_blkptr keep_root, invfs_blkptr pinned_root);
+
 #endif /* INVFS_VOL_BTREE_H */

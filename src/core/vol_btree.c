@@ -1209,6 +1209,38 @@ int btree_reclaim(invfs_volume *v, invfs_blkptr old_root, invfs_blkptr keep_root
     return (int)freed;
 }
 
+/* WP77: same reachability diff, but pages reachable from a live save
+ * point's pinned root are kept too (the save point must be able to
+ * restore them). pinned_root.pba == 0 is the no-save-point case and is
+ * identical to btree_reclaim. */
+int btree_reclaim_pinned(invfs_volume *v, invfs_blkptr old_root,
+                         invfs_blkptr keep_root, invfs_blkptr pinned_root)
+{
+    uint8_t *seen;
+    uint64_t bytes, freed = 0;
+
+    if (!v)
+        return -1;
+    if (old_root.pba == 0)
+        return 0;
+    bytes = (v->sb.total_blocks + 7u) / 8u;
+    seen = (uint8_t *)calloc(1, (size_t)bytes);
+    if (!seen)
+        return -1;
+    if (bt_mark_rec(v, keep_root, seen, v->sb.total_blocks) != 0 ||
+        (pinned_root.pba != 0 &&
+         bt_mark_rec(v, pinned_root, seen, v->sb.total_blocks) != 0)) {
+        free(seen);
+        return -1;
+    }
+    if (bt_free_rec(v, old_root, seen, v->sb.total_blocks, &freed) != 0) {
+        free(seen);
+        return -1;
+    }
+    free(seen);
+    return (int)freed;
+}
+
 /* ------------------------------------------------------------------ */
 /* WP-M5: v3 inode row codec + get/put/delete                          */
 /*                                                                    */

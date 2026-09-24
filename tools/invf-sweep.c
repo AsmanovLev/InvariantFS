@@ -84,6 +84,7 @@
 
 #include "invarifs.h"
 #include "volume.h"
+#include "vol_spt0.h"
 #include "codec.h"
 #include "rs.h"
 
@@ -834,28 +835,65 @@ int main(int argc, char **argv)
      * decline (sealed / read-only / no room for the staging) never stops
      * the sweep -- the run just goes uncheckpointed. */
     if (!dry) {
-        if (realize) {
-            uint64_t rfree = 0;
-            int rrc = vol_ckp_realize(vol, &rfree);
-            /* on a read-only/recovering volume the realize refusal is not
-             * fatal here -- the sweep's own machinery refuses the same way
-             * (and --seal needs to print its own read-only diagnostic) */
-            if (rrc < 0 && vol_write_enabled(vol)) {
-                fprintf(stderr, "checkpoint: realizing the previous run "
-                                "failed\n");
-                vol_close(vol);
-                return 1;
+        if (vol_sb(vol)->vol_flags & VOLF_V3) {
+            /* WP77: v3 rollback window is the SPT0 save point, not CKP0.
+             * --no-realize keeps the previous save point live; every other
+             * run drops it (realize) and captures a fresh one BEFORE the
+             * walk, so the live window is always the LAST sweep. K=1. */
+            if (no_realize) {
+                fprintf(stderr, "save point: kept previous (--no-realize)\n");
+            } else {
+                if (realize) {
+                    int drc = spt0_drop(vol);
+                    if (drc < 0) {
+                        fprintf(stderr, "save point: realizing the previous "
+                                        "run failed\n");
+                        vol_close(vol);
+                        return 1;
+                    }
+                    fprintf(stderr, drc > 0
+                            ? "save point: previous run realized\n"
+                            : "save point: nothing to realize\n");
+                } else if (spt0_info(vol, NULL)) {
+                    /* bare sweep: replace the previous window (K=1) */
+                    (void)spt0_drop(vol);
+                }
+                if (spt0_capture(vol) == 0) {
+                    invfs_spt0 sp;
+                    if (spt0_info(vol, &sp))
+                        fprintf(stderr, "save point captured "
+                                        "(base_root=%llu delta_end=%llu)\n",
+                                (unsigned long long)sp.base_root,
+                                (unsigned long long)sp.delta_end);
+                } else {
+                    fprintf(stderr, "save point: capture failed; sweeping "
+                                    "without one\n");
+                }
             }
-            if (rrc > 0)
-                fprintf(stderr, "checkpoint: previous run realized "
-                        "(%llu retained blocks freed)\n",
-                        (unsigned long long)rfree);
-            else
-                fprintf(stderr, "checkpoint: nothing to realize\n");
+        } else {
+            if (realize) {
+                uint64_t rfree = 0;
+                int rrc = vol_ckp_realize(vol, &rfree);
+                /* on a read-only/recovering volume the realize refusal is not
+                 * fatal here -- the sweep's own machinery refuses the same way
+                 * (and --seal needs to print its own read-only diagnostic) */
+                if (rrc < 0 && vol_write_enabled(vol)) {
+                    fprintf(stderr, "checkpoint: realizing the previous run "
+                                    "failed\n");
+                    vol_close(vol);
+                    return 1;
+                }
+                if (rrc > 0)
+                    fprintf(stderr, "checkpoint: previous run realized "
+                            "(%llu retained blocks freed)\n",
+                            (unsigned long long)rfree);
+                else
+                    fprintf(stderr, "checkpoint: nothing to realize\n");
+            }
+            if (vol_ckp_begin(vol, no_realize) < 0)
+                fprintf(stderr, "checkpoint: arm failed; sweeping without "
+                                "one\n");
         }
-        if (vol_ckp_begin(vol, no_realize) < 0)
-            fprintf(stderr, "checkpoint: arm failed; sweeping without "
-                            "one\n");
     }
 
     /* WP42: collect live regular files through the shared mapper-aware
@@ -1078,7 +1116,7 @@ progress:
      * (rollback never reads the registry); the realize of an unregistered
      * range is just deferred to the fsck after the next realize, and the
      * run exits nonzero so the failure is not silently swallowed. */
-    if (!dry) {
+    if (!dry && !(vol_sb(vol)->vol_flags & VOLF_V3)) {
         uint64_t rr = 0, rb = 0;
         if (vol_ckp_end(vol, &rr, &rb) != 0) {
             fprintf(stderr, "checkpoint: registry write failed (the "
