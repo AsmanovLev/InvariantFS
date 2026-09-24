@@ -31,15 +31,17 @@ contract. Not a replacement for ext4/XFS on general workloads.
   PNG (`PNGR`), PE/EXE (`EXER`).
 * **Containers kept original** — ZIP/TAR/7z/VDI/qcow2/... are stored
   byte-original with members exposed as on-demand windows.
-* **Append-only zones + offline sweep** — writes land in RAW, then the sweep
-  drains them into Shadow, re-encoding where proven bit-exact.
+* **Write-once ingestion + offline sweep** — writes land once in RAW as new
+  segments, then the sweep drains them into Shadow, re-encoding where proven
+  bit-exact. The zone fields are advisory policy over one shared free pool,
+  not fixed regions.
 * **Meta-v3 Metadata Architecture** — B+ tree base metadata + append-only Delta
   Log with background fold worker and lock-free reads.
 * **Content Addressing & Dedup** — immutable recipes and shadow blobs are
   BLAKE3-addressed with deduplication.
 * **Savepoints & Rollback** — durable metadata savepoints (SPT0) provide instant
   rollback via `invf-rollback`.
-* **Recovery tooling** — append-only WAL with replay; `invf-fsck [-f]`
+* **Recovery tooling** — append-only Delta Log with replay; `invf-fsck [-f]`
   walks, quarantines and repairs.
 * **Two-device volumes** — dev0 (metadata + RAW) and dev1 (canonical Shadow),
   with metadata mirroring; volumes identified by UUID, not kernel name.
@@ -91,9 +93,8 @@ internally. The optimizations that matter:
   an `ls -l`.
 * **Pre-fetching** — io_uring readahead on the next AST segment while
   the current one is still decompressing.
-* **Inline data** — files under ~2 KiB skip the recipe entirely; data
-  lives in the inode record. Eliminates Shadow-zone reads for millions
-  of small files.
+* **O(1) mount** — the `RT30` base root loads in constant time; only a short
+  Delta Log replay follows, instead of the v2 full metadata scan.
 
 With these, FUSE overhead becomes negligible compared to disk I/O and
 codec CPU cost.
@@ -102,10 +103,9 @@ codec CPU cost.
 
 * Not a drop-in ext4/XFS/ZFS replacement for general workloads.
 * No network/SAN support; single host only.
-* No high write throughput: the write path is append-only, consolidation is
-  offline.
+* No high write throughput: writes are write-once, consolidation is offline.
 * No power-loss durability guarantee (`make flakey` is a soak, not a contract).
-* No snapshots/CoW clones in the btrfs/ZFS sense — checkpoint/rollback only.
+* No snapshots/CoW clones in the btrfs/ZFS sense — savepoints/rollback only.
 * No frozen on-disk format yet; the v3 record layout is a deliberate break.
 * Not for metadata-space-dominated sets (millions of empty files).
 * No `security.*`/`trusted.*` xattrs, no NFSv4 ACLs; xattr cap 4096 B/inode,
@@ -113,9 +113,11 @@ codec CPU cost.
 
 ## How it works
 
-A volume has three primary zones: **Metadata** (superblock, RT30 B+ tree base,
-Delta Log, bitmap), **RAW** (linear landing area for new writes), and **Shadow**
-(consolidated, type-clustered storage).
+A volume has three logical areas: **Metadata** (superblock, bitmap, `RT30`
+descriptor, COW B+ tree base, Delta Log), **RAW** (the class tag for freshly
+written segments), and **Shadow** (consolidated, type-clustered storage). The
+zone fields are advisory policy over one shared free-block pool, not hard
+regions.
 
 ```
 write()   ->  RAW (LZ4 or verbatim)  ->  append delta mutation (inode + dirent)
@@ -145,7 +147,7 @@ For complete architecture specifications, see:
 | | ext4 / XFS | btrfs / ZFS | InvariantFS |
 |---|---|---|---|
 | Unit of storage | fixed blocks | blocks + COW | content segments + recipe |
-| Write model | in-place | COW | append-only zones, offline consolidation |
+| Write model | in-place | COW | write-once segments, offline consolidation |
 | Compression | no / opt | opt, not bit-exact-checked | per-segment, **proven** bit-exact |
 | Deduplication | no | btrfs yes | content-addressed recipe & shadow blobs (BLAKE3) |
 | Metadata | fixed inode table / B-tree | B-tree | Meta-v3 (B+ tree + Delta Log) |
@@ -174,14 +176,16 @@ Codec packs: `invfs-pack` — see the
 
 ```sh
 make                # all tools -> bin/
-make test           # 4722 unit checks
-make e2e            # serialized FUSE end-to-end suites
+make test           # ~4700 unit checks
+make e2e            # FUSE end-to-end suites (parallel-safe runner)
 make flakey         # chaos/soak
 make release        # dist/invfs-<ver>-<arch>.tar.zst + SHA256SUMS
 ```
 
 Requires `gcc`, `libfuse3-dev`, `zlib1g-dev`, `libzstd-dev`. Run e2e suites
-through `tools/run-e2e.sh` (serialized via `/tmp/invfs-e2e.lock`).
+through `tools/run-e2e.sh`: it isolates most suites in a private mount
+namespace (parallel-safe) and serializes only the root/loop/`/tmp`-using ones
+on a global lock.
 
 ## Known issues
 

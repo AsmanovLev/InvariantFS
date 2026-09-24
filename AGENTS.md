@@ -195,49 +195,67 @@ file.
 
 ### 2.3 Zone layout
 
+> **v0.5.0 (Meta-v3):** the four zone fields are *advisory policy*, not hard
+> regions — there is one shared free-block pool. Raw-class allocation prefers
+> the RAW extent and overflows into shadow-space blocks with the class tag
+> **unchanged** (`zone=0`), so placement never decides what a block is. The
+> `L2P journal` / `Inode area` / `Mapper` rows below were the v2 model and are
+> gone: v3 metadata is a COW B+ tree base plus an append-only Delta Log.
+
 | Zone | Role | Lifecycle |
 |---|---|---|
-| **Bitmap** | one bit per block | part of metadata zone; rewritten on every alloc |
-| **L2P journal** | append-only logical-to-physical mapping | grows; compacted by sweep |
-| **Inode area** | append-only file records (+ INO2 meta-ext) | grows; compacted by sweep |
-| **Mapper** | metadata extent table (v0.3.0+) | small fixed-size table; extents grow dynamically |
-| **RAW** | linear landing area for new writes | grows toward shadow; swept into shadow |
-| **Shadow** | consolidated, type-clustered storage | grows as RAW drains into it |
+| **Bitmap** | one bit per 4 KiB block | part of the metadata zone; the dirty range is flushed on `vol_flush` |
+| **Meta-v3 area** | `RT30` descriptor + COW B+ tree base + append-only Delta Log | base pages are copy-on-write; the delta is merged by the background **fold**; the base-page pool may be free inside the metadata zone |
+| **RAW** | content-class tag for freshly written segments | new writes land here; drained into Shadow by the sweep |
+| **Shadow** | consolidated, type-clustered, deduplicated storage | grows as RAW drains into it |
+| **Seal parity** | optional XOR/RS parity stripes over the shadow pba extent | written by `invf-sweep --seal` |
 
 ### 2.4 The write path (most important caveat)
 
-**Writes are append-only at the zone level.** When you `write()`
-through FUSE:
+**Writes are write-once at the segment level; metadata is a COW B+ tree plus
+an append-only Delta Log.** When you `write()` through FUSE:
 
-1. Data lands in RAW, LZ4-compressed (or verbatim under TURBO profile).
-2. An inode record is appended to the inode area with the new pbas.
-3. The bitmap is updated and the journal is appended-to.
+1. Data lands in RAW as **new segments** — LZ4 by default (verbatim when
+   incompressible; ZSTD under fill pressure via the adaptive effort ladder).
+   A ranged write forks the recipe and allocates fresh segments for the
+   touched ranges; untouched segments are aliased, never overwritten in place.
+2. The inode/dirent mutation is appended to the **Delta Log**. An in-memory
+   overlay makes it visible to readers immediately, without blocking.
+3. The background **fold** merges accumulated delta records into the immutable
+   COW B+ tree base and publishes the new root atomically through the `RT30`
+   double slot.
+4. The bitmap is updated in RAM; the dirty range is persisted on flush/close.
 
 When you `unlink()`:
 
-1. The file's pbas are NOT freed immediately.
-2. The inode record gets a **tombstone** (position-kill DELT).
-3. The blocks become freeable when the next sweep runs and rewrites
-   the inode area without the dead entries.
+1. A delta delete entry is appended — there is no immediate in-place record
+   surgery (the v2 "tombstone" model is gone).
+2. The file's blocks are **not** freed immediately; the sweep reclaims them,
+   and fold drops the delta entry.
+3. `df` reflects the reclaimed space only after the sweep (and the bitmap
+   flush) have run.
 
 **Implications:**
 
-- A volume that sees lots of writes-then-deletes will appear to fill
-  up until the sweep runs.
-- `df` reports the **virtual** free space after sweep + compaction.
-  Mid-sweep it can look scary; that's normal.
-- Don't write directly to RAW without going through the volume — the
-  format isn't a block device you can dd to.
+- A volume that sees lots of writes-then-deletes will appear to fill up until
+  the sweep runs.
+- `df` reports the free space after sweep; mid-sweep it can look scary, and
+  that is normal.
+- Don't write directly to RAW without going through the volume — the format
+  isn't a block device you can dd to.
 
 ### 2.5 The sweep
 
 `invf-sweep` is the background worker that:
 
-1. Drains RAW into Shadow (data movement).
+1. Drains RAW segments into Shadow (data movement).
 2. Re-clusters text/binary content by type.
-3. Reclaims tombstones in the inode area (compaction).
-4. Optionally re-encodes data with stronger codecs when bit-exactness
-   is proven (text → PPMd, binaries → ZSTD+BCJ).
+3. Reclaims dead blocks: per-segment dedupe (BLAKE3) and GC of dead
+   text/binary batches.
+4. Re-encodes data with stronger codecs where bit-exactness is proven
+   (text → PPMd batches, binaries → ZSTD+BCJ batches, plus the
+   container/codecpack lanes).
+5. Publishes the new recipes via inode-id-keyed publication.
 
 Manual invocation:
 
@@ -256,9 +274,10 @@ mounting. Default is OFF — opt in explicitly.
 
 ### 2.6 Recovery and rollback
 
-After a crash, the volume opens DIRTY and `invf-fsck` (or the next
-`vol_open` call) replays the journal. If the replay succeeds, the
-volume transitions to CLEAN automatically.
+After a crash, the volume opens DIRTY and `vol_open` replays the **Delta Log**
+(plus the legacy L2P journal on pre-v3 volumes) and scans the metadata. If the
+result is anomaly-free the volume transitions to CLEAN automatically;
+`invf-fsck [-f]` can also be run explicitly.
 
 To **undo** the last sweep (e.g., a sweep that mis-clustered data):
 
@@ -266,9 +285,11 @@ To **undo** the last sweep (e.g., a sweep that mis-clustered data):
 invf-rollback /path/to/volume.img
 ```
 
-Requires a live sweep checkpoint (the `--realize` flag in
-`invf-sweep` makes one durable). Without a checkpoint, rollback
-refuses — the volume's history is gone.
+On v3, rollback is built on **SPT0 savepoints** (`vol_spt0.c`): a savepoint
+records `{base_root, delta_end, flags}` and a restore returns the metadata to
+that generation. Without a savepoint, rollback refuses — the volume's history
+is gone. (The v2 `CKP0` sweep-checkpoint + `\x01reten` retention registry were
+retired with the v2 metadata machinery.)
 
 ### 2.7 Capacity and the metadata reservation
 
@@ -281,8 +302,8 @@ INVFS_META_FRAC=16 invf-mkfs /path/to/rootfs.img 30
 ```
 
 Symptoms of an undersized metadata zone: ENOSPC on writes even though
-`df` shows plenty free, and "inode compact: declined" spam in the
-FUSE log.
+`df` shows plenty free, and v3 base-page allocation falling back to the
+shadow pool (`mb_alloc_meta_zone` → shadow) in the FUSE log.
 
 ### 2.8 Tooling environment
 
@@ -318,9 +339,9 @@ be recovered bit-for-bit, regardless of what codec was applied.
 
 ### 2.10 Common pitfalls
 
-- **"Why is my volume full after a few small writes?"** — sweep not
-  running; tombstones are accumulating. Trigger `kill -USR1` or run
-  `invf-sweep` offline.
+- **"Why is my volume full after a few small writes?"** — the sweep is
+  not running, so dead segments and delta entries accumulate. Trigger
+  `kill -USR1` or run `invf-sweep` offline.
 - **"Why is my read path slow?"** — the ARC cache default is 256 MB;
   tune `arc_limit=<MB>` on mount. Cold reads always go through the
   full decode.

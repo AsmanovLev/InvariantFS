@@ -36,11 +36,16 @@ InvariantFS decouples immediate write ingestion from offline storage optimizatio
 
 | Zone | Role | Structure | Lifecycle |
 |---|---|---|---|
-| **Bitmap** | Physical block allocation state | One bit per 4 KiB block | Rewritten on block alloc/free |
-| **L2P Journal** | Logical-to-Physical block mapping | Append-only circular journal | Compacted by sweep |
-| **Meta-v3 Area** | Inodes, dirents, xattrs, recipes | B+ Tree + Append-only Delta Log | Merged by background fold |
-| **RAW Zone** | High-throughput write landing | Linear append-only (LZ4) | Drained into Shadow by sweep |
+| **Bitmap** | Physical block allocation state | One bit per 4 KiB block | Dirty range flushed on `vol_flush` |
+| **Meta-v3 Area** | Inodes, dirents, xattrs, recipes | COW B+ Tree + append-only Delta Log | Merged by background fold |
+| **RAW Zone** | Content-class tag for freshly written segments (advisory, not a fixed region) | Write-once LZ4/verbatim (ZSTD under fill pressure) | Drained into Shadow by sweep |
 | **Shadow Zone** | Long-term archival storage | Type-clustered, deduplicated | Compacted during sweep |
+
+> The v2 `L2P Journal` and append-only inode-record stream are gone in Meta-v3:
+> recipes live in the B+ tree base / Delta Log, and the four zone fields in the
+> superblock are **advisory policy** over one shared free-block pool (raw-class
+> allocation may overflow into shadow-space blocks with the class tag
+> unchanged).
 
 ---
 
