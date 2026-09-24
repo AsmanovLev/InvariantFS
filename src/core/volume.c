@@ -960,9 +960,11 @@ static invfs_volume *vol_open_inner(const char *path, int at_ckpt,
      * finishing its drain and an offline tool (invf-cp/invf-sweep) writing
      * the same image corrupt it between their in-memory bitmaps/L2P (seen
      * in the wild: stale-position record appends clobbering fresh records).
-     * LOCK_NB: fail loudly instead of waiting. Released by close(). */
-    if ((v->io_open[0] && flock(v->io.fd, LOCK_EX | LOCK_NB) != 0) ||
-        (v->io_open[1] && flock(v->io2.fd, LOCK_EX | LOCK_NB) != 0)) {
+     * LOCK_NB: fail loudly instead of waiting. Released by close().
+     * Set INVFS_RO_LOCK=1 / INVFS_ALLOW_SHARED=1 for concurrent read-only utilities. */
+    int ltype = (getenv("INVFS_ALLOW_SHARED") || getenv("INVFS_RO_LOCK")) ? LOCK_SH : LOCK_EX;
+    if ((v->io_open[0] && flock(v->io.fd, ltype | LOCK_NB) != 0) ||
+        (v->io_open[1] && flock(v->io2.fd, ltype | LOCK_NB) != 0)) {
         fprintf(stderr, "vol_open: %s: image is in use by another process\n",
                 real);
         *err = -2;

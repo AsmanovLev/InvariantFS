@@ -730,7 +730,7 @@ out_free:
 /* ---- map (MRMP: RECIPE gaps + coalesced MEMBER runs partition the file) - */
 
 /* In-memory buffer version of map: reads recipe file or buffer, writes MRMP directly to out_buf */
-static int cmd_map_mem(const char *in_path, uint8_t *out_buf, size_t out_cap, size_t *out_len)
+int cmd_map_mem(const char *in_path, uint8_t *out_buf, size_t out_cap, size_t *out_len)
 {
     qc_img v;
     uint8_t *ent = NULL;
@@ -1093,7 +1093,20 @@ static int cmd_estimate(const char *in)
  * src/include/ivpack_impl.h. */
 IVPACK_DEFINE_DESC(s_qcow2_desc, "qcow2", "1.1.0")
 
-IVPACK_CANON_CALLS(qcow2)
+static int qcow2_iv_call_enumerate(const ivpack_container_args *a)
+{ return (int)cmd_enumerate(a->in_path, a->out_path); }
+static int qcow2_iv_call_extract(const ivpack_container_args *a)
+{ return (int)cmd_extract(a->in_path, a->extract_idx, a->out_path); }
+static int qcow2_iv_call_strip(const ivpack_container_args *a)
+{ return (int)cmd_strip(a->in_path, a->out_path); }
+static int qcow2_iv_call_rebuild(const ivpack_container_args *a)
+{ return (int)cmd_rebuild(a->recipe_path, a->mbr_dir, a->out_path); }
+static int qcow2_iv_call_map(const ivpack_container_args *a)
+{
+    if (a->out_buf && a->out_cap > 0 && a->out_len)
+        return (int)cmd_map_mem(a->in_path ? a->in_path : a->recipe_path, a->out_buf, a->out_cap, a->out_len);
+    return (int)cmd_map(a->in_path ? a->in_path : a->recipe_path, a->out_path);
+}
 
 IVPACK_DEFINE_CONTAINER_CMD(qcow2, IVPACK_GLUE_NONE())
 

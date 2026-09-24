@@ -57,14 +57,18 @@ Only the two clean, zlib-compressed QEMU base images (`ubuntu2404-base` + `ubunt
 
 Extracting the full 1.36 GB archive (`u24.qcow2` 625 MB + `u22.qcow2` 735 MB) from cold compressed state:
 
-| Tool / Target | CPU Cores | Wall Time | Throughput | Peak RAM (RSS) |
-| :--- | :---: | :---: | :---: | :---: |
-| **Squashfs (`unsquashfs -p 1`)** | 1 thread | **10.83 s** | **119.75 MB/s** | ~270 MB |
-| **InvariantFS CLI (`invf-cat`)** | 1 thread | **10.88 s** | **119.20 MB/s** | ~1.7 GB (whole-file buffer) |
-| **InvariantFS FUSE (VFS Streaming)** | 1 thread | **~12–14 s** | **~81.5 – 83.4 MB/s** | **~2.6 MB** |
-| **Squashfs (`unsquashfs -p 4`)** | 4 threads | **2.39 s** | **542.63 MB/s** | ~275 MB |
-| **TAR.XZ (`xz -d`)** | 4 threads | **3.13 s** | **~410 MB/s** | ~2,733 MB |
-| **TAR.ZST (`zstd -d`)** | 4 threads | **0.49 s** | **~2,600 MB/s** | ~13.5 MB |
+| Tool / Target | CPU Cores | Wall Time | Throughput | Compression Ratio | Peak RAM (RSS) |
+| :--- | :---: | :---: | :---: | :---: | :---: |
+| **TAR.ZST (`zstd -d`)** | 4 threads | **0.49 s** | **~2,600 MB/s** | **1.028x** (97.26%) | ~13.5 MB |
+| **InvariantFS Concurrent (`invf-cat`)** | 2-4 threads | **2.29 s** | **565.55 MB/s** | **0.960x** (104.14%)* | ~1.7 GB (whole-file buffer) |
+| **Squashfs (`unsquashfs -p 4 -cat`)** | 4 threads | **2.39 s** | **542.03 MB/s** | **1.013x** (98.68%) | ~275 MB |
+| **TAR.XZ (`xz -d`)** | 4 threads | **3.13 s** | **~410 MB/s** | **1.031x** (96.99%) | ~2,733 MB |
+| **Squashfs (`unsquashfs -p 4 -d`)** | 4 threads | **3.45 s** | **375.57 MB/s** | **1.013x** (98.68%) | ~275 MB |
+| **Squashfs (`unsquashfs -p 1`)** | 1 thread | **10.83 s** | **119.75 MB/s** | **1.013x** (98.68%) | ~270 MB |
+| **InvariantFS CLI (`invf-cat`)** | 1 thread | **10.88 s** | **119.20 MB/s** | **0.960x** (104.14%)* | ~1.7 GB (whole-file buffer) |
+| **InvariantFS FUSE (VFS Streaming)** | 1 thread | **~12–14 s** | **~81.5 – 83.4 MB/s** | **0.960x** (104.14%)* | **~2.6 MB** |
+
+*\* Note on Corpus B Compression Ratio: On base OS templates already compressed with zlib internally, bit-exact storage without container decomposition reflects raw archive overhead. On the multi-image production corpus (Corpus A), InvariantFS achieved **2.89x ratio** (beating Squashfs's **2.42x**).*
 
 ---
 

@@ -890,6 +890,7 @@ static int walk_dir(fs_t *fs, uint32_t ino, unsigned depth)
     size_t i;
     uint8_t *nodes = NULL;
 
+    memset(&w, 0, sizeof w);
     if (depth > 64) {
         note("dir depth", depth, 0);
         return EX_DECLINE;

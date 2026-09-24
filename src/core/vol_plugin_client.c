@@ -304,7 +304,7 @@ int invfs_plugin_pool_container_cmd_mem(const char *pack_name,
 
         int rc = invfs_plugin_pool_container_cmd(pack_name, pack_so_path, cmd,
                                                  (in_buf && in_len > 0) ? spill_in : NULL,
-                                                 spill_out, recipe_path, NULL);
+                                                 NULL, spill_out, recipe_path, NULL);
         if (rc == 0 && out_buf && out_len) {
             int fd = open(spill_out, O_RDONLY);
             if (fd >= 0) {

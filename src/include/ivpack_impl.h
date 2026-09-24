@@ -214,9 +214,14 @@ int ivpack_container_cmd(const ivpack_container_args *args)                  \
     switch (args->cmd) {                                                     \
     case 1:                                                                  \
     case 3:                                                                  \
-    case 5:                                                                  \
         if (!args->in_path || !args->out_path)                               \
             return -IVPACK_RC_USAGE;                                         \
+        break;                                                               \
+    case 5:                                                                  \
+        if ((!args->in_path && !args->recipe_path) || (!args->out_path && !args->out_buf)) \
+            return -IVPACK_RC_USAGE;                                         \
+        if (args->out_buf && args->out_cap > 0)                              \
+            return PREFIX##_iv_call_map(args);                               \
         break;                                                               \
     case 2:                                                                  \
         if (!args->in_path || !args->extract_idx || !args->out_path)          \
