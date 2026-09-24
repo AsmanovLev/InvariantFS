@@ -251,6 +251,8 @@ static int v3_list_cb(void *ctx_, const char *nm, size_t nlen, uint64_t child)
 
     if (c->n >= c->max)
         return 1;                         /* full: stop the scan */
+    if (nlen && (unsigned char)nm[0] == 0x01)
+        return 0;                         /* internal owner/registry */
     if (nlen >= sizeof c->ents[0].name)
         return 0;
     if (vol_v3_inode_get(c->v, child, &in) != 1)

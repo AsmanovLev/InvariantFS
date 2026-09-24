@@ -1077,10 +1077,10 @@ progress:
      * counts come from the accumulators themselves: parts deferred at
      * container-explode time (WP14b) never produced a walk line.
      * --fast deferred nothing, so the GC/flush are skipped with it.
-     * WP-M21b: v3 volumes have no tz owner records and the v3 sweep path
-     * never defers (text takes generic ZSTD too), so GC/flush would only
-     * fail on the v2-append refusals -- skipped entirely. */
-    if (!dry && !fast && !(vol_sb(vol)->vol_flags & VOLF_V3)) {
+     * WP78: v3 volumes now defer too (TEXT/BATCHED_BIN batches published as
+     * v3 recipe deltas), and vol_tz_gc/vol_tz_flush dispatch to the v3
+     * registry path, so the pass runs on both formats. */
+    if (!dry && !fast) {
         int gcrc = vol_tz_gc(vol);
         size_t tzp = vol_acc_pending(vol, 0);
         size_t bzp = vol_acc_pending(vol, 1);
