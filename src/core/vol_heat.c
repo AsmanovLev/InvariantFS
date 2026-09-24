@@ -181,17 +181,33 @@ int heat_read_tlv(const uint8_t *rec, uint32_t rec_len,
     return -1;
 }
 
-/* stored heat of an inode's live record (0/0 when the TLV is absent) */
+/* WP78: is the id still live? The v2 name index is empty on v3, so the
+ * old idx_id_live() check marked every v3 file dead and heat never
+ * persisted there. */
+static int heat_id_live(invfs_volume *v, uint64_t inode)
+{
+    if (v->sb.vol_flags & VOLF_V3) {
+        invfs_v3_inode in;
+        return vol_v3_inode_get(v, inode, &in) == 1 && in.nlink > 0;
+    }
+    return idx_id_live(v, inode);
+}
+
+/* stored heat of an inode (0/0 when the TLV is absent). WP78: read it
+ * through the xattr API so it works on both the v2 INO2 ext and the v3
+ * named-xattr tree (meta_read_record_by_id is a v2-only lookup and made
+ * every v3 file read as cold). */
 static int heat_get(invfs_volume *v, uint64_t inode, uint16_t *r, uint8_t *w)
 {
-    uint8_t *rec = NULL;
-    uint32_t rl = 0;
-    int rc;
-    if (meta_read_record_by_id(v, inode, &rec, &rl, NULL, 0, NULL) != 0)
+    uint8_t val[4];
+    size_t vl = sizeof val;
+    if (r) *r = 0;
+    if (w) *w = 0;
+    if (vol_get_xattr(v, inode, INVFS_XATTR_HEAT, val, &vl) != 0 || vl < 3)
         return -1;
-    rc = heat_read_tlv(rec, rl, r, w);
-    free(rec);
-    return rc;
+    if (r) *r = (uint16_t)(val[0] | ((uint16_t)val[1] << 8));
+    if (w) *w = val[2];
+    return 0;
 }
 
 /* effective read heat: stored + this session's accrued, saturated */
@@ -401,7 +417,7 @@ void l2p_seed_heat(invfs_volume *v)
         if (!inode) continue;
         n = v->heat_tab[i][1];
         if (!n) continue;
-        if (!idx_id_live(v, inode)) continue;   /* dead id (rewritten) */
+        if (!heat_id_live(v, inode)) continue;   /* dead id (rewritten) */
         if (heat_get(v, inode, &r, &w) != 0) { r = 0; w = 0; }
         /* absent TLV == (0,0): "no heat history"; the fold writes only
          * when the accrual changes the stored value */
@@ -485,6 +501,28 @@ static int heat_decay_cb(void *ctx_, uint64_t rec_pos,
     return 0;
 }
 
+/* WP78: v3 decay body -- one pass over the live inode set, reading and
+ * rewriting the heat xattr through the format-agnostic xattr API. */
+static int heat_decay_v3_cb(invfs_volume *v, uint64_t inode_id,
+                            const char *name, void *ctx_)
+{
+    heat_decay_ctx *ctx = (heat_decay_ctx *)ctx_;
+    uint16_t r = 0, nr;
+    uint8_t w = 0, nw;
+
+    if (!name || (unsigned char)name[0] == 0x01)
+        return 0;
+    if (heat_get(v, inode_id, &r, &w) != 0)
+        return 0;               /* never heated: nothing to decay */
+    nr = (uint16_t)(r >> 1);
+    nw = w ? (uint8_t)(w - 1) : 0;
+    if (nr != r || nw != w)
+        heat_write(v, inode_id, nr, nw);
+    if (nr >= INVFS_HEAT_HOT) ctx->any_r = 1;
+    if (nw >= INVFS_WHEAT_HOT) ctx->any_w = 1;
+    return 0;
+}
+
 void vol_heat_sweep_begin(invfs_volume *v)
 {
     heat_decay_ctx ctx;
@@ -501,7 +539,10 @@ void vol_heat_sweep_begin(invfs_volume *v)
     ctx.end = v->inode_area_pos;
     ctx.any_r = 0;
     ctx.any_w = 0;
-    vol_records_walk(v, heat_decay_cb, &ctx);
+    if (v->sb.vol_flags & VOLF_V3)
+        (void)vol_v3_iter_live_inodes(v, heat_decay_v3_cb, &ctx);
+    else
+        vol_records_walk(v, heat_decay_cb, &ctx);
     v->heat_any_rhot = ctx.any_r;
     v->heat_any_whot = ctx.any_w;
     (void)v;
@@ -586,23 +627,111 @@ static int heat_promote_cb(void *ctx_, uint64_t rec_pos,
     return 0;
 }
 
+/* WP78: v3 promotion candidate collection -- one pass over the live inode
+ * set, class TEXT and read-hot. */
+static int heat_promote_v3_cb(invfs_volume *v, uint64_t inode_id,
+                              const char *name, void *ctx_)
+{
+    heat_cand_ctx *ctx = (heat_cand_ctx *)ctx_;
+    uint8_t cc = 0, ca = 0;
+    uint16_t cg = 0, r;
+    size_t nl;
+
+    if (!name || (unsigned char)name[0] == 0x01)
+        return 0;
+    if (vol_get_class(v, inode_id, &cc, &ca, &cg) != 0)
+        return 0;
+    if (cc != INVFS_CLASS_TEXT)
+        return 0;               /* BATCHED_BIN (fast already) never promotes */
+    ctx->text_members++;
+    r = heat_file_r(v, inode_id);
+    if (r < INVFS_HEAT_HOT) return 0;
+    if (ctx->n_cand == ctx->cap_cand) {
+        size_t nc = ctx->cap_cand ? ctx->cap_cand * 2 : 16;
+        heat_cand *nc2 = (heat_cand *)realloc(ctx->cand, nc * sizeof *nc2);
+        if (!nc2) { ctx->err = 1; return 1; }
+        ctx->cand = nc2;
+        ctx->cap_cand = nc;
+    }
+    nl = strlen(name);
+    if (nl > sizeof ctx->cand[0].name - 1) nl = sizeof ctx->cand[0].name - 1;
+    ctx->cand[ctx->n_cand].inode = inode_id;
+    ctx->cand[ctx->n_cand].r = r;
+    memcpy(ctx->cand[ctx->n_cand].name, name, nl);
+    ctx->cand[ctx->n_cand].name[nl] = 0;
+    ctx->n_cand++;
+    return 0;
+}
+
+/* WP78: extract one read-hot v3 TEXT member to a standalone whole-file
+ * ZSTD blob (the v3 analogue of vol_store_generic's promotion), with the
+ * same decode+memcmp bit-exactness guard. The batch segment is left for
+ * tz_v3_gc (vol_v3_free_recipe_blocks skips TEXT entries). 1 = promoted,
+ * 0 = no gain/refused (member stays batched), -1 = hard error. */
+static int heat_extract_v3(invfs_volume *v, uint64_t inode_id,
+                           const char *name)
+{
+    uint8_t *data = NULL, *enc = NULL, *back = NULL;
+    size_t dlen = 0, enc_cap, enc_len = 0;
+    const invfs_codec *zc = invfs_codec_by_algo(INVFS_ALGO_ZSTD);
+    uint64_t newino;
+
+    if (!zc || !zc->encode || !zc->decode) return -1;
+    if (vol_read_file(v, inode_id, &data, &dlen) != 0 || !data) {
+        free(data);
+        return -1;
+    }
+    enc_cap = ZSTD_compressBound(dlen);
+    enc = (uint8_t *)malloc(enc_cap);
+    if (!enc) { free(data); return -1; }
+    {
+        size_t zrc = ZSTD_compress(enc, enc_cap, data, dlen,
+                                   invfs_profile_zstd_level(v->profile));
+        if (ZSTD_isError(zrc) || zrc == 0 || zrc >= dlen || zrc > 0xFFFFFFFFu) {
+            free(enc); free(data);
+            return 0;           /* no gain: leave the member batched */
+        }
+        enc_len = zrc;
+    }
+    back = (uint8_t *)malloc(dlen ? dlen : 1);
+    if (!back || zc->decode(enc, enc_len, back, dlen) != 0 ||
+        memcmp(back, data, dlen) != 0) {
+        free(back); free(enc); free(data);
+        return 0;
+    }
+    free(back);
+    newino = vol_v3_publish_blob_inode(v, inode_id, enc, enc_len, dlen,
+                                       INVFS_ALGO_ZSTD);
+    free(enc);
+    free(data);
+    if (!newino) return -1;
+    vol_stamp_class(v, inode_id, INVFS_CLASS_GENERIC, INVFS_ALGO_ZSTD,
+                    invfs_registry_generation());
+    return 1;
+}
+
 int vol_heat_promote(invfs_volume *v)
 {
     uint64_t owner;
     heat_cand_ctx ctx;
     size_t budget = 0, i;
     int promoted = 0;
+    int v3;
 
     if (!v || !vol_write_enabled(v)) return 0;
     if (!v->heat_any_rhot) return 0;   /* cold volume: skip the walk */
+    v3 = (v->sb.vol_flags & VOLF_V3) != 0;
     owner = vol_find(v, TZ_OWNER_NAME);
-    if (!owner) return 0;
+    if (!v3 && !owner) return 0;
 
     /* walk live records (mapper extents via the shared walker on v0.3.0+,
      * the legacy area otherwise); TEXT class + hot -> candidate */
     memset(&ctx, 0, sizeof ctx);
     ctx.v = v;
-    vol_records_walk(v, heat_promote_cb, &ctx);
+    if (v3)
+        (void)vol_v3_iter_live_inodes(v, heat_promote_v3_cb, &ctx);
+    else
+        vol_records_walk(v, heat_promote_cb, &ctx);
     if (ctx.err) goto out;   /* realloc failed mid-collection (legacy: goto out) */
     /* NOTE: heat_any_rhot is NOT reset when the walk finds no TEXT
      * candidate: the summary means "some file is read-hot", and the tier
@@ -636,9 +765,17 @@ int vol_heat_promote(invfs_volume *v)
         zc = invfs_codec_by_algo(INVFS_ALGO_ZSTD);
         if (zc && zc->dec_mem_bytes > vol_get_dec_mem_limit(v))
             continue;
-        if (vol_store_generic(v, ctx.cand[i].inode, ctx.cand[i].name,
-                              INVFS_CLASS_GENERIC,
-                              INVFS_ALGO_ZSTD) != 0) {
+        if (v3) {
+            int pr = heat_extract_v3(v, ctx.cand[i].inode, ctx.cand[i].name);
+            if (pr <= 0) {
+                if (pr < 0)
+                    fprintf(stderr, "[heat] %s: promotion failed (member left "
+                                    "batched, intact)\n", ctx.cand[i].name);
+                continue;
+            }
+        } else if (vol_store_generic(v, ctx.cand[i].inode, ctx.cand[i].name,
+                                     INVFS_CLASS_GENERIC,
+                                     INVFS_ALGO_ZSTD) != 0) {
             fprintf(stderr, "[heat] %s: promotion failed (member left "
                             "batched, intact)\n", ctx.cand[i].name);
             continue;

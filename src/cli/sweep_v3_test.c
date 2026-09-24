@@ -124,13 +124,16 @@ int main(int argc, char **argv)
     }
     ok(v->raw_free > raw_free_before, "RAW zone reclaimed freed blocks after sweep");
 
-    /* 8. Assert all files are now in Shadow (BINARY) zone */
-    ok(vol_inode_first_zone(v, id_nested) == INVFS_ZONE_BINARY,
-       "dir1/sub2/photo.jpg successfully swept to Shadow");
-    ok(vol_inode_first_zone(v, id_root) == INVFS_ZONE_BINARY,
-       "root photo.jpg successfully swept to Shadow");
-    ok(vol_inode_first_zone(v, id_other) == INVFS_ZONE_BINARY,
-       "dir1/other.txt successfully swept to Shadow");
+    /* 8. Assert all files left RAW for consolidated storage. WP78: v3 now
+     * batches text into the TEXT zone (PPMd) exactly like v2, so the
+     * drained form is TEXT (not BINARY); the point is that RAW was
+     * reclaimed and the file is no longer a set of raw segments. */
+    ok(vol_inode_first_zone(v, id_nested) != INVFS_ZONE_RAW,
+       "dir1/sub2/photo.jpg successfully swept out of RAW");
+    ok(vol_inode_first_zone(v, id_root) != INVFS_ZONE_RAW,
+       "root photo.jpg successfully swept out of RAW");
+    ok(vol_inode_first_zone(v, id_other) != INVFS_ZONE_RAW,
+       "dir1/other.txt successfully swept out of RAW");
 
     /* 9. Verify NO stray entries at root and path lookup still resolves correctly */
     {
@@ -195,7 +198,8 @@ int main(int argc, char **argv)
         vol_mark_pending(v, act_id);
         swept_active = vol_sweep_pending(v);
         ok(swept_active == 1, "vol_sweep_pending swept committed file");
-        ok(vol_inode_first_zone(v, act_id) == INVFS_ZONE_BINARY, "committed file now in Shadow");
+        ok(vol_inode_first_zone(v, act_id) != INVFS_ZONE_RAW,
+           "committed file now out of RAW");
     }
 
     /* 12. Test vol_sweep_file on v3 (manual / SIGUSR1 sweep) */
@@ -234,10 +238,16 @@ int main(int argc, char **argv)
            "durable remount: dir1/sub2/photo.jpg bit-exact");
         free(read_back);
 
-        /* 14. Unlink test: verify data blocks are reclaimed */
-        uint64_t free_before_unlink = v->free_blocks;
+        /* 14. Unlink test. WP78: a text file now lives in a SHARED batch,
+         * so its blocks are reclaimed by the batch GC once no live member
+         * names the batch -- not at unlink time. Verify the name is gone
+         * (the recipe/blocks are unreachable, never served). */
         ok(vol_v3_unlink(v, "photo.jpg") == 0, "unlink photo.jpg");
-        ok(v->free_blocks > free_before_unlink, "free blocks increased after unlink");
+        {
+            uint64_t gone = 0;
+            ok(vol_v3_path_lookup(v, "photo.jpg", &gone) != 1,
+               "photo.jpg no longer resolves after unlink");
+        }
 
         vol_close(v);
     }

@@ -445,13 +445,16 @@ static int wsession_load_old_v3(invfs_wsession *s)
     }
 
     /* snapshot the old pbas so commit can free whatever the new recipe
-     * drops (the v3 path has no v2 refcount map to do it) */
+     * drops. WP78: TEXT entries name SHARED batch segments owned by the
+     * batch registry, so they are recorded as 0 (never freed here) --
+     * tz_v3_gc reclaims a dead batch once no live member names it. */
     s->old_n_ents = (uint32_t)nents;
     if (nents) {
         s->old_pbas = (uint64_t *)malloc(nents * sizeof(uint64_t));
         if (!s->old_pbas) { free(blob); return -1; }
         for (i = 0; i < nents; i++)
-            s->old_pbas[i] = ents[i].pba;
+            s->old_pbas[i] = (ents[i].zone == INVFS_ZONE_TEXT)
+                           ? 0 : ents[i].pba;
     }
     if (s->truncating) {   /* content dropped; commit frees the old pbas */
         free(blob);
@@ -467,8 +470,38 @@ static int wsession_load_old_v3(invfs_wsession *s)
         s->touched = (uint8_t *)calloc(s->touched_cap, 1);
         if (!s->ents || !s->touched) { free(blob); return -1; }
         memcpy(s->ents, ents, nents * sizeof(*s->ents));
-        s->aliased_n = (uint32_t)nents;
-        s->mat_upto = (uint32_t)nents;
+        if (wsession_simple_old(&ah, s->ents)) {
+            s->aliased_n = (uint32_t)nents;
+            s->mat_upto = (uint32_t)nents;
+        } else {
+            /* WP78: batched (TEXT) / container / whole-file content -- a
+             * write is an implicit downgrade to RAW, exactly like the v2
+             * path: re-read through the real read path in 64K windows and
+             * rebuild each as a fresh session segment. Aliasing the old
+             * entry while materializing touched ranges would leave an
+             * overlapping recipe (a TEXT entry covers the whole file). */
+            uint32_t nseg = (uint32_t)((s->old_size + SEGMENT_SIZE - 1) /
+                                       SEGMENT_SIZE);
+            uint8_t *plain = malloc(SEGMENT_SIZE);
+            if (!plain) { free(blob); return -1; }
+            fprintf(stderr, "[wsession] %s: write to swept/container file: "
+                    "materializing %u segment(s) to RAW\n", s->name, nseg);
+            s->n_ents = 0;
+            s->aliased_n = 0;
+            s->mat_upto = 0;
+            for (i = 0; i < nseg; i++) {
+                uint64_t off = (uint64_t)i * SEGMENT_SIZE;
+                uint64_t room = s->old_size - off;
+                size_t want = (size_t)(room < SEGMENT_SIZE ? room : SEGMENT_SIZE);
+                int got, rc;
+                memset(plain, 0, SEGMENT_SIZE);
+                got = vol_read_range(s->v, s->old_id, off, want, plain);
+                if (got != (int)want) { free(plain); free(blob); return -1; }
+                rc = wsession_write_seg(s, i, plain);
+                if (rc != 0) { free(plain); free(blob); return rc; }
+            }
+            free(plain);
+        }
     }
     free(blob);
     return 0;
@@ -837,6 +870,12 @@ static int vol_write_commit_v3(invfs_wsession *s)
      * here whenever the new entry table does not keep it. The superseded
      * recipe blob page itself is left for WP-M15. */
     if (s->old_pbas) {
+        /* WP78: the new recipe is already published, so a fresh ref map
+         * (TEXT batch pbas are excluded by the v3 walker) tells us whether
+         * any other live file still names each dropped pba -- a dedupe
+         * share or a sibling batch member must survive one file's rewrite. */
+        pba_ref_reset(v);
+        pba_ref_ensure(v);
         for (i = 0; i < s->old_n_ents; i++) {
             uint64_t pba = s->old_pbas[i];
             int keep = 0;
@@ -847,7 +886,7 @@ static int vol_write_commit_v3(invfs_wsession *s)
             if (!keep)
                 for (k = 0; k < s->n_ents; k++)
                     if (s->ents[k].pba == pba) { keep = 1; break; }
-            if (!keep) {
+            if (!keep && pba_ref_count(v, pba) == 0) {
                 uint64_t plen = 0;
                 if (seg_extent_checked(v, pba, &plen) == 0)
                     vol_free_blocks(v, pba, plen);

@@ -88,6 +88,12 @@ int vol_v3_free_recipe_blocks(invfs_volume *v,
             int dup = 0;
             if (!pba || pba == keep_pba)
                 continue;
+            /* WP78: a zone==TEXT entry names a SHARED batch segment owned
+             * by the batch registry -- dropping this member's reference
+             * must not free it; tz_v3_gc reclaims it when no live member
+             * names it any more. */
+            if (ents[i].zone == INVFS_ZONE_TEXT)
+                continue;
             for (k = 0; k < i; k++) {
                 if (ents[k].pba == pba) {
                     dup = 1;
