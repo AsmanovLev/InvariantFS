@@ -36,12 +36,20 @@ CORE    := volume vol_cpack helper_exec vol_plugin_client vol_png vol_seal vol_r
 CORE_O  := $(addprefix $(OBJ)/,$(addsuffix .o,$(CORE)))
 B3      := blake3 blake3_dispatch blake3_portable
 
+# Canonical core object list for the e2e helper link lines in tools/test-*.sh.
+# Emitted by `all` so it can never go stale against $(CORE). Kept as a list of
+# individual .o files (NOT a .a archive) so link order does not matter.
+CORE_OBJS_FILE := build/core_objs.txt
+
 TOOLS   := invf-mkfs invf-verify invf-fsck invf-cp invf-cat invf-ls invf-stat \
            invf-zip invf-arctest invf-blkio_test invf-fuse invf-import invf-sweep meta_probe \
            invf-stats invf-resize invf-rollback invf-l2ptest invfs-pack \
            invf-v3inode invf-plugin-host
 
-all: $(TOOLS:%=$(OUT)/%)
+all: $(TOOLS:%=$(OUT)/%) $(CORE_OBJS_FILE)
+
+$(CORE_OBJS_FILE): $(CORE_O) | $(OBJ)
+	@printf '%s\n' $(CORE_O) > $@
 
 $(OBJ):
 	mkdir -p $@
@@ -149,7 +157,7 @@ $(OBJ)/meta_probe.o: tools/meta_probe.c | $(OBJ)
 	$(CC) $(CFLAGS) -c -o $@ $<
 
 clean:
-	rm -rf $(OBJ) $(TOOLS:%=$(OUT)/%) $(OUT)/invf-codec_test \
+	rm -rf $(OBJ) $(CORE_OBJS_FILE) $(TOOLS:%=$(OUT)/%) $(OUT)/invf-codec_test \
 	       $(OUT)/invf-helper_exec_test $(OUT)/invf-metabuf_test \
 	       $(OUT)/invf-btree_test $(OUT)/invf-delta_test \
 <<<<<<< HEAD

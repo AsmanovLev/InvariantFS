@@ -156,7 +156,7 @@ int main(int argc, char **argv)
 ROCPICK_EOF
 gcc -std=gnu11 -O2 -I$REPO/src -I$REPO/src/core -I$REPO/src/codecs -I$REPO/src/recipes -I$REPO/src/vendor7z -o "$WORK/tools/rocpick" \
     "$WORK/tools/rocpick.c" \
-    $REPO/build/obj/{volume,vol_cpack,helper_exec,vol_png,vol_seal,vol_repair,vol_rollback,vol_resize,vol_fsck,vol_crash,vol_exer,vol_dedupe,vol_textzone,vol_heat,vol_sweep,vol_meta_merge,vol_read,vol_write,vol_records,vol_ast,vol_dirs,arc,crc32c,lz4,blkio,flacx,tarx,pngx,miniz,ppmd8,ppmd8enc,ppmd8dec,ppmd_codec,codec,bcj_x86,blake3,blake3_dispatch,blake3_portable,rs,vol_tier}.o \
+    $(sed "s|^|$REPO/|" "$REPO/build/core_objs.txt") \
     -Wl,-l:libzstd.so.1 -lz -lpthread
 RP="$WORK/tools/rocpick"
 
