@@ -87,6 +87,11 @@ typedef struct invfs_pack_def {
      * pack-free (the FS splices ranges from the recipe + member siblings
      * itself). */
     int          is_container;
+    /* manifest `decomp_gen = 1`: the pack renders the v2 map wire, so the FS
+     * stamps its own generation into the map header and re-derives a stored
+     * decomposition whose generation is behind (WP-Q2R3 migration). Packs
+     * without the key keep the v1 wire and are never re-decomposed. */
+    int          decomp_gen;
     const char  *enumerate;
     const char  *extract;
     const char  *strip;

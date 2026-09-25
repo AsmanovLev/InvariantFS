@@ -70,9 +70,19 @@ Drains data from the RAW landing zone into the Shadow zone, applies compression 
 # Offline sweep
 bin/invf-sweep volume.img
 
+# Persistent combined stdout/stderr log (appended between run headers)
+bin/invf-sweep volume.img --log /var/log/invfs/sweep.log
+INVFS_SWEEP_LOG=/var/log/invfs/sweep.log bin/invf-sweep volume.img
+
+# Force/disable ANSI colors (default: auto; NO_COLOR is honored)
+bin/invf-sweep volume.img --color always
+bin/invf-sweep volume.img --color never
+
 # Dry-run mode (display what would be swept without modifying disk)
 bin/invf-sweep volume.img --dry-run
 ```
+
+Normal sweeps report numbered stages (`prepare`, `collect`, `transform`, `heat`, optional `tier`, `dedupe`, `batches`, `finalize`, optional `seal`). Countable stages show current/total, percentage, elapsed time, and an ETA when enough observations exist. Interactive terminals update one ANSI-colored status line in place; redirected output and persistent logs use clean newline-delimited lines. Dedupe progress separates `cross-file` and `intra-file` merges. Use `INVFS_SWEEP_PROGRESS_MS=<100..60000>` to change console/log update cadence.
 
 ---
 

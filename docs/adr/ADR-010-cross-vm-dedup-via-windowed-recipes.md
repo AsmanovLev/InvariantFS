@@ -213,3 +213,16 @@ This matches the existing lazy-sweep convention documented in `AGENTS.md` §2.5 
 - Zstd/LZ4 transform kinds. Reserved opcode values but not implemented; Phase 2.
 - Guest filesystem types beyond ext4 inside qcow2. FAT32/NTFS/XFS windows require their own containerpack's `GUEST_ENUM` implementation; qcow2+ext4 is the MVP target because it is the dominant cloud image format.
 - Auto-creation of a hierarchical `.guestfs/` tree inside the volume. MVP uses flat sibling naming (`<source>!<sanitized_path>`); directory-style exposure is a Phase 2 UX improvement.
+
+## Amendment: Multi-member QCOW2 decomposition
+
+The implementation direction was revised after measuring the actual container ABI. The generic `INVFS_ALGO_WINDOW_SRC` recipe opcode and `GUEST_ENUM` command are deferred; they are not required for the native nested-container path.
+
+QCOW2 now emits two members:
+
+1. `idx=1`, `diskimg`: the full virtual-size guest disk, with unallocated regions zero-filled. Nested `rawdisk` and filesystem codecpacks consume this member.
+2. `idx=2`, `rankimg`: the allocated-cluster stream in rank-packed order. Q2R1/Q2R2 recipes and MRMP reference this member, preserving bit-exact original-image reads and rebuild.
+
+This keeps the existing seekable MRMP format unchanged while allowing a sparse QCOW2 image to be parsed as a complete raw disk. Decomposition remains lazy and is activated by `invf-sweep`; no write-path behavior changes.
+
+The tradeoff is additional member storage and extraction work. Filesystem-specific enumeration and publication remain the responsibility of the delegated `ext4fs` codecpack; this amendment is limited to QCOW2.

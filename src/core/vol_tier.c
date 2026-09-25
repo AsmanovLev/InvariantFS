@@ -787,7 +787,8 @@ int vol_tier_migrate(invfs_volume *v)
     }
 out:
     free(hm.t);
-    if (v->tier_promoted || v->tier_demoted || v->tier_n)
+    if (!invfs_sweep_ui_active() &&
+        (v->tier_promoted || v->tier_demoted || v->tier_n))
         printf("tier: %llu hot segment(s) copied to dev0 (%llu blocks), "
                "%llu demoted; %zu copies live\n",
                (unsigned long long)v->tier_promoted,

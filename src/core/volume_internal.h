@@ -434,6 +434,20 @@ typedef struct invfs_volume {
      * vol_close. */
     struct cpack_map_cache *maps;
     size_t maps_n, maps_cap;
+    /* WP-Q2R3: a 2-slot cache of LOADED recipes. A recipe address IS the
+     * BLAKE3 of its bytes, so a cached blob can never go stale -- there is
+     * nothing to invalidate. It exists because one recipe LOAD costs a
+     * B+ tree walk plus a hash of the whole blob, while a read costs a
+     * copy: a member with a large recipe (a >1 GiB member has a multi-megabyte
+     * one) read in many small ranges used to reload it every time, which is
+     * quadratic. */
+    struct {
+        uint8_t addr[INVFS_V3_RECIPE_ADDR_LEN];
+        uint8_t *blob;
+        size_t   len;
+        int      used;
+    } rcache[2];
+    pthread_mutex_t rc_mu;
     /* WP20b: redundancy configuration (the RDP0 descriptor at block 0
      * offset 0x100) + dirty-stripe tracking for incremental reseal.
      * seal_k1 is the EFFECTIVE layer-1 stripe size (the descriptor's k1
@@ -1672,7 +1686,7 @@ void cpack_map_cache_invalidate(invfs_volume *v, const char *name);
  * by local splice through its cached map. Returns the byte count (clamped
  * at the container size), -1 on any failure -- loud, like a corrupt member
  * on the exec path. */
-int cpack_map_read(invfs_volume *v, const char *name, uint64_t ino,
+int64_t cpack_map_read(invfs_volume *v, const char *name, uint64_t ino,
                           uint64_t container_size, uint64_t off,
                           uint8_t *dst, size_t len);
 
@@ -1686,6 +1700,9 @@ int cpack_map_read(invfs_volume *v, const char *name, uint64_t ino,
 int vol_containerpack_sweep(invfs_volume *v, uint64_t inode_id,
                                    const char *name, const invfs_codec *pc,
                                    const uint8_t *full, size_t full_len);
+uint32_t cpack_map_decomp_gen(invfs_volume *v, const char *name);
+int vol_cpack_migrate(invfs_volume *v, uint64_t inode_id, const char *name,
+                      const invfs_codec *pc);
 
 /* WP16a read side: rebuild the original container from the recipe blob +
  * the member siblings. Returns 0 and fills dst (want_len bytes) exactly,

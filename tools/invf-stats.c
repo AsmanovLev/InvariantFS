@@ -5,6 +5,10 @@
 #include <inttypes.h>
 #include "volume.h"
 
+#if !defined(_WIN32)
+#include <sys/stat.h>
+#endif
+
 int main(int argc, char **argv)
 {
     int err;
@@ -12,6 +16,10 @@ int main(int argc, char **argv)
     const invfs_superblock *sb;
     invfs_volume_stats st = {0};
     uint64_t meta_blocks, raw_blocks, shadow_blocks;
+    uint64_t image_allocated = 0;
+#if !defined(_WIN32)
+    struct stat image_stat;
+#endif
 
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) {
@@ -43,6 +51,10 @@ int main(int argc, char **argv)
     v = vol_open(argv[1], &err);
     if (!v) { fprintf(stderr, "open failed err=%d\n", err); return 1; }
     sb = vol_sb(v);
+#if !defined(_WIN32)
+    if (stat(argv[1], &image_stat) == 0 && image_stat.st_blocks > 0)
+        image_allocated = (uint64_t)image_stat.st_blocks * 512ULL;
+#endif
     if (vol_compute_stats(v, &st) != 0) { fprintf(stderr, "walk failed\n"); return 1; }
 
     meta_blocks   = sb->metadata_zone_blocks;
@@ -63,9 +75,12 @@ int main(int argc, char **argv)
         printf("  zones            : meta %.1f MiB | raw %d blk | shadow %d blk\n",
                meta_blocks * 4096 / 1048576.0,
                (int)raw_blocks, (int)shadow_blocks);
-        printf("  used             : %.1f MiB | free: %.1f MiB\n",
-               used_b / 1048576.0, free_b / 1048576.0);
-        printf("population (live)  :\n");
+         printf("  used             : %.1f MiB | free: %.1f MiB\n",
+                used_b / 1048576.0, free_b / 1048576.0);
+         if (image_allocated)
+             printf("  image allocated  : %.1f MiB (host filesystem blocks)\n",
+                    image_allocated / 1048576.0);
+         printf("population (live)  :\n");
         printf("  regular files    : %" PRIu64 "\n", st.files);
         printf("  directories      : %" PRIu64 "\n", st.dirs);
         printf("  symlinks         : %" PRIu64 "\n", st.links);

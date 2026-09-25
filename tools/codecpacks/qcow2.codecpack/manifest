@@ -1,15 +1,19 @@
 # qcow2 codecpack (WP16a/WP16b): QEMU qcow2 disk image decomposition.
 #
 # qcow2 v2/v3 images only, no backing file, no internal snapshots, no
-# compressed clusters, no encryption, refcount_bits=16, no unknown
-# incompatible feature bits. One member: idx 1 "diskimg" = the concatenated
-# allocated-cluster guest data in L1/L2 (guest) table order — a raw disk
-# image prefix, the input the rawdisk container pack decomposes further
-# (nested containers). The recipe is every other byte of the file verbatim
-# (header + extensions, L1/L2 tables, refcount table + blocks, free-cluster
-# junk, trailing junk, in file order) prefixed by a small pack-owned layout
-# table, so rebuild is bit-exact by construction, junk-in-a-hole included.
-# See qcow2.c for the full format documentation + the validation list.
+# encryption, refcount_bits=16, no unknown incompatible feature bits;
+# compressed clusters are decoded into diskimg and retained in the recipe;
+# exact zlib reproduction tries bundled stock zlib 1.3.1 and the system zlib
+# backend, recording the matching encoder in the deflate reproduction result.
+# Two members: idx 1 "diskimg" is the full virtual-size guest disk with
+# unallocated regions zero-filled, for nested rawdisk/ext4fs decomposition;
+# idx 2 "rankimg" is the allocated-cluster stream referenced by Q2R/MRMP
+# for bit-exact original-image reads and rebuild. The recipe is every other
+# byte of the file verbatim (header + extensions, L1/L2 tables, refcount
+# table + blocks, free-cluster junk, trailing junk, in file order) prefixed
+# by a small pack-owned layout table, so rebuild is bit-exact by
+# construction, junk-in-a-hole included. See qcow2.c for the full format
+# documentation + the validation list.
 #
 # The sniff keys on the u32 signature "QFI\xFB" at offset 0. The map command
 # makes the pack SEEKABLE (CAP_SEEK): reads splice from the recipe + the
@@ -26,10 +30,10 @@ name = qcow2
 type = container
 algo = 22
 codec_id = 22
-pack_version = 1
+pack_version = 3
 version = 1
 min_read = 1
-generation = 1
+generation = 2
 family = container
 category = primary
 provides = container
@@ -45,5 +49,9 @@ enumerate = bin/qcow2 enumerate {in} {out}
 extract = bin/qcow2 extract {in} {idx} {out}
 strip = bin/qcow2 strip {in} {out}
 rebuild = bin/qcow2 rebuild {recipe} {dir} {out}
-map = bin/qcow2 map {in} {out}
+map = bin/qcow2 map {recipe} {out}
+# the map is rendered from the RECIPE (Q2R3 parameters live there), and
+# decomp_gen opts into the FS-owned generation stamp: a stored layout older
+# than the pack generation is re-derived from the reconstructed stream.
+decomp_gen = 1
 estimate = bin/qcow2 estimate {in}

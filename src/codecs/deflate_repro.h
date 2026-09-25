@@ -13,9 +13,12 @@
 extern "C" {
 #endif
 
-/* Engine identifiers */
-#define INVFS_DEFLATE_ENGINE_ZLIB   0
-#define INVFS_DEFLATE_ENGINE_MINIZ  1
+/* Engine identifiers. The finder probes bundled stock zlib and the system
+ * zlib implementation, then records the exact matching backend. */
+#define INVFS_DEFLATE_ENGINE_ZLIB_SYSTEM 0
+#define INVFS_DEFLATE_ENGINE_MINIZ       1
+#define INVFS_DEFLATE_ENGINE_ZLIB_STOCK  2
+#define INVFS_DEFLATE_ENGINE_ZLIB        INVFS_DEFLATE_ENGINE_ZLIB_SYSTEM
 
 /* Parameter descriptor for exact deflate reproduction */
 typedef struct {
@@ -40,6 +43,7 @@ int invfs_deflate_repro_find(const uint8_t *raw, size_t raw_len,
                              const uint8_t *target_stream, size_t target_len,
                              int window_bits_hint,
                              invfs_deflate_params *out_params);
+const char *invfs_deflate_engine_name(uint8_t engine);
 
 /*
  * Re-encode raw uncompressed data using the specified params into *out_stream (*out_len).

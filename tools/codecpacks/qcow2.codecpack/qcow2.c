@@ -3,16 +3,16 @@
  * v1.1).
  *
  * Decomposes QEMU qcow2 disk images (v2/v3, unencrypted, no backing file,
- * no internal snapshots, no compressed clusters) into:
- *   - member idx 1 ("diskimg"): the concatenation of all ALLOCATED guest
- *     data clusters in L1/L2 table order (= guest address order), full
- *     cluster_size bytes each — i.e. the raw disk image up to the last
- *     allocated cluster, ready for the rawdisk pack to decompose further
- *     (nested containers);
- *   - recipe: a small pack-owned layout header (Q2R1, below) + every other
- *     byte of the file verbatim (header + extensions, L1 table, L2 tables,
- *     refcount table + blocks, free-cluster junk, trailing junk), in file
- *     order.
+ * no internal snapshots, no unknown incompatible feature bits) into:
+ *   - member idx 1 ("diskimg"): the full virtual-size guest disk, with
+ *     unallocated regions zero-filled, for nested rawdisk/ext4fs packs;
+ *   - member idx 2 ("rankimg"): allocated-cluster bytes in L1/L2 guest
+ *     order, used by the Q2R recipe and MRMP for exact original-image
+ *     reads/rebuild;
+ *   - recipe: a small pack-owned layout header (Q2R1/Q2R2, below) + every
+ *     other byte of the file verbatim (header + extensions, L1 table, L2
+ *     tables, refcount table + blocks, free-cluster junk, trailing junk),
+ *     in file order.
  *
  * QCOW2 layout (offsets verified empirically against qemu-img 10.2.2
  * output; ALL multi-byte integers in the file are BIG-ENDIAN):
@@ -24,8 +24,8 @@
  *             silently serve a lie)
  *   0x10 u32  backing_file_size   — likewise must be 0
  *   0x14 u32  cluster_bits, accepted 9..21 (cluster_size 512 B .. 2 MiB)
- *   0x18 u64  virtual disk size (informational; the tables, not this field,
- *             decide which clusters exist)
+ *   0x18 u64  virtual disk size (the LBA-aligned diskimg length; the tables
+ *             decide which clusters contain data)
  *   0x20 u32  crypt_method — must be 0 (1 = AES, 2 = LUKS: refuse)
  *   0x24 u32  l1_size (L1 entries)
  *   0x28 u64  l1_table_offset (cluster-aligned)
@@ -57,14 +57,11 @@
  * L2 table: cluster_size/8 x u64 at that offset; one entry per guest
  * cluster. Entry 0 = unallocated (NO bytes in the file — qcow2 is sparse
  * by construction). Otherwise:
- *   bit 62 (QCOW_OFLAG_COMPRESSED) — DECLINE the image (compressed clusters
- *     use a different sector-count layout this pack does not model);
- *   bit 0 (QCOW_OFLAG_ZERO, v3+) — a known-zero cluster: NOT a member, its
- *     in-file bytes (if any — preallocated zero clusters keep their extent,
- *     verified: write -z over an allocated cluster yields entry
- *     0x8000000000050001, offset kept, ZERO set, stale bytes still in the
- *     file) stay RECIPE bytes verbatim. In a v2 image the ZERO bit is
- *     reserved: a set bit is declined as unprovable;
+ *   bit 62 (QCOW_OFLAG_COMPRESSED) — the cluster is inflated into the
+ *     LBA-aligned diskimg; its original compressed bytes stay in the recipe
+ *     so rebuild is bit-exact;
+ *   bit 0 (QCOW_OFLAG_ZERO, v3+) — a known-zero cluster: its in-file bytes
+ *     (if any) stay recipe bytes verbatim;
  *   else bits 1..61 (mask 0x3FFFFFFFFFFFFFFE) = the data cluster's offset,
  *     which must be nonzero, cluster-aligned, and fully inside the file.
  *
@@ -89,24 +86,18 @@
  * far lower); and the exact coalesced MRMP entry count stays under the FS
  * cap (4*65536+4 = 262148).
  *
- * Recipe format (pack-owned; the FS never parses it) — "Q2R1":
- *   [0]   4B   "Q2R1"
+ * Recipe format (pack-owned; the FS never parses it) — "Q2R1"/"Q2R2":
+ *   [0]   4B   "Q2R1" or "Q2R2"
  *   [4]  u32LE n_ext          (== n_alloc, one extent per allocated cluster)
  *   [8]  u64LE file_size      (original container size)
- *   [16] u64LE member_size    (== n_ext * cluster_size)
+ *   [16] u64LE member_size    (rankimg size, == n_ext * cluster_size)
  *   [24] u32LE cluster_bits
  *   [28] u32LE reserved (0)
- *   [32] n_ext x 16B { u64LE file_off, u64LE mem_off }  — FILE order;
- *        mem_off is the cluster's rank in the guest-ordered member stream
- *        times cluster_size
- *   [32 + 16*n_ext ...]  the verbatim gap bytes, in file order (every byte
- *        of the original that is not a member extent: header + extensions,
- *        L1/L2 tables, refcount structures, free-cluster junk, tail)
- * rebuild re-derives the layout from this table alone (no qcow2 parsing at
- * rebuild time), validates it strictly (sizes, disjoint sorted extents,
- * mem_off a permutation of the member stream), then splices member bytes
- * at the cluster slots. Bit-exact by construction, junk-in-a-hole included
- * (holes are never seek-skipped; the recipe carries their bytes).
+ *   [32] n_ext x 16B (Q2R1) or 20B (Q2R2) extents in file order; mem_off
+ *        is the rank-packed rankimg offset. Q2R2 also carries compressed
+ *        cluster sizes. The remaining bytes are verbatim recipe gaps.
+ *   rebuild re-derives the layout from this table alone, validates it
+ *   strictly, then splices rankimg bytes at the original cluster slots.
  *
  * Map (MRMP, FS-owned): RECIPE runs for the gaps (src_off into the recipe
  * blob at 32 + 16*n_ext + accumulated gap bytes) + MEMBER runs for the
@@ -116,12 +107,13 @@
  * cap check). The entries exactly partition [0, file_size).
  *
  * Commands (fixed argv, no shell; exit 0 = ok, 3 = decline/fail):
- *   enumerate <in> <out>           "1<TAB>diskimg<TAB><n_alloc*cs>\n"
- *   extract   <in> <idx> <out>     the concatenated guest-order cluster stream
- *   strip     <in> <out>           the Q2R1 recipe
+ *   enumerate <in> <out>           "1<TAB>diskimg<TAB><virtual_size>\n"
+ *                                    "2<TAB>rankimg<TAB><n_alloc*cs>\n"
+ *   extract   <in> <idx> <out>     idx 1 = LBA diskimg, idx 2 = rankimg
+ *   strip     <in> <out>           the Q2R1/Q2R2 recipe
  *   rebuild   <recipe> <dir> <out> original, bit-exact
- *   map       <in> <out>           MRMP: RECIPE gaps + MEMBER cluster runs
- *   estimate  <in>                 prints member bytes + 64 MiB
+ *   map       <in> <out>           MRMP: RECIPE gaps + rankimg MEMBER runs
+ *   estimate  <in>                 prints the member estimate
  *
  * Everything streams through a 4 MiB window; no member ever needs to fit in
  * memory here (the parse tables are 24 B per allocated cluster, capped).
@@ -197,6 +189,8 @@
 
 #define MEMBER_IDX       1u
 #define MEMBER_SNAME     "diskimg"
+#define RANK_IDX         2u
+#define RANK_SNAME       "rankimg"
 
 /* recipe (Q2R1/Q2R2/Q2R3) constants */
 #define QR_MAGIC         "Q2R1"
@@ -206,6 +200,17 @@
 #define QR_ENT_LEN       16u             /* { u64 file_off, u64 mem_off } */
 #define QR2_ENT_LEN      20u             /* { u64 file_off, u64 mem_off, u32 csize } */
 #define QR3_ENT_LEN      24u             /* { u64 file_off, u64 mem_off, u32 csize, u8 repro, u8 level, u8 mem, u8 strat } */
+
+/* Q2R3 per-extent reproduction code (`repro`): the compressed cluster is NOT
+ * stored in the recipe at all -- rebuild regenerates it by re-encoding the
+ * raw cluster from the rankimg member with the recorded deflate parameters.
+ *   0 = verbatim: no exact parameter set reproduced it, the stream rides in
+ *       the recipe gap like Q2R2 (bit-exact, just not smaller)
+ *   1 = stock zlib (the bundled 1.3.1), 2 = system zlib (zlib-ng etc.)
+ * window_bits is always -12 (qcow2 raw deflate), so it is not stored. */
+#define QR3_VERBATIM     0u
+#define QR3_STOCK        1u
+#define QR3_SYSTEM       2u
 
 typedef struct {
     uint64_t off;      /* file offset of the data cluster */
@@ -218,14 +223,16 @@ typedef struct {
 } qc_ext;
 
 typedef struct {
-    uint64_t off;      /* file offset of cluster */
-    uint32_t csize;    /* 0 = uncompressed, >0 = compressed */
+    uint64_t off;
+    uint32_t csize;
+    uint64_t lba;
 } qc_entry;
 
 typedef struct {
     uint64_t file_size;
-    uint64_t cs;            /* cluster size (1 << cluster_bits) */
-    uint64_t member_size;   /* n_alloc * cs */
+    uint64_t cs;
+    uint64_t virtual_size;
+    uint64_t member_size;
     uint32_t cluster_bits;
     uint32_t version;
     uint32_t n_alloc;
@@ -355,7 +362,7 @@ static int qc_parse_fd(int fd, uint64_t file_size, qc_img *v)
 {
     uint8_t hdr[QC_HDR_NEED];
     uint8_t *l1w = NULL, *l2t = NULL;
-    uint64_t l1_off, rt_off, l2_per, i64;
+    uint64_t l1_off, rt_off, l2_per, i64, total_guest_clusters;
     uint32_t version, cluster_bits, l1_size, rt_clusters, cap = 0;
     uint32_t i;
     int rc = -1;
@@ -374,11 +381,15 @@ static int qc_parse_fd(int fd, uint64_t file_size, qc_img *v)
     if (get32be(hdr + QC_CRYPT_OFF) != 0) return -1;     /* encryption */
     if (get32be(hdr + QC_NSNAP_OFF) != 0) return -1;     /* snapshots */
 
+    v->virtual_size = get64be(hdr + 0x18);
+    if (v->virtual_size == 0 || v->virtual_size > (1ull << 44)) return -1;
+
     cluster_bits = get32be(hdr + QC_CLUSBITS_OFF);
     if (cluster_bits < QC_MIN_CLUSBITS || cluster_bits > QC_MAX_CLUSBITS)
         return -1;
     v->cluster_bits = cluster_bits;
     v->cs = 1ull << cluster_bits;
+    total_guest_clusters = (v->virtual_size + v->cs - 1) / v->cs;
 
     if (version == 3) {
         uint64_t hdr_len;
@@ -492,19 +503,24 @@ static int qc_parse_fd(int fd, uint64_t file_size, qc_img *v)
                         goto out;
                     csize = 0;
                 }
-                if (v->n_alloc == cap) {
-                    qc_entry *na;
-                    if (cap >= QC_MAX_ALLOC) goto out;
-                    cap = cap ? cap * 2 : 4096;
-                    if (cap > QC_MAX_ALLOC) cap = QC_MAX_ALLOC;
-                    na = (qc_entry *)realloc(v->alloc,
-                                             (size_t)cap * sizeof *na);
-                    if (!na) goto out;
-                    v->alloc = na;
+                {
+                    uint64_t guest_lba = (uint64_t)(i64 + k) * l2_per + j;
+                    if (guest_lba >= total_guest_clusters) goto out;
+                    if (v->n_alloc == cap) {
+                        qc_entry *na;
+                        if (cap >= QC_MAX_ALLOC) goto out;
+                        cap = cap ? cap * 2 : 4096;
+                        if (cap > QC_MAX_ALLOC) cap = QC_MAX_ALLOC;
+                        na = (qc_entry *)realloc(v->alloc,
+                                                 (size_t)cap * sizeof *na);
+                        if (!na) goto out;
+                        v->alloc = na;
+                    }
+                    v->alloc[v->n_alloc].off = off;
+                    v->alloc[v->n_alloc].csize = csize;
+                    v->alloc[v->n_alloc].lba = guest_lba;
+                    v->n_alloc++;
                 }
-                v->alloc[v->n_alloc].off = off;
-                v->alloc[v->n_alloc].csize = csize;
-                v->n_alloc++;
             }
         }
     }
@@ -567,6 +583,171 @@ static int qc_parse(const char *path, qc_img *v)
     return rc;
 }
 
+/* ---- recipe (Q2R1/Q2R2/Q2R3) view ---------------------------------------
+ *
+ * The recipe is self-describing: the layout table plus the gap bytes rebuild
+ * the original image without ever looking at a qcow2 header again. `map` used
+ * to re-parse the IMAGE and recompute the layout; reading the recipe instead
+ * is what lets Q2R3 clusters (whose bytes are NOT in the recipe) be mapped at
+ * all -- the reproduction parameters travel in the recipe table itself. */
+
+typedef struct {
+    uint64_t file_size;    /* the original image size */
+    uint64_t member_size;  /* rankimg size = n_ext * cs */
+    uint32_t cluster_bits;
+    uint32_t n_ext;
+    uint32_t ent_sz;
+    int      ver;          /* 1 = Q2R1, 2 = Q2R2, 3 = Q2R3 */
+    int      from_recipe;  /* parsed from a recipe file (not from an image) */
+    qc_ext  *ext;          /* n_ext entries, file order as stored */
+} qc_recipe;
+
+static void qc_recipe_free(qc_recipe *r)
+{
+    free(r->ext);
+    memset(r, 0, sizeof *r);
+}
+
+/* the deflate engine a Q2R3 repro code names, or -1 for verbatim */
+static int qr3_engine(uint8_t repro)
+{
+    if (repro == QR3_STOCK) return INVFS_DEFLATE_ENGINE_ZLIB_STOCK;
+    if (repro == QR3_SYSTEM) return INVFS_DEFLATE_ENGINE_ZLIB_SYSTEM;
+    return -1;
+}
+
+static int qc_recipe_parse(const char *path, qc_recipe *r)
+{
+    struct stat st;
+    uint8_t hdr[QR_HDR_LEN];
+    uint64_t cs, uncomp_bytes = 0, regen_bytes = 0;
+    uint8_t *tab = NULL;
+    uint32_t i;
+    int fd = -1, rc = -1;
+
+    memset(r, 0, sizeof *r);
+    r->from_recipe = 1;
+    if (stat(path, &st) != 0) { r->from_recipe = 0; return -1; }
+    if ((uint64_t)st.st_size < QR_HDR_LEN) return -1;
+    fd = open(path, O_RDONLY);
+    if (fd < 0) return -1;
+    if (pread_full(fd, hdr, sizeof hdr, 0) != 0) goto out;
+    if (memcmp(hdr, QR_MAGIC, 4) == 0) {
+        r->ver = 1;
+        r->ent_sz = QR_ENT_LEN;
+    } else if (memcmp(hdr, QR2_MAGIC, 4) == 0) {
+        r->ver = 2;
+        r->ent_sz = QR2_ENT_LEN;
+    } else if (memcmp(hdr, QR3_MAGIC, 4) == 0) {
+        r->ver = 3;
+        r->ent_sz = QR3_ENT_LEN;
+    } else {
+        goto out;
+    }
+    r->n_ext = get32le(hdr + 4);
+    r->file_size = get64le(hdr + 8);
+    r->member_size = get64le(hdr + 16);
+    r->cluster_bits = get32le(hdr + 24);
+    if (get32le(hdr + 28) != 0) goto out;
+    if (r->cluster_bits < QC_MIN_CLUSBITS || r->cluster_bits > QC_MAX_CLUSBITS)
+        goto out;
+    cs = 1ull << r->cluster_bits;
+    if (!r->n_ext || r->n_ext > QC_MAX_ALLOC) goto out;
+    if (r->member_size / cs != r->n_ext || r->member_size % cs != 0) goto out;
+    if (r->file_size < QC_HDR_NEED) goto out;
+    if ((uint64_t)st.st_size < QR_HDR_LEN + (uint64_t)r->n_ext * r->ent_sz)
+        goto out;
+
+    tab = (uint8_t *)malloc((size_t)r->n_ext * r->ent_sz);
+    r->ext = (qc_ext *)calloc(r->n_ext, sizeof *r->ext);
+    if (!tab || !r->ext) goto out;
+    if (pread_full(fd, tab, (size_t)r->n_ext * r->ent_sz, QR_HDR_LEN) != 0)
+        goto out;
+
+    for (i = 0; i < r->n_ext; i++) {
+        const uint8_t *p = tab + (size_t)i * r->ent_sz;
+        qc_ext *e = &r->ext[i];
+        e->off = get64le(p);
+        e->rank = (uint32_t)(get64le(p + 8) / cs);
+        e->csize = r->ver >= 2 ? get32le(p + 16) : 0;
+        if (r->ver == 3) {
+            e->repro = p[20];
+            e->level = p[21];
+            e->mem = p[22];
+            e->strat = p[23];
+        }
+        {
+            uint64_t moff = get64le(p + 8);
+            uint64_t elen = e->csize ? (uint64_t)e->csize : cs;
+            if (e->off > r->file_size || elen > r->file_size - e->off) goto out;
+            if (i && e->off < r->ext[i - 1].off) goto out;   /* must be sorted */
+            if (moff % cs != 0 || moff >= r->member_size) goto out;
+            if (!e->csize) {
+                uncomp_bytes += cs;
+            } else if (r->ver == 3 && e->repro != QR3_VERBATIM) {
+                if (qr3_engine(e->repro) < 0) goto out;    /* bad repro code */
+                if (!e->level || e->level > 9 || !e->mem || e->mem > 9 ||
+                    e->strat > 4) goto out;
+                regen_bytes += elen;   /* held by the member, not the recipe */
+            }
+        }
+    }
+    /* the member offsets must be a permutation of the whole member stream
+     * (each rank used exactly once): bitmap, not an O(n^2) rescan */
+    {
+        uint8_t *seen = (uint8_t *)calloc((size_t)r->n_ext, 1);
+        if (!seen) goto out;
+        for (i = 0; i < r->n_ext; i++) {
+            uint64_t rank = (uint64_t)r->ext[i].rank * cs;
+            if (seen[rank / cs]) { free(seen); goto out; }   /* duplicate rank */
+            seen[rank / cs] = 1;
+        }
+        for (i = 0; i < r->n_ext; i++)
+            if (!seen[i]) { free(seen); goto out; }
+        free(seen);
+    }
+    /* the gap length must agree with the file size: the recipe holds every
+     * byte of the image that is neither an uncompressed member cluster nor a
+     * regenerable compressed one */
+    {
+        uint64_t held = uncomp_bytes + regen_bytes;
+        if (r->file_size < held) goto out;
+        if ((uint64_t)st.st_size != QR_HDR_LEN + (uint64_t)r->n_ext * r->ent_sz +
+                                  (r->file_size - held))
+            goto out;
+    }
+    rc = 0;
+out:
+    free(tab);
+    if (fd >= 0) close(fd);
+    if (rc) qc_recipe_free(r);
+    return rc;
+}
+
+/* Build the same view straight from a parsed image (legacy `map <image>`),
+ * where every compressed cluster is verbatim -- the Q2R2 shape. */
+static int qc_recipe_from_img(const qc_img *v, qc_recipe *r)
+{
+    uint32_t i;
+
+    memset(r, 0, sizeof *r);
+    r->ver = 2;
+    r->ent_sz = QR2_ENT_LEN;
+    r->n_ext = v->n_alloc;
+    r->file_size = v->file_size;
+    r->member_size = v->member_size;
+    r->cluster_bits = v->cluster_bits;
+    r->ext = (qc_ext *)calloc(r->n_ext, sizeof *r->ext);
+    if (!r->ext) return -1;
+    for (i = 0; i < r->n_ext; i++) {
+        r->ext[i] = v->fext[i];
+        r->ext[i].repro = QR3_VERBATIM;
+    }
+    /* from_recipe stays 0: a map rendered from the image predates the
+     * generation record and stays on the v1 wire (see qc_map_render) */
+    return 0;
+}
+
 /* copy [off, off+len) of in_fd to out_fd, streaming through buf */
 static int copy_range(int in_fd, int out_fd, uint64_t off, uint64_t len,
                       uint8_t *buf)
@@ -598,7 +779,9 @@ static int cmd_enumerate(const char *in, const char *out)
     f = fopen(out, "w");
     if (f) {
         fprintf(f, "%u\t%s\t%llu\n", MEMBER_IDX, MEMBER_SNAME,
-                (unsigned long long)v.member_size);
+                (unsigned long long)v.virtual_size);
+        fprintf(f, "%u\t%s\t%llu\n", RANK_IDX, RANK_SNAME,
+                (unsigned long long)((uint64_t)v.n_alloc * v.cs));
         if (fclose(f) == 0) rc = 0;
     }
     qc_free(&v);
@@ -610,51 +793,104 @@ static int cmd_enumerate(const char *in, const char *out)
 static int cmd_extract(const char *in, const char *idx_s, const char *out)
 {
     qc_img v;
-    uint8_t *buf = NULL;
+    uint8_t *buf = NULL, *zero_buf = NULL;
     char *endp = NULL;
-    uint32_t i;
+    uint64_t total_clusters, lba, cs;
+    uint32_t idx, ai = 0;
     int fd_in = -1, fd_out = -1, rc = 3;
 
-    if (strtoul(idx_s, &endp, 10) != MEMBER_IDX || !endp || *endp)
-        return 3;
+    idx = (uint32_t)strtoul(idx_s, &endp, 10);
+    if (!endp || *endp || (idx != MEMBER_IDX && idx != RANK_IDX)) return 3;
     if (qc_parse(in, &v) != 0) return 3;
     fd_in = open(in, O_RDONLY);
     fd_out = open_out(out);
-    buf = (uint8_t *)malloc(COPY_CAP);
-    if (fd_in < 0 || fd_out < 0 || !buf) goto out;
-    /* the member stream = allocated clusters in GUEST (table walk) order */
-    for (i = 0; i < v.n_alloc; i++) {
-        if (v.alloc[i].csize) {
-            /* Decompress zlib cluster into full cluster_size member bytes */
-            uint8_t *comp_buf = (uint8_t *)malloc(v.alloc[i].csize);
-            uint8_t *dec_buf = (uint8_t *)malloc(v.cs);
-            if (!comp_buf || !dec_buf) {
-                free(comp_buf); free(dec_buf); goto out;
+    cs = v.cs;
+    buf = (uint8_t *)malloc(cs);
+    zero_buf = (uint8_t *)calloc(1, cs);
+    if (fd_in < 0 || fd_out < 0 || !buf || !zero_buf) goto out;
+
+    if (idx == MEMBER_IDX) {
+        total_clusters = (v.virtual_size + cs - 1) / cs;
+        for (lba = 0; lba < total_clusters; lba++) {
+            uint64_t to_write = cs;
+            uint64_t next_alloc_lba =
+                (ai < v.n_alloc) ? v.alloc[ai].lba : UINT64_MAX;
+            if (lba * cs + to_write > v.virtual_size)
+                to_write = v.virtual_size - lba * cs;
+            if (next_alloc_lba == lba) {
+                if (v.alloc[ai].csize) {
+                    uint8_t *comp_buf = (uint8_t *)malloc(v.alloc[ai].csize);
+                    uint8_t *dec_buf = (uint8_t *)malloc(cs);
+                    if (!comp_buf || !dec_buf) {
+                        free(comp_buf); free(dec_buf); goto out;
+                    }
+                    if (pread_full(fd_in, comp_buf, v.alloc[ai].csize,
+                                   v.alloc[ai].off) != 0) {
+                        free(comp_buf); free(dec_buf); goto out;
+                    }
+                    z_stream zst;
+                    memset(&zst, 0, sizeof zst);
+                    if (inflateInit2(&zst, -12) != Z_OK) {
+                        free(comp_buf); free(dec_buf); goto out;
+                    }
+                    zst.next_in = comp_buf;
+                    zst.avail_in = (uInt)v.alloc[ai].csize;
+                    zst.next_out = dec_buf;
+                    zst.avail_out = (uInt)cs;
+                    int zr = inflate(&zst, Z_FINISH);
+                    inflateEnd(&zst);
+                    free(comp_buf);
+                    if (zr != Z_STREAM_END && zr != Z_OK) {
+                        free(dec_buf); goto out;
+                    }
+                    if (write_full(fd_out, dec_buf, to_write) != 0) {
+                        free(dec_buf); goto out;
+                    }
+                    free(dec_buf);
+                } else {
+                    if (copy_range(fd_in, fd_out, v.alloc[ai].off,
+                                   to_write, buf) != 0) goto out;
+                }
+                ai++;
+            } else {
+                if (write_full(fd_out, zero_buf, to_write) != 0) goto out;
             }
-            if (pread_full(fd_in, comp_buf, v.alloc[i].csize, v.alloc[i].off) != 0) {
-                free(comp_buf); free(dec_buf); goto out;
+        }
+    } else {
+        for (ai = 0; ai < v.n_alloc; ai++) {
+            if (v.alloc[ai].csize) {
+                uint8_t *comp_buf = (uint8_t *)malloc(v.alloc[ai].csize);
+                uint8_t *dec_buf = (uint8_t *)malloc(cs);
+                if (!comp_buf || !dec_buf) {
+                    free(comp_buf); free(dec_buf); goto out;
+                }
+                if (pread_full(fd_in, comp_buf, v.alloc[ai].csize,
+                               v.alloc[ai].off) != 0) {
+                    free(comp_buf); free(dec_buf); goto out;
+                }
+                z_stream zst;
+                memset(&zst, 0, sizeof zst);
+                if (inflateInit2(&zst, -12) != Z_OK) {
+                    free(comp_buf); free(dec_buf); goto out;
+                }
+                zst.next_in = comp_buf;
+                zst.avail_in = (uInt)v.alloc[ai].csize;
+                zst.next_out = dec_buf;
+                zst.avail_out = (uInt)cs;
+                int zr = inflate(&zst, Z_FINISH);
+                inflateEnd(&zst);
+                free(comp_buf);
+                if (zr != Z_STREAM_END && zr != Z_OK) {
+                    free(dec_buf); goto out;
+                }
+                if (write_full(fd_out, dec_buf, cs) != 0) {
+                    free(dec_buf); goto out;
+                }
+                free(dec_buf);
+            } else {
+                if (copy_range(fd_in, fd_out, v.alloc[ai].off, cs, buf) != 0)
+                    goto out;
             }
-            z_stream zst;
-            memset(&zst, 0, sizeof zst);
-            if (inflateInit2(&zst, -12) != Z_OK) {
-                free(comp_buf); free(dec_buf); goto out;
-            }
-            zst.next_in = comp_buf;
-            zst.avail_in = (uInt)v.alloc[i].csize;
-            zst.next_out = dec_buf;
-            zst.avail_out = (uInt)v.cs;
-            int zr = inflate(&zst, Z_FINISH);
-            inflateEnd(&zst);
-            free(comp_buf);
-            if (zr != Z_STREAM_END && zr != Z_OK) {
-                free(dec_buf); goto out;
-            }
-            if (write_full(fd_out, dec_buf, v.cs) != 0) {
-                free(dec_buf); goto out;
-            }
-            free(dec_buf);
-        } else {
-            if (copy_range(fd_in, fd_out, v.alloc[i].off, v.cs, buf) != 0) goto out;
         }
     }
     rc = 0;
@@ -662,55 +898,98 @@ out:
     if (fd_in >= 0) close(fd_in);
     if (fd_out >= 0 && close(fd_out) != 0) rc = 3;
     free(buf);
+    free(zero_buf);
     qc_free(&v);
     return rc;
 }
 
-/* ---- strip (Q2R1 header + file-order extent table + the gap bytes) ----- */
+/* ---- strip (Q2R3 header + file-order extent table + the gap bytes) ----- */
 
+/*
+ * Q2R3 is what makes a decomposed qcow2 smaller than the source image: for
+ * every compressed cluster whose deflate stream can be reproduced bit-for-bit
+ * (the overwhelmingly common case -- qemu and stock zlib 1.3.1 agree), the
+ * stream is NOT copied into the recipe. Only the reproduction parameters plus
+ * the raw cluster (already in rankimg) are stored, and rebuild re-encodes the
+ * stream. Anything the finder cannot reproduce exactly stays verbatim in the
+ * recipe gap, so the output is bit-exact by construction either way.
+ */
 static int cmd_strip(const char *in, const char *out)
 {
     qc_img v;
     uint8_t hdr[QR_HDR_LEN];
-    uint8_t *tab = NULL, *buf = NULL;
+    uint8_t *tab = NULL, *buf = NULL, *comp = NULL, *raw = NULL;
     uint64_t pos = 0;
-    uint32_t i;
+    uint32_t i, n_comp = 0, n_repro = 0;
     int fd_in = -1, fd_out = -1, rc = 3;
 
     if (qc_parse(in, &v) != 0) return 3;
-    tab = (uint8_t *)malloc((size_t)v.n_alloc * QR2_ENT_LEN);
+    tab = (uint8_t *)malloc((size_t)v.n_alloc * QR3_ENT_LEN);
     buf = (uint8_t *)malloc(COPY_CAP);
-    if (!tab || !buf) goto out_free;
-    for (i = 0; i < v.n_alloc; i++) {
-        put64le(tab + (size_t)i * QR2_ENT_LEN, v.fext[i].off);
-        put64le(tab + (size_t)i * QR2_ENT_LEN + 8,
-                (uint64_t)v.fext[i].rank * v.cs);
-        put32le(tab + (size_t)i * QR2_ENT_LEN + 16, v.fext[i].csize);
-    }
+    /* a deflate stream of `cs` raw bytes never exceeds this bound */
+    comp = (uint8_t *)malloc((size_t)v.cs + (size_t)v.cs / 8 + 128);
+    raw = (uint8_t *)malloc((size_t)v.cs);
+    if (!tab || !buf || !comp || !raw) goto out_free;
     fd_in = open(in, O_RDONLY);
     fd_out = open_out(out);
     if (fd_in < 0 || fd_out < 0) goto out;
-    memcpy(hdr, QR2_MAGIC, 4);
+
+    for (i = 0; i < v.n_alloc; i++) {
+        uint8_t *p = tab + (size_t)i * QR3_ENT_LEN;
+        put64le(p, v.fext[i].off);
+        put64le(p + 8, (uint64_t)v.fext[i].rank * v.cs);
+        put32le(p + 16, v.fext[i].csize);
+        p[20] = QR3_VERBATIM;
+        p[21] = p[22] = p[23] = 0;
+        if (!v.fext[i].csize) continue;
+        n_comp++;
+        if (pread_full(fd_in, comp, v.fext[i].csize, v.fext[i].off) != 0)
+            continue;
+        {
+            uint8_t *dec = NULL;
+            size_t declen = 0;
+            invfs_deflate_params dp;
+            if (invfs_deflate_decompress(comp, v.fext[i].csize, -12,
+                                         &dec, &declen) != 0 || !dec)
+                continue;
+            if (declen != (size_t)v.cs) { free(dec); continue; }
+            memcpy(raw, dec, declen);
+            free(dec);
+            if (invfs_deflate_repro_find(raw, (size_t)v.cs, comp,
+                                         v.fext[i].csize, -12, &dp) == 0) {
+                p[20] = (dp.engine == INVFS_DEFLATE_ENGINE_ZLIB_STOCK)
+                            ? QR3_STOCK : QR3_SYSTEM;
+                p[21] = (uint8_t)dp.level;
+                p[22] = (uint8_t)dp.mem_level;
+                p[23] = (uint8_t)dp.strategy;
+                v.fext[i].repro = p[20];
+                n_repro++;
+            }
+        }
+    }
+    if (getenv("INVFS_Q2R3_VERBOSE"))
+        fprintf(stderr, "qcow2: Q2R3 strip: %u compressed, %u regenerable\n",
+                n_comp, n_repro);
+
+    memcpy(hdr, QR3_MAGIC, 4);
     put32le(hdr + 4, v.n_alloc);
     put64le(hdr + 8, v.file_size);
     put64le(hdr + 16, v.member_size);
     put32le(hdr + 24, v.cluster_bits);
     put32le(hdr + 28, 0);
     if (write_full(fd_out, hdr, sizeof hdr) != 0 ||
-        write_full(fd_out, tab, (size_t)v.n_alloc * QR2_ENT_LEN) != 0)
+        write_full(fd_out, tab, (size_t)v.n_alloc * QR3_ENT_LEN) != 0)
         goto out;
     /* the gap bytes: every non-member byte, in file order (junk-filled
-     * holes and compressed cluster bytes included) */
+     * holes plus the compressed clusters that are NOT regenerable) */
     for (i = 0; i < v.n_alloc; i++) {
         uint64_t ext = v.fext[i].off;
         uint64_t elen = v.fext[i].csize ? (uint64_t)v.fext[i].csize : v.cs;
         if (ext > pos && copy_range(fd_in, fd_out, pos, ext - pos, buf) != 0)
             goto out;
-        if (v.fext[i].csize) {
-            /* compressed cluster: written into recipe gap so rebuild reproduces it verbatim */
-            if (copy_range(fd_in, fd_out, ext, elen, buf) != 0)
-                goto out;
-        }
+        if (v.fext[i].csize && v.fext[i].repro == QR3_VERBATIM &&
+            copy_range(fd_in, fd_out, ext, elen, buf) != 0)
+            goto out;
         pos = ext + elen;
     }
     if (v.file_size > pos &&
@@ -723,224 +1002,275 @@ out:
 out_free:
     free(tab);
     free(buf);
+    free(comp);
+    free(raw);
     qc_free(&v);
     return rc;
 }
 
-/* ---- map (MRMP: RECIPE gaps + coalesced MEMBER runs partition the file) - */
+/* ---- map (MRMP/MRM2: the file partitioned into stored sources) --------- */
 
-/* In-memory buffer version of map: reads recipe file or buffer, writes MRMP directly to out_buf */
-int cmd_map_mem(const char *in_path, uint8_t *out_buf, size_t out_cap, size_t *out_len)
+/*
+ * The map tells the FS which stored source reproduces each byte range of the
+ * original container, so reads never exec this pack. Two wire versions:
+ *
+ *   v1 "MRMP" [u32 count]                    count x 29 B entries
+ *   v2 "MRM2" [u32 count][u32 decomp_gen]    count x 40 B entries
+ *
+ * v2 exists for Q2R3: a regenerable compressed cluster has NO bytes anywhere
+ * in the volume, so it gets kind 2 (REPRO) -- "re-encode raw_len bytes read
+ * from member idx at src_off with these deflate parameters, and the result is
+ * this entry's len bytes". decomp_gen is the pack generation that produced
+ * the decomposition, so the sweep can tell a stale layout from a current one
+ * and re-decompose from the reconstructed stream.
+ *
+ *   entry v1: u64 orig_off, u64 len, u8 kind, u32 idx, u64 src_off
+ *   entry v2: ... the above ... u32 raw_len, u8 engine, u8 level,
+ *             u8 mem_level, u8 strategy, i8 window_bits, u8 pad[2]
+ *
+ * kind 0 = RECIPE (src_off into the recipe blob), 1 = MEMBER (src_off within
+ * member idx), 2 = REPRO (as above; src_off/raw_len locate the raw cluster).
+ * A recipe with no regenerable cluster still emits v1, so Q2R1/Q2R2 volumes
+ * and the legacy `map <image>` path keep the exact old bytes on disk.
+ */
+
+#define MAP_V1_MAGIC "MRMP"
+#define MAP_V2_MAGIC "MRM2"
+#define MAP_V1_ENT   29u
+#define MAP_V2_ENT   40u
+#define QCOW2_DECOMP_GEN 2u   /* must match generation = in the manifest */
+
+typedef struct {
+    uint64_t off;
+    uint64_t len;
+    uint64_t src_off;
+    uint32_t idx;
+    uint32_t raw_len;
+    uint8_t  kind;         /* 0 RECIPE, 1 MEMBER, 2 REPRO */
+    uint8_t  engine, level, mem, strategy;
+    int8_t   window_bits;
+} map_ent_tmp;
+
+/*
+ * One pass over the extents, collecting the map entries. With cap == 0 it
+ * only counts (out may be NULL), so the count and the fill can never drift.
+ * Uncompressed clusters coalesce into MEMBER runs when they are consecutive
+ * in both the file and the member stream (a sequential qemu-img convert gets
+ * a handful of entries; a scrambled layout costs up to 2*n_ext+1, which the
+ * parse-time MAP_MAX_ENTS cap bounds).
+ */
+static int qc_map_iterate(const qc_recipe *r, map_ent_tmp *out, size_t cap,
+                          size_t *n_out, int v2)
 {
-    qc_img v;
-    uint8_t *ent = NULL;
-    uint64_t pos = 0, recipe_off, n_ents = 0;
+    uint64_t cs = 1ull << r->cluster_bits;
+    uint64_t pos = 0, recipe_off = QR_HDR_LEN + (uint64_t)r->n_ext * r->ent_sz;
+    size_t n = 0;
     uint32_t i;
-    int rc = 3;
-    uint8_t hdr[8];
 
-    if (!out_buf || out_cap < 8 || !out_len) return 3;
-    if (qc_parse(in_path, &v) != 0) return 3;
+    for (i = 0; i < r->n_ext; i++) {
+        const qc_ext *e = &r->ext[i];
+        uint64_t elen = e->csize ? (uint64_t)e->csize : cs;
+        uint64_t mem_off = (uint64_t)e->rank * cs;
+        int regen = v2 && e->csize && e->repro != QR3_VERBATIM;
 
-    /* count the exact entry number first (the parse already capped it) */
-    i = 0;
-    while (i < v.n_alloc) {
-        uint64_t run_off = v.fext[i].off;
-        uint64_t run_len = v.fext[i].csize ? (uint64_t)v.fext[i].csize : v.cs;
-        uint64_t run_mem = (uint64_t)v.fext[i].rank * v.cs;
-        int is_comp = (v.fext[i].csize != 0);
-        i++;
-        while (i < v.n_alloc && !is_comp && !v.fext[i].csize &&
-               v.fext[i].off == run_off + run_len &&
-               (uint64_t)v.fext[i].rank * v.cs == run_mem + run_len) {
-            run_len += v.cs;
-            i++;
+        if (e->off > pos) {                    /* RECIPE gap before the extent */
+            if (out && n >= cap) return -1;
+            if (out) {
+                map_ent_tmp *t = &out[n];
+                memset(t, 0, sizeof *t);
+                t->off = pos;
+                t->len = e->off - pos;
+                t->kind = 0;
+                t->src_off = recipe_off;
+            }
+            n++;
+            recipe_off += e->off - pos;
         }
-        if (run_off > pos) n_ents++;
-        n_ents++;
-        pos = run_off + run_len;
-    }
-    if (pos < v.file_size) n_ents++;
 
-    size_t total_needed = 8 + (size_t)n_ents * 29;
-    if (out_cap < total_needed) {
+        if (e->csize) {                        /* a compressed cluster: alone */
+            if (out && n >= cap) return -1;
+            if (out) {
+                map_ent_tmp *t = &out[n];
+                memset(t, 0, sizeof *t);
+                t->off = e->off;
+                t->len = elen;
+                if (regen) {
+                    t->kind = 2;
+                    t->idx = RANK_IDX;
+                    t->src_off = mem_off;
+                    t->raw_len = (uint32_t)cs;
+                    t->engine = (uint8_t)qr3_engine(e->repro);
+                    t->level = e->level;
+                    t->mem = e->mem;
+                    t->strategy = e->strat;
+                    t->window_bits = (int8_t)-12;
+                } else {
+                    t->kind = 0;               /* verbatim: recipe gap */
+                    t->src_off = recipe_off;
+                }
+            }
+            if (!regen) recipe_off += elen;
+            n++;
+        } else {                               /* uncompressed: coalesce runs */
+            uint64_t run_len = cs;
+            uint32_t j = i + 1;
+            while (j < r->n_ext && !r->ext[j].csize &&
+                   r->ext[j].off == e->off + run_len &&
+                   (uint64_t)r->ext[j].rank * cs == mem_off + run_len) {
+                run_len += cs;
+                j++;
+            }
+            if (out && n >= cap) return -1;
+            if (out) {
+                map_ent_tmp *t = &out[n];
+                memset(t, 0, sizeof *t);
+                t->off = e->off;
+                t->len = run_len;
+                t->kind = 1;
+                t->idx = RANK_IDX;
+                t->src_off = mem_off;
+            }
+            n++;
+            pos = e->off + run_len;
+            i = j - 1;
+            continue;
+        }
+        pos = e->off + elen;
+    }
+
+    if (r->file_size > pos) {                  /* trailing RECIPE gap */
+        if (out && n >= cap) return -1;
+        if (out) {
+            map_ent_tmp *t = &out[n];
+            memset(t, 0, sizeof *t);
+            t->off = pos;
+            t->len = r->file_size - pos;
+            t->kind = 0;
+            t->src_off = recipe_off;
+        }
+        n++;
+    }
+    *n_out = n;
+    return 0;
+}
+
+/*
+ * Load the map source view: the RECIPE when the caller handed us one (the
+ * manifest asks for {recipe}, so Q2R3 clusters are mappable at all), else the
+ * original image re-parsed into the Q2R2 shape.
+ */
+static int qc_map_load(const char *path, qc_recipe *r)
+{
+    uint8_t magic[4];
+
+    if (!path) return -1;
+    {
+        int fd = open(path, O_RDONLY);
+        if (fd < 0) return -1;
+        if (pread_full(fd, magic, 4, 0) != 0) { close(fd); return -1; }
+        close(fd);
+    }
+    if (memcmp(magic, QR_MAGIC, 4) == 0 || memcmp(magic, QR2_MAGIC, 4) == 0 ||
+        memcmp(magic, QR3_MAGIC, 4) == 0)
+        return qc_recipe_parse(path, r);
+    {
+        qc_img v;
+        int rc = qc_parse(path, &v);
+        if (rc != 0) return rc;
+        rc = qc_recipe_from_img(&v, r);
         qc_free(&v);
-        return 3; /* buffer too small */
+        return rc;
     }
+}
 
-    ent = (uint8_t *)malloc((size_t)n_ents * 29);
-    if (!ent) { qc_free(&v); return 3; }
+/* Render the map for `r` into a malloc'd buffer (caller frees). */
+static int qc_map_render(const qc_recipe *r, uint8_t **out, size_t *out_len)
+{
+    map_ent_tmp *ents = NULL;
+    size_t n = 0, i, ent_wire;
+    uint8_t *buf = NULL;
+    /* v2 whenever the recipe is the source: decomp_gen must be recorded even
+     * for a container with nothing to regenerate, or the sweep would consider
+     * it stale forever and re-decompose it on every run. */
+    int v2 = r->from_recipe, rc = -1;
 
-    pos = 0;
-    n_ents = 0;
-    recipe_off = QR_HDR_LEN + (uint64_t)v.n_alloc * QR2_ENT_LEN;
-    i = 0;
-    while (i < v.n_alloc) {
-        uint64_t run_off = v.fext[i].off;
-        uint64_t run_len = v.fext[i].csize ? (uint64_t)v.fext[i].csize : v.cs;
-        uint64_t run_mem = (uint64_t)v.fext[i].rank * v.cs;
-        uint8_t *p;
-        int is_comp = (v.fext[i].csize != 0);
-        i++;
-        while (i < v.n_alloc && !is_comp && !v.fext[i].csize &&
-               v.fext[i].off == run_off + run_len &&
-               (uint64_t)v.fext[i].rank * v.cs == run_mem + run_len) {
-            run_len += v.cs;
-            i++;
+    if (qc_map_iterate(r, NULL, 0, &n, v2) != 0 || !n) return -1;
+    ent_wire = v2 ? MAP_V2_ENT : MAP_V1_ENT;
+    ents = (map_ent_tmp *)malloc(n * sizeof *ents);
+    buf = (uint8_t *)malloc((v2 ? 12u : 8u) + n * ent_wire);
+    if (!ents || !buf) goto out;
+    if (qc_map_iterate(r, ents, n, &n, v2) != 0) goto out;
+
+    memcpy(buf, v2 ? MAP_V2_MAGIC : MAP_V1_MAGIC, 4);
+    put32le(buf + 4, (uint32_t)n);
+    /* only a Q2R3 recipe is a CURRENT decomposition; an older recipe keeps
+     * gen 0 so the sweep still sees it as stale and re-derives it */
+    if (v2) put32le(buf + 8, r->ver == 3 ? QCOW2_DECOMP_GEN : 0);
+    for (i = 0; i < n; i++) {
+        uint8_t *p = buf + (v2 ? 12u : 8u) + i * ent_wire;
+        const map_ent_tmp *t = &ents[i];
+        memset(p, 0, ent_wire);
+        put64le(p, t->off);
+        put64le(p + 8, t->len);
+        p[16] = t->kind;
+        put32le(p + 17, t->idx);
+        put64le(p + 21, t->src_off);
+        if (v2) {
+            put32le(p + 29, t->raw_len);
+            p[33] = t->engine;
+            p[34] = t->level;
+            p[35] = t->mem;
+            p[36] = t->strategy;
+            p[37] = (uint8_t)t->window_bits;
         }
-        if (run_off > pos) {                    /* RECIPE gap */
-            p = ent + (size_t)n_ents * 29;
-            put64le(p, pos);
-            put64le(p + 8, run_off - pos);
-            p[16] = 0;                          /* kind RECIPE */
-            put32le(p + 17, 0);
-            put64le(p + 21, recipe_off);
-            recipe_off += run_off - pos;
-            n_ents++;
-        }
-        p = ent + (size_t)n_ents * 29;
-        put64le(p, run_off);
-        put64le(p + 8, run_len);
-        if (is_comp) {
-            p[16] = 0;
-            put32le(p + 17, 0);
-            put64le(p + 21, recipe_off);
-            recipe_off += run_len;
-        } else {
-            p[16] = 1;
-            put32le(p + 17, MEMBER_IDX);
-            put64le(p + 21, run_mem);
-        }
-        n_ents++;
-        pos = run_off + run_len;
     }
-    if (v.file_size > pos) {                    /* trailing RECIPE gap */
-        uint8_t *p = ent + (size_t)n_ents * 29;
-        put64le(p, pos);
-        put64le(p + 8, v.file_size - pos);
-        p[16] = 0;
-        put32le(p + 17, 0);
-        put64le(p + 21, recipe_off);
-        n_ents++;
-    }
-
-    memcpy(hdr, "MRMP", 4);
-    put32le(hdr + 4, (uint32_t)n_ents);
-    memcpy(out_buf, hdr, 8);
-    memcpy(out_buf + 8, ent, (size_t)n_ents * 29);
-    *out_len = total_needed;
+    *out = buf;
+    *out_len = (v2 ? 12u : 8u) + n * ent_wire;
+    buf = NULL;
     rc = 0;
-
-    free(ent);
-    qc_free(&v);
+out:
+    free(ents);
+    free(buf);
     return rc;
+}
+
+int cmd_map_mem(const char *in_path, uint8_t *out_buf, size_t out_cap,
+                size_t *out_len)
+{
+    qc_recipe r;
+    uint8_t *buf = NULL;
+    size_t len = 0;
+    int rc;
+
+    if (!out_buf || !out_len) return 3;
+    if (qc_map_load(in_path, &r) != 0) return 3;
+    rc = qc_map_render(&r, &buf, &len);
+    qc_recipe_free(&r);
+    if (rc != 0) return 3;
+    if (out_cap < len) { free(buf); return 3; }   /* buffer too small */
+    memcpy(out_buf, buf, len);
+    *out_len = len;
+    free(buf);
+    return 0;
 }
 
 static int cmd_map(const char *in, const char *out)
 {
-    qc_img v;
-    uint8_t *ent = NULL;
-    uint64_t pos = 0, recipe_off, n_ents = 0;
-    uint32_t i;
+    qc_recipe r;
+    uint8_t *buf = NULL;
+    size_t len = 0;
     int fd_out = -1, rc = 3;
-    uint8_t hdr[8];
 
-    if (qc_parse(in, &v) != 0) return 3;
-    /* count the exact entry number first (the parse already capped it) */
-    i = 0;
-    while (i < v.n_alloc) {
-        uint64_t run_off = v.fext[i].off;
-        uint64_t run_len = v.fext[i].csize ? (uint64_t)v.fext[i].csize : v.cs;
-        uint64_t run_mem = (uint64_t)v.fext[i].rank * v.cs;
-        int is_comp = (v.fext[i].csize != 0);
-        i++;
-        while (i < v.n_alloc && !is_comp && !v.fext[i].csize &&
-               v.fext[i].off == run_off + run_len &&
-               (uint64_t)v.fext[i].rank * v.cs == run_mem + run_len) {
-            run_len += v.cs;
-            i++;
-        }
-        if (run_off > pos) n_ents++;
-        n_ents++;
-        pos = run_off + run_len;
-    }
-    if (pos < v.file_size) n_ents++;
-    ent = (uint8_t *)malloc((size_t)n_ents * 29);
-    if (!ent) goto out_free;
-
-    pos = 0;
-    n_ents = 0;
-    recipe_off = QR_HDR_LEN + (uint64_t)v.n_alloc * QR2_ENT_LEN;
-    i = 0;
-    while (i < v.n_alloc) {
-        uint64_t run_off = v.fext[i].off;
-        uint64_t run_len = v.fext[i].csize ? (uint64_t)v.fext[i].csize : v.cs;
-        uint64_t run_mem = (uint64_t)v.fext[i].rank * v.cs;
-        uint8_t *p;
-        int is_comp = (v.fext[i].csize != 0);
-        i++;
-        while (i < v.n_alloc && !is_comp && !v.fext[i].csize &&
-               v.fext[i].off == run_off + run_len &&
-               (uint64_t)v.fext[i].rank * v.cs == run_mem + run_len) {
-            run_len += v.cs;
-            i++;
-        }
-        if (run_off > pos) {                    /* RECIPE gap */
-            p = ent + (size_t)n_ents * 29;
-            put64le(p, pos);
-            put64le(p + 8, run_off - pos);
-            p[16] = 0;                          /* kind RECIPE */
-            put32le(p + 17, 0);
-            put64le(p + 21, recipe_off);
-            recipe_off += run_off - pos;
-            n_ents++;
-        }
-        p = ent + (size_t)n_ents * 29;
-        put64le(p, run_off);
-        put64le(p + 8, run_len);
-        if (is_comp) {
-            /* Compressed cluster: raw bytes ride in RECIPE gap for seekable read */
-            p[16] = 0;                          /* kind RECIPE */
-            put32le(p + 17, 0);
-            put64le(p + 21, recipe_off);
-            recipe_off += run_len;
-        } else {
-            /* Uncompressed cluster: member stream */
-            p[16] = 1;                          /* kind MEMBER */
-            put32le(p + 17, MEMBER_IDX);
-            put64le(p + 21, run_mem);
-        }
-        n_ents++;
-        pos = run_off + run_len;
-    }
-    if (v.file_size > pos) {                    /* trailing RECIPE gap */
-        uint8_t *p = ent + (size_t)n_ents * 29;
-        put64le(p, pos);
-        put64le(p + 8, v.file_size - pos);
-        p[16] = 0;
-        put32le(p + 17, 0);
-        put64le(p + 21, recipe_off);
-        n_ents++;
-    }
+    if (qc_map_load(in, &r) != 0) return 3;
+    if (qc_map_render(&r, &buf, &len) != 0) { qc_recipe_free(&r); return 3; }
+    qc_recipe_free(&r);
     fd_out = open_out(out);
-    if (fd_out < 0) { free(ent); qc_free(&v); return 3; }
-    memcpy(hdr, "MRMP", 4);
-    put32le(hdr + 4, (uint32_t)n_ents);
-    if (write_full(fd_out, hdr, 8) != 0 ||
-        write_full(fd_out, ent, (size_t)n_ents * 29) != 0) {
-        close(fd_out);
-        free(ent);
-        qc_free(&v);
-        return 3;
-    }
-    rc = (close(fd_out) == 0) ? 0 : 3;
-    free(ent);
-    qc_free(&v);
+    if (fd_out < 0) { free(buf); return 3; }
+    rc = 0;
+    if (write_full(fd_out, buf, len) != 0) rc = 3;
+    if (close(fd_out) != 0) rc = 3;
+    free(buf);
     return rc;
-out_free:
-    free(ent);
-    qc_free(&v);
-    return 3;
 }
 
 /* ---- rebuild ------------------------------------------------------------ */
@@ -956,19 +1286,24 @@ static int cmd_rebuild(const char *recipe, const char *dir, const char *out)
 {
     struct stat rst, mst;
     uint8_t hdr[QR_HDR_LEN];
-    uint8_t *tab = NULL, *chk = NULL, *buf = NULL;
+    uint8_t *tab = NULL, *chk = NULL, *buf = NULL, *raw = NULL;
     uint64_t file_size, member_size, cs, gap_off, pos = 0;
     uint32_t n_ext, cluster_bits, i;
     char mpath[4096];
     int fd_r = -1, fd_m = -1, fd_out = -1, rc = 3;
-    int is_q2r2 = 0;
+    int is_q2r2 = 0, is_q2r3 = 0;
     size_t ent_sz;
 
     if (stat(recipe, &rst) != 0) return 3;
-    if (snprintf(mpath, sizeof mpath, "%s/%u", dir, MEMBER_IDX) >=
+    if (snprintf(mpath, sizeof mpath, "%s/%u", dir, RANK_IDX) >=
         (int)sizeof mpath)
         return 3;
-    if (stat(mpath, &mst) != 0) return 3;
+    if (stat(mpath, &mst) != 0) {
+        if (snprintf(mpath, sizeof mpath, "%s/%u", dir, MEMBER_IDX) >=
+            (int)sizeof mpath)
+            return 3;
+        if (stat(mpath, &mst) != 0) return 3;
+    }
     if ((uint64_t)rst.st_size < QR_HDR_LEN) return 3;
     fd_r = open(recipe, O_RDONLY);
     if (fd_r < 0) return 3;
@@ -979,6 +1314,10 @@ static int cmd_rebuild(const char *recipe, const char *dir, const char *out)
     } else if (memcmp(hdr, QR2_MAGIC, 4) == 0) {
         is_q2r2 = 1;
         ent_sz = QR2_ENT_LEN;
+    } else if (memcmp(hdr, QR3_MAGIC, 4) == 0) {
+        is_q2r2 = 1;
+        is_q2r3 = 1;
+        ent_sz = QR3_ENT_LEN;
     } else {
         goto out;
     }
@@ -998,27 +1337,42 @@ static int cmd_rebuild(const char *recipe, const char *dir, const char *out)
     tab = (uint8_t *)malloc((size_t)n_ext * ent_sz);
     chk = (uint8_t *)malloc((size_t)n_ext * 8);
     buf = (uint8_t *)malloc(COPY_CAP);
-    if (!tab || !chk || !buf) goto out;
+    raw = (uint8_t *)malloc((size_t)cs);
+    if (!tab || !chk || !buf || !raw) goto out;
     if (pread_full(fd_r, tab, (size_t)n_ext * ent_sz, QR_HDR_LEN) != 0)
         goto out;
 
-    uint64_t uncomp_extent_bytes = 0;
+    uint64_t uncomp_extent_bytes = 0, regen_extent_bytes = 0;
     for (i = 0; i < n_ext; i++) {
-        uint64_t foff = get64le(tab + (size_t)i * ent_sz);
-        uint64_t moff = get64le(tab + (size_t)i * ent_sz + 8);
-        uint32_t csize = is_q2r2 ? get32le(tab + (size_t)i * ent_sz + 16) : 0;
+        const uint8_t *p = tab + (size_t)i * ent_sz;
+        uint64_t foff = get64le(p);
+        uint64_t moff = get64le(p + 8);
+        uint32_t csize = is_q2r2 ? get32le(p + 16) : 0;
         uint64_t elen = csize ? (uint64_t)csize : cs;
         if (foff > file_size || elen > file_size - foff) goto out;
         if (i && foff < get64le(tab + (size_t)(i - 1) * ent_sz))
             goto out;
         if (moff % cs != 0 || moff >= member_size) goto out;
         put64le(chk + (size_t)i * 8, moff);
-        if (!csize)
+        if (!csize) {
             uncomp_extent_bytes += cs;
+        } else if (is_q2r3 && p[20] != QR3_VERBATIM) {
+            /* regenerable: the stream is NOT in the recipe gap */
+            if (qr3_engine(p[20]) < 0) goto out;
+            if (!p[21] || p[21] > 9 || !p[22] || p[22] > 9 || p[23] > 4)
+                goto out;
+            regen_extent_bytes += elen;
+        }
     }
-    if ((uint64_t)rst.st_size !=
-        QR_HDR_LEN + (uint64_t)n_ext * ent_sz + (file_size - uncomp_extent_bytes))
-        goto out;
+    {
+        /* the recipe holds every image byte that is neither an uncompressed
+         * member cluster nor a regenerable compressed one */
+        uint64_t held = uncomp_extent_bytes + regen_extent_bytes;
+        if (file_size < held) goto out;
+        if ((uint64_t)rst.st_size !=
+            QR_HDR_LEN + (uint64_t)n_ext * ent_sz + (file_size - held))
+            goto out;
+    }
 
     /* permutation check */
     qsort(chk, n_ext, 8, u64_cmp);
@@ -1030,10 +1384,12 @@ static int cmd_rebuild(const char *recipe, const char *dir, const char *out)
     if (fd_m < 0 || fd_out < 0) goto out;
     gap_off = QR_HDR_LEN + (uint64_t)n_ext * ent_sz;
     for (i = 0; i < n_ext; i++) {
-        uint64_t foff = get64le(tab + (size_t)i * ent_sz);
-        uint64_t moff = get64le(tab + (size_t)i * ent_sz + 8);
-        uint32_t csize = is_q2r2 ? get32le(tab + (size_t)i * ent_sz + 16) : 0;
+        const uint8_t *tp = tab + (size_t)i * ent_sz;
+        uint64_t foff = get64le(tp);
+        uint64_t moff = get64le(tp + 8);
+        uint32_t csize = is_q2r2 ? get32le(tp + 16) : 0;
         uint64_t elen = csize ? (uint64_t)csize : cs;
+        int regen = is_q2r3 && csize && tp[20] != QR3_VERBATIM;
         if (foff > pos) {                /* gap: from the recipe */
             if (copy_range(fd_r, fd_out, gap_off, foff - pos, buf) != 0) {
                 fprintf(stderr, "qcow2: rebuild copy gap failed\n");
@@ -1041,7 +1397,42 @@ static int cmd_rebuild(const char *recipe, const char *dir, const char *out)
             }
             gap_off += foff - pos;
         }
-        if (csize) {
+        if (regen) {
+            /* Q2R3: re-encode the raw cluster from the member and emit the
+             * stream. The parameters were proven bit-exact at strip time;
+             * a length mismatch here means the recipe lied, so fail loudly
+             * rather than write a wrong image. */
+            uint8_t *enc = NULL;
+            size_t enc_len = 0;
+            invfs_deflate_params dp;
+            memset(&dp, 0, sizeof dp);
+            dp.engine = (uint8_t)qr3_engine(tp[20]);
+            dp.level = (int8_t)tp[21];
+            dp.mem_level = (int8_t)tp[22];
+            dp.strategy = (int8_t)tp[23];
+            dp.window_bits = -12;
+            if (pread_full(fd_m, raw, (size_t)cs, moff) != 0) {
+                fprintf(stderr, "qcow2: rebuild read member cluster failed\n");
+                goto out;
+            }
+            if (invfs_deflate_repro_encode(raw, (size_t)cs, &dp,
+                                           &enc, &enc_len) != 0 || !enc) {
+                fprintf(stderr, "qcow2: rebuild re-encode failed\n");
+                goto out;
+            }
+            if (enc_len != (size_t)elen) {
+                free(enc);
+                fprintf(stderr, "qcow2: rebuild regen len %zu != %llu\n",
+                        enc_len, (unsigned long long)elen);
+                goto out;
+            }
+            if (write_full(fd_out, enc, enc_len) != 0) {
+                free(enc);
+                fprintf(stderr, "qcow2: rebuild write regen failed\n");
+                goto out;
+            }
+            free(enc);
+        } else if (csize) {
             /* compressed cluster: verbatim from recipe gap */
             if (copy_range(fd_r, fd_out, gap_off, elen, buf) != 0) {
                 fprintf(stderr, "qcow2: rebuild copy comp cluster failed\n");
@@ -1070,6 +1461,7 @@ out:
     free(tab);
     free(chk);
     free(buf);
+    free(raw);
     return rc;
 }
 
@@ -1080,7 +1472,7 @@ static int cmd_estimate(const char *in)
     qc_img v;
 
     if (qc_parse(in, &v) != 0) return 3;
-    printf("%llu\n", (unsigned long long)(v.member_size + EST_MARGIN));
+    printf("%llu\n", (unsigned long long)(v.virtual_size + v.member_size + EST_MARGIN));
     qc_free(&v);
     return 0;
 }
@@ -1091,7 +1483,7 @@ static int cmd_estimate(const char *in)
  * intact inside a long-lived worker, and routes the estimate through the same
  * stdout the CLI prints. Shared with the other containerpacks: see
  * src/include/ivpack_impl.h. */
-IVPACK_DEFINE_DESC(s_qcow2_desc, "qcow2", "1.1.0")
+IVPACK_DEFINE_DESC(s_qcow2_desc, "qcow2", "1.2.0")
 
 static int qcow2_iv_call_enumerate(const ivpack_container_args *a)
 { return (int)cmd_enumerate(a->in_path, a->out_path); }
@@ -1103,9 +1495,13 @@ static int qcow2_iv_call_rebuild(const ivpack_container_args *a)
 { return (int)cmd_rebuild(a->recipe_path, a->mbr_dir, a->out_path); }
 static int qcow2_iv_call_map(const ivpack_container_args *a)
 {
+    /* the manifest asks for {recipe}: the recipe carries the Q2R3
+     * reproduction parameters, so mapping from the image (which no longer
+     * knows them) is only the legacy fallback. */
+    const char *src = a->recipe_path ? a->recipe_path : a->in_path;
     if (a->out_buf && a->out_cap > 0 && a->out_len)
-        return (int)cmd_map_mem(a->in_path ? a->in_path : a->recipe_path, a->out_buf, a->out_cap, a->out_len);
-    return (int)cmd_map(a->in_path ? a->in_path : a->recipe_path, a->out_path);
+        return (int)cmd_map_mem(src, a->out_buf, a->out_cap, a->out_len);
+    return (int)cmd_map(src, a->out_path);
 }
 
 IVPACK_DEFINE_CONTAINER_CMD(qcow2, IVPACK_GLUE_NONE())

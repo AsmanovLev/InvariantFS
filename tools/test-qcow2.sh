@@ -30,7 +30,7 @@
 #   memcmp + an MRMP partition re-verification in python) runs on every
 #   fixture BEFORE the FS legs (the pack is its own first arbiter), plus a
 #   30-layout fuzz-lite. FS legs: mkfs -> cp -> invf-sweep with
-#   INVFS_CODECPACKS=$WORK/packs (a symlink dir holding qcow2 + rawdisk —
+#   INVFS_CODECPACKS=$WORK/packs (a private copy dir holding qcow2 + rawdisk —
 #   the repo's shared pack dir is full at INVFS_PACK_MAX=8, so the shared
 #   dir is NOT used here; deterministic registration) -> CONTAINER{22,1}
 #   stamps -> verify --deep -> sha256 bit-exact (containers AND direct
@@ -56,9 +56,10 @@ WORK=/dev/shm/wp16qcow2
 trap 'rm -rf "$WORK" /dev/shm/wp16qcow2*.img' EXIT
 IMG=wp16qcow2.img
 IMGMEM=wp16qcow2-mem.img
+IMGMIG=wp16qcow2-mig.img
 rm -rf "$WORK" && mkdir -p "$WORK/orig" "$WORK/out" "$WORK/nopacks" "$WORK/bin" "$WORK/packs"
 cd /dev/shm
-rm -f "$IMG" "$IMGMEM"
+rm -f "$IMG" "$IMGMEM" "$IMGMIG"
 
 echo "== tools =="
 command -v cc >/dev/null || { echo "FAIL: cc not installed"; exit 1; }
@@ -68,20 +69,32 @@ command -v qemu-io >/dev/null || { echo "FAIL: qemu-io not installed"; exit 1; }
 echo "  qemu-img: $(qemu-img --version | head -1)"
 
 echo "== build the pack (the -Wall -Wextra -Werror gate) =="
-mkdir -p "$PACK/bin"
-WARN=$(cc -std=c11 -O2 -Wall -Wextra -Werror -I"$REPO/src/codecs" -o "$PACK/bin/qcow2" "$PACK/qcow2.c" "$REPO/src/codecs/deflate_repro.c" -lz 2>&1) \
-    || { echo "FAIL: pack build failed"; echo "$WARN"; exit 1; }
+mkdir -p "$PACK/bin" "$WORK/pack-build"
+OBJ="$REPO/build/obj"
+STOCK_OBJS=("$OBJ"/zlib_stock_*.o)
+for f in "$OBJ/deflate_repro.o" "$OBJ/deflate_backend_system.o" \
+         "$OBJ/deflate_backend_stock.o" "${STOCK_OBJS[0]}"; do
+    [ -f "$f" ] || { echo "FAIL: run make first (missing $f)"; exit 1; }
+done
+WARN=$( {
+    cc -std=c11 -O2 -Wall -Wextra -Werror -I"$REPO/src/codecs" \
+       -I"$REPO/src/zlib" -DZ_PREFIX -c "$PACK/qcow2.c" \
+       -o "$WORK/pack-build/qcow2.o" &&
+    cc -o "$PACK/bin/qcow2" "$WORK/pack-build/qcow2.o" \
+       "$OBJ/deflate_repro.o" "$OBJ/deflate_backend_system.o" \
+       "$OBJ/deflate_backend_stock.o" "${STOCK_OBJS[@]}" -lz -ldl
+} 2>&1 ) || { echo "FAIL: pack build failed"; echo "$WARN"; exit 1; }
 [ -z "$WARN" ] || { echo "FAIL: pack build not warning-clean:"; echo "$WARN"; exit 1; }
-echo "  bin/qcow2 built, -Wall -Wextra -Werror clean"
+echo "  bin/qcow2 built, -Wall -Wextra -Werror clean (stock/system zlib backends)"
 
-echo "== pack dir: symlinks (the shared dir is full at INVFS_PACK_MAX=8) =="
-ln -s "$PACK" "$WORK/packs/qcow2.codecpack"
+echo "== pack dir: private copies (the shared dir is full at INVFS_PACK_MAX=8) =="
+cp -a "$PACK" "$WORK/packs/qcow2.codecpack"
 RAWDISK=$REPO/tools/codecpacks/rawdisk.codecpack
 if [ -f "$RAWDISK/manifest" ]; then
-    ln -s "$RAWDISK" "$WORK/packs/rawdisk.codecpack"
-    echo "  qcow2 + rawdisk linked into \$WORK/packs"
+    cp -a "$RAWDISK" "$WORK/packs/rawdisk.codecpack"
+    echo "  qcow2 + rawdisk copied into \$WORK/packs"
 else
-    echo "  qcow2 linked into \$WORK/packs (no rawdisk pack — nested leg will skip)"
+    echo "  qcow2 copied into \$WORK/packs (no rawdisk pack — nested leg will skip)"
 fi
 export INVFS_CODECPACKS=$WORK/packs   # the sweep AND the reads
 
@@ -499,22 +512,23 @@ for f in diska diskb disks diskv2 qgen qzero; do
     rm -rf "$WORK/pk" && mkdir -p "$WORK/pk/mbr"
     "$Q" enumerate "$WORK/orig/$f.qcow2" "$WORK/pk/table" \
         || { echo "FAIL: enumerate $f"; ok=0; continue; }
-    [ "$(cat "$WORK/pk/table")" = "1	diskimg	$(stat -c%s "$WORK/orig/member-${f:4}.ref" 2>/dev/null || stat -c%s "$WORK/orig/member-$f.ref")" ] \
-        || { echo "FAIL: $f table: $(cat "$WORK/pk/table")"; ok=0; }
-    "$Q" extract "$WORK/orig/$f.qcow2" 1 "$WORK/pk/mbr/1" \
-        || { echo "FAIL: extract $f"; ok=0; }
     REF="$WORK/orig/member-${f:4}.ref"; [ -f "$REF" ] || REF="$WORK/orig/member-$f.ref"
-    cmp -s "$REF" "$WORK/pk/mbr/1" \
-        || { echo "FAIL: $f member stream mismatch"; ok=0; }
+    grep -q "^1	diskimg	" "$WORK/pk/table" || { echo "FAIL: $f missing idx 1 diskimg"; ok=0; }
+    grep -q "^2	rankimg	" "$WORK/pk/table" || { echo "FAIL: $f missing idx 2 rankimg"; ok=0; }
+    "$Q" extract "$WORK/orig/$f.qcow2" 2 "$WORK/pk/mbr/2" \
+        || { echo "FAIL: extract $f (rankimg)"; ok=0; }
+    cmp -s "$REF" "$WORK/pk/mbr/2" \
+        || { echo "FAIL: $f rankimg mismatch"; ok=0; }
+    "$Q" extract "$WORK/orig/$f.qcow2" 1 "$WORK/pk/mbr/1" \
+        || { echo "FAIL: extract $f (diskimg)"; ok=0; }
     "$Q" strip "$WORK/orig/$f.qcow2" "$WORK/pk/recipe" || { echo "FAIL: strip $f"; ok=0; }
-    "$Q" map "$WORK/orig/$f.qcow2" "$WORK/pk/map" || { echo "FAIL: map $f"; ok=0; }
+    "$Q" map "$WORK/pk/recipe" "$WORK/pk/map" || { echo "FAIL: map $f"; ok=0; }
     "$Q" rebuild "$WORK/pk/recipe" "$WORK/pk/mbr" "$WORK/pk/out" \
         || { echo "FAIL: rebuild $f"; ok=0; }
     cmp -s "$WORK/orig/$f.qcow2" "$WORK/pk/out" \
         || { echo "FAIL: $f rebuild not bit-exact"; ok=0; }
     "$Q" estimate "$WORK/orig/$f.qcow2" >/dev/null || { echo "FAIL: estimate $f"; ok=0; }
-    # MRMP partition re-verification against the recipe + member
-    python3 - "$WORK/orig/$f.qcow2" "$WORK/pk/map" "$WORK/pk/recipe" "$WORK/pk/mbr/1" <<'PY' \
+    python3 - "$WORK/orig/$f.qcow2" "$WORK/pk/map" "$WORK/pk/recipe" "$WORK/pk/mbr/2" <<'PY' \
         || { echo "FAIL: $f map does not partition/verify"; ok=0; }
 import struct
 import sys
@@ -522,24 +536,62 @@ img = open(sys.argv[1], "rb").read()
 mp = open(sys.argv[2], "rb").read()
 recipe = open(sys.argv[3], "rb").read()
 member = open(sys.argv[4], "rb").read()
-assert mp[:4] == b"MRMP"
+# the map is rendered from the RECIPE (self-describing), so the recipe's own
+# table cross-checks every entry: MRMP = v1 (29 B), MRM2 = v2 (40 B, kind 2)
+assert mp[:4] in (b"MRMP", b"MRM2")
+v2 = mp[:4] == b"MRM2"
+ent = 40 if v2 else 29
+base = 12 if v2 else 8
 n = struct.unpack("<I", mp[4:8])[0]
-assert len(mp) == 8 + n * 29
+assert len(mp) == base + n * ent
+rmagic, rn, rfile, rmem, rbits = struct.unpack("<4sIQQI", recipe[:28])
+rent = 24 if rmagic == b"Q2R3" else (20 if rmagic == b"Q2R2" else 16)
+cs = 1 << rbits
+# the recipe's csize for every file offset, to cross-check REPRO entries
+comp = {}
+for i in range(rn):
+    p = recipe[32 + i * rent:32 + (i + 1) * rent]
+    foff, moff = struct.unpack("<QQ", p[:16])
+    csize = struct.unpack("<I", p[16:20])[0] if rent >= 20 else 0
+    repro = p[20] if rent >= 24 else 0
+    if csize:
+        comp[foff] = (csize, moff, repro)
+n_repro = 0
 pos = 0
 for i in range(n):
-    off, ln = struct.unpack("<QQ", mp[8 + i * 29:8 + i * 29 + 16])
-    kind = mp[8 + i * 29 + 16]
-    idx = struct.unpack("<I", mp[8 + i * 29 + 17:8 + i * 29 + 21])[0]
-    src = struct.unpack("<Q", mp[8 + i * 29 + 21:8 + i * 29 + 29])[0]
+    o = base + i * ent
+    off, ln = struct.unpack("<QQ", mp[o:o + 16])
+    kind = mp[o + 16]
+    idx = struct.unpack("<I", mp[o + 17:o + 21])[0]
+    src = struct.unpack("<Q", mp[o + 21:o + 29])[0]
     assert off == pos and ln > 0
     if kind == 0:
         assert idx == 0 and src + ln <= len(recipe)
         assert recipe[src:src + ln] == img[off:off + ln]
-    else:
-        assert idx == 1 and src + ln <= len(member)
+    elif kind == 1:
+        assert idx == 2 and src + ln <= len(member)
         assert member[src:src + ln] == img[off:off + ln]
+    else:
+        assert v2 and kind == 2
+        raw = struct.unpack("<I", mp[o + 29:o + 33])[0]
+        eng, lvl, mem, strat = mp[o + 33], mp[o + 34], mp[o + 35], mp[o + 36]
+        assert eng in (0, 2) and 1 <= lvl <= 9 and 1 <= mem <= 9
+        assert strat <= 4 and mp[o + 37] == 0xF4   # window_bits = -12
+        # the raw cluster lives in rankimg; the recipe table must agree that
+        # this exact file range is a regenerable compressed cluster
+        assert idx == 2 and src % cs == 0 and raw == cs
+        assert src + raw <= len(member)
+        csize, moff, repro = comp[off]
+        assert csize == ln and moff == src and repro != 0
+        n_repro += 1
     pos += ln
 assert pos == len(img)
+if rmagic == b"Q2R3":
+    n_regen = sum(1 for i in range(rn)
+                  if struct.unpack("<I", recipe[32 + i * 24 + 16:32 + i * 24 + 20])[0]
+                  and recipe[32 + i * 24 + 20] != 0)
+    assert n_repro == (n_regen if n_regen else 0)
+    assert (n_repro > 0) == (n_regen > 0)
 sys.exit(0)
 PY
     echo "  $f.qcow2: enumerate/extract/strip/map/rebuild/estimate OK, rebuild + map verified"
@@ -547,12 +599,26 @@ done
 # test compc roundtrip explicitly (compressed clusters supported in Q2R2)
 rm -rf "$WORK/pk" && mkdir -p "$WORK/pk/mbr"
 "$Q" enumerate "$WORK/orig/compc.qcow2" "$WORK/pk/table" || { echo "FAIL: enumerate compc"; ok=0; }
-"$Q" extract "$WORK/orig/compc.qcow2" 1 "$WORK/pk/mbr/1" || { echo "FAIL: extract compc"; ok=0; }
+"$Q" extract "$WORK/orig/compc.qcow2" 2 "$WORK/pk/mbr/2" || { echo "FAIL: extract compc (rankimg)"; ok=0; }
 "$Q" strip "$WORK/orig/compc.qcow2" "$WORK/pk/recipe" || { echo "FAIL: strip compc"; ok=0; }
-"$Q" map "$WORK/orig/compc.qcow2" "$WORK/pk/map" || { echo "FAIL: map compc"; ok=0; }
+"$Q" map "$WORK/pk/recipe" "$WORK/pk/map" || { echo "FAIL: map compc"; ok=0; }
 "$Q" rebuild "$WORK/pk/recipe" "$WORK/pk/mbr" "$WORK/pk/rebuilt.qcow2" || { echo "FAIL: rebuild compc"; ok=0; }
 cmp -s "$WORK/orig/compc.qcow2" "$WORK/pk/rebuilt.qcow2" || { echo "FAIL: compc rebuild mismatch"; ok=0; }
-echo "  compc.qcow2: compressed cluster round-trip verified bit-exact"
+# the Q2R3 whole point: a regenerable compressed cluster must NOT be in the
+# recipe, and the map must reference it as kind 2 (REPRO) instead
+python3 - "$WORK/pk/recipe" "$WORK/pk/map" <<'PY' || { echo "FAIL: compc Q2R3 regen"; ok=0; }
+import struct, sys
+recipe = open(sys.argv[1], "rb").read()
+mp = open(sys.argv[2], "rb").read()
+assert recipe[:4] == b"Q2R3", "strip did not write a Q2R3 recipe"
+assert mp[:4] == b"MRM2", "a recipe-sourced map must render v2"
+n = struct.unpack("<I", mp[4:8])[0]
+kinds = [mp[12 + i * 40 + 16] for i in range(n)]
+assert 2 in kinds, "no REPRO entry in the map"
+print("  compc.qcow2: Q2R3 regen map OK (%d entries, %d REPRO)"
+      % (n, kinds.count(2)))
+PY
+echo "  compc.qcow2: compressed cluster round-trip verified bit-exact (Q2R3 regen)"
 
 for f in badmagic backed snap extl2 enc cbits dupcl pasteof incompat rb32 empty; do
     if "$Q" enumerate "$WORK/orig/$f.qcow2" "$WORK/pk.table" 2>/dev/null; then
@@ -671,8 +737,8 @@ for t in $(seq -w 0 29); do
     f="$WORK/fuzz/fz$t.qcow2"
     rm -rf "$WORK/pk" && mkdir -p "$WORK/pk/mbr"
     "$Q" enumerate "$f" "$WORK/pk/table" >/dev/null 2>&1 \
-        && "$Q" extract "$f" 1 "$WORK/pk/mbr/1" \
-        && cmp -s "$WORK/fuzz/fz$t.member" "$WORK/pk/mbr/1" \
+        && "$Q" extract "$f" 2 "$WORK/pk/mbr/2" \
+        && cmp -s "$WORK/fuzz/fz$t.member" "$WORK/pk/mbr/2" \
         && "$Q" strip "$f" "$WORK/pk/recipe" \
         && "$Q" map "$f" "$WORK/pk/map" \
         && "$Q" rebuild "$WORK/pk/recipe" "$WORK/pk/mbr" "$WORK/pk/out" \
@@ -784,7 +850,7 @@ QS="diska.qcow2 diskb.qcow2 disks.qcow2 diskv2.qcow2 qgen.qcow2 qzero.qcow2 comp
 DECLINES="badmagic.qcow2 backed.qcow2 snap.qcow2 extl2.qcow2 enc.qcow2 cbits.qcow2 dupcl.qcow2 pasteof.qcow2 incompat.qcow2 rb32.qcow2 empty.qcow2"
 
 echo "== mkfs + import =="
-$B/invf-mkfs "$IMG" 0.2 >/dev/null
+$B/invf-mkfs "$IMG" 0.5 >/dev/null
 for f in $QS $DECLINES; do
     $B/invf-cp "$IMG" "$WORK/orig/$f" "$f" >/dev/null
 done
@@ -805,20 +871,22 @@ grep -E "codecpack" "$WORK/sweep1.log"
 echo "== member pipeline (members flow the normal pipeline in the same run) =="
 grep -E "qcow2!\*.*parts -> " "$WORK/sweep1.log" || true
 
-echo "== sibling set (member + table + map) =="
+echo "== sibling set (diskimg + rankimg + table + map) =="
 for f in $QS; do
     N=$($B/invf-ls "$IMG" | grep -c "$f!" || true)
     echo "  $f!* names: $N"
-    [ "$N" -eq 3 ] || { echo "FAIL: $f: want 3 (member + table + map)"; $B/invf-ls "$IMG"; exit 1; }
+    [ "$N" -eq 4 ] || { echo "FAIL: $f: want 4 (diskimg + rankimg + table + map)"; $B/invf-ls "$IMG"; exit 1; }
     $B/invf-ls "$IMG" | grep -q "$f!mbr0001-diskimg" \
-        || { echo "FAIL: $f: member sibling missing"; exit 1; }
+        || { echo "FAIL: $f: LBA diskimg sibling missing"; exit 1; }
+    $B/invf-ls "$IMG" | grep -q "$f!mbr0002-rankimg" \
+        || { echo "FAIL: $f: rankimg sibling missing"; exit 1; }
     $B/invf-ls "$IMG" | grep -q "$f!mbrt" || { echo "FAIL: $f: member table missing"; exit 1; }
     $B/invf-ls "$IMG" | grep -q "$f!mbrmap" || { echo "FAIL: $f: member map missing"; exit 1; }
 done
-$B/invf-ls "$IMG" | grep "diska\.qcow2!mbr0001-diskimg" | grep -q "524288 bytes" \
-    || { echo "FAIL: diska member not 8*64K"; $B/invf-ls "$IMG"; exit 1; }
-$B/invf-ls "$IMG" | grep "diskb\.qcow2!mbr0001-diskimg" | grep -q "4194304 bytes" \
-    || { echo "FAIL: diskb member not 4 MiB"; $B/invf-ls "$IMG"; exit 1; }
+$B/invf-ls "$IMG" | grep -q "diska\.qcow2!mbr0002-rankimg" \
+    || { echo "FAIL: diska rankimg missing"; $B/invf-ls "$IMG"; exit 1; }
+$B/invf-ls "$IMG" | grep -q "diskb\.qcow2!mbr0001-diskimg" \
+    || { echo "FAIL: diskb LBA diskimg missing"; $B/invf-ls "$IMG"; exit 1; }
 for f in $DECLINES; do
     if $B/invf-ls "$IMG" | grep -q "$f!"; then
         echo "FAIL: declined $f gained siblings"; $B/invf-ls "$IMG"; exit 1
@@ -830,7 +898,7 @@ echo "== class stamps =="
 for f in $QS; do
     C=$("$WORK/classof" "$IMG" "$f")
     echo "  $f: $C"
-    [ "$C" = "cls=3 algo=22 gen=1" ] || { echo "FAIL: $f: want CONTAINER{QCOW2=22,1}"; exit 1; }
+    [ "$C" = "cls=3 algo=22 gen=2" ] || { echo "FAIL: $f: want CONTAINER{QCOW2=22,2}"; exit 1; }
 done
 for f in $DECLINES; do
     C=$("$WORK/classof" "$IMG" "$f")
@@ -850,19 +918,25 @@ for f in $QS $DECLINES; do
     b=$(sha256sum "$WORK/out/$f" | cut -d' ' -f1)
     if [ "$a" != "$b" ]; then echo "MISMATCH $f"; ok=0; fi
 done
-# the members are real inodes: read them directly
 for f in diska diskb disks diskv2 qgen qzero; do
-    $B/invf-cat "$IMG" "$f.qcow2!mbr0001-diskimg" "$WORK/out/m.$f" >/dev/null
+    $B/invf-cat "$IMG" "$f.qcow2!mbr0002-rankimg" "$WORK/out/m.$f" >/dev/null
     REF="$WORK/orig/member-${f:4}.ref"; [ -f "$REF" ] || REF="$WORK/orig/member-$f.ref"
-    cmp -s "$REF" "$WORK/out/m.$f" || { echo "MISMATCH $f member"; ok=0; }
+    cmp -s "$REF" "$WORK/out/m.$f" || { echo "MISMATCH $f rankimg"; ok=0; }
+done
+for f in diska diskb disks diskv2 qgen qzero; do
+    $B/invf-cat "$IMG" "$f.qcow2!mbr0001-diskimg" "$WORK/out/d.$f" >/dev/null
+    [ -s "$WORK/out/d.$f" ] || { echo "MISMATCH $f empty diskimg"; ok=0; }
 done
 [ "$ok" = 1 ] || exit 1
 echo "containers and members bit-exact"
-# the member table rides verbatim as !mbrt
 $B/invf-cat "$IMG" "diska.qcow2!mbrt" "$WORK/out/mbrt-a" >/dev/null
-[ "$(cat "$WORK/out/mbrt-a")" = "1	diskimg	524288" ] \
-    || { echo "FAIL: mbrt content drifted: $(cat "$WORK/out/mbrt-a")"; exit 1; }
-echo "member table sibling verbatim"
+[ "$(wc -l < "$WORK/out/mbrt-a")" -eq 2 ] \
+    || { echo "FAIL: mbrt row count drifted: $(cat "$WORK/out/mbrt-a")"; exit 1; }
+grep -q "^1	diskimg	" "$WORK/out/mbrt-a" \
+    || { echo "FAIL: mbrt missing diskimg: $(cat "$WORK/out/mbrt-a")"; exit 1; }
+grep -q "^2	rankimg	" "$WORK/out/mbrt-a" \
+    || { echo "FAIL: mbrt missing rankimg: $(cat "$WORK/out/mbrt-a")"; exit 1; }
+echo "member table sibling names both members"
 
 echo "== ranged reads (the WP16b local splice over diska.qcow2) =="
 rng() {  # rng <off> <len> <tag>
@@ -909,7 +983,7 @@ for f in $QS; do
     $B/invf-cat "$IMG" "$f" "$WORK/out/s2.$f" >/dev/null
     cmp -s "$WORK/orig/$f" "$WORK/out/s2.$f" || { echo "FAIL: $f drifted"; exit 1; }
     C=$("$WORK/classof" "$IMG" "$f")
-    [ "$C" = "cls=3 algo=22 gen=1" ] || { echo "FAIL: $f stamp drifted: $C"; exit 1; }
+    [ "$C" = "cls=3 algo=22 gen=2" ] || { echo "FAIL: $f stamp drifted: $C"; exit 1; }
 done
 echo "containers stable and bit-exact after sweep 2"
 
@@ -960,6 +1034,68 @@ if grep -q ": qcow2 (codecpack)" "$WORK/sweep3.log"; then
 fi
 grep -q " 0 corrupt" <($B/invf-verify "$IMG" --deep) || { echo "FAIL: corrupt"; exit 1; }
 echo "no re-decomposition"
+
+echo "== migration leg: a bumped pack generation re-derives the layout =="
+# a re-decomposition rewrites every member WHILE the old ones are still
+# stored, so it needs real headroom: run the leg on its own roomy image
+# instead of the tight 0.5G one above
+IMG=$IMGMIG
+mkdir -p "$WORK/mig"
+rm -rf "$WORK/mig"/* 2>/dev/null || true
+cp "$WORK/orig/compc.qcow2" "$WORK/mig/compc.qcow2"
+cp "$WORK/orig/diska.qcow2" "$WORK/mig/diska.qcow2"
+$B/invf-mkfs "$IMG" 2 >/dev/null
+$B/invf-cp "$IMG" "$WORK/mig/compc.qcow2" compc.qcow2 >/dev/null \
+    || { echo "FAIL: migration-leg cp"; exit 1; }
+$B/invf-cp "$IMG" "$WORK/mig/diska.qcow2" diska.qcow2 >/dev/null \
+    || { echo "FAIL: migration-leg cp"; exit 1; }
+$B/invf-sweep "$IMG" > "$WORK/sweep-mig1.log" 2>&1 \
+    || { cat "$WORK/sweep-mig1.log"; exit 1; }
+grep -q " 0 corrupt" <($B/invf-verify "$IMG" --deep) \
+    || { echo "FAIL: baseline migration volume corrupt"; exit 1; }
+# The map records the pack generation that produced the decomposition
+# (decomp_gen). Bump the generation in the PRIVATE pack copy and the sweep
+# must re-derive the container from the RECONSTRUCTED stream -- pack-agnostic
+# code: the FS reads the original bytes back through the stored map and lets
+# the pack strip them again. Proof: decomp_gen follows the manifest, the file
+# stays bit-exact, and the sweep is idempotent afterwards.
+cp -a "$WORK/packs" "$WORK/packs-mig"
+sed -i 's/^generation = .*/generation = 7/' "$WORK/packs-mig/qcow2.codecpack/manifest"
+grep -q "^generation = 7" "$WORK/packs-mig/qcow2.codecpack/manifest" \
+    || { echo "FAIL: could not bump the private pack generation"; exit 1; }
+$B/invf-cat "$IMG" "compc.qcow2!mbrmap" "$WORK/out/map-gen2" >/dev/null
+python3 - "$WORK/out/map-gen2" <<'PY' || { echo "FAIL: pre-migration map"; exit 1; }
+import struct, sys
+m = open(sys.argv[1], "rb").read()
+assert m[:4] == b"MRM2", "expected the v2 map"
+assert struct.unpack("<I", m[8:12])[0] == 2, "expected decomp_gen 2"
+PY
+echo "  pre-migration: decomp_gen=2"
+# point the registry at the bumped copy for this sweep only
+MIGPACKS=$WORK/packs-mig
+env INVFS_CODECPACKS="$MIGPACKS" $B/invf-sweep "$IMG" > "$WORK/sweep-mig.log" 2>&1 \
+    || { cat "$WORK/sweep-mig.log"; exit 1; }
+$B/invf-cat "$IMG" "compc.qcow2!mbrmap" "$WORK/out/map-gen7" >/dev/null
+python3 - "$WORK/out/map-gen7" <<'PY' || { echo "FAIL: post-migration map"; exit 1; }
+import struct, sys
+m = open(sys.argv[1], "rb").read()
+assert m[:4] == b"MRM2"
+g = struct.unpack("<I", m[8:12])[0]
+assert g == 7, "expected the map to carry the new generation, got %d" % g
+PY
+echo "  post-migration: decomp_gen=7 (re-derived from the reconstructed stream)"
+grep -q " 0 corrupt" <($B/invf-verify "$IMG" --deep) \
+    || { echo "FAIL: migration broke bit-exactness"; exit 1; }
+# idempotent: a second sweep at the same generation must not re-decompose
+env INVFS_CODECPACKS="$MIGPACKS" $B/invf-sweep "$IMG" > "$WORK/sweep-mig2.log" 2>&1 \
+    || { cat "$WORK/sweep-mig2.log"; exit 1; }
+if grep -q ": qcow2 (codecpack)" "$WORK/sweep-mig2.log"; then
+    echo "FAIL: migration is not idempotent"; cat "$WORK/sweep-mig2.log"; exit 1
+fi
+echo "  migration idempotent (second sweep at the same generation: no-op)"
+rm -rf "$WORK/packs-mig"
+# the legs below operate on the main image
+IMG=wp16qcow2.img
 
 echo "== delete cascade (vol_unlink, the FUSE path) =="
 cat > "$WORK/cbrm.c" <<'C'
@@ -1017,7 +1153,7 @@ if grep -q ": qcow2 (codecpack)" "$WORK/sweep-mem.log"; then
 fi
 C=$("$WORK/classof" "$IMGMEM" diska.qcow2)
 echo "  diska.qcow2 (arc limit): $C"
-[ "$C" = "cls=5 algo=22 gen=1" ] || { echo "FAIL: want GENERIC_MEMLIMIT{QCOW2=22,1}"; exit 1; }
+[ "$C" = "cls=5 algo=22 gen=2" ] || { echo "FAIL: want GENERIC_MEMLIMIT{QCOW2=22,2}"; exit 1; }
 $B/invf-cat "$IMGMEM" diska.qcow2 "$WORK/out/diskamem.qcow2" >/dev/null
 cmp -s "$WORK/orig/diska.qcow2" "$WORK/out/diskamem.qcow2" \
     || { echo "FAIL: arc-limited read not bit-exact"; exit 1; }

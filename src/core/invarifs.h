@@ -11,6 +11,19 @@
 #include <stddef.h>
 #include <string.h>
 
+#ifndef INVFS_VERSION_STRING
+#define INVFS_VERSION_STRING "v0.5.0"
+#endif
+#ifndef INVFS_BUILD_DATE
+#define INVFS_BUILD_DATE "2026-09-25"
+#endif
+#ifndef INVFS_AUTHOR_NAME
+#define INVFS_AUTHOR_NAME "Lev_Asmanov"
+#endif
+#ifndef INVFS_LICENSE
+#define INVFS_LICENSE "GPL-2.0-only"
+#endif
+
 /* On-disk magic. Exactly 8 bytes, and it is the bytes that decide whether a
    volume opens at all -- so it stays "InvariFS" even though the project is now
    called InvariantFS ("InvariantFS" is 11 bytes and would not fit anyway).

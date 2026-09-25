@@ -1643,13 +1643,13 @@ int vol_read_range(invfs_volume *v, uint64_t inode_id, uint64_t offset,
                 char mbn[288];
                 snprintf(mbn, sizeof mbn, "%s!mbrmap", rname);
                 if (vol_find(v, mbn) != 0) {
-                    int mrc;
+                    int64_t mrc;
                     if (offset >= ast_h.file_size) { free(rec); return 0; }
                     mrc = cpack_map_read(v, rname, inode_id,
                                          (uint64_t)ast_h.file_size, offset,
                                          (uint8_t *)buf, len);
                     free(rec);
-                    return mrc;
+                    return (int)mrc;
                 }
                 whole = seek;   /* map missing: the exec rebuild answers */
             }

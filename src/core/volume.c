@@ -21,6 +21,17 @@
 
 
 static const uint64_t JOURNAL_BLOCKS = INVFS_JOURNAL_BLOCKS;
+static int g_sweep_ui_active;
+
+void invfs_sweep_ui_set(int active)
+{
+    g_sweep_ui_active = active ? 1 : 0;
+}
+
+int invfs_sweep_ui_active(void)
+{
+    return g_sweep_ui_active;
+}
 
 
 /* ---- name index ---------------------------------------------------- */
@@ -924,6 +935,7 @@ static invfs_volume *vol_open_inner(const char *path, int at_ckpt,
     invfs_volume *v = (invfs_volume *)calloc(1, sizeof(invfs_volume));
     if (!v) { *err = -1; return NULL; }
     (void)pthread_rwlock_init(&v->meta_lock, NULL);
+    (void)pthread_mutex_init(&v->rc_mu, NULL);
 
     /* "W:" is the shorthand a user types; CreateFileW needs "\\.\W:". Store
        the normalized form, so diagnostics name what was actually opened. */
@@ -1355,8 +1367,9 @@ static invfs_volume *vol_open_inner(const char *path, int at_ckpt,
         if (vol_delta_mount(v) != 0) { *err = -6; goto fail; }
         /* WP-M16: load the save-point descriptor if one exists. */
         if (spt0_load(v) < 0) { *err = -6; goto fail; }
-        fprintf(stderr, "vol_open: %s: format v3 (metadata-v3 inode tree): "
-                "base root engine up, v2 paths refused\n", real);
+        if (!invfs_sweep_ui_active())
+            fprintf(stderr, "vol_open: %s: format v3 (metadata-v3 inode tree): "
+                    "base root engine up, v2 paths refused\n", real);
     } else
     {
         uint64_t p = v->inode_area_pos;
@@ -2022,6 +2035,11 @@ void vol_close(invfs_volume *v)
     /* WP-M21: idx_clear retired (in-memory name index gone). */
     arc_destroy(v->arc);
     cpack_map_cache_reset(v);
+    {
+        int i;
+        for (i = 0; i < 2; i++) { free(v->rcache[i].blob); v->rcache[i].blob = NULL; }
+        pthread_mutex_destroy(&v->rc_mu);
+    }
     free(v->heat_tab);
     free(v->pba_ref);
     free(v->seal_dirty);

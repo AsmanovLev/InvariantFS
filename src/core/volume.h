@@ -7,6 +7,9 @@
 
 typedef struct invfs_volume invfs_volume;
 
+void invfs_sweep_ui_set(int active);
+int invfs_sweep_ui_active(void);
+
 /* Longest name the on-disk record can hold, in bytes. invfs_inode_rec.name is
    256 bytes with a NUL, and name_len must agree with what is actually stored,
    so a longer name is refused rather than truncated. Callers that build names
@@ -143,7 +146,11 @@ void vol_mark_pending(invfs_volume *v, uint64_t inode_id);
 void vol_unmark_pending(invfs_volume *v, uint64_t inode_id);
 size_t vol_pending_count(invfs_volume *v);
 int  vol_sweep_pending(invfs_volume *v);
+typedef void (*invfs_sweep_file_progress_fn)(void *user, const char *name,
+                                            uint64_t done, uint64_t total);
 int  vol_sweep_one(invfs_volume *v, uint64_t inode_id, const char *name);
+int  vol_sweep_one_ex(invfs_volume *v, uint64_t inode_id, const char *name,
+                      invfs_sweep_file_progress_fn progress, void *progress_user);
 /* resolve the live name of an inode id for vol_sweep_one drivers that
  * collected only ids (vol_collect_sweepables); 1 = found, 0 = gone */
 int  vol_sweep_name_of(invfs_volume *v, uint64_t id, char *nm, size_t cap);
@@ -666,6 +673,33 @@ int vol_tz_gc(invfs_volume *v);
  * retired by this run's vol_tz_flush). Runs between the sweep walk and
  * vol_tz_gc in invf-sweep; the caller's vol_flush persists the rewrites.
  * Returns the number of merged segments, <0 on error. */
+typedef struct {
+    uint64_t segments_hashed;
+    uint64_t duplicate_candidates;
+    uint64_t intra_candidates;
+    uint64_t cross_candidates;
+    uint64_t segments_merged;
+    uint64_t intra_merged;
+    uint64_t cross_merged;
+    uint64_t blocks_freed;
+} invfs_dedupe_stats;
+
+typedef struct {
+    const char *phase;
+    uint64_t done;
+    uint64_t total;
+    uint64_t candidates;
+    uint64_t merged;
+    uint64_t cross_merged;
+    uint64_t intra_merged;
+    uint64_t freed;
+} invfs_dedupe_progress;
+
+typedef void (*invfs_dedupe_progress_fn)(void *user,
+                                         const invfs_dedupe_progress *p);
+
+int vol_sweep_dedupe_ex(invfs_volume *v, invfs_dedupe_stats *stats,
+                        invfs_dedupe_progress_fn progress, void *progress_user);
 int vol_sweep_dedupe(invfs_volume *v);
 
 /* ---- WP19/WP27: heat counters + adaptive tiering ----

@@ -2,6 +2,7 @@
 import json
 import os
 import glob
+import shlex
 
 REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 CC = "/usr/bin/cc"
@@ -41,7 +42,7 @@ for root, _, files in os.walk(os.path.join(REPO, "src")):
             cmd = [CC] + CFLAGS + ["-c", src_file, "-o", obj_file]
             commands.append({
                 "directory": REPO,
-                "command": " ".join(cmd),
+                "command": shlex.join(cmd),
                 "file": src_file
             })
 
@@ -52,7 +53,7 @@ for root, _, files in os.walk(os.path.join(REPO, "tools")):
             cmd = [CC] + CFLAGS + ["-c", src_file]
             commands.append({
                 "directory": REPO,
-                "command": " ".join(cmd),
+                "command": shlex.join(cmd),
                 "file": src_file
             })
 

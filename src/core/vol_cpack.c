@@ -9,6 +9,7 @@
 #include "volume_internal.h"
 #include "helper_exec.h"
 #include "vol_plugin_client.h"
+#include "../codecs/deflate_repro.h"
 
 
 /* WP61: the pack-child containment (Landlock + namespaces + rlimits +
@@ -415,9 +416,11 @@ int invfs_codec_pack_cmd(const invfs_codec *c, int cmd,
      *   extract   {in} {idx} {out}    -> in_path, extract_idx, out_path
      *   strip     {in} {out}          -> in_path, out_path
      *   rebuild   {recipe} {dir} {out}-> recipe_path, mbr_dir, out_path
-     *   map       {in} {out}          -> in_path, out_path   (`in` is the IMAGE:
-     *                                    the pack recomputes the recipe layout
-     *                                    it would have written, see cmd_map)
+     *   map       {in} {out}          -> in_path, out_path
+     *   map       {recipe} {out}      -> recipe_path, out_path (a pack whose
+     *                                    recipe carries per-extent metadata:
+     *                                    qcow2 Q2R3 reproduction parameters
+     *                                    only exist in the recipe)
      * A non-negative return is the pack's own exit status (0/1/3) and is
      * authoritative; a negative one means the pool could not carry the call,
      * which falls through to the CLI exec below. */
@@ -435,7 +438,8 @@ int invfs_codec_pack_cmd(const invfs_codec *c, int cmd,
             case INVFS_PACK_CMD_STRIP:     pcmd = 3; p_in = in;  p_out = out; break;
             case INVFS_PACK_CMD_REBUILD:   pcmd = 4; p_recipe = recipe;
                                            p_dir = dir;          p_out = out; break;
-            case INVFS_PACK_CMD_MAP:       pcmd = 5; p_in = in;  p_out = out; break;
+            case INVFS_PACK_CMD_MAP:       pcmd = 5; p_in = in;
+                                           p_recipe = recipe; p_out = out; break;
             default: break;
             }
             if (pcmd > 0) {
@@ -1844,8 +1848,12 @@ out:
  * an FS-OWNED binary format (the pack only renders it), little-endian, all
  * fields read by memcpy like every other on-disk value here:
  *
- *   [4B "MRMP"][u32 count]
- *   count x { u64 orig_off, u64 len, u8 kind, u32 idx, u64 src_off }  (29 B)
+ *   v1  [4B "MRMP"][u32 count]
+ *       count x { u64 orig_off, u64 len, u8 kind, u32 idx, u64 src_off }  (29 B)
+ *   v2  [4B "MRM2"][u32 count][u32 decomp_gen]
+ *       count x { u64 orig_off, u64 len, u8 kind, u32 idx, u64 src_off,
+ *                 u32 raw_len, u8 engine, u8 level, u8 mem_level,
+ *                 u8 strategy, i8 window_bits, u8 pad[2] }            (40 B)
  *
  * Entries are sorted by orig_off and must partition [0, container_size)
  * exactly (contiguous, no gaps, no overlaps, len > 0). kind 0 = RECIPE:
@@ -1853,6 +1861,18 @@ out:
  * = MEMBER: bytes are member idx's [src_off, +len) (idx must exist in the
  * member table, src_off+len within its usize). A zero-length member simply
  * has no map entries.
+ *
+ * kind 2 = REPRO (v2 only): the bytes exist NOWHERE -- they are re-encoded on
+ * read. `raw_len` bytes are read from member idx at src_off and deflated
+ * with the recorded engine/level/mem_level/strategy/window_bits; the result
+ * MUST be exactly `len` bytes, and [0, len) of it is what the entry serves.
+ * This is what lets a pack drop bytes it can regenerate bit-exactly (qcow2
+ * Q2R3 compressed clusters) instead of storing them twice. Regeneration
+ * costs a deflate per cluster read; the ARC cache absorbs the repeats.
+ *
+ * decomp_gen is the pack generation that produced the decomposition: a stored
+ * map older than the pack's current generation means the decomposition is
+ * stale and the sweep re-derives it from the reconstructed container stream.
  *
  * The map is validated at sweep time and again at cache load (it is disk
  * data then); the sweep additionally PROVES it: every entry's source range
@@ -1865,9 +1885,14 @@ out:
  * never serve an unguarded map.
  */
 
-#define CPACK_MAP_ENT_WIRE 29   /* u64 orig_off + u64 len + u8 kind +
+#define CPACK_MAP_ENT_WIRE 29   /* v1: u64 orig_off + u64 len + u8 kind +
 
                                  * u32 idx + u64 src_off */
+#define CPACK_MAP_ENT_WIRE2 40  /* v2: the above + u32 raw_len + engine,
+                                 * level, mem_level, strategy, window_bits */
+#define CPACK_MAP_MAGIC1  "MRMP"
+#define CPACK_MAP_MAGIC2  "MRM2"
+#define CPACK_MAP_KIND_REPRO 2
 #define CPACK_MAP_MAX_ENTS (4 * CPACK_MAX_MEMBERS + 4)  /* a member split
 
                                  * into recipe/member runs bounds entries;
@@ -1879,10 +1904,13 @@ typedef struct {
     uint64_t orig_off;   /* offset in the ORIGINAL container */
     uint64_t len;        /* covered bytes (never 0) */
     uint64_t src_off;    /* RECIPE: offset in the recipe blob;
-                          * MEMBER: offset within member idx */
-    uint32_t idx;        /* MEMBER: the member index (its !mbrNNNN sibling);
-                          * RECIPE: must be 0 */
-    uint8_t  kind;       /* 0 = RECIPE, 1 = MEMBER */
+                          * MEMBER/REPRO: offset within member idx */
+    uint32_t idx;        /* MEMBER/REPRO: the member index (its !mbrNNNN
+                          * sibling); RECIPE: must be 0 */
+    uint32_t raw_len;    /* REPRO: raw bytes to deflate (v2 only) */
+    uint8_t  kind;       /* 0 = RECIPE, 1 = MEMBER, 2 = REPRO */
+    uint8_t  engine, level, mem_level, strategy;
+    int8_t   window_bits;
 } cpack_map_ent;
 
 
@@ -1890,27 +1918,58 @@ typedef struct {
  * validated identically). Strict: the blob is exactly the header plus
  * count entries. Returns 0 on success. */
 static int cpack_map_parse(const uint8_t *blob, size_t blob_len,
-                           cpack_map_ent **out, size_t *n_out)
+                           cpack_map_ent **out, size_t *n_out,
+                           uint32_t *decomp_gen_out)
 {
     cpack_map_ent *ents;
     uint32_t count, i;
+    size_t ent_wire, base;
+    int v2;
 
     *out = NULL;
     *n_out = 0;
-    if (blob_len < 8 || memcmp(blob, "MRMP", 4) != 0) return -1;
+    if (decomp_gen_out) *decomp_gen_out = 0;
+    if (blob_len < 8) return -1;
+    if (memcmp(blob, CPACK_MAP_MAGIC2, 4) == 0) {
+        v2 = 1;
+        ent_wire = CPACK_MAP_ENT_WIRE2;
+        base = 12;
+    } else if (memcmp(blob, CPACK_MAP_MAGIC1, 4) == 0) {
+        v2 = 0;
+        ent_wire = CPACK_MAP_ENT_WIRE;
+        base = 8;
+    } else {
+        return -1;
+    }
     memcpy(&count, blob + 4, 4);   /* LE by the host convention (invarifs.h) */
     if (!count || count > CPACK_MAP_MAX_ENTS) return -1;
-    if (blob_len != 8 + (size_t)count * CPACK_MAP_ENT_WIRE) return -1;
-    ents = (cpack_map_ent *)malloc((size_t)count * sizeof *ents);
+    if (blob_len != base + (size_t)count * ent_wire) return -1;
+    if (v2) {
+        uint32_t g;
+        memcpy(&g, blob + 8, 4);
+        if (decomp_gen_out) *decomp_gen_out = g;
+    }
+    ents = (cpack_map_ent *)calloc(count, sizeof *ents);
     if (!ents) return -1;
     for (i = 0; i < count; i++) {
-        const uint8_t *p = blob + 8 + (size_t)i * CPACK_MAP_ENT_WIRE;
+        const uint8_t *p = blob + base + (size_t)i * ent_wire;
         memcpy(&ents[i].orig_off, p, 8);
         memcpy(&ents[i].len, p + 8, 8);
         ents[i].kind = p[16];
         memcpy(&ents[i].idx, p + 17, 4);
         memcpy(&ents[i].src_off, p + 21, 8);
-        if (ents[i].kind > 1) { free(ents); return -1; }
+        if (v2) {
+            memcpy(&ents[i].raw_len, p + 29, 4);
+            ents[i].engine = p[33];
+            ents[i].level = p[34];
+            ents[i].mem_level = p[35];
+            ents[i].strategy = p[36];
+            ents[i].window_bits = (int8_t)p[37];
+        }
+        if (ents[i].kind > (v2 ? CPACK_MAP_KIND_REPRO : 1)) {
+            free(ents);
+            return -1;
+        }
     }
     *out = ents;
     *n_out = count;
@@ -1973,13 +2032,29 @@ static int cpack_map_validate(const cpack_map_ent *e, size_t n,
             if (e[i].src_off > recipe_len ||
                 e[i].len > recipe_len - e[i].src_off)
                 return -1;
-        } else {                             /* MEMBER */
+        } else {                             /* MEMBER / REPRO */
             const cpack_member *mm = cpack_member_find(mem_sorted, nmem,
                                                        e[i].idx);
             if (!mm) return -1;              /* unknown member */
-            if (e[i].src_off > mm->usize ||
-                e[i].len > mm->usize - e[i].src_off)
-                return -1;
+            if (e[i].kind == CPACK_MAP_KIND_REPRO) {
+                /* the raw cluster must exist; the encoded length can only be
+                 * proven at read time, and a mismatch is a loud -1 there */
+                if (!e[i].raw_len) return -1;
+                if (e[i].src_off > mm->usize ||
+                    e[i].raw_len > mm->usize - e[i].src_off)
+                    return -1;
+                if (e[i].engine != INVFS_DEFLATE_ENGINE_ZLIB_SYSTEM &&
+                    e[i].engine != INVFS_DEFLATE_ENGINE_ZLIB_STOCK)
+                    return -1;
+                if (!e[i].level || e[i].level > 9 ||
+                    !e[i].mem_level || e[i].mem_level > 9 ||
+                    e[i].strategy > 4)
+                    return -1;
+            } else {
+                if (e[i].src_off > mm->usize ||
+                    e[i].len > mm->usize - e[i].src_off)
+                    return -1;
+            }
         }
         pos += e[i].len;
     }
@@ -2006,12 +2081,14 @@ static int cpack_recipe_seg(invfs_volume *v, uint64_t ino,
 
     if (v->sb.vol_flags & VOLF_V3) {
         invfs_v3_inode in;
-        if (vol_v3_inode_get(v, ino, &in) != 1)
-            return -1;
+        if (vol_v3_inode_get(v, ino, &in) != 1) {
+                return -1;
+        }
         uint8_t *rblob = NULL;
         size_t rblen = 0;
-        if (vol_v3_recipe_load(v, in.recipe_addr, &rblob, &rblen) != 0 || !rblob)
-            return -1;
+        if (vol_v3_recipe_load(v, in.recipe_addr, &rblob, &rblen) != 0 || !rblob) {
+                return -1;
+        }
         const invfs_ast_block_entry *ents = NULL;
         size_t n_ents = 0;
         if (vol_ast_recipe_parse(rblob, rblen, &ah, &ents, &n_ents) == 0 && n_ents >= 1) {
@@ -2110,9 +2187,7 @@ static int cpack_map_serve(invfs_volume *v, const char *name,
         const cpack_map_ent *en;
         uint64_t rel, avail;
         size_t take;
-        if (lo >= n) return -1;              /* ran off the map */
         en = &e[lo++];
-        if (en->orig_off > off + done) return -1;   /* a gap is not a map */
         rel = (off + done) - en->orig_off;
         avail = en->len - rel;
         take = avail < (uint64_t)(len - done) ? (size_t)avail
@@ -2120,6 +2195,42 @@ static int cpack_map_serve(invfs_volume *v, const char *name,
         if (en->kind == 0) {
             if (en->src_off + rel + take > recipe_len) return -1;
             memcpy(dst + done, recipe + (size_t)(en->src_off + rel), take);
+        } else if (en->kind == CPACK_MAP_KIND_REPRO) {
+            /* kind 2: the bytes are not stored anywhere -- re-encode the raw
+             * cluster from the member and serve the slice of the result. A
+             * length mismatch means the map lied: fail loudly (1:1). */
+            uint8_t *raw = (uint8_t *)malloc(en->raw_len);
+            uint8_t *enc = NULL;
+            size_t enc_len = 0;
+            invfs_deflate_params dp;
+            int rrc = -1;
+            if (!raw) return -1;
+            if (cpack_member_read(v, name, mem, nmem, en->idx, en->src_off,
+                                  raw, en->raw_len) != 0)
+                { free(raw); return -1; }
+            memset(&dp, 0, sizeof dp);
+            dp.engine = en->engine;
+            dp.level = (int8_t)en->level;
+            dp.mem_level = (int8_t)en->mem_level;
+            dp.strategy = (int8_t)en->strategy;
+            dp.window_bits = en->window_bits;
+            if (invfs_deflate_repro_encode(raw, en->raw_len, &dp,
+                                           &enc, &enc_len) == 0 && enc &&
+                enc_len == en->len && rel + take <= enc_len) {
+                memcpy(dst + done, enc + rel, take);
+                rrc = 0;
+            }
+            free(raw);
+            free(enc);
+            if (rrc != 0) {
+                if (getenv("INVFS_DEBUG_PACKS"))
+                    fprintf(stderr, "[cpack] REPRO: regenerated stream does "
+                                    "not match the mapped length (off=%llu "
+                                    "len=%llu)\n",
+                            (unsigned long long)en->orig_off,
+                            (unsigned long long)en->len);
+                return -1;
+            }
         } else if (cpack_member_read(v, name, mem, nmem, en->idx,
                                      en->src_off + rel,
                                      dst + done, take) != 0) {
@@ -2148,7 +2259,7 @@ static int cpack_map_guard(invfs_volume *v, const char *name,
     int rc = -1;
 
     if (cpack_recipe_seg(v, recipe_ino, &recipe, &recipe_len) != 0)
-        { if (getenv("INVFS_DEBUG_PACKS")) fprintf(stderr,"[cpack] guard: recipe seg read failed\n"); goto out; }
+        { if (getenv("INVFS_DEBUG_PACKS")) fprintf(stderr,"[cpack] guard: recipe seg read failed (ino=%llu)\n", (unsigned long long)recipe_ino); goto out; }
     buf = (uint8_t *)malloc(CPACK_GUARD_CHUNK);
     if (!buf) goto out;
     for (gi = 0; gi < n_ents; gi++) {
@@ -2191,6 +2302,7 @@ struct cpack_map_cache {
     size_t   nmem;
     uint8_t *recipe;             /* the recipe blob (segment, CRC-checked) */
     size_t   recipe_len;
+    uint32_t decomp_gen;         /* the pack generation that built it (v2) */
 };
 
 
@@ -2254,6 +2366,7 @@ static const struct cpack_map_cache *cpack_map_get(invfs_volume *v,
     cpack_map_ent *ents = NULL;
     size_t nmem = 0, nents = 0, i;
     uint64_t tino, mino;
+    uint32_t decomp_gen = 0;
     struct cpack_map_cache *e;
 
     for (i = 0; i < v->maps_n; i++)
@@ -2264,19 +2377,28 @@ static const struct cpack_map_cache *cpack_map_get(invfs_volume *v,
     snprintf(mn, sizeof mn, "%s!mbrmap", name);
     tino = vol_find(v, tn);
     mino = vol_find(v, mn);
-    if (!tino || !mino) return NULL;
+    if (!tino || !mino) {
+        if (getenv("INVFS_DEBUG_PACKS")) fprintf(stderr, "[cpack] map_get %s: tino=%llu mino=%llu\n", name, (unsigned long long)tino, (unsigned long long)mino);
+        return NULL;
+    }
     if (vol_read_file(v, mino, &mapb, &map_len) != 0 ||
-        cpack_map_parse(mapb, map_len, &ents, &nents) != 0)
+        cpack_map_parse(mapb, map_len, &ents, &nents, &decomp_gen) != 0) {
+        if (getenv("INVFS_DEBUG_PACKS")) fprintf(stderr, "[cpack] get %s: map read/parse failed\n", name);
         goto fail;
+    }
     if (vol_read_file(v, tino, &table, &table_len) != 0 ||
-        cpack_parse_table(table, table_len, &mem, &nmem, NULL) != 0 || !nmem)
+        cpack_parse_table(table, table_len, &mem, &nmem, NULL) != 0 || !nmem) {
+        if (getenv("INVFS_DEBUG_PACKS")) fprintf(stderr, "[cpack] get %s: mbrt parse failed (rc) len=%zu\n", name, table_len);
         goto fail;
+    }
     qsort(mem, nmem, sizeof *mem, cpack_member_idx_cmp);
-    if (cpack_recipe_seg(v, ino, &recipe, &recipe_len) != 0)
+    if (cpack_recipe_seg(v, ino, &recipe, &recipe_len) != 0) {
         goto fail;
+    }
     if (cpack_map_validate(ents, nents, container_size,
-                           (uint64_t)recipe_len, mem, nmem) != 0)
+                           (uint64_t)recipe_len, mem, nmem) != 0) {
         goto fail;
+    }
     free(table);
     table = NULL;
     free(mapb);
@@ -2300,6 +2422,7 @@ static const struct cpack_map_cache *cpack_map_get(invfs_volume *v,
     e->nmem = nmem;
     e->recipe = recipe;
     e->recipe_len = recipe_len;
+    e->decomp_gen = decomp_gen;
     v->maps_n++;
     return e;
 
@@ -2314,11 +2437,33 @@ fail:
 }
 
 
-/* The WP16b read entry point: serve [off, off+len) of a seekable container
+/* The decomposition generation stored in `name!mbrmap` (0 for a v1 map, i.e.
+ * "produced before generations were recorded"). Reads only the 12-byte
+ * header -- no sibling, recipe or member is touched, so the sweep can ask
+ * "is this decomposition stale?" cheaply. 0 = no map / unreadable. */
+uint32_t cpack_map_decomp_gen(invfs_volume *v, const char *name)
+{
+    char mn[288];
+    uint8_t *mapb = NULL;
+    size_t map_len = 0;
+    uint32_t gen = 0;
+
+    snprintf(mn, sizeof mn, "%s!mbrmap", name);
+    if (!vol_find(v, mn)) return 0;
+    if (vol_read_file(v, vol_find(v, mn), &mapb, &map_len) != 0 || !mapb)
+        return 0;
+    if (map_len >= 12 && memcmp(mapb, CPACK_MAP_MAGIC2, 4) == 0)
+        memcpy(&gen, mapb + 8, 4);
+    free(mapb);
+    return gen;
+}
+
+
+/* The seekable read entry point: serve [off, off+len) of a seekable container
  * by local splice through its cached map. Returns the byte count (clamped
  * at the container size), -1 on any failure -- loud, like a corrupt member
  * on the exec path. */
-int cpack_map_read(invfs_volume *v, const char *name, uint64_t ino,
+int64_t cpack_map_read(invfs_volume *v, const char *name, uint64_t ino,
                           uint64_t container_size, uint64_t off,
                           uint8_t *dst, size_t len)
 {
@@ -2331,7 +2476,7 @@ int cpack_map_read(invfs_volume *v, const char *name, uint64_t ino,
     if (cpack_map_serve(v, name, m->ents, m->n_ents, m->mem, m->nmem,
                         m->recipe, m->recipe_len, off, dst, len) != 0)
         return -1;
-    return (int)len;
+    return (int64_t)len;
 }
 
 
@@ -2362,7 +2507,8 @@ int vol_containerpack_sweep(invfs_volume *v, uint64_t inode_id,
     cpack_member *mem_sorted = NULL;   /* idx-sorted copy for the map paths */
     invfs_meta_pub keep;
     int have_keep, rc = 0;
-    if (getenv("INVFS_DEBUG_PACKS")) fprintf(stderr,"[cpack] enter %s\n", name);
+    if (getenv("INVFS_DEBUG_PACKS")) fprintf(stderr,"[cpack] enter %s (decomp_gen=%d gen=%u)\n", name,
+        def ? def->decomp_gen : -1, pc->generation);
     if (!pc->probe || !pc->probe()) return 1;    /* tools absent: wait */
     def = invfs_codec_pack_def(pc);
     if (!def || !def->is_container) { if (getenv("INVFS_DEBUG_PACKS")) fprintf(stderr,"[cpack] not-a-container-def\n"); return 0; }
@@ -2476,11 +2622,24 @@ int vol_containerpack_sweep(invfs_volume *v, uint64_t inode_id,
      * the recipe segment and the member siblings -- only exist inside the
      * volume then), replacing the rebuild exec entirely. */
     if (def->map) {
+        /* the recipe is passed as the map's {in}: a pack whose recipe records
+         * per-extent metadata (qcow2 Q2R3 reproduction parameters) CANNOT
+         * re-derive the layout from the image. Packs whose manifest still says
+         * {in} keep getting the image -- the template decides. */
         if (invfs_codec_pack_cmd(pc, INVFS_PACK_CMD_MAP, pin, NULL,
-                                 NULL, NULL, pmap) != 0)
+                                 pmdir, precipe, pmap) != 0)
             { if (getenv("INVFS_DEBUG_PACKS")) fprintf(stderr,"[cpack] map cmd failed\n"); goto out; }
         if (slurp_file(pmap, &mapb, &map_len) != 0) { if (getenv("INVFS_DEBUG_PACKS")) fprintf(stderr,"[cpack] map slurp failed\n"); goto out; }
-        if (cpack_map_parse(mapb, map_len, &ments, &nments) != 0) {
+        /* The map is an FS-owned format: the pack renders the wire, the FS
+         * owns the header. Stamp THIS pack's generation into the v2 header so
+         * a later sweep can tell a current decomposition from a stale one (and
+         * migrate the stale one from the reconstructed stream). */
+        if (def->decomp_gen && map_len >= 12 &&
+            memcmp(mapb, CPACK_MAP_MAGIC2, 4) == 0) {
+            uint32_t g = pc->generation;
+            memcpy(mapb + 8, &g, 4);
+        }
+        if (cpack_map_parse(mapb, map_len, &ments, &nments, NULL) != 0) {
             if (getenv("INVFS_DEBUG_PACKS")) fprintf(stderr,"[cpack] map parse failed\n");
             fprintf(stderr, "sweep: %s: %s: map unreadable, "
                             "decomposition abandoned\n", pc->name, name);
@@ -2709,6 +2868,109 @@ out:
     free(ments);
     free(mem_sorted);
     return rc;
+}
+
+
+/* ---- decomposition migration (WP-Q2R3) -----------------------------------
+ *
+ * A container decomposition records the pack generation that produced it
+ * (the map header's decomp_gen). When a pack bumps its generation it changed
+ * the layout it emits -- qcow2 went Q2R2 (every compressed cluster stored
+ * twice: in rankimg AND in the recipe gap) to Q2R3 (reproducible streams are
+ * re-encoded on read, so they are not stored at all).
+ *
+ * The migration is deliberately pack-agnostic: the ORIGINAL container bytes
+ * come back through the stored map (vol_read_file splices recipe + members),
+ * and the pack strips them again with its CURRENT recipe format. Nothing in
+ * the FS knows what the new layout looks like; a tar/zip/p7z pack migrates
+ * by exactly the same code path when its generation moves.
+ *
+ * Idempotent: after the re-decomposition the map carries the new generation,
+ * so the next sweep sees nothing stale. Returns 1 = migrated (count it as
+ * swept), 0 = declined/no-op, -1 = the read-back failed.
+ */
+int vol_cpack_migrate(invfs_volume *v, uint64_t inode_id, const char *name,
+                      const invfs_codec *pc)
+{
+    uint8_t *full = NULL;
+    size_t full_len = 0;
+    int rc;
+
+    if (!pc || !name || !name[0] || strchr(name, '!')) return 0;
+    if (vol_find(v, name) != inode_id) return 0;
+    /* A member can itself be a decomposed container (qcow2 diskimg -> rawdisk
+     * -> its own !mbrmap/!mbrt/members). Re-creating it as a plain member
+     * would leave that whole nested branch behind: the fresh record inherits
+     * the CONTAINER stamp but the members the OLD record's map points at are
+     * the ones still on disk, and the read path then serves a map that no
+     * longer describes the body. Purge every member's own siblings FIRST, so
+     * the re-decomposition below starts from a clean slate. */
+    {
+        uint8_t *tbl = NULL;
+        size_t tlen = 0;
+        cpack_member *mem = NULL;
+        size_t nmem = 0, i;
+        char tn[288], mn[320];
+        snprintf(tn, sizeof tn, "%s!mbrt", name);
+        if (vol_find(v, tn) &&
+            vol_read_file(v, vol_find(v, tn), &tbl, &tlen) == 0 &&
+            cpack_parse_table(tbl, tlen, &mem, &nmem, NULL) == 0) {
+            for (i = 0; i < nmem; i++) {
+                cpack_mbr_name(mn, sizeof mn, name, mem[i].idx, mem[i].sname);
+                if (vol_find(v, mn)) vol_delete_siblings(v, mn);
+            }
+        }
+        free(mem);
+        free(tbl);
+    }
+    /* Price the rewrite BEFORE touching anything. A migration re-creates
+     * every member while the old ones are still stored (unlike the first
+     * decomposition, which is charged only half in vol_containerpack_sweep),
+     * and a commit that runs out of room mid-way aborts -- which would leave
+     * the container with a half-replaced sibling set and no map, i.e.
+     * UNREADABLE. Deferring costs one sweep; a torn migration costs the
+     * decomposition. */
+    {
+        char tn[288];
+        uint8_t *table = NULL;
+        size_t tlen = 0;
+        cpack_member *mem = NULL;
+        size_t nmem = 0, i;
+        uint64_t sum = 0;
+        snprintf(tn, sizeof tn, "%s!mbrt", name);
+        if (vol_read_file(v, vol_find(v, tn), &table, &tlen) == 0 &&
+            cpack_parse_table(table, tlen, &mem, &nmem, NULL) == 0) {
+            for (i = 0; i < nmem; i++) sum += mem[i].usize;
+            free(mem);
+        }
+        free(table);
+        if (sum && sweep_enospc(v, sum + INVFS_ENOSPC_MARGIN)) {
+            /* deliberately NO re-stamp: the CONTAINER stamp carries the
+             * migration trigger, and a DEFER_ENOSPC stamp would mask it
+             * forever. The next sweep re-evaluates. */
+            if (getenv("INVFS_DEBUG_PACKS"))
+                fprintf(stderr, "[cpack] migrate %s: deferred, %llu bytes "
+                                "of members would not fit\n", name,
+                        (unsigned long long)sum);
+            return 0;
+        }
+    }
+    if (vol_read_file(v, inode_id, &full, &full_len) != 0 || !full) {
+        fprintf(stderr, "sweep: %s: %s: migration read-back failed, "
+                        "decomposition left as is\n", pc->name, name);
+        return -1;
+    }
+    if (getenv("INVFS_DEBUG_PACKS"))
+        fprintf(stderr, "[cpack] migrate %s: %zu bytes re-decomposed "
+                        "(gen %u -> %u)\n", name, full_len,
+                cpack_map_decomp_gen(v, name), pc->generation);
+    rc = vol_containerpack_sweep(v, inode_id, name, pc, full, full_len);
+    free(full);
+    if (rc >= 100) {
+        /* re-stamped by the commit; the sweep counts it as swept */
+        return 1;
+    }
+    return rc < 0 ? -1 : 0;
 }
 
 

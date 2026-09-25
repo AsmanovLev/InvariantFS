@@ -22,6 +22,19 @@
 
 static int checks = 0;
 static int failures = 0;
+static int progress_calls = 0;
+static int saw_hash_progress = 0;
+static int saw_merge_progress = 0;
+
+static void dedupe_progress(void *user, const invfs_dedupe_progress *p)
+{
+    (void)user;
+    progress_calls++;
+    if (p && p->phase && (strcmp(p->phase, "hash") == 0 ||
+                          strcmp(p->phase, "hash_done") == 0))
+        saw_hash_progress = 1;
+    if (p && p->phase && strcmp(p->phase, "merge") == 0) saw_merge_progress = 1;
+}
 
 static void ok(int cond, const char *msg)
 {
@@ -118,8 +131,19 @@ int main(int argc, char **argv)
     uint64_t free_before = v->free_blocks;
 
     /* 3. Run vol_sweep_dedupe */
-    int merged = vol_sweep_dedupe(v);
+    invfs_dedupe_stats ds;
+    int merged = vol_sweep_dedupe_ex(v, &ds, dedupe_progress, NULL);
     ok(merged > 0, "vol_sweep_dedupe merged duplicate segments");
+    ok(ds.segments_hashed == 16, "dedupe hashed all 16 live segments");
+    ok(ds.duplicate_candidates == 3 &&
+       ds.intra_candidates == 1 && ds.cross_candidates == 2,
+       "dedupe classified intra-file and cross-file candidates");
+    ok(ds.segments_merged == 3 && ds.intra_merged == 1 &&
+       ds.cross_merged == 2,
+       "dedupe classified intra-file and cross-file merges");
+    ok(ds.blocks_freed > 0, "dedupe reports reclaimed block count");
+    ok(progress_calls > 0 && saw_hash_progress && saw_merge_progress,
+       "dedupe progress callback covers hash and merge phases");
     ok(v->free_blocks > free_before, "free blocks increased after deduplication");
 
     /* 4. Flush and check bit-exact content */

@@ -24,16 +24,19 @@ CFLAGS  := -std=gnu11 -O2 -MMD -MP -I$(SRC) $(addprefix -I,$(SRCDIRS)) -pthread 
            -DINVFS_AUTHOR_NAME=\"$(AUTHOR_NAME)\" \
            -DINVFS_LICENSE=\"$(LICENSE)\"
 LDLIBS  := -Wl,-l:libzstd.so.1 -lz -lpthread
+STOCK_ZLIB_SRC := $(wildcard $(SRC)/zlib/*.c)
+STOCK_ZLIB_O := $(patsubst $(SRC)/zlib/%.c,$(OBJ)/zlib_stock_%.o,$(STOCK_ZLIB_SRC))
 FUSE_CFLAGS := $(shell pkg-config --cflags fuse3)
 FUSE_LIBS   := $(shell pkg-config --libs fuse3)
 
 CORE    := volume vol_cpack helper_exec vol_plugin_client vol_png vol_seal vol_repair vol_rollback \
            vol_resize vol_fsck vol_crash vol_exer vol_dedupe vol_textzone \
-           vol_heat vol_sweep vol_read vol_write vol_records vol_ast \
-           vol_dirs vol_tier vol_meta_merge vol_metabuf vol_btree vol_delta \
-           vol_fold vol_reclaim vol_spt0 \
-           arc crc32c lz4 flacx tarx pngx blkio miniz blake3 blake3_dispatch blake3_portable ppmd8 ppmd8enc ppmd8dec ppmd_codec codec bcj_x86 rs deflate_repro
-CORE_O  := $(addprefix $(OBJ)/,$(addsuffix .o,$(CORE)))
+            vol_heat vol_sweep vol_read vol_write vol_records vol_ast \
+            vol_dirs vol_tier vol_meta_merge vol_metabuf vol_btree vol_delta \
+            vol_fold vol_reclaim vol_spt0 \
+            arc crc32c lz4 flacx tarx pngx blkio miniz blake3 blake3_dispatch blake3_portable ppmd8 ppmd8enc ppmd8dec ppmd_codec codec bcj_x86 rs deflate_repro \
+            deflate_backend_system deflate_backend_stock
+CORE_O  := $(addprefix $(OBJ)/,$(addsuffix .o,$(CORE))) $(STOCK_ZLIB_O)
 B3      := blake3 blake3_dispatch blake3_portable
 
 # Canonical core object list for the e2e helper link lines in tools/test-*.sh.
@@ -56,6 +59,18 @@ $(OBJ):
 
 $(OBJ)/%.o: %.c | $(OBJ)
 	$(CC) $(CFLAGS) -c -o $@ $<
+
+$(OBJ)/deflate_repro.o: $(SRC)/codecs/deflate_repro.c $(SRC)/codecs/deflate_backend.h $(SRC)/codecs/deflate_repro.h | $(OBJ)
+	$(CC) $(CFLAGS) -fPIC -c -o $@ $<
+
+$(OBJ)/zlib_stock_%.o: $(SRC)/zlib/%.c | $(OBJ)
+	$(CC) $(CFLAGS) -I$(SRC)/zlib -DZ_PREFIX -fPIC -c -o $@ $<
+
+$(OBJ)/deflate_backend_system.o: $(SRC)/codecs/deflate_backend_zlib.c $(SRC)/codecs/deflate_backend.h $(SRC)/codecs/deflate_repro.h | $(OBJ)
+	$(CC) $(CFLAGS) -DINVFS_BACKEND_ENGINE=INVFS_DEFLATE_ENGINE_ZLIB_SYSTEM -DINVFS_BACKEND_SYM=invfs_deflate_backend_system -fPIC -c -o $@ $<
+
+$(OBJ)/deflate_backend_stock.o: $(SRC)/codecs/deflate_backend_zlib.c $(SRC)/codecs/deflate_backend.h $(SRC)/codecs/deflate_repro.h | $(OBJ)
+	$(CC) $(CFLAGS) -I$(SRC)/zlib -DZ_PREFIX -DINVFS_BACKEND_ENGINE=INVFS_DEFLATE_ENGINE_ZLIB_STOCK -DINVFS_BACKEND_SYM=invfs_deflate_backend_stock -fPIC -c -o $@ $<
 
 # tools that embed their own miniz copy must not double-link ours:
 # zip.c includes miniz internally, so it links without $(OBJ)/miniz.o
@@ -130,12 +145,14 @@ CPACKS      := qcow2 ext4fs fatfs ntfs rawdisk vdi xfs p7z
 PACKDIR      = tools/codecpacks/$(1).codecpack
 PLUGIN_CFLAGS := -std=gnu11 -O2 -fPIC -shared -Wall -Wextra -Werror \
                  -I$(SRC)/include -I$(SRC)/codecs -DIVPACK_SHARED_LIB
-# qcow2 is the only pack that links a repo codec (deflate_repro) today.
-PLUGIN_EXTRA_qcow2 := $(SRC)/codecs/deflate_repro.c
+# qcow2 links both repro backends; its own zlib calls use the bundled stock copy.
+PLUGIN_CFLAGS_qcow2 := $(PLUGIN_CFLAGS) -I$(SRC)/zlib -DZ_PREFIX
+PLUGIN_EXTRA_qcow2 := $(OBJ)/deflate_repro.o $(OBJ)/deflate_backend_system.o \
+                      $(OBJ)/deflate_backend_stock.o $(STOCK_ZLIB_O)
 
 define PLUGIN_SO_RULE
-$(call PACKDIR,$(1))/lib$(1).so: $(call PACKDIR,$(1))/$(1).c $(SRC)/include/ivpack_api.h $(SRC)/include/ivpack_impl.h
-	$(CC) $(PLUGIN_CFLAGS) -o $$@ $$< $(PLUGIN_EXTRA_$(1)) -lz -ldl
+$(call PACKDIR,$(1))/lib$(1).so: $(call PACKDIR,$(1))/$(1).c $(SRC)/include/ivpack_api.h $(SRC)/include/ivpack_impl.h $(PLUGIN_EXTRA_$(1))
+	$(CC) $(if $(PLUGIN_CFLAGS_$(1)),$(PLUGIN_CFLAGS_$(1)),$(PLUGIN_CFLAGS)) -o $$@ $$< $(PLUGIN_EXTRA_$(1)) -lz -ldl
 endef
 $(foreach p,$(CPACKS),$(eval $(call PLUGIN_SO_RULE,$(p))))
 
@@ -203,7 +220,8 @@ test: $(OUT)/invf-arctest $(OUT)/invf-blkio_test $(OUT)/invf-codec_test \
       $(OUT)/invf-delta_test $(OUT)/invf-concurrency_test $(OUT)/invf-sweep_v3_test \
       $(OUT)/invf-symlink_v3_test $(OUT)/invf-large_file_v3_test $(OUT)/invf-dedupe_v3_test \
       $(OUT)/invf-deflate_repro_test $(OUT)/invf-plugin_host_test $(OUT)/invf-plugin_mt_test \
-      $(OUT)/invf-ivpack_packs_test plugin-so
+      $(OUT)/invf-ivpack_packs_test $(OUT)/invf-mkfs $(OUT)/invf-cp \
+      $(OUT)/invf-sweep plugin-so $(CORE_OBJS_FILE)
 	$(OUT)/invf-arctest
 	$(OUT)/invf-blkio_test
 	$(OUT)/invf-codec_test
@@ -220,6 +238,7 @@ test: $(OUT)/invf-arctest $(OUT)/invf-blkio_test $(OUT)/invf-codec_test \
 	$(OUT)/invf-plugin_host_test
 	$(OUT)/invf-plugin_mt_test
 	$(OUT)/invf-ivpack_packs_test
+	bash tools/test-sweep-ui.sh
 
 # e2e tier: tmpfs images under /dev/shm; test-jxl needs cjxl/djxl installed
 e2e: all

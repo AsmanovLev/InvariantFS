@@ -69,10 +69,66 @@ typedef struct {
     uint8_t *blob;
     size_t blobcap;
     blake3_hasher *hx;
+    size_t progress_every;
+    invfs_dedupe_progress_fn progress;
+    void *progress_user;
     int stop;   /* an unparsable record: stop the walk, keep pass 1's
                  * findings (the old linear scan's `break`) */
     int err;    /* OOM: abort the pass */
 } dedup_hash_ctx;
+
+#define DEDUP_PROGRESS_DEFAULT 8192u
+
+static size_t dedup_progress_every(void)
+{
+    const char *s = getenv("INVFS_DEDUPE_PROGRESS_EVERY");
+    char *end = NULL;
+    unsigned long n;
+
+    if (!s || !*s) return DEDUP_PROGRESS_DEFAULT;
+    n = strtoul(s, &end, 10);
+    if (end == s || *end || n == 0 || n > (1UL << 20))
+        return DEDUP_PROGRESS_DEFAULT;
+    return (size_t)n;
+}
+
+static void dedup_report(invfs_dedupe_progress_fn fn, void *user,
+                         const char *phase, uint64_t done, uint64_t total,
+                         uint64_t candidates, uint64_t merged,
+                         uint64_t cross_merged, uint64_t intra_merged,
+                         uint64_t freed);
+
+static void dedup_hash_progress(const dedup_hash_ctx *ctx)
+{
+    if (!ctx->progress_every || !ctx->n ||
+        ctx->n % ctx->progress_every != 0)
+        return;
+    if (ctx->progress)
+        dedup_report(ctx->progress, ctx->progress_user,
+                     "hash", ctx->n, 0, 0, 0, 0, 0, 0);
+    else
+        fprintf(stderr, "dedupe: hashing %zu segments\n", ctx->n);
+}
+
+static void dedup_report(invfs_dedupe_progress_fn fn, void *user,
+                         const char *phase, uint64_t done, uint64_t total,
+                         uint64_t candidates, uint64_t merged,
+                         uint64_t cross_merged, uint64_t intra_merged,
+                         uint64_t freed)
+{
+    invfs_dedupe_progress p;
+
+    if (!fn) return;
+    p.phase = phase;
+    p.done = done;
+    p.total = total;
+    p.candidates = candidates;
+    p.merged = merged;
+    p.cross_merged = cross_merged;
+    p.intra_merged = intra_merged;
+    p.freed = freed;
+    fn(user, &p);
+}
 
 
 static int dedup_cmp(const void *a, const void *b)
@@ -167,6 +223,7 @@ static uint64_t dedup_cur_pba(invfs_volume *v, uint64_t inode, uint64_t lba)
  * time, cross-checked against the bitmap). */
 typedef struct {
     uint64_t inode, lba, cur_pba, canon_pba;
+    int cross_file;
 } merge_ent;
 
 static int merge_ent_cmp(const void *a, const void *b)
@@ -190,7 +247,8 @@ static int merge_ent_cmp(const void *a, const void *b)
  * *applied_out the count of intents actually applied. */
 static int dedup_remap_file_v3(invfs_volume *v, uint64_t inode,
                                const merge_ent *ms, size_t nm,
-                               uint64_t *freed_out, size_t *applied_out)
+                               uint64_t *freed_out, size_t *applied_out,
+                               size_t *cross_applied_out)
 {
     invfs_v3_inode in;
     uint8_t *blob = NULL;
@@ -208,6 +266,7 @@ static int dedup_remap_file_v3(invfs_volume *v, uint64_t inode,
 
     *freed_out = 0;
     *applied_out = 0;
+    *cross_applied_out = 0;
 
     if (vol_v3_inode_get(v, inode, &in) != 1) return -1;
     if (vol_v3_recipe_load(v, in.recipe_addr, &blob, &blen) != 0 || !blob) return -1;
@@ -225,6 +284,7 @@ static int dedup_remap_file_v3(invfs_volume *v, uint64_t inode,
                 if (new_ents[j].pba == ms[m].cur_pba && ms[m].cur_pba != ms[m].canon_pba) {
                     new_ents[j].pba = ms[m].canon_pba;
                     applied++;
+                    if (ms[m].cross_file) (*cross_applied_out)++;
                     pba_ref_modify(v, ms[m].cur_pba, -1);
                     pba_ref_modify(v, ms[m].canon_pba, +1);
                 }
@@ -280,10 +340,13 @@ static int dedup_remap_file_v3(invfs_volume *v, uint64_t inode,
 
 static int dedup_remap_file(invfs_volume *v, uint64_t inode,
                             const merge_ent *ms, size_t nm,
-                            uint64_t *freed_out, size_t *applied_out)
+                            uint64_t *freed_out, size_t *applied_out,
+                            size_t *cross_applied_out)
 {
+    *cross_applied_out = 0;
     if (v->sb.vol_flags & VOLF_V3)
-        return dedup_remap_file_v3(v, inode, ms, nm, freed_out, applied_out);
+        return dedup_remap_file_v3(v, inode, ms, nm, freed_out, applied_out,
+                                   cross_applied_out);
 
     uint8_t *rec = NULL, *combo = NULL, *tomb = NULL;
     uint32_t rl = 0;
@@ -298,7 +361,9 @@ static int dedup_remap_file(invfs_volume *v, uint64_t inode,
 
     *freed_out = 0;
     *applied_out = 0;
+    *cross_applied_out = 0;
 retry:
+    *cross_applied_out = 0;
     if (meta_read_record_by_id(v, inode, &rec, &rl, NULL, 0,
                                &old_pos) != 0 || !old_pos) {
         if (getenv("INVFS_DEBUG"))
@@ -336,6 +401,7 @@ retry:
                 if (e->pba == ms[m].cur_pba) {
                     e->pba = ms[m].canon_pba;
                     applied++;
+                    if (ms[m].cross_file) (*cross_applied_out)++;
                 }
                 break;
             }
@@ -550,6 +616,7 @@ static int dedup_hash_cb(void *ctx_, uint64_t rec_pos,
             ctx->segs = ns;
             ctx->cap = ncap;
         }
+        dedup_hash_progress(ctx);
     }
     return 0;
 }
@@ -621,13 +688,15 @@ static int dedup_v3_walk_cb(void *ctx_, const char *path, uint64_t inode_id,
             ctx->segs = ns;
             ctx->cap = ncap;
         }
+        dedup_hash_progress(ctx);
     }
     free(blob);
     return 0;
 }
 
 
-int vol_sweep_dedupe(invfs_volume *v)
+int vol_sweep_dedupe_ex(invfs_volume *v, invfs_dedupe_stats *stats,
+                        invfs_dedupe_progress_fn progress, void *progress_user)
 {
     size_t n = 0, cap = 1 << 16;
     dedup_seg *segs;
@@ -635,8 +704,16 @@ int vol_sweep_dedupe(invfs_volume *v)
     uint8_t *blob = NULL;
     size_t merged = 0;
     uint64_t freed_blocks = 0;
+    size_t progress_every = dedup_progress_every();
+    invfs_dedupe_stats local_stats;
+    invfs_dedupe_progress_fn report = progress;
+    void *report_user = progress_user;
     int marked = 0;             /* vol_mark_dirty done (first real merge) */
     int rc = 0;
+
+    memset(&local_stats, 0, sizeof local_stats);
+    if (!stats) stats = &local_stats;
+    else memset(stats, 0, sizeof *stats);
 
     if (!v) return -1;
     if (!vol_write_enabled(v)) return 0;   /* read-only: nothing to merge */
@@ -660,10 +737,13 @@ int vol_sweep_dedupe(invfs_volume *v)
         ctx.segs = segs;
         ctx.n = 0;
         ctx.cap = cap;
-        ctx.blob = NULL;
-        ctx.blobcap = 0;
-        ctx.hx = &hx;
-        ctx.stop = 0;
+         ctx.blob = NULL;
+         ctx.blobcap = 0;
+         ctx.hx = &hx;
+         ctx.progress_every = progress_every;
+         ctx.progress = report;
+         ctx.progress_user = report_user;
+         ctx.stop = 0;
         ctx.err = 0;
         if (v->sb.vol_flags & VOLF_V3)
             wrc = vol_v3_walk(v, dedup_v3_walk_cb, &ctx);
@@ -676,7 +756,14 @@ int vol_sweep_dedupe(invfs_volume *v)
          * OOM or a walker failure aborts the pass */
         if (ctx.err || (wrc != 0 && !ctx.stop)) { rc = -1; goto out; }
     }
-    printf("dedupe: hashed %zu live segments\n", n);
+    stats->segments_hashed = n;
+    if (report)
+        dedup_report(report, report_user,
+                     "hash_done", n, n, 0, 0, 0, 0, 0);
+    else
+        fprintf(stderr, "dedupe: sorting %zu segment hashes...\n", n);
+    if (!report)
+        printf("dedupe: hashed %zu live segments\n", n);
 
     /* pass 2: group by hash, collect the merge intents, then rewrite each
      * losing record ONCE with all its merges applied (the WP27 churn
@@ -684,10 +771,14 @@ int vol_sweep_dedupe(invfs_volume *v)
      * 250 times; per-file is one append + one position-kill) */
     if (n > 1)
         qsort(segs, n, sizeof(dedup_seg), dedup_cmp);
+    if (report)
+        dedup_report(report, report_user, "sort", n, n, 0, 0, 0, 0, 0);
+    else
+        fprintf(stderr, "dedupe: hash sort complete; scanning duplicate groups...\n");
     pba_ref_ensure(v);
     {
         merge_ent *mi = NULL;
-        size_t nmi = 0, capmi = 0;
+        size_t nmi = 0, capmi = 0, scan_cross = 0, scan_intra = 0;
         size_t i = 0;
         uint64_t last_inode = 0;
         uint8_t *cur_blob = NULL;
@@ -695,6 +786,7 @@ int vol_sweep_dedupe(invfs_volume *v)
         invfs_ast_hdr cur_ah;
         const invfs_ast_block_entry *cur_ents = NULL;
         size_t cur_nents = 0;
+        size_t next_scan = progress_every;
 
         while (i < n) {
             size_t j = i + 1;
@@ -749,27 +841,51 @@ int vol_sweep_dedupe(invfs_volume *v)
                     mi[nmi].lba = s->lba;
                     mi[nmi].cur_pba = cur_pba;
                     mi[nmi].canon_pba = canon_pba;
+                    mi[nmi].cross_file = s->inode != segs[i].inode;
+                    if (mi[nmi].cross_file) scan_cross++;
+                    else scan_intra++;
                     nmi++;
                 }
             }
             i = j;
+            if (i >= next_scan || i == n) {
+                if (report)
+                    dedup_report(report, report_user, "scan", i, n,
+                                 nmi, merged, stats->cross_merged,
+                                 stats->intra_merged, freed_blocks);
+                else
+                    fprintf(stderr,
+                            "dedupe: duplicate scan %zu/%zu segments, candidates=%zu\n",
+                            i, n, nmi);
+                next_scan = i + progress_every;
+            }
         }
         free(cur_blob);
         if (getenv("INVFS_DEBUG"))
             fprintf(stderr, "[dedupe] pass 2: n=%zu, duplicate candidates nmi=%zu\n", n, nmi);
+        stats->duplicate_candidates = nmi;
+        stats->cross_candidates = scan_cross;
+        stats->intra_candidates = scan_intra;
+        if (report)
+            dedup_report(report, report_user, "scan", n, n,
+                         nmi, merged, 0, 0, freed_blocks);
+        else
+            fprintf(stderr, "dedupe: duplicate candidates %zu\n", nmi);
         if (nmi > 1)
             qsort(mi, nmi, sizeof *mi, merge_ent_cmp);
         i = 0;
+        {
+            size_t next_progress = progress_every;
         while (i < nmi) {
             size_t j = i + 1;
             uint64_t freed_one = 0;
-            size_t applied = 0;
+            size_t applied = 0, cross_one = 0;
             int mrc;
             while (j < nmi && mi[j].inode == mi[i].inode) j++;
             if (!marked && vol_mark_dirty(v) != 0) { rc = -1; break; }
             marked = 1;
             mrc = dedup_remap_file(v, mi[i].inode, mi + i, j - i,
-                                   &freed_one, &applied);
+                                   &freed_one, &applied, &cross_one);
             if (mrc < 0) { rc = -1; free(mi); goto out; }
             if (mrc == 2) {
                 /* inode area full (compaction impossible under a live
@@ -783,16 +899,49 @@ int vol_sweep_dedupe(invfs_volume *v)
             if (mrc == 0) {
                 merged += applied;
                 freed_blocks += freed_one;
+                stats->segments_merged += applied;
+                stats->cross_merged += cross_one;
+                stats->intra_merged += applied - cross_one;
             }
             i = j;
+            if (i >= next_progress || i == nmi) {
+                if (report)
+                    dedup_report(report, report_user, "merge", i, nmi,
+                                 nmi, merged, stats->cross_merged,
+                                 stats->intra_merged, freed_blocks);
+                else
+                    fprintf(stderr,
+                            "dedupe: merge progress %zu/%zu candidate segments, "
+                            "merged=%zu, freed=%llu blocks\n",
+                            i, nmi, merged,
+                            (unsigned long long)freed_blocks);
+                next_progress = i + progress_every;
+            }
+        }
         }
         free(mi);
     }
 stop:
-    printf("dedupe: merged %zu segments, freed %llu blocks\n",
-           merged, (unsigned long long)freed_blocks);
+    stats->segments_merged = merged;
+    stats->blocks_freed = freed_blocks;
+    if (report)
+        dedup_report(report, report_user, "merge",
+                     stats->duplicate_candidates,
+                     stats->duplicate_candidates,
+                     stats->duplicate_candidates, merged,
+                     stats->cross_merged, stats->intra_merged, freed_blocks);
+    if (!report)
+        printf("dedupe: merged %zu segments, freed %llu blocks\n",
+               merged, (unsigned long long)freed_blocks);
 out:
+    stats->segments_merged = merged;
+    stats->blocks_freed = freed_blocks;
     free(blob);
     free(segs);
     return rc ? rc : (int)merged;
+}
+
+int vol_sweep_dedupe(invfs_volume *v)
+{
+    return vol_sweep_dedupe_ex(v, NULL, NULL, NULL);
 }

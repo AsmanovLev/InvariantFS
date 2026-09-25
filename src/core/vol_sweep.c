@@ -22,7 +22,9 @@ int sweep_enospc(invfs_volume *v, uint64_t need_bytes)
  * format_version=0 behaviour is unchanged. */
 
 static int vol_sweep_one_v3(invfs_volume *v, uint64_t inode_id,
-                            const char *name);
+                            const char *name,
+                            invfs_sweep_file_progress_fn progress,
+                            void *progress_user);
 
 
 /* Give back everything the atomic sweep path allocated for the new record
@@ -203,7 +205,7 @@ int vol_sweep_file(invfs_volume *v, uint64_t inode_id)
     if (v->sb.vol_flags & VOLF_V3) {
         if (vol_write_active_id(v, inode_id))
             return 1;   /* skipped -- active write session */
-        rc = vol_sweep_one_v3(v, inode_id, NULL);
+        rc = vol_sweep_one_v3(v, inode_id, NULL, NULL, NULL);
         if (rc > 0) return 0;
         if (rc == 0) return 1;
         return -1;
@@ -403,8 +405,9 @@ int vol_sweep_file_inner(invfs_volume *v, uint64_t inode_id,
         if (vol_mark_dirty(v) != 0) { free(rec); return -1; }
         new_id = v->next_inode_id++;
     } else if (!all_raw) {
-        fprintf(stderr, "sweep: %s is partially swept; finishing in place "
-                        "(pre-atomic volume)\n", rname);
+        if (!invfs_sweep_ui_active())
+            fprintf(stderr, "sweep: %s is partially swept; finishing in place "
+                            "(pre-atomic volume)\n", rname);
     }
 
     for (i = 0; i < ast_h.num_blocks; i++) {
@@ -844,10 +847,12 @@ void defer_container_parts(invfs_volume *v, const char *name)
     }
     /* one summary line per container, not one per part (a Silesia TAR has
      * ~1500 members); same format the sweep driver's part aggregator uses */
-    if (n_bin)
-        printf("  %s!*: %d parts -> ZSTD batch\n", name, n_bin);
-    if (n_text)
-        printf("  %s!*: %d parts -> PPMd batch\n", name, n_text);
+    if (!invfs_sweep_ui_active()) {
+        if (n_bin)
+            printf("  %s!*: %d parts -> ZSTD batch\n", name, n_bin);
+        if (n_text)
+            printf("  %s!*: %d parts -> PPMd batch\n", name, n_text);
+    }
 }
 
 
@@ -1288,7 +1293,9 @@ static void *sweep_thread_worker(void *arg_) {
 }
 
 static int vol_sweep_one_v3(invfs_volume *v, uint64_t inode_id,
-                            const char *name)
+                            const char *name,
+                            invfs_sweep_file_progress_fn progress,
+                            void *progress_user)
 {
     uint8_t ccls = 0, calgo = 0;
     uint16_t cgen = 0;
@@ -1303,8 +1310,11 @@ static int vol_sweep_one_v3(invfs_volume *v, uint64_t inode_id,
         return 0;
 
     /* WP-M23: active write session guard by inode_id and name */
-    fprintf(stderr, "[sweep-v3] checking inode %llu (%s)...\n", (unsigned long long)inode_id, name ? name : "NULL");
-    fflush(stderr);
+    if (!invfs_sweep_ui_active()) {
+        fprintf(stderr, "[sweep-v3] checking inode %llu (%s)...\n",
+                (unsigned long long)inode_id, name ? name : "NULL");
+        fflush(stderr);
+    }
     if (vol_write_active_id(v, inode_id))
         return 0;
     if (name && name[0] && vol_write_active_name(v, name))
@@ -1312,7 +1322,11 @@ static int vol_sweep_one_v3(invfs_volume *v, uint64_t inode_id,
 
     /* class policy: a stamp means drained-or-gated (subset of the WP10
      * table that needs no v2 record surgery) */
-    if (vol_get_class(v, inode_id, &ccls, &calgo, &cgen) == 0 && ccls != 0) {
+    { int _gc = vol_get_class(v, inode_id, &ccls, &calgo, &cgen);
+      if (getenv("INVFS_DEBUG_PACKS"))
+        fprintf(stderr, "[cls] %s rc=%d cls=%u algo=%u gen=%u\n",
+                name ? name : "?", _gc, ccls, calgo, cgen);
+      if (_gc == 0 && ccls != 0) {
         switch (ccls) {
         case INVFS_CLASS_UNCOMPRESSIBLE:
             if (invfs_registry_generation() <= cgen)
@@ -1349,9 +1363,29 @@ static int vol_sweep_one_v3(invfs_volume *v, uint64_t inode_id,
                 return vol_jxl_retry(v, inode_id, name);
             break;              /* new sub-encoder: retry via the dispatch */
         }
+        case INVFS_CLASS_CONTAINER: {
+            /* WP-Q2R3: a decomposition is stale when the pack that made it
+             * has since bumped its generation. Migrate by re-deriving it
+             * from the RECONSTRUCTED container stream (the stored map serves
+             * the original bytes; the pack strips them again with its current
+             * recipe format). Pack-agnostic -- see vol_cpack_migrate. */
+            const invfs_codec *cc = invfs_codec_by_algo(calgo);
+            const invfs_pack_def *cd = cc ? invfs_codec_pack_def(cc) : NULL;
+            /* only packs that opt into the v2 map wire record a generation;
+             * without the opt-in a v1 map means "no generations here" and the
+             * decomposition is left alone (otherwise it would never settle) */
+            if (name && name[0] && !strchr(name, '!') && cc && cd &&
+                cd->decomp_gen && cc->generation > cgen &&
+                cpack_map_decomp_gen(v, name) < cc->generation) {
+                int mrc = vol_cpack_migrate(v, inode_id, name, cc);
+                if (mrc != 0) return mrc;
+            }
+            return 0;           /* current generation: already swept */
+        }
         default:
             return 0;           /* GENERIC/CODEC/TEXT/...: already swept */
         }
+      }
     }
 
     if (vol_v3_inode_get(v, inode_id, &in) != 1)
@@ -1431,11 +1465,28 @@ static int vol_sweep_one_v3(invfs_volume *v, uint64_t inode_id,
     invfs_ast_hdr ah;
     const invfs_ast_block_entry *ents = NULL;
     size_t n_ents = 0;
+    {
+        /* A zero recipe address = a RAW inode whose segments have not been
+         * published yet. A sibling re-created by THIS sweep (a container
+         * decomposition commit, or a migration re-deriving one) lands exactly
+         * here: there is nothing stored, so there is nothing to sweep. */
+        static const uint8_t zero_addr[INVFS_V3_RECIPE_ADDR_LEN];
+        if (memcmp(in.recipe_addr, zero_addr,
+                   INVFS_V3_RECIPE_ADDR_LEN) == 0)
+            return 0;
+    }
     if (vol_v3_recipe_load(v, in.recipe_addr, &blob, &blen) != 0 || !blob)
         return -1;
-    if (vol_ast_recipe_parse(blob, blen, &ah, &ents, &n_ents) != 0 || !ents || n_ents == 0) {
+    if (vol_ast_recipe_parse(blob, blen, &ah, &ents, &n_ents) != 0) {
         free(blob);
-        return -1;
+        return -1;               /* a recipe that does not parse is corrupt */
+    }
+    if (!ents || n_ents == 0) {
+        /* a RAW inode whose segments have not been written yet (a sibling
+         * re-created by this same sweep, e.g. a decomposition migration):
+         * nothing stored, nothing to sweep -- not an error */
+        free(blob);
+        return 0;
     }
 
     int zlevel = invfs_profile_zstd_level(v->profile);
@@ -1553,7 +1604,11 @@ static int vol_sweep_one_v3(invfs_volume *v, uint64_t inode_id,
             }
 
             /* 3. Sequential allocate, write, refcount, and map update */
-            if (batch_start % 2560 == 0 || batch_end == n_ents) {
+            if (progress)
+                progress(progress_user, name, (uint64_t)batch_end,
+                         (uint64_t)n_ents);
+            if (!invfs_sweep_ui_active() &&
+                (batch_start % 2560 == 0 || batch_end == n_ents)) {
                 fprintf(stderr, "    [sweep] processed %zu / %zu segments (%.1f%%)...\n",
                         batch_end, n_ents, (batch_end * 100.0) / n_ents);
                 fflush(stderr);
@@ -1704,7 +1759,8 @@ static int vol_sweep_one_v3(invfs_volume *v, uint64_t inode_id,
 /* process a single inode: container explode / transcode / shadow move.
    Returns 1 if the inode was replaced/transcoded, 0 if not applicable,
    -1 on hard error (caller keeps it pending or aborts). */
-int vol_sweep_one(invfs_volume *v, uint64_t inode_id, const char *name)
+int vol_sweep_one_ex(invfs_volume *v, uint64_t inode_id, const char *name,
+                      invfs_sweep_file_progress_fn progress, void *progress_user)
 {
     uint8_t *full = NULL;
     size_t full_len = 0;
@@ -1717,8 +1773,29 @@ int vol_sweep_one(invfs_volume *v, uint64_t inode_id, const char *name)
 
     /* WP-M21b: v3 volumes take the blob-store path; everything below
      * this line is v2 record surgery. */
-    if (v->sb.vol_flags & VOLF_V3)
-        return vol_sweep_one_v3(v, inode_id, name);
+    if (v->sb.vol_flags & VOLF_V3) {
+        uint64_t live = inode_id;
+        int r3;
+        /* A record can be REPLACED between the walk that collected the id
+         * and this call: a container commit -- or a decomposition migration
+         * re-deriving one, which re-creates every "!mbr*" sibling -- retires
+         * the old inode under the same name. A stale id is not a hard error,
+         * it is a name that now resolves elsewhere: re-resolve and sweep the
+         * live record (which the next run would have done anyway). */
+        if (name && name[0]) {
+            uint64_t n = vol_find(v, name);
+            if (n) {
+                if (n != live && getenv("INVFS_DEBUG_PACKS"))
+                    fprintf(stderr, "sweep: %s: record replaced mid-sweep "
+                                    "(id %llu -> %llu), sweeping the live "
+                                    "one\n", name,
+                            (unsigned long long)live,
+                            (unsigned long long)n);
+                live = n;
+            }
+        }
+        return vol_sweep_one_v3(v, live, name, progress, progress_user);
+    }
 
     if (!name || strlen(name) > 240) return 0;
     /* internal control names (the "\x01tzb" batch owner) are never swept */
@@ -1921,6 +1998,11 @@ int vol_sweep_one(invfs_volume *v, uint64_t inode_id, const char *name)
         if (rc < 0) return -1;      /* hard error */
         return 0;                   /* already in Shadow: nothing done */
     }
+}
+
+int vol_sweep_one(invfs_volume *v, uint64_t inode_id, const char *name)
+{
+    return vol_sweep_one_ex(v, inode_id, name, NULL, NULL);
 }
 
 

@@ -2597,6 +2597,57 @@ int vol_v3_recipe_store(invfs_volume *v, const uint8_t *blob, size_t blen,
 /* Fetch and VERIFY the recipe blob named by `addr`. On success *blob_out is
  * a malloc'd copy the caller frees. 0 = ok, -1 = absent, unreadable, or a
  * BLAKE3 mismatch (hard error -- never returns unverified bytes). */
+/* WP-Q2R3 recipe cache. The address IS the BLAKE3 of the bytes, so a hit is
+ * always correct and nothing ever needs invalidating -- the only cost is a
+ * copy, which is what the caller was going to do anyway. Two slots: the hot
+ * inode plus whatever a walk touches next. */
+static int v3_rcache_get(invfs_volume *v, const uint8_t *addr,
+                         uint8_t **blob_out, size_t *blen_out)
+{
+    int i, hit = -1;
+
+    pthread_mutex_lock(&v->rc_mu);
+    for (i = 0; i < 2; i++)
+        if (v->rcache[i].used &&
+            memcmp(v->rcache[i].addr, addr, INVFS_V3_RECIPE_ADDR_LEN) == 0) {
+            hit = i;
+            break;
+        }
+    if (hit >= 0) {
+        uint8_t *copy = (uint8_t *)malloc(v->rcache[hit].len ?
+                                          v->rcache[hit].len : 1);
+        if (copy) {
+            memcpy(copy, v->rcache[hit].blob, v->rcache[hit].len);
+            *blob_out = copy;
+            *blen_out = v->rcache[hit].len;
+        }
+    }
+    pthread_mutex_unlock(&v->rc_mu);
+    return hit >= 0 && *blob_out ? 0 : -1;
+}
+
+static void v3_rcache_put(invfs_volume *v, const uint8_t *addr,
+                          const uint8_t *blob, size_t len)
+{
+    int i, victim = 0;
+    uint8_t *copy;
+
+    /* one huge recipe must not evict the pair for a trivial slot */
+    if (len > (64u << 20)) return;
+    copy = (uint8_t *)malloc(len ? len : 1);
+    if (!copy) return;
+    memcpy(copy, blob, len);
+    pthread_mutex_lock(&v->rc_mu);
+    for (i = 0; i < 2; i++)
+        if (!v->rcache[i].used) { victim = i; break; }
+    free(v->rcache[victim].blob);
+    memcpy(v->rcache[victim].addr, addr, INVFS_V3_RECIPE_ADDR_LEN);
+    v->rcache[victim].blob = copy;
+    v->rcache[victim].len = len;
+    v->rcache[victim].used = 1;
+    pthread_mutex_unlock(&v->rc_mu);
+}
+
 int vol_v3_recipe_load(invfs_volume *v, const uint8_t addr[INVFS_V3_RECIPE_ADDR_LEN],
                        uint8_t **blob_out, size_t *blen_out)
 {
@@ -2612,6 +2663,8 @@ int vol_v3_recipe_load(invfs_volume *v, const uint8_t addr[INVFS_V3_RECIPE_ADDR_
     *blen_out = 0;
     if (v3_ready(v) != 0)
         return -1;
+    if (v3_rcache_get(v, addr, blob_out, blen_out) == 0)
+        return 0;
     v3_recipe_key(kb, addr);
 
     /* WP-M11: the delta owns the key if it was rewritten since the fold;
@@ -2645,6 +2698,7 @@ int vol_v3_recipe_load(invfs_volume *v, const uint8_t addr[INVFS_V3_RECIPE_ADDR_
             }
             *blob_out = blob;
             *blen_out = dr.vlen;
+            v3_rcache_put(v, addr, blob, dr.vlen);
             return 0;
         }
     }
@@ -2694,6 +2748,7 @@ int vol_v3_recipe_load(invfs_volume *v, const uint8_t addr[INVFS_V3_RECIPE_ADDR_
             }
             *blob_out = blob;
             *blen_out = total_len;
+            v3_rcache_put(v, addr, blob, total_len);
             return 0;
         }
     }
@@ -2714,6 +2769,7 @@ int vol_v3_recipe_load(invfs_volume *v, const uint8_t addr[INVFS_V3_RECIPE_ADDR_
     }
     *blob_out = blob;
     *blen_out = val.n;
+    v3_rcache_put(v, addr, blob, val.n);
     return 0;
 }
 

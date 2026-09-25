@@ -786,9 +786,10 @@ int vol_heat_promote(invfs_volume *v)
                             "ZSTD\n", ctx.cand[i].name, ctx.cand[i].r);
     }
 out:
-    printf("heat: %zu hot text member(s), %d promoted "
-           "(budget %zu of %zu live)\n", ctx.n_cand, promoted, budget,
-           ctx.text_members);
+    if (!invfs_sweep_ui_active())
+        printf("heat: %zu hot text member(s), %d promoted "
+               "(budget %zu of %zu live)\n", ctx.n_cand, promoted, budget,
+               ctx.text_members);
     free(ctx.cand);
     return promoted;
 }

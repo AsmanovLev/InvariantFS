@@ -130,7 +130,38 @@ int main(void)
         free(re_qcow);
     }
 
-    /* 3. Negative test: arbitrary stream rejection */
+    /* 3. Bundled stock zlib backend is selectable and detectable. */
+    {
+        invfs_deflate_params stock_params = {
+            .engine = INVFS_DEFLATE_ENGINE_ZLIB_STOCK,
+            .level = 6,
+            .mem_level = 9,
+            .strategy = Z_DEFAULT_STRATEGY,
+            .window_bits = -12
+        };
+        invfs_deflate_params found_stock;
+        uint8_t *stock_stream = NULL;
+        uint8_t *stock_again = NULL;
+        size_t stock_len = 0, stock_again_len = 0;
+        int rc = invfs_deflate_repro_encode(raw, raw_len, &stock_params,
+                                           &stock_stream, &stock_len);
+        ok(rc == 0 && stock_stream != NULL,
+           "encode with bundled stock zlib backend");
+        memset(&found_stock, 0, sizeof found_stock);
+        rc = invfs_deflate_repro_find(raw, raw_len, stock_stream, stock_len,
+                                      -12, &found_stock);
+        ok(rc == 0 && found_stock.engine == INVFS_DEFLATE_ENGINE_ZLIB_STOCK,
+           "detect bundled stock zlib encoder");
+        rc = invfs_deflate_repro_encode(raw, raw_len, &found_stock,
+                                        &stock_again, &stock_again_len);
+        ok(rc == 0 && stock_again_len == stock_len &&
+           memcmp(stock_again, stock_stream, stock_len) == 0,
+           "re-encode with detected stock backend");
+        free(stock_stream);
+        free(stock_again);
+    }
+
+    /* 4. Negative test: arbitrary stream rejection */
     {
         uint8_t garbage[128];
         memset(garbage, 0xA5, sizeof garbage);

@@ -361,6 +361,7 @@ struct pack_manifest {
      * the FS-owned member map (MRMP); presence makes the pack SEEKABLE. */
     char     map[512];
     int      has_map;
+    int      decomp_gen;   /* manifest `decomp_gen = 1` (WP-Q2R3) */
 };
 
 static void str_copy(char *dst, size_t cap, const char *src)
@@ -473,6 +474,8 @@ static int parse_manifest(const char *path, struct pack_manifest *m)
         } else if (strcmp(s, "map") == 0) {
             str_copy(m->map, sizeof m->map, val);
             m->has_map = 1;
+        } else if (strcmp(s, "decomp_gen") == 0) {
+            m->decomp_gen = (strtol(val, NULL, 0) != 0);
         } else if (strcmp(s, "type") == 0) {
             /* WP16a: only "container" is special; anything else = codec */
             m->is_container = (strcmp(val, "container") == 0);
@@ -1140,6 +1143,7 @@ static void pack_register(const char *dir, const struct pack_manifest *m)
     /* WP16b: `map` is a container-ABI command; on a codec pack the line is
      * parsed but never wired (def.map stays NULL, no CAP_SEEK). */
     p->map = (m->is_container && m->has_map) ? pack_strdup(m->map) : NULL;
+    p->def.decomp_gen = (m->is_container && m->decomp_gen) ? 1 : 0;
     if (!p->dir || !p->name ||
         (m->has_encode && !p->encode) || (m->has_decode && !p->decode) ||
         (m->has_estimate && !p->estimate) ||

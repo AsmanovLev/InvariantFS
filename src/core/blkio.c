@@ -54,7 +54,18 @@ int blkio_looks_like_device(const char *path)
         return 1;
     return 0;
 #else
-    return strncmp(path, "/dev/", 5) == 0;
+    /* A path is a device when it IS one, not when it merely lives under
+     * /dev: /dev/shm is a tmpfs, and so is every /dev/<dir> some systems
+     * mount there. Stat it and ask the kernel -- a regular-file volume image
+     * must open as a file (get its size with fstat, not BLKGETSIZE64), and
+     * BLKGETSIZE64 on a tmpfs file fails with ENOTTY, which used to make
+     * every volume under /dev/shm unopenable by path. */
+    {
+        struct stat st;
+        if (path[0] != '/') return 0;
+        if (stat(path, &st) != 0) return 0;   /* not there yet (BLKIO_CREATE) */
+        return S_ISBLK(st.st_mode) ? 1 : 0;
+    }
 #endif
 }
 

@@ -1,7 +1,7 @@
 /*
  * invf-sweep.c — offline sweep driver for Linux
  *
- *   invf-sweep <image> [--dry-run]
+ *   invf-sweep <image> [--dry-run] [--log <file>]
  *                      [--seal|--unseal]
  *                      [--redundant-blocks <f>]
  *                      [--redundant-paranoic <f>[:rs-vm|rs-cauchy]]
@@ -74,12 +74,17 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stddef.h>
+#include <time.h>
 
 #ifndef _WIN32
 #include <signal.h>
 #include <unistd.h>
 #include <errno.h>
+#include <fcntl.h>
+#include <poll.h>
+#include <pthread.h>
 #include <sys/stat.h>
+#include <sys/types.h>
 #endif
 
 #include "invarifs.h"
@@ -102,6 +107,411 @@ typedef struct {
 
 static part_agg *g_parts;
 static size_t   g_parts_n, g_parts_cap;
+
+typedef struct {
+    unsigned current;
+    unsigned total;
+    const char *name;
+    uint64_t start_ms;
+    uint64_t last_ms;
+    uint64_t done;
+    uint64_t goal;
+    double fraction;
+    uint64_t interval_ms;
+    int active;
+} sweep_ui_state;
+
+static sweep_ui_state g_ui;
+static int g_progress_tty;
+static int g_progress_line_active;
+static int g_color_mode = -1;
+
+static int sw_color_enabled(void)
+{
+    if (g_color_mode >= 0) return g_color_mode;
+    return g_progress_tty && !getenv("NO_COLOR");
+}
+
+static uint64_t sw_now_ms(void)
+{
+    struct timespec ts;
+    if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0) return 0;
+    return (uint64_t)ts.tv_sec * 1000u + (uint64_t)ts.tv_nsec / 1000000u;
+}
+
+static void sw_duration(uint64_t ms, char *buf, size_t cap)
+{
+    unsigned long long sec = (unsigned long long)(ms / 1000u);
+    if (sec < 60)
+        snprintf(buf, cap, "%llus", (unsigned long long)(ms % 1000u));
+    else if (sec < 3600)
+        snprintf(buf, cap, "%llum%02llus", sec / 60u, sec % 60u);
+    else
+        snprintf(buf, cap, "%lluh%02llum", sec / 3600u,
+                 (sec % 3600u) / 60u);
+}
+
+static void sw_progress_interval(void)
+{
+    const char *s;
+    char *end = NULL;
+    unsigned long n;
+
+    if (g_ui.interval_ms) return;
+    g_ui.interval_ms = 250u;
+#ifndef _WIN32
+    if (!g_progress_tty) g_ui.interval_ms = 5000u;
+#endif
+    s = getenv("INVFS_SWEEP_PROGRESS_MS");
+    if (!s || !*s) return;
+    n = strtoul(s, &end, 10);
+    if (end != s && *end == '\0' && n >= 100 && n <= 60000)
+        g_ui.interval_ms = n;
+}
+
+static void sw_stage_total(unsigned total)
+{
+    memset(&g_ui, 0, sizeof g_ui);
+    g_ui.total = total;
+    sw_progress_interval();
+}
+
+static void sw_stage_line(uint64_t now, const char *detail, int force,
+                          int final)
+{
+    uint64_t elapsed, eta_ms = 0;
+    char elapsed_s[32], eta_s[32], count_s[64], line[768];
+    const char *eta = "--";
+    double pct_value = 100.0;
+    char pct_buf[24];
+    const char *pct = "     -";
+    const char *c_reset = "", *c_bracket = "", *c_name = "";
+    const char *c_pct = "", *c_eta = "", *c_elapsed = "", *c_dim = "";
+    int color, n;
+
+    if (!g_ui.active) return;
+    elapsed = now >= g_ui.start_ms ? now - g_ui.start_ms : 0;
+    if (!force && now < g_ui.last_ms + g_ui.interval_ms) return;
+    g_ui.last_ms = now;
+    sw_duration(elapsed, elapsed_s, sizeof elapsed_s);
+    if (g_ui.goal) {
+        if (g_ui.done > g_ui.goal) g_ui.done = g_ui.goal;
+        if (g_ui.fraction > g_ui.goal) g_ui.fraction = (double)g_ui.goal;
+        pct_value = g_ui.fraction * 100.0 / (double)g_ui.goal;
+        snprintf(pct_buf, sizeof pct_buf, "%5.1f%%", pct_value);
+        pct = pct_buf;
+        if (g_ui.fraction > 0.0 && g_ui.fraction < g_ui.goal) {
+            eta_ms = (uint64_t)((double)elapsed *
+                                ((double)(g_ui.goal - g_ui.fraction) /
+                                 g_ui.fraction));
+            sw_duration(eta_ms, eta_s, sizeof eta_s);
+            eta = eta_s;
+        } else if (g_ui.fraction >= g_ui.goal) {
+            eta = "0s";
+        }
+    }
+    if (g_ui.goal)
+        snprintf(count_s, sizeof count_s, "%llu/%llu",
+                 (unsigned long long)g_ui.done,
+                 (unsigned long long)g_ui.goal);
+    else
+        snprintf(count_s, sizeof count_s, "%llu",
+                 (unsigned long long)g_ui.done);
+    color = sw_color_enabled();
+    if (color) {
+        c_reset = "\033[0m";
+        c_bracket = "\033[36m";
+        c_name = "\033[1;36m";
+        c_pct = pct_value >= 75.0 ? "\033[32m" :
+                pct_value >= 25.0 ? "\033[36m" : "\033[33m";
+        c_eta = "\033[35m";
+        c_elapsed = "\033[1;37m";
+        c_dim = "\033[2m";
+    }
+    n = snprintf(line, sizeof line, "%s[%u/%u]%s %s%-10s%s %s%s%s  %s%s%s  ETA %s%s%s  %selapsed %s%s",
+                 c_bracket, g_ui.current, g_ui.total, c_reset,
+                 c_name, g_ui.name, c_reset,
+                 c_pct, pct, c_reset, c_dim, count_s, c_reset,
+                 c_eta, eta, c_reset,
+                 c_elapsed, elapsed_s, c_reset);
+    if (n < 0 || (size_t)n >= sizeof line) return;
+    (void)final;
+    if (detail && *detail) {
+        size_t used = (size_t)n;
+        n = snprintf(line + used, sizeof line - used, "  %s%s%s",
+                     c_dim, detail, c_reset);
+        if (n < 0 || (size_t)n >= sizeof line - used) return;
+    }
+#ifndef _WIN32
+    if (g_progress_tty) {
+        if (g_progress_line_active) fputs("\r\033[2K", stderr);
+        fputs(line, stderr);
+        g_progress_line_active = 1;
+        return;
+    }
+#endif
+    fputs(line, stderr);
+    fputc('\n', stderr);
+}
+
+static void sw_stage_begin(unsigned current, const char *name,
+                           uint64_t goal, const char *detail)
+{
+    uint64_t now = sw_now_ms();
+    g_ui.current = current;
+    g_ui.name = name;
+    g_ui.start_ms = now;
+    g_ui.last_ms = now;
+    g_ui.done = 0;
+    g_ui.goal = goal;
+    g_ui.active = 1;
+    sw_stage_line(now, detail, 1, 0);
+}
+
+static void sw_stage_update(uint64_t done, uint64_t goal, const char *detail)
+{
+    g_ui.done = done;
+    g_ui.fraction = (double)done;
+    if (goal) g_ui.goal = goal;
+    sw_stage_line(sw_now_ms(), detail, 0, 0);
+}
+
+static void sw_stage_fraction(double fraction, uint64_t done, uint64_t goal,
+                               const char *detail)
+{
+    g_ui.fraction = fraction;
+    g_ui.done = done;
+    if (goal) g_ui.goal = goal;
+    sw_stage_line(sw_now_ms(), detail, 0, 0);
+}
+
+static void sw_progress_suspend(void)
+{
+#ifndef _WIN32
+    if (g_progress_tty && g_progress_line_active) {
+        fputc('\n', stderr);
+        g_progress_line_active = 0;
+    }
+#endif
+}
+
+static void sw_progress_finish(void)
+{
+#ifndef _WIN32
+    if (g_progress_tty && g_progress_line_active) {
+        fputc('\n', stderr);
+        g_progress_line_active = 0;
+    }
+#endif
+}
+
+static void sw_stage_end(const char *detail)
+{
+    uint64_t now = sw_now_ms();
+    if (g_ui.goal && g_ui.done < g_ui.goal) g_ui.done = g_ui.goal;
+    g_ui.fraction = (double)g_ui.goal;
+    sw_stage_line(now, detail, 1, 1);
+    g_ui.active = 0;
+}
+
+#ifndef _WIN32
+static FILE *g_log_file;
+static int g_log_out_pipe[2] = { -1, -1 };
+static int g_log_err_pipe[2] = { -1, -1 };
+static int g_log_saved_stdout = -1;
+static int g_log_saved_stderr = -1;
+static pthread_t g_log_thread;
+static int g_log_thread_started;
+static volatile int g_log_stopping;
+
+static int sw_write_all(int fd, const void *buf, size_t len)
+{
+    const uint8_t *p = (const uint8_t *)buf;
+    while (len) {
+        ssize_t n = write(fd, p, len);
+        if (n < 0 && errno == EINTR) continue;
+        if (n <= 0) return -1;
+        p += n;
+        len -= (size_t)n;
+    }
+    return 0;
+}
+
+static void *sw_log_pump(void *user)
+{
+    struct pollfd pfd[2];
+    (void)user;
+    pfd[0].fd = g_log_out_pipe[0];
+    pfd[1].fd = g_log_err_pipe[0];
+    pfd[0].events = pfd[1].events = POLLIN;
+    for (;;) {
+        uint8_t buf[8192];
+        int i, ready;
+        pfd[0].revents = pfd[1].revents = 0;
+        ready = poll(pfd, 2, 100);
+        if (ready < 0) {
+            if (errno == EINTR) continue;
+            break;
+        }
+        for (i = 0; i < 2; i++) {
+            if (pfd[i].fd >= 0 && ready > 0 &&
+                (pfd[i].revents & (POLLIN|POLLHUP))) {
+                ssize_t n = read(pfd[i].fd, buf, sizeof buf);
+                if (n > 0) {
+                    int console = i ? g_log_saved_stderr : g_log_saved_stdout;
+                    (void)sw_write_all(console, buf, (size_t)n);
+                    (void)fwrite(buf, 1, (size_t)n, g_log_file);
+                    fflush(g_log_file);
+                } else if (n == 0) {
+                    pfd[i].fd = -1;
+                }
+            }
+        }
+        if (pfd[0].fd < 0 && pfd[1].fd < 0) break;
+        if (ready == 0 && g_log_stopping) break;
+    }
+    return NULL;
+}
+
+static void sw_log_cleanup(void)
+{
+    if (g_log_saved_stdout >= 0)
+        (void)dup2(g_log_saved_stdout, STDOUT_FILENO);
+    if (g_log_saved_stderr >= 0)
+        (void)dup2(g_log_saved_stderr, STDERR_FILENO);
+    if (g_log_out_pipe[0] >= 0) close(g_log_out_pipe[0]);
+    if (g_log_out_pipe[1] >= 0) close(g_log_out_pipe[1]);
+    if (g_log_err_pipe[0] >= 0) close(g_log_err_pipe[0]);
+    if (g_log_err_pipe[1] >= 0) close(g_log_err_pipe[1]);
+    if (g_log_saved_stdout >= 0) close(g_log_saved_stdout);
+    if (g_log_saved_stderr >= 0) close(g_log_saved_stderr);
+    g_log_out_pipe[0] = g_log_out_pipe[1] = -1;
+    g_log_err_pipe[0] = g_log_err_pipe[1] = -1;
+    g_log_saved_stdout = g_log_saved_stderr = -1;
+    if (g_log_file) fclose(g_log_file);
+    g_log_file = NULL;
+}
+
+static void sw_log_stop(void)
+{
+    if (!g_log_thread_started) {
+        sw_log_cleanup();
+        return;
+    }
+    fflush(stdout);
+    fflush(stderr);
+    if (g_log_saved_stdout >= 0)
+        (void)dup2(g_log_saved_stdout, STDOUT_FILENO);
+    if (g_log_saved_stderr >= 0)
+        (void)dup2(g_log_saved_stderr, STDERR_FILENO);
+    g_log_stopping = 1;
+    (void)pthread_join(g_log_thread, NULL);
+    g_log_thread_started = 0;
+    sw_log_cleanup();
+}
+
+static int sw_log_start(const char *path, const char *image)
+{
+    time_t now = time(NULL);
+    struct tm tm;
+    char stamp[64];
+
+    if (!path || !*path) return 0;
+    g_log_file = fopen(path, "a");
+    if (!g_log_file) {
+        fprintf(stderr, "cannot open sweep log %s: %s\n",
+                path, strerror(errno));
+        return -1;
+    }
+    localtime_r(&now, &tm);
+    strftime(stamp, sizeof stamp, "%Y-%m-%dT%H:%M:%S%z", &tm);
+    fprintf(g_log_file, "==== invf-sweep %s pid=%ld image=%s ====\n",
+            stamp, (long)getpid(), image ? image : "-");
+    fflush(g_log_file);
+    if (pipe(g_log_out_pipe) != 0 || pipe(g_log_err_pipe) != 0) {
+        fprintf(stderr, "cannot create sweep log pipes: %s\n", strerror(errno));
+        sw_log_cleanup();
+        return -1;
+    }
+    g_log_saved_stdout = dup(STDOUT_FILENO);
+    g_log_saved_stderr = dup(STDERR_FILENO);
+    if (g_log_saved_stdout < 0 || g_log_saved_stderr < 0 ||
+        dup2(g_log_out_pipe[1], STDOUT_FILENO) < 0 ||
+        dup2(g_log_err_pipe[1], STDERR_FILENO) < 0) {
+        fprintf(stderr, "cannot redirect sweep output: %s\n", strerror(errno));
+        g_log_stopping = 0;
+        sw_log_cleanup();
+        return -1;
+    }
+    close(g_log_out_pipe[1]);
+    close(g_log_err_pipe[1]);
+    g_log_out_pipe[1] = g_log_err_pipe[1] = -1;
+    if (pthread_create(&g_log_thread, NULL, sw_log_pump, NULL) != 0) {
+        fprintf(stderr, "cannot start sweep log pump: %s\n", strerror(errno));
+        g_log_stopping = 0;
+        sw_log_cleanup();
+        return -1;
+    }
+    g_log_thread_started = 1;
+    (void)atexit(sw_log_stop);
+    return 0;
+}
+#endif
+
+static void sw_file_progress(void *user, const char *name,
+                             uint64_t done, uint64_t total)
+{
+    char detail[256];
+    const char *base = name ? strrchr(name, '/') : NULL;
+    uint64_t completed = g_ui.done;
+    double fraction = (double)completed;
+
+    (void)user;
+    if (total) fraction += (double)done / (double)total;
+    if (base) base++;
+    else base = name ? name : "";
+    snprintf(detail, sizeof detail, "segments %llu/%llu  %s",
+             (unsigned long long)done, (unsigned long long)total, base);
+    sw_stage_fraction(fraction, completed, g_ui.goal, detail);
+}
+
+static void sw_dedupe_progress(void *user, const invfs_dedupe_progress *p)
+{
+    char detail[192];
+    const char *phase;
+
+    (void)user;
+    if (!p || !p->phase) return;
+    phase = p->phase;
+    if (strcmp(phase, "hash") == 0 ||
+        strcmp(phase, "hash_done") == 0) {
+        snprintf(detail, sizeof detail, "hashing %llu segments",
+                 (unsigned long long)p->done);
+        sw_stage_update(p->done, p->total, detail);
+        if (!invfs_sweep_ui_active() && strcmp(phase, "hash_done") == 0)
+            sw_progress_suspend();
+    } else if (strcmp(phase, "sort") == 0) {
+        snprintf(detail, sizeof detail, "hashed=%llu sorted",
+                 (unsigned long long)p->done);
+        sw_stage_update(p->done, p->total, detail);
+    } else if (strcmp(phase, "scan") == 0) {
+        snprintf(detail, sizeof detail, "candidates=%llu",
+                 (unsigned long long)p->candidates);
+        sw_stage_update(p->done, p->total, detail);
+    } else if (strcmp(phase, "merge") == 0) {
+        double mib = (double)p->freed * (double)INVFS_BLOCK_SIZE /
+                     (1024.0 * 1024.0);
+        snprintf(detail, sizeof detail,
+                 "merged=%llu cross=%llu intra=%llu freed=%.1f MiB",
+                 (unsigned long long)p->merged,
+                 (unsigned long long)p->cross_merged,
+                 (unsigned long long)p->intra_merged,
+                 mib);
+        sw_stage_update(p->done, p->total, detail);
+        if (!invfs_sweep_ui_active() && p->total && p->done == p->total)
+            sw_progress_suspend();
+    }
+}
 
 static void part_agg_add(const char *name, int binary)
 {
@@ -133,6 +543,12 @@ static void part_agg_add(const char *name, int binary)
 static void part_agg_print(void)
 {
     size_t i;
+    if (invfs_sweep_ui_active()) {
+        free(g_parts);
+        g_parts = NULL;
+        g_parts_n = g_parts_cap = 0;
+        return;
+    }
     for (i = 0; i < g_parts_n; i++) {
         if (g_parts[i].n_bin)
             printf("  %s*: %d parts -> ZSTD batch\n", g_parts[i].prefix,
@@ -522,12 +938,17 @@ int main(int argc, char **argv)
     int no_realize = 0, stopped = 0;
     int fast = 0;
     const char *extract_dir = NULL;    /* WP23 --extract-packs mode */
+    const char *log_path = NULL;
+    const char *color_arg = NULL;
     double rb_f = -1.0, rp_f = -1.0;   /* <0: flag absent */
     int rp_algo = 0;                   /* explicit :rs-vm/:rs-cauchy suffix */
     int auto_reseal = 0;
     uint64_t rec_bytes = 0;   /* WP42: record bytes walked (compaction trigger) */
-    int count = 0, cap = 0, swept = 0, skipped = 0, failed = 0;
+    int count = 0, cap = 0, kept = 0, swept = 0, skipped = 0, failed = 0;
     int reg_failed = 0;   /* WP53: retention-registry write failed */
+    unsigned ui_heat = 0, ui_tier = 0, ui_dedupe = 0;
+    unsigned ui_batches = 0, ui_finalize = 0, ui_seal = 0;
+    invfs_dedupe_stats ui_dedupe_stats;
     char (*names)[256] = NULL;
     uint64_t *inodes = NULL;
     uint64_t *sizes = NULL;
@@ -550,6 +971,8 @@ int main(int argc, char **argv)
                 "                         retention registry, clear CKP0)\n"
                 "           [--no-realize] (keep the previous checkpoint live;\n"
                 "                         blocks stay held until the next sweep)\n"
+                "           [--log <file>] (append combined stdout/stderr)\n"
+                "           [--color auto|always|never] (default: auto; NO_COLOR honored)\n"
                 "  --fast      cheap pass: RAW files take the generic\n"
                 "              per-segment recompress only (no classification,\n"
                 "              transcodes, decomposition, batching or dedupe)\n"
@@ -578,6 +1001,8 @@ int main(int argc, char **argv)
                 "                         retention registry, clear CKP0)\n"
                 "           [--no-realize] (keep the previous checkpoint live;\n"
                 "                         blocks stay held until the next sweep)\n"
+                "           [--log <file>] (append combined stdout/stderr)\n"
+                "           [--color auto|always|never] (default: auto; NO_COLOR honored)\n"
                 "  --fast      cheap pass: RAW files take the generic\n"
                 "              per-segment recompress only (no classification,\n"
                 "              transcodes, decomposition, batching or dedupe)\n"
@@ -601,6 +1026,10 @@ int main(int argc, char **argv)
             fast = 1;
         } else if (strcmp(a, "--compact") == 0) {
             /* retired in WP-M21; accepted silently as a no-op */
+        } else if (strcmp(a, "--log") == 0 && i + 1 < argc) {
+            log_path = argv[++i];
+        } else if (strcmp(a, "--color") == 0 && i + 1 < argc) {
+            color_arg = argv[++i];
         } else if (strcmp(a, "--extract-packs") == 0 && i + 1 < argc) {
             extract_dir = argv[++i];
         } else if (strcmp(a, "--seal") == 0) {
@@ -662,9 +1091,37 @@ int main(int argc, char **argv)
     /* WP-M21: --compact retired; the fold (vol_v3_fold_request) is the
      * only reclaim path, and it always runs as part of a normal sweep. */
 
+    if (!log_path) log_path = getenv("INVFS_SWEEP_LOG");
+#ifndef _WIN32
+    g_progress_tty = isatty(STDERR_FILENO) && !(log_path && *log_path);
+#else
+    g_progress_tty = 0;
+#endif
+    invfs_sweep_ui_set(g_progress_tty);
+    if (g_progress_tty) atexit(sw_progress_finish);
+    if (!color_arg) color_arg = getenv("INVFS_SWEEP_COLOR");
+    if (color_arg && *color_arg) {
+        if (strcmp(color_arg, "auto") == 0) g_color_mode = -1;
+        else if (strcmp(color_arg, "always") == 0) g_color_mode = 1;
+        else if (strcmp(color_arg, "never") == 0) g_color_mode = 0;
+        else {
+            fprintf(stderr, "--color: expected auto, always, or never\n");
+            return 2;
+        }
+    }
+#ifndef _WIN32
+    if (sw_log_start(log_path, img) != 0) return 1;
+#else
+    if (log_path && *log_path) {
+        fprintf(stderr, "--log is not supported on this platform\n");
+        return 1;
+    }
+#endif
+
     /* per-file lines go to stdout, the summary to stderr: unbuffered, or a
      * redirected log tears a line at every 4 KB flush boundary */
     setvbuf(stdout, NULL, _IONBF, 0);
+    setvbuf(stderr, NULL, _IONBF, 0);
 #ifndef _WIN32
     signal(SIGINT, on_sigint);
     signal(SIGTERM, on_sigint);
@@ -696,14 +1153,16 @@ int main(int argc, char **argv)
         }
         if (prof_from_env) {
             int ga = invfs_profile_generic_algo((int)vol_get_profile(vol));
-            if (ga == INVFS_ALGO_ZSTD)
-                fprintf(stderr, "profile: %s (generic zstd level %d)\n",
-                        invfs_profile_name((int)vol_get_profile(vol)),
-                        invfs_profile_zstd_level((int)vol_get_profile(vol)));
-            else
-                fprintf(stderr, "profile: %s (generic %s)\n",
-                        invfs_profile_name((int)vol_get_profile(vol)),
-                        ga == INVFS_ALGO_LZ4 ? "lz4" : "verbatim");
+            if (!invfs_sweep_ui_active()) {
+                if (ga == INVFS_ALGO_ZSTD)
+                    fprintf(stderr, "profile: %s (generic zstd level %d)\n",
+                            invfs_profile_name((int)vol_get_profile(vol)),
+                            invfs_profile_zstd_level((int)vol_get_profile(vol)));
+                else
+                    fprintf(stderr, "profile: %s (generic %s)\n",
+                            invfs_profile_name((int)vol_get_profile(vol)),
+                            ga == INVFS_ALGO_LZ4 ? "lz4" : "verbatim");
+            }
         }
     }
     /* WP10 memory policy: same size grammar as INVFS_ARC_BYTES in volume.c;
@@ -752,6 +1211,38 @@ int main(int argc, char **argv)
         return xrc;
     }
 
+    {
+        unsigned ui_total = 3;
+        int live_seal = 0;
+
+        if (!dry) {
+            uint32_t k1c, m2c;
+            int l2c;
+            if (!unseal && vol_redun_state(vol, &k1c, &l2c, &m2c))
+                live_seal = 1;
+        }
+        if (!dry && !fast) {
+            ui_heat = 4;
+            ui_tier = vol_ndev(vol) == 2 ? 5 : 0;
+            ui_dedupe = ui_tier ? 6 : 5;
+            ui_batches = ui_dedupe + 1;
+            ui_finalize = ui_batches + 1;
+            ui_seal = (seal || rb_f >= 0 || rp_f >= 0 || live_seal) ?
+                      ui_finalize + 1 : 0;
+            ui_total = ui_seal ? ui_seal : ui_finalize;
+        } else if (!dry) {
+            ui_finalize = 4;
+            if (seal || rb_f >= 0 || rp_f >= 0 || live_seal) {
+                ui_seal = 5;
+                ui_total = ui_seal;
+            } else {
+                ui_total = ui_finalize;
+            }
+        }
+        sw_stage_total(ui_total);
+        sw_stage_begin(1, "prepare", 0, "checkpoint + policy");
+    }
+
     /* WP20b: apply the requested redundancy configuration (persisted into
      * the RDP0 descriptor by vol_seal at the end of the run) */
     if (rb_f >= 0 || rp_f >= 0) {
@@ -781,15 +1272,17 @@ int main(int argc, char **argv)
                     double vm, ca;
                     if (rs_bench(32, 4, INVFS_BLOCK_SIZE, 512,
                                  &vm, &ca) != 0) {
+                        sw_progress_suspend();
                         fprintf(stderr, "redundant-paranoic: internal "
                                         "bench failed\n");
                         vol_close(vol);
                         return 1;
                     }
                     l2 = vm >= ca ? RS_ALGO_VM : RS_ALGO_CAUCHY;
-                    fprintf(stderr, "redundant-paranoic: bench picked %s "
-                            "(rs-vm %.1f vs rs-cauchy %.1f MB/s)\n",
-                            rs_algo_name(l2), vm, ca);
+                    if (!invfs_sweep_ui_active())
+                        fprintf(stderr, "redundant-paranoic: bench picked %s "
+                                "(rs-vm %.1f vs rs-cauchy %.1f MB/s)\n",
+                                rs_algo_name(l2), vm, ca);
                 }
             }
         }
@@ -802,9 +1295,10 @@ int main(int argc, char **argv)
         int l2c;
         if (vol_redun_state(vol, &k1c, &l2c, &m2c)) {
             auto_reseal = 1;
-            fprintf(stderr, "redundancy: live RDP0 descriptor (k1=%u, "
-                    "l2=%s m2=%u) -- auto-reseal after sweep\n",
-                    (unsigned)k1c, rs_algo_name(l2c), (unsigned)m2c);
+            if (!invfs_sweep_ui_active())
+                fprintf(stderr, "redundancy: live RDP0 descriptor (k1=%u, "
+                        "l2=%s m2=%u) -- auto-reseal after sweep\n",
+                        (unsigned)k1c, rs_algo_name(l2c), (unsigned)m2c);
         }
     }
 
@@ -841,31 +1335,35 @@ int main(int argc, char **argv)
              * run drops it (realize) and captures a fresh one BEFORE the
              * walk, so the live window is always the LAST sweep. K=1. */
             if (no_realize) {
-                fprintf(stderr, "save point: kept previous (--no-realize)\n");
+                if (!invfs_sweep_ui_active())
+                    fprintf(stderr, "save point: kept previous (--no-realize)\n");
             } else {
                 if (realize) {
                     int drc = spt0_drop(vol);
                     if (drc < 0) {
+                        sw_progress_suspend();
                         fprintf(stderr, "save point: realizing the previous "
                                         "run failed\n");
                         vol_close(vol);
                         return 1;
                     }
-                    fprintf(stderr, drc > 0
-                            ? "save point: previous run realized\n"
-                            : "save point: nothing to realize\n");
+                    if (!invfs_sweep_ui_active())
+                        fprintf(stderr, drc > 0
+                                ? "save point: previous run realized\n"
+                                : "save point: nothing to realize\n");
                 } else if (spt0_info(vol, NULL)) {
                     /* bare sweep: replace the previous window (K=1) */
                     (void)spt0_drop(vol);
                 }
                 if (spt0_capture(vol) == 0) {
                     invfs_spt0 sp;
-                    if (spt0_info(vol, &sp))
+                    if (spt0_info(vol, &sp) && !invfs_sweep_ui_active())
                         fprintf(stderr, "save point captured "
                                         "(base_root=%llu delta_end=%llu)\n",
                                 (unsigned long long)sp.base_root,
                                 (unsigned long long)sp.delta_end);
                 } else {
+                    sw_progress_suspend();
                     fprintf(stderr, "save point: capture failed; sweeping "
                                     "without one\n");
                 }
@@ -878,23 +1376,31 @@ int main(int argc, char **argv)
                  * fatal here -- the sweep's own machinery refuses the same way
                  * (and --seal needs to print its own read-only diagnostic) */
                 if (rrc < 0 && vol_write_enabled(vol)) {
+                    sw_progress_suspend();
                     fprintf(stderr, "checkpoint: realizing the previous run "
                                     "failed\n");
                     vol_close(vol);
                     return 1;
                 }
-                if (rrc > 0)
-                    fprintf(stderr, "checkpoint: previous run realized "
-                            "(%llu retained blocks freed)\n",
-                            (unsigned long long)rfree);
-                else
-                    fprintf(stderr, "checkpoint: nothing to realize\n");
+                if (!invfs_sweep_ui_active()) {
+                    if (rrc > 0)
+                        fprintf(stderr, "checkpoint: previous run realized "
+                                "(%llu retained blocks freed)\n",
+                                (unsigned long long)rfree);
+                    else if (rrc == 0)
+                        fprintf(stderr, "checkpoint: nothing to realize\n");
+                }
             }
-            if (vol_ckp_begin(vol, no_realize) < 0)
+            if (vol_ckp_begin(vol, no_realize) < 0) {
+                sw_progress_suspend();
                 fprintf(stderr, "checkpoint: arm failed; sweeping without "
                                 "one\n");
+            }
         }
     }
+    sw_stage_end(dry ? "dry-run policy ready" : "savepoint ready");
+
+    sw_stage_begin(2, "collect", 0, "walking live inodes");
 
     /* WP42: collect live regular files through the shared mapper-aware
      * record walker. On a v0.3.0+ mapper volume the records live in dynamic
@@ -913,10 +1419,13 @@ int main(int argc, char **argv)
             vc.sizes = &sizes; vc.poss = &poss;
             vc.tab = &tab; vc.tmask = &tmask; vc.tcount = &tcount;
             vc.count = &count; vc.cap = &cap;
-            if (vol_v3_walk(vol, v3_sweep_walk_cb, &vc) < 0)
+            if (vol_v3_walk(vol, v3_sweep_walk_cb, &vc) < 0) {
+                sw_progress_suspend();
                 fprintf(stderr, "warning: v3 directory walk did not "
                                 "complete\n");
+            }
             if (vc.oom) {
+                sw_progress_suspend();
                 fprintf(stderr, "out of memory\n");
                 return 1;
             }
@@ -928,9 +1437,10 @@ int main(int argc, char **argv)
             cc.sizes = &sizes; cc.poss = &poss;
             cc.tab = &tab; cc.tmask = &tmask; cc.tcount = &tcount;
             cc.count = &count; cc.cap = &cap;
-            vol_records_walk(vol, sweep_collect_cb, &cc);
-            if (cc.oom) {
-                fprintf(stderr, "out of memory\n");
+             vol_records_walk(vol, sweep_collect_cb, &cc);
+             if (cc.oom) {
+                 sw_progress_suspend();
+                 fprintf(stderr, "out of memory\n");
                 return 1;
             }
             rec_bytes = cc.rec_bytes;
@@ -943,16 +1453,32 @@ int main(int argc, char **argv)
      * absent). Sweep exactly the live ids -- sweeping a hidden record
      * would fail its reads and could resurrect dead ids' blocks. */
     {
-        int j, kept = 0;
+        int j;
+        char detail[128];
+        kept = 0;
         for (j = 0; j < count; j++) {
             uint64_t live;
             if (inodes[j] == 0 || sizes[j] == 0) continue;
             live = vol_find(vol, names[j]);
             if (live == 0) { inodes[j] = 0; continue; }
+            if (live != inodes[j]) {
+                /* the name now resolves to a DIFFERENT record than the one
+                 * the walk saw: a container commit (or a decomposition
+                 * migration re-deriving one) replaced it mid-walk, so the
+                 * cached size belongs to the retired record. Refresh it or
+                 * the sweep compares a fresh file against a stale length. */
+                uint64_t nsz = 0;
+                if (vol_stat_full(vol, names[j], NULL, &nsz, NULL) == 0 &&
+                    nsz > 0)
+                    sizes[j] = nsz;
+            }
             inodes[j] = live;   /* may be the fallback version's id */
             kept++;
         }
-        fprintf(stderr, "live entries: %d (of %d walked)\n", kept, count);
+        if (!invfs_sweep_ui_active())
+            fprintf(stderr, "live entries: %d (of %d walked)\n", kept, count);
+        snprintf(detail, sizeof detail, "%d live / %d walked", kept, count);
+        sw_stage_end(detail);
     }
 
     /* WP19: the once-per-RUN heat decay (rheat >>= 1, wheat -= 1), before
@@ -962,6 +1488,8 @@ int main(int argc, char **argv)
         vol_heat_sweep_begin(vol);
 
     /* sweep candidates: regular files with actual payload */
+    sw_stage_begin(3, dry ? "plan" : "transform", (uint64_t)count,
+                   dry ? "would sweep" : "files");
     for (int i = 0; i < count; i++) {
 #ifndef _WIN32
         if (g_stop) { stopped = 1; break; }
@@ -975,10 +1503,27 @@ int main(int argc, char **argv)
                 kill(getpid(), SIGKILL);
         }
 #endif
-        if (inodes[i] == 0 || sizes[i] == 0) { skipped++; continue; }
-        if (dry) { printf("would sweep %s (%llu bytes)\n",
-                          names[i], (unsigned long long)sizes[i]); continue; }
-        fprintf(stderr, "  sweeping %s (%llu bytes)...\n", names[i], (unsigned long long)sizes[i]);
+        if (inodes[i] == 0 || sizes[i] == 0) {
+            skipped++;
+            sw_stage_update((uint64_t)i + 1u, (uint64_t)count, "skipped");
+            continue;
+        }
+        if (dry) {
+            char detail[320];
+            if (!invfs_sweep_ui_active()) {
+                sw_progress_suspend();
+                printf("would sweep %s (%llu bytes)\n",
+                       names[i], (unsigned long long)sizes[i]);
+            }
+            snprintf(detail, sizeof detail, "%s", names[i]);
+            sw_stage_update((uint64_t)i + 1u, (uint64_t)count, detail);
+            continue;
+        }
+        if (!invfs_sweep_ui_active()) {
+            sw_progress_suspend();
+            fprintf(stderr, "  sweeping %s (%llu bytes)...\n",
+                    names[i], (unsigned long long)sizes[i]);
+        }
         {
             /* vol_sweep_one: 0 = nothing to do, >0 = transcoded/swept,
              * 7 = JPEG->JXL, 9 = text deferred into the batch accumulator,
@@ -988,6 +1533,7 @@ int main(int argc, char **argv)
              * <0 = hard error */
             int rc;
             if (fast) {
+                sw_stage_update((uint64_t)i, (uint64_t)count, "transforming");
                 /* WP22e --fast: the decision narrows to "generic or
                  * nothing" (vol_sweep_file_generic: 0 = swept to Shadow,
                  * 1 = nothing to do, <0 = hard error). No per-file line:
@@ -998,41 +1544,64 @@ int main(int argc, char **argv)
                 else failed++;
                 goto progress;
             }
-            rc = vol_sweep_one(vol, inodes[i], names[i]);
+            sw_stage_update((uint64_t)i, (uint64_t)count, "transforming");
+            rc = vol_sweep_one_ex(vol, inodes[i], names[i],
+                                  sw_file_progress, NULL);
+            if (rc < 0 && getenv("INVFS_DEBUG_PACKS"))
+                /* a 50k-file sweep says nothing about WHICH file failed */
+                fprintf(stderr, "sweep: %s: FAILED (rc=%d)\n",
+                        names[i], rc);
             if (rc == 9) {
                 if (strchr(names[i], '!'))
                     part_agg_add(names[i], 0);
-                else
+                else if (!invfs_sweep_ui_active())
                     printf("  %s: text -> PPMd batch\n", names[i]);
             }
             else if (rc == 10) {
                 if (strchr(names[i], '!'))
                     part_agg_add(names[i], 1);
-                else
+                else if (!invfs_sweep_ui_active())
                     printf("  %s: binary -> ZSTD batch\n", names[i]);
             }
             else if (rc == 11) {
                 swept++;
-                printf("  %s: exe media -> JXL (%u parts)\n", names[i],
-                       vol_exer_last_parts(vol));
+                if (!invfs_sweep_ui_active())
+                    printf("  %s: exe media -> JXL (%u parts)\n", names[i],
+                           vol_exer_last_parts(vol));
             }
             else if (rc == 7) {
                 swept++;
-                printf("  %s: JPEG -> JXL (lossless)\n", names[i]);
+                if (!invfs_sweep_ui_active())
+                    printf("  %s: JPEG -> JXL (lossless)\n", names[i]);
             }
             else if (rc >= 100) {
                 const invfs_codec *pc = invfs_codec_by_algo((uint32_t)(rc - 100));
                 swept++;
-                printf("  %s: %s (codecpack)\n", names[i],
-                       pc ? pc->name : "unknown-pack");
+                if (!invfs_sweep_ui_active())
+                    printf("  %s: %s (codecpack)\n", names[i],
+                           pc ? pc->name : "unknown-pack");
             }
             else if (rc > 0) swept++;
             else if (rc == 0) skipped++;
             else failed++;
         }
 progress:
-        if ((swept + skipped) % 5000 == 0)
-            fprintf(stderr, "  ..%d done (swept=%d)\n", swept + skipped, swept);
+        {
+            char detail[160];
+            snprintf(detail, sizeof detail, "swept=%d skipped=%d failed=%d",
+                     swept, skipped, failed);
+            sw_stage_update((uint64_t)i + 1u, (uint64_t)count, detail);
+        }
+        if (!invfs_sweep_ui_active() && i > 0 && (i + 1) % 5000 == 0)
+            fprintf(stderr, "  ..%d files processed (swept=%d)\n",
+                    i + 1, swept);
+    }
+
+    {
+        char detail[160];
+        snprintf(detail, sizeof detail,
+                 "swept=%d skipped=%d failed=%d", swept, skipped, failed);
+        sw_stage_end(detail);
     }
 
     /* WP14b: print the aggregated container-part deferral lines collected
@@ -1045,9 +1614,15 @@ progress:
      * promotions killed. The pass prints its own counts.
      * WP22e: --fast skips this (a transcode), along with dedupe/batching. */
     if (!dry && !fast) {
-        if (vol_heat_promote(vol) < 0)
+        int hrc;
+        sw_stage_begin(ui_heat, "heat", 0, "promoting hot batch members");
+        hrc = vol_heat_promote(vol);
+        if (hrc < 0) {
+            sw_progress_suspend();
             fprintf(stderr, "heat: promotion pass failed (sweep results "
                             "are intact)\n");
+        }
+        sw_stage_end(hrc < 0 ? "failed; sweep data intact" : "promotion complete");
     }
 
     /* WP25 rule 9: two-device tier migration -- canonical stays on dev1;
@@ -1056,9 +1631,15 @@ progress:
      * decay + promotion so post-decay rheat governs (the WP19 hysteresis
      * applies). No-op on a single-device volume. */
     if (!dry && !fast && vol_ndev(vol) == 2) {
-        if (vol_tier_migrate(vol) < 0)
+        int trc;
+        sw_stage_begin(ui_tier, "tier", 0, "balancing hot/cold devices");
+        trc = vol_tier_migrate(vol);
+        if (trc < 0) {
+            sw_progress_suspend();
             fprintf(stderr, "tier: migration pass failed (sweep results "
                             "are intact)\n");
+        }
+        sw_stage_end(trc < 0 ? "failed; sweep data intact" : "migration complete");
     }
 
     /* WP12(h): per-segment dedupe between the walk and the text-batch GC
@@ -1068,8 +1649,24 @@ progress:
      * it never sees a zone==TEXT entry (WP10 §11). The pass prints its
      * own merged/freed counts. */
     if (!dry && !fast) {
-        if (vol_sweep_dedupe(vol) < 0)
+        int drc;
+        char detail[224];
+        sw_stage_begin(ui_dedupe, "dedupe", 0, "hashing live segments");
+        memset(&ui_dedupe_stats, 0, sizeof ui_dedupe_stats);
+        drc = vol_sweep_dedupe_ex(vol, &ui_dedupe_stats,
+                                  sw_dedupe_progress, NULL);
+        if (drc < 0) {
+            sw_progress_suspend();
             fprintf(stderr, "dedupe: pass failed (sweep results are intact)\n");
+        }
+        snprintf(detail, sizeof detail,
+                 "cross=%llu intra=%llu merged=%llu freed=%.1f MiB",
+                 (unsigned long long)ui_dedupe_stats.cross_merged,
+                 (unsigned long long)ui_dedupe_stats.intra_merged,
+                 (unsigned long long)ui_dedupe_stats.segments_merged,
+                 (double)ui_dedupe_stats.blocks_freed *
+                 (double)INVFS_BLOCK_SIZE / (1024.0 * 1024.0));
+        sw_stage_end(drc < 0 ? "failed; sweep data intact" : detail);
     }
 
     /* WP10 §7 + WP14a: reclaim owner batches no live member references,
@@ -1082,33 +1679,51 @@ progress:
      * v3 recipe deltas), and vol_tz_gc/vol_tz_flush dispatch to the v3
      * registry path, so the pass runs on both formats. */
     if (!dry && !fast) {
-        int gcrc = vol_tz_gc(vol);
-        size_t tzp = vol_acc_pending(vol, 0);
-        size_t bzp = vol_acc_pending(vol, 1);
+        int gcrc;
+        size_t tzp, bzp;
+        char detail[128];
         int tzrc;
-        if (gcrc > 0)
-            printf("text gc: %u dead batches reclaimed\n", (unsigned)gcrc);
-        else if (gcrc < 0)
+        sw_stage_begin(ui_batches, "batches", 0, "GC + shared batch flush");
+        gcrc = vol_tz_gc(vol);
+        tzp = vol_acc_pending(vol, 0);
+        bzp = vol_acc_pending(vol, 1);
+        if (gcrc > 0) {
+            if (!invfs_sweep_ui_active())
+                printf("text gc: %u dead batches reclaimed\n", (unsigned)gcrc);
+        } else if (gcrc < 0) {
+            sw_progress_suspend();
             fprintf(stderr, "text gc failed (rc=%d)\n", gcrc);
+        }
         tzrc = vol_tz_flush(vol);
         if (tzrc == 0) {
-            if (tzp)
-                printf("text batches flushed (%zu deferred)\n", tzp);
-            if (bzp)
-                printf("binary batches flushed (%zu deferred)\n", bzp);
+            if (!invfs_sweep_ui_active()) {
+                if (tzp)
+                    printf("text batches flushed (%zu deferred)\n", tzp);
+                if (bzp)
+                    printf("binary batches flushed (%zu deferred)\n", bzp);
+            }
         }
         else if (tzrc < 0) {
+            sw_progress_suspend();
             fprintf(stderr, "batch flush failed (rc=%d)\n", tzrc);
             failed++;
         }
+        snprintf(detail, sizeof detail, "gc=%d text=%zu binary=%zu",
+                 gcrc, tzp, bzp);
+        sw_stage_end(tzrc < 0 ? "flush failed" : detail);
     }
 
-    fprintf(stderr, "sweep done: swept=%d skipped=%d failed=%d%s\n",
-            swept, skipped, failed,
-            stopped ? " (stopped by Ctrl+C)" : "");
-    /* WP42: the CLI-style summary line the big-volume e2e parses
-     * (`sweep: N swept`); mirrors src/cli/sweep.c's report. */
-    fprintf(stderr, "sweep: %d swept\n", swept);
+    if (!dry) {
+        sw_stage_begin(ui_finalize, "finalize", 0, "checkpoint + volume flush");
+    }
+    if (!invfs_sweep_ui_active()) {
+        fprintf(stderr, "sweep done: swept=%d skipped=%d failed=%d%s\n",
+                swept, skipped, failed,
+                stopped ? " (stopped by Ctrl+C)" : "");
+        /* WP42: the CLI-style summary line the big-volume e2e parses
+         * (`sweep: N swept`); mirrors src/cli/sweep.c's report. */
+        fprintf(stderr, "sweep: %d swept\n", swept);
+    }
 
     /* WP21: seal the retention registry (the "\x01reten" owner) holding
      * every block this run retired. From here the volume's end-state is:
@@ -1120,20 +1735,25 @@ progress:
     if (!dry && !(vol_sb(vol)->vol_flags & VOLF_V3)) {
         uint64_t rr = 0, rb = 0;
         if (vol_ckp_end(vol, &rr, &rb) != 0) {
+            sw_progress_suspend();
             fprintf(stderr, "checkpoint: registry write failed (the "
                             "checkpoint itself is intact)\n");
             /* WP53: a genuine registry-write failure is a real failure --
              * surface it in the exit status. */
             reg_failed = 1;
-        } else if (rb)
+        } else if (rb && !invfs_sweep_ui_active())
             fprintf(stderr, "checkpoint: %llu retained blocks held for "
-                    "rollback (%llu ranges)\n",
+                            "rollback (%llu ranges)\n",
                     (unsigned long long)rb, (unsigned long long)rr);
     }
 
     if (!dry) {
-        if (vol_flush(vol) != 0)
+        int frc = vol_flush(vol);
+        if (frc != 0) {
+            sw_progress_suspend();
             fprintf(stderr, "warning: final flush failed\n");
+        }
+        sw_stage_end(frc == 0 ? "volume durable" : "flush failed");
     }
 
     /* WP-M21: hot-tail pruning retired with on-line compaction. The fold
@@ -1149,56 +1769,77 @@ progress:
      * updated. Runs for --seal, the --redundant-* configures, and the
      * auto-reseal (live descriptor, no flags). */
     if (seal || rb_f >= 0 || rp_f >= 0 || auto_reseal) {
+        sw_stage_begin(ui_seal, "seal", 0, "updating parity stripes");
         invfs_seal_report rep;
         uint32_t k1c, m2c;
         int l2c;
         vol_redun_state(vol, &k1c, &l2c, &m2c);
         if (vol_seal(vol, 0, &rep) != 0) {
+            sw_progress_suspend();
             fprintf(stderr, "seal failed\n");
+            sw_stage_end("failed");
             vol_close(vol);
             return 1;
         }
-        printf("[seal] %llu stripes, %llu parity blocks, overhead %.2f%% of "
-               "occupied shadow; %llu stripes updated, %llu unchanged, "
-               "%llu dirty-skipped (k1=%u)",
-               (unsigned long long)rep.stripes,
-               (unsigned long long)rep.parity_blocks, rep.overhead_pct,
-               (unsigned long long)rep.updated,
-               (unsigned long long)rep.unchanged,
-               (unsigned long long)rep.dirty_skipped,
-               (unsigned)k1c);
-        if (rep.added || rep.freed)
-            printf(" (%llu added, %llu stale freed)",
-                   (unsigned long long)rep.added,
-                   (unsigned long long)rep.freed);
-        if (rep.unprotected)
-            printf(", %llu unprotected (ENOSPC)",
-                   (unsigned long long)rep.unprotected);
-        printf("\n");
-        if (l2c) {
-            printf("[seal2] %llu stripes, %llu parity blocks, overhead "
-                   "%.2f%% of occupied shadow; %llu stripes updated, "
-                   "%llu unchanged, %llu dirty-skipped (%s, k=32, m=%u)",
-                   (unsigned long long)rep.l2_stripes,
-                   (unsigned long long)rep.l2_parity_blocks,
-                   rep.l2_overhead_pct,
-                   (unsigned long long)rep.l2_updated,
-                   (unsigned long long)rep.l2_unchanged,
-                   (unsigned long long)rep.l2_dirty_skipped,
-                   rs_algo_name(l2c), (unsigned)m2c);
-            if (rep.l2_added || rep.l2_freed)
+        if (!invfs_sweep_ui_active()) {
+            printf("[seal] %llu stripes, %llu parity blocks, overhead %.2f%% of "
+                   "occupied shadow; %llu stripes updated, %llu unchanged, "
+                   "%llu dirty-skipped (k1=%u)",
+                   (unsigned long long)rep.stripes,
+                   (unsigned long long)rep.parity_blocks, rep.overhead_pct,
+                   (unsigned long long)rep.updated,
+                   (unsigned long long)rep.unchanged,
+                   (unsigned long long)rep.dirty_skipped,
+                   (unsigned)k1c);
+            if (rep.added || rep.freed)
                 printf(" (%llu added, %llu stale freed)",
-                       (unsigned long long)rep.l2_added,
-                       (unsigned long long)rep.l2_freed);
-            if (rep.l2_unprotected)
+                       (unsigned long long)rep.added,
+                       (unsigned long long)rep.freed);
+            if (rep.unprotected)
                 printf(", %llu unprotected (ENOSPC)",
-                       (unsigned long long)rep.l2_unprotected);
+                       (unsigned long long)rep.unprotected);
             printf("\n");
+            if (l2c) {
+                printf("[seal2] %llu stripes, %llu parity blocks, overhead "
+                       "%.2f%% of occupied shadow; %llu stripes updated, "
+                       "%llu unchanged, %llu dirty-skipped (%s, k=32, m=%u)",
+                       (unsigned long long)rep.l2_stripes,
+                       (unsigned long long)rep.l2_parity_blocks,
+                       rep.l2_overhead_pct,
+                       (unsigned long long)rep.l2_updated,
+                       (unsigned long long)rep.l2_unchanged,
+                       (unsigned long long)rep.l2_dirty_skipped,
+                       rs_algo_name(l2c), (unsigned)m2c);
+                if (rep.l2_added || rep.l2_freed)
+                    printf(" (%llu added, %llu stale freed)",
+                           (unsigned long long)rep.l2_added,
+                           (unsigned long long)rep.l2_freed);
+                if (rep.l2_unprotected)
+                    printf(", %llu unprotected (ENOSPC)",
+                           (unsigned long long)rep.l2_unprotected);
+                printf("\n");
+            }
         }
-        if (vol_flush(vol) != 0)
-            fprintf(stderr, "warning: final flush failed\n");
+        {
+            int frc = vol_flush(vol);
+            char detail[160];
+            if (frc != 0) {
+                sw_progress_suspend();
+                fprintf(stderr, "warning: final flush failed\n");
+            }
+            snprintf(detail, sizeof detail,
+                     "stripes=%llu updated=%llu parity=%llu",
+                     (unsigned long long)rep.stripes,
+                     (unsigned long long)rep.updated,
+                     (unsigned long long)rep.parity_blocks);
+            sw_stage_end(frc == 0 ? detail : "flush failed after seal");
+        }
     }
 
+    sw_progress_finish();
     vol_close(vol);
+#ifndef _WIN32
+    sw_log_stop();
+#endif
     return (failed || reg_failed) ? 1 : 0;
 }
