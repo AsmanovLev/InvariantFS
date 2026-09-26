@@ -38,13 +38,25 @@
 #      slot flip (INVFS_JRN_FORCE_COMPACT) across seeded drop_writes
 #      windows -- incl. the legacy->slot migration flip -- then recovery,
 #      fsck/verify clean, files bit-exact.
+#   7  page-cache power loss (WP83): the device is NEVER touched by chaos --
+#      it is healthy the whole time -- and the bytes are only ever in the
+#      host page cache. Write + fsync through the mount, kill -9 the daemon
+#      with no clean close, sync + drop_caches (the power-cut surrogate),
+#      reopen: every acknowledged byte intact, and a file rewritten in
+#      place is the COMPLETE old or COMPLETE new content, never a splice.
 #   (repeatability: fixed seeds; any failure preserves the backing
 #      image + all logs under tools/flakey/artifacts/<leg>-<ts>/.)
 #
 # Env knobs: FLAKEY_SEED (default 20260831), FLAKEY_SOAK_S (default 210),
 #            FLAKEY_WORK (default /tmp/invfs-flakey — tmpfs, needs ~4G of
 #            quota headroom; /dev/shm is too full on this box),
-#            FLAKEY_ONLY (e.g. "3" runs just that leg, a dev aid).
+#            FLAKEY_ONLY (e.g. "3" runs just that leg, a dev aid),
+#            FLAKEY_PC_WORK (leg 7 scratch; MUST be on a disk-backed
+#            filesystem — default /var/tmp/invfs-flakey-pagecache),
+#            FLAKEY_PC_BACKING (leg 7: loop = a loop device over the image
+#            (default when losetup works), file = the image file itself, the
+#            unprivileged path),
+#            FLAKEY_PC_SIZE_MB (leg 7 volume size, default 512).
 #
 # Needs: dm-flakey (modprobe dm-flakey), losetup, fusermount3, python3,
 #        passwordless sudo (the script is sudo-aware; `sudo -v` first if
@@ -72,6 +84,21 @@ LEG=""
 FAILED=0
 T0=$SECONDS
 
+# ---- leg 7 (WP83): the page-cache power-loss tier ----
+# Its own scratch, and its own volume: legs 0-6 all run on the dm-flakey
+# device over a loop file inside $FLK, and $FLK is tmpfs on this box --
+# drop_caches cannot evict a tmpfs page (there is no writeback to drop), so
+# the page-cache cut would be a silent NO-OP there. This leg refuses to
+# pretend: it picks a disk-backed scratch or says so loudly.
+PC_WORK=${FLAKEY_PC_WORK:-}
+PC_VOL=""
+PC_LOOP=""
+PC_MNT=""
+PC_MODE=""
+PC_SIZE_MB=${FLAKEY_PC_SIZE_MB:-512}
+PC_FUSE_PID=""
+PC_WRITER_PID=""
+
 say()  { echo; echo "== $* =="; }
 info() { echo "  $*"; }
 
@@ -90,6 +117,14 @@ cleanup() {
     [ -b "$DM" ] && dm_set up >/dev/null 2>&1
     sudo -n dmsetup remove "$DEV" >/dev/null 2>&1
     [ -n "$LOOP" ] && sudo -n losetup -d "$LOOP" >/dev/null 2>&1
+    # leg 7's scratch: its own mount, its own (optional) loop device
+    [ -n "$PC_VOL" ] && {
+        [ -n "$PC_WRITER_PID" ] && kill -9 "$PC_WRITER_PID" 2>/dev/null
+        [ -n "$PC_MNT" ] && fusermount3 -uz "$PC_MNT" 2>/dev/null
+        pkill -9 -f "invf-fuse -f $PC_VOL" 2>/dev/null
+        [ -n "$PC_LOOP" ] && sudo -n losetup -d "$PC_LOOP" 2>/dev/null
+        rm -rf "$PC_WORK"
+    }
     [ "$FAILED" = 0 ] && rm -rf "$FLK"
 }
 
@@ -101,6 +136,14 @@ preserve() {   # copy the ground truth + every log for replay
     cp -a "$FLK"/orig* "$dst/" 2>/dev/null
     [ -f "$FLK/oplog.txt" ]  && cp -a "$FLK/oplog.txt" "$dst/"
     [ -f "$FLK/model.json" ] && cp -a "$FLK/model.json" "$dst/"
+    # leg 7 lives in its own scratch (a disk-backed one): keep its image,
+    # manifest and logs too, or the page-cache cut is unreproducible
+    if [ -n "$PC_VOL" ] && [ -d "$PC_WORK" ]; then
+        cp -a "$PC_WORK"/*.log "$dst/" 2>/dev/null
+        cp -a "$PC_WORK"/manifest.txt "$dst/pc-manifest.txt" 2>/dev/null
+        cp --sparse=always "$PC_WORK/pc.img" "$dst/pc-backing.img" 2>/dev/null \
+            || echo "  WARN: page-cache backing image copy failed" >&2
+    fi
     if [ -f "$BACK" ]; then
         cp --sparse=always "$BACK" "$dst/backing.img" 2>/dev/null \
             || echo "  WARN: backing image copy failed" >&2
@@ -771,6 +814,382 @@ leg6() {
     vol_files_exact "$FLK/orig6" "post-recovery" || fail "content after compaction chaos"
 }
 
+# ---------------------------------------------- leg 7 (WP83): page cache --
+# The tier legs 0-6 structurally cannot reach: there the DEVICE is the
+# thing that lies (dm-flakey drop_writes / error). Here the device is
+# healthy for the whole leg and the bytes never leave the host page cache
+# -- which is exactly how `cp` "loses" a file that `ls` showed a second
+# earlier on a real block device.
+#
+#   1. write 9 files through the FUSE mount, fsync() each one, and rewrite
+#      two of them in place: one rewrite fsynced, one NOT (its fd is held
+#      open by a live writer so the commit can never happen). No unmount,
+#      no vol_close -- the fsync barriers are the only thing pinning the
+#      acknowledged bytes.
+#   2. record the expected sha256 of every generation
+#   3. kill -9 the daemon (started with -f, so the PID is the daemon)
+#   4. sync + `echo 3 > /proc/sys/vm/drop_caches`: the power-cut surrogate.
+#      Every byte that is not on the medium is gone, and the reopen has to
+#      re-read structure AND data from the medium.
+#   5. reopen: every file present and bit-exact -- through the offline
+#      tools AND through a fresh FUSE mount -- verify --deep 0 corrupt,
+#      fsck OK.
+#   6. THE assertion: a file rewritten in place must be the COMPLETE old
+#      content or the COMPLETE new content, never a splice of the two. The
+#      fsynced rewrite must be exactly the new content (it was
+#      acknowledged); the un-acked one may be either.
+#
+# What this tier can and cannot prove, stated honestly:
+# drop_caches evicts CLEAN pages only -- the kernel will not discard dirty
+# ones, so a write that reached the page cache can still be written back
+# after the "cut" (v3 barriers every delta append, so the un-acked file
+# usually comes back NEW; the leg accepts either generation). Discarding
+# un-acked bytes for real is dm-flakey drop_writes = legs 3/4/6. What this
+# tier uniquely proves is that the acknowledged bytes, their delta records
+# and the bitmap are on the MEDIUM and that the on-disk image is
+# self-consistent when re-read from scratch -- i.e. the FUSE fsync ack
+# (commit_wctx + vol_sync) is real on v3, which is what the pre-WP80
+# `vol_sync` early return made a silent no-op.
+
+pc_work_pick() {   # a DISK-backed scratch: drop_caches is a no-op on tmpfs
+    local c
+    if [ -z "$PC_WORK" ]; then
+        for c in /var/tmp /opt /var/lib; do
+            [ -d "$c" ] || continue
+            [ "$(stat -f -c %T "$c" 2>/dev/null)" = tmpfs ] && continue
+            PC_WORK="$c/invfs-flakey-pagecache"
+            break
+        done
+    fi
+    [ -n "$PC_WORK" ] || PC_WORK=/tmp/invfs-flakey-pagecache
+    PC_MNT="$PC_WORK/mnt"
+    rm -rf "$PC_WORK" && mkdir -p "$PC_WORK" "$PC_MNT" || return 1
+    if [ "$(stat -f -c %T "$PC_WORK" 2>/dev/null)" = tmpfs ]; then
+        echo "  WARN: $PC_WORK is tmpfs -- drop_caches cannot evict a tmpfs" >&2
+        echo "        page, so the page-cache cut below is a NO-OP there." >&2
+    fi
+    info "page-cache scratch: $PC_WORK ($(stat -f -c %T "$PC_WORK" 2>/dev/null))"
+}
+
+pc_dev_create() {  # a loop device when privileged (the raw-device path,
+                   # like production), the image file itself otherwise
+    pc_work_pick || fail "no scratch for the page-cache leg"
+    PC_VOL="$PC_WORK/pc.img"
+    PC_SIZE_GB=$(awk -v m="$PC_SIZE_MB" 'BEGIN{printf "%.4f", m/1024}')
+    truncate -s "${PC_SIZE_MB}M" "$PC_VOL" || fail "truncate $PC_VOL"
+    PC_LOOP=""
+    if [ "${FLAKEY_PC_BACKING:-loop}" != file ] &&
+       sudo -n true 2>/dev/null &&
+       PC_LOOP=$(sudo -n losetup -f --show "$PC_VOL" 2>/dev/null) &&
+       [ -n "$PC_LOOP" ]; then
+        sudo -n chmod 666 "$PC_LOOP" || fail "chmod $PC_LOOP"
+        PC_VOL="$PC_LOOP"
+        PC_MODE="loop device $PC_LOOP over pc.img"
+    else
+        PC_LOOP=""
+        PC_VOL="$PC_WORK/pc.img"
+        PC_MODE="image file (no loop device: FLAKEY_PC_BACKING=file or no losetup)"
+    fi
+}
+
+# A volume open on a freshly created LOOP DEVICE can lose a race with the
+# host's block-device prober: on this box a ROOT udev worker takes a LOCK_SH
+# flock on the new /dev/loopN for a moment (seen in /proc/locks, pid from
+# `fuser`), and vol_open's LOCK_EX then fails with "image is in use by
+# another process". A LOCK_SH holder is a reader, so retrying cannot endanger
+# the volume -- but a persistent conflict IS a real problem (two writers on
+# one image) and must still fail. Bounded, and it says so out loud.
+pc_run() {         # <label> <logfile> <cmd...>
+    local label=$1 log=$2 i rc=1
+    shift 2
+    for i in $(seq 1 12); do
+        "$@" >"$log" 2>&1
+        rc=$?
+        [ "$rc" = 0 ] && return 0
+        grep -q "image is in use by another process" "$log" || return "$rc"
+        if [ "$i" = 1 ]; then
+            echo "  NOTE: $label lost a flock race with a device prober" >&2
+            echo "        (root holds LOCK_SH on the new loop device);" >&2
+            echo "        retrying -- a reader cannot endanger the volume." >&2
+        fi
+        sleep 0.4
+    done
+    echo "  $label: still locked after 12 attempts" >&2
+    cat "$log" >&2
+    return "$rc"
+}
+
+pc_mnt_up() {     # -f: the daemon stays in the foreground, so $! IS the
+                  # daemon and kill -9 $! is an abrupt death (the default
+                  # daemonizes, and then $! is a process that already
+                  # exited -- the leg would silently become a clean close)
+    local i
+    for i in $(seq 1 12); do
+        $B/invf-fuse -f "$PC_VOL" "$PC_MNT" 2>"$PC_WORK/fuse.log" &
+        PC_FUSE_PID=$!
+        local j
+        for j in $(seq 1 50); do
+            grep -q " $PC_MNT " /proc/mounts && return 0
+            kill -0 "$PC_FUSE_PID" 2>/dev/null || break   # it gave up
+            sleep 0.1
+        done
+        grep -q "image is in use by another process" "$PC_WORK/fuse.log" || {
+            cat "$PC_WORK/fuse.log"; fail "mount of $PC_VOL never appeared"; }
+        [ "$i" = 1 ] && echo "  NOTE: mount lost a flock race; retrying" >&2
+        sleep 0.4
+    done
+    cat "$PC_WORK/fuse.log"
+    fail "mount of $PC_VOL never appeared (persistent flock conflict)"
+}
+
+pc_mnt_down() {   # clean unmount (the leg's LAST mount; the crash mount is
+                  # torn down by pc_kill)
+    local n=${1:-450} i
+    fusermount3 -u "$PC_MNT" 2>/dev/null
+    for i in $(seq 1 "$n"); do
+        kill -0 "$PC_FUSE_PID" 2>/dev/null || return 0
+        sleep 0.2
+    done
+    kill -9 "$PC_FUSE_PID" 2>/dev/null
+    sleep 0.5
+    return 1
+}
+
+# the power cut: the writer dies first (its fd would otherwise hold the
+# stale mount busy), then the daemon dies abruptly -- no vol_close, so no
+# final flush and no CLEAN superblock -- then the page cache goes away
+pc_kill() { # <writer-pid>
+    # wait on both: it reaps them (no stray "Killed" job notice in the log)
+    # and proves the death before the leg claims it was abrupt
+    [ -n "$1" ] && { kill -9 "$1" 2>/dev/null; wait "$1" 2>/dev/null; }
+    kill -9 "$PC_FUSE_PID" 2>/dev/null
+    wait "$PC_FUSE_PID" 2>/dev/null
+    kill -0 "$PC_FUSE_PID" 2>/dev/null && { echo "  daemon survived kill -9" >&2; return 1; }
+    fusermount3 -uz "$PC_MNT" 2>/dev/null
+    return 0
+}
+
+pc_cut() {        # the surrogate: write back, then drop the page cache
+    sync
+    if sudo -n true 2>/dev/null &&
+       sudo -n sh -c 'echo 3 > /proc/sys/vm/drop_caches' 2>/dev/null; then
+        info "page cache dropped (drop_caches=3): the reopen re-reads the medium"
+        return 0
+    fi
+    echo "  WARN: no root -- the page-cache cut was SKIPPED; this leg" >&2
+    echo "        degraded to kill -9 + reopen (process-death only)." >&2
+    return 1
+}
+
+pc_fsck() {       # <label>: structural gate, log in the page-cache scratch
+    pc_run "invf-fsck ($1)" "$PC_WORK/fsck.last" \
+        $B/invf-fsck "$PC_VOL" || return 1
+    tail -2 "$PC_WORK/fsck.last"
+    grep -q "^OK$" "$PC_WORK/fsck.last" && return 0
+    echo "  fsck not clean ($1):" >&2; cat "$PC_WORK/fsck.last" >&2
+    return 1
+}
+
+pc_verify() {     # <label>: rc==0 (0 corrupt AND parity clean-or-absent)
+    pc_run "invf-verify ($1)" "$PC_WORK/verify.last" \
+        $B/invf-verify "$PC_VOL" --deep || return 1
+    grep -E "^parity|^deep" "$PC_WORK/verify.last"
+    return 0
+}
+
+leg7() {
+    LEG=leg7-pagecache
+    say "[7] page-cache power loss: fsynced writes vs kill -9 + drop_caches"
+    pc_dev_create
+    $B/invf-mkfs "$PC_VOL" "$PC_SIZE_GB" >"$PC_WORK/mkfs.log" 2>&1 \
+        || { cat "$PC_WORK/mkfs.log"; fail "leg7 mkfs"; }
+    info "volume: $PC_VOL -- $PC_MODE"
+    pc_mnt_up
+
+    # -- 1 + 2: the acknowledged writes, and what they must read back as
+    python3 - "$PC_MNT" "$PC_WORK" $((SEED + 700)) <<'PY' >"$PC_WORK/write.log" 2>&1 &
+import hashlib, os, random, sys, time
+MNT, WORK, SEED = sys.argv[1], sys.argv[2], int(sys.argv[3])
+os.makedirs(WORK + "/ref", exist_ok=True)
+man = open(WORK + "/manifest.txt", "w")
+
+def gen(kind, n, seed):
+    r = random.Random(seed)
+    if kind == "text":                       # compressible -> PPMd/LZ4 lanes
+        w = ("the quick brown fox jumps over lazy dogs int static return "
+             "while for struct char void NULL size_t uint64_t\n").split()
+        b = bytearray()
+        while len(b) < n:
+            b += (r.choice(w) + " ").encode()
+        return bytes(b[:n])
+    if kind == "bin":                        # patterned binary -> ZSTD lane
+        pat = bytes(range(256)) * 4 + b"\x00" * 64
+        b = bytearray()
+        while len(b) < n:
+            b += pat + bytes([r.randrange(256)]) * 16
+        return bytes(b[:n])
+    return r.randbytes(n)                    # incompressible -> verbatim RAW
+
+def put(name, data, gen_no, cls):
+    fd = os.open(MNT + "/" + name, os.O_CREAT | os.O_WRONLY | os.O_TRUNC, 0o644)
+    mv = memoryview(data)
+    while mv:
+        k = os.write(fd, mv); mv = mv[k:]
+    os.fsync(fd)                             # THE acknowledgement
+    os.close(fd)
+    open("%s/ref/%s.g%d" % (WORK, name, gen_no), "wb").write(data)
+    man.write("%s\t%d\t%s\t%s\n" % (name, gen_no,
+                                    hashlib.sha256(data).hexdigest(), cls))
+
+def over(name, data, gen_no, cls, do_fsync):
+    # in-place rewrite: NO O_TRUNC (a truncate is its own metadata op), the
+    # new bytes overwrite the old ones from offset 0. Same length as the
+    # old generation on purpose: a torn rewrite then shows up as a byte
+    # splice at the same size, which is the failure this leg hunts.
+    fd = os.open(MNT + "/" + name, os.O_RDWR)
+    mv = memoryview(data)
+    while mv:
+        k = os.pwrite(fd, mv, 0); mv = mv[k:]
+    if do_fsync:
+        os.fsync(fd)
+    open("%s/ref/%s.g%d" % (WORK, name, gen_no), "wb").write(data)
+    man.write("%s\t%d\t%s\t%s\n" % (name, gen_no,
+                                    hashlib.sha256(data).hexdigest(), cls))
+    return fd
+
+n = 0
+for i in range(4):                          # text, compressible
+    put("pc-ack-t%d" % i, gen("text", 96 * 1024, SEED + 10 + i), 1, "ack"); n += 1
+for i in range(4):                          # patterned binary
+    put("pc-ack-b%d" % i, gen("bin", 128 * 1024, SEED + 20 + i), 1, "ack"); n += 1
+put("pc-ack-rand", random.Random(SEED).randbytes(64 * 1024), 1, "ack"); n += 1
+
+# 1 MiB = 16 segments: the in-place rewrite forks the whole recipe, so a
+# torn result has plenty of room to be a splice
+g1 = gen("bin", 1024 * 1024, SEED + 31)
+g2 = gen("bin", 1024 * 1024, SEED + 32)
+put("pc-acked.bin", g1, 1, "rw-acked")
+over("pc-acked.bin", g2, 2, "rw-acked", True)      # acknowledged rewrite
+put("pc-unacked.bin", g1, 1, "rw-unacked")
+wfd = over("pc-unacked.bin", g2, 2, "rw-unacked", False)   # NOT acknowledged
+man.close()
+print("WRITE-READY: %d files, %d generations, un-acked fd %d held open"
+      % (n + 2, sum(1 for _ in open(WORK + "/manifest.txt")), wfd), flush=True)
+# hold the un-acked fd open: the commit can only happen on flush/fsync/
+# release, and none of those may run before the daemon dies
+while True:
+    time.sleep(1)
+PY
+    PC_WRITER_PID=$!
+    local i
+    for i in $(seq 1 150); do
+        grep -q "WRITE-READY" "$PC_WORK/write.log" 2>/dev/null && break
+        sleep 0.2
+    done
+    grep -q "WRITE-READY" "$PC_WORK/write.log" \
+        || { cat "$PC_WORK/write.log"; fail "leg7 write phase never completed"; }
+    info "$(cat "$PC_WORK/write.log")"
+    info "every file fsynced; nothing unmounted, nothing closed"
+
+    # -- 3 + 4: the power cut
+    pc_kill "$PC_WRITER_PID" || fail "leg7: the daemon survived kill -9"
+    PC_WRITER_PID=""
+    info "daemon killed -9 (pid $PC_FUSE_PID), no vol_close, no CLEAN mark"
+    pc_cut || true
+    # the death really was abrupt: the superblock on the medium is still
+    # DIRTY (mkfs wrote CLEAN; vol_close is the only CLEAN writer)
+    python3 - "$PC_VOL" <<'PY' || fail "leg7: the daemon closed cleanly -- this is not a power cut"
+import struct, sys
+state = struct.unpack_from("<I", open(sys.argv[1], "rb").read(0x20), 0x18)[0]
+print("  on-disk superblock: 0x%02X%s" % (state,
+      " (DIRTY: the volume never closed)" if state == 0xDA else " (UNEXPECTED)"))
+sys.exit(0 if state == 0xDA else 1)
+PY
+
+    # -- 5: reopen offline. Presence, bit-exactness and the splice rule.
+    python3 - "$B" "$PC_VOL" "$PC_WORK" <<'PY' \
+        || fail "leg7: acknowledged bytes did not survive the cut"
+import hashlib, os, subprocess, sys, time
+B, VOL, WORK = sys.argv[1], sys.argv[2], sys.argv[3]
+man = [l.rstrip("\n").split("\t") for l in open(WORK + "/manifest.txt") if l.strip()]
+out = os.path.join(WORK, "cat.out")
+
+def cat(name):
+    """invf-cat with the loop-device flock race tolerated (see pc_run)"""
+    for _ in range(12):
+        r = subprocess.run([os.path.join(B, "invf-cat"), VOL, name, out],
+                           capture_output=True)
+        if r.returncode == 0:
+            return hashlib.sha256(open(out, "rb").read()).hexdigest(), None
+        if b"image is in use by another process" not in r.stderr:
+            return None, r.stderr.decode().strip()[-160:]
+        time.sleep(0.4)
+    return None, "flock race did not clear in 12 attempts"
+
+bad, checked, torn, verdict = [], 0, [], None
+for name, gen, sha, cls in man:
+    got, err = cat(name)
+    if got is None:
+        bad.append("%s (gen %s): invf-cat failed: %s" % (name, gen, err))
+        continue
+    checked += 1
+    if cls == "ack" and got != sha:
+        bad.append("%s: acknowledged bytes are NOT intact (%s != %s)"
+                   % (name, got[:12], sha[:12]))
+    elif cls == "rw-acked" and gen == "2" and got != sha:
+        bad.append("%s: the ACKED rewrite did not land (%s != %s)"
+                   % (name, got[:12], sha[:12]))
+    elif cls == "rw-unacked" and gen == "2":
+        # complete old or complete new -- anything else is a splice
+        g1 = [s_ for (n_, g_, s_, c_) in man if n_ == name and g_ == "1"][0]
+        if got == g1:
+            verdict = "OLD (the un-acked bytes were lost, as they may be)"
+        elif got == sha:
+            verdict = "NEW (the un-acked bytes were already durable)"
+        else:
+            verdict = "TORN"
+            torn.append("%s: neither the complete old (%s) nor the complete "
+                        "new (%s) content -- got %s: A SPLICE"
+                        % (name, g1[:12], sha[:12], got[:12]))
+print("  reopened: %d generations read back from the medium" % checked)
+if verdict:
+    print("  un-acked in-place rewrite came back %s" % verdict)
+for b in bad: print("  BAD: " + b)
+for t in torn: print("  BAD: " + t)
+sys.exit(1 if (bad or torn) else 0)
+PY
+    pc_fsck "post-cut" || fail "fsck after the page-cache cut"
+    pc_verify "post-cut" || fail "verify after the page-cache cut"
+
+    # -- 5b: and through a fresh mount (the FUSE read path, post-crash)
+    pc_mnt_up
+    python3 - "$PC_MNT" "$PC_WORK" <<'PY' \
+        || { pc_mnt_down; fail "leg7: remount read-back mismatch"; }
+import hashlib, os, sys
+MNT, WORK = sys.argv[1], sys.argv[2]
+man = [l.rstrip("\n").split("\t") for l in open(WORK + "/manifest.txt") if l.strip()]
+bad = []
+for name, gen, sha, cls in man:
+    if cls == "ack" or (cls == "rw-acked" and gen == "2"):
+        p = os.path.join(MNT, name)
+        try:
+            got = hashlib.sha256(open(p, "rb").read()).hexdigest()
+        except OSError as e:
+            bad.append("%s: unreadable through the mount (%s)" % (name, e)); continue
+        if got != sha:
+            bad.append("%s: mount read-back differs from the medium (%s != %s)"
+                       % (name, got[:12], sha[:12]))
+print("  remounted: every acknowledged file read back bit-exact through FUSE"
+      if not bad else "  remount: %d mismatch(es)" % len(bad))
+for b in bad: print("  BAD: " + b)
+sys.exit(1 if bad else 0)
+PY
+    pc_mnt_down 450 || fail "leg7: the daemon wedged on the clean unmount"
+    pc_fsck "post-remount" || fail "fsck after the remount"
+    pc_verify "post-remount" || fail "verify after the remount"
+    info "acknowledged writes survive kill -9 + drop_caches; no splices"
+}
+
 # -------------------------------------------------------------- main ----
 
 echo "WP22b flakey soak: seed=$SEED soak=${SOAK_S}s dev=$DM work=$FLK"
@@ -808,7 +1227,8 @@ want_leg 3 && leg3
 want_leg 4 && leg4
 want_leg 5 && leg5
 want_leg 6 && leg6
+want_leg 7 && leg7
 
 say "FLAKEY E2E: PASS  (seed=$SEED, $((SECONDS - T0))s total)"
-echo "  legs: re-mkfs-orphans / baseline / error-storm / torn-sweep / mid-seal kill / ${SOAK_S}s soak / compact-flip chaos"
+echo "  legs: re-mkfs-orphans / baseline / error-storm / torn-sweep / mid-seal kill / ${SOAK_S}s soak / compact-flip chaos / page-cache power loss"
 echo "  scratch $FLK cleaned; on failure the image + logs land in $ART"
