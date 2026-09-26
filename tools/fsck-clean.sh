@@ -23,18 +23,23 @@
 # The v2 branch is unchanged, so a v2 volume is still gated exactly as before.
 
 fsck_clean() {
-    local log=$1
-    # no [ -f ] here on purpose: callers pass a process substitution
-    # (`fsck_clean <(invf-fsck ...)`), which is a pipe, not a regular file.
-    # A missing/unreadable log simply fails every grep below, i.e. "not clean",
-    # and the caller names the path in its own message.
-    if grep -q "format:       v3" "$log"; then
-        grep -q "bad pages:    0" "$log" &&
-        grep -q "cycles/shared: 0" "$log" &&
-        grep -q "^OK$" "$log"
+    local log=$1 body
+    # Slurp ONCE. Callers legitimately pass a process substitution
+    # (`fsck_clean <(invf-fsck ...)`), which is a pipe, not a regular file --
+    # and a pipe cannot be re-read: the first grep drains it and every later
+    # grep sees EOF, so a three-condition gate silently reported "not clean"
+    # on a volume fsck had just called OK. Reading into a variable first
+    # makes file and process-substitution callers behave identically, and the
+    # greps then run against a herestring (a re-readable temp file).
+    body=$(cat "$log" 2>/dev/null) || return 1
+    [ -n "$body" ] || return 1
+    if grep -q "format:       v3" <<<"$body"; then
+        grep -q "bad pages:    0" <<<"$body" &&
+        grep -q "cycles/shared: 0" <<<"$body" &&
+        grep -q "^OK$" <<<"$body"
     else
-        grep -q "orphans:      0" "$log" &&
-        grep -q "missing:      0" "$log"
+        grep -q "orphans:      0" <<<"$body" &&
+        grep -q "missing:      0" <<<"$body"
     fi
 }
 
