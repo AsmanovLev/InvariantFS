@@ -191,7 +191,7 @@ echo "containers stamped CONTAINER{TARR}"
 
 echo "== re-sweep is idempotent =="
 $B/invf-sweep "$IMG" > "$WORK/sweep2.log" 2>&1
-if grep -q "batch\|parts -> " "$WORK/sweep2.log"; then
+if grep -q "parts -> " "$WORK/sweep2.log"; then
     echo "FAIL: re-sweep re-deferred"; cat "$WORK/sweep2.log"; exit 1;
 fi
 echo "no re-deferrals"

@@ -2586,6 +2586,29 @@ typedef struct {
     uint8_t *claimed;
 } wstats_v3_ctx;
 
+/* Attribute one segment extent to a content class. Each physical block is
+ * counted once no matter how many live recipes name it (a shared TEXT batch
+ * is referenced by the owner and by every member), so the claimed bitmap --
+ * not the zone tag -- is what makes the per-class totals add up. */
+static void wstats_claim(invfs_volume *v, uint8_t *claimed, uint64_t pba,
+                         uint64_t *phys)
+{
+    uint64_t plen = 0, b, bend;
+
+    if (!claimed || !pba || pba >= v->sb.total_blocks)
+        return;
+    if (seg_extent(v, pba, NULL, &plen) != 0)
+        return;
+    bend = pba + plen;
+    if (bend > v->sb.total_blocks)
+        bend = v->sb.total_blocks;
+    for (b = pba; b < bend; b++) {
+        if (bit_get(claimed, b)) continue;
+        bit_set(claimed, b);
+        *phys += INVFS_BLOCK_SIZE;
+    }
+}
+
 static int wstats_v3_cb(invfs_volume *v, uint64_t inode_id,
                         const char *name, void *ctx_)
 {
@@ -2628,23 +2651,16 @@ static int wstats_v3_cb(invfs_volume *v, uint64_t inode_id,
         for (i = 0; i < ne; i++) {
             if (ents[i].zone == INVFS_ZONE_TEXT) {
                 out->logic_text_bytes += ents[i].length;
-                if (c->claimed && ents[i].pba &&
-                    ents[i].pba < v->sb.total_blocks) {
-                    uint64_t plen = 0;
-                    if (seg_extent(v, ents[i].pba, NULL, &plen) == 0) {
-                        uint64_t b, bend = ents[i].pba + plen;
-                        if (bend > v->sb.total_blocks) bend = v->sb.total_blocks;
-                        for (b = ents[i].pba; b < bend; b++) {
-                            if (bit_get(c->claimed, b)) continue;
-                            bit_set(c->claimed, b);
-                            out->text_used_bytes += INVFS_BLOCK_SIZE;
-                        }
-                    }
-                }
+                wstats_claim(v, c->claimed, ents[i].pba,
+                             &out->text_used_bytes);
             } else if (ents[i].zone == INVFS_ZONE_BINARY) {
                 out->logic_shadow_bytes += ents[i].length;
+                wstats_claim(v, c->claimed, ents[i].pba,
+                             &out->shadow_used_bytes);
             } else {
                 out->logic_raw_bytes += ents[i].length;
+                wstats_claim(v, c->claimed, ents[i].pba,
+                             &out->raw_used_bytes);
             }
         }
     }
@@ -2672,19 +2688,33 @@ int vol_compute_stats(invfs_volume *v, invfs_volume_stats *out)
      * from the inode row itself), physical from the zone bitmaps: the v3
      * data plane still allocates RAW segments into the RAW zone and
      * blob/drain segments into Shadow, so region attribution is exact.
-     * The per-class physical breakdown and the per-zone logical split
-     * would need a recipe parse per live inode -- reported as zeros
-     * rather than guessed at (M18-remainder). */
+     * The per-class physical breakdown comes from the same recipe parse
+     * (each entry's zone tag over its own pba, each block claimed once),
+     * so it is a CONTENT-CLASS measure here exactly as the volume.h
+     * contract requires. */
     if (v->sb.vol_flags & VOLF_V3) {
         wstats_v3_ctx vc;
         vc.v = v; vc.out = out; vc.claimed = claimed;
         (void)vol_v3_iter_live_inodes(v, wstats_v3_cb, &vc);
-        out->raw_used_bytes = vol_zone_used_bytes(v,
-            v->sb.raw_zone_start,
-            v->sb.raw_zone_start + v->sb.raw_zone_blocks);
-        out->shadow_used_bytes = vol_zone_used_bytes(v,
-            v->sb.shadow_zone_start,
-            v->sb.shadow_zone_start + v->sb.shadow_zone_blocks);
+        /* raw/shadow/text_used_bytes are already CONTENT-CLASS measures,
+         * filled by the callback above. Do NOT recompute them as a scan of
+         * the raw/shadow REGIONS: zone boundaries are advisory and raw-class
+         * blocks legitimately live past raw_zone_blocks (the contract in
+         * volume.h says so). unclaimed is the one field that IS a region
+         * measure by definition -- data-region blocks no live recipe names
+         * -- so it is derived the same way the v2 path derives it. */
+        if (have_ms) {
+            uint64_t used = vol_zone_used_bytes(v, v->sb.raw_zone_start,
+                                                v->sb.total_blocks);
+            uint64_t cl = out->raw_used_bytes + out->shadow_used_bytes +
+                          out->text_used_bytes;
+            if (v->ndev == 2) {
+                uint64_t span = (v->sb.shadow_zone_start - v->dev0_blocks) *
+                                INVFS_BLOCK_SIZE;
+                used = span < used ? used - span : 0;
+            }
+            out->unclaimed_used_bytes = used > cl ? used - cl : 0;
+        }
         free(claimed);
         return 0;
     }
