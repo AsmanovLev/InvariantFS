@@ -6,6 +6,7 @@
 
 #include "volume_internal.h"
 #include "vol_spt0.h"
+#include "vol_btree.h"
 #include "vol_delta.h"
 #include "vol_metabuf.h"
 
@@ -56,11 +57,46 @@ int spt0_store(invfs_volume *v)
     return 0;
 }
 
+/* WP86: a save point is only useful if the base it pins can be walked. The
+ * page CRC of the root alone is not enough -- a torn page deeper in the tree
+ * makes the pinned root unusable while every check on the root page passes.
+ * spt0_tree_ok() walks the whole subtree, so neither capture nor restore can
+ * pin (or roll back onto) a damaged base; the caller gets a reason instead of
+ * a save point that would hand back an unreadable volume. */
+static int spt0_tree_ok(invfs_volume *v, uint64_t pba, char *err, size_t errlen)
+{
+    uint8_t page[INVFS_BLOCK_SIZE];
+    invfs_blkptr root;
+    char e[128];
+
+    if (mbuf_read(v, pba, page) != 0) {
+        if (err && errlen)
+            snprintf(err, errlen, "root page %llu is unreadable",
+                     (unsigned long long)pba);
+        return 0;
+    }
+    if (!mbuf_page_validate(page)) {
+        if (err && errlen)
+            snprintf(err, errlen, "root page %llu fails its CRC",
+                     (unsigned long long)pba);
+        return 0;
+    }
+    mbuf_ptr_set(&root, pba, page,
+                 mbuf_page_chdr(page)->level == INVFS_PAGE_LEVEL_LEAF
+                 ? INVFS_BP_ROOT | INVFS_BP_LEAF
+                 : INVFS_BP_ROOT | INVFS_BP_INTERNAL);
+    e[0] = 0;
+    if (btree_check(v, root, NULL, e, sizeof e) != 0) {
+        if (err && errlen)
+            snprintf(err, errlen, "%s", e[0] ? e : "base tree is invalid");
+        return 0;
+    }
+    return 1;
+}
+
 int spt0_capture(invfs_volume *v)
 {
     invfs_blkptr root;
-    uint8_t page[INVFS_BLOCK_SIZE];
-    invfs_page_hdr *h;
 
     if (!v)
         return -1;
@@ -72,11 +108,9 @@ int spt0_capture(invfs_volume *v)
     if (vol_v3_base_root(v, &root) != 0)
         return -1;
 
-    if (mbuf_read(v, root.pba, page) != 0)
-        return -1;
-    h = mbuf_page_hdr(page);
-    if (!mbuf_page_validate(page))
-        return -1;
+    /* WP86: refuse to pin a damaged base. */
+    if (!spt0_tree_ok(v, root.pba, NULL, 0))
+        return SPT0_RC_DAMAGED;
 
     memset(&v->spt0, 0, sizeof v->spt0);
     memcpy(v->spt0.magic, "SPT0", 4);
@@ -136,11 +170,22 @@ int spt0_restore(invfs_volume *v)
 
     base_root = v->spt0.base_root;
 
+    /* WP86: DETECT a damaged save point, do not use it. Publishing the pinned
+     * root when its tree is torn would replace a live (if damaged) volume
+     * with one whose every read fails, and would truncate the delta for a
+     * state that was never reachable. */
+    if (!spt0_tree_ok(v, base_root, NULL, 0)) {
+        fprintf(stderr, "invf-spt0: save point base_root %llu is damaged -- "
+                "refusing to roll back onto it; run invf-fsck -f to quarantine "
+                "the unreadable pages first\n",
+                (unsigned long long)base_root);
+        return SPT0_RC_DAMAGED;
+    }
     if (mbuf_read(v, base_root, page) != 0)
         return -1;
     h = mbuf_page_hdr(page);
     if (!mbuf_page_validate(page))
-        return -1;
+        return SPT0_RC_DAMAGED;
 
     if (mbuf_root_publish(v, base_root, h->gen) != 0)
         return -1;

@@ -21,6 +21,7 @@
 #include <string.h>
 #include "volume.h"
 #include "invarifs.h"
+#include "vol_spt0.h"
 
 int main(int argc, char **argv)
 {
@@ -32,6 +33,7 @@ int main(int argc, char **argv)
     invfs_seal2_repair r2;
     int issues;
 
+    memset(&rep, 0, sizeof rep);
     memset(&r2, 0, sizeof r2);
     for (i = 1; i < argc; i++) {
         if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) {
@@ -65,15 +67,45 @@ int main(int argc, char **argv)
 
     /* WP-M4: a format-v3 volume uses the metadata-v3 base tree, not the v2
      * inode-record stream. vol_fsck_scan dispatches to the v3 checker (RT30
-     * root double-slot + base-tree walk). It detects and reports only -- v3
-     * repair is a follow-up WP -- so -f changes nothing here; damage exits
-     * nonzero. The v2 path below is untouched. */
+     * root double-slot + base-tree walk).
+     *
+     * WP86: that walk CONTAINS an unreadable base page instead of stopping at
+     * it -- the page's key range is quarantined, every other subtree stays
+     * readable, and a key inside a quarantined range reads EIO. `-f` excises
+     * the quarantined ranges, folds the delta back in (which restores every
+     * quarantined key the delta still holds) and names what is left, which is
+     * gone for good.
+     *
+     * The exit code never softens the alarm: any damage found makes this pass
+     * exit 3, repair or not (the v2 -f contract -- `issues` is computed from
+     * what was found, not from what was fixed). A volume that is still
+     * damaged after -f is reported as DEGRADED with the reason, never as OK,
+     * and a damage -f cannot repair at all says so instead of doing nothing.
+     * The v2 path below is untouched. */
     if (vol_sb(v)->vol_flags & VOLF_V3) {
         const invfs_superblock *sb = vol_sb(v);
+        int degraded = 0;
         if (vol_fsck_scan(v, &rep, fix) != 0) {
             fprintf(stderr, "invf-fsck: v3 scan failed\n");
             vol_close(v);
             return 1;
+        }
+        if (rep.v3_rt30_bad || rep.v3_root_lost) {
+            degraded = 1;
+            fprintf(stderr, "invf-fsck: %s: CANNOT REPAIR: the base tree is "
+                            "unreachable (no valid RT30 root). Only the delta "
+                            "-- the writes since the last fold -- is readable; "
+                            "rebuilding the base from the delta alone would "
+                            "silently drop every key folded before it, so this "
+                            "pass refuses. The volume is intact but unreadable: "
+                            "restore it from a backup or from the original "
+                            "image.\n", img);
+        } else if (fix && rep.v3_quarantined && !rep.v3_repaired) {
+            degraded = 1;
+            fprintf(stderr, "invf-fsck: %s: CANNOT REPAIR: %llu unreadable base "
+                            "page(s) could not be quarantined away; the volume "
+                            "is unchanged and still degraded\n", img,
+                    (unsigned long long)rep.v3_bad_pages);
         }
         if (!quiet) {
             printf("InvariantFS fsck: %s\n", img);
@@ -98,6 +130,10 @@ int main(int argc, char **argv)
                        (unsigned long long)rep.v3_slots_ambiguous);
             printf("  bad pages:    %llu\n",
                    (unsigned long long)rep.v3_bad_pages);
+            if (rep.v3_quarantined)
+                printf("  quarantined:  %llu key range(s) -- a key inside one "
+                       "reads EIO, everything else is readable\n",
+                       (unsigned long long)rep.v3_quarantined);
             printf("  cycles/shared: %llu\n",
                    (unsigned long long)rep.v3_cycles);
             /* WP75: the v3 branch used to return before the v2 free-block
@@ -107,7 +143,40 @@ int main(int argc, char **argv)
             if (rep.v3_reachable_free)
                 printf("  reachable-but-free pages: %llu (bitmap divergence)\n",
                        (unsigned long long)rep.v3_reachable_free);
-            printf("%s\n", rep.v3_damaged ? "DAMAGED" : "OK");
+            if (spt0_info(v, NULL))
+                printf("  save point:   %s\n",
+                       rep.v3_savepoint_bad
+                       ? "live, pinning a DAMAGED base tree -- invf-rollback "
+                         "refuses it; invf-fsck -f drops it"
+                       : "live");
+            if (rep.v3_repaired) {
+                printf("  repaired:     %llu quarantined range(s) excised; "
+                       "%llu key(s) recovered from the delta\n",
+                       (unsigned long long)rep.v3_quarantined,
+                       (unsigned long long)rep.v3_keys_quarantined);
+                if (rep.v3_lost_names)
+                    printf("  LOST:         %llu name(s) -- their base page is "
+                           "unreadable and the data is NOT recoverable (each "
+                           "one is named above)\n",
+                           (unsigned long long)rep.v3_lost_names);
+                else
+                    printf("  LOST:         unrecoverable, and not "
+                           "attributable by name: the directory entries that "
+                           "named the lost files were inside a quarantined "
+                           "range too (see above)\n");
+            }
+            /* The verdict line keeps the v2 vocabulary (and the exact strings
+             * the e2e gates grep for): OK / DAMAGED / REPAIRED. The exit code
+             * is 3 whenever damage was found, REPAIRED or not -- the pass that
+             * finds the damage is the one that raises the alarm. What was
+             * repaired, and what is gone, is spelled out above. */
+            if (!rep.v3_damaged)
+                printf("OK\n");
+            else if (rep.v3_repaired)
+                printf("REPAIRED\n");
+            else
+                printf("DAMAGED\n");
+            (void)degraded;
         }
         vol_close(v);
         return rep.v3_damaged ? 3 : 0;

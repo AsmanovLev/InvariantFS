@@ -298,10 +298,15 @@ int mbuf_rt30_load(invfs_volume *v)
     memset(&v->rt30, 0, sizeof v->rt30);
     if (io_pread(&v->io, INVFS_RT30_OFF, &rt, sizeof rt) != 0)
         return -1;
-    if (memcmp(rt.magic, "RT30", 4) != 0 ||
-        rt.version != INVFS_RT30_VERSION ||
+    if (memcmp(rt.magic, "RT30", 4) != 0)
+        return 1;   /* no descriptor at all: an empty base (RDP0 rule) */
+    if (rt.version != INVFS_RT30_VERSION ||
         invfs_crc32c(&rt, offsetof(invfs_rt30, crc32c)) != rt.crc32c)
-        return 1;   /* absent or torn: present an empty root (RDP0 rule) */
+        /* WP86: a descriptor that is NAMED but does not validate is damage,
+         * not absence. Answering 1 here would present the whole namespace as
+         * empty -- every lookup would return "absent" and the operator would
+         * see a filesystem with no files in it. 2 = present but torn. */
+        return 2;
     v->rt30 = rt;
     v->rt30_present = 1;
     return 0;
@@ -354,7 +359,7 @@ int mbuf_root_read(invfs_volume *v, uint64_t *root_pba_out,
 {
     uint8_t page[INVFS_BLOCK_SIZE];
     uint64_t best_pba = 0, best_gen = 0;
-    int have = 0, io_fail = 0, i;
+    int have = 0, io_fail = 0, named = 0, i;
 
     if (!v)
         return -1;
@@ -363,13 +368,16 @@ int mbuf_root_read(invfs_volume *v, uint64_t *root_pba_out,
         if (rc < 0)
             return -1;
         if (rc == 1)
-            return 1;
+            return 1;   /* no descriptor: the base has never been written */
+        if (rc == 2)
+            return -1;  /* WP86: torn descriptor -- see mbuf_rt30_load */
     }
     for (i = 0; i < 2; i++) {
         uint64_t pba = v->rt30.root_slot[i];
         invfs_page_hdr *h;
         if (!pba)
             continue;
+        named = 1;
         if (mbuf_read(v, pba, page) != 0) {
             io_fail = 1;
             continue;
@@ -387,8 +395,16 @@ int mbuf_root_read(invfs_volume *v, uint64_t *root_pba_out,
             best_gen = h->gen;
         }
     }
-    if (!have)
-        return io_fail ? -1 : 1;
+    if (!have) {
+        /* WP86: RT30 NAMES a root but no named page validates. That is
+         * damage, not an empty tree: answering 1 made the entire namespace
+         * read as absent (a torn root page hid every file on the volume).
+         * The caller turns -1 into EIO, so a key the delta still holds stays
+         * readable and everything else fails loudly. */
+        /* The read failing above also sets `named`, so this is just "a slot
+         * names a page". */
+        return named ? -1 : 1;
+    }
     if (root_pba_out)
         *root_pba_out = best_pba;
     if (root_gen_out)

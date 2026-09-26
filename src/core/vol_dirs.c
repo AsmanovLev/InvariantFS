@@ -248,6 +248,7 @@ static int v3_list_cb(void *ctx_, const char *nm, size_t nlen, uint64_t child)
 {
     v3_list_ctx *c = (v3_list_ctx *)ctx_;
     invfs_v3_inode in;
+    int irc;
 
     if (c->n >= c->max)
         return 1;                         /* full: stop the scan */
@@ -255,7 +256,14 @@ static int v3_list_cb(void *ctx_, const char *nm, size_t nlen, uint64_t child)
         return 0;                         /* internal owner/registry */
     if (nlen >= sizeof c->ents[0].name)
         return 0;
-    if (vol_v3_inode_get(c->v, child, &in) != 1)
+    irc = vol_v3_inode_get(c->v, child, &in);
+    /* WP86: -1 is EIO (a quarantined or unreadable inode row), not a dangling
+     * dirent. Skipping it silently would hand readdir a shorter listing that
+     * looks complete -- the file would simply be gone. Abort the scan so the
+     * caller reports the error; a name is never invented and never hidden. */
+    if (irc < 0)
+        return -1;
+    if (irc == 0)
         return 0;                         /* dangling dirent: skip */
     memcpy(c->ents[c->n].name, nm, nlen);
     c->ents[c->n].name[nlen] = 0;

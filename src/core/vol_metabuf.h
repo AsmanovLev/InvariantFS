@@ -99,8 +99,9 @@ uint32_t mbuf_page_size(const invfs_volume *v);
 
 /* Read block 0's RT30 at INVFS_RT30_OFF, validate version + CRC, and
  * persist it on the volume (v->rt30 / v->rt30_present). 0 = present and
- * valid, 1 = absent/torn (empty root, the RDP0 convention), -1 = io
- * error. */
+ * valid, 1 = no descriptor at all (a base that was never written, the RDP0
+ * convention), 2 = WP86: a descriptor that is NAMED but fails version/CRC --
+ * damage, which must never be presented as an empty root -- -1 = io error. */
 int mbuf_rt30_load(invfs_volume *v);
 /* Recompute the descriptor CRC and write it back to block 0. 0 = ok. */
 int mbuf_rt30_store(invfs_volume *v);
@@ -112,7 +113,11 @@ int mbuf_rt30_store(invfs_volume *v);
 int mbuf_root_publish(invfs_volume *v, uint64_t root_pba, uint64_t root_gen);
 /* Select the live root: read both root slots, keep the one whose page
  * validates and carries the higher header gen (tie -> seq parity). 0 = ok
- * (pba_out/gen_out filled), 1 = no root yet (empty), -1 = io error. */
+ * (pba_out/gen_out filled), 1 = no root named at all (empty base),
+ * -1 = WP86: damage -- the descriptor is torn, or RT30 names a root page
+ * that does not validate. The caller must turn -1 into a hard error (EIO),
+ * never into "absent": a torn root page used to present the whole volume as
+ * an empty filesystem. */
 int mbuf_root_read(invfs_volume *v, uint64_t *root_pba_out,
                    uint64_t *root_gen_out);
 

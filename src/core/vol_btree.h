@@ -86,6 +86,60 @@ typedef struct {
 int btree_check(invfs_volume *v, invfs_blkptr root,
                 bt_stat *out, char *err, size_t errlen);
 
+/* WP86: containment walk. Same verification as btree_check, except an
+ * UNREADABLE page (bad CRC/gen/encoding) is recorded as a quarantined key
+ * range and skipped so the rest of the tree is still verified -- one torn
+ * page must not hide the state of the other 57. A structural failure (cycle,
+ * shared child, level or ordering violation) is NOT contained: that is a tree
+ * bug, not media damage, and it still returns -1. `q` (may be NULL) receives
+ * the quarantined ranges, the number of bad pages and a `qfull` flag when
+ * there were more bad pages than the range array can hold (the repair must
+ * refuse in that case rather than excise part of the damage). */
+#define BT_QUARANTINE_MAX      64u
+/* The longest key any v3 namespace can produce: a dirent key is
+ * parent:u64 + name_len:u16 + name, an xattr key 0x03 + inode:u64 +
+ * name_len:u16 + name -- 11 + INVFS_MAX_NAME(255) is the worst case. Anything
+ * longer cannot come from this engine; a range whose bound exceeds it is
+ * reported as undescribable and the repair is refused rather than guessed. */
+#define BT_QUARANTINE_KEY_MAX  272u
+typedef struct {
+    uint64_t pba;                            /* the page that failed */
+    uint8_t  lo[BT_QUARANTINE_KEY_MAX];      /* inclusive */
+    uint16_t lo_n;
+    uint8_t  hi[BT_QUARANTINE_KEY_MAX];      /* exclusive; see hi_unbounded */
+    uint16_t hi_n;
+    int      hi_unbounded;                   /* the rightmost range */
+} bt_range;
+typedef struct {
+    bt_range range[BT_QUARANTINE_MAX];
+    int      n;
+    uint64_t bad_pages;
+    /* 1 = the set is not complete/actionable: more bad pages than the array
+     * holds, or a key range longer than BT_QUARANTINE_KEY_MAX. The report is
+     * then partial and btree_excise must not run. */
+    int      qfull;
+} bt_quarantine;
+int btree_check_tolerant(invfs_volume *v, invfs_blkptr root,
+                         bt_stat *out, bt_quarantine *q,
+                         char *err, size_t errlen);
+
+/* WP86: drop the quarantined key ranges from the tree, copy-on-write. The
+ * parent entry that points at the unreadable page is removed (and a node left
+ * with a single child is collapsed into its parent), so every other key keeps
+ * its page: this is O(height) page writes, not a base rebuild, and it cannot
+ * lose a key that is still readable. The new root is returned in
+ * *new_root_out; the caller barriers and publishes it through RT30 and then
+ * reclaims the pages the dropped subtrees held.
+ *
+ * A key inside an excised range stops being EIO and becomes "absent" -- the
+ * bytes are gone. That is why this is an explicit repair, never a read-path
+ * fallback: the caller is expected to re-apply the delta afterwards (a fold
+ * restores every quarantined key the delta still holds) and to report the
+ * loss. 0 = nothing to do, 1 = the tree changed (*new_root_out is new),
+ * -1 = io/alloc/encode error (the input tree is untouched). */
+int btree_excise(invfs_volume *v, invfs_blkptr root, const bt_quarantine *q,
+                 invfs_blkptr *new_root_out);
+
 /* Reachability diff (design §8, D4): free every page reachable from
  * old_root but not from keep_root, via the WP-M2 allocator. Returns the number
  * of pages freed, or -1 on a walk/read error. This is the primitive WP-M15

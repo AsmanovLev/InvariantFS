@@ -4,6 +4,9 @@
 #include "volume_internal.h"
 #include "vol_metabuf.h"
 #include "vol_btree.h"
+#include "vol_delta.h"
+#include "vol_reclaim.h"
+#include "vol_spt0.h"
 
 
 /* The batch accumulator and the real vol_tz_flush/vol_tz_gc live with the
@@ -11,7 +14,8 @@
  * need meta_rewrite/vol_stamp_class/vol_delete_inode). */
 
 /* WP-M4: the v3 validation path (RT30 + base-tree walk). Defined after the
- * v2 helpers; vol_fsck_scan dispatches to it for VOLF_V3 volumes. */
+ * v2 helpers; vol_fsck_scan dispatches to it for VOLF_V3 volumes. WP86 added
+ * the containment walk and the -f repair behind the same entry point. */
 static int fsck_v3_scan(invfs_volume *v, invfs_fsck_report *rep, int fix);
 
 /* ================= fsck / repair =================
@@ -450,10 +454,15 @@ int vol_fsck_scan(invfs_volume *v, invfs_fsck_report *rep, int fix)
     memset(rep, 0, sizeof(*rep));
     /* WP-M4: a format-v3 volume carries no v2 inode-record stream / owner
      * WAL, so the v2 rebuild below does not apply. The v3 checker validates
-     * the RT30 root descriptor and walks the base B+-tree instead. This is
-     * detection-only: v3 repair is a follow-up WP, so `fix` is ignored
-     * (refuse, never mutate). v2 behavior is untouched when VOLF_V3 is
-     * clear. */
+     * the RT30 root descriptor and walks the base B+-tree instead, and WP86
+     * gave it a repair (the quarantined key ranges are excised, the delta is
+     * folded back in, the loss is named). v2 behavior is untouched when
+     * VOLF_V3 is clear.
+     *
+     * Known gap (NOT WP86, reported as a follow-up): the v2-only passes below
+     * -- the content cut (fix + INVFS_FSCK_CONTENT=1) and the seal2 repair
+     * (--repair) -- do not run on a v3 volume, so a data segment whose bytes
+     * were torn after its recipe landed cannot be quarantined there yet. */
     if (v->sb.vol_flags & VOLF_V3)
         return fsck_v3_scan(v, rep, fix);
     used_bytes = (size_t)v->bitmap_blocks * INVFS_BLOCK_SIZE;
@@ -924,19 +933,41 @@ int vol_fsck_scan(invfs_volume *v, invfs_fsck_report *rep, int fix)
     return 0;
 }
 
-/* ================= WP-M4: metadata-v3 fsck (detect only) =================
+/* ================= WP-M4/WP86: metadata-v3 fsck ==========================
  * A v3 volume's namespace lives in the immutable base B+-tree anchored by the
  * RT30 root descriptor (design-meta-v3.md §7/§12/§16). This checker validates
- * the root double-slot and walks every reachable base page. It DETECTS and
- * REPORTS only: v3 repair (re-derive a root, quarantine a torn page) is a
- * follow-up WP, so `fix` is deliberately ignored here -- a damaged v3 volume
- * is reported DAMAGED with a nonzero exit, never silently "repaired".
+ * the root double-slot and walks every reachable base page.
  *
- * A page whose blkptr.checksum/gen does not match its bytes is treated as a
- * hard read error (mbuf_read_ptr), exactly like the read path. That means a
- * torn child fails the walk at the first bad page; we report the damage and
- * keep going where we can (a torn root slot falls back to the other slot). */
-
+ * A page whose blkptr.checksum/gen does not match its bytes is a hard read
+ * error (mbuf_read_ptr), exactly like the read path -- it is not repairable
+ * and the tree keeps no second copy of it. WP-M4 stopped the walk there, which
+ * made one torn page fatal twice over: the report counted ONE bad page (the
+ * pages behind it were never walked) and `fix` did nothing, so the volume
+ * stayed broken forever.
+ *
+ * WP86 CONTAINS the damage instead:
+ *
+ *   report  btree_check_tolerant skips the unreadable page, records the key
+ *           range it owned, and keeps verifying the rest of the tree, so the
+ *           report names every bad page and every quarantined key range. A
+ *           key inside a quarantined range reads EIO on the read path
+ *           (mbuf_root_read / btree_search already refuse a bad page): it is
+ *           never presented as absent, and never as data.
+ *   -f      the quarantined ranges are EXCISED (btree_excise): the parent
+ *           entry that points at the unreadable page is dropped, every other
+ *           key keeps its page, and the delta is folded back in -- which
+ *           restores every quarantined key the delta still holds. What is left
+ *           -- keys that existed only in the damaged page -- is gone, and the
+ *           pass says so with the exact key range, the key count it could
+ *           not recover, and the NAMES it could attribute. The damage is
+ *           never silenced: the pass that finds it always exits nonzero
+ *           (the v2 -f contract), and a *structural* failure is refused
+ *           outright rather than "repaired".
+ *
+ * What no repair can do: a torn ROOT page with no valid sibling slot leaves
+ * the base tree unreachable. Only the delta is readable then, and rebuilding
+ * the base from the delta alone would silently drop every key that was folded
+ * before it -- so -f refuses, loudly, and says what is still readable. */
 static void fsck_v3_note(invfs_fsck_report *rep, const char *msg)
 {
     rep->v3_damaged = 1;
@@ -944,8 +975,10 @@ static void fsck_v3_note(invfs_fsck_report *rep, const char *msg)
 }
 
 /* Validate the RT30 descriptor itself (magic/version/page_size/CRC). Returns
- * 0 = valid, 1 = absent/torn (empty root, the RDP0 convention), -1 = io
- * error. On success v->rt30 is populated via mbuf_rt30_load. */
+ * 0 = valid, 1 = absent (an empty base, the RDP0 convention),
+ * 2 = WP86: present but torn -- damage, NOT an empty base; the caller must
+ * not walk a tree it cannot name, -1 = io error. On success v->rt30 is
+ * populated via mbuf_rt30_load. */
 static int fsck_v3_rt30(invfs_volume *v, invfs_fsck_report *rep)
 {
     int rc = mbuf_rt30_load(v);
@@ -955,9 +988,16 @@ static int fsck_v3_rt30(invfs_volume *v, invfs_fsck_report *rep)
     }
     if (rc == 1) {
         rep->v3_rt30_bad = 1;
-        fsck_v3_note(rep, "RT30 root descriptor absent or torn "
-                          "(magic/version/CRC) -- treating the base as empty");
+        fsck_v3_note(rep, "RT30 root descriptor absent -- the base was "
+                          "never written (empty)");
         return 1;
+    }
+    if (rc == 2) {
+        rep->v3_rt30_bad = 1;
+        fsck_v3_note(rep, "RT30 root descriptor is TORN (version/CRC) -- the "
+                          "base tree it names is unreachable; only the delta "
+                          "(recent writes) is readable");
+        return 2;
     }
     rep->v3_root_seq = v->rt30.seq;
     if (v->rt30.page_size != INVFS_BLOCK_SIZE) {
@@ -1000,6 +1040,27 @@ static int fsck_v3_slot_page(invfs_volume *v, uint64_t pba,
         return 2;
     if (gen_out)
         *gen_out = h->gen;
+    return 0;
+}
+
+/* Build a verified blkptr (pba + the page's own checksum/gen + root flags) for
+ * a page that RT30 or SPT0 names by pba alone. 0 = ok, -1 = the page does not
+ * read or does not validate. A blkptr whose checksum/gen are left zero does NOT
+ * work here: mbuf_read_ptr compares them against the page header, so it would
+ * reject every valid page. */
+static int fsck_v3_ptr_at(invfs_volume *v, uint64_t pba, invfs_blkptr *out)
+{
+    uint8_t page[INVFS_BLOCK_SIZE];
+
+    memset(out, 0, sizeof *out);
+    if (!pba || mbuf_read(v, pba, page) != 0)
+        return -1;
+    if (!mbuf_page_validate(page))
+        return -1;
+    mbuf_ptr_set(out, pba, page,
+                 mbuf_page_chdr(page)->level == INVFS_PAGE_LEVEL_LEAF
+                 ? INVFS_BP_ROOT | INVFS_BP_LEAF
+                 : INVFS_BP_ROOT | INVFS_BP_INTERNAL);
     return 0;
 }
 
@@ -1074,38 +1135,261 @@ static void fsck_v3_bitmap_check(invfs_volume *v, invfs_fsck_report *rep,
     }
 }
 
+/* The repair's lost-name scan needs the volume handle in a callback. */
+static invfs_volume *g_fsck_v;
+
+/* WP86: how many quarantined key ranges hold a key the delta still covers.
+ * Those are the ones the repair gets BACK (the fold re-applies them); every
+ * other key in a quarantined range existed only in the unreadable page and is
+ * gone. Counted before the fold, from the delta index. */
+typedef struct {
+    const bt_quarantine *q;
+    uint64_t recovered;
+} fsck_dq_ctx;
+
+static int fsck_delta_in_q_cb(void *ctx_, const uint8_t *key, uint16_t klen,
+                              const delta_ref *ref)
+{
+    fsck_dq_ctx *c = (fsck_dq_ctx *)ctx_;
+    int i;
+    (void)ref;
+    for (i = 0; i < c->q->n; i++) {
+        const bt_range *r = &c->q->range[i];
+        int ge_lo = 1, lt_hi = 1;
+        /* byte-lexicographic compare against the range bounds; keys are short,
+         * so a memcmp on the common prefix plus a length tie-break is exact */
+        uint16_t m;
+        int cc;
+        if (r->lo_n) {
+            m = klen < r->lo_n ? klen : r->lo_n;
+            cc = m ? memcmp(key, r->lo, m) : 0;
+            if (cc < 0 || (cc == 0 && klen < r->lo_n))
+                ge_lo = 0;
+        }
+        if (ge_lo && r->hi_n) {
+            m = klen < r->hi_n ? klen : r->hi_n;
+            cc = m ? memcmp(key, r->hi, m) : 0;
+            if (cc > 0 || (cc == 0 && klen >= r->hi_n))
+                lt_hi = 0;
+        }
+        if (ge_lo && lt_hi) {
+            c->recovered++;
+            return 0;
+        }
+    }
+    return 0;
+}
+
+/* WP86: after the repair, name the damage. A dirent whose inode row is gone is
+ * a file the volume can no longer show -- the only loss an operator can act on,
+ * so it is counted and printed instead of leaving a silently shorter directory.
+ * A quarantined dirent range means the names themselves are lost, which is
+ * reported too (as unattributable). */
+typedef struct {
+    uint64_t lost;
+    uint64_t shown;
+} fsck_names_ctx;
+
+static int fsck_lost_dirent_cb(void *ctx_, const char *name, size_t nlen,
+                               uint64_t child)
+{
+    fsck_names_ctx *c = (fsck_names_ctx *)ctx_;
+    invfs_v3_inode in;
+    int rc;
+
+    if (!nlen || !child)
+        return 0;
+    if ((unsigned char)name[0] == 0x01)
+        return 0;                       /* internal owner/registry entry */
+    rc = vol_v3_inode_get(g_fsck_v, child, &in);
+    if (rc < 0)
+        return 0;                       /* still unreadable: not "lost" yet */
+    if (rc == 1)
+        return 0;
+    c->lost++;
+    if (c->shown < 32)
+        fprintf(stderr, "fsck(v3): LOST: %s (inode %llu: its base page is "
+                        "unreadable; the data is not recoverable)\n",
+                name, (unsigned long long)child);
+    c->shown++;
+    return 0;
+}
+
+static void fsck_v3_lost_names(invfs_volume *v, invfs_fsck_report *rep)
+{
+    fsck_names_ctx c;
+    int rc;
+
+    memset(&c, 0, sizeof c);
+    g_fsck_v = v;
+    rc = vol_v3_dirent_scan(v, INVFS_V3_ROOT_INO, fsck_lost_dirent_cb, &c);
+    if (rc != 0) {
+        fprintf(stderr, "fsck(v3): UNATTRIBUTABLE LOSS: the directory entries "
+                        "that named the lost files were themselves inside a "
+                        "quarantined range, so the names cannot be listed. "
+                        "Every key in the quarantined range is gone; restore "
+                        "the volume from a backup if the names matter.\n");
+        return;
+    }
+    rep->v3_lost_names = c.lost;
+    if (c.lost)
+        fprintf(stderr, "fsck(v3): %llu name(s) lost with the quarantined "
+                        "pages%s\n", (unsigned long long)c.lost,
+                c.lost > c.shown ? " (list truncated)" : "");
+    else
+        fprintf(stderr, "fsck(v3): no name is left pointing at a lost inode "
+                        "row (the entries that named them were inside the "
+                        "quarantined range too)\n");
+}
+
+/* WP86: the -f repair. Excise the quarantined ranges, publish the new root,
+ * reclaim what the dropped subtrees held, and fold the delta back in so every
+ * quarantined key the delta still covers comes back.
+ *
+ * Crash safety is the fold's, unchanged: nothing is published until the new
+ * pages and the allocation bitmap are durable, so a crash before the publish
+ * leaves the volume exactly as it was (damaged but not worse), and a crash
+ * after it replays the delta against the new base idempotently. */
+static int fsck_v3_repair(invfs_volume *v, invfs_fsck_report *rep,
+                          invfs_blkptr old_root, const bt_quarantine *q)
+{
+    invfs_blkptr new_root = old_root, nr;
+    fsck_dq_ctx dq;
+    int changed;
+
+    /* A live save point pins pages this repair is about to free, and it pins a
+     * root whose tree is damaged by definition. WP86: it is detected and
+     * dropped here, never used (spt0_restore refuses such a save point too). */
+    if (v->savepoint_live) {
+        fprintf(stderr, "fsck(v3): dropping the save point (its base tree is "
+                        "damaged and cannot be used as a rollback target)\n");
+        if (spt0_drop(v) < 0) {
+            fsck_v3_note(rep, "could not drop the damaged save point");
+            return -1;
+        }
+    }
+
+    memset(&dq, 0, sizeof dq);
+    dq.q = q;
+    (void)vol_delta_iter(v, fsck_delta_in_q_cb, &dq);
+    rep->v3_keys_quarantined = dq.recovered;
+
+    changed = btree_excise(v, old_root, q, &new_root);
+    if (changed < 0) {
+        fsck_v3_note(rep, "quarantine excision failed (the volume is "
+                          "unchanged; re-run with free space)");
+        return -1;
+    }
+    if (changed == 0) {
+        fsck_v3_note(rep, "no quarantined range could be excised -- the base "
+                          "tree is unchanged");
+        return 0;
+    }
+
+    /* structure-before-reference (WP-M3): the new pages and the allocation
+     * bitmap are durable before RT30 names the new root. */
+    if (vol_v3_bitmap_flush(v) != 0 || vmux_barrier(v, "fsck v3 repair pages") < 0) {
+        fsck_v3_note(rep, "could not make the repaired pages durable; the "
+                          "root was NOT published (the volume is unchanged)");
+        return -1;
+    }
+    if (mbuf_root_publish(v, new_root.pba, new_root.gen) != 0) {
+        fsck_v3_note(rep, "RT30 refused the repaired root; the volume is "
+                          "unchanged");
+        return -1;
+    }
+
+    /* Reachability diff against the new root. The save point is gone, so
+     * nothing is pinned: the dropped subtrees' pages (including the damaged
+     * one) and the rewritten path are freed. */
+    (void)vol_reclaim_bump_epoch();
+    (void)vol_reclaim_drain(v);
+    (void)vol_reclaim_mark_and_free(v, old_root, new_root,
+                                    (invfs_blkptr){0, 0, 0, 0});
+
+    /* Fold the delta back in: this restores every quarantined key the delta
+     * still holds, and leaves the delta empty as a normal fold does. */
+    if (vol_delta_count(v) > 0 && vol_v3_fold(v) != 0)
+        fprintf(stderr, "fsck(v3): warning: the delta could not be folded "
+                        "back in after the repair; its records are still in "
+                        "the delta and will be re-applied by the next fold\n");
+
+    /* What is left is gone: name it. */
+    fsck_v3_lost_names(v, rep);
+    rep->v3_repaired = 1;
+    (void)nr;
+    return 0;
+}
+
 static int fsck_v3_scan(invfs_volume *v, invfs_fsck_report *rep, int fix)
 {
     invfs_blkptr root;
     bt_stat st;
+    bt_quarantine q;
     char err[128];
-    int rc;
+    int rc, i;
 
-    (void)fix;   /* detection only; v3 repair is a follow-up WP */
     rc = fsck_v3_rt30(v, rep);
     if (rc < 0)
         return -1;
+    if (rc == 2) {
+        /* WP86: the descriptor is torn, so no root can be named. Only the
+         * delta is readable, and rebuilding the base from the delta alone
+         * would drop every key folded before it -- refuse, loudly. */
+        rep->v3_root_lost = 1;
+        return 0;
+    }
     if (rc != 0) {
-        /* RT30 absent/torn or a page size this build cannot address: the
-         * base is not walkable. Damage is already recorded; report and
-         * stop rather than read 4 KiB pages under a 16 KiB descriptor. */
+        /* RT30 absent or a page size this build cannot address: the base is
+         * not walkable. Damage (if any) is already recorded; report and stop
+         * rather than read 4 KiB pages under a 16 KiB descriptor. */
         return 0;
     }
     if (fsck_v3_root(v, rep, &root) < 0)
         return -1;
 
     if (root.pba == 0) {
-        /* Empty base. A non-empty RT30 delta would be a later-WP concern;
-         * in the WP-M4 skeleton the namespace is empty and clean. */
-        if (!rep->v3_damaged)
+        /* No valid root page. Empty base when no slot names anything;
+         * WP86: damage when a slot named a page that does not validate. */
+        if (v->rt30.root_slot[0] || v->rt30.root_slot[1]) {
+            char b[192];
+            rep->v3_root_lost = 1;
+            snprintf(b, sizeof b,
+                     "no valid base root: root_slot[0]=%llu root_slot[1]=%llu "
+                     "and neither page validates -- the base tree is "
+                     "unreachable; only the delta (recent writes) is readable",
+                     (unsigned long long)v->rt30.root_slot[0],
+                     (unsigned long long)v->rt30.root_slot[1]);
+            fsck_v3_note(rep, b);
+        } else if (!rep->v3_damaged) {
             fprintf(stderr, "fsck(v3): base tree empty (clean)\n");
+        }
         return 0;
     }
 
+    /* WP86: a live save point over a damaged base is a trap -- it looks like a
+     * rollback target and is not one. Report it, and refuse the repair while
+     * it is live (fsck_v3_repair drops it, but only under -f). */
+    if (v->savepoint_live) {
+        invfs_blkptr pinned;
+        char e2[128];
+        e2[0] = 0;
+        if (fsck_v3_ptr_at(v, v->spt0.base_root, &pinned) != 0 ||
+            btree_check(v, pinned, NULL, e2, sizeof e2) != 0) {
+            char b[192];
+            rep->v3_savepoint_bad = 1;
+            snprintf(b, sizeof b, "a live save point pins a DAMAGED base tree "
+                     "(base_root %llu) -- invf-rollback will refuse it",
+                     (unsigned long long)v->spt0.base_root);
+            fsck_v3_note(rep, b);
+        }
+    }
+
     err[0] = 0;
-    rc = btree_check(v, root, &st, err, sizeof err);
+    rc = btree_check_tolerant(v, root, &st, &q, err, sizeof err);
     rep->v3_pages_walked = st.n_pages;
     rep->v3_keys = st.nkeys;
+    rep->v3_quarantined = (uint64_t)q.n;
     if (rc != 0) {
         char b[256];
         if (err[0])
@@ -1113,24 +1397,65 @@ static int fsck_v3_scan(invfs_volume *v, invfs_fsck_report *rep, int fix)
         else
             snprintf(b, sizeof b, "base tree walk failed (io error)");
         fsck_v3_note(rep, b);
-        /* btree_check's error text distinguishes a cycle/shared child from
-         * a torn page or a structural (ordering/level) failure; count the
-         * former as cycles, everything else as bad pages. */
+        /* A structural failure (cycle, shared child, level/ordering) is not
+         * media damage and is NOT excised: -f refuses rather than reshape a
+         * tree the engine itself built wrong. */
         if (strstr(err, "cycle or shared child"))
             rep->v3_cycles++;
         else
-            rep->v3_bad_pages++;
+            rep->v3_bad_pages += q.bad_pages ? q.bad_pages : 1;
         return 0;
     }
+    if (q.n) {
+        char b[256];
+        rep->v3_bad_pages += q.bad_pages;
+        for (i = 0; i < q.n; i++) {
+            char lo[3 * BT_QUARANTINE_KEY_MAX + 1];
+            char hi[3 * BT_QUARANTINE_KEY_MAX + 1];
+            size_t o = 0;
+            int j;
+            for (j = 0; j < q.range[i].lo_n && o + 3 < sizeof lo; j++)
+                o += (size_t)snprintf(lo + o, sizeof lo - o, "%02x",
+                                      q.range[i].lo[j]);
+            lo[o] = 0;
+            if (q.range[i].hi_unbounded) {
+                snprintf(hi, sizeof hi, "+inf");
+            } else {
+                o = 0;
+                for (j = 0; j < q.range[i].hi_n && o + 3 < sizeof hi; j++)
+                    o += (size_t)snprintf(hi + o, sizeof hi - o, "%02x",
+                                          q.range[i].hi[j]);
+                hi[o] = 0;
+            }
+            snprintf(b, sizeof b,
+                     "base page pba %llu is unreadable: key range [%s, %s) is "
+                     "QUARANTINED (those keys read EIO; everything else is "
+                     "readable)", (unsigned long long)q.range[i].pba, lo, hi);
+            fsck_v3_note(rep, b);
+        }
+        if (q.qfull) {
+            char b[192];
+            snprintf(b, sizeof b, "the quarantine set is incomplete (more "
+                     "unreadable pages than it holds, or a key range longer "
+                     "than %u bytes): this report is partial and -f will "
+                     "refuse to repair", (unsigned)BT_QUARANTINE_KEY_MAX);
+            fsck_v3_note(rep, b);
+        }
+    }
 
-    /* Allocator cross-check: a reachable page must be marked allocated in
-     * the metadata bitmap (the v2 "bitmap divergence" analogue). Only the
-     * root page is checked here: btree_check validates reachability but
-     * does not expose its visited set, and btree_reclaim (which could mark
-     * it) frees pages, which is out of scope. A full reachable-set diff
-     * needs a non-mutating mark walk; that lands with the reclaim WP.
-     * TODO(WP-M4): full reachable-set/bitmap cross-check. */
+    /* Allocator cross-check: a reachable page must be marked allocated in the
+     * metadata bitmap (the v2 "bitmap divergence" analogue). Only the
+     * root page is checked here: the check does not expose the visited set,
+     * and btree_reclaim (which could mark it) frees pages, which is out of
+     * scope. TODO(WP-M4): full reachable-set/bitmap cross-check. */
     fsck_v3_bitmap_check(v, rep, root.pba);
 
-    return 0;
+    if (!fix || !q.n)
+        return 0;
+    if (q.qfull) {
+        fsck_v3_note(rep, "refusing to repair: the damage exceeds what one pass "
+                          "can quarantine");
+        return 0;
+    }
+    return fsck_v3_repair(v, rep, root, &q);
 }

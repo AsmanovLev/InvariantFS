@@ -83,7 +83,7 @@ endef
 
 # CLI tools (main in src/cli/<name>.c)
 CLI_MAINS := mkfs verify fsck cp cat ls stat arctest blkio_test resize \
-             metabuf_test btree_test v3inode overlay_test fold_test concurrency_test \
+             metabuf_test btree_test btree_repair_test v3inode overlay_test fold_test concurrency_test \
              sweep_v3_test symlink_v3_test large_file_v3_test dedupe_v3_test deflate_repro_test \
              plugin_host_test plugin_mt_test
 $(foreach t,$(CLI_MAINS),$(eval $(call TOOL_RULE,$(t),)))
@@ -218,6 +218,7 @@ fuzz-ci: $(OUT)/invf-fuzz
 test: $(OUT)/invf-arctest $(OUT)/invf-blkio_test $(OUT)/invf-codec_test \
       $(OUT)/invf-helper_exec_test $(OUT)/invf-metabuf_test $(OUT)/invf-btree_test \
       $(OUT)/invf-delta_test $(OUT)/invf-concurrency_test $(OUT)/invf-sweep_v3_test \
+      $(OUT)/invf-btree_repair_test \
       $(OUT)/invf-symlink_v3_test $(OUT)/invf-large_file_v3_test $(OUT)/invf-dedupe_v3_test \
       $(OUT)/invf-deflate_repro_test $(OUT)/invf-plugin_host_test $(OUT)/invf-plugin_mt_test \
       $(OUT)/invf-ivpack_packs_test $(OUT)/invf-mkfs $(OUT)/invf-cp \
@@ -231,6 +232,7 @@ test: $(OUT)/invf-arctest $(OUT)/invf-blkio_test $(OUT)/invf-codec_test \
 	$(OUT)/invf-delta_test
 	$(OUT)/invf-concurrency_test /tmp
 	$(OUT)/invf-sweep_v3_test /tmp
+	$(OUT)/invf-btree_repair_test /tmp
 	$(OUT)/invf-symlink_v3_test /tmp
 	$(OUT)/invf-large_file_v3_test /tmp
 	$(OUT)/invf-dedupe_v3_test /tmp

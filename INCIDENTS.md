@@ -771,3 +771,118 @@ mapper repro (mkfs→cp×2→sweep→rollback→cp new→ls) shows the new name
 bit-exact; Bug A regression still `orphans=0 missing=0`, `make test`
 PASS. `test-mapper-crash.sh` leg3/leg4 “1 descending step” is
 **pre-existing** (reproduced with the fix stashed).
+
+---
+
+## WP86 — One torn Meta-v3 base page bricked the volume (or hid it)
+
+**Date:** Sep 26, 2026
+**Severity:** High (one unreadable 4 KiB page ⇒ the whole volume unreadable)
+**Impact:** every Meta-v3 volume (the v0.5.0 default format) written under a
+lying write cache / `drop_writes` window. Found by the WP83 flakey soak
+(seed 20260831, reproduced twice), fixed deterministically in WP86.
+**CWE:** CWE-390 (detection of an error condition without action) ×3,
+CWE-754 (improper check for an exceptional condition).
+
+### Symptom
+
+```
+REPO=<worktree> FLAKEY_ONLY=5 bash tools/run-e2e.sh tools/test-flakey.sh
+# soak round r4, gate at t=+9.2s:
+#   fsck rc=3: bad pages: 1 | DAMAGED | base tree walk failed: unreadable page
+#                     (bad CRC/gen/encoding)
+#   fsck -f rc=3: (identical)
+#   fsck final rc=3: (identical)
+#   FAIL: recovery ladder dead-ended at gate
+```
+
+`invf-fsck` named the damage, `invf-fsck -f` changed nothing (the v3 branch of
+`fsck.c` returned before any repair path existed — the comment said so: *"v3
+repair is a follow-up WP"*), and `invf-rollback` could not help because the SPT0
+save point pins the very tree that is damaged. The volume never became clean
+again, so every recovery ladder dead-ended at the gate.
+
+Three distinct failure modes hid behind that one message:
+
+1. **The walk stopped at the first bad page.** `btree_check()` aborts there, so
+   the report said `bad pages: 1` and `pages walked: 2` of 58 — the other 56
+   pages were never looked at, and the report could not say what was lost.
+2. **A torn ROOT page made the whole volume read as EMPTY.**
+   `mbuf_root_read()` answered `1` ("no root yet — empty tree") when RT30 named
+   a root page that did not validate, and `mbuf_rt30_load()` answered `1`
+   ("absent") for a descriptor whose magic matched but whose CRC did not. Every
+   lookup then returned **absent, not EIO**: a filesystem full of files
+   presented as a filesystem with no files in it, and a writer would have
+   created new ones straight on top. Silent, total, and worse than the loud
+   failure it replaced.
+3. **readdir laundered the damage.** `vol_dirs.c` `v3_list_cb()` folded an EIO
+   inode row into "dangling dirent: skip", so a directory whose children's rows
+   sat on the torn page came back *shorter* and looked complete. The files were
+   simply gone from the listing, with no error anywhere.
+
+### Fix
+
+- `mbuf_rt30_load()` returns **2** for "named but torn", and `mbuf_root_read()`
+  returns **-1** when RT30 names a root page that does not validate (both were
+  the "empty base" answer before). Damage is now distinct from absence, so a
+  torn root reads EIO — and a key the delta still holds stays readable, because
+  the overlay consults the delta before the base.
+- `btree_check_tolerant()` records the key range the unreadable page owned (the
+  parent's separators make it exact), skips the page and **keeps verifying the
+  rest of the tree**. A *structural* failure (cycle, shared child, level or
+  ordering violation) is a tree bug rather than media damage and is still
+  refused, never tolerated.
+- `invf-fsck -f` excises the quarantined ranges (`btree_excise()`): the parent
+  entry pointing at the unreadable page is dropped, a node left with one child
+  is collapsed into its parent, and everything else keeps its page. O(height)
+  page writes, not a base rebuild, and by construction it cannot drop a key
+  that is still readable. The new root is published through RT30 after the pages
+  and the allocation bitmap are durable (the fold's ordering), the reachability
+  diff frees the dropped subtrees, and a fold re-applies the delta — bringing
+  back every quarantined key the delta still holds. What remains is named:
+  each dirent whose inode row is gone is printed as `LOST: <name>`, and when the
+  dirents were inside the quarantine too, the loss is reported as
+  unattributable rather than quietly missing.
+- `spt0_capture()` / `spt0_restore()` walk the pinned tree instead of checking
+  only the root page's CRC, and return `SPT0_RC_DAMAGED`: a save point over a
+  damaged base is detected, never used, and `invf-fsck -f` drops it.
+- `v3_list_cb()` aborts the readdir scan on EIO.
+
+### The alarm is not silenced
+
+Any damage found exits **3**, repair or not — the v2 `-f` contract, where
+`issues` counts what was *found*, not what was *fixed*. The verdict line keeps
+the v2 vocabulary (`OK` / `DAMAGED` / `REPAIRED`) and the repair prints exactly
+what it dropped:
+
+```
+  repaired:     1 quarantined range(s) excised; 0 key(s) recovered from the delta
+  LOST:         unrecoverable, and not attributable by name: the directory
+                entries that named the lost files were inside a quarantined
+                range too (see above)
+REPAIRED
+```
+
+### What `-f` refuses, on purpose
+
+A torn **root** page with no valid sibling slot leaves the base unreachable:
+only the delta is readable, and rebuilding the base from the delta alone would
+silently drop every key folded before it. `fsck -f` says `CANNOT REPAIR` and
+exits non-zero rather than performing a "recovery" that is 95% data loss. The
+same holds for a structural tree failure and for damage larger than the
+quarantine table.
+
+### Verification
+
+- `bin/invf-btree_repair_test` (new, in `make test`): folds a volume, tears one
+  base leaf's CRC, and asserts the whole contract — containment, EIO not
+  absent, other subtrees readable, the delta's copy of a quarantined key
+  recovered, the surviving names intact, the tree valid after a remount; plus a
+  three-pages-at-once phase, a torn root, and a save point on a damaged base.
+  42 checks, 0 failures (13 of them fail on the pre-fix tree).
+- `tools/test-meta-v3-fsck.sh`, `test-meta-v3-fold.sh`, `test-writepath.sh`,
+  `test-meta-v3-{,delta,write,inode,dirent,mut,overlay,hardlink,xattr,recipe}.sh`:
+  PASS. `make test`: PASS.
+- flakey leg 5 with WP86: the same `drop_writes` window that used to dead-end
+  the ladder now converges — `fsck rc=3` (range named) → `fsck -f rc=3`
+  (excised) → `fsck final rc=0 / OK`.

@@ -88,6 +88,20 @@ typedef struct {
     int          level;
 } bt_dn;
 
+/* WP86: bt_range / bt_quarantine (the quarantined key ranges) are declared in
+ * vol_btree.h next to the API that fills and consumes them. Result of a
+ * recursive excision. node.pba == 0 means "this subtree is now
+ * empty" and the caller must drop the entry. min_* is the new minimum key of
+ * `node` when the node lost its first child, so the caller can keep its
+ * separator in step (copied, never a borrowed page pointer). */
+typedef struct {
+    invfs_blkptr node;
+    uint8_t      min_key[BT_QUARANTINE_KEY_MAX];
+    uint16_t     min_n;
+    uint64_t     dropped;    /* subtrees removed below here */
+    int          changed;
+} bt_excise;
+
 /* ------------------------------------------------------------------ */
 /* key compare + small encode helpers                                 */
 /* ------------------------------------------------------------------ */
@@ -950,6 +964,9 @@ typedef struct {
     uint64_t pages;
     uint64_t keys;
     uint32_t height;      /* leaf depth (1 = root is a leaf) */
+    uint64_t bad;         /* WP86: unreadable pages skipped, not fatal */
+    bt_quarantine *q;     /* WP86: where to record the quarantined ranges */
+    int      qfull;
     char    *err;
     size_t   errlen;
 } bt_ck;
@@ -1102,6 +1119,452 @@ int btree_check(invfs_volume *v, invfs_blkptr root,
     }
     free(ck.seen);
     return rc;
+}
+
+/* ------------------------------------------------------------------ */
+/* WP86: quarantine walk + range excision                             */
+/*                                                                   */
+/* A base page whose CRC/gen/encoding does not match its bytes cannot */
+/* be repaired: WP-M2 never rewrites a torn page, and a COW tree keeps */
+/* no second copy of one. But a B+-tree's parent separators say        */
+/* exactly which key range the page owned, so the damage can be        */
+/* CONTAINED instead of fatal -- the range is quarantined, every other */
+/* subtree stays readable, and a key inside the range fails loudly     */
+/* (EIO) rather than answering "absent".                               */
+/*                                                                   */
+/* btree_check walks strictly and aborts at the first bad page, so it  */
+/* both under-reports (one bad page found, the pages after it never   */
+/* walked) and cannot say what was lost. btree_check_tolerant keeps    */
+/* going: an unreadable page is recorded as a quarantine range and     */
+/* skipped, and every other page is still verified. A STRUCTURAL       */
+/* failure (cycle, shared child, level or ordering violation) is a      */
+/* different animal -- it means the tree logic is broken, not the      */
+/* media -- and is reported as such and never tolerated.               */
+/* ------------------------------------------------------------------ */
+
+/* Record one quarantined range. 0 = recorded, -1 = it cannot be represented
+ * (the array is full, or a bound is longer than any key this engine writes).
+ * A half-recorded range would be a WILDCARD -- "matches everything" -- and the
+ * excision would drop the whole tree, so an unrepresentable range is never
+ * left behind: the caller sees -1, sets qfull and refuses the repair. */
+static int bt_ck_quarantine_add(bt_ck *ck, invfs_blkptr ptr, bt_key lo, bt_key hi)
+{
+    bt_range r;
+
+    if (!ck->q)
+        return 0;                    /* the caller did not ask for ranges */
+    if (ck->q->n >= BT_QUARANTINE_MAX)
+        return -1;
+    memset(&r, 0, sizeof r);
+    r.pba = ptr.pba;
+    if (lo.n) {
+        if (lo.n > BT_QUARANTINE_KEY_MAX)
+            return -1;
+        memcpy(r.lo, lo.p, lo.n);
+        r.lo_n = lo.n;
+    }
+    if (hi.n) {
+        if (hi.n > BT_QUARANTINE_KEY_MAX)
+            return -1;
+        memcpy(r.hi, hi.p, hi.n);
+        r.hi_n = hi.n;
+    } else {
+        r.hi_unbounded = 1;
+    }
+    ck->q->range[ck->q->n++] = r;
+    return 0;
+}
+
+/* The same walk as bt_check_rec, but an unreadable page is recorded and
+ * skipped instead of aborting. Returns 0 when the readable part of the subtree
+ * is sound, -1 on a structural failure (see the header). */
+static int bt_check_tol_rec(invfs_volume *v, invfs_blkptr ptr, int expect_level,
+                            bt_key lo, bt_key hi, uint32_t depth, bt_ck *ck)
+{
+    uint8_t buf[INVFS_BLOCK_SIZE];
+    bt_ent *e = (bt_ent *)malloc(sizeof(bt_ent) * BT_MAX_ENTRIES);
+    int n, level, i;
+
+    if (!e)
+        return -1;
+    if (ptr.pba == 0 || ptr.pba >= ck->total) {
+        bt_ck_err(ck, "null/out-of-range child pba");
+        free(e);
+        return -1;
+    }
+    if (bit_get(ck->seen, ptr.pba)) {
+        bt_ck_err(ck, "cycle or shared child");
+        free(e);
+        return -1;
+    }
+    bit_set(ck->seen, ptr.pba);
+    ck->pages++;
+
+    if (bt_read(v, ptr, buf, e, &n, &level) != 0) {
+        bt_ck_err(ck, "unreadable page (bad CRC/gen/encoding)");
+        ck->bad++;
+        if (bt_ck_quarantine_add(ck, ptr, lo, hi) != 0)
+            ck->qfull = 1;
+        free(e);
+        return 0;               /* contained: the caller keeps walking */
+    }
+    if (expect_level >= 0 && level != expect_level) {
+        bt_ck_err(ck, "level not monotone");
+        free(e);
+        return -1;
+    }
+
+    if (level == INVFS_PAGE_LEVEL_LEAF) {
+        if (ck->height == 0)
+            ck->height = depth;
+        else if (ck->height != depth) {
+            bt_ck_err(ck, "leaves at differing depths");
+            free(e);
+            return -1;
+        }
+        if (n < 1) {
+            bt_ck_err(ck, "empty leaf");
+            free(e);
+            return -1;
+        }
+        for (i = 0; i < n; i++) {
+            if (i && bt_cmp(e[i - 1].k, e[i - 1].klen, e[i].k, e[i].klen) >= 0) {
+                bt_ck_err(ck, "leaf keys not strictly ordered");
+                free(e);
+                return -1;
+            }
+            if (lo.n && bt_cmp(e[i].k, e[i].klen, lo.p, lo.n) < 0) {
+                bt_ck_err(ck, "leaf key below parent bound");
+                free(e);
+                return -1;
+            }
+            if (hi.n && bt_cmp(e[i].k, e[i].klen, hi.p, hi.n) >= 0) {
+                bt_ck_err(ck, "leaf key above parent bound");
+                free(e);
+                return -1;
+            }
+        }
+        ck->keys += (uint64_t)n;
+        free(e);
+        return 0;
+    }
+
+    if (n < 2) {
+        bt_ck_err(ck, "internal node with fewer than 2 children");
+        free(e);
+        return -1;
+    }
+    for (i = 0; i < n; i++) {
+        if (i && bt_cmp(e[i - 1].k, e[i - 1].klen, e[i].k, e[i].klen) >= 0) {
+            bt_ck_err(ck, "separators not strictly ordered");
+            free(e);
+            return -1;
+        }
+        if (lo.n && bt_cmp(e[i].k, e[i].klen, lo.p, lo.n) < 0) {
+            bt_ck_err(ck, "separator below parent bound");
+            free(e);
+            return -1;
+        }
+        if (hi.n && bt_cmp(e[i].k, e[i].klen, hi.p, hi.n) >= 0) {
+            bt_ck_err(ck, "separator above parent bound");
+            free(e);
+            return -1;
+        }
+    }
+    for (i = 0; i < n; i++) {
+        bt_key clo, chi;
+        clo.p = e[i].k;
+        clo.n = e[i].klen;
+        chi.p = (i + 1 < n) ? e[i + 1].k : hi.p;
+        chi.n = (i + 1 < n) ? e[i + 1].klen : hi.n;
+        if (bt_check_tol_rec(v, e[i].child, level - 1, clo, chi,
+                             depth + 1, ck) != 0) {
+            free(e);
+            return -1;
+        }
+    }
+    free(e);
+    return 0;
+}
+
+int btree_check_tolerant(invfs_volume *v, invfs_blkptr root, bt_stat *out,
+                         bt_quarantine *q, char *err, size_t errlen)
+{
+    bt_ck ck;
+    uint64_t bytes;
+    int rc;
+
+    if (!v)
+        return -1;
+    if (out) {
+        out->n_pages = 0;
+        out->nkeys = 0;
+        out->height = 0;
+    }
+    if (err && errlen)
+        err[0] = 0;
+    if (q) {
+        memset(q, 0, sizeof *q);
+        q->qfull = 0;
+    }
+    if (root.pba == 0)
+        return 0;
+
+    bytes = (v->sb.total_blocks + 7u) / 8u;
+    memset(&ck, 0, sizeof ck);
+    ck.seen = (uint8_t *)calloc(1, (size_t)bytes);
+    if (!ck.seen)
+        return -1;
+    ck.total = v->sb.total_blocks;
+    ck.err = err;
+    ck.errlen = errlen;
+    ck.q = q;
+    rc = bt_check_tol_rec(v, root, -1, (bt_key){NULL, 0}, (bt_key){NULL, 0},
+                          1, &ck);
+    if (out) {
+        out->n_pages = ck.pages;
+        out->nkeys = ck.keys;
+        out->height = ck.height;
+    }
+    if (q) {
+        q->bad_pages = ck.bad;
+        q->qfull = ck.qfull;
+    }
+    free(ck.seen);
+    return rc;
+}
+
+/* ------------------------------------------------------------------ */
+/* WP86: excise the quarantined key ranges from the tree             */
+/*                                                                   */
+/* The repair is NOT a base rebuild. A damaged page cannot be read, so */
+/* its keys cannot be copied anywhere; but the tree becomes sound again */
+/* by dropping the parent entry that points at it. Every other key     */
+/* keeps its page, so the excision costs O(height) page writes and the  */
+/* reachability diff frees exactly the pages the dropped subtree held. */
+/* The COW discipline is the same as every other mutating call: new     */
+/* pages, no publish, and the caller barriers and publishes the new     */
+/* root through RT30.                                                  */
+/*                                                                   */
+/* Stated so no caller is surprised: a key inside an excised range stops */
+/* being EIO and becomes "absent". That is the point of -f -- the bytes */
+/* are gone and the pass says so loudly -- which is why the excision   */
+/* lives behind an explicit fix flag and never in the read path. Keys  */
+/* the delta still holds are re-inserted by the fold that follows, so    */
+/* only the keys that existed solely in the damaged page are lost.       */
+/* ------------------------------------------------------------------ */
+
+/* Is [clo, chi) contained in the quarantine range r? A zero-length chi means
+ * unbounded, which can only be contained by an unbounded hi. */
+static int bt_range_covers(const bt_range *r, bt_key clo, bt_key chi)
+{
+    if (r->lo_n && bt_cmp(clo.p, clo.n, r->lo, r->lo_n) < 0)
+        return 0;
+    if (r->hi_n) {
+        if (!chi.n)
+            return 0;
+        if (bt_cmp(chi.p, chi.n, r->hi, r->hi_n) > 0)
+            return 0;
+    }
+    return 1;
+}
+
+/* One level of the excision. Drops every child entry whose key range falls
+ * inside a quarantine range, recurses into the entries that only partially
+ * overlap, and collapses a node left with fewer than two children
+ * (btree_check requires two, so a one-child node must be replaced by its
+ * child on the way up). lo/hi bound this node's own range. */
+static int bt_excise_rec(invfs_volume *v, invfs_blkptr node, uint64_t gen,
+                         const bt_quarantine *q, bt_key lo, bt_key hi,
+                         int level_expect, bt_excise *out)
+{
+    uint8_t buf[INVFS_BLOCK_SIZE];
+    uint8_t *kfix = NULL;      /* owned replacement separators */
+    bt_ent *e;
+    int n, level, i, keep, rc = 0;
+
+    e = (bt_ent *)malloc(sizeof(bt_ent) * BT_MAX_ENTRIES);
+    if (!e)
+        return -1;
+    if (bt_read(v, node, buf, e, &n, &level) != 0) {
+        free(e);
+        return -1;
+    }
+    if (level_expect >= 0 && level != level_expect) {
+        free(e);
+        return -1;
+    }
+    if (level == INVFS_PAGE_LEVEL_LEAF) {
+        /* A readable leaf holds no quarantine range (a range only ever comes
+         * from an unreadable page), so there is nothing to drop here. */
+        free(e);
+        out->node = node;
+        return 0;
+    }
+
+    keep = 0;
+    for (i = 0; i < n; i++) {
+        bt_key clo, chi;
+        int drop = 0, j;
+
+        clo.p = e[i].k;
+        clo.n = e[i].klen;
+        chi.p = (i + 1 < n) ? e[i + 1].k : hi.p;
+        chi.n = (i + 1 < n) ? e[i + 1].klen : hi.n;
+        for (j = 0; j < q->n; j++) {
+            if (bt_range_covers(&q->range[j], clo, chi)) {
+                drop = 1;
+                break;
+            }
+        }
+        if (drop) {
+            out->dropped++;
+            out->changed = 1;
+            continue;
+        }
+        {
+            bt_excise sub;
+            memset(&sub, 0, sizeof sub);
+            if (bt_excise_rec(v, e[i].child, gen, q, clo, chi, level - 1,
+                              &sub) != 0) {
+                rc = -1;
+                goto done;
+            }
+            out->dropped += sub.dropped;
+            if (!sub.changed) {
+                e[keep] = e[i];        /* untouched subtree: alias it */
+                keep++;
+                continue;
+            }
+            if (sub.node.pba == 0) {
+                out->changed = 1;      /* the child collapsed: drop it too */
+                continue;
+            }
+            e[keep] = e[i];
+            if (sub.min_n) {
+                /* The child's minimum key moved (it lost its first child):
+                 * the separator has to follow it, or the parent's own bound
+                 * check would reject the tree. The replacement lives in an
+                 * owned arena -- the borrowed page bytes stay read-only. */
+                if (!kfix) {
+                    kfix = (uint8_t *)calloc((size_t)n,
+                                              BT_QUARANTINE_KEY_MAX);
+                    if (!kfix) {
+                        rc = -1;
+                        goto done;
+                    }
+                }
+                memcpy(kfix + (size_t)keep * BT_QUARANTINE_KEY_MAX,
+                       sub.min_key, sub.min_n);
+                e[keep].k = kfix + (size_t)keep * BT_QUARANTINE_KEY_MAX;
+                e[keep].klen = sub.min_n;
+            }
+            e[keep].child = sub.node;
+            keep++;
+        }
+    }
+
+    if (!out->changed) {
+        out->node = node;             /* alias: no COW churn */
+        goto done;
+    }
+    if (keep == 0) {
+        /* the whole subtree is gone: the caller drops this entry */
+        out->dropped++;
+        memset(out, 0, sizeof *out);
+        out->changed = 1;
+        goto done;
+    }
+    if (keep < 2) {
+        /* btree_check requires >= 2 children, so hand the survivor up and
+         * let the parent drop this node; its minimum key becomes the
+         * parent's separator. */
+        uint8_t kbuf[BT_QUARANTINE_KEY_MAX];
+        uint16_t kn = e[0].klen;
+        invfs_blkptr child = e[0].child;
+        uint64_t dropped = out->dropped;
+        if (kn > BT_QUARANTINE_KEY_MAX)
+            kn = BT_QUARANTINE_KEY_MAX;
+        memcpy(kbuf, e[0].k, kn);
+        memset(out, 0, sizeof *out);
+        out->dropped = dropped;
+        out->node = child;
+        out->min_n = kn;
+        memcpy(out->min_key, kbuf, kn);
+        out->changed = 1;
+        goto done;
+    }
+    {
+        invfs_blkptr nw;
+        if (bt_write(v, level, gen, e, keep, &nw) != 0) {
+            rc = -1;
+            goto done;
+        }
+        out->node = nw;
+        out->changed = 1;
+    }
+done:
+    free(kfix);
+    free(e);
+    return rc;
+}
+
+int btree_excise(invfs_volume *v, invfs_blkptr root, const bt_quarantine *q,
+                 invfs_blkptr *new_root_out)
+{
+    bt_excise top;
+    uint64_t gen;
+
+    if (!v || !q || !new_root_out)
+        return -1;
+    *new_root_out = root;
+    if (root.pba == 0 || q->n == 0)
+        return 0;
+    if (q->qfull)
+        return -1;       /* the set is partial: excising it would be a guess */
+    memset(&top, 0, sizeof top);
+    /* every rewritten page -- the root included -- carries a fresh gen, so
+     * the RT30 slot selection ("higher gen wins") cannot pick the old root */
+    gen = root.gen + 1;
+    if (bt_excise_rec(v, root, gen, q, (bt_key){NULL, 0}, (bt_key){NULL, 0},
+                      -1, &top) != 0)
+        return -1;
+    if (top.dropped == 0 && !top.changed)
+        return 0;                    /* nothing matched: the tree stands */
+    if (top.node.pba == 0) {
+        /* everything under the root was quarantined: the convention is a
+         * fresh empty leaf (v3_publish), never a null root slot. */
+        uint8_t page[INVFS_BLOCK_SIZE];
+        uint64_t pba;
+        pba = mbuf_alloc(v, gen);
+        if (!pba)
+            return -1;
+        mbuf_page_init(page, INVFS_PAGE_LEVEL_LEAF, gen);
+        if (mbuf_write(v, pba, page) != 0) {
+            mbuf_free(v, pba);
+            return -1;
+        }
+        mbuf_ptr_set(new_root_out, pba, page,
+                     INVFS_BP_LEAF | INVFS_BP_ROOT);
+        return 1;
+    }
+    if (top.min_n) {
+        /* The root itself was replaced by its only surviving child (a root
+         * with two children, one of them unreadable -- a small volume). That
+         * child carries an OLDER gen, and RT30 keeps whichever slot holds
+         * the higher one, so publishing it as it stands would let the next
+         * open pick the pre-repair root back and the damage with it. Recopy
+         * it at root.gen + 1, exactly as btree_delete does for a root
+         * collapse. */
+        invfs_blkptr rc;
+        if (bt_recopy(v, top.node, root.gen + 1, &rc) != 0)
+            return -1;
+        rc.flags |= INVFS_BP_ROOT;
+        *new_root_out = rc;
+        return 1;
+    }
+    *new_root_out = top.node;   /* the root page was rewritten at gen + 1 */
+    return 1;
 }
 
 /* ------------------------------------------------------------------ */
@@ -3522,6 +3985,10 @@ int vol_v3_iter_live_inodes(invfs_volume *v,
         return -1;
     if (v3_ready(v) != 0)
         return -1;
+    /* WP86: the base root read below can now fail on a torn root (it used to
+     * answer "no root"), and `root` was left uninitialised for the scan that
+     * follows -- an uninitialised blkptr into btree_scan. */
+    memset(&root, 0, sizeof root);
 
     /* find the highest inode id currently allocated so the scan range
      * upper bound is tight */

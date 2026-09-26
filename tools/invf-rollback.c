@@ -93,6 +93,16 @@ int main(int argc, char **argv)
                    (unsigned long long)sp.base_root,
                    (unsigned long long)sp.delta_end);
             break;
+        case SPT0_RC_DAMAGED:
+            /* WP86: a save point whose base tree does not walk is not a
+             * rollback target -- rolling back onto it would trade a degraded
+             * volume for an unreadable one. Say so instead of "rc 3". */
+            fprintf(stderr, "invf-rollback: %s: the save point pins a DAMAGED "
+                    "base tree (base_root=%llu); refusing to roll back onto "
+                    "it -- nothing was written. Quarantine the unreadable "
+                    "pages first (invf-fsck %s -f), then re-run.\n",
+                    img, (unsigned long long)sp.base_root, img);
+            break;
         default:
             fprintf(stderr, "invf-rollback: %s: rollback failed (rc %d); "
                     "re-run is safe\n", img, rc);
