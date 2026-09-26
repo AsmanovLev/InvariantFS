@@ -2,7 +2,7 @@
 
 **Branch:** `wp/meta-v3-design` (design only; no code)
 **Severity:** HIGH (format-breaking; replaces the on-disk metadata model)
-**Source:** metadata-layout study; WP58 measurements; `impl_docs/old_docs/AUDIT.md`;
+**Source:** metadata-layout study; WP58 measurements; `impl_docs/AUDIT.md`;
 `INCIDENTS.md`; AGENTS.md §2.3–§2.5, §2.7, §2.11
 **Status (2026-09-19):** design draft for review. Supersedes the earlier
 COW-snapshot draft of this file (see §11 Rejected alternatives).
@@ -312,4 +312,4 @@ field maturity. Profile: read-mostly / immutable / archive.
 ## 19. Coordination
 
 - Review artifact only; implementation WPs cut from §15.
-- Supersedes `WP58-meta-record-v3.md` (archived in `old_docs/`).
+- Supersedes `WP58-meta-record-v3.md` (deleted; recoverable from git history).

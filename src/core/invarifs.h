@@ -1,6 +1,8 @@
 /*
- * invarifs.h — InvariantFS on-disk structures (from doc/02-on-disk-format.md,
- *              doc/13-linux-rootfs.md)
+ * invarifs.h — InvariantFS on-disk structures. THIS HEADER IS THE SPEC:
+ * every on-disk constant, struct and magic below is the authority. The
+ * prose docs under docs/architecture/ are a map to this file, not a
+ * contract; the v2-era design prose was deleted (git history keeps it).
  *
  * Portable C99. MSVC + GCC compatible (no __attribute__).
  */
@@ -158,7 +160,8 @@ typedef struct {
 /* Storage-class flag (WP10): persisted as internal xattr "invfs.class" in the
  * INO2 ext block, value = invfs_class_tlv. Records WHY a file is stored the
  * way it is so sweep can skip/retry without re-deriving from content.
- * See impl_docs/old_docs/WP10-textzone-codec-registry.md §2. */
+ * On Meta-v3 it lives in the named-xattr tree; the v2 INO2 ext blob that
+ * also carried it is retired. */
 #define INVFS_XATTR_CLASS "invfs.class"
 
 enum {

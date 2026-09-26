@@ -205,9 +205,10 @@ on a global lock.
 ## Docs
 
 ```
-docs/        per-distro install guides, SECURITY.md
-src/doc/     on-disk format, AST recipe, sweep, crash recovery, dedup, benchmarks
-impl_docs/   architecture, FILEMAP, AUDIT, WP*.md
+docs/        architecture (concept + Meta-v3), ADRs, CLI guide, benchmarks,
+             per-distro install guides, SECURITY.md
+src/core/    invarifs.h IS the on-disk spec; volume_internal.h the engine map
+impl_docs/   AUDIT.md (live findings), DOCMAP/FILEMAP (doc-to-code lanes)
 ```
 
 ## License

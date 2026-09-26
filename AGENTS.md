@@ -14,7 +14,7 @@
 
 Sources of work, in rough order of priority:
 
-- `impl_docs/old_docs/AUDIT.md` — security / correctness audit findings.
+- `impl_docs/AUDIT.md` — security / correctness audit findings.
 - `INCIDENTS.md` — production incidents, including unresolved ones.
 - `tools/test-*.sh` failures.
 - Fuzz harness crashes (`make fuzz`).
@@ -26,9 +26,8 @@ naming the file:line and the failure mode. No drive-by fixes.
 
 ### 1.2 Work Packages (WP)
 
-Every change goes through a WP. The WP doc lives at
-`impl_docs/WP<N>-<slug>.md` (template: `impl_docs/WP-TEMPLATE.md`)
-and contains:
+Every change goes through a WP, written as
+`impl_docs/WP<N>-<slug>.md`, containing:
 
 - **Scope:** the smallest set of files the change touches.
 - **Why:** the audit finding / incident / bug it addresses.
@@ -36,6 +35,11 @@ and contains:
 - **Validation:** exact test commands and expected outcomes.
 - **Out of scope:** explicit list (so reviewers don't ask "did you also fix X?").
 - **Coordination notes:** subagent ID, e2e gates to run.
+
+The WP doc is a **work-in-progress scratchpad, not a deliverable**: it is
+deleted in the same commit that ships the change, because §1.7 makes the
+shipped commit the design rationale. Only the long-lived design decisions
+deserve to outlive it, and those go in `docs/adr/`.
 
 **Rule:** one WP per logical change. Don't bundle unrelated fixes into
 one branch — it makes bisect and revert miserable. Trivially small
@@ -157,7 +161,39 @@ Result: PASS
 Remaining TODOs: none
 ```
 
-### 1.7 Anti-patterns
+### 1.7 Documentation policy
+
+**The code is the spec. The docs are a map to the code.** This is not a
+style preference — the repo carried 18 design docs under `src/doc/` for
+months, 15 of which never mentioned Meta-v3 and all of which described the
+retired v2 format (L2P mapper, CKP0/`reten`). They read like contracts, so
+people and agents built on them and were wrong. They are now deleted; git
+history keeps every revision.
+
+Consequences, and they are binding:
+
+- **A doc that contradicts the code is a bug in the doc**, never a reason to
+  change the code. Fix the doc or delete it in the same commit as the code
+  change that made it wrong.
+- **A subsystem doc cites `file:line`.** A claim that cannot be pointed at in
+  the tree is deleted, not softened. `src/core/invarifs.h` is the on-disk
+  format authority; `docs/architecture/META-V3.md` is the concept layer over
+  it; `impl_docs/DOCMAP.md` is the subsystem→code map.
+- **Shipped design rationale lives in the commit that shipped it**
+  (`git log -p -- <path>`), not in a side file. The WP docs were deleted for
+  this reason; do not recreate that directory.
+- **New docs go in `docs/`** (architecture, ADRs, guides, benchmarks), not
+  next to the source and not in `impl_docs/` except the generated
+  symbol indexes and the live trackers (`AUDIT.md`, `INCIDENTS.md`).
+- Windows and NFS support are parked: document them as parked, do not
+  maintain recipes for them.
+- `tools/check-repo-hygiene.sh` fails the build when a doc under `docs/`
+  references a path that no longer exists. Keep it green.
+
+Rationale and the full inventory of what was deleted and why:
+`docs/architecture/OVERVIEW.md`; git history for the v2-era prose.
+
+### 1.8 Anti-patterns
 
 - Direct commits to `main`.
 - Bundling unrelated fixes into one branch.
@@ -165,7 +201,7 @@ Remaining TODOs: none
   rules sometimes break.
 - Running an e2e suite without acquiring the lock.
 - Reaching into another WP's worktree to "fix one small thing".
-- Touching `INCIDENTS.md` / `impl_docs/old_docs/AUDIT.md` without updating the
+- Touching `INCIDENTS.md` / `impl_docs/AUDIT.md` without updating the
   status fields — these files are the source of truth for what's been
   fixed and what hasn't.
 
@@ -376,10 +412,11 @@ When to **do** use it:
 ### 2.12 Getting help
 
 - `INCIDENTS.md` — production issues and their fixes.
-- `impl_docs/old_docs/AUDIT.md` — security / correctness audit findings.
+- `impl_docs/AUDIT.md` — security / correctness audit findings.
 - `docs/GENTOO-INSTALL.md` — full install guide (VM + bare metal).
 - `tools/test-*.sh` — executable examples of every operation.
-- `impl_docs/old_docs/WP*.md` — design rationale for non-trivial features.
+- `git log -p -- <path>` — design rationale for past changes. The WP docs
+  were deleted once shipped: the commit that landed a change is its rationale.
 - For new contributors: pick a `WP*` from the discovery list above,
   open a draft, ask for review.
 
