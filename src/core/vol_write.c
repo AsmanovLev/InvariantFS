@@ -11,6 +11,10 @@ struct invfs_wsession {
     uint64_t new_id, old_id, old_size;
     int      have_old, committed, loaded, truncating;
     int      owns_siblings;
+    /* WP85: the metadata generation this session was opened against, and
+     * the one-shot "already refused" latch (see wsession_stale). */
+    uint64_t gen;
+    int      stale;
     uint8_t  wheat_carry;    /* write-heat for session-born segments */
     uint8_t *old_ext;
     uint32_t old_ext_len;
@@ -69,6 +73,9 @@ uint64_t vol_write_begin(invfs_volume *v, const char *name, int truncate,
     snprintf(s->name, sizeof s->name, "%s", name);
     s->new_id = v->next_inode_id++;
     s->wheat_carry = 1;
+    s->gen = v->write_gen;     /* WP85: anchor the session to the live
+                                * generation; a rollback bumps v->write_gen
+                                * and this session goes stale */
     {
         uint64_t old_id = vol_find(v, name);
         if (old_id != 0) {
@@ -92,6 +99,40 @@ static void wsession_unlink(invfs_wsession *s)
         if (*pp == s) { *pp = s->next; s->next = NULL; return; }
         pp = &(*pp)->next;
     }
+}
+
+
+/* WP85 (INCIDENTS.md:734): refuse a session whose generation the volume has
+ * rolled back, loudly and exactly once per session.
+ *
+ * Why refusal and not re-anchoring: a save point pins {base_root, delta_end}
+ * and nothing else, while an uncommitted session's segments live in neither
+ * (WP27: they ride the session's own entry table and never touch the
+ * journal). So the moment a restore republishes the save point's root, the
+ * session's bytes belong to a generation that no longer exists AND no live
+ * recipe names -- re-anchoring would silently relocate data the rollback was
+ * called to remove, and the old id it aliases is not the file any more.
+ *
+ * The first refusal also RETIRES the session: it leaves v->wsessions, so the
+ * sweep guard (vol_write_active_name/_id) stops naming a session that can no
+ * longer be committed. The blocks it wrote are not freed here -- vol_write_abort
+ * does that on release, exactly as for any other uncommitted session, which
+ * is what returns the space instead of leaking it. Every later call keeps
+ * returning ESTALE, so a handle that writes again after the refusal cannot
+ * slip through on a half-retired session.
+ *
+ * 0 = the session is still live (carry on), -ESTALE = refused. */
+static int wsession_stale(invfs_wsession *s)
+{
+    if (!s || s->committed) return 0;
+    if (s->gen == s->v->write_gen) return 0;
+    if (!s->stale) {   /* one shot: retire + say so, once per session */
+        s->stale = 1;
+        wsession_unlink(s);
+        fprintf(stderr, "invfs: %s: write session refused (ESTALE): the "
+                "volume was rolled back under this handle\n", s->name);
+    }
+    return -ESTALE;
 }
 
 
@@ -621,6 +662,9 @@ int vol_write_range(invfs_wsession *ws, uint64_t offset,
     if (len == 0) return 0;
     if (offset + len > MAX_FILE_SIZE) return -1;   /* format sanity bound;
             the v1->v2 recipe header choice happens at commit */
+    /* WP85: refuse BEFORE touching the recipe or the segment writer. */
+    rc = wsession_stale(s);
+    if (rc != 0) return rc;
     rc = wsession_load_old(s);
     if (rc != 0) return rc;
 
@@ -685,6 +729,10 @@ int vol_write_truncate(invfs_wsession *ws, uint64_t len)
 
     if (!s || s->committed) return -1;
     if (len > MAX_FILE_SIZE) return -1;
+    /* WP85: ftruncate through a handle the rollback retired is the same
+     * write as an append -- refuse it the same way. */
+    rc = wsession_stale(s);
+    if (rc != 0) return rc;
     rc = wsession_load_old(s);
     if (rc != 0) return rc;
     if (len == s->logical_size) return 0;
@@ -761,6 +809,10 @@ int vol_write_read(invfs_wsession *ws, uint64_t offset,
     int rc;
 
     if (!s || s->committed || !buf) return -1;
+    /* WP85: a stale handle must not serve pre-rollback bytes either -- the
+     * caller surfaces ESTALE, and a fresh open reads the live generation. */
+    rc = wsession_stale(s);
+    if (rc != 0) return rc;
     rc = wsession_load_old(s);
     if (rc != 0) return rc;
     if (offset >= s->logical_size) return 0;
@@ -916,6 +968,11 @@ int vol_write_commit(invfs_wsession *ws)
     int rc;
 
     if (!s || s->committed) return -1;
+    /* WP85: the commit is the last chance to publish the retired
+     * generation's segments as a live recipe. A refused session never gets
+     * here -- the caller aborts it, which frees the segments it wrote. */
+    rc = wsession_stale(s);
+    if (rc != 0) return rc;
     rc = wsession_load_old(s);
     if (rc != 0) return rc;
     /* WP-M8: v3 content lives in a recipe blob + inode row, not a record. */

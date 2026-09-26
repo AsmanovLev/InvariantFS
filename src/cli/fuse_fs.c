@@ -1340,6 +1340,17 @@ static wctx *dirty_find_locked(const char *name)
     return NULL;
 }
 
+/* engine write-session rc -> FUSE errno. WP85: -ESTALE (this handle's
+ * generation was retired by a rollback) must reach userspace AS ESTALE --
+ * `cp`/`dd` must report an error, never a short write. Every other mapping
+ * is exactly what it was before. */
+static int wrc_eno(int rc)
+{
+    if (rc == -2) return -ENOSPC;
+    if (rc == -ESTALE) return -ESTALE;
+    return -EIO;
+}
+
 /* push the staged tail window into the session. Requires g_io_lock.
  * On error the window is kept staged (a retry rewrites the same bytes --
  * idempotent -- and the failure surfaces to the next writer/flusher). */
@@ -1405,7 +1416,7 @@ static int invf_read(const char *path, char *buf, size_t size, off_t offset,
     if (w) {
         got = vol_write_read(w->ws, (uint64_t)offset, (uint8_t *)buf, size);
         pthread_mutex_unlock(&g_io_lock);
-        return got < 0 ? -EIO : got;
+        return got == -ESTALE ? -ESTALE : (got < 0 ? -EIO : got);
     }
     pthread_mutex_unlock(&g_io_lock);
     /* Metadata read: lock-free base path */
@@ -1665,7 +1676,7 @@ static int invf_write(const char *path, const char *buf, size_t size, off_t offs
         }
         if (rc != 0) {
             pthread_mutex_unlock(&g_io_lock);
-            return rc == -2 ? -ENOSPC : -EIO;
+            return wrc_eno(rc);
         }
         done += piece;
     }
@@ -1918,16 +1929,19 @@ static int commit_wctx(wctx *c)
         /* late ENOSPC must be visible to the writer, never dropped
          * silently (audit H4; Dokan already reports STATUS_DISK_FULL).
          * The abort below rolls the volume back to the pre-session
-         * state, so a failed commit never leaves a torn file. */
+         * state, so a failed commit never leaves a torn file. WP85: for a
+         * stale handle the abort is the WHOLE point -- the session's
+         * segments belong to a retired generation, so retiring it here is
+         * what hands their blocks back instead of leaking them. */
         fprintf(stderr, "invf: commit %s failed (%s)\n", c->name,
-                rc == -2 ? "ENOSPC" : "io");
+                rc == -2 ? "ENOSPC" : (rc == -ESTALE ? "ESTALE" : "io"));
         vol_write_abort(c->ws);
         c->ws = NULL;
         dirty_del_locked(c);
         vol_flush(g_vol);
         table_sync_one_locked(c->name);
         pthread_mutex_unlock(&g_io_lock);
-        return rc == -2 ? -ENOSPC : -EIO;
+        return wrc_eno(rc);
     }
     vol_write_abort(c->ws);   /* committed: frees the session memory only */
     c->ws = NULL;
@@ -2133,7 +2147,7 @@ static int resize_volume_file(const char *name, off_t len)
     }
     table_sync_one_locked(name + 1);
     pthread_mutex_unlock(&g_io_lock);
-    return rc == 0 ? 0 : (rc == -2 ? -ENOSPC : -EIO);
+    return rc == 0 ? 0 : wrc_eno(rc);
 }
 
 /* libfuse3: one truncate entry point; fi != NULL for ftruncate-style calls
@@ -2178,7 +2192,7 @@ static int invf_truncate(const char *path, off_t len, struct fuse_file_info *fi)
         table_sync_one_locked(c->name);
     }
     pthread_mutex_unlock(&g_io_lock);
-    return rc == 0 ? 0 : (rc == -2 ? -ENOSPC : -EIO);
+    return rc == 0 ? 0 : wrc_eno(rc);
 }
 
 /* format v2: persist real timestamps by merging into the INO2 ext */

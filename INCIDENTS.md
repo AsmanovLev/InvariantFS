@@ -731,7 +731,7 @@ and make `--realize` free the checkpoint's retained ranges (ties to WP53).
 
 ---
 
-## WP58b — mapper-volume owner orphans (FIXED) + append-after-rollback (OPEN)
+## WP58b — mapper-volume owner orphans (FIXED) + append-after-rollback (FIXED)
 
 **Date:** Sep 19, 2026
 **Severity:** High (silent space leak + false fsck damage; data stayed bit-exact)
@@ -771,6 +771,51 @@ mapper repro (mkfs→cp×2→sweep→rollback→cp new→ls) shows the new name
 bit-exact; Bug A regression still `orphans=0 missing=0`, `make test`
 PASS. `test-mapper-crash.sh` leg3/leg4 “1 descending step” is
 **pre-existing** (reproduced with the fix stashed).
+
+**append-after-rollback (WP85, FIXED `c19ce2c` + the WP85 fix commit):**
+a write session (append handle) held open across a rollback kept writing
+into the generation the rollback had retired. On v3 the rollback is the
+SPT0 save point, and SPT0 pins `{base_root, delta_end}` and nothing else
+while an uncommitted session's segments live in neither (WP27: they ride
+the session's own entry table, never the journal) — so the session had no
+generation left to be re-anchored into. Reproduced on a v3 image: the
+post-rollback append returned **success** (`post_append_rc=0`) and the
+commit re-anchored, publishing 3×64 KiB of post-save-point data into the
+post-rollback volume (`size_after=316608` against a 120000-byte save
+point) — exactly the surprise a rollback exists to remove.
+
+Fix: `v->write_gen` (bumped by `spt0_restore`, the only path that
+republishes a root backwards) is stamped into the session at
+`vol_write_begin`; `wsession_stale()` refuses range/truncate/read/commit
+with `-ESTALE` and retires the session off `v->wsessions` (so the sweep
+guard stops naming it) once, and the abort on release frees the blocks it
+wrote. `fuse_fs.c` maps `-ESTALE` to `-ESTALE` so `cp` reports an error
+rather than a short write.
+
+**Symptom 1 (space leak) did NOT reproduce on v3** and is reported as
+such: `spt0_restore` frees nothing, and the buggy commit published a live
+recipe, so the free-block count balanced — 120625 → 120630 across
+rollback+release before the fix. After the fix the refused session retires
+and *returns* its own blocks: 120625 → **120634** (`blocks_lost=-9`), i.e.
+no leak from the refusal. The incident's leak text dates from the v2
+mapper era (the v2 `vol_rollback` decapitated the inode area; see Bug B
+above). **Symptom 2 (false fsck alarm) did not reproduce either** — fsck
+reported CLEAN before and after the fix, so nothing in `vol_fsck.c` was
+touched: the fix stands on its own, and the regression leg asserts fsck
+CLEAN so a future leak of either symptom fails the leg.
+
+Proves it:
+```
+INVFS_E2E_AGENT=wp85-append-after-rollback bash tools/run-e2e.sh tools/test-rollback.sh
+#   [H] post_append_rc=-116 errno=ESTALE / commit_rc=-116 errno=ESTALE
+#       free blocks: after rollback=120625 after release=120634 (lost -9)
+#       a.c back at its save-point size (120000 bytes); fsck CLEAN
+make test        # PASS, check counts unchanged
+```
+Note: `tools/test-rollback.sh` legs A–G are v2 CKP0-era and already RED
+on `main` (`[A1]`: "no checkpoint armed" — mkfs is v3-only since WP-M21),
+so the new [H] leg runs first in the body; that redness is pre-existing
+test rot, not this WP.
 
 ---
 

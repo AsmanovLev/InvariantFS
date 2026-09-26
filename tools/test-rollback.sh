@@ -41,6 +41,16 @@
 #   post-checkpoint allocation (would reuse the freed blocks) -> rollback
 #   -> the file is bit-exact to its checkpoint-time bytes.
 #
+#   image H (WP85, INCIDENTS.md:734 append-after-rollback): the v3 leg,
+#   and the FIRST leg in the body because legs A-G speak the v2 CKP0
+#   dialect that WP-M21 retired (mkfs is v3-only now, so [A1] already
+#   fails on `main` with "no checkpoint armed" -- pre-existing test rot,
+#   not this suite's business). A write session held open across an SPT0
+#   restore is anchored to a generation the rollback retired: its append
+#   must be REFUSED with ESTALE, its release must retire it (no space
+#   leak), and the pre-rollback bytes it wrote must NOT be re-anchored
+#   into the post-rollback volume. fsck stays CLEAN.
+#
 # Run from the repo root after `make`:  bash tools/test-rollback.sh
 # Uses /dev/shm (tmpfs) like the other soak scripts. NOTE: blkio treats
 # /dev/* paths as raw devices, so the script cd's into /dev/shm and uses
@@ -58,9 +68,10 @@ IMGD=wp21rb-d.img    # retention fidelity (resurrection)
 IMGE=wp21rb-e.img    # crash legs
 IMGF=wp21rb-f.img    # refusals (fresh / sealed / double)
 IMGG=wp21rb-g.img    # F4: overwrite under a live checkpoint retains
+IMGH=wp85-h.img      # WP85: append held across a rollback is refused
 rm -rf "$WORK" && mkdir -p "$WORK/orig" "$WORK/out"
 cd /dev/shm
-rm -f "$IMGA" "$IMGB" "$IMGC" "$IMGD" "$IMGE" "$IMGF" "$IMGG"
+rm -f "$IMGA" "$IMGB" "$IMGC" "$IMGD" "$IMGE" "$IMGF" "$IMGG" "$IMGH"
 
 fail() { echo "FAIL: $*" >&2; exit 1; }
 
@@ -110,6 +121,128 @@ gcc -std=gnu11 -O2 -I$REPO/src -I$REPO/src/core -I$REPO/src/codecs -I$REPO/src/r
     $(sed "s|^|$REPO/|" "$REPO/build/core_objs.txt") \
     -Wl,-l:libzstd.so.1 -lz -lpthread
 RP="$WORK/tools/rbpick"
+
+echo "== build the WP85 probe (needs the internal engine API: spt0_*) =="
+# spt0_capture / spt0_restore are not in the public volume.h, so this helper
+# links volume_internal.h -- which is why it needs the -D flags rbpick does
+# not (volume_internal.h pulls zlib.h next to the bundled miniz).
+cat > "$WORK/tools/rbgen.c" <<'RBGEN_EOF'
+/* rbgen — WP85 test helper: drive the INCIDENTS.md:734 sequence.
+ *
+ *   rbgen <img> <name>
+ *
+ * An append handle (a live write session) is opened, the volume takes an
+ * SPT0 save point, the handle appends (post-savepoint), the volume is
+ * rolled back to the save point, and the SAME handle appends again. Prints
+ * one `key=value` line per step; the shell leg asserts on them.
+ */
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <errno.h>
+
+#include "volume_internal.h"   /* pulls in volume.h + invarifs.h */
+#include "vol_spt0.h"
+
+static const char *errname(int rc)
+{
+    switch (rc) {
+    case 0:      return "OK";
+    case -ESTALE: return "ESTALE";
+    case -ENOSPC: return "ENOSPC";
+    case -EAGAIN: return "EAGAIN";
+    default:     return "ERR";
+    }
+}
+
+int main(int argc, char **argv)
+{
+    const char *img, *name;
+    invfs_volume *v;
+    invfs_wsession *ws = NULL;
+    invfs_meta_pub m, m2;
+    invfs_spt0 sp;
+    uint64_t id, old_size = 0, f_rb, f_rel;
+    int err = 0, rc, i;
+    char buf[65536];
+
+    if (argc < 3) return 2;
+    img = argv[1];
+    name = argv[2];
+    for (i = 0; i < (int)sizeof buf; i++) buf[i] = (char)('A' + (i % 26));
+
+    v = vol_open(img, &err);
+    if (!v) { fprintf(stderr, "open err %d\n", err); return 1; }
+    id = vol_find(v, name);
+    if (!id) { fprintf(stderr, "rbgen: no such file %s\n", name); return 1; }
+    if (vol_get_meta(v, id, &m) == 0) old_size = m.size;
+    printf("old_size=%llu\n", (unsigned long long)old_size);
+
+    rc = spt0_capture(v);
+    printf("capture_rc=%d\n", rc);
+    if (rc != 0) return 1;
+    spt0_info(v, &sp);
+    printf("sp_base_root=%llu\n", (unsigned long long)sp.base_root);
+
+    /* a post-savepoint write by ANOTHER writer, so the rollback has work */
+    memset(&m, 0, sizeof m);
+    m.type = INVFS_ITYP_REG;
+    m.mode = 0644;
+    m.nlink = 1;
+    vol_v3_write_bulk(v, "post.txt", (const uint8_t *)"post-savepoint\n", 16, &m);
+
+    /* the append handle, opened BEFORE the rollback */
+    if (!vol_write_begin(v, name, 0, &ws) || !ws) {
+        fprintf(stderr, "rbgen: vol_write_begin failed\n");
+        return 1;
+    }
+    /* two appends inside the still-live generation (the second lands in a
+     * fresh segment, the first rewrites the tail of the last one) */
+    for (i = 0; i < 2; i++) {
+        rc = vol_write_range(ws, old_size + (uint64_t)i * sizeof buf,
+                             (const uint8_t *)buf, sizeof buf);
+        if (rc != 0) break;
+    }
+    printf("pre_append_rc=%d errno=%s\n", rc, errname(rc));
+    if (rc != 0) return 1;
+
+    /* the rollback */
+    rc = spt0_restore(v);
+    printf("restore_rc=%d errno=%s\n", rc, errname(rc));
+    if (rc != 0) return 1;
+    f_rb = vol_free_blocks_cached(v);
+    printf("free_after_rollback=%llu\n", (unsigned long long)f_rb);
+
+    /* the holder keeps writing */
+    rc = vol_write_range(ws, old_size + 2 * sizeof buf,
+                         (const uint8_t *)buf, sizeof buf);
+    printf("post_append_rc=%d errno=%s\n", rc, errname(rc));
+
+    /* the release: the commit must refuse too, or the re-anchored recipe
+     * would publish the retired generation's segments */
+    rc = vol_write_commit(ws);
+    printf("commit_rc=%d errno=%s\n", rc, errname(rc));
+    if (rc != 0) vol_write_abort(ws);
+
+    f_rel = vol_free_blocks_cached(v);
+    printf("free_after_release=%llu\n", (unsigned long long)f_rel);
+    /* positive = blocks the release consumed and did not give back (the
+     * leak); negative = blocks it returned, which is what retiring a stale
+     * session is supposed to do */
+    printf("blocks_lost=%lld\n", (long long)f_rb - (long long)f_rel);
+    memset(&m2, 0, sizeof m2);
+    vol_get_meta(v, vol_find(v, name), &m2);
+    printf("size_after=%llu\n", (unsigned long long)m2.size);
+    vol_close(v);
+    return 0;
+}
+RBGEN_EOF
+gcc -std=gnu11 -O2 -DMINIZ_NO_ZLIB_APIS -DINVFS_EMBED_FLACX \
+    -I$REPO/src -I$REPO/src/core -I$REPO/src/codecs -I$REPO/src/recipes -I$REPO/src/vendor7z -o "$WORK/tools/rbgen" \
+    "$WORK/tools/rbgen.c" \
+    $(sed "s|^|$REPO/|" "$REPO/build/core_objs.txt") \
+    -Wl,-l:libzstd.so.1 -lz -lpthread
+RBG="$WORK/tools/rbgen"
 
 echo "== mkfs + corpus =="
 $B/invf-mkfs "$IMGA" 0.5 >/dev/null
@@ -174,6 +307,66 @@ check_all() { # <label> <img>
 }
 
 class_of() { $B/meta_probe "$1" --heat "$2" 2>/dev/null | sed -n 's/^class=\([0-9a-z]*\).*/\1/p'; }
+
+echo
+echo "== [H] WP85: an append held across a rollback is refused (ESTALE) =="
+# INCIDENTS.md:734. The v3 rollback is the SPT0 save point (WP-M16), so this
+# leg speaks that dialect: capture a save point, open an append handle, write
+# through it, roll the volume back, then keep writing through the SAME handle.
+# The handle is anchored to a generation the restore retired -- SPT0 records
+# {base_root, delta_end} and an uncommitted session's segments are in NEITHER
+# (WP27: they ride the session's own entry table, never the journal), so the
+# session cannot be re-anchored: there is no generation left that contains its
+# data. Refusal is the only honest answer, and it must be LOUD.
+$B/invf-mkfs "$IMGH" 0.5 >/dev/null
+for f in $FILES; do
+    $B/invf-cp "$IMGH" "$WORK/orig/$f" "$f" >/dev/null
+done
+HOLDSZ=$(wc -c < "$WORK/orig/a.c")
+$RBG "$IMGH" a.c > "$WORK/rb-h.log" 2>&1 || { cat "$WORK/rb-h.log"; fail "H: probe failed"; }
+sed 's/^/  /' "$WORK/rb-h.log"
+# (1) LOUD: the post-rollback append is refused with ESTALE -- not a short
+# write, not a silent success (a silent success is what re-anchors the
+# pre-rollback data into the post-rollback volume).
+grep -q "^post_append_rc=-116 errno=ESTALE$" "$WORK/rb-h.log" \
+    || fail "H: post-rollback append was NOT refused with ESTALE"
+# (2) LOUD on the release too: a commit that still published the retired
+# generation's segments would put the re-anchored recipe back.
+grep -q "^commit_rc=-116 errno=ESTALE$" "$WORK/rb-h.log" \
+    || fail "H: the stale session's commit was NOT refused with ESTALE"
+echo "  append + commit after the rollback: refused with ESTALE"
+# (3) NO LEAK: the refused session retires on release, so the release must
+# not consume blocks. A positive blocks_lost is the INCIDENTS.md:734 leak
+# (bytes allocated into the retired generation that nothing reclaims);
+# negative is the retirement handing its own segments back.
+FREE_RB=$(sed -n 's/^free_after_rollback=\([0-9]*\)$/\1/p' "$WORK/rb-h.log")
+FREE_REL=$(sed -n 's/^free_after_release=\([0-9]*\)$/\1/p' "$WORK/rb-h.log")
+LOST=$(sed -n 's/^blocks_lost=\(-\{0,1\}[0-9]*\)$/\1/p' "$WORK/rb-h.log")
+echo "  free blocks: after rollback=$FREE_RB after release=$FREE_REL (lost $LOST)"
+[ "$LOST" -le 0 ] || fail "H: the refused session leaked $LOST blocks"
+# (4) NO RE-ANCHORING: the bytes the handle wrote BEFORE the rollback are gone
+# with the generation they belonged to; the file is back at its save-point
+# size, bit-exact to the original.
+SAVED=$(sed -n 's/^size_after=\([0-9]*\)$/\1/p' "$WORK/rb-h.log")
+[ "$SAVED" = "$HOLDSZ" ] \
+    || fail "H: pre-rollback appends were re-anchored (size $SAVED, want $HOLDSZ)"
+echo "  a.c back at its save-point size ($SAVED bytes), pre-rollback appends discarded"
+$B/invf-cat "$IMGH" a.c "$WORK/out/a.c" >/dev/null || fail "H: a.c unreadable"
+cmp -s "$WORK/orig/a.c" "$WORK/out/a.c" || fail "H: a.c not at its save-point bytes"
+# the other writer's post-save-point file is gone: the rollback worked
+if $B/invf-ls "$IMGH" | grep -q "post.txt"; then
+    fail "H: post-save-point file survived the rollback"
+fi
+echo "  post.txt discarded by the rollback; a.c bit-exact at its save-point bytes"
+# (5) symptom 2: the volume is NOT dirty/anomalous. The refusal must be
+# enough -- if fsck still complains here that is a SECOND bug, and the fix
+# is in the write path, never in this assertion.
+$B/invf-fsck "$IMGH" | tee "$WORK/fsck-h.log"
+grep -q "^OK$" "$WORK/fsck-h.log" || fail "H: fsck not clean after the refusal"
+$B/invf-verify "$IMGH" --deep | tail -1 | grep -q " 0 corrupt," \
+    || fail "H: verify not clean after the refusal"
+check_all "H post-rollback" "$IMGH"
+rm -f "$IMGH"
 
 echo
 echo "== [A1] sweep: checkpoint armed, retention held, classes stamped =="

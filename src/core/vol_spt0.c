@@ -168,6 +168,16 @@ int spt0_restore(invfs_volume *v)
     if (!v->savepoint_live)
         return 1;
 
+    /* WP85: this is the point where the post-savepoint generation stops
+     * being live. Every write session opened before this line is anchored
+     * to metadata the restore just retired -- and to segments no live
+     * recipe names, because SPT0 pins {base_root, delta_end} only and a
+     * session's segments live in neither (WP27: they ride the session's
+     * own entry table, never the journal). Bump the counter BEFORE the
+     * first write so no session can slip an append through the window;
+     * the sessions themselves are refused and retired by vol_write_*. */
+    v->write_gen++;
+
     base_root = v->spt0.base_root;
 
     /* WP86: DETECT a damaged save point, do not use it. Publishing the pinned

@@ -371,6 +371,13 @@ typedef struct invfs_volume {
      * would drop the old id's L2P maps and free blocks the session still
      * reads through its aliases. */
     invfs_wsession *wsessions;
+    /* WP85: the metadata generation a write session anchors to. Bumped by
+     * every rollback (spt0_restore -- the only code path that republishes a
+     * root BACKWARDS; the fold and the btree only ever move forward). A
+     * session whose stamp is behind this counter was anchored to a
+     * generation the volume has retired, and its segments are in no live
+     * recipe: it must be refused, not re-anchored. */
+    uint64_t write_gen;
     /* in-memory name index */
     name_index_entry **nbuck;
     size_t nmask, ncount;

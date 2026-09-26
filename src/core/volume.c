@@ -1596,6 +1596,11 @@ free(rb);
     v->alloc_cursor = v->sb.raw_zone_start;
     if (v->next_inode_id == 0)
         v->next_inode_id = 1;
+    /* WP85: generation 1 is the mount's own; a rollback bumps it and every
+     * write session stamped before the bump goes stale (refused, not
+     * re-anchored -- see the write_gen declaration). */
+    if (v->write_gen == 0)
+        v->write_gen = 1;
     /* ENOSPC defaults for images created before the policy fields */
     if (v->sb.reserved_blocks == 0)
         v->sb.reserved_blocks = (uint32_t)(v->sb.total_blocks / 128 + 64);
