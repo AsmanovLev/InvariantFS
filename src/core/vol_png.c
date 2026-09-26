@@ -187,7 +187,10 @@ uint64_t vol_create_png_file(invfs_volume *v, const char *name,
     {
         z_stream s;
         memset(&s, 0, sizeof s);
-        if (deflateInit2(&s, 0, Z_DEFLATED, 15, 8, Z_DEFAULT_STRATEGY) != Z_OK) {
+        /* -15: a PNG IDAT is a RAW deflate stream, not a zlib-wrapped one.
+         * With windowBits 15 the spool carried a 2-byte header + adler32
+         * that no PNG reader accepts. */
+        if (deflateInit2(&s, 0, Z_DEFLATED, -15, 8, Z_DEFAULT_STRATEGY) != Z_OK) {
             pngx_free(&info); return 0;
         }
         size_t bound = deflateBound(&s, (uLong)info.filtered_len);
@@ -269,52 +272,31 @@ uint64_t vol_create_png_file(invfs_volume *v, const char *name,
         pngx_free(&info); return 0;   /* JXL changed pixels: keep original */
     }
 
-    /* brute-force deflate params reproducing the original IDAT */
-    uint8_t enc = 0, level = 0, mem = 0;
-    int found = 0;
-    /* refilter first (pixels from JXL round-trip are info.rgb) */
-    uint8_t *filt = NULL; size_t filt_len = 0;
-    if (pngx_refilter(info.rgb, info.rgb_len, &info, &filt, &filt_len) != 0) {
-        remove(jx_tmp); pngx_free(&info); return 0;
-    }
-    static const int prio[][2] = {
-        {6,8},{7,9},{6,9},{9,8},{7,8},{9,9},{6,7},{8,9},{8,8},{5,8},
-        {4,8},{3,8},{2,8},{1,8},{7,7},{8,7},{9,7},{1,9},{2,9},{3,9},{4,9},{5,9}
-    };
-    for (size_t i = 0; i < sizeof(prio) / sizeof(prio[0]) && !found; i++) {
-        z_stream s;
-        memset(&s, 0, sizeof s);
-        if (deflateInit2(&s, prio[i][0], Z_DEFLATED, 15, prio[i][1],
-                         Z_DEFAULT_STRATEGY) != Z_OK) continue;
-        size_t bound = deflateBound(&s, (uLong)filt_len);
-        uint8_t *re = (uint8_t *)malloc(bound);
-        s.next_in = filt;
-        s.avail_in = (uInt)(filt_len > 0x7FFFFFFF ? 0x7FFFFFFF : filt_len);
-        s.next_out = re;
-        s.avail_out = (uInt)bound;
-        int r2 = deflate(&s, Z_FINISH);
-        size_t re_len = (size_t)s.total_out;
-        deflateEnd(&s);
-        if (r2 == Z_STREAM_END && re_len == info.idat_len &&
-            memcmp(re, info.idat, info.idat_len) == 0) {
-            enc = 0; level = (uint8_t)prio[i][0]; mem = (uint8_t)prio[i][1];
-            found = 1;
-        }
-        free(re);
-    }
-    if (!found) {
-        /* miniz tdefl levels 1..10 */
-        for (int lv = 1; lv <= 10 && !found; lv++) {
-            size_t olen = 0;
-            size_t bound = filt_len + filt_len / 4 + 4096;
-            uint8_t *re = (uint8_t *)malloc(bound);
-            if (mz_tdefl_compress(filt, filt_len, re, bound, lv, &olen) == 0 &&
-                olen == info.idat_len && memcmp(re, info.idat, info.idat_len) == 0) {
-                enc = 1; level = (uint8_t)lv; mem = 0;
-                found = 1;
-            }
-            free(re);
-        }
+    /* Find the deflate parameters that reproduce the original IDAT
+     * byte-for-byte. This has to search ACROSS ENGINES, not just across
+     * (level, memLevel): the encoder that wrote the PNG may have been a
+     * different zlib implementation than the one this build links. On a
+     * zlib-ng host the old level/mem loop could never match a PNG PIL wrote
+     * with stock zlib -- all 225 (level, memLevel, strategy) combinations
+     * missed -- so every PNG landed in GENERIC_GUARD{PNGR} instead of being
+     * transcoded. invfs_deflate_repro_find() already probes the bundled
+     * stock zlib and the system zlib and reports which one matched, and
+     * `enc` carries that engine id (0 system zlib, 1 miniz, 2 stock zlib),
+     * so the recipe format is unchanged.
+     *
+     * Compat: recipes written before this change used enc=0 to mean "the
+     * build's default zlib", which was stock zlib. They now decode as
+     * "system zlib". Nothing wrote one while the lane was refusing every
+     * file, so the exposure is limited to volumes built with an older
+     * binary that DID transcode PNGs. */
+    invfs_deflate_params dp;
+    memset(&dp, 0, sizeof dp);
+    if (invfs_deflate_repro_find(filt, filt_len, info.idat, info.idat_len,
+                                 -15, &dp) == 0) {
+        enc = dp.engine;
+        level = (uint8_t)dp.level;
+        mem = (uint8_t)dp.mem_level;
+        found = 1;
     }
     free(filt);
     if (!found) {
@@ -551,25 +533,22 @@ uint64_t vol_create_png_file(invfs_volume *v, const char *name,
         memset(&pi2, 0, sizeof pi2);
         if (pngx_parse_recipe(recipe, rlen, &pi2) == 0 &&
             pngx_refilter(rt_rgb, rt_rgb_len, &pi2, &f2, &f2_len) == 0) {
-            if (pi2.enc == 0) {
-                z_stream s;
-                memset(&s, 0, sizeof s);
-                if (deflateInit2(&s, pi2.level, Z_DEFLATED, 15, pi2.mem,
-                                 Z_DEFAULT_STRATEGY) == Z_OK) {
-                    size_t bound = deflateBound(&s, (uLong)f2_len);
-                    s2 = (uint8_t *)malloc(bound);
-                    if (s2) {
-                        s.next_in = f2;
-                        s.avail_in = (uInt)(f2_len > 0x7FFFFFFF ? 0x7FFFFFFF : f2_len);
-                        s.next_out = s2;
-                        s.avail_out = (uInt)bound;
-                        if (deflate(&s, Z_FINISH) == Z_STREAM_END) {
-                            s2_len = (size_t)s.total_out;
-                            vok = 1;
-                        }
-                    }
-                    deflateEnd(&s);
-                }
+            if (pi2.enc == INVFS_DEFLATE_ENGINE_ZLIB_SYSTEM ||
+                pi2.enc == INVFS_DEFLATE_ENGINE_ZLIB_STOCK) {
+                /* Rebuild through the engine the sweep recorded, not through
+                 * whatever deflateInit2 happens to map to now: the IDAT is
+                 * reproduced bit-for-bit only by the same implementation that
+                 * wrote it. invfs_deflate_repro_encode() selects it. */
+                invfs_deflate_params dp;
+                memset(&dp, 0, sizeof dp);
+                dp.engine = pi2.enc;
+                dp.level = (int8_t)pi2.level;
+                dp.mem_level = (int8_t)pi2.mem;
+                dp.strategy = 0;
+                dp.window_bits = -15;   /* PNG IDAT = raw deflate */
+                if (invfs_deflate_repro_encode(f2, f2_len, &dp, &s2,
+                                               &s2_len) == 0)
+                    vok = 1;
             } else {
                 size_t bound = f2_len + f2_len / 4 + 4096;
                 s2 = (uint8_t *)malloc(bound);

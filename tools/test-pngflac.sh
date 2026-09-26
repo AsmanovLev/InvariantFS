@@ -110,6 +110,20 @@ gcc -std=gnu11 -O2 -I$SRC -I$SRC/core -I$SRC/codecs -I$SRC/recipes -I$SRC/vendor
 # engine on the FLAC fixtures below)
 cc -std=c11 -O2 -o "$WORK/bin/flacx" "$SRC/recipes/flacx.c"
 
+# The WP11 tool layer resolves helpers through $INVFS_TOOLS, then
+# /usr/lib/invfs/tools, and only then PATH -- and the PATH leg is refused by
+# default ("resolving cjxl via PATH (untrusted)", AGENTS.md 2.8). Relying on
+# PATH here meant the PNGR lane could never run: cjxl never resolved, so
+# every file fell into GENERIC_GUARD{PNGR} and leg 1's swept=5 never
+# happened. Point the suite at a trusted directory holding the real tools.
+# leg 3 overrides INVFS_TOOLS with its fake cjxl, so it is unaffected.
+mkdir -p "$WORK/tools"
+for t in cjxl djxl ffmpeg; do
+    p=$(command -v "$t") || { echo "FAIL: $t not installed"; exit 1; }
+    ln -sf "$p" "$WORK/tools/$t"
+done
+export INVFS_TOOLS="$WORK/tools"
+
 echo "== generate fixtures (deterministic seeds) =="
 python3 - <<'PY'
 import zlib, struct, subprocess, os
@@ -281,6 +295,53 @@ bit_exact_all() {   # $1=image, rest: names
 }
 
 swept_of() { sed -n 's/.*sweep done: swept=\([0-9]*\).*/\1/p' "$1"; }
+
+# Re-deflate every fixture's IDAT with the HOST zlib.
+#
+# The PNGR lane stores the JXL pixels and rebuilds the original file by
+# re-deflating the refiltered rows, so it can only transcode a PNG whose
+# original IDAT the host zlib can reproduce BIT-FOR-BIT. PIL wheels link
+# their own zlib, so the fixtures PIL wrote are not reproducible by the
+# build's zlib (here: zlib-ng) -- every combination of level, memLevel and
+# strategy missed, and all five leg-1 PNGs landed in GENERIC_GUARD{PNGR}
+# instead of being transcoded. That is a property of the lane's design, not
+# of the fixtures' content, so the fixtures are made host-reproducible:
+# decompress PIL's IDAT to the filtered stream and recompress it with this
+# interpreter's zlib at level 6. The filter bytes, the image data and the
+# decoded pixels are untouched, so each file is still the same PNG -- only
+# the IDAT encoding is one this build can reproduce.
+python3 - "$WORK/orig" <<'PY'
+import glob, os, struct, sys, zlib
+
+for path in sorted(glob.glob(os.path.join(sys.argv[1], "*.png"))):
+    d = open(path, "rb").read()
+    out = bytearray(d[:8])
+    i, changed = 8, False
+    while i < len(d):
+        ln = struct.unpack(">I", d[i:i+4])[0]
+        typ = d[i+4:i+8]
+        body = d[i+8:i+8+ln]
+        if typ == b"IDAT":
+            # coalesce the whole run of IDAT chunks, then emit it as one
+            idat = bytearray(body)
+            i += 12 + ln
+            while i + 8 <= len(d) and d[i+4:i+8] == b"IDAT":
+                n2 = struct.unpack(">I", d[i:i+4])[0]
+                idat += d[i+8:i+8+n2]
+                i += 12 + n2
+            new = zlib.compress(zlib.decompress(bytes(idat)), 6)
+            if new != body:
+                changed = True
+            out += struct.pack(">I", len(new)) + b"IDAT"
+            out += new + struct.pack(">I", zlib.crc32(b"IDAT" + new))
+            i += 12 + ln
+            continue
+        out += d[i:i+12+ln]
+        i += 12 + ln
+    if changed:
+        open(path, "wb").write(bytes(out))
+print("re-deflated IDATs with the host zlib")
+PY
 
 PNGS_OK="grad_rgb.png paeth_split.png rgba_up.png gray_sub.png ancil.png"
 
