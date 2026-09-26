@@ -517,20 +517,27 @@ for f in stored.7z hsolid.7z; do
 done
 while IFS=$'\t' read -r idx sn sz; do
     mbr=$(printf "stored.7z!mbr%04d-%s" "$idx" "$sn")
+# A batch-member class stamp carries the REGISTRY generation
+# (invfs_registry_generation(): the max over every loaded codec), not a
+# per-codec constant -- these suites install the whole pack dir, and
+# qcow2.codecpack/manifest declares generation 2. Match the class and the
+# algo, which is what the assertion is actually about. Container/MEMLIMIT
+# stamps name the decomposing pack's OWN generation and stay exact.
+stamp_is() { case "$1" in "$2"|"$2 "*) return 0 ;; esac; return 1; }
     C=$("$WORK/classof" "$IMG" "$mbr")
     echo "  $mbr: $C"
     case "$sn" in
         alpha.c|leaf.txt)
-            [ "$C" = "cls=7 algo=2 gen=1" ] || { echo "FAIL: text member $sn: want TEXT{PPMD,1}"; exit 1; } ;;
+            stamp_is "$C" "cls=7 algo=2" || { echo "FAIL: text member $sn: want TEXT{PPMD} (got $C)"; exit 1; } ;;
         beta.bin)
-            [ "$C" = "cls=8 algo=14 gen=1" ] || { echo "FAIL: ELF member: want BATCHED_BIN{ZSTD_BCJ,1}"; exit 1; } ;;
+            stamp_is "$C" "cls=8 algo=14" || { echo "FAIL: ELF member: want BATCHED_BIN{ZSTD_BCJ} (got $C)"; exit 1; } ;;
         rand.bin|empty.dat)
             [ "$C" = "none" ] || { echo "FAIL: $sn should be unclassified after sweep 1"; exit 1; } ;;
     esac
 done < "$WORK/orig/stored.table"
 C=$("$WORK/classof" "$IMG" "hsolid.7z!mbr0000-sa.txt")
 echo "  hsolid.7z!mbr0000-sa.txt: $C"
-[ "$C" = "cls=7 algo=2 gen=1" ] || { echo "FAIL: solid text member: want TEXT{PPMD,1}"; exit 1; }
+stamp_is "$C" "cls=7 algo=2" || { echo "FAIL: solid text member: want TEXT{PPMD} (got $C)"; exit 1; }
 for f in lzma2.7z enc.7z garbage.7z nomagic.7z trunc.7z; do
     C=$("$WORK/classof" "$IMG" "$f")
     echo "  $f: $C"

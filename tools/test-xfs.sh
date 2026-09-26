@@ -557,12 +557,19 @@ sib() {  # sib <container> <idx> <sname> -> the member sibling name
 TXTINO=$(awk -F'\t' '$2 == "text0.c" {print $1}' "$WORK/out/fs-a.xfs.tab")
 ELFINO=$(awk -F'\t' '$2 == "prog.elf" {print $1}' "$WORK/out/fs-a.xfs.tab")
 [ -n "$TXTINO" ] && [ -n "$ELFINO" ] || { echo "FAIL: members missing from table"; exit 1; }
+# A batch-member class stamp carries the REGISTRY generation
+# (invfs_registry_generation(): the max over every loaded codec), not a
+# per-codec constant -- these suites install the whole pack dir, and
+# qcow2.codecpack/manifest declares generation 2. Match the class and the
+# algo, which is what the assertion is actually about. Container/MEMLIMIT
+# stamps name the decomposing pack's OWN generation and stay exact.
+stamp_is() { case "$1" in "$2"|"$2 "*) return 0 ;; esac; return 1; }
 C=$("$WORK/classof" "$IMG" "$(sib fs-a.xfs "$TXTINO" text0.c)")
 echo "  text0.c member: $C"
-[ "$C" = "cls=7 algo=2 gen=1" ] || { echo "FAIL: want TEXT{PPMD,1}"; exit 1; }
+stamp_is "$C" "cls=7 algo=2" || { echo "FAIL: want TEXT{PPMD} (got $C)"; exit 1; }
 C=$("$WORK/classof" "$IMG" "$(sib fs-a.xfs "$ELFINO" prog.elf)")
 echo "  prog.elf member: $C"
-[ "$C" = "cls=8 algo=14 gen=1" ] || { echo "FAIL: want BATCHED_BIN{ZSTD_BCJ,1}"; exit 1; }
+stamp_is "$C" "cls=8 algo=14" || { echo "FAIL: want BATCHED_BIN{ZSTD_BCJ} (got $C)"; exit 1; }
 C=$("$WORK/classof" "$IMG" junk.xfs)
 echo "  junk.xfs: $C"
 case "$C" in *algo=19*|*cls=3*) echo "FAIL: junk.xfs carries a pack stamp"; exit 1;; esac
