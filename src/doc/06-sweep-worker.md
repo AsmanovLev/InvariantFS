@@ -1,5 +1,10 @@
 # Sweep Worker
 
+> **⚠ ФОРМАТ В АКТИВНОЙ РАЗРАБОТКЕ.** Документ описывает текущее
+> состояние Meta-v3, а не стабильную спецификацию; совместимость томов
+> между сборками не гарантируется. Подробности: `02-on-disk-format.md`,
+> `impl_docs/old_docs/AUDIT.md`, `INCIDENTS.md`.
+
 The Sweep worker is a background thread/process that moves data from the RAW Zone to Shadow Space, applying optimal compression based on data type.
 
 ## Design

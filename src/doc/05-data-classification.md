@@ -1,5 +1,10 @@
 # Data Classification — Magic Sniffer
 
+> **⚠ ФОРМАТ В АКТИВНОЙ РАЗРАБОТКЕ.** Документ описывает текущее
+> состояние Meta-v3, а не стабильную спецификацию; совместимость томов
+> между сборками не гарантируется. Подробности: `02-on-disk-format.md`,
+> `impl_docs/old_docs/AUDIT.md`, `INCIDENTS.md`.
+
 The Magic Sniffer identifies file types by examining magic bytes and structure. It determines:
 
 1. Whether the file is a **container** (FLAC, MP3, ZIP, TAR) → recurse into children
