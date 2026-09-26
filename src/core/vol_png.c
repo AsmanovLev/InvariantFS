@@ -868,7 +868,12 @@ uint64_t vol_v3_publish_blob_inode(invfs_volume *v, uint64_t inode_id,
                                    const uint8_t *blob, size_t blob_len,
                                    uint64_t orig_size, uint32_t algo)
 {
-    uint64_t phys_blocks, pba;
+    /* pba doubles as vol_v3_free_recipe_blocks' keep_pba ("do not free this
+     * one"), and the empty-blob branch below never allocates one -- so it must
+     * start at 0, like the explicit 0 the unlink paths pass. Uninitialised,
+     * a stack value that happens to equal an old recipe pba silently keeps
+     * that block alive forever (a leak), and reading it is UB besides. */
+    uint64_t phys_blocks = 0, pba = 0;
     uint8_t hdr4[8];
     invfs_ast_block_entry e;
     invfs_v3_inode in;

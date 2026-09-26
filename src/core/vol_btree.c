@@ -571,7 +571,8 @@ static int bt_ins_rec(invfs_volume *v, invfs_blkptr node, bt_key key,
              * each keyed by the FIRST key of the piece it introduces. The
              * leftmost piece stays in record i. */
             uint8_t rkbuf[INVFS_BLOCK_SIZE], mkbuf[INVFS_BLOCK_SIZE];
-            bt_key rk, mk;
+            bt_key rk;
+            bt_key mk = { NULL, 0 };
             int j, add = cu.nptr - 1;
             if (bt_first_key(v, cu.right, rkbuf, &rk) != 0) {
                 free(e);

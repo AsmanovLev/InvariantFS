@@ -65,15 +65,6 @@ int pngx_chunk_append(uint8_t **buf, size_t *len, size_t *cap,
     return 0;
 }
 
-/* chunk CRC for checks (type+data) */
-static unsigned long chunk_crc(const uint8_t *type, const uint8_t *data, size_t dlen)
-{
-    extern unsigned long crc32(unsigned long, const unsigned char *, unsigned);
-    unsigned long c = crc32(0L, NULL, 0);
-    c = crc32(c, type, 4);
-    if (dlen) c = crc32(c, data, (unsigned)dlen);
-    return c;
-}
 
 /* PNG filter application: out[i] = f[i] + pred (mod 256). Used both for
    unfilter (f = filtered, out = pixels) and refilter (f = pixels, out =
@@ -216,7 +207,8 @@ int pngx_extract(const uint8_t *png, size_t png_len,
     info->nrows = info->height;
     uint8_t *prev = (uint8_t *)calloc(info->row_bytes ? info->row_bytes : 1, 1);
     if (!prev) goto oom;
-    uint8_t *prev_px = (uint8_t *)calloc(info->width * info->bpp ? info->width * info->bpp : 1, 1);
+    size_t row_px0 = (size_t)info->width * info->bpp;
+    uint8_t *prev_px = (uint8_t *)calloc(row_px0 ? row_px0 : 1, 1);
     if (!prev_px) goto oom;
     for (size_t r = 0; r < info->height; r++) {
         const uint8_t *row = info->filtered + r * info->row_bytes;
@@ -380,7 +372,8 @@ int pngx_refilter(const uint8_t *rgb, size_t rgb_len, const pngx_info *info,
 {
     size_t row_px = (size_t)info->width * info->bpp;
     if (rgb_len != row_px * info->height) return -1;
-    uint8_t *f = (uint8_t *)malloc((info->row_bytes * info->height) ? info->row_bytes * info->height : 1);
+    size_t raw_len = info->row_bytes * info->height;
+    uint8_t *f = (uint8_t *)malloc(raw_len ? raw_len : 1);
     if (!f) return -1;
     uint8_t *prev = (uint8_t *)calloc(row_px ? row_px : 1, 1);
     if (!prev) { free(f); return -1; }
@@ -448,7 +441,7 @@ int pngx_rebuild(const pngx_info *info, const uint8_t *idat_stream,
     ihdr[10] = 0; /* compression */
     ihdr[11] = 0; /* filter */
     ihdr[12] = info->interlace;
-    if (pngx_chunk_append(&b, &o, &cap, "IHDR", ihdr, 13)) { free(b); return -1; }
+    if (pngx_chunk_append(&b, &o, &cap, (const uint8_t *)"IHDR", ihdr, 13)) { free(b); return -1; }
     if (info->pre_len) { memcpy(b + o, info->pre, info->pre_len); o += info->pre_len; }
     /* IDAT chunks with split — preserve ORIGINAL CRCs (may be broken) */
     size_t off = 0;

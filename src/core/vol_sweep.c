@@ -1770,7 +1770,6 @@ int vol_sweep_one_ex(invfs_volume *v, uint64_t inode_id, const char *name,
      * this line is v2 record surgery. */
     if (v->sb.vol_flags & VOLF_V3) {
         uint64_t live = inode_id;
-        int r3;
         /* A record can be REPLACED between the walk that collected the id
          * and this call: a container commit -- or a decomposition migration
          * re-deriving one, which re-creates every "!mbr*" sibling -- retires

@@ -116,8 +116,6 @@ static void bw_align(bw_t *b)
 {
     while (b->bits & 7) bw_put(b, 0, 1);
 }
-static size_t bw_size(const bw_t *b) { return b->bits / 8; }
-
 /* ---------------- CRCs (RFC 9639: CRC-8 poly 0x07, CRC-16 poly 0x8005) ------- */
 static uint8_t crc8(const uint8_t *p, size_t n)
 {
@@ -141,7 +139,6 @@ static uint16_t crc16(const uint8_t *p, size_t n)
 }
 
 /* ---------------- binary recipe helpers ---------------- */
-static void wr8(uint8_t **p, uint8_t v)  { *(*p)++ = v; }
 static void wr16(uint8_t **p, uint16_t v){ *(*p)++ = v & 0xFF; *(*p)++ = v >> 8; }
 static void wr32(uint8_t **p, uint32_t v){ *(*p)++ = v & 0xFF; *(*p)++ = (v>>8)&0xFF; *(*p)++ = (v>>16)&0xFF; *(*p)++ = v >> 24; }
 static void wr64(uint8_t **p, uint64_t v){ for (int i = 0; i < 8; i++) *(*p)++ = (v >> (8*i)) & 0xFF; }
@@ -208,7 +205,46 @@ typedef struct flacx_cover flacx_cover;
 
 /* ---------------- WAV reader (8/16/24-bit) ---------------- */
 /* WAV parser over an in-memory buffer (8/16/24-bit PCM) */
-static uint8_t *read_file(const char *path, size_t *len);
+
+
+/* ---------------- RECIPE EXTRACT (parse FLAC) ---------------- */
+static int read_utf8(br_t *b, uint64_t *out)
+{
+    int bb = br_get(b, 8);
+    if (!(bb & 0x80)) { *out = (uint64_t)bb; return 0; }
+    int n = 0, mask = 0x80;
+    while (bb & mask) { n++; mask >>= 1; }
+    uint64_t v = (uint64_t)(bb & (mask - 1));
+    for (int i = 0; i < n - 1; i++) v = (v << 6) | (uint64_t)(br_get(b, 8) & 0x3F);
+    *out = v;
+    return 0;
+}
+
+static uint32_t bs_table[16] = { 0, 192, 576, 1152, 2304, 4608, 0, 0,
+                                 256, 512, 1024, 2048, 4096, 8192, 16384, 32768 };
+static uint32_t sr_table[16] = { 0, 88200, 176400, 192000, 8000, 16000, 22050,
+                                 24000, 32000, 44100, 48000, 96000, 0, 0, 0, 0 };
+static int ss_table[8] = { 0, 8, 12, 0, 16, 20, 24, 32 };
+
+/* read raw bytes from file into memory */
+/* only the standalone driver (below) reads cover payloads off disk */
+#ifndef INVFS_EMBED_FLACX
+static uint8_t *read_file(const char *path, size_t *len)
+{
+    FILE *f = fopen(path, "rb");
+    if (!f) return NULL;
+    fseek(f, 0, SEEK_END);
+    long sz = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    uint8_t *b = (uint8_t *)malloc((size_t)sz + 1);
+    if (!b) { fclose(f); return NULL; }
+    if (fread(b, 1, (size_t)sz, f) != (size_t)sz) { free(b); fclose(f); return NULL; }
+    fclose(f);
+    *len = (size_t)sz;
+    return b;
+}
+#endif /* INVFS_EMBED_FLACX */
+
 static int32_t *read_wav_mem(const uint8_t *buf, size_t sz, int *out_n, int *out_ch, int *out_bits)
 {
     if (sz < 12 || memcmp(buf, "RIFF", 4) || memcmp(buf + 8, "WAVE", 4)) return NULL;
@@ -258,50 +294,7 @@ static int32_t *read_wav_mem(const uint8_t *buf, size_t sz, int *out_n, int *out
     return samples;
 }
 
-static int32_t *read_wav(const char *path, int *out_n, int *out_ch, int *out_bits)
-{
-    size_t sz = 0;
-    uint8_t *b = read_file(path, &sz);
-    if (!b) return NULL;
-    int32_t *s = read_wav_mem(b, sz, out_n, out_ch, out_bits);
-    free(b);
-    return s;
-}
 
-/* ---------------- RECIPE EXTRACT (parse FLAC) ---------------- */
-static int read_utf8(br_t *b, uint64_t *out)
-{
-    int bb = br_get(b, 8);
-    if (!(bb & 0x80)) { *out = (uint64_t)bb; return 0; }
-    int n = 0, mask = 0x80;
-    while (bb & mask) { n++; mask >>= 1; }
-    uint64_t v = (uint64_t)(bb & (mask - 1));
-    for (int i = 0; i < n - 1; i++) v = (v << 6) | (uint64_t)(br_get(b, 8) & 0x3F);
-    *out = v;
-    return 0;
-}
-
-static uint32_t bs_table[16] = { 0, 192, 576, 1152, 2304, 4608, 0, 0,
-                                 256, 512, 1024, 2048, 4096, 8192, 16384, 32768 };
-static uint32_t sr_table[16] = { 0, 88200, 176400, 192000, 8000, 16000, 22050,
-                                 24000, 32000, 44100, 48000, 96000, 0, 0, 0, 0 };
-static int ss_table[8] = { 0, 8, 12, 0, 16, 20, 24, 32 };
-
-/* read raw bytes from file into memory */
-static uint8_t *read_file(const char *path, size_t *len)
-{
-    FILE *f = fopen(path, "rb");
-    if (!f) return NULL;
-    fseek(f, 0, SEEK_END);
-    long sz = ftell(f);
-    fseek(f, 0, SEEK_SET);
-    uint8_t *b = (uint8_t *)malloc((size_t)sz + 1);
-    if (!b) { fclose(f); return NULL; }
-    if (fread(b, 1, (size_t)sz, f) != (size_t)sz) { free(b); fclose(f); return NULL; }
-    fclose(f);
-    *len = (size_t)sz;
-    return b;
-}
 
 /* parse one frame; returns byte offset of next frame or -1 */
 static long parse_frame(const uint8_t *d, size_t n, long off,
@@ -441,8 +434,9 @@ static long parse_frame(const uint8_t *d, size_t n, long off,
                     br_get(&br, bits * nsamp);  /* escape: raw residuals */
                 } else {
                     for (int s = 0; s < nsamp; s++) {
-                        int q = 0;
-                        while (br_get(&br, 1) == 0) q++;
+                        /* unary-coded run length: the count itself is not
+                         * needed, only the terminator's position */
+                        while (br_get(&br, 1) == 0) { }
                         br_get(&br, k);
                     }
                 }
@@ -690,7 +684,6 @@ int flacx_recipe_num_covers(const uint8_t *r, size_t rn)
 }
 /* flacx_rebuild_part.c — rebuild + main (appended to flacx.c) */
 
-static int32_t unzigzag(int32_t m) { return (m & 1) ? -(m / 2) - 1 : m / 2; }
 static int64_t zigzag64(int64_t v) { return v < 0 ? -2 * v - 1 : 2 * v; }
 
 static void put_utf8(bw_t *b, uint64_t v)
@@ -714,7 +707,6 @@ static int write_residuals(bw_t *bw, const subframe_t *sf, const int64_t *res, i
     int esc = sf->rmethod == 0 ? 15 : 31;
     int bs = nres + sf->order;
     int part = bs >> sf->porder;
-    int first = (sf->porder > 0) ? part - sf->order : nres;
     for (int p = 0; p < nparts; p++) {
         int warm = (sf->order > p * part) ? sf->order - p * part : 0;
         int n = part - warm;
@@ -1092,7 +1084,12 @@ int main(int argc, char **argv)
         int ncv = flacx_recipe_num_covers(r, rlen);
         flacx_cover covers[16];
         uint8_t *cdata[16];
-        for (int i = 0; i < ncv && i < 16; i++) {
+        /* the recipe may announce more covers than the stack array holds:
+         * passing the announced count to flacx_rebuild would read past it */
+        if (ncv > 16) ncv = 16;
+        memset(covers, 0, sizeof covers);
+        memset(cdata, 0, sizeof cdata);
+        for (int i = 0; i < ncv; i++) {
             char cn[300];
             snprintf(cn, sizeof cn, "%s.c%d", argv[3], i);
             size_t clen = 0;
@@ -1101,12 +1098,13 @@ int main(int argc, char **argv)
             covers[i].len = (uint32_t)clen;
             covers[i].data = cdata[i];
             covers[i].offset = 0;
+            covers[i].kind = 0;
         }
         if (flacx_rebuild(w, wlen, r, rlen, covers, (uint32_t)ncv, &o, &olen) != 0) {
-            for (int i = 0; i < ncv && i < 16; i++) free(cdata[i]);
+            for (int i = 0; i < ncv; i++) free(cdata[i]);
             free(w); free(r); return 1;
         }
-        for (int i = 0; i < ncv && i < 16; i++) free(cdata[i]);
+        for (int i = 0; i < ncv; i++) free(cdata[i]);
         FILE *f = fopen(argv[4], "wb");
         if (!f) return 1;
         fwrite(o, 1, olen, f);

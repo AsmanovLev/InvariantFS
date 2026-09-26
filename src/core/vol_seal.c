@@ -547,10 +547,11 @@ static int seal_shard_sync(invfs_volume *v, uint64_t owner, uint64_t shard,
     same = (o->n == want_n);
     if (same) {
         uint64_t w = base;
-        for (i = 0; i < o->n && same; i++, w++) {
+        for (i = 0; i < o->n && same; i++) {
             while (w < hi && !par_pba[w]) w++;
             if (w >= hi || o->ents[i].block_id != (uint32_t)(w - base))
                 same = 0;
+            w++;
         }
     }
     if (same) return 0;
@@ -663,7 +664,7 @@ static int seal2_shard_sync(invfs_volume *v, uint64_t owner, uint64_t shard,
     uint64_t shard_stripes = seal2_shard_stripes(m2);
     uint64_t base = shard * shard_stripes;
     uint64_t hi = base + shard_stripes;
-    uint32_t want_n = 0, i;
+    uint32_t want_n = 0;
     uint64_t s, j;
     int same;
     char nm[32];

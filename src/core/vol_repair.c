@@ -320,7 +320,7 @@ int vol_seal2_repair(invfs_volume *v, invfs_seal2_repair *rep)
     int rc = 0;
     /* live-record walk (the verify --deep pattern: newest id per name) */
     struct lr_ent *ents = NULL;
-    size_t nents = 0, capents = 0;
+    size_t nents = 0;
     /* candidate segments (deduped by pba) and the failed ones */
     typedef struct { uint64_t pba; uint32_t plen; } segcand;
     segcand *cand = NULL;
@@ -392,7 +392,7 @@ int vol_seal2_repair(invfs_volume *v, invfs_seal2_repair *rep)
         if (vol_records_walk(v, lr_scan_cb, &lc) != 0 && lc.oom) {
             rc = -1; goto out;
         }
-        ents = lc.ents; nents = lc.nents; capents = lc.capents;
+        ents = lc.ents; nents = lc.nents;
     }
     for (i = 0; i < nents; i++) {
         uint8_t *buf = NULL;

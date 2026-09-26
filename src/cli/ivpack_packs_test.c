@@ -137,7 +137,7 @@ int main(void)
 
     for (i = 0; i < NPACKS; i++) {
         const char *name = PACKS[i];
-        char sopath[256], want[128], what[256];
+        char sopath[256], want[128], what[512];
         void *h = load_pack(name, sopath, sizeof sopath);
         ivpack_get_desc_fn get_desc;
         ivpack_container_cmd_fn cmd;
@@ -172,7 +172,7 @@ int main(void)
         }
         /* type = container -> pack_class "containerpack" */
         if (manifest_get(name, "type", want, sizeof want) == 0) {
-            char wantclass[64];
+            char wantclass[160];
             snprintf(wantclass, sizeof wantclass, "%spack", want);
             snprintf(what, sizeof what, "%s: pack_class matches manifest type", name);
             ok(d->pack_class && strcmp(d->pack_class, wantclass) == 0, what);

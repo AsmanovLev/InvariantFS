@@ -78,7 +78,7 @@ int main(int argc, char **argv)
     invfs_volume *vol;
     const invfs_superblock *sb;
     int err;
-    uint64_t bm, inode_area_start, inode_area_end, p;
+    uint64_t inode_area_start, inode_area_end, p;
     int count = 0, cap = 0;
     const char *img;
     /* Grown on demand. These used to be fixed 512-entry arrays with a silent
@@ -128,7 +128,7 @@ int main(int argc, char **argv)
      * machinery (vol_get_children); on v3 they are omitted until the
      * recipe-blob member listing lands. */
     if (sb->vol_flags & VOLF_V3) {
-        struct ls3_stack { char path[INVFS_MAX_NAME + 2]; } *st = NULL;
+        struct ls3_stack { char path[2 * INVFS_MAX_NAME + 2]; } *st = NULL;
         size_t st_n = 0, st_cap = 0;
         uint64_t live = 0;
         printf("files in %s:\n", img);
@@ -139,7 +139,7 @@ int main(int argc, char **argv)
         st[0].path[0] = 0;
         st_n = 1;
         while (st_n) {
-            char dir[INVFS_MAX_NAME + 2];
+            char dir[2 * INVFS_MAX_NAME + 2];
             invfs_dirent *ents;
             int n;
             snprintf(dir, sizeof dir, "%s", st[--st_n].path);
@@ -151,11 +151,22 @@ int main(int argc, char **argv)
                 fprintf(stderr, "warning: %s%s truncated at 4096 entries\n",
                         dir, dir[0] ? "/" : "");
             for (int i = 0; i < n; i++) {
-                char full[INVFS_MAX_NAME + 2];
+                /* dir (INVFS_MAX_NAME) + '/' + name (INVFS_MAX_NAME): the
+                 * old buffer was INVFS_MAX_NAME+2, so a deep path was
+                 * silently truncated and vol_find() then answered for a
+                 * name that does not exist */
+                char full[2 * INVFS_MAX_NAME + 2];
+                int fn;
                 if (dir[0])
-                    snprintf(full, sizeof full, "%s/%s", dir, ents[i].name);
+                    fn = snprintf(full, sizeof full, "%s/%s", dir,
+                                  ents[i].name);
                 else
-                    snprintf(full, sizeof full, "%s", ents[i].name);
+                    fn = snprintf(full, sizeof full, "%s", ents[i].name);
+                if (fn < 0 || (size_t)fn >= sizeof full) {
+                    fprintf(stderr, "warning: name too long, listed as "
+                                    "<truncated>\n");
+                    continue;
+                }
                 if (ents[i].is_dir) {
                     uint64_t id = vol_find(vol, full);
                     printf("  %8llu bytes  inode %llu  %s/\n",
@@ -280,8 +291,12 @@ int main(int argc, char **argv)
                     }
                     cap = ncap;
                 }
-                strncpy(names[count], name, 255);
-                names[count][255] = 0;
+                {
+                    size_t nl = strlen(name);
+                    if (nl > 255) nl = 255;
+                    memcpy(names[count], name, nl);
+                    names[count][nl] = 0;
+                }
                 sizes[count] = h.file_size;
                 inodes[count] = h.inode_id;
                 poss[count] = p;

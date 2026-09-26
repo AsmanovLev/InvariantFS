@@ -69,7 +69,7 @@ static int is_temp_path(const char *path)
            strstr(path, "/var/tmp/") != NULL;
 }
 
-/* WP59a: files under /.invariantfs/config/* or /.invariantfs/codecpacks/**
+/* WP59a: files under /.invariantfs/config/ or /.invariantfs/codecpacks/
  * must be anchored so they stay builtin-readable. */
 static int is_anchored_path(const char *path)
 {
@@ -80,21 +80,6 @@ static int is_anchored_path(const char *path)
     return 0;
 }
 
-static void table_sync_one(const char *name)
-{
-    uint64_t id = 0, sz = 0, ct = 0;
-    pthread_mutex_lock(&g_io_lock);
-    if (!g_vol) { pthread_mutex_unlock(&g_io_lock); return; }
-    id = vol_find(g_vol, name);
-    if (!id) {
-        table_remove_name(name);
-        pthread_mutex_unlock(&g_io_lock);
-        return;
-    }
-    vol_stat_full(g_vol, name, &id, &sz, &ct);
-    table_upsert_locked(name, id, sz, ct);
-    pthread_mutex_unlock(&g_io_lock);
-}
 
 static void table_refresh_if_stale_locked(void)
 {
@@ -267,7 +252,7 @@ static void build_file_table(void)
     uint64_t nrecs = 0, caprecs = 0;
     /* tombstone kill list: (position-or-0, inode-id) pairs */
     uint64_t *tpos = NULL, *tid = NULL;
-    uint64_t ntomb = 0, captomb = 0;
+    uint64_t ntomb = 0;
 
     g_entries = NULL; g_nentries = 0; g_cap = 0;
 
@@ -278,7 +263,7 @@ static void build_file_table(void)
         /* walk error: fall through with whatever was collected */
     }
     recs = c.recs; nrecs = c.nrecs; caprecs = c.caprecs;
-    tpos = c.tpos; tid = c.tid; ntomb = c.ntomb; captomb = c.captomb;
+    tpos = c.tpos; tid = c.tid; ntomb = c.ntomb;
 
     /* pass 2: apply tombstones (records sorted by pos for bsearch) */
     qsort(recs, (size_t)nrecs, sizeof(fs_entry), cmp_entry_pos);
@@ -1581,7 +1566,7 @@ static int invf_create(const char *path, mode_t mode, struct fuse_file_info *fi)
                 vol_set_xattr(g_vol, ino2, XATTR_ACL_ACCESS, aacl, aalen) != 0)
                 fprintf(stderr, "invf: create ACL inherit FAILED %s\n", path);
         }
-        /* WP59a: pin /.invariantfs/config/* and /.invariantfs/codecpacks/**
+        /* WP59a: pin /.invariantfs/config/ and /.invariantfs/codecpacks/
          * so they stay builtin-readable (never pack-container coded). */
         if (is_anchored_path(path)) {
             uint8_t anchor_val = 1;
@@ -1713,7 +1698,7 @@ static void invf_sweep_worker(int arm_ckp)
 {
     uint64_t *ids = NULL;
     size_t max = 300000, n, i;
-    long saved = 0, swept = 0, skipped = 0, failed = 0;
+    long swept = 0, skipped = 0, failed = 0;
     int armed = 0;
     int is_v3 = 0;
 
@@ -2908,9 +2893,20 @@ int main(int argc, char *argv[])
                 opts = argv[++i];
             else {
                 static char obuf[1024];
+                size_t need = strlen(opts) + strlen(argv[i]) + 2;
                 i++;
-                snprintf(obuf, sizeof obuf, "%s,%s", opts, argv[i]);
-                opts = obuf;
+                if (need > sizeof obuf) {
+                    /* fuse_main would silently lose the tail options */
+                    static char *obuf_big;
+                    obuf_big = (char *)realloc(obuf_big, need);
+                    if (obuf_big) {
+                        snprintf(obuf_big, need, "%s,%s", opts, argv[i]);
+                        opts = obuf_big;
+                    }
+                } else {
+                    snprintf(obuf, sizeof obuf, "%s,%s", opts, argv[i]);
+                    opts = obuf;
+                }
             }
         }
         else if (!img) img = argv[i];
@@ -3107,7 +3103,6 @@ int main(int argc, char *argv[])
         struct fuse *f;
         struct fuse_session *se;
         int rc;
-        int k;
         fuse_argv[fuse_argc++] = "invf-fuse";
         /* WP17 transport tuning. attr/entry TTL: production default 1.0 s
          * (same-process daemon writes invalidate through the mount

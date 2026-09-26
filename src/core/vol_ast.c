@@ -233,7 +233,7 @@ uint64_t vol_create_container_file(invfs_volume *v, const char *name,
         /* one block of slack past the payload (see vol_create_file) */
         uint8_t *cbuf = (uint8_t *)malloc((size_t)cbound + 8 + INVFS_BLOCK_SIZE);
         uint8_t hdr[8];
-        uint64_t pba, phys_blocks; int seg_zone;
+        uint64_t pba, phys_blocks;
         uint32_t csize, seg_crc;
 
         if (!cbuf) { free(entries); free(seg_lz4); free(seg_csize); free(children_blob); return 0; }

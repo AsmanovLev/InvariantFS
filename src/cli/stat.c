@@ -40,15 +40,6 @@ static void enable_ansi(void)
 #endif
 }
 
-static const char *zone_name(int z)
-{
-    switch (z) {
-    case INVFS_ZONE_RAW:     return "RAW   ";
-    case INVFS_ZONE_TEXT:    return "Text  ";
-    case INVFS_ZONE_BINARY:  return "Binary";
-    default:                 return "?     ";
-    }
-}
 
 static void draw_bar(const invfs_volume *v, const invfs_superblock *sb,
                      const uint32_t *refcount,

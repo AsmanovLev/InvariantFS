@@ -122,12 +122,11 @@ int spt0_capture(invfs_volume *v)
     {
         uint64_t delta_bytes = 0;
         uint64_t cur = v->delta_seg_pba;
-        uint64_t chain_bytes[DELTA_MAX_SEGMENTS];
         size_t nsegs = 0;
         invfs_delta_seg_hdr hdr;
 
         while (cur && nsegs < DELTA_MAX_SEGMENTS) {
-            chain_bytes[nsegs++] = delta_bytes;
+            nsegs++;
             if (delta_read_hdr(v, cur, &hdr) != 0)
                 break;
             if (nsegs > 1 || v->delta_bump > INVFS_DELTA_SEG_HDR_LEN) {

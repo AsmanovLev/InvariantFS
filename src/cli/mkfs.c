@@ -397,7 +397,7 @@ int main(int argc, char **argv)
         devt.sync_seq = 1;
         memcpy(devt.vol_uuid, sb.uuid, 16);
         /* the hint is the path AS GIVEN (INVFS_DEV1 overrides it). Do
-         * NOT absolutize: blkio treats /dev/* paths as raw devices, so a
+         * NOT absolutize: blkio treats /dev/ paths as raw devices, so a
          * realpath of a /dev/shm image would become unusable -- the
          * as-given relative form is what the tools can always open from
          * the volume's directory. */

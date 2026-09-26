@@ -53,7 +53,7 @@ int invfs_ppmd_encode(const uint8_t *in, size_t inlen,
                       uint8_t *out, size_t outcap, size_t *outlen)
 {
     CPpmd8 p;
-    CInvIn ii; CInvOut oo;
+    CInvOut oo;                 /* encode writes only: see p.Stream.Out below */
     size_t i;
 
     if (!in || !out || !outlen || inlen == 0 || inlen > 0x7FFFFFFFull ||
@@ -64,7 +64,6 @@ int invfs_ppmd_encode(const uint8_t *in, size_t inlen,
     Ppmd8_Construct(&p);
     if (!Ppmd8_Alloc(&p, INVFS_PPMD_MEM_MB << 20, &g_alloc)) return -1;
 
-    ii.base.Read = Inv_InRead; ii.cur = in; ii.end = in + inlen; ii.extra = 0;
     oo.base.Write = Inv_OutWrite; oo.cur = out; oo.end = out + outcap; oo.overflow = 0;
 
     /* CPpmd8.Stream is a UNION of .In/.Out -- assign ONLY the member the

@@ -176,7 +176,7 @@ enum {
                                        * re-evaluated EVERY sweep; stamped
                                        * {algo,gen} of the declining codec */
     INVFS_CLASS_ANCHORED         = 10 /* WP59a: pinned builtin-readable
-                                       * (/.invariantfs/**).  Never assigned
+                                       * (/.invariantfs/).  Never assigned
                                        * a pack/container codec; skip dedup
                                        * remap and tier demotion. */
 };

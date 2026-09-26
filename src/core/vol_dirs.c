@@ -66,15 +66,26 @@ int vol_rmdir(invfs_volume *v, const char *name)
         int n = vol_list_dir(v, name, ents, 64);
         int k;
         for (k = 0; k < n; k++) {
+            int cn;
             if (ents[k].name[0] == 0) continue;
-            snprintf(child, sizeof child, "%s/%s", name, ents[k].name);
+            cn = snprintf(child, sizeof child, "%s/%s", name, ents[k].name);
+            if (cn < 0 || (size_t)cn >= sizeof child) {
+                /* the path does not fit: we cannot prove this child is
+                 * gone, so count it alive and keep the directory */
+                listed++;
+                alive++;
+                continue;
+            }
             listed++;
             if (vol_find(v, child) != 0 || vol_is_dir(v, child)) alive++;
         }
         if (alive == 0 && listed > 0 && n <= 64) {
             for (k = 0; k < n; k++) {
+                int cn;
                 if (ents[k].name[0] == 0) continue;
-                snprintf(child, sizeof child, "%s/%s", name, ents[k].name);
+                cn = snprintf(child, sizeof child, "%s/%s", name, ents[k].name);
+                if (cn < 0 || (size_t)cn >= sizeof child)
+                    continue;   /* never reached: counted alive above */
                 idx_del(v, child, (size_t)strlen(child), 0);
                 idx_bump_dirs(v, child, strlen(child), -1);
             }
@@ -1263,7 +1274,7 @@ int vol_rename(invfs_volume *v, const char *from, const char *to)
 {
     char (*names)[256] = NULL;
     char pre[300];
-    size_t n = 0, cap = 0, pren = 0, flen, i;
+    size_t n = 0, pren = 0, flen, i;
     int dir, rc = 0;
 
     if (v->sb.vol_flags & VOLF_V3) return vol_v3_rename(v, from, to);
@@ -1363,7 +1374,6 @@ int vol_rename(invfs_volume *v, const char *from, const char *to)
         wrc = vol_records_walk(v, rename_collect_cb, &c);
         names = c.names;
         n = c.n;
-        cap = c.cap;
         if (wrc != 0) { free(names); return -1; }   /* OOM / IO error */
     }
 

@@ -1215,12 +1215,10 @@ int vol_read_file(invfs_volume *v, uint64_t inode_id, uint8_t **out, size_t *out
 int vol_read_named(invfs_volume *v, const char *name, uint8_t **out, size_t *out_len)
 {
     char buf[512], *comps[16];
-    size_t ncomp = 0, total = 0;
+    size_t ncomp = 0;
     uint8_t *cur = NULL;
     size_t cur_len = 0;
-    const char *p = name;
     uint64_t ino;
-    int rc = -1;
 
     if (strlen(name) + 1 > sizeof buf)
         return -1;
@@ -1266,7 +1264,6 @@ int vol_read_named(invfs_volume *v, const char *name, uint8_t **out, size_t *out
         free(cur);
         cur = next;
         cur_len = next_len;
-        total += next_len;
     }
     *out = cur;
     *out_len = cur_len;

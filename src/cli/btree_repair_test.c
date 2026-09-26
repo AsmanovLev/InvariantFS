@@ -552,7 +552,7 @@ int main(int argc, char **argv)
     char err[128];
     invfs_fsck_report rep;
     int err_open = 0, i, eio = 0, abs = 0, invented = 0, kept = 0, outside = 0;
-    int lost_names = 0, rc, cli;
+    int lost_names = 0, cli;
     char cmd[1200];
 
     for (i = 1; i < argc; i++) {
@@ -1034,7 +1034,6 @@ int main(int argc, char **argv)
             memcpy(vlo, g_lp.vlo, vlo_n);
             vhi_n = g_lp.vhi_n;
             memcpy(vhi, g_lp.vhi, vhi_n);
-            vhi_unb = g_lp.vhi_unb;
             printf("  long-name tree: %d leaves; tearing pba %llu "
                    "(bounds %u/%u bytes)\n", ll.n, (unsigned long long)victim,
                    (unsigned)vlo_n, (unsigned)vhi_n);

@@ -402,21 +402,6 @@ static int copy_crc2(rzio *rz, uint64_t src, uint64_t dst, uint64_t len,
 }
 
 /* copy `len` bytes from src to dst through the bounce, chaining a CRC */
-static int copy_crc(blkio *io, uint64_t src, uint64_t dst, uint64_t len,
-                    uint8_t *buf, uint32_t *crc)
-{
-    while (len) {
-        size_t n = len > BLKIO_BOUNCE ? BLKIO_BOUNCE : (size_t)len;
-        if (blkio_pread(io, src, buf, n) != 0 ||
-            blkio_pwrite(io, dst, buf, n) != 0)
-            return -1;
-        *crc = invfs_crc32c_update(*crc, buf, n);
-        src += n;
-        dst += n;
-        len -= n;
-    }
-    return 0;
-}
 
 int main(int argc, char **argv)
 {

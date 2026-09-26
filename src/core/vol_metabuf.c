@@ -359,7 +359,7 @@ int mbuf_root_read(invfs_volume *v, uint64_t *root_pba_out,
 {
     uint8_t page[INVFS_BLOCK_SIZE];
     uint64_t best_pba = 0, best_gen = 0;
-    int have = 0, io_fail = 0, named = 0, i;
+    int have = 0, named = 0, i;
 
     if (!v)
         return -1;
@@ -378,10 +378,10 @@ int mbuf_root_read(invfs_volume *v, uint64_t *root_pba_out,
         if (!pba)
             continue;
         named = 1;
-        if (mbuf_read(v, pba, page) != 0) {
-            io_fail = 1;
-            continue;
-        }
+        if (mbuf_read(v, pba, page) != 0)
+            continue;      /* `named` already records that a slot pointed
+                             * somewhere; WP86 made the read-failure case
+                             * collapse into the "named but unusable" one */
         h = mbuf_page_hdr(page);
         if (!mbuf_page_validate(page))
             continue;

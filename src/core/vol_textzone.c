@@ -1679,7 +1679,7 @@ int vol_tz_gc(invfs_volume *v)
     tz_owner o;
     uint64_t owner;
     uint32_t *live = NULL;     /* sorted live batch_seqs */
-    size_t n_live = 0, cap_live = 0;
+    size_t n_live = 0;
     uint32_t i;
     size_t w;
     int freed = 0;
@@ -1706,7 +1706,6 @@ int vol_tz_gc(invfs_volume *v)
         wrc = vol_records_walk(v, tz_gc_mark_cb, &mc);
         live = mc.live;
         n_live = mc.n_live;
-        cap_live = mc.cap_live;
         if (wrc != 0) { rc = -1; goto out; }
     }
     /* sort for the membership queries below */

@@ -40,7 +40,7 @@ typedef struct {
 
 typedef struct {
     char name[128];
-    char path[MAX_PATH];
+    char path[MAX_PATH + 64];
     char algo[16];
     char pack_version[16];
     char codec_id[16];
@@ -66,24 +66,6 @@ static const char *env_codecpacks(void)
 }
 
 /* compute blake3 of a file; hex digest in hex_out (>=65 bytes) */
-static int hash_file(const char *path, char *hex_out)
-{
-    FILE *f = fopen(path, "rb");
-    if (!f) return -1;
-    blake3_hasher h;
-    blake3_hasher_init(&h);
-    uint8_t buf[65536];
-    size_t n;
-    while ((n = fread(buf, 1, sizeof buf, f)) > 0)
-        blake3_hasher_update(&h, buf, n);
-    fclose(f);
-    uint8_t out[BLAKE3_OUT_LEN];
-    blake3_hasher_finalize(&h, out, BLAKE3_OUT_LEN);
-    for (int i = 0; i < BLAKE3_OUT_LEN; i++)
-        sprintf(hex_out + i * 2, "%02x", out[i]);
-    hex_out[BLAKE3_OUT_LEN * 2] = 0;
-    return 0;
-}
 
 /* strip trailing \n and \r */
 static void strip_nl(char *s)
@@ -111,10 +93,18 @@ static int parse_manifest(const char *path, pack_info *pi)
         while (ke > k && (*ke == ' ' || *ke == '\t')) *ke-- = 0;
         while (*v == ' ' || *v == '\t') v++;
         if (pi->field_count < MAX_FIELDS) {
-            strncpy(pi->fields[pi->field_count].key, k, 127);
-            pi->fields[pi->field_count].key[127] = 0;
-            strncpy(pi->fields[pi->field_count].val, v, 511);
-            pi->fields[pi->field_count].val[511] = 0;
+            /* strncpy(127) does not terminate unless the source is short;
+             * the value IS a C string later, so copy and cap by hand */
+            size_t kl = strlen(k);
+            if (kl > 127) kl = 127;
+            memcpy(pi->fields[pi->field_count].key, k, kl);
+            pi->fields[pi->field_count].key[kl] = 0;
+            {
+                size_t vl = strlen(v);
+                if (vl > 511) vl = 511;
+                memcpy(pi->fields[pi->field_count].val, v, vl);
+                pi->fields[pi->field_count].val[vl] = 0;
+            }
             pi->field_count++;
         }
         /* map well-known keys */
@@ -154,12 +144,22 @@ static int parse_manifest(const char *path, pack_info *pi)
     return 0;
 }
 
+/* snprintf a path, refusing on truncation. Every one of these strings is
+ * fed to stat()/fopen(): a silently shortened path would open a different
+ * file (or none) and report a wrong verdict. -1 = would not fit. */
+static int pathf(char *dst, size_t cap, const char *fmt, const char *a,
+                 const char *b)
+{
+    int n = b ? snprintf(dst, cap, fmt, a, b) : snprintf(dst, cap, fmt, a);
+    return (n < 0 || (size_t)n >= cap) ? -1 : 0;
+}
+
 /* check if a directory exists and looks like a .codecpack */
 static int is_codecpack(const char *dir)
 {
-    char mp[MAX_PATH];
+    char mp[MAX_PATH + 64];
     struct stat st;
-    snprintf(mp, sizeof mp, "%s/manifest", dir);
+    if (pathf(mp, sizeof mp, "%s/manifest", dir, NULL) != 0) return 0;
     return stat(mp, &st) == 0 && S_ISREG(st.st_mode);
 }
 
@@ -243,6 +243,7 @@ static void cmd_where(void)
     printf("  %s  (system)\n", USR_ROOT);
 }
 
+
 static void cmd_list(const char *filter_family)
 {
     const char *roots[] = {
@@ -261,15 +262,16 @@ static void cmd_list(const char *filter_family)
         struct dirent *de;
         while ((de = readdir(d)) != NULL) {
             if (de->d_name[0] == '.') continue;
-            char full[MAX_PATH];
-            snprintf(full, sizeof full, "%s/%s", roots[r], de->d_name);
+            char full[MAX_PATH + 64];
+            if (pathf(full, sizeof full, "%s/%s", roots[r], de->d_name) != 0)
+                continue;
             struct stat st;
             if (stat(full, &st) != 0 || !S_ISDIR(st.st_mode)) continue;
             if (!is_codecpack(full)) continue;
             pack_info pi;
             memset(&pi, 0, sizeof pi);
-            char mp[MAX_PATH];
-            snprintf(mp, sizeof mp, "%s/manifest", full);
+            char mp[MAX_PATH + 64];
+            if (pathf(mp, sizeof mp, "%s/manifest", full, NULL) != 0) continue;
             parse_manifest(mp, &pi);
             if (filter_family[0] && strcmp(pi.family, filter_family) != 0)
                 continue;
@@ -292,14 +294,15 @@ static void cmd_info(const char *name)
 {
     const char *roots[] = { env_codecpacks(), HOST_ROOT, LEGACY_ROOT, USR_ROOT, NULL };
     for (int r = 0; roots[r]; r++) {
-        char full[MAX_PATH];
-        snprintf(full, sizeof full, "%s/%s.codecpack", roots[r], name);
+        char full[MAX_PATH + 64];
+        if (pathf(full, sizeof full, "%s/%s.codecpack", roots[r], name) != 0)
+            continue;
         struct stat st;
         if (stat(full, &st) != 0 || !S_ISDIR(st.st_mode)) continue;
         pack_info pi;
         memset(&pi, 0, sizeof pi);
-        char mp[MAX_PATH];
-        snprintf(mp, sizeof mp, "%s/manifest", full);
+        char mp[MAX_PATH + 64];
+        if (pathf(mp, sizeof mp, "%s/manifest", full, NULL) != 0) continue;
         if (parse_manifest(mp, &pi) != 0) continue;
         printf("Pack: %s\n", pi.name);
         printf("  source:       %s\n", roots[r]);
@@ -386,7 +389,7 @@ static void verify_pack(const char *name, const char *root)
     if (stat(dir, &st) != 0 || !S_ISDIR(st.st_mode)) return;
 
     /* read existing sha256 file if present */
-    char sha_path[MAX_PATH];
+    char sha_path[MAX_PATH + 16];
     snprintf(sha_path, sizeof sha_path, "%s/sha256", dir);
     FILE *sf = fopen(sha_path, "r");
     char stored_hash[128] = {0};
@@ -407,7 +410,7 @@ static void verify_pack(const char *name, const char *root)
         if (de->d_name[0] == '.') continue;
         if (strcmp(de->d_name, "sha256") == 0) continue;
         char fp[MAX_PATH];
-        snprintf(fp, sizeof fp, "%s/%s", dir, de->d_name);
+        if (pathf(fp, sizeof fp, "%s/%s", dir, de->d_name) != 0) continue;
         struct stat fs;
         if (stat(fp, &fs) != 0 || !S_ISREG(fs.st_mode)) continue;
         FILE *f = fopen(fp, "rb");
@@ -456,8 +459,9 @@ static void cmd_verify(const char *name)
         struct dirent *de;
         while ((de = readdir(d)) != NULL) {
             if (de->d_name[0] == '.') continue;
-            char full[MAX_PATH];
-            snprintf(full, sizeof full, "%s/%s", roots[r], de->d_name);
+            char full[MAX_PATH + 64];
+            if (pathf(full, sizeof full, "%s/%s", roots[r], de->d_name) != 0)
+                continue;
             struct stat st;
             if (stat(full, &st) != 0 || !S_ISDIR(st.st_mode)) continue;
             if (!is_codecpack(full)) continue;
@@ -490,15 +494,16 @@ static void cmd_alternatives(const char *family)
         struct dirent *de;
         while ((de = readdir(d)) != NULL) {
             if (de->d_name[0] == '.') continue;
-            char full[MAX_PATH];
-            snprintf(full, sizeof full, "%s/%s", roots[r], de->d_name);
+            char full[MAX_PATH + 64];
+            if (pathf(full, sizeof full, "%s/%s", roots[r], de->d_name) != 0)
+                continue;
             struct stat st;
             if (stat(full, &st) != 0 || !S_ISDIR(st.st_mode)) continue;
             if (!is_codecpack(full)) continue;
             pack_info pi;
             memset(&pi, 0, sizeof pi);
-            char mp[MAX_PATH];
-            snprintf(mp, sizeof mp, "%s/manifest", full);
+            char mp[MAX_PATH + 64];
+            if (pathf(mp, sizeof mp, "%s/manifest", full, NULL) != 0) continue;
             parse_manifest(mp, &pi);
             /* match by provides OR family */
             int match = 0;
@@ -525,15 +530,15 @@ static void cmd_use(const char *family, const char *pack)
     const char *roots[] = { env_codecpacks(), HOST_ROOT, LEGACY_ROOT, USR_ROOT, NULL };
     int ok = 0;
     for (int r = 0; roots[r]; r++) {
-        char full[MAX_PATH];
+        char full[MAX_PATH + 64];
         snprintf(full, sizeof full, "%s/%s.codecpack", roots[r], pack);
         struct stat st;
         if (stat(full, &st) != 0 || !S_ISDIR(st.st_mode)) continue;
         if (!is_codecpack(full)) continue;
         pack_info pi;
         memset(&pi, 0, sizeof pi);
-        char mp[MAX_PATH];
-        snprintf(mp, sizeof mp, "%s/manifest", full);
+        char mp[MAX_PATH + 64];
+        if (pathf(mp, sizeof mp, "%s/manifest", full, NULL) != 0) continue;
         parse_manifest(mp, &pi);
         if ((pi.provides[0] && strcmp(pi.provides, family) == 0) ||
             (pi.family[0] && strcmp(pi.family, family) == 0)) {

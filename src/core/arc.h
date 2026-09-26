@@ -63,7 +63,7 @@ typedef struct {
 invfs_arc *arc_create(size_t budget_bytes);
 void       arc_destroy(invfs_arc *a);
 
-/* On a hit returns 1 and points *data/*len at the cached content. The pointer
+/* On a hit returns 1 and points *data / *len at the cached content. The pointer
    is BORROWED and stays valid until the next arc_put/arc_invalidate/arc_clear/
    arc_destroy on this cache -- arc_get itself never frees anything, so copying
    out of it before the next mutation is enough. Returns 0 on a miss.

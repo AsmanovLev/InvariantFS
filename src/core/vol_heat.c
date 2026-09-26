@@ -142,14 +142,13 @@ uint16_t heat_session_take(invfs_volume *v, uint64_t inode)
 
 /* ---- the TLV ---- */
 
-/* parse the "invfs.heat" TLV out of a raw record buffer. Fills *r/*w
+/* parse the "invfs.heat" TLV out of a raw record buffer. Fills *r / *w
  * (either may be NULL). 0 = found, -1 = absent/corrupt. */
 int heat_read_tlv(const uint8_t *rec, uint32_t rec_len,
                   uint16_t *r, uint8_t *w)
 {
     const uint8_t *ext, *p;
     size_t elen = 0, rem;
-    size_t ast;
     invfs_meta_ext_hdr h;
 
     if (r) *r = 0;

@@ -1011,7 +1011,6 @@ int vol_delta_truncate(invfs_volume *v, uint64_t delta_end)
         uint64_t seg_bytes = (i == 0) ? v->delta_bump : INVFS_DELTA_SEG_BYTES;
 
         if (offset + seg_bytes > delta_end) {
-            uint64_t keep_bytes = (i == 0) ? v->delta_bump : INVFS_DELTA_SEG_BYTES;
             uint64_t trunc_off;
             invfs_delta_seg_hdr h;
             uint8_t *buf = NULL;

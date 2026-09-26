@@ -1254,7 +1254,7 @@ static uint64_t meta_rewrite(invfs_volume *v, uint64_t inode_id,
                              const uint8_t *newx, size_t newxlen, /* NULL=keep */
                              uint64_t *new_pos_out)
 {
-    uint8_t *oldbuf = NULL, *nurec = NULL, *combo = NULL;
+    uint8_t *oldbuf = NULL, *combo = NULL;
     uint32_t rl;
     char name[256];
     uint64_t old_pos = 0;
@@ -1486,7 +1486,7 @@ int vol_get_xattr(invfs_volume *v, uint64_t inode_id, const char *xn,
 {
     uint8_t *buf = NULL, *x = NULL;
     uint32_t rl;
-    size_t xl = 0, nlen = strlen(xn), rem, got = 0;
+    size_t xl = 0, nlen = strlen(xn), rem;
     const uint8_t *p;
     if (!vlen) return -1;
     /* WP-M7: v3 named xattrs live in the base B+-tree, not the INO2 ext. */
@@ -1511,7 +1511,6 @@ int vol_get_xattr(invfs_volume *v, uint64_t inode_id, const char *xn,
         if (tsz == 0) break;
         memcpy(&nl, p, 2); memcpy(&vl, p + 2 + nl, 2);
         if (nl == nlen && memcmp(p + 2, xn, nlen) == 0) {
-            got = vl;
             if (*vlen == 0) { *vlen = vl; free(buf); return 0; }
             if (*vlen < vl) { free(buf); return -2; }   /* ERANGE-ish */
             memcpy(val, p + 2 + nl + 2, vl);

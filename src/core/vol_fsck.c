@@ -236,7 +236,6 @@ static int fsck_truncate_suffix(invfs_volume *v,
     size_t off, ext_off = 0, ext_len = 0, ent0, body;
     uint32_t i, k;
     uint64_t new_size, newp = 0;
-    int trc = -1;
 
     if (io_seek(&v->io, pos) != 0 || io_read(&v->io, &rh, sizeof rh) != 0)
         return -1;
@@ -1407,7 +1406,11 @@ static int fsck_v3_scan(invfs_volume *v, invfs_fsck_report *rep, int fix)
         return 0;
     }
     if (q.n) {
-        char b[256];
+        /* big enough for two hex keys (3*BT_QUARANTINE_KEY_MAX+1 bytes each)
+         * plus the fixed text and the pba -- at 256 the tail carrying
+         * "QUARANTINED (those keys read EIO...)" was cut off, which is the
+         * part the operator has to read */
+        char b[2048];
         rep->v3_bad_pages += q.bad_pages;
         for (i = 0; i < q.n; i++) {
             char lo[3 * BT_QUARANTINE_KEY_MAX + 1];

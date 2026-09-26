@@ -18,7 +18,7 @@ LICENSE := GPL-2.0-only
 SRCDIRS := $(SRC)/core $(SRC)/codecs $(SRC)/recipes $(SRC)/cli $(SRC)/vendor7z $(SRC)/legacy
 vpath %.c $(SRCDIRS)
 
-CFLAGS  := -std=gnu11 -O2 -MMD -MP -I$(SRC) $(addprefix -I,$(SRCDIRS)) -pthread \
+CFLAGS  := -std=gnu11 -O2 -Wall -MMD -MP -I$(SRC) $(addprefix -I,$(SRCDIRS)) -pthread \
            -DINVFS_EMBED_FLACX -DMINIZ_NO_ZLIB_APIS \
            -DBLAKE3_NO_SSE2 -DBLAKE3_NO_SSE41 -DBLAKE3_NO_AVX2 -DBLAKE3_NO_AVX512 \
            -DINVFS_VERSION_STRING=\"$(VERSION)\" \
