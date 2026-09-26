@@ -1,5 +1,7 @@
 # InvariantFS — native Linux build (incremental).
-# Mirrors tools/build_native.sh flags; `make` builds everything, `make invf-fuse` one target.
+# This Makefile is the ONLY build system: every object list derives from
+# $(CORE), so a new core module cannot silently go missing. `make` builds
+# everything, `make invf-fuse` one target.
 CC      ?= gcc
 SRC     := src
 OUT     := bin
@@ -287,11 +289,15 @@ e2e: all
 
 # WP22b flakey tier: power-loss / unstable-device soak on dm-flakey over a
 # loop device. Standalone on purpose (needs passwordless sudo + dm-flakey,
-# takes minutes) — NOT part of `make e2e`. The script is sudo-aware; run
-# `sudo -v` first if the credential cache may be cold.
+# takes minutes) — NOT part of `make e2e`. It is a LOCKED suite (sudo +
+# losetup + shared /tmp), so it goes through the same runner as `make e2e`
+# and serialises on the global lock instead of clobbering shared /dev/shm and
+# /tmp. No `sudo -v` warm-up here on purpose: the suite uses `sudo -n`
+# throughout and preflights with `sudo -n true` (exit 2 if unavailable),
+# whereas `sudo -v` would demand a password and fail without a tty.
 #   knobs: FLAKEY_SEED=20260831 FLAKEY_SOAK_S=210 FLAKEY_ONLY=<leg>
 flakey:
-	bash tools/test-flakey.sh
+	bash tools/run-e2e.sh tools/test-flakey.sh
 
 # ---- release --------------------------------------------------------------
 # Build the host-installer release artifact consumed by packaging/bootstrap.sh:
