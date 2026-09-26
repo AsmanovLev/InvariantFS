@@ -425,6 +425,166 @@ static void test_wide_records(invfs_volume *v)
     ok(st.height >= 1, "a root page was created for the three pieces");
 }
 
+/* ---- WP89: the SAME three-way split, one level up (into a parent) -------
+ *
+ * test_wide_records pins the child half of the three-way split: a LEAF that
+ * needs three pages. Its tree stays one level deep, so the parent splice in
+ * bt_ins_rec -- the branch that has to make room for TWO new separators in
+ * an already-split internal page -- never runs.
+ *
+ * The production trigger was exactly one level up. The sweep's dedupe pass
+ * stores a fresh recipe per merged file, so the v3 base tree's root is an
+ * internal page with a dozen-odd leaf children; one of those leaves then
+ * three-way splits under a wide Q2R3 chunk and the splice ran. The loop
+ *
+ *     for (j = n; j > i + add; j--) e[j] = e[j - 1];
+ *
+ * is the two-way loop with only its bound generalised, so it moves the
+ * parent's tail up by ONE slot; with add == 2 the topmost destination
+ * (n + add - 1) was never written and kept uninitialised malloc memory. The
+ * page went out as a parent whose LAST child was null: its own CRC and gen
+ * check out, so nothing downstream could tell -- until the next
+ * btree_search for a key past that separator walked into the hole and
+ * returned -1. That is the "vol_v3_recipe_store failed" in the qcow2 e2e's
+ * dedupe pass, the batch flush that followed it, and the non-zero sweep
+ * exit (WP89).
+ *
+ * The shape below reproduces it deterministically. A narrow recipe encodes to
+ * 337 B (37 B of key/len framing + a 300 B value), so 24 of them fill a
+ * dozen-record leaf and split it: the root grows into an internal page with
+ * several leaf children. A wide Q2R3 chunk encodes to 3112 B (36 B key +
+ * 3072 B value), and each chunk is addressed to sort into the middle of a
+ * leaf that already holds records on both sides. The leaf it lands in ends
+ * up as 4 narrow + chunk + 3 narrow = 5491 B in 8 records, and every cut
+ * index leaves an overfull half (s=5 -> left 4480; s=4 -> right 4143; s=6
+ * -> left 4817; s=7 -> left 5154), so bt_split_point returns -1,
+ * bt_split3_point cuts it 4/3/1, and the internal page has to splice TWO
+ * separators. */
+#define WI_RECIPES 24          /* 24 * 337 B: the root leaf splits       */
+#define WI_NARROW  300u        /* value width of a narrow recipe         */
+#define WI_WIDE    3072u       /* value width of a Q2R3 recipe chunk     */
+#define WI_CHUNKS  3           /* wide chunks, spread over the leaves    */
+
+static void test_wide_split_internal(invfs_volume *v)
+{
+    invfs_blkptr root = empty_root();
+    static uint8_t nbuf[WI_RECIPES][WI_NARROW];
+    static uint8_t wbuf[WI_CHUNKS][WI_WIDE];
+    uint8_t kb[CKEY_LEN];
+    bt_stat st;
+    char err[128];
+    int i, upserts_ok = 1, nread = 0;
+
+    printf("wide records: a 3-way split spliced into an internal page\n");
+    for (i = 0; i < WI_RECIPES; i++) {
+        uint16_t j;
+        for (j = 0; j < WI_NARROW; j++)
+            nbuf[i][j] = (uint8_t)((i + 1) * 11u + j);
+    }
+    for (i = 0; i < WI_CHUNKS; i++) {
+        uint16_t j;
+        for (j = 0; j < WI_WIDE; j++)
+            wbuf[i][j] = (uint8_t)((i + 1) * 31u + j);
+    }
+    /* the narrow recipes first: the root leaf overflows and the tree grows
+     * an internal root with several leaf children */
+    for (i = 0; i < WI_RECIPES; i++) {
+        bt_key k;
+        bt_val val;
+        rkey_bytes(kb, RKEY_LEN, (uint32_t)(i + 1));
+        k.p = kb;
+        k.n = RKEY_LEN;
+        val.p = nbuf[i];
+        val.n = WI_NARROW;
+        if (btree_upsert(v, root, k, val, &root) != 0)
+            upserts_ok = 0;
+    }
+    ok(upserts_ok, "every narrow upsert succeeds");
+    ok(btree_check(v, root, &st, NULL, 0) == 0, "structural check before");
+    ok(st.height >= 2, "the root is an internal page (the splice has a parent)");
+
+    /* then one wide chunk per second leaf, addressed so it sorts into the
+     * middle of a leaf that already holds records on both sides. At least
+     * one of the three lands mid-leaf; that one forces the three-way split
+     * the parent has to splice. */
+    upserts_ok = 1;
+    for (i = 0; i < WI_CHUNKS; i++) {
+        bt_key k;
+        bt_val val;
+        rkey_bytes(kb, CKEY_LEN, (uint32_t)(4 + i * 7));
+        k.p = kb;
+        k.n = CKEY_LEN;
+        val.p = wbuf[i];
+        val.n = WI_WIDE;
+        if (btree_upsert(v, root, k, val, &root) != 0)
+            upserts_ok = 0;
+    }
+    ok(upserts_ok, "every wide upsert succeeds (no lost separator)");
+
+    /* The invariant: after an internal page takes a three-way split it still
+     * names every child it held plus the two new pieces, so the whole key
+     * space is reachable and the tree is still a legal B+-tree. A splice that
+     * shifts the tail by one leaves a null child in the published page: the
+     * page CRC and gen are valid, so only the reachability count and a search
+     * past the hole can see it. */
+    err[0] = 0;
+    ok(btree_check(v, root, &st, err, sizeof err) == 0,
+       "structural check after the splices");
+    if (err[0])
+        printf("        btree_check: %s\n", err);
+    ok(st.nkeys == WI_RECIPES + WI_CHUNKS,
+       "every record is reachable from the root after the splices");
+
+    for (i = 0; i < WI_RECIPES; i++) {
+        bt_key k;
+        bt_val val;
+        int found = -1;
+        uint16_t j, bad = 0;
+
+        rkey_bytes(kb, RKEY_LEN, (uint32_t)(i + 1));
+        k.p = kb;
+        k.n = RKEY_LEN;
+        if (btree_search(v, root, k, &val, &found) != 0 || !found ||
+            val.n != WI_NARROW) {
+            ok(0, "narrow recipe survives the splices");
+            continue;
+        }
+        for (j = 0; j < WI_NARROW; j++)
+            if (val.p[j] != nbuf[i][j])
+                bad = 1;
+        if (bad)
+            ok(0, "narrow recipe survives the splices");
+        else
+            nread++;
+    }
+    ok(nread == WI_RECIPES, "every narrow recipe reads back byte-for-byte");
+
+    nread = 0;
+    for (i = 0; i < WI_CHUNKS; i++) {
+        bt_key k;
+        bt_val val;
+        int found = -1;
+        uint16_t j, bad = 0;
+
+        rkey_bytes(kb, CKEY_LEN, (uint32_t)(4 + i * 7));
+        k.p = kb;
+        k.n = CKEY_LEN;
+        if (btree_search(v, root, k, &val, &found) != 0 || !found ||
+            val.n != WI_WIDE) {
+            ok(0, "wide chunk survives the splices");
+            continue;
+        }
+        for (j = 0; j < WI_WIDE; j++)
+            if (val.p[j] != wbuf[i][j])
+                bad = 1;
+        if (bad)
+            ok(0, "wide chunk survives the splices");
+        else
+            nread++;
+    }
+    ok(nread == WI_CHUNKS, "every wide chunk reads back byte-for-byte");
+}
+
 static int verify_model(invfs_volume *v, invfs_blkptr root, uint64_t n)
 {
     uint64_t i;
@@ -775,6 +935,8 @@ int main(int argc, char **argv)
     test_reclaim(v);
     fake_vol_reset(v);
     test_wide_records(v);
+    fake_vol_reset(v);
+    test_wide_split_internal(v);
 
     fake_vol_close(v);
     free(v);

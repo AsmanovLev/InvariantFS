@@ -229,8 +229,16 @@ def tile(blob, n):
 
 
 # content sources: a real busybox C source + a real x86-64 ELF
+# WP89: the walk is sorted, dirs included. os.walk yields directories in
+# readdir order, i.e. in whatever order the tree was created -- a real
+# `git submodule update` checkout and a plain `cp -a` of the same content
+# enumerate differently -- so the chosen `text` was a property of the
+# FILESYSTEM, not of the commit: this suite picked archival/dpkg.c in one
+# worktree and scripts/kconfig/expr.c in another, and the suite's result
+# differed with it. dirs.sort() makes the fixture the same everywhere.
 text = None
-for root, _dirs, files in os.walk(os.environ["REPO"] + "/tools/busybox-src"):  # fixture input (submodule)
+for root, dirs, files in os.walk(os.environ["REPO"] + "/tools/busybox-src"):  # fixture input (submodule)
+    dirs.sort()
     for n in sorted(files):
         if n.endswith(".c"):
             p = os.path.join(root, n)

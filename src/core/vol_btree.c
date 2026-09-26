@@ -176,6 +176,17 @@ static int bt_write(invfs_volume *v, int level, uint64_t gen,
         return -1;
     if (bt_used(level, e, n) > INVFS_BLOCK_SIZE)
         return -1;
+    /* An internal record with no child is a hole in the key space: every
+     * search for a key past that separator walks into it and fails, and it
+     * is unrecoverable once the page is published (the parent's page CRC
+     * and gen both check out). Every internal page in the tree leaves here,
+     * so this is the one place that can refuse the malformed page instead
+     * of sealing it. WP89 shipped the 3-way-split splice below with exactly
+     * such a hole; this turns the next one into a failed insert. */
+    if (level != INVFS_PAGE_LEVEL_LEAF)
+        for (i = 0; i < n; i++)
+            if (e[i].child.pba == 0)
+                return -1;
 
     pba = mbuf_alloc(v, gen);
     if (!pba)
@@ -575,8 +586,19 @@ static int bt_ins_rec(invfs_volume *v, invfs_blkptr node, bt_key key,
                 free(e);
                 return -1;
             }
-            for (j = n; j > i + add; j--)
-                e[j] = e[j - 1];
+            /* The tail moves up by `add` slots -- TWO of them for the
+             * three-way split, not one. The old `for (j = n; j > i + add;
+             * j--)` is the two-way loop generalised by changing only its
+             * bound: it shifts every tail record up by exactly one, so with
+             * add == 2 the topmost destination (n + add - 1) is never
+             * written. That slot kept whatever the malloc gave it, the page
+             * went out as a parent whose LAST child was null, and every
+             * later btree_search for a key past that separator returned -1
+             * (WP89: "vol_v3_recipe_store failed" in the sweep's dedupe
+             * pass, then a non-zero sweep exit). Read the source `add`
+             * slots lower, not one. */
+            for (j = n + add - 1; j > i + add; j--)
+                e[j] = e[j - add];
             e[i + 1].k = add == 2 ? mk.p : rk.p;
             e[i + 1].klen = add == 2 ? mk.n : rk.n;
             e[i + 1].child = add == 2 ? cu.mid : cu.right;

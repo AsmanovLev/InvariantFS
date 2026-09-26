@@ -931,3 +931,116 @@ quarantine table.
 - flakey leg 5 with WP86: the same `drop_writes` window that used to dead-end
   the ladder now converges — `fsck rc=3` (range named) → `fsck -f rc=3`
   (excised) → `fsck final rc=0 / OK`.
+
+---
+
+## WP89 — A three-way B+ tree split dropped a separator, and the e2e gate's colour came from readdir
+
+**Date:** Sep 26, 2026
+**Severity:** High (a published base page with a hole in its key space; the
+whole subtree past that separator is unreachable)
+**Impact:** any Meta-v3 volume whose base tree grows a three-way split under
+an internal page — the shape the Q2R3 chunked recipes and the sweep's dedupe
+pass produce. On `main` it made `tools/test-qcow2.sh` fail in the sweep's
+`[5/7] dedupe` and `[6/7] batches` stages; the same defect was live at
+`bb96b2a`. Introduced by `5979bfd`.
+**CWE:** CWE-787 (read of an uninitialised slot), CWE-672 (operation on an
+uninitialised value).
+
+### Symptom
+
+```
+$ bash tools/run-e2e.sh tools/test-qcow2.sh
+[3/7] transform  100.0%  18/18 ... swept=18 skipped=0 failed=0
+[5/7] dedupe     100.0%  1099/1099 ... failed; sweep data intact
+dedupe: pass failed (sweep results are intact)
+[6/7] batches ... flush failed
+batch flush failed (rc=-1)
+$ echo $?
+1
+```
+
+No `FAIL:` line: the test dies on the sweep's own non-zero exit. The two
+stages that failed are the two that "store a fresh recipe, then delta-put the
+inode row", and both got the same `-1` out of `vol_v3_recipe_store`.
+
+### Root Cause
+
+`5979bfd` taught `bt_ins_rec` to splice a **three**-way child split into an
+internal page (`add == 2`) and generalised the tail-shift loop by changing
+only its bound:
+
+```c
+for (j = n; j > i + add; j--)      /* was: j > i + 1, add was always 1 */
+    e[j] = e[j - 1];
+```
+
+With `add == 1` that is the old loop. With `add == 2` it moves every tail
+record up by exactly **one** slot: the topmost destination `n + add - 1` is
+never written (it keeps uninitialised `malloc` memory) and the records that
+belong at `i+3`, `i+4` each land one slot too low, orphaning the subtree of
+the old `e[i+1]`. The page is then written and published with `n += 2`
+records — a legal page (its CRC and generation both check out) holding an
+illegal child. Every later `btree_search` for a key past that separator walks
+into the hole and returns `-1`.
+
+Instrumented, at the moment of the damage:
+
+```
+ins_split: level=0 n=6 g=3 cut0=1 cut1=5 node=34677 mid=34678 right=34679
+splice:    level=1 i=20 n_old=23 add=2 cu.nptr=3
+bt_write:  NULL CHILD level=1 idx=24/25 gen=91
+bt_search: NULL child at depth=1 (level=1 n=27 ci=26)
+```
+
+### Fix
+
+- `bt_ins_rec` reads the source `add` slots lower, not one:
+  `e[j] = e[j - add]`, `j` from `n + add - 1` down to `i + add`. `add == 1`
+  reduces to the old loop exactly, so the two-way path is unchanged.
+- `bt_write` refuses to seal an internal page holding a record with no child.
+  Every internal page passes through it, so the next hole of this shape
+  becomes a failed insert instead of a published one.
+
+### Why the gate was green in one worktree and red in another
+
+`tools/test-qcow2.sh` picks its text fixture with `os.walk` over
+`tools/busybox-src` and sorted `files` but **unsorted `dirs`**, i.e. in
+readdir order — a property of how the submodule directory was created, not of
+the commit. A real `git submodule update` checkout and a `cp -a` of
+byte-identical content (`diff -r` reports only `.git/index`) enumerate
+differently, so the suite picked `archival/dpkg.c` in one worktree and
+`scripts/kconfig/expr.c` in another. The dpkg.c shape drives a leaf into a
+three-way split; the expr.c shape does not. `dirs.sort()` fixes the fixture
+for every worktree.
+
+This is also why the "ruled out" experiments all came back negative: they
+ran in `/home/user/InvariantFS`, whose `bin/invf-sweep` is built from a source
+that is not the one on disk (`build/obj/invf-sweep.o` is older than
+`tools/invf-sweep.c`, and the binary carries none of the dashboard strings
+the source emits). A `make clean && make` in a worktree is the control that
+makes such an experiment mean anything — 77 of 80 objects are byte-identical
+across the two trees, and the three that differ are `invf-sweep.o` (stale),
+`mkfs.o` and `blkio_test.o` (build-date string only).
+
+### Verification
+
+- `bin/invf-btree_test` (in `make test`): new `test_wide_split_internal`
+  builds 24 narrow recipes into six leaves under an internal root, then drops
+  a 3112-byte chunk into the middle of a leaf that already holds records on
+  both sides — 6388 B in 5 records, no cut index leaving two fitting halves,
+  so the parent must splice two separators. It asserts the invariant: after an
+  internal page absorbs a three-way split it still names every child it held
+  plus the two new pieces, so the whole key space is reachable
+  (`btree_check` reports `nkeys` equal to the record count) and every key
+  reads back byte-for-byte. **23 failures with the fix reverted, 0 with it.**
+  The WP88 test (`test_wide_records`) pins the child half — a leaf that needs
+  three pages — in a tree one level deep, so the parent's splice never ran;
+  that is the coverage gap.
+- `make test`: PASS (4765 btree checks, 0 failures).
+- The fixture that used to fail now sweeps clean: `dedupe 986/986 ...
+  merged=986`, `text batches flushed (6 deferred)`, sweep exit 0.
+- `tools/run-e2e.sh tools/test-qcow2.sh` → `QCOW2 CONTAINERPACK E2E: PASS`,
+  migration leg included, twice. `test-ivpacks.sh`, `test-writepath.sh`:
+  PASS. `make clean && make`: warning-free.
+- See `impl_docs/WP89-dedupe-batch-regression.md`.
