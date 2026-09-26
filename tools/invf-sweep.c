@@ -126,6 +126,306 @@ static int g_progress_tty;
 static int g_progress_line_active;
 static int g_color_mode = -1;
 
+/* ---- live decomposition tree (TTY only) ---------------------------------
+ *
+ * The progress line says "3/7 transform 50%" and nothing about WHAT it is
+ * chewing on. But every name the per-file progress callback sees already IS
+ * the decomposition chain: a nested container is addressed by its ancestry,
+ * "img.qcow2!mbr0001-diskimg!mbr0001-p0001". So the tree needs no new core
+ * plumbing -- split the name on '!' and you have the path.
+ *
+ * Drawn only when the UI owns a TTY. When the output is redirected to a log
+ * g_progress_tty is 0, the panel never renders and the log stays exactly as
+ * before, so scripted runs and benchmarks are unaffected. */
+#define TREE_MAX_DEPTH 10
+
+static char            g_tree[TREE_MAX_DEPTH][288];
+static size_t          g_tree_depth;
+static uint64_t        g_tree_done, g_tree_total;
+static uint64_t        g_tree_leaves;
+static size_t          g_tree_rows;    /* rows the last paint occupied */
+static invfs_volume   *g_tree_vol;
+
+/* remember the chain we were handed; a shorter name is a sibling, so the
+ * path is simply rebuilt from scratch every time */
+static void sw_tree_set(invfs_volume *v, const char *name,
+                        uint64_t done, uint64_t total)
+{
+    const char *p = name;
+    size_t n = 0;
+
+    g_tree_vol = v;
+    g_tree_done = done;
+    g_tree_total = total;
+    if (!name || !name[0]) { g_tree_depth = 0; return; }
+    while (*p && n < TREE_MAX_DEPTH) {
+        const char *e = strchr(p, '!');
+        size_t len = e ? (size_t)(e - p) : strlen(p);
+        if (len >= sizeof g_tree[0]) len = sizeof g_tree[0] - 1;
+        memcpy(g_tree[n], p, len);
+        g_tree[n][len] = '\0';
+        n++;
+        if (!e) break;
+        p = e + 1;
+    }
+    if (*p) snprintf(g_tree[TREE_MAX_DEPTH - 1], sizeof g_tree[0], "...");
+    g_tree_depth = n;
+}
+
+/* ---- live dashboard (opt-in: invf-sweep --dash <file.html>) -------------
+ *
+ * A browser view of what the sweep is doing RIGHT NOW. The design choice that
+ * makes it scale is "focus on the active object": the volume will hold
+ * millions of leaves, but only one decomposition chain is live at a time, so
+ * the dashboard renders that chain plus a short ring of recently finished
+ * containers -- never the whole population.
+ *
+ * The page is a single self-contained HTML file that the sweep rewrites about
+ * once a second. A browser pointed at it re-reads it on the meta-refresh, so
+ * there is no server, no port and no CORS: nothing leaves the machine and the
+ * volume lock is never shared (the sweep owns the volume; the browser only
+ * ever sees this file).
+ */
+#define DASH_RECENT 12
+
+/* defined further down, next to the rest of the UI */
+static uint64_t sw_now_ms(void);
+static void sw_tree_size(const char *name, char *out, size_t cap);
+
+static char     g_dash_path[512];
+static const char *g_volpath;
+static int      g_dash_on;
+static uint64_t g_dash_last_ms;
+static int      g_dash_leaves;
+
+static struct {
+    char     name[256];
+    uint64_t size;
+    int      members;
+    int      depth;
+} g_recent[DASH_RECENT];
+static int g_recent_n;
+
+/* Record a container that just finished decomposing, with the members it
+ * produced. Sizes come from the name index via vol_list_dir, so this costs
+ * one directory listing and no per-node stat. */
+static void sw_dash_note_container(invfs_volume *v, const char *name)
+{
+    invfs_dirent *ents;
+    char pfx[300];
+    int n, i, members = 0, slot;
+    uint64_t total = 0;
+    size_t pl;
+
+    if (!g_dash_on || !v || !name) return;
+    pl = (size_t)snprintf(pfx, sizeof pfx, "%s!mbr", name);
+    if (pl >= sizeof pfx) return;
+    ents = (invfs_dirent *)malloc(sizeof *ents * 4096);
+    if (!ents) return;
+    n = vol_list_dir(v, "/", ents, 4096);
+    for (i = 0; i < n; i++) {
+        if (strncmp(ents[i].name, pfx, pl)) continue;
+        members++;
+        total += ents[i].size;
+    }
+    free(ents);
+    if (!members) return;
+
+    slot = g_recent_n < DASH_RECENT ? g_recent_n++ : DASH_RECENT - 1;
+    if (g_recent_n == DASH_RECENT)
+        memmove(&g_recent[0], &g_recent[1], sizeof g_recent[0] * (DASH_RECENT - 1));
+    snprintf(g_recent[slot].name, sizeof g_recent[slot].name, "%s", name);
+    g_recent[slot].size = total;
+    g_recent[slot].members = members;
+    {
+        const char *p = name;
+        int d = 0;
+        while ((p = strchr(p, '!'))) { d++; p++; }
+        g_recent[slot].depth = d;
+    }
+}
+
+/* ---- HTML emission ---------------------------------------------------- */
+
+static void dash_json_escape(FILE *f, const char *s)
+{
+    for (; s && *s; s++) {
+        unsigned char c = (unsigned char)*s;
+        if (c == '"' || c == '\\') { fputc('\\', f); fputc((int)c, f); }
+        else if (c < 0x20) fprintf(f, "\\u%04x", c);
+        else fputc((int)c, f);
+    }
+}
+
+static void sw_dash_write(invfs_volume *v, const char *volpath)
+{
+    FILE *f;
+    uint64_t now = sw_now_ms();
+    int i;
+
+    if (!g_dash_on) return;
+    if (g_dash_last_ms && now - g_dash_last_ms < 1000) return;
+    g_dash_last_ms = now;
+    f = fopen(g_dash_path, "w");
+    if (!f) return;
+
+    fprintf(f, "<!doctype html><meta charset=utf-8>");
+    fprintf(f, "<meta http-equiv=refresh content=1>");
+    fprintf(f, "<title>InvariantFS sweep</title><style>");
+    fprintf(f,
+      ":root{--bg:#0d1117;--fg:#c9d1d9;--dim:#6e7681;--ac:#58a6ff;"
+      "--ok:#3fb950;--warn:#d29922;--raw:#8b949e;--txt:#79c0ff;--bin:#d2a8ff}");
+    fprintf(f,
+      "body{background:var(--bg);color:var(--fg);font:13px/1.55 ui-monospace,"
+      "SFMono-Regular,Menlo,monospace;margin:0;padding:18px 22px}");
+    fprintf(f,
+      "h1{font-size:15px;font-weight:600;margin:0 0 2px;letter-spacing:.4px}");
+    fprintf(f,
+      ".sub{color:var(--dim);font-size:11.5px;margin-bottom:16px}");
+    fprintf(f,
+      ".bar{height:5px;background:#21262d;border-radius:3px;overflow:hidden;"
+      "margin:5px 0 16px}");
+    fprintf(f,
+      ".bar>i{display:block;height:100%;background:var(--ac);"
+      "transition:width .4s}");
+    fprintf(f,
+      ".act{border-left:2px solid var(--ac);padding:7px 12px;margin:0 0 16px;"
+      "background:#161b22;border-radius:0 5px 5px 0}");
+    fprintf(f,
+      ".n{color:var(--ac)}.d{color:var(--dim)}.s{color:var(--ok)}");
+    fprintf(f,
+      ".row{display:flex;justify-content:space-between;gap:14px}");
+    fprintf(f,
+      ".lbl{color:var(--dim);font-size:11px;text-transform:uppercase;"
+      "letter-spacing:.9px;margin:14px 0 5px}");
+    fprintf(f,
+      ".e{display:flex;align-items:center;gap:9px;padding:1.5px 0}");
+    fprintf(f,
+      ".nm{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}");
+    fprintf(f,
+      ".g{display:inline-block;width:7px;height:7px;border-radius:2px;"
+      "flex:0 0 auto}");
+    fprintf(f,
+      "hr{border:0;border-top:1px solid #21262d;margin:16px 0}");
+    fprintf(f,"</style><body>");
+
+    fprintf(f, "<h1>InvariantFS &mdash; live sweep</h1><div class=sub>");
+    dash_json_escape(f, volpath ? volpath : "");
+    fprintf(f, "</div>");
+
+    /* stage bar */
+    {
+        double pct = g_ui.goal ? (double)g_ui.done / (double)g_ui.goal : 0.0;
+        if (pct > 1.0) pct = 1.0;
+        fprintf(f,
+            "<div class=row><span><b>[%u/%u]</b> %s</span>"
+            "<span class=d>%llu/%llu &middot; %llus</span></div>",
+            g_ui.current, g_ui.total, g_ui.name ? g_ui.name : "",
+            (unsigned long long)g_ui.done, (unsigned long long)g_ui.goal,
+            (unsigned long long)((now - g_ui.start_ms) / 1000));
+        fprintf(f, "<div class=bar><i style=width:%.1f%%></i></div>",
+                pct * 100.0);
+    }
+
+    /* the active chain: the whole point -- what is being decomposed, and how
+     * deep the nesting currently goes */
+    if (g_tree_depth) {
+        char path[TREE_MAX_DEPTH][288];
+        size_t k;
+        fprintf(f, "<div class=act>");
+        for (k = 0; k < g_tree_depth; k++) {
+            char sz[24] = "";
+            if (k == 0) snprintf(path[k], sizeof path[k], "%s", g_tree[k]);
+            else snprintf(path[k], sizeof path[k], "%s!%s", path[k - 1], g_tree[k]);
+            sw_tree_size(path[k], sz, sizeof sz);
+            fprintf(f,
+                "<div class=row><span class=nm style=\"padding-left:%zupx\">"
+                "%s%s</span><span class=d>%s</span></div>",
+                k * 14, k ? k + 1 == g_tree_depth ? "`&nbsp; " : "|&nbsp; " : "",
+                g_tree[k], sz);
+        }
+        fprintf(f,
+            "<div class=sub style=margin:6px 0 0\">depth <b>%zu</b>"
+            " &middot; segments %llu/%llu &middot; leaves %d</div>",
+            g_tree_depth, (unsigned long long)g_tree_done,
+            (unsigned long long)g_tree_total, g_dash_leaves);
+        fprintf(f, "</div>");
+    }
+
+    /* recently finished containers */
+    if (g_recent_n) {
+        fprintf(f, "<div class=lbl>decomposed &mdash; deepest first</div>");
+        for (i = g_recent_n - 1; i >= 0; i--) {
+            double mib = (double)g_recent[i].size / 1048576.0;
+            fprintf(f,
+                "<div class=e><span class=g style=background:var(--txt)>"
+                "</span><span class=nm style=\"padding-left:%dpx\">%s"
+                "</span><span class=d>%d members &middot; %.1f MiB</span></div>",
+                g_recent[i].depth * 10, g_recent[i].name,
+                g_recent[i].members, mib);
+        }
+    }
+    fprintf(f, "<hr><div class=sub>auto-refresh 1s &middot; "
+               "focus: active object &middot; no data leaves this machine</div>");
+    fclose(f);
+}
+
+static void sw_tree_size(const char *name, char *out, size_t cap)
+{
+    uint64_t sz = 0;
+    out[0] = '\0';
+    if (!g_tree_vol) return;
+    if (vol_stat_full(g_tree_vol, name, NULL, &sz, NULL) != 0 || !sz) return;
+    if (sz >= 1073741824ull)
+        snprintf(out, cap, "%.2fG", (double)sz / 1073741824.0);
+    else if (sz >= 1048576ull)
+        snprintf(out, cap, "%.1fM", (double)sz / 1048576.0);
+    else if (sz >= 1024ull)
+        snprintf(out, cap, "%.1fK", (double)sz / 1024.0);
+    else
+        snprintf(out, cap, "%lluB", (unsigned long long)sz);
+}
+
+/* Erase the stage line AND the block under it, leaving the cursor on the
+ * stage line's row. The cursor sits one row below the block after a paint. */
+static void sw_tree_erase(void)
+{
+    int i;
+    if (!g_progress_tty) { g_tree_rows = 0; return; }
+    for (i = 0; i <= (int)g_tree_rows + 1; i++) {
+        fputs("\r\033[2K", stderr);
+        if (i <= (int)g_tree_rows) fputs("\033[1A", stderr);
+    }
+    g_tree_rows = 0;
+}
+
+/* Paint the block under the already-printed stage line. */
+static void sw_tree_render(void)
+{
+    char path[TREE_MAX_DEPTH][288];
+    size_t i;
+
+    if (!g_progress_tty || !g_tree_depth) return;
+    for (i = 0; i < g_tree_depth; i++) {
+        if (i == 0)
+            snprintf(path[i], sizeof path[i], "%s", g_tree[i]);
+        else
+            snprintf(path[i], sizeof path[i], "%s!%s", path[i - 1], g_tree[i]);
+    }
+    for (i = 0; i < g_tree_depth; i++) {
+        char sz[24] = "";
+        sw_tree_size(path[i], sz, sizeof sz);
+        fprintf(stderr, "  %s%-46s %8s%s\n",
+                i ? "  " : "", path[i], sz, "");
+    }
+    fprintf(stderr, "  %-*s %8s   depth %zu, segments %llu/%llu, leaves %llu\n",
+            46, "", "", g_tree_depth,
+            (unsigned long long)g_tree_done,
+            (unsigned long long)g_tree_total,
+            (unsigned long long)g_tree_leaves);
+    g_tree_rows = g_tree_depth + 1;
+}
+
 static int sw_color_enabled(void)
 {
     if (g_color_mode >= 0) return g_color_mode;
@@ -243,9 +543,12 @@ static void sw_stage_line(uint64_t now, const char *detail, int force,
         if (n < 0 || (size_t)n >= sizeof line - used) return;
     }
 #ifndef _WIN32
+    if (g_dash_on) sw_dash_write(g_tree_vol, g_volpath);
     if (g_progress_tty) {
+        sw_tree_erase();
         if (g_progress_line_active) fputs("\r\033[2K", stderr);
         fputs(line, stderr);
+        sw_tree_render();
         g_progress_line_active = 1;
         return;
     }
@@ -289,6 +592,8 @@ static void sw_progress_suspend(void)
 {
 #ifndef _WIN32
     if (g_progress_tty && g_progress_line_active) {
+        sw_tree_erase();
+        if (g_progress_line_active) fputs("\r\033[2K", stderr);
         fputc('\n', stderr);
         g_progress_line_active = 0;
     }
@@ -466,7 +771,7 @@ static void sw_file_progress(void *user, const char *name,
     uint64_t completed = g_ui.done;
     double fraction = (double)completed;
 
-    (void)user;
+    sw_tree_set((invfs_volume *)user, name, done, total);
     if (total) fraction += (double)done / (double)total;
     if (base) base++;
     else base = name ? name : "";
@@ -972,6 +1277,10 @@ int main(int argc, char **argv)
                 "           [--no-realize] (keep the previous checkpoint live;\n"
                 "                         blocks stay held until the next sweep)\n"
                 "           [--log <file>] (append combined stdout/stderr)\n"
+                "           [--dash <file.html>] (write a live browser view of\n"
+                "                         the active decomposition to <file.html>;\n"
+                "                         the sweep rewrites it ~1x/sec, open it\n"
+                "                         in a browser -- no server, no network)\n"
                 "           [--color auto|always|never] (default: auto; NO_COLOR honored)\n"
                 "  --fast      cheap pass: RAW files take the generic\n"
                 "              per-segment recompress only (no classification,\n"
@@ -1016,7 +1325,10 @@ int main(int argc, char **argv)
     img = argv[1];
     for (i = 2; i < argc; i++) {
         const char *a = argv[i];
-        if (strcmp(a, "--dry-run") == 0) {
+        if (strcmp(a, "--dash") == 0 && i + 1 < argc) {
+            snprintf(g_dash_path, sizeof g_dash_path, "%s", argv[++i]);
+            g_dash_on = 1;
+        } else if (strcmp(a, "--dry-run") == 0) {
             dry = 1;
         } else if (strcmp(a, "--realize") == 0) {
             realize = 1;
@@ -1146,6 +1458,7 @@ int main(int argc, char **argv)
      * env: a default run must produce byte-identical LOGS too. */
     {
         int prof_from_env = getenv("INVFS_PROFILE") != NULL;
+        g_volpath = img;
         vol = vol_open(img, &err);
         if (!vol) {
             fprintf(stderr, "cannot open volume %s (err %d)\n", img, err);
@@ -1545,8 +1858,13 @@ int main(int argc, char **argv)
                 goto progress;
             }
             sw_stage_update((uint64_t)i, (uint64_t)count, "transforming");
+            /* show what we are about to chew on, before any per-segment
+             * callback arrives: a container decomposition reports none */
+            sw_tree_set(vol, names[i], 0, 0);
+            sw_stage_fraction((double)i, (uint64_t)i, (uint64_t)count,
+                              names[i]);
             rc = vol_sweep_one_ex(vol, inodes[i], names[i],
-                                  sw_file_progress, NULL);
+                                  sw_file_progress, vol);
             if (rc < 0 && getenv("INVFS_DEBUG_PACKS"))
                 /* a 50k-file sweep says nothing about WHICH file failed */
                 fprintf(stderr, "sweep: %s: FAILED (rc=%d)\n",
@@ -1577,6 +1895,7 @@ int main(int argc, char **argv)
             else if (rc >= 100) {
                 const invfs_codec *pc = invfs_codec_by_algo((uint32_t)(rc - 100));
                 swept++;
+                sw_dash_note_container(vol, names[i]);
                 if (!invfs_sweep_ui_active())
                     printf("  %s: %s (codecpack)\n", names[i],
                            pc ? pc->name : "unknown-pack");

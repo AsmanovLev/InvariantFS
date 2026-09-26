@@ -1322,11 +1322,7 @@ static int vol_sweep_one_v3(invfs_volume *v, uint64_t inode_id,
 
     /* class policy: a stamp means drained-or-gated (subset of the WP10
      * table that needs no v2 record surgery) */
-    { int _gc = vol_get_class(v, inode_id, &ccls, &calgo, &cgen);
-      if (getenv("INVFS_DEBUG_PACKS"))
-        fprintf(stderr, "[cls] %s rc=%d cls=%u algo=%u gen=%u\n",
-                name ? name : "?", _gc, ccls, calgo, cgen);
-      if (_gc == 0 && ccls != 0) {
+    if (vol_get_class(v, inode_id, &ccls, &calgo, &cgen) == 0 && ccls != 0) {
         switch (ccls) {
         case INVFS_CLASS_UNCOMPRESSIBLE:
             if (invfs_registry_generation() <= cgen)
@@ -1385,7 +1381,6 @@ static int vol_sweep_one_v3(invfs_volume *v, uint64_t inode_id,
         default:
             return 0;           /* GENERIC/CODEC/TEXT/...: already swept */
         }
-      }
     }
 
     if (vol_v3_inode_get(v, inode_id, &in) != 1)
