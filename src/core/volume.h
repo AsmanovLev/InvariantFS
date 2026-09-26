@@ -917,6 +917,14 @@ int  vol_degraded(const invfs_volume *v);
 /* 1 = the metadata mirror devices disagree (a resync runs at the next
  * flush, newest state wins). */
 int  vol_mirror_stale(const invfs_volume *v);
+/* WP99: ask the DEVICES which of the two is behind, from the on-disk
+ * signals only (DEVT sync_seq, and the block-0 RT30 root generation on
+ * Meta-v3). `stale` receives the losing device (0/1) or -1 when the
+ * devices agree or cannot be compared; `why` names the signal that fired
+ * (or why there is nothing to compare). Returns 0 when the comparison
+ * happened, -1 otherwise. The mount path and the reporting tools both use
+ * it, so they can never disagree about whether the mirror is safe. */
+int  vol_mirror_compare(invfs_volume *v, int *stale, const char **why);
 /* tiering (dev0 acceleration copies): live copy count + their block total;
  * for tools/tests. first_cpba/first_dpba optionally take one sample. */
 uint64_t vol_tier_count(invfs_volume *v, uint64_t *blocks_out,

@@ -436,6 +436,30 @@ int main(int argc, char **argv)
                 }
             }
         }
+        /* WP99: the deep read walks ONE copy of the metadata, so it cannot
+         * see a two-device volume whose other device is behind. That is the
+         * shape of the worst case: the copy walked here reads perfectly
+         * while the dev0 mirror holds a rolled-back root descriptor, and a
+         * mount that serves it adopts that generation and drops the delta
+         * records past it -- silently, on both devices. So ask the devices
+         * (the same call the mount path makes) and make a stale mirror
+         * fatal here too: `0 corrupt` must not be printed over it. Counted
+         * into `bad` BEFORE the summary line, so the number and the reason
+         * are on screen together. */
+        if (vol_ndev(vol) == 2) {
+            int stale = -1;
+            const char *why = NULL;
+            if (vol_mirror_compare(vol, &stale, &why) == 0 && stale >= 0) {
+                printf("  MIRROR STALE: dev%d's block 0 is behind "
+                       "(%s) -- the reads above came from the newer copy; a "
+                       "mount serving dev%d would adopt a rolled-back root "
+                       "and lose writes made since\n",
+                       stale, why ? why : "block 0", stale);
+                bad++;
+            } else {
+                printf("mirror: in sync (both devices)\n");
+            }
+        }
         printf("deep: %llu files ok, %llu corrupt, %llu bytes verified\n",
                (unsigned long long)live, (unsigned long long)bad,
                (unsigned long long)total_bytes);

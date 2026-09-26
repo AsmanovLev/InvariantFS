@@ -21,23 +21,26 @@
 #          fsck report works, fsck -f refused; reattach -> RW resumes
 #   leg 7  mirror resync: rewind dev0's block 0 (stale sync_seq) -> open
 #          detects divergence, reads fail over, next flush resyncs (newest
-#          state wins, logged) -> spans byte-identical again
+#          state wins, logged) -> spans byte-identical again. Also the
+#          safety net: fsck and verify NAME the stale device and exit
+#          nonzero, and the file written after the rewind reads bit-exact
 #   leg 8  resize: grow lands on the tail device (dev1); shrink refused
 #   leg 9  fsck clean on both legs + a single-device smoke (compat)
 #
-# Legs 1-6 and 9 pass on BOTH formats. Legs 7-8 are red on Meta-v3 and NOT
-# because of anything this suite owns: on v3 vol_flush returns right after
-# the bitmap flush (volume.c:2435), so the whole two-device commit tail --
-# vol_write_devt with its sync_seq bump, and mirror_resync -- never runs.
-# Two consequences, both measured (impl_docs/AUDIT.md, E2E-BASELINE item (4)):
-# the DEVT sync_seq is frozen at its mkfs value forever, so the staleness
-# DETECTION at open can never fire; and the rewind this leg performs rolls
-# dev0's block 0 back, which on v3 carries the RT30 root descriptor at 0x9D0,
-# so it silently damages the volume with nothing to detect or repair it --
-# which is what leg 8's "verify --deep reports corruption" actually is (a
-# clean volume resizes and verifies 0 corrupt). The degraded -f refusal in
-# leg 6 is refused on v2 only: src/cli/fsck.c's v3 branch returns at line 182
-# before the WP25 `fix && vol_degraded(v)` check at line 188.
+# All nine legs pass on BOTH formats. Legs 7-8 were red on Meta-v3 because
+# the whole two-device commit tail -- vol_write_devt with its sync_seq bump,
+# and mirror_resync -- sat in the v2 half of vol_flush, which the VOLF_V3
+# branch returns out of (volume.c, the early return WP98 already had to fix
+# once for the tier/RAW-mirror indexes). The DEVT sync_seq was therefore
+# frozen at its mkfs value for the life of every v3 volume, so the staleness
+# DETECTION could never fire; and leg 7's rewind, which rolls dev0's block 0
+# back, carries the RT30 root descriptor at 0x9D0, so with nothing to detect
+# or repair it the next publish published from a rolled-back generation and
+# dropped every delta record past it -- on BOTH devices, since the metadata
+# span is mirrored write-through. That is what leg 8's corruption was, and
+# invf-fsck reported OK throughout. WP99 wires the tail into the v3 flush,
+# makes the two staleness signals (DEVT sync_seq, block-0 root generation)
+# both readable, and puts the verdict in fsck + verify.
 #
 # Run from the repo root after `make`:  bash tools/run-e2e.sh tools/test-multidev.sh
 set -e
@@ -322,13 +325,68 @@ cmp -s "$WORK/orig/hot.bin" "$WORK/out/hot3.bin" || fail "reattach hot read"
 echo "reattach: RW resumed, writes + reads bit-exact"
 
 echo "== leg 7: mirror resync (stale dev0) =="
+# WP99: the DEVT sync_seq is the protocol's own staleness sequence, bumped
+# once per two-device flush. It is asserted here MOVING, because it used to
+# be frozen at its mkfs value on Meta-v3: the bump lived in the v2 tail of
+# vol_flush, which the VOLF_V3 branch returns out of (the same early-return
+# trap WP98 hit for the tier/RAW-mirror indexes). A frozen sequence means
+# the divergence DETECTION below can never fire -- and the rewind this leg
+# performs rolls dev0's block 0 back, which on v3 carries the RT30 root
+# descriptor at 0x9D0. So it is a real loss of the newest committed
+# generation, and with neither detection nor repair the next publish on the
+# stale copy dropped every delta record past it -- on BOTH devices, because
+# the metadata span is mirrored write-through, with invf-fsck still walking
+# the copy it could reach and printing OK.
+devt_seq() {
+    python3 -c "import struct,sys; print(struct.unpack_from('<Q', open(sys.argv[1],'rb').read(4096), 0x2A0+0x20)[0])" "$1"
+}
+# the root generation (block 0 + 0x24) is the SECOND staleness signal: it
+# moves on every publish, so it sees a divergence even on a volume whose
+# DEVT never moved (an image written before the bump was wired, or a dev0
+# that lost only the root region of block 0).
+rt30_seq() {
+    python3 -c "import struct,sys; print(struct.unpack_from('<Q', open(sys.argv[1],'rb').read(4096), 0x9D0+0x24)[0])" "$1"
+}
+S0=$(devt_seq "$D0")
+[ "$S0" = "$(devt_seq "$D1")" ] || fail "devices disagree before leg 7"
 dd if="$D0" of=b0save.wp25 bs=4096 count=1 status=none
 echo leg7 > leg7.txt
 $B/invf-cp "$D0" leg7.txt leg7.txt > /dev/null 2>&1 || fail "cp leg7"
+S1=$(devt_seq "$D0")
+[ "$S1" -gt "$S0" ] || fail "DEVT sync_seq frozen across a write (dev0 $S0 -> $S1)"
+[ "$S1" = "$(devt_seq "$D1")" ] || fail "sync_seq not equal on both devices after a write"
+[ "$(rt30_seq "$D0")" = "$(rt30_seq "$D1")" ] || fail "root generation differs between devices after a write"
+echo "sync_seq advances across writes and is equal on both devices ($S0 -> $S1)"
+# rewind dev0's block 0 to the generation from before leg7.txt
 dd if=b0save.wp25 of="$D0" bs=4096 count=1 conv=notrunc status=none
 rm -f b0save.wp25
 $B/invf-ls "$D0" > "$WORK/rs.log" 2>&1 || fail "stale open"
 grep -q "stale" "$WORK/rs.log" || { cat "$WORK/rs.log"; fail "staleness not detected"; }
+grep -q "dev0 is stale" "$WORK/rs.log" \
+    || { cat "$WORK/rs.log"; fail "the stale device was not named"; }
+# SAFETY NET. The scan walks ONE copy of the metadata, so it cannot see the
+# other device; before WP99 that made the report a lie -- it walked the
+# newer copy, found nothing wrong with it and printed OK, over a volume
+# whose newest file was one write from being unrecoverable. A stale mirror
+# gets its own verdict and a nonzero exit, and the report says WHICH device
+# and WHICH signal.
+if $B/invf-fsck "$D0" > "$WORK/rs-fsck.log" 2>&1; then
+    fail "invf-fsck reported success on a stale mirror"
+fi
+grep -q "MIRROR STALE" "$WORK/rs-fsck.log" \
+    || { cat "$WORK/rs-fsck.log"; fail "invf-fsck did not name the stale mirror"; }
+grep -q "dev0 is STALE" "$WORK/rs-fsck.log" \
+    || { cat "$WORK/rs-fsck.log"; fail "invf-fsck did not say which device is stale"; }
+if $B/invf-verify "$D0" --deep > "$WORK/rs-verify.log" 2>&1; then
+    fail "invf-verify --deep reported success on a stale mirror"
+fi
+grep -q "MIRROR STALE" "$WORK/rs-verify.log" \
+    || { cat "$WORK/rs-verify.log"; fail "invf-verify did not name the stale mirror"; }
+echo "stale mirror DETECTED and REPORTED (fsck + verify, both nonzero)"
+# the file written AFTER the rewind snapshot must read back bit-exact
+# through the failover -- this is the file that read CORRUPT before WP99
+$B/invf-cat "$D0" leg7.txt "$WORK/out/rs-leg7.txt" 2>/dev/null || fail "read leg7.txt"
+cmp -s leg7.txt "$WORK/out/rs-leg7.txt" || fail "leg7.txt not bit-exact after the failover"
 echo y > y.txt
 $B/invf-cp "$D0" y.txt y.txt > "$WORK/rs2.log" 2>&1 || fail "resync flush"
 grep -q "mirror resync" "$WORK/rs2.log" || { cat "$WORK/rs2.log"; fail "resync did not run"; }
@@ -337,7 +395,37 @@ cmp <(head -c $(( (META_HI + 1) * 4096 )) "$D0") \
     || fail "mirror spans differ after resync"
 $B/invf-stats "$D0" | grep -q "mirror *: in sync" \
     || fail "mirror not back in sync"
-rm -f leg7.txt y.txt
+# ... and after the repair both tools are clean again, with no corrupt file
+$B/invf-verify "$D0" --deep > "$WORK/rs-verify2.log" 2>&1 || fail "verify after resync"
+grep -q "0 corrupt" "$WORK/rs-verify2.log" || fail "corrupt file after resync"
+grep -qE "mirror: +in sync" "$WORK/rs-verify2.log" \
+    || { cat "$WORK/rs-verify2.log"; fail "mirror still stale after resync"; }
+$B/invf-fsck "$D0" > "$WORK/rs-fsck2.log" 2>&1 || fail "fsck after resync"
+grep -qE "mirror: +in sync" "$WORK/rs-fsck2.log" \
+    || { cat "$WORK/rs-fsck2.log"; fail "fsck: mirror still stale after resync"; }
+# The repair verb the MIRROR STALE report points at has to be `invf-fsck -f`,
+# so -f has to actually resync. It did not at first: the resync is a
+# flush-time action and a pass that finds no structural damage never
+# flushes, so the report's own advice was a lie -- the mirror stayed stale
+# and the pass still exited 3. Roll dev0's block 0 back once more and gate
+# the whole repair round trip.
+dd if="$D0" of=b0save.wp25 bs=4096 count=1 status=none
+echo leg7b > leg7b.txt
+$B/invf-cp "$D0" leg7b.txt leg7b.txt > /dev/null 2>&1 || fail "cp leg7b"
+dd if=b0save.wp25 of="$D0" bs=4096 count=1 conv=notrunc status=none
+rm -f b0save.wp25
+$B/invf-fsck "$D0" -f > "$WORK/rs-fsckf.log" 2>&1 || {
+    cat "$WORK/rs-fsckf.log"; fail "fsck -f on a stale mirror did not succeed"; }
+grep -q "RESYNCED by this pass" "$WORK/rs-fsckf.log" \
+    || { cat "$WORK/rs-fsckf.log"; fail "fsck -f did not report the resync it performed"; }
+grep -q "^OK$" "$WORK/rs-fsckf.log" \
+    || { cat "$WORK/rs-fsckf.log"; fail "fsck -f verdict not OK after the resync"; }
+cmp <(head -c $(( (META_HI + 1) * 4096 )) "$D0") \
+    <(head -c $(( (META_HI + 1) * 4096 )) "$D1") \
+    || fail "mirror spans differ after the fsck -f resync"
+$B/invf-cat "$D0" leg7b.txt "$WORK/out/rs-leg7b.txt" 2>/dev/null || fail "read leg7b.txt"
+cmp -s leg7b.txt "$WORK/out/rs-leg7b.txt" || fail "leg7b.txt not bit-exact after the fsck -f resync"
+rm -f leg7.txt y.txt leg7b.txt
 echo "stale dev0 detected, reads failed over, resync newest-wins + byte-identical"
 
 echo "== leg 8: resize (grow the tail device only) =="
@@ -348,22 +436,53 @@ grep -q "invf-resize: OK" "$WORK/resize.log" || fail "resize not OK"
 [ "$(stat -c %s "$D1")" -gt "$SZ1_BEFORE" ] || fail "dev1 did not grow"
 # dev0's size must not move
 [ "$(stat -c %s "$D0")" = "134217728" ] || fail "dev0 changed size"
+# WP99: this `0 corrupt` used to be red on Meta-v3, and it was never a
+# resize bug -- leg 7's rewind had already rolled dev0's block 0 back, so
+# the RT30 root descriptor inside it was a rolled-back generation and the
+# next write published from it, dropping the delta records past it. Leg 7
+# now repairs that divergence and gates on it, so what remains here is the
+# resize itself: the grown geometry must leave BOTH devices agreeing, or the
+# next mount would see a fresh divergence.
+[ "$(devt_seq "$D0")" = "$(devt_seq "$D1")" ] \
+    || fail "resize left the DEVT sync_seq unequal between the devices"
+[ "$(rt30_seq "$D0")" = "$(rt30_seq "$D1")" ] \
+    || fail "resize left the root generation unequal between the devices"
 $B/invf-verify "$D0" --deep > "$WORK/verify2.log" 2>&1 || fail "verify after resize"
 grep -q "0 corrupt" "$WORK/verify2.log" || fail "corrupt after resize"
+grep -qE "mirror: +in sync" "$WORK/verify2.log" \
+    || { cat "$WORK/verify2.log"; fail "resize desynchronised the mirror"; }
 if $B/invf-resize "$D0" 256M > "$WORK/shrink.log" 2>&1; then
     fail "two-device shrink succeeded?!"
 fi
 grep -q "grows only the TAIL device" "$WORK/shrink.log" \
     || fail "shrink refusal not loud"
-echo "resize: growth landed on dev1, reads intact, shrink refused loudly"
+echo "resize: growth landed on dev1, reads intact, mirror still in sync, shrink refused loudly"
 
 echo "== leg 9: fsck clean + single-device compat smoke =="
 $B/invf-fsck "$D0" > "$WORK/fsck1.log" 2>&1 || fail "fsck"
 grep -q "OK" "$WORK/fsck1.log" || { cat "$WORK/fsck1.log"; fail "fsck not clean"; }
 $B/invf-fsck "$D0" -f > "$WORK/fsckf.log" 2>&1 || fail "fsck -f"
 grep -q "OK" "$WORK/fsckf.log" || { cat "$WORK/fsckf.log"; fail "fsck -f not clean"; }
-$B/invf-fsck "$E0" > "$WORK/fsck-e.log" 2>&1 || fail "fsck E"
+# WP99: the E volume must be fsck'd with ITS OWN device 1. The export at the
+# top of this script names D1, and leg 5 scopes E1 to a subshell, so this
+# line used to hand invf-fsck the D volume's device 1 as the E volume's
+# mirror. Nothing noticed: the foreign table failed devt_sane, the mount
+# fell into the "no valid DEVT, treat it as stale" branch, and the report
+# walked E0 and printed OK -- so this gate never tested E's mirror at all.
+# It is now paired correctly (and a wrong pairing is refused outright, see
+# wp25_open_dev1), and the mirror line is asserted like the D volume's.
+if INVFS_DEV1=$E1 $B/invf-fsck "$E0" > "$WORK/fsck-e.log" 2>&1; then :; else
+    cat "$WORK/fsck-e.log"; fail "fsck E"; fi
 grep -q "OK" "$WORK/fsck-e.log" || { cat "$WORK/fsck-e.log"; fail "fsck E not clean"; }
+grep -qE "mirror: +in sync" "$WORK/fsck-e.log" \
+    || { cat "$WORK/fsck-e.log"; fail "fsck E: mirror not in sync"; }
+# ... and the mis-pairing is refused, loudly, instead of quietly adopted
+if INVFS_DEV1=$D1 $B/invf-fsck "$E0" > "$WORK/fsck-e-wrong.log" 2>&1; then
+    fail "invf-fsck accepted the WRONG device 1 for the E volume?!"
+fi
+grep -q "not this volume's device 1" "$WORK/fsck-e-wrong.log" \
+    || { cat "$WORK/fsck-e-wrong.log"; fail "wrong-device-1 refusal not loud"; }
+echo "fsck E clean with ITS OWN device 1; a foreign device 1 is refused"
 # single-device: no DEVT, the pre-WP25 layout byte-for-byte
 $B/invf-mkfs "$S0" 0.0625 > /dev/null 2>&1 || fail "single-device mkfs"
 if dd if="$S0" bs=1 skip=672 count=4 status=none | grep -q DEVT; then

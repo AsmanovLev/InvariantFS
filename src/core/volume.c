@@ -614,21 +614,30 @@ uint32_t devt_crc(const invfs_devt *d)
 }
 
 
-/* Persist the in-memory DEVT by read-modify-write of block 0, mirrored by
- * the mux to every writable (non-skipped) device. */
+/* Persist the in-memory DEVT, mirrored by the mux to every writable
+ * (non-skipped) device.
+ *
+ * WP99: this wrote the WHOLE of block 0 back (read-modify-write of 4 KiB)
+ * with only the 188 DEVT bytes patched. Block 0 is the one region every
+ * v3 publisher rewrites: the RT30 root descriptor (0x9D0) is stored there
+ * by mbuf_rt30_store / mbuf_root_publish, and the SPT0 save-point
+ * descriptor (0xA00) likewise. A read-modify-write of the block is
+ * therefore a lost-update against any of them, and the DEVT bump is about
+ * to run on every Meta-v3 flush (WP99), which turns that race from a rare
+ * interleaving into a per-flush one. The DEVT occupies 0x2A0..0x35C, which
+ * overlaps neither the superblock (0x00..0x90) nor the RT30/SPT0
+ * descriptors, so writing just the descriptor is equivalent for the DEVT
+ * and cannot clobber its neighbours. */
 int vol_write_devt(invfs_volume *v)
 {
-    uint8_t blk[INVFS_BLOCK_SIZE];
     invfs_devt t;
     if (v->ndev != 2) return 0;
     t = v->devt;
     memcpy(t.magic, "DEVT", 4);
     t.crc32c = 0;
     t.crc32c = devt_crc(&t);
-    if (vmux_seek(v, 0) != 0 || vmux_read(v, blk, sizeof blk) != 0)
-        return -1;
-    memcpy(blk + INVFS_DEVT_OFF, &t, sizeof t);
-    if (vmux_seek(v, 0) != 0 || vmux_write(v, blk, sizeof blk) != 0)
+    if (vmux_seek(v, INVFS_DEVT_OFF) != 0 ||
+        vmux_write(v, &t, sizeof t) != 0)
         return -1;
     v->devt = t;
     return 0;
@@ -711,11 +720,173 @@ static int mirror_resync(invfs_volume *v)
 }
 
 
+/* The two-device commit tail (WP25 rule 5), in one place so both flush
+ * paths use the same protocol: repair a stale mirror (newest state wins),
+ * then bump the DEVT sync_seq so the next open can certify that both
+ * devices carry the same state.
+ *
+ * WP99: this used to be the inline tail of the v2 path only. vol_flush's
+ * VOLF_V3 branch returns before it, so on Meta-v3 the DEVT sync_seq was
+ * frozen at its mkfs value for the life of the volume -- which made BOTH
+ * halves of the mirror protocol inert: the staleness DETECTION could never
+ * fire, and a divergence detected some other way (a dev0 barrier failure,
+ * which does bump the DEVT from inside vmux_barrier) was never repaired.
+ * The failure was silent and it was data loss: rewinding dev0's block 0
+ * rolls the RT30 root descriptor (0x9D0, inside block 0 on v3) back, the
+ * stale generation is adopted as live, and the next publish drops every
+ * delta record written past it -- on BOTH devices, because the mirror is
+ * write-through -- while invf-fsck still walked the tree it could reach
+ * and printed OK.
+ *
+ * The v3 caller runs this AFTER the barrier that made the published root
+ * durable, so the DEVT bump certifies a generation both devices hold. It is
+ * deliberately NOT accompanied by a bare vol_write_sb here: on v3 the
+ * superblock's live neighbour in block 0 is the RT30 root, which the
+ * publish path already stores and barriers, and v->sb.state is the v2
+ * crash-state machine, whose v3 activation is a separate question. The
+ * block-0 image that reaches the devices does get rewritten every flush
+ * anyway, because the DEVT lives in it. */
+static int vol_commit_mirror(invfs_volume *v)
+{
+    if (v->ndev != 2 || v->degraded)
+        return 0;
+    if (v->resync_pending)
+        mirror_resync(v);   /* failures keep the loser skipped */
+    v->devt.sync_seq++;
+    if (vol_write_devt(v) != 0) {
+        vol_io_error_latch(v, "DEVT write");
+        return -1;
+    }
+    return 0;
+}
+
+
 int vol_ndev(const invfs_volume *v)     { return v ? v->ndev : 0; }
 int vol_degraded(const invfs_volume *v) { return v && v->degraded; }
 int vol_mirror_stale(const invfs_volume *v)
 {
     return v && (v->resync_pending || v->dev_skip[0] || v->dev_skip[1]);
+}
+
+
+/* ================= WP99: which device is stale? =================
+ * The two-device volumes keep their metadata span mirrored write-through,
+ * so "is one of them behind?" has to be answerable from the devices
+ * themselves, without trusting any in-RAM state. Two independent signals
+ * exist, and neither is sufficient alone:
+ *
+ *   DEVT.sync_seq   the protocol's own sequence, bumped once per
+ *                   two-device flush (vol_commit_mirror). It is blind on
+ *                   any volume whose flushes never reached the bump --
+ *                   which, before WP99, was EVERY Meta-v3 volume, because
+ *                   vol_flush returned out of its VOLF_V3 branch above the
+ *                   tail that holds the bump. The DEVT on such a volume
+ *                   still carries its mkfs value forever, so a rewound (or
+ *                   half-lost) dev0 block 0 brings back a matching
+ *                   sync_seq and the comparison sees nothing. It is also
+ *                   blind in the other direction: a dev0 that lost only the
+ *                   0x9D0..0xA00 region of block 0 keeps an intact DEVT.
+ *
+ *   block-0 gen     the RT30 root generation at INVFS_RT30_OFF: monotone,
+ *                   rewritten on every publish, and on Meta-v3 it is the
+ *                   ONLY content of block 0 that orders two copies of the
+ *                   same volume against each other. It does not exist on
+ *                   v2 (the area is reserved-zero), so a signal that is
+ *                   absent on this format is skipped, not treated as a
+ *                   mismatch.
+ *
+ * A divergence is declared when EITHER available signal says so. DEVT wins
+ * when the two disagree: a dev0 whose DEVT is behind is provably behind
+ * the last commit even if its RT30 looks current, which is the case a
+ * partial block-0 loss produces.
+ *
+ * This is the ONE place the question is asked. The mount decision
+ * (wp25_open_dev1) and the reporting verdict (invf-fsck, invf-verify) both
+ * call it, so the two can never disagree about whether a volume is safe.
+ *
+ * `stale` (out) is the LOSING device, 0 or 1, or -1 when the devices
+ * agree / the volume is not comparable. `why` (out) names the signal that
+ * fired, or the reason the devices could not be compared. Returns 0 when
+ * the two devices were compared, -1 when they could not be (single
+ * device, degraded, a device absent, or an io error). */
+static void mirror_signal(const uint8_t *blk, unsigned long long *devt_seq,
+                          int *devt_ok, unsigned long long *gen, int *gen_ok)
+{
+    const invfs_devt *d = (const invfs_devt *)(blk + INVFS_DEVT_OFF);
+    const invfs_rt30 *r = (const invfs_rt30 *)(blk + INVFS_RT30_OFF);
+
+    *devt_ok = 0;
+    *gen_ok = 0;
+    *devt_seq = 0;
+    *gen = 0;
+    if (memcmp(d->magic, "DEVT", 4) == 0 && d->version == INVFS_DEVT_VERSION
+        && devt_crc(d) == d->crc32c) {
+        *devt_seq = d->sync_seq;
+        *devt_ok = 1;
+    }
+    if (memcmp(r->magic, "RT30", 4) == 0 && r->version == INVFS_RT30_VERSION
+        && invfs_crc32c(r, offsetof(invfs_rt30, crc32c)) == r->crc32c) {
+        *gen = r->seq;
+        *gen_ok = 1;
+    }
+}
+
+
+int vol_mirror_compare(invfs_volume *v, int *stale, const char **why)
+{
+    uint8_t b0[INVFS_BLOCK_SIZE], b1[INVFS_BLOCK_SIZE];
+    unsigned long long d0, d1, g0, g1;
+    int dok0, dok1, gok0, gok1;
+
+    if (stale) *stale = -1;
+    if (why)   *why = NULL;
+    if (!v) return -1;
+    /* Not comparable: a single-device volume has no mirror, and a degraded
+     * mount (dev0 absent) has nothing to compare dev1 against. */
+    if (v->ndev != 2 || v->degraded || !v->dev0_present ||
+        !v->io_open[0] || !v->io_open[1]) {
+        if (why) *why = "not a two-device mount";
+        return -1;
+    }
+    /* Read each device DIRECTLY. vmux_pread would hide exactly what is being
+     * looked for: it serves the metadata span from dev0 unless dev0 is
+     * already known to be skipped. */
+    if (blkio_pread(&v->io, 0, b0, sizeof b0) != 0 ||
+        blkio_pread(&v->io2, 0, b1, sizeof b1) != 0) {
+        if (why) *why = "block 0 unreadable on a device";
+        return -1;
+    }
+    mirror_signal(b0, &d0, &dok0, &g0, &gok0);
+    mirror_signal(b1, &d1, &dok1, &g1, &gok1);
+
+    if (dok0 && dok1 && d0 != d1) {
+        if (stale) *stale = d0 < d1 ? 0 : 1;
+        if (why) *why = "DEVT sync_seq";
+        return 0;
+    }
+    if (dok0 != dok1) {
+        /* One device carries a valid device table and the other does not:
+         * the one without it cannot be the newer copy. */
+        if (stale) *stale = dok0 ? 1 : 0;
+        if (why) *why = "DEVT presence";
+        return 0;
+    }
+    if (gok0 && gok1 && g0 != g1) {
+        if (stale) *stale = g0 < g1 ? 0 : 1;
+        if (why) *why = "block-0 root generation";
+        return 0;
+    }
+    if (gok0 != gok1) {
+        if (stale) *stale = gok0 ? 1 : 0;
+        if (why) *why = "block-0 root descriptor presence";
+        return 0;
+    }
+    if (!dok0 && !gok0 && !gok1) {
+        if (why) *why = "neither device carries a DEVT or an RT30 root";
+        return -1;
+    }
+    if (why) *why = "in sync";
+    return 0;
 }
 
 
@@ -773,8 +944,7 @@ static int wp25_open_dev1(invfs_volume *v, const char *hint)
         return -1;
     }
     if (blkio_pread(&v->io2, INVFS_DEVT_OFF, &d2, sizeof d2) != 0 ||
-        memcmp(d2.magic, "DEVT", 4) != 0 || devt_crc(&d2) != d2.crc32c ||
-        !devt_sane(&d2, &v->sb)) {
+        memcmp(d2.magic, "DEVT", 4) != 0 || devt_crc(&d2) != d2.crc32c) {
         /* no readable table on dev1: treat it as stale (dev0's table is
          * authoritative); the next flush resyncs dev1's metadata span
          * wholesale, which rewrites its block 0 */
@@ -785,31 +955,59 @@ static int wp25_open_dev1(invfs_volume *v, const char *hint)
         v->dev_skip[1] = 1;    /* metadata writes skip dev1 until resync */
         return 0;
     }
+    /* WP99: a SELF-VALID device table that is not this volume's device 1 is
+     * a different volume (or a device that was re-purposed), not a stale
+     * copy of ours. That distinction is load-bearing, because the "treat it
+     * as stale" branch above ends in mirror_resync, which copies this
+     * volume's whole metadata span over the loser: accepting a foreign
+     * device here means the first write DESTROYS it. The check used to be
+     * `!devt_sane(...)` folded into the branch above, so a wrong
+     * INVFS_DEV1 -- which is an operator pointing the tool at the wrong
+     * image, and which tools/test-multidev.sh leg 9 was doing to the E
+     * volume -- mounted happily and quietly overwrote the other volume.
+     * A stale device 1 still carries a valid table for THIS volume, which
+     * is exactly what identifies it, so nothing legitimate is refused. */
+    if (!devt_sane(&d2, &v->sb)) {
+        fprintf(stderr, "vol_open: %s: %s carries a valid device table, but "
+                "it is not this volume's device 1 (geometry %llu+%llu blocks, "
+                "uuid %02x%02x%02x%02x vs this volume's %llu+%llu, "
+                "%02x%02x%02x%02x); refusing to mount rather than resync over "
+                "it -- check INVFS_DEV1 / the DEVT device-1 hint\n",
+                v->path, d1,
+                (unsigned long long)d2.dev_blocks[0],
+                (unsigned long long)d2.dev_blocks[1],
+                d2.vol_uuid[0], d2.vol_uuid[1], d2.vol_uuid[2], d2.vol_uuid[3],
+                (unsigned long long)v->devt.dev_blocks[0],
+                (unsigned long long)v->devt.dev_blocks[1],
+                v->sb.uuid[0], v->sb.uuid[1], v->sb.uuid[2], v->sb.uuid[3]);
+        return -1;
+    }
     if (d2.dev_blocks[0] != v->devt.dev_blocks[0] ||
         d2.dev_blocks[1] != v->devt.dev_blocks[1]) {
         fprintf(stderr, "vol_open: %s: device 1 DEVT disagrees with "
                 "device 0 on the geometry; refusing to mount\n", v->path);
         return -1;
     }
-    if (d2.sync_seq != v->devt.sync_seq) {
-        if (d2.sync_seq > v->devt.sync_seq) {
-            /* dev1 is newer: dev0 is the stale one */
+    /* WP99: the divergence decision now comes from vol_mirror_compare,
+     * which asks both devices for the two staleness signals and declares a
+     * divergence when EITHER available one fires. The v2 behaviour is a
+     * strict subset of it: the DEVT sync_seq branch below used to be the
+     * ONLY check, so on Meta-v3 -- where no flush ever bumped sync_seq, see
+     * vol_commit_mirror -- it could never fire, and a rewound dev0 block 0
+     * was adopted as the live generation. The RT30 root generation is the
+     * signal that sees it. */
+    {
+        int stale = -1;
+        const char *why = NULL;
+        if (vol_mirror_compare(v, &stale, &why) == 0 && stale >= 0) {
             v->resync_pending = 1;
-            v->resync_winner = 1;
-            v->dev_skip[0] = 1;
-            fprintf(stderr, "vol_open: metadata mirror divergence: dev0 "
-                    "is stale (seq %llu < %llu); reads fail over to dev1, "
+            v->resync_winner = stale ^ 1;
+            if (stale == 0)
+                v->dev_skip[0] = 1;
+            fprintf(stderr, "vol_open: metadata mirror divergence: dev%d "
+                    "is stale (%s disagrees); reads fail over to dev%d, "
                     "resync at the next flush\n",
-                    (unsigned long long)v->devt.sync_seq,
-                    (unsigned long long)d2.sync_seq);
-        } else {
-            v->resync_pending = 1;
-            v->resync_winner = 0;
-            fprintf(stderr, "vol_open: metadata mirror divergence: dev1 "
-                    "is stale (seq %llu < %llu); resync at the next "
-                    "flush\n",
-                    (unsigned long long)d2.sync_seq,
-                    (unsigned long long)v->devt.sync_seq);
+                    stale, why ? why : "block 0", stale ^ 1);
         }
     }
     return 0;
@@ -2455,6 +2653,14 @@ int vol_flush(invfs_volume *v)
                 return -1;
             }
         }
+        /* WP99: ... and the two-device commit tail lived in that same v2
+         * tail, so the DEVT sync_seq never moved and neither the staleness
+         * detection nor the resync ever ran here. It runs after the barrier
+         * above, which is what makes the ordering right: the published root
+         * (RT30, inside block 0) is durable on both devices BEFORE the
+         * sync_seq bump certifies it. */
+        if (vol_commit_mirror(v) != 0)
+            return -1;
         return 0;
     }
     /* WP25: same for a degraded mount (dev0 absent): vol_mark_dirty
@@ -2538,15 +2744,8 @@ int vol_flush(invfs_volume *v)
     /* WP25: the mirror staleness resync runs inside the first flush that
      * follows the open that detected it (newest state wins), then the
      * DEVT sync_seq bump certifies both devices carry this state. */
-    if (v->ndev == 2 && !v->degraded) {
-        if (v->resync_pending)
-            mirror_resync(v);   /* failures keep the loser skipped */
-        v->devt.sync_seq++;
-        if (vol_write_devt(v) != 0) {
-            vol_io_error_latch(v, "DEVT write");
-            return -1;
-        }
-    }
+    if (vol_commit_mirror(v) != 0)
+        return -1;
     return 0;
 }
 
