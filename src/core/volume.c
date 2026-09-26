@@ -2439,6 +2439,22 @@ int vol_flush(invfs_volume *v)
         }
         if (vmux_barrier(v, "v3 bitmap") < 0)
             return -1;
+        /* WP98: this early return is also why the WP25 tier/RAW-mirror
+         * indexes never reached their owner records on v3 (the sync sits
+         * in the v2 tail below), which is what left both indexes RAM-only
+         * across a reopen. The ordering rule the tail documents -- the
+         * copies' maps durable BEFORE the owner record that names them --
+         * needs no journal here: the owner blob is published after the
+         * barrier above, so the copy blocks it names are already durable,
+         * and publish_blob_inode CRC-frames the index bytes (a torn
+         * flush leaves the previous index, never a half one). */
+        if (v->ndev == 2 && !v->degraded &&
+            (v->rawm_dirty || v->tier_dirty)) {
+            if (wp25_owner_sync(v) != 0) {
+                vol_io_error_latch(v, "mirror/tier owner sync (v3)");
+                return -1;
+            }
+        }
         return 0;
     }
     /* WP25: same for a degraded mount (dev0 absent): vol_mark_dirty
