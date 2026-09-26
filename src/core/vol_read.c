@@ -1476,6 +1476,7 @@ static int v3_read_range(invfs_volume *v, uint64_t inode_id, uint64_t offset,
     size_t n_ents = 0, i, got = 0;
     uint8_t *blob = NULL, *all = NULL;
     size_t blen = 0, all_len = 0;
+    int container_no_map = 0;
     int rc;
 
     rc = vol_v3_inode_get(v, inode_id, &in);
@@ -1523,6 +1524,15 @@ static int v3_read_range(invfs_volume *v, uint64_t inode_id, uint64_t offset,
                     free(blob);
                     return cpack_map_read(v, iname, inode_id, in.size, offset, (uint8_t *)buf, len);
                 }
+                /* The map is GONE (deleted, or a pre-v1.1 sweep never wrote
+                 * one): there is no local splice unit left, so this ranged
+                 * read has to fall back to the pack's whole-file rebuild
+                 * exec. algo_is_whole_file() deliberately says NO for a
+                 * seekable container, so without this the entry falls
+                 * through to the per-segment decoder and dies on
+                 * "unexpected algo <container id>". */
+                if (pd && pd->is_container)
+                    container_no_map = 1;
             }
         }
     }
@@ -1576,8 +1586,10 @@ static int v3_read_range(invfs_volume *v, uint64_t inode_id, uint64_t offset,
         }
 
         /* whole-file unit (codecpack / container): no bounded segment
-         * decode exists -- rebuild once and slice the requested window */
-        if (algo_is_whole_file(e->algo)) {
+         * decode exists -- rebuild once and slice the requested window.
+         * container_no_map: a seekable container whose !mbrmap is gone has
+         * the same shape (vol_read_inode runs the pack's rebuild exec). */
+        if (container_no_map || algo_is_whole_file(e->algo)) {
             if (!all) {
                 if (vol_read_inode(v, inode_id, 0, &all, &all_len) != 0) {
                     free(blob);
