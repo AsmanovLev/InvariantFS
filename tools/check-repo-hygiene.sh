@@ -96,6 +96,14 @@ while IFS= read -r -d '' md; do
         case "$ref" in
             *'*'*|*.md.bak) continue ;;    # globs, backups: not literal
         esac
+        # build outputs: a doc may legitimately name an artifact that is
+        # produced by a build, not tracked in git. Skipping the artifact
+        # EXTENSIONS covers the class without a per-file allowlist that
+        # rots the moment someone builds a new one.
+        case "$ref" in
+            *.gz|*.bz2|*.xz|*.zst|*.img|*.cpio|*.o|*.a|*.so|*.pyc|*.ko|*.iso)
+                continue ;;
+        esac
         # final segment must look like a file (has an extension); this skips
         # identifier chains such as `vol_get/set/remove_xattr`, which are not
         # paths. A missing extensionless dir is a known blind spot.

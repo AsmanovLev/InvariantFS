@@ -50,8 +50,13 @@ for f in "${files[@]}"; do
             gsub(/[\042\047]/, "", tag)       # bare and quoted tags both occur
             if (tag !~ /^[A-Za-z_][A-Za-z0-9_]*$/) next
             idx++
-            file = sprintf("%s/%s.%d.py", out, src, idx)
-            gsub(/[^A-Za-z0-9_.-]/, "_", file)
+            # sanitise the NAME only, then join: sanitising the whole path
+            # also rewrote the slashes in $tmp, which turned the target into
+            # a relative path and dropped every extracted block into the
+            # repository root (391 of them got committed).
+            name = sprintf("%s.%d.py", src, idx)
+            gsub(/[^A-Za-z0-9_.-]/, "_", name)
+            file = out "/" name
             body = (line ~ /<<-/) ? 1 : 0
             print file > (out "/.blocks")
             print body > (out "/.tabs")

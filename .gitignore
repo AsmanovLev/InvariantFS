@@ -56,3 +56,7 @@ impl_docs/doxygen/
 # LSP compilation database and editor configs
 compile_commands.json
 .clangd
+
+# tools/lint-test-heredocs.sh scratch (should never land here, but if its
+# path handling regresses again, do not let the blocks reach the index)
+_tmp_tmp.*.py

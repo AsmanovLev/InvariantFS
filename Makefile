@@ -230,6 +230,7 @@ test: $(OUT)/invf-arctest $(OUT)/invf-blkio_test $(OUT)/invf-codec_test \
       $(OUT)/invf-btree_repair_test \
       $(OUT)/invf-symlink_v3_test $(OUT)/invf-large_file_v3_test $(OUT)/invf-dedupe_v3_test \
       $(OUT)/invf-deflate_repro_test $(OUT)/invf-plugin_host_test $(OUT)/invf-plugin_mt_test \
+      $(OUT)/invf-window_test \
       $(OUT)/invf-ivpack_packs_test $(OUT)/invf-mkfs $(OUT)/invf-cp \
       $(OUT)/invf-sweep plugin-so $(CORE_OBJS_FILE)
 	$(OUT)/invf-arctest
@@ -252,6 +253,11 @@ test: $(OUT)/invf-arctest $(OUT)/invf-blkio_test $(OUT)/invf-codec_test \
 	$(OUT)/invf-ivpack_packs_test
 	bash tools/test-sweep-ui.sh
 	bash tools/lint-test-heredocs.sh
+	bash tools/check-repo-hygiene.sh
+
+# repo hygiene is also a standalone gate, for when you do not want a rebuild
+check-hygiene:
+	bash tools/check-repo-hygiene.sh
 
 # e2e tier: tmpfs images under /dev/shm; test-jxl needs cjxl/djxl installed
 e2e: all
