@@ -7,9 +7,87 @@
 
 /* ---- PNG Repack ---- */
 
-/* zlib inflate wrapper used by pngx (windowBits=15: zlib wrapper) */
+/* WP91: say WHY the lane refused, under INVFS_DEBUG.
+ *
+ * Every refusal here is a `return 0`, and a `return 0` from this function
+ * reaches the caller as one indistinguishable GENERIC_GUARD{PNGR} stamp. The
+ * lane therefore has a dozen distinct refusal reasons and one visible
+ * symptom, which is how "the decode-back pixel check never ran" (a parse
+ * failure) got reported for a long time as "the deflate search found
+ * nothing" -- a search that was never reached. The helper's own stderr
+ * cannot cover this half: cjxl exiting 0 and djxl exiting 0 is exactly the
+ * case where the refusal is ours, not the tool's.
+ *
+ * INVFS_DEBUG is the existing convention (vol_sweep.c, vol_tier.c, ...), so
+ * this adds no new knob and no behaviour change: unset, it is a single
+ * getenv() the compiler already had to emit for the rest of the file. */
+static void png_refuse(const char *name, const char *why)
+{
+    if (getenv("INVFS_DEBUG"))
+        fprintf(stderr, "[vol] PNGR %s: refused (%s); original kept RAW\n",
+                name ? name : "?", why);
+}
+
+/* zlib inflate wrapper used by pngx (windowBits=-15: a PNG IDAT is a RAW
+ * deflate stream -- see png_inflate() for why the framing is negotiated) */
 static int png_inflate(const unsigned char *in, size_t in_len,
                        unsigned char **out, size_t *out_len);
+
+/* Build spool.png: the ORIGINAL filtered rows, deflated at level 0
+ * (STORED), so cjxl sees the pixels with no second compressor in between.
+ *
+ * Shared by both halves of vol_create_png_file() on purpose. The two copies
+ * this replaces had already drifted once: dfc2b24 fixed the windowBits in
+ * the _WIN32 copy and not the POSIX one, which is the whole reason the lane
+ * still refused every file afterwards. One copy cannot drift.
+ *
+ * wbits chooses the IDAT framing (see the cjxl/djxl loop in the POSIX half
+ * for why it is a parameter and not a constant). 0 on failure. */
+static int png_spool_build(const pngx_info *info, int wbits,
+                           uint8_t **out, size_t *out_len)
+{
+    z_stream s;
+    uint8_t *stream, *spool, ihdr[13];
+    size_t bound, cap, o = 0, slen;
+    int r;
+
+    *out = NULL;
+    *out_len = 0;
+    if (!info || !info->filtered || !info->filtered_len) return -1;
+    memset(&s, 0, sizeof s);
+    if (deflateInit2(&s, 0, Z_DEFLATED, wbits, 8, Z_DEFAULT_STRATEGY) != Z_OK)
+        return -1;
+    bound = deflateBound(&s, (uLong)info->filtered_len);
+    stream = (uint8_t *)malloc(bound);
+    if (!stream) { deflateEnd(&s); return -1; }
+    s.next_in = info->filtered;
+    s.avail_in = (uInt)(info->filtered_len > 0x7FFFFFFF ? 0x7FFFFFFF
+                                                        : info->filtered_len);
+    s.next_out = stream;
+    s.avail_out = (uInt)bound;
+    r = deflate(&s, Z_FINISH);
+    slen = (size_t)s.total_out;
+    deflateEnd(&s);
+    if (r != Z_STREAM_END) { free(stream); return -1; }
+
+    wr32v(ihdr, info->width);
+    wr32v(ihdr + 4, info->height);
+    ihdr[8] = info->bitdepth; ihdr[9] = info->colortype; ihdr[10] = 0;
+    ihdr[11] = 0; ihdr[12] = info->interlace;
+    cap = 8 + 25 + slen + 12;
+    spool = (uint8_t *)malloc(cap);
+    if (!spool) { free(stream); return -1; }
+    memcpy(spool + o, "\x89PNG\r\n\x1a\n", 8); o += 8;
+    if (pngx_chunk_append(&spool, &o, &cap, (const uint8_t *)"IHDR", ihdr, 13) ||
+        pngx_chunk_append(&spool, &o, &cap, (const uint8_t *)"IDAT", stream, slen) ||
+        pngx_chunk_append(&spool, &o, &cap, (const uint8_t *)"IEND", NULL, 0)) {
+        free(stream); free(spool); return -1;
+    }
+    free(stream);
+    *out = spool;
+    *out_len = o;
+    return 0;
+}
 
 #ifndef _WIN32
 /* read a whole tool-output file into a fresh buffer; 0 on success.
@@ -129,25 +207,86 @@ int mz_tdefl_compress(const uint8_t *in, size_t in_len,
 }
 
 
+/* True when `in` starts with a valid zlib (RFC 1950) header, i.e. the stream
+ * is zlib-WRAPPED rather than a bare deflate stream. */
+static int png_idat_is_zlib_wrapped(const unsigned char *in, size_t in_len)
+{
+    unsigned cmf, flg;
+    if (!in || in_len < 2) return 0;
+    cmf = in[0]; flg = in[1];
+    return (cmf & 0x0F) == 8 && ((cmf << 8) | flg) % 31 == 0 && !(flg & 0x20);
+}
+
 static int png_inflate(const unsigned char *in, size_t in_len,
                        unsigned char **out, size_t *out_len)
 {
     z_stream s;
-    memset(&s, 0, sizeof s);
-    inflateInit2(&s, 15);
-    size_t cap = in_len * 8 + 4096;
-    uint8_t *buf = (uint8_t *)malloc(cap);
-    if (!buf) { inflateEnd(&s); return -1; }
-    s.next_in = (Bytef *)in;
-    s.avail_in = (uInt)(in_len > 0x7FFFFFFF ? 0x7FFFFFFF : in_len);
-    s.next_out = buf;
-    s.avail_out = (uInt)(cap > 0x7FFFFFFF ? 0x7FFFFFFF : cap);
-    int r = inflate(&s, Z_FINISH);
-    inflateEnd(&s);
-    if (r != Z_STREAM_END) { free(buf); return -1; }
-    *out = buf;
-    *out_len = (size_t)s.total_out;
-    return 0;
+    /* A PNG IDAT is a RAW deflate stream: the PNG spec's compression method 0
+     * is DEFLATE with no zlib wrapper, and the recipe rebuilds the file at
+     * windowBits -15, so -15 is the framing this lane stores.
+     *
+     * But the stream we are handed is not always the file's own IDAT: it is
+     * also djxl's PNG, read back for the decode-back pixel guard, and a
+     * given host's tools do not agree on the framing (libjxl writes a
+     * zlib-wrapped IDAT with a 32 KB window, i.e. header 0x78 0x9c, or an
+     * 8 KB one, 0x68 0x05). Refusing the wrapped case here took the lane's
+     * own round-trip guard away -- the guard was never comparing pixels, and
+     * the refusal it produced read as "JXL changed the pixels".
+     *
+     * So: try the spec framing first, then zlib. This is a parse tolerance
+     * only. A wrapped IDAT on the INPUT is still refused, by name, further
+     * up -- the recipe has no room to record which framing it must rebuild
+     * with, so the stored shape is the raw one only. */
+    int wbits[2];
+    int nw = 0, i;
+
+    wbits[nw++] = -15;
+    if (png_idat_is_zlib_wrapped(in, in_len)) wbits[nw++] = 15;
+
+    for (i = 0; i < nw; i++) {
+        int r;
+        size_t cap;
+        uint8_t *buf;
+
+        memset(&s, 0, sizeof s);
+        if (inflateInit2(&s, wbits[i]) != Z_OK) return -1;
+        /* The output has to be able to GROW. Sizing the buffer from in_len
+         * (the old in_len * 8 + 4096) silently capped how well an IDAT was
+         * allowed to compress: djxl's decode of a smooth gradient produced a
+         * 31-byte IDAT for 9264 bytes of filtered rows, which is 299:1, and
+         * the guess was short by 5 KB -- so the guard read djxl's PNG as
+         * unparseable and the lane blamed the pixels. Same bound, same
+         * symptom, for any highly compressible PNG. */
+        cap = in_len * 8 + 4096;
+        buf = (uint8_t *)malloc(cap);
+        if (!buf) { inflateEnd(&s); return -1; }
+        s.next_in = (Bytef *)in;
+        s.avail_in = (uInt)(in_len > 0x7FFFFFFF ? 0x7FFFFFFF : in_len);
+        for (;;) {
+            s.next_out = buf + s.total_out;
+            s.avail_out = (uInt)(cap - s.total_out);
+            r = inflate(&s, Z_NO_FLUSH);
+            if (r == Z_STREAM_END) {
+                *out = buf;
+                *out_len = (size_t)s.total_out;
+                inflateEnd(&s);
+                return 0;
+            }
+            if (r != Z_OK) break;              /* wrong framing, or corrupt */
+            if (s.avail_out != 0) break;       /* input exhausted, no EOB */
+            if (cap > (size_t)1 << 31) break;  /* refuse an absurd image */
+            {
+                size_t ncap = cap * 2;
+                uint8_t *nb = (uint8_t *)realloc(buf, ncap);
+                if (!nb) { free(buf); inflateEnd(&s); return -1; }
+                buf = nb;
+                cap = ncap;
+            }
+        }
+        free(buf);
+        inflateEnd(&s);
+    }
+    return -1;
 }
 
 
@@ -184,43 +323,8 @@ uint64_t vol_create_png_file(invfs_volume *v, const char *name,
     /* spool.png: original filtered rows with STORED IDAT (level 0) */
     uint8_t *spool = NULL;
     size_t spool_len = 0;
-    {
-        z_stream s;
-        memset(&s, 0, sizeof s);
-        /* -15: a PNG IDAT is a RAW deflate stream, not a zlib-wrapped one.
-         * With windowBits 15 the spool carried a 2-byte header + adler32
-         * that no PNG reader accepts. */
-        if (deflateInit2(&s, 0, Z_DEFLATED, -15, 8, Z_DEFAULT_STRATEGY) != Z_OK) {
-            pngx_free(&info); return 0;
-        }
-        size_t bound = deflateBound(&s, (uLong)info.filtered_len);
-        uint8_t *stream = (uint8_t *)malloc(bound);
-        s.next_in = info.filtered;
-        s.avail_in = (uInt)(info.filtered_len > 0x7FFFFFFF ? 0x7FFFFFFF : info.filtered_len);
-        s.next_out = stream;
-        s.avail_out = (uInt)bound;
-        int r = deflate(&s, Z_FINISH);
-        size_t slen = (size_t)s.total_out;
-        deflateEnd(&s);
-        if (r != Z_STREAM_END) { free(stream); pngx_free(&info); return 0; }
-        /* build spool png: sig + IHDR + IDAT(stored) + IEND */
-        uint8_t ihdr[13];
-        wr32v(ihdr, info.width);
-        wr32v(ihdr + 4, info.height);
-        ihdr[8] = info.bitdepth; ihdr[9] = info.colortype; ihdr[10] = 0;
-        ihdr[11] = 0; ihdr[12] = info.interlace;
-        size_t cap = 8 + 25 + slen + 12;
-        spool = (uint8_t *)malloc(cap);
-        if (!spool) { free(stream); pngx_free(&info); return 0; }
-        size_t o = 0;
-        memcpy(spool + o, "\x89PNG\r\n\x1a\n", 8); o += 8;
-        if (pngx_chunk_append(&spool, &o, &cap, (const uint8_t *)"IHDR", ihdr, 13) ||
-            pngx_chunk_append(&spool, &o, &cap, (const uint8_t *)"IDAT", stream, slen) ||
-            pngx_chunk_append(&spool, &o, &cap, (const uint8_t *)"IEND", NULL, 0)) {
-            free(stream); free(spool); pngx_free(&info); return 0;
-        }
-        spool_len = o;
-        free(stream);
+    if (png_spool_build(&info, -15, &spool, &spool_len) != 0) {
+        pngx_free(&info); return 0;
     }
 
     /* cjxl: spool.png -> JXL (lossless, effort 7) */
@@ -289,6 +393,13 @@ uint64_t vol_create_png_file(invfs_volume *v, const char *name,
      * "system zlib". Nothing wrote one while the lane was refusing every
      * file, so the exposure is limited to volumes built with an older
      * binary that DID transcode PNGs. */
+    uint8_t enc = 0, level = 0, mem = 0, strategy = 0;
+    int found = 0;
+    /* refilter first (the JXL round-trip proved info.rgb is the pixels) */
+    uint8_t *filt = NULL; size_t filt_len = 0;
+    if (pngx_refilter(info.rgb, info.rgb_len, &info, &filt, &filt_len) != 0) {
+        remove(jx_tmp); pngx_free(&info); return 0;
+    }
     invfs_deflate_params dp;
     memset(&dp, 0, sizeof dp);
     if (invfs_deflate_repro_find(filt, filt_len, info.idat, info.idat_len,
@@ -296,6 +407,7 @@ uint64_t vol_create_png_file(invfs_volume *v, const char *name,
         enc = dp.engine;
         level = (uint8_t)dp.level;
         mem = (uint8_t)dp.mem_level;
+        strategy = (uint8_t)dp.strategy;
         found = 1;
     }
     free(filt);
@@ -306,7 +418,7 @@ uint64_t vol_create_png_file(invfs_volume *v, const char *name,
 
     /* recipe + JXL blob */
     uint8_t *recipe = NULL; size_t rlen = 0;
-    if (pngx_build_recipe(&info, enc, level, mem, &recipe, &rlen) != 0) {
+    if (pngx_build_recipe(&info, enc, level, mem, strategy, &recipe, &rlen) != 0) {
         remove(jx_tmp); pngx_free(&info); return 0;
     }
     f = fopen(jx_tmp, "rb");
@@ -353,164 +465,182 @@ uint64_t vol_create_png_file(invfs_volume *v, const char *name,
      * JXL round-trip must reproduce the pixels and the deflate replica the
      * original IDAT before anything is committed; refused files keep their
      * original RAW bytes. */
-    if (png_len < 33 || memcmp(png, "\x89PNG\r\n\x1a\n", 8) != 0) return 0;
-    if (name_too_long_for_children(name)) return 0;
+    if (png_len < 33 || memcmp(png, "\x89PNG\r\n\x1a\n", 8) != 0) {
+        png_refuse(name, "no PNG signature"); return 0;
+    }
+    if (name_too_long_for_children(name)) {
+        png_refuse(name, "name too long for the !jxl sibling"); return 0;
+    }
     pngx_info info;
     memset(&info, 0, sizeof info);
     if (pngx_extract(png, png_len, NULL, 0, png_inflate, &info) != 0) {
+        /* A zlib-wrapped IDAT lands here: it is not a PNG. */
+        png_refuse(name, "IDAT is not a raw-deflate PNG stream, or the "
+                         "chunks do not describe an image");
         pngx_free(&info);   /* a failed extract still owns idat/idat_crc */
         return 0;
     }
     if (info.bitdepth != 8 || info.interlace != 0 || info.bpp == 0) {
-        pngx_free(&info); return 0;   /* v1 guard: 8-bit non-interlaced */
+        png_refuse(name, "v1 guard: 8-bit non-interlaced only");
+        pngx_free(&info); return 0;
     }
-    if (info.nrows == 0 || info.rgb_len == 0) { pngx_free(&info); return 0; }
-
-    /* spool.png: original filtered rows with STORED IDAT (level 0) */
-    uint8_t *spool = NULL;
-    size_t spool_len = 0;
-    {
-        z_stream s;
-        memset(&s, 0, sizeof s);
-        if (deflateInit2(&s, 0, Z_DEFLATED, 15, 8, Z_DEFAULT_STRATEGY) != Z_OK) {
-            pngx_free(&info); return 0;
-        }
-        size_t bound = deflateBound(&s, (uLong)info.filtered_len);
-        uint8_t *stream = (uint8_t *)malloc(bound);
-        if (!stream) { deflateEnd(&s); pngx_free(&info); return 0; }
-        s.next_in = info.filtered;
-        s.avail_in = (uInt)(info.filtered_len > 0x7FFFFFFF ? 0x7FFFFFFF : info.filtered_len);
-        s.next_out = stream;
-        s.avail_out = (uInt)bound;
-        int r = deflate(&s, Z_FINISH);
-        size_t slen = (size_t)s.total_out;
-        deflateEnd(&s);
-        if (r != Z_STREAM_END) { free(stream); pngx_free(&info); return 0; }
-        /* build spool png: sig + IHDR + IDAT(stored) + IEND */
-        uint8_t ihdr[13];
-        wr32v(ihdr, info.width);
-        wr32v(ihdr + 4, info.height);
-        ihdr[8] = info.bitdepth; ihdr[9] = info.colortype; ihdr[10] = 0;
-        ihdr[11] = 0; ihdr[12] = info.interlace;
-        size_t cap = 8 + 25 + slen + 12;
-        spool = (uint8_t *)malloc(cap);
-        if (!spool) { free(stream); pngx_free(&info); return 0; }
-        size_t o = 0;
-        memcpy(spool + o, "\x89PNG\r\n\x1a\n", 8); o += 8;
-        if (pngx_chunk_append(&spool, &o, &cap, (const uint8_t *)"IHDR", ihdr, 13) ||
-            pngx_chunk_append(&spool, &o, &cap, (const uint8_t *)"IDAT", stream, slen) ||
-            pngx_chunk_append(&spool, &o, &cap, (const uint8_t *)"IEND", NULL, 0)) {
-            free(stream); free(spool); pngx_free(&info); return 0;
-        }
-        spool_len = o;
-        free(stream);
+    if (info.nrows == 0 || info.rgb_len == 0) {
+        png_refuse(name, "empty image"); pngx_free(&info); return 0;
+    }
+    /* The recipe rebuilds the IDAT at windowBits -15 (a PNG IDAT is a raw
+     * deflate stream) and the recipe has no field in which to record another
+     * framing -- its enc byte is the deflate ENGINE, per dfc2b24, not a
+     * window. So a zlib-wrapped IDAT is refused here, by name, instead of
+     * being stored under a shape the read path could not reproduce. It is
+     * not a PNG: no conforming decoder reads it. Some toolschains' PNG
+     * writers do emit one, which is why pngx_extract() tolerates it and the
+     * refusal lives here rather than in the parser. */
+    if (png_idat_is_zlib_wrapped(info.idat, info.idat_len)) {
+        png_refuse(name, "IDAT is zlib-wrapped, not a raw deflate stream");
+        pngx_free(&info); return 0;
     }
 
     char dir[64], sp[320], jx[320], dn[320];
-    if (tool_tmpdir(dir, sizeof dir) != 0) { free(spool); pngx_free(&info); return 0; }
+    if (tool_tmpdir(dir, sizeof dir) != 0) { pngx_free(&info); return 0; }
     snprintf(sp, sizeof sp, "%s/spool.png", dir);
     snprintf(jx, sizeof jx, "%s/tmp.jxl", dir);
     snprintf(dn, sizeof dn, "%s/dn.png", dir);
-    if (tool_write(sp, spool, spool_len) != 0) {
-        free(spool); pngx_free(&info);
-        rmdir(dir);
-        return 0;
-    }
-    free(spool);
-    /* cjxl: spool.png -> JXL (lossless, effort 7) */
-    if (jxl_tool("cjxl", sp, jx, "-d 0 -e 7") != 0) {
-        tool_rm(dir, "spool.png"); tool_rm(dir, "tmp.jxl"); rmdir(dir);
-        pngx_free(&info); return 0;
-    }
-    /* djxl: verify the round-trip produces identical pixels. The matched
-     * pixels are kept for the read-path replay guard below. */
+
+    /* cjxl/djxl: prove the pixels survive the round-trip. The SPOOL's IDAT
+     * framing is ours to choose -- the recipe's framing is not (see the
+     * zlib-wrapped refusal above), and the spool never leaves this loop.
+     *
+     * The spec framing (-15, a bare deflate stream) is tried first. Only if
+     * the decode-back guard rejects it do we retry zlib-wrapped, because a
+     * toolchain whose PNG reader expects a wrapped IDAT does not fail on a
+     * raw one -- it warns and hands back the wrong pixels, and only the
+     * pixel memcmp can tell. That is a property of the host, not of the
+     * file, and it must not decide the file's fate. Nothing is weakened
+     * for the retry: the same pixel comparison and the same byte-exact
+     * rebuild guard below still have to pass. */
+    static const int spool_wbits[2] = { -15, 15 };
     uint8_t *rt_rgb = NULL; size_t rt_rgb_len = 0;
-    {
+    const char *rt_why = "djxl failed (see INVFS_HELPER_VERBOSE)";
+    int spi;
+    for (spi = 0; spi < 2 && !rt_rgb; spi++) {
+        uint8_t *spool = NULL;
+        size_t spool_len = 0;
         uint8_t *dnb = NULL; size_t dn_len = 0;
-        if (jxl_tool("djxl", jx, dn, "") == 0 &&
-            png_slurp(dn, &dnb, &dn_len) == 0) {
+
+        if (png_spool_build(&info, spool_wbits[spi], &spool, &spool_len) != 0)
+            continue;
+        if (tool_write(sp, spool, spool_len) != 0) {
+            png_refuse(name, "cannot write the spool PNG");
+            free(spool);
+            tool_rm(dir, "tmp.jxl"); rmdir(dir);
+            pngx_free(&info); return 0;
+        }
+        free(spool);
+        /* cjxl: spool.png -> JXL (lossless, effort 7) */
+        if (jxl_tool("cjxl", sp, jx, "-d 0 -e 7") != 0) {
+            rt_why = "cjxl failed on the spool (see INVFS_HELPER_VERBOSE)";
+            tool_rm(dir, "spool.png"); tool_rm(dir, "tmp.jxl");
+            continue;
+        }
+        /* djxl: verify the round-trip produces identical pixels. The
+         * matched pixels are kept for the read-path replay guard below. */
+        rt_why = "djxl failed (see INVFS_HELPER_VERBOSE)";
+        if (jxl_tool("djxl", jx, dn, "") != 0) {
+            tool_rm(dir, "spool.png"); tool_rm(dir, "tmp.jxl");
+            continue;
+        }
+        if (png_slurp(dn, &dnb, &dn_len) != 0) {
+            rt_why = "djxl produced no readable PNG";
+            tool_rm(dir, "spool.png"); tool_rm(dir, "tmp.jxl");
+            continue;
+        }
+        {
             pngx_info di;
             memset(&di, 0, sizeof di);
-            if (pngx_extract(dnb, dn_len, NULL, 0, png_inflate, &di) == 0 &&
-                di.rgb_len == info.rgb_len &&
-                memcmp(di.rgb, info.rgb, info.rgb_len) == 0) {
+            if (pngx_extract(dnb, dn_len, NULL, 0, png_inflate, &di) != 0) {
+                rt_why = "djxl's PNG does not parse";
+            } else if (di.rgb_len != info.rgb_len) {
+                rt_why = "djxl returned a different pixel count";
+            } else if (memcmp(di.rgb, info.rgb, info.rgb_len) != 0) {
+                rt_why = "JXL round-trip changed the pixels";
+            } else {
                 rt_rgb = di.rgb; rt_rgb_len = di.rgb_len;
                 di.rgb = NULL; di.rgb_len = 0;
             }
             pngx_free(&di);
         }
         free(dnb);
+        tool_rm(dir, "spool.png"); tool_rm(dir, "dn.png");
+        /* tmp.jxl is left in place on the winning pass: the blob is slurped
+         * after the search, and removing it here would have made the size
+         * guard and the commit below read an empty file. */
+        if (!rt_rgb) tool_rm(dir, "tmp.jxl");
     }
-    tool_rm(dir, "spool.png"); tool_rm(dir, "dn.png");
     if (!rt_rgb) {
-        tool_rm(dir, "tmp.jxl"); rmdir(dir);
+        rmdir(dir);
+        png_refuse(name, rt_why);
         pngx_free(&info); return 0;   /* JXL changed pixels: keep original */
     }
 
-    /* brute-force deflate params reproducing the original IDAT */
-    uint8_t enc = 0, level = 0, mem = 0;
+    /* Find the deflate parameters that reproduce the original IDAT
+     * byte-for-byte. This has to search ACROSS ENGINES, not just across
+     * (level, memLevel): the encoder that wrote the PNG may have been a
+     * different zlib implementation than the one this build links. On a
+     * zlib-ng host the old level/mem loop could never match a PNG PIL wrote
+     * with stock zlib -- all 225 (level, memLevel, strategy) combinations
+     * missed -- so every PNG landed in GENERIC_GUARD{PNGR} instead of being
+     * transcoded. invfs_deflate_repro_find() already probes the bundled
+     * stock zlib and the system zlib and reports which one matched, and
+     * `enc` carries that engine id (0 system zlib, 1 miniz, 2 stock zlib),
+     * so the recipe format is unchanged.
+     *
+     * Compat: recipes written before this change used enc=0 to mean "the
+     * build's default zlib", which was stock zlib. They now decode as
+     * "system zlib". Nothing wrote one while the lane was refusing every
+     * file, so the exposure is limited to volumes built with an older
+     * binary that DID transcode PNGs. */
+    uint8_t enc = 0, level = 0, mem = 0, strategy = 0;
     int found = 0;
     /* refilter first (the JXL round-trip proved info.rgb is the pixels) */
     uint8_t *filt = NULL; size_t filt_len = 0;
     if (pngx_refilter(info.rgb, info.rgb_len, &info, &filt, &filt_len) != 0) {
+        png_refuse(name, "refilter failed");
         free(rt_rgb); tool_rm(dir, "tmp.jxl"); rmdir(dir);
         pngx_free(&info); return 0;
     }
-    static const int prio[][2] = {
-        {6,8},{7,9},{6,9},{9,8},{7,8},{9,9},{6,7},{8,9},{8,8},{5,8},
-        {4,8},{3,8},{2,8},{1,8},{7,7},{8,7},{9,7},{1,9},{2,9},{3,9},{4,9},{5,9}
-    };
-    for (size_t i = 0; i < sizeof(prio) / sizeof(prio[0]) && !found; i++) {
-        z_stream s;
-        memset(&s, 0, sizeof s);
-        if (deflateInit2(&s, prio[i][0], Z_DEFLATED, 15, prio[i][1],
-                         Z_DEFAULT_STRATEGY) != Z_OK) continue;
-        size_t bound = deflateBound(&s, (uLong)filt_len);
-        uint8_t *re = (uint8_t *)malloc(bound);
-        if (!re) { deflateEnd(&s); continue; }
-        s.next_in = filt;
-        s.avail_in = (uInt)(filt_len > 0x7FFFFFFF ? 0x7FFFFFFF : filt_len);
-        s.next_out = re;
-        s.avail_out = (uInt)bound;
-        int r2 = deflate(&s, Z_FINISH);
-        size_t re_len = (size_t)s.total_out;
-        deflateEnd(&s);
-        if (r2 == Z_STREAM_END && re_len == info.idat_len &&
-            memcmp(re, info.idat, info.idat_len) == 0) {
-            enc = 0; level = (uint8_t)prio[i][0]; mem = (uint8_t)prio[i][1];
-            found = 1;
-        }
-        free(re);
-    }
-    if (!found) {
-        /* miniz tdefl levels 1..10 */
-        for (int lv = 1; lv <= 10 && !found; lv++) {
-            size_t olen = 0;
-            size_t bound = filt_len + filt_len / 4 + 4096;
-            uint8_t *re = (uint8_t *)malloc(bound);
-            if (re &&
-                mz_tdefl_compress(filt, filt_len, re, bound, lv, &olen) == 0 &&
-                olen == info.idat_len && memcmp(re, info.idat, info.idat_len) == 0) {
-                enc = 1; level = (uint8_t)lv; mem = 0;
-                found = 1;
-            }
-            free(re);
-        }
+    invfs_deflate_params dp;
+    memset(&dp, 0, sizeof dp);
+    if (invfs_deflate_repro_find(filt, filt_len, info.idat, info.idat_len,
+                                 -15, &dp) == 0) {
+        enc = dp.engine;
+        level = (uint8_t)dp.level;
+        mem = (uint8_t)dp.mem_level;
+        strategy = (uint8_t)dp.strategy;
+        found = 1;
+        if (getenv("INVFS_DEBUG"))
+            fprintf(stderr, "[vol] PNGR %s: IDAT reproduced by %s "
+                    "level=%d memLevel=%d strategy=%d\n",
+                    name ? name : "?", invfs_deflate_engine_name(dp.engine),
+                    (int)dp.level, (int)dp.mem_level, (int)dp.strategy);
     }
     free(filt);
     if (!found) {
+        png_refuse(name, "no deflate parameters reproduce the IDAT "
+                         "(windowBits/level/memLevel/strategy outside the grid)");
         free(rt_rgb); tool_rm(dir, "tmp.jxl"); rmdir(dir);
         pngx_free(&info); return 0;   /* unknown encoder: keep original */
     }
 
     /* recipe + JXL blob */
     uint8_t *recipe = NULL; size_t rlen = 0;
-    if (pngx_build_recipe(&info, enc, level, mem, &recipe, &rlen) != 0) {
+    if (pngx_build_recipe(&info, enc, level, mem, strategy, &recipe, &rlen) != 0) {
+        png_refuse(name, "recipe build failed");
         free(rt_rgb); tool_rm(dir, "tmp.jxl"); rmdir(dir);
         pngx_free(&info); return 0;
     }
     uint8_t *jxl = NULL; size_t jxl_len = 0;
     if (png_slurp(jx, &jxl, &jxl_len) != 0) {
+        png_refuse(name, "cjxl left no JXL blob behind");
         free(rt_rgb); free(recipe);
         tool_rm(dir, "tmp.jxl"); rmdir(dir);
         pngx_free(&info); return 0;
@@ -528,11 +658,17 @@ uint64_t vol_create_png_file(invfs_volume *v, const char *name,
         pngx_info pi2;
         uint8_t *f2 = NULL, *s2 = NULL, *rb = NULL;
         size_t f2_len = 0, s2_len = 0, rb_len = 0;
+        size_t want_split = 0, i;
         int vok = 0;
+        const char *vwhy = "recipe does not parse";
 
+        for (i = 0; i < info.idat_n; i++) want_split += info.idat_split[i];
         memset(&pi2, 0, sizeof pi2);
-        if (pngx_parse_recipe(recipe, rlen, &pi2) == 0 &&
-            pngx_refilter(rt_rgb, rt_rgb_len, &pi2, &f2, &f2_len) == 0) {
+        if (pngx_parse_recipe(recipe, rlen, &pi2) != 0) {
+            vwhy = "recipe does not parse";
+        } else if (pngx_refilter(rt_rgb, rt_rgb_len, &pi2, &f2, &f2_len) != 0) {
+            vwhy = "refilter of the round-tripped pixels failed";
+        } else {
             if (pi2.enc == INVFS_DEFLATE_ENGINE_ZLIB_SYSTEM ||
                 pi2.enc == INVFS_DEFLATE_ENGINE_ZLIB_STOCK) {
                 /* Rebuild through the engine the sweep recorded, not through
@@ -544,11 +680,16 @@ uint64_t vol_create_png_file(invfs_volume *v, const char *name,
                 dp.engine = pi2.enc;
                 dp.level = (int8_t)pi2.level;
                 dp.mem_level = (int8_t)pi2.mem;
-                dp.strategy = 0;
+                dp.strategy = (int8_t)pi2.strategy;
                 dp.window_bits = -15;   /* PNG IDAT = raw deflate */
                 if (invfs_deflate_repro_encode(f2, f2_len, &dp, &s2,
-                                               &s2_len) == 0)
+                                               &s2_len) != 0) {
+                    vwhy = "deflate replica failed";
+                } else if (s2_len != want_split) {
+                    vwhy = "deflate replica is not the recorded IDAT length";
+                } else {
                     vok = 1;
+                }
             } else {
                 size_t bound = f2_len + f2_len / 4 + 4096;
                 s2 = (uint8_t *)malloc(bound);
@@ -556,16 +697,25 @@ uint64_t vol_create_png_file(invfs_volume *v, const char *name,
                     mz_tdefl_compress(f2, f2_len, s2, bound,
                                       pi2.level, &s2_len) == 0)
                     vok = 1;
+                else
+                    vwhy = "miniz replica failed";
             }
-            if (vok) {
-                vok = (pngx_rebuild(&pi2, s2, s2_len, &rb, &rb_len) == 0 &&
-                       rb_len == png_len && memcmp(rb, png, png_len) == 0);
+            if (vok && pngx_rebuild(&pi2, s2, s2_len, &rb, &rb_len) != 0) {
+                vok = 0;
+                vwhy = "pngx_rebuild rejected the replica";
+            } else if (vok && rb_len != png_len) {
+                vok = 0;
+                vwhy = "rebuilt PNG is the wrong length";
+            } else if (vok && memcmp(rb, png, png_len) != 0) {
+                vok = 0;
+                vwhy = "rebuilt PNG differs from the original";
             }
         }
         free(f2); free(s2); free(rb);
         pngx_free(&pi2);
         free(rt_rgb);
         if (!vok) {
+            png_refuse(name, vwhy);
             free(jxl); free(recipe); pngx_free(&info);
             return 0;   /* the stored shape would not read back: refuse */
         }
@@ -573,6 +723,7 @@ uint64_t vol_create_png_file(invfs_volume *v, const char *name,
 
     /* guard: JXL + recipe must be smaller than the original */
     if ((size_t)jxl_len + rlen >= png_len) {
+        png_refuse(name, "JXL blob + recipe is not smaller than the PNG");
         free(jxl); free(recipe); pngx_free(&info); return 0;
     }
     /* create name!jxl first, then name (atomic) */
@@ -581,11 +732,13 @@ uint64_t vol_create_png_file(invfs_volume *v, const char *name,
     uint64_t jino = vol_create_blob_file(v, jn, jxl, (size_t)jxl_len,
                                          (uint64_t)jxl_len, INVFS_ALGO_NONE);
     free(jxl);
-    if (!jino) { free(recipe); pngx_free(&info);
+    if (!jino) { png_refuse(name, "blob write failed");
+                 free(recipe); pngx_free(&info);
                  return vol_transcode_abort(v, name); }
     size_t bound = ZSTD_compressBound(rlen);
     uint8_t *rc = (uint8_t *)malloc(bound + 1);
-    if (!rc) { free(recipe); pngx_free(&info);
+    if (!rc) { png_refuse(name, "out of memory");
+               free(recipe); pngx_free(&info);
                return vol_transcode_abort(v, name); }
     size_t rbl = 0;
     size_t rcl = ZSTD_compress(rc + 1, bound, recipe, rlen, 19);

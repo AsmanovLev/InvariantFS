@@ -18,7 +18,7 @@ typedef struct {
     uint8_t *idat; size_t idat_len;
     uint8_t *idat_crc;   /* original IDAT chunk CRCs (4B each) */
     uint8_t  iend_crc[4];/* original IEND CRC (may be broken) */
-    uint8_t  enc, level, mem;
+    uint8_t  enc, level, mem, strategy;
 } pngx_info;
 
 int pngx_extract(const uint8_t *png, size_t png_len,
@@ -27,7 +27,8 @@ int pngx_extract(const uint8_t *png, size_t png_len,
                                    unsigned char **out, size_t *out_len),
                  pngx_info *info);
 int pngx_build_recipe(const pngx_info *info, uint8_t enc, uint8_t level,
-                      uint8_t mem, uint8_t **recipe_out, size_t *rlen_out);
+                      uint8_t mem, uint8_t strategy,
+                      uint8_t **recipe_out, size_t *rlen_out);
 int pngx_parse_recipe(const uint8_t *r, size_t rlen, pngx_info *info);
 int pngx_refilter(const uint8_t *rgb, size_t rgb_len, const pngx_info *info,
                   uint8_t **out, size_t *out_len);

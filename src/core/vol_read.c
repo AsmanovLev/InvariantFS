@@ -953,23 +953,34 @@ static int vol_decode_ast_entries(invfs_volume *v, uint64_t inode_id,
                     if (ok && pngx_refilter(rgb, rgb_len, &pi, &filt, &filt_len) != 0)
                         ok = 0;
                     if (ok) {
-                        /* deflate replica (zlib or miniz) */
-                        if (pi.enc == 0) {
-                            z_stream s;
-                            memset(&s, 0, sizeof s);
-                            if (deflateInit2(&s, pi.level, Z_DEFLATED, 15, pi.mem,
-                                             Z_DEFAULT_STRATEGY) == Z_OK) {
-                                size_t bound = deflateBound(&s, (uLong)filt_len);
-                                stream = (uint8_t *)malloc(bound);
-                                s.next_in = filt;
-                                s.avail_in = (uInt)(filt_len > 0x7FFFFFFF ? 0x7FFFFFFF : filt_len);
-                                s.next_out = stream;
-                                s.avail_out = (uInt)bound;
-                                int r2 = deflate(&s, Z_FINISH);
-                                stream_len = (size_t)s.total_out;
-                                deflateEnd(&s);
-                                if (r2 != Z_STREAM_END) ok = 0;
-                            } else ok = 0;
+                        /* deflate replica. Replay through the engine the
+                         * sweep RECORDED (pi.enc), not through whatever
+                         * deflateInit2 maps to now: the IDAT comes back
+                         * bit-for-bit only from the same implementation
+                         * that wrote it, and a PNG IDAT is a raw deflate
+                         * stream (windowBits -15). dfc2b24 taught the
+                         * _WIN32 transcode half this; the read path and the
+                         * POSIX transcode half kept the old "pi.enc == 0
+                         * means whatever this build links" assumption, so
+                         * a PNG stamped on a zlib-ng host would have read
+                         * back as EIO. The strategy comes from the recipe
+                         * too: invfs_deflate_repro_find() may legitimately
+                         * match a stream that needs Z_FILTERED, and a replay
+                         * that assumed Z_DEFAULT_STRATEGY would produce a
+                         * different stream and fail the length check. */
+                        if (pi.enc == INVFS_DEFLATE_ENGINE_ZLIB_SYSTEM ||
+                            pi.enc == INVFS_DEFLATE_ENGINE_ZLIB_STOCK) {
+                            invfs_deflate_params dp;
+                            memset(&dp, 0, sizeof dp);
+                            dp.engine = pi.enc;
+                            dp.level = (int8_t)pi.level;
+                            dp.mem_level = (int8_t)pi.mem;
+                            dp.strategy = (int8_t)pi.strategy;
+                            dp.window_bits = -15;  /* PNG IDAT = raw deflate */
+                            if (invfs_deflate_repro_encode(filt, filt_len, &dp,
+                                                           &stream,
+                                                           &stream_len) != 0)
+                                ok = 0;
                         } else {
                             size_t bound = filt_len + filt_len / 4 + 4096;
                             stream = (uint8_t *)malloc(bound);

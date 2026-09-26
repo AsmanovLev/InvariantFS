@@ -2,24 +2,36 @@
  * pngx.c — PNG container extraction/rebuild for InvariantFS (PNG Repack).
  *
  * PNG = signature + chunks. IDAT (one or more consecutive chunks) holds a
- * single zlib stream. Plan:
+ * single RAW DEFLATE stream -- a PNG IDAT is not zlib-wrapped, and the
+ * recipe rebuilds it at windowBits -15 (WP91; this line said "zlib stream"
+ * and was the belief behind the bug). Plan:
  *   transcode:  inflate IDAT -> filtered rows -> spool.png (stored IDAT)
  *               -> cjxl -d 0 -> name!jxl ; brute-force deflate params
- *               (zlib levels x memLevel, miniz) reproducing the original
+ *               (both zlib engines x levels x memLevel x strategy, miniz)
+ *               reproducing the original
  *               IDAT byte-for-byte; recipe = non-IDAT chunks + IDAT chunk
  *               split (sizes! part of the 1:1 file) + per-row filters
  *               (1 byte/row — NOT recoverable from RGB!) + encoder params.
  *   rebuild:    djxl name!jxl -> PNG -> parse -> unfilter -> pixels
- *               -> refilter (saved filters) -> deflate(level,mem) -> IDAT
+ *               -> refilter (saved filters) -> deflate(engine,level,mem,
+ *               strategy) -> IDAT
  *               -> original PNG byte-for-byte.
  *
- * Recipe IVPN v1:
- *   [4B "IVPN"][1B ver=1][4B width][4B height][1B bitdepth][1B colortype]
+ * Recipe IVPN v2:
+ *   [4B "IVPN"][1B ver=2][4B width][4B height][1B bitdepth][1B colortype]
  *   [1B interlace][2B pre_n][pre chunks: (4B type, 4B len, data)]
  *   [2B idat_n][idat split: 4B len each]
  *   [2B post_n][post chunks]
- *   [1B enc: 0=zlib 1=miniz][1B level][1B mem (zlib only)]
+ *   [1B enc: 0=zlib-system 1=miniz 2=zlib-stock][1B level][1B mem][1B strategy]
  *   [4B nrows][nrows bytes of filters]
+ *
+ * v1 is the same layout without the trailing strategy byte, and v1 could
+ * only ever be replayed at Z_DEFAULT_STRATEGY -- that is what the v1 readers
+ * (vol_png.c's full-house guard, vol_read.c's PNGR branch) hardcoded. So v1
+ * parses as strategy 0, which is exactly what a v1 recipe meant. WP91 added
+ * the byte because the cross-engine search (dfc2b24) can legitimately match
+ * a stream that needs Z_FILTERED or Z_FIXED, and a recipe that cannot
+ * reproduce its own IDAT is a shape the read path would fail on.
  */
 #include <stdint.h>
 #include <stdlib.h>
@@ -236,16 +248,17 @@ fail:
 
 /* build IVPN recipe from parsed info + encoder params */
 int pngx_build_recipe(const pngx_info *info, uint8_t enc, uint8_t level,
-                      uint8_t mem, uint8_t **recipe_out, size_t *rlen_out)
+                      uint8_t mem, uint8_t strategy,
+                      uint8_t **recipe_out, size_t *rlen_out)
 {
     size_t rl = 4 + 1 + 4 + 4 + 1 + 1 + 1 + 2 + info->pre_len +
                 2 + info->idat_n * 4 + 2 + info->post_len +
-                1 + 1 + 1 + 4 + info->nrows + info->idat_n * 4 + 4;
+                1 + 1 + 1 + 1 + 4 + info->nrows + info->idat_n * 4 + 4;
     uint8_t *r = (uint8_t *)malloc(rl);
     if (!r) return -1;
     size_t o = 0;
     memcpy(r + o, "IVPN", 4); o += 4;
-    r[o++] = 1;
+    r[o++] = 2;
     wr32(r + o, info->width); o += 4;
     wr32(r + o, info->height); o += 4;
     r[o++] = info->bitdepth;
@@ -260,6 +273,7 @@ int pngx_build_recipe(const pngx_info *info, uint8_t enc, uint8_t level,
     r[o++] = enc;
     r[o++] = level;
     r[o++] = mem;
+    r[o++] = strategy;
     wr32(r + o, (uint32_t)info->nrows); o += 4;
     memcpy(r + o, info->filters, info->nrows); o += info->nrows;
     for (size_t i = 0; i < info->idat_n; i++) {
@@ -274,7 +288,10 @@ int pngx_build_recipe(const pngx_info *info, uint8_t enc, uint8_t level,
 /* parse recipe back */
 int pngx_parse_recipe(const uint8_t *r, size_t rlen, pngx_info *info)
 {
-    if (rlen < 33 || memcmp(r, "IVPN", 4) != 0 || r[4] != 1) return -1;
+    int ver;
+    if (rlen < 33 || memcmp(r, "IVPN", 4) != 0) return -1;
+    ver = r[4];
+    if (ver != 1 && ver != 2) return -1;
     memset(info, 0, sizeof *info);
     size_t o = 5;
     info->width = rd32(r + o); o += 4;
@@ -350,6 +367,11 @@ int pngx_parse_recipe(const uint8_t *r, size_t rlen, pngx_info *info)
     info->enc = r[o++];
     info->level = r[o++];
     info->mem = r[o++];
+    if (ver >= 2) {
+        if (o + 1 > rlen) return -1;
+        info->strategy = r[o++];
+    }
+    /* v1 carried no strategy and every v1 reader assumed Z_DEFAULT_STRATEGY */
     if (o + 4 > rlen) return -1;
     info->nrows = rd32(r + o); o += 4;
     if (o + info->nrows > rlen) return -1;
