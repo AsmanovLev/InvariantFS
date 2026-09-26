@@ -2481,6 +2481,32 @@ int64_t cpack_map_read(invfs_volume *v, const char *name, uint64_t ino,
 
 
 
+/* v3: release the blocks the superseded parent recipe owned, once the
+ * decomposition has committed. Called at the END of the commit, never before:
+ * a guard/map failure rolls the name back onto the untouched old record, which
+ * has to stay readable. Only when the row really MOVED: a recipe address is
+ * the content hash of the recipe, so a re-decomposition that reproduces the
+ * same recipe (a lost class stamp re-arms the file) lands on the SAME address,
+ * the live inode still points at those very segments, and freeing them would
+ * strand the file. */
+static void cpack_release_superseded(
+    invfs_volume *v, uint64_t inode_id,
+    const uint8_t old_addr[INVFS_V3_RECIPE_ADDR_LEN])
+{
+    static const uint8_t zero_addr[INVFS_V3_RECIPE_ADDR_LEN] = {0};
+    invfs_v3_inode now;
+
+    if (!v || !old_addr ||
+        memcmp(old_addr, zero_addr, sizeof zero_addr) == 0)
+        return;
+    if (vol_v3_inode_get(v, inode_id, &now) != 1)
+        return;
+    if (memcmp(now.recipe_addr, old_addr, INVFS_V3_RECIPE_ADDR_LEN) == 0)
+        return;
+    vol_v3_free_recipe_blocks(v, old_addr, 0);
+}
+
+
 /* WP16a sweep attempt: decompose one RAW container through a container
  * codecpack. See the section header for the pipeline; the return
  * convention mirrors vol_pack_sweep (100+algo on commit, 1 = tools absent
@@ -2507,6 +2533,9 @@ int vol_containerpack_sweep(invfs_volume *v, uint64_t inode_id,
     cpack_member *mem_sorted = NULL;   /* idx-sorted copy for the map paths */
     invfs_meta_pub keep;
     int have_keep, rc = 0;
+    /* the superseded parent recipe, released once the commit is complete */
+    invfs_v3_inode old_in;
+    uint8_t old_addr[INVFS_V3_RECIPE_ADDR_LEN];
     if (getenv("INVFS_DEBUG_PACKS")) fprintf(stderr,"[cpack] enter %s (decomp_gen=%d gen=%u)\n", name,
         def ? def->decomp_gen : -1, pc->generation);
     if (!pc->probe || !pc->probe()) return 1;    /* tools absent: wait */
@@ -2677,6 +2706,24 @@ int vol_containerpack_sweep(invfs_volume *v, uint64_t inode_id,
      * normal pipeline owns them from here), then the member table, then
      * the name-owning recipe record; retire the old record last. */
     have_keep = vol_get_meta(v, inode_id, &keep) == 0;
+    /* v3: the parent's row is superseded IN PLACE -- vol_v3_create_content_node
+     * reuses the dirent's inode id -- so the moment the new record lands the
+     * superseded recipe's DATA SEGMENTS are unreachable, and nothing in the
+     * tree ever frees them: vol_create_blob_file cannot (it is handed the new
+     * address, never the old one), and the WP-M15 reachability reclaim diffs
+     * B+ tree PAGES only -- a recipe blob IS a page, but the segments it
+     * points at are data blocks. Capture the address here and release it at
+     * the end of the commit, the way vol_v3_publish_blob_inode and the WP78
+     * batch publishers do. Skipping this stranded the whole original import
+     * (measured: 25.5 MiB of a 40 MiB rawdisk fixture, allocated, named by no
+     * live recipe, and no sweep, fsck or fold reclaimed it). */
+    memset(old_addr, 0, sizeof old_addr);
+    if (v->sb.vol_flags & VOLF_V3) {
+        uint64_t pid = 0;
+        if (vol_v3_path_lookup(v, name, &pid) == 1 &&
+            vol_v3_inode_get(v, pid, &old_in) == 1)
+            memcpy(old_addr, old_in.recipe_addr, sizeof old_addr);
+    }
     for (i = 0; i < nmem; i++) {
         char pm[256], mn[320];
         uint8_t *mb = NULL;
@@ -2767,7 +2814,12 @@ int vol_containerpack_sweep(invfs_volume *v, uint64_t inode_id,
                         (uint64_t)full_len, old_ctime);
             goto out;
         }
-        if (!(v->sb.vol_flags & VOLF_V3))
+        /* the commit is complete: !mbrmap is down, so nothing can roll the
+         * name back onto the old record and the superseded recipe's blocks
+         * can go. */
+        if (v->sb.vol_flags & VOLF_V3)
+            cpack_release_superseded(v, newino, old_addr);
+        else
             vol_delete_inode(v, inode_id, name);
         /* the fresh blob record has no ext; carry the old meta across
          * (the vol_pack_sweep flow) */
@@ -2790,7 +2842,11 @@ int vol_containerpack_sweep(invfs_volume *v, uint64_t inode_id,
             vol_transcode_abort(v, name);
             goto out;
         }
-        if (!(v->sb.vol_flags & VOLF_V3))
+        /* the mapless branch has no post-create fallible step (its rebuild
+         * guard ran BEFORE the commit), so the superseded recipe goes here */
+        if (v->sb.vol_flags & VOLF_V3)
+            cpack_release_superseded(v, newino, old_addr);
+        else
             vol_delete_inode(v, inode_id, name);
         /* the fresh blob record has no ext; carry the old meta across
          * (the vol_pack_sweep flow) */
