@@ -84,6 +84,23 @@ static uint64_t helper_timeout_ms(uint64_t requested)
                           HELPER_TIMEOUT_MS_DEFAULT);
 }
 
+/* INVFS_HELPER_VERBOSE: trace the argv and let the helper's stderr reach
+ * ours instead of /dev/null.
+ *
+ * A helper that refuses does so on stderr, and the builtin lanes pass
+ * out=NULL -- so every refusal was a silent `return 0` and the guard stamp
+ * was the only evidence. That made "the tool said no" and "the tool never
+ * ran" indistinguishable from outside the process (WP91). Off by default:
+ * a daemon's log is not the place for cjxl's progress chatter, and a
+ * correct caller must observe no change. Follows the INVFS_DEBUG /
+ * INVFS_NO_COMPACT / INVFS_PACK_SANDBOX convention: opt in by name,
+ * "0" explicitly off. */
+static int helper_verbose(void)
+{
+    const char *e = getenv("INVFS_HELPER_VERBOSE");
+    return e && *e && strcmp(e, "0") != 0;
+}
+
 /* ------------------------------------------------------------------ */
 /* errors + target ids (computed in the parent, never via NSS in child) */
 /* ------------------------------------------------------------------ */
@@ -661,6 +678,7 @@ int invfs_helper_exec(char *const argv[], uint64_t mem_cap,
     int capture;
     int sbmode;
     int is_root;
+    int verbose;
     uid_t h_uid = 0;
     gid_t h_gid = 0;
     uint64_t tmo;
@@ -669,10 +687,20 @@ int invfs_helper_exec(char *const argv[], uint64_t mem_cap,
     tmo = helper_timeout_ms(timeout_ms);
     sbmode = sb ? pack_sandbox_mode() : 0;
     is_root = (getuid() == 0);
+    verbose = helper_verbose();
     if (is_root) (void)helper_target_ids(&h_uid, &h_gid);
 
     capture = (out != NULL && out_cap > 0);
     if (capture && pipe(pfd) != 0) return -1;
+
+    if (verbose) {
+        int i;
+        fprintf(stderr, "helper_exec: [%d] ", (int)getpid());
+        for (i = 0; argv[i]; i++)
+            fprintf(stderr, "%s%s", i ? " " : "", argv[i]);
+        fputc('\n', stderr);
+        fflush(stderr);
+    }
 
     pid = fork();
     if (pid < 0) {
@@ -682,14 +710,17 @@ int invfs_helper_exec(char *const argv[], uint64_t mem_cap,
     if (pid == 0) {
         int dn = open("/dev/null", O_RDWR);
         if (capture) {
-            if (dn >= 0) { dup2(dn, STDIN_FILENO); dup2(dn, STDERR_FILENO); }
+            if (dn >= 0) {
+                dup2(dn, STDIN_FILENO);
+                if (!verbose) dup2(dn, STDERR_FILENO);
+            }
             dup2(pfd[1], STDOUT_FILENO);
             close(pfd[0]);
             close(pfd[1]);
         } else if (dn >= 0) {
             dup2(dn, STDIN_FILENO);
             dup2(dn, STDOUT_FILENO);
-            dup2(dn, STDERR_FILENO);
+            if (!verbose) dup2(dn, STDERR_FILENO);
         }
         if (dn > STDERR_FILENO) close(dn);
 

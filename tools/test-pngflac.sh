@@ -16,11 +16,26 @@
 # Legs:
 #   1. main:     5 crafted PNGs transcode -> CONTAINER{PNGR=10,gen=1} +
 #                name!jxl siblings; idempotent re-sweep (swept=0).
-#   2. refused:  16-bit + Adam7-interlaced (v1 guard), Z_FIXED-strategy
-#                stream (encoder outside the replica grid), incompressible
-#                noise (size guard), palette + PIL-default (observed
-#                GUARD here; the stamp is informational for those two) —
-#                all stay RAW, GENERIC_GUARD{PNGR,1}, bit-exact.
+#   1c. strategy: a Z_FIXED-strategy PNG transcodes and reads back bit-exact,
+#                next to a control that shares its pixels and differs only in
+#                being encoded at a grid point. The replica search
+#                legitimately matches non-default strategies, so the IVPN
+#                recipe has to record which one -- a recipe that assumed
+#                Z_DEFAULT_STRATEGY would rebuild a different IDAT and the
+#                file would read EIO. The control is what stops the
+#                Z_FIXED case from being a lucky pass.
+#   2. refused:  16-bit + Adam7-interlaced (v1 guard), a level-0 (STORED)
+#                IDAT (no grid point reproduces it), a zlib-wrapped IDAT
+#                (not a PNG), incompressible noise (size guard), palette +
+#                PIL-default (observed GUARD here; the stamp is
+#                informational for those two) -- all stay RAW,
+#                GENERIC_GUARD{PNGR,1}, bit-exact.
+#
+# Every fixture that is meant to be transcodable is a real PNG: a PNG IDAT is
+# a RAW deflate stream (windowBits -15), and the fixture writers say so
+# explicitly. Do not reintroduce the "re-deflate every fixture's IDAT with the
+# host zlib" pass: it existed to work around non-PNG fixtures, and it also
+# silently rewrote the properties the refused cases exist to test.
 #   3. guard:    fake cjxl via INVFS_TOOLS (garbage output, exit 0) ->
 #                the djxl decode-back pixel memcmp refuses ->
 #                GENERIC_GUARD{PNGR,1}, RAW, bit-exact; no refire.
@@ -55,17 +70,17 @@ trap 'rm -rf "$WORK" /dev/shm/w12cpngflac*.img' EXIT
 IMG=w12cpngflac.img        # leg 1: transcodable PNGs
 IMGR=w12cpngflac-ref.img   # leg 2: refused PNGs
 IMGG=w12cpngflac-guard.img # leg 3: fake cjxl
+IMGS=w12cpngflac-strat.img # leg 1c: non-default deflate strategy
 IMGM=w12cpngflac-mem.img   # leg 4: MEMLIMIT
 IMGF=w12cpngflac-flac.img  # leg 5: FLAC
 rm -rf "$WORK" && mkdir -p "$WORK/orig" "$WORK/out" "$WORK/bin" "$WORK/faketools"
 cd /dev/shm
-rm -f "$IMG" "$IMGR" "$IMGG" "$IMGM" "$IMGF"
+rm -f "$IMG" "$IMGR" "$IMGG" "$IMGS" "$IMGM" "$IMGF"
 
 echo "== tools + helper build =="
 command -v cjxl    >/dev/null || { echo "FAIL: cjxl not installed"; exit 1; }
 command -v djxl    >/dev/null || { echo "FAIL: djxl not installed"; exit 1; }
 command -v ffmpeg  >/dev/null || { echo "FAIL: ffmpeg not installed"; exit 1; }
-command -v magick  >/dev/null || { echo "FAIL: magick not installed"; exit 1; }
 command -v python3 >/dev/null || { echo "FAIL: python3 not installed"; exit 1; }
 python3 -c "import PIL, numpy" || { echo "FAIL: python3 PIL/numpy missing"; exit 1; }
 command -v cc >/dev/null || { echo "FAIL: cc not installed"; exit 1; }
@@ -126,12 +141,17 @@ export INVFS_TOOLS="$WORK/tools"
 
 echo "== generate fixtures (deterministic seeds) =="
 python3 - <<'PY'
-import zlib, struct, subprocess, os
+import zlib, struct, os
 import numpy as np
 from PIL import Image
 
 rng = np.random.default_rng(20260903)
 D = "/dev/shm/w12cpngflac/orig"
+
+# A PNG IDAT is a RAW deflate stream. Every fixture meant to be transcodable
+# has to be a real PNG, so the writers below default to -15; only the case
+# that asserts the lane refuses a zlib-wrapped one asks for 15.
+PNG_IDAT_WBITS = -15
 
 def mkpx(w, h, sigma, ct=2, seed=None):
     r_ = np.random.default_rng(seed) if seed is not None else rng
@@ -172,16 +192,37 @@ def chunk(t, data):
     return struct.pack(">I", len(data)) + t + data + \
            struct.pack(">I", zlib.crc32(t + data) & 0xffffffff)
 
+def write_png_raw_idat(fn, ihdr, filt, level=6, mem=8,
+                       strategy=zlib.Z_DEFAULT_STRATEGY,
+                       wbits=PNG_IDAT_WBITS):
+    """Assemble a PNG from an explicit IHDR and already-filtered rows.
+
+    Needed for the fixtures write_png() cannot express: 16-bit samples (its
+    row_bytes is a byte-per-pixel table), Adam7 (seven passes, not a filter
+    set), and a deliberately non-default deflate window."""
+    co = zlib.compressobj(level, zlib.DEFLATED, wbits, mem, strategy)
+    idat = co.compress(filt) + co.flush()
+    png = b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", ihdr) + chunk(b"IDAT", idat) \
+        + chunk(b"IEND", b"")
+    open(os.path.join(D, fn), "wb").write(png)
+    print(" ", fn, len(png), "bytes")
+
 def write_png(fn, arr, ct, filters, level, mem, split=1,
-              strategy=zlib.Z_DEFAULT_STRATEGY, pre=b"", post=b""):
+              strategy=zlib.Z_DEFAULT_STRATEGY, pre=b"", post=b"",
+              wbits=PNG_IDAT_WBITS):
     """Hand-rolled PNG writer: explicit per-row filters and zlib params, so
        the IDAT stream sits at a known (level, memLevel, strategy) point of
-       the FS replica grid."""
+       the FS replica grid.
+
+       wbits is -15 (PNG_IDAT_WBITS) unless a case deliberately wants another
+       framing: a PNG IDAT is a RAW deflate stream, and every fixture that is
+       meant to be transcodable has to be a real PNG. Use 15 only for the
+       fixture that asserts the lane refuses a zlib-wrapped one."""
     h, w = arr.shape[:2]
     bpp = {0: 1, 2: 3, 3: 1, 6: 4}[ct]
     rows = [arr[r].tobytes() for r in range(h)]
     filt = filter_rows(rows, bpp, filters)
-    co = zlib.compressobj(level, zlib.DEFLATED, 15, mem, strategy)
+    co = zlib.compressobj(level, zlib.DEFLATED, wbits, mem, strategy)
     idat = co.compress(filt) + co.flush()
     ihdr = struct.pack(">IIBBBBB", w, h, 8, ct, 0, 0, 0)
     parts = []
@@ -211,44 +252,111 @@ write_png("ancil.png", mkpx(257, 129, 7), 2, [3], 6, 9, split=2,
           pre=pre, post=post)                                    # grid[2] + chunks
 
 # --- refused set (leg 2) ---
-# 16-bit grayscale (PIL): the v1 guard (bitdepth != 8) refuses.
-g16 = rng.integers(0, 65536, (128, 128)).astype(np.uint16)
-Image.fromarray(g16).save(os.path.join(D, "gray16.png"))
+# 16-bit grayscale, hand-built (see the note above write_png on PIL): the
+# v1 guard is bitdepth != 8, and the lane refuses it and keeps the original.
+g16 = rng.integers(0, 65536, (128, 128)).astype(">u2")
+g16rows = b"".join(b"\x00" + g16[r].tobytes() for r in range(128))
+write_png_raw_idat("gray16.png",
+                   struct.pack(">IIBBBBB", 128, 128, 16, 0, 0, 0, 0), g16rows)
 # incompressible noise: the size guard (jxl+recipe >= png) refuses.
 write_png("noise64.png", rng.integers(0, 256, (64, 64, 3)).astype(np.uint8),
           2, [0], 6, 8)
-# Z_FIXED strategy: outside the replica grid (grid = Z_DEFAULT_STRATEGY +
-# miniz tdefl) -> "unknown encoder" refusal.
-write_png("fixed.png", mkpx(200, 150, 6), 2, [1], 6, 8,
-          strategy=zlib.Z_FIXED)
-# palette (crafted: PLTE + indexed rows, grid zlib): djxl expands to RGB,
-# the pixel-shape memcmp refuses.
+# A level-0 (STORED) IDAT: a valid PNG, but no point of the replica grid
+# produces it. deflate_backend_zlib.c's find() sweeps levels
+# {6,9,1,7,5,8,4,3,2} at memLevel 8, then {9,7}, then memLevel 1..6, then
+# levels 1..9 x {FILTERED,HUFFMAN_ONLY,RLE,FIXED} -- level 0 is in none of
+# them, and a STORED block stream is not something another setting can
+# reproduce byte-for-byte. So the lane must refuse it and keep the original.
+#
+# This case used to be "Z_FIXED strategy, outside the grid", which had
+# quietly stopped being true: find() does sweep Z_FIXED, so a Z_FIXED stream
+# is transcodable now (leg 1c covers it). A windowBits -12 stream is NOT a
+# substitute either -- it was reproduced here at Z_RLE, because a
+# back-reference-free strategy never consults the window.
+_gW, _gH = 200, 400
+_gx = np.linspace(0, 255, _gW, dtype=np.float32)
+_gy = np.linspace(0, 255, _gH, dtype=np.float32)[:, None]
+_gn = rng.normal(0, 3, (_gH, _gW))
+_grid = np.dstack([np.clip(_gx + _gn, 0, 255), np.clip(_gy + _gn, 0, 255),
+                   np.clip((_gx + _gy) / 2 + _gn, 0, 255)]).astype(np.uint8)
+_gridrows = b"".join(b"\x00" + _grid[r].tobytes() for r in range(_gH))
+_gridihdr = struct.pack(">IIBBBBB", _gW, _gH, 8, 2, 0, 0, 0)
+write_png_raw_idat("stored_idat.png", _gridihdr, _gridrows, level=0)
+# The control: the SAME image at a grid point. It has to transcode, or the
+# refusal above would only be proving that cjxl or the size guard dislikes
+# this image -- which is the whole reason the pair exists.
+write_png_raw_idat("grid_ctrl.png", _gridihdr, _gridrows, level=6)
+
+# zlib-wrapped IDAT: not a PNG (no conforming decoder reads it). The lane
+# parses it far enough to say so by name and keeps the original RAW.
+write_png("wrapped_idat.png", mkpx(64, 48, 6), 2, [0], 6, 8, wbits=15)
+# palette (crafted: PLTE + indexed rows, grid zlib). Refused, but NOT by the
+# pixel-shape memcmp this comment used to claim: the spool is written with the
+# source's colortype and the source's 1-byte indexed rows and no PLTE, so
+# cjxl rejects it as an undecodable PNG ("Missing PLTE before IDAT"). The v1
+# recipe is 8-bit RGB/RGBA, so a palette PNG is out of scope either way; what
+# leg 2 pins is the disposition, not the reason.
 pal = bytes(range(256)) * 3
 idx = (np.arange(150 * 200, dtype=np.uint32).reshape(150, 200) % 256
        ).astype(np.uint8)
 write_png("palette.png", idx, 3, [0], 6, 8,
           pre=chunk(b"PLTE", pal))
-# PIL default save: on this box Pillow's stream is zlib-ng (6,9,Z_FILTERED),
-# outside the grid -> refused. (Elsewhere it may sit in the grid and
-# transcode — either disposition must read back bit-exactly.)
+# PIL default save: what a real toolchain emits. Host-dependent disposition
+# (Pillow's deflate strategy and window vary by build, and a host whose
+# Pillow writes a zlib-wrapped IDAT gets the refusal above instead), so the
+# stamp is informational -- the invariant that must hold everywhere is that
+# the file reads back bit-exact either way.
 Image.fromarray(mkpx(160, 120, 6)).save(os.path.join(D, "pil_default.png"))
+
+# --- Adam7 interlaced, hand-built (leg 2's interlace guard) ---
+# Not produced by `magick -interlace PNG`: on a host whose PNG readers expect
+# a zlib-wrapped IDAT, magick cannot even read a spec-conformant fixture and
+# the fixture would silently depend on the host's zlib. Adam7 is 7 fixed
+# passes, so building it here keeps the case deterministic everywhere.
+def adam7_passes(w, h):
+    xs = [0, 4, 0, 2, 0, 1, 0]
+    ys = [0, 0, 4, 0, 2, 0, 1]
+    xd = [8, 8, 4, 4, 2, 2, 1]
+    yd = [8, 8, 8, 4, 4, 2, 2]
+    for p in range(7):
+        cols = (w - xs[p] + xd[p] - 1) // xd[p]
+        rows = (h - ys[p] + yd[p] - 1) // yd[p]
+        yield p, xs[p], ys[p], xd[p], yd[p], cols, rows
+
+il = mkpx(64, 64, 5)
+ilfilt = bytearray()
+for p, x0, y0, xd, yd, cols, rows in adam7_passes(64, 64):
+    for r in range(rows):
+        sy = y0 + r * yd
+        # filter 0: the guard under test is the interlace flag, not filtering
+        ilfilt += b"\x00" + b"".join(
+            il[sy, x0 + i * xd, c] for i in range(cols) for c in range(3))
+write_png_raw_idat("interlaced.png",
+                   struct.pack(">IIBBBBB", 64, 64, 8, 2, 0, 0, 1), bytes(ilfilt))
+
+# Z_FIXED strategy (leg 1c): the cross-engine search can legitimately match a
+# stream that needs a non-default strategy, and the recipe has to carry it or
+# the read path cannot replay the IDAT. Before the strategy byte this file was
+# refused, and leg 2 used to assert that refusal for Z_FIXED -- which had
+# quietly become untrue, because find() does sweep the four non-default
+# strategies. A 200x120 image keeps the (deliberately bloated) IDAT small
+# enough for the 0.1 volumes below.
+write_png("zfixed.png", mkpx(200, 120, 6), 2, [1], 6, 8,
+          strategy=zlib.Z_FIXED)
 
 # --- MEMLIMIT set (leg 4) ---
 write_png("big.png", mkpx(1200, 900, 6), 2, [0, 1, 2, 3, 4], 6, 8)
 write_png("small.png", mkpx(64, 64, 6), 2, [0, 1, 2, 3, 4], 6, 8)
 
-# --- fixture sanity: the interlaced + 16-bit fixtures must be what they
-# --- claim (asserted against IHDR) ---
-subprocess.run(["magick", os.path.join(D, "grad_rgb.png"),
-                "-interlace", "PNG", os.path.join(D, "interlaced.png")],
-               check=True)
+# --- fixture sanity: the refused fixtures must be what they claim ---
 def ihdr_of(fn):
     d = open(os.path.join(D, fn), "rb").read()
     assert d[:8] == b"\x89PNG\r\n\x1a\n"
     return d[16:16 + 13]
 ih = ihdr_of("interlaced.png"); assert ih[12] == 1, "interlace flag not set"
 ih = ihdr_of("gray16.png");     assert ih[8] == 16, "not a 16-bit PNG"
-print("  interlaced.png + gray16.png sanity OK")
+ih = ihdr_of("stored_idat.png"); assert ih[8] == 8 and ih[9] == 2, "IHDR"
+print("  interlaced.png + gray16.png + stored_idat.png sanity OK")
 PY
 
 # --- FLAC fixtures (deterministic PCM, ffmpeg encoder) ---
@@ -296,53 +404,6 @@ bit_exact_all() {   # $1=image, rest: names
 
 swept_of() { sed -n 's/.*sweep done: swept=\([0-9]*\).*/\1/p' "$1"; }
 
-# Re-deflate every fixture's IDAT with the HOST zlib.
-#
-# The PNGR lane stores the JXL pixels and rebuilds the original file by
-# re-deflating the refiltered rows, so it can only transcode a PNG whose
-# original IDAT the host zlib can reproduce BIT-FOR-BIT. PIL wheels link
-# their own zlib, so the fixtures PIL wrote are not reproducible by the
-# build's zlib (here: zlib-ng) -- every combination of level, memLevel and
-# strategy missed, and all five leg-1 PNGs landed in GENERIC_GUARD{PNGR}
-# instead of being transcoded. That is a property of the lane's design, not
-# of the fixtures' content, so the fixtures are made host-reproducible:
-# decompress PIL's IDAT to the filtered stream and recompress it with this
-# interpreter's zlib at level 6. The filter bytes, the image data and the
-# decoded pixels are untouched, so each file is still the same PNG -- only
-# the IDAT encoding is one this build can reproduce.
-python3 - "$WORK/orig" <<'PY'
-import glob, os, struct, sys, zlib
-
-for path in sorted(glob.glob(os.path.join(sys.argv[1], "*.png"))):
-    d = open(path, "rb").read()
-    out = bytearray(d[:8])
-    i, changed = 8, False
-    while i < len(d):
-        ln = struct.unpack(">I", d[i:i+4])[0]
-        typ = d[i+4:i+8]
-        body = d[i+8:i+8+ln]
-        if typ == b"IDAT":
-            # coalesce the whole run of IDAT chunks, then emit it as one
-            idat = bytearray(body)
-            i += 12 + ln
-            while i + 8 <= len(d) and d[i+4:i+8] == b"IDAT":
-                n2 = struct.unpack(">I", d[i:i+4])[0]
-                idat += d[i+8:i+8+n2]
-                i += 12 + n2
-            new = zlib.compress(zlib.decompress(bytes(idat)), 6)
-            if new != body:
-                changed = True
-            out += struct.pack(">I", len(new)) + b"IDAT"
-            out += new + struct.pack(">I", zlib.crc32(b"IDAT" + new))
-            i += 12 + ln
-            continue
-        out += d[i:i+12+ln]
-        i += 12 + ln
-    if changed:
-        open(path, "wb").write(bytes(out))
-print("re-deflated IDATs with the host zlib")
-PY
-
 PNGS_OK="grad_rgb.png paeth_split.png rgba_up.png gray_sub.png ancil.png"
 
 echo "== leg 1: PNG sweep transcode (PNGR) =="
@@ -377,8 +438,40 @@ echo "stamps stable, still bit-exact"
 $B/invf-fsck "$IMG" | tee "$WORK/fsck1.log" | tail -1
 grep -q "^OK" "$WORK/fsck1.log" || { echo "FAIL: fsck not OK"; exit 1; }
 
+echo "== leg 1c: a non-default deflate strategy is transcoded and replayed =="
+# The whole point of recording `strategy` in the IVPN recipe: the sweep finds
+# the parameters, and the READ path has to reproduce the same stream from the
+# recipe alone. A recipe that assumed Z_DEFAULT_STRATEGY here produced a
+# different IDAT, and the file would have read back EIO.
+LEG1C="zfixed.png grid_ctrl.png"
+$B/invf-mkfs "$IMGS" 0.1 >/dev/null
+for f in $LEG1C; do $B/invf-cp "$IMGS" "$WORK/orig/$f" "$f" >/dev/null; done
+$B/invf-sweep "$IMGS" > "$WORK/sweep1c.log" 2>&1 || { cat "$WORK/sweep1c.log"; exit 1; }
+echo "sweep: $(grep 'sweep done' "$WORK/sweep1c.log")"
+[ "$(swept_of "$WORK/sweep1c.log")" = "2" ] || {
+    echo "FAIL: want swept=2 (Z_FIXED strategy + the STORED control)"
+    grep PNGR "$WORK/sweep1c.log" || cat "$WORK/sweep1c.log"; exit 1; }
+for f in $LEG1C; do
+    C=$("$WORK/classof" "$IMGS" "$f")
+    echo "  $f: $C"
+    [ "$C" = "cls=3 algo=10 gen=1" ] || { echo "FAIL: $f: $C"; exit 1; }
+done
+bit_exact_all "$IMGS" $LEG1C || exit 1
+$B/invf-verify "$IMGS" --deep | tee "$WORK/verify1c.log" | tail -1
+grep -q "0 corrupt" "$WORK/verify1c.log" || { echo "FAIL: corrupt files"; exit 1; }
+echo "Z_FIXED-strategy PNG + the STORED control transcoded, replayed bit-exact"
+
 echo "== leg 2: refused PNGs stay RAW, GENERIC_GUARD{PNGR,1} =="
-REF_STRICT="gray16.png interlaced.png fixed.png noise64.png"
+# stored_idat  a level-0 (STORED) IDAT: no grid point reproduces it
+# wrapped_idat a zlib-wrapped IDAT: not a PNG, refused by name
+# gray16       16-bit: the v1 guard is bitdepth != 8. (pngx's row_bytes is a
+#              bytes-per-pixel table, so a 16-bit PNG actually fails one step
+#              earlier, at the IDAT length check -- same outcome: refused,
+#              original kept, bit-exact. The guard is not what stops this
+#              one; the stamp is.)
+# interlaced   Adam7, hand-built
+# noise64      incompressible: the size guard
+REF_STRICT="stored_idat.png wrapped_idat.png gray16.png interlaced.png noise64.png"
 REF_INFO="palette.png pil_default.png"
 $B/invf-mkfs "$IMGR" 0.1 >/dev/null
 for f in $REF_STRICT $REF_INFO; do $B/invf-cp "$IMGR" "$WORK/orig/$f" "$f" >/dev/null; done
@@ -402,7 +495,7 @@ for f in $REF_INFO; do
     esac
 done
 bit_exact_all "$IMGR" $REF_STRICT $REF_INFO || exit 1
-echo "all 6 refused-case PNGs bit-exact (originals kept)"
+echo "all 7 refused-case PNGs bit-exact (originals kept)"
 $B/invf-verify "$IMGR" --deep | tail -1
 $B/invf-sweep "$IMGR" > "$WORK/sweep2b.log" 2>&1 || { cat "$WORK/sweep2b.log"; exit 1; }
 [ "$(swept_of "$WORK/sweep2b.log")" = "0" ] || { echo "FAIL: guard refired on re-sweep"; exit 1; }
