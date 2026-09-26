@@ -99,14 +99,42 @@ int main(int argc, char **argv)
      * what was found, not from what was fixed). A volume that is still
      * damaged after -f is reported as DEGRADED with the reason, never as OK,
      * and a damage -f cannot repair at all says so instead of doing nothing.
-     * The v2 path below is untouched. */
+     * The v2 path below is untouched.
+     *
+     * WP99: the walk only ever sees ONE copy of the metadata, so on a
+     * two-device volume it could not see the failure that actually loses
+     * data. It walks whatever the mux serves -- the dev1 mirror once dev0 is
+     * known to be stale -- and prints OK, while the tree reachable from the
+     * OTHER device is a rolled-back generation whose next publish drops
+     * every delta record past it. So the verdict now also asks the two
+     * devices directly (vol_mirror_compare, the same call the mount path
+     * makes) and a stale mirror is named, never folded into a clean OK. A
+     * resync the pass itself performed is reported as such. */
     if (vol_sb(v)->vol_flags & VOLF_V3) {
         const invfs_superblock *sb = vol_sb(v);
         int degraded = 0;
+        int mstale = -1, mstale_after = -1, mresynced = 0;
+        const char *mwhy = NULL, *mwhy_after = NULL;
+        (void)vol_mirror_compare(v, &mstale, &mwhy);
         if (vol_fsck_scan(v, &rep, fix) != 0) {
             fprintf(stderr, "invf-fsck: v3 scan failed\n");
             vol_close(v);
             return 1;
+        }
+        /* -f writes, so a resync pending from the open may have just run
+         * (vol_commit_mirror). Ask again rather than reporting a mirror this
+         * pass already put right -- but only after making sure it did: the
+         * resync is a flush-time action and a report leaves the volume
+         * untouched, so on a tree with no structural damage nothing would
+         * have flushed and the "-f" this report points the operator at would
+         * be a lie. */
+        if (mstale >= 0 && fix) {
+            if (vol_flush(v) != 0)
+                fprintf(stderr, "invf-fsck: %s: the mirror resync flush "
+                        "failed; the devices are still out of sync\n", img);
+            (void)vol_mirror_compare(v, &mstale_after, &mwhy_after);
+            if (mstale_after < 0)
+                mresynced = 1;
         }
         if (rep.v3_rt30_bad || rep.v3_root_lost) {
             degraded = 1;
@@ -183,12 +211,38 @@ int main(int argc, char **argv)
                            "named the lost files were inside a quarantined "
                            "range too (see above)\n");
             }
+            /* WP99: the two-device mirror verdict, asked of the devices
+             * rather than of whatever the mux served the walk. A stale
+             * device is named with the signal that saw it, because the
+             * consequence is specific: a dev0 that is behind holds a
+             * rolled-back root descriptor, and mounting it read-write
+             * adopts that generation and drops the delta records past it. */
+            if (mresynced)
+                printf("  mirror:       dev%d was stale (%s); RESYNCED by this "
+                       "pass, both devices now carry the same generation\n",
+                       mstale, mwhy ? mwhy : "block 0");
+            else if (mstale >= 0)
+                printf("  mirror:       dev%d is STALE (%s) -- its block 0 is "
+                       "behind the other device's. The tree walked above is "
+                       "the newer copy and reads fine, but this volume is NOT "
+                       "in sync: a mount that serves dev%d would adopt a "
+                       "rolled-back root and drop the writes since. Reattach "
+                       "both devices and run `invf-fsck -f %s` to resync "
+                       "(newest state wins).\n",
+                       mstale, mwhy ? mwhy : "block 0", mstale, img);
+            else if (vol_ndev(v) == 2)
+                printf("  mirror:       in sync\n");
             /* The verdict line keeps the v2 vocabulary (and the exact strings
              * the e2e gates grep for): OK / DAMAGED / REPAIRED. The exit code
              * is 3 whenever damage was found, REPAIRED or not -- the pass that
              * finds the damage is the one that raises the alarm. What was
-             * repaired, and what is gone, is spelled out above. */
-            if (!rep.v3_damaged)
+             * repaired, and what is gone, is spelled out above.
+             * WP99 adds MIRROR STALE, a verdict of its own for a volume whose
+             * one device is behind: the tree is walkable, so DAMAGED would be
+             * wrong, and OK would be the silent lie this pass exists to stop. */
+            if (!rep.v3_damaged && mstale >= 0 && !mresynced)
+                printf("MIRROR STALE\n");
+            else if (!rep.v3_damaged)
                 printf("OK\n");
             else if (rep.v3_repaired)
                 printf("REPAIRED\n");
@@ -197,7 +251,7 @@ int main(int argc, char **argv)
             (void)degraded;
         }
         vol_close(v);
-        return rep.v3_damaged ? 3 : 0;
+        return (rep.v3_damaged || (mstale >= 0 && !mresynced)) ? 3 : 0;
     }
 
     /* WP21: with a sweep checkpoint live, the rebuild's orphan reclaim is
