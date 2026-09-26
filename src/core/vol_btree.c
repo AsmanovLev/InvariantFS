@@ -4161,3 +4161,411 @@ int vol_v3_iter_live_inodes(invfs_volume *v,
     free(ic.visited);
     return rc;
 }
+
+/* ------------------------------------------------------------------ */
+/* WP96: live-set iteration at an ARBITRARY save-point generation       */
+/* ------------------------------------------------------------------ */
+
+/* vol_v3_iter_live_inodes above always walks the CURRENT base root and the
+ * CURRENT delta overlay. WP96 needs the inode set of a PAST generation --
+ * the one an SPT0 save point pinned -- twice: at capture, to take the data
+ * pin, and at restore, to verify the pinned state before republishing it.
+ * That state is exactly the pair SPT0 records:
+ *
+ *     { base inode rows at `root_pba` } overlaid by
+ *     { delta records written before `delta_end` }
+ *
+ * The delta half CANNOT come from v->delta_index: the index coalesces, so it
+ * only knows the newest record per key, and the whole point of this walk is
+ * the generation where a later record has since replaced the pinned one. So
+ * the pinned prefix is replayed from the log itself, oldest segment to
+ * newest, and every 8-byte-key (inode) record in it is collected with its
+ * position; last-wins within a key is decided by log order, exactly as
+ * vol_delta_mount resolves it.
+ *
+ * The prefix test needs the chain geometry, because delta_end is measured in
+ * the log's own units: spt0_capture counts `delta_bump` bytes of the then-
+ * head segment plus INVFS_DELTA_SEG_BYTES for every older one. So a record
+ * written at (segment, depth d from the head, offset off) belongs to the
+ * pinned prefix iff
+ *
+ *     d >= delta_segs                  -> appended after the capture
+ *     d <  delta_segs - 1              -> a full older segment: in
+ *     d == delta_segs - 1              -> the captured head: off < bump,
+ *                                          bump = delta_end - (segs-1)*SEG
+ *
+ * and a segment that is not in the chain at all is not in the prefix. That
+ * those records are still PHYSICALLY there is spt0_delta_intact's job in
+ * vol_spt0.c, not this walk's (a fold resets the chain, and then the pinned
+ * state is unrecoverable -- a refusal, not a walk).
+ *
+ * Cost: one sequential pass over the pinned prefix of the log (the same bytes
+ * vol_delta_mount replays at every open), one sequential pass over the base
+ * tree under the root, and an O(k log k) sort of the k inode records the
+ * prefix holds. No name resolution (callers want recipes, not paths) and no
+ * recursion beyond btree_scan's own. */
+
+/* one inode record inside the pinned log prefix */
+typedef struct {
+    uint64_t id;
+    uint64_t seg;
+    uint64_t off;
+    uint64_t seq;          /* log order; the highest wins for a key */
+    uint16_t flags;
+    uint16_t vlen;
+} v3_gen_rec;
+
+typedef struct {
+    invfs_volume *v;
+    int (*cb)(invfs_volume *v, uint64_t inode_id,
+              const invfs_v3_inode *in, void *ctx);
+    void *ctx;
+    uint64_t delta_end;
+    uint64_t delta_segs;
+    uint64_t delta_head_pba; /* the head segment AT capture */
+    uint64_t head_bump;
+    int64_t   head_depth;    /* where that head sits in the CURRENT chain */
+    uint64_t *seg_pba;       /* chain_pba[depth], head first */
+    size_t    nseg;
+    v3_gen_rec *recs;        /* the prefix's inode records, log order */
+    size_t    nrecs, crecs;
+    uint64_t *visited;
+    size_t    visited_cap;
+    size_t    visited_n;
+    int       oom;
+} v3_gen_ctx;
+
+static int v3_gen_rec_push(v3_gen_ctx *gc, const v3_gen_rec *r)
+{
+    if (gc->nrecs == gc->crecs) {
+        size_t nc = gc->crecs ? gc->crecs * 2 : 64;
+        v3_gen_rec *nr = (v3_gen_rec *)realloc(gc->recs, nc * sizeof *nr);
+        if (!nr) { gc->oom = 1; return -1; }
+        gc->recs = nr;
+        gc->crecs = nc;
+    }
+    gc->recs[gc->nrecs++] = *r;
+    return 0;
+}
+
+static int v3_gen_rec_cmp(const void *a, const void *b)
+{
+    const v3_gen_rec *x = (const v3_gen_rec *)a, *y = (const v3_gen_rec *)b;
+    if (x->id != y->id)
+        return x->id < y->id ? -1 : 1;
+    if (x->seq != y->seq)
+        return x->seq < y->seq ? -1 : 1;
+    return 0;
+}
+
+/* Replay the pinned prefix of the log, collecting its inode records. The
+ * chain is walked newest -> oldest to build seg_pba, then replayed oldest ->
+ * newest (log order) so `seq` is monotone. */
+static int v3_gen_prefix_replay(invfs_volume *v, v3_gen_ctx *gc)
+{
+    uint64_t cur = v->delta_seg_pba, seq = 0;
+    uint32_t guard = 0;
+    size_t d;
+
+    if (gc->delta_end == 0 || !gc->delta_segs)
+        return 0;                            /* the generation had no log */
+    while (cur && guard++ < DELTA_MAX_SEGMENTS) {
+        invfs_delta_seg_hdr h;
+        uint64_t *np;
+        if (delta_read_hdr(v, cur, &h) != 0)
+            break;
+        np = (uint64_t *)realloc(gc->seg_pba, (gc->nseg + 1) * sizeof *np);
+        if (!np)
+            return -1;
+        gc->seg_pba = np;
+        gc->seg_pba[gc->nseg++] = cur;
+        if (h.prev_pba == cur)
+            break;
+        cur = h.prev_pba;
+    }
+    /* Where the CAPTURED head sits in the chain as it is NOW. The log is
+     * append-only, so a sweep that filled the head rolled a NEW segment in
+     * front of it: the captured head is then at depth > 0 and everything in
+     * front of it is post-capture. (Depth-from-the-head alone cannot say
+     * this -- that is exactly how a post-sweep recipe used to be mistaken for
+     * a pinned one.) */
+    gc->head_depth = -1;
+    for (d = 0; d < gc->nseg; d++)
+        if (gc->seg_pba[d] == gc->delta_head_pba) {
+            gc->head_depth = (int64_t)d;
+            break;
+        }
+    if (gc->head_depth < 0)
+        return -1;                           /* the prefix is gone; the caller
+                                             * refuses the rollback */
+    for (d = gc->nseg; d-- > 0; ) {
+        uint8_t *buf;
+        size_t plen, off = 0, limit;
+        invfs_delta_seg_hdr h;
+
+        if ((int64_t)d > gc->head_depth)
+            continue;                        /* newer than the captured head */
+        if (delta_read_hdr(v, gc->seg_pba[d], &h) != 0)
+            return -1;
+        buf = (uint8_t *)malloc((size_t)INVFS_DELTA_SEG_BYTES);
+        if (!buf)
+            return -1;
+        if (io_pread(&v->io, gc->seg_pba[d] * (uint64_t)INVFS_BLOCK_SIZE,
+                     buf, (size_t)INVFS_DELTA_SEG_BYTES) != 0) {
+            free(buf);
+            return -1;
+        }
+        plen = (size_t)(INVFS_DELTA_SEG_BYTES - h.hdr_size);
+        /* The captured head contributes only its used prefix; every older
+         * segment contributed all of itself (delta_end counts their full
+         * stride). `off` below is PAYLOAD-relative (the records start after
+         * the segment header) while head_bump is a SEGMENT offset, so the cut
+         * has to be translated -- miss that by hdr_size and the first record
+         * written after the capture is read as if it were inside it, which
+         * hands the restore a post-sweep recipe. */
+        limit = plen;
+        if ((int64_t)d == gc->head_depth) {
+            uint64_t usable = gc->head_bump > h.hdr_size
+                            ? gc->head_bump - h.hdr_size : 0;
+            limit = (size_t)usable;
+        }
+        if (limit > plen)
+            limit = plen;
+        while (off < limit) {
+            uint16_t kl, vl, fl;
+            size_t rl;
+            int rc = vol_delta_rec_parse(buf + h.hdr_size, plen, off,
+                                         &kl, &vl, &fl, &rl);
+            v3_gen_rec r;
+            if (rc <= 0)
+                break;                       /* clean end or torn tail */
+            if (kl == 8) {
+                uint64_t id = 0;
+                uint16_t i;
+                for (i = 0; i < 8; i++)
+                    id = (id << 8) | buf[h.hdr_size + off +
+                                          INVFS_DELTA_REC_HDR_LEN + i];
+                if (id >= INVFS_V3_ROOT_INO) {
+                    r.id = id;
+                    r.seg = gc->seg_pba[d];
+                    r.off = (uint64_t)h.hdr_size + off;
+                    r.seq = seq;
+                    r.flags = fl;
+                    r.vlen = vl;
+                    if (v3_gen_rec_push(gc, &r) != 0) {
+                        free(buf);
+                        return -1;
+                    }
+                }
+            }
+            seq++;
+            off += rl;
+        }
+        free(buf);
+        if (gc->oom)
+            return -1;
+    }
+    if (gc->nrecs > 1)
+        qsort(gc->recs, gc->nrecs, sizeof *gc->recs, v3_gen_rec_cmp);
+    return 0;
+}
+
+/* how many consecutive entries share recs[lo]'s id */
+static size_t v3_gen_run(const v3_gen_ctx *gc, size_t lo)
+{
+    size_t n = 1;
+    while (lo + n < gc->nrecs && gc->recs[lo + n].id == gc->recs[lo].id)
+        n++;
+    return n;
+}
+
+/* the winning prefix record for `id`, or NULL. Records are sorted by
+ * (id, log order), so the last entry of the id's run is the one replay would
+ * have kept. */
+static const v3_gen_rec *v3_gen_find(const v3_gen_ctx *gc, uint64_t id)
+{
+    size_t lo = 0, hi = gc->nrecs;
+    while (lo < hi) {
+        size_t mid = lo + (hi - lo) / 2;
+        if (gc->recs[mid].id < id)
+            lo = mid + 1;
+        else
+            hi = mid;
+    }
+    if (lo < gc->nrecs && gc->recs[lo].id == id)
+        return &gc->recs[lo + v3_gen_run(gc, lo) - 1];
+    return NULL;
+}
+
+static int v3_gen_seen_id(const v3_gen_ctx *gc, uint64_t id)
+{
+    size_t h;
+    if (!gc->visited_cap)
+        return 0;
+    h = id & (gc->visited_cap - 1);
+    while (gc->visited[h]) {
+        if (gc->visited[h] == id)
+            return 1;
+        h = (h + 1) & (gc->visited_cap - 1);
+    }
+    return 0;
+}
+
+static int v3_gen_mark(v3_gen_ctx *gc, uint64_t id)
+{
+    size_t h;
+
+    if (gc->visited_n * 2 >= gc->visited_cap) {
+        size_t nc = gc->visited_cap ? gc->visited_cap * 2 : 64;
+        uint64_t *nv = (uint64_t *)calloc(nc, sizeof *nv);
+        size_t i;
+        if (!nv) { gc->oom = 1; return 0; }
+        for (i = 0; i < gc->visited_cap; i++) {
+            if (gc->visited[i]) {
+                size_t hh = gc->visited[i] & (nc - 1);
+                while (nv[hh]) hh = (hh + 1) & (nc - 1);
+                nv[hh] = gc->visited[i];
+            }
+        }
+        free(gc->visited);
+        gc->visited = nv;
+        gc->visited_cap = nc;
+    }
+    h = id & (gc->visited_cap - 1);
+    while (gc->visited[h]) h = (h + 1) & (gc->visited_cap - 1);
+    gc->visited[h] = id;
+    gc->visited_n++;
+    return 1;
+}
+
+static int v3_gen_emit_row(v3_gen_ctx *gc, uint64_t id, const uint8_t *row,
+                           uint16_t rlen)
+{
+    invfs_v3_inode in;
+    if (!v3_gen_mark(gc, id))
+        return -1;
+    if (v3_ino_decode(row, rlen, &in) != 0)
+        return 0;                        /* a row we cannot decode names no
+                                         * recipe we could verify */
+    if (in.nlink == 0)
+        return 0;
+    return gc->cb(gc->v, id, &in, gc->ctx);
+}
+
+static int v3_gen_emit_ref(v3_gen_ctx *gc, uint64_t id, const v3_gen_rec *r)
+{
+    uint8_t rb[INVFS_V3_INODE_ROW_FIXED];
+    uint16_t rlen = 0;
+    delta_ref ref;
+
+    memset(&ref, 0, sizeof ref);
+    ref.seg = r->seg;
+    ref.off = r->off;
+    ref.flags = r->flags;
+    ref.vlen = r->vlen;
+    if (vol_delta_read_value(gc->v, &ref, rb, sizeof rb, &rlen) != 0)
+        return -1;
+    return v3_gen_emit_row(gc, id, rb, rlen);
+}
+
+static int v3_gen_base_cb(void *ctx_, bt_key k, bt_val val)
+{
+    v3_gen_ctx *gc = (v3_gen_ctx *)ctx_;
+    const v3_gen_rec *r;
+    uint64_t id = 0;
+    uint16_t i;
+
+    if (k.n != 8)                          /* not an inode row: dirent (>= 10
+                                         * bytes), xattr (0x03), recipe (0x04) */
+        return 0;
+    for (i = 0; i < 8; i++)
+        id = (id << 8) | k.p[i];
+    if (id < INVFS_V3_ROOT_INO)
+        return 0;
+    r = v3_gen_find(gc, id);
+    if (r) {
+        if (r->flags & INVFS_DELTA_FLAG_DELETE)
+            return 0;                      /* the pinned generation deleted it */
+        return v3_gen_emit_ref(gc, id, r);
+    }
+    return v3_gen_emit_row(gc, id, val.p, val.n);
+}
+
+/* the delta pass: pinned-prefix records for inodes the base tree never had */
+static int v3_gen_delta_pass(v3_gen_ctx *gc)
+{
+    size_t i = 0;
+
+    while (i < gc->nrecs) {
+        size_t run = v3_gen_run(gc, i);
+        const v3_gen_rec *r = &gc->recs[i + run - 1];
+        if (!v3_gen_seen_id(gc, r->id) &&
+            !(r->flags & INVFS_DELTA_FLAG_DELETE)) {
+            if (v3_gen_emit_ref(gc, r->id, r) != 0)
+                return -1;
+        }
+        i += run;
+    }
+    return 0;
+}
+
+int vol_v3_iter_inodes_at(invfs_volume *v, uint64_t root_pba,
+                          uint64_t delta_end, uint64_t delta_segs,
+                          uint64_t delta_head_pba,
+                          int (*cb)(invfs_volume *v, uint64_t inode_id,
+                                    const invfs_v3_inode *in, void *ctx),
+                          void *ctx)
+{
+    v3_gen_ctx gc;
+    invfs_blkptr root;
+    uint8_t lo[8];
+    int rc = 0;
+
+    if (!v || !cb)
+        return -1;
+    memset(&root, 0, sizeof root);
+    memset(&gc, 0, sizeof gc);
+    gc.v = v;
+    gc.cb = cb;
+    gc.ctx = ctx;
+    gc.delta_end = delta_end;
+    gc.delta_segs = delta_segs;
+    gc.delta_head_pba = delta_head_pba;
+    gc.head_bump = (delta_segs > 1)
+                 ? delta_end - (delta_segs - 1) * INVFS_DELTA_SEG_BYTES
+                 : delta_end;
+    if (gc.head_bump < INVFS_DELTA_SEG_HDR_LEN)
+        gc.head_bump = INVFS_DELTA_SEG_HDR_LEN;
+
+    if (v3_gen_prefix_replay(v, &gc) != 0 || gc.oom) {
+        free(gc.seg_pba);
+        free(gc.recs);
+        return -1;
+    }
+    if (root_pba) {
+        /* the root page's level decides the blkptr flags btree_scan wants
+         * (the same pairing spt0_tree_ok builds) */
+        uint8_t page[INVFS_BLOCK_SIZE];
+        if (mbuf_read(v, root_pba, page) != 0) {
+            free(gc.seg_pba);
+            free(gc.recs);
+            return -1;
+        }
+        mbuf_ptr_set(&root, root_pba, page,
+                     mbuf_page_chdr(page)->level == INVFS_PAGE_LEVEL_LEAF
+                     ? INVFS_BP_ROOT | INVFS_BP_LEAF
+                     : INVFS_BP_ROOT | INVFS_BP_INTERNAL);
+    }
+    v3_ino_key(INVFS_V3_ROOT_INO, lo);
+    if (root_pba)
+        rc = btree_scan(v, root, (bt_key){lo, 8}, (bt_key){NULL, 0},
+                        v3_gen_base_cb, &gc);
+    if (rc == 0)
+        rc = v3_gen_delta_pass(&gc);
+    if (rc != 0 || gc.oom)
+        rc = -1;
+    free(gc.seg_pba);
+    free(gc.recs);
+    free(gc.visited);
+    return rc;
+}

@@ -2049,6 +2049,7 @@ void vol_close(invfs_volume *v)
     free(v->pba_ref);
     free(v->seal_dirty);
     free(v->retmap);
+    free(v->spn_bitmap);        /* WP96: the save point's in-memory mark set */
     free(v->tz);
     free(v->bz);
     free(v->bitmap);
@@ -4167,39 +4168,19 @@ uint64_t vol_write_guard(invfs_volume *v)
 }
 
 
-void vol_free_blocks(invfs_volume *v, uint64_t pba, uint64_t nblocks)
+/* The real free of one CONTIGUOUS, wholly-unpinned run: clear the bits, give
+ * the space back to its zone, mark the seal dirty, release the ENOSPC latch.
+ * vol_free_blocks below is the entry point and the only place a block can be
+ * freed; it splits a pinned run into its unpinned parts and calls this once
+ * per part. Keeping the body in its own function (rather than recursing on
+ * vol_free_blocks) is what makes that split non-recursive and the free
+ * counters exact. */
+static void vol_free_run(invfs_volume *v, uint64_t pba, uint64_t nblocks)
 {
     uint64_t i;
     uint64_t end = pba + nblocks;
     if (end > v->sb.total_blocks)
         end = v->sb.total_blocks;
-    /* WP21: while a sweep checkpoint (CKP0) is live, NOTHING is freed. The
-     * blocks stay allocated in the bitmap (that is what bars their reuse
-     * for the rest of the checkpoint's life -- the rollback fidelity
-     * guarantee) and are recorded in retmap, the realize-time registry
-     * list. Content does not change, so seal stripes stay valid and the
-     * free counters stay honest (the blocks are NOT free). Idempotent per
-     * block, so the PB7 shared-pba cases mark twice without consequence.
-     *
-     * Retention keys on the ON-DISK state (ck_present), not on this
-     * session having armed the checkpoint (v->retain): the arming sweep
-     * exits with the checkpoint still live, and a later process' frees
-     * (a FUSE write's retire path, a delete, an unseal's parity release)
-     * would otherwise free PRE-checkpoint blocks for real and let a
-     * post-checkpoint allocation reuse them -- invf-rollback then
-     * resurrects the pre-sweep record over somebody else's bytes (F4, the
-     * leg-5 soak's THIRD STATE). A NULL retmap (any process that did not
-     * arm) degrades registration to "stays allocated, unregistered": the
-     * rollback rebuild still keeps the resurrected references live, and
-     * the post-resolution fsck reclaims what nothing references.
-     * retain_release exempts the checkpoint machinery's own deliberate
-     * frees (realize / arm unwind / no-op disarm). */
-    if ((v->retain || v->ck_present) && !v->retain_release) {
-        if (v->retmap)
-            for (i = pba; i < end; i++)
-                bit_set(v->retmap, i);
-        return;
-    }
     /* WP25: a REAL free (retention above holds its blocks) drops the
      * redundant second copy: the dev1 mirror of a raw-zone run, or the
      * dev0 acceleration copy of a canonical dev1-shadow run. */
@@ -4236,6 +4217,98 @@ void vol_free_blocks(invfs_volume *v, uint64_t pba, uint64_t nblocks)
     }
     /* H5: freeing is the way out of the space latch -- re-evaluate */
     vol_readonly_unlatch(v);
+}
+
+void vol_free_blocks(invfs_volume *v, uint64_t pba, uint64_t nblocks)
+{
+    uint64_t i;
+    uint64_t end = pba + nblocks;
+    if (end > v->sb.total_blocks)
+        end = v->sb.total_blocks;
+    /* WP21: while a sweep checkpoint (CKP0) is live, NOTHING is freed. The
+     * blocks stay allocated in the bitmap (that is what bars their reuse
+     * for the rest of the checkpoint's life -- the rollback fidelity
+     * guarantee) and are recorded in retmap, the realize-time registry
+     * list. Content does not change, so seal stripes stay valid and the
+     * free counters stay honest (the blocks are NOT free). Idempotent per
+     * block, so the PB7 shared-pba cases mark twice without consequence.
+     *
+     * Retention keys on the ON-DISK state (ck_present), not on this
+     * session having armed the checkpoint (v->retain): the arming sweep
+     * exits with the checkpoint still live, and a later process' frees
+     * (a FUSE write's retire path, a delete, an unseal's parity release)
+     * would otherwise free PRE-checkpoint blocks for real and let a
+     * post-checkpoint allocation reuse them -- invf-rollback then
+     * resurrects the pre-sweep record over somebody else's bytes (F4, the
+     * leg-5 soak's THIRD STATE). A NULL retmap (any process that did not
+     * arm) degrades registration to "stays allocated, unregistered": the
+     * rollback rebuild still keeps the resurrected references live, and
+     * the post-resolution fsck reclaims what nothing references.
+     * retain_release exempts the checkpoint machinery's own deliberate
+     * frees (realize / arm unwind / no-op disarm). */
+    if ((v->retain || v->ck_present) && !v->retain_release) {
+        if (v->retmap)
+            for (i = pba; i < end; i++)
+                bit_set(v->retmap, i);
+        return;
+    }
+    /* WP96: the v3 save point's DATA pin, the one place a v3 volume has one.
+     * Same rule as the v2 checkpoint above, keyed on the on-disk pin (v->
+     * spn_armed, loaded at open) rather than on this session having armed
+     * anything: the sweep that armed the window is not the only writer on
+     * the volume, and a FUSE write's retire path, a delete, or a later
+     * process' sweep must all see the hold. Sitting HERE rather than at the
+     * publishers that replace recipes is the point -- vol_v3_free_recipe_
+     * blocks has four v3 call sites and the drain frees directly, and a
+     * missing one is exactly the silent corruption this refuses: a rollback
+     * republishing a recipe over a block somebody else now owns. The blocks
+     * stay ALLOCATED (that is what bars reuse) and the next save-point
+     * capture's reclaim pass gives them back once no live recipe names
+     * them, so the hold costs one generation, not the volume. */
+    if (!v->retain_release && spt0_block_pinned(v, pba, end - pba))
+        return;
+    /* WP96: the v3 save point's DATA pin, the one place a v3 volume has one.
+     * Same rule as the v2 checkpoint above, keyed on the on-disk pin (v->
+     * spn_armed, loaded at open) rather than on this session having armed
+     * anything: the sweep that armed the window is not the only writer on
+     * the volume, and a FUSE write's retire path, a delete, or a later
+     * process' sweep must all see the hold. Sitting HERE rather than at the
+     * publishers that replace recipes is the point -- vol_v3_free_recipe_
+     * blocks has four v3 call sites and the drain frees directly, and a
+     * missing one is exactly the silent corruption this refuses: a rollback
+     * republishing a recipe over a block somebody else now owns.
+     *
+     * PER BLOCK, not per run. A held block must not hold its neighbours: the
+     * reclaim pass can only discharge the PIN's own debt (it walks the
+     * previous mark set), so a block that is unpinned but got dragged along by
+     * a pinned neighbour is in NO mark set and NOTHING will ever free it. That
+     * is a structural leak, so the run is split and only the unpinned parts
+     * are freed; the pinned blocks stay ALLOCATED (that is what bars their
+     * reuse) and the next save-point capture's reclaim pass gives them back
+     * once no live recipe names them, so the hold costs one generation, not
+     * the volume.
+     *
+     * HONEST SCOPE: on today's publishers (whole recipe extents, all-or-
+     * nothing) this split changes no measured behaviour -- the four free-path
+     * suites and the 8-sweep pin-cost run are identical with and without it.
+     * It is HARDENING against a mixed-extent free, not a measured fix; the
+     * measured leak in this WP was spn_reclaim's (src/core/vol_spt0.c), whose
+     * own "N blocks reclaimed" log line is what hid it. Keeping it costs one
+     * bitmap probe per block on the rare path where a run IS pinned, and it
+     * keeps the invariant local to the one choke point: "a block is freed iff
+     * no live save point names it". */
+    if (v->retain_release || !spt0_block_pinned(v, pba, end - pba)) {
+        vol_free_run(v, pba, end - pba);
+        return;
+    }
+    {
+        uint64_t run = 0;
+        for (i = pba; i < end; i++) {
+            if (!spt0_block_pinned(v, i, 1)) { run++; continue; }
+            if (run) { vol_free_run(v, i - run, run); run = 0; }
+        }
+        if (run) vol_free_run(v, end - run, run);
+    }
 }
 
 

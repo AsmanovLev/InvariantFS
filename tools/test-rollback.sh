@@ -26,6 +26,19 @@
 #   [A3/C] the restore consumes the window: a second rollback refuses
 #   (rc!=0, "no save point"). That refusal is the point of no return.
 #
+#   [W] WP96: the save point's DATA half, second layer. [B] proves the pin
+#   holds the pre-sweep segments; [W] proves the restore-time check by REMOVING
+#   the pin (INVFS_SPT0_NOPIN=1), letting the sweep free and the next write
+#   reuse the blocks, and then requiring the rollback to be REFUSED
+#   (SPT0_RC_DAMAGED, rc 5) with the volume completely untouched -- the loud
+#   refusal replaces the silent corruption the old [B] had to assert.
+#
+#   [R] WP96: the reclaim pass. The pin must cost ONE generation, not the
+#   volume: a second bare sweep has to report a REAL reclaim and the free-block
+#   count must hold steady at a constant live set. This leg exists because the
+#   reclaim shipped broken and its own log line hid it (a run length reported as
+#   a block count), so "the log said it reclaimed" proved nothing.
+#
 #   [P] the SPT0 contract through the engine API, since [D] retention
 #   fidelity, [G] overwrite-under-a-live-window and [C] spt0_drop are
 #   properties of vol_spt0.c rather than of the CLI wiring:
@@ -53,9 +66,12 @@ IMGE=wp21rb-e.img    # crash legs
 IMGF=wp21rb-f.img    # refusals (fresh / sealed / double)
 IMGG=wp21rb-g.img    # F4: overwrite under a live checkpoint retains
 IMGH=wp85-h.img      # WP85: append held across a rollback is refused
+IMGI=wp96-i.img      # WP96: with the pin disabled, a rollback onto reused
+                     # data is REFUSED and the volume is left alone
+IMGR=wp96-r.img      # WP96: the reclaim pass gives the pin's blocks back
 rm -rf "$WORK" && mkdir -p "$WORK/orig" "$WORK/out"
 cd /dev/shm
-rm -f "$IMGA" "$IMGB" "$IMGC" "$IMGD" "$IMGE" "$IMGF" "$IMGG" "$IMGH"
+rm -f "$IMGA" "$IMGB" "$IMGC" "$IMGD" "$IMGE" "$IMGF" "$IMGG" "$IMGH" "$IMGI" "$IMGR"
 
 fail() { echo "FAIL: $*" >&2; exit 1; }
 
@@ -402,27 +418,118 @@ grep -q "rolled back to save point" "$WORK/rb-b.log" \
 n=$($B/invf-ls "$IMGA" 2>/dev/null | grep -c "late-add.txt" || true)
 [ "$n" = 0 ] || fail "B: the post-savepoint file SURVIVED the rollback"
 echo "  post-savepoint write discarded by the rollback"
-# KNOWN GAP (impl_docs/AUDIT.md, P0 "rollback can restore a state whose data
-# blocks the sweep already reclaimed"): an SPT0 save point pins
-# {base_root, delta_end} and nothing else. A sweep that re-encodes a file
-# publishes a new recipe and immediately frees the old segments, so after a
-# sweep that batched anything, the restored recipe can point at blocks that
-# have since been reallocated -- the read then fails with "segment CRC
-# mismatch" even though invf-rollback returned 0 and invf-fsck said OK.
-# Measured: the two ZSTD/BCJ-batched binaries unreadable, every unbatched
-# file bit-exact. Until the save point pins (or validates) its data blocks,
-# assert the failure mode instead of pretending the leg is green.
-if check_all "B post-rollback" "$IMGA" 2>"$WORK/checkb.log"; then
-    $B/invf-verify "$IMGA" --deep | tail -1 | grep -q " 0 corrupt," \
-        || fail "B: verify not clean after the rollback"
-    echo "  rollback restored a fully readable volume"
-else
-    sed 's/^/  /' "$WORK/checkb.log"
-    echo "  KNOWN GAP: the rollback restored a volume whose re-encoded data"
-    echo "  blocks the sweep had already reclaimed (see impl_docs/AUDIT.md)."
-    echo "  This leg flips to the strict assertion when that is fixed."
-fi
+# WP96: this used to be the KNOWN GAP (impl_docs/AUDIT.md, P0 "rollback can
+# restore a state whose data blocks the sweep already reclaimed"), asserted
+# as a failure mode because it was one. It is now a strict assertion, and it
+# proves the save point's DATA half: at capture every block the captured
+# generation's recipes name is marked in the SPN0 pin and stays allocated, so
+# the sweep that re-encodes a.c (PPMd), bin_x64/bin_a64 (ZSTD+BCJ) and rand.bin
+# (RAW->shadow) cannot hand those blocks to the allocator -- and the restore
+# additionally re-checks every pinned segment against the identity recorded at
+# capture, so a block that somehow WAS reused refuses the rollback
+# (SPT0_RC_DAMAGED) instead of publishing a recipe over it.
+check_all "B post-rollback" "$IMGA" 2>"$WORK/checkb.log" \
+    || { sed 's/^/  /' "$WORK/checkb.log"; fail "B: the rollback did not restore a bit-exact volume"; }
+echo "  every corpus file bit-exact after the rollback (the pin held the pre-sweep segments)"
+$B/invf-verify "$IMGA" --deep | tail -1 | grep -q " 0 corrupt," \
+    || { $B/invf-verify "$IMGA" --deep | tail -3; fail "B: verify not clean after the rollback"; }
+echo "  verify --deep clean: the restored generation is readable end to end"
 $B/invf-fsck "$IMGA" | grep -q "^OK$" || fail "B: fsck not clean after the rollback"
+
+echo
+echo "== [W] WP96: with the pin disabled, a rollback onto reused data REFUSES =="
+# Layer 2 of the WP96 fix, proved independently of layer 1. INVFS_SPT0_NOPIN=1
+# turns the pin off, so the sweep frees exactly what it always freed and the
+# post-sweep write reuses those blocks -- the state that used to yield "rc 0,
+# fsck OK, every read of the batched files fails". The restore must instead
+# compare every segment the pinned recipes name against the identity the
+# capture recorded, refuse, and leave the volume alone.
+INVFS_SPT0_NOPIN=1 $B/invf-mkfs "$IMGI" 0.5 >/dev/null || fail "W: mkfs failed"
+for f in $FILES; do
+    INVFS_SPT0_NOPIN=1 $B/invf-cp "$IMGI" "$WORK/orig/$f" "$f" >/dev/null \
+        || fail "W: could not stage $f"
+done
+INVFS_SPT0_NOPIN=1 $B/invf-sweep "$IMGI" > "$WORK/sweep-w.log" 2>&1 \
+    || { cat "$WORK/sweep-w.log"; fail "W: sweep failed"; }
+grep -q "save point captured" "$WORK/sweep-w.log" \
+    || fail "W: the sweep armed no save point even with the pin disabled"
+echo "  save point armed with the data pin DISABLED"
+# reuse the blocks the sweep just freed: a fresh incompressible write lands on
+# the pre-sweep segments, which is what makes the restore's data wrong
+head -c 25000000 /dev/urandom > "$WORK/orig/.wfill"
+INVFS_SPT0_NOPIN=1 $B/invf-cp "$IMGI" "$WORK/orig/.wfill" "w-fill.bin" >/dev/null \
+    || fail "W: could not write the reusing file"
+rm -f "$WORK/orig/.wfill"
+# the post-sweep state is healthy -- a refusal here must not be a false alarm
+check_all "W post-sweep" "$IMGI" || fail "W: the post-sweep volume is already broken"
+nsl=$($B/invf-ls "$IMGI" 2>/dev/null | wc -l)
+rc=0
+INVFS_SPT0_NOPIN=1 $B/invf-rollback "$IMGI" > "$WORK/rb-w.log" 2>&1 || rc=$?
+sed 's/^/  /' "$WORK/rb-w.log"
+[ "$rc" -ne 0 ] || fail "W: the rollback SUCCEEDED onto reused data (the P0 is back)"
+grep -q "invf-spt0: refusing to roll back" "$WORK/rb-w.log" \
+    || fail "W: the refusal did not come from the save point's data check"
+echo "  rollback REFUSED (rc=$rc) with the reason above"
+# the volume must be untouched: same namespace, same bytes, fsck clean
+nsl2=$($B/invf-ls "$IMGI" 2>/dev/null | wc -l)
+[ "$nsl" = "$nsl2" ] || fail "W: the refused rollback changed the namespace ($nsl -> $nsl2)"
+check_all "W post-refusal" "$IMGI" || fail "W: the refused rollback damaged the volume"
+$B/invf-verify "$IMGI" --deep | tail -1 | grep -q " 0 corrupt," \
+    || fail "W: verify not clean after the refusal"
+$B/invf-fsck "$IMGI" | grep -q "^OK$" || fail "W: fsck not clean after the refusal"
+echo "  volume untouched: $nsl2 names, every file bit-exact, verify --deep clean, fsck OK"
+# and the window is still live, so the operator can drop it deliberately
+rc=0; $B/invf-rollback "$IMGI" > "$WORK/rb-w2.log" 2>&1 || rc=$?
+[ "$rc" -ne 0 ] || fail "W: the second rollback succeeded (the save point was consumed by a refusal)"
+echo "  the save point survived the refusal (a re-run still refuses, not consumes)"
+unset INVFS_SPT0_NOPIN
+rm -f "$IMGI"
+
+echo
+echo "== [R] WP96: the reclaim pass gives the pin's blocks BACK (leak-free) =="
+# The pin holds a replaced recipe's blocks for exactly ONE generation, and the
+# next capture's reclaim pass is what gives them back. That pass shipped broken
+# and the bug was INVISIBLE: spn_reclaim's inner loop scanned to the end of the
+# volume before freeing anything, so it issued one free for a garbage range at
+# the tail and returned a run LENGTH as its "blocks reclaimed" count. Every
+# sweep logged a plausible reclaim while the volume grew by ~32 blocks FOREVER
+# (measured, WP96 fix note in the commit). So this leg asserts the reclaim is
+# REAL: a second bare sweep must report a non-zero reclaim, and the free-block
+# count must not shrink sweep over sweep at a constant live set.
+rm -f "$IMGR"
+$B/invf-mkfs "$IMGR" 0.5 >/dev/null || fail "R: mkfs failed"
+for f in $FILES; do
+    $B/invf-cp "$IMGR" "$WORK/orig/$f" "$f" >/dev/null || fail "R: could not stage $f"
+done
+freeb() { $B/invf-fsck "$IMGR" 2>/dev/null | sed -n 's/^ *free blocks: *//p' | head -1; }
+prev=""
+for r in 1 2 3 4; do
+    $B/invf-sweep "$IMGR" > "$WORK/sweep-r$r.log" 2>&1 \
+        || { cat "$WORK/sweep-r$r.log"; fail "R: sweep $r failed"; }
+    fb=$(freeb)
+    if [ "$r" -ge 3 ]; then
+        [ -n "$prev" ] || fail "R: could not read the free-block count"
+        [ "$fb" -ge "$prev" ] \
+            || fail "R: the volume SHRANK at a constant live set (sweep $r: $prev -> $fb): the pin is leaking"
+    fi
+    prev="$fb"
+done
+rec=$(sed -n 's/.*reclaim: \([0-9][0-9]*\) blocks.*/\1/p' "$WORK/sweep-r2.log" | head -1)
+[ -n "$rec" ] && [ "$rec" -gt 0 ] \
+    || fail "R: the second bare sweep reclaimed nothing (sweep log: $(grep -c reclaim "$WORK/sweep-r2.log") reclaim lines) -- the pass is not discharging the pin's debt"
+echo "  sweep 2 reclaimed $rec blocks the previous window held; free blocks held steady over sweeps 3-4"
+check_all "R post-sweeps" "$IMGR" || fail "R: repeated sweeps lost bit-exactness"
+$B/invf-fsck "$IMGR" | grep -q "^OK$" || fail "R: fsck not clean after repeated sweeps"
+# and the operator's escape hatch: --realize drops the window, and the next
+# sweep must be able to use the space again
+$B/invf-sweep "$IMGR" --realize > "$WORK/realize-r.log" 2>&1 || fail "R: --realize failed"
+grep -qiE "realiz" "$WORK/realize-r.log" || fail "R: --realize did not report anything"
+before=$(freeb)
+$B/invf-sweep "$IMGR" > "$WORK/sweep-r-realize.log" 2>&1 || fail "R: post-realize sweep failed"
+after=$(freeb)
+[ "$after" -ge "$before" ] || fail "R: space went backwards after --realize ($before -> $after)"
+echo "  --realize released the hold; the next sweep did not lose space ($before -> $after)"
+rm -f "$IMGR"
 
 echo
 echo "== [A3/C] double rollback = no save point: the point of no return =="

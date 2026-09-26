@@ -703,6 +703,62 @@ typedef struct {
 } invfs_spt0;                   /* 0xA00 + 32 -> ends 0xA20 */
 #pragma pack(pop)
 
+/* ---- WP96: SPN0 v3 save-point DATA pin (block 0 reserved area) --------
+ * Lives at byte offset 0xA20 of block 0, immediately past SPT0 (0xA00..0xA20).
+ * Volumes written before WP96 carry zeros there, which read as "absent".
+ *
+ * SPT0 pins the save point's METADATA ({base_root, delta_end}) and nothing
+ * else, so a sweep that replaces a recipe and frees the old segments leaves
+ * the pinned state naming blocks whose content now belongs to somebody else:
+ * invf-rollback returns 0, invf-fsck says OK, and the first read of the
+ * restored file fails with "segment CRC mismatch" (impl_docs/AUDIT.md, P0).
+ * WP21's v2 answer was the CKP0 + "\x01reten" registry: while the checkpoint
+ * was armed, vol_free_blocks freed nothing and the skipped blocks were
+ * registered. WP-M21 retired both with the v2 metadata machinery, so this
+ * descriptor is the v3 re-expression: `pba` names a run of `blocks` blocks
+ * holding a bitmap of total_blocks bits -- one bit per volume block, the same
+ * shape as the retired per-run retmap. A set bit means "the live save point's
+ * data references this block": the block stays ALLOCATED in the real bitmap
+ * (that is what bars reuse) and is never freed while the pin is armed.
+ * `flags` bit0 (INVFS_SPN0_F_ARMED) says a save point is live and the set is
+ * enforcing; a cleared bit means the set is a worklist only (the window was
+ * dropped/realized and the next capture reclaims what nothing references).
+ *
+ * The last three fields are the save point's LOG geometry, which the restore
+ * needs whether or not a pin was taken (they are what tells the pinned-state
+ * walk which delta records were already written at capture). delta_segs is
+ * the chain length at capture, delta_head_pba the then-head segment: the log
+ * is append-only, so the pinned prefix survives only while that segment is
+ * still reachable through delta_segs-1 prev_pba hops. A fold resets the
+ * chain and frees it, which is a REFUSED restore, not a lossy one.
+ *
+ *   0xA20  char magic[4]       "SPN0"
+ *   0xA24  u32  version        1
+ *   0xA28  u32  flags          bit0 armed (see INVFS_SPN0_F_ARMED)
+ *   0xA2C  u64  pba            first block of the bitmap run (0 = none)
+ *   0xA34  u64  blocks         run length in blocks
+ *   0xA3C  u64  npinned        set bits
+ *   0xA44  u64  delta_segs     delta chain length at capture (0 = no log)
+ *   0xA4C  u64  delta_head_pba the then-head delta segment pba
+ *   0xA54  u32  crc32c         over descriptor with this field 0
+ * 56 bytes total; the rest of block 0 stays reserved-zero. */
+#define INVFS_SPN0_OFF      0xA20
+#define INVFS_SPN0_VERSION  1
+#define INVFS_SPN0_F_ARMED  0x00000001u
+#pragma pack(push, 1)
+typedef struct {
+    char     magic[4];          /* 0xA20 "SPN0" */
+    uint32_t version;           /* 0xA24 INVFS_SPN0_VERSION */
+    uint32_t flags;             /* 0xA28 INVFS_SPN0_F_* */
+    uint64_t pba;               /* 0xA2C first block of the bitmap run */
+    uint64_t blocks;            /* 0xA34 run length in blocks */
+    uint64_t npinned;           /* 0xA3C set bits */
+    uint64_t delta_segs;        /* 0xA44 chain length at capture */
+    uint64_t delta_head_pba;    /* 0xA4C the then-head segment pba */
+    uint32_t crc32c;            /* 0xA54 over descriptor with this field 0 */
+} invfs_spn0;                   /* 0xA20 + 56 -> ends 0xA58 */
+#pragma pack(pop)
+
 /* ---- WP-M1: v3 base-page + block-pointer wire format (design §12) ----
  * Frozen here so WP-M2 (page format + allocator) and WP-M3 (delta/fold)
  * share one definition instead of each inventing its own. A base page is a

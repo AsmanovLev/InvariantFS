@@ -347,6 +347,30 @@ int vol_v3_walk(invfs_volume *v, vol_v3_walk_cb cb, void *ctx);
 int vol_v3_iter_live_inodes(invfs_volume *v,
     int (*cb)(invfs_volume *v, uint64_t inode_id, const char *name, void *ctx),
     void *ctx);
+/* ---- WP96: the same walk at an ARBITRARY save-point generation -------
+ * vol_v3_iter_live_inodes reads the CURRENT base root and the CURRENT delta
+ * overlay. An SPT0 save point pins {base_root, delta_end} -- a PAST
+ * generation -- so the save-point machinery needs the inode set of that
+ * generation twice: at capture (to take the data pin) and at restore (to
+ * verify the pinned state before republishing it). This walks
+ *   { base inode rows at root_pba } overlaid by
+ *   { delta records older than the captured prefix },
+ * where the prefix geometry is (delta_end, delta_segs, delta_head_pba):
+ * delta_end is the pinned byte count, delta_segs the chain length at capture
+ * and delta_head_pba the then-head segment. The head's pba is what makes the
+ * prefix decidable: the log is append-only, so a sweep that filled the head
+ * rolls a NEW segment in front of it, and only the head's identity says which
+ * records are in front of the cut and which behind it. `delta_segs` = 0 means
+ * the generation had no log tier, so only the base rows count. No name
+ * resolution: the callback gets the inode id and the decoded row. Returns 0
+ * complete, -1 error (including a prefix that is no longer in the chain),
+ * non-zero callback propagated. */
+int vol_v3_iter_inodes_at(invfs_volume *v, uint64_t root_pba,
+                          uint64_t delta_end, uint64_t delta_segs,
+                          uint64_t delta_head_pba,
+    int (*cb)(invfs_volume *v, uint64_t inode_id,
+              const invfs_v3_inode *in, void *ctx),
+    void *ctx);
 /* Reverse lookup: find the canonical full path ("dir/sub/file.txt") mapping
  * to `inode_id`. Returns 1 found (*name filled with full path, *parent_out set),
  * 0 absent, -1 error. */

@@ -664,6 +664,34 @@ typedef struct invfs_volume {
     invfs_spt0 spt0;                   /* SPT0 descriptor (loaded from disk) */
     int      savepoint_live;            /* SPT0 was present and CRC-valid */
     invfs_blkptr pinned_root;           /* base_root at capture (zeroed = none) */
+    /* ---- WP96: v3 save-point DATA pin (SPN0 descriptor) ---------------- */
+    /* SPT0 pins {base_root, delta_end} and nothing else, so a sweep that
+     * re-encodes a file publishes a new recipe and frees the old segments --
+     * which a later invf-rollback republishes over somebody else's bytes. The
+     * pin is the v3 re-expression of WP21's retmap: spn_bitmap is a bitmap
+     * over total_blocks (one bit per block, lazily loaded) whose set bits are
+     * the blocks the live save point's recipes name. spn_armed mirrors the
+     * SPN0 descriptor's ARMED bit and is what vol_free_blocks consults, so
+     * the hold is a VOLUME property (a FUSE write's retire path sees it too),
+     * not a property of the sweep that armed it. spn_pba/spn_blocks name the
+     * on-disk run; it is freed only by the next capture, which first reclaims
+     * the blocks the previous generation held and no live recipe names.
+     * spn_nopin is the debug kill switch (INVFS_SPT0_NOPIN=1): the pin is not
+     * taken, so the sweep frees as before and only spt0_restore's data check
+     * (WP96 layer 2) stands between a rollback and silent corruption. */
+    uint8_t *spn_bitmap;
+    uint64_t spn_pba;
+    uint64_t spn_blocks;
+    uint64_t spn_npinned;
+    int      spn_armed;
+    int      spn_nopin;
+    /* the save point's log geometry at capture (SPN0): chain length and the
+     * then-head segment. The pinned-state walk needs them to place the
+     * delta_end cut, and the restore re-checks that the head is still
+     * reachable -- a fold resets the chain, and then the pinned state is
+     * unrecoverable, which must be a refusal rather than a lossy rollback. */
+    uint64_t spn_delta_segs;
+    uint64_t spn_delta_head;
     /* WP30 Phase 6+: rwlock protecting meta_mapper and MET0 state.
      * Readers hold shared lock (pthread_rwlock_rdlock); writers hold
      * exclusive lock (pthread_rwlock_wrlock). Protects: meta_mapper_get,
