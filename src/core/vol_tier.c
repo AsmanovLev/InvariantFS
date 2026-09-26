@@ -35,8 +35,56 @@
  * v1 limits (loud when hit, never silent): at most 65535 mirrored raw
  * segments and 65535 live tier copies (one owner record each), and dev0
  * must be < 2^24 blocks (the rawm map keys are 24-bit). Both are format
- * limits of the owner-record pattern, not of the device table. */
+ * limits of the owner-record pattern, not of the device table.
+ *
+ * WP98 (Meta-v3): v3 has neither the v2 record stream nor the owner-L2P
+ * journal, so the owner-record shape above does not exist there -- an
+ * owner written through it, and read back through
+ * meta_read_record_by_id(), was invisible after every reopen (WP94 found
+ * it; it is the same trap WP78 fell into for heat, vol_heat.c:195). On v3
+ * the owner is a hidden file whose CONTENT is the index: a recipe blob
+ * whose AST entries carry each copy's pba and block count directly (the
+ * WP27 invariant every v3 file recipe already has), published with
+ * vol_v3_publish_blob_inode and read back with vol_read_file. That is the
+ * tz_v3_reg_store registry-over-a-hidden-file shape (vol_textzone.c:1085)
+ * and it is a re-expression, not a second mapping structure: the v2 L2P
+ * map existed only to carry (pba, plen) that the AST entry now carries, so
+ * on v3 it is not written at all (wp25_map/wp25_unmap below are no-ops).
+ * The consequences of getting this wrong were: invf-stats reporting 0
+ * copies after a sweep that made 24, a non-idempotent tier pass that
+ * re-copied and re-demoted the same segments every sweep, and -- worst --
+ * RAW-zone files unreadable on a degraded mount, because the failover
+ * read needs the mirror index to find the dev1 copy. */
 #include "volume_internal.h"
+
+
+/* Is this a Meta-v3 volume (COW B+ tree + delta log, no v2 record
+ * stream, no owner-L2P journal)? */
+static int wp25_is_v3(const invfs_volume *v)
+{
+    return (v->sb.vol_flags & VOLF_V3) != 0;
+}
+
+
+/* The v2 owner-L2P map. On v3 there is no journal to carry it and
+ * vol_flush never reaches jrn_flush (volume.c:2435 returns for VOLF_V3
+ * right after the bitmap flush), so a map queued here would grow the
+ * in-RAM table until vol_map reports "L2P journal full" and the caller
+ * latches the volume -- a self-inflicted outage for a table nothing
+ * reads. The copy's address rides in the owner's AST entry instead. */
+static int wp25_map(invfs_volume *v, uint64_t owner, uint64_t ord,
+                    uint64_t pba, uint32_t plen)
+{
+    if (wp25_is_v3(v)) return 0;
+    return vol_map(v, owner, ord, pba, plen);
+}
+
+
+static void wp25_unmap(invfs_volume *v, uint64_t owner, uint64_t ord)
+{
+    if (wp25_is_v3(v)) return;
+    l2p_remove(v, owner, ord);
+}
 
 
 /* ---------------- sorted index (bsearch by key) ---------------- */
@@ -158,24 +206,92 @@ uint64_t vol_rawm_count(invfs_volume *v, uint64_t *blocks_out)
 
 /* ---------------- owner-record persistence ---------------- */
 
+/* WP98: the Meta-v3 owner. There is no v2 record stream and no owner-L2P
+ * journal on v3, so the index IS the owner's content: a recipe blob whose
+ * AST entries carry every copy's pba and block count directly (the WP27
+ * invariant -- the field has been in the entry since WP27 and the v2 writer
+ * below already fills it; only the v2 LOADER still prefers the WAL map).
+ * Publication is vol_v3_publish_blob_inode, the same
+ * registry-over-a-hidden-file shape tz_v3_reg_store uses
+ * (vol_textzone.c:1085): the index bytes are CRC-framed as a segment and
+ * the inode row names them, so a torn flush leaves the PREVIOUS index
+ * intact -- exactly the "worst case an orphan block fsck reclaims"
+ * contract the v2 path has.
+ *
+ * Entry layout is deliberately identical to the v2 owner's AST, so the two
+ * formats carry the same information in the same shape: file_offset = the
+ * index key (the raw-zone pba for rawm, the canonical dev1 pba for tier),
+ * block_id = the WAL ordinal, length = the copy's extent in bytes, pba =
+ * the copy's address. */
+static int wp25_owner_write_v3(invfs_volume *v, uint64_t *owner_slot,
+                               const char *name, const wp25_ent *ents, size_t n)
+{
+    invfs_ast_block_entry *ae = NULL;
+    uint8_t *blob = NULL;
+    size_t blen = 0, i;
+    uint64_t owner;
+
+    if (n > 65535) return -1;   /* one owner blob, v1 cap (same as v2) */
+    ae = (invfs_ast_block_entry *)calloc(n ? n : 1, sizeof *ae);
+    if (!ae) return -1;
+    for (i = 0; i < n; i++) {
+        ae[i].file_offset = ents[i].key;
+        ae[i].length = (uint64_t)ents[i].plen * INVFS_BLOCK_SIZE;
+        ae[i].zone = INVFS_ZONE_BINARY;
+        ae[i].algo = INVFS_ALGO_NONE;
+        ae[i].block_id = ents[i].ord;
+        ae[i].block_offset = 0;
+        ae[i].pba = ents[i].pba;
+    }
+    /* file_size 0, not the cumulative copy length the v2 record header
+     * carries: this blob is an index, not a file, and the v3 recipe header
+     * refuses to serialize past MAX_FILE_SIZE (1 TB) -- which 65535 copies
+     * of the 64 MB per-segment ceiling exceeds. Nothing reads the field
+     * (the loader walks the entries only). */
+    if (vol_ast_recipe_serialize(0, ae, (uint32_t)n, &blob, &blen) != 0) {
+        free(ae);
+        return -1;
+    }
+    free(ae);
+    owner = *owner_slot;
+    if (owner) {
+        if (!vol_v3_publish_blob_inode(v, owner, blob, blen, blen,
+                                       INVFS_ALGO_NONE)) {
+            free(blob);
+            return -1;
+        }
+    } else {
+        owner = vol_create_blob_file(v, name, blob, blen, blen,
+                                     INVFS_ALGO_NONE);
+        if (!owner) { free(blob); return -1; }
+        *owner_slot = owner;
+    }
+    free(blob);
+    return 0;
+}
+
+
 /* The tz_owner_write variant the WP25 owners need: the entries' keys ride
  * in file_offset (tz_owner_write would rebuild those as the cumulative
  * concatenation). Same ordering contract otherwise: append [INOD][DELT
  * position-kill of the previous version] as one write; the owner keeps
  * its inode id so the L2P maps stay valid. */
-static int wp25_owner_write(invfs_volume *v, uint64_t owner,
+static int wp25_owner_write(invfs_volume *v, uint64_t *owner_slot,
                             uint64_t *ext_slot, const char *name,
                             const wp25_ent *ents, size_t n)
 {
     invfs_ast_block_entry *ae = NULL;
     uint8_t ah[INVFS_AST_HDR_V2_LEN];
     size_t ahlen, rec_len, total, nlen, tomb_len;
-    uint64_t run = 0, old_pos, new_pos;
+    uint64_t run = 0, owner, old_pos, new_pos;
     uint8_t *combo;
     invfs_inode_rec *rh;
     uint32_t crc_rec, crc_tomb;
     size_t i;
 
+    if (wp25_is_v3(v))
+        return wp25_owner_write_v3(v, owner_slot, name, ents, n);
+    owner = *owner_slot;
     if (n > 65535) return -1;   /* one owner record, v1 header */
     ae = (invfs_ast_block_entry *)calloc(n ? n : 1, sizeof *ae);
     if (!ae) return -1;
@@ -275,6 +391,67 @@ static int wp25_owner_write(invfs_volume *v, uint64_t owner,
 }
 
 
+/* WP98: the Meta-v3 index load. The owner is a hidden file (vol_find
+ * resolves a 0x01 name through the v3 dirent tree, like the tz registry's
+ * "\x01tzb"), its content is the recipe blob wp25_owner_write_v3
+ * published, and each copy's pba and extent ride in its AST entries --
+ * so there is no second mapping structure to consult, which is why this
+ * is a re-expression of the v2 loader rather than a port of it.
+ *
+ * An entry that names no copy (pba 0), no whole block (length), or a key
+ * outside the volume is skipped rather than trusted: the load runs before
+ * anything has validated the blob against the bitmap, and a bogus entry
+ * would send a read to a wrong address. Skipping costs redundancy (the
+ * read falls back to canonical), never correctness. */
+static void wp25_index_load_v3(invfs_volume *v, uint64_t *owner_slot,
+                               const char *name, wp25_ent **tp, size_t *np,
+                               size_t *cp, int is_rawm)
+{
+    uint8_t *blob = NULL;
+    size_t blen = 0, n_ents = 0, i;
+    const invfs_ast_block_entry *ents;
+    invfs_ast_hdr ah;
+    uint64_t owner;
+
+    *np = 0;
+    owner = *owner_slot;
+    if (!owner) {
+        owner = vol_find(v, name);
+        if (!owner) return;
+        *owner_slot = owner;
+    }
+    if (vol_read_file(v, owner, &blob, &blen) != 0 || !blob) {
+        free(blob);
+        return;
+    }
+    if (vol_ast_recipe_parse(blob, blen, &ah, &ents, &n_ents) != 0 || !ents) {
+        if (getenv("INVFS_DEBUG"))
+            fprintf(stderr, "[wp25] %s: owner blob unreadable (%zu bytes); "
+                    "index rebuilt empty\n", name, blen);
+        free(blob);
+        return;
+    }
+    for (i = 0; i < n_ents; i++) {
+        uint64_t key = ents[i].file_offset, pba = ents[i].pba;
+        uint64_t plen = ents[i].length / INVFS_BLOCK_SIZE;
+        if (!pba || !plen || ents[i].length % INVFS_BLOCK_SIZE) continue;
+        if (!key || key >= v->sb.total_blocks) continue;
+        if (pba >= v->sb.total_blocks || plen > v->sb.total_blocks - pba)
+            continue;   /* the copy's run must fit the volume: seg_read_once
+                         * uses plen as its upper bound, so an absurd one
+                         * would loosen the csize check */
+        if (is_rawm && (key < v->sb.raw_zone_start ||
+                        key >= v->sb.raw_zone_start + v->sb.raw_zone_blocks))
+            continue;   /* a mirror is keyed by a RAW-zone pba; this is not
+                         * one, so the entry is not a mirror */
+        if (wp25_put(tp, np, cp, key, pba, (uint32_t)plen,
+                     ents[i].block_id) != 0)
+            break;   /* OOM: a partial index only costs redundancy */
+    }
+    free(blob);
+}
+
+
 /* Rebuild one in-RAM index from its owner record: AST entry file_offset =
  * key, block_id = map key; the map gives the copy's pba (+plen). Entries
  * whose map is missing are skipped (a torn window: the copy's blocks are
@@ -291,6 +468,16 @@ static void wp25_index_load_one(invfs_volume *v, uint64_t owner,
     uint32_t i;
 
     *np = 0;
+    if (wp25_is_v3(v)) {
+        /* the v3 loader resolves the owner by name itself rather than
+         * trusting the caller's id: vol_find answers a 0x01 name through
+         * the v3 dirent tree on both a full and a degraded open, and this
+         * is the same lookup the tz_v3 registry does (vol_textzone.c). */
+        wp25_index_load_v3(v, is_rawm ? &v->rawm_owner : &v->tier_owner,
+                           is_rawm ? "\x01rawm" : "\x01tier0",
+                           tp, np, cp, is_rawm);
+        return;
+    }
     if (!owner) return;
     if (meta_read_record_by_id(v, owner, &buf, &rl, NULL, 0, NULL) != 0)
         return;
@@ -332,17 +519,20 @@ void wp25_index_load(invfs_volume *v)
 
 /* vol_flush hook (after jrn_flush): rewrite dirty owner records so they
  * name exactly the current index entries. The maps/unmaps are already
- * durable in this same flush. */
+ * durable in this same flush. WP98: on v3 vol_flush's v2 tail is not
+ * reached at all (volume.c:2435 returns for VOLF_V3 right after the bitmap
+ * flush), so the call site in vol_flush has a v3 branch of its own -- the
+ * ordering rule is unchanged and satisfied there by the bitmap barrier. */
 int wp25_owner_sync(invfs_volume *v)
 {
     if (v->rawm_dirty) {
-        if (wp25_owner_write(v, v->rawm_owner, &v->rawm_owner_ext,
+        if (wp25_owner_write(v, &v->rawm_owner, &v->rawm_owner_ext,
                              "\x01rawm", v->rawm, v->rawm_n) != 0)
             return -1;
         v->rawm_dirty = 0;
     }
     if (v->tier_dirty) {
-        if (wp25_owner_write(v, v->tier_owner, &v->tier_owner_ext,
+        if (wp25_owner_write(v, &v->tier_owner, &v->tier_owner_ext,
                              "\x01tier0", v->tier, v->tier_n) != 0)
             return -1;
         v->tier_dirty = 0;
@@ -356,13 +546,27 @@ int wp25_owner_sync(invfs_volume *v)
 /* Lazy owner creation (the tz_owner_id pattern): a fresh two-device
  * volume has no owner records yet -- the first mirrored RAW segment / the
  * first promotion creates its owner as an empty record, which the next
- * flush's wp25_owner_sync rewrites with the live entries. */
+ * flush's wp25_owner_sync rewrites with the live entries. WP98: on v3 the
+ * owner is born with its (empty) index blob rather than as an empty node,
+ * because vol_create_blob_file is the v3 create-with-content path; the
+ * first flush's wp25_owner_write_v3 republishes it with the live entries. */
 static uint64_t wp25_owner_id(invfs_volume *v, int is_rawm)
 {
     uint64_t *slot = is_rawm ? &v->rawm_owner : &v->tier_owner;
-    if (!*slot)
-        *slot = vol_create_file(v, is_rawm ? "\x01rawm" : "\x01tier0",
-                                NULL, 0);
+    if (!*slot) {
+        const char *name = is_rawm ? "\x01rawm" : "\x01tier0";
+        if (wp25_is_v3(v)) {
+            uint8_t *blob = NULL;
+            size_t blen = 0;
+            if (vol_ast_recipe_serialize(0, NULL, 0, &blob, &blen) == 0) {
+                *slot = vol_create_blob_file(v, name, blob, blen, blen,
+                                             INVFS_ALGO_NONE);
+                free(blob);
+            }
+        } else {
+            *slot = vol_create_file(v, name, NULL, 0);
+        }
+    }
     return *slot;
 }
 
@@ -392,7 +596,7 @@ int wp25_rawm_write(invfs_volume *v, uint64_t pba, const uint8_t *buf,
     if (old) {
         /* rewrite of the same raw slot: retire the old mirror first
          * (unmap + free), then take a fresh allocation */
-        l2p_remove(v, v->rawm_owner, old->ord);
+        wp25_unmap(v, v->rawm_owner, old->ord);
         vol_free_blocks(v, old->pba, old->plen);
         wp25_del(v->rawm, &v->rawm_n, pba);
     }
@@ -415,13 +619,13 @@ int wp25_rawm_write(invfs_volume *v, uint64_t pba, const uint8_t *buf,
         vol_free_blocks(v, mpba, phys_blocks);
         return -1;   /* dev1 failed: the caller latches */
     }
-    if (vol_map(v, v->rawm_owner, rel, mpba, (uint32_t)phys_blocks) != 0) {
+    if (wp25_map(v, v->rawm_owner, rel, mpba, (uint32_t)phys_blocks) != 0) {
         vol_free_blocks(v, mpba, phys_blocks);
         return -1;
     }
     if (wp25_put(&v->rawm, &v->rawm_n, &v->rawm_cap, pba, mpba,
                  (uint32_t)phys_blocks, (uint32_t)rel) != 0) {
-        l2p_remove(v, v->rawm_owner, rel);
+        wp25_unmap(v, v->rawm_owner, rel);
         vol_free_blocks(v, mpba, phys_blocks);
         return -1;
     }
@@ -443,7 +647,7 @@ void wp25_on_free(invfs_volume *v, uint64_t pba, uint64_t nblocks)
         for (i = 0; i < v->rawm_n; ) {
             wp25_ent e = v->rawm[i];
             if (e.key >= pba && e.key < end) {
-                l2p_remove(v, v->rawm_owner, e.ord);
+                wp25_unmap(v, v->rawm_owner, e.ord);
                 vol_free_blocks(v, e.pba, e.plen);
                 wp25_del(v->rawm, &v->rawm_n, e.key);
                 v->rawm_dirty = 1;
@@ -456,7 +660,7 @@ void wp25_on_free(invfs_volume *v, uint64_t pba, uint64_t nblocks)
         for (i = 0; i < v->tier_n; ) {
             wp25_ent e = v->tier[i];
             if (e.key >= pba && e.key < end) {
-                l2p_remove(v, v->tier_owner, e.ord);
+                wp25_unmap(v, v->tier_owner, e.ord);
                 vol_free_blocks(v, e.pba, e.plen);
                 wp25_del(v->tier, &v->tier_n, e.key);
                 v->tier_dirty = 1;
@@ -741,13 +945,13 @@ static int tier_promote_one(invfs_volume *v, uint64_t cpba, uint32_t plen)
         return -1;
     }
     free(buf);
-    if (vol_map(v, v->tier_owner, ord, dpba, plen) != 0) {
+    if (wp25_map(v, v->tier_owner, ord, dpba, plen) != 0) {
         vol_free_blocks(v, dpba, plen);
         return -1;
     }
     if (wp25_put(&v->tier, &v->tier_n, &v->tier_cap, cpba, dpba, plen,
                  ord) != 0) {
-        l2p_remove(v, v->tier_owner, ord);
+        wp25_unmap(v, v->tier_owner, ord);
         vol_free_blocks(v, dpba, plen);
         return -1;
     }
@@ -769,7 +973,7 @@ static int tier_promote_one(invfs_volume *v, uint64_t cpba, uint32_t plen)
 static void tier_demote_idx(invfs_volume *v, size_t idx)
 {
     wp25_ent e = v->tier[idx];
-    l2p_remove(v, v->tier_owner, e.ord);
+    wp25_unmap(v, v->tier_owner, e.ord);
     v->retain_release = 1;
     vol_free_blocks(v, e.pba, e.plen);
     v->retain_release = 0;

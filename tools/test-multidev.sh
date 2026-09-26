@@ -25,6 +25,20 @@
 #   leg 8  resize: grow lands on the tail device (dev1); shrink refused
 #   leg 9  fsck clean on both legs + a single-device smoke (compat)
 #
+# Legs 1-6 and 9 pass on BOTH formats. Legs 7-8 are red on Meta-v3 and NOT
+# because of anything this suite owns: on v3 vol_flush returns right after
+# the bitmap flush (volume.c:2435), so the whole two-device commit tail --
+# vol_write_devt with its sync_seq bump, and mirror_resync -- never runs.
+# Two consequences, both measured (impl_docs/AUDIT.md, E2E-BASELINE item (4)):
+# the DEVT sync_seq is frozen at its mkfs value forever, so the staleness
+# DETECTION at open can never fire; and the rewind this leg performs rolls
+# dev0's block 0 back, which on v3 carries the RT30 root descriptor at 0x9D0,
+# so it silently damages the volume with nothing to detect or repair it --
+# which is what leg 8's "verify --deep reports corruption" actually is (a
+# clean volume resizes and verifies 0 corrupt). The degraded -f refusal in
+# leg 6 is refused on v2 only: src/cli/fsck.c's v3 branch returns at line 182
+# before the WP25 `fix && vol_degraded(v)` check at line 188.
+#
 # Run from the repo root after `make`:  bash tools/run-e2e.sh tools/test-multidev.sh
 set -e
 set -o pipefail
@@ -58,8 +72,10 @@ pba0() {
     $B/meta_probe "$1" --heat "$2" | grep "^ast i=0 " |
       tail -1 | sed "s/.*pba=//" | awk '{print $1}'
 }
-# which format is this volume? The v2-only gates (the WP25 owner-record
-# indexes) say so out loud instead of failing on v3 -- see leg 4.
+# which format is this volume? Printed once so a failure names the format it
+# happened on. Nothing gates on it any more: WP98 made the WP25 owner indexes
+# (tier + RAW mirror) durable on Meta-v3 as well as v2, so every assertion
+# below is format-independent (see leg 4).
 vol_is_v3() { $B/invf-fsck "$1" 2>/dev/null | grep -q "format:       v3"; }
 
 echo "== leg 1: build the two-device volume =="
@@ -77,6 +93,7 @@ AR_HI=$(sed -n 's/.*tier arena: *blocks [0-9]* \.\. \([0-9]*\).*/\1/p' "$WORK/mk
 dd if="$D0" bs=1 skip=672 count=4 status=none | grep -q DEVT || fail "no DEVT on dev0"
 dd if="$D1" bs=1 skip=672 count=4 status=none | grep -q DEVT || fail "no DEVT on dev1"
 echo "geometry: raw $RAW_LO..$RAW_HI, arena $AR_LO..$AR_HI, shadow $SH_LO.."
+if vol_is_v3 "$D0"; then echo "format: v3 (Meta-v3)"; else echo "format: v2"; fi
 
 echo "== leg 2: import mixed corpus -> sweep -> verify --deep =="
 python3 - <<'PY'
@@ -139,33 +156,16 @@ $B/invf-sweep "$D0" > "$WORK/sweep2.log" 2>&1 || { cat "$WORK/sweep2.log"; fail 
 grep -q "^tier: [1-9][0-9]* hot segment(s) copied to dev0" "$WORK/sweep2.log" \
     || { cat "$WORK/sweep2.log"; fail "no tier copies made"; }
 TC=$($B/invf-stats "$D0" | sed -n 's/.*tier (dev0 copies): \([0-9]*\) live.*/\1/p')
-# WP94: the two WP25 indexes are persisted through v2 owner records, and
-# wp25_index_load_one() reads them back with meta_read_record_by_id() --
-# a v2 record-stream lookup that finds nothing on Meta-v3. So a reopened v3
-# volume reports 0 live copies even though the sweep above demonstrably
-# made them. The promotion itself is asserted strictly above (the sweep's
-# own "N hot segment(s) copied to dev0" line); only the CROSS-OPEN
-# accounting is v2-only, so that is what v3 skips -- and it proves the copy
-# is physically there and bit-exact by scanning the dev0 arena for the
-# canonical dev1 block, which is stronger than reading coordinates back
-# out of the index. Tracked: impl_docs/AUDIT.md, E2E-BASELINE item (4).
-if vol_is_v3 "$D0"; then
-    if ! python3 - "$D0" "$D1" "$AR_LO" "$AR_HI" "$HP" <<'PY'
-import sys
-d0, d1, lo, hi = sys.argv[1], sys.argv[2], int(sys.argv[3]), int(sys.argv[4])
-hp = int(sys.argv[5])
-blk = open(d1, "rb").read()[hp*4096:(hp+1)*4096]
-d0b = open(d0, "rb").read()
-# the copy is a whole-segment span, so its FIRST block must sit in the arena
-sys.exit(0 if d0b.find(blk, lo*4096, (hi+1)*4096) >= 0 else 1)
-PY
-    then fail "no byte-identical copy of the canonical pba $HP in the dev0 arena"; fi
-    echo "v3: tier copies are RAM-only across a reopen (AUDIT E2E-BASELINE (4));"
-    echo "    the canonical block IS present byte-identical inside the dev0 arena"
-else
-# the v2 gate, verbatim: on v2 the index survives the reopen, so every
-# original assertion stands unchanged
-[ "${TC:-0}" -ge 1 ] || fail "no live tier copies after the sweep"
+# WP98: the cross-open accounting is asserted on BOTH formats. It used to be
+# v2-only, with a byte-scan fallback for v3, because the two WP25 indexes were
+# persisted through v2 owner records and wp25_index_load_one() read them back
+# with meta_read_record_by_id() -- a v2 record-stream lookup that finds nothing
+# on Meta-v3, so both indexes were RAM-only across a reopen. On v3 the owner is
+# a hidden file whose content IS the index (a recipe blob whose AST entries
+# carry each copy's pba and block count), published with
+# vol_v3_publish_blob_inode and read back with vol_read_file. So invf-stats --
+# a fresh open -- must now see the copies the sweep made, on either format.
+[ "${TC:-0}" -ge 1 ] || fail "no live tier copies after the sweep (index did not survive the reopen)"
 # the dev0 copy is byte-identical to the canonical dev1 segment
 CP=$($B/invf-stats "$D0" | sed -n 's/.*first tier copy *: canonical pba \([0-9]*\) -> dev0 pba \([0-9]*\)/\1 \2/p')
 set -- $CP
@@ -176,8 +176,19 @@ CAN=$1; DEV0P=$2
 cmp <(dd if="$D0" bs=4096 skip="$DEV0P" count=1 status=none) \
     <(dd if="$D1" bs=4096 skip=$((CAN - AR_HI - 1)) count=1 status=none) \
     || fail "tier copy block differs from the canonical block"
-echo "tier: $TC copies live in the dev0 arena; first copy byte-identical"
-fi
+# and the bytes are there independently of the index: the canonical block must
+# appear byte-identical somewhere in the dev0 arena (the v3 fallback gate)
+if ! python3 - "$D0" "$D1" "$AR_LO" "$AR_HI" "$CAN" <<'PY'
+import sys
+d0, d1, lo, hi = sys.argv[1], sys.argv[2], int(sys.argv[3]), int(sys.argv[4])
+can = int(sys.argv[5])
+blk = open(d1, "rb").read()[can*4096:(can+1)*4096]
+d0b = open(d0, "rb").read()
+# the copy is a whole-segment span, so its FIRST block must sit in the arena
+sys.exit(0 if d0b.find(blk, lo*4096, (hi+1)*4096) >= 0 else 1)
+PY
+then fail "no byte-identical copy of the canonical pba $CAN in the dev0 arena"; fi
+echo "tier: $TC copies live in the dev0 arena after a reopen; first copy byte-identical"
 
 $B/invf-cat "$D0" hot.bin "$WORK/out/hot2.bin" 2>/dev/null
 cmp -s "$WORK/orig/hot.bin" "$WORK/out/hot2.bin" || fail "hot.bin read after tiering"
@@ -193,11 +204,11 @@ RP=$(pba0 "$D0" rawfile.bin)
 [ "$RP" -ge "$RAW_LO" ] && [ "$RP" -le "$RAW_HI" ] \
     || fail "rawfile.bin pba $RP outside the RAW zone [$RAW_LO,$RAW_HI] (dev0)"
 MC=$($B/invf-stats "$D0" | sed -n 's/.*raw mirror *: \([0-9]*\) segments.*/\1/p')
-# the mirror index rides the same v2 owner record as the tier index (leg 4):
-# the BYTES below are the real proof and hold on both formats
-if ! vol_is_v3 "$D0"; then
-    [ "${MC:-0}" -ge 1 ] || fail "rawfile.bin has no dev1 mirror (raw mirror=$MC)"
-fi
+# WP98: asserted on both formats -- the mirror index rides the same hidden
+# owner as the tier index, so it survives the reopen the same way (before
+# this it was a v2-only gate; see leg 4). The BYTES below are the
+# independent proof and hold either way.
+[ "${MC:-0}" -ge 1 ] || fail "rawfile.bin has no dev1 mirror (raw mirror=$MC)"
 # the mirror block is byte-identical: find the raw block's bytes on dev1
 if ! python3 - "$RP" <<'PY'
 import sys
@@ -232,15 +243,14 @@ PY
     done
     $B/invf-sweep "$E0" > "$WORK/e-sweepA.log" 2>&1 || fail "sweep promote A"
     grep -q "^tier: [1-9]" "$WORK/e-sweepA.log" || fail "A not promoted"
-    # the two "copies live" counts come from invf-stats, i.e. a REOPEN: the
-    # WP25 index rides a v2 owner record and does not survive one on v3
-    # (leg 4 explains it). The promotion and the demotion themselves are
-    # read out of the sweep's own tier: line, which is asserted below.
-    E_V3=0
-    if vol_is_v3 "$E0"; then E_V3=1; fi
+    # the two "copies live" counts come from invf-stats, i.e. a REOPEN, and
+    # WP98 made the WP25 index survive one on Meta-v3 as well as v2 (leg 4
+    # explains the shape), so both are asserted unconditionally now. The
+    # promotion and the demotion themselves are also read out of the sweep's
+    # own tier: line, asserted below.
     TA=$($B/invf-stats "$E0" | sed -n 's/.*tier (dev0 copies): \([0-9]*\) live.*/\1/p')
-    [ "$E_V3" = 1 ] || [ "${TA:-0}" -ge 1 ] || fail "A has no live copies"
-    echo "A promoted: ${TA:-0} copies live after a reopen (0 expected on v3)"
+    [ "${TA:-0}" -ge 1 ] || fail "A has no live copies after a reopen"
+    echo "A promoted: ${TA:-0} copies live after a reopen"
     # let A go cold: 3 idle sweeps halve rheat 8 -> 4 -> 2 -> 1
     for i in 1 2 3; do $B/invf-sweep "$E0" >/dev/null 2>&1 || fail "idle sweep $i"; done
     $B/invf-cp "$E0" "$WORK/orig/coldB.bin" B.bin >/dev/null 2>&1 || fail "cp B"
@@ -255,7 +265,7 @@ PY
     [ "${DEM:-0}" -ge 1 ] || { cat "$WORK/e-sweepB.log"; fail "no demotion under pressure"; }
     # the coldest (A's) copies went; B's hot copies stay live
     LIVE=$($B/invf-stats "$E0" | sed -n 's/.*tier (dev0 copies): \([0-9]*\) live.*/\1/p')
-    [ "$E_V3" = 1 ] || [ "${LIVE:-0}" -ge 1 ] || {
+    [ "${LIVE:-0}" -ge 1 ] || {
         cat "$WORK/e-sweepB.log"; fail "demotion evicted the hot copies too"; }
     echo "pressure demoted $DEM cold copies (A's); ${LIVE:-0} hot copies (B's) live after a reopen"
     $B/invf-cat "$E0" A.bin "$WORK/out/A.bin" 2>/dev/null

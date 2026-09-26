@@ -65,6 +65,24 @@ int main(int argc, char **argv)
         return 1;
     }
 
+    /* WP25: a degraded mount (dev0 absent) is read-only -- report mode
+     * works (every structure reads from the dev1 mirror), but -f mutates:
+     * the mirror would diverge with dev0 absent. Reattach dev0 first.
+     *
+     * WP98: this check sat BELOW the v3 branch, so on a Meta-v3 volume the
+     * v3 return skipped it and `invf-fsck -f` happily ran its repair pass
+     * against a read-only, degraded mount -- writing to the dev1 mirror
+     * alone, which on v3 nothing detects or repairs (no DEVT sync_seq bump
+     * and no mirror_resync: vol_flush returns before that tail for VOLF_V3,
+     * volume.c:2435). Hoisted above both branches, so the refusal is format
+     * independent. Report mode is unaffected. */
+    if (fix && vol_degraded(v)) {
+        fprintf(stderr, "invf-fsck: %s: DEGRADED volume (dev0 absent) -- "
+                "report mode only; reattach dev0 to repair\n", img);
+        vol_close(v);
+        return 1;
+    }
+
     /* WP-M4: a format-v3 volume uses the metadata-v3 base tree, not the v2
      * inode-record stream. vol_fsck_scan dispatches to the v3 checker (RT30
      * root double-slot + base-tree walk).
@@ -180,16 +198,6 @@ int main(int argc, char **argv)
         }
         vol_close(v);
         return rep.v3_damaged ? 3 : 0;
-    }
-
-    /* WP25: a degraded mount (dev0 absent) is read-only -- report mode
-     * works (every structure reads from the dev1 mirror), but -f mutates:
-     * the mirror would diverge with dev0 absent. Reattach dev0 first. */
-    if (fix && vol_degraded(v)) {
-        fprintf(stderr, "invf-fsck: %s: DEGRADED volume (dev0 absent) -- "
-                "report mode only; reattach dev0 to repair\n", img);
-        vol_close(v);
-        return 1;
     }
 
     /* WP21: with a sweep checkpoint live, the rebuild's orphan reclaim is
