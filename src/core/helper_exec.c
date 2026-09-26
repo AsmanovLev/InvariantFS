@@ -309,15 +309,37 @@ static void helper_chown_tree(const char *path, uid_t uid, gid_t gid,
 static int helper_drop_privs(const char *work_dir, const char *ro_path,
                              uid_t uid, gid_t gid)
 {
+    int rc;
+
     if (work_dir) helper_chown_tree(work_dir, uid, gid, 0);
     if (helper_scratch_path(ro_path)) {
         int cr = lchown(ro_path, uid, gid);
         (void)cr;
     }
 
-    if (setgroups(0, NULL) != 0) return -1;
-    if (setgid(gid) != 0) return -1;
-    if (setuid(uid) != 0) return -1;
+    /* A user namespace created by an unprivileged process (unshare -r, a
+     * rootless container) maps ONE id and the kernel then REQUIRES that
+     * setgroups(2) never be called: it fails with EPERM, permanently. Every
+     * runtime that drops privileges inside such a namespace skips it, and so
+     * must we -- calling it and treating EPERM as fatal made the child
+     * _exit(126) before it ever exec'd, so every pack command in a rootless
+     * namespace reported as a tool failure. /proc/self/setgroups is not a
+     * usable test here: in the forked child it is already unreadable (EACCES).
+     * Any other errno still means "we really could not drop". */
+    if (setgroups(0, NULL) != 0 && errno != EPERM)
+        return -1;
+
+    /* setgid/setuid answer EINVAL when the target id is simply not present in
+     * this namespace's map. Then there is no second id to shed and the
+     * namespace itself is the confinement, so keep the current (namespace
+     * root) ids instead of refusing to run the helper at all. EPERM/EACCES
+     * still mean a genuine inability to drop and stay fatal. */
+    rc = setgid(gid);
+    if (rc != 0 && errno != EINVAL)
+        return -1;
+    rc = setuid(uid);
+    if (rc != 0 && errno != EINVAL)
+        return -1;
     return 0;
 }
 

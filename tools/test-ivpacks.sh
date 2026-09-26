@@ -67,10 +67,54 @@ note "mkfs.ext4+debugfs: $([ $HAVE_E2FS = 1 ] && echo yes || echo 'no (ext4fs fi
 
 echo "== build: CLI helpers + plugin .so (the -Wall -Wextra -Werror gate) =="
 make -C "$REPO" -s plugin-so >/dev/null
+# qcow2 is the one pack whose CLI needs more than libc + system zlib: since
+# Q2R3 its cmd_strip/cmd_rebuild call invfs_deflate_repro_*, so the CLI must
+# link the repro core, both deflate backends and the bundled stock zlib they
+# were compiled against. Ask the Makefile for that list (PLUGIN_EXTRA_qcow2)
+# rather than hand-maintaining it -- a new CORE member or a new src/zlib/*.c
+# used to be able to leave this harness silently under-linked.
+DEFLATE_OBJ=$(make -s -C "$REPO" print-obj-qcow2 || true)
+# make emits REPO-relative objects and this script has cd'd to $WORK, so anchor
+# them (the same `sed "s|^|$REPO/|"` every other tools/test-*.sh uses on
+# build/core_objs.txt). An empty list must stay empty here -- prefixing it
+# would turn "nothing to link" into one bogus path.
+[ -z "${DEFLATE_OBJ//[[:space:]]/}" ] || \
+    DEFLATE_OBJ=$(printf '%s\n' $DEFLATE_OBJ | sed "s|^|$REPO/|")
+check_deflate_objs() {
+    # 1. the Makefile must have handed us a non-empty list
+    set -- $DEFLATE_OBJ
+    [ $# -gt 0 ] || { echo "    (make print-obj-qcow2 returned nothing)"; return 1; }
+    # 2. every object it named must exist (run `make` first)
+    for o in "$@"; do
+        [ -f "$o" ] || { echo "    (missing $o -- run make first)"; return 1; }
+    done
+    # 3. the stock-zlib half must cover EVERY src/zlib/*.c. This is the check
+    #    that turns "the list silently lost its stock objects" into a loud
+    #    failure: a wildcard that expanded to nothing used to produce a binary
+    #    whose stock backend resolved against the system zlib instead.
+    #    (`|| true` on both: the script runs under `set -o pipefail`, so a
+    #    non-matching glob would otherwise abort the suite before it could
+    #    report WHICH pack lost its objects.)
+    ns=$(ls -1 "$REPO"/src/zlib/*.c 2>/dev/null | wc -l || true)
+    [ "$ns" -gt 0 ] || { echo "    (no src/zlib/*.c: stock backend cannot link)"; return 1; }
+    no=$(printf '%s\n' "$@" | grep -c '/zlib_stock_' || true)
+    [ "$no" = "$ns" ] || {
+        echo "    (stock zlib objects incomplete: $no linked, $ns sources)"; return 1; }
+    return 0
+}
 for p in $CPACKS; do
     d=$PACKROOT/$p.codecpack
     mkdir -p "$d/bin"
-    cc -std=c11 -O2 -Wall -Wextra -Werror -o "$d/bin/$p" "$d/$p.c" -lz \
+    EXTRA_SRC=""; EXTRA_OBJ=""
+    if [ "$p" = qcow2 ]; then
+        EXTRA_SRC="-I$REPO/src/codecs -I$REPO/src/zlib -DZ_PREFIX"
+        check_deflate_objs || { bad "$p: deflate core link set unusable"; continue; }
+        EXTRA_OBJ="$DEFLATE_OBJ"
+    fi
+    # EXTRA_SRC/EXTRA_OBJ are deliberately unquoted: a flag list / an object
+    # list, both whitespace-separated. shellcheck disable=SC2086
+    cc -std=c11 -O2 -Wall -Wextra -Werror $EXTRA_SRC -o "$d/bin/$p" \
+       "$d/$p.c" $EXTRA_OBJ -lz \
         || { bad "$p: CLI build failed"; continue; }
     [ -s "$d/lib$p.so" ] || bad "$p: make plugin-so produced no lib$p.so"
 done

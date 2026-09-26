@@ -325,6 +325,106 @@ static invfs_blkptr empty_root(void)
     return r;
 }
 
+/* ---- WP88: a leaf that needs THREE pages, not two ----------------------
+ *
+ * bt_split_point() can only cut an overflowing node in two, and for a
+ * variable-width run there are orderings with NO cut index at which both
+ * halves fit a 4 KiB page. The production trigger was a v3 recipe leaf: a
+ * 3072-byte Q2R3 recipe chunk (36-byte chunk key) between narrower recipe
+ * blobs (33-byte keys). Encoded, that leaf is
+ *
+ *   309 + 693 + 85 + 3112 + 693 + 693 + 245 + 85 + 20 = 5935 bytes
+ *
+ * and every cut leaves an overfull half: s=3 -> right 4848, s=4 -> left 4219.
+ * bt_ins_rec() then returned -1, vol_v3_recipe_store() failed, vol_write_commit()
+ * failed, and the containerpack sweep reported "member inode failed" and
+ * abandoned the decomposition of the whole container (WP88 Bug B).
+ *
+ * The keys and value widths below are byte-for-byte that leaf, so this test
+ * fails on any tree whose split cannot produce three page-fitting pieces. */
+#define RKEY_LEN   33   /* 1 prefix byte + 32-byte recipe address */
+#define CKEY_LEN   36   /* RKEY_LEN + 3-byte chunk index (continuation) */
+#define RKEY_RECIPE_PREFIX 0x21
+
+static void rkey_bytes(uint8_t *out, uint8_t nbytes, uint32_t addr)
+{
+    int i;
+    out[0] = RKEY_RECIPE_PREFIX;
+    for (i = 0; i < 4; i++)
+        out[1 + i] = (uint8_t)(addr >> (24 - 8 * i));
+    for (i = 5; i < RKEY_LEN; i++)
+        out[i] = 0x5A;
+    /* the chunk key continues its recipe key, so it sorts immediately after */
+    for (i = RKEY_LEN; i < nbytes; i++)
+        out[i] = 0x00;
+}
+
+static void test_wide_records(invfs_volume *v)
+{
+    /* addr order, then value width -- the 3072-byte chunk sits at index 3 */
+    static const uint32_t addrs[8] = { 1, 2, 3, 4, 5, 6, 7, 8 };
+    static const uint16_t vlen[8] = { 272, 656, 48, 3072, 656, 656, 208, 48 };
+    /* insertion order: the seven narrow recipes land in one leaf (2823 bytes),
+     * THEN the wide chunk is inserted into the middle of it. That is the
+     * production order -- a leaf that already held recipes overflows on the
+     * Q2R3 chunk -- and it is the only order that reaches the unsplittable
+     * case (insert the chunk first and the node splits cleanly in two). */
+    static const int order[8] = { 0, 1, 2, 4, 5, 6, 7, 3 };
+    static uint8_t vbuf[8][3072];
+    invfs_blkptr root = empty_root();
+    bt_stat st;
+    int i, all_ok = 1;
+
+    printf("wide records: a leaf that needs a 3-way split\n");
+    for (i = 0; i < 8; i++) {
+        uint16_t j;
+
+        for (j = 0; j < vlen[i]; j++)
+            vbuf[i][j] = (uint8_t)(addrs[i] * 7u + j);
+    }
+    for (i = 0; i < 8; i++) {
+        int r = order[i];
+        uint8_t kb[CKEY_LEN];
+        uint16_t n = (r == 3) ? CKEY_LEN : RKEY_LEN;
+        bt_key k;
+        bt_val val;
+
+        rkey_bytes(kb, n, addrs[r]);
+        k.p = kb;
+        k.n = n;
+        val.p = vbuf[r];
+        val.n = vlen[r];
+        if (btree_upsert(v, root, k, val, &root) != 0)
+            all_ok = 0;
+    }
+    ok(all_ok, "every upsert succeeds (no unsplittable leaf)");
+    ok(btree_check(v, root, &st, NULL, 0) == 0, "structural check");
+    ok(st.nkeys == 8, "all 8 records are reachable from the root");
+    for (i = 0; i < 8; i++) {
+        uint8_t kb[CKEY_LEN];
+        uint16_t n = (i == 3) ? CKEY_LEN : RKEY_LEN;
+        bt_key k;
+        bt_val val;
+        int found = -1;
+        uint16_t j, bad = 0;
+
+        rkey_bytes(kb, n, addrs[i]);
+        k.p = kb;
+        k.n = n;
+        if (btree_search(v, root, k, &val, &found) != 0 || !found ||
+            val.n != vlen[i]) {
+            ok(0, "wide record reads back");
+            continue;
+        }
+        for (j = 0; j < vlen[i]; j++)
+            if (val.p[j] != vbuf[i][j])
+                bad = 1;
+        ok(!bad, "wide record reads back byte-for-byte");
+    }
+    /* the tree must still be a legal B+-tree, i.e. no page is overfull */
+    ok(st.height >= 1, "a root page was created for the three pieces");
+}
+
 static int verify_model(invfs_volume *v, invfs_blkptr root, uint64_t n)
 {
     uint64_t i;
@@ -673,6 +773,8 @@ int main(int argc, char **argv)
     test_crc_gen(v);
     fake_vol_reset(v);
     test_reclaim(v);
+    fake_vol_reset(v);
+    test_wide_records(v);
 
     fake_vol_close(v);
     free(v);

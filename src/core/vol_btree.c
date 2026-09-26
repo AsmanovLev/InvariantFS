@@ -71,11 +71,15 @@ typedef struct {
     uint16_t       vlen;       /* leaf only */
 } bt_ent;
 
-/* Result of a recursive insertion. */
+/* Result of a recursive insertion. `nptr` is how many sibling pages the node
+ * turned into (1 = no split, 2 = the classic 2-way split, 3 = the node needed
+ * three pages -- see bt_split3_point). A 3-way split hands the parent TWO new
+ * separators, which is why the struct carries `mid` as well. */
 typedef struct {
-    invfs_blkptr node;         /* new subtree root */
-    invfs_blkptr right;        /* new right sibling when split != 0 */
-    int          split;
+    invfs_blkptr node;         /* new subtree root (leftmost piece) */
+    invfs_blkptr mid;          /* middle piece, valid when nptr == 3 */
+    invfs_blkptr right;        /* rightmost piece, valid when nptr >= 2 */
+    int          nptr;         /* 1, 2 or 3 */
     int          level;
 } bt_up;
 
@@ -373,6 +377,66 @@ static int bt_split_point(int level, const bt_ent *e, int n)
     return s;
 }
 
+/* Split an overflowing node into 2 or 3 page-fitting pieces.
+ *
+ * A 2-way split is not always possible. Records are variable-width, so an
+ * ordered run can have NO cut index at which both halves fit a page -- the
+ * WP88 case is a leaf holding a 3112-byte Q2R3 recipe chunk next to
+ * 309/693/85-byte recipes: cutting before the chunk leaves 4848 bytes on the
+ * right, cutting after it leaves 4219 on the left. The old code reported that
+ * as an insert failure (bt_ins_rec -> -1), which surfaced as
+ * "vol_v3_recipe_store failed" and cost the containerpack sweep the whole
+ * decomposition of the file.
+ *
+ * So: try the balanced 2-way split first and keep its exact behaviour; only
+ * when it is impossible fall back to greedily packing the run left to right
+ * into at most THREE page-fitting pieces. `cut[]` receives the g-1 interior
+ * cut indices (the trailing piece runs to n-1) and the return value is g, or
+ * 0 when even three pieces cannot hold the run -- which needs a single record
+ * too wide for a page, a case bt_write already rejects. Every piece is
+ * verified page-fitting before it is returned, so this can never hand
+ * bt_write an overfull node.
+ */
+static int bt_split3_point(int level, const bt_ent *e, int n, int *cut)
+{
+    int s = bt_split_point(level, e, n);
+    int i, s1, s2;
+
+    if (s > 0) {              /* the classic 2-way split still works */
+        cut[0] = s;
+        return 2;
+    }
+    if (n < 3)               /* not enough records for three pieces */
+        return 0;
+    /* A record that cannot fit a page on its own makes every split fail. */
+    for (i = 0; i < n; i++)
+        if (bt_used(level, &e[i], 1) > INVFS_BLOCK_SIZE)
+            return 0;
+    /* s1: the largest prefix (leaving >= 2 records behind) that fits a page. */
+    s1 = 0;
+    for (i = 1; i <= n - 2; i++) {
+        if (bt_used(level, e, i) > INVFS_BLOCK_SIZE)
+            break;
+        s1 = i;
+    }
+    if (s1 < 1)
+        return 0;
+    /* s2: the largest second piece that fits a page, leaving >= 1 behind. */
+    s2 = s1;
+    for (i = s1 + 1; i <= n - 1; i++) {
+        if (bt_used(level, e + s1, i - s1) > INVFS_BLOCK_SIZE)
+            break;
+        s2 = i;
+    }
+    if (s2 < s1 + 1)
+        return 0;
+    if (bt_used(level, e + s2, n - s2) > INVFS_BLOCK_SIZE)
+        return 0;
+    cut[0] = s1;
+    cut[1] = s2;
+    return 3;
+}
+
 /* ------------------------------------------------------------------ */
 /* search                                                             */
 /* ------------------------------------------------------------------ */
@@ -429,7 +493,8 @@ static int bt_ins_rec(invfs_volume *v, invfs_blkptr node, bt_key key,
 {
     uint8_t buf[INVFS_BLOCK_SIZE];
     bt_ent *e = (bt_ent *)malloc(sizeof(bt_ent) * BT_MAX_ENTRIES);
-    int n, level, s;
+    int n, level, g;
+    int cut[2];
 
     if (!e)
         return -1;
@@ -464,7 +529,7 @@ static int bt_ins_rec(invfs_volume *v, invfs_blkptr node, bt_key key,
                 free(e);
                 return -1;
             }
-            out->split = 0;
+            out->nptr = 1;
             free(e);
             return 0;
         }
@@ -479,42 +544,54 @@ static int bt_ins_rec(invfs_volume *v, invfs_blkptr node, bt_key key,
             e[i].k = key.p;
             e[i].klen = key.n;
         }
-        if (!cu.split) {
+        if (cu.nptr == 1) {
             e[i].child = cu.node;
             if (bt_used(level, e, n) <= INVFS_BLOCK_SIZE) {
                 if (bt_write(v, level, gen, e, n, &out->node) != 0) {
                     free(e);
                     return -1;
                 }
-                out->split = 0;
+                out->nptr = 1;
                 free(e);
                 return 0;
             }
         } else {
-            uint8_t rkbuf[INVFS_BLOCK_SIZE];
-            bt_key rk;
-            int j;
+            /* cu.nptr is 2 or 3: splice in (nptr - 1) separators at i+1..,
+             * each keyed by the FIRST key of the piece it introduces. The
+             * leftmost piece stays in record i. */
+            uint8_t rkbuf[INVFS_BLOCK_SIZE], mkbuf[INVFS_BLOCK_SIZE];
+            bt_key rk, mk;
+            int j, add = cu.nptr - 1;
             if (bt_first_key(v, cu.right, rkbuf, &rk) != 0) {
                 free(e);
                 return -1;
             }
-            e[i].child = cu.node;
-            if (n >= BT_MAX_ENTRIES) {
+            if (add == 2 && bt_first_key(v, cu.mid, mkbuf, &mk) != 0) {
                 free(e);
                 return -1;
             }
-            for (j = n; j > i + 1; j--)
+            e[i].child = cu.node;
+            if (n + add > BT_MAX_ENTRIES) {
+                free(e);
+                return -1;
+            }
+            for (j = n; j > i + add; j--)
                 e[j] = e[j - 1];
-            e[i + 1].k = rk.p;
-            e[i + 1].klen = rk.n;
-            e[i + 1].child = cu.right;
-            n++;
+            e[i + 1].k = add == 2 ? mk.p : rk.p;
+            e[i + 1].klen = add == 2 ? mk.n : rk.n;
+            e[i + 1].child = add == 2 ? cu.mid : cu.right;
+            if (add == 2) {
+                e[i + 2].k = rk.p;
+                e[i + 2].klen = rk.n;
+                e[i + 2].child = cu.right;
+            }
+            n += add;
             if (bt_used(level, e, n) <= INVFS_BLOCK_SIZE) {
                 if (bt_write(v, level, gen, e, n, &out->node) != 0) {
                     free(e);
                     return -1;
                 }
-                out->split = 0;
+                out->nptr = 1;
                 free(e);
                 return 0;
             }
@@ -522,20 +599,32 @@ static int bt_ins_rec(invfs_volume *v, invfs_blkptr node, bt_key key,
         /* fall through: the internal page now overflows */
     }
 
-    s = bt_split_point(level, e, n);
-    if (s <= 0 || s >= n) {
+    g = bt_split3_point(level, e, n, cut);
+    if (g < 2) {
         free(e);
         return -1;
     }
-    if (bt_write(v, level, gen, e, s, &out->node) != 0) {
+    if (bt_write(v, level, gen, e, cut[0], &out->node) != 0) {
         free(e);
         return -1;
     }
-    if (bt_write(v, level, gen, e + s, n - s, &out->right) != 0) {
+    if (g == 3) {
+        if (bt_write(v, level, gen, e + cut[0], cut[1] - cut[0],
+                     &out->mid) != 0) {
+            free(e);
+            return -1;
+        }
+        if (bt_write(v, level, gen, e + cut[1], n - cut[1],
+                     &out->right) != 0) {
+            free(e);
+            return -1;
+        }
+    } else if (bt_write(v, level, gen, e + cut[0], n - cut[0],
+                        &out->right) != 0) {
         free(e);
         return -1;
     }
-    out->split = 1;
+    out->nptr = g;
     free(e);
     return 0;
 }
@@ -569,27 +658,45 @@ int btree_upsert(invfs_volume *v, invfs_blkptr root, bt_key key,
     if (bt_ins_rec(v, root, key, val, gen, &up) != 0)
         return -1;
 
-    if (!up.split) {
+    if (up.nptr == 1) {
         up.node.flags |= INVFS_BP_ROOT;
         *new_root_out = up.node;
         return 0;
     }
 
     {
-        uint8_t k1[INVFS_BLOCK_SIZE], k2[INVFS_BLOCK_SIZE];
-        bt_key m1, m2;
-        bt_ent re[2];
+        /* The old root became up.nptr pages; the new root is one level up
+         * with up.nptr records: record k is keyed by the FIRST key of piece
+         * k and owns that piece's subtree. A 3-way split therefore needs 3
+         * records, not 2. */
+        uint8_t k1[INVFS_BLOCK_SIZE], k2[INVFS_BLOCK_SIZE], k3[INVFS_BLOCK_SIZE];
+        bt_key m1, m2, m3;
+        bt_ent re[3];
         invfs_blkptr r;
-        if (bt_first_key(v, up.node, k1, &m1) != 0 ||
-            bt_first_key(v, up.right, k2, &m2) != 0)
+        re[0].child = up.node;
+        if (bt_first_key(v, up.node, k1, &m1) != 0)
             return -1;
         re[0].k = m1.p;
         re[0].klen = m1.n;
-        re[0].child = up.node;
-        re[1].k = m2.p;
-        re[1].klen = m2.n;
-        re[1].child = up.right;
-        if (bt_write(v, up.level + 1, gen, re, 2, &r) != 0)
+        if (up.nptr == 3) {
+            re[1].child = up.mid;
+            if (bt_first_key(v, up.mid, k2, &m2) != 0)
+                return -1;
+            re[1].k = m2.p;
+            re[1].klen = m2.n;
+            re[2].child = up.right;
+            if (bt_first_key(v, up.right, k3, &m3) != 0)
+                return -1;
+            re[2].k = m3.p;
+            re[2].klen = m3.n;
+        } else {
+            re[1].child = up.right;
+            if (bt_first_key(v, up.right, k2, &m2) != 0)
+                return -1;
+            re[1].k = m2.p;
+            re[1].klen = m2.n;
+        }
+        if (bt_write(v, up.level + 1, gen, re, up.nptr, &r) != 0)
             return -1;
         r.flags |= INVFS_BP_ROOT;
         *new_root_out = r;

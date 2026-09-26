@@ -159,6 +159,17 @@ $(foreach p,$(CPACKS),$(eval $(call PLUGIN_SO_RULE,$(p))))
 PLUGIN_SO := $(foreach p,$(CPACKS),$(call PACKDIR,$(p))/lib$(p).so)
 plugin-so: $(PLUGIN_SO)
 
+# The e2e harnesses that compile a pack's CLI themselves (tools/test-ivpacks.sh)
+# must link the same extras as the .so rule above, or they go stale the moment a
+# CORE member or a src/zlib/*.c file is added -- which is exactly how qcow2 broke
+# when Q2R3 made it call invfs_deflate_repro_*. `make print-obj-<pack>` emits the
+# list (repo-relative), so those harnesses never hand-maintain it again.
+# An EMPTY print means the list itself is empty (e.g. $(wildcard src/zlib/*.c)
+# matched nothing) -- the harnesses are required to fail loudly on that, not to
+# fall through to a silently under-linked binary.
+print-obj-%:
+	@printf '%s\n' $(PLUGIN_EXTRA_$*)
+
 # .ivpack bundles (ADR-007 §3: uncompressed ZIP-0, manifest + sha256 +
 # lib/<name>.so + bin/<name> CLI fallback). Artifacts land in dist/ivpack/.
 IVPACKS := $(foreach p,$(CPACKS),dist/ivpack/$(p).ivpack)
@@ -177,12 +188,8 @@ clean:
 	rm -rf $(OBJ) $(CORE_OBJS_FILE) $(TOOLS:%=$(OUT)/%) $(OUT)/invf-codec_test \
 	       $(OUT)/invf-helper_exec_test $(OUT)/invf-metabuf_test \
 	       $(OUT)/invf-btree_test $(OUT)/invf-delta_test \
-<<<<<<< HEAD
-	       $(OUT)/invf-plugin_host_test $(OUT)/invf-plugin_mt_test tools/codecpacks/qcow2.codecpack/libqcow2.so \
-=======
-	       $(OUT)/invf-plugin_host_test $(OUT)/invf-ivpack_packs_test \
-	       $(PLUGIN_SO) dist/ivpack \
->>>>>>> origin/wp/71-ivpack-all-packs
+	       $(OUT)/invf-plugin_host_test $(OUT)/invf-plugin_mt_test \
+	       $(OUT)/invf-ivpack_packs_test $(PLUGIN_SO) $(IVPACKS) \
 	       tools/invf-plugin-host \
 	       $(OUT)/invf-fuzz
 
