@@ -38,8 +38,23 @@ cd /dev/shm
 rm -f "$IMG" "$IMGNEG"
 
 echo "== tools =="
-command -v cjxl >/dev/null || { echo "FAIL: cjxl not installed"; exit 1; }
-command -v djxl >/dev/null || { echo "FAIL: djxl not installed"; exit 1; }
+# The EXE carve transcodes its JPEG members with cjxl/djxl DIRECTLY
+# (vol_exer.c invfs_jxl_compress/decompress), and the WP11/WP33 tool layer
+# resolves helpers through $INVFS_TOOLS, then /usr/lib/invfs/tools, and
+# only then PATH -- with the PATH leg refused by default for uid 0
+# (AGENTS.md 2.8, vol_cpack.c tool_resolve_strict). tools/run-e2e.sh runs
+# suites under `unshare -rm`, so uid IS 0 here and a plain `command -v`
+# preflight is a lie: cjxl on PATH never resolved, every JPEG member
+# silently fell to the "guard refused" skip (vol_exer.c goto skip), and the
+# carve committed with the PNG part only -> "exe media -> JXL (1 parts)".
+# Point the suite at a trusted directory holding the real tools, the
+# test-pngflac.sh convention.
+mkdir -p "$WORK/tools"
+for t in cjxl djxl; do
+    p=$(command -v "$t") || { echo "FAIL: $t not installed"; exit 1; }
+    ln -sf "$p" "$WORK/tools/$t"
+done
+export INVFS_TOOLS="$WORK/tools"
 
 echo "== mkfs =="
 $B/invf-mkfs "$IMG" 0.2 >/dev/null
@@ -324,8 +339,17 @@ IMGAB=wp14exr-ab.img
 rm -f "$IMGAB"
 $B/invf-mkfs "$IMGAB" 0.2 >/dev/null
 $B/invf-cp "$IMGAB" "$WORK/orig/game.exe" game.exe >/dev/null
-INVFS_FAIL_CHILD=2 $B/invf-sweep "$IMGAB" > "$WORK/sweep-ab.log" 2>&1 \
-    || { cat "$WORK/sweep-ab.log"; exit 1; }
+# The hook fails EVERY blob write from the Nth on (vol_png.c: it models
+# ENOSPC, not a single hiccup), so it does not stop at the part: the aborted
+# carve falls through to the binary-batch path, and that batch's flush is
+# blob #3 and fails too -- "batch flush failed", which the driver counts and
+# returns 1 for (invf-sweep.c: (failed || reg_failed) ? 1 : 0). Pin that exit
+# code: 0 would mean the fault stopped mattering, anything else is a crash.
+rc=0
+INVFS_FAIL_CHILD=2 $B/invf-sweep "$IMGAB" > "$WORK/sweep-ab.log" 2>&1 || rc=$?
+[ "$rc" -eq 1 ] || {
+    echo "FAIL: sweep exit $rc (want 1: the post-abort batch flush must fail too)"
+    cat "$WORK/sweep-ab.log"; exit 1; }
 grep -q "INVFS_FAIL_CHILD" "$WORK/sweep-ab.log" || { echo "FAIL: fault hook did not fire"; exit 1; }
 if grep -q "exe media" "$WORK/sweep-ab.log"; then
     echo "FAIL: carve completed despite the failed part"; exit 1
