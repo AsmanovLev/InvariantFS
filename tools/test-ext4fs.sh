@@ -28,8 +28,8 @@
 #
 #   FS e2e: mkfs -> invf-import -> INVFS_CODECPACKS=$REPO/tools/codecpacks
 #   invf-sweep -> "ext4fs (codecpack)" lines + same-run member batching
-#   (PPMd / ZSTD) -> class stamps CONTAINER{17,1} / TEXT{PPMD,1} /
-#   BATCHED_BIN{ZSTD_BCJ,1} -> verify --deep -> invf-cat sha256 bit-exact
+#   (PPMd / ZSTD) -> class stamps CONTAINER{17,1} / TEXT{PPMD} /
+#   BATCHED_BIN{ZSTD_BCJ} -> verify --deep -> invf-cat sha256 bit-exact
 #   -> direct member reads bit-exact -> ranged reads (mid-member /
 #   cross-boundary / tail / whole-by-windows) -> pack-ABSENT reads via the
 #   self-describing map -> idempotent re-sweep -> delete cascade -> fsck
@@ -639,21 +639,29 @@ echo "  fsA.ext4: $C"
 C=$("$WORK/classof" "$IMG" fsB.ext4)
 echo "  fsB.ext4: $C"
 [ "$C" = "cls=3 algo=17 gen=1" ] || { echo "FAIL: want CONTAINER{17,1}"; exit 1; }
-# a text member (leaf.c) -> TEXT{PPMD,1}; the ELF -> BATCHED_BIN{ZSTD_BCJ,1}
+# a text member (leaf.c) -> TEXT{PPMD}; the ELF -> BATCHED_BIN{ZSTD_BCJ}
+# The batch stamps carry the REGISTRY generation (the max over every codec
+# the process loaded, codec.c:invfs_registry_generation), not the batch
+# codec's own -- this suite installs the whole tools/codecpacks dir, so the
+# value moves with the pack set (qcow2.codecpack declares generation = 2).
+# The class+algo pair is the classification contract, so it is what the
+# stamp_is() helper below matches; the CONTAINER/MEMLIMIT stamps name the
+# decomposing pack's OWN generation and stay matched exactly.
+stamp_is() { case "$1" in "$2"|"$2 "*) return 0 ;; esac; return 1; }
 TINO=$(awk '$2 == "/deep/a/b/c/d/e/leaf.c" && $1 == "fsA" {print $3}' "$WORK/manifest")
 TSIB=$(printf "fsA.ext4!mbr%04d-leaf.c" "$TINO")
 C=$("$WORK/classof" "$IMG" "$TSIB")
 echo "  leaf.c member: $C"
-[ "$C" = "cls=7 algo=2 gen=1" ] || { echo "FAIL: want TEXT{PPMD,1} for $TSIB"; exit 1; }
+stamp_is "$C" "cls=7 algo=2" || { echo "FAIL: want TEXT{PPMD} for $TSIB (got $C)"; exit 1; }
 XINO=$(awk '$2 == "/bin/busybox.elf" && $1 == "fsA" {print $3}' "$WORK/manifest")
 XSIB=$(printf "fsA.ext4!mbr%04d-busybox.elf" "$XINO")
 C=$("$WORK/classof" "$IMG" "$XSIB")
 echo "  ELF member: $C"
-[ "$C" = "cls=8 algo=14 gen=1" ] || { echo "FAIL: want BATCHED_BIN{ZSTD_BCJ,1} for $XSIB"; exit 1; }
+stamp_is "$C" "cls=8 algo=14" || { echo "FAIL: want BATCHED_BIN{ZSTD_BCJ} for $XSIB (got $C)"; exit 1; }
 C=$("$WORK/classof" "$IMG" plain.ext4)
 echo "  plain.ext4: $C"
 case "$C" in *algo=17*) echo "FAIL: plain.ext4 carries the pack stamp"; exit 1;; esac
-[ "$C" = "cls=7 algo=2 gen=1" ] || { echo "FAIL: plain.ext4 should be TEXT{PPMD,1}"; exit 1; }
+stamp_is "$C" "cls=7 algo=2" || { echo "FAIL: plain.ext4 should be TEXT{PPMD} (got $C)"; exit 1; }
 
 echo "== verify --deep (reads every container through the map) =="
 $B/invf-verify "$IMG" --deep | tee "$WORK/verify1.log"
