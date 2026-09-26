@@ -713,6 +713,14 @@ cmp -s "$WORK/table" "$WORK/out/mbrt" || { echo "FAIL: !mbrt != enumerate output
 echo "members + table + map present; !mbrt is the verbatim table"
 
 echo "== class stamps =="
+# The batch stamps carry the REGISTRY generation (the max over every codec
+# the process loaded, codec.c:invfs_registry_generation), not the batch
+# codec's own -- this suite installs the whole tools/codecpacks dir, so the
+# value moves with the pack set (qcow2.codecpack declares generation = 2).
+# The class+algo pair is the classification contract, so it is what
+# stamp_is() matches; the CONTAINER/MEMLIMIT stamps name the decomposing
+# pack's OWN generation and stay matched exactly.
+stamp_is() { case "$1" in "$2"|"$2 "*) return 0 ;; esac; return 1; }
 C=$("$WORK/classof" "$IMG" fs.ntfs)
 echo "  fs.ntfs: $C"
 [ "$C" = "cls=3 algo=20 gen=1" ] || { echo "FAIL: want CONTAINER{NTFS=20,1}"; exit 1; }
@@ -720,15 +728,15 @@ TEXTMBR=$($B/invf-ls "$IMG" | grep -oE "fs\.ntfs!mbr[0-9]+-(big|hard)\.txt" | he
 [ -n "$TEXTMBR" ] || { echo "FAIL: text member sibling not found"; $B/invf-ls "$IMG"; exit 1; }
 C=$("$WORK/classof" "$IMG" "$TEXTMBR")
 echo "  $TEXTMBR: $C"
-[ "$C" = "cls=7 algo=2 gen=1" ] || { echo "FAIL: want TEXT{PPMD,1}"; exit 1; }
+stamp_is "$C" "cls=7 algo=2" || { echo "FAIL: want TEXT{PPMD} (got $C)"; exit 1; }
 ELFMBR=$($B/invf-ls "$IMG" | grep -oE "fs\.ntfs!mbr[0-9]+-program\.elf" | head -1)
 C=$("$WORK/classof" "$IMG" "$ELFMBR")
 echo "  $ELFMBR: $C"
-[ "$C" = "cls=8 algo=14 gen=1" ] || { echo "FAIL: want BATCHED_BIN{ZSTD_BCJ,1}"; exit 1; }
+stamp_is "$C" "cls=8 algo=14" || { echo "FAIL: want BATCHED_BIN{ZSTD_BCJ} (got $C)"; exit 1; }
 NESTMBR=$($B/invf-ls "$IMG" | grep -oE "fs\.ntfs!mbr[0-9]+-nested\.c" | head -1)
 C=$("$WORK/classof" "$IMG" "$NESTMBR")
 echo "  $NESTMBR: $C"
-[ "$C" = "cls=7 algo=2 gen=1" ] || { echo "FAIL: subdir member want TEXT{PPMD,1}"; exit 1; }
+stamp_is "$C" "cls=7 algo=2" || { echo "FAIL: subdir member want TEXT{PPMD} (got $C)"; exit 1; }
 
 echo "== verify --deep (reads the container through the map) =="
 $B/invf-verify "$IMG" --deep | tee "$WORK/verify1.log"
