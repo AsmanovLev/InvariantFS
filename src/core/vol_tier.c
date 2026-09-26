@@ -643,11 +643,58 @@ static int tier_heat_cb(void *ctx_, uint64_t rec_pos,
     return 0;
 }
 
+/* WP94: v3 body -- the v2 callback above parses the AST out of a v2
+ * record; a v3 recipe lives in its own content-addressed blob behind
+ * in.recipe_addr (the shape vol_sweep_dedupe_ex walks). Same admission
+ * rules, so the two passes cannot drift: internal \x01 rows, anchored
+ * files, cold files and non-shadow (RAW / arena / metadata) pbas are all
+ * still skipped. */
+static int tier_heat_v3_cb(invfs_volume *v, uint64_t inode_id,
+                           const char *name, void *ctx_)
+{
+    tier_heat_ctx *c = (tier_heat_ctx *)ctx_;
+    invfs_v3_inode in;
+    invfs_ast_hdr ah;
+    const invfs_ast_block_entry *ents = NULL;
+    uint8_t *blob = NULL;
+    size_t blen = 0, n_ents = 0, i;
+    uint16_t r;
+
+    if (!name || (unsigned char)name[0] == 0x01) return 0;
+    if (invfs_inode_is_anchored(v, inode_id)) return 0;   /* WP59a */
+    r = heat_file_r(v, inode_id);
+    if (!r) return 0;
+    if (vol_v3_inode_get(v, inode_id, &in) != 1) return 0;
+    if (vol_v3_recipe_load(v, in.recipe_addr, &blob, &blen) != 0 || !blob)
+        return 0;
+    if (vol_ast_recipe_parse(blob, blen, &ah, &ents, &n_ents) != 0 || !ents) {
+        free(blob);
+        return 0;
+    }
+    for (i = 0; i < n_ents; i++) {
+        uint64_t pba = ents[i].pba;
+        if (!pba || pba < v->sb.shadow_zone_start ||
+            pba >= v->sb.total_blocks)
+            continue;   /* only canonical (dev1) shadow segments */
+        if (tier_heat_put(c->m, pba, r) != 0) { free(blob); return -1; }
+    }
+    free(blob);
+    return 0;
+}
+
 static int tier_heat_build(invfs_volume *v, tier_heat_map *m)
 {
     tier_heat_ctx c;
     c.v = v;
     c.m = m;
+    /* WP94: a Meta-v3 volume has no v2 records to walk -- the live set is
+     * the base inode tree + delta overlay (the same branch
+     * vol_collect_sweepables takes, vol_sweep.c:2355). Without it the map
+     * came back empty on every v3 volume, so vol_tier_migrate's
+     * `heat_any_rhot && hm.t` gate never opened and the whole WP25 tier
+     * migration was inert on the only format invf-mkfs produces. */
+    if (v->sb.vol_flags & VOLF_V3)
+        return vol_v3_iter_live_inodes(v, tier_heat_v3_cb, &c);
     return vol_records_walk(v, tier_heat_cb, &c);
 }
 

@@ -423,6 +423,17 @@ static int vol_decode_ast_entries(invfs_volume *v, uint64_t inode_id,
 
             if (!has_complex_codecs && nblocks >= 16) {
                 int n_threads = 6;
+                /* WP94: the serial loop below touches read heat once per
+                 * entry; this fast path replaces it, so it owes the same
+                 * touch. It is made ONCE here, from the calling thread,
+                 * because heat is per-file (heat_tab_touch dedupes per
+                 * inode, so the serial loop's N touches net to exactly one)
+                 * and heat_tab_touch's table insert is not thread-safe --
+                 * decode_thread_worker() must not call it. Skipping it left
+                 * every read of a >=16-segment NONE/LZ4/ZSTD recipe at
+                 * rheat=0, which starved heat promotion AND the WP25 tier
+                 * migration (tier_heat_cb reads heat_file_r). */
+                heat_touch_read(v, inode_id, 0);
                 const char *et = getenv("INVFS_READ_THREADS");
                 if (et && *et) {
                     int t = atoi(et);
