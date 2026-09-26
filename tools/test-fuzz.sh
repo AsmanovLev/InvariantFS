@@ -2,13 +2,17 @@
 # test-fuzz.sh — REDUCED fuzz pass (the make-e2e-suitable slice of the
 # tools/fuzz/ wave; the full passes live in the fuzz tools themselves).
 #
-#   1. bitflip.py    40 image-mutation iterations (data/journal/inode/
+#   1. bitflip.py    60 image-mutation iterations (data/journal/inode/
 #                    superblock/descriptor regions; flip/zero4K/truncate/
 #                    crafted-descriptor; fsck+verify --deep+bit-exact cats)
-#   2. opseq.py      2 images x 120 random ops vs a shadow tree
-#   3. packfuzz.py   60 mutants per available containerpack helper
-#   4. fuzz_manifest 200 malformed-manifest cases through the real
+#   2. opseq.py      2 images x 150 random ops vs a shadow tree
+#   3. packfuzz.py   100 mutants per available containerpack helper
+#   4. fuzz_manifest 400 malformed-manifest cases through the real
 #                    pack registration path
+#
+# The two C helpers it builds (ophelper, fuzz_manifest) take their object
+# lists and include path from the Makefile, never from a copy in this file
+# -- see the comment at the build step.
 #
 # Everything is deterministic (fixed default seeds); failures print their
 # repro lines. Packs whose fixture tooling is missing are skipped, never
@@ -21,7 +25,6 @@ set -o pipefail
 REPO="${REPO:-$(cd "$(dirname "$0")/.." && pwd)}"   # override with the worktree when testing a branch
 B=$REPO/bin
 FZ=$REPO/tools/fuzz
-OBJ=$REPO/build/obj
 SHM=/dev/shm
 
 [ -x "$B/invf-mkfs" ] || { echo "FAIL: run make first"; exit 1; }
@@ -29,13 +32,43 @@ command -v python3 >/dev/null || { echo "FAIL: python3"; exit 1; }
 command -v cc >/dev/null || { echo "FAIL: cc"; exit 1; }
 
 echo "== build fuzz harness helpers =="
-cc -std=gnu11 -O2 -I$REPO/src -I$REPO/src/core -I$REPO/src/codecs -I$REPO/src/recipes -I$REPO/src/vendor7z -DMINIZ_NO_ZLIB_APIS -o "$FZ/ophelper" \
+# Ask the Makefile for the object lists instead of hand-maintaining them.
+# ophelper links the whole engine, so it takes build/core_objs.txt -- the
+# list `make all` emits from $(CORE), the same source 20-odd other
+# tools/test-*.sh use. The hand-written list this replaces predated
+# deflate_repro, vol_plugin_client and the stock-zlib objects, so the link
+# failed outright (undefined invfs_deflate_repro_encode / *_decompress /
+# invfs_plugin_pool_*) and ALL FOUR FUZZ LEGS BELOW NEVER RAN: a green
+# "make e2e" entry for this suite was reporting a harness that could not
+# build. fuzz_manifest links exactly the pure-codec set `make fuzz` links,
+# via print-fuzz-objs. The include path is $(SRC) + $(SRCDIRS) from
+# print-incdirs (the hardcoded one had lost src/legacy and src/cli).
+CORE_OBJS_FILE=$REPO/build/core_objs.txt
+[ -s "$CORE_OBJS_FILE" ] \
+    || { echo "FAIL: $CORE_OBJS_FILE missing/empty (run make)"; exit 1; }
+CORE_O=$(sed "s|^|$REPO/|" "$CORE_OBJS_FILE")
+INCS=$(make -s -C "$REPO" print-incdirs)
+[ -n "${INCS//[[:space:]]/}" ] \
+    || { echo "FAIL: make print-incdirs returned nothing"; exit 1; }
+INCS=$(printf '%s\n' $INCS | sed "s|^|-I$REPO/|")
+FUZZ_O=$(make -s -C "$REPO" print-fuzz-objs)
+[ -n "${FUZZ_O//[[:space:]]/}" ] \
+    || { echo "FAIL: make print-fuzz-objs returned nothing"; exit 1; }
+FUZZ_O=$(printf '%s\n' $FUZZ_O | sed "s|^|$REPO/|")
+# Every object the Makefile named must exist. An empty or half-resolved
+# list has to fail LOUDLY here, never fall through to a silently
+# under-linked helper (the tools/test-ivpacks.sh print-obj-qcow2 rule).
+for o in $CORE_O $FUZZ_O; do
+    [ -f "$o" ] || { echo "FAIL: $o missing (run make)"; exit 1; }
+done
+echo "  core objects: $(echo $CORE_O | wc -w), fuzz objects: $(echo $FUZZ_O | wc -w)"
+cc -std=gnu11 -O2 -DMINIZ_NO_ZLIB_APIS $INCS -o "$FZ/ophelper" \
     "$FZ/ophelper.c" \
-    $OBJ/{volume,vol_cpack,helper_exec,vol_png,vol_seal,vol_repair,vol_rollback,vol_resize,vol_fsck,vol_crash,vol_exer,vol_dedupe,vol_textzone,vol_heat,vol_sweep,vol_meta_merge,vol_metabuf,vol_btree,vol_delta,vol_fold,vol_reclaim,vol_spt0,vol_read,vol_write,vol_records,vol_ast,vol_dirs,arc,crc32c,lz4,flacx,tarx,pngx,blkio,miniz,blake3,blake3_dispatch,blake3_portable,ppmd8,ppmd8enc,ppmd8dec,ppmd_codec,codec,bcj_x86,rs,vol_tier}.o \
+    $CORE_O \
     -Wl,-l:libzstd.so.1 -lz -lpthread
-cc -std=gnu11 -O2 -I$REPO/src -I$REPO/src/core -I$REPO/src/codecs -I$REPO/src/recipes -I$REPO/src/vendor7z -o "$FZ/fuzz_manifest" \
+cc -std=gnu11 -O2 $INCS -o "$FZ/fuzz_manifest" \
     "$FZ/fuzz_manifest.c" \
-    $OBJ/{codec,ppmd8,ppmd8enc,ppmd8dec,ppmd_codec,lz4,bcj_x86}.o \
+    $FUZZ_O \
     -Wl,-l:libzstd.so.1 -lz -lpthread
 echo "helpers built"
 

@@ -6,11 +6,10 @@
  *   ophelper <image> rm <name> [name...]        delete files, flush, close
  *   ophelper <image> rm-nonexistent <name>      delete must FAIL (rc 2)
  *
- * Build (tools/test-fuzz.sh does this):
- *   gcc -std=gnu11 -O2 -I src -o ophelper ophelper.c \
- *       build/obj/{volume,arc,crc32c,lz4,flacx,tarx,pngx,blkio,miniz,blake3,
- *       blake3_dispatch,blake3_portable,ppmd8,ppmd8enc,ppmd8dec,ppmd_codec,
- *       codec,bcj_x86,rs}.o -Wl,-l:libzstd.so.1 -lz -lpthread
+ * Build: tools/test-fuzz.sh does it, from the Makefile's own lists --
+ * `build/core_objs.txt` (the whole engine) and `make print-incdirs` for
+ * the include path. Do not copy a build line from here: an abbreviated
+ * one is what let this harness drift out of the link entirely.
  */
 #include <stdio.h>
 #include <string.h>

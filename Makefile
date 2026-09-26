@@ -172,6 +172,14 @@ plugin-so: $(PLUGIN_SO)
 print-obj-%:
 	@printf '%s\n' $(PLUGIN_EXTRA_$*)
 
+# Same service for the harnesses that compile a small main() against the
+# engine: hand-written `-I` lists go stale the moment a header moves into a
+# new $(SRCDIRS) entry, and they had already lost src/legacy and src/cli.
+# Emits the directories (one per line, like print-obj-%), not the flags:
+# the harness turns each into -I$REPO/<dir> once it has anchored the path.
+print-incdirs:
+	@printf '%s\n' $(SRC) $(SRCDIRS)
+
 # .ivpack bundles (ADR-007 §3: uncompressed ZIP-0, manifest + sha256 +
 # lib/<name>.so + bin/<name> CLI fallback). Artifacts land in dist/ivpack/.
 IVPACKS := $(foreach p,$(CPACKS),dist/ivpack/$(p).ivpack)
@@ -219,6 +227,11 @@ $(OUT)/invf-fuzz: $(OBJ)/fuzz_invfs.o $(FUZZ_O)
 	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
 
 fuzz: $(OUT)/invf-fuzz
+
+# tools/fuzz/fuzz_manifest.c links exactly this set; hand-maintaining it in
+# tools/test-fuzz.sh made a second source of truth for the fuzz link.
+print-fuzz-objs:
+	@printf '%s\n' $(FUZZ_O)
 
 # CI target: 10k iterations (faster than fuzz's default 100k)
 fuzz-ci: $(OUT)/invf-fuzz
