@@ -17,18 +17,36 @@ int vol_ast_recipe_serialize(uint64_t file_size,
                              const invfs_ast_block_entry *ents, uint32_t n,
                              uint8_t **blob_out, size_t *blen_out)
 {
+    return vol_ast_recipe_serialize_win(file_size, ents, n, NULL, 0,
+                                       blob_out, blen_out);
+}
+
+/* ADR-010 amendment 2: same, plus the trailing window table. Passing
+ * (NULL, 0) produces the byte-identical blob the v1 writer always produced,
+ * which is what keeps every pre-existing volume stable. */
+int vol_ast_recipe_serialize_win(uint64_t file_size,
+                                 const invfs_ast_block_entry *ents, uint32_t n,
+                                 const invfs_ast_window_entry *wins,
+                                 uint32_t n_wins,
+                                 uint8_t **blob_out, size_t *blen_out)
+{
     uint8_t hdr[INVFS_AST_HDR_V2_LEN];
-    size_t hlen, total;
+    size_t hlen, total, wlen = 0;
     uint8_t *blob;
 
-    if (!blob_out || !blen_out || (n && !ents))
+    if (!blob_out || !blen_out || (n && !ents) || (n_wins && !wins))
         return -1;
     if (file_size > MAX_FILE_SIZE || n > MAX_SEGMENTS_V2)
         return -1;
     hlen = invfs_ast_hdr_write(hdr, file_size, n, 0);
     if (!hlen)
         return -1;
-    total = hlen + (size_t)n * sizeof(*ents);
+    if (n_wins) {
+        if (n_wins > MAX_SEGMENTS_V2)
+            return -1;
+        wlen = 8 + (size_t)n_wins * sizeof(*wins);
+    }
+    total = hlen + (size_t)n * sizeof(*ents) + wlen;
     if (total > INVFS_V3_RECIPE_STREAM_MAX)
         return -1;   /* WP-M25: recipe stream capped at 64 MiB */
     blob = (uint8_t *)malloc(total ? total : 1);
@@ -37,8 +55,48 @@ int vol_ast_recipe_serialize(uint64_t file_size,
     memcpy(blob, hdr, hlen);
     if (n)
         memcpy(blob + hlen, ents, (size_t)n * sizeof(*ents));
+    if (n_wins) {
+        uint8_t *w = blob + hlen + (size_t)n * sizeof(*ents);
+        memcpy(w, INVFS_AST_WINDOW_MAGIC, 4);
+        memcpy(w + 4, &n_wins, 4);
+        memcpy(w + 8, wins, (size_t)n_wins * sizeof(*wins));
+    }
     *blob_out = blob;
     *blen_out = total;
+    return 0;
+}
+
+/* Locate the trailing window table, if any. Returns 0 and sets *wins_out to
+ * NULL / *n_out to 0 for every pre-ADR-010 recipe (their blob ends exactly
+ * after the last entry), so the read path pays one length compare. -1 = the
+ * section is present but malformed, which must fail the read loudly rather
+ * than silently serve zeros. */
+int vol_ast_recipe_windows(const uint8_t *blob, size_t blen,
+                           const invfs_ast_hdr *hdr,
+                           const invfs_ast_window_entry **wins_out,
+                           uint32_t *n_out)
+{
+    size_t used;
+    uint32_t nw = 0;
+
+    *wins_out = NULL;
+    *n_out = 0;
+    if (!blob || !hdr || blen < hdr->hdr_len)
+        return -1;
+    used = hdr->hdr_len + (size_t)hdr->num_blocks * sizeof(invfs_ast_block_entry);
+    if (used > blen)
+        return -1;                 /* the entries themselves are truncated */
+    if (used == blen)
+        return 0;                  /* no window section: the v1 shape */
+    if (blen - used < 8 || memcmp(blob + used, INVFS_AST_WINDOW_MAGIC, 4) != 0)
+        return -1;                 /* trailing bytes we do not understand */
+    memcpy(&nw, blob + used + 4, 4);
+    if (nw == 0 || (size_t)nw > MAX_SEGMENTS_V2)
+        return -1;
+    if (blen - used - 8 != (size_t)nw * sizeof(invfs_ast_window_entry))
+        return -1;                 /* count/size disagree */
+    *wins_out = (const invfs_ast_window_entry *)(blob + used + 8);
+    *n_out = nw;
     return 0;
 }
 

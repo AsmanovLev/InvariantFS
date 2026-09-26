@@ -86,7 +86,7 @@ endef
 # CLI tools (main in src/cli/<name>.c)
 CLI_MAINS := mkfs verify fsck cp cat ls stat arctest blkio_test resize \
              metabuf_test btree_test btree_repair_test v3inode overlay_test fold_test concurrency_test \
-             sweep_v3_test symlink_v3_test large_file_v3_test dedupe_v3_test deflate_repro_test \
+             sweep_v3_test symlink_v3_test large_file_v3_test dedupe_v3_test deflate_repro_test window_test \
              plugin_host_test plugin_mt_test
 $(foreach t,$(CLI_MAINS),$(eval $(call TOOL_RULE,$(t),)))
 
@@ -245,6 +245,7 @@ test: $(OUT)/invf-arctest $(OUT)/invf-blkio_test $(OUT)/invf-codec_test \
 	$(OUT)/invf-symlink_v3_test /tmp
 	$(OUT)/invf-large_file_v3_test /tmp
 	$(OUT)/invf-dedupe_v3_test /tmp
+	$(OUT)/invf-window_test /tmp
 	$(OUT)/invf-deflate_repro_test
 	$(OUT)/invf-plugin_host_test
 	$(OUT)/invf-plugin_mt_test

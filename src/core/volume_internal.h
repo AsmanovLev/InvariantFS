@@ -1435,6 +1435,22 @@ int vol_v3_recipe_load(invfs_volume *v,
 int vol_ast_recipe_serialize(uint64_t file_size,
                              const invfs_ast_block_entry *ents, uint32_t n,
                              uint8_t **blob_out, size_t *blen_out);
+int vol_ast_recipe_serialize_win(uint64_t file_size,
+                                 const invfs_ast_block_entry *ents, uint32_t n,
+                                 const invfs_ast_window_entry *wins,
+                                 uint32_t n_wins,
+                                 uint8_t **blob_out, size_t *blen_out);
+int vol_ast_recipe_windows(const uint8_t *blob, size_t blen,
+                           const invfs_ast_hdr *hdr,
+                           const invfs_ast_window_entry **wins_out,
+                           uint32_t *n_out);
+uint64_t vol_v3_publish_window_inode(invfs_volume *v, const char *name,
+                                     uint64_t src_inode, uint64_t src_off,
+                                     uint64_t length, uint64_t src_len,
+                                     uint32_t transform,
+                                     uint8_t engine, uint8_t level,
+                                     uint8_t mem_level, uint8_t strategy,
+                                     int8_t window_bits);
 int vol_ast_recipe_parse(const uint8_t *blob, size_t blen,
                          invfs_ast_hdr *hdr_out,
                          const invfs_ast_block_entry **ents_out,

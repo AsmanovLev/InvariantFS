@@ -149,6 +149,11 @@ typedef struct {
  * splice at the offsets; the sweep stores nothing before a full in-memory
  * rebuild memcmps the original (the house 1:1 invariant). */
 #define INVFS_ALGO_EXER 15
+/* ADR-010 amendment 2: a recipe entry that is a WINDOW into another inode
+ * instead of a stored segment. The entry's own pba is unused (a window owns
+ * no blocks) and carries src_inode_id; the rest of the descriptor lives in a
+ * trailing window table addressed by block_id. See invfs_ast_window_entry. */
+#define INVFS_ALGO_WINDOW_SRC 24
 
 /* Storage-class flag (WP10): persisted as internal xattr "invfs.class" in the
  * INO2 ext block, value = invfs_class_tlv. Records WHY a file is stored the
@@ -851,6 +856,35 @@ typedef struct {
     uint32_t block_offset;          /* offset within the decoded batch */
     uint64_t pba;                   /* physical block address (WP27) */
 } invfs_ast_block_entry;            /* 32 bytes */
+
+/* ADR-010 amendment 2 -- the window table.
+ *
+ * A recipe blob is [header][num_blocks x 32 B entries][window table]. The
+ * window table is a NEW trailing section, so every recipe written before this
+ * change parses unchanged (it simply has zero trailing bytes). An entry with
+ * algo == INVFS_ALGO_WINDOW_SRC is a reference, not a payload: block_id
+ * indexes this table and the entry's pba field carries src_inode_id, so the
+ * 32-byte array stride never changes.
+ *
+ *   [4B "WINW"][u32 count] count x invfs_ast_window_entry
+ *
+ * transform_kind: 0 = verbatim, 1 = inflate the source range (the source is
+ * a QCOW2 rankimg cluster stream; the recorded zlib parameters are the ones
+ * the Q2R3 recipe proved bit-exact, the same ones the MRMP kind-2 REPRO read
+ * path already replays). 2/3 are reserved for zstd/lz4 and refused. */
+#define INVFS_AST_WINDOW_MAGIC "WINW"
+
+typedef struct {
+    uint64_t src_off;      /* byte offset in the source inode */
+    uint64_t src_len;      /* exact source byte length (a whole cluster) */
+    uint32_t transform;    /* 0 verbatim, 1 inflate */
+    uint8_t  engine;       /* INVFS_DEFLATE_ENGINE_* for transform 1 */
+    uint8_t  level;        /* deflate level 1..9 */
+    uint8_t  mem_level;    /* memLevel 1..9 */
+    uint8_t  strategy;     /* zlib strategy 0..4 */
+    int8_t   window_bits;  /* -12 for a qcow2 cluster */
+    uint8_t  reserved[3];
+} invfs_ast_window_entry;
 
 /* The format-v1 entry (24B, no pba): physical addresses lived only in the
  * L2P journal, keyed (inode, block_id). Read now only by invf-convert,

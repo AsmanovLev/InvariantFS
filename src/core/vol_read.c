@@ -2,6 +2,7 @@
  * inode/container read paths, ranged reads. Split from volume.c. */
 
 #include "volume_internal.h"
+#include "../codecs/deflate_repro.h"   /* the window transform inverse */
 
 
 /* WP10 §5 / WP14a: is this AST entry a member slice of a shared batch?
@@ -368,10 +369,16 @@ static void *decode_thread_worker(void *arg_) {
     return NULL;
 }
 
+/* ADR-010 amendment 2: `wins`/`n_wins` are the recipe's trailing window
+ * table (NULL/0 for every recipe written before the change). Passing the
+ * table in rather than re-parsing it per entry keeps the hot loop's cost at
+ * one extra branch per entry. */
 static int vol_decode_ast_entries(invfs_volume *v, uint64_t inode_id,
                                   const char *rec_name,
                                   const invfs_ast_hdr *ast_h,
                                   const invfs_ast_block_entry *ents,
+                                  const invfs_ast_window_entry *wins,
+                                  uint32_t n_wins,
                                   uint8_t *data)
 {
     uint32_t i;
@@ -468,6 +475,91 @@ static int vol_decode_ast_entries(invfs_volume *v, uint64_t inode_id,
                         return -1;
                     }
                     continue;
+                }
+
+                /* ADR-010 amendment 2: a WINDOW_SRC entry is a reference, not
+                 * a payload -- it owns no blocks, so it must be handled before
+                 * the pba check below (its pba slot holds the SOURCE inode).
+                 * Read the source range through its own read path, invert the
+                 * transform, and copy the slice. A missing or unreadable
+                 * source is EIO for the caller, never zeros. */
+                if (e->algo == INVFS_ALGO_WINDOW_SRC) {
+                    const invfs_ast_window_entry *w;
+                    uint8_t *srcbuf = NULL, *outbuf = NULL;
+                    size_t outlen = 0;
+                    int wrc = -1;
+
+                    if (!wins || e->block_id >= n_wins) {
+                        fprintf(stderr, "inode %llu: window entry %u has no "
+                                "descriptor\n", (unsigned long long)inode_id,
+                                e->block_id);
+                        return -1;
+                    }
+                    w = &wins[e->block_id];
+                    {
+                        invfs_v3_inode sin;
+                        if (!e->pba || vol_v3_inode_get(v, e->pba, &sin) != 1) {
+                            fprintf(stderr, "inode %llu: window source inode "
+                                    "%llu is gone\n",
+                                    (unsigned long long)inode_id,
+                                    (unsigned long long)e->pba);
+                            return -1;
+                        }
+                    }
+                    srcbuf = (uint8_t *)malloc(w->src_len ? w->src_len : 1);
+                    if (!srcbuf) return -1;
+                    outlen = (size_t)vol_read_range(v, e->pba, w->src_off,
+                                                    w->src_len, srcbuf);
+                    if ((int64_t)outlen != (int64_t)w->src_len) {
+                        fprintf(stderr, "inode %llu: window source read failed "
+                                "(off=%llu len=%llu got=%zu)\n",
+                                (unsigned long long)inode_id,
+                                (unsigned long long)w->src_off,
+                                (unsigned long long)w->src_len, outlen);
+                        free(srcbuf);
+                        return -1;
+                    }
+                    if (w->transform == 0) {
+                        if (w->src_len < e->length) { free(srcbuf); return -1; }
+                        memcpy(data + dst_off, srcbuf, (size_t)e->length);
+                        free(srcbuf);
+                        heat_touch_read(v, e->pba, e->block_id);
+                        continue;
+                    }
+                    if (w->transform == 1) {
+                        invfs_deflate_params dp;
+                        memset(&dp, 0, sizeof dp);
+                        dp.engine = w->engine;
+                        dp.level = (int8_t)w->level;
+                        dp.mem_level = (int8_t)w->mem_level;
+                        dp.strategy = (int8_t)w->strategy;
+                        dp.window_bits = w->window_bits;
+                        if (invfs_deflate_decompress(srcbuf, w->src_len,
+                                                     w->window_bits,
+                                                     &outbuf, &outlen) == 0 &&
+                            outbuf && outlen == e->length) {
+                            memcpy(data + dst_off, outbuf, outlen);
+                            wrc = 0;
+                        }
+                        free(outbuf);
+                        free(srcbuf);
+                        if (wrc != 0) {
+                            fprintf(stderr, "inode %llu: window inflate failed "
+                                    "(%llu -> %llu, want %llu)\n",
+                                    (unsigned long long)inode_id,
+                                    (unsigned long long)w->src_len,
+                                    (unsigned long long)outlen,
+                                    (unsigned long long)e->length);
+                            return -1;
+                        }
+                        heat_touch_read(v, e->pba, e->block_id);
+                        continue;
+                    }
+                    free(srcbuf);
+                    fprintf(stderr, "inode %llu: window transform %u is "
+                            "reserved, not implemented\n",
+                            (unsigned long long)inode_id, w->transform);
+                    return -1;
                 }
 
                 /* segment physical location: the entry's own pba (WP27);
@@ -1093,9 +1185,18 @@ int vol_read_inode(invfs_volume *v, uint64_t inode_id, unsigned depth,
         data = (uint8_t *)malloc(len ? len : 1);
         if (!data) { free(blob); return -1; }
         char iname[600];
+        const invfs_ast_window_entry *wins = NULL;
+        uint32_t n_wins = 0;
         iname[0] = 0;
+        if (vol_ast_recipe_windows(blob, blen, &ah, &wins, &n_wins) != 0) {
+            fprintf(stderr, "inode %llu: corrupt window table\n",
+                    (unsigned long long)inode_id);
+            free(data); free(blob);
+            return -1;
+        }
         vol_v3_path_of(v, inode_id, iname, sizeof iname);
-        if (vol_decode_ast_entries(v, inode_id, iname, &ah, ents, data) != 0) {
+        if (vol_decode_ast_entries(v, inode_id, iname, &ah, ents,
+                                   wins, n_wins, data) != 0) {
             free(data); free(blob);
             return -1;
         }
@@ -1186,8 +1287,18 @@ int vol_read_inode(invfs_volume *v, uint64_t inode_id, unsigned depth,
             data = (uint8_t *)malloc(len ? len : 1);
             if (!data) { free(rec); return -1; }
 
+            const invfs_ast_window_entry *wins = NULL;
+            uint32_t n_wins = 0;
+            if (vol_ast_recipe_windows(rec + off - ast_h.hdr_len,
+                                       rec_h.rec_len - off + ast_h.hdr_len,
+                                       &ast_h, &wins, &n_wins) != 0) {
+                fprintf(stderr, "inode %llu: corrupt window table\n",
+                        (unsigned long long)inode_id);
+                free(rec); free(data);
+                return -1;
+            }
             if (vol_decode_ast_entries(v, inode_id, rec_name, &ast_h,
-                                       ents, data) != 0) {
+                                       ents, wins, n_wins, data) != 0) {
                 free(data); free(rec); return -1;
             }
         }
