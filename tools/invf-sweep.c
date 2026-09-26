@@ -443,7 +443,9 @@ static void sw_duration(uint64_t ms, char *buf, size_t cap)
 {
     unsigned long long sec = (unsigned long long)(ms / 1000u);
     if (sec < 60)
-        snprintf(buf, cap, "%llus", (unsigned long long)(ms % 1000u));
+        /* under a minute the remainder is MILLISECONDS -- printing it with an
+         * "s" suffix read as "elapsed 941s" and made fast stages look slow */
+        snprintf(buf, cap, "%llums", (unsigned long long)(ms % 1000u));
     else if (sec < 3600)
         snprintf(buf, cap, "%llum%02llus", sec / 60u, sec % 60u);
     else
