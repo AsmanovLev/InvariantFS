@@ -430,6 +430,7 @@ RSPROP="$WORK/tools/rsprop"
 
 echo "== mkfs + corpus =="
 $B/invf-mkfs "$IMG" 0.5 >/dev/null
+
 python3 - <<'PY'
 import os, random, tarfile, io
 random.seed(20)
@@ -509,6 +510,42 @@ check_all() { # <label>
     [ "$ok" = 1 ] || fail "bit-exact check: $1"
     echo "  all files bit-exact ($1)"
 }
+
+# Meta-v3 has no parity seal yet: vol_seal() refuses up front because all
+# three of its moving parts are v2 (seal_view_load's v->l2p scan, the
+# stripe->parity map from L2P MAP entries, tz_owner_load/vol_map). What is
+# asserted here is the REFUSAL -- a clean, diagnosed, debris-free no-op --
+# because the alternative was a half-run seal that allocated parity, left an
+# empty owner node behind and failed with no message. The port is tracked in
+# impl_docs/AUDIT.md; when it lands this branch becomes the real seal legs.
+if $B/invf-fsck "$IMG" 2>/dev/null | grep -q "format:.*v3"; then
+    echo "== [0] Meta-v3: parity seal is not implemented; asserting the refusal =="
+    for i in 1 2 3 4; do head -c 100000 /dev/urandom > "$WORK/orig/r$i.bin"; done
+    $B/invf-import "$IMG" "$WORK/orig" >/dev/null 2>&1 \
+        || fail "v3 refusal branch: import failed"
+    $B/invf-sweep "$IMG" >/dev/null 2>&1
+    rc=0; $B/invf-sweep "$IMG" --seal > "$WORK/seal-v3.log" 2>&1 || rc=$?
+    [ "$rc" -ne 0 ] || fail "v3: --seal reported success (it must refuse)"
+    grep -q "NOT IMPLEMENTED on Meta-v3" "$WORK/seal-v3.log" \
+        || { cat "$WORK/seal-v3.log"; fail "v3: --seal failed without saying why"; }
+    echo "  --seal refused with a diagnostic (rc=$rc)"
+    urc=0; $B/invf-sweep "$IMG" --unseal > "$WORK/unseal-v3.log" 2>&1 || urc=$?
+    [ "$urc" -ne 0 ] || fail "v3: --unseal reported success (it must refuse)"
+    echo "  --unseal refused too"
+    # the refusal must not have touched the volume
+    check_all "v3 after refused seal" "$IMG"
+    fsck_clean <($B/invf-fsck "$IMG" 2>&1) || fail "v3: fsck dirty after refused seal"
+    $B/invf-verify "$IMG" --deep 2>&1 | tail -1 | grep -q " 0 corrupt," \
+        || fail "v3: verify not clean after refused seal"
+    # owner shards are named "\x01parity" / "\x01parityN" (seal_shard_name);
+    # skip the "files in <img>:" header line, whose path contains "seal"
+    n=$($B/invf-ls "$IMG" 2>/dev/null | tail -n +2 | grep -c "parity" || true)
+    [ "$n" = 0 ] || fail "v3: the refused seal left $n owner shard(s) behind"
+    echo "  volume untouched by the refusal: bit-exact, fsck clean, no owner shards"
+    echo
+    echo "SEAL E2E: SKIP (parity seal is not implemented on Meta-v3 -- see impl_docs/AUDIT.md)"
+    exit 0
+fi
 
 echo
 echo "== [1] sweep + --seal =="

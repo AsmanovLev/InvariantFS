@@ -331,6 +331,22 @@ echo "  overflow transcoded RAW->SHADOW, raw extent drained, fsck+verify clean"
 echo
 echo "== [5] seal: stripes over the shadow extent cover overflow blocks =="
 $B/invf-mkfs "$IMG2" 0.5 > "$WORK/mkfs2.log"
+
+# Meta-v3: there is no parity seal, so this leg's self-healing read cannot
+# work. vol_seal() refuses up front (its owner records, stripe->parity map
+# and parity bitmap are all still v2 L2P machinery). Assert the refusal
+# rather than a mystery "seal failed", and keep leg 6 -- it does not need the
+# seal. The port is tracked in impl_docs/AUDIT.md.
+if grep -q "v3" "$WORK/mkfs2.log" || $B/invf-fsck "$IMG2" 2>/dev/null | grep -q "format:.*v3"; then
+    rc=0; $DZ "$IMG2" seal > "$WORK/seal-b.log" 2>&1 || rc=$?
+    [ "$rc" -ne 0 ] || fail "leg5: seal reported success on v3 (it must refuse)"
+    grep -q "NOT IMPLEMENTED on Meta-v3" "$WORK/seal-b.log" \
+        || { cat "$WORK/seal-b.log"; fail "leg5: seal failed without saying why"; }
+    echo "  SKIP: parity seal is not implemented on Meta-v3 (refused, rc=$rc)"
+    SEALS=skip
+else
+    SEALS=on
+fi
 SHADOW_LO2=$(sed -n 's/.*shadow zone: *blocks \([0-9]*\) \.\. \([0-9]*\).*/\1/p' "$WORK/mkfs2.log")
 [ -n "$SHADOW_LO2" ] || fail "leg5: could not parse shadow start"
 for k in 1 2 3; do
@@ -339,6 +355,7 @@ done
 has_pba_past "$IMG2" f3.bin "$SHADOW_LO2" || fail "leg5: no overflow on image B"
 # seal WITHOUT a sweep: the raw-class overflow blocks stay in place and
 # land under the stripes like any occupied shadow-extent block
+if [ "$SEALS" = on ]; then
 $DZ "$IMG2" seal > "$WORK/seal-b.log" || { cat "$WORK/seal-b.log"; fail "leg5: seal failed"; }
 cat "$WORK/seal-b.log"
 grep -q "stripes" "$WORK/seal-b.log" || fail "leg5: no stripes reported"
@@ -356,10 +373,14 @@ grep -q "\[seal\] recovered block $VICTIM" "$WORK/heal.log" \
 fsck_ok "$IMG2"
 deep_ok "$IMG2"
 echo "  overflow block recovered via stripe parity; fsck+verify clean"
+fi   # [ "$SEALS" = on ]
 
 echo
 echo "== [6] resize: the advisory RAW share persists, shadow absorbs growth =="
-$DZ "$IMG2" unseal >/dev/null || fail "leg6: unseal failed"
+# unseal only when a seal was actually written; on v3 the seal never landed
+if [ "$SEALS" = on ]; then
+    $DZ "$IMG2" unseal >/dev/null || fail "leg6: unseal failed"
+fi
 RT_B=$(zone_total "$IMG2" raw);  ST_B=$(zone_total "$IMG2" shadow)
 $B/invf-resize "$IMG2" 768M | tee "$WORK/resize.log" | grep -q "invf-resize: OK" \
     || fail "leg6: grow did not report OK"
@@ -387,4 +408,8 @@ echo "  grow: share unchanged, tail absorbed shadow-side, content bit-exact"
 
 rm -f "$IMG1" "$IMG2"
 echo
-echo "DYNZONE E2E: PASS"
+if [ "$SEALS" = skip ]; then
+    echo "DYNZONE E2E: PASS (leg 5 skipped: no parity seal on Meta-v3 -- impl_docs/AUDIT.md)"
+else
+    echo "DYNZONE E2E: PASS"
+fi

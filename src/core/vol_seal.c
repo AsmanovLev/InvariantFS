@@ -1087,6 +1087,26 @@ int vol_seal(invfs_volume *v, int unseal, invfs_seal_report *rep)
                 unseal ? "unseal" : "seal");
         return -1;
     }
+    /* Meta-v3: the parity seal is still v2 machinery and is REFUSED here,
+     * loudly, instead of half-running. Its three moving parts are all v2:
+     * seal_view_load() rebuilds the parity bitmap by scanning v->l2p, the
+     * stripe->parity map is recovered from L2P MAP entries, and each shard
+     * is persisted with tz_owner_load()/vol_map() (meta_read_record_by_id
+     * + invfs_inode_rec). None of that exists on v3 -- vol_flush() drops the
+     * queued L2P op, so a seal that got that far would allocate parity,
+     * leave an empty owner node behind and then fail with no message (that
+     * is exactly what tools/test-seal.sh and test-dynzone.sh leg 5 hit).
+     * The v3 shape follows the textzone pattern instead: a registry blob
+     * (cf. tz_v3_reg_load in vol_textzone.c) holding {stripe -> parity pba},
+     * with is_par rebuilt from the live recipes. Tracked in
+     * impl_docs/AUDIT.md; until it lands, --seal/--unseal on a v3 volume is
+     * a no-op with a diagnostic, never a silent partial seal. */
+    if (v->sb.vol_flags & VOLF_V3) {
+        fprintf(stderr, "seal: parity sealing is NOT IMPLEMENTED on "
+                        "Meta-v3; refusing instead of writing a partial "
+                        "seal (see impl_docs/AUDIT.md)\n");
+        return -1;
+    }
     if (seal_view_load(v, &sv) != 0) return -1;
 
     if (unseal) {
