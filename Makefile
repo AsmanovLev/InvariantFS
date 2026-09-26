@@ -251,6 +251,7 @@ test: $(OUT)/invf-arctest $(OUT)/invf-blkio_test $(OUT)/invf-codec_test \
 	$(OUT)/invf-plugin_mt_test
 	$(OUT)/invf-ivpack_packs_test
 	bash tools/test-sweep-ui.sh
+	bash tools/lint-test-heredocs.sh
 
 # e2e tier: tmpfs images under /dev/shm; test-jxl needs cjxl/djxl installed
 e2e: all

@@ -1,0 +1,12 @@
+name = splt_nomap
+type = container
+algo = 41
+pack_version = 1
+generation = 1
+caps = container|external
+sniff.magic = 53504C54
+sniff.ext = splt
+enumerate = python3 {pack}/splt.py enumerate {in} {out}
+extract = python3 {pack}/splt.py extract {in} {idx} {out}
+strip = python3 {pack}/splt.py strip {in} {out}
+rebuild = python3 {pack}/splt.py rebuild {recipe} {dir} {out}
