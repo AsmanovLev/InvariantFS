@@ -96,9 +96,15 @@ int main(int argc, char **argv)
         case SPT0_RC_DAMAGED:
             /* WP86: a save point whose base tree does not walk is not a
              * rollback target -- rolling back onto it would trade a degraded
-             * volume for an unreadable one. Say so instead of "rc 3". */
-            fprintf(stderr, "invf-rollback: %s: the save point pins a DAMAGED "
-                    "base tree (base_root=%llu); refusing to roll back onto "
+             * volume for an unreadable one. Say so instead of "rc 3".
+             * WP96: the same refusal covers the save point's DATA: if a
+             * segment the pinned recipes name no longer matches its own CRC
+             * (or the pinned log prefix a fold reset is gone), the rollback
+             * is refused too, and invf-spt0 has already said which. */
+            fprintf(stderr, "invf-rollback: %s: the save point is DAMAGED "
+                    "(base_root=%llu, see the invf-spt0 diagnostic above: the "
+                    "pinned base tree does not walk, or the data its recipes "
+                    "address is no longer there); refusing to roll back onto "
                     "it -- nothing was written. Quarantine the unreadable "
                     "pages first (invf-fsck %s -f), then re-run.\n",
                     img, (unsigned long long)sp.base_root, img);
