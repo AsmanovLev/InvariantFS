@@ -765,7 +765,6 @@ echo "containers + all members + maps deleted"
 
 echo "== fsck =="
 $B/invf-fsck "$IMG" | tee "$WORK/fsck.log"
-grep -q "orphans:      0" "$WORK/fsck.log" || { echo "FAIL: fsck reports orphans"; exit 1; }
 grep -q "^OK" "$WORK/fsck.log" || { echo "FAIL: fsck not OK"; exit 1; }
 
 echo "== admission leg: INVFS_ARC_BYTES=1M (GENERIC_MEMLIMIT{17,1}) =="

@@ -18,6 +18,10 @@ set -e
 set -o pipefail
 
 REPO="${REPO:-$(cd "$(dirname "$0")/.." && pwd)}"   # override with the worktree when testing a branch
+
+# the format-aware "volume is clean" gate (v3 has no L2P orphans counter)
+. "$REPO/tools/fsck-clean.sh"
+
 B=$REPO/bin
 WORK=/dev/shm/wp14bz
 IMG=wp14bz.img
@@ -264,7 +268,7 @@ fi
 
 echo "== fsck =="
 $B/invf-fsck "$IMG" | tee "$WORK/fsck.log"
-grep -q "orphans:      0" "$WORK/fsck.log" || { echo "FAIL: fsck reports orphans"; exit 1; }
+fsck_require_clean "$WORK/fsck.log" "fsck" || exit 1
 $B/invf-verify "$IMG" --deep | tail -1
 
 echo "== survivors still bit-exact =="

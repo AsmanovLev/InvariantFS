@@ -271,7 +271,8 @@ os.makedirs(d, exist_ok=True)
 # text batch fodder: real C sources, duplicated with edits
 src = "/home/user/InvariantFS/tools/busybox-src"
 files = []
-for root, _, names in os.walk(src):
+for root, dirs, names in os.walk(src):
+dirs.sort()
     for n in sorted(names):
         if n.endswith((".c", ".h")):
             p = os.path.join(root, n)

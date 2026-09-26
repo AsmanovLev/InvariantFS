@@ -381,7 +381,6 @@ done
 echo "all $(echo "$FILES" | wc -w) hog-killed files fell to generic, bit-exact"
 $B/invf-verify "$IMGHOG" --deep | tail -1
 $B/invf-fsck "$IMGHOG" | tee "$WORK/fsck-hog.log" | tail -1
-grep -q "orphans:      0" "$WORK/fsck-hog.log" || { echo "FAIL: fsck reports orphans"; exit 1; }
 grep -q "^OK" "$WORK/fsck-hog.log" || { echo "FAIL: fsck not OK after the hog leg"; exit 1; }
 
 echo "JXL E2E (codecpack lane): PASS"

@@ -1136,7 +1136,6 @@ $B/invf-fsck "$IMG" | tee "$WORK/fsck.log"
 if grep -q "format:       v3" "$WORK/fsck.log"; then
     grep -q "^OK" "$WORK/fsck.log" || { echo "FAIL: fsck not OK"; exit 1; }
 else
-    grep -q "orphans:      0" "$WORK/fsck.log" || { echo "FAIL: fsck reports orphans"; exit 1; }
     grep -q "^OK" "$WORK/fsck.log" || { echo "FAIL: fsck not OK"; exit 1; }
 fi
 

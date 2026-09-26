@@ -48,6 +48,10 @@ set -e
 set -o pipefail
 
 REPO="${REPO:-$(cd "$(dirname "$0")/.." && pwd)}"   # override with the worktree when testing a branch
+
+# the format-aware "volume is clean" gate (v3 has no L2P orphans counter)
+. "$REPO/tools/fsck-clean.sh"
+
 B=$REPO/bin
 WORK=/dev/shm/wp16cpack
 IMG=wp16cpack.img
@@ -80,7 +84,8 @@ rnd = random.Random(16)
 # "chunk0" carries no extension on purpose)
 text = None
 src = "/home/user/InvariantFS/tools/busybox-src"
-for root, _dirs, files in os.walk(src):
+for root, dirs, files in os.walk(src):
+dirs.sort()
     for n in sorted(files):
         if n.endswith(".c"):
             p = os.path.join(root, n)
@@ -402,7 +407,6 @@ echo "containers + all members + maps + nested grandchildren deleted"
 
 echo "== fsck =="
 $B/invf-fsck "$IMG" | tee "$WORK/fsck.log"
-grep -q "orphans:      0" "$WORK/fsck.log" || { echo "FAIL: fsck reports orphans"; exit 1; }
 grep -q "^OK" "$WORK/fsck.log" || { echo "FAIL: fsck not OK"; exit 1; }
 
 echo "== survivor bit-exact =="
@@ -514,8 +518,8 @@ for mode in guard hole; do
         || { echo "FAIL: corrupt map ($mode): content not bit-exact"; exit 1; }
     grep -q " 0 corrupt," <($B/invf-verify "$IMGC" --deep) \
         || { echo "FAIL: corrupt map ($mode): verify --deep not clean"; exit 1; }
-    grep -q "orphans:      0" <($B/invf-fsck "$IMGC") \
-        || { echo "FAIL: corrupt map ($mode): rollback leaked blocks"; exit 1; }
+    fsck_clean <($B/invf-fsck "$IMGC") \
+        || { echo "FAIL: corrupt map ($mode): rollback left the volume dirty"; exit 1; }
 done
 echo "corrupt map: guard refused, rolled back to RAW, generic store, fsck clean"
 

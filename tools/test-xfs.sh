@@ -40,6 +40,10 @@ set -e
 set -o pipefail
 
 REPO="${REPO:-$(cd "$(dirname "$0")/.." && pwd)}"   # override with the worktree when testing a branch
+
+# the format-aware "volume is clean" gate (v3 has no L2P orphans counter)
+. "$REPO/tools/fsck-clean.sh"
+
 B=$REPO/bin
 PACK=$REPO/tools/codecpacks/xfs.codecpack
 # scratch lives on /tmp (a separate tmpfs): only the blkio-opened VOLUME
@@ -213,7 +217,8 @@ import os, random, subprocess, sys
 mnt = sys.argv[1]
 # text files: real busybox .c sources
 srcs = []
-for root, _d, files in os.walk('/home/user/InvariantFS/tools/busybox-src'):
+for root, dirs, files in os.walk('/home/user/InvariantFS/tools/busybox-src'):
+dirs.sort()
     for n in sorted(files):
         p = os.path.join(root, n)
         if n.endswith('.c') and os.path.getsize(p) > 20000:
@@ -288,7 +293,8 @@ python3 - "$MNT" <<'PY'
 import os, sys
 mnt = sys.argv[1]
 src = None
-for root, _d, files in os.walk('/home/user/InvariantFS/tools/busybox-src'):
+for root, dirs, files in os.walk('/home/user/InvariantFS/tools/busybox-src'):
+dirs.sort()
     for n in sorted(files):
         p = os.path.join(root, n)
         if n.endswith('.c') and os.path.getsize(p) > 30000:
@@ -711,7 +717,6 @@ echo "  containers + all members + tables + maps deleted"
 
 echo "== fsck =="
 $B/invf-fsck "$IMG" | tee "$WORK/fsck.log"
-grep -q "orphans:      0" "$WORK/fsck.log" || { echo "FAIL: fsck reports orphans"; exit 1; }
 grep -q "^OK" "$WORK/fsck.log" || { echo "FAIL: fsck not OK"; exit 1; }
 
 echo "== survivor bit-exact =="
@@ -740,8 +745,8 @@ for f in fs-c.xfs fs-d.xfs; do
 done
 grep -q " 0 corrupt," <($B/invf-verify "$IMGNEG" --deep) \
     || { echo "FAIL: verify on refusal image not clean"; exit 1; }
-grep -q "orphans:      0" <($B/invf-fsck "$IMGNEG") \
-    || { echo "FAIL: fsck on refusal image reports orphans"; exit 1; }
+fsck_clean <($B/invf-fsck "$IMGNEG") \
+    || { echo "FAIL: fsck on the refusal image is not clean"; exit 1; }
 echo "  declined images store generic, bit-exact, fsck clean"
 
 echo "XFS CONTAINERPACK E2E: PASS"

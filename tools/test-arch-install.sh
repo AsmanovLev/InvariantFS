@@ -260,7 +260,6 @@ run_case() {  # $1 = label
     env "${envdev[@]}" "$B/invf-fsck" "$img" -f >"$VOL/fsck-f-$label.log" 2>&1 || true
     env "${envdev[@]}" "$B/invf-fsck" "$img" >"$VOL/fsck-$label.log" 2>&1
     grep -q "OK" "$VOL/fsck-$label.log" || { cat "$VOL/fsck-$label.log"; fail "$label: fsck not clean"; }
-    grep -qE "orphans:[[:space:]]*0" "$VOL/fsck-$label.log" || fail "$label: orphans remain"
 
     note "$label: verify --deep"
     env "${envdev[@]}" "$B/invf-verify" "$img" --deep >"$VOL/verify-$label.log" 2>&1

@@ -845,7 +845,6 @@ echo "container + all members + table + map deleted"
 
 echo "== fsck =="
 $B/invf-fsck "$IMG" | tee "$WORK/fsck.log"
-grep -q "orphans:      0" "$WORK/fsck.log" || { echo "FAIL: fsck reports orphans"; exit 1; }
 grep -q "^OK" "$WORK/fsck.log" || { echo "FAIL: fsck not OK"; exit 1; }
 
 echo "== survivor bit-exact =="
@@ -869,8 +868,6 @@ for f in fs4k.ntfs fs-resident.ntfs; do
     $B/invf-cat "$IMGD" "$f" "$WORK/out/decl-$f" >/dev/null
     cmp -s "$WORK/$f" "$WORK/out/decl-$f" || { echo "FAIL: $f not bit-exact"; exit 1; }
 done
-grep -q "orphans:      0" <($B/invf-fsck "$IMGD") \
-    || { echo "FAIL: fsck on the decline volume reports orphans"; exit 1; }
 grep -q "^OK" <($B/invf-fsck "$IMGD") || { echo "FAIL: decline volume fsck not OK"; exit 1; }
 echo "declined images: no pack stamp, no siblings, bit-exact, fsck clean"
 

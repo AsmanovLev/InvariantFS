@@ -40,20 +40,36 @@ rm -f "$IMG" "$IMGCTL" "$IMGT"
 
 free_blocks() { $B/invf-fsck "$1" | awk '/free blocks:/ {print $3}'; }
 
-# v3 fsck reports base-tree health (bad pages / cycles) rather than the v2
-# orphan/missing counters; accept either report shape but require a clean
-# verdict (WP75: the test now reaches this section on the default v3 format).
-fsck_clean() {
-    local log=$1
-    if grep -q "format:       v3" "$log"; then
-        grep -q "bad pages:    0" "$log" &&
-        grep -q "cycles/shared: 0" "$log" &&
-        grep -q "^OK$" "$log"
-    else
-        grep -q "orphans:      0" "$log" &&
-        grep -q "missing:      0" "$log"
-    fi
+# The sweep reports the dedupe counters in its stage line:
+#   [5/7] dedupe  100.0%  171/171 ... merged=171 cross=163 intra=8 freed=4.1 MiB
+# Older builds printed a standalone "dedupe: merged N segments, freed N MiB"
+# line. Read either shape and normalise to "MERGED FREED_MiB" so the
+# assertions below do not care which build produced the log.
+dedupe_line() {   # <log> -> the dedupe line, or empty
+    local log=$1 line
+    line=$(grep -E "merged=[0-9]+ cross=[0-9]+" "$log" 2>/dev/null | tail -1)
+    [ -n "$line" ] || line=$(grep "dedupe: merged" "$log" 2>/dev/null | tail -1)
+    printf '%s' "$line"
 }
+
+dedupe_field() {  # <log> <merged|cross|intra|freed>
+    local log=$1 want=$2 line
+    line=$(dedupe_line "$log")
+    [ -n "$line" ] || return 1
+    case "$want" in
+    merged) sed -n 's/.*merged[= ]\([0-9]*\).*/\1/p' <<<"$line" ;;
+    cross)  sed -n 's/.*cross[= ]\([0-9]*\).*/\1/p' <<<"$line" ;;
+    intra)  sed -n 's/.*intra[= ]\([0-9]*\).*/\1/p' <<<"$line" ;;
+    freed)  sed -n 's/.*freed[= ]\([0-9.]*\).*/\1/p' <<<"$line" ;;
+    esac
+}
+
+
+# v3 fsck reports base-tree health (bad pages / cycles) rather than the v2
+# orphan/missing counters, so the gate is format-aware: fsck_clean lives in
+# tools/fsck-clean.sh and asserts what each format actually verifies
+# (WP75: the test now reaches this section on the default v3 format).
+. "$REPO/tools/fsck-clean.sh"
 
 # Meta-v3 stores text as generic ZSTD (no deferred PPMd batches), so the
 # leg-2 expectations differ between formats. Meta-v3 is the default.
@@ -111,11 +127,11 @@ echo "free blocks after import: $FREE0"
 
 echo "== sweep #1 (walk -> dedupe -> GC -> flush) =="
 $B/invf-sweep "$IMG" > "$WORK/sweep1.log" 2>&1 || { cat "$WORK/sweep1.log"; exit 1; }
-DEDUP_LINE=$(grep "dedupe: merged" "$WORK/sweep1.log" || true)
+DEDUP_LINE=$(dedupe_line "$WORK/sweep1.log")
 echo "${DEDUP_LINE:-FAIL: no dedupe line}"
 [ -n "$DEDUP_LINE" ] || { echo "FAIL: sweep ran no dedupe pass"; exit 1; }
-MERGED=$(echo "$DEDUP_LINE" | awk '{print $3}')
-FREED=$(echo "$DEDUP_LINE" | awk '{print $6}')
+MERGED=$(dedupe_field "$WORK/sweep1.log" merged)
+FREED=$(dedupe_field "$WORK/sweep1.log" freed)
 # 1 shared middle segment (a1/a2) + 3 fully-shared segments (dup1/dup2)
 [ "$MERGED" = "4" ] || { echo "FAIL: expected 4 merged segments, got $MERGED"; exit 1; }
 # merged blocks must be back in the bitmap. On Meta-v3 the sweep also
@@ -149,9 +165,9 @@ FREE0_CTL=$(free_blocks "$IMGCTL")
 echo "free blocks after control import: $FREE0_CTL"
 $B/invf-sweep "$IMGCTL" > "$WORK/sweepctl.log" 2>&1 || {
     cat "$WORK/sweepctl.log"; exit 1; }
-DEDUP_CTL=$(grep "dedupe: merged" "$WORK/sweepctl.log" || true)
+DEDUP_CTL=$(dedupe_line "$WORK/sweepctl.log")
 echo "${DEDUP_CTL:-FAIL: control ran no dedupe pass}"
-echo "$DEDUP_CTL" | grep -q "merged 0 segments" || {
+[ "$(dedupe_field "$WORK/sweepctl.log" merged)" = "0" ] || {
     echo "FAIL: control tree still has shared segments"; exit 1; }
 $B/invf-sweep "$IMGCTL" --realize >> "$WORK/sweepctl.log" 2>&1 || {
     cat "$WORK/sweepctl.log"; exit 1; }
@@ -181,10 +197,12 @@ echo "all $(echo "$FILES" | wc -w) files bit-exact"
 
 echo "== sweep #2 (idempotent) =="
 $B/invf-sweep "$IMG" > "$WORK/sweep2.log" 2>&1 || { cat "$WORK/sweep2.log"; exit 1; }
-DEDUP2=$(grep "dedupe: merged" "$WORK/sweep2.log" || true)
+DEDUP2=$(dedupe_line "$WORK/sweep2.log")
 echo "${DEDUP2:-FAIL: no dedupe line on sweep #2}"
-echo "$DEDUP2" | grep -q "merged 0 segments, freed 0 blocks" || {
+[ "$(dedupe_field "$WORK/sweep2.log" merged)" = "0" ] || {
     echo "FAIL: second sweep merged again"; exit 1; }
+[ "$(dedupe_field "$WORK/sweep2.log" freed)" = "0" ] || {
+    echo "FAIL: second sweep freed blocks again"; exit 1; }
 
 echo "== fsck =="
 $B/invf-fsck "$IMG" | tee "$WORK/fsck1.log"
@@ -227,13 +245,14 @@ TZL=$(grep -c "text -> PPMd batch" "$WORK/sweept1.log" || true)
 DEDUPT=$(grep "dedupe: " "$WORK/sweept1.log" || true)
 echo "$DEDUPT"
 if is_v3 "$IMGT"; then
-    echo "text->PPMd lines: $TZL (v3 stores text as generic ZSTD)"
-    # v3 has no deferred text batches: the two identical texts are ordinary
-    # generic segments, so dedupe is expected to merge them (safely -- there
-    # is no batch flush whose retire could corrupt the canonical copy).
-    [ "$TZL" -eq 0 ] || { echo "FAIL: unexpected text batching on v3"; exit 1; }
+    # WP78 taught v3 to defer texts into PPMd batches too (published as v3
+    # recipe deltas), so v3 batches here exactly like v2 -- the old "v3 stores
+    # text as generic ZSTD, expect no batching" expectation predates it. What
+    # the pass must still deliver on v3 is a cross-file merge.
+    echo "text->PPMd lines: $TZL (v3 batches texts since WP78)"
+    [ "$TZL" -ge 3 ] || { echo "FAIL: v3 did not batch the texts"; exit 1; }
     echo "$DEDUPT" | grep -qE "merged [1-9][0-9]* segments" || {
-        echo "FAIL: v3 dedupe did not merge the identical texts"; exit 1; }
+        echo "FAIL: v3 dedupe merged nothing"; exit 1; }
 else
     echo "text->PPMd lines: $TZL"
     [ "$TZL" -ge 3 ] || { echo "FAIL: expected >=3 deferred texts"; exit 1; }
@@ -263,9 +282,9 @@ $B/invf-verify "$IMGT" --deep | tail -1
 
 echo "== re-sweep (idempotent) =="
 $B/invf-sweep "$IMGT" > "$WORK/sweept2.log" 2>&1 || { cat "$WORK/sweept2.log"; exit 1; }
-DEDUPT2=$(grep "dedupe: merged" "$WORK/sweept2.log" || true)
+DEDUPT2=$(dedupe_line "$WORK/sweept2.log")
 echo "${DEDUPT2:-FAIL: no dedupe line on text re-sweep}"
-echo "$DEDUPT2" | grep -q "merged 0 segments, freed 0 blocks" || {
+[ "$(dedupe_field "$WORK/sweept2.log" merged)" = "0" ] || {
     echo "FAIL: text re-sweep merged"; exit 1; }
 ok=1
 for f in $TFILES; do

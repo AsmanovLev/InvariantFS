@@ -44,6 +44,10 @@ set -e
 set -o pipefail
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
+
+# the format-aware "volume is clean" gate (v3 has no L2P orphans counter)
+. "$REPO/tools/fsck-clean.sh"
+
 B=$REPO/bin
 WORK=/dev/shm/wp20seal
 IMG=wp20seal.img       # image A: the recoverable/main line
@@ -1057,7 +1061,7 @@ set -e
 [ "$CRC" != 0 ] || fail "unrecoverable stripe silently healed?!"
 [ ! -s "$WORK/out/vic5b.d" ] || fail "garbage written after failed repair"
 # fsck stays structurally honest (content damage is verify's domain)
-grep -q "orphans:      0" "$WORK/fsckd2.log" || fail "phantom orphans"
+fsck_clean "$WORK/fsckd2.log" || fail "fsck reports the volume structurally dirty"
 set +e
 $B/invf-verify "$IMGD" --deep > "$WORK/verifyd3.log" 2>&1
 VRC=$?

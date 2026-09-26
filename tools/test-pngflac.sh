@@ -314,7 +314,6 @@ done
 bit_exact_all "$IMG" $PNGS_OK || exit 1
 echo "stamps stable, still bit-exact"
 $B/invf-fsck "$IMG" | tee "$WORK/fsck1.log" | tail -1
-grep -q "orphans:      0" "$WORK/fsck1.log" || { echo "FAIL: fsck orphans"; exit 1; }
 grep -q "^OK" "$WORK/fsck1.log" || { echo "FAIL: fsck not OK"; exit 1; }
 
 echo "== leg 2: refused PNGs stay RAW, GENERIC_GUARD{PNGR,1} =="

@@ -1714,6 +1714,61 @@ static int vol_sweep_one_v3(invfs_volume *v, uint64_t inode_id,
         return 0;
     }
 
+    /* WP-B1: the profile ladder. invfs_profile_generic_algo() already states
+     * the intent (turbo = store verbatim, fastest = LZ4, else ZSTD) and the v2
+     * record writer honours it -- but this v3 blob path compressed with ZSTD
+     * unconditionally, so on the default format INVFS_PROFILE=turbo wrote
+     * LESS than balanced: the exact opposite of what the knob promises, and
+     * silently so. The test that caught it is test-heat leg 3. */
+    {
+    uint32_t algo = (uint32_t)invfs_profile_generic_algo(v->profile);
+
+    if (algo == INVFS_ALGO_NONE) {
+        /* turbo: identity. No codec, no round-trip guard needed -- what goes
+         * in is what comes out, which is the whole point of the profile. */
+        newino = vol_v3_publish_blob_inode(v, inode_id, full, full_len,
+                                           full_len, INVFS_ALGO_NONE);
+        free(full);
+        if (!newino)
+            return 0;       /* store failed (ENOSPC): stay RAW */
+        v3_stamp_generic(v, inode_id, INVFS_CLASS_GENERIC, INVFS_ALGO_NONE);
+        return 1;
+    }
+
+    if (algo == INVFS_ALGO_LZ4) {
+        int l4cap = LZ4_compressBound((int)full_len);
+        uint8_t *dec = NULL;
+        const invfs_codec *lc = invfs_codec_by_algo(INVFS_ALGO_LZ4);
+        int l4n;
+        if (l4cap <= 0 || !lc || !lc->decode) { free(full); return 0; }
+        enc = (uint8_t *)malloc((size_t)l4cap);
+        if (!enc) { free(full); return -1; }
+        l4n = LZ4_compress_default((const char *)full, (char *)enc,
+                                    (int)full_len, l4cap);
+        if (l4n <= 0 || (size_t)l4n >= full_len) {
+            free(enc);
+            free(full);
+            v3_stamp_generic(v, inode_id, INVFS_CLASS_UNCOMPRESSIBLE, 0);
+            return 0;
+        }
+        dec = (uint8_t *)malloc(full_len ? full_len : 1);
+        if (!dec || lc->decode(enc, (size_t)l4n, dec, full_len) != 0 ||
+            memcmp(dec, full, full_len) != 0) {
+            free(dec); free(enc); free(full);
+            return 0;       /* the round-trip guard refused: stay RAW */
+        }
+        free(dec);
+        newino = vol_v3_publish_blob_inode(v, inode_id, enc, (size_t)l4n,
+                                           full_len, INVFS_ALGO_LZ4);
+        free(enc);
+        free(full);
+        if (!newino)
+            return 0;
+        v3_stamp_generic(v, inode_id, INVFS_CLASS_GENERIC, INVFS_ALGO_LZ4);
+        return 1;
+    }
+
+    zc = invfs_codec_by_algo(INVFS_ALGO_ZSTD);
     enc_cap = ZSTD_compressBound(full_len);
     enc = (uint8_t *)malloc(enc_cap);
     if (!enc) { free(full); return -1; }
@@ -1749,6 +1804,7 @@ static int vol_sweep_one_v3(invfs_volume *v, uint64_t inode_id,
 
     v3_stamp_generic(v, inode_id, INVFS_CLASS_GENERIC, INVFS_ALGO_ZSTD);
     return 1;
+    }
 }
 
 /* process a single inode: container explode / transcode / shadow move.

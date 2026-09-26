@@ -138,6 +138,8 @@ static int g_color_mode = -1;
  * g_progress_tty is 0, the panel never renders and the log stays exactly as
  * before, so scripted runs and benchmarks are unaffected. */
 #define TREE_MAX_DEPTH 10
+/* a tree path is "!".join of up to TREE_MAX_DEPTH 288-byte names */
+#define TREE_PATH_MAX (TREE_MAX_DEPTH * 288 + 8)
 
 static char            g_tree[TREE_MAX_DEPTH][288];
 static size_t          g_tree_depth;
@@ -285,7 +287,7 @@ static void sw_dash_write(invfs_volume *v, const char *volpath)
     fprintf(f,
       ".bar{height:5px;background:#21262d;border-radius:3px;overflow:hidden;"
       "margin:5px 0 16px}");
-    fprintf(f,
+    fprintf(f, "%s",
       ".bar>i{display:block;height:100%;background:var(--ac);"
       "transition:width .4s}");
     fprintf(f,
@@ -330,7 +332,7 @@ static void sw_dash_write(invfs_volume *v, const char *volpath)
     /* the active chain: the whole point -- what is being decomposed, and how
      * deep the nesting currently goes */
     if (g_tree_depth) {
-        char path[TREE_MAX_DEPTH][288];
+        char path[TREE_MAX_DEPTH][TREE_PATH_MAX];
         size_t k;
         fprintf(f, "<div class=act>");
         for (k = 0; k < g_tree_depth; k++) {
@@ -402,7 +404,7 @@ static void sw_tree_erase(void)
 /* Paint the block under the already-printed stage line. */
 static void sw_tree_render(void)
 {
-    char path[TREE_MAX_DEPTH][288];
+    char path[TREE_MAX_DEPTH][TREE_PATH_MAX];
     size_t i;
 
     if (!g_progress_tty || !g_tree_depth) return;
@@ -1141,8 +1143,14 @@ static int sweep_collect_cb(void *ctx_, uint64_t rec_pos,
                 *c->cap = ncap;
                 if (!nn || !ni || !ns || !np) { c->oom = 1; return 1; }
             }
-            strncpy(names[*c->count], name, 256);
-            names[*c->count][255] = 0;
+            {
+                /* 256 bytes INCLUDING the terminator; strncpy(256) does
+                 * not guarantee that, and the name is used as a C string */
+                size_t nl = strlen(name);
+                if (nl > 255) nl = 255;
+                memcpy(names[*c->count], name, nl);
+                names[*c->count][nl] = 0;
+            }
             inodes[*c->count] = h->inode_id;
             sizes[*c->count] = h->file_size;
             poss[*c->count] = rec_pos;
@@ -1240,7 +1248,6 @@ static void on_sigint(int sig)
 int main(int argc, char **argv)
 {
     invfs_volume *vol;
-    const invfs_superblock *sb;
     int err, dry = 0, seal = 0, unseal = 0, bench = 0, realize = 0;
     int no_realize = 0, stopped = 0;
     int fast = 0;
@@ -1509,7 +1516,7 @@ int main(int argc, char **argv)
                                 "size; ignored\n", dl);
         }
     }
-    sb = vol_sb(vol);
+    (void)vol_sb(vol);
 
     /* WP-M21: the inline inode-area compaction + the CMP0 recovery preflight
      * both retired; --compact is now a recognised-but-removed flag (we
@@ -1988,6 +1995,19 @@ progress:
                  (double)ui_dedupe_stats.blocks_freed *
                  (double)INVFS_BLOCK_SIZE / (1024.0 * 1024.0));
         sw_stage_end(drc < 0 ? "failed; sweep data intact" : detail);
+        /* The stage line only reaches a TTY. Without this, a batch/CI sweep
+         * ran the dedupe pass SILENTLY -- no merged count, no freed bytes --
+         * which is exactly the line an operator (and test-dedupe) greps for.
+         * Print it whenever the UI is off, in the same key=value shape. */
+        if (!invfs_sweep_ui_active())
+            fprintf(stderr, "dedupe: merged %llu segments, freed %llu blocks "
+                    "(%.1f MiB; cross %llu, intra %llu)\n",
+                    (unsigned long long)ui_dedupe_stats.segments_merged,
+                    (unsigned long long)ui_dedupe_stats.blocks_freed,
+                    (double)ui_dedupe_stats.blocks_freed *
+                    (double)INVFS_BLOCK_SIZE / (1024.0 * 1024.0),
+                    (unsigned long long)ui_dedupe_stats.cross_merged,
+                    (unsigned long long)ui_dedupe_stats.intra_merged);
     }
 
     /* WP10 §7 + WP14a: reclaim owner batches no live member references,
