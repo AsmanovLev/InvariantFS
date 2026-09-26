@@ -272,7 +272,7 @@ os.makedirs(d, exist_ok=True)
 src = "/home/user/InvariantFS/tools/busybox-src"
 files = []
 for root, dirs, names in os.walk(src):
-dirs.sort()
+    dirs.sort()
     for n in sorted(names):
         if n.endswith((".c", ".h")):
             p = os.path.join(root, n)

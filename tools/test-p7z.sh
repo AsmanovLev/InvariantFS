@@ -110,7 +110,7 @@ rnd = random.Random(42)
 # --- member content -------------------------------------------------------
 texts = []
 for root, dirs, files in os.walk(os.environ["REPO"] + "/tools/busybox-src"):  # fixture input (submodule)
-dirs.sort()
+    dirs.sort()
     for n in sorted(files):
         if n.endswith(".c"):
             p = os.path.join(root, n)

@@ -52,7 +52,7 @@ REPO="${REPO:-$(cd "$(dirname "$0")/.." && pwd)}"   # override with the worktree
 B=$REPO/bin
 PACK=$REPO/tools/codecpacks/rawdisk.codecpack
 WORK=/dev/shm/rawdiskwp
-trap 'rm -rf "$WORK" /dev/shm/rawdiskwp*' EXIT
+if [ "${INVFS_KEEP_WORK:-0}" = 1 ]; then trap 'echo KEPT $WORK' EXIT; else trap 'rm -rf "$WORK" /dev/shm/rawdiskwp*' EXIT; fi
 IMG=rawdiskwp.img
 IMGMD=rawdiskwp-md.img
 IMGMEM=rawdiskwp-mem.img
@@ -108,7 +108,7 @@ def text_bytes(n):
     """A real busybox .c file, repeated/truncated to exactly n bytes."""
     src = None
     for root, dirs, files in os.walk(os.path.join(REPO, "tools/busybox-src")):
-    dirs.sort()
+        dirs.sort()
         for fn in sorted(files):
             if fn.endswith(".c"):
                 p = os.path.join(root, fn)

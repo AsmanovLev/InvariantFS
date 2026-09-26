@@ -85,7 +85,7 @@ rnd = random.Random(16)
 text = None
 src = "/home/user/InvariantFS/tools/busybox-src"
 for root, dirs, files in os.walk(src):
-dirs.sort()
+    dirs.sort()
     for n in sorted(files):
         if n.endswith(".c"):
             p = os.path.join(root, n)

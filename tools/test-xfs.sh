@@ -218,7 +218,7 @@ mnt = sys.argv[1]
 # text files: real busybox .c sources
 srcs = []
 for root, dirs, files in os.walk('/home/user/InvariantFS/tools/busybox-src'):
-dirs.sort()
+    dirs.sort()
     for n in sorted(files):
         p = os.path.join(root, n)
         if n.endswith('.c') and os.path.getsize(p) > 20000:
@@ -294,7 +294,7 @@ import os, sys
 mnt = sys.argv[1]
 src = None
 for root, dirs, files in os.walk('/home/user/InvariantFS/tools/busybox-src'):
-dirs.sort()
+    dirs.sort()
     for n in sorted(files):
         p = os.path.join(root, n)
         if n.endswith('.c') and os.path.getsize(p) > 30000:

@@ -158,7 +158,7 @@ def tile(blob, n):
 # content sources: a real busybox C source + a real x86-64 ELF
 text = None
 for root, dirs, files in os.walk("/home/user/InvariantFS/tools/busybox-src"):
-dirs.sort()
+    dirs.sort()
     for n in sorted(files):
         if n.endswith(".c"):
             p = os.path.join(root, n)

@@ -80,7 +80,7 @@ os.makedirs(os.path.join(d, "texts"))
 src = "/home/user/InvariantFS/tools/busybox-src"
 names = []
 for root, dirs, files in os.walk(src):
-dirs.sort()
+    dirs.sort()
     for n in sorted(files):
         p = os.path.join(root, n)
         if n.endswith(".c") and len(names) < 12:
