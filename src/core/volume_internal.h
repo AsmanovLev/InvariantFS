@@ -1506,6 +1506,14 @@ void defer_container_parts(invfs_volume *v, const char *name);
  * untouched, the file waits, 0. -1 only on a read failure. */
 int vol_jxl_retry(invfs_volume *v, uint64_t inode_id, const char *name);
 
+/* WP14b: the exe carve's upgrade retry, for the trap the JXL stamp above
+ * also falls into: a GENERIC_MEMLIMIT{EXER} stamp is written on a
+ * decode-policy refusal and the generic floor then stores the file, so the
+ * RAW-gated dispatch can never see it again. Runs the same carve on the
+ * current bytes (vol_exer_retry's own admission re-reads the live limit).
+ * 11 = carved, 0 = still refused / nothing to carve, -1 on read failure. */
+int vol_exer_retry(invfs_volume *v, uint64_t inode_id, const char *name);
+
 /* ---- WP14b M2: exe-as-container carve (sweep side) ----
  *
  * A binary-family file (ELF/PE/Mach-O per invfs_binary_family) is scanned

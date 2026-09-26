@@ -897,6 +897,35 @@ int vol_jxl_retry(invfs_volume *v, uint64_t inode_id, const char *name)
 }
 
 
+/* WP14b: exe-carve upgrade retry -- the EXER twin of vol_jxl_retry above,
+ * for the same reason. vol_exer_carve stamps GENERIC_MEMLIMIT{EXER} on a
+ * decode-policy refusal (vol_exer.c) and the caller then lets the generic
+ * floor store the file, so by the next sweep the first zone is SHADOW and
+ * the RAW-gated dispatch in vol_sweep_one_ex can never see it again: the
+ * EXER entry is a builtin CONTAINER codec (codec.c), so the
+ * "retry via the full path" break below is taken, the dispatch is skipped,
+ * and the stamp is dead forever. This runs the SAME carve on the current
+ * (reconstructed) bytes; the working-set admission inside vol_exer_carve
+ * re-reads the live limit, so a raised limit admits the file and the carve
+ * commits CONTAINER{EXER} + the exrN siblings. 11 = carved (the driver
+ * reports the part count), 0 = still refused (vol_exer_carve re-stamped, or
+ * nothing to carve: the next sweep retries), -1 only on a read failure. */
+int vol_exer_retry(invfs_volume *v, uint64_t inode_id, const char *name)
+{
+    uint8_t *full = NULL;
+    size_t full_len = 0;
+    uint32_t nparts = 0;
+    int rc;
+
+    if (vol_read_file(v, inode_id, &full, &full_len) != 0) return -1;
+    rc = vol_exer_carve(v, inode_id, name, full, full_len, &nparts);
+    free(full);
+    if (rc != 1) return 0;
+    v->last_exer_parts = nparts;   /* invf-sweep reports the count */
+    return 11;
+}
+
+
 /* WP78: shared per-file transcode decision. Both the v2 record path and the
  * v3 blob path read the whole file and hand it here; every bit-exactness
  * guard lives in the helpers this dispatches to (containerpack/pack sweeps
@@ -1332,6 +1361,11 @@ static int vol_sweep_one_v3(invfs_volume *v, uint64_t inode_id,
             break;              /* space is a property of NOW: retry */
         case INVFS_CLASS_GENERIC_MEMLIMIT: {
             const invfs_codec *cc = invfs_codec_by_algo(calgo);
+            /* WP14b: an EXER stamp is a carve refusal, and the file is
+             * generic-stored behind it -- same trap as the JXL stamp below,
+             * so take the retry before the container/map break. */
+            if (calgo == INVFS_ALGO_EXER)
+                return vol_exer_retry(v, inode_id, name);
             /* WP-M26 / WP16b: a seekable container with a map
              * (!mbrmap) doesn't need whole-file ARC buffering, so the
              * arc_budget gate never applied to it. If the stamp comes
@@ -1884,8 +1918,12 @@ int vol_sweep_one_ex(invfs_volume *v, uint64_t inode_id, const char *name,
             case INVFS_CLASS_GENERIC_MEMLIMIT:
                 if (!cc || cc->dec_mem_bytes > vol_get_dec_mem_limit(v))
                     return 0;
+                /* both stamps live behind the generic store now, so the
+                 * RAW-gated branch below can never see them again */
                 if (calgo == INVFS_ALGO_JXL)
                     return vol_jxl_retry(v, inode_id, name);
+                if (calgo == INVFS_ALGO_EXER)
+                    return vol_exer_retry(v, inode_id, name);
                 break;   /* the policy now admits the codec: retry */
             case INVFS_CLASS_DEFER_ENOSPC:
                 /* WP16b: the sweep deferred this file for free space. Space
