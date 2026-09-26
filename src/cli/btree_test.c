@@ -18,6 +18,7 @@
 #include <string.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <sys/statvfs.h>
 
 #include "volume_internal.h"
 #include "vol_metabuf.h"
@@ -46,6 +47,58 @@ static void ok(int cond, const char *what)
 #define FB_SHADOW_BLOCKS (FB_TOTAL - FB_SHADOW_START)
 #define FB_MAPPER_PBA   3u
 #define FB_MAPPER_BLOCKS 2u
+
+/* ---- scratch-store accounting ----------------------------------------- */
+
+/* The scratch image is FB_TOTAL blocks, and the N=5000 split/delete case
+ * dirties ~26k of them (~103 MiB), so the store has to be able to hold the
+ * whole image. The tree cannot tell "the backing store is full" from "the
+ * tree is broken": mbuf_write() collapses every store error to -1
+ * (vol_metabuf.c:107) and btree_upsert() propagates it verbatim. So the
+ * harness has to. Filing a full scratch dir as a broken tree sends the next
+ * reader to vol_btree.c instead of to the filesystem that filled up. */
+#define SCRATCH_NEED_MIB ((unsigned long long)(FB_TOTAL * INVFS_BLOCK_SIZE) >> 20)
+
+static const char *g_scratch_dir = "/tmp";
+
+/* Free MiB on the scratch filesystem, or -1 if it cannot be determined. */
+static long long scratch_avail_mib(const char *dir)
+{
+    struct statvfs sfs;
+    if (statvfs(dir, &sfs) != 0)
+        return -1;
+    return (long long)(((unsigned long long)sfs.f_bavail * sfs.f_frsize) >> 20);
+}
+
+/* An operation the store could not back. The remaining model checks of the
+ * case describe a tree that was never fully built, so they are not evidence
+ * of anything: abort the case on one clearly attributed failure instead of
+ * letting a storage shortfall masquerade as a tree defect. The suite still
+ * goes red (failures is incremented) -- a case that could not run has not
+ * passed. */
+static void op_aborted(const char *what, uint64_t done, uint64_t n)
+{
+    long long avail = scratch_avail_mib(g_scratch_dir);
+    failures++;
+    if (avail < 0) {
+        printf("  FAIL  %s: aborted at %llu/%llu; free space on the scratch "
+               "store is unknown (statvfs(%s) failed), so this is UNDIAGNOSED "
+               "-- check the store by hand\n",
+               what, (unsigned long long)done, (unsigned long long)n,
+               g_scratch_dir);
+    } else if ((unsigned long long)avail < SCRATCH_NEED_MIB) {
+        printf("  FAIL  %s: aborted at %llu/%llu -- scratch store %s has %lld "
+               "MiB free, this test needs %llu MiB. Storage limit, NOT a tree "
+               "defect; the rest of this case did not run.\n",
+               what, (unsigned long long)done, (unsigned long long)n,
+               g_scratch_dir, avail, SCRATCH_NEED_MIB);
+    } else {
+        printf("  FAIL  %s: aborted at %llu/%llu with %lld MiB free on %s -- "
+               "the store is NOT full, so this IS a tree defect\n",
+               what, (unsigned long long)done, (unsigned long long)n,
+               avail, g_scratch_dir);
+    }
+}
 
 static int image_make(const char *path, uint64_t blocks)
 {
@@ -640,8 +693,16 @@ static void test_basic(invfs_volume *v)
            (unsigned long long)N);
     reset_model(N);
 
-    for (i = 0; i < N; i++)
-        ok(upsert_key(v, &root, g_keys[i], 1) == 0, "upsert");
+    /* One check per operation, as before: a store that refuses a write must
+     * not turn the remaining N-i inserts into phantom failures, but the
+     * per-operation accounting is real coverage and stays. */
+    for (i = 0; i < N; i++) {
+        if (upsert_key(v, &root, g_keys[i], 1) != 0) {
+            op_aborted("insert", i, N);
+            return;
+        }
+        ok(1, "upsert");
+    }
     ok(verify_model(v, root, N) == 0, "every inserted key is found with its value");
     ok(btree_check(v, root, &st, NULL, 0) == 0, "structural check after inserts");
     ok(st.nkeys == N, "nkeys == N");
@@ -662,8 +723,12 @@ static void test_basic(invfs_volume *v)
        "replace does not change nkeys");
 
     for (i = 0; i < N; i++) {
-        ok(delete_key(v, &root, g_keys[i]) == 0, "delete");
+        if (delete_key(v, &root, g_keys[i]) != 0) {
+            op_aborted("delete", i, N);
+            return;
+        }
         g_live[i] = 0;
+        ok(1, "delete");
     }
     ok(verify_model(v, root, N) == 0, "all deleted keys are gone");
     ok(btree_check(v, root, &st, NULL, 0) == 0 && st.nkeys == 0,
@@ -686,14 +751,22 @@ static void test_cow(invfs_volume *v)
     for (i = 0; i < K0; i++)
         if (upsert_key(v, &root, g_keys[i], 1) != 0)
             break;
-    ok(i == K0 && root.pba != 0, "build retained root");
+    if (i != K0) {
+        op_aborted("build retained root", i, K0);
+        return;
+    }
+    ok(root.pba != 0, "build retained root");
     rootA = root;
     ok(mbuf_read(v, rootA.pba, page0) == 0, "snapshot retained root page");
 
     for (i = K0; i < N; i++)
         if (upsert_key(v, &root, g_keys[i], 1) != 0)
             break;
-    ok(i == N, "continue mutating into a new root");
+    if (i != N) {
+        op_aborted("continue mutating into a new root", i - K0, N - K0);
+        return;
+    }
+    ok(1, "continue mutating into a new root");
     rootB = root;
 
     for (i = 0; i < K0; i++) {
@@ -736,6 +809,10 @@ static void test_split_merge(invfs_volume *v)
     for (i = 0; i < N; i++)
         if (upsert_key(v, &root, g_keys[i], 1) != 0)
             break;
+    if (i != N) {
+        op_aborted("build the split tree", i, N);
+        return;
+    }
     ok(i == N, "built the split tree");
     ok(btree_check(v, root, &st1, NULL, 0) == 0, "structural check after splits");
     ok(st1.height >= 3, "tree gained at least two internal levels");
@@ -761,22 +838,36 @@ static void test_split_merge(invfs_volume *v)
         order[i - 1] = order[j];
         order[j] = t;
     }
-    for (i = 0; i < N; i++) {
-        uint64_t idx = order[i];
-        if (delete_key(v, &root, g_keys[idx]) != 0)
-            break;
-        g_live[idx] = 0;
-        if ((i % 500) == 0 || i == N - 1) {
-            if (verify_model(v, root, N) != 0)
+    /* Three ways out of this loop, and only one of them is a tree finding:
+     * delete_key() failing is the store refusing the write, whereas a
+     * verify_model()/btree_check() trip is the tree itself misbehaving (it
+     * says so on stdout) and must keep flowing into the checks below. */
+    {
+        int op_err = 0;
+        for (i = 0; i < N; i++) {
+            uint64_t idx = order[i];
+            if (delete_key(v, &root, g_keys[idx]) != 0) {
+                op_err = 1;
                 break;
-            {
-                bt_stat stc;
-                char err[128];
-                if (btree_check(v, root, &stc, err, sizeof err) != 0) {
-                    printf("  check failed mid-delete: %s\n", err);
+            }
+            g_live[idx] = 0;
+            if ((i % 500) == 0 || i == N - 1) {
+                if (verify_model(v, root, N) != 0)
                     break;
+                {
+                    bt_stat stc;
+                    char err[128];
+                    if (btree_check(v, root, &stc, err, sizeof err) != 0) {
+                        printf("  check failed mid-delete: %s\n", err);
+                        break;
+                    }
                 }
             }
+        }
+        if (op_err) {
+            op_aborted("delete every key in random order", i, N);
+            free(order);
+            return;
         }
     }
     ok(i == N, "deleted every key in random order");
@@ -906,6 +997,25 @@ int main(int argc, char **argv)
     }
 
     printf("btree tests (WP-M3)\n");
+
+    g_scratch_dir = dir;
+
+    /* Preflight. Without this the split case dies of ENOSPC partway through
+     * and reports half a dozen tree-invariant failures that say nothing
+     * about the tree (the store, not the tree, ran out). Refuse up front
+     * and name the limit. This is a hard failure, NOT a skip: ~4.7k model
+     * checks would go unrun, and an unrun check is not a passed check. */
+    {
+        long long avail = scratch_avail_mib(dir);
+        if (avail >= 0 && (unsigned long long)avail < SCRATCH_NEED_MIB) {
+            failures++;
+            printf("  FAIL  scratch store %s has %lld MiB free; the %llu MiB "
+                   "test image does not fit, so no check in this suite can run\n",
+                   dir, avail, SCRATCH_NEED_MIB);
+            printf("%d checks, %d failure(s)\n", checks, failures);
+            return 1;
+        }
+    }
 
     snprintf(img, sizeof img, "%s/invf-btree_test.img", dir);
     if (image_make(img, FB_TOTAL) != 0) {
