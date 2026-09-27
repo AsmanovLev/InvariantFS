@@ -334,6 +334,7 @@ e2e: all
 	$(TESTENV) bash tools/run-e2e.sh tools/test-rocp.sh
 	$(TESTENV) bash tools/run-e2e.sh tools/test-p7z.sh
 	$(TESTENV) bash tools/run-e2e.sh tools/test-qcow2.sh
+	$(TESTENV) bash tools/run-e2e.sh tools/test-qcow2-zlib.sh
 	$(TESTENV) bash tools/run-e2e.sh tools/test-ivpacks.sh
 	$(TESTENV) bash tools/run-e2e.sh tools/test-fuzz.sh
 	$(TESTENV) bash tools/run-e2e.sh tools/test-writepath.sh
