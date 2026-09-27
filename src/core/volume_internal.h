@@ -711,6 +711,47 @@ typedef struct invfs_volume {
      * meta_mapper_set, meta_mapper_flush, meta_met0_persist, and all
      * mutation paths in meta_get_append_pos. */
     pthread_rwlock_t meta_lock;
+    /* ---- WP126: orphan-collector work state (see vol_btree.c) ---------
+     * WP121's collector cost O(allocated blocks) block reads per call and
+     * fold_reclaim_hook calls it on EVERY fold, which is what keeps
+     * INVFS_RECLAIM_ORPHANS default-off. This is the state that makes the
+     * per-call cost proportional to the metadata the collector can
+     * possibly free, instead of to the size of the volume.
+     *
+     * orph.pba/orph.n is the CANDIDATE SET: the blocks this handle
+     * believes are allocated v3 base pages. It is fed by two sources and
+     * nothing else:
+     *   (a) btree_orphan_note_alloc() at every mbuf_alloc() site that
+     *       produces a base page -- exact, for anything allocated in this
+     *       session;
+     *   (b) a one-pass scan of the allocation bitmap ("the seed pass"),
+     *       which is what finds the pages a PREVIOUS session allocated.
+     *       The seed pass is budgeted and cursor-carrying, so it costs a
+     *       bounded number of reads per fold and stops for good once it
+     *       has wrapped the block space.
+     * orph.inlist is the O(1) membership index for that set (one bit per
+     * block), so note_alloc cannot append a duplicate. All of it is
+     * calloc-zeroed per open and is rebuilt from nothing; nothing here is
+     * persisted and nothing here is trusted for a free decision. A stale
+     * or missing entry costs a leaked page, never a wrong one. */
+    struct invfs_orphan {
+        uint64_t *pba;
+        size_t    n, cap;
+        uint8_t  *inlist;       /* membership bit per block, like `bitmap` */
+        uint64_t  seed_cursor;  /* next block the seed pass will examine */
+        int       seed_done;    /* the seed pass has wrapped the space once */
+        uint64_t  budget;       /* seed-pass reads per call; 0 = default */
+        /* diagnostics (not persisted, not load-bearing) */
+        uint64_t  calls, cand_reads, seed_reads, mark_reads;
+        uint64_t  freed, cands, peak;
+        /* settled: the last call found the seed pass wrapped and freed
+         * nothing, OR hit a state it can never leave (no RT30, no bitmap,
+         * a slot it refuses to reason about). It is what bounds the
+         * offline drain's loop, and it is set on EVERY return path --
+         * a drain that only checked "freed == 0" would spin forever on a
+         * volume whose RT30 names no root at all. */
+        int       settled;
+    } orph;
 } invfs_volume;
 
 /* v_of_blk: recover the volume from the embedded dev0 blkio (the io_*

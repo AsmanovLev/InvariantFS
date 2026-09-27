@@ -30,6 +30,18 @@
 #          no teeth and the suite says so loudly.
 #   leg 5  a save point (SPT0) is a liveness root: with a pinned root the
 #          collector must not free its pages.
+#   leg 6  collection is idempotent and the volume stays clean.
+#   leg 7  the PRODUCTION fold path, not a direct collector call.
+#   leg 8  (WP126) the per-fold COST BOUND: one bounded call is a small
+#          fraction of a full-pool pass over the same volume, and the
+#          offline drain still reaches settlement. This is the leg that
+#          decides whether the flag can be the default.
+#
+# WP126 note: `collect` and `naive-collect`/`pinned-collect` drain the
+# collector to settlement rather than making one pass, because they are
+# asked in a FRESH process about orphans a previous process allocated, and
+# finding those is the seed scan's job. Same collector, same predicate;
+# leg 8 is what pins down that bounding it did not cost anything.
 #
 # Run:  bash tools/run-e2e.sh tools/test-v3-orphan-reclaim.sh
 #   or:  bash tools/test-v3-orphan-reclaim.sh     (from make test)
@@ -270,5 +282,68 @@ GO=$(field "$OUT" PAGES_ORPHAN)
 [ "$GO" -gt 0 ] || fail "gate-off fold leg left no orphans, so the assertion above proved nothing"
 echo "  gate off on the fold path: $GO orphans retained, nothing collected"
 "$T" verify fold-off.img "$NFILES" || fail "readback failed on the gate-off fold volume"
+
+# ---------------------------------------------------------------------------
+# leg 8 (WP126): THE COST BOUND. Every leg above asks whether the collector
+# frees the right pages. This one asks the question that keeps
+# INVFS_RECLAIM_ORPHANS default-off: what does ONE CALL cost, on the path
+# fold_reclaim_hook takes on every fold?
+#
+# It drives the production fold path (vol_v3_fold -> fold_reclaim_hook ->
+# vol_reclaim_orphans, the same bounded single pass) and asserts:
+#   1. no single call exceeds the hard seed-pass cap;
+#   2. the LAST fold's cost is a small fraction of one full-pool pass over
+#      the same volume -- i.e. the per-fold cost is no longer O(allocated);
+#   3. the offline drain still reaches SETTLED, so the sweep path is not
+#      starved by the bounding.
+# If this leg ever goes vacuous (no folds, no reads) it says so and fails.
+# ---------------------------------------------------------------------------
+echo "== leg 8: the per-fold cost is bounded, not O(allocated) =="
+SEEDCAP=${INVFS_RECLAIM_SCAN_BUDGET:-1024}
+NFOLD=12
+mkvol cost.img
+OUT=$(INVFS_RECLAIM_ORPHANS=1 "$T" cost cost.img "$NFILES" "$NGENS" "$NFOLD" 2>"$WORK/cost.err") \
+    || { echo "$OUT"; cat "$WORK/cost.err"; fail "cost leg failed"; }
+echo "$OUT" | sed 's/^/  | /'
+ALLOCB=$(field "$OUT" alloc_blocks)
+[ -n "$ALLOCB" ] || fail "leg 8: the driver printed no alloc_blocks"
+[ "$ALLOCB" -gt 0 ] || fail "leg 8: an empty volume would pass vacuously"
+NF=$(printf '%s\n' "$OUT" | grep -c '^COSTFOLD')
+[ "$NF" -eq "$NFOLD" ] || fail "leg 8: got $NF fold measurements, expected $NFOLD"
+[ "$NFOLD" -ge 2 ] || fail "leg 8: NFOLD must be at least 2 to have a 'last' fold"
+
+MAXSEED=0; MAXTOT=0; LASTM=0
+printf '%s\n' "$OUT" | grep '^COSTFOLD' | while read -r L; do
+    SR=$(field "$L" seed_reads); CR=$(field "$L" cand_reads); MR=$(field "$L" mark_reads)
+    [ -n "$SR" ] && [ -n "$CR" ] && [ -n "$MR" ] \
+        || fail "leg 8: could not parse the counters out of: $L"
+    [ "$SR" -le "$SEEDCAP" ] \
+        || fail "leg 8: a fold spent $SR block reads on the seed pass, over the $SEEDCAP cap -- the cost is not bounded"
+    printf '%s %s %s\n' "$((SR + CR + MR))" "$SR" "$CR" > "$WORK/cost.last"
+done
+[ -s "$WORK/cost.last" ] || fail "leg 8: no fold counters were parsed"
+read -r LASTM LASTSEED LASTCAND < "$WORK/cost.last"
+[ "$LASTM" -gt 0 ] || fail "leg 8: the last fold cost 0 collector reads -- the leg would pass vacuously"
+# The first fold is the one that pays the seed pass; the LAST fold is the
+# steady state a live root actually lives in.
+FIRSTFOLD=$(printf '%s\n' "$OUT" | grep '^COSTFOLD' | head -1)
+FSEED=$(field "$FIRSTFOLD" seed_reads)
+FCR=$(field "$FIRSTFOLD" cand_reads)
+FMR=$(field "$FIRSTFOLD" mark_reads)
+echo "  first fold: $((FSEED + FCR + FMR)) collector block reads (of which $FSEED on the seed pass)"
+echo "  LAST  fold: $LASTM collector block reads (cand=$LASTCAND seed=$LASTSEED)"
+
+echo "  LAST fold total reads=$LASTM vs $ALLOCB allocated blocks (WP121 read all of them, every fold)"
+# A quarter, not a hair's breadth: the claim is that the per-fold cost is a
+# function of the metadata, and on a volume with a few hundred orphan pages
+# and tens of thousands of allocated blocks that is a very large gap.
+[ $((LASTM * 4)) -lt "$ALLOCB" ] \
+    || fail "leg 8: the last fold still cost $LASTM reads against $ALLOCB allocated blocks -- the per-fold cost is not bounded below a full-pool pass"
+DR=$(field "$OUT" settled)
+[ "$DR" = "1" ] || fail "leg 8: the offline drain did not reach settlement -- bounding the fold path starved the sweep path"
+"$T" verify cost.img "$NFILES" || fail "leg 8: readback failed after the bounded fold path + drain"
+FSCK=$("$B/invf-fsck" cost.img 2>&1) || { echo "$FSCK"; fail "leg 8: fsck nonzero"; }
+echo "$FSCK" | grep -q "^OK$" || { echo "$FSCK"; fail "leg 8: fsck not OK"; }
+echo "  the fold path collected what it could and the volume is still byte-exact"
 
 echo "ALL V3 ORPHAN RECLAIM LEGS PASS"

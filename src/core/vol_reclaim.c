@@ -21,7 +21,7 @@
 #include <string.h>
 
 /* ------------------------------------------------------------------ */
-/* WP121: the orphan collector's gate                                  */
+/* WP121: the orphan collector's gate. WP126 bounds its cost.            */
 /* ------------------------------------------------------------------ */
 
 /* DEFAULT OFF. The collector frees metadata pages in a way that a wrong
@@ -29,7 +29,16 @@
  * than a crash, so it does not ship enabled. INVFS_RECLAIM_ORPHANS=1 turns
  * it on; nothing else does. The value is read once per process and cached:
  * a volume is opened once per process, so re-reading getenv per fold buys
- * nothing and makes the gate depend on call order. */
+ * nothing and makes the gate depend on call order.
+ *
+ * WP126 changed WHY it is off. It is no longer the cost -- the collector
+ * is now one bounded incremental pass per fold, and the fold path no
+ * longer walks the volume (see vol_btree.c). It is now purely the
+ * WP121-listed promotion conditions, of which the cost one is the only
+ * one this WP addresses, and it does NOT address:
+ *   (1) mbuf_page_validate / mbuf_root_read in vol_metabuf.c must make
+ *       the READER enforce the invariant, not just the reclaimer;
+ *   (3) a test-flakey.sh power-loss leg. */
 static int orphan_gate_state = -1;   /* -1 = not yet read */
 
 static int orphan_gate(void)
@@ -42,28 +51,79 @@ static int orphan_gate(void)
     return orphan_gate_state;
 }
 
-/* Free base pages that no live root can reach. The gate is HERE, not at
- * the call sites, so every path that reaches the collector is gated by
- * exactly one rule and there is no call site that forgot it.
- *
- * Returns the number of pages freed, 0 when the gate is off or the
- * collector declined to run, -1 on error. */
-int vol_reclaim_orphans(invfs_volume *v, uint64_t *freed_out)
+static int orph_stats_wanted(void)
+{
+    const char *e = getenv("INVFS_RECLAIM_STATS");
+    return e && e[0] == '1' && e[1] == '\0';
+}
+
+/* One gate, two drains. `full` picks the offline sweep's drain-to-
+ * settlement loop over the fold path's single bounded pass; the gate and
+ * every other rule apply identically to both. */
+static int orph_gated(invfs_volume *v, uint64_t *freed_out, int full)
 {
     uint64_t freed = 0;
+    int rc;
 
     if (freed_out)
         *freed_out = 0;
     if (!v || !orphan_gate())
         return 0;
-    if (btree_collect_orphans(v, &freed) != 0)
+    rc = full ? btree_collect_orphans_full(v, &freed)
+              : btree_collect_orphans(v, &freed);
+    if (rc != 0)
         return -1;
     if (freed_out)
         *freed_out = freed;
     if (freed)
         fprintf(stderr, "vol_reclaim: collected %llu orphaned v3 base page(s)\n",
                 (unsigned long long)freed);
+    if (orph_stats_wanted()) {
+        struct invfs_orphan_stats st;
+        if (btree_orphan_stats(v, &st) == 0)
+            fprintf(stderr,
+                    "vol_reclaim: orphan stats calls=%llu cands=%llu "
+                    "peak=%llu cand_reads=%llu seed_reads=%llu mark_reads=%llu "
+                    "freed=%llu settled=%d\n",
+                    (unsigned long long)st.calls, (unsigned long long)st.cands,
+                    (unsigned long long)st.peak,
+                    (unsigned long long)st.cand_reads,
+                    (unsigned long long)st.seed_reads,
+                    (unsigned long long)st.mark_reads,
+                    (unsigned long long)st.freed, st.settled);
+    }
     return (int)freed;
+}
+
+/* Free base pages that no live root can reach. The gate is HERE, not at
+ * the call sites, so every path that reaches the collector is gated by
+ * exactly one rule and there is no call site that forgot it.
+ *
+ * This is the FOLD-path entry point: one bounded, incremental pass, whose
+ * cost is a function of the metadata rather than of the volume.
+ *
+ * Returns the number of pages freed, 0 when the gate is off or the
+ * collector declined to run, -1 on error. */
+int vol_reclaim_orphans(invfs_volume *v, uint64_t *freed_out)
+{
+    return orph_gated(v, freed_out, 0);
+}
+
+/* The OFFLINE-SWEEP entry point: the same collector, drained to
+ * settlement. A sweep holds the volume exclusively and has no latency
+ * budget, so it should collect everything collectable; a fold must not.
+ * Splitting the two is what lets the fold path be bounded without costing
+ * the sweep any of the compression win. */
+int vol_reclaim_orphans_full(invfs_volume *v, uint64_t *freed_out)
+{
+    return orph_gated(v, freed_out, 1);
+}
+
+int vol_reclaim_orphan_stats(invfs_volume *v, struct invfs_orphan_stats *out)
+{
+    if (!v)
+        return -1;
+    return btree_orphan_stats(v, out);
 }
 
 /* ------------------------------------------------------------------ */

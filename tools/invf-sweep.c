@@ -2193,10 +2193,18 @@ progress:
      * FUSE drain reaches the same collector through fold_reclaim_hook; the
      * offline path had no reclaim call at all, which is why a swept volume
      * never converged. Gated on INVFS_RECLAIM_ORPHANS=1 (default off) and
-     * a no-op otherwise, so nothing here changes on an unset environment. */
+     * a no-op otherwise, so nothing here changes on an unset environment.
+     *
+     * WP126: this is the FULL drain, not the fold path's single bounded
+     * pass. That split is the whole design: the fold path has to be cheap
+     * enough to run on every fold of a live root, and a sweep has no such
+     * constraint, so the sweep keeps paying for a complete collection and
+     * the compression result is unchanged. The drain loops until a whole
+     * pass frees nothing, so it terminates; each individual pass is still
+     * budgeted, so a sweep cannot be surprised by one enormous read. */
     {
         uint64_t orphans = 0;
-        if (vol_reclaim_orphans(vol, &orphans) < 0) {
+        if (vol_reclaim_orphans_full(vol, &orphans) < 0) {
             sw_progress_suspend();
             fprintf(stderr, "warning: v3 orphan reclaim failed\n");
         } else if (orphans && !invfs_sweep_ui_active()) {

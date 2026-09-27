@@ -175,4 +175,61 @@ int btree_reclaim_pinned(invfs_volume *v, invfs_blkptr old_root,
  * return 0 having freed nothing. */
 int btree_collect_orphans(invfs_volume *v, uint64_t *freed_out);
 
+/* WP126: the SAME collector with a BOUNDED, INCREMENTAL cost.
+ *
+ * WP121's btree_collect_orphans() above walks the whole block space on
+ * every call, which is one 4 KiB block read per ALLOCATED block: measured
+ * 48,732 reads on one Silesia volume, per call, and fold_reclaim_hook calls
+ * it on every fold. This entry point is what the fold path uses instead. It
+ * keeps WP121's liveness predicate byte-for-byte -- same RT30-slot set, same
+ * pinned_root, same gen ceiling, same BPG3-only candidacy, same refuse-to-
+ * run on a half-known RT30 -- and changes only WHICH blocks it looks at per
+ * call and HOW MANY reads that costs. It never frees a page the full-pool
+ * sweep would have kept, and never keeps one the full-pool sweep would have
+ * freed, except for pages the budget had not yet reached this call.
+ *
+ * The cost is bounded by construction: at most `budget` block reads for the
+ * one-pass seed scan of pre-existing pages, plus one read per block in the
+ * candidate set (allocated base pages this handle knows about), plus the
+ * two RT30 tree walks -- and the tree walks happen ONLY on a call that
+ * actually found a freeable candidate, so a fold that finds nothing costs
+ * the budget and nothing else. All three terms are functions of the
+ * METADATA, not of the volume.
+ *
+ * Returns 0 on success (freed_out, if non-NULL, holds the page count freed
+ * by THIS call) or -1 on an io/alloc error. Same refuse-to-run contract as
+ * above. */
+int btree_collect_orphans_incr(invfs_volume *v, uint64_t *freed_out);
+
+/* WP126: drain btree_collect_orphans_incr() until it is SETTLED -- the seed
+ * pass has wrapped the block space and a whole call over a non-empty
+ * candidate set freed nothing. This is the OFFLINE SWEEP's entry point: a
+ * sweep is a maintenance operation with no latency budget, so it should
+ * collect everything collectable, and this is how it does that while the
+ * per-FOLD cost stays bounded. Same return contract. */
+int btree_collect_orphans_full(invfs_volume *v, uint64_t *freed_out);
+
+/* WP126: feed the candidate set. Every mbuf_alloc() that produces a v3 base
+ * page calls this with the pba it returned, so the collector knows about
+ * that page without having to find it in the block space. A page that is
+ * never announced simply is not a candidate yet -- a leak, never a
+ * wrong free. Idempotent, allocation-failure tolerant (it then finds the
+ * page the slow way), and safe to call with pba == 0. */
+void btree_orphan_note_alloc(invfs_volume *v, uint64_t pba);
+
+/* WP126: the counters the WP126 report is measured from. Purely
+ * observational: nothing in the collector's behaviour depends on them. */
+struct invfs_orphan_stats {
+    uint64_t calls;       /* collector invocations on this handle */
+    uint64_t cand_reads;  /* block reads over the candidate set, cumulative */
+    uint64_t seed_reads;  /* block reads spent on the one-pass seed scan */
+    uint64_t mark_reads;  /* block reads walking the two RT30 trees + pin */
+    uint64_t freed;       /* base pages freed, cumulative */
+    uint64_t cands;       /* candidate-set size examined on the last call */
+    uint64_t peak;        /* largest candidate-set size seen */
+    int      settled;     /* 1 = seed pass done AND last call freed nothing */
+};
+
+int btree_orphan_stats(const invfs_volume *v, struct invfs_orphan_stats *out);
+
 #endif /* INVFS_VOL_BTREE_H */

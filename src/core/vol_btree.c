@@ -189,6 +189,9 @@ static int bt_write(invfs_volume *v, int level, uint64_t gen,
                 return -1;
 
     pba = mbuf_alloc(v, gen);
+    /* WP126: tell the orphan collector this is a base page, so it
+     * never has to look for it in the block space. */
+    btree_orphan_note_alloc(v, pba);
     if (!pba)
         return -1;
 
@@ -315,6 +318,9 @@ static int bt_recopy(invfs_volume *v, invfs_blkptr ptr, uint64_t gen,
     if (mbuf_read_ptr(v, &ptr, page) != 0)
         return -1;
     pba = mbuf_alloc(v, gen);
+    /* WP126: tell the orphan collector this is a base page, so it
+     * never has to look for it in the block space. */
+    btree_orphan_note_alloc(v, pba);
     if (!pba)
         return -1;
     h = mbuf_page_hdr(page);
@@ -1667,6 +1673,9 @@ int btree_excise(invfs_volume *v, invfs_blkptr root, const bt_quarantine *q,
         uint8_t page[INVFS_BLOCK_SIZE];
         uint64_t pba;
         pba = mbuf_alloc(v, gen);
+        /* WP126: tell the orphan collector this is a base page, so it
+         * never has to look for it in the block space. */
+        btree_orphan_note_alloc(v, pba);
         if (!pba)
             return -1;
         mbuf_page_init(page, INVFS_PAGE_LEVEL_LEAF, gen);
@@ -1835,7 +1844,7 @@ int btree_reclaim_pinned(invfs_volume *v, invfs_blkptr old_root,
 }
 
 /* ------------------------------------------------------------------ */
-/* WP121: orphan collector — the FULL-POOL sweep                        */
+/* WP121: orphan collector. WP126 makes its COST bounded.               */
 /*                                                                   */
 /* Why this exists, and why it is not btree_reclaim_pinned: every       */
 /* publisher of a new base root (v3_publish, vol_btree.c:1993)         */
@@ -1884,10 +1893,174 @@ int btree_reclaim_pinned(invfs_volume *v, invfs_blkptr old_root,
 /*   - an unreadable candidate is left alone.                           */
 /* ------------------------------------------------------------------ */
 
+/* WHAT WP126 CHANGED, AND WHAT IT DID NOT. It changed WHERE the        */
+/* collector looks and HOW MUCH that costs. It did not change a single   */
+/* one of the rules above; the predicate below is WP121's, verbatim,    */
+/* and a page it frees is a page WP121's full-pool sweep would also     */
+/* have freed. The red control in tools/test-v3-orphan-reclaim.sh      */
+/* still exercises this code, not a copy of it.                         */
+/*                                                                   */
+/* WP121's cost: one 4 KiB block read per ALLOCATED block, per CALL --  */
+/* 48,732 reads on a 1 GB Silesia volume -- and fold_reclaim_hook calls */
+/* it on every fold, so a volume that folds often pays the whole volume */
+/* every fold. That is the whole reason INVFS_RECLAIM_ORPHANS is        */
+/* default-off: not because the collector is wrong, but because it is   */
+/* O(volume) on a path a live root filesystem takes thousands of times  */
+/* a minute.                                                           */
+/*                                                                   */
+/* The fix is to stop asking "is this block a base page?" about every   */
+/* block in the volume. A v3 base page is a page mbuf_alloc handed      */
+/* out, so the collector keeps a CANDIDATE SET of the base pages this  */
+/* handle knows about, fed by exactly two sources:                     */
+/*                                                                   */
+/*   (a) btree_orphan_note_alloc(), called at every mbuf_alloc() site  */
+/*       that produces a base page (4 in this file, 1 in vol_fold.c).  */
+/*       That is EXACT for anything allocated in this session, costs    */
+/*       nothing, and is the steady state: a fold's cost is then one   */
+/*       read per live base page plus one per orphan, which is a        */
+/*       function of the METADATA and not of the volume at all.        */
+/*                                                                   */
+/*   (b) A one-pass, budgeted, cursor-carrying scan of the allocation  */
+/*       bitmap -- "the seed pass" -- which is the only way to find the */
+/*       base pages a PREVIOUS session allocated, because that knowledge */
+/*       is not on disk. It reads at most `budget` blocks per call,     */
+/*       walks free space a byte at a time, wraps once and then stops   */
+/*       for the rest of the open. So the O(volume) term is paid ONCE  */
+/*       per open, spread over >= ceil(allocated/budget) folds, and     */
+/*       never again.                                                  */
+/*                                                                   */
+/* The failure mode of a missing candidate is a LEAKED page, never a    */
+/* wrong free: the set is a filter that narrows the search, and the     */
+/* predicate is unchanged once a page is in it. A base page allocated   */
+/* through a path that forgets note_alloc() is still found by the seed */
+/* pass. That asymmetry is the reason this shape was chosen over the   */
+/* alternatives: an incremental CURSOR over the raw block space        */
+/* (without a candidate set) spends its whole per-call read budget on   */
+/* DATA blocks that can never be base pages, so on a large volume it   */
+/* never even reaches the metadata between calls, and rate-limiting    */
+/* alone still leaves the per-call cost O(allocated).                  */
+/* ------------------------------------------------------------------ */
+
 /* Deepest tree we will believe. A page claiming a deeper level than any  */
 /* real v3 tree is not a page we understand, and an un-understood page is */
 /* never freed. */
 #define ORPHAN_MAX_LEVEL 32u
+
+/* Seed-pass reads per call. This is the ONLY term that is not a function
+ * of the metadata, it is hard-capped, and it goes to zero for good once
+ * the seed pass has wrapped the block space. 1024 reads = 4 MiB of reads
+ * on a fold, which is invisible next to the fold's own I/O, and it makes
+ * a 1 GB volume seed in <= 40 folds. INVFS_RECLAIM_SCAN_BUDGET overrides
+ * it (0 = unlimited, i.e. WP121's one-shot behaviour). */
+#define ORPHAN_SEED_BUDGET_DEFAULT 1024u
+
+/* A drain (the offline sweep) stops after this many collector calls even
+ * if it has not settled. It exists to bound a loop, not to bound work. */
+#define ORPHAN_DRAIN_MAX_ROUNDS 0x400000u
+
+/* Resolved once per process, like vol_reclaim.c's orphan_gate: a volume is
+ * opened once per process and the budget is a policy, not a per-call input.
+ * 0 means "not resolved yet"; a resolved 0 is normalised to unlimited. */
+static uint64_t g_orph_budget = 0;
+
+static uint64_t orph_budget(invfs_volume *v)
+{
+    if (v->orph.budget)
+        return v->orph.budget;
+    if (!g_orph_budget) {
+        const char *e = getenv("INVFS_RECLAIM_SCAN_BUDGET");
+        g_orph_budget = (e && e[0]) ? strtoull(e, NULL, 10)
+                                    : (uint64_t)ORPHAN_SEED_BUDGET_DEFAULT;
+        if (!g_orph_budget)
+            g_orph_budget = UINT64_MAX;
+    }
+    return g_orph_budget;
+}
+
+/* The membership bit per block. Allocated lazily on the first
+ * note_alloc/collect, and its presence is the only thing that says the
+ * candidate set is usable -- a handle that cannot allocate it collects
+ * nothing rather than collecting without a filter. */
+static int orph_set_ready(invfs_volume *v)
+{
+    uint64_t bytes;
+
+    if (v->orph.inlist)
+        return 0;
+    bytes = (v->sb.total_blocks + 7u) / 8u;
+    v->orph.inlist = (uint8_t *)calloc(1, (size_t)bytes);
+    return v->orph.inlist ? 0 : -1;
+}
+
+static int orph_cand_add(invfs_volume *v, uint64_t pba)
+{
+    if (pba == 0 || pba >= v->sb.total_blocks)
+        return 0;
+    if (bit_get(v->orph.inlist, pba))
+        return 0;
+    if (v->orph.n == v->orph.cap) {
+        size_t nc = v->orph.cap ? v->orph.cap * 2 : 64;
+        uint64_t *np = (uint64_t *)realloc(v->orph.pba, nc * sizeof *np);
+        if (!np)
+            return -1;      /* the seed pass will find it instead */
+        v->orph.pba = np;
+        v->orph.cap = nc;
+    }
+    bit_set(v->orph.inlist, pba);
+    v->orph.pba[v->orph.n++] = pba;
+    if (v->orph.n > v->orph.peak)
+        v->orph.peak = v->orph.n;
+    return 0;
+}
+
+void btree_orphan_note_alloc(invfs_volume *v, uint64_t pba)
+{
+    if (!v || pba == 0 || pba >= v->sb.total_blocks || !v->bitmap)
+        return;
+    if (orph_set_ready(v) != 0)
+        return;             /* no filter -> no candidates; the seed pass retries */
+    (void)orph_cand_add(v, pba);
+}
+
+/* THE SEED PASS. One cursor-carrying lap of the allocation bitmap, budgeted
+ * in block reads, that teaches the collector about the base pages an earlier
+ * session allocated. Free space costs one byte test per eight blocks and no
+ * I/O; only an ALLOCATED block costs a read, and only an allocated block
+ * that validates as a base page joins the candidate set.
+ *
+ * It runs at most once per open. After the wrap, seed_done stays set and
+ * this function costs two loads and a branch for the rest of the session --
+ * which is what makes the steady-state per-fold cost independent of volume
+ * size. */
+static void orph_seed_scan(invfs_volume *v, uint64_t budget, uint8_t *page)
+{
+    uint64_t total = v->sb.total_blocks, b, reads = 0;
+
+    if (v->orph.seed_done || !v->bitmap)
+        return;
+    b = v->orph.seed_cursor ? v->orph.seed_cursor : 1;
+    while (b < total && reads < budget) {
+        if (v->bitmap[b >> 3] == 0) {
+            b += 8;         /* eight free blocks for one byte test */
+            continue;
+        }
+        if (mbuf_read(v, b, page) != 0) {
+            b++;
+            continue;       /* unreadable: leave it alone, as always */
+        }
+        reads++;
+        v->orph.seed_reads++;
+        if (mbuf_page_validate(page) &&
+            mbuf_page_chdr(page)->level <= ORPHAN_MAX_LEVEL)
+            (void)orph_cand_add(v, b);
+        b++;
+    }
+    v->orph.seed_cursor = b;
+    if (b >= total) {
+        v->orph.seed_done = 1;
+        v->orph.seed_cursor = 1;
+    }
+}
 
 /* Offset of invfs_blkptr recipe inside invfs_v3_inode_row. The row is the */
 /* only leaf VALUE in the v3 base trees that can contain a blkptr (every   */
@@ -1949,6 +2122,7 @@ static int bt_mark_rec_deep(invfs_volume *v, invfs_blkptr ptr, uint8_t *seen,
     if (bit_get(seen, ptr.pba))
         return 0;
     bit_set(seen, ptr.pba);
+    v->orph.mark_reads++;
     if (mbuf_read_ptr(v, &ptr, buf) != 0)
         return -1;
     if (mbuf_page_chdr(buf)->level == INVFS_PAGE_LEVEL_LEAF) {
@@ -2013,90 +2187,239 @@ static int orphan_slot_ptr(invfs_volume *v, uint64_t pba, invfs_blkptr *out,
     return 0;
 }
 
+/* WP126: one bounded, incremental pass of the collector.
+ *
+ * The order of the three steps is the design, not an accident:
+ *
+ *   1. Learn the liveness roots (2 block reads). A slot we cannot turn into
+ *      a trustworthy blkptr aborts the whole call BEFORE anything is
+ *      freed, exactly as in WP121. This is why the mark walk can be moved
+ *      below the candidate scan without weakening the predicate: the
+ *      refuse-to-run decision does not depend on the mark set.
+ *   2. Seed-scan a bounded slice of the block space and examine the whole
+ *      candidate set. Neither of these can free anything, so both are
+ *      free to be partial.
+ *   3. Only if step 2 produced at least one page that LOOKS freeable,
+ *      build the complete mark set and decide. This is the term that used
+ *      to be paid unconditionally, and it is a function of the live tree,
+ *      not of the volume.
+ *
+ * Steps 1-3 see exactly the same predicate as WP121's single full-pool
+ * pass. A page this call does not look at is a page WP121 would have
+ * reached on a later fold; a page it does look at gets WP121's verdict. */
 int btree_collect_orphans(invfs_volume *v, uint64_t *freed_out)
 {
     uint8_t *seen = NULL, page[INVFS_BLOCK_SIZE];
-    uint64_t bytes, b, freed = 0, max_root_gen = 0, gen = 0;
-    int have_root = 0, i;
+    uint64_t *cand = NULL, *cgen = NULL;   /* looks-freeable pba + its gen */
+    uint64_t total, freed = 0, max_root_gen = 0, gen = 0;
+    invfs_blkptr root[2];
+    int have_root = 0, nroot = 0, ncand = 0, i;
+    size_t k, keep;
 
     if (!v)
         return -1;
     if (freed_out)
         *freed_out = 0;
-    /* No descriptor, or no in-RAM bitmap to work from: nothing to say. */
-    if (!v->rt30_present || !v->bitmap)
+    /* No descriptor, or no in-RAM bitmap to work from: nothing to say, and
+     * nothing that can change inside this open, so a drain must stop here
+     * rather than spin on a state it can never leave. */
+    if (!v->rt30_present || !v->bitmap) {
+        v->orph.cands = 0;
+        v->orph.settled = 1;
         return 0;
-
-    bytes = (v->sb.total_blocks + 7u) / 8u;
-    seen = (uint8_t *)calloc(1, (size_t)bytes);
-    if (!seen)
-        return -1;
+    }
+    total = v->sb.total_blocks;
+    if (orph_set_ready(v) != 0)
+        return -1;                 /* no filter -> no collection at all */
+    v->orph.calls++;
 
     /* (1) BOTH RT30 slots are liveness roots. See the header comment. */
     for (i = 0; i < 2; i++) {
-        invfs_blkptr r;
         uint64_t pba = v->rt30.root_slot[i];
         if (!pba)
             continue;
-        if (pba >= v->sb.total_blocks || orphan_slot_ptr(v, pba, &r, &gen) != 0) {
+        if (pba >= total || orphan_slot_ptr(v, pba, &root[nroot], &gen) != 0) {
             /* We do not fully know the RT30. Refuse to collect: a slot we
              * cannot read is exactly the slot the reader would fall back
              * to, and "probably unreachable" is how the volume loses a
              * namespace silently. */
-            free(seen);
+            v->orph.cands = 0;
+            v->orph.settled = 1;
             return 0;
         }
-        if (bt_mark_rec_deep(v, r, seen, v->sb.total_blocks) != 0) {
-            free(seen);
-            return -1;
-        }
+        v->orph.cand_reads++;
         if (!have_root || gen > max_root_gen) {
             max_root_gen = gen;
             have_root = 1;
         }
-    }
-    /* (2) a live SPT0 save point pins its own base root. */
-    if (v->pinned_root.pba != 0 &&
-        bt_mark_rec_deep(v, v->pinned_root, seen, v->sb.total_blocks) != 0) {
-        free(seen);
-        return -1;
+        nroot++;
     }
     if (!have_root) {
         /* RT30 names no root at all: there is no base tree to diff against,
          * so every BPG3 page would look like an orphan. Do not guess. */
-        free(seen);
+        v->orph.cands = 0;
+        v->orph.settled = 1;
         return 0;
     }
 
-    /* (3) full-pool sweep: every allocated block that is a base page and
-     * that no live root can reach is an orphan. */
-    for (b = 1; b < v->sb.total_blocks; b++) {
+    /* (2) bounded seed slice + the whole candidate set. No frees here, so
+     * a partial pass is always safe; it can only mean "not this call". */
+    orph_seed_scan(v, orph_budget(v), page);
+
+    if (v->orph.n) {
+        cand = (uint64_t *)malloc(v->orph.n * sizeof *cand);
+        cgen = (uint64_t *)malloc(v->orph.n * sizeof *cgen);
+        if (!cand || !cgen) {
+            free(cand);
+            free(cgen);
+            return -1;
+        }
+    }
+    /* Compacting pass: this is the term that WP121 spent 48,732 reads on,
+     * and it now spends one read per block that could POSSIBLY be a base
+     * page. The full pool is not walked at all. */
+    keep = 0;
+    for (k = 0; k < v->orph.n; k++) {
+        uint64_t b = v->orph.pba[k];
         const invfs_page_hdr *h;
-        if (!bit_get(v->bitmap, b))
-            continue;
+        if (b == 0 || b >= total || !bit_get(v->bitmap, b)) {
+            if (b < total)
+                bit_clr(v->orph.inlist, b);
+            continue;               /* somebody else freed it: drop it */
+        }
+        v->orph.pba[keep++] = b;     /* still allocated: keep it in the set */
         if (mbuf_read(v, b, page) != 0)
-            continue;                    /* unreadable: leave it alone */
+            continue;                /* unreadable: leave it alone */
+        v->orph.cand_reads++;
         if (!mbuf_page_validate(page))
-            continue;                    /* not a base page: not ours */
+            continue;                /* not a base page: not ours */
         h = mbuf_page_chdr(page);
         if (h->level > ORPHAN_MAX_LEVEL)
-            continue;                    /* deeper than any real tree */
-        if (bit_get(seen, b))
-            continue;                    /* live: reachable from a root */
+            continue;                /* deeper than any real tree */
         if (h->gen > max_root_gen)
-            continue;                    /* uncommitted COW copy: live */
+            continue;                /* uncommitted COW copy: live */
+        cand[ncand] = b;
+        cgen[ncand] = h->gen;
+        ncand++;
+    }
+    v->orph.n = keep;
+    v->orph.cands = (uint64_t)keep;
+    if (ncand == 0) {
+        /* Nothing even looks freeable, so the mark walk -- the only
+         * unbounded-ish term left -- is not paid. On a settled volume this
+         * is the steady state of a fold that allocated and published
+         * without abandoning anything reclaimable. */
+        free(cand);
+        free(cgen);
+        v->orph.settled = 0;
+        return 0;
+    }
+
+    /* (3) a candidate exists, so pay for the complete mark set. */
+    {
+        uint64_t bytes = (total + 7u) / 8u;
+        seen = (uint8_t *)calloc(1, (size_t)bytes);
+        if (!seen) {
+            free(cand);
+            free(cgen);
+            return -1;
+        }
+        for (i = 0; i < nroot; i++)
+            if (bt_mark_rec_deep(v, root[i], seen, total) != 0) {
+                free(seen);
+                free(cand);
+                free(cgen);
+                return -1;
+            }
+        /* a live SPT0 save point pins its own base root. */
+        if (v->pinned_root.pba != 0 &&
+            bt_mark_rec_deep(v, v->pinned_root, seen, total) != 0) {
+            free(seen);
+            free(cand);
+            free(cgen);
+            return -1;
+        }
+    }
+
+    for (i = 0; i < ncand; i++) {
+        uint64_t b = cand[i];
+        if (bit_get(seen, b))
+            continue;                /* live: reachable from a root */
+        if (cgen[i] > max_root_gen)
+            continue;                /* the ceiling can only have risen */
         mbuf_free(v, b);
         if (bit_get(v->bitmap, b))
-            continue;                    /* retention held it: not freed */
+            continue;                /* retention held it: not freed */
+        bit_clr(v->orph.inlist, b);
         freed++;
     }
     free(seen);
+    free(cand);
+    free(cgen);
+
+    /* Drop the freed pages from the candidate set so it stays the size of
+     * the live tree plus what this session has not reclaimed yet -- which
+     * is the whole reason the next fold is cheap. */
+    keep = 0;
+    for (k = 0; k < v->orph.n; k++)
+        if (bit_get(v->bitmap, v->orph.pba[k]))
+            v->orph.pba[keep++] = v->orph.pba[k];
+    v->orph.n = keep;
+
     if (freed_out)
         *freed_out = freed;
+    v->orph.settled = (v->orph.seed_done && freed == 0) ? 1 : 0;
+    v->orph.freed += freed;
     /* Make the frees durable in the same breath. A crash before this point
      * leaves the blocks allocated (a leak), never shared. */
     if (freed && vol_v3_bitmap_flush(v) != 0)
         return -1;
+    return 0;
+}
+
+int btree_orphan_stats(const invfs_volume *v, struct invfs_orphan_stats *out)
+{
+    if (!v || !out)
+        return -1;
+    out->calls      = v->orph.calls;
+    out->cand_reads = v->orph.cand_reads;
+    out->seed_reads = v->orph.seed_reads;
+    out->mark_reads = v->orph.mark_reads;
+    out->freed      = v->orph.freed;
+    out->cands      = v->orph.cands;
+    out->peak       = v->orph.peak;
+    out->settled    = v->orph.settled ? 1 : 0;
+    return 0;
+}
+
+/* The OFFLINE drain. A sweep has no latency budget, so it should collect
+ * everything collectable; folding does not, so folding must not. The loop
+ * terminates when a whole pass over a non-empty candidate set freed nothing
+ * AND the seed pass has wrapped, which is exactly "the full-pool sweep
+ * would have had nothing left to do". */
+int btree_collect_orphans_full(invfs_volume *v, uint64_t *freed_out)
+{
+    struct invfs_orphan_stats st;
+    uint64_t total = 0, f = 0;
+    unsigned long rounds = 0;
+    int rc;
+
+    if (freed_out)
+        *freed_out = 0;
+    for (;;) {
+        rc = btree_collect_orphans(v, &f);
+        if (rc != 0)
+            return rc;
+        total += f;
+        if (btree_orphan_stats(v, &st) != 0)
+            return -1;
+        if (st.settled)
+            break;
+        if (++rounds >= ORPHAN_DRAIN_MAX_ROUNDS)
+            break;
+    }
+    if (freed_out)
+        *freed_out = total;
     return 0;
 }
 
@@ -2263,6 +2586,9 @@ static int v3_publish(invfs_volume *v, invfs_blkptr root, uint64_t old_gen)
         uint64_t gen = old_gen + 1, pba;
 
         pba = mbuf_alloc(v, gen);
+        /* WP126: tell the orphan collector this is a base page, so it
+         * never has to look for it in the block space. */
+        btree_orphan_note_alloc(v, pba);
         if (!pba)
             return -1;
         mbuf_page_init(page, INVFS_PAGE_LEVEL_LEAF, gen);

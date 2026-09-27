@@ -183,6 +183,18 @@ static uint64_t count_alloc_pages(invfs_volume *v)
     return n;
 }
 
+/* Every allocated block, base page or not. This is the population WP121's
+ * collector read once per call, and therefore the number a per-fold cost
+ * has to be compared against to show the cost is no longer O(volume). */
+static uint64_t count_all_blocks(invfs_volume *v)
+{
+    uint64_t b, n = 0;
+    for (b = 1; b < v->sb.total_blocks; b++)
+        if (bit_get(v->bitmap, b))
+            n++;
+    return n;
+}
+
 /* ---- allocation-aware reachability walk ------------------------------- */
 
 /* Deliberately NOT btree_check: btree_check only reads pages, and a freed
@@ -497,10 +509,18 @@ static int cmd_collect(const char *img)
     v = vol_open(img, &err);
     if (!v)
         return fail("vol_open(%s) err=%d", img, err);
-    rc = vol_reclaim_orphans(v, &freed);
+    /* WP126: the DRAIN, not the single bounded pass. This subcommand is
+     * the offline sweep's question -- "collect everything collectable" --
+     * and it is asked in a FRESH process, so the orphans it is after were
+     * allocated by a previous one and are only discoverable by the seed
+     * scan, which the bounded pass deliberately does not finish in one
+     * call. Draining is the same collector with the same predicate; it
+     * just keeps going. `cost` below is the leg that pins down that the
+     * per-call cost stayed bounded. */
+    rc = vol_reclaim_orphans_full(v, &freed);
     if (rc < 0) {
         vol_close(v);
-        return fail("vol_reclaim_orphans failed");
+        return fail("vol_reclaim_orphans_full failed");
     }
     printf("COLLECTED=%llu\n", (unsigned long long)freed);
     vol_close(v);
@@ -519,10 +539,10 @@ static int cmd_gate_off(const char *img)
     v = vol_open(img, &err);
     if (!v)
         return fail("vol_open(%s) err=%d", img, err);
-    rc = vol_reclaim_orphans(v, &freed);
+    rc = vol_reclaim_orphans_full(v, &freed);
     vol_close(v);
     if (rc < 0)
-        return fail("vol_reclaim_orphans failed with the gate off");
+        return fail("vol_reclaim_orphans_full failed with the gate off");
     if (freed != 0)
         return fail("the collector freed %llu pages with INVFS_RECLAIM_ORPHANS "
                     "unset -- the gate is not default-off",
@@ -645,7 +665,7 @@ static int emulate_wrong_predicate(const char *img, int pin_older, const char *t
         v->pinned_root = pinned;
     }
 
-    if (vol_reclaim_orphans(v, &freed) < 0) {
+    if (vol_reclaim_orphans_full(v, &freed) < 0) {
         v->rt30.root_slot[0] = save[0];
         v->rt30.root_slot[1] = save[1];
         vol_close(v);
@@ -785,11 +805,138 @@ static int cmd_reuse(const char *img, uint64_t root_pba, uint64_t root_gen,
     return 0;
 }
 
+/* WP126: THE COST LEG. Everything else in this driver is about whether the
+ * collector frees the right pages. This one is about whether it can be
+ * called on every fold, which is the only reason INVFS_RECLAIM_ORPHANS is
+ * still default-off.
+ *
+ * `cost <img> <nfiles> <ngen> <nfold>`: populate and fold, then take the
+ * SINGLE BOUNDED PASS -- vol_reclaim_orphans, exactly what
+ * fold_reclaim_hook calls -- once per fold, and print the collector's own
+ * block-read counters for each. The caller asserts that the per-call cost
+ * is a function of the metadata and not of the volume: the counters must
+ * stay bounded while the orphan count in the volume grows, and the seed
+ * term must go to zero for good once the one-pass seed scan has wrapped.
+ *
+ * It also prints what a full drain costs, because that is the number the
+ * offline sweep pays and the compression result depends on. */
+static int cmd_cost(const char *img, int nfiles, int ngen, int nfold)
+{
+    invfs_volume *v;
+    int err, i;
+    uint64_t freed = 0, drain = 0;
+    struct invfs_orphan_stats st;
+
+    v = vol_open(img, &err);
+    if (!v)
+        return fail("vol_open(%s) err=%d", img, err);
+    /* The leak, built exactly as cmd_build builds it. */
+    for (i = 0; i < nfiles; i++) {
+        char name[64];
+        size_t len = content_len(i);
+        uint8_t *buf = malloc(len);
+        if (!buf) { vol_close(v); return fail("out of memory"); }
+        content_fill(i, 0, buf, len);
+        fname(i, name, sizeof name);
+        if (vol_replace_file(v, name, buf, len) == 0) {
+            free(buf); vol_close(v); return fail("vol_replace_file failed");
+        }
+        free(buf);
+    }
+    for (i = 0; i < ngen; i++) {
+        invfs_v3_inode ino;
+        uint64_t id = 0x7200000000000000ull + (uint64_t)i;
+        memset(&ino, 0, sizeof ino);
+        ino.type = INVFS_ITYP_REG;
+        ino.mode = 0100644;
+        ino.nlink = 1;
+        ino.size = (uint64_t)(i + 1);
+        ino.mtime = ino.atime = 1700000000;
+        if (vol_v3_inode_put(v, id, &ino) != 0) {
+            vol_close(v); return fail("vol_v3_inode_put(gen %d) failed", i);
+        }
+    }
+    if (vol_v3_fold(v) != 0) { vol_close(v); return fail("fold failed"); }
+    {
+        uint64_t base = count_alloc_pages(v);
+        uint64_t live = 0;
+        char ebuf[128];
+        invfs_blkptr r0;
+        if (vol_v3_base_root(v, &r0) == 0) {
+            bt_stat bs;
+            if (btree_check(v, r0, &bs, ebuf, sizeof ebuf) == 0)
+                live = bs.n_pages;
+        }
+        printf("COST total_blocks=%llu alloc_blocks=%llu base_pages=%llu "
+               "live_pages=%llu\n",
+               (unsigned long long)v->sb.total_blocks,
+               (unsigned long long)count_all_blocks(v),
+               (unsigned long long)base, (unsigned long long)live);
+    }
+    for (i = 0; i < nfold; i++) {
+        uint64_t before_c, before_s, before_m;
+        if (btree_orphan_stats(v, &st) != 0) {
+            vol_close(v); return fail("stats failed");
+        }
+        before_c = st.cand_reads;
+        before_s = st.seed_reads;
+        before_m = st.mark_reads;
+        if (vol_reclaim_orphans(v, &freed) < 0) {
+            vol_close(v); return fail("vol_reclaim_orphans failed");
+        }
+        if (btree_orphan_stats(v, &st) != 0) {
+            vol_close(v); return fail("stats failed");
+        }
+        printf("COSTFOLD %d cands=%llu cand_reads=%llu seed_reads=%llu "
+               "mark_reads=%llu freed=%llu\n", i,
+               (unsigned long long)st.cands,
+               (unsigned long long)(st.cand_reads - before_c),
+               (unsigned long long)(st.seed_reads - before_s),
+               (unsigned long long)(st.mark_reads - before_m),
+               (unsigned long long)freed);
+        /* Publish another root so the NEXT call has something to reclaim:
+         * this is the steady state a live root is in, one abandoned root
+         * per generation. */
+        {
+            invfs_v3_inode ino;
+            uint64_t id = 0x7300000000000000ull + (uint64_t)i;
+            memset(&ino, 0, sizeof ino);
+            ino.type = INVFS_ITYP_REG;
+            ino.mode = 0100644;
+            ino.nlink = 1;
+            ino.size = (uint64_t)(i + 1);
+            ino.mtime = ino.atime = 1700000000;
+            if (vol_v3_inode_put(v, id, &ino) != 0) {
+                vol_close(v); return fail("vol_v3_inode_put(fold %d) failed", i);
+            }
+        }
+    }
+    /* The offline sweep's number, for the report: what a full drain costs
+     * on the very same volume and the very same collector. */
+    if (vol_reclaim_orphans_full(v, &drain) < 0) {
+        vol_close(v); return fail("vol_reclaim_orphans_full failed");
+    }
+    if (btree_orphan_stats(v, &st) != 0) {
+        vol_close(v); return fail("stats failed");
+    }
+    printf("DRAIN freed=%llu total_cand_reads=%llu total_seed_reads=%llu "
+           "total_mark_reads=%llu calls=%llu peak_cands=%llu settled=%d\n",
+           (unsigned long long)drain,
+           (unsigned long long)st.cand_reads,
+           (unsigned long long)st.seed_reads,
+           (unsigned long long)st.mark_reads,
+           (unsigned long long)st.calls,
+           (unsigned long long)st.peak, st.settled);
+    if (vol_flush(v) != 0) { vol_close(v); return fail("flush failed"); }
+    vol_close(v);
+    return 0;
+}
+
 int main(int argc, char **argv)
 {
     if (argc < 3) {
         fprintf(stderr, "usage: %s <build|verify|collect|gate-off|slots|"
-                        "damage-newest|naive-collect|pinned-collect|walk> "
+                        "damage-newest|naive-collect|pinned-collect|walk|cost> "
                         "<img> [args]\n", argv[0]);
         return 2;
     }
@@ -801,6 +948,8 @@ int main(int argc, char **argv)
         return cmd_verify(argv[2], atoi(argv[3]));
     if (!strcmp(argv[1], "collect") && argc == 3)
         return cmd_collect(argv[2]);
+    if (!strcmp(argv[1], "cost") && argc == 6)
+        return cmd_cost(argv[2], atoi(argv[3]), atoi(argv[4]), atoi(argv[5]));
     if (!strcmp(argv[1], "gate-off") && argc == 3)
         return cmd_gate_off(argv[2]);
     if (!strcmp(argv[1], "slots") && argc == 3)

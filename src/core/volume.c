@@ -2136,6 +2136,12 @@ fail:
     free(v->mjops);
     free(v->meta_mapper);
     free(v->meta_type_bitmap);
+    /* WP126: the orphan collector's candidate set. Rebuilt from nothing on
+     * the next open, so there is nothing to persist -- but it is one bit
+     * per block plus an array, and a process that opens volumes in a loop
+     * (the unit and e2e drivers) would grow it without this. */
+    free(v->orph.pba);
+    free(v->orph.inlist);
     free(v->heat_tab);
     free(v->pba_ref);
     free(v->l2p);

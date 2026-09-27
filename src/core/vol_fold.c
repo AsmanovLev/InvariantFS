@@ -297,9 +297,22 @@ void fold_reclaim_hook(invfs_volume *v, invfs_blkptr old_root,
      * new_root or the pinned save-point root */
     (void)vol_reclaim_mark_and_free(v, old_root, new_root, v->pinned_root);
     /* WP121: the diff above is one generation wide, so every root abandoned
-     * by an earlier publish stays allocated forever. The collector is the
-     * full-pool sweep that actually reclaims them; it is gated on
-     * INVFS_RECLAIM_ORPHANS=1 and is a no-op otherwise. */
+     * by an earlier publish stays allocated forever. The collector is what
+     * actually reclaims them; it is gated on INVFS_RECLAIM_ORPHANS=1 and is
+     * a no-op otherwise.
+     *
+     * WP126: this is the call site that made the collector unusable on a
+     * live root. It runs on EVERY fold, and WP121's collector cost one
+     * block read per allocated block per call (48,732 on a 1 GB Silesia
+     * volume), so the cost of a fold was proportional to the size of the
+     * volume. The collector it reaches now is ONE bounded incremental
+     * pass: at most a hard-capped slice of the one-pass seed scan (and
+     * only until that scan has wrapped, once per open), plus one read per
+     * known base page, plus the two RT30 tree walks -- and the tree walks
+     * are paid only on a call that actually found something freeable. All
+     * three terms are functions of the METADATA. The offline sweep drains
+     * the same collector to settlement (vol_reclaim_orphans_full), which
+     * is why this being bounded costs the sweep no compression. */
     (void)vol_reclaim_orphans(v, NULL);
 }
 
@@ -415,6 +428,8 @@ int vol_v3_fold(invfs_volume *v)
         uint8_t page[INVFS_BLOCK_SIZE];
         uint64_t gen = old_root.pba ? old_root.gen + 1 : 1;
         uint64_t pba = mbuf_alloc(v, gen);
+        /* WP126: the emptied-tree root is a base page like any other. */
+        btree_orphan_note_alloc(v, pba);
         if (!pba) {
             fold_list_free(&list);
             return -1;
