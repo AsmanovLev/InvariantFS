@@ -154,12 +154,26 @@
   100 minutes originally observed is about **0.015%** of the way in. This
   bug was never going to finish.
 
+  **The model is validated against two independent volumes**, which is what
+  makes the projection more than an assertion:
+
+  | volume | `di->cap` (G) | dirs/lookup (D) | predicted | measured |
+  |---|---:|---:|---:|---:|
+  | 1,650 files | 8,192 | 15.5 | 1.7 ms | 27 ms |
+  | 46,245 files (reproducer) | 262,144 | 3,399 | 11.6 s | 14.0 s |
+
+  Within **21%** on both. Scaling fits roughly `0.024 * K^3`, which is why the
+  knee is sharp rather than gradual. Exact K is unknown because the run never
+  finished, so the day-scale projection is a range, not a value.
+
   ### Scale control
 
   999 files from the same source tree, same un-folded delta condition: the
   heat stage completes in **<100 ms**. So an un-folded delta log is not by
   itself the trigger; `K x D x G` crossing roughly 1e11 is. Predicted knee:
-  **~8-9k un-folded inodes on one device.**
+  **somewhere in the 8k-16k un-folded inode range on one device** — the two
+  measurements bracketing it were taken with different control volumes, and
+  the honest statement is the range, not a single threshold.
 
   ### Proposed fix (proposal only, nothing implemented)
 
