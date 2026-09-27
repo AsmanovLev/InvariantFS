@@ -1491,6 +1491,85 @@ uint64_t vol_create_tar_file(invfs_volume *v, const char *name,
 }
 
 
+/* GZ_FIXED_HLEN: ID1 ID2 CM FLG MTIME[4] XFL OS, the bytes every gzip
+   member starts with. RFC 1952 s2.3.1. */
+#define GZ_FIXED_HLEN 10
+
+/* WP129: the gzip header walk, extracted so it can be bounded one access
+ * at a time and fuzzed on its own (tools/fuzz/gzhdrfuzz.c, and
+ * src/cli/gz_header_test.c).
+ *
+ * The threat model is the real one: vol_sweep.c:1087 hands this buffer the
+ * whole file, of exactly gz_len bytes, straight from whatever landed on
+ * the volume. So "read past gz_len" is a heap over-read of an
+ * attacker-sized allocation, not slack in a padded block.
+ *
+ * The bound used everywhere is gz_len itself. Every check is written
+ * against the bytes NOT YET CONSUMED, and as a subtraction where a
+ * subtraction is possible, so that
+ *
+ *   (a) no index is ever formed and then validated -- the walk can only
+ *       ever move forward inside [0, gz_len]; and
+ *   (b) no check can overflow, because gz_len - hlen is evaluated with
+ *       hlen <= gz_len already established, so it cannot wrap.
+ *
+ * That (b) matters: the pre-WP129 walk computed hlen + 2 + XLEN with a
+ * 16-bit XLEN and then scanned for a NUL with no bound at all, so a
+ * crafted 18-byte file was enough to read far outside the buffer.
+ *
+ * Returns 1 and stores the header length, or 0 for a header this parser
+ * refuses. A refusal here is not a format opinion: every return 0 below
+ * is a header whose declared length does not fit the buffer we were
+ * given, or one RFC 1952 s2.1.1 declares unparseable. Nothing here
+ * constrains a WELL-FORMED header, so the bit-exactness probe below is
+ * reached on exactly the same inputs as before this change.
+ */
+static int gz_header_len(const uint8_t *gz, size_t gz_len, size_t *hlen_out)
+{
+    size_t hlen = GZ_FIXED_HLEN;
+    unsigned flg;
+
+    if (gz_len < 18 || gz[0] != 0x1F || gz[1] != 0x8B) return 0;
+
+    flg = gz[3];
+    /* RFC 1952 s2.1.1: FLG bits 5,6,7 (0xE0) are reserved and MUST be
+     * zero. Bits 0-4 (FTEXT, FHCRC, FEXTRA, FNAME, FCOMMENT) are defined
+     * and are all still accepted below. */
+    if (flg & 0xE0) return 0;
+
+    if (flg & 0x04) {                        /* FEXTRA: XLEN(2) + XLEN bytes */
+        size_t xl;
+        /* XLEN is a 2-byte field, so it can only be read if 2 bytes remain. */
+        if (gz_len - hlen < 2) return 0;
+        xl = (size_t)gz[hlen] | ((size_t)gz[hlen + 1] << 8);
+        /* The extra field must fit whole. Written as a subtraction from
+         * what is left so the bound cannot overflow; hlen stays <= gz_len
+         * after the +=, so the invariant the next branch relies on holds. */
+        if (xl > gz_len - hlen - 2) return 0;
+        hlen += 2 + xl;
+    }
+    if (flg & 0x08) {                        /* FNAME: NUL-terminated string */
+        while (hlen < gz_len && gz[hlen]) hlen++;
+        if (hlen >= gz_len) return 0;        /* ran off the end: truncated */
+        hlen++;                              /* step over the NUL */
+    }
+    if (flg & 0x10) {                        /* FCOMMENT: same shape */
+        while (hlen < gz_len && gz[hlen]) hlen++;
+        if (hlen >= gz_len) return 0;
+        hlen++;
+    }
+    if (flg & 0x02) {                        /* FHCRC: 2 bytes, skipped, not verified */
+        if (gz_len - hlen < 2) return 0;
+        hlen += 2;
+    }
+    /* The 8 trailer bytes (CRC32 + ISIZE) must follow, and at least one
+     * deflate byte must sit between them. This is also what makes the
+     * stream_len subtraction below underflow-free. */
+    if (hlen + 8 >= gz_len) return 0;
+    *hlen_out = hlen;
+    return 1;
+}
+
 /* GZIP container (density profile): split a .tar.gz into tar members
    (siblings "name!partN", each compressed by its best algorithm) plus a
    gzip-recipe: [gzip header bytes][deflate params (level,memLevel)][crc32]
@@ -1501,15 +1580,10 @@ uint64_t vol_create_tar_file(invfs_volume *v, const char *name,
 uint64_t vol_create_gz_file(invfs_volume *v, const char *name,
                             const uint8_t *gz, size_t gz_len)
 {
-    if (gz_len < 18 || gz[0] != 0x1F || gz[1] != 0x8B) return 0;
     if (name_too_long_for_children(name)) return 0;
-    unsigned flg = gz[3];
-    size_t hlen = 10;
-    if (flg & 0x04) { unsigned xl = gz[hlen] | (gz[hlen + 1] << 8); hlen += 2 + xl; }
-    if (flg & 0x08) { while (gz[hlen]) hlen++; hlen++; }
-    if (flg & 0x10) { while (gz[hlen]) hlen++; hlen++; }
-    if (flg & 0x02) hlen += 2;
-    if (hlen + 8 >= gz_len) return 0;
+    size_t hlen = 0;
+    if (!gz_header_len(gz, gz_len, &hlen)) return 0;
+    /* hlen + 8 < gz_len was just established, so this is >= 1 and cannot wrap. */
     size_t stream_len = gz_len - hlen - 8;
     unsigned crc_stored = (unsigned)gz[gz_len - 8] | ((unsigned)gz[gz_len - 7] << 8) |
                           ((unsigned)gz[gz_len - 6] << 16) | ((unsigned)gz[gz_len - 5] << 24);

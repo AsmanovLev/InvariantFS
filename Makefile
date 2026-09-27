@@ -258,6 +258,89 @@ $(OUT)/recipefuzz: tools/fuzz/recipefuzz.c $(CORE_O)
 
 recipefuzz: $(OUT)/recipefuzz
 
+# WP129: the gzip header parse, fuzzed against the REAL engine function.
+# Same shape as recipefuzz above, and for the same reason: the harness
+# #includes src/core/vol_cpack.c, so it runs the shipped gz_header_len()
+# static. A mirror of the parser cannot find an overflow -- it is compiled
+# with whatever bounds its author gave it, which is the bug.
+#
+# vol_cpack.o is dropped for the same reason as recipefuzz: the harness TU
+# already provides those statics.
+#
+# Two forms from one source:
+#   gzhdrfuzz-libfuzzer  libFuzzer, for the long soak (needs clang+libFuzzer,
+#                        so it is NOT wired into `make test`)
+#   gzhdrfuzz            the standalone driver: the seed corpus plus a PRNG
+#                        sweep, ordinary CFLAGS, and IS in `make test`. The
+#                        gate has to run wherever the tree is built.
+GZHDRFUZZ_OBJS := $(filter-out $(OBJ)/vol_cpack.o,$(CORE_O))
+GZHDR_SEEDS    := $(sort $(wildcard tools/fuzz/seeds/gzhdr/*))
+
+# Sanitizers go on the harness TU only; the engine objects stay
+# uninstrumented, which is enough: ASan replaces the allocator and
+# intercepts memcpy process-wide, so an out-of-bounds read of an
+# ASan-allocated buffer inside uninstrumented engine code is still caught.
+# -fsanitize and `ulimit -v` cannot be combined (ASan reserves ~16 TB of
+# shadow), so bound the soak with ASAN_OPTIONS=hard_rss_limit_mb.
+GZHDR_SAN_CFLAGS := -std=gnu11 -O1 -g -fsanitize=address,undefined \
+                    -fno-omit-frame-pointer $(addprefix -I,$(SRC) $(SRCDIRS)) \
+                    -DINVFS_EMBED_FLACX -DMINIZ_NO_ZLIB_APIS
+
+# WP129: the regression test. Sanitizers are not optional here -- on main
+# the malformed cases are a memory error, not a wrong return value, so an
+# uninstrumented build of this test would go GREEN on the bug.
+# detect_leaks=0: vol_open allocates v->meta_type_bitmap (1 MiB at this
+# geometry, src/core/volume.c:4594) and vol_close does not free it. That is a
+# PRE-EXISTING volume-lifecycle leak, nothing to do with the header walk --
+# and it is invisible to every other unit binary because none of them are
+# built with a sanitizer. Fixing it belongs to whoever owns volume.c's
+# lifecycle, not here: LeakSanitizer is not what this gate is for, and
+# silencing it here is not a claim that the leak does not exist.
+GZHDR_TEST_ASAN := hard_rss_limit_mb=4096:detect_leaks=0
+$(OUT)/invf-gz_header_test: src/cli/gz_header_test.c $(CORE_O)
+	$(CC) $(GZHDR_SAN_CFLAGS) -o $@ $< $(CORE_O) \
+	      -fsanitize=address,undefined $(LDLIBS)
+
+$(OUT)/gzhdrfuzz: tools/fuzz/gzhdrfuzz.c $(CORE_O)
+	$(CC) $(GZHDR_SAN_CFLAGS) -o $@ $< $(GZHDRFUZZ_OBJS) \
+	      -fsanitize=address,undefined -Wl,-l:libzstd.so.1 -lz -lpthread
+
+# The soak build. libFuzzer needs clang, so it is a separate target and is
+# NOT in `make test` -- a tree that builds with gcc must still be gated.
+#   make FUZZ_CC=/usr/lib/llvm-19/bin/clang gzhdrfuzz-soak
+FUZZ_CC ?= clang
+$(OUT)/gzhdrfuzz-libfuzzer: tools/fuzz/gzhdrfuzz.c $(CORE_O)
+	$(FUZZ_CC) $(GZHDR_SAN_CFLAGS) -DGZHDR_LIBFUZZER -fsanitize=fuzzer -o $@ $< \
+	      $(GZHDRFUZZ_OBJS) -Wl,-l:libzstd.so.1 -lz -lpthread
+
+# The seed corpus is GENERATED, not checked in: every file in it is either
+# 18 bytes of hand-written header or a member zlib can rebuild, and a
+# binary blob in git is a blob nobody can review. `make gzhdr-seeds`
+# regenerates it; the test rule depends on it.
+gzhdr-seeds:
+	@python3 tools/mk-gzhdr-seeds.py tools/fuzz/seeds/gzhdr >/dev/null
+
+# The gate itself: corpus + 200k PRNG cases under ASan+UBSan. Fails on any
+# over-read, on any P2 disagreement (a well-formed member the old walk
+# accepted and the new one refuses), and on any P3 disagreement.
+test-gzhdr: $(OUT)/gzhdrfuzz gzhdr-seeds
+	$(TESTENV) $(TESTISO) $(OUT)/gzhdrfuzz 200000 0x9E3779B97F4A7C15 \
+	    $(GZHDR_SEEDS)
+
+# The long soak. Run in the background; report the run count AND the wall
+# clock, because "no crash" without a count is not evidence.
+#   make FUZZ_CC=/usr/lib/llvm-19/bin/clang gzhdrfuzz-soak SECS=240
+gzhdrfuzz-soak: $(OUT)/gzhdrfuzz-libfuzzer gzhdr-seeds
+	@# libFuzzer takes ONE corpus directory, not a directory plus a file
+	@# list -- "Not a directory: <file>; exiting". So the seeds are seeded
+	@# INTO the corpus dir rather than appended to the argument list.
+	@mkdir -p $(OBJ)/gzhdrfuzz-corpus
+	@cp -n $(GZHDR_SEEDS) $(OBJ)/gzhdrfuzz-corpus/ 2>/dev/null || true
+	ASAN_OPTIONS=hard_rss_limit_mb=4096 \
+	$(OUT)/gzhdrfuzz-libfuzzer -max_total_time=$(or $(SECS),240) \
+	    -rss_limit_mb=4096 -max_len=1024 -print_final_stats=1 \
+	    $(OBJ)/gzhdrfuzz-corpus
+
 # .ivpack bundles (ADR-007 §3: uncompressed ZIP-0, manifest + sha256 +
 # lib/<name>.so + bin/<name> CLI fallback). Artifacts land in dist/ivpack/.
 IVPACKS := $(foreach p,$(CPACKS),dist/ivpack/$(p).ivpack)
@@ -279,7 +362,9 @@ clean:
 	       $(OUT)/invf-plugin_host_test $(OUT)/invf-plugin_mt_test \
 	       $(OUT)/invf-ivpack_packs_test $(PLUGIN_SO) $(IVPACKS) \
 	       tools/invf-plugin-host \
-	       $(OUT)/invf-fuzz
+	       $(OUT)/invf-fuzz $(OUT)/gzhdrfuzz $(OUT)/gzhdrfuzz-libfuzzer \
+	       $(OUT)/invf-gz_header_test \
+	       $(OBJ)/gzhdrfuzz-corpus tools/fuzz/seeds/gzhdr
 
 # ---- tests ---------------------------------------------------------------
 # unit tier: fast, no I/O images
@@ -323,7 +408,8 @@ test: $(OUT)/invf-arctest $(OUT)/invf-blkio_test $(OUT)/invf-codec_test \
       $(OUT)/invf-deflate_repro_test $(OUT)/invf-plugin_host_test $(OUT)/invf-plugin_mt_test \
       $(OUT)/invf-window_test $(OUT)/invf-nlink_v3_test \
       $(OUT)/invf-cpack_guard_test $(OUT)/invf-orphan_test \
-      $(OUT)/invf-rt30_slot_test \
+      $(OUT)/invf-rt30_slot_test $(OUT)/gzhdrfuzz \
+      $(OUT)/invf-gz_header_test \
       $(OUT)/invf-ivpack_packs_test $(OUT)/invf-mkfs $(OUT)/invf-cp \
       $(OUT)/invf-sweep $(OUT)/invf-fsck $(OUT)/invf-plugin-host \
       plugin-so $(CORE_OBJS_FILE)
@@ -362,6 +448,19 @@ test: $(OUT)/invf-arctest $(OUT)/invf-blkio_test $(OUT)/invf-codec_test \
 	$(TESTENV) $(TESTISO) $(OUT)/invf-window_test /tmp
 	$(TESTENV) $(TESTISO) $(OUT)/invf-nlink_v3_test /tmp
 	$(TESTENV) $(OUT)/invf-cpack_guard_test
+	@# WP129: the GZR gzip header parse, under ASan+UBSan, against the real
+	@# engine function and the generated seed corpus. This gate is what keeps
+	@# the 18-byte over-read out; the libFuzzer soak (make gzhdrfuzz-soak) is
+	@# the depth behind it, but it needs clang and so cannot be a build-
+	@# anywhere requirement.
+	$(TESTENV) $(TESTISO) bash tools/run-gzhdr-gate.sh
+	@# The same parser again, through the PUBLIC engine entry point, with
+	@# the malformed cases AND the well-formed ones. Built with sanitizers
+	@# because on main the malformed cases are only a memory error, not a
+	@# wrong return value -- an uninstrumented build would pass them. The
+	@# accept leg is the one that matters commercially: a bounds check
+	@# that started refusing valid gzip would cost compression silently.
+	ASAN_OPTIONS=$(GZHDR_TEST_ASAN) $(TESTENV) $(TESTISO) $(OUT)/invf-gz_header_test
 	@# WP121: the orphan collector is DEFAULT OFF, so the unit run proves the
 	@# gate (subprocess with a clean env) and the on-disk geometry of a
 	@# volume that was built, reclaimed and then damaged -- the damage leg
