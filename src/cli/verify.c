@@ -403,6 +403,63 @@ int main(int argc, char **argv)
             }
         }
         free(ents);
+        /* WP118: the deep pass above walks INODES (once per id), so two names
+         * on one inode are read once and the count it prints is a count of
+         * inodes, not of the names the volume claims to have. That is how a
+         * 7-name volume with two aliased pairs reported "5 files ok, 0
+         * corrupt" (WP111b). Put the NAMES against the inode rows' nlink
+         * now: for every live inode the number of names that resolve to it
+         * must equal its nlink -- the invariant a hardlink satisfies (fan-in
+         * 2, nlink 2) and the aliasing bug violates (fan-in 2, nlink 1).
+         * Counted into `bad` BEFORE the summary line, so the number and the
+         * reason are on screen together and the exit code is non-zero. */
+        if (vol_sb(vol)->vol_flags & VOLF_V3) {
+            invfs_nlink_audit na;
+            if (vol_v3_nlink_audit(vol, &na) != 0) {
+                printf("  CORRUPT: the nlink/fan-in audit could not be "
+                       "completed (the namespace walk failed); the counts "
+                       "above are partial\n");
+                bad++;
+            } else {
+                uint64_t fi;
+                printf("deep: names walked: %llu over %llu live inode(s)\n",
+                       (unsigned long long)na.names,
+                       (unsigned long long)na.inodes);
+                if (na.mismatch) {
+                    for (fi = 0; fi < na.nfault; fi++) {
+                        const invfs_nlink_fault *f = &na.fault[fi];
+                        printf("  CORRUPT: inode %llu (%s): nlink %u but %u "
+                               "name(s) resolve to it -- %s\n",
+                               (unsigned long long)f->id,
+                               f->name[0] ? f->name : "?", f->nlink, f->fanin,
+                               !strcmp(f->reason, "missing-name")
+                               ? "a name is MISSING from the directory tree"
+                               : !strcmp(f->reason, "dead")
+                               ? "its inode row is not live"
+                               : "STALE DIRENT(S): a name landed on this "
+                                 "inode; the content under the other name(s) "
+                                 "is gone");
+                        bad++;
+                    }
+                    if (na.nfault_total > na.nfault)
+                        printf("  ... and %llu more unbalanced inode(s)\n",
+                               (unsigned long long)(na.nfault_total -
+                                                    na.nfault));
+                    printf("deep: nlink/fan-in: %llu inode(s) do not balance "
+                           "(%llu missing name(s), %llu stale dirent(s))\n",
+                           (unsigned long long)na.nfault_total,
+                           (unsigned long long)na.missing_names,
+                           (unsigned long long)na.stale_dirents);
+                } else {
+                    printf("deep: nlink/fan-in: ok\n");
+                }
+                if (na.orphan_rows)
+                    printf("deep: note: %llu live inode(s) that no directory "
+                           "entry names (orphan rows; reported, not counted "
+                           "as corrupt)\n",
+                           (unsigned long long)na.orphan_rows);
+            }
+        }
         /* WP20: when the volume is sealed, recompute every parity stripe
          * against its stored parity block. Drift counters are all zero on
          * an unsealed volume (seal is opt-in), so the line appears only

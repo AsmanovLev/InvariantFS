@@ -8,6 +8,11 @@
 # survive unmount/remount. v3 nodes are still empty (recipes are WP-M8), so
 # the "content" that must stay alive is the shared inode row + its xattrs.
 #
+# WP118: this suite is also the POSITIVE CONTROL for the nlink / dirent
+# fan-in accounting, because a volume of hardlinks is exactly the shape a
+# "no two names may share an inode id" check gets wrong. The last leg
+# requires invf-fsck to report the accounting as balanced.
+#
 # Run from the repo root after `make`:
 #   bash tools/run-e2e.sh tools/test-meta-v3-hardlink.sh
 set -e
@@ -185,7 +190,21 @@ mnt_down
 # --- offline sanity: fsck clean, and the last unlink freed the inode -----
 FSCK=$($B/invf-fsck "$IMG" 2>&1) || { echo "$FSCK"; fail "fsck exited nonzero"; }
 echo "$FSCK" | grep -q "^OK$" || { echo "$FSCK"; fail "fsck not OK"; }
-echo "fsck: OK"
+# WP118: this volume has hardlinks in it by construction (that is the whole
+# point of the suite), so it is also the POSITIVE CONTROL for the nlink /
+# dirent fan-in accounting: every live inode must have exactly as many names
+# as its nlink. An implementation that checked "inode ids must be unique"
+# -- which is what a hardlink violates on purpose -- would fail here.
+echo "$FSCK" | grep -q "nlink/fan-in:  ok" \
+    || { echo "$FSCK"; fail "fsck does not report the nlink/fan-in accounting as ok"; }
+echo "$FSCK" | grep -q "DO NOT BALANCE" \
+    && { echo "$FSCK"; fail "fsck reports a hardlink volume as unbalanced"; }
+NA=$($B/invf-v3inode "$IMG" nlink audit 2>/dev/null) \
+    || { echo "$NA"; fail "the nlink audit rejected a volume full of hardlinks"; }
+echo "$NA" | grep -q "verdict=OK" \
+    || { echo "$NA"; fail "nlink audit did not verdict OK on a hardlink volume"; }
+echo "fsck: OK -- $(echo "$FSCK" | sed -n 's/^  names\/inodes: *//p')"
+echo "  audit: $NA"
 if $B/invf-v3inode "$IMG" get "$FID" >/dev/null 2>&1; then
     fail "engine inode $FID still present after its last name was unlinked"
 fi

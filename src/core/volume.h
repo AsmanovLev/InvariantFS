@@ -96,6 +96,21 @@ typedef struct {
     uint64_t v3_savepoint_bad;  /* a live save point pins a damaged base */
     uint64_t v3_repaired;       /* -f rebuilt the tree (quarantine excised) */
     int      v3_damaged;        /* 1 = any v3 structural damage found */
+    /* WP118: nlink vs dirent fan-in accounting (v3 only; zero on the v2
+     * path, whose format invf-mkfs can no longer produce). The namespace
+     * invariant every other check here missed: the names that resolve to
+     * each live inode must be as many as its nlink claims. Detected and
+     * reported, never repaired -- the repair (which name is the intruder?)
+     * is not decidable from the volume. */
+    uint64_t nlink_names;      /* user names the walk reached */
+    uint64_t nlink_inodes;     /* live non-directory inode rows audited */
+    uint64_t nlink_missing;    /* fan-in < nlink: a name is missing */
+    uint64_t nlink_stale;      /* fan-in > nlink: a stale/aliased dirent */
+    uint64_t nlink_dead;       /* a name whose inode row is not live */
+    uint64_t nlink_orphans;    /* live rows no name resolves to: reported,
+                                 * NOT damage (vol_v3_nlink_audit) */
+    uint64_t nlink_faults;     /* offending inodes (sum, not per name) */
+    int      nlink_bad;        /* 1 = the accounting does not balance */
 } invfs_fsck_report;
 int vol_fsck_scan(invfs_volume *v, invfs_fsck_report *rep, int fix);
 int  vol_map(invfs_volume *v, uint64_t inode, uint64_t lba, uint64_t pba, uint32_t length);
@@ -382,6 +397,49 @@ int vol_v3_name_of(invfs_volume *v, uint64_t inode_id,
  * found, -1 error (too deep/cyclic/buffer too small). */
 int vol_v3_path_of(invfs_volume *v, uint64_t inode_id, char *buf,
                    size_t cap);
+
+/* ---- WP118: nlink vs dirent fan-in accounting --------------------------
+ * For every live inode, the number of NAMES that resolve to it (its
+ * fan-in) must equal its nlink. Hardlinks are why: `ln a b` puts two
+ * dirents on one id and bumps nlink to 2, so "inode ids must be unique"
+ * is the wrong invariant -- it false-positives on every correct volume
+ * that hardlinks and still misses the corruption that actually loses
+ * data (two names landing on one id whose nlink was never bumped).
+ *
+ *   fanin == nlink   correct
+ *   fanin <  nlink   missing_names: a name is gone
+ *   fanin >  nlink   stale_dirents: a name the row does not account for
+ *
+ * Directories (POSIX nlink 2) and engine-internal 0x01 owner entries are
+ * not audited; see the implementation comment for why. `names` is what the
+ * ordinary namespace walk reaches, so it is directly comparable with what
+ * invf-verify --deep walks.
+ *
+ * Returns 0 = audit completed (read *mismatch*), -1 = the walk failed. */
+#define INVFS_NLINK_FAULT_MAX 16
+typedef struct {
+    uint64_t id;
+    uint32_t nlink;
+    uint32_t fanin;
+    const char *reason;   /* "stale-dirent" | "missing-name" | "dead" */
+    char     name[192];   /* one name that resolves to the id */
+} invfs_nlink_fault;
+
+typedef struct {
+    uint64_t names;          /* user names the walk reached */
+    uint64_t inodes;         /* live non-directory inode rows audited */
+    uint64_t missing_names;  /* sum of (nlink - fanin) over offenders */
+    uint64_t stale_dirents;  /* sum of (fanin - nlink) over offenders */
+    uint64_t dead_names;     /* names whose inode row is not live */
+    uint64_t orphan_rows;    /* live rows NO name resolves to (reported,
+                             * non-fatal: see the implementation comment) */
+    uint64_t nfault;         /* faults stored in fault[] (< MAX) */
+    uint64_t nfault_total;   /* faults found */
+    int      mismatch;       /* 1 = the accounting does not balance */
+    invfs_nlink_fault fault[INVFS_NLINK_FAULT_MAX];
+} invfs_nlink_audit;
+
+int vol_v3_nlink_audit(invfs_volume *v, invfs_nlink_audit *out);
 
 /* ---- WP-M14: v3 fold (merge delta into base, atomic publish, reset) --
  * Fold applies every live delta record to a COW copy of the base B+-tree,

@@ -1320,6 +1320,90 @@ static int fsck_v3_repair(invfs_volume *v, invfs_fsck_report *rep,
     return 0;
 }
 
+/* WP118: run the nlink/fan-in audit and turn it into the report + the
+ * operator-facing lines. Every offender is named (up to
+ * INVFS_NLINK_FAULT_MAX of them) with its inode id, its nlink, how many
+ * names actually resolve to it, and one of those names -- the volume
+ * cannot say WHICH name is the intruder (that is a judgement about
+ * history, not a fact in the volume), so it says what it knows instead.
+ * A mismatch is damage: it sets v3_damaged, so the verdict is DAMAGED and
+ * the exit code is 3, exactly as for every other finding here. */
+static void fsck_v3_nlink_report(invfs_volume *v, invfs_fsck_report *rep)
+{
+    invfs_nlink_audit a;
+    uint64_t i;
+
+    if (vol_v3_nlink_audit(v, &a) != 0) {
+        fsck_v3_note(rep, "the nlink/fan-in accounting could not be completed "
+                          "(the namespace walk failed); the pass below is "
+                          "partial");
+        return;
+    }
+    rep->nlink_names = a.names;
+    rep->nlink_inodes = a.inodes;
+    rep->nlink_missing = a.missing_names;
+    rep->nlink_stale = a.stale_dirents;
+    rep->nlink_dead = a.dead_names;
+    rep->nlink_orphans = a.orphan_rows;
+    rep->nlink_faults = a.nfault_total;
+    rep->nlink_bad = a.mismatch;
+    if (a.orphan_rows) {
+        /* not damage (see vol_v3_nlink_audit): a crash between the row and
+         * its dirent leaves a row nobody names, and no repair removes it. */
+        fprintf(stderr, "fsck(v3): nlink/fan-in: %llu live inode(s) have NO "
+                        "directory entry naming them (orphan rows). Not "
+                        "counted as damage: the v3 write order is row then "
+                        "dirent, so a crash between the two leaves one, and "
+                        "-f cannot remove it. The volume lists the files it "
+                        "has; these rows are unreachable.\n",
+                (unsigned long long)a.orphan_rows);
+    }
+    if (!a.mismatch)
+        return;
+
+    rep->v3_damaged = 1;
+    for (i = 0; i < a.nfault; i++) {
+        const invfs_nlink_fault *f = &a.fault[i];
+        const char *what = !strcmp(f->reason, "missing-name")
+                         ? "a name is MISSING (nlink counts links no "
+                           "directory entry accounts for)"
+                         : !strcmp(f->reason, "dead")
+                         ? "a name points at an inode row that is not live"
+                         : "STALE DIRENT (more names resolve to this inode "
+                           "than its nlink accounts for -- a name landed on "
+                           "an inode it does not belong to, and the content "
+                           "under the older name is gone)";
+        fprintf(stderr, "fsck(v3): nlink/fan-in: inode %llu (%s): nlink %u, "
+                        "%u name(s) resolve to it -- %s%s%s\n",
+                (unsigned long long)f->id, f->name[0] ? f->name : "?",
+                f->nlink, f->fanin, what,
+                a.nfault_total > a.nfault ? " [list truncated]" : "", "");
+    }
+    if (a.missing_names)
+        fprintf(stderr, "fsck(v3): nlink/fan-in: %llu name(s) missing -- the "
+                        "inode rows claim %llu more link(s) than the "
+                        "directory tree has entries for\n",
+                (unsigned long long)a.missing_names,
+                (unsigned long long)a.missing_names);
+    if (a.stale_dirents)
+        fprintf(stderr, "fsck(v3): nlink/fan-in: %llu stale dirent(s) -- "
+                        "directory entries resolve to inodes whose rows do "
+                        "not account for them; this is the shape of the "
+                        "WP111b data loss (one name's content replaced by "
+                        "another's)\n",
+                (unsigned long long)a.stale_dirents);
+    if (a.dead_names)
+        fprintf(stderr, "fsck(v3): nlink/fan-in: %llu name(s) point at an "
+                        "inode row that is not live\n",
+                (unsigned long long)a.dead_names);
+    fprintf(stderr, "fsck(v3): nlink/fan-in: %llu name(s) over %llu live "
+                    "inode(s); %llu inode(s) do not balance. NOT REPAIRABLE "
+                    "by -f: which of the colliding names is the intruder is "
+                    "not decidable from the volume.\n",
+            (unsigned long long)a.names, (unsigned long long)a.inodes,
+            (unsigned long long)a.nfault_total);
+}
+
 static int fsck_v3_scan(invfs_volume *v, invfs_fsck_report *rep, int fix)
 {
     invfs_blkptr root;
@@ -1452,6 +1536,26 @@ static int fsck_v3_scan(invfs_volume *v, invfs_fsck_report *rep, int fix)
      * and btree_reclaim (which could mark it) frees pages, which is out of
      * scope. TODO(WP-M4): full reachable-set/bitmap cross-check. */
     fsck_v3_bitmap_check(v, rep, root.pba);
+
+    /* WP118: nlink vs dirent fan-in. Every check above looks at the base
+     * tree, the pages and the bitmap; none of them compares the NAMES the
+     * volume claims to have against the link counts its inode rows carry, so
+     * a volume where two names share one inode -- silently replacing one
+     * file's content with another's, the WP111b data loss -- passed every one
+     * of them. fsck_v3_nlink_report names the inode and the discrepancy.
+     *
+     * Skipped when the tree itself is damaged: a name inside a quarantined
+     * key range does not resolve, so the fan-in side of every comparison
+     * would be short by exactly the lost keys and each would read as a
+     * missing name. The damage is already reported above; a namespace audit
+     * on top of it would be noise, and a wrong one. */
+    if (q.n || q.qfull) {
+        fprintf(stderr, "fsck(v3): nlink/fan-in check SKIPPED: the base tree "
+                        "is damaged, so a name that does not resolve cannot be "
+                        "told from a lost one\n");
+    } else {
+        fsck_v3_nlink_report(v, rep);
+    }
 
     if (!fix || !q.n)
         return 0;

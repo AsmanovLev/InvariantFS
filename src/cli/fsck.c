@@ -189,6 +189,35 @@ int main(int argc, char **argv)
             if (rep.v3_reachable_free)
                 printf("  reachable-but-free pages: %llu (bitmap divergence)\n",
                        (unsigned long long)rep.v3_reachable_free);
+            /* WP118: the namespace accounting. Every line above describes the
+             * metadata; this one describes the NAMES -- the check that puts
+             * the number of directory entries against the link counts the
+             * inode rows claim, which is the only place a volume with two
+             * names on one inode (WP111b: one file's content replaced by
+             * another's) can be caught. Reported, never repaired: which of
+             * the colliding names is the intruder is not decidable from the
+             * volume. */
+            printf("  names/inodes:  %llu name(s) over %llu live inode(s)\n",
+                   (unsigned long long)rep.nlink_names,
+                   (unsigned long long)rep.nlink_inodes);
+            if (rep.nlink_bad) {
+                printf("  nlink/fan-in:  %llu inode(s) DO NOT BALANCE -- "
+                       "%llu missing name(s), %llu stale dirent(s), %llu "
+                       "name(s) on a dead row (each offender named above)\n",
+                       (unsigned long long)rep.nlink_faults,
+                       (unsigned long long)rep.nlink_missing,
+                       (unsigned long long)rep.nlink_stale,
+                       (unsigned long long)rep.nlink_dead);
+            }
+            if (rep.nlink_orphans)
+                printf("  orphan rows:   %llu live inode(s) that no "
+                       "directory entry names (reported; not damage, not "
+                       "repairable)\n",
+                       (unsigned long long)rep.nlink_orphans);
+            if (!rep.nlink_bad)
+                printf("  nlink/fan-in:  ok (%llu live inode(s), each with "
+                       "exactly as many names as its nlink)\n",
+                       (unsigned long long)rep.nlink_inodes);
             if (spt0_info(v, NULL))
                 printf("  save point:   %s\n",
                        rep.v3_savepoint_bad

@@ -4174,6 +4174,297 @@ int vol_v3_iter_live_inodes(invfs_volume *v,
 }
 
 /* ------------------------------------------------------------------ */
+/* WP118: nlink vs dirent fan-in                                       */
+/* ------------------------------------------------------------------ */
+
+/* The invariant: for every live inode, the number of directory entries
+ * (names) that RESOLVE to it -- its fan-in -- equals its nlink. Hardlinks
+ * are why this is the right invariant and "inode ids must be unique" is the
+ * wrong one: `ln a b` puts two dirents on ONE id and bumps nlink to 2, so a
+ * uniqueness check false-positives on every correct volume that uses
+ * hardlinks while still missing the corruption that actually happens -- two
+ * names landing on one id whose nlink was never bumped, which silently
+ * replaces one file's content with another's (WP111b, commit 1771a0d: a
+ * 7-name volume that reported "5 files ok, 0 corrupt" and fsck OK).
+ *
+ *   fanin == nlink   correct
+ *   fanin <  nlink   a name is MISSING: the row claims links no dirent
+ *                    accounts for (a lost name, or a count that was never
+ *                    decremented)
+ *   fanin >  nlink   a STALE dirent: more names resolve to the id than the
+ *                    row claims -- the aliasing corruption
+ *
+ * One case is counted but NOT fatal: a live row that NO name resolves to
+ * (fan-in 0, nlink > 0) is an orphan row. The v3 write order is row first,
+ * dirent second (vol_v3_create_content_node), so a crash between the two
+ * legitimately leaves a row nobody names -- and nothing in the repair path
+ * removes it, so making it fatal would leave a volume permanently DAMAGED
+ * over a state fsck cannot fix. It is reported, loudly, on its own line;
+ * the named-inode accounting above is what the exit code follows.
+ *
+ * Deliberately NOT audited:
+ *   - directories: their nlink is the POSIX "2" (itself + parent), not a
+ *     count of names, so fan-in cannot be compared against it;
+ *   - engine-internal owners (names starting 0x01: the tz batch owner, the
+ *     seal parity owners, the retention registry): their link counts are the
+ *     engine's own bookkeeping, not a namespace invariant;
+ *   - the root inode, which has no name at all.
+ *
+ * `names` counts what vol_v3_walk -- the walk the read/verify path itself
+ * uses -- reaches, so a name whose inode row does not resolve is outside
+ * both sides of the comparison (that loss is reported by the base-page
+ * damage path, which owns it).
+ *
+ * Cost: one btree range scan of the inode keyspace, one delta pass (both
+ * O(pages)) and one hierarchical namespace walk. Deliberately NOT
+ * vol_v3_iter_live_inodes: that resolves a name per inode through a full
+ * reverse dirent walk (O(depth x live) each -- the WP117 quadratic), and
+ * this check runs inside fsck, where a large volume must still finish. */
+
+typedef struct {
+    uint64_t id;
+    uint32_t nlink;      /* 0 = the row was not seen (name-only entry) */
+    uint32_t fanin;
+    char     name[192];  /* one name that resolves to it */
+} nlink_ent;
+
+typedef struct {
+    nlink_ent *tab;
+    size_t cap, n;       /* cap is a power of two; id 0 marks an empty slot */
+    invfs_nlink_audit *a;
+    invfs_volume *v;
+    int oom;
+} nlink_ctx;
+
+static int nlink_grow(nlink_ctx *c)
+{
+    size_t nc = c->cap ? c->cap * 2 : 256;
+    nlink_ent *nt = (nlink_ent *)calloc(nc, sizeof *nt);
+    size_t i;
+    if (!nt) { c->oom = 1; return -1; }
+    for (i = 0; i < c->cap; i++) {
+        if (c->tab[i].id) {
+            size_t h = (size_t)(c->tab[i].id ^ (c->tab[i].id >> 32)) & (nc - 1);
+            while (nt[h].id)
+                h = (h + 1) & (nc - 1);
+            nt[h] = c->tab[i];
+        }
+    }
+    free(c->tab);
+    c->tab = nt;
+    c->cap = nc;
+    return 0;
+}
+
+/* find-or-insert; *fresh is set when this call created the entry. NULL on
+ * OOM (c->oom is then set). */
+static nlink_ent *nlink_slot(nlink_ctx *c, uint64_t id, int *fresh)
+{
+    size_t mask, h;
+    if (fresh)
+        *fresh = 0;
+    if (!c->cap || (c->n + 1) * 2 >= c->cap) {
+        if (nlink_grow(c) != 0)
+            return NULL;
+    }
+    mask = c->cap - 1;
+    h = (size_t)(id ^ (id >> 32)) & mask;
+    while (c->tab[h].id) {
+        if (c->tab[h].id == id)
+            return &c->tab[h];
+        h = (h + 1) & mask;
+    }
+    c->tab[h].id = id;
+    c->n++;
+    if (fresh)
+        *fresh = 1;
+    return &c->tab[h];
+}
+
+static void nlink_fault(invfs_nlink_audit *a, const char *what,
+                        uint64_t id, uint32_t nlink, uint32_t fanin,
+                        const char *name)
+{
+    if (a->nfault < INVFS_NLINK_FAULT_MAX) {
+        invfs_nlink_fault *f = &a->fault[a->nfault++];
+        f->id = id;
+        f->nlink = nlink;
+        f->fanin = fanin;
+        f->reason = what;
+        snprintf(f->name, sizeof f->name, "%s", name ? name : "");
+    }
+    a->nfault_total++;
+}
+
+/* pass 1: every live, non-directory inode row. The base tree first, then
+ * the delta for rows created since the last fold. An 8-byte key is an inode
+ * row: dirent keys are >= 10 bytes and carry a parent prefix, xattr keys
+ * start 0x03, recipe keys 0x04 (invarifs.h). */
+static int nlink_row_cb(void *ctx_, bt_key k, bt_val val)
+{
+    nlink_ctx *c = (nlink_ctx *)ctx_;
+    uint64_t id = 0;
+    invfs_v3_inode in;
+    nlink_ent *e;
+    int fresh;
+
+    (void)val;
+    if (k.n != 8)
+        return 0;
+    {
+        int i;
+        for (i = 0; i < 8; i++)
+            id = (id << 8) | k.p[i];
+    }
+    if (id == INVFS_V3_ROOT_INO)
+        return 0;
+    /* vol_v3_inode_get consults the delta overlay, so a row the delta
+     * deleted reads back absent and a row the delta replaced reads back
+     * current -- one truth for both passes. */
+    if (vol_v3_inode_get(c->v, id, &in) != 1)
+        return 0;
+    if (in.type == INVFS_ITYP_DIR)
+        return 0;                       /* dir nlink is not a name count */
+    if (in.nlink == 0 || in.nlink == 0xFFFFFFFFu)
+        return 0;                       /* malformed / wrap sentinel */
+    e = nlink_slot(c, id, &fresh);
+    if (!e)
+        return -1;
+    e->nlink = in.nlink;
+    /* an id the delta shadows is visited by BOTH passes (base key, delta
+     * key); count the row once. The nlink it carries is the same either
+     * way -- vol_v3_inode_get resolves the overlay -- so re-reading it is
+     * harmless; counting it twice would not be. */
+    if (fresh)
+        c->a->inodes++;
+    return 0;
+}
+
+static int nlink_row_delta_cb(void *ctx_, const uint8_t *key, uint16_t klen,
+                              const delta_ref *ref)
+{
+    (void)ref;
+    if (klen != 8)
+        return 0;
+    return nlink_row_cb(ctx_, (bt_key){key, klen}, (bt_val){NULL, 0});
+}
+
+/* pass 2: every name, hierarchically. */
+static int nlink_name_cb(void *ctx_, const char *path, uint64_t ino,
+                        uint32_t type, uint64_t size, int64_t mtime)
+{
+    nlink_ctx *c = (nlink_ctx *)ctx_;
+    nlink_ent *e;
+    int fresh;
+
+    (void)size; (void)mtime;
+    if (!path || !path[0])
+        return 0;
+    if ((unsigned char)path[0] == 0x01)
+        return 0;                       /* engine-internal owner entry */
+    c->a->names++;
+    if (type == INVFS_ITYP_DIR)
+        return 0;                       /* see the header comment */
+    /* defensive: a row the pass-1 filter would reject must not be counted as
+     * a stale dirent. (The walk already skips names whose row does not
+     * resolve at all, so this is belt and braces.) */
+    {
+        invfs_v3_inode in;
+        if (vol_v3_inode_get(c->v, ino, &in) == 1 &&
+            (in.nlink == 0 || in.nlink == 0xFFFFFFFFu))
+            return 0;
+    }
+    e = nlink_slot(c, ino, &fresh);
+    if (!e)
+        return -1;
+    if (fresh || !e->name[0])
+        snprintf(e->name, sizeof e->name, "%s", path);
+    e->fanin++;
+    return 0;
+}
+
+int vol_v3_nlink_audit(invfs_volume *v, invfs_nlink_audit *out)
+{
+    nlink_ctx c;
+    invfs_blkptr root;
+    uint8_t lo[8], page[INVFS_BLOCK_SIZE];
+    size_t i;
+    int rc;
+
+    if (!v || !out)
+        return -1;
+    memset(out, 0, sizeof *out);
+    if (v3_ready(v) != 0)
+        return -1;
+
+    memset(&c, 0, sizeof c);
+    c.a = out;
+    c.v = v;
+
+    memset(&root, 0, sizeof root);
+    v3_ino_key(INVFS_V3_ROOT_INO, lo);
+    rc = 0;
+    if (v3_base_root(v, &root) == 0 && root.pba &&
+        mbuf_read(v, root.pba, page) == 0) {
+        /* the root page's level decides the blkptr flags btree_scan wants
+         * (the same pairing spt0_tree_ok / vol_v3_iter_inodes_at build) */
+        mbuf_ptr_set(&root, root.pba, page,
+                     mbuf_page_chdr(page)->level == INVFS_PAGE_LEVEL_LEAF
+                     ? INVFS_BP_ROOT | INVFS_BP_LEAF
+                     : INVFS_BP_ROOT | INVFS_BP_INTERNAL);
+        rc = btree_scan(v, root, (bt_key){lo, 8}, (bt_key){NULL, 0},
+                        nlink_row_cb, &c);
+    }
+    /* The delta pass is NOT conditional on the base tree: a volume whose
+     * rows have not been folded yet has an EMPTY base root slot and every
+     * inode row in the delta, which is the state a freshly mounted volume
+     * is in most of the time. Skipping the delta with the base scan would
+     * leave every name pointing at a row pass 1 never saw -- the check
+     * would then "detect" the whole namespace as dead. */
+    if (rc == 0)
+        rc = vol_delta_range(v, lo, 8, NULL, 0, nlink_row_delta_cb, &c);
+    if (rc == 0)
+        rc = vol_v3_walk(v, nlink_name_cb, &c);
+    if (c.oom)
+        rc = -1;
+
+    /* verdict: every entry whose fan-in does not match its nlink */
+    for (i = 0; i < c.cap; i++) {
+        nlink_ent *e = &c.tab[i];
+        if (!e->id)
+            continue;
+        if (e->nlink == 0) {
+            /* a name resolved here but pass 1 never saw a live row for it */
+            out->dead_names++;
+            nlink_fault(out, "dead", e->id, 0, e->fanin, e->name);
+            continue;
+        }
+        if (e->fanin == 0) {
+            /* a live row no directory entry names: reported, not fatal */
+            out->orphan_rows++;
+            nlink_fault(out, "orphan-row", e->id, e->nlink, 0, e->name);
+            continue;
+        }
+        if (e->fanin == e->nlink)
+            continue;
+        if (e->fanin > e->nlink) {
+            out->stale_dirents += e->fanin - e->nlink;
+            nlink_fault(out, "stale-dirent", e->id, e->nlink, e->fanin,
+                        e->name);
+        } else {
+            out->missing_names += e->nlink - e->fanin;
+            nlink_fault(out, "missing-name", e->id, e->nlink, e->fanin,
+                        e->name);
+        }
+    }
+    if (out->stale_dirents || out->missing_names || out->dead_names)
+        out->mismatch = 1;
+
+    free(c.tab);
+    return rc;
+}
+
+/* ------------------------------------------------------------------ */
 /* WP96: live-set iteration at an ARBITRARY save-point generation       */
 /* ------------------------------------------------------------------ */
 

@@ -13,6 +13,13 @@
 #   - bad pages / torn slots:   nothing in it is unreadable or ambiguous
 #   - cycles/shared:            the tree is not cyclic or over-shared
 #   - reachable-but-free pages: allocator cross-check (one direction)
+#   - nlink/fan-in:             the namespace accounting (WP118): every live
+#                               inode has exactly as many names resolving to
+#                               it as its nlink. It is the one check a volume
+#                               with two names on one inode cannot pass
+#                               (WP111b) and the one a volume full of
+#                               hardlinks passes, so it belongs in the gate
+#                               every suite already uses.
 #   - ^OK:                      the scan found nothing at all
 # The v3 scan checks allocated-vs-reachable in ONE direction only (a reachable
 # page must be allocated). The other direction -- an allocated page nothing
@@ -36,6 +43,7 @@ fsck_clean() {
     if grep -q "format:       v3" <<<"$body"; then
         grep -q "bad pages:    0" <<<"$body" &&
         grep -q "cycles/shared: 0" <<<"$body" &&
+        grep -q "nlink/fan-in:  ok" <<<"$body" &&
         grep -q "^OK$" <<<"$body"
     else
         grep -q "orphans:      0" <<<"$body" &&
