@@ -77,7 +77,13 @@ Files:
 
 7. Update `tools/invf-rollback.c` — add v3 path that calls `vol_spt0_restore`.
 
-8. Update `tools/invf-rollback.1` man page if applicable.
+8. Update the `invf-rollback.8` man page under `packaging/man/` (and its `ru`
+   translation) if applicable. **This was never done** — as of WP102 the page
+   still describes the retired v2 CKP0 checkpoint ("undo the last sweep from
+   its checkpoint", "decapitates the append-only inode area", L2P reconcile)
+   and never mentions SPT0 save points, which is the v3 behaviour AGENTS.md
+   §2.6 documents. No man page was ever placed under `tools/`; man pages live
+   under `packaging/man/` and install as section 8. Worth its own WP.
 
 ## Validation
 

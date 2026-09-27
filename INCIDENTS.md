@@ -1,5 +1,18 @@
 # InvariantFS Incidents & Fixes
 
+> **A note on the v2-era suites named below.** Several incidents cite e2e
+> suites that no longer exist — `test-mapper-crash.sh`,
+> `test-meta-extent-walk.sh`, `test-sweep-mapper.sh` and their siblings. They
+> were deleted deliberately in `4954d9b` (WP-M21, "legacy deletion of v2
+> metadata machinery") because they exercised the v2 mapper / CKP0 metadata,
+> not because their coverage was dropped by accident. This file is a record
+> of what happened, so those names stay; they are written as bare script
+> names rather than `tools/` paths to mark them as historical. To read one:
+> `git show 4954d9b^:tools/<name>`. Per AGENTS.md §1.7 the shipped commit is
+> the design rationale, and `tools/check-repo-hygiene.sh` fails the build on
+> a path that cannot be pointed at in the tree — a name you cannot follow is
+> rot whether or not it once existed.
+
 ## WP71-A — Plugin EXTRACT could not name a member (wrong operand order)
 
 **Date:** Sep 24, 2026  
@@ -37,7 +50,11 @@ CLI's output) is the regression gate.
 - `rawdisk`/`qcow2`/`vdi`/`ext4fs` round trips bit-exact through the plugin ABI
   and identical to the CLI, member for member
 - `tools/plugin-daemon-smoke.sh` drives the same cycle through the real daemon
-- See `impl_docs/WP71-ivpack-all-packs.md`
+- The shipped design rationale for the plugin architecture is
+  `docs/adr/ADR-007-plugin-architecture-ivpack.md`. The WP71 work package
+  itself was a scratchpad and was deleted with the rest of `impl_docs/WP*.md`
+  (AGENTS.md §1.7); this incident's fix and that rationale are both in
+  `2a34cd4` — `git show 2a34cd4`
 
 ---
 
@@ -656,7 +673,8 @@ Verified: `make test` 4722/0; `test-sweep-mapper` 6/0 (fsck bad records 0);
 `test-binbatch`, `test-textzone` PASS; `test-meta-extent-walk` 6/0;
 `invf-fsck` on the swept bigvol fixture: bad records 0.
 
-Until then `tools/test-sweep-mapper.sh` is RED on the fsck leg (bad
+Until then the v2-era `test-sweep-mapper.sh` (deleted in `4954d9b`, see the
+note at the top) is RED on the fsck leg (bad
 records: 2) — intentionally, as the first regression signal for WP52.
 
 ---
@@ -700,7 +718,7 @@ flush-safe owner append is WP52.
   no warning, exit 0, `invf-fsck` CLEAN (`bad records: 0`), `--realize`
   frees the retained ranges, `invf-rollback` bit-exact.
 - `make test`: 4722 checks, 0 failures.
-- `tools/test-meta-extent-walk.sh`: 6/0.
+- `test-meta-extent-walk.sh`: 6/0 (v2-era suite, deleted in `4954d9b`).
 - `test-rollback.sh` / `test-sweepboot.sh` remain RED on `main` (WP52
   batch deferral; pre-existing seal parity mismatch) — unchanged here.
 
@@ -710,8 +728,9 @@ flush-safe owner append is WP52.
 
 **Date:** Sep 19, 2026
 **Severity:** High (fresh red signal after WP52)
-**Impact:** On a small two-device mapper fixture, `tools/test-mapper-crash.sh`
-leg 4 (a full offline sweep) fails:
+**Impact:** On a small two-device mapper fixture, the v2-era
+`test-mapper-crash.sh` (deleted in `4954d9b`) leg 4 (a full offline sweep)
+fails:
 ```
 tz: commit failed for d03/f00001
 tz: commit failed for d03/f00029
@@ -720,14 +739,23 @@ sweep done: swept=0 skipped=49 failed=1        -> sweep rc=1
 ```
 and afterwards the mapper table carries **1 duplicate pba** while
 `invf-sweep --realize` leaves **457 orphan blocks** (strict fsck-clean SKIPped).
-`tools/test-sweep-mapper.sh` still passes 6/0 on the 30k fixture, so the
+The v2-era `test-sweep-mapper.sh` (deleted in `4954d9b`) still passes 6/0 on
+the 30k fixture, so the
 failure is content/fixture-dependent — likely in the text/binary batch commit
 path re-enabled by WP52 interacting with the new owner-extent allocation
 (duplicate pba) and the checkpoint retained-range release (realize leak).
 
-Open. Needs: reproduce with the crash-suite fixture, fix `tz_commit_member`/
-batch flush failure, ensure owner-extent allocation cannot duplicate a pba,
-and make `--realize` free the checkpoint's retained ranges (ties to WP53).
+**Status: Open, and no longer reproducible as written.** Neither suite that
+observed it exists any more — both were removed with the v2 metadata machinery
+in `4954d9b`, so there is no fixture left to re-run this against. What it
+needed, as recorded at the time: reproduce with the crash-suite fixture, fix
+`tz_commit_member` / batch flush failure, ensure owner-extent allocation
+cannot duplicate a pba, and make `--realize` free the checkpoint's retained
+ranges (ties to WP53). That is a v2-era record, not a live work order;
+re-observing it needs a v3 equivalent, which does not exist yet.
+`tz_commit_member` itself does survive, at `src/core/vol_textzone.c:447`, so
+the batch-commit path it names is still live code. Nothing here records the
+defect as fixed.
 
 ---
 
@@ -1043,4 +1071,8 @@ across the two trees, and the three that differ are `invf-sweep.o` (stale),
 - `tools/run-e2e.sh tools/test-qcow2.sh` → `QCOW2 CONTAINERPACK E2E: PASS`,
   migration leg included, twice. `test-ivpacks.sh`, `test-writepath.sh`:
   PASS. `make clean && make`: warning-free.
-- See `impl_docs/WP89-dedupe-batch-regression.md`.
+- The fix shipped as `749f31a` — `git show 749f31a`. The WP89 work package
+  was a scratchpad, deleted with the rest of `impl_docs/WP*.md`
+  (AGENTS.md §1.7); the shipped commit is the rationale. There is no ADR:
+  this was a bug in the B+ tree splice, not a design decision. The page
+  geometry it touches is `docs/adr/ADR-005-asymmetric-btree-page-sizing.md`.

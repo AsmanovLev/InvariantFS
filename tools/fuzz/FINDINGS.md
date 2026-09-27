@@ -46,9 +46,13 @@ isolation to confirm.
 - **Expected**: any structural `err()` forces a nonzero exit with or
   without --deep. A CI gating on `invf-verify --deep` exit status would
   pass a structurally destroyed volume.
-- **Suspected layer**: tools-only — `src/verify.c`: the shallow path ends
-  `return errors ? 1 : 0;` but the `--deep` branch ends
+- **Suspected layer**: tools-only — `src/cli/verify.c` (pre-fix the file
+  lived under the old `src-extracted/VFS/src/` layout; `src/` was later
+  restructured by pure `git mv`, `1e66eba` then `6af6845`): the shallow path
+  ends `return errors ? 1 : 0;` but the `--deep` branch ends
   `return (bad || parity_bad) ? 1 : 0;`, dropping `errors`.
+  **Fixed in `95fb5b4`**, the same commit that added this file; the deep
+  branch now reads `return (bad || parity_bad || errors) ? 1 : 0;`.
 - **Related observation (same exit-code hole, informational)**: when the
   *head* of the append-only inode area is destroyed (zero4k on its first
   block, or flips that break an early record), the scan yields zero live
@@ -71,9 +75,14 @@ isolation to confirm.
   → error message + nonzero exit. The engine side of the same condition
   is correct: an image-side write under EDQUOT fails loudly
   (`[create] write fail seg 0 …`, rc=1) and fsck stays clean after.
-- **Suspected layer**: tools — `src/cat.c:85-86` (`fwrite` + `fclose`
-  unchecked; the stdout branch likewise), same pattern at
-  `src/zip.c:200-201`.
+- **Suspected layer**: tools — `src/cli/cat.c` (`fwrite` + `fclose`
+  unchecked; the stdout branch likewise), same pattern in
+  `src/recipes/zip.c`. Both files were at the top of the old
+  `src-extracted/VFS/src/` layout when this wave ran; `src/` was later
+  restructured by pure `git mv` (`1e66eba`, then `6af6845`), so the
+  `file:line` anchors this report originally carried no longer address the
+  same statements — the current `fwrite`/`fclose` pair is at
+  `src/cli/cat.c:115`.
 
 ## Clean bills (explicitly verified)
 - Corrupt data is never served: across 1100 mutated images, every

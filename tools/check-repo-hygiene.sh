@@ -77,15 +77,22 @@ while IFS= read -r -d '' rec; do
 done < <(git ls-files -s -z)
 
 # 3. doc rot: markdown that cites a repo path which no longer exists.
-#    Scoped to reference docs. INCIDENTS.md / CHANGELOG.md are append-only
-#    records of the past: citing a test script that existed then is accurate,
-#    not rot, so they are deliberately not checked.
+#    Scoped to every tracked markdown, with the exceptions noted at the file
+#    list below. Historical trackers (INCIDENTS.md, CHANGELOG.md) ARE checked:
+#    a deleted path there is not rot per se, but a pointer that cannot be
+#    followed is rot -- the fix is to reword the pointer (name the commit, or
+#    say the file was deleted in N), not to delete the incident.
 #    Backticked `path/like/this` tokens and bare md links are checked; this is
 #    what stops a deleted subsystem from leaving behind a doc that reads like
 #    a live contract.
 while IFS= read -r -d '' md; do
-    # every repo-ish path mentioned in the doc, backticked or in an md link
-    grep -oE '`[A-Za-z0-9_./-]+(/[A-Za-z0-9_.*-]+)*`' "$md" 2>/dev/null \
+    # every repo-ish path mentioned in the doc, backticked or in an md link.
+    # The char class includes ':' so a `file.c:LINE` / `dir/file.sh:12-30`
+    # citation is captured whole and the :NNN strip below can drop the
+    # anchor. Without ':' the token never matches (the class stops at the
+    # dot, and the closing backtick is not there), so every file:line
+    # citation silently escaped the check.
+    grep -oE '`[A-Za-z0-9_./:-]+(/[A-Za-z0-9_.*:-]+)*`' "$md" 2>/dev/null \
     | tr -d '`' \
     | grep -E '/' \
     | grep -vE '^(/|https?|ftp)://|^/|^[a-z]+:[0-9]|/$|^(bin|src/zstd|src/lz4|src/zlib|var|fs|portage|archival|scripts/kconfig)/' \
@@ -112,7 +119,22 @@ while IFS= read -r -d '' md; do
         printf 'DOCROT %s cites missing %s\n' "$md" "$ref"
         echo "$md" >> "$tmpd/rot"
     done
-done < <(git ls-files -z | grep -zE '^(docs/|impl_docs/)[^/]+\.md$|^(AGENTS|README[^/]*)\.md$')
+#    Scan EVERY tracked markdown, not just docs/ and impl_docs/ top level:
+#    Benchmark.md, CHANGELOG.md, INCIDENTS.md and README-RU.md sit at the
+#    repo root and were previously never checked -- nor, because the old
+#    `[^/]+\.md$` tail also excluded subdirs, were docs/adr/*, docs/guides/*,
+#    docs/architecture/* or impl_docs/tasks/*.
+#    Excluded, because their paths are relative to their own root (or to a
+#    different repo) and every hit in them is a false positive by
+#    construction:
+#      src/{zstd,lz4,zlib,busybox-src}*/  vendored third-party trees
+#      tools/busybox-src/                 submodule (gitlink; never scanned)
+#      docs/benchmarks/corpus.md          cites megapolos-installer/.../x.qcow2,
+#                                         a path in the *corpus* repo, not here
+#    docs/benchmarks/QCOW2-COMPRESSION-BENCHMARK.md is NOT excluded and is
+#    clean; the exclusion is per-file precisely so that stays true.
+done < <(git ls-files -z '*.md' \
+    | grep -zvE '^(src/(zstd|lz4|zlib|busybox-src)[^/]*/|tools/busybox-src/|docs/benchmarks/corpus\.md$)')
 if [ -s "$tmpd/rot" ]; then
     viol=1
 fi
