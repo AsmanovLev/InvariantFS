@@ -1,0 +1,75 @@
+# codecpack vendored-copy / registry provenance record   (WP112)
+#
+# tools/codecpacks/<name>.codecpack/ is this repo's working copy of
+# codecpacks/<name>/<version>/ in the registry repo. This file records, per
+# pack, HOW the two relate, so tools/check-codecpack-sync.sh can tell real
+# drift from the two shapes of difference that are not drift.
+#
+# Read by tools/check-codecpack-sync.sh — keep the two in step.
+#
+# Format:  <pack>  <mode>  <allowlist>  <gen_macro>
+#
+#   mode = mirror       the vendored source must be byte-identical to the
+#                       registry's. Any difference is drift.
+#   mode = fork         the vendored source is intentionally NOT the
+#                       registry's: it must be an engine SUPERSET (every
+#                       registry code line present; engine-only code allowed).
+#   mode = independent  the two are different implementations of the same
+#                       job -- neither contains the other, so no containment
+#                       question is meaningful. The reason is in this file and
+#                       the check prints it on every run.
+#
+#   allowlist  comma-separated engine-parsed manifest keys whose value may
+#              differ from the registry's, each with the reason below.
+#              `-` = nothing is excepted.
+#   gen_macro  the constant in the pack's source that the manifest's
+#              `generation` must equal (`-` if the pack has none). This is
+#              checked on EVERY run, registry or not.
+#
+# WHY THIS FILE EXISTS (tools/check-codecpack-sync.sh, layers A-C): the two
+# repos developed in parallel with nothing cross-checking them, and a
+# manifest bug in the registry (qcow2 `map {in}`, missing `decomp_gen`)
+# shipped unnoticed because the engine e2e never read the registry's copy.
+#
+# PROVENANCE, in one paragraph, from `git log -p -- tools/codecpacks/`:
+# this repo ORIGINATED the packs (26b0d43, 2026-08-26 .. 23f9db4,
+# 2026-09-26) and the registry was seeded from it (2090502, 2026-09-19,
+# "seed codecpack registry", whose diff is 11 packs copied out of this tree
+# — the registry has no commit older than that one). The vendored copies
+# are therefore this repo's development tree, not a third-party import:
+# Makefile:169-173 compiles lib<p>.so from the .c next to the manifest,
+# Makefile:52 keeps /usr/lib/invfs/codecpacks out of `make test`, and
+# Makefile:402 ships the directory in the release tarball.
+
+# --- byte-identical to the registry (jxlest.c, raw_image.py, splt.py) ------
+jxl          mirror  -           -
+raw_image    mirror  -           -
+splt_test    mirror  -           -
+
+# --- engine ahead: the ADR-007 ivpack plugin glue (WP71, 2a34cd4), which
+#     the registry cannot carry (it builds standalone, with no engine
+#     headers: registry tools/build-helpers.sh:47). p7z also carries the
+#     self_path fallback, rawdisk the fork-window init, xfs the estimate
+#     wrapper, ext4fs one memset. ZERO registry-only code lines in all seven.
+ext4fs       fork    -           -
+fatfs        fork    -           -
+ntfs         fork    -           -
+p7z          fork    -           -
+rawdisk      fork    -           -
+vdi          fork    -           -
+xfs          fork    -           -
+
+# --- qcow2: a real FORK, not staleness. -----------------------------------
+# The engine pack and the registry pack are two different designs:
+#   engine   generation = 2 (manifest:36) / QCOW2_DECOMP_GEN 2u (qcow2.c:1041),
+#            TWO members (diskimg + rankimg), reproduction through the
+#            engine's own src/codecs/deflate_repro.h (qcow2.c:151-154) and
+#            hence PLUGIN_EXTRA_qcow2 on the link line.
+#   registry generation = 3, ONE member, a self-contained QR2 search, no
+#            engine dependency.
+# Dropping the registry's copy in is a REGRESSION, measured: 28 FAILs in
+# tools/test-qcow2.sh ("missing idx 2 rankimg" x11, "strip did not write a
+# Q2R3 recipe" on the compressed fixture). Reconciling the two is a design
+# WP of its own; until then the two generation numbers MUST NOT be made to
+# agree, which is why they are excepted here instead of "fixed".
+qcow2        independent  generation,pack_version  QCOW2_DECOMP_GEN

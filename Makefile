@@ -328,10 +328,23 @@ test: $(OUT)/invf-arctest $(OUT)/invf-blkio_test $(OUT)/invf-codec_test \
 	$(TESTENV) $(TESTISO) bash tools/test-sweep-ui.sh
 	$(TESTENV) $(TESTISO) bash tools/lint-test-heredocs.sh
 	$(TESTENV) bash tools/check-repo-hygiene.sh
+	@# WP112: the vendored codecpacks (tools/codecpacks/) and the registry
+	@# repo's codecpacks/<name>/<version>/ are two copies of the same packs
+	@# with nothing cross-checking them; a manifest bug in the registry
+	@# (qcow2 `map {in}`, no `decomp_gen`) shipped unnoticed for exactly
+	@# that reason. This line is what makes the next one loud. A host with
+	@# no registry checkout gets a loud SKIP on stderr, not a silent pass;
+	@# `make check-codecpacks` is the strict form.
+	$(TESTENV) bash tools/check-codecpack-sync.sh
 
 # repo hygiene is also a standalone gate, for when you do not want a rebuild
 check-hygiene:
 	$(TESTENV) bash tools/check-repo-hygiene.sh
+
+# WP112: vendored-codecpack / registry drift, strict (no registry = fail).
+# Point it at a checkout with INVFS_CODECPACK_REGISTRY=<path>.
+check-codecpacks:
+	INVFS_CODECPACK_STRICT=1 bash tools/check-codecpack-sync.sh
 
 # e2e tier: tmpfs images under /dev/shm; test-jxl needs cjxl/djxl installed
 e2e: all

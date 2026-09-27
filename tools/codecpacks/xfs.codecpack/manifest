@@ -40,5 +40,13 @@ rebuild = bin/xfs rebuild {recipe} {dir} {out}
 # WP16b: the map command makes the pack SEEKABLE (CAP_SEEK): reads splice
 # locally from the recipe + member siblings and never exec the pack.
 map = bin/xfs map {in} {out}
+# Opt into the FS-owned decomposition generation. This pack renders a v1
+# (MRMP) map today, so the stamp is a no-op -- but a pack that emits v2
+# without this key gets a map header whose generation is whatever the
+# pack happened to write, and a later generation bump re-decomposes
+# nothing. The engine only stamps an MRM2 header (src/core/vol_cpack.c,
+# the map-header stamp in the container sweep), so declaring it here is
+# inert for v1 and correct for v2. Matches the registry manifest.
+decomp_gen = 1
 # admission input: sum(member usize) + 64 MiB
 estimate = bin/xfs estimate {in}
