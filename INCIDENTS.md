@@ -1387,3 +1387,84 @@ It needs an owner.
 **Not corruption.** A declined container is stored whole and reads back
 bit-exact; the refusal is a storage-efficiency decision and the sweep commits
 nothing.
+
+## OPEN (WP122) — v3 has no read-only view at a point in time; the mount option that promised one is dead code that always refuses
+
+**Status:** Open. Filed by WP122 (`test-rocp.sh` v2 → `tools/test-imagelock.sh` v3 port), `main` `e3761fb`.
+**Severity:** Medium — a lost capability, not a corruption. Nothing on the v3 write or rollback path misbehaves because of it.
+
+**What is gone.** `test-rocp.sh` was the WP24-lite suite for the v2
+read-only time-travel mount: `vol_open_at(path, ckpt_seq)` with FUSE's
+`-o at_checkpoint[=<seq>]`. It was RED on `main` at leg B and had been for
+some time. The cause is not test rot — the mechanism it tested was retired by
+WP-M21, and the test was asserting a string the engine cannot produce.
+
+**The evidence, in the tree:**
+
+- `src/core/vol_rollback.c:65` — `vol_ckp_begin` is a stub that returns 0
+  ("declined") unconditionally. Its body is one comment and a `return 0`.
+  Nothing arms a CKP0 sweep checkpoint any more.
+- `src/core/vol_rollback.c:75` — `vol_ckp_end` returns 0 blocks retained; the
+  `\x01reten` registry is not written. The sweep's registry write is gated on
+  `!VOLF_V3` anyway (`tools/invf-sweep.c:2085`).
+- `src/core/vol_rollback.c:109` — `ckp_stage_replay`, the function that
+  reconstructed the pre-sweep namespace for a read-only view, is a stub
+  returning `-3`. Its own comment says it was "the open_at path that replayed
+  the staged journal".
+- The only caller of `ckp_stage_replay` is `vol_open_at`
+  (`src/core/volume.c:1511`), and `vol_open_at` first requires `v->ck_present`
+  (`src/core/volume.c:1444-1452`). A v3 volume has no CKP0, so `ck_present` is
+  always 0 and `vol_open_at` always fails with `-11`.
+- The strings the test grepped for, `"checkpoint: #N armed"` and `"N retained
+  blocks held for rollback"`, do not occur anywhere in `src/` or `tools/` except
+  in the test itself. `grep -rn "checkpoint: #" src/ tools/` returns only
+  the old suite's lines 203 and 329 (`git show e3761fb:tools/test-rocp.sh`).
+- `src/core/invarifs.h:410` still defines `INVFS_CKP0_OFF` / `invfs_ckp0` and
+  `src/core/volume.c:1414-1437` still *validates* the descriptor at open — that
+  is the legacy-volume read path, and it is harmless: the result is unused, as
+  `vol_rollback.c:14-19` states.
+
+**So the test was wrong, not the code** (AGENTS.md §1.7), and it was ported
+rather than the feature restored.
+
+**The capability that did not survive the port.** v3 rollback is the SPT0 save
+point (`src/core/vol_spt0.c`), and SPT0 is a **restore**, not a view:
+`spt0_capture` records `{base_root, delta_end}` and `spt0_restore` publishes
+that root and truncates the delta — it is destructive by construction
+(`src/core/vol_spt0.h:63-77`). There is no `spt0_open_view`, no
+read-only handle, nothing that can be opened against a pinned generation
+without consuming it. The `VOLF_READONLY` / `time_travel` machinery
+(`src/core/volume.h:37-39`, `src/core/volume_internal.h:524`,
+`src/core/vol_crash.c:43`) survives and is still compiled, but nothing can
+ever set `time_travel` on a v3 volume.
+
+The operational consequence: **you cannot look at a volume as it was before a
+sweep without destroying the present.** `invf-rollback` is the only verb, it
+is one-shot, and after it the window is gone. "Check whether the last sweep
+mis-clustered my data" is not a question the v3 engine can answer without
+committing to the answer. That is a real regression against v2's guarantee and
+it is why this is filed rather than closed as test rot.
+
+**Dead CLI surface that survives it.** `invf-fuse` still parses
+`-o at_checkpoint` and `-o at_checkpoint=<seq>` (`src/cli/fuse_fs.c:2956-2964`)
+and always fails with `cannot mount at_checkpoint: no live sweep checkpoint`
+(`src/cli/fuse_fs.c:3021-3025`). `packaging/man/invf-fuse.8:58` still
+documents the option as working. A user reading the man page gets a mount
+failure with no indication the feature is retired. Cleaning that up is a
+separate WP (it touches `src/cli/` and the packaging, not `tools/`), so it is
+not bundled here.
+
+**What was done instead of a test that proves nothing.** Leg [V] of
+`test-imagelock.sh` asserts the *refusal* — that `-o at_checkpoint` and
+`-o at_checkpoint=1` mount nothing and say why, and that the refusal names the
+missing checkpoint rather than the flock. That is a real contract: it pins the
+current answer so the option cannot silently drift into looking functional, and
+it will fail loudly if a future WP gives SPT0 a read-only view. The guarantee
+itself is NOT covered by any test, because there is nothing to test.
+
+**Not fixed here.** Giving SPT0 a read-only view is a design change, not a
+test port: it needs a way to open a volume against a pinned generation without
+truncating the delta (an overlay or a second root slot), which touches
+`vol_spt0.c` and the open path. `impl_docs/design-meta-v3.md:253` already
+records the intended shape (`| rollback | coarse CKP0 | single save point |`).
+It needs an owner and a WP.
