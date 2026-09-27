@@ -13,6 +13,64 @@
 > a path that cannot be pointed at in the tree — a name you cannot follow is
 > rot whether or not it once existed.
 
+## UNRESOLVED — `invf-sweep` does not terminate above ~46k live inodes
+
+  **Date:** Sep 27, 2026  
+  **Severity:** High (availability — the sweep never returns)  
+  **Status:** **Unresolved.** Reproduced with a control; loop not yet localised.  
+  **Impact:** Any volume large enough to need a sweep stalls a full core
+  indefinitely and commits nothing. Not corruption — the volume is byte-identical
+  to its pre-sweep state, since the image's mtime never moves.
+
+  ### Symptom
+
+  `invf-import` of a 41,993-file / 1.19 GB Debian tree (a 12-style and a
+  13-style tree combined) returns `rc=0` in 3h29m. The following `invf-sweep`
+  collects 46,245 live inodes of 46,438 walked in 835 ms, prints
+  `[2/7] collect`, and then never returns from `[3/7] transform`.
+
+  Measured over 1h40m of watching:
+
+  | | |
+  |---|---|
+  | `rchar` | 50,536 MB, climbing linearly at ~250 MB/s |
+  | `wchar` | 0.25 MB, never rises |
+  | image mtime | 04:17:29 — unchanged from the instant import returned |
+  | process | 1 thread, 100% CPU, 43 MB RSS |
+
+  45 GB read for a 1.19 GB corpus is ~38x re-read amplification with zero
+  forward progress. 43 MB RSS rules out "accumulate then commit at finalize".
+
+  ### Control
+
+  The same binary, same flags, on the Silesia corpus at 1 GB / 2,450 inodes:
+  three passes, all reaching `[7/7] finalize`. So the trigger is scale, and the
+  threshold lies between **2,450 and 46,245** live inodes. 46,245 is not
+  extreme — it is roughly what a Linux rootfs with a desktop environment looks
+  like.
+
+  ### Not localised
+
+  This host has no `gdb` and no `perf`, and the sweep's only internal
+  instrumentation is the seven stage banners, so the last printed line is
+  `[2/7] collect` and the spinning frame is unknown. Localising it needs a
+  `-pg`/sampling build, or bisecting the transform lanes (text / binary /
+  container) against the same image. Until then the honest statement is
+  "does not terminate", not any guess at which loop it is.
+
+  ### Artifacts
+
+  `/srv/bench/sweep-hang/` — `EVIDENCE.txt`, the sweep log, the harness
+  transcript, and the 8 GiB reproducer image (symlinked; source tree
+  `/srv/bench/cloudcmp/invfs/stage`).
+
+  ### Why it is filed as an incident
+
+  It is availability rather than correctness, which makes it easy to
+  under-rank, and it is the reason no combined-Debian compression ratio could
+  be reported: the measurement that corpus exists to produce does not converge.
+  A ratio derived from a sweep known not to finish would be meaningless.
+
 ## WP71-A — Plugin EXTRACT could not name a member (wrong operand order)
 
 **Date:** Sep 24, 2026  
