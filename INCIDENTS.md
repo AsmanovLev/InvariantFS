@@ -13,17 +13,27 @@
 > a path that cannot be pointed at in the tree — a name you cannot follow is
 > rot whether or not it once existed.
 
-## UNRESOLVED — the RT30 fallback root can be reclaimed while still live
+## UNRESOLVED (reclaimer half addressed by WP121) — the RT30 fallback root can be reclaimed while still live
 
   **Date:** Sep 27, 2026  
   **Severity:** High (silent namespace rollback)  
-  **Status:** **Unresolved.** Reachable in the code; the damage sequence has not
-  been constructed as a test.  
+  **Status:** **Partially resolved (WP121, branch `wp/121-v3-orphan-reclaim`).**
+  The damage sequence is now **constructed and observed** — see "The sequence is
+  reachable: it has been run" below. The *reclaimer* half is fixed: the RT30-slot
+  liveness predicate is enforced in `btree_collect_orphans`, and
+  `fold_reclaim_hook` no longer frees a root the RT30 still names. Still
+  **UNRESOLVED** and deliberately **not** fixed here: `mbuf_page_validate` does
+  not consult the allocation bitmap, and the collector is default-OFF behind
+  `INVFS_RECLAIM_ORPHANS=1`. `src/core/vol_metabuf.c` was out of scope for
+  WP121.  
   **Impact:** On a volume where the v3 fold has run and the newest root page is
   subsequently damaged, `mbuf_root_read` falls back to an RT30 slot naming a
   root whose pages have already been freed — and adopts a **stale namespace**
   without any error. Files created after that root can become invisible. Not
-  corruption of file contents; corruption of which files exist.
+  corruption of file contents; corruption of which files exist. WP121 realised
+  the second-order form: the freed pages come back out of the allocator to
+  somebody else's data, so the fallback tree reads **wrong bytes**, not merely
+  absent ones.
 
   ### The chain, each step verified in the tree
 
@@ -67,11 +77,55 @@
 
   ### Not determined
 
-  - Whether the sequence is reachable in practice. It is reachable from the
-    code; no test has been built that damages a live root page and observes the
-    rollback.
   - Whether a savepoint (`SPT0`) would prevent it in the common case. The
     savepoint pins a *generation*; if it is the newer one it does not help.
+    WP121 did not settle this; it only proved that `v->pinned_root` is honoured
+    as a liveness source when it IS the older root.
+
+  ### The sequence is reachable: it has been run
+
+  WP121 built it. `tools/test-v3-orphan-reclaim.sh` leg 4/4b, driver
+  `src/cli/orphan_test.c`:
+
+  1. build a v3 volume (40 files through the public write path, folded into the
+     base), force 60 base generations so both RT30 slots name distinct roots;
+  2. narrow the collector's liveness set to the newest root only — the wrong
+     predicate — and collect (302 pages freed, 2 more than the correct run);
+  3. scribble 64 bytes after the newest root page's header, keeping the `BPG3`
+     magic and breaking the CRC32C, so `mbuf_page_validate` rejects it and
+     `mbuf_root_read` adopts the other slot;
+  4. `walk` the adopted tree: **8 pages, 2 of them no longer allocated**;
+  5. hand 20,000 blocks to `mbuf_alloc`: **2 of the fallback tree's own pages
+     come back out of the allocator** carrying somebody else's generation.
+
+  Step 5 is the answer to "not determined". The corruption is not a failed read;
+  it is the reader walking a tree whose nodes are another file's blocks. The
+  same five steps with the shipped predicate give `UNALLOCATED=0` and
+  `REUSED=0` on the same image geometry and the same churn — the liveness
+  predicate is the only variable. Step 4 is asserted by the suite; step 5 is
+  asserted by the red control, so the suite fails loudly if the check ever stops
+  distinguishing the two predicates.
+
+  ### What WP121 changed, and what it deliberately did not
+
+  - `btree_collect_orphans` (`src/core/vol_btree.c`) marks **both** RT30 slots
+    and `v->pinned_root`, refuses to collect at all if a named slot cannot be
+    turned into a valid blkptr, and treats a page whose generation exceeds the
+    newest live root's as live (an uncommitted COW copy). **Default OFF**
+    (`INVFS_RECLAIM_ORPHANS=1`).
+  - `fold_reclaim_hook` (`src/core/vol_fold.c`) no longer runs the
+    one-generation diff when `old_root` is still named by an RT30 slot. This is
+    the *existing* trigger for this incident, and it fires on every fold; leaving
+    it would have undone the collector's liveness set one line earlier.
+  - `src/core/vol_metabuf.c` is **untouched**, as instructed. The residual
+    defect stands: `mbuf_page_validate` (`src/core/vol_metabuf.c:62-68`) checks
+    `h->magic` and `h->checksum` and nothing else, so a freed page is
+    indistinguishable from a live one to the reader. The fix belongs there —
+    make the root-slot acceptance in `mbuf_root_read` also require the block to
+    be allocated, or make `mbuf_page_validate` take the bitmap — and it is a
+    separate WP. Until then, the collector's predicate is the only thing keeping
+    the fallback honest, which is why it must not become the newest slot's
+    tree.
 
 ## FIXED (WP117) — `invf-sweep` hung in `vol_heat_sweep_begin` above ~46k live inodes
 

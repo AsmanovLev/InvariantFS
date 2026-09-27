@@ -90,6 +90,7 @@
 #include "invarifs.h"
 #include "volume.h"
 #include "vol_spt0.h"
+#include "vol_reclaim.h"
 #include "codec.h"
 #include "rs.h"
 
@@ -2184,6 +2185,23 @@ progress:
                      (unsigned long long)rep.updated,
                      (unsigned long long)rep.parity_blocks);
             sw_stage_end(frc == 0 ? detail : "flush failed after seal");
+        }
+    }
+
+    /* WP121: the offline sweep holds the volume exclusively, so this is the
+     * quiescent point the orphan collector's caller contract asks for. The
+     * FUSE drain reaches the same collector through fold_reclaim_hook; the
+     * offline path had no reclaim call at all, which is why a swept volume
+     * never converged. Gated on INVFS_RECLAIM_ORPHANS=1 (default off) and
+     * a no-op otherwise, so nothing here changes on an unset environment. */
+    {
+        uint64_t orphans = 0;
+        if (vol_reclaim_orphans(vol, &orphans) < 0) {
+            sw_progress_suspend();
+            fprintf(stderr, "warning: v3 orphan reclaim failed\n");
+        } else if (orphans && !invfs_sweep_ui_active()) {
+            printf("[reclaim] %llu orphaned v3 base page(s) collected\n",
+                   (unsigned long long)orphans);
         }
     }
 

@@ -1835,6 +1835,272 @@ int btree_reclaim_pinned(invfs_volume *v, invfs_blkptr old_root,
 }
 
 /* ------------------------------------------------------------------ */
+/* WP121: orphan collector — the FULL-POOL sweep                        */
+/*                                                                   */
+/* Why this exists, and why it is not btree_reclaim_pinned: every       */
+/* publisher of a new base root (v3_publish, vol_btree.c:1993)         */
+/* abandons the root it supersedes and frees nothing.                   */
+/* btree_reclaim_pinned is a ONE-GENERATION diff: it is handed the      */
+/* previous root and frees what that root reaches which the new one    */
+/* does not. A root abandoned two publications ago is reachable from   */
+/* neither argument, so it is never even visited. Measured on a        */
+/* 60-file corpus: 198 allocated base pages, 5 in the live tree, 193   */
+/* orphans -- one abandoned page per generation, linear in file count  */
+/* and independent of file size.                                        */
+/*                                                                   */
+/* THE LIVENESS PREDICATE. This is the load-bearing part. RT30 has     */
+/* TWO root slots and mbuf_root_publish only ever writes ONE of them   */
+/* per publish (vol_metabuf.c:349: slot = rt30.seq & 1), so the other  */
+/* slot still names the previous root -- that is WP86's damage         */
+/* tolerance, not a bug to clean up here. mbuf_root_read               */
+/* (vol_metabuf.c:375) loops over BOTH slots, keeps every slot whose   */
+/* root page passes mbuf_page_validate, and adopts the highest gen     */
+/* among them. mbuf_page_validate checks magic + CRC32C and NOTHING    */
+/* else: it does not consult the allocation bitmap, so a page that has */
+/* been freed and not yet reused still validates. Damage the newest    */
+/* root page and the reader silently adopts the OLDER slot.            */
+/*                                                                   */
+/* Therefore:                                                           */
+/*                                                                   */
+/*   LIVE(P)  <=>  P is reachable from a root named by ANY of the     */
+/*                2 RT30 slots, or from v->pinned_root (a live SPT0    */
+/*                save point), or P is named by a blkptr stored       */
+/*                inside a value of such a tree.                        */
+/*                                                                   */
+/* "Any of the 2 slots", never "the newest slot" and never "the        */
+/* current root": a depth-2 root stack BOUNDS the leak, it does not    */
+/* make freeing safe. Freeing slot[older]'s exclusive pages converts a  */
+/* recoverable single-page root tear into a silent adoption of a       */
+/* namespace that is half-missing, and no existing test would notice.  */
+/*                                                                   */
+/* Every other rule below only ever ADDS to the live set, so each of    */
+/* them is a one-directional safety margin:                              */
+/*   - a slot that cannot be read into a valid blkptr aborts the       */
+/*     whole collection (we refuse to reason about a half-known RT30); */
+/*   - a page whose gen is greater than the newest live root's gen is   */
+/*     treated as LIVE (an uncommitted COW copy);                      */
+/*   - only blocks that validate as a BPG3 base page are candidates, so */
+/*     no other block type can be collected by construction;           */
+/*   - an unreadable candidate is left alone.                           */
+/* ------------------------------------------------------------------ */
+
+/* Deepest tree we will believe. A page claiming a deeper level than any  */
+/* real v3 tree is not a page we understand, and an un-understood page is */
+/* never freed. */
+#define ORPHAN_MAX_LEVEL 32u
+
+/* Offset of invfs_blkptr recipe inside invfs_v3_inode_row. The row is the */
+/* only leaf VALUE in the v3 base trees that can contain a blkptr (every   */
+/* other value is a dirent child id or an opaque recipe chunk). Today       */
+/* every producer memsets it to zero -- vol_dirs.c:376,379,437,            */
+/* vol_png.c:1081,1190, vol_textzone.c:1237, vol_write.c:905 and            */
+/* vol_records.c:1229 only ever copy it -- so the guard below is a no-op in */
+/* practice. It is here so that the day a producer starts populating it,    */
+/* this collector cannot be the thing that frees the page it points at. The  */
+/* _Static_assert below is what keeps the constant honest: a struct change */
+/* that moves the field breaks the build instead of silently disabling the */
+/* guard.                                                                    */
+#define ORPHAN_ROW_OFF 54u
+_Static_assert(offsetof(invfs_v3_inode_row, recipe) == ORPHAN_ROW_OFF,
+               "ORPHAN_ROW_OFF must track invfs_v3_inode_row.recipe");
+
+/* Does this leaf value look like an encoded inode row (the only shape    */
+/* that carries a blkptr)? Deliberately strict: a false positive costs a   */
+/* spurious block read, a false negative is the failure we are guarding    */
+/* against, so the version word, the size window and the type field all  */
+/* have to agree before the recipe pointer is even looked at.              */
+static int orphan_row_recipe(const uint8_t *val, uint16_t n, uint64_t *pba_out)
+{
+    uint32_t ver;
+    uint32_t type;
+    uint64_t pba;
+
+    if (n < ORPHAN_ROW_OFF + sizeof(invfs_blkptr))
+        return 0;
+    if (n > sizeof(invfs_v3_inode_row) + INVFS_V3_INODE_XATTR_MAX)
+        return 0;
+    memcpy(&ver, val, sizeof ver);
+    memcpy(&type, val + 4, sizeof type);
+    if (ver != 1u && ver != INVFS_V3_INODE_ROW_VERSION)
+        return 0;
+    if (type > INVFS_ITYP_BLK)
+        return 0;
+    memcpy(&pba, val + ORPHAN_ROW_OFF, sizeof pba);
+    *pba_out = pba;
+    return 1;
+}
+
+/* Mark walk used only by the collector. Identical to bt_mark_rec except  */
+/* that on a leaf it also follows the recipe blkptr of any inode row it   */
+/* finds -- see the ORPHAN_ROW_OFF comment. bt_mark_rec is left alone:    */
+/* the reachability diff's contract is tree structure, and changing it    */
+/* would change the existing reclaim's behaviour in the same commit.     */
+static int bt_mark_rec_deep(invfs_volume *v, invfs_blkptr ptr, uint8_t *seen,
+                            uint64_t total)
+{
+    uint8_t buf[INVFS_BLOCK_SIZE];
+    bt_ent *e;
+    int n, level, i;
+
+    if (ptr.pba == 0)
+        return 0;
+    if (ptr.pba >= total)
+        return -1;
+    if (bit_get(seen, ptr.pba))
+        return 0;
+    bit_set(seen, ptr.pba);
+    if (mbuf_read_ptr(v, &ptr, buf) != 0)
+        return -1;
+    if (mbuf_page_chdr(buf)->level == INVFS_PAGE_LEVEL_LEAF) {
+        e = (bt_ent *)malloc(sizeof(bt_ent) * BT_MAX_ENTRIES);
+        if (!e)
+            return -1;
+        if (bt_read(v, ptr, buf, e, &n, &level) != 0) {
+            free(e);
+            return -1;
+        }
+        for (i = 0; i < n; i++) {
+            uint64_t pba;
+            invfs_blkptr rp;
+            if (!orphan_row_recipe(e[i].v, e[i].vlen, &pba) || !pba)
+                continue;
+            if (pba >= total)
+                continue;   /* already a broken row; reads fail loudly */
+            if (bit_get(seen, pba))
+                continue;
+            memset(&rp, 0, sizeof rp);
+            rp.pba = pba;
+            if (bt_mark_rec_deep(v, rp, seen, total) != 0) {
+                free(e);
+                return -1;
+            }
+        }
+        free(e);
+        return 0;
+    }
+    e = (bt_ent *)malloc(sizeof(bt_ent) * BT_MAX_ENTRIES);
+    if (!e)
+        return -1;
+    if (bt_read(v, ptr, buf, e, &n, &level) != 0) {
+        free(e);
+        return -1;
+    }
+    for (i = 0; i < n; i++) {
+        if (bt_mark_rec_deep(v, e[i].child, seen, total) != 0) {
+            free(e);
+            return -1;
+        }
+    }
+    free(e);
+    return 0;
+}
+
+/* Read an RT30 slot into a blkptr. Returns 0 on success, -1 if the slot
+ * names a block we cannot turn into a trustworthy pointer. The caller
+ * treats -1 as "abort the collection", never as "this slot is dead". */
+static int orphan_slot_ptr(invfs_volume *v, uint64_t pba, invfs_blkptr *out,
+                           uint64_t *gen_out)
+{
+    uint8_t page[INVFS_BLOCK_SIZE];
+
+    if (mbuf_read(v, pba, page) != 0)
+        return -1;
+    if (!mbuf_page_validate(page))
+        return -1;
+    mbuf_ptr_set(out, pba, page, INVFS_BP_LEAF | INVFS_BP_ROOT);
+    if (gen_out)
+        *gen_out = out->gen;
+    return 0;
+}
+
+int btree_collect_orphans(invfs_volume *v, uint64_t *freed_out)
+{
+    uint8_t *seen = NULL, page[INVFS_BLOCK_SIZE];
+    uint64_t bytes, b, freed = 0, max_root_gen = 0, gen = 0;
+    int have_root = 0, i;
+
+    if (!v)
+        return -1;
+    if (freed_out)
+        *freed_out = 0;
+    /* No descriptor, or no in-RAM bitmap to work from: nothing to say. */
+    if (!v->rt30_present || !v->bitmap)
+        return 0;
+
+    bytes = (v->sb.total_blocks + 7u) / 8u;
+    seen = (uint8_t *)calloc(1, (size_t)bytes);
+    if (!seen)
+        return -1;
+
+    /* (1) BOTH RT30 slots are liveness roots. See the header comment. */
+    for (i = 0; i < 2; i++) {
+        invfs_blkptr r;
+        uint64_t pba = v->rt30.root_slot[i];
+        if (!pba)
+            continue;
+        if (pba >= v->sb.total_blocks || orphan_slot_ptr(v, pba, &r, &gen) != 0) {
+            /* We do not fully know the RT30. Refuse to collect: a slot we
+             * cannot read is exactly the slot the reader would fall back
+             * to, and "probably unreachable" is how the volume loses a
+             * namespace silently. */
+            free(seen);
+            return 0;
+        }
+        if (bt_mark_rec_deep(v, r, seen, v->sb.total_blocks) != 0) {
+            free(seen);
+            return -1;
+        }
+        if (!have_root || gen > max_root_gen) {
+            max_root_gen = gen;
+            have_root = 1;
+        }
+    }
+    /* (2) a live SPT0 save point pins its own base root. */
+    if (v->pinned_root.pba != 0 &&
+        bt_mark_rec_deep(v, v->pinned_root, seen, v->sb.total_blocks) != 0) {
+        free(seen);
+        return -1;
+    }
+    if (!have_root) {
+        /* RT30 names no root at all: there is no base tree to diff against,
+         * so every BPG3 page would look like an orphan. Do not guess. */
+        free(seen);
+        return 0;
+    }
+
+    /* (3) full-pool sweep: every allocated block that is a base page and
+     * that no live root can reach is an orphan. */
+    for (b = 1; b < v->sb.total_blocks; b++) {
+        const invfs_page_hdr *h;
+        if (!bit_get(v->bitmap, b))
+            continue;
+        if (mbuf_read(v, b, page) != 0)
+            continue;                    /* unreadable: leave it alone */
+        if (!mbuf_page_validate(page))
+            continue;                    /* not a base page: not ours */
+        h = mbuf_page_chdr(page);
+        if (h->level > ORPHAN_MAX_LEVEL)
+            continue;                    /* deeper than any real tree */
+        if (bit_get(seen, b))
+            continue;                    /* live: reachable from a root */
+        if (h->gen > max_root_gen)
+            continue;                    /* uncommitted COW copy: live */
+        mbuf_free(v, b);
+        if (bit_get(v->bitmap, b))
+            continue;                    /* retention held it: not freed */
+        freed++;
+    }
+    free(seen);
+    if (freed_out)
+        *freed_out = freed;
+    /* Make the frees durable in the same breath. A crash before this point
+     * leaves the blocks allocated (a leak), never shared. */
+    if (freed && vol_v3_bitmap_flush(v) != 0)
+        return -1;
+    return 0;
+}
+
+/* ------------------------------------------------------------------ */
 /* WP-M5: v3 inode row codec + get/put/delete                          */
 /*                                                                    */
 /* The stable tier keeps one row per inode in the base B+-tree. The key */

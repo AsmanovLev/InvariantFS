@@ -270,9 +270,37 @@ void fold_reclaim_hook(invfs_volume *v, invfs_blkptr old_root,
 {
     /* wait for in-flight readers (g_fold_epoch drain) */
     (void)vol_reclaim_drain(v);
+    /* WP121: the fold has just published new_root, so the OTHER RT30 slot
+     * still names old_root -- that is WP86's damage tolerance, and
+     * mbuf_root_read adopts it whenever new_root's page fails
+     * mbuf_page_validate. mbuf_page_validate does not consult the
+     * allocation bitmap, so freeing old_root's exclusive pages here does
+     * not make the fallback fail loudly; it makes the reader adopt a
+     * namespace standing on reallocated blocks. That is silent data loss,
+     * and it is exactly what INCIDENTS.md's UNRESOLVED "RT30 fallback root
+     * can be reclaimed while still live" entry describes. It is also the
+     * predecessor of the collector below, so leaving it in place would
+     * mean the collector's careful liveness set is undone one line
+     * earlier, every time.
+     *
+     * The guard is a refusal, not a repair: when the RT30 still names
+     * old_root the diff has nothing safe to free, and the collector --
+     * which keeps the union of both slots -- reclaims those pages the
+     * next time a root is published and neither slot names them. */
+    if (old_root.pba != 0 &&
+        (old_root.pba == v->rt30.root_slot[0] ||
+         old_root.pba == v->rt30.root_slot[1])) {
+        (void)vol_reclaim_orphans(v, NULL);
+        return;
+    }
     /* reachability diff: free base pages in old_root not reachable from
      * new_root or the pinned save-point root */
     (void)vol_reclaim_mark_and_free(v, old_root, new_root, v->pinned_root);
+    /* WP121: the diff above is one generation wide, so every root abandoned
+     * by an earlier publish stays allocated forever. The collector is the
+     * full-pool sweep that actually reclaims them; it is gated on
+     * INVFS_RECLAIM_ORPHANS=1 and is a no-op otherwise. */
+    (void)vol_reclaim_orphans(v, NULL);
 }
 
 /* Reset the recent tier to empty: an empty index and RT30 no longer naming a

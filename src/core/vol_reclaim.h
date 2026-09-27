@@ -31,6 +31,14 @@ int vol_reclaim_mark_and_free(struct invfs_volume *v,
                              invfs_blkptr keep_root,
                              invfs_blkptr pinned_root);
 
+/* WP121: free base pages that no live root can reach -- the FULL-POOL
+ * orphan collector, as opposed to the one-generation diff above. The gate
+ * is inside: returns 0 having done nothing unless INVFS_RECLAIM_ORPHANS=1
+ * is set in the environment. It is DEFAULT OFF and must stay default off
+ * until the damage-tolerance argument in vol_btree.c has held under the
+ * e2e suite; see the WP121 report. Returns the page count freed, or -1. */
+int vol_reclaim_orphans(struct invfs_volume *v, uint64_t *freed_out);
+
 /* Free delta segments in the chain starting at head_pba.
  * Segments with pba < delta_end are freed (delta_end=0 means all). */
 int vol_reclaim_delta_segments(struct invfs_volume *v,

@@ -21,6 +21,52 @@
 #include <string.h>
 
 /* ------------------------------------------------------------------ */
+/* WP121: the orphan collector's gate                                  */
+/* ------------------------------------------------------------------ */
+
+/* DEFAULT OFF. The collector frees metadata pages in a way that a wrong
+ * answer to "is this page reachable" turns into silent data loss rather
+ * than a crash, so it does not ship enabled. INVFS_RECLAIM_ORPHANS=1 turns
+ * it on; nothing else does. The value is read once per process and cached:
+ * a volume is opened once per process, so re-reading getenv per fold buys
+ * nothing and makes the gate depend on call order. */
+static int orphan_gate_state = -1;   /* -1 = not yet read */
+
+static int orphan_gate(void)
+{
+    const char *e;
+    if (orphan_gate_state >= 0)
+        return orphan_gate_state;
+    e = getenv("INVFS_RECLAIM_ORPHANS");
+    orphan_gate_state = (e && e[0] == '1' && e[1] == '\0') ? 1 : 0;
+    return orphan_gate_state;
+}
+
+/* Free base pages that no live root can reach. The gate is HERE, not at
+ * the call sites, so every path that reaches the collector is gated by
+ * exactly one rule and there is no call site that forgot it.
+ *
+ * Returns the number of pages freed, 0 when the gate is off or the
+ * collector declined to run, -1 on error. */
+int vol_reclaim_orphans(invfs_volume *v, uint64_t *freed_out)
+{
+    uint64_t freed = 0;
+
+    if (freed_out)
+        *freed_out = 0;
+    if (!v || !orphan_gate())
+        return 0;
+    if (btree_collect_orphans(v, &freed) != 0)
+        return -1;
+    if (freed_out)
+        *freed_out = freed;
+    if (freed)
+        fprintf(stderr, "vol_reclaim: collected %llu orphaned v3 base page(s)\n",
+                (unsigned long long)freed);
+    return (int)freed;
+}
+
+/* ------------------------------------------------------------------ */
 /* g_fold_epoch — reader drain                                         */
 /* ------------------------------------------------------------------ */
 

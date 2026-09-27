@@ -153,4 +153,26 @@ int btree_reclaim(invfs_volume *v, invfs_blkptr old_root, invfs_blkptr keep_root
 int btree_reclaim_pinned(invfs_volume *v, invfs_blkptr old_root,
                          invfs_blkptr keep_root, invfs_blkptr pinned_root);
 
+/* WP121: the FULL-POOL orphan collector. Unlike btree_reclaim_pinned this
+ * is not a generation diff -- it walks every allocated block in the volume
+ * and frees each one that is a v3 base page (BPG3, CRC-valid) and is not
+ * reachable from ANY root named by the 2 RT30 slots, nor from
+ * v->pinned_root. That "ANY of the 2 slots" is the whole safety argument:
+ * mbuf_root_publish writes one slot per publish (vol_metabuf.c:349) and
+ * mbuf_root_read falls back to the other when the newer root fails
+ * mbuf_page_validate -- and mbuf_page_validate does not consult the
+ * allocation bitmap, so a freed-but-intact page would still validate. A
+ * depth-2 root stack bounds the leak; it does not make freeing safe.
+ *
+ * Caller contract: quiescent. No COW mutation may be in flight (the caller
+ * holds the volume write lock and is between publications), because an
+ * uncommitted copy is protected only by the gen ceiling, not by a root.
+ *
+ * Returns 0 on success (freed_out, if non-NULL, holds the page count --
+ * 0 when nothing was collected, including every refuse-to-run case), -1 on
+ * an io/alloc error. It never reports "collected some but the live set is
+ * uncertain": an RT30 slot it cannot turn into a valid blkptr makes it
+ * return 0 having freed nothing. */
+int btree_collect_orphans(invfs_volume *v, uint64_t *freed_out);
+
 #endif /* INVFS_VOL_BTREE_H */
