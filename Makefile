@@ -101,7 +101,7 @@ endef
 CLI_MAINS := mkfs verify fsck cp cat ls stat arctest blkio_test resize \
              metabuf_test btree_test btree_repair_test v3inode overlay_test fold_test concurrency_test \
              sweep_v3_test symlink_v3_test large_file_v3_test dedupe_v3_test deflate_repro_test window_test \
-             nlink_v3_test cpack_guard_test orphan_test \
+             nlink_v3_test cpack_guard_test orphan_test rt30_slot_test \
              plugin_host_test plugin_mt_test
 $(foreach t,$(CLI_MAINS),$(eval $(call TOOL_RULE,$(t),)))
 
@@ -323,6 +323,7 @@ test: $(OUT)/invf-arctest $(OUT)/invf-blkio_test $(OUT)/invf-codec_test \
       $(OUT)/invf-deflate_repro_test $(OUT)/invf-plugin_host_test $(OUT)/invf-plugin_mt_test \
       $(OUT)/invf-window_test $(OUT)/invf-nlink_v3_test \
       $(OUT)/invf-cpack_guard_test $(OUT)/invf-orphan_test \
+      $(OUT)/invf-rt30_slot_test \
       $(OUT)/invf-ivpack_packs_test $(OUT)/invf-mkfs $(OUT)/invf-cp \
       $(OUT)/invf-sweep $(OUT)/invf-fsck $(OUT)/invf-plugin-host \
       plugin-so $(CORE_OBJS_FILE)
@@ -366,6 +367,10 @@ test: $(OUT)/invf-arctest $(OUT)/invf-blkio_test $(OUT)/invf-codec_test \
 	@# volume that was built, reclaimed and then damaged -- the damage leg
 	@# is what a wrong liveness predicate cannot survive.
 	$(TESTENV) $(TESTISO) bash tools/test-v3-orphan-reclaim.sh
+	@# WP123: the RT30 reader must refuse a root slot whose block the
+	@# allocation bitmap reports as free. The suite carries its own red
+	@# control so a no-op fix cannot pass it.
+	$(TESTENV) $(TESTISO) bash tools/test-v3-rt30-slot-alloc.sh
 	$(TESTENV) $(TESTISO) $(OUT)/invf-deflate_repro_test
 	$(TESTENV) $(TESTISO) $(OUT)/invf-plugin_host_test
 	$(TESTENV) $(TESTISO) $(OUT)/invf-plugin_mt_test

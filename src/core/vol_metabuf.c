@@ -67,6 +67,37 @@ int mbuf_page_validate(const uint8_t *page)
     return h->checksum == mbuf_page_crc(page);
 }
 
+/* WP123: is `pba` an ALLOCATED block according to the volume's allocation
+ * bitmap? This is a SEPARATE question from mbuf_page_validate, and until
+ * now nothing asked it.
+ *
+ * Page integrity answers "are these bytes a whole BPG3 page". Allocation
+ * answers "does the volume still own this block". A page that has been
+ * handed back to the free pool but not yet re-issued answers YES to the
+ * first and NO to the second, because free does not scrub the block: the
+ * magic and the CRC32C of whatever was last written there are both still
+ * perfect. Anything that treats "validates" as "usable" is therefore one
+ * allocator round away from adopting a page it does not own.
+ *
+ * The authority is v->bitmap, which vol_open populates from the metadata
+ * zone BEFORE mbuf_rt30_load runs (volume.c:1463 vs :1545), so a root read
+ * at open consults the same bytes the descriptor was written against.
+ *
+ * A NULL bitmap is NOT a "free" answer. It means this volume has no
+ * allocation authority to consult at all (synthetic test volumes that
+ * never went through vol_open); refusing there would be inventing damage
+ * out of missing information, so we report "cannot tell" (-1) and let the
+ * caller's integrity check stand. vol_open allocates v->bitmap
+ * unconditionally, so this branch is unreachable for any real volume. */
+int mbuf_page_allocated(const invfs_volume *v, uint64_t pba)
+{
+    if (!v || !v->bitmap)
+        return -1;                          /* no authority: cannot tell */
+    if (pba == 0 || pba >= v->sb.total_blocks)
+        return 0;                           /* out of range: not allocated */
+    return bit_get(v->bitmap, pba) ? 1 : 0;
+}
+
 uint32_t mbuf_page_size(const invfs_volume *v)
 {
     /* D3: base pages are 4 KiB and map 1:1 to blocks. The RT30 page_size
@@ -346,9 +377,26 @@ int mbuf_root_publish(invfs_volume *v, uint64_t root_pba, uint64_t root_gen)
     if (!mbuf_page_validate(page) || h->gen != root_gen)
         return -1;
 
+    /* WP123: structure-before-reference, enforced HERE rather than by
+     * caller discipline. The reader's new allocation check
+     * (mbuf_root_read -> mbuf_page_allocated) is only sound if the
+     * allocation bitmap is durable at the moment the descriptor becomes
+     * durable -- otherwise a crash could leave RT30 naming a page whose
+     * allocation bit is still clear on disk, and the very next open would
+     * refuse a live root. That is the failure mode this must never have, so
+     * the ordering that prevents it cannot live in four separate callers
+     * that a fifth caller may forget. (All four existing call sites --
+     * v3_publish, vol_v3_fold, the fsck repair and spt0_restore -- already
+     * do this; re-flushing an already-clean range is a no-op, so this is
+     * belt-and-braces, not duplicated I/O.) */
+    if (vol_v3_bitmap_flush(v) != 0)
+        return -1;
+
     slot = (uint32_t)(v->rt30.seq & 1u);
     v->rt30.root_slot[slot] = root_pba;
     v->rt30.seq++;
+    /* One barrier covers the bitmap and the descriptor together: the
+     * descriptor must never become durable before the allocation it names. */
     if (mbuf_rt30_store(v) != 0)
         return -1;
     return vmux_barrier(v, "rt30 root publish") < 0 ? -1 : 0;
@@ -360,6 +408,13 @@ int mbuf_root_read(invfs_volume *v, uint64_t *root_pba_out,
     uint8_t page[INVFS_BLOCK_SIZE];
     uint64_t best_pba = 0, best_gen = 0;
     int have = 0, named = 0, i;
+    /* WP123: per-slot verdicts, kept so the failure message can tell the
+     * two damage modes apart. They are different faults with different
+     * remedies -- a torn page is a write that did not land, a freed page is
+     * a reclaim that freed a live root -- and a reader that collapses them
+     * into "unusable" cannot report either. */
+    int slot_alloc[2] = { -1, -1 };
+    int slot_valid[2] = { 0, 0 };
 
     if (!v)
         return -1;
@@ -378,6 +433,18 @@ int mbuf_root_read(invfs_volume *v, uint64_t *root_pba_out,
         if (!pba)
             continue;
         named = 1;
+        /* WP123: the allocation question comes FIRST, and it is
+         * independent of the page's contents. A freed page is a freed page
+         * whether it still validates, has been scribbled over, or is
+         * unreadable -- so asking the bitmap first means a freed slot can
+         * never be adopted on the strength of whatever bytes happen to be
+         * sitting there now. mbuf_page_allocated returns -1 only when the
+         * volume carries no bitmap at all (synthetic volumes); that is
+         * "no authority", not "freed", and falls through to the integrity
+         * check alone. */
+        slot_alloc[i] = mbuf_page_allocated(v, pba);
+        if (slot_alloc[i] == 0)
+            continue;
         if (mbuf_read(v, pba, page) != 0)
             continue;      /* `named` already records that a slot pointed
                              * somewhere; WP86 made the read-failure case
@@ -385,6 +452,7 @@ int mbuf_root_read(invfs_volume *v, uint64_t *root_pba_out,
         h = mbuf_page_hdr(page);
         if (!mbuf_page_validate(page))
             continue;
+        slot_valid[i] = 1;
         /* Higher page gen wins; on a tie prefer the slot the current seq
          * parity points at (the most recently published one). */
         if (!have || h->gen > best_gen ||
@@ -400,7 +468,38 @@ int mbuf_root_read(invfs_volume *v, uint64_t *root_pba_out,
          * damage, not an empty tree: answering 1 made the entire namespace
          * read as absent (a torn root page hid every file on the volume).
          * The caller turns -1 into EIO, so a key the delta still holds stays
-         * readable and everything else fails loudly. */
+         * readable and everything else fails loudly.
+         *
+         * WP123: and it is silent data loss rather than an absence, because
+         * a freed page VALIDATES. Report the per-slot verdicts, naming the
+         * slot the current seq parity calls newest, so the operator can
+         * tell "the newest root is torn" from "the newest root was freed
+         * and the volume is standing on a block the allocator may re-issue"
+         * without re-deriving it from a hex dump. */
+        for (i = 0; i < 2; i++) {
+            uint64_t pba = v->rt30.root_slot[i];
+            const char *why;
+            if (!pba)
+                continue;
+            if (slot_alloc[i] == 0)
+                why = "FREED: the allocation bitmap reports this block as "
+                      "free, so the page is no longer the volume's -- its "
+                      "bytes still pass the CRC only because free does not "
+                      "scrub";
+            else if (slot_alloc[i] == 1)
+                why = slot_valid[i] ? "unusable"
+                                    : "TORN: the page is allocated but its "
+                                      "magic or CRC32C does not validate";
+            else
+                why = "unusable: unreadable, or out of range";
+            fprintf(stderr,
+                    "vol: RT30 root_slot[%d] (pba %llu, %s per seq %llu) "
+                    "is not usable: %s\n",
+                    i, (unsigned long long)pba,
+                    ((uint32_t)i == (uint32_t)(v->rt30.seq & 1u))
+                        ? "the newer slot" : "the older slot",
+                    (unsigned long long)v->rt30.seq, why);
+        }
         /* The read failing above also sets `named`, so this is just "a slot
          * names a page". */
         return named ? -1 : 1;

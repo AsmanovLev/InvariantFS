@@ -57,6 +57,14 @@ void     mbuf_page_init(uint8_t *page, uint16_t level, uint64_t gen);
 void     mbuf_page_seal(uint8_t *page);
 /* 1 = magic "BPG3" and checksum match; 0 otherwise (torn/foreign page). */
 int      mbuf_page_validate(const uint8_t *page);
+/* WP123: is `pba` still an ALLOCATED block per the volume's allocation
+ * bitmap? 1 = allocated, 0 = free or out of range, -1 = this volume has no
+ * bitmap to consult (synthetic volumes; "cannot tell", not "free").
+ * A page that has been freed but not yet re-issued still passes
+ * mbuf_page_validate -- free does not scrub the block -- so integrity and
+ * allocation are independent questions and a caller that means "usable"
+ * must ask both. mbuf_root_read does. */
+int      mbuf_page_allocated(const invfs_volume *v, uint64_t pba);
 invfs_page_hdr       *mbuf_page_hdr(uint8_t *page);
 const invfs_page_hdr *mbuf_page_chdr(const uint8_t *page);
 
@@ -109,15 +117,28 @@ int mbuf_rt30_store(invfs_volume *v);
 /* Publish `root_pba` as the current base root. The page at root_pba must
  * already be durable and carry header gen `root_gen`; this helper refuses
  * otherwise. Alternates root_slot[seq & 1], bumps seq, stores RT30 and
- * barriers. 0 = ok. */
+ * barriers. 0 = ok.
+ */
 int mbuf_root_publish(invfs_volume *v, uint64_t root_pba, uint64_t root_gen);
-/* Select the live root: read both root slots, keep the one whose page
- * validates and carries the higher header gen (tie -> seq parity). 0 = ok
- * (pba_out/gen_out filled), 1 = no root named at all (empty base),
- * -1 = WP86: damage -- the descriptor is torn, or RT30 names a root page
- * that does not validate. The caller must turn -1 into a hard error (EIO),
- * never into "absent": a torn root page used to present the whole volume as
- * an empty filesystem. */
+/* Select the live root: read both root slots, keep the one whose page is
+ * ALLOCATED (WP123), validates, and carries the higher header gen
+ * (tie -> seq parity). 0 = ok (pba_out/gen_out filled), 1 = no root named at
+ * all (empty base), -1 = damage -- the descriptor is torn, or every named
+ * root is unusable. The caller must turn -1 into a hard error (EIO), never
+ * into "absent": a torn root page used to present the whole volume as an
+ * empty filesystem, and a FREED root page validates perfectly, so before
+ * WP123 the reader would silently adopt a block the allocator had taken back.
+ *
+ * SCOPE, stated so nobody over-reads it. This guards the ROOT PAGE of a
+ * slot. It does NOT verify the pages that root reaches: a root page that is
+ * allocated and intact but standing on a freed child is a separate hazard
+ * with a separate (tree-wide) remedy, and is NOT closed here. And on current
+ * main no shipped path frees a block a live slot names -- the alternating
+ * slots consume the fallback's name on the next publish before any reclaim
+ * can reach its pages -- so this is hardening against a future reclaimer
+ * that gets the liveness predicate wrong, not a fix for a reachable
+ * data-loss bug. It converts that class from "silently adopts a stale
+ * namespace" to "fails loudly, naming the slot and the reason". */
 int mbuf_root_read(invfs_volume *v, uint64_t *root_pba_out,
                    uint64_t *root_gen_out);
 
