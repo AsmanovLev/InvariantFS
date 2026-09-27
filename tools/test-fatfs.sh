@@ -543,6 +543,15 @@ fi
 echo "members + tables + maps present; empty member is 0 bytes; text.img clean"
 
 echo "== class stamps =="
+# WP105: the member stamps (TEXT / BATCHED_BIN) carry the REGISTRY generation
+# -- the MAX generation over every codec the process loaded
+# (codec.c:invfs_registry_generation) -- not the batch codec's own. This suite
+# scopes INVFS_CODECPACKS to its private $WORK/packs, but that does NOT disable
+# /usr/lib/invfs/codecpacks, so a host pack declaring generation = 2 moves the
+# value and the literal was never true here. The class+algo pair is the
+# classification contract, so stamp_is matches that; the CONTAINER stamps above
+# name the fatfs pack's OWN generation and stay matched exactly.
+stamp_is() { case "$1" in "$2"|"$2 "*) return 0 ;; esac; return 1; }
 for f in fat32.img fat16.img exfat.img; do
     C=$("$WORK/classof" "$IMG" "$f")
     echo "  $f: $C"
@@ -558,11 +567,11 @@ RAND_IDX=$(awk -F'\t'  '$2=="BIG.BIN"{print $1}' "$WORK/out/fat32.mbrt")
 MBR=$(printf "fat32.img!mbr%04d-README" "$README_IDX")
 C=$("$WORK/classof" "$IMG" "$MBR")
 echo "  $MBR: $C"
-[ "$C" = "cls=7 algo=2 gen=1" ] || { echo "FAIL: want TEXT{PPMD,1}"; exit 1; }
+stamp_is "$C" "cls=7 algo=2" || { echo "FAIL: want TEXT{PPMD} (got $C)"; exit 1; }
 MBR=$(printf "fat32.img!mbr%04d-ELF.BIN" "$ELF_IDX")
 C=$("$WORK/classof" "$IMG" "$MBR")
 echo "  $MBR: $C"
-[ "$C" = "cls=8 algo=14 gen=1" ] || { echo "FAIL: want BATCHED_BIN{ZSTD_BCJ,1}"; exit 1; }
+stamp_is "$C" "cls=8 algo=14" || { echo "FAIL: want BATCHED_BIN{ZSTD_BCJ} (got $C)"; exit 1; }
 MBR=$(printf "fat32.img!mbr%04d-BIG.BIN" "$RAND_IDX")
 C=$("$WORK/classof" "$IMG" "$MBR")
 echo "  $MBR: $C"

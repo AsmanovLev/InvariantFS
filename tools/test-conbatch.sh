@@ -166,15 +166,26 @@ gcc -std=gnu11 -O2 -I$REPO/src -I$REPO/src/core -I$REPO/src/codecs -I$REPO/src/r
 NB=$($B/invf-ls "$IMG" | grep -c "^")  # total lines (header+files+summary)
 NPARTS=$($B/invf-ls "$IMG" | grep -c '!' || true)
 echo "live names with '!': $NPARTS"
+# WP105: the TEXT / BATCHED_BIN stamps carry the REGISTRY generation -- the
+# MAX generation over every codec the process loaded
+# (codec.c:invfs_registry_generation), not the batch codec's own -- so the
+# value moves with the host's pack set. The class+algo pair is the
+# classification contract, so the arms below match the prefix and leave the
+# generation unconstrained; the CONTAINER{TARR} stamps at the bottom name the
+# decomposing pack's own generation and stay matched exactly.
+stamp_is() { case "$1" in "$2"|"$2 "*) return 0 ;; esac; return 1; }
 ok=1
 n_bz=0; n_tz=0; n_gen=0
 for p in $($B/invf-ls "$IMG" | awk '/!/ {print $5}'); do
     C=$("$WORK/classof" "$IMG" "$p")
+    if stamp_is "$C" "cls=8 algo=14"; then
+        case "$p" in bins.tar!*) n_bz=$((n_bz+1)); continue;; esac
+    fi
+    if stamp_is "$C" "cls=7 algo=2"; then
+        case "$p" in texts.tar!*|misc.tar!*) n_tz=$((n_tz+1)); continue;; esac
+    fi
     case "$p,$C" in
-    bins.tar!*,cls=8\ algo=14\ gen=1) n_bz=$((n_bz+1));;
-    texts.tar!*,cls=7\ algo=2\ gen=1) n_tz=$((n_tz+1));;
     misc.tar!*,none) n_gen=$((n_gen+1));;          # the random member stays generic
-    misc.tar!*,cls=7\ algo=2\ gen=1) n_tz=$((n_tz+1));;   # tiny.txt: text-batched
     *) echo "FAIL: $p has unexpected stamp: $C"; ok=0;;
     esac
 done

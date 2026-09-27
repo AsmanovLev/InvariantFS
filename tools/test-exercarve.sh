@@ -274,11 +274,20 @@ echo "  game.exe!exr1: $C"
 for f in fake.exe tiny.exe; do
     C=$("$WORK/classof" "$IMG" "$f")
     echo "  $f: $C"
-    case "$C" in
-    cls=8\ algo=1*\ gen=1|cls=8\ algo=14\ gen=1) ;;   # BATCHED_BIN (x64 -> BCJ)
-    cls=4\ algo=1\ gen=0) ;;                          # GENERIC (batch declined)
-    *) echo "FAIL: $f: want BATCHED_BIN or GENERIC, got $C"; exit 1;;
-    esac
+    # WP105: the BATCHED_BIN stamp carries the REGISTRY generation (the MAX
+    # over every codec the process loaded, codec.c:invfs_registry_generation),
+    # so it moves with the host's pack set -- match the class+algo prefix and
+    # leave the generation unconstrained. GENERIC{ZSTD} is stamped with the
+    # ZSTD codec's own generation (0) and is matched exactly.
+    stamp_is() { case "$1" in "$2"|"$2 "*) return 0 ;; esac; return 1; }
+    if stamp_is "$C" "cls=8 algo=1" || stamp_is "$C" "cls=8 algo=14"; then
+        :                                     # BATCHED_BIN (x64 -> BCJ)
+    else
+        case "$C" in
+        cls=4\ algo=1\ gen=0) ;;             # GENERIC (batch declined)
+        *) echo "FAIL: $f: want BATCHED_BIN or GENERIC, got $C"; exit 1;;
+        esac
+    fi
 done
 # a carved part is a real sibling inode and reads back as the bare member
 $B/invf-ls "$IMG" | grep "game.exe!"

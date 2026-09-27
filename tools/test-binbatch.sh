@@ -197,21 +197,30 @@ gcc -std=gnu11 -O2 -I$REPO/src -I$REPO/src/core -I$REPO/src/codecs -I$REPO/src/r
     $(sed "s|^|$REPO/|" "$REPO/build/core_objs.txt") \
     -Wl,-l:libzstd.so.1 -lz -lpthread
 
+# WP105: the batch stamps (TEXT / BATCHED_BIN) carry the REGISTRY generation
+# -- the MAX generation over every codec the process loaded
+# (codec.c:invfs_registry_generation) -- not the batch codec's own, so the
+# value moves with the host's pack set (a qcow2 pack declaring generation = 2
+# is enough). The class+algo pair is the classification contract, so that is
+# what stamp_is matches; the CONTAINER stamps name the decomposing pack's OWN
+# generation and stay matched exactly below.
+stamp_is() { case "$1" in "$2"|"$2 "*) return 0 ;; esac; return 1; }
+
 for f in $FILES; do
     C=$("$WORK/classof" "$IMG" "$f")
     echo "  $f: $C"
     case "$f" in
     a.c|b.py|notes.txt)
-        [ "$C" = "cls=7 algo=2 gen=1" ] || { echo "FAIL: $f: want TEXT{PPMD}"; exit 1; } ;;
+        stamp_is "$C" "cls=7 algo=2" || { echo "FAIL: $f: want TEXT{PPMD} (got $C)"; exit 1; } ;;
     a64.bin|macho.bin)
         # non-x86 binary family: batched, plain ZSTD payload (algo 1)
-        [ "$C" = "cls=8 algo=1 gen=1" ] || { echo "FAIL: $f: want BATCHED_BIN{ZSTD}"; exit 1; } ;;
+        stamp_is "$C" "cls=8 algo=1" || { echo "FAIL: $f: want BATCHED_BIN{ZSTD} (got $C)"; exit 1; } ;;
     tiny.elf|rand.bin)
         # below the 4KB gate / incompressible: never batched
         case "$C" in cls=8*) echo "FAIL: $f must not be batched"; exit 1;; esac ;;
     elf*|lib*.so|i386.bin)
         # x86/x86-64: batched with the BCJ prefilter (algo 14)
-        [ "$C" = "cls=8 algo=14 gen=1" ] || { echo "FAIL: $f: want BATCHED_BIN{ZSTD_BCJ}"; exit 1; } ;;
+        stamp_is "$C" "cls=8 algo=14" || { echo "FAIL: $f: want BATCHED_BIN{ZSTD_BCJ} (got $C)"; exit 1; } ;;
     esac
 done
 

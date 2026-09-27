@@ -275,12 +275,34 @@ echo "  multi.splt: $C"
 C=$("$WORK/classof" "$IMG" nest.splt)
 echo "  nest.splt: $C"
 [ "$C" = "cls=3 algo=40 gen=1" ] || { echo "FAIL: want CONTAINER{SPLT=40,1}"; exit 1; }
-C=$("$WORK/classof" "$IMG" "multi.splt!mbr0000-chunk0")
-echo "  member0 (text): $C"
-[ "$C" = "cls=7 algo=2 gen=1" ] || { echo "FAIL: want TEXT{PPMD,1}"; exit 1; }
-C=$("$WORK/classof" "$IMG" "multi.splt!mbr0002-chunk2")
-echo "  member2 (elf): $C"
-[ "$C" = "cls=8 algo=14 gen=1" ] || { echo "FAIL: want BATCHED_BIN{ZSTD_BCJ,1}"; exit 1; }
+# The two container stamps above carry the PACK's own decomp_gen (the SPLT
+# fixture pack declares generation = 1), so an exact match is correct there.
+#
+# The two member stamps below do not: the batching lane stamps
+# invfs_registry_generation() (codec.c), the MAX generation over every codec
+# the process loaded. Any pack that changes its member layout must bump its
+# generation, so that global moves for reasons that have nothing to do with
+# this tree -- and this suite exports the WHOLE tools/codecpacks dir, which
+# already includes a qcow2 pack declaring generation = 2, so the literal was
+# wrong even under `make e2e`. Pinning 2 instead would re-break the moment the
+# next pack bumps, which is the same defect wearing a different hat.
+#
+# The classification contract is the class+algo pair, so that is what is
+# matched (stamp_is(), the helper test-ext4fs.sh already uses). What replaces
+# the lost weight: both members were stamped from the SAME registry generation
+# in the SAME flush, so they must agree, and the stamp must be live (>= 1). A
+# member stamped from some other counter, or left ungenerated, still fails.
+stamp_is() { case "$1" in "$2"|"$2 "*) return 0 ;; esac; return 1; }
+M0=$("$WORK/classof" "$IMG" "multi.splt!mbr0000-chunk0")
+echo "  member0 (text): $M0"
+stamp_is "$M0" "cls=7 algo=2" || { echo "FAIL: want TEXT{PPMD} (got $M0)"; exit 1; }
+M2=$("$WORK/classof" "$IMG" "multi.splt!mbr0002-chunk2")
+echo "  member2 (elf): $M2"
+stamp_is "$M2" "cls=8 algo=14" || { echo "FAIL: want BATCHED_BIN{ZSTD_BCJ} (got $M2)"; exit 1; }
+gen_of() { echo "${1##* gen=}"; }
+GEN0=$(gen_of "$M0"); GEN2=$(gen_of "$M2")
+[ "$GEN0" -ge 1 ] || { echo "FAIL: member0 carries no live registry generation (gen=$GEN0)"; exit 1; }
+[ "$GEN0" = "$GEN2" ] || { echo "FAIL: members stamped from different registry generations (m0=$GEN0 m2=$GEN2)"; exit 1; }
 C=$("$WORK/classof" "$IMG" "multi.splt!mbr0003-chunk3")
 echo "  member3 (rand): $C"
 [ "$C" = "none" ] || { echo "FAIL: random member should stay unclassified"; exit 1; }

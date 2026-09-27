@@ -1,15 +1,19 @@
 /*
  * codec_test.c — exercise the codec registry (WP10).
  *
- * Standalone, NOT wired into the Makefile; build by hand:
- *   gcc -std=gnu11 -O2 -I src -o /tmp/codec_test \
- *       src/codec_test.c build/obj/codec.o \
- *       build/obj/ppmd8.o build/obj/ppmd8enc.o build/obj/ppmd8dec.o \
- *       build/obj/ppmd_codec.o build/obj/lz4.o \
- *       -Wl,-l:libzstd.so.1 -lz -lpthread
+ * Wired into `make test` (WP105 fixed the stale "NOT wired" claim below).
+ *
+ * The registry shape this suite pins is the BUILTIN one: main() sets
+ * INVFS_CODECPACKS_SYS=0 so the host's installed codecpacks cannot change what
+ * invfs_codec_all() returns. Pack registration is exercised from fixture
+ * manifests written into a per-pid /tmp dir.
+ *
+ * Environment-dependent legs degrade to SKIP, never FAIL (WP105) — the same
+ * rule helper_exec_test.c and ivpack_packs_test.c follow.
  */
 #define _CRT_SECURE_NO_WARNINGS
 
+#include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <stdio.h>
@@ -82,8 +86,15 @@ int invfs_codec_pack_estimate(const invfs_codec *c, const char *in_path,
 }
 
 
+/* WP105: the size of the BUILTIN codec table in src/codecs/codec.c
+ * (REGISTRY_N). Pinned here on purpose -- adding a builtin codec must be a
+ * deliberate, visible test change, not a silent drift. It says nothing about
+ * how many codecpacks the host has installed; main() guarantees that. */
+#define REGISTRY_STATIC_N 14
+
 static int failures = 0;
 static int checks = 0;
+static int skips = 0;
 
 static void ok(int cond, const char *what)
 {
@@ -92,6 +103,14 @@ static void ok(int cond, const char *what)
         failures++;
         printf("  FAIL  %s\n", what);
     }
+}
+
+/* WP105: the same idiom as helper_exec_test.c:46 / ivpack_packs_test.c:51 --
+ * a leg whose prerequisite is missing degrades to SKIP, never FAIL. */
+static void skip(const char *what)
+{
+    skips++;
+    printf("  SKIP  %s\n", what);
 }
 
 /* ---------------- registry shape ---------------- */
@@ -103,7 +122,13 @@ static void test_registry(void)
     const invfs_codec *c;
     int roundtrip;
 
-    ok(all != NULL && n == 14, "registry holds the 14 static entries");
+    /* WP105: "14" is REGISTRY_N -- the BUILTIN registry's size, a property of
+     * this source tree, and it is only reachable because main() switched the
+     * system pack dir off. What is NOT a property of this tree is how many
+     * codecpacks the host has installed, so that half never enters an
+     * assertion here; pack registration is exercised from fixture manifests
+     * below, and the host-pack path is covered by the e2e suites. */
+    ok(all != NULL && n == REGISTRY_STATIC_N, "registry holds the 14 static entries");
     ok(invfs_registry_generation() >= 1, "registry generation >= 1");
 
     c = invfs_codec_by_algo(INVFS_ALGO_NONE);
@@ -499,6 +524,50 @@ static int write_file(const char *path, const char *data, int exec)
     return 0;
 }
 
+/* WP105: mirror of pack_tool_resolvable() (src/codecs/codec.c) for the one
+ * tool the fixtures need. A host without `cp` cannot run the probe-dependent
+ * fixture legs; that is an environment, not a defect, so it SKIPs. */
+static int dir_has_exec(const char *dir, const char *tool)
+{
+    char p[4096];
+    DIR *d = opendir(dir);
+    struct dirent *e;
+    int found = 0;
+
+    if (!d) return 0;
+    while (!found && (e = readdir(d)) != NULL) {
+        if (strcmp(e->d_name, tool) != 0) continue;
+        snprintf(p, sizeof p, "%s/%s", dir, tool);
+        found = access(p, X_OK) == 0;
+    }
+    closedir(d);
+    return found;
+}
+
+static int tool_resolvable(const char *tool)
+{
+    const char *dir = getenv("INVFS_TOOLS");
+    const char *path, *p;
+
+    if (dir && *dir && dir_has_exec(dir, tool)) return 1;
+    if (dir_has_exec("/usr/lib/invfs/tools", tool)) return 1;
+    path = getenv("PATH");
+    if (!path) return 0;
+    for (p = path; *p; ) {
+        const char *colon = strchr(p, ':');
+        size_t dlen = colon ? (size_t)(colon - p) : strlen(p);
+        char d[4096];
+        if (dlen && dlen < sizeof d) {
+            memcpy(d, p, dlen);
+            d[dlen] = '\0';
+            if (dir_has_exec(d, tool)) return 1;
+        }
+        if (!colon) break;
+        p = colon + 1;
+    }
+    return 0;
+}
+
 static void test_probe(void)
 {
     const invfs_codec *pmp = invfs_codec_by_algo(INVFS_ALGO_PMP);
@@ -509,10 +578,16 @@ static void test_probe(void)
     char *saved_path;
     int r;
 
-    /* availability of real tools is environment-dependent: just exercise */
+    /* WP105: whether the four EXTERNAL lanes (pmp / jxl / ape / wv) are
+     * installed on the host is an environment fact, not a property of the
+     * registry -- probe() is documented to answer either way, so an absent
+     * helper is reported as a SKIP with the summary counting it, not left as
+     * a bare "info" the reader has to interpret. */
     r = pmp->probe(); ok(r == 0 || r == 1, "probe(pmp) is well-defined");
-    printf("  info  probe: pmp=%d jxl=%d ape=%d wv=%d\n",
-           r, jxl->probe(), ape->probe(), wv->probe());
+    if (r == 0) skip("external helper packMP3 absent: the PMP lane is unexercised");
+    if (jxl->probe() == 0) skip("external helper cjxl absent: the JXL lane is unexercised");
+    if (ape->probe() == 0) skip("external helper mac absent: the APE lane is unexercised");
+    if (wv->probe() == 0) skip("external helper wavpack absent: the WV lane is unexercised");
 
     saved_path = getenv("PATH");
     saved_path = saved_path ? strdup(saved_path) : NULL;
@@ -606,7 +681,7 @@ static void test_packs(void)
     static const uint8_t mz4[6] = { 0, 0, 0, 0, 'M', 'Z' };   /* MZ at off 4 */
     static const uint8_t mz0[6] = { 'M', 'Z', 0, 0, 0, 0 };   /* MZ at off 0 */
     static const uint8_t splt[4] = { 'S', 'P', 'L', 'T' };
-    int r;
+    int r, cp_ok = tool_resolvable("cp");
 
     snprintf(dir, sizeof dir, "/tmp/invfs_pack_test_%d", (int)getpid());
     snprintf(packs, sizeof packs, "%s/packs", dir);
@@ -711,7 +786,12 @@ static void test_packs(void)
     invfs_codec_probe_reset();
 
     all = invfs_codec_all(&n);
-    ok(all != NULL && n == 17,
+    /* 14 static, MINUS the jxl placeholder the override pack replaced (the
+     * pack's entry is the only one for algo 4), PLUS the four fixture packs
+     * that are allowed to register: fakeimg(42), spltmini(43), spltmap(45),
+     * jxlpack(4). dupe(algo 1) collides with builtin ZSTD and badcont(44) is
+     * missing rebuild -- both skipped, asserted separately below. */
+    ok(all != NULL && n == REGISTRY_STATIC_N - 1 + 4,
        "packs registered: 13 static + codec + override + 2 containers "
        "(the override REPLACES the builtin jxl placeholder)");
     ok(all[n - 1].algo == INVFS_ALGO_PPMD,
@@ -740,18 +820,30 @@ static void test_packs(void)
        "extension list -> 50");
     ok(c && c->sniff(mz0, sizeof mz0, "x.png") == 0, "no match -> 0");
 
-    ok(c && c->probe() == 1, "pack probe: cp resolvable (requires)");
+    /* WP105: every fixture pack's argv names `cp`, so a host without it
+     * cannot make a pack probe available. That is an environment, not a
+     * defect -- SKIP the three probe legs, keep the registration legs (which
+     * are gated on manifest completeness, not on the probe). */
+    if (cp_ok) {
+        ok(c && c->probe() == 1, "pack probe: cp resolvable (requires)");
+    } else {
+        skip("pack probe: `cp` does not resolve on this host");
+    }
 
     for (i = 0; i < sizeof data; i++) data[i] = (uint8_t)(i * 29 + 5);
     olen = 0;
-    ok(c && c->encode(data, sizeof data, enc, sizeof enc, &olen) == 0 &&
-       olen == sizeof data && memcmp(enc, data, sizeof data) == 0,
-       "pack encode trampoline (cp = identity)");
-    ok(c && c->decode(enc, olen, dec, sizeof dec) == 0 &&
-       memcmp(dec, data, sizeof data) == 0,
-       "pack decode trampoline (cp = identity)");
-    ok(c && c->decode(enc, olen, dec, sizeof dec - 1) == -1,
-       "pack decode: wrong output size -> -1 (bit-exact or nothing)");
+    if (cp_ok) {
+        ok(c && c->encode(data, sizeof data, enc, sizeof enc, &olen) == 0 &&
+           olen == sizeof data && memcmp(enc, data, sizeof data) == 0,
+           "pack encode trampoline (cp = identity)");
+        ok(c && c->decode(enc, olen, dec, sizeof dec) == 0 &&
+           memcmp(dec, data, sizeof data) == 0,
+           "pack decode trampoline (cp = identity)");
+        ok(c && c->decode(enc, olen, dec, sizeof dec - 1) == -1,
+           "pack decode: wrong output size -> -1 (bit-exact or nothing)");
+    } else {
+        skip("pack encode/decode trampolines: `cp` does not resolve on this host");
+    }
 
     ok(invfs_codec_pack_estimate(c, "whatever", &est) == -1,
        "pack without estimate command -> -1");
@@ -781,7 +873,12 @@ static void test_packs(void)
        "container pack extension list -> 50");
     ok(c && c->sniff(mz0, sizeof mz0, "x.bin") == 0,
        "container pack: no magic/ext match -> 0");
-    ok(c && c->probe() == 1, "container pack probe: all four argv tools resolve");
+    if (cp_ok) {
+        ok(c && c->probe() == 1,
+           "container pack probe: all four argv tools resolve");
+    } else {
+        skip("container pack probe: `cp` does not resolve on this host");
+    }
     def = invfs_codec_pack_def(c);
     ok(def && def->is_container == 1, "pack def: is_container");
     ok(def && def->enumerate && def->extract && def->strip && def->rebuild,
@@ -800,8 +897,12 @@ static void test_packs(void)
        (c->caps & INVFS_CODEC_CAP_WHOLEFILE) &&
        (c->caps & INVFS_CODEC_CAP_SEEK),
        "container pack with a map command: CONTAINER|EXTERNAL|WHOLEFILE|SEEK");
-    ok(c && c->probe && c->probe() == 1,
-       "seekable container pack probe covers the map tool");
+    if (cp_ok) {
+        ok(c && c->probe && c->probe() == 1,
+           "seekable container pack probe covers the map tool");
+    } else {
+        skip("seekable container pack probe: `cp` does not resolve on this host");
+    }
     def = c ? invfs_codec_pack_def(c) : NULL;
     ok(def && def->map && strstr(def->map, "{in}") && strstr(def->map, "{out}"),
        "pack def exposes the map command argv");
@@ -860,7 +961,7 @@ static void test_packs(void)
        c->decode == NULL && (c->caps & INVFS_CODEC_CAP_PACKONLY),
        "reset restores the overridden builtin placeholder (sniff+probe only)");
     all = invfs_codec_all(&n);
-    ok(n == 14, "reset restores the static registry");
+    ok(n == REGISTRY_STATIC_N, "reset restores the static registry");
     invfs_codec_probe_reset();   /* a second reset is harmless */
 
     snprintf(path, sizeof path, "%s/manifest", pack);
@@ -938,6 +1039,19 @@ int main(void)
 {
     printf("codec registry tests\n");
 
+    /* WP105: the registry SHAPE this suite pins is the BUILTIN one. The
+     * system pack dir is host state -- three packs on one box, none on
+     * another, and a qcow2 pack that legitimately bumped generation 1->2 --
+     * so a literal entry count read through invfs_codec_all() said nothing
+     * about this tree. INVFS_CODECPACKS_SYS=0 is a production knob
+     * (src/codecs/codec.c:pack_scan_all), not a test hack; setting it HERE
+     * rather than only in the Makefile's TESTENV makes the binary correct
+     * however it is invoked (make test, run-e2e, or by hand). Packs are then
+     * exercised from the fixture manifests below, and the host-pack path is
+     * covered by the e2e suites, which deliberately run with the knob unset. */
+    setenv("INVFS_CODECPACKS_SYS", "0", 1);
+    invfs_codec_probe_reset();
+
     test_registry();
     test_sniff();
     test_text_family();
@@ -948,7 +1062,7 @@ int main(void)
     test_packs();
     test_profiles();
 
-    printf("%d checks, %d failure(s)\n", checks, failures);
+    printf("%d checks, %d failure(s), %d skip(s)\n", checks, failures, skips);
     printf("%s\n", failures ? "FAIL" : "PASS");
     return failures ? 1 : 0;
 }

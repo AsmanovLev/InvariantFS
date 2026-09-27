@@ -525,6 +525,15 @@ fi
 echo "3 members + table + map per image; notes.img clean"
 
 echo "== class stamps =="
+# WP105: the member stamps (TEXT / BATCHED_BIN) carry the REGISTRY generation
+# -- the MAX generation over every codec the process loaded
+# (codec.c:invfs_registry_generation) -- not the batch codec's own. This suite
+# scopes INVFS_CODECPACKS to its private $WORK/packs, but that does NOT disable
+# /usr/lib/invfs/codecpacks, so a host pack declaring generation = 2 moves the
+# value and the literal was never true here. The class+algo pair is the
+# classification contract, so stamp_is matches that; the CONTAINER stamps below
+# name the rawdisk pack's OWN generation and stay matched exactly.
+stamp_is() { case "$1" in "$2"|"$2 "*) return 0 ;; esac; return 1; }
 C=$("$WORK/classof" "$IMG" disk-mbr.img)
 echo "  disk-mbr.img: $C"
 [ "$C" = "cls=3 algo=16 gen=1" ] || { echo "FAIL: want CONTAINER{RAWDISK=16,1}"; exit 1; }
@@ -533,23 +542,23 @@ echo "  disk-gpt.img: $C"
 [ "$C" = "cls=3 algo=16 gen=1" ] || { echo "FAIL: want CONTAINER{RAWDISK=16,1}"; exit 1; }
 C=$("$WORK/classof" "$IMG" "disk-mbr.img!mbr0001-t83")
 echo "  mbr member1 (text): $C"
-[ "$C" = "cls=7 algo=2 gen=1" ] || { echo "FAIL: want TEXT{PPMD,1}"; exit 1; }
+stamp_is "$C" "cls=7 algo=2" || { echo "FAIL: want TEXT{PPMD} (got $C)"; exit 1; }
 C=$("$WORK/classof" "$IMG" "disk-mbr.img!mbr0002-t07")
 echo "  mbr member2 (elf): $C"
-[ "$C" = "cls=8 algo=14 gen=1" ] || { echo "FAIL: want BATCHED_BIN{ZSTD_BCJ,1}"; exit 1; }
+stamp_is "$C" "cls=8 algo=14" || { echo "FAIL: want BATCHED_BIN{ZSTD_BCJ} (got $C)"; exit 1; }
 C=$("$WORK/classof" "$IMG" "disk-gpt.img!mbr0001-boot")
 echo "  gpt member1 (text): $C"
-[ "$C" = "cls=7 algo=2 gen=1" ] || { echo "FAIL: want TEXT{PPMD,1}"; exit 1; }
+stamp_is "$C" "cls=7 algo=2" || { echo "FAIL: want TEXT{PPMD} (got $C)"; exit 1; }
 C=$("$WORK/classof" "$IMG" "disk-gpt.img!mbr0002-rootfs")
 echo "  gpt member2 (elf): $C"
-[ "$C" = "cls=8 algo=14 gen=1" ] || { echo "FAIL: want BATCHED_BIN{ZSTD_BCJ,1}"; exit 1; }
+stamp_is "$C" "cls=8 algo=14" || { echo "FAIL: want BATCHED_BIN{ZSTD_BCJ} (got $C)"; exit 1; }
 C=$("$WORK/classof" "$IMG" "disk-mbr.img!mbr0011-t83")
 echo "  mbr member11 (zeros): $C"
 [ "$C" = "none" ] || { echo "FAIL: zeros member should stay unclassified"; exit 1; }
 C=$("$WORK/classof" "$IMG" notes.img)
 echo "  notes.img (refused): $C"
 case "$C" in *algo=16*|*cls=3*) echo "FAIL: notes.img carries a pack stamp"; exit 1;; esac
-[ "$C" = "cls=7 algo=2 gen=1" ] || { echo "FAIL: notes.img should be TEXT{PPMD,1}"; exit 1; }
+stamp_is "$C" "cls=7 algo=2" || { echo "FAIL: notes.img should be TEXT{PPMD} (got $C)"; exit 1; }
 
 echo "== verify --deep (reads every container through the map) =="
 $B/invf-verify "$IMG" --deep | tee "$WORK/verify1.log"

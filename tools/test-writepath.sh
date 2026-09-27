@@ -55,7 +55,11 @@ rm -rf "$WORK" && mkdir -p "$WORK/mnt" "$WORK/ref" "$WORK/out"
 cd /dev/shm
 rm -f "$IMG1" "$IMG2"
 
-command -v gpg >/dev/null || { echo "gpg required for leg F"; exit 1; }
+# WP105: gpg is used by leg F only (see below). The other seven legs do not
+# need it, so a host without gpg must SKIP leg F, not lose the suite -- the
+# convention test-p7z.sh:77 / test-qcow2.sh:67 already follow.
+HAVE_GPG=0
+command -v gpg >/dev/null || echo "note: gpg not installed; leg F will be SKIPPED"
 
 fail() { echo "FAIL: $*" >&2; exit 1; }
 
@@ -314,17 +318,21 @@ mnt_up "$IMG1"
 
 echo
 echo "== [F] gpg acceptance: sign + verify over the mounted volume =="
-export GNUPGHOME="$WORK/gnupg"
-rm -rf "$GNUPGHOME" && mkdir -m 700 "$GNUPGHOME"
-gpg --batch --pinentry-mode loopback --passphrase '' \
-    --quick-gen-key 'wp4 writepath <wp4@invfs>' ed25519 sign 2>/dev/null
-head -c 3000000 /dev/urandom > "$MNT/payload.bin"
-gpg --batch --pinentry-mode loopback --passphrase '' \
-    --detach-sign -o "$MNT/payload.bin.sig" "$MNT/payload.bin" 2>/dev/null
-gpg --batch --verify "$MNT/payload.bin.sig" "$MNT/payload.bin" \
-    2>&1 | tee "$WORK/gpg.log"
-grep -q "Good signature" "$WORK/gpg.log" || fail "gpg --verify failed"
-echo "  gpg --verify: Good signature (payload + sig both read via the mount)"
+if command -v gpg >/dev/null; then
+    export GNUPGHOME="$WORK/gnupg"
+    rm -rf "$GNUPGHOME" && mkdir -m 700 "$GNUPGHOME"
+    gpg --batch --pinentry-mode loopback --passphrase '' \
+        --quick-gen-key 'wp4 writepath <wp4@invfs>' ed25519 sign 2>/dev/null
+    head -c 3000000 /dev/urandom > "$MNT/payload.bin"
+    gpg --batch --pinentry-mode loopback --passphrase '' \
+        --detach-sign -o "$MNT/payload.bin.sig" "$MNT/payload.bin" 2>/dev/null
+    gpg --batch --verify "$MNT/payload.bin.sig" "$MNT/payload.bin" \
+        2>&1 | tee "$WORK/gpg.log"
+    grep -q "Good signature" "$WORK/gpg.log" || fail "gpg --verify failed"
+    echo "  gpg --verify: Good signature (payload + sig both read via the mount)"
+else
+    echo "SKIP: leg F (gpg not installed)"
+fi
 
 mnt_down
 fsck_ok "$IMG1"

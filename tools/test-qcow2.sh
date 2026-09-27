@@ -65,7 +65,10 @@ echo "== tools =="
 command -v cc >/dev/null || { echo "FAIL: cc not installed"; exit 1; }
 command -v python3 >/dev/null || { echo "FAIL: python3 not installed"; exit 1; }
 command -v qemu-img >/dev/null || { echo "SKIP: qemu-img not installed"; exit 0; }
-command -v qemu-io >/dev/null || { echo "FAIL: qemu-io not installed"; exit 1; }
+# WP105: qemu-io is a sibling optional tool from the same package as qemu-img
+# (and qemu-img's absence already SKIPs the suite one line above). A host with
+# one but not the other is an environment, not a defect -- SKIP, never FAIL.
+command -v qemu-io >/dev/null || { echo "SKIP: qemu-io not installed"; exit 0; }
 echo "  qemu-img: $(qemu-img --version | head -1)"
 
 echo "== build the pack (the -Wall -Wextra -Werror gate) =="
