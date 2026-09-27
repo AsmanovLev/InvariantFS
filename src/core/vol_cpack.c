@@ -2615,10 +2615,18 @@ int vol_containerpack_sweep(invfs_volume *v, uint64_t inode_id,
      * wait RAW, re-evaluated every sweep (the class predicate's
      * DEFER_ENOSPC case), never fall to generic. rc 1 = the same silent
      * "wait RAW" the tools-absent case uses.
-     * Seekable containers read each member once via a ranged MRMP splice
-     * -- they don't double the on-disk cost during the commit, so the
-     * admission gate does not apply to them either. */
-    if (!def->map && sweep_enospc(v, sum_usize / 2 + INVFS_ENOSPC_MARGIN)) {
+     * The map command changes the READ path (a local splice instead of a
+     * rebuild exec); it does not change what the commit writes. A seekable
+     * container still writes the members, the table, the recipe AND the map
+     * while the original record is stored -- MORE than a map-less one -- so
+     * it is priced exactly like one. Gating it off here (the WP16b
+     * rationale claimed seekable containers "don't double the on-disk cost
+     * during the commit") did not remove the cost, it only moved the
+     * refusal from the admission check to a mid-commit EROFS: the sweep
+     * drove the volume to its ENOSPC floor, flipped it read-only, and only
+     * then failed writing member 0, leaving the file unstamped with no
+     * DEFER_ENOSPC record and a full retry next sweep. */
+    if (sweep_enospc(v, sum_usize / 2 + INVFS_ENOSPC_MARGIN)) {
         vol_stamp_class(v, inode_id, INVFS_CLASS_DEFER_ENOSPC,
                         (uint8_t)pc->algo, pc->generation);
         rc = 1;

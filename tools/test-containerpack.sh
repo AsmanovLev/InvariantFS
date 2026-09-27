@@ -37,8 +37,8 @@
 #     DEFER_ENOSPC: a tight image stamps cls=9{algo,gen} and stays RAW;
 #     freeing space and re-sweeping processes the file.
 #     INVFS_PROFILE: the sweep logs the profile + generic zstd level.
-#   Admission leg: fresh image, INVFS_DEC_MEM_LIMIT=64K -> GENERIC_
-#   MEMLIMIT{40,1}, no decomposition, bit-exact.
+#   Admission leg: fresh image, INVFS_DEC_MEM_LIMIT=64K on the MAP-LESS
+#   pack -> GENERIC_MEMLIMIT{41,1}, no decomposition, bit-exact.
 #
 # Run from the repo root after `make`:  bash tools/test-containerpack.sh
 # Uses /dev/shm (tmpfs) like the other soak scripts. NOTE: blkio treats
@@ -352,17 +352,26 @@ cmp -s "$WORK/orig/multi.splt" "$WORK/out/whole.rng" \
 echo "mid-member / cross-boundary / tail / head / whole-by-windows all exact"
 
 echo "== pack-ABSENT reads still work (the map is self-describing) =="
-# a fresh process with an empty pack dir: algo 40 has no registry entry,
+# WP106: a pack-ABSENT leg must really have no pack. Pointing
+# INVFS_CODECPACKS at an empty dir only empties the FIRST search dir --
+# pack_scan_all() (codec.c) still scans /usr/lib/invfs/codecpacks unless
+# INVFS_CODECPACKS_SYS=0, so on a host with packs installed the "absent"
+# legs below were answered by a SYSTEM pack and proved nothing. The
+# splt_test pack (algo 40/41) only ever lives in this tree, which is why
+# these legs happened to pass, but the isolation was not what it claimed.
+absent() { INVFS_CODECPACKS="$WORK/nopacks" INVFS_CODECPACKS_SYS=0 "$@"; }
+
+# a fresh process with NO pack at all: algo 40 has no registry entry,
 # and STILL every byte comes back, without any pack exec -- that is the
 # point of a seekable container
-INVFS_CODECPACKS=$WORK/nopacks $B/invf-cat "$IMG" multi.splt "$WORK/out/absent" >/dev/null
+absent $B/invf-cat "$IMG" multi.splt "$WORK/out/absent" >/dev/null
 cmp -s "$WORK/orig/multi.splt" "$WORK/out/absent" \
     || { echo "FAIL: pack-absent whole read not bit-exact"; exit 1; }
-INVFS_CODECPACKS=$WORK/nopacks "$WORK/rngread" "$IMG" multi.splt \
+absent "$WORK/rngread" "$IMG" multi.splt \
     $((m2_off + 4096)) 65536 "$WORK/out/absent.rng" >/dev/null
 cmp -s "$WORK/out/ref.midmember" "$WORK/out/absent.rng" \
     || { echo "FAIL: pack-absent ranged read mismatch"; exit 1; }
-INVFS_CODECPACKS=$WORK/nopacks "$WORK/rngread" "$IMG" multi.splt 0 -1 \
+absent "$WORK/rngread" "$IMG" multi.splt 0 -1 \
     "$WORK/out/absent.wrng" >/dev/null
 cmp -s "$WORK/orig/multi.splt" "$WORK/out/absent.wrng" \
     || { echo "FAIL: pack-absent ranged whole read mismatch"; exit 1; }
@@ -388,7 +397,7 @@ cmp -s "$WORK/orig/nest.splt" "$WORK/out/nest2.splt" \
 $B/invf-cat "$IMG" multi.splt "$WORK/out/multi2.splt" >/dev/null
 cmp -s "$WORK/orig/multi.splt" "$WORK/out/multi2.splt" \
     || { echo "FAIL: multi.splt drifted"; exit 1; }
-INVFS_CODECPACKS=$WORK/nopacks $B/invf-cat "$IMG" nest.splt "$WORK/out/nest3.splt" >/dev/null
+absent $B/invf-cat "$IMG" nest.splt "$WORK/out/nest3.splt" >/dev/null
 cmp -s "$WORK/orig/nest.splt" "$WORK/out/nest3.splt" \
     || { echo "FAIL: pack-absent NESTED read not bit-exact"; exit 1; }
 echo "nested splice bit-exact (pack present AND pack absent)"
@@ -456,7 +465,7 @@ cmp -s "$WORK/orig/multi.splt" "$WORK/out/md.splt" \
 cmp -s "$WORK/out/ref.midmember" "$WORK/out/md.rng" \
     || { echo "FAIL: map-deleted ranged read mismatch"; exit 1; }
 # pack absent AND no map: LOUD failure (the WP16a semantics, unchanged)
-if INVFS_CODECPACKS=$WORK/nopacks $B/invf-cat "$IMGMD" multi.splt \
+if absent $B/invf-cat "$IMGMD" multi.splt \
         "$WORK/out/md.absent" 2> "$WORK/mdabsent.err"; then
     echo "FAIL: pack-absent map-less read SUCCEEDED (silent 1:1 break)"; exit 1
 fi
@@ -503,7 +512,7 @@ echo "  multi.splt (nomap): $C"
 INVFS_CODECPACKS=$WORK/packs-nomap $B/invf-cat "$IMGNM" multi.splt "$WORK/out/nm.splt" >/dev/null
 cmp -s "$WORK/orig/multi.splt" "$WORK/out/nm.splt" \
     || { echo "FAIL: map-less exec read not bit-exact"; exit 1; }
-if INVFS_CODECPACKS=$WORK/nopacks $B/invf-cat "$IMGNM" multi.splt \
+if absent $B/invf-cat "$IMGNM" multi.splt \
         "$WORK/out/nm.absent" 2> "$WORK/nmabsent.err"; then
     echo "FAIL: map-less pack-absent read SUCCEEDED (silent 1:1 break)"; exit 1
 fi
@@ -548,18 +557,34 @@ echo "corrupt map: guard refused, rolled back to RAW, generic store, fsck clean"
 echo "== DEFER_ENOSPC (cls=9): tight image defers, freed space re-arms =="
 IMGT=wp16cpack-tight.img
 rm -f "$IMGT"
-python3 - "$WORK/orig" <<'PY'
+python3 - "$WORK/orig" <<'FILLERPY'
 import random, sys
 rnd = random.Random(99)
-# incompressible filler: big enough that free space drops under the
-# DEFER_ENOSPC admission (64 MiB margin + half the member total) once the
-# filler and the container are both in
+# WP106: the filler must land the volume INSIDE the DEFER_ENOSPC admission
+# band, which is bounded on both sides:
+#   above the band -- the gate trips when free < sum_usize/2 + 64 MiB;
+#   below the band -- alloc_blocks sets VOLF_READONLY at hard_min
+#     (total/1024+16 = 67 blocks on a 0.2 GiB image) and the stamp is an
+#     xattr write, so a latched volume cannot RECORD the deferral and the
+#     leg reads back "none".
+# Measured with the pin OFF (the first half below): 60-78 MiB is TOO LOOSE
+# (the gate admits it), 100-140 MiB all give cls=9. 120 MiB is the middle.
 open(sys.argv[1] + "/filler.bin", "wb").write(rnd.randbytes(120 * 1024 * 1024))
-PY
+FILLERPY
 $B/invf-mkfs "$IMGT" 0.2 >/dev/null
 $B/invf-cp "$IMGT" "$WORK/orig/filler.bin" filler.bin >/dev/null
 $B/invf-cp "$IMGT" "$WORK/orig/multi.splt" multi.splt >/dev/null
-$B/invf-sweep "$IMGT" > "$WORK/sweept1.log" 2>&1 || { cat "$WORK/sweept1.log"; exit 1; }
+# WP106, first half: the stamp is IDEMPOTENT while the volume stays tight.
+# INVFS_SPT0_NOPIN=1 is required here, and the reason is the only thing
+# worth teaching. The SPT0 save point PINS every block the live recipes
+# name, and the pin is released at the START of the next sweep ("reclaim:
+# N blocks the previous save point held are no longer referenced"), so on
+# an UNCHANGED volume free space reads ~41 MiB during sweep 1 and ~104 MiB
+# during sweep 2. With the pin on the gate would correctly defer in sweep 1
+# and correctly admit in sweep 2 -- "still tight" would be unassertable and
+# the leg would be testing the pin rather than the gate. The pin is working
+# as designed (cf. tools/test-rollback.sh leg [W]).
+INVFS_SPT0_NOPIN=1 $B/invf-sweep "$IMGT" > "$WORK/sweept1.log" 2>&1 || { cat "$WORK/sweept1.log"; exit 1; }
 if grep -q "splt_test (codecpack)" "$WORK/sweept1.log"; then
     echo "FAIL: decomposition ran on a volume too tight for it"; exit 1
 fi
@@ -571,14 +596,40 @@ $B/invf-cat "$IMGT" multi.splt "$WORK/out/tight1.splt" >/dev/null
 cmp -s "$WORK/orig/multi.splt" "$WORK/out/tight1.splt" \
     || { echo "FAIL: DEFER_ENOSPC file not bit-exact"; exit 1; }
 # re-sweeping while still tight re-stamps and stays RAW (idempotent)
-$B/invf-sweep "$IMGT" > "$WORK/sweept2.log" 2>&1 || { cat "$WORK/sweept2.log"; exit 1; }
+INVFS_SPT0_NOPIN=1 $B/invf-sweep "$IMGT" > "$WORK/sweept2.log" 2>&1 || { cat "$WORK/sweept2.log"; exit 1; }
 if grep -q "splt_test (codecpack)" "$WORK/sweept2.log"; then
     echo "FAIL: decomposition ran on the still-tight re-sweep"; exit 1
 fi
 C=$("$WORK/classof" "$IMGT" multi.splt)
 [ "$C" = "cls=9 algo=40 gen=1" ] || { echo "FAIL: DEFER_ENOSPC re-stamp drifted"; exit 1; }
-# free space appears: the filler goes, the NEXT sweep decomposes
-"$WORK/cbrm" "$IMGT" filler.bin
+
+# WP106, second half: free space appears and the NEXT sweep decomposes.
+# Rebuilt from scratch with the pin ON (the production default), because on
+# v3 the pin release IS the reclaim trigger. With the pin on, 120 MiB of
+# filler is what makes the first sweep defer, and the pin release at the
+# start of the second sweep hands back ~16k blocks, which re-arms the
+# decomposition. So the re-arm is driven by a real reclaim. It is NOT
+# driven by the fixture deleting a file: on v3 an unlink frees the NAME and
+# the blocks return only through that reclaim path, so "delete the filler
+# and expect the sweep to re-arm" does not hold. Measured on a plain 20 MiB
+# file with no container involved: import free=94658, after sweep free=94624,
+# after unlink free=94624 (unchanged) -- a file deleted BEFORE its first
+# sweep does drop, to 94978. That gap is general to swept files and is filed
+# in impl_docs/AUDIT.md as E2E-BASELINE (6), not papered over here.
+rm -f "$IMGT"
+python3 - "$WORK/orig" <<'FILLER2PY'
+import random, sys
+# Measured with the pin ON: 60 MiB is the size that defers on sweep 1 and
+# re-arms on sweep 2 (the pin release hands back the difference).
+open(sys.argv[1] + "/filler.bin", "wb").write(random.Random(99).randbytes(60 * 1024 * 1024))
+FILLER2PY
+$B/invf-mkfs "$IMGT" 0.2 >/dev/null
+$B/invf-cp "$IMGT" "$WORK/orig/filler.bin" filler.bin >/dev/null
+$B/invf-cp "$IMGT" "$WORK/orig/multi.splt" multi.splt >/dev/null
+$B/invf-sweep "$IMGT" > "$WORK/sweept3a.log" 2>&1 || { cat "$WORK/sweept3a.log"; exit 1; }
+C=$("$WORK/classof" "$IMGT" multi.splt)
+[ "$C" = "cls=9 algo=40 gen=1" ] \
+    || { echo "FAIL: tight image did not defer before the re-arm, got $C"; exit 1; }
 $B/invf-sweep "$IMGT" > "$WORK/sweept3.log" 2>&1 || { cat "$WORK/sweept3.log"; exit 1; }
 grep -q "multi.splt: splt_test (codecpack)" "$WORK/sweept3.log" \
     || { echo "FAIL: freed space did not re-arm the decomposition"; cat "$WORK/sweept3.log"; exit 1; }
@@ -590,7 +641,7 @@ $B/invf-ls "$IMGT" | grep -q "multi\.splt!mbrmap" \
 $B/invf-cat "$IMGT" multi.splt "$WORK/out/tight3.splt" >/dev/null
 cmp -s "$WORK/orig/multi.splt" "$WORK/out/tight3.splt" \
     || { echo "FAIL: re-armed container not bit-exact"; exit 1; }
-INVFS_CODECPACKS=$WORK/nopacks "$WORK/rngread" "$IMGT" multi.splt \
+absent "$WORK/rngread" "$IMGT" multi.splt \
     $((m2_off + 4096)) 65536 "$WORK/out/tight3.rng" >/dev/null
 cmp -s "$WORK/out/ref.midmember" "$WORK/out/tight3.rng" \
     || { echo "FAIL: re-armed container pack-absent ranged read mismatch"; exit 1; }
@@ -659,16 +710,29 @@ echo "profile env reaches pack execs (pack saw INVFS_PROFILE=dense)"
 echo "== admission leg: INVFS_DEC_MEM_LIMIT=64K =="
 $B/invf-mkfs "$IMGMEM" 0.2 >/dev/null
 $B/invf-cp "$IMGMEM" "$WORK/orig/multi.splt" multi.splt >/dev/null
-# the ABI default working set (sum of member usizes + container size)
-# exceeds 64K -> policy refusal before any extract; GENERIC_MEMLIMIT{40,1}
-INVFS_DEC_MEM_LIMIT=64K $B/invf-sweep "$IMGMEM" > "$WORK/sweep-mem.log" 2>&1 \
+# WP106: this leg must use the MAP-LESS pack (algo 41, $WORK/packs-nomap),
+# not splt_test (algo 40). It used algo 40, which registers a `map` command
+# and is therefore SEEKABLE -- and the decode-memory gate deliberately does
+# not apply to seekable packs (vol_cpack.c: "the bytes stream through the
+# read path ... so the size guard only applies to non-seekable
+# decompressors"; ws is set to 0 and the guard short-circuits on !def->map).
+# That exemption is correct on the merits and was verified here, not assumed:
+# the map step is a pack exec writing a small map file, and the map commit
+# reads recipe segments + member siblings by range -- neither buffers the
+# whole container. So with algo 40 the leg could only ever fail, and it did:
+# "FAIL: decomposition ran under a 64K decode-memory limit". The ABI default
+# working set (sum of member usizes + container size) is what 64K is
+# compared against, and that model only ever applied to the map-less path.
+# So: same policy, same stamp, on the pack it governs.
+INVFS_CODECPACKS=$WORK/packs-nomap INVFS_DEC_MEM_LIMIT=64K \
+    $B/invf-sweep "$IMGMEM" > "$WORK/sweep-mem.log" 2>&1 \
     || { cat "$WORK/sweep-mem.log"; exit 1; }
-if grep -q "splt_test (codecpack)" "$WORK/sweep-mem.log"; then
+if grep -q "splt_nomap (codecpack)" "$WORK/sweep-mem.log"; then
     echo "FAIL: decomposition ran under a 64K decode-memory limit"; exit 1
 fi
 C=$("$WORK/classof" "$IMGMEM" multi.splt)
 echo "  multi.splt (memlimit): $C"
-[ "$C" = "cls=5 algo=40 gen=1" ] || { echo "FAIL: want GENERIC_MEMLIMIT{SPLT=40,1}"; exit 1; }
+[ "$C" = "cls=5 algo=41 gen=1" ] || { echo "FAIL: want GENERIC_MEMLIMIT{SPLT_NOMAP=41,1}, got $C"; exit 1; }
 $B/invf-cat "$IMGMEM" multi.splt "$WORK/out/multimem.splt" >/dev/null
 cmp -s "$WORK/orig/multi.splt" "$WORK/out/multimem.splt" \
     || { echo "FAIL: memlimit read not bit-exact"; exit 1; }

@@ -611,21 +611,32 @@ cmp -s "$WORK/orig/disk-mbr.img" "$WORK/out/whole2.rng" \
 [ -s "$WORK/out/eof.rng" ] && { echo "FAIL: read past EOF returned bytes"; exit 1; }
 echo "mid-member / gap crossings / head / tail / marker gap / whole-by-windows all exact"
 
+# WP106: a pack-ABSENT leg must really have no pack. Pointing
+# INVFS_CODECPACKS at an empty dir only empties the FIRST search dir --
+# pack_scan_all() (codec.c) still scans /usr/lib/invfs/codecpacks unless
+# INVFS_CODECPACKS_SYS=0, and rawdisk.codecpack is installed there on any
+# host that has run the packager. The map-deleted leg's "pack absent AND no
+# map must fail LOUDLY" check therefore read the file back through the
+# SYSTEM pack's rebuild exec on such a host and reported a 1:1 break that
+# was not one (the bytes were bit-exact; the pack was simply not absent).
+# Every absent leg below goes through this wrapper.
+absent() { INVFS_CODECPACKS="$WORK/nopacks" INVFS_CODECPACKS_SYS=0 "$@"; }
+
 echo "== pack-ABSENT reads still work (the map is self-describing) =="
-# a fresh process with an empty pack dir: algo 16 has no registry entry,
+# a fresh process with NO pack at all: algo 16 has no registry entry,
 # and STILL every byte comes back, without any pack exec -- the point of
 # a seekable container
-INVFS_CODECPACKS=$WORK/nopacks $B/invf-cat "$IMG" disk-mbr.img "$WORK/out/absent.a" >/dev/null
+absent $B/invf-cat "$IMG" disk-mbr.img "$WORK/out/absent.a" >/dev/null
 cmp -s "$WORK/orig/disk-mbr.img" "$WORK/out/absent.a" \
     || { echo "FAIL: pack-absent MBR read not bit-exact"; exit 1; }
-INVFS_CODECPACKS=$WORK/nopacks $B/invf-cat "$IMG" disk-gpt.img "$WORK/out/absent.b" >/dev/null
+absent $B/invf-cat "$IMG" disk-gpt.img "$WORK/out/absent.b" >/dev/null
 cmp -s "$WORK/orig/disk-gpt.img" "$WORK/out/absent.b" \
     || { echo "FAIL: pack-absent GPT read not bit-exact"; exit 1; }
-INVFS_CODECPACKS=$WORK/nopacks "$WORK/rngread" "$IMG" disk-gpt.img \
+absent "$WORK/rngread" "$IMG" disk-gpt.img \
     $((b_p2_off + 4096)) 65536 "$WORK/out/absent.rng" >/dev/null
 cmp -s "$WORK/out/ref.midmember" "$WORK/out/absent.rng" \
     || { echo "FAIL: pack-absent ranged read mismatch"; exit 1; }
-INVFS_CODECPACKS=$WORK/nopacks "$WORK/rngread" "$IMG" disk-mbr.img 0 -1 \
+absent "$WORK/rngread" "$IMG" disk-mbr.img 0 -1 \
     "$WORK/out/absent.wrng" >/dev/null
 cmp -s "$WORK/orig/disk-mbr.img" "$WORK/out/absent.wrng" \
     || { echo "FAIL: pack-absent ranged whole read mismatch"; exit 1; }
@@ -680,7 +691,7 @@ dd if="$WORK/orig/disk-mbr.img" of="$WORK/out/md.ref" bs=1 skip=$((a_p2_off + 40
 cmp -s "$WORK/out/md.ref" "$WORK/out/md.rng" \
     || { echo "FAIL: map-deleted ranged read mismatch"; exit 1; }
 # pack absent AND no map: LOUD failure (the WP16a semantics, unchanged)
-if INVFS_CODECPACKS=$WORK/nopacks $B/invf-cat "$IMGMD" disk-mbr.img \
+if absent $B/invf-cat "$IMGMD" disk-mbr.img \
         "$WORK/out/md.absent" 2> "$WORK/mdabsent.err"; then
     echo "FAIL: pack-absent map-less read SUCCEEDED (silent 1:1 break)"; exit 1
 fi
@@ -719,7 +730,7 @@ $B/invf-sweep "$IMGR1" >/dev/null 2>&1   # settle: zeros member goes generic
 UDEC=$(used_mib "$IMGR1")
 $B/invf-mkfs "$IMGR2" 0.2 >/dev/null
 $B/invf-cp "$IMGR2" "$WORK/orig/disk-mbr.img" disk-mbr.img >/dev/null
-INVFS_CODECPACKS=$WORK/nopacks $B/invf-sweep "$IMGR2" >/dev/null 2>&1
+absent $B/invf-sweep "$IMGR2" >/dev/null 2>&1
 UGEN=$(used_mib "$IMGR2")
 awk -v raw="$a_size" -v u0="$U0" -v uraw="$URAW" -v udec="$UDEC" -v ugen="$UGEN" 'BEGIN {
     gib = 1048576.0;

@@ -144,10 +144,21 @@ static char *helper_takeenv(const char *name)
 
 /* Rebuild a minimal environment. Names in INVFS_HELPER_KEEPENV are copied
  * through (except LD_*), TMPDIR is forced to the sandbox scratch, and PATH
- * is the minimal system path unless PATH itself is being kept. */
+ * is the minimal system path unless PATH itself is being kept.
+ *
+ * WP106: INVFS_PROFILE joins the always-kept set. vol_open() parses it and
+ * then RE-PUBLISHES the effective name with setenv() precisely so that pack
+ * subprocesses run under the volume's profile (vol_cpack.c step 5/6 call the
+ * pack's exec with no profile argument in the manifest ABI). WP61's scrub
+ * landed a month after that contract and silently deleted it, so a pack
+ * that reads INVFS_PROFILE saw it unset while the sweep's own logs reported
+ * the profile in use. It is an allowlist entry, not a pass-through: the
+ * scrub's containment properties are unchanged (LD_* still refused, HOME /
+ * user secrets still dropped, PATH still the minimal default). */
 static void helper_scrub_env(const invfs_helper_sandbox *sb)
 {
-    static const char *always[] = { "LANG", "LC_ALL", "LC_CTYPE" };
+    static const char *always[] = { "LANG", "LC_ALL", "LC_CTYPE",
+                                    "INVFS_PROFILE" };
     const char *keep = getenv("INVFS_HELPER_KEEPENV");
     char namebuf[512];
     char *names[32];

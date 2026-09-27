@@ -74,6 +74,13 @@ assert maxsz > 4 * 1024 * 1024, "no >4MB member picked"
 print("bins.tar: %d members, %.1f MB, biggest member %.1f MB"
       % (len(picked), os.path.getsize(os.path.join(d, "bins.tar")) / 1048576,
          maxsz / 1048576))
+# WP106: how many members this host's /usr/bin actually yielded is HOST
+# dependent -- the spread cands[::37][:24] caps at 24 but the stride only
+# produces ceil(len(cands)/37) of them, so a host with a smaller /usr/bin
+# gets fewer. The stamp leg below asserts EVERY member batched, against this
+# count, instead of a literal floor the fixture cannot guarantee.
+with open(os.path.join(d, "bins.count"), "w") as f:
+    f.write("%d\n" % len(picked))
 
 # --- texts.tar: C sources (text parts -> PPMd batches) ---
 os.makedirs(os.path.join(d, "texts"))
@@ -190,7 +197,15 @@ for p in $($B/invf-ls "$IMG" | awk '/!/ {print $5}'); do
     esac
 done
 [ "$ok" = 1 ] || exit 1
-[ "$n_bz" -ge 20 ] || { echo "FAIL: only $n_bz batched binary parts"; exit 1; }
+# WP106: assert EVERY member batched, against the count THIS host's fixture
+# actually produced. A literal floor is a number the host decides (the
+# /usr/bin scan yields 18 members here, 24 on a fuller one) and it can only
+# ever fail for the wrong reason; the real invariant is that no member of
+# bins.tar is left unstamped, which the per-member stamp_is arm above
+# already established for the ones it saw.
+N_BINS=$(cat "$WORK/orig/bins.count")
+[ "$n_bz" -eq "$N_BINS" ] \
+    || { echo "FAIL: $n_bz/$N_BINS bins.tar members batched (not all)"; exit 1; }
 [ "$n_tz" -ge 10 ] || { echo "FAIL: only $n_tz batched text parts"; exit 1; }
 [ "$n_gen" -ge 1 ] || { echo "FAIL: misc.tar members should stay generic"; exit 1; }
 echo "stamps: $n_bz BATCHED_BIN{ZSTD_BCJ} parts, $n_tz TEXT{PPMD} parts, $n_gen generic parts"
