@@ -55,3 +55,8 @@ map = bin/qcow2 map {recipe} {out}
 # than the pack generation is re-derived from the reconstructed stream.
 decomp_gen = 1
 estimate = bin/qcow2 estimate {in}
+# BUILD: this pack links zlib (it inflates compressed clusters and reproduces
+# their deflate streams). `libs` is build-time only -- neither the engine nor
+# parse_manifest() reads it. tools/pack-libs.sh (and `make print-libs-<pack>`)
+# does, so a harness link line does not hand-maintain it.
+libs = -lz

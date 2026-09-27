@@ -166,14 +166,42 @@ PLUGIN_CFLAGS_qcow2 := $(PLUGIN_CFLAGS) -I$(SRC)/zlib -DZ_PREFIX
 PLUGIN_EXTRA_qcow2 := $(OBJ)/deflate_repro.o $(OBJ)/deflate_backend_system.o \
                       $(OBJ)/deflate_backend_stock.o $(STOCK_ZLIB_O)
 
+# WP113: a pack's LINK LIBRARIES come from its own manifest, `libs = -lz`,
+# exactly as the registry's build-helpers.sh pack_libs() reads them
+# (registry tools/build-helpers.sh:47). Before this, the .so rule hardcoded
+# `-lz` for all eight packs, so the manifest field was dead here and a pack
+# that gained a dependency was invisible to this repo's build -- the same
+# class of bug as WP109, one layer up. The filter (flag-shaped tokens only,
+# everything else reported and dropped) lives in tools/pack-libs.sh, which is
+# also what `make print-libs-<pack>` runs, so there is exactly one reader.
+PACK_LIBS = $(shell bash tools/pack-libs.sh $(call PACKDIR,$(1)))
+
 define PLUGIN_SO_RULE
-$(call PACKDIR,$(1))/lib$(1).so: $(call PACKDIR,$(1))/$(1).c $(SRC)/include/ivpack_api.h $(SRC)/include/ivpack_impl.h $(PLUGIN_EXTRA_$(1))
-	$(CC) $(if $(PLUGIN_CFLAGS_$(1)),$(PLUGIN_CFLAGS_$(1)),$(PLUGIN_CFLAGS)) -o $$@ $$< $(PLUGIN_EXTRA_$(1)) -lz -ldl
+$(call PACKDIR,$(1))/lib$(1).so: $(call PACKDIR,$(1))/$(1).c $(call PACKDIR,$(1))/manifest $(SRC)/include/ivpack_api.h $(SRC)/include/ivpack_impl.h $(PLUGIN_EXTRA_$(1))
+	$(CC) $(if $(PLUGIN_CFLAGS_$(1)),$(PLUGIN_CFLAGS_$(1)),$(PLUGIN_CFLAGS)) -o $$@ $$< $(PLUGIN_EXTRA_$(1)) -ldl $(call PACK_LIBS,$(1))
 endef
 $(foreach p,$(CPACKS),$(eval $(call PLUGIN_SO_RULE,$(p))))
 
 PLUGIN_SO := $(foreach p,$(CPACKS),$(call PACKDIR,$(p))/lib$(p).so)
 plugin-so: $(PLUGIN_SO)
+
+# WP113: the CLI half of every containerpack -- bin/<name>, the helper the
+# pack's own manifest argv names and that each tools/test-<pack>.sh builds
+# for itself with a hand-written `cc -std=c11 -O2 -Wall -Wextra -Werror` line.
+# Built here too, from the same manifest `libs`, so a pack's link needs are
+# declared once and the harnesses can ask for them (`print-libs-%`).
+HELPER_CFLAGS := -std=c11 -O2 -Wall -Wextra -Werror
+HELPER_CFLAGS_qcow2 := $(HELPER_CFLAGS) -I$(SRC)/codecs -I$(SRC)/zlib -DZ_PREFIX
+define HELPER_RULE
+$(call PACKDIR,$(1))/bin/$(1): $(call PACKDIR,$(1))/$(1).c $(call PACKDIR,$(1))/manifest $(PLUGIN_EXTRA_$(1))
+	@mkdir -p $$(dir $$@)
+	$(CC) $(if $(HELPER_CFLAGS_$(1)),$(HELPER_CFLAGS_$(1)),$(HELPER_CFLAGS)) -o $$@ $$< $(PLUGIN_EXTRA_$(1)) $(call PACK_LIBS,$(1))
+endef
+$(foreach p,$(CPACKS),$(eval $(call HELPER_RULE,$(p))))
+
+HELPERS := $(foreach p,$(CPACKS),$(call PACKDIR,$(p))/bin/$(p))
+helpers: $(HELPERS)
+
 
 # The e2e harnesses that compile a pack's CLI themselves (tools/test-ivpacks.sh)
 # must link the same extras as the .so rule above, or they go stale the moment a
@@ -185,6 +213,14 @@ plugin-so: $(PLUGIN_SO)
 # fall through to a silently under-linked binary.
 print-obj-%:
 	@printf '%s\n' $(PLUGIN_EXTRA_$*)
+
+# WP113: the same service for a pack's `libs`, so a harness compiling bin/<p>
+# itself never hand-maintains the link flags either. Prints the accepted
+# flags, one line of space-separated tokens (empty for the seven packs that
+# link libc only); non-link tokens in the manifest are reported on stderr and
+# dropped by the same PACK_LIBS filter the build uses.
+print-libs-%:
+	@bash tools/pack-libs.sh $(call PACKDIR,$*)
 
 # Same service for the harnesses that compile a small main() against the
 # engine: hand-written `-I` lists go stale the moment a header moves into a
