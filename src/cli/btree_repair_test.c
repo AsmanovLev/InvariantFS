@@ -61,6 +61,26 @@
 static int checks = 0;
 static int failures = 0;
 
+/* WP104: a setup error returns 2 from somewhere in the middle of a very long
+ * main(). Those paths printed nothing, so the tail of the log was whatever
+ * the PREVIOUS run left -- typically "56 checks, 0 failure(s)" -- and a
+ * harness reading it saw a green tally next to a red exit code, with no way
+ * to tell that the tally was stale. Every exit now tallies and names the
+ * phase it died in. (exit 2 is a legitimate code: it is not a failed check,
+ * and the tally says so. What it must never do is exit silently.) */
+static const char *g_phase = "startup";
+static int g_tallied = 0;
+
+static void tally_on_exit(void)
+{
+    if (g_tallied)
+        return;
+    g_tallied = 1;
+    printf("%d checks, %d failure(s) -- ABORTED in phase %s\n",
+           checks, failures, g_phase);
+    fflush(stdout);
+}
+
 static void ok(int cond, const char *what)
 {
     checks++;
@@ -555,6 +575,10 @@ int main(int argc, char **argv)
     int lost_names = 0, cli;
     char cmd[1200];
 
+    if (atexit(tally_on_exit) != 0) {
+        fprintf(stderr, "btree_repair_test: atexit(tally_on_exit) failed\n");
+        return 2;
+    }
     for (i = 1; i < argc; i++) {
         if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) {
             fprintf(stderr, "usage: %s [scratch-dir]\n", argv[0]);
@@ -584,6 +608,7 @@ int main(int argc, char **argv)
 
     printf("WP86: a torn v3 base page must be survivable (btree_repair_test)\n");
 
+    g_phase = "A: build + fold";
     /* ---- A: build + fold ---- */
     snprintf(cmd, sizeof cmd, "%s/bin/invf-mkfs %s 32 2>/dev/null", g_bin, g_img);
     if (system(cmd) != 0) {
@@ -593,6 +618,7 @@ int main(int argc, char **argv)
     if (build_and_fold() != 0)
         return 2;
 
+    g_phase = "B: pick a leaf, tear it";
     /* ---- B: pick a leaf, tear it ---- */
     memset(&g_lp, 0, sizeof g_lp);
     if (vol_v3_base_root(g_v, &root) != 0)
@@ -642,6 +668,7 @@ int main(int argc, char **argv)
     if (!g_v)
         return 1;
 
+    g_phase = "C: report";
     /* ---- C: report ---- */
     memset(&rep, 0, sizeof rep);
     err[0] = 0;
@@ -662,6 +689,7 @@ int main(int argc, char **argv)
     printf("  invf-fsck exit code on the damaged volume: %d\n", cli);
     ok(cli == 3, "invf-fsck exits 3 (damage) on a damaged volume");
 
+    g_phase = "D: reads";
     /* ---- D: reads ---- */
     for (i = 0; i < (int)NFILE; i++) {
         invfs_v3_inode in;
@@ -719,6 +747,7 @@ int main(int argc, char **argv)
         ok(n < 0, "readdir fails loudly instead of silently listing fewer names");
     }
 
+    g_phase = "E: repair";
     /* ---- E: repair ---- */
     cli = fsck_cli_offline(g_img, 1);
     printf("  invf-fsck -f exit code on the damaged volume: %d\n", cli);
@@ -1219,6 +1248,7 @@ int main(int argc, char **argv)
         unlink(img5);
     }
 
+    g_phase = "F: a torn root page";
     /* ---- F: a torn root page ---- */
     {
         char img2[512];
@@ -1285,6 +1315,7 @@ int main(int argc, char **argv)
         unlink(img2);
     }
 
+    g_phase = "G: a save point on a damaged base tree";
     /* ---- G: a save point on a damaged base tree ---- */
     {
         invfs_volume *v3;
@@ -1370,6 +1401,7 @@ int main(int argc, char **argv)
     }
 
     unlink(g_img);
+    g_tallied = 1;              /* the real tally is about to be printed */
     printf("%d checks, %d failure(s)\n", checks, failures);
     if (failures) {
         printf("BTREE REPAIR TEST FAIL\n");

@@ -51,6 +51,15 @@ CORE_OBJS_FILE := build/core_objs.txt
 # is the deployed behaviour.
 TESTENV := INVFS_CODECPACKS_SYS=0
 
+# WP104: run every unit-suite command in a private /tmp + /dev/shm (mount
+# namespace, no root required, same shape as run-e2e.sh's ISOLATED mode).
+# The unit binaries write to FIXED /tmp names and take their scratch dir
+# from argv, and the recipe hands them /tmp -- which is shared with every
+# worktree and every concurrent `make test`, and is a tmpfs on most hosts.
+# A killed run therefore leaves residue the next run trips over. See
+# tools/run-unit-isolated.sh for what this does and does NOT fix.
+TESTISO := bash tools/run-unit-isolated.sh
+
 TOOLS   := invf-mkfs invf-verify invf-fsck invf-cp invf-cat invf-ls invf-stat \
            invf-zip invf-arctest invf-blkio_test invf-fuse invf-import invf-sweep meta_probe \
            invf-stats invf-resize invf-rollback invf-l2ptest invfs-pack \
@@ -250,7 +259,8 @@ test: $(OUT)/invf-arctest $(OUT)/invf-blkio_test $(OUT)/invf-codec_test \
       $(OUT)/invf-deflate_repro_test $(OUT)/invf-plugin_host_test $(OUT)/invf-plugin_mt_test \
       $(OUT)/invf-window_test \
       $(OUT)/invf-ivpack_packs_test $(OUT)/invf-mkfs $(OUT)/invf-cp \
-      $(OUT)/invf-sweep plugin-so $(CORE_OBJS_FILE)
+      $(OUT)/invf-sweep $(OUT)/invf-fsck $(OUT)/invf-plugin-host \
+      plugin-so $(CORE_OBJS_FILE)
 	@# WP101: run the unit suite with the system codecpack directory off.
 	@# invf-codec_test's registry-shape assertions count the STATIC
 	@# codecs, but pack_scan_all() also scans /usr/lib/invfs/codecpacks,
@@ -259,26 +269,37 @@ test: $(OUT)/invf-arctest $(OUT)/invf-blkio_test $(OUT)/invf-codec_test \
 	@# deployed binary gets, so this is not a behaviour change.
 	@# (Note: `export` in a recipe does not survive to the next line here,
 	@# so the variable is applied per command as $(TESTENV).)
-	$(TESTENV) $(OUT)/invf-arctest
-	$(TESTENV) $(OUT)/invf-blkio_test
-	$(TESTENV) $(OUT)/invf-codec_test
+	@#
+	@# WP104: every command below runs through $(TESTISO), which gives it
+	@# a private /tmp and /dev/shm (mount namespace, no root). Two
+	@# exceptions, both deliberate:
+	@#   invf-helper_exec_test -- it branches on getuid(): unprivileged it
+	@#     SKIPs the privilege-drop checks, and inside a user namespace
+	@#     (fake root) those checks run and FAIL. Changing what a test
+	@#     asserts is not isolation, it is sabotage; it already uses a
+	@#     per-pid scratch dir, so it has no residue to collide with.
+	@#   check-repo-hygiene.sh -- it reads git, which must see the real
+	@#     worktree; nothing in it writes outside it.
+	$(TESTENV) $(TESTISO) $(OUT)/invf-arctest
+	$(TESTENV) $(TESTISO) $(OUT)/invf-blkio_test
+	$(TESTENV) $(TESTISO) $(OUT)/invf-codec_test
 	$(TESTENV) $(OUT)/invf-helper_exec_test
-	$(TESTENV) $(OUT)/invf-metabuf_test
-	$(TESTENV) $(OUT)/invf-btree_test
-	$(TESTENV) $(OUT)/invf-delta_test
-	$(TESTENV) $(OUT)/invf-concurrency_test /tmp
-	$(TESTENV) $(OUT)/invf-sweep_v3_test /tmp
-	$(TESTENV) $(OUT)/invf-btree_repair_test /tmp
-	$(TESTENV) $(OUT)/invf-symlink_v3_test /tmp
-	$(TESTENV) $(OUT)/invf-large_file_v3_test /tmp
-	$(TESTENV) $(OUT)/invf-dedupe_v3_test /tmp
-	$(TESTENV) $(OUT)/invf-window_test /tmp
-	$(TESTENV) $(OUT)/invf-deflate_repro_test
-	$(TESTENV) $(OUT)/invf-plugin_host_test
-	$(TESTENV) $(OUT)/invf-plugin_mt_test
-	$(TESTENV) $(OUT)/invf-ivpack_packs_test
-	$(TESTENV) bash tools/test-sweep-ui.sh
-	$(TESTENV) bash tools/lint-test-heredocs.sh
+	$(TESTENV) $(TESTISO) $(OUT)/invf-metabuf_test
+	$(TESTENV) $(TESTISO) $(OUT)/invf-btree_test
+	$(TESTENV) $(TESTISO) $(OUT)/invf-delta_test
+	$(TESTENV) $(TESTISO) $(OUT)/invf-concurrency_test /tmp
+	$(TESTENV) $(TESTISO) $(OUT)/invf-sweep_v3_test /tmp
+	$(TESTENV) $(TESTISO) $(OUT)/invf-btree_repair_test /tmp
+	$(TESTENV) $(TESTISO) $(OUT)/invf-symlink_v3_test /tmp
+	$(TESTENV) $(TESTISO) $(OUT)/invf-large_file_v3_test /tmp
+	$(TESTENV) $(TESTISO) $(OUT)/invf-dedupe_v3_test /tmp
+	$(TESTENV) $(TESTISO) $(OUT)/invf-window_test /tmp
+	$(TESTENV) $(TESTISO) $(OUT)/invf-deflate_repro_test
+	$(TESTENV) $(TESTISO) $(OUT)/invf-plugin_host_test
+	$(TESTENV) $(TESTISO) $(OUT)/invf-plugin_mt_test
+	$(TESTENV) $(TESTISO) $(OUT)/invf-ivpack_packs_test
+	$(TESTENV) $(TESTISO) bash tools/test-sweep-ui.sh
+	$(TESTENV) $(TESTISO) bash tools/lint-test-heredocs.sh
 	$(TESTENV) bash tools/check-repo-hygiene.sh
 
 # repo hygiene is also a standalone gate, for when you do not want a rebuild
