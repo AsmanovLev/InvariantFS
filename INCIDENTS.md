@@ -1286,3 +1286,43 @@ across the two trees, and the three that differ are `invf-sweep.o` (stale),
   (AGENTS.md §1.7); the shipped commit is the rationale. There is no ADR:
   this was a bug in the B+ tree splice, not a design decision. The page
   geometry it touches is `docs/adr/ADR-005-asymmetric-btree-page-sizing.md`.
+
+## OPEN (WP119) — the containerpack size guard declines real coverage
+
+**Status:** Open. Filed by WP119 (`cpack: refuse a container decomposition that
+is not a gain`, `main` `42852d2`).
+
+The guard landed with its red case proven, but it changes which fixtures the
+qcow2 sweep lane accepts, and that has two consequences that outlive the
+branch.
+
+**1. The sweep-level MRM2/REPRO read path is no longer exercised through a
+volume.** Every compressed-cluster fixture in `tools/test-qcow2.sh` and
+`tools/test-qcow2-zlib.sh` is now size-declined (disks +86,016 B, diskv2
++126,976 B, compc +409,600 B, whole zlib image +409 KiB, all packs-on vs
+packs-off). `cpack_map_serve` re-deflating per request is therefore no longer
+driven end to end by a volume. It is still covered at the pack level — MRM2
+with REPRO entries, Q2R3 rebuild == source, diskimg == qemu-img — and those
+proofs were moved to the pack-level leg, which never consults the guard.
+Restoring volume-level coverage needs a compressed fixture that is genuinely a
+win; the Q2R3 recipe shape does not currently produce one, and
+`test-rawdisk.sh` only covers the sparse case.
+
+**2. The guard's baseline is asymmetric, and four real regressions get through.**
+`vol_containerpack_sweep` charges the original its **full** length rather than
+`min(zstd19(orig), orig)` — the ZIP pack's model, followed for consistency. For
+a container whose data is highly compressible that is generous: measured
+fixtures **diska +544,768 B, diskb +446,464 B, qgen +393,216 B, qzero
++520,192 B** (packs on vs off) are decompositions that are a net regression the
+guard accepts, because it credits the container 1.2–4.4 MB while the generic
+lane stores it for 204–614 KiB.
+
+A symmetric baseline would catch all four and is the more correct model. It was
+not shipped because it declines **every** fixture in `test-qcow2.sh` and
+`test-qcow2-zlib.sh` — it would disable the qcow2 pack's sweep lane on its own
+test corpus. That is a pack-economics and coverage decision, not a coding one.
+It needs an owner.
+
+**Not corruption.** A declined container is stored whole and reads back
+bit-exact; the refusal is a storage-efficiency decision and the sweep commits
+nothing.
