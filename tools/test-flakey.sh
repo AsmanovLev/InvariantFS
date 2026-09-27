@@ -630,17 +630,17 @@ leg3() {
     import_all "$FLK/orig3"
     manifest_build "$FLK/orig3" > "$FLK/manifest3"
     fsck_ok "pre-sweep" || fail "fsck pre-sweep"
-    # sweep starts healthy; chaos begins only after the WP21 checkpoint is
+    # sweep starts healthy; chaos begins only after the WP21 save point is
     # armed (that machinery is designed to be in place before the walk)
     $B/invf-sweep "$DM" >"$FLK/sweep3.log" 2>&1 &
     local swpid=$!
     local i
     for i in $(seq 1 100); do
-        grep -q "checkpoint: #" "$FLK/sweep3.log" 2>/dev/null && break
+        grep -q "save point captured" "$FLK/sweep3.log" 2>/dev/null && break
         sleep 0.1
     done
-    grep -q "checkpoint: #" "$FLK/sweep3.log" || fail "checkpoint never armed"
-    info "checkpoint armed; seeded drop_writes windows on"
+    grep -q "save point captured" "$FLK/sweep3.log" || fail "save point never armed"
+    info "save point armed; seeded drop_writes windows on"
     python3 "$REPO/tools/flakey/dmchaos.py" "$DEV" "$LOOP" "$SEC" \
         $((SEED + 300)) 600 "$FLK/stop3" drop >"$FLK/chaos3.log" 2>&1 &
     CHAOS_PID=$!
@@ -675,7 +675,7 @@ leg4() {
     local swpid=$!
     local i
     for i in $(seq 1 100); do
-        grep -q "checkpoint: #" "$FLK/seal4a.log" 2>/dev/null && break
+        grep -q "save point captured" "$FLK/seal4a.log" 2>/dev/null && break
         sleep 0.1
     done
     python3 "$REPO/tools/flakey/dmchaos.py" "$DEV" "$LOOP" "$SEC" \
@@ -697,7 +697,7 @@ leg4() {
     $B/invf-sweep "$DM" --seal >"$FLK/seal4b.log" 2>&1 &
     swpid=$!
     for i in $(seq 1 100); do
-        grep -q "checkpoint: #" "$FLK/seal4b.log" 2>/dev/null && break
+        grep -q "save point captured" "$FLK/seal4b.log" 2>/dev/null && break
         sleep 0.1
     done
     python3 "$REPO/tools/flakey/dmchaos.py" "$DEV" "$LOOP" "$SEC" \
