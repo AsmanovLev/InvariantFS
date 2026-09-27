@@ -73,63 +73,141 @@
   - Whether a savepoint (`SPT0`) would prevent it in the common case. The
     savepoint pins a *generation*; if it is the newer one it does not help.
 
-## UNRESOLVED — `invf-sweep` does not terminate above ~46k live inodes
+## UNRESOLVED — `invf-sweep` hangs in `vol_heat_sweep_begin` above ~46k live inodes
 
   **Date:** Sep 27, 2026  
   **Severity:** High (availability — the sweep never returns)  
-  **Status:** **Unresolved.** Reproduced with a control; loop not yet localised.  
+  **Status:** **Unresolved, but localised.** Spinning frame, call chain and
+  complexity measured; no fix shipped.  
   **Impact:** Any volume large enough to need a sweep stalls a full core
-  indefinitely and commits nothing. Not corruption — the volume is byte-identical
-  to its pre-sweep state, since the image's mtime never moves.
+  indefinitely and commits nothing. Not corruption — the image's mtime never
+  moves, so the volume is byte-identical to its pre-sweep state. Worse than a
+  crash in practice, because a filesystem that silently stops reclaiming space
+  becomes a disk-full outage and nothing alerts you.
 
-  ### Symptom
+  ### Correction: an earlier version of this entry named the wrong stage
 
-  `invf-import` of a 41,993-file / 1.19 GB Debian tree (a 12-style and a
-  13-style tree combined) returns `rc=0` in 3h29m. The following `invf-sweep`
-  collects 46,245 live inodes of 46,438 walked in 835 ms, prints
-  `[2/7] collect`, and then never returns from `[3/7] transform`.
+  It claimed the process hung in `[3/7] transform`. **That banner is never
+  printed.** `tools/invf-sweep.c:1821` is `sw_stage_begin(3, "transform", ...)`
+  and `vol_heat_sweep_begin(vol)` is at `tools/invf-sweep.c:1818` — three
+  lines earlier. `sw_stage_begin` passes `force=1` to `sw_stage_line`, whose
+  only early return is `if (!force && now < g_ui.last_ms + g_ui.interval_ms)`,
+  so a stage banner cannot be suppressed by throttling. A missing `[3/7]` is
+  positive proof the transform loop was never entered. The hang is in the heat
+  call that precedes it.
 
-  Measured over 1h40m of watching:
+  ### The spinning loop
+
+  `src/core/vol_delta.c:722`, the linear scan in `vol_delta_range()`:
+
+  ```c
+  for (i = 0; i < di->cap; i++) {
+      const delta_slot *s = &di->slot[i];
+      if (!s->key) continue;
+      ...
+  ```
+
+  `di->cap` is the capacity of an **open-addressed hash table**, not a record
+  count — `di_grow()` (`src/core/vol_delta.c:311-316`) doubles it and
+  `calloc`s a new array. Every range query walks the whole table. The
+  `!s->key` guard skips empty slots but still pays the iteration, and at the
+  ~70% load factor most slots are occupied anyway.
+
+  ### Measured
+
+  Counter build, two SIGUSR2 dumps 56.0 s apart:
 
   | | |
   |---|---|
-  | `rchar` | 50,536 MB, climbing linearly at ~250 MB/s |
-  | `wchar` | 0.25 MB, never rises |
-  | image mtime | 04:17:29 — unchanged from the instant import returned |
-  | process | 1 thread, 100% CPU, 43 MB RSS |
+  | `delta_range` calls | 1,828 -> 18,208 (+16,380 in 56 s) |
+  | slots scanned | 4.79e8 -> 4.77e9 (**+4.29e9**) |
+  | max `di->cap` | 262,144 |
+  | max entries in one range | 107,024 |
+  | directory listings per single `vol_v3_name_of` | **3,399** |
 
-  45 GB read for a 1.19 GB corpus is ~38x re-read amplification with zero
-  forward progress. 43 MB RSS rules out "accumulate then commit at finalize".
+  292 `vol_delta_range` calls/s x 262,144 slots = **76.6 M slot-scans/s**.
+  Sampling (342 `setitimer` samples): 95% land in
+  `dl_key_cmp` <- `vol_delta_range` <- `vol_v3_dirent_scan`.
 
-  ### Control
+  Call chain, from a SIGUSR1 `backtrace()` on a `-g` build resolved with
+  `addr2line` against the PIE base from `/proc/PID/maps`:
 
-  The same binary, same flags, on the Silesia corpus at 1 GB / 2,450 inodes:
-  three passes, all reaching `[7/7] finalize`. So the trigger is scale, and the
-  threshold lies between **2,450 and 46,245** live inodes. 46,245 is not
-  extreme — it is roughly what a Linux rootfs with a desktop environment looks
-  like.
+  ```
+  main (invf-sweep.c:1894) -> vol_heat_sweep_begin (vol_heat.c:542)
+    -> vol_v3_iter_live_inodes (vol_btree.c:4169) -> vol_delta_range (:773)
+    -> v3_iter_delta_cb (vol_btree.c:4109) -> vol_v3_name_of (:3916)
+    -> vol_v3_walk -> v3_walk_dir x12 (vol_dirs.c:730/766)
+    -> vol_v3_path_list_dir (:306) -> vol_v3_dirent_scan (vol_btree.c:3751)
+    -> vol_delta_range (vol_delta.c:722) -> dl_key_cmp (:679-682)
+  ```
 
-  ### Not localised
+  `src/core/vol_btree.c:4075`: the BASE pass calls `vol_v3_name_of` too, so
+  this fires for every inode on every call.
 
-  This host has no `gdb` and no `perf`, and the sweep's only internal
-  instrumentation is the seven stage banners, so the last printed line is
-  `[2/7] collect` and the spinning frame is unknown. Localising it needs a
-  `-pg`/sampling build, or bisecting the transform lanes (text / binary /
-  container) against the same image. Until then the honest statement is
-  "does not terminate", not any guess at which loop it is.
+  ### Complexity and projection
+
+  **O(K x D x G)** — K = inodes reported by `iter_live_inodes`, D = dirs
+  enumerated per name lookup, G = `di->cap`. Measured D = 3,399 and
+  G = 262,144 at 46,245 inodes.
+
+  Projected total: **7.5 days** (46,245 / 4) to **17.3 days** (107,024). The
+  100 minutes originally observed is about **0.015%** of the way in. This
+  bug was never going to finish.
+
+  ### Scale control
+
+  999 files from the same source tree, same un-folded delta condition: the
+  heat stage completes in **<100 ms**. So an un-folded delta log is not by
+  itself the trigger; `K x D x G` crossing roughly 1e11 is. Predicted knee:
+  **~8-9k un-folded inodes on one device.**
+
+  ### Proposed fix (proposal only, nothing implemented)
+
+  **B — essential.** `vol_v3_iter_live_inodes` must not perform one full tree
+  walk per inode. Build the id -> path map in **one** `vol_v3_walk` — the
+  collect stage at `tools/invf-sweep.c:1733` already does exactly that walk, so
+  it is close to free — and answer every name lookup from it.
+  **O(K x D x G) -> O(D x G + K).** `src/core/vol_btree.c:3925-3928` already
+  concedes that "each hop is a full reverse dirent walk, so this is
+  O(depth x live) -- fine for the offline tools"; on v3 it is O(whole tree),
+  and the sweep is exactly that offline tool.
+
+  **A — recommended.** Make `vol_delta_range` sub-linear: keep a key-sorted
+  array of occupied slots alongside the hash, `bsearch` the low bound, walk to
+  the high bound. **O(log G + k)** instead of **O(G)**. On its own this takes
+  the one remaining walk from ~4.7e9 slot-scans to under 1e8.
+
+  ### Same shape elsewhere, unmeasured
+
+  - `vol_v3_iter_live_inodes` is also called from `vol_sweep.c:2574`,
+  `vol_sweep.c:2915` and `vol_tier.c:901` — all hit the same blowup.
+    `vol_heat_promote` is stage `[4/7]` and would be the next to hang.
+  - `vol_v3_path_of()` (`vol_btree.c:3929`, reached from `vol_read.c:1230` and
+    `vol_read.c:1553`) has the same shape and sits on the **FUSE open path**,
+    which is far worse than an offline tool. Flagged, not measured.
+
+  ### Not determined
+
+  - Exact K — the run never finished, so the projection is a range, not a value.
+  - Whether D grows with volume size (measured only at 46,245).
+  - Whether `[3/7] transform` onward is healthy. A proof-of-concept that
+    skipped only the `vol_v3_name_of` call let the heat stage finish in under a
+    second and entered transform — where its own ETA read 2h59m at file
+    22/46,438. **Fixing the heat stage is not sufficient.**
+  - How base pages end up in the SHADOW pool (`invf-mkfs` marks the whole
+    metadata zone allocated, so `mb_alloc_meta_zone` always overflows). This
+    interacts with the COW base-page leak; not chased.
 
   ### Artifacts
 
-  `/srv/bench/sweep-hang/` — `EVIDENCE.txt`, the sweep log, the harness
-  transcript, and the 8 GiB reproducer image (symlinked; source tree
-  `/srv/bench/cloudcmp/invfs/stage`).
+  `/srv/bench/sweep-hang/` — `EVIDENCE.txt`, sweep log, harness transcript.
+  Full localisation writeup: `WP115-TASK.md` in the WP115 worktree.
 
-  ### Why it is filed as an incident
+  ### Why it is filed
 
-  It is availability rather than correctness, which makes it easy to
-  under-rank, and it is the reason no combined-Debian compression ratio could
-  be reported: the measurement that corpus exists to produce does not converge.
-  A ratio derived from a sweep known not to finish would be meaningless.
+  Availability bugs are easy to under-rank against the compression work, and
+  this is the reason no combined-Debian ratio could be reported. A ratio taken
+  from a sweep known not to converge would be meaningless.
 
 ## WP71-A — Plugin EXTRACT could not name a member (wrong operand order)
 
