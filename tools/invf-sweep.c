@@ -1410,7 +1410,13 @@ int main(int argc, char **argv)
         return 2;
     }
     /* WP-M21: --compact retired; the fold (vol_v3_fold_request) is the
-     * only reclaim path, and it always runs as part of a normal sweep. */
+     * only reclaim path. WP116: it does NOT run here. The only callers of
+     * vol_v3_fold_request / vol_reclaim_schedule are in vol_sweep.c's
+     * vol_sweep_pending(), which this offline tool never reaches -- the
+     * FUSE daemon path, and the only one that drains. An earlier version
+     * of this comment claimed the fold "always runs as part of a normal
+     * sweep"; that was false for the offline path and hid a v3 COW base
+     * page leak (see docs/adr/ for the root-stack design). */
 
     if (!log_path) log_path = getenv("INVFS_SWEEP_LOG");
 #ifndef _WIN32
@@ -1521,7 +1527,9 @@ int main(int argc, char **argv)
     /* WP-M21: the inline inode-area compaction + the CMP0 recovery preflight
      * both retired; --compact is now a recognised-but-removed flag (we
      * accept "invf-sweep --compact foo.img" as a synonym for a normal
-     * sweep of foo.img, since the fold is unconditional inside the run). */
+     * sweep of foo.img). WP116 corrected the rationale: the fold is NOT
+     * unconditional inside this run -- nothing here calls
+     * vol_v3_fold_request; only the FUSE drain (vol_sweep_pending) does. */
 
     /* WP23 --extract-packs: a standalone, read-only, engine-side mode for
      * the sweepboot maintenance boot (tools/sweepboot-init.sh). No sweep,
@@ -2098,10 +2106,12 @@ progress:
     }
 
     /* WP-M21: hot-tail pruning retired with on-line compaction. The fold
-     * (vol_v3_fold_request) replaces it -- it always runs as part of the
-     * sweep, idempotently, and never invalidates a sweep that already
-     * succeeded. INVFS_NO_COMPACT=1 (and the --compact flag) is accepted
-     * but ignored. */
+     * (vol_v3_fold_request) was to replace it. WP116: the fold does NOT
+     * run in this offline tool -- see the note at the --compact parse
+     * above. Calling it is idempotent and would never invalidate a sweep
+     * that already succeeded, but not calling it is what leaves the v3 COW
+     * base-page generations unreclaimed. INVFS_NO_COMPACT=1 (and the
+     * --compact flag) is accepted but ignored. */
     (void)rec_bytes;
 
     /* WP20 --seal / WP20b: (re)seal the shadow-zone parity AFTER the sweep
