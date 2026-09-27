@@ -357,6 +357,19 @@ typedef struct invfs_volume {
     int j_compact;            /* next flush compacts (fsck rebuild) */
     uint64_t open_cuts;       /* consistent-cut hides at mount (WP22d) */
     uint64_t next_inode_id;
+    /* WP111: the v3 inode-id allocator recovers next_inode_id from the
+     * base tree + delta exactly ONCE per mount. That recovery used to be
+     * gated on `next_inode_id <= INVFS_V3_ROOT_INO` -- i.e. on the counter
+     * still holding its post-vol_open sentinel -- so ANY other code path
+     * that incremented the counter first disabled it for the rest of the
+     * mount. vol_write_begin (vol_write.c) burns an id on its first call
+     * after every remount and is the FUSE write path's first id consumer,
+     * so a mount whose first id-consuming operation was a write to an
+     * EXISTING file never recovered, and the next create handed out an id
+     * that was already live: two dirents, one inode row, the older file's
+     * content silently replaced, fsck clean. Recovery is now gated on this
+     * flag, which nothing else can close. */
+    uint8_t  v3_id_recovered;
     /* WP-M18: the pre-fold root stored at vol_v3_fold_request start so that
      * fold_reclaim_hook (called after fold) can diff old vs new. Cleared
      * after reclaim runs. */

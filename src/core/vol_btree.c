@@ -3825,7 +3825,15 @@ uint64_t vol_v3_inode_alloc(invfs_volume *v)
 {
     if (!v)
         return 0;
-    if (v->next_inode_id <= INVFS_V3_ROOT_INO) {
+    /* WP111: recover the high-water mark from the on-disk namespace ONCE per
+     * mount. The gate is a dedicated flag, not `next_inode_id <= ROOT`: any
+     * other code path that bumps the counter (vol_write_begin burns one on
+     * the FUSE write path's first call after every remount) would otherwise
+     * shut this off permanently, and every later create would hand out an id
+     * that is already live -- two dirents naming one inode row, the older
+     * file's content silently replaced, invf-fsck clean. The early returns
+     * below deliberately leave the flag clear so the next call retries. */
+    if (!v->v3_id_recovered) {
         invfs_blkptr root;
         uint64_t max = 0;
         if (v3_ready(v) != 0)
@@ -3840,9 +3848,12 @@ uint64_t vol_v3_inode_alloc(invfs_volume *v)
         if (vol_delta_range(v, NULL, 0, NULL, 0,
                             v3_max_inode_delta_cb, &max) != 0)
             return 0;
+        if (v->next_inode_id > max + 1)
+            max = v->next_inode_id - 1;   /* never go backwards */
         v->next_inode_id = max + 1;
         if (v->next_inode_id <= INVFS_V3_ROOT_INO)
             v->next_inode_id = INVFS_V3_ROOT_INO + 1;
+        v->v3_id_recovered = 1;
     }
     return v->next_inode_id++;
 }
