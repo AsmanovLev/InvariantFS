@@ -2661,10 +2661,16 @@ int vol_containerpack_sweep(invfs_volume *v, uint64_t inode_id,
      * the recipe segment and the member siblings -- only exist inside the
      * volume then), replacing the rebuild exec entirely. */
     if (def->map) {
-        /* the recipe is passed as the map's {in}: a pack whose recipe records
-         * per-extent metadata (qcow2 Q2R3 reproduction parameters) CANNOT
-         * re-derive the layout from the image. Packs whose manifest still says
-         * {in} keep getting the image -- the template decides. */
+        /* BOTH operands are passed: 'in' = the image, 'recipe' = the strip
+         * output. pack_subst (via pack_argv_build) expands {in} to the image
+         * and {recipe} to the strip output, and the MANIFEST TEMPLATE decides
+         * which the pack is handed. A pack that records per-extent metadata
+         * (qcow2 Q2R3 reproduction parameters) -- and therefore CANNOT
+         * re-derive the layout from the image -- must template its map
+         * command as 'map {recipe} {out}'. Templating it {in} hands the pack
+         * the image, it emits a map numbering recipe bytes the recipe does
+         * not contain, and cpack_map_validate rejects it with a message that
+         * blames the container rather than the manifest. See WP107. */
         if (invfs_codec_pack_cmd(pc, INVFS_PACK_CMD_MAP, pin, NULL,
                                  pmdir, precipe, pmap) != 0)
             { if (getenv("INVFS_DEBUG_PACKS")) fprintf(stderr,"[cpack] map cmd failed\n"); goto out; }
