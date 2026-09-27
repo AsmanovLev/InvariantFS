@@ -194,6 +194,33 @@ print-obj-%:
 print-incdirs:
 	@printf '%s\n' $(SRC) $(SRCDIRS)
 
+# WP110: the hostile-recipe fuzzer for the pack trust boundary.
+# tools/fuzz/recipefuzz.c #includes src/core/vol_cpack.c so it calls the
+# REAL static cpack_map_parse / cpack_map_validate / cpack_map_serve --
+# the functions that consume the MRMP/MRM2 blob a codecpack hands back
+# (vol_cpack.c:2668 at sweep time, 2384-2401 again at read time). A mirror
+# of the parser (as src/legacy/fuzz_invfs.c "leg 6" is) can agree with the
+# code while the code is wrong, and cannot see an overflow at all; this
+# links the production code and lets ASan judge it.
+#
+# vol_cpack.o is dropped from the link because the harness's own
+# translation unit already provides those statics -- linking both is a
+# duplicate-symbol error, not a stronger test.
+#
+# Sanitizers go on the harness TU only; the engine objects stay
+# uninstrumented, which is enough: ASan replaces the allocator and
+# intercepts memcpy process-wide, so an out-of-bounds read of an
+# ASan-allocated recipe buffer inside uninstrumented engine code is still
+# caught. -fsanitize and `ulimit -v` cannot be combined (ASan reserves
+# ~16 TB of shadow), so bound this with ASAN_OPTIONS=hard_rss_limit_mb.
+RECIPEFUZZ_CFLAGS := $(CFLAGS) -fsanitize=address,undefined -fno-omit-frame-pointer -g
+RECIPEFUZZ_OBJS  := $(filter-out $(OBJ)/vol_cpack.o,$(CORE_O))
+$(OUT)/recipefuzz: tools/fuzz/recipefuzz.c $(CORE_O)
+	$(CC) $(RECIPEFUZZ_CFLAGS) -o $@ $< $(RECIPEFUZZ_OBJS) \
+	      -fsanitize=address,undefined $(LDLIBS)
+
+recipefuzz: $(OUT)/recipefuzz
+
 # .ivpack bundles (ADR-007 §3: uncompressed ZIP-0, manifest + sha256 +
 # lib/<name>.so + bin/<name> CLI fallback). Artifacts land in dist/ivpack/.
 IVPACKS := $(foreach p,$(CPACKS),dist/ivpack/$(p).ivpack)
@@ -391,7 +418,7 @@ docs:
 docs-clean:
 	rm -rf impl_docs/doxygen
 
-.PHONY: all clean test e2e fuzz flakey docs docs-clean release
+.PHONY: all clean test e2e fuzz flakey recipefuzz docs docs-clean release
 -include $(wildcard $(OBJ)/*.d)
 
 $(OUT)/invf-stats: $(OBJ)/invf-stats.o $(CORE_O)
