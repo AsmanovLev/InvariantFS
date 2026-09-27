@@ -1522,3 +1522,32 @@ truncating the delta (an overlay or a second root slot), which touches
 `vol_spt0.c` and the open path. `impl_docs/design-meta-v3.md:253` already
 records the intended shape (`| rollback | coarse CKP0 | single save point |`).
 It needs an owner and a WP.
+
+## OPEN — test-vdi.sh is red, and WP119 changed the symptom
+
+**Status:** Open. Pre-existing red, not a fresh regression, but the *reason* it
+is red changed and that should not be lost.
+
+`tools/test-vdi.sh` fails both before and after the WP119 size guard, for
+different reasons:
+
+- on `7c19622` (pre-guard): `FAIL: decomposition ran under a 64K
+  decode-memory limit` — the decomposition happened, then tripped a memory
+  assertion.
+- on `main`: `FAIL: qgen.vdi not decomposed` — the guard declines it:
+  `1137 fixed + 2097152 content + 16384 member-cost (1 members) = 2114673 B
+  vs 2098176 B original`, a **0.79%** projected loss against a **0.5%**
+  threshold.
+
+That refusal is very likely correct. `qgen.vdi` is a qemu-generated dynamic
+VDI from **random** data (see the fixture comment at `tools/test-vdi.sh:17`),
+and random data does not compress — so declining to decompose it is the
+guard doing its job, on a margin of 16,497 B.
+
+What is unresolved: this suite has never been green on either side, so its
+other assertions are unverified. It is not in the `make e2e` gate, which is
+how it went unnoticed. Either the 64K decode-memory assertion needs fixing
+and the fixtures need to be sized so a decomposition genuinely pays, or the
+random-data fixtures should assert that the guard *declines* them — which is
+the real contract now. That is a test-design decision, not a code fix, and it
+is not done.
