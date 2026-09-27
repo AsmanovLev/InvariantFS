@@ -122,8 +122,19 @@ with open(os.path.join(d, "multi.layout"), "w") as f:
     f.write("size=%d data_off=%d m0_len=%d m2_off=%d m2_len=%d\n"
             % (len(multi), data_off, m0_len, m2_off, len(elf)))
 
-inner = splt([b"inner member alpha\n" * 500, b"inner member beta\n" * 700])
-nest = splt([inner, b"outer tail\n" * 300])
+# WP119: nest.splt is 290 KB, not the 25 KB it used to be, and the size is
+# the point. A decomposition costs the engine its per-member bookkeeping
+# (~16 KiB measured, the ZIP pack's MEM_COST), and the guard charges it
+# against the container. At 25 KB the old fixture's decomposition was NOT a
+# gain and the guard refused it -- correctly: measured with the guard
+# disabled, decomposing it stored 49,152 B MORE than storing the container
+# whole (24,576 B per member on a 22 KB file, free-block delta over three
+# sweeps). A nested-container fixture has to be a container big enough for
+# a nested decomposition to be worth anything; the nested read path, the
+# grandchild map and the pack-absent nested read are unchanged, only the
+# payload is realistic now.
+inner = splt([b"inner member alpha\n" * 5000, b"inner member beta\n" * 7000])
+nest = splt([inner, b"outer tail\n" * 3000])
 open(os.path.join(d, "nest.splt"), "wb").write(nest)
 
 # negative: the table announces 5 payload bytes but 10 are present --
@@ -737,5 +748,79 @@ $B/invf-cat "$IMGMEM" multi.splt "$WORK/out/multimem.splt" >/dev/null
 cmp -s "$WORK/orig/multi.splt" "$WORK/out/multimem.splt" \
     || { echo "FAIL: memlimit read not bit-exact"; exit 1; }
 echo "policy refusal stored generic, bit-exact"
+
+# ---------------------------------------------------------------------------
+# WP119: the SIZE GUARD. This leg is the red test: it injects the
+# regression the guard exists to stop, a container whose decomposition is
+# BIGGER than the container itself, and requires the sweep to refuse it.
+#
+#   regret.splt -- 200 incompressible 16 KiB members (3.28 MB). No codec
+#     can shrink them, and every exposed member costs the engine its own
+#     bookkeeping (~16 KiB measured, WP108), so committing this shape
+#     would store ~6.5 MB of what was 3.28 MB. The SAME bytes as one
+#     member would be a different question; the member COUNT is the
+#     regression.
+#   win.splt -- one 3.28 MB compressible member: the positive control, so
+#     "the guard refused" cannot be confused with "the guard refuses".
+# ---------------------------------------------------------------------------
+echo "== WP119 size guard (a decomposition that is not a gain) =="
+IMGSG=wp16cpack-sg.img
+rm -f "$IMGSG"
+python3 - "$WORK/orig" <<'PY'
+import random, struct, sys
+
+def splt(members):
+    b = b"SPLT" + struct.pack("<I", len(members))
+    for m in members:
+        b += struct.pack("<Q", len(m))
+    return b + b"".join(members)
+
+d = sys.argv[1]
+rnd = random.Random(119)
+noise = [rnd.randbytes(16384) for _ in range(200)]
+open(d + "/regret.splt", "wb").write(splt(noise))
+# the same volume of data, one member, compressible
+open(d + "/win.splt", "wb").write(
+    splt([b"the quick brown fox jumps over the lazy dog 0123456789\n" * 41000]))
+PY
+echo "  regret.splt $(stat -c %s "$WORK/orig/regret.splt") B (200 random members)"
+echo "  win.splt    $(stat -c %s "$WORK/orig/win.splt") B (1 text member)"
+$B/invf-mkfs "$IMGSG" 0.2 >/dev/null
+$B/invf-cp "$IMGSG" "$WORK/orig/regret.splt" regret.splt >/dev/null
+$B/invf-cp "$IMGSG" "$WORK/orig/win.splt" win.splt >/dev/null
+$B/invf-sweep "$IMGSG" > "$WORK/sweepsg.log" 2>&1 || { cat "$WORK/sweepsg.log"; exit 1; }
+# 1. the guard fired, and it fired on the SIZE, with the price in the log
+LINE=$(grep "regret.splt: size guard refused" "$WORK/sweepsg.log" | head -1)
+[ -n "$LINE" ] || { echo "FAIL: the size guard did not refuse the regression"; \
+                    cat "$WORK/sweepsg.log"; exit 1; }
+PROJ=$(echo "$LINE" | sed -e 's/.*= //' -e 's/ B vs .*//' | tr -dc '0-9')
+ORIG=$(echo "$LINE" | sed -e 's/.* B vs //' -e 's/ B original.*//')
+[ -n "$PROJ" ] && [ -n "$ORIG" ] && [ "$PROJ" -gt "$ORIG" ] \
+    || { echo "FAIL: the refusal does not show a projected > original"; \
+         echo "  $LINE"; exit 1; }
+echo "  refused: projected $PROJ B vs original $ORIG B (+$((PROJ - ORIG)) B)"
+# 2. a refusal leaves NOTHING behind: no stamp, no siblings, no recipe
+if $B/invf-ls "$IMGSG" | grep -q "regret\.splt!"; then
+    echo "FAIL: the size-guard refusal left siblings behind"; $B/invf-ls "$IMGSG"; exit 1
+fi
+C=$("$WORK/classof" "$IMGSG" regret.splt)
+echo "  regret.splt: $C"
+case "$C" in *algo=40*) echo "FAIL: regret.splt carries a pack stamp"; exit 1;; esac
+# 3. the positive control: the same volume of bytes, decomposable, IS taken
+grep -q "win.splt: splt_test (codecpack)" "$WORK/sweepsg.log" \
+    || { echo "FAIL: a genuine win was declined too"; cat "$WORK/sweepsg.log"; exit 1; }
+C=$("$WORK/classof" "$IMGSG" win.splt)
+echo "  win.splt: $C"
+[ "$C" = "cls=3 algo=40 gen=1" ] || { echo "FAIL: want CONTAINER{SPLT=40,1}, got $C"; exit 1; }
+# 4. both files read back bit-exact: the declined one through the generic lane
+$B/invf-verify "$IMGSG" --deep > "$WORK/verifysg.log" 2>&1 \
+    || { cat "$WORK/verifysg.log"; exit 1; }
+grep -q " 0 corrupt," "$WORK/verifysg.log" || { cat "$WORK/verifysg.log"; exit 1; }
+for f in regret.splt win.splt; do
+    $B/invf-cat "$IMGSG" "$f" "$WORK/out/sg.$f" >/dev/null
+    cmp -s "$WORK/orig/$f" "$WORK/out/sg.$f" \
+        || { echo "FAIL: $f not bit-exact after the size guard"; exit 1; }
+done
+echo "WP119: regression refused (+$((PROJ - ORIG)) B projected), win decomposed, both bit-exact"
 
 echo "CONTAINERPACK E2E: PASS"

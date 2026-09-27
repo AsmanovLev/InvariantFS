@@ -1763,6 +1763,50 @@ int64_t cpack_map_read(invfs_volume *v, const char *name, uint64_t ino,
                           uint8_t *dst, size_t len);
 
 
+/* WP119: the containerpack size guard. Its four constants, and then what the
+ * sweep prices a decomposition with, in the units the volume pays:
+ *   CPACK_ZSTD_LANE   the generic binary lane. Every member reaches it even
+ *                     with batching switched off, so charging min(zstd19,
+ *                     usize) is a FLOOR, not a bet: anything the guard
+ *                     accepts is a win before batching, and batching only
+ *                     improves it.
+ *   CPACK_MEMBER_COST per exposed member -- the engine's own bookkeeping
+ *                     (record, recipe, inode/dirent/index, block rounding).
+ *                     MEASURED, not guessed: on WP108's 201-member archive
+ *                     the codec projection said 1,685,140 B and the volume
+ *                     actually charged 4,935,680 B, i.e. 16,167 B per member
+ *                     the projection never saw; 16 KiB is that rounded UP.
+ *                     The ZIP pack shipped a 3 MB regression behind a guard
+ *                     that counted only compressed content.
+ *   CPACK_ZGAIN_MILLE the INVFS_MIN_GAIN_PCT default (0.5%) in thousandths.
+ *   CPACK_REPRO_MAX   the largest single kind-2 re-deflation the read path
+ *                     pays per request. A kind-2 entry stores nothing and
+ *                     re-deflates its whole raw_len on every read that
+ *                     touches it -- quadratic in the member size, invisible
+ *                     to any content projection. 4 MiB is twice the largest
+ *                     cluster qcow2 allows (cluster_bits <= 21), so no
+ *                     conformant image is refused. */
+#define CPACK_ZSTD_LANE     19
+#define CPACK_MEMBER_COST   16384ull
+#define CPACK_ZGAIN_MILLE   5ull
+#define CPACK_REPRO_MAX     (4ull << 20)
+
+typedef struct {
+    uint64_t fixed;        /* recipe + member table + map */
+    uint64_t content;      /* sum over members of min(zstd19(member), usize) */
+    uint64_t member_count;
+    uint64_t member_cost;  /* member_count * CPACK_MEMBER_COST */
+    uint64_t repro_max;    /* largest kind-2 re-deflation, per request */
+    uint64_t repro_bytes;  /* the map's per-pass re-deflation total */
+    int      content_bound;/* content is an UPPER bound, not a measurement:
+                            * the per-member bookkeeping alone already lost,
+                            * so no payload was compressed to price it */
+} cpack_size_proj;
+
+int cpack_size_guard(uint64_t orig_len, const cpack_size_proj *p,
+                     const char **why);
+
+
 /* WP16a sweep attempt: decompose one RAW container through a container
  * codecpack. See the section header for the pipeline; the return
  * convention mirrors vol_pack_sweep (100+algo on commit, 1 = tools absent

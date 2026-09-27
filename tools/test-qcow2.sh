@@ -857,12 +857,23 @@ gcc -std=gnu11 -O2 -I$REPO/src -I$REPO/src/core -I$REPO/src/codecs -I$REPO/src/r
     $CORE_O -Wl,-l:libzstd.so.1 -lz -lpthread
 
 . "$WORK/orig/diska.layout"   # size firstext hole midext tail
-QS="diska.qcow2 diskb.qcow2 disks.qcow2 diskv2.qcow2 qgen.qcow2 qzero.qcow2 compc.qcow2"
+# WP119: the sweep takes a decomposition only when it is a GAIN. Three of
+# these fixtures are hand-built structural images whose Q2R3 recipe is
+# most of the file (7,637 B of 12,288; 37,585 B of 57,467; 328,336 B of
+# 328,192), so the shape costs more than the container it replaces --
+# MEASURED, by the volume's own content accounting with the guard
+# disabled, free-block delta over three sweeps, packs on vs off:
+#   disks  +86,016 B   diskv2 +126,976 B   compc +409,600 B
+# They move to the size-decline group. The pack itself is still exercised
+# on all seven by the pack-level leg above (enumerate/extract/strip/map/
+# rebuild/regen, which never consults the size guard).
+QS="diska.qcow2 diskb.qcow2 qgen.qcow2 qzero.qcow2"
+SG="disks.qcow2 diskv2.qcow2 compc.qcow2"      # WP119: size guard declines
 DECLINES="badmagic.qcow2 backed.qcow2 snap.qcow2 extl2.qcow2 enc.qcow2 cbits.qcow2 dupcl.qcow2 pasteof.qcow2 incompat.qcow2 rb32.qcow2 empty.qcow2"
 
 echo "== mkfs + import =="
 $B/invf-mkfs "$IMG" 0.5 >/dev/null
-for f in $QS $DECLINES; do
+for f in $QS $SG $DECLINES; do
     $B/invf-cp "$IMG" "$WORK/orig/$f" "$f" >/dev/null
 done
 
@@ -871,6 +882,18 @@ $B/invf-sweep "$IMG" > "$WORK/sweep1.log" 2>&1 || { cat "$WORK/sweep1.log"; exit
 for f in $QS; do
     grep -q "$f: qcow2 (codecpack)" "$WORK/sweep1.log" \
         || { echo "FAIL: $f not decomposed"; cat "$WORK/sweep1.log"; exit 1; }
+done
+# WP119: the size guard is the other decliner, and it says so out loud --
+# a refusal names the container and the reason, so a volume that stops
+# decomposing is diagnosable from the log instead of looking like a pack
+# that quietly stopped firing.
+for f in $SG; do
+    grep -q "$f: qcow2 (codecpack)" "$WORK/sweep1.log" \
+        && { echo "FAIL: $f was decomposed (the size guard must decline it)"; cat "$WORK/sweep1.log"; exit 1; }
+    grep -q "qcow2: $f: size guard refused" "$WORK/sweep1.log" \
+        || { echo "FAIL: $f: no size-guard refusal line"; cat "$WORK/sweep1.log"; exit 1; }
+    echo "  size guard refused $f:"
+    grep "qcow2: $f: size guard refused" "$WORK/sweep1.log" | sed 's/^sweep: /    /'
 done
 for f in $DECLINES; do
     if grep -q "$f: qcow2 (codecpack)" "$WORK/sweep1.log"; then
@@ -898,12 +921,12 @@ $B/invf-ls "$IMG" | grep -q "diska\.qcow2!mbr0002-rankimg" \
     || { echo "FAIL: diska rankimg missing"; $B/invf-ls "$IMG"; exit 1; }
 $B/invf-ls "$IMG" | grep -q "diskb\.qcow2!mbr0001-diskimg" \
     || { echo "FAIL: diskb LBA diskimg missing"; $B/invf-ls "$IMG"; exit 1; }
-for f in $DECLINES; do
+for f in $SG $DECLINES; do
     if $B/invf-ls "$IMG" | grep -q "$f!"; then
         echo "FAIL: declined $f gained siblings"; $B/invf-ls "$IMG"; exit 1
     fi
 done
-echo "member/table/map siblings present; declines clean"
+echo "member/table/map siblings present; declines clean (pack declines + size-guard declines)"
 
 echo "== class stamps =="
 for f in $QS; do
@@ -911,11 +934,11 @@ for f in $QS; do
     echo "  $f: $C"
     [ "$C" = "cls=3 algo=22 gen=2" ] || { echo "FAIL: $f: want CONTAINER{QCOW2=22,2}"; exit 1; }
 done
-for f in $DECLINES; do
+for f in $SG $DECLINES; do
     C=$("$WORK/classof" "$IMG" "$f")
-    case "$C" in *algo=22*) echo "FAIL: declined $f carries a pack stamp"; exit 1;; esac
+    case "$C" in *algo=22*) echo "FAIL: declined $f carries a pack stamp ($C)"; exit 1;; esac
 done
-echo "  declines carry no pack stamp"
+echo "  declines carry no pack stamp (a size-guard refusal is not a pack verdict)"
 
 echo "== verify --deep =="
 $B/invf-verify "$IMG" --deep | tee "$WORK/verify1.log"
@@ -923,18 +946,18 @@ grep -q " 0 corrupt," "$WORK/verify1.log" || { echo "FAIL: corrupt files"; exit 
 
 echo "== sha256 bit-exact (containers + direct member reads) =="
 ok=1
-for f in $QS $DECLINES; do
+for f in $QS $SG $DECLINES; do
     $B/invf-cat "$IMG" "$f" "$WORK/out/$f" >/dev/null
     a=$(sha256sum "$WORK/orig/$f" | cut -d' ' -f1)
     b=$(sha256sum "$WORK/out/$f" | cut -d' ' -f1)
     if [ "$a" != "$b" ]; then echo "MISMATCH $f"; ok=0; fi
 done
-for f in diska diskb disks diskv2 qgen qzero; do
+for f in diska diskb qgen qzero; do   # WP119: the size-declined fixtures have no members
     $B/invf-cat "$IMG" "$f.qcow2!mbr0002-rankimg" "$WORK/out/m.$f" >/dev/null
     REF="$WORK/orig/member-${f:4}.ref"; [ -f "$REF" ] || REF="$WORK/orig/member-$f.ref"
     cmp -s "$REF" "$WORK/out/m.$f" || { echo "MISMATCH $f rankimg"; ok=0; }
 done
-for f in diska diskb disks diskv2 qgen qzero; do
+for f in diska diskb qgen qzero; do   # WP119: the size-declined fixtures have no members
     $B/invf-cat "$IMG" "$f.qcow2!mbr0001-diskimg" "$WORK/out/d.$f" >/dev/null
     [ -s "$WORK/out/d.$f" ] || { echo "MISMATCH $f empty diskimg"; ok=0; }
 done
@@ -996,7 +1019,13 @@ for f in $QS; do
     C=$("$WORK/classof" "$IMG" "$f")
     [ "$C" = "cls=3 algo=22 gen=2" ] || { echo "FAIL: $f stamp drifted: $C"; exit 1; }
 done
-echo "containers stable and bit-exact after sweep 2"
+for f in $SG; do
+    $B/invf-cat "$IMG" "$f" "$WORK/out/s2.$f" >/dev/null
+    cmp -s "$WORK/orig/$f" "$WORK/out/s2.$f" || { echo "FAIL: $f drifted"; exit 1; }
+    C=$("$WORK/classof" "$IMG" "$f")
+    case "$C" in *algo=22*) echo "FAIL: size-declined $f re-decomposed: $C"; exit 1;; esac
+done
+echo "containers stable and bit-exact after sweep 2 (the size-declined ones stay declined, not re-tried)"
 
 echo "== composition leg: the member stream is a raw disk image =="
 MAC=$("$WORK/classof" "$IMG" "diska.qcow2!mbr0001-diskimg")
@@ -1053,11 +1082,12 @@ echo "== migration leg: a bumped pack generation re-derives the layout =="
 IMG=$IMGMIG
 mkdir -p "$WORK/mig"
 rm -rf "$WORK/mig"/* 2>/dev/null || true
-cp "$WORK/orig/compc.qcow2" "$WORK/mig/compc.qcow2"
+# WP119: this used compc.qcow2, which the size guard now declines (its
+# recipe is the whole 328 KB container -- a measured +409,600 B regression),
+# so the leg runs on diska.qcow2: the same v2 (MRM2) map, decomp_gen
+# carried in the map header either way.
 cp "$WORK/orig/diska.qcow2" "$WORK/mig/diska.qcow2"
 $B/invf-mkfs "$IMG" 2 >/dev/null
-$B/invf-cp "$IMG" "$WORK/mig/compc.qcow2" compc.qcow2 >/dev/null \
-    || { echo "FAIL: migration-leg cp"; exit 1; }
 $B/invf-cp "$IMG" "$WORK/mig/diska.qcow2" diska.qcow2 >/dev/null \
     || { echo "FAIL: migration-leg cp"; exit 1; }
 $B/invf-sweep "$IMG" > "$WORK/sweep-mig1.log" 2>&1 \
@@ -1074,7 +1104,7 @@ cp -a "$WORK/packs" "$WORK/packs-mig"
 sed -i 's/^generation = .*/generation = 7/' "$WORK/packs-mig/qcow2.codecpack/manifest"
 grep -q "^generation = 7" "$WORK/packs-mig/qcow2.codecpack/manifest" \
     || { echo "FAIL: could not bump the private pack generation"; exit 1; }
-$B/invf-cat "$IMG" "compc.qcow2!mbrmap" "$WORK/out/map-gen2" >/dev/null
+$B/invf-cat "$IMG" "diska.qcow2!mbrmap" "$WORK/out/map-gen2" >/dev/null
 python3 - "$WORK/out/map-gen2" <<'PY' || { echo "FAIL: pre-migration map"; exit 1; }
 import struct, sys
 m = open(sys.argv[1], "rb").read()
@@ -1086,7 +1116,7 @@ echo "  pre-migration: decomp_gen=2"
 MIGPACKS=$WORK/packs-mig
 env INVFS_CODECPACKS="$MIGPACKS" $B/invf-sweep "$IMG" > "$WORK/sweep-mig.log" 2>&1 \
     || { cat "$WORK/sweep-mig.log"; exit 1; }
-$B/invf-cat "$IMG" "compc.qcow2!mbrmap" "$WORK/out/map-gen7" >/dev/null
+$B/invf-cat "$IMG" "diska.qcow2!mbrmap" "$WORK/out/map-gen7" >/dev/null
 python3 - "$WORK/out/map-gen7" <<'PY' || { echo "FAIL: post-migration map"; exit 1; }
 import struct, sys
 m = open(sys.argv[1], "rb").read()
@@ -1128,7 +1158,7 @@ int main(int argc, char **argv)
 C
 gcc -std=gnu11 -O2 -I$REPO/src -I$REPO/src/core -I$REPO/src/codecs -I$REPO/src/recipes -I$REPO/src/vendor7z -o "$WORK/cbrm" "$WORK/cbrm.c" \
     $CORE_O -Wl,-l:libzstd.so.1 -lz -lpthread
-"$WORK/cbrm" "$IMG" $QS
+"$WORK/cbrm" "$IMG" $QS $SG
 if $B/invf-ls "$IMG" | grep -q "qcow2!"; then
     echo "FAIL: !mbr/!mbrt/!mbrmap siblings survived the container delete"; $B/invf-ls "$IMG"; exit 1
 fi

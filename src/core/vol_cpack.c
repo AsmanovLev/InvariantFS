@@ -1899,6 +1899,11 @@ out:
                                  * four runs per member is generous */
 #define CPACK_GUARD_CHUNK  (8ull << 20)   /* map-guard read-back window */
 
+/* The containerpack SIZE GUARD's constants (CPACK_ZSTD_LANE,
+ * CPACK_MEMBER_COST, CPACK_ZGAIN_MILLE, CPACK_REPRO_MAX) live next to
+ * cpack_size_proj in volume_internal.h: they are the guard's contract with
+ * the unit test, not private tuning. */
+
 
 typedef struct {
     uint64_t orig_off;   /* offset in the ORIGINAL container */
@@ -2016,49 +2021,248 @@ static const cpack_member *cpack_member_find(const cpack_member *mem,
  * announced usize. mem_sorted is idx-sorted. 0 = valid. */
 static int cpack_map_validate(const cpack_map_ent *e, size_t n,
                               uint64_t container_size, uint64_t recipe_len,
-                              const cpack_member *mem_sorted, size_t nmem)
+                              const cpack_member *mem_sorted, size_t nmem,
+                              const char **why)
 {
     uint64_t pos = 0;
     size_t i;
 
-    if (!n) return -1;
+#define MV_FAIL(why_str) do { if (why) *why = (why_str); return -1; } while (0)
+    if (why) *why = NULL;
+    if (!n) MV_FAIL("the map is empty");
     for (i = 0; i < n; i++) {
         if (e[i].orig_off != pos)
-            return -1;                       /* gap/overlap/unsorted */
+            MV_FAIL("the entries do not tile the container in order");
         if (!e[i].len || e[i].len > container_size - pos)
-            return -1;                       /* zero-length or past the end */
+            MV_FAIL("an entry is empty or runs past the container");
         if (e[i].kind == 0) {                /* RECIPE */
-            if (e[i].idx != 0) return -1;
+            if (e[i].idx != 0) MV_FAIL("a recipe entry names a member");
             if (e[i].src_off > recipe_len ||
                 e[i].len > recipe_len - e[i].src_off)
-                return -1;
+                MV_FAIL("a recipe entry runs past the recipe blob");
         } else {                             /* MEMBER / REPRO */
             const cpack_member *mm = cpack_member_find(mem_sorted, nmem,
                                                        e[i].idx);
-            if (!mm) return -1;              /* unknown member */
+            if (!mm) MV_FAIL("an entry names a member that does not exist");
             if (e[i].kind == CPACK_MAP_KIND_REPRO) {
                 /* the raw cluster must exist; the encoded length can only be
                  * proven at read time, and a mismatch is a loud -1 there */
-                if (!e[i].raw_len) return -1;
+                if (!e[i].raw_len)
+                    MV_FAIL("a kind-2 entry re-deflates nothing");
                 if (e[i].src_off > mm->usize ||
                     e[i].raw_len > mm->usize - e[i].src_off)
-                    return -1;
+                    MV_FAIL("a kind-2 entry runs past its member");
                 if (e[i].engine != INVFS_DEFLATE_ENGINE_ZLIB_SYSTEM &&
                     e[i].engine != INVFS_DEFLATE_ENGINE_ZLIB_STOCK)
-                    return -1;
+                    MV_FAIL("a kind-2 entry names an unknown deflate engine");
                 if (!e[i].level || e[i].level > 9 ||
                     !e[i].mem_level || e[i].mem_level > 9 ||
                     e[i].strategy > 4)
-                    return -1;
+                    MV_FAIL("a kind-2 entry names impossible deflate parameters");
+                /* WP119: the RE-DEFLAVATION BOUND. A kind-2 entry re-deflates
+                 * its whole raw_len EVERY time a read request touches it, so
+                 * its cost is set by the entry's size and not by how few
+                 * bytes the caller asked for: reading an S-byte member in
+                 * 4 KiB windows costs S/4Ki deflate passes over S bytes --
+                 * quadratic in S. "Compressed content" cannot see any of
+                 * that, because the entry stores NOTHING, so the bound has
+                 * to be on raw_len itself. 4 MiB is twice the largest
+                 * cluster the qcow2 format allows (cluster_bits <= 21), so
+                 * no conformant image is refused; a pack that wants to
+                 * expose more keeps that payload verbatim in the recipe
+                 * instead (kind 1/0), which is exactly what the ZIP pack's
+                 * own ZIP_REPRO_MAX does on its side. */
+                if ((uint64_t)e[i].raw_len > CPACK_REPRO_MAX)
+                    MV_FAIL("a kind-2 entry re-deflates more than the read "
+                            "path bounds");
             } else {
                 if (e[i].src_off > mm->usize ||
                     e[i].len > mm->usize - e[i].src_off)
-                    return -1;
+                    MV_FAIL("an entry runs past its member");
             }
         }
         pos += e[i].len;
     }
-    return pos == container_size ? 0 : -1;
+    if (pos != container_size) { if (why) *why = "the entries stop short of the container"; return -1; }
+#undef MV_FAIL
+    return 0;
+}
+
+
+/* ---- WP119: the containerpack SIZE GUARD --------------------------------
+ *
+ * The GZR lane has had a gain guard since forever -- "transcode only when
+ * smaller" (the `total >= gz_len` test above). vol_containerpack_sweep()
+ * had none, so a pack could hand back a decomposition that is BIGGER than
+ * the container it came from and the sweep would store it. Decomposition
+ * is not free: every exposed member becomes a real inode with its own
+ * record, recipe, dirent and index entry, so a container of many small
+ * incompressible members costs nearly twice what the whole file costs as
+ * one generic ZSTD segment. The guard is the same one the ZIP pack
+ * carries in the registry (codecpacks/zip/1.0.0/zip.c), promoted into the
+ * engine so it binds every container pack instead of one that remembered
+ * to write it:
+ *
+ *     projected = fixed + sum_i min(zstd19(member_i), usize_i) + n*MEM_COST
+ *     accept only when projected * 1000 < orig_len * (1000 - ZGAIN_MILLE)
+ *
+ * `fixed` is the recipe + the member table + the map, which ride verbatim
+ * in their own inodes. zstd-19 is the engine's generic binary lane, which
+ * every member reaches even if batching never fires, so the sum is a FLOOR
+ * and not a bet: whatever the guard accepts is a win before batching, and
+ * batching only improves it. MEM_COST is measured, not guessed (WP108: the
+ * codec projection said 1,685,140 B and the volume actually charged
+ * 4,935,680 B for a 201-member archive -- 16,167 B per member the
+ * projection never saw; 16 KiB is that number rounded UP).
+ *
+ * That is why "compressed content" is not a safety bound for a container
+ * pack, and it is why the second term is not optional: the ZIP pack
+ * shipped a 3 MB regression while passing a guard that only counted
+ * compressed content.
+ *
+ * The second, independent bound is the RE-DEFLAVATION one, and it lives in
+ * the size projection rather than in this comparison because it is a
+ * property of the MAP, not of the byte counts: a kind-2 entry is charged
+ * nothing here (it stores nothing) yet the read path re-deflates its whole
+ * raw_len on every request that touches it -- quadratic in the member
+ * size, invisible to any content projection. repro_max carries the largest
+ * such re-deflation out of the map and cpack_map_validate refuses a map
+ * that asks for more than CPACK_REPRO_MAX; the two refusals are reported
+ * through the same verdict so one decline covers both.
+ */
+
+/* The gain the guard demands, in thousandths (5 = 0.5%). The same knob and
+ * the same default as vol_min_gain_pct() (vol_sweep.c:58), read here
+ * without touching that file; float only in this one conversion. */
+static uint64_t cpack_gain_mille(void)
+{
+    const char *e = getenv("INVFS_MIN_GAIN_PCT");
+    if (e && *e) {
+        char *end = NULL;
+        double pct = strtod(e, &end);
+        if (end != e && pct >= 0.0 && pct < 100.0)
+            return (uint64_t)(pct * 10.0 + 0.5);   /* percent -> per-mille */
+    }
+    return CPACK_ZGAIN_MILLE;
+}
+
+
+/* The verdict: 1 = commit the decomposition, 0 = decline it (the file
+ * falls through to the generic lane, exactly as it did before the pack
+ * existed). `why` (optional) gets a one-clause reason for the sweep's
+ * refusal line. */
+int cpack_size_guard(uint64_t orig_len, const cpack_size_proj *p,
+                     const char **why)
+{
+    const char *reason = NULL;
+    uint64_t projected, gain = cpack_gain_mille();
+
+    if (why) *why = NULL;
+    if (!p || !orig_len) return 0;
+    if (p->repro_max > CPACK_REPRO_MAX)
+        reason = "a kind-2 entry re-deflates more than the read path bounds";
+    if (p->member_cost > UINT64_MAX - p->content ||
+        p->content > UINT64_MAX - p->fixed)
+        return 0;                         /* cannot be a gain at this size */
+    projected = p->fixed + p->content + p->member_cost;
+    if (!reason && (projected > orig_len ||
+        (__uint128_t)projected * 1000u >=
+        (__uint128_t)orig_len * (1000u - gain)))
+        reason = "the decomposition is not a gain";
+    if (reason) {
+        if (why) *why = reason;
+        return 0;
+    }
+    return 1;
+}
+
+
+/* Project the cost of the decomposition the sweep is about to commit.
+ * `fixed` is recipe + table (+ map, once the pack has produced one) and the
+ * member payloads are read back from the pack's scratch dir: each is put
+ * through the ZSTD-19 lane the engine itself will put it through, and
+ * charged min(compressed, usize) -- the content it is guaranteed to reach.
+ * Returns 0, or -1 when a member cannot be read (the caller abandons). */
+static int cpack_project(const cpack_member *mem, size_t nmem,
+                         const char *pmdir, uint64_t orig_len, uint64_t fixed,
+                         uint64_t sum_usize, cpack_size_proj *out)
+{
+    size_t i;
+
+    memset(out, 0, sizeof *out);
+    out->fixed = fixed;
+    out->member_count = (uint64_t)nmem;
+    out->member_cost = (uint64_t)nmem * CPACK_MEMBER_COST;
+    /* The per-member bookkeeping alone already eats the container: no need
+     * to read a single payload to know this decomposition is a loss. The
+     * verdict rests on the LOW side of the projection (content >= 0), which
+     * is the sound side; what goes in `content` here is the announced
+     * member total, an UPPER bound (min(zstd19, usize) <= usize), so the
+     * refusal line still shows the worst the shape could possibly cost. */
+    if (fixed >= orig_len || out->member_cost >= orig_len - fixed) {
+        out->content = sum_usize;
+        out->content_bound = 1;
+        return 0;
+    }
+    for (i = 0; i < nmem; i++) {
+        char pm[256];
+        uint8_t *mb = NULL;
+        uint8_t *cb = NULL;
+        size_t mlen = 0, bound, cl;
+        snprintf(pm, sizeof pm, "%s/%u", pmdir, mem[i].idx);
+        if (slurp_file(pm, &mb, &mlen) != 0 || mlen != (size_t)mem[i].usize) {
+            free(mb);
+            return -1;
+        }
+        bound = ZSTD_compressBound(mlen);
+        cb = (uint8_t *)malloc(bound);
+        if (!cb) { free(mb); return -1; }
+        cl = ZSTD_compress(cb, bound, mb, mlen, CPACK_ZSTD_LANE);
+        /* an error, or a member that does not compress: it is stored
+         * verbatim, which is the most the projection may charge for it */
+        if (ZSTD_isError(cl) || cl >= mlen) cl = mlen;
+        out->content += (uint64_t)cl;
+        free(cb);
+        free(mb);
+    }
+    return 0;
+}
+
+
+/* The largest single re-deflation (and the per-pass total) a map asks the
+ * read path for. Zero for a map-less pack: nothing is regenerated. */
+static void cpack_repro_stats(const cpack_map_ent *e, size_t n,
+                              cpack_size_proj *p)
+{
+    size_t i;
+    for (i = 0; i < n; i++) {
+        if (e[i].kind != CPACK_MAP_KIND_REPRO) continue;
+        if (e[i].raw_len > p->repro_max) p->repro_max = e[i].raw_len;
+        p->repro_bytes += e[i].raw_len;
+    }
+}
+
+
+/* One line, on the same channel as the rebuild/map guard refusals, with the
+ * whole price in it: a decline that cannot be explained from the log is a
+ * decline nobody can act on. */
+static void cpack_size_refusal(const char *pack, const char *name,
+                               uint64_t orig_len, const cpack_size_proj *p,
+                               const char *why)
+{
+    uint64_t projected = p->fixed + p->content + p->member_cost;
+    fprintf(stderr, "sweep: %s: %s: size guard refused, decomposition "
+            "declined (%s): %llu fixed + %s%llu content + %llu member-cost "
+            "(%llu members) = %s%llu B vs %llu B original; largest per-request "
+            "re-deflation %llu B\n",
+            pack, name, why ? why : "not a gain",
+            (unsigned long long)p->fixed,
+            p->content_bound ? "<=" : "",
+            (unsigned long long)p->content, (unsigned long long)p->member_cost,
+            (unsigned long long)p->member_count,
+            p->content_bound ? "<=" : "",
+            (unsigned long long)projected, (unsigned long long)orig_len,
+            (unsigned long long)p->repro_max);
 }
 
 
@@ -2396,7 +2600,7 @@ static const struct cpack_map_cache *cpack_map_get(invfs_volume *v,
         goto fail;
     }
     if (cpack_map_validate(ents, nents, container_size,
-                           (uint64_t)recipe_len, mem, nmem) != 0) {
+                           (uint64_t)recipe_len, mem, nmem, NULL) != 0) {
         goto fail;
     }
     free(table);
@@ -2531,6 +2735,9 @@ int vol_containerpack_sweep(invfs_volume *v, uint64_t inode_id,
     cpack_map_ent *ments = NULL;
     size_t nments = 0;
     cpack_member *mem_sorted = NULL;   /* idx-sorted copy for the map paths */
+    cpack_size_proj proj;              /* WP119: the price of this shape */
+    const char *why = NULL;            /* WP119: the guard's reason, if any */
+    const char *map_why = NULL;        /* the map validator's reason, if any */
     invfs_meta_pub keep;
     int have_keep, rc = 0;
     /* the superseded parent recipe, released once the commit is complete */
@@ -2654,6 +2861,25 @@ int vol_containerpack_sweep(invfs_volume *v, uint64_t inode_id,
             { if (getenv("INVFS_DEBUG_PACKS")) fprintf(stderr,"[cpack] extract idx=%u size mismatch\n", mem[i].idx); goto out; }
     }
 
+    /* 4b. WP119 SIZE GUARD. Everything the volume would pay for this
+     * decomposition is knowable before a single byte of it is written: the
+     * recipe and the member table are in hand, the member payloads are in
+     * the scratch dir. Price them here (see "the containerpack SIZE GUARD"
+     * above); the VERDICT is taken in step 5, beside the pack's own guards
+     * and still before the commit, so a refusal leaves no stamp, no
+     * siblings and no recipe -- the file falls through to the generic lane
+     * exactly as it did before the pack existed. A pack with a map is
+     * priced a second time in step 5, once the map has added its own bytes
+     * to `fixed` and told us what the read path would re-deflate per
+     * request. */
+    if (cpack_project(mem, nmem, pmdir, (uint64_t)full_len,
+                      (uint64_t)recipe_len + (uint64_t)table_len,
+                      sum_usize, &proj) != 0) {
+        if (getenv("INVFS_DEBUG_PACKS"))
+            fprintf(stderr, "[cpack] size guard: member payload unreadable\n");
+        goto out;
+    }
+
     /* 5. the map command (ABI v1.1), when the pack has one: the FS-owned
      * binary partition of the container into recipe-blob and member ranges.
      * Parse + validate the SHAPE here; the byte-exactness proof runs
@@ -2690,13 +2916,29 @@ int vol_containerpack_sweep(invfs_volume *v, uint64_t inode_id,
                             "decomposition abandoned\n", pc->name, name);
             goto out;
         }
+        /* Shape first, price second: a map that does not tile the container
+         * is a broken pack, and that is the more useful thing to say -- the
+         * size guard would otherwise answer a different question first and
+         * bury it. */
         mem_sorted = cpack_members_sorted(mem, nmem);
         if (!mem_sorted) { if (getenv("INVFS_DEBUG_PACKS")) fprintf(stderr,"[cpack] members_sorted alloc failed\n"); goto out; }
         if (cpack_map_validate(ments, nments, (uint64_t)full_len,
-                               (uint64_t)recipe_len, mem_sorted, nmem) != 0) {
+                               (uint64_t)recipe_len, mem_sorted, nmem,
+                               &map_why) != 0) {
             fprintf(stderr, "sweep: %s: %s: map does not partition the "
-                            "container, decomposition abandoned\n",
-                    pc->name, name);
+                            "container (%s), decomposition abandoned\n",
+                    pc->name, name, map_why ? map_why : "no reason given");
+            goto out;
+        }
+        /* WP119: the map completes the price. It rides in its own inode
+         * (`fixed`), and its kind-2 entries are the part no content
+         * projection can see: they store nothing, and the read path
+         * re-deflates their whole raw_len on every request that touches
+         * them. */
+        cpack_repro_stats(ments, nments, &proj);
+        proj.fixed += (uint64_t)map_len;
+        if (!cpack_size_guard((uint64_t)full_len, &proj, &why)) {
+            cpack_size_refusal(pc->name, name, (uint64_t)full_len, &proj, why);
             goto out;
         }
     } else {
@@ -2716,6 +2958,16 @@ int vol_containerpack_sweep(invfs_volume *v, uint64_t inode_id,
         }
         free(outb);
         outb = NULL;
+        /* WP119: the size guard, AFTER the 1:1 proof and for the same
+         * reason the map path prices after its shape check -- a pack that
+         * cannot rebuild its own container is broken, and that is the more
+         * useful thing to report than a size verdict on a shape that was
+         * never going to be committed. Nothing has reached the volume
+         * either way: the commit is step 6. */
+        if (!cpack_size_guard((uint64_t)full_len, &proj, &why)) {
+            cpack_size_refusal(pc->name, name, (uint64_t)full_len, &proj, why);
+            goto out;
+        }
     }
 
     /* 6. commit: children first (the FLAC note) -- members (RAW, the

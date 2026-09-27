@@ -2,6 +2,18 @@
 # test-qcow2-zlib.sh — the qcow2 codecpack's ZLIB-COMPRESSED-CLUSTER lane
 # end to end, and the manifest contract that lane depends on (WP107).
 #
+# WP119 (2026): the sweep no longer decomposes a compressed-cluster image.
+# The Q2R3 strip keeps every deflate stream in the recipe verbatim and
+# regenerates it per read, so for a `-c` image the recipe is most of the
+# container and the members are addition without subtraction -- MEASURED at
+# +409 KiB of content blocks for this fixture (packs on vs off, three
+# sweeps). The sweep's size guard refuses it and names the reason. The
+# proofs that used to ride on the stored decomposition (MRM2 with REPRO
+# entries, the Q2R3 rebuild == source, diskimg == qemu-img) now run at the
+# pack level, which never consulted the size guard; the gate-1 refusal of
+# the zstd twin, the map-validator negative and every bit-exactness read
+# through the volume are unchanged.
+#
 # WHAT THIS PINS
 #   An 80%-compressed qcow2 used to be silently abandoned by the sweep with
 #     "map does not partition the container, decomposition abandoned"
@@ -153,6 +165,25 @@ print('  MRM2: %d entries, kinds %s' % (n, dict(kinds)))
 assert kinds[2] > 0, 'no REPRO entries: the fixture does not exercise the lane'
 PY
 echo "  (kind 2 = REPRO: a raw member range plus the deflate parameters)"
+# WP119: the sweep no longer decomposes a compressed-cluster image (see the
+# FS leg below -- the Q2R3 recipe of a -c image IS the container, so the
+# shape cannot pay for itself), which means the two proofs the FS legs used
+# to carry live here now: the members rebuild the container bit-exactly --
+# that rebuild walks the map and RE-deflates every kind-2 range -- and the
+# diskimg member equals what qemu-img reads back.
+mkdir -p "$WORK/out/mbr"
+for i in 1 2; do
+    "$PK" extract "$WORK/orig/z.qcow2" $i "$WORK/out/mbr/$i" >/dev/null \
+        || { echo "FAIL: extract z.qcow2 member $i"; exit 1; }
+done
+"$PK" rebuild "$WORK/out/r.bin" "$WORK/out/mbr" "$WORK/out/rebuilt.qcow2" >/dev/null \
+    || { echo "FAIL: rebuild from the Q2R3 recipe + members"; exit 1; }
+cmp -s "$WORK/orig/z.qcow2" "$WORK/out/rebuilt.qcow2" \
+    || { echo "FAIL: the Q2R3 rebuild (REPRO regen) is not bit-exact"; exit 1; }
+cmp -s "$WORK/orig/z.ref" "$WORK/out/mbr/1" \
+    || { echo "FAIL: the diskimg member is not bit-exact vs qemu-img"; exit 1; }
+echo "  Q2R3 rebuild (every REPRO range re-deflated) == source"
+echo "  member 1 (diskimg) == qemu-img convert -O raw: $(sha256sum "$WORK/out/mbr/1" | cut -d' ' -f1)"
 
 echo "== pack-level: the zstd twin is declined AT GATE 1 =="
 # Gate 1 is the qcow2 v3 header's incompatible_features "compression type"
@@ -262,47 +293,30 @@ if grep -q "decomposition abandoned" "$WORK/out/sweep1.log"; then
     grep "sweep:" "$WORK/out/sweep1.log"
     exit 1
 fi
+# WP119: a COMPRESSED-cluster image cannot pay for its own decomposition.
+# The Q2R3 strip keeps every deflate stream in the recipe verbatim and
+# regenerates it per read (kind 2), so the recipe is 336,565 B of this
+# 377,344 B container and the members are pure addition on top. Measured,
+# packs on vs off, three sweeps, the volume's own content accounting:
+# this shape holds +409 KiB more than storing the container whole. The
+# size guard refuses it and says why; a sparse/uncompressed image
+# (test-qcow2.sh, test-rawdisk.sh) still decomposes and still wins.
 grep -q "  z.qcow2: qcow2 (codecpack)" "$WORK/out/sweep1.log" \
-    || { echo "FAIL: the zlib image was not decomposed by the qcow2 pack:"; cat "$WORK/out/sweep1.log"; exit 1; }
+    && { echo "FAIL: the zlib image was decomposed (the size guard must refuse it):"; cat "$WORK/out/sweep1.log"; exit 1; }
+grep -q "qcow2: z.qcow2: size guard refused" "$WORK/out/sweep1.log" \
+    || { echo "FAIL: no size-guard refusal for z.qcow2:"; cat "$WORK/out/sweep1.log"; exit 1; }
+grep "qcow2: z.qcow2: size guard refused" "$WORK/out/sweep1.log" | sed 's/^sweep: /  /'
 grep -q "  s.qcow2: qcow2 (codecpack)" "$WORK/out/sweep1.log" \
     && { echo "FAIL: the zstd twin was decomposed"; exit 1; }
-echo "  z.qcow2 decomposed, s.qcow2 declined, no abandonment"
-
-echo "== siblings =="
-for s in '!mbr0001-diskimg' '!mbrt' '!mbrmap'; do
-    "$B/invf-cat" "$IMG" "z.qcow2$s" "$WORK/out/sib" >/dev/null 2>&1 \
-        || { echo "FAIL: missing sibling z.qcow2$s"; exit 1; }
-done
-"$B/invf-cat" "$IMG" 'z.qcow2!mbrt' "$WORK/out/mbrt" >/dev/null
-# The diskimg row is the invariant every qcow2 pack revision shares (it is
-# the full virtual-size guest image). The row COUNT is not: the pre-WP100
-# revision also publishes the compacted rankimg stream beside it. Assert the
-# row, print the table.
-grep -qx "1	diskimg	$((32 * 1024 * 1024))" "$WORK/out/mbrt" \
-    || { echo "FAIL: member table wrong: $(cat "$WORK/out/mbrt")"; exit 1; }
-sed 's/^/  mbrt: /' "$WORK/out/mbrt"
-"$B/invf-cat" "$IMG" 'z.qcow2!mbrmap' "$WORK/out/map" >/dev/null
-[ "$(od -A n -t x1 -N 4 "$WORK/out/map" | tr -d ' \n')" = "4d524d32" ] \
-    || { echo "FAIL: the stored map is not MRM2"; exit 1; }
-NREP=$(python3 -c "
-import struct,sys
-b=open('$WORK/out/map','rb').read(); n=struct.unpack_from('<I',b,4)[0]
-print(sum(1 for i in range(n) if b[12+i*40+16]==2))")
-echo "  !mbr0001-diskimg, !mbrt, !mbrmap (MRM2, $NREP REPRO entries)"
-[ "$NREP" -gt 0 ] || { echo "FAIL: the stored map has no REPRO entries"; exit 1; }
-echo "  the zstd twin has NO siblings:"
-for s in '!mbr0001-diskimg' '!mbrt' '!mbrmap'; do
-    "$B/invf-cat" "$IMG" "s.qcow2$s" "$WORK/out/nope" >/dev/null 2>&1 \
-        && { echo "FAIL: the declined zstd twin grew sibling s.qcow2$s"; exit 1; }
+echo "  z.qcow2 declined by the SIZE guard, s.qcow2 declined at gate 1, no abandonment"
+echo "  neither gained a sibling (a refusal writes nothing):"
+for f in z.qcow2 s.qcow2; do
+    for s in '!mbr0001-diskimg' '!mbrt' '!mbrmap'; do
+        "$B/invf-cat" "$IMG" "$f$s" "$WORK/out/nope" >/dev/null 2>&1 \
+            && { echo "FAIL: declined $f grew sibling $f$s"; exit 1; }
+    done
 done
 echo "    (none)"
-
-echo "== BIT-EXACTNESS: the member == qemu-img convert -O raw =="
-"$B/invf-cat" "$IMG" 'z.qcow2!mbr0001-diskimg' "$WORK/out/member.raw" >/dev/null
-cmp "$WORK/orig/z.ref" "$WORK/out/member.raw" \
-    || { echo "FAIL: the diskimg member is not bit-exact"; exit 1; }
-echo "  $(sha256sum "$WORK/out/member.raw" | cut -d' ' -f1)  (member, $((32 * 1024 * 1024)) B)"
-echo "  $(sha256sum "$WORK/orig/z.ref"       | cut -d' ' -f1)  (qemu-img convert -O raw)"
 
 echo "== BIT-EXACTNESS: the container reads back, direct and in windows =="
 "$B/invf-cat" "$IMG" z.qcow2 "$WORK/out/back.qcow2" >/dev/null
@@ -314,50 +328,6 @@ echo "  source:            $(sha256sum "$WORK/orig/z.qcow2" | cut -d' ' -f1)"
 cmp "$WORK/orig/z.qcow2" "$WORK/out/whole.rng" \
     || { echo "FAIL: the container drifted read in 64K windows"; exit 1; }
 echo "  64K windows:       $(sha256sum "$WORK/out/whole.rng" | cut -d' ' -f1)"
-
-echo "== RANGED reads across the MRM2 splice (REPRO really regenerates) =="
-# The windows are derived from the STORED map, not from guessed offsets: the
-# head, each kind transition (recipe -> member, member -> recipe), the
-# inside of a REPRO entry, and the tail. A REPRO entry that failed to
-# regenerate would break these reads even though the member itself is
-# intact -- which is the whole content of this leg.
-RANGES=$(python3 - "$WORK/out/map" <<'PY'
-import struct, sys
-b = open(sys.argv[1], 'rb').read()
-n = struct.unpack_from('<I', b, 4)[0]
-e = [(struct.unpack_from('<Q', b, 12 + i * 40)[0],
-      struct.unpack_from('<Q', b, 12 + i * 40 + 8)[0],
-      b[12 + i * 40 + 16]) for i in range(n)]
-size = e[-1][0] + e[-1][1]
-out = [(0, 64)]
-for i in range(1, n):
-    if e[i][2] != e[i - 1][2]:                 # a kind transition
-        out.append((max(0, e[i][0] - 32), 64))
-    if e[i][2] == 2 and e[i][1] > 4096:        # inside a regenerable cluster
-        out.append((e[i][0] + (e[i][1] - 4096) // 2, 4096))
-out.append((max(0, size - 4096), min(4096, size)))
-seen, uniq = set(), []
-for o, l in out:
-    if (o, l) in seen:
-        continue
-    seen.add((o, l))
-    uniq.append((o, min(l, size - o)))
-print(' '.join('%d:%d' % (o, l) for o, l in uniq))
-PY
-)
-echo "  windows: $RANGES"
-i=0
-for spec in $RANGES; do
-    i=$((i + 1))
-    off=${spec%%:*}
-    len=${spec##*:}
-    "$WORK/rngread" "$IMG" z.qcow2 "$off" "$len" "$WORK/out/got.$i" >/dev/null
-    dd if="$WORK/orig/z.qcow2" of="$WORK/out/ref.$i" bs=1 skip="$off" \
-       count="$len" status=none
-    cmp -s "$WORK/out/got.$i" "$WORK/out/ref.$i" \
-        || { echo "FAIL: range off=$off len=$len mismatch"; exit 1; }
-    echo "  off=$off len=$len OK"
-done
 
 echo "== the declined zstd twin is still bit-exact (stored verbatim) =="
 "$B/invf-cat" "$IMG" s.qcow2 "$WORK/out/back-s.qcow2" >/dev/null
@@ -387,7 +357,8 @@ BADIMG=wp107qcow2bad.img
 INVFS_CODECPACKS=$WORK/nbad "$B/invf-mkfs" "$BADIMG" 1 >/dev/null 2>&1
 INVFS_CODECPACKS=$WORK/nbad "$B/invf-cp" "$BADIMG" "$WORK/orig/z.qcow2" z.qcow2 >/dev/null
 INVFS_CODECPACKS=$WORK/nbad "$B/invf-sweep" "$BADIMG" > "$WORK/out/sweep-bad.log" 2>&1
-grep -q "map does not partition the container, decomposition abandoned" \
+# WP119: the refusal now names WHY it refused, so match the prefix.
+grep -q "map does not partition the container (.*), decomposition abandoned" \
     "$WORK/out/sweep-bad.log" \
     || { echo "FAIL: map {in} did not reproduce the abandonment:"; cat "$WORK/out/sweep-bad.log"; exit 1; }
 INVFS_CODECPACKS=$WORK/nbad "$B/invf-cat" "$BADIMG" 'z.qcow2!mbrmap' "$WORK/out/x" \
@@ -398,5 +369,7 @@ cmp "$WORK/orig/z.qcow2" "$WORK/out/bad-back.qcow2" \
 rm -f "$BADIMG"
 echo "  map {in} -> 'decomposition abandoned', no siblings, file still bit-exact"
 echo
-echo "PASS: qcow2 zlib clusters decompose, read back bit-exact, and the"
-echo "      manifest contract that makes it work is asserted."
+echo "PASS: the qcow2 pack maps zlib clusters to MRM2 with REPRO entries and"
+echo "      rebuilds the container bit-exactly; the sweep declines this"
+echo "      compressed-cluster image ON SIZE (WP119) and says so, and the"
+echo "      manifest contract and the map validator are still asserted."
