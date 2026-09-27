@@ -800,9 +800,16 @@ static int part_generic_segments(invfs_volume *v, uint64_t inode_id)
     return ok;
 }
 
+/* `max_out` (WP103): 0 = the original rule -- the blob only has to be
+ * smaller than the input, which is the right bar for a pack that SNIFFED the
+ * file and is its only competitor on offer. Non-zero = the byte ceiling a
+ * try-last pack must come in under (see sweep_lane_ref_size): a pack that
+ * runs LAST still has to beat the engine lane, not merely the LZ4 the write
+ * path left on disk. */
 static int vol_pack_sweep(invfs_volume *v, uint64_t inode_id,
                           const char *name, const invfs_codec *pc,
-                          const uint8_t *full, size_t full_len);
+                          const uint8_t *full, size_t full_len,
+                          size_t max_out);
 
 
 /* WP14b: defer the parts of a just-exploded extraction container
@@ -891,7 +898,7 @@ int vol_jxl_retry(invfs_volume *v, uint64_t inode_id, const char *name)
         return 0;
     }
 
-    rc = vol_pack_sweep(v, inode_id, name, jc, full, full_len);
+    rc = vol_pack_sweep(v, inode_id, name, jc, full, full_len, 0);
     free(full);
     return rc == 1 ? 0 : rc;   /* 1 = wait RAW (tools/space): keep waiting */
 }
@@ -937,11 +944,58 @@ int vol_exer_retry(invfs_volume *v, uint64_t inode_id, const char *name)
  * its own generic floor. Never frees `full`; the caller owns it. */
 #define SWEEP_DECLINED (-2)
 
+/* WP103: the size the ENGINE's own lane would store this file at -- the bar
+ * a try-last codecpack has to come in under, discounted by the gain guard.
+ * Same codec the lanes use: the registry's ZSTD entry (zstdc_encode, level
+ * 19) on BCJ-prefiltered bytes for the two x86 families, which is exactly
+ * what tz_seal does to a binary member (vol_textzone.c:610, :937). The
+ * comparison is therefore pack-whole-file vs lane-whole-file -- the same
+ * comparison RESULTS.md measured (+6.8% for LZMA2+BCJ over BCJ+ZSTD-19 on
+ * ELF, -13.9% for LZMA2 over PPMd8-z on text).
+ *
+ * Slightly strict for content that is neither text nor binary: those reach
+ * the generic floor, which compresses PER SEGMENT, and a whole-file
+ * reference can only be the smaller of the two. Strict is the safe side --
+ * a pack that cannot clear the bar is declined and the file keeps the
+ * builtin lane. Returns -1 when no reference could be produced (no ZSTD
+ * entry, or the working buffers would not allocate): the caller declines
+ * rather than admitting an unmeasured pack. */
+static int sweep_lane_ref_size(const char *name, const uint8_t *full,
+                               size_t full_len, size_t *out)
+{
+    const invfs_codec *zc = invfs_codec_by_algo(INVFS_ALGO_ZSTD);
+    const uint8_t *src = full;
+    uint8_t *work = NULL, *enc = NULL;
+    size_t cap, ref = 0;
+    int bfam, rc = -1;
+
+    if (!zc || !zc->encode || !full_len) return -1;
+    bfam = invfs_binary_family(full, full_len, name);
+    if (bfam == INVFS_BIN_FAMILY_ELF_X64 ||
+        bfam == INVFS_BIN_FAMILY_ELF_X86) {
+        work = (uint8_t *)malloc(full_len);
+        if (!work) return -1;
+        memcpy(work, full, full_len);
+        invfs_bcj_x86_enc(work, full_len);
+        src = work;
+    }
+    cap = ZSTD_compressBound(full_len);
+    enc = (uint8_t *)malloc(cap);
+    if (enc && zc->encode(src, full_len, enc, cap, &ref) == 0) {
+        rc = 0;
+        if (out) *out = ref;
+    }
+    free(enc);
+    free(work);
+    return rc;
+}
+
 static int sweep_dispatch(invfs_volume *v, uint64_t inode_id,
                           const char *name, const uint8_t *full,
                           size_t full_len, int v3)
 {
     char rname[272], p0name[272], jn[272];
+    int declined_algo = 0;   /* WP103: the pack the WP13 loop already tried */
 
     if (!name || !name[0] || !full || full_len < 4)
         return SWEEP_DECLINED;
@@ -1176,7 +1230,11 @@ static int sweep_dispatch(invfs_volume *v, uint64_t inode_id,
     /* WP13: codecpack codecs -- the registry's dynamic EXTERNAL entries, the
      * only ones carrying encode/decode trampolines (builtin externals have
      * NULL fn pointers and their own branches above). First sniff hit wins;
-     * a declined pack stamps and falls through to text/generic. */
+     * a declined pack stamps and falls through to text/generic.
+     * WP103: `declined_algo` remembers which pack already had its turn on
+     * this file, so the try-last loop further down (which runs after the
+     * text and EXER branches) does not encode the same file with the same
+     * pack twice. 0 = none declined. */
     {
         size_t cn = 0, ci;
         const invfs_codec *all = invfs_codec_all(&cn);
@@ -1193,10 +1251,11 @@ static int sweep_dispatch(invfs_volume *v, uint64_t inode_id,
                     packless_claim = 1;
                 continue;
             }
-            prc = vol_pack_sweep(v, inode_id, name, pc, full, full_len);
+            prc = vol_pack_sweep(v, inode_id, name, pc, full, full_len, 0);
             if (prc == 1) return 0;   /* tool absent: defer */
             if (prc >= 100) return prc;   /* transcoded */
             packless_claim = 0;
+            declined_algo = (int)pc->algo;
             break;   /* declined: stamps applied; text/generic still run */
         }
         if (packless_claim) return 0;   /* wait for the pack */
@@ -1235,6 +1294,91 @@ static int sweep_dispatch(invfs_volume *v, uint64_t inode_id,
             return 11;   /* exe media -> JXL container */
         }
         exer_no_bz = (erc == 2);
+    }
+
+    /* ---- WP103: the try-last codecpack loop ---------------------------
+     *
+     * Placement is the whole point, so read it against the branches above:
+     * a pack that scored 0 in the WP13 loop (no sniff.magic AND no
+     * sniff.ext -- a `family = code` general codec) is offered a SECOND
+     * chance here, which is AFTER the text branch (a text file has already
+     * returned 9 to PPMd and never arrives) and AFTER the exe carve, and
+     * BEFORE the binary ZSTD batch.
+     *
+     * Why after text: pack admission is claim-based. pack_sniff_impl
+     * returns 100 on a magic, 50 on an extension, 0 otherwise, and the
+     * WP13 loop breaks on the first hit, so a pack that sniffs `.c`/`.py`/
+     * `.md` PRE-EMPTS the built-in text lane and PPMd is never tried. That
+     * is a regression, not a lane: on the 12.2 MB text corpus measured in
+     * /srv/bench/packs/RESULTS.md, PPMd8-z gets 4.684x against LZMA2's
+     * 4.034x (-13.9%), and on web text 11.49x against 10.35x. Ranking by
+     * claim can only ever say "packs win on text", which is the wrong
+     * answer. Ordering by result says the right one.
+     *
+     * Why before binary, and not after: a general codec has no input magic
+     * to claim (claiming the magic the pack itself emits would make the
+     * sweep re-compress its own output), so without this block a pack is
+     * simply DEAD on the class where it does win. Binary is that class --
+     * LZMA2+BCJ 3.178x against the lane's BCJ+ZSTD-19 2.975x, +6.8% -- and
+     * it is the only measured headroom left. Placing this after the binary
+     * branch as well would leave the pack reachable only for content that
+     * is neither text nor executable, and the change would prove nothing.
+     *
+     * Three rules make running last safe:
+     *  - it must BEAT the engine lane by more than the gain guard, not
+     *    merely beat the LZ4 sitting in RAW right now: the bar is
+     *    sweep_lane_ref_size() discounted by INVFS_MIN_GAIN_PCT, checked
+     *    in vol_pack_sweep's max_out. No reference, no admission.
+     *  - being unavailable is NOT a claim. A pack with no trampolines, or
+     *    whose tools do not resolve, is skipped, never deferred: a score-0
+     *    pack matches EVERY file, so one under-built pack must not be able
+     *    to freeze the whole binary lane on RAW.
+     *  - nothing is ever half-applied. vol_pack_sweep encodes, decodes back
+     *    and memcmps before it replaces anything, so a decline leaves the
+     *    file exactly as found and the branch below still runs.
+     *
+     * '!'-sibling parts never get here (WP10 §12.7): a member belongs to
+     * its container's batch, not to a whole-file pack. */
+    if (!strchr(name, '!')) {
+        size_t cn = 0, ci;
+        const invfs_codec *all = invfs_codec_all(&cn);
+        size_t lane_ref = 0, bar = 0;
+        int have_ref = 0;
+        for (ci = 0; ci < cn; ci++) {
+            const invfs_codec *pc = &all[ci];
+            int prc;
+            if (!(pc->caps & INVFS_CODEC_CAP_EXTERNAL) || !pc->sniff)
+                continue;
+            if (pc->sniff(full, full_len, name) != 0) continue;
+            if ((int)pc->algo == declined_algo) continue;  /* had its turn */
+            if (!pc->encode || !pc->decode) continue;      /* not a claim */
+            if (!pc->probe || !pc->probe()) continue;     /* tools absent */
+            if (!have_ref) {
+                /* the lane's own answer for this file, discounted by the
+                 * gain guard -- measured once per file, not once per pack */
+                double pct = vol_min_gain_pct();
+                if (sweep_lane_ref_size(name, full, full_len, &lane_ref) != 0)
+                    break;   /* unmeasurable: no pack can be admitted */
+                bar = (size_t)((double)lane_ref * (1.0 - pct / 100.0));
+                if (bar < 1) bar = 1;   /* 0 means "no ceiling" downstream */
+                have_ref = 1;
+            }
+            prc = vol_pack_sweep(v, inode_id, name, pc, full, full_len, bar);
+            if (getenv("INVFS_DEBUG_PACKS"))
+                fprintf(stderr, "[packdbg] try-last %s on %s: lane=%zu "
+                                "bar=%zu prc=%d\n", pc->name, name,
+                        lane_ref, bar, prc);
+            if (prc == 1) continue;   /* out of space: try the next one */
+            if (prc >= 100) return prc;   /* transcoded, round-trip clean */
+            /* declined: try the NEXT one. Unlike the claimed loop above
+             * this must not break -- a score-0 pack that happens to be
+             * registered first and LOSES (plain ZSTD-19 against the
+             * BCJ+ZSTD-19 lane, say) would otherwise mask a pack that
+             * wins, and registry order is not a quality ranking. The price
+             * is one external encode per installed score-0 pack on a file
+             * no pack claimed; if none of them can prove the win the file
+             * falls through to the batch below, untouched. */
+        }
     }
 
     /* WP14a: not text either -- executable binaries (ELF/PE/Mach-O by
@@ -2234,10 +2378,11 @@ int vol_sweep_pending(invfs_volume *v)
  * (defer: leave the file RAW and unstamped -- like a missing cjxl, the
  * first sweep after the tools appear picks it up), 0 when the pack
  * declined (GUARD/MEMLIMIT stamped; the caller falls through to
- * text/generic, and the stamp carries the retry semantics). */
+ * text/generic, and the stamp carries the retry semantics). `max_out`
+ * is the WP103 lane bar -- 0 keeps the "smaller than the input" rule. */
 static int vol_pack_sweep(invfs_volume *v, uint64_t inode_id, const char *name,
                           const invfs_codec *pc, const uint8_t *full,
-                          size_t full_len)
+                          size_t full_len, size_t max_out)
 {
     const invfs_pack_def *def;
     uint8_t *enc = NULL, *back = NULL;
@@ -2297,7 +2442,8 @@ static int vol_pack_sweep(invfs_volume *v, uint64_t inode_id, const char *name,
     enc = (uint8_t *)malloc(enc_cap);
     if (!enc) return 0;
     if (pc->encode(full, full_len, enc, enc_cap, &enc_len) == 0 &&
-        enc_len < full_len) {
+        enc_len < full_len &&
+        (!max_out || enc_len <= max_out)) {
         /* guard: the blob must decode back to the exact original bytes
          * before anything is replaced */
         back = (uint8_t *)malloc(full_len ? full_len : 1);
