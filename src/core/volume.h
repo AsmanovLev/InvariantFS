@@ -356,9 +356,11 @@ int vol_v3_walk(invfs_volume *v, vol_v3_walk_cb cb, void *ctx);
  * (may be NULL if not found via dirent). Returns 0 complete, -1 error,
  * callback non-zero propagated. */
 /* Enumerate live inodes with their resolved path. On v3, `name` is the
- * full canonical path from root ("dir/sub/file.txt"), or NULL if the inode
- * has no dirent reference. Returns 0 complete, -1 error, or non-zero callback
- * return code propagated. */
+ * mount-relative path of ONE dirent naming the inode
+ * ("dir/sub/file.txt"; for nlink > 1, whichever the walk reaches
+ * first), or NULL if the inode has no dirent reference, or "" if the
+ * path does not fit the buffer. Returns 0 complete, -1 error, or
+ * non-zero callback return code propagated. */
 int vol_v3_iter_live_inodes(invfs_volume *v,
     int (*cb)(invfs_volume *v, uint64_t inode_id, const char *name, void *ctx),
     void *ctx);

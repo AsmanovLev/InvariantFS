@@ -3922,10 +3922,19 @@ int vol_v3_name_of(invfs_volume *v, uint64_t inode_id,
  * name-keyed consumer (vol_stat/vol_find/create_blob_file, the sweep
  * collector's dedupe table) expects that shape, while the v3 dirent
  * tree only stores leaves. Returns 1 composed, 0 not found, -1 error
- * (too deep / cyclic / buffer too small). Each hop is a full reverse
- * dirent walk, so this is O(depth x live) -- fine for the offline
- * tools, and the sweep collector's per-file vol_stat is the same order.
- * A dirent-index (id -> path) would be the v3-native optimization. */
+ * (too deep / cyclic / buffer too small).
+ *
+ * The hop loop below runs ONCE on a well-formed volume, and that is not
+ * an optimisation: v3_name_of_walk_cb copies the whole path and never
+ * assigns *parent_out, so vol_v3_name_of() always reports parent 0 and
+ * the loop exits on it. The cost is therefore one reverse walk of the
+ * ENTIRE dirent tree per call -- 3,399 directory listings on the
+ * 46,245-inode reproducer, each one a vol_delta_range() over the delta
+ * index. That is the FUSE open and read path (vol_read.c:1230), not an
+ * offline tool. WP117's second commit made vol_delta_range O(log G + k)
+ * and took one measured vol_v3_path_of from 44.5 ms to 1.3 ms, but the
+ * whole-tree walk is still there. NOT fixed here: it needs its own WP
+ * and its own risk assessment. */
 int vol_v3_path_of(invfs_volume *v, uint64_t inode_id, char *buf,
                    size_t cap)
 {
@@ -3973,6 +3982,44 @@ int vol_v3_path_of(invfs_volume *v, uint64_t inode_id, char *buf,
 /* WP-M18: live-set iteration for the sweep driver                     */
 /* ------------------------------------------------------------------ */
 
+/* WP117: one-shot inode-id -> leaf-name map for the iterator below.
+ *
+ * vol_v3_name_of() answers "what dirent names this inode" with a full
+ * reverse dirent walk of the whole tree (see the note on
+ * vol_v3_path_of), and every directory listing it performs is one
+ * vol_delta_range(), which walks the whole capacity of an open-addressed
+ * hash table. The iterator used to call it once PER LIVE INODE, so a
+ * sweep cost O(K x D x G) -- K inodes, D directory listings per lookup
+ * (3,399 measured on the 46,245-inode reproducer), G the delta index
+ * capacity (262,144). That put vol_heat_sweep_begin at a projected
+ * 6-14 days. One vol_v3_walk() builds the whole map, so the cost drops
+ * to D x G + K -- the single walk the sweep's collect stage already pays.
+ *
+ * The stored string is the dirent's LEAF name, exactly what
+ * The stored string is the full mount-relative path of ONE dirent
+ * naming the inode -- byte for byte what vol_v3_name_of() returned, so
+ * every caller of vol_v3_iter_live_inodes keeps its current contract
+ * (heat_promote_v3_cb hands the name straight to vol_stat_full, which
+ * needs the full path, not a basename). The first name wins on a
+ * hardlink (nlink > 1), which is also vol_v3_name_of()'s "any name
+ * suffices" rule: both walk the tree in the same order and stop at the
+ * first dirent whose child id matches. A path too long for the caller's
+ * buffer is stored as "", which is again what vol_v3_name_of() leaves
+ * behind for such a path (it refuses rather than truncates). */
+typedef struct {
+    uint64_t id;
+    uint32_t off;          /* name offset in pool, +1; 0 = empty slot */
+} v3_nidx_slot;
+
+typedef struct {
+    v3_nidx_slot *tab;
+    size_t cap;            /* power of two, load factor <= 0.5 */
+    size_t n;
+    char *pool;            /* NUL-separated names */
+    size_t pool_n, pool_cap;
+    int oom;
+} v3_name_index;
+
 typedef struct {
     invfs_volume *v;
     int (*cb)(invfs_volume *v, uint64_t inode_id, const char *name, void *ctx);
@@ -3981,7 +4028,159 @@ typedef struct {
     size_t visited_cap;
     size_t visited_n;
     int oom;
+    v3_name_index nidx;    /* WP117: built once, before the base scan */
+    int nidx_ok;
+    char namebuf[INVFS_MAX_NAME + 1];   /* fallback path only */
 } v3_iter_ctx;
+
+static size_t v3_nidx_hash(uint64_t id)
+{
+    id ^= id >> 33; id *= 0xff51afd7ed558ccdULL;
+    id ^= id >> 33; id *= 0xc4ceb9fe1a85ec53ULL;
+    id ^= id >> 33;
+    return (size_t)id;
+}
+
+static void v3_nidx_free(v3_name_index *ni)
+{
+    if (!ni)
+        return;
+    free(ni->tab);
+    free(ni->pool);
+    ni->tab = NULL;
+    ni->pool = NULL;
+    ni->cap = ni->n = ni->pool_n = ni->pool_cap = 0;
+}
+
+static int v3_nidx_grow(v3_name_index *ni)
+{
+    size_t nc = ni->cap ? ni->cap * 2 : 1024, i;
+    v3_nidx_slot *nt = (v3_nidx_slot *)calloc(nc, sizeof *nt);
+
+    if (!nt) { ni->oom = 1; return -1; }
+    for (i = 0; i < ni->cap; i++) {
+        size_t h;
+        if (!ni->tab[i].off)
+            continue;
+        h = v3_nidx_hash(ni->tab[i].id) & (nc - 1);
+        while (nt[h].off)
+            h = (h + 1) & (nc - 1);
+        nt[h] = ni->tab[i];
+    }
+    free(ni->tab);
+    ni->tab = nt;
+    ni->cap = nc;
+    return 0;
+}
+
+/* Record id -> `leaf`. Returns 1 on success (an id already present
+ * keeps its first name), 0 on OOM. */
+static int v3_nidx_put(v3_name_index *ni, uint64_t id, const char *leaf)
+{
+    size_t h, nl;
+
+    if (!ni)
+        return 0;
+    if (ni->cap) {
+        h = v3_nidx_hash(id) & (ni->cap - 1);
+        while (ni->tab[h].off) {
+            if (ni->tab[h].id == id)
+                return 1;                   /* first name wins (hardlink) */
+            h = (h + 1) & (ni->cap - 1);
+        }
+    }
+    if ((ni->n + 1) * 2 >= ni->cap && v3_nidx_grow(ni) != 0)
+        return 0;
+    nl = strlen(leaf) + 1;
+    if (ni->pool_n + nl > ni->pool_cap) {
+        size_t nc = ni->pool_cap ? ni->pool_cap : 4096;
+        char *np;
+        while (nc < ni->pool_n + nl) {
+            if (nc > 0xF0000000u) { ni->oom = 1; return 0; }
+            nc *= 2;
+        }
+        np = (char *)realloc(ni->pool, nc);
+        if (!np) { ni->oom = 1; return 0; }
+        ni->pool = np;
+        ni->pool_cap = nc;
+    }
+    h = v3_nidx_hash(id) & (ni->cap - 1);
+    while (ni->tab[h].off)
+        h = (h + 1) & (ni->cap - 1);
+    memcpy(ni->pool + ni->pool_n, leaf, nl);
+    ni->tab[h].id = id;
+    ni->tab[h].off = (uint32_t)(ni->pool_n + 1);
+    ni->pool_n += nl;
+    ni->n++;
+    return 1;
+}
+
+/* The dirent path for an inode, or NULL if no dirent names it. */
+static const char *v3_nidx_get(const v3_name_index *ni, uint64_t id)
+{
+    size_t h;
+
+    if (!ni || !ni->cap)
+        return NULL;
+    h = v3_nidx_hash(id) & (ni->cap - 1);
+    while (ni->tab[h].off) {
+        if (ni->tab[h].id == id)
+            return ni->pool + (ni->tab[h].off - 1);
+        h = (h + 1) & (ni->cap - 1);
+    }
+    return NULL;
+}
+
+/* One dirent's mount-relative path per inode, exactly as
+ * vol_v3_name_of() would have reported it: the full path, or "" when
+ * the path does not fit the iterator's name buffer. vol_v3_walk's own
+ * path buffer is 600 bytes, so a path longer than either is a corrupt
+ * namespace rather than a name to keep. */
+static int v3_nidx_build_cb(void *ctx_, const char *path, uint64_t ino,
+                            uint32_t type, uint64_t size, int64_t mtime)
+{
+    v3_name_index *ni = (v3_name_index *)ctx_;
+
+    (void)type; (void)size; (void)mtime;
+    if (!ni || !path)
+        return 0;
+    return v3_nidx_put(ni, ino,
+                       strlen(path) < INVFS_MAX_NAME + 1 ? path : "")
+           ? 0
+           : 1;                                  /* 1 stops the walk */
+}
+
+/* One vol_v3_walk() for the whole iteration. 0 = map ready, -1 = could
+ * not build it (the caller then falls back to the per-inode walk). */
+static int v3_nidx_build(invfs_volume *v, v3_name_index *ni)
+{
+    int rc;
+
+    memset(ni, 0, sizeof *ni);
+    rc = vol_v3_walk(v, v3_nidx_build_cb, ni);
+    if (rc != 0 || ni->oom) {
+        v3_nidx_free(ni);
+        return -1;
+    }
+    return 0;
+}
+
+/* The one place the iterator resolves a name. Returns NULL when the
+ * inode has no dirent reference -- the documented "may be NULL" case.
+ * Falls back to the per-inode reverse walk only if the one-shot map
+ * could not be built, i.e. exactly the pre-WP117 behaviour. */
+static const char *v3_iter_name(v3_iter_ctx *ic, uint64_t inode_id)
+{
+    uint64_t parent;
+
+    if (ic->nidx_ok)
+        return v3_nidx_get(&ic->nidx, inode_id);
+    ic->namebuf[0] = 0;
+    if (vol_v3_name_of(ic->v, inode_id, ic->namebuf,
+                       sizeof ic->namebuf, &parent) != 1)
+        return NULL;
+    return ic->namebuf;
+}
 
 /* WP-M21b: the visited set became a real open-addressed table (0 = empty;
  * inode id 0 is never live). The original append-anywhere + fixed-window
@@ -4063,18 +4262,7 @@ static int v3_iter_base_cb(void *ctx_, bt_key k, bt_val val)
     if (!v3_iter_mark(ic, inode_id))
         return -1;
 
-    /* resolve name via dirent lookup */
-    {
-        char name[INVFS_MAX_NAME + 1];
-        uint64_t parent;
-        int got;
-
-        name[0] = 0;
-        got = vol_v3_name_of(ic->v, inode_id, name, sizeof name, &parent);
-        (void)parent;
-
-        return ic->cb(ic->v, inode_id, got > 0 ? name : NULL, ic->ctx);
-    }
+    return ic->cb(ic->v, inode_id, v3_iter_name(ic, inode_id), ic->ctx);
 }
 
 /* WP-M21b: delta pass. Rows created (or recreated) since the last fold
@@ -4088,9 +4276,7 @@ static int v3_iter_delta_cb(void *ctx_, const uint8_t *key, uint16_t klen,
 {
     v3_iter_ctx *ic = (v3_iter_ctx *)ctx_;
     uint64_t inode_id = 0;
-    char name[INVFS_MAX_NAME + 1];
-    uint64_t parent;
-    int got, i;
+    int i;
 
     if (klen != 8)
         return 0;
@@ -4103,10 +4289,7 @@ static int v3_iter_delta_cb(void *ctx_, const uint8_t *key, uint16_t klen,
     if (!v3_iter_mark(ic, inode_id))
         return -1;
 
-    name[0] = 0;
-    got = vol_v3_name_of(ic->v, inode_id, name, sizeof name, &parent);
-    (void)parent;
-    return ic->cb(ic->v, inode_id, got > 0 ? name : NULL, ic->ctx);
+    return ic->cb(ic->v, inode_id, v3_iter_name(ic, inode_id), ic->ctx);
 }
 
 /* Public entry point. Callback is invoked once per live inode (nlink > 1
@@ -4156,6 +4339,10 @@ int vol_v3_iter_live_inodes(invfs_volume *v,
     ic.v = v;
     ic.cb = cb;
     ic.ctx = ctx;
+    /* WP117: ONE dirent walk for the whole iteration feeds the name map
+     * both passes below read from. Before this, each live inode paid its
+     * own whole-tree reverse walk (see v3_name_index). */
+    ic.nidx_ok = (v3_nidx_build(v, &ic.nidx) == 0);
 
     rc = btree_scan(v, root, (bt_key){lo, 8}, (bt_key){hi, 8},
                     v3_iter_base_cb, &ic);
@@ -4169,6 +4356,7 @@ int vol_v3_iter_live_inodes(invfs_volume *v,
         if (drc != 0 || ic.oom)
             rc = -1;
     }
+    v3_nidx_free(&ic.nidx);
     free(ic.visited);
     return rc;
 }

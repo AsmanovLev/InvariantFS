@@ -251,7 +251,18 @@ struct delta_index {
     delta_slot *slot;
     size_t      cap;    /* power of two */
     size_t      used;   /* occupied slots (keys are never tombstoned) */
+    /* WP117: identity of the key SET, for the per-thread sorted view that
+     * vol_delta_range reads (see di_sorted_this). `inst` is unique per
+     * index for the life of the process, so a view built against a freed
+     * index can never be mistaken for a view of a new one; `epoch` moves
+     * whenever the key set changes. */
+    uint64_t    inst;
+    uint64_t    epoch;
 };
+
+/* WP117: instance counter, guarded by g_delta_lock (di_new is reached from
+ * vol_delta_mount at open and from fold_delta_reset, both serialized). */
+static uint64_t g_index_inst;
 
 static uint32_t dl_hash(const uint8_t *p, uint16_t n)
 {
@@ -275,6 +286,7 @@ static struct delta_index *di_new(void)
         free(di);
         return NULL;
     }
+    di->inst = ++g_index_inst;
     return di;
 }
 
@@ -327,6 +339,7 @@ static int di_grow(struct delta_index *di)
     free(di->slot);
     di->slot = ns;
     di->cap = ncap;
+    di->epoch++;          /* WP117: every slot moved */
     return 0;
 }
 
@@ -359,6 +372,7 @@ static int di_put(struct delta_index *di, const uint8_t *key, uint16_t klen,
             s->key = k;
             s->klen = klen;
             di->used++;
+            di->epoch++;      /* WP117: the key set grew */
             if (inserted)
                 *inserted = 1;
             break;
@@ -701,6 +715,112 @@ static int dl_rentry_cmp(const void *pa, const void *pb)
     return dl_key_cmp(a->key, a->klen, b->key, b->klen);
 }
 
+/* ------------------------------------------------------------------ */
+/* WP117: the index's slots in KEY order, cached per thread             */
+/* ------------------------------------------------------------------ */
+/* A range query is a sorted-range query, and the only thing the index
+ * has to offer is an open-addressed hash table whose capacity is padded
+ * to a 70% load factor. Answering it from that order means walking
+ * di->cap -- the CAPACITY, not the record count -- on every call. That
+ * is what made one vol_v3_dirent_scan() cost 262,144 dl_key_cmp() calls
+ * on the 46,245-inode reproducer, and it is the multiplier under both
+ * vol_v3_name_of()'s reverse walk and vol_v3_path_of() on the read path.
+ *
+ * So: keep the occupied slots in key order alongside the table, once,
+ * and answer the query with a bsearch for `lo` plus a walk to `hi` --
+ * O(log G + k) instead of O(G). The view is DERIVED data and it is
+ * per-thread (a pthread TLS slot, freed by a destructor), so a reader
+ * still mutates no state another thread can see: delta reads stay
+ * lock-free, exactly as the note on g_delta_lock promises. It is
+ * rebuilt when the index's (inst, epoch) pair moves, i.e. when a key was
+ * inserted or the table rehashed.
+ *
+ * OOM building the view falls back to the linear capacity scan, which is
+ * the pre-WP117 code path and is always correct. The pre-existing
+ * assumption is unchanged and is not made safer here: a reader may still
+ * race a concurrent append (di_put) or rehash (di_grow) exactly as it
+ * could when the scan loop read di->slot directly. WP117 adds no new
+ * window -- the writer's critical section is g_delta_lock, and the only
+ * state this cache adds is per-thread. */
+typedef struct {
+    const uint8_t *key;   /* borrowed from the index slot */
+    uint16_t       klen;
+    uint32_t       slot;  /* index into delta_index::slot */
+} di_skey;
+
+typedef struct {
+    uint64_t inst, epoch; /* the (inst, epoch) this view was built from */
+    di_skey *v;
+    size_t   n, cap;
+} di_sorted;
+
+static int di_skey_cmp(const void *pa, const void *pb)
+{
+    const di_skey *a = (const di_skey *)pa;
+    const di_skey *b = (const di_skey *)pb;
+    return dl_key_cmp(a->key, a->klen, b->key, b->klen);
+}
+
+static void di_sorted_release(void *p)
+{
+    di_sorted *s = (di_sorted *)p;
+    if (!s)
+        return;
+    free(s->v);
+    free(s);
+}
+
+static pthread_key_t  g_di_sorted_key;
+static pthread_once_t g_di_sorted_once = PTHREAD_ONCE_INIT;
+
+static void di_sorted_key_init(void)
+{
+    pthread_key_create(&g_di_sorted_key, di_sorted_release);
+}
+
+static di_sorted *di_sorted_this(void)
+{
+    di_sorted *s;
+
+    pthread_once(&g_di_sorted_once, di_sorted_key_init);
+    s = (di_sorted *)pthread_getspecific(g_di_sorted_key);
+    if (!s) {
+        s = (di_sorted *)calloc(1, sizeof *s);
+        if (s)
+            pthread_setspecific(g_di_sorted_key, s);
+    }
+    return s;
+}
+
+static int di_sorted_build(const struct delta_index *di, di_sorted *s)
+{
+    size_t i, n = 0;
+
+    if (s->cap < di->used) {
+        di_skey *nv = (di_skey *)realloc(s->v,
+                                         (di->used ? di->used : 1) * sizeof *nv);
+        if (!nv)
+            return -1;
+        s->v = nv;
+        s->cap = di->used;
+    }
+    for (i = 0; i < di->cap; i++) {
+        const delta_slot *sl = &di->slot[i];
+        if (!sl->key)
+            continue;
+        s->v[n].key = sl->key;
+        s->v[n].klen = sl->klen;
+        s->v[n].slot = (uint32_t)i;
+        n++;
+    }
+    if (n > 1)
+        qsort(s->v, n, sizeof *s->v, di_skey_cmp);
+    s->n = n;
+    s->inst = di->inst;
+    s->epoch = di->epoch;
+    return 0;
+}
+
 int vol_delta_range(invfs_volume *v,
                     const uint8_t *lo, uint16_t lolen,
                     const uint8_t *hi, uint16_t hilen,
@@ -709,7 +829,8 @@ int vol_delta_range(invfs_volume *v,
     struct delta_index *di;
     dl_rentry *arr = NULL;
     size_t n = 0, cap = 0, i;
-    int rc = 0;
+    di_sorted *sv;
+    int rc = 0, presorted = 0;
 
     if (!v || !cb)
         return -1;
@@ -719,34 +840,68 @@ int vol_delta_range(invfs_volume *v,
     if (!di)
         return 0;                        /* empty recent tier */
 
-    for (i = 0; i < di->cap; i++) {
-        const delta_slot *s = &di->slot[i];
-        if (!s->key)
-            continue;
-        if (lolen && dl_key_cmp(s->key, s->klen, lo, lolen) < 0)
-            continue;
-        if (hilen && dl_key_cmp(s->key, s->klen, hi, hilen) >= 0)
-            continue;
-        if (n == cap) {
-            size_t ncap = cap ? cap * 2 : 32;
-            dl_rentry *na = (dl_rentry *)realloc(arr, ncap * sizeof *na);
-            if (!na) {
-                free(arr);
-                return -1;
+/* One collected entry. Declared as a macro so the sorted-view path and
+ * the linear-scan fallback cannot drift apart. */
+#define DI_EMIT(KEYV, KLENV, SLOTP) do {                                  \
+        if (n == cap) {                                                   \
+            size_t ncap_ = cap ? cap * 2 : 32;                            \
+            dl_rentry *na_ = (dl_rentry *)realloc(arr, ncap_ * sizeof *na_); \
+            if (!na_) { free(arr); return -1; }                           \
+            arr = na_;                                                     \
+            cap = ncap_;                                                   \
+        }                                                                  \
+        arr[n].key = (KEYV);                                               \
+        arr[n].klen = (KLENV);                                             \
+        arr[n].ref.seg = (SLOTP)->seg;                                     \
+        arr[n].ref.off = (SLOTP)->off;                                     \
+        arr[n].ref.seq = (SLOTP)->seq;                                     \
+        arr[n].ref.flags = (SLOTP)->flags;                                 \
+        arr[n].ref.vlen = (SLOTP)->vlen;                                   \
+        n++;                                                               \
+    } while (0)
+
+    sv = di_sorted_this();
+    if (sv && (sv->inst != di->inst || sv->epoch != di->epoch) &&
+        di_sorted_build(di, sv) != 0)
+        sv = NULL;                     /* OOM: linear scan below */
+    if (sv) {
+        size_t first = 0;
+        /* bsearch for the first key >= lo */
+        if (lolen) {
+            size_t a = 0, b = sv->n;
+            while (a < b) {
+                size_t mid = a + (b - a) / 2;
+                if (dl_key_cmp(sv->v[mid].key, sv->v[mid].klen,
+                               lo, lolen) < 0)
+                    a = mid + 1;
+                else
+                    b = mid;
             }
-            arr = na;
-            cap = ncap;
+            first = a;
         }
-        arr[n].key = s->key;
-        arr[n].klen = s->klen;
-        arr[n].ref.seg = s->seg;
-        arr[n].ref.off = s->off;
-        arr[n].ref.seq = s->seq;
-        arr[n].ref.flags = s->flags;
-        arr[n].ref.vlen = s->vlen;
-        n++;
+        for (i = first; i < sv->n; i++) {
+            const delta_slot *s;
+            if (hilen && dl_key_cmp(sv->v[i].key, sv->v[i].klen,
+                                   hi, hilen) >= 0)
+                break;
+            s = &di->slot[sv->v[i].slot];
+            DI_EMIT(sv->v[i].key, sv->v[i].klen, s);
+        }
+        presorted = 1;
+    } else {
+        for (i = 0; i < di->cap; i++) {
+            const delta_slot *s = &di->slot[i];
+            if (!s->key)
+                continue;
+            if (lolen && dl_key_cmp(s->key, s->klen, lo, lolen) < 0)
+                continue;
+            if (hilen && dl_key_cmp(s->key, s->klen, hi, hilen) >= 0)
+                continue;
+            DI_EMIT(s->key, s->klen, s);
+        }
     }
-    if (n > 1)
+#undef DI_EMIT
+    if (n > 1 && !presorted)
         qsort(arr, n, sizeof *arr, dl_rentry_cmp);
     for (i = 0; i < n; i++) {
         rc = cb(ctx, arr[i].key, arr[i].klen, &arr[i].ref);

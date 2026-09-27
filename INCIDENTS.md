@@ -73,14 +73,16 @@
   - Whether a savepoint (`SPT0`) would prevent it in the common case. The
     savepoint pins a *generation*; if it is the newer one it does not help.
 
-## UNRESOLVED — `invf-sweep` hangs in `vol_heat_sweep_begin` above ~46k live inodes
+## FIXED (WP117) — `invf-sweep` hung in `vol_heat_sweep_begin` above ~46k live inodes
 
   **Date:** Sep 27, 2026  
   **Severity:** High (availability — the sweep never returns)  
-  **Status:** **Unresolved, but localised.** Spinning frame, call chain and
-  complexity measured; no fix shipped.  
-  **Impact:** Any volume large enough to need a sweep stalls a full core
-  indefinitely and commits nothing. Not corruption — the image's mtime never
+  **Status:** **Fixed** for the heat stage, in two commits on
+  `wp/117-iter-live-inodes-quadratic`. The `[3/7] transform` onward path has
+  **its own, separate, still-open problem** — see "What is still broken"
+  at the end of this entry.  
+  **Impact:** Any volume large enough to need a sweep stalled a full core
+  indefinitely and committed nothing. Not corruption — the image's mtime never
   moves, so the volume is byte-identical to its pre-sweep state. Worse than a
   crash in practice, because a filesystem that silently stops reclaiming space
   becomes a disk-full outage and nothing alerts you.
@@ -175,39 +177,98 @@
   measurements bracketing it were taken with different control volumes, and
   the honest statement is the range, not a single threshold.
 
-  ### Proposed fix (proposal only, nothing implemented)
+  ### The fix (WP117, `wp/117-iter-live-inodes-quadratic`)
 
-  **B — essential.** `vol_v3_iter_live_inodes` must not perform one full tree
-  walk per inode. Build the id -> path map in **one** `vol_v3_walk` — the
-  collect stage at `tools/invf-sweep.c:1733` already does exactly that walk, so
-  it is close to free — and answer every name lookup from it.
-  **O(K x D x G) -> O(D x G + K).** `src/core/vol_btree.c:3925-3928` already
-  concedes that "each hop is a full reverse dirent walk, so this is
-  O(depth x live) -- fine for the offline tools"; on v3 it is O(whole tree),
-  and the sweep is exactly that offline tool.
+  **B — essential, commit 1.** `vol_v3_iter_live_inodes` no longer performs one
+  full tree walk per inode. It builds the id -> name map in **one**
+  `vol_v3_walk` — the same walk the collect stage at `tools/invf-sweep.c:1733`
+  already does, so it is close to free — and answers both passes (base scan and
+  delta range) from it. **O(K x D x G) -> O(D x G + K).** The map stores exactly
+  what `vol_v3_name_of` stored (the full mount-relative path of one dirent, `""`
+  for a path that does not fit, `NULL` for no dirent; first name wins on a
+  hardlink), so all five call sites keep their contract — `heat_promote_v3_cb`
+  needs the full path, since it hands the name to `vol_stat_full`. If the map
+  cannot be built, the iterator falls back to the old per-inode walk.
+  Verified by A/B: 511/511 `(inode id, name)` pairs identical to `main` on a
+  fresh 433-file import, and 51,154/51,154 on the reproducer.
 
-  **A — recommended.** Make `vol_delta_range` sub-linear: keep a key-sorted
-  array of occupied slots alongside the hash, `bsearch` the low bound, walk to
-  the high bound. **O(log G + k)** instead of **O(G)**. On its own this takes
-  the one remaining walk from ~4.7e9 slot-scans to under 1e8.
+  **A — commit 2, the same branch, a separate commit.** `vol_delta_range` no
+  longer walks the index's capacity. It reads a per-thread cached key ordering
+  of the index — derived data in a pthread TLS slot, so a reader still mutates
+  no shared state and the "delta reads are lock-free" promise holds — rebuilt
+  when the index's `(inst, epoch)` pair moves, with `inst` unique per index so
+  a view built against a freed index can never be reused against a new one.
+  **O(G) -> O(log G + k).**
 
-  ### Same shape elsewhere, unmeasured
+  **Measured on the 46,245-inode reproducer**, wall clock from `invf-sweep`
+  launch to the force-printed `[3/7] transform` banner (so it includes
+  `vol_open`, the prepare stage and the collect stage; the banner's absence is
+  positive proof the heat stage never returned):
+
+  | build | time to `[3/7]` |
+  |---|---|
+  | `main` 577d96e | **> 11 min 00 s** — killed, 100% CPU, banner never printed (WP115 saw > 100 min) |
+  | commit 1 only (B) | **73.5 s** |
+  | commits 1 + 2 (B + A) | **4.05 s** |
+
+  A also fixed the FUSE read path as a side effect, because
+  `vol_v3_path_of` is called on every read (`vol_read.c:1230`) and each of its
+  directory listings is a `vol_delta_range`. Per-file cost on the reproducer:
+
+  | | `vol_v3_path_of` | rest of `vol_read_file` |
+  |---|---|---|
+  | before | 44.5 ms | 43.2 ms |
+  | after | 1.3 ms | 1.3 ms |
+
+  Bit-exactness across a full 7-stage sweep, checked with `invf-cat` and its
+  exit code checked before hashing: 433/433 files read back byte-identical to
+  the source, 0 refusals, 0 mismatches.
+
+  ### Same shape elsewhere
 
   - `vol_v3_iter_live_inodes` is also called from `vol_sweep.c:2574`,
-  `vol_sweep.c:2915` and `vol_tier.c:901` — all hit the same blowup.
-    `vol_heat_promote` is stage `[4/7]` and would be the next to hang.
-  - `vol_v3_path_of()` (`vol_btree.c:3929`, reached from `vol_read.c:1230` and
-    `vol_read.c:1553`) has the same shape and sits on the **FUSE open path**,
-    which is far worse than an offline tool. Flagged, not measured.
+  `vol_sweep.c:2915` and `vol_tier.c:901` — all three took the same blowup
+  and all three are fixed by the same commit, since the walk is now shared.
+    `vol_heat_promote` is stage `[4/7]` and was the next to hang.
+  - `vol_v3_path_of()` (`vol_btree.c:3934`, reached from `vol_read.c:1230` and
+    `vol_read.c:1553`) has the same shape and sits on the **FUSE open and read
+    path**, which is far worse than an offline tool. WP117 made each of its
+    directory listings ~34x cheaper but did **not** touch the function: it is
+    still one whole-tree walk per call, and it needs its own WP and its own
+    risk assessment. Note also that `vol_v3_name_of` never assigns
+    `*parent_out` (`v3_name_of_walk_cb` has no such store), so
+    `vol_v3_path_of`'s hop loop runs exactly once and returns the full path
+    from that first hop.
+
+  ### What is still broken — `[3/7] transform` onward
+
+  **Fixing the heat stage is not sufficient, and this is a separate defect.**
+  With the heat stage fixed the sweep enters `[3/7] transform` in ~4 s and then
+  crawls. Measured on the 46,245-inode reproducer with the WP117 build: 18.6
+  files/s at the 5% mark, an ETA of ~1h15m for that stage alone, and the stage
+  was still running after 40 minutes. On a 433-file volume the same stage runs
+  at ~470 files/s, so it is not a per-file constant cost.
+
+  `[6/7] batches` looks worse and superlinear in the number of live TEXT
+  members: on the 433-file volume it took **1 m 29 s for 420 entries**
+  (4.7 entries/s), against `[3/7] transform`'s 919 ms for the same 433 files on
+  the same volume. If that rate is even roughly quadratic, 46,245 entries is
+  not a sweep that finishes in a working day. Only two points have been
+  measured, so the exponent is a guess and the stage is **not diagnosed**.
+
+  Neither stage was touched by WP117. The next WP should localise
+  `[3/7] transform` first — it is the larger of the two and it gates
+  everything after it.
 
   ### Not determined
 
-  - Exact K — the run never finished, so the projection is a range, not a value.
+  - Exact K for the old code — the run never finished, so the projection
+    stays a range, 7.5 to 17.3 days.
   - Whether D grows with volume size (measured only at 46,245).
-  - Whether `[3/7] transform` onward is healthy. A proof-of-concept that
-    skipped only the `vol_v3_name_of` call let the heat stage finish in under a
-    second and entered transform — where its own ETA read 2h59m at file
-    22/46,438. **Fixing the heat stage is not sufficient.**
+  - The complexity of `[3/7] transform` and `[6/7] batches` (see above).
+  - Whether the sweep as a whole completes on this corpus. It was still in
+    `[3/7] transform` when the measurement window closed, so **the sweep is
+    NOT demonstrated to converge on 46,245 inodes.**
   - How base pages end up in the SHADOW pool (`invf-mkfs` marks the whole
     metadata zone allocated, so `mb_alloc_meta_zone` always overflows). This
     interacts with the COW base-page leak; not chased.

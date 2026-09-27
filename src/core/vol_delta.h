@@ -116,8 +116,10 @@ int vol_delta_iter(invfs_volume *v, vol_delta_iter_cb cb, void *ctx);
  * btree_scan convention; keys are never empty. cb returns non-zero to abort
  * and that value is propagated. 0 = complete, -1 = bad arguments. The key
  * pointer passed to cb is the index's owned copy and is valid for the whole
- * call; it must not be retained after the cursor returns. O(k log k) in the
- * number of matching keys, so a small recent tier stays cheap. */
+ * call; it must not be retained after the cursor returns. WP117: the query
+ * runs over a per-thread cached key ordering of the index, so it costs
+ * O(log G + k) in the indexed keys G and the k matches -- not O(G) in the
+ * hash table's capacity. */
 typedef int (*vol_delta_range_cb)(void *ctx, const uint8_t *key, uint16_t klen,
                                   const delta_ref *ref);
 int vol_delta_range(invfs_volume *v,
