@@ -131,6 +131,45 @@ def sh(cmd, **kw):
                    stderr=subprocess.DEVNULL, **kw)
 
 
+# WP109: the objects a pack's helper must link, per the Makefile itself.
+# `print-obj-%` (Makefile:178) is the sanctioned source -- a hand-written
+# list here is exactly what rotted in WP101. Returns repo-absolute paths,
+# building any that are missing (a fresh worktree has an empty build/obj),
+# and RAISES rather than returning a short list: an under-linked helper
+# is a silently mis-fuzzed pack, which is worse than a loud abort.
+PACKS_NEEDING_EXTRAS = {"qcow2"}   # every other pack links libc only
+
+
+def pack_link_objects(repo, pack):
+    if pack not in PACKS_NEEDING_EXTRAS:
+        return []
+    p = subprocess.run(["make", "-s", "-C", repo, "print-obj-" + pack],
+                       stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    if p.returncode != 0:
+        raise PackFailure("make print-obj-%s failed: %s"
+                          % (pack, p.stderr.decode(errors="replace")[:400]))
+    rel = [l for l in p.stdout.decode().split("\n") if l.strip()]
+    if not rel:
+        raise PackFailure("make print-obj-%s returned NOTHING -- the link "
+                          "would silently drop %s's stock-zlib backend"
+                          % (pack, pack))
+    abs_ = [os.path.join(repo, l) for l in rel]
+    missing = [a for a in abs_ if not os.path.exists(a)]
+    if missing:
+        # Build exactly the named targets, not the whole engine. make
+        # matches them by the repo-relative names print-obj emitted
+        # (Makefile:190), not by the absolute paths we link with.
+        subprocess.run(["make", "-s", "-C", repo]
+                       + [os.path.relpath(a, repo) for a in missing],
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    still = [a for a in abs_ if not os.path.exists(a)]
+    if still:
+        raise PackFailure("cannot build pack helper %s: %d object(s) missing "
+                          "after `make` (%s...)"
+                          % (pack, len(still), ", ".join(still[:3])))
+    return abs_
+
+
 def build_ext4fs(path):
     with open(path, "wb") as f:
         f.truncate(16 << 20)
@@ -195,13 +234,35 @@ def build_ntfs(path):
 
 
 def build_qcow2(path):
-    sh("qemu-img create -f qcow2 %s 16M" % path)
-    payload = b"qcow2 fixture cluster\n" * 300
-    with open(path + ".pay", "wb") as f:
-        f.write(payload)
-    sh("qemu-io %s -c 'write -P 0x41 0 128k' -c 'write -P 0x42 1M 64k'"
-       % path)
-    os.unlink(path + ".pay")
+    """Mixed-cluster 16M image: compressed AND uncompressed allocations.
+
+    WP109: this used `write -P 0x41` (no -c), so EVERY allocated cluster
+    was uncompressed and the image never once entered the pack's
+    compressed-descriptor parser (qcow2.c:445-492: the csize_shift /
+    dataSize arithmetic and the pread of a pack-sized length off a
+    pack-controlled offset) or the reproduction search (qcow2.c:945-966).
+    56 source lines were dead in the fuzz corpus -- per gcov they are the
+    only lines in the pack where a length is derived from a 62-bit field.
+
+    The mix is deliberate: compressible text (real deflate-repro work),
+    incompressible random data (the plain path, and a cluster qemu
+    refuses to shrink), a second compressed region so the L2 table holds
+    several compressed descriptors in different slots, a constant-pattern
+    cluster, and a large unallocated span for the zero/`diskimg` path.
+    """
+    sh("qemu-img create -f qcow2 -o compression_type=zlib %s 16M" % path)
+    rng = random.Random(0xC0FFEE)
+    text = "".join("qcow2 fuzz fixture line %d\n" % i
+                   for i in range(24000)).encode()[:128 << 10]
+    with open(path + ".txt", "wb") as f:
+        f.write(text)
+    with open(path + ".rnd", "wb") as f:
+        f.write(rng.randbytes(64 << 10))
+    sh("qemu-io %s -c 'write -c -s %s.txt 0 128k' -c 'write -s %s.rnd 4M 64k'"
+       " -c 'write -c -s %s.txt 8M 64k' -c 'write -P 0x41 12M 64k'"
+       % (path, path, path, path))
+    os.unlink(path + ".txt")
+    os.unlink(path + ".rnd")
 
 
 PACKS = {                       # name -> (source, fixture builder)
@@ -325,20 +386,27 @@ def fuzz_pack(args, pack, src, builder):
     # failed with undefined references and the ONE pack this harness most
     # needs to cover -- the one that ships a hand-written container parser
     # -- was never fuzzed: the traceback aborted the whole run.
+    #
+    # WP109: WP101's fix was a HAND-MAINTAINED object list, filtered by
+    # os.path.exists and then applied only `if extra:`. In a clean
+    # checkout (any fresh worktree, a CI clone, a new WP worktree --
+    # exactly how this harness is run) build/obj/ is empty, `extra` is
+    # empty, and -lz was dropped with it, so the link failed with
+    # `undefined reference to inflateInit2_` and qcow2 went unfuzzed
+    # again -- the very gap WP101 closed, re-armed. Makefile:181 spells
+    # out the rule this broke: harnesses must not hand-maintain this
+    # list, and must "fail loudly on an empty list, not fall through to a
+    # silently under-linked binary". So: ask the Makefile
+    # (`print-obj-<pack>`, Makefile:178-181), build any object it names
+    # that is missing, and refuse to link if anything is still absent.
     cflags = ["cc", "-std=c11", "-O2", "-I" + os.path.join(fz.REPO, "src", "core"),
               "-I" + os.path.join(fz.REPO, "src", "codecs")]
-    extra = [a for a in (os.path.join(fz.REPO, "build", "obj", o)
-                         for o in ("deflate_repro.o", "deflate_backend_system.o",
-                                   "deflate_backend_stock.o", "zlib_stock_inflate.o",
-                                   "zlib_stock_inffast.o", "zlib_stock_deflate.o",
-                                   "zlib_stock_adler32.o", "zlib_stock_crc32.o",
-                                   "zlib_stock_inftrees.o", "zlib_stock_trees.o",
-                                   "zlib_stock_zutil.o"))
-             if os.path.exists(a)]
-    if extra:
-        cflags += extra + ["-lz", "-lpthread"]
+    extra = pack_link_objects(fz.REPO, pack)
+    # the Makefile's own .so rule (Makefile:168) always links -lz -ldl;
+    # mirror it exactly rather than re-deriving the flag set here.
     subprocess.run(cflags + ["-o", helper,
-                            os.path.join(fz.REPO, "tools/codecpacks", src)],
+                            os.path.join(fz.REPO, "tools/codecpacks", src)]
+                   + extra + ["-lz", "-ldl"],
                    check=True)
     if not os.path.exists(fixture) or args.refixtures:
         builder(fixture)
