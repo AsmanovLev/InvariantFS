@@ -100,9 +100,41 @@ EOF
 echo "INVFS probe: [$PROBED]"
 echo "INVFS_RAW=$INVFS_RAW DEV1=$INVFS_DEV1"
 
+# WP125: when the root volume will not come up, the box is only rescueable if
+# the repair tools are reachable from THIS shell. mkinitramfs.sh stages
+# invf-verify/invf-fsck/invf-cat/invf-ls/invf-stat for exactly this reason.
+rescue_shell() {
+    cat <<EOF
+
+--------------------------------------------------------------------------
+InvariantFS root did not come up. This initramfs carries the repair tools,
+so the volume can be inspected and fixed from here -- no rescue media needed.
+
+  # what is on the volume (works on an UNMOUNTED volume, unlike the mount):
+  invf-ls     $INVFS_RAW
+  invf-cat    $INVFS_RAW /path/to/file /tmp/out
+
+  # is it damaged?  NOTE: trust the EXIT CODE, not the word OK on stdout --
+  # invf-verify prints "OK" for the superblock pass BEFORE --deep runs.
+  invf-verify --deep $INVFS_RAW; echo "exit=\$?"
+
+  # repair, then re-check:
+  invf-fsck -f $INVFS_RAW
+  invf-verify --deep $INVFS_RAW; echo "exit=\$?"
+
+  # reclaim space (offline; the volume must NOT be mounted):
+  invf-sweep $INVFS_RAW
+
+Mounting is impossible while any of the above hold the volume open, so
+unmount first if something is still attached.
+--------------------------------------------------------------------------
+EOF
+    sh
+}
+
 if [ -z "$INVFS_RAW" ]; then
     echo "ERROR: no InvariantFS volume found on any block device"
-    sh
+    rescue_shell
 fi
 
 # ---- WP23 sweepboot: maintenance boot --------------------------------------
@@ -142,7 +174,7 @@ done
 if [ "$READY" != "1" ]; then
     echo "ERROR: invf-fuse did not mount in 120s:"
     cat /tmp/fuse.log
-    sh
+    rescue_shell
 fi
 
 grep "InvariantFS mounted" /tmp/fuse.log
