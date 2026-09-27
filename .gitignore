@@ -60,3 +60,7 @@ compile_commands.json
 # tools/lint-test-heredocs.sh scratch (should never land here, but if its
 # path handling regresses again, do not let the blocks reach the index)
 _tmp_tmp.*.py
+
+# WP scratch dirs: a WP doc is deleted in its shipping commit (AGENTS.md 1.2).
+# Never track one; `git add -A` from a worktree will otherwise sweep it in.
+.wp*/
