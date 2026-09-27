@@ -13,6 +13,66 @@
 > a path that cannot be pointed at in the tree — a name you cannot follow is
 > rot whether or not it once existed.
 
+## UNRESOLVED — the RT30 fallback root can be reclaimed while still live
+
+  **Date:** Sep 27, 2026  
+  **Severity:** High (silent namespace rollback)  
+  **Status:** **Unresolved.** Reachable in the code; the damage sequence has not
+  been constructed as a test.  
+  **Impact:** On a volume where the v3 fold has run and the newest root page is
+  subsequently damaged, `mbuf_root_read` falls back to an RT30 slot naming a
+  root whose pages have already been freed — and adopts a **stale namespace**
+  without any error. Files created after that root can become invisible. Not
+  corruption of file contents; corruption of which files exist.
+
+  ### The chain, each step verified in the tree
+
+  1. **RT30 is a double slot and only one slot is written per publish.**
+     `src/core/vol_metabuf.c:349-351`: `slot = v->rt30.seq & 1;
+     v->rt30.root_slot[slot] = root_pba; v->rt30.seq++;`. The other slot
+     therefore still names the *previous* root after every publish.
+  2. **`mbuf_root_read` deliberately falls back to it.**
+     `src/core/vol_metabuf.c:375-390` loops `for (i = 0; i < 2; i++)` over both
+     slots and prefers the higher validating generation — a WP86
+     damage-tolerance feature.
+  3. **Reclaim frees exactly that root's pages.** `btree_reclaim_pinned`
+     (`src/core/vol_btree.c:1809-1835`) marks `keep_root` and `pinned_root`,
+     then `bt_free_rec(v, old_root, ...)` — freeing everything in `old_root`
+     that is not reachable from the new root. `old_root` is the root the
+     surviving slot still names.
+  4. **A freed page still validates.** `mbuf_page_validate`
+     (`src/core/vol_metabuf.c`) checks only `h->magic` and `h->checksum` — it
+     never consults the allocation bitmap. Freeing clears a bitmap bit and
+     leaves page contents intact, so a freed, not-yet-reused page passes
+     validation perfectly.
+
+  So: damage the new root page, and the fallback resolves to a root whose
+  pages are all still checksum-valid, and the volume silently mounts an old
+  namespace.
+
+  ### Why this is not caused by any change of ours
+
+  The reclaim that frees `old_root` is the existing `fold_reclaim_hook`
+  (`src/core/vol_fold.c:268-276`), reached from the FUSE drain
+  (`vol_sweep.c:2361-2364`) today. This is a latent bug in shipped behaviour,
+  independent of the COW base-page leak, and independent of any fix for it.
+
+  ### The constraint it imposes on the leak fix
+
+  The obvious fix for the leak is to retain N published roots in a stack. That
+  is **not sufficient**. The liveness predicate is not "reachable from the
+  current root" — it is "named by any RT30 slot". A stack of depth N bounds
+  the leak; it does not make the fallback safe. Any collector must treat the
+  union of both RT30 slots as live regardless of generation.
+
+  ### Not determined
+
+  - Whether the sequence is reachable in practice. It is reachable from the
+    code; no test has been built that damages a live root page and observes the
+    rollback.
+  - Whether a savepoint (`SPT0`) would prevent it in the common case. The
+    savepoint pins a *generation*; if it is the newer one it does not help.
+
 ## UNRESOLVED — `invf-sweep` does not terminate above ~46k live inodes
 
   **Date:** Sep 27, 2026  
