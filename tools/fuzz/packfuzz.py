@@ -217,6 +217,10 @@ FIXT_EXT = {"rawdisk": ".img", "ext4fs": ".ext4", "fatfs": ".fat",
             "xfs": ".xfs", "ntfs": ".ntfs", "vdi": ".vdi",
             "qcow2": ".qcow2"}
 
+# Packs whose members legitimately exceed the container file: the member is
+# the guest's *virtual* disk, not the bytes the image stores. See check_table.
+SPARSE_PACKS = {"qcow2", "vdi", "rawdisk"}
+
 
 # ------------------------------------------------------------- checking --
 
@@ -244,7 +248,16 @@ def check_table(data, size, pack, mid):
         if not (0 <= idx <= 65535):
             raise PackFailure("%s #%d: idx %d out of range"
                               % (pack, mid, idx))
-        if usize < 0 or usize > 10 * size:
+        # WP101: a member larger than its container is NORMAL for a sparse
+        # container -- qcow2's "diskimg" is the full virtual-size guest disk
+        # (bounded to 16 TiB by the pack itself, qcow2.c: virtual_size cap)
+        # and can dwarf the image that holds it. vol_cpack.c deliberately
+        # does not bound usize by the container size either: it is fed to
+        # the admission estimate instead, so an over-claiming image is
+        # declined with ENOSPC rather than materialised. The old
+        # `usize > 10 * size` rule fired on exactly that legal shape and
+        # failed the suite on a correct pack.
+        if usize < 0 or (usize > 10 * size and pack not in SPARSE_PACKS):
             raise PackFailure("%s #%d: NONSENSE usize %d (mutant is %d "
                               "bytes)" % (pack, mid, usize, size))
     if n > 65536:
@@ -306,8 +319,26 @@ def fuzz_pack(args, pack, src, builder):
     fixture = os.path.join(work, "fixtures", pack + FIXT_EXT[pack])
     mutant = os.path.join(work, "mutant" + FIXT_EXT[pack] + "." + pack)
 
-    subprocess.run(["cc", "-std=c11", "-O2", "-o", helper,
-                    os.path.join(fz.REPO, "tools/codecpacks", src)],
+    # WP101: a bare `cc` cannot link every pack. qcow2.c needs the system
+    # zlib and the tree's deflate-reproduction objects (it calls
+    # invfs_deflate_decompress / invfs_deflate_repro_*), so the build
+    # failed with undefined references and the ONE pack this harness most
+    # needs to cover -- the one that ships a hand-written container parser
+    # -- was never fuzzed: the traceback aborted the whole run.
+    cflags = ["cc", "-std=c11", "-O2", "-I" + os.path.join(fz.REPO, "src", "core"),
+              "-I" + os.path.join(fz.REPO, "src", "codecs")]
+    extra = [a for a in (os.path.join(fz.REPO, "build", "obj", o)
+                         for o in ("deflate_repro.o", "deflate_backend_system.o",
+                                   "deflate_backend_stock.o", "zlib_stock_inflate.o",
+                                   "zlib_stock_inffast.o", "zlib_stock_deflate.o",
+                                   "zlib_stock_adler32.o", "zlib_stock_crc32.o",
+                                   "zlib_stock_inftrees.o", "zlib_stock_trees.o",
+                                   "zlib_stock_zutil.o"))
+             if os.path.exists(a)]
+    if extra:
+        cflags += extra + ["-lz", "-lpthread"]
+    subprocess.run(cflags + ["-o", helper,
+                            os.path.join(fz.REPO, "tools/codecpacks", src)],
                    check=True)
     if not os.path.exists(fixture) or args.refixtures:
         builder(fixture)
@@ -357,8 +388,11 @@ def fuzz_pack(args, pack, src, builder):
                         est = int(out.strip())
                     except ValueError:
                         raise PackFailure("estimate printed %r" % out[:80])
-                    if est < 0 or est > 10 * os.path.getsize(mutant) + \
-                            EST_MARGIN:
+                    # same sparse-container exemption as check_table: an
+                    # estimate is the pack's own accounting of the virtual
+                    # disk, which may legitimately exceed the image
+                    if est < 0 or (est > 10 * os.path.getsize(mutant) +
+                                   EST_MARGIN and pack not in SPARSE_PACKS):
                         raise PackFailure("NONSENSE estimate %d (mutant %d "
                                           "bytes)" % (est, os.path.getsize(
                                               mutant)))

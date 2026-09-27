@@ -559,7 +559,16 @@ int vol_get_children(invfs_volume *v, uint64_t inode_id,
         if (ast_hint_valid(v, ip)) {
             invfs_inode_rec h;
             if (vol_read_raw(v, ip, &h, sizeof h) == 0 &&
-                h.magic == INODE_REC_MAGIC && h.inode_id == inode_id) {
+                h.magic == INODE_REC_MAGIC && h.inode_id == inode_id &&
+                /* WP101: the hint path read rec_len straight out of the
+                 * image and malloc'd it below with no bound, while the
+                 * walk path (volume.c rec_walk_span) does bound it. The
+                 * hint is currently unreachable (idx_get_id is a no-op
+                 * stub, so ast_hint_valid(v, 0) is false), but a bound
+                 * that only exists on the live path is one refactor away
+                 * from a 4 GiB allocation driven by image bytes. */
+                h.rec_len >= INVFS_REC_HDR_LEN + 1 &&
+                h.rec_len <= INVFS_MAX_REC_LEN) {
                 p = ip;
                 rl = h.rec_len;
             }

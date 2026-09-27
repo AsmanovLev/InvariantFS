@@ -46,6 +46,11 @@ B3      := blake3 blake3_dispatch blake3_portable
 # individual .o files (NOT a .a archive) so link order does not matter.
 CORE_OBJS_FILE := build/core_objs.txt
 
+# WP101: hermetic unit-suite env, applied per recipe line (see `test:`).
+# Unset in production: pack_scan_all() scanning /usr/lib/invfs/codecpacks
+# is the deployed behaviour.
+TESTENV := INVFS_CODECPACKS_SYS=0
+
 TOOLS   := invf-mkfs invf-verify invf-fsck invf-cp invf-cat invf-ls invf-stat \
            invf-zip invf-arctest invf-blkio_test invf-fuse invf-import invf-sweep meta_probe \
            invf-stats invf-resize invf-rollback invf-l2ptest invfs-pack \
@@ -185,7 +190,7 @@ print-incdirs:
 IVPACKS := $(foreach p,$(CPACKS),dist/ivpack/$(p).ivpack)
 ivpacks: plugin-so $(IVPACKS)
 dist/ivpack/%.ivpack: $(PLUGIN_SO) | dist/ivpack
-	bash tools/pack-ivpack.sh tools/codecpacks/$*.codecpack $@
+	$(TESTENV) bash tools/pack-ivpack.sh tools/codecpacks/$*.codecpack $@
 dist/ivpack:
 	mkdir -p $@
 
@@ -235,7 +240,7 @@ print-fuzz-objs:
 
 # CI target: 10k iterations (faster than fuzz's default 100k)
 fuzz-ci: $(OUT)/invf-fuzz
-	$(OUT)/invf-fuzz 10000 0x1CF51EE5
+	$(TESTENV) $(OUT)/invf-fuzz 10000 0x1CF51EE5
 
 test: $(OUT)/invf-arctest $(OUT)/invf-blkio_test $(OUT)/invf-codec_test \
       $(OUT)/invf-helper_exec_test $(OUT)/invf-metabuf_test $(OUT)/invf-btree_test \
@@ -246,67 +251,75 @@ test: $(OUT)/invf-arctest $(OUT)/invf-blkio_test $(OUT)/invf-codec_test \
       $(OUT)/invf-window_test \
       $(OUT)/invf-ivpack_packs_test $(OUT)/invf-mkfs $(OUT)/invf-cp \
       $(OUT)/invf-sweep plugin-so $(CORE_OBJS_FILE)
-	$(OUT)/invf-arctest
-	$(OUT)/invf-blkio_test
-	$(OUT)/invf-codec_test
-	$(OUT)/invf-helper_exec_test
-	$(OUT)/invf-metabuf_test
-	$(OUT)/invf-btree_test
-	$(OUT)/invf-delta_test
-	$(OUT)/invf-concurrency_test /tmp
-	$(OUT)/invf-sweep_v3_test /tmp
-	$(OUT)/invf-btree_repair_test /tmp
-	$(OUT)/invf-symlink_v3_test /tmp
-	$(OUT)/invf-large_file_v3_test /tmp
-	$(OUT)/invf-dedupe_v3_test /tmp
-	$(OUT)/invf-window_test /tmp
-	$(OUT)/invf-deflate_repro_test
-	$(OUT)/invf-plugin_host_test
-	$(OUT)/invf-plugin_mt_test
-	$(OUT)/invf-ivpack_packs_test
-	bash tools/test-sweep-ui.sh
-	bash tools/lint-test-heredocs.sh
-	bash tools/check-repo-hygiene.sh
+	@# WP101: run the unit suite with the system codecpack directory off.
+	@# invf-codec_test's registry-shape assertions count the STATIC
+	@# codecs, but pack_scan_all() also scans /usr/lib/invfs/codecpacks,
+	@# so on a host that has codecpacks installed `make test` went red for
+	@# a reason that has nothing to do with the tree. Unset is what a
+	@# deployed binary gets, so this is not a behaviour change.
+	@# (Note: `export` in a recipe does not survive to the next line here,
+	@# so the variable is applied per command as $(TESTENV).)
+	$(TESTENV) $(OUT)/invf-arctest
+	$(TESTENV) $(OUT)/invf-blkio_test
+	$(TESTENV) $(OUT)/invf-codec_test
+	$(TESTENV) $(OUT)/invf-helper_exec_test
+	$(TESTENV) $(OUT)/invf-metabuf_test
+	$(TESTENV) $(OUT)/invf-btree_test
+	$(TESTENV) $(OUT)/invf-delta_test
+	$(TESTENV) $(OUT)/invf-concurrency_test /tmp
+	$(TESTENV) $(OUT)/invf-sweep_v3_test /tmp
+	$(TESTENV) $(OUT)/invf-btree_repair_test /tmp
+	$(TESTENV) $(OUT)/invf-symlink_v3_test /tmp
+	$(TESTENV) $(OUT)/invf-large_file_v3_test /tmp
+	$(TESTENV) $(OUT)/invf-dedupe_v3_test /tmp
+	$(TESTENV) $(OUT)/invf-window_test /tmp
+	$(TESTENV) $(OUT)/invf-deflate_repro_test
+	$(TESTENV) $(OUT)/invf-plugin_host_test
+	$(TESTENV) $(OUT)/invf-plugin_mt_test
+	$(TESTENV) $(OUT)/invf-ivpack_packs_test
+	$(TESTENV) bash tools/test-sweep-ui.sh
+	$(TESTENV) bash tools/lint-test-heredocs.sh
+	$(TESTENV) bash tools/check-repo-hygiene.sh
 
 # repo hygiene is also a standalone gate, for when you do not want a rebuild
 check-hygiene:
-	bash tools/check-repo-hygiene.sh
+	$(TESTENV) bash tools/check-repo-hygiene.sh
 
 # e2e tier: tmpfs images under /dev/shm; test-jxl needs cjxl/djxl installed
 e2e: all
-	bash tools/run-e2e.sh tools/test-textzone.sh
-	bash tools/run-e2e.sh tools/test-dedupe.sh
-	bash tools/run-e2e.sh tools/test-heat.sh
-	bash tools/run-e2e.sh tools/test-seal.sh
-	bash tools/run-e2e.sh tools/test-jxl.sh
-	bash tools/run-e2e.sh tools/test-pngflac.sh
-	bash tools/run-e2e.sh tools/test-rawimg.sh
-	bash tools/run-e2e.sh tools/test-binbatch.sh
-	bash tools/run-e2e.sh tools/test-conbatch.sh
-	bash tools/run-e2e.sh tools/test-exercarve.sh
-	bash tools/run-e2e.sh tools/test-containerpack.sh
-	bash tools/run-e2e.sh tools/test-sandbox.sh
-	bash tools/run-e2e.sh tools/test-helper-isolation.sh
-	bash tools/run-e2e.sh tools/test-rawdisk.sh
-	bash tools/run-e2e.sh tools/test-ext4fs.sh
-	bash tools/run-e2e.sh tools/test-fatfs.sh
-	bash tools/run-e2e.sh tools/test-xfs.sh
-	bash tools/run-e2e.sh tools/test-ntfs.sh
-	bash tools/run-e2e.sh tools/test-vdi.sh
-	bash tools/run-e2e.sh tools/test-resize.sh
-	bash tools/run-e2e.sh tools/test-rollback.sh
-	bash tools/run-e2e.sh tools/test-watermark.sh
-	bash tools/run-e2e.sh tools/test-dynzone.sh
-	bash tools/run-e2e.sh tools/test-rocp.sh
-	bash tools/run-e2e.sh tools/test-p7z.sh
-	bash tools/run-e2e.sh tools/test-qcow2.sh
-	bash tools/run-e2e.sh tools/test-ivpacks.sh
-	bash tools/run-e2e.sh tools/test-fuzz.sh
-	bash tools/run-e2e.sh tools/test-writepath.sh
-	bash tools/run-e2e.sh tools/test-acl.sh
-	bash tools/run-e2e.sh tools/test-flushfail.sh
-	bash tools/run-e2e.sh tools/test-multidev.sh
-	bash tools/run-e2e.sh tools/test-mkstemp.sh
+	$(TESTENV) bash tools/run-e2e.sh tools/test-textzone.sh
+	$(TESTENV) bash tools/run-e2e.sh tools/test-dedupe.sh
+	$(TESTENV) bash tools/run-e2e.sh tools/test-heat.sh
+	$(TESTENV) bash tools/run-e2e.sh tools/test-seal.sh
+	$(TESTENV) bash tools/run-e2e.sh tools/test-jxl.sh
+	$(TESTENV) bash tools/run-e2e.sh tools/test-pngflac.sh
+	$(TESTENV) bash tools/run-e2e.sh tools/test-rawimg.sh
+	$(TESTENV) bash tools/run-e2e.sh tools/test-binbatch.sh
+	$(TESTENV) bash tools/run-e2e.sh tools/test-conbatch.sh
+	$(TESTENV) bash tools/run-e2e.sh tools/test-exercarve.sh
+	$(TESTENV) bash tools/run-e2e.sh tools/test-containerpack.sh
+	$(TESTENV) bash tools/run-e2e.sh tools/test-sandbox.sh
+	$(TESTENV) bash tools/run-e2e.sh tools/test-helper-isolation.sh
+	$(TESTENV) bash tools/run-e2e.sh tools/test-rawdisk.sh
+	$(TESTENV) bash tools/run-e2e.sh tools/test-ext4fs.sh
+	$(TESTENV) bash tools/run-e2e.sh tools/test-fatfs.sh
+	$(TESTENV) bash tools/run-e2e.sh tools/test-xfs.sh
+	$(TESTENV) bash tools/run-e2e.sh tools/test-ntfs.sh
+	$(TESTENV) bash tools/run-e2e.sh tools/test-vdi.sh
+	$(TESTENV) bash tools/run-e2e.sh tools/test-resize.sh
+	$(TESTENV) bash tools/run-e2e.sh tools/test-rollback.sh
+	$(TESTENV) bash tools/run-e2e.sh tools/test-watermark.sh
+	$(TESTENV) bash tools/run-e2e.sh tools/test-dynzone.sh
+	$(TESTENV) bash tools/run-e2e.sh tools/test-rocp.sh
+	$(TESTENV) bash tools/run-e2e.sh tools/test-p7z.sh
+	$(TESTENV) bash tools/run-e2e.sh tools/test-qcow2.sh
+	$(TESTENV) bash tools/run-e2e.sh tools/test-ivpacks.sh
+	$(TESTENV) bash tools/run-e2e.sh tools/test-fuzz.sh
+	$(TESTENV) bash tools/run-e2e.sh tools/test-writepath.sh
+	$(TESTENV) bash tools/run-e2e.sh tools/test-acl.sh
+	$(TESTENV) bash tools/run-e2e.sh tools/test-flushfail.sh
+	$(TESTENV) bash tools/run-e2e.sh tools/test-multidev.sh
+	$(TESTENV) bash tools/run-e2e.sh tools/test-mkstemp.sh
 
 # WP22b flakey tier: power-loss / unstable-device soak on dm-flakey over a
 # loop device. Standalone on purpose (needs passwordless sudo + dm-flakey,
@@ -318,7 +331,7 @@ e2e: all
 # whereas `sudo -v` would demand a password and fail without a tty.
 #   knobs: FLAKEY_SEED=20260831 FLAKEY_SOAK_S=210 FLAKEY_ONLY=<leg>
 flakey:
-	bash tools/run-e2e.sh tools/test-flakey.sh
+	$(TESTENV) bash tools/run-e2e.sh tools/test-flakey.sh
 
 # ---- release --------------------------------------------------------------
 # Build the host-installer release artifact consumed by packaging/bootstrap.sh:
@@ -350,7 +363,7 @@ release: all
 # doxygen HTML browser (impl_docs/doxygen/html, gitignored). Requires doxygen
 # (and graphviz for the call graphs).
 docs:
-	bash tools/gen_impl_docs.sh
+	$(TESTENV) bash tools/gen_impl_docs.sh
 	doxygen Doxyfile
 
 docs-clean:

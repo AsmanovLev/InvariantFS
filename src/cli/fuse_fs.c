@@ -2718,11 +2718,23 @@ static int invf_unlink(const char *path)
  * files; without this the kernel returns EOPNOTSUPP and journald gives
  * up. We return 0 (no-op) — the volume doesn't support hole-punch or
  * preallocation, but callers that only need "file exists and is long
- * enough" are satisfied. */
+ * enough" are satisfied.
+ *
+ * WP101: that answer was honest for mode 0 only. PUNCH_HOLE and
+ * ZERO_RANGE also got 0, which is a LIE: the caller is told blocks were
+ * released (or zeroed) and no block ever was. A caller that punches
+ * holes to shrink a file — SQLite, the trim-style reclaimers, log
+ * truncators — silently leaks, and df never moves. EOPNOTSUPP is the
+ * answer those callers already know how to fall back from, so say it.
+ * FALLOC_FL_* is not defined on every libc, hence the literals. */
 static int invf_fallocate(const char *path, int mode, off_t offset,
                           off_t length, struct fuse_file_info *fi)
 {
-    (void)path; (void)mode; (void)offset; (void)length; (void)fi;
+    (void)path; (void)offset; (void)length; (void)fi;
+    /* 0x02 = PUNCH_HOLE, 0x10 = ZERO_RANGE, 0x01 = KEEP_SIZE pairs with
+     * either; none of them is a preallocation. */
+    if (mode & 0x02 || mode & 0x10)
+        return -EOPNOTSUPP;
     return 0;
 }
 

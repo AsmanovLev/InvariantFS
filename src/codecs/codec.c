@@ -1235,11 +1235,21 @@ static void pack_scan_dir(const char *dir, size_t dlen)
 }
 
 /* scan $INVFS_CODECPACKS colon-dirs, then the system dir (PATH probing of
- * tool names is probe()-time business, not registration) */
+ * tool names is probe()-time business, not registration).
+ *
+ * WP101: the system dir used to be scanned unconditionally, so the registry
+ * SHAPE a caller sees depended on whatever the host happened to have
+ * installed under /usr/lib/invfs/codecpacks. That made the unit suite
+ * non-hermetic: on a machine with packs installed, invf-codec_test's
+ * "registry holds the 14 static entries" and "packs registered: 13 static +
+ * ..." assertions fail through no fault of the code under test.
+ * INVFS_CODECPACKS_SYS=0 skips the system dir; unset (the default) keeps
+ * production behaviour identical. */
 static void pack_scan_all(void)
 {
     static const char sysdir[] = "/usr/lib/invfs/codecpacks";
     const char *p = getenv("INVFS_CODECPACKS");
+    const char *nosys = getenv("INVFS_CODECPACKS_SYS");
 
     while (p && *p) {
         const char *colon = strchr(p, ':');
@@ -1248,6 +1258,8 @@ static void pack_scan_all(void)
         if (!colon) break;
         p = colon + 1;
     }
+    if (nosys && strcmp(nosys, "0") == 0)
+        return;
     pack_scan_dir(sysdir, sizeof sysdir - 1);
 }
 

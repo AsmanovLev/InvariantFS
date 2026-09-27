@@ -81,10 +81,10 @@ To guarantee both high performance and crash resilience:
   - Shared objects are loaded using `dlmopen(LM_ID_NEWLM, ...)`.
   - Each pack operates in its own isolated dynamic linker namespace, preventing symbol collisions across conflicting versions (e.g. differing `zlib` or library builds).
 
-* **Sandboxed Worker Pool with Partitioned Memory:**
-  - `invf-fuse` and background sweepers spawn a fixed pool of $N = \min(nproc, 16)$ sandboxed worker processes (`invf-plugin-host`).
-  - Workers run under `CLONE_NEWNET` (no network access), dropped privileges (`nobody`), and restricted filesystem visibility (`Landlock`).
-  - **Shared Memory Pool:** Sized at $64\text{ MiB} \times nproc$ in `/dev/shm/invfs_pool`.
+* **Worker Pool with Partitioned Memory** *(name corrected by WP101: the pool is partitioned, not sandboxed)*
+  - `invf-fuse` and background sweepers spawn a fixed pool of $N = \min(nproc, 16)$ worker processes (`invf-plugin-host`).
+  - **WP101 — the workers are NOT sandboxed.** `tools/invf-plugin-host.c` contains no `clone`/`unshare` (so no `CLONE_NEWNET`), no `setuid`/`setgid`/`seteuid` (so no drop to `nobody`) and no `landlock_*` call; `accept()` (`:374`) does no `SO_PEERCRED` check. The control socket is a fixed `/tmp` path (`:253`) that the code never `chmod`s (its mode is whatever the launcher's umask leaves) and the shm object is `shm_open(..., 0666)` (`:308`), so the pool is reachable by any local user that can reach `/tmp` and `/dev/shm`. What the design actually buys is the `dlmopen` namespace above, per-slot memory partitioning, and the fault isolation below. Hardening this host is tracked in `impl_docs/AUDIT.md`; do not cite this ADR as a containment claim.
+  - **Shared Memory Pool:** Sized at $64\text{ MiB} \times nproc$ in `/dev/shm/invfs_plugin_pool` (`src/core/invf_plugin_ipc.h:16`).
   - **Dedicated SPSC Slots:** Memory is strictly partitioned into independent $64\text{ MiB}$ slots (one per worker). Communication uses lock-free Single-Producer Single-Consumer ring buffers with `eventfd`/`futex` notification.
   - **Fault Isolation:** If a shared object in worker $i$ encounters a `SIGSEGV` or memory corruption, only worker $i$ terminates. The main daemon and remaining $N-1$ workers continue uninterrupted. The failed slot is assigned a freshly spawned worker in $\approx 1\text{ ms}$, mirroring the recovery speed of legacy CLI helpers while achieving in-memory transfer speeds.
 

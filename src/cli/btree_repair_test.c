@@ -568,8 +568,18 @@ int main(int argc, char **argv)
     }
     if (getenv("PWD"))
         g_bin = getenv("PWD");
-    snprintf(g_img, sizeof g_img, "%s/invf-btree-repair-test.img", dir);
-    snprintf(g_cli_log, sizeof g_cli_log, "%s/invf-btree-repair-fsck.log", dir);
+    /* WP101: make the image name unique per process. `make test` in two
+     * worktrees at the same time (which AGENTS.md 1.3 makes the normal
+     * case -- one worktree per subagent) both built
+     * /tmp/invf-btree-repair-test.img, and the loser failed with
+     * "image is in use by another process" -- a green tree looking red
+     * for a reason that has nothing to do with the tree. tools/run-e2e.sh
+     * solves this for e2e by namespacing; the unit suite needs its own
+     * answer. Same for the fsck log beside it. */
+    snprintf(g_img, sizeof g_img, "%s/invf-btree-repair-test-%ld.img",
+             dir, (long)getpid());
+    snprintf(g_cli_log, sizeof g_cli_log, "%s/invf-btree-repair-fsck-%ld.log",
+             dir, (long)getpid());
     unlink(g_img);
 
     printf("WP86: a torn v3 base page must be survivable (btree_repair_test)\n");
@@ -801,7 +811,7 @@ int main(int argc, char **argv)
         int nv = 0, k, l;
         int eio2 = 0, abs2 = 0, inv2 = 0, kept2 = 0, out2 = 0;
 
-        snprintf(img3, sizeof img3, "%s/invf-btree-repair-multi.img", dir);
+        snprintf(img3, sizeof img3, "%s/invf-btree-repair-multi-%ld.img", dir, (long)getpid());
         unlink(img3);
         snprintf(cmd, sizeof cmd, "%s/bin/invf-mkfs %s 32 2>/dev/null",
                  g_bin, img3);
@@ -977,7 +987,7 @@ int main(int argc, char **argv)
 
         memset(longname, 'n', 200);
         longname[200] = 0;
-        snprintf(img4, sizeof img4, "%s/invf-btree-repair-longname.img", dir);
+        snprintf(img4, sizeof img4, "%s/invf-btree-repair-longname-%ld.img", dir, (long)getpid());
         unlink(img4);
         snprintf(cmd, sizeof cmd, "%s/bin/invf-mkfs %s 32 2>/dev/null",
                  g_bin, img4);
@@ -1089,7 +1099,7 @@ int main(int argc, char **argv)
         int torn_leaf_keys = 0;
         int j;
 
-        snprintf(img5, sizeof img5, "%s/invf-btree-repair-collapse.img", dir);
+        snprintf(img5, sizeof img5, "%s/invf-btree-repair-collapse-%ld.img", dir, (long)getpid());
         unlink(img5);
         snprintf(cmd, sizeof cmd, "%s/bin/invf-mkfs %s 32 2>/dev/null",
                  g_bin, img5);
@@ -1215,7 +1225,7 @@ int main(int argc, char **argv)
         invfs_v3_inode in;
         int r;
 
-        snprintf(img2, sizeof img2, "%s/invf-btree-repair-root.img", dir);
+        snprintf(img2, sizeof img2, "%s/invf-btree-repair-root-%ld.img", dir, (long)getpid());
         unlink(img2);
         snprintf(cmd, sizeof cmd, "%s/bin/invf-mkfs %s 32 2>/dev/null",
                  g_bin, img2);

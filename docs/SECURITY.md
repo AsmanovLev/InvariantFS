@@ -39,8 +39,39 @@ which helper runs.
 
 Every helper child — codecpack helpers *and* the builtin transcode lanes
 (cjxl/djxl, ffmpeg, MAC, packMP3) — is launched through one shared
-implementation, `invfs_helper_exec()` in `src/core/helper_exec.c`. The
-WP12d Landlock whitelist is unchanged and additive to the controls below:
+implementation, `invfs_helper_exec()` in `src/core/helper_exec.c`.
+
+**WP101 — the two classes do NOT get the same sandbox.** The controls in the
+table below are common to both; the Landlock filesystem whitelist is *not*:
+
+| | codecpack children (`sbmode == 2`) | builtin transcode lanes |
+|---|---|---|
+| WP61 controls (below) | yes | yes |
+| **Landlock whitelist** | **yes** | **no** |
+
+A builtin lane is launched by `tool_exec_strict()`
+(`src/core/vol_cpack.c:190`), which passes `sb = NULL`; `landlock_apply()` is
+called only `if (sb && sbmode == 2)` (`src/core/helper_exec.c:603`). So
+packMP3/ffmpeg/MAC/cjxl run with the WP61 containment (privilege drop,
+`CLONE_NEWNET`, rlimits, deadline, environment scrub) but **without any
+filesystem whitelist** — they keep whatever read/write access their uid has.
+What constrains *which* binary runs is path discipline, not Landlock:
+`execv` (no PATH search) and, with `INVFS_REQUIRE_HELPER_PATH` active, the
+requirement that the binary lives in `$INVFS_TOOLS` or `/usr/lib/invfs/tools`.
+
+This is not a change in WP61 behaviour — `src/core/helper_exec.h:17-18` has
+always said "no specification (builtin lanes) means no Landlock". It is a
+correction to this document, which used to read as if the whitelist covered
+every helper child. Extending Landlock to the builtin lanes is future work.
+
+The bit-exactness guard is separate from all of this and applies to both
+classes: a helper's output is decoded back and `memcmp`d against the original
+before anything is committed, and a refusal is a clean decline (the file stays
+RAW / the container is left whole). For codecpacks that guard runs
+*after* the child has already executed (`src/core/vol_cpack.c:2277`), so it
+protects the data, not the child process.
+
+The WP12d Landlock whitelist is unchanged and additive to the controls below:
 
 | Control | Behaviour | Knob |
 |---------|-----------|------|
@@ -55,9 +86,14 @@ child (never `LD_*`). It exists for legitimate tool overrides such as the
 p7z pack's `P7Z_7ZZ`; leave it unset in production unless a pack needs it.
 
 If the namespace operations are unavailable (an old kernel or a locked-down
-container), the launcher degrades to the other controls and Landlock; it
-never falls back to an unrestricted child. The controls are covered by the
-`invf-helper_exec_test` unit binary and `tools/test-helper-isolation.sh`.
+container), the launcher degrades to the controls that are left. For a
+codecpack child that still includes Landlock. For a **builtin** lane child
+there is no Landlock to degrade to, so what remains is privilege drop, the
+resource caps, the deadline and the environment scrub — a child that is
+filesystem-unconfined by design (see the table above). Either way the helper
+never runs with the daemon's own uid *and* an unscrubbed environment.
+The controls are covered by the `invf-helper_exec_test` unit binary and
+`tools/test-helper-isolation.sh`.
 
 ### Windows behaviour (future work — NOT YET HARDENED)
 
@@ -94,10 +130,13 @@ a deferred fix — the Windows build is not the primary target of WP33.
 
 ## Other security considerations
 
-### Landlock sandbox (pack children)
+### Landlock sandbox (pack children only)
 
 Every codecpack exec (encode/decode, container commands, estimate hook) runs
-under a per-exec Landlock ruleset on Linux. The ruleset is a whitelist:
+under a per-exec Landlock ruleset on Linux. **Builtin transcode lanes
+(cjxl/djxl, ffmpeg, MAC, packMP3) do not** — see the table in
+[Helper child containment](#helper-child-containment-wp61) above. The ruleset
+is a whitelist:
 
 - **RO + EXEC:** the pack directory, the runtime trees (`/usr/lib`,
   `/usr/lib64`, `/lib`, `/lib64`, `/usr/bin`, `/bin`, `/usr/local/bin`),

@@ -650,14 +650,25 @@ static int vol_decode_ast_entries(invfs_volume *v, uint64_t inode_id,
                         free(jpg);
                     }
                 } else if (e->algo == INVFS_ALGO_APE) {
-                    /* whole file is one APE blob -> decode to flac */
+                    /* whole file is one APE blob -> decode to flac.
+                       WP101: the length must MATCH, it is not clamped. A
+                       short decode used to be memcpy'd in and the tail of
+                       the caller's buffer left at whatever it held, so a
+                       truncated/corrupt APE blob was served as a partly
+                       valid FLAC instead of failing. A long decode is an
+                       overflow of `data + dst_off` and is refused too. */
                     uint8_t *fl = NULL;
                     size_t fl_len = 0;
                     if (invfs_ape_decompress(blob, hdr, &fl, &fl_len) != 0) {
                         fprintf(stderr, "APE decompress error\n");
                         free(blob); return -1;
                     }
-                    memcpy(data + dst_off, fl, fl_len < e->length ? fl_len : e->length);
+                    if (fl_len != e->length) {
+                        fprintf(stderr, "APE length mismatch (%s: got %zu, want %llu)\n",
+                                rec_name, fl_len, (unsigned long long)e->length);
+                        free(fl); free(blob); return -1;
+                    }
+                    memcpy(data + dst_off, fl, fl_len);
                     free(fl);
                 } else if (e->algo == INVFS_ALGO_PMP) {
                     /* whole file is one PMP blob -> decode back to mp3.

@@ -80,9 +80,22 @@ int main(int argc, char **argv)
                "delta_end=%llu\n", img,
                (unsigned long long)sp.base_root,
                (unsigned long long)sp.delta_end);
-        if (vol_needs_recovery(v))
-            fprintf(stderr, "invf-rollback: volume was not closed cleanly; "
-                    "rollback proceeds as the recovery\n");
+        if (vol_needs_recovery(v)) {
+            /* WP101: on v3 vol_open sets needs_recovery unconditionally for
+             * the whole session (src/core/volume.c), so this test is true on
+             * EVERY v3 volume, clean or not -- the old message fired on every
+             * successful rollback and told the operator that a clean volume
+             * needed crash recovery. The real on-disk signal is sb.state, so
+             * report that, and name what this pass actually does. */
+            fprintf(stderr, "invf-rollback: %s: volume state=0x%02X%s%s%s; "
+                    "restoring the SPT0 save point (undo the last sweep, not "
+                    "a crash recovery)\n", img,
+                    (unsigned)v->sb.state,
+                    (v->sb.state & INVFS_STATE_DIRTY) ? " DIRTY" : "",
+                    (v->sb.state & INVFS_STATE_CLEAN) ? " CLEAN" : "",
+                    (v->sb.state & INVFS_STATE_CLEAN) ? " CLEAN" :
+                    (v->sb.state & INVFS_STATE_RECOVERY) ? " RECOVERY" : "");
+        }
 
         rc = spt0_restore(v);
         switch (rc) {

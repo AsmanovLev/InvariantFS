@@ -1095,6 +1095,34 @@ static int sweep_dispatch(invfs_volume *v, uint64_t inode_id,
             fprintf(stderr, "[sweep] %s: PMP rc=%d pmp_len=%zu (mp3 %zu)\n",
                     name, prc, pmp_len, full_len);
         if (prc == 0 && pmp_len > 0 && pmp_len < full_len) {
+            /* WP101: the round-trip guard. packMP3 is an EXTERNAL helper
+             * (fork+exec) and nothing in its output format guarantees the
+             * bytes decode back to the input: the read path can only check
+             * that the length matches, so a packMP3 that mangles a frame
+             * (or a swapped/hijacked helper binary) would be committed and
+             * then served as if it were the original. Decode the blob back
+             * and memcmp it against the original before anything is
+             * replaced -- the same rule the LZ4/ZSTD/codecpack lanes apply.
+             * A refusal is a DECLINE, not an error: the file stays RAW. */
+            uint8_t *back = NULL;
+            size_t back_len = 0;
+            int exact = 0;
+            if (invfs_pmp_decompress(pmp, pmp_len, &back, &back_len) == 0 &&
+                back && back_len == full_len &&
+                memcmp(back, full, full_len) == 0)
+                exact = 1;
+            free(back);
+            if (!exact) {
+                if (getenv("INVFS_DEBUG"))
+                    fprintf(stderr, "[sweep] %s: PMP round-trip guard refused "
+                                    "(decoded %zu of %zu) -- staying RAW\n",
+                            name, back_len, full_len);
+                free(pmp);
+                vol_stamp_class(v, inode_id, INVFS_CLASS_GENERIC_GUARD,
+                                INVFS_ALGO_PMP, tz_codec_gen(INVFS_ALGO_PMP));
+                goto pmp_declined;
+            }
+            {
             uint64_t nino = vol_create_pmp_file(v, name, pmp, pmp_len,
                                                 (uint64_t)full_len);
             free(pmp);
@@ -1103,10 +1131,15 @@ static int sweep_dispatch(invfs_volume *v, uint64_t inode_id,
             vol_stamp_class(v, nino, INVFS_CLASS_CODEC,
                             INVFS_ALGO_PMP, tz_codec_gen(INVFS_ALGO_PMP));
             return 8;   /* MP3 */
+            }
         }
         free(pmp);
         vol_stamp_class(v, inode_id, INVFS_CLASS_GENERIC_GUARD,
                         INVFS_ALGO_PMP, tz_codec_gen(INVFS_ALGO_PMP));
+    pmp_declined:
+        /* fall through to the generic lanes: the MP3 stays RAW and is
+         * retried when the codec generation rolls over */
+        ;
     }
 
     /* WP16a: container codecpacks (manifest type=container) -- decompose a

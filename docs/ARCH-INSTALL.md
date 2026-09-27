@@ -201,7 +201,12 @@ before the `exec chroot`.
 journald also needs `fallocate()` and `FS_IOC_SETFLAGS` (chattr +C) on
 newly created journal files. Without `.fallocate` the kernel returns
 EOPNOTSUPP; without `.ioctl` for `FS_IOC_SETFLAGS` it returns ENOTTY.
-WP66 adds no-op stubs for both (see `src/cli/fuse_fs.c`).
+WP66 adds a no-op stub for both (see `src/cli/fuse_fs.c`); WP101 made the
+`fallocate` stub honest for the modes it cannot honour — plain preallocation
+(mode 0) is still a no-op success, while `PUNCH_HOLE` and `ZERO_RANGE` now
+return `EOPNOTSUPP`, because the volume frees nothing when told to and a
+caller that punches holes to shrink a file must be able to fall back instead
+of silently leaking.
 
 ### Remaining blockers (not fixed in WP66)
 
