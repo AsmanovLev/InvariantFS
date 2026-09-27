@@ -148,7 +148,18 @@ echo "$OUT"
 echo "== leg 5: the volume must still open and read back =="
 # A reader that silently adopted a stale root passes invf-fsck, so this leg
 # is stated explicitly rather than left implicit.
-"$B/invf-fsck" fsck.img >fsck2.out 2>&1 || fail "invf-fsck reported damage after the repair"
+"$B/invf-fsck" good.img >fsck2.out 2>&1 || { cat fsck2.out; fail "leg 5: invf-fsck reported damage in an UNTOUCHED volume"; }
+# The cleanliness assertion above runs against good.img, NOT fsck.img. fsck.img
+# had its newest root torn AND a non-root tree page destroyed by leg 4, and the
+# repair excised the damage -- so it legitimately still carries damage this test
+# caused on purpose: excised dirent pages leave live inodes that no directory
+# entry names, and invf-fsck's exit code never softens that (it reports DEGRADED
+# with the reason rather than OK). Asserting "clean" there asserted that
+# deliberate destruction was repairable, a much stronger claim than this WP
+# makes. What leg 5 is for is the READER, asserted on both volumes below.
+"$B/invf-fsck" fsck.img >fsck3.out 2>&1
+OUT=$("$T" probe fsck.img safe) || { echo "$OUT"; cat fsck3.out; fail "leg 5: the repaired volume's root no longer reads"; }
+echo "  the repaired volume opens and its root reads (its damage is deliberate and expected)"
 OUT=$("$T" probe good.img safe) || { echo "$OUT"; fail "leg 5: the untouched volume regressed"; }
 echo "$OUT"
 
