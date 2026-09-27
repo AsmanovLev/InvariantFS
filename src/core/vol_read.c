@@ -369,12 +369,83 @@ static void *decode_thread_worker(void *arg_) {
     return NULL;
 }
 
+/* WP120: the record name, resolved on first use.
+ *
+ * `rec_name` is read by exactly one family of lanes -- FLACR, TARR, GZR,
+ * PNGR, EXR and the codecpack lane -- and only for two things: their
+ * "name!sibling" lookups (name!recipe, name!coverN, name!partN, name!jxl,
+ * name!exrN, name!mbrmap) and their error text. NONE/LZ4/ZSTD, PPMd text
+ * batches and ZSTD binary batches -- the lanes that carry essentially every
+ * byte a sweep or a read touches -- never look at it.
+ *
+ * On a v3 volume, though, OBTAINING it is not free: vol_v3_path_of() is a
+ * reverse walk of the whole dirent tree, one vol_v3_dirent_scan() per
+ * directory, each of which runs a vol_delta_range() and one
+ * vol_delta_read_value() pread per delta-resident child (see the note on
+ * vol_v3_path_of in vol_btree.c). Resolving it eagerly therefore made every
+ * whole-file read cost O(number of inodes in the volume) -- and the sweep
+ * reads every file whole exactly once (vol_sweep_one_v3), so its transform
+ * stage grew superlinearly. On one content mix held constant, that stage
+ * took 0.47 s at 1,017 inodes, 113 s at 4,270 and 2,086 s at 21,342 -- a
+ * three-point log-log fit of T = 4.6e-9 * N^2.74, dominated by pread(2)
+ * syscalls in vol_delta_read_value, ~S*G of them (S files transformed, G
+ * delta records). With the name resolved on first use instead, the same
+ * three sets transform in 0.065 s, 0.822 s and 0.785 s -- the stage is
+ * flat in inode count and what remains is byte-proportional codec work.
+ * The 46,245-inode reproducer, which had not finished in 40 minutes, then
+ * ran transform to completion (46,438/46,438, 34m44s, swept=9109
+ * skipped=12997 failed=0) and went on through dedupe.
+ *
+ * Two things these numbers do NOT say, recorded so they are not over-read.
+ * The 2.74 exponent is quadratic-plus-cache-degradation, fitted to three
+ * points it does not describe well (it over-predicts its own 21k point by
+ * 1.6x), and it is an exponent on the pread COUNT -- the wall clock is worse
+ * than the mechanism predicts, because each pread also gets dearer as the
+ * working set outgrows the cache. And the 21k set is stride-sampled and
+ * dominated by .pyc, which stage 3 defers to stage 6, so its collapse to
+ * 0.785 s is not what a real rootfs does. The 46k volume is the honest case:
+ * transform there is 34m44s, and 78% of that stage is now ZSTD compressing
+ * and bit-exact-verifying 1.3 GiB of real files.
+ *
+ * So resolve it lazily. `pre` is a name the caller already has (the v2
+ * record name, or a name handed down by a caller that resolved it); when it
+ * is NULL the walk runs on first use, exactly as before -- the string, its
+ * bytes and the truncated-prefix-on-overflow behaviour are unchanged, only
+ * the timing moves. Single-threaded by construction: every recname_of()
+ * caller is in the serial entry loop of vol_decode_ast_entries(), never in
+ * decode_thread_worker(). */
+typedef struct {
+    invfs_volume *v;
+    uint64_t      inode_id;
+    const char   *pre;        /* caller-supplied name, or NULL to walk */
+    char          buf[600];
+    int           resolved;
+} vol_recname;
+
+static const char *recname_of(vol_recname *rn)
+{
+    if (!rn->resolved) {
+        rn->resolved = 1;
+        rn->buf[0] = 0;
+        if (rn->pre && rn->pre[0]) {
+            snprintf(rn->buf, sizeof rn->buf, "%s", rn->pre);
+        } else if (rn->v && (rn->v->sb.vol_flags & VOLF_V3)) {
+            /* return value ignored on purpose: vol_v3_path_of() leaves a
+             * partial prefix in the buffer when the path does not fit, and
+             * that is what the eager call handed the lanes. */
+            (void)vol_v3_path_of(rn->v, rn->inode_id, rn->buf,
+                                 sizeof rn->buf);
+        }
+    }
+    return rn->buf;
+}
+
 /* ADR-010 amendment 2: `wins`/`n_wins` are the recipe's trailing window
  * table (NULL/0 for every recipe written before the change). Passing the
  * table in rather than re-parsing it per entry keeps the hot loop's cost at
  * one extra branch per entry. */
 static int vol_decode_ast_entries(invfs_volume *v, uint64_t inode_id,
-                                  const char *rec_name,
+                                  vol_recname *rn,
                                   const invfs_ast_hdr *ast_h,
                                   const invfs_ast_block_entry *ents,
                                   const invfs_ast_window_entry *wins,
@@ -665,7 +736,7 @@ static int vol_decode_ast_entries(invfs_volume *v, uint64_t inode_id,
                     }
                     if (fl_len != e->length) {
                         fprintf(stderr, "APE length mismatch (%s: got %zu, want %llu)\n",
-                                rec_name, fl_len, (unsigned long long)e->length);
+                                recname_of(rn), fl_len, (unsigned long long)e->length);
                         free(fl); free(blob); return -1;
                     }
                     memcpy(data + dst_off, fl, fl_len);
@@ -681,7 +752,7 @@ static int vol_decode_ast_entries(invfs_volume *v, uint64_t inode_id,
                     if (invfs_pmp_decompress(blob, hdr, &m, &m_len) != 0 ||
                         m_len != e->length) {
                         fprintf(stderr, "PMP decompress error (%s: got %zu, want %llu)\n",
-                                rec_name, m_len, (unsigned long long)e->length);
+                                recname_of(rn), m_len, (unsigned long long)e->length);
                         free(m); free(blob); return -1;
                     }
                     memcpy(data + dst_off, m, m_len);
@@ -694,10 +765,10 @@ static int vol_decode_ast_entries(invfs_volume *v, uint64_t inode_id,
                     size_t wav_len = 0, rcp_len = 0, fl_len = 0;
                     char rname[272];
                     if (invfs_ape_to_wav(blob, hdr, &wav, &wav_len) != 0) {
-                        fprintf(stderr, "FLACR: APE->WAV failed for %s\n", rec_name);
+                        fprintf(stderr, "FLACR: APE->WAV failed for %s\n", recname_of(rn));
                         free(blob); return -1;
                     }
-                    snprintf(rname, sizeof rname, "%s!recipe", rec_name);
+                    snprintf(rname, sizeof rname, "%s!recipe", recname_of(rn));
                     uint64_t rino = vol_find(v, rname);
                     if (rino == 0) {
                         fprintf(stderr, "FLACR: recipe inode '%s' not found\n", rname);
@@ -714,7 +785,7 @@ static int vol_decode_ast_entries(invfs_volume *v, uint64_t inode_id,
                     int ok = 1;
                     for (int ci = 0; ci < ncv && ci < 16; ci++) {
                         char cn[288];
-                        snprintf(cn, sizeof cn, "%s!cover%d", rec_name, ci);
+                        snprintf(cn, sizeof cn, "%s!cover%d", recname_of(rn), ci);
                         uint64_t cino = vol_find(v, cn);
                         size_t clen = 0;
                         cdata[ci] = NULL;
@@ -765,7 +836,7 @@ static int vol_decode_ast_entries(invfs_volume *v, uint64_t inode_id,
                     tarx_member *members = NULL; size_t n = 0;
                     uint8_t *trailer = NULL; size_t tlen = 0;
                     if (tarx_parse_recipe(rcp, rcp_len, &members, &n, &trailer, &tlen) != 0) {
-                        fprintf(stderr, "TARR: bad recipe for %s\n", rec_name);
+                        fprintf(stderr, "TARR: bad recipe for %s\n", recname_of(rn));
                         free(rcp_own); free(blob); return -1;
                     }
                     int np = tarx_recipe_num_parts(rcp, rcp_len);
@@ -774,7 +845,7 @@ static int vol_decode_ast_entries(invfs_volume *v, uint64_t inode_id,
                     int ok = 1;
                     for (int pi = 0; pi < np; pi++) {
                         char pn[320];
-                        snprintf(pn, sizeof pn, "%s!part%u", rec_name, pi);
+                        snprintf(pn, sizeof pn, "%s!part%u", recname_of(rn), pi);
                         uint64_t pino = vol_find(v, pn);
                         if (!pino) {
                             fprintf(stderr, "TARR: part '%s' missing\n", pn);
@@ -820,7 +891,7 @@ static int vol_decode_ast_entries(invfs_volume *v, uint64_t inode_id,
                         rcp = blob + 1; rcp_len = hdr - 1;
                     }
                     if (rcp_len < 20 || memcmp(rcp, "IVGZ", 4) != 0 || rcp[4] != 1) {
-                        fprintf(stderr, "GZR: bad recipe for %s\n", rec_name);
+                        fprintf(stderr, "GZR: bad recipe for %s\n", recname_of(rn));
                         free(rcp_own); free(blob); return -1;
                     }
                     int glevel = rcp[5];
@@ -840,7 +911,7 @@ static int vol_decode_ast_entries(invfs_volume *v, uint64_t inode_id,
                     tarx_member *members = NULL; size_t n = 0;
                     uint8_t *trailer = NULL; size_t tlen = 0;
                     if (tarx_parse_recipe(ivft, ivft_len, &members, &n, &trailer, &tlen) != 0) {
-                        fprintf(stderr, "GZR: bad IVFT for %s\n", rec_name);
+                        fprintf(stderr, "GZR: bad IVFT for %s\n", recname_of(rn));
                         free(rcp_own); free(blob); return -1;
                     }
                     int np = tarx_recipe_num_parts(ivft, ivft_len);
@@ -849,7 +920,7 @@ static int vol_decode_ast_entries(invfs_volume *v, uint64_t inode_id,
                     int ok = 1;
                     for (int pi = 0; pi < np; pi++) {
                         char pn[320];
-                        snprintf(pn, sizeof pn, "%s!part%u", rec_name, pi);
+                        snprintf(pn, sizeof pn, "%s!part%u", recname_of(rn), pi);
                         uint64_t pino = vol_find(v, pn);
                         if (!pino) {
                             fprintf(stderr, "GZR: part '%s' missing\n", pn);
@@ -903,7 +974,7 @@ static int vol_decode_ast_entries(invfs_volume *v, uint64_t inode_id,
                                     fl[ghl + stream_len + 7] = (uint8_t)((gisz >> 24) & 0xFF);
                                     fl_len = ghl + stream_len + 8;
                                     if ((unsigned)(c & 0xFFFFFFFFu) != gcrc) {
-                                        fprintf(stderr, "GZR: crc mismatch for %s\n", rec_name);
+                                        fprintf(stderr, "GZR: crc mismatch for %s\n", recname_of(rn));
                                         ok = 0;
                                     }
                                 } else ok = 0;
@@ -946,7 +1017,7 @@ static int vol_decode_ast_entries(invfs_volume *v, uint64_t inode_id,
                     memset(&pi, 0, sizeof pi);
                     if (pngx_parse_recipe(rcp, rcp_len, &pi) != 0) {
                         fprintf(stderr, "PNGR: bad recipe for %s (len %zu)\n",
-                                rec_name, rcp_len);
+                                recname_of(rn), rcp_len);
                         fprintf(stderr, "PNGR: recipe head: %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x\n",
                                 rcp_len > 0 ? rcp[0] : 0, rcp_len > 1 ? rcp[1] : 0,
                                 rcp_len > 2 ? rcp[2] : 0, rcp_len > 3 ? rcp[3] : 0,
@@ -959,13 +1030,13 @@ static int vol_decode_ast_entries(invfs_volume *v, uint64_t inode_id,
                     uint8_t *rgb = NULL; size_t rgb_len = 0;
                     {
                         char jn[320];
-                        snprintf(jn, sizeof jn, "%s!jxl", rec_name);
+                        snprintf(jn, sizeof jn, "%s!jxl", recname_of(rn));
                         uint64_t jino = vol_find(v, jn);
                         if (!jino) {
                             fprintf(stderr, "PNGR: jxl '%s' missing\n", jn);
                             ok = 0;
                         } else if (invfs_png_from_jxl(v, jino, &rgb, &rgb_len) != 0) {
-                            fprintf(stderr, "PNGR: djxl failed for %s\n", rec_name);
+                            fprintf(stderr, "PNGR: djxl failed for %s\n", recname_of(rn));
                             ok = 0;
                         }
                     }
@@ -1055,7 +1126,7 @@ static int vol_decode_ast_entries(invfs_volume *v, uint64_t inode_id,
                         char pn[288];
                         uint64_t pino;
                         size_t plen = 0;
-                        snprintf(pn, sizeof pn, "%s!exr%zu", rec_name, pi);
+                        snprintf(pn, sizeof pn, "%s!exr%zu", recname_of(rn), pi);
                         pino = vol_find(v, pn);
                         if (!pino ||
                             vol_read_file(v, pino, &parts[pi], &plen) != 0 ||
@@ -1072,7 +1143,7 @@ static int vol_decode_ast_entries(invfs_volume *v, uint64_t inode_id,
                     free(rows);
                     if (!ok) {
                         fprintf(stderr, "EXER: rebuild failed for %s\n",
-                                rec_name);
+                                recname_of(rn));
                         free(blob); return -1;
                     }
                 } else if (e->algo == INVFS_ALGO_NONE) {
@@ -1091,19 +1162,19 @@ static int vol_decode_ast_entries(invfs_volume *v, uint64_t inode_id,
                     if ((pd && pd->is_container &&
                          (pc->caps & INVFS_CODEC_CAP_SEEK)) || !pc) {
                         char mbn[288];
-                        snprintf(mbn, sizeof mbn, "%s!mbrmap", rec_name);
+                        snprintf(mbn, sizeof mbn, "%s!mbrmap", recname_of(rn));
                         mapped = vol_find(v, mbn) != 0;
                     }
                     if (mapped) {
                         /* cpack_map_read returns the byte count (the
                          * vol_read_range convention): < 0 is the failure */
-                        if (cpack_map_read(v, rec_name, inode_id,
+                        if (cpack_map_read(v, recname_of(rn), inode_id,
                                            (uint64_t)e->length,
                                            e->file_offset, data + dst_off,
                                            (size_t)e->length) < 0) {
                             fprintf(stderr, "%s: mapped container read "
                                     "failed for %s\n",
-                                    pc ? pc->name : "codecpack", rec_name);
+                                    pc ? pc->name : "codecpack", recname_of(rn));
                             free(blob); return -1;
                         }
                     } else if (pd && pd->is_container) {
@@ -1114,12 +1185,12 @@ static int vol_decode_ast_entries(invfs_volume *v, uint64_t inode_id,
                          * container no longer exists), then spliced by the
                          * pack's rebuild command. A missing/corrupt member
                          * fails the read LOUDLY (the 1:1 invariant). */
-                        if (pack_container_rebuild(v, pc, rec_name,
+                        if (pack_container_rebuild(v, pc, recname_of(rn),
                                                    blob, hdr,
                                                    data + dst_off,
                                                    (size_t)e->length) != 0) {
                             fprintf(stderr, "%s: container rebuild failed "
-                                    "for %s\n", pc->name, rec_name);
+                                    "for %s\n", pc->name, recname_of(rn));
                             free(blob); return -1;
                         }
                     } else if (!pc || !pc->decode) {
@@ -1217,21 +1288,26 @@ int vol_read_inode(invfs_volume *v, uint64_t inode_id, unsigned depth,
         len = (size_t)ah.file_size;
         data = (uint8_t *)malloc(len ? len : 1);
         if (!data) { free(blob); return -1; }
-        char iname[600];
         const invfs_ast_window_entry *wins = NULL;
         uint32_t n_wins = 0;
-        iname[0] = 0;
         if (vol_ast_recipe_windows(blob, blen, &ah, &wins, &n_wins) != 0) {
             fprintf(stderr, "inode %llu: corrupt window table\n",
                     (unsigned long long)inode_id);
             free(data); free(blob);
             return -1;
         }
-        vol_v3_path_of(v, inode_id, iname, sizeof iname);
-        if (vol_decode_ast_entries(v, inode_id, iname, &ah, ents,
-                                   wins, n_wins, data) != 0) {
-            free(data); free(blob);
-            return -1;
+        /* WP120: the name is resolved by the lanes that need it, not here --
+         * resolving it here walked the whole dirent tree on every read. */
+        {
+            vol_recname rn;
+            memset(&rn, 0, sizeof rn);
+            rn.v = v;
+            rn.inode_id = inode_id;
+            if (vol_decode_ast_entries(v, inode_id, &rn, &ah, ents,
+                                       wins, n_wins, data) != 0) {
+                free(data); free(blob);
+                return -1;
+            }
         }
         free(blob);
         *out = data;
@@ -1330,9 +1406,16 @@ int vol_read_inode(invfs_volume *v, uint64_t inode_id, unsigned depth,
                 free(rec); free(data);
                 return -1;
             }
-            if (vol_decode_ast_entries(v, inode_id, rec_name, &ast_h,
-                                       ents, wins, n_wins, data) != 0) {
-                free(data); free(rec); return -1;
+            {
+                vol_recname rn;
+                memset(&rn, 0, sizeof rn);
+                rn.v = v;
+                rn.inode_id = inode_id;
+                rn.pre = rec_name;          /* v2: the record name is the path */
+                if (vol_decode_ast_entries(v, inode_id, &rn, &ast_h,
+                                           ents, wins, n_wins, data) != 0) {
+                    free(data); free(rec); return -1;
+                }
             }
         }
         free(rec);
