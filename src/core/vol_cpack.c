@@ -2536,10 +2536,12 @@ int vol_containerpack_sweep(invfs_volume *v, uint64_t inode_id,
     /* the superseded parent recipe, released once the commit is complete */
     invfs_v3_inode old_in;
     uint8_t old_addr[INVFS_V3_RECIPE_ADDR_LEN];
-    if (getenv("INVFS_DEBUG_PACKS")) fprintf(stderr,"[cpack] enter %s (decomp_gen=%d gen=%u)\n", name,
-        def ? def->decomp_gen : -1, pc->generation);
     if (!pc->probe || !pc->probe()) return 1;    /* tools absent: wait */
     def = invfs_codec_pack_def(pc);
+    /* the trace prints def->decomp_gen, so it must come AFTER the assignment
+     * above: reading the uninitialised local was undefined behaviour (WP100) */
+    if (getenv("INVFS_DEBUG_PACKS")) fprintf(stderr,"[cpack] enter %s (decomp_gen=%d gen=%u)\n", name,
+        def ? def->decomp_gen : -1, pc->generation);
     if (!def || !def->is_container) { if (getenv("INVFS_DEBUG_PACKS")) fprintf(stderr,"[cpack] not-a-container-def\n"); return 0; }
     if (strlen(name) + CPACK_NAME_RESERVE > INVFS_MAX_NAME) { if (getenv("INVFS_DEBUG_PACKS")) fprintf(stderr,"[cpack] name too long\n"); return 0; }
     {
