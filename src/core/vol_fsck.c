@@ -1016,7 +1016,15 @@ static int fsck_v3_rt30(invfs_volume *v, invfs_fsck_report *rep)
 
 /* Read a root slot page and check it against the RT30 slot value. A slot
  * naming a page that does not validate is "torn". Returns 0 = valid (fills
- * *gen_out), 1 = empty slot, 2 = torn, -1 = io error.
+ * *gen_out), 1 = empty slot, 2 = torn, 3 = free (WP-D), -1 = io error.
+ *
+ * WP-D: 3 is its own code because a freed page is not torn and reporting it
+ * as such is a lie an operator acts on. The bytes are perfect -- that is
+ * the whole reason this is a separate finding -- so "bad page CRC/magic"
+ * would send them to a media-recovery procedure for a volume whose real
+ * fault is a reclaim whose liveness predicate was wrong. v3_slots_torn
+ * keeps meaning torn; the freed slot is counted as v3_reachable_free,
+ * whose name is the finding.
  *
  * TODO(WP-M4): RT30 stores only a pba per slot, not a blkptr, so the WP
  * doc's "blkptr.checksum does not match" cannot be checked literally; the
@@ -1032,6 +1040,11 @@ static int fsck_v3_slot_page(invfs_volume *v, uint64_t pba,
         return 1;
     if (pba >= v->sb.total_blocks)
         return 2;               /* out of range: torn/foreign slot */
+    /* WP-D: allocation before integrity, so a freed slot can never be
+     * adopted as the live root on the strength of the bytes it still
+     * carries. (mbuf_root_read makes the same call on the read path.) */
+    if (mbuf_page_allocated(v, pba) == 0)
+        return 3;
     if (mbuf_read(v, pba, page) != 0)
         return -1;
     h = mbuf_page_chdr(page);
@@ -1054,6 +1067,13 @@ static int fsck_v3_ptr_at(invfs_volume *v, uint64_t pba, invfs_blkptr *out)
     memset(out, 0, sizeof *out);
     if (!pba || mbuf_read(v, pba, page) != 0)
         return -1;
+    /* WP-D: same call as the slot path, for the same reason -- a page the
+     * bitmap reports free is not a pointer fsck should hand to a tree
+     * walk, a savepoint comparison, or -f's reachability diff. The subtree
+     * walk behind those uses mbuf_read_ptr and is hardened already; this
+     * is the root page itself, which is read directly. */
+    if (mbuf_page_allocated(v, pba) == 0)
+        return -1;
     if (!mbuf_page_validate(page))
         return -1;
     mbuf_ptr_set(out, pba, page,
@@ -1064,10 +1084,12 @@ static int fsck_v3_ptr_at(invfs_volume *v, uint64_t pba, invfs_blkptr *out)
 }
 
 /* Select the winning root from the RT30 double slot. A slot is a candidate
- * only when its page validates; among candidates the higher header gen wins,
- * tie -> the slot seq parity points at (the most recently published). A
- * non-empty slot whose page does not validate is torn and reported. Returns
- * 0 = ok (possibly empty, *root_out.pba == 0), -1 = io error. */
+ * only when its block is ALLOCATED (WP-D) and its page validates; among
+ * candidates the higher header gen wins, tie -> the slot seq parity points
+ * at (the most recently published). A non-empty slot whose page does not
+ * validate is torn and reported; a slot whose block is free is reported
+ * separately (the bytes are fine, the ownership is not). Returns 0 = ok
+ * (possibly empty, *root_out.pba == 0), -1 = io error. */
 static int fsck_v3_root(invfs_volume *v, invfs_fsck_report *rep,
                         invfs_blkptr *root_out)
 {
@@ -1090,6 +1112,21 @@ static int fsck_v3_root(invfs_volume *v, invfs_fsck_report *rep,
             snprintf(b, sizeof b, "root_slot[%d] pba %llu is torn "
                      "(bad page CRC/magic) -- slot ignored",
                      i, (unsigned long long)pba);
+            fsck_v3_note(rep, b);
+            continue;
+        }
+        if (rc == 3) {
+            /* WP-D: the page is intact and the volume does not own it. A
+             * reclaim with a wrong liveness predicate freed a block a live
+             * slot still names -- this is the observable fingerprint of
+             * that bug, and it is worth more than the torn count because
+             * the bytes are perfect and nothing else reports it. */
+            char b[192];
+            rep->v3_reachable_free++;
+            snprintf(b, sizeof b, "root_slot[%d] pba %llu is FREE in the "
+                     "allocation bitmap but its bytes still pass CRC -- the "
+                     "block was reclaimed while a live root named it; slot "
+                     "ignored", i, (unsigned long long)pba);
             fsck_v3_note(rep, b);
             continue;
         }

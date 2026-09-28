@@ -1862,12 +1862,24 @@ int btree_reclaim_pinned(invfs_volume *v, invfs_blkptr old_root,
 /* per publish (vol_metabuf.c:349: slot = rt30.seq & 1), so the other  */
 /* slot still names the previous root -- that is WP86's damage         */
 /* tolerance, not a bug to clean up here. mbuf_root_read               */
-/* (vol_metabuf.c:375) loops over BOTH slots, keeps every slot whose   */
-/* root page passes mbuf_page_validate, and adopts the highest gen     */
-/* among them. mbuf_page_validate checks magic + CRC32C and NOTHING    */
-/* else: it does not consult the allocation bitmap, so a page that has */
-/* been freed and not yet reused still validates. Damage the newest    */
-/* root page and the reader silently adopts the OLDER slot.            */
+/* (vol_metabuf.c:375) loops over BOTH slots and adopts the highest    */
+/* gen among the ones it accepts.                                      */
+/*                                                                   */
+/* WP121 wrote the next point as "mbuf_page_validate checks magic +    */
+/* CRC32C and NOTHING else, so a freed page still validates, and the   */
+/* reader silently adopts the OLDER slot." Both halves were true then. */
+/* WP-D closed them: mbuf_root_read and this file's orphan_slot_ptr    */
+/* now consult the allocation bitmap BEFORE the page bytes, and        */
+/* mbuf_read_ptr does the same for every page a tree walk reaches. A  */
+/* slot whose block has been freed is refused, loudly and by name,     */
+/* instead of adopted; a subtree whose pages have been freed fails the */
+/* walk with EIO instead of being read.                                */
+/*                                                                   */
+/* The predicate below is STILL load-bearing. The reader-side check is */
+/* a backstop that turns a silent corruption into a reported one; it   */
+/* does not make freeing a page a live root names CORRECT. A volume    */
+/* that trips it has already lost the namespace those pages described, */
+/* whatever the reader then does with it.                              */
 /*                                                                   */
 /* Therefore:                                                           */
 /*                                                                   */
@@ -2171,12 +2183,21 @@ static int bt_mark_rec_deep(invfs_volume *v, invfs_blkptr ptr, uint8_t *seen,
 
 /* Read an RT30 slot into a blkptr. Returns 0 on success, -1 if the slot
  * names a block we cannot turn into a trustworthy pointer. The caller
- * treats -1 as "abort the collection", never as "this slot is dead". */
+ * treats -1 as "abort the collection", never as "this slot is dead".
+ *
+ * WP-D: ask the allocation question before the integrity one, exactly as
+ * mbuf_root_read does. This function has its own mbuf_read + validate
+ * rather than going through mbuf_read_ptr (it has to build the blkptr from
+ * the bytes it just read, so there is no pointer to verify yet), which made
+ * it the one RT30 reader that still accepted a freed slot -- and the
+ * collector's entire liveness set is derived from these two pointers. */
 static int orphan_slot_ptr(invfs_volume *v, uint64_t pba, invfs_blkptr *out,
                            uint64_t *gen_out)
 {
     uint8_t page[INVFS_BLOCK_SIZE];
 
+    if (mbuf_page_allocated(v, pba) == 0)
+        return -1;
     if (mbuf_read(v, pba, page) != 0)
         return -1;
     if (!mbuf_page_validate(page))

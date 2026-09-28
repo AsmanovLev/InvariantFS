@@ -36,9 +36,16 @@
  * longer walks the volume (see vol_btree.c). It is now purely the
  * WP121-listed promotion conditions, of which the cost one is the only
  * one this WP addresses, and it does NOT address:
- *   (1) mbuf_page_validate / mbuf_root_read in vol_metabuf.c must make
- *       the READER enforce the invariant, not just the reclaimer;
- *   (3) a test-flakey.sh power-loss leg. */
+ *   (1) a test-flakey.sh power-loss leg.
+ *
+ * WP-D closed the other listed condition. The reader now enforces the
+ * invariant, not just the reclaimer: mbuf_read_ptr refuses a page whose
+ * block the allocation bitmap reports free, so every base-tree walk in
+ * vol_btree.c inherits the check, and mbuf_root_read and orphan_slot_ptr
+ * refuse a freed RT30 slot. A wrong liveness predicate here can still
+ * damage a volume, but it can no longer damage one SILENTLY -- the reader
+ * and invf-fsck both report it now. The gate stays default-off anyway: the
+ * remaining promotion condition is the power-loss leg, not this one. */
 static int orphan_gate_state = -1;   /* -1 = not yet read */
 
 static int orphan_gate(void)

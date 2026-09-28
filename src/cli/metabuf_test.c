@@ -258,6 +258,73 @@ static void test_page_io(invfs_volume *v)
     ok(mbuf_verify_ptr(v, &p) != 0, "torn page rejected by verify_ptr");
 }
 
+/* WP-D: allocation is a SEPARATE question from integrity, and a page the
+ * volume has handed back to the free pool answers YES to the first and NO
+ * to the second -- free does not scrub, so the magic and the CRC32C of
+ * whatever was last written there are both still perfect. Anything that
+ * treats "validates" as "usable" is trusting bytes the volume itself
+ * believes are free.
+ *
+ * The window this names is free-but-not-yet-reused. A stale blkptr held
+ * past the free AND past the next mbuf_alloc is caught by the gen/checksum
+ * triple, because reuse stamps a new one. INSIDE the window it is not:
+ * every check the reader performs passes, and the block the reader is
+ * holding is one the allocator is free to hand to the next allocation. */
+static void test_freed_page(invfs_volume *v)
+{
+    uint8_t page[INVFS_BLOCK_SIZE], back[INVFS_BLOCK_SIZE];
+    uint8_t *save_bitmap;
+    invfs_blkptr p;
+    uint64_t pba;
+
+    printf("freed page: integrity verdict vs. allocation\n");
+    pba = mbuf_alloc(v, 11);
+    ok(pba != 0, "alloc a page to free");
+    if (!pba)
+        return;
+    mbuf_page_init(page, INVFS_PAGE_LEVEL_LEAF, 11);
+    page[100] = pat(9);
+    page[4000] = pat(10);
+    ok(mbuf_write(v, pba, page) == 0, "write the page");
+    mbuf_ptr_set(&p, pba, page, INVFS_BP_LEAF);
+
+    mbuf_free(v, pba);
+    ok(bit_get(v->bitmap, pba) == 0, "the block is free in the bitmap");
+
+    memset(back, 0, sizeof back);
+    ok(mbuf_read(v, pba, back) == 0, "the freed block still reads");
+    ok(mbuf_page_validate(back) == 1,
+       "PREMISE: a freed page still passes the integrity check");
+
+    /* THE DEFECT. A consumer of the verdict has no way to tell, so it hands
+     * back a page the volume has already disowned. */
+    ok(mbuf_read_ptr(v, &p, back) != 0,
+       "read_ptr refuses a page whose block is free");
+    ok(mbuf_verify_ptr(v, &p) != 0,
+       "verify_ptr refuses a page whose block is free");
+
+    /* The same question, asked the way WP123's mbuf_root_read asks it, so
+     * the tree-wide chokepoint and the root-slot chokepoint cannot drift
+     * apart: the bitmap says what the tree-wide check must honour. */
+    ok(mbuf_page_allocated(v, pba) == 0,
+       "mbuf_page_allocated agrees: the block is not the volume's");
+
+    /* NARROWNESS GUARD. "No bitmap" is "no authority to consult", which is
+     * not "free". A volume with no allocation bitmap at all must keep
+     * answering on integrity alone; treating the missing authority as a
+     * negative answer would turn a synthetic test volume into one where
+     * every page is unreadable. */
+    save_bitmap = v->bitmap;
+    v->bitmap = NULL;
+    ok(mbuf_page_allocated(v, pba) == -1,
+       "a volume with no bitmap reports 'cannot tell', not 'free'");
+    ok(mbuf_read_ptr(v, &p, back) == 0,
+       "read_ptr falls back to integrity when there is no authority");
+    v->bitmap = save_bitmap;
+
+    mbuf_free(v, pba);   /* idempotent; leaves the pool as found */
+}
+
 static void test_allocator(invfs_volume *v)
 {
     uint64_t boot0, boot1, c, d, e, pba, reuse = 0, last = 0, n = 0;
@@ -401,6 +468,7 @@ int main(int argc, char **argv)
 
     test_allocator(v);
     test_page_io(v);
+    test_freed_page(v);
     test_rt30(v);
 
     fake_vol_close(v);

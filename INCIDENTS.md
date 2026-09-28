@@ -13,25 +13,30 @@
 > a path that cannot be pointed at in the tree — a name you cannot follow is
 > rot whether or not it once existed.
 
-## UNRESOLVED (reclaimer half addressed by WP121) — the RT30 fallback root can be reclaimed while still live
+## OPEN (reclaimer by WP121, reader by WP-D) — the RT30 fallback root can be reclaimed while still live
 
   **Date:** Sep 27, 2026  
   **Severity:** High (silent namespace rollback)  
-  **Status:** **RESOLVED (WP121 + WP123).** Superseded 2026-09-28 — this entry
-  previously read "Partially resolved (WP121)" and called the reader half
-  UNRESOLVED, which by then it was not. WP123 closed it at the reader:
-  `mbuf_page_allocated` is asked *before* integrity in the root-slot acceptance
-  path (`src/core/vol_metabuf.c:445`, defined `:92-99`), and the reclaimer now
-  refuses to free a root the RT30 still names (`src/core/vol_fold.c:290-295`).
-  Covered by `src/cli/rt30_slot_test.c` and
-  `tools/test-v3-rt30-slot-alloc.sh:89-171`.
-  Still open, and tracked separately: the collector remains default-OFF behind
-  `INVFS_RECLAIM_ORPHANS=1` (`src/core/vol_reclaim.c:48-51`). The
-  `mbuf_page_validate` residual described below was split out into a helper that
-  is called from one site; `mbuf_page_validate` itself is unchanged, which is
-  correct -- the bitmap consult belongs at the root-slot acceptance point, not
-  in a function that also validates pages with no volume to ask.  
-  **Impact:** On a volume where the v3 fold has run and the newest root page is
+  **Status:** **Reader side RESOLVED, in two halves; one condition still open.**
+  Superseded 2026-09-28. The entry has been rewritten twice today, and both
+  rewrites were wrong in opposite directions, so the halves are named
+  explicitly:
+  - **Root-slot half — WP123.** `mbuf_page_allocated` is asked *before*
+    integrity in the root-slot acceptance path (`src/core/vol_metabuf.c:445`,
+    defined `:92-99`), and the reclaimer refuses to free a root the RT30 still
+    names (`src/core/vol_fold.c:290-295`). Covered by `src/cli/rt30_slot_test.c`
+    and `tools/test-v3-rt30-slot-alloc.sh:89-171`.
+  - **Tree-wide half — WP-D (`wp/bitmap-validate`).** WP123 closed only the page
+    that *is* the root; its own scope note said it does not verify the pages
+    that root reaches. WP-D closed those, at the chokepoint every base-tree walk
+    goes through: `mbuf_read_ptr` (`src/core/vol_metabuf.c:163`), plus the four
+    sites that have a volume and a pba and bypass it — `orphan_slot_ptr`
+    (`src/core/vol_btree.c:2182`), `spt0_tree_ok`/`spt0_restore`
+    (`src/core/vol_spt0.c:134`/`:1188`), `fsck_v3_slot_page`/`fsck_v3_ptr_at`
+    (`src/core/vol_fsck.c:1038`/`:1057`). Regression test
+    `test_freed_page` in `src/cli/metabuf_test.c`, written and run failing first.
+  Still **open**, and tracked separately: the collector is default-OFF behind
+  `INVFS_RECLAIM_ORPHANS=1` (`src/core/vol_reclaim.c:48-51`).    **Impact:** On a volume where the v3 fold has run and the newest root page is
   subsequently damaged, `mbuf_root_read` falls back to an RT30 slot naming a
   root whose pages have already been freed — and adopts a **stale namespace**
   without any error. Files created after that root can become invisible. Not
@@ -56,10 +61,13 @@
      that is not reachable from the new root. `old_root` is the root the
      surviving slot still names.
   4. **A freed page still validates.** `mbuf_page_validate`
-     (`src/core/vol_metabuf.c`) checks only `h->magic` and `h->checksum` — it
-     never consults the allocation bitmap. Freeing clears a bitmap bit and
-     leaves page contents intact, so a freed, not-yet-reused page passes
-     validation perfectly.
+     (`src/core/vol_metabuf.c:62-68`) checks only `h->magic` and
+     `h->checksum` — it takes no volume and no pba, so it *cannot* consult the
+     allocation bitmap. Freeing clears a bitmap bit and leaves page contents
+     intact, so a freed, not-yet-reused page passes validation perfectly. The
+     question is therefore not "does `mbuf_page_validate` consult the bitmap"
+     but "does every consumer of its verdict also ask" — WP123 did that for
+     the RT30 slot, WP-D for everything else (§ "What WP-D added" below).
 
   So: damage the new root page, and the fallback resolves to a root whose
   pages are all still checksum-valid, and the volume silently mounts an old
@@ -136,6 +144,15 @@
     answered at the one place that has a volume and one that is choosing a
     root.
 
+  - **Why the fix was not in `mbuf_page_validate`.** Its signature is
+    `(const uint8_t *page)` — no volume, no pba — so it *structurally cannot*
+    ask, and the finding "it never consults the allocation bitmap" is true but
+    not actionable on that function. It is a page-integrity predicate and stays
+    one. The actionable defect was that its **consumers** did not ask, and they
+    have a volume and a pba to ask with. A missing bitmap is likewise not a
+    negative answer: `mbuf_page_allocated` returns -1 for "cannot tell" and
+    every site falls through to integrity alone, so a future edit cannot
+    quietly turn missing authority into invented damage.
 ## FIXED (WP117) — `invf-sweep` hung in `vol_heat_sweep_begin` above ~46k live inodes
 
   **Date:** Sep 27, 2026  

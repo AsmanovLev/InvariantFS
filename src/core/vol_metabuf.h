@@ -83,7 +83,18 @@ void mbuf_ptr_set(invfs_blkptr *p, uint64_t pba, const uint8_t *page,
                   uint32_t flags);
 
 /* Read the page a blkptr names and verify it against the pointer's
- * gen + checksum (the design's "bad CRC is a hard read error"). 0 = ok. */
+ * gen + checksum (the design's "bad CRC is a hard read error") AND against
+ * the volume's allocation bitmap. 0 = ok.
+ *
+ * WP-D: this is the tree-wide chokepoint -- every base-tree walk in
+ * vol_btree.c reaches its pages through here -- and it asks BOTH questions.
+ * Integrity alone accepts a freed page, because free does not scrub the
+ * block: the magic and the CRC32C of whatever was last written there are
+ * still perfect, and the blkptr's own gen/checksum still match them,
+ * because the allocator has not re-issued the block yet. Without the
+ * allocation question a reader walks a subtree the volume has already given
+ * back to the pool. A volume with no bitmap at all answers on integrity
+ * alone (mbuf_page_allocated returns -1, "cannot tell", never "free"). */
 int mbuf_read_ptr(invfs_volume *v, const invfs_blkptr *p, uint8_t *page_out);
 /* Same verification, discarding the page bytes. */
 int mbuf_verify_ptr(invfs_volume *v, const invfs_blkptr *p);
@@ -129,14 +140,20 @@ int mbuf_root_publish(invfs_volume *v, uint64_t root_pba, uint64_t root_gen);
  * empty filesystem, and a FREED root page validates perfectly, so before
  * WP123 the reader would silently adopt a block the allocator had taken back.
  *
- * SCOPE, stated so nobody over-reads it. This guards the ROOT PAGE of a
- * slot. It does NOT verify the pages that root reaches: a root page that is
- * allocated and intact but standing on a freed child is a separate hazard
- * with a separate (tree-wide) remedy, and is NOT closed here. And on current
- * main no shipped path frees a block a live slot names -- the alternating
- * slots consume the fallback's name on the next publish before any reclaim
- * can reach its pages -- so this is hardening against a future reclaimer
- * that gets the liveness predicate wrong, not a fix for a reachable
+ * SCOPE, stated so nobody over-reads it. WP123 guarded the ROOT PAGE of a
+ * slot here and nothing below it. WP-D closed the tree-wide half: every page
+ * a root REACHES is read through mbuf_read_ptr, which asks the allocation
+ * bitmap too, so a root that is allocated and intact but standing on a freed
+ * child now fails the walk with EIO instead of being read. The gap that
+ * remains is narrower than it was: a page reached WITHOUT mbuf_read_ptr, of
+ * which there are four, each with its own check -- orphan_slot_ptr (this
+ * file's sibling in vol_btree.c), spt0_tree_ok and spt0_restore
+ * (vol_spt0.c), and fsck_v3_ptr_at (vol_fsck.c).
+ *
+ * And on current main no shipped path frees a block a live slot names -- the
+ * alternating slots consume the fallback's name on the next publish before any
+ * reclaim can reach its pages -- so this is hardening against a future
+ * reclaimer that gets the liveness predicate wrong, not a fix for a reachable
  * data-loss bug. It converts that class from "silently adopts a stale
  * namespace" to "fails loudly, naming the slot and the reason". */
 int mbuf_root_read(invfs_volume *v, uint64_t *root_pba_out,

@@ -155,6 +155,41 @@ int mbuf_read_ptr(invfs_volume *v, const invfs_blkptr *p, uint8_t *page_out)
     invfs_page_hdr *h;
     if (!p || !page_out || p->pba == 0)
         return -1;
+    /* WP-D: the allocation question comes FIRST, and it is independent of
+     * the page's contents. Free does not scrub, so a block the volume has
+     * handed back to the pool still carries the whole page -- magic, gen
+     * and CRC32C -- exactly as the last writer left it. Every check below
+     * therefore passes on a block that is no longer the volume's, and the
+     * gen/checksum triple does not rescue it either: until the allocator
+     * re-issues the block, they still match the page that was there.
+     *
+     * This is the tree-wide chokepoint. Every base-tree walk in vol_btree.c
+     * reaches its pages through here, so the refusal lands once, for all of
+     * them, instead of once per caller that might forget.
+     *
+     * WHY THIS CANNOT MAKE A HEALTHY READ FAIL. A set bit is not a promise
+     * here, it is a fact the volume's own allocator maintains: cleared in
+     * vol_free_run at the moment the block is given back, set in
+     * mb_alloc_meta_zone / alloc_blocks at the moment it is handed out. If a
+     * page the tree reaches has a clear bit, the volume has ALREADY given
+     * that block away and the next allocation may take it -- the read was
+     * unsound before this check ran, and EIO on it reports the truth
+     * instead of returning bytes the volume disowns. The check therefore
+     * cannot reject a page the volume still owns; it can only refuse one it
+     * does not. (The one way a set bit is not current is across an
+     * ungraceful close: the bitmap is a derived cache flushed on
+     * flush/close, so a block freed but not yet flushed still reads as
+     * ALLOCATED on the next open. That direction fails OPEN -- we keep
+     * today's behaviour for it -- and WP123 already flushed the bitmap
+     * before publishing RT30 so the dangerous instance of it cannot occur.)
+     *
+     * mbuf_page_allocated answers -1 only when this volume carries no
+     * bitmap at all (synthetic volumes that never went through vol_open).
+     * That is "no authority to consult", not "free", and it falls through
+     * to the integrity check alone: inventing damage out of missing
+     * information is exactly how a narrowing fix becomes a data-loss fix. */
+    if (mbuf_page_allocated(v, p->pba) == 0)
+        return -1;
     if (mbuf_read(v, p->pba, page_out) != 0)
         return -1;
     h = mbuf_page_hdr(page_out);

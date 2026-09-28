@@ -137,6 +137,25 @@ static int spt0_tree_ok(invfs_volume *v, uint64_t pba, char *err, size_t errlen)
                      (unsigned long long)pba);
         return 0;
     }
+    /* WP-D: CRC is not the only thing a root page can fail. Ask the
+     * allocation bitmap too, for the reason this function exists in the
+     * first place: it is the gate that decides whether a save point is
+     * allowed to pin a base at all, so a base the volume has already given
+     * back to the allocator must not be capturable. The subtree walk below
+     * goes through mbuf_read_ptr and is hardened already; this is the root
+     * page itself, which the walk never re-reads through that path.
+     *
+     * This makes capture refuse, it does not make a read fail: a savepoint
+     * on a fully-pinned generation has its bits set (the SPN0 hold is what
+     * keeps vol_free_blocks from clearing them), so a live base is
+     * unaffected. */
+    if (mbuf_page_allocated(v, pba) == 0) {
+        if (err && errlen)
+            snprintf(err, errlen, "root page %llu is FREE in the allocation "
+                     "bitmap -- the volume has given that block back and a "
+                     "save point cannot pin it", (unsigned long long)pba);
+        return 0;
+    }
     mbuf_ptr_set(&root, pba, page,
                  mbuf_page_chdr(page)->level == INVFS_PAGE_LEVEL_LEAF
                  ? INVFS_BP_ROOT | INVFS_BP_LEAF
@@ -1186,6 +1205,23 @@ int spt0_restore(invfs_volume *v)
         return -1;
     h = mbuf_page_hdr(page);
     if (!mbuf_page_validate(page))
+        return SPT0_RC_DAMAGED;
+    /* WP-D: refuse to roll back ONTO a block the volume has given back. A
+     * freed page passes mbuf_page_validate (free does not scrub) and
+     * passes the gen match, so without this the publish two lines below
+     * would install a root whose pages belong to the free pool -- and the
+     * next allocation would overwrite them under a live namespace.
+     *
+     * On a correct volume this never fires. The SPN0 hold armed at capture
+     * time is exactly what stops vol_free_blocks clearing the pinned
+     * blocks, and the restore only proceeds after spt0_data_ok() has
+     * verified that pin; so reaching a clear bit here means the save point
+     * is stale, and refusing it is the only answer that does not publish a
+     * namespace over somebody else's bytes. Refusing a ROLLBACK is not
+     * making a read fail: the volume is left exactly as it was, and the
+     * caller reports SPT0_RC_DAMAGED, which is already this function's
+     * answer for "the save point does not describe a usable base". */
+    if (mbuf_page_allocated(v, base_root) == 0)
         return SPT0_RC_DAMAGED;
 
     if (mbuf_root_publish(v, base_root, h->gen) != 0)

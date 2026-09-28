@@ -273,14 +273,22 @@ void fold_reclaim_hook(invfs_volume *v, invfs_blkptr old_root,
     /* WP121: the fold has just published new_root, so the OTHER RT30 slot
      * still names old_root -- that is WP86's damage tolerance, and
      * mbuf_root_read adopts it whenever new_root's page fails
-     * mbuf_page_validate. mbuf_page_validate does not consult the
-     * allocation bitmap, so freeing old_root's exclusive pages here does
-     * not make the fallback fail loudly; it makes the reader adopt a
-     * namespace standing on reallocated blocks. That is silent data loss,
-     * and it is exactly what INCIDENTS.md's UNRESOLVED "RT30 fallback root
-     * can be reclaimed while still live" entry describes. It is also the
-     * predecessor of the collector below, so leaving it in place would
-     * mean the collector's careful liveness set is undone one line
+     * mbuf_page_validate. At the time, freeing old_root's exclusive pages
+     * here did not make that fallback fail loudly: mbuf_page_validate
+     * consults magic + CRC32C only, and free does not scrub, so the reader
+     * adopted a namespace standing on reallocated blocks. That was silent
+     * data loss, and it is what INCIDENTS.md's "RT30 fallback root can be
+     * reclaimed while still live" entry describes.
+     *
+     * WP-D changed the consequence but NOT the reason for this guard. The
+     * reader now consults the allocation bitmap -- mbuf_root_read for the
+     * slot, mbuf_read_ptr for every page the fallback tree reaches -- so
+     * freeing here would now produce EIO and a named RT30 diagnostic
+     * instead of a silent adoption. That is still a volume that has lost
+     * the namespace old_root's pages described, and a fallback root that
+     * is reclaimed while still live is still a bug; the only thing WP-D
+     * bought is that it stops hiding. Leaving this guard in place is also
+     * still what keeps the collector below from being undone one line
      * earlier, every time.
      *
      * The guard is a refusal, not a repair: when the RT30 still names

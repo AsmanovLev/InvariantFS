@@ -160,9 +160,16 @@ int btree_reclaim_pinned(invfs_volume *v, invfs_blkptr old_root,
  * v->pinned_root. That "ANY of the 2 slots" is the whole safety argument:
  * mbuf_root_publish writes one slot per publish (vol_metabuf.c:349) and
  * mbuf_root_read falls back to the other when the newer root fails
- * mbuf_page_validate -- and mbuf_page_validate does not consult the
- * allocation bitmap, so a freed-but-intact page would still validate. A
- * depth-2 root stack bounds the leak; it does not make freeing safe.
+ * mbuf_page_validate. A depth-2 root stack bounds the leak; it does not make
+ * freeing safe.
+ *
+ * WP-D added the reader-side backstop, which is why the collector is no
+ * longer the ONLY thing standing between a wrong predicate and a silent
+ * adoption: mbuf_read_ptr refuses any page whose block the bitmap reports
+ * free, so a freed subtree now fails the walk with EIO instead of being
+ * read, and mbuf_root_read refuses a freed slot. That converts a silent
+ * corruption into a loud one; it does not make freeing safe, which is why
+ * the liveness predicate below is still the load-bearing part.
  *
  * Caller contract: quiescent. No COW mutation may be in flight (the caller
  * holds the volume write lock and is between publications), because an
