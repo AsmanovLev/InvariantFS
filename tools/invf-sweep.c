@@ -1919,7 +1919,20 @@ int main(int argc, char **argv)
                            pc ? pc->name : "unknown-pack");
             }
             else if (rc > 0) swept++;
-            else if (rc == 0) skipped++;
+            else if (rc == 0) {
+                /* rc == 0 is "no lane claimed this file". It used to be
+                 * counted into `skipped` with no line at all, so a pack that
+                 * declined -- size guard, memory policy, ENOSPC deferral --
+                 * was indistinguishable from a file with nothing to do, and
+                 * the summary read "skipped=1" with nothing to explain it.
+                 * A policy that is supposed to leave a stamp (DEFER_ENOSPC)
+                 * was likewise indistinguishable from one that silently did
+                 * nothing. Name the file. */
+                skipped++;
+                if (!invfs_sweep_ui_active())
+                    printf("  %s: no lane claimed it (declined or nothing to do)\n",
+                           names[i]);
+            }
             else failed++;
         }
 progress:

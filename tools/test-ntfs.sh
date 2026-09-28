@@ -898,7 +898,7 @@ if grep -q "fs.ntfs: ntfs (codecpack)" "$WORK/sweept1.log"; then
 fi
 C=$("$WORK/classof" "$IMGT" fs.ntfs)
 echo "  fs.ntfs (tight): $C"
-[ "$C" = "cls=9 algo=20 gen=1" ] || { echo "FAIL: want DEFER_ENOSPC{NTFS=20,1}"; exit 1; }
+[ "$C" = "cls=9 algo=20 gen=1" ] || { echo "FAIL: want DEFER_ENOSPC{NTFS=20,1}, got $C"; cat "$WORK/sweept1.log"; exit 1; }
 $B/invf-cat "$IMGT" fs.ntfs "$WORK/out/tight1.ntfs" >/dev/null
 cmp -s "$WORK/fs.ntfs" "$WORK/out/tight1.ntfs" \
     || { echo "FAIL: DEFER_ENOSPC file not bit-exact"; exit 1; }
