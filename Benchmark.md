@@ -1,5 +1,20 @@
 # InvariantFS Benchmark — Silesia corpus
 
+> **SUPERSEDED — read this before quoting any number below.**
+> This run is dated 2025-08-25 and predates Meta-v3 entirely (the `v0.5.0`
+> default format), WP10/WP14 batching, and the v3 COW base-page accounting.
+> It was taken without `INVFS_META_FRAC` set, and **no reclaim-gate
+> condition was recorded**, so its `2.95x` is not a current figure and
+> must not be compared against a gated run. Per AGENTS.md §1.7 a claim
+> that cannot be pointed at in the tree is not restated, so this WP did
+> **not** substitute a replacement ratio: the current Silesia numbers do
+> not exist in the tree, and the live benchmark document is
+> `docs/benchmarks/`. Two notes specific to the text below: the comment
+> «RAW-оригиналы свип освобождает» describes v2 behaviour — on v3 the
+> builtin container lanes do not release the superseded segments at lane
+> time (see `AGENTS.md` §2.5) — and `bench-invfs.sh` was never written.
+> The raw table is kept below as a historical record, otherwise unmodified.
+
 Дата: 2025-08-25. Корпус: Silesia, 12 файлов, **211 938 580 B** (202.16 MiB).
 Хост: i5-10500H (12 тредов), Fedora 44, том/образы в tmpfs. Все числа — только
 полезные байты данных (метаданные ФС исключены; для INVFS — занятые блоки зон
@@ -44,7 +59,9 @@
   RAW-оригиналы свип освобождает.
 
 Повтор: `/var/tmp/bench/harness/fs-bench.sh` (btrfs/erofs), INVFS-легa —
-команды в истории сессии; скрипт `bench-invfs.sh` планируется в tests/.
+команды в истории сессии. Скрипт `bench-invfs.sh` **не написан**: ни
+`tools/`, ни `tests/` в дереве нет, так что этот прогон невоспроизводим из
+репозитория.
 
 > Этот прогон (2025-08-25, 2.95x) — до WP10/WP14. Актуальные числа на том
 > же корпусе и чтение vs btrfs жили в отдельном документе серии B30+

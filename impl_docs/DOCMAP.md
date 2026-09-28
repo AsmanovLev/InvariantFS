@@ -23,7 +23,7 @@ This map answers "where does X live". Source layout is in `FILEMAP.md`;
 | codecs (zlib repro, ppmd, zstd, lz4, crc32c) | `deflate_repro.c`, `deflate_backend_zlib.c`, `ppmd_codec.c`, `crc32c.c` | — |
 | dedupe, heat, tiering | `vol_dedupe.c`, `vol_heat.c`, `vol_tier.c` | — |
 | crash recovery, fsck, seal | `vol_crash.c`, `vol_fsck.c`, `src/cli/fsck.c`, `vol_seal.c`, `vol_repair.c` | ADR-009 |
-| FUSE surface, Linux rootfs | `fuse_fs.c`, `tools/mkinitramfs.sh` | `docs/architecture/OVERVIEW.md` |
+| FUSE surface, Linux rootfs | `fuse_fs.c`, `tools/mkinitramfs.sh` | `docs/ARCH-INSTALL.md`, `docs/GENTOO-INSTALL.md` (rootfs recipes; `docs/architecture/OVERVIEW.md` is a zone summary, not a FUSE or rootfs doc) |
 
 Windows (dokan/winfsp) is parked; those sources still exist under
 `src/legacy/`. NFS is served by exporting the image (iSCSI/NBD/virtio-blk),

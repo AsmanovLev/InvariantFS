@@ -50,8 +50,9 @@ table below are common to both; the Landlock filesystem whitelist is *not*:
 | **Landlock whitelist** | **yes** | **no** |
 
 A builtin lane is launched by `tool_exec_strict()`
-(`src/core/vol_cpack.c:190`), which passes `sb = NULL`; `landlock_apply()` is
-called only `if (sb && sbmode == 2)` (`src/core/helper_exec.c:603`). So
+(`src/core/vol_cpack.c:191`), whose body passes `sb = NULL`
+(`src/core/vol_cpack.c:193`); `landlock_apply()` is
+called only `if (sb && sbmode == 2)` (`src/core/helper_exec.c:614`). So
 packMP3/ffmpeg/MAC/cjxl run with the WP61 containment (privilege drop,
 `CLONE_NEWNET`, rlimits, deadline, environment scrub) but **without any
 filesystem whitelist** — they keep whatever read/write access their uid has.

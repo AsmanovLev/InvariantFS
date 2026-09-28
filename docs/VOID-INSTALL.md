@@ -83,8 +83,8 @@ that opens the volume):
 INVFS_META_FRAC=16 bin/invf-mkfs root.img 15 shadow.img 20
 ```
 
-`INVFS_META_FRAC=16` gives ~992 MB of metadata on a 15 GiB volume, enough
-for a ~65k-object rootfs (`AGENTS.md` §2.7).
+`INVFS_META_FRAC=16` gives 960 MiB (1007 MB) of metadata on a 15 GiB
+volume — enough for a ~65k-object rootfs (`AGENTS.md` §2.7).
 
 ## 5. Import offline
 

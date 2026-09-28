@@ -190,8 +190,10 @@ Consequences, and they are binding:
 - `tools/check-repo-hygiene.sh` fails the build when a doc under `docs/`
   references a path that no longer exists. Keep it green.
 
-Rationale and the full inventory of what was deleted and why:
-`docs/architecture/OVERVIEW.md`; git history for the v2-era prose.
+Rationale and the full inventory of what was deleted and why: git history
+for the v2-era prose (`git log --diff-filter=D --name-only -- src/doc/`).
+`docs/architecture/OVERVIEW.md` is NOT part of that inventory — it is a
+65-line zone summary that still exists and is still current.
 
 ### 1.8 Anti-patterns
 
@@ -226,8 +228,11 @@ file.
   and are not part of `make e2e`.)
 - Not a SAN/network filesystem. Single-host, FUSE-based.
 - Not magic. The bit-exact invariant is achieved by storing things
-  untransformed when in doubt, which means **it does not compress
-  well by default** — the compression happens offline in the sweep.
+  untransformed when in doubt, which means **it compresses poorly by
+  default** — the write path stores fast LZ4 (ZSTD only once RAW fill
+  passes 80%, via the adaptive effort ladder) and falls back to verbatim
+  when a segment does not shrink; the sweep is what re-encodes into the
+  strong codecs (`src/core/vol_write.c:190`, `:203-204`; see §2.4).
 
 ### 2.3 Zone layout
 
@@ -266,32 +271,75 @@ When you `unlink()`:
 
 1. A delta delete entry is appended — there is no immediate in-place record
    surgery (the v2 "tombstone" model is gone).
-2. The file's blocks are **not** freed immediately; the sweep reclaims them,
-   and fold drops the delta entry.
-3. `df` reflects the reclaimed space only after the sweep (and the bitmap
-   flush) have run.
+2. On v3 the file's data segments are freed **at `unlink`**: `vol_v3_unlink`
+   walks the inode's recipe and frees every non-shared segment through
+   `vol_v3_free_recipe_blocks` → `vol_free_blocks`
+   (`src/core/vol_dirs.c:598-600`, `src/core/vol_ast.c:125`). Fold drops
+   the delta entry. Two things still defer the space, and they are the
+   reason a delete-then-check cycle can look like a leak:
+   - a **live SPT0 savepoint** (§2.6) pins every block the captured
+     generation's recipes named, so the blocks stay allocated until the
+     next bare sweep drops that window and reclaims what no live recipe
+     names (`spn_reclaim`, `src/core/vol_spt0.c`);
+   - a `zone == TEXT` entry names a *shared* batch segment, which the
+     targeted free deliberately skips — `tz_v3_gc` reclaims it when the
+     last live member drops (`src/core/vol_ast.c:153`).
+3. The bitmap is a derived cache, so `df` reflects the free only after the
+   bitmap has been flushed.
 
 **Implications:**
 
-- A volume that sees lots of writes-then-deletes will appear to fill up until
-  the sweep runs.
-- `df` reports the free space after sweep; mid-sweep it can look scary, and
-  that is normal.
+- A volume that sees lots of writes-then-deletes can still appear to fill up
+  until a bare sweep drops the savepoint pin described in §2.4 step 2.
+- `df` reports the free space after the bitmap flush; mid-sweep it can look
+  scary, and that is normal.
 - Don't write directly to RAW without going through the volume — the format
   isn't a block device you can dd to.
 
 ### 2.5 The sweep
 
-`invf-sweep` is the background worker that:
+`invf-sweep` is the background worker. A single-device, non-`--dry-run` run is
+seven core stages, in this order (`tools/invf-sweep.c`):
 
-1. Drains RAW segments into Shadow (data movement).
-2. Re-clusters text/binary content by type.
-3. Reclaims dead blocks: per-segment dedupe (BLAKE3) and GC of dead
-   text/binary batches.
-4. Re-encodes data with stronger codecs where bit-exactness is proven
-   (text → PPMd batches, binaries → ZSTD+BCJ batches, plus the
-   container/codecpack lanes).
-5. Publishes the new recipes via inode-id-keyed publication.
+| # | stage | what it does | cite |
+|---|---|---|---|
+| 1 | `prepare` | policy, and on v3 the **savepoint capture** that brackets the run | `invf-sweep.c:1574`, `:1689` |
+| 2 | `collect` | walk the live inodes | `:1734` |
+| 3 | `transform` | per-file lane dispatch: builtin container lanes, codecpack/containerpack lanes, text/binary batching, EXER carve, generic ZSTD floor — each only after its own bit-exactness guard passes | `:1822` |
+| 4 | `heat` | promote hot batch members to standalone segments | `:1955` |
+| 5 | `dedupe` | per-segment BLAKE3; cross-file and intra-file merge | `:1991` |
+| 6 | `batches` | GC of dead text/binary batches + the shared batch flush | `:2036` |
+| 7 | `finalize` | the durability point: checkpoint and volume flush | `:2067`, `:2106` |
+
+Two variants: a two-device volume inserts `tier` (hot/cold balancing) between
+`heat` and `dedupe` (`invf-sweep.c:1972`), and `--seal` appends `seal`
+(`:2124`). Under `--dry-run`, stage 3 reports as `plan`.
+
+Note the ordering: **re-encoding (stage 3) happens before reclaiming
+(stages 5–6)**, not after. A sweep therefore needs free space for the new
+encoding before it gets the old space back.
+
+> **v3 space accounting when a lane supersedes a file.** The builtin
+> container lanes do **not** release the superseded recipe's data segments
+> on v3 — the `vol_delete_inode` after each `vol_create_*_file` is guarded
+> `if (!v3 && ...)` (`src/core/vol_sweep.c:1058`, `:1075`, `:1093`,
+> `:1132`, `:1184`). The containerpack lane is two-sided by contrast: it
+> branches the *other* way, releasing the superseded recipe on v3
+> (`if (v->sb.vol_flags & VOLF_V3) cpack_release_superseded(...) else
+> vol_delete_inode(...)`, `src/core/vol_cpack.c:3162-3165` and
+> `:3189-3192`; the release is a targeted `vol_v3_free_recipe_blocks`,
+> `src/core/vol_cpack.c:2784`). Measured on a 12-file / 1.8 MiB
+> TAR corpus (v3 image, `invf-mkfs` + `invf-import` + `invf-sweep`,
+> `invf-fsck` free-block counts): a lane sweep left **478 free blocks
+> stranded** as "unclaimed — allocated, no live reference"; the next bare
+> sweep reclaimed 456 of them and the count then stayed flat across further
+> sweeps. Part of that swing is inherent, not a defect: a successful
+> container lane stores the members *and* the recipe before the old
+> segments are given up (§2.9). So this is a **one-sweep lag, not an
+> unbounded leak** — the space comes back when the next bare sweep drops
+> the savepoint pin (§2.4 step 2) — and `invf-fsck -f` does **not** recover
+> it on v3 (measured: unchanged after a full `-f` pass).
+> `INVFS_RECLAIM_ORPHANS=1` runs the orphan collector, which is default-off.
 
 Manual invocation:
 
@@ -300,13 +348,32 @@ invf-sweep /path/to/volume.img                # offline (volume unmounted)
 invf-sweep /path/to/volume.img --dry-run      # show what would happen
 invf-sweep /path/to/volume.img --seal         # also write parity seals
 
-# In FUSE: trigger sweep by signal or xattr
+# In FUSE: full pass, and it arms NO savepoint — see the warning below
 kill -USR1 $(pidof invf-fuse)                  # request sweep
 setfattr -n user.invfs.sweep -v 1 /mount/point  # same, via xattr
 ```
 
-Background sweep in FUSE: set `INVFS_SWEEP_INTERVAL=<seconds>` before
-mounting. Default is OFF — opt in explicitly.
+> **Which triggers arm a rollback savepoint (v3).** Only two do. The
+> offline `invf-sweep` captures an SPT0 savepoint before the walk
+> (`tools/invf-sweep.c:1689`), and so does the in-FUSE watermark pass
+> (`-o raw_watermark=<pct>` → `invf_sweep_worker(1)`,
+> `src/cli/fuse_fs.c:1883` → `spt0_capture` at `src/cli/fuse_fs.c:1710-1718`).
+> **`kill -USR1` and the `user.invfs.sweep` xattr arm nothing.** Both just
+> set the same in-process flag (`src/cli/fuse_fs.c:1680`, `:1798`, `:2539-2541`),
+> and the sweep thread runs `invf_sweep_worker(0)` (`src/cli/fuse_fs.c:1834`) —
+> "the SIGUSR1 path passes 0 and keeps its historic uncheckpointed behavior"
+> (`src/cli/fuse_fs.c:1696`). So **do not try to roll back after a USR1 or
+> xattr sweep on v3**: there is no save point, `invf-rollback` refuses with
+> `no save point` and exit 1 (`tools/invf-rollback.c:75-78`) — and it refuses
+> *after* the sweep has already rewritten the data. If you want the rollback
+> window, mount with `-o raw_watermark=<pct>` or run `invf-sweep` offline.
+
+`INVFS_SWEEP_INTERVAL=<seconds>` is **not** the worker above. It enables a
+1 Hz in-daemon loop that drains only `vol_sweep_pending` — the write path's
+partial-pending list — and flushes the volume
+(`src/cli/fuse_fs.c:1848-1858`). It never reaches `transform`, never
+dedupes, never re-encodes, and arms no savepoint. Default is OFF — opt in
+explicitly.
 
 ### 2.6 Recovery and rollback
 
@@ -321,11 +388,22 @@ To **undo** the last sweep (e.g., a sweep that mis-clustered data):
 invf-rollback /path/to/volume.img
 ```
 
-On v3, rollback is built on **SPT0 savepoints** (`vol_spt0.c`): a savepoint
-records `{base_root, delta_end, flags}` and a restore returns the metadata to
-that generation. Without a savepoint, rollback refuses — the volume's history
-is gone. (The v2 `CKP0` sweep-checkpoint + `\x01reten` retention registry were
-retired with the v2 metadata machinery.)
+> **There may be nothing to roll back to.** On v3 a savepoint only exists if
+> something *captured* one, and that is only the offline `invf-sweep` and the
+> in-FUSE watermark pass (§2.5). A sweep triggered by `kill -USR1` or the
+> `user.invfs.sweep` xattr rewrites the data with no window behind it, and
+> `invf-rollback` then prints `no save point` and exits 1
+> (`tools/invf-rollback.c:75-78`) — after the damage, not before. Capture a
+> savepoint first (offline sweep, or `-o raw_watermark=<pct>`) if you need one.
+
+On v3, rollback is built on **SPT0 savepoints** (`vol_spt0.c`): the 32-byte
+`SPT0` descriptor at block-0 offset `0xA00` records
+`{base_root, delta_end}` (plus a reserved `flags` and a `crc32c`
+over the descriptor, `src/core/invarifs.h:683-703`), and a restore publishes
+`base_root` and truncates the delta to `delta_end`. Without a savepoint,
+rollback refuses — the volume's history is gone. (The v2 `CKP0`
+sweep-checkpoint + `\x01reten` retention registry were retired with the v2
+metadata machinery.)
 
 ### 2.7 Capacity and the metadata reservation
 
@@ -361,12 +439,47 @@ be recovered bit-for-bit, regardless of what codec was applied.
 
 **What it does NOT mean:**
 
-- It does not mean "lossless compression of everything". A file that's
-  already compressed (ZIP, JPEG, MP4) is stored verbatim because no
-  useful codec applies — the volume is acting like a dedup'd tarball.
+- It does not mean "lossless compression of everything" — but it also does
+  not mean "already-compressed files are stored verbatim". What actually
+  happens per kind, on v3:
+  - **JPEG → JXL lossless**, via the `jxl.codecpack` lane
+    (`tools/codecpacks/jxl.codecpack/manifest`;
+    `src/core/vol_sweep.c:333-336`, `:866-882`, `:1100`). It is a
+    *transcode*, guarded by a decode-back
+    `memcmp`, so the bytes come back identical through a different codec.
+  - **PNG → JXL lossless**, via the built-in PNGR lane
+    (`src/core/vol_sweep.c:1100-1136`). The whole-path rebuild+memcmp guard
+    refuses anything it cannot prove, and a refused PNG is simply left RAW
+    (measured: `PNGR ...: refused (IDAT is zlib-wrapped, not a raw deflate
+    stream); original kept RAW`).
+  - **MP4 → stored verbatim.** There is no video lane; the lossless H.264
+    model was built, measured, and shelved (`impl_docs/AUDIT.md` WP15).
+  - **TAR / GZIP → stored byte-original but *decomposed*.** The lane keeps
+    the header bytes verbatim in an IVFT/IVGZ recipe blob, splits the
+    payloads into `name!partN` sibling inodes (each compressed by its best
+    algorithm), and records the original length as `file_size`; the read
+    path rebuilds the container byte-for-byte
+    (`src/core/vol_cpack.c:1399-1402`, `:1430-1454`, `:1482-1483`; the
+    GZIP sibling is `vol_create_gz_file`, `src/core/vol_cpack.c:1580`). So
+    "verbatim" is imprecise: the bytes are exact, but nothing is left as
+    one opaque segment. Note this lane's guard is a *size* guard
+    ("transcode only when smaller", `src/core/vol_cpack.c:1464-1470`), not
+    a runtime `memcmp` — same category as FLAC in
+    `impl_docs/AUDIT.md` H10.
+  - **ZIP → the builtin ZIP lane is v2-only** (`src/core/vol_sweep.c:1023`:
+    `if (!v3 && full[0] == 'P' ...)` — WP78's stated parity gap), so on v3
+    a ZIP falls to the generic floor or to a containerpack.
 - It does not mean "metadata is preserved exactly". mtime is
-  truncated to seconds (ctime64 second resolution); xattrs and POSIX
-  ACLs are stored as opaque blobs; uid/gid are preserved.
+  truncated to seconds (ctime64 second resolution); plain xattrs are stored
+  as opaque blobs; uid/gid are preserved. **POSIX ACLs are the exception
+  to "opaque"** — they are stored verbatim as the standard
+  `system.posix_acl_access` / `system.posix_acl_default` blob *and
+  evaluated daemon-side on every entry point* (`perm_check_cred` /
+  `perm_check_traversal_cred`; the contract is written out at
+  `src/cli/fuse_fs.c:578-615`, the two functions are at
+  `src/cli/fuse_fs.c:809` and `:854`), because the
+  mount deliberately does not negotiate `default_permissions` and so is
+  the sole object-level permission authority. ACLs are not decorative.
 - It does not mean "files are stored in their original form". They're
   stored in segments with explicit per-segment codecs; the FUSE read
   path reassembles them. Reading the same file twice from the same

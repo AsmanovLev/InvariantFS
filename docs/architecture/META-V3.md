@@ -16,43 +16,79 @@ In Meta-v3:
 - **Recent tier**: Append-only Delta Log capturing real-time mutations with minimal latency.
 - **Overlay**: Readers look up the Delta Log first; if absent, they read the immutable B+ tree base.
 - **Fold worker**: Periodic background task merges accumulated delta entries into the B+ tree, freeing obsolete pages.
-- **Mount time**: $O(1)$ base root load + short delta replay ($< 250\text{ ms}$).
+- **Mount time**: $O(1)$ base root load + short delta replay (`vol_open` →
+  `vol_delta_mount`, `src/core/volume.c:1565`; the replay loop and the
+  torn-tail truncation are in `src/core/vol_delta.c:928-992`). The fold
+  *trigger* thresholds in §3 are what bound how long that replay can get.
 
 ---
 
 ## 2. Key Structures
 
 ### RT30 Superblock Descriptor
-Lives at offset `0x9D0` of block 0 and occupies alternating double slots (blocks 161–162 or equivalent based on volume geometry).
+`src/core/invarifs.h:663-671` is the authority. It is a **48-byte packed
+descriptor at byte offset `0x9D0` of block 0** — not a block, and not a pair
+of blocks. There is no geometry-dependent slot number: the "double slot" is
+the `root_slot[2]` *array inside the descriptor*, holding the pba of base
+root slot A and slot B (0 = empty), with `seq` as the atomicity anchor — on
+recovery the highest CRC-valid `seq` wins.
 
 ```c
 typedef struct {
-    char     magic[4];       /* "RT30" */
-    uint32_t version;        /* INVFS_RT30_VERSION */
-    uint64_t seq;            /* Monotonic publication sequence */
-    uint64_t root_pba;       /* Physical block address of B+ tree root */
-    uint64_t root_gen;       /* Generation number of root page */
-    uint64_t delta_pba;      /* Current delta log head segment PBA */
-    uint32_t page_size;      /* Default 4096 */
-    uint32_t flags;          /* State flags */
-    uint32_t crc32c;         /* CRC32C of preceding fields */
-} invfs_rt30;
+    char     magic[4];       /* 0x9D0 "RT30" */
+    uint32_t version;        /* 0x9D4 INVFS_RT30_VERSION (1) */
+    uint32_t page_size;      /* 0x9D8 metadata base-page size (default 4096) */
+    uint64_t root_slot[2];   /* 0x9DC base root slot A / B pba (0 = empty) */
+    uint64_t delta_pba;      /* 0x9EC active delta segment pba (0 = none) */
+    uint64_t seq;            /* 0x9F4 root generation (monotone; higher = newer) */
+    uint32_t crc32c;         /* 0x9FC over the descriptor, this field read 0 */
+} invfs_rt30;               /* 0x9D0 + 48 -> ends 0xA00 */
 ```
 
+There is no `root_pba` field, no `root_gen` field, and no `flags` field in
+this struct. Publication is `mbuf_root_publish(v, root_pba, root_gen)`
+(`src/core/vol_metabuf.c:356`, `:396`), which writes the *parameter* into the
+chosen `root_slot[]` entry — the generation is carried by the page header it
+validates (`h->gen`) and by `seq`, not by a descriptor field.
+
 ### Key Encodings
-All keys are lexicographically ordered big-endian byte sequences:
-- **Inodes**: 8-byte big-endian inode ID (`0x0000000000000002` .. `0xFFFFFFFFFFFFFFFF`).
-- **Dirents**: `[parent_inode_id (8B)][name_bytes (variable)]`.
-- **Xattrs**: `[target_inode_id (8B)][0xFF][xattr_name (variable)]`.
+All keys are lexicographically ordered big-endian byte sequences. The
+namespaces are kept disjoint by key *length* and by a prefix byte
+(`src/core/invarifs.h:1262-1282`):
+
+- **Inodes**: 8-byte big-endian inode ID, no prefix
+  (`v3_ino_key`, `src/core/vol_btree.c:2441-2448`). Being exactly 8 bytes
+  is what keeps this namespace disjoint from the prefixed and lengthened
+  ones below.
+- **Dirents**: `parent_inode_id:u64 BE || name_len:u16 BE || name bytes`,
+  no prefix — always ≥ 10 bytes, which is what keeps it disjoint from the
+  8-byte inode keys (`v3_dirent_key`, `src/core/vol_btree.c:3988-3999`; the
+  layout is frozen at `:3969`). The value is the child inode id, 8 bytes BE.
+  A directory's own anchor entry has `name_len == 0`.
+- **Xattrs**: `0x03 || inode_id:u64 BE || name_len:u16 BE || name`
+  (`v3_xattr_key`, `src/core/vol_btree.c:2780-2792`; prefix
+  `INVFS_V3_XATTR_KEY_PREFIX` = `0x03`, `src/core/invarifs.h:1272`). The
+  value is the raw xattr value bytes. Values too large for one base page use
+  **continuation keys**: the same key with `0x00 || chunk_index:u16 BE`
+  appended (`v3_xattr_chunk_key`, `src/core/vol_btree.c:2795-2803`); an xattr
+  name cannot contain NUL, so the two key shapes are unambiguous.
+- **Recipe blobs**: `0x04 || BLAKE3-256(serialized recipe)[32]`
+  (`INVFS_V3_RECIPE_KEY_PREFIX` = `0x04`, `src/core/invarifs.h:1282`). This
+  is why identical recipes dedup to one key, and why a recipe lookup
+  recomputes the hash and hard-fails on mismatch rather than decoding.
 
 ---
 
 ## 3. The Fold Worker Lifecycle
 
-Fold is triggered when the Delta Log exceeds thresholds:
-- Bytes: 64 MiB
-- Records: 262,144 records
-- Age: 3,600 seconds (1 hour)
+Fold is triggered when the Delta Log exceeds thresholds
+(`src/core/vol_fold.c:84-86`):
+- Bytes: 64 MiB (`FOLD_TRIGGER_BYTES`)
+- Records: 262,144 records (`FOLD_TRIGGER_RECORDS`, a RAM-index bound)
+- Age: 3,600 seconds (1 hour) (`FOLD_TRIGGER_AGE_S`)
+
+These are diagnostics, not format: changing them changes *when* fold runs,
+never what is on disk (`src/core/vol_fold.c:50-52`).
 
 ### Step-by-Step Fold Order:
 1. **Iterate & Snapshot**: Collect winning delta records in memory into key-sorted order.
