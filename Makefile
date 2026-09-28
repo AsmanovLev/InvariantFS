@@ -289,16 +289,13 @@ GZHDR_SAN_CFLAGS := -std=gnu11 -O1 -g -fsanitize=address,undefined \
 # WP129: the regression test. Sanitizers are not optional here -- on main
 # the malformed cases are a memory error, not a wrong return value, so an
 # uninstrumented build of this test would go GREEN on the bug.
-# detect_leaks=0 was here for one reason: vol_open allocated
-# v->meta_type_bitmap (1 MiB at this geometry, allocated at
-# src/core/volume.c:4600) and vol_close never freed it, so LSan fired on every
-# open. WP133 fixed that leak in vol_close -- it measured 8388608 B over 8
-# open/close cycles before the fix and 0 B after -- so the original
-# justification is gone and this flag is now a leftover, not a decision.
-# It is still 0 here because flipping it back is WP129's lane and this gate's
-# full 200k-iteration run has not been re-verified under LSan; at 2k
-# iterations the same binary is LSan-clean, so there is nothing else known to
-# be holding it back.
+# detect_leaks=0: vol_open allocates v->meta_type_bitmap (1 MiB at this
+# geometry, src/core/volume.c:4594) and vol_close does not free it. That is a
+# PRE-EXISTING volume-lifecycle leak, nothing to do with the header walk --
+# and it is invisible to every other unit binary because none of them are
+# built with a sanitizer. Fixing it belongs to whoever owns volume.c's
+# lifecycle, not here: LeakSanitizer is not what this gate is for, and
+# silencing it here is not a claim that the leak does not exist.
 GZHDR_TEST_ASAN := hard_rss_limit_mb=4096:detect_leaks=0
 $(OUT)/invf-gz_header_test: src/cli/gz_header_test.c $(CORE_O)
 	$(CC) $(GZHDR_SAN_CFLAGS) -o $@ $< $(CORE_O) \
