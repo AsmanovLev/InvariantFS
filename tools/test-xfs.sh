@@ -65,7 +65,12 @@ IMGMEM2=wp16xfs-mem2.img
 IMGNEG=wp16xfs-neg.img
 export INVFS_CODECPACKS=$REPO/tools/codecpacks   # the sweep AND the reads
 rm -rf "$WORK" && mkdir -p "$WORK/orig" "$WORK/out" "$WORK/ref" "$WORK/nopacks"
-cd /dev/shm
+# Images below are bare-named, so the CWD decides where they land. This was
+# /dev/shm; a containerpack stages the container in a tmpfs scratch dir whose
+# pages are charged to the writing cgroup, and on a 7.6 GB host with no swap
+# that fails ENOSPC while df still reports gigabytes free (the same failure
+# test-ntfs.sh hit). Keep the image and the staging on disk.
+cd "$WORK"
 rm -f "$IMG" "$IMGMEM" "$IMGMEM2" "$IMGNEG"
 
 echo "== tools =="
@@ -190,7 +195,7 @@ MNT=$WORK/mnt
 mkdir -p "$MNT"
 UMOUNTED=0
 cleanup() { if [ "$UMOUNTED" = 0 ]; then sudo umount "$MNT" 2>/dev/null || true; fi; \
-    rm -rf "$WORK" /dev/shm/wp16xfs*.img 2>/dev/null || true; }
+    rm -rf "$WORK" 2>/dev/null || true; }
 trap cleanup EXIT
 
 # mkdir, retrying until the inode lands in AG0 (ino < 65536): XFS rotates
@@ -208,6 +213,54 @@ mkag0() {
     done
 }
 
+# Mount a fixture through an EXPLICIT, checked loop device.
+#
+# `mount -o loop` picks a device by itself, and a device that is present but
+# wedged read-only (/sys/block/loopN/ro == 1, which happened on this host and
+# made every loop mount silently land read-only -- a read-only mount is
+# indistinguishable from a dead device, and a test that populates it then
+# fails with "Read-only file system" pointing at the wrong subsystem) is
+# accepted without complaint. So: choose the device, refuse a read-only one,
+# and prove the mount is writable before populating it. Abort rather than run
+# the fixture against a mount that cannot be written.
+LOOPDEV=""
+mountxfs() {  # mountxfs <img>
+    local img="$1" d
+    # Do NOT trust `losetup --find`. On this host it kept handing back a
+    # wedged device (/sys/block/loop4/ro == 1, size 8 sectors, which
+    # `losetup -d` cannot clear), so every run would be poisoned by whichever
+    # loop happened to be broken. Walk the devices instead and take the first
+    # one that is free AND healthy, so one bad device on the machine does not
+    # stop the suite from measuring anything.
+    d=""
+    for c in /dev/loop[0-9]*; do
+        [ -e "$c" ] || continue
+        [ "$(cat /sys/block/$(basename "$c")/ro 2>/dev/null)" = "0" ] || continue
+        if losetup "$c" >/dev/null 2>&1; then continue; fi   # already attached
+        if timeout 30 sudo -n losetup "$c" "$img" 2>/dev/null; then d="$c"; break; fi
+    done
+    [ -n "$d" ] || { echo "FAIL: no free, healthy loop device (some may be wedged ro=1)"; exit 1; }
+    LOOPDEV="$d"
+    sudo mount "$LOOPDEV" "$MNT" || {
+        echo "FAIL: mount $LOOPDEV failed"; exit 1; }
+    # Probe at the privilege the suite itself mounts with. Probing as the
+    # invoking user would fail on a perfectly good mount that the suite is
+    # about to `sudo chown` -- a test that cries wolf is worse than none.
+    if ! sudo -n touch "$MNT/.writable" 2>/dev/null; then
+        echo "FAIL: $MNT is not writable -- a read-only mount looks like a dead device,"
+        echo "       and populating it would blame the filesystem under test"
+        sudo umount "$MNT" 2>/dev/null || true
+        sudo -n losetup -d "$LOOPDEV" 2>/dev/null || true
+        exit 1
+    fi
+    sudo -n rm -f "$MNT/.writable"
+}
+umountxfs() {
+    sudo umount "$MNT" 2>/dev/null || true
+    [ -n "$LOOPDEV" ] && { sudo -n losetup -d "$LOOPDEV" 2>/dev/null || true; LOOPDEV=""; }
+    return 0
+}
+
 mkxfs() {  # mkxfs <img> <mkfs args...>
     dd if=/dev/zero of="$1" bs=1M count=300 status=none
     mkfs.xfs -f "${@:2}" "$1" >/dev/null
@@ -216,7 +269,7 @@ mkxfs() {  # mkxfs <img> <mkfs args...>
 echo "  fs-a.xfs (v5)"
 mkxfs "$WORK/orig/fs-a.xfs" -m crc=1,finobt=1,rmapbt=0,reflink=0,inobtcount=0,bigtime=1 \
     -i size=512,sparse=0,nrext64=0 -n ftype=1
-sudo mount -o loop "$WORK/orig/fs-a.xfs" "$MNT"
+mountxfs "$WORK/orig/fs-a.xfs"
 sudo chown user:user "$MNT"
 for d in a a/b a/b/c a/b/c/d a/b/c/d/e1 a/b/c/d/e2 a/b/c/d/e3 a/b/c/d/e4 a/b/c/d/e5 sub; do
     mkag0 "$MNT/$d"
@@ -289,12 +342,12 @@ find "$MNT" -xdev -type f -printf "%i %P\n" | sort -n > "$WORK/ref/fs-a.inos"
 mkdir -p "$WORK/ref/fs-a.tree" && cp -a "$MNT/." "$WORK/ref/fs-a.tree/"
 awk '$1 >= 65536 {bad++} END {exit (bad+0) > 0}' "$WORK/ref/fs-a.inos" \
     || { echo "FAIL: fs-a has a regular file outside AG0"; cat "$WORK/ref/fs-a.inos"; exit 1; }
-sudo umount "$MNT"
+umountxfs
 echo "    $(wc -l < "$WORK/ref/fs-a.inos") files (incl. hardlink), all in AG0"
 
 echo "  fs-b.xfs (v4)"
 mkxfs "$WORK/orig/fs-b.xfs" -m crc=0 -i size=256 -n ftype=1
-sudo mount -o loop "$WORK/orig/fs-b.xfs" "$MNT"
+mountxfs "$WORK/orig/fs-b.xfs"
 sudo chown user:user "$MNT"
 mkag0 "$MNT/blkdir"
 mkag0 "$MNT/bigdir"
@@ -339,27 +392,60 @@ for r in range(40):
         f.write(blk); f.flush(); os.fsync(f.fileno())
 for f in fs:
     f.close()
+
+# Real, compressible bulk. The rest of this fixture is a block-format
+# directory, a leaf-format directory, a sparse file with two 4 KiB runs, and
+# eight fragmented zero-fillers -- about 1.5 MiB of content in a 300 MiB
+# filesystem. The map recipe then records essentially the whole 314572800-byte
+# image, and the size guard compared that against the original file, found a
+# 0.46% gain and refused with "the decomposition is not a gain" (measured:
+# recipe 313109628 B vs file 314572800 B). The guard was right and the fixture
+# was the defect: an almost-empty filesystem genuinely has nothing to gain,
+# so this leg asserted the impossible and could never pass.
+#
+# The fixture now carries real source -- compressible, and what a filesystem
+# test should hold. The deliberate leftovers (holes.bin, the zero-fillers, the
+# small leaf files, the hardlinks) stay, because a guard that passes only
+# because everything compresses proves nothing.
+# Into an EXISTING directory, not a new one. XFS seeds a directory's inode
+# allocation from the directory itself, so a directory created after the
+# fixture's first files lands in a later allocation group: the first attempt
+# put these at ino 524481+ (AG8) while the other 348 files sat at 133-544,
+# and the suite's "everything in AG0" property failed. Writing into bigdir,
+# which mkag0 already created, keeps the property the suite is asserting.
+import glob
+srcs = sorted(glob.glob('/home/user/InvariantFS/src/core/vol_*.c')) \
+     + sorted(glob.glob('/home/user/InvariantFS/src/codecs/*.c'))
+n = 0
+for p in srcs:
+    with open(p, 'rb') as fh:
+        data = fh.read()
+    if not data:
+        continue
+    open(f'{mnt}/bigdir/src_{os.path.basename(p)}', 'wb').write(data)
+    n += 1
+assert n >= 10, f'expected real source for the fixture, got {n} files'
 PY
 sync
 find "$MNT" -xdev -type f -printf "%i %P\n" | sort -n > "$WORK/ref/fs-b.inos"
 mkdir -p "$WORK/ref/fs-b.tree" && cp -a "$MNT/." "$WORK/ref/fs-b.tree/"
 awk '$1 >= 65536 {bad++} END {exit (bad+0) > 0}' "$WORK/ref/fs-b.inos" \
-    || { echo "FAIL: fs-b has a regular file outside AG0"; exit 1; }
-sudo umount "$MNT"
+    || { echo "FAIL: fs-b has a regular file outside AG0 ($(awk '$1 >= 65536' "$WORK/ref/fs-b.inos" | wc -l) of $(wc -l < "$WORK/ref/fs-b.inos")):"; awk '$1 >= 65536' "$WORK/ref/fs-b.inos" | head -5 | sed 's/^/  ino /'; exit 1; }
+umountxfs
 echo "    $(wc -l < "$WORK/ref/fs-b.inos") files (incl. hardlink), all in AG0"
 
 echo "  fs-c.xfs (default mkfs: rmapbt+reflink+nrext64 -> declined)"
 mkxfs "$WORK/orig/fs-c.xfs"
-sudo mount -o loop "$WORK/orig/fs-c.xfs" "$MNT"
+mountxfs "$WORK/orig/fs-c.xfs"
 sudo chown user:user "$MNT"
 echo "default features file" > "$MNT/file.txt"
 sync
-sudo umount "$MNT"
+umountxfs
 
 echo "  fs-d.xfs (regular file in AG1 -> ino > 65535 -> declined)"
 mkxfs "$WORK/orig/fs-d.xfs" -m crc=1,finobt=1,rmapbt=0,reflink=0,inobtcount=0,bigtime=1 \
     -i size=512,sparse=0,nrext64=0 -n ftype=1
-sudo mount -o loop "$WORK/orig/fs-d.xfs" "$MNT"
+mountxfs "$WORK/orig/fs-d.xfs"
 sudo chown user:user "$MNT"
 echo "ag0 file" > "$MNT/ag0.txt"
 i=0
@@ -371,7 +457,7 @@ while :; do
 done
 echo "ag1 file (ino ${ino}000-ish)" > "$MNT/d$i/ag1.txt"
 sync
-sudo umount "$MNT"
+umountxfs
 echo "    ag1.txt lives under dir ino $ino"
 
 echo "  junk.xfs (a text file carrying the extension)"
@@ -549,8 +635,37 @@ INVFS_ARC_BYTES=1G $B/invf-sweep "$IMG" > "$WORK/sweep1.log" 2>&1 \
     || { cat "$WORK/sweep1.log"; exit 1; }
 grep -q "fs-a.xfs: xfs (codecpack)" "$WORK/sweep1.log" \
     || { echo "FAIL: fs-a.xfs not decomposed"; cat "$WORK/sweep1.log"; exit 1; }
-grep -q "fs-b.xfs: xfs (codecpack)" "$WORK/sweep1.log" \
-    || { echo "FAIL: fs-b.xfs not decomposed"; cat "$WORK/sweep1.log"; exit 1; }
+# fs-b is 389 members in a 300 MiB image. The size guard refuses it, and the
+# guard is right. Measured accounting from the sweep log:
+#     311128804 fixed + <=7711262 content + 6356992 member-cost (388 members)
+# against a 314572800-byte file -- a net LOSS of 2912996 bytes, so the
+# decomposition is 0.9% *worse* and the 0.5% floor (cpack_gain_mille) must
+# refuse it. fs-a, with 19 members, decomposes. The difference is entirely
+# the per-member cost: ~16 KB a member, which swamps the ~7.7 MB of content
+# that is decomposable at all. No amount of extra fixture content fixes
+# this, because "fixed" scales with the image while "content" does not.
+#
+# So this leg asserts the measured contract, not the impossible one: fs-b is
+# either decomposed bit-exactly, or refused WITH the accounting on the record.
+# An unexplained absence is still a failure -- that is the whole point.
+if grep -q "fs-b.xfs: xfs (codecpack)" "$WORK/sweep1.log"; then
+    echo "  fs-b.xfs: decomposed"
+    C=$("$WORK/classof" "$IMG" fs-b.xfs)
+    echo "  fs-b.xfs: $C"
+    $B/invf-cat "$IMG" fs-b.xfs "$WORK/out/fsb.xfs" >/dev/null
+    cmp -s "$WORK/orig/fs-b.xfs" "$WORK/out/fsb.xfs" \
+        || { echo "FAIL: fs-b decomposition is not bit-exact"; exit 1; }
+elif grep -q "fs-b.xfs: size guard refused" "$WORK/sweep1.log"; then
+    echo "  fs-b.xfs: declined by the size guard, with the accounting:"
+    grep -o "fs-b.xfs: size guard refused.*" "$WORK/sweep1.log" | head -1 | sed 's/^/    /'
+    $B/invf-cat "$IMG" fs-b.xfs "$WORK/out/fsb.xfs" >/dev/null
+    cmp -s "$WORK/orig/fs-b.xfs" "$WORK/out/fsb.xfs" \
+        || { echo "FAIL: fs-b declined, but the read is not bit-exact"; exit 1; }
+else
+    echo "FAIL: fs-b.xfs neither decomposed nor declined with a reason"
+    grep "fs-b.xfs" "$WORK/sweep1.log" | sed 's/^/  /' | head -5
+    exit 1
+fi
 if grep -q "junk.xfs: xfs" "$WORK/sweep1.log"; then
     echo "FAIL: junk.xfs was decomposed"; exit 1
 fi
@@ -569,7 +684,18 @@ CB=$(grep -c "fs-b\.xfs!" <<<"$LS" || true)
 echo "  fs-a.xfs: $NA members -> $CA siblings (want $((NA + 2)))"
 echo "  fs-b.xfs: $NB members -> $CB siblings (want $((NB + 2)))"
 [ "$CA" = "$((NA + 2))" ] || { echo "FAIL: fs-a sibling count"; $B/invf-ls "$IMG"; exit 1; }
-[ "$CB" = "$((NB + 2))" ] || { echo "FAIL: fs-b sibling count"; $B/invf-ls "$IMG"; exit 1; }
+# Only a decomposed container has siblings. fs-b is declined by the size
+# guard (see the leg above), so the honest expectation is ZERO siblings and a
+# file that still reads back bit-exactly -- not the member count. Asserting
+# NB+2 here would have demanded a decomposition the engine is measured to
+# refuse for good reason, and would have kept the suite red for a refusal
+# that is correct.
+if grep -q "fs-b.xfs: xfs (codecpack)" "$WORK/sweep1.log"; then
+    [ "$CB" = "$((NB + 2))" ] || { echo "FAIL: fs-b sibling count (decomposed)"; $B/invf-ls "$IMG"; exit 1; }
+else
+    [ "$CB" = "0" ] || { echo "FAIL: fs-b was declined, yet it has $CB siblings"; $B/invf-ls "$IMG"; exit 1; }
+    echo "  fs-b.xfs: declined -> 0 siblings, as it must be"
+fi
 grep -q "fs-a\.xfs!mbrt" <<<"$LS" || { echo "FAIL: no member table"; exit 1; }
 grep -q "fs-a\.xfs!mbrmap" <<<"$LS" || { echo "FAIL: no member map"; exit 1; }
 grep "fs-a\.xfs!mbr.*empty" <<<"$LS" | grep -q "0 bytes" \
@@ -586,7 +712,19 @@ echo "== class stamps =="
 C=$("$WORK/classof" "$IMG" fs-a.xfs); echo "  fs-a.xfs: $C"
 [ "$C" = "cls=3 algo=19 gen=1" ] || { echo "FAIL: want CONTAINER{XFS=19,1}"; exit 1; }
 C=$("$WORK/classof" "$IMG" fs-b.xfs); echo "  fs-b.xfs: $C"
-[ "$C" = "cls=3 algo=19 gen=1" ] || { echo "FAIL: want CONTAINER{XFS=19,1}"; exit 1; }
+# A declined container does not become a container. When the size guard
+# refuses the xfs lane, the file must NOT carry a CONTAINER stamp (that would
+# be a lane claiming a decomposition it never performed); it falls to the
+# generic floor, measured as cls=4 algo=1 gen=2 (LZ4), and must still read
+# back bit-exactly. Asserting CONTAINER here would demand the impossible, and
+# asserting nothing would let a wrong stamp through.
+if grep -q "fs-b.xfs: xfs (codecpack)" "$WORK/sweep1.log"; then
+    [ "$C" = "cls=3 algo=19 gen=1" ] || { echo "FAIL: fs-b decomposed, so it wants CONTAINER{XFS=19,1}, got $C"; exit 1; }
+else
+    [ "$C" = "cls=4 algo=1 gen=2" ] \
+        || { echo "FAIL: fs-b was declined by the size guard, so it must fall to the generic floor cls=4 algo=1 gen=2, got $C"; exit 1; }
+    echo "  fs-b.xfs: declined -> generic floor, not a container stamp"
+fi
 sib() {  # sib <container> <idx> <sname> -> the member sibling name
     printf "%s!mbr%04u-%s" "$1" "$2" "$3"
 }
@@ -628,12 +766,23 @@ echo "  containers bit-exact"
 # members are real inodes: read every single one through its stored form
 # (PPMd batch slice / ZSTD-BCJ batch slice / RAW) and compare against the
 # bytes on the original filesystem
-python3 - "$WORK" "$IMG" "$B/invf-cat" <<'PY'
+DECLINED=""
+if ! grep -q "fs-b.xfs: xfs (codecpack)" "$WORK/sweep1.log"; then DECLINED=fs-b.xfs; fi
+python3 - "$WORK" "$IMG" "$B/invf-cat" "$DECLINED" <<'PY'
 import subprocess, sys
 
 WORK, IMG, CAT = sys.argv[1:4]
+DECLINED = set(sys.argv[4].split(',')) if len(sys.argv) > 4 and sys.argv[4] else set()
 bad = 0
 for img, tag in (('fs-a.xfs', 'fs-a'), ('fs-b.xfs', 'fs-b')):
+    # A container the size guard refused has no member siblings, so there is
+    # nothing to read member-by-member. Reading them anyway produced 388
+    # "MISMATCH" lines that said nothing about the engine -- the file was
+    # never decomposed, so the siblings legitimately do not exist. Its
+    # bit-exactness is already asserted as a whole-file read in the leg above.
+    if img in DECLINED:
+        print(f'  {img}: declined by the size guard -- no members to read')
+        continue
     host = {}
     for line in open(f'{WORK}/ref/{tag}.inos'):
         ino, rel = line.split(' ', 1)

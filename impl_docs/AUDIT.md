@@ -252,6 +252,57 @@ M0 host build+smoke (works today per f6 logs) → M1 WP1+WP3 quick wins, busybox
 partially — opt-in only) → M4 WP4 ranged writes, package-manager grade (**landed**) →
 M5 full OpenRC boot, productionization (WP5/8/9 polish).
 
+## 6a. FINDING 2026-09-28: the containerpack size guard refuses filesystem
+##      images, and the member cost is why
+
+**Severity: HIGH for the rootfs target. Not a soundness defect -- the guard is
+correct. A goal blocker.**
+
+Measured on `tools/test-xfs.sh` fs-b (300 MiB XFS v4, crc=0, 256 B inodes,
+389 files), one offline sweep, host-side:
+
+```
+sweep: xfs: fs-b.xfs: size guard refused, decomposition declined
+       (the decomposition is not a gain):
+       311128804 fixed + <=7711262 content + 6356992 member-cost (388 members)
+```
+
+against a 314572800-byte file. Net **-2912996 bytes**, i.e. the decomposition
+is 0.9% *worse*, and the floor is 0.5% (`cpack_gain_mille`,
+`src/core/vol_cpack.c`, default `INVFS_MIN_GAIN_PCT`). The refusal is right.
+
+The cause is arithmetic, not a bug. "fixed" tracks the image; "content" -- the
+part that can be re-encoded at all -- is 7.7 MB, 2.5% of the image. Per-member
+cost is 6356992/388 = **~16 KB a member**, which alone consumes 82% of the
+decompressible content. fs-a, the same fixture shape with 19 members, DOES
+decompose (`cls=3 algo=19 gen=1`).
+
+**Why this matters beyond the suite.** A Linux root filesystem IS a filesystem
+image of exactly this shape: mostly `fixed` structure (superblock, AG headers,
+bitmaps, inode tables) with a long tail of small files. The `INVFS_META_FRAC=16`
+advice in AGENTS.md 2.7 exists precisely because a ~50k-small-file rootfs is
+the expected shape. At 50k members the member cost is ~800 MB against a ~7.7 MB
+content term, so the guard will refuse **every** rootfs image, and the
+containerpack lane will be inert on the author's primary target.
+
+**The open question, which is a design decision and not mine to take.** The
+per-member cost is the lever. Either the member overhead is genuinely ~16 KB
+and a many-file filesystem should be refused (a defensible position -- the
+lane is for a few large members, not for a rootfs), or that overhead is
+inflated by something fixable (per-member metadata in the map, fixed-size
+member records, a per-member header) and reducing it is what makes the rootfs
+target reachable. Nothing in the code or docs says which was intended.
+
+**Do not "fix" this by lowering the guard.** Doing so would store rootfs
+images that are strictly larger, which is exactly the trade the bit-exactness
+invariant and the whole point of the sweep are meant to avoid.
+
+**Current state:** `tools/test-xfs.sh` asserts the MEASURED contract -- fs-b is
+either decomposed bit-exactly, or refused with the accounting on the record,
+with zero siblings, a generic-floor stamp (not a container stamp), and a
+bit-exact whole-file read. An unexplained absence is still a failure. fs-a
+still asserts full decomposition, so the lane itself stays under test.
+
 ## 7. Far roadmap (ideas, NOT scheduled work)
 
 - **Template Zone (RE-QUALIFIED 2026-08-28, doc/17)**: NOT a chunk store — a **shared-reference / dictionary layer**: AST recipes reference semantic templates by id + residual, invariant `(template ⊕ residual) == original` (BLAKE3). Targets redundancy that batching structurally cannot reach: ACROSS the whole volume and ACROSS TIME (new file vs files swept months ago; batching only sees a 4MB window), plus explicit user pinning ("this directory is a base layer"). Domains by feasibility: (a) ZSTD patch_from_dict for versioned trees (Docker layers, .rodata across compiler versions — stock zstd dict API, no custom delta math); (b) ELF/PE section sharing; (c) audio transient CDC templates (FLAC→PCM→CDC→BLAKE3 index) — LAST, needs the FLAC pipeline; delta/residual coding = v2+. **The old "precondition: refcounts (WP6)" is RETRACTED**: the owner-inode + L2P-dup + mark-and-sweep GC pattern proven by TEXT zone (WP10) covers ownership without refcounts (and PB7 itself is fixed since WP16f). On-disk: zone field value 3 (RESERVED today) = TEMPLATE; owner `\x01tmpl`; templates ARC-pinned (~10% budget), ARC keyed by template_seq not pba (GC invalidates). Still far-roadmap: needs a measured proof that explicit templates beat WP14 batching on a template-heavy corpus (e.g. 50 tracks sharing a drum kit) before any code.
