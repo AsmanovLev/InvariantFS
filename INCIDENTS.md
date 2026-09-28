@@ -17,15 +17,20 @@
 
   **Date:** Sep 27, 2026  
   **Severity:** High (silent namespace rollback)  
-  **Status:** **Partially resolved (WP121, branch `wp/121-v3-orphan-reclaim`).**
-  The damage sequence is now **constructed and observed** — see "The sequence is
-  reachable: it has been run" below. The *reclaimer* half is fixed: the RT30-slot
-  liveness predicate is enforced in `btree_collect_orphans`, and
-  `fold_reclaim_hook` no longer frees a root the RT30 still names. Still
-  **UNRESOLVED** and deliberately **not** fixed here: `mbuf_page_validate` does
-  not consult the allocation bitmap, and the collector is default-OFF behind
-  `INVFS_RECLAIM_ORPHANS=1`. `src/core/vol_metabuf.c` was out of scope for
-  WP121.  
+  **Status:** **RESOLVED (WP121 + WP123).** Superseded 2026-09-28 — this entry
+  previously read "Partially resolved (WP121)" and called the reader half
+  UNRESOLVED, which by then it was not. WP123 closed it at the reader:
+  `mbuf_page_allocated` is asked *before* integrity in the root-slot acceptance
+  path (`src/core/vol_metabuf.c:445`, defined `:92-99`), and the reclaimer now
+  refuses to free a root the RT30 still names (`src/core/vol_fold.c:290-295`).
+  Covered by `src/cli/rt30_slot_test.c` and
+  `tools/test-v3-rt30-slot-alloc.sh:89-171`.
+  Still open, and tracked separately: the collector remains default-OFF behind
+  `INVFS_RECLAIM_ORPHANS=1` (`src/core/vol_reclaim.c:48-51`). The
+  `mbuf_page_validate` residual described below was split out into a helper that
+  is called from one site; `mbuf_page_validate` itself is unchanged, which is
+  correct -- the bitmap consult belongs at the root-slot acceptance point, not
+  in a function that also validates pages with no volume to ask.  
   **Impact:** On a volume where the v3 fold has run and the newest root page is
   subsequently damaged, `mbuf_root_read` falls back to an RT30 slot naming a
   root whose pages have already been freed — and adopts a **stale namespace**
@@ -117,15 +122,19 @@
     one-generation diff when `old_root` is still named by an RT30 slot. This is
     the *existing* trigger for this incident, and it fires on every fold; leaving
     it would have undone the collector's liveness set one line earlier.
-  - `src/core/vol_metabuf.c` is **untouched**, as instructed. The residual
-    defect stands: `mbuf_page_validate` (`src/core/vol_metabuf.c:62-68`) checks
-    `h->magic` and `h->checksum` and nothing else, so a freed page is
-    indistinguishable from a live one to the reader. The fix belongs there —
-    make the root-slot acceptance in `mbuf_root_read` also require the block to
-    be allocated, or make `mbuf_page_validate` take the bitmap — and it is a
-    separate WP. Until then, the collector's predicate is the only thing keeping
-    the fallback honest, which is why it must not become the newest slot's
-    tree.
+  - `src/core/vol_metabuf.c` is **untouched** by WP121, as instructed. *(This
+    bullet described a defect that WP123 has since closed at the root-slot
+    acceptance point, `src/core/vol_metabuf.c:445`. It is kept as written
+    because it is the record of what WP121 deliberately left out, not a current
+    claim.)* The fix described here -- make the root-slot acceptance in
+    `mbuf_root_read` also require the block to be allocated -- is what WP123
+    did. Note the reasoning: `mbuf_page_validate` (`src/core/vol_metabuf.c:62-68`)
+    is correct as a page-integrity check and was deliberately NOT given the
+    bitmap, because a page-validity predicate that can consult a volume is a
+    different function with different callers; putting the consult there would
+    have changed the meaning of every other caller. The bitmap question is
+    answered at the one place that has a volume and one that is choosing a
+    root.
 
 ## FIXED (WP117) — `invf-sweep` hung in `vol_heat_sweep_begin` above ~46k live inodes
 
