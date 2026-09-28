@@ -363,3 +363,127 @@ tell that the constant is a conservative bound being treated as a constant.
 - FS-image containers (NTFS/ext4 .img member decomposition) — LANDED as WP16c (rawdisk/ext4fs/fatfs/xfs/ntfs/vdi containerpacks; nested vdi→rawdisk→GPT proven). This bullet is retained as the design-origin record; the live spec is WP16-containerpacks.md.
 - RLIMIT_AS runtime enforcement in tool/pack children — LANDED as WP12(d) (`acad2c76`; vol_cpack.c). Remaining: concurrency sweep-vs-mount formalization; fuzz/property tests for the sweep classifier.
 - **SCHEDULED (author's decision 2026-09-27): `INVFS_DEC_MEM_LIMIT` is inert for every containerpack.** Commit `80ba49f` ("docs(benchmarks): add QCOW2 compression & performance report, enable debug flags") moved the seekable-pack exemption from the ARC check to the decode check with no WP, so the estimate branch is skipped for map packs (`src/core/vol_cpack.c:2865`) and the guard cannot fire (`:2883`, `if (ws && ws > vol_get_dec_mem_limit(v) && !def->map)`). All six containerpacks declare a map — xfs, vdi, ntfs, p7z, qcow2, rawdisk — so the knob governs none of them. Measured: an xfs map pack decomposes with `INVFS_DEC_MEM_LIMIT=64K` set and no ARC budget, i.e. the knob is provably dead, not merely untested. Consequence: a streaming decode over a large container can consume memory unbounded, because the only protection left is the ARC budget gate — and that one is deliberately skipped when `INVFS_ARC_BYTES` is unset (`vol_cpack.c:2859`). **Decision: leave the engine alone for now and fix the three suites' unreachable expectations (WP137); revisit the engine when a WP is scheduled for it.** When it is, the real question is not "restore the guard" — a map pack reads incrementally and would often fit anyway, so restoring it means refusing work that could have succeeded. The question is whether the decode-memory bound for map packs should be measured against a streaming estimate rather than the whole-file estimate the streaming packs get.
+
+## 9. FINDING 2026-09-28: the orphan collector aborted on every sweep that
+##    transformed, because the save point's pinned root was a pointer no
+##    walk could ever verify
+
+**Status: FIXED (`wp/reclaim-collector-abort`). The gate stays default-OFF —
+whether to ship it ON is a separate decision, and this finding does not make
+it. Severity: HIGH for the rootfs target — a collector that aborts is not a
+collector, and the volume latches read-only on fill
+(`src/core/volume.c:2871-2882`) while the sweep is offline-only.**
+
+**The symptom, reproduced.** `invf-mkfs` + `invf-import` of a 20-file text
+corpus, then `INVFS_RECLAIM_ORPHANS=1 invf-sweep img`:
+
+```
+[spt0] save point: pinned 420 blocks (40 segments, 0 already damaged) in 513 blocks of mark set at pba 4201320
+save point captured (base_root=4201319 delta_end=8655)
+...
+warning: v3 orphan reclaim failed
+```
+
+Sweep exit status 0. `[reclaim]` never printed: zero base pages collected. The
+same volume swept again collected 39, which is the tell — the second sweep does
+no transform work and the collector works.
+
+**The cause is NOT the superseded-root hypothesis.** The pinned root's page is
+present and valid. Instrumenting `bt_mark_rec_deep` to print the pointer and
+the page it failed on:
+
+```
+DBG mark_deep pba=4201319 ptr{ck=0 gen=0 flags=0} raw{ck=1625528048 gen=20 magic_ok=1} mbuf_read=0
+```
+
+`mbuf_read` succeeded and the page validates. What failed is the POINTER.
+`v->pinned_root` was built with `checksum = 0` and `gen = 0` in
+`src/core/vol_spt0.c:845-848` (`spt0_capture`) and `src/core/vol_spt0.c:80-83`
+(`spt0_load`) on the commit this branch was cut from (a9c5dcc; `:898-907`
+and `:115-120` after merging main) — introduced by `8b9a21c` as a mechanical
+`uint64_t -> invfs_blkptr` type fix that zero-filled the new fields, and
+never revisited.
+`mbuf_read_ptr` (`src/core/vol_metabuf.c:196`) requires
+`h->checksum == p->checksum && h->gen == p->gen`, and a real root page has
+neither value zero. So `bt_mark_rec_deep` at
+`src/core/vol_btree.c:2357` returns -1, `btree_collect_orphans` frees nothing,
+and `tools/invf-sweep.c:2222` prints the warning and carries on.
+
+**Why transform is the trigger.** `bt_mark_rec_deep` returns early at
+`src/core/vol_btree.c:2134` when the pba is already in the mark set. A save
+point captured in `prepare` is still named by one of the two RT30 slots on a
+sweep that publishes nothing, so the walk skips the page and never
+dereferences the pointer. A sweep that transforms publishes past both slots;
+the pinned root leaves the mark set, the page has to be read, and the pointer
+is rejected. This is also why the existing suite missed it: leg 5 of
+`tools/test-v3-orphan-reclaim.sh` emulates the pin with a driver-built
+`mbuf_ptr_set` blkptr, which is well-formed by construction, and no leg ran a
+real `invf-sweep` with the save point the sweep armed itself.
+
+**Same pointer, one path that does NOT show it — stated so it is not
+assumed.** `vol_reclaim_mark_and_free` marks `pinned_root` with the same
+`bt_mark_rec` (`src/core/vol_btree.c:1855`), and `fold_reclaim_hook` discards
+its return value (`src/core/vol_fold.c:298`), so a savepoint window would in
+principle silently disable the fold's one-generation diff too. I instrumented
+both `fold_reclaim_hook` and `vol_reclaim_mark_and_free` and ran the fold path
+with a live window: the hook was reached, and the RT30-slot guard at
+`src/core/vol_fold.c:287-292` fired (`DBG hook old=23536 s0=23620 s1=23536`
+-> guard), so `vol_reclaim_mark_and_free` was not reached at all. No claim is
+made that this path aborts; the offline sweep does not fold either (its
+transform publishes through `v3_publish` directly), which is why the
+instrumented offline sweep printed zero hook lines.
+
+**The fix.** Populate `pinned_root` as a real, verifiable blkptr. At capture,
+copy the blkptr `vol_v3_base_root` already read and verified (no extra I/O).
+At load, rebuild it from the bare pba the SPT0 descriptor carries with a new
+`spt0_pinned_from_pba`, which reads the page and `mbuf_ptr_set`s it. If that
+page cannot be read or does not validate, the checksum and gen stay zero and
+every walk refuses — fail-closed, because a walk that cannot verify the save
+point's tree must cost space, not data. Dropping the pba instead would take
+the tree out of the mark set entirely, and THAT is the fix that would have
+turned this into data loss.
+
+**Validation.** Leg 9 of `tools/test-v3-orphan-reclaim.sh` is new: a real
+`invf-sweep` on a corpus that makes the transform stage publish new roots,
+asserting no warning, a non-zero `[reclaim]` count on that same run, and
+byte-identical readback afterwards. It fails on `main` with the warning above
+and passes on this branch.
+
+**Cross-reference.** AUDIT.md §8 on the unmerged `wp/130-reclaim-default`
+branch is the measurement that surfaced this ("+0.29% sweep wall time,
+10/10 exit 0, peak RSS +2,072 kB"). Those numbers are the measurement's, not
+this finding's, and are unchanged by the fix: this finding is about function,
+not cost.
+
+**The number: blocks stranded per transform sweep.** Measured A/B, same
+corpus, same image geometry, the only difference being the gate — and on
+`main` the gate-ON arm is indistinguishable from the gate-OFF arm because it
+warns and frees nothing.
+
+*300 small text files (a rootfs-shaped corpus), one offline transform sweep,
+24 GiB image, `INVFS_META_FRAC=16`:*
+
+| arm | sweep rc | warnings | collected | free blocks after |
+|---|---|---|---|---|
+| gate ON, this branch | 0 | 0 | **1142** | 5,889,263 |
+| gate OFF | 0 | 0 | 0 | 5,888,121 |
+| gate ON, `main` (the defect) | 0 | **1** | **0** | 5,888,121 |
+
+**1,142 blocks — 4.46 MiB of 4 KiB metadata pages — stranded by one transform
+sweep of 300 files** (~3.8 per file), and the collector's own count matches the
+free-block delta exactly. Unbounded in the number of sweeps: the pages are
+abandoned base roots, and nothing else on the sweep path reclaims them.
+
+*Longer run, 60 files then four rounds of "import 20 more, sweep", 140 files
+total:*
+
+| arm | per-round collected | final free blocks |
+|---|---|---|
+| gate ON, this branch | 268, 79, 80, 83 (510 total) | 15,719,346 |
+| gate OFF | 0, 0, 0, 0 | 15,718,835 |
+
+511 blocks over four transform sweeps. Every file stayed byte-identical and
+`invf-verify` reported clean in every arm — which is the point: the damage here
+is space, and it is invisible until the volume latches read-only
+(`src/core/volume.c:2871-2882`) on a sweep that can no longer run offline
+because the volume is mounted.

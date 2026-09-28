@@ -36,6 +36,9 @@
 #          fraction of a full-pool pass over the same volume, and the
 #          offline drain still reaches settlement. This is the leg that
 #          decides whether the flag can be the default.
+#   leg 9  the PRODUCTION SWEEP with the save point the sweep armed itself:
+#          the collector must not abort, must free on that run, and every
+#          file must still read back byte-identical.
 #
 # WP126 note: `collect` and `naive-collect`/`pinned-collect` drain the
 # collector to settlement rather than making one pass, because they are
@@ -345,5 +348,94 @@ DR=$(field "$OUT" settled)
 FSCK=$("$B/invf-fsck" cost.img 2>&1) || { echo "$FSCK"; fail "leg 8: fsck nonzero"; }
 echo "$FSCK" | grep -q "^OK$" || { echo "$FSCK"; fail "leg 8: fsck not OK"; }
 echo "  the fold path collected what it could and the volume is still byte-exact"
+
+# ---------------------------------------------------------------------------
+# leg 9: THE PRODUCTION SWEEP, WITH THE SAVE POINT THE SWEEP ITSELF ARMED.
+#
+# Every leg above calls the collector with v->pinned_root either unset (legs
+# 1-4) or set to a blkptr the DRIVER built with mbuf_ptr_set (leg 5). This
+# leg runs neither. It runs `invf-sweep`, which is the only caller whose
+# pinned_root comes from the production producer -- spt0_capture -- and it
+# runs it on a corpus that makes the transform stage publish new base roots,
+# which is the condition that distinguishes the two cases.
+#
+# Why that condition matters: the collector skips a mark walk whose pba is
+# already in the mark set (vol_btree.c:2122). A save point captured at
+# prepare is, on a sweep that does nothing, still named by one of the two
+# RT30 slots, so its walk is skipped before the pointer is ever dereferenced
+# and a malformed pinned_root is invisible. A sweep that TRANSFORMS publishes
+# past both slots, so the pinned root is no longer in the mark set and the
+# walk has to read the page. That is the whole reason this leg exists and
+# the reason the previous legs did not catch the defect.
+#
+# Asserted: the sweep exits 0, does NOT print "warning: v3 orphan reclaim
+# failed", DOES report a non-zero [reclaim] count on that same run, and every
+# file still reads back byte-identical afterwards.
+# ---------------------------------------------------------------------------
+echo "== leg 9: a real sweep, a real save point, a real collect =="
+[ -x "$B/invf-sweep" ] || fail "bin/invf-sweep missing (run make)"
+[ -x "$B/invf-import" ] || fail "bin/invf-import missing (run make)"
+[ -x "$B/invf-cat" ] || fail "bin/invf-cat missing (run make)"
+
+mkdir -p swcorp
+i=0
+while [ "$i" -lt 8 ]; do
+    i=$((i + 1))
+    yes "the quick brown fox jumps over the lazy dog $i" \
+        | head -n 900 > "swcorp/sw$i.txt"
+done
+mkvol sw.img
+"$B/invf-import" sw.img swcorp > sw.import 2>&1 \
+    || { cat sw.import; fail "leg 9: import failed"; }
+sed -n 's/^imported:.*/  &/p' sw.import
+
+freeblocks() {  # freeblocks <img> -> the fsck free-block count
+    "$B/invf-fsck" "$1" 2>&1 \
+        | sed -n 's/^ *free blocks: *\([0-9]*\).*/\1/p' | head -1
+}
+FREE0=$(freeblocks sw.img)
+[ -n "$FREE0" ] || fail "leg 9: could not parse the fsck free-block count"
+
+INVFS_RECLAIM_ORPHANS=1 "$B/invf-sweep" sw.img > sw.out 2> sw.err
+SWEEP_RC=$?
+[ "$SWEEP_RC" -eq 0 ] || { tail -20 sw.err; fail "leg 9: the sweep exited $SWEEP_RC"; }
+sed -n 's/^/  | /p' sw.err | grep -E "save point captured|reclaim|warning" || true
+
+if grep -q "warning: v3 orphan reclaim failed" sw.err; then
+    cat >&2 <<'EOF'
+FAIL: THE COLLECTOR ABORTED ON THE SWEEP THAT DID TRANSFORM WORK.
+"warning: v3 orphan reclaim failed" means btree_collect_orphans returned -1
+and the sweep freed nothing. The sweep still exits 0, so nothing treats it
+as a failure. This is the defect leg 9 exists for.
+EOF
+    exit 1
+fi
+grep -q "^\[3/7\] transform *100" sw.err \
+    || fail "leg 9: the sweep did no transform work, so the leg would pass vacuously"
+RECLAIMED=$(sed -n 's/^\[reclaim\] \([0-9]*\) orphaned.*/\1/p' sw.out | head -1)
+[ -n "$RECLAIMED" ] || fail "leg 9: the sweep printed no [reclaim] count"
+[ "$RECLAIMED" -gt 0 ] \
+    || fail "leg 9: the sweep reported 0 collected pages -- the collector ran but freed nothing"
+FREE1=$(freeblocks sw.img)
+[ -n "$FREE1" ] || fail "leg 9: could not parse the fsck free-block count after the sweep"
+echo "  transform sweep with the gate on collected $RECLAIMED base page(s)"
+echo "  free blocks: $FREE0 -> $FREE1"
+
+# Bit-exactness, byte for byte, against the source corpus.
+BADREAD=0
+i=0
+while [ "$i" -lt 8 ]; do
+    i=$((i + 1))
+    "$B/invf-cat" sw.img "sw$i.txt" "sw.out.$i" >/dev/null 2>&1 \
+        || { echo "  sw$i.txt: invf-cat FAILED"; BADREAD=1; continue; }
+    cmp -s "swcorp/sw$i.txt" "sw.out.$i" || { echo "  sw$i.txt: BYTES DIFFER"; BADREAD=1; }
+done
+[ "$BADREAD" -eq 0 ] || fail "leg 9: a file did not read back byte-identical after the collect"
+"$B/invf-verify" sw.img > sw.verify 2>&1 || { cat sw.verify; fail "leg 9: invf-verify failed after the collect"; }
+tail -2 sw.verify | sed 's/^/  | /'
+FSCK=$("$B/invf-fsck" sw.img 2>&1) || { echo "$FSCK"; fail "leg 9: fsck nonzero after the sweep collect"; }
+echo "$FSCK" | grep -q "^OK$" || { echo "$FSCK"; fail "leg 9: fsck not OK after the sweep collect"; }
+echo "  8/8 files byte-identical after the collect, volume clean"
+rm -f "sw.out".[0-9]
 
 echo "ALL V3 ORPHAN RECLAIM LEGS PASS"

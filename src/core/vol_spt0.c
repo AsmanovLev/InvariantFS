@@ -44,6 +44,42 @@ static int  spt0_pin_take(invfs_volume *v, uint64_t root_pba,
                            uint64_t delta_head_pba);
 static int  spt0_data_ok(invfs_volume *v, char *err, size_t errlen);
 
+/* Fill v->pinned_root from a base-root pba.
+ *
+ * The SPT0 descriptor stores a base root as a BARE PBA, so rebuilding
+ * pinned_root from it means rebuilding a whole invfs_blkptr, and all four
+ * fields matter. mbuf_read_ptr (vol_metabuf.c:161) refuses a pointer whose
+ * checksum or gen does not match the page's own header, and every
+ * reachability walk in the reclaim paths reaches its roots through
+ * mbuf_read_ptr: bt_mark_rec (vol_btree.c:1727) for the fold diff,
+ * bt_mark_rec_deep (vol_btree.c:2126) for the orphan collector.
+ *
+ * So a pinned_root with checksum = 0 and gen = 0 is not a loose pointer, it
+ * is a pointer NOBODY can ever verify. The walk reaches the pinned root,
+ * the page does not match the pointer, and the walk returns -1 -- which
+ * aborts the fold diff outright (vol_fold.c:298 discards the result) and
+ * aborts the orphan collector's entire collection, which is what invf-sweep
+ * prints as "warning: v3 orphan reclaim failed" while still exiting 0.
+ *
+ * On failure the checksum and gen stay zero, deliberately, and that is the
+ * safe direction: a walk that cannot verify the save point's tree refuses to
+ * free anything, which costs space. Dropping the pba instead -- so the
+ * pinned tree is not in the mark set at all -- would let the collector free
+ * a tree the save point can still restore, which costs DATA. */
+static void spt0_pinned_from_pba(invfs_volume *v, uint64_t base_root)
+{
+    uint8_t page[INVFS_BLOCK_SIZE];
+
+    memset(&v->pinned_root, 0, sizeof v->pinned_root);
+    v->pinned_root.pba = base_root;
+    if (!base_root)
+        return;
+    if (mbuf_read(v, base_root, page) != 0 || !mbuf_page_validate(page))
+        return;                        /* unverifiable: fail closed, see above */
+    mbuf_ptr_set(&v->pinned_root, base_root, page,
+                 INVFS_BP_ROOT | INVFS_BP_PINNED);
+}
+
 static uint32_t spt0_crc(const invfs_spt0 *s)
 {
     invfs_spt0 t = *s;
@@ -77,10 +113,11 @@ int spt0_load(invfs_volume *v)
 
     v->spt0 = s;
     v->savepoint_live = 1;
-    v->pinned_root.pba = s.base_root;
-    v->pinned_root.checksum = 0;
-    v->pinned_root.gen = 0;
-    v->pinned_root.flags = 0;
+    /* The descriptor carries a pba, so the blkptr has to be rebuilt from
+     * the page it names -- see spt0_pinned_from_pba. This is the path that
+     * runs at every vol_open on a volume with a live window, i.e. the next
+     * sweep after this one. */
+    spt0_pinned_from_pba(v, s.base_root);
     /* the restore's data check needs the pinned log geometry even when no
      * pin was taken, and an armed pin needs its mark set in memory */
     {
@@ -861,10 +898,13 @@ int spt0_capture(invfs_volume *v)
     (void)spt0_pin_take(v, root.pba, v->spt0.delta_end, v->spn_delta_segs,
                         v->spn_delta_head);
 
-    v->pinned_root.pba = v->spt0.base_root;
-    v->pinned_root.checksum = 0;
-    v->pinned_root.gen = 0;
-    v->pinned_root.flags = 0;
+    /* `root` is the blkptr vol_v3_base_root() just read and verified, so it
+     * is copied whole rather than rebuilt field by field: pinned_root is
+     * walked through mbuf_read_ptr like any other root, and a hand-assembled
+     * one with checksum = 0 / gen = 0 fails that check (spt0_pinned_from_pba).
+     * No extra I/O: the page is already in hand. */
+    v->pinned_root = root;
+    v->pinned_root.flags |= INVFS_BP_PINNED;
     v->savepoint_live = 1;
 
     if (spt0_store(v) != 0)
