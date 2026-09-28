@@ -69,10 +69,18 @@ P7Z_7ZZ_BIN=
 for _cand in \
     "$REPO/tools/7-Zip-zstd/CPP/7zip/Bundles/Alone2/_o/7zz" \
     "$B/7zz" \
-    "$(command -v 7zz 2>/dev/null || true)"; do
+    "$(command -v 7zz 2>/dev/null || true)" \
+    "$(command -v 7za 2>/dev/null || true)" \
+    "$(command -v 7z  2>/dev/null || true)" \
+    "$(command -v p7zip 2>/dev/null || true)"; do
     if [ -n "$_cand" ] && [ -x "$_cand" ]; then P7Z_7ZZ_BIN=$_cand; break; fi
 done
-[ -n "$P7Z_7ZZ_BIN" ] || { echo "SKIP: 7zz not found (optional helper)"; exit 0; }
+# A skip here is a FAILURE, not a pass. This suite skipped silently for an
+# unknown number of releases: it probed only for `7zz` (package 7-zip) while
+# p7zip-full ships the same archiver as `7z`/`7za`/`p7zip`, and `exit 0` on
+# the skip path made `make e2e` report this pack as green while it had
+# exercised nothing. A lane with no coverage must block, not pass quietly.
+[ -n "$P7Z_7ZZ_BIN" ] || { echo "FAIL: no 7z archiver (need 7zz, 7za, 7z or p7zip; apt: p7zip-full)"; exit 1; }
 export P7Z_7ZZ=$P7Z_7ZZ_BIN                      # the encoded-header decode
 # WP61: helper env is scrubbed; the 7zz override is part of the pack contract
 export INVFS_HELPER_KEEPENV=P7Z_7ZZ
@@ -207,12 +215,12 @@ PY
 # deep path inside the archive)
 (
     cd "$WORK/fsrc"
-    $B/7zz a -t7z -m0=Copy "$WORK/orig/stored.7z" \
+    "$P7Z_7ZZ_BIN" a -t7z -m0=Copy "$WORK/orig/stored.7z" \
         alpha.c beta.bin empty.dat deep/nested/leaf.txt rand.bin >/dev/null
-    $B/7zz a -t7z "$WORK/orig/lzma2.7z" alpha.c beta.bin >/dev/null
-    $B/7zz a -t7z -m0=Copy -psecret -mhe=on "$WORK/orig/enc.7z" alpha.c >/dev/null
-    $B/7zz a -t7z -m0=Copy -mhc=off "$WORK/orig/nohdr.7z" alpha.c empty.dat >/dev/null
-    $B/7zz a -t7z -m0=Copy "$WORK/orig/dents.7z" deep >/dev/null
+    "$P7Z_7ZZ_BIN" a -t7z "$WORK/orig/lzma2.7z" alpha.c beta.bin >/dev/null
+    "$P7Z_7ZZ_BIN" a -t7z -m0=Copy -psecret -mhe=on "$WORK/orig/enc.7z" alpha.c >/dev/null
+    "$P7Z_7ZZ_BIN" a -t7z -m0=Copy -mhc=off "$WORK/orig/nohdr.7z" alpha.c empty.dat >/dev/null
+    "$P7Z_7ZZ_BIN" a -t7z -m0=Copy "$WORK/orig/dents.7z" deep >/dev/null
 )
 # truncated: the 7z header rides at the END of the archive, so any cut loses it
 head -c 2097152 "$WORK/orig/stored.7z" > "$WORK/orig/trunc.7z"
@@ -220,9 +228,9 @@ head -c 2097152 "$WORK/orig/stored.7z" > "$WORK/orig/trunc.7z"
 cat "$WORK/orig/stored.7z" > "$WORK/orig/tjunk.7z"
 head -c 777 /dev/urandom >> "$WORK/orig/tjunk.7z"
 # the hand-crafted solid archive must be a REAL 7z: 7zz integrity check
-$B/7zz t "$WORK/orig/hsolid.7z" >/dev/null \
+"$P7Z_7ZZ_BIN" t "$WORK/orig/hsolid.7z" >/dev/null \
     || { echo "FAIL: 7zz refuses the hand-crafted hsolid.7z"; exit 1; }
-$B/7zz l -slt "$WORK/orig/hsolid.7z" | grep -q "^Solid = +" \
+"$P7Z_7ZZ_BIN" l -slt "$WORK/orig/hsolid.7z" | grep -q "^Solid = +" \
     || { echo "FAIL: hsolid.7z is not solid"; exit 1; }
 ls -la "$WORK/orig" | grep -E "7z$|members.list"
 

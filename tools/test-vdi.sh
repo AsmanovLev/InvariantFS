@@ -290,13 +290,28 @@ print("  qemu-img convert: virtual disk = GPT image + zero tail, as generated")
 PY
     # and a qemu-GENERATED vdi as external ground truth for the FS legs
     python3 -c "
-import random, sys
+import random, sys, glob
 rnd = random.Random(77)
 MB = 1048576
 buf = bytearray(16 * MB)
+# 2 MB of incompressible random data: keeps the pack honest about content it
+# cannot shrink, so a size-guard pass here is not 'everything compresses'.
 buf[0:MB] = rnd.randbytes(MB)          # block 0
 buf[3*MB:4*MB] = rnd.randbytes(MB)     # block 3
 buf[3*MB:3*MB+16] = b'INVARIANTFS-VDI!'  # marker
+# ... and 10 MB of genuinely COMPRESSIBLE bulk, taken from this repo's own
+# source. Without it the fixture is ~2 MB of random data in a dynamic VDI,
+# every codec legitimately declines it, the size guard refuses the
+# decomposition, and the sweep-leg expectation below can never be met. Same
+# defect class WP132 found in the fatfs fixtures (mostly unused slack): a
+# guard that is right about a fixture that cannot represent the case.
+bulk = b''
+for f in sorted(glob.glob('$REPO/src/core/vol_*.c'))[:12]:
+    bulk += open(f,'rb').read()
+if not bulk:
+    bulk = b'the quick brown fox jumps over the lazy dog\n' * 4096
+bulk = (bulk * ((10 * MB) // len(bulk) + 1))[:10*MB]
+buf[2*MB:2*MB+len(bulk)] = bulk
 open('$WORK/orig/qgen.raw','wb').write(bytes(buf))
 "
     qemu-img convert -f raw -O vdi "$WORK/orig/qgen.raw" "$WORK/orig/qgen.vdi"
