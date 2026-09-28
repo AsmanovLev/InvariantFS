@@ -31,21 +31,31 @@
  * a volume is opened once per process, so re-reading getenv per fold buys
  * nothing and makes the gate depend on call order.
  *
- * WP126 changed WHY it is off. It is no longer the cost -- the collector
- * is now one bounded incremental pass per fold, and the fold path no
- * longer walks the volume (see vol_btree.c). It is now purely the
- * WP121-listed promotion conditions, of which the cost one is the only
- * one this WP addresses, and it does NOT address:
- *   (1) a test-flakey.sh power-loss leg.
+ * HISTORY, because the default changed and the old reasons are worth keeping.
+ * The gate was default-OFF from WP126 through 2026-09-28, and the two
+ * promotion conditions WP121 listed for flipping it are now both closed:
  *
- * WP-D closed the other listed condition. The reader now enforces the
- * invariant, not just the reclaimer: mbuf_read_ptr refuses a page whose
- * block the allocation bitmap reports free, so every base-tree walk in
- * vol_btree.c inherits the check, and mbuf_root_read and orphan_slot_ptr
- * refuse a freed RT30 slot. A wrong liveness predicate here can still
- * damage a volume, but it can no longer damage one SILENTLY -- the reader
- * and invf-fsck both report it now. The gate stays default-off anyway: the
- * remaining promotion condition is the power-loss leg, not this one. */
+ *   (1) Cost. Measured, not asserted (AUDIT.md 8): +0.29% sweep wall at 8 GiB
+ *       over n=5 per arm with 10/10 exit 0, and +2072 kB peak RSS on a 1 TiB
+ *       volume -- 0.0002% -- because `inlist` is calloc'd and untouched zero
+ *       pages never fault in, which is 0.06x the 32 MiB a naive
+ *       total_blocks/8 would imply.
+ *
+ *   (2) The reader must enforce the invariant, not just the reclaimer, so a
+ *       wrong liveness predicate cannot damage a volume SILENTLY. Closed in
+ *       two halves: WP123 at the root slot, then WP-D (7ea939d) tree-wide --
+ *       mbuf_read_ptr refuses a page whose block the allocation bitmap
+ *       reports free, so every base-tree walk in vol_btree.c inherits the
+ *       check.
+ *
+ * A third defect had to be fixed first, and it is the reason this gate was
+ * flipping to no-op: 3b70ab2. Commit 8b9a21c's mechanical uint64_t ->
+ * invfs_blkptr type fix left v->pinned_root with checksum=0 and gen=0, so
+ * every mark walk over it returned -1 and the collector aborted on exactly
+ * the sweeps that create orphans worth collecting -- while exiting 0. Flipping
+ * the default before that would have shipped a permanently failing collector
+ * to every user as a warning on every sweep. The reader now also enforces
+ * the RT30-slot condition (vol_btree.c, vol_fold.c). */
 static int orphan_gate_state = -1;   /* -1 = not yet read */
 
 static int orphan_gate(void)
@@ -54,7 +64,35 @@ static int orphan_gate(void)
     if (orphan_gate_state >= 0)
         return orphan_gate_state;
     e = getenv("INVFS_RECLAIM_ORPHANS");
-    orphan_gate_state = (e && e[0] == '1' && e[1] == '\0') ? 1 : 0;
+    /* Default ON since 2026-09-28 (author's call). The collector is not a
+     * speculative extra: on a transform sweep it returns 4.46 MiB per sweep
+     * (1142 blocks over 300 files, AUDIT.md 9), and a volume that fills latches
+     * read-only for good (volume.c:2875) with sweep offline-only, so stranded
+     * metadata space has no other way back. Measured cost of the collector:
+     * +0.29% sweep wall (8 GiB, n=5/arm, 10/10 exit 0) and +2072 kB peak RSS on
+     * a 1 TiB volume (0.0002%), because `inlist` is calloc'd and untouched
+     * zero pages never fault in -- AUDIT.md 8. Both promotion conditions in
+     * the note above are met: the reader side is fixed tree-wide
+     * (7ea939d) and the producer side, which made every walk over
+     * v->pinned_root return -1 and silently disabled the collector on exactly
+     * the sweeps that create orphans, is fixed (3b70ab2).
+     *
+     * INVFS_RECLAIM_ORPHANS=0 turns it back off for a bisect. Anything else
+     * other than "1" or "0" is a typo and is rejected loudly rather than
+     * silently read as a policy the caller did not ask for. */
+    if (!e || !e[0]) {
+        orphan_gate_state = 1;
+    } else if (!strcmp(e, "1")) {
+        orphan_gate_state = 1;
+    } else if (!strcmp(e, "0")) {
+        orphan_gate_state = 0;
+    } else {
+        fprintf(stderr,
+                "warning: INVFS_RECLAIM_ORPHANS=%s is neither \"0\" nor \"1\"; "
+                "treating it as \"0\" (collector off). Use 0 to disable the "
+                "orphan collector, 1 or unset to enable it.\n", e);
+        orphan_gate_state = 0;
+    }
     return orphan_gate_state;
 }
 

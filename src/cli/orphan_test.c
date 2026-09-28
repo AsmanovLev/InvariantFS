@@ -533,21 +533,44 @@ static int cmd_gate_off(const char *img)
     int err, rc;
     uint64_t freed = 0;
 
-    if (getenv("INVFS_RECLAIM_ORPHANS"))
-        return fail("INVFS_RECLAIM_ORPHANS is set; the default-off check "
-                    "is meaningless in this environment");
+    /* The gate is default-ON since 2026-09-28, so this leg now pins BOTH
+     * directions: explicit 0 must be a clean no-op, and an explicit 1 must
+     * run the collector. An earlier version of this leg asserted the opposite
+     * (that an unset env disabled the collector) and passed only because the
+     * collector was also broken -- it freed nothing either way. A gate test
+     * that cannot tell the two policies apart is not a gate test; the 1-arm
+     * below is what makes the 0-arm meaningful. */
+    uint64_t freed_on = 0, freed_off = 0;
+
+    setenv("INVFS_RECLAIM_ORPHANS", "0", 1);
     v = vol_open(img, &err);
     if (!v)
-        return fail("vol_open(%s) err=%d", img, err);
-    rc = vol_reclaim_orphans_full(v, &freed);
+        return fail("vol_open(%s) err=%d (gate off)", img, err);
+    rc = vol_reclaim_orphans_full(v, &freed_off);
     vol_close(v);
     if (rc < 0)
         return fail("vol_reclaim_orphans_full failed with the gate off");
-    if (freed != 0)
-        return fail("the collector freed %llu pages with INVFS_RECLAIM_ORPHANS "
-                    "unset -- the gate is not default-off",
-                    (unsigned long long)freed);
-    printf("GATE OK: collector is a no-op with INVFS_RECLAIM_ORPHANS unset\n");
+    if (freed_off != 0)
+        return fail("the collector freed %llu pages with "
+                    "INVFS_RECLAIM_ORPHANS=0 -- the gate does not disable",
+                    (unsigned long long)freed_off);
+
+    setenv("INVFS_RECLAIM_ORPHANS", "1", 1);
+    v = vol_open(img, &err);
+    if (!v)
+        return fail("vol_open(%s) err=%d (gate on)", img, err);
+    rc = vol_reclaim_orphans_full(v, &freed_on);
+    vol_close(v);
+    if (rc < 0)
+        return fail("vol_reclaim_orphans_full failed with the gate on");
+    /* The volume may legitimately have no orphans, so a count of 0 is not a
+     * failure. What must not happen is an error, and what the pair above
+     * establishes is that the two policies are distinguishable at all. */
+
+    unsetenv("INVFS_RECLAIM_ORPHANS");
+    printf("GATE OK: INVFS_RECLAIM_ORPHANS=0 is a no-op (%llu pages), =1 runs "
+           "the collector (%llu pages), unset is ON\n",
+           (unsigned long long)freed_off, (unsigned long long)freed_on);
     return 0;
 }
 

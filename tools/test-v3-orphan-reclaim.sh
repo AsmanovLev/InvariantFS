@@ -272,18 +272,23 @@ echo "  orphans left after the fold path: $F_ORPHAN (was $NGENS before it ran)"
 "$T" verify fold.img "$NFILES" || fail "readback failed after the fold path"
 FSCK=$("$B/invf-fsck" fold.img 2>&1) || { echo "$FSCK"; fail "fsck nonzero after the fold path"; }
 echo "$FSCK" | grep -q "^OK$" || { echo "$FSCK"; fail "fsck not OK after the fold path"; }
-# And the same leg with the gate off must collect nothing, on the fold path
+# And the same leg with the gate OFF must collect nothing, on the fold path
 # too -- the guard is not the collector, and must not be mistaken for one.
+# The gate is default-ON since 2026-09-28, so "off" is now the EXPLICIT 0.
+# This leg used to say `env -u INVFS_RECLAIM_ORPHANS` and read "no variable" as
+# "disabled", which was true when the default was off and became a false test
+# the moment the default flipped -- it would have kept asserting a policy the
+# code no longer had. A bisect switch has to be named, not inferred.
 mkvol fold-off.img
-OUT=$(env -u INVFS_RECLAIM_ORPHANS "$T" fold fold-off.img "$NFILES" "$NGENS" 2>"$WORK/foldoff.err") \
+OUT=$(env INVFS_RECLAIM_ORPHANS=0 "$T" fold fold-off.img "$NFILES" "$NGENS" 2>"$WORK/foldoff.err") \
     || { echo "$OUT"; fail "gate-off fold leg failed"; }
 if grep -q "collected .* orphaned" "$WORK/foldoff.err"; then
     cat "$WORK/foldoff.err"
-    fail "the fold path collected orphans with INVFS_RECLAIM_ORPHANS unset"
+    fail "the fold path collected orphans with INVFS_RECLAIM_ORPHANS=0"
 fi
 GO=$(field "$OUT" PAGES_ORPHAN)
 [ "$GO" -gt 0 ] || fail "gate-off fold leg left no orphans, so the assertion above proved nothing"
-echo "  gate off on the fold path: $GO orphans retained, nothing collected"
+echo "  gate off on the fold path: $GO orphans retained, nothing collected (explicit =0)"
 "$T" verify fold-off.img "$NFILES" || fail "readback failed on the gate-off fold volume"
 
 # ---------------------------------------------------------------------------
