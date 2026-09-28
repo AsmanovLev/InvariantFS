@@ -124,25 +124,66 @@ The load-bearing rule is **structure-before-reference**:
 - COW base pages and their allocation bits are durable before `RT30`'s root
   slot names the new root.
 
-### 4.2 `fsync` / `fdatasync`
+"Durable" in that table means *a barrier has been issued and returned 0* —
+see §4.2 for exactly what that does and does not buy on each platform. It
+does not mean each write is write-through.
+
+### 4.2 What the barrier actually is
+
+`blkio_flush` is `fsync(fd)` on POSIX and `FlushFileBuffers` on Windows
+(`src/core/blkio.c:619-628`). The *open* differs by platform, and the open is
+what most people assume carries the guarantee:
+
+| platform | backing store | open flags | what a barrier buys |
+|---|---|---|---|
+| Windows | raw device | `FILE_FLAG_NO_BUFFERING \| FILE_FLAG_WRITE_THROUGH` | every write already reached the device as issued; ordering is the handle's own |
+| Windows | image file | buffered | process-death survival |
+| POSIX/Linux | raw device **and** image file | plain `O_RDWR` — no `O_DIRECT`, `O_SYNC` or `O_DSYNC` (`blkio.c:296-298`) | the bytes have been handed to the host storage stack: process-death survival, and power-loss survival only to the extent the host filesystem and device honour `fsync(2)` |
+
+So on Linux, write ordering is established by **InvariantFS**, not by the
+open: the structures that must land in a given order are written in that
+order and then made durable together by one barrier, and each is
+magic/CRC-framed so a partially completed flush is detected at the next
+mount rather than adopted. `fsync()` does not order one `pwrite` against
+another at the device, and cannot promise anything about a device that lies
+about its own volatile cache. `src/core/vol_crash.c` is the in-code
+authority for this; `blkio_test.c` asserts the open flags so the text cannot
+drift from the code.
+
+### 4.3 `fsync` / `fdatasync`
 
 `vol_sync` = `vol_flush` + one `vmux_barrier`. On v3 that means:
 
 - `vol_flush` persists the dirty block bitmap (`vol_v3_bitmap_flush`);
-- the barrier flushes the backing store (device cache, or the page cache of
-  a buffered image file), so everything written since the previous barrier
-  is on stable storage;
+- the barrier flushes the backing store — everything written since the
+  previous barrier is handed to the host storage stack, which is stable
+  storage only to the extent the host filesystem and device honour
+  `fsync(2)` (§4.2);
 - a failure latches the volume (`vol_io_error_latch`): later mutations are
   refused (`vol_write_enabled` consults `io_latched` even on v3) and
   `vol_close` will not write CLEAN.
 
-Because the delta append already barriers each record (§4.3), the metadata
+Because the delta append already barriers each record (§4.4), the metadata
 of an acknowledged mutation is durable *before* `fsync` is called. What
 `fsync` adds on v3 is the **bitmap**: the allocation map is a derived cache
 persisted only on flush/publish, so `fsync` is the point that pins it. Data
 blocks are covered by the barrier that follows them.
 
-### 4.3 The per-append barrier (WP80/Bug C audit)
+**What `fsync` does not cover, on v3:** the bitmap is *not* made durable
+before a delta record. The record is barriered at append
+(`src/core/vol_delta.c:571`); the bitmap is only written at `vol_flush`
+(`src/core/volume.c:2641`). A crash inside that window leaves a durable
+record naming blocks whose allocation bits are still clear on disk. This is
+safe by **derivation, not by ordering**: the bitmap is a derived cache
+(`vol_fsck.c:25`) and mount replay re-reserves every block a replayed segment
+spans (`dl_reserve_segment`, `src/core/vol_delta.c:409`) before any
+allocator call can hand it out again. The window can strand free space, it
+cannot alias a live block. `tools/delta_test.c`
+(`bitmap-before-delta gap is safe by replay`) is the regression test for
+that derivation; there is deliberately no test asserting an ordering that
+does not exist.
+
+### 4.4 The per-append barrier (WP80/Bug C audit)
 
 `vol_delta_append` calls `vmux_barrier(v, "delta append")` after **every**
 record, not per batch. Audit result:
@@ -167,7 +208,7 @@ record, not per batch. Audit result:
   the device. Until that is measured and the weaker contract is adopted
   deliberately, the barrier stays.
 
-### 4.4 `vol_close` and the CLEAN superblock
+### 4.5 `vol_close` and the CLEAN superblock
 
 A CLEAN superblock asserts that everything it describes is durable, so
 `vol_close` barriers **before** writing CLEAN:
@@ -182,7 +223,7 @@ recovers instead of adopting a possibly-torn tail. The old opt-in
 `INVFS_FSYNC` barrier is gone: it ran *after* the CLEAN write, which is the
 wrong side of the ordering it was meant to provide.
 
-### 4.5 Failure injection
+### 4.6 Failure injection
 
 `INVFS_SYNC_FAIL_AT=N` makes the Nth `vol_sync` of the process latch the
 volume and report EIO (`tools/test-flushfail.sh`). On v3 the delta tail is

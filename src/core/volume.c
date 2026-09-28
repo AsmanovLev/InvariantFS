@@ -3150,8 +3150,9 @@ int vol_map(invfs_volume *v, uint64_t inode, uint64_t lba, uint64_t pba, uint32_
      *
      * This used to seek and write the 64-byte record here, on every segment.
      * On an image that is a buffered 64-byte write and invisible; on a raw
-     * device opened NO_BUFFERING|WRITE_THROUGH it is a read-modify-write of
-     * a 4 KB block plus a synchronous flush to flash -- ~80 ms. Files are
+     * device opened NO_BUFFERING|WRITE_THROUGH (Windows only) it is a
+     * read-modify-write of a 4 KB block plus a synchronous flush to flash --
+     * ~80 ms. Files are
      * split into 64 KB segments, so an 8 MB file paid ~128 of them (~11 s)
      * and an 18 MB file ~20 s, all inside vol_create_file under the Dokan
      * write lock. That is what pushed a callback past opt.Timeout and made

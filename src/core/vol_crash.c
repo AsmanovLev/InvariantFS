@@ -30,11 +30,48 @@
  *    the tombstone, bitmap dirtied in RAM only), so deletes mark DIRTY
  *    without flushing.
  *
- * What "durable" buys depends on the backing store. A device is opened
- * FILE_FLAG_NO_BUFFERING|FILE_FLAG_WRITE_THROUGH (blkio.c), so write ordering
- * there survives power loss. An image file is buffered, so ordering survives
- * process death -- which is what the crash tests inject. WP80: power loss is
- * covered by default -- vol_close now issues a barrier before it writes the
+ * What "durable" buys depends on the backing store AND the platform, and the
+ * platform that matters -- POSIX -- buys less than this file used to claim.
+ * Stated exactly, per branch of blkio_open:
+ *
+ *   - Windows + raw device: FILE_FLAG_NO_BUFFERING | FILE_FLAG_WRITE_THROUGH
+ *     (blkio.c:243). Every write reaches the device as it is issued, so the
+ *     write ordering above is the handle's own.
+ *   - Windows + image file: buffered. Ordering survives process death.
+ *   - POSIX (Linux), image file AND raw device alike: opened plain O_RDWR --
+ *     no O_DIRECT, no O_SYNC, no O_DSYNC (blkio.c:296-298). Every write is a
+ *     pwrite() into the page cache and the ONLY durability point is
+ *     blkio_flush() -> fsync(fd) (blkio.c:626).
+ *
+ * So on Linux the guarantee is: after a barrier returns 0, the bytes have
+ * been handed to the host storage stack and survive process death (which is
+ * what the crash tests inject). fsync() does NOT make each write
+ * write-through, does NOT order one pwrite against another at the device, and
+ * cannot promise anything about a device that lies about its own volatile
+ * cache. Every ordering rule in this file is therefore enforced by
+ * InvariantFS, not by the open flags: the structures that must land in a
+ * given order are written in that order and then made durable TOGETHER by one
+ * barrier, and each is magic/CRC-framed so a partially completed flush is
+ * detected on the next mount rather than adopted. Power-loss ordering on
+ * Linux is delegated to the host filesystem and device honouring fsync(2).
+ * InvariantFS adds nothing to it. (README.md, AGENTS.md 2.2 and
+ * docs/SECURITY.md have always said this out loud; this comment did not.)
+ *
+ * ONE ordering is NOT established at all, and it is worth naming because a
+ * reader of rule 2 above may assume it: the allocation bitmap is not made
+ * durable BEFORE a delta record. A record is barriered at append
+ * (vol_delta.c:571) and the bitmap is only written at vol_flush
+ * (volume.c:2641), so a crash inside the deferred window leaves a durable
+ * record naming blocks whose allocation bits are still clear on disk. That is
+ * safe by DERIVATION, not by ordering: the bitmap is a derived cache
+ * (vol_fsck.c:25) and replay re-reserves every block a replayed segment
+ * spans (dl_reserve_segment, vol_delta.c:409) before any allocator call can
+ * hand it out again. The deferred window can therefore strand space, never
+ * alias a live block. The v3 commit-point table is
+ * docs/architecture/META-V3.md 4.1; ADR-009 is the decision behind the
+ * v3 fsync contract.
+ *
+ * WP80: the barrier before CLEAN -- vol_close barriers before it writes the
  * CLEAN superblock (INVFS_CLOSE_NOBARRIER=1 is the documented opt-out), and
  * vol_sync does the same on v3 as on v2.
  */

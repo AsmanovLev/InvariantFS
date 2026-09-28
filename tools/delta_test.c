@@ -408,6 +408,76 @@ static void test_index_equals_scan(invfs_volume *v)
     ok(count == 2, "index and scan agree on key count");
 }
 
+/* The bitmap is NOT made durable before a delta record, and there is no test
+ * that pretends otherwise: a record is barriered at append
+ * (vol_delta.c:571) while the bitmap is only written at vol_flush
+ * (volume.c:2641), so a crash inside the deferred window leaves a durable
+ * record naming blocks the on-disk bitmap still calls free. What makes that
+ * safe is a DERIVATION, not an ordering, and this is the test for it: replay
+ * re-reserves every block a replayed segment spans (dl_reserve_segment)
+ * before any allocator call can hand it out again.
+ *
+ * A test that asserted "the bitmap is durable before the record" would be
+ * asserting a guarantee the code does not have. This one asserts the
+ * property that IS true, and it is written with an explicit red control
+ * (the bit really is clear before replay) so a suite that silently stopped
+ * exercising anything cannot pass. */
+static void test_bitmap_before_delta_gap(const char *dir)
+{
+    char img[512];
+    invfs_volume *v;
+    uint64_t seg, b, leaked = 0, n;
+
+    printf("bitmap-before-delta gap is safe by replay, not by ordering\n");
+    snprintf(img, sizeof img, "%s/invf-delta_bmgap.img", dir);
+    if (image_make(img, FB_TOTAL) != 0) { ok(0, "make bmgap image"); return; }
+    v = (invfs_volume *)calloc(1, sizeof *v);
+    if (!v) { ok(0, "calloc bmgap volume"); return; }
+    if (synth_open(v, img) != 0) { ok(0, "open bmgap volume"); free(v); return; }
+
+    /* One append allocates a whole 128 KiB delta segment and reserves it. */
+    ok(vol_delta_append(v, (const uint8_t *)"gap", 3,
+                        (const uint8_t *)"payload", 7, 0) == 0,
+       "append inside the deferred window");
+    seg = v->delta_seg_pba;
+    ok(seg != 0, "the append created a delta segment");
+    ok(bit_get(v->bitmap, seg), "append reserved the segment in RAM");
+    ok(v->rt30_present && v->rt30.delta_pba == seg,
+       "RT30 names the segment (the record is durable and reachable)");
+
+    /* The deferred window, exactly: the record and its segment are on the
+     * image, the bitmap flush that would have recorded the reservation has
+     * not happened. A plain file cannot have its page cache discarded
+     * unprivileged, so the unflushed state is stood up directly -- the
+     * allocation bits for the segment's blocks are gone. */
+    n = 0;
+    for (b = seg; b < seg + INVFS_DELTA_SEG_BLOCKS && b < v->sb.total_blocks; b++)
+        n++;
+    ok(n > 0, "the segment spans real blocks");
+    for (b = seg; b < seg + INVFS_DELTA_SEG_BLOCKS && b < v->sb.total_blocks; b++)
+        bit_clr(v->bitmap, b);
+
+    /* RED CONTROL: without replay, those blocks are free and the allocator
+     * would hand them straight back out. If this ever passes, the test has
+     * stopped standing up the hazard and the assertion below proves
+     * nothing. */
+    for (b = seg; b < seg + INVFS_DELTA_SEG_BLOCKS && b < v->sb.total_blocks; b++)
+        if (bit_get(v->bitmap, b)) break;
+    ok(b >= seg + n, "control: the blocks really are un-reserved before replay");
+
+    /* The record survived, so replay runs -- and must re-reserve. */
+    ok(synth_remount(v, img) == 0, "replay after the unflushed bitmap");
+    ok(vol_delta_count(v) == 1, "the record itself was durable");
+    for (b = seg; b < seg + INVFS_DELTA_SEG_BLOCKS && b < v->sb.total_blocks; b++)
+        if (!bit_get(v->bitmap, b)) leaked++;
+    ok(leaked == 0, "replay re-reserved every block the record names");
+
+    vol_delta_close(v);
+    fake_vol_close(v);
+    free(v);
+    remove(img);
+}
+
 static void test_crc_truncation(const char *dir)
 {
     char img[512];
@@ -616,6 +686,7 @@ static void run_unit(const char *dir)
     remove(img);
 
     test_crc_truncation(dir);
+    test_bitmap_before_delta_gap(dir);
     test_rollover(dir);
     test_v3_metadata_delta(dir);
 

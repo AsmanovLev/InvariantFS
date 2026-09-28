@@ -357,6 +357,84 @@ to ~512, which takes the 388-member term from 6,356,992 to 198,656 B. Note
 4978324 > 4935680) and pins the expected total; that test change is itself the
 tell that the constant is a conservative bound being treated as a constant.
 
+## 6b. FINDING 2026-09-30: the durability comment claimed a write-through
+##      guarantee the POSIX open path does not provide
+
+**Status: FIXED (doc corrected to the code, in the same commit). Severity:
+HIGH for the "only copy of the machine" story -- it is not a soundness defect,
+it is a comment that lies to the next maintainer.**
+
+`src/core/vol_crash.c` said the volume is opened
+`FILE_FLAG_NO_BUFFERING|FILE_FLAG_WRITE_THROUGH` "so write ordering there
+survives power loss". That flag pair is set in exactly one place,
+`src/core/blkio.c:243`, **inside the `#ifdef _WIN32` branch**. The POSIX open
+is a plain `O_RDWR` for an image file *and* for a raw device
+(`src/core/blkio.c:296-298`): no `O_DIRECT`, no `O_SYNC`, no `O_DSYNC`.
+Durability bottoms out at one `fsync()` in `blkio_flush`
+(`src/core/blkio.c:626`). The same claim was duplicated verbatim into
+`volume_internal.h`'s `vol_mark_dirty` doc comment and, in weaker form, into
+`blkio.h` and two cost-rationale comments. A rootfs preflight audit
+(`/srv/bench/results/ROOTFS-PREFLIGHT.md`, row N16) named it "the most
+load-bearing wrong sentence in the tree".
+
+**What the POSIX path actually provides.** `fsync()` on a non-`O_SYNC` fd
+flushes every dirty page of that file to the storage device, so a barrier
+returning 0 buys *process-death* survival and -- only as far as the host
+filesystem and device honour `fsync(2)` -- power-loss survival. It does not
+make an individual `pwrite` write-through, it does not order one `pwrite`
+against another at the device, and it cannot defend against a device that
+lies about its own volatile cache. Write ordering on Linux is therefore
+established by InvariantFS, not by the open: the structures that must land in
+a given order are written in that order and made durable together in one
+barrier, and each is magic/CRC-framed so a partially completed flush is
+detected at the next mount rather than adopted. `README.md`, `AGENTS.md` 2.2
+and `docs/SECURITY.md` already said all of this out loud; the code comment is
+what was wrong.
+
+**The ordering that genuinely does NOT exist**, now named in the same
+comment and in `docs/architecture/META-V3.md` 4.3: the allocation bitmap is
+not made durable before a delta record. The record is barriered at append
+(`vol_delta.c:571`), the bitmap is only written at `vol_flush`
+(`volume.c:2641`). Safe by derivation, not ordering -- the bitmap is a
+derived cache (`vol_fsck.c:25`) and mount replay re-reserves every block a
+replayed segment spans (`dl_reserve_segment`, `vol_delta.c:409`) before any
+allocator call can hand it out again. The window can strand free space; it
+cannot alias a live block.
+
+**Tests.** There is no power-loss property to assert here and the new tests
+say so rather than faking one: a test process shares the page cache with the
+volume, so it cannot distinguish "fsync'd" from "dirty in the page cache".
+What is pinned is (a) the open-path shape -- `src/cli/blkio_test.c` asserts
+the POSIX fd carries no `O_SYNC`/`O_DSYNC`/`O_DIRECT`, so raising the
+guarantee cannot happen quietly, and that a barrier failure reaches the
+caller, which is what `vol_close` relies on to keep the volume DIRTY; and
+(b) the derivation -- `tools/delta_test.c`'s "bitmap-before-delta gap" case
+stands up the unflushed state with an explicit red control and asserts
+replay re-reserves. Both were confirmed to go red when the property is
+removed (adding `O_SYNC`; disabling `dl_reserve_segment`).
+
+**Proposal to RAISE the guarantee -- NOT APPLIED, cost measured, author's
+call.** `O_SYNC` on the POSIX open would make every `pwrite` write-through.
+Measured on this host (ext4 on /dev/sda1, 300 ops, 256 MiB scratch file,
+images under `/srv/bench`):
+
+| write size | buffered `pwrite` | `pwrite`+`fsync` (the `O_SYNC` proxy) |
+|---|---|---|
+| 64 B | 1.616 ms/op | 48.177 ms/op (**30x**) |
+| 4 KiB | 0.198 ms/op | 42.621 ms/op (215x) |
+| 64 KiB | 0.698 ms/op | 50.410 ms/op (72x) |
+
+That is fatal for the append path: `vol_delta_append` barriers every record
+(`vol_delta.c:571`), so `O_SYNC` would add one device flush per namespace
+mutation, and `vol_create_file` writes 64 KiB segments, so an 8 MB file would
+pay ~128 of them -- the same ~11 s the `volume.c:3151` comment already
+documents for the pre-WP25 record path. `O_DIRECT` is worse, not better: it
+would force the `BLKIO_ALIGN` bounce path onto every transfer and break the
+336-byte inode records and 4-byte CRCs the format is built on without
+reworking every writer. Neither is worth it: the honest cheap middle is what
+already exists (one `fsync` per barrier, ordering enforced in code), plus
+telling the truth in the comment, which is what this commit does.
+
 ## 7. Far roadmap (ideas, NOT scheduled work)
 
 - **Template Zone (RE-QUALIFIED 2026-08-28, doc/17)**: NOT a chunk store — a **shared-reference / dictionary layer**: AST recipes reference semantic templates by id + residual, invariant `(template ⊕ residual) == original` (BLAKE3). Targets redundancy that batching structurally cannot reach: ACROSS the whole volume and ACROSS TIME (new file vs files swept months ago; batching only sees a 4MB window), plus explicit user pinning ("this directory is a base layer"). Domains by feasibility: (a) ZSTD patch_from_dict for versioned trees (Docker layers, .rodata across compiler versions — stock zstd dict API, no custom delta math); (b) ELF/PE section sharing; (c) audio transient CDC templates (FLAC→PCM→CDC→BLAKE3 index) — LAST, needs the FLAC pipeline; delta/residual coding = v2+. **The old "precondition: refcounts (WP6)" is RETRACTED**: the owner-inode + L2P-dup + mark-and-sweep GC pattern proven by TEXT zone (WP10) covers ownership without refcounts (and PB7 itself is fixed since WP16f). On-disk: zone field value 3 (RESERVED today) = TEMPLATE; owner `\x01tmpl`; templates ARC-pinned (~10% budget), ARC keyed by template_seq not pba (GC invalidates). Still far-roadmap: needs a measured proof that explicit templates beat WP14 batching on a template-heavy corpus (e.g. 50 tracks sharing a drum kit) before any code.

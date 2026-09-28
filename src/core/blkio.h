@@ -16,12 +16,22 @@
  * buffer, with read-modify-write for partial sectors, and callers keep their
  * byte-granular view.
  *
- * Devices are opened FILE_FLAG_NO_BUFFERING | FILE_FLAG_WRITE_THROUGH. That
- * is deliberate and it is why the alignment work is unavoidable: a buffered
- * volume handle would let the Windows cache manager reorder writes, and
- * InvariantFS has a journal whose entire purpose is that the journal record
- * reaches the platter before the data it describes. Buffering would make
- * crash recovery a fiction.
+ * On Windows, a device is opened FILE_FLAG_NO_BUFFERING |
+ * FILE_FLAG_WRITE_THROUGH. That is deliberate and it is why the alignment
+ * work is unavoidable there: a buffered volume handle would let the Windows
+ * cache manager reorder writes, and InvariantFS has a journal whose entire
+ * purpose is that the journal record reaches the platter before the data it
+ * describes. Buffering would make crash recovery a fiction.
+ *
+ * POSIX has no such open. blkio_open uses a plain O_RDWR for an image file
+ * AND for a raw device (blkio.c), with no O_DIRECT, no O_SYNC and no
+ * O_DSYNC, so a write is a page-cache write and the one and only durability
+ * point is the fsync() in blkio_flush. Do not read the guarantee above as
+ * platform-independent; it is not. Write ordering is established by
+ * InvariantFS (write in the required order, then make the whole set durable
+ * in one barrier) and power-loss ordering is delegated to the host
+ * filesystem and device honouring fsync(2). blkio_test.c asserts the open
+ * flags so this paragraph cannot quietly stop matching the code.
  *
  * Image files keep the old direct path -- no alignment, no bounce, no
  * behaviour change. Setting INVFS_FORCE_DEV=1 in the environment overrides

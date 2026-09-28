@@ -322,9 +322,9 @@ typedef struct invfs_volume {
     uint64_t raw_fail_run, shadow_fail_run;
     /* Byte range of the bitmap changed since the last flush, as [lo, hi).
      * lo > hi means nothing is dirty. vol_flush used to push the whole
-     * bitmap -- 480 KB on a 14.65 GB volume -- on every file close, and the
-     * device is opened FILE_FLAG_NO_BUFFERING|WRITE_THROUGH, so that was a
-     * synchronous ~250 ms per file on flash regardless of file size. */
+     * bitmap -- 480 KB on a 14.65 GB volume -- on every file close, and a
+     * WINDOWS device is opened FILE_FLAG_NO_BUFFERING|WRITE_THROUGH, so that
+     * was a synchronous ~250 ms per file on flash regardless of file size. */
     uint64_t bm_lo, bm_hi;
     uint64_t free_blocks;     /* cached free count (bitmap scan at open) */
     /* in-memory L2P */
@@ -1200,13 +1200,16 @@ int vol_write_sb(invfs_volume *v);
  *    the tombstone, bitmap dirtied in RAM only), so deletes mark DIRTY
  *    without flushing.
  *
- * What "durable" buys depends on the backing store. A device is opened
- * FILE_FLAG_NO_BUFFERING|FILE_FLAG_WRITE_THROUGH (blkio.c), so write ordering
- * there survives power loss. An image file is buffered, so ordering survives
- * process death -- which is what the crash tests inject. WP80: power loss is
- * covered by default -- vol_close now issues a barrier before it writes the
- * CLEAN superblock (INVFS_CLOSE_NOBARRIER=1 is the documented opt-out), and
- * vol_sync does the same on v3 as on v2.
+ * What "durable" buys depends on the backing store AND the platform -- see
+ * the full statement in src/core/vol_crash.c, which is the authority. In one
+ * line: on Windows a raw device is opened unbuffered/write-through, so write
+ * ordering is the handle's own; on POSIX, image file AND raw device alike, the
+ * open is a plain O_RDWR and the only durability point is fsync() in
+ * blkio_flush, so a barrier buys process-death survival and power-loss
+ * ordering is delegated to the host filesystem and device. WP80: the barrier
+ * before CLEAN is the default everywhere -- vol_close barriers before it
+ * writes the CLEAN superblock (INVFS_CLOSE_NOBARRIER=1 is the documented
+ * opt-out), and vol_sync does the same on v3 as on v2.
  */
 int vol_mark_dirty(invfs_volume *v);
 

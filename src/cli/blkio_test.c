@@ -17,6 +17,11 @@
 #include <stdlib.h>
 #include <string.h>
 
+#ifndef _WIN32
+#include <fcntl.h>
+#include <unistd.h>
+#endif
+
 #include "blkio.h"
 
 #define IMG_SIZE  (4u * 1024u * 1024u)
@@ -245,6 +250,75 @@ int main(int argc, char **argv)
             }
         }
     }
+
+#ifndef _WIN32
+    /* ---- the durability contract, as the code actually implements it ----
+     *
+     * There is no power-loss property to assert here, and no test should
+     * invent one: a test process shares the page cache with the volume, so
+     * it cannot tell "fsync'd" from "dirty in the page cache" without
+     * root, drop_caches and a real power cut. What IS assertable -- and
+     * what just regressed in the documentation -- is the shape of the open
+     * path and the fact that the barrier is a real syscall whose failure
+     * reaches the caller.
+     *
+     * blkio.h used to say "Devices are opened FILE_FLAG_NO_BUFFERING |
+     * FILE_FLAG_WRITE_THROUGH", which is true only of the _WIN32 branch at
+     * blkio.c:243. On POSIX the volume is opened plain O_RDWR and the only
+     * durability point is the fsync() in blkio_flush. These checks pin THAT.
+     * If somebody later adds O_SYNC or O_DIRECT the guarantee really has
+     * been raised, and that is a good day -- but it is a different contract
+     * with a measured cost, so it must be a deliberate commit that rewrites
+     * the text in blkio.h, vol_crash.c and META-V3.md. This test is the
+     * thing that makes it impossible to do that quietly. */
+    {
+        blkio d;
+        int fl;
+        if (blkio_open(&d, path, 0) == 0) {
+            fl = fcntl(d.fd, F_GETFL);
+            ok(fl != -1, "F_GETFL on the volume fd");
+#ifdef O_DIRECT
+            ok((fl & O_DIRECT) == 0,
+               "POSIX volume is not O_DIRECT (buffered; see the note above)");
+#endif
+#ifdef O_SYNC
+            ok((fl & O_SYNC) == 0,
+               "POSIX volume is not O_SYNC (the barrier is blkio_flush, not the open)");
+#endif
+#ifdef O_DSYNC
+            ok((fl & O_DSYNC) == 0,
+               "POSIX volume is not O_DSYNC");
+#endif
+            ok((fl & O_ACCMODE) == O_RDWR, "POSIX volume is opened read-write");
+
+            ok(blkio_flush(&d) == 0, "barrier on an idle volume succeeds");
+            {
+                unsigned char probe[64], back[64];
+                int j;
+                for (j = 0; j < 64; j++) probe[j] = (unsigned char)(j * 7u + 3u);
+                ok(blkio_pwrite(&d, 7u * 512u * 1024u, probe, sizeof probe) == 0,
+                   "write before the barrier");
+                ok(blkio_flush(&d) == 0, "barrier after a write succeeds");
+                ok(blkio_pread(&d, 7u * 512u * 1024u, back, sizeof back) == 0 &&
+                   memcmp(back, probe, sizeof back) == 0,
+                   "flushed bytes read back bit-exact");
+            }
+
+            /* The barrier has to be a real call on THIS descriptor, and its
+             * failure has to reach the caller: vol_close and vol_sync both
+             * keep the volume DIRTY instead of writing CLEAN only because
+             * blkio_flush reports the error. A stub, or a flush on some
+             * other fd, would silently turn every acked fsync into a lie. */
+            close(d.fd);
+            d.fd = -1;
+            ok(blkio_flush(&d) != 0,
+               "barrier on a broken fd fails (vol_close depends on this)");
+            blkio_close(&d);
+        } else {
+            ok(0, "reopen for the durability-contract checks");
+        }
+    }
+#endif
 
     free(model);
     free(tmp);
