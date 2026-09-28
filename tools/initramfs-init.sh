@@ -41,8 +41,33 @@ if [ ! -e /dev/fuse ]; then
     [ -e /dev/fuse ] || busybox mknod /dev/fuse c 10 229 2>/dev/null || true
     [ -e /dev/fuse ] && chmod 666 /dev/fuse 2>/dev/null
 fi
-for p in /modules/failover.ko /modules/net_failover.ko /modules/virtio_net.ko; do
-    [ -f "$p" ] && busybox insmod "$p" 2>/dev/null
+# virtio_blk FIRST, then the NIC. It is not a nicety: on a distro kernel
+# CONFIG_VIRTIO_BLK=m, so a virtio-attached volume does not exist as a block
+# device until this loads, and the probe below then reports "no InvariantFS
+# volume found on any block device" -- which reads like a lost volume and is
+# actually an invisible disk. Measured on 6.12.107+deb13-amd64, the image
+# built before this listed only the NIC modules and booted to exactly that
+# error with a perfectly good volume on the bus.
+#
+# The path is /lib/modules, where mkinitramfs.sh stages them (its `mkdir -p
+# lib/modules`). This loop used to read /modules, which exists but is empty,
+# so every staged module was skipped by a `[ -f ]` guard that hid it. Both
+# halves of that were silent.
+#
+# Order matters: insmod resolves nothing. Each module is staged in dependency
+# order by the builder; a failure is reported rather than swallowed, because a
+# rescue medium that silently cannot see the disk is the worst possible
+# failure mode for this script.
+for p in /lib/modules/virtio_blk.ko /lib/modules/failover.ko \
+         /lib/modules/net_failover.ko /lib/modules/virtio_net.ko; do
+    if [ -f "$p" ]; then
+        if ! busybox insmod "$p" 2>/dev/null; then
+            echo "initramfs: could not load $p" >&2
+        fi
+    else
+        echo "initramfs: $p is NOT in this image (kernel built it in, or the" \
+             "builder did not stage it)" >&2
+    fi
 done
 
 # ---- cmdline options -----------------------------------------------------
@@ -52,6 +77,19 @@ get_opt() {  # $1 = key
             "$1"=*) echo "${w#*=}"; return;;
         esac
     done
+}
+has_opt() {  # $1 = bare flag, e.g. invfs.selftest
+    # get_opt matches "key=value" only, so a bare flag read through it ALWAYS
+    # comes back empty -- which is how `invfs.selftest` first did nothing and
+    # the boot looked like it had simply not run the check. The sweepboot
+    # flag at the bottom of this file has its own bare-key loop for the same
+    # reason; this is that loop, named.
+    for w in $(cat /proc/cmdline 2>/dev/null); do
+        case "$w" in
+            "$1"|"$1"=*) return 0;;
+        esac
+    done
+    return 1
 }
 RAW_UUID=$(get_opt invfs.raw_uuid)
 DEV1_UUID=$(get_opt invfs.dev1_uuid)
@@ -179,6 +217,50 @@ fi
 
 grep "InvariantFS mounted" /tmp/fuse.log
 
+# ---- self-test (invfs.selftest on the cmdline) ------------------------------
+# A rescue medium is only as good as what an operator can do with it, and
+# "it booted" is not that. This runs the check that answers the question
+# directly: is the volume mounted, and does it serve back the exact bytes it
+# was given? The output goes to the console and nowhere else, so it can be
+# read from a serial log with no one typing anything. The expected sum is
+# baked in only when the builder is given INVFS_SELFTEST_SUM, so a normal
+# image carries no test data and the branch is simply skipped.
+#
+# It exists as a cmdline flag rather than a test-only script because typing
+# into this console turned out to be unusable for automation: the guest tty
+# drops characters (a character-at-a-time sender with a 12 ms gap still
+# delivered "ls /mnt/invfs" as "l/ntnf"), so a harness that types commands
+# measures the tty, not the filesystem.
+if has_opt invfs.selftest; then
+    echo "SELFTEST: begin"
+    echo "SELFTEST: device=$INVFS_RAW dev1=$INVFS_DEV1"
+    echo "SELFTEST: files at the mount point:"
+    ls /mnt/invfs 2>&1 | sed 's/^/SELFTEST:   /'
+    N=$(ls /mnt/invfs 2>/dev/null | grep -vc '^\(proc\|sys\|dev\)$')
+    echo "SELFTEST: file_count=$N"
+    # Byte fidelity, read back THROUGH the mount. A mount that lists names
+    # but serves wrong bytes is precisely the failure this filesystem exists
+    # to prevent, and this is the only place it can be seen end to end.
+    if [ -f /mnt/invfs/invfs-selftest.txt ]; then
+        SUM=$(cat /mnt/invfs/invfs-selftest.txt 2>/dev/null | md5sum | cut -d" " -f1)
+        WANT=$(cut -d" " -f1 /selftest.sha 2>/dev/null)
+        echo "SELFTEST: readback_md5=$SUM"
+        echo "SELFTEST: expected_md5=$WANT"
+        if [ -n "$WANT" ] && [ "$SUM" = "$WANT" ]; then
+            echo "SELFTEST: BYTES_MATCH"
+        else
+            echo "SELFTEST: BYTES_DIFFER"
+        fi
+    else
+        echo "SELFTEST: no invfs-selftest.txt on the volume; skipping the byte check"
+    fi
+    # The offline tools want the volume UNMOUNTED and will say so here. A
+    # refusal is reported as a refusal, never as a pass.
+    echo "SELFTEST: invf-verify on the mounted raw device:"
+    invf-verify "$INVFS_RAW" 2>&1 | tail -3 | sed 's/^/SELFTEST:   /'
+    echo "SELFTEST: end"
+fi
+
 # Debug emergency shell on ttyS0 (background; chroot still happens).
 busybox sh -i < /dev/ttyS0 > /dev/ttyS0 2>&1 &
 
@@ -216,4 +298,28 @@ export INVFS_DEV1
 # see docs/ARCH-INSTALL.md). Defaults to /sbin/init.
 INIT=$(get_opt invfs.init)
 [ -n "$INIT" ] || INIT=/sbin/init
+# Do NOT exec a chroot whose target does not exist. `exec` replaces PID 1, so
+# a failing chroot does not return to a shell -- the kernel panics with
+# "Attempted to kill init!", measured on a volume that mounted cleanly and
+# simply had no rootfs in it:
+#   Chrooting to InvFS root...
+#   chroot: can't execute '/sbin/init': No such file or directory
+#   Kernel panic - not syncing: Attempted to kill init! exitcode=0x00000132
+# That is the wrong answer for a RESCUE medium. "The volume mounts but has no
+# init" is an ordinary state -- a data-only volume, a half-restored one, the
+# wrong volume, a rootfs whose init is missing -- and it is precisely the case
+# an operator boots rescue media to fix. A medium that panics there has
+# removed the only way to reach the repair tools, which are sitting right here.
+if [ ! -x "/mnt/invfs$INIT" ]; then
+    echo "The volume mounted, but $INIT is not there (checked /mnt/invfs$INIT)."
+    if [ -e "/mnt/invfs$INIT" ]; then
+        echo "It exists but is not executable -- wrong permissions, or it is a"
+        echo "directory or a dangling symlink."
+    else
+        echo "This volume has no root filesystem in it: it may be a data-only"
+        echo "volume, a half-restored one, or not the volume you meant."
+    fi
+    echo "Staying in the repair shell instead of handing off to a rootfs."
+    rescue_shell
+fi
 exec chroot /mnt/invfs "$INIT"

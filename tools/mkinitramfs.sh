@@ -208,10 +208,22 @@ else
     echo "         The initramfs will not be able to mount a volume." >&2
 fi
 
-# virtio_net + net_failover (guest NIC, so a root-on-InvFS box is reachable for
-# remote repair). Optional, same as fuse: absent on a host with no module dir.
+# virtio_blk (SEE THE VOLUME) + virtio_net / net_failover / failover (the
+# guest NIC, so a root-on-InvFS box is reachable for remote repair).
+#
+# virtio_blk was missing from this list, which is why a volume attached as a
+# virtio disk was invisible to the initramfs: on a distro kernel
+# CONFIG_VIRTIO_BLK=m (checked on 6.12.107+deb13-amd64), so the disk does not
+# exist as a block device until the module loads, and the init's probe then
+# reports "no InvariantFS volume found on any block device" -- indistinguishable
+# from a lost volume. virtio, virtio_ring and virtio_pci are builtin on that
+# kernel (no .ko in the tree, and virtio_pci is =y), so virtio_blk is the only
+# one to stage. Same as fuse: absent on a host with no module dir.
+#
+# Order is the load order: insmod resolves nothing, so a module has to appear
+# after everything it depends on.
 mkdir -p lib/modules
-for mod in failover net_failover virtio_net; do
+for mod in virtio_blk failover net_failover virtio_net; do
     src=$(find "/lib/modules/$KVER/kernel" -name "$mod.ko.*" 2>/dev/null | head -1 || true)
     [ -n "$src" ] || continue
     case "$(file -b "$src")" in
@@ -224,6 +236,17 @@ done
 # ---- init -----------------------------------------------------------------
 cp "$ROOT/tools/initramfs-init.sh" init
 chmod 755 init
+
+# Optional self-test data. INVFS_SELFTEST_SUM is the expected md5 of the file
+# the volume under test carries, and the `invfs.selftest` cmdline flag makes
+# the init read the file back through the mount and compare. Unset in every
+# normal build, so the shipped image carries no test data at all.
+if [ -n "${INVFS_SELFTEST_SUM:-}" ]; then
+    printf '%s\n' "$INVFS_SELFTEST_SUM" > selftest.sha
+    echo "self-test: expected md5 $INVFS_SELFTEST_SUM baked into selftest.sha"
+else
+    rm -f selftest.sha
+fi
 
 # ---- manifest -------------------------------------------------------------
 # Read by tools/verify-initramfs.sh and by anyone debugging a bad image: it
