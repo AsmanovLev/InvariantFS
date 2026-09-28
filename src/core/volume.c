@@ -2262,6 +2262,15 @@ void vol_close(invfs_volume *v)
     free(v->jops);
     free(v->mjops);
     free(v->meta_mapper);
+    /* WP133: alloc_state_reset calloc()s this, one bit per block
+     * (src/core/volume.c:4600). The vol_open fail path has freed it since
+     * WP52, but the success path never did -- so every open/close cycle
+     * stranded bitmap_blocks * INVFS_BLOCK_SIZE bytes (1 MiB at the 32 GB
+     * geometry), on a daemon that reopens volumes on remount, on recovery
+     * and on every FUSE teardown. Same field and same lifecycle as the
+     * frees around it, which is why it belongs here and not in a
+     * teardown layer. */
+    free(v->meta_type_bitmap);
     free(v->tier);
     free(v->rawm);
     free(v->path2);

@@ -33,9 +33,10 @@ fi
 python3 tools/mk-gzhdr-seeds.py "$SEEDS" >/dev/null || exit 1
 
 # shellcheck disable=SC2046
-# detect_leaks=0 for the same reason as the Makefile rule: vol_open's
-# v->meta_type_bitmap is a pre-existing volume-lifecycle leak, and this
-# gate is about reads, not ownership.
+# detect_leaks=0 matches the Makefile rule. It was originally here because
+# vol_open's v->meta_type_bitmap leaked on every open; WP133 fixed that, so
+# the reason is gone. It stays 0 only because re-verifying this gate at its
+# full iteration count under LSan is WP129's lane, not this WP's.
 ASAN_OPTIONS=hard_rss_limit_mb=4096:detect_leaks=0 \
   bin/gzhdrfuzz "$ITERS" "$SEED" $(ls -1 "$SEEDS"/*) || exit 1
 
