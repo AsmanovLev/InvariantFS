@@ -669,16 +669,45 @@ echo "declined files bit-exact after the deletes"
 echo "== admission leg: INVFS_DEC_MEM_LIMIT=64K =="
 $B/invf-mkfs "$IMGMEM" 0.2 >/dev/null
 $B/invf-cp "$IMGMEM" "$WORK/orig/diska.vdi" diska.vdi >/dev/null
-# the pack's estimate (member bytes + 64 MiB) exceeds 64K -> policy refusal
-# before any extract; GENERIC_MEMLIMIT{21,1}
+# PINNED KNOWN-INERT KNOB -- the author decided (impl_docs/AUDIT.md, de2064d)
+# to leave the engine alone and revisit it as its own WP. vdi is a MAP pack
+# (`map = bin/vdi map {in} {out}`), and the decode guard exempts map packs:
+# the whole-file estimate branch is skipped (src/core/vol_cpack.c:2865) and
+# the guard's own condition `!def->map` (:2883) can never be reached, so
+# INVFS_DEC_MEM_LIMIT provably does not fire here. Commit 80ba49f moved that
+# exemption from the ARC check to the decode check, with no WP.
+#
+# The old leg asserted a refusal that could never happen, and the suite had
+# never run, so it stayed green. What is asserted now is the MEASURED
+# contract: the knob is inert for a map pack, and setting it does not change
+# the stamp. When the engine WP lands, this leg is what must change.
 INVFS_DEC_MEM_LIMIT=64K $B/invf-sweep "$IMGMEM" > "$WORK/sweep-mem.log" 2>&1 \
     || { cat "$WORK/sweep-mem.log"; exit 1; }
-if grep -q ": vdi (codecpack)" "$WORK/sweep-mem.log"; then
-    echo "FAIL: decomposition ran under a 64K decode-memory limit"; exit 1
+if ! grep -q ": vdi (codecpack)" "$WORK/sweep-mem.log"; then
+    echo "FAIL: the map pack did not decompose at all -- a real regression,"; echo "       unrelated to the inert knob"; cat "$WORK/sweep-mem.log"; exit 1
 fi
 C=$("$WORK/classof" "$IMGMEM" diska.vdi)
-echo "  diska.vdi (memlimit): $C"
-[ "$C" = "cls=5 algo=21 gen=1" ] || { echo "FAIL: want GENERIC_MEMLIMIT{VDI=21,1}"; exit 1; }
+echo "  diska.vdi (DEC_MEM_LIMIT=64K, inert for map packs): $C"
+$B/invf-cat "$IMGMEM" diska.vdi "$WORK/out/diskamem.vdi" >/dev/null
+cmp -s "$WORK/orig/diska.vdi" "$WORK/out/diskamem.vdi" \
+    || { echo "FAIL: read after the inert knob is not bit-exact"; exit 1; }
+
+# The ARC leg -- the admission that actually exists. The budget is STATED,
+# not assumed: the engine's ARC gate is guarded on the operator having set
+# one (`getenv("INVFS_ARC_BYTES") && v->arc_budget`, src/core/vol_cpack.c:2859),
+# so with nothing set there is no budget to refuse against and the pack
+# correctly decomposes. The built-in 256 MB default is deliberately not an
+# admission input. Stating 1M puts this container over the budget, so the
+# refusal below is a real exercise of the code path rather than an artefact
+# of a default that was never applied. Same correction as test-xfs.sh.
+echo "== admission leg: INVFS_ARC_BYTES=1M (stated) -> GENERIC_MEMLIMIT =="
+$B/invf-mkfs "$IMGMEM" 0.2 >/dev/null
+$B/invf-cp "$IMGMEM" "$WORK/orig/diska.vdi" diska.vdi >/dev/null
+INVFS_ARC_BYTES=1M $B/invf-sweep "$IMGMEM" > "$WORK/sweep-arc.log" 2>&1 \
+    || { cat "$WORK/sweep-arc.log"; exit 1; }
+C=$("$WORK/classof" "$IMGMEM" diska.vdi)
+echo "  diska.vdi (ARC_BYTES=1M): $C"
+[ "$C" = "cls=5 algo=21 gen=1" ] || { echo "FAIL: want GENERIC_MEMLIMIT{VDI=21,1}, got $C"; cat "$WORK/sweep-arc.log"; exit 1; }
 $B/invf-cat "$IMGMEM" diska.vdi "$WORK/out/diskamem.vdi" >/dev/null
 cmp -s "$WORK/orig/diska.vdi" "$WORK/out/diskamem.vdi" \
     || { echo "FAIL: memlimit read not bit-exact"; exit 1; }
