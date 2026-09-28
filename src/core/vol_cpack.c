@@ -197,9 +197,28 @@ static int tool_exec_strict(char *const argv[], uint64_t mem_cap,
 int tool_tmpdir(char *dir, size_t cap)
 {
     static const char *roots[] = { "/dev/shm", "/tmp" };
-    size_t r;
+    const char *env = getenv("INVFS_TOOL_SCRATCH");
+    size_t r, first = 0;
 
-    for (r = 0; r < sizeof roots / sizeof roots[0]; r++) {
+    /* An explicit scratch root wins. The default order is tmpfs-first because
+     * the intermediate files are written and read back once, and tmpfs makes
+     * that cheap -- but a tmpfs page is charged to the writing cgroup, so on a
+     * memory-constrained host the write of a large container fails ENOSPC even
+     * while `df /dev/shm` still reports gigabytes free. The fallback above
+     * only ever engaged when mkdtemp ITSELF failed, so a tmpfs that exists and
+     * cannot hold the data was never abandoned, and the failure surfaced as an
+     * opaque "tool_write pin failed". An operator on a small machine, and every
+     * suite whose fixture exceeds available tmpfs, needs the escape hatch. */
+    if (env && *env) {
+        int n = snprintf(dir, cap, "%s/invfs-tool-XXXXXX", env);
+        if (n > 0 && (size_t)n < cap && mkdtemp(dir) != NULL)
+            return 0;
+        fprintf(stderr, "tool_tmpdir: INVFS_TOOL_SCRATCH=%s unusable: %s\n",
+                env, strerror(errno));
+        return -1;
+    }
+
+    for (r = first; r < sizeof roots / sizeof roots[0]; r++) {
         int n = snprintf(dir, cap, "%s/invfs-tool-XXXXXX", roots[r]);
         if (n > 0 && (size_t)n < cap && mkdtemp(dir) != NULL)
             return 0;
@@ -219,9 +238,29 @@ void tool_rm(const char *dir, const char *name)
 int tool_write(const char *path, const uint8_t *data, size_t len)
 {
     FILE *f = fopen(path, "wb");
-    if (!f) return -1;
-    if (len && fwrite(data, 1, len, f) != len) { fclose(f); return -1; }
-    return fclose(f);
+    if (!f) {
+        fprintf(stderr, "tool_write: fopen(%s, %zu bytes) failed: %s\n",
+                path, len, strerror(errno));
+        return -1;
+    }
+    if (len && fwrite(data, 1, len, f) != len) {
+        /* The reason matters and used to be thrown away. "tool_write pin
+         * failed" is the same message for ENOSPC, EACCES and EFBIG, and
+         * separating those three is the difference between a one-line fix and
+         * an afternoon: this is the step that hands a whole container to an
+         * external helper, so it is where a scratch-space or quota problem
+         * first shows up. */
+        fprintf(stderr, "tool_write: fwrite(%s, %zu bytes) failed: %s\n",
+                path, len, strerror(errno));
+        fclose(f);
+        return -1;
+    }
+    if (fclose(f) != 0) {
+        fprintf(stderr, "tool_write: fclose(%s) failed: %s\n",
+                path, strerror(errno));
+        return -1;
+    }
+    return 0;
 }
 
 
@@ -2817,7 +2856,16 @@ int vol_containerpack_sweep(invfs_volume *v, uint64_t inode_id,
     /* the superseded parent recipe, released once the commit is complete */
     invfs_v3_inode old_in;
     uint8_t old_addr[INVFS_V3_RECIPE_ADDR_LEN];
-    if (!pc->probe || !pc->probe()) return 1;    /* tools absent: wait */
+    if (!pc->probe || !pc->probe()) {
+        /* "tools absent: wait" is rc 1, which is ALSO what the DEFER_ENOSPC
+         * path below returns -- but that one leaves a cls=9 stamp and this one
+         * leaves nothing. Both used to be silent, so 'rc=1, no stamp' could not
+         * be attributed to either cause, and test-ntfs.sh's DEFER_ENOSPC leg
+         * was failing with no way to say which branch had run. Name it. */
+        fprintf(stderr, "cpack: %s: tools absent, waiting for RAW (no stamp set)\n",
+                pc->name);
+        return 1;
+    }
     def = invfs_codec_pack_def(pc);
     /* the trace prints def->decomp_gen, so it must come AFTER the assignment
      * above: reading the uninitialised local was undefined behaviour (WP100) */
@@ -2908,8 +2956,22 @@ int vol_containerpack_sweep(invfs_volume *v, uint64_t inode_id,
      * then failed writing member 0, leaving the file unstamped with no
      * DEFER_ENOSPC record and a full retry next sweep. */
     if (sweep_enospc(v, sum_usize / 2 + INVFS_ENOSPC_MARGIN)) {
-        vol_stamp_class(v, inode_id, INVFS_CLASS_DEFER_ENOSPC,
-                        (uint8_t)pc->algo, pc->generation);
+        /* The return value used to be discarded. It is -1 when the stamp
+         * write failed, and the one volume guaranteed to fail it is the
+         * tight volume this policy exists to protect: the deferral was
+         * decided *because* there is no room, and the record of the decision
+         * needs room too. So on exactly the volume this policy exists for, the
+         * policy silently did nothing -- the file kept no stamp, the class
+         * predicate could not re-admit it, and every later sweep paid the full
+         * admission cost again with nothing on disk saying why. This is the
+         * same "unstamped with no DEFER_ENOSPC record" ending the comment
+         * below describes, reached one step earlier. Say it out loud. */
+        if (vol_stamp_class(v, inode_id, INVFS_CLASS_DEFER_ENOSPC,
+                            (uint8_t)pc->algo, pc->generation) < 0)
+            fprintf(stderr,
+                    "cpack: %s: DEFER_ENOSPC could NOT be recorded (volume too "
+                    "tight to write the stamp); this file will be re-admitted "
+                    "and re-priced every sweep\n", pc->name);
         rc = 1;
         goto out;
     }
