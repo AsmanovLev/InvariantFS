@@ -44,6 +44,13 @@
 #      with no clean close, sync + drop_caches (the power-cut surrogate),
 #      reopen: every acknowledged byte intact, and a file rewritten in
 #      place is the COMPLETE old or COMPLETE new content, never a splice.
+#   8  orphan reclaim across a power cut (WP130): the v3 collector frees
+#      base pages and flushes the bitmap, then the process is killed -9 with
+#      no clean close, the page cache is dropped, and the volume is asked
+#      what survived: every file byte-identical, and then rewritten on top of
+#      exactly the blocks that were just freed (the aliasing probe). Two
+#      arms -- the shipped default must free durably, and
+#      INVFS_RECLAIM_ORPHANS=0 must free nothing (the leg's red control).
 #   (repeatability: fixed seeds; any failure preserves the backing
 #      image + all logs under tools/flakey/artifacts/<leg>-<ts>/.)
 #
@@ -56,7 +63,15 @@
 #            FLAKEY_PC_BACKING (leg 7: loop = a loop device over the image
 #            (default when losetup works), file = the image file itself, the
 #            unprivileged path),
-#            FLAKEY_PC_SIZE_MB (leg 7 volume size, default 512).
+#            FLAKEY_PC_SIZE_MB (leg 7 volume size, default 512),
+#            FLAKEY_RC_WORK (leg 8 scratch; same disk-backed rule as leg 7,
+#            default /srv/invfs-flakey-reclaim then /var/tmp/...),
+#            FLAKEY_RC_SIZE_MB (leg 8 volume size, default 512),
+#            FLAKEY_RC_ROUNDS (leg 8 ARM A cuts, default 3),
+#            FLAKEY_MIN_FREE_MB (hard scratch-space floor, default 4000; 0 to
+#            override while diagnosing a "device smaller than the table" red),
+#            FLAKEY_RC_NFOLD (leg 8 crash driver's fold ceiling — it must be
+#            far larger than the cut reaches, default 3000).
 #
 # Needs: dm-flakey (modprobe dm-flakey), losetup, fusermount3, python3,
 #        passwordless sudo (the script is sudo-aware; `sudo -v` first if
@@ -99,15 +114,61 @@ PC_SIZE_MB=${FLAKEY_PC_SIZE_MB:-512}
 PC_FUSE_PID=""
 PC_WRITER_PID=""
 
+# ---- leg 8 (WP130): the orphan-collector's power-loss leg ----
+# Same page-cache technique as leg 7 and for the same reason: a loop device
+# transfers zero bytes in this sandbox, so legs 0-6's dm-flakey tier cannot
+# run and leg 7's file-backed path is the only crash surrogate that works
+# here. This leg therefore also lives on a DISK-backed scratch and cuts with
+# sync + drop_caches, and its subject is the collector rather than the
+# write path. RC_VOL is a plain image file: no mount, no daemon, no loop.
+RC_WORK=${FLAKEY_RC_WORK:-}
+RC_VOL=""
+RC_SIZE_MB=${FLAKEY_RC_SIZE_MB:-512}
+RC_NFOLD=${FLAKEY_RC_NFOLD:-3000}
+RC_ROUNDS=${FLAKEY_RC_ROUNDS:-3}
+RC_NFILES=40          # real files, written through the public write path
+RC_NGEN=200           # forced base generations -> the orphans ARM A collects
+RC_CRASH_PID=""
+RC_JITTER=$((SEED % 97))
+
 say()  { echo; echo "== $* =="; }
 info() { echo "  $*"; }
 
 # ---------------------------------------------------------------- util --
 
+# Take a FUSE mount down for good, or say that we could not.
+#
+# The trap used to call `fusermount3 -u "$MNT" 2>/dev/null` once and move on.
+# A single lazy-less unmount of a busy FUSE mount fails, the error was
+# discarded, and the trap then went on to `dmsetup remove` and `losetup -d` --
+# which is how a run leaves a FUSE mount attached to a device that no longer
+# exists, and the NEXT run trips over it. Escalate instead, and verify with
+# /proc/mounts rather than trusting the exit code.
+umount_all() {  # <mountpoint> <daemon-pattern>
+    local mnt=$1 pat=$2 i
+    [ -n "$mnt" ] || return 0
+    grep -q " $mnt " /proc/mounts 2>/dev/null || return 0
+    fusermount3 -u "$mnt" 2>/dev/null
+    for i in $(seq 1 25); do
+        grep -q " $mnt " /proc/mounts 2>/dev/null || return 0
+        sleep 0.2
+    done
+    [ -n "$pat" ] && pkill -9 -f "$pat" 2>/dev/null
+    sleep 0.3
+    fusermount3 -uz "$mnt" 2>/dev/null
+    for i in $(seq 1 25); do
+        grep -q " $mnt " /proc/mounts 2>/dev/null || return 0
+        sleep 0.2
+    done
+    echo "  WARN: $mnt is still mounted after fusermount3 -uz; a later run on" >&2
+    echo "        this host may trip over it. Unmount it by hand." >&2
+    return 1
+}
+
 cleanup() {
     set +e
     [ -n "$CHAOS_PID" ] && { kill "$CHAOS_PID" 2>/dev/null; wait "$CHAOS_PID" 2>/dev/null; }
-    fusermount3 -u "$MNT" 2>/dev/null
+    umount_all "$MNT" "invf-fuse $DM"
     local i
     for i in $(seq 1 25); do
         pgrep -f "invf-fuse $DM" >/dev/null || break
@@ -120,10 +181,15 @@ cleanup() {
     # leg 7's scratch: its own mount, its own (optional) loop device
     [ -n "$PC_VOL" ] && {
         [ -n "$PC_WRITER_PID" ] && kill -9 "$PC_WRITER_PID" 2>/dev/null
-        [ -n "$PC_MNT" ] && fusermount3 -uz "$PC_MNT" 2>/dev/null
-        pkill -9 -f "invf-fuse -f $PC_VOL" 2>/dev/null
+        umount_all "$PC_MNT" "invf-fuse -f $PC_VOL"
         [ -n "$PC_LOOP" ] && sudo -n losetup -d "$PC_LOOP" 2>/dev/null
         rm -rf "$PC_WORK"
+    }
+    # leg 8's scratch: same rule as leg 7's -- keep it OUT of $FLK, which is
+    # tmpfs on this box, or drop_caches is a no-op and the leg is theatre.
+    [ -n "$RC_VOL" ] && {
+        [ -n "$RC_CRASH_PID" ] && kill -9 "$RC_CRASH_PID" 2>/dev/null
+        rm -rf "$RC_WORK"
     }
     [ "$FAILED" = 0 ] && rm -rf "$FLK"
 }
@@ -144,6 +210,13 @@ preserve() {   # copy the ground truth + every log for replay
         cp --sparse=always "$PC_WORK/pc.img" "$dst/pc-backing.img" 2>/dev/null \
             || echo "  WARN: page-cache backing image copy failed" >&2
     fi
+    # leg 8 lives in its own scratch too, and its evidence is the crash log
+    # plus the free-block ledger -- without the image the crash is unreplayable
+    if [ -n "$RC_VOL" ] && [ -d "$RC_WORK" ]; then
+        cp -a "$RC_WORK"/crash*.log "$RC_WORK"/*.txt "$dst/" 2>/dev/null
+        cp --sparse=always "$RC_VOL" "$dst/rc-backing.img" 2>/dev/null \
+            || echo "  WARN: reclaim backing image copy failed" >&2
+    fi
     if [ -f "$BACK" ]; then
         cp --sparse=always "$BACK" "$dst/backing.img" 2>/dev/null \
             || echo "  WARN: backing image copy failed" >&2
@@ -161,11 +234,18 @@ want_leg() { [ -z "$ONLY" ] && return 0; case ",$ONLY," in *",$1,"*) return 0;; 
 
 # ------------------------------------------------------------- devices --
 
-dm_set() {   # dm_set up|drop|error — swap the live dm table
+dm_set() {   # dm_set up|drop|drop_slow|error — swap the live dm table
     local spec
     case "$1" in
         up)    spec="0 $SEC flakey $LOOP 0 3600 0";;
         drop)  spec="0 $SEC flakey $LOOP 0 1 1 1 drop_writes";;
+        # drop_slow: the same acknowledged-write loss, but biased hard toward
+        # UP. `drop` is a 50/50 duty cycle, and a vol_open that lands in a
+        # down window fails with "device 0 is smaller than the device table
+        # says" (volume.c:1256-1261) -- which reads like a capacity bug and
+        # is really just the window. A long up window keeps the arm about
+        # write loss instead of about retry loops.
+        drop_slow) spec="0 $SEC flakey $LOOP 0 20 1 1 drop_writes";;
         error) spec="0 $SEC error";;
         *)     echo "dm_set: bad mode $1" >&2; return 2;;
     esac
@@ -203,7 +283,15 @@ mkfs_fresh() {
 import_all() { # <origdir>
     local f
     for f in $(cd "$1" && ls); do
-        $B/invf-cp "$DM" "$1/$f" "$f" >/dev/null 2>&1 || fail "invf-cp $f"
+        # The tool's stderr is the log. `>/dev/null 2>&1` here threw away the
+        # only thing that says WHY a 200 MB import died, and cost a full
+        # round of misdiagnosis ("the engine regressed") before anyone looked
+        # at what invf-cp actually printed. Capture it, and on failure print
+        # it: a leg that cannot name its own failure is not a gate.
+        $B/invf-cp "$DM" "$1/$f" "$f" >"$FLK/cp.log" 2>&1 \
+            || { echo "  invf-cp $f failed:" >&2; cat "$FLK/cp.log" >&2
+                 echo "  (source: $1/$f, $(stat -c %s "$1/$f" 2>/dev/null) B)" >&2
+                 fail "invf-cp $f"; }
     done
 }
 
@@ -906,7 +994,13 @@ pc_run() {         # <label> <logfile> <cmd...>
         "$@" >"$log" 2>&1
         rc=$?
         [ "$rc" = 0 ] && return 0
-        grep -q "image is in use by another process" "$log" || return "$rc"
+        # A lost race for the image with a device prober, OR a vol_open that
+        # landed inside a dm-flakey down window. Both are transient and both
+        # are read-mostly (a prober holds LOCK_SH; a down window is read
+        # nothing and write nothing), so retrying cannot endanger the volume
+        # -- but a persistent conflict IS a real problem and must still fail.
+        grep -qE "image is in use by another process|smaller than the device table" \
+            "$log" || return "$rc"
         if [ "$i" = 1 ]; then
             echo "  NOTE: $label lost a flock race with a device prober" >&2
             echo "        (root holds LOCK_SH on the new loop device);" >&2
@@ -1190,6 +1284,382 @@ PY
     info "acknowledged writes survive kill -9 + drop_caches; no splices"
 }
 
+# ------------------------------------------------------------- leg 8 (WP130) --
+# The v3 orphan collector (WP121) frees COW base pages that no RT30 slot and
+# no save point can name. A wrong answer to "is this page reachable" is
+# SILENT DATA LOSS, not a crash, so the collector's safety case cannot be made
+# by reading the predicate -- it has to be made by cutting power in the middle
+# of it and asking what the volume says afterwards. That is this leg.
+#
+# WHAT IS BEING CRASHED, precisely:
+#
+#   invf-orphan_test `cost` runs the production cycle in a loop: publish a
+#   new COW base root (which abandons the old one), then call
+#   vol_reclaim_orphans -- the SAME bounded pass, under the SAME gate, that
+#   fold_reclaim_hook calls on every fold of a live root. The collector
+#   flushes the allocation bitmap in the same breath as its frees
+#   (btree_collect_orphans: "A crash before this point leaves the blocks
+#   allocated (a leak), never shared"), so a kill -9 at any point in the
+#   loop lands in the state this leg is about: blocks FREED, bitmap FLUSHED,
+#   no clean close, no CLEAN superblock.
+#
+#   The loop is the whole reason a kill has somewhere to land. A single
+#   collector pass takes milliseconds, so a one-shot collect would always be
+#   killed either before it freed anything or after the process had already
+#   closed -- neither of which is the state under test. The loop runs for
+#   minutes; a seeded jitter picks the cut point.
+#
+# WHAT IS ASSERTED, and which arm is which:
+#
+#   ARM A (the SHIPPED DEFAULT, whatever it is -- no INVFS_RECLAIM_ORPHANS in
+#   the environment): the collector must free blocks, the frees must be
+#   DURABLE across the cut (invf-fsck's on-medium free-block count must go
+#   UP across the kill, which is only possible if the bitmap flush reached
+#   the image), and after the cut every one of the 40 files must read back
+#   BYTE-IDENTICAL -- through vol_read_named, through invf-verify --deep, and
+#   after the volume has been asked to allocate hard on top of exactly the
+#   blocks that were just freed. That last step is the ALIASING probe: if the
+#   collector had freed a page the live root still stands on, the reopen
+#   reads a namespace standing on a block somebody else now owns, and the
+#   rewrite is what makes "somebody else" happen.
+#
+#   ARM B (INVFS_RECLAIM_ORPHANS=0, the documented escape hatch): the same
+#   procedure must free NOTHING -- the free-block count must not rise. This
+#   is the leg's own red control. Without it ARM A proves nothing: a workload
+#   that freed blocks for reasons of its own would satisfy it too.
+#
+#   On a build where the collector is default-OFF, ARM A's durability
+#   assertion fails and the leg fails. That is the point: this leg is what
+#   makes "the default" a measurement rather than a decision.
+#
+# WHAT IT DOES NOT CLAIM, stated rather than omitted:
+#   * The one crash state it cannot reach is "freed in RAM, not yet
+#     flushed". The flush is the statement immediately after the frees
+#     inside the collector, so that window is a handful of instructions and
+#     a cut inside it is a LEAK by construction, never a wrong free.
+#   * The RT30-fallback axis is not re-litigated here. test-v3-orphan-
+#     reclaim.sh legs 3 and 4 own it, with the wrong-predicate red control.
+#   * dm-flakey's drop_writes is the only thing that can discard an
+#     acknowledged write, and it needs a loop device, which transfers zero
+#     bytes in this sandbox (see the leg 7 header). This is a process-death
+#     leg, not a device-failure leg.
+
+RC_T=""   # the driver; a `make` target, so it is built on demand
+
+rc_driver() {
+    if [ ! -x "$B/invf-orphan_test" ]; then
+        make -C "$REPO" bin/invf-orphan_test >"$RC_WORK/driver-build.log" 2>&1 \
+            || { cat "$RC_WORK/driver-build.log"; fail "cannot build bin/invf-orphan_test"; }
+    fi
+    RC_T=$B/invf-orphan_test
+}
+
+rc_work_pick() {   # a DISK-backed scratch: drop_caches is a no-op on tmpfs
+    local c
+    if [ -z "$RC_WORK" ]; then
+        for c in /srv /var/tmp /opt /var/lib; do
+            [ -d "$c" ] || continue
+            [ "$(stat -f -c %T "$c" 2>/dev/null)" = tmpfs ] && continue
+            RC_WORK="$c/invfs-flakey-reclaim"
+            break
+        done
+    fi
+    [ -n "$RC_WORK" ] || RC_WORK=/tmp/invfs-flakey-reclaim
+    rm -rf "$RC_WORK" && mkdir -p "$RC_WORK" || return 1
+    if [ "$(stat -f -c %T "$RC_WORK" 2>/dev/null)" = tmpfs ]; then
+        echo "  WARN: $RC_WORK is tmpfs -- drop_caches cannot evict a tmpfs" >&2
+        echo "        page, so the power cut below is a NO-OP there." >&2
+    fi
+    info "reclaim scratch: $RC_WORK ($(stat -f -c %T "$RC_WORK" 2>/dev/null))"
+}
+
+rc_free() {        # free blocks as recorded ON THE MEDIUM by invf-fsck
+    $B/invf-fsck "$RC_VOL" 2>/dev/null \
+        | sed -n 's/.*free blocks: *\([0-9][0-9]*\).*/\1/p' | tail -1
+}
+
+rc_field() { printf '%s\n' "$1" | tr ' ' '\n' | sed -n "s/^$2=//p" | head -1; }
+
+rc_sudirty() {     # the death really was abrupt.
+                   #
+                   # NOT leg 7's superblock-state check, and the difference
+                   # matters. Leg 7 watches a FUSE daemon, which marks the
+                   # volume DIRTY as it mounts, so CLEAN-on-medium after a
+                   # kill -9 is proof that vol_close never ran. Nothing here
+                   # does: a v3 volume is recovered by replaying the delta
+                   # log, so vol_open does not set the state bit and the
+                   # medium legitimately still says CLEAN from the last
+                   # clean close. Copying leg 7's check here would assert a
+                   # property of the FUSE mount path, not of the collector.
+                   #
+                   # The witness for THIS leg is the driver's own last act:
+                   # `cost` prints its DRAIN ledger, then vol_flush, then
+                   # vol_close. A process that got that far logged DRAIN and
+                   # exited 0. No DRAIN line and a SIGKILL status is the
+                   # death-without-a-close, stated in the driver's terms.
+    local log=$1 wrc=$2
+    if grep -q "^DRAIN " "$log"; then
+        echo "  the driver reached its DRAIN ledger and closed cleanly --" >&2
+        echo "        the process was not cut, so nothing was tested" >&2
+        return 1
+    fi
+    [ "$wrc" -ge 128 ] || {
+        echo "  the driver exited $wrc, which is not a signal death" >&2
+        return 1; }
+    info "    no DRAIN ledger, exit $wrc: it died on SIGKILL with the volume open"
+    return 0
+}
+
+rc_verify() {      # <label>: the bit-exactness invariant, two readers
+    pc_run "orphan_test verify ($1)" "$RC_WORK/verify-$1.log" \
+        "$RC_T" verify "$RC_VOL" "$RC_NFILES" || return 1
+    grep -E "^VERIFY" "$RC_WORK/verify-$1.log" | sed 's/^/  /'
+    grep -q "^VERIFY OK" "$RC_WORK/verify-$1.log" || {
+        echo "  BIT-EXACTNESS BROKEN after $1:" >&2
+        cat "$RC_WORK/verify-$1.log" >&2; return 1; }
+    pc_run "invf-verify --deep ($1)" "$RC_WORK/deep-$1.log" \
+        $B/invf-verify "$RC_VOL" --deep || return 1
+    grep -E "corrupt" "$RC_WORK/deep-$1.log" | sed 's/^/  /'
+    grep -qE "[1-9][0-9]* corrupt" "$RC_WORK/deep-$1.log" && {
+        echo "  invf-verify reports corrupt files after $1" >&2
+        cat "$RC_WORK/deep-$1.log" >&2; return 1; }
+    return 0
+}
+
+rc_fsck() {
+    pc_run "invf-fsck ($1)" "$RC_WORK/fsck-$1.log" $B/invf-fsck "$RC_VOL" || return 1
+    grep -E "^OK$" "$RC_WORK/fsck-$1.log" >/dev/null || {
+        echo "  fsck not clean after $1:" >&2; cat "$RC_WORK/fsck-$1.log" >&2; return 1; }
+    grep -E "bad pages|torn slots" "$RC_WORK/fsck-$1.log" | sed 's/^/  /'
+    return 0
+}
+
+# One cut. <label> <nfold> [ENV=VAL ...] (the ENVs go to the driver only --
+# the verifier and fsck calls below always run in the caller's environment).
+# Echoes "<label> free_before free_after delta collector_freed".
+rc_crash_round() {
+    local label=$1 nfold=$2; shift 2
+    local log="$RC_WORK/crash-$label.log"
+    local before after folds i wrc
+    before=$(rc_free)
+    [ -n "$before" ] || { echo "  $label: cannot read the free-block count" >&2; return 1; }
+    : > "$log"
+    # stdbuf -oL: the COSTFOLD ledger is line-buffered, so the per-fold record
+    # survives the kill instead of dying in stdout's block buffer.
+    env "$@" stdbuf -oL "$RC_T" cost "$RC_VOL" 0 "$RC_NGEN" "$nfold" \
+        >"$log" 2>&1 &
+    RC_CRASH_PID=$!
+    # Do not cut before the collector has anything to do: the bounded pass only
+    # frees once BOTH RT30 slots have moved off a root, which takes a few
+    # published generations.
+    for i in $(seq 1 400); do
+        folds=$(grep -c COSTFOLD "$log" 2>/dev/null); folds=${folds:-0}
+        [ "$folds" -ge 8 ] && break
+        kill -0 "$RC_CRASH_PID" 2>/dev/null || break
+        sleep 0.25
+    done
+    [ "${folds:-0}" -ge 8 ] || {
+        echo "  $label: the driver reached only ${folds:-0} fold(s) -- the" >&2
+        echo "        crash window closed; raise RC_NFOLD." >&2
+        kill -9 "$RC_CRASH_PID" 2>/dev/null; wait "$RC_CRASH_PID" 2>/dev/null
+        RC_CRASH_PID=""; return 1; }
+    sleep "$(( (RC_JITTER + i * 13) % 9 + 1 ))"   # seeded spread of cut points
+    kill -9 "$RC_CRASH_PID" 2>/dev/null
+    wait "$RC_CRASH_PID" 2>/dev/null; wrc=$?
+    RC_CRASH_PID=""
+    [ "$wrc" = 0 ] && {
+        echo "  $label: the driver FINISHED on its own (nfold=$nfold) -- no" >&2
+        echo "        crash happened; raise RC_NFOLD." >&2; return 1; }
+    info "$label: kill -9 after $folds published root generations, no vol_close"
+    rc_sudirty "$log" "$wrc" || return 1
+    # the surrogate: write back, then make the medium the only copy left
+    sync
+    if sudo -n sh -c 'echo 3 > /proc/sys/vm/drop_caches' 2>/dev/null; then
+        info "$label: page cache dropped (drop_caches=3): the reopen re-reads the medium"
+    else
+        echo "  WARN: no root -- the page-cache cut was SKIPPED; $label degraded" >&2
+        echo "        to kill -9 + reopen (process death only, not a power cut)." >&2
+        return 1
+    fi
+    after=$(rc_free)
+    [ -n "$after" ] || { echo "  $label: cannot read the free-block count after the cut" >&2; return 1; }
+    local freed
+    freed=$(sed -n 's/.*freed=\([0-9][0-9]*\).*/\1/p' "$log" \
+            | awk '{s+=$1} END{print s+0}')
+    echo "$label $before $after $(( after - before )) $freed" >> "$RC_WORK/ledger.txt"
+    printf '  %s: free %s -> %s (%+d blocks on the medium across the cut)\n' \
+        "$label" "$before" "$after" "$(( after - before ))"
+    printf '  %s:        the collector reported %s page(s) freed before it died\n' \
+        "$label" "$freed"
+    return 0
+}
+
+# The ALIASING probe. Rewrite every file and force more base generations, so
+# the allocator lays fresh base pages and segments over exactly the blocks the
+# collector just freed. A page that was freed while the live root still stood
+# on it does not fail at this point -- it fails HERE, when the block gets a
+# new owner and the read-back diverges.
+rc_reuse_probe() {
+    local label=$1
+    pc_run "orphan_test build ($label)" "$RC_WORK/probe-$label.log" \
+        "$RC_T" build "$RC_VOL" "$RC_NFILES" 60 || {
+            echo "  the aliasing probe could not rewrite the volume:" >&2
+            cat "$RC_WORK/probe-$label.log" >&2; return 1; }
+    info "$label: rewrote all $RC_NFILES files and forced 60 more base generations"
+    info "$label:        on top of the blocks the collector had just freed"
+    rc_verify "probe-$label" || return 1
+    rc_fsck "probe-$label" || return 1
+    return 0
+}
+
+leg8() {
+    LEG=leg8-reclaim
+    say "[8] orphan reclaim across a power cut: frees + bitmap flush + kill -9"
+    rc_work_pick || fail "no scratch for the reclaim leg"
+    rc_driver
+    RC_VOL="$RC_WORK/rc.img"
+    local size_gb
+    size_gb=$(awk -v m="$RC_SIZE_MB" 'BEGIN{printf "%.4f", m/1024}')
+    truncate -s "${RC_SIZE_MB}M" "$RC_VOL" || fail "truncate $RC_VOL"
+    $B/invf-mkfs "$RC_VOL" "$size_gb" >"$RC_WORK/mkfs.log" 2>&1 \
+        || { cat "$RC_WORK/mkfs.log"; fail "leg8 mkfs"; }
+    info "volume: $RC_VOL (${RC_SIZE_MB} MB image file, no loop device)"
+    info "collector gate in this environment: ${INVFS_RECLAIM_ORPHANS:-<unset, shipped default>}"
+
+    # ---- the leak, or nothing below is anything
+    local out orphan
+    out=$("$RC_T" build "$RC_VOL" "$RC_NFILES" "$RC_NGEN" 2>&1) \
+        || { echo "$out"; fail "leg8 build"; }
+    echo "$out" | grep -E "^(FILES|FOLD)" | sed 's/^/  /'
+    orphan=$(rc_field "$out" PAGES_ORPHAN)
+    [ -n "$orphan" ] || fail "build did not report PAGES_ORPHAN"
+    [ "$orphan" -gt 0 ] || fail "no orphan base pages to reclaim -- leg 8 would pass vacuously"
+    info "$orphan of the allocated base pages are orphans no RT30 slot can name"
+    rc_verify "baseline" || fail "leg8: read-back failed BEFORE any reclaim"
+    rc_fsck "baseline"   || fail "leg8: fsck failed before any reclaim"
+
+    # ---- ARM A: the shipped default
+    say "  ARM A: the shipped default -- the collector must free, durably"
+    local a_delta=0 a_freed=0 a_label line
+    local round
+    for round in $(seq 1 "$RC_ROUNDS"); do
+        a_label="A$round"
+        rc_crash_round "$a_label" "$RC_NFOLD" INVFS_RECLAIM_STATS=1 \
+            || fail "leg8 arm A round $round: the crash itself did not happen"
+        rc_verify "$a_label" || fail "leg8 arm A round $round: bytes did not survive the cut"
+        rc_fsck "$a_label"   || fail "leg8 arm A round $round: fsck after the cut"
+        rc_reuse_probe "$a_label" || fail "leg8 arm A round $round: aliasing probe"
+        line=$(grep "^$a_label " "$RC_WORK/ledger.txt" | tail -1)
+        a_delta=$(( a_delta + $(echo "$line" | awk '{print $4}') ))
+        a_freed=$(( a_freed + $(echo "$line" | awk '{print $5}') ))
+    done
+    info "ARM A: the collector reported $a_freed page(s) freed across $RC_ROUNDS cut(s)"
+    info "ARM A: on-medium free-block delta across the cuts: $a_delta"
+    [ "$a_freed" -gt 0 ] \
+        || fail "ARM A: the collector freed NOTHING under the shipped default -- \
+the reclaim power-loss path was never exercised, so this leg proves nothing"
+    [ "$a_delta" -gt 0 ] \
+        || fail "ARM A: no free block survived the cut -- the collector's frees \
+never reached the medium, so the crash leg proved nothing (or the collector \
+did not run)"
+
+    # ---- ARM B: the documented escape hatch, and this leg's red control
+    say "  ARM B: INVFS_RECLAIM_ORPHANS=0 -- the collector must free nothing"
+    rc_crash_round B1 "$RC_NFOLD" INVFS_RECLAIM_ORPHANS=0 \
+        || fail "leg8 arm B: the crash itself did not happen"
+    rc_verify B1 || fail "leg8 arm B: bytes did not survive the cut"
+    rc_fsck B1   || fail "leg8 arm B: fsck after the cut"
+    rc_reuse_probe B1 || fail "leg8 arm B: aliasing probe"
+    local b_line b_delta b_freed
+    b_line=$(grep "^B1 " "$RC_WORK/ledger.txt" | tail -1)
+    b_delta=$(echo "$b_line" | awk '{print $4}')
+    b_freed=$(echo "$b_line" | awk '{print $5}')
+    info "ARM B: the collector reported $b_freed page(s) freed; on-medium delta $b_delta"
+    [ "$b_freed" = 0 ] \
+        || fail "ARM B: INVFS_RECLAIM_ORPHANS=0 still freed $b_freed page(s) -- \
+the gate is not an off switch, so ARM A's delta proves nothing about the gate"
+    [ "$b_delta" -le 0 ] \
+        || fail "ARM B: the free-block count ROSE by $b_delta with the collector \
+switched off -- ARM A's rise was the workload, not the collector, and the \
+whole leg is void"
+
+    # ---- ARM C: dm-flakey drop_writes, on the shared flakey device.
+    #
+    # THIS IS NOT A THIRD COPY OF CONDITION (3), and the difference is the
+    # point. Condition (3) is a process-death state: frees, bitmap flushed,
+    # no clean close. dm-flakey cannot produce it -- it discards ACKNOWLEDGED
+    # WRITES, and the driver under it is still running normally. So ARM C
+    # covers a different axis and asserts a different thing: that when the
+    # medium throws away writes in the middle of the reclaim window, the
+    # volume still reads back BIT-EXACT and nothing is aliased.
+    #
+    # Note what is deliberately NOT asserted here. The collector's bitmap
+    # flush is an acknowledged write, so under drop_writes it may simply
+    # never land: the medium's bitmap then still says ALLOCATED for the freed
+    # blocks. That is the SAFE direction -- a leak, never a shared block --
+    # and a leg that failed on it would be asserting that the filesystem
+    # defeats a lying write cache, which is not a property it can have. The
+    # only reclaim claim ARM C makes is the one that matters: the frees that
+    # DID land did not cost us a byte.
+    local c_freed="skipped"
+    if [ "${FLAKEY_RC_FLAKEY:-1}" = 1 ] && [ -b "$DM" ]; then
+        say "  ARM C: dm-flakey drop_writes through the reclaim window"
+        dm_set up || fail "leg8 arm C: could not bring the flakey device up"
+        RC_VOL_SAVE=$RC_VOL
+        RC_VOL="$DM"     # the helpers all read RC_VOL; point them at the device
+        $B/invf-mkfs "$DM" "$size_gb" >"$RC_WORK/mkfs-c.log" 2>&1 \
+            || { cat "$RC_WORK/mkfs-c.log"; fail "leg8 arm C mkfs"; }
+        out=$("$RC_T" build "$DM" "$RC_NFILES" "$RC_NGEN" 2>&1) \
+            || { echo "$out"; fail "leg8 arm C build"; }
+        c_orphan=$(rc_field "$out" PAGES_ORPHAN)
+        info "ARM C: $c_orphan orphan base pages to reclaim on the device"
+        rc_verify "C-base" || fail "leg8 arm C: read-back failed before the window"
+        clog="$RC_WORK/crash-C1.log"; : > "$clog"
+        stdbuf -oL "$RC_T" cost "$DM" 0 "$RC_NGEN" "$RC_NFOLD" >"$clog" 2>&1 &
+        RC_CRASH_PID=$!
+        for i in $(seq 1 400); do
+            folds=$(grep -c COSTFOLD "$clog" 2>/dev/null); folds=${folds:-0}
+            [ "$folds" -ge 8 ] && break
+            kill -0 "$RC_CRASH_PID" 2>/dev/null || break
+            sleep 0.25
+        done
+        [ "${folds:-0}" -ge 8 ] || {
+            kill -9 "$RC_CRASH_PID" 2>/dev/null; wait "$RC_CRASH_PID" 2>/dev/null
+            RC_CRASH_PID=""; fail "leg8 arm C: the driver never got going"; }
+        # the device now lies about every write it acknowledges
+        dm_set drop_slow || fail "leg8 arm C: could not enter the drop_writes window"
+        info "ARM C: drop_writes engaged (20s up / 1s down) with the collector running"
+        sleep 6
+        kill -9 "$RC_CRASH_PID" 2>/dev/null
+        wait "$RC_CRASH_PID" 2>/dev/null; wrc=$?
+        RC_CRASH_PID=""
+        rc_sudirty "$clog" "$wrc" || fail "leg8 arm C: the driver was not cut"
+        dm_set up || fail "leg8 arm C: could not restore the device"
+        sync; sleep 0.5
+        c_freed=$(sed -n 's/.*freed=\([0-9][0-9]*\).*/\1/p' "$clog" | awk '{s+=$1} END{print s+0}')
+        info "ARM C: the collector freed $c_freed page(s) before it died; the"
+        info "ARM C:        medium may have discarded some or all of that flush"
+        [ "$c_freed" -gt 0 ] \
+            || fail "ARM C: the collector freed NOTHING in the window -- the arm \
+was vacuous, so it proved nothing about write loss"
+        rc_verify C1 || fail "leg8 arm C: bytes did not survive acknowledged-write loss"
+        rc_fsck C1   || fail "leg8 arm C: fsck after the write-loss window"
+        rc_reuse_probe C1 || fail "leg8 arm C: aliasing probe"
+        RC_VOL=$RC_VOL_SAVE
+    else
+        say "  ARM C: SKIPPED (FLAKEY_RC_FLAKEY=0 or no flakey device)"
+        info "        the dm-flakey acknowledged-write-loss arm did not run"
+    fi
+
+    local ev="$ART/reclaim-$(date +%Y%m%d-%H%M%S)"
+    mkdir -p "$ev" && cp -a "$RC_WORK"/crash-*.log "$RC_WORK/ledger.txt" "$ev"/ 2>/dev/null
+    info "evidence: $ev"
+    echo "  ARM A, shipped default: $a_freed pages freed by the collector,"
+    echo "        $a_delta block(s) reclaimed on the medium across $RC_ROUNDS cut(s)"
+    echo "  ARM B, INVFS_RECLAIM_ORPHANS=0: $b_freed freed, $b_delta reclaimed"
+    echo "  ARM C, dm-flakey drop_writes: $c_freed freed; bit-exactness held"
+}
+
 # -------------------------------------------------------------- main ----
 
 echo "WP22b flakey soak: seed=$SEED soak=${SOAK_S}s dev=$DM work=$FLK"
@@ -1206,8 +1676,47 @@ sudo -n modprobe dm-flakey 2>/dev/null
 sudo -n dmsetup targets 2>/dev/null | grep -q flakey \
     || { echo "dm-flakey target unavailable in this kernel — STOP" >&2; exit 2; }
 info "dm-flakey: $(sudo -n dmsetup targets | grep flakey)"
-AVAIL=$(df --output=avail -B1M /tmp 2>/dev/null | tail -1 | tr -d ' ')
-[ "${AVAIL:-0}" -ge 4000 ] || echo "  WARN: /tmp has ${AVAIL}MB free (want >=4000)"
+
+# Scratch space: a HARD stop, on the filesystem that will actually be used.
+#
+# This used to measure /tmp and only warn. Both halves were wrong. It
+# measured the wrong filesystem -- FLAKEY_WORK may point anywhere, and the
+# check did not follow it -- and it warned its way into a condition the next
+# line calls fatal, so a run that could not host the volume proceeded and
+# failed later, somewhere unrelated, with the tool's own error as the only
+# evidence. A scratch that cannot hold the image produces
+# "device 0 is smaller than the device table says" from vol_open, which
+# reads like a capacity bug in the engine and is not one.
+#
+# A stop is the right call rather than an automatic fallback: legs 7 and 8
+# additionally need a DISK-backed scratch, because drop_caches cannot evict
+# a tmpfs page, so quietly relocating the scratch would change what the leg
+# proves. Failing loudly and naming the override costs one line of retype
+# and cannot be misread as an engine regression.
+mkdir -p "$FLK" 2>/dev/null || {
+    echo "STOP: cannot create the scratch $FLK" >&2
+    echo "      override with FLAKEY_WORK=/srv/bench/<name>" >&2; exit 2; }
+AVAIL=$(df --output=avail -B1M "$FLK" 2>/dev/null | tail -1 | tr -d ' ')
+AVAIL_FS=$(stat -f -c %T "$FLK" 2>/dev/null || echo "?")
+NEED_MB=${FLAKEY_MIN_FREE_MB:-4000}
+if [ "${AVAIL:-0}" -lt "$NEED_MB" ]; then
+    cat >&2 <<EOF
+
+STOP: the scratch for this run has ${AVAIL:-?} MB free and this suite needs
+      >= ${NEED_MB} MB (a ${SIZE_GB}G backing image, a ~244 MB corpus, and the
+      soak's own artifacts).
+
+  scratch:   $FLK   (on $AVAIL_FS)
+  override:  FLAKEY_WORK=/srv/bench/<name> bash $0
+
+Proceeding anyway converts a full disk into a confusing failure deep inside
+a leg, so this stops here instead. Legs 7 and 8 need a DISK-backed scratch
+for a second reason: drop_caches cannot evict a tmpfs page, so a tmpfs
+scratch silently turns their power cut into a no-op.
+EOF
+    exit 2
+fi
+info "scratch: $FLK on $AVAIL_FS, ${AVAIL} MB free (need >= ${NEED_MB})"
 # clear OUR leftovers from a previous run
 sudo -n dmsetup remove "$DEV" >/dev/null 2>&1
 if [ -f "$BACK" ]; then
@@ -1228,7 +1737,8 @@ want_leg 4 && leg4
 want_leg 5 && leg5
 want_leg 6 && leg6
 want_leg 7 && leg7
+want_leg 8 && leg8
 
 say "FLAKEY E2E: PASS  (seed=$SEED, $((SECONDS - T0))s total)"
-echo "  legs: re-mkfs-orphans / baseline / error-storm / torn-sweep / mid-seal kill / ${SOAK_S}s soak / compact-flip chaos / page-cache power loss"
+echo "  legs: re-mkfs-orphans / baseline / error-storm / torn-sweep / mid-seal kill / ${SOAK_S}s soak / compact-flip chaos / page-cache power loss / reclaim power loss"
 echo "  scratch $FLK cleaned; on failure the image + logs land in $ART"
