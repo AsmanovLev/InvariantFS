@@ -139,6 +139,15 @@ if [ -s "$tmpd/rot" ]; then
     viol=1
 fi
 
+# 4. citation drift: AGENTS.md 1.7 also requires a cited LINE NUMBER to
+#    still point at something. Section 3 above strips the :NNN anchor and
+#    checks only the path, so a citation whose file still exists but whose
+#    line has drifted past the end of the file passes unnoticed. Citations
+#    rot silently as files grow.
+if [ "$viol" -eq 0 ]; then
+    python3 tools/check-citations.py || viol=1
+fi
+
 if [ "$viol" -eq 0 ]; then
     echo "repo hygiene: OK ($(git ls-files | wc -l) tracked files, no binaries/oversize outside allowlist)"
 else
