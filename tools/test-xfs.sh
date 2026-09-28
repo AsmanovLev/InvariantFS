@@ -22,10 +22,12 @@
 #   hand self-test first (enumerate/extract/strip/rebuild bit-exact, MRMP
 #   map validated by an inline-python emulation of the FS map guard),
 #   then FS e2e:
-#     admission: default ARC 256M -> GENERIC_MEMLIMIT{19}; raised
-#       INVFS_ARC_BYTES=1G -> decompose. Second admission leg:
-#       INVFS_DEC_MEM_LIMIT=64K (the pack's estimate is sum+64MiB) ->
-#       GENERIC_MEMLIMIT{19} even with ARC raised.
+#     admission: the ARC budget gates the pack, and only once the budget is
+#       STATED -- INVFS_ARC_BYTES=256M (the default budget) refuses the
+#       300 MiB container with GENERIC_MEMLIMIT{19}; raised to 1G it
+#       decomposes. Second admission leg pins the OTHER knob:
+#       INVFS_DEC_MEM_LIMIT is not an admission input for a seekable pack
+#       (xfs declares a map), so a starved decode limit must NOT refuse.
 #     main: sweep -> CONTAINER{19,1} stamps -> member classes (text ->
 #       TEXT{PPMD,1}, ELF -> BATCHED_BIN{ZSTD_BCJ,1}) -> verify --deep ->
 #       sha256 bit-exact (containers + direct member reads) -> ranged
@@ -482,12 +484,25 @@ for f in fs-c.xfs fs-d.xfs; do
     $B/invf-cp "$IMGNEG" "$WORK/orig/$f" "$f" >/dev/null
 done
 
-echo "== admission leg 1: default ARC (256M) -> GENERIC_MEMLIMIT{19} =="
+echo "== admission leg 1: ARC 256M (the default budget, stated) -> GENERIC_MEMLIMIT{19} =="
+# WP-FIX: the budget is STATED here rather than left implicit. The pack's
+# ARC admission is guarded on the operator having set one
+# (src/core/vol_cpack.c:2859, `getenv("INVFS_ARC_BYTES") && v->arc_budget
+# && full_len > v->arc_budget`): the read cache is not the decode budget,
+# so the built-in 256 MB default is deliberately not an admission input --
+# otherwise every container over 256 MB would be silently un-decomposable on
+# a stock config. Measured on this fixture (314572800 B): no env -> the pack
+# fires; ARC=256M -> refused; ARC=1M -> refused; ARC=1G -> fires; ARC=512M ->
+# fires. The 256M/1G boundary this leg pins is unchanged by stating it, and
+# it is the same shape as every sibling pack suite (test-ext4fs.sh:778,
+# test-ntfs.sh:947, test-p7z.sh:667, test-qcow2.sh:1184, test-rawdisk.sh:702
+# all set INVFS_ARC_BYTES=1M/8M explicitly for the same reason).
 $B/invf-mkfs "$IMGMEM" 2 >/dev/null
 $B/invf-cp "$IMGMEM" "$WORK/orig/fs-a.xfs" fs-a.xfs >/dev/null
-$B/invf-sweep "$IMGMEM" > "$WORK/sweep-mem.log" 2>&1 || { cat "$WORK/sweep-mem.log"; exit 1; }
+INVFS_ARC_BYTES=256M $B/invf-sweep "$IMGMEM" > "$WORK/sweep-mem.log" 2>&1 \
+    || { cat "$WORK/sweep-mem.log"; exit 1; }
 if grep -q "xfs (codecpack)" "$WORK/sweep-mem.log"; then
-    echo "FAIL: decomposition ran under the default ARC budget"; exit 1
+    echo "FAIL: decomposition ran under a 256M ARC budget"; exit 1
 fi
 C=$("$WORK/classof" "$IMGMEM" fs-a.xfs)
 echo "  fs-a.xfs (default ARC): $C"
@@ -498,22 +513,36 @@ cmp -s "$WORK/orig/fs-a.xfs" "$WORK/out/mem1.xfs" \
 rm -f "$WORK/out/mem1.xfs"
 echo "  300M container waits RAW, stamped, bit-exact"
 
-echo "== admission leg 2: INVFS_DEC_MEM_LIMIT=64K (estimate gate) =="
+echo "== admission leg 2: INVFS_DEC_MEM_LIMIT does not gate a seekable pack =="
+# WP-FIX: this leg used to assert the opposite -- that a 64K decode-memory
+# limit refuses the container with GENERIC_MEMLIMIT{19}. That is no longer a
+# reachable decision for xfs, and the reason is the pack's shape, not the
+# knob. xfs.codecpack/manifest declares `map = bin/xfs map {in} {out}`, so
+# the pack is SEEKABLE, and the engine exempts seekable packs from the
+# decode-memory guard (src/core/vol_cpack.c:2883,
+# `if (ws && ws > vol_get_dec_mem_limit(v) && !def->map)`): the estimate
+# branch is skipped for a map pack (`:2865`) and ws stays 0, so no limit can
+# be exceeded. The rationale is in the code and is sound -- a seekable
+# container never buffers the archive, the bytes stream through the read
+# path -- so there is no memory to guard. ARC (leg 1) is the one remaining
+# GENERIC_MEMLIMIT trigger for this pack.
+#
+# So this leg now pins the measured contract instead of the dead one: a
+# starved decode limit must NOT refuse, and the file must still be admitted
+# once the ARC budget allows it. If a future change re-arms the decode guard
+# for map packs, this assertion fires and the vdi/ntfs/p7z DEC_MEM legs
+# (the same dead expectation, see the report) get re-evaluated with it.
 $B/invf-mkfs "$IMGMEM2" 2 >/dev/null
 $B/invf-cp "$IMGMEM2" "$WORK/orig/fs-a.xfs" fs-a.xfs >/dev/null
 INVFS_ARC_BYTES=1G INVFS_DEC_MEM_LIMIT=64K $B/invf-sweep "$IMGMEM2" \
     > "$WORK/sweep-mem2.log" 2>&1 || { cat "$WORK/sweep-mem2.log"; exit 1; }
-if grep -q "xfs (codecpack)" "$WORK/sweep-mem2.log"; then
-    echo "FAIL: decomposition ran under a 64K decode-memory limit"; exit 1
+if ! grep -q "xfs (codecpack)" "$WORK/sweep-mem2.log"; then
+    echo "FAIL: a seekable pack was refused by a decode-memory limit"; cat "$WORK/sweep-mem2.log"; exit 1
 fi
 C=$("$WORK/classof" "$IMGMEM2" fs-a.xfs)
-echo "  fs-a.xfs (dec_mem 64K): $C"
-[ "$C" = "cls=5 algo=19 gen=1" ] || { echo "FAIL: want GENERIC_MEMLIMIT{XFS=19,1}"; exit 1; }
-$B/invf-cat "$IMGMEM2" fs-a.xfs "$WORK/out/mem2.xfs" >/dev/null
-cmp -s "$WORK/orig/fs-a.xfs" "$WORK/out/mem2.xfs" \
-    || { echo "FAIL: memlimit read not bit-exact"; exit 1; }
-rm -f "$WORK/out/mem2.xfs"
-echo "  estimate sum+64MiB is the admission input; policy refusal bit-exact"
+echo "  fs-a.xfs (dec_mem 64K, seekable): $C"
+[ "$C" = "cls=3 algo=19 gen=1" ] || { echo "FAIL: want CONTAINER{XFS=19,1}"; exit 1; }
+echo "  decode-memory limit is not an admission input for a map pack (ws=0)"
 
 echo "== sweep (INVFS_ARC_BYTES=1G): decomposition =="
 INVFS_ARC_BYTES=1G $B/invf-sweep "$IMG" > "$WORK/sweep1.log" 2>&1 \
