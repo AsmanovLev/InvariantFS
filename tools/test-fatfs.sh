@@ -59,6 +59,11 @@ set -e
 set -o pipefail
 
 REPO="${REPO:-$(cd "$(dirname "$0")/.." && pwd)}"   # override with the worktree when testing a branch
+
+# Hardened loop mounting: walks for a free device that is not wedged
+# read-only, and proves the mount is writable before any fixture is
+# written through it. See tools/lib-loopmount.sh for why.
+. "$REPO/tools/lib-loopmount.sh"
 B=$REPO/bin
 PACK=$REPO/tools/codecpacks/fatfs.codecpack
 WORK=/dev/shm/wp16fatfs
@@ -235,11 +240,11 @@ mcopy -i "$WORK/orig/fat16.img" "$WORK/stage/BULK.TXT" ::BULK.TXT
 # --- exfat.img: 32MB, loop-mount populated (mtools has no exFAT) ----------
 dd if=/dev/zero of="$WORK/orig/exfat.img" bs=1M count=32 status=none
 mkfs.exfat "$WORK/orig/exfat.img" >/dev/null
-sudo -n mount -o loop,uid="$(id -u)" "$WORK/orig/exfat.img" "$WORK/mnt"
+invfs_loop_mount "$WORK/orig/exfat.img" "$WORK/mnt" -o "uid=$(id -u)"
 cp -r "$WORK/stage"/* "$WORK/mnt/"
 head -c 3145728 /dev/urandom > "$WORK/mnt/frag.bin"
 sync
-sudo -n umount "$WORK/mnt"
+invfs_loop_umount "$WORK/mnt"
 # the kernel driver usually lands frag.bin contiguous (NoFatChain). Chain
 # mode is part of the format, so force it deterministically: scatter
 # frag.bin's clusters to strided free clusters, re-link the FAT chain,

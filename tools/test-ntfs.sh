@@ -46,6 +46,11 @@ set -e
 set -o pipefail
 
 REPO="${REPO:-$(cd "$(dirname "$0")/.." && pwd)}"   # override with the worktree when testing a branch
+
+# Hardened loop mounting: walks for a free device that is not wedged
+# read-only, and proves the mount is writable before any fixture is
+# written through it. See tools/lib-loopmount.sh for why.
+. "$REPO/tools/lib-loopmount.sh"
 B=$REPO/bin
 PACK=$REPO/tools/codecpacks/ntfs.codecpack
 WORK=${INVFS_NTFS_WORK:-/srv/bench/wp16ntfs-$$}
@@ -144,7 +149,7 @@ echo "== build the NTFS image (mkfs.ntfs + sudo loop-mount population) =="
 mkdir -p "$WORK/mnt"
 dd if=/dev/zero of="$WORK/fs.ntfs" bs=1M count=64 status=none
 mkfs.ntfs -Q -F "$WORK/fs.ntfs" >/dev/null
-sudo -n mount -o loop -t ntfs-3g "$WORK/fs.ntfs" "$WORK/mnt"
+invfs_loop_mount "$WORK/fs.ntfs" "$WORK/mnt" -t ntfs-3g
 sudo -n bash -s "$WORK" <<'SH'
 set -e
 W=$1
@@ -168,23 +173,23 @@ sync
 cp "$W/src/frag.bin" "$M/frag.bin"                 # >4MB, forced into holes
 sync
 SH
-sudo -n umount "$WORK/mnt"
+invfs_loop_umount "$WORK/mnt"
 echo "  fs.ntfs: $(stat -c%s "$WORK/fs.ntfs") bytes, populated"
 
 echo "== decline-leg fixtures =="
 # 4K-sector image: valid NTFS, outside the v1 support window -> decline
 dd if=/dev/zero of="$WORK/fs4k.ntfs" bs=1M count=32 status=none
 mkfs.ntfs -Q -F -s 4096 "$WORK/fs4k.ntfs" >/dev/null
-sudo -n mount -o loop -t ntfs-3g "$WORK/fs4k.ntfs" "$WORK/mnt"
+invfs_loop_mount "$WORK/fs4k.ntfs" "$WORK/mnt" -t ntfs-3g
 echo "four k sector file" | sudo -n tee "$WORK/mnt/afile.txt" >/dev/null
-sudo -n umount "$WORK/mnt"
+invfs_loop_umount "$WORK/mnt"
 # zero-member image: only resident/tiny files -> enumerate ok, empty table
 dd if=/dev/zero of="$WORK/fs-resident.ntfs" bs=1M count=16 status=none
 mkfs.ntfs -Q -F "$WORK/fs-resident.ntfs" >/dev/null
-sudo -n mount -o loop -t ntfs-3g "$WORK/fs-resident.ntfs" "$WORK/mnt"
+invfs_loop_mount "$WORK/fs-resident.ntfs" "$WORK/mnt" -t ntfs-3g
 echo "small" | sudo -n tee "$WORK/mnt/small.txt" >/dev/null
 sudo -n touch "$WORK/mnt/empty.txt"
-sudo -n umount "$WORK/mnt"
+invfs_loop_umount "$WORK/mnt"
 # corrupt: fixup trailer of an in-use record broken (record 5 = root dir)
 cp "$WORK/fs.ntfs" "$WORK/fs-corrupt.ntfs"
 python3 - "$WORK/fs-corrupt.ntfs" <<'PY'
