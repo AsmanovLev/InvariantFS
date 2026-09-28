@@ -49,7 +49,14 @@ PACK=$REPO/tools/codecpacks/xfs.codecpack
 # scratch lives on /tmp (a separate tmpfs): only the blkio-opened VOLUME
 # images must sit under /dev/shm with relative paths (the header note);
 # /dev/shm fills up fast when several pack waves soak at once
-WORK=/tmp/wpxfs
+#
+# WP-FIX: /tmp is a 3.8 GB shared tmpfs on this host, and the suite needs
+# well over a gigabyte, so a run there failed with
+#   xfs: error: write: No space left on device
+# and then left 1327 MB of scratch behind, which filled /tmp for every other
+# job on the machine. Per-process directory on the disk-backed volume, with
+# the override still honoured.
+WORK=${INVFS_XFS_WORK:-/srv/bench/wpxfs-$$}
 IMG=wp16xfs.img
 IMGMEM=wp16xfs-mem.img
 IMGMEM2=wp16xfs-mem2.img
