@@ -348,25 +348,40 @@ invf-sweep /path/to/volume.img                # offline (volume unmounted)
 invf-sweep /path/to/volume.img --dry-run      # show what would happen
 invf-sweep /path/to/volume.img --seal         # also write parity seals
 
-# In FUSE: full pass, and it arms NO savepoint — see the warning below
+# In FUSE: full pass, and it arms a savepoint — see the note below
 kill -USR1 $(pidof invf-fuse)                  # request sweep
 setfattr -n user.invfs.sweep -v 1 /mount/point  # same, via xattr
 ```
 
-> **Which triggers arm a rollback savepoint (v3).** Only two do. The
-> offline `invf-sweep` captures an SPT0 savepoint before the walk
-> (`tools/invf-sweep.c:1689`), and so does the in-FUSE watermark pass
-> (`-o raw_watermark=<pct>` → `invf_sweep_worker(1)`,
-> `src/cli/fuse_fs.c:1883` → `spt0_capture` at `src/cli/fuse_fs.c:1710-1718`).
-> **`kill -USR1` and the `user.invfs.sweep` xattr arm nothing.** Both just
-> set the same in-process flag (`src/cli/fuse_fs.c:1680`, `:1798`, `:2539-2541`),
-> and the sweep thread runs `invf_sweep_worker(0)` (`src/cli/fuse_fs.c:1834`) —
-> "the SIGUSR1 path passes 0 and keeps its historic uncheckpointed behavior"
-> (`src/cli/fuse_fs.c:1696`). So **do not try to roll back after a USR1 or
-> xattr sweep on v3**: there is no save point, `invf-rollback` refuses with
-> `no save point` and exit 1 (`tools/invf-rollback.c:75-78`) — and it refuses
-> *after* the sweep has already rewritten the data. If you want the rollback
-> window, mount with `-o raw_watermark=<pct>` or run `invf-sweep` offline.
+> **Which triggers arm a rollback savepoint (v3).** All of them. The
+> offline `invf-sweep` captures an SPT0 savepoint in `prepare`, before the
+> walk (`tools/invf-sweep.c:1689`), and so does every full pass the FUSE
+> daemon runs: the watermark pass (`-o raw_watermark=<pct>`) and, since
+> WP134, `kill -USR1` and the `user.invfs.sweep` xattr too. All three
+> in-FUSE triggers set the same in-process flag
+> (`src/cli/fuse_fs.c:1678`, `:1889`), and the sweep thread's
+> `invf_sweep_worker` takes the same capture at the same point: under
+> `g_io_lock`, after policy and before `vol_collect_sweepables`
+> (`src/cli/fuse_fs.c:1753-1782`, the walk at `:1795`). **So a USR1 or
+> xattr sweep on v3 CAN be rolled back**: unmount, then `invf-rollback`.
+> The daemon prints that command when it arms the window, and
+> `getfattr -n user.invfs -m- /` reports `savepoint=live|none` so the
+> operator can see the window instead of taking the daemon's word for it.
+>
+> **The window costs the blocks it pins, for one generation.** A capture
+> pins every block the pre-sweep generation's recipes named, so those
+> blocks stay allocated while the window is live; the next bare sweep
+> drops the old window and reclaims what no live recipe still names
+> (§2.4 step 2). Measured on a 12-file / 3.0 MiB text corpus plus a
+> 3.0 MiB TAR (v3 image, `invf-mkfs` + `invf-import`, then `kill -USR1`):
+> the pass pinned **414 blocks** in a 33-block mark set, and the entire
+> free-block difference against the same sweep run with no window was
+> **447 blocks** — the pin plus the mark set, and nothing else. Same order
+> of magnitude as the 478-block lane lag above: one generation, not a leak.
+>
+> The USR1/xattr pass **fails closed**: if the capture is refused it
+> abandons the pass rather than rewrite the data with no way back. The
+> watermark pass keeps its older fail-open behaviour.
 
 `INVFS_SWEEP_INTERVAL=<seconds>` is **not** the worker above. It enables a
 1 Hz in-daemon loop that drains only `vol_sweep_pending` — the write path's
@@ -388,13 +403,16 @@ To **undo** the last sweep (e.g., a sweep that mis-clustered data):
 invf-rollback /path/to/volume.img
 ```
 
-> **There may be nothing to roll back to.** On v3 a savepoint only exists if
-> something *captured* one, and that is only the offline `invf-sweep` and the
-> in-FUSE watermark pass (§2.5). A sweep triggered by `kill -USR1` or the
-> `user.invfs.sweep` xattr rewrites the data with no window behind it, and
-> `invf-rollback` then prints `no save point` and exits 1
-> (`tools/invf-rollback.c:75-78`) — after the damage, not before. Capture a
-> savepoint first (offline sweep, or `-o raw_watermark=<pct>`) if you need one.
+> **Check there is something to roll back to.** On v3 a savepoint only
+> exists if something *captured* one, and since WP134 that is every sweep
+> trigger: the offline `invf-sweep`, the in-FUSE watermark pass, `kill
+> -USR1`, and the `user.invfs.sweep` xattr (§2.5). The USR1/xattr pass
+> fails closed, so a data-rewriting pass that ran is a pass that got its
+> window. If `invf-rollback` still prints `no save point` and exits 1
+> (`tools/invf-rollback.c:75-78`), no trigger armed one on this volume —
+> check `getfattr -n user.invfs -m- /` for `savepoint=none` (a live
+> window from a *previous* pass may also have been consumed by an earlier
+> rollback, which is the point of no return).
 
 On v3, rollback is built on **SPT0 savepoints** (`vol_spt0.c`): the 32-byte
 `SPT0` descriptor at block-0 offset `0xA00` records

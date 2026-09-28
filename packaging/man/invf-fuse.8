@@ -82,6 +82,21 @@ by
 inside the mount (root only), or by
 .BR invf-sweep (8)
 run offline.
+.PP
+On a Meta-v3 volume every full pass the daemon runs
+.RB ( "\-\-USR1" ", the " user.invfs.sweep " xattr, and the " raw_watermark
+kick alike)
+captures an SPT0 save point
+.RB ( invf\-rollback (8))
+before it rewrites anything, so the pass can be undone. The daemon logs
+the save point and prints the
+.B invf\-rollback
+command when it arms one. The window costs the pinned blocks it holds until
+the next pass replaces it, and it fails
+.IR closed :
+if the save point cannot be captured, a
+.B "\-\-USR1"
+or xattr pass is refused rather than run with no way back.
 .TP
 .B INVFS_PROFILE
 Codec effort profile:
@@ -113,15 +128,24 @@ mount options.
 The mount root carries a control namespace:
 .PP
 .nf
-getfattr --only-values -n user.invfs /        # RAM summary
+getfattr --only-values -n user.invfs /        # RAM summary + savepoint=live|None
 getfattr --only-values -n user.invfs.stats /  # hot counters + zone usage
 setfattr -n user.invfs.sweep -v 1 /           # trigger a manual sweep (root)
 .fi
+.PP
+.B savepoint=live
+in the
+.B user.invfs
+summary is the proof that a rollback window exists: the volume can be
+returned to its pre-sweep state with
+.BR "invf\-rollback image"
+after it is unmounted.
 .SH EXIT STATUS
 0 on success; non-zero if the volume cannot be opened or the mount fails.
 .SH SEE ALSO
 .BR invf-mkfs (8),
 .BR invf-sweep (8),
+.BR invf-rollback (8),
 .BR invf-fsck (8),
 .BR invarifs (7),
 .BR fuse (8)

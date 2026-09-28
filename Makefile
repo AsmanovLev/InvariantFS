@@ -519,6 +519,7 @@ e2e: all
 	$(TESTENV) bash tools/run-e2e.sh tools/test-resize.sh
 	$(TESTENV) bash tools/run-e2e.sh tools/test-rollback.sh
 	$(TESTENV) bash tools/run-e2e.sh tools/test-watermark.sh
+	$(TESTENV) bash tools/run-e2e.sh tools/test-usr1-savepoint.sh
 	$(TESTENV) bash tools/run-e2e.sh tools/test-dynzone.sh
 	$(TESTENV) bash tools/run-e2e.sh tools/test-imagelock.sh
 	$(TESTENV) bash tools/run-e2e.sh tools/test-p7z.sh

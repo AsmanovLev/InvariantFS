@@ -36,6 +36,7 @@ static volatile int g_open_handles = 0;
 static volatile int g_shutdown = 0;
 static volatile sig_atomic_t g_sweep_now = 0;
 static char g_img_path[512] = "?";
+static char g_mnt_path[512] = "?";  /* WP134: named in the rollback warning */
 static volatile int g_sweep_busy = 0;
 static int g_tt = 0;            /* WP24-lite: time-travel (at_checkpoint) mount */
 static double g_attr_t = 1.0;   /* -o attr_t= override; 0 = bench-honest */
@@ -1680,54 +1681,109 @@ static void on_sweep_signal(int sig)
     g_sweep_now = 1;
 }
 
+/* WP134: a USR1 / user.invfs.sweep pass arms the same rollback window the
+ * offline and watermark passes arm, so say so -- and say how to use it --
+ * while the operator is still in front of the terminal that asked for it.
+ * Before WP134 this pass rewrote the data with nothing behind it and
+ * invf-rollback's "no save point" arrived too late to matter. */
+static void sweep_rollback_warning(const char *img, const char *mnt)
+{
+    fprintf(stderr,
+        "[sweep] ROLLBACK WINDOW ARMED: this pass re-encodes data, and a\n"
+        "[sweep] save point was captured first, so the volume can be put\n"
+        "[sweep] back the way it was. To undo THIS pass:\n"
+        "[sweep]     1. unmount the filesystem:  fusermount3 -u %s\n"
+        "[sweep]     2. restore the save point: invf-rollback %s\n"
+        "[sweep] That consumes the window -- afterwards the volume has no\n"
+        "[sweep] save point again. Until you spend it the next pass\n"
+        "[sweep] REPLACES this one, it does not add to it.\n"
+        "[sweep] Proof it is there: the '[spt0] save point: pinned N blocks'\n"
+        "[sweep] line just above, or `getfattr -n user.invfs -m- %s` ->\n"
+        "[sweep] savepoint=live.\n",
+        mnt, img, mnt);
+}
+
 /* Manual full pass: collect every data file and sweep it with per-file
  * locking (system stays responsive). Progress to stderr (= console in
  * the guest init context). Trigger: kill -USR1 $(pidof invf-fuse) or
- * /usr/local/bin/invf-sweep. INVFS_SWEEP_INTERVAL=<sec> additionally
+ * /usr/local/bin/invf-sweep. INVFS_SWEEP_INTERVAL=<seconds> additionally
  * enables the periodic mode.
  *
- * arm_ckp (WP26, watermark-triggered passes only): bracket the walk with
- * the rollback window. On v2 that is the WP21 checkpoint machinery
- * (vol_ckp_begin BEFORE the walk, vol_ckp_end after it); on v3 (WP77) it
- * is the SPT0 save point: a live previous pass's save point is dropped
- * (K=1), then spt0_capture records {base_root, delta_end} before the walk
- * and stays live as the rollback window after it. A pass that retires
- * nothing arms nothing on v2 (vol_ckp_end disarms an identity). The
- * SIGUSR1 path passes 0 and keeps its historic uncheckpointed behavior. */
-static void invf_sweep_worker(int arm_ckp)
+ * full_pass (WP26): 0 = the manual pass (kill -USR1 / the user.invfs.sweep
+ * xattr), which drives each file through the plain vol_sweep_file floor;
+ * 1 = the watermark-triggered pass, which drives them through the
+ * policy/pack-aware vol_sweep_one. That driver choice -- and the heat
+ * decay pass that goes with it -- is a SWEEP DATA DECISION and is
+ * deliberately NOT tied to the rollback window below.
+ *
+ * The rollback window (WP77, extended by WP134 to EVERY in-FUSE pass): on
+ * v3 it is the SPT0 save point; a live previous pass's save point is
+ * dropped (K=1) and spt0_capture records {base_root, delta_end} in
+ * prepare, i.e. under g_io_lock and still before vol_collect_sweepables
+ * (collect) -- the same position the offline invf-sweep takes
+ * (tools/invf-sweep.c:1689, between sw_stage_begin "prepare" and
+ * sw_stage_begin "collect"). It stays live as the window after the walk.
+ *
+ * WP134: the USR1/xattr path used to pass 0 here and arm nothing, so an
+ * operator who swept that way and then reached for invf-rollback got
+ * "no save point" -- AFTER the data had been rewritten. It now arms the
+ * same save point the offline and watermark paths arm, and it arms it
+ * FAIL-CLOSED: if the capture is refused the pass is abandoned, because a
+ * rewrite with no way back is worse than no rewrite. The watermark path
+ * keeps its pre-existing fail-open behaviour.
+ *
+ * On v2 the CKP0 arm (vol_ckp_begin / vol_ckp_end) stays watermark-only:
+ * it is the retired WP21 machinery, not the SPT0 save point, and a pass
+ * that retires nothing arms nothing on v2 (vol_ckp_end disarms an
+ * identity). */
+static void invf_sweep_worker(int full_pass)
 {
     uint64_t *ids = NULL;
     size_t max = 300000, n, i;
     long swept = 0, skipped = 0, failed = 0;
     int armed = 0;
     int is_v3 = 0;
+    const char *tag = full_pass ? "watermark" : "manual";
 
     ids = malloc(max * sizeof(*ids));
     if (!ids) return;
     pthread_mutex_lock(&g_io_lock);
     if (!g_vol) { pthread_mutex_unlock(&g_io_lock); free(ids); return; }
     is_v3 = (vol_sb(g_vol)->vol_flags & VOLF_V3) != 0;
-    if (arm_ckp) {
-        if (is_v3) {
-            /* WP77: v3 rollback window is the SPT0 save point. K=1: a
-             * previous pass's save point is dropped first, so the live
-             * window is always the LAST watermark sweep. */
-            invfs_spt0 sp;
-            if (spt0_info(g_vol, NULL))
-                (void)spt0_drop(g_vol);
-            if (spt0_capture(g_vol) == 0) {
-                armed = 1;
-                if (spt0_info(g_vol, &sp))
-                    fprintf(stderr, "[watermark] save point captured "
-                                    "(base_root=%llu delta_end=%llu)\n",
-                            (unsigned long long)sp.base_root,
-                            (unsigned long long)sp.delta_end);
-            } else {
-                fprintf(stderr, "[watermark] save point capture failed; "
-                                "sweeping without one\n");
-            }
+    if (is_v3) {
+        /* WP77: v3 rollback window is the SPT0 save point. K=1: a
+         * previous pass's save point is dropped first, so the live
+         * window is always the LAST sweep. */
+        invfs_spt0 sp;
+        if (spt0_info(g_vol, NULL))
+            (void)spt0_drop(g_vol);
+        if (spt0_capture(g_vol) == 0) {
+            armed = 1;
+            if (spt0_info(g_vol, &sp))
+                fprintf(stderr, "[%s] save point captured "
+                                "(base_root=%llu delta_end=%llu)\n", tag,
+                        (unsigned long long)sp.base_root,
+                        (unsigned long long)sp.delta_end);
+            if (!full_pass)
+                /* WP134: the operator asked for this pass in the
+                 * foreground, so tell them -- before the walk, while it
+                 * is still true -- how to take it back. */
+                sweep_rollback_warning(g_img_path, g_mnt_path);
         } else {
-            armed = vol_ckp_begin(g_vol, 0);   /* 1 armed, 0 declined, -1 error */
+            fprintf(stderr, "[%s] save point capture failed; %s\n", tag,
+                    full_pass ? "sweeping without one"
+                              : "REFUSING the pass (the volume is unchanged)");
+            if (!full_pass) {
+                /* fail closed: no window, no rewrite */
+                pthread_mutex_unlock(&g_io_lock);
+                free(ids);
+                return;
+            }
+        }
+    }
+    if (full_pass) {
+        if (!is_v3) {
+            armed = vol_ckp_begin(g_vol, 0);  /* 1 armed, 0 declined, -1 error */
             if (armed < 0) {
                 fprintf(stderr, "[watermark] checkpoint arm failed; sweeping "
                                 "without one\n");
@@ -1737,12 +1793,11 @@ static void invf_sweep_worker(int arm_ckp)
         vol_heat_sweep_begin(g_vol);   /* one decay pass per sweep run */
     }
     n = vol_collect_sweepables(g_vol, ids, max);
-    fprintf(stderr, "[sweep] %s pass started: %zu files\n",
-            arm_ckp ? "watermark" : "manual", n);
+    fprintf(stderr, "[sweep] %s pass started: %zu files\n", tag, n);
     for (i = 0; i < n; i++) {
         int rc;
         if (g_shutdown || !g_vol) break;
-        if (arm_ckp) {
+        if (full_pass) {
             /* the daemon's own driver (same as the pending drain):
              * policy/pack-aware -- the plain vol_sweep_file floor defers
              * everything on small images (WP16b margin) and would never
@@ -1771,7 +1826,7 @@ static void invf_sweep_worker(int arm_ckp)
         pthread_mutex_lock(&g_io_lock);
     }
     if (g_vol) {
-        if (arm_ckp)
+        if (full_pass)
             vol_heat_promote(g_vol);   /* extract read-hot batch members */
         vol_tz_flush(g_vol);   /* seal anything the walk deferred */
         if (armed && !is_v3) {
@@ -2444,19 +2499,32 @@ static int invf_getxattr(const char *path, const char *name, char *value,
      * (RAM counters / bitmap pass); the sweep trigger is ROOT ONLY
      * (a background sweep is an administrative action). */
     if (strcmp(path, "/") == 0 && strcmp(name, "user.invfs") == 0) {
-        char buf[512];
+        char buf[768];
         int n;
+        invfs_spt0 sp;
+        int live = 0;
         pthread_mutex_lock(&g_io_lock);
+        /* WP134: a rollback window nobody can see is useless. `savepoint=`
+         * is the operator's proof that a sweep armed one -- the offline
+         * invf-sweep, the watermark pass and the USR1/xattr pass all leave
+         * it live. Read-only: spt0_info() just reads the loaded SPT0. */
+        live = g_vol ? spt0_info(g_vol, &sp) : 0;
         n = snprintf(buf, sizeof buf,
                      "volume=%s\n"
                      "entries=%d\n"
                      "free_blocks=%llu\n"
                      "pending_sweep=%llu\n"
-                     "sweep_busy=%d\n",
+                     "sweep_busy=%d\n"
+                     "savepoint=%s\n"
+                     "savepoint_base_root=%llu\n"
+                     "savepoint_delta_end=%llu\n",
                      g_img_path, g_nentries,
                      (unsigned long long)(g_vol ? vol_count_free(g_vol) : 0),
                      (unsigned long long)(g_vol ? vol_pending_count(g_vol) : 0),
-                     g_sweep_busy);
+                     g_sweep_busy,
+                     live ? "live" : "none",
+                     (unsigned long long)(live ? sp.base_root : 0),
+                     (unsigned long long)(live ? sp.delta_end : 0));
         pthread_mutex_unlock(&g_io_lock);
         if (!value || size == 0) return n;      /* size query */
         if ((size_t)n + 1 > size) return -ERANGE;
@@ -3088,6 +3156,7 @@ int main(int argc, char *argv[])
         fprintf(stderr, "invf: RAW watermark sweep at >%d%% fill\n",
                 g_raw_watermark);
     snprintf(g_img_path, sizeof g_img_path, "%s", img);
+    snprintf(g_mnt_path, sizeof g_mnt_path, "%s", mnt);
     setvbuf(stderr, NULL, _IONBF, 0);
     build_file_table();
     fprintf(stderr, "InvariantFS mounted: %d files%s\n", g_nentries,
