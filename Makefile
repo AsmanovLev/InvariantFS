@@ -35,7 +35,7 @@ CORE    := volume vol_cpack helper_exec vol_plugin_client vol_png vol_seal vol_r
            vol_resize vol_fsck vol_crash vol_exer vol_dedupe vol_textzone \
             vol_heat vol_sweep vol_read vol_write vol_records vol_ast \
             vol_dirs vol_tier vol_meta_merge vol_metabuf vol_btree vol_delta \
-            vol_fold vol_reclaim vol_spt0 \
+            vol_fold vol_reclaim vol_spt0 vol_anchor \
             arc crc32c lz4 flacx tarx pngx blkio miniz blake3 blake3_dispatch blake3_portable ppmd8 ppmd8enc ppmd8dec ppmd_codec codec bcj_x86 rs deflate_repro \
             deflate_backend_system deflate_backend_stock
 CORE_O  := $(addprefix $(OBJ)/,$(addsuffix .o,$(CORE))) $(STOCK_ZLIB_O)
@@ -101,7 +101,7 @@ endef
 CLI_MAINS := mkfs verify fsck cp cat ls stat arctest blkio_test resize \
              metabuf_test btree_test btree_repair_test v3inode overlay_test fold_test concurrency_test \
              sweep_v3_test symlink_v3_test large_file_v3_test dedupe_v3_test deflate_repro_test window_test \
-             nlink_v3_test cpack_guard_test orphan_test rt30_slot_test \
+             nlink_v3_test cpack_guard_test orphan_test rt30_slot_test anchor_test \
              plugin_host_test plugin_mt_test
 $(foreach t,$(CLI_MAINS),$(eval $(call TOOL_RULE,$(t),)))
 
@@ -408,11 +408,21 @@ test: $(OUT)/invf-arctest $(OUT)/invf-blkio_test $(OUT)/invf-codec_test \
       $(OUT)/invf-deflate_repro_test $(OUT)/invf-plugin_host_test $(OUT)/invf-plugin_mt_test \
       $(OUT)/invf-window_test $(OUT)/invf-nlink_v3_test \
       $(OUT)/invf-cpack_guard_test $(OUT)/invf-orphan_test \
-      $(OUT)/invf-rt30_slot_test $(OUT)/gzhdrfuzz \
+      $(OUT)/invf-rt30_slot_test $(OUT)/invf-anchor_test $(OUT)/gzhdrfuzz \
       $(OUT)/invf-gz_header_test \
       $(OUT)/invf-ivpack_packs_test $(OUT)/invf-mkfs $(OUT)/invf-cp \
       $(OUT)/invf-sweep $(OUT)/invf-fsck $(OUT)/invf-plugin-host \
-      plugin-so $(CORE_OBJS_FILE)
+      plugin-so $(CORE_OBJS_FILE) all
+	@# The explicit tool list above was the only set of prerequisites, and it
+	@# is incomplete: the suites also invoke invf-ls, invf-cat, invf-verify,
+	@# invf-stat, invf-import, invf-stats, invf-resize and invf-rollback,
+	@# none of which were in it. So those binaries were whatever was last
+	@# built, and adding a new source to CORE left them stale -- observed
+	@# directly: after the ANC0 merge, invf-fsck had the anchor code and
+	@# invf-ls did not, so a suite asserted on an old binary and failed for a
+	@# reason that had nothing to do with the tree. A test that runs against a
+	@# stale binary is worse than no test, because it reports a result. `all`
+	@# is the one prerequisite that cannot drift from the source list.
 	@# WP101: run the unit suite with the system codecpack directory off.
 	@# invf-codec_test's registry-shape assertions count the STATIC
 	@# codecs, but pack_scan_all() also scans /usr/lib/invfs/codecpacks,
@@ -470,6 +480,10 @@ test: $(OUT)/invf-arctest $(OUT)/invf-blkio_test $(OUT)/invf-codec_test \
 	@# allocation bitmap reports as free. The suite carries its own red
 	@# control so a no-op fix cannot pass it.
 	$(TESTENV) $(TESTISO) bash tools/test-v3-rt30-slot-alloc.sh
+	@# The ANC0 tail anchor: a second LOCATION for the block-0 descriptors.
+	@# The suite carries its own red control (a volume with no anchor must
+	@# never have its tail block written), so a no-op cannot pass it.
+	$(TESTENV) $(TESTISO) bash tools/test-v3-meta-anchor.sh
 	$(TESTENV) $(TESTISO) $(OUT)/invf-deflate_repro_test
 	$(TESTENV) $(TESTISO) $(OUT)/invf-plugin_host_test
 	$(TESTENV) $(TESTISO) $(OUT)/invf-plugin_mt_test

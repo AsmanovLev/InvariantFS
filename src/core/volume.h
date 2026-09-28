@@ -94,6 +94,10 @@ typedef struct {
     uint64_t v3_lost_names;     /* names whose inode row is gone after -f */
     uint64_t v3_root_lost;      /* every named root slot page is unreadable */
     uint64_t v3_savepoint_bad;  /* a live save point pins a damaged base */
+    uint64_t v3_anchor_restored;/* the open ran on the ANC0 tail anchor: the
+                                 * volume is readable but block 0 is damaged */
+    uint64_t v3_anchor_stale;   /* an ANC0 refresh FAILED during the session */
+    uint64_t v3_anchor_refused; /* the tail anchor did not match this volume */
     uint64_t v3_repaired;       /* -f rebuilt the tree (quarantine excised) */
     int      v3_damaged;        /* 1 = any v3 structural damage found */
     /* WP118: nlink vs dirent fan-in accounting (v3 only; zero on the v2

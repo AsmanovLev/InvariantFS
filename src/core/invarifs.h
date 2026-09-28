@@ -759,6 +759,69 @@ typedef struct {
 } invfs_spn0;                   /* 0xA20 + 56 -> ends 0xA58 */
 #pragma pack(pop)
 
+/* ---- ANC0: the tail anchor (LAST block of the device) ------------------
+ * This is the ONLY descriptor in the format that does not live in block 0,
+ * and that is the entire point of it. RT30 (0x9D0) and SPT0 (0xA00) each
+ * exist exactly once, in block 0, alongside seven other descriptors -- so
+ * losing block 0 loses the 48 bytes that decide whether the volume can be
+ * opened at all, with no second copy anywhere.
+ *
+ * Two things that look like they already cover this, and do not:
+ *
+ *   - RT30's "double slot" is NOT two copies of the descriptor. root_slot[2]
+ *     are two POINTERS to base pages. The double slot protects against a
+ *     STALE ROOT; it does nothing whatever for a LOST DESCRIPTOR.
+ *   - the "writethrough mirror" in the DEVT comment is a TWO-DEVICE volume
+ *     feature (dev0 mirrored onto dev1). On a single-device volume, which is
+ *     the shape this is for, it does not exist.
+ *
+ * Parity is the wrong tool here, and the reason is not a preference. Parity
+ * protects against INDEPENDENT loss; a copy in a DIFFERENT PLACE protects
+ * against REGIONAL loss. An XOR over block 0's contents is computed from
+ * block 0, stored nowhere better, and dies with block 0. What is needed is a
+ * redundant LOCATION, so that is what this is.
+ *
+ * WHY THE TAIL, and why specifically the last block: anchor_pba is
+ * total_blocks - 1, computable from the DEVICE SIZE alone, with no read of
+ * block 0. A recovery path that cannot find its backup without first reading
+ * the thing that may be dead is not a recovery path. The metadata zone was
+ * the wrong answer precisely because reaching it means block 0 answered.
+ *
+ * A volume created before this descriptor existed carries no anchor: the
+ * last block is whatever it was, usually an ordinary data block, and this
+ * descriptor never adopts or creates a tail block it did not write. The
+ * probe at open is what decides, per volume, whether the tail is OURS.
+ *
+ *   0x00  char magic[4]       "ANC0"
+ *   0x04  u32  version        1
+ *   0x08  u64  total_blocks   geometry fingerprint: the volume this mirror
+ *   0x10  u32  block_size     belongs to. Every arm is checked before the
+ *   0x14  u32  format_version mirror is trusted; a mismatch is a REFUSAL,
+ *   0x18  char vol_uuid[16]   never a silent adoption. The uuid is the arm
+ *                             that matters for a same-size re-mkfs, which
+ *                             keeps every geometry field identical and
+ *                             leaves the old tail bytes in place.
+ *   0x28  invfs_rt30 rt30     the mirrored RT30, verbatim
+ *   0x58  invfs_spt0 spt0     the mirrored SPT0, verbatim
+ *   0x78  u32  crc32c         over the descriptor with this field read 0
+ * 124 bytes total, at byte offset 0 of the anchor block. */
+#define INVFS_ANCHOR_MAGIC   "ANC0"
+#define INVFS_ANC0_VERSION   1
+#define INVFS_ANCHOR_OFF     0
+#pragma pack(push, 1)
+typedef struct {
+    char     magic[4];          /* 0x00 "ANC0" */
+    uint32_t version;           /* 0x04 INVFS_ANCH0_VERSION */
+    uint64_t total_blocks;      /* 0x08 geometry fingerprint */
+    uint32_t block_size;        /* 0x10 geometry fingerprint */
+    uint32_t format_version;    /* 0x14 geometry fingerprint */
+    char     vol_uuid[16];      /* 0x18 geometry fingerprint */
+    invfs_rt30 rt30;            /* 0x28 mirrored root descriptor (48) */
+    invfs_spt0 spt0;            /* 0x58 mirrored save-point descriptor (32) */
+    uint32_t crc32c;            /* 0x78 over descriptor, this field 0 */
+} invfs_anc0;                   /* 124 bytes at offset 0 of the tail block */
+#pragma pack(pop)
+
 /* ---- WP-M1: v3 base-page + block-pointer wire format (design §12) ----
  * Frozen here so WP-M2 (page format + allocator) and WP-M3 (delta/fold)
  * share one definition instead of each inventing its own. A base page is a

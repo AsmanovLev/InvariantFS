@@ -180,6 +180,21 @@ check_all "pre-resize baseline" "$WORK/orig"
 F0=$(free_blocks "$IMG")
 echo "  free blocks pre-grow: $F0"
 
+# Did this volume carry an ANC0 tail anchor when the grow started? A grow
+# RELEASES the old anchor block (after the commit it is an ordinary free
+# block holding a stale descriptor -- keeping it would leak 4 KiB per
+# resize), so the post-grow free delta is +1 on a volume that had one. Ask
+# the volume rather than widen the assertion to a range: "131072 or 131073"
+# would pass on a resize that quietly lost or gained a block for any other
+# reason, which is the thing this line exists to catch.
+HAD_ANCHOR=0
+if [ -x "$B/invf-anchor_test" ]; then
+    A=$("$B/invf-anchor_test" probe "$IMG" 2>/dev/null | tr ' ' '\n' \
+        | sed -n 's/^ANCHOR_STATE=//p' | head -1)
+    [ "$A" = "ok" ] && HAD_ANCHOR=1
+fi
+echo "  pre-grow anchor state: $([ "$HAD_ANCHOR" = 1 ] && echo present || echo absent)"
+
 echo
 echo "== [A2] grow 512M -> 1G =="
 $B/invf-resize "$IMG" 1G | tee "$WORK/resize-a1.log"
@@ -191,8 +206,12 @@ $B/invf-verify "$IMG" --deep | tee "$WORK/verify-a1.log" | grep -q " 0 corrupt,"
 check_all "post-grow" "$WORK/orig"
 F1=$(free_blocks "$IMG")
 echo "  free blocks post-grow: $F1 (delta $((F1 - F0)))"
-# 512M -> 1G is +131072 blocks; the staging rides the grown tail for free
-[ "$((F1 - F0))" = "131072" ] || fail "free space did not grow by the exact delta"
+# 512M -> 1G is +131072 blocks; the staging rides the grown tail for free.
+# One more if the volume had a tail anchor, which the grow released.
+EXPECT_DELTA=131072
+[ "$HAD_ANCHOR" = 1 ] && EXPECT_DELTA=131073
+[ "$((F1 - F0))" = "$EXPECT_DELTA" ] \
+    || fail "free space grew by $((F1 - F0)), expected $EXPECT_DELTA"
 
 echo
 echo "== [A3] write MORE data post-grow (bigger than the old free space) =="

@@ -18,6 +18,7 @@
 #include "vol_metabuf.h"
 #include "vol_delta.h"
 #include "vol_spt0.h"
+#include "vol_anchor.h"
 
 
 static const uint64_t JOURNAL_BLOCKS = INVFS_JOURNAL_BLOCKS;
@@ -1083,33 +1084,32 @@ bad:
 }
 
 
-/* WP-M1: read + validate the RT30 v3 root-area descriptor and log it. The
- * metadata-v3 base/delta engine lands in WP-M2/M3; this WP only proves the
- * descriptor round-trips. A missing or torn descriptor is treated as an
- * empty root (warning, not fatal) -- the RDP0 "absent" convention, and it
- * keeps a v3 mkfs interrupted before the RT30 write openable. Nothing is
- * stored on the volume struct yet: the field belongs in volume_internal.h,
- * which is out of this WP's scope. TODO(WP-M2): persist v->rt30. */
+/* WP-M1: log the RT30 v3 root-area descriptor the open settled on. This used
+ * to do its own read of block 0 and complain on failure; it now reports the
+ * state mbuf_rt30_load() already resolved, because a volume that recovered
+ * off the ANC0 tail anchor has a perfectly good descriptor and must not also
+ * be told it is "presenting an empty namespace". A descriptor that really is
+ * absent or torn is still a warning, not a refusal -- the RDP0 "absent"
+ * convention, which keeps a v3 mkfs interrupted before the RT30 write
+ * openable. */
 static void v3_probe_rt30(invfs_volume *v)
 {
-    invfs_rt30 rt;
-    if (io_seek(&v->io, INVFS_RT30_OFF) != 0 ||
-        io_read(&v->io, &rt, sizeof rt) != 0 ||
-        memcmp(rt.magic, "RT30", 4) != 0 ||
-        rt.version != INVFS_RT30_VERSION ||
-        invfs_crc32c(&rt, offsetof(invfs_rt30, crc32c)) != rt.crc32c) {
+    const invfs_rt30 *rt = &v->rt30;
+
+    if (!v->rt30_present) {
         fprintf(stderr, "vol_open: %s: RT30 v3 root descriptor absent or "
                 "torn; presenting an empty namespace\n", v->path);
         return;
     }
     if (getenv("INVFS_DEBUG"))
         fprintf(stderr, "vol_open: v3 root descriptor: page_size=%u "
-                "seq=%llu root_slot=%llu/%llu delta_pba=%llu\n",
-                (unsigned)rt.page_size,
-                (unsigned long long)rt.seq,
-                (unsigned long long)rt.root_slot[0],
-                (unsigned long long)rt.root_slot[1],
-                (unsigned long long)rt.delta_pba);
+                "seq=%llu root_slot=%llu/%llu delta_pba=%llu%s\n",
+                (unsigned)rt->page_size,
+                (unsigned long long)rt->seq,
+                (unsigned long long)rt->root_slot[0],
+                (unsigned long long)rt->root_slot[1],
+                (unsigned long long)rt->delta_pba,
+                v->anchor_adopted ? " (from the ANC0 tail anchor)" : "");
 }
 
 
@@ -1541,8 +1541,19 @@ static invfs_volume *vol_open_inner(const char *path, int at_ckpt,
          * state is untouched. */
         /* WP-M21: idx_init retired (the in-memory name index is gone;
          * v3 resolves names through the dirent btree). */
-        v3_probe_rt30(v);
+        /* ANC0 tail anchor, probed ONCE here and before anything reads
+         * block 0's descriptors. The probe is what decides whether the tail
+         * block is this volume's anchor at all: on a volume made before the
+         * anchor existed its last block is an ordinary data block, and from
+         * here on every refresh of the mirror is gated on the answer, so
+         * that block is never written. A refusal (a valid anchor belonging
+         * to some other geometry) leaves v->anchor_state as a refusal, which
+         * is deliberately NOT the same answer as "absent" -- see
+         * vol_anchor.c. Only a v3 volume probes: a v2 volume has no RT30 or
+         * SPT0 to mirror and its tail is never touched. */
+        anchor_probe(v, NULL);
         if (mbuf_rt30_load(v) < 0) { *err = -6; goto fail; }
+        v3_probe_rt30(v);
         mbuf_init(v);
         /* WP-M5: skip the WP-M2 bootstrap pool (see v3_ready in
          * vol_btree.c) -- its cursor resets every open, so reusing it would
@@ -2895,7 +2906,11 @@ uint64_t alloc_blocks(invfs_volume *v, uint64_t zone_start, uint64_t zone_len,
 
     for (count = 0; count < zone_len; count++) {
         if (i >= zone_end) { i = zone_start; start = 0; }
-        if (!bit_get(v->bitmap, i)) {
+        /* The anchor is the last block of the device and therefore inside the
+         * shadow zone's range, so the bitmap test alone would hand it out. See
+         * anchor_block_protected for why the bitmap bit is not a sufficient
+         * reservation. */
+        if (!bit_get(v->bitmap, i) && !anchor_block_protected(v, i)) {
             if (start == 0) start = i;
             if (i - start + 1 == n) {
                 uint64_t k;

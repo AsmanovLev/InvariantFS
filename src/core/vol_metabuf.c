@@ -14,6 +14,7 @@
 
 #include "volume_internal.h"
 #include "vol_metabuf.h"
+#include "vol_anchor.h"
 
 #include <stddef.h>
 
@@ -355,6 +356,30 @@ void mbuf_free(invfs_volume *v, uint64_t pba)
 /* RT30 root-area descriptor + double-slot publish                    */
 /* ------------------------------------------------------------------ */
 
+/* Adopt the anchor's mirrored RT30 over a block-0 RT30 that failed.
+ *
+ * The loud part is the point. A volume that silently resumes on a restored
+ * descriptor is exactly the failure mode this project exists to prevent: the
+ * operator has no way to learn that what they are looking at is not what the
+ * media says. So this prints, once per open, naming the source. */
+static void anchor_adopt_rt30(invfs_volume *v, const invfs_anc0 *a)
+{
+    v->rt30 = a->rt30;
+    v->rt30_present = 1;
+    v->anchor_adopted = 1;
+    fprintf(stderr,
+            "vol_open: *** ANC0 TAIL ANCHOR ADOPTED *** block %llu: the RT30 "
+            "root descriptor in block 0 is unreadable (offset 0x%X), so the "
+            "root descriptor is being taken from the mirror at block %llu "
+            "(seq=%llu, root_slot={%llu,%llu}). This volume is running on a "
+            "RESTORED descriptor: block 0 is damaged and must be replaced.\n",
+            (unsigned long long)anchor_pba(v), (unsigned)INVFS_RT30_OFF,
+            (unsigned long long)anchor_pba(v),
+            (unsigned long long)a->rt30.seq,
+            (unsigned long long)a->rt30.root_slot[0],
+            (unsigned long long)a->rt30.root_slot[1]);
+}
+
 int mbuf_rt30_load(invfs_volume *v)
 {
     invfs_rt30 rt;
@@ -364,18 +389,33 @@ int mbuf_rt30_load(invfs_volume *v)
     memset(&v->rt30, 0, sizeof v->rt30);
     if (io_pread(&v->io, INVFS_RT30_OFF, &rt, sizeof rt) != 0)
         return -1;
-    if (memcmp(rt.magic, "RT30", 4) != 0)
-        return 1;   /* no descriptor at all: an empty base (RDP0 rule) */
-    if (rt.version != INVFS_RT30_VERSION ||
-        invfs_crc32c(&rt, offsetof(invfs_rt30, crc32c)) != rt.crc32c)
-        /* WP86: a descriptor that is NAMED but does not validate is damage,
-         * not absence. Answering 1 here would present the whole namespace as
-         * empty -- every lookup would return "absent" and the operator would
-         * see a filesystem with no files in it. 2 = present but torn. */
-        return 2;
-    v->rt30 = rt;
-    v->rt30_present = 1;
-    return 0;
+    if (memcmp(rt.magic, "RT30", 4) == 0 &&
+        rt.version == INVFS_RT30_VERSION &&
+        invfs_crc32c(&rt, offsetof(invfs_rt30, crc32c)) == rt.crc32c) {
+        v->rt30 = rt;
+        v->rt30_present = 1;
+        return 0;
+    }
+    /* Block 0's RT30 is either absent (magic) or torn (version/CRC). On a
+     * volume that carries an anchor, both are the case the anchor exists
+     * for, so consult it -- and only it. Everything below is unchanged: with
+     * no anchor (every volume made before it) a bad magic is still absence
+     * and a bad CRC is still damage, with the same return values callers
+     * have always seen. */
+    if (v->anchor_state == INVFS_ANCHOR_OK &&
+        memcmp(v->anchor.rt30.magic, "RT30", 4) == 0 &&
+        v->anchor.rt30.version == INVFS_RT30_VERSION &&
+        invfs_crc32c(&v->anchor.rt30,
+                     offsetof(invfs_rt30, crc32c)) == v->anchor.rt30.crc32c) {
+        anchor_adopt_rt30(v, &v->anchor);
+        return 0;
+    }
+    /* A magic mismatch with no anchor is the RDP0 convention: a base that was
+     * never written. A NAMED descriptor that does not validate is damage,
+     * and answering 1 there would present the whole namespace as empty --
+     * every lookup would return "absent" and the operator would see a
+     * filesystem with no files in it (WP86). 2 = present but torn. */
+    return memcmp(rt.magic, "RT30", 4) != 0 ? 1 : 2;
 }
 
 int mbuf_rt30_store(invfs_volume *v)
@@ -385,6 +425,15 @@ int mbuf_rt30_store(invfs_volume *v)
     v->rt30.crc32c = invfs_crc32c(&v->rt30, offsetof(invfs_rt30, crc32c));
     if (io_pwrite(&v->io, INVFS_RT30_OFF, &v->rt30, sizeof v->rt30) != 0)
         return -1;
+    /* The mirror is stale the instant the primary lands. Refreshing it here
+     * rather than at the callers is deliberate: mbuf_rt30_store is the ONE
+     * place the block-0 RT30 becomes durable, so this is the one place the
+     * mirror can be guaranteed to track it, and a fifth caller cannot forget
+     * to call. A refresh failure does NOT fail the store -- the primary
+     * write landed, and a volume whose tail device is failing must still be
+     * able to publish roots -- but anchor_refresh() says so out loud and
+     * latches the condition for invf-fsck. */
+    anchor_refresh(v);
     return 0;
 }
 

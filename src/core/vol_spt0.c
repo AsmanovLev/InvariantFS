@@ -28,6 +28,7 @@
 #include "vol_btree.h"
 #include "vol_delta.h"
 #include "vol_metabuf.h"
+#include "vol_anchor.h"
 
 #include <string.h>
 
@@ -106,13 +107,39 @@ int spt0_load(invfs_volume *v)
 
     if (io_pread(&v->io, INVFS_SPT0_OFF, &s, sizeof s) != 0)
         return -1;
-    if (memcmp(s.magic, "SPT0", 4) != 0 ||
-        s.version != INVFS_SPT0_VERSION ||
-        spt0_crc(&s) != s.crc32c)
+    if (memcmp(s.magic, "SPT0", 4) == 0 &&
+        s.version == INVFS_SPT0_VERSION &&
+        spt0_crc(&s) == s.crc32c) {
+        v->spt0 = s;
+        v->savepoint_live = 1;
+    } else if (v->anchor_state == INVFS_ANCHOR_OK &&
+               memcmp(v->anchor.spt0.magic, "SPT0", 4) == 0 &&
+               v->anchor.spt0.version == INVFS_SPT0_VERSION &&
+               spt0_crc(&v->anchor.spt0) == v->anchor.spt0.crc32c) {
+        /* The same rule as the RT30 recovery, applied PER DESCRIPTOR: a
+         * block-0 descriptor that does not validate is replaced by its
+         * mirror, and one that does is left strictly alone. So a volume that
+         * lost only RT30's 48 bytes keeps a perfectly good SPT0, and one
+         * that lost both is restored from both. The mirror is never mixed
+         * into a healthy descriptor, because "the anchor is fresher" is a
+         * claim, and the one thing a fallback must never do is overwrite
+         * something that was not broken. */
+        s = v->anchor.spt0;
+        v->spt0 = s;
+        v->savepoint_live = 1;
+        v->anchor_adopted = 1;
+        fprintf(stderr,
+                "vol_open: *** ANC0 TAIL ANCHOR ADOPTED *** block %llu: the "
+                "SPT0 save-point descriptor in block 0 is unreadable (offset "
+                "0x%X), so the save point is being taken from the mirror at "
+                "block %llu (base_root=%llu delta_end=%llu). Block 0 is "
+                "damaged and must be replaced.\n",
+                (unsigned long long)anchor_pba(v), (unsigned)INVFS_SPT0_OFF,
+                (unsigned long long)anchor_pba(v),
+                (unsigned long long)s.base_root,
+                (unsigned long long)s.delta_end);
+    } else
         return 1;
-
-    v->spt0 = s;
-    v->savepoint_live = 1;
     /* The descriptor carries a pba, so the blkptr has to be rebuilt from
      * the page it names -- see spt0_pinned_from_pba. This is the path that
      * runs at every vol_open on a volume with a live window, i.e. the next
@@ -147,6 +174,11 @@ int spt0_store(invfs_volume *v)
     s.crc32c = spt0_crc(&s);
     if (io_pwrite(&v->io, INVFS_SPT0_OFF, &s, sizeof s) != 0)
         return -1;
+    /* The mirror went stale the instant that landed. Same reasoning, and the
+     * same non-failing behaviour, as the RT30 refresh: the primary store
+     * succeeded, so a failing tail must not stop a save point from being
+     * captured -- but anchor_refresh() says so out loud and latches it. */
+    anchor_refresh(v);
     return 0;
 }
 

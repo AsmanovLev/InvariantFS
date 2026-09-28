@@ -7,6 +7,7 @@
 #include "vol_delta.h"
 #include "vol_reclaim.h"
 #include "vol_spt0.h"
+#include "vol_anchor.h"
 
 
 /* The batch accumulator and the real vol_tz_flush/vol_tz_gc live with the
@@ -1441,6 +1442,61 @@ static void fsck_v3_nlink_report(invfs_volume *v, invfs_fsck_report *rep)
             (unsigned long long)a.nfault_total);
 }
 
+/* ANC0: what the volume did about its tail anchor, stated in the verdict.
+ *
+ * This is the one place the "say it out loud" rule from vol_cpack pays off
+ * for the anchor, because an open that silently recovered would leave the
+ * operator believing a DAMAGED volume is healthy. It is damaged: block 0's
+ * RT30 did not validate, and the only reason the tree is walkable is the
+ * copy at the tail. So the pass records it as damage -- the data is
+ * readable and the report says so -- and invf-fsck exits nonzero. An
+ * operator who wants a clean bill of health has to replace block 0.
+ *
+ * The opposite case is just as important: a volume whose tail holds NO
+ * anchor (every volume formatted before the anchor existed) says so and
+ * nothing else. fsck must not invent a missing anchor, and a volume that
+ * never had one is not damaged by not having one. */
+static void fsck_v3_anchor(invfs_volume *v, invfs_fsck_report *rep)
+{
+    char b[320];
+
+    if (v->anchor_adopted) {
+        rep->v3_anchor_restored = 1;
+        snprintf(b, sizeof b,
+                 "ANC0: the volume opened on its TAIL ANCHOR at block %llu "
+                 "-- block 0's root descriptor did not validate. The base "
+                 "tree is readable and is being walked, but this image is "
+                 "DAMAGED: block 0 must be replaced (re-format, or restore "
+                 "block 0 from a backup) before it is sound",
+                 (unsigned long long)anchor_pba(v));
+        fsck_v3_note(rep, b);
+        return;
+    }
+    if (v->anchor_refresh_failed) {
+        rep->v3_anchor_stale = 1;
+        snprintf(b, sizeof b,
+                 "ANC0: a refresh of the tail anchor at block %llu FAILED "
+                 "during this session. The anchor is now older than the root "
+                 "descriptor it mirrors, so a loss of block 0 would fall back "
+                 "to a stale root. The volume itself is sound",
+                 (unsigned long long)anchor_pba(v));
+        fsck_v3_note(rep, b);
+        return;
+    }
+    if (v->anchor_state == INVFS_ANCHOR_REFUSED_GEOMETRY) {
+        rep->v3_anchor_refused = 1;
+        fsck_v3_note(rep, "ANC0: the tail block holds an anchor whose "
+                          "geometry fingerprint does not match this volume; "
+                          "it was REFUSED, not adopted. Refusal is not "
+                          "absence -- the block is not this volume's");
+    } else if (v->anchor_state == INVFS_ANCHOR_REFUSED_DAMAGE) {
+        rep->v3_anchor_refused = 1;
+        fsck_v3_note(rep, "ANC0: the tail block holds an ANC0 descriptor that "
+                          "failed its own CRC. It was REFUSED, not adopted; "
+                          "the block is damaged, not absent");
+    }
+}
+
 static int fsck_v3_scan(invfs_volume *v, invfs_fsck_report *rep, int fix)
 {
     invfs_blkptr root;
@@ -1449,6 +1505,7 @@ static int fsck_v3_scan(invfs_volume *v, invfs_fsck_report *rep, int fix)
     char err[128];
     int rc, i;
 
+    fsck_v3_anchor(v, rep);
     rc = fsck_v3_rt30(v, rep);
     if (rc < 0)
         return -1;

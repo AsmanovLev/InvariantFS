@@ -623,8 +623,10 @@ typedef struct invfs_volume {
      * validation passed. The descriptor's root_slot[2] is the double-slot
      * base root and seq is the monotone publication generation; recovery
      * picks the slot whose page validates and carries the higher gen
-     * (mbuf_root_read). WP-M1's v3_probe_rt30 still does its own read for
-     * the skeleton log line -- wiring it to mbuf_rt30_load belongs to the
+     * (mbuf_root_read). v3_probe_rt30 reports this same state for the
+     * skeleton log line (it used to do its own read of block 0, which made
+     * a volume that had just recovered off the ANC0 tail anchor also print
+     * "presenting an empty namespace"); wiring it to mbuf_rt30_load belongs to the
      * WP that makes v3 writable, because volume.c is outside WP-M2's file
      * scope. The allocator's bootstrap cursor hands out the two root-area
      * pages WP-M1 reserved after the mapper table before falling through
@@ -632,6 +634,21 @@ typedef struct invfs_volume {
      * cursors mirroring the v2 raw/shadow pair. */
     invfs_rt30 rt30;
     int      rt30_present;
+    /* ---- ANC0 tail anchor (see vol_anchor.c) --------------------------
+     * The second LOCATION for rt30 and spt0, at total_blocks - 1, readable
+     * without touching block 0. anchor_state is the open-time probe verdict
+     * (INVFS_ANCHOR_*): INVFS_ANCHOR_OK only when the tail block really is
+     * this volume's anchor, and every path that would refresh the mirror is
+     * gated on it -- so on a volume created before the anchor existed, whose
+     * last block is ordinary data, nothing here ever writes a byte there.
+     * anchor_adopted records that THIS open took the mirror instead of block
+     * 0 (and has already said so out loud); anchor_refresh_failed latches
+     * when a refresh write failed, so invf-fsck can keep reporting a volume
+     * that is running without its second copy. */
+    int      anchor_state;            /* INVFS_ANCHOR_* */
+    int      anchor_adopted;          /* 1 = recovered off the anchor */
+    int      anchor_refresh_failed;   /* sticky: a refresh write failed */
+    invfs_anc0 anchor;                /* the probe's descriptor, on OK */
     /* WP-M5: the metadata-v3 base-tree engine has been brought up on this
      * handle (mbuf_init called once). mbuf_init resets the bootstrap
      * cursor, so it must not run per operation. */

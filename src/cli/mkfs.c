@@ -48,6 +48,7 @@
 #endif
 
 #include "invarifs.h"
+#include "vol_anchor.h"
 #include "blkio.h"
 
 static void gen_uuid(uint8_t u[16])
@@ -169,6 +170,10 @@ int main(int argc, char **argv)
      * not-yet-rewritten v2-era suites; it dies with the WP-M21 deletion
      * of the v2 branch. INVFS_V3=1 is still accepted (idempotent). */
     int v3 = 1;
+    /* ANC0 tail anchor: the reserved block, reported by mkfs so the
+     * reservation is visible in the format summary rather than only in the
+     * bitmap. */
+    uint64_t anchor_pba_mkfs = 0;
 
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) {
@@ -596,6 +601,17 @@ int main(int argc, char **argv)
         for (i = base_lo; i < base_hi; i++)
             bitmap[i / 8] &= (uint8_t)~(1u << (i % 8));
     }
+    /* ANC0 tail anchor: the SECOND LOCATION of the block-0 descriptors, at
+     * total_blocks - 1 (see invarifs.h). The allocator hands out a block
+     * only when its bit is clear, so marking it here is what reserves it --
+     * there is no other reservation path, and this is the only place the
+     * block is claimed. On a two-device volume the last GLOBAL block is the
+     * last block of dev1, and the bitmap below is the one dev1 mirrors, so
+     * this single bit covers both. */
+    if (v3 && total_blocks >= 2) {
+        i = total_blocks - 1;
+        bitmap[i / 8] |= (uint8_t)(1u << (i % 8));
+    }
     /* v0.3.0: mark first metadata extent only (mapper is system reserved, not in bitmap) */
     for (i = 0; i < extent_blocks; i++)
         bitmap[(first_extent_pba + i) / 8] |= (uint8_t)(1u << ((first_extent_pba + i) % 8));
@@ -734,6 +750,36 @@ int main(int argc, char **argv)
             blkio_close(&io);
             return 1;
         }
+        /* ANC0: the tail anchor, written LAST so it can only ever mirror a
+         * block-0 descriptor that is already durable. Its bitmap bit was
+         * set above, so the block is reserved from the moment the volume
+         * exists. On a two-device volume the anchor's address is the last
+         * block of the GLOBAL space, which is dev1's last LOCAL block --
+         * the device that does NOT hold the copy of block 0 this volume
+         * already has, so on a two-device volume the two are complementary
+         * rather than redundant with each other. */
+        {
+            invfs_anc0 a;
+            memset(&a, 0, sizeof a);
+            memcpy(a.magic, INVFS_ANCHOR_MAGIC, 4);
+            a.version = INVFS_ANC0_VERSION;
+            a.total_blocks = sb.total_blocks;
+            a.block_size = INVFS_BLOCK_SIZE;
+            a.format_version = sb.format_version;
+            memcpy(a.vol_uuid, sb.uuid, 16);
+            a.rt30 = rt;          /* SPT0 is zeros: no save point yet */
+            a.crc32c = anchor_crc(&a);
+            if (anchor_write_raw(twodev ? (void *)&io2 : (void *)&io,
+                                 total_blocks - 1, &a) != 0) {
+                fprintf(stderr, "ANC0 tail anchor write failed at block %llu\n",
+                        (unsigned long long)(total_blocks - 1));
+                free(bitmap);
+                if (twodev) blkio_close(&io2);
+                blkio_close(&io);
+                return 1;
+            }
+            anchor_pba_mkfs = total_blocks - 1;
+        }
     }
 
     /* WP25: the metadata span is byte-identical on BOTH devices (the
@@ -809,6 +855,11 @@ int main(int argc, char **argv)
                (unsigned)INVFS_RT30_OFF,
                (unsigned long long)v3_root_pba,
                (unsigned long long)(v3_root_pba + 1));
+    if (anchor_pba_mkfs)
+        printf("  tail anchor:   ANC0 at block %llu (RESERVED; mirrors RT30 "
+               "@0x%X and SPT0 @0x%X)\n",
+               (unsigned long long)anchor_pba_mkfs,
+               (unsigned)INVFS_RT30_OFF, (unsigned)INVFS_SPT0_OFF);
     printf("  state: CLEAN, uuid: ");
     for (i = 0; i < 16; i++)
         printf("%02x", sb.uuid[i]);

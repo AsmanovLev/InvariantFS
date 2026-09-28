@@ -51,6 +51,53 @@ this struct. Publication is `mbuf_root_publish(v, root_pba, root_gen)`
 chosen `root_slot[]` entry — the generation is carried by the page header it
 validates (`h->gen`) and by `seq`, not by a descriptor field.
 
+Because `root_slot[2]` are two *pointers inside one descriptor*, the double
+slot answers "which of the two roots is newer", not "is there a root". A
+block 0 that loses `0x9D0..0xA00` takes both pointers with it.
+
+### ANC0 Tail Anchor
+`src/core/invarifs.h:762-822` (`invfs_anc0`) is the authority;
+`src/core/vol_anchor.c` is the only writer and the only reader. It is a **124-byte packed descriptor
+in the LAST block of the device**, at `anchor_pba() = total_blocks - 1` (`src/core/vol_anchor.h:42`). It
+carries a full copy of RT30 (48 B) and SPT0 (32 B), a geometry fingerprint
+(`total_blocks`, `block_size`, format version, 16-byte volume UUID) and its
+own CRC32C.
+
+Why the tail, and not the metadata zone: `total_blocks - 1` is computable
+from the **device size alone**. A recovery path that has to read block 0 to
+find the backup of block 0 is not a recovery path. Why a copy and not parity:
+parity protects against INDEPENDENT loss, and an XOR over the contents of
+block 0 dies with block 0; a copy in a different *location* is what survives
+regional loss.
+
+Rules (`src/core/vol_anchor.h:42-82`):
+
+- **Reserved at mkfs** by setting the bitmap bit for the tail block. The
+  block is also past the end of every range the allocator can hand out, so
+  the bit is belt and braces.
+- **Refreshed** on every successful `mbuf_rt30_store` and `spt0_store`. A
+  failed refresh prints once and latches `v->anchor_refresh_failed`; it does
+  **not** fail the primary store (the block is pre-reserved, so ENOSPC
+  cannot cause it — only a dying tail device can), and `invf-fsck` reports
+  the latch.
+- **Adopted on open** only when block 0's descriptor fails magic, version or
+  CRC32C *and* the anchor's own CRC validates *and* the geometry fingerprint
+  matches. A healthy block-0 descriptor is never overwritten by the mirror.
+  Adoption prints a loud line naming the source, and `invf-fsck` reports
+  `DAMAGED`: the tree is walkable, the image is not sound.
+- **Refused, not adopted**, on a fingerprint mismatch or a failed anchor CRC.
+  Refusal is a *distinct* state from "no anchor" (`INVFS_ANCHOR_ABSENT`) and
+  both are reported distinctly.
+- **Absent means untouched.** `anchor_refresh()` is gated on
+  `v->anchor_state == INVFS_ANCHOR_OK`, so a volume formatted before the
+  anchor existed never has its last block read, written or adopted.
+- **Invalidated, not relocated, by a resize.** `total_blocks` moves, so the
+  anchor's address moves with it. Relocating would mean a new anchor write
+  inside the RSZ0 crash-recovery roll-forward, and on a shrink the new last
+  block can hold live file data — writing an anchor there destroys user
+  data. So `vol_rsz0_apply` zeroes the old anchor block after the commit and
+  says the volume has no anchor until it is re-formatted.
+
 ### Key Encodings
 All keys are lexicographically ordered big-endian byte sequences. The
 namespaces are kept disjoint by key *length* and by a prefix byte

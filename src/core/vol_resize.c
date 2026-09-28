@@ -2,6 +2,7 @@
  * Split from volume.c. */
 
 #include "volume_internal.h"
+#include "vol_anchor.h"
 
 
 /* ---- WP18: offline resize roll-forward (descriptor: invarifs.h RSZ0) ---
@@ -98,6 +99,9 @@ int vol_rsz0_apply(invfs_volume *v, const invfs_rsz0 *rz)
     uint8_t *buf = NULL, *bm = NULL, *wbuf = NULL, *rec = NULL;
     size_t wlen = 0;
     int rc = -1;
+    /* ANC0: was there an anchor at the OLD tail? (see below) */
+    invfs_anc0 old_anchor;
+    int had_anchor = 0;
 
     buf = (uint8_t *)malloc(BLKIO_BOUNCE);
     wbuf = (uint8_t *)malloc(BLKIO_BOUNCE);
@@ -158,6 +162,47 @@ int vol_rsz0_apply(invfs_volume *v, const invfs_rsz0 *rz)
         }
         if (new_bm_bytes > rz->bm_bytes)
             memset(bm + rz->bm_bytes, 0, (size_t)(new_bm_bytes - rz->bm_bytes));
+        /* -- ANC0: the resize MOVES the anchor, and this WP INVALIDATES it
+         * rather than relocating it. That choice is forced, and worth stating
+         * because the alternative looks attractive:
+         *
+         *   - a GROW would make the new last block freshly-free, so it could
+         *     be claimed. But this apply is a crash-recovery roll-forward:
+         *     adding an anchor write to the middle of it is a new way for
+         *     the commit to half-happen, and the old tail block would be
+         *     left allocated at an address nothing will ever read again.
+         *   - a SHRINK makes the new last block an arbitrary block that may
+         *     hold live file data. Writing an anchor there is not a leak, it
+         *     is DATA DESTRUCTION, and nothing at this point can tell the
+         *     two apart without a liveness walk of the whole volume inside
+         *     a commit.
+         *
+         * So the anchor is invalidated: the old block is zeroed at the
+         * commit (only if the probe below proved one was really there), its
+         * bit goes back to the free pool on a grow, and the volume is left
+         * anchor-less -- which is exactly, and verifiably, the state of
+         * every volume made before this descriptor existed. The cost is
+         * that a RESIZED volume has no anchor until it is re-formatted; the
+         * alternative costs correctness on shrink. -- */
+        if (v->sb.total_blocks >= 2) {
+            invfs_anc0 a;
+            uint64_t old_tail = v->sb.total_blocks - 1;
+            if (io_pread(&v->io, old_tail * (uint64_t)INVFS_BLOCK_SIZE,
+                         &a, sizeof a) == 0 &&
+                anchor_state_of(&a) == INVFS_ANCHOR_OK &&
+                anchor_fp_matches(&a, v->sb.total_blocks, v->sb.block_size,
+                                  v->sb.format_version,
+                                  (const uint8_t *)v->sb.uuid)) {
+                had_anchor = 1;
+                old_anchor = a;
+                /* grow: the block is now interior and unowned, so give it
+                 * back. shrink: its bit is cleared with every other bit past
+                 * the new end, just below. */
+                if (old_tail < nsb->total_blocks)
+                    bm[old_tail / 8] &= (uint8_t)~(1u << (old_tail % 8));
+            }
+        }
+
         /* bits past the end of the (new) volume are never allocated */
         {
             uint64_t b, top = new_bm_bytes * 8;
@@ -323,6 +368,24 @@ int vol_rsz0_apply(invfs_volume *v, const invfs_rsz0 *rz)
         }
         if (io_seek(&v->io, 0) != 0 || io_write(&v->io, blk, sizeof blk) != 0)
             goto out;
+    }
+    /* ANC0: zero the block the anchor used to live in, so the new
+     * total_blocks-1 address can never be confused with the old one. This is
+     * AFTER the block-0 commit on purpose: that write clears RSZ0, so once
+     * it has landed this apply cannot be re-entered, and there is no window
+     * in which the superblock says "resized" while the old anchor is still
+     * standing. */
+    if (had_anchor) {
+        uint64_t old_tail = v->sb.total_blocks - 1;
+        if (anchor_invalidate_at(v, old_tail, &old_anchor) != 0)
+            goto out;
+        fprintf(stderr, "vol: ANC0 tail anchor at block %llu invalidated by "
+                "the resize: total_blocks moved %llu -> %llu, so the anchor's "
+                "address moved with it. This volume has NO anchor until it is "
+                "re-formatted -- a loss of block 0 is unrecoverable on it.\n",
+                (unsigned long long)old_tail,
+                (unsigned long long)v->sb.total_blocks,
+                (unsigned long long)nsb->total_blocks);
     }
     vmux_barrier(v, "resize commit");
     v->sb = *nsb;
