@@ -7,9 +7,11 @@
 #   exFAT):
 #     fat32.img — 64MB FAT32: a >20KB text (busybox .c, PPMd-batchable),
 #       a real x86-64 ELF (ZSTD/BCJ-batchable), a 5MB random file, an LFN
-#       file, a subdir, an empty file, and FRAG.BIN (1MB) hand-scattered
-#       to 2048 single-cluster runs by FAT surgery (fsck-clean).
-#     fat16.img — 16MB FAT16: two small files.
+#       file, a subdir, an empty file, BULK.TXT (6MB of busybox source, so
+#       the image is POPULATED rather than ~90% slack -- see WP132 below),
+#       and FRAG.BIN (1MB) hand-scattered to 2048 single-cluster runs by
+#       FAT surgery (fsck-clean).
+#     fat16.img — 16MB FAT16: two small files + BULK.TXT.
 #     exfat.img — 32MB exFAT: same stage set (contiguous/NoFatChain) plus a
 #       3MB fragmented file written after a create/delete pattern -> CHAIN
 #       MODE (NoFatChain clear), fragmented root dir chain.
@@ -24,6 +26,19 @@
 #   pack-ABSENT reads via the self-describing map -> idempotent re-sweep ->
 #   delete cascade -> fsck -> admission leg (tiny ARC ->
 #   GENERIC_MEMLIMIT{18,1}).
+#
+#   FIXTURE FILL (WP132): the containerpack size guard
+#   (src/core/vol_cpack.c:2242, WP119) refuses a decomposition that is not a
+#   gain, and the fixtures here were ~90% unused slack, so ALL THREE images
+#   were declined -- by 0.21%, 0.08% and 0.14% -- and this suite, the only
+#   coverage of the fatfs pack through a volume, exercised nothing after the
+#   hand self-test. The pack is not broken and the guard is not wrong: a
+#   64MB FAT32 image holding 6.2MB of members really does cost MORE split
+#   (60.9MB of recipe, stored verbatim, plus the members) than whole. So the
+#   FIXTURE is sized, not the guard: BULK.TXT adds 6MB of compressible
+#   members to each image, which is both what a populated FAT image looks
+#   like and a genuine gain the guard is right to accept. See b5b357d, which
+#   sized test-sweepboot.sh's nest.splt for exactly the same reason.
 #
 #   PACK DIR SCOPING: the sweep/read legs export INVFS_CODECPACKS=$WORK/packs
 #   (a symlink to fatfs.codecpack only), NOT the shared tools/codecpacks
@@ -47,7 +62,17 @@ REPO="${REPO:-$(cd "$(dirname "$0")/.." && pwd)}"   # override with the worktree
 B=$REPO/bin
 PACK=$REPO/tools/codecpacks/fatfs.codecpack
 WORK=/dev/shm/wp16fatfs
-trap 'rm -rf "$WORK" /dev/shm/wp16fatfs*.img' EXIT
+# WP132: the exFAT leg mounts $WORK/mnt on a loop, and the old trap was a bare
+# `rm -rf`. rm -rf cannot remove a MOUNTPOINT, so any run that died after the
+# mount (an assertion, a signal, a lost lock) left /dev/shm/wp16fatfs/mnt busy
+# forever and every LATER run then died in setup with "ln: failed to create
+# symbolic link ... No such file or directory" -- leftover state that reads
+# like a codecpack bug. Umount first, on every exit path.
+cleanup() {
+    sudo -n umount "$WORK/mnt" 2>/dev/null || true
+    rm -rf "$WORK" /dev/shm/wp16fatfs*.img
+}
+trap cleanup EXIT INT TERM
 IMG=wp16fatfs.img
 IMGMEM=wp16fatfs-mem.img
 export MTOOLS_SKIP_CHECK=1
@@ -101,7 +126,37 @@ for p in ("/usr/bin/passwd", "/usr/bin/gpg", "/bin/ls", "/usr/bin/ls",
             break
 assert elf, "no x86-64 ELF fixture found"
 open(os.path.join(d, "elf.bin"), "wb").write(elf)
-print("  README %d bytes, elf.bin %d bytes" % (len(text), len(elf)))
+# WP132: BULK.TXT, 6 MiB of real source, so a member that COMPRESSES carries
+# its weight. The WP119 containerpack size guard (src/core/vol_cpack.c:2242)
+# declines a decomposition that is not a gain, and with only the members
+# above these fixtures are ~90% unused slack: fat32.img projected 67,250,489 B
+# against 67,108,864 B of container -- a 0.21% LOSS, correctly refused, and
+# the suite's whole sweep-level read-path leg silently stopped running.
+# Compressible members move the projection the RIGHT way (the payload leaves
+# the recipe and re-enters as min(zstd19, usize), and zstd-19 hits 0.22 on
+# this corpus, so 6 MiB of member becomes ~1.35 MiB of content) -- which is
+# what a POPULATED FAT image looks like. The guard is NOT loosened: this
+# suite still asserts its refusals (text.img, the hand refusals, the tiny-ARC
+# leg), and b5b357d sized test-sweepboot.sh exactly this way.
+BULK = 6 << 20
+bulk = bytearray()
+for root, dirs, files in os.walk(src):
+    dirs.sort()
+    for n in sorted(files):
+        if n.endswith(".c"):
+            try:
+                bulk += open(os.path.join(root, n), "rb").read()
+            except OSError:
+                pass
+        if len(bulk) >= BULK:
+            break
+    if len(bulk) >= BULK:
+        break
+bulk = bytes(bulk[:BULK])
+assert len(bulk) == BULK, "bulk fixture too small (%d of %d)" % (len(bulk), BULK)
+open(os.path.join(d, "BULK.TXT"), "wb").write(bulk)
+print("  README %d bytes, elf.bin %d bytes, BULK.TXT %d bytes"
+      % (len(text), len(elf), len(bulk)))
 PY
 head -c 5000000 /dev/urandom > "$WORK/stage/big.bin"
 echo "long file name fixture" > "$WORK/stage/Long File Name Number One.txt"
@@ -172,6 +227,10 @@ dd if=/dev/zero of="$WORK/orig/fat16.img" bs=1M count=16 status=none
 mkfs.vfat -F 16 "$WORK/orig/fat16.img" >/dev/null
 mcopy -i "$WORK/orig/fat16.img" "$WORK/stage/README" ::README.TXT
 mcopy -i "$WORK/orig/fat16.img" "$WORK/stage/Long File Name Number One.txt" ::
+# WP132: BULK.TXT rides along so the 16MB image is not ~99.6% slack (it was
+# projected at 16,763,338 B against 16,777,216 B of container -- a 0.08% loss,
+# and declined).
+mcopy -i "$WORK/orig/fat16.img" "$WORK/stage/BULK.TXT" ::BULK.TXT
 
 # --- exfat.img: 32MB, loop-mount populated (mtools has no exFAT) ----------
 dd if=/dev/zero of="$WORK/orig/exfat.img" bs=1M count=32 status=none
