@@ -50,7 +50,14 @@ set -o pipefail
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 B=$REPO/bin
 T=$B/invf-rt30_slot_test
-WORK=${INVFS_RT30_SLOT_WORK:-/srv/bench/wp123-rt30}
+# WP123-FIX: a single fixed scratch made this suite collide with itself.
+# Every worktree's `make test` starts with `rm -rf "$WORK"`, so two agents
+# running `make test` concurrently deleted each other's images and reported
+# it as an engine failure -- with a DIFFERENT leg failing each run (observed
+# leg 4, then leg 1, then leg 2), which is the signature of the collision
+# rather than of any one bug. Default to a per-process directory; the
+# explicit override is still honoured, and each run cleans up only its own.
+WORK=${INVFS_RT30_SLOT_WORK:-/srv/bench/rt30-slot-$$}
 NFILES=40
 NGENS=60
 
