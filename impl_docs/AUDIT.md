@@ -327,7 +327,7 @@ and the accounting line in 6a should be read as an upper bound.
 estimate is `projected = fixed + content + member_cost`
 (`src/core/vol_cpack.c:2280`, decline at `:2284`), and `member_cost` is
 `nmem * CPACK_MEMBER_COST` (`:2308`) where `CPACK_MEMBER_COST = 16384ull` is
-`src/core/volume_internal.h:1831`. It is exactly 4 x 4096, obtained by
+`src/core/volume_internal.h:1851`. It is exactly 4 x 4096, obtained by
 dividing a whole-image delta residual (4935680 - 1685140) by 201 members and
 rounding up -- an apportionment of one run's total, which then silently
 absorbs every fixed per-sweep cost and is charged linearly at every member
