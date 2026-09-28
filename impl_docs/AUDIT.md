@@ -303,6 +303,60 @@ with zero siblings, a generic-floor stamp (not a container stamp), and a
 bit-exact whole-file read. An unexplained absence is still a failure. fs-a
 still asserts full decomposition, so the lane itself stays under test.
 
+### 6a.1 CORRECTION and ROOT CAUSE (2026-09-28, same day)
+
+Two things were wrong or incomplete in 6a as first written, both found by a
+read-only analysis (`/srv/bench/results/MEMBER-COST-ANALYSIS.md`).
+
+**Correction -- the `content` term above is an UPPER BOUND, not a
+measurement.** In that 388-member run the guard took an early exit
+(`src/core/vol_cpack.c:2315`) and printed `sum_usize` in place of the codec
+projection, so the `6356992 member-cost` figure was compared against a
+worst-case content term. The two readings must not be conflated:
+
+- with the printed upper bound, `fixed + content` alone already loses, and the
+  member cost is not what decided the refusal;
+- with the content term actually projected (~1.5 MB), the sum IS a gain and the
+  member-cost term is the sole reason for the refusal.
+
+The conclusion of 6a survives, but it is the second reading that supports it,
+and the accounting line in 6a should be read as an upper bound.
+
+**Root cause: the cost is a hard-coded constant, not a measurement.** The
+estimate is `projected = fixed + content + member_cost`
+(`src/core/vol_cpack.c:2280`, decline at `:2284`), and `member_cost` is
+`nmem * CPACK_MEMBER_COST` (`:2308`) where `CPACK_MEMBER_COST = 16384ull` is
+`src/core/volume_internal.h:1831`. It is exactly 4 x 4096, obtained by
+dividing a whole-image delta residual (4935680 - 1685140) by 201 members and
+rounding up -- an apportionment of one run's total, which then silently
+absorbs every fixed per-sweep cost and is charged linearly at every member
+count forever.
+
+**Verdict: INFLATED, 3.67x.** For a 4 KiB member the code's own accounting is
+4,096 data block + ~81 recipe row (`vol_btree.c:3733-3740`) + 114 inode row +
+~40 dirent + ~133 delta record = ~4,464 B. Three of those five are packed into
+shared COW B+ tree pages, not one page each -- pages are frozen at 4 KiB by
+`vol_metabuf.c:101-110`. Charged 16,384 against an honest 4,464: the gap is
+almost exactly three phantom pages.
+
+**Scaling is linear by construction, so this gets worse in the rootfs regime,
+not better.** The code's own arithmetic puts a hard ceiling at
+`orig_len / 16384` members: 19,200 on a 300 MiB image, 262,144 on 4 GiB.
+50,000 members = 781 MB charged against ~25 MB of real packed metadata.
+
+**The honest per-member cost is sub-linear in pages**, so the constant both
+over-charges small members and keeps charging 16 KB as the shape gets cheaper
+per member.
+
+**Smallest fix, NOT applied** (it changes what the lane stores, so it is the
+author's call): round `content` up to `INVFS_BLOCK_SIZE` at
+`vol_cpack.c:2337` -- sound in both directions, and it removes the last real
+work the constant was doing -- then retune `volume_internal.h:1831` from 16384
+to ~512, which takes the 388-member term from 6,356,992 to 198,656 B. Note
+`src/cli/cpack_guard_test.c:104-110` currently PINS the pessimism (it asserts
+4978324 > 4935680) and pins the expected total; that test change is itself the
+tell that the constant is a conservative bound being treated as a constant.
+
 ## 7. Far roadmap (ideas, NOT scheduled work)
 
 - **Template Zone (RE-QUALIFIED 2026-08-28, doc/17)**: NOT a chunk store — a **shared-reference / dictionary layer**: AST recipes reference semantic templates by id + residual, invariant `(template ⊕ residual) == original` (BLAKE3). Targets redundancy that batching structurally cannot reach: ACROSS the whole volume and ACROSS TIME (new file vs files swept months ago; batching only sees a 4MB window), plus explicit user pinning ("this directory is a base layer"). Domains by feasibility: (a) ZSTD patch_from_dict for versioned trees (Docker layers, .rodata across compiler versions — stock zstd dict API, no custom delta math); (b) ELF/PE section sharing; (c) audio transient CDC templates (FLAC→PCM→CDC→BLAKE3 index) — LAST, needs the FLAC pipeline; delta/residual coding = v2+. **The old "precondition: refcounts (WP6)" is RETRACTED**: the owner-inode + L2P-dup + mark-and-sweep GC pattern proven by TEXT zone (WP10) covers ownership without refcounts (and PB7 itself is fixed since WP16f). On-disk: zone field value 3 (RESERVED today) = TEMPLATE; owner `\x01tmpl`; templates ARC-pinned (~10% budget), ARC keyed by template_seq not pba (GC invalidates). Still far-roadmap: needs a measured proof that explicit templates beat WP14 batching on a template-heavy corpus (e.g. 50 tracks sharing a drum kit) before any code.
