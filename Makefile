@@ -102,7 +102,7 @@ CLI_MAINS := mkfs verify fsck cp cat ls stat arctest blkio_test resize \
              metabuf_test btree_test btree_repair_test v3inode overlay_test fold_test concurrency_test \
              sweep_v3_test symlink_v3_test large_file_v3_test dedupe_v3_test deflate_repro_test window_test \
              nlink_v3_test cpack_guard_test orphan_test rt30_slot_test anchor_test \
-             plugin_host_test plugin_mt_test
+             plugin_host_test plugin_mt_test rs_stability_test
 $(foreach t,$(CLI_MAINS),$(eval $(call TOOL_RULE,$(t),)))
 
 # WP71: loads every containerpack .so through dlmopen/dlopen -> needs -ldl,
@@ -409,6 +409,7 @@ test: $(OUT)/invf-arctest $(OUT)/invf-blkio_test $(OUT)/invf-codec_test \
       $(OUT)/invf-window_test $(OUT)/invf-nlink_v3_test \
       $(OUT)/invf-cpack_guard_test $(OUT)/invf-orphan_test \
       $(OUT)/invf-rt30_slot_test $(OUT)/invf-anchor_test $(OUT)/gzhdrfuzz \
+      $(OUT)/invf-rs_stability_test \
       $(OUT)/invf-gz_header_test \
       $(OUT)/invf-ivpack_packs_test $(OUT)/invf-mkfs $(OUT)/invf-cp \
       $(OUT)/invf-sweep $(OUT)/invf-fsck $(OUT)/invf-plugin-host \
@@ -458,6 +459,12 @@ test: $(OUT)/invf-arctest $(OUT)/invf-blkio_test $(OUT)/invf-codec_test \
 	$(TESTENV) $(TESTISO) $(OUT)/invf-window_test /tmp
 	$(TESTENV) $(TESTISO) $(OUT)/invf-nlink_v3_test /tmp
 	$(TESTENV) $(OUT)/invf-cpack_guard_test
+	@# The RS parity MATH, standalone: no volume, no v2, no filesystem.
+	@# tools/test-seal.sh cannot do this -- the seal is v2-only and v2 is
+	@# retired in 0.5.0, so that test SKIPs on every volume that can exist.
+	@# Asserts determinism, bit-exact recovery from m erasures, refusal at
+	@# m+1, and states the erasure-vs-error-correction boundary.
+	$(TESTENV) $(OUT)/invf-rs_stability_test
 	@# WP129: the GZR gzip header parse, under ASan+UBSan, against the real
 	@# engine function and the generated seed corpus. This gate is what keeps
 	@# the 18-byte over-read out; the libFuzzer soak (make gzhdrfuzz-soak) is
