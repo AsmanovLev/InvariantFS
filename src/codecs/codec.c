@@ -362,6 +362,11 @@ struct pack_manifest {
      * the FS-owned member map (MRMP); presence makes the pack SEEKABLE. */
     char     map[512];
     int      has_map;
+    /* WP140: optional `batch` command (container packs only): {in} {dir}
+     * {out} -> every member the enumerate table at {dir} announces, written
+     * as "<idx>" files into {out}, in ONE header parse. */
+    char     batch[512];
+    int      has_batch;
     int      decomp_gen;   /* manifest `decomp_gen = 1` (WP-Q2R3) */
 };
 
@@ -475,6 +480,9 @@ static int parse_manifest(const char *path, struct pack_manifest *m)
         } else if (strcmp(s, "map") == 0) {
             str_copy(m->map, sizeof m->map, val);
             m->has_map = 1;
+        } else if (strcmp(s, "batch") == 0) {
+            str_copy(m->batch, sizeof m->batch, val);
+            m->has_batch = 1;
         } else if (strcmp(s, "decomp_gen") == 0) {
             m->decomp_gen = (strtol(val, NULL, 0) != 0);
         } else if (strcmp(s, "type") == 0) {
@@ -714,6 +722,7 @@ typedef struct {
     int              is_container;
     char            *enumerate, *extract, *strip, *rebuild;
     char            *map;       /* WP16b: container packs only, optional */
+    char            *batch;     /* WP140: container packs only, optional */
     pack_magic_rule  magic[PACK_MAX_MAGIC];
     size_t           n_magic;
     int              overrides_builtin;  /* WP16e: this pack replaced a
@@ -788,8 +797,8 @@ static int pack_tool_resolvable(const char *pdir, const char *tool)
 
 /* available iff every argv's tool resolves (the codec set — encode/decode,
  * estimate when present — or the WP16a container set — enumerate/extract/
- * strip/rebuild, plus the WP16b map command when the pack declares one) and
- * every `requires` entry does */
+ * strip/rebuild, plus the WP16b map command and the WP140 batch command when
+ * the pack declares them) and every `requires` entry does */
 static int pack_probe_impl(pack_entry *p)
 {
     const char *r;
@@ -804,6 +813,12 @@ static int pack_probe_impl(pack_entry *p)
             !manifest_tool_ok(p->dir, p->rebuild))
             return 0;
         if (p->map && !manifest_tool_ok(p->dir, p->map))
+            return 0;
+        /* WP140: a declared batch whose argv0 does not resolve must make the
+         * pack UNAVAILABLE, not silently degrade it to per-member extract:
+         * the lane prefers batch, and "declared but unrunnable" is a pack
+         * that cannot be installed as written. */
+        if (p->batch && !manifest_tool_ok(p->dir, p->batch))
             return 0;
     } else {
         if (!manifest_tool_ok(p->dir, p->encode) ||
@@ -980,6 +995,7 @@ static void pack_entry_free(pack_entry *p)
     free(p->estimate); free(p->requires); free(p->exts);
     free(p->enumerate); free(p->extract); free(p->strip); free(p->rebuild);
     free(p->map);
+    free(p->batch);
     memset(p, 0, sizeof *p);
 }
 
@@ -1141,14 +1157,17 @@ static void pack_register(const char *dir, const struct pack_manifest *m)
     p->strip     = m->has_strip ? pack_strdup(m->strip) : NULL;
     p->rebuild   = m->has_rebuild ? pack_strdup(m->rebuild) : NULL;
     /* WP16b: `map` is a container-ABI command; on a codec pack the line is
-     * parsed but never wired (def.map stays NULL, no CAP_SEEK). */
+     * parsed but never wired (def.map stays NULL, no CAP_SEEK). Same for
+     * WP140's `batch`. */
     p->map = (m->is_container && m->has_map) ? pack_strdup(m->map) : NULL;
+    p->batch = (m->is_container && m->has_batch) ? pack_strdup(m->batch) : NULL;
     p->def.decomp_gen = (m->is_container && m->decomp_gen) ? 1 : 0;
     if (!p->dir || !p->name ||
         (m->has_encode && !p->encode) || (m->has_decode && !p->decode) ||
         (m->has_estimate && !p->estimate) ||
         (m->requires[0] && !p->requires) || (m->exts[0] && !p->exts) ||
         (m->is_container && m->has_map && !p->map) ||
+        (m->is_container && m->has_batch && !p->batch) ||
         (m->is_container &&
          (!p->enumerate || !p->extract || !p->strip || !p->rebuild))) {
         pack_entry_free(p);
@@ -1201,6 +1220,7 @@ static void pack_register(const char *dir, const struct pack_manifest *m)
     p->def.strip     = p->strip;
     p->def.rebuild   = p->rebuild;
     p->def.map       = p->map;
+    p->def.batch     = p->batch;
     packs_n++;
 }
 

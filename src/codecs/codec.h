@@ -85,7 +85,13 @@ typedef struct invfs_pack_def {
      * carry `map` ({in} {out} -> the FS-owned binary member map, MRMP);
      * its presence puts INVFS_CODEC_CAP_SEEK on the entry and makes reads
      * pack-free (the FS splices ranges from the recipe + member siblings
-     * itself). */
+     * itself). WP140: a container pack may ALSO carry `batch`
+     * ({in} {dir} {out} -> every member the enumerate table at {dir}
+     * announces, written as "<idx>" files into {out}, ONE header parse for
+     * the whole set). It is optional: absent, the lane execs `extract` once
+     * per member exactly as before -- which, for a pack whose per-member
+     * cost includes a whole-container parse, is O(n^2) in the container's
+     * member count (measured on p7z: 84k members, ~13 days). */
     int          is_container;
     /* manifest `decomp_gen = 1`: the pack renders the v2 map wire, so the FS
      * stamps its own generation into the map header and re-derives a stored
@@ -97,6 +103,7 @@ typedef struct invfs_pack_def {
     const char  *strip;
     const char  *rebuild;
     const char  *map;        /* WP16b: NULL when the pack has no map cmd */
+    const char  *batch;      /* WP140: NULL when the pack has no batch cmd */
 } invfs_pack_def;
 
 /* The pack record behind a registry entry, or NULL for builtin codecs.
@@ -126,7 +133,13 @@ enum {
     INVFS_PACK_CMD_EXTRACT,         /* {in} {idx} {out} -> member bytes */
     INVFS_PACK_CMD_STRIP,           /* {in} {out} -> recipe */
     INVFS_PACK_CMD_REBUILD,         /* {recipe} {dir} {out} -> original */
-    INVFS_PACK_CMD_MAP              /* WP16b: {in} {out} -> member map (MRMP) */
+    INVFS_PACK_CMD_MAP,             /* WP16b: {in} {out} -> member map (MRMP) */
+    /* WP140: {in} {dir} {out} -> every member the enumerate table at {dir}
+     * announces, as "<idx>" files in {out}. Appended last so the four
+     * pre-existing command numbers never move. CLI-exec only: the ADR-007
+     * worker pool's plugin ABI has no such command, so this path
+     * deliberately skips the pool and execs the helper. */
+    INVFS_PACK_CMD_EXTRACT_BATCH
 };
 int invfs_codec_pack_cmd(const invfs_codec *c, int cmd,
                          const char *in, const char *idx,

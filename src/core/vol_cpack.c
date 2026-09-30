@@ -460,6 +460,13 @@ int invfs_codec_pack_cmd(const invfs_codec *c, int cmd,
                                            p_dir = dir;          p_out = out; break;
             case INVFS_PACK_CMD_MAP:       pcmd = 5; p_in = in;
                                            p_recipe = recipe; p_out = out; break;
+            /* WP140: no pool case. The ADR-007 plugin ABI has five
+             * container commands; a batch has no plugin wire yet, and
+             * inventing pcmd 6 against a daemon that may predate it is how
+             * a "pack-free" path becomes a silent per-member fallback. The
+             * pool is opt-in (/tmp/invfs_plugin_pool.sock) and off by
+             * default; with it up, batch execs the CLI helper instead of the
+             * .so -- correct, and still one parse for the whole set. */
             default: break;
             }
             if (pcmd > 0) {
@@ -478,6 +485,7 @@ int invfs_codec_pack_cmd(const invfs_codec *c, int cmd,
     case INVFS_PACK_CMD_STRIP:     tmpl = def->strip;     break;
     case INVFS_PACK_CMD_REBUILD:   tmpl = def->rebuild;   break;
     case INVFS_PACK_CMD_MAP:       tmpl = def->map;       break;
+    case INVFS_PACK_CMD_EXTRACT_BATCH: tmpl = def->batch; break;
     default: return -1;
     }
     if (!tmpl) return -1;
@@ -485,9 +493,13 @@ int invfs_codec_pack_cmd(const invfs_codec *c, int cmd,
                         argv, 24, arena, sizeof arena) != 0)
         return -1;
     /* WP12d sandbox: every container command writes only under {out}'s
-     * dir (enumerate/strip/map: the scratch root; extract: the member
-     * dir; rebuild: the scratch root holding the recipe + members) and
-     * reads the container (or, for rebuild, the recipe) RO */
+     * dir (enumerate/strip/map/batch: the scratch root or member dir;
+     * extract: the member dir; rebuild: the scratch root holding the recipe
+     * + members) and reads the container (or, for rebuild, the recipe) RO.
+     * WP140's batch reads the member TABLE too, and it lives in the same
+     * scratch root the child is already granted RW, so no new path is
+     * opened -- the caller passes {out} with a trailing '/' so this still
+     * resolves to the member dir and not its parent. */
     sb.pack_dir = def->dir;
     sb.ro_path = in ? in : recipe;
     sb.rw_dir = sb_dirname(rwbuf, sizeof rwbuf, out);
@@ -3137,6 +3149,77 @@ void cpack_rollback_commit(invfs_volume *v, uint64_t newino,
 }
 
 
+/* WP140: the member BYTES one `batch` call is asked for.
+ *
+ * The reason a range exists at all is the helper child's ceiling:
+ * helper_exec.c gives every pack subprocess INVFS_HELPER_TIMEOUT_MS (120 s
+ * default) of wall clock and the same in RLIMIT_CPU. Measured on the
+ * 84,279-member / 3,567,834,051 B rootfs container, one extract_batch for
+ * the WHOLE table took 146 s -- killed, lane declined. The per-member path
+ * never met that ceiling because no single call did that much work.
+ *
+ * So the slice is sized in bytes, not in members: the work a call does is
+ * the bytes it copies, and that is the thing the ceiling bounds. 256 MiB is
+ * ~10 s of the measured 146 s/3.57 GB, i.e. a 12x margin against a
+ * contended disk, and it puts the 3.57 GB rootfs container at 14 calls --
+ * 14 header parses instead of 84,279.
+ *
+ * Overridable for a slower or faster host than the one measured on:
+ * INVFS_CPACK_BATCH_MAX_BYTES. 0 disables chunking (one call for the whole
+ * table), which is correct only when the whole table fits the ceiling. */
+static uint64_t cpack_batch_max_bytes(void)
+{
+    const char *e = getenv("INVFS_CPACK_BATCH_MAX_BYTES");
+    if (e && *e) {
+        char *end = NULL;
+        unsigned long long v = strtoull(e, &end, 10);
+        if (end && end != e) return (uint64_t)v;
+    }
+    return 256ull << 20;
+}
+
+
+/* WP140: one `batch` call for member-table rows [lo,hi).
+ *
+ * The slice is written out as its own table file -- the same
+ * "idx<TAB>sname<TAB>usize" lines, verbatim, in the same order -- because
+ * that is the contract the batch command takes: "these members", not "these
+ * indexes". Writing a slice rather than passing a range keeps the pack's
+ * input identical to what `enumerate` produced, which is what lets the same
+ * command be handed a whole table or a piece of one.
+ *
+ * Returns the pack's exit status (0 ok), or -1 if the slice could not be
+ * written -- which the caller treats as a lane failure like any other. */
+static int cpack_batch_run(const invfs_codec *pc, const uint8_t *table,
+                           size_t table_len, size_t lo, size_t hi,
+                           const char *pin, const char *ptable,
+                           const char *pmslash)
+{
+    char slice[160];
+    FILE *f;
+    size_t pos = 0, row = 0;
+
+    snprintf(slice, sizeof slice, "%s.batch", ptable);
+    f = fopen(slice, "wb");
+    if (!f) return -1;
+    while (pos < table_len && row < hi) {
+        const uint8_t *nl = (const uint8_t *)memchr(table + pos, '\n',
+                                                    table_len - pos);
+        size_t len = nl ? (size_t)(nl - (table + pos)) + 1
+                        : table_len - pos;
+        if (row >= lo && fwrite(table + pos, 1, len, f) != len) {
+            fclose(f);
+            return -1;
+        }
+        row++;
+        pos += len;
+    }
+    if (ferror(f) || fclose(f) != 0) return -1;
+    return invfs_codec_pack_cmd(pc, INVFS_PACK_CMD_EXTRACT_BATCH, pin, NULL,
+                                slice, NULL, pmslash);
+}
+
+
 /* WP16a sweep attempt: decompose one RAW container through a container
  * codecpack. See the section header for the pipeline; the return
  * convention mirrors vol_pack_sweep (100+algo on commit, 1 = tools absent
@@ -3150,6 +3233,7 @@ int vol_containerpack_sweep(invfs_volume *v, uint64_t inode_id,
     const invfs_pack_def *def;
     cpack_member *mem = NULL;
     size_t nmem = 0, i;
+    int batch_calls = 0;
     uint64_t sum_usize = 0, ws;
     char dir[64], pin[128], ptable[128], precipe[128], pout[128],
          pmap[128], pmdir[192];
@@ -3352,16 +3436,75 @@ int vol_containerpack_sweep(invfs_volume *v, uint64_t inode_id,
     if (slurp_file(precipe, &recipe, &recipe_len) != 0) { if (getenv("INVFS_DEBUG_PACKS")) fprintf(stderr,"[cpack] recipe slurp failed\n"); goto out; }
 
     /* 4. extract every member into the scratch dir as "<idx>"; the pack
-     * must produce exactly the announced byte count */
+     * must produce exactly the announced byte count.
+     *
+     * WP140: this used to exec the pack once PER MEMBER. For a pack whose
+     * per-member cost includes parsing the whole container -- p7z re-reads
+     * and re-parses the entire 7z header on every `extract`, and fork/execs
+     * 7zz to LZMA-decode it -- that is O(n^2) in the member count, and it
+     * is what made an 84k-file rootfs container a multi-day pack. A pack
+     * that declares `batch` is asked for a RANGE of members per call: the
+     * header is parsed once per call, and the pack writes exactly the
+     * members the slice of the table it was handed announces. The
+     * per-member size check below is UNCHANGED and still runs for every
+     * member either way, so "the pack produced this many bytes" is verified
+     * here and not taken on the pack's word.
+     *
+     * WHY A RANGE AND NOT "ALL OF IT IN ONE CALL". The helper child runs
+     * under a wall-clock/CPU ceiling (helper_exec.c, INVFS_HELPER_TIMEOUT_MS
+     * / 120 s). Measured on the 84,279-member rootfs container: the whole
+     * set in ONE extract_batch takes 146 s -- over the ceiling, so the
+     * child was killed and the lane declined. The per-member path never hit
+     * that ceiling because no single call ever did that much work. So the
+     * lane slices the table by MEMBER BYTES and calls the pack once per
+     * slice: the cost per call is bounded, and the number of calls (hence
+     * of header parses) is ceil(total / cpack_batch_max_bytes()), not the
+     * member count. At 3.57 GB and the 256 MiB default that is 14 calls --
+     * against 84,279.
+     *
+     * The batch operand `out` carries a trailing '/' on purpose:
+     * sb_dirname() then resolves to the MEMBER dir, so the WP12d Landlock
+     * grant is no wider than the per-member path's. */
     if (mkdir(pmdir, 0700) != 0) { if (getenv("INVFS_DEBUG_PACKS")) fprintf(stderr,"[cpack] mkdir failed\n"); goto out; }
+    batch_calls = 0;
+    if (def->batch) {
+        char pmslash[256];
+        size_t start = 0;
+        uint64_t acc = 0;
+        snprintf(pmslash, sizeof pmslash, "%s/", pmdir);
+        for (i = 0; i < nmem; i++) {
+            if (acc && acc + mem[i].usize > cpack_batch_max_bytes()) {
+                if (cpack_batch_run(pc, table, table_len, start, i, pin,
+                                    ptable, pmslash) != 0)
+                    { if (getenv("INVFS_DEBUG_PACKS")) fprintf(stderr,"[cpack] extract_batch [%zu,%zu) failed\n", start, i); goto out; }
+                batch_calls++;
+                start = i;
+                acc = 0;
+            }
+            acc += mem[i].usize;
+        }
+        /* the tail, plus the whole table when nmem is 1 or the total fits */
+        if (start < nmem) {
+            if (cpack_batch_run(pc, table, table_len, start, nmem, pin,
+                                ptable, pmslash) != 0)
+                { if (getenv("INVFS_DEBUG_PACKS")) fprintf(stderr,"[cpack] extract_batch [%zu,%zu) failed\n", start, nmem); goto out; }
+            batch_calls++;
+        }
+        if (getenv("INVFS_DEBUG_PACKS"))
+            fprintf(stderr,"[cpack] extract_batch: %d call(s), %zu members "
+                            "(extract calls: 0)\n", batch_calls, nmem);
+    }
     for (i = 0; i < nmem; i++) {
         char idxbuf[16], pm[256];
         struct stat st;
-        snprintf(idxbuf, sizeof idxbuf, "%u", mem[i].idx);
+        if (!def->batch) {
+            snprintf(idxbuf, sizeof idxbuf, "%u", mem[i].idx);
+            snprintf(pm, sizeof pm, "%s/%u", pmdir, mem[i].idx);
+            if (invfs_codec_pack_cmd(pc, INVFS_PACK_CMD_EXTRACT, pin, idxbuf,
+                                     NULL, NULL, pm) != 0)
+                { if (getenv("INVFS_DEBUG_PACKS")) fprintf(stderr,"[cpack] extract idx=%u failed\n", mem[i].idx); goto out; }
+        }
         snprintf(pm, sizeof pm, "%s/%u", pmdir, mem[i].idx);
-        if (invfs_codec_pack_cmd(pc, INVFS_PACK_CMD_EXTRACT, pin, idxbuf,
-                                 NULL, NULL, pm) != 0)
-            { if (getenv("INVFS_DEBUG_PACKS")) fprintf(stderr,"[cpack] extract idx=%u failed\n", mem[i].idx); goto out; }
         if (stat(pm, &st) != 0 || (uint64_t)st.st_size != mem[i].usize)
             { if (getenv("INVFS_DEBUG_PACKS")) fprintf(stderr,"[cpack] extract idx=%u size mismatch\n", mem[i].idx); goto out; }
     }

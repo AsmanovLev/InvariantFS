@@ -56,6 +56,15 @@ sniff.offset = 0
 sniff.ext = 7z
 enumerate = bin/p7z enumerate {in} {out}
 extract = bin/p7z extract {in} {idx} {out}
+# WP140: the whole member set in ONE header parse. `extract` re-parses the
+# entire 7z header (and fork/execs 7zz to LZMA-decode the default compressed
+# header) on every call, so an FS lane that exec'd it once per member paid
+# O(n^2) in the header size -- ~13 days at 84k members. This command parses
+# once and writes "<dir>/<idx>" for every member the enumerate table at {dir}
+# announces: the same stream_copy over the same (off,len) extents, so the
+# bytes are bit-identical to the per-member path by construction. Optional:
+# a pack without this key is still extracted one member per exec, as before.
+batch = bin/p7z extract_batch {in} {dir} {out}
 strip = bin/p7z strip {in} {out}
 rebuild = bin/p7z rebuild {recipe} {dir} {out}
 map = bin/p7z map {in} {out}

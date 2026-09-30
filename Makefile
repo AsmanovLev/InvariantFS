@@ -642,7 +642,8 @@ test: $(TEST_BINS) $(OUT)/invf-arctest $(OUT)/invf-blkio_test $(OUT)/invf-codec_
       $(OUT)/invf-gz_header_test \
       $(OUT)/invf-ivpack_packs_test $(OUT)/invf-mkfs $(OUT)/invf-cp \
       $(OUT)/invf-sweep $(OUT)/invf-fsck $(OUT)/invf-plugin-host \
-      plugin-so $(CORE_OBJS_FILE) all
+      plugin-so helpers $(CORE_OBJS_FILE) all
+
 	@# The explicit tool list above was the only set of prerequisites, and it
 	@# is incomplete: the suites also invoke invf-ls, invf-cat, invf-verify,
 	@# invf-stat, invf-import, invf-stats, invf-resize and invf-rollback,
@@ -789,6 +790,17 @@ test: $(TEST_BINS) $(OUT)/invf-arctest $(OUT)/invf-blkio_test $(OUT)/invf-codec_
 	@# because a C unit test cannot see the eight sources the packs are
 	@# compiled from.
 	$(TESTENV) $(TESTISO) bash tools/test-cpack-max-members.sh
+	@# WP140: the containerpack lane's COST SHAPE. p7z re-parses the whole
+	@# 7z header on every extract, so a lane that exec'd it once per member
+	@# was O(n^2) in the header size -- 13+ days at 84k members. The gate is
+	@# a COUNT of header parses (the pack's own counter, plus the lane's own
+	@# batch-vs-extract call count), never a wall clock: this box is shared
+	@# and a timing threshold would flake with no code change. Carries its
+	@# own red control -- the per-member extract arm -- and cmp's every
+	@# member back against its source, because a parse-once path that
+	@# spliced the wrong extents would pass a count assertion.
+	$(TESTENV) $(TESTISO) bash tools/test-p7z-batch.sh
+
 	@# The RS parity MATH, standalone: no volume, no v2, no filesystem.
 	@# tools/test-seal.sh cannot do this -- the seal is v2-only and v2 is
 	@# retired in 0.5.0, so that test SKIPs on every volume that can exist.

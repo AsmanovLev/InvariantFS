@@ -59,7 +59,7 @@ bad()  { echo "  FAIL: $*"; fail=1; }
 # src/codecs/codec.c:429 (parse_manifest) and its key chain below it.
 ENGINE_KEYS="name algo pack_version caps dec_mem generation requires
              decomp_gen type encode decode estimate
-             enumerate extract strip rebuild map
+             enumerate extract strip rebuild map batch
              sniff.offset sniff.magic sniff.ext"
 
 # Self-check: a key the engine no longer parses would silently stop being

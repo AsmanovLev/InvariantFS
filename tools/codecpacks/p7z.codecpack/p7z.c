@@ -38,6 +38,8 @@
  *
  *     enumerate <in> <out>           member table lines "idx<TAB>sname<TAB>usize"
  *     extract   <in> <idx> <out>     member idx's raw bytes (exactly usize)
+ *     extract_batch <in> <tbl> <dir> every member the enumerate table names,
+ *                                    ONE header parse for all of them
  *     strip     <in> <out>           the recipe (P7R1, below)
  *     rebuild   <recipe> <dir> <out> original archive, bit-exact
  *     map       <in> <out>           the FS-owned MRMP member map (WP16b)
@@ -49,6 +51,18 @@
  * A member with data occupies exactly one extent: its own Copy folder, or a
  * substream of a multi-file Copy folder (a "solid" stored archive, where
  * the folder stream is just the concatenation of its files).
+ *
+ * WHY extract_batch EXISTS (WP140). Every cmd_* calls analyze(), which
+ * re-reads and re-parses the WHOLE header — and for the default
+ * LZMA-compressed header also fork/execs 7zz to decode it. The FS execs
+ * the pack once per member, so an n-member archive cost n header parses and
+ * n 7zz execs: O(n^2) in the header size, which is what makes an 84k-file
+ * rootfs container take days. extract_batch parses ONCE and writes every
+ * member the enumerate table at <tbl> announces, so a whole decomposition
+ * is enumerate + strip + extract_batch + map = 4 parses, independent of n.
+ * It runs the same stream_copy over the same (off,len) extents as extract,
+ * so the bytes are identical by construction; see the bit-exactness note
+ * in the command's own comment.
  *
  * ------------------------------------------------------------------------
  * RECIPE FORMAT ("P7R1", pack-owned; the FS never parses it). All integers
@@ -142,6 +156,14 @@
 #define ESTIMATE_MARGIN (64ull << 20)   /* estimate slack */
 
 static uint8_t *g_buf;                  /* the streaming window */
+
+/* WP140: how many times this process has parsed a 7z header. The cost of a
+ * decomposition is (this number) x (header size), which is why the FS lane
+ * used to be quadratic: it exec'd the pack once per member and every exec
+ * started at 1. Reported to $P7Z_STATS_FILE when set — instrumentation for
+ * the regression test, deliberately NOT a gate: a failed write is ignored
+ * and the command's exit status is never touched. */
+static unsigned long g_parses;
 
 /* ---------------- CRC32 (zlib polynomial, as 7z uses) ---------------- */
 
@@ -637,12 +659,24 @@ typedef struct {
     int      has_anti;          /* any anti bit set -> caller declines */
     uint8_t *names;             /* kName blob (UTF-16LE, NUL-separated) */
     size_t   names_len;
+    /* WP140: the name blob is walked ONCE here instead of once per member.
+     * The old make_sname() re-scanned from offset 0 for every index, which
+     * is O(num_files^2) even for a single header parse -- 3.5e9 steps at
+     * 84k members. name_ok[i] records whether the walk REACHED name i (a
+     * truncated/unterminated blob fails from that index on, exactly as the
+     * re-scan did), and name_off/name_end are its byte range. */
+    uint32_t *name_off;
+    uint32_t *name_end;
+    uint8_t  *name_ok;
 } files_t;
 
 static void files_free(files_t *fi)
 {
     free(fi->empty_stream);
     free(fi->names);
+    free(fi->name_off);
+    free(fi->name_end);
+    free(fi->name_ok);
     memset(fi, 0, sizeof *fi);
 }
 
@@ -710,29 +744,65 @@ static int parse_files_info(cur_t *c, files_t *fi)
     return 0;
 }
 
+/*
+ * WP140: index the kName blob ONCE. One forward pass records, per file, the
+ * byte range of its NUL-terminated UTF-16LE name and whether the walk ever
+ * REACHED it.
+ *
+ * The "reached" rule is copied verbatim from the walk this replaces, which
+ * restarted at offset 0 for every member: a name is rejected (and the
+ * member falls back to "mbr<i>") when the terminator would sit past the end
+ * of the blob, and once one index fails every LATER index fails too, because
+ * the old scan hit the same bad bytes on its way to them. Keeping that rule
+ * is what makes enumerate's output byte-identical before and after this
+ * change -- the regression test diffs the two tables.
+ *
+ * Returns 0 on success, 1 on allocation failure (a decline, not an error:
+ * the caller treats every parse failure as exit 3 already).
+ */
+static int files_index_names(files_t *fi)
+{
+    size_t pos = 0, i;
+
+    if (fi->num_files > (1ull << 32) - 1) return 1;  /* offsets are u32;
+                                                        * MAX_FILES is 2^20,
+                                                        * so this cannot fire */
+
+    fi->name_off = (uint32_t *)malloc((size_t)fi->num_files * sizeof(uint32_t) + 2);
+    fi->name_end = (uint32_t *)malloc((size_t)fi->num_files * sizeof(uint32_t) + 2);
+    fi->name_ok  = (uint8_t *)calloc((size_t)fi->num_files + 1, 1);
+    if (!fi->name_off || !fi->name_end || !fi->name_ok) return 1;
+    if (!fi->names) return 0;                 /* every name falls back */
+    for (i = 0; i < (size_t)fi->num_files; i++) {
+        size_t s = pos;
+        int bad = 0;
+        for (;;) {
+            unsigned u;
+            if (pos + 1 >= fi->names_len + 2) { bad = 1; break; }
+            u = fi->names[pos] | ((unsigned)fi->names[pos + 1] << 8);
+            pos += 2;
+            if (pos > fi->names_len) { bad = 1; break; }
+            if (!u) break;
+        }
+        fi->name_off[i] = (uint32_t)s;
+        if (bad) break;                       /* i and everything after */
+        fi->name_end[i] = (uint32_t)(pos - 2);
+        fi->name_ok[i] = 1;
+    }
+    return 0;
+}
+
 /* the UTF-16LE name of file i -> ASCII basename sname (advisory) */
 static void make_sname(const files_t *fi, uint64_t i, char *out, size_t cap)
 {
-    size_t pos = 0, start = 0, end = 0, p;
-    uint64_t idx;
+    size_t start, end, p;
     char tmp[128];
     size_t w = 0;
 
     out[0] = 0;
-    if (!fi->names) goto fallback;
-    /* walk to the i-th NUL-terminated UTF-16LE string */
-    for (idx = 0; idx <= i; idx++) {
-        size_t s = pos;
-        for (;;) {
-            unsigned u;
-            if (pos + 1 >= fi->names_len + 2) goto fallback;  /* unterminated */
-            u = fi->names[pos] | ((unsigned)fi->names[pos + 1] << 8);
-            pos += 2;
-            if (pos > fi->names_len) goto fallback;
-            if (!u) break;
-        }
-        if (idx == i) { start = s; end = pos - 2; break; }
-    }
+    if (!fi->names || i >= fi->num_files || !fi->name_ok[i]) goto fallback;
+    start = fi->name_off[i];
+    end = fi->name_end[i];
     /* basename: after the last '/' or '\\' */
     {
         size_t b = start, q;
@@ -961,6 +1031,7 @@ static int analyze(const char *argv0, const char *path, plan_t *pl)
     memset(pl, 0, sizeof *pl);
     memset(&si, 0, sizeof si);
     memset(&fi, 0, sizeof fi);
+    g_parses++;                  /* WP140: one full header parse starts here */
 
     f = fopen(path, "rb");
     if (!f) return 1;
@@ -1072,6 +1143,10 @@ static int analyze(const char *argv0, const char *path, plan_t *pl)
     if (c.pos != c.len) goto out;                   /* trailing garbage */
     if (fi.num_files == 0) goto out;                /* no FilesInfo */
     if (fi.has_anti) goto out;                      /* differential junk */
+    /* WP140: index the name blob once, here, so the member loop below is
+     * O(n) rather than O(n^2) (make_sname used to re-scan from offset 0 for
+     * every member). */
+    if (files_index_names(&fi) != 0) goto out;
 
     /* ---- build the plan (the strict support matrix) ---- */
     pl->members = (pmember_t *)calloc(fi.num_files, sizeof(pmember_t));
@@ -1269,12 +1344,138 @@ static int cmd_extract(const char *argv0, const char *in, const char *idx_s,
     return rc;
 }
 
+/* ---------------- extract_batch (WP140) ----------------
+ *
+ * ONE header parse, every member. The FS lane used to exec `extract` once
+ * per member, and every exec re-parsed the whole 7z header (plus a 7zz
+ * fork/exec for the default LZMA-compressed header), which made packing an
+ * n-member container O(n^2). This command parses once and writes, into
+ * <dir>, a file named "<idx>" for every member the enumerate table at <tbl>
+ * announces.
+ *
+ * The set is taken from the TABLE, not from an index range, so it is
+ * exactly what the FS asked for: the pack's index space is dense today, but
+ * the table is the authority and a range would write stray files for any
+ * index the table does not name.
+ *
+ * BIT-EXACTNESS: unchanged, and unchanged by construction. Each member is
+ * the same stream_copy() over the same (off,len) extent that cmd_extract
+ * does; nothing is decoded, re-encoded or checksummed differently here. The
+ * per-member guards that make the batch fail rather than lie are the same
+ * ones extract has, on the same conditions:
+ *   - an idx the plan does not have            -> exit 1 (extract: same)
+ *   - a repeated idx in the table               -> exit 1 (extract: N/A)
+ *   - a malformed table line                    -> exit 1
+ *   - a table usize that disagrees with the plan -> exit 1. The FS's own
+ *     size check (vol_cpack.c, stat vs announced usize) runs after this and
+ *     is unchanged, so a member that came out the wrong length still fails
+ *     the lane; this check makes the failure land in the pack instead.
+ *
+ * CLI-only, and that is a stated boundary rather than an accident: the
+ * ADR-007 ivpack plugin ABI has five container commands (ENUMERATE,
+ * EXTRACT, STRIP, REBUILD, MAP) and the pool is opt-in, so `batch` is an
+ * exec-path command and the engine deliberately does not route it to the
+ * pool. The FS lane falls back to one exec per member for any pack without
+ * a `batch` line, so nothing depends on this existing.
+ */
+#ifndef IVPACK_SHARED_LIB
+static int cmd_extract_batch(const char *argv0, const char *in,
+                             const char *tbl, const char *dir)
+{
+    plan_t pl;
+    FILE *ft = NULL, *fi = NULL;
+    char *text = NULL;
+    long tlen = 0;
+    uint8_t *seen = NULL;
+    size_t pos = 0;
+    int rc = 1;
+
+    rc = analyze(argv0, in, &pl);
+    if (rc != 0) return rc;
+
+    ft = fopen(tbl, "rb");
+    if (!ft) goto out;
+    if (fseek(ft, 0, SEEK_END) != 0) goto out;
+    tlen = ftell(ft);
+    if (tlen < 0) goto out;
+    if (fseek(ft, 0, SEEK_SET) != 0) goto out;
+    text = (char *)malloc((size_t)tlen + 1);
+    if (!text) goto out;
+    if (tlen && fread(text, 1, (size_t)tlen, ft) != (size_t)tlen) goto out;
+    text[tlen] = 0;
+    fclose(ft);
+    ft = NULL;
+
+    seen = (uint8_t *)calloc(pl.nmem + 1, 1);
+    if (!seen) goto out;
+
+    /* one open handle for the whole run: the extents are ascending in
+     * table order, so this reads the container forward, not seek-per-file */
+    fi = fopen(in, "rb");
+    if (!fi) goto out;
+
+    while (pos < (size_t)tlen) {
+        char *line = text + pos;
+        char *nl = strchr(line, '\n');
+        char *endp = NULL;
+        unsigned long idx;
+        uint64_t usize;
+        const pmember_t *m = NULL;
+        char path[4096];
+        FILE *fo;
+        size_t i, llen;
+
+        if (nl) { *nl = 0; pos = (size_t)(nl - text) + 1; }
+        else { pos = (size_t)tlen; }
+        llen = strlen(line);
+        if (!llen) continue;                 /* tolerate a trailing newline */
+
+        /* "idx<TAB>sname<TAB>usize" — exactly what enumerate wrote */
+        idx = strtoul(line, &endp, 10);
+        if (!endp || endp == line || *endp != '\t') goto out;
+        line = endp + 1;
+        endp = strchr(line, '\t');
+        if (!endp) goto out;
+        *endp = 0;
+        usize = strtoull(endp + 1, &endp, 10);
+        if (!endp || endp[0] != 0) goto out;
+        if (idx >= pl.nmem) goto out;        /* not a member of this archive */
+        if (seen[idx]) goto out;             /* the FS table never repeats */
+        seen[idx] = 1;
+        for (i = 0; i < pl.nmem; i++)
+            if (pl.members[i].idx == (uint32_t)idx) { m = &pl.members[i]; break; }
+        if (!m || m->usize != usize) goto out;
+
+        {
+            int n = snprintf(path, sizeof path, "%s/%lu", dir, idx);
+            if (n <= 0 || (size_t)n >= sizeof path) goto out;
+        }
+        fo = fopen(path, "wb");
+        if (!fo) goto out;
+        if (m->usize == 0) {
+            if (fclose(fo) != 0) goto out;   /* an empty member is an empty file */
+            continue;
+        }
+        if (seek_to(fi, m->off) != 0 ||
+            stream_copy(fi, fo, m->usize) != 0 || fclose(fo) != 0)
+            goto out;
+    }
+    rc = 0;
+out:
+    if (ft) fclose(ft);
+    if (fi) fclose(fi);
+    free(text);
+    free(seen);
+    plan_free(&pl);
+    return rc;
+}
+#endif /* !IVPACK_SHARED_LIB: the plugin ABI has no batch command */
+
 /* the recipe header size for n data members (shared by strip and map) */
 static uint64_t recipe_hdr_size(size_t n_data)
 {
     return 4 + 8 + 4 + (uint64_t)n_data * 20 + 4;
 }
-
 static int cmd_strip(const char *argv0, const char *in, const char *out)
 {
     plan_t pl;
@@ -1620,6 +1821,22 @@ IVPACK_DEFINE_CONTAINER_ESTIMATE(p7z, ivpack_glue_p7z(),
                              rc = p7z_iv_estimate(a);)
 
 #ifndef IVPACK_SHARED_LIB
+/* WP140: append one line per invocation to $P7Z_STATS_FILE. Instrumentation
+ * only: a failure here is silent and the command's exit status is already
+ * decided, so this can never turn a good decomposition into a bad one. The
+ * regression test counts these lines to assert the FS lane parses the header
+ * a constant number of times regardless of the member count. */
+static void p7z_stats(const char *cmd)
+{
+    const char *path = getenv("P7Z_STATS_FILE");
+    FILE *f;
+    if (!path || !*path) return;
+    f = fopen(path, "a");
+    if (!f) return;
+    fprintf(f, "%s parses=%lu\n", cmd, g_parses);
+    fclose(f);
+}
+
 int main(int argc, char **argv)
 {
     const char *cmd;
@@ -1634,6 +1851,8 @@ int main(int argc, char **argv)
         rc = cmd_enumerate(argv[0], argv[2], argv[3]);
     else if (!strcmp(cmd, "extract") && argc == 5)
         rc = cmd_extract(argv[0], argv[2], argv[3], argv[4]);
+    else if (!strcmp(cmd, "extract_batch") && argc == 5)
+        rc = cmd_extract_batch(argv[0], argv[2], argv[3], argv[4]);
     else if (!strcmp(cmd, "strip") && argc == 4)
         rc = cmd_strip(argv[0], argv[2], argv[3]);
     else if (!strcmp(cmd, "rebuild") && argc == 5)
@@ -1642,6 +1861,7 @@ int main(int argc, char **argv)
         rc = cmd_map(argv[0], argv[2], argv[3]);
     else if (!strcmp(cmd, "estimate") && argc == 3)
         rc = cmd_estimate(argv[0], argv[2]);
+    p7z_stats(cmd);
     free(g_buf);
     return rc;
 }
