@@ -125,7 +125,16 @@ CLI_MAINS := mkfs verify fsck cp cat ls stat arctest blkio_test resize \
              fsck_liveness_test scratch_policy_test v2rb_rollback_test keycmp_test \
              lane_release_test pbaref_v3_test \
              sweep_publish_rollback_test \
-             sibling_retire_v3_test tar_cap_test fold_delta_read_test
+             sibling_retire_v3_test tar_cap_test fold_delta_read_test \
+             reclaim_reader_epoch_test
+# NOTE on reclaim_reader_epoch_test: it is in CLI_MAINS so it BUILDS, but it
+# is deliberately NOT in the test: run recipe below. It is the deterministic
+# red control for the OPEN base-reclaim-vs-reader defect (vol_reclaim_drain
+# waits on a count nothing increments), so on this tree it fails -- by
+# design, and adding it to the gate would turn `make test` red for a defect
+# that is not fixed yet. It moves into the recipe in the same commit that
+# wires the reclaim reader epoch. Run it by hand:
+#   ./bin/invf-reclaim_reader_epoch_test /tmp   # expect: "the read FAILED"
 $(foreach t,$(CLI_MAINS),$(eval $(call TOOL_RULE,$(t),)))
 
 # WP71: loads every containerpack .so through dlmopen/dlopen -> needs -ldl,

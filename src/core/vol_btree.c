@@ -70,6 +70,19 @@
 #include <string.h>
 #include <stdlib.h>
 
+/* Test seam: fired by v3_base_root once it has a root and before anyone
+ * walks it. Weak, so this no-op definition is what links unless a test
+ * supplies its own -- production pays one predicted call on a path that
+ * already did a block read, and no state. It exists so the
+ * capture/reclaim interleave can be FORCED rather than raced for, at the
+ * exact boundary the reclaim reader epoch has to span
+ * (src/cli/reclaim_reader_epoch_test.c; the sibling seam for the delta side
+ * is invfs_test_delta_read_hook, vol_delta.c). */
+__attribute__((weak)) void invfs_test_base_read_hook(const invfs_blkptr *root)
+{
+    (void)root;
+}
+
 /* A node cannot hold more records than this: a leaf record is >= 4 bytes, an
  * internal record >= 26, and the usable payload is 4096-20. The bound also has
  * to cover a sibling pair during a merge (2 * leaf max). */
@@ -2619,6 +2632,12 @@ static int v3_base_root(invfs_volume *v, invfs_blkptr *out)
     if (mbuf_read(v, pba, page) != 0)
         return -1;
     mbuf_ptr_set(out, pba, page, INVFS_BP_ROOT);
+    /* Test seam: the root is captured and nothing of it has been read yet.
+     * This is the boundary a reclaim reader epoch must span -- a fold that
+     * publishes, drains and frees between the capture above and the walk
+     * below takes the pages out from under the caller. See the KNOWN GAP in
+     * this file's header. */
+    invfs_test_base_read_hook(out);
     return 0;
 }
 

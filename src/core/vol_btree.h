@@ -41,6 +41,17 @@
  * before the file ends, so forward-declare rather than include it twice. */
 typedef struct invfs_volume invfs_volume;
 
+/* Test seam: called by v3_base_root immediately after it has captured the
+ * current base root into *out, and before ANY caller walks it. That is the
+ * one point every base-tree read passes through, and it sits exactly on the
+ * boundary the reclaim reader epoch has to span -- the reader is holding a
+ * root and has read no page of it yet. Weak (see vol_btree.c): a no-op
+ * unless a test defines its own, which is how reclaim_reader_epoch_test
+ * forces the fold/reclaim interleave instead of racing for it.
+ *
+ * Non-default seam: unset in production, no behaviour change. */
+void invfs_test_base_read_hook(const invfs_blkptr *root);
+
 /* An ordered key / opaque value. Both are borrowed byte ranges. */
 typedef struct { const uint8_t *p; uint16_t n; } bt_key;
 typedef struct { const uint8_t *p; uint16_t n; } bt_val;
