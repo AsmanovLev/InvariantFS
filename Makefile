@@ -131,7 +131,7 @@ CLI_MAINS := mkfs verify fsck cp cat ls stat arctest blkio_test resize \
              rollback_symlink_test \
              sibling_retire_v3_test tar_cap_test fold_delta_read_test \
              reclaim_reader_epoch_test readdir_error_test dedupe_symlink_test dirs_free_before_publish_test \
-             stat_v3_counts_test acl_eio_test meta_clobber_test
+             stat_v3_counts_test acl_eio_test meta_clobber_test spn_skip_recipe_test
 $(foreach t,$(CLI_MAINS),$(eval $(call TOOL_RULE,$(t),)))
 
 # reclaim_reader_epoch_test was, for one commit, a red control that built but
@@ -766,6 +766,8 @@ test: $(TEST_BINS) $(OUT)/invf-arctest $(OUT)/invf-blkio_test $(OUT)/invf-codec_
 	@# uid map to swallow. INVFS_FAULT is unset on the healthy legs, so those
 	@# also assert the unset path stays inert.
 	$(TESTENV) $(TESTISO) $(OUT)/invf-meta_clobber_test /tmp
+	$(TESTENV) $(TESTISO) $(OUT)/invf-spn_skip_recipe_test /srv/bench/scratch skipped
+	$(TESTENV) $(TESTISO) $(OUT)/invf-spn_skip_recipe_test /srv/bench/scratch skippedctl
 	@# WP-arc-concurrent-safe: the content cache, under concurrency. TSAN is
 	@# the structure (arc.c had no lock at all), ASan is the borrow (an
 	@# arc_get pointer freed underneath the reader's memcpy). Both must be

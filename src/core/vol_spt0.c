@@ -297,7 +297,8 @@ typedef struct {
     uint64_t broken;         /* a segment that was already damaged at capture */
     uint64_t marked;
     uint64_t recipes;
-    uint64_t unreadable;     /* a recipe we could not even load */
+    uint64_t indeterminate;  /* an inode whose block set is UNKNOWN: see the
+                              * rule above spn_inode_block_set */
     uint64_t n_inodes;
 } spn_walk_ctx;
 
@@ -552,6 +553,89 @@ static int spn_dig_cmp(const void *a, const void *b)
     return x < y ? -1 : x > y ? 1 : 0;
 }
 
+/* ===================================================================
+ * THE RULE, and the one function both ends of a save point consult.
+ *
+ * A save point answers exactly one question about the generation it captured:
+ * WHICH BLOCKS DOES THAT GENERATION NAME? Two code paths answer it -- the
+ * walk below, whose mark set HOLDS those blocks, and spt0_data_ino, which
+ * verifies them when a rollback publishes the pinned root -- and they have to
+ * give the same answer. A save point that pins less than it can prove and then
+ * frees the difference is not a save point that is "a bit stale": it is a save
+ * point that means one thing to the capture and another to the restore.
+ *
+ * So the rule is about the ANSWER, not about either walk:
+ *
+ *   A live inode whose block set cannot be determined makes that answer
+ *   INCOMPLETE. An incomplete answer is never used to release a block, and is
+ *   never reported as an intact generation.
+ *
+ * "Cannot be determined" has exactly two causes, and BOTH ARE FAILURES, not
+ * absences: the recipe did not load, or it loaded and did not parse. A
+ * genuinely absent recipe (recipe_addr all zero) and a raw-blob type (a
+ * symlink's target string) are NOT failures -- they name no blocks, which is
+ * a complete answer, and they say so here rather than leaving each end to
+ * work it out for itself.
+ *
+ * WHICH BLOCKS THE "EXCEPT" WOULD HAVE TO PROTECT, since that is the question
+ * the refuse-or-except choice turns on: an unreadable recipe names an UNKNOWN
+ * set. Nothing bounds it -- a recipe blob is content-addressed and can name any
+ * block of the volume, in any quantity -- so the only sound protect-set is the
+ * whole of old_map, i.e. the answer "reclaim nothing". An except-the-unreadable
+ * -ones reclaim therefore reclaims nothing while carrying an extra place to get
+ * the protection wrong. Hence SPN_SET_UNKNOWN is a refusal, not a filter.
+ * =================================================================== */
+typedef enum {
+    SPN_SET_NAMED   = 0,   /* the recipe loaded and parsed: *ents is the set */
+    SPN_SET_NONE    = 1,   /* it names no blocks (no recipe, or a raw blob) */
+    SPN_SET_UNKNOWN = -1   /* INDETERMINATE -- the rule applies to this one */
+} spn_set_rc;
+
+/* The block set of one live inode. On SPN_SET_NAMED the caller owns *blob and
+ * must free it. On the other two *blob is left NULL, and `why` (when given) says
+ * which of them this is and why -- the restore refuses with it, the capture
+ * counts it. */
+static spn_set_rc spn_inode_block_set(invfs_volume *v,
+                                      const invfs_v3_inode *in,
+                                      uint8_t **blob, size_t *blen,
+                                      invfs_ast_hdr *ah,
+                                      const invfs_ast_block_entry **ents,
+                                      size_t *n_ents, char *why, size_t whylen)
+{
+    uint8_t *b = NULL;
+    size_t l = 0;
+
+    *blob = NULL;
+    *blen = 0;
+    *ents = NULL;
+    *n_ents = 0;
+    if (memcmp(in->recipe_addr, "\0\0\0\0\0\0\0\0",
+               INVFS_V3_RECIPE_ADDR_LEN) == 0)
+        return SPN_SET_NONE;          /* no recipe: names no blocks */
+    if (vol_v3_recipe_load(v, in->recipe_addr, &b, &l) != 0 || !b) {
+        if (why && whylen)
+            snprintf(why, whylen, "inode's pinned recipe is unreadable");
+        return SPN_SET_UNKNOWN;
+    }
+    /* A raw-blob type (a symlink's target string) has a blob that is not an
+     * AST. The LOAD is still the whole obligation for one -- it is stored
+     * content-addressed exactly like a recipe, and a symlink whose blob really
+     * is missing is caught above -- so this skips the PARSE, never the load. */
+    if (invfs_inode_content_is_raw_blob(in->type)) {
+        free(b);
+        return SPN_SET_NONE;
+    }
+    if (vol_ast_recipe_parse(b, l, ah, ents, n_ents) != 0 || !*ents) {
+        if (why && whylen)
+            snprintf(why, whylen, "inode's pinned recipe does not parse");
+        free(b);
+        return SPN_SET_UNKNOWN;
+    }
+    *blob = b;
+    *blen = l;
+    return SPN_SET_NAMED;
+}
+
 /* The walk: for every live inode of the captured generation, mark the blocks
  * its recipe names and record each segment's identity. */
 static int spn_walk_ino(invfs_volume *v, uint64_t inode_id,
@@ -563,74 +647,67 @@ static int spn_walk_ino(invfs_volume *v, uint64_t inode_id,
     invfs_ast_hdr ah;
     const invfs_ast_block_entry *ents = NULL;
     size_t n_ents = 0;
+    spn_set_rc set;
 
     c->n_inodes++;
-    if (memcmp(in->recipe_addr, "\0\0\0\0\0\0\0\0",
-               INVFS_V3_RECIPE_ADDR_LEN) == 0)
+    set = spn_inode_block_set(v, in, &blob, &blen, &ah, &ents, &n_ents,
+                              NULL, 0);
+    if (set == SPN_SET_UNKNOWN) {
+        /* THE RULE, capture side. This walk still completes and the pin is
+         * still armed with whatever it did determine -- a hold is best-effort
+         * and refusing the whole save point over one damaged file would cost
+         * every other file its window. What it may NOT do is RELEASE: the mark
+         * set is now known to be missing this inode's blocks, so it is not a
+         * sound basis for "no live recipe names this any more", and
+         * spn_reclaim is told so below. */
+        c->indeterminate++;
         return 0;
-    if (vol_v3_recipe_load(v, in->recipe_addr, &blob, &blen) != 0 || !blob) {
-        c->unreadable++;
-        return 0;               /* keep walking; the caller reports it */
     }
+    if (set != SPN_SET_NAMED)
+        return 0;
     c->recipes++;
-    /* Same predicate as the restore-side check above, and for the same
-     * reason: a symlink's blob is a raw object, not an AST. It is
-     * harmless HERE only by accident -- the parse fails, so the loop below
-     * is skipped and nothing is marked. Accidental is not a property:
-     * invfs_ast_hdr_parse accepts any target whose first four bytes are a
-     * v1/v2 AST version word, so a crafted target parses and every
-     * attacker-controlled block entry would be marked into the pin (held
-     * for a generation by spn_reclaim) and recorded in the digest the
-     * restore cross-checks (a spurious SPT0_RC_DAMAGED on top of the one
-     * this predicate fixes). Stated explicitly, the two ends agree. */
-    if (invfs_inode_content_is_raw_blob(in->type)) {
-        free(blob);
-        return 0;
-    }
-    if (vol_ast_recipe_parse(blob, blen, &ah, &ents, &n_ents) == 0 && ents) {
-        for (i = 0; i < n_ents; i++) {
-            uint64_t pba = ents[i].pba, plen = 0, b;
-            if (!pba)
-                continue;
-            /* a WINDOW_SRC entry's pba field is the SOURCE INODE ID, not a
-             * block address: pinning it would pin an unrelated block and
-             * leak it for a generation. The source's own recipe pins its
-             * data (the window resolves through it). */
-            if (ents[i].algo == INVFS_ALGO_WINDOW_SRC)
-                continue;
-            if (pba >= v->sb.total_blocks)
-                continue;
-            if (seg_extent_checked(v, pba, &plen) != 0 || plen == 0 ||
-                pba + plen > v->sb.total_blocks) {
-                /* the header is already unusable: pin the head block so the
-                 * free path cannot hand it out, and record the damage so
-                 * the restore-time check refuses instead of "restoring" it */
-                if (!bit_get(c->map, pba)) {
-                    bit_set(c->map, pba);
-                    c->marked++;
-                }
-                c->broken++;
-                if (spn_dig_push(c, pba, 0, 0) != 0)
-                    return -1;
-                continue;
+    for (i = 0; i < n_ents; i++) {
+        uint64_t pba = ents[i].pba, plen = 0, b;
+        if (!pba)
+            continue;
+        /* a WINDOW_SRC entry's pba field is the SOURCE INODE ID, not a
+         * block address: pinning it would pin an unrelated block and
+         * leak it for a generation. The source's own recipe pins its
+         * data (the window resolves through it). */
+        if (ents[i].algo == INVFS_ALGO_WINDOW_SRC)
+            continue;
+        if (pba >= v->sb.total_blocks)
+            continue;
+        if (seg_extent_checked(v, pba, &plen) != 0 || plen == 0 ||
+            pba + plen > v->sb.total_blocks) {
+            /* the header is already unusable: pin the head block so the
+             * free path cannot hand it out, and record the damage so
+             * the restore-time check refuses instead of "restoring" it */
+            if (!bit_get(c->map, pba)) {
+                bit_set(c->map, pba);
+                c->marked++;
             }
-            {   /* the identity the restore re-checks: [4B csize][4B crc] */
-                uint8_t hdr[8];
-                uint32_t csize = 0, crc = 0;
-                if (io_pread(&v->io, pba * (uint64_t)INVFS_BLOCK_SIZE,
-                             hdr, 8) == 0) {
-                    memcpy(&csize, hdr, 4);
-                    memcpy(&crc, hdr + 4, 4);
-                }
-                if (spn_dig_push(c, pba, csize, crc) != 0)
-                    return -1;
-            }
-            for (b = pba; b < pba + plen; b++)
-                if (!bit_get(c->map, b)) {
-                    bit_set(c->map, b);
-                    c->marked++;
-                }
+            c->broken++;
+            if (spn_dig_push(c, pba, 0, 0) != 0)
+                return -1;
+            continue;
         }
+        {   /* the identity the restore re-checks: [4B csize][4B crc] */
+            uint8_t hdr[8];
+            uint32_t csize = 0, crc = 0;
+            if (io_pread(&v->io, pba * (uint64_t)INVFS_BLOCK_SIZE,
+                         hdr, 8) == 0) {
+                memcpy(&csize, hdr, 4);
+                memcpy(&crc, hdr + 4, 4);
+            }
+            if (spn_dig_push(c, pba, csize, crc) != 0)
+                return -1;
+        }
+        for (b = pba; b < pba + plen; b++)
+            if (!bit_get(c->map, b)) {
+                bit_set(c->map, b);
+                c->marked++;
+            }
     }
     free(blob);
     return 0;
@@ -685,7 +762,7 @@ static uint64_t spn_free_counted(invfs_volume *v, uint64_t pba, uint64_t n)
 }
 
 static uint64_t spn_reclaim(invfs_volume *v, const uint8_t *old_map,
-                            const uint8_t *new_map)
+                            const uint8_t *new_map, int new_map_complete)
 {
     uint64_t total = v->sb.total_blocks;
     uint64_t b = 0, freed = 0, run = 0, start = 0;
@@ -693,6 +770,31 @@ static uint64_t spn_reclaim(invfs_volume *v, const uint8_t *old_map,
     size_t n_reg = 0;
 
     if (!old_map)
+        return 0;
+    /* THE RULE, applied to the RELEASE -- and it is the same rule the walk and
+     * the restore-side check consult (spn_inode_block_set, above).
+     *
+     * The set this pass releases on is old_map \ new_map, which reads as
+     * "no live recipe names this any more". That reading is only true when
+     * new_map is a COMPLETE answer, and a walk that could not determine one
+     * live inode's block set has not produced a complete answer -- so the
+     * blocks that inode names are in old_map and absent from new_map, and
+     * they are freed under a live recipe.
+     *
+     * Pre-fix this loop asked only about the batch registry (the check just
+     * below), so the OTHER owner set was fail-closed and this one was not.
+     *
+     * Why refuse the whole reclaim rather than reclaim everything except the
+     * unreadable ones: an unreadable recipe names an UNKNOWN set of blocks.
+     * Nothing bounds it -- a recipe blob is content-addressed and can name any
+     * block of the volume, in any quantity -- so the only protect-set that is
+     * certainly right is all of old_map, i.e. the answer "reclaim nothing". An
+     * except-the-unreadable-ones pass therefore reclaims nothing while
+     * carrying an extra place to get the exception wrong. The cost of
+     * refusing is space held for one generation longer, which is the same
+     * trade the unreadable registry below already makes, and the same one
+     * pba_ref_ensure makes when it cannot build an exact map (c47cf65). */
+    if (!new_map_complete)
         return 0;
     /* A RECIPE is not the only owner of a pinned block. The v3 batch
      * registry (the hidden TZ_OWNER_NAME file) owns its batches' extents
@@ -814,19 +916,24 @@ static int spt0_pin_take(invfs_volume *v, uint64_t root_pba,
         return -1;
     }
     npinned = c.marked;
-    if (c.unreadable)
-        fprintf(stderr, "[spt0] save point: %llu of %llu recipes in the "
-                "captured generation could not be read; their blocks cannot "
-                "be pinned, and the restore-time data check will refuse a "
-                "rollback onto them\n",
-                (unsigned long long)c.unreadable,
-                (unsigned long long)(c.recipes + c.unreadable));
+    if (c.indeterminate)
+        fprintf(stderr, "[spt0] save point: %llu of %llu live inodes in the "
+                "captured generation have a block set this walk could not "
+                "determine (the recipe did not load, or did not parse). Their "
+                "blocks are NOT pinned, the restore-time data check will "
+                "refuse a rollback onto them, and this capture does NOT "
+                "reclaim: a set with a hole in it is not a basis for "
+                "releasing the blocks it is missing. The previous save "
+                "point's hold is carried one generation longer instead.\n",
+                (unsigned long long)c.indeterminate,
+                (unsigned long long)c.n_inodes);
 
     /* reclaim the previous generation's debt BEFORE arming the new set */
     if (old_pba && old_blocks && map) {
         old_map = spn_old_map_load(v, old_pba);
         if (old_map) {
-            uint64_t freed = spn_reclaim(v, old_map, map);
+            uint64_t freed = spn_reclaim(v, old_map, map,
+                                         c.indeterminate == 0);
             /* WP137: publish the discharge. This is the ONLY place debt is
              * ever collected, so it is also the only place the FUSE ladder
              * can learn that the fill it is reading high is (or is no
@@ -1175,37 +1282,23 @@ static int spt0_data_ino(invfs_volume *v, uint64_t inode_id,
     invfs_ast_hdr ah;
     const invfs_ast_block_entry *ents = NULL;
     size_t n_ents = 0;
+    char why[96];
+    spn_set_rc set;
 
-    if (memcmp(in->recipe_addr, "\0\0\0\0\0\0\0\0",
-               INVFS_V3_RECIPE_ADDR_LEN) == 0)
-        return 0;
-    if (vol_v3_recipe_load(v, in->recipe_addr, &blob, &blen) != 0 || !blob) {
-        snprintf(c->err, sizeof c->err,
-                 "inode %llu's pinned recipe is unreadable",
-                 (unsigned long long)inode_id);
+    /* THE RULE, restore side. The same function the capture walk above asks,
+     * asked the same question, so the two ends cannot drift: an inode whose
+     * block set is INDETERMINATE makes the save point's answer incomplete, and
+     * an incomplete answer is not an intact generation -- it is a refusal. */
+    set = spn_inode_block_set(v, in, &blob, &blen, &ah, &ents, &n_ents,
+                              why, sizeof why);
+    if (set == SPN_SET_UNKNOWN) {
+        snprintf(c->err, sizeof c->err, "inode %llu: %s",
+                 (unsigned long long)inode_id, why);
         return -1;
     }
+    if (set != SPN_SET_NAMED)
+        return 0;
     c->inodes++;
-    /* The blob LOADED, which is the whole obligation for a raw-blob type.
-     * A symlink's content is its target string, stored content-addressed
-     * exactly like a recipe (vol_v3_create_node), so recipe_addr is
-     * non-zero and this row walked straight into vol_ast_recipe_parse --
-     * which cannot parse "usr/lib", refused the rollback, and named damage
-     * that does not exist. invf_inode_content_is_raw_blob is the same
-     * predicate the read path dispatches on and the fsck recipe audit is
-     * routed through: skip the PARSE, never the LOAD (a symlink whose blob
-     * really is missing is still caught by the load above). */
-    if (invfs_inode_content_is_raw_blob(in->type)) {
-        free(blob);
-        return 0;
-    }
-    if (vol_ast_recipe_parse(blob, blen, &ah, &ents, &n_ents) != 0 || !ents) {
-        snprintf(c->err, sizeof c->err,
-                 "inode %llu's pinned recipe does not parse",
-                 (unsigned long long)inode_id);
-        free(blob);
-        return -1;
-    }
     for (i = 0; i < n_ents; i++) {
         uint64_t pba = ents[i].pba;
         const spn_dig *want;

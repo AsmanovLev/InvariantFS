@@ -4153,6 +4153,19 @@ int vol_v3_recipe_load(invfs_volume *v, const uint8_t addr[INVFS_V3_RECIPE_ADDR_
     *blen_out = 0;
     if (v3_ready(v) != 0)
         return -1;
+    /* WP141: one-shot injectible read failure, for the SAME reason the inode-
+     * row site above exists. Every failure path of this function returns -1,
+     * so the injected one is indistinguishable to a caller -- which is the
+     * point: a recipe that will not load is an expected state on a damaged
+     * volume (AGENTS.md 2.10), and the savepoint capture walk has to be
+     * reachable in that state without scribbling a volume to get there.
+     *
+     * It sits BEFORE the rcache hit on purpose. A capture that already loaded
+     * this address once in the same session would otherwise be served from
+     * the cache and the injected failure would never be reached, so the leg
+     * would measure the healthy path and go green. */
+    if (invfs_vol_fault("v3_recipe_load"))
+        return -1;
     if (v3_rcache_get(v, addr, blob_out, blen_out) == 0)
         return 0;
     v3_recipe_key(kb, addr);
