@@ -636,6 +636,37 @@ uint64_t vol_create_special(invfs_volume *v, const char *name,
 int vol_hardlink(invfs_volume *v, const char *from, const char *to);
 size_t vol_collect_sweepables(invfs_volume *v, uint64_t *ids, size_t max);
 
+/* The sweep-id collection, with the truncation made VISIBLE.
+ *
+ * vol_collect_sweepables() stores at most `max` ids and returns how many it
+ * stored; a caller that compares that against nothing cannot tell a complete
+ * list from a strict prefix of one. vol_collect_sweepables_ex() adds
+ * *found_out: the number of sweepable inodes the walk actually SAW. The
+ * predicate is exact --
+ *
+ *     found == n   the walk reached the end of the live set: COMPLETE
+ *     found  > n   the buffer filled with inodes still to come: TRUNCATED,
+ *                  and n is only a prefix, by exactly found - n
+ *
+ * (The conservative test a caller may use instead, `n == max`, cannot tell
+ * "exactly full" from "overflowing" and costs an extra walk; this does not.)
+ * On v3 the walk STOPS one entry past the cap, so counting costs nothing:
+ * found is exact in the complete case and a lower bound in the truncated one.
+ * On v2 every record is resolved regardless of the cap, so it is always exact.
+ *
+ * vol_collect_sweepables_grow() is the collector a caller should normally
+ * reach for: it doubles *ids_io and re-collects until a collect comes back
+ * complete, and returns 0 only in that case. It returns -1 when realloc fails
+ * or the capacity would overflow -- and then *n_out is a strict subset with
+ * *found_out above it, so the shortfall is reported rather than assumed away.
+ * The caller decides what a short list is worth, and it cannot skip that
+ * decision: a sweep that reports success having swept a subset is worse than
+ * one that refuses. */
+size_t vol_collect_sweepables_ex(invfs_volume *v, uint64_t *ids, size_t max,
+                                 size_t *found_out);
+int vol_collect_sweepables_grow(invfs_volume *v, uint64_t **ids_io, size_t *cap_io,
+                                size_t *n_out, size_t *found_out);
+
 /* ---- WP4b: incremental ranged-write sessions ----
  * Streaming write path: begin a session for `name` (truncate != 0 drops
  * the old content at first use), then vol_write_range any [off,len)

@@ -1755,14 +1755,13 @@ static void sweep_rollback_warning(const char *img, const char *mnt)
 static void invf_sweep_worker(int full_pass)
 {
     uint64_t *ids = NULL;
-    size_t max = 300000, n, i;
+    size_t cap = 0, n = 0, found = 0, i;
     long swept = 0, skipped = 0, failed = 0;
     int armed = 0;
     int is_v3 = 0;
+    int complete;
     const char *tag = full_pass ? "watermark" : "manual";
 
-    ids = malloc(max * sizeof(*ids));
-    if (!ids) return;
     pthread_mutex_lock(&g_io_lock);
     if (!g_vol) { pthread_mutex_unlock(&g_io_lock); free(ids); return; }
     is_v3 = (vol_sb(g_vol)->vol_flags & VOLF_V3) != 0;
@@ -1808,8 +1807,63 @@ static void invf_sweep_worker(int full_pass)
         }
         vol_heat_sweep_begin(g_vol);   /* one decay pass per sweep run */
     }
-    n = vol_collect_sweepables(g_vol, ids, max);
-    fprintf(stderr, "[sweep] %s pass started: %zu files\n", tag, n);
+    /* WP-fuse-sweep-inode-cap: GROW, and know whether the list is whole.
+     *
+     * This used to be a fixed `malloc(300000 * 8)` and a bare
+     * vol_collect_sweepables(), so above 300,000 sweepable inodes the pass
+     * swept a strict PREFIX and then printed an ordinary successful DONE
+     * line. Nothing compared the stored count against what the walk saw, so
+     * the truncation was invisible -- and this is the pass a live volume
+     * depends on: AGENTS.md 2.5 makes the watermark ladder take the capture
+     * itself, and 2.6 makes USR1 / the user.invfs.sweep xattr the daemon's
+     * own recovery path. A silently truncated pass on a live volume means
+     * dead segments accumulate forever behind a clean log.
+     *
+     * The 300,000 was not a memory budget and not a fixed allocation
+     * chosen for a reason: it is 2.4 MB of ids against a process that
+     * already caches 256 MB of ARC by default, it is a bare literal with no
+     * comment, and `git log -S "max = 300000"` reaches the initial import
+     * with no commit message offering a rationale. It is a guess that was
+     * never checked against the volume geometry, so the buffer now grows
+     * the way the offline sweep's own collector already does
+     * (tools/invf-sweep.c:1203-1221).
+     *
+     * cap is 0 here on purpose: the seed lives inside
+     * vol_collect_sweepables_grow(), so there is no ceiling on this path to
+     * be tempted back into a literal. It doubles and re-collects until a
+     * collect comes back complete, and returns 0 only then. The re-walks it
+     * costs are bounded by log2(files/seed) and are lost against the
+     * per-file usleep(500) further down this same loop. */
+    complete = (vol_collect_sweepables_grow(g_vol, &ids, &cap, &n, &found) == 0);
+    if (!complete) {
+        /* The growth itself ran out of memory. `found > n` is the proof
+         * that the list is a subset, so the pass must not be allowed to
+         * look like it swept the volume. */
+        fprintf(stderr,
+                "[%s] INCOMPLETE: could not allocate a sweep list for this "
+                "volume; collected %zu of at least %zu inodes. The pass "
+                "below is a PARTIAL sweep, not a whole one.\n", tag, n, found);
+        if (!full_pass) {
+            /* Fail closed, the same rule the save-point capture follows
+             * above: the operator asked for this in the foreground, a
+             * subset is not what they asked for, and the volume is
+             * unchanged. Say what would actually collect it all. */
+            fprintf(stderr,
+                    "[%s] REFUSING the pass (the volume is unchanged). Sweep "
+                    "it offline instead -- invf-sweep on the unmounted image "
+                    "grows its list the same way and has no memory ceiling "
+                    "here.\n", tag);
+            pthread_mutex_unlock(&g_io_lock);
+            free(ids);
+            return;
+        }
+        /* The watermark pass keeps its pre-existing fail-open behaviour:
+         * that pass exists to relieve fill pressure, and abandoning it
+         * leaves the volume worse. It sweeps what it got -- loudly, and
+         * the DONE line below carries the marker. */
+    }
+    fprintf(stderr, "[sweep] %s pass started: %zu files%s\n", tag, n,
+            complete ? "" : " (PARTIAL -- see INCOMPLETE above)");
     for (i = 0; i < n; i++) {
         int rc;
         if (g_shutdown || !g_vol) break;
@@ -1858,8 +1912,27 @@ static void invf_sweep_worker(int full_pass)
         vol_flush(g_vol);
     }
     pthread_mutex_unlock(&g_io_lock);
-    fprintf(stderr, "[sweep] DONE files=%zu swept=%ld skipped=%ld failed=%ld\n",
-            n, swept, skipped, failed);
+    /* WP-fuse-sweep-inode-cap: the two counts the operator needs, and the
+     * marker that says whether they are the same number.
+     *
+     * `found` is what the collection walk saw on the volume; `files` is what
+     * this pass actually had a list entry for and therefore swept. On a
+     * complete collect they are equal by construction -- the growing
+     * collector only returns success when found == files -- so the line
+     * states the identity rather than leaving it implied. On a short collect
+     * they differ, found is a LOWER BOUND (the walk stops one entry past the
+     * cap), and the line says PARTIAL so the pass cannot be read as a
+     * clean one. swept+skipped+failed is the per-file disposition and
+     * reconciles against `files` (the loop breaks early only on g_shutdown).
+     *
+     * This is the checkable form: `files`, `swept+skipped+failed` and
+     * `found` are all in one line, and a truncated pass is the only way to
+     * see them disagree. */
+    fprintf(stderr,
+            "[sweep] DONE found=%zu files=%zu swept=%ld skipped=%ld "
+            "failed=%ld%s\n",
+            found, n, swept, skipped, failed,
+            (complete && found == n) ? "" : " INCOMPLETE");
     free(ids);
 }
 

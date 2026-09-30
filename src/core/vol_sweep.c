@@ -2681,7 +2681,7 @@ static int sweep_seen_cb(void *ctx_, uint64_t rec_pos,
 /* WP-M21b: collector callback for the v3 live-set iterator. Internal
  * (\x01) rows and nameless rows are not sweep targets; the iterator has
  * already dropped deleted rows and de-duplicated nlink-shared inodes. */
-struct v3_sweep_ids { uint64_t *ids; size_t max, n; };
+struct v3_sweep_ids { uint64_t *ids; size_t max, n; size_t found; };
 
 static int collect_sweepables_v3_cb(invfs_volume *v, uint64_t id,
                                     const char *name, void *ctx)
@@ -2690,25 +2690,34 @@ static int collect_sweepables_v3_cb(invfs_volume *v, uint64_t id,
     (void)v;
     if (!name || !name[0] || (unsigned char)name[0] == 0x01)
         return 0;
+    /* Counted BEFORE the full test, so a collect that ran out of room leaves
+     * found == n + 1: the excess is the proof that the list is a strict
+     * subset of the volume. Counted after, a truncating call would be
+     * indistinguishable from an exactly-full one -- and that difference is
+     * the whole of the "swept a prefix and said nothing" defect. */
+    c->found++;
     if (c->n >= c->max)
         return 1;                       /* full: stop the iteration */
     c->ids[c->n++] = id;
     return 0;
 }
 
-size_t vol_collect_sweepables(invfs_volume *v, uint64_t *ids, size_t max)
+size_t vol_collect_sweepables_ex(invfs_volume *v, uint64_t *ids, size_t max,
+                                 size_t *found_out)
 {
     sweep_seen_ctx c;
-    size_t out = 0, s;
+    size_t out = 0, s, found = 0;
 
+    if (found_out) *found_out = 0;
     if (!v || !ids || max == 0) return 0;
 
     /* WP-M21b: on v3 the live set is the base inode tree + delta overlay
      * (M18 iterator) -- the v2 record walk below finds nothing there. */
     if (v->sb.vol_flags & VOLF_V3) {
         struct v3_sweep_ids vc;
-        vc.ids = ids; vc.max = max; vc.n = 0;
+        vc.ids = ids; vc.max = max; vc.n = 0; vc.found = 0;
         (void)vol_v3_iter_live_inodes(v, collect_sweepables_v3_cb, &vc);
+        if (found_out) *found_out = vc.found;
         return vc.n;
     }
 
@@ -2717,13 +2726,60 @@ size_t vol_collect_sweepables(invfs_volume *v, uint64_t *ids, size_t max)
      * legacy loop saw only the empty contiguous area) and still bounds
      * itself to [inode_area_start, inode_area_pos) on legacy volumes */
     vol_records_walk(v, sweep_seen_cb, &c);
-    /* resolve through the live index: tombstoned seeds drop out here */
-    for (s = 0; s < c.seen_n && out < max; s++) {
+    /* Resolve through the live index: tombstoned seeds drop out here. The
+     * loop deliberately does NOT stop at `out < max` any more -- the ids
+     * past the cap are dropped, but every record is still resolved, because
+     * the caller needs to be told how many there were. */
+    for (s = 0; s < c.seen_n; s++) {
         uint64_t id = vol_find(v, c.seen[s].name);
-        if (id != 0) ids[out++] = id;
+        if (id == 0) continue;
+        found++;
+        if (out < max) ids[out++] = id;
     }
     free(c.seen);
+    if (found_out) *found_out = found;
     return out;
+}
+
+size_t vol_collect_sweepables(invfs_volume *v, uint64_t *ids, size_t max)
+{
+    return vol_collect_sweepables_ex(v, ids, max, NULL);
+}
+
+int vol_collect_sweepables_grow(invfs_volume *v, uint64_t **ids_io, size_t *cap_io,
+                                size_t *n_out, size_t *found_out)
+{
+    uint64_t *ids;
+    size_t cap, n = 0, found = 0;
+
+    if (!v || !ids_io || !cap_io || !n_out || !found_out) return -1;
+    ids = *ids_io; cap = *cap_io;
+
+    if (cap == 0) {
+        cap = 4096;
+        ids = (uint64_t *)malloc(cap * sizeof *ids);
+        if (!ids) { *n_out = 0; *found_out = 0; return -1; }
+    }
+    for (;;) {
+        n = vol_collect_sweepables_ex(v, ids, cap, &found);
+        /* found == n means the walk reached the end of the live set with
+         * room to spare: this is a COMPLETE list, and returning it is the
+         * only way this function returns 0. */
+        if (found <= n) break;
+        /* found > n: the buffer is full and the volume has more. Double
+         * and walk again -- the same shape tz_v3_gc already uses
+         * (vol_textzone.c:1569) and the same shape the offline sweep's own
+         * collector uses (tools/invf-sweep.c:1203). */
+        if (cap > (size_t)-1 / (2 * sizeof *ids)) { break; }
+        {
+            uint64_t *ni = (uint64_t *)realloc(ids, cap * 2 * sizeof *ni);
+            if (!ni) break;            /* OOM: leave the subset we have */
+            ids = ni; cap *= 2;
+        }
+    }
+    *ids_io = ids; *cap_io = cap;
+    *n_out = n; *found_out = found;
+    return found <= n ? 0 : -1;
 }
 
 
