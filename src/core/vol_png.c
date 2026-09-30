@@ -777,6 +777,31 @@ uint64_t vol_create_blob_file(invfs_volume *v, const char *name,
                 name, (unsigned long long)orig_size);
         return 0;
     }
+    /* Fault injection: fail every blob write from the Nth of this process on.
+     *
+     * Every transcode child goes through here, so this is the one place that
+     * can make a partial transcode happen on demand. Without it the abort
+     * paths are only reachable by filling a volume to a precise byte -- the
+     * sweep frees the original as it goes, so the exact failure point is not
+     * controllable from outside -- and they are precisely the paths where a
+     * bug costs the user a file instead of some space.
+     *
+     * From the Nth *onward*, not the Nth alone: that is what ENOSPC looks
+     * like, and it is the only way to exercise the retry paths (the FLAC
+     * recipe falls back to storing uncompressed, so failing one write just
+     * takes the fallback and the transcode succeeds). Unset in normal runs. */
+    {
+        const char *fc = getenv("INVFS_FAIL_CHILD");
+        if (fc && atoi(fc) > 0) {
+            static int nth = 0;
+            if (++nth >= atoi(fc)) {
+                fprintf(stderr, "[vol] INVFS_FAIL_CHILD: failing blob #%d (%s)\n",
+                        nth, name);
+                return 0;
+            }
+        }
+    }
+
     if (blob_len == 0) {
         /* empty file: zero recipe addr; the read path keys off size 0 */
         memset(addr, 0, sizeof addr);
