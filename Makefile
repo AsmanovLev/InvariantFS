@@ -122,9 +122,10 @@ CLI_MAINS := mkfs verify fsck cp cat ls stat arctest blkio_test resize \
              read_parallel_bitexact_test arc_concurrency_test \
              nlink_v3_test recipe_fsck_test cpack_guard_test orphan_test rt30_slot_test anchor_test \
              fsck_rootslot_test batch_owner_test plugin_host_test plugin_mt_test rs_stability_test \
-fsck_liveness_test scratch_policy_test v2rb_rollback_test keycmp_test \ lane_release_test pbaref_v3_test
-fsck_liveness_test scratch_policy_test v2rb_rollback_test keycmp_test \
-sibling_retire_v3_test$(foreach t,$(CLI_MAINS),$(eval $(call TOOL_RULE,$(t),)))
+             fsck_liveness_test scratch_policy_test v2rb_rollback_test keycmp_test \
+             lane_release_test pbaref_v3_test \
+             sibling_retire_v3_test
+$(foreach t,$(CLI_MAINS),$(eval $(call TOOL_RULE,$(t),)))
 
 # WP71: loads every containerpack .so through dlmopen/dlopen -> needs -ldl,
 # and resolves tools/codecpacks/... relative to the repo root.
