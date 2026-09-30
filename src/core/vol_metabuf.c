@@ -295,6 +295,15 @@ uint64_t mbuf_alloc(invfs_volume *v, uint64_t gen)
     uint64_t pba;
     if (!v)
         return 0;
+    /* A read-only volume is read-only at the METADATA level too. Every other
+     * allocator applies this latch -- alloc_blocks does it at
+     * src/core/volume.c:2886 -- and this path did not, so it scanned the
+     * metadata-zone bitmap and handed blocks out on a volume that had latched
+     * itself read-only for lack of space. That is the one guarantee the latch
+     * exists to give. Return 0, which is this function-s allocation-failure
+     * value and is already handled by every caller. */
+    if (v->sb.vol_flags & VOLF_READONLY)
+        return 0;
     if (v->rt30_present && v->rt30.page_size != INVFS_BLOCK_SIZE)
         return 0;
 
