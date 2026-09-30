@@ -81,7 +81,12 @@ typedef struct {
     uint64_t v3_cycles;         /* cycles / shared children detected */
     uint64_t v3_root_seq;       /* RT30 seq as read */
     uint64_t v3_rt30_bad;       /* RT30 magic/version/CRC failed */
-    uint64_t v3_slots_ambiguous;/* both slots valid at equal gen */
+    uint64_t v3_slots_ambiguous;/* two DISTINCT root pages valid at equal gen */
+    uint64_t v3_slots_same_root; /* both slots name the SAME page at equal gen:
+                                    one root with two names. REPORTED, never
+                                    damage -- an ordinary rollback publishes
+                                    the still-current root into the other
+                                    slot, so this is a normal volume shape. */
     uint64_t v3_reachable_free; /* reachable page free in the metadata bitmap */
     /* WP86: an unreadable base page is CONTAINED, not fatal. The walk skips
      * the page, records the key range it owned as quarantined, and keeps

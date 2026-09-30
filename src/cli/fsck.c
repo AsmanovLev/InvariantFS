@@ -187,9 +187,15 @@ int main(int argc, char **argv)
             printf("  torn slots:   %llu\n",
                    (unsigned long long)rep.v3_slots_torn);
             if (rep.v3_slots_ambiguous)
-                printf("  ambiguous slots: %llu (both root slots valid at "
-                       "the same gen)\n",
+                printf("  ambiguous slots: %llu (two DIFFERENT root pages "
+                       "valid at the same gen -- the publish order is not "
+                       "observable)\n",
                        (unsigned long long)rep.v3_slots_ambiguous);
+            if (rep.v3_slots_same_root)
+                printf("  same-root slots: %llu (both slots name the SAME "
+                       "root page at the same gen -- one root, normal after "
+                       "a rollback; not damage)\n",
+                       (unsigned long long)rep.v3_slots_same_root);
             printf("  bad pages:    %llu\n",
                    (unsigned long long)rep.v3_bad_pages);
             if (rep.v3_quarantined)

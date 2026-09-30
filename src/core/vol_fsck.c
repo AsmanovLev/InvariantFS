@@ -974,6 +974,17 @@ static void fsck_v3_note(invfs_fsck_report *rep, const char *msg)
     fprintf(stderr, "fsck(v3): %s\n", msg);
 }
 
+/* The same sentence on stderr, WITHOUT the damage verdict. A condition an
+ * operator should be able to see but must not be charged for. The split
+ * between "reported" and "damaged" is the whole point: one predicate that
+ * does both is how a healthy volume gets reported as broken, and an operator
+ * told the filesystem is damaged reaches for interventions the volume never
+ * needed. */
+static void fsck_v3_info(const char *msg)
+{
+    fprintf(stderr, "fsck(v3): %s\n", msg);
+}
+
 /* Validate the RT30 descriptor itself (magic/version/page_size/CRC). Returns
  * 0 = valid, 1 = absent (an empty base, the RDP0 convention),
  * 2 = WP86: present but torn -- damage, NOT an empty base; the caller must
@@ -1087,7 +1098,10 @@ static int fsck_v3_ptr_at(invfs_volume *v, uint64_t pba, invfs_blkptr *out)
 /* Select the winning root from the RT30 double slot. A slot is a candidate
  * only when its block is ALLOCATED (WP-D) and its page validates; among
  * candidates the higher header gen wins, tie -> the slot seq parity points
- * at (the most recently published). A non-empty slot whose page does not
+ * at (the most recently published), but ONLY when the tie is between two
+ * DIFFERENT pages: two slots naming the same page are one root with two
+ * names -- reported, not damage (see the branch below), because there is
+ * nothing to choose between them. A non-empty slot whose page does not
  * validate is torn and reported; a slot whose block is free is reported
  * separately (the bytes are fine, the ownership is not). Returns 0 = ok
  * (possibly empty, *root_out.pba == 0), -1 = io error. */
@@ -1136,14 +1150,45 @@ static int fsck_v3_root(invfs_volume *v, invfs_fsck_report *rep,
             best_pba = pba;
             best_gen = gen;
         } else if (gen == best_gen) {
-            /* Both slots validate at the same gen: the publication order is
-             * not observable, so the choice is ambiguous (design §7). The
-             * seq parity names the most recently published slot; flag it. */
-            rep->v3_slots_ambiguous++;
-            fsck_v3_note(rep, "both RT30 root slots valid at the same gen "
-                              "(ambiguous publish; seq parity used)");
-            if ((uint32_t)i == (uint32_t)(v->rt30.seq & 1u))
-                best_pba = pba;
+            /* Equal gen is the AMBIGUOUS shape only when the two slots name
+             * two DIFFERENT pages. When they name the SAME page there is no
+             * ambiguity to resolve: it is one root with two slot names, and
+             * there is no choice to make.
+             *
+             * That shape is reached by an ordinary shipped path, not by
+             * damage. mbuf_root_publish writes slot `seq & 1` and then bumps
+             * seq (vol_metabuf.c:479-481), so consecutive publishes alternate
+             * slots; when a pass publishes NO new root, the rollback's
+             * mbuf_root_publish (vol_spt0.c:1299) writes the still-current
+             * root into the OTHER slot, and both slots then name one page at
+             * one generation. The gen comes out of the page's own header
+             * (fsck_v3_slot_page above), so that state lands on
+             * `gen == best_gen` by construction. Charging it as damage
+             * reported a clean volume as DAMAGED (exit 3) -- the failure an
+             * operator acts on, in the direction of doing too much.
+             *
+             * So: the same page is REPORTED (an operator who sees the two
+             * slots line up deserves to be told why nothing was flagged) and
+             * NOT charged. The two-different-pages shape below keeps the
+             * flag exactly as it was -- that one is real (a torn or
+             * ambiguous publish after a crash), and silencing it would trade
+             * a false positive for silent corruption. */
+            if (pba == best_pba) {
+                char b[160];
+                rep->v3_slots_same_root++;
+                snprintf(b, sizeof b, "both RT30 root slots name the SAME "
+                          "root (pba %llu, gen %llu) -- one root, not an "
+                          "ambiguous publish",
+                          (unsigned long long)pba, (unsigned long long)gen);
+                fsck_v3_info(b);
+            } else {
+                rep->v3_slots_ambiguous++;
+                fsck_v3_note(rep, "two DIFFERENT RT30 root pages valid at the "
+                                  "same gen (ambiguous publish; seq parity "
+                                  "used)");
+                if ((uint32_t)i == (uint32_t)(v->rt30.seq & 1u))
+                    best_pba = pba;
+            }
         }
     }
     if (!have)

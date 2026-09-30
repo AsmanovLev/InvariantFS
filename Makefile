@@ -102,7 +102,7 @@ CLI_MAINS := mkfs verify fsck cp cat ls stat arctest blkio_test resize \
              metabuf_test btree_test btree_repair_test v3inode overlay_test fold_test concurrency_test \
              sweep_v3_test symlink_v3_test large_file_v3_test dedupe_v3_test deflate_repro_test window_test \
              nlink_v3_test recipe_fsck_test cpack_guard_test orphan_test rt30_slot_test anchor_test \
-             plugin_host_test plugin_mt_test rs_stability_test
+             fsck_rootslot_test plugin_host_test plugin_mt_test rs_stability_test
 $(foreach t,$(CLI_MAINS),$(eval $(call TOOL_RULE,$(t),)))
 
 # WP71: loads every containerpack .so through dlmopen/dlopen -> needs -ldl,
@@ -410,6 +410,7 @@ test: $(OUT)/invf-arctest $(OUT)/invf-blkio_test $(OUT)/invf-codec_test \
       $(OUT)/invf-recipe_fsck_test \
       $(OUT)/invf-cpack_guard_test $(OUT)/invf-orphan_test \
       $(OUT)/invf-rt30_slot_test $(OUT)/invf-anchor_test $(OUT)/gzhdrfuzz \
+      $(OUT)/invf-fsck_rootslot_test \
       $(OUT)/invf-rs_stability_test \
       $(OUT)/invf-gz_header_test \
       $(OUT)/invf-ivpack_packs_test $(OUT)/invf-mkfs $(OUT)/invf-cp \
@@ -489,6 +490,13 @@ test: $(OUT)/invf-arctest $(OUT)/invf-blkio_test $(OUT)/invf-codec_test \
 	@# allocation bitmap reports as free. The suite carries its own red
 	@# control so a no-op fix cannot pass it.
 	$(TESTENV) $(TESTISO) bash tools/test-v3-rt30-slot-alloc.sh
+	@# Two RT30 slots at the same gen are TWO different things: both slots
+	@# naming ONE root is what an ordinary rollback produces (clean, and it
+	@# used to be reported DAMAGED with exit 3), while two DISTINCT pages
+	@# at one gen is a real ambiguous publish and must still be caught. The
+	@# negative leg is the one that stops a fix which silences the tiebreak
+	@# outright; the red control proves the false positive was real.
+	$(TESTENV) $(TESTISO) bash tools/test-v3-rt30-same-root.sh
 	@# The ANC0 tail anchor: a second LOCATION for the block-0 descriptors.
 	@# The suite carries its own red control (a volume with no anchor must
 	@# never have its tail block written), so a no-op cannot pass it.
