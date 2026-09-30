@@ -123,7 +123,8 @@ CLI_MAINS := mkfs verify fsck cp cat ls stat arctest blkio_test resize \
              nlink_v3_test recipe_fsck_test cpack_guard_test orphan_test rt30_slot_test anchor_test \
              fsck_rootslot_test batch_owner_test plugin_host_test plugin_mt_test rs_stability_test \
 fsck_liveness_test scratch_policy_test v2rb_rollback_test keycmp_test \ lane_release_test pbaref_v3_test
-$(foreach t,$(CLI_MAINS),$(eval $(call TOOL_RULE,$(t),)))
+fsck_liveness_test scratch_policy_test v2rb_rollback_test keycmp_test \
+sibling_retire_v3_test$(foreach t,$(CLI_MAINS),$(eval $(call TOOL_RULE,$(t),)))
 
 # WP71: loads every containerpack .so through dlmopen/dlopen -> needs -ldl,
 # and resolves tools/codecpacks/... relative to the repo root.
@@ -620,6 +621,7 @@ test: $(OUT)/invf-arctest $(OUT)/invf-blkio_test $(OUT)/invf-codec_test \
       $(OUT)/invf-keycmp_test \
       $(OUT)/invf-lane_release_test \
       $(OUT)/invf-pbaref_v3_test \
+      $(OUT)/invf-sibling_retire_v3_test \
       $(OUT)/invf-rt30_slot_test $(OUT)/invf-anchor_test $(OUT)/gzhdrfuzz \
       $(OUT)/invf-fsck_rootslot_test \
       $(OUT)/invf-batch_owner_test \
@@ -750,7 +752,7 @@ test: $(OUT)/invf-arctest $(OUT)/invf-blkio_test $(OUT)/invf-codec_test \
 	$(TESTENV) $(TESTISO) $(OUT)/invf-pbaref_v3_test /tmp rednosweep
 	$(TESTENV) $(TESTISO) $(OUT)/invf-pbaref_v3_test /tmp all
 	$(TESTENV) $(TESTISO) $(OUT)/invf-pbaref_v3_test /tmp allnosweep
-	@# The container MEMBER BOUND is one number in the engine and eight
+	$(TESTENV) $(TESTISO) $(OUT)/invf-sibling_retire_v3_test	@# The container MEMBER BOUND is one number in the engine and eight
 	@# mirrored copies in the container packs. Nothing noticed when they
 	@# drifted -- a pack left at the old cap just declines every container
 	@# over it, for that one container type, silently. Cross-checked here

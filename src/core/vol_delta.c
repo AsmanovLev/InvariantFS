@@ -1088,6 +1088,81 @@ out:
 
 /* ---- WP-M16: delta truncation for save-point rollback ----------------- */
 
+/* Cut `seg_pba` back to `trunc_off` used bytes and make it the head,
+ * freeing every segment in `newer` (which must all be NEWER than seg_pba,
+ * i.e. reached by walking prev_pba forward from it). The one place a
+ * segment is shortened, shared by every truncation path below. */
+static int delta_cut_to(invfs_volume *v, uint64_t seg_pba, uint64_t trunc_off,
+                        const uint64_t *newer, size_t n_newer)
+{
+    invfs_delta_seg_hdr h;
+    uint8_t *buf;
+    size_t j;
+
+    if (trunc_off < INVFS_DELTA_SEG_HDR_LEN)
+        trunc_off = INVFS_DELTA_SEG_HDR_LEN;
+    if (delta_read_hdr(v, seg_pba, &h) != 0)
+        return -1;
+
+    buf = (uint8_t *)malloc((size_t)INVFS_DELTA_SEG_BYTES);
+    if (!buf)
+        return -1;
+    if (io_pread(&v->io, seg_pba * (uint64_t)INVFS_BLOCK_SIZE, buf,
+                 (size_t)INVFS_DELTA_SEG_BYTES) != 0) {
+        free(buf);
+        return -1;
+    }
+    memset(buf + trunc_off, 0, (size_t)(INVFS_DELTA_SEG_BYTES - trunc_off));
+    delta_hdr_encode(buf, h.seg_seq, h.prev_pba);
+    if (io_pwrite(&v->io, seg_pba * (uint64_t)INVFS_BLOCK_SIZE, buf,
+                  (size_t)INVFS_DELTA_SEG_BYTES) != 0) {
+        free(buf);
+        return -1;
+    }
+    free(buf);
+
+    /* PUBLISH the new head before anything frees. This is the same rule the
+     * rollover obeys on its way up (vol_delta_append: `v->rt30.delta_pba =
+     * pba; mbuf_rt30_store(v)`), and skipping it is what made a rollback
+     * undo itself: the truncate moved v->delta_seg_pba in RAM only, so the
+     * caller's own re-index -- spt0_restore does `vol_delta_close(v);
+     * vol_delta_mount(v)` two lines later, and vol_delta_mount starts from
+     * v->rt30.delta_pba -- followed RT30 straight back to the segment the
+     * rollback had just abandoned and replayed every post-savepoint record
+     * in it. rc was still 0. Structure-before-reference, in both
+     * directions. */
+    v->rt30.delta_pba = seg_pba;
+    if (mbuf_rt30_store(v) != 0)
+        return -1;
+    v->delta_seg_pba = seg_pba;
+    v->delta_bump = trunc_off;
+
+    for (j = 0; j < n_newer; j++) {
+        invfs_delta_seg_hdr nh;
+        if (delta_read_hdr(v, newer[j], &nh) == 0)
+            vol_free_blocks(v, newer[j], INVFS_DELTA_SEG_BLOCKS);
+    }
+    return vmux_barrier(v, "delta truncate");
+}
+
+/* How many of the CAPTURED head's bytes are inside `delta_end`. This is
+ * the WP96 prefix reader's inversion, verbatim (vol_btree.c:
+ * `head_bump = (delta_segs > 1) ? delta_end - (delta_segs-1)*SEG :
+ * delta_end`), so the truncate and the prefix reader consume one number the
+ * same way. */
+static uint64_t delta_head_bump(uint64_t delta_end, uint64_t segs)
+{
+    uint64_t hb;
+
+    if (segs > 1) {
+        hb = delta_end - (segs - 1) * INVFS_DELTA_SEG_BYTES;
+    } else {
+        hb = delta_end;
+    }
+    return hb < INVFS_DELTA_SEG_HDR_LEN ? INVFS_DELTA_SEG_HDR_LEN : hb;
+}
+
+
 int vol_delta_truncate(invfs_volume *v, uint64_t delta_end)
 {
     uint64_t *chain = NULL;
@@ -1136,76 +1211,93 @@ int vol_delta_truncate(invfs_volume *v, uint64_t delta_end)
         goto out;
     }
 
-    offset = 0;
     newer = NULL;
     n_newer = 0;
     cap_newer = 0;
 
-    for (i = 0; i < nchain; i++) {
-        uint64_t seg_pba = chain[nchain - 1 - i];
-        uint64_t seg_bytes = (i == 0) ? v->delta_bump : INVFS_DELTA_SEG_BYTES;
-
-        if (offset + seg_bytes > delta_end) {
-            uint64_t trunc_off;
-            invfs_delta_seg_hdr h;
-            uint8_t *buf = NULL;
-            uint64_t old_prev_pba;
-
-            if (delta_read_hdr(v, seg_pba, &h) != 0)
-                goto out;
-
-            old_prev_pba = h.prev_pba;
-
-            for (size_t j = i + 1; j < nchain; j++) {
-                uint64_t npba = chain[nchain - 1 - j];
+    /* EXACT path. A byte count alone cannot say WHERE the cut is once the
+     * chain has rolled: delta_end is the capture's count, and the head that
+     * count was measured against is no longer the head. The capture already
+     * recorded which one it was (v->spn_delta_head / v->spn_delta_segs,
+     * set next to the delta_end it wrote), so use them: free every segment
+     * NEWER than the captured head, cut the captured head to its own bump,
+     * and leave everything older alone. That is exactly the state the
+     * capture described.
+     *
+     * Without this, a rollback that spans a rollover keeps the newest
+     * segment's records and re-adds records the older one had already
+     * passed -- and returns 0. The byte-count path below cannot fix that;
+     * it is only the fallback for a handle whose captured geometry is not
+     * in RAM (a remount between the capture and the rollback: SPT0 stores
+     * delta_end but not the head pba). */
+    if (v->spn_delta_head) {
+        size_t hi;
+        for (hi = 0; hi < nchain; hi++)
+            if (chain[hi] == v->spn_delta_head)
+                break;
+        if (hi < nchain) {
+            for (i = 0; i < hi; i++) {
                 if (n_newer >= cap_newer) {
                     size_t ncap = cap_newer ? cap_newer * 2 : 8;
-                    uint64_t *nn = (uint64_t *)realloc(newer, ncap * sizeof *nn);
+                    uint64_t *nn = (uint64_t *)realloc(newer,
+                                                       ncap * sizeof *nn);
                     if (!nn)
                         goto out;
                     newer = nn;
                     cap_newer = ncap;
                 }
-                newer[n_newer++] = npba;
+                newer[n_newer++] = chain[i];
             }
+            rc = delta_cut_to(v, chain[hi],
+                              delta_head_bump(delta_end, v->spn_delta_segs),
+                              newer, n_newer);
+            goto out;
+        }
+        /* the captured head is not in the chain: something re-wrote the
+         * chain behind the savepoint. Fall through to byte counting rather
+         * than free a segment the capture never described. */
+    }
 
-            trunc_off = delta_end - offset;
-            if (trunc_off < INVFS_DELTA_SEG_HDR_LEN)
-                trunc_off = INVFS_DELTA_SEG_HDR_LEN;
+    offset = 0;
 
-            buf = (uint8_t *)malloc((size_t)INVFS_DELTA_SEG_BYTES);
-            if (!buf)
-                goto out;
+    /* Walk the chain NEWEST FIRST, which is the order both producers and
+     * consumers of delta_end already agree on:
+     *
+     *   - the capture counts the head's used bytes and then a FULL segment
+     *     per older one (vol_spt0.c: `delta_bytes += (nsegs == 1) ?
+     *     v->delta_bump : INVFS_DELTA_SEG_BYTES`, where nsegs==1 IS the
+     *     head, and it walks v->delta_seg_pba -> prev_pba);
+     *   - the WP96 prefix reader inverts that exactly:
+     *     `head_bump = delta_end - (delta_segs-1)*SEG` (vol_btree.c).
+     *
+     * chain[] is built in that same head -> prev order above, so chain[0]
+     * is the head. This loop used to walk it backwards AND give the
+     * bump to the OLDEST segment, which contradicted both twins: with a
+     * two-segment chain it truncated the head at the wrong offset, freed
+     * nothing (the "newer" list came out empty), and returned 0 -- a
+     * rollback that silently restored nothing. The head-first walk below
+     * is the third copy of one rule, spelled the same way as the other two.
+     */
+    for (i = 0; i < nchain; i++) {
+        uint64_t seg_pba = chain[i];
+        uint64_t seg_bytes = (i == 0) ? v->delta_bump : INVFS_DELTA_SEG_BYTES;
 
-            if (io_pread(&v->io, seg_pba * (uint64_t)INVFS_BLOCK_SIZE, buf, (size_t)INVFS_DELTA_SEG_BYTES) != 0) {
-                free(buf);
-                goto out;
-            }
-
-            memset(buf + trunc_off, 0, (size_t)(INVFS_DELTA_SEG_BYTES - trunc_off));
-
-            delta_hdr_encode(buf, h.seg_seq, old_prev_pba);
-
-            if (io_pwrite(&v->io, seg_pba * (uint64_t)INVFS_BLOCK_SIZE, buf, (size_t)INVFS_DELTA_SEG_BYTES) != 0) {
-                free(buf);
-                goto out;
-            }
-            free(buf);
-
-            v->delta_seg_pba = seg_pba;
-            v->delta_bump = trunc_off;
-
-            for (size_t j = 0; j < n_newer; j++) {
-                invfs_delta_seg_hdr nh;
-                if (delta_read_hdr(v, newer[j], &nh) == 0) {
-                    vol_free_blocks(v, newer[j], INVFS_DELTA_SEG_BLOCKS);
+        if (offset + seg_bytes > delta_end) {
+            size_t j;
+            /* everything NEWER than the truncation point goes: chain[0..i-1] */
+            for (j = 0; j < i; j++) {
+                if (n_newer >= cap_newer) {
+                    size_t ncap = cap_newer ? cap_newer * 2 : 8;
+                    uint64_t *nn = (uint64_t *)realloc(newer,
+                                                       ncap * sizeof *nn);
+                    if (!nn)
+                        goto out;
+                    newer = nn;
+                    cap_newer = ncap;
                 }
+                newer[n_newer++] = chain[j];
             }
-
-            if (vmux_barrier(v, "delta truncate") < 0)
-                goto out;
-
-            rc = 0;
+            rc = delta_cut_to(v, seg_pba, delta_end - offset, newer, n_newer);
             goto out;
         }
         offset += seg_bytes;

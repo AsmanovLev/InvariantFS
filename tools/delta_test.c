@@ -31,6 +31,7 @@
 #include "volume_internal.h"   /* pulls in volume.h + invarifs.h */
 #include "vol_delta.h"
 #include "vol_metabuf.h"
+#include "vol_spt0.h"
 
 static int checks = 0;
 static int failures = 0;
@@ -652,6 +653,155 @@ static void test_v3_metadata_delta(const char *dir)
     remove(img);
 }
 
+/* A rollback must actually roll back ACROSS a segment rollover.
+ *
+ * The divergence this exists for (WP meta-write-dup-audit): three
+ * implementations of "how many bytes does each segment of the delta chain
+ * contribute", and vol_delta_truncate's was inverted. The producer
+ * (vol_spt0.c, capture) counts the HEAD's used bytes and then a full
+ * segment per older one; the WP96 prefix reader (vol_btree.c) inverts
+ * exactly that; vol_delta_truncate walked the chain oldest-first and gave
+ * the head's bump to the OLDEST segment instead.
+ *
+ * With one segment the two coincide, which is why nothing noticed. With
+ * two, the old loop measured the OLDEST segment by the head's (small) bump,
+ * so the cut landed inside the HEAD: the head was truncated at a nonsense
+ * offset, the "newer" list came out EMPTY (nothing was freed), and rc = 0 --
+ * a rollback that reported success and restored nothing. Every write made
+ * after the savepoint survived it.
+ *
+ * The red control is the shape that distinguishes them: capture while the
+ * chain is ONE segment, then keep appending until it rolls, then truncate
+ * back to the CAPTURED delta_end. Records written before the capture must
+ * survive; every record written after it must be gone -- in RAM and after a
+ * remount. */
+static void test_spt0_truncate_multiseg(const char *dir)
+{
+    char img[512];
+    invfs_volume *v;
+    char key[32], val[8000];
+    uint64_t delta_end, segs = 0, bytes = 0, records = 0;
+    uint64_t head_before;
+    /* wide records, few of them: every append is a barrier, and the point
+     * is to cross ONE 128 KiB segment boundary, not to append a lot. */
+    int i, n_before = 12, n_total = 25, err = 0, rc_cap;
+    delta_ref r;
+
+    printf("rollback truncates correctly across a segment rollover\n");
+    /* A REAL v3 volume, not the synthetic substrate: spt0_capture refuses
+     * anything without a VOLF_V3 base root, and this leg exists to hold
+     * the real producer (not a restatement of its formula) to the real
+     * consumer. */
+    snprintf(img, sizeof img, "%s/invf-delta_spt0trunc.img", dir);
+    unlink(img);
+    {
+        char cmd[1024];
+        const char *root = getenv("PWD") ? getenv("PWD") : ".";
+        snprintf(cmd, sizeof cmd, "%s/bin/invf-mkfs %s 1 2>/dev/null",
+                 root, img);
+        if (system(cmd) != 0) { ok(0, "make spt0-trunc image"); return; }
+    }
+    v = vol_open(img, &err);
+    if (!v) { ok(0, "open spt0-trunc volume"); return; }
+
+    /* The capture walks the BASE tree as part of its pin set and treats an
+     * unreadable one as damaged -- and an EMPTY base tree reads as damaged
+     * (an empty leaf fails the tree check). So put real content in the base
+     * and fold it first; the fold also empties the delta, which is what
+     * makes the segment geometry below start from a known place. */
+    ok(vol_v3_write_bulk(v, "seed", (const uint8_t *)"seed content", 12,
+                         NULL) != 0, "seed file written");
+    ok(vol_v3_fold(v) == 0, "folded the seed into the base tree");
+
+    memset(val, 'y', sizeof val);
+    for (i = 0; i < n_before; i++) {
+        int nk = snprintf(key, sizeof key, "pre-%04d", i);
+        val[sizeof val - 1] = (char)('a' + (i % 26));
+        if (vol_delta_append(v, (const uint8_t *)key, (uint16_t)nk,
+                             (const uint8_t *)val,
+                             (uint16_t)(sizeof val - 1), 0) != 0)
+            break;
+    }
+    ok(i == n_before, "appended the pre-capture run");
+    vol_delta_stats(v, &records, &segs, &bytes);
+    ok(segs == 1, "the chain is ONE segment at capture time");
+    head_before = v->delta_seg_pba;
+
+    /* the real producer, not a restatement of its formula */
+    rc_cap = spt0_capture(v);
+    if (rc_cap != 0)
+        printf("        (spt0_capture rc=%d -- SPT0_RC_DAMAGED is 3)\n",
+               rc_cap);
+    ok(rc_cap == 0, "spt0_capture succeeds");
+    delta_end = v->spt0.delta_end;
+    ok(delta_end > INVFS_DELTA_SEG_HDR_LEN, "capture recorded a delta_end");
+
+    for (i = n_before; i < n_total; i++) {
+        int nk = snprintf(key, sizeof key, "post-%04d", i);
+        val[sizeof val - 1] = (char)('A' + (i % 26));
+        if (vol_delta_append(v, (const uint8_t *)key, (uint16_t)nk,
+                             (const uint8_t *)val,
+                             (uint16_t)(sizeof val - 1), 0) != 0)
+            break;
+    }
+    ok(i == n_total, "appended the post-capture run");
+    vol_delta_stats(v, &records, &segs, &bytes);
+    ok(segs >= 2, "the chain ROLLED to a second segment before the rollback");
+    ok(v->delta_seg_pba != head_before, "the head is now the newer segment");
+
+    ok(vol_delta_truncate(v, delta_end) == 0, "vol_delta_truncate succeeds");
+    /* the caller re-indexes, exactly as spt0_restore does: the truncate
+     * rewrites the segment and frees the newer ones, it does not touch the
+     * in-RAM index (which still answers from the pre-truncate state). */
+    vol_delta_close(v);
+    ok(vol_delta_mount(v) == 0, "delta re-indexed after the truncate");
+
+    /* the point of the whole thing: post-capture writes are gone */
+    ok(vol_delta_lookup(v, (const uint8_t *)"post-0012", 8, &r) == 0,
+       "a post-capture record is GONE after the rollback");
+    ok(vol_delta_lookup(v, (const uint8_t *)"post-0024", 8, &r) == 0,
+       "the last post-capture record is gone too");
+    /* and pre-capture writes are not collateral damage */
+    ok(vol_delta_lookup(v, (const uint8_t *)"pre-0000", 8, &r) == 1,
+       "a pre-capture record survives the rollback");
+    /* every post-capture key, not just two of them: the old loop's failure
+     * mode was that NONE of them went away */
+    {
+        int leaked = 0;
+        for (i = n_before; i < n_total; i++) {
+            char k[32];
+            int nk = snprintf(k, sizeof k, "post-%04d", i);
+            if (vol_delta_lookup(v, (const uint8_t *)k, (uint16_t)nk, &r) == 1)
+                leaked++;
+        }
+        ok(leaked == 0, "NO post-capture record survived the rollback");
+    }
+    {
+        int lost = 0;
+        for (i = 0; i < n_before; i++) {
+            char k[32];
+            int nk = snprintf(k, sizeof k, "pre-%04d", i);
+            if (vol_delta_lookup(v, (const uint8_t *)k, (uint16_t)nk, &r) != 1)
+                lost++;
+        }
+        ok(lost == 0, "no pre-capture record was collateral damage");
+    }
+
+    vol_close(v);
+
+    /* durable, not just the in-RAM index */
+    v = vol_open(img, &err);
+    ok(v != NULL, "remount after the rollback");
+    if (v) {
+        ok(vol_delta_lookup(v, (const uint8_t *)"post-0012", 8, &r) == 0,
+           "a post-capture record is still gone after a remount");
+        ok(vol_delta_lookup(v, (const uint8_t *)"pre-0000", 8, &r) == 1,
+           "a pre-capture record still resolves after a remount");
+        vol_close(v);
+    }
+    remove(img);
+}
+
 static void run_unit(const char *dir)
 {
     char img[512];
@@ -690,6 +840,7 @@ static void run_unit(const char *dir)
     test_crc_truncation(dir);
     test_bitmap_before_delta_gap(dir);
     test_rollover(dir);
+    test_spt0_truncate_multiseg(dir);
     test_v3_metadata_delta(dir);
 
     printf("%d checks, %d failure(s)\n", checks, failures);

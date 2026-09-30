@@ -485,6 +485,15 @@ static int wsession_load_old_v3(invfs_wsession *s)
         return -1;        /* row/blob disagreement: corruption */
     }
 
+    /* Does the file being replaced own "name!..." siblings? The v2 loader
+     * answers the same question off the old record (vol_write.c:583) and
+     * the v2 commit retires them (:1131); on v3 they are real dirents, so
+     * the answer has to come from the recipe blob instead -- off the SAME
+     * ast_owns_siblings rule, or the two formats answer differently for
+     * the same file and the v3 one strands the siblings. Asked BEFORE the
+     * row is republished: this is the old content's recipe. */
+    s->owns_siblings = ast_owns_siblings(&ah, ents, nents);
+
     /* snapshot the old pbas so commit can free whatever the new recipe
      * drops. WP78: TEXT entries name SHARED batch segments owned by the
      * batch registry, so they are recorded as 0 (never freed here) --
@@ -947,6 +956,21 @@ static int vol_write_commit_v3(invfs_wsession *s)
     }
     free(s->old_pbas);
     s->old_pbas = NULL;
+
+    /* Retire the superseded content's "name!..." siblings -- the leg the v2
+     * commit has always had (vol_write_commit:1131, gated on the same
+     * ast_owns_siblings answer the v3 loader now takes at wsession_load_old_v3).
+     *
+     * A decomposed container keeps its payload in sibling INODES on v3 too
+     * (vol_create_tar_file -> vol_create_blob_file("%s!part%u")), so without
+     * this a v3 overwrite of a swept a.tar leaves a.tar!part0..N live for
+     * ever: the sweep walks but never retires an internal '!' name, and
+     * spn_reclaim cannot free a block a live recipe names -- unlike the
+     * old recipe's own segments, which the loop above does free. The new
+     * row is already published and the siblings are separate inodes, so
+     * this cannot affect what `name` reads back. */
+    if (s->owns_siblings)
+        vol_delete_siblings(v, s->name);
 
     wsession_unlink(s);
     s->committed = 1;

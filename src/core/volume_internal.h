@@ -1946,6 +1946,14 @@ int vol_store_generic(invfs_volume *v, uint64_t inode_id,
  * 1 = siblings possible (unknown record -> 1: scan conservatively). */
 int record_owns_siblings(const uint8_t *rec, uint32_t rl);
 
+/* The sibling-ownership RULE, on a parsed AST: does a file with this
+ * header and these entries own "name!..." siblings that must die with it?
+ * Both record_owns_siblings (v2 records) and the v3 write session's
+ * wsession_load_old_v3 ask this one function, so an overwrite retires the
+ * same siblings on both formats. 1 = siblings possible. */
+int ast_owns_siblings(const invfs_ast_hdr *ah,
+                      const invfs_ast_block_entry *ents, size_t nents);
+
 /* layer-2 stripes per owner record: one AST entry per parity block */
 uint64_t seal2_shard_stripes(uint32_t m2);
 void seal_view_free(seal_view *sv);

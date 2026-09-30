@@ -1782,20 +1782,65 @@ int vol_stamp_class(invfs_volume *v, uint64_t inode_id,
 
 
 
-/* Does this record own "name!..." siblings that must die with it? A
- * ZIP-style container lists AST children; the extraction containers
- * (TARR/GZR/PNGR/FLACR/EXER) carry num_children == 0 but keep their
- * payload in sibling inodes ("name!partN", "name!recipe", "name!jxl",
+/* Does a file whose AST looks like THIS own "name!..." siblings that must
+ * die with it? A ZIP-style container lists AST children; the extraction
+ * containers (TARR/GZR/PNGR/FLACR/EXER) carry num_children == 0 but keep
+ * their payload in sibling inodes ("name!partN", "name!recipe", "name!jxl",
  * "name!coverN", "name!exrN") the read path resolves by name -- deleting
  * only the anchor strands them as live records nothing reaches (verified:
- * a TAR's parts survived vol_unlink). The sibling walk is O(area), so
+ * a TAR's parts survived vol_unlink). The sibling walk is O(namespace), so
  * plain files skip it.
+ *
+ * This is the ONE rule, on the parsed AST rather than on a container
+ * format's bytes. Both callers ask it: the v2 record
+ * (record_owns_siblings) and the v3 recipe blob
+ * (wsession_load_old_v3, vol_write.c), so an overwrite retires exactly the
+ * siblings its counterpart format retires. 1 = siblings possible. */
+int ast_owns_siblings(const invfs_ast_hdr *ah,
+                      const invfs_ast_block_entry *ents, size_t nents)
+{
+    uint32_t algo;
+
+    if (!ah)
+        return 1;
+    if (ah->num_children != 0)
+        return 1;
+    if (ah->num_blocks == 0)
+        return 0;
+    if (!ents || nents == 0)
+        return 1;
+    algo = ents[0].algo;
+    switch (algo) {
+    case INVFS_ALGO_TARR:
+    case INVFS_ALGO_GZR:
+    case INVFS_ALGO_PNGR:
+    case INVFS_ALGO_FLACR:
+    case INVFS_ALGO_EXER:
+        return 1;
+    }
+    /* WP16a: a container codecpack's recipe owns "!mbrNNNN" siblings. An
+     * algo this build cannot resolve (the pack is not loaded right now)
+     * gets the conservative answer: the scan costs one namespace walk and
+     * can only find what is there -- the codec-pack case (raw_image et al)
+     * simply has no siblings to find. */
+    {
+        const invfs_codec *pc = invfs_codec_by_algo(algo);
+        const invfs_pack_def *pd;
+        if (!pc) return 1;
+        pd = invfs_codec_pack_def(pc);
+        if (pd && pd->is_container) return 1;
+    }
+    return 0;
+}
+
+
+/* The v2 caller of ast_owns_siblings: the same answer, read off a record.
  * 1 = siblings possible (unknown record -> 1: scan conservatively). */
 int record_owns_siblings(const uint8_t *rec, uint32_t rl)
 {
     invfs_ast_hdr ah;
+    invfs_ast_block_entry e0;
     size_t base;
-    uint32_t fl;
 
     if (!rec || rl < INVFS_REC_HDR_LEN + 1)
         return 1;
@@ -1804,37 +1849,13 @@ int record_owns_siblings(const uint8_t *rec, uint32_t rl)
         return 1;
     if (invfs_ast_hdr_parse(rec + base, rl - base, &ah) != 0)
         return 1;
-    if (ah.num_children != 0)
-        return 1;
     if (ah.num_blocks == 0)
         return 0;
     if (rl < base + ah.hdr_len + sizeof(invfs_ast_block_entry))
         return 1;
-    memcpy(&fl, rec + base + ah.hdr_len + 16, 4);   /* zone:2 | algo:6 LSB */
-    {
-        uint32_t algo = (fl >> 2) & 0x3F;
-        switch (algo) {
-        case INVFS_ALGO_TARR:
-        case INVFS_ALGO_GZR:
-        case INVFS_ALGO_PNGR:
-        case INVFS_ALGO_FLACR:
-        case INVFS_ALGO_EXER:
-            return 1;
-        }
-        /* WP16a: a container codecpack's recipe record owns "!mbrNNNN"
-         * siblings. An algo this build cannot resolve (the pack is not
-         * loaded right now) gets the conservative answer: the scan costs
-         * one area walk and can only find what is there -- the codec-pack
-         * case (raw_image et al) simply has no siblings to find. */
-        {
-            const invfs_codec *pc = invfs_codec_by_algo(algo);
-            const invfs_pack_def *pd;
-            if (!pc) return 1;
-            pd = invfs_codec_pack_def(pc);
-            if (pd && pd->is_container) return 1;
-        }
-    }
-    return 0;
+    memset(&e0, 0, sizeof e0);
+    memcpy(&e0, rec + base + ah.hdr_len, sizeof e0);
+    return ast_owns_siblings(&ah, &e0, 1);
 }
 
 
