@@ -813,6 +813,26 @@ test: $(TEST_BINS) $(OUT)/invf-arctest $(OUT)/invf-blkio_test $(OUT)/invf-codec_
 	@# volume that was built, reclaimed and then damaged -- the damage leg
 	@# is what a wrong liveness predicate cannot survive.
 	$(TESTENV) $(TESTISO) bash tools/test-v3-orphan-reclaim.sh
+	@# WP138: invf-import must never DROP a path without naming it. This is
+	@# the silent-absence shape -- run as an ordinary user, /etc/shadow and
+	@# every other root-only path were skipped, the tool exited 0, and
+	@# invf-fsck reported OK on the volume because nothing in it references
+	@# what is missing. The suite builds the fixture as the ordinary user
+	@# and mode-denies it to itself, so it needs no root and no privileges:
+	@# the kernel returns the same EACCES, at the same line, for the same
+	@# reason. It asserts BOTH that each unreadable path is absent AND that
+	@# it is named, because either half alone passes on the old code.
+	@#
+	@# NOT $(TESTISO), for the invf-helper_exec_test reason: unshare -r maps
+	@# the caller to uid 0 in a namespace whose uid map holds exactly one
+	@# uid, so the suite would see a fake root, its fixture's mode-000 files
+	@# would be readable, and every leg would pass VACUOUSLY. A suite that
+	@# needs to BE the ordinary user whose /etc/shadow is unreadable cannot
+	@# be run as an isolation wrapper's fake root. It needs no isolation
+	@# either -- a private mktemp -d under /dev/shm and a trap, no fixed
+	@# path, nothing in /tmp. If it does land on a real uid 0 it re-execs
+	@# itself as nobody via setpriv, and declines loudly if it cannot.
+	$(TESTENV) bash tools/test-import-skip-report.sh
 	@# The v3 batch REGISTRY is a block owner in its own right, not just the
 	@# recipes that point into a batch. When the savepoint reclaim freed a
 	@# block the registry still owned, the block went straight back to the
