@@ -34,6 +34,15 @@
 #include "invarifs.h"
 #include "volume_internal.h"
 
+/* The cross-TU fault door. The site is v3_inode_row_read, inside
+ * vol_v3_inode_get (src/core/vol_btree.c), and the arming state is that
+ * file's TU statics -- so a test in this one must reload them through the
+ * door, NOT with unsetenv+setenv. That frees the old string, setenv very
+ * often gets the same address back, the pointer compare in invfs_vol_fault
+ * sees no change, the countdown stays spent, and the leg goes green
+ * measuring the healthy path. */
+extern void invfs_vol_btree_fault_reload(void);
+
 #define MAXPB 64
 
 static int checks = 0, failures = 0;
@@ -398,6 +407,235 @@ static void run_session(int do_sweep, int ranged)
     free(a); free(b);
 }
 
+/* ---- leg: a row pba_ref_ensure's build cannot read ----
+ *
+ * The map is the sole gate on every data-block free, so the ONE question this
+ * leg answers is: what does the map do about a live inode whose row it could
+ * not read? The answer it must give is a refusal, because a reference the map
+ * is missing is the only kind of map error that costs data (a surplus one
+ * costs space).
+ *
+ * Setup is the cheapest shape that shares a block: A and B hold the same
+ * first 64 KiB segment, and a dedupe pass collapses the two copies into one
+ * pba both recipes name. Then ONE row read is failed, the build runs, and the
+ * OTHER sharer is retired.
+ *
+ * THE RETIRE IS vol_v3_free_recipe_blocks CALLED DIRECTLY, with B's row still
+ * live, and that is deliberate. It is the free half of vol_v3_unlink -- the
+ * unlink calls exactly this at src/core/vol_dirs.c:572 -- but calling it
+ * directly keeps the state the map is supposed to be built in: B still NAMED.
+ * Going through vol_v3_unlink instead would take a SECOND build at
+ * vol_dirs.c:552, and that one runs after the dirent has already been
+ * dropped at :540, so the walk cannot see the row whose blocks are about to
+ * be subtracted. That is a separate defect with its own cause (an ordering,
+ * not a skip) and it is not what this leg measures; putting it in the path
+ * here would mean a failure of either fix looked like a failure of both.
+ * The control leg runs the real vol_v3_unlink, so the unlink path is
+ * exercised -- just not as the thing under test.
+ *
+ * `armed == 0` is the CONTROL: the identical sequence with the fault off. It
+ * is what makes the armed leg a measurement of the fault rather than of the
+ * scenario -- if the control ever showed the same damage, the scenario would
+ * be the defect and this leg would be proving nothing.
+ */
+static void leg_skiprow(int armed)
+{
+    size_t file_sz = 8 * SEGMENT_SIZE;
+    invfs_dedupe_stats ds;
+    invfs_volume *v;
+    uint8_t *a = mk_file(1), *b = mk_file(2);
+    uint64_t pa[MAXPB];
+    uint8_t b_recipe[INVFS_V3_RECIPE_ADDR_LEN];
+    uint64_t b_id = 0, pba, plen = 0, donor = 0, donor_plen = 0, n, got;
+    int na = 0, rc, map_on;
+    char tag[64];
+
+    snprintf(tag, sizeof tag, "%s", armed ? "skiprow" : "skiprowctl");
+    printf("  [%s] === the pba-ref build, %s ===\n", tag,
+           armed ? "ONE inode-row read made to fail" : "CONTROL: no fault armed");
+
+    mkfs_fresh();
+    v = open_vol();
+    ok(vol_v3_write_bulk(v, "file_a.bin", a, file_sz, NULL) != 0,
+       "wrote file_a.bin");
+    ok(vol_v3_write_bulk(v, "file_b.bin", b, file_sz, NULL) != 0,
+       "wrote file_b.bin");
+    vol_sweep_dedupe_ex(v, &ds, NULL, NULL);
+    pba = find_shared(v);
+    ok(pba != 0, "dedupe made A and B name the same segment P");
+    pba_save(pba);
+    printf("  [%s] shared segment P = %llu\n", tag, (unsigned long long)pba);
+    /* B's own recipe address: the unlink's `in.recipe_addr`, taken while B is
+     * still live and still named. */
+    memset(b_recipe, 0, sizeof b_recipe);
+    {
+        invfs_v3_inode bin;
+        if (vol_v3_path_lookup(v, "file_b.bin", &b_id) == 1 &&
+            vol_v3_inode_get(v, b_id, &bin) == 1)
+            memcpy(b_recipe, bin.recipe_addr, sizeof b_recipe);
+    }
+    ok(b_recipe[0] != 0, "resolved B's recipe address while B is still named");
+    /* A's OTHER segment: the donor that will be laid over P once P is free,
+     * so the damage is a VALID segment of the same shape rather than a
+     * scribble. A read error would be a weaker demonstration -- it would not
+     * distinguish "the block is gone" from "the block now holds something
+     * else", and the whole point of the finding is the second one. */
+    if (recipe_pbas(v, "file_a.bin", pa, MAXPB, &na) == 0)
+        for (int i = 0; i < na; i++)
+            if (pa[i] != pba) { donor = pa[i]; break; }
+    ok(donor != 0, "resolved a donor segment of the same length to lay over P");
+    save_bytes("a_source", a, file_sz);
+
+    /* ---- THE BUILD ----
+     * pba_ref_reset drops the map so every attempt below is a real walk, and
+     * the fault is armed HERE and nowhere else: everything above is setup,
+     * and an arming that survives it spends the countdown on setup.
+     *
+     * The countdown is SEARCHED rather than fixed. How many inode-row reads
+     * a build performs is the VOLUME's business -- the walked row set, the
+     * order the directory enumerates in, and reads the walk does on its own
+     * account all move it -- so a hard-coded n is a constant that goes stale
+     * the moment the corpus changes, and a stale one is the worst kind of
+     * test failure: it measures the healthy path and goes green. The search
+     * starts the countdown at 1 and walks it up until the build comes back
+     * short a live reference (pre-fix) or refuses (post-fix); both are the
+     * same statement, that the map did not come back exact.
+     *
+     * Each attempt is independent: pba_ref_reset discards the map the
+     * previous attempt left, so an attempt that hit nothing costs a walk and
+     * nothing else. A search that exhausts FAILS -- the leg cannot pass
+     * without having actually broken the build. */
+    rc = 0;
+    if (armed) {
+        int n2, found = 0;
+        for (n2 = 1; n2 <= 64 && !found; n2++) {
+            char spec[64];
+            snprintf(spec, sizeof spec, "v3_inode_row_read:%d", n2);
+            setenv("INVFS_FAULT", spec, 1);
+            invfs_vol_btree_fault_reload();
+            pba_ref_reset(v);
+            rc = pba_ref_ensure(v);
+            unsetenv("INVFS_FAULT");
+            invfs_vol_btree_fault_reload();
+            if (rc != 0 || pba_ref_count(v, pba) < 2) {
+                found = n2;
+                printf("  [%s] armed INVFS_FAULT=\"v3_inode_row_read:%d\" "
+                       "(via invfs_vol_btree_fault_reload): the build stopped "
+                       "being exact there\n", tag, n2);
+            }
+        }
+        ok(found != 0,
+           "a single failed inode-row read is enough to make the build "
+           "inexact (this assertion is what stops the leg going green on a "
+           "countdown that never fired)");
+        if (!found) {
+            printf("  [%s] no countdown in 1..64 changed the map; the leg is "
+                   "vacuous and this is a FAILURE, not a pass\n", tag);
+        }
+    } else {
+        pba_ref_reset(v);
+        rc = pba_ref_ensure(v);
+    }
+    map_on = v->pba_ref_on && v->pba_ref != NULL;
+    printf("  [%s] pba_ref_ensure -> %d   map %s   pba_ref_count(P)=%u\n",
+           tag, rc, map_on ? "EXISTS" : "ABSENT", pba_ref_count(v, pba));
+    if (armed) {
+        /* The two legitimate answers, and nothing else. PRE-FIX the build
+         * returned 0 and left a map that says less than 2 where two live
+         * recipes name P -- the "exact" flag set on an inexact map. POST-FIX
+         * it returns non-zero and leaves no map, and "no map" is the state
+         * every pba_ref_* already reads as unknown. */
+        ok(rc != 0 || pba_ref_count(v, pba) < 2,
+           "RED CONTROL: the build did not come back exact");
+        ok(rc != 0 || map_on,
+           "RED CONTROL: the pre-fix build returns success and an 'exact' map "
+           "while missing a live row");
+    } else {
+        ok(rc == 0 && map_on,
+           "control: the build over a healthy volume succeeds and leaves a map");
+        ok(pba_ref_count(v, pba) == 2,
+           "control: the map counts BOTH live recipes naming P");
+    }
+    report_pba(v, "after the build", pba);
+
+    /* ---- and now the retire of the OTHER sharer ----
+     * The map is now whatever the build above produced, and B's row is still
+     * live and still named -- which is the state the unlink's free is
+     * supposed to run in (see the comment at the top of this function). */
+    ok(vol_v3_free_recipe_blocks(v, b_recipe, 0) == 0,
+       "retired B's data blocks (the free half of the unlink)");
+    report_pba(v, "after B's blocks are retired", pba);
+    ok(a_names_pba(v, pba), "A still names P after B's blocks are retired");
+    {
+        uint64_t p2 = 0;
+        n = extent_allocated(v, pba, &p2);
+        plen = p2;
+        printf("  [%s] P extent: %llu of %llu blocks still allocated\n", tag,
+               (unsigned long long)n, (unsigned long long)plen);
+        ok(n == plen,
+           "P survives the retire of the other sharer (a count of 0 frees a "
+           "block a live recipe still names)");
+    }
+
+    /* If the block WAS freed, put somebody else's valid bytes where A's are.
+     * This is the "A reads something else" step, done the way a real
+     * allocation would do it, so the length is unchanged and
+     * invf-verify --deep (which checks readability and length only) has
+     * nothing to complain about. */
+    if (n < plen) {
+        got = alloc_blocks(v, pba, plen, 1, 1, INVFS_ALLOC_DATA);
+        printf("  [%s] alloc_blocks(%llu,%llu) -> %llu\n", tag,
+               (unsigned long long)pba, (unsigned long long)plen,
+               (unsigned long long)got);
+        ok(got == pba, "P is handed straight back out to the next writer");
+        if (got == pba && donor) {
+            uint8_t *dbuf;
+            /* Read the donor's frames verbatim -- a RAW copy of the donor's
+             * blocks is by construction a valid segment, which is the whole
+             * point: the damage has to be readable-but-different, or the leg
+             * only proves "the block is gone" and not "A reads something
+             * else". */
+            if (seg_extent_checked(v, donor, &donor_plen) != 0 || donor_plen == 0) {
+                printf("  [%s] donor %llu: framed extent did not validate, "
+                       "copying its first block verbatim\n", tag,
+                       (unsigned long long)donor);
+                donor_plen = 1;
+            }
+            dbuf = (uint8_t *)malloc((size_t)donor_plen * INVFS_BLOCK_SIZE);
+            if (dbuf &&
+                io_seek(&v->io, donor * INVFS_BLOCK_SIZE) == 0 &&
+                io_read(&v->io, dbuf, (size_t)donor_plen * INVFS_BLOCK_SIZE) == 0) {
+                io_pwrite(&v->io, got * INVFS_BLOCK_SIZE, dbuf,
+                          (size_t)donor_plen * INVFS_BLOCK_SIZE);
+                printf("  [%s] laid donor segment %llu (%llu blocks) over P=%llu "
+                       "-- a VALID segment, different bytes\n",
+                       tag, (unsigned long long)donor,
+                       (unsigned long long)donor_plen, (unsigned long long)pba);
+            } else {
+                printf("  [%s] could not read the donor segment %llu\n", tag,
+                       (unsigned long long)donor);
+            }
+            free(dbuf);
+        }
+    }
+
+    /* THE ORACLE. Byte equality against the bytes that went in, never
+     * invf-verify --deep: an invfs_ast_block_entry carries a pba, not a
+     * content hash, so a recipe that resolves to a valid-but-wrong segment
+     * of the right length passes a deep verify. */
+    {
+        char m[160];
+        snprintf(m, sizeof m,
+                 "%s: A byte-exact after the other sharer was retired",
+                 tag);
+        oracle(v, "file_a.bin", a, file_sz, m);
+    }
+    dump_a(v);
+    vol_flush(v);
+    vol_close(v);
+    free(a); free(b);
+}
+
 int main(int argc, char **argv)
 {
     const char *phase = (argc > 2) ? argv[2] : "red";
@@ -602,6 +840,8 @@ int main(int argc, char **argv)
         dump_a(v);
         vol_flush(v); vol_close(v);
         free(a); free(b);
+    } else if (!strcmp(phase, "skiprow") || !strcmp(phase, "skiprowctl")) {
+        leg_skiprow(!strcmp(phase, "skiprow"));
     } else {
         fprintf(stderr, "unknown phase %s\n", phase);
         return 2;

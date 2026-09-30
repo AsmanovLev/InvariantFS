@@ -3524,14 +3524,82 @@ static int pba_ref_v3_walk_cb(void *ctx_, const char *path, uint64_t inode_id,
      * above the parse, after the load, so the shape of this function
      * stays "load, then decide" like every sibling reader. */
     if (invfs_inode_content_is_raw_blob(type)) return 0;
-    if (vol_v3_inode_get(v, inode_id, &in) != 1) return 0;
+    /* ---- below here, an unreadable row is NOT a row with no references ----
+     *
+     * Everything above this line is a statement about the inode: a
+     * directory, an owner record, a symlink. All of them are TRUE statements,
+     * and a return of 0 is the walk's "I have nothing to add".
+     *
+     * Everything from here on is a statement about whether this build can
+     * be trusted, and a return of 0 there is a lie with a body count behind
+     * it. This map is the SOLE gate on every data-block free
+     * (vol_v3_free_recipe_blocks :179, the write commit's retire loop
+     * vol_write.c:860, the sweep remap vol_sweep.c:1418, dedupe's loser
+     * retire vol_dedupe.c:275), so a live reference the map does not hold is
+     * a block that gets freed while a live recipe still names it -- silent,
+     * cross-file, and invisible to invf-verify --deep, which checks
+     * readability and length and cannot see that an invfs_ast_block_entry
+     * carries a pba rather than a content hash.
+     *
+     *   two files share pba X   (a correct map says 2)
+     *   B's row is unreadable   (this used to `return 0`)
+     *   B is unlinked           (the -1 takes the count to 0)
+     *   X is FREED              -- while A still names it
+     *
+     * So each of these is a non-zero return: it aborts v3_walk_dir, and
+     * pba_ref_ensure below throws the whole partial map away rather than
+     * declaring it exact. Non-zero is not "skip this inode" -- a skip is
+     * precisely the bug.
+     *
+     * The cost is named here because it is the thing a reviewer should
+     * check the shape against. A quarantined b+ tree range reads EIO for
+     * every key inside it (AGENTS.md 2.6), so a volume in that state can no
+     * longer build this map, and with no map every data-block free is
+     * refused: the volume leaks rather than frees wrong. That is the correct
+     * trade -- the alternative is the chain above -- and it is the same one
+     * the map already makes for a missing entry (pba_ref_count returns 2,
+     * "unknown: never free"), so no new state and no new policy: a build
+     * that could not see everything lands in the state a build that has not
+     * run yet is already in.
+     */
+    {
+        int grc = vol_v3_inode_get(v, inode_id, &in);
+        if (grc != 1) {
+            fprintf(stderr, "pba_ref: inode %llu's row is not readable "
+                    "(rc=%d); the reference map cannot be built exact, so no "
+                    "block will be freed through it this session\n",
+                    (unsigned long long)inode_id, grc);
+            return -1;
+        }
+    }
     if (in.size == 0) return 0;
-    if (vol_v3_recipe_load(v, in.recipe_addr, &blob, &blen) != 0 || !blob) return 0;
-    if (vol_ast_recipe_parse(blob, blen, &ah, &ents, &n_ents) == 0 && ents) {
-        for (i = 0; i < n_ents; i++) {
-            if (ents[i].zone != INVFS_ZONE_TEXT && ents[i].pba) {
-                pba_ref_modify(v, ents[i].pba, +1);
-            }
+    /* A RECIPE BLOB is the same question asked one step further down, and
+     * skipping one is the SAME wrong free by a different route: the row is
+     * live and names its segments, so their pbas must be counted, and a blob
+     * that will not load contributes nothing. Nothing distinguishes "this
+     * blob is gone" from "these blocks are free" at the gate. The restore
+     * side of the savepoint already refuses on exactly this condition
+     * (spn_data_check_ino, src/core/vol_spt0.c:1182-1187), which is the
+     * proof that the two ends are supposed to agree and that this one did
+     * not. */
+    if (vol_v3_recipe_load(v, in.recipe_addr, &blob, &blen) != 0 || !blob) {
+        fprintf(stderr, "pba_ref: inode %llu's recipe blob does not load; "
+                "the reference map cannot be built exact, so no block will be "
+                "freed through it this session\n",
+                (unsigned long long)inode_id);
+        return -1;
+    }
+    if (vol_ast_recipe_parse(blob, blen, &ah, &ents, &n_ents) != 0 || !ents) {
+        fprintf(stderr, "pba_ref: inode %llu's recipe blob does not parse; "
+                "the reference map cannot be built exact, so no block will be "
+                "freed through it this session\n",
+                (unsigned long long)inode_id);
+        free(blob);
+        return -1;
+    }
+    for (i = 0; i < n_ents; i++) {
+        if (ents[i].zone != INVFS_ZONE_TEXT && ents[i].pba) {
+            pba_ref_modify(v, ents[i].pba, +1);
         }
     }
     free(blob);
@@ -3561,7 +3629,43 @@ int pba_ref_ensure(invfs_volume *v)
     v->pba_ref_n = 0;
     v->pba_ref_on = 1;
     c.v = v;
-    vol_v3_walk(v, pba_ref_v3_walk_cb, &c);
+    /* vol_v3_walk_STICT, and the status is CHECKED.
+     *
+     * Both halves of that are the fix. The walk is strict because a row it
+     * cannot read is a live reference the map would not hold, and
+     * pba_ref_v3_walk_cb now aborts the walk when that happens (and when a
+     * recipe blob will not load or parse, which is the same wrong free by a
+     * different route). The status is checked because an unchecked walk
+     * status is how the walk's answer was being thrown away: it returned 0
+     * for "I saw everything" and 1 for "I stopped early", and both were
+     * discarded, so the line below set pba_ref_stale = 0 -- the "this map is
+     * exact" flag -- on a map built from a partial view of the namespace.
+     *
+     * A partial map is the one thing this function must never return. Every
+     * reference it is missing is a block the four free gates will read as
+     * unshared.
+     *
+     * So an incomplete build DISCARDS the map: pba_ref_free leaves
+     * pba_ref_on = 0 and pba_ref = NULL, and that is a state the map's own
+     * API already answers for -- pba_ref_count returns 2 ("unknown: never
+     * free", :3469), pba_ref_modify is a no-op (:3416), pba_ref_apply is a
+     * no-op (:3446). No caller has to learn a new state, and none of the
+     * four free gates can be reached with it. They are also free to ignore
+     * this function's return value, which they all do today
+     * (vol_ast.c:177, vol_write.c:849, vol_sweep.c:1185, vol_dedupe.c:475,
+     * vol_dirs.c:552, :649) -- with the map absent, "ignored" means
+     * "never free", which is the safe direction and the reason the ignore is
+     * tolerable rather than a second defect.
+     *
+     * pba_ref_stale is left 1 so the next call tries again: a row that could
+     * not be read may well be readable a moment later (that is the whole
+     * shape of a fold racing a read), and a permanent failure costs a walk
+     * per attempt on a volume that is already damaged. */
+    if (vol_v3_walk_strict(v, pba_ref_v3_walk_cb, &c) != 0) {
+        pba_ref_free(v);
+        v->pba_ref_stale = 1;
+        return -1;
+    }
     v->pba_ref_stale = 0;
     return 0;
 }

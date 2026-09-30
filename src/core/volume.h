@@ -430,6 +430,14 @@ int vol_v3_ensure_path(invfs_volume *v, const char *name);
 typedef int (*vol_v3_walk_cb)(void *ctx, const char *path, uint64_t ino,
                               uint32_t type, uint64_t size, int64_t mtime);
 int vol_v3_walk(invfs_volume *v, vol_v3_walk_cb cb, void *ctx);
+/* vol_v3_walk, but a name or a row it cannot read ABORTS the walk with -1
+ * instead of being stepped over. For the one caller whose answer must not be
+ * a partial view of the namespace: pba_ref_ensure, whose map is the sole
+ * gate on every data-block free (src/core/volume.c). A listing walk may
+ * skip a row it cannot read -- its consumer cannot act on one either way --
+ * but a walk that builds a reference count cannot, because the reference it
+ * drops is a block a live recipe still names. */
+int vol_v3_walk_strict(invfs_volume *v, vol_v3_walk_cb cb, void *ctx);
 
 /* ---- WP-M18: live-set iteration for sweep driver ---------------------
  * Walk the base B-tree inode range, consult the delta overlay for each

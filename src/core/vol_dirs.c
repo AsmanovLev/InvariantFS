@@ -694,8 +694,31 @@ int vol_v3_ensure_path(invfs_volume *v, const char *name)
     return 0;
 }
 
+/* The shared live-inode walker.
+ *
+ * `strict` is the whole of the difference between this and a walker that
+ * enumerates whatever it managed to read, and it exists for ONE caller
+ * (vol_v3_walk_strict, below) whose answer must not be a partial view.
+ *
+ * A listing walk legitimately skips: its consumer wants a best-effort sweep,
+ * and a row it cannot read is not something it can act on either way. The pba
+ * reference map is not that. The map answers "how many LIVE recipes name this
+ * block" and it is the sole gate on every data-block free -- so a row it
+ * could not read is a live reference it does not hold, and a count that is
+ * missing one frees a block somebody still names. There is no third answer:
+ * the walk either saw every live inode or the caller must be told it did not.
+ *
+ * That is why this is a parameter and not a change to vol_v3_walk: the other
+ * five callers (vol_btree.c:4854, :5099, :5566, vol_dedupe.c:448,
+ * vol_records.c:194) each want a listing, and tightening the walk under them
+ * would turn one damaged row into five unrelated failures.
+ *
+ * Returns 0 = every entry was visited, 1 = the callback asked to stop, -1 =
+ * the walk could not be completed (a listing or a row read failed, or the
+ * depth cap was hit). In strict mode a row read that fails is that last
+ * case; out of it, the same read is a `continue`. */
 static int v3_walk_dir(invfs_volume *v, const char *dir,
-                       vol_v3_walk_cb cb, void *ctx, int depth)
+                       vol_v3_walk_cb cb, void *ctx, int depth, int strict)
 {
     invfs_dirent *ents;
     int cap = 256, n, i;
@@ -730,18 +753,30 @@ static int v3_walk_dir(invfs_volume *v, const char *dir,
         if (pr < 0 || (size_t)pr >= sizeof path) {
             fprintf(stderr, "v3_walk_dir: path exceeds buffer capacity (%s/%s)\n",
                     dir, ents[i].name);
+            if (strict) { free(ents); return -1; }
             continue;
         }
-        if (vol_v3_path_lookup(v, path, &ino) != 1)
+        /* Both of these distinguish three answers already -- found, absent,
+         * could not read -- and the middle one is the only one a walk can
+         * step over. A name whose inode could not be RESOLVED is an error
+         * (vol_v3_path_lookup says so), and a row that could not be READ is
+         * an error (vol_v3_inode_get says so, and volume.h is explicit that
+         * a caller must not map its -1 to 0). In strict mode neither is a
+         * `continue`. */
+        if (vol_v3_path_lookup(v, path, &ino) != 1) {
+            if (strict) { free(ents); return -1; }
             continue;
-        if (vol_v3_inode_get(v, ino, &in) != 1)
+        }
+        if (vol_v3_inode_get(v, ino, &in) != 1) {
+            if (strict) { free(ents); return -1; }
             continue;
+        }
         if (cb && cb(ctx, path, ino, in.type, in.size, in.mtime) != 0) {
             free(ents);
             return 1;
         }
         if (in.type == INVFS_ITYP_DIR) {
-            int sub_rc = v3_walk_dir(v, path, cb, ctx, depth + 1);
+            int sub_rc = v3_walk_dir(v, path, cb, ctx, depth + 1, strict);
             if (sub_rc != 0) {
                 free(ents);
                 return sub_rc;
@@ -756,7 +791,17 @@ int vol_v3_walk(invfs_volume *v, vol_v3_walk_cb cb, void *ctx)
 {
     if (!v)
         return -1;
-    return v3_walk_dir(v, "", cb, ctx, 0);
+    return v3_walk_dir(v, "", cb, ctx, 0, 0);
+}
+
+/* The same walk, with every unreadable row reported instead of stepped over.
+ * See the comment on v3_walk_dir for why this is a second entry point and
+ * not a change to vol_v3_walk. One caller: pba_ref_ensure. */
+int vol_v3_walk_strict(invfs_volume *v, vol_v3_walk_cb cb, void *ctx)
+{
+    if (!v)
+        return -1;
+    return v3_walk_dir(v, "", cb, ctx, 0, 1);
 }
 
 

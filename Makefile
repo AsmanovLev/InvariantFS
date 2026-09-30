@@ -842,6 +842,21 @@ test: $(TEST_BINS) $(OUT)/invf-arctest $(OUT)/invf-blkio_test $(OUT)/invf-codec_
 	$(TESTENV) $(TESTISO) $(OUT)/invf-pbaref_v3_test /tmp rednosweep
 	$(TESTENV) $(TESTISO) $(OUT)/invf-pbaref_v3_test /tmp all
 	$(TESTENV) $(TESTISO) $(OUT)/invf-pbaref_v3_test /tmp allnosweep
+	@# WP wp/pbaref-skipped-row-is-not-exact: pba_ref_ensure SKIPPED an inode
+	@# row it could not read, discarded the walk's status, and set
+	@# pba_ref_stale = 0 -- the "this map is exact" flag -- on a map built
+	@# from a partial view of the namespace. One unreadable row is a live
+	@# reference the map does not hold, and a count that is missing one frees
+	@# a block a live recipe still names. `skiprow` fails ONE inode-row read
+	@# during the build (src/core/vol_btree.c, via the cross-TU
+	@# invfs_vol_btree_fault_reload door) and shows the shared block freed
+	@# under the surviving file; `skiprowctl` is the identical sequence with
+	@# the fault off, so the damage is measured against the fault and not
+	@# against the scenario. The countdown is SEARCHED, not fixed: how many
+	@# row reads a build performs is the volume's business, and a hard-coded
+	@# n goes stale silently and leaves the leg green on the healthy path.
+	$(TESTENV) $(TESTISO) $(OUT)/invf-pbaref_v3_test /tmp skiprow
+	$(TESTENV) $(TESTISO) $(OUT)/invf-pbaref_v3_test /tmp skiprowctl
 	@# WP wp/dirs-free-before-publish: vol_v3_create_node freed the existing
 	@# inode's blocks BEFORE it republished the row, so each of the four
 	@# failure returns between the free and the publish left a LIVE row naming

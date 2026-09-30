@@ -3731,6 +3731,20 @@ int vol_v3_inode_get(invfs_volume *v, uint64_t inode_id, invfs_v3_inode *out)
         return -1;
     if (v3_ready(v) != 0)
         return -1;
+    /* Test-only seam (src/core/vol_fault.h), armed by INVFS_FAULT: the
+     * v3_inode_row_read twin of the xattr row-read site at :3352. It stands
+     * in for the ROW READ failing, which in production is a quarantined or
+     * otherwise unreadable base page, or a torn delta chain -- both answer
+     * -1 below. The site injects the same -1, so nothing downstream,
+     * including the code that has to tell a read error from a missing row,
+     * can tell it from the real thing.
+     *
+     * This is the read pba_ref_ensure's build depends on being able to make,
+     * because the map it builds is the sole gate on every data-block free: a
+     * row that cannot be read is a live reference the map does not hold.
+     * src/cli/pbaref_v3_test.c (leg "skiprow") fails one of them there. */
+    if (invfs_vol_fault("v3_inode_row_read"))
+        return -1;
     v3_ino_key(inode_id, kb);
 
     /* WP-M11: delta first -- a delta row (or delete) shadows the base.
