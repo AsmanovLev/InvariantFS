@@ -33,6 +33,25 @@
  * is that diff; WP-M15 schedules it. This is why the tree unit test can check
  * COW sharing byte-for-byte.
  *
+ * "Immutable between folds" IS TRUE OF THE PAGES AND WAS READ AS A LICENCE
+ * FOR UNGUARDED READS, WHICH IT IS NOT. No page a live root names is ever
+ * rewritten, so a walk cannot tear -- that much holds. What immutability does
+ * NOT give a reader is LIVENESS: the fold's reachability diff
+ * (fold_reclaim_hook) frees the pages of a retired generation, and the reader
+ * drain that is supposed to keep it away from in-flight readers
+ * (vol_reclaim_drain) waits on g_readers_in_flight, which nothing in the tree
+ * increments -- no read path calls vol_reclaim_reader_snapshot/_release. So a
+ * reader holding a root from two publishes ago can still have a page collected
+ * under it, and mbuf_read_ptr reports that honestly as -1 via the allocation
+ * check (vol_metabuf.c:192) rather than returning recycled bytes. Measured
+ * at ~1e-6 of reads. See vol_fold.c's KNOWN GAP. Not fixed here: separate
+ * finding (§1.8).
+ *
+ * The same sentence used to cover the DELTA, and there it was simply false:
+ * the recent tier is freed by the fold the moment the index is dropped. A
+ * resolved delta_ref names bytes only while g_delta_lock is held, so
+ * vol_delta_read_value holds it (WP-inode-get-fold-race).
+ *
  * TODO(WP-M15): the WP-M3 task blurb says upsert "frees old pages via the
  * metabuf allocator"; this implementation deliberately does NOT, because with
  * COW a retired page can still be reachable from a retained root and the API
@@ -2694,6 +2713,18 @@ int vol_v3_base_root(invfs_volume *v, invfs_blkptr *out)
 /* has it; if it still does, the delta copy is the same (or newer)      */
 /* value. This helper freezes that delta-before-base order -- callers   */
 /* must not read the base first.                                        */
+/*                                                                    */
+/* WHAT THAT DOES NOT SAY (WP-inode-get-fold-race). "Needs no read    */
+/* lock" is true of the ORDER and of the INDEX -- vol_delta_lookup      */
+/* takes g_delta_lock to read the index at all, and the fold takes the */
+/* same lock to replace it. It was read as covering the BYTES, and that */
+/* is where the read path broke: the ref this helper hands back names a */
+/* block range, the fold frees that range the moment it drops the index */
+/* (vol_v3_fold step 3), and the caller read it afterwards with bare    */
+/* preads. vol_delta_read_value now holds the same lock across the read, */
+/* so a ref is a promise for exactly as long as the caller's next call */
+/* -- do not cache one, and do not read one without vol_delta_read_    */
+/* value.                                                              */
 /* ------------------------------------------------------------------ */
 
 /* 1 = delta wins (*ref filled; a DELETE flag means "shadowed/absent"),
@@ -2762,19 +2793,17 @@ static int v3_overlay_exists(invfs_volume *v, const uint8_t *key, uint16_t klen)
 static int v3_overlay_get_key(invfs_volume *v, const uint8_t *key, uint16_t klen,
                               uint8_t *buf, size_t cap, uint16_t *vlen_out)
 {
-    delta_ref dr;
-    int drc = v3_overlay_lookup(v, key, klen, &dr);
+    /* One critical section for the resolve AND the read: a delta_ref names a
+     * block range the fold is free to recycle the moment the lock drops
+     * (WP-inode-get-fold-race). -2 (value too big for cap) keeps the old
+     * meaning: -1 to this function. */
+    uint16_t dflags = 0;
+    int drc = vol_delta_lookup_value(v, key, klen, buf, cap, &dflags, vlen_out);
     if (drc < 0)
         return -1;
     if (drc == 1) {
-        if (dr.flags & INVFS_DELTA_FLAG_DELETE)
+        if (dflags & INVFS_DELTA_FLAG_DELETE)
             return 0;
-        if (dr.vlen > cap)
-            return -1;
-        if (vlen_out)
-            *vlen_out = 0;
-        if (vol_delta_read_value(v, &dr, buf, cap, vlen_out) != 0)
-            return -1;
         return 1;
     }
     {
@@ -3571,23 +3600,27 @@ int vol_v3_inode_get(invfs_volume *v, uint64_t inode_id, invfs_v3_inode *out)
         return -1;
     v3_ino_key(inode_id, kb);
 
-    /* WP-M11: delta first -- a delta row (or delete) shadows the base. */
+    /* WP-M11: delta first -- a delta row (or delete) shadows the base.
+     * WP-inode-get-fold-race: resolve and read in ONE critical section. The
+     * lookup used to return a delta_ref and the value read happened after the
+     * lock was dropped, which let the fold free the chain and the next
+     * segment allocation zero it: this function then decoded zeros and
+     * answered -1 for an inode that was present and whose row the fold had
+     * already copied into the new base. */
     {
-        delta_ref dr;
-        int drc = v3_overlay_lookup(v, kb, sizeof kb, &dr);
         uint8_t rb[INVFS_V3_INODE_ROW_FIXED];
-        uint16_t rlen = 0;
+        uint16_t rlen = 0, dflags = 0;
+        int drc = vol_delta_lookup_value(v, kb, sizeof kb, rb, sizeof rb,
+                                         &dflags, &rlen);
         if (drc < 0)
-            return -1;
+            return -1;                   /* -2 too: see volume.h */
         if (drc == 1) {
-            if (dr.flags & INVFS_DELTA_FLAG_DELETE)
+            if (dflags & INVFS_DELTA_FLAG_DELETE)
                 return 0;                /* hidden by a delta delete */
             /* The delta value is the frozen fixed row. TODO(WP-M12): if a
              * later writer inlines xattr bytes (xattr_len > 0) the value can
-             * exceed INVFS_V3_INODE_ROW_FIXED; size the buffer from dr.vlen
-             * then. Today only the fixed row can appear. */
-            if (vol_delta_read_value(v, &dr, rb, sizeof rb, &rlen) != 0)
-                return -1;
+             * exceed INVFS_V3_INODE_ROW_FIXED; -2 above is that case, and it
+             * keeps answering -1 as it always did. */
             if (v3_ino_decode(rb, rlen, out) != 0)
                 return -1;
             return 1;
@@ -3943,27 +3976,51 @@ int vol_v3_recipe_load(invfs_volume *v, const uint8_t addr[INVFS_V3_RECIPE_ADDR_
 
     /* WP-M11: the delta owns the key if it was rewritten since the fold;
      * a delete shadows the base blob. The BLAKE3 check below still governs
-     * whatever bytes the delta returns (content-addressing is immutable). */
+     * whatever bytes the delta returns (content-addressing is immutable).
+     * WP-inode-get-fold-race: resolve and read in ONE critical section -- a
+     * ref handed out by the lookup names blocks the fold recycles the moment
+     * the lock drops. A blob bigger than the stack buffer comes back as -2
+     * with its length, and the second, exactly-sized attempt is atomic too
+     * (a fold in between means the key is in the base, which is the fall
+     * through below). */
     {
-        delta_ref dr;
-        int drc = v3_overlay_lookup(v, kb, V3_RECIPE_KEY_LEN, &dr);
-        if (drc < 0)
-            return -1;
-        if (drc == 1) {
-            if (dr.flags & INVFS_DELTA_FLAG_DELETE)
-                return -1;               /* hidden by a delta delete */
-            blob = (uint8_t *)malloc(dr.vlen ? dr.vlen : 1);
-            if (!blob)
+        uint8_t sbuf[V3_XATTR_CHUNK_DATA];
+        uint16_t dflags = 0, dlen = 0, got = 0;
+        uint8_t *dbuf = sbuf;
+        size_t dcap = sizeof sbuf;
+        int drc = vol_delta_lookup_value(v, kb, V3_RECIPE_KEY_LEN,
+                                         dbuf, dcap, &dflags, &dlen);
+        if (drc == -2) {
+            dbuf = (uint8_t *)malloc(dlen ? dlen : 1);
+            if (!dbuf)
                 return -1;
-            {
-                uint16_t got = 0;
-                if (vol_delta_read_value(v, &dr, blob, dr.vlen, &got) != 0 ||
-                    got != dr.vlen) {
-                    free(blob);
-                    return -1;
-                }
+            dcap = dlen;
+            drc = vol_delta_lookup_value(v, kb, V3_RECIPE_KEY_LEN,
+                                         dbuf, dcap, &dflags, &dlen);
+            got = dlen;
+        }
+        if (drc < 0) {
+            if (dbuf != sbuf)
+                free(dbuf);
+            return -1;
+        }
+        if (drc == 1) {
+            if (dflags & INVFS_DELTA_FLAG_DELETE) {
+                if (dbuf != sbuf)
+                    free(dbuf);
+                return -1;               /* hidden by a delta delete */
             }
-            v3_blake3(blob, dr.vlen, chk);
+            if (got == 0)
+                got = dlen;
+            blob = (dbuf == sbuf) ? (uint8_t *)malloc(dlen ? dlen : 1) : dbuf;
+            if (!blob) {
+                if (dbuf != sbuf)
+                    free(dbuf);
+                return -1;
+            }
+            if (blob != dbuf)
+                memcpy(blob, dbuf, dlen);
+            v3_blake3(blob, dlen, chk);
             if (memcmp(chk, addr, INVFS_V3_RECIPE_ADDR_LEN) != 0) {
                 fprintf(stderr, "v3 recipe blob (delta): BLAKE3 mismatch "
                         "(corrupt or forged); refusing the read\n");
@@ -3971,8 +4028,8 @@ int vol_v3_recipe_load(invfs_volume *v, const uint8_t addr[INVFS_V3_RECIPE_ADDR_
                 return -1;
             }
             *blob_out = blob;
-            *blen_out = dr.vlen;
-            v3_rcache_put(v, addr, blob, dr.vlen);
+            *blen_out = dlen;
+            v3_rcache_put(v, addr, blob, dlen);
             return 0;
         }
     }
@@ -4127,20 +4184,19 @@ int vol_v3_dirent_get(invfs_volume *v, uint64_t parent, const char *name,
         return -1;
     kn = v3_dirent_key(kb, parent, name, nlen);
 
-    /* WP-M11: delta first; a delete shadows the base dirent. */
+    /* WP-M11: delta first; a delete shadows the base dirent.
+     * WP-inode-get-fold-race: one critical section for resolve + read. */
     {
-        delta_ref dr;
-        int drc = v3_overlay_lookup(v, kb, kn, &dr);
+        uint8_t vb[8];
+        uint16_t dflags = 0, got = 0;
+        int drc = vol_delta_lookup_value(v, kb, kn, vb, sizeof vb,
+                                         &dflags, &got);
         if (drc < 0)
-            return -1;
+            return -1;                   /* -2 too: a dirent value is 8 B */
         if (drc == 1) {
-            uint8_t vb[8];
-            uint16_t got = 0;
-            if (dr.flags & INVFS_DELTA_FLAG_DELETE)
+            if (dflags & INVFS_DELTA_FLAG_DELETE)
                 return 0;
-            if (dr.vlen != 8 ||
-                vol_delta_read_value(v, &dr, vb, sizeof vb, &got) != 0 ||
-                got != 8)
+            if (got != 8)
                 return -1;
             if (child_out)
                 *child_out = v3_dirent_val_get(vb, got);

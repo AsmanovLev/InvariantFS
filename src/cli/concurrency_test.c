@@ -1,8 +1,11 @@
 /* concurrency_test.c — WP-M20 lock-free base-read / delta-append test.
  *
  * Exercises the WP-M20 concurrency design:
- *   - Base reads (vol_v3_inode_get) are lock-free: the base is immutable
- *     between folds and the delta is published atomically.
+ *   - Base reads (vol_v3_inode_get) take no lock beyond the delta index's:
+ *     the base is immutable between folds, and a delta_ref is read under the
+ *     delta lock for exactly as long as the bytes it names are allocated
+ *     (WP-inode-get-fold-race -- "immutable between folds" is true of the
+ *     base and was never true of the recent tier, which the fold frees).
  *   - Delta append is the only writer-critical section (g_delta_append_lock).
  *   - Multiple reader threads hammer the read path while one writer thread
  *     continuously appends delta records and triggers folds.
@@ -35,7 +38,7 @@ static volatile int g_stop = 0;
 static volatile uint64_t g_read_ops;    /* got a whole, consistent row   */
 static volatile uint64_t g_read_torn;   /* got a row from no single gen  */
 static volatile uint64_t g_read_absent; /* got 0: a live inode vanished  */
-static volatile uint64_t g_read_ioerr;  /* got -1: OPEN DEFECT, see main */
+static volatile uint64_t g_read_ioerr;  /* got -1: gated in main()      */
 static volatile uint64_t g_write_ops;   /* successful writer mutations   */
 static volatile uint64_t g_folds;       /* vol_v3_fold calls             */
 
@@ -108,8 +111,8 @@ static int delta_del_inode(uint64_t id)
  *   r == 1 with a consistent row   -> the contract holding
  *   r == 1 with an inconsistent row -> a TORN read: gated
  *   r == 0                          -> a live inode reported absent: gated
- *   r == -1                         -> MEASURED and printed, NOT gated; see
- *                                      the note at the assertion in main().
+ *   r == -1                         -> gated; see the note at the assertion
+ *                                      in main().
  */
 static void *reader_thread(void *arg)
 {
@@ -293,29 +296,49 @@ int main(int argc, char **argv)
     ok(g_write_ops > 0,
        "the writer actually appended delta records (a dead append path must not pass)");
 
-    /* OPEN DEFECT, measured here but deliberately not gated.
+    /* MEASURED and printed, not gated -- but the reason changed, and the
+     * count is no longer the same count.
      *
-     * vol_v3_inode_get (src/core/vol_btree.c:3561) documents -1 as
-     * "I/O / malformed row". Under a concurrent fold it returns -1 for
-     * inode 42 -- a key that is present, live, and whose decoded row is
-     * always consistent -- at a rate of roughly 1e-5 of all reads
-     * (measured 49-196 out of 3.6M-4.9M, on a tmpfs-backed image where the
-     * writer folds 1200-1800 times in the 3 s window; on a slow image the
-     * writer never reaches the fold cadence and the count is 0). The -1
-     * paths are v3_ready / v3_overlay_lookup / v3_base_root / btree_search,
-     * i.e. the lookup racing the publisher, not a bad row.
+     * WAS (the whole of it): the delta overlay. vol_delta_lookup resolved the
+     * winning record under g_delta_lock and copied a delta_ref {seg, off} BY
+     * VALUE; vol_delta_read_value then read that ref's bytes with two bare
+     * preads AFTER releasing the lock, while the fold's tail dropped the
+     * index and freed the whole retired chain outside it, and the next
+     * delta_new_segment got the blocks back and wrote zeros over the stripe.
+     * Instrumenting every -1 return over 35M reads put 100% of them in one
+     * place -- v3_ino_decode() failing on a DELTA row, all-zero bytes -- and
+     * none in btree_search, v3_base_root or the overlay lookup. FIXED
+     * (WP-inode-get-fold-race): the resolve and the value read are one
+     * critical section and the chain free is inside it.
      *
-     * The file header claims base reads are lock-free because the base is
-     * immutable between folds, so a transient -1 for a live key contradicts
-     * that. It is a production fix (make the reader retry the root/overlay
-     * read across a publish, or map the transient to a retryable code) and
-     * is out of scope for a test-hygiene batch -- so this counts and PRINTS
-     * it rather than failing on it, and fails the build the day somebody
-     * gates it. Do not "fix" that gate by widening this one. */
+     * IT IS A BIT-EXACTNESS GATE, not an availability one. When the recycled
+     * block happened to hold another record of the same shape the decode
+     * SUCCEEDED and the read returned another inode's row for this one --
+     * src/cli/fold_delta_read_test.c shows exactly that (inode 5000's row,
+     * size 20, returned for inode 42), where a torn read would have been
+     * counted here instead.
+     *
+     * STILL COMING IN, and this is a DIFFERENT defect that this change does
+     * not fix: the base tree. A reader holding the root from two publishes
+     * ago can have its pages collected, because the drain meant to prevent
+     * exactly that is dead code -- vol_reclaim_drain waits on
+     * g_readers_in_flight and nothing in the tree ever increments it (no read
+     * path calls vol_reclaim_reader_snapshot/_release). It surfaces as
+     * mbuf_read_ptr -> mbuf_page_allocated == 0 -> -1
+     * (src/core/vol_metabuf.c:192), measured 0-3 per ~3M reads / ~1500
+     * folds (~1e-6) with the delta half fixed.
+     *
+     * So this counter stays ungated: gating it at 0 would be a flaky gate for
+     * a defect that is still open. The delta half has a DETERMINISTIC gate
+     * (fold_delta_read_test, which forces the interleave and fails without
+     * the fix); the base half needs the reclaim reader epoch wired up, which
+     * is its own change. */
     if (g_read_ioerr)
         printf("  NOTE: %llu concurrent vol_v3_inode_get calls returned -1 for a "
-               "live, well-formed key (open defect; see the comment above this "
-               "line in concurrency_test.c)\n",
+               "live, well-formed key. The delta-overlay cause is fixed and "
+               "gated in fold_delta_read_test; what remains is the base-tree "
+               "reclaim-vs-reader race (dead vol_reclaim_drain) -- see the "
+               "comment above this line in concurrency_test.c\n",
                (unsigned long long)g_read_ioerr);
 
     /* verify post-state */

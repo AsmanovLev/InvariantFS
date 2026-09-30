@@ -15,7 +15,8 @@
  *   1. apply the live keys to the base, writing COW pages (no publish yet);
  *   2. barrier the COW pages + the dirty bitmap, then publish the new root
  *      with a bumped RT30 seq (mbuf_root_publish, CRC + higher-gen wins);
- *   3. only THEN reset the delta (new empty segment, clear the index).
+ *   3. only THEN reset the delta (new empty segment, clear the index) AND free
+ *      the retired chain -- both inside g_delta_lock.
  *
  * A crash between 2 and 3 replays the OLD delta against the NEW base; every
  * key was already applied, so re-applying is idempotent (upsert of the same
@@ -25,7 +26,13 @@
  * A lock-free reader resolves delta-first-then-base. If it sees the key in
  * the delta, that record is the (or a newer) value; if it misses the delta,
  * the key must already be in the published base -- so no transient ENOENT is
- * observable, and no read lock is needed on either structure.
+ * observable, and no read lock is needed on either structure. "Lock-free" is a
+ * claim about the BASE, whose pages are immutable between folds. The recent
+ * tier is NOT: step 3 frees it. A resolved delta_ref names bytes only for as
+ * long as g_delta_lock is held, which is why step 3 holds that lock across the
+ * free and why vol_delta_read_value holds it across the value read
+ * (WP-inode-get-fold-race). The two halves are useless apart: either one alone
+ * leaves the reader reading a block the volume has already given back.
  *
  * -------------------------------------------------------------- reclaim
  * No mutating B+-tree call frees a page (vol_btree.c), so fold RETAINS every
@@ -33,9 +40,23 @@
  * retired page may still be reachable from a retained root (a save point or
  * an in-flight reader), and the design (§8, D4) makes freeing a reachability
  * diff. WP-M15 supplies that diff against {current base, pinned save-point
- * root}; this WP only leaves it a clean hook (fold_reclaim_hook below), which
- * today is a no-op. The delta's superseded segments are likewise not freed
- * (WP-M15); reset only stops naming the old chain from RT30.
+ * root}; this WP only leaves it a clean hook (fold_reclaim_hook below). The
+ * delta's superseded segments ARE freed -- under the lock, for the reason
+ * above.
+ *
+ * KNOWN GAP, deliberately not fixed here (§1.8, one finding per change): the
+ * base side of that same sentence is currently UNPROTECTED. vol_reclaim_drain
+ * waits on g_readers_in_flight, and nothing in the tree ever increments it --
+ * no read path calls vol_reclaim_reader_snapshot/_release -- so the drain
+ * returns immediately and fold_reclaim_hook frees a retired generation with no
+ * regard for a reader that captured its root. A reader holding the root from
+ * two publishes ago has its pages collected and mbuf_read_ptr reports it as
+ * -1 (src/core/vol_metabuf.c:192). Measured on this host WITH the delta half
+ * of this change in place: 0-3 per ~3M reads over ~1500 folds (~1e-6), which
+ * is why concurrency_test still counts that case rather than gating it.
+ * Fixing it means wiring the reclaim reader epoch -- announce across the root
+ * capture AND the walk, in every base-tree read entry point -- which is its
+ * own change, and half of it would be worse than none.
  *
  * -------------------------------------------------------------- trigger
  * D2 fixes the trigger SHAPE (size / record count / age, with the sweep as a
@@ -444,15 +465,30 @@ int vol_v3_fold(invfs_volume *v)
      * failure here leaves base+delta both carrying the keys, which replay
      * resolves idempotently; a later fold_request retries.
      * WP-M20: hold g_delta_lock so concurrent lock-free readers see either
-     * the old delta_index or the new empty one -- never a half-freed pointer. */
+     * the old delta_index or the new empty one -- never a half-freed pointer.
+     *
+     * WP-inode-get-fold-race: THE CHAIN FREE BELONGS IN HERE. It used to run
+     * two lines further down, OUTSIDE the lock, on the strength of the comment
+     * above -- that a reader which resolved a ref under the lock has no use
+     * left for the bytes once it drops the lock. It did have use left for
+     * them: vol_delta_read_value reads a ref's value with two bare preads, and
+     * this is the code that frees the very blocks that ref names the moment
+     * the index is gone. The allocator hands them straight back
+     * (delta_new_segment writes a header and zeros across a 128 KiB stripe),
+     * so the reader decoded zeros and vol_v3_inode_get answered -1 for an
+     * inode that was present, live and internally consistent -- ~1e-5 of all
+     * reads, and a wrong row rather than an error whenever the recycled block
+     * happened to hold one. Dropping the index and freeing what the index
+     * named is ONE step as far as a reader is concerned, so it is one critical
+     * section; vol_delta_read_value now takes this same lock across its
+     * preads, which is what makes the pairing work. */
     uint64_t old_delta_pba = v->rt30.delta_pba;
     vol_delta_lock();
     if (fold_delta_reset(v) != 0)
         failed_reset = 1;
-    vol_delta_unlock();
-
     /* WP-M15: free superseded delta segments (saved before reset cleared them) */
     (void)vol_reclaim_delta_segments(v, old_delta_pba, 0);
+    vol_delta_unlock();
 
     /* WP-M15: bump epoch for reader drain, then reclaim base pages */
     (void)vol_reclaim_bump_epoch();

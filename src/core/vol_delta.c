@@ -24,10 +24,30 @@
 #include <time.h>
 
 /* WP-M20: delta append lock — guards the only writer critical section.
- * Base reads are lock-free (immutable base pages); delta reads are lock-free
- * (index published atomically after record bytes written). Only delta append
- * needs serialization. */
+ *
+ * IT ALSO GUARDS THE READ OF A RECORD'S BYTES, which the comment above used
+ * to deny. "Delta reads are lock-free (index published atomically after record
+ * bytes written)" describes the APPEND's ordering; it says nothing about how
+ * long the bytes a resolved ref names stay allocated, and the answer was "one
+ * fold". A reader resolved a ref under this lock and then re-read the record
+ * with two bare preads AFTER releasing it, while the fold's tail frees the
+ * whole retired chain the moment the index is dropped (vol_v3_fold ->
+ * vol_reclaim_delta_segments). The reader then decoded the recycled block --
+ * measured at ~1e-5 of all reads, an -1 for a key that was present and whose
+ * row was intact. So the index lookup and the value read are now ONE critical
+ * section, and the free moved inside the fold's. See vol_delta_read_value. */
 static pthread_mutex_t g_delta_lock = PTHREAD_MUTEX_INITIALIZER;
+
+/* Test seam: called from inside vol_delta_read_value's critical section, with
+ * the ref the caller resolved. Weak, so the definition here is what links
+ * unless a test provides its own -- production pays one predicted call and no
+ * state. It exists so the fold/read interleave can be FORCED instead of raced
+ * for (src/cli/fold_delta_read_test.c). */
+__attribute__((weak)) void invfs_test_delta_read_hook(const void *ref)
+{
+    (void)ref;
+}
+
 
 void vol_delta_lock(void)
 {
@@ -624,30 +644,167 @@ int vol_delta_lookup(invfs_volume *v, const uint8_t *key, uint16_t klen,
     return 1;
 }
 
-int vol_delta_read_value(invfs_volume *v, const delta_ref *ref,
-                         uint8_t *buf, size_t cap, uint16_t *vlen_out)
+/* Read a ref's value bytes. THE LOCK MUST BE HELD: a ref names a block range,
+ * and the fold frees the retired chain's blocks in the same critical section
+ * that drops the index (vol_v3_fold step 3), after which the allocator hands
+ * them straight back -- delta_new_segment writes a header and zeros over a
+ * whole 128 KiB stripe. Reading outside the lock is therefore not a race with
+ * the APPEND (which is serialized by this same lock) but a race with the FREE,
+ * and it returned -1 for an inode that was present and whose row was intact
+ * (~1e-5 of reads). See vol_delta_lookup_value, which is how a caller is meant
+ * to reach a ref at all. */
+/* Value bytes that fit the one-pread fast path, plus the largest key. A delta
+ * record never crosses a segment (vol_delta_append refuses one that would), so
+ * reading exactly the record is in-bounds by construction. 1 KiB of value
+ * covers every inode row (114 B), every dirent (8 B) and every xattr chunk
+ * (V3_XATTR_CHUNK_DATA); anything larger takes the two-pread path. */
+#define DL_ONEPREAD_VMAX 1024u
+#define DL_ONEPREAD_MAX  (INVFS_DELTA_REC_HDR_LEN + 256u + DL_ONEPREAD_VMAX)
+static __thread uint8_t dl_tls_record[DL_ONEPREAD_MAX];
+
+static int delta_read_value_locked(invfs_volume *v, const delta_ref *ref,
+                                   uint16_t klen, uint8_t *buf, size_t cap,
+                                   uint16_t *vlen_out)
 {
     uint8_t hdr[INVFS_DELTA_REC_HDR_LEN];
+    uint64_t at = ref->seg * (uint64_t)INVFS_BLOCK_SIZE + ref->off;
     uint16_t kl;
 
-    if (!v || !ref)
-        return -1;
     if (vlen_out)
         *vlen_out = 0;
     if (ref->vlen == 0)
         return 0;                        /* delete / empty value */
-    if (!buf || cap < ref->vlen)
-        return -1;
-    if (io_pread(&v->io, ref->seg * (uint64_t)INVFS_BLOCK_SIZE + ref->off,
-                 hdr, sizeof hdr) != 0)
+    /* One pread, because this now runs inside the delta lock and the lock is
+     * the volume's metadata chokepoint: two syscalls of hold time per read is
+     * a measurable fraction of an uncoordinated read's cost (measured on
+     * concurrency_test: 4 readers on one key, ~5.9M reads/3 s -> ~2.1M). The
+     * index already knows klen, so the record's whole extent is known here
+     * and there is no reason to go to the media twice. The header that comes
+     * back is checked against the index rather than trusted -- that check is
+     * also what would catch a ref whose blocks are no longer its record's. */
+    if (klen != 0 && klen <= 256u && ref->vlen <= DL_ONEPREAD_VMAX) {
+        size_t need = (size_t)INVFS_DELTA_REC_HDR_LEN + klen + ref->vlen;
+        if (io_pread(&v->io, at, dl_tls_record, need) != 0)
+            return -1;
+        if (dl_rd16be(dl_tls_record) != klen ||
+            dl_rd16be(dl_tls_record + 2) != ref->vlen)
+            return -1;
+        memcpy(buf, dl_tls_record + INVFS_DELTA_REC_HDR_LEN + klen,
+               ref->vlen);
+        if (vlen_out)
+            *vlen_out = ref->vlen;
+        return 0;
+    }
+    if (io_pread(&v->io, at, hdr, sizeof hdr) != 0)
         return -1;
     kl = dl_rd16be(hdr);
-    if (io_pread(&v->io, ref->seg * (uint64_t)INVFS_BLOCK_SIZE + ref->off +
-                 INVFS_DELTA_REC_HDR_LEN + kl, buf, ref->vlen) != 0)
+    if (io_pread(&v->io, at + INVFS_DELTA_REC_HDR_LEN + kl, buf,
+                 ref->vlen) != 0)
         return -1;
     if (vlen_out)
         *vlen_out = ref->vlen;
     return 0;
+}
+
+/* Resolve a key AND read its value inside ONE critical section. This is the
+ * only correct way for an overlay read to reach a delta value, and the reason
+ * is a lifetime, not a performance one: vol_delta_lookup hands back a ref that
+ * names a BLOCK RANGE, so the moment the lock is dropped the fold may free
+ * those blocks and the next segment allocation may zero them. Splitting the
+ * two calls -- which is what every overlay read site used to do -- leaves the
+ * whole fold in the middle of the read.
+ *
+ * That is not a theoretical window. Locking only the read half makes it much
+ * WIDER: the reader then blocks on the mutex while a fold runs, so it is
+ * released into a block the fold has already recycled, and the measured -1
+ * rate went UP by two orders of magnitude (1-10 per 6M reads -> 140-254).
+ * Both halves have to be inside.
+ *
+ *  1 = found. *flags_out carries INVFS_DELTA_FLAG_DELETE for a shadowing
+ *      delete, and *vlen_out the value length. The value is copied into buf
+ *      only when it fits in cap; if it does not, the return is -2 and
+ *      *vlen_out still holds the length, so a caller that needs the whole
+ *      value can size a buffer and call again (that second call is itself
+ *      atomic: if the fold completed in between, the key is in the base).
+ *  0 = miss.  -1 = I/O error or bad arguments.
+ */
+int vol_delta_lookup_value(invfs_volume *v, const uint8_t *key, uint16_t klen,
+                           uint8_t *buf, size_t cap, uint16_t *flags_out,
+                           uint16_t *vlen_out)
+{
+    struct delta_index *di;
+    const delta_slot *s;
+    delta_ref ref;
+    size_t i;
+    int rc;
+
+    if (!v || !key || klen == 0)
+        return -1;
+    if (vlen_out)
+        *vlen_out = 0;
+    pthread_mutex_lock(&g_delta_lock);
+    di = v->delta_index;
+    if (!di) {
+        pthread_mutex_unlock(&g_delta_lock);
+        return 0;
+    }
+    i = di_find(di, key, klen);
+    if (i == (size_t)-1) {
+        pthread_mutex_unlock(&g_delta_lock);
+        return 0;
+    }
+    s = &di->slot[i];
+    ref.seg = s->seg;
+    ref.off = s->off;
+    ref.seq = s->seq;
+    ref.flags = s->flags;
+    ref.vlen = s->vlen;
+    if (flags_out)
+        *flags_out = ref.flags;
+    if (ref.vlen == 0) {                  /* delete / empty value */
+        pthread_mutex_unlock(&g_delta_lock);
+        return 1;
+    }
+    if (vlen_out)
+        *vlen_out = ref.vlen;
+    if (!buf || cap < ref.vlen) {
+        pthread_mutex_unlock(&g_delta_lock);
+        return -2;
+    }
+    invfs_test_delta_read_hook(&ref);
+    rc = delta_read_value_locked(v, &ref, s->klen, buf, cap, vlen_out);
+    pthread_mutex_unlock(&g_delta_lock);
+    return rc == 0 ? 1 : -1;
+}
+
+/* Read a ref whose bytes this caller obtained some other way (the merge
+ * cursor and the fsck generator both snapshot refs first). Locked here so
+ * that path cannot read a block the fold is freeing -- but note that a LOCK
+ * IS NOT A PIN: a ref snapshotted before a fold still names blocks that fold
+ * may free, and only vol_delta_lookup_value rules that out by never letting
+ * the ref escape. Prefer it. */
+int vol_delta_read_value(invfs_volume *v, const delta_ref *ref,
+                         uint8_t *buf, size_t cap, uint16_t *vlen_out)
+{
+    int rc;
+
+    if (!v || !ref)
+        return -1;
+    if (ref->vlen == 0) {
+        if (vlen_out)
+            *vlen_out = 0;
+        return 0;                        /* delete / empty value */
+    }
+    if (!buf || cap < ref->vlen) {
+        if (vlen_out)
+            *vlen_out = 0;
+        return -1;
+    }
+    pthread_mutex_lock(&g_delta_lock);
+    invfs_test_delta_read_hook(ref);
+    rc = delta_read_value_locked(v, ref, 0, buf, cap, vlen_out);
+    pthread_mutex_unlock(&g_delta_lock);
+    return rc;
 }
 
 int vol_delta_iter(invfs_volume *v, vol_delta_iter_cb cb, void *ctx)

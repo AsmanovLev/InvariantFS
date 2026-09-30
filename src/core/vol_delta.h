@@ -80,14 +80,50 @@ int vol_delta_append(invfs_volume *v, const uint8_t *key, uint16_t klen,
                      const uint8_t *val, uint16_t vlen, uint16_t flags);
 
 /* Point lookup of the winning record. 1 = found (*out filled), 0 = absent,
- * -1 = error/bad arguments. */
+ * -1 = error/bad arguments.
+ *
+ * A ref it returns names a BLOCK RANGE, and the fold frees the retired
+ * chain's blocks the moment it drops the index. So a ref does not outlive
+ * this call safely: read it with vol_delta_read_value only if you already
+ * know the bytes are pinned, and prefer vol_delta_lookup_value below, which
+ * cannot get this wrong by construction. */
 int vol_delta_lookup(invfs_volume *v, const uint8_t *key, uint16_t klen,
                      delta_ref *out);
 
+/* Resolve a key AND read its value in ONE critical section. This is how an
+ * overlay read is meant to reach a delta value: splitting the lookup and the
+ * read leaves a fold free to run in between, and the fold's tail frees the
+ * blocks the ref names.
+ *
+ *   1  = found. *flags_out carries INVFS_DELTA_FLAG_DELETE for a shadowing
+ *        delete; *vlen_out is the value length and the value is in buf.
+ *   0  = miss.
+ *  -1  = I/O error / bad arguments.
+ *  -2  = found, but the value does not fit `cap`: *vlen_out still holds its
+ *        length and buf is untouched. Size a buffer and call again; that call
+ *        is atomic too (if a fold completed in between, the key is in the
+ *        base, which the caller falls through to).
+ */
+int vol_delta_lookup_value(invfs_volume *v, const uint8_t *key, uint16_t klen,
+                           uint8_t *buf, size_t cap, uint16_t *flags_out,
+                           uint16_t *vlen_out);
+
 /* Read a ref's value bytes. `cap` must be >= ref->vlen. On success *vlen_out
- * holds the value length and 0 is returned. A delete record has vlen 0. */
+ * holds the value length and 0 is returned. A delete record has vlen 0.
+ *
+ * HOLDS THE DELTA LOCK across both preads. That protects the blocks from a
+ * free IN PROGRESS -- not from a free that already happened: a ref resolved
+ * before a fold can name blocks the fold has since recycled, which is how the
+ * read path used to answer -1 for a live inode. Prefer vol_delta_lookup_value,
+ * which never lets a ref escape. */
 int vol_delta_read_value(invfs_volume *v, const delta_ref *ref,
                          uint8_t *buf, size_t cap, uint16_t *vlen_out);
+
+/* Test seam, called from inside the critical section of whichever read a
+ * caller used, with the ref being read. Weak (see vol_delta.c): a no-op
+ * unless a test defines its own, which is how fold_delta_read_test forces the
+ * interleave instead of racing for it. */
+void invfs_test_delta_read_hook(const void *ref);
 
 /* ---- locking helpers (for callers that mutate delta state) ------------- */
 

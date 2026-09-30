@@ -319,7 +319,19 @@ static inline int invfs_inode_content_is_raw_blob(uint8_t type)
 }
 
 /* Read the row for inode_id. Returns 1 = present (*out filled), 0 = absent,
- * -1 = I/O / malformed row. */
+ * -1 = I/O / malformed row.
+ *
+ * -1 IS AN ERROR, NEVER AN ABSENCE, AND NOT A RETRY SIGNAL. It means the row
+ * could not be produced: an I/O error, or bytes that are not a row of this
+ * format (v3_ino_decode refuses a row_version it does not know -- correctly).
+ * Until WP-inode-get-fold-race it could ALSO mean "a concurrent fold freed the
+ * delta block this read was about to touch", which is how it reached ~1e-5 of
+ * reads on an inode that was present, live and internally consistent. That
+ * cause is gone -- the value read and the chain free now share one critical
+ * section (vol_delta.c, vol_fold.c) -- so nothing here is transient and a
+ * caller must not map -1 to 0. Callers that still cannot tell the two apart
+ * (vol_v3_create_node zeroes a row it did not read) should say so where they
+ * do it. */
 int vol_v3_inode_get(invfs_volume *v, uint64_t inode_id, invfs_v3_inode *out);
 /* Insert or replace the row. `in->nlink` must be >= 1 (a zero-nlink row is
  * deleted, not stored). COW-writes the base pages, makes them durable, then

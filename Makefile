@@ -124,7 +124,7 @@ CLI_MAINS := mkfs verify fsck cp cat ls stat arctest blkio_test resize \
              fsck_rootslot_test batch_owner_test plugin_host_test plugin_mt_test rs_stability_test \
              fsck_liveness_test scratch_policy_test v2rb_rollback_test keycmp_test \
              lane_release_test pbaref_v3_test \
-             sibling_retire_v3_test tar_cap_test
+             sibling_retire_v3_test tar_cap_test fold_delta_read_test
 $(foreach t,$(CLI_MAINS),$(eval $(call TOOL_RULE,$(t),)))
 
 # WP71: loads every containerpack .so through dlmopen/dlopen -> needs -ldl,
@@ -605,6 +605,7 @@ test: $(OUT)/invf-arctest $(OUT)/invf-blkio_test $(OUT)/invf-codec_test \
       $(OUT)/invf-helper_exec_test $(OUT)/invf-metabuf_test $(OUT)/invf-btree_test \
       $(OUT)/invf-delta_test $(OUT)/invf-groupcommit_test $(OUT)/invf-concurrency_test $(OUT)/invf-sweep_v3_test \
       $(OUT)/invf-sweep_collect_test \
+      $(OUT)/invf-fold_delta_read_test \
       $(OUT)/invf-btree_repair_test \
       $(OUT)/invf-symlink_v3_test $(OUT)/invf-large_file_v3_test $(OUT)/invf-dedupe_v3_test \
       $(OUT)/invf-read_parallel_bitexact_test \
@@ -671,6 +672,14 @@ test: $(OUT)/invf-arctest $(OUT)/invf-blkio_test $(OUT)/invf-codec_test \
 	$(TESTENV) $(TESTISO) $(OUT)/invf-delta_test
 	$(TESTENV) $(TESTISO) $(OUT)/invf-groupcommit_test /tmp
 	$(TESTENV) $(TESTISO) $(OUT)/invf-concurrency_test /tmp
+	@# WP-inode-get-fold-race: the fold frees the retired delta chain, and a
+	@# reader that had already resolved a ref was reading those blocks
+	@# afterwards. The interleave is PLANNED (a weak seam inside the value
+	@# read), not raced for: pre-fix the fold completes and the reader comes
+	@# back with ANOTHER inode's row; post-fix the fold cannot get past the
+	@# reader. It fails if the red control does not arm, so it cannot go
+	@# green by the allocator quietly changing.
+	$(TESTENV) $(TESTISO) $(OUT)/invf-fold_delta_read_test /tmp
 	$(TESTENV) $(TESTISO) $(OUT)/invf-sweep_v3_test /tmp
 	$(TESTENV) $(TESTISO) $(OUT)/invf-sweep_collect_test /tmp
 	$(TESTENV) $(TESTISO) $(OUT)/invf-btree_repair_test /tmp
