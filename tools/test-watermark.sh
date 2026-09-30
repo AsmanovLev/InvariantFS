@@ -20,11 +20,17 @@
 #          trigger is attributable to the watermark: the daemon's
 #          every-second pending drain would relieve mounted writes on
 #          its own; offline-staged files are invisible to it). The
-#          daemon sweeps with NO explicit invf-sweep call, captures a v3
-#          save point, and the RAW fill drops below the mark.
+#          daemon sweeps with NO explicit invf-sweep call and captures a
+#          v3 save point. The fill does NOT drop at this generation —
+#          the window it just armed is a hold on the pre-sweep
+#          generation's blocks — so leg 1 asserts the pin.
+#   Leg 1b: on its OWN image, the next bare sweep discharges that hold: a
+#          non-zero reclaim, RAW fill back under the mark, files still
+#          bit-exact. (A separate image on purpose: it leaves IMGA's
+#          rollback chain — legs 2 and 3 — exactly as it was.)
 #   Leg 2: an offline sweep with --no-realize keeps the live save point
 #          (the rollback window survives an unrelated maintenance run).
-#   Leg 3: rollback restores the save point — the swept file is
+#   Leg 3: rollback undoes the watermark sweep — the swept file is
 #          bit-exact and fsck is clean.
 #   Leg 4: fresh image, one watermark pass, rollback -> bit-exact,
 #          fsck clean.
@@ -47,10 +53,11 @@ WORK=/dev/shm/wp26watermark
 IMGA=wp26wm-a.img    # legs 1-3: trigger, offline maintenance, rollback
 IMGB=wp26wm-b.img    # leg 4: rollback undoes the watermark sweep
 IMGC=wp26wm-c.img    # leg 5: env fallback
+IMGD=wp26wm-d.img    # leg 1b: the pin's blocks come back on the next sweep
 MNT=$WORK/mnt
 rm -rf "$WORK" && mkdir -p "$WORK/mnt" "$WORK/ref" "$WORK/out"
 cd /dev/shm
-rm -f "$IMGA" "$IMGB" "$IMGC"
+rm -f "$IMGA" "$IMGB" "$IMGC" "$IMGD"
 
 fail() { echo "FAIL: $*" >&2; exit 1; }
 
@@ -117,12 +124,12 @@ import random, sys
 d = sys.argv[1]
 rnd = random.Random(26)
 vocab = [('w%05d' % i).encode() for i in range(12000)]
-for k in range(64):
+for k in range(80):
     with open('%s/fat%02d.txt' % (d, k), 'wb') as f:
         n = 0
         while n < 262144:
             w = rnd.choice(vocab); f.write(w); f.write(b' '); n += len(w) + 1
-print("  fixtures: 64 fat fillers (256KB each)")
+print("  fixtures: 80 fat fillers (256KB each)")
 PY
 
 # ---- geometry ----------------------------------------------------------
@@ -171,12 +178,69 @@ grep -q "\[watermark\] RAW fill .* over 25%: kicking a sweep pass" \
 grep -q "\[sweep\] DONE files=" "$WORK/fuse.a1.log" \
     || fail "watermark pass did not finish"
 echo "  pass 1: kicked by the daemon, save point captured (no invf-sweep ran)"
+# The pass armed a rollback window, and a window is a HOLD: a capture pins
+# every block the PRE-sweep generation's recipes named (spt0_pin_take ->
+# vol_v3_iter_inodes_at, src/core/vol_spt0.c:745) and only the NEXT
+# capture's reclaim pass gives them back (spn_reclaim,
+# src/core/vol_spt0.c:652, called from spt0_pin_take at :764 -- it frees
+# where the old mark set has a block, the new one does not, and the bitmap
+# still has it, :676). This leg used to assert the fill dropped below the
+# 25% mark after ONE pass, which can only hold on a volume that has lost
+# the window the pass just armed. Assert the pin instead: it is what makes
+# the flat fill explicable, and its absence is the real defect.
+PINNED=$(sed -n 's/.*save point: pinned \([0-9][0-9]*\) blocks.*/\1/p' \
+    "$WORK/fuse.a1.log" | head -1)
+[ -n "$PINNED" ] && [ "$PINNED" -gt 0 ] \
+    || fail "the watermark pass armed no data pin; a flat fill would then be a broken reclaim, not a live window"
 mnt_down "$IMGA"
 FILLNOW=$(raw_used "$IMGA")
-echo "  RAW fill after the daemon's pass: $FILLNOW/$RAWBLOCKS"
-[ "$FILLNOW" -lt "$T25" ] \
-    || fail "fill $FILLNOW did not drop below the 25% mark ($T25)"
+echo "  the window pinned $PINNED blocks; RAW fill $FILLNOW/$RAWBLOCKS (held by the pin)"
+[ "$FILLNOW" = "$LAZYFILL" ] \
+    || fail "RAW fill moved during the pass: $LAZYFILL -> $FILLNOW; the pin should be holding the pre-sweep generation"
 fsck_ok "$IMGA"
+
+echo
+echo "== [1b] the space comes back on the NEXT bare sweep (one-generation pin) =="
+# The reclamation leg 1 used to imply and never measured. A bare sweep
+# drops the previous window and captures a fresh one (invf-sweep.c:1687
+# then :1689), and that capture's spn_reclaim discharges the daemon pass's
+# debt. Asserted as a RECLAIM (a non-zero "[spt0] reclaim:" line) AND as
+# a FILL below the mark: "the log said it reclaimed" proved nothing once
+# already, which is why spn_free_counted (src/core/vol_spt0.c:639) counts
+# the blocks the bitmap changed rather than a run length.
+#
+# Its own image on purpose. Sweeping IMGA here would work, but it would
+# also leave IMGA's live window one generation further along, and legs 2
+# and 3 are about the window the DAEMON armed -- so keep that chain as it
+# was and measure the reclaim where it does not perturb anything.
+$B/invf-mkfs "$IMGD" 0.0625 >/dev/null
+FIRSTD=$(printf 'fat%02d.txt' "$FATN")
+fill_to "$IMGD" "$T45"
+mnt_up d1 "$IMGD" -- -o raw_watermark=25
+wait_log d1 "save point captured" 30
+wait_log d1 "\[sweep\] DONE files=" 60
+PINNED_D=$(sed -n 's/.*save point: pinned \([0-9][0-9]*\) blocks.*/\1/p' \
+    "$WORK/fuse.d1.log" | head -1)
+[ -n "$PINNED_D" ] && [ "$PINNED_D" -gt 0 ] \
+    || fail "the watermark pass on $IMGD armed no data pin"
+mnt_down "$IMGD"
+HELD=$(raw_used "$IMGD")
+echo "  the daemon's window pinned $PINNED_D blocks; RAW fill held at $HELD/$RAWBLOCKS"
+$B/invf-sweep "$IMGD" > "$WORK/sweep-d2.log" 2>&1 \
+    || { cat "$WORK/sweep-d2.log"; fail "the bare sweep after the watermark pass failed"; }
+RECLAIMED=$(sed -n 's/.*reclaim: \([0-9][0-9]*\) blocks.*/\1/p' \
+    "$WORK/sweep-d2.log" | head -1)
+[ -n "$RECLAIMED" ] && [ "$RECLAIMED" -gt 0 ] \
+    || fail "the bare sweep reclaimed nothing, so the watermark pass's window is a leak, not a one-generation pin"
+FILL2=$(raw_used "$IMGD")
+[ "$FILL2" -lt "$T25" ] \
+    || fail "sweep 2 reclaimed $RECLAIMED blocks but RAW fill is still $FILL2/$RAWBLOCKS, over the 25% mark ($T25)"
+echo "  sweep 2 reclaimed the $RECLAIMED blocks the window held; RAW fill $FILL2/$RAWBLOCKS"
+$B/invf-cat "$IMGD" "$FIRSTD" "$WORK/out/after2.bin" >/dev/null
+cmp "$WORK/ref/$FIRSTD" "$WORK/out/after2.bin" \
+    || fail "the reclaiming sweep cost bit-exactness on $FIRSTD"
+fsck_ok "$IMGD"
+echo "  reclaimed, and $FIRSTD is still bit-exact"
 
 echo
 echo "== [2] offline --no-realize keeps the live save point =="
@@ -227,6 +291,6 @@ $B/invf-rollback "$IMGC" >/dev/null 2>&1 || fail "env-armed rollback failed"
 fsck_ok "$IMGC"
 echo "  env fallback armed the same machinery; rollback + fsck clean"
 
-rm -f "$IMGA" "$IMGB" "$IMGC"
+rm -f "$IMGA" "$IMGB" "$IMGC" "$IMGD"
 echo
 echo "WATERMARK E2E: PASS"
