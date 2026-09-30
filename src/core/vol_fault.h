@@ -35,6 +35,7 @@
 
 #include <stdlib.h>
 #include <string.h>
+#include <stdint.h>
 
 /*
  * 1 if THIS call is the one the armed spec selected (and disarms it), else 0.
@@ -44,33 +45,50 @@
  * through the init below both compute the same values from the same environ;
  * there is nothing to tear.
  */
+/* Arming state at file scope, so invfs_vol_fault_reload() can reach it.
+ * Still exactly ONE copy per translation unit, which is the property that
+ * matters: two sites cannot share a countdown. */
+static const char *invfs_fault_seen;
+static char        invfs_fault_armed[32];
+static long        invfs_fault_countdown;
+
+/* Re-read the environment on the next call EVEN IF the string is unchanged.
+ *
+ * Without this a test arms a site, does its setup writes, then arms the same
+ * value again -- and because the spec is compared by POINTER, setting an
+ * identical string is not a change, so the countdown stays spent and the
+ * intended call never fires. That failure is invisible: the leg goes GREEN,
+ * which is how a red control ends up proving nothing.
+ */
+static inline void invfs_vol_fault_reload(void)
+{
+    invfs_fault_seen = (const char *)(intptr_t)-1;  /* never a getenv value */
+}
+
 static inline int invfs_vol_fault(const char *site)
 {
-    static const char *seen;      /* the spec string the state was built from */
-    static char armed[32];
-    static long countdown;
     const char *spec = getenv("INVFS_FAULT");
 
-    if (spec != seen) {
-        seen = spec;
-        armed[0] = 0;
-        countdown = 0;
+    if (spec != invfs_fault_seen) {
+        invfs_fault_seen = spec;
+        invfs_fault_armed[0] = 0;
+        invfs_fault_countdown = 0;
         if (spec && *spec) {
             const char *colon = strchr(spec, ':');
-            if (colon && (size_t)(colon - spec) < sizeof armed) {
-                memcpy(armed, spec, (size_t)(colon - spec));
-                armed[colon - spec] = 0;
-                countdown = strtol(colon + 1, NULL, 10);
-                if (countdown < 1)
-                    countdown = 0;
+            if (colon && (size_t)(colon - spec) < sizeof invfs_fault_armed) {
+                memcpy(invfs_fault_armed, spec, (size_t)(colon - spec));
+                invfs_fault_armed[colon - spec] = 0;
+                invfs_fault_countdown = strtol(colon + 1, NULL, 10);
+                if (invfs_fault_countdown < 1)
+                    invfs_fault_countdown = 0;
             }
         }
     }
-    if (!countdown || strcmp(armed, site) != 0)
+    if (!invfs_fault_countdown || strcmp(invfs_fault_armed, site) != 0)
         return 0;
-    if (--countdown > 0)
+    if (--invfs_fault_countdown > 0)
         return 0;
-    countdown = 0;                /* one shot */
+    invfs_fault_countdown = 0;         /* one shot */
     return 1;
 }
 

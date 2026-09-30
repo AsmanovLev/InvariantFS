@@ -61,6 +61,7 @@
  */
 
 #include "volume_internal.h"
+#include "vol_fault.h"
 #include "vol_btree.h"
 #include "vol_metabuf.h"
 #include "vol_delta.h"
@@ -3724,6 +3725,8 @@ int vol_v3_inode_delete(invfs_volume *v, uint64_t inode_id)
 int vol_v3_inode_delta_put(invfs_volume *v, uint64_t inode_id,
                            const invfs_v3_inode *in)
 {
+    if (invfs_vol_fault("v3_inode_delta_put"))
+        return -1;   /* test hook: pretend the delta append failed */
     uint8_t kb[8];
     uint8_t vb[INVFS_V3_INODE_ROW_FIXED];
     uint16_t vl;
@@ -3851,6 +3854,8 @@ static void v3_blake3(const uint8_t *buf, size_t len,
 int vol_v3_recipe_store(invfs_volume *v, const uint8_t *blob, size_t blen,
                         uint8_t addr_out[INVFS_V3_RECIPE_ADDR_LEN])
 {
+    if (invfs_vol_fault("v3_recipe_store"))
+        return -1;   /* test hook: pretend the base-tree publish failed */
     uint8_t kb[V3_RECIPE_KEY_LEN], addr[INVFS_V3_RECIPE_ADDR_LEN];
     invfs_blkptr root, nr;
     bt_val val;
