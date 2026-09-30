@@ -847,7 +847,6 @@ int vol_records_walk_ex(invfs_volume *v,
                         void *ctx,
                         void (*bad_cb)(void *ctx, uint64_t rec_pos));
 
-#endif
 uint64_t vol_count_free(invfs_volume *v);
 /* per-REGION free counters (maintained incrementally by alloc/free):
  * 0 ok, -1 no volume. WP-DZ: the regions are the advisory zone extents,
@@ -1185,3 +1184,5 @@ int  vol_tier_migrate(invfs_volume *v);
 
 /* WP-M21: extent shrink/merge run retired. The mapper is pre-allocated at
  * mkfs; fold (vol_v3_fold) is the reclaim path. */
+
+#endif /* VOL_INTERNALS_H */
