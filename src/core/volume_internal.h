@@ -190,51 +190,14 @@ int  vmux_barrier(struct invfs_volume *v, const char *what);
 
 
 /* ---- volume ---- */
-/* In-memory name index. vol_find/vol_is_dir/vol_list_dir used to re-read the
-   whole inode area from disk on every lookup, and since callers do many
-   lookups per operation the mount scaled quadratically (measured on Dokan:
-   1.9 ms/file at 100 files, 5 ms at 200, 10 ms at 400). vol_open already
-   walks every record to verify CRCs, so building this costs no extra I/O.
-
-   name_index maps name -> inode id. dir_index maps a directory prefix
-   ("a/", "a/b/") to the number of live records under it, which is what
-   makes vol_is_dir O(1) without a prefix scan: a directory exists exactly
-   when its count is nonzero (its own anchor record counts too). */
-typedef struct name_index_entry {
-    struct name_index_entry *next;
-    uint64_t inode_id;
-    uint64_t pos;          /* byte offset of the record in the inode area */
-    /* Cached from the record header. A directory listing needs the size and
-       time of every entry; reading them back per entry cost one seek+read
-       each, which is 1600 disk reads for a 1600-file directory -- and Windows
-       enumerates the directory after every single create. */
-    uint64_t size;
-    uint64_t ctime;
-    uint32_t nlen;
-    char name[1];          /* NUL-terminated, allocated to fit */
-} name_index_entry;
-
-
-/* inode_id -> record offset. Never pruned on tombstone: the record stays on
-   disk and vol_read_inode is expected to still find it, exactly as the old
-   scan did. `live` counts the LIVE name-index entries pointing at this id:
-   the rename fast path (hardlink + unlink) deliberately shares one id
-   between two records, and a retire must not drop maps a surviving record
-   still resolves through (WP22c/F2). */
-typedef struct id_index_entry {
-    struct id_index_entry *next;
-    uint64_t id;
-    uint64_t pos;
-    uint32_t live;         /* live name entries referencing this id */
-} id_index_entry;
-
-
-typedef struct dir_index_entry {
-    struct dir_index_entry *next;
-    uint64_t count;        /* live records under this prefix */
-    uint32_t nlen;
-    char name[1];          /* prefix including the trailing '/' */
-} dir_index_entry;
+/* The in-memory name/dir/id indexes are GONE. They existed to answer a
+   name lookup without re-reading the append-only inode area on every call
+   (the quadratic-mount problem they were built for). That area is gone, and
+   with it the indexes: names resolve through the dirent B+-tree
+   (vol_v3_path_lookup and friends), a directory's liveness through the
+   dirents themselves, and an inode's segments through its recipe blob.
+   WP-M21 had already reduced the whole set to no-op stubs; these are the
+   declarations that kept the call sites compiling. */
 
 /* WP27: per-file heat session state. The durable home is the record's
  * "invfs.heat" xattr TLV (see invarifs.h); in RAM, read touches accrue
@@ -391,13 +354,6 @@ typedef struct invfs_volume {
      * generation the volume has retired, and its segments are in no live
      * recipe: it must be refused, not re-anchored. */
     uint64_t write_gen;
-    /* in-memory name index */
-    name_index_entry **nbuck;
-    size_t nmask, ncount;
-    dir_index_entry **dbuck;
-    size_t dmask, dcount;
-    id_index_entry **ibuck;
-    size_t imask, icount;
     /* Reconstructed-content cache. A transcoded file has no decodable
        segments -- only a blob plus a sibling recipe -- so serving a 64 KB
        ranged read means rebuilding the whole file. See arc.h. */
@@ -888,10 +844,10 @@ static inline struct invfs_volume *v_of_blk(const blkio *io)
    sizeof(name) - 1. For a longer path that stored a length which did not
    match the bytes stored after it, and readers trust name_len -- the index
    build, fsck and ls all copy that many bytes out of the field, so they read
-   a name running past its end and into the AST recipe behind it. rename_one
-   was the only path that checked. Names are validated on the way in now, so
-   an over-long one is refused rather than silently truncated to a record
-   that no longer describes the file it points at.
+   a name running past its end and into the AST recipe behind it. The v2
+   rename path was the only one that checked. Names are validated on the way
+   in now, so an over-long one is refused rather than silently truncated to a
+   record that no longer describes the file it points at.
 
    INVFS_MAX_NAME is declared in volume.h so name-building callers can check
    before they start; this asserts it still matches the field it describes. */
@@ -1213,56 +1169,6 @@ static inline int invfs_inode_is_anchored(invfs_volume *v, uint64_t inode_id)
     return vol_get_xattr(v, inode_id, INVFS_XATTR_ANCHOR,
                          &val, &vlen) == 0 && vlen >= 1;
 }
-
-/* ---- name index ---------------------------------------------------- */
-
-uint64_t idx_hash(const char *s, size_t n);
-
-/* Remember where inode `id` lives. The last record for an id wins, matching
-   the old scan, which kept walking and overwrote rec_pos on every hit. */
-void idx_put_id(invfs_volume *v, uint64_t id, uint64_t pos);
-
-/* 0 = unknown; callers fall back to a scan */
-uint64_t idx_get_id(invfs_volume *v, uint64_t id);
-
-/* WP48: reconcile the id->position index with the authoritative name index
- * in one O(N) pass (name entries carry the live record position). Called
- * once per volume after a stale id hint is detected; idempotent. */
-void idx_repair_ids_from_names(invfs_volume *v);
-
-/* live name-index entries currently pointing at this id (the rename fast
-   path shares one id between two names; the retire path reads this to keep
-   a survivor's mappings) */
-uint32_t idx_id_live(const invfs_volume *v, uint64_t id);
-
-/* add `delta` to the live count of every directory prefix of `name`:
-   "a/b/c.txt" bumps "a/" and "a/b/"; the anchor "a/" bumps "a/" itself,
-   which is what keeps an empty directory visible */
-void idx_bump_dirs(invfs_volume *v, const char *name, size_t nlen,
-                          int delta);
-
-/* record `name` as live under `id`. Replacing an existing name keeps the
-   directory counts untouched -- it is still one live name. */
-void idx_put(invfs_volume *v, const char *name, size_t nlen,
-                    uint64_t id, uint64_t pos, uint64_t size, uint64_t ctime);
-
-/* A tombstone kills only ITS version of the name: the sweep appends the
-   replacement record BEFORE the tombstone for the old inode, so a blind
-   delete-by-name would drop the newer file. Mirrors the old vol_find scan. */
-void idx_del(invfs_volume *v, const char *name, size_t nlen,
-                    uint64_t id);
-
-/* v2 position kill: remove the entry whose record lives exactly at `pos`,
- * whatever its id. Same-id metadata rewrites chain versions under one name,
- * so a plain id match would kill the NEWEST version instead of the one the
- * tombstone names. Falls back to nothing -- callers keep the id path for
- * legacy (file_size==0) tombstones. */
-void idx_del_at(invfs_volume *v, const char *name, size_t nlen,
-                       uint64_t pos);
-const name_index_entry *idx_get(invfs_volume *v, const char *name,
-                                       size_t nlen);
-uint64_t idx_dir_count(invfs_volume *v, const char *pre, size_t plen);
-int idx_dir_live(invfs_volume *v, const char *pre, size_t plen);
 
 /* Persist (rd != NULL) or clear (rd == NULL) the RDP0 descriptor by
  * read-modify-write of the whole block 0. vol_write_sb only ever writes

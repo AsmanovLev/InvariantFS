@@ -8,13 +8,15 @@
  *   - stale L2P       (journal out of sync with the inode area)
  *   - bad inode records (CRC/length)
  *
- * Usage: invf-fsck <image> [-f|--fix] [--repair] [-q]
- *   default: read-only report; -f applies fixes (rewrites bitmap,
- *   journal and superblock state=CLEAN).
- *   --repair: WP20b layer-2 RS recovery -- after the structural scan,
- *   reconstruct CRC-failed shadow segments from the RS(32+m2, 32) parity
- *   (vol_seal2_repair). Stripes damaged beyond m2 are reported and left
- *   untouched.
+ * Usage: invf-fsck <image> [-f|--fix] [-q] [--discard-reachable]
+ *   default: read-only report; -f applies fixes (rewrites the bitmap and
+ *   the superblock state=CLEAN).
+ *
+ *   --repair (WP20b layer-2 RS recovery) is RETIRED: it reconstructed
+ *   CRC-failed shadow segments from RS(32+m2, 32) parity using a stripe
+ *   map read out of the format-v2 owner records, and it is passed
+ *   explicitly rather than silently ignored so an operator who asks for
+ *   it is told.
  */
 #include <stdio.h>
 #include <stdlib.h>
@@ -31,15 +33,13 @@ int main(int argc, char **argv)
     int err = 0;
     invfs_volume *v;
     invfs_fsck_report rep;
-    invfs_seal2_repair r2;
     int issues;
 
     memset(&rep, 0, sizeof rep);
-    memset(&r2, 0, sizeof r2);
     for (i = 1; i < argc; i++) {
         if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) {
             fprintf(stderr,
-                "usage: invf-fsck <image> [-f|--fix] [--repair] [-q]\n"
+                "usage: invf-fsck <image> [-f|--fix] [-q]\n"
                 "                [--discard-reachable]\n"
                 "  --discard-reachable  with -f: excise a quarantined key\n"
                 "      range even when a live inode still needs a key inside\n"
@@ -415,29 +415,23 @@ int main(int argc, char **argv)
         return 1;
     }
 
-    /* WP20b: layer-2 RS recovery runs after the structural scan, so the
-     * bitmap/L2P the repair trusts are the just-verified ones. */
+    /* WP20b: layer-2 RS recovery read its stripe map out of the v2 owner
+     * records and resolved each member through the L2P journal. Both are
+     * gone with format v2, so on this format the pass had nothing to scan:
+     * it reported zero stripes of every kind and said nothing. Say so
+     * instead of accepting the flag and reporting nothing. */
     if (repair) {
-        if (vol_seal2_repair(v, &r2) != 0) {
-            fprintf(stderr, "invf-fsck: seal2 repair pass failed\n");
-            vol_close(v);
-            return 1;
-        }
-        if (!quiet && (r2.stripes_scanned || r2.stripes_repaired ||
-                       r2.unrecoverable))
-            printf("  seal2 repair: %llu damaged stripes, %llu repaired "
-                   "(%llu blocks rewritten), %llu unrecoverable "
-                   "(%llu hypotheses)\n",
-                   (unsigned long long)r2.stripes_scanned,
-                   (unsigned long long)r2.stripes_repaired,
-                   (unsigned long long)r2.blocks_rewritten,
-                   (unsigned long long)r2.unrecoverable,
-                   (unsigned long long)r2.hypotheses);
+        fprintf(stderr, "invf-fsck: %s: --repair (WP20b layer-2 RS "
+                "recovery) is retired with format v2 -- it read its stripe "
+                "map from the v2 owner records. This build has no "
+                "replacement for it.\n", img);
+        vol_close(v);
+        return 1;
     }
 
     issues = (rep.orphans || rep.missing || rep.bad_recs || rep.l2p_miss ||
               rep.cut_records || rep.lost_files || rep.corrupt_files ||
-              r2.unrecoverable);
+              0);
     if (!quiet) {
         const invfs_superblock *sb = vol_sb(v);
         printf("InvariantFS fsck: %s\n", img);
@@ -478,8 +472,7 @@ int main(int argc, char **argv)
                        "invf-rollback; accept: invf-sweep --realize)\n",
                        (unsigned long long)ck.sweep_seq);
         }
-        printf("%s\n", issues ? (fix || r2.stripes_repaired
-                                 ? "REPAIRED" : "ISSUES FOUND")
+        printf("%s\n", issues ? (fix ? "REPAIRED" : "ISSUES FOUND")
                               : "OK");
     }
 

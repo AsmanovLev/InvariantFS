@@ -147,13 +147,7 @@ static fs_entry *g_entries;
 static int g_nentries, g_cap;
 
 /* sort helpers */
-static int cmp_entry_pos(const void *pa, const void *pb)
-{
-    const fs_entry *a = (const fs_entry *)pa, *b = (const fs_entry *)pb;
-    if (a->pos < b->pos) return -1;
-    if (a->pos > b->pos) return 1;
-    return 0;
-}
+
 
 static int cmp_entry_name_pos(const void *pa, const void *pb)
 {
@@ -170,13 +164,7 @@ static int cmp_entry_key(const void *key, const void *element)
     return strcmp((const char *)key, ((const fs_entry *)element)->name);
 }
 
-static int cmp_u64(const void *pa, const void *pb)
-{
-    const uint64_t *a = (const uint64_t *)pa, *b = (const uint64_t *)pb;
-    if (*a < *b) return -1;
-    if (*a > *b) return 1;
-    return 0;
-}
+
 
 /* WP49: pass-1 collector fed by the bounded, index-ordered
  * vol_records_walk (a position-driven vol_inode_next loop can cycle when
@@ -189,44 +177,7 @@ typedef struct {
     int oom;
 } bft_ctx;
 
-static int bft_cb(void *ctx_, uint64_t rec_pos,
-                  const invfs_inode_rec *h, const uint8_t *rec)
-{
-    bft_ctx *c = (bft_ctx *)ctx_;
-    (void)rec;
-    if (h->magic == TOMBSTONE_MAGIC) {   /* DELT */
-        if (c->ntomb == c->captomb) {
-            uint64_t nc = c->captomb ? c->captomb * 2 : 64;
-            uint64_t *tp = (uint64_t *)realloc(c->tpos, nc * sizeof(uint64_t));
-            uint64_t *ti = (uint64_t *)realloc(c->tid, nc * sizeof(uint64_t));
-            if (!tp || !ti) { c->oom = 1; if (tp) c->tpos = tp; if (ti) c->tid = ti; return 1; }
-            c->tpos = tp; c->tid = ti; c->captomb = nc;
-        }
-        /* v2 kills by position (file_size); legacy by inode id (0) */
-        c->tpos[c->ntomb] = h->file_size;
-        c->tid[c->ntomb] = h->inode_id;
-        c->ntomb++;
-        return 0;
-    }
-    if (c->nrecs == c->caprecs) {
-        uint64_t nc = c->caprecs ? c->caprecs * 2 : 1024;
-        fs_entry *nr = (fs_entry *)realloc(c->recs, nc * sizeof(fs_entry));
-        if (!nr) { c->oom = 1; return 1; }
-        c->recs = nr; c->caprecs = nc;
-    }
-    memset(&c->recs[c->nrecs], 0, sizeof(fs_entry));
-    {
-        size_t nl = h->name_len < 255 ? h->name_len : 255;
-        memcpy(c->recs[c->nrecs].name, h->name, nl);
-        c->recs[c->nrecs].name[nl] = 0;
-    }
-    c->recs[c->nrecs].inode_id = h->inode_id;
-    c->recs[c->nrecs].size = h->file_size;
-    c->recs[c->nrecs].ctime = h->ctime;
-    c->recs[c->nrecs].pos = rec_pos;
-    c->nrecs++;
-    return 0;
-}
+
 
 /* WP-M6: a v3 volume has no v2 record stream, so the table is built from
  * the dirent tree via vol_v3_walk. Files land under their path; directories
@@ -284,116 +235,9 @@ static void build_file_table_v3(void)
 
 static void build_file_table(void)
 {
-    const invfs_superblock *sb = vol_sb(g_vol);
-    (void)sb;
-    bft_ctx c;
-    fs_entry *recs = NULL;
-
-    if (sb->vol_flags & VOLF_V3) {
-        build_file_table_v3();
-        return;
-    }
-    uint64_t nrecs = 0, caprecs = 0;
-    /* tombstone kill list: (position-or-0, inode-id) pairs */
-    uint64_t *tpos = NULL, *tid = NULL;
-    uint64_t ntomb = 0;
-
-    g_entries = NULL; g_nentries = 0; g_cap = 0;
-
-    /* pass 1: collect raw records. vol_records_walk is mapper-aware
-     * (dynamic extents via the mapper) and bounded for legacy volumes. */
-    memset(&c, 0, sizeof c);
-    if (vol_records_walk(g_vol, bft_cb, &c) != 0 && !c.oom) {
-        /* walk error: fall through with whatever was collected */
-    }
-    recs = c.recs; nrecs = c.nrecs; caprecs = c.caprecs;
-    tpos = c.tpos; tid = c.tid; ntomb = c.ntomb;
-
-    /* pass 2: apply tombstones (records sorted by pos for bsearch) */
-    qsort(recs, (size_t)nrecs, sizeof(fs_entry), cmp_entry_pos);
-
-    /* Build hash set for legacy tombstones (inode-id kill) to avoid O(T×N) scan */
-    uint64_t *legacy_kill_ids = NULL;
-    uint64_t nlegacy = 0, caplegacy = 0;
-    for (uint64_t t = 0; t < ntomb; t++) {
-        if (tpos[t] == 0) {
-            if (nlegacy == caplegacy) {
-                caplegacy = caplegacy ? caplegacy * 2 : 256;
-                legacy_kill_ids = (uint64_t *)realloc(legacy_kill_ids, caplegacy * sizeof(uint64_t));
-                if (!legacy_kill_ids) goto done;
-            }
-            legacy_kill_ids[nlegacy++] = tid[t];
-        }
-    }
-
-    /* Sort legacy kill ids for faster lookup */
-    qsort(legacy_kill_ids, (size_t)nlegacy, sizeof(uint64_t), cmp_u64);
-
-    for (uint64_t t = 0; t < ntomb; t++) {
-        if (tpos[t] != 0) {
-            /* v2 position kill: exact record offset */
-            uint64_t lo = 0, hi = nrecs;
-            while (lo < hi) {
-                uint64_t mid = (lo + hi) / 2;
-                if (recs[mid].pos < tpos[t]) lo = mid + 1;
-                else hi = mid;
-            }
-            if (lo < nrecs && recs[lo].pos == tpos[t]) recs[lo].inode_id = UINT64_MAX; /* dead */
-        }
-        /* Legacy kill now handled in pass 3 via hash set */
-    }
-
-    /* pass 3: drop dead, then last-write-wins per name.
-     * Also apply legacy kills using the sorted id array (binary search). */
-    {
-        uint64_t w = 0, r;
-        for (r = 0; r < nrecs; r++) {
-            int dead = 0;
-            if (recs[r].inode_id == UINT64_MAX) {
-                dead = 1;
-            } else if (nlegacy > 0) {
-                /* Binary search in legacy_kill_ids */
-                uint64_t lo = 0, hi = nlegacy;
-                while (lo < hi) {
-                    uint64_t mid = (lo + hi) / 2;
-                    if (legacy_kill_ids[mid] < recs[r].inode_id) lo = mid + 1;
-                    else hi = mid;
-                }
-                if (lo < nlegacy && legacy_kill_ids[lo] == recs[r].inode_id) dead = 1;
-            }
-            if (!dead) recs[w++] = recs[r];
-        }
-        nrecs = w;
-    }
-    free(legacy_kill_ids); legacy_kill_ids = NULL;
-
-    /* pass 3: drop dead, then last-write-wins per name */
-    {
-        uint64_t w = 0, r;
-        for (r = 0; r < nrecs; r++)
-            if (recs[r].inode_id != UINT64_MAX) recs[w++] = recs[r];
-        nrecs = w;
-    }
-    qsort(recs, (size_t)nrecs, sizeof(fs_entry), cmp_entry_name_pos);
-    {
-        uint64_t w = 0, r;
-        for (r = 0; r < nrecs; r++) {
-            if (w > 0 && strcmp(recs[w - 1].name, recs[r].name) == 0)
-                recs[w - 1] = recs[r];      /* newer pos wins */
-            else
-                recs[w++] = recs[r];
-        }
-        nrecs = w;
-    }
-
-    g_entries = recs;
-    g_cap = (int)caprecs;
-    g_nentries = (nrecs > 0x7fffffff) ? 0x7fffffff : (int)nrecs;
-    free(tpos); free(tid);
-    return;
-done:
-    free(recs); free(tpos); free(tid);
+    build_file_table_v3();
 }
+
 
 static fs_entry *find_entry(const char *name)
 {

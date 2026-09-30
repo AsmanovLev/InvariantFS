@@ -35,67 +35,6 @@ int invfs_sweep_ui_active(void)
 }
 
 
-/* ---- name index ---------------------------------------------------- */
-
-uint64_t idx_hash(const char *s, size_t n)
-{
-    uint64_t h = 1469598103934665603ULL;   /* FNV-1a 64 */
-    size_t i;
-    for (i = 0; i < n; i++) {
-        h ^= (uint8_t)s[i];
-        h *= 1099511628211ULL;
-    }
-    return h;
-}
-
-
-/* ---- WP-M21: in-memory name index (nbuck/dbuck/ibuck) retired -------
- * The mount-scan O(N) index that the v2 write path used to maintain for
- * path lookups is gone: v3 resolves names through the dirent btree
- * (vol_v3_path_*) and the data plane short-circuits on VOLF_V3. The
- * legacy read-only path (format_version=0) gets a stub here that
- * returns "not found" for every lookup -- the volume opens read-only on
- * legacy, and the index being absent simply means no path resolves
- * (fsck sees the records directly via vol_records_walk). The data
- * plane still calls these functions (write-side maintenance); they
- * become no-ops on every path. */
-
-void idx_put_id(invfs_volume *v, uint64_t id, uint64_t pos)
-{ (void)v; (void)id; (void)pos; }
-
-uint64_t idx_get_id(invfs_volume *v, uint64_t id)
-{ (void)v; (void)id; return 0; }
-
-void idx_repair_ids_from_names(invfs_volume *v)
-{ (void)v; }
-
-uint32_t idx_id_live(const invfs_volume *v, uint64_t id)
-{ (void)v; (void)id; return 0; }
-
-void idx_bump_dirs(invfs_volume *v, const char *name, size_t nlen, int delta)
-{ (void)v; (void)name; (void)nlen; (void)delta; }
-
-void idx_put(invfs_volume *v, const char *name, size_t nlen,
-             uint64_t id, uint64_t pos, uint64_t size, uint64_t ctime)
-{ (void)v; (void)name; (void)nlen; (void)id; (void)pos; (void)size; (void)ctime; }
-
-void idx_del(invfs_volume *v, const char *name, size_t nlen, uint64_t id)
-{ (void)v; (void)name; (void)nlen; (void)id; }
-
-void idx_del_at(invfs_volume *v, const char *name, size_t nlen, uint64_t pos)
-{ (void)v; (void)name; (void)nlen; (void)pos; }
-
-const name_index_entry *idx_get(invfs_volume *v, const char *name, size_t nlen)
-{ (void)v; (void)name; (void)nlen; return NULL; }
-
-uint64_t idx_dir_count(invfs_volume *v, const char *pre, size_t plen)
-{ (void)v; (void)pre; (void)plen; return 0; }
-
-int idx_dir_live(invfs_volume *v, const char *pre, size_t plen)
-{ (void)v; (void)pre; (void)plen; return 0; }
-
-
-
 /* vol_bm_dirty() (volume_internal.h) widens the dirty byte range so
  * vol_flush writes just that slice instead of the whole bitmap. */
 
@@ -1036,10 +975,17 @@ static int wp25_open_degraded(invfs_volume *v)
         invfs_crc32c(&v->sb, offsetof(invfs_superblock, checksum)) !=
             v->sb.checksum)
         goto bad;
-    if (!(v->sb.vol_flags & VOLF_ASTV2)) {
-        fprintf(stderr, "vol_open: %s: format v1 volume (no VOLF_ASTV2): "
-                "this build reads format v2 only. Convert it offline "
-                "first: invf-migrate-v2 <dev0>\n", d1);
+    /* The degraded leg is the same format gate as the primary one in
+     * vol_open: the mirror's superblock decides the format, and this build
+     * reads v3 only. It says so without naming a conversion tool -- there is
+     * none (invf-migrate-v2 was v1 -> v2 and no longer exists). */
+    if (!(v->sb.vol_flags & VOLF_V3)) {
+        fprintf(stderr, "vol_open: %s: %s volume: this build reads format v3 "
+                "only (INVFS_VERSION=%s); format %s is retired and its reader "
+                "has been removed. No in-tree conversion path exists.\n",
+                d1, (v->sb.vol_flags & VOLF_ASTV2) ? "format v2" : "format v1",
+                INVFS_VERSION_STRING,
+                (v->sb.vol_flags & VOLF_ASTV2) ? "v2" : "v1");
         goto bad;
     }
     memcpy(&d2, blk + INVFS_DEVT_OFF, sizeof d2);
@@ -1195,19 +1141,38 @@ static invfs_volume *vol_open_inner(const char *path, int at_ckpt,
      * a v3 volume carries no invfs_inode_rec stream / owner WAL. */
     is_v3 = (v->sb.vol_flags & VOLF_V3) != 0;
 
-    /* WP27: format v2 reads v2 only. A volume without VOLF_ASTV2 is format
-     * v1: its records' AST entries are 24B and carry no physical addresses
-     * (they live in the v1 L2P journal). There are deliberately NO dual
-     * readers -- convert the volume offline instead. */
-    if (!is_v3 && !(v->sb.vol_flags & VOLF_ASTV2)) {
+    /* Format v3 only. VOLF_V3 is the authoritative marker; a volume without
+     * it is a pre-v0.5 artifact and this build carries no reader for it.
+     *
+     * The v2 branches this used to fall through to are DELETED, not disabled
+     * (WP drop-v2-branches). They were already inert: WP-M21 retired the v2
+     * name index and left idx_get()/idx_dir_live()/idx_id_live() as no-ops
+     * returning NULL/0, so a v2 volume that opened could not resolve a single
+     * name, could not list a directory, and told vol_retire_inode that the
+     * last live record of an id was unshared -- while still accepting writes
+     * nothing could read back. Refusing here is what makes the deletion safe.
+     *
+     * Neither refusal names a conversion tool, because there is none to name.
+     * invf-migrate-v2 (v1 -> v2) was removed with the rest of the v2
+     * machinery in 6b9a593, and no v1/v2 -> v3 converter has ever existed:
+     * invf-mkfs has refused to CREATE a v2 volume since v0.5.0, so there has
+     * never been an in-tree path from an old volume to a current one. The
+     * operator's only route is to re-create the volume with invf-mkfs and
+     * re-import from a copy of the data, or to restore from a backup. */
+    if (!is_v3) {
+        const int is_v1 = !(v->sb.vol_flags & VOLF_ASTV2);
         fprintf(stderr,
-                "vol_open: %s: format v1 volume (no VOLF_ASTV2): this build "
-                "reads format v2 (INVFS_VERSION=%u) only.\n"
-                "  Convert it offline first:  invf-migrate-v2 %s\n"
-                "  (invf-migrate-v2 rewrites the records with resolved "
-                "addresses, in place, crash-safe; run it on an unmounted, "
-                "cleanly-closed volume)\n",
-                real, INVFS_VERSION, real);
+                "vol_open: %s: %s volume: this build reads format v3 only "
+                "(INVFS_VERSION=%s); format %s is retired and its reader has "
+                "been removed.\n"
+                "  There is no conversion tool: invf-migrate-v2 (format v1 -> "
+                "v2) was removed with the format itself, and no v1/v2 -> v3 "
+                "path exists in-tree.\n"
+                "  To keep the data: create a new volume with invf-mkfs and "
+                "re-import from a copy of the source tree, or restore from a "
+                "backup.\n",
+                real, is_v1 ? "format v1" : "format v2", INVFS_VERSION_STRING,
+                is_v1 ? "v1" : "v2");
         *err = -12;
         goto fail;
     }
@@ -1505,11 +1470,11 @@ static invfs_volume *vol_open_inner(const char *path, int at_ckpt,
         }
     }
 
-    /* replay the owner-WAL journal BEFORE the inode scan. WP27: file
-     * records carry their own pbas and need no mapping; the WAL resolves
-     * only the owner-referenced shapes (batches / seal parity / retention
-     * ranges / device sidecars). WP24-lite: a time-travel open replays the
-     * checkpoint's STAGED prefix instead (read-only, from memory). */
+    /* WP24-lite: a time-travel open replays the checkpoint's STAGED prefix
+     * (read-only, from memory) instead of the present. The ordinary open has
+     * no journal to replay: the v2 L2P owner-WAL was resolved here and its
+     * replay is gone, so the format gate above is the only thing standing
+     * between a pre-v0.5 volume and a reader that would misread it. */
     if (at_ckpt) {
         int rrc = ckp_stage_replay(v);
         if (rrc != 0) {
@@ -1518,283 +1483,62 @@ static invfs_volume *vol_open_inner(const char *path, int at_ckpt,
                     real, (unsigned long long)v->ck.sweep_seq);
             *err = -11; goto fail;
         }
-    } else if (!is_v3 && l2p_replay(v) != 0) { *err = -9; goto fail; }
-
-    /* scan existing inode records: find end of area + max inode id + name index.
-     * WP30: on a mapper volume the records span ALL extents, not just the active
-     * one. The active extent's end is where NEW writes go (the CRC-validated
-     * tail), but the scan must walk earlier extents in full. We split the walk
-     * into per-extent segments with the active extent trimmed at inode_area_pos. */
-    if (is_v3) {
-        /* WP-M1: a v3 volume has no v2 record stream. Present an empty
-         * namespace: idx_init gives lookup/readdir their (empty) tables
-         * and next_inode_id starts at 1 below. The RT30 descriptor is
-         * validated for the round-trip.
-         *
-         * WP-M5: bring the metadata-v3 base-tree engine up. The root lives
-         * in RT30 and the allocator + dirty-bitmap flush are owned by
-         * vol_metabuf/vol_btree; the inode API (vol_v3_inode_*) writes the
-         * base tree directly (no delta yet). The v2 write engine still does
-         * not apply to a v3 namespace, so refuse its mutations: keep
-         * needs_recovery = 1 (the engine-level backstop vol_write_enabled /
-         * vol_mark_dirty consult). VOLF_READONLY is cleared *only* so the
-         * shared metadata allocator (alloc_blocks) can hand out base pages;
-         * the inode path persists the dirty bitmap before it publishes a
-         * root, the superblock is never rewritten, so the on-disk READONLY
-         * state is untouched. */
-        /* WP-M21: idx_init retired (the in-memory name index is gone;
-         * v3 resolves names through the dirent btree). */
-        /* ANC0 tail anchor, probed ONCE here and before anything reads
-         * block 0's descriptors. The probe is what decides whether the tail
-         * block is this volume's anchor at all: on a volume made before the
-         * anchor existed its last block is an ordinary data block, and from
-         * here on every refresh of the mirror is gated on the answer, so
-         * that block is never written. A refusal (a valid anchor belonging
-         * to some other geometry) leaves v->anchor_state as a refusal, which
-         * is deliberately NOT the same answer as "absent" -- see
-         * vol_anchor.c. Only a v3 volume probes: a v2 volume has no RT30 or
-         * SPT0 to mirror and its tail is never touched. */
-        anchor_probe(v, NULL);
-        if (mbuf_rt30_load(v) < 0) { *err = -6; goto fail; }
-        v3_probe_rt30(v);
-        mbuf_init(v);
-        /* WP-M5: skip the WP-M2 bootstrap pool (see v3_ready in
-         * vol_btree.c) -- its cursor resets every open, so reusing it would
-         * let a COW write clobber a live page from a previous session. */
-        v->mb_boot_cursor = v->mb_boot_end;
-        v->v3_mbuf_ready = 1;
-        v->needs_recovery = 1;
-        /* WP-M19: a degraded v3 mount (dev0 absent) serves only from the
-         * dev1 metadata mirror; keep it READ-ONLY, exactly like the v2
-         * degraded leg. A full two-device v3 mount needs the READONLY bit
-         * clear so the shared metadata allocator can hand out base pages. */
-        if (v->degraded)
-            v->sb.vol_flags |= VOLF_READONLY;
-        else
-            v->sb.vol_flags &= ~(VOLF_READONLY | VOLF_RO_SPACE);
-        /* WP-M10: replay the append-only delta chain named by RT30 into the
-         * in-memory index (D1). Overlay reads are WP-M11 and fold is WP-M14;
-         * this only reconstructs the recent tier so a crash/remount keeps
-         * it. A torn tail is truncated inside vol_delta_mount. */
-        if (vol_delta_mount(v) != 0) { *err = -6; goto fail; }
-        /* WP-M16: load the save-point descriptor if one exists. */
-        if (spt0_load(v) < 0) { *err = -6; goto fail; }
-        if (!invfs_sweep_ui_active())
-            fprintf(stderr, "vol_open: %s: format v3 (metadata-v3 inode tree): "
-                    "base root engine up, v2 paths refused\n", real);
-    } else
-    {
-        uint64_t p = v->inode_area_pos;
-        const uint64_t scan_end_at_ckpt = at_ckpt ? v->ck.inode_area_pos : 0;
-        uint64_t found = 0;
-        scan_set ss = { NULL, 0, 0 };
-        size_t si;
-        int done = 0;
-
-        /* extent sequence to walk: when a mapper exists, every extent 0..N-1
-         * with the active extent's end trimmed at inode_area_pos; otherwise
-         * the legacy contiguous region from inode_area_start..inode_area_end. */
-        size_t scan_ext_idx = 0;
-        uint64_t scan_ext_end = 0;
-        if (v->met0_present && v->meta_mapper && v->met0.extent_count > 0) {
-            uint64_t e0 = meta_mapper_get(v, 0);
-            if (e0) {
-                uint64_t pba0 = invfs_meta_ext_pba(e0);
-                uint64_t sz0 = invfs_meta_ext_size(e0);
-                p = pba0 * INVFS_BLOCK_SIZE;
-                scan_ext_idx = 0;
-                scan_ext_end = pba0 * INVFS_BLOCK_SIZE + sz0;
-                /* For the active extent: scan the full extent. The cursor
-                 * (v->inode_area_pos) names where NEW writes go, but the
-                 * active_offset field is not persisted at every record
-                 * append -- on reopen it may be 0 even though records exist
-                 * from offset 0 upward. The CRC validation per-record
-                 * prevents us from reading past the last valid record. */
-                if (at_ckpt && scan_ext_end > scan_end_at_ckpt)
-                    scan_ext_end = scan_end_at_ckpt;
-            }
-        } else {
-            scan_ext_end = v->inode_area_end;
-            if (at_ckpt && scan_ext_end > scan_end_at_ckpt)
-                scan_ext_end = scan_end_at_ckpt;
-        }
-        
-
-        for (;;) {
-            if (done) break;
-            /* extent-advancement at the TOP of the inner loop: when the
-             * previous iteration left us at an extent boundary (either by
-             * a record's tail, or by magic=0/IO error forcing p =
-             * scan_ext_end), try to move on to the next extent. at_ckpt
-             * truncates each extent at the checkpoint's append pointer
-             * (WP24-lite). */
-            if (p >= scan_ext_end) {
-                int advanced = 0;
-                while (scan_ext_idx + 1 < (size_t)v->met0.extent_count) {
-                    uint64_t next_e = meta_mapper_get(v, scan_ext_idx + 1);
-                    if (!next_e) break;
-                    uint64_t next_pba = invfs_meta_ext_pba(next_e);
-                    uint64_t next_sz = invfs_meta_ext_size(next_e);
-                    scan_ext_idx++;
-                    p = next_pba * INVFS_BLOCK_SIZE;
-                    scan_ext_end = next_pba * INVFS_BLOCK_SIZE + next_sz;
-                    if (at_ckpt && scan_ext_end > scan_end_at_ckpt)
-                        scan_ext_end = scan_end_at_ckpt;
-                    if (p + INVFS_REC_HDR_LEN <= scan_ext_end) {
-                        advanced = 1;
-                        break;
-                    }
-                }
-                if (!advanced) { done = 1; break; }
-            }
-            if (p + INVFS_REC_HDR_LEN > scan_ext_end) {
-                /* Not enough room for even one more record header in this
-                 * extent -- a clean extent has zero bytes before any
-                 * record; advance to the next extent. Continue (not
-                 * break) so we don't fall out of for(;;). */
-                p = scan_ext_end;
-                continue;
-            }
-            invfs_inode_rec rec_h;
-            uint8_t *rb = NULL;
-            if (io_seek(&v->io, p) != 0 ||
-                io_read(&v->io, &rec_h, sizeof(rec_h)) != 0) {
-                p = scan_ext_end;
-                continue;  /* restart loop, advancement will run */
-            }
-            if (rec_h.magic != INODE_REC_MAGIC && rec_h.magic != TOMBSTONE_MAGIC) {
-                /* end of records in this extent: a clean extent has zero
-                 * bytes before any record; advance to the next extent. */
-                p = scan_ext_end;
-                continue;  /* restart loop, advancement will run */
-            }
-            if (rec_h.rec_len < INVFS_REC_HDR_LEN + 1 ||
-                rec_h.rec_len > INVFS_MAX_REC_LEN ||
-                p + rec_h.rec_len + 4 > scan_ext_end) {
-                v->scan_anomalies++;
-                /* corrupt or out-of-extent tail: stop scanning this extent
-                 * and let the top-of-loop advancement move on to the next.
-                 * Continue (not break) so we don't fall out of for(;;). */
-                p = scan_ext_end;
-                continue;
-            }
-            /* torn-write protection: verify trailing CRC32C; a record
-             * whose CRC fails is a half-written append (crash/SIGPIPE),
-             * NOT a valid boundary — stop here so later tools never
-             * step into garbage. */
-            rb = (uint8_t *)malloc((size_t)rec_h.rec_len + 4);
-            if (!rb) break;
-            {
-                uint32_t crc_stored, crc_calc;
-                if (io_seek(&v->io, p) != 0 ||
-                    io_read(&v->io, rb, (size_t)rec_h.rec_len + 4) != 0) {
-                    free(rb); break;
-                }
-                memcpy(&crc_stored, rb + rec_h.rec_len, 4);
-                crc_calc = invfs_crc32c(rb, rec_h.rec_len);
-                if (crc_calc != crc_stored) {
-                    fprintf(stderr, "vol_open: corrupt inode record at %llu, "
-                            "skipping (rec_len=%u)\n",
-                            (unsigned long long)p,
-                            (unsigned)rec_h.rec_len);
-                    v->scan_anomalies++;
-                    free(rb);
-                    /* skip the corrupt record and keep scanning so files
-                     * AFTER it stay visible; run fsck -f to clean up */
-                    p += (uint64_t)rec_h.rec_len + 4;
-                    continue;
-                }
-            }
-            if (rec_h.magic == INODE_REC_MAGIC &&
-                rec_h.inode_id >= v->next_inode_id)
-                v->next_inode_id = rec_h.inode_id + 1;
-            /* Feed the scan set from this same pass: the record is read and
-               CRC-verified here, so the set inherits the exact same
-               skip-the-corrupt-record semantics for free. A separate pass
-               would stop at the first bad record and hide every name after
-               it. WP27: an INOD whose entries carry an invalid pba is
-               BROKEN -- recorded as a version but never live; the name
-               falls back to its newest valid version. A DELT still applies
-               (position-kill), except the kill of a broken replacement's
-               predecessor is skipped (torn retire: keep the fallback). */
-            {
-                /* the name lives in the full (CRC-verified) record buffer,
-                 * never in the 36-byte prefix copy rec_h; clamp the on-disk
-                 * name_len to both the field cap and the bytes actually
-                 * present before the body/CRC. */
-                const invfs_inode_rec *rr = (const invfs_inode_rec *)rb;
-                size_t ncap = rec_h.rec_len - INVFS_REC_HDR_LEN - 1;
-                size_t nl = rr->name_len < INVFS_MAX_NAME
-                          ? rr->name_len : INVFS_MAX_NAME;
-                if (nl > ncap) nl = ncap;
-                if (rec_h.magic == INODE_REC_MAGIC) {
-                    uint64_t moff[4], mlen[4];
-                    unsigned mn = 0;
-                    /* a broken record is hidden from the live view; the
-                     * loud log happens at fold time for the names that
-                     * actually lose content (a properly retired old
-                     * version is broken too -- and nothing was lost) */
-                    uint64_t miss = rec_pba_miss(rb, rec_h.rec_len,
-                                                 v->sb.total_blocks,
-                                                 moff, mlen, &mn);
-                    if (scanset_inod(&ss, rr->name, nl, rec_h.inode_id, p,
-                                     rec_h.file_size, rec_h.ctime,
-                                     miss) != 0) {
-                        free(rb); scanset_free(&ss);
-                        *err = -6; goto fail;
-                    }
-                } else {
-                    scanset_delt(&ss, rr->name, nl, rec_h.inode_id,
-                                 rec_h.file_size);
-                }
-            }
-free(rb);
-            p += rec_h.rec_len + 4;
-            found++;
-        }
-    /* everything the scan just walked is on the device already: the
-     * first barrier anchor (WP22c/F1) */
-    v->inode_area_durable = p;
-    /* everything the scan just walked is on the device already: the
-     * first barrier anchor (WP22c/F1) */
-    v->inode_area_durable = p;
-        /* fold the consistent cut into the live index: per name, the newest
-         * non-broken version; a name with none is absent (logged loudly) */
-        for (si = 0; ss.buck && si <= ss.mask; si++) {
-            scan_name *e;
-            for (e = ss.buck[si]; e; e = e->next) {
-                const scan_ver *lv = scanset_live(e);
-                if (!lv) {
-                    /* nvers == 0 is a properly deleted name -- silent.
-                     * Only a name whose every version is broken is a
-                     * genuine cut. */
-                    if (e->nvers) {
-                        fprintf(stderr, "vol_open: record cut: %s: no valid "
-                                "version remains; the file is hidden (run "
-                                "invf-fsck -f)\n", e->name);
-                        v->open_cuts++;
-                    }
-                    continue;
-                }
-                if (e->vers[e->nvers - 1].broken) {
-                    fprintf(stderr, "vol_open: record cut: %s: fell back to "
-                            "record @%llu (newest version invalid)\n",
-                            e->name, (unsigned long long)lv->pos);
-                    v->open_cuts++;
-                }
-                idx_put(v, e->name, e->nlen, lv->id, lv->pos,
-                        lv->size, lv->ctime);
-                idx_put_id(v, lv->id, lv->pos);
-            }
-        }
-        scanset_free(&ss);
-        if (getenv("INVFS_DEBUG"))
-            printf("[vol_open] scanned %llu inode recs, next_inode=%llu, area_pos=%llu, "
-                   "index=%llu names/%llu dirs\n",
-                   (unsigned long long)found, (unsigned long long)v->next_inode_id,
-                   (unsigned long long)v->inode_area_pos,
-                   (unsigned long long)v->ncount, (unsigned long long)v->dcount);
     }
+
+    /* WP-M1: bring up the metadata-v3 engine. The RT30 descriptor is
+     * validated for the round-trip.
+     *
+     * WP-M5: bring the metadata-v3 base-tree engine up. The root lives
+     * in RT30 and the allocator + dirty-bitmap flush are owned by
+     * vol_metabuf/vol_btree; the inode API (vol_v3_inode_*) writes the
+     * base tree directly (no delta yet). The v2 write engine still does
+     * not apply to a v3 namespace, so refuse its mutations: keep
+     * needs_recovery = 1 (the engine-level backstop vol_write_enabled /
+     * vol_mark_dirty consult). VOLF_READONLY is cleared *only* so the
+     * shared metadata allocator (alloc_blocks) can hand out base pages;
+     * the inode path persists the dirty bitmap before it publishes a
+     * root, the superblock is never rewritten, so the on-disk READONLY
+     * state is untouched. */
+    /* WP-M21: idx_init retired (the in-memory name index is gone;
+     * v3 resolves names through the dirent btree). */
+    /* ANC0 tail anchor, probed ONCE here and before anything reads
+     * block 0's descriptors. The probe is what decides whether the tail
+     * block is this volume's anchor at all: on a volume made before the
+     * anchor existed its last block is an ordinary data block, and from
+     * here on every refresh of the mirror is gated on the answer, so
+     * that block is never written. A refusal (a valid anchor belonging
+     * to some other geometry) leaves v->anchor_state as a refusal, which
+     * is deliberately NOT the same answer as "absent" -- see
+     * vol_anchor.c. Only a v3 volume probes: a v2 volume has no RT30 or
+     * SPT0 to mirror and its tail is never touched. */
+    anchor_probe(v, NULL);
+    if (mbuf_rt30_load(v) < 0) { *err = -6; goto fail; }
+    v3_probe_rt30(v);
+    mbuf_init(v);
+    /* WP-M5: skip the WP-M2 bootstrap pool (see v3_ready in
+     * vol_btree.c) -- its cursor resets every open, so reusing it would
+     * let a COW write clobber a live page from a previous session. */
+    v->mb_boot_cursor = v->mb_boot_end;
+    v->v3_mbuf_ready = 1;
+    v->needs_recovery = 1;
+    /* WP-M19: a degraded v3 mount (dev0 absent) serves only from the
+     * dev1 metadata mirror; keep it READ-ONLY, exactly like the v2
+     * degraded leg. A full two-device v3 mount needs the READONLY bit
+     * clear so the shared metadata allocator can hand out base pages. */
+    if (v->degraded)
+        v->sb.vol_flags |= VOLF_READONLY;
+    else
+        v->sb.vol_flags &= ~(VOLF_READONLY | VOLF_RO_SPACE);
+    /* WP-M10: replay the append-only delta chain named by RT30 into the
+     * in-memory index (D1). Overlay reads are WP-M11 and fold is WP-M14;
+     * this only reconstructs the recent tier so a crash/remount keeps
+     * it. A torn tail is truncated inside vol_delta_mount. */
+    if (vol_delta_mount(v) != 0) { *err = -6; goto fail; }
+    /* WP-M16: load the save-point descriptor if one exists. */
+    if (spt0_load(v) < 0) { *err = -6; goto fail; }
+    if (!invfs_sweep_ui_active())
+        fprintf(stderr, "vol_open: %s: format v3 (metadata-v3 inode tree): "
+                "base root engine up, v2 paths refused\n", real);
 
     /* WP25: with the name/id indexes live, load the tier + RAW-mirror
      * indexes from their owner records (2-device volumes only; a degraded
@@ -1853,87 +1597,6 @@ free(rb);
             fprintf(stderr, "vol_open: bitmap/journal divergence: %llu "
                     "mapped block%s were marked free; forced used\n",
                     (unsigned long long)fixed, fixed == 1 ? "" : "s");
-    }
-    /* WP27: and the record side of the same divergence: on a NOT-cleanly
-     * closed volume the on-disk bitmap may predate landed records (the
-     * record append is the commit point; the bitmap covering its pbas was
-     * flushed first, but a drop window can take bitmap pages and spare the
-     * record's). Reconcile one-sidedly: force every live record's segment
-     * extent USED. Extents derive from the segments' framed headers
-     * (seg_extent) -- one 8-byte read per segment, on the recovery path
-     * only (a clean close flushed a consistent bitmap and skips this). A
-     * segment whose header is unreadable is content-torn; its first block
-     * is pinned and the file's reads fail loudly at CRC, exactly like
-     * before -- fsck's content cut arbitrates. */
-    if (v->sb.state != INVFS_STATE_CLEAN && !at_ckpt && v->nbuck) {
-        uint64_t fixed = 0, pinned = 0;
-        size_t b;
-        for (b = 0; b <= v->nmask; b++) {
-            const name_index_entry *ne;
-            for (ne = v->nbuck[b]; ne; ne = ne->next) {
-                uint8_t *rec = NULL;
-                uint32_t rl = 0;
-                invfs_ast_hdr ah;
-                const invfs_ast_block_entry *ents;
-                size_t base;
-                uint32_t i;
-                if (meta_read_record_by_id(v, ne->inode_id, &rec, &rl,
-                                           NULL, 0, NULL) != 0)
-                    continue;
-                if (rl < INVFS_REC_HDR_LEN + 1) {
-                    free(rec);
-                    continue;
-                }
-                base = (size_t)(invfs_rec_cbody((const invfs_inode_rec *)rec)
-                                - rec);
-                if (rl < base + INVFS_AST_HDR_V1_LEN ||
-                    invfs_ast_hdr_parse(rec + base, rl - base, &ah) != 0 ||
-                    rl < base + ah.hdr_len +
-                         (size_t)ah.num_blocks * sizeof(*ents)) {
-                    free(rec);
-                    continue;
-                }
-                ents = (const invfs_ast_block_entry *)(rec + base +
-                                                       ah.hdr_len);
-                for (i = 0; i < ah.num_blocks; i++) {
-                    uint64_t pba = ents[i].pba, plen = 0, k, bend;
-                    if (!pba || pba >= v->sb.total_blocks) continue;
-                    /* "\x01reten*" registry entries carry BLOCKS in
-                     * length (never read as files); everyone else's
-                     * extent derives from the framed segment header */
-                    if (ne->nlen >= 6 && ne->name[0] == 0x01 &&
-                        memcmp(ne->name + 1, "reten", 5) == 0) {
-                        plen = ents[i].length;
-                    } else if (seg_extent(v, pba, NULL, &plen) != 0) {
-                        plen = 1;   /* torn header: pin the first block */
-                        pinned++;
-                    }
-                    if (!plen) continue;
-                    bend = pba + plen;
-                    if (bend > v->sb.total_blocks)
-                        bend = v->sb.total_blocks;
-                    for (k = pba; k < bend; k++) {
-                        if (!bit_get(v->bitmap, k)) {
-                            bit_set(v->bitmap, k);
-                            vol_bm_dirty(v, k);
-                            v->free_blocks--;
-                            if (k >= v->sb.shadow_zone_start)
-                                v->shadow_free--;
-                            else if (k >= v->sb.raw_zone_start)
-                                v->raw_free--;
-                            fixed++;
-                        }
-                    }
-                }
-                free(rec);
-            }
-        }
-        if (fixed || pinned)
-            fprintf(stderr, "vol_open: bitmap/record divergence: %llu "
-                    "referenced block%s were marked free; forced used "
-                    "(%llu torn segment header%s pinned by first block)\n",
-                    (unsigned long long)fixed, fixed == 1 ? "" : "s",
-                    (unsigned long long)pinned, pinned == 1 ? "" : "s");
     }
     /* H5: a volume whose latch persisted in the superblock re-evaluates it
      * at open: space freed while it was offline (fsck reclaim, a resize,
@@ -3540,162 +3203,17 @@ const invfs_l2p_entry *l2p_idx_get(invfs_volume *v, uint64_t inode,
 }
 
 
-static scan_name *scs_find(const scan_set *ss, const char *name, size_t nlen)
-{
-    size_t b = (size_t)(idx_hash(name, nlen) & ss->mask);
-    scan_name *e;
-    for (e = ss->buck[b]; e; e = e->next)
-        if (e->nlen == nlen && memcmp(e->name, name, nlen) == 0)
-            return e;
-    return NULL;
-}
 
-static void scs_grow(scan_set *ss)
-{
-    size_t ncap = (ss->mask + 1) * 2, i;
-    scan_name **nb = (scan_name **)calloc(ncap, sizeof *nb);
-    if (!nb) return;
-    for (i = 0; i <= ss->mask; i++) {
-        scan_name *e = ss->buck[i];
-        while (e) {
-            scan_name *nx = e->next;
-            size_t b = (size_t)(idx_hash(e->name, e->nlen) & (ncap - 1));
-            e->next = nb[b]; nb[b] = e;
-            e = nx;
-        }
-    }
-    free(ss->buck);
-    ss->buck = nb;
-    ss->mask = ncap - 1;
-}
 
-int scanset_inod(scan_set *ss, const char *name, size_t nlen,
-                 uint64_t id, uint64_t pos, uint64_t size, uint64_t ctime,
-                 uint64_t miss)
-{
-    scan_name *e;
-    scan_ver *sv;
-    size_t b;
-    if (nlen == 0 || nlen > 255) return 0;
-    if (!ss->buck) {
-        ss->buck = (scan_name **)calloc(1024, sizeof *ss->buck);
-        if (!ss->buck) return -1;
-        ss->mask = 1023;
-    }
-    e = scs_find(ss, name, nlen);
-    if (!e) {
-        e = (scan_name *)malloc(sizeof *e + nlen);
-        if (!e) return -1;
-        memcpy(e->name, name, nlen);
-        e->name[nlen] = 0;
-        e->nlen = (uint32_t)nlen;
-        e->vers = NULL;
-        e->nvers = e->capvers = 0;
-        b = (size_t)(idx_hash(name, nlen) & ss->mask);
-        e->next = ss->buck[b];
-        ss->buck[b] = e;
-        ss->count++;
-        if (ss->count > ss->mask + 1) scs_grow(ss);
-    }
-    if (e->nvers == e->capvers) {
-        uint32_t ncap = e->capvers ? e->capvers * 2 : 4;
-        scan_ver *nv = (scan_ver *)realloc(e->vers, ncap * sizeof *nv);
-        if (!nv) return -1;
-        e->vers = nv;
-        e->capvers = ncap;
-    }
-    sv = &e->vers[e->nvers++];
-    sv->pos = pos;
-    sv->id = id;
-    sv->size = size;
-    sv->ctime = ctime;
-    sv->miss = miss;
-    sv->broken = miss != 0;
-    return 0;
-}
 
-void scanset_delt(scan_set *ss, const char *name, size_t nlen,
-                  uint64_t id, uint64_t killpos)
-{
-    scan_name *e;
-    if (!ss->buck || nlen == 0 || nlen > 255) return;
-    e = scs_find(ss, name, nlen);
-    if (!e || !e->nvers) return;
-    if (killpos == 0) {
-        /* legacy kill-by-id. A match on the NEWEST version is a name
-         * delete (idx_del semantics): clear every version -- older ones
-         * are not resurrected (a delete that was acknowledged stays
-         * acknowledged). A match on an OLDER version is a retire of that
-         * superseded version: drop exactly it -- with the same
-         * torn-retire guard as the v2 kill. The guard keeps the target
-         * only when the target is HEALTHY and its successor is broken
-         * (the retire transaction tore): a broken target is unreadable
-         * either way, so letting it die is what makes a quarantine chain
-         * converge instead of resurrecting a useless record forever. */
-        uint32_t i;
-        if (e->vers[e->nvers - 1].id == id) { e->nvers = 0; return; }
-        for (i = 0; i < e->nvers; i++) {
-            if (e->vers[i].id == id) {
-                if (i + 1 < e->nvers && e->vers[i + 1].broken &&
-                    !e->vers[i].broken)
-                    return;
-                memmove(e->vers + i, e->vers + i + 1,
-                        (e->nvers - i - 1) * sizeof *e->vers);
-                e->nvers--;
-                return;
-            }
-        }
-        return;
-    }
-    /* v2 position kill: drop exactly that version -- UNLESS the target is
-     * healthy and its successor is broken: then the kill belongs to a
-     * retire transaction whose replacement record lost its mappings (a
-     * torn sweep/write), and dropping the healthy fallback would present
-     * the name as deleted while its replacement is unreadable. A BROKEN
-     * target is no fallback -- it is unreadable either way -- so the kill
-     * lands: that is what lets a quarantine chain (fsck -f) converge
-     * instead of resurrecting a useless record on every scan. */
-    {
-        uint32_t i;
-        for (i = 0; i < e->nvers; i++) {
-            if (e->vers[i].pos == killpos) {
-                if (i + 1 < e->nvers && e->vers[i + 1].broken &&
-                    !e->vers[i].broken)
-                    return;
-                memmove(e->vers + i, e->vers + i + 1,
-                        (e->nvers - i - 1) * sizeof *e->vers);
-                e->nvers--;
-                return;
-            }
-        }
-    }
-}
 
-const scan_ver *scanset_live(const scan_name *e)
-{
-    uint32_t i;
-    for (i = e->nvers; i-- > 0; )
-        if (!e->vers[i].broken)
-            return &e->vers[i];
-    return NULL;
-}
 
-void scanset_free(scan_set *ss)
-{
-    size_t i;
-    if (!ss->buck) return;
-    for (i = 0; i <= ss->mask; i++) {
-        scan_name *e = ss->buck[i];
-        while (e) {
-            scan_name *nx = e->next;
-            free(e->vers);
-            free(e);
-            e = nx;
-        }
-    }
-    free(ss->buck);
-    ss->buck = NULL;
-}
+
+
+
+
+
+
 
 
 /* read one block worth of raw bytes at pba */
@@ -3968,23 +3486,7 @@ uint32_t pba_ref_count(invfs_volume *v, uint64_t pba)
  * The shared walker visits each live record exactly once. */
 typedef struct { invfs_volume *v; } pba_ref_ensure_ctx;
 
-static int pba_ref_ensure_cb(void *ctx_, uint64_t rec_pos,
-                             const invfs_inode_rec *h, const uint8_t *rec)
-{
-    pba_ref_ensure_ctx *c = (pba_ref_ensure_ctx *)ctx_;
-    invfs_volume *v = c->v;
 
-    if (h->magic != INODE_REC_MAGIC) return 0;
-    if (!h->name_len) return 0;
-    if ((uint8_t)h->name[0] == 0x01) return 0;         /* owners: WAL-owned */
-    if (h->name[h->name_len - 1] == '/') return 0;     /* dir anchor */
-    /* live version only: the name index must point at this very record
-     * (superseded/tombstoned versions carry the same id) */
-    if (vol_find(v, h->name) != h->inode_id) return 0;
-    if (idx_get_id(v, h->inode_id) != rec_pos) return 0;
-    pba_ref_apply(v, rec, h->rec_len, +1);
-    return 0;
-}
 
 static int pba_ref_v3_walk_cb(void *ctx_, const char *path, uint64_t inode_id,
                               uint32_t type, uint64_t size, int64_t mtime)
@@ -4059,10 +3561,7 @@ int pba_ref_ensure(invfs_volume *v)
     v->pba_ref_n = 0;
     v->pba_ref_on = 1;
     c.v = v;
-    if (v->sb.vol_flags & VOLF_V3)
-        vol_v3_walk(v, pba_ref_v3_walk_cb, &c);
-    else
-        vol_records_walk(v, pba_ref_ensure_cb, &c);
+    vol_v3_walk(v, pba_ref_v3_walk_cb, &c);
     v->pba_ref_stale = 0;
     return 0;
 }

@@ -58,32 +58,23 @@
 #include "volume_internal.h"
 
 
-/* Is this a Meta-v3 volume (COW B+ tree + delta log, no v2 record
- * stream, no owner-L2P journal)? */
-static int wp25_is_v3(const invfs_volume *v)
-{
-    return (v->sb.vol_flags & VOLF_V3) != 0;
-}
-
-
-/* The v2 owner-L2P map. On v3 there is no journal to carry it and
- * vol_flush never reaches jrn_flush (volume.c:2435 returns for VOLF_V3
- * right after the bitmap flush), so a map queued here would grow the
- * in-RAM table until vol_map reports "L2P journal full" and the caller
- * latches the volume -- a self-inflicted outage for a table nothing
- * reads. The copy's address rides in the owner's AST entry instead. */
+/* The v2 owner-L2P map. There is no journal to carry it now and vol_flush
+ * never reached jrn_flush on this format anyway (it returned for VOLF_V3
+ * right after the bitmap flush), so a map queued here grew the in-RAM table
+ * until vol_map reported "L2P journal full" and the caller latched the
+ * volume -- a self-inflicted outage for a table nothing read. The copy's
+ * address rides in the owner's AST entry instead. */
 static int wp25_map(invfs_volume *v, uint64_t owner, uint64_t ord,
                     uint64_t pba, uint32_t plen)
 {
-    if (wp25_is_v3(v)) return 0;
-    return vol_map(v, owner, ord, pba, plen);
+    (void)v; (void)owner; (void)ord; (void)pba; (void)plen;
+    return 0;
 }
 
 
 static void wp25_unmap(invfs_volume *v, uint64_t owner, uint64_t ord)
 {
-    if (wp25_is_v3(v)) return;
-    l2p_remove(v, owner, ord);
+    (void)v; (void)owner; (void)ord;
 }
 
 
@@ -280,114 +271,11 @@ static int wp25_owner_write(invfs_volume *v, uint64_t *owner_slot,
                             uint64_t *ext_slot, const char *name,
                             const wp25_ent *ents, size_t n)
 {
-    invfs_ast_block_entry *ae = NULL;
-    uint8_t ah[INVFS_AST_HDR_V2_LEN];
-    size_t ahlen, rec_len, total, nlen, tomb_len;
-    uint64_t run = 0, owner, old_pos, new_pos;
-    uint8_t *combo;
-    invfs_inode_rec *rh;
-    uint32_t crc_rec, crc_tomb;
-    size_t i;
-
-    if (wp25_is_v3(v))
-        return wp25_owner_write_v3(v, owner_slot, name, ents, n);
-    owner = *owner_slot;
-    if (n > 65535) return -1;   /* one owner record, v1 header */
-    ae = (invfs_ast_block_entry *)calloc(n ? n : 1, sizeof *ae);
-    if (!ae) return -1;
-    for (i = 0; i < n; i++) {
-        ae[i].file_offset = ents[i].key;   /* the canonical pba (record) */
-        ae[i].length = (uint64_t)ents[i].plen * INVFS_BLOCK_SIZE;
-        ae[i].zone = INVFS_ZONE_BINARY;    /* physical home; NOT TEXT */
-        ae[i].algo = INVFS_ALGO_NONE;
-        ae[i].block_id = ents[i].ord;      /* the WAL map key */
-        ae[i].block_offset = 0;
-        ae[i].pba = ents[i].pba;   /* WP27: the copy's pba rides in the
-                                    * record too (fsck derives the bitmap
-                                    * from records; the WAL map stays the
-                                    * operational truth for the index) */
-        run += ae[i].length;
-    }
-    ahlen = invfs_ast_hdr_write(ah, run, (uint32_t)n, 0);
-    if (!ahlen) { free(ae); return -1; }
-
-    nlen = strlen(name);
-    if (nlen > INVFS_MAX_NAME) nlen = INVFS_MAX_NAME;
-    tomb_len = INVFS_REC_HDR_LEN + nlen + 1;
-    rec_len = INVFS_REC_HDR_LEN + nlen + 1 + ahlen + n * sizeof(*ae);
-    old_pos = idx_get_id(v, owner);
-    total = rec_len + 4 + (old_pos ? tomb_len + 4 : 0);
-    /* WP52: on a mapper volume meta_get_append_pos sizes (or grows) the
-     * active extent to hold the whole record+tombstone, so no legacy room
-     * pre-check applies. The legacy contiguous area keeps the online churn
-     * backstop, before the position-kill target is read: the compaction
-     * moves every record, so old_pos is re-derived after it. */
-    if (!(v->met0_present && v->meta_mapper) &&
-        v->inode_area_pos + total > v->inode_area_end) {
-        if (inode_area_make_room(v, total) != 0) { free(ae); return -1; }
-        old_pos = idx_get_id(v, owner);
-        total = rec_len + 4 + (old_pos ? tomb_len + 4 : 0);
-    }
-    combo = (uint8_t *)calloc(1, total);
-    if (!combo) { free(ae); return -1; }
-
-    rh = (invfs_inode_rec *)combo;
-    rh->magic = INODE_REC_MAGIC;
-    rh->rec_len = (uint32_t)rec_len;
-    rh->inode_id = owner;
-    rh->file_size = run;
-    rh->ctime = (uint64_t)time(NULL);
-    rec_set_name(rh, name);
-    {
-        uint8_t *body = invfs_rec_body(rh);
-        memcpy(body, ah, ahlen);
-        if (n)
-            memcpy(body + ahlen, ae, n * sizeof(*ae));
-    }
-    free(ae);
-    crc_rec = invfs_crc32c(combo, rec_len);
-    memcpy(combo + rec_len, &crc_rec, 4);
-    if (old_pos) {
-        invfs_inode_rec *th = (invfs_inode_rec *)(combo + rec_len + 4);
-        th->magic = TOMBSTONE_MAGIC;
-        v->hot.tombstones++;
-        th->rec_len = (uint32_t)tomb_len;
-        th->inode_id = owner;
-        th->file_size = old_pos;        /* v2 position kill */
-        rec_set_name(th, name);
-        crc_tomb = invfs_crc32c((uint8_t *)th, tomb_len);
-        memcpy(combo + rec_len + 4 + tomb_len, &crc_tomb, 4);
-    }
-
-    if (vol_mark_dirty(v) != 0) { free(combo); return -1; }
-    /* WP52: one extent-sized append for the whole record+tombstone. On a
-     * mapper volume vol_append_slot refuses a slot that would run past its
-     * extent (sizing inside meta_get_append_pos); on a legacy volume it is
-     * the contiguous cursor, bumped below. Flush-safe: no re-entrant flush,
-     * and the write stays inside the extent's own device. */
-    {
-        int arc = vol_append_owner_slot(v, total, ext_slot, &new_pos);
-        if (arc != 0) { free(combo); return -1; }
-    }
-    /* WP52: when the owner record is rewritten IN PLACE (its dedicated
-     * extent is reused, new_pos == the previous position) there is nothing
-     * to position-kill -- the old version is overwritten. Emitting the
-     * tombstone anyway would name new_pos and kill the record we just
-     * wrote. Write just the record+CRC in that case. */
-    {
-        size_t wlen = (old_pos && new_pos == old_pos) ? rec_len + 4 : total;
-        if (io_seek(&v->io, new_pos) != 0 ||
-            io_write(&v->io, combo, wlen) != 0) { free(combo); return -1; }
-    }
-    /* on a mapper volume the owner lives in its own extent and the shared
-     * file-record cursor must NOT be dragged to it */
-    if (!(v->met0_present && v->meta_mapper))
-        v->inode_area_pos = new_pos + total;
-    free(combo);
-    idx_put(v, name, strlen(name), owner, new_pos, run,
-            (uint64_t)time(NULL));
-    idx_put_id(v, owner, new_pos);
-    return 0;
+    /* On v3 the owner is a recipe blob + inode row. The v2 alternative
+     * appended [INOD][DELT] into the inode area and re-keyed the owner's
+     * L2P mappings. */
+    (void)ext_slot;
+    return wp25_owner_write_v3(v, owner_slot, name, ents, n);
 }
 
 
@@ -460,48 +348,14 @@ static void wp25_index_load_one(invfs_volume *v, uint64_t owner,
                                 wp25_ent **tp, size_t *np, size_t *cp,
                                 int is_rawm)
 {
-    uint8_t *buf = NULL;
-    uint32_t rl = 0;
-    invfs_ast_hdr ah;
-    const invfs_ast_block_entry *ents;
-    size_t base;
-    uint32_t i;
-
-    *np = 0;
-    if (wp25_is_v3(v)) {
-        /* the v3 loader resolves the owner by name itself rather than
-         * trusting the caller's id: vol_find answers a 0x01 name through
-         * the v3 dirent tree on both a full and a degraded open, and this
-         * is the same lookup the tz_v3 registry does (vol_textzone.c). */
-        wp25_index_load_v3(v, is_rawm ? &v->rawm_owner : &v->tier_owner,
-                           is_rawm ? "\x01rawm" : "\x01tier0",
-                           tp, np, cp, is_rawm);
-        return;
-    }
-    if (!owner) return;
-    if (meta_read_record_by_id(v, owner, &buf, &rl, NULL, 0, NULL) != 0)
-        return;
-    base = (size_t)(invfs_rec_cbody((const invfs_inode_rec *)buf) - buf);
-    if (rl < base + INVFS_AST_HDR_V1_LEN ||
-        invfs_ast_hdr_parse(buf + base, rl - base, &ah) != 0 ||
-        rl < base + ah.hdr_len +
-             (size_t)ah.num_blocks * sizeof(invfs_ast_block_entry)) {
-        free(buf);
-        return;
-    }
-    ents = (const invfs_ast_block_entry *)(buf + base + ah.hdr_len);
-    for (i = 0; i < ah.num_blocks; i++) {
-        uint64_t pba = 0, plen = 0, key;
-        if (vol_lookup_entry(v, owner, ents[i].block_id, &pba, &plen) != 0 ||
-            !pba)
-            continue;
-        key = is_rawm ? v->sb.raw_zone_start + ents[i].block_id
-                      : ents[i].file_offset;
-        if (wp25_put(tp, np, cp, key, pba, (uint32_t)plen,
-                     ents[i].block_id) != 0)
-            break;   /* OOM: a partial index only costs redundancy */
-    }
-    free(buf);
+    /* the v3 loader resolves the owner by name itself rather than
+     * trusting the caller's id: vol_find answers a 0x01 name through
+     * the v3 dirent tree on both a full and a degraded open, and this
+     * is the same lookup the tz_v3 registry does (vol_textzone.c). */
+    wp25_index_load_v3(v, is_rawm ? &v->rawm_owner : &v->tier_owner,
+                       is_rawm ? "\x01rawm" : "\x01tier0",
+                       tp, np, cp, is_rawm);
+    return;
 }
 
 
@@ -555,16 +409,14 @@ static uint64_t wp25_owner_id(invfs_volume *v, int is_rawm)
     uint64_t *slot = is_rawm ? &v->rawm_owner : &v->tier_owner;
     if (!*slot) {
         const char *name = is_rawm ? "\x01rawm" : "\x01tier0";
-        if (wp25_is_v3(v)) {
-            uint8_t *blob = NULL;
-            size_t blen = 0;
-            if (vol_ast_recipe_serialize(0, NULL, 0, &blob, &blen) == 0) {
-                *slot = vol_create_blob_file(v, name, blob, blen, blen,
-                                             INVFS_ALGO_NONE);
-                free(blob);
-            }
-        } else {
-            *slot = vol_create_file(v, name, NULL, 0);
+        uint8_t *blob = NULL;
+        size_t blen = 0;
+        /* the owner is an empty recipe blob; the v2 shape created a
+         * zero-length record and grew it in place */
+        if (vol_ast_recipe_serialize(0, NULL, 0, &blob, &blen) == 0) {
+            *slot = vol_create_blob_file(v, name, blob, blen, blen,
+                                         INVFS_ALGO_NONE);
+            free(blob);
         }
     }
     return *slot;
@@ -798,54 +650,7 @@ typedef struct {
     tier_heat_map *m;
 } tier_heat_ctx;
 
-static int tier_heat_cb(void *ctx_, uint64_t rec_pos,
-                        const invfs_inode_rec *h, const uint8_t *rec)
-{
-    tier_heat_ctx *c = (tier_heat_ctx *)ctx_;
-    invfs_volume *v = c->v;
-    size_t nl, ent0;
-    size_t base = (size_t)(invfs_rec_cbody((const invfs_inode_rec *)rec) - rec);
-    char nm[INVFS_MAX_NAME + 1];
-    uint16_t r;
-    invfs_ast_hdr ah;
-    uint32_t j;
-    uint64_t ip;
 
-    if (h->magic != INODE_REC_MAGIC) return 0;   /* tombstones */
-    if (h->name_len > INVFS_MAX_NAME ||
-        h->rec_len < INVFS_REC_HDR_LEN + h->name_len + 1)
-        return 0;
-    if (!h->name_len || (uint8_t)h->name[0] == 0x01) return 0;
-    nl = h->name_len;
-    memcpy(nm, h->name, nl);
-    nm[nl] = 0;
-    if (nl && nm[nl - 1] == '/') return 0;       /* directory anchors */
-    ip = idx_get_id(v, h->inode_id);
-    if (vol_find(v, nm) != h->inode_id || (ip && ip != rec_pos))
-        return 0;   /* superseded version: not the live record */
-    /* WP59a: anchored files are never promoted/demoted -- their segments
-     * stay pinned to avoid re-encoding through a pack codec. */
-    if (invfs_inode_is_anchored(v, h->inode_id))
-        return 0;
-    r = heat_file_r(v, h->inode_id);
-    if (!r) return 0;
-    if (h->rec_len < base + INVFS_AST_HDR_V1_LEN ||
-        invfs_ast_hdr_parse(rec + base, h->rec_len - base, &ah) != 0 ||
-        h->rec_len < base + ah.hdr_len +
-             (size_t)ah.num_blocks * sizeof(invfs_ast_block_entry))
-        return 0;
-    ent0 = base + ah.hdr_len;
-    for (j = 0; j < ah.num_blocks; j++) {
-        const invfs_ast_block_entry *e =
-            (const invfs_ast_block_entry *)
-            (rec + ent0 + (size_t)j * sizeof(*e));
-        if (!e->pba || e->pba < v->sb.shadow_zone_start ||
-            e->pba >= v->sb.total_blocks)
-            continue;   /* only canonical (dev1) shadow segments */
-        if (tier_heat_put(c->m, e->pba, r) != 0) return -1;
-    }
-    return 0;
-}
 
 /* WP94: v3 body -- the v2 callback above parses the AST out of a v2
  * record; a v3 recipe lives in its own content-addressed blob behind
@@ -908,9 +713,7 @@ static int tier_heat_build(invfs_volume *v, tier_heat_map *m)
      * came back empty on every v3 volume, so vol_tier_migrate's
      * `heat_any_rhot && hm.t` gate never opened and the whole WP25 tier
      * migration was inert on the only format invf-mkfs produces. */
-    if (v->sb.vol_flags & VOLF_V3)
-        return vol_v3_iter_live_inodes(v, tier_heat_v3_cb, &c);
-    return vol_records_walk(v, tier_heat_cb, &c);
+    return vol_v3_iter_live_inodes(v, tier_heat_v3_cb, &c);
 }
 
 

@@ -35,21 +35,7 @@ static int vol_sweep_one_v3(invfs_volume *v, uint64_t inode_id,
  * record names the new pbas, no flush has happened -- so this is pure
  * in-memory bookkeeping plus bitmap bits, and the file is left exactly as
  * it was found. */
-static void sweep_unwind(invfs_volume *v, invfs_ast_block_entry *ents,
-                         uint32_t nents)
-{
-    uint32_t i;
-    if (!ents) return;
-    for (i = 0; i < nents; i++) {
-        uint64_t plen = 0;
-        if (ents[i].zone != INVFS_ZONE_BINARY || !ents[i].pba)
-            continue;
-        if (seg_extent_checked(v, ents[i].pba, &plen) == 0)
-            vol_free_blocks(v, ents[i].pba, plen);
-        ents[i].pba = 0;
-        ents[i].zone = INVFS_ZONE_RAW;
-    }
-}
+
 
 
 /* WP10 §2: the minimum compression gain (in percent) below which a file is
@@ -129,522 +115,26 @@ typedef struct {
     int found;
 } sweep_locate_ctx;
 
-static int sweep_locate_cb(void *ctx_, uint64_t rec_pos,
-                           const invfs_inode_rec *h, const uint8_t *rec)
-{
-    sweep_locate_ctx *c = (sweep_locate_ctx *)ctx_;
-    size_t nl;
-    (void)rec;
-    if (h->magic != INODE_REC_MAGIC || h->inode_id != c->want)
-        return 0;
-    if (h->name_len > INVFS_MAX_NAME ||
-        h->rec_len < INVFS_REC_HDR_LEN + h->name_len + 1)
-        return 0;
-    c->h = *h;
-    c->rec_pos = rec_pos;
-    nl = h->name_len < sizeof(c->name) - 1
-       ? h->name_len : sizeof(c->name) - 1;
-    memcpy(c->name, h->name, nl);
-    c->name[nl] = 0;
-    c->found = 1;
-    return 1;   /* found: stop the walk */
-}
 
-static uint64_t sweep_locate_record(invfs_volume *v, uint64_t inode_id,
-                                    invfs_inode_rec *h)
-{
-    if (v->met0_present && v->meta_mapper && v->met0.extent_count > 0) {
-        uint64_t ip = idx_get_id(v, inode_id);
-        if (ip && vol_read_raw(v, ip, h, sizeof(*h)) == 0 &&
-            h->magic == INODE_REC_MAGIC && h->inode_id == inode_id)
-            return ip;
-        {
-            sweep_locate_ctx lc;
-            memset(&lc, 0, sizeof lc);
-            lc.want = inode_id;
-            vol_records_walk(v, sweep_locate_cb, &lc);
-            if (lc.found) { *h = lc.h; return lc.rec_pos; }
-        }
-        return 0;
-    }
-    {
-        uint64_t start = v->inode_area_start * INVFS_BLOCK_SIZE;
-        uint64_t end = v->inode_area_pos;
-        uint64_t pos = start;
-        uint64_t ip = idx_get_id(v, inode_id);
-        if (ip >= start && ip + INVFS_REC_HDR_LEN + 1 <= end) pos = ip;
-        while (pos + INVFS_REC_HDR_LEN + 1 <= end) {
-            invfs_inode_rec rh;
-            if (io_seek(&v->io, pos) != 0 ||
-                io_read(&v->io, &rh, sizeof rh) != 0)
-                return 0;
-            if (rh.magic == TOMBSTONE_MAGIC) {
-                pos += (uint64_t)rh.rec_len + 4;
-                continue;
-            }
-            if (rh.magic != INODE_REC_MAGIC) return 0;
-            if (rh.inode_id == inode_id) { *h = rh; return pos; }
-            pos += (uint64_t)rh.rec_len + 4;
-        }
-    }
-    return 0;
-}
+
+
 
 int vol_sweep_file(invfs_volume *v, uint64_t inode_id)
 {
-    invfs_meta_pub keep;
-    int have_keep;
-    char name[256] = "";
-    int rc;
-
-    if (!v || !inode_id) return -1;
-
     /* WP-M23: v3 volumes route directly to the id-keyed v3 sweep.
      * vol_sweep_one_v3 returns: 1 = swept, 0 = skipped/noop, -1 = err.
-     * vol_sweep_file returns: 0 = swept, 1 = skipped/noop, -1 = err. */
-    if (v->sb.vol_flags & VOLF_V3) {
-        if (vol_write_active_id(v, inode_id))
-            return 1;   /* skipped -- active write session */
-        rc = vol_sweep_one_v3(v, inode_id, NULL, NULL, NULL);
-        if (rc > 0) return 0;
-        if (rc == 0) return 1;
-        return -1;
-    }
-
-    have_keep = vol_get_meta(v, inode_id, &keep) == 0;
-    {
-        uint64_t pos = idx_get_id(v, inode_id);
-        int in_area;
-        /* WP42: mapper volumes locate records by the absolute index hint;
-         * only legacy volumes are bounded by the contiguous area. */
-        if (v->met0_present && v->meta_mapper)
-            in_area = (pos != 0);
-        else
-            in_area = pos >= v->inode_area_start * INVFS_BLOCK_SIZE &&
-                      pos + INVFS_REC_HDR_LEN + 1 <= v->inode_area_pos;
-        if (in_area) {
-            invfs_inode_rec h;
-            if (vol_read_raw(v, pos, &h, sizeof h) == 0 &&
-                h.magic == INODE_REC_MAGIC && h.inode_id == inode_id &&
-                h.name_len <= INVFS_MAX_NAME &&
-                h.rec_len >= INVFS_REC_HDR_LEN + h.name_len + 1 &&
-                h.rec_len <= INVFS_MAX_REC_LEN) {
-                uint8_t *rb = (uint8_t *)malloc(h.rec_len);
-                if (rb && vol_read_raw(v, pos, rb, h.rec_len) == 0) {
-                    const invfs_inode_rec *fr = (const invfs_inode_rec *)rb;
-                    size_t nl = fr->name_len < sizeof(name) - 1
-                              ? fr->name_len : sizeof(name) - 1;
-                    memcpy(name, fr->name, nl);
-                    name[nl] = 0;
-                }
-                free(rb);
-            }
-        }
-    }
-
-    /* WP4ab: a live write session aliases this file's blocks under its own
-     * id; sweeping (worst case the pre-atomic in-place path, which frees
-     * old segments directly) would pull them from under the session. */
-    if (name[0] && vol_write_active_name(v, name))
-        return 1;   /* skipped -- the caller counts it, the file stays RAW */
-
-    rc = vol_sweep_file_inner(v, inode_id, 0);
-
-    if (have_keep && name[0]) {
-        uint64_t nid = vol_find(v, name);
-        if (nid != 0 && nid != inode_id) {
-            invfs_meta_pub chk;
-            if (vol_get_meta(v, nid, &chk) != 0)
-                vol_apply_meta(v, name, &keep);
-        }
-    }
-    return rc;
+     * Returns: 0 = swept, 1 = skipped/noop, -1 = err. */
+    int rc;
+    if (!v || !inode_id) return -1;
+    if (vol_write_active_id(v, inode_id))
+        return 1;   /* skipped -- active write session */
+    rc = vol_sweep_one_v3(v, inode_id, NULL, NULL, NULL);
+    if (rc > 0) return 0;
+    if (rc == 0) return 1;
+    return -1;
 }
 
-int vol_sweep_file_inner(invfs_volume *v, uint64_t inode_id,
-                                int generic_only)
-{
-    uint64_t rec_pos = 0;
-    invfs_inode_rec rec_h;
-    uint8_t *rec = NULL;
-    uint8_t *body = NULL;
-    const char *rname = NULL;
-    uint32_t crc_stored, crc_calc;
-    invfs_ast_hdr ast_h;
-    invfs_ast_block_entry *ents;
-    uint32_t i;
-    int swept_any = 0;
-    /* Target of the new maps. Zero until the atomic path is chosen, and the
-       whole file is written under it before anything references it. */
-    uint64_t new_id = 0;
-    int all_raw = 1;
-    /* WP10: bytes the sweep actually stored (sum of csize+8 per segment),
-       for the UNCOMPRESSIBLE gain check; a codec guard that refused the file
-       (guard_algo) stamps GENERIC_GUARD instead of a gain-based class --
-       stamped on the NEW id at the end. (A GENERIC_MEMLIMIT/GUARD stamp a
-       pack branch set BEFORE we ran lives in the copied ext and wins over
-       the gain verdict below.) */
-    uint64_t new_bytes = 0;
-    uint32_t guard_algo = 0;
 
-    /* locate the inode record (mapper-aware, WP42) */
-    {
-        rec_pos = sweep_locate_record(v, inode_id, &rec_h);
-        if (rec_pos == 0) return -1;
-    }
-
-    rec = (uint8_t *)malloc(rec_h.rec_len);
-    if (!rec) return -1;
-    if (io_seek(&v->io, rec_pos) != 0 || io_read(&v->io, rec, rec_h.rec_len) != 0 ||
-        io_read(&v->io, &crc_stored, 4) != 0) { free(rec); return -1; }
-    crc_calc = invfs_crc32c(rec, rec_h.rec_len);
-    if (crc_calc != crc_stored) { fprintf(stderr, "inode CRC mismatch\n"); free(rec); return -1; }
-    if (rec_h.rec_len < INVFS_REC_HDR_LEN + 1) { free(rec); return -1; }
-
-    body = invfs_rec_body((invfs_inode_rec *)rec);
-    rname = ((invfs_inode_rec *)rec)->name;
-    if (((invfs_inode_rec *)rec)->name_len > INVFS_MAX_NAME ||
-        (size_t)rec_h.rec_len <
-            INVFS_REC_HDR_LEN + ((invfs_inode_rec *)rec)->name_len + 1) {
-        fprintf(stderr, "sweep: invalid record name length\n");
-        free(rec);
-        return -1;
-    }
-    if (invfs_ast_hdr_parse(body, rec_h.rec_len - (uint32_t)(body - rec),
-                            &ast_h) != 0 ||
-        (size_t)ast_h.num_blocks * sizeof(invfs_ast_block_entry) >
-            rec_h.rec_len - (uint32_t)(body - rec) - ast_h.hdr_len) {
-        fprintf(stderr, "sweep: %s: unsupported/corrupt AST recipe header\n",
-                rname);
-        free(rec);
-        return -1;
-    }
-    ents = (invfs_ast_block_entry *)(body + ast_h.hdr_len);
-
-    /* already swept (Shadow/BINARY) — nothing to do */
-    if (ents[0].zone != INVFS_ZONE_RAW) {
-        if (getenv("INVFS_DEBUG"))
-            printf("[sweep] %s: already in Shadow (zone %u), skip\n",
-                   rname, ents[0].zone);
-        free(rec);
-        return 1;
-    }
-
-    /* WP16e: the JPEG->JXL lane is pack-owned now (the jxl codecpack claims
-     * FF D8 FF content in vol_sweep_one's WP13 pack loop -- probe ->
-     * estimate-based admission -> encode -> decode-back memcmp guard ->
-     * stamp -> blob, all in vol_pack_sweep). No builtin branch remains here. */
-
-    /* APE pass: FLAC magic -> transcode whole file via MAC.exe -c4000 */
-    if (!generic_only && ents[0].zone == INVFS_ZONE_RAW && getenv("INVFS_APE")) {
-        uint8_t *full = NULL;
-        size_t full_len = 0;
-        if (vol_read_file(v, inode_id, &full, &full_len) == 0 && full_len >= 4 &&
-            full[0] == 'f' && full[1] == 'L' && full[2] == 'a' && full[3] == 'C') {
-            uint8_t *ape = NULL;
-            size_t ape_len = 0;
-            int crc_res = invfs_ape_compress(full, full_len, &ape, &ape_len);
-            if (getenv("INVFS_DEBUG"))
-                printf("[sweep] %s: APE rc=%d ape_len=%zu (flac %zu)\n",
-                       rname, crc_res, ape_len, full_len);
-            if (crc_res == 0 && ape_len < full_len) {
-                /* probe decode to learn exact re-encoded FLAC size
-                 * (ffmpeg re-encode differs from original FLAC bytes) */
-                uint8_t *probe = NULL;
-                size_t probe_len = 0;
-                uint64_t fsize = full_len;
-                if (invfs_ape_decompress(ape, ape_len, &probe, &probe_len) == 0) {
-                    fsize = probe_len;
-                    free(probe);
-                }
-                {
-                    uint64_t newino = vol_create_ape_file(v, rname, ape, ape_len, fsize);
-                    if (newino == 0)
-                        fprintf(stderr, "sweep: APE create failed (%s)\n", rname);
-                    else {
-                        vol_delete_inode(v, inode_id, rname);
-                        vol_stamp_class(v, newino, INVFS_CLASS_CODEC,
-                                        INVFS_ALGO_APE, tz_codec_gen(INVFS_ALGO_APE));
-                        swept_any = 1;
-                    }
-                }
-                free(ape); free(full); free(rec);
-                return swept_any ? 0 : 1;
-            }
-            guard_algo = INVFS_ALGO_APE;
-            free(ape);
-        }
-        free(full);
-    }
-
-    /* Which path can be taken. A file whose segments are ALL still RAW can be
-       handed to a fresh inode id wholesale. A partially swept one cannot: the
-       already-Shadow segments are mapped under the old id, and
-       vol_delete_inode(old) frees every block the old id's maps name -- it
-       would free blocks the new record still uses. Such a file can only come
-       from a volume damaged by the pre-atomic code (a mid-file alloc failure);
-       finish it the old way, in place, which is the behaviour it already had. */
-    for (i = 0; i < ast_h.num_blocks; i++)
-        if (ents[i].zone != INVFS_ZONE_RAW) { all_raw = 0; break; }
-    /* WP16b DEFER_ENOSPC: the atomic path stores the whole new shape before
-     * the old blocks retire, so price the worst case up front -- the
-     * original's own size raw (an incompressible segment stores as-is) plus
-     * per-segment framing plus the flat margin -- and defer cheaply instead
-     * of reading + recompressing every segment just to unwind at the first
-     * failed alloc. The file waits RAW; the DEFER_ENOSPC stamp re-enters it
-     * on every later sweep (the class predicate's case). */
-    if (all_raw && ast_h.num_blocks > 0 &&
-        sweep_enospc(v, (uint64_t)ast_h.file_size +
-                        (uint64_t)ast_h.num_blocks * 8 + INVFS_ENOSPC_MARGIN)) {
-        vol_stamp_class(v, inode_id, INVFS_CLASS_DEFER_ENOSPC,
-                        INVFS_ALGO_ZSTD, tz_codec_gen(INVFS_ALGO_ZSTD));
-        free(rec);
-        return 1;
-    }
-    if (all_raw && ast_h.num_blocks > 0) {
-        if (vol_mark_dirty(v) != 0) { free(rec); return -1; }
-        new_id = v->next_inode_id++;
-    } else if (!all_raw) {
-        if (!invfs_sweep_ui_active())
-            fprintf(stderr, "sweep: %s is partially swept; finishing in place "
-                            "(pre-atomic volume)\n", rname);
-    }
-
-    for (i = 0; i < ast_h.num_blocks; i++) {
-        invfs_ast_block_entry *e = &ents[i];
-        uint64_t pba_old = 0, phys_len_old = 0;
-        uint32_t hdr_old, crc_old;
-        uint8_t *blob_old = NULL, *orig = NULL;
-        size_t orig_len = e->length;
-        uint64_t pba_new, phys_blocks_new;
-        uint32_t csize_new, crc_new;
-        uint8_t *cbuf_new = NULL;
-        int cbound;
-        uint8_t hdr4[8];  /* [4B csize][4B crc] — was [4] = stack overflow */
-
-        if (e->zone != INVFS_ZONE_RAW)
-            continue;  /* already swept */
-        /* 1. read old segment. WP27: the entry carries the pba; the
-         * physical length derives from the segment's framed header. */
-        pba_old = e->pba;
-        if (pba_old == 0 || pba_old >= v->sb.total_blocks) {
-            fprintf(stderr, "sweep: invalid pba seg %u\n", e->block_id);
-            sweep_unwind(v, new_id ? ents : NULL, ast_h.num_blocks); free(rec); return -1;
-        }
-        {
-            uint8_t hdrb[8];
-            if (io_seek(&v->io, pba_old * INVFS_BLOCK_SIZE) != 0 ||
-                io_read(&v->io, hdrb, 8) != 0) { sweep_unwind(v, new_id ? ents : NULL, ast_h.num_blocks); free(rec); return -1; }
-            memcpy(&hdr_old, hdrb, 4);
-            memcpy(&crc_old, hdrb + 4, 4);
-        }
-        phys_len_old = ((uint64_t)hdr_old + 8 + INVFS_BLOCK_SIZE - 1) /
-                       INVFS_BLOCK_SIZE;
-        blob_old = (uint8_t *)malloc(hdr_old);
-        if (!blob_old) { sweep_unwind(v, new_id ? ents : NULL, ast_h.num_blocks); free(rec); return -1; }
-        if (io_seek(&v->io, pba_old * INVFS_BLOCK_SIZE + 8) != 0 ||
-            io_read(&v->io, blob_old, hdr_old) != 0) { free(blob_old); sweep_unwind(v, new_id ? ents : NULL, ast_h.num_blocks); free(rec); return -1; }
-        /* deep protection: verify segment CRC32C */
-        if (crc_old != 0 && invfs_crc32c(blob_old, hdr_old) != crc_old) {
-            fprintf(stderr, "sweep: segment CRC mismatch inode %llu seg %u\n",
-                    (unsigned long long)inode_id, e->block_id);
-            free(blob_old); sweep_unwind(v, new_id ? ents : NULL, ast_h.num_blocks); free(rec); return -1;
-        }
-
-        /* 2. decompress to original */
-        orig = (uint8_t *)malloc(orig_len ? orig_len : 1);
-        if (!orig) { free(blob_old); sweep_unwind(v, new_id ? ents : NULL, ast_h.num_blocks); free(rec); return -1; }
-        if (e->algo == INVFS_ALGO_LZ4) {
-            int got = LZ4_decompress_safe((const char *)blob_old, (char *)orig,
-                                          (int)hdr_old, (int)orig_len);
-            if (got != (int)orig_len) { free(blob_old); free(orig); sweep_unwind(v, new_id ? ents : NULL, ast_h.num_blocks); free(rec); return -1; }
-        } else if (e->algo == INVFS_ALGO_ZSTD) {
-            /* WP23 (cross-lane touch, flagged for the WP22e lane): a RAW
-             * segment written under fill pressure is ZSTD -- decode it
-             * with the same per-segment dispatch the read paths already
-             * had, or the sweep would mis-decode it as verbatim NONE. */
-            size_t got = ZSTD_decompress(orig, orig_len, blob_old, hdr_old);
-            if (ZSTD_isError(got) || got != orig_len) { free(blob_old); free(orig); sweep_unwind(v, new_id ? ents : NULL, ast_h.num_blocks); free(rec); return -1; }
-        } else {  /* NONE */
-            if (hdr_old != orig_len) { free(blob_old); free(orig); sweep_unwind(v, new_id ? ents : NULL, ast_h.num_blocks); free(rec); return -1; }
-            memcpy(orig, blob_old, orig_len);
-        }
-        free(blob_old);
-
-        /* 3. recompress at the volume's profile (WP16b/WP19): the levelled
-         * profiles re-encode ZSTD (default balanced = the historical 19);
-         * the meta-profiles substitute the floor codec at admission --
-         * fastest = LZ4, turbo = verbatim store. Fallback raw as always. */
-        cbound = (v->profile == INVFS_PROFILE_FASTEST)
-               ? LZ4_compressBound((int)orig_len)
-               : (int)ZSTD_compressBound(orig_len);
-        cbuf_new = (uint8_t *)malloc((size_t)cbound + 8 + INVFS_BLOCK_SIZE);
-        if (!cbuf_new) { free(orig); sweep_unwind(v, new_id ? ents : NULL, ast_h.num_blocks); free(rec); return -1; }
-        switch (invfs_profile_generic_algo(v->profile)) {
-        case INVFS_ALGO_NONE:      /* turbo: verbatim, segment-aligned */
-            csize_new = (uint32_t)orig_len;
-            memcpy(cbuf_new + 8, orig, orig_len);
-            e->algo = INVFS_ALGO_NONE;
-            break;
-        case INVFS_ALGO_LZ4:       /* fastest */
-            csize_new = (uint32_t)LZ4_compress_default((const char *)orig,
-                                                       (char *)(cbuf_new + 8),
-                                                       (int)orig_len, cbound);
-            if (csize_new == 0 || csize_new >= orig_len) {
-                csize_new = (uint32_t)orig_len;
-                memcpy(cbuf_new + 8, orig, orig_len);
-                e->algo = INVFS_ALGO_NONE;
-            } else {
-                e->algo = INVFS_ALGO_LZ4;
-            }
-            break;
-        default:                   /* the levelled ZSTD profiles */
-            csize_new = (uint32_t)ZSTD_compress(cbuf_new + 8, cbound, orig,
-                                                orig_len,
-                                                invfs_profile_zstd_level(v->profile));
-            if (ZSTD_isError(csize_new) || csize_new >= orig_len) {
-                csize_new = (uint32_t)orig_len;   /* store raw */
-                memcpy(cbuf_new + 8, orig, orig_len);
-                e->algo = INVFS_ALGO_NONE;
-            } else {
-                e->algo = INVFS_ALGO_ZSTD;
-            }
-            break;
-        }
-        e->zone = INVFS_ZONE_BINARY;
-        /* block_id stays the segment index (L2P key) */
-        crc_new = invfs_crc32c(cbuf_new + 8, csize_new);
-
-        /* 4. write to Shadow zone */
-        phys_blocks_new = ((uint64_t)csize_new + 8 + INVFS_BLOCK_SIZE - 1) / INVFS_BLOCK_SIZE;
-        pba_new = alloc_blocks(v, v->sb.shadow_zone_start, v->sb.shadow_zone_blocks,
-                               phys_blocks_new, 1, INVFS_ALLOC_DATA);
-        if (pba_new == 0) { free(cbuf_new); free(orig); sweep_unwind(v, new_id ? ents : NULL, ast_h.num_blocks); free(rec); return -1; }
-        hdr4[0] = (uint8_t)(csize_new & 0xFF);
-        hdr4[1] = (uint8_t)((csize_new >> 8) & 0xFF);
-        hdr4[2] = (uint8_t)((csize_new >> 16) & 0xFF);
-        hdr4[3] = (uint8_t)((csize_new >> 24) & 0xFF);
-        hdr4[4] = (uint8_t)(crc_new & 0xFF);
-        hdr4[5] = (uint8_t)((crc_new >> 8) & 0xFF);
-        hdr4[6] = (uint8_t)((crc_new >> 16) & 0xFF);
-        hdr4[7] = (uint8_t)((crc_new >> 24) & 0xFF);
-        memcpy(cbuf_new, hdr4, 8);
-        new_bytes += (uint64_t)csize_new + 8;   /* WP10 gain accounting */
-        if (write_segment_blocks(v, pba_new, cbuf_new, (size_t)csize_new + 8,
-                                 phys_blocks_new) != 0) {
-            free(cbuf_new); free(orig); sweep_unwind(v, new_id ? ents : NULL, ast_h.num_blocks); free(rec); return -1;
-        }
-        free(cbuf_new);
-
-        /* 5. WP27: the entry carries the new segment's address -- no map,
-         * no journal traffic. On the atomic path the new pba lands in the
-         * in-memory copy of the record and the old record stays readable
-         * until the new one is published. */
-        e->pba = pba_new;
-        if (!new_id) {
-            /* 6. free old RAW blocks (in-place path only; the atomic path
-             * leaves them to vol_delete_inode of the old id, which is what
-             * makes the old record readable until the new one lands).
-             *
-             * Free exactly what was allocated: the physical block count
-             * derives from the segment's framed header (csize+8, padded to
-             * whole blocks -- the write_segment_blocks contract). */
-            vol_free_blocks(v, pba_old, phys_len_old);
-        }
-        free(orig);
-        swept_any = 1;
-
-        if (getenv("INVFS_DEBUG"))
-            printf("[sweep] inode %llu seg %u: RAW(%llu) -> SHADOW(%llu) %u bytes (%s)\n",
-                   (unsigned long long)inode_id, e->block_id,
-                   (unsigned long long)pba_old, (unsigned long long)pba_new,
-                   csize_new, e->algo == INVFS_ALGO_ZSTD ? "zstd" :
-                              e->algo == INVFS_ALGO_LZ4 ? "lz4" : "raw");
-    }
-
-    /* 7. Publish. On the atomic path the record is appended under new_id and
-     * the old one tombstoned -- the same delete+create shape every other
-     * transcode uses, and the reason vol_pre_record's ordering is enough here:
-     * new_id's maps are on disk before any record mentions new_id, and the old
-     * record stays readable until the instant the new one lands. */
-    if (swept_any && new_id) {
-        invfs_inode_rec *nh = (invfs_inode_rec *)rec;
-        char name[INVFS_MAX_NAME + 1];
-        size_t nlen = rec_h.name_len > INVFS_MAX_NAME ? INVFS_MAX_NAME : rec_h.name_len;
-        memcpy(name, rname, nlen);
-        name[nlen] = 0;
-
-        nh->inode_id = new_id;
-        crc_calc = invfs_crc32c(rec, rec_h.rec_len);
-        if (!(v->met0_present && v->meta_mapper) &&
-            inode_area_make_room(v, rec_h.rec_len + 4 +
-                INVFS_REC_HDR_LEN + nlen + 1 + 4) != 0) {
-            /* no room for the record AND the tombstone that must follow it */
-            fprintf(stderr, "sweep: inode area full (%s)\n", name);
-            sweep_unwind(v, new_id ? ents : NULL, ast_h.num_blocks); free(rec); return -1;
-        }
-        if (vol_pre_record(v) != 0) { sweep_unwind(v, new_id ? ents : NULL, ast_h.num_blocks); free(rec); return -1; }
-        /* Bug J: route the append through the mapper */
-        {
-            uint64_t npos;
-            int rc2 = vol_append_slot(v, (uint64_t)rec_h.rec_len + 4, &npos);
-            if (rc2 != 0) {
-                sweep_unwind(v, new_id ? ents : NULL, ast_h.num_blocks); free(rec); return -1;
-            }
-            if (io_seek(&v->io, npos) != 0 ||
-                io_write(&v->io, rec, rec_h.rec_len) != 0 ||
-                io_write(&v->io, &crc_calc, 4) != 0) {
-                sweep_unwind(v, new_id ? ents : NULL, ast_h.num_blocks); free(rec); return -1;
-            }
-            idx_put(v, name, nlen, new_id, npos, nh->file_size, nh->ctime);
-            idx_put_id(v, new_id, npos);
-        }
-        pba_ref_apply(v, rec, rec_h.rec_len, +1);
-        /* frees the old RAW blocks: they are still referenced by the old
-         * record until the retire drops it */
-        if (vol_delete_inode(v, inode_id, name) != 0)
-            fprintf(stderr, "sweep: %s transcoded but the old record survived; "
-                            "invf-fsck -f will reclaim it\n", name);
-    } else if (swept_any) {
-        /* in-place, pre-atomic volumes only (see the note above the loop) */
-        crc_calc = invfs_crc32c(rec, rec_h.rec_len);
-        if (io_seek(&v->io, rec_pos) != 0 ||
-            io_write(&v->io, rec, rec_h.rec_len) != 0 ||
-            io_write(&v->io, &crc_calc, 4) != 0) { free(rec); return -1; }
-        pba_ref_reset(v);   /* the record mutated in place; the pba map
-                             * rebuilds lazily from the live set */
-    } else {
-        sweep_unwind(v, new_id ? ents : NULL, ast_h.num_blocks);   /* nothing swept: give the id's maps back */
-    }
-    /* WP10 §2: stamp the outcome class. A codec guard that refused the file
-     * pins GENERIC_GUARD (retried when that codec's generation grows past the
-     * stored one); otherwise the file-level gain decides UNCOMPRESSIBLE vs
-     * GENERIC. A GUARD/MEMLIMIT stamp the caller set before we ran (it lives
-     * in the copied ext) wins over the gain verdict -- it carries the retry
-     * semantics the gain verdict knows nothing about. */
-    if (swept_any && ast_h.file_size > 0) {
-        uint64_t tid = new_id ? new_id : inode_id;
-        uint8_t oc = 0, oa = 0;
-        uint16_t og = 0;
-        int havec = vol_get_class(v, tid, &oc, &oa, &og) == 0;
-        if (guard_algo) {
-            vol_stamp_class(v, tid, INVFS_CLASS_GENERIC_GUARD,
-                            (uint8_t)guard_algo, tz_codec_gen(guard_algo));
-        } else if (!havec || oc == INVFS_CLASS_GENERIC ||
-                   oc == INVFS_CLASS_UNCOMPRESSIBLE) {
-            double pct = vol_min_gain_pct();
-            if ((double)new_bytes >=
-                (double)ast_h.file_size * (1.0 - pct / 100.0))
-                vol_stamp_class(v, tid, INVFS_CLASS_UNCOMPRESSIBLE, 0,
-                                invfs_registry_generation());
-            else
-                vol_stamp_class(v, tid, INVFS_CLASS_GENERIC, INVFS_ALGO_ZSTD,
-                                tz_codec_gen(INVFS_ALGO_ZSTD));
-        }
-    }
-    free(rec);
-    return swept_any ? 0 : 1;
-}
 
 
 /* ---- on-demand sweep core (embedded daemon / CLI) ---- */
@@ -695,69 +185,28 @@ size_t vol_pending_count(invfs_volume *v)
    blob has no sibling, so it checks the zone directly. */
 int vol_inode_first_zone(invfs_volume *v, uint64_t inode_id)
 {
-    uint64_t pos, bofs;
-    invfs_inode_rec rec_h;
-    uint8_t hb[INVFS_AST_HDR_V2_LEN];
-    invfs_ast_hdr ast_h;
-    invfs_ast_block_entry e0;
-    uint32_t ver;
+    invfs_v3_inode in;
+    invfs_ast_hdr ah;
+    const invfs_ast_block_entry *ents = NULL;
+    size_t n_ents = 0;
+    uint8_t *blob = NULL;
+    size_t blen = 0;
+    int zone = -1;
+    static const uint8_t zero_addr[INVFS_V3_RECIPE_ADDR_LEN];
 
-    /* WP-M21b: v3 -- no record stream to locate; the zone of entry 0
-     * comes from the content-addressed recipe blob (same parse the read
-     * path uses). Without this the absent-class branch of vol_sweep_one
-     * saw fz == -1 != RAW for EVERY v3 file and skipped the whole live
-     * set ("sweep done: swept=0 skipped=N"). */
-    if (v->sb.vol_flags & VOLF_V3) {
-        invfs_v3_inode in;
-        invfs_ast_hdr ah;
-        const invfs_ast_block_entry *ents = NULL;
-        size_t n_ents = 0;
-        uint8_t *blob = NULL;
-        size_t blen = 0;
-        int zone = -1;
-        static const uint8_t zero_addr[INVFS_V3_RECIPE_ADDR_LEN];
-
-        if (vol_v3_inode_get(v, inode_id, &in) != 1)
-            return -1;
-        if (in.size == 0 ||
-            memcmp(in.recipe_addr, zero_addr,
-                   INVFS_V3_RECIPE_ADDR_LEN) == 0)
-            return -1;                  /* empty file: no zone */
-        if (vol_v3_recipe_load(v, in.recipe_addr, &blob, &blen) != 0)
-            return -1;
-        if (vol_ast_recipe_parse(blob, blen, &ah, &ents, &n_ents) == 0 &&
-            n_ents > 0)
-            zone = ents[0].zone;
-        free(blob);
-        return zone;
-    }
-
-    /* WP42: mapper-aware locate; legacy volumes keep the contiguous scan */
-    pos = sweep_locate_record(v, inode_id, &rec_h);
-    if (pos == 0) return -1;
-    /* WP58a: the body offset depends on the variable-length name; rec_h is
-     * the 36-byte prefix, so derive it from rec_len-independent fields. */
-    bofs = (uint64_t)INVFS_REC_HDR_LEN + rec_h.name_len + 1;
-    /* recipe header length is version-dependent (16 B v1 / 24 B v2):
-     * read the version word first, then the full header, then entry 0
-     * behind it */
-    if (io_seek(&v->io, pos + bofs) != 0 ||
-        io_read(&v->io, &ver, 4) != 0) return -1;
-    if (ver != INVFS_AST_VERSION_V1 && ver != INVFS_AST_VERSION_V2)
+    if (vol_v3_inode_get(v, inode_id, &in) != 1)
         return -1;
-    {
-        size_t need = ver == INVFS_AST_VERSION_V1 ? INVFS_AST_HDR_V1_LEN
-                                                  : INVFS_AST_HDR_V2_LEN;
-        if (io_seek(&v->io, pos + bofs) != 0 ||
-            io_read(&v->io, hb, need) != 0)
-            return -1;
-        if (invfs_ast_hdr_parse(hb, need, &ast_h) != 0)
-            return -1;
-        if (ast_h.num_blocks == 0) return -1;
-        if (io_seek(&v->io, pos + bofs + need) != 0 ||
-            io_read(&v->io, &e0, sizeof e0) != 0) return -1;
-    }
-    return (int)e0.zone;
+    if (in.size == 0 ||
+        memcmp(in.recipe_addr, zero_addr,
+               INVFS_V3_RECIPE_ADDR_LEN) == 0)
+        return -1;                  /* empty file: no zone */
+    if (vol_v3_recipe_load(v, in.recipe_addr, &blob, &blen) != 0)
+        return -1;
+    if (vol_ast_recipe_parse(blob, blen, &ah, &ents, &n_ents) == 0 &&
+        n_ents > 0)
+        zone = ents[0].zone;
+    free(blob);
+    return zone;
 }
 
 
@@ -766,39 +215,7 @@ int vol_inode_first_zone(invfs_volume *v, uint64_t inode_id)
  * part ("name!partN") looks exactly like this before batching; a part
  * holding anything else (a whole-file JXL/APE blob, a batch member) is not
  * a candidate. 1 = the shape matches. */
-static int part_generic_segments(invfs_volume *v, uint64_t inode_id)
-{
-    uint8_t *buf = NULL;
-    uint32_t rl = 0;
-    invfs_ast_hdr ah;
-    const invfs_ast_block_entry *ents;
-    size_t base;
-    uint32_t i;
-    int ok = 0;
 
-    if (meta_read_record_by_id(v, inode_id, &buf, &rl, NULL, 0, NULL) != 0)
-        return 0;
-    base = (size_t)(invfs_rec_cbody((const invfs_inode_rec *)buf) - buf);
-    if (rl >= base + INVFS_AST_HDR_V1_LEN &&
-        invfs_ast_hdr_parse(buf + base, rl - base, &ah) == 0 &&
-        ah.num_blocks && ah.num_children == 0 &&
-        rl >= base + ah.hdr_len +
-               (size_t)ah.num_blocks * sizeof(invfs_ast_block_entry)) {
-        ents = (const invfs_ast_block_entry *)(buf + base + ah.hdr_len);
-        ok = 1;
-        for (i = 0; i < ah.num_blocks; i++) {
-            if (ents[i].zone != INVFS_ZONE_BINARY ||
-                (ents[i].algo != INVFS_ALGO_NONE &&
-                 ents[i].algo != INVFS_ALGO_LZ4 &&
-                 ents[i].algo != INVFS_ALGO_ZSTD)) {
-                ok = 0;
-                break;
-            }
-        }
-    }
-    free(buf);
-    return ok;
-}
 
 /* `max_out` (WP103): 0 = the original rule -- the blob only has to be
  * smaller than the input, which is the right bar for a pack that SNIFFED the
@@ -992,32 +409,27 @@ static int sweep_lane_ref_size(const char *name, const uint8_t *full,
 
 static int sweep_dispatch(invfs_volume *v, uint64_t inode_id,
                           const char *name, const uint8_t *full,
-                          size_t full_len, int v3)
+                          size_t full_len)
 {
     char rname[272], p0name[272], jn[272];
     int declined_algo = 0;   /* WP103: the pack the WP13 loop already tried */
     /* WP202: the address the row carries RIGHT NOW, captured before any lane
      * below can supersede it in place.
      *
-     * On v3 every builtin container lane ends in vol_create_*_file ->
+     * Every builtin container lane ends in vol_create_*_file ->
      * vol_create_blob_file -> vol_v3_create_content_node, which reuses the
      * dirent's inode id and replaces the row: the moment the lane lands, the
      * recipe that named the ORIGINAL file's segments is unreachable, and
      * nothing frees it. vol_create_blob_file is handed the NEW address and
      * never the old one, so the capture has to happen here, at the call site
      * -- the same discipline (and the same reasoning) as the containerpack
-     * commit at vol_cpack.c:3276-3282.
-     *
-     * On v2 the row is not superseded: the lane appends a new record under a
-     * NEW inode id and tombstones the old one, which is what the
-     * `vol_delete_inode` at each lane already does, and old_addr stays unused. */
+     * commit at vol_cpack.c:3276-3282. */
     uint8_t old_addr[INVFS_V3_RECIPE_ADDR_LEN];
     memset(old_addr, 0, sizeof old_addr);
-    if (v3) {
-        invfs_v3_inode in;
-        if (vol_v3_inode_get(v, inode_id, &in) == 1)
-            memcpy(old_addr, in.recipe_addr, sizeof old_addr);
-    }
+
+    invfs_v3_inode in;
+    if (vol_v3_inode_get(v, inode_id, &in) == 1)
+        memcpy(old_addr, in.recipe_addr, sizeof old_addr);
 
     if (!name || !name[0] || !full || full_len < 4)
         return SWEEP_DECLINED;
@@ -1041,34 +453,6 @@ static int sweep_dispatch(invfs_volume *v, uint64_t inode_id,
     if (heat_any_whot(v) && heat_file_maxw(v, inode_id) >= INVFS_WHEAT_HOT)
         return SWEEP_DECLINED;
 
-    /* ZIP container: explode into AST children (keep original bytes).
-     * WP78: vol_create_container_file still writes a v2 record, so a v3
-     * volume leaves ZIP to the generic floor (parity TODO). */
-    if (!v3 && full[0] == 'P' && full[1] == 'K' &&
-        ((full[2] == 3 && full[3] == 4) || (full[2] == 5 && full[3] == 6))) {
-        invfs_ast_child_entry *ch =
-            (invfs_ast_child_entry *)calloc(MAX_AST_CHILDREN, sizeof(*ch));
-        if (ch) {
-            int n = vol_zip_parse_children(full, full_len, ch, MAX_AST_CHILDREN);
-            if (n > 0) {
-                uint64_t nino = vol_create_container_file(v, name, full, full_len,
-                                                          ch, (size_t)n);
-                if (nino) {
-                    vol_delete_inode(v, inode_id, name);
-                    vol_stamp_class(v, nino, INVFS_CLASS_CONTAINER,
-                                    INVFS_ALGO_ZIPR, tz_codec_gen(INVFS_ALGO_ZIPR));
-                    free(ch);
-                    return 1;
-                }
-                /* recognized but refused: retry only on a new generation */
-                vol_stamp_class(v, inode_id, INVFS_CLASS_GENERIC_GUARD,
-                                INVFS_ALGO_ZIPR, tz_codec_gen(INVFS_ALGO_ZIPR));
-            }
-            free(ch);
-        }
-        return 0;
-    }
-
     /* FLAC -> APE(PCM) + frame recipe (bit-exact) */
     if (full_len >= 4 && memcmp(full, "fLaC", 4) == 0) {
         snprintf(rname, sizeof rname, "%s!recipe", name);
@@ -1079,11 +463,9 @@ static int sweep_dispatch(invfs_volume *v, uint64_t inode_id,
                             INVFS_ALGO_FLACR, tz_codec_gen(INVFS_ALGO_FLACR));
             return 0;
         }
-        /* WP202: on v3 the lane SUPERSEDED the row in place, so the old
-         * recipe's data segments are the lane's to release; on v2 the row
-         * still exists and the tombstone is the whole job. */
-        if (v3) vol_v3_release_superseded_blob(v, inode_id, old_addr);
-        else if (vol_delete_inode(v, inode_id, name) != 0) return -1;
+        /* WP202: the lane SUPERSEDED the row in place, so the old recipe's
+         * data segments are the lane's to release. */
+        vol_v3_release_superseded_blob(v, inode_id, old_addr);
         vol_stamp_class(v, nino, INVFS_CLASS_CONTAINER,
                         INVFS_ALGO_FLACR, tz_codec_gen(INVFS_ALGO_FLACR));
         return 2;   /* FLAC */
@@ -1100,11 +482,9 @@ static int sweep_dispatch(invfs_volume *v, uint64_t inode_id,
                             INVFS_ALGO_TARR, tz_codec_gen(INVFS_ALGO_TARR));
             return 0;
         }
-        /* WP202: on v3 the lane SUPERSEDED the row in place, so the old
-         * recipe's data segments are the lane's to release; on v2 the row
-         * still exists and the tombstone is the whole job. */
-        if (v3) vol_v3_release_superseded_blob(v, inode_id, old_addr);
-        else if (vol_delete_inode(v, inode_id, name) != 0) return -1;
+        /* WP202: the lane SUPERSEDED the row in place, so the old recipe's
+         * data segments are the lane's to release. */
+        vol_v3_release_superseded_blob(v, inode_id, old_addr);
         vol_stamp_class(v, nino, INVFS_CLASS_CONTAINER,
                         INVFS_ALGO_TARR, tz_codec_gen(INVFS_ALGO_TARR));
         defer_container_parts(v, name);   /* WP14b: batch parts this run */
@@ -1122,11 +502,9 @@ static int sweep_dispatch(invfs_volume *v, uint64_t inode_id,
                             INVFS_ALGO_GZR, tz_codec_gen(INVFS_ALGO_GZR));
             return 0;
         }
-        /* WP202: on v3 the lane SUPERSEDED the row in place, so the old
-         * recipe's data segments are the lane's to release; on v2 the row
-         * still exists and the tombstone is the whole job. */
-        if (v3) vol_v3_release_superseded_blob(v, inode_id, old_addr);
-        else if (vol_delete_inode(v, inode_id, name) != 0) return -1;
+        /* WP202: the lane SUPERSEDED the row in place, so the old recipe's
+         * data segments are the lane's to release. */
+        vol_v3_release_superseded_blob(v, inode_id, old_addr);
         vol_stamp_class(v, nino, INVFS_CLASS_CONTAINER,
                         INVFS_ALGO_GZR, tz_codec_gen(INVFS_ALGO_GZR));
         defer_container_parts(v, name);   /* WP14b: batch parts this run */
@@ -1165,11 +543,9 @@ static int sweep_dispatch(invfs_volume *v, uint64_t inode_id,
                             INVFS_ALGO_PNGR, tz_codec_gen(INVFS_ALGO_PNGR));
             return 0;
         }
-        /* WP202: on v3 the lane SUPERSEDED the row in place, so the old
-         * recipe's data segments are the lane's to release; on v2 the row
-         * still exists and the tombstone is the whole job. */
-        if (v3) vol_v3_release_superseded_blob(v, inode_id, old_addr);
-        else if (vol_delete_inode(v, inode_id, name) != 0) return -1;
+        /* WP202: the lane SUPERSEDED the row in place, so the old recipe's
+         * data segments are the lane's to release. */
+        vol_v3_release_superseded_blob(v, inode_id, old_addr);
         vol_stamp_class(v, nino, INVFS_CLASS_CONTAINER,
                         INVFS_ALGO_PNGR, tz_codec_gen(INVFS_ALGO_PNGR));
         return 5;   /* PNG */
@@ -1224,9 +600,8 @@ static int sweep_dispatch(invfs_volume *v, uint64_t inode_id,
             /* WP202: on v3 the lane SUPERSEDED the row in place, so the old
              * recipe's data segments are the lane's to release; on v2 the row
              * still exists and the tombstone is the whole job. */
-            if (v3) vol_v3_release_superseded_blob(v, inode_id, old_addr);
-            else if (vol_delete_inode(v, inode_id, name) != 0) return -1;
-            vol_stamp_class(v, nino, INVFS_CLASS_CODEC,
+            vol_v3_release_superseded_blob(v, inode_id, old_addr);
+                vol_stamp_class(v, nino, INVFS_CLASS_CODEC,
                             INVFS_ALGO_PMP, tz_codec_gen(INVFS_ALGO_PMP));
             return 8;   /* MP3 */
             }
@@ -1700,7 +1075,7 @@ static int vol_sweep_one_v3(invfs_volume *v, uint64_t inode_id,
             if (vol_read_inode(v, inode_id, 0, &full, &full_len) == 0 && full) {
                 if (full_len == (size_t)in.size) {
                     int drc = sweep_dispatch(v, inode_id, name, full,
-                                             full_len, 1);
+                                             full_len);
                     free(full);
                     full = NULL;
                     if (drc != SWEEP_DECLINED)
@@ -2206,245 +1581,26 @@ static int vol_sweep_one_v3(invfs_volume *v, uint64_t inode_id,
 int vol_sweep_one_ex(invfs_volume *v, uint64_t inode_id, const char *name,
                       invfs_sweep_file_progress_fn progress, void *progress_user)
 {
-    uint8_t *full = NULL;
-    size_t full_len = 0;
-
-    if (!v || inode_id == 0) return 0;
-
-    /* WP-M23: active session guard by id and name */
-    if (vol_write_active_id(v, inode_id)) return 0;
-    if (name && name[0] && vol_write_active_name(v, name)) return 0;
-
-    /* WP-M21b: v3 volumes take the blob-store path; everything below
-     * this line is v2 record surgery. */
-    if (v->sb.vol_flags & VOLF_V3) {
-        uint64_t live = inode_id;
-        /* A record can be REPLACED between the walk that collected the id
-         * and this call: a container commit -- or a decomposition migration
-         * re-deriving one, which re-creates every "!mbr*" sibling -- retires
-         * the old inode under the same name. A stale id is not a hard error,
-         * it is a name that now resolves elsewhere: re-resolve and sweep the
-         * live record (which the next run would have done anyway). */
-        if (name && name[0]) {
-            uint64_t n = vol_find(v, name);
-            if (n) {
-                if (n != live && getenv("INVFS_DEBUG_PACKS"))
-                    fprintf(stderr, "sweep: %s: record replaced mid-sweep "
-                                    "(id %llu -> %llu), sweeping the live "
-                                    "one\n", name,
-                            (unsigned long long)live,
-                            (unsigned long long)n);
-                live = n;
-            }
-        }
-        return vol_sweep_one_v3(v, live, name, progress, progress_user);
-    }
-
-    if (!name || strlen(name) > 240) return 0;
-    /* internal control names (the "\x01tzb" batch owner) are never swept */
-    if ((uint8_t)name[0] == 0x01) return 0;
-
-    /* WP10 §2: class-aware walk predicate. A present class flag decides
-     * skip/retry/downgrade without touching content; absent = the legacy
-     * rule (RAW zone = full path below, anything else = already swept). */
-    {
-        uint8_t ccls = 0, calgo = 0;
-        uint16_t cgen = 0;
-        if (vol_get_class(v, inode_id, &ccls, &calgo, &cgen) == 0) {
-            const invfs_codec *cc = invfs_codec_by_algo(calgo);
-            switch (ccls) {
-            case INVFS_CLASS_UNCOMPRESSIBLE:
-                /* Retry only when the registry grew AND a codec actually
-                 * sniffs the content now (the sniff is the cheap part --
-                 * one head segment, no full read). */
-                if (invfs_registry_generation() <= cgen) return 0;
-                if (!tz_sniff_any(v, inode_id, name)) {
-                    /* Nothing claims it even now: advance the snapshot so
-                     * the next sweep skips the sniff until the registry
-                     * grows again. */
-                    vol_stamp_class(v, inode_id, INVFS_CLASS_UNCOMPRESSIBLE, 0,
-                                    invfs_registry_generation());
-                    return 0;
-                }
-                break;
-            case INVFS_CLASS_GENERIC_GUARD:
-                if (!cc || cc->generation <= cgen) return 0;
-                /* WP12(b): a JXL retry lives behind the generic store
-                 * now -- the RAW-gated branch can never see it again */
-                if (calgo == INVFS_ALGO_JXL)
-                    return vol_jxl_retry(v, inode_id, name);
-                break;   /* new sub-encoder: retry via the full path */
-            case INVFS_CLASS_GENERIC_MEMLIMIT:
-                if (!cc || cc->dec_mem_bytes > vol_get_dec_mem_limit(v))
-                    return 0;
-                /* both stamps live behind the generic store now, so the
-                 * RAW-gated branch below can never see them again */
-                if (calgo == INVFS_ALGO_JXL)
-                    return vol_jxl_retry(v, inode_id, name);
-                if (calgo == INVFS_ALGO_EXER)
-                    return vol_exer_retry(v, inode_id, name);
-                break;   /* the policy now admits the codec: retry */
-            case INVFS_CLASS_DEFER_ENOSPC:
-                /* WP16b: the sweep deferred this file for free space. Space
-                 * is a property of NOW, not of the file or the codec, so the
-                 * file re-enters the full path on EVERY sweep (like an
-                 * absent stamp): admitted when the free blocks suffice,
-                 * re-stamped (a check-then-write no-op) when they do not. */
-                break;
-            case INVFS_CLASS_ANCHORED:
-                /* WP59a: anchored files must never be transcoded by a
-                 * pack/container codec (the chicken-and-egg: you need packs
-                 * to read pack-coded files, but the packs themselves must
-                 * be readable without packs).  Leave the file alone;
-                 * builtin LZ4/ZSTD/PPMd-via-batch remain admissible if the
-                 * file enters the full path through the absent-stamp branch
-                 * (a fresh sweep), but this class stamp prevents the sweep
-                 * from re-entering the full path on subsequent runs. */
-                return 0;
-            default: {
-                /* TEXT/BATCHED_BIN/CODEC/CONTAINER/GENERIC: policy
-                 * compliance. The generic floor codecs (NONE/LZ4/ZSTD) are
-                 * always compliant -- there is nothing cheaper left to
-                 * downgrade INTO. (A BATCHED_BIN member stamped with the
-                 * ZSTD_BCJ AST tag finds no registry entry -- the BCJ tag
-                 * names a pipeline stage, not a codec -- and skips the
-                 * codec-level checks entirely; the batch-size rule below is
-                 * its compliance check.) */
-                int violated = 0;
-                if (cc && calgo != INVFS_ALGO_NONE &&
-                    calgo != INVFS_ALGO_LZ4 && calgo != INVFS_ALGO_ZSTD) {
-                    if (cc->dec_mem_bytes > vol_get_dec_mem_limit(v))
-                        violated = 1;
-                    if (!violated && (cc->caps & INVFS_CODEC_CAP_WHOLEFILE) &&
-                        v->arc_budget) {
-                        uint64_t fsz = 0;
-                        vol_stat_full(v, name, NULL, &fsz, NULL);
-                        if (fsz > v->arc_budget) violated = 1;
-                    }
-                }
-                /* a batch that outgrew the cache budget un-batches: arc
-                 * refuses entries over budget/2 (arc.c), so the policy
-                 * guarantee is read-time, and the member re-stores generic.
-                 * BATCHED_BIN (WP14a) obeys the same rule -- the batch
-                 * payload's [4B usize] header is codec-independent, so
-                 * tz_member_oversized reads zstd batches unchanged. */
-                if (!violated && (ccls == INVFS_CLASS_TEXT ||
-                                  ccls == INVFS_CLASS_BATCHED_BIN) &&
-                    v->arc_budget &&
-                    tz_member_oversized(v, inode_id, v->arc_budget / 2))
-                    violated = 1;
-                /* WP14a migration path: a GENERIC file (pre-WP14a that
-                 * means per-segment ZSTD) whose head sniffs as an
-                 * executable family re-enters the full path below and
-                 * defers into the binary accumulator. ALWAYS on -- not
-                 * generation-gated: binary batching shipped in the same
-                 * build as this predicate, so a GENERIC stamp on a
-                 * binary-family file can only predate it, and re-batching
-                 * it is the upgrade the stamp exists to permit. (The
-                 * UNCOMPRESSIBLE stamp stays generation-gated: such a file
-                 * already proved the gain is not there.) */
-                if (!violated && ccls == INVFS_CLASS_GENERIC &&
-                    !strchr(name, '!')) {
-                    uint8_t head[8192];
-                    int got = vol_read_range(v, inode_id, 0, sizeof head,
-                                             head);
-                    if (got > 0 &&
-                        invfs_binary_family(head, (size_t)got, name) > 0)
-                        break;   /* -> full path: re-read + bz_defer */
-                }
-                if (!violated) return 0;
-                {
-                    /* the downgrade stamp names the batch PAYLOAD codec:
-                     * BCJ is a pipeline stage with no registry entry, so a
-                     * MEMLIMIT{ZSTD_BCJ} stamp could never re-arm (the
-                     * predicate's by_algo lookup finds nothing). ZSTD is
-                     * the codec the retry consults; it is always admitted,
-                     * so the re-batch fires on the very next sweep and
-                     * re-targets the CURRENT batch size. */
-                    uint8_t dalgo = (ccls == INVFS_CLASS_BATCHED_BIN &&
-                                     calgo == INVFS_ALGO_ZSTD_BCJ)
-                                  ? (uint8_t)INVFS_ALGO_ZSTD : calgo;
-                    return vol_store_generic(v, inode_id, name,
-                                             INVFS_CLASS_GENERIC_MEMLIMIT,
-                                             dalgo) == 0 ? 6 : -1;
-                }
-            }
-            }
-        } else {
-            int fz = vol_inode_first_zone(v, inode_id);
-            if (fz != INVFS_ZONE_RAW) {
-                /* WP14b (WP10 §12.7 v2): an extraction container's part
-                 * ("name!partN") stored per-segment generic -- absent class
-                 * stamp, BINARY zone, NONE/LZ4/ZSTD algos -- is a batching
-                 * candidate: sniff the head, defer into the binary or text
-                 * accumulator. Parts already in batches (zone TEXT) and
-                 * whole-file blob siblings skip here as before. The flush
-                 * re-validates from the live record. */
-                if (fz == INVFS_ZONE_BINARY && strchr(name, '!') &&
-                    part_generic_segments(v, inode_id)) {
-                    uint8_t head[8192];
-                    uint64_t fsz = 0;
-                    int got = vol_read_range(v, inode_id, 0, sizeof head,
-                                             head);
-                    int bfam, tfam;
-                    if (got > 0 &&
-                        vol_stat_full(v, name, NULL, &fsz, NULL) == 0 &&
-                        fsz) {
-                        bfam = invfs_binary_family(head, (size_t)got, name);
-                        if (bfam > 0 &&
-                            bz_defer(v, inode_id, name, fsz,
-                                     (uint32_t)bfam) == 0)
-                            return 10;   /* part -> ZSTD batch */
-                        tfam = invfs_text_family(name, head, (size_t)got);
-                        if (tfam > 0) {
-                            const invfs_codec *pc =
-                                invfs_codec_by_algo(INVFS_ALGO_PPMD);
-                            if (pc && pc->dec_mem_bytes >
-                                      vol_get_dec_mem_limit(v)) {
-                                vol_stamp_class(v, inode_id,
-                                                INVFS_CLASS_GENERIC_MEMLIMIT,
-                                                INVFS_ALGO_PPMD,
-                                                pc->generation);
-                            } else if (tz_defer(v, inode_id, name, fsz,
-                                                (uint32_t)tfam) == 0) {
-                                return 9;   /* part -> PPMd batch */
-                            }
-                        }
-                    }
-                }
-                /* Cheap reject before the expensive read. vol_read_file
-                   DECODES, so on an already-swept volume the old order paid
-                   a full packMP3/cjxl/APE decode per file just to conclude
-                   "nothing to do". Anything not in RAW has been swept; the
-                   one caller that still needs the decoded bytes
-                   (vol_sweep_file) re-checks the zone itself. (Legacy rule
-                   for files with no class flag.) */
-                return 0;
-            }
+    uint64_t live = inode_id;
+    /* A record can be REPLACED between the walk that collected the id
+     * and this call: a container commit -- or a decomposition migration
+     * re-deriving one, which re-creates every "!mbr*" sibling -- retires
+     * the old inode under the same name. A stale id is not a hard error,
+     * it is a name that now resolves elsewhere: re-resolve and sweep the
+     * live record (which the next run would have done anyway). */
+    if (name && name[0]) {
+        uint64_t n = vol_find(v, name);
+        if (n) {
+            if (n != live && getenv("INVFS_DEBUG_PACKS"))
+                fprintf(stderr, "sweep: %s: record replaced mid-sweep "
+                                "(id %llu -> %llu), sweeping the live "
+                                "one\n", name,
+                        (unsigned long long)live,
+                        (unsigned long long)n);
+            live = n;
         }
     }
-
-    if (vol_read_file(v, inode_id, &full, &full_len) != 0 || full_len < 4) {
-        free(full);
-        return 0;
-    }
-    /* WP78: one shared transcode decision for both the v2 and v3 paths */
-    {
-        int drc = sweep_dispatch(v, inode_id, name, full, full_len, 0);
-        free(full);
-        if (drc != SWEEP_DECLINED)
-            return drc;
-    }
-
-    /* generic: recompress RAW -> Shadow (profile codec). (WP16e: JPEG -> JXL
-     * no longer lands here -- the jxl codecpack's WP13 branch above owns it
-     * and reports 100+algo directly.) */
-    {
-        int rc = vol_sweep_file(v, inode_id);
-        if (rc == 0) return 6;      /* swept to Shadow */
-        if (rc < 0) return -1;      /* hard error */
-        return 0;                   /* already in Shadow: nothing done */
-    }
+    return vol_sweep_one_v3(v, live, name, progress, progress_user);
 }
 
 int vol_sweep_one(invfs_volume *v, uint64_t inode_id, const char *name)
@@ -2464,9 +1620,7 @@ int vol_sweep_one(invfs_volume *v, uint64_t inode_id, const char *name)
 int vol_sweep_file_generic(invfs_volume *v, uint64_t inode_id)
 {
     if (!v || !inode_id) return -1;
-    if (v->sb.vol_flags & VOLF_V3)
-        return vol_sweep_file(v, inode_id);
-    return vol_sweep_file_inner(v, inode_id, 1);
+    return vol_sweep_file(v, inode_id);
 }
 
 
@@ -2476,29 +1630,13 @@ int vol_sweep_file_generic(invfs_volume *v, uint64_t inode_id)
  * unreadable. Same scan the pending drain has always used. */
 int vol_sweep_name_of(invfs_volume *v, uint64_t id, char *nm, size_t cap)
 {
+    uint64_t parent;
+    int rc;
     if (!v || !nm || cap == 0) return 0;
-
-    /* WP-M18: v3 volumes use the dirent tree (delta-first) */
-    if (v->sb.vol_flags & VOLF_V3) {
-        uint64_t parent;
-        int rc = vol_v3_name_of(v, id, nm, cap, &parent);
-        return (rc > 0) ? 1 : 0;
-    }
-
-    /* v2: shared mapper-aware walker */
-    {
-        sweep_locate_ctx lc;
-        memset(&lc, 0, sizeof lc);
-        lc.want = id;
-        vol_records_walk(v, sweep_locate_cb, &lc);
-        if (!lc.found) return 0;
-        {
-            size_t nl = strlen(lc.name);
-            if (nl >= cap) return 0;
-            memcpy(nm, lc.name, nl + 1);
-        }
-        return 1;
-    }
+    /* WP-M18: the dirent tree, delta-first. The v2 alternative walked the
+     * append-only inode area to find the record carrying the name. */
+    rc = vol_v3_name_of(v, id, nm, cap, &parent);
+    return (rc > 0) ? 1 : 0;
 }
 
 
@@ -2540,7 +1678,7 @@ int vol_sweep_pending(invfs_volume *v)
      * at mkfs; fold is the reclaim path now). */
     /* WP-M18: after sweep walk + meta merge, try to fold the delta and then
      * schedule reclaim. Both are idempotent stubs in this WP; M15 fills them. */
-    if ((v->sb.vol_flags & VOLF_V3) && !(v->sb.vol_flags & VOLF_READONLY)) {
+    if (!(v->sb.vol_flags & VOLF_READONLY)) {
         (void)vol_v3_fold_request(v);
         (void)vol_reclaim_schedule(v);
     }
@@ -2632,23 +1770,12 @@ static int vol_pack_sweep(invfs_volume *v, uint64_t inode_id, const char *name,
         if (back &&
             pc->decode(enc, enc_len, back, full_len) == 0 &&
             memcmp(back, full, full_len) == 0) {
-            invfs_meta_pub keep;
-            int have_keep = vol_get_meta(v, inode_id, &keep) == 0;
-            uint64_t newino;
-            if (v->sb.vol_flags & VOLF_V3) {
-                newino = vol_v3_publish_blob_inode(v, inode_id, enc, enc_len,
-                                                   full_len, pc->algo);
-            } else {
-                newino = vol_create_blob_file(v, name, enc, enc_len,
-                                               full_len, pc->algo);
-                if (newino)
-                    vol_delete_inode(v, inode_id, name);
-                if (have_keep) {
-                    invfs_meta_pub chk;
-                    if (vol_get_meta(v, newino, &chk) != 0)
-                        vol_apply_meta(v, name, &keep);
-                }
-            }
+            /* vol_v3_publish_blob_inode carries the inode row forward in
+             * place; the v2 shape had to snapshot the ext and re-apply it
+             * over a freshly created blob record. */
+            uint64_t newino = vol_v3_publish_blob_inode(v, inode_id, enc,
+                                                       enc_len, full_len,
+                                                       pc->algo);
             if (newino) {
                 vol_stamp_class(v, newino, INVFS_CLASS_CODEC,
                                 (uint8_t)pc->algo, pc->generation);
@@ -2691,36 +1818,7 @@ typedef struct {
     size_t seen_n, seen_cap;
 } sweep_seen_ctx;
 
-static int sweep_seen_cb(void *ctx_, uint64_t rec_pos,
-                         const invfs_inode_rec *h, const uint8_t *rec)
-{
-    sweep_seen_ctx *c = (sweep_seen_ctx *)ctx_;
-    size_t nl, s;
-    (void)rec_pos; (void)rec;
-    if (h->magic != INODE_REC_MAGIC) return 0;   /* tombstone */
-    if (h->file_size == 0) return 0;             /* nothing to move */
-    if (h->name_len > INVFS_MAX_NAME ||
-        h->rec_len < INVFS_REC_HDR_LEN + h->name_len + 1)
-        return 0;
-    nl = h->name_len;
-    for (s = 0; s < c->seen_n; s++)
-        if (strncmp(c->seen[s].name, h->name, sizeof(c->seen[s].name)) == 0) {
-            c->seen[s].id = h->inode_id;   /* last record wins */
-            return 0;
-        }
-    if (c->seen_n == c->seen_cap) {
-        sweep_seed *ns;
-        c->seen_cap = c->seen_cap ? c->seen_cap * 2 : 4096;
-        ns = realloc(c->seen, c->seen_cap * sizeof(*ns));
-        if (!ns) return 1;   /* OOM: stop, resolve what we have */
-        c->seen = ns;
-    }
-    memset(c->seen[c->seen_n].name, 0, sizeof(c->seen[c->seen_n].name));
-    memcpy(c->seen[c->seen_n].name, h->name, nl);
-    c->seen[c->seen_n].id = h->inode_id;
-    c->seen_n++;
-    return 0;
-}
+
 
 
 /* WP-M21b: collector callback for the v3 live-set iterator. Internal
@@ -2750,40 +1848,11 @@ static int collect_sweepables_v3_cb(invfs_volume *v, uint64_t id,
 size_t vol_collect_sweepables_ex(invfs_volume *v, uint64_t *ids, size_t max,
                                  size_t *found_out)
 {
-    sweep_seen_ctx c;
-    size_t out = 0, s, found = 0;
-
-    if (found_out) *found_out = 0;
-    if (!v || !ids || max == 0) return 0;
-
-    /* WP-M21b: on v3 the live set is the base inode tree + delta overlay
-     * (M18 iterator) -- the v2 record walk below finds nothing there. */
-    if (v->sb.vol_flags & VOLF_V3) {
-        struct v3_sweep_ids vc;
-        vc.ids = ids; vc.max = max; vc.n = 0; vc.found = 0;
-        (void)vol_v3_iter_live_inodes(v, collect_sweepables_v3_cb, &vc);
-        if (found_out) *found_out = vc.found;
-        return vc.n;
-    }
-
-    memset(&c, 0, sizeof c);
-    /* WP42: the walker hops every mapper extent on v0.3.0+ volumes (the
-     * legacy loop saw only the empty contiguous area) and still bounds
-     * itself to [inode_area_start, inode_area_pos) on legacy volumes */
-    vol_records_walk(v, sweep_seen_cb, &c);
-    /* Resolve through the live index: tombstoned seeds drop out here. The
-     * loop deliberately does NOT stop at `out < max` any more -- the ids
-     * past the cap are dropped, but every record is still resolved, because
-     * the caller needs to be told how many there were. */
-    for (s = 0; s < c.seen_n; s++) {
-        uint64_t id = vol_find(v, c.seen[s].name);
-        if (id == 0) continue;
-        found++;
-        if (out < max) ids[out++] = id;
-    }
-    free(c.seen);
-    if (found_out) *found_out = found;
-    return out;
+    struct v3_sweep_ids vc;
+    vc.ids = ids; vc.max = max; vc.n = 0; vc.found = 0;
+    (void)vol_v3_iter_live_inodes(v, collect_sweepables_v3_cb, &vc);
+    if (found_out) *found_out = vc.found;
+    return vc.n;
 }
 
 size_t vol_collect_sweepables(invfs_volume *v, uint64_t *ids, size_t max)
@@ -2852,182 +1921,7 @@ typedef struct {
     int have_ms;
 } wstats_ctx;
 
-static int wstats_cb(void *ctx_, uint64_t rec_pos,
-                     const invfs_inode_rec *hp, const uint8_t *rb)
-{
-    wstats_ctx *ctx = (wstats_ctx *)ctx_;
-    invfs_volume *v = ctx->v;
-    invfs_volume_stats *out = ctx->out;
-    uint8_t *claimed = ctx->claimed;
-    int have_ms = ctx->have_ms;
-    invfs_inode_rec h = *hp;
-    const invfs_inode_rec *fr = (const invfs_inode_rec *)rb;
 
-    if (h.magic == TOMBSTONE_MAGIC) { out->tombstones++; return 0; }
-    if (h.name_len > INVFS_MAX_NAME ||
-        h.rec_len < INVFS_REC_HDR_LEN + h.name_len + 1)
-        return 0;
-    /* count each file once, at its live version: the name resolves to
-     * the current id and the id index points at the newest record.
-     * Older same-id versions (meta rewrites, class stamps, batch-owner
-     * growth) and replaced/deleted records would otherwise inflate every
-     * counter below. The position check uses rec_pos -- this record's
-     * own offset -- exactly what the legacy loop compared with
-     * pos - rec_len - 4 after advancing. */
-    {
-        uint64_t ip = idx_get_id(v, h.inode_id);
-        if (vol_find(v, fr->name) != h.inode_id || (ip && ip != rec_pos))
-            return 0;
-    }
-    /* WP-DZ: physical attribution by content class, for EVERY live
-     * record including the 0x01 internal owners (their blocks -- text
-     * batches, seal parity, the retention registry -- are real used
-     * bytes; the 0x01 exclusion below stays logical-only).
-     * WP27: the extent comes from the entry's pba; the physical
-     * length derives from the segment's framed header (owner classes
-     * carry it in the entry: reten length = blocks, tier/rawm length
-     * = bytes, parity = one block). */
-    if (have_ms) {
-        size_t pbase = (size_t)(invfs_rec_cbody(fr) - rb);
-        invfs_ast_hdr pah;
-        if (h.rec_len >= pbase + INVFS_AST_HDR_V1_LEN &&
-            invfs_ast_hdr_parse(rb + pbase, h.rec_len - pbase, &pah) == 0 &&
-            h.rec_len >= pbase + pah.hdr_len +
-                          (size_t)pah.num_blocks *
-                              sizeof(invfs_ast_block_entry)) {
-            const uint8_t *ep = rb + pbase + pah.hdr_len;
-            uint32_t pi;
-            int is_ret = h.name_len && (uint8_t)fr->name[0] == 0x01 &&
-                         h.name_len >= 6 &&
-                         memcmp(fr->name + 1, "reten", 5) == 0;
-            for (pi = 0; pi < pah.num_blocks; pi++) {
-                const uint8_t *e = ep + (size_t)pi *
-                                        sizeof(invfs_ast_block_entry);
-                uint32_t zab, zone;
-                uint64_t pba, plen = 0, b, bend;
-                memcpy(&zab, e + 16, 4);   /* zone:2 | algo:6 | bid:24 */
-                zone = zab & 3;
-                memcpy(&pba, e + 24, 8);
-                if (!pba || pba >= v->sb.total_blocks) continue;
-                if (is_ret) {
-                    uint64_t l;
-                    memcpy(&l, e + 8, 8);
-                    plen = l;              /* reten: BLOCKS */
-                } else if (h.name_len && (uint8_t)fr->name[0] == 0x01) {
-                    /* seal parity: one block; tier/rawm: the copy's
-                     * span in bytes; tzb: length is the DECODED size
-                     * -- the batch's extent derives from its frame */
-                    uint64_t l;
-                    memcpy(&l, e + 8, 8);
-                    if (!(h.name_len >= 4 &&
-                          memcmp(fr->name + 1, "tzb", 3) == 0) &&
-                        l && l % INVFS_BLOCK_SIZE == 0)
-                        plen = l / INVFS_BLOCK_SIZE;   /* parity/tier/rawm */
-                    else if (seg_extent(v, pba, NULL, &plen) != 0)
-                        continue;                        /* tzb batch */
-                } else if (seg_extent(v, pba, NULL, &plen) != 0)
-                    continue;   /* torn header: attribute nothing */
-                bend = pba + plen;
-                if (bend > v->sb.total_blocks) bend = v->sb.total_blocks;
-                for (b = pba; b < bend; b++) {
-                    if (bit_get(claimed, b)) continue;
-                    bit_set(claimed, b);
-                    if (zone == INVFS_ZONE_TEXT)
-                        out->text_used_bytes += INVFS_BLOCK_SIZE;
-                    else if (zone == INVFS_ZONE_BINARY)
-                        out->shadow_used_bytes += INVFS_BLOCK_SIZE;
-                    else
-                        out->raw_used_bytes += INVFS_BLOCK_SIZE;
-                }
-            }
-        }
-    }
-    {
-        invfs_meta_pub m;
-        int type = (vol_get_meta(v, h.inode_id, &m) == 0) ? m.type : -1;
-        switch (type) {
-        case INVFS_ITYP_DIR:  out->dirs++; break;
-        case INVFS_ITYP_LNK:  out->links++; break;
-        case INVFS_ITYP_FIFO: case INVFS_ITYP_SOCK:
-        case INVFS_ITYP_CHR:  case INVFS_ITYP_BLK: out->special++; break;
-        default: {
-            /* WP12(a)/WP52: internal owner records ("\x01tzb", "\x01rawm",
-             * "\x01tier0", "\x01parityN", "\x01reten") are engine
-             * bookkeeping, not regular files. They carry file_size = the
-             * sum of their sealed batches / mirror spans, so counting the
-             * owner as well as its members doubles the logical bytes (the
-             * Silesia image showed 309 MiB logical vs a 202 MiB corpus).
-             * With WP52's deferral re-enabled on mapper volumes these
-             * owners are now visible to the mapper-aware walk, so the
-             * exclusion must cover the file COUNT too -- otherwise the
-             * population grows by the owner records across a sweep.
-             * Physical used-bytes accounting is the class-based pass above
-             * and DOES include the internal owners. */
-            if (h.name_len && (uint8_t)fr->name[0] == 0x01)
-                break;
-            out->files++;
-            /* attribute logical size across the AST's zones */
-            {
-                /* record layout: rec header | AST header (v1 16B /
-                 * v2 24B -- WP22a; the parsed view carries the length)
-                 * | entries | children | INO2 ext. (An earlier version
-                 * of this loop added the whole AST blob length to the
-                 * base and read past it.) */
-                size_t base = (size_t)(invfs_rec_cbody(fr) - rb);
-                invfs_ast_hdr ah;
-                uint32_t nb = 0;
-                size_t hl = 0;
-                if (h.rec_len >= base + INVFS_AST_HDR_V1_LEN &&
-                    h.file_size > 0 &&
-                    invfs_ast_hdr_parse(rb + base, h.rec_len - base,
-                                        &ah) == 0) {
-                    hl = ah.hdr_len;
-                    if (h.rec_len < base + hl + (size_t)ah.num_blocks *
-                                              sizeof(invfs_ast_block_entry))
-                        nb = 0;     /* truncated recipe: attribute nothing */
-                    else
-                        nb = ah.num_blocks;
-                }
-                {
-                    uint64_t remain = h.file_size;
-                    uint32_t i;
-                    for (i = 0; i < nb && remain > 0; i++) {
-                        const uint8_t *e = rb + base + hl +
-                            (size_t)i * sizeof(invfs_ast_block_entry);
-                        uint32_t zone = e[16] & 3;   /* zone:2 LSB */
-                        uint64_t seg;
-                        /* TEXT entries are arbitrary-length slices of a
-                         * shared batch (not 64 KB segments): use the
-                         * entry's own length */
-                        if (zone == INVFS_ZONE_TEXT) {
-                            memcpy(&seg, e + 8, 8);
-                            if (seg > remain) seg = remain;
-                        } else {
-                            seg = remain > 65536 ? 65536 : remain;
-                        }
-                        remain -= seg;
-                        if (zone == INVFS_ZONE_TEXT)
-                            out->logic_text_bytes += seg;
-                        else if (zone == INVFS_ZONE_BINARY)
-                            out->logic_shadow_bytes += seg;
-                        else
-                            out->logic_raw_bytes += seg;
-                    }
-                }
-            }
-            if (h.file_size && vol_find(v, fr->name) == h.inode_id) {
-                out->logical_bytes += h.file_size;
-                if (h.file_size > out->biggest_size) {
-                    out->biggest_size = h.file_size;
-                    snprintf(out->biggest_name, sizeof(out->biggest_name),
-                             "%s", fr->name);
-                }
-            }
-        }
-        }
-    }
-    return 0;
-}
 
 /* WP-M21b: per-inode body of the v3 stats pass -- type straight from the
  * row (invfs_v3_inode.type), logical bytes from the row size. Internal
@@ -3133,93 +2027,28 @@ int vol_compute_stats(invfs_volume *v, invfs_volume_stats *out)
      * it (dedupe shares, the TEXT owner/member double references). */
     uint8_t *claimed = NULL;
     int have_ms = 0;
+    wstats_v3_ctx vc;
     if (!v || !out) return -1;
     memset(out, 0, sizeof(*out));
     claimed = (uint8_t *)calloc((size_t)(v->sb.total_blocks + 7) / 8, 1);
     if (claimed)
         have_ms = 1;   /* degrade: physical zeros, not a lie */
 
-    /* WP-M21b: v3 -- population from the live-set iterator (type comes
-     * from the inode row itself), physical from the zone bitmaps: the v3
-     * data plane still allocates RAW segments into the RAW zone and
-     * blob/drain segments into Shadow, so region attribution is exact.
-     * The per-class physical breakdown comes from the same recipe parse
-     * (each entry's zone tag over its own pba, each block claimed once),
-     * so it is a CONTENT-CLASS measure here exactly as the volume.h
-     * contract requires. */
-    if (v->sb.vol_flags & VOLF_V3) {
-        wstats_v3_ctx vc;
-        vc.v = v; vc.out = out; vc.claimed = claimed;
-        (void)vol_v3_iter_live_inodes(v, wstats_v3_cb, &vc);
-        /* raw/shadow/text_used_bytes are already CONTENT-CLASS measures,
-         * filled by the callback above. Do NOT recompute them as a scan of
-         * the raw/shadow REGIONS: zone boundaries are advisory and raw-class
-         * blocks legitimately live past raw_zone_blocks (the contract in
-         * volume.h says so). unclaimed is the one field that IS a region
-         * measure by definition -- data-region blocks no live recipe names
-         * -- so it is derived the same way the v2 path derives it. */
-        if (have_ms) {
-            uint64_t used = vol_zone_used_bytes(v, v->sb.raw_zone_start,
-                                                v->sb.total_blocks);
-            uint64_t cl = out->raw_used_bytes + out->shadow_used_bytes +
-                          out->text_used_bytes;
-            if (v->ndev == 2) {
-                uint64_t span = (v->sb.shadow_zone_start - v->dev0_blocks) *
-                                INVFS_BLOCK_SIZE;
-                used = span < used ? used - span : 0;
-            }
-            out->unclaimed_used_bytes = used > cl ? used - cl : 0;
-        }
-        free(claimed);
-        return 0;
-    }
-
-    {
-        wstats_ctx c;
-        c.v = v; c.out = out; c.claimed = claimed; c.have_ms = have_ms;
-        if (v->met0_present && v->meta_mapper && v->met0.extent_count > 0) {
-            /* WP41: mapper volume -- records live in dynamic meta
-             * extents (MET0 + mapper table). vol_records_walk() hops
-             * across every extent via vol_inode_next; the legacy
-             * contiguous walk saw zero records here (66182 files on the
-             * 15 GiB stage3 volume reported as 0). The walker
-             * CRC-verifies each record and skips torn ones silently. */
-            vol_records_walk(v, wstats_cb, &c);
-        } else {
-            /* legacy format_version=0: direct contiguous loop, kept
-             * byte-for-byte so regressions in the shared branch cannot
-             * leak into legacy handling. The per-record body is shared
-             * with the walker callback above. */
-            uint64_t pos, end;
-            pos = v->inode_area_start * INVFS_BLOCK_SIZE;
-            end = v->inode_area_pos;
-            while (pos + INVFS_REC_HDR_LEN + 1 <= end) {
-                invfs_inode_rec h;
-                uint8_t *rb;
-                uint32_t stored, calc;
-                if (io_seek(&v->io, pos) != 0 ||
-                    io_read(&v->io, &h, sizeof(h)) != 0) break;
-                if (h.magic != INODE_REC_MAGIC && h.magic != TOMBSTONE_MAGIC) break;
-                if (h.rec_len < INVFS_REC_HDR_LEN + 1 || h.rec_len > INVFS_MAX_REC_LEN ||
-                    pos + h.rec_len + 4 > end) { out->bad_records++; break; }
-                rb = malloc((size_t)h.rec_len + 4);
-                if (!rb) break;
-                if (io_seek(&v->io, pos) != 0 ||
-                    io_read(&v->io, rb, (size_t)h.rec_len + 4) != 0) { free(rb); break; }
-                memcpy(&stored, rb + h.rec_len, 4);
-                calc = invfs_crc32c(rb, h.rec_len);
-                if (calc != stored) { free(rb); out->bad_records++; pos += (uint64_t)h.rec_len + 4; continue; }
-                pos += (uint64_t)h.rec_len + 4;
-                (void)wstats_cb(&c, pos - ((uint64_t)h.rec_len + 4), &h, rb);
-                free(rb);
-            }
-        }
-    }
-    /* unattributed data-region blocks: used in the bitmap but claimed by
-     * no live record above (orphans awaiting fsck, crash debris). On a
-     * two-device volume the dev1 reserved span (metadata mirror + the
-     * RAW-width gap) is allocated by construction -- it is metadata, not
-     * content, so it never counts as unclaimed. */
+    /* WP-M21b: population from the live-set iterator (type comes from the
+     * inode row itself), physical from the zone bitmaps: the v3 data plane
+     * still allocates RAW segments into the RAW zone and blob/drain segments
+     * into Shadow, so region attribution is exact. The per-class physical
+     * breakdown comes from the same recipe parse (each entry's zone tag over
+     * its own pba, each block claimed once), so it is a CONTENT-CLASS measure
+     * here exactly as the volume.h contract requires. */
+    vc.v = v; vc.out = out; vc.claimed = claimed;
+    (void)vol_v3_iter_live_inodes(v, wstats_v3_cb, &vc);
+    /* raw/shadow/text_used_bytes are already CONTENT-CLASS measures,
+     * filled by the callback above. Do NOT recompute them as a scan of
+     * the raw/shadow REGIONS: zone boundaries are advisory and raw-class
+     * blocks legitimately live past raw_zone_blocks (the contract in
+     * volume.h says so). unclaimed is the one field that IS a region
+     * measure by definition -- data-region blocks no live recipe names. */
     if (have_ms) {
         uint64_t used = vol_zone_used_bytes(v, v->sb.raw_zone_start,
                                             v->sb.total_blocks);

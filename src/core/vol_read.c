@@ -271,31 +271,7 @@ static int vol_read_text_slice(invfs_volume *v, uint64_t inode_id,
  * which the legacy [inode_area_start, inode_area_pos) bound rejected. Accept
  * any position inside any mapper extent (mirroring vol_inode_next), or the
  * legacy contiguous region; anything else falls back to vol_records_walk(). */
-static int read_hint_valid(invfs_volume *v, uint64_t ip)
-{
-    const uint64_t rs = INVFS_REC_HDR_LEN;
-    if (!ip) return 0;
-    if (v->met0_present && v->meta_mapper) {
-        size_t ei;
-        int ok = 0;
-        pthread_rwlock_rdlock(&v->meta_lock);
-        for (ei = 0; ei < (size_t)v->met0.extent_count; ei++) {
-            uint64_t entry = meta_mapper_get(v, ei);
-            uint64_t start, stop;
-            if (!entry) break;
-            start = invfs_meta_ext_pba(entry) * INVFS_BLOCK_SIZE;
-            stop = start + invfs_meta_ext_size(entry);
-            if ((int)ei == (int)v->met0.active_extent &&
-                stop > v->inode_area_pos)
-                stop = v->inode_area_pos;
-            if (ip >= start && ip + rs <= stop) { ok = 1; break; }
-        }
-        pthread_rwlock_unlock(&v->meta_lock);
-        return ok;
-    }
-    return ip >= v->inode_area_start * INVFS_BLOCK_SIZE &&
-           ip + rs <= v->inode_area_pos;
-}
+
 
 typedef struct {
     uint64_t want;
@@ -303,37 +279,12 @@ typedef struct {
     int found;
 } read_locate_ctx;
 
-static int read_locate_cb(void *ctx_, uint64_t rec_pos,
-                          const invfs_inode_rec *h, const uint8_t *rec)
-{
-    read_locate_ctx *c = (read_locate_ctx *)ctx_;
-    (void)rec;
-    if (h->magic != INODE_REC_MAGIC || h->inode_id != c->want) return 0;
-    c->pos = rec_pos;
-    c->found = 1;
-    return 1;   /* found: stop the walk */
-}
+
 
 /* Locate the live INOD for inode_id: the O(1) index hint when it is valid
  * and names a record for this id, else the mapper-aware vol_records_walk().
  * Returns the record position, or 0 when absent. */
-static uint64_t read_locate_record(invfs_volume *v, uint64_t inode_id)
-{
-    uint64_t ip = idx_get_id(v, inode_id);
-    if (read_hint_valid(v, ip)) {
-        invfs_inode_rec h;
-        if (vol_read_raw(v, ip, &h, sizeof h) == 0 &&
-            h.magic == INODE_REC_MAGIC && h.inode_id == inode_id)
-            return ip;
-    }
-    {
-        read_locate_ctx lc;
-        memset(&lc, 0, sizeof lc);
-        lc.want = inode_id;
-        vol_records_walk(v, read_locate_cb, &lc);
-        return lc.found ? lc.pos : 0;
-    }
-}
+
 
 /* WP-M8: decode a parsed AST recipe (header + entries) into a caller-
  * allocated `data` of ast_h->file_size bytes. Shared verbatim by the v2
@@ -510,7 +461,7 @@ static const char *recname_of(vol_recname *rn)
         rn->buf[0] = 0;
         if (rn->pre && rn->pre[0]) {
             snprintf(rn->buf, sizeof rn->buf, "%s", rn->pre);
-        } else if (rn->v && (rn->v->sb.vol_flags & VOLF_V3)) {
+        } else if (rn->v) {
             /* return value ignored on purpose: vol_v3_path_of() leaves a
              * partial prefix in the buffer when the path does not fit, and
              * that is what the eager call handed the lanes. */
@@ -1305,219 +1256,106 @@ static int vol_decode_ast_entries(invfs_volume *v, uint64_t inode_id,
 int vol_read_inode(invfs_volume *v, uint64_t inode_id, unsigned depth,
                           uint8_t **out, size_t *out_len)
 {
-    uint64_t pos, end;
+    invfs_v3_inode in;
+    invfs_ast_hdr ah;
+    const invfs_ast_block_entry *ents = NULL;
+    size_t n_ents = 0;
+    uint8_t *blob = NULL;
+    size_t blen = 0;
     uint8_t *data = NULL;
     size_t len = 0;
-    char rec_name[INVFS_MAX_NAME + 1];
+    int rc;
+    static const uint8_t zero_addr[INVFS_V3_RECIPE_ADDR_LEN];
 
     /* WP-M8: a v3 volume has no append-only record stream. The inode row in
      * the base tree carries a content-addressed recipe *reference*; fetch
      * and BLAKE3-verify the immutable blob, then decode its segments with
-     * the exact same codec code as the v2 path (vol_decode_ast_entries).
+     * the exact same codec code (vol_decode_ast_entries).
      * An empty file (size 0 / no address) is the "no content" case.
      * WP-M11: vol_v3_inode_get and vol_v3_recipe_load resolve through the
      * delta overlay (delta first, then base), so a read observes the recent
      * tier without this function knowing about it. */
-    if (v->sb.vol_flags & VOLF_V3) {
-        invfs_v3_inode in;
-        invfs_ast_hdr ah;
-        const invfs_ast_block_entry *ents = NULL;
-        size_t n_ents = 0;
-        uint8_t *blob = NULL;
-        size_t blen = 0;
-        int rc = vol_v3_inode_get(v, inode_id, &in);
-        static const uint8_t zero_addr[INVFS_V3_RECIPE_ADDR_LEN];
-
-        if (rc != 1)
-            return -1;
-        /* The TYPE decides the shape of the content, before the address is
-         * even looked at: a raw-blob type (a symlink -- the blob IS the
-         * target string) is returned verbatim and never parsed as an AST.
-         * The predicate is shared with the checkers (volume.h) precisely so
-         * that neither side can drift from the other. */
-        if (invfs_inode_content_is_raw_blob(in.type)) {
-            if (in.size == 0 ||
-                memcmp(in.recipe_addr, zero_addr, INVFS_V3_RECIPE_ADDR_LEN) == 0) {
-                *out = (uint8_t *)calloc(1, 1);
-                if (!*out) return -1;
-                *out_len = 0;
-                return 0;
-            }
-            if (vol_v3_recipe_load(v, in.recipe_addr, &blob, &blen) != 0)
-                return -1;
-            *out = blob;
-            *out_len = blen;
-            return 0;
-        }
+    rc = vol_v3_inode_get(v, inode_id, &in);
+    if (rc != 1)
+        return -1;
+    /* The TYPE decides the shape of the content, before the address is
+     * even looked at: a raw-blob type (a symlink -- the blob IS the
+     * target string) is returned verbatim and never parsed as an AST.
+     * The predicate is shared with the checkers (volume.h) precisely so
+     * that neither side can drift from the other. */
+    if (invfs_inode_content_is_raw_blob(in.type)) {
         if (in.size == 0 ||
             memcmp(in.recipe_addr, zero_addr, INVFS_V3_RECIPE_ADDR_LEN) == 0) {
-            *out = (uint8_t *)malloc(1);
-            if (!*out)
-                return -1;
+            *out = (uint8_t *)calloc(1, 1);
+            if (!*out) return -1;
             *out_len = 0;
             return 0;
         }
-        if (vol_v3_recipe_load(v, in.recipe_addr, &blob, &blen) != 0) {
-            fprintf(stderr, "vol_read_inode: v3 inode %llu: recipe blob "
-                    "missing/corrupt\n", (unsigned long long)inode_id);
+        if (vol_v3_recipe_load(v, in.recipe_addr, &blob, &blen) != 0)
             return -1;
-        }
-        if (vol_ast_recipe_parse(blob, blen, &ah, &ents, &n_ents) != 0) {
-            fprintf(stderr, "vol_read_inode: v3 inode %llu: corrupt recipe "
-                    "blob\n", (unsigned long long)inode_id);
-            free(blob);
+        *out = blob;
+        *out_len = blen;
+        return 0;
+    }
+    if (in.size == 0 ||
+        memcmp(in.recipe_addr, zero_addr, INVFS_V3_RECIPE_ADDR_LEN) == 0) {
+        *out = (uint8_t *)malloc(1);
+        if (!*out)
             return -1;
-        }
-        /* the row's size and the blob's header must agree; a disagreement
-         * is corruption, not something to paper over with a clamp */
-        if (ah.file_size != in.size) {
-            fprintf(stderr, "vol_read_inode: v3 inode %llu: row size %llu != "
-                    "recipe size %llu\n", (unsigned long long)inode_id,
-                    (unsigned long long)in.size,
-                    (unsigned long long)ah.file_size);
-            free(blob);
-            return -1;
-        }
-        len = (size_t)ah.file_size;
-        data = (uint8_t *)malloc(len ? len : 1);
-        if (!data) { free(blob); return -1; }
-        const invfs_ast_window_entry *wins = NULL;
-        uint32_t n_wins = 0;
-        if (vol_ast_recipe_windows(blob, blen, &ah, &wins, &n_wins) != 0) {
-            fprintf(stderr, "inode %llu: corrupt window table\n",
-                    (unsigned long long)inode_id);
+        *out_len = 0;
+        return 0;
+    }
+    if (vol_v3_recipe_load(v, in.recipe_addr, &blob, &blen) != 0) {
+        fprintf(stderr, "vol_read_inode: v3 inode %llu: recipe blob "
+                "missing/corrupt\n", (unsigned long long)inode_id);
+        return -1;
+    }
+    if (vol_ast_recipe_parse(blob, blen, &ah, &ents, &n_ents) != 0) {
+        fprintf(stderr, "vol_read_inode: v3 inode %llu: corrupt recipe "
+                "blob\n", (unsigned long long)inode_id);
+        free(blob);
+        return -1;
+    }
+    /* the row's size and the blob's header must agree; a disagreement
+     * is corruption, not something to paper over with a clamp */
+    if (ah.file_size != in.size) {
+        fprintf(stderr, "vol_read_inode: v3 inode %llu: row size %llu != "
+                "recipe size %llu\n", (unsigned long long)inode_id,
+                (unsigned long long)in.size,
+                (unsigned long long)ah.file_size);
+        free(blob);
+        return -1;
+    }
+    len = (size_t)ah.file_size;
+    data = (uint8_t *)malloc(len ? len : 1);
+    if (!data) { free(blob); return -1; }
+    const invfs_ast_window_entry *wins = NULL;
+    uint32_t n_wins = 0;
+    if (vol_ast_recipe_windows(blob, blen, &ah, &wins, &n_wins) != 0) {
+        fprintf(stderr, "inode %llu: corrupt window table\n",
+                (unsigned long long)inode_id);
+        free(data); free(blob);
+        return -1;
+    }
+    /* WP120: the name is resolved by the lanes that need it, not here --
+     * resolving it here walked the whole dirent tree on every read. */
+    {
+        vol_recname rn;
+        memset(&rn, 0, sizeof rn);
+        rn.v = v;
+        rn.inode_id = inode_id;
+        if (vol_decode_ast_entries(v, inode_id, &rn, &ah, ents,
+                                   wins, n_wins, data) != 0) {
             free(data); free(blob);
             return -1;
         }
-        /* WP120: the name is resolved by the lanes that need it, not here --
-         * resolving it here walked the whole dirent tree on every read. */
-        {
-            vol_recname rn;
-            memset(&rn, 0, sizeof rn);
-            rn.v = v;
-            rn.inode_id = inode_id;
-            if (vol_decode_ast_entries(v, inode_id, &rn, &ah, ents,
-                                       wins, n_wins, data) != 0) {
-                free(data); free(blob);
-                return -1;
-            }
-        }
-        free(blob);
-        *out = data;
-        *out_len = len;
-        return 0;
     }
-
-    /* The id index knows where this record is; without it every read of every
-       file re-read the whole inode area, which is what kept reads quadratic
-       after the name index landed. 0 means "not indexed" -- fall back to the
-       scan below, which is still the authority. WP47: the hint is valid in any
-       mapper extent, and the fallback is the shared mapper-aware walker. */
-    pos = read_locate_record(v, inode_id);
-    if (!pos) return -1;
-    end = pos + INVFS_REC_HDR_LEN;
-
-    while (pos + INVFS_REC_HDR_LEN <= end) {
-        invfs_inode_rec rec_h;
-        uint32_t crc_stored, crc_calc;
-        uint8_t *rec;
-
-        if (io_pread(&v->io, pos, &rec_h, sizeof(rec_h)) != 0)
-            return -1;
-        if (rec_h.magic != INODE_REC_MAGIC && rec_h.magic != TOMBSTONE_MAGIC)
-            return -1;
-        if (rec_h.magic == TOMBSTONE_MAGIC) { pos += rec_h.rec_len + 4; continue; }
-        if (rec_h.inode_id != inode_id) { pos += rec_h.rec_len + 4; continue; }
-
-        /* read full record + crc, verify */
-        if (rec_h.rec_len < INVFS_REC_HDR_LEN + 1 ||
-            rec_h.rec_len > INVFS_MAX_REC_LEN) {
-            fprintf(stderr, "inode %llu: rec_len %u outside valid range\n",
-                    (unsigned long long)inode_id, rec_h.rec_len);
-            return -1;
-        }
-        rec = (uint8_t *)malloc(rec_h.rec_len);
-        if (!rec) return -1;
-        if (io_pread(&v->io, pos, rec, rec_h.rec_len) != 0 ||
-            io_pread(&v->io, pos + rec_h.rec_len, &crc_stored, 4) != 0) {
-            free(rec);
-            return -1;
-        }
-        crc_calc = invfs_crc32c(rec, rec_h.rec_len);
-        if (crc_calc != crc_stored) {
-            fprintf(stderr, "inode record CRC mismatch (inode %llu)\n",
-                    (unsigned long long)inode_id);
-            free(rec);
-            return -1;
-        }
-
-        /* the name lives in the full CRC-verified record, not in the
-         * 36-byte prefix copy rec_h; materialize a bounded NUL-terminated
-         * copy so every "%s" sibling-name build below is safe. */
-        {
-            const invfs_inode_rec *rr = (const invfs_inode_rec *)rec;
-            size_t n = rr->name_len;
-            size_t present = (size_t)rec_h.rec_len - INVFS_REC_HDR_LEN - 1;
-            if (n > INVFS_MAX_NAME) n = INVFS_MAX_NAME;
-            if (n > present) n = present;
-            memcpy(rec_name, rr->name, n);
-            rec_name[n] = 0;
-        }
-
-        /* parse AST: header + entries after rec header */
-        {
-            invfs_ast_hdr ast_h;
-            const invfs_ast_block_entry *ents;
-            size_t off = (size_t)(invfs_rec_cbody((const invfs_inode_rec *)rec)
-                                  - rec);
-            if (invfs_ast_hdr_parse(rec + off, rec_h.rec_len - off,
-                                    &ast_h) != 0) {
-                fprintf(stderr, "inode %llu: unsupported/corrupt AST recipe "
-                        "header\n", (unsigned long long)inode_id);
-                free(rec);
-                return -1;
-            }
-            off += ast_h.hdr_len;
-            if ((size_t)ast_h.num_blocks * sizeof(invfs_ast_block_entry) >
-                rec_h.rec_len - off) {
-                free(rec);
-                return -1;
-            }
-            ents = (const invfs_ast_block_entry *)(rec + off);
-
-            len = (size_t)ast_h.file_size;
-            data = (uint8_t *)malloc(len ? len : 1);
-            if (!data) { free(rec); return -1; }
-
-            const invfs_ast_window_entry *wins = NULL;
-            uint32_t n_wins = 0;
-            if (vol_ast_recipe_windows(rec + off - ast_h.hdr_len,
-                                       rec_h.rec_len - off + ast_h.hdr_len,
-                                       &ast_h, &wins, &n_wins) != 0) {
-                fprintf(stderr, "inode %llu: corrupt window table\n",
-                        (unsigned long long)inode_id);
-                free(rec); free(data);
-                return -1;
-            }
-            {
-                vol_recname rn;
-                memset(&rn, 0, sizeof rn);
-                rn.v = v;
-                rn.inode_id = inode_id;
-                rn.pre = rec_name;          /* v2: the record name is the path */
-                if (vol_decode_ast_entries(v, inode_id, &rn, &ast_h,
-                                           ents, wins, n_wins, data) != 0) {
-                    free(data); free(rec); return -1;
-                }
-            }
-        }
-        free(rec);
-        *out = data;
-        *out_len = len;
-        return 0;
-    }
-    return -1;  /* not found */
+    free(blob);
+    *out = data;
+    *out_len = len;
+    return 0;
 }
+
 
 
 /* public entry: read file, reconstructing containers from children */
@@ -1606,32 +1444,12 @@ int vol_stat(invfs_volume *v, const char *name, uint64_t *size_out)
 int vol_stat_full(invfs_volume *v, const char *name, uint64_t *id_out,
                   uint64_t *size_out, uint64_t *ctime_out)
 {
-    const name_index_entry *e;
-    /* WP-M6: v3 resolves names through the dirent tree / inode rows. */
-    if (v->sb.vol_flags & VOLF_V3)
-        return vol_v3_path_stat(v, name, id_out, size_out, ctime_out);
-    e = idx_get(v, name, strlen(name));
-
-    /* The old scan walked from the start of the area and returned -1 on the
-       first record that was not an INOD, so a single deleted file made stat
-       fail for every name stored after it. The index goes straight to the
-       live record -- and carries size and ctime, so a stat costs no I/O at
-       all. Both are copied from the record header the index was built from,
-       and every writer updates them through idx_put. */
-    if (!e) return -1;
-    /* Every out-param is optional: a caller that only wants to know whether a
-       name exists has no id or size to put anywhere, and passing NULL for the
-       rest is the obvious way to ask that. Dereferencing unconditionally
-       turned that question into a crash. */
-    if (id_out)    *id_out    = e->inode_id;
-    if (size_out)  *size_out  = e->size;
-    if (ctime_out) *ctime_out = e->ctime;
-    return 0;
+    /* WP-M6: names resolve through the dirent tree / inode rows. The v2
+     * alternative was one idx_get lookup -- and that index has been a no-op
+     * returning NULL since WP-M21 retired it, so the v2 stat reported every
+     * name as absent. */
+    return vol_v3_path_stat(v, name, id_out, size_out, ctime_out);
 }
-
-
-/* live names in the index (files + directory anchors) */
-uint64_t vol_name_count(invfs_volume *v) { return (uint64_t)v->ncount; }
 
 
 /*
@@ -1919,269 +1737,11 @@ static int v3_read_range(invfs_volume *v, uint64_t inode_id, uint64_t offset,
 int vol_read_range(invfs_volume *v, uint64_t inode_id, uint64_t offset,
                    size_t len, void *buf)
 {
-    uint64_t pos, end;
-    invfs_ast_hdr ast_h;
-    invfs_ast_block_entry *ents = NULL;
-    uint8_t *rec = NULL;
-    uint32_t i;
-    size_t got = 0;
-
     /* WP-M9: a v3 file resolves through its content-addressed recipe blob
-     * and decodes only the segments the window needs. */
-    if (v->sb.vol_flags & VOLF_V3)
-        return v3_read_range(v, inode_id, offset, len, buf);
-
-    /* WP47: hint jump when the index position is valid (mapper extent or
-     * legacy region); otherwise locate through the mapper-aware walker. */
-    pos = read_locate_record(v, inode_id);
-    end = pos ? pos + INVFS_REC_HDR_LEN : 0;
-
-    while (pos + INVFS_REC_HDR_LEN <= end) {
-        invfs_inode_rec rec_h;
-        uint32_t crc_stored, crc_calc;
-        if (io_seek(&v->io, pos) != 0 || io_read(&v->io, &rec_h, sizeof(rec_h)) != 0)
-            return -1;
-        if (rec_h.magic != INODE_REC_MAGIC && rec_h.magic != TOMBSTONE_MAGIC) {
-            return -1;
-        }
-        if (rec_h.magic == TOMBSTONE_MAGIC) { pos += rec_h.rec_len + 4; continue; }
-        if (rec_h.inode_id != inode_id) { pos += rec_h.rec_len + 4; continue; }
-        if (rec_h.rec_len < INVFS_REC_HDR_LEN + 1 ||
-            rec_h.rec_len > INVFS_MAX_REC_LEN) {
-            fprintf(stderr, "[rr] inode %llu: rec_len %u outside valid range\n",
-                    (unsigned long long)inode_id, rec_h.rec_len);
-            return -1;
-        }
-        rec = (uint8_t *)malloc(rec_h.rec_len);
-        if (!rec) return -1;
-        if (io_seek(&v->io, pos) != 0 || io_read(&v->io, rec, rec_h.rec_len) != 0 ||
-            io_read(&v->io, &crc_stored, 4) != 0) { free(rec); return -1; }
-        crc_calc = invfs_crc32c(rec, rec_h.rec_len);
-        if (crc_calc != crc_stored) { free(rec); return -1; }
-
-        {
-            size_t base = (size_t)(invfs_rec_cbody((const invfs_inode_rec *)rec)
-                                   - rec);
-            if (invfs_ast_hdr_parse(rec + base, rec_h.rec_len - base,
-                                    &ast_h) != 0 ||
-                (size_t)ast_h.num_blocks * sizeof(invfs_ast_block_entry) >
-                    rec_h.rec_len - base - ast_h.hdr_len) {
-                fprintf(stderr, "[rr] inode %llu: unsupported/corrupt AST recipe "
-                        "header\n", (unsigned long long)inode_id);
-                free(rec);
-                return -1;
-            }
-            ents = (invfs_ast_block_entry *)(rec + base + ast_h.hdr_len);
-        }
-        break;
-    }
-    if (!rec) { fprintf(stderr,"[rr] record not found id=%llu\n",
-        (unsigned long long)inode_id); return -1; }
-    {
-        /* the record's own name (rec_h was loop-local): sibling names
-         * ("<name>!mbrmap") resolve by it */
-        const invfs_inode_rec *rrh = (const invfs_inode_rec *)rec;
-        size_t rpresent = (size_t)rrh->rec_len - INVFS_REC_HDR_LEN - 1;
-        size_t rnl = rrh->name_len < INVFS_MAX_NAME
-                   ? rrh->name_len : INVFS_MAX_NAME;
-        char rname[INVFS_MAX_NAME + 1];
-        if (rnl > rpresent) rnl = rpresent;
-        memcpy(rname, rrh->name, rnl);
-        rname[rnl] = 0;
-        /* WP16b: a seekable containerpack record (the pack's algo + a map
-         * command, i.e. CAP_SEEK) -- or an algo NO pack resolves (the pack
-         * is absent) backed by a !mbrmap sibling -- serves ranged reads by
-         * LOCAL SPLICE: the map translates ranges into recipe-segment reads
-         * and member-sibling reads. No pack exec, no whole-file rebuild,
-         * no ARC unit. A seekable pack whose map is missing (a pre-v1.1
-         * sweep) falls back to the whole-file rebuild exec below. */
-        int whole = ast_h.num_children > 0 ||
-            (ast_h.num_blocks == 1 && algo_is_whole_file(ents[0].algo));
-        if (!whole && ast_h.num_children == 0 && ast_h.num_blocks == 1 &&
-            ents[0].zone == INVFS_ZONE_BINARY) {
-            const invfs_codec *pc = invfs_codec_by_algo(ents[0].algo);
-            const invfs_pack_def *pd = pc ? invfs_codec_pack_def(pc) : NULL;
-            int seek = pd && pd->is_container &&
-                       (pc->caps & INVFS_CODEC_CAP_SEEK) != 0;
-            if (seek || !pc) {
-                char mbn[288];
-                snprintf(mbn, sizeof mbn, "%s!mbrmap", rname);
-                if (vol_find(v, mbn) != 0) {
-                    int64_t mrc;
-                    if (offset >= ast_h.file_size) { free(rec); return 0; }
-                    mrc = cpack_map_read(v, rname, inode_id,
-                                         (uint64_t)ast_h.file_size, offset,
-                                         (uint8_t *)buf, len);
-                    free(rec);
-                    return (int)mrc;
-                }
-                whole = seek;   /* map missing: the exec rebuild answers */
-            }
-        }
-        if (whole) {
-        /* Whole-file reconstruction, served out of the content cache.
-         *
-         * Two shapes land here. A container (num_children > 0) keeps the
-         * original archive bytes and its members are windows into them, so a
-         * window costs a full rebuild. A transcoded file is one segment whose
-         * algo decodes in a single piece -- and for FLACR/TARR/GZR/PNGR there
-         * is no segment path below at all: they fell through to the raw branch,
-         * where the stored blob length never equals the reconstructed length,
-         * so every ranged read of a swept file returned -1. That is why a
-         * transcoded file was unreadable through a mount while invf-cat, which
-         * goes through vol_read_file, still returned it byte for byte.
-         *
-         * Rebuilding per callback is what makes this need a cache rather than
-         * just a fix: a mount asks in 64 KB pieces, so a sequential read of an
-         * N-byte container did O(N^2) work, and a FLAC spawned MAC.exe once per
-         * 64 KB. Copy the window out BEFORE handing the buffer to the cache --
-         * arc_put either takes ownership or frees an oversized entry, and
-         * after it returns the pointer is not ours to read. */
-        uint8_t *fresh = NULL;
-        size_t all_len = 0, take = 0;
-        free(rec);
-        /* WP-arc-concurrent-safe: arc_get_copy, not arc_get. This path runs
-         * from invf_read with g_io_lock RELEASED (fuse_fs.c:1407, :1414) under
-         * fuse_loop_mt, so N threads are in here at once and another thread's
-         * arc_put can evict -- and free -- this entry. A borrowed pointer was
-         * memcpy'd from at :1966 straight after arc_get returned, which is a
-         * use-after-free that returns SUCCESS with whatever the freed heap
-         * held: a whole file wrong, not a few bytes. The copy now happens
-         * inside the cache's lock. Same single memcpy it always was. */
-        if (arc_get_copy(v->arc, inode_id, (size_t)offset, len,
-                         (uint8_t *)buf, &take))
-            return (int)take;
-        if (vol_read_file(v, inode_id, &fresh, &all_len) != 0) return -1;
-        if (offset < all_len) {
-            take = (size_t)((offset + len > all_len) ? all_len - offset : len);
-            memcpy(buf, fresh + offset, take);
-        }
-        arc_put(v->arc, inode_id, fresh, all_len);
-        return (int)take;
-        }
-    }
-    if (offset >= ast_h.file_size) { free(rec); return 0; }
-
-    for (i = 0; i < ast_h.num_blocks; i++) {
-        const invfs_ast_block_entry *e = &ents[i];
-        uint64_t seg_lo = e->file_offset;
-        uint64_t seg_hi = e->file_offset + e->length;
-        uint64_t req_lo = offset, req_hi = offset + len;
-        uint64_t lo, hi;
-        uint8_t tmp[SEGMENT_SIZE];
-        /* A container part (vol_create_blob_file) is ONE segment holding the
-         * whole part, and a part can far exceed the 64 KB segment size of
-         * the regular path: decode those from the heap, not the stack
-         * (WP14b reads part heads through here at sweep time). */
-        uint8_t *segbuf = tmp;
-        uint8_t *segheap = NULL;
-        size_t want;
-
-        if (seg_hi <= req_lo || seg_lo >= req_hi)
-            continue;  /* no overlap */
-        lo = (req_lo > seg_lo) ? req_lo : seg_lo;
-        hi = (req_hi < seg_hi) ? req_hi : seg_hi;
-        if (hi > ast_h.file_size) hi = ast_h.file_size;
-        if (lo >= hi) continue;
-
-        /* Batch member: slice of a shared PPMd/ZSTD(+BCJ) batch; heap +
-         * pba-keyed ARC, never the stack tmp[] (batches reach 4 MB,
-         * segments only 64 KB) */
-        if (e->zone == INVFS_ZONE_TEXT && tz_batch_algo(e->algo)) {
-            want = (size_t)(hi - lo);
-            if (vol_read_text_slice(v, inode_id, e, lo - seg_lo,
-                                    (uint8_t *)buf + (size_t)(lo - offset),
-                                    want) != 0) {
-                free(rec); return -1;
-            }
-            got += want;
-            continue;
-        }
-
-        /* decode whole segment */
-        {
-            uint64_t pba;
-            uint32_t hdr;
-            uint8_t *blob;
-            if (e->length > sizeof tmp) {
-                segheap = (uint8_t *)malloc((size_t)e->length);
-                if (!segheap) { free(rec); return -1; }
-                segbuf = segheap;
-            }
-            /* WP27: the entry carries the pba; plen derives from the
-             * segment header (0 = unknown) */
-            pba = e->pba;
-            if (pba == 0 || pba >= v->sb.total_blocks) {
-                free(segheap); free(rec); return -1;
-            }
-            heat_touch_read(v, inode_id, e->block_id);   /* WP19 */
-            /* framed segment read, CRC-verified inside; a shadow-zone
-             * failure gets one WP20 seal-parity recovery attempt before
-             * the error propagates */
-            if (seg_read_checked(v, pba, 0, 1, &hdr, &blob) != 0) {
-                fprintf(stderr, "segment CRC mismatch: inode %llu seg %u\n",
-                        (unsigned long long)inode_id, e->block_id);
-                free(segheap); free(rec); return -1;
-            }
-
-            if (e->algo == INVFS_ALGO_LZ4) {
-                int got = LZ4_decompress_safe((const char *)blob, (char *)segbuf,
-                                              (int)hdr, (int)e->length);
-                if (got != (int)e->length) {
-                    free(blob); free(segheap); free(rec); return -1; }
-            } else if (e->algo == INVFS_ALGO_ZSTD) {
-                size_t got = ZSTD_decompress(segbuf, e->length, blob, hdr);
-                if (ZSTD_isError(got) || got != e->length) { free(blob); free(segheap); free(rec); return -1; }
-            } else if (e->algo == INVFS_ALGO_APE) {
-                uint8_t *fl = NULL;
-                size_t fl_len = 0;
-                if (invfs_ape_decompress(blob, hdr, &fl, &fl_len) != 0 ||
-                    fl_len < (size_t)(hi - lo) || (size_t)(lo - seg_lo) > fl_len) {
-                    free(blob); free(segheap); free(rec); return -1;
-                }
-                want = (size_t)(hi - lo);
-                memcpy((uint8_t *)buf + (size_t)(lo - offset),
-                       fl + (size_t)(lo - seg_lo), want);
-                got += want;
-                free(fl);
-                free(blob);
-                free(segheap);
-                continue;
-            } else if (e->algo == INVFS_ALGO_PMP) {
-                /* ranged read: decode the whole blob, hand back the window.
-                   A media player seeking in an .mp3 hits this per read, and
-                   packMP3 decodes at ~1.9 MB/s -- correct but slow. Worth a
-                   cache if playback off the mount ever matters. */
-                uint8_t *m = NULL;
-                size_t m_len = 0;
-                if (invfs_pmp_decompress(blob, hdr, &m, &m_len) != 0 ||
-                    (size_t)(lo - seg_lo) > m_len ||
-                    m_len - (size_t)(lo - seg_lo) < (size_t)(hi - lo)) {
-                    free(m); free(blob); free(segheap); free(rec); return -1;
-                }
-                want = (size_t)(hi - lo);
-                memcpy((uint8_t *)buf + (size_t)(lo - offset),
-                       m + (size_t)(lo - seg_lo), want);
-                got += want;
-                free(m);
-                free(blob);
-                free(segheap);
-                continue;
-            } else {
-                if (hdr != e->length) {
-                    free(blob); free(segheap); free(rec); return -1; }
-                memcpy(segbuf, blob, e->length);
-            }
-            free(blob);
-        }
-
-        want = (size_t)(hi - lo);
-        memcpy((uint8_t *)buf + (size_t)(lo - offset), segbuf + (size_t)(lo - seg_lo), want);
-        free(segheap);
-        got += want;
-    }
-    free(rec);
-    return (int)got;
+     * and decodes only the segments the window needs. The v2 alternative
+     * located the inode record in the append-only inode area and walked it;
+     * vol_open no longer admits a volume that has one. */
+    return v3_read_range(v, inode_id, offset, len, (uint8_t *)buf);
 }
 
 

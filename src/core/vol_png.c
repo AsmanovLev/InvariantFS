@@ -761,252 +761,68 @@ uint64_t vol_create_png_file(invfs_volume *v, const char *name,
 uint64_t vol_create_blob_file(invfs_volume *v, const char *name,
                                      const uint8_t *blob, size_t blob_len,
                                      uint64_t orig_size, uint32_t algo)
-{
-    uint64_t inode_id;
-    uint64_t phys_blocks;
+{    uint64_t phys_blocks;
     uint64_t pba;
     uint8_t hdr4[8];
-    size_t rec_size;
-    uint8_t *rec;
-    invfs_inode_rec *rh;
-    uint8_t ast_h[INVFS_AST_HDR_V2_LEN];
-    size_t ast_hlen;
     invfs_ast_block_entry e;
-    uint32_t crc;
 
-    /* Fault injection: fail every blob write from the Nth of this process on.
-     *
-     * Every transcode child goes through here, so this is the one place that
-     * can make a partial transcode happen on demand. Without it the abort
-     * paths are only reachable by filling a volume to a precise byte -- the
-     * sweep frees the original as it goes, so the exact failure point is not
-     * controllable from outside -- and they are precisely the paths where a
-     * bug costs the user a file instead of some space.
-     *
-     * From the Nth *onward*, not the Nth alone: that is what ENOSPC looks
-     * like, and it is the only way to exercise the retry paths (the FLAC
-     * recipe falls back to storing uncompressed, so failing one write just
-     * takes the fallback and the transcode succeeds). Unset in normal runs. */
-    {
-        const char *fc = getenv("INVFS_FAIL_CHILD");
-        if (fc && atoi(fc) > 0) {
-            static int nth = 0;
-            if (++nth >= atoi(fc)) {
-                fprintf(stderr, "[vol] INVFS_FAIL_CHILD: failing blob #%d (%s)\n",
-                        nth, name);
-                return 0;
-            }
-        }
-    }
 
-    /* blob_len goes into a 4-byte on-disk segment header, so the blob stays
-       u32-capped; orig_size rides the v2 recipe header past 4 GB (WP22a) --
-       only MAX_FILE_SIZE is refused, never silently folded */
-    if (blob_len > 0xFFFFFFFFu || orig_size > MAX_FILE_SIZE) {
-        fprintf(stderr, "invarifs: %s: blob %llu / original %llu bytes "
-                "exceeds the format limit (blob 4 GB / file 1 TB)\n", name,
-                (unsigned long long)blob_len, (unsigned long long)orig_size);
+    uint8_t addr[INVFS_V3_RECIPE_ADDR_LEN];
+    uint8_t *rblob = NULL;
+    size_t rlen = 0;
+
+    if (blob_len == 0 && orig_size != 0) {
+        fprintf(stderr, "invarifs: %s: empty blob for %llu-byte "
+                "original -- refused\n",
+                name, (unsigned long long)orig_size);
         return 0;
     }
-    if (name_too_long(name)) return 0;
-
-    /* WP-M21b: v3 volumes publish blobs as a content-addressed recipe
-     * blob + inode row (same segment layout, same AST entries, same
-     * reader -- only the metadata publication differs). The v2 record
-     * append below is refused on v3 (vol_records.c guards), and nothing
-     * would read the record stream anyway. An existing name's row is
-     * superseded in place (create_content_node reuses the id, delta-first
-     * resolution), so v3 callers must NOT vol_delete_inode() the old id
-     * afterwards -- on v3 the v2 tombstone cannot retire a v3 row at all,
-     * so the call achieves nothing and only appends a v2 record into the
-     * shared pool (see cpack_rollback_commit in vol_cpack.c).
-     *
-     * WP201: the dropped recipe/segments are NOT reclaimed here, and the
-     * earlier claim on this comment -- that "the WP-M15 reachability
-     * reclaim" recovers them "after a fold" -- was wrong. WP-M15 diffs B+ tree
-     * PAGES: a candidate block must satisfy mbuf_page_validate
-     * (vol_btree.c:2368) to be considered at all, and a framed data segment
-     * is not a base page, so the segments the old recipe pointed at are
-     * never candidates. The recipe BLOB is a page and does get collected;
-     * the data segments it named do not. A caller that wants them back has
-     * to ask for it explicitly, the way vol_v3_publish_blob_inode does at
-     * :1090 (vol_v3_free_recipe_blocks on the captured old address) and the
-     * containerpack lane does at cpack_release_superseded. The callers that
-     * do not are listed in the WP201 report. */
-    if (v->sb.vol_flags & VOLF_V3) {
-        uint8_t addr[INVFS_V3_RECIPE_ADDR_LEN];
-        uint8_t *rblob = NULL;
-        size_t rlen = 0;
-
-        if (blob_len == 0 && orig_size != 0) {
-            fprintf(stderr, "invarifs: %s: empty blob for %llu-byte "
-                    "original -- refused\n",
-                    name, (unsigned long long)orig_size);
-            return 0;
-        }
-        if (blob_len == 0) {
-            /* empty file: zero recipe addr; the read path keys off size 0 */
-            memset(addr, 0, sizeof addr);
-        } else {
-            uint32_t bcrc;
-            phys_blocks = (blob_len + 8 + INVFS_BLOCK_SIZE - 1) /
-                          INVFS_BLOCK_SIZE;
-            pba = alloc_blocks(v, v->sb.shadow_zone_start,
-                               v->sb.shadow_zone_blocks, phys_blocks, 1,
-                               INVFS_ALLOC_DATA);
-            if (pba == 0) return 0;
-            hdr4[0] = (uint8_t)(blob_len & 0xFF);
-            hdr4[1] = (uint8_t)((blob_len >> 8) & 0xFF);
-            hdr4[2] = (uint8_t)((blob_len >> 16) & 0xFF);
-            hdr4[3] = (uint8_t)((blob_len >> 24) & 0xFF);
-            bcrc = invfs_crc32c(blob, blob_len);
-            hdr4[4] = (uint8_t)(bcrc & 0xFF);
-            hdr4[5] = (uint8_t)((bcrc >> 8) & 0xFF);
-            hdr4[6] = (uint8_t)((bcrc >> 16) & 0xFF);
-            hdr4[7] = (uint8_t)((bcrc >> 24) & 0xFF);
-            if (io_pwrite(&v->io, pba * INVFS_BLOCK_SIZE, hdr4, 8) != 0 ||
-                io_pwrite(&v->io, pba * INVFS_BLOCK_SIZE + 8, blob, blob_len) != 0) {
-                vol_free_blocks(v, pba, phys_blocks);
-                return 0;
-            }
-            /* WP27: no L2P map -- the entry itself carries the address */
-            memset(&e, 0, sizeof e);
-            e.file_offset = 0;
-            e.length = orig_size;
-            e.zone = INVFS_ZONE_BINARY;
-            e.algo = algo;
-            e.block_id = 0;
-            e.pba = pba;
-            if (vol_ast_recipe_serialize(orig_size, &e, 1, &rblob,
-                                         &rlen) != 0) {
-                vol_free_blocks(v, pba, phys_blocks);
-                return 0;
-            }
-            if (vol_v3_recipe_store(v, rblob, rlen, addr) != 0) {
-                free(rblob);
-                vol_free_blocks(v, pba, phys_blocks);
-                return 0;
-            }
-            free(rblob);
-        }
-        return vol_v3_create_content_node(v, name, orig_size, addr);
-    }
-
-    /* Empty member (e.g. a zero-length TAR part): the generic guard stores
-     * such a blob verbatim as csize=0, and the read path (seg_read_checked,
-     * min_csize=1) would then reject our own segment forever. An empty
-     * original needs no segment at all — write the same num_blocks=0 record
-     * shape vol_create_file uses for empty files. blob_len==0 with a
-     * nonzero orig_size is an upstream bug: refuse rather than store
-     * something no decoder could satisfy. */
     if (blob_len == 0) {
-        if (orig_size != 0) {
-            fprintf(stderr, "invarifs: %s: empty blob for %llu-byte original\n",
-                    name, (unsigned long long)orig_size);
-            return 0;
-        }
-        inode_id = v->next_inode_id++;
-        rec_size = INVFS_REC_HDR_LEN + strlen(name) + 1 + INVFS_AST_HDR_V1_LEN;
-        rec = (uint8_t *)calloc(1, rec_size);
-        if (!rec) return 0;
-        rh = (invfs_inode_rec *)rec;
-        rec_set_name(rh, name);
-        /* empty file, v1 header by definition (nothing overflows it) */
-        if (invfs_ast_hdr_write(invfs_rec_body(rh), 0, 0, 0) == 0) {
-            free(rec);
-            return 0;
-        }
-        rh->magic = INODE_REC_MAGIC;
-        rh->rec_len = (uint32_t)rec_size;
-        rh->inode_id = inode_id;
-        rh->file_size = 0;
-        rh->ctime = (uint64_t)time(NULL);
-        crc = invfs_crc32c(rec, rec_size);
-        if (inode_area_make_room(v, (uint64_t)rec_size + 4) != 0) { free(rec); return 0; }
-        if (vol_pre_record(v) != 0) { free(rec); return 0; }
-        /* Bug J: route the append through the mapper */
-        {
-            uint64_t npos;
-            int rc2 = vol_append_slot(v, (uint64_t)rec_size + 4, &npos);
-            if (rc2 != 0) { free(rec); return 0; }
-            if (io_seek(&v->io, npos) != 0 ||
-                io_write(&v->io, rec, rec_size) != 0 ||
-                io_write(&v->io, &crc, 4) != 0) { free(rec); return 0; }
-            idx_put(v, name, strlen(name), inode_id, npos,
-                    rh->file_size, rh->ctime);
-            idx_put_id(v, inode_id, npos);
-        }
-        free(rec);
-        return inode_id;
-    }
-
-    inode_id = v->next_inode_id++;
-    phys_blocks = (blob_len + 8 + INVFS_BLOCK_SIZE - 1) / INVFS_BLOCK_SIZE;
-    pba = alloc_blocks(v, v->sb.shadow_zone_start, v->sb.shadow_zone_blocks,
-                       phys_blocks, 1, INVFS_ALLOC_DATA);
-
-    if (pba == 0) return 0;
-    hdr4[0] = (uint8_t)(blob_len & 0xFF);
-    hdr4[1] = (uint8_t)((blob_len >> 8) & 0xFF);
-    hdr4[2] = (uint8_t)((blob_len >> 16) & 0xFF);
-    hdr4[3] = (uint8_t)((blob_len >> 24) & 0xFF);
-    {
-        uint32_t bcrc = invfs_crc32c(blob, blob_len);
+        /* empty file: zero recipe addr; the read path keys off size 0 */
+        memset(addr, 0, sizeof addr);
+    } else {
+        uint32_t bcrc;
+        phys_blocks = (blob_len + 8 + INVFS_BLOCK_SIZE - 1) /
+                      INVFS_BLOCK_SIZE;
+        pba = alloc_blocks(v, v->sb.shadow_zone_start,
+                           v->sb.shadow_zone_blocks, phys_blocks, 1,
+                           INVFS_ALLOC_DATA);
+        if (pba == 0) return 0;
+        hdr4[0] = (uint8_t)(blob_len & 0xFF);
+        hdr4[1] = (uint8_t)((blob_len >> 8) & 0xFF);
+        hdr4[2] = (uint8_t)((blob_len >> 16) & 0xFF);
+        hdr4[3] = (uint8_t)((blob_len >> 24) & 0xFF);
+        bcrc = invfs_crc32c(blob, blob_len);
         hdr4[4] = (uint8_t)(bcrc & 0xFF);
         hdr4[5] = (uint8_t)((bcrc >> 8) & 0xFF);
         hdr4[6] = (uint8_t)((bcrc >> 16) & 0xFF);
         hdr4[7] = (uint8_t)((bcrc >> 24) & 0xFF);
+        if (io_pwrite(&v->io, pba * INVFS_BLOCK_SIZE, hdr4, 8) != 0 ||
+            io_pwrite(&v->io, pba * INVFS_BLOCK_SIZE + 8, blob, blob_len) != 0) {
+            vol_free_blocks(v, pba, phys_blocks);
+            return 0;
+        }
+        /* WP27: no L2P map -- the entry itself carries the address */
+        memset(&e, 0, sizeof e);
+        e.file_offset = 0;
+        e.length = orig_size;
+        e.zone = INVFS_ZONE_BINARY;
+        e.algo = algo;
+        e.block_id = 0;
+        e.pba = pba;
+        if (vol_ast_recipe_serialize(orig_size, &e, 1, &rblob,
+                                     &rlen) != 0) {
+            vol_free_blocks(v, pba, phys_blocks);
+            return 0;
+        }
+        if (vol_v3_recipe_store(v, rblob, rlen, addr) != 0) {
+            free(rblob);
+            vol_free_blocks(v, pba, phys_blocks);
+            return 0;
+        }
+        free(rblob);
     }
-
-    if (io_pwrite(&v->io, pba * INVFS_BLOCK_SIZE, hdr4, 8) != 0 ||
-        io_pwrite(&v->io, pba * INVFS_BLOCK_SIZE + 8, blob, blob_len) != 0) {
-        vol_free_blocks(v, pba, phys_blocks);
-        return 0;
-    }
-
-    /* WP27: no L2P map -- the entry itself carries the address */
-    memset(&e, 0, sizeof e);
-    e.file_offset = 0;
-    e.length = orig_size;
-    e.zone = INVFS_ZONE_BINARY;
-    e.algo = algo;
-    e.block_id = 0;
-    e.pba = pba;
-
-    /* v2 recipe header only when orig_size overflows v1's u32 (WP22a) */
-    ast_hlen = invfs_ast_hdr_write(ast_h, orig_size, 1, 0);
-    if (!ast_hlen) return 0;
-    rec_size = INVFS_REC_HDR_LEN + strlen(name) + 1 + ast_hlen + sizeof(e);
-    rec = (uint8_t *)calloc(1, rec_size);
-    if (!rec) return 0;
-    rh = (invfs_inode_rec *)rec;
-    rh->magic = INODE_REC_MAGIC;
-    rh->rec_len = (uint32_t)rec_size;
-    rh->inode_id = inode_id;
-    rh->file_size = orig_size;
-    rh->ctime = (uint64_t)time(NULL);
-    rec_set_name(rh, name);
-    memcpy(invfs_rec_body(rh), ast_h, ast_hlen);
-    memcpy(invfs_rec_body(rh) + ast_hlen, &e, sizeof e);
-    crc = invfs_crc32c(rec, rec_size);
-
-    if (inode_area_make_room(v, (uint64_t)rec_size + 4) != 0) { free(rec); return 0; }
-    if (vol_pre_record(v) != 0) { free(rec); return 0; }
-    /* Bug J: route the append through the mapper */
-    {
-        uint64_t npos;
-        int rc2 = vol_append_slot(v, (uint64_t)rec_size + 4, &npos);
-        if (rc2 != 0) { free(rec); return 0; }
-        if (io_seek(&v->io, npos) != 0 ||
-            io_write(&v->io, rec, rec_size) != 0 ||
-            io_write(&v->io, &crc, 4) != 0) { free(rec); return 0; }
-        idx_put(v, name, strlen(name), inode_id, npos,
-                rh->file_size, rh->ctime);
-        idx_put_id(v, inode_id, npos);
-    }
-    pba_ref_apply(v, rec, (uint32_t)rec_size, +1);
-    free(rec);
-    return inode_id;
+    return vol_v3_create_content_node(v, name, orig_size, addr);
 }
 
 

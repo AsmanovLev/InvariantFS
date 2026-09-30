@@ -191,25 +191,13 @@ int main(int argc, char **argv)
     }
 
     if (strcmp(cmd, "list") == 0) {
-        invfs_ast_child_entry *ch = NULL;
-        size_t nch = 0;
+        /* The v2 AST member table is gone, so there is no "already
+         * reconstructed" list to prefer: the ZIP stream is parsed. */
         printf("members of %s (%zu bytes):\n", zname, zlen);
-        /* prefer AST children (fast, already reconstructed);
-         * fall back to parsing the ZIP stream */
-        if (vol_get_children(vol, find_inode(vol, zname), &ch, &nch) == 0 && nch > 0) {
-            for (size_t i = 0; i < nch; i++)
-                printf("  %-48s %10u bytes  %s (crc %08x)\n",
-                       ch[i].name, ch[i].usize,
-                       ch[i].method == 0 ? "stored" : ch[i].method == 8 ? "deflate" : "?",
-                       ch[i].crc);
-            printf("%zu member(s) from AST\n", nch);
-            free(ch);
-        } else {
-            for (int i = 0; i < nm; i++)
-                printf("  %-48s %10u bytes  %s\n", mem[i].name, mem[i].usize,
-                       mem[i].method == 0 ? "stored" : mem[i].method == 8 ? "deflate" : "?");
-            printf("%d member(s)\n", nm);
-        }
+        for (int i = 0; i < nm; i++)
+            printf("  %-48s %10u bytes  %s\n", mem[i].name, mem[i].usize,
+                   mem[i].method == 0 ? "stored" : mem[i].method == 8 ? "deflate" : "?");
+        printf("%d member(s)\n", nm);
     } else if (strcmp(cmd, "get") == 0 && argc >= 6) {
         const char *member = argv[4];
         const char *outf = argv[5];

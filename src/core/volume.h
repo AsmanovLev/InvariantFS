@@ -225,7 +225,6 @@ int  vol_stat(invfs_volume *v, const char *name, uint64_t *size_out);
 /* inode id + size + ctime in one O(1) index lookup */
 int  vol_stat_full(invfs_volume *v, const char *name, uint64_t *id_out,
                    uint64_t *size_out, uint64_t *ctime_out);
-uint64_t vol_name_count(invfs_volume *v);
 int  vol_read_range(invfs_volume *v, uint64_t inode_id, uint64_t offset,
                     size_t len, void *buf);
 int  vol_delete_file(invfs_volume *v, const char *name);

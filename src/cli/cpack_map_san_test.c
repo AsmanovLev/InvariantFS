@@ -734,11 +734,6 @@ int flacx_extract(const uint8_t *d, size_t n, uint8_t **recipe, size_t *rlen, fl
 { (void)d; (void)n; (void)recipe; (void)rlen; (void)covers; (void)ncovers; return -1; }
 int flacx_rebuild(const uint8_t *wav, size_t wlen, const uint8_t *r, size_t rn, const flacx_cover *covers, uint32_t ncovers, uint8_t **out, size_t *olen)
 { (void)wav; (void)wlen; (void)r; (void)rn; (void)covers; (void)ncovers; (void)out; (void)olen; return -1; }
-const name_index_entry *idx_get(invfs_volume *v, const char *name, size_t nlen)
-{ (void)v; (void)name; (void)nlen; return NULL; }
-uint64_t idx_get_id(invfs_volume *v, uint64_t id) { (void)v; return id; }
-void idx_put(invfs_volume *v, const char *name, size_t nlen, uint64_t id, uint64_t pos, uint64_t size, uint64_t ctime)
-{ (void)v; (void)name; (void)nlen; (void)id; (void)pos; (void)size; (void)ctime; }
 int invfs_binary_family(const uint8_t *head, size_t head_len, const char *name)
 { (void)head; (void)head_len; (void)name; return 0; }
 const invfs_codec *invfs_codec_by_algo(uint32_t algo) { (void)algo; return NULL; }

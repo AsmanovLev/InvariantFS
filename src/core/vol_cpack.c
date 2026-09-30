@@ -2512,64 +2512,28 @@ static void cpack_size_refusal(const char *pack, const char *name,
  * record's own AST entry. Returns the malloc'd payload. */
 static int cpack_recipe_seg(invfs_volume *v, uint64_t ino,
                             uint8_t **out, size_t *out_len)
-{
-    uint64_t pba = 0;
+{    uint64_t pba = 0;
     uint32_t csize;
     uint8_t *blob;
-    uint8_t *rec = NULL;
-    uint32_t rl = 0;
     invfs_ast_hdr ah;
-    size_t base;
 
-    *out = NULL;
-    *out_len = 0;
 
-    if (v->sb.vol_flags & VOLF_V3) {
-        invfs_v3_inode in;
-        if (vol_v3_inode_get(v, ino, &in) != 1) {
-                return -1;
-        }
-        uint8_t *rblob = NULL;
-        size_t rblen = 0;
-        if (vol_v3_recipe_load(v, in.recipe_addr, &rblob, &rblen) != 0 || !rblob) {
-                return -1;
-        }
-        const invfs_ast_block_entry *ents = NULL;
-        size_t n_ents = 0;
-        if (vol_ast_recipe_parse(rblob, rblen, &ah, &ents, &n_ents) == 0 && n_ents >= 1) {
-            pba = ents[0].pba;
-        }
-        free(rblob);
-        if (!pba || pba >= v->sb.total_blocks) return -1;
-        if (seg_read_checked(v, pba, 0, 0, &csize, &blob) != 0)
+    invfs_v3_inode in;
+    if (vol_v3_inode_get(v, ino, &in) != 1) {
             return -1;
-        *out = blob;
-        *out_len = csize;
-        return 0;
     }
-
-    if (meta_read_record_by_id(v, ino, &rec, &rl, NULL, 0, NULL) != 0)
-        return -1;
-    if (rl < INVFS_REC_HDR_LEN ||
-        ((const invfs_inode_rec *)rec)->name_len > INVFS_MAX_NAME ||
-        rl < INVFS_REC_HDR_LEN +
-             ((const invfs_inode_rec *)rec)->name_len + 1) {
-        free(rec);
-        return -1;
+    uint8_t *rblob = NULL;
+    size_t rblen = 0;
+    if (vol_v3_recipe_load(v, in.recipe_addr, &rblob, &rblen) != 0 || !rblob) {
+            return -1;
     }
-    base = (size_t)(invfs_rec_cbody((const invfs_inode_rec *)rec) - rec);
-    if (rl >= base + INVFS_AST_HDR_V1_LEN &&
-        invfs_ast_hdr_parse(rec + base, rl - base, &ah) == 0 &&
-        ah.num_blocks >= 1 &&
-        rl >= base + ah.hdr_len + sizeof(invfs_ast_block_entry)) {
-        const invfs_ast_block_entry *e =
-            (const invfs_ast_block_entry *)(rec + base + ah.hdr_len);
-        pba = e->pba;
+    const invfs_ast_block_entry *ents = NULL;
+    size_t n_ents = 0;
+    if (vol_ast_recipe_parse(rblob, rblen, &ah, &ents, &n_ents) == 0 && n_ents >= 1) {
+        pba = ents[0].pba;
     }
-    free(rec);
+    free(rblob);
     if (!pba || pba >= v->sb.total_blocks) return -1;
-    /* framed read, CRC-verified inside (an empty recipe is legal);
-     * a shadow-zone failure gets one WP20 seal-parity recovery attempt */
     if (seg_read_checked(v, pba, 0, 0, &csize, &blob) != 0)
         return -1;
     *out = blob;
@@ -3132,20 +3096,22 @@ void cpack_rollback_commit(invfs_volume *v, uint64_t newino,
                            uint64_t old_pos, uint64_t old_size,
                            uint64_t old_ctime)
 {
-    if (!(v->sb.vol_flags & VOLF_V3) || newino != inode_id) {
+    if (newino != inode_id) {
         vol_delete_inode(v, newino, name);
     } else {
-        /* v3: the row was superseded in place, so there is no old row left
-         * to retire -- and calling the v2 retire would append a v2 record
-         * into the pool v3 allocates from. Say what happened instead. */
-        fprintf(stderr, "sweep: %s: map rollback on v3: the row was already "
+        /* The row was superseded in place, so there is no old row left to
+         * retire. Say what happened instead of calling it "declined". */
+        fprintf(stderr, "sweep: %s: map rollback: the row was already "
                         "superseded in place, so there is no old row to "
-                        "retire; no v2 tombstone was written, and the "
+                        "retire; no tombstone was written, and the "
                         "superseded segments are unreclaimed\n", name);
     }
     vol_transcode_abort(v, name);
-    if (old_pos)
-        idx_put(v, name, strlen(name), inode_id, old_pos, old_size, old_ctime);
+    /* old_pos/old_size/old_ctime were the v2 name-index rollback: an
+     * idx_put that restored the index entry pointing at the pre-commit
+     * record. There is no name index and the row was superseded in place,
+     * so there is nothing to restore. */
+    (void)old_pos; (void)old_size; (void)old_ctime; (void)inode_id;
 }
 
 
@@ -3634,7 +3600,7 @@ int vol_containerpack_sweep(invfs_volume *v, uint64_t inode_id,
      * (measured: 25.5 MiB of a 40 MiB rawdisk fixture, allocated, named by no
      * live recipe, and no sweep, fsck or fold reclaimed it). */
     memset(old_addr, 0, sizeof old_addr);
-    if (v->sb.vol_flags & VOLF_V3) {
+    {
         uint64_t pid = 0;
         if (vol_v3_path_lookup(v, name, &pid) == 1 &&
             vol_v3_inode_get(v, pid, &old_in) == 1)
@@ -3693,9 +3659,7 @@ int vol_containerpack_sweep(invfs_volume *v, uint64_t inode_id,
          * purges the siblings, like a rebuild-guard refusal. */
         char mbn[288];
         uint64_t newino, old_pos = 0, old_ctime = 0;
-        const name_index_entry *ne = idx_get(v, name, strlen(name));
-        if (ne) old_ctime = ne->ctime;
-        old_pos = idx_get_id(v, inode_id);
+        (void)old_pos; (void)old_ctime;
 
         newino = vol_create_blob_file(v, name, recipe, recipe_len,
                                       (uint64_t)full_len, pc->algo);
@@ -3727,10 +3691,7 @@ int vol_containerpack_sweep(invfs_volume *v, uint64_t inode_id,
         /* the commit is complete: !mbrmap is down, so nothing can roll the
          * name back onto the old record and the superseded recipe's blocks
          * can go. */
-        if (v->sb.vol_flags & VOLF_V3)
-            cpack_release_superseded(v, newino, old_addr);
-        else
-            vol_delete_inode(v, inode_id, name);
+        cpack_release_superseded(v, newino, old_addr);
         /* the fresh blob record has no ext; carry the old meta across
          * (the vol_pack_sweep flow) */
         if (have_keep) {
@@ -3754,10 +3715,7 @@ int vol_containerpack_sweep(invfs_volume *v, uint64_t inode_id,
         }
         /* the mapless branch has no post-create fallible step (its rebuild
          * guard ran BEFORE the commit), so the superseded recipe goes here */
-        if (v->sb.vol_flags & VOLF_V3)
-            cpack_release_superseded(v, newino, old_addr);
-        else
-            vol_delete_inode(v, inode_id, name);
+        cpack_release_superseded(v, newino, old_addr);
         /* the fresh blob record has no ext; carry the old meta across
          * (the vol_pack_sweep flow) */
         if (have_keep) {

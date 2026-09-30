@@ -213,52 +213,15 @@ uint16_t heat_session_take(invfs_volume *v, uint64_t inode)
 
 /* parse the "invfs.heat" TLV out of a raw record buffer. Fills *r / *w
  * (either may be NULL). 0 = found, -1 = absent/corrupt. */
-int heat_read_tlv(const uint8_t *rec, uint32_t rec_len,
-                  uint16_t *r, uint8_t *w)
-{
-    const uint8_t *ext, *p;
-    size_t elen = 0, rem;
-    invfs_meta_ext_hdr h;
 
-    if (r) *r = 0;
-    if (w) *w = 0;
-    ext = meta_locate_ext(rec, rec_len, &elen);
-    if (!ext) return -1;
-    if (elen < sizeof(h)) return -1;
-    memcpy(&h, ext, sizeof h);
-    if (h.magic != INVFS_META_MAGIC || h.ext_len > elen ||
-        (size_t)sizeof(h) + h.target_len > h.ext_len)
-        return -1;
-    p = ext + sizeof(h) + h.target_len;
-    rem = h.ext_len - sizeof(h) - h.target_len;
-    while (rem >= 4) {
-        uint16_t nl, vl;
-        memcpy(&nl, p, 2);
-        memcpy(&vl, p + 2 + nl, 2);
-        if ((size_t)2 + nl + 2 + vl > rem || nl == 0) break;
-        if (nl == strlen(INVFS_XATTR_HEAT) &&
-            memcmp(p + 2, INVFS_XATTR_HEAT, nl) == 0 && vl >= 3) {
-            if (r) *r = (uint16_t)(p[2 + nl + 2] |
-                                   ((uint16_t)p[2 + nl + 3] << 8));
-            if (w) *w = p[2 + nl + 4];
-            return 0;
-        }
-        p += 2 + nl + 2 + vl;
-        rem -= 2 + nl + 2 + vl;
-    }
-    return -1;
-}
 
-/* WP78: is the id still live? The v2 name index is empty on v3, so the
- * old idx_id_live() check marked every v3 file dead and heat never
- * persisted there. */
+/* WP78: is the id still live? The v2 name index it used to ask is empty
+ * on this format, which marked every file dead and meant heat never
+ * persisted anywhere. */
 static int heat_id_live(invfs_volume *v, uint64_t inode)
 {
-    if (v->sb.vol_flags & VOLF_V3) {
-        invfs_v3_inode in;
-        return vol_v3_inode_get(v, inode, &in) == 1 && in.nlink > 0;
-    }
-    return idx_id_live(v, inode);
+    invfs_v3_inode in;
+    return vol_v3_inode_get(v, inode, &in) == 1 && in.nlink > 0;
 }
 
 /* stored heat of an inode (0/0 when the TLV is absent). WP78: read it
@@ -475,11 +438,10 @@ void l2p_seed_heat(invfs_volume *v)
 /* Fold the session's accrued read touches into the records' TLVs.
  * Best-effort per file: a record that died mid-session (rewritten) is
  * skipped; heat is advisory, so a lost touch is a colder file, never a
- * wrong one. The liveness test is the NAME index (idx_id_live): the id
- * index is never pruned by design (vol_read_inode must still find
- * tombstoned records), so it cannot tell a retired id from a live one --
- * and meta-rewriting a retired id would re-add its name to the live
- * index (the fold-then-resurrect bug).
+ * wrong one. The liveness test is heat_id_live(): the id
+ * position hint is never pruned, so it cannot tell a retired id from a
+ * live one, and rewriting a retired id would resurrect it (the
+ * fold-then-resurrect bug).
  *
  * WP-heat-table-concurrent-safe: the walk below is now split in three, and
  * the reason is lock ordering, not style. The per-record work calls
@@ -598,40 +560,7 @@ typedef struct {
     int           any_w;
 } heat_decay_ctx;
 
-static int heat_decay_cb(void *ctx_, uint64_t rec_pos,
-                         const invfs_inode_rec *h, const uint8_t *rec)
-{
-    heat_decay_ctx *ctx = (heat_decay_ctx *)ctx_;
-    invfs_volume *v = ctx->v;
-    uint16_t r = 0;
-    uint8_t w = 0;
 
-    if (rec_pos >= ctx->end) return 1;   /* an append made during the pass */
-    if (h->magic != INODE_REC_MAGIC || !h->name_len ||
-        h->name_len > INVFS_MAX_NAME ||
-        h->rec_len < INVFS_REC_HDR_LEN + h->name_len + 1 ||
-        (uint8_t)((const invfs_inode_rec *)rec)->name[0] == 0x01 ||
-        vol_find(v, ((const invfs_inode_rec *)rec)->name) != h->inode_id)
-        return 0;
-    if (idx_get_id(v, h->inode_id) != rec_pos)
-        return 0;   /* the live version only (position-kill chains share the id) */
-    /* absent TLV == (0,0) and decays to itself: the pass never stamps a
-     * never-heated file (zero churn on cold volumes -- a format-v2
-     * property, since a stamp is a record append now). The record came
-     * off the walker CRC-verified, so heat_read_tlv sees the same bytes
-     * the legacy loop's seek/read/CRC sequence did. */
-    if (heat_read_tlv(rec, h->rec_len, &r, &w) != 0)
-        return 0;
-    {
-        uint16_t nr = (uint16_t)(r >> 1);
-        uint8_t nw = w ? (uint8_t)(w - 1) : 0;
-        if (nr != r || nw != w)
-            heat_write(v, h->inode_id, nr, nw);
-        if (nr >= INVFS_HEAT_HOT) ctx->any_r = 1;
-        if (nw >= INVFS_WHEAT_HOT) ctx->any_w = 1;
-    }
-    return 0;
-}
 
 /* WP78: v3 decay body -- one pass over the live inode set, reading and
  * rewriting the heat xattr through the format-agnostic xattr API. */
@@ -671,10 +600,7 @@ void vol_heat_sweep_begin(invfs_volume *v)
     ctx.end = v->inode_area_pos;
     ctx.any_r = 0;
     ctx.any_w = 0;
-    if (v->sb.vol_flags & VOLF_V3)
-        (void)vol_v3_iter_live_inodes(v, heat_decay_v3_cb, &ctx);
-    else
-        vol_records_walk(v, heat_decay_cb, &ctx);
+    (void)vol_v3_iter_live_inodes(v, heat_decay_v3_cb, &ctx);
     pthread_mutex_lock(&v->heat_mu);   /* WP-heat-table-concurrent-safe */
     v->heat_any_rhot = ctx.any_r;
     v->heat_any_whot = ctx.any_w;
@@ -720,46 +646,7 @@ typedef struct {
     int err;
 } heat_cand_ctx;
 
-static int heat_promote_cb(void *ctx_, uint64_t rec_pos,
-                           const invfs_inode_rec *h, const uint8_t *rec)
-{
-    heat_cand_ctx *ctx = (heat_cand_ctx *)ctx_;
-    invfs_volume *v = ctx->v;
-    size_t nl;
-    char nm[257];
-    uint64_t ip;
-    uint8_t cc = 0, ca = 0;
-    uint16_t cg = 0, r;
 
-    if (h->magic == TOMBSTONE_MAGIC) return 0;
-    if (h->name_len > INVFS_MAX_NAME ||
-        h->rec_len < INVFS_REC_HDR_LEN + h->name_len + 1) return 0;
-    nl = h->name_len < INVFS_MAX_NAME ? h->name_len : INVFS_MAX_NAME;
-    memcpy(nm, ((const invfs_inode_rec *)rec)->name, nl);
-    nm[nl] = 0;
-    ip = idx_get_id(v, h->inode_id);
-    if (vol_find(v, nm) != h->inode_id || (ip && ip != rec_pos))
-        return 0;   /* superseded version: not the live record */
-    if (vol_get_class(v, h->inode_id, &cc, &ca, &cg) != 0)
-        return 0;
-    if (cc != INVFS_CLASS_TEXT)
-        return 0;   /* BATCHED_BIN (fast already) never promotes */
-    ctx->text_members++;
-    r = heat_file_r(v, h->inode_id);
-    if (r < INVFS_HEAT_HOT) return 0;
-    if (ctx->n_cand == ctx->cap_cand) {
-        size_t nc = ctx->cap_cand ? ctx->cap_cand * 2 : 16;
-        heat_cand *nc2 = (heat_cand *)realloc(ctx->cand, nc * sizeof *nc2);
-        if (!nc2) { ctx->err = 1; return 1; }
-        ctx->cand = nc2;
-        ctx->cap_cand = nc;
-    }
-    ctx->cand[ctx->n_cand].inode = h->inode_id;
-    ctx->cand[ctx->n_cand].r = r;
-    memcpy(ctx->cand[ctx->n_cand].name, nm, nl + 1);
-    ctx->n_cand++;
-    return 0;
-}
 
 /* WP78: v3 promotion candidate collection -- one pass over the live inode
  * set, class TEXT and read-hot. */
@@ -850,23 +737,17 @@ int vol_heat_promote(invfs_volume *v)
     heat_cand_ctx ctx;
     size_t budget = 0, i;
     int promoted = 0;
-    int v3;
 
     if (!v || !vol_write_enabled(v)) return 0;
     if (!heat_any_rhot(v)) return 0;   /* cold volume: skip the walk */
-    v3 = (v->sb.vol_flags & VOLF_V3) != 0;
     owner = vol_find(v, TZ_OWNER_NAME);
-    if (!v3 && !owner) return 0;
+    (void)owner;
 
-    /* walk live records (mapper extents via the shared walker on v0.3.0+,
-     * the legacy area otherwise); TEXT class + hot -> candidate */
+    /* walk the live inodes; TEXT class + hot -> candidate */
     memset(&ctx, 0, sizeof ctx);
     ctx.v = v;
-    if (v3)
-        (void)vol_v3_iter_live_inodes(v, heat_promote_v3_cb, &ctx);
-    else
-        vol_records_walk(v, heat_promote_cb, &ctx);
-    if (ctx.err) goto out;   /* realloc failed mid-collection (legacy: goto out) */
+    (void)vol_v3_iter_live_inodes(v, heat_promote_v3_cb, &ctx);
+    if (ctx.err) goto out;   /* realloc failed mid-collection */
     /* NOTE: heat_any_rhot is NOT reset when the walk finds no TEXT
      * candidate: the summary means "some file is read-hot", and the tier
      * migration (vol_tier_migrate) keys on exactly that for
@@ -899,7 +780,7 @@ int vol_heat_promote(invfs_volume *v)
         zc = invfs_codec_by_algo(INVFS_ALGO_ZSTD);
         if (zc && zc->dec_mem_bytes > vol_get_dec_mem_limit(v))
             continue;
-        if (v3) {
+        {
             int pr = heat_extract_v3(v, ctx.cand[i].inode, ctx.cand[i].name);
             if (pr <= 0) {
                 if (pr < 0)
@@ -907,12 +788,6 @@ int vol_heat_promote(invfs_volume *v)
                                     "batched, intact)\n", ctx.cand[i].name);
                 continue;
             }
-        } else if (vol_store_generic(v, ctx.cand[i].inode, ctx.cand[i].name,
-                                     INVFS_CLASS_GENERIC,
-                                     INVFS_ALGO_ZSTD) != 0) {
-            fprintf(stderr, "[heat] %s: promotion failed (member left "
-                            "batched, intact)\n", ctx.cand[i].name);
-            continue;
         }
         promoted++;
         if (getenv("INVFS_DEBUG"))

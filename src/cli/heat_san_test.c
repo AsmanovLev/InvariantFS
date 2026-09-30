@@ -400,10 +400,6 @@ int main(void)
 /* ================================================================== */
 
 int vol_write_enabled(invfs_volume *v) { (void)v; return 1; }
-uint64_t idx_get_id(invfs_volume *v, uint64_t id) { (void)v; return id; }
-uint32_t idx_id_live(const invfs_volume *v, uint64_t id) { (void)v; (void)id; return 1; }
-const uint8_t *meta_locate_ext(const uint8_t *rec, size_t rec_len, size_t *out)
-{ (void)rec; (void)rec_len; if (out) *out = 0; return NULL; }
 int sweep_enospc(invfs_volume *v, uint64_t need) { (void)v; (void)need; return 0; }
 uint64_t vol_find(invfs_volume *v, const char *name) { (void)v; (void)name; return 0; }
 int vol_get_class(invfs_volume *v, uint64_t inode, uint8_t *cls, uint8_t *algo,

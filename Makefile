@@ -126,7 +126,7 @@ CLI_MAINS := mkfs verify fsck cp cat ls stat arctest blkio_test resize \
              nlink_v3_test recipe_fsck_test cpack_guard_test orphan_test rt30_slot_test anchor_test \
              fsck_rootslot_test batch_owner_test plugin_host_test plugin_mt_test rs_stability_test \
              fsck_liveness_test scratch_policy_test v2rb_rollback_test keycmp_test \
-             lane_release_test pbaref_v3_test \
+             lane_release_test pbaref_v3_test v2_open_test \
              sweep_publish_rollback_test \
              rollback_symlink_test \
              sibling_retire_v3_test tar_cap_test fold_delta_read_test \
@@ -783,6 +783,7 @@ test: $(TEST_BINS) $(OUT)/invf-arctest $(OUT)/invf-blkio_test $(OUT)/invf-codec_
 	@# reported success over blocks that were orphaned forever. Both legs
 	@# assert on the DISK EFFECT, not on a return code alone.
 	$(TESTENV) $(TESTISO) $(OUT)/invf-v2rb_rollback_test /tmp
+	$(TESTENV) $(TESTISO) $(OUT)/invf-v2_open_test /tmp
 	@# WP202: a builtin container lane that supersedes a file on v3 gave the
 	@# superseded recipe's data blocks to nobody, while the containerpack
 	@# lane released them. One implementation now, and this pins the premise

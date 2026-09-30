@@ -52,41 +52,7 @@ typedef struct {
 /* WP49b: per-record body fed by the bounded, index-ordered
  * vol_records_walk (the old position-driven vol_inode_next loop can cycle
  * on a non-monotonic mapper table). */
-static int deep_cb(void *ctx_, uint64_t rec_pos,
-                   const invfs_inode_rec *h, const uint8_t *rec)
-{
-    deep_ctx *c = (deep_ctx *)ctx_;
-    uint64_t ino = h->inode_id, fsz = h->file_size;
-    char nm[256];
-    size_t k, nl;
-    (void)rec_pos; (void)rec;
 
-    if (h->magic != INODE_REC_MAGIC) return 0;
-    /* h->name is not NUL-terminated */
-    nl = h->name_len < 255 ? h->name_len : 255;
-    memcpy(nm, h->name, nl);
-    nm[nl] = 0;
-    if ((uint8_t)nm[0] == 0x01) return 0;  /* internal owners
-            ("\x01tzb", WP20 "\x01parityN"): not user files; the
-            parity leg below checks the seal owners' real payload */
-    if (vol_find(c->vol, nm) != ino) return 0;  /* superseded */
-    for (k = 0; k < c->nents; k++)
-        if (c->ents[k].id == ino) break;
-    if (k == c->nents) {
-        if (c->nents == c->capents) {
-            size_t nc = c->capents ? c->capents * 2 : 256;
-            void *ne = realloc(c->ents, nc * sizeof *c->ents);
-            if (!ne) return 1;
-            c->ents = (deep_ent *)ne;
-            c->capents = nc;
-        }
-        k = c->nents++;
-    }
-    c->ents[k].id = ino;
-    c->ents[k].fsz = fsz;
-    memcpy(c->ents[k].nm, nm, sizeof c->ents[k].nm);
-    return 0;
-}
 
 static int cmp_deep_ent_id(const void *a, const void *b)
 {
@@ -365,8 +331,7 @@ int main(int argc, char **argv)
         printf("deep: reading all live files...\n");
         memset(&dc, 0, sizeof dc);
         dc.vol = vol;
-        /* WP-M21b: v3 live set walked hierarchically in O(n) */
-        if (vol_sb(vol)->vol_flags & VOLF_V3) {
+        {
             (void)vol_v3_walk(vol, deep_v3_walk_cb, &dc);
             if (dc.nents > 1) {
                 qsort(dc.ents, dc.nents, sizeof *dc.ents, cmp_deep_ent_id);
@@ -380,8 +345,6 @@ int main(int argc, char **argv)
                 }
                 dc.nents = w;
             }
-        } else {
-            vol_records_walk(vol, deep_cb, &dc);
         }
         ents = dc.ents; nents = dc.nents;
         for (size_t k = 0; k < nents; k++) {
@@ -413,7 +376,7 @@ int main(int argc, char **argv)
          * 2, nlink 2) and the aliasing bug violates (fan-in 2, nlink 1).
          * Counted into `bad` BEFORE the summary line, so the number and the
          * reason are on screen together and the exit code is non-zero. */
-        if (vol_sb(vol)->vol_flags & VOLF_V3) {
+        {
             invfs_nlink_audit na;
             if (vol_v3_nlink_audit(vol, &na) != 0) {
                 printf("  CORRUPT: the nlink/fan-in audit could not be "

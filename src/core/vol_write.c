@@ -559,104 +559,14 @@ static int wsession_load_old_v3(invfs_wsession *s)
 
 static int wsession_load_old(invfs_wsession *s)
 {
-    uint8_t *buf = NULL;
-    uint32_t rl = 0, i;
-    invfs_ast_hdr ah;
-    const uint8_t *ext;
-    size_t ext_len = 0;
-    size_t base;
-
     if (s->loaded) return 0;
     s->loaded = 1;
     /* WP-M8: a v3 file's previous content lives in an immutable recipe
-     * blob, not a v2 record. Load it into the session's entry table so
-     * ranged writes/truncate alias and re-encode exactly like the v2
-     * path. */
-    if (s->v->sb.vol_flags & VOLF_V3)
-        return wsession_load_old_v3(s);
-    if (!s->have_old) return 0;
-    if (meta_read_record_by_id(s->v, s->old_id, &buf, &rl, NULL, 0,
-                               NULL) != 0)
-        return -1;
-    base = (size_t)(invfs_rec_cbody((const invfs_inode_rec *)buf) - buf);
-    if (base > rl || rl - base < INVFS_AST_HDR_V1_LEN ||
-        invfs_ast_hdr_parse(buf + base, rl - base, &ah) != 0) {
-        free(buf);
-        return -1;
-    }
-    if (rl < base + ah.hdr_len + (size_t)ah.num_blocks * sizeof(*s->ents)) {
-        free(buf);
-        return -1;
-    }
-    s->old_size = ah.file_size;
-    s->owns_siblings = record_owns_siblings(buf, rl);
-    /* WP19: write-heat is the one counter a rewrite must not reset --
-     * carry max(old)+1 onto this session's born segments (aliased
-     * segments keep their own entries' heat instead) */
-    {
-        uint8_t w = heat_file_maxw(s->v, s->old_id);
-        s->wheat_carry = (w == 0xFF) ? 0xFF : (uint8_t)(w + 1);
-    }
-    ext = meta_locate_ext(buf, rl, &ext_len);
-    if (ext && ext_len && ext_len <= 0xFFFF) {
-        s->old_ext = malloc(ext_len);
-        if (s->old_ext) {
-            memcpy(s->old_ext, ext, ext_len);
-            s->old_ext_len = (uint32_t)ext_len;
-        }
-    }
-    if (s->truncating) { free(buf); return 0; }   /* content dropped */
-
-    s->logical_size = ah.file_size;
-    s->n_ents = ah.num_blocks;
-    if (s->n_ents) {
-        s->cap_ents = s->n_ents;
-        s->ents = malloc(s->cap_ents * sizeof(*s->ents));
-        if (!s->ents) { free(buf); return -1; }
-        memcpy(s->ents, buf + base + ah.hdr_len, s->n_ents * sizeof(*s->ents));
-        s->touched_cap = s->n_ents;
-        s->touched = calloc(s->touched_cap, 1);
-        if (!s->touched) { free(buf); return -1; }
-    }
-    if (wsession_simple_old(&ah, s->ents)) {
-        /* WP27: aliasing IS the copied entries -- they carry the old
-         * segments' pbas verbatim, so the fork needs no maps at all. The
-         * old record stays live (and its blocks allocated) until the
-         * commit's retire; the refcount map then keeps exactly the blocks
-         * the new record still names. */
-        s->aliased_n = s->n_ents;
-    } else if (s->n_ents) {
-        /* swept / container / batched content: a write is an implicit
-         * downgrade to RAW. Re-read the whole file through the real read
-         * path in 64K windows and rewrite each as a fresh session
-         * segment; bounded memory (one 64K bounce buffer). NOTE the loop
-         * count is derived from the file SIZE, not the old AST shape: a
-         * batched member has a single entry covering the whole file.
-         * The old record keeps owning its blocks until commit, and its
-         * "name!..." siblings die there. */
-        uint32_t nseg = (uint32_t)((s->old_size + SEGMENT_SIZE - 1) /
-                                   SEGMENT_SIZE);
-        uint8_t *plain = malloc(SEGMENT_SIZE);
-        if (!plain) { free(buf); return -1; }
-        fprintf(stderr, "[wsession] %s: write to swept/container file: "
-                "materializing %u segment(s) to RAW\n", s->name, nseg);
-        s->n_ents = 0;   /* re-built segment-by-segment below */
-        for (i = 0; i < nseg; i++) {
-            uint64_t off = (uint64_t)i * SEGMENT_SIZE;
-            uint64_t room = s->old_size - off;
-            size_t want = (size_t)(room < SEGMENT_SIZE ? room : SEGMENT_SIZE);
-            int got, rc;
-            memset(plain, 0, SEGMENT_SIZE);
-            got = vol_read_range(s->v, s->old_id, off, want, plain);
-            if (got != (int)want) { free(plain); free(buf); return -1; }
-            rc = wsession_write_seg(s, i, plain);
-            if (rc != 0) { free(plain); free(buf); return rc; }
-        }
-        free(plain);
-    }
-    free(buf);
-    return 0;
+     * blob, not a record. Load it into the session's entry table so
+     * ranged writes/truncate alias and re-encode the way they always did. */
+    return wsession_load_old_v3(s);
 }
+
 
 
 int vol_write_range(invfs_wsession *ws, uint64_t offset,
@@ -981,14 +891,6 @@ int vol_write_commit(invfs_wsession *ws)
 {
     invfs_wsession *s = ws;
     invfs_volume *v = ws ? ws->v : NULL;
-    size_t rec_size, hdr_len;
-    uint8_t *rec;
-    invfs_inode_rec *rh;
-    size_t nlen;
-    uint8_t ah[INVFS_AST_HDR_V2_LEN];
-    uint32_t crc_rec;
-    uint64_t now = (uint64_t)time(NULL);
-    uint64_t cur;
     int rc;
 
     if (!s || s->committed) return -1;
@@ -999,168 +901,14 @@ int vol_write_commit(invfs_wsession *ws)
     if (rc != 0) return rc;
     rc = wsession_load_old(s);
     if (rc != 0) return rc;
-    /* WP-M8: v3 content lives in a recipe blob + inode row, not a record. */
+    /* WP-M8: v3 content lives in a recipe blob + inode row, not a record.
+     * The guard is a precondition on the session, not a format choice: vol_open
+     * refuses a non-v3 volume, so this only fires on a malformed session. */
     if (v && (v->sb.vol_flags & VOLF_V3))
         return vol_write_commit_v3(s);
-    if (s->logical_size > MAX_FILE_SIZE || s->n_ents > MAX_SEGMENTS_V2)
-        return -1;
-
-    /* no segment may live entirely past the logical end (defensive;
-     * vol_write_truncate already drops them) */
-    while (s->n_ents > 0 &&
-           (uint64_t)(s->n_ents - 1) * SEGMENT_SIZE >= s->logical_size) {
-        uint32_t j = s->n_ents - 1;
-        if (j < s->touched_cap && s->touched[j] && s->ents[j].pba) {
-            uint64_t plen = 0;
-            if (seg_extent_checked(v, s->ents[j].pba, &plen) == 0)
-                vol_free_blocks(v, s->ents[j].pba, plen);
-        }
-        s->n_ents--;
-    }
-    /* entry.length is the decoded-payload size (the read path
-     * decompresses with length as the output cap). Session segments are
-     * whole-64K encodes, so the last segment of a file whose size is not
-     * segment-aligned is re-encoded once here at its exact tail length. */
-    if (s->n_ents > 0) {
-        uint32_t j = s->n_ents - 1;
-        uint64_t base = (uint64_t)j * SEGMENT_SIZE;
-        uint64_t tail = s->logical_size - base;   /* in 1..SEGMENT_SIZE */
-        if (tail > SEGMENT_SIZE) tail = SEGMENT_SIZE;
-        if (s->ents[j].length != tail) {
-            uint8_t plain[SEGMENT_SIZE];
-            rc = wsession_seg_current(s, j, plain);
-            if (rc != 0) return rc;
-            rc = wsession_write_seg_n(s, j, plain, (size_t)tail);
-            if (rc != 0) return rc;
-        }
-    }
-
-    /* v2 recipe header only when v1 cannot hold the truth (file_size >
-     * 4 GB - 1 or num_blocks > 0xFFFF) -- anything else stays byte-identical
-     * to the pre-WP22a record. */
-    hdr_len = invfs_ast_hdr_write(ah, s->logical_size, s->n_ents, 0);
-    if (!hdr_len) return -1;
-
-    /* WP19/WP27 heat carry: the replacement record keeps the old file's
-     * read history (plus this session's touches of the old id) and bumps
-     * the write-heat -- "rewritten often" is the history a rewrite
-     * destroys, so it is the one counter that must survive. */
-    {
-        uint32_t ext_len = 0;
-        uint8_t *ext;
-        uint16_t r_old = 0, r_sess = 0;
-        uint8_t w_new = s->wheat_carry;
-        if (s->have_old) {
-            uint8_t *ob = NULL;
-            uint32_t orl = 0;
-            if (meta_read_record_by_id(v, s->old_id, &ob, &orl,
-                                       NULL, 0, NULL) == 0) {
-                heat_read_tlv(ob, orl, &r_old, NULL);
-                free(ob);
-            }
-            r_sess = heat_session_take(v, s->old_id);
-        }
-        /* stamp when there is anything to carry; otherwise the old ext
-         * rides verbatim. A rewrite (have_old) always stamps: the wheat
-         * carry is what the sweep's write-hot skip reads. */
-        if (s->have_old || v->heat_init || r_sess || r_old) {
-            uint32_t r = (uint32_t)r_old + r_sess + v->heat_init;
-            if (r > 0xFFFF) r = 0xFFFF;
-            ext = heat_ext_merge(v, s->old_ext, s->old_ext_len,
-                                 0, (uint16_t)r, w_new, &ext_len);
-            if (ext) {
-                free(s->old_ext);
-                s->old_ext = ext;
-                s->old_ext_len = (uint16_t)ext_len;
-            }
-        }
-    }
-
-    nlen = strlen(s->name);
-    rec_size = INVFS_REC_HDR_LEN + nlen + 1 + hdr_len
-             + (size_t)s->n_ents * sizeof(invfs_ast_block_entry)
-             + s->old_ext_len;
-    rec = calloc(1, rec_size);
-    if (!rec) return -1;
-    rh = (invfs_inode_rec *)rec;
-    rh->magic = INODE_REC_MAGIC;
-    rh->rec_len = (uint32_t)rec_size;
-    rh->inode_id = s->new_id;
-    rh->file_size = s->logical_size;
-    rh->ctime = now;
-    rec_set_name(rh, s->name);
-    memcpy(invfs_rec_body(rh), ah, hdr_len);
-    if (s->n_ents)
-        memcpy(invfs_rec_body(rh) + hdr_len, s->ents,
-               (size_t)s->n_ents * sizeof(invfs_ast_block_entry));
-    if (s->old_ext_len)
-        memcpy(rec + rec_size - s->old_ext_len, s->old_ext, s->old_ext_len);
-    crc_rec = invfs_crc32c(rec, rec_size);
-
-    /* WP30 Phase 3: room for the record AND the retire tombstone(s) that
-     * must follow: running out between the two would strand the old version live.
-     * When VOLF_META_DYN is set, use the dynamic extent append path. */
-    uint64_t total_rec_size = rec_size + 4 +
-        (s->have_old ? 2 * (INVFS_REC_HDR_LEN + nlen + 1 + 4) : 0);
-    uint64_t abs_pba, offset;
-    int pos_rc = meta_get_append_pos(v, total_rec_size, &abs_pba, &offset);
-    if (pos_rc != 0) {
-        free(rec);
-        if (pos_rc == -EAGAIN) return -EAGAIN;
-        return pos_rc == -2 ? -2 : -1;
-    }
-    /* the version live RIGHT NOW, before our record lands: normally the
-     * one begin() saw, but a concurrent session may have committed a
-     * third version in between -- it must be retired too (last writer
-     * wins, and its blocks must not leak) */
-    cur = vol_find(v, s->name);
-
-    if (vol_pre_record(v) != 0 ||
-        io_seek(&v->io, (off_t)(abs_pba + offset)) != 0 ||
-        io_write(&v->io, rec, rec_size) != 0 ||
-        io_write(&v->io, &crc_rec, 4) != 0) {
-        free(rec);
-        return -1;
-    }
-    /* WP30 Phase 3: update dynamic extent offset */
-    uint64_t rec_pos = abs_pba + offset;
-    pthread_rwlock_wrlock(&v->meta_lock);
-    v->met0.active_offset += rec_size + 4;
-    pthread_rwlock_unlock(&v->meta_lock);
-    v->inode_area_pos = rec_pos + rec_size + 4;
-    idx_put(v, s->name, strlen(s->name), s->new_id,
-            rec_pos, s->logical_size, now);
-    idx_put_id(v, s->new_id, rec_pos);
-    pba_ref_apply(v, rec, (uint32_t)rec_size, +1);
-    free(rec);
-
-    /* The vol_replace_file ordering: the new record is live first, then
-     * the old one is retired. vol_delete_inode frees exactly the old
-     * blocks no live mapping references any more (the new record re-owns
-     * the aliased ones; dedupe-shared and TEXT-batch blocks are guarded)
-     * and tombstones the old record. */
-    if (s->have_old && vol_delete_inode(v, s->old_id, s->name) != 0)
-        fprintf(stderr, "[wsession] %s: old-version retire failed; "
-                "fsck will reconcile\n", s->name);
-    if (cur && cur != s->old_id && cur != s->new_id) {
-        int cur_sibs = 1;   /* unknown record: scan conservatively */
-        uint8_t *cb = NULL;
-        uint32_t crl = 0;
-        if (meta_read_record_by_id(v, cur, &cb, &crl, NULL, 0, NULL) == 0)
-            cur_sibs = record_owns_siblings(cb, crl);
-        free(cb);
-        vol_delete_inode(v, cur, s->name);
-        if (cur_sibs) vol_delete_siblings(v, s->name);
-    }
-    if (s->owns_siblings)
-        vol_delete_siblings(v, s->name);
-    /* committed: the new record owns everything the session mapped, so the
-     * sweep guard no longer needs to see this session. (abort unlinks too;
-     * the unlink is idempotent.) */
-    wsession_unlink(s);
-    s->committed = 1;
-    return 0;
+    return -1;
 }
+
 
 
 void vol_write_abort(invfs_wsession *ws)

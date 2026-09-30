@@ -144,84 +144,10 @@ static int dedup_cmp(const void *a, const void *b)
 
 /* is this inode deferred into one of the running sweep's accumulators
  * (text WP10 / binary WP14a)? */
-static int dedup_is_deferred(const invfs_volume *v, uint64_t inode_id)
-{
-    size_t i;
-    for (i = 0; i < v->tz_n; i++)
-        if (v->tz[i].inode_id == inode_id) return 1;
-    for (i = 0; i < v->bz_n; i++)
-        if (v->bz[i].inode_id == inode_id) return 1;
-    return 0;
-}
 
 
-/* The CURRENT pba of (inode, lba): re-read the live record and find the
- * entry. 0 = gone/unreadable (leave it alone). The sweep holds the volume
- * exclusively, so the only rewrites since the hash pass are OUR OWN
- * earlier merges of the same file -- the pba equality check in
- * dedup_remap_one is the not-blind rule that catches them. */
-static uint64_t dedup_cur_pba(invfs_volume *v, uint64_t inode, uint64_t lba)
-{
-    uint8_t *rec = NULL;
-    uint32_t rl = 0;
-    uint64_t pba = 0;
-    invfs_ast_hdr ah;
-    size_t base, ent0;
-    uint32_t j;
 
-    if (v->sb.vol_flags & VOLF_V3) {
-        invfs_v3_inode in;
-        uint8_t *blob = NULL;
-        size_t blen = 0;
-        const invfs_ast_block_entry *ents = NULL;
-        size_t n_ents = 0;
-        if (vol_v3_inode_get(v, inode, &in) != 1)
-            return 0;
-        /* Same predicate as the collector, for the same reason: a raw-blob
-         * type's blob is not an AST and names no segment, so there is no
-         * pba to report. Harmless here today only because the parse fails
-         * on a strlen-delimited target string. */
-        if (invfs_inode_content_is_raw_blob(in.type))
-            return 0;
-        if (vol_v3_recipe_load(v, in.recipe_addr, &blob, &blen) != 0 || !blob)
-            return 0;
-        if (vol_ast_recipe_parse(blob, blen, &ah, &ents, &n_ents) == 0 && ents) {
-            for (j = 0; j < n_ents; j++) {
-                if (ents[j].block_id == lba) {
-                    pba = ents[j].pba;
-                    break;
-                }
-            }
-        }
-        free(blob);
-        return pba;
-    }
 
-    if (meta_read_record_by_id(v, inode, &rec, &rl, NULL, 0, NULL) != 0)
-        return 0;
-    if (rl < INVFS_REC_HDR_LEN ||
-        ((const invfs_inode_rec *)rec)->name_len > INVFS_MAX_NAME ||
-        rl < INVFS_REC_HDR_LEN +
-             ((const invfs_inode_rec *)rec)->name_len + 1) {
-        free(rec);
-        return 0;
-    }
-    base = (size_t)(invfs_rec_cbody((const invfs_inode_rec *)rec) - rec);
-    if (rl >= base + INVFS_AST_HDR_V1_LEN &&
-        invfs_ast_hdr_parse(rec + base, rl - base, &ah) == 0 &&
-        rl >= base + ah.hdr_len +
-             (size_t)ah.num_blocks * sizeof(invfs_ast_block_entry)) {
-        ent0 = base + ah.hdr_len;
-        for (j = 0; j < ah.num_blocks; j++) {
-            const invfs_ast_block_entry *e =
-                (const invfs_ast_block_entry *)
-                (rec + ent0 + (size_t)j * sizeof(*e));
-            if (e->block_id == lba) { pba = e->pba; break; }
-        }
-    }
-    free(rec);
-    return pba;
-}
 
 
 /* one merge intent: entry (inode, lba) currently at cur_pba moves onto
@@ -366,281 +292,8 @@ static int dedup_remap_file(invfs_volume *v, uint64_t inode,
                             size_t *cross_applied_out)
 {
     *cross_applied_out = 0;
-    if (v->sb.vol_flags & VOLF_V3)
-        return dedup_remap_file_v3(v, inode, ms, nm, freed_out, applied_out,
-                                   cross_applied_out);
-
-    uint8_t *rec = NULL, *combo = NULL, *tomb = NULL;
-    uint32_t rl = 0;
-    uint64_t old_pos = 0;
-    invfs_ast_hdr ah;
-    size_t base, ent0, total, tomb_size;
-    uint32_t j;
-    size_t m, applied = 0;
-    uint32_t crc_nu, crc_tb;
-    int rc = -1;
-    int tried_compact = 0;
-
-    *freed_out = 0;
-    *applied_out = 0;
-    *cross_applied_out = 0;
-retry:
-    *cross_applied_out = 0;
-    if (meta_read_record_by_id(v, inode, &rec, &rl, NULL, 0,
-                               &old_pos) != 0 || !old_pos) {
-        if (getenv("INVFS_DEBUG"))
-            fprintf(stderr, "[dedupe] remap %llu: live record read "
-                    "failed\n", (unsigned long long)inode);
-        return -1;
-    }
-    if (rl < INVFS_REC_HDR_LEN ||
-        ((const invfs_inode_rec *)rec)->name_len > INVFS_MAX_NAME ||
-        rl < INVFS_REC_HDR_LEN +
-             ((const invfs_inode_rec *)rec)->name_len + 1)
-        goto out;
-    base = (size_t)(invfs_rec_cbody((const invfs_inode_rec *)rec) - rec);
-    if (rl < base + INVFS_AST_HDR_V1_LEN ||
-        invfs_ast_hdr_parse(rec + base, rl - base, &ah) != 0 ||
-        rl < base + ah.hdr_len +
-             (size_t)ah.num_blocks * sizeof(invfs_ast_block_entry))
-        goto out;
-    ent0 = base + ah.hdr_len;
-
-    /* build the new record version: the old one copied verbatim (name,
-     * times, the ext with its heat) with every intent's entry patched
-     * onto its winner's pba */
-    tomb_size = INVFS_REC_HDR_LEN +
-                ((const invfs_inode_rec *)rec)->name_len + 1;
-    total = (size_t)rl + 4 + tomb_size + 4;
-    combo = (uint8_t *)malloc(total);
-    if (!combo) goto out;
-    memcpy(combo, rec, rl);
-    for (m = 0; m < nm; m++) {
-        for (j = 0; j < ah.num_blocks; j++) {
-            invfs_ast_block_entry *e = (invfs_ast_block_entry *)
-                (combo + ent0 + (size_t)j * sizeof(*e));
-            if (e->block_id == ms[m].lba) {
-                if (e->pba == ms[m].cur_pba) {
-                    e->pba = ms[m].canon_pba;
-                    applied++;
-                    if (ms[m].cross_file) (*cross_applied_out)++;
-                }
-                break;
-            }
-        }
-    }
-    if (!applied) { rc = 1; goto out; }
-
-    crc_nu = invfs_crc32c(combo, rl);
-    memcpy(combo + rl, &crc_nu, 4);
-    tomb = (uint8_t *)calloc(1, tomb_size);
-    if (!tomb) goto out;
-    ((invfs_inode_rec *)tomb)->magic = TOMBSTONE_MAGIC;
-    v->hot.tombstones++;
-    ((invfs_inode_rec *)tomb)->rec_len = (uint32_t)tomb_size;
-    ((invfs_inode_rec *)tomb)->inode_id = inode;
-    ((invfs_inode_rec *)tomb)->file_size = old_pos;   /* v2 position kill */
-    {
-        invfs_inode_rec *oh = (invfs_inode_rec *)rec;
-        invfs_inode_rec *th = (invfs_inode_rec *)tomb;
-        th->name_len = oh->name_len;
-        memcpy(th->name, oh->name, oh->name_len);
-    }
-    crc_tb = invfs_crc32c(tomb, tomb_size);
-    memcpy(combo + rl + 4, tomb, tomb_size);
-    memcpy(combo + rl + 4 + tomb_size, &crc_tb, 4);
-
-    /* Room for [new version][CRC][tombstone][CRC]. On a v0.3.0+ mapper
-     * volume the "area" is dynamic extents and meta_get_append_pos grows
-     * them on demand, so the legacy inode_area_pos/end bound does not
-     * apply (it would always trip here); the append's own failure is the
-     * real ENOSPC. On legacy format_version=0 the linear bound still
-     * gates, with the churn backstop's compaction/retry. */
-    if (!(v->met0_present && v->meta_mapper) &&
-        v->inode_area_pos + total > v->inode_area_end) {
-        /* churn backstop: reclaim the dead prefix and RE-READ (the
-         * compaction moves every record: old_pos and the entry offsets
-         * are rebuilt fresh) */
-        free(combo);
-        free(rec);
-        free(tomb);
-        rec = NULL;
-        combo = NULL;
-        tomb = NULL;
-        if (getenv("INVFS_DEBUG"))
-            fprintf(stderr, "[dedupe] area full, compacting\n");
-        if (!tried_compact && inode_area_make_room(v, total) == 0) {
-            tried_compact = 1;
-            applied = 0;
-            goto retry;
-        }
-        /* the dead prefix is unreachable under a live checkpoint: stop
-         * the pass cleanly, everything merged so far stays merged */
-        rc = 2;
-        goto out;
-    }
-    {
-        uint64_t npos;
-        int rc2 = vol_append_slot(v, (uint64_t)total, &npos);
-        if (rc2 != 0) {
-            /* mapper volume out of extents/space (or a legacy write
-             * refusal): stop the pass cleanly, keeping what merged */
-            if (getenv("INVFS_DEBUG"))
-                fprintf(stderr, "[dedupe] append slot failed (%d)\n", rc2);
-            rc = 2;
-            goto out;
-        }
-        if (io_seek(&v->io, npos) != 0 ||
-            io_write(&v->io, combo, total) != 0)
-            goto out;
-        {
-            invfs_inode_rec *nh = (invfs_inode_rec *)combo;
-            char nm[INVFS_MAX_NAME + 1];
-            size_t nlen = nh->name_len < INVFS_MAX_NAME ? nh->name_len
-                                                        : INVFS_MAX_NAME;
-            memcpy(nm, nh->name, nlen);
-            nm[nlen] = 0;
-            idx_put(v, nm, nlen, inode, npos, nh->file_size, nh->ctime);
-            idx_put_id(v, inode, npos);
-        }
-    }
-    /* the refcount move: the old version's references die with it, the
-     * new version's (the winners among them) arrive with it */
-    pba_ref_apply(v, rec, rl, -1);
-    pba_ref_apply(v, combo, rl, +1);
-    *applied_out = applied;
-    for (m = 0; m < nm; m++) {
-        size_t k;
-        int seen = 0;
-        /* the loser's extent goes back exactly when its last live
-         * reference died; two intents never free one extent twice */
-        for (k = 0; k < m; k++)
-            if (ms[k].cur_pba == ms[m].cur_pba) { seen = 1; break; }
-        if (seen) continue;
-        /* the cheap rule: free when the loser pba has no live reference
-         * left (the map counts all live records) */
-        if (pba_ref_count(v, ms[m].cur_pba) == 0) {
-            uint64_t plen = 0;
-            if (seg_extent_checked(v, ms[m].cur_pba, &plen) == 0) {
-                vol_free_blocks(v, ms[m].cur_pba, plen);
-                *freed_out += plen;
-            }
-        }
-    }
-    rc = 0;
-out:
-    free(combo);
-    free(rec);
-    free(tomb);
-    return rc;
-}
-
-
-/* pass-1 record callback. The walker has already CRC-verified `rec`
- * (a full [record][CRC] buffer) and skipped torn appends, so the skip
- * rules here are exactly the linear scan's minus its own CRC/bounds
- * plumbing: TOMBSTONE and bad-name records are skipped, only the LIVE
- * newest record version is eligible, and the \x01 internal-owner records
- * are excluded. `rec_pos` is the record's absolute offset (what
- * idx_put_id stores), so the position-kill check is unchanged. */
-static int dedup_hash_cb(void *ctx_, uint64_t rec_pos,
-                         const invfs_inode_rec *h, const uint8_t *rec)
-{
-    dedup_hash_ctx *ctx = (dedup_hash_ctx *)ctx_;
-    invfs_volume *v = ctx->v;
-    invfs_ast_hdr ah;
-    size_t base;
-    uint32_t i;
-
-    if (h->magic == TOMBSTONE_MAGIC)
-        return 0;
-    if (h->name_len > INVFS_MAX_NAME ||
-        h->rec_len < INVFS_REC_HDR_LEN + h->name_len + 1)
-        return 0;
-    {
-        /* newest-wins + position-kill: only the LIVE record version
-         * describes segments that may be remapped */
-        uint64_t ip = idx_get_id(v, h->inode_id);
-        if (dedup_is_deferred(v, h->inode_id) ||
-            vol_find(v, ((const invfs_inode_rec *)rec)->name) != h->inode_id ||
-            (ip && ip != rec_pos))
-            return 0;
-    }
-    /* WP59a: anchored files are never dedup-remapped.  Their segments stay
-     * pinned to avoid re-encoding through a pack codec. */
-    if (invfs_inode_is_anchored(v, h->inode_id))
-        return 0;
-    /* internal owner records ("\x01tzb", the WP20 "\x01parityN" seal
-     * owners): tzb entries are zone==TEXT and skipped below anyway, and
-     * parity blocks are NOT framed segments -- hashing them would merge
-     * stripes with identical content onto one shared parity block,
-     * which a later re-seal write would corrupt for the other sharers */
-    if (h->name_len && (uint8_t)((const invfs_inode_rec *)rec)->name[0] == 0x01)
-        return 0;
-    base = (size_t)(invfs_rec_cbody((const invfs_inode_rec *)rec) - rec);
-    if (h->rec_len < base + INVFS_AST_HDR_V1_LEN ||
-        invfs_ast_hdr_parse(rec + base, h->rec_len - base, &ah) != 0) {
-        ctx->stop = 1;
-        return 1;
-    }
-    if (h->rec_len < base + ah.hdr_len +
-                     (size_t)ah.num_blocks * sizeof(invfs_ast_block_entry)) {
-        ctx->stop = 1;
-        return 1;
-    }
-    for (i = 0; i < ah.num_blocks; i++) {
-        invfs_ast_block_entry e;
-        uint64_t pba = 0;
-        uint8_t hdrb[8];
-        uint32_t csize;
-
-        memcpy(&e, rec + base + ah.hdr_len +
-               (size_t)i * sizeof(e), sizeof(e));
-        if (e.zone == INVFS_ZONE_TEXT)
-            continue;   /* WP10 §11: shared PPMd batches, owner-owned */
-        if (e.algo == INVFS_ALGO_JXL || e.algo == INVFS_ALGO_APE ||
-            e.algo == INVFS_ALGO_EXER)
-            continue;   /* whole-file blobs: unique by construction */
-        pba = e.pba;
-        if (pba == 0 || pba >= v->sb.total_blocks)
-            continue;
-        if (io_seek(&v->io, pba * INVFS_BLOCK_SIZE) != 0 ||
-            io_read(&v->io, hdrb, 8) != 0)
-            continue;
-        memcpy(&csize, hdrb, 4);
-        /* the payload must fit inside the volume; 0 is never a real
-         * segment's size */
-        if (csize == 0 ||
-            (uint64_t)csize + 8 >
-                (v->sb.total_blocks - pba) * INVFS_BLOCK_SIZE)
-            continue;
-        if (csize > ctx->blobcap) {
-            uint8_t *nb = (uint8_t *)realloc(ctx->blob, csize);
-            if (!nb) { ctx->err = 1; return -1; }
-            ctx->blob = nb;
-            ctx->blobcap = csize;
-        }
-        if (io_seek(&v->io, pba * INVFS_BLOCK_SIZE + 8) != 0 ||
-            io_read(&v->io, ctx->blob, csize) != 0)
-            continue;
-        blake3_hasher_init(ctx->hx);
-        blake3_hasher_update(ctx->hx, hdrb, 8);
-        blake3_hasher_update(ctx->hx, ctx->blob, csize);
-        blake3_hasher_finalize(ctx->hx, ctx->segs[ctx->n].hash, 32);
-        ctx->segs[ctx->n].inode = h->inode_id;
-        ctx->segs[ctx->n].lba = e.block_id;
-        ctx->segs[ctx->n].pba = pba;
-        if (++ctx->n >= ctx->cap) {
-            dedup_seg *ns;
-            size_t ncap = ctx->cap * 2;
-            ns = (dedup_seg *)realloc(ctx->segs, ncap * sizeof(dedup_seg));
-            if (!ns) { ctx->err = 1; return -1; }
-            ctx->segs = ns;
-            ctx->cap = ncap;
-        }
-        dedup_hash_progress(ctx);
-    }
-    return 0;
+    return dedup_remap_file_v3(v, inode, ms, nm, freed_out, applied_out,
+                               cross_applied_out);
 }
 
 
@@ -792,10 +445,7 @@ int vol_sweep_dedupe_ex(invfs_volume *v, invfs_dedupe_stats *stats,
          ctx.progress_user = report_user;
          ctx.stop = 0;
         ctx.err = 0;
-        if (v->sb.vol_flags & VOLF_V3)
-            wrc = vol_v3_walk(v, dedup_v3_walk_cb, &ctx);
-        else
-            wrc = vol_records_walk(v, dedup_hash_cb, &ctx);
+        wrc = vol_v3_walk(v, dedup_v3_walk_cb, &ctx);
         segs = ctx.segs;        /* the callback may have grown the array */
         blob = ctx.blob;
         n = ctx.n;
@@ -845,22 +495,22 @@ int vol_sweep_dedupe_ex(invfs_volume *v, invfs_dedupe_stats *stats,
                     const dedup_seg *s = &segs[k];
                     uint64_t cur_pba = 0;
 
-                    if (v->sb.vol_flags & VOLF_V3) {
+                    {
                         if (s->inode != last_inode) {
                             free(cur_blob);
                             cur_blob = NULL;
                             last_inode = s->inode;
                             invfs_v3_inode in;
                             if (vol_v3_inode_get(v, s->inode, &in) == 1) {
-                                /* The v3 twin of dedup_cur_pba above, and
-                                 * the third reader of a raw-blob type's blob
-                                 * in this file: a symlink names no segment,
-                                 * so there is no cur_pba to recover. The
-                                 * guard belongs here too because this leg
-                                 * is what actually feeds cur_pba -- and
-                                 * therefore dedup_remap_file_v3 -- and it
-                                 * must not be reachable only by way of the
-                                 * collector having already filtered. */
+                                /* The third reader of a raw-blob type's
+                                 * blob in this file: a symlink names no
+                                 * segment, so there is no cur_pba to
+                                 * recover. The guard belongs here too
+                                 * because this leg is what actually feeds
+                                 * cur_pba -- and therefore
+                                 * dedup_remap_file_v3 -- and it must not be
+                                 * reachable only by way of the collector
+                                 * having already filtered. */
                                 if (invfs_inode_content_is_raw_blob(in.type)) {
                                     last_inode = 0;   /* nothing cached */
                                 } else
@@ -883,8 +533,6 @@ int vol_sweep_dedupe_ex(invfs_volume *v, invfs_dedupe_stats *stats,
                                 }
                             }
                         }
-                    } else {
-                        cur_pba = dedup_cur_pba(v, s->inode, s->lba);
                     }
 
                     if (!cur_pba || cur_pba == canon_pba)

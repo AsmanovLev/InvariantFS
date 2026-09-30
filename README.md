@@ -106,10 +106,17 @@ codec CPU cost.
 * No high write throughput: writes are write-once, consolidation is offline.
 * No power-loss durability guarantee (`make flakey` is a soak, not a contract).
 * No snapshots/CoW clones in the btrfs/ZFS sense — savepoints/rollback only.
-* No frozen on-disk format yet; the v3 record layout is a deliberate break.
+* The on-disk format is not frozen; the v3 record layout is a deliberate
+  break, and it is the only one this build reads.
 * Not for metadata-space-dominated sets (millions of empty files).
-* No NFSv4 ACLs; on v2 format xattr cap is 4096 B/inode (v3 xattrs use dedicated
-  xattr B+ tree supporting up to 64 KiB per attribute matching Linux VFS);
+* No NFSv4 ACLs; the xattr cap is 64 KiB per attribute (xattrs live in the
+  metadata B+ tree, matching Linux VFS);
+* **Format v3 only.** A volume written by a pre-v0.5 build (formats v1 and
+  v2) will not open, and there is no in-tree conversion: `invf-mkfs` has
+  refused to *create* a v2 volume since v0.5.0, the `invf-migrate-v2`
+  v1-to-v2 converter was removed with the format, and no v1/v2-to-v3 path
+  has ever existed. To keep the data, create a new volume and re-import
+  from a copy of the source tree, or restore from a backup.
   `trusted.*`/`security.*` require root with capabilities (`CAP_SYS_ADMIN`),
   `security.capability` requires mounting without `nosuid`; mtime truncated to seconds.
 
