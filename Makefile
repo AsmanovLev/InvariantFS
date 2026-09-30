@@ -122,7 +122,7 @@ CLI_MAINS := mkfs verify fsck cp cat ls stat arctest blkio_test resize \
              read_parallel_bitexact_test arc_concurrency_test \
              nlink_v3_test recipe_fsck_test cpack_guard_test orphan_test rt30_slot_test anchor_test \
              fsck_rootslot_test batch_owner_test plugin_host_test plugin_mt_test rs_stability_test \
-             fsck_liveness_test scratch_policy_test
+             fsck_liveness_test scratch_policy_test v2rb_rollback_test
 $(foreach t,$(CLI_MAINS),$(eval $(call TOOL_RULE,$(t),)))
 
 # WP71: loads every containerpack .so through dlmopen/dlopen -> needs -ldl,
@@ -498,7 +498,7 @@ test: $(OUT)/invf-arctest $(OUT)/invf-blkio_test $(OUT)/invf-codec_test \
       $(OUT)/invf-window_test $(OUT)/invf-nlink_v3_test \
       $(OUT)/invf-recipe_fsck_test $(OUT)/invf-fsck_liveness_test \
       $(OUT)/invf-cpack_guard_test $(OUT)/invf-orphan_test \
-      $(OUT)/invf-scratch_policy_test \
+      $(OUT)/invf-scratch_policy_test $(OUT)/invf-v2rb_rollback_test \
       $(OUT)/invf-rt30_slot_test $(OUT)/invf-anchor_test $(OUT)/gzhdrfuzz \
       $(OUT)/invf-fsck_rootslot_test \
       $(OUT)/invf-batch_owner_test \
@@ -566,6 +566,15 @@ test: $(OUT)/invf-arctest $(OUT)/invf-blkio_test $(OUT)/invf-codec_test \
 	$(TESTENV) $(TESTISO) $(OUT)/invf-fsck_liveness_test /tmp
 	$(TESTENV) $(OUT)/invf-cpack_guard_test
 	$(TESTENV) $(OUT)/invf-scratch_policy_test
+	@# WP201: the two v2-era paths that kept running on Meta-v3. The
+	@# containerpack MAP branch's rollback reached v3, where the commit it
+	@# rolls back superseded the row IN PLACE -- so it deleted the fresh
+	@# blob and appended a v2 TOMBSTONE into the shared metadata extent,
+	@# which on v3 is the base-page/data pool. And vol_v3_free_recipe_blocks
+	@# reported success on a recipe it could not parse, so vol_v3_unlink
+	@# reported success over blocks that were orphaned forever. Both legs
+	@# assert on the DISK EFFECT, not on a return code alone.
+	$(TESTENV) $(TESTISO) $(OUT)/invf-v2rb_rollback_test /tmp
 	@# The container MEMBER BOUND is one number in the engine and eight
 	@# mirrored copies in the container packs. Nothing noticed when they
 	@# drifted -- a pack left at the old cap just declines every container

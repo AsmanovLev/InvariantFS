@@ -817,9 +817,22 @@ uint64_t vol_create_blob_file(invfs_volume *v, const char *name,
      * would read the record stream anyway. An existing name's row is
      * superseded in place (create_content_node reuses the id, delta-first
      * resolution), so v3 callers must NOT vol_delete_inode() the old id
-     * afterwards -- that would destroy the fresh blob. The dropped
-     * recipe/segments become unreachable and are reclaimed by the WP-M15
-     * reachability reclaim after a fold. */
+     * afterwards -- on v3 the v2 tombstone cannot retire a v3 row at all,
+     * so the call achieves nothing and only appends a v2 record into the
+     * shared pool (see cpack_rollback_commit in vol_cpack.c).
+     *
+     * WP201: the dropped recipe/segments are NOT reclaimed here, and the
+     * earlier claim on this comment -- that "the WP-M15 reachability
+     * reclaim" recovers them "after a fold" -- was wrong. WP-M15 diffs B+ tree
+     * PAGES: a candidate block must satisfy mbuf_page_validate
+     * (vol_btree.c:2368) to be considered at all, and a framed data segment
+     * is not a base page, so the segments the old recipe pointed at are
+     * never candidates. The recipe BLOB is a page and does get collected;
+     * the data segments it named do not. A caller that wants them back has
+     * to ask for it explicitly, the way vol_v3_publish_blob_inode does at
+     * :1090 (vol_v3_free_recipe_blocks on the captured old address) and the
+     * containerpack lane does at cpack_release_superseded. The callers that
+     * do not are listed in the WP201 report. */
     if (v->sb.vol_flags & VOLF_V3) {
         uint8_t addr[INVFS_V3_RECIPE_ADDR_LEN];
         uint8_t *rblob = NULL;

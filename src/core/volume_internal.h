@@ -1849,6 +1849,16 @@ int mz_tdefl_compress(const uint8_t *in, size_t in_len,
                              size_t *out_len);
 
 
+/* WP201: the containerpack MAP branch's rollback, shared by its two failure
+ * paths so the two cannot drift. Exposed (not static) so the regression test
+ * in src/cli/v2rb_rollback_test.c drives the SHIPPED line rather than a copy
+ * of it -- a test that re-implemented these three lines would prove nothing
+ * about the code that actually runs. */
+void cpack_rollback_commit(invfs_volume *v, uint64_t newino,
+                           uint64_t inode_id, const char *name,
+                           uint64_t old_pos, uint64_t old_size,
+                           uint64_t old_ctime);
+
 /* create inode storing one blob (JXL/APE/...) as a single segment */
 uint64_t vol_create_blob_file(invfs_volume *v, const char *name,
                                      const uint8_t *blob, size_t blob_len,

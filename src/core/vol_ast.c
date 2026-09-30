@@ -122,6 +122,17 @@ int vol_ast_recipe_parse(const uint8_t *blob, size_t blen,
     return 0;
 }
 
+/* WP201: free every data block a v3 recipe names. 0 = the recipe parsed and
+ * every block it named is now free (or it named none); -1 = nothing was
+ * freed because the recipe could not be loaded OR did not parse.
+ *
+ * The parse leg used to fall through to `return 0` -- reporting success
+ * having freed nothing. The v2 twin bails on exactly this
+ * (vol_records.c:551-557), and "the retired twin is right, the current
+ * implementation diverged" is the shape this whole lane keeps hitting. A
+ * caller that trusts the return believes the space is back, deletes the
+ * row, and leaves every block the recipe named allocated, referenced by
+ * nothing and reachable by no name. */
 int vol_v3_free_recipe_blocks(invfs_volume *v,
                              const uint8_t recipe_addr[INVFS_V3_RECIPE_ADDR_LEN],
                              uint64_t keep_pba)
@@ -133,6 +144,7 @@ int vol_v3_free_recipe_blocks(invfs_volume *v,
     const invfs_ast_block_entry *ents = NULL;
     size_t n_ents = 0;
     size_t i, k;
+    int parsed;
 
     if (!v || !recipe_addr)
         return -1;
@@ -140,7 +152,9 @@ int vol_v3_free_recipe_blocks(invfs_volume *v,
         return 0;
     if (vol_v3_recipe_load(v, recipe_addr, &blob, &blen) != 0 || !blob)
         return -1;
-    if (vol_ast_recipe_parse(blob, blen, &ah, &ents, &n_ents) == 0 && ents) {
+    parsed = (vol_ast_recipe_parse(blob, blen, &ah, &ents, &n_ents) == 0 &&
+              ents != NULL);
+    if (parsed) {
         for (i = 0; i < n_ents; i++) {
             uint64_t pba = ents[i].pba;
             int dup = 0;
@@ -170,7 +184,7 @@ int vol_v3_free_recipe_blocks(invfs_volume *v,
         }
     }
     free(blob);
-    return 0;
+    return parsed ? 0 : -1;
 }
 
 

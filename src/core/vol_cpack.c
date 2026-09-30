@@ -2872,6 +2872,54 @@ static void cpack_release_superseded(
 }
 
 
+/* The MAP branch's rollback: undo the commit at step 6 when a fallible step
+ * AFTER it fails, and put the name back on the untouched old record.
+ *
+ * WP201: the v3 guard is the same one the EXER lane already carries
+ * (src/core/vol_exer.c:441), and it is not optional. On v3
+ * vol_create_blob_file supersedes the inode row IN PLACE (newino ==
+ * inode_id), so the "old row" this rollback exists to retire no longer
+ * exists -- the call cannot undo its commit, on v2 or on v3.
+ *
+ * What it does instead is worse than doing nothing. vol_retire_inode
+ * (vol_records.c:623) has no v3 guard either, so it rewrites the superblock
+ * and then appends a v2 TOMBSTONE_MAGIC record through vol_append_slot into
+ * the ACTIVE METADATA EXTENT. On v3 that extent is the shared base-page /
+ * data pool the COW B+ tree allocates from, and on a volume whose metadata
+ * zone ran short it is physically in the shadow pool (AGENTS.md 2.7).
+ * Measured on a 48 MB v3 image: the record landed at pba 2680775 in the
+ * shadow zone, overwriting a block that was ALLOCATED -- a v2-shaped
+ * record written over a live v3 block, which is a bit-exactness violation,
+ * not a bookkeeping one.
+ *
+ * Note what it does NOT do: the v2 tombstone and the idx_del beside it are
+ * invisible to v3 resolution, so the committed row survives. The damage is
+ * the pool overwrite plus the superblock rewrite, not a lost file -- which
+ * is exactly why "declined" is such a poor report for it. The lane has to
+ * say what it actually did.
+ * */
+void cpack_rollback_commit(invfs_volume *v, uint64_t newino,
+                           uint64_t inode_id, const char *name,
+                           uint64_t old_pos, uint64_t old_size,
+                           uint64_t old_ctime)
+{
+    if (!(v->sb.vol_flags & VOLF_V3) || newino != inode_id) {
+        vol_delete_inode(v, newino, name);
+    } else {
+        /* v3: the row was superseded in place, so there is no old row left
+         * to retire -- and calling the v2 retire would append a v2 record
+         * into the pool v3 allocates from. Say what happened instead. */
+        fprintf(stderr, "sweep: %s: map rollback on v3: the row was already "
+                        "superseded in place, so there is no old row to "
+                        "retire; no v2 tombstone was written, and the "
+                        "superseded segments are unreclaimed\n", name);
+    }
+    vol_transcode_abort(v, name);
+    if (old_pos)
+        idx_put(v, name, strlen(name), inode_id, old_pos, old_size, old_ctime);
+}
+
+
 /* WP16a sweep attempt: decompose one RAW container through a container
  * codecpack. See the section header for the pipeline; the return
  * convention mirrors vol_pack_sweep (100+algo on commit, 1 = tools absent
@@ -3304,22 +3352,16 @@ int vol_containerpack_sweep(invfs_volume *v, uint64_t inode_id,
                             ments, nments, mem_sorted, nmem) != 0) {
             fprintf(stderr, "sweep: %s: %s: map guard refused, "
                             "decomposition abandoned\n", pc->name, name);
-            vol_delete_inode(v, newino, name);
-            vol_transcode_abort(v, name);
-            if (old_pos)
-                idx_put(v, name, strlen(name), inode_id, old_pos,
-                        (uint64_t)full_len, old_ctime);
+            cpack_rollback_commit(v, newino, inode_id, name, old_pos,
+                                  (uint64_t)full_len, old_ctime);
             goto out;
         }
         snprintf(mbn, sizeof mbn, "%s!mbrmap", name);
         if (!vol_create_file(v, mbn, mapb, map_len)) {
             fprintf(stderr, "sweep: %s: member map inode failed (%s)\n",
                     pc->name, mbn);
-            vol_delete_inode(v, newino, name);
-            vol_transcode_abort(v, name);
-            if (old_pos)
-                idx_put(v, name, strlen(name), inode_id, old_pos,
-                        (uint64_t)full_len, old_ctime);
+            cpack_rollback_commit(v, newino, inode_id, name, old_pos,
+                                  (uint64_t)full_len, old_ctime);
             goto out;
         }
         /* the commit is complete: !mbrmap is down, so nothing can roll the

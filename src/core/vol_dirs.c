@@ -593,14 +593,37 @@ int vol_v3_unlink(invfs_volume *v, const char *name)
     if (vol_v3_dirent_delta_del(v, pino, leaf) != 0)
         return -1;
     if (in.nlink <= 1) {
+        int rc = 0;
         if (vol_v3_inode_delta_delete(v, id) != 0)
             return -1;
-        /* WP-N1: targeted free of unlinked file data blocks */
-        if (in.type == INVFS_ITYP_REG)
-            vol_v3_free_recipe_blocks(v, in.recipe_addr, 0);
+        /* WP-N1: targeted free of unlinked file data blocks.
+         *
+         * WP201: the ORDER is unchanged and must stay that way -- the row
+         * goes first, the blocks second. Freeing first would let a failure
+         * between the two leave a LIVE row pointing at freed blocks, which
+         * is a bit-exactness violation and strictly worse than the leak
+         * this reports. So by the time the free runs the name is already
+         * gone and the unlink has happened; what is left to say is whether
+         * the space came back.
+         *
+         * It may not: vol_v3_free_recipe_blocks returns -1 when the recipe
+         * will not load or will not parse, having freed nothing. Returning
+         * 0 there told the caller "gone and reclaimed" while every block the
+         * recipe named stayed allocated under no reachable name -- forever.
+         * Report it, and name the file, so the operator knows which reclaim
+         * to chase. */
+        if (in.type == INVFS_ITYP_REG &&
+            vol_v3_free_recipe_blocks(v, in.recipe_addr, 0) != 0) {
+            fprintf(stderr, "invarifs: unlink %s: recipe does not load or "
+                    "parse, so its data blocks were NOT reclaimed; the name "
+                    "is gone and the space is still allocated. Run "
+                    "invf-fsck.\n", name);
+            rc = -1;
+        }
         /* Cascade delete container/transcode siblings if main file is unlinked */
         if (strchr(name, '!') == NULL)
             vol_delete_siblings(v, name);
+        return rc;
     } else {
         in.nlink--;
         if (vol_v3_inode_delta_put(v, id, &in) != 0)
