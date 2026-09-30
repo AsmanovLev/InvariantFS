@@ -1558,7 +1558,6 @@ static int invf_open(const char *path, struct fuse_file_info *fi)
 static int invf_create(const char *path, mode_t mode, struct fuse_file_info *fi)
 {
     int temp = is_temp_path(path);
-    fprintf(stderr, "invf_create: path=%s temp=%d mode=%o fi->flags=%o\n", path, temp, mode, fi->flags);
     wctx *c;
     struct fuse_context *ctx = fuse_get_context();
     uint8_t aacl[INVFS_META_XATTR_MAX];
@@ -1567,7 +1566,6 @@ static int invf_create(const char *path, mode_t mode, struct fuse_file_info *fi)
     (void)temp;
     if (!vol_write_enabled(g_vol))
         return -EROFS;
-    fprintf(stderr, "[create] %s\n", path);
     if (strcmp(path, "/") == 0)
         return -EISDIR;
     {
