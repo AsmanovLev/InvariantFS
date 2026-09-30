@@ -532,26 +532,68 @@ int vol_v3_unlink(invfs_volume *v, const char *name)
         return -1;                        /* EISDIR: use rmdir */
     if (vol_v3_path_lookup(v, parent, &pino) != 1)
         return -1;
-    /* WP-M17 frozen transition (design §4): drop the dirent, then the
-     * count; only nlink == 0 frees the row (and, via inode_delete, the
-     * xattr keys). Name-first means a crash between the two leaves nlink
-     * >= the live name count -- an inode may leak, but a live dirent can
-     * never point at a freed row. */
-    if (vol_v3_dirent_delta_del(v, pino, leaf) != 0)
-        return -1;
     if (in.nlink <= 1) {
         int rc = 0;
-        /* WP pba-ref-v3-incremental: make the map exact while this row still
-         * names its recipe. vol_v3_free_recipe_blocks below subtracts exactly
-         * this recipe's count and frees what reaches 0; if the map were
-         * rebuilt AFTER the delete it would no longer contain this row's
-         * contribution, the -1 would take some OTHER live sharer's count
-         * instead, and the block would be freed out from under it. The
-         * v2 twin retires with the same ordering (vol_records.c:547 ensures
-         * before it reads the record it is about to kill). */
+        /* WP-M17 frozen transition (design §4): drop the dirent, then the
+         * count; only nlink == 0 frees the row (and, via inode_delete, the
+         * xattr keys). Name-first means a crash between the two leaves nlink
+         * >= the live name count -- an inode may leak, but a live dirent can
+         * never point at a freed row. That ordering is unchanged; what
+         * changed is that the name now goes INSIDE the map's hold, and the
+         * map is taken BEFORE it rather than after.
+         *
+         * WP unlink-takes-map-after-dirent-drop. This used to take the map
+         * at the old :552, AFTER the dirent delete at the old :540, and the
+         * comment there said the ensure had to happen "while this row still
+         * names its recipe". That is the wrong invariant, and c47cf65 is
+         * what says so: pba_ref_ensure's build reaches an inode THROUGH ITS
+         * DIRENT (v3_walk_dir, below -- vol_v3_path_list_dir, then
+         * vol_v3_path_lookup at :761-765), so once the dirent is gone the
+         * walk cannot reach the row AT ALL, whatever the row still says. A
+         * rebuild after the delete is short by exactly this row's
+         * contribution:
+         *
+         *   two files share pba P     a correct map says 2
+         *   the dirent is dropped     the walk can no longer see B
+         *   pba_ref_ensure rebuilds   count(P) = 1
+         *   pba_ref_modify(P, -1)     count(P) = 0
+         *   vol_free_blocks(P)        P is freed while A still names it
+         *
+         * and the rebuild is ROUTINE, not exceptional: pba_ref_ensure is a
+         * no-op unless the map is absent or pba_ref_stale (volume.c:3620),
+         * and pba_ref_stale is set from the single place a recipe_addr is
+         * published (vol_v3_inode_delta_put, vol_btree.c:3881/:3884). Any
+         * recipe publish since the last build arms it, so writing one more
+         * file is the whole trigger -- which is why this fires on a clean
+         * volume with no injected fault.
+         *
+         * MOVING THE ENSURE IS NECESSARY BUT NOT SUFFICIENT, and the hold is
+         * the other half. The ensure and the -1 are separated by the two
+         * deletes and a recipe load, and the map has no lock of its own --
+         * pba_ref_free and pba_ref_grow both free(v->pba_ref), so a second
+         * writer is a use-after-free, not a lost update. FUSE hid that
+         * behind g_io_lock (fuse_fs.c:32), a `static` in that translation
+         * unit: the core cannot take it, the offline tools are not linked
+         * against it, and invf-sweep runs its sweep on a worker thread
+         * holding nothing. So the precondition was an accident of the mount,
+         * and the offline paths were safe only by being single-writer.
+         * vol_pba_ref_hold makes it structural -- and it is the DELETE that
+         * has to be inside the hold, not merely the ensure, or a rebuild
+         * landing between them rebuilds against a live set the pending -1
+         * does not belong to (and with two sharers retiring at once the
+         * second -1 floors at 0 and frees the block a second time). */
+        vol_pba_ref_hold(v);
+        /* the map, taken while the NAME is still there, so this recipe's own
+         * contribution is in it and the -1 below has something to take */
         pba_ref_ensure(v);
-        if (vol_v3_inode_delta_delete(v, id) != 0)
+        if (vol_v3_dirent_delta_del(v, pino, leaf) != 0) {
+            vol_pba_ref_release(v);
             return -1;
+        }
+        if (vol_v3_inode_delta_delete(v, id) != 0) {
+            vol_pba_ref_release(v);
+            return -1;
+        }
         /* WP-N1: targeted free of unlinked file data blocks.
          *
          * WP201: the ORDER is unchanged and must stay that way -- the row
@@ -576,11 +618,21 @@ int vol_v3_unlink(invfs_volume *v, const char *name)
                     "invf-fsck.\n", name);
             rc = -1;
         }
-        /* Cascade delete container/transcode siblings if main file is unlinked */
+        /* Cascade delete container/transcode siblings if main file is
+         * unlinked. Still inside the hold: this is a nested vol_v3_unlink
+         * per sibling, and the hold is depth-counted over a RECURSIVE mutex,
+         * so it nests correctly instead of unlocking early. */
         if (strchr(name, '!') == NULL)
             vol_delete_siblings(v, name);
+        vol_pba_ref_release(v);
         return rc;
     } else {
+        /* More than one name on this inode: this unlink retires a NAME, not
+         * the inode, and frees nothing -- so it needs no map at all. The row
+         * keeps naming its recipe and every surviving name still reaches it,
+         * which is exactly the condition a map build requires. */
+        if (vol_v3_dirent_delta_del(v, pino, leaf) != 0)
+            return -1;
         in.nlink--;
         if (vol_v3_inode_delta_put(v, id, &in) != 0)
             return -1;

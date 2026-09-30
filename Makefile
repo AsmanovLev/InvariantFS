@@ -875,6 +875,22 @@ test: $(TEST_BINS) $(OUT)/invf-arctest $(OUT)/invf-blkio_test $(OUT)/invf-codec_
 	@# n goes stale silently and leaves the leg green on the healthy path.
 	$(TESTENV) $(TESTISO) $(OUT)/invf-pbaref_v3_test /tmp skiprow
 	$(TESTENV) $(TESTISO) $(OUT)/invf-pbaref_v3_test /tmp skiprowctl
+	@# WP wp/unlink-takes-map-after-dirent-drop: vol_v3_unlink took the
+	@# pba-ref map AFTER it had already dropped the dirent, and the map's
+	@# build reaches an inode THROUGH ITS DIRENT (v3_walk_dir ->
+	@# vol_v3_path_list_dir + vol_v3_path_lookup), so a rebuild taken after
+	@# the delete cannot see the row whose blocks the -1 is about to
+	@# subtract: count(P) comes back 1 where a correct map says 2, the -1
+	@# reaches 0, and P is freed while the other sharer still names it.
+	@# NO FAULT IS INJECTED -- that is the point of this leg. The rebuild
+	@# is routine, because pba_ref_stale is set by any recipe publish
+	@# (vol_btree.c:3881/3884), so publishing one more file arms it and an
+	@# ordinary import is the whole trigger. `unlinkmapctl` is the
+	@# identical sequence with nothing published in between, so the map is
+	@# still exact, the ensure is a no-op, and the leg measures the
+	@# ORDER rather than the scenario.
+	$(TESTENV) $(TESTISO) $(OUT)/invf-pbaref_v3_test /tmp unlinkmap
+	$(TESTENV) $(TESTISO) $(OUT)/invf-pbaref_v3_test /tmp unlinkmapctl
 	@# WP wp/dirs-free-before-publish: vol_v3_create_node freed the existing
 	@# inode's blocks BEFORE it republished the row, so each of the four
 	@# failure returns between the free and the publish left a LIVE row naming

@@ -14,6 +14,12 @@
  *   [bitmap_blocks+journal .. end):  inode/AST area (append-only)
  */
 
+/* _GNU_SOURCE for PTHREAD_RECURSIVE_MUTEX_INITIALIZER_NP (the pba-ref map's
+ * own lock, see g_pba_ref_mu below) — the vol_cpack.c pattern */
+#if defined(__linux__) && !defined(_GNU_SOURCE)
+#define _GNU_SOURCE
+#endif
+
 #include "volume_internal.h"
 #include "vol_metabuf.h"
 #include "vol_delta.h"
@@ -3354,6 +3360,56 @@ static uint64_t pba_ref_hash(uint64_t pba)
     return pba ^ (pba >> 31);
 }
 
+/* WP unlink-takes-map-after-dirent-drop: THE MAP'S MISSING LOCK.
+ *
+ * Every pba_ref primitive below is a read-modify-write of v->pba_ref, and
+ * two of them REPLACE the array: pba_ref_free() does free(v->pba_ref), and
+ * pba_ref_grow() does free(v->pba_ref); v->pba_ref = nt. A second writer is
+ * therefore not a lost update, it is a use-after-free. The map was
+ * single-writer by ACCIDENT -- it relied on every caller happening to be
+ * under the FUSE daemon's one big mutex (g_io_lock, src/cli/fuse_fs.c:32),
+ * which is a `static` in that translation unit. Nothing in src/core/ can
+ * take it, and the offline tools are not linked against it: invf-sweep runs
+ * its sweep on a worker thread (tools/invf-sweep.c) and holds nothing. They
+ * are safe only because each is a single writer per volume, which is a
+ * property of their structure and not a guarantee this code made or checked.
+ *
+ * So the lock lives here, next to the data it protects. File-static rather
+ * than a volume member: it needs no init/destroy pairing on the
+ * invfs_volume allocation and no ABI change, and a process opens one volume
+ * at a time in every caller that exists (the daemon has exactly one g_vol),
+ * so a process-wide lock costs nothing that a per-volume one would not.
+ *
+ * RECURSIVE, for two reasons that are both real: pba_ref_ensure walks the
+ * namespace and calls pba_ref_modify once per block entry, and the retire
+ * paths nest -- vol_v3_unlink calls vol_delete_siblings, which calls
+ * vol_v3_unlink again. */
+static pthread_mutex_t g_pba_ref_mu = PTHREAD_RECURSIVE_MUTEX_INITIALIZER_NP;
+
+/* Depth of the hold/release pairs below. A count and not a flag, so a
+ * nested retire inside an outer one cannot unlock early. */
+static int g_pba_ref_held;
+
+/* Span a critical section that is not a single function: a retire has to
+ * take the map, drop the name, drop the row, and subtract -- and all four
+ * have to be one atomic thing with respect to the map, because a rebuild
+ * that lands between the first and the last rebuilds against a live set the
+ * pending -1 does not belong to. See vol_v3_unlink. */
+void vol_pba_ref_hold(invfs_volume *v)
+{
+    (void)v;
+    pthread_mutex_lock(&g_pba_ref_mu);
+    g_pba_ref_held++;
+}
+
+void vol_pba_ref_release(invfs_volume *v)
+{
+    (void)v;
+    if (g_pba_ref_held > 0)
+        g_pba_ref_held--;
+    pthread_mutex_unlock(&g_pba_ref_mu);
+}
+
 static void pba_ref_free(invfs_volume *v)
 {
     free(v->pba_ref);
@@ -3369,14 +3425,18 @@ static void pba_ref_free(invfs_volume *v)
  * can read a count that predates that publish. */
 void pba_ref_invalidate(invfs_volume *v)
 {
+    pthread_mutex_lock(&g_pba_ref_mu);
     if (v) v->pba_ref_stale = 1;
+    pthread_mutex_unlock(&g_pba_ref_mu);
 }
 
 /* The converse: the caller kept the map exact by hand (the sweep's segment
  * remap, dedupe's remap), so the recipe it just published is accounted for. */
 void pba_ref_validate(invfs_volume *v)
 {
+    pthread_mutex_lock(&g_pba_ref_mu);
     if (v) v->pba_ref_stale = 0;
+    pthread_mutex_unlock(&g_pba_ref_mu);
 }
 
 /* drop the map (a path that rewrote records without the apply hooks --
@@ -3384,7 +3444,9 @@ void pba_ref_validate(invfs_volume *v)
  * rebuilds it lazily from the live set */
 void pba_ref_reset(invfs_volume *v)
 {
+    pthread_mutex_lock(&g_pba_ref_mu);
     pba_ref_free(v);
+    pthread_mutex_unlock(&g_pba_ref_mu);
 }
 
 /* grow to 2x and rehash; failure drops the whole map (the callers' free
@@ -3410,7 +3472,10 @@ static int pba_ref_grow(invfs_volume *v)
     return 0;
 }
 
-void pba_ref_modify(invfs_volume *v, uint64_t pba, int delta)
+/* The body, called with g_pba_ref_mu held. Split out rather than unlocked
+ * inline because it has an early return on a grow failure, and a return
+ * that forgot an unlock is a deadlock rather than a wrong answer. */
+static void pba_ref_modify_locked(invfs_volume *v, uint64_t pba, int delta)
 {
     size_t k;
     if (!v->pba_ref_on || !v->pba_ref || !pba || pba >= v->sb.total_blocks)
@@ -3431,12 +3496,19 @@ void pba_ref_modify(invfs_volume *v, uint64_t pba, int delta)
     }
 }
 
+void pba_ref_modify(invfs_volume *v, uint64_t pba, int delta)
+{
+    pthread_mutex_lock(&g_pba_ref_mu);
+    pba_ref_modify_locked(v, pba, delta);
+    pthread_mutex_unlock(&g_pba_ref_mu);
+}
+
 /* delta = +1 (record appended) / -1 (record killed). Owner records and
  * TEXT entries are skipped (see the section comment). Decrement floors at
  * 0: a record absent from the build (dead before the map existed) must not
  * drive counts negative. */
-void pba_ref_apply(invfs_volume *v, const uint8_t *rec, uint32_t rec_len,
-                   int delta)
+static void pba_ref_apply_locked(invfs_volume *v, const uint8_t *rec,
+                                uint32_t rec_len, int delta)
 {
     invfs_ast_hdr ah;
     const invfs_inode_rec *rh;
@@ -3459,20 +3531,32 @@ void pba_ref_apply(invfs_volume *v, const uint8_t *rec, uint32_t rec_len,
         const invfs_ast_block_entry *e = (const invfs_ast_block_entry *)
             (rec + off + (size_t)i * sizeof(*e));
         if (e->zone == INVFS_ZONE_TEXT || !e->pba) continue;
-        pba_ref_modify(v, e->pba, delta);
+        pba_ref_modify_locked(v, e->pba, delta);
     }
+}
+
+void pba_ref_apply(invfs_volume *v, const uint8_t *rec, uint32_t rec_len,
+                   int delta)
+{
+    pthread_mutex_lock(&g_pba_ref_mu);
+    pba_ref_apply_locked(v, rec, rec_len, delta);
+    pthread_mutex_unlock(&g_pba_ref_mu);
 }
 
 uint32_t pba_ref_count(invfs_volume *v, uint64_t pba)
 {
     size_t k;
-    if (!v->pba_ref_on || !v->pba_ref) return 2;   /* unknown: never free */
+    uint32_t n;
+    pthread_mutex_lock(&g_pba_ref_mu);
+    if (!v->pba_ref_on || !v->pba_ref) { pthread_mutex_unlock(&g_pba_ref_mu); return 2; }  /* unknown: never free */
     k = (size_t)pba_ref_hash(pba) & v->pba_ref_mask;
+    n = 0;
     while (v->pba_ref[k].pba) {
-        if (v->pba_ref[k].pba == pba) return v->pba_ref[k].n;
+        if (v->pba_ref[k].pba == pba) { n = v->pba_ref[k].n; break; }
         k = (k + 1) & v->pba_ref_mask;
     }
-    return 0;
+    pthread_mutex_unlock(&g_pba_ref_mu);
+    return n;
 }
 
 /* Build the map from the live name-index set (one read per live record).
@@ -3606,7 +3690,9 @@ static int pba_ref_v3_walk_cb(void *ctx_, const char *path, uint64_t inode_id,
     return 0;
 }
 
-int pba_ref_ensure(invfs_volume *v)
+/* The body, called with g_pba_ref_mu held (see pba_ref_modify_locked for why
+ * the early returns live in a separate function). */
+static int pba_ref_ensure_locked(invfs_volume *v)
 {
     pba_ref_ensure_ctx c;
     /* WP pba-ref-v3-incremental: an existing map is only reused when nothing
@@ -3668,6 +3754,15 @@ int pba_ref_ensure(invfs_volume *v)
     }
     v->pba_ref_stale = 0;
     return 0;
+}
+
+int pba_ref_ensure(invfs_volume *v)
+{
+    int rc;
+    pthread_mutex_lock(&g_pba_ref_mu);
+    rc = pba_ref_ensure_locked(v);
+    pthread_mutex_unlock(&g_pba_ref_mu);
+    return rc;
 }
 
 

@@ -636,6 +636,179 @@ static void leg_skiprow(int armed)
     free(a); free(b);
 }
 
+/* ---- leg: vol_v3_unlink takes the map AFTER the dirent is gone ----
+ *
+ * NO FAULT IS INJECTED HERE, and that is the entire point of this leg. The
+ * other legs in this file all need a fault door armed; this one walks off a
+ * healthy volume, because the defect is an ORDERING and not a skipped row:
+ *
+ *   src/core/vol_dirs.c:540   the dirent is dropped (a delta delete appended)
+ *   src/core/vol_dirs.c:552   pba_ref_ensure(v)  <- a rebuild HERE cannot
+ *                             see the row at :540
+ *   src/core/vol_dirs.c:572   vol_v3_free_recipe_blocks -> the -1 at
+ *                             src/core/vol_ast.c:180
+ *
+ * pba_ref_ensure's build reaches an inode THROUGH ITS DIRENT: the walk is
+ * v3_walk_dir (src/core/vol_dirs.c:722), which enumerates
+ * vol_v3_path_list_dir and resolves each name with vol_v3_path_lookup
+ * (:761-765). Dropping the dirent at :540 therefore removes B from the walk's
+ * view even though B's row is still live -- it is not deleted until :553. A
+ * rebuild at :552 is a rebuild that cannot see B, so count(P) comes back 1
+ * where a correct map says 2, the -1 reaches 0, and P is freed while A still
+ * names it. The comment at :544-551 asserts the opposite of what the ordering
+ * does.
+ *
+ * WHY THE MAP IS EVEN REBUILT: pba_ref_ensure is a no-op unless the map is
+ * absent or pba_ref_stale (src/core/volume.c:3620), and pba_ref_stale is set
+ * by pba_ref_invalidate from the single place a recipe_addr is published --
+ * vol_v3_inode_delta_put, src/core/vol_btree.c:3881/3884. So ANY recipe
+ * publish since the last map build arms it, and the rebuild at :552 is
+ * routine rather than exceptional. Publishing a third file is all it takes;
+ * that is what the armed leg does, and it is an ordinary import, not a fault.
+ *
+ * `stale_on == 0` is the CONTROL: the same corpus, the same unlink, with
+ * nothing published in between so the map is still exact and the ensure is a
+ * no-op. It is what makes the armed leg a measurement of the ORDER rather
+ * than of the scenario -- if the control showed the same damage, the shared
+ * segment would be the defect and this leg would prove nothing.
+ */
+static uint8_t *mk_donor(void)
+{
+    size_t seg_sz = SEGMENT_SIZE, file_sz = 8 * seg_sz;
+    uint8_t *d = (uint8_t *)malloc(file_sz);
+    size_t i, s;
+    assert(d);
+    /* Deliberately NOT mk_file()'s shared segment-0 pattern: the donor has to
+     * carry bytes that DIFFER from A's, or laying it over P would reproduce
+     * A's own segment and the oracle would pass on a freed block. */
+    for (s = 0; s < file_sz / seg_sz; s++)
+        for (i = 0; i < seg_sz; i++)
+            d[s * seg_sz + i] = (uint8_t)(((s + 9) * 91 + i * 5 + 77) & 0xFF);
+    return d;
+}
+
+static void leg_unlink_map_order(int stale_on)
+{
+    size_t file_sz = 8 * SEGMENT_SIZE;
+    invfs_dedupe_stats ds;
+    invfs_volume *v;
+    uint8_t *a = mk_file(1), *b = mk_file(2), *c = mk_file(3), *d = mk_donor();
+    uint64_t pba = 0, plen = 0, n = 0, donor = 0, got = 0, donor_plen = 0;
+    uint64_t pa[MAXPB];
+    int na = 0;
+    const char *tag = stale_on ? "unlinkmap" : "unlinkmapctl";
+
+    printf("  [%s] === the map is taken after the dirent is dropped, %s ===\n",
+           tag, stale_on ? "NO FAULT ARMED" : "CONTROL: nothing published in between");
+
+    mkfs_fresh();
+    v = open_vol();
+    ok(vol_v3_write_bulk(v, "file_a.bin", a, file_sz, NULL) != 0, "wrote file_a.bin");
+    ok(vol_v3_write_bulk(v, "file_b.bin", b, file_sz, NULL) != 0, "wrote file_b.bin");
+    vol_sweep_dedupe_ex(v, &ds, NULL, NULL);
+    pba = find_shared(v);
+    ok(pba != 0, "dedupe made A and B name the same segment P");
+    pba_save(pba);
+    save_bytes("a_expect", a, file_sz);
+    report_both(v, "after dedupe", pba);
+    printf("  [%s] map before the unlink: on=%d stale=%d count(P)=%u "
+           "(two live recipes name P)\n", tag, v->pba_ref_on, v->pba_ref_stale,
+           pba_ref_count(v, pba));
+
+    if (stale_on) {
+        /* The trigger, and it is completely ordinary: publishing a recipe
+         * sets pba_ref_stale (vol_btree.c:3881/3884), so the ensure the
+         * unlink takes has to rebuild -- and it rebuilds AFTER :540. */
+        ok(vol_v3_write_bulk(v, "file_c.bin", c, file_sz, NULL) != 0,
+           "published file_c.bin (an ordinary recipe publish, no fault)");
+        printf("  [%s] map after publishing file_c.bin: on=%d stale=%d count(P)=%u "
+               "-- a correct map says 2 and still names both A and B\n", tag,
+               v->pba_ref_on, v->pba_ref_stale, pba_ref_count(v, pba));
+    }
+
+    /* NB: the donor is written AFTER the unlink, not before. Writing it
+     * before would itself publish a recipe and set pba_ref_stale, which is
+     * the very state the armed leg is built on -- so the control would
+     * inherit the fault and stop being a control. (It did, the first time:
+     * the donor-in-front leg failed identically in both arms.) The donor is
+     * only ever READ, so nothing about it has to exist before the unlink. */
+    ok(vol_v3_unlink(v, "file_b.bin") == 0, "unlinked file_b.bin via vol_v3_unlink");
+    report_both(v, "after unlink", pba);
+
+    n = extent_allocated(v, pba, &plen);
+    printf("  [%s] P extent: %llu of %llu blocks still allocated\n", tag,
+           (unsigned long long)n, (unsigned long long)plen);
+    if (n < plen) {
+        /* The donor: a real segment of the same length, so the damage is
+         * "A reads a DIFFERENT valid segment", not "A is short". A scribble
+         * would be caught by the length check invf-verify --deep does
+         * (src/cli/verify.c:357-364); a real segment of the same length is
+         * not, because an invfs_ast_block_entry carries a pba and no content
+         * hash. */
+        ok(vol_v3_write_bulk(v, "file_d.bin", d, file_sz, NULL) != 0,
+           "wrote file_d.bin (the donor)");
+        recipe_pbas(v, "file_d.bin", pa, MAXPB, &na);
+        donor = na ? pa[0] : 0;
+        {
+            int k, took = 0;
+            for (k = 0; k < na; k++) if (pa[k] == pba) took = 1;
+            /* The strong case: the donor's OWN allocation landed on the
+             * block the wrong free handed back, so what A now reads is a
+             * real segment an ordinary write produced -- no hand-laid bytes
+             * at all. When that does not happen the copy below is the
+             * fallback, and it is the same bytes either way. */
+            if (took) {
+                printf("  [%s] the donor's own allocation took P=%llu: A now "
+                       "reads a valid segment a normal write produced, of the "
+                       "SAME length\n", tag, (unsigned long long)pba);
+                ok(1, "P is handed straight back out to the next writer");
+                goto donated;
+            }
+        }
+        got = alloc_blocks(v, pba, plen, 1, 1, INVFS_ALLOC_DATA);
+        printf("  [%s] alloc_blocks(%llu,%llu) -> %llu\n", tag,
+               (unsigned long long)pba, (unsigned long long)plen,
+               (unsigned long long)got);
+        ok(got == pba, "P is handed straight back out to the next writer");
+        if (got == pba && donor) {
+            uint8_t *dbuf;
+            if (seg_extent_checked(v, donor, &donor_plen) != 0 || donor_plen == 0) {
+                printf("  [%s] donor %llu: framed extent did not validate, "
+                       "copying its first block verbatim\n", tag,
+                       (unsigned long long)donor);
+                donor_plen = 1;
+            }
+            dbuf = (uint8_t *)malloc((size_t)donor_plen * INVFS_BLOCK_SIZE);
+            if (dbuf &&
+                io_seek(&v->io, donor * INVFS_BLOCK_SIZE) == 0 &&
+                io_read(&v->io, dbuf, (size_t)donor_plen * INVFS_BLOCK_SIZE) == 0) {
+                io_pwrite(&v->io, got * INVFS_BLOCK_SIZE, dbuf,
+                          (size_t)donor_plen * INVFS_BLOCK_SIZE);
+                printf("  [%s] laid donor segment %llu (%llu blocks) over P=%llu "
+                       "-- a VALID segment of the same length, different bytes\n",
+                       tag, (unsigned long long)donor,
+                       (unsigned long long)donor_plen, (unsigned long long)pba);
+            } else {
+                printf("  [%s] could not read the donor segment %llu\n", tag,
+                       (unsigned long long)donor);
+            }
+            free(dbuf);
+        }
+    }
+donated:;
+    /* THE ORACLE: byte equality against the bytes that went in. */
+    {
+        char m[160];
+        snprintf(m, sizeof m,
+                 "%s: A byte-exact after the OTHER sharer was unlinked", tag);
+        oracle(v, "file_a.bin", a, file_sz, m);
+    }
+    dump_a(v);
+    vol_flush(v);
+    vol_close(v);
+    free(a); free(b); free(c); free(d);
+}
+
 int main(int argc, char **argv)
 {
     const char *phase = (argc > 2) ? argv[2] : "red";
@@ -842,6 +1015,8 @@ int main(int argc, char **argv)
         free(a); free(b);
     } else if (!strcmp(phase, "skiprow") || !strcmp(phase, "skiprowctl")) {
         leg_skiprow(!strcmp(phase, "skiprow"));
+    } else if (!strcmp(phase, "unlinkmap") || !strcmp(phase, "unlinkmapctl")) {
+        leg_unlink_map_order(!strcmp(phase, "unlinkmap"));
     } else {
         fprintf(stderr, "unknown phase %s\n", phase);
         return 2;

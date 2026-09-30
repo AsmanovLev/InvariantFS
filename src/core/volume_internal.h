@@ -1467,6 +1467,35 @@ void pba_ref_reset(invfs_volume *v);
 void pba_ref_invalidate(invfs_volume *v);
 void pba_ref_validate(invfs_volume *v);
 
+/* WP unlink-takes-map-after-dirent-drop: span a critical section over the
+ * MAP that is not a single function call.
+ *
+ * Every pba_ref primitive above is a read-modify-write of an array that two
+ * of them REPLACE (pba_ref_free and pba_ref_grow both free(v->pba_ref)),
+ * so they take g_pba_ref_mu in volume.c. That is enough for one call, and
+ * not enough for a RETIRE, which is four steps with a correctness relation
+ * between them: the map must be taken while the retiring inode is still
+ * REACHABLE BY NAME, the name is then dropped, the row is dropped, and only
+ * then is the recipe's contribution subtracted. A rebuild landing between
+ * the first and the last rebuilds against a live set the pending -1 does not
+ * belong to, and the count that comes back is short by exactly the
+ * reference being retired -- which is a free of a live block.
+ *
+ * So a retire holds the map across the whole span:
+ *
+ *     vol_pba_ref_hold(v);
+ *     pba_ref_ensure(v);               // the map, while the name is there
+ *     <drop the dirent>                // the walk can no longer reach it
+ *     <drop the row>
+ *     vol_v3_free_recipe_blocks(...);  // the -1, against a map that held us
+ *     vol_pba_ref_release(v);
+ *
+ * Depth-counted and built on a RECURSIVE mutex, because the retire paths
+ * nest: vol_v3_unlink calls vol_delete_siblings, which calls vol_v3_unlink
+ * again, so a flag would unlock early. */
+void vol_pba_ref_hold(invfs_volume *v);
+void vol_pba_ref_release(invfs_volume *v);
+
 /* WP22d consistent-cut scan set: per-name version stack built by the
  * open/fsck inode-area scan. WP27: a version is "broken" when some AST
  * entry carries an invalid pba (0 or past the volume end -- block 0 is the
