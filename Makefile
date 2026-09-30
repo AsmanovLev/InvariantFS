@@ -132,7 +132,8 @@ CLI_MAINS := mkfs verify fsck cp cat ls stat arctest blkio_test resize \
              sibling_retire_v3_test tar_cap_test fold_delta_read_test \
              reclaim_reader_epoch_test readdir_error_test dedupe_symlink_test dirs_free_before_publish_test \
              stat_v3_counts_test acl_eio_test meta_clobber_test spn_skip_recipe_test \
-             walk_status_test walk_status_fuse_test no_v2_surface_test
+             walk_status_test walk_status_fuse_test no_v2_surface_test \
+             table_sync_evict_test
 $(foreach t,$(CLI_MAINS),$(eval $(call TOOL_RULE,$(t),)))
 
 # reclaim_reader_epoch_test was, for one commit, a red control that built but
@@ -724,6 +725,15 @@ test: $(TEST_BINS) $(OUT)/invf-arctest $(OUT)/invf-blkio_test $(OUT)/invf-codec_
 	@# which is the same staleness trap the comment on `all` describes.
 	$(TESTENV) $(TESTISO) $(OUT)/invf-walk_status_test /tmp
 	$(TESTENV) $(TESTISO) $(OUT)/invf-walk_status_fuse_test /tmp
+	@# WP140: the name table must not evict a LIVE name because a lookup could
+	@# not be completed. Runs under $(TESTISO): fuse_get_context() is stubbed
+	@# to NULL, so every permission check takes the documented uid-0 bypass and
+	@# no leg here depends on a denial the one-entry fake-root uid map would
+	@# swallow. Its failure is INVFS_FAULT, armed through
+	@# invfs_vol_btree_fault_reload() (the site is in vol_btree.c and the
+	@# countdown is per-translation-unit), and it is DISARMED after every
+	@# probe, so the unset path stays inert here too.
+	$(TESTENV) $(TESTISO) $(OUT)/invf-table_sync_evict_test /tmp
 	$(TESTENV) $(TESTISO) $(OUT)/invf-btree_repair_test /tmp
 	$(TESTENV) $(TESTISO) $(OUT)/invf-symlink_v3_test /tmp
 	$(TESTENV) $(TESTISO) $(OUT)/invf-large_file_v3_test /tmp

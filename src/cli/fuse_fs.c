@@ -340,15 +340,75 @@ static void table_remove_name(const char *name)
 }
 
 /* re-read one name from the engine into the table. Call WITHOUT the lock. */
-/* same as table_sync_one but caller already holds g_io_lock */
+/* same as table_sync_one but caller already holds g_io_lock
+ *
+ * WP140: a lookup that could not be COMPLETED must not evict anything.
+ *
+ * This used to be `id = vol_find(...); if (!id) { table_remove_name(name);
+ * return; }`, and vol_find returns a uint64_t -- so "there is no such name"
+ * and "the dirent row on the path would not read" were both the value 0, and
+ * this function acted on the union of them. It is called after EVERY mutation,
+ * so one transient read error -- a quarantined base page, a fold racing the
+ * read -- took a live file out of the name table and the mount answered ENOENT
+ * for it until something unrelated marked the table stale, or the next mount.
+ * Nothing is written to the volume, so no data was at risk; but `ls` still
+ * listed the file (invf_readdir is engine-backed) while open/stat/read said it
+ * was not there, which is the shape that reaches a user.
+ *
+ * The three answers, from vol_find_rc (src/core/vol_ast.c), and what each may
+ * do to the table:
+ *
+ *   1  the name is there      -> refresh its row.
+ *   0  the name is NOT there  -> evict. This is the ONLY eviction, and it is
+ *                                the only one that is a fact about the volume.
+ *  -1  the lookup failed      -> KEEP whatever the table already says, mark it
+ *                                stale, and say so.
+ *
+ * Why KEEP is the right answer and not the cautious-looking EVICT: the two
+ * errors are not symmetric. An entry dropped for a LIVE name is a lie about
+ * presence -- `ls` hides a file that is there -- but it is SELF-HEALING (a
+ * rebuild puts it back) and the bytes were never touched: the engine still
+ * resolves the name and reads them (that is what `invf-cat` does, and it never
+ * consults this table). An entry KEPT for a DELETED name is a lie about
+ * absence, and it is the worse of the two: unlink already freed the file's
+ * blocks to the allocator (AGENTS.md 2.4), so that entry hands out an inode id
+ * whose storage now belongs to somebody else. On a filesystem whose whole
+ * invariant is bit-exactness, returning another file's recycled blocks is a
+ * worse outcome than a file the mount temporarily cannot find.
+ *
+ * What can still be stale in a kept entry is size and mtime, never existence
+ * and never the inode id: the row was written by the previous mutation, and
+ * every mutation -- including unlink, create and rename -- re-establishes it,
+ * so there is no window in which a kept id can name a freed inode.
+ *
+ * The stale mark is what makes this total. Without it a name that was not
+ * already in the table (a create or mknod that syncs a name the table has
+ * never seen) would still be invisible until some unrelated op marked the
+ * table dirty; with it, snapshot_entry's existing miss-then-rebuild path heals
+ * on the very next lookup.
+ *
+ * vol_find is deliberately NOT widened. 102 call sites test it against 0 and
+ * most only skip work, which is fail-safe under the collapse; changing the
+ * meaning for all of them at once would change what every one of them does,
+ * and the finding is that this one DECIDES something. Hence vol_find_rc. */
 static void table_sync_one_locked(const char *name)
 {
-    uint64_t id, sz = 0, ct = 0;
+    uint64_t id = 0, sz = 0, ct = 0;
+    int rc;
     if (!g_vol) return;
-    id = vol_find(g_vol, name);
-    if (!id) { table_remove_name(name); return; }
+    rc = vol_find_rc(g_vol, name, &id);
+    if (rc < 0) {
+        table_mark_stale();
+        fprintf(stderr, "invf-fuse: table: lookup did not complete for \"%s\"; "
+                        "keeping the entry the table already has, and marking "
+                        "the table for a rebuild\n", name);
+        return;
+    }
+    if (rc == 0) { table_remove_name(name); return; }
     if (vol_stat_full(g_vol, name, &id, &sz, &ct) == 0)
         table_upsert_locked(name, id, sz, ct);
+    else
+        table_mark_stale();   /* found, but not stat-able: same "keep, and ask again later" */
 }
 
 
