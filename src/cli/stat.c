@@ -387,11 +387,26 @@ int main(int argc, char **argv)
         if (!tbl[j].killed && tbl[j].ino != 0 && tbl[j].ino <= max_live_ino)
             live[tbl[j].ino] = 1;
 
-    /* refcount per block from L2P journal — only LIVE inodes */
-    uint32_t *refc = (uint32_t *)calloc(total, sizeof(uint32_t));
+    /* Refcount per block, from the v2 L2P journal, for LIVE inodes only.
+     *
+     * THE V2 JOURNAL IS EMPTY ON v3, so this yields a refcount array of
+     * zeros and the bar's `d = refcount[b] > 1` is therefore structurally
+     * always false: `dedup` and `both` could not be non-zero on a v3 volume
+     * no matter how duplicated it is, and the legend still advertised two
+     * colours. A zero presented as a measurement is the same defect as the
+     * empty file table this branch already fixed, one function over.
+     *
+     * The v3 answer exists -- pba_ref_count() is exactly "how many live
+     * entries name this pba" -- but filling the array that way is a lookup
+     * per allocated block, which is a new cost and a new feature, not a fix.
+     * So on v3 the tool says it does not know rather than reporting a
+     * confident zero, and the legend drops the colours it cannot produce. */
+    const int can_refcount = !(sb->vol_flags & VOLF_V3);
+    uint32_t *refc = can_refcount
+                   ? (uint32_t *)calloc(total, sizeof(uint32_t)) : NULL;
     size_t n_l2p = 0;
-    const invfs_l2p_entry *l2p = vol_l2p(vol, &n_l2p);
-    for (size_t i = 0; i < n_l2p; i++) {
+    const invfs_l2p_entry *l2p = can_refcount ? vol_l2p(vol, &n_l2p) : NULL;
+    for (size_t i = 0; i < (can_refcount ? n_l2p : 0); i++) {
         const invfs_l2p_entry *e = &l2p[i];
         if (e->type != INVFS_JRN_MAP || e->inode > max_live_ino ||
             !live[e->inode] || e->pba >= total) continue;
@@ -410,9 +425,16 @@ int main(int argc, char **argv)
     uint64_t asis, sem, dedup, both, alloc, freeb;
     draw_bar(vol, sb, refc, &asis, &sem, &dedup, &both, &alloc, &freeb);
 
-    printf("\n  " C_GRAY "█ As-IS (RAW)" C_RST "  " C_BLUE "█ semantic" C_RST
-           "  " C_GREEN "█ dedup" C_RST "  " C_CYAN "█ semantic+dedup" C_RST
-           "  " C_DIM "░ free" C_RST "\n\n");
+    if (can_refcount)
+        printf("\n  " C_GRAY "█ As-IS (RAW)" C_RST "  " C_BLUE "█ semantic" C_RST
+               "  " C_GREEN "█ dedup" C_RST "  " C_CYAN "█ semantic+dedup" C_RST
+               "  " C_DIM "░ free" C_RST "\n\n");
+    else
+        printf("\n  " C_GRAY "█ As-IS (RAW)" C_RST "  " C_BLUE "█ semantic" C_RST
+               "  " C_DIM "░ free" C_RST "\n"
+               "  " C_DIM "dedup and semantic+dedup are not shown: this format "
+               "keeps no L2P journal, so per-block refcounts are not available "
+               "here." C_RST "\n\n");
 
     char fb[64], ab[64], ub[64], pct[32];
     human(freeb * INVFS_BLOCK_SIZE, fb, sizeof fb);
@@ -445,18 +467,32 @@ int main(int argc, char **argv)
         printf("  files : %llu live of %zu names (%llu tombstones), %s logical, largest %s\n",
                (unsigned long long)nlive, nfiles, (unsigned long long)tombs, mb, mb2);
 
-    printf("  l2p   : %zu maps, journal %.1f%% (of %llu blk)\n",
-           n_l2p, 100.0 * vol_journal_pos(vol) /
-           (double)(INVFS_JOURNAL_BLOCKS * INVFS_BLOCK_SIZE),
-           (unsigned long long)INVFS_JOURNAL_BLOCKS);
-    printf("  inode : area %.1f%% used\n",
-           100.0 * (vol_inode_area_pos(vol) - vol_inode_area_start(vol)) /
-           (double)((vol_inode_area_end(vol) - vol_inode_area_start(vol))));
+    if (can_refcount) {
+        printf("  l2p   : %zu maps, journal %.1f%% (of %llu blk)\n",
+               n_l2p, 100.0 * vol_journal_pos(vol) /
+               (double)(INVFS_JOURNAL_BLOCKS * INVFS_BLOCK_SIZE),
+               (unsigned long long)INVFS_JOURNAL_BLOCKS);
+        printf("  inode : area %.1f%% used\n",
+               100.0 * (vol_inode_area_pos(vol) - vol_inode_area_start(vol)) /
+               (double)((vol_inode_area_end(vol) - vol_inode_area_start(vol))));
+    } else {
+        /* The v2 journal and the v2 inode area do not exist on this format.
+         * Printing their occupancy would report two zeroes about structures
+         * that are not there, in a block of output an operator reads as
+         * measurements. "space :" and "zones :" below are bitmap-derived and
+         * are honest on v3. */
+        printf("  l2p   : (not present on this format)\n"
+               "  inode : (no inode area on this format)\n");
+    }
 
-    printf("\n  semantic: %llu blk (%.1f%%)  dedup: %llu blk (%.1f%%)  both: %llu\n",
-           (unsigned long long)sem, 100.0 * sem / (alloc ? alloc : 1),
-           (unsigned long long)dedup, 100.0 * dedup / (alloc ? alloc : 1),
-           (unsigned long long)both);
+    if (can_refcount)
+        printf("\n  semantic: %llu blk (%.1f%%)  dedup: %llu blk (%.1f%%)  both: %llu\n",
+               (unsigned long long)sem, 100.0 * sem / (alloc ? alloc : 1),
+               (unsigned long long)dedup, 100.0 * dedup / (alloc ? alloc : 1),
+               (unsigned long long)both);
+    else
+        printf("\n  semantic: %llu blk (%.1f%%)  dedup: n/a  both: n/a\n",
+               (unsigned long long)sem, 100.0 * sem / (alloc ? alloc : 1));
 
     if (show_files) {
         printf("\n  files by policy:\n");
@@ -467,9 +503,14 @@ int main(int argc, char **argv)
                 printf("    " C_DIM "X %-40s (deleted)" C_RST "\n", nm);
                 continue;
             }
-            /* check refcount over this inode's mapped blocks */
+            /* Policy tag per file. The l2p index is EMPTY on v3, so both
+             * flags would be 0 for every file and every line would read [A]
+             * as-is -- which is what it did, on a volume that had been swept
+             * and consolidated. Same defect as the bar: a confident zero
+             * where the tool simply cannot see. Say so on the legend rather
+             * than printing a tag it did not compute. */
             int is_sem = 0, is_ded = 0;
-            for (size_t i = 0; i < n_l2p; i++) {
+            for (size_t i = 0; can_refcount && i < n_l2p; i++) {
                 if (l2p[i].type != INVFS_JRN_MAP || l2p[i].inode != ino) continue;
                 if (l2p[i].pba >= sb->shadow_zone_start) is_sem = 1;
                 uint64_t n = l2p[i].length;
@@ -481,6 +522,7 @@ int main(int argc, char **argv)
             if (is_sem && is_ded) { col = C_CYAN; tag = "B"; }
             else if (is_sem)     { col = C_BLUE; tag = "S"; }
             else if (is_ded)     { col = C_GREEN; tag = "D"; }
+            if (!can_refcount) { col = C_DIM; tag = "?"; }
             char fs2[24];
             human(fsz, fs2, sizeof fs2);
             /* a v3 table carries directories too; mark them the way invf-ls
@@ -489,8 +531,12 @@ int main(int argc, char **argv)
             snprintf(dname, sizeof dname, "%s%s", nm, tbl[j].dir ? "/" : "");
             printf("    %s[%s] %-44s %8s" C_RST "\n", col, tag, dname, fs2);
         }
-        printf("\n  " C_GRAY "[A] as-is" C_RST "  " C_BLUE "[S] semantic" C_RST
-               "  " C_GREEN "[D] dedup" C_RST "  " C_CYAN "[B] both" C_RST "\n");
+        if (can_refcount)
+            printf("\n  " C_GRAY "[A] as-is" C_RST "  " C_BLUE "[S] semantic" C_RST
+                   "  " C_GREEN "[D] dedup" C_RST "  " C_CYAN "[B] both" C_RST "\n");
+        else
+            printf("\n  " C_DIM "[?] policy unknown: this format keeps no L2P "
+                   "journal, so per-block refcounts are not available here." C_RST "\n");
     }
 
     free(refc);
