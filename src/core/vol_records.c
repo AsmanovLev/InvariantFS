@@ -284,13 +284,58 @@ static void meta_pub_from_hdr_defaults(invfs_meta_pub *m, uint8_t type)
 
 int vol_get_meta(invfs_volume *v, uint64_t inode_id, invfs_meta_pub *out)
 {
+    /* Kept at 0 / -1 for its ~100 callers, which all read the -1 as "no
+     * metadata, use a default". vol_get_meta_rc is the same read with the
+     * two reasons kept apart; widening this one would change every one of
+     * those callers at once, so the split is made at the other end of the
+     * wire instead. */
+    return vol_get_meta_rc(v, inode_id, out) == 0 ? 0 : -1;
+}
+
+
+/* THE RETURN CONTRACT IS THREE DISTINCT ANSWERS, and that is the whole
+ * point of this comment. This function used to return -1 for BOTH "this
+ * inode has no meta row" and "the row could not be read" (the flattening is
+ * still visible one line up). Those are not remotely the same thing, and the
+ * difference is not academic:
+ *
+ *   -ENOENT  the row is not there. NORMAL, and the answer the v1->v2
+ *            metadata upgrade path is built on: volume.c sets
+ *            v3_mbuf_ready unconditionally on open, so on a volume whose
+ *            records predate the v3 inode row -- i.e. every pre-v3 volume,
+ *            see the contract note in volume.h -- vol_v3_inode_get answers
+ *            0 and no row will ever be found. A caller stamping metadata
+ *            onto such a record legitimately starts from type defaults
+ *            (uid/gid 0, 0644 files / 0755 dirs) and applies its patch on
+ *            top; the defaults stand in for a row that was never written.
+ *
+ *   -EIO     the row could not be READ. DAMAGE: a quarantined base page
+ *            makes bt_read fail, btree_search return -1 and v3_base_get
+ *            pass that through, and a value that will not decode lands here
+ *            too. There is no honest default for an inode whose recorded
+ *            mode and owner are exactly what could not be read -- the
+ *            defaults are not a guess, they are a DIFFERENT inode.
+ *
+ * The FUSE side acted on the merged value: meta_for_path filled
+ * meta_defaults() and returned success, and meta_apply_patch then WROTE
+ * those defaults back, so a chmod / utimens / chown on an inode whose row
+ * would not read silently reset its mode to 0644 and its owner to root. The
+ * volume was changed by a call that reported success.
+ *
+ * -EIO covers every unreadable cause rather than naming them, because the
+ * caller's correct response is the same for all of them and none of them is
+ * a "no". */
+int vol_get_meta_rc(invfs_volume *v, uint64_t inode_id, invfs_meta_pub *out)
+{
     invfs_v3_inode in;
-    if (!out) return -1;
+    int rc;
+    if (!out) return -EIO;
     /* WP-M5/WP-M24: there is no INO2 ext -- the row in the base tree is the
      * authority. Map it onto the same public view (size/recipe included);
      * the symlink target rides in the recipe blob (WP-M8/WP-M24). */
-    if (vol_v3_inode_get(v, inode_id, &in) != 1)
-        return -1;
+    rc = vol_v3_inode_get(v, inode_id, &in);
+    if (rc < 0) return -EIO;      /* the row could not be read */
+    if (rc == 0) return -ENOENT;  /* there is no such row; see above */
     memset(out, 0, sizeof(*out));
     out->type  = (uint8_t)in.type;
     out->mode  = in.mode;

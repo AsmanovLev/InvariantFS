@@ -3758,6 +3758,25 @@ int vol_v3_inode_get(invfs_volume *v, uint64_t inode_id, invfs_v3_inode *out)
         return -1;
     v3_ino_key(inode_id, kb);
 
+    /* Test-only seam (src/core/vol_fault.h), armed by INVFS_FAULT. It stands
+     * in for the inode ROW READ failing, which in production is a
+     * quarantined or otherwise unreadable base page: bt_read makes
+     * btree_search return -1 (vol_btree.c:522) and v3_base_get passes that
+     * through, exactly as it passes through below at the decode. The site
+     * injects the same -1, so nothing downstream -- including
+     * vol_get_meta_rc, which has to tell this from "there is no such row" --
+     * can tell it from the real thing.
+     *
+     * Placed here, before the delta probe, so it also covers a delta-side
+     * read failure: the two are the same question to every caller.
+     *
+     * The reload door for this file is invfs_vol_btree_fault_reload()
+     * (:3288). A test in another translation unit must call it -- see the
+     * declaration in vol_fault.h for why unsetenv+setenv is not a
+     * substitute. */
+    if (invfs_vol_fault("v3_inode_row_read"))
+        return -1;
+
     /* WP-M11: delta first -- a delta row (or delete) shadows the base.
      * WP-inode-get-fold-race: resolve and read in ONE critical section. The
      * lookup used to return a delta_ref and the value read happened after the

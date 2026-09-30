@@ -131,7 +131,7 @@ CLI_MAINS := mkfs verify fsck cp cat ls stat arctest blkio_test resize \
              rollback_symlink_test \
              sibling_retire_v3_test tar_cap_test fold_delta_read_test \
              reclaim_reader_epoch_test readdir_error_test dedupe_symlink_test dirs_free_before_publish_test \
-             stat_v3_counts_test acl_eio_test
+             stat_v3_counts_test acl_eio_test meta_clobber_test
 $(foreach t,$(CLI_MAINS),$(eval $(call TOOL_RULE,$(t),)))
 
 # reclaim_reader_epoch_test was, for one commit, a red control that built but
@@ -750,6 +750,22 @@ test: $(TEST_BINS) $(OUT)/invf-arctest $(OUT)/invf-blkio_test $(OUT)/invf-codec_
 	@# INVFS_FAULT, unset here, so this leg also asserts the unset path stays
 	@# inert.
 	$(TESTENV) $(TESTISO) $(OUT)/invf-acl_eio_test /tmp
+	@# WP meta-clobber-on-unreadable-row: vol_get_meta returned -1 for BOTH
+	@# "this inode has no meta row" and "the row could not be read", and
+	@# meta_for_path answered the merged value with meta_defaults() -- 0644,
+	@# owner root -- and meta_apply_patch then WROTE that back. So a chmod /
+	@# utimens / chown on an inode whose row would not read silently reset its
+	@# mode and owner and returned success: the volume was changed by a call
+	@# that said it worked. The test reads mode and owner back OFF THE VOLUME,
+	@# because an errno-only control would pass against a fix that renamed the
+	@# return value and left the write-back in place.
+	@# Runs under $(TESTISO): it calls the entry points directly with
+	@# fuse_get_context() stubbed to NULL, so every permission check takes the
+	@# documented uid-0 bypass and the only failure injected is the row read
+	@# under test. No real uid denial, so nothing for the one-entry fake-root
+	@# uid map to swallow. INVFS_FAULT is unset on the healthy legs, so those
+	@# also assert the unset path stays inert.
+	$(TESTENV) $(TESTISO) $(OUT)/invf-meta_clobber_test /tmp
 	@# WP-arc-concurrent-safe: the content cache, under concurrency. TSAN is
 	@# the structure (arc.c had no lock at all), ASan is the borrow (an
 	@# arc_get pointer freed underneath the reader's memcpy). Both must be

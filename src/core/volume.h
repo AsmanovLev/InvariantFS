@@ -272,8 +272,27 @@ typedef struct {
 } invfs_meta_pub;
 
 /* read metadata for an inode: 0 = found, -1 = none/corrupt/not indexed.
- * target is only filled for INVFS_ITYP_LNK. */
+ * target is only filled for INVFS_ITYP_LNK.
+ *
+ * The -1 here is TWO answers, deliberately kept merged for the ~100 callers
+ * that read it as "no metadata, fall back to a default". vol_get_meta_rc
+ * below is the same read with them apart, and a caller that is going to WRITE
+ * the result back must use that one. */
 int      vol_get_meta(invfs_volume *v, uint64_t inode_id, invfs_meta_pub *out);
+
+/* vol_get_meta with the two ways of not getting metadata told apart.
+ *   0        the row was read; *out is filled.
+ *   -ENOENT  this inode has no metadata row. NORMAL, not damage: a volume
+ *            whose records predate the v3 inode row (every pre-v3 volume --
+ *            see the note above) has none to find, and a caller that stamps
+ *            a fresh mode/owner onto such a record is expected to start
+ *            from type defaults and apply its patch on top.
+ *   -EIO     the row could not be READ (quarantined/unreadable base page, a
+ *            value that will not decode). Damage, and never a legitimate
+ *            "no": a caller must NOT answer it with defaults, because the
+ *            defaults are a different inode's mode and owner, not a guess
+ *            at this one's. */
+int      vol_get_meta_rc(invfs_volume *v, uint64_t inode_id, invfs_meta_pub *out);
 
 /* ---- WP-M5: v3 inode tree (metadata-v3 base B+-tree) ----------------
  * The v3 stable tier stores one row per inode keyed by inode_id (design

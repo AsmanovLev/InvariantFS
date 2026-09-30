@@ -365,7 +365,23 @@ static void meta_defaults(const char *name, uint64_t size, invfs_meta_pub *m)
 }
 
 /* resolve path -> engine record name ("dir" -> "dir/" anchor) + metadata.
- * Returns 1 and fills ename/m on success, 0 if nothing exists there. */
+ *
+ * THE RETURN CONTRACT IS THREE ANSWERS, and the middle one is the whole
+ * point of this comment. It used to be 1 / 0, and both 0 and a failed
+ * vol_get_meta collapsed into "use meta_defaults()", which is mode 0644 and
+ * owner root. That is harmless for a caller that only READS the answer --
+ * a stat built from a wrong mode is wrong, but nothing changed -- and it is
+ * a volume-clobbering lie for every caller that WRITES it back, which is
+ * what meta_apply_patch and its chmod/utimens/chown callers do.
+ *
+ *   1  resolved. *ename and *m are filled. *m may still be the type
+ *      defaults (see below) -- that is the documented v1->v2 upgrade path,
+ *      and a caller writing *m back is then doing the right thing.
+ *   0  there is nothing at this path.
+ *  -1  the name resolved but its metadata row COULD NOT BE READ (quarantine,
+ *      an undecodable value). *m is NOT written. A caller must fail; it must
+ *      not answer with defaults, because the defaults are a different
+ *      inode's mode and owner rather than a guess at this one's. */
 static int meta_for_path(const char *path, char *ename, size_t ecapsz,
                          invfs_meta_pub *m)
 {
@@ -373,18 +389,19 @@ static int meta_for_path(const char *path, char *ename, size_t ecapsz,
     uint64_t ino = 0, size = 0, ctime = 0;
 
     if (snapshot_entry(name, &ino, &size, &ctime)) {
-        int got;
+        int grc;
         pthread_mutex_lock(&g_io_lock);
-        got = g_vol ? (vol_get_meta(g_vol, ino, m) == 0) : 0;
+        grc = g_vol ? vol_get_meta_rc(g_vol, ino, m) : -EIO;
         pthread_mutex_unlock(&g_io_lock);
-        if (!got) meta_defaults(name, size, m);
+        if (grc == -EIO) return -1;
+        if (grc == -ENOENT) meta_defaults(name, size, m);
         snprintf(ename, ecapsz, "%s", name);
         return 1;
     }
     /* not a file entry: a directory's anchor record is "name/" */
     {
         char anchor[300];
-        int is_dir = 0, got = 0;
+        int is_dir = 0, grc = -ENOENT;
         pthread_mutex_lock(&g_io_lock);
         is_dir = g_vol ? vol_is_dir(g_vol, name) : 0;
         pthread_mutex_unlock(&g_io_lock);
@@ -392,12 +409,15 @@ static int meta_for_path(const char *path, char *ename, size_t ecapsz,
         snprintf(anchor, sizeof anchor, "%s/", name);
         if (snapshot_entry(anchor, &ino, &size, &ctime)) {
             pthread_mutex_lock(&g_io_lock);
-            got = g_vol ? (vol_get_meta(g_vol, ino, m) == 0) : 0;
+            grc = g_vol ? vol_get_meta_rc(g_vol, ino, m) : -EIO;
             pthread_mutex_unlock(&g_io_lock);
         }
-        if (!got) {
-            /* anchor record may predate its INO2 ext (or ext parse failed):
-             * report sane DIR defaults; first setattr rewrites the ext */
+        if (grc == -EIO) return -1;
+        if (grc == -ENOENT) {
+            /* the anchor record predates its metadata row (a pre-v3 volume):
+             * report sane DIR defaults, which is the v1->v2 upgrade path --
+             * there is no recorded mode to lose. A row that could not be
+             * READ is the other case and returned above. */
             meta_defaults(name, 0, m);
             m->type = INVFS_ITYP_DIR;
             m->nlink = 2;
@@ -438,14 +458,36 @@ static void fill_stat_from_meta(struct stat *st, const invfs_meta_pub *m,
 #define MM_MODE  0x02
 #define MM_OWNER 0x04
 #define MM_TIMES 0x08
+/* merge a partial patch over current/default metadata and persist it.
+ *
+ * THIS IS THE WRITE-BACK, so it is where the two "no metadata" cases have to
+ * come apart. `cur` is merged field-by-field over the whole record and the
+ * whole record is written back by vol_apply_meta, so anything the read did
+ * not establish is not a missing field, it is a field this call is about to
+ * invent:
+ *
+ *   cur from type defaults (mmeta: rc 1 with the defaults applied)  -- the
+ *     record has no metadata row at all, a pre-v3 volume. Writing the
+ *     defaults plus the patch is the documented v1->v2 upgrade path and is
+ *     the ONE case where a default belongs in the row.
+ *
+ *   cur unreadable (meta_for_path -1) -- damage. The recorded mode and owner
+ *     are exactly what could not be read, and 0644/root is not a guess at
+ *     them, it is a different inode's. So this refuses: -EIO, and NOTHING is
+ *     written. A chmod that could not be applied must not be reported as
+ *     applied, and must not leave the inode half-modified -- which is what
+ *     merging a patch onto a default-filled record did: it returned 0, the
+ *     kernel recorded the chmod as done, and the volume's mode and owner had
+ *     been reset underneath it. */
 static int meta_apply_patch(const char *path, unsigned mask,
                             const invfs_meta_pub *patch)
 {
     char ename[300];
     invfs_meta_pub cur;
     uint64_t nid;
-    if (!meta_for_path(path, ename, sizeof ename, &cur))
-        return -ENOENT;
+    int rc = meta_for_path(path, ename, sizeof ename, &cur);
+    if (rc == 0) return -ENOENT;
+    if (rc <  0) return -EIO;      /* unreadable row: write nothing at all */
     if (mask & MM_MODE)  cur.mode = patch->mode & 07777;
     if (mask & MM_OWNER) { cur.uid = patch->uid; cur.gid = patch->gid; }
     if (mask & MM_TIMES) { cur.mtime = patch->mtime; cur.atime = patch->atime; }
@@ -720,11 +762,19 @@ static int perm_check_cred(const struct acreds *c, const char *path,
     invfs_meta_pub m;
     char ename[300];
     int is_root = strcmp(path, "/") == 0;
+    int mrc;
 
     if (is_root) {
         root_meta(&m);
-    } else if (!meta_for_path(path, ename, sizeof ename, &m)) {
-        return -ENOENT;
+    } else if ((mrc = meta_for_path(path, ename, sizeof ename, &m)) != 1) {
+        /* -1 as well as 0: an inode whose metadata row could not be read
+         * used to come back here as mode 0644 / owner root, and this
+         * function then evaluated the mode triad and the ownership against
+         * THOSE -- so one unreadable row removed the file's real
+         * permissions from the decision and replaced them with the most
+         * permissive default in the file. The xattr fix above closed the
+         * ACL half of this; the mode half is here. Both fail closed now. */
+        return mrc < 0 ? -EIO : -ENOENT;
     }
     if (c->bypass || !want)
         return 0;
@@ -798,8 +848,8 @@ static int perm_check_traversal_cred(const struct acreds *c, const char *path)
         if (n == 0 || n >= sizeof comp) continue;
         memcpy(comp, p, n);
         comp[n] = 0;
-        if (!meta_for_path(comp, ename, sizeof ename, &m))
-            return -ENOENT;
+        if ((rc = meta_for_path(comp, ename, sizeof ename, &m)) != 1)
+            return rc < 0 ? -EIO : -ENOENT;  /* unreadable is a denial too */
         if (m.type != INVFS_ITYP_DIR)
             return -ENOTDIR;
         rc = perm_check_cred(c, comp, X_OK);
@@ -849,10 +899,16 @@ static int perm_check_sticky(const struct acreds *c, const char *path)
     char ename[300];
     const char *p = path[0] == '/' ? path + 1 : path;
     const char *s = strrchr(p, '/');
+    int rc;
 
     if (c->bypass) return 0;
-    if (!meta_for_path(path, ename, sizeof ename, &em))
-        return -ENOENT;
+    /* The sticky bit lives in the parent's mode, and an unreadable row used
+     * to answer with meta_defaults() -- 0644, no 01000 -- so the test below
+     * read "this directory is not sticky" and the rename or unlink was let
+     * through. The bit missing from a default is exactly the bit that was
+     * protecting somebody else's file. */
+    if ((rc = meta_for_path(path, ename, sizeof ename, &em)) != 1)
+        return rc < 0 ? -EIO : -ENOENT;
     if (!s) {
         root_meta(&pm);
     } else {
@@ -861,8 +917,8 @@ static int perm_check_sticky(const struct acreds *c, const char *path)
         if (n == 0 || n >= sizeof parent) return -ENAMETOOLONG;
         memcpy(parent, p, n);
         parent[n] = 0;
-        if (!meta_for_path(parent, ename, sizeof ename, &pm))
-            return -ENOENT;
+        if ((rc = meta_for_path(parent, ename, sizeof ename, &pm)) != 1)
+            return rc < 0 ? -EIO : -ENOENT;
     }
     if (!(pm.mode & 01000)) return 0;
     if (c->uid == pm.uid || c->uid == em.uid) return 0;
@@ -1093,11 +1149,21 @@ static int invf_getattr(const char *path, struct stat *st, struct fuse_file_info
             is_dir = g_vol ? vol_is_dir(g_vol, name) : 0;
             if (!is_dir) return -ENOENT;
         }
-        if (!meta_for_path(path, ename, sizeof ename, &m)) {
-            int isd;
-            isd = g_vol ? vol_is_dir(g_vol, name) : 0;
-            meta_defaults(name, size, &m);
-            if (isd) { m.type = INVFS_ITYP_DIR; m.nlink = 2; }
+        /* The racy fallback below is for a name the snapshot has not caught
+         * up with yet, and it is a READ -- nothing here is written back, so
+         * answering from defaults misreports the mode but does not change
+         * the volume. A row that could not be READ is a different thing
+         * (meta_for_path -1) and is reported as the I/O error it is, rather
+         * than as a confident 0644/root. */
+        {
+            int mrc = meta_for_path(path, ename, sizeof ename, &m);
+            if (mrc < 0) return -EIO;
+            if (mrc == 0) {
+                int isd;
+                isd = g_vol ? vol_is_dir(g_vol, name) : 0;
+                meta_defaults(name, size, &m);
+                if (isd) { m.type = INVFS_ITYP_DIR; m.nlink = 2; }
+            }
         }
         fill_stat_from_meta(st, &m, size, ctime);
         return 0;
@@ -2278,8 +2344,13 @@ static int invf_rename(const char *from, const char *to, unsigned int flags)
         if (rc) return rc;
         rc = perm_check_sticky(&c, from);
         if (rc) return rc;
-        /* an overwritten victim is a delete: same sticky rule */
-        if (meta_for_path(to, (char[300]){0}, 300, &(invfs_meta_pub){0})) {
+        /* an overwritten victim is a delete: same sticky rule.
+         * `!= 0` rather than `== 1` on purpose. meta_for_path answers -1 for
+         * a name that resolved but whose row could not be read, and that is
+         * NOT "there is no victim": it is a victim whose sticky bit is
+         * unknown, which is the one case the rule below exists for. Take the
+         * check; perm_check_sticky refuses on the unreadable row itself. */
+        if (meta_for_path(to, (char[300]){0}, 300, &(invfs_meta_pub){0}) != 0) {
             rc = perm_check_sticky(&c, to);
             if (rc) return rc;
         }
@@ -2468,8 +2539,8 @@ static int invf_chmod(const char *path, mode_t mode, struct fuse_file_info *fi)
     struct acreds c;
     int rc = perm_check_traversal(path);
     if (rc) return rc;
-    if (!meta_for_path(path, ename, sizeof ename, &cur))
-        return -ENOENT;
+    if ((rc = meta_for_path(path, ename, sizeof ename, &cur)) != 1)
+        return rc < 0 ? -EIO : -ENOENT;
     /* ownership rule (notify_change enforces it at VFS level already;
      * kept here as the daemon is the sole authority on everything else) */
     acreds_get(&c);
@@ -2539,13 +2610,18 @@ static int invf_chown(const char *path, uid_t uid, gid_t gid,
     if (strcmp(path, "/") == 0) return 0;
     int rc = perm_check_traversal(path);
     if (rc) return rc;
-    if (!meta_for_path(path, ename, sizeof ename, &cur))
-        return -ENOENT;
+    if ((rc = meta_for_path(path, ename, sizeof ename, &cur)) != 1)
+        return rc < 0 ? -EIO : -ENOENT;
     /* POSIX chown rules, daemon-side: on this kernel the VFS does NOT
      * police chown for a default_permissions-less FUSE mount (verified:
      * a foreign uid could chown away someone else's file). Owner change
      * is privileged (CAP_CHOWN); a group change is allowed for the owner
-     * into a group they belong to. */
+     * into a group they belong to.
+     *
+     * `cur` is read against the caller's own uid here, so a row that could
+     * not be read must NOT answer as uid 0: with the defaults, "am I the
+     * owner?" is asked of root and the rule below is evaluated against a
+     * different inode's ownership. Refuse instead. */
     acreds_get(&c);
     if (!c.bypass) {
         if (uid != (uid_t)-1 && uid != cur.uid)
@@ -2605,8 +2681,8 @@ static int invf_readlink(const char *path, char *buf, size_t size)
     invfs_meta_pub m;
     int rc = perm_check_traversal(path);
     if (rc) return rc;
-    if (!meta_for_path(path, ename, sizeof ename, &m))
-        return -ENOENT;
+    if ((rc = meta_for_path(path, ename, sizeof ename, &m)) != 1)
+        return rc < 0 ? -EIO : -ENOENT;
     if (m.type != INVFS_ITYP_LNK)
         return -EINVAL;
     if (strlen(m.target) >= size)
@@ -2807,14 +2883,14 @@ static int invf_getxattr(const char *path, const char *name, char *value,
         int trc = perm_check_traversal(path);
         if (trc) return trc;
     }
-    if (!meta_for_path(path, ename, sizeof ename, &m))
-        return -ENOENT;
+    if ((rc = meta_for_path(path, ename, sizeof ename, &m)) != 1)
+        return rc < 0 ? -EIO : -ENOENT;
     pthread_mutex_lock(&g_io_lock);
     if (!g_vol) { pthread_mutex_unlock(&g_io_lock); return -EIO; }
     ino = vol_find(g_vol, ename);
     if (!ino) {
         pthread_mutex_unlock(&g_io_lock);
-        return meta_for_path(path, ename, sizeof ename, &m)
+        return meta_for_path(path, ename, sizeof ename, &m) == 1
                ? -ENODATA : -ENOENT;
     }
     {
@@ -2858,8 +2934,12 @@ static int invf_setxattr(const char *path, const char *name,
         int trc = perm_check_traversal(path);
         if (trc) return trc;
     }
-    if (!meta_for_path(path, ename, sizeof ename, &m))
-        return -ENOENT;
+    /* Refuses an unreadable row rather than answering as uid 0: the
+     * ownership test below is `c.uid != m.uid`, and a default-filled m is
+     * owned by root, so a failed read used to turn "is the caller the
+     * owner of this ACL?" into "is the caller root?". */
+    if ((rc = meta_for_path(path, ename, sizeof ename, &m)) != 1)
+        return rc < 0 ? -EIO : -ENOENT;
     /* ACL xattrs are security state: only the owner (or the bypass
      * admin) may set them, the blob must be a well-formed version-2
      * posix_acl blob, and a default ACL only makes sense on a dir.
@@ -2910,8 +2990,8 @@ static int invf_listxattr(const char *path, char *list, size_t size)
         int trc = perm_check_traversal(path);
         if (trc) return trc;
     }
-    if (!meta_for_path(path, ename, sizeof ename, &m))
-        return -ENOENT;
+    if ((rc = meta_for_path(path, ename, sizeof ename, &m)) != 1)
+        return rc < 0 ? -EIO : -ENOENT;
     pthread_mutex_lock(&g_io_lock);
     if (!g_vol) { pthread_mutex_unlock(&g_io_lock); return -EIO; }
     ino = vol_find(g_vol, ename);
@@ -2939,8 +3019,8 @@ static int invf_removexattr(const char *path, const char *name)
         int trc = perm_check_traversal(path);
         if (trc) return trc;
     }
-    if (!meta_for_path(path, ename, sizeof ename, &m))
-        return -ENOENT;
+    if ((rc = meta_for_path(path, ename, sizeof ename, &m)) != 1)
+        return rc < 0 ? -EIO : -ENOENT;   /* same "answered as root" trap as setxattr */
     /* removing an ACL is the same privilege as setting one */
     if (strcmp(name, XATTR_ACL_ACCESS) == 0 ||
         strcmp(name, XATTR_ACL_DEFAULT) == 0) {
@@ -3009,6 +3089,10 @@ static int invf_unlink(const char *path)
         char ename[300];
         invfs_meta_pub hm;
         int have_meta = meta_for_path(path, ename, sizeof ename, &hm);
+        /* nlink > 1 selects the name-only unlink, so this decides whether
+         * the OTHER hard links survive. An unreadable row must not be read
+         * as nlink == 1: that retires the inode and every link to it. */
+        if (have_meta < 0) return -EIO;
         if (have_meta && hm.nlink > 1) {
             pthread_mutex_lock(&g_io_lock);
             if (!g_vol) { pthread_mutex_unlock(&g_io_lock); return -EIO; }
