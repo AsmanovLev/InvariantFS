@@ -10,8 +10,7 @@
  *      root-area pages WP-M1 reserves, then free-space allocation/reclaim
  *      through the existing bitmap allocator;
  *   3. the double-slot root publish — write the new base root into the
- *      RT30 root_slot[] and bump seq (higher gen + valid CRC wins on read,
- *      the l2p_replay idiom).
+ *      RT30 root_slot[] and bump seq (higher gen + valid CRC wins on read).
  *
  * Entry encoding, tree traversal, delta, fold and fsck validation are
  * explicitly WP-M3/WP-M4 and live elsewhere.

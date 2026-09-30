@@ -440,7 +440,3 @@ int invfs_profile_zstd_level(int p) { return p; }
 uint16_t invfs_registry_generation(void) { return 0; }
 int invfs_sweep_ui_active(void) { return 0; }
 
-int vol_records_walk(invfs_volume *v,
-                     int (*cb)(void *, uint64_t, const invfs_inode_rec *, const uint8_t *),
-                     void *ctx)
-{ (void)v; (void)cb; (void)ctx; return 0; }

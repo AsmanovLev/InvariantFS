@@ -317,10 +317,9 @@ int vol_zip_parse_children(const uint8_t *z, size_t zlen,
 
 /* WP47: is `ip` a plausible record position? On a v0.3.0+ mapper volume
  * records live inside dynamic metadata extents (idx_get_id returns the
- * absolute extent offset), so the legacy [inode_area_start, inode_area_pos)
- * bound rejected every valid hint. Accept any position inside any mapper
- * extent (mirroring vol_inode_next), or inside the legacy contiguous
- * region; anything else falls back to vol_records_walk(). */
+ * absolute extent offset), so a bound over the contiguous record region
+ * rejected every valid hint. Accept any position inside any mapper extent
+ * (mirroring vol_inode_next); anything else is not a record position. */
 
 
 typedef struct {

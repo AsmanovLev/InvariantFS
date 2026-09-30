@@ -148,9 +148,9 @@ int ast_owns_siblings(const invfs_ast_hdr *ah,
  *
  * Collect the names first: vol_delete_inode appends a tombstone, so a live
  * scan would walk into records it had just written. WP47: the collection
- * goes through the shared mapper-aware vol_records_walk() so siblings in
- * dynamic metadata extents are found on v0.3.0+ volumes; the per-record
- * policy (prefix-match, supersede check, first-name-wins) is unchanged. */
+ * goes through the shared extent-aware record scan so siblings in
+ * dynamic metadata extents are found; the per-record policy (prefix-match,
+ * supersede check, first-name-wins) is unchanged. */
 typedef struct {
     invfs_volume *v;
     char (*names)[256];
@@ -250,7 +250,7 @@ uint64_t vol_transcode_abort(invfs_volume *v, const char *name)
 
 
 /* WP48: fallback locator for meta_read_record_by_id. Fed by the bounded,
- * index-ordered vol_records_walk; captures the first record whose id
+ * index-ordered record scan; captures the first record whose id
  * matches (the walker's semantics; the caller only needs a version of that
  * id). */
 typedef struct {

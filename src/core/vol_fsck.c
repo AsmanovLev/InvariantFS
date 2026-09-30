@@ -90,7 +90,7 @@ static int fsck_v3_scan(invfs_volume *v, invfs_fsck_report *rep, int fix,
 
 
 
-/* WP49: mapper-volume pass-1 body fed by the bounded vol_records_walk_ex
+/* WP49: pass-1 body fed by the bounded, index-ordered namespace walk
  * (position-driven vol_inode_next can cycle on a non-monotonic mapper
  * table). bad_cb keeps fsck's torn/CRC-bad record accounting. */
 

@@ -74,7 +74,7 @@ FRB_T := $(CURDIR)/build/frbtest
 
 TOOLS   := invf-mkfs invf-verify invf-fsck invf-cp invf-cat invf-ls invf-stat \
            invf-zip invf-arctest invf-blkio_test invf-fuse invf-import invf-sweep meta_probe \
-           invf-stats invf-resize invf-rollback invf-l2ptest invfs-pack \
+           invf-stats invf-resize invf-rollback invfs-pack \
            invf-v3inode invf-plugin-host
 
 all: $(TOOLS:%=$(OUT)/%) $(CORE_OBJS_FILE)
@@ -132,7 +132,7 @@ CLI_MAINS := mkfs verify fsck cp cat ls stat arctest blkio_test resize \
              sibling_retire_v3_test tar_cap_test fold_delta_read_test \
              reclaim_reader_epoch_test readdir_error_test dedupe_symlink_test dirs_free_before_publish_test \
              stat_v3_counts_test acl_eio_test meta_clobber_test spn_skip_recipe_test \
-             walk_status_test walk_status_fuse_test
+             walk_status_test walk_status_fuse_test no_v2_surface_test
 $(foreach t,$(CLI_MAINS),$(eval $(call TOOL_RULE,$(t),)))
 
 # reclaim_reader_epoch_test was, for one commit, a red control that built but
@@ -177,11 +177,6 @@ $(OBJ)/invf-sweep.o: tools/invf-sweep.c | $(OBJ)
 $(OUT)/invf-rollback: $(OBJ)/invf-rollback.o $(CORE_O)
 	$(CC) $(CFLAGS) -Itools -o $@ $< $(CORE_O) $(LDLIBS)
 $(OBJ)/invf-rollback.o: tools/invf-rollback.c | $(OBJ)
-	$(CC) $(CFLAGS) -c -o $@ $<
-
-$(OUT)/invf-l2ptest: $(OBJ)/l2ptest.o $(CORE_O)
-	$(CC) $(CFLAGS) -Itools -o $@ $< $(CORE_O) $(LDLIBS)
-$(OBJ)/l2ptest.o: tools/l2ptest.c | $(OBJ)
 	$(CC) $(CFLAGS) -c -o $@ $<
 
 $(OUT)/invf-plugin-host: $(OBJ)/invf-plugin-host.o $(CORE_O)
@@ -827,6 +822,7 @@ test: $(TEST_BINS) $(OUT)/invf-arctest $(OUT)/invf-blkio_test $(OUT)/invf-codec_
 	@# reported success over blocks that were orphaned forever. Both legs
 	@# assert on the DISK EFFECT, not on a return code alone.
 	$(TESTENV) $(TESTISO) $(OUT)/invf-v2rb_rollback_test /tmp
+	$(TESTENV) $(TESTISO) $(OUT)/invf-no_v2_surface_test /tmp
 	$(TESTENV) $(TESTISO) $(OUT)/invf-v2_open_test /tmp
 	@# WP202: a builtin container lane that supersedes a file on v3 gave the
 	@# superseded recipe's data blocks to nobody, while the containerpack

@@ -1,20 +1,15 @@
 #!/bin/bash
 # test-imagelock.sh — one writer per image, across a live save-point window.
 #
-# HISTORY. This file was `tools/test-rocp.sh`, the WP24-lite suite for the v2
-# read-only time-travel mount (`vol_open_at` / `-o at_checkpoint`). WP-M21
-# retired the mechanism it tested: the CKP0 sweep checkpoint and the
-# "\x01reten" retention registry went with the v2 metadata machinery, and
-# `vol_ckp_begin` is now a stub that declines (`src/core/vol_rollback.c:65`),
-# so no sweep has written a CKP0 since. `ckp_stage_replay` is a stub returning
-# -3 (`src/core/vol_rollback.c:109`), and the only path that could reach it is
-# `vol_open_at` (`src/core/volume.c:1511`). So `-o at_checkpoint` on a v3 volume
-# can only ever fail: v3 rollback is the SPT0 save point (`src/core/vol_spt0.c`),
-# which is a RESTORE, not a view. Per AGENTS.md 1.7 the test was the thing that
-# was wrong, so it was ported rather than the feature restored. What is lost —
-# a read-only view at a point in time — is filed as an OPEN finding in
-# INCIDENTS.md, and leg [V] below pins the current answer (a loud refusal) so
-# the retired mount option cannot drift into looking functional.
+# HISTORY. This file was `tools/test-rocp.sh`, the WP24-lite suite for the
+# read-only time-travel mount (`-o at_checkpoint`). That option and the
+# `vol_open_at` behind it are deleted (wp/purge-v2-l2p-journal): the only
+# thing they could restore was a staged prefix of the retired mapping
+# journal, so they had never succeeded on this format. Rollback here is the
+# SPT0 save point (`src/core/vol_spt0.c`), which is a RESTORE, not a view.
+# Leg [V], which asserted that `-o at_checkpoint` refused with a specific
+# message, went with the option -- a leg that greps for a message the code
+# no longer emits tests nothing.
 #
 # What survives, and why it is worth its own suite:
 #
@@ -33,10 +28,7 @@
 #       quietly deleted the only test of it. Asserted here with the save point
 #       live, which is the question the v2 leg was really asking: an armed
 #       rollback window is not a lock and must not act like one.
-#   [V] `-o at_checkpoint` and `-o at_checkpoint=<seq>` REFUSE loudly on a v3
-#       volume and mount nothing. This is the port of the v2 legs D/D3: the
-#       answer changed from "here is the view" to "there is no view", and a
-#       refusal is a real contract that can be asserted. See INCIDENTS.md.
+#   [E] the present is intact, the refused openers changed nothing, and a RW
 #   [E] the present is intact, the refused openers changed nothing, and a RW
 #       mount still writes.
 #
@@ -225,40 +217,11 @@ echo "  control: with the image free the same reader succeeds (the refusals were
 fsck_ok "$IMG"
 
 echo
-echo "== [V] -o at_checkpoint is a RETIRED option: it refuses, it does not view =="
-# This is the port of the v2 legs D / D3 / D4. On v3 there is no read-only view
-# at a point in time: vol_open_at asks for a live CKP0, no v3 sweep has written
-# one since WP-M21, and ckp_stage_replay is a stub, so the open always fails
-# with -11 (src/core/volume.c:1444-1452). Asserting the REFUSAL is the honest
-# v3 contract: the option is still parsed, and it cannot mount a view. If a
-# future WP gives SPT0 a read-only view, this leg fails — which is the point.
-set +e
-$B/invf-fuse -o at_checkpoint "$IMG" "$MNT" >"$WORK/fuse.tt.log" 2>&1
-RC=$?
-set -e
-[ "$RC" != 0 ] || fail "V: -o at_checkpoint mounted a view on a v3 volume"
-grep -q "cannot mount at_checkpoint: no live sweep checkpoint" "$WORK/fuse.tt.log" \
-    || { cat "$WORK/fuse.tt.log"; fail "V: the refusal was not the checkpoint one"; }
-if grep -q " $MNT " /proc/mounts; then fail "V: a mount appeared"; fi
-echo "  -o at_checkpoint: refused, nothing mounted"
-# ...and the refusal is specifically about the missing checkpoint, never a
-# lock we are accidentally passing off for one. The two must stay
-# distinguishable, or the message lies about the real cause.
-set +e
-$B/invf-fuse -o at_checkpoint=1 "$IMG" "$MNT" >"$WORK/fuse.seq.log" 2>&1
-RC=$?
-set -e
-[ "$RC" != 0 ] || fail "V: -o at_checkpoint=1 mounted a view"
-grep -q "no live sweep checkpoint" "$WORK/fuse.seq.log" \
-    || { cat "$WORK/fuse.seq.log"; fail "V: at_checkpoint=1 gave a different failure"; }
-if grep -q "image is in use by another process" "$WORK/fuse.seq.log"; then
-    fail "V: at_checkpoint was refused by the flock, not by the missing checkpoint"
-fi
-if grep -q " $MNT " /proc/mounts; then fail "V: a mount appeared"; fi
-echo "  -o at_checkpoint=1: same refusal (checkpoint, not lock)"
-fsck_ok "$IMG"
+# The -o at_checkpoint leg is deleted with the option (wp/purge-v2-l2p-journal).
+# It asserted a refusal message that no longer exists: the option is not parsed
+# at all, so libfuse rejects it as unknown and the daemon says nothing about
+# it. A leg that greps for a message the code no longer emits tests nothing.
 
-echo
 echo "== [E] the present is intact and still writable =="
 mnt_up "$IMG"
 if grep -q "not closed cleanly" "$WORK/fuse.last.log"; then

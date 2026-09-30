@@ -82,7 +82,6 @@ static volatile sig_atomic_t g_sweep_now = 0;
 static char g_img_path[512] = "?";
 static char g_mnt_path[512] = "?";  /* WP134: named in the rollback warning */
 static volatile int g_sweep_busy = 0;
-static int g_tt = 0;            /* WP24-lite: time-travel (at_checkpoint) mount */
 static double g_attr_t = 1.0;   /* -o attr_t= override; 0 = bench-honest */
 /* WP26: RAW-zone fill watermark (percent, 0 = lazy default). Set by
  * -o raw_watermark=<pct> or INVFS_RAW_WATERMARK; when the RAW fill
@@ -178,9 +177,9 @@ static int cmp_entry_key(const void *key, const void *element)
 
 
 
-/* WP49: pass-1 collector fed by the bounded, index-ordered
- * vol_records_walk (a position-driven vol_inode_next loop can cycle when
- * the mapper table is not pba monotonic). */
+/* WP49: pass-1 collector fed by the namespace walk (a position-driven
+ * vol_inode_next loop can cycle when the mapper table is not pba
+ * monotonic). */
 typedef struct {
     fs_entry *recs;
     uint64_t nrecs, caprecs;
@@ -1358,7 +1357,6 @@ static int invf_rmdir(const char *path)
 {
     int rc;
     struct acreds c;
-    if (g_tt) return -EROFS;   /* WP24-lite: time-travel views never mutate */
     acreds_get(&c);
     rc = perm_check_traversal_cred(&c, path);
     if (rc) return rc;
@@ -2441,7 +2439,6 @@ static int invf_rename(const char *from, const char *to, unsigned int flags)
     if (flags & ~(unsigned int)RENAME_NOREPLACE)
         return -EOPNOTSUPP;   /* RENAME_EXCHANGE / RENAME_WHITEOUT */
     if (flags & RENAME_NOREPLACE) noreplace = 1;
-    if (g_tt) return -EROFS;   /* WP24-lite: time-travel views never mutate */
     acreds_get(&c);
     if (!c.bypass) {
         rc = perm_check_traversal_cred(&c, from);
@@ -3196,11 +3193,8 @@ static int invf_unlink(const char *path)
     int rc;
     struct acreds c;
     (void)is_temp_path;
-    /* WP24-lite: a delete is deliberately allowed under the ordinary
-     * read-only space latch (H5, it is the way out), but a time-travel
-     * view is not the present -- the tombstone would land on the live
-     * volume's post-checkpoint records. Refuse like every other write. */
-    if (g_tt) return -EROFS;
+    /* A delete is deliberately allowed under the ordinary
+     * read-only space latch (H5, it is the way out). */
     acreds_get(&c);
     rc = perm_check_traversal_cred(&c, path);
     if (rc) return rc;
@@ -3475,10 +3469,6 @@ int main(int argc, char *argv[])
      * unknown options make fuse_new reject the mount. */
     uint64_t arc_limit = 0, dec_mem_limit = 0;
     int have_arc = 0, have_dec = 0;
-    /* WP24-lite: -o at_checkpoint[=<seq>] mounts the read-only view at the
-     * live sweep checkpoint (no arg = the live one; K=1 contract). */
-    uint64_t ckpt_seq = 0;
-    int at_ckpt = 0;
     if (opts) {
         static char fbuf[1024];
         char tmp[1024];
@@ -3495,17 +3485,6 @@ int main(int argc, char *argv[])
                 if (parse_size_opt(tok + 14, &dec_mem_limit)) have_dec = 1;
                 else fprintf(stderr, "invf: bad -o dec_mem_limit=%s; ignored\n",
                              tok + 14);
-            } else if (strcmp(tok, "at_checkpoint") == 0) {
-                at_ckpt = 1;
-            } else if (strncmp(tok, "at_checkpoint=", 14) == 0) {
-                char *ep = NULL;
-                unsigned long long sq = strtoull(tok + 14, &ep, 10);
-                if (ep != tok + 14 && *ep == '\0' && sq > 0) {
-                    at_ckpt = 1;
-                    ckpt_seq = (uint64_t)sq;
-                } else {
-                    fprintf(stderr, "invf: bad -o %s; ignored\n", tok);
-                }
             } else if (strncmp(tok, "attr_t=", 7) == 0) {
                 /* attr/entry cache TTL in seconds (WP17); 0 restores the
                  * old bench-honest mode where every stat hits the daemon */
@@ -3559,31 +3538,19 @@ int main(int argc, char *argv[])
         opts = fl ? fbuf : NULL;
     }
 
-    if (at_ckpt) {
-        g_vol = vol_open_at(img, ckpt_seq, &err);
-        if (!g_vol && err == -11)
-            fprintf(stderr, "invf: %s: cannot mount at_checkpoint: no live "
-                    "sweep checkpoint (or its retention registry is gone -- "
-                    "already realized?); run invf-sweep first\n", img);
-    } else {
-        g_vol = vol_open(img, &err);
-    }
+    g_vol = vol_open(img, &err);
     if (!g_vol) {
         fprintf(stderr, "cannot open volume %s (err %d)\n", img, err);
         return 1;
     }
-    g_tt = vol_time_travel(g_vol);
-    if (g_tt)
-        fprintf(stderr, "invf: time-travel mount (read-only): all writes "
-                "will fail with EROFS; the live volume is untouched\n");
 
     /* WP59: codec-policy mount gate.
      * - No PCK0 (legacy volume): refuse unless -o ignore-missing-codecs.
      * - BASIC_ONLY: pass (builtin codecs only, no packs required).
      * - Non-BASIC_ONLY with n_codecs > 0: refuse if codec packs are not
      *   installed (resolution deferred to WP60; for now refuse loudly).
-     * The gate is skipped on time-travel (read-only) mounts. */
-    if (!g_tt) {
+     */
+    {
         const invfs_pck0 *pk = vol_pck0(g_vol);
         if (!pk) {
             if (!g_ignore_missing_codecs) {
@@ -3633,13 +3600,9 @@ int main(int argc, char *argv[])
     snprintf(g_mnt_path, sizeof g_mnt_path, "%s", mnt);
     setvbuf(stderr, NULL, _IONBF, 0);
     build_file_table();
-    fprintf(stderr, "InvariantFS mounted: %d files%s\n", g_nentries,
-            g_tt ? " (checkpoint view)" : "");
+    fprintf(stderr, "InvariantFS mounted: %d files\n", g_nentries);
 
-    /* background on-demand sweep thread (drains pending list when idle);
-     * pointless on a time-travel view (nothing is ever pending and every
-     * mutation is refused) -- do not even start it */
-    if (!g_tt)
+    /* background on-demand sweep thread (drains pending list when idle) */
     {
         pthread_t tid;
         if (pthread_create(&tid, NULL, fuse_sweep_thread, NULL) == 0)

@@ -84,17 +84,15 @@ done
 echo "all 30 texts batched (class=7 algo=2)"
 
 echo "== leg 1: read hot subset (t00-t02 x20, t03 x4) =="
-# WP27: a read touch is RAM-only in the session (no per-read journal
-# traffic, and no journal pad to carry it any more); heat persists via
-# the record's TLV when the pump calls vol_heat_persist before closing.
-# The pump stands in for "a sweep-cadence session observed the reads":
-# one full read per process (the real read path, one touch per segment),
-# then the persist folds the accrual into the record.
+# WP27: a read touch is RAM-only in the session; heat persists when the
+# driver folds it. meta_probe --heatpump stands in for "a sweep-cadence
+# session observed the reads": one full read per process (the real read
+# path, one touch per segment), then the fold persists the accrual.
 for i in $(seq 20); do
-    $B/invf-l2ptest pump "$IMG" t00.txt t01.txt t02.txt
+    $B/meta_probe "$IMG" --heatpump t00.txt t01.txt t02.txt
 done
 for i in $(seq 4); do
-    $B/invf-l2ptest pump "$IMG" t03.txt
+    $B/meta_probe "$IMG" --heatpump t03.txt
 done
 # heat persisted across the 24 unmount/remount cycles above (each pump is
 # a full open+read+compact+close), and a probe run does not itself accrue

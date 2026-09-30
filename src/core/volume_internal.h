@@ -215,14 +215,6 @@ int  vmux_barrier(struct invfs_volume *v, const char *what);
  * the member's retire), and owner records free through the owner WAL. */
 typedef struct { uint64_t pba; uint32_t n; } pba_ref_ent;
 
-/* WP-L2Q: session-persistent (inode,lba) -> newest live L2P table slot.
- * WP27: the table is now the owner-scoped WAL (few entries), but the
- * index stays -- the seal/tier hot paths query it per stripe. */
-typedef struct {
-    uint64_t inode, lba;
-    uint64_t slot;            /* index into v->l2p[] */
-} l2p_idx_ent;
-
 /* WP25: one tier-arena copy / RAW-mirror index entry. key = the canonical
  * segment's pba (tier: a dev1-shadow pba; rawm: a raw-zone pba), pba = the
  * second copy's pba (tier: dev0 arena; rawm: dev1 shadow), plen = blocks,
@@ -296,35 +288,6 @@ typedef struct invfs_volume {
      * question about this volume; vol_close and the reporting surfaces read
      * and clear it. Relaxed-atomic -- see vol_walk.c. */
     unsigned VOL_WALK_LATCH_FIELD;
-    /* in-memory L2P */
-    invfs_l2p_entry *l2p;
-    size_t l2p_count, l2p_cap;
-    /* WP-L2Q: the session hash index over the table (NULL = disabled:
-     * allocation failed or INVFS_L2P_IDX=0 -- lookups fall back to the
-     * newest-wins scan). Never diverges from the table; see the stress
-     * leg of tools/test-l2p.sh. */
-    l2p_idx_ent *l2p_idx;
-    size_t l2p_idx_mask, l2p_idx_n;
-    /* WP22d: the journal is append-only within a slot (invarifs.h WP22d
-     * note); the in-memory table stays the compacted newest-wins view.
-     * jops[] holds the not-yet-journaled ops (MAP/UNMAP, in order) that
-     * the next vol_flush appends at the active slot's log end; j_heat[]
-     * holds (inode,lba) pairs whose pad bytes changed in RAM only (WP19
-     * WRITE-side carries -- read touches are RAM-only since WP-L2Q) and
-     * which the next flush re-appends as refresh MAPs (or folds into the
-     * compaction image when bulk). */
-    invfs_l2p_entry *jops;
-    size_t jops_n, jops_cap;
-    /* WP30: metadata extent WAL entries (META_ALLOC/META_EXTEND/SHRINK/FREE/MERGE) */
-    invfs_meta_wal *mjops;
-    size_t mjops_n, mjops_cap;
-    int j_slotted;            /* 0 = legacy flat log, 1 = slot format */
-    uint32_t j_slot;          /* active slot index when slotted (0/1) */
-    uint64_t j_seq;           /* active slot image's sequence number */
-    uint32_t j_last_crc;      /* chain crc of the last journaled entry
-                               * (the slot header's crc when the log is bare) */
-    int j_compact;            /* next flush compacts (fsck rebuild) */
-    uint64_t open_cuts;       /* consistent-cut hides at mount (WP22d) */
     uint64_t next_inode_id;
     /* WP111: the v3 inode-id allocator recovers next_inode_id from the
      * base tree + delta exactly ONCE per mount. That recovery used to be
@@ -1237,19 +1200,6 @@ int rsz0_sane(invfs_volume *v, const invfs_rsz0 *rz);
  * Returns 0 with v->sb already the new superblock, -1 on failure. */
 int vol_rsz0_apply(invfs_volume *v, const invfs_rsz0 *rz);
 
-/* Replay the L2P journal from disk into the in-memory table and reseed the
- * WP19 hot summaries; sets v->journal_pos to the end of the valid prefix.
- * vol_open runs this once; the WP21 rollback runs it again after restoring
- * the checkpoint's staged journal bytes. The table allocation grows but
- * never shrinks. Returns 0, -1 on allocation failure. */
-int l2p_replay(invfs_volume *v);
-/* apply one journaled entry to the in-memory table (replay path; no op
- * journaling). Returns -1 on allocation failure. */
-int l2p_apply(invfs_volume *v, const invfs_l2p_entry *e);
-/* reseed the WP19 hot summaries: v1 replayed them from the journal pads;
- * v2 stores heat in the records, so an open starts conservative (1/1 =
- * "maybe hot") and the sweep's decay pass recomputes the truth. */
-void l2p_seed_heat(invfs_volume *v);
 /* Persist the superblock. The checksum covers bytes 0..0x7B, and `state`
    lives at 0x18 -- inside that range -- so it has to be recomputed here.
    It was not, which was harmless only for as long as nothing inside the
@@ -1329,47 +1279,6 @@ uint64_t alloc_raw_or_shadow(invfs_volume *v, uint64_t nblocks, int *zone_out);
  * fsck bitmap rebuild and vol_open; logged, persisted by the next flush. */
 void vol_readonly_unlatch(invfs_volume *v);
 
-/* remove all mappings for (inode, lba) from the in-memory table and
- * journal the UNMAP op (append-only; l2p_remove_mem skips the op for
- * replay) */
-void l2p_remove(invfs_volume *v, uint64_t inode, uint64_t lba);
-void l2p_remove_mem(invfs_volume *v, uint64_t inode, uint64_t lba);
-
-/* ---- WP-L2Q session L2P index ----------------------------------------
- * All no-ops when the index is disabled (v->l2p_idx == NULL). put
- * overwrites the slot of an existing key (newest wins); reslot rewrites
- * the stored table slot of a key only when it currently names old_slot
- * (a compaction moving a NON-newest duplicate must not touch the index);
- * del removes the key (cluster rehash); reset empties the index (replay
- * restart); rebuild derives it from the current table (fsck/seal bulk
- * rewrites). */
-void l2p_idx_reset(invfs_volume *v);
-void l2p_idx_put(invfs_volume *v, uint64_t inode, uint64_t lba,
-                 uint64_t slot);
-void l2p_idx_del(invfs_volume *v, uint64_t inode, uint64_t lba);
-void l2p_idx_reslot(invfs_volume *v, uint64_t inode, uint64_t lba,
-                    uint64_t old_slot, uint64_t new_slot);
-void l2p_idx_rebuild(invfs_volume *v);
-/* the live entry for the key, NULL when unmapped (or the index is off) */
-const invfs_l2p_entry *l2p_idx_get(invfs_volume *v, uint64_t inode,
-                                   uint64_t lba);
-
-/* WP22d: queue one journal op for the next flush's append (MAP/UNMAP,
- * CRC restamped from the chain at write time) */
-int jrn_push_op(invfs_volume *v, const invfs_l2p_entry *e);
-int jrn_push_meta_op(invfs_volume *v, const invfs_meta_wal *w);
-
-/* WP30: dynamic metadata extent allocation */
-uint64_t alloc_meta_extent(invfs_volume *v, uint8_t size_class);
-int extend_meta_extent(invfs_volume *v, uint64_t extent_idx, uint8_t new_size_class);
-int meta_journal_alloc(invfs_volume *v, uint16_t ext_idx, uint64_t pba, uint8_t size_class);
-int meta_journal_extend(invfs_volume *v, uint16_t ext_idx, uint8_t size_class, uint8_t aux);
-
-/* WP30: queue one metadata extent WAL op for the next flush's append */
-int jrn_push_meta_op(invfs_volume *v, const invfs_meta_wal *w);
-
-/* absolute byte offset of slot `slot`'s header block */
-uint64_t jrn_slot_base(const invfs_volume *v, uint32_t slot);
 
 /* ---- WP30: metadata extent mapper ----------------------------------------- */
 int meta_mapper_load(invfs_volume *v);
@@ -1378,6 +1287,8 @@ uint64_t meta_mapper_get(const invfs_volume *v, size_t i);
 void meta_mapper_set(invfs_volume *v, size_t i, uint64_t entry);
 
 /* WP30 Phase 3: dynamic metadata extent append path */
+uint64_t alloc_meta_extent(invfs_volume *v, uint8_t size_class);
+int extend_meta_extent(invfs_volume *v, uint64_t extent_idx, uint8_t new_size_class);
 uint32_t meta_met0_crc(const invfs_met0 *m);
 int meta_met0_persist(invfs_volume *v);
 int meta_get_append_pos(invfs_volume *v, uint64_t rec_size,
@@ -1416,12 +1327,6 @@ int vol_append_slot(invfs_volume *v, uint64_t rec_size,
 int vol_append_owner_slot(invfs_volume *v, uint64_t rec_size,
                           uint64_t *ext_slot, uint64_t *rec_pos_out);
 
-/* WP30 Phase 5: metadata extent journal helpers (in volume.c) */
-int meta_journal_alloc(invfs_volume *v, uint16_t ext_idx, uint64_t pba,
-                       uint8_t size_class);
-int meta_journal_extend(invfs_volume *v, uint16_t ext_idx,
-                        uint8_t size_class, uint8_t aux);
-/* WP-M21: meta_journal_free / meta_journal_merge retired. */
 
 /* ---- WP27: segment extents --------------------------------------------
  * AST entries carry pba but no physical length (the 32B wire format has
@@ -2194,7 +2099,7 @@ int vol_write_devt(invfs_volume *v);
 void wp25_index_load(invfs_volume *v);
 
 /* Flush-time owner-record sync for dirty tier/rawm indexes (the maps are
- * durable first -- jrn_flush ran; the owner record names only durable
+ * durable first; the owner record names only durable
  * ordinals). */
 int  wp25_owner_sync(invfs_volume *v);
 

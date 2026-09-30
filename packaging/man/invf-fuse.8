@@ -55,11 +55,6 @@ Per-unit decoder working-set limit (default 512M, or
 Codecs whose decode needs more are declined at sweep time and the file falls
 back to generic storage.
 .TP
-.BR at_checkpoint [ =seq ]
-Mount the read-only view at a live sweep checkpoint (WP21/WP24). Without
-.IR seq ,
-the live checkpoint is used (K=1 contract).
-.TP
 .BI attr_t= seconds
 Attribute/entry cache TTL (default 1.0;
 .B 0

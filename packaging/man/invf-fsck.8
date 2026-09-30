@@ -9,16 +9,19 @@ invf-fsck \- check and repair an InvariantFS volume
 .RB [ \-q ]
 .SH DESCRIPTION
 .B invf-fsck
-rebuilds the L2P table and the used-block bitmap from the inode area (AST
-recipes are the source of truth for block ownership) and reports orphaned
-blocks (allocated but referenced by no live AST), missing blocks
-(referenced but free), stale L2P journal entries, and bad inode records
-(CRC/length).
+rebuilds the used-block bitmap from the live namespace (each file's
+recipe is the source of truth for block ownership) and reports orphaned
+blocks (allocated but referenced by no live recipe), missing blocks
+(referenced but free), and unreadable or malformed metadata.
+.PP
+A volume whose superblock does not carry
+.B VOLF_V3
+is refused by name before anything is read; the image is not modified.
 .PP
 By default the tool is a read-only report.
 .B \-f
-applies the fixes: it rewrites the bitmap, the journal, and the superblock
-state to CLEAN.
+applies the fixes: it rewrites the bitmap and the superblock state to
+CLEAN.
 .PP
 A volume that was interrupted (superblock DIRTY) normally needs no manual
 fsck: at the next mount an anomaly-free scan self-heals it to CLEAN+rw.

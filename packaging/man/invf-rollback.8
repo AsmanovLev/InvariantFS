@@ -6,40 +6,43 @@ invf-rollback \- undo the last InvariantFS sweep from its checkpoint
 .I image
 .SH DESCRIPTION
 .B invf-rollback
-rolls a volume back to the checkpoint taken by the last
+rolls a volume back to the savepoint taken by the last
 .BR invf-sweep (8)
-run (WP21). It restores the checkpoint's staged journal prefix and
-decapitates the append-only inode area at the checkpoint append pointer:
-everything past it - post-sweep records, tombstones, the retention
-registry - vanishes wholesale. The ordinary fsck rebuild machinery then
-reconciles the bitmap and L2P: the pre-sweep record versions resurrect
-with their retained blocks, and the sweep's own allocations are reclaimed
-as orphans. The result is bit-exact the pre-sweep state.
+run. The savepoint (an
+.B SPT0
+descriptor at block-0 offset
+.BR 0xA00 )
+records the base-tree root and the delta end offset as they stood at
+sweep start; a restore republishes that root and truncates the Delta Log
+to that end, so everything the sweep appended past it vanishes wholesale
+and the pre-sweep generation becomes the whole volume again. The result
+is bit-exact the pre-sweep state.
 .PP
 This is an offline tool: the volume must not be mounted. The phases are
 idempotent; a killed run simply continues when re-run.
 .PP
 The rollback window is always the
 .I last
-sweep: a new sweep realizes (frees) the previous checkpoint after arming
-its own. Use
+sweep: a new sweep drops the previous savepoint after capturing its own.
+Use
 .BR "invf-sweep \-\-realize"
-to accept a sweep without running a new one.
+to accept a sweep without running a new one. A sweep that never armed one
+(arm refused) has nothing to roll back to, and this tool says so.
 .SH EXIT STATUS
 .TP
 0
 Rolled back.
 .TP
 1
-No checkpoint: nothing to roll back.
+No savepoint: nothing to roll back.
 .TP
 2
 Refused: a live redundancy seal would be invalidated. Free it first with
 .BR "invf-sweep \-\-free\-redundant" .
 .TP
 3
-The checkpoint descriptor or its journal staging failed verification; the
-post-sweep state is untouched.
+The savepoint descriptor failed verification; the post-sweep state is
+untouched.
 .TP
 5
 I/O or internal error; re-run.

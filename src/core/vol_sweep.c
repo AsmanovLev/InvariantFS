@@ -102,11 +102,11 @@ uint64_t jpeg_raw_estimate(const uint8_t *j, size_t n)
 
 /* WP42: per-id record locator for the sweep engine. idx_get_id stores the
  * absolute offset of an id's newest record; on a v0.3.0+ mapper volume that
- * is an extent position, so the legacy [inode_area_start, inode_area_pos)
- * bound rejected every hint and each lookup came back empty (the sweep saw
- * no files at all). Mapper volumes try the index hint first, then fall back
- * to the shared vol_records_walk(); legacy volumes keep the contiguous scan
- * byte-for-byte. Returns the record position and fills *h, or 0 if absent. */
+ * is an extent position, so a bound over the contiguous record region
+ * rejected every hint and each lookup came back empty (the sweep saw
+ * no files at all). The index hint is tried first, then the shared
+ * extent-aware scan. Returns the record position and fills *h, or 0 if
+ * absent. */
 typedef struct {
     uint64_t want;
     uint64_t rec_pos;
@@ -1821,9 +1821,9 @@ static int vol_pack_sweep(invfs_volume *v, uint64_t inode_id, const char *name,
 typedef struct { char name[256]; uint64_t id; } sweep_seed;
 
 /* WP42: per-record body of the sweepable collector, fed by the shared
- * mapper-aware vol_records_walk(). Last record per name wins, exactly the
- * legacy contiguous scan's rule; torn records are already skipped by the
- * walker. An OOM aborts the walk and keeps what was collected so far. */
+ * extent-aware record scan. Last record per name wins; torn records are
+ * already skipped by the walker. An OOM aborts the walk and keeps what was
+ * collected so far. */
 typedef struct {
     sweep_seed *seen;
     size_t seen_n, seen_cap;
@@ -1983,9 +1983,8 @@ uint64_t vol_zone_used_bytes(invfs_volume *v, uint64_t start_blk, uint64_t end_b
 
 
 /* WP41: shared per-record analysis body for vol_compute_stats, driven by
- * the WP40 mapper-aware walker vol_records_walk() so statistics cover
- * v0.3.0+ volumes whose inode records live in dynamic meta extents (the
- * legacy contiguous walk saw zero records there). ctx carries the
+ * the WP40 extent-aware walker so statistics cover volumes whose records
+ * live in dynamic meta extents. ctx carries the
  * claimed bitmap and the stats accumulator; rb INCLUDES the trailing
  * CRC and is owned by the walker (never freed here). */
 typedef struct {

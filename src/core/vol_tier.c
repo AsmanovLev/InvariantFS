@@ -28,7 +28,7 @@
  *
  * Crash/ordering rules mirror tz_seal: copy data blocks are written and
  * their maps journaled BEFORE the owner record names them (the owner
- * sync runs at the end of vol_flush, after jrn_flush); removals rewrite
+ * sync runs at the end of vol_flush); removals rewrite
  * the owner record first (same flush) and only then unmap+free. A crash
  * anywhere leaves at worst an orphan block fsck reclaims.
  *
@@ -58,12 +58,9 @@
 #include "volume_internal.h"
 
 
-/* The v2 owner-L2P map. There is no journal to carry it now and vol_flush
- * never reached jrn_flush on this format anyway (it returned for VOLF_V3
- * right after the bitmap flush), so a map queued here grew the in-RAM table
- * until vol_map reported "L2P journal full" and the caller latched the
- * volume -- a self-inflicted outage for a table nothing read. The copy's
- * address rides in the owner's AST entry instead. */
+/* The owner-L2P map. There is no journal to carry it, so a map queued here
+ * grew an in-RAM table nothing ever read -- a self-inflicted outage. The
+ * copy's address rides in the owner's AST entry instead. */
 static int wp25_map(invfs_volume *v, uint64_t owner, uint64_t ord,
                     uint64_t pba, uint32_t plen)
 {
@@ -371,7 +368,7 @@ void wp25_index_load(invfs_volume *v)
 }
 
 
-/* vol_flush hook (after jrn_flush): rewrite dirty owner records so they
+/* vol_flush hook: rewrite dirty owner records so they
  * name exactly the current index entries. The maps/unmaps are already
  * durable in this same flush. WP98: on v3 vol_flush's v2 tail is not
  * reached at all (volume.c:2435 returns for VOLF_V3 right after the bitmap
@@ -641,10 +638,10 @@ static uint16_t tier_heat_of(const tier_heat_map *m, uint64_t pba)
  * their blocks (parity stripes, batches, the tier/rawm copies themselves)
  * are engine bookkeeping, never promotion candidates.
  *
- * WP47: the walk goes through the shared mapper-aware vol_records_walk(),
- * so records living in dynamic metadata extents are seen too (the legacy
- * [inode_area_start, inode_area_pos) loop saw none on v0.3.0+ volumes and
- * left the promotion map empty). */
+ * WP47: the walk goes through the shared extent-aware record scan, so
+ * records living in dynamic metadata extents are seen too (a loop over the
+ * contiguous record region saw none of them and left the promotion map
+ * empty). */
 typedef struct {
     invfs_volume *v;
     tier_heat_map *m;

@@ -1,9 +1,26 @@
 /* meta_probe.c — isolate vol_apply_meta failures outside FUSE.
  *
- * usage: meta_probe <image> <name>           legacy probe (MUTATES:
- *                                              applies a test setattr)
- *        meta_probe <image> --heat <name>    WP19 read-only dump: storage
- *                                            class + per-entry heat counters
+ * usage: meta_probe <image> <name>           probe (MUTATES: applies a
+ *                                              test setattr)
+ *        meta_probe <image> --heat <name>    read-only dump: storage class
+ *                                            + per-entry heat counters
+ *        meta_probe <image> --xattr <name> <xattr>
+ *        meta_probe <image> --zonefree
+ *        meta_probe <image> --heatpump <name>...   MUTATES: reads each named
+ *                                              file once through the real
+ *                                              read path (one read-heat touch
+ *                                              per segment), then folds the
+ *                                              session's accrued read heat into
+ *                                              the volume WITHOUT the sweep's
+ *                                              halving decay, and flushes.
+ *
+ * --heatpump exists because vol_heat_persist() is a driver-facing API --
+ * "persist read touches without a sweep run" -- and this is its driver. It
+ * used to live in tools/l2ptest.c, whose whole subject was the retired
+ * mapping journal; the three suites that need a sweep-cadence read session
+ * (test-heat.sh, test-heat-mapper.sh, test-multidev.sh) call it here now.
+ * It is a probe mode, not a shipped tool: it is how a test stands in for a
+ * session that observed some reads.
  */
 #include <stdio.h>
 #include <stdlib.h>
@@ -19,32 +36,6 @@
  * TLV (format v2: heat moved out of the journal pads into the record).
  * Read-only: nothing here touches the vol_read_* paths, so no heat
  * accrues and the volume closes clean. */
-/* WP49b: per-record body fed by the bounded, index-ordered
- * vol_records_walk (the old position-driven vol_inode_next loop can cycle
- * on a non-monotonic mapper table). Keeps the last matching INOD seen. */
-typedef struct {
-    uint64_t id;
-    uint8_t *rec;
-    uint32_t rec_rl;
-} heat_ctx;
-
-static int heat_cb(void *ctx_, uint64_t rec_pos,
-                   const invfs_inode_rec *h, const uint8_t *rec)
-{
-    heat_ctx *c = (heat_ctx *)ctx_;
-    uint8_t *buf;
-    (void)rec_pos;
-
-    if (h->magic == TOMBSTONE_MAGIC || h->inode_id != c->id) return 0;
-    buf = (uint8_t *)malloc(h->rec_len);
-    if (!buf) return 1;
-    memcpy(buf, rec, h->rec_len);
-    free(c->rec);
-    c->rec = buf;   /* keep the last match: newest wins */
-    c->rec_rl = h->rec_len;
-    return 0;
-}
-
 /* WP-B1: a named-xattr dump. Meta-v3's inode row has no ext blob, so
  * everything v3 keeps per file outside the row (heat, the anchor mark)
  * lives in the named-xattr tree. --heat walks the v2 record stream, which
@@ -78,12 +69,8 @@ static int xattr_dump(invfs_volume *v, const char *name, const char *xname)
 static int heat_dump(invfs_volume *v, const char *name)
 {
     uint64_t id = vol_find(v, name);
-    size_t shown = 0;
     uint8_t cls = 0, algo = 0;
     uint16_t gen = 0;
-    uint8_t *rec = NULL;
-    uint32_t rec_rl = 0;
-    heat_ctx hc;
     const invfs_superblock *sb = vol_sb(v);
 
     printf("find(%s)=%llu\n", name, (unsigned long long)id);
@@ -105,12 +92,9 @@ static int heat_dump(invfs_volume *v, const char *name)
             printf("heat=absent\n");
     }
 
-    /* AST entries. On v2 they live in the record body; on Meta-v3 the record
-     * stream is empty and the segment table is the inode's RMC1 recipe, so
-     * read it through the same loader the engine uses. Without this the probe
-     * reports "entries=0" for every v3 file and every segment-level gate
-     * (per-segment algo/zone) is unobservable on the default format. */
-    if (sb->vol_flags & VOLF_V3) {
+    /* AST entries: the segment table is the inode's RMC1 recipe, read
+     * through the same loader the engine uses. */
+    {
         invfs_v3_inode in;
         uint8_t *blob = NULL;
         size_t blen = 0;
@@ -142,8 +126,8 @@ static int heat_dump(invfs_volume *v, const char *name)
             return 1;
         }
         for (k = 0; k < n_ents; k++) {
-            /* the physical extent comes from the segment's framed header, the
-             * same way the v2 branch below derives it (the entry stores none) */
+            /* the physical extent comes from the segment's framed header
+             * (the entry itself stores none) */
             uint64_t phys = 0;
             uint8_t hb[8];
             uint32_t cs;
@@ -167,53 +151,6 @@ static int heat_dump(invfs_volume *v, const char *name)
         free(blob);
         return 0;
     }
-
-    memset(&hc, 0, sizeof hc);
-    hc.id = id;
-    vol_records_walk(v, heat_cb, &hc);
-    rec = hc.rec;
-    rec_rl = hc.rec_rl;
-    if (rec) {
-        invfs_ast_hdr ah;
-        size_t base =
-            (size_t)(invfs_rec_cbody((const invfs_inode_rec *)rec) - rec);
-        /* WP22a: v1/v2 recipe header -- entries follow hdr_len */
-        if (rec_rl >= base + INVFS_AST_HDR_V1_LEN &&
-            invfs_ast_hdr_parse(rec + base, rec_rl - base, &ah) == 0) {
-            const invfs_ast_block_entry *ents;
-            uint32_t k;
-            ents = (const invfs_ast_block_entry *)(rec + base + ah.hdr_len);
-            for (k = 0; k < ah.num_blocks; k++) {
-                /* the physical extent derives from the segment's framed
-                 * header (WP27: the entry stores no length) */
-                uint64_t phys = 0;
-                uint8_t hb[8];
-                uint32_t cs;
-                if (ents[k].pba && ents[k].pba < sb->total_blocks &&
-                    vol_read_raw(v, ents[k].pba * INVFS_BLOCK_SIZE,
-                                 hb, 8) == 0) {
-                    memcpy(&cs, hb, 4);
-                    if (cs)
-                        phys = ((uint64_t)cs + 8 + INVFS_BLOCK_SIZE - 1) /
-                               INVFS_BLOCK_SIZE;
-                }
-                if (base + ah.hdr_len + (size_t)(k + 1) * sizeof(*ents) > rec_rl)
-                    break;
-                printf("ast i=%u off=%llu len=%llu zone=%u algo=%u "
-                       "bid=%u boff=%u pba=%llu phys=%llu\n", k,
-                       (unsigned long long)ents[k].file_offset,
-                       (unsigned long long)ents[k].length,
-                       ents[k].zone, ents[k].algo,
-                       ents[k].block_id, ents[k].block_offset,
-                       (unsigned long long)ents[k].pba,
-                       (unsigned long long)phys);
-                shown++;
-            }
-        }
-        free(rec);
-    }
-    printf("entries=%zu\n", shown);
-    return 0;
 }
 
 int main(int argc, char **argv)
@@ -225,7 +162,7 @@ int main(int argc, char **argv)
 
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) {
-            fprintf(stderr, "usage: %s <img> <name>|--heat <name>|--xattr <name> <xattr>\n", argv[0]);
+            fprintf(stderr, "usage: %s <img> <name>|--heat <name>|--xattr <name> <xattr>|--zonefree|--heatpump <name>...\n", argv[0]);
             return 2;
         }
         if (strcmp(argv[i], "-v") == 0 || strcmp(argv[i], "--version") == 0) {
@@ -235,11 +172,44 @@ int main(int argc, char **argv)
         }
     }
 
-    if (argc < 3) { fprintf(stderr, "usage: %s <img> <name>|--heat <name>|--xattr <name> <xattr>\n",
+    if (argc < 3) { fprintf(stderr, "usage: %s <img> <name>|--heat <name>|--xattr <name> <xattr>|--zonefree|--heatpump <name>...\n",
                             argv[0]); return 2; }
     setvbuf(stdout, NULL, _IONBF, 0);
     v = vol_open(argv[1], &err);
     if (!v) { printf("open FAIL err=%d\n", err); return 1; }
+    if (strcmp(argv[2], "--heatpump") == 0) {
+        int i, bad = 0;
+        if (argc < 4) { vol_close(v); return 2; }
+        for (i = 3; i < argc; i++) {
+            uint64_t ino = vol_find(v, argv[i]);
+            uint8_t *buf = NULL;
+            size_t len = 0;
+            if (!ino) {
+                fprintf(stderr, "heatpump: '%s' not found\n", argv[i]);
+                bad = 1;
+                continue;
+            }
+            /* the REAL read path: this is what accrues the touches. A probe
+             * that short-circuited it would accrue nothing and the suites
+             * would go green on a volume whose heat never moved. */
+            if (vol_read_file(v, ino, &buf, &len) != 0) {
+                fprintf(stderr, "heatpump: read failed for '%s'\n", argv[i]);
+                bad = 1;
+                continue;
+            }
+            free(buf);
+        }
+        /* fold the session's read heat into the volume; the sweep's decay
+         * pass does this too, plus the halving, and is not what a test
+         * asking for "16 read sessions, rheat >= 16" wants. */
+        if (!bad) vol_heat_persist(v);
+        if (!bad && vol_flush(v) != 0) {
+            fprintf(stderr, "heatpump: flush failed\n");
+            bad = 1;
+        }
+        vol_close(v);
+        return bad;
+    }
     if (strcmp(argv[2], "--heat") == 0) {
         if (argc < 4) { vol_close(v); return 2; }
         rc = heat_dump(v, argv[3]);

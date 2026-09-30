@@ -8,27 +8,35 @@ decompress-and-compare before it is trusted; containers (ZIP/TAR, and
 external formats via containerpacks) are decomposed into member inodes
 that flow through the whole codec pipeline recursively; transcodes happen
 only where bit-exactness is proven per file. The on-disk format is the
-InvariFS volume format v2 (magic
-.RB \(dq InvariFS\e0 \(dq);
-the de-facto spec is
+InvariFS volume format v3 (magic
+.RB \(dq InvariFS\e0 \(dq,
+.RB VOLF_V3
+in the superblock flags); a volume without
+.B VOLF_V3
+is refused by name by every tool. The de-facto spec is
 .I invarifs.h
-plus
-.I volume.c
 in the source tree.
 .SH VOLUME FORMAT
-The inode area is append-only:
-.B [INOD rec_len ... CRC][DELT tombstone CRC]
-pairs; v2 tombstones kill by record position (the
-.I file_size
-field), legacy ones by inode id. Per-file metadata lives in an
-.B INO2
-extension block appended after the AST recipe inside the record: type,
-mode, uid/gid, mtime/atime, nlink, symlink target, xattr TLVs. Directory
-anchors are records named
-.RB \(dq path/ \(dq.
-Hard links clone the record under a new name sharing the inode.
+Metadata is two-tier: an immutable copy-on-write B+ tree base published
+through a double-slot
+.B RT30
+root descriptor, plus an append-only Delta Log that readers overlay and a
+background fold merges into the base. Keys are
+.B 0x03
+for named xattrs,
+.B 0x04
+for recipe blobs (keyed by the BLAKE3 of their own contents), and inode
+and dirent rows above that.
+.PP
+The metadata zone also holds the block bitmap and a 32 MiB reserved gap
+between the metadata extent mapper and the record area. That gap is never
+read and never written; its size is load-bearing, because the record
+area's block number is derived from it.
 .PP
 Superblock flags:
+.B VOLF_V3
+(the format marker; absent means the volume is not readable by this
+build),
 .B VOLF_READONLY
 (operator/tool hold),
 .B VOLF_META2
@@ -68,7 +76,7 @@ check & repair
 offline grow/shrink
 .TP
 .B invf-rollback
-undo the last sweep from its checkpoint
+undo the last sweep from its savepoint
 .TP
 .B invf-import
 engine-level tree import

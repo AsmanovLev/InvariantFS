@@ -268,9 +268,9 @@ static int vol_read_text_slice(invfs_volume *v, uint64_t inode_id,
 
 /* WP47: is `ip` a plausible record position? On a v0.3.0+ mapper volume
  * idx_get_id returns an absolute offset inside a dynamic metadata extent,
- * which the legacy [inode_area_start, inode_area_pos) bound rejected. Accept
- * any position inside any mapper extent (mirroring vol_inode_next), or the
- * legacy contiguous region; anything else falls back to vol_records_walk(). */
+ * which a bound over the contiguous record region rejected. Accept any
+ * position inside any mapper extent (mirroring vol_inode_next); anything
+ * else is not a record position. */
 
 
 typedef struct {
@@ -282,7 +282,7 @@ typedef struct {
 
 
 /* Locate the live INOD for inode_id: the O(1) index hint when it is valid
- * and names a record for this id, else the mapper-aware vol_records_walk().
+ * and names a record for this id, else a scan of the metadata extents.
  * Returns the record position, or 0 when absent. */
 
 

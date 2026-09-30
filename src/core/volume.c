@@ -4,14 +4,19 @@
  *   vol_open / vol_close
  *   vol_alloc  (bitmap free-list cursor)
  *   vol_write_raw (allocate blocks in RAW zone + write)
- *   vol_map    (L2P journal MAP entry + in-memory table)
  *   vol_read_block (read raw bytes at pba)
- *   inode area: append-only records (name + AST recipe)
+ *   vol_flush  (bitmap range + two-device commit tail)
  *
  * Metadata zone layout:
  *   [0 .. bitmap_blocks):            block bitmap
- *   [bitmap_blocks .. +journal):     L2P journal (append-only)
- *   [bitmap_blocks+journal .. end):  inode/AST area (append-only)
+ *   [bitmap_blocks .. +mapper):      metadata extent mapper (MET0 + table)
+ *   [bitmap_blocks+mapper .. +res):  reserved (unused on this format)
+ *   [bitmap_blocks+reserved .. end): append-only record area
+ *
+ * The v3 namespace itself is NOT here: it is the RT30 double slot plus a
+ * COW B+ tree base and an append-only Delta Log (vol_metabuf.c,
+ * vol_delta.c, vol_btree.c, vol_fold.c). The record area above is the
+ * metadata EXTENT pool the tree's base pages are allocated from.
  */
 
 /* _GNU_SOURCE for PTHREAD_RECURSIVE_MUTEX_INITIALIZER_NP (the pba-ref map's
@@ -86,261 +91,6 @@ int vol_write_rdp0(invfs_volume *v, const invfs_rdp0 *rd)
     return 0;
 }
 
-
-/* ---- WP22d: crash-atomic journal (append-only log + slot compaction) --
- * The on-disk rules live with INVFS_JRN_MAGIC in invarifs.h. In short:
- * the journal area is two slots; the active one holds a CRC-chained log
- * (a compacted image followed by appended ops); a flush APPENDS the
- * pending ops and never rewrites durable entries; when the log cannot
- * hold them (or fsck rebuilt the table, or a legacy volume migrates) the
- * whole table is imaged into the inactive slot, barriered, and the
- * superblock selector flipped (barriered again). Replay picks the
- * highest-sequence CRC-valid slot; with none valid and pad2 == 0 the area
- * is a legacy flat log and replays by the pre-WP22d rule. */
-
-/* chain seed of a slot: crc over the header fields preceding image_crc
- * (everything the image bytes cannot influence -- the image's own chained
- * entry crcs ride inside image_crc) */
-static uint32_t jrn_seed(const invfs_jrn_hdr *h)
-{
-    return invfs_crc32c(h, offsetof(invfs_jrn_hdr, image_crc));
-}
-
-
-/* chained entry crc: crc32c over entry[0..offsetof(crc)) continuing from
- * prev (the previous entry's stored crc; the slot seed for the first) */
-static uint32_t jrn_chain(uint32_t prev, const invfs_l2p_entry *e)
-{
-    return invfs_crc32c_update(prev, e, offsetof(invfs_l2p_entry, crc));
-}
-
-
-/* absolute byte offset of slot `slot`'s header block */
-uint64_t jrn_slot_base(const invfs_volume *v, uint32_t slot)
-{
-    return (v->journal_start + (uint64_t)slot * INVFS_JRN_SLOT_BLOCKS)
-           * INVFS_BLOCK_SIZE;
-}
-
-
-/* read + validate a slot header; 0 = valid (out filled) */
-static int jrn_read_hdr(invfs_volume *v, uint32_t slot, invfs_jrn_hdr *out)
-{
-    invfs_jrn_hdr h;
-    uint64_t off = jrn_slot_base(v, slot);
-    if (io_seek(&v->io, off) != 0 || io_read(&v->io, &h, sizeof h) != 0)
-        return -1;
-    if (memcmp(h.magic, INVFS_JRN_MAGIC, 4) != 0 ||
-        h.version != INVFS_JRN_VERSION)
-        return -1;
-    if (h.image_bytes % sizeof(invfs_l2p_entry) != 0 ||
-        h.image_bytes >
-            (uint64_t)(INVFS_JRN_SLOT_BLOCKS - 1) * INVFS_BLOCK_SIZE)
-        return -1;
-    if (invfs_crc32c(&h, offsetof(invfs_jrn_hdr, crc32c)) != h.crc32c)
-        return -1;
-    *out = h;
-    return 0;
-}
-
-
-/* apply one journaled entry to the in-memory table (replay path; no op
- * journaling). Returns -1 on allocation failure. */
-int l2p_apply(invfs_volume *v, const invfs_l2p_entry *e)
-{
-    if (e->type == INVFS_JRN_MAP) {
-        if (v->l2p_count == v->l2p_cap) {
-            v->l2p_cap = v->l2p_cap ? v->l2p_cap * 2 : 256;
-            v->l2p = (invfs_l2p_entry *)realloc(v->l2p,
-                            v->l2p_cap * sizeof(invfs_l2p_entry));
-            if (!v->l2p) return -1;
-        }
-        v->l2p[v->l2p_count++] = *e;
-        /* WP-L2Q: replay builds the session index incrementally */
-        l2p_idx_put(v, e->inode, e->lba, (uint64_t)(v->l2p_count - 1));
-    } else if (e->type == INVFS_JRN_UNMAP) {
-        l2p_remove_mem(v, e->inode, e->lba);
-    }
-    return 0;
-}
-
-
-/* Replay one slot whose header validated: image (wholesale CRC) then the
- * chained log until the first chain break. -1 = io/alloc failure, +1 =
- * image torn (slot unusable, caller tries the other slot). */
-static int l2p_replay_slot(invfs_volume *v, uint32_t slot,
-                           const invfs_jrn_hdr *h)
-{
-    uint64_t base = jrn_slot_base(v, slot);
-    uint64_t jend = base + (uint64_t)INVFS_JRN_SLOT_BLOCKS * INVFS_BLOCK_SIZE;
-    uint64_t jp = base + INVFS_BLOCK_SIZE;
-    uint32_t prev = jrn_seed(h);
-    uint64_t replayed = 0;
-
-    if (h->image_bytes) {
-        uint8_t *img = (uint8_t *)malloc((size_t)h->image_bytes);
-        size_t n = (size_t)h->image_bytes / sizeof(invfs_l2p_entry);
-        size_t i;
-        if (!img) return -1;
-        if (io_seek(&v->io, jp) != 0 ||
-            io_read(&v->io, img, (size_t)h->image_bytes) != 0 ||
-            invfs_crc32c(img, (size_t)h->image_bytes) != h->image_crc) {
-            free(img);
-            return 1;   /* torn compaction: the other slot is the truth */
-        }
-        for (i = 0; i < n; i++) {
-            const invfs_l2p_entry *e = (const invfs_l2p_entry *)
-                (img + i * sizeof(invfs_l2p_entry));
-            if (l2p_apply(v, e) != 0) { free(img); return -1; }
-            prev = e->crc;
-            replayed++;
-        }
-        free(img);
-        jp += h->image_bytes;
-    }
-    while (jp + sizeof(invfs_l2p_entry) <= jend) {
-        invfs_l2p_entry e;
-        if (io_seek(&v->io, jp) != 0 ||
-            io_read(&v->io, &e, sizeof(e)) != 0)
-            break;
-        if (jrn_chain(prev, &e) != e.crc)
-            break;  /* end of the log (chain stops at holes/stale tails) */
-        if (l2p_apply(v, &e) != 0) return -1;
-        prev = e.crc;
-        jp += sizeof(e);
-        replayed++;
-    }
-    v->journal_pos = jp;
-    v->j_last_crc = prev;
-    v->j_slot = slot;
-    v->j_seq = h->seq;
-    v->j_slotted = 1;
-    if (getenv("INVFS_DEBUG"))
-        printf("[l2p_replay] slot %u seq %llu: replayed %llu L2P entries, "
-               "journal_pos=%llu\n", slot, (unsigned long long)h->seq,
-               (unsigned long long)replayed,
-               (unsigned long long)v->journal_pos);
-    return 0;
-}
-
-
-/* The pre-WP22d flat log: bare-CRC entries from the journal base, replay
- * stops at the first bad one (the terminator convention). */
-static int l2p_replay_legacy(invfs_volume *v)
-{
-    uint64_t jp = v->journal_start * INVFS_BLOCK_SIZE;
-    uint64_t jend = (v->journal_start + JOURNAL_BLOCKS) * INVFS_BLOCK_SIZE;
-    uint64_t replayed = 0;
-
-    while (jp + sizeof(invfs_l2p_entry) <= jend) {
-        invfs_l2p_entry e;
-        if (io_seek(&v->io, jp) != 0 ||
-            io_read(&v->io, &e, sizeof(e)) != 0)
-            break;
-        if (invfs_crc32c(&e, offsetof(invfs_l2p_entry, crc)) != e.crc)
-            break;  /* end of valid journal */
-        if (l2p_apply(v, &e) != 0) return -1;
-        jp += sizeof(e);
-        replayed++;
-    }
-    v->journal_pos = jp;
-    if (getenv("INVFS_DEBUG"))
-        printf("[l2p_replay] legacy: replayed %llu L2P entries, "
-               "journal_pos=%llu\n", (unsigned long long)replayed,
-               (unsigned long long)v->journal_pos);
-    return 0;
-}
-
-
-/* WP27: the journal no longer carries heat (it moved into the records'
- * INO2 ext), so replay has no summaries to reseed. */
-
-
-/* Replay the L2P journal from disk into the in-memory table and reseed the
- * WP19 hot summaries; sets v->journal_pos to the end of the valid prefix.
- * vol_open runs this once; the WP21 rollback runs it again after restoring
- * the checkpoint's staged journal bytes. The table allocation grows but
- * never shrinks. Returns 0, -1 on allocation failure. */
-int l2p_replay(invfs_volume *v)
-{
-    invfs_jrn_hdr h[2];
-    int ok[2];
-    int pick = -1;
-
-    v->l2p_count = 0;
-    v->jops_n = 0;
-    l2p_idx_reset(v);   /* WP-L2Q: the replay below re-seeds the index */
-    ok[0] = jrn_read_hdr(v, 0, &h[0]) == 0;
-    ok[1] = jrn_read_hdr(v, 1, &h[1]) == 0;
-    if (ok[0] && ok[1]) {
-        /* both valid: the higher sequence is the newer compaction; a tie
-         * (a rollback restored the same bytes to both) follows pad2 */
-        pick = h[0].seq != h[1].seq ? (h[0].seq > h[1].seq ? 0 : 1)
-             : (v->sb.pad2 == INVFS_JSEL_SLOT1 ? 1 : 0);
-    } else if (ok[0]) {
-        pick = 0;
-    } else if (ok[1]) {
-        pick = 1;
-    }
-    if (pick >= 0) {
-        /* the winner's image itself may be torn (dropped mid-compaction):
-         * fall back to the other slot, which then holds the full pre-
-         * compaction state */
-        int other = pick ^ 1;
-        int rc = l2p_replay_slot(v, (uint32_t)pick, &h[pick]);
-        if (rc > 0 && ok[other]) {
-            fprintf(stderr, "l2p_replay: slot %d image torn; falling back "
-                    "to slot %d\n", pick, other);
-            v->l2p_count = 0;
-            l2p_idx_reset(v);
-            rc = l2p_replay_slot(v, (uint32_t)other, &h[other]);
-        }
-        if (rc > 0) {
-            /* No slot fully validates. A torn LEGACY migration (the flip
-             * never landed, or it landed while the image was still torn)
-             * leaves the flat log's start intact in slot 0's region --
-             * migration images into slot 1 for exactly this reason. The
-             * legacy walk is read-only and self-terminating, so try it
-             * whenever slots have failed: it recovers the pre-flush state
-             * of the migration window, and any other case (a genuinely
-             * slotted volume whose slots both died) just walks zero
-             * entries past the slot-0 header and lands in the loud
-             * both-torn branch below. */
-        v->l2p_count = 0;
-        l2p_idx_reset(v);
-        v->j_slotted = 0;
-        if (l2p_replay_legacy(v) != 0) return -1;
-        if (v->sb.pad2 == INVFS_JSEL_LEGACY || v->l2p_count > 0) {
-            fprintf(stderr, "l2p_replay: no intact slot; recovered "
-                    "%llu entr%s from the pre-migration flat log\n",
-                    (unsigned long long)v->l2p_count,
-                    v->l2p_count == 1 ? "y" : "ies");
-            return 0;
-        }
-        /* both slots torn: no trustworthy mapping anywhere. Loud,
-         * empty, and the next flush recompacts a clean slot. WP27: the
-         * owner WAL is redundant with the owner records' AST pbas, so
-         * this loses the WAL (seal stripe maps, batch GC maps) only;
-         * fsck -f rebuilds it from the owner records. */
-        fprintf(stderr, "l2p_replay: BOTH journal slots torn; "
-                "starting with an empty WAL (run invf-fsck -f)\n");
-        v->l2p_count = 0;
-        v->j_slotted = 1;
-        v->j_slot = 0;
-        v->j_seq = h[0].seq > h[1].seq ? h[0].seq : h[1].seq;
-        v->journal_pos = jrn_slot_base(v, 0) + INVFS_BLOCK_SIZE;
-        v->j_last_crc = 0;
-        v->j_compact = 1;
-        v->scan_anomalies++;
-        return 0;
-    }
-    if (rc != 0) return -1;
-    } else {
-        v->j_slotted = 0;
-        if (l2p_replay_legacy(v) != 0) return -1;
-    }
-    return 0;
-}
 
 
 /* ==================== WP25: two-device mux ====================
@@ -982,16 +732,14 @@ static int wp25_open_degraded(invfs_volume *v)
             v->sb.checksum)
         goto bad;
     /* The degraded leg is the same format gate as the primary one in
-     * vol_open: the mirror's superblock decides the format, and this build
-     * reads v3 only. It says so without naming a conversion tool -- there is
-     * none (invf-migrate-v2 was v1 -> v2 and no longer exists). */
+     * vol_open, and says the same thing: the mirror's superblock decides
+     * the format, and this build reads v3 only. */
     if (!(v->sb.vol_flags & VOLF_V3)) {
-        fprintf(stderr, "vol_open: %s: %s volume: this build reads format v3 "
-                "only (INVFS_VERSION=%s); format %s is retired and its reader "
-                "has been removed. No in-tree conversion path exists.\n",
+        fprintf(stderr, "vol_open: %s: this is not a format v3 volume: the "
+                "device 1 image reports %s (VOLF_V3 is not set). This build "
+                "reads format v3 only (INVFS_VERSION=%s).\n",
                 d1, (v->sb.vol_flags & VOLF_ASTV2) ? "format v2" : "format v1",
-                INVFS_VERSION_STRING,
-                (v->sb.vol_flags & VOLF_ASTV2) ? "v2" : "v1");
+                INVFS_VERSION_STRING);
         goto bad;
     }
     memcpy(&d2, blk + INVFS_DEVT_OFF, sizeof d2);
@@ -1058,16 +806,7 @@ static void v3_probe_rt30(invfs_volume *v)
 }
 
 
-/* WP24-lite: vol_open_inner(path, at_ckpt, ckpt_seq, err).
- * at_ckpt == 0 is the ordinary open (vol_open). at_ckpt != 0 asks for the
- * read-only time-travel view at the live CKP0 sweep checkpoint
- * (vol_open_at): the journal is replayed from the checkpoint's STAGED
- * prefix (never the live, post-sweep slots) and the inode-area scan stops
- * at the checkpoint's append pointer, so the in-memory view is exactly the
- * sweep-start state; ckpt_seq != 0 pins the expected sweep sequence
- * (K=1 contract: only the one live checkpoint exists). */
-static invfs_volume *vol_open_inner(const char *path, int at_ckpt,
-                                    uint64_t ckpt_seq, int *err_out)
+static invfs_volume *vol_open_inner(const char *path, int *err_out)
 {
     int dummy_err = 0;
     int *err = err_out ? err_out : &dummy_err;
@@ -1142,43 +881,30 @@ static invfs_volume *vol_open_inner(const char *path, int at_ckpt,
     if (invfs_crc32c(&v->sb, offsetof(invfs_superblock, checksum)) != v->sb.checksum)
         { *err = -5; goto fail; }
 
-    /* WP-M1: format v3 is the metadata-v3 two-tier engine. VOLF_V3 is the
-     * authoritative marker and is checked BEFORE the v2 reader gate below:
-     * a v3 volume carries no invfs_inode_rec stream / owner WAL. */
+    /* VOLF_V3 is the authoritative format marker, and it is the first thing
+     * checked. Every structure below this line is read through it.
+     *
+     * A volume without it is not readable by this build. Say so plainly, and
+     * say what the operator can do -- but do not write a migration advisory
+     * for a format that is not going to come back: there is no converter to
+     * name (invf-migrate-v2 went with the machinery it migrated, and no
+     * v1/v2 -> v3 path has ever existed in-tree; invf-mkfs has refused to
+     * CREATE such a volume since v0.5.0). The two facts that are worth the
+     * operator's time are the one they already half-know (this build reads
+     * v3 only) and the one they cannot guess (their image is untouched, so
+     * trying something else cannot hurt it). */
     is_v3 = (v->sb.vol_flags & VOLF_V3) != 0;
-
-    /* Format v3 only. VOLF_V3 is the authoritative marker; a volume without
-     * it is a pre-v0.5 artifact and this build carries no reader for it.
-     *
-     * The v2 branches this used to fall through to are DELETED, not disabled
-     * (WP drop-v2-branches). They were already inert: WP-M21 retired the v2
-     * name index and left idx_get()/idx_dir_live()/idx_id_live() as no-ops
-     * returning NULL/0, so a v2 volume that opened could not resolve a single
-     * name, could not list a directory, and told vol_retire_inode that the
-     * last live record of an id was unshared -- while still accepting writes
-     * nothing could read back. Refusing here is what makes the deletion safe.
-     *
-     * Neither refusal names a conversion tool, because there is none to name.
-     * invf-migrate-v2 (v1 -> v2) was removed with the rest of the v2
-     * machinery in 6b9a593, and no v1/v2 -> v3 converter has ever existed:
-     * invf-mkfs has refused to CREATE a v2 volume since v0.5.0, so there has
-     * never been an in-tree path from an old volume to a current one. The
-     * operator's only route is to re-create the volume with invf-mkfs and
-     * re-import from a copy of the data, or to restore from a backup. */
     if (!is_v3) {
         const int is_v1 = !(v->sb.vol_flags & VOLF_ASTV2);
         fprintf(stderr,
-                "vol_open: %s: %s volume: this build reads format v3 only "
-                "(INVFS_VERSION=%s); format %s is retired and its reader has "
-                "been removed.\n"
-                "  There is no conversion tool: invf-migrate-v2 (format v1 -> "
-                "v2) was removed with the format itself, and no v1/v2 -> v3 "
-                "path exists in-tree.\n"
-                "  To keep the data: create a new volume with invf-mkfs and "
-                "re-import from a copy of the source tree, or restore from a "
-                "backup.\n",
-                real, is_v1 ? "format v1" : "format v2", INVFS_VERSION_STRING,
-                is_v1 ? "v1" : "v2");
+                "vol_open: %s: this is not a format v3 volume: the image "
+                "reports %s (VOLF_V3 is not set). This build reads format v3 "
+                "only (INVFS_VERSION=%s) and carries no reader for any other "
+                "format.\n"
+                "  The image is untouched by this attempt. To get at the data, "
+                "create a new volume with invf-mkfs and re-import from a copy "
+                "of the source tree, or restore from a backup.\n",
+                real, is_v1 ? "format v1" : "format v2", INVFS_VERSION_STRING);
         *err = -12;
         goto fail;
     }
@@ -1186,7 +912,7 @@ static invfs_volume *vol_open_inner(const char *path, int at_ckpt,
     /* WP25: the DEVT device table at 0x2A0 (block 0 reserved area, the
      * RDP0 convention: absent = zeros = single-device). When it names two
      * devices, open device 1 here so every structure read below (bitmap,
-     * journal, inode area) can fail over to the mirror. dev1 holds the
+     * metadata extents) can fail over to the mirror. dev1 holds the
      * canonical data: a volume that cannot reach dev1 is refused loudly
      * (the degraded leg covers dev0-absent only). */
     if (!v->devt_present) {
@@ -1410,27 +1136,6 @@ static invfs_volume *vol_open_inner(const char *path, int at_ckpt,
             }
         }
     }
-    /* WP24-lite: a time-travel open requires the LIVE checkpoint -- the
-     * retention registry (which keeps the post-checkpoint-freed blocks the
-     * cut still references alive) exists exactly while CKP0 does. A
-     * realized/absent checkpoint means the old segment versions may be
-     * reused: refuse loudly, never serve a maybe-phantom view. */
-    if (at_ckpt) {
-        if (!v->ck_present) {
-            fprintf(stderr, "vol_open_at: %s: no live sweep checkpoint "
-                    "(nothing armed, or already realized)\n", real);
-            *err = -11; goto fail;
-        }
-        if (ckpt_seq && ckpt_seq != v->ck.sweep_seq) {
-            fprintf(stderr, "vol_open_at: %s: checkpoint #%llu requested, "
-                    "but the live checkpoint is #%llu (K=1: only the live "
-                    "one can be viewed)\n", real,
-                    (unsigned long long)ckpt_seq,
-                    (unsigned long long)v->ck.sweep_seq);
-            *err = -11; goto fail;
-        }
-    }
-
     v->bitmap_blocks = (v->sb.total_blocks / 8 + INVFS_BLOCK_SIZE - 1) / INVFS_BLOCK_SIZE;
     v->bitmap = (uint8_t *)calloc(1, (size_t)v->bitmap_blocks * INVFS_BLOCK_SIZE);
     if (!v->bitmap) { *err = -6; goto fail; }
@@ -1458,10 +1163,7 @@ static invfs_volume *vol_open_inner(const char *path, int at_ckpt,
 
     /* WP30: on a mapper volume the append cursor is extent-relative.
      * Rebase the cursor onto the active extent so writers append inside
-     * extent 0 and readers find what was written there. inode_area_start
-     * stays at the legacy position so legacy read paths that compare
-     * idx_get_id() against inode_area_start still fall through (idx
-     * positions sit in shadow extents, past legacy_start). */
+     * extent 0 and readers find what was written there. */
     if (v->met0_present && v->meta_mapper &&
         v->met0.extent_count > 0 &&
         v->met0.active_extent < (uint64_t)v->met0.extent_count) {
@@ -1473,21 +1175,6 @@ static invfs_volume *vol_open_inner(const char *path, int at_ckpt,
             v->inode_area_pos = first_pba * (uint64_t)INVFS_BLOCK_SIZE + off;
             if (v->inode_area_end < first_pba * (uint64_t)INVFS_BLOCK_SIZE + esz)
                 v->inode_area_end = first_pba * (uint64_t)INVFS_BLOCK_SIZE + esz;
-        }
-    }
-
-    /* WP24-lite: a time-travel open replays the checkpoint's STAGED prefix
-     * (read-only, from memory) instead of the present. The ordinary open has
-     * no journal to replay: the v2 L2P owner-WAL was resolved here and its
-     * replay is gone, so the format gate above is the only thing standing
-     * between a pre-v0.5 volume and a reader that would misread it. */
-    if (at_ckpt) {
-        int rrc = ckp_stage_replay(v);
-        if (rrc != 0) {
-            fprintf(stderr, "vol_open_at: %s: checkpoint #%llu staging "
-                    "failed verification; the present is untouched\n",
-                    real, (unsigned long long)v->ck.sweep_seq);
-            *err = -11; goto fail;
         }
     }
 
@@ -1570,63 +1257,11 @@ static invfs_volume *vol_open_inner(const char *path, int at_ckpt,
         v->sb.hard_min_blocks = (uint32_t)(v->sb.total_blocks / 1024 + 16);
     v->free_blocks = vol_count_free(v);
     alloc_state_reset(v);
-    /* WP22d/WP27: bitmap divergence guard. The bitmap is a CACHE of the
-     * records + the owner WAL (fsck rebuilds it wholesale); the flush
-     * writes the dirty bitmap range, the WAL append and the record appends
-     * as separate units under one barrier, so a drop window can tear them
-     * apart. The fsck -f rebuild does the full two-sided reconcile; at
-     * open we do the cheap one-sided direction: every WAL-mapped block is
-     * forced USED in the runtime bitmap, never cleared. A false positive
-     * is a leak fsck reclaims; a false negative would be corruption.
-     * Runs AFTER alloc_state_reset so the repaired range stays dirty for
-     * the first flush. */
-    {
-        size_t bi;
-        uint64_t fixed = 0;
-        for (bi = 0; bi < v->l2p_count; bi++) {
-            const invfs_l2p_entry *e = &v->l2p[bi];
-            uint64_t b;
-            if (e->type != INVFS_JRN_MAP) continue;
-            for (b = e->pba; b < e->pba + e->length; b++) {
-                if (b >= v->sb.total_blocks) break;
-                if (!bit_get(v->bitmap, b)) {
-                    bit_set(v->bitmap, b);
-                    vol_bm_dirty(v, b);
-                    v->free_blocks--;
-                    if (b >= v->sb.shadow_zone_start) v->shadow_free--;
-                    else if (b >= v->sb.raw_zone_start) v->raw_free--;
-                    fixed++;
-                }
-            }
-        }
-        if (fixed)
-            fprintf(stderr, "vol_open: bitmap/journal divergence: %llu "
-                    "mapped block%s were marked free; forced used\n",
-                    (unsigned long long)fixed, fixed == 1 ? "" : "s");
-    }
     /* H5: a volume whose latch persisted in the superblock re-evaluates it
      * at open: space freed while it was offline (fsck reclaim, a resize,
      * a delete in a session that never flushed the flag clear) must not
      * keep it read-only. In RAM only -- persisted by the first flush. */
     vol_readonly_unlatch(v);
-
-    /* WP24-lite: the time-travel handle is read-only by construction. The
-     * VOLF_READONLY latch (RAM only -- never flushed from this handle)
-     * makes every vol_write_enabled caller answer EROFS; time_travel is
-     * the engine-level backstop (vol_mark_dirty refuses loudly, vol_flush/
-     * vol_sync/vol_close write nothing). Set BEFORE the auto-recovery
-     * block below, so a dirty-at-open TT mount takes the conservative
-     * no-write path (needs_recovery) instead of the sb-writing one. */
-    if (at_ckpt) {
-        vol_set_readonly(v, 1);
-        v->time_travel = 1;
-        fprintf(stderr, "vol_open_at: %s: read-only view at sweep "
-                "checkpoint #%llu (inode area @%llu, journal @%llu); the "
-                "live volume is untouched\n", real,
-                (unsigned long long)v->ck.sweep_seq,
-                (unsigned long long)v->ck.inode_area_pos,
-                (unsigned long long)v->ck.journal_pos);
-    }
 
     /* Reconstructed-content cache.
      *
@@ -1762,17 +1397,13 @@ static invfs_volume *vol_open_inner(const char *path, int at_ckpt,
      * pass, what happened while unmounted is unknowable). */
     if (v->rd_present && (v->rd.l1_algo || v->rd.l2_algo))
         seal_dirty_reset(v);
-    /* WP27: seed the heat summaries conservative-hot; the sweep's decay
-     * pass recomputes the truth from the records' TLVs. */
-    l2p_seed_heat(v);
     /* WP27: build the pba reference map at open: the map must count the
      * live set EXACTLY for the retire/dedupe free gates, and building it
      * from the records the open scan just CRC-validated is free I/O.
      * Building it lazily (the first retire) would lose records superseded
      * between open and that first use, and a retire's -1 on a
      * never-counted record would drive a live sharer's count to zero. */
-    if (!v->time_travel)
-        pba_ref_ensure(v);
+    pba_ref_ensure(v);
     *err = 0;
     /* Unclean shutdown. Reading always works -- that is how you find out
      * what survived. For WRITES the old behavior was a hard latch: every
@@ -1787,17 +1418,13 @@ static invfs_volume *vol_open_inner(const char *path, int at_ckpt,
     if (v->sb.state != INVFS_STATE_CLEAN) {
         const char *ar = getenv("INVFS_AUTO_RECOVER");
         int ro_flag = (v->sb.vol_flags & VOLF_READONLY) != 0;
-        /* WP22d: a non-zero open_cuts means the consistent cut hid
-         * records (drop-torn mappings). The live set is consistent, but
-         * the losses are unreviewed: keep the conservative manual path
-         * (fsck -f quarantines them) instead of silently cleaning up. */
         if (v->degraded) {
             fprintf(stderr, "vol_open: %s: DEGRADED read-only mount "
                     "(device 0 absent); the recorded state 0x%02X is "
                     "left untouched until reattach\n",
                     real, (unsigned)v->sb.state);
             v->needs_recovery = 1;
-        } else if (!ro_flag && v->scan_anomalies == 0 && v->open_cuts == 0 &&
+        } else if (!ro_flag && v->scan_anomalies == 0 &&
             (!ar || strcmp(ar, "0") != 0)) {
             v->sb.state = INVFS_STATE_CLEAN;
             if (vol_write_sb(v) == 0)
@@ -1808,11 +1435,10 @@ static invfs_volume *vol_open_inner(const char *path, int at_ckpt,
                 v->needs_recovery = 1;
         } else {
             fprintf(stderr,
-                    "vol_open: %s was not closed cleanly (state=0x%02X%s%s); "
+                    "vol_open: %s was not closed cleanly (state=0x%02X%s); "
                     "read-only until recovery. Run `invf-fsck -f %s`.\n",
                     real, (unsigned)v->sb.state,
                     v->scan_anomalies ? ", damaged records" : "",
-                    v->open_cuts ? ", l2p cuts hidden" : "",
                     path);
             v->needs_recovery = 1;
         }
@@ -1825,8 +1451,6 @@ fail:
     io_close(&v->io);
     pthread_rwlock_destroy(&v->meta_lock);
     if (v->bitmap) free(v->bitmap);
-    free(v->jops);
-    free(v->mjops);
     free(v->meta_mapper);
     free(v->meta_type_bitmap);
     /* WP126: the orphan collector's candidate set. Rebuilt from nothing on
@@ -1839,8 +1463,6 @@ fail:
     heat_locks_destroy(v);   /* WP-heat-table-concurrent-safe */
     cpack_locks_destroy(v);  /* WP-cpack-map-copy-out */
     free(v->pba_ref);
-    free(v->l2p);
-    free(v->l2p_idx);
     free(v->tier);
     free(v->rawm);
     free(v->path2);
@@ -1852,19 +1474,7 @@ fail:
 
 invfs_volume *vol_open(const char *path, int *err)
 {
-    return vol_open_inner(path, 0, 0, err);
-}
-
-
-invfs_volume *vol_open_at(const char *path, uint64_t ckpt_seq, int *err)
-{
-    return vol_open_inner(path, 1, ckpt_seq, err);
-}
-
-
-int vol_time_travel(const invfs_volume *v)
-{
-    return v && v->time_travel;
+    return vol_open_inner(path, err);
 }
 
 
@@ -1903,7 +1513,7 @@ void vol_close(invfs_volume *v)
        WP24-lite: a time-travel handle skips the whole block -- it never
        dirtied the device (vol_mark_dirty refuses), so there is nothing to
        flush and the CLEAN mark is not this view's to write. */
-    if (v->dirty && !v->time_travel) {
+    if (v->dirty) {
         /* WP80/A: v3 sets needs_recovery unconditionally at open (the M5
          * backstop), so it cannot distinguish a real this-session io error
          * there -- io_latched can. A latched volume must never write CLEAN:
@@ -1970,10 +1580,6 @@ void vol_close(invfs_volume *v)
     free(v->tz);
     free(v->bz);
     free(v->bitmap);
-    free(v->l2p);
-    free(v->l2p_idx);
-    free(v->jops);
-    free(v->mjops);
     free(v->meta_mapper);
     heat_locks_destroy(v);   /* WP-heat-table-concurrent-safe */
     cpack_locks_destroy(v);  /* WP-cpack-map-copy-out (after the map reset) */
@@ -2042,302 +1648,6 @@ int vol_write_sb(invfs_volume *v)
 }
 
 
-#ifndef _WIN32
-
-/* WP22d test hook (tools/test-flushfail.sh / test-flakey.sh): die
- * mid-compaction -- after the image write ("image"), after the image
- * barrier ("barrier1"), or after the selector flip ("flip"). The next
- * mount must find either the old slot or the new one fully intact. */
-static int jrn_abort_at(const char *stage)
-{
-    const char *a = getenv("INVFS_COMPACT_ABORT_AT");
-    return a && strcmp(a, stage) == 0;
-}
-
-#endif
-
-
-/* Queue one journal op for the next flush's append. The entry's crc is
- * restamped from the chain at write time; a MAP op's pad bytes are
- * re-read from the live table at write time (heat keeps moving in RAM
- * after the op was queued). */
-int jrn_push_op(invfs_volume *v, const invfs_l2p_entry *e)
-{
-    if (v->jops_n == v->jops_cap) {
-        size_t ncap = v->jops_cap ? v->jops_cap * 2 : 256;
-        invfs_l2p_entry *nj =
-            (invfs_l2p_entry *)realloc(v->jops, ncap * sizeof *nj);
-        if (!nj) return -1;
-        v->jops = nj;
-        v->jops_cap = ncap;
-    }
-    v->jops[v->jops_n++] = *e;
-    return 0;
-}
-
-
-/* WP30: queue one metadata extent WAL op for the next flush's append.
- * The entry's CRC16-CCITT is computed at push time. */
-int jrn_push_meta_op(invfs_volume *v, const invfs_meta_wal *w)
-{
-    if (v->mjops_n == v->mjops_cap) {
-        size_t ncap = v->mjops_cap ? v->mjops_cap * 2 : 64;
-        invfs_meta_wal *nj = (invfs_meta_wal *)realloc(v->mjops, ncap * sizeof *nj);
-        if (!nj) return -1;
-        v->mjops = nj;
-        v->mjops_cap = ncap;
-    }
-    v->mjops[v->mjops_n++] = *w;
-    return 0;
-}
-
-
-/* Write the compacted image (the whole live table, chained) + slot header
- * into slot `target`. The header's crc lands in the same block write; the
- * caller barriers, then flips the selector. 0 = ok. */
-static int jrn_write_image(invfs_volume *v, uint32_t target, uint64_t seq)
-{
-    uint64_t base = jrn_slot_base(v, target);
-    uint64_t img_bytes = (uint64_t)v->l2p_count * sizeof(invfs_l2p_entry);
-    invfs_jrn_hdr h;
-    uint8_t blk[INVFS_BLOCK_SIZE];
-    invfs_l2p_entry *buf = NULL;
-    uint32_t prev;
-    size_t i;
-
-    memset(&h, 0, sizeof h);
-    memcpy(h.magic, INVFS_JRN_MAGIC, 4);
-    h.version = INVFS_JRN_VERSION;
-    h.seq = seq;
-    h.image_bytes = img_bytes;
-    prev = jrn_seed(&h);
-    if (img_bytes) {
-        buf = (invfs_l2p_entry *)malloc((size_t)img_bytes);
-        if (!buf) return -1;
-        for (i = 0; i < v->l2p_count; i++) {
-            buf[i] = v->l2p[i];
-            buf[i].crc = jrn_chain(prev, &buf[i]);
-            prev = buf[i].crc;
-        }
-        h.image_crc = invfs_crc32c(buf, (size_t)img_bytes);
-    }
-    h.crc32c = invfs_crc32c(&h, offsetof(invfs_jrn_hdr, crc32c));
-    memset(blk, 0, sizeof blk);
-    memcpy(blk, &h, sizeof h);
-    if (io_seek(&v->io, base) != 0 ||
-        io_write(&v->io, blk, sizeof blk) != 0) {
-        free(buf);
-        return -1;
-    }
-    if (img_bytes) {
-        if (io_seek(&v->io, base + INVFS_BLOCK_SIZE) != 0 ||
-            io_write(&v->io, buf, (size_t)img_bytes) != 0) {
-            free(buf);
-            return -1;
-        }
-    }
-    /* the append point + chain state of the fresh slot */
-    v->journal_pos = base + INVFS_BLOCK_SIZE + img_bytes;
-    v->j_last_crc = prev;
-    free(buf);
-    return 0;
-}
-
-
-/* Atomic compaction: image the table into the inactive slot, barrier,
- * flip the superblock selector, barrier. A crash anywhere before the flip
- * leaves the old slot authoritative; a torn new slot is caught by
- * image_crc at the next replay and the old slot still answers.
- *
- * The LEGACY migration images into slot 1, never slot 0: the flat log it
- * replaces starts at the journal base = slot 0's header block, so imaging
- * slot 0 would destroy the log's BEGINNING -- the part replay reads first
- * -- and a drop or kill mid-migration would leave neither a valid slot
- * nor a replayable log. Imaging slot 1 leaves the log's start intact: a
- * prefix shorter than a slot survives whole, a longer one survives up to
- * the slot boundary (a valid prefix either way), and replay, seeing pad2
- * == LEGACY with no CRC-valid slot, falls back to it. */
-static int jrn_compact(invfs_volume *v)
-{
-    uint32_t target = v->j_slotted ? (v->j_slot ^ 1) : 1;
-    uint64_t seq = v->j_slotted ? v->j_seq + 1 : 1;
-
-    if ((uint64_t)v->l2p_count * sizeof(invfs_l2p_entry) >
-        (uint64_t)(INVFS_JRN_SLOT_BLOCKS - 1) * INVFS_BLOCK_SIZE)
-        return 1;   /* the table outgrew a slot: only reachable for a
-                     * legacy volume >466k live mappings -- caller stays
-                     * legacy-append (documented limitation) */
-#ifndef _WIN32
-    {
-        const char *fc = getenv("INVFS_JRN_FORCE_COMPACT");
-        (void)fc;
-    }
-#endif
-    if (jrn_write_image(v, target, seq) != 0) {
-        vol_io_error_latch(v, "journal compaction image write");
-        return -1;
-    }
-#ifndef _WIN32
-    if (jrn_abort_at("image")) { kill(getpid(), SIGKILL); }
-#endif
-    if (vmux_barrier(v, "journal compaction barrier") < 0) {
-        vol_io_error_latch(v, "journal compaction barrier");
-        return -1;
-    }
-#ifndef _WIN32
-    if (jrn_abort_at("barrier1")) { kill(getpid(), SIGKILL); }
-#endif
-    /* the flip: selector write is the commit point */
-    v->sb.pad2 = target == 0 ? INVFS_JSEL_SLOT0 : INVFS_JSEL_SLOT1;
-    if (vol_write_sb(v) != 0) {
-        vol_io_error_latch(v, "journal slot selector write");
-        return -1;
-    }
-    if (vmux_barrier(v, "journal slot flip barrier") < 0) {
-        vol_io_error_latch(v, "journal slot flip barrier");
-        return -1;
-    }
-#ifndef _WIN32
-    if (jrn_abort_at("flip")) { kill(getpid(), SIGKILL); }
-#endif
-    v->j_slotted = 1;
-    v->j_slot = target;
-    v->j_seq = seq;
-    v->jops_n = 0;         /* the image covers every pending op */
-    v->j_compact = 0;
-    return 0;
-}
-
-
-/* Append the pending ops at the active slot's log end.
- * One write, chained from j_last_crc; a drop window can only punch a hole
- * that replay stops at -- durable prefixes are never rewritten.
- * Also appends pending metadata extent WAL entries (mjops) after L2P entries. */
-static int jrn_append_pending(invfs_volume *v)
-{
-    size_t n = v->jops_n, i;
-    invfs_l2p_entry *buf;
-    uint32_t prev;
-    uint64_t jp;
-
-    if (!n && !v->mjops_n) return 0;
-
-    /* Append L2P entries first */
-    if (n) {
-        buf = (invfs_l2p_entry *)malloc(n * sizeof *buf);
-        if (!buf) return -1;
-        prev = v->j_last_crc;
-        for (i = 0; i < n; i++) {
-            buf[i] = v->jops[i];
-            buf[i].crc = jrn_chain(prev, &buf[i]);
-            prev = buf[i].crc;
-        }
-        jp = v->journal_pos;
-        if (io_seek(&v->io, jp) != 0 ||
-            io_write(&v->io, buf, n * sizeof *buf) != 0) {
-            free(buf);
-            vol_io_error_latch(v, "journal append");
-            return -1;
-        }
-        free(buf);
-        v->journal_pos = jp + n * sizeof *buf;
-        v->j_last_crc = prev;
-        v->jops_n = 0;
-    }
-
-    /* Append metadata extent WAL entries (mjops) */
-    if (v->mjops_n) {
-        size_t mn = v->mjops_n;
-        uint8_t *mbuf = (uint8_t *)malloc(mn * sizeof(invfs_meta_wal));
-        if (!mbuf) return -1;
-        memcpy(mbuf, v->mjops, mn * sizeof(invfs_meta_wal));
-        jp = v->journal_pos;
-        if (io_seek(&v->io, jp) != 0 ||
-            io_write(&v->io, mbuf, mn * sizeof(invfs_meta_wal)) != 0) {
-            free(mbuf);
-            vol_io_error_latch(v, "metadata WAL append");
-            return -1;
-        }
-        free(mbuf);
-        v->journal_pos = jp + mn * sizeof(invfs_meta_wal);
-        v->mjops_n = 0;
-    }
-    return 0;
-}
-
-
-/* Legacy-mode append (only for a legacy volume whose live table outgrew a
- * slot -- everything else migrates): append at the legacy append point,
- * re-stamp the terminator, keep the pre-WP22d wire format. */
-static int jrn_append_legacy(invfs_volume *v)
-{
-    uint64_t jend = (v->journal_start + JOURNAL_BLOCKS) * INVFS_BLOCK_SIZE;
-    size_t n = v->jops_n, i;
-    invfs_l2p_entry *buf;
-    uint64_t jp = v->journal_pos;
-
-    if (!n) return 0;
-    if (jp + (uint64_t)(n + 1) * sizeof(invfs_l2p_entry) > jend)
-        return -1;   /* journal full */
-    buf = (invfs_l2p_entry *)malloc(n * sizeof *buf);
-    if (!buf) return -1;
-    for (i = 0; i < n; i++) {
-        buf[i] = v->jops[i];
-        buf[i].crc = invfs_crc32c(&buf[i], offsetof(invfs_l2p_entry, crc));
-    }
-    if (io_seek(&v->io, jp) != 0 ||
-        io_write(&v->io, buf, n * sizeof *buf) != 0) {
-        free(buf);
-        vol_io_error_latch(v, "journal write");
-        return -1;
-    }
-    free(buf);
-    jp += n * sizeof *buf;
-    /* Terminator: replay stops at the first entry whose CRC does not
-       check out. Without it a journal that SHRANK (after a delete) left
-       the previous, still-valid tail behind, and the next mount replayed
-       mappings for blocks that had already been freed. */
-    {
-        invfs_l2p_entry z;
-        memset(&z, 0, sizeof z);
-        z.crc = ~invfs_crc32c(&z, offsetof(invfs_l2p_entry, crc));
-        if (io_seek(&v->io, jp) != 0 ||
-            io_write(&v->io, &z, sizeof z) != 0) {
-            vol_io_error_latch(v, "journal terminator write");
-            return -1;
-        }
-    }
-    v->journal_pos = jp;
-    v->jops_n = 0;
-    return 0;
-}
-
-
-/* The journal half of vol_flush: migrate legacy on first contact, compact
- * when the log cannot hold the pending ops (or a rebuild/bulk-heat forced
- * it), otherwise just append. */
-static int jrn_flush(invfs_volume *v)
-{
-    uint64_t slot_end, need;
-    int force = 0;
-#ifndef _WIN32
-    {
-        const char *fc = getenv("INVFS_JRN_FORCE_COMPACT");
-        force = fc && strcmp(fc, "0") != 0;
-    }
-#endif
-    if (!v->j_slotted)
-        return jrn_compact(v) < 0 ? -1 :
-               (v->j_slotted ? 0 : jrn_append_legacy(v));
-    need = (uint64_t)v->jops_n * sizeof(invfs_l2p_entry);
-    slot_end = jrn_slot_base(v, v->j_slot) +
-               (uint64_t)INVFS_JRN_SLOT_BLOCKS * INVFS_BLOCK_SIZE;
-    if (v->j_compact || force ||
-        v->journal_pos + need > slot_end)
-        return jrn_compact(v) == 0 ? 0 : -1;
-    return jrn_append_pending(v);
-}
-
 
 int vol_flush(invfs_volume *v)
 {
@@ -2354,127 +1664,40 @@ int vol_flush(invfs_volume *v)
      * already refused at vol_mark_dirty, so nothing is pending and the
      * flush contract is vacuously satisfied -- and the superblock write
      * below would otherwise land on the PRESENT volume's block 0. */
-    if (v->time_travel) return 0;
-    /* WP75: v3 keeps its block bitmap dirty in RAM between publishes --
-     * v3_publish (via vol_v3_bitmap_flush) is the only other writer. A
-     * flush must persist it too, or the sweep's post-publish dedupe frees
-     * (and any allocation after the last publish) are dropped at close and
-     * a reopen can re-hand those blocks. Structure-before-reference: make
-     * the bitmap durable before returning, mirroring v3_publish. */
-    if (v->sb.vol_flags & VOLF_V3) {
-        if (vol_v3_bitmap_flush(v) != 0) {
-            vol_io_error_latch(v, "v3 bitmap flush");
-            return -1;
-        }
-        if (vmux_barrier(v, "v3 bitmap") < 0)
-            return -1;
-        /* WP98: this early return is also why the WP25 tier/RAW-mirror
-         * indexes never reached their owner records on v3 (the sync sits
-         * in the v2 tail below), which is what left both indexes RAM-only
-         * across a reopen. The ordering rule the tail documents -- the
-         * copies' maps durable BEFORE the owner record that names them --
-         * needs no journal here: the owner blob is published after the
-         * barrier above, so the copy blocks it names are already durable,
-         * and publish_blob_inode CRC-frames the index bytes (a torn
-         * flush leaves the previous index, never a half one). */
-        if (v->ndev == 2 && !v->degraded &&
-            (v->rawm_dirty || v->tier_dirty)) {
-            if (wp25_owner_sync(v) != 0) {
-                vol_io_error_latch(v, "mirror/tier owner sync (v3)");
-                return -1;
-            }
-        }
-        /* WP99: ... and the two-device commit tail lived in that same v2
-         * tail, so the DEVT sync_seq never moved and neither the staleness
-         * detection nor the resync ever ran here. It runs after the barrier
-         * above, which is what makes the ordering right: the published root
-         * (RT30, inside block 0) is durable on both devices BEFORE the
-         * sync_seq bump certifies it. */
-        if (vol_commit_mirror(v) != 0)
-            return -1;
-        return 0;
-    }
-    /* WP25: same for a degraded mount (dev0 absent): vol_mark_dirty
-     * refused every mutation, so nothing is pending; a flush attempt
-     * would only trip the mirror's read-only refusal. */
+    /* WP25: a degraded mount (dev0 absent) has nothing pending --
+     * vol_mark_dirty refused every mutation -- so a flush attempt would
+     * only trip the mirror's read-only refusal. */
     if (v->degraded) return 0;
-    /* persist superblock (state / ENOSPC policy fields / READONLY flag) */
-    if (vol_write_sb(v) != 0) {
-        vol_io_error_latch(v, "superblock write");
+    /* WP75: the volume keeps its block bitmap dirty in RAM between
+     * publishes -- v3_publish (via vol_v3_bitmap_flush) is the only other
+     * writer. A flush must persist it too, or the sweep's post-publish
+     * dedupe frees (and any allocation after the last publish) are dropped
+     * at close and a reopen can re-hand those blocks.
+     * Structure-before-reference: make the bitmap durable before
+     * returning, mirroring v3_publish. */
+    if (vol_v3_bitmap_flush(v) != 0) {
+        vol_io_error_latch(v, "v3 bitmap flush");
         return -1;
     }
-    /* WP30: persist the dynamic metadata extent mapper (MET0 descriptor
-     * + mapper table). Without this the cursor (active_offset, active_extent,
-     * extent_count) is lost on close: every record append advances
-     * active_offset but never persists it; on reopen the cursor points at
-     * the START of the active extent, hiding all the records the prior
-     * session wrote there. Bug D fix relied on the on-disk cursor; this
-     * closes the loop. */
-    if (v->met0_present && v->meta_mapper) {
-        if (meta_mapper_flush(v) != 0) {
-            vol_io_error_latch(v, "mapper flush");
-            return -1;
-        }
-        if (meta_met0_persist(v) != 0) {
-            vol_io_error_latch(v, "MET0 persist");
-            return -1;
-        }
-    }
-    /* Persist only the part of the bitmap that changed. Dokan flushes on
-     * every file close and the device is unbuffered write-through, so the
-     * old unconditional full-bitmap write cost a synchronous 480 KB per
-     * close on this volume -- about 250 ms on flash, independent of how
-     * many bytes the file actually had. A file touches a handful of
-     * bitmap bytes; write those. */
-    {
-        uint64_t bm_bytes = (uint64_t)v->bitmap_blocks * INVFS_BLOCK_SIZE;
-        uint64_t base = v->sb.metadata_zone_start * INVFS_BLOCK_SIZE;
-        if (v->bm_lo <= v->bm_hi) {
-            uint64_t lo = v->bm_lo, hi = v->bm_hi;
-            if (hi > bm_bytes) hi = bm_bytes;
-            /* round out to INVFS_BLOCK_SIZE so the unbuffered path writes
-               whole blocks and never read-modify-writes a partial one */
-            lo -= lo % INVFS_BLOCK_SIZE;
-            hi = ((hi + INVFS_BLOCK_SIZE - 1) / INVFS_BLOCK_SIZE) * INVFS_BLOCK_SIZE;
-            if (hi > bm_bytes) hi = bm_bytes;
-#ifdef INVFS_DEBUG_META_EXTENTS
-            fprintf(stderr, "[flush.bm] write offset=%llu len=%llu (lo=%llu hi=%llu bm_bytes=%llu)\n",
-                    (unsigned long long)(base + lo), (unsigned long long)(hi - lo),
-                    (unsigned long long)lo, (unsigned long long)hi, (unsigned long long)bm_bytes);
-#endif
-            if (hi > lo) {
-                if (io_seek(&v->io, base + lo) != 0 ||
-                    io_write(&v->io, v->bitmap + lo, (size_t)(hi - lo)) != 0) {
-                    vol_io_error_latch(v, "bitmap write");
-                    return -1;
-                }
-            }
-            v->bm_lo = 1; v->bm_hi = 0;   /* clean */
-        }
-    }
-    /* WP22d: the journal is append-only within a slot (invarifs.h WP22d
-     * note). The pre-WP22d flush rewrote the suffix from l2p_dirty and
-     * re-stamped the terminator, so any delete/heat touch dragged the
-     * rewrite frontier back over entries that were already durable -- and
-     * a dm-flakey drop window mid-rewrite silently un-mapped fsync-
-     * acknowledged files (F3). Now a flush appends the pending ops at the
-     * log end, or compacts the whole table into the inactive slot
-     * (double-buffered, selector flip after a barrier) when the log can't
-     * hold them. */
-    if (jrn_flush(v) != 0)
-        return -1;   /* the journal paths latch their own failures */
-    /* WP25: the rawm/tier owner records are rewritten here, AFTER the
-     * journal carried their (re)maps (maps durable before the record that
-     * names them -- the tz_seal rule). */
-    if (v->ndev == 2 && !v->degraded && (v->rawm_dirty || v->tier_dirty)) {
+    if (vmux_barrier(v, "v3 bitmap") < 0)
+        return -1;
+    /* WP98: the WP25 tier/RAW-mirror indexes need no journal to be
+     * durable. The ordering rule is the copies' blocks BEFORE the owner
+     * record that names them, and the owner blob is published after the
+     * barrier above, so the blocks it names are already durable -- and
+     * publish_blob_inode CRC-frames the index bytes, so a torn flush
+     * leaves the previous index, never a half one. */
+    if (v->ndev == 2 && !v->degraded &&
+        (v->rawm_dirty || v->tier_dirty)) {
         if (wp25_owner_sync(v) != 0) {
             vol_io_error_latch(v, "mirror/tier owner sync");
             return -1;
         }
     }
-    /* WP25: the mirror staleness resync runs inside the first flush that
-     * follows the open that detected it (newest state wins), then the
-     * DEVT sync_seq bump certifies both devices carry this state. */
+    /* WP99: the two-device commit tail runs AFTER the barrier above,
+     * which is what makes the ordering right: the published root (RT30,
+     * inside block 0) is durable on both devices BEFORE the sync_seq
+     * bump certifies it. */
     if (vol_commit_mirror(v) != 0)
         return -1;
     return 0;
@@ -2482,8 +1705,8 @@ int vol_flush(invfs_volume *v)
 
 
 /* fsync/fdatasync entry point (WP4ab): everything vol_flush persists
- * (superblock, dirty bitmap range, journal suffix + terminator) becomes
- * durable against power loss, not just process death. vol_write_commit
+ * (the dirty bitmap range) becomes durable against power loss, not just
+ * process death. vol_write_commit
  * has already pushed the data blocks themselves with io_write, so one
  * barrier at the end covers the whole pending state.
  *
@@ -2500,7 +1723,6 @@ int vol_sync(invfs_volume *v)
     /* WP24-lite: nothing of this handle's can be in flight (mutations are
      * refused), so the durability contract is already met without touching
      * the device. */
-    if (v->time_travel) return 0;
     /* WP80/A: v3 is the default full format now, not the empty/read-only
      * skeleton the WP-M1 comment described. Its pending state is the dirty
      * block bitmap, which vol_flush persists (WP75); the delta records are
@@ -2692,37 +1914,6 @@ uint64_t alloc_raw_or_shadow(invfs_volume *v, uint64_t nblocks, int *zone_out)
 
 /* ==================== WP30: Dynamic Metadata Extents ==================== */
 
-static uint16_t meta_crc16(const invfs_meta_wal *e)
-{
-    return invfs_crc32c(e, offsetof(invfs_meta_wal, crc)) & 0xFFFFu;
-}
-
-int meta_journal_alloc(invfs_volume *v, uint16_t ext_idx, uint64_t pba,
-                       uint8_t size_class)
-{
-    invfs_meta_wal e;
-    memset(&e, 0, sizeof e);
-    e.type = INVFS_JRN_META_ALLOC;
-    e.ext_idx = ext_idx;
-    e.pba = pba;
-    e.size_class = size_class;
-    e.crc = meta_crc16(&e);
-    return jrn_push_meta_op(v, &e);
-}
-
-int meta_journal_extend(invfs_volume *v, uint16_t ext_idx,
-                        uint8_t size_class, uint8_t aux)
-{
-    invfs_meta_wal e;
-    memset(&e, 0, sizeof e);
-    e.type = INVFS_JRN_META_EXTEND;
-    e.ext_idx = ext_idx;
-    e.size_class = size_class;
-    e.aux = aux;
-    e.crc = meta_crc16(&e);
-    return jrn_push_meta_op(v, &e);
-}
-
 /* WP30: allocate a metadata extent from the free pool.
  * v0.3.0+: mapper table is pre-allocated at mkfs; just find a free slot.
  * size_class: 0=64KB, 1=128KB, 2=256KB... up to 15=2GB
@@ -2765,7 +1956,6 @@ uint64_t alloc_meta_extent(invfs_volume *v, uint8_t size_class)
     if (idx >= v->meta_mapper_n)
         v->meta_mapper_n = idx + 1;
 
-    meta_journal_alloc(v, (uint16_t)idx, pba, size_class);
     return idx + 1;  /* 1-based index for callers */
 }
 
@@ -2818,7 +2008,6 @@ int extend_meta_extent(invfs_volume *v, uint64_t extent_idx, uint8_t new_size_cl
             v->meta_free_blocks -= adj_blocks;
 
             v->meta_mapper[extent_idx] = invfs_meta_ext_encode(old_pba, new_size_class);
-            meta_journal_extend(v, (uint16_t)extent_idx, new_size_class, adj_blocks);
             return 1;
         }
     }
@@ -2849,168 +2038,6 @@ uint64_t vol_write_raw(invfs_volume *v, const uint8_t *data, size_t len)
 }
 
 
-/* (inode,lba) key mixer: shared by the WP-L2Q session index and
- * vol_heat.c's per-inode table (identical hash -> identical bucket
- * choice). */
-static uint64_t mapset_hash(uint64_t inode, uint64_t lba)
-{
-    uint64_t h = inode * 0x9E3779B97F4A7C15ull ^ lba;
-    h ^= h >> 29; h *= 0xBF58476D1CE4E5B9ull; h ^= h >> 32;
-    return h;
-}
-
-
-/* L2P MAP entry: inode logical block -> physical block */
-int vol_map(invfs_volume *v, uint64_t inode, uint64_t lba, uint64_t pba, uint32_t length)
-{
-    invfs_l2p_entry e;
-    memset(&e, 0, sizeof(e));
-    e.type = INVFS_JRN_MAP;
-    e.inode = inode;
-    e.lba = lba;
-    e.pba = pba;
-    e.length = length;
-    e.crc = invfs_crc32c(&e, offsetof(invfs_l2p_entry, crc));
-
-    /* In-memory only until the flush. vol_flush is the single writer of
-     * the journal: it appends the queued ops (jops) at the active slot's
-     * log end, never rewriting durable entries (WP22d).
-     *
-     * This used to seek and write the 64-byte record here, on every segment.
-     * On an image that is a buffered 64-byte write and invisible; on a raw
-     * device opened NO_BUFFERING|WRITE_THROUGH (Windows only) it is a
-     * read-modify-write of a 4 KB block plus a synchronous flush to flash --
-     * ~80 ms. Files are
-     * split into 64 KB segments, so an 8 MB file paid ~128 of them (~11 s)
-     * and an 18 MB file ~20 s, all inside vol_create_file under the Dokan
-     * write lock. That is what pushed a callback past opt.Timeout and made
-     * the mount die mid-copy with no error, and why a fully compressible
-     * 8 MB file cost the same as an incompressible one: the price was per
-     * segment, not per byte reaching the device.
-     *
-     * The capacity bound is the slot payload (slotted) or the whole area
-     * (legacy, pre-migration): the compacted image must always fit one
-     * slot. */
-    {
-        uint64_t room = v->j_slotted
-            ? (uint64_t)(INVFS_JRN_SLOT_BLOCKS - 1) * INVFS_BLOCK_SIZE
-            : (uint64_t)JOURNAL_BLOCKS * INVFS_BLOCK_SIZE;
-        if ((uint64_t)(v->l2p_count + 2) * sizeof(e) > room) {
-            fprintf(stderr, "L2P journal full\n");
-            return -1;
-        }
-    }
-
-    /* in-memory */
-    if (v->l2p_count == v->l2p_cap) {
-        v->l2p_cap = v->l2p_cap ? v->l2p_cap * 2 : 256;
-        v->l2p = (invfs_l2p_entry *)realloc(v->l2p, v->l2p_cap * sizeof(invfs_l2p_entry));
-        if (!v->l2p) return -1;
-    }
-    v->l2p[v->l2p_count++] = e;
-    if (jrn_push_op(v, &e) != 0) { v->l2p_count--; return -1; }
-    /* WP-L2Q: the index tracks the append (a re-MAP of the same key
-     * overwrites -- newest wins) */
-    l2p_idx_put(v, inode, lba, (uint64_t)(v->l2p_count - 1));
-    return 0;
-}
-
-
-/* in-memory L2P lookup: inode + lba -> pba and phys length (or 0) */
-uint64_t vol_lookup(invfs_volume *v, uint64_t inode, uint64_t lba)
-{
-    uint64_t pba = 0, len = 0;
-    vol_lookup_entry(v, inode, lba, &pba, &len);
-    return pba;
-}
-
-
-int vol_lookup_entry(invfs_volume *v, uint64_t inode, uint64_t lba,
-                     uint64_t *pba_out, uint64_t *len_out)
-{
-    /* WP-L2Q: the session index answers O(1). A miss is authoritative
-     * (the index mirrors the table); a hit is cross-checked against the
-     * table and any inconsistency falls through to the scan below. */
-    if (v->l2p_idx) {
-        size_t k = (size_t)mapset_hash(inode, lba) & v->l2p_idx_mask;
-        while (v->l2p_idx[k].inode) {
-            if (v->l2p_idx[k].inode == inode && v->l2p_idx[k].lba == lba) {
-                uint64_t slot = v->l2p_idx[k].slot;
-                if (slot < v->l2p_count) {
-                    const invfs_l2p_entry *e = &v->l2p[slot];
-                    if (e->type == INVFS_JRN_MAP && e->inode == inode &&
-                        e->lba == lba) {
-                        *pba_out = e->pba;
-                        *len_out = e->length;
-                        return 0;
-                    }
-                }
-                break;   /* diverged: scan (cannot happen) */
-            }
-            k = (k + 1) & v->l2p_idx_mask;
-        }
-        if (!v->l2p_idx[k].inode)
-            return -1;
-    }
-    /* newest wins: scan from the end (L2P is append-only journal) */
-    size_t i;
-    for (i = v->l2p_count; i-- > 0; ) {
-        const invfs_l2p_entry *e = &v->l2p[i];
-        if (e->type == INVFS_JRN_MAP && e->inode == inode && e->lba == lba) {
-            *pba_out = e->pba;
-            *len_out = e->length;
-            return 0;
-        }
-    }
-    return -1;
-}
-
-
-/* remove all mappings for (inode, lba) from the in-memory table */
-void l2p_remove_mem(invfs_volume *v, uint64_t inode, uint64_t lba)
-{
-    size_t i, w = 0;
-    for (i = 0; i < v->l2p_count; i++) {
-        const invfs_l2p_entry *e = &v->l2p[i];
-        if (e->type == INVFS_JRN_MAP && e->inode == inode && e->lba == lba)
-            continue;  /* drop */
-        if (w != i) {
-            v->l2p[w] = v->l2p[i];
-            /* the moved entry may be its key's newest: fix the index */
-            l2p_idx_reslot(v, e->inode, e->lba, (uint64_t)i, (uint64_t)w);
-        }
-        w++;
-    }
-    v->l2p_count = w;
-    l2p_idx_del(v, inode, lba);   /* every occurrence of the key died */
-}
-
-
-/* In-memory compaction + the UNMAP op for the journal. The on-disk
- * journal is append-only (WP22d): the unmap is queued, the old MAP entry
- * is never rewritten. Replay folds MAP-then-UNMAP to the same view. */
-void l2p_remove(invfs_volume *v, uint64_t inode, uint64_t lba)
-{
-    uint64_t pba, len;
-    if (vol_lookup_entry(v, inode, lba, &pba, &len) == 0) {
-        invfs_l2p_entry e;
-        memset(&e, 0, sizeof e);
-        e.type = INVFS_JRN_UNMAP;
-        e.inode = inode;
-        e.lba = lba;
-        jrn_push_op(v, &e);   /* OOM: the op is lost; the stale MAP is an
-                               * orphan the next fsck reclaims -- degraded,
-                               * never corrupt */
-    }
-    l2p_remove_mem(v, inode, lba);
-}
-
-
-/* public wrapper (used by dedupe pass) */
-void vol_l2p_remove(invfs_volume *v, uint64_t inode, uint64_t lba)
-{
-    l2p_remove(v, inode, lba);
-}
 
 
 /* ---- WP22d: consistent-cut machinery ------------------------------------
@@ -3060,171 +2087,6 @@ uint64_t rec_pba_miss(const uint8_t *rec, uint32_t rec_len,
     return miss;
 }
 
-
-/* ---- WP-L2Q: session-persistent L2P index ------------------------------
- * Open addressing over (inode,lba) -> table slot (the mapset hash, but
- * slot numbers instead of pointers: v->l2p reallocs on growth). The index
- * is a pure cache of the newest-wins scan's answer: every table mutation
- * keeps it in lock-step, so vol_lookup_entry answers O(1) and the scan
- * remains only as the fallback for a disabled index. */
-
-/* 0 = on (default). A disabled index frees immediately and every hook
- * becomes a no-op, so a half-maintained index can never be consulted. */
-static int l2p_idx_enabled(void)
-{
-    const char *e = getenv("INVFS_L2P_IDX");
-    return !e || strcmp(e, "0") != 0;
-}
-
-static void l2p_idx_disable(invfs_volume *v)
-{
-    free(v->l2p_idx);
-    v->l2p_idx = NULL;
-    v->l2p_idx_mask = v->l2p_idx_n = 0;
-}
-
-void l2p_idx_reset(invfs_volume *v)
-{
-    if (!v->l2p_idx) return;
-    memset(v->l2p_idx, 0, (v->l2p_idx_mask + 1) * sizeof *v->l2p_idx);
-    v->l2p_idx_n = 0;
-}
-
-/* grow to 2x and rehash; on allocation failure the index disables itself
- * (the caller's table mutation already happened -- the scan fallback
- * keeps answering correctly) */
-static void l2p_idx_grow(invfs_volume *v)
-{
-    size_t ncap = (v->l2p_idx_mask + 1) * 2, i;
-    l2p_idx_ent *nt = (l2p_idx_ent *)calloc(ncap, sizeof *nt);
-    if (!nt) { l2p_idx_disable(v); return; }
-    for (i = 0; i <= v->l2p_idx_mask; i++) {
-        if (v->l2p_idx[i].inode) {
-            size_t k = (size_t)mapset_hash(v->l2p_idx[i].inode,
-                                           v->l2p_idx[i].lba) & (ncap - 1);
-            while (nt[k].inode) k = (k + 1) & (ncap - 1);
-            nt[k] = v->l2p_idx[i];
-        }
-    }
-    free(v->l2p_idx);
-    v->l2p_idx = nt;
-    v->l2p_idx_mask = ncap - 1;
-}
-
-void l2p_idx_put(invfs_volume *v, uint64_t inode, uint64_t lba,
-                 uint64_t slot)
-{
-    size_t mask, k;
-    if (!v->l2p_idx) {
-        size_t cap = 1024;
-        if (!l2p_idx_enabled()) return;
-        v->l2p_idx = (l2p_idx_ent *)calloc(cap, sizeof *v->l2p_idx);
-        if (!v->l2p_idx) return;
-        v->l2p_idx_mask = cap - 1;
-        v->l2p_idx_n = 0;
-    }
-    if ((v->l2p_idx_n + 1) * 10 >= (v->l2p_idx_mask + 1) * 7) {
-        l2p_idx_grow(v);
-        if (!v->l2p_idx) return;   /* disabled mid-flight */
-    }
-    mask = v->l2p_idx_mask;
-    k = (size_t)mapset_hash(inode, lba) & mask;
-    while (v->l2p_idx[k].inode) {
-        if (v->l2p_idx[k].inode == inode && v->l2p_idx[k].lba == lba) {
-            v->l2p_idx[k].slot = slot;   /* a newer MAP supersedes */
-            return;
-        }
-        k = (k + 1) & mask;
-    }
-    v->l2p_idx[k].inode = inode;
-    v->l2p_idx[k].lba = lba;
-    v->l2p_idx[k].slot = slot;
-    v->l2p_idx_n++;
-}
-
-void l2p_idx_del(invfs_volume *v, uint64_t inode, uint64_t lba)
-{
-    size_t mask, k, j;
-    if (!v->l2p_idx) return;
-    mask = v->l2p_idx_mask;
-    k = (size_t)mapset_hash(inode, lba) & mask;
-    while (v->l2p_idx[k].inode) {
-        if (v->l2p_idx[k].inode == inode && v->l2p_idx[k].lba == lba)
-            break;
-        k = (k + 1) & mask;
-    }
-    if (!v->l2p_idx[k].inode) return;   /* not present */
-    /* Reinsert the rest of the cluster one past the hole (deletion by
-     * rehash -- no tombstones, lookups never pass a stale entry). */
-    v->l2p_idx[k].inode = 0;
-    v->l2p_idx_n--;
-    j = (k + 1) & mask;
-    while (v->l2p_idx[j].inode) {
-        l2p_idx_ent e = v->l2p_idx[j];
-        v->l2p_idx[j].inode = 0;
-        v->l2p_idx_n--;
-        k = (size_t)mapset_hash(e.inode, e.lba) & mask;
-        while (v->l2p_idx[k].inode) k = (k + 1) & mask;
-        v->l2p_idx[k] = e;
-        v->l2p_idx_n++;
-        j = (j + 1) & mask;
-    }
-}
-
-void l2p_idx_reslot(invfs_volume *v, uint64_t inode, uint64_t lba,
-                    uint64_t old_slot, uint64_t new_slot)
-{
-    size_t mask, k;
-    if (!v->l2p_idx) return;
-    mask = v->l2p_idx_mask;
-    k = (size_t)mapset_hash(inode, lba) & mask;
-    while (v->l2p_idx[k].inode) {
-        if (v->l2p_idx[k].inode == inode && v->l2p_idx[k].lba == lba) {
-            if (v->l2p_idx[k].slot == old_slot)
-                v->l2p_idx[k].slot = new_slot;
-            return;
-        }
-        k = (k + 1) & mask;
-    }
-}
-
-void l2p_idx_rebuild(invfs_volume *v)
-{
-    size_t i;
-    l2p_idx_reset(v);
-    for (i = 0; i < v->l2p_count; i++) {
-        const invfs_l2p_entry *e = &v->l2p[i];
-        if (e->type == INVFS_JRN_MAP)
-            l2p_idx_put(v, e->inode, e->lba, (uint64_t)i);
-        if (!v->l2p_idx) return;   /* disabled mid-rebuild */
-    }
-}
-
-const invfs_l2p_entry *l2p_idx_get(invfs_volume *v, uint64_t inode,
-                                   uint64_t lba)
-{
-    size_t mask, k;
-    if (!v->l2p_idx) return NULL;
-    mask = v->l2p_idx_mask;
-    k = (size_t)mapset_hash(inode, lba) & mask;
-    while (v->l2p_idx[k].inode) {
-        if (v->l2p_idx[k].inode == inode && v->l2p_idx[k].lba == lba) {
-            uint64_t slot = v->l2p_idx[k].slot;
-            const invfs_l2p_entry *e;
-            if (slot >= v->l2p_count) return NULL;   /* cannot happen */
-            e = &v->l2p[slot];
-            /* defensive cross-check: the index must name a live MAP for
-             * exactly this key; anything else is a bug, answered via the
-             * scan fallback by the caller treating this as "unknown" */
-            if (e->type != INVFS_JRN_MAP || e->inode != inode ||
-                e->lba != lba)
-                return NULL;
-            return e;
-        }
-        k = (k + 1) & mask;
-    }
-    return NULL;
-}
 
 
 
@@ -3819,12 +2681,6 @@ const uint8_t *vol_bitmap(invfs_volume *v, uint64_t *blocks_out)
 }
 
 
-const invfs_l2p_entry *vol_l2p(invfs_volume *v, size_t *count_out)
-{
-    if (count_out) *count_out = v->l2p_count;
-    return v->l2p;
-}
-
 
 uint64_t vol_inode_area_pos(invfs_volume *v) { return v->inode_area_pos; }
 
@@ -3846,105 +2702,6 @@ uint64_t vol_inode_area_free(invfs_volume *v)
          ? v->inode_area_end - v->inode_area_pos : 0;
 }
 
-
-/* WP40/WP48: mapper-aware valid-record walker. One implementation for
- * every statistic/sweep/dedupe/heat/pass so the "records live in dynamic
- * extents" era does not need seven near-identical CRC loops.
- *
- * WP48: iterate the mapper table by EXTENT INDEX, not by absolute
- * position. Allocating extents reuses free mapper slots, so the pba order
- * of the entries is NOT monotonic; a position-driven walk
- * (vol_inode_next's "find the extent containing pos") then hops between
- * disjoint regions and revisits records forever -- observed as an
- * unbounded spin on a 66k-record volume whose table had grown/merged
- * across sweep runs. Index order visits each extent exactly once.
- * Torn records (CRC mismatch) are skipped exactly like vol_open does. */
-typedef struct {
-    invfs_volume *v;
-    int (*cb)(void *, uint64_t, const invfs_inode_rec *, const uint8_t *);
-    void *ctx;
-    void (*bad_cb)(void *, uint64_t);
-} rec_walk_state;
-
-/* scan [start,end) of one extent, feeding cb; return -1 on fatal error */
-static int rec_walk_span(rec_walk_state *w, uint64_t start, uint64_t end)
-{
-    invfs_volume *v = w->v;
-    uint64_t p = start;
-    while (p + INVFS_REC_HDR_LEN + 4 <= end) {
-        invfs_inode_rec h;
-        uint8_t *buf;
-        uint32_t stored, calc;
-        if (vol_read_raw(v, p, &h, sizeof h) != 0) break;
-        if (h.magic != INODE_REC_MAGIC && h.magic != TOMBSTONE_MAGIC)
-            break;                                  /* end of this extent */
-        if (h.rec_len < INVFS_REC_HDR_LEN + 1 || h.rec_len > INVFS_MAX_REC_LEN ||
-            p + (uint64_t)h.rec_len + 4 > end) {
-            if (w->bad_cb) w->bad_cb(w->ctx, p);    /* torn/garbage tail */
-            break;
-        }
-        buf = (uint8_t *)malloc((size_t)h.rec_len + 4);
-        if (!buf) return -1;
-        if (vol_read_raw(v, p, buf, (size_t)h.rec_len + 4) != 0) {
-            free(buf); return -1;
-        }
-        memcpy(&stored, buf + h.rec_len, 4);
-        calc = invfs_crc32c(buf, h.rec_len);
-        if (calc == stored) {
-            /* hand the callback the full record; its variable-length name
-             * lives in buf, not in a 36-byte prefix copy */
-            if (w->cb(w->ctx, p, (const invfs_inode_rec *)buf, buf) != 0) {
-                free(buf); return -1;
-            }
-        } else if (w->bad_cb) {
-            w->bad_cb(w->ctx, p);
-        }
-        free(buf);
-        p += (uint64_t)h.rec_len + 4;
-    }
-    return 0;
-}
-
-int vol_records_walk_ex(invfs_volume *v,
-                        int (*cb)(void *ctx, uint64_t rec_pos,
-                                  const invfs_inode_rec *h,
-                                  const uint8_t *rec),
-                        void *ctx,
-                        void (*bad_cb)(void *ctx, uint64_t rec_pos))
-{
-    rec_walk_state w;
-    if (!v || !cb) return -1;
-    w.v = v;
-    w.cb = cb;
-    w.ctx = ctx;
-    w.bad_cb = bad_cb;
-    if (v->met0_present && v->meta_mapper && v->met0.extent_count > 0) {
-        size_t ei, n = (size_t)v->met0.extent_count;
-        uint64_t active = v->met0.active_extent;
-        for (ei = 0; ei < n; ei++) {
-            uint64_t e = meta_mapper_get(v, ei);
-            uint64_t start, end;
-            if (!e) continue;                       /* free mapper slot */
-            start = invfs_meta_ext_pba(e) * (uint64_t)INVFS_BLOCK_SIZE;
-            end = start + invfs_meta_ext_size(e);
-            if (ei == (size_t)active && end > v->inode_area_pos)
-                end = v->inode_area_pos;            /* trimmed live tail */
-            if (rec_walk_span(&w, start, end) != 0) return -1;
-        }
-        return 0;
-    }
-    return rec_walk_span(&w, v->inode_area_start * INVFS_BLOCK_SIZE,
-                         v->inode_area_pos);
-}
-
-int vol_records_walk(invfs_volume *v,
-                     int (*cb)(void *ctx, uint64_t rec_pos,
-                               const invfs_inode_rec *h,
-                               const uint8_t *rec),
-                     void *ctx)
-{
-    return vol_records_walk_ex(v, cb, ctx, NULL);
-}
 
 
 uint64_t vol_inode_next(invfs_volume *v, uint64_t pos, uint32_t *magic_out,

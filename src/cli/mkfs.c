@@ -163,12 +163,11 @@ int main(int argc, char **argv)
     uint64_t size2_bytes = 0, dev0_blocks = 0, dev1_blocks = 0;
     int is_dev2 = 0, twodev = 0;
     invfs_devt devt;
-    /* WP-M21b (cutover, per the WP-M21 frozen rule "after this WP mkfs
-     * writes v3 by default"): metadata-v3 (RT30 root descriptor + B+-tree
-     * base + delta log) is the DEFAULT format. The v2 skeleton stays
-     * reachable via INVFS_V2=1 only as the interim escape hatch for the
-     * not-yet-rewritten v2-era suites; it dies with the WP-M21 deletion
-     * of the v2 branch. INVFS_V3=1 is still accepted (idempotent). */
+    /* metadata-v3 (RT30 root descriptor + B+-tree base + delta log) is the
+     * only format invf-mkfs writes. INVFS_V3=0 and INVFS_V2=1 are still
+     * recognised, and still REFUSE, so a script that carries one of them
+     * fails loudly instead of silently getting a volume it did not ask
+     * for. INVFS_V3=1 is accepted and idempotent. */
     int v3 = 1;
     /* ANC0 tail anchor: the reserved block, reported by mkfs so the
      * reservation is visible in the format summary rather than only in the
@@ -209,12 +208,16 @@ int main(int argc, char **argv)
     {
         const char *v2e = getenv("INVFS_V2");
         if (v2e && *v2e && strcmp(v2e, "0") != 0) {
-            fprintf(stderr, "invf-mkfs: v2 metadata format is deprecated and retired in v0.5.0; only v3 is supported\n");
+            fprintf(stderr, "invf-mkfs: INVFS_V2 asks for a format this "
+                            "build does not write; format v3 is the only "
+                            "one. Unset it.\n");
             return 2;
         }
         const char *v3e = getenv("INVFS_V3");
         if (v3e && *v3e && strcmp(v3e, "0") == 0) {
-            fprintf(stderr, "invf-mkfs: v2 metadata format is deprecated and retired in v0.5.0; only v3 is supported\n");
+            fprintf(stderr, "invf-mkfs: INVFS_V3=0 asks for a format this "
+                            "build does not write; format v3 is the only "
+                            "one. Unset it.\n");
             return 2;
         }
     }
@@ -663,10 +666,9 @@ int main(int argc, char **argv)
     sb.meta_mapper_pba = mapper_pba;
     sb.meta_mapper_blocks = INVFS_META_EXT_BLOCKS;
 
-    /* WP-M1: v3 root area. Reserve two metadata pages immediately after
-     * the mapper table -- the first free metadata blocks, i.e. vol_open's
-     * journal_start on a v2 layout (a v3 volume skips the v2 WAL replay,
-     * so those blocks are free) -- and zero them, making the span durable
+    /* v3 root area. Reserve two metadata pages immediately after the
+     * mapper table -- the first free metadata blocks -- and zero them,
+     * making the span durable
      * before the RT30 descriptor that anchors the root area is written. On
      * an empty volume both root slots stay 0 (empty per the wire
      * convention); the WP-M2 page allocator owns handing these pages to

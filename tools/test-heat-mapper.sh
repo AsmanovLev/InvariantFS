@@ -11,7 +11,7 @@
 #   A. import -> mount via invf-fuse -> read ~100 seeded names through the
 #      mount (real FUSE read path, one touch per segment) -> unmount ->
 #      wait for the daemon to exit.
-#   B. heat persist pass: invf-l2ptest pump folds the session's accrual
+#   B. heat persist pass: meta_probe --heatpump folds the session's accrual
 #      into the records (test-heat.sh pattern; the pump is a full
 #      open+read+persist per name).
 #   C. reopen: meta_probe --heat must show rheat>0 for every touched name
@@ -107,7 +107,7 @@ call_pump() {
         set -- "$@" "$_name"
     done < "$TOUCHED"
     [ "$#" -gt 0 ] || return 1
-    "$B/invf-l2ptest" pump "$IMG" "$@" >"$WORK/pump.log" 2>&1
+    "$B/meta_probe" "$IMG" --heatpump "$@" >"$WORK/pump.log" 2>&1
 }
 call_pump && ok "heat persist pass (pump over all touched names)" \
              || bad "heat persist pass (pump) failed"

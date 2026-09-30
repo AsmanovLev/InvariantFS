@@ -33,63 +33,33 @@
    If it ever moves, it moves in format v2 with a compatibility path. */
 #define INVFS_MAGIC       "InvariFS\0"   /* 8 bytes */
 #define INVFS_BLOCK_SIZE  4096
-/* Format version 2 (WP27): AST block entries carry the physical block
- * address (24B -> 32B), the L2P journal shrinks to the owner-scoped WAL,
- * heat lives in the INO2 ext, and the bitmap is a rebuildable cache of
- * records+WAL. The on-disk signal is VOLF_ASTV2 in sb.vol_flags (outside
- * the checksum, the v0.9 policy-field convention); a v2 reader refuses a
- * volume without it, loudly, pointing at invf-migrate-v2 (no dual
- * readers). */
+/* Wire version of the AST block entry (WP27: entries carry the physical
+ * block address, 24B -> 32B) and of the INO2 metadata extension. This
+ * number is NOT the volume format: the format marker is VOLF_V3 in
+ * sb.vol_flags, and vol_open refuses every volume without it. */
 #define INVFS_VERSION     2
-#define INVFS_JOURNAL_BLOCKS 8192  /* 32MB total: two 16MB journal slots (WP22d) */
+/* Reserved gap in the metadata zone, between the metadata extent mapper and
+ * the record area: 32 MiB, never read and never written by this build. The
+ * record area's block number is DERIVED from it (volume.c, vol_open), so the
+ * gap is load-bearing geometry: do not shrink or reclaim it, or every
+ * record on every existing volume moves. */
+#define INVFS_JOURNAL_BLOCKS 8192
 #define INVFS_META_RESERVED_PCT_DFLT 10  /* WP30: default 10% free pool for metadata */
 
-/* ---- WP22d: crash-atomic L2P journal (double-buffered slots) ----
- * The journal area is split into two equal slots of INVFS_JRN_SLOT_BLOCKS
- * each. A slot holds: one header block (invfs_jrn_hdr), then the compacted
- * image (the whole live L2P table, one MAP entry per key), then the
- * appended op log (MAP/UNMAP, newest wins). In slotted mode an entry's crc
- * is CHAINED: crc = crc32c_update(prev_crc, entry[0..offsetof(crc)]), the
- * first entry chaining from the header's crc32c -- a hole or a stale tail
- * left by a dropped write breaks the chain and stops the replay exactly
- * there (the bare-CRC terminator of the legacy format is subsumed). The
- * image additionally carries a whole-image CRC (image_crc): a torn
- * compaction invalidates the whole slot instead of replaying half a table.
- *
- * Writes are append-only within a slot: a flush appends the pending ops at
- * the log end and never rewrites durable entries (WP22d/F3: rewriting
- * already-durable positions is what let a drop window silently un-map
- * fsync-acknowledged files). When the log cannot hold the pending ops (or
- * fsck rebuilds the table, or legacy migrates) the whole table is imaged
- * into the INACTIVE slot, barriered, and only then the superblock selector
- * (pad2) is flipped and barriered again. Crash before the flip = old slot
- * intact; crash mid-flip = the selector (outside the sb checksum, so a
- * torn flip can read as garbage) is only a hint: replay picks the
- * highest-sequence CRC-valid slot, which is always the right one (an image
- * is a pure compaction of everything the older slot holds).
- *
- * Capacity: a slot's payload is (INVFS_JRN_SLOT_BLOCKS-1) blocks, so the
- * live L2P table may hold at most ~(4095*4096/36) = 465,920 mappings
- * (vol_map refuses past that). Pre-WP22d volumes carry pad2 == 0 and no
- * slot headers: they replay as the legacy flat log and migrate into slot
- * 1 on the first flush (slot 1, not 0: the flat log starts at the journal
- * base = slot 0's header block, so imaging slot 1 keeps the old log's
- * beginning intact as the fallback until the flip lands; a torn migration
- * is caught by image_crc and replay falls back to the flat log). mkfs
- * keeps writing legacy volumes -- born-legacy, migrated-on-first-flush,
- * so the migration path is exercised by every test. Old binaries mounting
- * a migrated volume replay the active slot's header as a (bad-CRC) entry
- * and see an empty journal -- downgrade was never a guaranteed direction;
- * the geometry (INVFS_JOURNAL_BLOCKS) is unchanged so at least the zone
- * layout stays intact for them.
- */
+/* The retired mapping log's slot geometry, and its record header. invf-resize
+ * still reads slot headers out of the reserved gap to decide how to move the
+ * region (src/cli/resize.c, src/core/vol_resize.c), so the header layout has
+ * to keep parsing. Nothing in this build WRITES one: the gap is zero-filled
+ * on a volume this code creates and stays that way for the life of the
+ * volume. Do not add a writer. */
 #define INVFS_JRN_SLOTS       2
 #define INVFS_JRN_SLOT_BLOCKS (INVFS_JOURNAL_BLOCKS / INVFS_JRN_SLOTS)
 #define INVFS_JRN_MAGIC   "JRN0"
 #define INVFS_JRN_VERSION 1
 
-/* sb.pad2 values (the journal slot selector; 0 on pre-WP22d volumes) */
-#define INVFS_JSEL_LEGACY 0   /* no slots: the whole area is one flat log */
+/* sb.pad2 slot selector. sb.pad2 is RESERVED and must be 0 on a volume this
+ * build writes; resize only ever reads it. */
+#define INVFS_JSEL_LEGACY 0
 #define INVFS_JSEL_SLOT0  1
 #define INVFS_JSEL_SLOT1  2
 
@@ -198,14 +168,13 @@ typedef struct {
 } invfs_class_tlv;   /* 4 bytes */
 #pragma pack(pop)
 
-/* L2P journal entry types */
+/* Record types of the retired mapping log, in the same never-written gap
+ * (see above). Same rule: parsed on resize, written by nothing. */
 #define INVFS_JRN_MAP       0x01
 #define INVFS_JRN_UNMAP     0x02
 #define INVFS_JRN_SWEEP     0x03
 #define INVFS_JRN_CHECKPOINT 0xFF
 
-/* WP30: metadata extent WAL record types (owner-scoped, like L2P).
- * WP-M21 removed META_SHRINK/FREE/MERGE (extent consolidation). */
 #define INVFS_JRN_META_ALLOC  0x10
 #define INVFS_JRN_META_EXTEND 0x11
 
@@ -241,13 +210,13 @@ typedef struct {
     uint32_t reserved_blocks;       /* 0x80 reserve for sweep/transcodes */
     uint32_t hard_min_blocks;       /* 0x84 below this -> READONLY */
     uint32_t vol_flags;             /* 0x88 bit0 = VOLF_READONLY */
-    uint32_t pad2;                  /* 0x8C unused (was journal slot selector) */
+    uint32_t pad2;                  /* 0x8C reserved, must be 0 */
     uint8_t  format_version;       /* 0x90 format version: 0=legacy, 1=v0.3.0 */
     uint8_t  pad3[3];              /* 0x91 padding */
     /* WP30: dynamic metadata extents (outside checksum - 0 on old images) */
     uint32_t meta_reserved_pct;     /* 0x94 min free pool % for metadata */
-    uint64_t meta_mapper_pba;       /* 0x98 pba of metadata mapper table (0=absent) */
-    uint32_t meta_mapper_blocks;     /* 0xA0 blocks for mapper table */
+    uint64_t meta_mapper_pba;       /* 0x98 pba of the metadata extent mapper (0=absent) */
+    uint32_t meta_mapper_blocks;    /* 0xA0 blocks reserved for the mapper */
     uint32_t meta_extent_min;       /* 0xA4 min extent size class (default 1=128KB) */
 } invfs_superblock;                /* 0xA8 = 168 bytes */
 

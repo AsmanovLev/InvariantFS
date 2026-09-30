@@ -36,7 +36,6 @@ invfs_volume *vol_open(const char *path, int *err);
  * untouched). Returns NULL on failure. */
 invfs_volume *vol_open_at(const char *path, uint64_t ckpt_seq, int *err);
 /* 1 = this handle is a time-travel view (all write paths refuse) */
-int  vol_time_travel(const invfs_volume *v);
 void vol_close(invfs_volume *v);
 int  vol_flush(invfs_volume *v);
 /* vol_flush + a real storage barrier (fsync on image files, no-op-ish on
@@ -148,15 +147,10 @@ int vol_fsck_scan(invfs_volume *v, invfs_fsck_report *rep, int fix);
  * value any in-tree caller passes) never destroys a key a live inode needs. */
 int vol_fsck_scan_ex(invfs_volume *v, invfs_fsck_report *rep, int fix,
                      int discard_reachable);
-int  vol_map(invfs_volume *v, uint64_t inode, uint64_t lba, uint64_t pba, uint32_t length);
-uint64_t vol_lookup(invfs_volume *v, uint64_t inode, uint64_t lba);
-int  vol_lookup_entry(invfs_volume *v, uint64_t inode, uint64_t lba,
-                      uint64_t *pba_out, uint64_t *len_out);
 int  vol_read_block(invfs_volume *v, uint64_t pba, void *buf);
 
 uint64_t vol_create_file(invfs_volume *v, const char *name,
                          const uint8_t *data, size_t len);
-void vol_l2p_remove(invfs_volume *v, uint64_t inode, uint64_t lba);
 
 /* AST children (containers: ZIP members etc.) */
 uint64_t vol_create_container_file(invfs_volume *v, const char *name,
@@ -864,7 +858,6 @@ void vol_set_readonly(invfs_volume *v, int ro);
 uint64_t vol_free_blocks_cached(invfs_volume *v);
 uint64_t vol_write_guard(invfs_volume *v);
 const uint8_t *vol_bitmap(invfs_volume *v, uint64_t *blocks_out);
-const invfs_l2p_entry *vol_l2p(invfs_volume *v, size_t *count_out);
 uint64_t vol_inode_area_pos(invfs_volume *v);
 uint64_t vol_inode_area_start(invfs_volume *v);
 uint64_t vol_inode_area_end(invfs_volume *v);
@@ -879,32 +872,6 @@ uint64_t vol_journal_pos(invfs_volume *v);
 uint64_t vol_inode_next(invfs_volume *v, uint64_t pos, uint32_t *magic_out,
                         uint64_t *inode_out, uint64_t *size_out,
                         char *name_out, size_t name_cap, uint32_t *rec_len_out);
-
-/* WP40: walk-every-record callback used by all mapper-aware record
- * passes (stats, sweep collector, dedupe hasher, heat persist/promote,
- * rename/sibling collectors). CB receives a record buffer that INCLUDES
- * the trailing CRC32C and has been CRC-verified on behalf of the
- * caller; torn records are skipped by the walker itself so the caller
- * only sees valid ones. The walk reads the mapper extents via
- * vol_inode_next on mapper volumes and the plain [inode_area_start,
- * inode_area_pos) region on legacy volumes. cb returns 0 = continue,
- * nonzero = abort the walk (value becomes vol_records_walk's result).
- * Passing NULL the name/ctx is legal. */
-int vol_records_walk(invfs_volume *v,
-                     int (*cb)(void *ctx, uint64_t rec_pos,
-                               const invfs_inode_rec *h,
-                               const uint8_t *rec),
-                     void *ctx);
-
-/* WP49: same walk, but the caller also wants torn/CRC-bad records reported
- * instead of silently skipped (fsck counts them). bad_cb may be NULL
- * (identical to vol_records_walk). */
-int vol_records_walk_ex(invfs_volume *v,
-                        int (*cb)(void *ctx, uint64_t rec_pos,
-                                  const invfs_inode_rec *h,
-                                  const uint8_t *rec),
-                        void *ctx,
-                        void (*bad_cb)(void *ctx, uint64_t rec_pos));
 
 uint64_t vol_count_free(invfs_volume *v);
 /* per-REGION free counters (maintained incrementally by alloc/free):

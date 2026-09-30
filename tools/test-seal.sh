@@ -69,7 +69,6 @@ cat > "$WORK/tools/sealpick.c" <<'SEALPICK_EOF'
  *                                   ONE stripe belonging to one user file
  *   sealpick <img> blocks <n>    -> "pba1..pbaN name": N occupied blocks of
  *                                   ONE 32-stripe belonging to one user file
- *   sealpick <img> parity        -> first parity block pba
  *   sealpick <img> rm <name>     -> delete a file (no CLI rm exists)
  *   sealpick <img> setro|setrw   -> toggle VOLF_READONLY (persists)
  *   sealpick <img> desc          -> RDP0 descriptor: "present l1 l2 k1 k2 m2"
@@ -78,10 +77,8 @@ cat > "$WORK/tools/sealpick.c" <<'SEALPICK_EOF'
  *                                   binary file, seal again (dirty-only),
  *                                   print both reports
  *
- * WP27: a file's segments live in its record's AST entries (the pba is
- * inline); the L2P table is the owner-scoped WAL (the "parity" mode below
- * still reads it -- parity maps ARE owner maps). File modes walk the inode
- * area and parse the live records directly (the meta_probe pattern).
+ * File modes walk the inode area and parse the live records directly (the
+ * meta_probe pattern).
  */
 #include <stdio.h>
 #include <stdlib.h>
@@ -194,8 +191,7 @@ int main(int argc, char **argv)
 {
     int err = 0;
     const invfs_superblock *sb;
-    const invfs_l2p_entry *l2p;
-    size_t n = 0, i;
+    size_t i;
 
     if (argc < 3) return 2;
     v = vol_open(argv[1], &err);
@@ -269,23 +265,6 @@ int main(int argc, char **argv)
             if (!strcmp(g_segs[i].name, argv[3])) {
                 printf("%llu %llu\n", (unsigned long long)g_segs[i].pba,
                        (unsigned long long)g_segs[i].plen);
-                vol_close(v);
-                return 0;
-            }
-        vol_close(v);
-        return 1;
-    }
-    if (!strcmp(argv[2], "parity")) {
-        /* owner-class maps live in the WAL (vol_l2p) exactly as before */
-        uint64_t owner;
-        char nm[32];
-        snprintf(nm, sizeof nm, "\x01parity");
-        owner = vol_find(v, nm);
-        if (!owner) { vol_close(v); return 1; }
-        l2p = vol_l2p(v, &n);
-        for (i = 0; i < n; i++)
-            if (l2p[i].type == INVFS_JRN_MAP && l2p[i].inode == owner) {
-                printf("%llu\n", (unsigned long long)l2p[i].pba);
                 vol_close(v);
                 return 0;
             }

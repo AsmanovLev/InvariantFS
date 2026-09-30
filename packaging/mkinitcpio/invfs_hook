@@ -117,7 +117,7 @@ invfs_mount_handler() {
 
     msg ":: mounting InvariantFS volume '$dev' on real root"
     # rootflags ride into the daemon as -o options; invf-fuse pulls out its
-    # own keys (arc_limit=, at_checkpoint, ...) and passes the rest to libfuse
+    # own keys (arc_limit=, raw_watermark=, ...) and passes the rest to libfuse
     if [ -n "${rootflags:-}" ]; then
         invf-fuse -o "$rootflags" "$dev" "$mp"
     else

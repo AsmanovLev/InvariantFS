@@ -1066,102 +1066,6 @@ static void sw_insert(sw_bucket ***tabp, size_t *maskp, size_t *countp,
     (*countp)++;
 }
 
-/* WP42: per-record collector state for the sweep walk. The shared
- * vol_records_walk() owns the scan (all mapper extents on v0.3.0+, the
- * legacy contiguous area otherwise) and its CRC verification; the callback
- * keeps the legacy collector policy (tombstone position-kill, newest record
- * per name, name snapshots) and accumulates the walked record bytes for the
- * compaction trigger. The arrays are reached through their addresses because
- * the callback may realloc them. */
-typedef struct {
-    char (**names)[256];
-    uint64_t **inodes, **sizes, **poss;
-    sw_bucket ***tab;
-    size_t *tmask, *tcount;
-    int *count, *cap;
-    uint64_t rec_bytes;
-    int oom;
-} sweep_collect_ctx;
-
-static int sweep_collect_cb(void *ctx_, uint64_t rec_pos,
-                            const invfs_inode_rec *h, const uint8_t *rec)
-{
-    sweep_collect_ctx *c = (sweep_collect_ctx *)ctx_;
-    char (*names)[256] = *c->names;
-    uint64_t *inodes = *c->inodes;
-    uint64_t *sizes = *c->sizes;
-    uint64_t *poss = *c->poss;
-    char name[257];
-    size_t nl;
-
-    (void)rec;
-    /* same corrupt-record guards the legacy loop broke on */
-    if (h->magic != INODE_REC_MAGIC && h->magic != TOMBSTONE_MAGIC)
-        return 1;
-    if (h->name_len > INVFS_MAX_NAME ||
-        h->rec_len < INVFS_REC_HDR_LEN + h->name_len + 1 ||
-        h->rec_len > INVFS_MAX_REC_LEN)
-        return 1;
-    nl = h->name_len;
-    memcpy(name, h->name, nl);
-    name[nl] = 0;
-    c->rec_bytes += (uint64_t)h->rec_len + 4;
-
-    if (h->magic == TOMBSTONE_MAGIC) {
-        int i = sw_find(*c->tab, *c->tmask, names, name);
-        if (h->file_size == 0) {   /* legacy kill-by-id */
-            if (i >= 0 && inodes[i] == h->inode_id) inodes[i] = 0;
-        } else if (i >= 0 && poss[i] == (uint64_t)h->file_size) {
-            /* v2 position kill: retires exactly the record at that
-             * position -- the name dies only if its current version IS
-             * that record */
-            inodes[i] = 0;
-        }
-        return 0;
-    }
-
-    {
-        int i = sw_find(*c->tab, *c->tmask, names, name);
-        if (i >= 0) {
-            inodes[i] = h->inode_id; sizes[i] = h->file_size;
-            poss[i] = rec_pos;
-        } else {
-            if (*c->count == *c->cap) {
-                int ncap = *c->cap ? *c->cap * 2 : 512;
-                char (*nn)[256] =
-                    (char (*)[256])realloc(names, (size_t)ncap * 256);
-                uint64_t *ni =
-                    (uint64_t *)realloc(inodes, (size_t)ncap * sizeof *ni);
-                uint64_t *ns =
-                    (uint64_t *)realloc(sizes, (size_t)ncap * sizeof *ns);
-                uint64_t *np =
-                    (uint64_t *)realloc(poss, (size_t)ncap * sizeof *np);
-                if (nn) names = nn;
-                if (ni) inodes = ni;
-                if (ns) sizes = ns;
-                if (np) poss = np;
-                *c->names = names; *c->inodes = inodes;
-                *c->sizes = sizes; *c->poss = poss;
-                *c->cap = ncap;
-                if (!nn || !ni || !ns || !np) { c->oom = 1; return 1; }
-            }
-            {
-                /* 256 bytes INCLUDING the terminator; strncpy(256) does
-                 * not guarantee that, and the name is used as a C string */
-                size_t nl = strlen(name);
-                if (nl > 255) nl = 255;
-                memcpy(names[*c->count], name, nl);
-                names[*c->count][nl] = 0;
-            }
-            inodes[*c->count] = h->inode_id;
-            sizes[*c->count] = h->file_size;
-            poss[*c->count] = rec_pos;
-            sw_insert(c->tab, c->tmask, c->tcount, names, *c->count);
-            (*c->count)++;
-        }
-    }
-    return 0;
-}
 
 /* WP-M21b: v3 live-set collector, fed by vol_v3_walk in a single O(n)
  * hierarchical pass. A v3 volume has no record stream to walk, so the
@@ -1259,9 +1163,7 @@ int main(int argc, char **argv)
     double rb_f = -1.0, rp_f = -1.0;   /* <0: flag absent */
     int rp_algo = 0;                   /* explicit :rs-vm/:rs-cauchy suffix */
     int auto_reseal = 0;
-    uint64_t rec_bytes = 0;   /* WP42: record bytes walked (compaction trigger) */
     int count = 0, cap = 0, kept = 0, swept = 0, skipped = 0, failed = 0;
-    int reg_failed = 0;   /* WP53: retention-registry write failed */
     /* A vol_flush that failed at the durability point. LATCHED, not a
      * counter: a run whose data was rewritten but whose flush failed has
      * left the volume in a state the caller must be told about, so a later
@@ -1666,82 +1568,50 @@ int main(int argc, char **argv)
         return 0;
     }
 
-    /* WP21+WP22d: resolve the previous sweep's checkpoint. --realize is
-     * the standalone point of no return (free the retention registry,
-     * clear CKP0), then a normal sweep proceeds. A bare sweep instead
-     * goes straight to vol_ckp_begin, which arms the NEW checkpoint FIRST
-     * and realizes the old registry only with the new net already live
+    /* Resolve the previous sweep's rollback window. --realize is the
+     * standalone point of no return (drop the previous save point), then a
+     * normal sweep proceeds. A bare sweep instead captures the NEW window
+     * FIRST and drops the old one only with the new state already live
      * (realize-after-arm): a torn sweep never leaves the volume with
-     * neither a checkpoint nor intact data. A dry run touches nothing. A
-     * decline (sealed / read-only / no room for the staging) never stops
-     * the sweep -- the run just goes uncheckpointed. */
+     * neither a save point nor intact data. A dry run touches nothing. A
+     * failed capture never stops the sweep -- the run just goes
+     * unsavepointed. */
     if (!dry) {
-        if (vol_sb(vol)->vol_flags & VOLF_V3) {
-            /* WP77: v3 rollback window is the SPT0 save point, not CKP0.
-             * --no-realize keeps the previous save point live; every other
-             * run drops it (realize) and captures a fresh one BEFORE the
-             * walk, so the live window is always the LAST sweep. K=1. */
-            if (no_realize) {
-                if (!invfs_sweep_ui_active())
-                    fprintf(stderr, "save point: kept previous (--no-realize)\n");
-            } else {
-                if (realize) {
-                    int drc = spt0_drop(vol);
-                    if (drc < 0) {
-                        sw_progress_suspend();
-                        fprintf(stderr, "save point: realizing the previous "
-                                        "run failed\n");
-                        vol_close(vol);
-                        return 1;
-                    }
-                    if (!invfs_sweep_ui_active())
-                        fprintf(stderr, drc > 0
-                                ? "save point: previous run realized\n"
-                                : "save point: nothing to realize\n");
-                } else if (spt0_info(vol, NULL)) {
-                    /* bare sweep: replace the previous window (K=1) */
-                    (void)spt0_drop(vol);
-                }
-                if (spt0_capture(vol) == 0) {
-                    invfs_spt0 sp;
-                    if (spt0_info(vol, &sp) && !invfs_sweep_ui_active())
-                        fprintf(stderr, "save point captured "
-                                        "(base_root=%llu delta_end=%llu)\n",
-                                (unsigned long long)sp.base_root,
-                                (unsigned long long)sp.delta_end);
-                } else {
-                    sw_progress_suspend();
-                    fprintf(stderr, "save point: capture failed; sweeping "
-                                    "without one\n");
-                }
-            }
+        /* --no-realize keeps the previous save point live; every other run
+         * drops it (realize) and captures a fresh one BEFORE the walk, so
+         * the live window is always the LAST sweep. K=1. */
+        if (no_realize) {
+            if (!invfs_sweep_ui_active())
+                fprintf(stderr, "save point: kept previous (--no-realize)\n");
         } else {
             if (realize) {
-                uint64_t rfree = 0;
-                int rrc = vol_ckp_realize(vol, &rfree);
-                /* on a read-only/recovering volume the realize refusal is not
-                 * fatal here -- the sweep's own machinery refuses the same way
-                 * (and --seal needs to print its own read-only diagnostic) */
-                if (rrc < 0 && vol_write_enabled(vol)) {
+                int drc = spt0_drop(vol);
+                if (drc < 0) {
                     sw_progress_suspend();
-                    fprintf(stderr, "checkpoint: realizing the previous run "
-                                    "failed\n");
+                    fprintf(stderr, "save point: realizing the previous "
+                                    "run failed\n");
                     vol_close(vol);
                     return 1;
                 }
-                if (!invfs_sweep_ui_active()) {
-                    if (rrc > 0)
-                        fprintf(stderr, "checkpoint: previous run realized "
-                                "(%llu retained blocks freed)\n",
-                                (unsigned long long)rfree);
-                    else if (rrc == 0)
-                        fprintf(stderr, "checkpoint: nothing to realize\n");
-                }
+                if (!invfs_sweep_ui_active())
+                    fprintf(stderr, drc > 0
+                            ? "save point: previous run realized\n"
+                            : "save point: nothing to realize\n");
+            } else if (spt0_info(vol, NULL)) {
+                /* bare sweep: replace the previous window (K=1) */
+                (void)spt0_drop(vol);
             }
-            if (vol_ckp_begin(vol, no_realize) < 0) {
+            if (spt0_capture(vol) == 0) {
+                invfs_spt0 sp;
+                if (spt0_info(vol, &sp) && !invfs_sweep_ui_active())
+                    fprintf(stderr, "save point captured "
+                                    "(base_root=%llu delta_end=%llu)\n",
+                            (unsigned long long)sp.base_root,
+                            (unsigned long long)sp.delta_end);
+            } else {
                 sw_progress_suspend();
-                fprintf(stderr, "checkpoint: arm failed; sweeping without "
-                                "one\n");
+                fprintf(stderr, "save point: capture failed; sweeping "
+                                "without one\n");
             }
         }
     }
@@ -1749,81 +1619,40 @@ int main(int argc, char **argv)
 
     sw_stage_begin(2, "collect", 0, "walking live inodes");
 
-    /* WP42: collect live regular files through the shared mapper-aware
-     * record walker. On a v0.3.0+ mapper volume the records live in dynamic
-     * metadata extents; the old contiguous [area_start, inode_area_pos)
-     * loop saw none and the sweep silently no-op'd. rec_bytes is the walked
-     * record footprint used by the compaction trigger below and, unlike
-     * pos-minus-start, cannot underflow on a mapper volume. */
+
+    /* Collect the live set from the namespace (base tree + delta overlay).
+     * vol_open refuses any volume without VOLF_V3, so there is no record
+     * stream to walk and no second collector. */
     {
-        if (vol_sb(vol)->vol_flags & VOLF_V3) {
-            /* WP-M21b: v3 volumes iterate the live inode set (base tree
-             * + delta overlay) instead of the record stream. */
-            v3_collect_ctx vc;
-            vol_walk_t w;
-            int wrc;
-            memset(&vc, 0, sizeof vc);
-            vc.vol = vol;
-            vc.names = &names; vc.inodes = &inodes;
-            vc.sizes = &sizes; vc.poss = &poss;
-            vc.tab = &tab; vc.tmask = &tmask; vc.tcount = &tcount;
-            vc.count = &count; vc.cap = &cap;
-            /* WP135: this used to PRINT A WARNING AND CARRY ON, which is
-             * the whole defect in one line -- it warned, then swept a
-             * volume it had just admitted it could not read, rewriting every
-             * file it happened to reach. The collect is the input to the
-             * mutating stages; a partial input is not a smaller job, it is
-             * the wrong job, and the damage is not limited to the files the
-             * walk missed (a container lane supersedes a recipe, so the
-             * files it DID see are rewritten on the strength of a list it
-             * could not complete).
-             *
-             * So it stops. Both modes: a --dry-run over a partial list is
-             * also the wrong plan, and a plan is what an operator acts on. */
-            vol_walk_init(&w, vol, "invf-sweep collect");
-            /* WP135: the STRICT walk -- the collect's output is the input
-             * to every mutating stage below it. */
-            wrc = vol_v3_walk_strict(vol, v3_sweep_walk_cb, &vc);
-            /* `vc.count` is the int the collect callback increments, by
-             * POINTER: *(vc.count) is what the walk delivered. Casting the
-             * pointer itself is how the first draft of this line printed a
-             * 47-bit address as an entry count. */
-            vol_walk_result(&w, wrc, (size_t)*vc.count, (size_t)*vc.count);
-            if (vol_walk_commit(&w) != 0) {
-                sw_progress_suspend();
-                fprintf(stderr,
-                        "invf-sweep: the v3 namespace walk did not complete "
-                        "(it stopped after %zu entr%s of a volume it could "
-                        "not fully read). Refusing to %s: a partial live set "
-                        "is not a smaller sweep, it is the wrong one. Run "
-                        "invf-fsck on the image first.\n",
-                        vol_walk_seen(&w), vol_walk_seen(&w) == 1 ? "y" : "ies",
-                        dry ? "plan" : "sweep");
-                return 1;
-            }
-            if (vc.oom) {
-                sw_progress_suspend();
-                fprintf(stderr, "out of memory\n");
-                return 1;
-            }
-            rec_bytes = 0;   /* the fold bounds the delta; no compaction */
-        } else {
-            sweep_collect_ctx cc;
-            memset(&cc, 0, sizeof cc);
-            cc.names = &names; cc.inodes = &inodes;
-            cc.sizes = &sizes; cc.poss = &poss;
-            cc.tab = &tab; cc.tmask = &tmask; cc.tcount = &tcount;
-            cc.count = &count; cc.cap = &cap;
-             vol_records_walk(vol, sweep_collect_cb, &cc);
-             if (cc.oom) {
-                 sw_progress_suspend();
-                 fprintf(stderr, "out of memory\n");
-                return 1;
-            }
-            rec_bytes = cc.rec_bytes;
+        vol_walk_t w;
+        int wrc;
+        v3_collect_ctx vc;
+        memset(&vc, 0, sizeof vc);
+        vc.vol = vol;
+        vc.names = &names; vc.inodes = &inodes;
+        vc.sizes = &sizes; vc.poss = &poss;
+        vc.tab = &tab; vc.tmask = &tmask; vc.tcount = &tcount;
+        vc.count = &count; vc.cap = &cap;
+    vol_walk_init(&w, vol, "invf-sweep collect");
+        wrc = vol_v3_walk_strict(vol, v3_sweep_walk_cb, &vc);
+        vol_walk_result(&w, wrc, (size_t)*vc.count, (size_t)*vc.count);
+        if (wrc < 0) {
+            sw_progress_suspend();
+            fprintf(stderr, "warning: v3 directory walk did not "
+                            "complete\n");
+        }
+        if (vc.oom) {
+            sw_progress_suspend();
+            fprintf(stderr, "out of memory\n");
+            return 1;
         }
     }
 
+    /* The walk above collects the newest record per name, but the live
+     * answer is the name index's consistent cut (a torn newest version is
+     * hidden and the name resolves to an older id, or is absent). Sweep
+     * exactly the live ids -- sweeping a hidden entry would fail its reads
+     * and could resurrect dead ids' blocks. */
     /* WP22d: the walk above collects the newest record per name, but the
      * live answer is the name index's consistent cut (a torn newest
      * version is hidden and the name resolves to an older id, or is
@@ -2134,27 +1963,6 @@ progress:
         fprintf(stderr, "sweep: %d swept\n", swept);
     }
 
-    /* WP21: seal the retention registry (the "\x01reten" owner) holding
-     * every block this run retired. From here the volume's end-state is:
-     * checkpoint live + retained blocks held, until invf-rollback or the
-     * next realize. A registry failure does NOT invalidate the checkpoint
-     * (rollback never reads the registry); the realize of an unregistered
-     * range is just deferred to the fsck after the next realize, and the
-     * run exits nonzero so the failure is not silently swallowed. */
-    if (!dry && !(vol_sb(vol)->vol_flags & VOLF_V3)) {
-        uint64_t rr = 0, rb = 0;
-        if (vol_ckp_end(vol, &rr, &rb) != 0) {
-            sw_progress_suspend();
-            fprintf(stderr, "checkpoint: registry write failed (the "
-                            "checkpoint itself is intact)\n");
-            /* WP53: a genuine registry-write failure is a real failure --
-             * surface it in the exit status. */
-            reg_failed = 1;
-        } else if (rb && !invfs_sweep_ui_active())
-            fprintf(stderr, "checkpoint: %llu retained blocks held for "
-                            "rollback (%llu ranges)\n",
-                    (unsigned long long)rb, (unsigned long long)rr);
-    }
 
     if (!dry) {
         int frc = vol_flush(vol);
@@ -2180,15 +1988,6 @@ progress:
         }
         sw_stage_end(frc == 0 ? "volume durable" : "flush failed");
     }
-
-    /* WP-M21: hot-tail pruning retired with on-line compaction. The fold
-     * (vol_v3_fold_request) was to replace it. WP116: the fold does NOT
-     * run in this offline tool -- see the note at the --compact parse
-     * above. Calling it is idempotent and would never invalidate a sweep
-     * that already succeeded, but not calling it is what leaves the v3 COW
-     * base-page generations unreclaimed. INVFS_NO_COMPACT=1 (and the
-     * --compact flag) is accepted but ignored. */
-    (void)rec_bytes;
 
     /* WP20 --seal / WP20b: (re)seal the shadow-zone parity AFTER the sweep
      * is fully flushed -- the parity covers the post-sweep state.
@@ -2301,8 +2100,8 @@ progress:
     sw_log_stop();
 #endif
     /* The exit contract, in one place. `failed` counts files that did not
-     * sweep; `reg_failed` counts a failed retention-registry write;
+     * sweep;
      * `flush_failed` latches a failed durability point. Any of the three
      * means "do not report this volume as swept and durable". */
-    return (failed || reg_failed || flush_failed) ? 1 : 0;
+    return (failed || flush_failed) ? 1 : 0;
 }

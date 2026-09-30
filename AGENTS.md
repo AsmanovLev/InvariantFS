@@ -166,7 +166,7 @@ Remaining TODOs: none
 **The code is the spec. The docs are a map to the code.** This is not a
 style preference — the repo carried 18 design docs under `src/doc/` for
 months, 15 of which never mentioned Meta-v3 and all of which described the
-retired v2 format (L2P mapper, CKP0/`reten`). They read like contracts, so
+retired format. They read like contracts, so
 people and agents built on them and were wrong. They are now deleted; git
 history keeps every revision.
 
@@ -191,7 +191,7 @@ Consequences, and they are binding:
   references a path that no longer exists. Keep it green.
 
 Rationale and the full inventory of what was deleted and why: git history
-for the v2-era prose (`git log --diff-filter=D --name-only -- src/doc/`).
+for that prose (`git log --diff-filter=D --name-only -- src/doc/`).
 `docs/architecture/OVERVIEW.md` is NOT part of that inventory — it is a
 65-line zone summary that still exists and is still current.
 
@@ -236,12 +236,12 @@ file.
 
 ### 2.3 Zone layout
 
-> **v0.5.0 (Meta-v3):** the four zone fields are *advisory policy*, not hard
-> regions — there is one shared free-block pool. Raw-class allocation prefers
-> the RAW extent and overflows into shadow-space blocks with the class tag
-> **unchanged** (`zone=0`), so placement never decides what a block is. The
-> `L2P journal` / `Inode area` / `Mapper` rows below were the v2 model and are
-> gone: v3 metadata is a COW B+ tree base plus an append-only Delta Log.
+> **v0.5.0 (Meta-v3) is the only format.** The four zone fields are *advisory
+> policy*, not hard regions — there is one shared free-block pool. Raw-class
+> allocation prefers the RAW extent and overflows into shadow-space blocks
+> with the class tag **unchanged** (`zone=0`), so placement never decides
+> what a block is. Metadata is a COW B+ tree base plus an append-only Delta
+> Log; there is no mapping journal and no inode-record stream.
 
 | Zone | Role | Lifecycle |
 |---|---|---|
@@ -249,7 +249,7 @@ file.
 | **Meta-v3 area** | `RT30` descriptor + COW B+ tree base + append-only Delta Log | base pages are copy-on-write; the delta is merged by the background **fold**; the base-page pool may be free inside the metadata zone |
 | **RAW** | content-class tag for freshly written segments | new writes land here; drained into Shadow by the sweep |
 | **Shadow** | consolidated, type-clustered, deduplicated storage | grows as RAW drains into it |
-| **Seal parity** | *not implemented on v3* — the XOR/RS implementation was v2 and went with it | `invf-sweep --seal` refuses and says so |
+| **Seal parity** | *not implemented* — the XOR/RS implementation went with the format it belonged to | `invf-sweep --seal` refuses and says so |
 
 ### 2.4 The write path (most important caveat)
 
@@ -270,8 +270,8 @@ an append-only Delta Log.** When you `write()` through FUSE:
 When you `unlink()`:
 
 1. A delta delete entry is appended — there is no immediate in-place record
-   surgery (the v2 "tombstone" model is gone).
-2. On v3 the file's data segments are freed **at `unlink`**: `vol_v3_unlink`
+   surgery.
+2. The file's data segments are freed **at `unlink`**: `vol_v3_unlink`
    walks the inode's recipe and frees every non-shared segment through
    `vol_v3_free_recipe_blocks` → `vol_free_blocks`
    (`src/core/vol_dirs.c:598-600`, `src/core/vol_ast.c:125`). Fold drops
@@ -365,7 +365,7 @@ Manual invocation:
 ```bash
 invf-sweep /path/to/volume.img                # offline (volume unmounted)
 invf-sweep /path/to/volume.img --dry-run      # show what would happen
-invf-sweep /path/to/volume.img --seal         # v2 only; refuses on v3
+invf-sweep /path/to/volume.img --seal         # not implemented; refuses
 
 # In FUSE: full pass, and it arms a savepoint — see the note below
 kill -USR1 $(pidof invf-fuse)                  # request sweep
@@ -431,9 +431,13 @@ explicitly.
 ### 2.6 Recovery and rollback
 
 After a crash, the volume opens DIRTY and `vol_open` replays the **Delta Log**
-(plus the legacy L2P journal on pre-v3 volumes) and scans the metadata. If the
-result is anomaly-free the volume transitions to CLEAN automatically;
-`invf-fsck [-f]` can also be run explicitly.
+and scans the metadata. If the result is anomaly-free the volume transitions
+to CLEAN automatically; `invf-fsck [-f]` can also be run explicitly.
+
+A volume whose superblock does not carry `VOLF_V3` is refused by name, by
+every tool, with the image untouched. There is no conversion path in-tree and
+there never was: the only route is `invf-mkfs` a new volume and re-import, or
+restore from a backup.
 
 > **What `invf-fsck -f` will and will not do on a damaged v3 volume.** An
 > unreadable base page is *contained*, not fatal: its key range is
@@ -480,13 +484,13 @@ On v3, rollback is built on **SPT0 savepoints** (`vol_spt0.c`): the 32-byte
 `{base_root, delta_end}` (plus a reserved `flags` and a `crc32c`
 over the descriptor, `src/core/invarifs.h:683-703`), and a restore publishes
 `base_root` and truncates the delta to `delta_end`. Without a savepoint,
-rollback refuses — the volume's history is gone. (The v2 `CKP0`
-sweep-checkpoint + `\x01reten` retention registry were retired with the v2
-metadata machinery, and their code is now gone too. Note that
-`invf-fuse -o at_checkpoint` still exists and still reaches the v2 replay
-path: it cannot succeed on v3 and never has, returning err -11. It was left
-in place deliberately — removing it would change what a reachable v3 mount
-option does, which is a behaviour change rather than a deletion.)
+rollback refuses — the volume's history is gone.
+
+There is no read-only "mount at the checkpoint" view: `-o at_checkpoint` and
+`vol_open_at()` were removed, because the only thing they could restore was
+the retired mapping journal's staged prefix, so they had never succeeded and
+returned err -11 for every mount. A mount that passes the option now mounts
+normally, read-write; libfuse rejects the unknown option itself.
 
 ### 2.7 Capacity and the metadata reservation
 
@@ -502,9 +506,9 @@ Symptoms of an undersized metadata zone: ENOSPC on writes even though
 `df` shows plenty free, and v3 base-page allocation falling back to the
 shadow pool (`mb_alloc_meta_zone` → shadow) in the FUSE log.
 
-> **On v3 this knob does NOT bound inode capacity — measure before you
-> rely on it.** `mb_alloc_meta_zone`'s own comment says why: mkfs marks
-> the whole metadata zone allocated (bitmap + journal + inode area), so in
+> **This knob does NOT bound inode capacity — measure before you rely on
+> it.** `mb_alloc_meta_zone`'s own comment says why: mkfs marks
+> the whole metadata zone allocated (bitmap + mapper + record area), so in
 > practice the zone scan finds nothing and `mbuf_alloc` falls through to
 > the **shared pool**. Measured on a 4 GiB image: 60 files → 106 META
 > blocks, 120 → 228, 240 → 471, i.e. **2.03 blocks (8,309 B) of META per
@@ -514,9 +518,9 @@ shadow pool (`mb_alloc_meta_zone` → shadow) in the FUSE log.
 > size**, not by this fraction: at 4 GiB that is roughly 480,000 files.
 > The per-file figure is extrapolated past 240 files; the three-point
 > linearity is clean but the extrapolation is an extrapolation.
-> The v2 reserved inode area on a v3 volume is dead weight, and a
-> lower fraction reserves less of it — which is the honest reason the
-> older advice said "16-24".
+> A 32 MiB reserved gap between the mapper and the record area is dead
+> weight, and a lower fraction reserves less of it — which is the honest
+> reason the older advice said "16-24".
 
 ### 2.8 Tooling environment
 
@@ -608,10 +612,8 @@ be recovered bit-for-bit, regardless of what codec was applied.
     ("transcode only when smaller", `src/core/vol_cpack.c:1464-1470`), not
     a runtime `memcmp` — same category as FLAC in
     `impl_docs/AUDIT.md` H10.
-  - **ZIP → there is no builtin lane at all.** There used to be a v2-only
-    one, behind `if (!v3 && full[0] == 'P' ...)`; it was removed with the rest
-    of the v2 branches. On v3 a ZIP falls to the generic floor or to a
-    containerpack.
+  - **ZIP → there is no builtin lane at all.** On v3 a ZIP falls to the
+    generic floor or to a containerpack.
 - It does not mean "metadata is preserved exactly". mtime is
   truncated to seconds (ctime64 second resolution); plain xattrs are stored
   as opaque blobs; uid/gid are preserved. **POSIX ACLs are the exception

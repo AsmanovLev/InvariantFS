@@ -146,11 +146,11 @@ HP=$(pba0 "$D0" hot.bin)
 echo "hot.bin canonical at pba $HP (dev1 shadow)"
 
 echo "== leg 4: heat -> dev0 acceleration copies =="
-# WP27: read heat accrues RAM-only per session; the pump persists it via
+# WP27: read heat accrues RAM-only per session; the driver persists it via
 # vol_heat_persist (the sweep-cadence fold, without the sweep's decay):
 # it reads the file once per session, standing in for sweep cadence.
 for i in $(seq 16); do
-    INVFS_JRN_FORCE_COMPACT=1 $B/invf-l2ptest pump "$D0" hot.bin >/dev/null 2>&1
+    $B/meta_probe "$D0" --heatpump hot.bin >/dev/null 2>&1
 done
 RH=$(rheat_max "$D0" hot.bin)
 [ "$RH" -ge 16 ] || fail "hot.bin rheat $RH < 16 after 16 read sessions"
@@ -242,7 +242,7 @@ PY
     $B/invf-cp "$E0" "$WORK/orig/coldA.bin" A.bin >/dev/null 2>&1 || fail "cp A"
     $B/invf-sweep "$E0" >/dev/null 2>&1 || fail "sweep A->shadow"
     for i in $(seq 16); do
-        INVFS_JRN_FORCE_COMPACT=1 $B/invf-l2ptest pump "$E0" A.bin >/dev/null 2>&1
+        $B/meta_probe "$E0" --heatpump A.bin >/dev/null 2>&1
     done
     $B/invf-sweep "$E0" > "$WORK/e-sweepA.log" 2>&1 || fail "sweep promote A"
     grep -q "^tier: [1-9]" "$WORK/e-sweepA.log" || fail "A not promoted"
@@ -259,7 +259,7 @@ PY
     $B/invf-cp "$E0" "$WORK/orig/coldB.bin" B.bin >/dev/null 2>&1 || fail "cp B"
     $B/invf-sweep "$E0" >/dev/null 2>&1 || fail "sweep B->shadow"
     for i in $(seq 16); do
-        INVFS_JRN_FORCE_COMPACT=1 $B/invf-l2ptest pump "$E0" B.bin >/dev/null 2>&1
+        $B/meta_probe "$E0" --heatpump B.bin >/dev/null 2>&1
     done
     $B/invf-sweep "$E0" > "$WORK/e-sweepB.log" 2>&1 || fail "sweep promote B"
     grep "^tier: " "$WORK/e-sweepB.log" || fail "no tier line for B"

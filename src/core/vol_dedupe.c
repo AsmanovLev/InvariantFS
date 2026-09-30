@@ -59,9 +59,8 @@ typedef struct {
     uint64_t inode, lba, pba;
 } dedup_seg;
 
-/* WP44: pass-1 walk state. The shared vol_records_walk owns the record
- * scan (mapper extents or the legacy area) and its CRC verification; this
- * carries the accumulator and error/stop flags the callback reports. */
+/* WP44: pass-1 walk state. The namespace walk owns the scan; this carries
+ * the accumulator and error/stop flags the callback reports. */
 typedef struct {
     invfs_volume *v;
     dedup_seg *segs;
@@ -424,11 +423,8 @@ int vol_sweep_dedupe_ex(invfs_volume *v, invfs_dedupe_stats *stats,
     /* pass 1: hash the stored bytes of every live, dedup-eligible segment.
      * WP27: the address comes from the record's entry; the physical
      * extent derives from the segment's own framed header.
-     * WP44: the scan is the shared vol_records_walk -- on a v0.3.0+
-     * mapper volume that visits every dynamic metadata extent, on a
-     * legacy format_version=0 volume it falls back to the contiguous
-     * [inode_area_start, inode_area_pos) region. The walker CRC-verifies
-     * each record and skips torn appends itself (vol_open's rule), so
+     * WP44: the scan is the shared namespace walk, which CRC-verifies
+     * every record and skips torn appends itself (vol_open's rule), so
      * dedup_hash_cb sees only valid records. */
     {
         dedup_hash_ctx ctx;

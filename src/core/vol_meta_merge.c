@@ -245,10 +245,10 @@ int meta_get_append_pos(invfs_volume *v, uint64_t rec_size,
  * regression). The owner record belongs in its own extent: allocate one
  * sized for the WHOLE record, write it there, and leave the file-record
  * cursor exactly where it was, so ordinary record appends keep packing and
- * flushes stay on the journal watermark instead of firing per record.
+ * flushes stay on the extent watermark instead of firing per record.
  *
- * The allocated extent is registered in the mapper (so vol_records_walk and
- * the open scan see the record) and MET0 is persisted. *pba_out is the
+ * The allocated extent is registered in the mapper (so the open scan sees
+ * the records written into it) and MET0 is persisted. *pba_out is the
  * absolute byte offset of the extent, *offset_out is 0. Returns 0 on
  * success, -1 on error, -2 on ENOSPC. Flush-safe: alloc_meta_extent and the
  * persistence helpers are ordinary io_writes; nothing here recurses into

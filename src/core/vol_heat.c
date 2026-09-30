@@ -419,22 +419,6 @@ uint8_t *heat_ext_merge(const invfs_volume *v, const uint8_t *old_ext,
 }
 
 
-/* v1 kept the WP19 hot summaries in the journal pads; v2 stores heat in
- * the records, so an open starts conservative (1/1 = "maybe hot") and the
- * sweep's decay pass recomputes the truth from the TLVs. */
-void l2p_seed_heat(invfs_volume *v)
-{
-    /* WP-heat-table-concurrent-safe: the summaries are shared state with the
-     * lock-free readers (heat_touch_read sets heat_any_rhot), so the seed
-     * takes the same lock. vol_open runs it before any thread exists, so this
-     * is uncontended in practice. */
-    pthread_mutex_lock(&v->heat_mu);
-    v->heat_any_rhot = 1;
-    v->heat_any_whot = 1;
-    pthread_mutex_unlock(&v->heat_mu);
-}
-
-
 /* Fold the session's accrued read touches into the records' TLVs.
  * Best-effort per file: a record that died mid-session (rewritten) is
  * skipped; heat is advisory, so a lost touch is a colder file, never a
@@ -546,7 +530,7 @@ void vol_heat_persist(invfs_volume *v)
  * the records. The promotion check runs AFTER the decay (the hysteresis).
  * See the section comment at the top for the full rules. */
 
-/* WP43: per-record body of the decay pass, fed by vol_records_walk().
+/* WP43: per-record body of the decay pass, fed by the namespace walk.
  * `end` is the walk bound frozen before the pass started: heat_write()
  * stamps persist as NEW record versions (a stamp is a record append),
  * and each append bumps the active-extent cursor, so an unfrozen walk
@@ -636,7 +620,7 @@ static int heat_cand_cmp(const void *a, const void *b)
  * Runs between the sweep walk and vol_sweep_dedupe in the driver, after
  * the run's decay pass. Returns the number of promotions, <0 on error. */
 /* WP43: per-record body of the promotion candidate collection, fed by
- * vol_records_walk(). Collection only reads (liveness, class, heat);
+ * the namespace walk. Collection only reads (liveness, class, heat);
  * the records are rewritten by the promotion itself, after the walk. */
 typedef struct {
     invfs_volume *v;

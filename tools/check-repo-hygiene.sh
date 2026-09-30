@@ -139,6 +139,35 @@ if [ -s "$tmpd/rot" ]; then
     viol=1
 fi
 
+# 5. RETIRED-SURFACE TRIPWIRE. The mapping journal, the name index and
+#    the record stream were deleted (0c82a7a, 16d9ffc). This is NOT the
+#    proof that they are gone -- no_v2_surface_test is, because it looks
+#    at the reserved gap on a real v3 volume after a real write cycle and
+#    finds it byte-for-byte zero, which any re-grown caller breaks
+#    whatever it is named. This is the narrower, complementary thing a
+#    disk scan cannot see: a retired NAME coming back into a header, a
+#    struct field, or a comment, with no behaviour change yet. The format
+#    gets re-grown that way -- a change that "just adds a field" -- and
+#    by the time the behaviour follows, the deletion is invisible again.
+#
+#    Deliberately a NAME list, not a pattern: these are the identifiers
+#    the deleted surface was called, and renaming one to get past this
+#    check is itself the signal a reviewer should catch.
+#
+#    Allowlist: none in src/, tools/, packaging/. impl_docs/ and
+#    INCIDENTS.md are HISTORY -- they are where a retired name is
+#    supposed to appear, and that is what makes them worth reading.
+if [ "$viol" -eq 0 ]; then
+    hits=$(python3 tools/check-retired-surface.py) || viol=1
+    if [ -n "$hits" ]; then
+        echo "retired-surface tripwire: a deleted identifier is back in the CODE." >&2
+        echo "If this is a real re-introduction, that is a format decision and" >&2
+        echo "needs a WP, not a lint waiver. See AGENTS.md 1.7." >&2
+        echo "$hits" | head -40 >&2
+        viol=1
+    fi
+fi
+
 # 4. citation drift: AGENTS.md 1.7 also requires a cited LINE NUMBER to
 #    still point at something. Section 3 above strips the :NNN anchor and
 #    checks only the path, so a citation whose file still exists but whose

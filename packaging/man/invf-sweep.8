@@ -72,8 +72,7 @@ Paranoid RS parity fraction and variant.
 Benchmark the redundancy encoder.
 .TP
 .B \-\-realize
-Accept the previous sweep's checkpoint: free its retention registry and
-clear CKP0. After this,
+Drop the previous sweep's savepoint. After this,
 .BR invf-rollback (8)
 can no longer undo that sweep.
 .TP

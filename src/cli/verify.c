@@ -50,9 +50,9 @@ typedef struct {
     size_t nents, capents;
 } deep_ctx;
 
-/* WP49b: per-record body fed by the bounded, index-ordered
- * vol_records_walk (the old position-driven vol_inode_next loop can cycle
- * on a non-monotonic mapper table). */
+/* WP49b: per-record body fed by the bounded, index-ordered namespace
+ * walk (the old position-driven vol_inode_next loop can cycle on a
+ * non-monotonic mapper table). */
 
 
 static int cmp_deep_ent_id(const void *a, const void *b)
@@ -154,6 +154,25 @@ int main(int argc, char **argv)
     /* 1. magic */
     if (memcmp(sb.magic, INVFS_MAGIC, 8) != 0)
         return fail("bad magic (not an InvariantFS image?)", 1);
+
+    /* 1b. format. verify reads the superblock directly and never mounts, so
+     * it does not pass through vol_open's gate -- which is exactly why it
+     * needs its own. "OK ... is a valid InvariantFS volume" for an image in
+     * a format this build cannot read is a verdict about a volume the tool
+     * never opened and no tool can open: the same defect as a confident
+     * zero. Name what the image is, and refuse. */
+    if (!(sb.vol_flags & VOLF_V3)) {
+        fprintf(stderr,
+                "FAIL: %s: this is not a format v3 volume: the image reports "
+                "%s (VOLF_V3 is not set). This build reads format v3 only "
+                "(INVFS_VERSION=%s) and carries no reader for any other "
+                "format, so there is nothing here it can verify.\n"
+                "  The image is untouched by this attempt.\n",
+                path,
+                (sb.vol_flags & VOLF_ASTV2) ? "format v2" : "format v1",
+                INVFS_VERSION_STRING);
+        return 1;
+    }
 
     /* 2. checksum */
     crc = invfs_crc32c(&sb, offsetof(invfs_superblock, checksum));

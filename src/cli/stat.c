@@ -118,114 +118,6 @@ typedef struct {
     uint8_t killed, dir;
 } fent;
 
-static uint64_t fent_hash(const char *s)
-{
-    uint64_t h = 1469598103934665603ULL;
-    for (; *s; s++) { h ^= (unsigned char)*s; h *= 1099511628211ULL; }
-    return h;
-}
-
-/* Open-addressed name -> slot map. Buckets hold slot+1 so 0 means empty; the
-   table is kept under half full, which bounds the probe run. */
-static size_t fent_find(const uint32_t *hb, size_t hmask, const fent *tbl,
-                        const char *nm)
-{
-    size_t b;
-    if (!hb) return (size_t)-1;
-    for (b = fent_hash(nm) & hmask; hb[b]; b = (b + 1) & hmask)
-        if (strcmp(tbl[hb[b] - 1].name, nm) == 0) return (size_t)(hb[b] - 1);
-    return (size_t)-1;
-}
-
-static int fent_insert(uint32_t **hbp, size_t *hmaskp, const fent *tbl,
-                       size_t slot, size_t nfiles)
-{
-    size_t b;
-    if (!*hbp || nfiles * 2 > *hmaskp + 1) {
-        size_t ncap = *hbp ? (*hmaskp + 1) * 2 : 8192, i;
-        uint32_t *nt = (uint32_t *)calloc(ncap, sizeof *nt);
-        if (!nt) return -1;
-        for (i = 0; i < nfiles; i++) {          /* rehash every live slot */
-            size_t j = fent_hash(tbl[i].name) & (ncap - 1);
-            while (nt[j]) j = (j + 1) & (ncap - 1);
-            nt[j] = (uint32_t)(i + 1);
-        }
-        free(*hbp);
-        *hbp = nt;
-        *hmaskp = ncap - 1;
-        return 0;                                /* slot went in with the rest */
-    }
-    b = fent_hash(tbl[slot].name) & *hmaskp;
-    while ((*hbp)[b]) b = (b + 1) & *hmaskp;
-    (*hbp)[b] = (uint32_t)(slot + 1);
-    return 0;
-}
-
-/* WP49b: per-record body of the inode walk, fed by the bounded,
- * index-ordered vol_records_walk (the old position-driven vol_inode_next
- * loop can cycle on a non-monotonic mapper table). */
-typedef struct {
-    fent *tbl;
-    size_t nfiles, fcap;
-    uint32_t *hb;
-    size_t hmask;
-    uint64_t recs, tombs, max_live_ino;
-} stat_ctx;
-
-static int stat_cb(void *ctx_, uint64_t rec_pos,
-                   const invfs_inode_rec *h, const uint8_t *rec)
-{
-    stat_ctx *c = (stat_ctx *)ctx_;
-    char nm[256];
-    size_t nl, slot;
-    (void)rec_pos; (void)rec;
-
-    c->recs++;
-    if (h->magic == TOMBSTONE_MAGIC) c->tombs++;
-    if (h->magic == INODE_REC_MAGIC && h->inode_id > c->max_live_ino)
-        c->max_live_ino = h->inode_id;
-    /* h->name is not NUL-terminated */
-    nl = h->name_len < 255 ? h->name_len : 255;
-    memcpy(nm, h->name, nl);
-    nm[nl] = 0;
-
-    slot = fent_find(c->hb, c->hmask, c->tbl, nm);
-    if (slot == (size_t)-1) {
-        if (c->nfiles == c->fcap) {
-            size_t ncap = c->fcap ? c->fcap * 2 : 4096;
-            fent *nt = (fent *)realloc(c->tbl, ncap * sizeof(fent));
-            if (!nt) {
-                fprintf(stderr, "out of memory at %llu names\n",
-                        (unsigned long long)c->nfiles);
-                return 1;
-            }
-            c->tbl = nt; c->fcap = ncap;
-        }
-        memset(&c->tbl[c->nfiles], 0, sizeof(fent));
-        memcpy(c->tbl[c->nfiles].name, nm, nl + 1);
-        slot = c->nfiles++;
-        if (fent_insert(&c->hb, &c->hmask, c->tbl, slot, c->nfiles) != 0) {
-            fprintf(stderr, "out of memory at %llu names\n",
-                    (unsigned long long)c->nfiles);
-            return 1;
-        }
-    }
-    if (h->magic == INODE_REC_MAGIC) {
-        c->tbl[slot].ino = h->inode_id;
-        c->tbl[slot].fsz = h->file_size;
-        c->tbl[slot].killed = 0;
-    } else {
-        /* tombstone: kills only the matching version. A v2 position kill
-         * (file_size = retired record's offset, != 0) names a version that
-         * was already superseded by a same-id INOD seen above -- ls.c skips
-         * these; counting them here marked every meta-rewritten
-         * (class-stamped) file as deleted. */
-        if (h->file_size == 0 && c->tbl[slot].ino == h->inode_id)
-            c->tbl[slot].killed = 1;
-    }
-    return 0;
-}
-
 /* ------------------------------------------------------------------ */
 /* v3: the namespace IS the dirent tree.                                  */
 /* ------------------------------------------------------------------ */
@@ -326,95 +218,29 @@ int main(int argc, char **argv)
     const invfs_superblock *sb = vol_sb(vol);
     uint64_t total = sb->total_blocks;
 
-    /* Was a fixed calloc(65536) with a silent `nfiles < MAX_FILES` cutoff, so
-       a 146k-file image reported "65536 live of 65536 names" -- a number that
-       looks like a real total and is not. Grown on demand instead. That growth
-       is what stat_v3_cb below does too; the bound is NOT reintroduced here.
-
-       The per-record name lookup was also a linear strcmp over everything seen
-       so far; at 146k names that is ~10^10 comparisons and stat never returns.
-       Same fix ls.c already carries: hash the name to a slot (v2 only -- a v3
-       dirent tree yields each path exactly once, so there is nothing to
-       merge). */
-    fent *tbl = NULL;
-    size_t nfiles = 0;
-    uint32_t *hb = NULL;           /* name -> slot+1, open addressed (v2) */
-    uint64_t tombs = 0, max_live_ino = 0;
-    int v3 = (sb->vol_flags & VOLF_V3) != 0;
-    uint64_t ndirs = 0;
-
-    if (v3) {
-        /* WP stat-counts-v3: from the namespace, not the v2 inode area. */
-        stat_v3_ctx vc;
-        int rc;
-        memset(&vc, 0, sizeof vc);
-        rc = vol_v3_walk(vol, stat_v3_cb, &vc);
-        if (rc != 0 || vc.oom) {
-            /* A walk that did not finish, or a table that stopped growing, has
-             * no count. Printing the part that was collected would repeat the
-             * 146k incident in its other form: a bounded table's overflow
-             * presented as a plausible total. Name the failure and exit. */
-            fprintf(stderr, "ivfs-stat: cannot enumerate %s (%s)%s\n",
-                    argv[1],
-                    rc < 0 ? "namespace walk failed" : "out of memory",
-                    vc.oom ? " growing the name table" : "");
-            free(vc.tbl);
-            vol_close(vol);
-            return 1;
-        }
-        tbl = vc.tbl; nfiles = vc.nfiles;
-        ndirs = vc.ndirs;
-        max_live_ino = vc.max_live_ino;
-        /* tombs stays 0 and that is not a silent omission: on v3 an unlink
-         * appends a delta delete, so a deleted name is not in the namespace at
-         * all and a live walk cannot see one. The word is printed as a
-         * directory count instead -- see the files: line below. */
-    } else {
-        /* v2: walk the inode area, version-aware. A tombstone kills only the
-         * inode version it references (sweep appends create-first, then the
-         * OLD tombstone -- the newer live record sits BEFORE the tombstone). */
-        stat_ctx sc;
-        memset(&sc, 0, sizeof sc);
-        vol_records_walk(vol, stat_cb, &sc);
-        tbl = sc.tbl; nfiles = sc.nfiles;
-        hb = sc.hb;
-        tombs = sc.tombs; max_live_ino = sc.max_live_ino;
+    /* The file table, straight from the namespace. vol_open refuses any
+     * volume without VOLF_V3, so this walk is the only source of names
+     * there is -- there is no record stream to fall back to. */
+    stat_v3_ctx vc;
+    int rc;
+    memset(&vc, 0, sizeof vc);
+    rc = vol_v3_walk(vol, stat_v3_cb, &vc);
+    if (rc != 0 || vc.oom) {
+        /* A walk that did not finish, or a table that stopped growing, has
+         * no count. Printing the part that was collected would present a
+         * bounded table's overflow as a plausible total. Name the failure
+         * and exit. */
+        fprintf(stderr, "ivfs-stat: cannot enumerate %s (%s)%s\n",
+                argv[1],
+                rc < 0 ? "namespace walk failed" : "out of memory",
+                vc.oom ? " growing the name table" : "");
+        free(vc.tbl);
+        vol_close(vol);
+        return 1;
     }
-
-    /* live inode set: per-name newest version that is not killed */
-    uint8_t *live = (uint8_t *)calloc((size_t)max_live_ino + 1, 1);
-    for (size_t j = 0; j < nfiles; j++)
-        if (!tbl[j].killed && tbl[j].ino != 0 && tbl[j].ino <= max_live_ino)
-            live[tbl[j].ino] = 1;
-
-    /* Refcount per block, from the v2 L2P journal, for LIVE inodes only.
-     *
-     * THE V2 JOURNAL IS EMPTY ON v3, so this yields a refcount array of
-     * zeros and the bar's `d = refcount[b] > 1` is therefore structurally
-     * always false: `dedup` and `both` could not be non-zero on a v3 volume
-     * no matter how duplicated it is, and the legend still advertised two
-     * colours. A zero presented as a measurement is the same defect as the
-     * empty file table this branch already fixed, one function over.
-     *
-     * The v3 answer exists -- pba_ref_count() is exactly "how many live
-     * entries name this pba" -- but filling the array that way is a lookup
-     * per allocated block, which is a new cost and a new feature, not a fix.
-     * So on v3 the tool says it does not know rather than reporting a
-     * confident zero, and the legend drops the colours it cannot produce. */
-    const int can_refcount = !(sb->vol_flags & VOLF_V3);
-    uint32_t *refc = can_refcount
-                   ? (uint32_t *)calloc(total, sizeof(uint32_t)) : NULL;
-    size_t n_l2p = 0;
-    const invfs_l2p_entry *l2p = can_refcount ? vol_l2p(vol, &n_l2p) : NULL;
-    for (size_t i = 0; i < (can_refcount ? n_l2p : 0); i++) {
-        const invfs_l2p_entry *e = &l2p[i];
-        if (e->type != INVFS_JRN_MAP || e->inode > max_live_ino ||
-            !live[e->inode] || e->pba >= total) continue;
-        uint64_t n = e->length;
-        if (n > total - e->pba) n = total - e->pba;
-        for (uint64_t b = e->pba; b < e->pba + n; b++)
-            if (refc[b] < 0xFFFF) refc[b]++;
-    }
+    fent *tbl = vc.tbl;
+    const size_t nfiles = vc.nfiles;
+    const uint64_t ndirs = vc.ndirs;
 
     printf("\n" C_BLUE "InvariantFS" C_RST " volume: " C_DIM "%s" C_RST "\n", argv[1]);
     printf("  %llu blocks x %u = ", (unsigned long long)total, INVFS_BLOCK_SIZE);
@@ -423,18 +249,13 @@ int main(int argc, char **argv)
     printf("%s\n\n", sz);
 
     uint64_t asis, sem, dedup, both, alloc, freeb;
-    draw_bar(vol, sb, refc, &asis, &sem, &dedup, &both, &alloc, &freeb);
+    draw_bar(vol, sb, NULL, &asis, &sem, &dedup, &both, &alloc, &freeb);
 
-    if (can_refcount)
-        printf("\n  " C_GRAY "█ As-IS (RAW)" C_RST "  " C_BLUE "█ semantic" C_RST
-               "  " C_GREEN "█ dedup" C_RST "  " C_CYAN "█ semantic+dedup" C_RST
-               "  " C_DIM "░ free" C_RST "\n\n");
-    else
-        printf("\n  " C_GRAY "█ As-IS (RAW)" C_RST "  " C_BLUE "█ semantic" C_RST
-               "  " C_DIM "░ free" C_RST "\n"
-               "  " C_DIM "dedup and semantic+dedup are not shown: this format "
-               "keeps no L2P journal, so per-block refcounts are not available "
-               "here." C_RST "\n\n");
+    printf("\n  " C_GRAY "█ As-IS (RAW)" C_RST "  " C_BLUE "█ semantic" C_RST
+           "  " C_DIM "░ free" C_RST "\n"
+           "  " C_DIM "dedup and semantic+dedup are not shown: this format "
+           "records no per-block mappings, so refcounts are not available "
+           "here." C_RST "\n\n");
 
     char fb[64], ab[64], ub[64], pct[32];
     human(freeb * INVFS_BLOCK_SIZE, fb, sizeof fb);
@@ -457,92 +278,44 @@ int main(int argc, char **argv)
     char mb[64], mb2[64];
     human(total_bytes, mb, sizeof mb);
     human(max_size, mb2, sizeof mb2);
-    if (v3)
-        /* A directory is a name but not a file: invf-ls prints it with 0 bytes
-         * and leaves it out of its `N file(s)` tally, so counting it here
-         * would put the two tools back in disagreement for no gain. */
-        printf("  files : %llu live of %zu names (%llu directories), %s logical, largest %s\n",
-               (unsigned long long)nlive, nfiles, (unsigned long long)ndirs, mb, mb2);
-    else
-        printf("  files : %llu live of %zu names (%llu tombstones), %s logical, largest %s\n",
-               (unsigned long long)nlive, nfiles, (unsigned long long)tombs, mb, mb2);
+    /* A directory is a name but not a file: invf-ls prints it with 0 bytes
+     * and leaves it out of its `N file(s)` tally, so counting it here
+     * would put the two tools back in disagreement for no gain. */
+    printf("  files : %llu live of %zu names (%llu directories), %s logical, largest %s\n",
+           (unsigned long long)nlive, nfiles, (unsigned long long)ndirs, mb, mb2);
 
-    if (can_refcount) {
-        printf("  l2p   : %zu maps, journal %.1f%% (of %llu blk)\n",
-               n_l2p, 100.0 * vol_journal_pos(vol) /
-               (double)(INVFS_JOURNAL_BLOCKS * INVFS_BLOCK_SIZE),
-               (unsigned long long)INVFS_JOURNAL_BLOCKS);
-        printf("  inode : area %.1f%% used\n",
-               100.0 * (vol_inode_area_pos(vol) - vol_inode_area_start(vol)) /
-               (double)((vol_inode_area_end(vol) - vol_inode_area_start(vol))));
-    } else {
-        /* The v2 journal and the v2 inode area do not exist on this format.
-         * Printing their occupancy would report two zeroes about structures
-         * that are not there, in a block of output an operator reads as
-         * measurements. "space :" and "zones :" below are bitmap-derived and
-         * are honest on v3. */
-        printf("  l2p   : (not present on this format)\n"
-               "  inode : (no inode area on this format)\n");
-    }
+    /* There is no mapping journal and no inode area on this format, so
+     * there is no occupancy to report here: printing two zeroes about
+     * structures that are not there, in a block an operator reads as
+     * measurements, is the defect. "space :" and "zones :" are
+     * bitmap-derived and are honest. */
+    printf("  meta  : no mapping journal or inode area on this format\n");
 
-    if (can_refcount)
-        printf("\n  semantic: %llu blk (%.1f%%)  dedup: %llu blk (%.1f%%)  both: %llu\n",
-               (unsigned long long)sem, 100.0 * sem / (alloc ? alloc : 1),
-               (unsigned long long)dedup, 100.0 * dedup / (alloc ? alloc : 1),
-               (unsigned long long)both);
-    else
-        printf("\n  semantic: %llu blk (%.1f%%)  dedup: n/a  both: n/a\n",
-               (unsigned long long)sem, 100.0 * sem / (alloc ? alloc : 1));
+    printf("\n  semantic: %llu blk (%.1f%%)  dedup: n/a  both: n/a\n",
+           (unsigned long long)sem, 100.0 * sem / (alloc ? alloc : 1));
 
     if (show_files) {
         printf("\n  files by policy:\n");
         for (size_t j = 0; j < nfiles; j++) {
             const char *nm = tbl[j].name;
-            uint64_t ino = tbl[j].ino, fsz = tbl[j].fsz;
-            if (tbl[j].killed || ino == 0) {
-                printf("    " C_DIM "X %-40s (deleted)" C_RST "\n", nm);
-                continue;
-            }
-            /* Policy tag per file. The l2p index is EMPTY on v3, so both
-             * flags would be 0 for every file and every line would read [A]
-             * as-is -- which is what it did, on a volume that had been swept
-             * and consolidated. Same defect as the bar: a confident zero
-             * where the tool simply cannot see. Say so on the legend rather
-             * than printing a tag it did not compute. */
-            int is_sem = 0, is_ded = 0;
-            for (size_t i = 0; can_refcount && i < n_l2p; i++) {
-                if (l2p[i].type != INVFS_JRN_MAP || l2p[i].inode != ino) continue;
-                if (l2p[i].pba >= sb->shadow_zone_start) is_sem = 1;
-                uint64_t n = l2p[i].length;
-                if (n > total - l2p[i].pba) n = total - l2p[i].pba;
-                for (uint64_t b = l2p[i].pba; b < l2p[i].pba + n; b++)
-                    if (refc[b] > 1) is_ded = 1;
-            }
-            const char *col = C_GRAY, *tag = "A";
-            if (is_sem && is_ded) { col = C_CYAN; tag = "B"; }
-            else if (is_sem)     { col = C_BLUE; tag = "S"; }
-            else if (is_ded)     { col = C_GREEN; tag = "D"; }
-            if (!can_refcount) { col = C_DIM; tag = "?"; }
+            uint64_t fsz = tbl[j].fsz;
             char fs2[24];
             human(fsz, fs2, sizeof fs2);
-            /* a v3 table carries directories too; mark them the way invf-ls
-             * does rather than listing them bare under a "files" heading */
+            /* Directories are names too; mark them the way invf-ls does
+             * rather than listing them bare under a "files" heading. The
+             * per-file storage policy tag is NOT printed: this format
+             * records no per-block mappings, so there is nothing to compute
+             * it from, and a tag the tool did not derive is the same defect
+             * as a zero it did not measure. */
             char dname[sizeof tbl[0].name + 2];
             snprintf(dname, sizeof dname, "%s%s", nm, tbl[j].dir ? "/" : "");
-            printf("    %s[%s] %-44s %8s" C_RST "\n", col, tag, dname, fs2);
+            printf("    %s%-44s %8s" C_RST "\n", C_DIM, dname, fs2);
         }
-        if (can_refcount)
-            printf("\n  " C_GRAY "[A] as-is" C_RST "  " C_BLUE "[S] semantic" C_RST
-                   "  " C_GREEN "[D] dedup" C_RST "  " C_CYAN "[B] both" C_RST "\n");
-        else
-            printf("\n  " C_DIM "[?] policy unknown: this format keeps no L2P "
-                   "journal, so per-block refcounts are not available here." C_RST "\n");
+        printf("\n  " C_DIM "[?] storage policy unknown: this format records "
+               "no per-block mappings, so refcounts are not available here." C_RST "\n");
     }
 
-    free(refc);
     free(tbl);
-    free(hb);
-    free(live);
     vol_close(vol);
     return 0;
 }

@@ -34,10 +34,6 @@
 #      create/write/delete/rename/sweep/seal/unseal/fsck with the device
 #      toggling up/drop_writes/error, ~$FLAKEY_SOAK_S wall; periodic
 #      gates + final fsck/verify/manifest diff.
-#   6  journal compaction under drops (WP22d): every flush forced into a
-#      slot flip (INVFS_JRN_FORCE_COMPACT) across seeded drop_writes
-#      windows -- incl. the legacy->slot migration flip -- then recovery,
-#      fsck/verify clean, files bit-exact.
 #   7  page-cache power loss (WP83): the device is NEVER touched by chaos --
 #      it is healthy the whole time -- and the bytes are only ever in the
 #      host page cache. Write + fsync through the mount, kill -9 the daemon
@@ -887,234 +883,12 @@ leg5() {
 # slot migration flip at the first dirty close. Whatever tears, replay must
 # land on exactly one CRC-valid side of the flip (or the pre-migration flat
 # log) and the consistent cut must keep every live record fully mapped.
-leg6() {
-    LEG=leg6-compact-flip
-    say "[6] journal compaction (slot flip) under drop_writes windows"
-    mkfs_fresh
-    # re-mkfs on a dirty device must leave NO trace of the previous volume
-    # (the inode-area full-erase regression guard)
-    $B/invf-fsck "$DM" >"$FLK/fsck6-postmkfs.log" 2>&1 || true
-    # 'live files:' is the v2 report line too (src/cli/fsck.c:446). On a v3
-    # volume it is never printed, so this gate has been failing
-    # UNCONDITIONALLY since the format default flipped -- the suite has not
-    # run leg 6 in that time. The v3 line that says the same thing is
-    # "live recipes: ok (0 live inode(s) with content, ...)": after a fresh
-    # mkfs no live inode may carry content. Anchored on the literal ", every"
-    # so a non-zero count cannot satisfy it.
-    grep -qE 'live recipes: ok \(0 live inode\(s\) with content, every ' \
-        "$FLK/fsck6-postmkfs.log" \
-        || { cat "$FLK/fsck6-postmkfs.log"; fail "mkfs left stale records (pre-compact)"; }
-    gen_corpus "$FLK/orig6" $((SEED + 6)) small
-    import_all "$FLK/orig6"
-    manifest_build "$FLK/orig6" > "$FLK/manifest6"
-    fsck_ok "pre-compact" || fail "fsck pre-compact"
-    python3 "$REPO/tools/flakey/dmchaos.py" "$DEV" "$LOOP" "$SEC" \
-        $((SEED + 600)) 900 "$FLK/stop6" drop >"$FLK/chaos6.log" 2>&1 &
-    CHAOS_PID=$!
-    local round src
-    for round in 1 2 3; do
-        INVFS_JRN_FORCE_COMPACT=1 $B/invf-sweep "$DM" >"$FLK/sweep6-$round.log" 2>&1
-        src=$?
-        [ "$src" = 0 ] || info "sweep round $round failed loudly under chaos (acceptable): rc=$src"
-        grep -E "sweep done|failed" "$FLK/sweep6-$round.log" | tail -1 | sed 's/^/  /'
-    done
-    touch "$FLK/stop6"; wait $CHAOS_PID 2>/dev/null; CHAOS_PID=""
-    dm_set up
-    info "compaction chaos over ($(grep -c drop "$FLK/chaos6.log") drop windows)"
-    recover "leg6" || fail "recovery ladder dead-ended"
-    fsck_ok "leg6" || fail "fsck after recovery"
-    verify_clean "leg6" || fail "verify after recovery"
-    vol_files_exact "$FLK/orig6" "post-recovery" || fail "content after compaction chaos"
-}
-
-# ---------------------------------------------- leg 7 (WP83): page cache --
-# The tier legs 0-6 structurally cannot reach: there the DEVICE is the
-# thing that lies (dm-flakey drop_writes / error). Here the device is
-# healthy for the whole leg and the bytes never leave the host page cache
-# -- which is exactly how `cp` "loses" a file that `ls` showed a second
-# earlier on a real block device.
-#
-#   1. write 9 files through the FUSE mount, fsync() each one, and rewrite
-#      two of them in place: one rewrite fsynced, one NOT (its fd is held
-#      open by a live writer so the commit can never happen). No unmount,
-#      no vol_close -- the fsync barriers are the only thing pinning the
-#      acknowledged bytes.
-#   2. record the expected sha256 of every generation
-#   3. kill -9 the daemon (started with -f, so the PID is the daemon)
-#   4. sync + `echo 3 > /proc/sys/vm/drop_caches`: the power-cut surrogate.
-#      Every byte that is not on the medium is gone, and the reopen has to
-#      re-read structure AND data from the medium.
-#   5. reopen: every file present and bit-exact -- through the offline
-#      tools AND through a fresh FUSE mount -- verify --deep 0 corrupt,
-#      fsck OK.
-#   6. THE assertion: a file rewritten in place must be the COMPLETE old
-#      content or the COMPLETE new content, never a splice of the two. The
-#      fsynced rewrite must be exactly the new content (it was
-#      acknowledged); the un-acked one may be either.
-#
-# What this tier can and cannot prove, stated honestly:
-# drop_caches evicts CLEAN pages only -- the kernel will not discard dirty
-# ones, so a write that reached the page cache can still be written back
-# after the "cut" (v3 barriers every delta append, so the un-acked file
-# usually comes back NEW; the leg accepts either generation). Discarding
-# un-acked bytes for real is dm-flakey drop_writes = legs 3/4/6. What this
-# tier uniquely proves is that the acknowledged bytes, their delta records
-# and the bitmap are on the MEDIUM and that the on-disk image is
-# self-consistent when re-read from scratch -- i.e. the FUSE fsync ack
-# (commit_wctx + vol_sync) is real on v3, which is what the pre-WP80
-# `vol_sync` early return made a silent no-op.
-
-pc_work_pick() {   # a DISK-backed scratch: drop_caches is a no-op on tmpfs
-    local c
-    if [ -z "$PC_WORK" ]; then
-        for c in /var/tmp /opt /var/lib; do
-            [ -d "$c" ] || continue
-            [ "$(stat -f -c %T "$c" 2>/dev/null)" = tmpfs ] && continue
-            PC_WORK="$c/invfs-flakey-pagecache"
-            break
-        done
-    fi
-    [ -n "$PC_WORK" ] || PC_WORK=/tmp/invfs-flakey-pagecache
-    PC_MNT="$PC_WORK/mnt"
-    rm -rf "$PC_WORK" && mkdir -p "$PC_WORK" "$PC_MNT" || return 1
-    if [ "$(stat -f -c %T "$PC_WORK" 2>/dev/null)" = tmpfs ]; then
-        echo "  WARN: $PC_WORK is tmpfs -- drop_caches cannot evict a tmpfs" >&2
-        echo "        page, so the page-cache cut below is a NO-OP there." >&2
-    fi
-    info "page-cache scratch: $PC_WORK ($(stat -f -c %T "$PC_WORK" 2>/dev/null))"
-}
-
-pc_dev_create() {  # a loop device when privileged (the raw-device path,
-                   # like production), the image file itself otherwise
-    pc_work_pick || fail "no scratch for the page-cache leg"
-    PC_VOL="$PC_WORK/pc.img"
-    PC_SIZE_GB=$(awk -v m="$PC_SIZE_MB" 'BEGIN{printf "%.4f", m/1024}')
-    truncate -s "${PC_SIZE_MB}M" "$PC_VOL" || fail "truncate $PC_VOL"
-    PC_LOOP=""
-    if [ "${FLAKEY_PC_BACKING:-loop}" != file ] &&
-       sudo -n true 2>/dev/null &&
-       PC_LOOP=$(sudo -n losetup -f --show "$PC_VOL" 2>/dev/null) &&
-       [ -n "$PC_LOOP" ]; then
-        sudo -n chmod 666 "$PC_LOOP" || fail "chmod $PC_LOOP"
-        PC_VOL="$PC_LOOP"
-        PC_MODE="loop device $PC_LOOP over pc.img"
-    else
-        PC_LOOP=""
-        PC_VOL="$PC_WORK/pc.img"
-        PC_MODE="image file (no loop device: FLAKEY_PC_BACKING=file or no losetup)"
-    fi
-}
-
-# A volume open on a freshly created LOOP DEVICE can lose a race with the
-# host's block-device prober: on this box a ROOT udev worker takes a LOCK_SH
-# flock on the new /dev/loopN for a moment (seen in /proc/locks, pid from
-# `fuser`), and vol_open's LOCK_EX then fails with "image is in use by
-# another process". A LOCK_SH holder is a reader, so retrying cannot endanger
-# the volume -- but a persistent conflict IS a real problem (two writers on
-# one image) and must still fail. Bounded, and it says so out loud.
-pc_run() {         # <label> <logfile> <cmd...>
-    local label=$1 log=$2 i rc=1
-    shift 2
-    for i in $(seq 1 12); do
-        "$@" >"$log" 2>&1
-        rc=$?
-        [ "$rc" = 0 ] && return 0
-        # A lost race for the image with a device prober, OR a vol_open that
-        # landed inside a dm-flakey down window. Both are transient and both
-        # are read-mostly (a prober holds LOCK_SH; a down window is read
-        # nothing and write nothing), so retrying cannot endanger the volume
-        # -- but a persistent conflict IS a real problem and must still fail.
-        grep -qE "image is in use by another process|smaller than the device table" \
-            "$log" || return "$rc"
-        if [ "$i" = 1 ]; then
-            echo "  NOTE: $label lost a flock race with a device prober" >&2
-            echo "        (root holds LOCK_SH on the new loop device);" >&2
-            echo "        retrying -- a reader cannot endanger the volume." >&2
-        fi
-        sleep 0.4
-    done
-    echo "  $label: still locked after 12 attempts" >&2
-    cat "$log" >&2
-    return "$rc"
-}
-
-pc_mnt_up() {     # -f: the daemon stays in the foreground, so $! IS the
-                  # daemon and kill -9 $! is an abrupt death (the default
-                  # daemonizes, and then $! is a process that already
-                  # exited -- the leg would silently become a clean close)
-    local i
-    for i in $(seq 1 12); do
-        $B/invf-fuse -f "$PC_VOL" "$PC_MNT" 2>"$PC_WORK/fuse.log" &
-        PC_FUSE_PID=$!
-        local j
-        for j in $(seq 1 50); do
-            grep -q " $PC_MNT " /proc/mounts && return 0
-            kill -0 "$PC_FUSE_PID" 2>/dev/null || break   # it gave up
-            sleep 0.1
-        done
-        grep -q "image is in use by another process" "$PC_WORK/fuse.log" || {
-            cat "$PC_WORK/fuse.log"; fail "mount of $PC_VOL never appeared"; }
-        [ "$i" = 1 ] && echo "  NOTE: mount lost a flock race; retrying" >&2
-        sleep 0.4
-    done
-    cat "$PC_WORK/fuse.log"
-    fail "mount of $PC_VOL never appeared (persistent flock conflict)"
-}
-
-pc_mnt_down() {   # clean unmount (the leg's LAST mount; the crash mount is
-                  # torn down by pc_kill)
-    local n=${1:-450} i
-    fusermount3 -u "$PC_MNT" 2>/dev/null
-    for i in $(seq 1 "$n"); do
-        kill -0 "$PC_FUSE_PID" 2>/dev/null || return 0
-        sleep 0.2
-    done
-    kill -9 "$PC_FUSE_PID" 2>/dev/null
-    sleep 0.5
-    return 1
-}
-
-# the power cut: the writer dies first (its fd would otherwise hold the
-# stale mount busy), then the daemon dies abruptly -- no vol_close, so no
-# final flush and no CLEAN superblock -- then the page cache goes away
-pc_kill() { # <writer-pid>
-    # wait on both: it reaps them (no stray "Killed" job notice in the log)
-    # and proves the death before the leg claims it was abrupt
-    [ -n "$1" ] && { kill -9 "$1" 2>/dev/null; wait "$1" 2>/dev/null; }
-    kill -9 "$PC_FUSE_PID" 2>/dev/null
-    wait "$PC_FUSE_PID" 2>/dev/null
-    kill -0 "$PC_FUSE_PID" 2>/dev/null && { echo "  daemon survived kill -9" >&2; return 1; }
-    fusermount3 -uz "$PC_MNT" 2>/dev/null
-    return 0
-}
-
-pc_cut() {        # the surrogate: write back, then drop the page cache
-    sync
-    if sudo -n true 2>/dev/null &&
-       sudo -n sh -c 'echo 3 > /proc/sys/vm/drop_caches' 2>/dev/null; then
-        info "page cache dropped (drop_caches=3): the reopen re-reads the medium"
-        return 0
-    fi
-    echo "  WARN: no root -- the page-cache cut was SKIPPED; this leg" >&2
-    echo "        degraded to kill -9 + reopen (process-death only)." >&2
-    return 1
-}
-
-pc_fsck() {       # <label>: structural gate, log in the page-cache scratch
-    pc_run "invf-fsck ($1)" "$PC_WORK/fsck.last" \
-        $B/invf-fsck "$PC_VOL" || return 1
-    tail -2 "$PC_WORK/fsck.last"
-    grep -q "^OK$" "$PC_WORK/fsck.last" && return 0
-    echo "  fsck not clean ($1):" >&2; cat "$PC_WORK/fsck.last" >&2
-    return 1
-}
-
-pc_verify() {     # <label>: rc==0 (0 corrupt AND parity clean-or-absent)
-    pc_run "invf-verify ($1)" "$PC_WORK/verify.last" \
-        $B/invf-verify "$PC_VOL" --deep || return 1
-    grep -E "^parity|^deep" "$PC_WORK/verify.last"
-    return 0
-}
+# Leg 6 was the WP22d journal-compaction leg: every flush forced into a slot
+# flip (INVFS_JRN_FORCE_COMPACT), raced against drop_writes windows, asserting
+# that replay landed on exactly one CRC-valid side. It drove the mapping
+# journal's slot image, selector flip and replay -- all deleted in
+# wp/purge-v2-l2p-journal -- and its env hook with them. The drop_writes chaos
+# coverage it shared is unchanged in legs 2, 3 and 5.
 
 leg7() {
     LEG=leg7-pagecache
@@ -1760,7 +1534,6 @@ want_leg 2 && leg2
 want_leg 3 && leg3
 want_leg 4 && leg4
 want_leg 5 && leg5
-want_leg 6 && leg6
 want_leg 7 && leg7
 want_leg 8 && leg8
 
