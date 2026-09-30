@@ -421,6 +421,69 @@ $(OUT)/invf-heat-conc-asan: $(HEAT_SAN_SRC) src/core/volume_internal.h | $(OUT)
 $(OUT)/invf-heat_table_concurrency_test: $(HEAT_SAN_SRC) src/core/volume_internal.h | $(OUT)
 	$(CC) $(HEAT_SAN_CFLAGS) -O2 -o $@ $(HEAT_SAN_SRC) $(HEAT_SAN_LIBS)
 
+# WP-cpack-map-copy-out: the RED CONTROL for the parsed !mbrmap cache, the
+# THIRD instance of the ARC shape on the same lock-free read call site.
+#
+# One source, three binaries, linked against src/core/vol_cpack.c ALONE.
+# vol_cpack.c needs the real volume_internal.h for the struct and calls ~45
+# project symbols, so src/cli/cpack_map_san_test.c defines the ones off the
+# path under test as stubs at the bottom of itself. The stubs that ARE on the
+# path (vol_find, vol_read_file, vol_read_range, seg_read_checked,
+# vol_ast_recipe_parse) serve synthetic containers, so the code under test
+# runs its REAL load, validate and serve paths -- the test observes the cache
+# only through the shipped accessors, never through a mirror of them. No
+# volume, no image, no codecpack, so a sanitizer build costs about a second.
+#
+#   cpack_map_conc_tsan  -> the STRUCTURE. vol_cpack.c had no lock and no
+#                           atomic anywhere, and the read path reaches it
+#                           with g_io_lock RELEASED (src/cli/fuse_fs.c:1407
+#                           then :1423, under fuse_loop_mt at :3362).
+#                           TSAN needs the accesses to be UNORDERED, not
+#                           overlapping, and with no edge anywhere the
+#                           unorderedness is guaranteed: reports first run.
+#   cpack_map_conc_asan  -> the LIFETIME, and both legs are PLANNED rather
+#                           than raced. planned_realloc: -Wl,--wrap=realloc
+#                           performs the grow's real realloc -- which frees
+#                           the old array -- and parks before
+#                           `v->maps = nm`, so a reader is guaranteed to
+#                           resolve against a freed, still-published array.
+#                           planned_free: -Wl,--wrap=free performs a retire's
+#                           real free of an entry's `ents` and parks with the
+#                           slot still naming a live container. Neither needs
+#                           a production hook.
+#   cpack_map_conc_test  -> the same source, no sanitizer. The glibc heap
+#                           checker aborts on the unfixed cache and the fixed
+#                           one asserts every read returned its OWN
+#                           container's bytes.
+#
+# The source declares cpack_locks_init WEAK, so all three compile and run
+# against a tree that predates the fix (the symbol resolves to NULL and the
+# cache is then used with no lock at all -- the defect). Same source, same
+# commands, red before and green after. -Wl,--wrap=free and
+# -Wl,--wrap=realloc go on all three so the interposers' __real_* resolve
+# even when the planned legs are not selected.
+#
+# Unlike the ARC and heat ASAN binaries this one keeps LeakSanitizer ON: the
+# entries are individually malloc'd, and a free that drops the payloads but
+# not the descriptor leaks a struct per cached container for the life of the
+# mount -- which is exactly the kind of thing that only shows up here.
+CPACK_SAN_CFLAGS := -std=gnu11 -O1 -g -fno-omit-frame-pointer $(addprefix -I,$(SRC) $(SRCDIRS)) \
+                    -pthread -DINVFS_EMBED_FLACX -DMINIZ_NO_ZLIB_APIS \
+                    -DBLAKE3_NO_SSE2 -DBLAKE3_NO_SSE41 -DBLAKE3_NO_AVX2 -DBLAKE3_NO_AVX512 \
+                    -Wl,--wrap=free -Wl,--wrap=realloc
+CPACK_SAN_LIBS   := -lpthread -Wl,-l:libzstd.so.1 -lz
+CPACK_SAN_SRC    := src/cli/cpack_map_san_test.c src/core/vol_cpack.c
+CPACK_SAN_ASAN   := hard_rss_limit_mb=4096
+
+$(OUT)/invf-cpack_map_conc_tsan: $(CPACK_SAN_SRC) src/core/volume_internal.h | $(OUT)
+	$(CC) $(CPACK_SAN_CFLAGS) -fsanitize=thread -o $@ $(CPACK_SAN_SRC) $(CPACK_SAN_LIBS)
+
+$(OUT)/invf-cpack_map_conc_asan: $(CPACK_SAN_SRC) src/core/volume_internal.h | $(OUT)
+	$(CC) $(CPACK_SAN_CFLAGS) -fsanitize=address -o $@ $(CPACK_SAN_SRC) $(CPACK_SAN_LIBS)
+
+$(OUT)/invf-cpack_map_conc_test: $(CPACK_SAN_SRC) src/core/volume_internal.h | $(OUT)
+	$(CC) $(CPACK_SAN_CFLAGS) -O2 -o $@ $(CPACK_SAN_SRC) $(CPACK_SAN_LIBS)
+
 $(OUT)/invf-gz_header_test: src/cli/gz_header_test.c $(CORE_O)
 	$(CC) $(GZHDR_SAN_CFLAGS) -o $@ $< $(CORE_O) \
 	      -fsanitize=address,undefined $(LDLIBS)
@@ -546,6 +609,8 @@ test: $(OUT)/invf-arctest $(OUT)/invf-blkio_test $(OUT)/invf-codec_test \
       $(OUT)/invf-arc_concurrency_test \
       $(OUT)/invf-heat-conc-tsan $(OUT)/invf-heat-conc-asan \
       $(OUT)/invf-heat_table_concurrency_test \
+      $(OUT)/invf-cpack_map_conc_tsan $(OUT)/invf-cpack_map_conc_asan \
+      $(OUT)/invf-cpack_map_conc_test \
       $(OUT)/invf-deflate_repro_test $(OUT)/invf-plugin_host_test $(OUT)/invf-plugin_mt_test \
       $(OUT)/invf-window_test $(OUT)/invf-nlink_v3_test \
       $(OUT)/invf-recipe_fsck_test $(OUT)/invf-fsck_liveness_test \
@@ -622,6 +687,19 @@ test: $(OUT)/invf-arctest $(OUT)/invf-blkio_test $(OUT)/invf-codec_test \
 	ASAN_OPTIONS=$(GZHDR_TEST_ASAN) INVFS_HEAT_SAN_LEG=all \
 	    $(TESTENV) $(TESTISO) $(OUT)/invf-heat-conc-asan
 	$(TESTENV) $(TESTISO) $(OUT)/invf-heat_table_concurrency_test
+	@# WP-cpack-map-copy-out: the parsed !mbrmap cache, under concurrency. It
+	@# is the THIRD instance of the ARC shape on the same lock-free call site:
+	@# no lock at all, a realloc that invalidates every pointer into the
+	@# array, a borrowed pointer handed to a reader that copies bytes out of
+	@# it, and a serve that reports success. TSAN is the structure; ASan's two
+	@# planned legs schedule the grow's realloc and a retire's free with
+	@# -Wl,--wrap=realloc / -Wl,--wrap=free instead of racing for them; the
+	@# plain build asserts every read got its own container's bytes. Any one
+	@# of the three reporting is this gate going red.
+	$(TESTENV) $(TESTISO) $(OUT)/invf-cpack_map_conc_tsan
+	ASAN_OPTIONS=$(CPACK_SAN_ASAN) INVFS_CPACK_SAN_LEG=all \
+	    $(TESTENV) $(TESTISO) $(OUT)/invf-cpack_map_conc_asan
+	INVFS_CPACK_SAN_LEG=all $(TESTENV) $(TESTISO) $(OUT)/invf-cpack_map_conc_test
 	$(TESTENV) $(TESTISO) $(OUT)/invf-dedupe_v3_test /tmp
 	$(TESTENV) $(TESTISO) $(OUT)/invf-window_test /tmp
 	$(TESTENV) $(TESTISO) $(OUT)/invf-nlink_v3_test /tmp

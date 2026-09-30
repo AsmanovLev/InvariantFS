@@ -1131,6 +1131,10 @@ static invfs_volume *vol_open_inner(const char *path, int at_ckpt,
      * lock-free read path (fuse_fs.c releases g_io_lock before vol_read_range),
      * so it carries its own leaf mutex rather than relying on a caller's. */
     heat_locks_init(v);
+    /* WP-cpack-map-copy-out: same reason, same shape. The parsed !mbrmap
+     * cache grows (realloc) and compacts on the lock-free read path, so it
+     * carries its own leaf mutex rather than relying on a caller's. */
+    cpack_locks_init(v);
 
     /* "W:" is the shorthand a user types; CreateFileW needs "\\.\W:". Store
        the normalized form, so diagnostics name what was actually opened. */
@@ -1154,6 +1158,7 @@ static invfs_volume *vol_open_inner(const char *path, int at_ckpt,
             *err = -2;
             free(v->path);
             heat_locks_destroy(v);
+            cpack_locks_destroy(v);   /* WP-cpack-map-copy-out */
             free(v);
             return NULL;
         }
@@ -2153,6 +2158,7 @@ fail:
     free(v->orph.inlist);
     free(v->heat_tab);
     heat_locks_destroy(v);   /* WP-heat-table-concurrent-safe */
+    cpack_locks_destroy(v);  /* WP-cpack-map-copy-out */
     free(v->pba_ref);
     free(v->l2p);
     free(v->l2p_idx);
@@ -2273,6 +2279,7 @@ void vol_close(invfs_volume *v)
     free(v->mjops);
     free(v->meta_mapper);
     heat_locks_destroy(v);   /* WP-heat-table-concurrent-safe */
+    cpack_locks_destroy(v);  /* WP-cpack-map-copy-out (after the map reset) */
     free(v->tier);
     free(v->rawm);
     free(v->path2);

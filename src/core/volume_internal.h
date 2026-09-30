@@ -474,8 +474,42 @@ typedef struct invfs_volume {
     /* WP16b: parsed !mbrmap cache (local-splice reads of seekable
      * containers). Filled on first map read of a container, invalidated
      * when its name (or a "name!..." sibling) is retired, freed at
-     * vol_close. */
-    struct cpack_map_cache *maps;
+     * vol_close.
+     *
+     * WP-cpack-map-copy-out: cpacks_mu guards maps, maps_n and maps_cap.
+     * These were written with no lock on the premise that the volume layer
+     * is caller-serialized, and that premise is FALSE for the same reason
+     * it was false for ARC and for the heat table: invf_read releases
+     * g_io_lock (src/cli/fuse_fs.c:1407) and THEN calls vol_read_range
+     * (:1423), under fuse_loop_mt (:3362). cpack_map_get
+     * (src/core/vol_cpack.c:2722) has exactly ONE caller -- cpack_map_read
+     * (:2831) -- and that has three, all inside vol_read_range
+     * (src/core/vol_read.c:1259, :1729, :1972), so the grow at
+     * src/core/vol_cpack.c:2772-2778 is reachable ONLY from the lock-free
+     * read path. The realloc invalidates every pointer into the array, and
+     * a retire both frees the entry's payloads and compacts the array over
+     * the hole (:2711), so an unguarded reader got freed OR SHIFTED heap
+     * and cpack_map_serve returned success with another container's bytes.
+     *
+     * cpacks_mu is a STRICT LEAF: every region holding it is straight-line
+     * code over these fields and the entry struct plus strcmp/strdup/free/
+     * memset. The map LOAD runs with it DROPPED, because it calls
+     * vol_find / vol_read_file / cpack_recipe_seg and the v3 tree, delta and
+     * plugin locks sit above it. So the only orders ever observed are
+     * g_io_lock -> cpacks.mu, vol_btree -> cpacks.mu,
+     * vol_plugin_client -> cpacks.mu, arc.mu -> cpacks.mu and
+     * heat.mu -> cpacks.mu -- never the reverse. g_io_lock is `static` to
+     * src/cli/fuse_fs.c:32, so no core file can take it. */
+    pthread_mutex_t cpacks_mu;
+    /* An array of POINTERS to individually malloc'd entries, not an array
+     * of entries. That is the whole point: a grow reallocs this array and
+     * frees the old block, so ANY pointer into it dangles -- and even a
+     * reader that resolved a reference under the lock could not then hand
+     * that reference back, because the address it holds is a realloc'd
+     * slot. An entry's own address never moves, so `struct
+     * cpack_map_cache *` is a stable handle and the reference count on it
+     * is a real lifetime, not a hopeful one. */
+    struct cpack_map_cache **maps;
     size_t maps_n, maps_cap;
     /* WP-Q2R3: a 2-slot cache of LOADED recipes. A recipe address IS the
      * BLAKE3 of its bytes, so a cached blob can never go stale -- there is
@@ -1561,6 +1595,11 @@ int  heat_any_rhot(const invfs_volume *v);
 int  heat_any_whot(const invfs_volume *v);
 void heat_locks_init(invfs_volume *v);
 void heat_locks_destroy(invfs_volume *v);
+
+/* WP-cpack-map-copy-out: the parsed-!mbrmap cache's leaf mutex, same shape
+ * and same reason as heat's. vol_open/vol_close call these. */
+void cpack_locks_init(invfs_volume *v);
+void cpack_locks_destroy(invfs_volume *v);
 
 /* stored heat of a record (0/0 when the TLV is absent) */
 int  heat_read_tlv(const uint8_t *rec, uint32_t rec_len,

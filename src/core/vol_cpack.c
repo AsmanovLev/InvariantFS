@@ -2658,7 +2658,21 @@ out:
 /* The per-volume parsed-map cache: one entry per seekable container the
  * read path has touched. Never re-read mid-session: content is immutable
  * under a name (rewrites are delete+create, and the retire invalidates).
- * Freed wholesale at vol_close. */
+ * Freed wholesale at vol_close.
+ *
+ * WP-cpack-map-copy-out: `refs` is a REFERENCE COUNT, and it is what stops
+ * a reader from holding a borrowed pointer into `v->maps`. The array is
+ * realloc'd when it grows (cpack_map_get, :2772-2778) -- which invalidates
+ * every pointer into it, free or no free -- and a retire frees the entry's
+ * payloads and then COMPACTS the array over the hole (:2711). So a reader
+ * that kept `&v->maps[i]` across either was reading freed or SHIFTED heap,
+ * and cpack_map_serve would have handed the caller another container's
+ * bytes and reported success. Instead, the lookup bumps `refs` under
+ * cpacks_mu and the caller drops it when it is done, with the lock NOT
+ * held. The entry is then reachable only through a pointer that no
+ * realloc and no compaction can move. A deep copy of ents/mem/recipe was
+ * the other option and was rejected on cost: `recipe` is the container's
+ * whole segment table, and copying it per 64 KiB read() is quadratic. */
 struct cpack_map_cache {
     char    *name;               /* the container's name (owned) */
     cpack_map_ent *ents;         /* the validated map, sorted by orig_off */
@@ -2668,61 +2682,150 @@ struct cpack_map_cache {
     uint8_t *recipe;             /* the recipe blob (segment, CRC-checked) */
     size_t   recipe_len;
     uint32_t decomp_gen;         /* the pack generation that built it (v2) */
+    size_t   refs;               /* 1 while published in v->maps, +1 per reader */
 };
 
 
+/* WP-cpack-map-copy-out. cpacks_mu is a STRICT LEAF: every region that
+ * holds it is straight-line code over `v->maps` / this struct plus
+ * strcmp/strdup/free/memset, and it calls nothing outside libc. The map
+ * LOAD deliberately runs with the lock DROPPED, because it descends into
+ * vol_find / vol_read_file / cpack_recipe_seg, and the v3 tree, delta and
+ * plugin locks all sit ABOVE this one. So the only orders ever observed
+ * are g_io_lock -> cpacks.mu, vol_btree -> cpacks.mu,
+ * vol_plugin_client -> cpacks.mu, arc.mu -> cpacks.mu and
+ * heat.mu -> cpacks.mu -- never the reverse. g_io_lock is `static` to
+ * src/cli/fuse_fs.c:32, so no core file can take it. */
+void cpack_locks_init(invfs_volume *v)
+{
+    if (!v) return;
+    pthread_mutex_init(&v->cpacks_mu, NULL);
+}
+
+void cpack_locks_destroy(invfs_volume *v)
+{
+    if (!v) return;
+    pthread_mutex_destroy(&v->cpacks_mu);
+}
+
+
+/* caller holds cpacks_mu. Drops an entry nobody references any more: its
+ * payloads AND the entry itself. The entries are individually malloc'd (see
+ * the `maps` field note in volume_internal.h), so the descriptor has to go
+ * with them -- freeing only the payloads leaks one struct per cached
+ * container for the life of the mount. */
 static void cpack_map_cache_free_ent(struct cpack_map_cache *m)
 {
+    if (!m) return;
     free(m->name);
     free(m->ents);
     free(m->mem);
     free(m->recipe);
-    memset(m, 0, sizeof *m);
+    free(m);
 }
 
+/* Drop one reference. The entry is freed only when the last READER lets go,
+ * so an in-flight cpack_map_read keeps serving the map it resolved -- the
+ * same guarantee arc_get_copy gives. */
+static void cpack_map_release(invfs_volume *v, struct cpack_map_cache *m)
+{
+    if (!m) return;
+    pthread_mutex_lock(&v->cpacks_mu);
+    if (m->refs > 0 && --m->refs == 0) cpack_map_cache_free_ent(m);
+    pthread_mutex_unlock(&v->cpacks_mu);
+}
+
+/* vol_close only. Drops the ARRAY's reference to each entry; an entry a
+ * reader still holds is deliberately left alone rather than freed under it
+ * -- at close the daemon has already stopped the read threads, so this can
+ * only cost one map's worth of memory at process exit, and freeing it would
+ * be the exact bug this whole change exists to stop. */
 void cpack_map_cache_reset(invfs_volume *v)
 {
     size_t i;
     if (!v) return;
+    pthread_mutex_lock(&v->cpacks_mu);
     for (i = 0; i < v->maps_n; i++)
-        cpack_map_cache_free_ent(&v->maps[i]);
+        if (v->maps[i]->refs > 0 && --v->maps[i]->refs == 0)
+            cpack_map_cache_free_ent(v->maps[i]);
     free(v->maps);
     v->maps = NULL;
     v->maps_n = v->maps_cap = 0;
+    pthread_mutex_unlock(&v->cpacks_mu);
 }
 
 
 /* Retiring `name` kills the map cached for it, and retiring a "name!..."
  * sibling (a member, the table, the map itself) kills the container's:
- * the next read reloads from the current records. */
+ * the next read reloads from the current records.
+ *
+ * The compaction below MOVES entries (v->maps[w] = v->maps[i]), which on
+ * the unfixed tree silently replaced the slot a concurrent reader was
+ * holding with a different container's entry -- and cpack_map_serve then
+ * served that container's bytes and reported success. Taking cpacks_mu
+ * here, and holding a reference across the read, closes both halves: a
+ * reader either resolved before this ran (and keeps its entry alive until
+ * it is done) or resolves after it (and reloads from the live records). */
 void cpack_map_cache_invalidate(invfs_volume *v, const char *name)
 {
     size_t i, w = 0;
 
     if (!v || !name) return;
+    pthread_mutex_lock(&v->cpacks_mu);
     for (i = 0; i < v->maps_n; i++) {
-        size_t nl = strlen(v->maps[i].name);
-        int hit = strcmp(v->maps[i].name, name) == 0 ||
-                  (strncmp(name, v->maps[i].name, nl) == 0 && name[nl] == '!');
+        struct cpack_map_cache *m = v->maps[i];
+        size_t nl = strlen(m->name);
+        int hit = strcmp(m->name, name) == 0 ||
+                  (strncmp(name, m->name, nl) == 0 && name[nl] == '!');
         if (hit) {
-            cpack_map_cache_free_ent(&v->maps[i]);
+            /* A reader that already resolved this map still holds a
+             * reference, so the entry outlives the retire and the reader
+             * finishes against the map it resolved. The next reader
+             * misses and reloads from the live records. */
+            if (m->refs > 0 && --m->refs == 0) cpack_map_cache_free_ent(m);
             continue;
         }
-        if (w != i) v->maps[w] = v->maps[i];
+        if (w != i) v->maps[w] = m;
         w++;
     }
     v->maps_n = w;
+    pthread_mutex_unlock(&v->cpacks_mu);
 }
 
 
-/* Load-or-return the cached map for a container. NULL on any failure
+/* Load-or-reference the cached map for a container. 0 on any failure
  * (missing siblings -- the callers gate on the !mbrmap presence -- a
  * corrupt map or table, an unreadable recipe segment): everything is
- * re-validated against the live record because this IS disk data. */
-static const struct cpack_map_cache *cpack_map_get(invfs_volume *v,
-                                                   const char *name,
-                                                   uint64_t ino,
-                                                   uint64_t container_size)
+ * re-validated against the live record because this IS disk data.
+ *
+ * WP-cpack-map-copy-out. This is the copy-out-of-lock half of the fix, and
+ * BOTH things it hands back matter:
+ *
+ *   *out   a BY-VALUE copy of the entry's descriptor, taken under
+ *          cpacks_mu. The caller then reads m->ents / m->mem / m->recipe
+ *          with the lock DROPPED and nothing can move them: a realloc of
+ *          v->maps copies the old array and frees it, so reading the
+ *          fields out of the array element is a race on the array block
+ *          itself, not just on the entry. (TSAN found exactly that here
+ *          the first time this was written with a reference alone and no
+ *          value copy -- a good reminder that "the entry is alive" and
+ *          "the descriptor is somewhere safe to read" are two claims.)
+ *
+ *   *owner the array element, carrying a REFERENCE. The payloads behind
+ *          the copy's pointers are separate allocations that only
+ *          cpack_map_cache_free_ent frees, and that only happens when the
+ *          last reference goes; the caller's cpack_map_release is that
+ *          last reference for a reader that has resolved already.
+ *
+ * cpack_map_get is `static` and cpack_map_read is its only caller, on
+ * purpose: there is exactly one way into this cache, so a second accessor
+ * cannot appear and diverge from the locking.
+ *
+ * Returns 1 on success, 0 on failure. */
+static int cpack_map_get(invfs_volume *v, const char *name, uint64_t ino,
+                         uint64_t container_size,
+                         struct cpack_map_cache *out,
+                         struct cpack_map_cache **owner)
 {
     char tn[288], mn[288];
     uint8_t *table = NULL, *mapb = NULL, *recipe = NULL;
@@ -2734,17 +2837,31 @@ static const struct cpack_map_cache *cpack_map_get(invfs_volume *v,
     uint32_t decomp_gen = 0;
     struct cpack_map_cache *e;
 
+    pthread_mutex_lock(&v->cpacks_mu);
     for (i = 0; i < v->maps_n; i++)
-        if (strcmp(v->maps[i].name, name) == 0)
-            return &v->maps[i];
+        if (strcmp(v->maps[i]->name, name) == 0) {
+            e = v->maps[i];
+            e->refs++;
+            *out = *e;              /* the value copy, under the lock */
+            *owner = e;
+            pthread_mutex_unlock(&v->cpacks_mu);
+            return 1;
+        }
+    pthread_mutex_unlock(&v->cpacks_mu);
 
+    /* The load runs UNLOCKED: it calls vol_find / vol_read_file /
+     * cpack_recipe_seg, which descend into the v3 tree, and those locks
+     * sit above cpacks_mu. Holding a leaf across them would be a cycle.
+     * Two threads racing on a cold name therefore both load; the insert
+     * below re-checks and keeps ONE of them, so the duplicate is a cost
+     * and never a second visible entry. */
     snprintf(tn, sizeof tn, "%s!mbrt", name);
     snprintf(mn, sizeof mn, "%s!mbrmap", name);
     tino = vol_find(v, tn);
     mino = vol_find(v, mn);
     if (!tino || !mino) {
         if (getenv("INVFS_DEBUG_PACKS")) fprintf(stderr, "[cpack] map_get %s: tino=%llu mino=%llu\n", name, (unsigned long long)tino, (unsigned long long)mino);
-        return NULL;
+        return 0;
     }
     if (vol_read_file(v, mino, &mapb, &map_len) != 0 ||
         cpack_map_parse(mapb, map_len, &ents, &nents, &decomp_gen) != 0) {
@@ -2769,18 +2886,29 @@ static const struct cpack_map_cache *cpack_map_get(invfs_volume *v,
     free(mapb);
     mapb = NULL;
 
+    pthread_mutex_lock(&v->cpacks_mu);
+    /* Re-check under the lock: another thread may have published this name
+     * (or retired it) while we were loading. */
+    for (i = 0; i < v->maps_n; i++)
+        if (strcmp(v->maps[i]->name, name) == 0) {
+            e = v->maps[i];
+            e->refs++;
+            *out = *e;
+            *owner = e;
+            goto drop_ours;         /* unlocks below */
+        }
     if (v->maps_n == v->maps_cap) {
         size_t nc = v->maps_cap ? v->maps_cap * 2 : 8;
-        struct cpack_map_cache *nm =
-            (struct cpack_map_cache *)realloc(v->maps, nc * sizeof *nm);
-        if (!nm) goto fail_recipe;
+        struct cpack_map_cache **nm =
+            (struct cpack_map_cache **)realloc(v->maps, nc * sizeof *nm);
+        if (!nm) { pthread_mutex_unlock(&v->cpacks_mu); goto fail_recipe; }
         v->maps = nm;
         v->maps_cap = nc;
     }
-    e = &v->maps[v->maps_n];
-    memset(e, 0, sizeof *e);
+    e = (struct cpack_map_cache *)calloc(1, sizeof *e);
+    if (!e) { pthread_mutex_unlock(&v->cpacks_mu); goto fail_recipe; }
     e->name = strdup(name);
-    if (!e->name) goto fail_recipe;
+    if (!e->name) { free(e); pthread_mutex_unlock(&v->cpacks_mu); goto fail_recipe; }
     e->ents = ents;
     e->n_ents = nents;
     e->mem = mem;
@@ -2788,8 +2916,20 @@ static const struct cpack_map_cache *cpack_map_get(invfs_volume *v,
     e->recipe = recipe;
     e->recipe_len = recipe_len;
     e->decomp_gen = decomp_gen;
-    v->maps_n++;
-    return e;
+    e->refs = 2;                     /* the array's own, and the reader's */
+    *out = *e;
+    *owner = e;
+    v->maps[v->maps_n++] = e;        /* published LAST, fully built */
+    pthread_mutex_unlock(&v->cpacks_mu);
+    return 1;
+
+drop_ours:
+    /* somebody else got there first: keep theirs, throw ours away. */
+    pthread_mutex_unlock(&v->cpacks_mu);
+    free(recipe);
+    free(mem);
+    free(ents);
+    return 1;
 
 fail_recipe:
     free(recipe);
@@ -2798,7 +2938,7 @@ fail:
     free(mapb);
     free(mem);
     free(ents);
-    return NULL;
+    return 0;
 }
 
 
@@ -2827,21 +2967,36 @@ uint32_t cpack_map_decomp_gen(invfs_volume *v, const char *name)
 /* The seekable read entry point: serve [off, off+len) of a seekable container
  * by local splice through its cached map. Returns the byte count (clamped
  * at the container size), -1 on any failure -- loud, like a corrupt member
- * on the exec path. */
+ * on the exec path.
+ *
+ * WP-cpack-map-copy-out: this is the ONLY public way into the map cache, and
+ * it is find-and-reference -> SERVE WITH cpacks_mu DROPPED -> release. The
+ * serve must run unlocked: cpack_member_read calls vol_read_range for the
+ * member siblings, so holding a leaf mutex across it would serialize every
+ * container read in the daemon and re-enter the read path under the lock.
+ * The reference taken in cpack_map_get is what makes the unlocked serve
+ * safe -- the entry and its payloads cannot be freed or moved under it. */
 int64_t cpack_map_read(invfs_volume *v, const char *name, uint64_t ino,
                           uint64_t container_size, uint64_t off,
                           uint8_t *dst, size_t len)
 {
-    const struct cpack_map_cache *m;
+    struct cpack_map_cache m, *owner;
+    int64_t rc;
 
     if (off >= container_size) return 0;
     if (off + len > container_size) len = (size_t)(container_size - off);
-    m = cpack_map_get(v, name, ino, container_size);
-    if (!m) return -1;
-    if (cpack_map_serve(v, name, m->ents, m->n_ents, m->mem, m->nmem,
-                        m->recipe, m->recipe_len, off, dst, len) != 0)
-        return -1;
-    return (int64_t)len;
+    if (!cpack_map_get(v, name, ino, container_size, &m, &owner)) return -1;
+    /* UNLOCKED, and safe: `m` is a stack copy taken under cpacks_mu and
+     * `owner` holds a reference, so the grow's realloc cannot move the
+     * fields being read and the retire cannot free them. The serve must
+     * run unlocked -- cpack_member_read calls vol_read_range for the
+     * member siblings, so holding a leaf across it would serialize every
+     * container read in the daemon and re-enter the read path under it. */
+    rc = cpack_map_serve(v, name, m.ents, m.n_ents, m.mem, m.nmem,
+                         m.recipe, m.recipe_len, off, dst, len) == 0
+       ? (int64_t)len : (int64_t)-1;
+    cpack_map_release(v, owner);
+    return rc;
 }
 
 

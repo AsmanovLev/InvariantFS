@@ -1413,13 +1413,20 @@ static int invf_read(const char *path, char *buf, size_t size, off_t offset,
     /* Data read: lock-free, and that means EVERY structure vol_read_range
      * touches must be safe on its own. The io_pread claim is true and it is
      * not the whole story: the block I/O is stateless, but the path above it
-     * is not. Two structures have been found racing here because this comment
-     * read as a blanket guarantee that there was nothing left to lock --
-     * the ARC cache (fixed in 40ad1e3; see arc.h) and the read-heat table
-     * (src/core/vol_heat.c, heat_mu). Both are strict-leaf mutexes now, and
-     * that -- not the pread -- is what makes this line safe. If you add a
-     * cache, a counter or an index to vol_read_range, it needs its own
-     * locking; "the pread is thread-safe" is not an answer. */
+     * is not. THREE structures have been found racing here because this
+     * comment read as a blanket guarantee that there was nothing left to
+     * lock --
+     *   the ARC cache            (fixed in 40ad1e3; see arc.h, arc.mu)
+     *   the read-heat table      (src/core/vol_heat.c, heat_mu)
+     *   the parsed !mbrmap cache (src/core/vol_cpack.c, cpacks_mu)
+     * All three are strict-leaf mutexes now, and that -- not the pread -- is
+     * what makes this line safe. The third is the sharpest case of the three:
+     * its grow REALLOCs the array, which invalidates every pointer into it,
+     * and what it handed the reader was a borrow into that array. If you add
+     * a cache, a counter or an index to vol_read_range, it needs its own
+     * locking; "the pread is thread-safe" is not an answer. And if it hands
+     * anything out, hand out a copy or a reference -- never a pointer into a
+     * structure another thread can move. */
     got = vol_read_range(g_vol, ino, (uint64_t)offset, size, buf);
     if (got < 0)
         return -EIO;
@@ -3350,11 +3357,18 @@ int main(int argc, char *argv[])
         se = fuse_get_session(f);
         fuse_set_signal_handlers(se);
 
-        /* WP17: multithreaded loop. volume.c has NO internal locks, so all
-         * engine/table state stays serialized by the single g_io_lock (every
-         * op already takes it; the per-handle write-buffer paths were closed
-         * in this wave). mt then overlaps kernel<->daemon IPC (request
-         * dispatch, splice copies) with the locked engine work.
+        /* WP17: multithreaded loop. When this was written the claim was that
+         * the core has NO internal locks, so all engine/table state stays
+         * serialized by the single g_io_lock -- "every op already takes it".
+         * BOTH halves of that are false now, and finding out cost three
+         * silent-corruption bugs: the core DOES carry its own leaf mutexes
+         * (arc.mu, heat.mu, cpacks_mu), and g_io_lock does NOT cover every
+         * op -- invf_read releases it and THEN calls vol_read_range (:1407,
+         * :1423), under the comment above. So "g_io_lock serializes the
+         * engine" is not a safety argument for a new structure; the lock-free
+         * read path is the counterexample and it is the busiest one. mt then
+         * overlaps kernel<->daemon IPC (request dispatch, splice copies)
+         * with the locked engine work.
          * API quirk: at FUSE_USE_VERSION=31 fuse_loop_mt(f, arg) maps to
          * fuse_loop_mt_31(f, clone_fd) -- struct fuse_loop_config only
          * exists at API >= 32 -- so pass clone_fd=0 and take libfuse
