@@ -299,6 +299,151 @@ static int run_frame_disagreement_leg(const char *img,
     return fails;
 }
 
+/* The SAME tamper, run through the SWEEP instead of the read path.
+ *
+ * ast_frame_ok() is the one implementation of "does this frame back this
+ * recipe entry". The read paths call it. The sweep has its own copy of the
+ * decode step -- sweep_thread_worker(), vol_sweep.c -- and that copy did
+ *
+ *     memcpy(orig, blob_old, orig_len);      // orig_len = e->length
+ *
+ * with no framing check at all, where `blob_old` is a `csize_old`-byte
+ * allocation. So a frame the read path refuses is a frame the sweep happily
+ * re-frames: the over-read tail is compressed, CRC'd, allocated and written
+ * back as an ordinary stored segment. After one sweep the file reads back
+ * SUCCESSFULLY with wrong bytes -- a bit-exactness violation manufactured out
+ * of a corruption the system had already detected and rejected, and laundered
+ * into a CRC-valid segment.
+ *
+ * The invariant pinned here is not "the sweep fails" -- a sweep is allowed to
+ * skip a segment it cannot decode, and skipping is the right answer. It is
+ * that after vol_sweep_file() the file must not read back as successfully-
+ * wrong. Either the sweep leaves the disagreement in place (the next read
+ * still refuses, loudly) or it declines to touch the file.
+ */
+static int run_sweep_frame_disagreement_leg(const char *img,
+                                            const uint8_t *orig,
+                                            size_t fsize)
+{
+    invfs_volume *v;
+    int err = 0, fails = 0, sweep_rc, read_rc;
+    uint64_t id, rid;
+    invfs_v3_inode in;
+    invfs_ast_hdr ah;
+    const invfs_ast_block_entry *ents = NULL;
+    invfs_ast_block_entry *tap = NULL;
+    uint8_t *blob = NULL, *nblob = NULL;
+    size_t blen = 0, nblen = 0;
+    uint8_t naddr[INVFS_V3_RECIPE_ADDR_LEN];
+    uint8_t *got = NULL;
+    size_t glen = 0;
+    char cmd[600];
+
+    unsetenv("INVFS_READ_THREADS");
+    unsetenv("INVFS_FORCE_DEV");
+    snprintf(cmd, sizeof cmd, "./bin/invf-mkfs %s 2 >/dev/null 2>&1", img);
+    if (system(cmd) != 0) { printf("  FAIL  sweep leg: mkfs failed\n"); return 1; }
+    v = vol_open(img, &err);
+    if (!v) { printf("  FAIL  sweep leg: vol_open (%d)\n", err); return 1; }
+
+    id = vol_v3_write_bulk(v, "sweepframe.bin", (uint8_t *)orig, fsize, NULL);
+    if (!id) { printf("  FAIL  sweep leg: write\n"); vol_close(v); return 1; }
+    if (vol_v3_inode_get(v, id, &in) != 1) {
+        printf("  FAIL  sweep leg: inode_get\n"); vol_close(v); return 1;
+    }
+    if (vol_v3_recipe_load(v, in.recipe_addr, &blob, &blen) != 0 || !blob ||
+        vol_ast_recipe_parse(blob, blen, &ah, &ents, NULL) != 0) {
+        printf("  FAIL  sweep leg: recipe load/parse\n"); free(blob); vol_close(v); return 1;
+    }
+    if (ah.num_blocks < 2) {
+        printf("  FAIL  sweep leg: recipe has %u entries; the per-segment "
+               "sweep needs > 1, so this leg proved nothing\n", ah.num_blocks);
+        free(blob); vol_close(v); return 1;
+    }
+
+    tap = (invfs_ast_block_entry *)malloc((size_t)ah.num_blocks * sizeof *tap);
+    if (!tap) { free(blob); vol_close(v); return 1; }
+    memcpy(tap, ents, (size_t)ah.num_blocks * sizeof *tap);
+    free(blob); blob = NULL;
+
+    {
+        size_t pick = (size_t)-1;
+        uint32_t pick_csize = 0;
+        size_t k;
+        for (k = 0; k < ah.num_blocks; k++) {
+            uint32_t csize = 0; uint8_t *b = NULL;
+            if (tap[k].pba == 0) continue;
+            if (seg_read_checked(v, tap[k].pba, 0, 1, &csize, &b) != 0)
+                continue;
+            free(b);
+            if (csize < tap[k].length) { pick = k; pick_csize = csize; break; }
+        }
+        if (pick == (size_t)-1) {
+            printf("  FAIL  sweep leg: every frame is >= its entry length, so "
+                   "no disagreement exists and this leg proved nothing\n");
+            free(tap); vol_close(v); return 1;
+        }
+        tap[pick].algo = INVFS_ALGO_NONE;
+        printf("  ..    sweep leg: entry %zu relabelled NONE; frame holds "
+               "%u bytes, entry claims %llu\n", pick, pick_csize,
+               (unsigned long long)tap[pick].length);
+    }
+
+    if (vol_ast_recipe_serialize(ah.file_size, tap, ah.num_blocks,
+                                 &nblob, &nblen) != 0 ||
+        vol_v3_recipe_store(v, nblob, nblen, naddr) != 0) {
+        printf("  FAIL  sweep leg: could not republish recipe\n");
+        free(nblob); free(tap); vol_close(v); return 1;
+    }
+    free(nblob); free(tap);
+    memcpy(in.recipe_addr, naddr, sizeof naddr);
+    if (vol_v3_inode_delta_put(v, id, &in) != 0) {
+        printf("  FAIL  sweep leg: inode_delta_put\n"); vol_close(v); return 1;
+    }
+    vol_flush(v);
+
+    /* The read path must refuse this recipe -- establish that, so a later
+     * successful read can only be the sweep's doing. */
+    read_rc = vol_read_inode(v, id, 0, &got, &glen);
+    free(got); got = NULL;
+    if (read_rc == 0) {
+        printf("  FAIL  sweep leg: the read path ACCEPTED the disagreement; "
+               "the control this leg rests on is broken\n");
+        vol_close(v); return 1;
+    }
+
+    sweep_rc = vol_sweep_file(v, id);
+    printf("  ..    sweep leg: vol_sweep_file -> %d\n", sweep_rc);
+
+    /* Re-read by NAME: the sweep may have superseded the inode. */
+    rid = vol_find(v, "sweepframe.bin");
+    if (!rid) rid = id;
+    read_rc = vol_read_inode(v, rid, 0, &got, &glen);
+    if (read_rc != 0) {
+        printf("  OK    sweep leg: the sweep left the disagreement in place; "
+               "the file still refuses to read (rc=%d)\n", read_rc);
+    } else if (glen == fsize && fsize > 0 && memcmp(got, orig, fsize) == 0) {
+        printf("  OK    sweep leg: the file reads back bit-exact\n");
+    } else {
+        long d = -1;
+        size_t i;
+        for (i = 0; i < glen && i < fsize; i++)
+            if (got[i] != orig[i]) { d = (long)i; break; }
+        printf("  FAIL  sweep leg: sweep ACCEPTED a frame shorter than its "
+               "entry length and the file now reads back SUCCESSFULLY with "
+               "%zu bytes", glen);
+        if (d >= 0)
+            printf(", first wrong byte at offset %ld: got 0x%02x want 0x%02x",
+                   d, got[d] & 0xff, orig[d] & 0xff);
+        printf(" -- the sweep laundered a detected corruption into a "
+               "CRC-valid segment\n");
+        fails++;
+    }
+    free(got);
+    vol_close(v);
+    return fails;
+}
+
 int main(int argc, char **argv)
 {
     const char *dir = (argc > 1) ? argv[1] : "/tmp";
@@ -345,6 +490,11 @@ int main(int argc, char **argv)
     fails += run_leg(img, "FORCE_DEV path (aligned=1, shared bounce)",
                      1, orig, fsize, reps, threads);
     fails += run_frame_disagreement_leg(img, orig, fsize);
+    /* The sweep leg gets its own, smaller file: the per-segment sweep only
+     * runs for a recipe with more than one entry, and the whole point is the
+     * recipe -- 32 entries of it is as much as this leg needs. */
+    fails += run_sweep_frame_disagreement_leg(img, orig,
+                                             32u * SEGMENT_SIZE);
 
     unlink(img);
     free(orig);

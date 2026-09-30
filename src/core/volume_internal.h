@@ -1398,6 +1398,21 @@ int seg_extent(invfs_volume *v, uint64_t pba, uint32_t *csize_out,
                uint64_t *plen_out);
 int seg_extent_checked(invfs_volume *v, uint64_t pba, uint64_t *plen_out);
 
+/* ---- the segment framing contract, in ONE place ------------------------
+ * "Does this stored frame back this recipe entry?" -- `hdr` is the csize the
+ * frame header on disk claims, `len` is the length the entry claims. 0 = the
+ * frame is well-formed for that algo, -1 = it is not.
+ *
+ * This used to live ONLY in the read loops, which made every OTHER decoder of
+ * a stored segment -- the sweep's per-segment recompress, above all -- a
+ * second, weaker implementation of the same contract. The sweep's version
+ * memcpy'd `len` bytes out of a `hdr`-byte allocation, then compressed,
+ * CRC'd, allocated and wrote the result back: a corruption the read path
+ * refused came back as a file that reads successfully with wrong bytes.
+ * Declared here so the sweep CALLS this instead of re-deriving it. */
+int ast_frame_ok(uint8_t algo, uint32_t hdr, uint64_t len,
+                 const char *algo_name);
+
 /* ---- WP27: pba reference map (PB7 without the L2P) --------------------
  * pba_ref_ensure builds the map from the live name-index set (idempotent,
  * cheap after the first build); pba_ref_apply walks a just-written or

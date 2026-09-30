@@ -373,9 +373,15 @@ typedef struct {
  * WP94 parallel fast path a second, weaker implementation of the same
  * contract -- it validated nothing and copied `e->length` for ALGO_NONE. Both
  * loops call this now, so "the fast path is a different implementation" cannot
- * rot back into "the fast path is a worse implementation". */
-static int ast_frame_ok(uint8_t algo, uint32_t hdr, uint64_t len,
-                        const char *algo_name)
+ * rot back into "the fast path is a worse implementation".
+ *
+ * WP200: the SWEEP decodes stored segments too -- sweep_thread_worker() in
+ * vol_sweep.c, one per segment, across a pool of threads -- and it had its own
+ * copy of this contract, which was to have none of it. It is declared in
+ * volume_internal.h and called from there for exactly the same reason: a
+ * decoder that cannot see the check is free to skip it. */
+int ast_frame_ok(uint8_t algo, uint32_t hdr, uint64_t len,
+                 const char *algo_name)
 {
     if (algo == INVFS_ALGO_NONE) {
         if (hdr != len) {

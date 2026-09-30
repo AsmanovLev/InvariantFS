@@ -1462,6 +1462,30 @@ static void *sweep_thread_worker(void *arg_) {
         if (!a->tasks[k].valid) continue;
         size_t orig_len = a->tasks[k].orig_len;
 
+        /* WP200: the frame must say what the recipe says it says, BEFORE any
+         * of the bytes are copied -- and the check is the read path's
+         * ast_frame_ok(), not a fourth derivation of the same rule.
+         *
+         * This used to be a bare `memcpy(orig, blob_old, orig_len)` in the
+         * else arm, where `blob_old` is a `csize_old`-byte allocation. When
+         * the frame is shorter than the entry claims, that read runs off the
+         * end of the heap block -- and unlike the read path's over-read,
+         * whose damage ended at the caller's buffer, this one is WRITTEN
+         * BACK: the over-read tail is recompressed, CRC'd, allocated and
+         * stored as an ordinary segment. A corruption the read path refused
+         * came back one sweep later as a file that reads successfully with
+         * wrong bytes. Marking the task invalid is the same "leave this
+         * segment exactly as it was found" answer the decompress-failure
+         * arms below already give. */
+        if (ast_frame_ok(a->tasks[k].old_algo, a->tasks[k].csize_old,
+                         orig_len,
+                         a->tasks[k].old_algo == INVFS_ALGO_ZSTD ? "zstd" : "lz4") != 0) {
+            free(a->tasks[k].blob_old);
+            a->tasks[k].blob_old = NULL;
+            a->tasks[k].valid = 0;
+            continue;
+        }
+
         if (a->tasks[k].old_algo == INVFS_ALGO_LZ4) {
             int got = LZ4_decompress_safe((const char *)a->tasks[k].blob_old, (char *)orig,
                                           (int)a->tasks[k].csize_old, (int)orig_len);
