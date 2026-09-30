@@ -68,6 +68,9 @@ TESTENV := INVFS_CODECPACKS_SYS=0
 # A killed run therefore leaves residue the next run trips over. See
 # tools/run-unit-isolated.sh for what this does and does NOT fix.
 TESTISO := bash tools/run-unit-isolated.sh
+# wp/dirs-free-before-publish needs cross-process state, and $(TESTISO) gives
+# every command a private /tmp. build/ is gitignored and per-worktree.
+FRB_T := $(CURDIR)/build/frbtest
 
 TOOLS   := invf-mkfs invf-verify invf-fsck invf-cp invf-cat invf-ls invf-stat \
            invf-zip invf-arctest invf-blkio_test invf-fuse invf-import invf-sweep meta_probe \
@@ -127,7 +130,7 @@ CLI_MAINS := mkfs verify fsck cp cat ls stat arctest blkio_test resize \
              sweep_publish_rollback_test \
              rollback_symlink_test \
              sibling_retire_v3_test tar_cap_test fold_delta_read_test \
-             reclaim_reader_epoch_test readdir_error_test dedupe_symlink_test
+             reclaim_reader_epoch_test readdir_error_test dedupe_symlink_test dirs_free_before_publish_test
 $(foreach t,$(CLI_MAINS),$(eval $(call TOOL_RULE,$(t),)))
 
 # reclaim_reader_epoch_test was, for one commit, a red control that built but
@@ -820,6 +823,32 @@ test: $(TEST_BINS) $(OUT)/invf-arctest $(OUT)/invf-blkio_test $(OUT)/invf-codec_
 	$(TESTENV) $(TESTISO) $(OUT)/invf-pbaref_v3_test /tmp rednosweep
 	$(TESTENV) $(TESTISO) $(OUT)/invf-pbaref_v3_test /tmp all
 	$(TESTENV) $(TESTISO) $(OUT)/invf-pbaref_v3_test /tmp allnosweep
+	@# WP wp/dirs-free-before-publish: vol_v3_create_node freed the existing
+	@# inode's blocks BEFORE it republished the row, so each of the four
+	@# failure returns between the free and the publish left a LIVE row naming
+	@# freed, re-allocatable blocks -- reachable from an ordinary O_TRUNC on
+	@# a volume that cannot append a delta record.
+	@#
+	@# The legs are SEPARATE PROCESSES and `setup` writes the volume each time,
+	@# so the arming (setenv at process start, before vol_open) is read on the
+	@# FIRST vol_v3_inode_delta_put call in the process -- which is the
+	@# truncate's, because nothing else publishes a row in that process. That
+	@# is what lets the injector stay `static inline` with no reload helper.
+	@# `red` must follow its `setup` and precede any leg that mkfs's afresh;
+	@# `hookctl` mkfs's its own volume, so it goes last. `ok` asserts the
+	@# pre-existing safe path still SUCCEEDS and still reclaims, which is the
+	@# leg a fix that refuses every truncate would fail.
+	@#
+	@# The scratch dir is $(FRB_T), NOT /tmp, and that is load-bearing:
+	# $(TESTISO) mounts a FRESH private tmpfs on /tmp for every single
+	# command, so a phase's state cannot survive into the next one. build/ is
+	# gitignored, inside the repo (which the wrapper keeps visible), and
+	# per-worktree, so two concurrent `make test` runs cannot collide.
+	$(TESTENV) $(TESTISO) $(OUT)/invf-dirs_free_before_publish_test $(FRB_T) setup
+	$(TESTENV) $(TESTISO) $(OUT)/invf-dirs_free_before_publish_test $(FRB_T) red
+	$(TESTENV) $(TESTISO) $(OUT)/invf-dirs_free_before_publish_test $(FRB_T) setup
+	$(TESTENV) $(TESTISO) $(OUT)/invf-dirs_free_before_publish_test $(FRB_T) ok
+	$(TESTENV) $(TESTISO) $(OUT)/invf-dirs_free_before_publish_test $(FRB_T) hookctl
 	$(TESTENV) $(TESTISO) $(OUT)/invf-sibling_retire_v3_test
 	@# The container MEMBER BOUND is one number in the engine and eight
 	@# mirrored copies in the container packs. Nothing noticed when they

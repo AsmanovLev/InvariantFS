@@ -321,9 +321,10 @@ uint64_t vol_v3_create_node(invfs_volume *v, const char *name,
                             const invfs_meta_pub *meta)
 {
     char parent[600], leaf[INVFS_MAX_NAME + 1];
+    uint8_t old_addr[INVFS_V3_RECIPE_ADDR_LEN];
     uint64_t pino, id, existing = 0;
     invfs_v3_inode in;
-    int rc;
+    int rc, had_content = 0;
 
     if (!v)
         return 0;
@@ -335,6 +336,7 @@ uint64_t vol_v3_create_node(invfs_volume *v, const char *name,
         return 0;
     if (!vol_v3_path_is_dir(v, parent))
         return 0;
+    memset(old_addr, 0, sizeof old_addr);
     rc = vol_v3_dirent_get(v, pino, leaf, &existing);
     if (rc < 0)
         return 0;
@@ -342,8 +344,14 @@ uint64_t vol_v3_create_node(invfs_volume *v, const char *name,
         id = existing;
         if (vol_v3_inode_get(v, id, &in) != 1)
             memset(&in, 0, sizeof in);
-        else if (in.type == INVFS_ITYP_REG && in.size > 0)
-            vol_v3_free_recipe_blocks(v, in.recipe_addr, 0);
+        else if (in.type == INVFS_ITYP_REG && in.size > 0) {
+            /* CAPTURE the superseded recipe; the free waits for the row that
+             * supersedes it to be durable. `in.type` is read here, BEFORE
+             * `meta` can overwrite it below -- a REG replaced by a symlink
+             * still has data blocks to release. */
+            memcpy(old_addr, in.recipe_addr, sizeof old_addr);
+            had_content = 1;
+        }
     } else {
         id = vol_v3_inode_alloc(v);
         if (!id)
@@ -382,6 +390,27 @@ uint64_t vol_v3_create_node(invfs_volume *v, const char *name,
     }
     if (vol_v3_inode_delta_put(v, id, &in) != 0)
         return 0;
+    /* The supersede is now durable in the delta log and the live row names
+     * the NEW recipe, so the old blocks are unreachable by anything that can
+     * still be read -- free them now, and only now. Mirrors vol_v3_unlink:
+     * the row goes first, the blocks second.
+     *
+     * Deferring costs nothing here. The row this publishes names NO recipe
+     * for a REG/DIR replacement (recipe_addr is memset to zero, and a zero
+     * address names no blocks -- vol_v3_free_recipe_blocks, vol_ast.c:151),
+     * so nothing live points into the old recipe when the free runs; the
+     * recipe BLOB is a base-tree value under 0x04 || BLAKE3(blob), reclaimed
+     * by the fold, not here. Where a recipe IS published (a symlink target)
+     * the address is BLAKE3 of the blob, so identical content recurs at the
+     * SAME address -- which is exactly why the free is guarded on the row
+     * having MOVED. That is the guard vol_v3_release_superseded_blob already
+     * carries, and it is load-bearing twice over: vol_v3_inode_delta_put only
+     * invalidates the pba map when recipe_addr changes, so freeing an
+     * address the row still names would decrement counts the map attributes
+     * to nothing. */
+    if (had_content &&
+        memcmp(in.recipe_addr, old_addr, INVFS_V3_RECIPE_ADDR_LEN) != 0)
+        vol_v3_free_recipe_blocks(v, old_addr, 0);
     if (vol_v3_dirent_delta_put(v, pino, leaf, id) != 0)
         return 0;
     if (in.type == INVFS_ITYP_DIR)
