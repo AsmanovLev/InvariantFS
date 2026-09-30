@@ -177,6 +177,12 @@ static uint64_t dedup_cur_pba(invfs_volume *v, uint64_t inode, uint64_t lba)
         size_t n_ents = 0;
         if (vol_v3_inode_get(v, inode, &in) != 1)
             return 0;
+        /* Same predicate as the collector, for the same reason: a raw-blob
+         * type's blob is not an AST and names no segment, so there is no
+         * pba to report. Harmless here today only because the parse fails
+         * on a strlen-delimited target string. */
+        if (invfs_inode_content_is_raw_blob(in.type))
+            return 0;
         if (vol_v3_recipe_load(v, in.recipe_addr, &blob, &blen) != 0 || !blob)
             return 0;
         if (vol_ast_recipe_parse(blob, blen, &ah, &ents, &n_ents) == 0 && ents) {
@@ -269,6 +275,16 @@ static int dedup_remap_file_v3(invfs_volume *v, uint64_t inode,
     *cross_applied_out = 0;
 
     if (vol_v3_inode_get(v, inode, &in) != 1) return -1;
+    /* The destructive end of the same chain the collector guards above.
+     * This is the function that REPUBLISHES: it serialises a synthesised
+     * recipe over the inode and moves pba refcounts, so a raw-blob type
+     * arriving here would have its content overwritten by an AST the
+     * caller never wrote. Reached only with an inode id that came out of
+     * the collector's candidate list, which no longer contains one -- so
+     * this is the invariant stated where it is load-bearing rather than
+     * assumed upstream. Returning 1 ("nothing applied") is the honest
+     * answer: there are no merges for a symlink. */
+    if (invfs_inode_content_is_raw_blob(in.type)) return 1;
     if (vol_v3_recipe_load(v, in.recipe_addr, &blob, &blen) != 0 || !blob) return -1;
     if (vol_ast_recipe_parse(blob, blen, &ah, &ents, &n_ents) != 0 || !ents) {
         free(blob);
@@ -644,6 +660,31 @@ static int dedup_v3_walk_cb(void *ctx_, const char *path, uint64_t inode_id,
 
     if (type == INVFS_ITYP_DIR || !inode_id) return 0;
     if (path && (unsigned char)path[0] == 0x01) return 0;
+    /* A symlink's blob is its TARGET STRING, stored content-addressed like
+     * any recipe (vol_v3_create_node, src/core/vol_dirs.c) -- the address
+     * does not say "AST". invfs_ast_hdr_parse accepts any blob whose first
+     * four bytes are a v1/v2 AST version word, so a symlink that
+     * false-parses donates attacker-chosen block entries to this pass and
+     * they reach dedup_remap_file_v3, which republishes a SYNTHESISED
+     * recipe over the link. Stated through the predicate the READ path
+     * dispatches on (src/core/volume.h) so the two cannot drift again.
+     *
+     * Today this is redundant: every v3 symlink writer takes strlen() over a
+     * NUL-terminated buffer and both version words carry a NUL at offset 1,
+     * so the blob is one byte long and hdr_parse rejects it before it reads
+     * the version. Redundant is not harmless -- it is a property of the
+     * caller, and the day a symlink's content stops being strlen-delimited
+     * this becomes silent data loss. src/cli/dedupe_symlink_test leg R
+     * proves the reachability gap and leg F what happens across it.
+     *
+     * Placed BEFORE the load, unlike the checkers in vol_spt0.c and
+     * vol_btree.c. "Skip the parse, never the load" exists because a
+     * checker OWES a load: it is judging the volume and must not pass a
+     * blob it could not read. This pass owes nothing -- it is not a health
+     * check (the recipe audit in vol_btree.c is), it is a candidate list,
+     * and a symlink has no segments to contribute. Reading a blob whose
+     * bytes are already known to be the wrong shape would be wasted I/O. */
+    if (invfs_inode_content_is_raw_blob(type)) return 0;
     if (vol_v3_inode_get(v, inode_id, &in) != 1) return 0;
     if (in.size == 0) return 0;
     if (vol_v3_recipe_load(v, in.recipe_addr, &blob, &blen) != 0 || !blob) return 0;
@@ -811,6 +852,18 @@ int vol_sweep_dedupe_ex(invfs_volume *v, invfs_dedupe_stats *stats,
                             last_inode = s->inode;
                             invfs_v3_inode in;
                             if (vol_v3_inode_get(v, s->inode, &in) == 1) {
+                                /* The v3 twin of dedup_cur_pba above, and
+                                 * the third reader of a raw-blob type's blob
+                                 * in this file: a symlink names no segment,
+                                 * so there is no cur_pba to recover. The
+                                 * guard belongs here too because this leg
+                                 * is what actually feeds cur_pba -- and
+                                 * therefore dedup_remap_file_v3 -- and it
+                                 * must not be reachable only by way of the
+                                 * collector having already filtered. */
+                                if (invfs_inode_content_is_raw_blob(in.type)) {
+                                    last_inode = 0;   /* nothing cached */
+                                } else
                                 if (vol_v3_recipe_load(v, in.recipe_addr, &cur_blob, &cur_blen) == 0 && cur_blob) {
                                     if (vol_ast_recipe_parse(cur_blob, cur_blen, &cur_ah, &cur_ents, &cur_nents) != 0) {
                                         free(cur_blob); cur_blob = NULL;

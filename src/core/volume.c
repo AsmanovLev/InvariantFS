@@ -4001,6 +4001,27 @@ static int pba_ref_v3_walk_cb(void *ctx_, const char *path, uint64_t inode_id,
 
     if (type == INVFS_ITYP_DIR || !inode_id) return 0;
     if (path && (unsigned char)path[0] == 0x01) return 0;
+    /* A symlink's blob is its target string, not an AST, so it names no
+     * segment and must contribute no reference. Stated through the same
+     * predicate the read path dispatches on (src/core/volume.h) rather
+     * than left to the parse happening to fail.
+     *
+     * This one is not merely redundant. Every fabricated entry a symlink
+     * donates lands here as a +1 on a block a live recipe owns, and
+     * pba_ref_modify floors at 0, so the phantom reference is never given
+     * back: the block reads as shared, and when its real owner goes the
+     * count goes 2 -> 1 and vol_free_blocks' gate is never satisfied.
+     * A leaked extent, from a name on a volume. Measured in
+     * src/cli/dedupe_symlink_test leg F3 against a control volume
+     * identical but for the symlink: pba_ref_count(canon) 3 vs 2.
+     *
+     * The LOAD is preserved for the same reason as in the checkers: this
+     * walk is not a health check, but nothing downstream wants a missing
+     * blob diagnosed here either -- the recipe audit in vol_btree.c
+     * reports that, and it does its own load. The guard sits directly
+     * above the parse, after the load, so the shape of this function
+     * stays "load, then decide" like every sibling reader. */
+    if (invfs_inode_content_is_raw_blob(type)) return 0;
     if (vol_v3_inode_get(v, inode_id, &in) != 1) return 0;
     if (in.size == 0) return 0;
     if (vol_v3_recipe_load(v, in.recipe_addr, &blob, &blen) != 0 || !blob) return 0;

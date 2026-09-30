@@ -127,7 +127,7 @@ CLI_MAINS := mkfs verify fsck cp cat ls stat arctest blkio_test resize \
              sweep_publish_rollback_test \
              rollback_symlink_test \
              sibling_retire_v3_test tar_cap_test fold_delta_read_test \
-             reclaim_reader_epoch_test readdir_error_test
+             reclaim_reader_epoch_test readdir_error_test dedupe_symlink_test
 $(foreach t,$(CLI_MAINS),$(eval $(call TOOL_RULE,$(t),)))
 
 # NOTE on reclaim_reader_epoch_test: it is in CLI_MAINS so it BUILDS, but it
@@ -747,6 +747,7 @@ test: $(TEST_BINS) $(OUT)/invf-arctest $(OUT)/invf-blkio_test $(OUT)/invf-codec_
 	    $(TESTENV) $(TESTISO) $(OUT)/invf-cpack_map_conc_asan
 	INVFS_CPACK_SAN_LEG=all $(TESTENV) $(TESTISO) $(OUT)/invf-cpack_map_conc_test
 	$(TESTENV) $(TESTISO) $(OUT)/invf-dedupe_v3_test /tmp
+	$(TESTENV) $(OUT)/invf-dedupe_symlink_test /srv/bench/scratch
 	$(TESTENV) $(TESTISO) $(OUT)/invf-window_test /tmp
 	$(TESTENV) $(TESTISO) $(OUT)/invf-nlink_v3_test /tmp
 	$(TESTENV) $(TESTISO) $(OUT)/invf-recipe_fsck_test /tmp

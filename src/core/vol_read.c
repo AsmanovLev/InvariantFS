@@ -1701,6 +1701,41 @@ static int v3_read_range(invfs_volume *v, uint64_t inode_id, uint64_t offset,
     if (len == 0)
         return 0;
 
+    /* A raw-blob type -- a symlink -- has no segments to range over: its
+     * content IS the target string, and the row's size is that string's
+     * length. Answer it the way the authority does (vol_read_inode,
+     * :1338: dispatch on the TYPE before recipe_addr is even looked at,
+     * load, hand the blob back verbatim) rather than letting it fall
+     * through to the AST parse below, which cannot succeed and returns
+     * EIO. One file holding two answers for the same inode is how the
+     * NEXT divergence starts.
+     *
+     * Unreachable through FUSE today -- the kernel resolves a symlink and
+     * never routes read(2) on one to the daemon -- but every core caller
+     * (the ranged-write fork in vol_write.c, the container lanes'
+     * member source in vol_cpack.c, the sweep's header peek) reaches
+     * this function by inode id alone, and none of them filters on type.
+     *
+     * The LOAD is the content here, so it is performed, not skipped. The
+     * window is bounded by min(blen, in.size): the row's size is the
+     * authority on how long the object is, and a blob longer than that
+     * must not become readable past it. */
+    if (invfs_inode_content_is_raw_blob(in.type)) {
+        size_t avail;
+        if (vol_v3_recipe_load(v, in.recipe_addr, &blob, &blen) != 0)
+            return -1;
+        avail = (blen < in.size) ? blen : (size_t)in.size;
+        if (offset >= avail) {
+            free(blob);
+            return 0;
+        }
+        if (len > avail - offset)
+            len = (size_t)(avail - offset);
+        memcpy(buf, blob + offset, len);
+        free(blob);
+        return (int)len;
+    }
+
     if (vol_v3_recipe_load(v, in.recipe_addr, &blob, &blen) != 0)
         return -1;
     if (vol_ast_recipe_parse(blob, blen, &ah, &ents, &n_ents) != 0 ||

@@ -123,6 +123,19 @@ static int heat_dump(invfs_volume *v, const char *name)
             printf("v3 recipe load FAIL\n");
             return 1;
         }
+        /* A symlink's blob is its target string, not an AST, so there is
+         * nothing to iterate and nothing to report. Say so, rather than
+         * printing a false "v3 recipe parse FAIL" -- which reads as a
+         * corrupt blob on a perfectly healthy volume and sends whoever
+         * is debugging exactly the wrong thing. Same predicate the read
+         * path dispatches on (src/core/volume.h); the LOAD above is kept
+         * because this probe is the thing that reports an unreadable
+         * blob, and skipping it here would hide a real failure. */
+        if (invfs_inode_content_is_raw_blob(in.type)) {
+            printf("symlink target: %.*s\n", (int)blen, (const char *)blob);
+            free(blob);
+            return 0;
+        }
         if (vol_ast_recipe_parse(blob, blen, &ah, &ents, &n_ents) != 0 || !ents) {
             printf("v3 recipe parse FAIL\n");
             free(blob);

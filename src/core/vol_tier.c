@@ -869,6 +869,17 @@ static int tier_heat_v3_cb(invfs_volume *v, uint64_t inode_id,
     r = heat_file_r(v, inode_id);
     if (!r) return 0;
     if (vol_v3_inode_get(v, inode_id, &in) != 1) return 0;
+    /* A symlink's blob is its target string, not an AST: it names no
+     * segment, so it has no block to be hot or cold. What this function
+     * consumes is ents[i].pba alone, and a symlink's pba set is empty --
+     * an invariant about the CONTENT, not about this caller. It holds
+     * today only because the parse of a strlen-delimited target string
+     * happens to fail. Stated with the same predicate the read path
+     * dispatches on (src/core/volume.h), so it survives the day someone
+     * widens what a symlink row may hold: a heat map that admitted an
+     * unrelated block address would move a real segment between tiers
+     * because of a symlink's NAME. */
+    if (invfs_inode_content_is_raw_blob(in.type)) return 0;
     if (vol_v3_recipe_load(v, in.recipe_addr, &blob, &blen) != 0 || !blob)
         return 0;
     if (vol_ast_recipe_parse(blob, blen, &ah, &ents, &n_ents) != 0 || !ents) {

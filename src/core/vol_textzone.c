@@ -1579,6 +1579,19 @@ static int tz_v3_gc(invfs_volume *v)
         const invfs_ast_block_entry *ents = NULL;
         size_t ne = 0;
         if (vol_v3_inode_get(v, ids[i], &in) != 1) continue;
+        /* A symlink's blob is its target string, not an AST. What this
+         * loop collects is ents[j].pba for zone==TEXT entries, and a
+         * symlink has no entries at all -- it is a member id in
+         * `ids` (it got there through the batch registry, which does
+         * not discriminate by type), so "listed as a possible member"
+         * and "names a shared batch segment" are different questions.
+         * Stated with the predicate the read path dispatches on
+         * (src/core/volume.h) rather than left to the parse failing on a
+         * strlen-delimited target: this list feeds tz_v3_gc's liveness
+         * test, and a fabricated pba admitted here would keep an
+         * unrelated batch segment alive -- or let a real one be freed
+         * while it is still referenced. */
+        if (invfs_inode_content_is_raw_blob(in.type)) continue;
         if (vol_v3_recipe_load(v, in.recipe_addr, &blob, &blen) != 0 || !blob) {
             free(blob);
             continue;
