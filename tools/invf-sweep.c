@@ -1633,13 +1633,40 @@ int main(int argc, char **argv)
         vc.sizes = &sizes; vc.poss = &poss;
         vc.tab = &tab; vc.tmask = &tmask; vc.tcount = &tcount;
         vc.count = &count; vc.cap = &cap;
-    vol_walk_init(&w, vol, "invf-sweep collect");
+        vol_walk_init(&w, vol, "invf-sweep collect");
+        /* WP135: the STRICT walk -- the collect's output is the input to
+         * every mutating stage below it. */
         wrc = vol_v3_walk_strict(vol, v3_sweep_walk_cb, &vc);
+        /* `vc.count` is the int the collect callback increments, by POINTER:
+         * *(vc.count) is what the walk delivered. Casting the pointer itself
+         * is how the first draft of this line printed a 47-bit address as an
+         * entry count. */
         vol_walk_result(&w, wrc, (size_t)*vc.count, (size_t)*vc.count);
-        if (wrc < 0) {
+        if (vol_walk_commit(&w) != 0) {
             sw_progress_suspend();
-            fprintf(stderr, "warning: v3 directory walk did not "
-                            "complete\n");
+            /* TWO CASES, and they are not the same volume state. A walk that
+             * stopped having already delivered entries produced a PARTIAL
+             * live set; a walk that stopped before delivering anything
+             * produced NO live set at all, and the stages below would then
+             * run over an empty list and report a clean sweep of a volume
+             * they never read. The second is strictly worse -- it is not a
+             * subset, it is nothing -- and an operator reading "0 files" in
+             * the summary deserves to know the volume was never walked
+             * rather than believed to be empty. */
+            fprintf(stderr,
+                    "invf-sweep: the v3 namespace walk did not complete. %s\n"
+                    "Refusing to %s: a partial live set is not a smaller "
+                    "sweep, it is the wrong one. Run invf-fsck on the image "
+                    "first.\n",
+                    *vc.count
+                        ? "It stopped partway through, after delivering some "
+                          "of the live set."
+                        : "It stopped before delivering ANY entry, so this "
+                          "volume yielded no live set at all -- an empty "
+                          "sweep here means the volume was never read, not "
+                          "that it holds nothing worth sweeping.",
+                    dry ? "plan" : "sweep");
+            return 1;
         }
         if (vc.oom) {
             sw_progress_suspend();
