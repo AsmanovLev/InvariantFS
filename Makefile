@@ -503,6 +503,8 @@ test: $(OUT)/invf-arctest $(OUT)/invf-blkio_test $(OUT)/invf-codec_test \
       $(OUT)/invf-fsck_rootslot_test \
       $(OUT)/invf-batch_owner_test \
       $(OUT)/invf-rs_stability_test \
+      $(OUT)/invf-arc_concurrency_test \
+      $(OUT)/invf-arc-conc-tsan $(OUT)/invf-arc-conc-asan \
       $(OUT)/invf-gz_header_test \
       $(OUT)/invf-ivpack_packs_test $(OUT)/invf-mkfs $(OUT)/invf-cp \
       $(OUT)/invf-sweep $(OUT)/invf-fsck $(OUT)/invf-plugin-host \
