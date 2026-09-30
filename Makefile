@@ -119,6 +119,7 @@ endef
 CLI_MAINS := mkfs verify fsck cp cat ls stat arctest blkio_test resize \
              metabuf_test btree_test btree_repair_test v3inode overlay_test fold_test concurrency_test \
              sweep_v3_test symlink_v3_test large_file_v3_test dedupe_v3_test deflate_repro_test window_test \
+             read_parallel_bitexact_test \
              nlink_v3_test recipe_fsck_test cpack_guard_test orphan_test rt30_slot_test anchor_test \
              fsck_rootslot_test batch_owner_test plugin_host_test plugin_mt_test rs_stability_test \
              fsck_liveness_test scratch_policy_test
@@ -454,6 +455,7 @@ test: $(OUT)/invf-arctest $(OUT)/invf-blkio_test $(OUT)/invf-codec_test \
       $(OUT)/invf-delta_test $(OUT)/invf-groupcommit_test $(OUT)/invf-concurrency_test $(OUT)/invf-sweep_v3_test \
       $(OUT)/invf-btree_repair_test \
       $(OUT)/invf-symlink_v3_test $(OUT)/invf-large_file_v3_test $(OUT)/invf-dedupe_v3_test \
+      $(OUT)/invf-read_parallel_bitexact_test \
       $(OUT)/invf-deflate_repro_test $(OUT)/invf-plugin_host_test $(OUT)/invf-plugin_mt_test \
       $(OUT)/invf-window_test $(OUT)/invf-nlink_v3_test \
       $(OUT)/invf-recipe_fsck_test $(OUT)/invf-fsck_liveness_test \
@@ -509,6 +511,7 @@ test: $(OUT)/invf-arctest $(OUT)/invf-blkio_test $(OUT)/invf-codec_test \
 	$(TESTENV) $(TESTISO) $(OUT)/invf-btree_repair_test /tmp
 	$(TESTENV) $(TESTISO) $(OUT)/invf-symlink_v3_test /tmp
 	$(TESTENV) $(TESTISO) $(OUT)/invf-large_file_v3_test /tmp
+	$(TESTENV) $(TESTISO) $(OUT)/invf-read_parallel_bitexact_test /tmp
 	$(TESTENV) $(TESTISO) $(OUT)/invf-dedupe_v3_test /tmp
 	$(TESTENV) $(TESTISO) $(OUT)/invf-window_test /tmp
 	$(TESTENV) $(TESTISO) $(OUT)/invf-nlink_v3_test /tmp

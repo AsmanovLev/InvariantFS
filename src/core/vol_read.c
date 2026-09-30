@@ -328,6 +328,48 @@ typedef struct {
     int err;
 } decode_worker_arg;
 
+/* The framing contract for ONE decoded segment, in one place.
+ *
+ * `hdr` is the csize the frame header on disk claims; `len` is the length the
+ * recipe entry claims. For an in-place codec these are two different numbers
+ * and both are load-bearing:
+ *
+ *   NONE   the payload IS the data, so they must be equal. If hdr < len the
+ *          payload is shorter than the destination wants, and copying `len`
+ *          bytes out of a `hdr`-byte buffer is a heap over-read whose tail is
+ *          whatever happened to be allocated next -- not an error the codec
+ *          can raise, because there is no codec involved.
+ *   LZ4/   the frame must be non-empty and strictly smaller than the
+ *   ZSTD    destination, or it is not a compressed-in-place segment.
+ *
+ * Whole-file blobs (JXL/APE/FLACR/...) keep csize unrelated to the logical
+ * size -- the transcoder may be smaller OR larger -- so they are NOT checked
+ * here; the serial loop applies that rule per-algo below.
+ *
+ * WP-read-parallel: this used to live ONLY in the serial loop, which made the
+ * WP94 parallel fast path a second, weaker implementation of the same
+ * contract -- it validated nothing and copied `e->length` for ALGO_NONE. Both
+ * loops call this now, so "the fast path is a different implementation" cannot
+ * rot back into "the fast path is a worse implementation". */
+static int ast_frame_ok(uint8_t algo, uint32_t hdr, uint64_t len,
+                        const char *algo_name)
+{
+    if (algo == INVFS_ALGO_NONE) {
+        if (hdr != len) {
+            fprintf(stderr, "raw segment header corrupt (csize %u, want %llu)\n",
+                    hdr, (unsigned long long)len);
+            return -1;
+        }
+    } else if (algo == INVFS_ALGO_LZ4 || algo == INVFS_ALGO_ZSTD) {
+        if (hdr >= len || hdr == 0) {
+            fprintf(stderr, "%s segment header corrupt (csize %u)\n",
+                    algo_name, hdr);
+            return -1;
+        }
+    }
+    return 0;
+}
+
 static void *decode_thread_worker(void *arg_) {
     decode_worker_arg *a = (decode_worker_arg *)arg_;
     for (size_t i = a->start; i < a->end; i++) {
@@ -347,8 +389,18 @@ static void *decode_thread_worker(void *arg_) {
             return NULL;
         }
 
+        /* The frame must say what the recipe says it says, BEFORE the bytes
+           are copied anywhere. Without this an ALGO_NONE entry whose frame is
+           shorter than its declared length reads past the end of `blob`. */
+        if (ast_frame_ok(e->algo, hdr, e->length,
+                         e->algo == INVFS_ALGO_ZSTD ? "zstd" : "lz4") != 0) {
+            free(blob);
+            a->err = -1;
+            return NULL;
+        }
+
         if (e->algo == INVFS_ALGO_NONE) {
-            memcpy(a->data + dst_off, blob, (size_t)e->length);
+            memcpy(a->data + dst_off, blob, hdr);
             free(blob);
         } else if (e->algo == INVFS_ALGO_LZ4) {
             int got = LZ4_decompress_safe((const char *)blob,
@@ -661,21 +713,13 @@ static int vol_decode_ast_entries(invfs_volume *v, uint64_t inode_id,
                             (unsigned long long)inode_id, e->block_id);
                     return -1;
                 }
-                if (e->algo == INVFS_ALGO_NONE) {
-                    if (hdr != e->length) {
-                        fprintf(stderr, "raw segment header corrupt (csize %u, want %llu)\n",
-                                hdr, (unsigned long long)e->length);
-                        free(blob); return -1;
-                    }
-                } else if (e->algo == INVFS_ALGO_LZ4 || e->algo == INVFS_ALGO_ZSTD) {
-                    /* compressed-in-place segments: csize < usize is required */
-                    if (hdr >= e->length || hdr == 0) {
-                        fprintf(stderr, "lz4 segment header corrupt (csize %u)\n", hdr);
-                        free(blob); return -1;
-                    }
+                if (ast_frame_ok(e->algo, hdr, e->length,
+                                 e->algo == INVFS_ALGO_ZSTD ? "zstd" : "lz4") != 0) {
+                    free(blob); return -1;
                 }
                 /* whole-file blobs (JXL/APE/FLACR) keep csize unrelated to the
-                   logical size: the transcoder may be smaller OR larger */
+                   logical size: the transcoder may be smaller OR larger, so
+                   ast_frame_ok deliberately does not judge them. */
                 if (e->algo == INVFS_ALGO_LZ4) {
                     int got = LZ4_decompress_safe((const char *)blob,
                                                   (char *)(data + dst_off),

@@ -44,6 +44,7 @@
 
 #include <stdint.h>
 #include <stddef.h>
+#include <pthread.h>
 
 /* Alignment granularity for device I/O. Equal to INVFS_BLOCK_SIZE, and a
    multiple of every logical sector size we accept (512 or 4096), so one
@@ -84,6 +85,17 @@ typedef struct blkio {
     int      locked;      /* volume was locked and dismounted by us */
     unsigned char *bounce;      /* aligned scratch; NULL for image files */
     void          *bounce_base; /* what to free (bounce may be offset) */
+    /* Guards `bounce`. There is exactly ONE bounce buffer per volume, but a
+       volume has many threads: the WP94 parallel whole-file decode
+       (vol_read.c, up to INVFS_READ_THREADS workers) and the sweep's own
+       lanes all issue transfers through the same handle. Unguarded, two
+       threads handing the same buffer overlapping reads each memcpy out of
+       whatever the other last read in -- a torn page holding two different
+       regions at once, which no downstream CRC can catch, because the CRC is
+       taken over the buffer as it is written. Initialised at the top of
+       blkio_open (ahead of every path that can call blkio_close) and
+       destroyed in blkio_close. */
+    pthread_mutex_t bounce_mu;
 
     /* Transfer counters. Every read and write the layer actually issues to
        the handle is counted here -- not the byte-granular calls above it, the

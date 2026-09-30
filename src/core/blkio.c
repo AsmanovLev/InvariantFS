@@ -226,6 +226,9 @@ int blkio_open(blkio *io, const char *path, int flags)
     int force_dev = (fdev && *fdev && *fdev != '0');
 
     memset(io, 0, sizeof *io);
+    /* Before anything that can fail into blkio_close(): the bounce mutex is
+       destroyed there, and destroying an uninitialised mutex is undefined. */
+    (void)pthread_mutex_init(&io->bounce_mu, NULL);
 
 #ifdef _WIN32
     {
@@ -384,6 +387,7 @@ void blkio_close(blkio *io)
     free(io->bounce_base);
     io->bounce_base = NULL;
     io->bounce = NULL;
+    (void)pthread_mutex_destroy(&io->bounce_mu);
 }
 
 /* ------------------------------------------------------------------ *
@@ -451,6 +455,13 @@ static int dev_pread(blkio *io, uint64_t off, void *buf, size_t len)
 {
     unsigned char *out = (unsigned char *)buf;
 
+    /* One bounce buffer per volume, many threads per volume: hold it for the
+       whole transfer so no thread can read out of the region another is
+       filling. The decompression that follows is still parallel; only the
+       device hand-off is serialised, and on a device each of those is a
+       synchronous round-trip anyway. */
+    (void)pthread_mutex_lock(&io->bounce_mu);
+
     while (len) {
         uint64_t base = off & ~(uint64_t)(BLKIO_ALIGN - 1);
         size_t   skip = (size_t)(off - base);
@@ -466,19 +477,23 @@ static int dev_pread(blkio *io, uint64_t off, void *buf, size_t len)
            fails outright rather than returning short. */
         if (base + span > io->cap) {
             if (base >= io->cap)
-                return -1;
+                goto fail;
             span = (size_t)(io->cap - base);
             if (span < skip + want)
-                return -1;
+                goto fail;
         }
         if (raw_pread(io, base, io->bounce, span) != 0)
-            return -1;
+            goto fail;
         memcpy(out, io->bounce + skip, want);
         out += want;
         off += want;
         len -= want;
     }
+    (void)pthread_mutex_unlock(&io->bounce_mu);
     return 0;
+fail:
+    (void)pthread_mutex_unlock(&io->bounce_mu);
+    return -1;
 }
 
 /* Write [off, off+len) to a device. Whole aligned chunks go straight out;
@@ -488,6 +503,12 @@ static int dev_pread(blkio *io, uint64_t off, void *buf, size_t len)
 static int dev_pwrite(blkio *io, uint64_t off, const void *buf, size_t len)
 {
     const unsigned char *in = (const unsigned char *)buf;
+
+    /* The read-modify-write below is only atomic with respect to other users
+       of the bounce buffer if the whole read-patch-write cycle is held. Two
+       threads interleaving between the read-back and the patch would write one
+       thread's sector over the other's, and both would report success. */
+    (void)pthread_mutex_lock(&io->bounce_mu);
 
     while (len) {
         uint64_t base = off & ~(uint64_t)(BLKIO_ALIGN - 1);
@@ -501,7 +522,7 @@ static int dev_pwrite(blkio *io, uint64_t off, const void *buf, size_t len)
         span = (skip + want + BLKIO_ALIGN - 1) & ~(size_t)(BLKIO_ALIGN - 1);
 
         if (base + span > io->cap)
-            return -1;
+            goto fail;
 
         /* Only the two end blocks can be partially overwritten, so only they
            have to be read back first. This used to read the whole span
@@ -516,11 +537,11 @@ static int dev_pwrite(blkio *io, uint64_t off, const void *buf, size_t len)
             /* Head and tail are the only two blocks and they are adjacent:
                one read of both beats two reads of one. */
             if (raw_pread(io, base, io->bounce, span) != 0)
-                return -1;
+                goto fail;
         } else {
             if (skip) {
                 if (raw_pread(io, base, io->bounce, BLKIO_ALIGN) != 0)
-                    return -1;
+                    goto fail;
             }
             if (tail) {
                 /* Last block of the span. If it is the same block we just
@@ -529,7 +550,7 @@ static int dev_pwrite(blkio *io, uint64_t off, const void *buf, size_t len)
                 if (!(skip && last == 0)) {
                     if (raw_pread(io, base + last, io->bounce + last,
                                   BLKIO_ALIGN) != 0)
-                        return -1;
+                        goto fail;
                 }
             }
         }
@@ -538,13 +559,17 @@ static int dev_pwrite(blkio *io, uint64_t off, const void *buf, size_t len)
            through the bounce even when no read was needed. */
         memcpy(io->bounce + skip, in, want);
         if (raw_pwrite(io, base, io->bounce, span) != 0)
-            return -1;
+            goto fail;
 
         in  += want;
         off += want;
         len -= want;
     }
+    (void)pthread_mutex_unlock(&io->bounce_mu);
     return 0;
+fail:
+    (void)pthread_mutex_unlock(&io->bounce_mu);
+    return -1;
 }
 
 /* ------------------------------------------------------------------ *
