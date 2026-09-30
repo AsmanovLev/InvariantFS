@@ -1239,12 +1239,61 @@ int main(int argc, char **argv)
             } else {
                 ok(0, "the collapsed root is a valid single-leaf tree");
             }
+            /* What the 5 dropped keys actually WERE. The recipe blobs live
+             * in the same tree under 0x04, which sorts after the 0x03 xattr
+             * keys, so the LAST leaf held 3 xattr keys + both recipes --
+             * and dropping them cost the volume both files' content while
+             * their rows and names survived untouched. The rows still
+             * resolving (asserted above) is exactly why this was silent. */
+            {
+                invfs_recipe_audit ra;
+                size_t fi;
+                int rc = vol_v3_recipe_audit(g_v, &ra);
+                int f0 = 0, f1 = 0;
+                for (fi = 0; rc == 0 && fi < ra.nfault; fi++) {
+                    if (ra.fault[fi].id == id0) f0 = 1;
+                    if (ra.fault[fi].id == id1) f1 = 1;
+                }
+                ok(rc == 0 && ra.nfault_total == 2,
+                   "both live inodes' recipe blobs are gone: exactly 2");
+                ok(f0 && f1,
+                   "the offender list names BOTH surviving rows "
+                   "(two00.bin, two01.bin)");
+                ok(vol_v3_inode_get(g_v, id0, &in) == 1,
+                   "the inode ROW survives anyway -- only the content is "
+                   "gone, which is what the recipe check is for");
+            }
             vol_close(g_v);
             g_v = NULL;
         }
         cli = fsck_cli_offline(img5, 0);
         printf("  invf-fsck after the collapse repair: exit %d\n", cli);
-        ok(cli == 0, "the collapsed-root volume is clean after the repair");
+        /* The collapsed-root volume is NOT clean, and this assertion used to
+         * say it was. It was wrong: the torn leaf is the LAST one, so it is
+         * the high end of the keyspace -- the 0x03 xattr keys AND both 0x04
+         * recipe keys (3 + 2 = the 5 keys it held). The repair drops all
+         * five, so the two inode rows and their dirents survive while the
+         * recipe blobs that hold their CONTENT do not. The volume goes on
+         * listing two files it can no longer read:
+         *
+         *   $ invf-verify <img> --deep
+         *     CORRUPT: two00.bin / CORRUPT: two01.bin
+         *     deep: 0 files ok, 2 corrupt, 0 bytes verified
+         *
+         * That loss was invisible here until fsck learned to resolve a live
+         * inode's recipe (see recipe_fsck_test): every page CRC verified and
+         * the fan-in balanced, so the pass printed OK and exited 0 on a
+         * volume whose every file was unreadable. The check now reports it
+         * (exit 3, both inodes named) -- which is correct, and the loss
+         * itself is a SEPARATE, still-open defect in the WP86 collapse
+         * repair, not something this pass can fix: a recipe blob is stored
+         * under the BLAKE3 hash of its own contents and is gone for good.
+         * When that repair is fixed, this assertion and the ones under it
+         * are the gate that will say so.
+         */
+        ok(cli == 3, "the collapsed-root volume is NOT reported clean: the "
+                     "repair destroyed both files' recipes (see the comment "
+                     "above -- an open defect in the WP86 collapse repair)");
         unlink(img5);
     }
 

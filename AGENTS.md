@@ -514,7 +514,11 @@ be recovered bit-for-bit, regardless of what codec was applied.
   full decode.
 - **"Why does `invf-cat` give me a different byte count than
   `wc -c` on the source?"** — it shouldn't. If it does, the file's
-  recipe is corrupt; run `invf-fsck -f` to repair.
+  recipe is corrupt. Run `invf-fsck` first: it names the inode and
+  says which live recipes will not load. A recipe blob is stored
+  under the BLAKE3 hash of its own contents, so `-f` cannot rebuild
+  one that is gone — it reports the file as unreadable and leaves it
+  alone. Restore the content from a backup or the original image.
 - **"Why does mkfs refuse to format my image?"** — probably the
   metadata zone is too small for the volume size. Use
   `INVFS_META_FRAC=16` or smaller.

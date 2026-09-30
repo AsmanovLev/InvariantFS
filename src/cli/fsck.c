@@ -152,6 +152,22 @@ int main(int argc, char **argv)
                             "page(s) could not be quarantined away; the volume "
                             "is unchanged and still degraded\n", img,
                     (unsigned long long)rep.v3_bad_pages);
+        } else if (fix && rep.v3_recipe_bad) {
+            /* The blob is addressed by the BLAKE3 hash of its own contents.
+             * There is nothing to rebuild it from, so -f does not touch
+             * these files and does not claim to have: the verdict stays
+             * DAMAGED and the exit code stays 3, exactly as for damage -f
+             * cannot address anywhere else on this pass. */
+            degraded = 1;
+            fprintf(stderr, "invf-fsck: %s: CANNOT REPAIR: %llu live inode(s) "
+                            "name a recipe blob the volume can no longer "
+                            "produce. A recipe is stored under the BLAKE3 hash "
+                            "of its own contents, so -f has nothing to rebuild "
+                            "it from and made NO change to those files -- the "
+                            "content is gone. Restore it from a backup or from "
+                            "the original image; the other files on this volume "
+                            "are unaffected and readable.\n", img,
+                    (unsigned long long)rep.v3_recipe_bad);
         }
         if (!quiet) {
             printf("InvariantFS fsck: %s\n", img);
@@ -218,6 +234,23 @@ int main(int argc, char **argv)
                 printf("  nlink/fan-in:  ok (%llu live inode(s), each with "
                        "exactly as many names as its nlink)\n",
                        (unsigned long long)rep.nlink_inodes);
+            /* The other half of readability. Every line above describes the
+             * tree and the names; this one asks the question the read path
+             * asks -- can the content a live row names still be produced?
+             * Reported, never repaired: a blob is addressed by the hash of
+             * its own contents, so -f has nothing to rebuild it from. */
+            if (rep.v3_recipe_partial)
+                printf("  live recipes: PARTIAL -- the walk failed, so the "
+                       "count is a floor, not a total\n");
+            else if (rep.v3_recipe_bad)
+                printf("  live recipes: %llu UNREADABLE of %llu live inode(s) "
+                        "with content (each offender is named above)\n",
+                        (unsigned long long)rep.v3_recipe_bad,
+                        (unsigned long long)rep.v3_recipe_checked);
+            else
+                printf("  live recipes: ok (%llu live inode(s) with content, "
+                        "every recipe blob they name loads and parses)\n",
+                        (unsigned long long)rep.v3_recipe_checked);
             if (spt0_info(v, NULL))
                 printf("  save point:   %s\n",
                        rep.v3_savepoint_bad

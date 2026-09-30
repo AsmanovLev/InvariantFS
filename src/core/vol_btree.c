@@ -5266,6 +5266,97 @@ int vol_v3_nlink_audit(invfs_volume *v, invfs_nlink_audit *out)
 }
 
 /* ------------------------------------------------------------------ */
+/* Recipe resolvability (fsck)                                         */
+/* ------------------------------------------------------------------ */
+/* A v3 inode row does not carry its content: it carries a 32-byte
+ * BLAKE3 content address, and the recipe blob lives under its own key
+ * (0x04 || addr) in the SAME base tree the page walk already verified
+ * (v3_recipe_key, above). So the tree walk cannot find it -- not by
+ * following a pointer, because there is no pointer to follow, and not by
+ * counting keys, because a key that is gone leaves no trace in the page's
+ * own CRC. The only thing in the volume that still says the blob must be
+ * there is the address in the row, and nothing in the fsck path was
+ * reading it. That is the whole defect: the read path resolves the
+ * address (vol_read_inode -> vol_v3_recipe_load) and fsck did not, so a
+ * volume with an unreadable file passed every structural check fsck ran.
+ *
+ * The walk itself is the one vol_v3_iter_live_inodes already performs
+ * (base range + delta overlay, one visit per inode, names resolved), so
+ * the audit adds no new traversal shape to the volume. */
+
+typedef struct {
+    invfs_recipe_audit *a;
+} recipe_audit_ctx;
+
+static void recipe_fault(invfs_recipe_audit *a, uint64_t id, uint32_t kind,
+                         uint64_t size, const char *name)
+{
+    if (a->nfault < INVFS_RECIPE_BAD_MAX) {
+        invfs_recipe_fault *f = &a->fault[a->nfault++];
+        f->id = id;
+        f->kind = kind;
+        f->size = size;
+        snprintf(f->name, sizeof f->name, "%s", name ? name : "");
+    }
+    a->nfault_total++;
+}
+
+static int recipe_audit_cb(invfs_volume *v, uint64_t inode_id, const char *name,
+                           void *ctx_)
+{
+    recipe_audit_ctx *c = (recipe_audit_ctx *)ctx_;
+    static const uint8_t zero_addr[INVFS_V3_RECIPE_ADDR_LEN];
+    invfs_v3_inode in;
+    uint8_t *blob = NULL;
+    size_t blen = 0;
+    uint32_t kind;
+
+    if (vol_v3_inode_get(v, inode_id, &in) != 1)
+        return 0;
+    if (in.type == INVFS_ITYP_DIR)
+        return 0;                  /* a directory has no recipe */
+    /* The read path short-circuits exactly these two cases and hands back
+     * zero bytes, so a row that matches is not an unreadable file. */
+    if (in.size == 0 ||
+        memcmp(in.recipe_addr, zero_addr, INVFS_V3_RECIPE_ADDR_LEN) == 0)
+        return 0;
+
+    c->a->checked++;
+    if (vol_v3_recipe_load(v, in.recipe_addr, &blob, &blen) == 0 && blob) {
+        invfs_ast_hdr ah;
+        const invfs_ast_block_entry *ents = NULL;
+        size_t n_ents = 0;
+        if (vol_ast_recipe_parse(blob, blen, &ah, &ents, &n_ents) == 0) {
+            free(blob);
+            return 0;
+        }
+        kind = INVFS_RECIPE_BAD_CORRUPT;
+    } else {
+        kind = INVFS_RECIPE_BAD_MISSING;
+    }
+    c->a->bad++;
+    recipe_fault(c->a, inode_id, kind, in.size, name);
+    free(blob);                    /* NULL on the load-failure path */
+    return 0;
+}
+
+int vol_v3_recipe_audit(invfs_volume *v, invfs_recipe_audit *out)
+{
+    recipe_audit_ctx c;
+    int rc;
+
+    if (!v || !out)
+        return -1;
+    memset(out, 0, sizeof *out);
+    if (v3_ready(v) != 0)
+        return -1;
+    memset(&c, 0, sizeof c);
+    c.a = out;
+    rc = vol_v3_iter_live_inodes(v, recipe_audit_cb, &c);
+    return rc < 0 ? -1 : 0;
+}
+
+/* ------------------------------------------------------------------ */
 /* WP96: live-set iteration at an ARBITRARY save-point generation       */
 /* ------------------------------------------------------------------ */
 

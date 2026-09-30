@@ -115,6 +115,15 @@ typedef struct {
                                  * NOT damage (vol_v3_nlink_audit) */
     uint64_t nlink_faults;     /* offending inodes (sum, not per name) */
     int      nlink_bad;        /* 1 = the accounting does not balance */
+    /* Recipe resolvability (v3 only). The nlink audit above compares names
+     * to rows and the page walk compares pages to CRCs; neither resolves
+     * the content address a row carries, so a live inode whose recipe blob
+     * cannot be loaded used to pass this pass clean while its file read
+     * back EIO. Reported, never repaired: a blob named by its own hash
+     * cannot be rebuilt. */
+    uint64_t v3_recipe_checked;/* live inodes whose recipe was resolved */
+    uint64_t v3_recipe_bad;    /* live inodes whose recipe will not load */
+    int      v3_recipe_partial;/* the walk failed: this count is a floor */
 } invfs_fsck_report;
 int vol_fsck_scan(invfs_volume *v, invfs_fsck_report *rep, int fix);
 int  vol_map(invfs_volume *v, uint64_t inode, uint64_t lba, uint64_t pba, uint32_t length);
@@ -446,6 +455,54 @@ typedef struct {
 } invfs_nlink_audit;
 
 int vol_v3_nlink_audit(invfs_volume *v, invfs_nlink_audit *out);
+
+/* ---- recipe-resolvability audit (v3, fsck) ---------------------------
+ * The other half of "can this volume still be read". The nlink audit above
+ * compares the NAMES against the rows; the page walk (vol_fsck.c) compares
+ * the pages against their CRCs. Neither one ever resolves the 32-byte
+ * content address an inode row carries, so a live inode whose recipe blob
+ * cannot be loaded -- the key is gone, or the bytes no longer hash to the
+ * address that names them -- was invisible: every page verified, every
+ * fan-in balanced, verdict OK, and the read path (vol_read_inode) failing
+ * on the file.
+ *
+ * This walks the live inode set and asks, for each inode that claims
+ * content, exactly the question vol_read_inode asks: does the recipe load,
+ * and does it parse? The segment DECODE is deliberately not part of it --
+ * that reads every byte and is `invf-verify --deep`'s job; this is the
+ * metadata pass, and it must stay one.
+ *
+ * Detected and reported, never repaired: a recipe blob is addressed by the
+ * hash of its own contents, so there is nothing left to rebuild it from.
+ * See the -f contract in src/cli/fsck.c.
+ *
+ *   INVFS_RECIPE_BAD_MISSING  vol_v3_recipe_load refused: the key is not
+ *                             in the base tree, the delta shadows it with a
+ *                             delete, or the blob's bytes do not hash to
+ *                             the address the row names
+ *   INVFS_RECIPE_BAD_CORRUPT  the blob loaded and failed to parse
+ */
+#define INVFS_RECIPE_BAD_MISSING 1
+#define INVFS_RECIPE_BAD_CORRUPT 2
+#define INVFS_RECIPE_BAD_MAX 16
+typedef struct {
+    uint64_t id;             /* the inode whose content is unreadable */
+    uint32_t kind;           /* INVFS_RECIPE_BAD_* */
+    uint64_t size;           /* the size the row claims */
+    char     name[192];      /* one name that resolves to the id, or "" */
+} invfs_recipe_fault;
+
+typedef struct {
+    uint64_t checked;        /* live inodes whose recipe was resolved */
+    uint64_t bad;            /* offenders (sum, not per fault) */
+    uint64_t nfault;         /* faults stored in fault[] (< MAX) */
+    uint64_t nfault_total;   /* faults found */
+    invfs_recipe_fault fault[INVFS_RECIPE_BAD_MAX];
+} invfs_recipe_audit;
+
+/* Returns 0 = audit completed (read *out*), -1 = the live-inode walk
+ * failed, in which case the caller must treat the result as PARTIAL. */
+int vol_v3_recipe_audit(invfs_volume *v, invfs_recipe_audit *out);
 
 /* ---- WP-M14: v3 fold (merge delta into base, atomic publish, reset) --
  * Fold applies every live delta record to a COW copy of the base B+-tree,

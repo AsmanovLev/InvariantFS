@@ -1497,6 +1497,67 @@ static void fsck_v3_anchor(invfs_volume *v, invfs_fsck_report *rep)
     }
 }
 
+/* The recipe resolvability audit. Every check above looks at the
+ * base tree, the pages, the bitmap or the NAMES; none of them resolves the
+ * content address an inode row carries. So a volume that had lost a recipe
+ * blob -- the key gone from the tree, or its bytes no longer hashing to the
+ * address that names them -- walked clean here: every page CRC verified,
+ * every fan-in balanced, verdict OK, and invf-verify --deep plus the read
+ * path both failing on a file the volume still listed. Each offender is
+ * named with its id, its size and (when one resolves) its path.
+ *
+ * A recipe blob is addressed by the hash of its own contents, so there is
+ * nothing to rebuild it from: this is damage, -f does not touch it, and the
+ * verdict is DAMAGED either way.
+ *
+ * Skipped for the same reason the nlink audit above is: with a quarantined
+ * key range in the tree, a recipe that cannot be loaded may simply be in
+ * that range -- reported as damage that -f can address, not as a lost blob
+ * it cannot. */
+static void fsck_v3_recipe_report(invfs_volume *v, invfs_fsck_report *rep)
+{
+    invfs_recipe_audit a;
+    uint64_t i;
+
+    if (vol_v3_recipe_audit(v, &a) != 0) {
+        rep->v3_recipe_partial = 1;
+        fsck_v3_note(rep, "the recipe resolvability check could not be "
+                          "completed (the live-inode walk failed); the count "
+                          "below is a floor, not a total");
+        return;
+    }
+    rep->v3_recipe_checked = a.checked;
+    rep->v3_recipe_bad = a.bad;
+    for (i = 0; i < a.nfault; i++) {
+        const invfs_recipe_fault *f = &a.fault[i];
+        char b[512];
+        snprintf(b, sizeof b,
+                 "inode %llu (%s): the recipe blob its row names cannot be "
+                 "read -- %s. The file is %llu byte(s) of content the volume "
+                 "no longer has, and %s",
+                 (unsigned long long)f->id,
+                 f->name[0] ? f->name : "no name resolves to it",
+                 f->kind == INVFS_RECIPE_BAD_CORRUPT
+                     ? "the blob is present but does not parse as a recipe"
+                     : "the blob is MISSING from the base tree, shadowed by a "
+                       "delta delete, or its bytes no longer hash to the "
+                       "address that names them",
+                 (unsigned long long)f->size,
+                 f->name[0] ? "invf-verify --deep will list it as corrupt"
+                            : "no directory entry names it, so nothing the "
+                              "operator can read points at it");
+        fsck_v3_note(rep, b);
+    }
+    if (a.bad && a.nfault_total > a.nfault)
+        fprintf(stderr, "fsck(v3): recipe blobs: %llu unreadable (the list "
+                        "above is truncated at %d)\n",
+                (unsigned long long)a.nfault_total, INVFS_RECIPE_BAD_MAX);
+    else if (a.bad)
+        fprintf(stderr, "fsck(v3): recipe blobs: %llu of %llu live inode(s) "
+                        "with content cannot be read\n",
+                (unsigned long long)a.bad, (unsigned long long)a.checked);
+}
+
 static int fsck_v3_scan(invfs_volume *v, invfs_fsck_report *rep, int fix)
 {
     invfs_blkptr root;
@@ -1647,8 +1708,13 @@ static int fsck_v3_scan(invfs_volume *v, invfs_fsck_report *rep, int fix)
         fprintf(stderr, "fsck(v3): nlink/fan-in check SKIPPED: the base tree "
                         "is damaged, so a name that does not resolve cannot be "
                         "told from a lost one\n");
+        fprintf(stderr, "fsck(v3): recipe resolvability check SKIPPED for "
+                        "the same reason: a recipe that will not load may be "
+                        "inside a quarantined key range, which is damage -f "
+                        "can address\n");
     } else {
         fsck_v3_nlink_report(v, rep);
+        fsck_v3_recipe_report(v, rep);
     }
 
     if (!fix || !q.n)
