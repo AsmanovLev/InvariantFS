@@ -387,12 +387,27 @@ int main(void)
     groups++;
 
     /* --- 6. the two-phase re-decision, with the pin carried across --- */
-    if (shm_max > 262144) {
-        /* the pin fits the tmpfs (need < shm_max) and the whole job does
-         * not (need * 4 > shm_max): the exact shape of a containerpack
-         * forward pass, where the member total is only known after
-         * enumerate. */
-        need = shm_max / 2 + 4096;
+    if (!(shm_max > 262144 && disk_fs > need * 4 + (128ull * 1048576)))
+        printf("  (case 6 needs a job that fits the real root but not the "
+               "tmpfs; disk free %llu B vs whole job %llu B -- skipped on "
+               "this host)\n", (unsigned long long)disk_fs,
+               (unsigned long long)(need * 4));
+    need = shm_max / 2 + 4096;
+    /* The window this case needs: the pin fits the tmpfs, the whole job does
+     * NOT fit the tmpfs, and the whole job DOES fit the real root -- that is
+     * the exact shape of a containerpack forward pass, where the member total
+     * is only known after enumerate and the scratch has to MIGRATE.
+     *
+     * The original guard only checked `shm_max > 262144` and silently assumed
+     * a real root four times larger than the tmpfs. That is not a property
+     * of every host: on a machine where /var/tmp and /tmp are tmpfs, or where
+     * the disk root lives on a small root filesystem, there is no such window
+     * and the correct verdict is REFUSED. A host-dependent assumption in a
+     * guard is what made this case fail on a machine that had merely run out
+     * of room elsewhere -- so the assumption is now stated and checked, and
+     * the case skips loudly instead of failing, the same way cases 2 and 3
+     * already do. */
+    if (shm_max > 262144 && disk_fs > need * 4 + (128ull * 1048576)) {
         snprintf(num, sizeof num, "%llu", (unsigned long long)need);
         n = 0;
         e[n].k = "TEST_NEED";               e[n++].v = num;
