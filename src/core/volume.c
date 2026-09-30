@@ -1871,6 +1871,24 @@ int vol_time_travel(const invfs_volume *v)
 void vol_close(invfs_volume *v)
 {
     if (!v) return;
+    /* WP135: the anti-forgetting half of the walk receipt. A caller that
+     * drops a walk's status -- including with an explicit (void) cast,
+     * which is what silenced warn_unused_result at all five of the sites
+     * this WP is about -- leaves a short walk latched on the volume. Close
+     * is the one point in every tool's life that the caller does not
+     * control, so it is where the question gets asked out loud. Without it
+     * "please check the status" is a comment, and the failure mode of a
+     * comment is that it is not read. */
+    {
+        size_t unclaimed = vol_walk_reap(v);
+        if (unclaimed)
+            fprintf(stderr, "vol_close: %zu v3 walk%s on this volume stopped "
+                    "early and %s never accounted for the result. Anything "
+                    "that acted on the output of those walks acted on a "
+                    "partial listing.\n",
+                    unclaimed, unclaimed == 1 ? "" : "s",
+                    unclaimed == 1 ? "its caller" : "their callers");
+    }
     /* WP27: read heat accrues per session in RAM and persists at the
      * sweep's decay pass (or an explicit vol_heat_persist) -- never here:
      * a close that appended record rewrites per read file would churn the

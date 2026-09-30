@@ -26,6 +26,7 @@
 #include "invarifs.h"
 #include "volume.h"
 #include "vol_spt0.h"
+#include "vol_walk.h"   /* WP135: a walk's status is not optional */
 #include "tmpstore.h"
 
 static invfs_volume *g_vol;
@@ -101,6 +102,10 @@ static void table_rebuild_locked(void);   /* fwd (defined below) */
  * of closes -- rebuilding per close scanned the whole inode area each time
  * and made imports O(N^2). */
 static int g_table_stale = 0;
+/* WP135: set when a rebuild finished but the walk behind it did not. The
+ * table is usable for what it holds; it is not authority on what the volume
+ * contains, so a name it lacks is an I/O error, not an ENOENT. */
+static int g_table_degraded = 0;
 
 static void table_mark_stale(void) { g_table_stale = 1; }
 static void table_upsert_locked(const char *name, uint64_t ino,
@@ -129,7 +134,14 @@ static void table_refresh_if_stale_locked(void)
 {
     if (g_table_stale && g_vol) {
         table_rebuild_locked();
-        g_table_stale = 0;
+        /* WP135: build_file_table_v3 leaves the flag SET when the walk did
+         * not finish, and only on a rebuild that completed is the
+         * question answered. Clearing it unconditionally here is what made
+         * the daemon stop retrying after the one walk that failed -- the
+         * missing subtree was gone for the rest of the mount, and nothing
+         * ever re-asked. */
+        if (!g_table_degraded)
+            g_table_stale = 0;
     }
 }
 
@@ -221,16 +233,48 @@ static int v3_bft_cb(void *ctx_, const char *path, uint64_t ino,
     return 0;
 }
 
+/* WP135: the walk's status was dropped here, and that is what made whole
+ * SUBTREES vanish from a live mount. v3_walk_dir used to `continue` past an
+ * entry it could not resolve, so one unreadable dirent took its directory and
+ * everything under it out of the table -- silently, with a return value of 0
+ * meaning COMPLETE. Every path under a lost directory then missed in
+ * snapshot_entry(), and the three call sites turned that into -ENOENT: the
+ * user's `ls` says the files are not there, on a volume where they are.
+ *
+ * The table is still published -- a short table is strictly better than none
+ * for the paths it does contain -- but the volume is marked DEGRADED until a
+ * rebuild completes, and a degraded volume answers -EIO rather than -ENOENT
+ * for a name the table does not have. -ENOENT is a claim about the disk; on a
+ * volume that could not finish reading itself, it is a claim the daemon has
+ * no standing to make. The rebuild is also left marked stale, so the next
+ * op retries instead of the one-shot clear at :132 retiring the question. */
 static void build_file_table_v3(void)
 {
     v3_bft_ctx c;
+    vol_walk_t w;
+    int rc;
+
     memset(&c, 0, sizeof c);
-    vol_v3_walk(g_vol, v3_bft_cb, &c);
+    vol_walk_init(&w, g_vol, "build_file_table_v3");
+    /* WP135: the STRICT walk. A name table is a partial view of the
+     * namespace presented to the kernel as a whole one, and the lenient
+     * walk's `continue` is what takes a whole subtree out of it. See
+     * vol_v3_walk_strict's comment: it names pba_ref_ensure as the one
+     * caller that must not get a partial view, and this is a second. */
+    rc = vol_v3_walk_strict(g_vol, v3_bft_cb, &c);
+    vol_walk_result(&w, rc, (size_t)(c.n > 0 ? c.n : 0), (size_t)(c.n > 0 ? c.n : 0));
     if (c.n > 1)
         qsort(c.v, (size_t)c.n, sizeof *c.v, cmp_entry_name_pos);
     g_entries = c.v;
     g_nentries = c.n;
     g_cap = c.cap;
+    if (vol_walk_commit(&w) != 0) {
+        g_table_degraded = 1;
+        fprintf(stderr, "invf-fuse: the namespace walk did not complete; the "
+                        "name table is missing at least one subtree, and "
+                        "lookups for names it does not hold now answer EIO "
+                        "rather than ENOENT until a rebuild succeeds\n");
+    }
 }
 
 static void build_file_table(void)
@@ -312,10 +356,20 @@ static void table_sync_one_locked(const char *name)
 /* Race-safe lookup (audit H1): g_entries is freed and rebuilt by every
  * flush/create/unlink/sweep, so callers must never hold the pointer across
  * a rebuild. Copy the fields out under g_io_lock instead. */
+/* WP135: THREE answers now, and the third is the one this whole WP is
+ * about. 1 = found. 0 = the table is authoritative and the name is not
+ * there, which is a real ENOENT. -1 = the name is not there AND the last
+ * rebuild's namespace walk did not finish, so the table is not authority on
+ * what the volume contains: a name it lacks may be a name it never read.
+ * Mapping that to ENOENT is how "a damaged volume deletes a subtree" --
+ * the walk used to skip an unresolvable entry AND its recursion, so the
+ * lost part was a whole directory tree, and the operator's only evidence
+ * was `ls` saying the files were never written. */
 static int snapshot_entry(const char *name, uint64_t *ino_out, uint64_t *size_out,
                           uint64_t *ctime_out)
 {
     int found = 0;
+    int degraded = 0;
     pthread_mutex_lock(&g_io_lock);
     if (!g_vol) {
         pthread_mutex_unlock(&g_io_lock);
@@ -330,10 +384,12 @@ static int snapshot_entry(const char *name, uint64_t *ino_out, uint64_t *size_ou
             if (size_out)  *size_out  = e->size;
             if (ctime_out) *ctime_out = e->ctime;
             found = 1;
+        } else if (g_table_degraded) {
+            degraded = 1;
         }
     }
     pthread_mutex_unlock(&g_io_lock);
-    return found;
+    return found ? 1 : (degraded ? -1 : 0);
 }
 
 /* ---- format v2 metadata overlay ----
@@ -388,7 +444,11 @@ static int meta_for_path(const char *path, char *ename, size_t ecapsz,
     const char *name = path[0] == '/' ? path + 1 : path;
     uint64_t ino = 0, size = 0, ctime = 0;
 
-    if (snapshot_entry(name, &ino, &size, &ctime)) {
+    /* WP135: == 1, not truthiness: snapshot_entry has three answers now
+     * (found / absent / absent-on-a-degraded-table) and -1 must not be read
+     * as found. Upstream's three-valued refactor is what made that a
+     * question worth asking. */
+    if (snapshot_entry(name, &ino, &size, &ctime) == 1) {
         int grc;
         pthread_mutex_lock(&g_io_lock);
         grc = g_vol ? vol_get_meta_rc(g_vol, ino, m) : -EIO;
@@ -407,7 +467,7 @@ static int meta_for_path(const char *path, char *ename, size_t ecapsz,
         pthread_mutex_unlock(&g_io_lock);
         if (!is_dir) return 0;
         snprintf(anchor, sizeof anchor, "%s/", name);
-        if (snapshot_entry(anchor, &ino, &size, &ctime)) {
+        if (snapshot_entry(anchor, &ino, &size, &ctime) == 1) {
             pthread_mutex_lock(&g_io_lock);
             grc = g_vol ? vol_get_meta_rc(g_vol, ino, m) : -EIO;
             pthread_mutex_unlock(&g_io_lock);
@@ -1144,10 +1204,19 @@ static int invf_getattr(const char *path, struct stat *st, struct fuse_file_info
          * itself is how the kernel discovers S_IFLNK */
         const char *name = path[0] == '/' ? path + 1 : path;
         /* WP-M20: base reads are lock-free (immutable base, delta published atomically) */
-        if (!snapshot_entry(name, NULL, &size, &ctime)) {
-            int is_dir = 0;
-            is_dir = g_vol ? vol_is_dir(g_vol, name) : 0;
-            if (!is_dir) return -ENOENT;
+        {
+            /* WP135: -1 = absent on a table that is not authority. A name
+             * the degraded table does not hold may be one it never read, so
+             * ENOENT here would be a claim about the disk that the daemon is
+             * not in a position to make. The vol_is_dir() fallback below is
+             * a real lookup against the engine, so it is allowed to have
+             * the last word on what IS there. */
+            int se = snapshot_entry(name, NULL, &size, &ctime);
+            if (se <= 0) {
+                int is_dir = 0;
+                is_dir = g_vol ? vol_is_dir(g_vol, name) : 0;
+                if (!is_dir) return (se < 0) ? -EIO : -ENOENT;
+            }
         }
         /* The racy fallback below is for a name the snapshot has not caught
          * up with yet, and it is a READ -- nothing here is written back, so
@@ -1444,8 +1513,15 @@ static int invf_read(const char *path, char *buf, size_t size, off_t offset,
     }
     pthread_mutex_unlock(&g_io_lock);
     /* Metadata read: lock-free base path */
-    if (!snapshot_entry(path + 1, &ino, &size64, &ctime))
-        return -ENOENT;
+    {
+        /* WP135: EIO, not ENOENT, when the table is degraded -- see the
+         * three-answer contract on snapshot_entry(). */
+        int se = snapshot_entry(path + 1, &ino, &size64, &ctime);
+        if (se < 0)
+            return -EIO;
+        if (se == 0)
+            return -ENOENT;
+    }
     if ((uint64_t)offset >= size64)
         return 0;
     /* Data read: lock-free, and that means EVERY structure vol_read_range
@@ -1476,6 +1552,11 @@ static void table_rebuild_locked(void)
     /* free old table, rescan */
     free(g_entries);
     g_entries = NULL; g_nentries = 0; g_cap = 0;
+    /* WP135: clear the degraded mark BEFORE the rebuild, so it is this
+     * rebuild's verdict and not the last one's. A rebuild that completes
+     * leaves it 0 and the table is authority again; one that does not sets
+     * it in build_file_table_v3. */
+    g_table_degraded = 0;
     build_file_table();
 }
 
@@ -1484,8 +1565,14 @@ static int invf_open(const char *path, struct fuse_file_info *fi)
     struct acreds c;
     if (strcmp(path, "/") == 0)
         return -EISDIR;
-    if (!snapshot_entry(path + 1, NULL, NULL, NULL))
-        return -ENOENT;
+    {
+        /* WP135: EIO, not ENOENT, when the table is degraded. */
+        int se = snapshot_entry(path + 1, NULL, NULL, NULL);
+        if (se < 0)
+            return -EIO;
+        if (se == 0)
+            return -ENOENT;
+    }
     acreds_get(&c);
     /* O_PATH is a handle-only open (stat material): no data access, hence
      * no permission gate (POSIX: O_PATH needs none) */
@@ -1575,13 +1662,13 @@ static int invf_create(const char *path, mode_t mode, struct fuse_file_info *fi)
             /* O_CREAT over an existing file is an open: needs W on it.
              * (The daemon replaces the record either way -- pre-existing
              * semantics -- but never for a caller the file would refuse.) */
-            if (snapshot_entry(path + 1, NULL, NULL, NULL)) {
+            if (snapshot_entry(path + 1, NULL, NULL, NULL) == 1) {
                 rc = perm_check_cred(&cr, path, W_OK);
                 if (rc) return rc;
             }
         }
     }
-    if ((fi->flags & O_EXCL) && snapshot_entry(path + 1, NULL, NULL, NULL))
+    if ((fi->flags & O_EXCL) && snapshot_entry(path + 1, NULL, NULL, NULL) == 1)
         return -EEXIST;
     /* default-ACL inheritance: child access ACL = parent's default,
      * masked by the create mode (posix_acl_create_masq) */
@@ -1891,13 +1978,28 @@ static void invf_sweep_worker(int full_pass)
      * per-file usleep(500) further down this same loop. */
     complete = (vol_collect_sweepables_grow(g_vol, &ids, &cap, &n, &found) == 0);
     if (!complete) {
-        /* The growth itself ran out of memory. `found > n` is the proof
-         * that the list is a subset, so the pass must not be allowed to
-         * look like it swept the volume. */
-        fprintf(stderr,
-                "[%s] INCOMPLETE: could not allocate a sweep list for this "
-                "volume; collected %zu of at least %zu inodes. The pass "
-                "below is a PARTIAL sweep, not a whole one.\n", tag, n, found);
+        /* WP135: -1 has two causes now and they need different words.
+         * found > n is the buffer-full case (the growth ran out of memory);
+         * found == n is the WALK case, where the collector could not
+         * enumerate the live set at all -- a quarantined base page, and the
+         * delta pass that vol_v3_iter_live_inodes skips after a failed base
+         * scan, so the list is missing every inode created since the last
+         * fold. Before the fix the second case reached here as `complete`
+         * with a matching count and printed an ordinary DONE line: the
+         * sharpest of the five, because a damaged volume then accumulates
+         * dead segments forever behind a clean log (AGENTS.md 2.5). */
+        if (found > n) {
+            fprintf(stderr,
+                    "[%s] INCOMPLETE: could not allocate a sweep list for this "
+                    "volume; collected %zu of at least %zu inodes. The pass "
+                    "below is a PARTIAL sweep, not a whole one.\n", tag, n, found);
+        } else {
+            fprintf(stderr,
+                    "[%s] INCOMPLETE: the live-set WALK did not complete (%zu "
+                    "inodes collected, and the walk stopped rather than "
+                    "finished). The volume is damaged or unreadable; the pass "
+                    "below would rewrite only a subset of it.\n", tag, n);
+        }
         if (!full_pass) {
             /* Fail closed, the same rule the save-point capture follows
              * above: the operator asked for this in the foreground, a
@@ -1928,14 +2030,22 @@ static void invf_sweep_worker(int full_pass)
              * everything on small images (WP16b margin) and would never
              * relieve the watermark's pressure */
             char nm[256];
-            if (vol_sweep_name_of(g_vol, ids[i], nm, sizeof nm)) {
+            /* WP135: == 1, and -1 counted as a FAILURE. The name lookup
+             * now reports a walk that stopped as -1 rather than 0; truthiness
+             * would have handed that -1 to vol_sweep_one together with an
+             * empty name, and "skipped" would have told the operator the
+             * file was deleted between collect and sweep. It was not. */
+            int nrc = vol_sweep_name_of(g_vol, ids[i], nm, sizeof nm);
+            if (nrc == 1) {
                 rc = vol_sweep_one(g_vol, ids[i], nm);
                 /* one rc: 0 = nothing to do, >0 = swept/deferred, <0 = err */
                 if (rc > 0)       { swept++;   }
                 else if (rc == 0) { skipped++; }
                 else              { failed++; }
-            } else {
+            } else if (nrc == 0) {
                 skipped++;   /* deleted between collect and walk */
+            } else {
+                failed++;   /* the namespace could not be read for this inode */
             }
         } else {
             rc = vol_sweep_file(g_vol, ids[i]);

@@ -90,6 +90,7 @@
 #include "invarifs.h"
 #include "volume.h"
 #include "vol_spt0.h"
+#include "vol_walk.h"   /* WP135: a walk's status is not optional */
 #include "vol_reclaim.h"
 #include "codec.h"
 #include "rs.h"
@@ -1759,16 +1760,46 @@ int main(int argc, char **argv)
             /* WP-M21b: v3 volumes iterate the live inode set (base tree
              * + delta overlay) instead of the record stream. */
             v3_collect_ctx vc;
+            vol_walk_t w;
+            int wrc;
             memset(&vc, 0, sizeof vc);
             vc.vol = vol;
             vc.names = &names; vc.inodes = &inodes;
             vc.sizes = &sizes; vc.poss = &poss;
             vc.tab = &tab; vc.tmask = &tmask; vc.tcount = &tcount;
             vc.count = &count; vc.cap = &cap;
-            if (vol_v3_walk(vol, v3_sweep_walk_cb, &vc) < 0) {
+            /* WP135: this used to PRINT A WARNING AND CARRY ON, which is
+             * the whole defect in one line -- it warned, then swept a
+             * volume it had just admitted it could not read, rewriting every
+             * file it happened to reach. The collect is the input to the
+             * mutating stages; a partial input is not a smaller job, it is
+             * the wrong job, and the damage is not limited to the files the
+             * walk missed (a container lane supersedes a recipe, so the
+             * files it DID see are rewritten on the strength of a list it
+             * could not complete).
+             *
+             * So it stops. Both modes: a --dry-run over a partial list is
+             * also the wrong plan, and a plan is what an operator acts on. */
+            vol_walk_init(&w, vol, "invf-sweep collect");
+            /* WP135: the STRICT walk -- the collect's output is the input
+             * to every mutating stage below it. */
+            wrc = vol_v3_walk_strict(vol, v3_sweep_walk_cb, &vc);
+            /* `vc.count` is the int the collect callback increments, by
+             * POINTER: *(vc.count) is what the walk delivered. Casting the
+             * pointer itself is how the first draft of this line printed a
+             * 47-bit address as an entry count. */
+            vol_walk_result(&w, wrc, (size_t)*vc.count, (size_t)*vc.count);
+            if (vol_walk_commit(&w) != 0) {
                 sw_progress_suspend();
-                fprintf(stderr, "warning: v3 directory walk did not "
-                                "complete\n");
+                fprintf(stderr,
+                        "invf-sweep: the v3 namespace walk did not complete "
+                        "(it stopped after %zu entr%s of a volume it could "
+                        "not fully read). Refusing to %s: a partial live set "
+                        "is not a smaller sweep, it is the wrong one. Run "
+                        "invf-fsck on the image first.\n",
+                        vol_walk_seen(&w), vol_walk_seen(&w) == 1 ? "y" : "ies",
+                        dry ? "plan" : "sweep");
+                return 1;
             }
             if (vc.oom) {
                 sw_progress_suspend();

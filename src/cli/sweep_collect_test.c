@@ -142,7 +142,7 @@ int main(int argc, char **argv)
     /* --- 1. truncation is VISIBLE ------------------------------------ */
     ids = (uint64_t *)calloc(TINY_CAP, sizeof *ids);
     if (!ids) { fprintf(stderr, "oom\n"); return 2; }
-    n = vol_collect_sweepables_ex(v, ids, TINY_CAP, &found);
+    n = vol_collect_sweepables_ex(v, ids, TINY_CAP, &found, NULL);
     ok(n == TINY_CAP,
        "1.  a cap of %d on a %d-file volume stores exactly the cap (%zu)",
        TINY_CAP, NFILES, n);
@@ -155,7 +155,7 @@ int main(int argc, char **argv)
         uint64_t *big = (uint64_t *)calloc(NFILES * 4, sizeof *big);
         size_t n2, f2;
         if (!big) { fprintf(stderr, "oom\n"); return 2; }
-        n2 = vol_collect_sweepables_ex(v, big, NFILES * 4, &f2);
+        n2 = vol_collect_sweepables_ex(v, big, NFILES * 4, &f2, NULL);
         ok(n2 == NFILES,
            "2.  CONTROL, a cap the volume fits inside collects all %d "
            "files (%zu)", NFILES, n2);
@@ -202,7 +202,7 @@ int main(int argc, char **argv)
         size_t j;
         uint64_t id = ids[i];
         for (j = 0; j < i; j++) if (ids[j] == id) unique = 0;
-        if (vol_sweep_name_of(v, id, nm, sizeof nm) == 0) resolvable = 0;
+        if (vol_sweep_name_of(v, id, nm, sizeof nm) != 1) resolvable = 0;
     }
     ok(unique, "5.  every collected id is distinct: a list that grew by "
        "duplicating would pass 3 and fail here");
@@ -217,7 +217,7 @@ int main(int argc, char **argv)
         char nm[256];
         int idx;
         (void)vol_sweep_file(v, ids[i]);   /* the call the FUSE pass makes */
-        if (vol_sweep_name_of(v, ids[i], nm, sizeof nm) == 0) continue;
+        if (vol_sweep_name_of(v, ids[i], nm, sizeof nm) != 1) continue;
         for (k = 0; k < (size_t)NFILES; k++) {
             char want[64];
             snprintf(want, sizeof want, "f%03zu.bin", k);

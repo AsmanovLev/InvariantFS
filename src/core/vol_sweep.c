@@ -1626,8 +1626,14 @@ int vol_sweep_file_generic(invfs_volume *v, uint64_t inode_id)
 
 /* Resolve the current name of an inode id for a sweep driver that has
  * only the id (vol_sweep_one wants the name: class policy, pack sniffing
- * and the live-session guard all key on it). 1 = found, 0 = deleted or
- * unreadable. Same scan the pending drain has always used. */
+ * and the live-session guard all key on it). 1 = found, 0 = deleted, -1 =
+ * the name could not be resolved because the namespace walk STOPPED.
+ * Same scan the pending drain has always used.
+ *
+ * WP135: `(rc > 0) ? 1 : 0` flattened that -1 into the "deleted" answer, so
+ * an inode the walk simply could not reach was skipped with a comment that
+ * said "deleted between collect and walk" -- which the operator then
+ * believed, on a volume that was not being deleted from. */
 int vol_sweep_name_of(invfs_volume *v, uint64_t id, char *nm, size_t cap)
 {
     uint64_t parent;
@@ -1636,6 +1642,7 @@ int vol_sweep_name_of(invfs_volume *v, uint64_t id, char *nm, size_t cap)
     /* WP-M18: the dirent tree, delta-first. The v2 alternative walked the
      * append-only inode area to find the record carrying the name. */
     rc = vol_v3_name_of(v, id, nm, cap, &parent);
+    if (rc < 0) { nm[0] = 0; return -1; }
     return (rc > 0) ? 1 : 0;
 }
 
@@ -1661,7 +1668,11 @@ int vol_sweep_pending(invfs_volume *v)
         char nm[256];
         int found = vol_sweep_name_of(v, id, nm, sizeof nm);
         vol_unmark_pending(v, id);
-        if (found) {
+        /* WP135: == 1, not "non-zero". vol_sweep_name_of propagates the -1
+         * that a stopped v3 walk now produces, and a truthiness test would
+         * have fed that -1 straight into vol_sweep_one with an EMPTY name --
+         * a rewrite keyed on a name the volume could not supply. */
+        if (found == 1) {
             int rc = vol_sweep_one(v, id, nm);
             if (rc > 0) done++;
         }
@@ -1824,7 +1835,7 @@ typedef struct {
 /* WP-M21b: collector callback for the v3 live-set iterator. Internal
  * (\x01) rows and nameless rows are not sweep targets; the iterator has
  * already dropped deleted rows and de-duplicated nlink-shared inodes. */
-struct v3_sweep_ids { uint64_t *ids; size_t max, n; size_t found; };
+struct v3_sweep_ids { uint64_t *ids; size_t max, n; size_t found; int full; };
 
 static int collect_sweepables_v3_cb(invfs_volume *v, uint64_t id,
                                     const char *name, void *ctx)
@@ -1839,25 +1850,66 @@ static int collect_sweepables_v3_cb(invfs_volume *v, uint64_t id,
      * indistinguishable from an exactly-full one -- and that difference is
      * the whole of the "swept a prefix and said nothing" defect. */
     c->found++;
-    if (c->n >= c->max)
-        return 1;                       /* full: stop the iteration */
+    if (c->n >= c->max) {
+        /* The callback's non-zero return is how the iteration STOPS, and
+         * vol_v3_iter_live_inodes propagates a non-zero callback result as
+         * its own (-1). So a buffer that simply filled up arrives at the
+         * caller indistinguishable from a walk that failed -- which is
+         * exactly the confusion this WP exists to end, one level down. The
+         * flag says which it was, and the caller resolves it: a full buffer
+         * is the normal state of the first pass of a growing collect. */
+        c->full = 1;
+        return 1;
+    }
     c->ids[c->n++] = id;
     return 0;
 }
 
+/* WP135: the live-set collect, and the walk's STATUS.
+ *
+ * `*rc_out` is vol_v3_iter_live_inodes' own return value. It is a separate
+ * out-param rather than being folded into the return because the return is a
+ * count and callers legitimately want the count they got even on a short
+ * walk -- what they must not do is mistake it for the whole set, and only
+ * they can decide what a short list is worth. */
 size_t vol_collect_sweepables_ex(invfs_volume *v, uint64_t *ids, size_t max,
-                                 size_t *found_out)
+                                 size_t *found_out, int *rc_out)
 {
     struct v3_sweep_ids vc;
-    vc.ids = ids; vc.max = max; vc.n = 0; vc.found = 0;
-    (void)vol_v3_iter_live_inodes(v, collect_sweepables_v3_cb, &vc);
+    int rc;
+
+    vc.ids = ids; vc.max = max; vc.n = 0; vc.found = 0; vc.full = 0;
+    /* WP135: this status was discarded, and the discard is the sharpest of
+     * the five. vol_v3_iter_live_inodes returns -1 when the base scan
+     * fails, and the two things that follow from that were both silent:
+     *
+     *   1. the DELTA pass is skipped entirely (vol_btree.c:5300 only runs
+     *      it when the base scan came back 0), so the collect loses every
+     *      inode created since the last fold; and
+     *   2. vol_collect_sweepables_grow below sees found == n -- the walk
+     *      stopped at the first failure, so it SAW exactly what it STORED
+     *      -- and reads that as "the walk reached the end of the live set:
+     *      COMPLETE", returning 0.
+     *
+     * The caller then prints an ordinary successful DONE line and rewrites
+     * the subset it enumerated. AGENTS.md 2.5: the sweep is what drains RAW
+     * and reclaims, so this is unbounded dead-segment accumulation behind a
+     * clean log -- the exact failure 2.5 warns the operator about, reached
+     * by a damaged volume rather than by a disabled worker. */
+    rc = vol_v3_iter_live_inodes(v, collect_sweepables_v3_cb, &vc);
+    /* *rc_out answers ONE question: did the walk fail for a reason of its
+     * own? A stop this callback asked for (the buffer filled) is not that,
+     * and reporting it as one would make every growing collect give up
+     * after its first pass. Truncation is reported the other way, by
+     * found > n, which is what the whole found/n contract is for. */
+    if (rc_out) *rc_out = (rc != 0 && !vc.full) ? rc : 0;
     if (found_out) *found_out = vc.found;
     return vc.n;
 }
 
 size_t vol_collect_sweepables(invfs_volume *v, uint64_t *ids, size_t max)
 {
-    return vol_collect_sweepables_ex(v, ids, max, NULL);
+    return vol_collect_sweepables_ex(v, ids, max, NULL, NULL);
 }
 
 int vol_collect_sweepables_grow(invfs_volume *v, uint64_t **ids_io, size_t *cap_io,
@@ -1865,6 +1917,8 @@ int vol_collect_sweepables_grow(invfs_volume *v, uint64_t **ids_io, size_t *cap_
 {
     uint64_t *ids;
     size_t cap, n = 0, found = 0;
+    vol_walk_t w;
+    int rc = 0;
 
     if (!v || !ids_io || !cap_io || !n_out || !found_out) return -1;
     ids = *ids_io; cap = *cap_io;
@@ -1874,12 +1928,27 @@ int vol_collect_sweepables_grow(invfs_volume *v, uint64_t **ids_io, size_t *cap_
         ids = (uint64_t *)malloc(cap * sizeof *ids);
         if (!ids) { *n_out = 0; *found_out = 0; return -1; }
     }
+    vol_walk_init(&w, v, "vol_collect_sweepables");
     for (;;) {
-        n = vol_collect_sweepables_ex(v, ids, cap, &found);
-        /* found == n means the walk reached the end of the live set with
-         * room to spare: this is a COMPLETE list, and returning it is the
-         * only way this function returns 0. */
-        if (found <= n) break;
+        n = vol_collect_sweepables_ex(v, ids, cap, &found, &rc);
+        /* rc, NOT the receipt's "complete". The two are not the same
+         * question and conflating them is a bug this loop had once: on a
+         * seed of one slot, found > n is the EXPECTED state of the first
+         * pass -- that is what makes the buffer double -- and a receipt
+         * that folds truncation into "complete" would read that as a walk
+         * that stopped and give up after one entry. Truncation is handled
+         * by the doubling below; only the walk's own status can stop it.
+         *
+         * The receipt is recorded ONCE, after the loop. A collect that
+         * grows takes several passes and every one of the early ones is
+         * truncated by construction; recording each would latch the volume
+         * once per pass and discharge it once, and vol_close would then
+         * report N unclaimed walks for a collect that was answered
+         * correctly. The receipt is about the OUTCOME, and there is one
+         * outcome. */
+        if (rc != 0)
+            break;                 /* the walk STOPPED: growing cannot help */
+        if (found <= n) break;     /* reached the end: this is the live set */
         /* found > n: the buffer is full and the volume has more. Double
          * and walk again -- the same shape tz_v3_gc already uses
          * (vol_textzone.c:1569) and the same shape the offline sweep's own
@@ -1893,7 +1962,12 @@ int vol_collect_sweepables_grow(invfs_volume *v, uint64_t **ids_io, size_t *cap_
     }
     *ids_io = ids; *cap_io = cap;
     *n_out = n; *found_out = found;
-    return found <= n ? 0 : -1;
+    vol_walk_result(&w, rc, n, found);
+    /* WP135: -1 for a walk that did not finish, exactly as it already
+     * returned -1 for a list it could not grow. Both are "this is a strict
+     * subset of a set we cannot enumerate", and the caller has to say so
+     * either way. Return 0 only for a list that IS the live set. */
+    return vol_walk_commit(&w);
 }
 
 

@@ -40,6 +40,7 @@
 
 #include "invarifs.h"
 #include "volume.h"
+#include "vol_walk.h"
 #include "blkio.h"
 #include "arc.h"
 #if __has_include("lz4.h")
@@ -290,6 +291,11 @@ typedef struct invfs_volume {
      * was a synchronous ~250 ms per file on flash regardless of file size. */
     uint64_t bm_lo, bm_hi;
     uint64_t free_blocks;     /* cached free count (bitmap scan at open) */
+    /* WP135: unclaimed short v3 walks (src/core/vol_walk.h). A walk that
+     * stopped and that nobody committed or explicitly abandoned is an open
+     * question about this volume; vol_close and the reporting surfaces read
+     * and clear it. Relaxed-atomic -- see vol_walk.c. */
+    unsigned VOL_WALK_LATCH_FIELD;
     /* in-memory L2P */
     invfs_l2p_entry *l2p;
     size_t l2p_count, l2p_cap;

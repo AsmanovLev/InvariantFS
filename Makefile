@@ -44,7 +44,7 @@ CORE    := volume vol_cpack helper_exec tool_scratch vol_plugin_client vol_png v
            vol_resize vol_fsck vol_crash vol_exer vol_dedupe vol_textzone \
             vol_heat vol_sweep vol_read vol_write vol_records vol_ast \
             vol_dirs vol_tier vol_meta_merge vol_metabuf vol_btree vol_delta \
-            vol_fold vol_reclaim vol_spt0 vol_anchor \
+            vol_fold vol_reclaim vol_spt0 vol_anchor vol_walk \
             arc crc32c lz4 flacx tarx pngx blkio miniz blake3 blake3_dispatch blake3_portable ppmd8 ppmd8enc ppmd8dec ppmd_codec codec bcj_x86 rs deflate_repro \
             deflate_backend_system deflate_backend_stock
 CORE_O  := $(addprefix $(OBJ)/,$(addsuffix .o,$(CORE))) $(STOCK_ZLIB_O)
@@ -131,7 +131,8 @@ CLI_MAINS := mkfs verify fsck cp cat ls stat arctest blkio_test resize \
              rollback_symlink_test \
              sibling_retire_v3_test tar_cap_test fold_delta_read_test \
              reclaim_reader_epoch_test readdir_error_test dedupe_symlink_test dirs_free_before_publish_test \
-             stat_v3_counts_test acl_eio_test meta_clobber_test spn_skip_recipe_test
+             stat_v3_counts_test acl_eio_test meta_clobber_test spn_skip_recipe_test \
+             walk_status_test walk_status_fuse_test
 $(foreach t,$(CLI_MAINS),$(eval $(call TOOL_RULE,$(t),)))
 
 # reclaim_reader_epoch_test was, for one commit, a red control that built but
@@ -625,7 +626,7 @@ TEST_BINS := $(foreach t,$(filter %_test,$(CLI_MAINS)),$(OUT)/invf-$(t))
 test: $(TEST_BINS) $(OUT)/invf-arctest $(OUT)/invf-blkio_test $(OUT)/invf-codec_test \
       $(OUT)/invf-helper_exec_test $(OUT)/invf-metabuf_test $(OUT)/invf-btree_test \
       $(OUT)/invf-delta_test $(OUT)/invf-groupcommit_test $(OUT)/invf-concurrency_test $(OUT)/invf-sweep_v3_test \
-      $(OUT)/invf-sweep_collect_test \
+      $(OUT)/invf-sweep_collect_test $(OUT)/invf-verify \
       $(OUT)/invf-fold_delta_read_test \
       $(OUT)/invf-btree_repair_test \
       $(OUT)/invf-symlink_v3_test $(OUT)/invf-large_file_v3_test $(OUT)/invf-dedupe_v3_test \
@@ -721,6 +722,13 @@ test: $(TEST_BINS) $(OUT)/invf-arctest $(OUT)/invf-blkio_test $(OUT)/invf-codec_
 	$(TESTENV) $(TESTISO) $(OUT)/invf-reclaim_reader_epoch_test /tmp
 	$(TESTENV) $(TESTISO) $(OUT)/invf-sweep_v3_test /tmp
 	$(TESTENV) $(TESTISO) $(OUT)/invf-sweep_collect_test /tmp
+	@# WP135: the walk-receipt controls. invf-verify and invf-sweep are
+	@# invoked as SUBPROCESSES by walk_status_test (they are separate mains,
+	@# and a fresh process is also a fresh fault countdown), so they have to
+	@# be built before it runs. Neither was in the prerequisite list above,
+	@# which is the same staleness trap the comment on `all` describes.
+	$(TESTENV) $(TESTISO) $(OUT)/invf-walk_status_test /tmp
+	$(TESTENV) $(TESTISO) $(OUT)/invf-walk_status_fuse_test /tmp
 	$(TESTENV) $(TESTISO) $(OUT)/invf-btree_repair_test /tmp
 	$(TESTENV) $(TESTISO) $(OUT)/invf-symlink_v3_test /tmp
 	$(TESTENV) $(TESTISO) $(OUT)/invf-large_file_v3_test /tmp

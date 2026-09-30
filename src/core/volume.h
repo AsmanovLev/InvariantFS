@@ -226,7 +226,10 @@ int  vol_sweep_one(invfs_volume *v, uint64_t inode_id, const char *name);
 int  vol_sweep_one_ex(invfs_volume *v, uint64_t inode_id, const char *name,
                       invfs_sweep_file_progress_fn progress, void *progress_user);
 /* resolve the live name of an inode id for vol_sweep_one drivers that
- * collected only ids (vol_collect_sweepables); 1 = found, 0 = gone */
+ * collected only ids (vol_collect_sweepables).
+ * WP135: 1 = found, 0 = gone, -1 = the namespace walk STOPPED (a quarantined
+ * base page, an OOM). The third answer is not "gone" and a caller that
+ * tests the result for truthiness will read it as found. */
 int  vol_sweep_name_of(invfs_volume *v, uint64_t id, char *nm, size_t cap);
 int  vol_stat(invfs_volume *v, const char *name, uint64_t *size_out);
 /* inode id + size + ctime in one O(1) index lookup */
@@ -736,9 +739,16 @@ size_t vol_collect_sweepables(invfs_volume *v, uint64_t *ids, size_t max);
  * *found_out above it, so the shortfall is reported rather than assumed away.
  * The caller decides what a short list is worth, and it cannot skip that
  * decision: a sweep that reports success having swept a subset is worse than
- * one that refuses. */
+ * one that refuses.
+ *
+ * WP135: `*rc_out` is the live-set WALK's own status. Without it the caller
+ * had only `found`/`n`, and a walk that STOPPED (a quarantined base page)
+ * makes found == n -- it saw exactly what it stored -- which reads as
+ * COMPLETE. So `found == n` proves "not truncated by the cap", never "the
+ * walk reached the end". A short list has two causes now, the cap and the
+ * walk, and only vol_collect_sweepables_grow() can see both. */
 size_t vol_collect_sweepables_ex(invfs_volume *v, uint64_t *ids, size_t max,
-                                 size_t *found_out);
+                                 size_t *found_out, int *rc_out);
 int vol_collect_sweepables_grow(invfs_volume *v, uint64_t **ids_io, size_t *cap_io,
                                 size_t *n_out, size_t *found_out);
 

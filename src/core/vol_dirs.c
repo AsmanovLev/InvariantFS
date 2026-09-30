@@ -4,6 +4,17 @@
 #include "volume_internal.h"
 #include "vol_fault.h"
 
+/* Test-only door (src/core/vol_fault.h): the arming state of THIS
+ * translation unit, which a test in another one cannot reach by hand --
+ * unsetenv+setenv does not re-arm, because the freed string's address is
+ * usually handed straight back and the pointer compare sees no change.
+ * Same role as invfs_vol_btree_fault_reload(), in the file that owns the
+ * walk fault sites below. */
+void invfs_vol_dirs_fault_reload(void)
+{
+    invfs_vol_fault_reload();
+}
+
 
 /* ---- virtual directories (prefix-based; mkdir creates an empty anchor
    file named "dir/"; nested files "dir/x" make dir visible) ---- */
@@ -212,10 +223,36 @@ int vol_v3_path_list_dir(invfs_volume *v, const char *dir,
 
     if (!v || !ents || max <= 0)
         return 0;
-    if (v3_skip_slash(dir)[0] == 0)
+    if (v3_skip_slash(dir)[0] == 0) {
         pino = INVFS_V3_ROOT_INO;
-    else if (vol_v3_path_lookup(v, dir, &pino) != 1)
-        return 0;
+    } else {
+        /* WP135: test-only seam for the case the `else` below used to turn
+         * into an empty directory -- the directory's OWN dirent sits in an
+         * unreadable range. Unset in production; one getenv and one pointer
+         * compare. Returns the same errno the real lookup failure would. */
+        if (invfs_vol_fault("path_list_dir_lookup"))
+            return -EIO;
+        /* WP135: `!= 1` collapsed two different volume states into one
+         * answer. vol_v3_path_lookup returns 1 found, 0 absent and -1
+         * ERROR, and 0 was returned for both of the others -- so a
+         * directory whose OWN dirent sits in a quarantined range (the
+         * name lookup EIOs) was reported as an EMPTY DIRECTORY, with rc 0,
+         * while damage one level down -- in the children range -- has
+         * always produced -EIO at :224 below. The same volume therefore
+         * answered `ls` two different ways depending on which range was
+         * unreadable, and the first way is indistinguishable from a
+         * directory that genuinely has no entries.
+         *
+         * 0 stays 0: a name that resolves to nothing is not this function's
+         * error to invent (a dirent can be unlinked between the lookup and
+         * the listing, and the caller's ENOENT is the honest answer there).
+         * Only a lookup that FAILED becomes -EIO. */
+        int lrc = vol_v3_path_lookup(v, dir, &pino);
+        if (lrc < 0)
+            return -EIO;
+        if (lrc == 0)
+            return 0;
+    }
     c.v = v;
     c.ents = ents;
     c.max = max;
@@ -799,9 +836,15 @@ static int v3_walk_dir(invfs_volume *v, const char *dir,
                        vol_v3_walk_cb cb, void *ctx, int depth, int strict)
 {
     invfs_dirent *ents;
-    int cap = 256, n, i;
+    int cap = 256, n, i, lrc, irc;
 
     if (depth > 64)
+        return -1;
+    /* WP135: test-only seam -- the walk itself stops (a quarantined base
+     * page, an OOM in the callback). This is the state all three of the
+     * v3_walk() callers failed to act on, and the one the red controls
+     * need to reach without corrupting a tree. Unset in production. */
+    if (invfs_vol_fault("v3_walk_dir_stop"))
         return -1;
     ents = (invfs_dirent *)malloc((size_t)cap * sizeof *ents);
     if (!ents)
@@ -840,12 +883,31 @@ static int v3_walk_dir(invfs_volume *v, const char *dir,
          * (vol_v3_path_lookup says so), and a row that could not be READ is
          * an error (vol_v3_inode_get says so, and volume.h is explicit that
          * a caller must not map its -1 to 0). In strict mode neither is a
-         * `continue`. */
-        if (vol_v3_path_lookup(v, path, &ino) != 1) {
+         * `continue`.
+         *
+         * WP135: this branch is now the whole of the "which caller asked"
+         * question, and the answer is that four of the six callers of a v3
+         * walk still ask for the LENIENT one -- see vol_v3_walk_strict's
+         * own comment, which names pba_ref_ensure as "the one caller whose
+         * answer must not be a partial view of the namespace". A file list
+         * for invf-verify, a name table for the mount, a live set for the
+         * sweep and a reverse name lookup are all partial views too; they
+         * are just partial views that get PRINTED rather than used to drop
+         * a block reference, which is what made them look safe. WP135
+         * moves those four to vol_v3_walk_strict.
+         *
+         * The fault seam below stands in for the failed RESOLUTION and then
+         * defers to this same branch, so the red control measures the
+         * lenient/lenient choice rather than a private copy of it. */
+        lrc = invfs_vol_fault("v3_walk_dir_entry")
+                  ? -1 : vol_v3_path_lookup(v, path, &ino);
+        if (lrc != 1) {
             if (strict) { free(ents); return -1; }
             continue;
         }
-        if (vol_v3_inode_get(v, ino, &in) != 1) {
+        irc = invfs_vol_fault("v3_walk_dir_row")
+                  ? -1 : vol_v3_inode_get(v, ino, &in);
+        if (irc != 1) {
             if (strict) { free(ents); return -1; }
             continue;
         }

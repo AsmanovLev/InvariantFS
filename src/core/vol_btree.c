@@ -4892,6 +4892,7 @@ int vol_v3_name_of(invfs_volume *v, uint64_t inode_id,
 {
     v3_name_of_ctx c;
     invfs_v3_inode in;
+    int rc;
 
     if (!v || !name || name_cap == 0)
         return -1;
@@ -4908,7 +4909,20 @@ int vol_v3_name_of(invfs_volume *v, uint64_t inode_id,
     c.parent_out = parent_out;
     c.found = 0;
 
-    (void)vol_v3_walk(v, v3_name_of_walk_cb, &c);
+    /* WP135: the status was dropped here, so a walk that STOPPED -- a
+     * quarantined base page, an OOM -- answered 0, "absent". Two callers
+     * act on that: vol_sweep_name_of() turns it into "this file is gone"
+     * and skips the inode, and the iterator's per-inode fallback turns it
+     * into NULL, which v3_iter_live_inodes documents as the ordinary "no
+     * dirent reference" case. A short walk is -1, which is what this
+     * function's own contract already promised. */
+    /* WP135: the STRICT walk. "This inode has no name" and "the tree
+     * could not be read" are different answers and only one of them is 0.
+     * The lenient walk cannot express the difference: it steps over the
+     * unreadable row and returns 0, which is what this function did. */
+    rc = vol_v3_walk_strict(v, v3_name_of_walk_cb, &c);
+    if (rc < 0)
+        return -1;
     return c.found ? 1 : 0;
 }
 
@@ -5323,6 +5337,15 @@ int vol_v3_iter_live_inodes(invfs_volume *v,
      * released before the delta pass at the end. This is the sweep's collect
      * walker, so on a large volume it is the longest single hold on the
      * counter in the tree -- the drain's measured worst case. */
+    /* WP135: test-only seam -- the BASE scan fails, which is the state that
+     * costs the most. vol_v3_iter_live_inodes skips the delta pass entirely
+     * once rc is set (see `if (rc == 0)` below), so the caller loses every
+     * inode created since the last fold as well -- and the count it stored
+     * still matches the count it SAW, which is how the sweep read the
+     * shortfall as COMPLETE. Unset in production. */
+    if (invfs_vol_fault("iter_live_inodes"))
+        return -1;
+
     (void)vol_reclaim_reader_snapshot();
     if (v3_base_root(v, &root) == 0 && root.pba != 0) {
         uint64_t m = 0;

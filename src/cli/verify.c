@@ -21,6 +21,7 @@
 #include "volume.h"
 #include "blkio.h"
 #include "vol_metabuf.h"   /* WP76: INVFS_MBUF_BOOT_PAGES */
+#include "vol_walk.h"   /* WP135: a walk's status is not optional */
 
 static int errors = 0;
 
@@ -332,7 +333,35 @@ int main(int argc, char **argv)
         memset(&dc, 0, sizeof dc);
         dc.vol = vol;
         {
-            (void)vol_v3_walk(vol, deep_v3_walk_cb, &dc);
+            /* WP135: the walk's status was dropped here, so a volume whose
+             * namespace walk STOPPED -- a quarantined base page, an OOM --
+             * produced a short file list, and the summary below printed
+             * "N files ok, 0 corrupt" over it. That is not a near-miss: on
+             * exactly the volumes --deep exists to inspect, the files it
+             * could not enumerate are the ones a restore is looking for, and
+             * the number it printed said the volume was fine.
+             *
+             * The file already held the other answer: the nlink audit 46
+             * lines below handles the same failure, says so in words, and
+             * counts it into `bad`. This brings the walk into line with it,
+             * for the same reason and with the same wording, so the exit
+             * code and the summary cannot disagree. */
+            vol_walk_t w;
+            int wrc;
+            vol_walk_init(&w, vol, "verify --deep namespace walk");
+            /* WP135: the STRICT walk -- a deep pass that skipped a
+             * subtree would report a short volume as a clean one. */
+            wrc = vol_v3_walk_strict(vol, deep_v3_walk_cb, &dc);
+            vol_walk_result(&w, wrc, dc.nents, dc.nents);
+            if (vol_walk_commit(&w) != 0) {
+                printf("  CORRUPT: the deep pass could not walk the whole "
+                       "namespace (the walk stopped after %llu entr%s); the "
+                       "file count below is a LOWER BOUND and must not be "
+                       "read as \"0 corrupt\"\n",
+                       (unsigned long long)vol_walk_seen(&w),
+                       vol_walk_seen(&w) == 1 ? "y" : "ies");
+                bad++;
+            }
             if (dc.nents > 1) {
                 qsort(dc.ents, dc.nents, sizeof *dc.ents, cmp_deep_ent_id);
                 size_t w = 0;
