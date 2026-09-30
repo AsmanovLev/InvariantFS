@@ -47,7 +47,7 @@
  * check proved every block at/above the new boundary unallocated.
  *
  * Shrink refuses (honestly, with a count) when live blocks sit at/above the
- * new boundary: there is no compaction in v1. Free the tail (delete files,
+ * new boundary: there is no compaction in any format. Free the tail (delete files,
  * then invf-sweep + invf-fsck -f) and retry.
  */
 #define _CRT_SECURE_NO_WARNINGS
@@ -823,7 +823,7 @@ int main(int argc, char **argv)
         if (blocked) {
             fprintf(stderr, "invf-resize: %s: cannot shrink to %llu blocks: "
                     "%llu live block(s) at/above the new boundary (first at "
-                    "block %llu)\n  no compaction in v1 -- free the tail "
+                    "block %llu)\n  no compaction exists in any format -- free the tail "
                     "(delete files, then invf-sweep + invf-fsck -f) and "
                     "retry\n",
                     path, (unsigned long long)new_total,
