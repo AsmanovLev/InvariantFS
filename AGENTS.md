@@ -344,6 +344,19 @@ encoding before it gets the old space back.
 > the savepoint pin (§2.4 step 2), which on a `raw_watermark` mount the
 > ladder arranges by itself (§2.5) — and `invf-fsck -f` does **not** recover
 > it on v3 (measured: unchanged after a full `-f` pass).
+>
+> **CORRECTION — the 478 was not measured to be lane retirement.** A later
+> four-cell measurement on a named corpus (12 TARs, 122,880 B each,
+> 2,836,480 B total, v3 image, `invf-fsck` free blocks) implemented the
+> shared `sweep_retire_superseded()` shape four ways -- with and without the
+> savepoint pin, with and without the helper -- and **all four cells were
+> identical** (249413 free after the lane sweep). The shape reclaimed
+> **zero** additional blocks on that corpus. The 253-block swing between
+> sweep 1 and sweep 2 is **the savepoint pin being discharged at the next
+> capture, not lane retirement.** What drives the swing was not established;
+> the two candidates are the pin and the superseded recipe blob no longer
+> loading. Keep the 478 figure as the historical observation it is, and do
+> not attribute it to a lane policy.
 > `INVFS_RECLAIM_ORPHANS=1` runs the orphan collector, which is default-off.
 
 Manual invocation:
@@ -483,6 +496,22 @@ INVFS_META_FRAC=16 invf-mkfs /path/to/rootfs.img 30
 Symptoms of an undersized metadata zone: ENOSPC on writes even though
 `df` shows plenty free, and v3 base-page allocation falling back to the
 shadow pool (`mb_alloc_meta_zone` → shadow) in the FUSE log.
+
+> **On v3 this knob does NOT bound inode capacity — measure before you
+> rely on it.** `mb_alloc_meta_zone`'s own comment says why: mkfs marks
+> the whole metadata zone allocated (bitmap + journal + inode area), so in
+> practice the zone scan finds nothing and `mbuf_alloc` falls through to
+> the **shared pool**. Measured on a 4 GiB image: 60 files → 106 META
+> blocks, 120 → 228, 240 → 471, i.e. **2.03 blocks (8,309 B) of META per
+> file, flat** — and the *same* 240-file run gave **471 blocks at
+> `INVFS_META_FRAC=16` and 472 at `INVFS_META_FRAC=64`**, identical. The
+> inode count a volume can present is therefore set by **total volume
+> size**, not by this fraction: at 4 GiB that is roughly 480,000 files.
+> The per-file figure is extrapolated past 240 files; the three-point
+> linearity is clean but the extrapolation is an extrapolation.
+> The v2 reserved inode area on a v3 volume is dead weight, and a
+> lower fraction reserves less of it — which is the honest reason the
+> older advice said "16-24".
 
 ### 2.8 Tooling environment
 
