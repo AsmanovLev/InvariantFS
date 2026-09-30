@@ -102,8 +102,21 @@ static void human(uint64_t bytes, char *buf, size_t cap)
     snprintf(buf, cap, "%.1f %s", v, u[i]);
 }
 
-/* One name seen in the inode area, with its newest version. */
-typedef struct { char name[256]; uint64_t ino, fsz; uint8_t killed; } fent;
+/* One name in the namespace, with the inode and size it resolves to. `dir` is
+ * what a v3 namespace walk hands over and the v2 record walk does not: on v3
+ * the count is a NAME count (so it lines up with invf-ls's `N file(s)`), and a
+ * directory is a name too -- it is just not a file. */
+typedef struct {
+    /* a v3 walk hands a MOUNT-RELATIVE PATH, not a leaf name: dir + '/' + name
+     * with two full components is 2*INVFS_MAX_NAME+1 characters. The v2 record
+     * carried a bare leaf, which is why 256 was enough then. Sizing this at the
+     * path length is what keeps a deep entry from being reported under a name
+     * it does not have -- the same shape as the truncated-deep-path bug
+     * invf-ls's own `full[]` comment records. */
+    char name[2 * INVFS_MAX_NAME + 2];
+    uint64_t ino, fsz;
+    uint8_t killed, dir;
+} fent;
 
 static uint64_t fent_hash(const char *s)
 {
@@ -213,6 +226,76 @@ static int stat_cb(void *ctx_, uint64_t rec_pos,
     return 0;
 }
 
+/* ------------------------------------------------------------------ */
+/* v3: the namespace IS the dirent tree.                                  */
+/* ------------------------------------------------------------------ */
+/*
+ * WP stat-counts-v3: this tool used to populate the table above from
+ * vol_records_walk(), which scans [inode_area_start, inode_area_pos) -- the
+ * v2 inode area, dead weight on a v3 volume. The walk still existed (the v2
+ * L2P journal layer is deliberately still in the tree), so it still ran, still
+ * found nothing, and invf-stat printed "0 live of 0 names, 0.0 B logical,
+ * largest 0.0 B" for a volume with files on it. vol_open refuses anything
+ * without VOLF_V3, so every volume this build opens is v3 and every count this
+ * tool printed was zero.
+ *
+ * vol_v3_walk() is the v3 equivalent, and it is what the rest of the tool
+ * already uses: the FUSE build_file_table_v3 (src/cli/fuse_fs.c:224) is built
+ * on it, and invf-ls reaches the same tree through vol_list_dir ->
+ * vol_v3_path_list_dir. Its callback hands (path, ino, type, size, mtime) --
+ * the whole fent row plus the file/dir distinction.
+ *
+ * vol_v3_iter_live_inodes() was the other candidate and is the wrong shape
+ * here: it fires once per INODE (not once per name, so a hardlinked volume
+ * would under-report against invf-ls), and it hands no size, so fsz would cost
+ * a vol_stat_full() per inode on top of a walk that already resolves a name
+ * per inode.
+ *
+ * No name dedup is needed: a dirent tree yields each path exactly once, so the
+ * hash table the v2 path needs (many versions of one name) has nothing to
+ * merge. The grow-on-demand table is kept and is what keeps the 146k-file
+ * image off a fixed bound; `oom` is what stops a failed growth from printing
+ * the truncated count as if it were the whole one.
+ */
+typedef struct {
+    fent *tbl;
+    size_t nfiles, fcap;
+    uint64_t ndirs, max_live_ino;
+    int oom;
+} stat_v3_ctx;
+
+static int stat_v3_cb(void *ctx_, const char *path, uint64_t ino,
+                      uint32_t type, uint64_t size, int64_t mtime)
+{
+    stat_v3_ctx *c = (stat_v3_ctx *)ctx_;
+    size_t nl;
+    (void)mtime;
+
+    if (c->nfiles == c->fcap) {
+        size_t ncap = c->fcap ? c->fcap * 2 : 4096;
+        fent *nt = (fent *)realloc(c->tbl, ncap * sizeof(fent));
+        if (!nt) {
+            fprintf(stderr, "out of memory at %llu names\n",
+                    (unsigned long long)c->nfiles);
+            c->oom = 1;
+            return 1;
+        }
+        c->tbl = nt; c->fcap = ncap;
+    }
+    nl = strlen(path);
+    if (nl >= sizeof c->tbl[0].name) nl = sizeof c->tbl[0].name - 1;
+    memset(&c->tbl[c->nfiles], 0, sizeof(fent));
+    memcpy(c->tbl[c->nfiles].name, path, nl);
+    c->tbl[c->nfiles].name[nl] = 0;
+    c->tbl[c->nfiles].ino = ino;
+    c->tbl[c->nfiles].fsz = (type == INVFS_ITYP_DIR) ? 0 : size;
+    c->tbl[c->nfiles].dir = (type == INVFS_ITYP_DIR) ? 1 : 0;
+    c->nfiles++;
+    if (type == INVFS_ITYP_DIR) c->ndirs++;
+    if (ino > c->max_live_ino) c->max_live_ino = ino;
+    return 0;
+}
+
 int main(int argc, char **argv)
 {
     for (int i = 1; i < argc; i++) {
@@ -243,26 +326,60 @@ int main(int argc, char **argv)
     const invfs_superblock *sb = vol_sb(vol);
     uint64_t total = sb->total_blocks;
 
-    /* walk inode area; version-aware: a tombstone kills only the inode
-     * version it references (sweep appends create-first, then the OLD
-     * tombstone — the newer live record sits BEFORE the tombstone). */
     /* Was a fixed calloc(65536) with a silent `nfiles < MAX_FILES` cutoff, so
        a 146k-file image reported "65536 live of 65536 names" -- a number that
-       looks like a real total and is not. Grown on demand instead.
+       looks like a real total and is not. Grown on demand instead. That growth
+       is what stat_v3_cb below does too; the bound is NOT reintroduced here.
 
        The per-record name lookup was also a linear strcmp over everything seen
        so far; at 146k names that is ~10^10 comparisons and stat never returns.
-       Same fix ls.c already carries: hash the name to a slot. */
+       Same fix ls.c already carries: hash the name to a slot (v2 only -- a v3
+       dirent tree yields each path exactly once, so there is nothing to
+       merge). */
     fent *tbl = NULL;
     size_t nfiles = 0;
-    uint32_t *hb = NULL;           /* name -> slot+1, open addressed */
+    uint32_t *hb = NULL;           /* name -> slot+1, open addressed (v2) */
     uint64_t tombs = 0, max_live_ino = 0;
-    stat_ctx sc;
-    memset(&sc, 0, sizeof sc);
-    vol_records_walk(vol, stat_cb, &sc);
-    tbl = sc.tbl; nfiles = sc.nfiles;
-    hb = sc.hb;
-    tombs = sc.tombs; max_live_ino = sc.max_live_ino;
+    int v3 = (sb->vol_flags & VOLF_V3) != 0;
+    uint64_t ndirs = 0;
+
+    if (v3) {
+        /* WP stat-counts-v3: from the namespace, not the v2 inode area. */
+        stat_v3_ctx vc;
+        int rc;
+        memset(&vc, 0, sizeof vc);
+        rc = vol_v3_walk(vol, stat_v3_cb, &vc);
+        if (rc != 0 || vc.oom) {
+            /* A walk that did not finish, or a table that stopped growing, has
+             * no count. Printing the part that was collected would repeat the
+             * 146k incident in its other form: a bounded table's overflow
+             * presented as a plausible total. Name the failure and exit. */
+            fprintf(stderr, "ivfs-stat: cannot enumerate %s (%s)%s\n",
+                    argv[1],
+                    rc < 0 ? "namespace walk failed" : "out of memory",
+                    vc.oom ? " growing the name table" : "");
+            free(vc.tbl);
+            vol_close(vol);
+            return 1;
+        }
+        tbl = vc.tbl; nfiles = vc.nfiles;
+        ndirs = vc.ndirs;
+        max_live_ino = vc.max_live_ino;
+        /* tombs stays 0 and that is not a silent omission: on v3 an unlink
+         * appends a delta delete, so a deleted name is not in the namespace at
+         * all and a live walk cannot see one. The word is printed as a
+         * directory count instead -- see the files: line below. */
+    } else {
+        /* v2: walk the inode area, version-aware. A tombstone kills only the
+         * inode version it references (sweep appends create-first, then the
+         * OLD tombstone -- the newer live record sits BEFORE the tombstone). */
+        stat_ctx sc;
+        memset(&sc, 0, sizeof sc);
+        vol_records_walk(vol, stat_cb, &sc);
+        tbl = sc.tbl; nfiles = sc.nfiles;
+        hb = sc.hb;
+        tombs = sc.tombs; max_live_ino = sc.max_live_ino;
+    }
 
     /* live inode set: per-name newest version that is not killed */
     uint8_t *live = (uint8_t *)calloc((size_t)max_live_ino + 1, 1);
@@ -310,7 +427,7 @@ int main(int argc, char **argv)
 
     uint64_t nlive = 0, total_bytes = 0, max_size = 0;
     for (size_t j = 0; j < nfiles; j++) {
-        if (tbl[j].killed || tbl[j].ino == 0) continue;
+        if (tbl[j].killed || tbl[j].ino == 0 || tbl[j].dir) continue;
         nlive++;
         total_bytes += tbl[j].fsz;
         if (tbl[j].fsz > max_size) max_size = tbl[j].fsz;
@@ -318,8 +435,15 @@ int main(int argc, char **argv)
     char mb[64], mb2[64];
     human(total_bytes, mb, sizeof mb);
     human(max_size, mb2, sizeof mb2);
-    printf("  files : %llu live of %zu names (%llu tombstones), %s logical, largest %s\n",
-           (unsigned long long)nlive, nfiles, (unsigned long long)tombs, mb, mb2);
+    if (v3)
+        /* A directory is a name but not a file: invf-ls prints it with 0 bytes
+         * and leaves it out of its `N file(s)` tally, so counting it here
+         * would put the two tools back in disagreement for no gain. */
+        printf("  files : %llu live of %zu names (%llu directories), %s logical, largest %s\n",
+               (unsigned long long)nlive, nfiles, (unsigned long long)ndirs, mb, mb2);
+    else
+        printf("  files : %llu live of %zu names (%llu tombstones), %s logical, largest %s\n",
+               (unsigned long long)nlive, nfiles, (unsigned long long)tombs, mb, mb2);
 
     printf("  l2p   : %zu maps, journal %.1f%% (of %llu blk)\n",
            n_l2p, 100.0 * vol_journal_pos(vol) /
@@ -359,7 +483,11 @@ int main(int argc, char **argv)
             else if (is_ded)     { col = C_GREEN; tag = "D"; }
             char fs2[24];
             human(fsz, fs2, sizeof fs2);
-            printf("    %s[%s] %-44s %8s" C_RST "\n", col, tag, nm, fs2);
+            /* a v3 table carries directories too; mark them the way invf-ls
+             * does rather than listing them bare under a "files" heading */
+            char dname[sizeof tbl[0].name + 2];
+            snprintf(dname, sizeof dname, "%s%s", nm, tbl[j].dir ? "/" : "");
+            printf("    %s[%s] %-44s %8s" C_RST "\n", col, tag, dname, fs2);
         }
         printf("\n  " C_GRAY "[A] as-is" C_RST "  " C_BLUE "[S] semantic" C_RST
                "  " C_GREEN "[D] dedup" C_RST "  " C_CYAN "[B] both" C_RST "\n");

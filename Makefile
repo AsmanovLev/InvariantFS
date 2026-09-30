@@ -130,7 +130,8 @@ CLI_MAINS := mkfs verify fsck cp cat ls stat arctest blkio_test resize \
              sweep_publish_rollback_test \
              rollback_symlink_test \
              sibling_retire_v3_test tar_cap_test fold_delta_read_test \
-             reclaim_reader_epoch_test readdir_error_test dedupe_symlink_test dirs_free_before_publish_test
+             reclaim_reader_epoch_test readdir_error_test dedupe_symlink_test dirs_free_before_publish_test \
+             stat_v3_counts_test
 $(foreach t,$(CLI_MAINS),$(eval $(call TOOL_RULE,$(t),)))
 
 # reclaim_reader_epoch_test was, for one commit, a red control that built but
@@ -732,6 +733,12 @@ test: $(TEST_BINS) $(OUT)/invf-arctest $(OUT)/invf-blkio_test $(OUT)/invf-codec_
 	@# which is unset here -- the unset path is the one that has to stay
 	@# inert in production, so this also asserts it stays inert.
 	$(TESTENV) $(TESTISO) $(OUT)/invf-readdir_error_test /tmp
+	@# WP stat-counts-v3: invf-stat's file counts against invf-ls's, on one
+	@# image. Two oracles on purpose -- the defect is that one of them read an
+	@# empty v2 inode area on a v3 volume and printed a confident zero, so an
+	@# expectation pinned to a literal would only encode today's count. Needs
+	@# invf-mkfs, invf-ls and invf-stat on disk (the `all` prerequisite).
+	$(TESTENV) $(TESTISO) $(OUT)/invf-stat_v3_counts_test /tmp
 	@# WP-arc-concurrent-safe: the content cache, under concurrency. TSAN is
 	@# the structure (arc.c had no lock at all), ASan is the borrow (an
 	@# arc_get pointer freed underneath the reader's memcpy). Both must be
