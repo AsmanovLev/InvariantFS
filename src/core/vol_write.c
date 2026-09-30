@@ -77,11 +77,33 @@ uint64_t vol_write_begin(invfs_volume *v, const char *name, int truncate,
                                 * generation; a rollback bumps v->write_gen
                                 * and this session goes stale */
     {
-        uint64_t old_id = vol_find(v, name);
-        if (old_id != 0) {
+        /* vol_find() collapses "no such name" and "the lookup could not be
+         * completed" into the single value 0, because it returns a uint64_t
+         * inode id. So a LOOKUP THAT FAILED left s->have_old == 0, and the
+         * commit's retire loop -- guarded on `if (s->old_pbas)` -- never ran:
+         * the write succeeded, read back perfectly, and the old recipe's
+         * blocks stayed allocated under no reachable name. **Space, not
+         * data**, which is why it hides: nothing is corrupt and nothing is
+         * missing, the volume just quietly stopped giving blocks back.
+         *
+         * The distinction already exists -- vol_find_rc keeps 1/0/-1 apart,
+         * and it exists precisely because this confusion has produced three
+         * separate defects (the ACL fail-open, the rename overwrite, and the
+         * name-table eviction). Use it here rather than widening vol_find,
+         * which 102 call sites test against 0.
+         *
+         * An absent name (0) is NORMAL and is the only case that leaves
+         * have_old clear. A FAILED lookup leaves the session unable to say
+         * what it is superseding, so it refuses rather than proceed blind. */
+        uint64_t old_id = 0;
+        int frc = vol_find_rc(v, name, &old_id);
+        if (frc == 1) {
             s->have_old = 1;
             s->old_id = old_id;
             s->truncating = truncate;
+        } else if (frc < 0) {
+            free(s);
+            return 0;   /* could not establish what this write supersedes */
         }
     }
     s->next = v->wsessions;
