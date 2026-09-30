@@ -124,7 +124,7 @@ CLI_MAINS := mkfs verify fsck cp cat ls stat arctest blkio_test resize \
              fsck_rootslot_test batch_owner_test plugin_host_test plugin_mt_test rs_stability_test \
              fsck_liveness_test scratch_policy_test v2rb_rollback_test keycmp_test \
              lane_release_test pbaref_v3_test \
-             sibling_retire_v3_test
+             sibling_retire_v3_test tar_cap_test
 $(foreach t,$(CLI_MAINS),$(eval $(call TOOL_RULE,$(t),)))
 
 # WP71: loads every containerpack .so through dlmopen/dlopen -> needs -ldl,
@@ -619,7 +619,7 @@ test: $(OUT)/invf-arctest $(OUT)/invf-blkio_test $(OUT)/invf-codec_test \
       $(OUT)/invf-recipe_fsck_test $(OUT)/invf-fsck_liveness_test \
       $(OUT)/invf-cpack_guard_test $(OUT)/invf-orphan_test \
       $(OUT)/invf-scratch_policy_test $(OUT)/invf-v2rb_rollback_test \
-      $(OUT)/invf-keycmp_test \
+      $(OUT)/invf-keycmp_test $(OUT)/invf-tar_cap_test \
       $(OUT)/invf-lane_release_test \
       $(OUT)/invf-pbaref_v3_test \
       $(OUT)/invf-sibling_retire_v3_test \
@@ -714,6 +714,7 @@ test: $(OUT)/invf-arctest $(OUT)/invf-blkio_test $(OUT)/invf-codec_test \
 	$(TESTENV) $(TESTISO) $(OUT)/invf-fsck_liveness_test /tmp
 	$(TESTENV) $(OUT)/invf-cpack_guard_test
 	$(TESTENV) $(OUT)/invf-scratch_policy_test
+	$(TESTENV) $(TESTISO) $(OUT)/invf-tar_cap_test /tmp
 	@# WP201: the two v2-era paths that kept running on Meta-v3. The
 	@# containerpack MAP branch's rollback reached v3, where the commit it
 	@# rolls back superseded the row IN PLACE -- so it cannot undo anything,

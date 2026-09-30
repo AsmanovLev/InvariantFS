@@ -1420,7 +1420,49 @@ uint64_t vol_create_flac_file(invfs_volume *v, const char *name,
    interpreting them (header bytes kept verbatim in the IVFT recipe), store
    each payload in sibling "name!partN" compressed by its best algorithm,
    rebuild = byte-for-byte reassembly (invariant 1:1). */
-#define TARX_MAX_PARTS 2048
+
+/* TARX_MAX_PARTS is the WIDTH OF AN ON-DISK FIELD, not a memory bound.
+ *
+ * The IVFT recipe records the member count as a uint16 at offset 13 --
+ * tarx_build_recipe writes it with tarx_wr16 (src/recipes/tarx.c:206) and
+ * tarx_parse_recipe reads it back with tarx_rd16 (:228). So 65535 is not a
+ * tuning knob: it is what the format can express. Decomposing more members
+ * than that needs a new IVFT version, not a bigger constant, which is why
+ * this is NOT the CPACK_MAX_MEMBERS case (src/core/volume_internal.h) --
+ * that one really is RAM-only, because a containerpack member count never
+ * lands in a header field (src/core/invarifs.h:1026-1033).
+ *
+ * This used to read 2048, which is below any plausible rootfs: a pruned
+ * Debian trixie rootfs is 4,733 entries and a full `debootstrap minbase` is
+ * 8,017. The lane that exists to make a rootfs cheap to ingest could not
+ * touch one, and said nothing unless INVFS_DEBUG=1 was set. The cost of the
+ * raise is ~536 B of `tarx_member` plus ~523 B of recipe PER MEMBER held in
+ * RAM for the duration of the lane (~69 MB at the ceiling) and one sibling
+ * inode per member -- the count itself is the same order the rootfs already
+ * has, so it is not a new cost, only a newly-permitted one. */
+#define TARX_MAX_PARTS 65535
+
+/* The one place a container lane says "this archive has more members than I
+ * can decompose". Both the TAR and the GZIP lane carry TARX_MAX_PARTS; the
+ * GZIP copy used to print NOTHING at all, so a tar.gz too large to
+ * decompose and a tar.gz already fine were the same log line.
+ *
+ * The wording follows the containerpack member cap's CPACK_TABLE_TOOMANY
+ * report further down this file -- the count, the limit, and what kind of
+ * limit it is. The two are NOT the same kind, and calling this one a memory
+ * bound would be a lie: it is a format bound, so the remedy it names is a
+ * new IVFT version rather than a constant. */
+static void tarx_report_member_cap(const char *name, size_t n,
+                                   const char *lane)
+{
+    fprintf(stderr,
+            "[vol] %s: %zu members; the %s lane's limit is %d -- the member "
+            "count is a uint16 (nparts) in the IVFT recipe, written by "
+            "tarx_build_recipe (src/recipes/tarx.c), so this is a FORMAT "
+            "bound, not a memory one: decomposing more members needs a new "
+            "IVFT version, not a bigger constant\n",
+            name, n, lane, (int)TARX_MAX_PARTS);
+}
 
 uint64_t vol_create_tar_file(invfs_volume *v, const char *name,
                              const uint8_t *tar, size_t tar_len)
@@ -1436,9 +1478,19 @@ uint64_t vol_create_tar_file(invfs_volume *v, const char *name,
         fprintf(stderr, "[vol] tarx_extract failed for %s\n", name);
         return 0;
     }
-    if (n == 0 || n > TARX_MAX_PARTS) {
-        if (getenv("INVFS_DEBUG"))
-            fprintf(stderr, "[vol] %s: %zu members — keep original\n", name, n);
+    /* Two different refusals, not one. "No members" means this is not a tar
+     * the lane can decompose; "too many members" is a capacity number an
+     * operator can act on. They used to share one INVFS_DEBUG-only line,
+     * which made both of them invisible on the normal path. */
+    if (n == 0) {
+        fprintf(stderr,
+                "[vol] %s: no tar members found — keep original "
+                "(not a tar this lane decomposes)\n", name);
+        free(members); free(trailer);
+        return 0;
+    }
+    if (n > TARX_MAX_PARTS) {
+        tarx_report_member_cap(name, n, "TAR");
         free(members); free(trailer);
         return 0;
     }
@@ -1636,8 +1688,24 @@ uint64_t vol_create_gz_file(invfs_volume *v, const char *name,
         /* not a tar inside: keep original */
         free(tar); return 0;
     }
-    if (tarx_extract(tar, tar_len, &members, &n, &trailer, &trailer_len) != 0 ||
-        n == 0 || n > TARX_MAX_PARTS) {
+    if (tarx_extract(tar, tar_len, &members, &n, &trailer, &trailer_len) != 0) {
+        fprintf(stderr, "[vol] tarx_extract failed for %s\n", name);
+        free(tar);
+        return 0;
+    }
+    /* Same bound as the TAR lane, and this copy of the check used to be the
+     * worst of the silent refusals: no output at all, not even under
+     * INVFS_DEBUG=1. A tar.gz that was too large to decompose and a tar.gz
+     * that was already fine were the same log line. */
+    if (n == 0) {
+        fprintf(stderr,
+                "[vol] %s: no tar members found — keep original "
+                "(not a tar this lane decomposes)\n", name);
+        free(tar); free(members); free(trailer);
+        return 0;
+    }
+    if (n > TARX_MAX_PARTS) {
+        tarx_report_member_cap(name, n, "GZIP");
         free(tar); free(members); free(trailer);
         return 0;
     }

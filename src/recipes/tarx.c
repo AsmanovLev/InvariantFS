@@ -12,11 +12,19 @@
  * reassembly -> invariant 1:1.
  *
  * Recipe format (IVFT v1):
- *   [4B "IVFT"][1B ver=1][8B total_len][4B nparts]
+ *   [4B "IVFT"][1B ver=1][8B total_len][2B nparts]
  *   per member:
  *     [512B header_orig][8B data_len][1B pad_kind][2B pad_len]
  *   [8B trailer_len][1B trailer_kind]     (kind: 1=zeros, 0=bytes follow)
  *   [trailer bytes, only when trailer_kind==0]
+ *
+ * nparts is a uint16, so 65535 members is what this format version can
+ * express, and the TAR lane's TARX_MAX_PARTS (src/core/vol_cpack.c) sits
+ * there for exactly this reason. Decomposing more than that needs an IVFT
+ * v2, not a bigger constant. (This comment used to say [4B nparts]; the code
+ * has always written and read TWO bytes -- tarx_wr16 at :206, tarx_rd16 at
+ * :228 -- and the parser's own `rlen < 24` / `need = 15 + n * per` bounds
+ * below are the 2-byte layout's, not the 4-byte one's.)
  *
  * Members: header_orig is copied verbatim; data_len is the payload size
  * parsed from the octal/base-256 size field; pad_len = (512 - data_len%512)
@@ -175,6 +183,13 @@ int tarx_build_recipe(const tarx_member *m, size_t n,
                       uint8_t **recipe_out, size_t *rlen_out)
 {
     size_t per = 512 + 8 + 1 + 2; /* header + dlen + pad_kind + pad_len */
+    /* nparts is a uint16. A caller that got past its own bound with a count
+     * that does not fit used to truncate silently through the cast on the
+     * tarx_wr16 below and produce a recipe that rebuilds a DIFFERENT archive
+     * -- shorter, and with no member that names the truncation. Refuse
+     * instead, so the failure is the caller's visible refusal rather than a
+     * quiet loss of members. */
+    if (n > 65535u) return -1;
     size_t rl = 17 + n * per + 9 + (trailer ? trailer_len : 0);
     uint8_t *r = (uint8_t *)malloc(rl);
     if (!r) return -1;
