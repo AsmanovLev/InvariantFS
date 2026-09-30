@@ -1261,6 +1261,13 @@ int main(int argc, char **argv)
     uint64_t rec_bytes = 0;   /* WP42: record bytes walked (compaction trigger) */
     int count = 0, cap = 0, kept = 0, swept = 0, skipped = 0, failed = 0;
     int reg_failed = 0;   /* WP53: retention-registry write failed */
+    /* A vol_flush that failed at the durability point. LATCHED, not a
+     * counter: a run whose data was rewritten but whose flush failed has
+     * left the volume in a state the caller must be told about, so a later
+     * flush that happens to succeed must NOT clear the fact that one did
+     * not. The sweep still runs to the end -- the operator wants the seal
+     * and the reclaim -- but it does not get to call that a success. */
+    int flush_failed = 0;
     unsigned ui_heat = 0, ui_tier = 0, ui_dedupe = 0;
     unsigned ui_batches = 0, ui_finalize = 0, ui_seal = 0;
     invfs_dedupe_stats ui_dedupe_stats;
@@ -1644,8 +1651,16 @@ int main(int argc, char **argv)
         }
         printf("[unseal] %llu parity blocks freed, seal removed\n",
                (unsigned long long)rep.freed);
-        if (vol_flush(vol) != 0)
-            fprintf(stderr, "warning: final flush failed\n");
+        /* Same durability point as the sweep below: the unseal just gave
+         * every parity block back, and until that is flushed the allocator
+         * will hand those blocks out again. */
+        if (vol_flush(vol) != 0) {
+            fprintf(stderr,
+                    "FATAL: the flush after --unseal failed -- the parity "
+                    "blocks just freed are NOT durable.\n");
+            vol_close(vol);
+            return 1;
+        }
         vol_close(vol);
         return 0;
     }
@@ -2114,7 +2129,23 @@ progress:
         int frc = vol_flush(vol);
         if (frc != 0) {
             sw_progress_suspend();
-            fprintf(stderr, "warning: final flush failed\n");
+            flush_failed = 1;
+            /* This is THE durability point: everything above it rewrote
+             * the volume's data. A flush that fails here means that rewrite
+             * is not on stable storage, so the run has produced partial
+             * success -- the volume now holds new segments and a new
+             * recipe that the bitmap and the superblock do not yet vouch
+             * for. Say so plainly, and fail: the caller asked whether the
+             * data is safe, and it is not. The volume is not rolled back
+             * and the failure is not retried into a quiet success -- the
+             * operator gets this line, the nonzero exit, and a volume left
+             * dirty for the next mount to replay. */
+            fprintf(stderr,
+                    "FATAL: the final volume flush failed -- this sweep "
+                    "rewrote data that is NOT durable.\n"
+                    "       The volume is left dirty (see any latch line "
+                    "above); run invf-fsck before trusting it.\n"
+                    "       This run did NOT complete.\n");
         }
         sw_stage_end(frc == 0 ? "volume durable" : "flush failed");
     }
@@ -2190,7 +2221,14 @@ progress:
             char detail[160];
             if (frc != 0) {
                 sw_progress_suspend();
-                fprintf(stderr, "warning: final flush failed\n");
+                /* Same durability point, second call: the seal's parity
+                 * stripes were just written. Latched for the same reason
+                 * -- if the main flush above already failed, this one
+                 * succeeding does not unmake that. */
+                flush_failed = 1;
+                fprintf(stderr,
+                        "FATAL: the flush after the seal failed -- the "
+                        "parity stripes just written are NOT durable.\n");
             }
             snprintf(detail, sizeof detail,
                      "stripes=%llu updated=%llu parity=%llu",
@@ -2231,5 +2269,9 @@ progress:
 #ifndef _WIN32
     sw_log_stop();
 #endif
-    return (failed || reg_failed) ? 1 : 0;
+    /* The exit contract, in one place. `failed` counts files that did not
+     * sweep; `reg_failed` counts a failed retention-registry write;
+     * `flush_failed` latches a failed durability point. Any of the three
+     * means "do not report this volume as swept and durable". */
+    return (failed || reg_failed || flush_failed) ? 1 : 0;
 }

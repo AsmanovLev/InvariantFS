@@ -909,6 +909,7 @@ e2e: all
 	$(TESTENV) bash tools/run-e2e.sh tools/test-writepath.sh
 	$(TESTENV) bash tools/run-e2e.sh tools/test-acl.sh
 	$(TESTENV) bash tools/run-e2e.sh tools/test-flushfail.sh
+	$(TESTENV) bash tools/run-e2e.sh tools/test-sweep-flushfail.sh
 	$(TESTENV) bash tools/run-e2e.sh tools/test-multidev.sh
 	$(TESTENV) bash tools/run-e2e.sh tools/test-mkstemp.sh
 

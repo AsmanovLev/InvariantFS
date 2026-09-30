@@ -611,6 +611,15 @@ typedef struct invfs_volume {
      * v2 inode area, so there the zeroing is a no-op and the latch + the
      * refused mutations are what is exercised. */
     uint64_t sync_fail_at;
+    /* Test hook (tools/test-sweep-flushfail.sh), same shape as
+     * sync_fail_at: when nonzero, the Nth vol_flush of this process
+     * latches an I/O error and reports -1 without touching the image.
+     * It exists so a caller that OWNS an exit code -- invf-sweep's
+     * durability point -- can be shown failing it deterministically.
+     * The pre-existing ways to fail a flush (a full volume, a read-only
+     * image) all fail EARLIER in a sweep, so they never reach the final
+     * vol_flush at all. 0 = off. */
+    uint64_t flush_fail_at;
     /* hot population counters, maintained incrementally by idx_put /
      * idx_del_at / idx_del (insert vs update vs removal) and bumped once
      * per DELT append. Seeded for free: the open scan replays every

@@ -1884,10 +1884,25 @@ static int vol_sweep_one_v3(invfs_volume *v, uint64_t inode_id,
                     wargs[t].end = (t + 1) * per_th;
                     if (wargs[t].end > batch_len) wargs[t].end = batch_len;
                     wargs[t].zlevel = zlevel;
-                    if (wargs[t].start < wargs[t].end)
-                        pthread_create(&th[t], NULL, sweep_thread_worker, &wargs[t]);
-                    else
-                        th[t] = 0;
+                    /* th[t] MUST be initialised before pthread_create is
+                     * called: on failure (EAGAIN under thread/memory
+                     * pressure -- this box has OOMed) pthread_create does
+                     * not write *th, so the join loop below would read
+                     * stack garbage and pthread_join on it. That is UB
+                     * and it faults: reproduced with pthread_create forced
+                     * to EAGAIN, where the join consumed 0xdeadbeef...
+                     * and the sweep died on SIGSEGV. */
+                    th[t] = 0;
+                    if (wargs[t].start < wargs[t].end &&
+                        pthread_create(&th[t], NULL, sweep_thread_worker,
+                                       &wargs[t]) != 0) {
+                        /* No thread for this slice, so the work still has
+                         * to happen -- run it on this one. Dropping it
+                         * would silently leave those segments RAW, which is
+                         * the same "a failure that does not surface" shape
+                         * this branch is here to end. */
+                        sweep_thread_worker(&wargs[t]);
+                    }
                 }
                 for (int t = 0; t < active_threads; t++) {
                     if (th[t]) pthread_join(th[t], NULL);

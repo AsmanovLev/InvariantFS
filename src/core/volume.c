@@ -2078,6 +2078,16 @@ free(rb);
                 v->sync_fail_at = n;
         }
     }
+    /* Same shape, for the durability point: see flush_fail_at. */
+    {
+        const char *ff = getenv("INVFS_FLUSH_FAIL_AT");
+        if (ff && *ff) {
+            char *endp = NULL;
+            unsigned long long n = strtoull(ff, &endp, 10);
+            if (endp != ff && *endp == '\0' && n > 0)
+                v->flush_fail_at = n;
+        }
+    }
     /* WP20b: a live descriptor means a seal config exists -- start the
      * dirty bitmap (all-ones: the first reseal of a session is a full
      * pass, what happened while unmounted is unknowable). */
@@ -2644,6 +2654,15 @@ static int jrn_flush(invfs_volume *v)
 
 int vol_flush(invfs_volume *v)
 {
+    /* Test hook, same shape as sync_fail_at (volume_internal.h): the Nth
+     * flush of this process reports -1 without touching the image. It is
+     * here, at the top of the function, so it fires for every caller --
+     * the durability point at the end of a sweep, the seal tail, the
+     * in-FUSE worker's close -- and not only on the v3 branch below. */
+    if (v->flush_fail_at && --v->flush_fail_at == 0) {
+        vol_io_error_latch(v, "flush (INVFS_FLUSH_FAIL_AT)");
+        return -1;
+    }
     /* WP24-lite: a time-travel handle never persists. Every mutation was
      * already refused at vol_mark_dirty, so nothing is pending and the
      * flush contract is vacuously satisfied -- and the superblock write
