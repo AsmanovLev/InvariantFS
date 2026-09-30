@@ -130,14 +130,12 @@ CLI_MAINS := mkfs verify fsck cp cat ls stat arctest blkio_test resize \
              reclaim_reader_epoch_test readdir_error_test dedupe_symlink_test
 $(foreach t,$(CLI_MAINS),$(eval $(call TOOL_RULE,$(t),)))
 
-# NOTE on reclaim_reader_epoch_test: it is in CLI_MAINS so it BUILDS, but it
-# is deliberately NOT in the test: run recipe below. It is the deterministic
-# red control for the OPEN base-reclaim-vs-reader defect (vol_reclaim_drain
-# waits on a count nothing increments), so on this tree it fails -- by
-# design, and adding it to the gate would turn `make test` red for a defect
-# that is not fixed yet. It moves into the recipe in the same commit that
-# wires the reclaim reader epoch. Run it by hand:
-#   ./bin/invf-reclaim_reader_epoch_test /tmp   # expect: "the read FAILED"
+# reclaim_reader_epoch_test was, for one commit, a red control that built but
+# did not run: it is the deterministic control for the base-reclaim-vs-reader
+# race, and vol_reclaim_drain waited on a count nothing incremented. That
+# defect is fixed (wp/reclaim-blocking-drain), so it is in the run recipe
+# below, next to fold_delta_read_test, which is the same interleave on the
+# delta side.
 
 # WP71: loads every containerpack .so through dlmopen/dlopen -> needs -ldl,
 # and resolves tools/codecpacks/... relative to the repo root.
@@ -702,6 +700,21 @@ test: $(TEST_BINS) $(OUT)/invf-arctest $(OUT)/invf-blkio_test $(OUT)/invf-codec_
 	@# reader. It fails if the red control does not arm, so it cannot go
 	@# green by the allocator quietly changing.
 	$(TESTENV) $(TESTISO) $(OUT)/invf-fold_delta_read_test /tmp
+	@# The base-tree half of the same question (wp/reclaim-blocking-drain):
+	@# the fold's reachability diff frees a retired generation, and a reader
+	@# that had already captured its root walked pages that were gone --
+	@# measured at ~1e-6 of reads and reported by mbuf_read_ptr's
+	@# allocation check as a plain -1, with no error having happened.
+	@# vol_reclaim_drain waited on g_readers_in_flight and nothing in the
+	@# tree ever incremented it. The interleave is PLANNED (a weak seam in
+	@# v3_base_root, fired once the root is captured and before one page of
+	@# it is read), and the assertion is the read-path outcome -- the row,
+	@# field for field -- not a counter. Pre-fix the folds complete and the
+	@# read fails; post-fix the fold cannot get past the reader. It also
+	@# fails if the interleave is not decided at all, so it cannot go green
+	@# by the setup quietly changing. It is in CLI_MAINS, so $(TEST_BINS)
+	@# above already has it as a prerequisite.
+	$(TESTENV) $(TESTISO) $(OUT)/invf-reclaim_reader_epoch_test /tmp
 	$(TESTENV) $(TESTISO) $(OUT)/invf-sweep_v3_test /tmp
 	$(TESTENV) $(TESTISO) $(OUT)/invf-sweep_collect_test /tmp
 	$(TESTENV) $(TESTISO) $(OUT)/invf-btree_repair_test /tmp

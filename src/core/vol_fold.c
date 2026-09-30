@@ -44,19 +44,29 @@
  * delta's superseded segments ARE freed -- under the lock, for the reason
  * above.
  *
- * KNOWN GAP, deliberately not fixed here (§1.8, one finding per change): the
- * base side of that same sentence is currently UNPROTECTED. vol_reclaim_drain
- * waits on g_readers_in_flight, and nothing in the tree ever increments it --
- * no read path calls vol_reclaim_reader_snapshot/_release -- so the drain
- * returns immediately and fold_reclaim_hook frees a retired generation with no
- * regard for a reader that captured its root. A reader holding the root from
- * two publishes ago has its pages collected and mbuf_read_ptr reports it as
- * -1 (src/core/vol_metabuf.c:192). Measured on this host WITH the delta half
- * of this change in place: 0-3 per ~3M reads over ~1500 folds (~1e-6), which
- * is why concurrency_test still counts that case rather than gating it.
- * Fixing it means wiring the reclaim reader epoch -- announce across the root
- * capture AND the walk, in every base-tree read entry point -- which is its
- * own change, and half of it would be worse than none.
+ * The base side of that same sentence is now PROTECTED, by the reclaim reader
+ * epoch (wp/reclaim-blocking-drain). It used to be a known gap: vol_reclaim_drain
+ * waited on g_readers_in_flight and nothing in the tree ever incremented it, so
+ * the drain returned immediately and fold_reclaim_hook freed a retired
+ * generation with no regard for a reader that captured its root -- a reader
+ * holding the root from two publishes ago had its pages collected and
+ * mbuf_read_ptr reported it as -1 (src/core/vol_metabuf.c:192), measured at
+ * 0-3 per ~3M reads over ~1500 folds (~1e-6). Every base-tree read now
+ * announces itself BEFORE it captures the root and releases after the walk
+ * (vol_btree.c: v3_base_get and the paired calls around each scan;
+ * vol_spt0.c: spt0_capture), the drain really waits, and it is BOUNDED: at
+ * the bound it returns -1 and this hook skips BOTH frees rather than doing
+ * them unsafely.
+ *
+ * What that costs, stated plainly because it is the reason the drain is
+ * bounded rather than merely correct: the drain blocks under the sweep's
+ * g_io_lock, so a large vol_v3_dirent_scan or vol_v3_iter_live_inodes in
+ * flight stalls other metadata work for the length of that walk. A missed
+ * release is a mount-wide hang, not a leak -- the count is process-global and
+ * the drain spins under g_io_lock -- which is why the bound exists and why it
+ * is loud. The count is global while a volume is a per-handle object: fine
+ * today (one vol_open per process), a cross-volume stall the day that stops
+ * being true.
  *
  * -------------------------------------------------------------- trigger
  * D2 fixes the trigger SHAPE (size / record count / age, with the sweep as a
@@ -257,8 +267,28 @@ static void fold_sort(fold_list *l)
 void fold_reclaim_hook(invfs_volume *v, invfs_blkptr old_root,
                       invfs_blkptr new_root)
 {
-    /* wait for in-flight readers (g_fold_epoch drain) */
-    (void)vol_reclaim_drain(v);
+    /* Wait for in-flight readers (g_fold_epoch drain).
+     *
+     * This BLOCKS, and it blocks under the sweep's g_io_lock (the hook is
+     * reached from vol_sweep.c under that lock), so a reader in the middle
+     * of a large vol_v3_dirent_scan or vol_v3_iter_live_inodes stalls other
+     * metadata work for the length of that walk. That is the known cost of
+     * the decision, accepted deliberately: the alternative is freeing a
+     * generation under a reader that captured its root, which is a read
+     * that fails with no error having happened.
+     *
+     * A -1 means the drain gave up (a read path that never released). BOTH
+     * frees are then skipped, and loudly: the space is not reclaimed this
+     * fold, the next fold tries again, and the volume is left untouched
+     * rather than damaged. Skipping only the diff and running the collector
+     * would be worse -- the collector frees exactly the generations the
+     * diff declined to, one generation behind. */
+    if (vol_reclaim_drain(v) != 0) {
+        fprintf(stderr, "fold: reclaim SKIPPED -- a base-tree reader "
+                        "outlived the drain, so this generation is left "
+                        "allocated rather than freed under it\n");
+        return;
+    }
     /* WP121: the fold has just published new_root, so the OTHER RT30 slot
      * still names old_root -- that is WP86's damage tolerance, and
      * mbuf_root_read adopts it whenever new_root's page fails

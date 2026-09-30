@@ -318,28 +318,33 @@ int main(int argc, char **argv)
      * size 20, returned for inode 42), where a torn read would have been
      * counted here instead.
      *
-     * STILL COMING IN, and this is a DIFFERENT defect that this change does
-     * not fix: the base tree. A reader holding the root from two publishes
-     * ago can have its pages collected, because the drain meant to prevent
-     * exactly that is dead code -- vol_reclaim_drain waits on
-     * g_readers_in_flight and nothing in the tree ever increments it (no read
-     * path calls vol_reclaim_reader_snapshot/_release). It surfaces as
+     * AND NOW THE BASE TREE TOO, gated here. A reader holding the root from
+     * two publishes ago could have its pages collected, because the drain
+     * meant to prevent exactly that was dead code -- vol_reclaim_drain waits
+     * on g_readers_in_flight and nothing in the tree ever incremented it (no
+     * read path called vol_reclaim_reader_snapshot/_release). It surfaced as
      * mbuf_read_ptr -> mbuf_page_allocated == 0 -> -1
      * (src/core/vol_metabuf.c:192), measured 0-3 per ~3M reads / ~1500
      * folds (~1e-6) with the delta half fixed.
      *
-     * So this counter stays ungated: gating it at 0 would be a flaky gate for
-     * a defect that is still open. The delta half has a DETERMINISTIC gate
-     * (fold_delta_read_test, which forces the interleave and fails without
-     * the fix); the base half needs the reclaim reader epoch wired up, which
-     * is its own change. */
-    if (g_read_ioerr)
-        printf("  NOTE: %llu concurrent vol_v3_inode_get calls returned -1 for a "
-               "live, well-formed key. The delta-overlay cause is fixed and "
-               "gated in fold_delta_read_test; what remains is the base-tree "
-               "reclaim-vs-reader race (dead vol_reclaim_drain) -- see the "
-               "comment above this line in concurrency_test.c\n",
-               (unsigned long long)g_read_ioerr);
+     * FIXED (wp/reclaim-blocking-drain): every base-tree read now announces
+     * itself before it captures the root and releases after the walk, so the
+     * drain really waits. Which is why this counter is GATED rather than
+     * printed: it was print-only *because this defect was open*, and leaving
+     * it that way after the fix is exactly how the next regression walks in.
+     * A -1 here now means a base-tree read path has a missed
+     * vol_reclaim_reader_release, or a read that failed for a reason nothing
+     * else accounts for -- either way it is a gate going red, loudly.
+     *
+     * The deterministic gate for the interleave itself is
+     * reclaim_reader_epoch_test (the same planned-seam shape as
+     * fold_delta_read_test, on the base side); this counter is the
+     * statistical backstop over the whole run, including paths the
+     * interleave test does not reach. */
+    ok(g_read_ioerr == 0,
+       "no concurrent vol_v3_inode_get call returned -1 for a live, "
+       "well-formed key (base-tree reclaim vs reader -- see the comment "
+       "above this line in concurrency_test.c)");
 
     /* verify post-state */
     {

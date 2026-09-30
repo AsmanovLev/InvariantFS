@@ -37,15 +37,38 @@
  * FOR UNGUARDED READS, WHICH IT IS NOT. No page a live root names is ever
  * rewritten, so a walk cannot tear -- that much holds. What immutability does
  * NOT give a reader is LIVENESS: the fold's reachability diff
- * (fold_reclaim_hook) frees the pages of a retired generation, and the reader
- * drain that is supposed to keep it away from in-flight readers
- * (vol_reclaim_drain) waits on g_readers_in_flight, which nothing in the tree
- * increments -- no read path calls vol_reclaim_reader_snapshot/_release. So a
- * reader holding a root from two publishes ago can still have a page collected
- * under it, and mbuf_read_ptr reports that honestly as -1 via the allocation
- * check (vol_metabuf.c:192) rather than returning recycled bytes. Measured
- * at ~1e-6 of reads. See vol_fold.c's KNOWN GAP. Not fixed here: separate
- * finding (§1.8).
+ * (fold_reclaim_hook) frees the pages of a retired generation, and a reader
+ * holding a root from two publishes ago could have a page collected under it,
+ * which mbuf_read_ptr reported honestly as -1 via the allocation check
+ * (vol_metabuf.c:192). Measured at ~1e-6 of reads.
+ *
+ * THAT IS NOW CLOSED by the reclaim reader epoch. Every base-tree read in
+ * this file announces itself (vol_reclaim_reader_snapshot) BEFORE it captures
+ * the root and releases (vol_reclaim_reader_release) after the walk:
+ *   - point reads go through v3_base_get(), which owns the section and has a
+ *     single exit -- v3_overlay_exists, v3_overlay_get_key, vol_v3_inode_get,
+ *     vol_v3_dirent_get and the base half of vol_v3_recipe_load (whose RMC1
+ *     chunk loop is why that last one is its own function);
+ *   - the scans pair the two calls around the walk: vol_v3_xattr_scan,
+ *     v3_delta_shadow_xattr_keys, vol_v3_dirent_scan, vol_v3_inode_alloc,
+ *     vol_v3_iter_live_inodes, vol_v3_nlink_audit -- plus spt0_capture in
+ *     vol_spt0.c;
+ *   - three walks deliberately do NOT participate: vol_v3_fold (it IS the
+ *     reclaimer, so it would spin the drain on itself), btree_check in
+ *     vol_fsck.c (exclusive), and vol_v3_iter_inodes_at, which walks a
+ *     PINNED savepoint root the reclaim keeps as a mark root.
+ * The mutating base paths (inode_put/delete, xattr_set, dirent_del, ...) do
+ * a btree_search on the current root before their COW and are not announced:
+ * in FUSE the fold runs only from the sweep worker under g_io_lock and every
+ * mutation holds that same lock, so they are mutually exclusive. That is a
+ * property to preserve and cite, not one to rely on silently.
+ *
+ * The order inside is the part that is easy to get backwards and the reason
+ * the announce is not inside v3_base_root: the window between mbuf_root_read
+ * returning a root and the reader being counted is exactly the window in
+ * which a fold can publish, drain (count still 0) and free. Announce-then-
+ * capture is load-bearing; capture-then-announce is the same defect with an
+ * extra step.
  *
  * The same sentence used to cover the DELTA, and there it was simply false:
  * the recent tier is freed by the fold the moment the index is dropped. A
@@ -65,6 +88,7 @@
 #include "vol_btree.h"
 #include "vol_metabuf.h"
 #include "vol_delta.h"
+#include "vol_reclaim.h"
 
 #include <stddef.h>
 #include <stdint.h>
@@ -2716,6 +2740,41 @@ int vol_v3_base_root(invfs_volume *v, invfs_blkptr *out)
     return v3_base_root(v, out);
 }
 
+/* The reclaim reader epoch, applied to a base-tree POINT read: announce,
+ * capture, search, release -- one exit, and nothing in between can return.
+ *
+ * This is the hot path (it is where the ~1e-6 of collected-generation reads
+ * was measured), and the shape is deliberate. Every early return a hand-
+ * instrumented capture-then-walk has is a place a release can be forgotten,
+ * and a forgotten release is not a leak: g_readers_in_flight is process-
+ * global and vol_reclaim_drain spins on it under g_io_lock, so ONE missed
+ * release wedges every later fold on the mount. A single-exit helper makes
+ * that a property of the code's shape rather than of a reviewer's care.
+ *
+ * The order inside is the part that is easy to get backwards. The announce
+ * precedes v3_base_root because the alternative leaves a window: mbuf_root_read
+ * returns a root, and a fold that publishes, drains (count still 0) and frees
+ * in the gap before the increment leaves the reader walking a root whose
+ * generation is already gone. Announce-then-capture is load-bearing;
+ * capture-then-announce is the same defect with an extra step.
+ *
+ * val/found are exactly btree_search's, and its value still points into the
+ * per-thread buffer that the next search invalidates -- the caller copies it
+ * out, as it did before. */
+static int v3_base_get(invfs_volume *v, const uint8_t *key, uint16_t klen,
+                       bt_val *val, int *found)
+{
+    invfs_blkptr root;
+    int rc;
+
+    (void)vol_reclaim_reader_snapshot();
+    rc = v3_base_root(v, &root);
+    if (rc == 0)
+        rc = btree_search(v, root, (bt_key){key, klen}, val, found);
+    vol_reclaim_reader_release();
+    return rc;
+}
+
 /* ------------------------------------------------------------------ */
 /* WP-M11: overlay read primitive (delta first, then base)             */
 /*                                                                    */
@@ -2797,12 +2856,9 @@ static int v3_overlay_exists(invfs_volume *v, const uint8_t *key, uint16_t klen)
     if (drc == 1)
         return (dr.flags & INVFS_DELTA_FLAG_DELETE) ? 0 : 1;
     {
-        invfs_blkptr root;
         bt_val val;
         int found = 0;
-        if (v3_base_root(v, &root) != 0)
-            return -1;
-        if (btree_search(v, root, (bt_key){key, klen}, &val, &found) != 0)
+        if (v3_base_get(v, key, klen, &val, &found) != 0)
             return -1;
         return found;
     }
@@ -2827,12 +2883,9 @@ static int v3_overlay_get_key(invfs_volume *v, const uint8_t *key, uint16_t klen
         return 1;
     }
     {
-        invfs_blkptr root;
         bt_val val;
         int found = 0;
-        if (v3_base_root(v, &root) != 0)
-            return -1;
-        if (btree_search(v, root, (bt_key){key, klen}, &val, &found) != 0)
+        if (v3_base_get(v, key, klen, &val, &found) != 0)
             return -1;
         if (!found)
             return 0;
@@ -3443,12 +3496,19 @@ int vol_v3_xattr_scan(invfs_volume *v, uint64_t inode_id,
         v3_xa_free(&l);
         return -1;
     }
+    /* Reclaim reader epoch: announce BEFORE the capture, release after the
+     * walk. The release is placed immediately after btree_scan, not at the
+     * function's exit, because everything below it (the sort and the caller
+     * callback) touches only the collected list. */
+    (void)vol_reclaim_reader_snapshot();
     if (v3_base_root(v, &root) != 0) {
+        vol_reclaim_reader_release();
         v3_xa_free(&l);
         return -1;
     }
     rc = btree_scan(v, root, (bt_key){lo, V3_XATTR_FIXED},
                     (bt_key){hi, V3_XATTR_FIXED}, v3_xa_base_cb, &l);
+    vol_reclaim_reader_release();
     if (rc != 0 || l.oom) {
         v3_xa_free(&l);
         return -1;
@@ -3539,12 +3599,19 @@ static int v3_delta_shadow_xattr_keys(invfs_volume *v, uint64_t inode_id)
     v3_xattr_key(lo, inode_id, NULL, 0);
     v3_xattr_key(hi, inode_id + 1, NULL, 0);
 
+    /* The base SCAN is a read of a freshly captured root, so it is inside
+     * the reclaim reader epoch. The delta appends below are not: the section
+     * is released before the first vol_delta_* call, so nothing in this
+     * function ever holds the announce across g_delta_lock. */
+    (void)vol_reclaim_reader_snapshot();
     if (v3_base_root(v, &root) != 0) {
+        vol_reclaim_reader_release();
         free(b.buf);
         return -1;
     }
     rc = btree_scan(v, root, (bt_key){lo, V3_XATTR_FIXED},
                     (bt_key){hi, V3_XATTR_FIXED}, v3_xattr_collect_cb, &b);
+    vol_reclaim_reader_release();
     if (rc != 0) {
         free(b.buf);
         return -1;
@@ -3610,7 +3677,6 @@ static int v3_xattr_remove_all(v3_xmut *m, uint64_t inode_id)
 int vol_v3_inode_get(invfs_volume *v, uint64_t inode_id, invfs_v3_inode *out)
 {
     uint8_t kb[8];
-    invfs_blkptr root;
     bt_val val;
     int found = 0;
 
@@ -3647,9 +3713,7 @@ int vol_v3_inode_get(invfs_volume *v, uint64_t inode_id, invfs_v3_inode *out)
         }
     }
 
-    if (v3_base_root(v, &root) != 0)
-        return -1;
-    if (btree_search(v, root, (bt_key){kb, 8}, &val, &found) != 0)
+    if (v3_base_get(v, kb, 8, &val, &found) != 0)
         return -1;
     if (!found)
         return 0;
@@ -3979,14 +4043,18 @@ static void v3_rcache_put(invfs_volume *v, const uint8_t *addr,
     pthread_mutex_unlock(&v->rc_mu);
 }
 
+/* Forward: the base half owns the reclaim reader epoch across the RMC1
+ * chunk loop and has a single exit, so it is a separate function (see its
+ * definition below). */
+static int v3_recipe_base_blob(invfs_volume *v,
+    const uint8_t addr[INVFS_V3_RECIPE_ADDR_LEN], const uint8_t *kb,
+    uint8_t **blob_out, size_t *blen_out);
+
 int vol_v3_recipe_load(invfs_volume *v, const uint8_t addr[INVFS_V3_RECIPE_ADDR_LEN],
                        uint8_t **blob_out, size_t *blen_out)
 {
     uint8_t kb[V3_RECIPE_KEY_LEN], chk[INVFS_V3_RECIPE_ADDR_LEN];
-    invfs_blkptr root;
-    bt_val val;
     uint8_t *blob;
-    int found = 0;
 
     if (!v || !addr || !blob_out || !blen_out)
         return -1;
@@ -4058,13 +4126,42 @@ int vol_v3_recipe_load(invfs_volume *v, const uint8_t addr[INVFS_V3_RECIPE_ADDR_
         }
     }
 
+    return v3_recipe_base_blob(v, addr, kb, blob_out, blen_out);
+}
+
+/* The BASE half of vol_v3_recipe_load, split out because it is the one
+ * point-read site that is not a one-liner, and for the reason the whole
+ * reclaim reader epoch is shaped the way it is.
+ *
+ * An RMC1 recipe is a descriptor plus N chunk keys, and every chunk is its
+ * own btree_search against the SAME captured root. So the epoch section has
+ * to span the descriptor read AND the whole chunk loop -- releasing after
+ * the first search would leave every chunk search walking a generation the
+ * fold is free to collect, which is the defect in its most literal form.
+ *
+ * That makes the section cover a loop with four early returns and two
+ * error paths, which is exactly where a hand-written announce/release pair
+ * goes wrong. So it is not hand-written: this function owns the section and
+ * has one exit, and the code below is otherwise the code that was there. */
+static int v3_recipe_base_blob(invfs_volume *v,
+    const uint8_t addr[INVFS_V3_RECIPE_ADDR_LEN], const uint8_t *kb,
+    uint8_t **blob_out, size_t *blen_out)
+{
+    uint8_t chk[INVFS_V3_RECIPE_ADDR_LEN];
+    invfs_blkptr root;
+    bt_val val;
+    uint8_t *blob = NULL;
+    int found = 0;
+    int rc = -1;
+
+    (void)vol_reclaim_reader_snapshot();
     if (v3_base_root(v, &root) != 0)
-        return -1;
+        goto out;
     if (btree_search(v, root, (bt_key){kb, V3_RECIPE_KEY_LEN}, &val,
                      &found) != 0)
-        return -1;
+        goto out;
     if (!found)
-        return -1;
+        goto out;
 
     /* WP-M25: check if this is an RMC1 multi-chunk descriptor */
     if (val.n == sizeof(invfs_v3_recipe_desc)) {
@@ -4074,10 +4171,10 @@ int vol_v3_recipe_load(invfs_volume *v, const uint8_t addr[INVFS_V3_RECIPE_ADDR_
             uint32_t total_len = desc.total_len;
             uint16_t n_chunks = desc.n_chunks;
             if (total_len == 0 || total_len > INVFS_V3_RECIPE_STREAM_MAX)
-                return -1;
+                goto out;
             blob = (uint8_t *)malloc(total_len);
             if (!blob)
-                return -1;
+                goto out;
             for (uint16_t i = 0; i < n_chunks; i++) {
                 uint8_t ckb[INVFS_V3_RECIPE_CHUNK_KEY_LEN];
                 bt_val cval;
@@ -4090,7 +4187,8 @@ int vol_v3_recipe_load(invfs_volume *v, const uint8_t addr[INVFS_V3_RECIPE_ADDR_
                 if (btree_search(v, root, (bt_key){ckb, INVFS_V3_RECIPE_CHUNK_KEY_LEN},
                                  &cval, &cfound) != 0 || !cfound || cval.n != exp_len) {
                     free(blob);
-                    return -1;
+                    blob = NULL;
+                    goto out;
                 }
                 memcpy(blob + off, cval.p, exp_len);
             }
@@ -4099,12 +4197,14 @@ int vol_v3_recipe_load(invfs_volume *v, const uint8_t addr[INVFS_V3_RECIPE_ADDR_
                 fprintf(stderr, "v3 recipe blob %p: BLAKE3 mismatch (corrupt or "
                         "forged); refusing the read\n", (const void *)addr);
                 free(blob);
-                return -1;
+                blob = NULL;
+                goto out;
             }
             *blob_out = blob;
             *blen_out = total_len;
             v3_rcache_put(v, addr, blob, total_len);
-            return 0;
+            rc = 0;
+            goto out;
         }
     }
 
@@ -4112,7 +4212,7 @@ int vol_v3_recipe_load(invfs_volume *v, const uint8_t addr[INVFS_V3_RECIPE_ADDR_
      * the next search: copy it out before doing anything else. */
     blob = (uint8_t *)malloc(val.n ? val.n : 1);
     if (!blob)
-        return -1;
+        goto out;
     if (val.n)
         memcpy(blob, val.p, val.n);
     v3_blake3(blob, val.n, chk);
@@ -4120,12 +4220,17 @@ int vol_v3_recipe_load(invfs_volume *v, const uint8_t addr[INVFS_V3_RECIPE_ADDR_
         fprintf(stderr, "v3 recipe blob %p: BLAKE3 mismatch (corrupt or "
                 "forged); refusing the read\n", (const void *)addr);
         free(blob);
-        return -1;
+        blob = NULL;
+        goto out;
     }
     *blob_out = blob;
     *blen_out = val.n;
     v3_rcache_put(v, addr, blob, val.n);
-    return 0;
+    rc = 0;
+
+out:
+    vol_reclaim_reader_release();
+    return rc;
 }
 
 
@@ -4196,7 +4301,6 @@ int vol_v3_dirent_get(invfs_volume *v, uint64_t parent, const char *name,
                       uint64_t *child_out)
 {
     uint8_t kb[V3_DIRENT_KEY_FIXED + INVFS_MAX_NAME];
-    invfs_blkptr root;
     bt_val val;
     uint16_t kn;
     size_t nlen = name ? strlen(name) : 0;
@@ -4228,9 +4332,7 @@ int vol_v3_dirent_get(invfs_volume *v, uint64_t parent, const char *name,
         }
     }
 
-    if (v3_base_root(v, &root) != 0)
-        return -1;
-    if (btree_search(v, root, (bt_key){kb, kn}, &val, &found) != 0)
+    if (v3_base_get(v, kb, kn, &val, &found) != 0)
         return -1;
     if (!found)
         return 0;
@@ -4514,7 +4616,14 @@ int vol_v3_dirent_scan(invfs_volume *v, uint64_t parent,
         return -1;
     }
 
+    /* Reclaim reader epoch. This is the LONG one: a readdir of a large
+     * directory holds the announce for the whole walk, which is what makes
+     * the drain's cost real (see the measurement in the WP). Released
+     * immediately after btree_scan; the delta-tail flush below works from
+     * the already-collected list. */
+    (void)vol_reclaim_reader_snapshot();
     if (v3_base_root(v, &root) != 0) {
+        vol_reclaim_reader_release();
         v3_merge_list_free(&list);
         return -1;
     }
@@ -4526,6 +4635,7 @@ int vol_v3_dirent_scan(invfs_volume *v, uint64_t parent,
     rc = btree_scan(v, root, (bt_key){lo, V3_DIRENT_KEY_FIXED},
                     (bt_key){hi, V3_DIRENT_KEY_FIXED},
                     v3_merge_base_cb, &m);
+    vol_reclaim_reader_release();
     if (rc == 0) {
         /* flush the delta tail (keys after the last base key) */
         while (m.i < m.n) {
@@ -4599,11 +4709,21 @@ uint64_t vol_v3_inode_alloc(invfs_volume *v)
         uint64_t max = 0;
         if (v3_ready(v) != 0)
             return 0;
-        if (v3_base_root(v, &root) != 0)
+        /* Reclaim reader epoch. This is a READ and the easy one to miss:
+         * the high-water-mark scan runs once per mount, from the create
+         * path, and it walks the whole base tree exactly as a readdir
+         * would. */
+        (void)vol_reclaim_reader_snapshot();
+        if (v3_base_root(v, &root) != 0) {
+            vol_reclaim_reader_release();
             return 0;
+        }
         if (btree_scan(v, root, (bt_key){NULL, 0}, (bt_key){NULL, 0},
-                       v3_max_inode_cb, &max) != 0)
+                       v3_max_inode_cb, &max) != 0) {
+            vol_reclaim_reader_release();
             return 0;
+        }
+        vol_reclaim_reader_release();
         /* WP-M12: a create since the last fold is delta-only, so the base
          * scan alone would miss it. Unbounded range; only 8-byte keys count. */
         if (vol_delta_range(v, NULL, 0, NULL, 0,
@@ -5083,6 +5203,12 @@ int vol_v3_iter_live_inodes(invfs_volume *v,
                               v3_max_inode_delta_cb, &m);
         max_id = m;
     }
+    /* Reclaim reader epoch. One section spans BOTH base walks and the name
+     * index build between them (which is itself a dirent walk), and it is
+     * released before the delta pass at the end. This is the sweep's collect
+     * walker, so on a large volume it is the longest single hold on the
+     * counter in the tree -- the drain's measured worst case. */
+    (void)vol_reclaim_reader_snapshot();
     if (v3_base_root(v, &root) == 0 && root.pba != 0) {
         uint64_t m = 0;
         (void)btree_scan(v, root, (bt_key){NULL, 0}, (bt_key){NULL, 0},
@@ -5107,6 +5233,7 @@ int vol_v3_iter_live_inodes(invfs_volume *v,
 
     rc = btree_scan(v, root, (bt_key){lo, 8}, (bt_key){hi, 8},
                     v3_iter_base_cb, &ic);
+    vol_reclaim_reader_release();
     if (rc != 0 || ic.oom)
         rc = -1;
     /* WP-M21b: rows created since the last fold exist only in the delta;
@@ -5353,6 +5480,10 @@ int vol_v3_nlink_audit(invfs_volume *v, invfs_nlink_audit *out)
     memset(&root, 0, sizeof root);
     v3_ino_key(INVFS_V3_ROOT_INO, lo);
     rc = 0;
+    /* Reclaim reader epoch. The announce has to sit OUTSIDE the condition
+     * below, because v3_base_root is inside it: announcing after the capture
+     * would leave exactly the window this mechanism exists to close. */
+    (void)vol_reclaim_reader_snapshot();
     if (v3_base_root(v, &root) == 0 && root.pba &&
         mbuf_read(v, root.pba, page) == 0) {
         /* the root page's level decides the blkptr flags btree_scan wants
@@ -5364,6 +5495,7 @@ int vol_v3_nlink_audit(invfs_volume *v, invfs_nlink_audit *out)
         rc = btree_scan(v, root, (bt_key){lo, 8}, (bt_key){NULL, 0},
                         nlink_row_cb, &c);
     }
+    vol_reclaim_reader_release();
     /* The delta pass is NOT conditional on the base tree: a volume whose
      * rows have not been folded yet has an EMPTY base root slot and every
      * inode row in the delta, which is the state a freshly mounted volume

@@ -29,6 +29,7 @@
 #include "vol_delta.h"
 #include "vol_metabuf.h"
 #include "vol_anchor.h"
+#include "vol_reclaim.h"
 
 #include <string.h>
 
@@ -943,6 +944,7 @@ static int spt0_pin_take(invfs_volume *v, uint64_t root_pba,
 int spt0_capture(invfs_volume *v)
 {
     invfs_blkptr root;
+    int rc = 0;
 
     if (!v)
         return -1;
@@ -951,12 +953,30 @@ int spt0_capture(invfs_volume *v)
     if (v->savepoint_live)
         return 1;
 
-    if (vol_v3_base_root(v, &root) != 0)
-        return -1;
+    /* Reclaim reader epoch. Announced BEFORE the capture, released after
+     * spt0_pin_take -- the capture is not a point read: spt0_tree_ok and
+     * spt0_pin_take between them walk the whole generation this root names,
+     * so an announce released at the capture would protect nothing.
+     *
+     * In FUSE this cannot actually stall a drain: every trigger that arms a
+     * save point (the watermark pass, USR1, the xattr, the offline sweep)
+     * runs the capture under g_io_lock, which is the same lock the fold's
+     * drain runs under, so the two are mutually exclusive. It is announced
+     * anyway because that mutual exclusion is a property of the callers and
+     * not of this function, and a capture that outlived its lock would
+     * otherwise free nothing and read pages that are gone. */
+    (void)vol_reclaim_reader_snapshot();
+
+    if (vol_v3_base_root(v, &root) != 0) {
+        rc = -1;
+        goto out;
+    }
 
     /* WP86: refuse to pin a damaged base. */
-    if (!spt0_tree_ok(v, root.pba, NULL, 0))
-        return SPT0_RC_DAMAGED;
+    if (!spt0_tree_ok(v, root.pba, NULL, 0)) {
+        rc = SPT0_RC_DAMAGED;
+        goto out;
+    }
 
     memset(&v->spt0, 0, sizeof v->spt0);
     memcpy(v->spt0.magic, "SPT0", 4);
@@ -1008,12 +1028,16 @@ int spt0_capture(invfs_volume *v)
     v->pinned_root.flags |= INVFS_BP_PINNED;
     v->savepoint_live = 1;
 
-    if (spt0_store(v) != 0)
-        return -1;
+    if (spt0_store(v) != 0) {
+        rc = -1;
+        goto out;
+    }
     if (vmux_barrier(v, "spt0 capture") < 0)
-        return -1;
+        rc = -1;
 
-    return 0;
+out:
+    vol_reclaim_reader_release();
+    return rc;
 }
 
 /* ===================================================================

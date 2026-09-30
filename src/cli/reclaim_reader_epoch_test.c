@@ -1,12 +1,13 @@
-/* reclaim_reader_epoch_test.c — RED CONTROL for the base-reclaim vs reader race.
+/* reclaim_reader_epoch_test.c — the deterministic control for the
+ * base-reclaim vs reader race.
  *
  * WHAT THIS IS
  * ------------
- * `vol_reclaim_drain` (src/core/vol_reclaim.c:199) spins on
- * `g_readers_in_flight`, and nothing in the tree ever increments it:
- * `vol_reclaim_reader_snapshot` (:188) returns the epoch and touches no
- * counter, and no read path calls the pair at all. So the drain returns
- * immediately, and `fold_reclaim_hook` (src/core/vol_fold.c:257) frees a
+ * `vol_reclaim_drain` (src/core/vol_reclaim.c) spins on
+ * `g_readers_in_flight`, and for a long time nothing in the tree ever
+ * incremented it: `vol_reclaim_reader_snapshot` returned the epoch and
+ * touched no counter, and no read path called the pair at all. So the drain
+ * returned immediately, and `fold_reclaim_hook` (src/core/vol_fold.c) freed a
  * retired generation with no regard for a reader that captured its root.
  *
  * The consequence is the only failure mode in this tree that is not a wrong
@@ -14,8 +15,8 @@
  * to it, and the pages went away underneath it. A read returns -1 because
  * `mbuf_read_ptr` consults the allocation bitmap and the bit is now clear
  * (src/core/vol_metabuf.c:192). Measured at 0-3 per ~3M reads over ~1500
- * folds (~1e-6) -- which is why src/cli/concurrency_test.c can only print
- * that counter.
+ * folds (~1e-6) -- which is why src/cli/concurrency_test.c could only PRINT
+ * that counter, and now gates it.
  *
  * WHY THIS IS NOT A PROBABILITY TEST
  * ----------------------------------
@@ -30,7 +31,9 @@
  *     it runs; on any other build the weak definition in vol_btree.c is what
  *     links and it is a no-op. That is the one point EVERY base-tree read
  *     passes through, so parking here parks a real reader at a real
- *     boundary.
+ *     boundary. It is also INSIDE the reclaim reader epoch the fix added --
+ *     every base-tree read announces itself before it captures the root --
+ *     so a reader parked here is a reader the drain is genuinely waiting on.
  *   - The hook parks the reader holding a root it has already captured.
  *     This file then runs REAL folds to completion until the generation that
  *     root names is no longer allocated, and only then releases the reader.
@@ -40,11 +43,11 @@
  * what is being gated, because a counter that is never incremented reads
  * zero perfectly well.
  *
- * Pre-fix: the folds complete, R0's pages are collected, the reader walks
- *          R0, mbuf_read_ptr refuses the root page, and
- *          vol_v3_inode_get returns -1. RED.
- * Post-fix: the fold blocks in vol_reclaim_drain behind the reader, the
- *          pages are still there, and the read returns the row. GREEN.
+ * Before the epoch was wired: the folds complete, R0's pages are collected,
+ * the reader walks R0, mbuf_read_ptr refuses the root page, and
+ * vol_v3_inode_get returns -1. RED -- deterministically, 12/12 runs.
+ * With the epoch: the fold blocks in vol_reclaim_drain behind the reader,
+ * the pages are still there, and the read returns the row. GREEN.
  *
  * THE CONTROL ON THE CONTROL. This test cannot go green by accident:
  *
@@ -62,17 +65,11 @@
  * Usage: invf-reclaim_reader_epoch_test <scratch-dir>
  * exit 0 = pass, 1 = a check failed, 2 = setup failure.
  *
- * STATUS: RED ON THIS TREE, AND NOT IN THE `make test` GATE.
- *
- * The defect this controls is still open, so the test fails today, on
- * purpose and deterministically (12/12 runs on the branch this landed on).
- * It is in CLI_MAINS so that `make` builds it -- a red control nobody ever
- * executes is a comment with a build target -- but it is NOT one of the
- * `test:` recipe's commands, because a knowingly-red gate would make
- * `make test` red for a defect that has not been fixed. It joins the recipe
- * in the same commit that wires the reclaim reader epoch. Until then:
- *
- *   ./bin/invf-reclaim_reader_epoch_test /tmp    # expect: "the read FAILED"
+ * In `make test`, next to fold_delta_read_test, which is the same interleave
+ * on the delta side. It was built but NOT run while the defect was open --
+ * a knowingly-red gate would have turned the suite red for a defect that
+ * had not been fixed yet -- and it moved into the recipe in the same commit
+ * that wired the epoch.
  */
 
 #define _CRT_SECURE_NO_WARNINGS

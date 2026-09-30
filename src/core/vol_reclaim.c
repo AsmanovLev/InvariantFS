@@ -6,9 +6,10 @@
  *   - Delta segments below the save-point delta_end once a fold has published.
  *
  * Reader drain: a page is freeable only after (a) fold has published newer
- * root AND (b) no reader holds the old root. Uses a simple epoch counter:
- * each fold bumps g_fold_epoch; readers snapshot it on entry and are
- * considered "in flight" until they release.
+ * root AND (b) no reader holds the old root. Every base-tree read
+ * announces itself (vol_reclaim_reader_snapshot) BEFORE it captures the
+ * root and releases (vol_reclaim_reader_release) after the walk; the fold
+ * bumps g_fold_epoch and drains before it frees.
  */
 
 #include "volume_internal.h"
@@ -19,6 +20,8 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stdio.h>
+#include <time.h>
 
 /* ------------------------------------------------------------------ */
 /* WP121: the orphan collector's gate. WP126 bounds its cost.            */
@@ -177,41 +180,154 @@ int vol_reclaim_orphan_stats(invfs_volume *v, struct invfs_orphan_stats *out)
 
 /* Global epoch counter. Bumped on every fold publish; readers snapshot
  * on entry and are considered in-flight until they call
- * vol_reclaim_reader_release. This is a simple counter, not atomic:
- * callers must hold the volume write lock (already held by fold). */
+ * vol_reclaim_reader_release. The fold bumps it, but it is touched from
+ * every base-tree read thread, so it is atomic too. */
 static uint64_t g_fold_epoch = 0;
 
-/* Reader snapshot: incremented on snapshot, decremented on release.
- * Uses a regular uint64_t because callers hold the volume write lock. */
+/* The reader count, and it is REAL: every base-tree read announces itself
+ * with vol_reclaim_reader_snapshot() and releases with
+ * vol_reclaim_reader_release(). Before this was wired the counter was
+ * declared, drained on, and never incremented by anything, so
+ * vol_reclaim_drain was a no-op and fold_reclaim_hook freed a retired
+ * generation under a reader that had already captured its root -- a read
+ * returning -1 at mbuf_read_ptr (vol_metabuf.c:192) with no error having
+ * happened, measured at ~1e-6 of reads.
+ *
+ * __atomic_*, NOT <stdatomic.h>: this is the house idiom (blkio.c:594-604)
+ * and it keeps the header out of every includer.
+ *
+ * SEQ_CST on the count AND on the epoch, because these two counters ARE
+ * the whole synchronisation argument. The reader announces, then reads the
+ * root slot; the reclaimer publishes the new root, then reads the count.
+ * With both sides sequentially consistent, "the reclaimer saw zero" forces
+ * the reader's root read to have happened after the publish, so the reader
+ * captured the NEW root. Relaxing either side reopens the window this
+ * whole mechanism exists to close.
+ *
+ * GLOBAL, while a volume is a per-handle object. Fine today because there
+ * is exactly one vol_open per process; a second volume in one process
+ * would make a reader on either stall the other's reclaim. That is a
+ * property to keep true, not one to rely on silently. */
 static uint64_t g_readers_in_flight = 0;
+
+/* How long the drain waits for a reader before giving up on this
+ * generation. NOT a liveness parameter for a healthy volume -- a reader
+ * that finishes frees the drain immediately -- it is the bound on the cost
+ * of a MISSED release, which is a mount-wide hang otherwise (the count is
+ * process-global and the drain spins under g_io_lock; see fold_reclaim_hook).
+ *
+ * 30 s, chosen against the measured worst case: the longest base-tree walk
+ * a drain can be waiting behind (vol_v3_iter_live_inodes / vol_v3_dirent_scan
+ * over a large namespace) is single-digit seconds, so 30 s is ~an order of
+ * magnitude of headroom over a walk that has merely gone slow, while still
+ * bounding the stall at something an operator will notice and can act on.
+ * Tunable because a pathological volume (a 5M-file sweep walker on a cold
+ * image) may want more: INVFS_RECLAIM_DRAIN_MS. At the bound the drain
+ * returns -1, its caller SKIPS the free rather than doing it unsafely, and
+ * the condition is printed. Space is not reclaimed this fold; the next
+ * fold tries again. That is recoverable, a hang is not. */
+#ifndef INVFS_RECLAIM_DRAIN_MS_DEFAULT
+#define INVFS_RECLAIM_DRAIN_MS_DEFAULT 30000u
+#endif
+
+/* Below this wait, spin: a point read announces and releases within
+ * microseconds, and paying a millisecond of sleep for it would put that
+ * latency into every fold. Above it, sleep 1 ms at a time so a long wait
+ * costs a long wait and not a saturated core. */
+#define RECLAIM_DRAIN_SPIN_MS 2u
+
+/* Read once per process and cached, for the same reason the orphan gate
+ * above caches its getenv: a volume is opened once per process, so re-reading
+ * the environment per fold buys nothing and makes the bound depend on call
+ * order. Two threads racing here compute the same value and store the same
+ * one, so the benign race is not worth a lock on the path that decides
+ * whether a fold is about to block. */
+static uint32_t reclaim_drain_timeout_ms(void)
+{
+    static uint32_t cached = 0;
+    if (cached == 0) {
+        const char *e = getenv("INVFS_RECLAIM_DRAIN_MS");
+        long ms = e ? strtol(e, NULL, 10) : (long)INVFS_RECLAIM_DRAIN_MS_DEFAULT;
+        cached = (ms > 0 && ms < 3600000L) ? (uint32_t)ms
+                                            : INVFS_RECLAIM_DRAIN_MS_DEFAULT;
+    }
+    return cached;
+}
+
+static uint64_t reclaim_now_ms(void)
+{
+    struct timespec ts;
+    if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0)
+        return 0;
+    return (uint64_t)ts.tv_sec * 1000u + (uint64_t)(ts.tv_nsec / 1000000L);
+}
 
 uint64_t vol_reclaim_reader_snapshot(void)
 {
-    return g_fold_epoch;
+    /* The increment comes FIRST, before anything this caller will read.
+     * Announce-then-capture is load-bearing: the window between the root
+     * read returning and the reader being counted is exactly the window in
+     * which a fold can publish, drain (count still 0) and free, and the
+     * reader then walks a root whose pages are already gone. Capture-then-
+     * announce is the same bug with an extra step. */
+    (void)__atomic_add_fetch(&g_readers_in_flight, 1, __ATOMIC_SEQ_CST);
+    return __atomic_load_n(&g_fold_epoch, __ATOMIC_SEQ_CST);
 }
 
 void vol_reclaim_reader_release(void)
 {
-    if (g_readers_in_flight)
-        g_readers_in_flight--;
+    /* Unconditional, and deliberately so: the old `if (count) count--`
+     * guard turns an unbalanced release into a silent underflow that a
+     * later drain would trip over. Every announce in the tree has exactly
+     * one release on every path out, and that is checkable by reading it. */
+    (void)__atomic_sub_fetch(&g_readers_in_flight, 1, __ATOMIC_SEQ_CST);
 }
 
 int vol_reclaim_drain(invfs_volume *v)
 {
+    uint64_t start = reclaim_now_ms();
+    uint32_t bound = reclaim_drain_timeout_ms();
+
     (void)v;
-    while (g_readers_in_flight > 0) {
+    for (;;) {
+        uint64_t waited;
+        if (__atomic_load_n(&g_readers_in_flight, __ATOMIC_SEQ_CST) == 0)
+            return 0;
+        waited = reclaim_now_ms() - start;
+        if (waited >= bound) {
+            /* LOUD on purpose. Reaching this line means a base-tree read
+             * announced itself and did not release, which under g_io_lock
+             * is a wedged mount; the cost of staying quiet is that the next
+             * person to see a stall has nothing to grep for. Say which
+             * count, how long, and what the caller is about to give up. */
+            fprintf(stderr,
+                    "[reclaim] TIMEOUT: %llu base-tree reader(s) still in "
+                    "flight after %llu ms; a read path is missing a "
+                    "vol_reclaim_reader_release(). This reclaim is being "
+                    "SKIPPED (space is not freed this round) -- the volume "
+                    "is intact, but every later fold will hit this too "
+                    "until the read path is fixed.\n",
+                    (unsigned long long)
+                        __atomic_load_n(&g_readers_in_flight, __ATOMIC_SEQ_CST),
+                    (unsigned long long)waited);
+            return -1;
+        }
+        if (waited < RECLAIM_DRAIN_SPIN_MS) {
 #ifndef _WIN32
-        sched_yield();
+            sched_yield();
 #else
-        Sleep(0);
+            Sleep(0);
 #endif
+        } else {
+            struct timespec ts = { 0, 1000000L };   /* 1 ms */
+            nanosleep(&ts, NULL);
+        }
     }
-    return 0;
 }
 
 uint64_t vol_reclaim_bump_epoch(void)
 {
-    return ++g_fold_epoch;
+    return __atomic_add_fetch(&g_fold_epoch, 1, __ATOMIC_SEQ_CST);
 }
 
 /* ------------------------------------------------------------------ */
