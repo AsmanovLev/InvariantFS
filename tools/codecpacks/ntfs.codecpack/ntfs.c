@@ -172,8 +172,8 @@
 
 #define COPY_BUF_SZ   (4u << 20)     /* streaming window: <= 8 MiB (ABI) */
 #define MAX_IMAGE     (4ull << 30)   /* the FS blob format is u32-sized */
-#define MAX_MEMBERS   65536u         /* FS ABI: CPACK_MAX_MEMBERS */
-#define MAX_IDX       65535u         /* FS ABI: CPACK_MAX_IDX */
+#define MAX_MEMBERS   1048576u       /* FS ABI: CPACK_MAX_MEMBERS */
+#define MAX_IDX       1048575u       /* FS ABI: CPACK_MAX_IDX */
 #define MAX_MAP_ENTS  (4u * MAX_MEMBERS + 4u)   /* FS ABI cap */
 #define ESTIMATE_SLACK (64ull << 20) /* estimate = sum(usize) + 64 MiB */
 

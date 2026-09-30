@@ -135,8 +135,8 @@
 
 
 #define COPY_BUF_SZ   (8u << 20)        /* 8 MiB streaming window */
-#define MAX_FILES     65536u            /* FS member bound (table rows) */
-#define CPACK_MAX_IDX_PLUS1 65536u      /* recipe member record cap */
+#define MAX_FILES     1048576u          /* FS member bound (table rows) */
+#define CPACK_MAX_IDX_PLUS1 1048576u    /* recipe member record cap */
 #define MAX_HEADER    (256ull << 20)    /* header blob sanity cap */
 #define MAX_SUBSTREAMS (1u << 21)       /* >> FS bound; alloc guard */
 #define ESTIMATE_MARGIN (64ull << 20)   /* estimate slack */

@@ -113,10 +113,10 @@
 #define MAX_CLUSTERS   (64ull << 20)       /* ownership map is 1 B/clu */
 #define MAX_CLUS_BYTES (32ull << 20)       /* cluster size sanity cap */
 #define MAX_DIR_BYTES  (64ull << 20)       /* one directory region cap */
-#define MAX_MEMBERS    65536u              /* the ABI's member bound */
+#define MAX_MEMBERS    1048576u            /* the ABI's member bound */
 #define MAX_RUNS       (4u << 20)          /* total member runs sanity */
 #define MAX_DEPTH      64                  /* subdirectory recursion */
-#define MAP_MAX_ENTS   (4u * 65536u + 4u)  /* the ABI's map entry cap */
+#define MAP_MAX_ENTS   (4u * MAX_MEMBERS + 4u)  /* the ABI's map entry cap */
 
 /* ------------------------------------------------------------------ */
 /* little-endian scalars (the formats are LE; read via memcpy)         */

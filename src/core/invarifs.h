@@ -1021,6 +1021,16 @@ typedef struct {
 } invfs_ast_block_entry_v1;         /* 24 bytes */
 
 /* recursion / allocation guards (deep protection) */
+
+/* NB this is NOT the containerpack member bound. The containerpack lane's
+ * bound is CPACK_MAX_MEMBERS (src/core/vol_cpack.c), and it is 2^20, because
+ * a containerpack member is a separate sibling inode and the member count
+ * never lands in a header field. This one IS an on-disk bound: these children
+ * live in the AST recipe, where num_children is uint16_t in v1
+ * (invfs_ast_recipe_header_v1 below) and only widens to u32 in v2, which the
+ * builtin ZIP lane does not currently emit. Raising this is a format change
+ * with a v1-read compatibility story, and it is a ZIP concern, not a
+ * containerpack one. Left alone deliberately. */
 #define MAX_AST_CHILDREN      65536u   /* max members per container */
 #define MAX_AST_CHILD_NAME    255u
 #define MAX_AST_DEPTH         16u      /* nested containers (zip-in-zip) */

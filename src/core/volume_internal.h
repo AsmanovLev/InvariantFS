@@ -1959,6 +1959,58 @@ int cpack_size_guard(uint64_t orig_len, const cpack_size_proj *p,
                      const char **why);
 
 
+/* ---- the member-table parser (WP-cpack-max-members) ----
+ *
+ * The total-member bound, and with it the member index bound. These live
+ * here, not in vol_cpack.c, for the same reason cpack_size_proj does: the
+ * unit test is the thing that has to be able to hold the engine and the
+ * bound to the same number, and a #define inside the .c is unreachable
+ * from there. The eight container packs mirror the value in their own
+ * sources (one .c under tools/codecpacks per pack);
+ * tools/test-cpack-max-members.sh
+ * asserts all nine agree, because a pack that is left behind silently
+ * turns the raise into a no-op for that container type and nothing else
+ * says so.
+ *
+ * This is a MEMORY bound, not an on-disk one. The member count never lands
+ * in a header field: the member table is a TEXT sibling (one row per
+ * member) and the member map blob carries a uint32_t count. Each member is
+ * its own sibling inode, so the AST recipe's uint16_t num_children is 0
+ * for every containerpack file. Raising this costs RAM -- 40 B/member for
+ * the table, one bit/member for the duplicate-index bitmap -- and nothing
+ * on disk. What actually limits a real rootfs is cpack_size_guard above.
+ *
+ * 2^20 is ~10x the host's whole /usr (105,880 members) and ~6x past the
+ * 151,418-member break-even for a 3.5 GB /usr corpus, so in practice the
+ * size guard refuses first and refuses with a reason. */
+#define CPACK_MAX_MEMBERS 1048576u
+#define CPACK_MAX_IDX     (CPACK_MAX_MEMBERS - 1u)
+
+/* One row of the member table. idx names the member's "!mbr<idx>" sibling
+ * inode; it is a uint32 in the member map and a decimal string in the
+ * table, so it is not what bounds a container. */
+typedef struct {
+    uint32_t idx;
+    uint64_t usize;
+    char     sname[25];
+} cpack_member;
+
+/* cpack_parse_table()'s distinct return for a well-formed table that is
+ * over the member bound. It used to be the same -1 as a malformed row, so
+ * "this container is too big" printed the same line as "this table is
+ * corrupt" and neither was diagnosable from a log. */
+#define CPACK_TABLE_TOOMANY (-2)
+
+/* Parse a member table (the enumerate output, stored verbatim as the
+ * "name!mbrt" sibling). Returns 0, -1 (malformed), or CPACK_TABLE_TOOMANY
+ * -- and on CPACK_TABLE_TOOMANY *n_out carries the container's REAL member
+ * count, so the caller can print the number against the limit instead of
+ * "more than the limit". */
+int cpack_parse_table(const uint8_t *text, size_t len,
+                      cpack_member **out, size_t *n_out,
+                      uint64_t *sum_out);
+
+
 /* WP16a sweep attempt: decompose one RAW container through a container
  * codecpack. See the section header for the pipeline; the return
  * convention mirrors vol_pack_sweep (100+algo on commit, 1 = tools absent

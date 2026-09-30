@@ -182,7 +182,10 @@
 #define QC_L2_OFFMASK         0x3ffffffffffffffeull   /* drop COPIED|ZERO */
 
 #define QC_MAX_ALLOC     (1u << 21)      /* parse-table cap: 2M clusters */
-#define MAP_MAX_ENTS     262148u         /* FS: 4 * CPACK_MAX_MEMBERS + 4 */
+/* The FS member bound is CPACK_MAX_MEMBERS (src/core/vol_cpack.c); this is
+ * that bound's 4-runs-per-member map-entry derivation, spelled out. */
+#define CPACK_MAX_MEMBERS 1048576u
+#define MAP_MAX_ENTS     (4u * CPACK_MAX_MEMBERS + 4u)
 #define EST_MARGIN       (64ull << 20)   /* the estimate's flat margin */
 #define COPY_CAP         (4u << 20)      /* streaming window (<= 8 MiB) */
 #define L1_WIN           4096u           /* L1 entries per read window */

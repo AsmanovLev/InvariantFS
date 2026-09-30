@@ -141,7 +141,10 @@
 #define VDI_MAX_CBLOCKS   (1u << 24)     /* bmap slurp cap: 64 MiB of u32 */
 #define VDI_MIN_CBBLOCK   512u
 #define VDI_MAX_CBBLOCK   (1u << 28)     /* 256 MiB blocks: generous */
-#define MAP_MAX_ENTS      262148u        /* FS: 4 * CPACK_MAX_MEMBERS + 4 */
+/* The FS member bound is CPACK_MAX_MEMBERS (src/core/vol_cpack.c); this is
+ * that bound's 4-runs-per-member map-entry derivation, spelled out. */
+#define CPACK_MAX_MEMBERS 1048576u
+#define MAP_MAX_ENTS      (4u * CPACK_MAX_MEMBERS + 4u)
 #define EST_MARGIN        (64ull << 20)  /* the estimate's flat margin */
 #define COPY_CAP          (4u << 20)     /* streaming window (<= 8 MiB) */
 

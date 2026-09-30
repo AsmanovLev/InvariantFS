@@ -1804,21 +1804,17 @@ uint64_t vol_create_gz_file(invfs_volume *v, const char *name,
  * below cpack_parse_table.
  */
 
-#define CPACK_MAX_MEMBERS 65536u   /* the WP10 §12 total-member sanity bound */
-
-#define CPACK_MAX_IDX     65535u   /* idx values name "!mbr<NNNN>" + {dir} files */
+/* CPACK_MAX_MEMBERS, CPACK_MAX_IDX, cpack_member and cpack_parse_table now
+ * live in volume_internal.h, next to cpack_size_proj and its bound. The
+ * reason they moved is in that header: the member bound is the one constant
+ * the engine, the unit test and EIGHT packs all have to agree on, and a
+ * #define buried in this file is invisible to all of them -- which is how
+ * eight copies drifted in the first place. WP-cpack-max-members raised it
+ * from 65536 to 2^20. */
 
 #define CPACK_SNAME_MAX   24       /* sanitized suggested_name in a sibling name */
 
 #define CPACK_NAME_RESERVE 40      /* "!mbr" + idx + "-" + sname (and "!mbrt") */
-
-
-typedef struct {
-    uint32_t idx;                        /* member index (the {dir} file name) */
-    uint64_t usize;                      /* member size in bytes */
-    char     sname[CPACK_SNAME_MAX + 1]; /* sanitized suggested name ("" ok) */
-} cpack_member;
-
 
 /* suggested_name -> the part that may ride inside a sibling name:
  * [A-Za-z0-9._-] kept, anything else folds to '_' (never a '/', never
@@ -1860,10 +1856,14 @@ static void cpack_mbr_name(char *out, size_t cap, const char *base,
  * move -- the sweep stats every extracted member against its announced
  * usize, the read side compares what vol_read_file returned against it.
  * *sum_out (nullable) accumulates the member bytes (overflow-refused) for
- * the admission estimate. Returns 0 on success. */
-static int cpack_parse_table(const uint8_t *text, size_t len,
-                             cpack_member **out, size_t *n_out,
-                             uint64_t *sum_out)
+ * the admission estimate.
+ *
+ * The declaration and CPACK_TABLE_TOOMANY are in volume_internal.h, so the
+ * unit test can drive this parser directly instead of the only alternative,
+ * which is building a container with a million members to watch it fail. */
+int cpack_parse_table(const uint8_t *text, size_t len,
+                      cpack_member **out, size_t *n_out,
+                      uint64_t *sum_out)
 {
     cpack_member *mem = NULL;
     size_t n = 0, cap = 0, pos = 0;
@@ -1882,6 +1882,26 @@ static int cpack_parse_table(const uint8_t *text, size_t len,
         char numbuf[32];
         while (eol < len && text[eol] != '\n') eol++;
         if (eol == pos) { pos++; continue; }   /* blank line: tolerate */
+        /* The member-count bound is checked FIRST, before the row is
+         * validated, and that ordering is load-bearing rather than
+         * stylistic. CPACK_MAX_IDX is CPACK_MAX_MEMBERS-1, so a container
+         * with one member too many also has one idx too large -- and the
+         * idx check fired first, returning the same -1 a corrupt row gets.
+         * The one diagnostic this change exists to produce was therefore
+         * unreachable for exactly the containers that needed it. Count the
+         * rest of the table here, where the answer is still knowable. */
+        if (n == CPACK_MAX_MEMBERS) {
+            size_t total = n;
+            while (pos < len) {
+                size_t e = pos;
+                while (e < len && text[e] != '\n') e++;
+                if (e != pos) total++;
+                pos = e + 1;
+            }
+            if (n_out) *n_out = total;
+            rc = CPACK_TABLE_TOOMANY;
+            goto out;
+        }
         /* field boundaries: idx TAB sname TAB usize */
         f1 = pos;
         while (f1 < eol && text[f1] != '\t') f1++;
@@ -1905,8 +1925,6 @@ static int cpack_parse_table(const uint8_t *text, size_t len,
         if (seen[idx / 8] & (1u << (idx % 8)))
             goto out;                          /* duplicate idx */
         seen[idx / 8] |= (uint8_t)(1u << (idx % 8));
-        if (n == CPACK_MAX_MEMBERS)
-            goto out;
         if (n == cap) {
             size_t nc = cap ? cap * 2 : 64;
             cpack_member *nm =
@@ -2927,14 +2945,30 @@ int vol_containerpack_sweep(invfs_volume *v, uint64_t inode_id,
     snprintf(pmdir, sizeof pmdir, "%s/mbr", dir);
     if (tool_write(pin, full, full_len) != 0) { if (getenv("INVFS_DEBUG_PACKS")) fprintf(stderr,"[cpack] tool_write pin failed\n"); goto out; }
 
-    /* 1. enumerate: the member table */
+    /* 1. enumerate: the member table. Each failure mode gets its own line.
+     * These three used to be one "[cpack] table parse failed nmem=%zu" and
+     * were impossible to tell apart in a log: the pack's own exec failing, a
+     * table that is corrupt or truncated, and a container that is simply
+     * bigger than the member cap. The last one is a number the operator can
+     * act on, so it names the container's real member count and the limit. */
     if (invfs_codec_pack_cmd(pc, INVFS_PACK_CMD_ENUMERATE, pin, NULL,
                              NULL, NULL, ptable) != 0)
-        { if (getenv("INVFS_DEBUG_PACKS")) fprintf(stderr,"[cpack] enumerate failed\n"); goto out; }
-    if (slurp_file(ptable, &table, &table_len) != 0) { if (getenv("INVFS_DEBUG_PACKS")) fprintf(stderr,"[cpack] table slurp failed\n"); goto out; }
-    if (cpack_parse_table(table, table_len, &mem, &nmem, &sum_usize) != 0 ||
-        nmem == 0)
-        { if (getenv("INVFS_DEBUG_PACKS")) fprintf(stderr,"[cpack] table parse failed nmem=%zu\n", nmem); goto out; }
+        { if (getenv("INVFS_DEBUG_PACKS")) fprintf(stderr,"[cpack] enumerate failed: %s could not enumerate the container (tool absent, or the container is not in a form it reads)\n", pc->name); goto out; }
+    if (slurp_file(ptable, &table, &table_len) != 0) { if (getenv("INVFS_DEBUG_PACKS")) fprintf(stderr,"[cpack] table slurp failed: %s wrote no readable member table\n", pc->name); goto out; }
+    {
+        int prc = cpack_parse_table(table, table_len, &mem, &nmem, &sum_usize);
+        if (prc == CPACK_TABLE_TOOMANY) {
+            fprintf(stderr,
+                    "cpack: %s: container has %zu members; the limit is %u "
+                    "(a memory bound, not a format limit -- raise "
+                    "CPACK_MAX_MEMBERS in src/core/volume_internal.h and "
+                    "the pack's own mirror of it)\n",
+                    pc->name, nmem, (unsigned)CPACK_MAX_MEMBERS);
+            goto out;
+        }
+        if (prc != 0 || nmem == 0)
+            { if (getenv("INVFS_DEBUG_PACKS")) fprintf(stderr,"[cpack] table parse failed: %s wrote a malformed or empty member table (nmem=%zu)\n", pc->name, nmem); goto out; }
+    }
 
     /* 1b. Phase 2 of the scratch decision. The pin is `full_len` and the
      * extraction loop below writes EVERY member, so the scratch peak is

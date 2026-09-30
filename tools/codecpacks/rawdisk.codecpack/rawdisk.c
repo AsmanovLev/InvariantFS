@@ -122,7 +122,7 @@
 #define SECTOR_SIZE 512ull
 #define COPY_BUF (8u << 20)            /* 8 MiB streaming window */
 #define GPT_MAX_TABLE (64ull << 20)    /* GPT entries-table sanity cap */
-#define MAX_MEMBERS 65535u             /* FS idx is 0..65535; we start at 1 */
+#define MAX_MEMBERS 1048575u            /* FS idx is 0..1048575; we start at 1 */
 #define EBR_STEP_CAP 4096u             /* EBR chain loop guard */
 #define ESTIMATE_MARGIN (64ull << 20)  /* estimate = sum(usize) + 64 MiB */
 
@@ -646,7 +646,10 @@ static int cmd_rebuild(const char *recipe, const char *dir, const char *out)
             goto out;
     }
     if (rd_le64f(fr, &size) != 0 || !size || size > (1ull << 48)) goto out;
-    if (rd_le32f(fr, &nmem) != 0 || !nmem || nmem > 65536u) goto out;
+    /* A hardcoded 65536u here outlived the define above it by one bump --
+     * the same drift the other seven packs are exposed to, except that this
+     * one did not even LOOK like the cap. Bound it by the define. */
+    if (rd_le32f(fr, &nmem) != 0 || !nmem || nmem > MAX_MEMBERS + 1u) goto out;
     mem = (member_t *)malloc(nmem * sizeof *mem);
     if (!mem) goto out;
     pos = 0;

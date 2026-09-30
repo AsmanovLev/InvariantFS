@@ -122,8 +122,8 @@
 #define NULLSTARTBLOCK  ((1ULL << 52) - 1)  /* bmbt hole marker */
 #define DIR_LEAF_DBLOCK (1ULL << 23)        /* leaf/free area: file blocks
                                              * >= this are not dir data */
-#define MAX_MEMBERS    65536u
-#define MAX_IDX        65535u
+#define MAX_MEMBERS    1048576u
+#define MAX_IDX        1048575u
 #define MAX_DEPTH      128
 #define CHUNK          (8u << 20)           /* streaming window, <= 8 MiB */
 

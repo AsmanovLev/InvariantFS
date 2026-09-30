@@ -192,8 +192,8 @@
 #define E4_S_IFREG       0x8000u
 #define E4_S_IFDIR       0x4000u
 
-#define ABI_MAX_MEMBERS  65536u
-#define ABI_MAX_IDX      65535u
+#define ABI_MAX_MEMBERS  1048576u
+#define ABI_MAX_IDX      1048575u
 #define ABI_MAP_MAX_ENTS (4u * ABI_MAX_MEMBERS + 4u)
 
 #define RECIPE_MAGIC "E4RCP001"

@@ -519,6 +519,13 @@ test: $(OUT)/invf-arctest $(OUT)/invf-blkio_test $(OUT)/invf-codec_test \
 	$(TESTENV) $(TESTISO) $(OUT)/invf-fsck_liveness_test /tmp
 	$(TESTENV) $(OUT)/invf-cpack_guard_test
 	$(TESTENV) $(OUT)/invf-scratch_policy_test
+	@# The container MEMBER BOUND is one number in the engine and eight
+	@# mirrored copies in the container packs. Nothing noticed when they
+	@# drifted -- a pack left at the old cap just declines every container
+	@# over it, for that one container type, silently. Cross-checked here
+	@# because a C unit test cannot see the eight sources the packs are
+	@# compiled from.
+	$(TESTENV) $(TESTISO) bash tools/test-cpack-max-members.sh
 	@# The RS parity MATH, standalone: no volume, no v2, no filesystem.
 	@# tools/test-seal.sh cannot do this -- the seal is v2-only and v2 is
 	@# retired in 0.5.0, so that test SKIPs on every volume that can exist.

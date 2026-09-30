@@ -720,6 +720,140 @@ int main(void)
         }
     }
 
+    /* ---- WP-cpack-max-members: the total-member BOUND ----
+     *
+     * The cases above are about what a decomposition COSTS. This one is
+     * about how many members a container is ALLOWED to have, which is a
+     * different question with a different failure: CPACK_MAX_MEMBERS used
+     * to be 65536, a real rootfs (/usr, 87,255 members measured on the
+     * development host) sailed past it, and every containerpack subcommand
+     * returned rc=3 in 0 s -- before the size guard above was ever
+     * consulted, so the pack declined work it was profitable to do and
+     * said only "enumerate failed".
+     *
+     * These drive cpack_parse_table() directly. The alternative -- building
+     * a container with a million members to watch the parser refuse it --
+     * is not a unit test, it is a half-hour wait, and it can only ever
+     * prove the refusal. The parser is reachable from here because the
+     * bound and the parser moved to volume_internal.h next to
+     * cpack_size_proj; that is the same reason those live where they do. */
+    {
+        /* A member table of n rows, built once and reused. 24 B/row is what
+         * "idx<TAB>shortname<TAB>usize\n" costs; the exact length does not
+         * matter to the parser, only the row count does. */
+        size_t cap = 64, len = 0;
+        uint8_t *t = (uint8_t *)malloc(cap);
+        int n;
+
+#define MKTAB(N)                                                          \
+        do {                                                              \
+            size_t want = (size_t)(N) * 24;                               \
+            while (cap < want) { cap *= 2; t = (uint8_t *)realloc(t, cap); } \
+            len = 0;                                                      \
+            for (n = 0; n < (N); n++) {                                   \
+                int k = snprintf((char *)t + len, cap - len,              \
+                                 "%d\ts\t1\n", n);                         \
+                len += (size_t)k;                                         \
+            }                                                             \
+        } while (0)
+
+        /* THE RED CONTROL. 84,279 members is the /usr corpus the bound
+         * used to refuse; 87,255 is the count actually measured on the
+         * development host. Under the old 65536 bound BOTH returned -1
+         * with no distinction from a malformed table. */
+        {
+            cpack_member *mem = NULL;
+            size_t nmem = 0;
+            uint64_t sum = 0;
+            int rc;
+
+            MKTAB(87255);
+            rc = cpack_parse_table(t, len, &mem, &nmem, &sum);
+            ok(rc == 0 && nmem == 87255,
+               "member bound: an 87,255-member table (the measured /usr "
+               "rootfs corpus) is ACCEPTED, not refused at parse time");
+            ok(rc == 0 && sum == 87255,
+               "member bound: every member's announced usize is still "
+               "accumulated at 87,255 members");
+            free(mem);
+        }
+
+        /* idx does not truncate. The old bound's twin was CPACK_MAX_IDX
+         * 65535, and a u16 anywhere on this path would show up here as a
+         * collision or a rejection once the table runs past 65,535. */
+        {
+            cpack_member *mem = NULL;
+            size_t nmem = 0, i;
+            int rc, ordered = 1, distinct = 1;
+            MKTAB(70000);
+            rc = cpack_parse_table(t, len, &mem, &nmem, NULL);
+            ok(rc == 0 && nmem == 70000,
+               "member index: 70,000 rows past the old 65535 index bound "
+               "parse, so idx is not 16-bit anywhere on this path");
+            if (rc == 0) {
+                for (i = 0; i < nmem; i++) {
+                    if (mem[i].idx != (uint32_t)i) ordered = 0;
+                    if (i && mem[i].idx == mem[i - 1].idx) distinct = 0;
+                }
+            }
+            ok(ordered, "member index: idx survives the round trip "
+                        "unchanged at index 69,999");
+            ok(distinct, "member index: no two rows collide, so the "
+                         "duplicate-index bitmap is indexed wide enough");
+            free(mem);
+        }
+
+        /* THE CEILING, and the legible refusal. One row over the bound is
+         * refused with CPACK_TABLE_TOOMANY -- NOT the -1 a malformed row
+         * gets, which is the whole point: the two were the same value, and
+         * the caller printed the same line for both. And *n_out carries the
+         * container's REAL member count, so the operator is told how many
+         * members the container has and not merely that it has too many. */
+        {
+            cpack_member *mem = NULL;
+            size_t nmem = 0;
+            int rc;
+            MKTAB(CPACK_MAX_MEMBERS + 1);
+            rc = cpack_parse_table(t, len, &mem, &nmem, NULL);
+            ok(rc == CPACK_TABLE_TOOMANY,
+               "member bound: one row over the limit is refused with "
+               "CPACK_TABLE_TOOMANY, distinct from a malformed table's -1");
+            ok(nmem == (size_t)CPACK_MAX_MEMBERS + 1,
+               "member bound: the refusal reports the container's real "
+               "member count, not just 'more than the limit'");
+            ok(mem == NULL,
+               "member bound: the over-limit table leaks no partial table");
+            free(mem);
+        }
+
+        /* And a malformed row is still -1, so the new code did not just
+         * repaint every failure as a size problem. */
+        {
+            cpack_member *mem = NULL;
+            size_t nmem = 0;
+            const char *bad = "0\ts\t1\nNOT-A-ROW\n2\ts\t1\n";
+            int rc = cpack_parse_table((const uint8_t *)bad, strlen(bad),
+                                       &mem, &nmem, NULL);
+            ok(rc == -1 && rc != CPACK_TABLE_TOOMANY,
+               "member bound: a malformed row is still a malformed row, "
+               "not reported as an over-limit container");
+            free(mem);
+        }
+
+        /* The bound is a NUMBER, and it is the one the eight packs mirror.
+         * Asserted rather than described: this is the value that made a
+         * real rootfs unpackable, so a future edit that lowers it again is
+         * a visible change to a test, not a quiet one. */
+        ok(CPACK_MAX_MEMBERS == 1048576u,
+           "member bound: CPACK_MAX_MEMBERS is 2^20 (1,048,576)");
+        ok(CPACK_MAX_IDX == CPACK_MAX_MEMBERS - 1,
+           "member bound: the index bound tracks the member bound, so the "
+           "duplicate-index bitmap is not sized off a stale constant");
+
+#undef MKTAB
+        free(t);
+    }
+
     printf("\ncpack_guard_test summary: %d checks, %d failures\n",
            checks, failures);
     return failures ? 1 : 0;
