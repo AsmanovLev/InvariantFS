@@ -32,6 +32,49 @@ static invfs_volume *g_vol;
 static pthread_mutex_t g_io_lock = PTHREAD_MUTEX_INITIALIZER;
 /* open-handle counter: background sweep only when idle */
 static volatile int g_open_handles = 0;
+static volatile int g_handles_warned = 0;
+
+/* ---- open-handle accounting -------------------------------------------
+ *
+ * INVARIANT: g_open_handles is the number of file handles the kernel is
+ * holding -- the number of .open and .create calls that returned 0 and
+ * have not yet been matched by a .release. It is a CENSUS, not a refcount
+ * the kernel consults; it is the only thing that tells the background
+ * worker whether the volume is idle (fuse_sweep_thread).
+ *
+ * libfuse sends .release for a file it CREATED exactly as it does for one
+ * it opened, so .create owes an acquire just as .open does. Discharge is
+ * unconditional (invf_release) because libfuse pairs it with every
+ * successful open and only with those -- a failed entry point gets no
+ * .release, so it must not acquire.
+ *
+ * That leaves exactly one way to get this wrong: acquiring on a path that
+ * goes on to return an error. It has been got wrong twice -- .create did
+ * not acquire at all, and .open acquired before its calloc and then
+ * returned -ENOMEM straight past the discharge. So the acquire is not a
+ * call scattered through the body. It is ONE call, immediately before the
+ * entry point's only `return 0`, which is the only way out of a
+ * successful open: nothing fallible sits between an acquire and the
+ * success it buys, and the pair reads off the function's tail.
+ *
+ * A third entry point that can hand the kernel a handle ends with the
+ * same two lines. */
+static void handle_acquired(void)
+{
+    __sync_fetch_and_add(&g_open_handles, 1);
+}
+
+/* The only discharge. Unconditional on purpose: libfuse sends .release for
+ * every successful .open and .create, and for nothing else, so a release
+ * with no matching acquire means an entry point failed to acquire -- which
+ * the fuse_sweep_thread guard reports. Symmetric by construction: if
+ * handle_acquired() has exactly one call site per entry point, so does
+ * this. */
+static void handle_released(void)
+{
+    __sync_fetch_and_sub(&g_open_handles, 1);
+}
+
 /* set at unmount: stops the background sweep thread before vol_close */
 static volatile int g_shutdown = 0;
 static volatile sig_atomic_t g_sweep_now = 0;
@@ -1462,53 +1505,53 @@ static int invf_open(const char *path, struct fuse_file_info *fi)
         rc = perm_check_cred(&c, path, want);
         if (rc) return rc;
     }
-    __sync_fetch_and_add(&g_open_handles, 1);
-    if ((fi->flags & O_ACCMODE) == O_RDONLY) {
+    if ((fi->flags & O_ACCMODE) != O_RDONLY) {
+        /* WP22d: refuse a write open on a non-writable volume (latched /
+         * read-only) HERE, at open: with WRITEBACK_CACHE, a write() buffers
+         * payload in the kernel page cache before this daemon is asked, and a
+         * later-refused write leaves exactly those un-acked bytes in the cache
+         * -- the next read would serve the phantom. Failing the open is the
+         * POSIX EROFS shape and keeps the phantom out of the cache entirely. */
+        if (!vol_write_enabled(g_vol))
+            return -EROFS;
+        /* read-write open: allocate a write context. Content is NOT loaded:
+         * the engine session (begun lazily at the first write) forks the
+         * file's segment layout incrementally, so memory stays bounded no
+         * matter how large the file is (WP4b). A failed calloc returns
+         * straight out of here, before any handle exists to release. */
+        {
+            wctx *c = (wctx *)calloc(1, sizeof(wctx));
+            if (!c) return -ENOMEM;
+            strncpy(c->name, path + 1, 255);
+            fi->fh = (uint64_t)(uintptr_t)c;
+            fi->keep_cache = 1;
+        }
+        if (fi->flags & O_TRUNC) {
+            /* truncate to empty; the old file's transcode siblings describe
+             * bytes that are gone, so vol_replace_file drops them with it */
+            invfs_meta_pub keep;
+            int have_keep = 0;
+            pthread_mutex_lock(&g_io_lock);
+            {
+                uint64_t ino = vol_find(g_vol, path + 1);
+                if (ino && vol_get_meta(g_vol, ino, &keep) == 0)
+                    have_keep = 1;
+            }
+            vol_replace_file(g_vol, path + 1, NULL, 0);
+            if (have_keep)
+                vol_apply_meta(g_vol, path + 1, &keep);
+            table_sync_one_locked(path + 1);
+            pthread_mutex_unlock(&g_io_lock);
+        }
+    } else {
         /* WP17: keep page cache across open/close. Every content change
          * flows through this kernel mount (single-mount model; sweeps keep
          * logical bytes identical), so the kernel always knows when to
          * invalidate -- same argument as the pre-existing RDWR branch. */
         fi->keep_cache = 1;
-        return 0;  /* plain read open */
     }
-    /* WP22d: refuse a write open on a non-writable volume (latched /
-     * read-only) HERE, at open: with WRITEBACK_CACHE, a write() buffers
-     * payload in the kernel page cache before this daemon is asked, and a
-     * later-refused write leaves exactly those un-acked bytes in the cache
-     * -- the next read would serve the phantom. Failing the open is the
-     * POSIX EROFS shape and keeps the phantom out of the cache entirely. */
-    if (!vol_write_enabled(g_vol)) {
-        __sync_fetch_and_sub(&g_open_handles, 1);
-        return -EROFS;
-    }
-    /* read-write open: allocate a write context. Content is NOT loaded:
-     * the engine session (begun lazily at the first write) forks the
-     * file's segment layout incrementally, so memory stays bounded no
-     * matter how large the file is (WP4b). */
-    {
-        wctx *c = (wctx *)calloc(1, sizeof(wctx));
-        if (!c) return -ENOMEM;
-        strncpy(c->name, path + 1, 255);
-        fi->fh = (uint64_t)(uintptr_t)c;
-        fi->keep_cache = 1;
-    }
-    if (fi->flags & O_TRUNC) {
-        /* truncate to empty; the old file's transcode siblings describe bytes
-           that are gone, so vol_replace_file drops them with it */
-        invfs_meta_pub keep;
-        int have_keep = 0;
-        pthread_mutex_lock(&g_io_lock);
-        {
-            uint64_t ino = vol_find(g_vol, path + 1);
-            if (ino && vol_get_meta(g_vol, ino, &keep) == 0)
-                have_keep = 1;
-        }
-        vol_replace_file(g_vol, path + 1, NULL, 0);
-        if (have_keep)
-            vol_apply_meta(g_vol, path + 1, &keep);
-        table_sync_one_locked(path + 1);
-        pthread_mutex_unlock(&g_io_lock);
-    }
+    /* the one success exit, and the one acquire -- see handle_acquired() */
+    handle_acquired();
     return 0;
 }
 
@@ -1596,6 +1639,9 @@ static int invf_create(const char *path, mode_t mode, struct fuse_file_info *fi)
         table_sync_one_locked(path + 1);
     }
     pthread_mutex_unlock(&g_io_lock);
+    /* From here the handle is ours to release. A failed calloc above returns
+     * before this point, so it acquires nothing -- and so is sent no
+     * .release. */
     c = (wctx *)calloc(1, sizeof(wctx));
     if (!c) return -ENOMEM;
     strncpy(c->name, path + 1, 255);
@@ -1611,6 +1657,12 @@ static int invf_create(const char *path, mode_t mode, struct fuse_file_info *fi)
     }
     fi->fh = (uint64_t)(uintptr_t)c;
     fi->keep_cache = 1;
+    /* the one success exit, and the one acquire -- see handle_acquired().
+     * libfuse pairs every successful .create with a .release exactly as it
+     * does a .open, so the census owed this handle is owed here too; not
+     * acquiring is what took reclaim off a mount that merely created a
+     * file (see the guard in fuse_sweep_thread). */
+    handle_acquired();
     return 0;
 }
 
@@ -2021,7 +2073,32 @@ static void *fuse_sweep_thread(void *arg)
         }
         if (interval > 0 && ++tick >= interval) {
             tick = 0;
-            if (g_shutdown || g_open_handles != 0) continue;
+            /* Defer while a handle is open, because a pass rewrites block
+             * layout under it. Note the test is "> 0", not "!= 0": this
+             * guard's subject is OCCUPANCY, and a count below zero is not
+             * a claim that a handle exists. Reading a bad count as "busy"
+             * is precisely what turned a one-line accounting asymmetry
+             * into a mount that silently lost background reclaim for its
+             * whole lifetime -- the worker re-reads the same wrong answer
+             * every tick, so nothing ever recovers and nothing ever says
+             * so. A wrong count is a bug to REPORT, not a reason to
+             * switch off the thing that recovers space, so say it once,
+             * loudly, and keep working. handle_acquired() makes the count
+             * negative-unreachable; this is the tripwire for the day
+             * someone adds a fourth entry point and forgets. */
+            if (g_open_handles < 0) {
+                if (!g_handles_warned) {
+                    fprintf(stderr,
+                            "invf: open-handle count is %d, which is "
+                            "impossible (handle_acquired/handle_released are "
+                            "unbalanced); clamping to 0 and continuing. This "
+                            "is a daemon accounting bug -- report it.\n",
+                            g_open_handles);
+                    g_handles_warned = 1;
+                }
+                g_open_handles = 0;
+            }
+            if (g_shutdown || g_open_handles > 0) continue;
         }
         pthread_mutex_lock(&g_io_lock);
         if (g_shutdown || !g_vol) {   /* unmount won the race */
@@ -2238,7 +2315,7 @@ static int invf_release(const char *path, struct fuse_file_info *fi)
         free(c->tail);
         free(c);
     }
-    __sync_fetch_and_sub(&g_open_handles, 1);
+    handle_released();
     return 0;
 }
 
