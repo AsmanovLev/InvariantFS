@@ -1,0 +1,66 @@
+# Template file for 'xbps-src'
+#
+# Consumes the PUBLISHED RELEASE ARTIFACT (see docs/INSTALL-MATRIX.md):
+# prebuilt bin/invf-* plus the codecpacks with their helpers already built,
+# so nothing is compiled here. packaging/install.sh -- the one place the
+# FHS layout is defined, shared with the Arch/Debian/Gentoo packaging --
+# does the whole install, so this template has no file list to drift out of
+# sync.
+#
+#   cd packaging/void && xbps-src binary-bootstrap <host> x86_64
+#   ./xbps-src --fetch yes ...          # per the normal xbps-src flow
+#   xbps-install -s ./hostpkgdir/invfs-0.5.0_1.x86_64.xbps
+#
+# Checksum provenance: the sha256 in distfiles/MANIFEST below is the one in
+# the published dist/SHA256SUMS, which `make release SIGNING_KEY=...`
+# detach-signs (ed25519). xbps-src checks the .sha256 in its files/ dir, not
+# a signature, so the chain is:
+#     files/*.sha256 -> dist/SHA256SUMS -> SHA256SUMS.sig -> author pubkey
+# the same chain packaging/bootstrap.sh --check-only --pubkey checks.
+
+pkgname=invfs
+version=0.5.0
+revision=1
+_artifact="invfs-v${version}-x86_64"
+build_style=generic
+# The artifact is prebuilt, so there is nothing to configure or compile.
+configure_style=none
+makeopts=()
+hostmakedepends=
+depends="fuse3-devel zstd-devel zlib-devel"
+# Runtime needs only -- no compiler toolchain to install a prebuilt artifact.
+makedepends=
+short_desc="Semantic content-addressed filesystem with a bit-exactness invariant"
+maintainer="none@localhost"
+license="GPL-2.0-only"
+homepage="https://github.com/AsmanovLev/InvariantFS"
+# Void uses OpenRC, not systemd: ship the unit files (they are inert without
+# a running systemd) but do NOT try to wire up timers that Void's init
+# would never run.
+replaces=""
+
+distfiles="
+	https://github.com/AsmanovLev/InvariantFS/releases/download/v${version}/${_artifact}.tar.zst
+	https://github.com/AsmanovLev/InvariantFS/releases/download/v${version}/SHA256SUMS
+"
+# Checksum of ${_artifact}.tar.zst, copied from the published SHA256SUMS.
+sha256sums="3fc20b159cc9d6abf691f2e9260dc8af60b3b4926ea49f54b41b9f55a47037b7  ${_artifact}.tar.zst"
+
+do_install() {
+	vmkdir "$PKGDESTDIR"
+	cd "$srcdir/${_artifact}"
+	# Void initramfs is mkinitcpio-compatible; keep the dracut module out.
+	DESTDIR="$PKGDESTDIR" PREFIX=/usr \
+		WITH_SYSTEMD=1 WITH_DRACUT=0 WITH_MKINITCPIO=1 \
+		WITH_INITRAMFS_TOOLS=0 \
+		sh packaging/install.sh
+}
+
+post_install() {
+	vmkdir "$PKGDESTDIR/etc/systemd/system"
+	# Intentional: the timers stay DISABLED. Void is OpenRC, and enabling a
+	# systemd timer on a system that has no systemd is a bug, not a default.
+	# An OpenRC service for the sweep can be added by the packager; see
+	# docs/INSTALL-MATRIX.md.
+	:
+}

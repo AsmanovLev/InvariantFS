@@ -1,11 +1,19 @@
-usr/bin/invf-*
+# Payload list. The FHS layout itself is packaging/install.sh's job (it is
+# the single source of truth shared with the Arch/Gentoo/Void packaging);
+# this file only names what dh_install copies out of debian/tmp.
+#
+# The man directories are listed as DIRECTORIES, not as `manN/*.N` globs.
+# Two reasons, both learned the hard way:
+#   * install.sh writes the Russian translations to manN/ru/*.N.gz, which a
+#     `usr/share/man/*/man1/...` glob can never match -- the old globs here
+#     silently dropped all 14 translated pages from the .deb.
+#   * WITH_GZIP_MAN=1 (the default) means the files are *.N.gz, so a `*.N`
+#     glob would miss them too. A directory entry is compression-agnostic.
+usr/bin/invf*
 usr/lib/invfs/codecpacks
-usr/share/man/man1/invf-*.1
-usr/share/man/man7/invarifs.7
-usr/share/man/man8/invf-*.8
-usr/share/man/*/man1/invf-*.1
-usr/share/man/*/man7/invarifs.7
-usr/share/man/*/man8/invf-*.8
+usr/share/man/man1
+usr/share/man/man7
+usr/share/man/man8
 usr/lib/systemd/system/invfs-*
 usr/share/initramfs-tools/hooks/invfs
 usr/share/initramfs-tools/scripts/local-top/invfs

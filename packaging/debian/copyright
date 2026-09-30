@@ -1,7 +1,7 @@
 Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
 Upstream-Name: invfs
 Upstream-Contact: InvariantFS Developers <invfs@localhost>
-Source: https://github.com/anomalyco/InvariantFS
+Source: https://github.com/AsmanovLev/InvariantFS
 
 Files: *
 Copyright: 2026 InvariantFS Developers

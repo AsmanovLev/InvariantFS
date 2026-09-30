@@ -62,7 +62,7 @@ install -Dm644 README-RU.md %{buildroot}%{_docdir}/%{name}/README-RU.md
 %files
 %license src/LICENSE
 %doc README.md README-RU.md
-%{_bindir}/invf-*
+%{_bindir}/invf*
 /usr/lib/invfs/codecpacks/
 %{_mandir}/man7/invarifs.7*
 %{_mandir}/man1/invf-*.1*

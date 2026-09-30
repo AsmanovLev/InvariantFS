@@ -6,7 +6,16 @@ CC      ?= gcc
 SRC     := src
 OUT     := bin
 OBJ     := build/obj
-VERSION := $(shell git describe --always --tags 2>/dev/null | sed 's/-.*//' || echo "unknown")
+VERSION_GIT := $(shell git describe --always --tags 2>/dev/null | sed 's/-.*//')
+# A build from a SOURCE TARBALL has no .git -- and a tarball build is exactly
+# what the Debian/Arch/Gentoo/Void recipes do, so `git describe` answers
+# nothing. The old `|| echo unknown` never fired (the pipeline's status is
+# sed's, which is 0), so VERSION was empty, the -D below defined
+# INVFS_VERSION_STRING as "", and that DEFEATED the #ifndef fallback in
+# src/core/invarifs.h:18 -- producing a binary that reports
+# "version  (build ...)" with no version at all. Fall back to that header's
+# own value instead, which is the canonical one.
+VERSION := $(if $(VERSION_GIT),$(VERSION_GIT),$(shell sed -n 's/^#define INVFS_VERSION_STRING "\(.*\)"/\1/p' $(SRC)/core/invarifs.h | head -1))
 BUILD_DATE := $(shell date '+%Y-%m-%d')
 AUTHOR_NAME := Lev_Asmanov
 AUTHOR_EMAIL := asmanovlev@gmail.com
@@ -73,6 +82,15 @@ $(CORE_OBJS_FILE): $(CORE_O) | $(OBJ)
 $(OBJ):
 	mkdir -p $@
 
+# WP114: $(OUT) is where every binary is LINKED, and unlike $(OBJ) it had
+# no rule at all -- so a build in a tree that had no bin/ yet died with
+# "ld: cannot open output file bin/invf-mkfs". It only ever worked because
+# every developer's tree already had a bin/ in it. That is why
+# `dpkg-buildpackage` (which builds from a pristine source package, so
+# there is no bin/ yet) could not build at all.
+$(OUT):
+	mkdir -p $@
+
 $(OBJ)/%.o: %.c | $(OBJ)
 	$(CC) $(CFLAGS) -c -o $@ $<
 
@@ -93,7 +111,7 @@ $(OBJ)/deflate_backend_stock.o: $(SRC)/codecs/deflate_backend_zlib.c $(SRC)/code
 MINIZLESS := $(filter-out miniz.o,$(notdir $(CORE_O)))
 
 define TOOL_RULE
-$(OUT)/invf-$(1): $$(OBJ)/$(1).o $(CORE_O)
+$(OUT)/invf-$(1): $$(OBJ)/$(1).o $(CORE_O) | $(OUT)
 	$$(CC) $$(CFLAGS) -o $$@ $$< $(CORE_O) $$(LDLIBS) $$(2)
 endef
 
@@ -110,7 +128,7 @@ $(foreach t,$(CLI_MAINS),$(eval $(call TOOL_RULE,$(t),)))
 $(eval $(call TOOL_RULE,ivpack_packs_test,-ldl))
 
 # WP60: invfs-pack is named differently (invfs- not invf-)
-$(OUT)/invfs-pack: $(OBJ)/pack.o $(CORE_O)
+$(OUT)/invfs-pack: $(OBJ)/pack.o $(CORE_O) | $(OUT)
 	$(CC) $(CFLAGS) -o $@ $< $(CORE_O) $(LDLIBS)
 $(OBJ)/pack.o: $(SRC)/cli/pack.c | $(OBJ)
 	$(CC) $(CFLAGS) -c -o $@ $<
@@ -201,7 +219,25 @@ endef
 $(foreach p,$(CPACKS),$(eval $(call HELPER_RULE,$(p))))
 
 HELPERS := $(foreach p,$(CPACKS),$(call PACKDIR,$(p))/bin/$(p))
-helpers: $(HELPERS)
+
+# WP114: a codecpack may ship a C helper WITHOUT being a containerpack, in
+# which case it is in neither CPACKS nor any *_EXTRA_* list and so got no
+# build rule at all. jxlest (the SOF marker-walk estimator the jxl pack's
+# manifest names as `estimate = jxlest estimate {in}`) is the case in point:
+# plain C11 + libc, not an ivpack plugin, built ad-hoc by tools/test-jxl.sh
+# and previously by packaging/install.sh's hand-rolled per-pack compile.
+# install.sh now SHIPS what the Makefile builds rather than re-deriving the
+# recipe, so a helper with no rule here is a helper that silently stops
+# being installed. Declared explicitly below; same flags as the other helpers.
+STANDALONE_HELPER_FILES := tools/codecpacks/jxl.codecpack/bin/jxlest
+
+tools/codecpacks/jxl.codecpack/bin/jxlest: \
+		tools/codecpacks/jxl.codecpack/jxlest.c \
+		tools/codecpacks/jxl.codecpack/manifest
+	@mkdir -p $(dir $@)
+	$(CC) $(HELPER_CFLAGS) -o $@ $< $(call PACK_LIBS,jxl)
+
+helpers: $(HELPERS) $(STANDALONE_HELPER_FILES)
 
 
 # The e2e harnesses that compile a pack's CLI themselves (tools/test-ivpacks.sh)
@@ -553,6 +589,11 @@ e2e: all
 	$(TESTENV) bash tools/run-e2e.sh tools/test-sandbox.sh
 	$(TESTENV) bash tools/run-e2e.sh tools/test-helper-isolation.sh
 	$(TESTENV) bash tools/run-e2e.sh tools/test-rawdisk.sh
+	@# WP114: the packaging gate. INVFS_PKG_DEB=0 keeps it off the full
+	@# compile inside dpkg-buildpackage (that is `make test`'s job, not this
+	@# one's); INVFS_PKG_DEB=1 builds the real .deb and inspects it, and is
+	@# what a release should be cut with.
+	$(TESTENV) INVFS_PKG_DEB=0 bash tools/run-e2e.sh tools/test-packaging.sh
 	$(TESTENV) bash tools/run-e2e.sh tools/test-ext4fs.sh
 	$(TESTENV) bash tools/run-e2e.sh tools/test-fatfs.sh
 	$(TESTENV) bash tools/run-e2e.sh tools/test-xfs.sh
@@ -588,29 +629,124 @@ flakey:
 	$(TESTENV) bash tools/run-e2e.sh tools/test-flakey.sh
 
 # ---- release --------------------------------------------------------------
-# Build the host-installer release artifact consumed by packaging/bootstrap.sh:
+# Build the host-installer release artifact consumed by packaging/bootstrap.sh
+# and by the Arch/Gentoo/Void recipes:
 #   dist/invfs-<ver>-<arch>.tar.zst   (bin + codecpacks + packaging tree)
 #   dist/SHA256SUMS
-# bootstrap.sh downloads both and verifies SHA256 before unpack/exec.
+#   dist/SHA256SUMS.sig   (detached ed25519, when SIGNING_KEY is given)
+# bootstrap.sh downloads all of it and verifies SHA256 before unpack/exec.
+#
+# WP114: `helpers` is now a prerequisite. The artifact ships the codecpack
+# C helpers and packaging/install.sh ships whatever the Makefile built
+# (it used to re-derive the compile itself, with a link line that could not
+# resolve qcow2's deflate_repro objects, so the install aborted at exit 1 on
+# any host with a compiler). Without `helpers` in the artifact there is
+# nothing for install.sh to ship and every pack silently degrades.
+#
+# Signing is opt-in and never silently skipped: without SIGNING_KEY the
+# artifact is unsigned and the build says so on stdout, because an unsigned
+# release is exactly the thing the author must not publish by accident.
+#   make release SIGNING_KEY=/path/to/invfs-signing.ed25519
 ARCH ?= $(shell uname -m)
 RELEASE_VERSION ?= $(VERSION)
 RELEASE_NAME := invfs-$(RELEASE_VERSION)-$(ARCH)
 DIST := dist
 RELEASE_DIR := $(DIST)/$(RELEASE_NAME)
+SIGNING_KEY ?=
 
-release: all
-	rm -rf $(RELEASE_DIR) $(DIST)/$(RELEASE_NAME).tar.zst $(DIST)/SHA256SUMS
-	mkdir -p $(RELEASE_DIR)/tools
-	cp -a bin $(RELEASE_DIR)/bin
-	rm -f $(RELEASE_DIR)/bin/invf-codec_test $(RELEASE_DIR)/bin/invf-fuzz
+release: all helpers
+	rm -rf $(RELEASE_DIR) $(DIST)/$(RELEASE_NAME).tar.zst $(DIST)/SHA256SUMS \
+	       $(DIST)/SHA256SUMS.sig
+	mkdir -p $(RELEASE_DIR)/tools $(RELEASE_DIR)/bin
+	@# Ship EXACTLY $(TOOLS), not the whole bin/. `all` also builds ~23 unit
+	@# harnesses (invf-anchor_test, invf-delta_test, invf-ivpack_packs_test,
+	@# gzhdrfuzz, ...) into bin/, and packaging/install.sh installs
+	@# `bin/invf-*` -- so a `cp -a bin` shipped every one of those test
+	@# binaries into the user-facing package on all four targets. $(TOOLS) is
+	@# this repo's own definition of what ships; use it as the single filter
+	@# rather than maintaining an exclusion list (which is how
+	@# invf-codec_test/invf-fuzz came to be special-cased before).
+	@for t in $(TOOLS); do \
+	    install -m755 $(OUT)/$$t $(RELEASE_DIR)/bin/ || exit 1; \
+	done
 	cp -a packaging $(RELEASE_DIR)/packaging
+	@# The target-native RECIPES are not payload -- they are inputs to build a
+	@# package, and packaging/install.sh never reads them. Leaving them in
+	@# would also make the release a fixed-point problem: each recipe pins
+	@# the artifact's digest, and the artifact contains the recipe, so
+	@# pasting a digest in would change the digest. What install.sh actually
+	@# needs (install.sh, man/, systemd/, dracut/, mkinitcpio/, and the two
+	@# debian/invfs.initramfs-* payload files) all stays.
+	rm -f $(RELEASE_DIR)/packaging/PKGBUILD \
+	      $(RELEASE_DIR)/packaging/invfs.spec
+	rm -rf $(RELEASE_DIR)/packaging/gentoo $(RELEASE_DIR)/packaging/void
+	rm -f $(RELEASE_DIR)/packaging/debian/rules \
+	      $(RELEASE_DIR)/packaging/debian/control \
+	      $(RELEASE_DIR)/packaging/debian/changelog \
+	      $(RELEASE_DIR)/packaging/debian/copyright \
+	      $(RELEASE_DIR)/packaging/debian/install
 	cp -a tools/codecpacks $(RELEASE_DIR)/tools/codecpacks
 	printf '%s\n' '$(RELEASE_VERSION)' > $(RELEASE_DIR)/VERSION
-	tar -C $(DIST) -cf - $(RELEASE_NAME) \
+	@# owner/mtime pinned so a rebuild of the same tree is byte-identical
+	tar --sort=name --owner=0 --group=0 --numeric-owner \
+	    --mtime='@0' -C $(DIST) -cf - $(RELEASE_NAME) \
 		| zstd -q -T0 -19 -f -o $(DIST)/$(RELEASE_NAME).tar.zst
 	( cd $(DIST) && sha256sum $(RELEASE_NAME).tar.zst > SHA256SUMS )
+	@# detach-sign SHA256SUMS (which pins the artifact) -- never the tarball
+	@# directly, so one signature covers every file published under the tag.
+	@#
+	@# WP114: this block used to print "signed" after an `sq` invocation that
+	@# had silently failed (wrong flag names, and `sq sign --signer-file`
+	@# wants a SECRET key file, not an armored public one), so a release
+	@# could be announced as signed with no .sig on disk at all. The rule now
+	@# is: SIGNING_KEY means a signature is produced AND verifies, or the
+	@# build fails. Verify-after-sign is the whole point.
+	@if [ -z "$(SIGNING_KEY)" ]; then \
+	    echo "release: NOTE: UNSIGNED (no SIGNING_KEY= given); do not publish this"; \
+	elif command -v gpg >/dev/null 2>&1; then \
+	    rm -f $(DIST)/SHA256SUMS.sig; \
+	    gpg --batch --yes --local-user "$(SIGNING_KEY)" \
+	        --output $(DIST)/SHA256SUMS.sig \
+	        --detach-sign $(DIST)/SHA256SUMS || \
+	        { echo "release: gpg failed to sign; aborting" >&2; exit 1; }; \
+	    gpg --batch --verify $(DIST)/SHA256SUMS.sig $(DIST)/SHA256SUMS >/dev/null 2>&1 || \
+	        { echo "release: signature does not verify; aborting (not publishing an unverified sig)" >&2; exit 1; }; \
+	    echo "release: signed + verified SHA256SUMS -> $(DIST)/SHA256SUMS.sig"; \
+	else \
+	    echo "release: SIGNING_KEY set but gpg(1) not found; cannot sign" >&2; \
+	    exit 1; \
+	fi
 	@echo "release: $(DIST)/$(RELEASE_NAME).tar.zst"
 	@cat $(DIST)/SHA256SUMS
+
+# The target-native recipes pin the artifact's digest, and pinning it by
+# hand is how a release ships with a stale hash that nobody notices until a
+# user gets a checksum error. This prints the exact lines to paste after
+# each release:
+#   make release && make release-sums
+# into packaging/PKGBUILD (sha256sums), packaging/gentoo/invfs-<v>.ebuild
+# (BLAKE2B, which is what portage wants) and packaging/void/files/ (the
+# .sha256 xbps-src checks).
+release-sums: release
+	@# portage wants BLAKE2B (32-byte digest) + size, which is b2sum -l 256
+	@# output -- NOT openssl's blake2b512, which is a different length.
+	@s=$$(cut -d' ' -f1 $(DIST)/SHA256SUMS); n=$(RELEASE_NAME); \
+	f=$(DIST)/$$n.tar.zst; \
+	echo "artifact: $$n"; \
+	echo; echo "# packaging/PKGBUILD"; \
+	printf "sha256sums=('%s'\n            '  %s')\n" "$$s" "$$n"; \
+	echo; echo "# packaging/gentoo/invfs-$(RELEASE_VERSION).ebuild (BLAKE2B)"; \
+	if command -v b2sum >/dev/null 2>&1; then \
+	    sz=$$(wc -c < "$$f" | tr -d ' '); \
+	    printf "BLAKE2B=\"%s\" size=%s\n" "$$(b2sum -l 256 "$$f" | cut -d' ' -f1)" "$$sz"; \
+	else \
+	    echo "(install coreutils 'b2sum' to print the portage BLAKE2B line)"; \
+	fi; \
+	echo; echo "# packaging/void/files/$$n.tar.zst.sha256"; \
+	echo "$$s  $$n.tar.zst"; \
+	echo; echo "(printed, not written: a digest of the tarball cannot live inside"; \
+	echo " the tree the tarball is built from -- writing it there would change the"; \
+	echo " tarball on the next run and make every release un-reproducible)"
 
 # ---- docs -----------------------------------------------------------------
 # ctags index (impl_docs/FUNCTIONS.md, TYPES.md, functions/, types/) plus the

@@ -1,36 +1,51 @@
-# PKGBUILD for InvariantFS (WP-PKG).
-# Builds the current checkout (this file lives in packaging/ inside the
-# repo); run `makepkg -si` from anywhere with a readable repo tree.
+# PKGBUILD for InvariantFS.
+#
+# Consumes the PUBLISHED RELEASE ARTIFACT, not a git checkout: a machine
+# that runs `makepkg -si` gets exactly the bytes that were checksummed and
+# signed at release time, and needs no compiler toolchain to do it. The
+# artifact is `make release` output -- prebuilt bin/invf-*, the codecpacks
+# with their helpers already built, and the packaging/ tree.
+#
+#   cd packaging && makepkg -si
+#
+# Checksum provenance: the sha256 pinned below is the one in the published
+# dist/SHA256SUMS, which `make release SIGNING_KEY=...` detach-signs
+# (ed25519). makepkg cannot verify that signature directly -- it only
+# checks signatures over source files themselves -- so the chain this file
+# relies on is:
+#     pinned sha256 -> dist/SHA256SUMS -> SHA256SUMS.sig -> author pubkey
+# The same chain packaging/bootstrap.sh checks, with --check-only /
+# --pubkey. To have makepkg itself enforce a signature, publish a detached
+# signature over the tarball and add it to source=() plus validpgpkeys=;
+# see docs/INSTALL-MATRIX.md.
+#
+# `make release` prints the line to paste here after each release:
+#     make release-sums
 pkgname=invfs
 pkgver=0.5.0
 pkgrel=1
 pkgdesc="Semantic content-addressed filesystem with a bit-exactness invariant"
-arch=('x86_64')
+arch=('x86_64' 'aarch64')
 url="https://github.com/AsmanovLev/InvariantFS"
 license=('GPL2')
-depends=('fuse3' 'zstd' 'zlib' 'glibc')
-makedepends=('gcc' 'make' 'pkgconf')
+# The artifact is prebuilt, so these are runtime needs only -- no gcc/make.
+depends=('fuse3' 'zstd' 'zlib')
 optdepends=(
     'libjxl: JPEG -> lossless JXL codecpack (cjxl/djxl)'
     'p7zip: 7z containerpack (7zz)'
     'python: script-based codecpacks (raw_image, splt_test)'
 )
-source=()
-sha256sums=()
+# makepkg resolves sources relative to the directory holding the PKGBUILD.
+source=("invfs-v$pkgver-$arch.tar.zst")
+sha256sums=('3fc20b159cc9d6abf691f2e9260dc8af60b3b4926ea49f54b41b9f55a47037b7'
+            '  invfs-v0.5.0-x86_64.tar.zst')
 
-# the repo root is two levels up from packaging/PKGBUILD
-_repo_root() {
-    cd "$(dirname "$startdir/PKGBUILD")/.." && pwd
-}
-
-build() {
-    cd "$(_repo_root)"
-    make
-}
-
+# The one place the FHS layout is defined. WITH_MKINITCPIO=1 because this
+# IS Arch; dracut is Gentoo/Fedora and stays off here.
 package() {
-    cd "$(_repo_root)"
+    cd "$srcdir/invfs-v$pkgver-$arch"
     DESTDIR="$pkgdir" PREFIX=/usr \
-        WITH_SYSTEMD=1 WITH_DRACUT=0 WITH_MKINITCPIO=1 WITH_INITRAMFS_TOOLS=0 \
+        WITH_SYSTEMD=1 WITH_DRACUT=0 WITH_MKINITCPIO=1 \
+        WITH_INITRAMFS_TOOLS=0 \
         sh packaging/install.sh
 }

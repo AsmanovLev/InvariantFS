@@ -22,6 +22,14 @@
 #   --file <tarball>         use a local artifact (offline / inspect-before-run);
 #                            release artifact (*.tar.zst) or source tarball
 #   --download-only          fetch + verify + stage only; do not install
+#   --check-only             fetch + verify (sha256 + signature), print the
+#                            plan, install NOTHING. This is the
+#                            inspect-then-run form: run it, read it, then
+#                            run the install separately. Use with --pubkey.
+#   --pubkey <file>          ed25519 public key used to verify
+#                            SHA256SUMS.sig. With this set, verification is
+#                            FAIL-CLOSED: a missing or bad signature aborts
+#                            rather than installing anyway. (INVFS_PUBKEY)
 #   --run                    execute the staged --file / cached artifact
 #   --no-systemd             skip systemd units
 #   --no-dracut              skip the dracut module
@@ -56,6 +64,8 @@ UNINSTALL=0
 LIST=0
 ASSUME_YES=0
 DOWNLOAD_ONLY=0
+CHECK_ONLY=0
+PUBKEY=${INVFS_PUBKEY:-}
 RUN=0
 WITH_SYSTEMD=1
 WITH_DRACUT=1
@@ -85,6 +95,9 @@ while [ $# -gt 0 ]; do
         --file) FILE=${2:?--file needs an argument}; shift 2;;
         --file=*) FILE=${1#*=}; shift;;
         --download-only) DOWNLOAD_ONLY=1; shift;;
+        --check-only) CHECK_ONLY=1; shift;;
+        --pubkey) PUBKEY=${2:?--pubkey needs an argument}; shift 2;;
+        --pubkey=*) PUBKEY=${1#*=}; shift;;
         --run) RUN=1; shift;;
         --no-systemd) WITH_SYSTEMD=0; shift;;
         --no-dracut) WITH_DRACUT=0; shift;;
@@ -135,6 +148,17 @@ fetch() {  # $1 url $2 dest
 url_exists() {  # $1 url
     if have curl; then curl -fsSLI -o /dev/null "$1" 2>/dev/null
     elif have wget; then wget -q --spider "$1" 2>/dev/null
+    else return 1
+    fi
+}
+
+# Like fetch(), but a missing (404) file is a quiet no-op rather than a
+# fatal error. Used for the OPTIONAL detached signature: an unsigned release
+# is legal (verify_signature decides whether that is acceptable, based on
+# whether the caller supplied a key), so a 404 here must not abort the run.
+fetch_quiet() {  # $1 url $2 dest
+    if have curl; then curl -fsSL "$1" -o "$2" 2>/dev/null
+    elif have wget; then wget -qO "$2" "$1" 2>/dev/null
     else return 1
     fi
 }
@@ -306,6 +330,73 @@ verify_sha256() {  # $1 tarball $2 sumsfile $3 artifact basename
     info "sha256 verified: $3 $actual"
 }
 
+# Verify the detached ed25519 signature over SHA256SUMS.
+#
+# A checksum only proves the bytes did not change on the way to you; it does
+# not prove they came from InvariantFS. The signature is what closes that,
+# so:
+#   * pubkey given        -> the signature MUST verify. No signature, a bad
+#                            signature or a missing tool is fatal. Fail closed.
+#   * no pubkey, sig there-> warn loudly that the checksum is unauthenticated
+#   * no sig at all        -> say so; the artifact is unsigned
+#
+# $1 sumsfile, $2 sigfile, $3 pubkey (may be empty)
+verify_signature() {
+    sums=$1; sig=$2; key=$3
+
+    if [ -z "$key" ]; then
+        if [ -f "$sig" ]; then
+            warn "SHA256SUMS.sig is published but no --pubkey/INVFS_PUBKEY was given."
+            warn "The checksum above proves the download was intact, NOT that it came"
+            warn "from InvariantFS. Re-run with --pubkey to check the signature, e.g.:"
+            warn "    curl -fsSLO <pubkey> && $PROG --pubkey <pubkey> --check-only"
+        else
+            warn "no SHA256SUMS.sig published for this release: the artifact is UNSIGNED."
+            warn "Only the sha256 was checked."
+        fi
+        return 0
+    fi
+
+    [ -f "$sig" ] || die "signature expected but missing: $sig
+  (a pubkey was supplied, so verification is fail-closed; refusing to
+   install an artifact whose provenance cannot be checked)"
+    if [ ! -f "$key" ]; then
+        die "public key not found: $key"
+    fi
+
+    # sequoia: --signer-file is the key option (there is no --key), and
+    # supplying the key explicitly is what makes the signature
+    # "authenticated" rather than WoT-looked-up.
+    if have sq; then
+        if sq verify --signature-file "$sig" --signer-file "$key" "$sums" \
+                >/dev/null 2>&1; then
+            info "signature verified (sq, ed25519): $(basename "$sig")"
+            return 0
+        fi
+    fi
+
+    # gpg: the public key has to be in a keyring, so use a throwaway
+    # GNUPGHOME rather than the caller's (this must not import anything into
+    # the user's real keyring, nor depend on what is already in it).
+    if have gpg; then
+        _kh=$(mktemp -d 2>/dev/null) || _kh=
+        if [ -n "$_kh" ] && chmod 700 "$_kh" 2>/dev/null; then
+            if GNUPGHOME=$_kh gpg --batch --quiet --import "$key" >/dev/null 2>&1; then
+                if GNUPGHOME=$_kh gpg --batch --verify "$sig" "$sums" >/dev/null 2>&1; then
+                    rm -rf "$_kh"
+                    info "signature verified (gpg, ed25519): $(basename "$sig")"
+                    return 0
+                fi
+            fi
+            rm -rf "$_kh"
+        fi
+    fi
+
+    die "SIGNATURE VERIFICATION FAILED for $(basename "$sig") against $key
+  The artifact was NOT installed. Either the release is unsigned, the
+  signature does not match, or the key is not the author's."
+}
+
 # ---- source location -------------------------------------------------------
 locate_source() {
     if [ -n "${INVFS_SOURCE_DIR:-}" ]; then
@@ -389,6 +480,14 @@ do_release() {
             fi
             fetch "$base/$artifact" "$TARBALL"
             fetch "$base/SHA256SUMS" "$SUMS"
+            # WP114: also try to fetch the detached signature. A 404 here is
+            # NOT fatal on its own -- unsigned releases exist, and
+            # verify_signature() decides whether that is acceptable based on
+            # whether the caller supplied a key. What was broken before is
+            # that the signature was never even fetched, so a published,
+            # signed release always reported "signature expected but
+            # missing" and could not be installed with --pubkey at all.
+            fetch_quiet "$base/SHA256SUMS.sig" "$SUMS.sig" || true
         fi
     fi
 
@@ -400,13 +499,43 @@ do_release() {
 
     verify_sha256 "$TARBALL" "$SUMS" "$(basename "$TARBALL")"
 
+    # The signature is published next to SHA256SUMS, never instead of it:
+    # the sig covers the sums file, and the sums file covers the tarball.
+    SIG=""
+    for cand in "$(dirname "$SUMS")/SHA256SUMS.sig" "$SUMS.sig"; do
+        if [ -f "$cand" ]; then SIG=$cand; break; fi
+    done
+    verify_signature "$SUMS" "$SIG" "$PUBKEY"
+
+    if [ "$CHECK_ONLY" = 1 ]; then
+        info "CHECK-ONLY: verification passed; NOTHING was installed."
+        info "artifact: $TARBALL"
+        info "sha256:   $(sha256_of "$TARBALL")"
+        if [ -n "$SIG" ]; then info "signature: $SIG"; fi
+        cat >&2 <<EOF
+$PROG: reviewed. To install the exact bytes just verified, run:
+    sudo sh ${0##*/} --file $TARBALL --prefix $PREFIX --yes
+(or re-run this script without --check-only).
+EOF
+        return 0
+    fi
+
     if [ "$DOWNLOAD_ONLY" = 1 ]; then
         info "download+verify complete (staged)"
         info "artifact: $TARBALL"
         info "sums:     $SUMS"
+        if [ -n "$SIG" ]; then info "sig:      $SIG"; fi
         info "now run: ${0##*/} --run --version $VERSION --prefix $PREFIX ..."
         return 0
     fi
+
+    # Everything below this line modifies the system. Say what is about to
+    # be modified and on whose authority, so a `curl | sh` run is auditable
+    # in its own log after the fact.
+    info "about to install $artifact into $DESTDIR$PREFIX"
+    info "  sha256    $(sha256_of "$TARBALL")"
+    if [ -n "$SIG" ]; then info "  signature $SIG${PUBKEY:+ (key: $PUBKEY)}"; fi
+    info "  manifest  $MANIFEST   (drives --uninstall)"
 
     confirm "Install InvariantFS from $artifact into $DESTDIR$PREFIX?" || \
         die "aborted (pass --yes to run non-interactively)"

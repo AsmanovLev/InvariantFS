@@ -5,7 +5,7 @@ Maintainer: InvariantFS Developers <invfs@localhost>
 Build-Depends: debhelper-compat (= 13), gcc, make, pkg-config, libfuse3-dev, zlib1g-dev, libzstd1
 Standards-Version: 4.6.2
 Rules-Requires-Root: no
-Homepage: https://github.com/anomalyco/InvariantFS
+Homepage: https://github.com/AsmanovLev/InvariantFS
 
 Package: invfs
 Architecture: any
