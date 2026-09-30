@@ -785,5 +785,13 @@ int vol_stat_full(invfs_volume *v, const char *name, uint64_t *id_out, uint64_t 
 uint64_t vol_transcode_abort(invfs_volume *v, const char *name) { (void)v; (void)name; return 0; }
 int vol_v3_free_recipe_blocks(invfs_volume *v, const uint8_t recipe_addr[INVFS_V3_RECIPE_ADDR_LEN], uint64_t keep_pba)
 { (void)v; (void)recipe_addr; (void)keep_pba; return 0; }
+/* WP202: cpack_release_superseded is now a one-line forward to the shared
+ * vol_v3_release_superseded_blob (src/core/vol_ast.c), so this file -- which
+ * links vol_cpack.c ALONE, per its own header -- needs its stub, the same way
+ * it already stubs vol_v3_free_recipe_blocks just above. It is off the
+ * map-cache path under test. */
+void vol_v3_release_superseded_blob(invfs_volume *v, uint64_t inode_id,
+                                    const uint8_t old_addr[INVFS_V3_RECIPE_ADDR_LEN])
+{ (void)v; (void)inode_id; (void)old_addr; }
 int vol_v3_path_lookup(invfs_volume *v, const char *name, uint64_t *ino_out)
 { (void)v; (void)name; if (ino_out) *ino_out = 0; return -1; }

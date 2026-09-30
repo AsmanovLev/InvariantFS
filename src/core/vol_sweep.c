@@ -996,6 +996,28 @@ static int sweep_dispatch(invfs_volume *v, uint64_t inode_id,
 {
     char rname[272], p0name[272], jn[272];
     int declined_algo = 0;   /* WP103: the pack the WP13 loop already tried */
+    /* WP202: the address the row carries RIGHT NOW, captured before any lane
+     * below can supersede it in place.
+     *
+     * On v3 every builtin container lane ends in vol_create_*_file ->
+     * vol_create_blob_file -> vol_v3_create_content_node, which reuses the
+     * dirent's inode id and replaces the row: the moment the lane lands, the
+     * recipe that named the ORIGINAL file's segments is unreachable, and
+     * nothing frees it. vol_create_blob_file is handed the NEW address and
+     * never the old one, so the capture has to happen here, at the call site
+     * -- the same discipline (and the same reasoning) as the containerpack
+     * commit at vol_cpack.c:3276-3282.
+     *
+     * On v2 the row is not superseded: the lane appends a new record under a
+     * NEW inode id and tombstones the old one, which is what the
+     * `vol_delete_inode` at each lane already does, and old_addr stays unused. */
+    uint8_t old_addr[INVFS_V3_RECIPE_ADDR_LEN];
+    memset(old_addr, 0, sizeof old_addr);
+    if (v3) {
+        invfs_v3_inode in;
+        if (vol_v3_inode_get(v, inode_id, &in) == 1)
+            memcpy(old_addr, in.recipe_addr, sizeof old_addr);
+    }
 
     if (!name || !name[0] || !full || full_len < 4)
         return SWEEP_DECLINED;
@@ -1057,7 +1079,11 @@ static int sweep_dispatch(invfs_volume *v, uint64_t inode_id,
                             INVFS_ALGO_FLACR, tz_codec_gen(INVFS_ALGO_FLACR));
             return 0;
         }
-        if (!v3 && vol_delete_inode(v, inode_id, name) != 0) return -1;
+        /* WP202: on v3 the lane SUPERSEDED the row in place, so the old
+         * recipe's data segments are the lane's to release; on v2 the row
+         * still exists and the tombstone is the whole job. */
+        if (v3) vol_v3_release_superseded_blob(v, inode_id, old_addr);
+        else if (vol_delete_inode(v, inode_id, name) != 0) return -1;
         vol_stamp_class(v, nino, INVFS_CLASS_CONTAINER,
                         INVFS_ALGO_FLACR, tz_codec_gen(INVFS_ALGO_FLACR));
         return 2;   /* FLAC */
@@ -1074,7 +1100,11 @@ static int sweep_dispatch(invfs_volume *v, uint64_t inode_id,
                             INVFS_ALGO_TARR, tz_codec_gen(INVFS_ALGO_TARR));
             return 0;
         }
-        if (!v3 && vol_delete_inode(v, inode_id, name) != 0) return -1;
+        /* WP202: on v3 the lane SUPERSEDED the row in place, so the old
+         * recipe's data segments are the lane's to release; on v2 the row
+         * still exists and the tombstone is the whole job. */
+        if (v3) vol_v3_release_superseded_blob(v, inode_id, old_addr);
+        else if (vol_delete_inode(v, inode_id, name) != 0) return -1;
         vol_stamp_class(v, nino, INVFS_CLASS_CONTAINER,
                         INVFS_ALGO_TARR, tz_codec_gen(INVFS_ALGO_TARR));
         defer_container_parts(v, name);   /* WP14b: batch parts this run */
@@ -1092,7 +1122,11 @@ static int sweep_dispatch(invfs_volume *v, uint64_t inode_id,
                             INVFS_ALGO_GZR, tz_codec_gen(INVFS_ALGO_GZR));
             return 0;
         }
-        if (!v3 && vol_delete_inode(v, inode_id, name) != 0) return -1;
+        /* WP202: on v3 the lane SUPERSEDED the row in place, so the old
+         * recipe's data segments are the lane's to release; on v2 the row
+         * still exists and the tombstone is the whole job. */
+        if (v3) vol_v3_release_superseded_blob(v, inode_id, old_addr);
+        else if (vol_delete_inode(v, inode_id, name) != 0) return -1;
         vol_stamp_class(v, nino, INVFS_CLASS_CONTAINER,
                         INVFS_ALGO_GZR, tz_codec_gen(INVFS_ALGO_GZR));
         defer_container_parts(v, name);   /* WP14b: batch parts this run */
@@ -1131,7 +1165,11 @@ static int sweep_dispatch(invfs_volume *v, uint64_t inode_id,
                             INVFS_ALGO_PNGR, tz_codec_gen(INVFS_ALGO_PNGR));
             return 0;
         }
-        if (!v3 && vol_delete_inode(v, inode_id, name) != 0) return -1;
+        /* WP202: on v3 the lane SUPERSEDED the row in place, so the old
+         * recipe's data segments are the lane's to release; on v2 the row
+         * still exists and the tombstone is the whole job. */
+        if (v3) vol_v3_release_superseded_blob(v, inode_id, old_addr);
+        else if (vol_delete_inode(v, inode_id, name) != 0) return -1;
         vol_stamp_class(v, nino, INVFS_CLASS_CONTAINER,
                         INVFS_ALGO_PNGR, tz_codec_gen(INVFS_ALGO_PNGR));
         return 5;   /* PNG */
@@ -1183,7 +1221,11 @@ static int sweep_dispatch(invfs_volume *v, uint64_t inode_id,
                                                 (uint64_t)full_len);
             free(pmp);
             if (!nino) return 0;
-            if (!v3 && vol_delete_inode(v, inode_id, name) != 0) return -1;
+            /* WP202: on v3 the lane SUPERSEDED the row in place, so the old
+             * recipe's data segments are the lane's to release; on v2 the row
+             * still exists and the tombstone is the whole job. */
+            if (v3) vol_v3_release_superseded_blob(v, inode_id, old_addr);
+            else if (vol_delete_inode(v, inode_id, name) != 0) return -1;
             vol_stamp_class(v, nino, INVFS_CLASS_CODEC,
                             INVFS_ALGO_PMP, tz_codec_gen(INVFS_ALGO_PMP));
             return 8;   /* MP3 */

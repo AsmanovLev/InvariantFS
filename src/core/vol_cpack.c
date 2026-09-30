@@ -3004,26 +3004,20 @@ int64_t cpack_map_read(invfs_volume *v, const char *name, uint64_t ino,
 /* v3: release the blocks the superseded parent recipe owned, once the
  * decomposition has committed. Called at the END of the commit, never before:
  * a guard/map failure rolls the name back onto the untouched old record, which
- * has to stay readable. Only when the row really MOVED: a recipe address is
- * the content hash of the recipe, so a re-decomposition that reproduces the
- * same recipe (a lost class stamp re-arms the file) lands on the SAME address,
- * the live inode still points at those very segments, and freeing them would
- * strand the file. */
+ * has to stay readable.
+ *
+ * WP202: the body is vol_v3_release_superseded_blob (src/core/vol_ast.c), so
+ * the "only when the row really MOVED" guard lives in ONE place. It used to
+ * live here, and the builtin container lanes in sweep_dispatch (src/core/
+ * vol_sweep.c) superseded a row exactly the same way with no release at all --
+ * two implementations of "a lane replaces a file", one of which handed the
+ * space back. This is a forward, not a copy: a second copy is how the two
+ * drifted in the first place. */
 static void cpack_release_superseded(
     invfs_volume *v, uint64_t inode_id,
     const uint8_t old_addr[INVFS_V3_RECIPE_ADDR_LEN])
 {
-    static const uint8_t zero_addr[INVFS_V3_RECIPE_ADDR_LEN] = {0};
-    invfs_v3_inode now;
-
-    if (!v || !old_addr ||
-        memcmp(old_addr, zero_addr, sizeof zero_addr) == 0)
-        return;
-    if (vol_v3_inode_get(v, inode_id, &now) != 1)
-        return;
-    if (memcmp(now.recipe_addr, old_addr, INVFS_V3_RECIPE_ADDR_LEN) == 0)
-        return;
-    vol_v3_free_recipe_blocks(v, old_addr, 0);
+    vol_v3_release_superseded_blob(v, inode_id, old_addr);
 }
 
 

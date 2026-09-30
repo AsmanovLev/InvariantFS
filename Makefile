@@ -122,7 +122,8 @@ CLI_MAINS := mkfs verify fsck cp cat ls stat arctest blkio_test resize \
              read_parallel_bitexact_test arc_concurrency_test \
              nlink_v3_test recipe_fsck_test cpack_guard_test orphan_test rt30_slot_test anchor_test \
              fsck_rootslot_test batch_owner_test plugin_host_test plugin_mt_test rs_stability_test \
-fsck_liveness_test scratch_policy_test v2rb_rollback_test keycmp_test
+fsck_liveness_test scratch_policy_test v2rb_rollback_test keycmp_test \
+             lane_release_test
 $(foreach t,$(CLI_MAINS),$(eval $(call TOOL_RULE,$(t),)))
 
 # WP71: loads every containerpack .so through dlmopen/dlopen -> needs -ldl,
@@ -617,6 +618,7 @@ test: $(OUT)/invf-arctest $(OUT)/invf-blkio_test $(OUT)/invf-codec_test \
       $(OUT)/invf-cpack_guard_test $(OUT)/invf-orphan_test \
       $(OUT)/invf-scratch_policy_test $(OUT)/invf-v2rb_rollback_test \
       $(OUT)/invf-keycmp_test \
+      $(OUT)/invf-lane_release_test \
       $(OUT)/invf-rt30_slot_test $(OUT)/invf-anchor_test $(OUT)/gzhdrfuzz \
       $(OUT)/invf-fsck_rootslot_test \
       $(OUT)/invf-batch_owner_test \
@@ -719,6 +721,12 @@ test: $(OUT)/invf-arctest $(OUT)/invf-blkio_test $(OUT)/invf-codec_test \
 	@# reported success over blocks that were orphaned forever. Both legs
 	@# assert on the DISK EFFECT, not on a return code alone.
 	$(TESTENV) $(TESTISO) $(OUT)/invf-v2rb_rollback_test /tmp
+	@# WP202: a builtin container lane that supersedes a file on v3 gave the
+	@# superseded recipe's data blocks to nobody, while the containerpack
+	@# lane released them. One implementation now, and this pins the premise
+	@# (the row really moved in place) beside the effect (the blocks are free
+	@# AND the file is still bit-exact).
+	$(TESTENV) $(TESTISO) $(OUT)/invf-lane_release_test /tmp
 	@# The v3 KEY ORDERING. The base B+-tree, the delta log and the
 	@# fold used to carry three byte-identical private comparators and the
 	@# fold's delta/base merge is correct only while they agree. They are

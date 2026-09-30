@@ -1736,6 +1736,9 @@ int vol_ast_recipe_parse(const uint8_t *blob, size_t blen,
 int vol_v3_free_recipe_blocks(invfs_volume *v,
                              const uint8_t recipe_addr[INVFS_V3_RECIPE_ADDR_LEN],
                              uint64_t keep_pba);
+void vol_v3_release_superseded_blob(
+    invfs_volume *v, uint64_t inode_id,
+    const uint8_t old_addr[INVFS_V3_RECIPE_ADDR_LEN]);
 int sweep_enospc(invfs_volume *v, uint64_t need_bytes);
 uint16_t tz_codec_gen(uint32_t algo);
 

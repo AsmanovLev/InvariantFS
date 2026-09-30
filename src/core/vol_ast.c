@@ -188,6 +188,50 @@ int vol_v3_free_recipe_blocks(invfs_volume *v,
 }
 
 
+/* WP202: release the blocks a SUPERSEDED inode recipe owned. One
+ * implementation, three callers -- the containerpack commit
+ * (cpack_release_superseded in vol_cpack.c, which is now a one-line
+ * forward to this) and the builtin container lanes in
+ * sweep_dispatch (vol_sweep.c), which did the same supersede through
+ * vol_create_blob_file -> vol_v3_create_content_node and, until now,
+ * gave the space back to nobody.
+ *
+ * The caller must have captured `old_addr` from the inode row BEFORE
+ * the supersede; vol_create_blob_file is handed the NEW address and
+ * never the old one, which is the whole reason the capture has to
+ * happen at the call site (the comment on that function says so).
+ *
+ * Two guards, both load-bearing:
+ *
+ *  - "only when the row really MOVED": a recipe address is the content
+ *    hash of the recipe, so a re-run that reproduces the SAME recipe (a
+ *    lost class stamp re-arms the file; a batched member promoted twice)
+ *    lands on the SAME address, the live inode still points at those very
+ *    segments, and freeing them would strand the file. This is the
+ *    guard cpack_release_superseded already carried.
+ *
+ *  - `zone == INVFS_ZONE_TEXT` entries are skipped inside
+ *    vol_v3_free_recipe_blocks (a shared batch segment is owned by the
+ *    batch registry, not by this member), and the pba refcount means a
+ *    block another live recipe still names is not freed here. */
+void vol_v3_release_superseded_blob(
+    invfs_volume *v, uint64_t inode_id,
+    const uint8_t old_addr[INVFS_V3_RECIPE_ADDR_LEN])
+{
+    static const uint8_t zero_addr[INVFS_V3_RECIPE_ADDR_LEN] = {0};
+    invfs_v3_inode now;
+
+    if (!v || !old_addr ||
+        memcmp(old_addr, zero_addr, sizeof zero_addr) == 0)
+        return;
+    if (vol_v3_inode_get(v, inode_id, &now) != 1)
+        return;
+    if (memcmp(now.recipe_addr, old_addr, INVFS_V3_RECIPE_ADDR_LEN) == 0)
+        return;
+    vol_v3_free_recipe_blocks(v, old_addr, 0);
+}
+
+
 
 /* ---- AST children: serialize / deserialize / container creation ---- */
 
