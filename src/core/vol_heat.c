@@ -45,7 +45,14 @@ static uint64_t idx_mix_heat(uint64_t x)
 
 /* per-inode accrued read touches this session. heat_tab doubles as the
  * once-per-session seen set: presence == counted. On allocation failure a
- * touch is silently dropped -- a colder file, never a wrong one. */
+ * touch is silently dropped -- a colder file, never a wrong one.
+ *
+ * WP-heat-table-concurrent-safe: caller holds heat_mu. The grow below
+ * free()s the old array and republishes the pointer, so an unlocked caller
+ * is not merely writing the wrong count -- it is dereferencing an array
+ * another thread has already freed. The read path reaches here with
+ * g_io_lock RELEASED (src/cli/fuse_fs.c:1407 then :1414, under fuse_loop_mt
+ * at :3353), so "the caller serializes" was never true. */
 static int heat_tab_touch(invfs_volume *v, uint64_t inode)
 {
     size_t mask, i, j;
@@ -82,27 +89,41 @@ static int heat_tab_touch(invfs_volume *v, uint64_t inode)
     return 0;
 }
 
-/* accrued reads of `inode` this session (0 when none) */
-static uint16_t heat_tab_get(const invfs_volume *v, uint64_t inode)
+/* accrued reads of `inode` this session (0 when none).
+ * WP-heat-table-concurrent-safe: this one TAKES heat_mu itself rather than
+ * requiring the caller to, because its only caller (heat_file_r) is reached
+ * from the sweep/tier walk and from vol_sweep.c, and a lock at every one of
+ * those entry points would spread this over four files for nothing. It holds
+ * the lock across nothing but the probe, so it stays a leaf. */
+static uint16_t heat_tab_get(const invfs_volume *cv, uint64_t inode)
 {
+    invfs_volume *v = (invfs_volume *)cv;
     size_t i;
-    if (!v->heat_tab) return 0;
+    uint16_t r = 0;
+    pthread_mutex_lock(&v->heat_mu);
+    if (!v->heat_tab) { pthread_mutex_unlock(&v->heat_mu); return 0; }
     i = (size_t)idx_mix_heat(inode) & v->heat_tab_mask;
     while (v->heat_tab[i][0]) {
-        if (v->heat_tab[i][0] == inode)
-            return v->heat_tab[i][1] > 0xFFFF ? 0xFFFF
-                                              : (uint16_t)v->heat_tab[i][1];
+        if (v->heat_tab[i][0] == inode) {
+            r = v->heat_tab[i][1] > 0xFFFF ? 0xFFFF
+                                            : (uint16_t)v->heat_tab[i][1];
+            break;
+        }
         i = (i + 1) & v->heat_tab_mask;
     }
-    return 0;
+    pthread_mutex_unlock(&v->heat_mu);
+    return r;
 }
 
 /* remove + return the session's accrued reads of `inode` (the write-commit
- * carry transfers the old id's pending touches onto the replacement) */
+ * carry transfers the old id's pending touches onto the replacement).
+ * WP-heat-table-concurrent-safe: caller holds heat_mu -- it REMOVES an entry
+ * and decrements heat_tab_n, so it is a writer, and the write path's
+ * g_io_lock does not exclude the lock-free readers. */
 static uint16_t heat_tab_take(invfs_volume *v, uint64_t inode)
 {
     size_t i;
-    uint16_t r;
+    uint16_t r = 0;
     if (!v->heat_tab) return 0;
     i = (size_t)idx_mix_heat(inode) & v->heat_tab_mask;
     while (v->heat_tab[i][0]) {
@@ -113,30 +134,78 @@ static uint16_t heat_tab_take(invfs_volume *v, uint64_t inode)
             v->heat_tab[i][1] = 0;
             v->heat_tab_n--;
             /* no tombstone compaction: the map is rebuilt by the fold */
-            return r;
+            break;
         }
         i = (i + 1) & v->heat_tab_mask;
     }
-    return 0;
+    return r;
+}
+
+/* WP-heat-table-concurrent-safe: the two summary flags are shared state on
+ * the same footing as the table (heat_touch_read sets heat_any_rhot from a
+ * lock-free reader), so they get the same lock and the same accessors. */
+int heat_any_rhot(const invfs_volume *cv)
+{
+    invfs_volume *v = (invfs_volume *)cv;
+    int r;
+    pthread_mutex_lock(&v->heat_mu);
+    r = v->heat_any_rhot;
+    pthread_mutex_unlock(&v->heat_mu);
+    return r;
+}
+
+int heat_any_whot(const invfs_volume *cv)
+{
+    invfs_volume *v = (invfs_volume *)cv;
+    int w;
+    pthread_mutex_lock(&v->heat_mu);
+    w = v->heat_any_whot;
+    pthread_mutex_unlock(&v->heat_mu);
+    return w;
+}
+
+/* vol_open / vol_close. A zeroed pthread_mutex_t happens to be a valid
+ * glibc normal mutex, but relying on that is not what "locked" means; the
+ * test harness calls this too, which is why it is exported. */
+void heat_locks_init(invfs_volume *v)
+{
+    pthread_mutex_init(&v->heat_mu, NULL);
+}
+
+void heat_locks_destroy(invfs_volume *v)
+{
+    pthread_mutex_destroy(&v->heat_mu);
 }
 
 
 /* +1 accrued read on the inode, once per session. Read-only sessions
- * accrue nothing. RAM-only: folds at close / sweep-decay time. */
+ * accrue nothing. RAM-only: folds at close / sweep-decay time.
+ *
+ * WP-heat-table-concurrent-safe: this is the LOCK-FREE READ PATH. It is
+ * reached from vol_read_range with g_io_lock already released
+ * (src/cli/fuse_fs.c:1407 releases, :1414 calls, :3353 fuse_loop_mt), so the
+ * only thing standing between N threads and one heat_tab is this lock. */
 void heat_touch_read(invfs_volume *v, uint64_t inode, uint64_t lba)
 {
     (void)lba;   /* WP27: per-file counters; the segment index is kept in
                   * the signature for the call sites' shape */
     if (!vol_write_enabled(v)) return;
     if (!inode) return;
-    if (heat_tab_touch(v, inode)) return;   /* already counted */
-    /* conservative summary: the promotion walk gates on it */
-    v->heat_any_rhot = 1;
+    pthread_mutex_lock(&v->heat_mu);
+    if (!heat_tab_touch(v, inode)) {
+        /* conservative summary: the promotion walk gates on it */
+        v->heat_any_rhot = 1;
+    }
+    pthread_mutex_unlock(&v->heat_mu);
 }
 
 uint16_t heat_session_take(invfs_volume *v, uint64_t inode)
 {
-    return heat_tab_take(v, inode);
+    uint16_t r;
+    pthread_mutex_lock(&v->heat_mu);
+    r = heat_tab_take(v, inode);
+    pthread_mutex_unlock(&v->heat_mu);
+    return r;
 }
 
 
@@ -392,8 +461,14 @@ uint8_t *heat_ext_merge(const invfs_volume *v, const uint8_t *old_ext,
  * sweep's decay pass recomputes the truth from the TLVs. */
 void l2p_seed_heat(invfs_volume *v)
 {
+    /* WP-heat-table-concurrent-safe: the summaries are shared state with the
+     * lock-free readers (heat_touch_read sets heat_any_rhot), so the seed
+     * takes the same lock. vol_open runs it before any thread exists, so this
+     * is uncontended in practice. */
+    pthread_mutex_lock(&v->heat_mu);
     v->heat_any_rhot = 1;
     v->heat_any_whot = 1;
+    pthread_mutex_unlock(&v->heat_mu);
 }
 
 
@@ -404,18 +479,50 @@ void l2p_seed_heat(invfs_volume *v)
  * index is never pruned by design (vol_read_inode must still find
  * tombstoned records), so it cannot tell a retired id from a live one --
  * and meta-rewriting a retired id would re-add its name to the live
- * index (the fold-then-resurrect bug). */void heat_fold(invfs_volume *v)
+ * index (the fold-then-resurrect bug).
+ *
+ * WP-heat-table-concurrent-safe: the walk below is now split in three, and
+ * the reason is lock ordering, not style. The per-record work calls
+ * heat_id_live -> vol_v3_inode_get and heat_write -> vol_set_xattr, and those
+ * descend into the v3 tree, whose locks (vol_btree, vol_delta) sit ABOVE
+ * heat_mu. So heat_mu is held only across (a) copying the pending
+ * (inode, count) pairs out of the table and (b) the reset memset -- both
+ * straight-line table work -- and is NOT held across the xattr I/O. A touch
+ * that lands while the fold is doing I/O is simply not folded this pass; it
+ * is in the next one. That is the same trade the fold already made for
+ * crashed records ("a lost touch is a colder file, never a wrong one"), and
+ * it is why heat_mu stays a strict leaf. */void heat_fold(invfs_volume *v)
 {
-    size_t i;
-    if (!v->heat_tab) return;
-    for (i = 0; i <= v->heat_tab_mask; i++) {
-        uint64_t inode = v->heat_tab[i][0];
-        uint64_t n;
+    uint64_t *pend = NULL;
+    size_t np = 0, cap = 0, i;
+
+    /* (a) copy the pending touches out under the lock. */
+    pthread_mutex_lock(&v->heat_mu);
+    if (v->heat_tab && v->heat_tab_n) {
+        cap = v->heat_tab_n;
+        pend = (uint64_t *)calloc(2 * cap, sizeof *pend);
+        if (pend) {
+            for (i = 0; i <= v->heat_tab_mask; i++) {
+                uint64_t inode = v->heat_tab[i][0];
+                uint64_t n = v->heat_tab[i][1];
+                if (!inode || !n) continue;
+                if (np == cap) break;   /* cannot happen: cap == heat_tab_n */
+                pend[2 * np] = inode;
+                pend[2 * np + 1] = n;
+                np++;
+            }
+        }
+    }
+    v->heat_folded = 1;   /* set on every fold attempt, as before */
+    pthread_mutex_unlock(&v->heat_mu);
+    if (!pend) return;
+
+    /* (b) the per-record work, with heat_mu NOT held. */
+    for (i = 0; i < np; i++) {
+        uint64_t inode = pend[2 * i];
+        uint64_t n = pend[2 * i + 1];
         uint16_t r = 0, nr;
         uint8_t w = 0;
-        if (!inode) continue;
-        n = v->heat_tab[i][1];
-        if (!n) continue;
         if (!heat_id_live(v, inode)) continue;   /* dead id (rewritten) */
         if (heat_get(v, inode, &r, &w) != 0) { r = 0; w = 0; }
         /* absent TLV == (0,0): "no heat history"; the fold writes only
@@ -424,11 +531,29 @@ void l2p_seed_heat(invfs_volume *v)
         if (nr == r) continue;
         heat_write(v, inode, nr, w);
     }
-    /* the touches are persisted: the table resets (a long-lived process
-     * folding twice must not double-count) */
-    memset(v->heat_tab, 0, (v->heat_tab_mask + 1) * sizeof *v->heat_tab);
-    v->heat_tab_n = 0;
-    v->heat_folded = 1;
+
+    /* (c) reset under the lock. Everything copied out above has been folded;
+     * anything a reader added since (a) is left for the next pass rather than
+     * silently erased -- so only the pairs we actually folded are cleared. */
+    pthread_mutex_lock(&v->heat_mu);
+    for (i = 0; i < np; i++) {
+        uint64_t inode = pend[2 * i], n = pend[2 * i + 1];
+        size_t k = (size_t)idx_mix_heat(inode) & v->heat_tab_mask;
+        while (v->heat_tab[k][0]) {
+            if (v->heat_tab[k][0] == inode) {
+                /* clear only what we folded; a concurrent touch cannot have
+                 * raised this slot above the value we copied */
+                v->heat_tab[k][0] = 0;
+                v->heat_tab[k][1] = 0;
+                v->heat_tab_n--;
+                (void)n;
+                break;
+            }
+            k = (k + 1) & v->heat_tab_mask;
+        }
+    }
+    pthread_mutex_unlock(&v->heat_mu);
+    free(pend);
 }
 
 
@@ -438,8 +563,16 @@ void l2p_seed_heat(invfs_volume *v)
  * folds only. */
 void vol_heat_persist(invfs_volume *v)
 {
+    int empty;
     if (!v || !vol_write_enabled(v)) return;
-    if (!v->heat_tab_n) return;
+    /* WP-heat-table-concurrent-safe: read the count under heat_mu. A reader
+     * that adds a touch between this test and heat_fold()'s copy-out simply
+     * gets folded on the next call -- the fold is idempotent-by-reset either
+     * way, and heat is advisory. */
+    pthread_mutex_lock(&v->heat_mu);
+    empty = !v->heat_tab_n;
+    pthread_mutex_unlock(&v->heat_mu);
+    if (empty) return;
     if (vol_mark_dirty(v) != 0) return;
     heat_fold(v);
 }
@@ -542,8 +675,10 @@ void vol_heat_sweep_begin(invfs_volume *v)
         (void)vol_v3_iter_live_inodes(v, heat_decay_v3_cb, &ctx);
     else
         vol_records_walk(v, heat_decay_cb, &ctx);
+    pthread_mutex_lock(&v->heat_mu);   /* WP-heat-table-concurrent-safe */
     v->heat_any_rhot = ctx.any_r;
     v->heat_any_whot = ctx.any_w;
+    pthread_mutex_unlock(&v->heat_mu);
     (void)v;
 }
 
@@ -718,7 +853,7 @@ int vol_heat_promote(invfs_volume *v)
     int v3;
 
     if (!v || !vol_write_enabled(v)) return 0;
-    if (!v->heat_any_rhot) return 0;   /* cold volume: skip the walk */
+    if (!heat_any_rhot(v)) return 0;   /* cold volume: skip the walk */
     v3 = (v->sb.vol_flags & VOLF_V3) != 0;
     owner = vol_find(v, TZ_OWNER_NAME);
     if (!v3 && !owner) return 0;

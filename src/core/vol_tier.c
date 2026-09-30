@@ -998,7 +998,8 @@ int vol_tier_migrate(invfs_volume *v)
     watermark = v->arena_blocks / 5;   /* demote below 20% free */
 
     memset(&hm, 0, sizeof hm);
-    if ((v->heat_any_rhot || v->tier_n) &&
+    /* WP-heat-table-concurrent-safe: locked accessor, not the raw field. */
+    if ((heat_any_rhot(v) || v->tier_n) &&
         tier_heat_build(v, &hm) != 0) {
         free(hm.t);
         memset(&hm, 0, sizeof hm);   /* cold-run fallback (see above) */
@@ -1007,7 +1008,7 @@ int vol_tier_migrate(invfs_volume *v)
     /* ---- promotion: read-hot canonical (dev1) segments -> dev0 copy --
      * the WP19 hysteresis applies: the sweep's decay ran first, so a
      * burst promotes only when it survives exactly one halving. */
-    if (v->heat_any_rhot && hm.t) {
+    if (heat_any_rhot(v) && hm.t) {
         for (i = 0; i <= hm.mask; i++) {
             uint64_t plen = 0;
             int prc;

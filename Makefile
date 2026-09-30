@@ -372,6 +372,55 @@ $(OUT)/invf-arc-conc-tsan: src/cli/arc_san_test.c src/core/arc.c src/core/arc.h 
 $(OUT)/invf-arc-conc-asan: src/cli/arc_san_test.c src/core/arc.c src/core/arc.h | $(OUT)
 	$(CC) $(ARC_SAN_CFLAGS) $(ARC_SAN_ASAN) -o $@ $< src/core/arc.c -lpthread
 
+# WP-heat-table-concurrent-safe: the RED CONTROL for the read-heat table, the
+# sibling defect the ARC control found on the same call site.
+#
+# It is standalone for the same reason arc.c's is: src/core/vol_heat.c needs no
+# object outside libc + libzstd. It does need the real volume_internal.h for
+# the struct, and it calls 25 project symbols (vol_find, vol_get_xattr,
+# vol_v3_inode_get, meta_locate_ext, ...), so src/cli/heat_san_test.c defines
+# all 25 as stubs at the bottom of itself. No volume, no image, no codecpack,
+# so a sanitizer build still costs about a second.
+#
+#   heat-conc-tsan -> the structure. heat_tab_touch() had no lock and no
+#                     atomic anywhere, and the read path reaches it with
+#                     g_io_lock RELEASED (src/cli/fuse_fs.c:1407 then :1414,
+#                     under fuse_loop_mt at :3353). TSAN needs the accesses to
+#                     be UNORDERED, not to overlap, and with no edge anywhere
+#                     unorderedness is guaranteed: reports first run, every run.
+#   heat-conc-asan -> the lifetime, and the leg that is PLANNED rather than
+#                     raced. heat_tab_touch() grows by free()-ing the old
+#                     array (src/core/vol_heat.c:68); -Wl,--wrap=free performs
+#                     that free and then parks before :69 republishes it, and
+#                     the test starts a reader only after observing the park.
+#                     INVFS_HEAT_SAN_LEG=planned selects that leg alone.
+#   heat_table_concurrency_test -> the same source with no sanitizer: the
+#                     glibc heap checker aborts on the unfixed table's
+#                     free()-and-republish storm, and on the fixed one it
+#                     asserts the table's own invariants.
+#
+# The source declares heat_locks_init WEAK, so all three compile and run
+# against a tree that predates the fix (the symbol resolves to NULL and the
+# table is then touched with no lock at all -- the defect). Same source, same
+# commands, red before and green after. -Wl,--wrap=free goes on all three so
+# the interposer's __real_free resolves even when the planned leg is not run.
+# As with the ARC binaries, ASan is bounded with ASAN_OPTIONS=hard_rss_limit_mb.
+HEAT_SAN_CFLAGS := -std=gnu11 -O1 -g -fno-omit-frame-pointer $(addprefix -I,$(SRC) $(SRCDIRS)) \
+                   -pthread -DINVFS_EMBED_FLACX -DMINIZ_NO_ZLIB_APIS \
+                   -DBLAKE3_NO_SSE2 -DBLAKE3_NO_SSE41 -DBLAKE3_NO_AVX2 -DBLAKE3_NO_AVX512 \
+                   -Wl,--wrap=free
+HEAT_SAN_LIBS   := -lpthread -Wl,-l:libzstd.so.1 -lz
+HEAT_SAN_SRC    := src/cli/heat_san_test.c src/core/vol_heat.c
+
+$(OUT)/invf-heat-conc-tsan: $(HEAT_SAN_SRC) src/core/volume_internal.h | $(OUT)
+	$(CC) $(HEAT_SAN_CFLAGS) -fsanitize=thread -o $@ $(HEAT_SAN_SRC) $(HEAT_SAN_LIBS)
+
+$(OUT)/invf-heat-conc-asan: $(HEAT_SAN_SRC) src/core/volume_internal.h | $(OUT)
+	$(CC) $(HEAT_SAN_CFLAGS) -fsanitize=address -o $@ $(HEAT_SAN_SRC) $(HEAT_SAN_LIBS)
+
+$(OUT)/invf-heat_table_concurrency_test: $(HEAT_SAN_SRC) src/core/volume_internal.h | $(OUT)
+	$(CC) $(HEAT_SAN_CFLAGS) -O2 -o $@ $(HEAT_SAN_SRC) $(HEAT_SAN_LIBS)
+
 $(OUT)/invf-gz_header_test: src/cli/gz_header_test.c $(CORE_O)
 	$(CC) $(GZHDR_SAN_CFLAGS) -o $@ $< $(CORE_O) \
 	      -fsanitize=address,undefined $(LDLIBS)
@@ -494,6 +543,9 @@ test: $(OUT)/invf-arctest $(OUT)/invf-blkio_test $(OUT)/invf-codec_test \
       $(OUT)/invf-symlink_v3_test $(OUT)/invf-large_file_v3_test $(OUT)/invf-dedupe_v3_test \
       $(OUT)/invf-read_parallel_bitexact_test \
       $(OUT)/invf-arc-conc-tsan $(OUT)/invf-arc-conc-asan \
+      $(OUT)/invf-arc_concurrency_test \
+      $(OUT)/invf-heat-conc-tsan $(OUT)/invf-heat-conc-asan \
+      $(OUT)/invf-heat_table_concurrency_test \
       $(OUT)/invf-deflate_repro_test $(OUT)/invf-plugin_host_test $(OUT)/invf-plugin_mt_test \
       $(OUT)/invf-window_test $(OUT)/invf-nlink_v3_test \
       $(OUT)/invf-recipe_fsck_test $(OUT)/invf-fsck_liveness_test \
@@ -560,6 +612,16 @@ test: $(OUT)/invf-arctest $(OUT)/invf-blkio_test $(OUT)/invf-codec_test \
 	$(TESTENV) $(TESTISO) $(OUT)/invf-arc-conc-tsan
 	ASAN_OPTIONS=$(GZHDR_TEST_ASAN) $(TESTENV) $(TESTISO) $(OUT)/invf-arc-conc-asan
 	$(TESTENV) $(TESTISO) $(OUT)/invf-arc_concurrency_test /tmp
+	@# WP-heat-table-concurrent-safe: the read-heat table, under concurrency.
+	@# TSAN is the structure (vol_heat.c had no lock and the read path reaches
+	@# it with g_io_lock released); ASan is the lifetime, and its planned leg
+	@# schedules the grow's free() with -Wl,--wrap=free instead of racing for
+	@# it; the plain build asserts the table's own invariants. Any one of the
+	@# three reporting is this gate going red.
+	$(TESTENV) $(TESTISO) $(OUT)/invf-heat-conc-tsan
+	ASAN_OPTIONS=$(GZHDR_TEST_ASAN) INVFS_HEAT_SAN_LEG=all \
+	    $(TESTENV) $(TESTISO) $(OUT)/invf-heat-conc-asan
+	$(TESTENV) $(TESTISO) $(OUT)/invf-heat_table_concurrency_test
 	$(TESTENV) $(TESTISO) $(OUT)/invf-dedupe_v3_test /tmp
 	$(TESTENV) $(TESTISO) $(OUT)/invf-window_test /tmp
 	$(TESTENV) $(TESTISO) $(OUT)/invf-nlink_v3_test /tmp

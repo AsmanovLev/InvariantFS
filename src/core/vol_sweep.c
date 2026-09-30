@@ -1014,7 +1014,9 @@ static int sweep_dispatch(invfs_volume *v, uint64_t inode_id,
      * sweep interval -- wheat survives rewrites, see vol_replace_file)
      * churns too fast to amortize containers, transcodes or batching:
      * skip the heavy fan-out for this run and take the generic floor. */
-    if (v->heat_any_whot && heat_file_maxw(v, inode_id) >= INVFS_WHEAT_HOT)
+    /* WP-heat-table-concurrent-safe: read the summary through its locked
+     * accessor -- heat_any_whot is written by the lock-free read path. */
+    if (heat_any_whot(v) && heat_file_maxw(v, inode_id) >= INVFS_WHEAT_HOT)
         return SWEEP_DECLINED;
 
     /* ZIP container: explode into AST children (keep original bytes).

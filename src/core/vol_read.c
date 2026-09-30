@@ -579,12 +579,27 @@ static int vol_decode_ast_entries(invfs_volume *v, uint64_t inode_id,
                  * entry; this fast path replaces it, so it owes the same
                  * touch. It is made ONCE here, from the calling thread,
                  * because heat is per-file (heat_tab_touch dedupes per
-                 * inode, so the serial loop's N touches net to exactly one)
-                 * and heat_tab_touch's table insert is not thread-safe --
-                 * decode_thread_worker() must not call it. Skipping it left
-                 * every read of a >=16-segment NONE/LZ4/ZSTD recipe at
-                 * rheat=0, which starved heat promotion AND the WP25 tier
-                 * migration (tier_heat_cb reads heat_file_r). */
+                 * inode, so the serial loop's N touches net to exactly one).
+                 *
+                 * WP-heat-table-concurrent-safe: this comment used to end
+                 * "and heat_tab_touch's table insert is not thread-safe --
+                 * decode_thread_worker() must not call it". That was true
+                 * about the WORKERS and wrong about everything it implied
+                 * for the caller. "The calling thread" is NOT a
+                 * serialization point: this runs inside vol_read_range,
+                 * which invf_read calls with g_io_lock ALREADY RELEASED
+                 * (src/cli/fuse_fs.c:1407 releases, :1414 calls, :3353
+                 * fuse_loop_mt), so N FUSE read threads are in here at once
+                 * and every one of them reaches this line. heat_tab_touch
+                 * now takes heat_mu itself (src/core/vol_heat.c), so the
+                 * hoist is about the DEDUPE (one touch, not N) and no longer
+                 * about thread safety -- but the workers still must not call
+                 * it, because the dedupe is by presence and a worker racing
+                 * the caller's touch would fold one inode's N segments into
+                 * whichever touch landed first. Skipping it left every read
+                 * of a >=16-segment NONE/LZ4/ZSTD recipe at rheat=0, which
+                 * starved heat promotion AND the WP25 tier migration
+                 * (tier_heat_cb reads heat_file_r). */
                 heat_touch_read(v, inode_id, 0);
                 const char *et = getenv("INVFS_READ_THREADS");
                 if (et && *et) {

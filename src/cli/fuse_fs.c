@@ -1410,7 +1410,16 @@ static int invf_read(const char *path, char *buf, size_t size, off_t offset,
         return -ENOENT;
     if ((uint64_t)offset >= size64)
         return 0;
-    /* Data read: thread-safe pread via io_pread in vol_read_range (no g_io_lock needed) */
+    /* Data read: lock-free, and that means EVERY structure vol_read_range
+     * touches must be safe on its own. The io_pread claim is true and it is
+     * not the whole story: the block I/O is stateless, but the path above it
+     * is not. Two structures have been found racing here because this comment
+     * read as a blanket guarantee that there was nothing left to lock --
+     * the ARC cache (fixed in 40ad1e3; see arc.h) and the read-heat table
+     * (src/core/vol_heat.c, heat_mu). Both are strict-leaf mutexes now, and
+     * that -- not the pread -- is what makes this line safe. If you add a
+     * cache, a counter or an index to vol_read_range, it needs its own
+     * locking; "the pread is thread-safe" is not an answer. */
     got = vol_read_range(g_vol, ino, (uint64_t)offset, size, buf);
     if (got < 0)
         return -EIO;

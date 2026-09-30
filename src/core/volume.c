@@ -1127,6 +1127,10 @@ static invfs_volume *vol_open_inner(const char *path, int at_ckpt,
     if (!v) { *err = -1; return NULL; }
     (void)pthread_rwlock_init(&v->meta_lock, NULL);
     (void)pthread_mutex_init(&v->rc_mu, NULL);
+    /* WP-heat-table-concurrent-safe: the read-heat table is reached from the
+     * lock-free read path (fuse_fs.c releases g_io_lock before vol_read_range),
+     * so it carries its own leaf mutex rather than relying on a caller's. */
+    heat_locks_init(v);
 
     /* "W:" is the shorthand a user types; CreateFileW needs "\\.\W:". Store
        the normalized form, so diagnostics name what was actually opened. */
@@ -1149,6 +1153,7 @@ static invfs_volume *vol_open_inner(const char *path, int at_ckpt,
             fprintf(stderr, "vol_open: %s: %s\n", real, blkio_strerror(rc));
             *err = -2;
             free(v->path);
+            heat_locks_destroy(v);
             free(v);
             return NULL;
         }
@@ -2147,6 +2152,7 @@ fail:
     free(v->orph.pba);
     free(v->orph.inlist);
     free(v->heat_tab);
+    heat_locks_destroy(v);   /* WP-heat-table-concurrent-safe */
     free(v->pba_ref);
     free(v->l2p);
     free(v->l2p_idx);
@@ -2266,6 +2272,7 @@ void vol_close(invfs_volume *v)
     free(v->jops);
     free(v->mjops);
     free(v->meta_mapper);
+    heat_locks_destroy(v);   /* WP-heat-table-concurrent-safe */
     free(v->tier);
     free(v->rawm);
     free(v->path2);

@@ -430,7 +430,30 @@ typedef struct invfs_volume {
      * (INVFS_HEAT_INIT, default 0). heat_any_rhot/whot are "some file sits
      * at/above the hot threshold" summaries -- they let the sweep skip the
      * promotion walk / write-hot scans on cold volumes. heat_tab is the
-     * session's per-inode accrued read counts (see the typedef note). */
+     * session's per-inode accrued read counts (see the typedef note).
+     *
+     * WP-heat-table-concurrent-safe: heat_mu guards heat_tab, heat_tab_mask,
+     * heat_tab_n, heat_any_rhot and heat_any_whot. These were written with no
+     * lock because the premise was "the volume layer is caller-serialized --
+     * FUSE holds g_io_lock around every vol_* call", and that premise is
+     * FALSE: invf_read releases g_io_lock (src/cli/fuse_fs.c:1407) and THEN
+     * calls vol_read_range (:1414), under a comment that says so, and the
+     * daemon runs fuse_loop_mt (:3353). Every heat_touch_read() on the read
+     * path (src/core/vol_read.c:179, :582, :683, :712, :730, :1807, :2056) is
+     * therefore N-at-once on one table, and heat_tab_touch() GROWS the table
+     * by free()-ing the old array (src/core/vol_heat.c:68).
+     *
+     * heat_mu is a STRICT LEAF: every region that holds it is straight-line
+     * code over these fields plus calloc/free/memset, and takes no other lock
+     * and calls nothing outside libc. So the only orders ever observed are
+     * g_io_lock -> heat.mu, g_delta_lock -> heat.mu, btree.mu -> heat.mu,
+     * plugin.mu -> heat.mu and arc.mu -> heat.mu -- never the reverse -- and it
+     * can never be the outer half of a cycle. heat_fold() deliberately drops
+     * it before the per-record xattr work, because vol_get_xattr /
+     * vol_set_xattr descend into the v3 tree and those locks sit above this
+     * one. Read the summary flags through heat_any_rhot()/heat_any_whot(),
+     * never directly. */
+    pthread_mutex_t heat_mu;
     uint16_t heat_init;
     int heat_any_rhot, heat_any_whot;
     uint64_t (*heat_tab)[2];       /* [0]=inode (0=empty), [1]=accrued reads */
@@ -1529,6 +1552,15 @@ uint64_t rec_pba_miss(const uint8_t *rec, uint32_t rec_len,
  * at vol_close / the sweep's decay pass (the read path never touches the
  * journal or the inode area). */
 void heat_touch_read(invfs_volume *v, uint64_t inode, uint64_t lba);
+
+/* WP-heat-table-concurrent-safe: the "some file is hot" summaries are part
+ * of the same guarded state as heat_tab (heat_touch_read sets heat_any_rhot
+ * from a lock-free reader), so they are read through these and never
+ * directly. vol_open/vol_close call heat_locks_init/heat_locks_destroy. */
+int  heat_any_rhot(const invfs_volume *v);
+int  heat_any_whot(const invfs_volume *v);
+void heat_locks_init(invfs_volume *v);
+void heat_locks_destroy(invfs_volume *v);
 
 /* stored heat of a record (0/0 when the TLV is absent) */
 int  heat_read_tlv(const uint8_t *rec, uint32_t rec_len,
