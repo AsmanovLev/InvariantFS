@@ -36,7 +36,7 @@
  * Why the assertions are byte comparisons and not `invf-verify --deep`
  * -------------------------------------------------------------------
  * `invf-verify --deep` checks readability and LENGTH only
- * (src/cli/verify.c:400-415), because `invfs_ast_block_entry`
+ * (src/cli/verify.c:357-364), because `invfs_ast_block_entry`
  * (src/core/invarifs.h:972-980) carries no content hash -- only a pba. A
  * lane that paired every member with another member of the same length
  * would print "N files ok, 0 corrupt". So every leg below compares actual

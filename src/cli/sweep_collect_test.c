@@ -53,7 +53,7 @@
  *      file is then read back and compared against the source bytes. This is
  *      the oracle the sweep's own invariant needs: invf-verify --deep is NOT
  *      one, because it checks readability and length only
- *      (src/cli/verify.c:400-415) and invfs_ast_block_entry carries a pba and
+ *      (src/cli/verify.c:357-364) and invfs_ast_block_entry carries a pba and
  *      no content hash (src/core/invarifs.h:970-980), so a wrong segment of
  *      the right length passes it. A memcmp against the source cannot.
  */

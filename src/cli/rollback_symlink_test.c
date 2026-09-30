@@ -31,7 +31,7 @@
  *   C  bit-exactness: every file read back through vol_read_inode and
  *      memcmp'd against the source bytes. invf-verify --deep is NOT the
  *      oracle here -- it checks readability and length only
- *      (src/cli/verify.c:400-415), because invfs_ast_block_entry carries a
+ *      (src/cli/verify.c:357-364), because invfs_ast_block_entry carries a
  *      pba and no content hash.
  *   D  the check is NARROWED, not removed: a REGULAR file whose pinned
  *      recipe really does not parse must still REFUSE (SPT0_RC_DAMAGED)

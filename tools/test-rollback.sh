@@ -681,7 +681,7 @@ for tag in s t; do
     say "[S/$tag] the post-capture write was undone"
     # ...and the pre-sweep corpus is bit-exact, byte for byte.
     # bin/invf-cat + cmp, NOT invf-verify --deep: that checks readability
-    # and length only (src/cli/verify.c:400-415), because
+    # and length only (src/cli/verify.c:357-364), because
     # invfs_ast_block_entry carries a pba and no content hash.
     for f in $(cd "$src" && ls -1); do
         [ -f "$src/$f" ] || continue          # the symlinks, handled below
