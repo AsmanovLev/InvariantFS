@@ -3281,6 +3281,36 @@ int vol_v3_xattr_del(invfs_volume *v, uint64_t inode_id, const char *name)
     return v3_xmut_commit(&m);
 }
 
+/* Test-only door (src/core/vol_fault.h): reach the arming state of THIS
+ * translation unit, which a test in another one cannot do by hand. See the
+ * comment on the declaration for why unsetenv+setenv is not enough. Defined
+ * here because this is the file that owns the xattr row-read site. */
+void invfs_vol_btree_fault_reload(void)
+{
+    invfs_vol_fault_reload();
+}
+
+/* Read one xattr's chunks and concatenate them.
+ *
+ * THE RETURN CONTRACT IS FOUR DISTINCT ANSWERS, and that is the whole point
+ * of this comment. This function used to return -1 for both "this inode has
+ * no such xattr" and "the row could not be read", and every caller read both
+ * as "no such xattr" -- which turned a quarantined base page into a file
+ * that appeared to carry no POSIX ACL, and the mount into one that had
+ * stopped enforcing it (see the FUSE side). The two are now separate values:
+ *
+ *   0          found. *vlen is the value's length (and, on entry, the size of
+ *              the caller's buffer; on a size query pass 0).
+ *   -ENODATA   the canonical key is not there. The ONLY place this can come
+ *              from is a clean miss at idx == 0.
+ *   -EIO       the row could not be read (an unreadable/quarantined base
+ *              page, a delta record that will not parse), the value is over
+ *              V3_XATTR_MAX_TOTAL, or the accumulator could not be grown.
+ *              Never a statement about whether the xattr exists.
+ *   -EINVAL    the arguments are not usable (NULL, or a name outside
+ *              1..INVFS_MAX_NAME). A caller bug, not a volume condition.
+ *   -ERANGE    the caller's buffer is smaller than the value.
+ */
 int vol_v3_xattr_get(invfs_volume *v, uint64_t inode_id, const char *name,
                      void *val, size_t *vlen)
 {
@@ -3291,12 +3321,12 @@ int vol_v3_xattr_get(invfs_volume *v, uint64_t inode_id, const char *name,
     uint16_t kn, idx;
 
     if (!v || !name || !vlen)
-        return -1;
+        return -EINVAL;
     nl = strlen(name);
     if (nl == 0 || nl > INVFS_MAX_NAME)
-        return -1;
+        return -EINVAL;
     if (v3_ready(v) != 0)
-        return -1;
+        return -EIO;
 
     /* WP-M12: walk the canonical + continuation keys through the overlay
      * (delta first, then base) so a value written since the last fold is
@@ -3312,22 +3342,32 @@ int vol_v3_xattr_get(invfs_volume *v, uint64_t inode_id, const char *name,
             kn = v3_xattr_key(kb, inode_id, name, nl);
         else
             kn = v3_xattr_chunk_key(kb, inode_id, name, nl, idx);
-        rc = v3_overlay_get_key(v, kb, kn, one, sizeof one, &got);
-        if (rc < 0) {
+        /* Test-only seam (src/core/vol_fault.h), armed by INVFS_FAULT. It
+         * stands in for the ROW READ failing, which in production is a
+         * quarantined or otherwise unreadable base page: bt_read makes
+         * btree_search return -1 (vol_btree.c:522) and v3_overlay_get_key
+         * passes that -1 through (:2893). The site injects the same -1, so
+         * nothing downstream -- including the code below that has to tell a
+         * read error from a missing key -- can tell it from the real thing. */
+        if (invfs_vol_fault("v3_xattr_row_read"))
+            rc = -1;
+        else
+            rc = v3_overlay_get_key(v, kb, kn, one, sizeof one, &got);
+        if (rc < 0) {                     /* the row could not be READ */
             free(acc);
-            return -1;
+            return -EIO;
         }
         if (rc == 0) {
-            if (idx == 0) {              /* ENODATA */
+            if (idx == 0) {               /* absent, and that is all it says */
                 free(acc);
-                return -1;
+                return -ENODATA;
             }
             break;                       /* end of the chunk chain */
         }
         add = got;
         if (total + add > V3_XATTR_MAX_TOTAL) {
             free(acc);
-            return -1;
+            return -EIO;
         }
         if (total + add > cap) {
             size_t ncap = cap ? cap * 2 : 1024;
@@ -3335,7 +3375,7 @@ int vol_v3_xattr_get(invfs_volume *v, uint64_t inode_id, const char *name,
             while (ncap < total + add)
                 ncap *= 2;
             na = (uint8_t *)realloc(acc, ncap);
-            if (!na) { free(acc); return -1; }
+            if (!na) { free(acc); return -EIO; }
             acc = na;
             cap = ncap;
         }
@@ -3353,7 +3393,14 @@ int vol_v3_xattr_get(invfs_volume *v, uint64_t inode_id, const char *name,
     }
     if (*vlen < total) {
         free(acc);
-        return -2;                       /* ERANGE */
+        /* -ERANGE, not the literal -2 this used to return. 2 is ENOENT, so
+         * the old value was a third thing wearing ERANGE's label: a caller
+         * that passed the engine's answer through (as invf_getxattr now
+         * does) would have told the application the file did not exist.
+         * The FUSE layer had been compensating by mapping every non-(-1)
+         * return to -ERANGE, which is exactly the flattening that hid the
+         * ENODATA/EIO ambiguity in the first place. */
+        return -ERANGE;
     }
     if (total)
         memcpy(val, acc, total);
@@ -4311,6 +4358,17 @@ int vol_v3_dirent_get(invfs_volume *v, uint64_t parent, const char *name,
     if (v3_ready(v) != 0)
         return -1;
     kn = v3_dirent_key(kb, parent, name, nlen);
+
+    /* Test-only seam (src/core/vol_fault.h), armed by INVFS_FAULT. Stands in
+     * for the DIRENT row read failing -- an unreadable or quarantined base
+     * page holding this name's entry -- and injects the same -1 the read
+     * failure below produces, so the name-resolution path cannot tell it
+     * from the real thing. It is the second trigger for the same fail-open
+     * the xattr row read is: when this returns -1, vol_v3_path_lookup
+     * returns -1, and a caller that only tests the name for existence goes
+     * on as though the name were not there. */
+    if (invfs_vol_fault("v3_dirent_row_read"))
+        return -1;
 
     /* WP-M11: delta first; a delete shadows the base dirent.
      * WP-inode-get-fold-race: one critical section for resolve + read. */

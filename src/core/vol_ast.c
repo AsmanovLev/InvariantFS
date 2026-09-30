@@ -348,6 +348,38 @@ uint64_t vol_find(invfs_volume *v, const char *name)
     return ino;
 }
 
+/* vol_find, keeping the two ways of not finding a name apart.
+ *   1 = found, *ino_out set. 0 = there is no such name. -1 = the lookup
+ * could not be completed (a dirent row on the path is unreadable, the name
+ * is unusable, or the walk hit a dangling entry).
+ *
+ * vol_find returns a uint64_t, so its "not found" and its "could not look"
+ * are both the single value 0 and a caller cannot tell them apart. That is
+ * harmless for most of the hundred-odd things that call it -- they just
+ * proceed as though the name is not there -- but it is NOT harmless for a
+ * permission check. perm_check_cred resolves the name, then reads the
+ * inode's POSIX ACL through it; when the resolution fails it never gets as
+ * far as the ACL, and the mount evaluates the plain mode triad instead,
+ * which is how one unreadable dirent row became a file whose ACLs the mount
+ * stopped enforcing. See src/cli/fuse_fs.c perm_check_cred.
+ *
+ * vol_find itself is unchanged: 102 call sites test it against 0 and
+ * widening its return would change every one of them.
+ */
+int vol_find_rc(invfs_volume *v, const char *name, uint64_t *ino_out)
+{
+    uint64_t ino = 0;
+    int rc;
+
+    if (!ino_out)
+        return -1;
+    rc = vol_v3_path_lookup(v, name, &ino);
+    if (rc != 1)
+        return rc;
+    *ino_out = ino;
+    return 1;
+}
+
 
 /* The live version of a name under the consistent cut (WP22d): the index
  * holds exactly the post-cut view, so this is the answer listing tools

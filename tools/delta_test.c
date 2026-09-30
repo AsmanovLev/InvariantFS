@@ -636,7 +636,12 @@ static void test_v3_metadata_delta(const char *dir)
     ok(vol_v3_inode_delta_delete(v, 42) == 0, "delta delete inode");
     ok(vol_v3_inode_get(v, 42, &in) == 0, "deleted inode hidden");
     vlen = sizeof vbuf;
-    ok(vol_v3_xattr_get(v, 42, "user.k", vbuf, &vlen) == -1,
+    /* -ENODATA, not the bare -1 this used to assert. The cascade removes
+     * the keys, so the honest answer is "this xattr is not there" -- and
+     * the bare -1 was the very value the row-read failure also returned,
+     * which is how an unreadable inode row could read as an inode carrying
+     * no ACLs. The assertion is now stronger, not weaker. */
+    ok(vol_v3_xattr_get(v, 42, "user.k", vbuf, &vlen) == -ENODATA,
        "inode delete cascaded the xattr keys");
 
     if (vol_v3_base_root(v, &b1) != 0) {

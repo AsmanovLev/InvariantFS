@@ -365,6 +365,10 @@ uint64_t vol_create_special(invfs_volume *v, const char *name,
 
 /* ---- xattr TLV helpers ---- */
 
+/* See volume.h for the return contract, which is the load-bearing part:
+ * 0 / -ENODATA / -EIO / -ERANGE / -EINVAL are five different answers, and
+ * -ENODATA in particular must never be handed back for a row that could not
+ * be read. */
 int vol_get_xattr(invfs_volume *v, uint64_t inode_id, const char *xn,
                   void *val, size_t *vlen)
 {
@@ -472,6 +476,24 @@ int vol_list_xattr(invfs_volume *v, uint64_t inode_id,
 
 /* ---- WP10 storage-class flag ("invfs.class" xattr, WP10 §2) ---- */
 
+/* 0 = the stamp was read, 1 = there is no usable class on this inode.
+ *
+ * The second answer is deliberately COARSE and it is a decision, not an
+ * accident: a malformed value has always read as unclassified, and it is now
+ * also what a row read that FAILS reads as. The storage class is a hint the
+ * sweep uses to pick a lane; "I could not read the hint" and "there is no
+ * hint" lead to the same safe place -- the generic floor -- and a class that
+ * cannot be read is not a permission, a length, or anything bit-exactness
+ * depends on. The class is NOT an authority the way a POSIX ACL is, so unlike
+ * perm_check_cred this caller does not need to fail closed.
+ *
+ * The 0/1 contract is load-bearing at six call sites that all test `== 0` or
+ * `!= 0` (vol_sweep.c:828, :983, :1112; vol_heat.c:663; vol_textzone.c:634;
+ * tools/meta_probe.c:91), so the coarse answer is spelled out here rather
+ * than widened into a third value underneath all of them. The ambiguity is
+ * therefore now STATED rather than accidental, which is the difference this
+ * change was after.
+ */
 int vol_get_class(invfs_volume *v, uint64_t inode_id,
                   uint8_t *cls, uint8_t *algo, uint16_t *gen)
 {
@@ -479,7 +501,7 @@ int vol_get_class(invfs_volume *v, uint64_t inode_id,
     size_t vlen = sizeof(tlv);
     if (vol_get_xattr(v, inode_id, INVFS_XATTR_CLASS, &tlv, &vlen) != 0 ||
         vlen != sizeof(tlv))
-        return 1;   /* absent (a malformed value reads as unclassified) */
+        return 1;   /* absent, malformed, or unreadable -> unclassified */
     if (cls)  *cls  = tlv.cls;
     if (algo) *algo = tlv.algo;
     if (gen)  *gen  = tlv.gen;

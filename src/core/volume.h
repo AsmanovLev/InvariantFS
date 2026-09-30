@@ -173,6 +173,13 @@ int vol_read_named(invfs_volume *v, const char *name,
 int vol_zip_parse_children(const uint8_t *z, size_t zlen,
                            invfs_ast_child_entry *ch, size_t maxch);
 uint64_t vol_find(invfs_volume *v, const char *name);
+/* vol_find with the two ways of not finding a name kept apart: 1 = found,
+ * 0 = no such name, -1 = the lookup could not be completed. A caller whose
+ * DECISION depends on the difference -- anything that goes on to read a
+ * permission off the inode it was about to open -- must use this and fail
+ * closed on -1. vol_find cannot express it: it returns a uint64_t whose
+ * "not found" and "could not look" are both 0. */
+int vol_find_rc(invfs_volume *v, const char *name, uint64_t *ino_out);
 /* The live version of a name under the consistent cut (WP22d): the inode
  * id, or 0 when absent; fills the live record's size/ctime. Raw area
  * walkers (invf-ls) must defer to this -- they see torn versions the
@@ -767,7 +774,24 @@ void vol_hot_counters(invfs_volume *v, uint64_t *files, uint64_t *dirs,
                       uint64_t *tombstones, uint64_t *logical_bytes);
 
 /* xattrs stored inside the same INO2 ext (TLVs). val semantics like
- * getxattr(2): size query via *vlen==0. list returns NUL-separated names. */
+ * getxattr(2): size query via *vlen==0. list returns NUL-separated names.
+ *
+ * vol_get_xattr returns FOUR distinguishable answers, and a caller that
+ * treats any of them as "this inode has no such xattr" is wrong in a way
+ * that matters: the first two used to be the same value, which is how an
+ * unreadable inode row came to mean a file with no POSIX ACL on it.
+ *
+ *   0          found; *vlen set.
+ *   -ENODATA   the xattr is genuinely not there.
+ *   -EIO       the row could not be read, or the value could not be
+ *              assembled. Says nothing about whether the xattr exists.
+ *   -ERANGE    the caller's buffer is smaller than the value.
+ *   -EINVAL    unusable arguments (NULL, or a name outside 1..INVFS_MAX_NAME).
+ *
+ * A caller whose decision DEPENDS on the difference -- a permission
+ * evaluator, a checksum, a class of behaviour -- must check -EIO separately
+ * and fail closed. See src/cli/fuse_fs.c perm_check_cred.
+ */
 int vol_get_xattr(invfs_volume *v, uint64_t inode_id, const char *xn,
                   void *val, size_t *vlen);
 int vol_set_xattr(invfs_volume *v, uint64_t inode_id, const char *xn,

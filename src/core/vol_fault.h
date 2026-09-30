@@ -65,6 +65,22 @@ static inline void invfs_vol_fault_reload(void)
     invfs_fault_seen = (const char *)(intptr_t)-1;  /* never a getenv value */
 }
 
+/* The reload above reaches only the copy in the CALLING translation unit, and
+ * the state is per-TU static on purpose (two sites must not share a
+ * countdown). So a test that arms a site in one core file from its own
+ * translation unit cannot reload it by hand, and the obvious workaround --
+ * unsetenv() then setenv() the same value -- does NOT work: unsetenv frees
+ * the old string and setenv very often gets the same address back, so the
+ * pointer compare sees no change and the countdown stays spent. The leg then
+ * runs against the real, healthy path and goes green proving nothing.
+ *
+ * This is the door for that case: a definition living in the translation
+ * unit that OWNS the site, reachable from a test in another one. It is
+ * defined once, in src/core/vol_btree.c, beside the xattr row-read site, and
+ * reaches nothing but that one TU's arming state. Like every other door
+ * here it is inert in production: nothing calls it unless a test does. */
+void invfs_vol_btree_fault_reload(void);
+
 static inline int invfs_vol_fault(const char *site)
 {
     const char *spec = getenv("INVFS_FAULT");

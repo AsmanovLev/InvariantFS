@@ -693,7 +693,27 @@ static void root_meta(invfs_meta_pub *m)
 }
 
 /* mode+ACL check for one existing path; want = R_OK|W_OK|X_OK bits
- * (0 = existence only). 0 ok, -EACCES denied, -ENOENT missing. */
+ * (0 = existence only). 0 ok, -EACCES denied, -ENOENT missing, -EIO when
+ * the access ACL could not be READ.
+ *
+ * WHY -EIO AND NOT A VERDICT. The mount does not negotiate
+ * default_permissions (AGENTS.md 2.9), so this function is the only
+ * object-level permission authority there is -- there is no second opinion
+ * from the kernel to fall back on. That makes "I could not read the ACL" a
+ * decision the mount has to make deliberately rather than by accident.
+ *
+ * It used to make it by accident. vol_get_xattr returned -1 both for "this
+ * inode has no access ACL" and for "the ACL row could not be read" (a
+ * quarantined base page, or any other read failure), and `== 0` collapsed
+ * both into aclp = NULL -- which acl_eval answers with the plain mode triad.
+ * One unreadable inode row therefore removed that file's POSIX ACLs from
+ * the mount entirely and the mount began ALLOWING what they had denied.
+ * vol_get_xattr now separates -ENODATA from -EIO (see volume.h), and the
+ * -EIO is propagated: the caller gets a refusal, not a permit. Refusing is
+ * the right way to be wrong here. Guessing "probably no ACL" turns a
+ * damaged volume into a permissive one, which is the one direction a
+ * permission bug must never go.
+ */
 static int perm_check_cred(const struct acreds *c, const char *path,
                            unsigned want)
 {
@@ -713,15 +733,40 @@ static int perm_check_cred(const struct acreds *c, const char *path,
         uint8_t acl[INVFS_META_XATTR_MAX];
         size_t alen = 0;
         const uint8_t *aclp = NULL;
+        int arc = 0;
         if (!is_root) {
-            uint64_t ino;
+            uint64_t ino = 0;
             size_t vlen = sizeof acl;
+            int frc;
             pthread_mutex_lock(&g_io_lock);
-            ino = g_vol ? vol_find(g_vol, ename) : 0;
-            if (ino && vol_get_xattr(g_vol, ino, XATTR_ACL_ACCESS,
-                                     acl, &vlen) == 0) {
-                alen = vlen;
-                aclp = acl;
+            frc = g_vol ? vol_find_rc(g_vol, ename, &ino) : -1;
+            if (frc == 1) {
+                arc = vol_get_xattr(g_vol, ino, XATTR_ACL_ACCESS, acl, &vlen);
+                if (arc == 0) {
+                    alen = vlen;
+                    aclp = acl;
+                } else if (arc == -EIO) {
+                    /* the ACL row could not be read: we do not know what it
+                     * says, so we must not answer as though it said
+                     * "nothing". -EIO is a refusal the application sees. */
+                    pthread_mutex_unlock(&g_io_lock);
+                    return -EIO;
+                }
+                /* -ENODATA: the inode genuinely has no access ACL, and the
+                 * mode triad is the whole truth. -ERANGE cannot happen
+                 * (INVFS_META_XATTR_MAX is the TLV budget) and -EINVAL is a
+                 * caller bug; both fall through to the mode triad exactly
+                 * as they did before, so a name-length problem cannot turn
+                 * into a spurious EIO storm on every open. */
+            } else if (frc < 0) {
+                /* Resolving the name failed, so the ACL is never even read.
+                 * This is the same fail-open one call upstream of the xattr
+                 * read above, and it is why vol_find is not used here: its
+                 * return is a uint64_t whose "not found" and "could not look"
+                 * are both 0, and a 0 would have dropped us into the mode
+                 * triad below exactly as an absent ACL would. */
+                pthread_mutex_unlock(&g_io_lock);
+                return -EIO;
             }
             pthread_mutex_unlock(&g_io_lock);
         }
@@ -824,17 +869,28 @@ static int perm_check_sticky(const struct acreds *c, const char *path)
     return -EPERM;
 }
 
-/* fetch the default ACL of path's parent directory. 1 = present (valid
- * blob in buf, *len bytes), 0 = none. The root has no default ACL.
- * Call without g_io_lock held. */
+/* fetch the default ACL of path's parent directory.
+ *   1   = present (valid blob in buf, *len bytes)
+ *   0   = there is none, and that is a fact about the volume
+ *  -EIO = it could not be READ
+ * The root has no default ACL. Call without g_io_lock held.
+ *
+ * The third answer is new and the two callers that matter used to get 0 for
+ * it. A directory's default ACL is what restricts the files created inside
+ * it: reading it as "absent" when the row could not be read creates the new
+ * file with no inherited restriction at all, which is the create-time twin
+ * of the perm_check_cred fail-open -- the object lands on disk already
+ * carrying less restriction than the directory says it should. So the
+ * callers below refuse the create instead.
+ */
 static int parent_default_acl(const char *path, uint8_t *buf, size_t *len)
 {
     char anchor[300];
     const char *p = path[0] == '/' ? path + 1 : path;
     const char *s = strrchr(p, '/');
-    uint64_t ino;
+    uint64_t ino = 0;
     size_t vlen;
-    int rc;
+    int rc, frc;
 
     if (!s) return 0;                    /* parent is "/" */
     {
@@ -846,9 +902,24 @@ static int parent_default_acl(const char *path, uint8_t *buf, size_t *len)
     }
     vlen = INVFS_META_XATTR_MAX;         /* bounded by the TLV budget */
     pthread_mutex_lock(&g_io_lock);
-    ino = g_vol ? vol_find(g_vol, anchor) : 0;
-    rc = ino ? vol_get_xattr(g_vol, ino, XATTR_ACL_DEFAULT, buf, &vlen) : -1;
+    frc = g_vol ? vol_find_rc(g_vol, anchor, &ino) : -1;
+    if (frc < 0) {
+        /* the anchor record could not be resolved, so the default ACL was
+         * never read. Same reasoning as the -EIO below: an unreadable
+         * restriction is not an absent one, and treating it as absent
+         * creates the new file with less restriction than the directory
+         * declares. */
+        pthread_mutex_unlock(&g_io_lock);
+        return -EIO;
+    }
+    if (frc == 0) {
+        pthread_mutex_unlock(&g_io_lock);
+        return 0;                        /* no anchor record: no default ACL */
+    }
+    rc = vol_get_xattr(g_vol, ino, XATTR_ACL_DEFAULT, buf, &vlen);
     pthread_mutex_unlock(&g_io_lock);
+    if (rc == -EIO)
+        return -EIO;                     /* unreadable: NOT the same as none */
     if (rc != 0 || !acl_blob_valid(buf, vlen))
         return 0;                        /* absent (or corrupt: treat as none) */
     *len = vlen;
@@ -1104,7 +1175,9 @@ static int invf_mkdir(const char *path, mode_t mode)
     if (rc) return rc;
     rc = perm_check_parent(path, W_OK | X_OK);
     if (rc) return rc;
-    if (parent_default_acl(path, dacl, &dlen)) {
+    rc = parent_default_acl(path, dacl, &dlen);
+    if (rc < 0) return rc;               /* the default ACL is unreadable */
+    if (rc) {
         unsigned mm = cmode;
         memcpy(aacl, dacl, dlen);
         if (acl_create_masq(aacl, dlen, &mm) > 0)
@@ -1448,7 +1521,9 @@ static int invf_create(const char *path, mode_t mode, struct fuse_file_info *fi)
      * masked by the create mode (posix_acl_create_masq) */
     {
         size_t dlen = 0;
-        if (parent_default_acl(path, aacl, &dlen)) {
+        int drc = parent_default_acl(path, aacl, &dlen);
+        if (drc < 0) return drc;         /* unreadable: do not create */
+        if (drc) {
             unsigned mm = cmode;
             if (acl_create_masq(aacl, dlen, &mm) > 0)
                 aalen = dlen;
@@ -2403,14 +2478,37 @@ static int invf_chmod(const char *path, mode_t mode, struct fuse_file_info *fi)
     /* POSIX.1e: fold the new mode into a stored access ACL -- USER_OBJ
      * and OTHER are set from the mode, the group class (MASK if present,
      * else GROUP_OBJ) gets the mode's group bits; a now-trivial ACL is
-     * dropped. No ACL -> nothing to do. */
+     * dropped. No ACL -> nothing to do.
+     *
+     * A row read that FAILS is not "no ACL to fold into". Skipping the
+     * fold leaves the previous ACL standing while the mode below changes,
+     * so the file's effective permissions stop matching what the owner just
+     * asked for -- in the permissive direction whenever the chmod was
+     * removing access, which the named-user and named-group entries are
+     * exactly the ones that decide. The chmod is refused instead: the
+     * caller is told the ACL could not be updated, and nothing is left half
+     * applied. */
     pthread_mutex_lock(&g_io_lock);
     if (g_vol) {
-        uint64_t ino = vol_find(g_vol, ename);
-        if (ino) {
+        uint64_t ino = 0;
+        /* vol_find_rc, not vol_find: a name that could not be resolved has to
+         * be refused, not treated as an inode with no ACL to fold into --
+         * otherwise the mode below is changed while the old ACL keeps
+         * granting what the owner just took away. */
+        int frc = vol_find_rc(g_vol, ename, &ino);
+        if (frc < 0) {
+            pthread_mutex_unlock(&g_io_lock);
+            return -EIO;
+        }
+        if (frc == 1) {
             uint8_t acl[INVFS_META_XATTR_MAX];
             size_t alen = sizeof acl;
-            if (vol_get_xattr(g_vol, ino, XATTR_ACL_ACCESS, acl, &alen) == 0) {
+            int arc = vol_get_xattr(g_vol, ino, XATTR_ACL_ACCESS, acl, &alen);
+            if (arc == -EIO) {
+                pthread_mutex_unlock(&g_io_lock);
+                return -EIO;
+            }
+            if (arc == 0) {
                 if (acl_chmod_masq(acl, alen, (unsigned)(mode & 0777)) > 0)
                     vol_set_xattr(g_vol, ino, XATTR_ACL_ACCESS, acl, alen);
                 else
@@ -2590,7 +2688,9 @@ static int invf_mknod(const char *path, mode_t mode, dev_t rdev)
     if (rc) return rc;
     /* same default-ACL inheritance as .create (no default ACL onward:
      * only dirs carry one) */
-    if (parent_default_acl(path, aacl, &dlen)) {
+    rc = parent_default_acl(path, aacl, &dlen);
+    if (rc < 0) return rc;               /* unreadable: do not create */
+    if (rc) {
         unsigned mm = cmode;
         if (acl_create_masq(aacl, dlen, &mm) > 0)
             aalen = dlen;
@@ -2722,7 +2822,17 @@ static int invf_getxattr(const char *path, const char *name, char *value,
         rc = vol_get_xattr(g_vol, ino, name, value, &vlen);
         pthread_mutex_unlock(&g_io_lock);
         if (rc == 0) return (int)vlen;
-        return rc == -1 ? -ENODATA : -ERANGE;
+        /* Pass the engine's answer through. This used to be
+         * `rc == -1 ? -ENODATA : -ERANGE`, which turned a row that could not
+         * be read into "this attribute does not exist" -- a confidently
+         * wrong answer to a question the application asked. -ENODATA now
+         * means the attribute is genuinely not there and -EIO means the
+         * store could not be read, which is what the caller has to act on
+         * differently (retry, repair, or stop trusting the answer).
+         * -EINVAL cannot reach here (name comes from the kernel and
+         * vol_get_xattr already rejected it), and is passed through
+         * unchanged rather than being flattened into ENODATA. */
+        return rc;
     }
 }
 

@@ -618,9 +618,9 @@ be recovered bit-for-bit, regardless of what codec was applied.
   to "opaque"** — they are stored verbatim as the standard
   `system.posix_acl_access` / `system.posix_acl_default` blob *and
   evaluated daemon-side on every entry point* (`perm_check_cred` /
-  `perm_check_traversal_cred`; the contract is written out at
-  `src/cli/fuse_fs.c:578-615`, the two functions are at
-  `src/cli/fuse_fs.c:809` and `:854`), because the
+  `perm_check_traversal_cred`; the evaluation contract is written out at
+  `src/cli/fuse_fs.c:621-626`, the two functions are at
+  `src/cli/fuse_fs.c:717` and `:787`), because the
   mount deliberately does not negotiate `default_permissions` and so is
   the sole object-level permission authority. ACLs are not decorative.
 - It does not mean "files are stored in their original form". They're

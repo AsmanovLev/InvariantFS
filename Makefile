@@ -131,7 +131,7 @@ CLI_MAINS := mkfs verify fsck cp cat ls stat arctest blkio_test resize \
              rollback_symlink_test \
              sibling_retire_v3_test tar_cap_test fold_delta_read_test \
              reclaim_reader_epoch_test readdir_error_test dedupe_symlink_test dirs_free_before_publish_test \
-             stat_v3_counts_test
+             stat_v3_counts_test acl_eio_test
 $(foreach t,$(CLI_MAINS),$(eval $(call TOOL_RULE,$(t),)))
 
 # reclaim_reader_epoch_test was, for one commit, a red control that built but
@@ -739,6 +739,17 @@ test: $(TEST_BINS) $(OUT)/invf-arctest $(OUT)/invf-blkio_test $(OUT)/invf-codec_
 	@# expectation pinned to a literal would only encode today's count. Needs
 	@# invf-mkfs, invf-ls and invf-stat on disk (the `all` prerequisite).
 	$(TESTENV) $(TESTISO) $(OUT)/invf-stat_v3_counts_test /tmp
+	@# WP xattr-enodata-vs-eio: vol_get_xattr returned -1 for BOTH "no such
+	@# xattr" and "the row could not be read", and perm_check_cred used that
+	@# to decide "this inode has no ACL" -- so a read error on the inode row
+	@# degraded ACL enforcement to the plain mode triad and the mount started
+	@# ALLOWING what the ACL denied. Runs under $(TESTISO) because it never
+	@# asks the kernel for a permission: it builds struct acreds by hand and
+	@# calls the evaluator directly, so there is no real uid denial in it for
+	@# the one-entry fake-root uid map to swallow. The row-read failure is
+	@# INVFS_FAULT, unset here, so this leg also asserts the unset path stays
+	@# inert.
+	$(TESTENV) $(TESTISO) $(OUT)/invf-acl_eio_test /tmp
 	@# WP-arc-concurrent-safe: the content cache, under concurrency. TSAN is
 	@# the structure (arc.c had no lock at all), ASan is the borrow (an
 	@# arc_get pointer freed underneath the reader's memcpy). Both must be
