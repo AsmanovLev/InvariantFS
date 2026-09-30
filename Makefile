@@ -119,7 +119,7 @@ endef
 CLI_MAINS := mkfs verify fsck cp cat ls stat arctest blkio_test resize \
              metabuf_test btree_test btree_repair_test v3inode overlay_test fold_test concurrency_test \
              sweep_v3_test symlink_v3_test large_file_v3_test dedupe_v3_test deflate_repro_test window_test \
-             read_parallel_bitexact_test \
+             read_parallel_bitexact_test arc_concurrency_test \
              nlink_v3_test recipe_fsck_test cpack_guard_test orphan_test rt30_slot_test anchor_test \
              fsck_rootslot_test batch_owner_test plugin_host_test plugin_mt_test rs_stability_test \
              fsck_liveness_test scratch_policy_test
@@ -335,6 +335,43 @@ GZHDR_SAN_CFLAGS := -std=gnu11 -O1 -g -fsanitize=address,undefined \
 # lifecycle, not here: LeakSanitizer is not what this gate is for, and
 # silencing it here is not a claim that the leak does not exist.
 GZHDR_TEST_ASAN := hard_rss_limit_mb=4096:detect_leaks=0
+# WP-arc-concurrent-safe: the RED CONTROL for the ARC concurrency defect, and
+# the one gate in this file that a broken arc.c cannot pass by luck.
+#
+# It is standalone on purpose: src/core/arc.c has no dependency outside libc,
+# so these link arc.c ALONE. No volume, no image, no codecpack -- which is
+# what makes a sanitizer build of it cost about a second instead of
+# rebuilding the engine twice.
+#
+#   arc-conc-tsan  -> arc.c's hash chains, lists and byte accounting are
+#                     plain racy writes. TSAN does not need two accesses to
+#                     overlap in TIME, only to be unordered, and with no lock
+#                     at all in the file unorderedness is guaranteed: this
+#                     reports on the first run, every run.
+#   arc-conc-asan  -> the borrow. arc_get handed out a pointer "valid until
+#                     the next arc_put"; the read path memcpy'd out of it; a
+#                     concurrent arc_replace does free(victim->data). The
+#                     test PLANS that free with a barrier instead of racing
+#                     for it, and checks the bytes -- a use-after-free that
+#                     returned success is a bit-exactness failure, not a
+#                     crash, so the byte check is the point.
+#
+# The source declares arc_get_copy WEAK, so the same binary compiles and runs
+# against a tree that predates the fix (the symbol resolves to NULL and the
+# test falls back to the pre-fix borrow). That is what lets one command be
+# both the red control and the green gate.
+# -fsanitize and `ulimit -v` cannot be combined (ASan reserves ~16 TB of
+# shadow), so bound these with ASAN_OPTIONS=hard_rss_limit_mb.
+ARC_SAN_CFLAGS := -std=gnu11 -O1 -g -fno-omit-frame-pointer -I$(SRC)/core
+ARC_SAN_TSAN    := -fsanitize=thread
+ARC_SAN_ASAN    := -fsanitize=address
+
+$(OUT)/invf-arc-conc-tsan: src/cli/arc_san_test.c src/core/arc.c src/core/arc.h | $(OUT)
+	$(CC) $(ARC_SAN_CFLAGS) $(ARC_SAN_TSAN) -o $@ $< src/core/arc.c -lpthread
+
+$(OUT)/invf-arc-conc-asan: src/cli/arc_san_test.c src/core/arc.c src/core/arc.h | $(OUT)
+	$(CC) $(ARC_SAN_CFLAGS) $(ARC_SAN_ASAN) -o $@ $< src/core/arc.c -lpthread
+
 $(OUT)/invf-gz_header_test: src/cli/gz_header_test.c $(CORE_O)
 	$(CC) $(GZHDR_SAN_CFLAGS) -o $@ $< $(CORE_O) \
 	      -fsanitize=address,undefined $(LDLIBS)
@@ -456,6 +493,7 @@ test: $(OUT)/invf-arctest $(OUT)/invf-blkio_test $(OUT)/invf-codec_test \
       $(OUT)/invf-btree_repair_test \
       $(OUT)/invf-symlink_v3_test $(OUT)/invf-large_file_v3_test $(OUT)/invf-dedupe_v3_test \
       $(OUT)/invf-read_parallel_bitexact_test \
+      $(OUT)/invf-arc-conc-tsan $(OUT)/invf-arc-conc-asan \
       $(OUT)/invf-deflate_repro_test $(OUT)/invf-plugin_host_test $(OUT)/invf-plugin_mt_test \
       $(OUT)/invf-window_test $(OUT)/invf-nlink_v3_test \
       $(OUT)/invf-recipe_fsck_test $(OUT)/invf-fsck_liveness_test \
@@ -512,6 +550,13 @@ test: $(OUT)/invf-arctest $(OUT)/invf-blkio_test $(OUT)/invf-codec_test \
 	$(TESTENV) $(TESTISO) $(OUT)/invf-symlink_v3_test /tmp
 	$(TESTENV) $(TESTISO) $(OUT)/invf-large_file_v3_test /tmp
 	$(TESTENV) $(TESTISO) $(OUT)/invf-read_parallel_bitexact_test /tmp
+	@# WP-arc-concurrent-safe: the content cache, under concurrency. TSAN is
+	@# the structure (arc.c had no lock at all), ASan is the borrow (an
+	@# arc_get pointer freed underneath the reader's memcpy). Both must be
+	@# silent: either one reporting is this gate going red.
+	$(TESTENV) $(TESTISO) $(OUT)/invf-arc-conc-tsan
+	ASAN_OPTIONS=$(GZHDR_TEST_ASAN) $(TESTENV) $(TESTISO) $(OUT)/invf-arc-conc-asan
+	$(TESTENV) $(TESTISO) $(OUT)/invf-arc_concurrency_test /tmp
 	$(TESTENV) $(TESTISO) $(OUT)/invf-dedupe_v3_test /tmp
 	$(TESTENV) $(TESTISO) $(OUT)/invf-window_test /tmp
 	$(TESTENV) $(TESTISO) $(OUT)/invf-nlink_v3_test /tmp

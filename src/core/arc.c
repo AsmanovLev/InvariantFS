@@ -26,6 +26,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <pthread.h>
 #include "arc.h"
 
 /* which list a node is in */
@@ -48,6 +49,21 @@ typedef struct {
 } arc_list;
 
 struct invfs_arc {
+    /* WP-arc-concurrent-safe. Everything below is mutable and none of it was
+     * atomic, so this mutex is what makes the cache usable from the lock-free
+     * read path (fuse_fs.c calls vol_read_range with g_io_lock released, and
+     * the daemon is fuse_loop_mt). It is a strict LEAF: no arc_* function takes
+     * any other lock and none calls out of this file, so the only order a
+     * caller can build is g_io_lock -> mu. It cannot invert against the four
+     * subsystems that already lock (vol_delta.c, vol_plugin_client.c,
+     * vol_btree.c, volume.c): those are taken inside vol_* calls, which sit
+     * ABOVE this one. And g_io_lock is static to fuse_fs.c, so no core file
+     * can take it at all.
+     *
+     * The lock makes each entry atomic. It does NOT make a pointer handed out
+     * by arc_get survive the next call -- hence arc_get_copy, which copies
+     * under the lock. See arc.h. */
+    pthread_mutex_t mu;
     arc_list t1, t2, b1, b2;
     size_t   c;               /* budget, bytes */
     size_t   p;               /* adaptive target for T1, bytes */
@@ -172,9 +188,10 @@ invfs_arc *arc_create(size_t budget_bytes)
     if (budget_bytes == 0) return NULL;
     a = (invfs_arc *)calloc(1, sizeof *a);
     if (!a) return NULL;
+    if (pthread_mutex_init(&a->mu, NULL) != 0) { free(a); return NULL; }
     a->nbuckets = 256;
     a->buckets = (arc_node **)calloc(a->nbuckets, sizeof *a->buckets);
-    if (!a->buckets) { free(a); return NULL; }
+    if (!a->buckets) { pthread_mutex_destroy(&a->mu); free(a); return NULL; }
     a->c = budget_bytes;
     a->p = budget_bytes / 2;   /* start even; the ghosts will move it */
     a->st.budget = budget_bytes;
@@ -185,32 +202,79 @@ void arc_destroy(invfs_arc *a)
 {
     size_t i;
     if (!a) return;
+    /* Teardown, not a mutation. The volume calls this from vol_close, after
+       every reader has gone; nothing reads a half-destroyed cache. */
     for (i = 0; i < a->nbuckets; i++) {
         arc_node *n = a->buckets[i];
         while (n) { arc_node *next = n->hnext; free(n->data); free(n); n = next; }
     }
     free(a->buckets);
+    pthread_mutex_destroy(&a->mu);
     free(a);
 }
 
 int arc_get(invfs_arc *a, uint64_t key, const uint8_t **data, size_t *len)
 {
     arc_node *n;
+    int hit;
     if (!a) return 0;
+    pthread_mutex_lock(&a->mu);
     n = ht_find(a, key);
     if (!n || !n->data) {          /* absent, or a ghost -- both are misses */
         a->st.misses++;
         if (n) a->st.ghost_hits++;  /* ...but a ghost hit is worth counting:
                                        it is exactly the miss ARC learns from */
-        return 0;
+        hit = 0;
+    } else {
+        /* Case I: a real hit. Seen twice or more now, so it belongs in T2
+           regardless of which list it was in. */
+        move_to(a, n, L_T2);
+        a->st.hits++;
+        *data = n->data;
+        *len = n->len;
+        hit = 1;
     }
-    /* Case I: a real hit. Seen twice or more now, so it belongs in T2
-       regardless of which list it was in. */
-    move_to(a, n, L_T2);
-    a->st.hits++;
-    *data = n->data;
-    *len = n->len;
-    return 1;
+    pthread_mutex_unlock(&a->mu);
+    return hit;
+}
+
+/* arc_get_copy: the form every caller that can run concurrently must use.
+   Identical to arc_get up to the hit, and then it COPIES instead of handing
+   the pointer out -- while still holding the lock, so no other thread's
+   arc_replace can free the buffer between the find and the memcpy. That
+   window was the bug: arc.h used to promise a borrowed pointer "valid until
+   the next arc_put", and the read path acted on it (vol_read.c:1966).
+   It is not an extra copy: every read-path caller was already memcpy'ing out
+   of a borrowed pointer immediately afterwards. */
+int arc_get_copy(invfs_arc *a, uint64_t key, size_t off, size_t want,
+                 uint8_t *dst, size_t *got)
+{
+    arc_node *n;
+    int hit;
+
+    if (got) *got = 0;
+    if (!a) return 0;
+    pthread_mutex_lock(&a->mu);
+    n = ht_find(a, key);
+    if (!n || !n->data) {          /* absent, or a ghost -- both are misses */
+        a->st.misses++;
+        if (n) a->st.ghost_hits++;
+        hit = 0;
+    } else {
+        move_to(a, n, L_T2);
+        a->st.hits++;
+        /* a hit with nothing left to copy is still a hit: the caller
+           distinguishes "miss" (0) from "short" (*got < want) itself */
+        if (off < n->len) {
+            size_t avail = n->len - off;
+            if (avail > want) avail = want;
+            if (dst && avail) memcpy(dst, n->data + off, avail);
+            if (got) *got = avail;
+        }
+        hit = 1;
+    }
+    pthread_mutex_unlock(&a->mu);
+    return hit;
 }
 
 /* Free room for `need` bytes by demoting LRU entries to their ghost lists.
@@ -260,12 +324,15 @@ void arc_put(invfs_arc *a, uint64_t key, uint8_t *data, size_t len)
 
     if (!a) { free(data); return; }
 
+    pthread_mutex_lock(&a->mu);
+
     /* An entry over half the budget would evict nearly everything to get in
        and then be evicted itself by the next insert -- pure thrash, and the
        reconstruction it displaces is as expensive as its own. Refuse it and
        say so; raising INVFS_ARC_BYTES is the answer, not evicting the world. */
     if (len * 2 > a->c) {
         a->st.refused++;
+        pthread_mutex_unlock(&a->mu);
         free(data);
         return;
     }
@@ -287,6 +354,7 @@ void arc_put(invfs_arc *a, uint64_t key, uint8_t *data, size_t len)
         n->data = data;
         move_to(a, n, L_T2);        /* a repeat sighting belongs in T2 */
         arc_trim_ghosts(a);
+        pthread_mutex_unlock(&a->mu);
         return;
     }
 
@@ -314,6 +382,7 @@ void arc_put(invfs_arc *a, uint64_t key, uint8_t *data, size_t len)
         move_to(a, n, L_T2);        /* a second sighting: straight to T2 */
         a->st.inserts++;
         arc_trim_ghosts(a);
+        pthread_mutex_unlock(&a->mu);
         return;
     }
 
@@ -321,7 +390,7 @@ void arc_put(invfs_arc *a, uint64_t key, uint8_t *data, size_t len)
     arc_replace(a, len, 0);
     if (a->nnodes + 1 > a->nbuckets - (a->nbuckets >> 2)) ht_grow(a);
     n = (arc_node *)calloc(1, sizeof *n);
-    if (!n) { free(data); return; }
+    if (!n) { pthread_mutex_unlock(&a->mu); free(data); return; }
     n->key = key;
     n->len = len;
     n->data = data;
@@ -330,24 +399,28 @@ void arc_put(invfs_arc *a, uint64_t key, uint8_t *data, size_t len)
     move_to(a, n, L_T1);            /* first sighting: T1 */
     a->st.inserts++;
     arc_trim_ghosts(a);
+    pthread_mutex_unlock(&a->mu);
 }
 
 void arc_invalidate(invfs_arc *a, uint64_t key)
 {
     arc_node *n;
     if (!a) return;
+    pthread_mutex_lock(&a->mu);
     n = ht_find(a, key);
-    if (!n) return;
+    if (!n) { pthread_mutex_unlock(&a->mu); return; }
     /* Drop the ghost too. Keeping it would make the next insert of this id --
        which cannot happen, ids are not reused -- look like a ghost hit. */
     node_free(a, n);
     a->st.invalidated++;
+    pthread_mutex_unlock(&a->mu);
 }
 
 void arc_clear(invfs_arc *a)
 {
     size_t i;
     if (!a) return;
+    pthread_mutex_lock(&a->mu);
     for (i = 0; i < a->nbuckets; i++) {
         arc_node *n = a->buckets[i];
         while (n) { arc_node *next = n->hnext; free(n->data); free(n); n = next; }
@@ -359,12 +432,17 @@ void arc_clear(invfs_arc *a)
     memset(&a->b1, 0, sizeof a->b1);
     memset(&a->b2, 0, sizeof a->b2);
     a->p = a->c / 2;
+    pthread_mutex_unlock(&a->mu);
 }
 
-void arc_stats(const invfs_arc *a, invfs_arc_stats *out)
+void arc_stats(invfs_arc *a, invfs_arc_stats *out)
 {
     if (!out) return;
     if (!a) { memset(out, 0, sizeof *out); return; }
+    /* Read under the lock like everything else: the stats xattr is served
+       while read threads are inside arc_put, and a torn invfs_arc_stats is a
+       report of nonsense rather than of the cache. */
+    pthread_mutex_lock(&a->mu);
     *out = a->st;
     out->bytes    = a->t1.bytes + a->t2.bytes;
     out->t1_bytes = a->t1.bytes;
@@ -372,4 +450,5 @@ void arc_stats(const invfs_arc *a, invfs_arc_stats *out)
     out->entries  = a->t1.count + a->t2.count;
     out->ghosts   = a->b1.count + a->b2.count;
     out->p        = a->p;
+    pthread_mutex_unlock(&a->mu);
 }

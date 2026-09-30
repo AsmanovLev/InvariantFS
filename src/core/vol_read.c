@@ -145,16 +145,28 @@ int seg_read_checked(invfs_volume *v, uint64_t pba, uint64_t plen,
  * read of such a slice first decodes the slice [block_offset, +length) as
  * a whole, inverts it, and only then serves the requested sub-window. The
  * cached batch stays in encoded form (the cache is shared with the other
- * members and must never be mutated). */
+ * members and must never be mutated).
+ *
+ * WP-arc-concurrent-safe: the cached batch is read through a heap WINDOW, not
+ * through a borrowed pointer. This function runs under invf_read with
+ * g_io_lock released (fuse_fs.c:1407, :1414) and the daemon is fuse_loop_mt,
+ * so another thread can be inside arc_replace -- free(victim->data) -- while
+ * this one is still working off the cached batch. arc_get_copy copies under
+ * the cache lock, so the window below is already private by the time
+ * anything touches it; that is also what keeps the "cached batch stays in
+ * encoded form" rule above true, because the BCJ inverse runs on the copy
+ * and never on the shared batch. */
 static int vol_read_text_slice(invfs_volume *v, uint64_t inode_id,
                                const invfs_ast_block_entry *e,
                                uint64_t slice_off, uint8_t *dst, size_t want)
 {
     uint64_t pba = e->pba;
-    const uint8_t *batch = NULL;
+    uint8_t *win = NULL;        /* this slice's window, private to us */
+    size_t   win_off;           /* where `win` starts inside the batch */
+    size_t   need;              /* bytes of the batch the slice needs */
     uint8_t *fresh = NULL;
-    size_t batch_len = 0;
-    int rc = -1;
+    int      bcj = (e->algo == INVFS_ALGO_ZSTD_BCJ);
+    int      cached;
 
     if (want == 0) return 0;
     if (slice_off + want > e->length)
@@ -165,7 +177,27 @@ static int vol_read_text_slice(invfs_volume *v, uint64_t inode_id,
         return -1;
     }
     heat_touch_read(v, inode_id, e->block_id);   /* WP19: member heat */
-    if (!arc_get(v->arc, pba | TZ_ARC_TAG, &batch, &batch_len)) {
+
+    /* How much of the batch this member needs. The BCJ inverse is only
+       bijective over the WHOLE member window (it was prefiltered standalone,
+       pc=0), so it needs all of it; every other batch algo needs only the
+       bytes the caller asked for. */
+    if (bcj) { win_off = e->block_offset;          need = (size_t)e->length; }
+    else     { win_off = e->block_offset + slice_off; need = want; }
+
+    win = (uint8_t *)malloc(need ? need : 1);
+    if (!win) return -1;
+
+    cached = 0;
+    {
+        size_t got = 0;
+        /* a short entry is not a usable window: fall through and decode */
+        if (arc_get_copy(v->arc, pba | TZ_ARC_TAG, (size_t)win_off, need,
+                         win, &got) && got == need)
+            cached = 1;
+    }
+
+    if (!cached) {
         uint32_t csize, usize;
         uint8_t *blob;
 
@@ -176,20 +208,21 @@ static int vol_read_text_slice(invfs_volume *v, uint64_t inode_id,
         if (seg_read_checked(v, pba, 0, 4 + 2, &csize, &blob) != 0) {
             fprintf(stderr, "segment CRC mismatch: text batch pba %llu\n",
                     (unsigned long long)pba);
+            free(win);
             return -1;
         }
         memcpy(&usize, blob, 4);
         if (usize == 0 || usize > (64u << 20)) {   /* batches are <= 4 MB */
-            free(blob); return -1;
+            free(blob); free(win); return -1;
         }
         fresh = (uint8_t *)malloc(usize);
-        if (!fresh) { free(blob); return -1; }
+        if (!fresh) { free(blob); free(win); return -1; }
         /* the decoder's wire blob starts past the usize LE */
         if (e->algo == INVFS_ALGO_PPMD) {
             if (invfs_ppmd_decode(blob + 4, csize - 4, fresh, usize) != 0) {
                 fprintf(stderr, "ppmd decode failed: text batch pba %llu\n",
                         (unsigned long long)pba);
-                free(fresh); free(blob); return -1;
+                free(fresh); free(blob); free(win); return -1;
             }
         } else if (e->algo == INVFS_ALGO_ZSTD ||
                    e->algo == INVFS_ALGO_ZSTD_BCJ) {
@@ -201,46 +234,36 @@ static int vol_read_text_slice(invfs_volume *v, uint64_t inode_id,
                 zc->decode(blob + 4, csize - 4, fresh, usize) != 0) {
                 fprintf(stderr, "zstd decode failed: binary batch pba %llu\n",
                         (unsigned long long)pba);
-                free(fresh); free(blob); return -1;
+                free(fresh); free(blob); free(win); return -1;
             }
         } else {
             fprintf(stderr, "text slice: unknown batch algo %u\n",
                     (unsigned)e->algo);
-            free(fresh); free(blob); return -1;
+            free(fresh); free(blob); free(win); return -1;
         }
         free(blob);
-        batch = fresh;
-        batch_len = usize;
-    }
-    if (e->algo == INVFS_ALGO_ZSTD_BCJ) {
-        /* invert the per-member prefilter: the window is exactly the
-         * member slice, decoded whole, at pc=0 -- the same window the
-         * encoder ran over (see the flush feed loop) */
-        if ((uint64_t)e->block_offset + e->length <= batch_len) {
-            if (slice_off == 0 && want == (size_t)e->length) {
-                /* the common case (whole-slice read): no extra copy */
-                memcpy(dst, batch + e->block_offset, want);
-                invfs_bcj_x86_dec(dst, want);
-                rc = 0;
-            } else {
-                uint8_t *sl = (uint8_t *)malloc(e->length ? e->length : 1);
-                if (sl) {
-                    memcpy(sl, batch + e->block_offset, e->length);
-                    invfs_bcj_x86_dec(sl, e->length);
-                    memcpy(dst, sl + slice_off, want);
-                    free(sl);
-                    rc = 0;
-                }
-            }
+        if ((uint64_t)win_off + need > usize) {   /* recipe claims more than
+                                                     * the batch holds */
+            free(fresh); free(win); return -1;
         }
-    } else if ((uint64_t)e->block_offset + slice_off + want <= batch_len) {
-        memcpy(dst, batch + e->block_offset + slice_off, want);
-        rc = 0;
+        memcpy(win, fresh + win_off, need);
+        /* arc_put takes ownership (or frees an oversized entry), so the slice
+         * is copied out of `fresh` BEFORE the buffer is handed over -- and the
+         * window is already private, so the entry may be evicted immediately
+         * afterwards without affecting us. NULL cache frees. */
+        arc_put(v->arc, pba | TZ_ARC_TAG, fresh, usize);
     }
-    /* arc_put takes ownership (or frees an oversized entry), so the slice
-     * is copied out BEFORE the buffer is handed over. NULL cache frees. */
-    if (fresh) arc_put(v->arc, pba | TZ_ARC_TAG, fresh, batch_len);
-    return rc;
+
+    if (bcj) {
+        /* invert the per-member prefilter over the whole slice window, at
+         * pc=0 -- the same window the encoder ran over (flush feed loop) */
+        invfs_bcj_x86_dec(win, need);
+        memcpy(dst, win + slice_off, want);
+    } else {
+        memcpy(dst, win, want);
+    }
+    free(win);
+    return 0;
 }
 
 /* WP47: is `ip` a plausible record position? On a v0.3.0+ mapper volume
@@ -1953,19 +1976,26 @@ int vol_read_range(invfs_volume *v, uint64_t inode_id, uint64_t offset,
          * 64 KB. Copy the window out BEFORE handing the buffer to the cache --
          * arc_put either takes ownership or frees an oversized entry, and
          * after it returns the pointer is not ours to read. */
-        const uint8_t *all = NULL;
         uint8_t *fresh = NULL;
         size_t all_len = 0, take = 0;
         free(rec);
-        if (!arc_get(v->arc, inode_id, &all, &all_len)) {
-            if (vol_read_file(v, inode_id, &fresh, &all_len) != 0) return -1;
-            all = fresh;
-        }
+        /* WP-arc-concurrent-safe: arc_get_copy, not arc_get. This path runs
+         * from invf_read with g_io_lock RELEASED (fuse_fs.c:1407, :1414) under
+         * fuse_loop_mt, so N threads are in here at once and another thread's
+         * arc_put can evict -- and free -- this entry. A borrowed pointer was
+         * memcpy'd from at :1966 straight after arc_get returned, which is a
+         * use-after-free that returns SUCCESS with whatever the freed heap
+         * held: a whole file wrong, not a few bytes. The copy now happens
+         * inside the cache's lock. Same single memcpy it always was. */
+        if (arc_get_copy(v->arc, inode_id, (size_t)offset, len,
+                         (uint8_t *)buf, &take))
+            return (int)take;
+        if (vol_read_file(v, inode_id, &fresh, &all_len) != 0) return -1;
         if (offset < all_len) {
             take = (size_t)((offset + len > all_len) ? all_len - offset : len);
-            memcpy(buf, all + offset, take);
+            memcpy(buf, fresh + offset, take);
         }
-        if (fresh) arc_put(v->arc, inode_id, fresh, all_len);
+        arc_put(v->arc, inode_id, fresh, all_len);
         return (int)take;
         }
     }

@@ -1,9 +1,36 @@
 /*
  * arc.h — Adaptive Replacement Cache for reconstructed file contents.
  *
- * Portable C99, no platform dependencies, no internal locking: the volume
- * layer is caller-serialized (Dokan holds g_lock, FUSE holds g_io_lock around
- * every vol_* call) and this follows the same discipline.
+ * Portable C99, no platform dependencies. INTERNAL LOCKING: this cache takes
+ * its own mutex, because the volume layer is NOT caller-serialized. See
+ * "WHY THIS CACHE LOCKS ITSELF" below.
+ *
+ * WHY THIS CACHE LOCKS ITSELF
+ * --------------------------
+ * This file used to claim that no locking was needed "because the volume layer
+ * is caller-serialized -- FUSE holds g_io_lock around every vol_* call". That
+ * was true of everything except the one path that matters most here. invf_read
+ * releases g_io_lock and THEN calls vol_read_range (fuse_fs.c:1407, :1414,
+ * under a comment saying so), and the daemon runs fuse_loop_mt
+ * (fuse_fs.c:3353). vol_read_range is where this cache is used: the whole-file
+ * content cache for every container and every transcoded file
+ * (vol_read.c:1960), and the shared-batch cache for every text/binary batch
+ * member (vol_read.c:168). So N read threads mutate one cache at once, while
+ * the sweep thread mutates the same cache from another direction.
+ *
+ * With two threads in here, the byte-accounted lists are not merely stale,
+ * they are wrong: two lst_unlink calls on one node double-subtract l->bytes,
+ * and l->bytes is a size_t. Worse, arc_get handed out a BORROWED pointer valid
+ * only until the next arc_put -- and the reader memcpy's out of it -- so
+ * another thread's eviction (arc_replace's free(victim->data)) could free the
+ * buffer mid-copy and the read still returned success. That is a whole file of
+ * wrong bytes, not a few.
+ *
+ * So: a mutex here, and arc_get_copy for anyone who can run concurrently. The
+ * mutex is a strict leaf -- arc.c takes no other lock and calls nothing outside
+ * libc -- so the only order ever observed is g_io_lock -> arc.mu, and it adds
+ * no cycle to the four subsystems that already lock (vol_delta.c,
+ * vol_plugin_client.c, vol_btree.c, volume.c).
  *
  * WHY A CACHE IS LOAD-BEARING HERE, NOT AN OPTIMISATION
  *
@@ -64,11 +91,28 @@ invfs_arc *arc_create(size_t budget_bytes);
 void       arc_destroy(invfs_arc *a);
 
 /* On a hit returns 1 and points *data / *len at the cached content. The pointer
-   is BORROWED and stays valid until the next arc_put/arc_invalidate/arc_clear/
-   arc_destroy on this cache -- arc_get itself never frees anything, so copying
-   out of it before the next mutation is enough. Returns 0 on a miss.
-   NULL cache is a miss. */
+ * is BORROWED and stays valid only until the next arc_* call on this cache
+ * FROM ANY THREAD -- the lock this cache now takes makes each call atomic, it
+ * does not make a pointer handed out of one survive the next one. Copying out
+ * of it is therefore only safe while no other thread can be calling into this
+ * cache. Any caller that can run concurrently must use arc_get_copy instead.
+ * Returns 0 on a miss. NULL cache is a miss. */
 int  arc_get(invfs_arc *a, uint64_t key, const uint8_t **data, size_t *len);
+
+/* The concurrent-safe form of arc_get, and the one every volume caller uses.
+ *
+ * On a hit, copies min(want, len - off) bytes from the cached content into
+ * `dst` and returns 1; *got (when non-NULL) receives the byte count actually
+ * copied, so a short entry is visible as *got < want rather than as a miss.
+ * A hit with nothing left to copy (off >= len) returns 1 with *got == 0 -- a
+ * hit is a hit. A miss returns 0 and writes nothing.
+ *
+ * The copy happens while the cache's lock is held, so the buffer cannot be
+ * freed underneath it: this is what makes a concurrent arc_put/arc_invalidate
+ * safe against a reader. It is not an extra copy -- every read-path caller was
+ * already memcpy'ing out of a borrowed pointer immediately afterwards. */
+int  arc_get_copy(invfs_arc *a, uint64_t key, size_t off, size_t want,
+                  uint8_t *dst, size_t *got);
 
 /* Insert. TAKES OWNERSHIP of `data` (must be malloc'd) on success, and frees
    it if the entry is refused for size -- so the caller never has to know
@@ -77,6 +121,6 @@ void arc_put(invfs_arc *a, uint64_t key, uint8_t *data, size_t len);
 
 void arc_invalidate(invfs_arc *a, uint64_t key);
 void arc_clear(invfs_arc *a);
-void arc_stats(const invfs_arc *a, invfs_arc_stats *out);
+void arc_stats(invfs_arc *a, invfs_arc_stats *out);
 
 #endif /* INVFS_ARC_H */
