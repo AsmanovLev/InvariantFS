@@ -217,9 +217,49 @@ static void commit_unarmed(void *arg)
  *
  * which reads as "the fix regressed" and is in fact "you are running the old
  * binary". That is the exact confusion this file exists to end, committed
- * inside the file meant to end it. The check is cheap, it runs before the
- * search, and it says which of the two it is.
+ * inside the file meant to end it.
+ *
+ * The second half of the diagnosis is below, and it exists because "the
+ * binary lacks the string" has TWO causes whose remedies are opposite.
  */
+static int binary_older_than(const char *bin, const char *src)
+{
+    struct stat sb, ss;
+    if (stat(bin, &sb) != 0 || stat(src, &ss) != 0)
+        return -1;
+    return sb.st_mtime < ss.st_mtime;
+}
+
+/* Which of the two things it can be.
+ *
+ * It earns its keep on a real case. After the v2 purge, the hand-resolved
+ * merge in tools/invf-sweep.c kept the receipt calls and dropped the
+ * refusal -- so the binary was CURRENT and the SOURCE was wrong. A guard
+ * that said only "STALE -- rebuild", which is what this one said at first,
+ * sends the reader to rebuild; they see no change and get no explanation.
+ * The mtime compare is a hint and not a proof (a checkout or a touch can
+ * move either), which is why the message states both facts rather than
+ * picking one silently. */
+static const char *diagnose(const char *bin, const char *src, int fresh)
+{
+    static char msg[512];
+    int older = binary_older_than(bin, src);
+
+    if (fresh < 0)
+        snprintf(msg, sizeof msg, "%s could not be read at all.", bin);
+    else if (older == 1)
+        snprintf(msg, sizeof msg,
+                 "%s is STALE: it is older than %s. Rebuild: rm -f %s && "
+                 "make %s", bin, src, bin, bin);
+    else
+        snprintf(msg, sizeof msg,
+                 "%s is CURRENT (not older than %s) and still lacks the "
+                 "refusal, so the fix is missing from the SOURCE as well -- "
+                 "a merge dropped it. Rebuilding will not help; restore the "
+                 "refusal.", bin, src);
+    return msg;
+}
+
 static int binary_has(const char *path, const char *needle)
 {
     FILE *f = fopen(path, "rb");
@@ -671,16 +711,12 @@ int main(int argc, char **argv)
         snprintf(bin, sizeof bin, "%s/bin/invf-verify", verify_bin);
         fresh = binary_has(bin, "could not walk the whole namespace");
         ok(fresh == 1,
-           "2-0. the invf-verify under test is the CURRENT build (it carries "
-           "the deep pass's refusal string)");
-        if (fresh != 1) {
-            printf("        ^ %s is %s. The site-2 legs below CANNOT pass "
-                   "against it and their failure would say nothing about the "
-                   "code. Rebuild it first: rm -f bin/invf-verify && make "
-                   "bin/invf-verify\n", bin,
-                   fresh == 0 ? "STALE -- it predates the fix"
-                              : "unreadable");
-        }
+           "2-0. the invf-verify under test CARRIES the deep pass's refusal "
+           "string");
+        if (fresh != 1)
+            printf("        ^ the site-2 legs below CANNOT pass against it, "
+                   "and their failure would say nothing about the code. %s\n",
+                   diagnose(bin, "src/cli/verify.c", fresh));
 
         for (n = 1; n <= 8; n++) {
             snprintf(spec, sizeof spec, "v3_walk_dir_stop:%d", n);
@@ -755,6 +791,7 @@ int main(int argc, char **argv)
      * the partial collect had named. */
     {
         int n, st, e2 = 0, hits = 0, hit_n = 0, hit_st = 0;
+        int refusals_all = 0, refusals_none = 0;
         size_t blen = 0;
         uint8_t *buf = NULL;
         invfs_volume *v2;
@@ -792,14 +829,10 @@ int main(int argc, char **argv)
              * needs testing rather than eyeballing. */
             sfresh = binary_has(sbin, "a partial live set is not a smaller sweep");
             ok(sfresh == 1,
-               "4-0. the invf-sweep under test is the CURRENT build (it "
-               "carries the refusal)");
+               "4-0. the invf-sweep under test CARRIES the refusal");
             if (sfresh != 1)
-                printf("        ^ %s is %s. The site-4 legs below CANNOT pass "
-                       "against it. Rebuild it first: rm -f bin/invf-sweep && "
-                       "make bin/invf-sweep\n", sbin,
-                       sfresh == 0 ? "STALE -- it predates the fix"
-                                   : "unreadable");
+                printf("        ^ the site-4 legs below CANNOT pass against "
+                       "it. %s\n", diagnose(sbin, "tools/invf-sweep.c", sfresh));
         }
         for (n = 1; n <= 8; n++) {
             snprintf(cmd, sizeof cmd,
@@ -808,6 +841,10 @@ int main(int argc, char **argv)
             st = run_capture(cmd, out, sizeof out);
             if (strstr(out, "Refusing to sweep") != NULL ||
                 strstr(out, "Refusing to plan") != NULL) {
+                if (strstr(out, "It stopped partway through") != NULL)
+                    refusals_all++;
+                else if (strstr(out, "before delivering ANY entry") != NULL)
+                    refusals_none++;
                 if (hits == 0) {
                     snprintf(hit, sizeof hit, "%s", out);
                     hit_n = n;
@@ -844,6 +881,31 @@ int main(int argc, char **argv)
         ok(strstr(hit, "[7/7] finalize") == NULL,
            "4h. and it stops before the durability point, so the pass leaves "
            "no half-swept generation behind");
+
+        /* 4i. THE TWO CASES ARE NOT THE SAME VOLUME STATE.
+         *
+         * A walk that stopped having already delivered entries produced a
+         * PARTIAL live set. A walk that stopped before delivering anything
+         * produced NO live set at all -- and the stages below would then
+         * run over an empty list and report a clean sweep of a volume they
+         * never read. That is strictly worse than a subset, and it reads in
+         * the summary as "0 files", i.e. as an EMPTY VOLUME.
+         *
+         * Asserted across the whole search rather than at a pinned
+         * position, because which case a position lands in depends on the
+         * tree's shape -- this fixture has directories, so a shallow
+         * position stops before the first entry is delivered and a deeper
+         * one stops partway through. What has to hold is that the two are
+         * distinguished AT ALL and that both are reachable here: an arm
+         * that names only one of them is the silent one. */
+        ok(refusals_all > 0 && refusals_none > 0,
+           "4i. and the refusal tells a PARTIAL collect from NO live set at "
+           "all: across the positions tried here, %d said partial and %d "
+           "said nothing was delivered", refusals_all, refusals_none);
+        if (!refusals_all || !refusals_none)
+            printf("        ^ one of the two wordings never appeared, so one "
+                   "of the two cases is unlabelled: an operator cannot tell "
+                   "a subset from a volume that was never read\n");
 
         /* and the bytes are untouched, which is the point of all of it */
         v2 = vol_open(img, &e2);
