@@ -3013,14 +3013,21 @@ static int invf_unlink(const char *path)
         table_remove_name(path + 1);   /* no flush: tombstone+bitmap are
         durable on the next flush/close; per-unlink fsync-class writes
         made rm -rf of a source tree take minutes */
-    } else {
-        /* index ghost? record already tombstoned by a killed process:
-         * drop the entry instead of reporting ENOENT forever */
-        if (vol_forget_name(g_vol, path + 1) == 0) {
-            table_remove_name(path + 1);
-            rc = 0;
-        }
     }
+    /* There is deliberately no "index ghost" recovery here any more.
+     *
+     * It used to ask vol_forget_name() whether the name was a live entry or a
+     * ghost left behind by a killed process, and answer ENOENT only for a
+     * live one. But the v2 name index that could leave a ghost is GONE
+     * (0c82a7a), so vol_forget_name() is a stub that returns 0 for
+     * EVERYTHING -- the function says "forgotten" about a name that is still
+     * perfectly live. The branch therefore always fired, and it CONVERTED
+     * EVERY FAILED UNLINK INTO A SUCCESS: rm of a file that does not exist
+     * returned 0, the entry was dropped from the table anyway, and a
+     * subsequent lookup reported ENOENT for a file still on the volume.
+     *
+     * A stub that always agrees is not a recovery path, it is the absence of
+     * a check. rm(2) must fail when nothing was removed. */
     pthread_mutex_unlock(&g_io_lock);
     if (rc == 0) return 0;
     return vol_write_enabled(g_vol) ? -ENOENT : -EROFS;

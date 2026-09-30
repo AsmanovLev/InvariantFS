@@ -916,12 +916,12 @@ int vol_hardlink(invfs_volume *v, const char *from, const char *to)
 
 
 
-/* Drop a name whose backing record is already gone (index ghost left by
- * a killed process). Returns 0 if the entry was forgotten, -1 if the
- * name looks live (caller should use the normal unlink path). */
-int vol_forget_name(invfs_volume *v, const char *name)
-{
-    /* The v2 name index that could leave a ghost entry behind is gone, so
-     * there is never a ghost to forget. */
-    return 0;
-}
+/* REMOVED: vol_forget_name().
+ *
+ * It existed to drop a name left behind by the v2 name index when a process
+ * died between the record append and the index update. That index is gone
+ * (0c82a7a), so the function had no case where it could return anything but
+ * 0 -- and its one caller read that 0 as "this was a ghost, safe to report
+ * success", which turned every failed unlink into a success. rm(2) of a
+ * nonexistent file returned 0. A stub that always agrees is not a check. */
+
