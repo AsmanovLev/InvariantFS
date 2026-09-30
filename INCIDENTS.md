@@ -1296,6 +1296,66 @@ exits non-zero rather than performing a "recovery" that is 95% data loss. The
 same holds for a structural tree failure and for damage larger than the
 quarantine table.
 
+### Follow-up (`wp/btree-collapse-data-loss`) — the excision destroyed reachable content and said `OK`
+
+**Date:** Sep 30, 2026 · **Severity:** High (silent, total loss of file content
+on the repair path) · **Status:** **Fixed** (gate in `-f`; the operator can
+still override it explicitly, loudly, with `--discard-reachable`).
+
+WP86 contained the damage and made the repair *possible*. It did not make the
+repair *safe*, and for a while the two were the same thing in the test's eyes.
+
+The excision's unit is a **quarantined key range**, not a page: the walk learns
+`[lo, hi)` from the parent's separators and `btree_excise` drops every key in
+it. Nothing established that those keys were unreachable. Two of the namespaces
+in an interval are addressed by something no tree walk can follow — a recipe
+blob at `0x04 || blake3_256(blob)[32]`, named only by the 32 bytes in an inode
+row, and an xattr record at `0x03 || inode || name_len || name` — and a key
+that is gone leaves no trace in any page's own CRC, so every structural check
+the pass runs still passed afterwards.
+
+WP86's own test leg tore the **last** leaf, which is the high end of the
+keyspace where `0x03` and `0x04` sort, while the two files' inode rows and
+dirents sat in a readable leaf. So `-f` took both files' content and left their
+names, and the leg asserted the result was clean. Measured on the volume that
+leg leaves behind, on `main` @ `f42434e`:
+
+```
+$ invf-verify <img> --deep        # after `invf-fsck <img> -f`
+  CORRUPT: two00.bin
+  CORRUPT: two01.bin
+  deep: 0 files ok, 2 corrupt, 0 bytes verified
+$ invf-cat <img> two00.bin
+  vol_read_inode: v3 inode 2: recipe blob missing/corrupt      (exit 1)
+$ invf-fsck <img>
+  OK                                                           (exit 0)
+```
+
+The same shape, larger: tear a leaf holding the inode **rows** of 17 named
+files whose dirents are readable, and `-f` printed
+`LOST: 17 name(s) -- ... the data is NOT recoverable` and then exited 0.
+
+**The lesson is the test, not the tool.** That leg asserted a structural fact
+(`exit 0`, "clean after the repair") about a defect that was not structural,
+and nothing in it ever asked a live inode for its bytes — the rows resolved, the
+names resolved, `invf-ls` listed the files, and nothing called `invf-cat` on
+them. A test that verifies a repair with the repairer's own success criteria
+cannot see a repair that meets the criteria and fails the filesystem. The gate
+now asks a different tool, on the far side of the repair, and uses an
+interference experiment (put the torn byte back) rather than another assertion
+about the tree.
+
+**The contract now:** `-f` excises a range only after showing that no live,
+readable object requires a key inside it (an inode row requires its recipe blob
+and its xattrs; a directory entry requires the row it resolves to). A range it
+cannot clear is left alone — the volume is changed not at all, stays `DAMAGED`,
+exits 3, and prints `CANNOT REPAIR` naming the files. The key stays on its page
+and still reads `EIO`, which a restore can undo; an excised key cannot be.
+`-f --discard-reachable` is the operator's separate, explicit decision to drop
+them anyway. This is the same line the adjacent recipe check already keeps (a
+blob is addressed by the hash of its own contents, so it cannot be rebuilt):
+both refuse loudly and change nothing.
+
 ### Verification
 
 - `bin/invf-btree_repair_test` (new, in `make test`): folds a volume, tears one
@@ -1303,7 +1363,14 @@ quarantine table.
   absent, other subtrees readable, the delta's copy of a quarantined key
   recovered, the surviving names intact, the tree valid after a remount; plus a
   three-pages-at-once phase, a torn root, and a save point on a damaged base.
-  42 checks, 0 failures (13 of them fail on the pre-fix tree).
+  Its excision legs now name `--discard-reachable` (they cover the excision
+  machinery; the default's refusal is asserted separately). 66 checks, 0
+  failures.
+- `bin/invf-fsck_liveness_test` (new, in `make test`): the gate itself, as an
+  interference experiment. **4 of its 11 checks fail on `f42434e` and 5 on
+  `11eb3d2`.** It also asserts the gate did not disable the repair: a bounded
+  range holding only dead keys is still excised and the volume still reaches
+  CLEAN.
 - `tools/test-meta-v3-fsck.sh`, `test-meta-v3-fold.sh`, `test-writepath.sh`,
   `test-meta-v3-{,delta,write,inode,dirent,mut,overlay,hardlink,xattr,recipe}.sh`:
   PASS. `make test`: PASS.

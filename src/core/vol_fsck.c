@@ -17,7 +17,8 @@
 /* WP-M4: the v3 validation path (RT30 + base-tree walk). Defined after the
  * v2 helpers; vol_fsck_scan dispatches to it for VOLF_V3 volumes. WP86 added
  * the containment walk and the -f repair behind the same entry point. */
-static int fsck_v3_scan(invfs_volume *v, invfs_fsck_report *rep, int fix);
+static int fsck_v3_scan(invfs_volume *v, invfs_fsck_report *rep, int fix,
+                        int discard_reachable);
 
 /* ================= fsck / repair =================
  * WP27 note on physical addressing: AST entries store the segment's pba
@@ -443,6 +444,12 @@ static void fscan_bad(void *ctx_, uint64_t pos)
 
 int vol_fsck_scan(invfs_volume *v, invfs_fsck_report *rep, int fix)
 {
+    return vol_fsck_scan_ex(v, rep, fix, 0);
+}
+
+int vol_fsck_scan_ex(invfs_volume *v, invfs_fsck_report *rep, int fix,
+                     int discard_reachable)
+{
     uint64_t pos, end;
     size_t bi;
     size_t l2p_n = 0, l2p_cap = 0;
@@ -464,7 +471,7 @@ int vol_fsck_scan(invfs_volume *v, invfs_fsck_report *rep, int fix)
      * (--repair) -- do not run on a v3 volume, so a data segment whose bytes
      * were torn after its recipe landed cannot be quarantined there yet. */
     if (v->sb.vol_flags & VOLF_V3)
-        return fsck_v3_scan(v, rep, fix);
+        return fsck_v3_scan(v, rep, fix, discard_reachable);
     used_bytes = (size_t)v->bitmap_blocks * INVFS_BLOCK_SIZE;
     used = (uint8_t *)calloc(1, used_bytes);
     if (!used) return -1;
@@ -1324,6 +1331,406 @@ static void fsck_v3_lost_names(invfs_volume *v, invfs_fsck_report *rep)
                         "quarantined range too)\n");
 }
 
+/* ================================================================== */
+/* WP: excision liveness -- may this key RANGE be dropped at all?      */
+/* ================================================================== */
+/* The repair's unit of destruction is a QUARANTINED KEY RANGE, not a page.
+ * The page walk learns that interval from the parent's separators and never
+ * learns what was IN it, so btree_excise drops [lo, hi) blind. That is sound
+ * only if nothing a live object still needs lives in the interval -- and the
+ * check that would have established it did not exist, which is why a torn leaf
+ * at the HIGH end of the keyspace could take both files' recipe blobs with it
+ * while their inode rows and dirents (in readable pages) went on resolving:
+ *
+ *   - a recipe blob is stored under 0x04 || blake3_256(blob)[32] in the SAME
+ *     tree, so nothing in the tree POINTS at it; the only thing in the volume
+ *     that says it must exist is the 32-byte address in the inode row;
+ *   - xattrs are keyed 0x03 || inode:u64 || name_len || name, again with the
+ *     reference living in the row / the key, not in a walkable pointer;
+ *   - and a key that is GONE leaves no trace in any page's own CRC, so every
+ *     structural check the pass runs still passes afterwards.
+ *
+ * So the gate is a FORWARD reachability pass over everything that is still
+ * readable, asking for each key such an object requires:
+ *
+ *   readable inode row  ->  0x04 || row.recipe_addr        (its content)
+ *                           the 0x03 keys its xattrs occupy, resolved to the
+ *                           actual names -- the per-inode SPACE only picks
+ *                           which inodes are worth enumerating (see below)
+ *   readable dirent     ->  the child inode's 8-byte row key
+ *
+ * The dirent direction is the same defect one level up: a readable name whose
+ * ROW is inside the range is a file that loses its content and keeps its name.
+ * It is what turns the WP86 phase-A volume -- whose torn leaf holds the rows of
+ * 17 named files, their dirents all readable -- from a 17-file loss into a
+ * refusal.
+ *
+ * Any such key inside a quarantined range REFUSES that range. The volume is
+ * left exactly as it was -- damaged, nothing destroyed, every refused key
+ * still on the page it was on -- because a key that reads EIO is recoverable
+ * (restore the image, or the page) and a key that has been excised is gone.
+ * That is the whole ordering rule: establish liveness FIRST, mutate second.
+ *
+ * What this cannot prove is as stated as what it can: a name inside a
+ * quarantined dirent range is invisible from here, so a hardlink whose SECOND
+ * name is in the range is not detected. --discard-reachable is the operator's
+ * explicit, separately-worded decision to proceed past whatever the proof
+ * cannot clear. */
+#define FSCK_EXCISE_FAULT_MAX 32
+
+typedef struct {
+    uint64_t id;
+    uint64_t size;
+    uint32_t kind;               /* INVFS_EXCISE_BLOCK_* */
+    char     name[256];
+} fsck_excise_fault;
+
+enum {
+    INVFS_EXCISE_BLOCK_RECIPE = 0,  /* the 0x04 blob that holds its content */
+    INVFS_EXCISE_BLOCK_XATTR  = 1,  /* the 0x03 keys that hold its xattrs   */
+    INVFS_EXCISE_BLOCK_ROW    = 2   /* the row a surviving NAME resolves to */
+};
+
+typedef struct {
+    const bt_quarantine *q;
+    uint8_t  refused[BT_QUARANTINE_MAX];
+    fsck_excise_fault fault[FSCK_EXCISE_FAULT_MAX];
+    uint64_t nfault, nfault_total;
+    uint64_t live;               /* live rows asked */
+    uint64_t xa_unknown;         /* xattr enumerations that hit the damage */
+} fsck_live_ctx;
+
+/* What fsck_excise_live_cb's xattr enumeration callback needs to build a key
+ * and name the offender it would destroy. */
+typedef struct {
+    fsck_live_ctx *c;
+    uint64_t id;
+    uint64_t size;
+    const char *name;
+} fsck_excise_live_cb_ctx;
+
+static void fsck_be64(uint8_t *p, uint64_t v)
+{
+    int i;
+    for (i = 0; i < 8; i++)
+        p[i] = (uint8_t)(v >> (56 - 8 * i));
+}
+
+/* Mark every quarantined range that holds the key `lo` (or, when `hi_n` is
+ * set, any key of the space [lo,hi)), and record the first offender that
+ * reaches each one. One offender per (inode, kind) is enough: the point of
+ * the list is that the operator sees WHICH files, not how many pages. */
+static void fsck_excise_mark(fsck_live_ctx *c, uint64_t id, uint32_t kind,
+                             const char *name, uint64_t size,
+                             const uint8_t *lo, uint16_t lo_n,
+                             const uint8_t *hi, uint16_t hi_n)
+{
+    int j, hit = 0, known = 0;
+    uint64_t i;
+
+    for (j = 0; j < c->q->n; j++) {
+        int overlaps = hi_n ? btree_quarantine_overlaps(c->q, lo, lo_n, hi, hi_n)
+                            : btree_quarantine_has(c->q, lo, lo_n);
+        if (!overlaps)
+            continue;
+        c->refused[j] = 1;
+        hit = 1;
+    }
+    if (!hit)
+        return;
+    for (i = 0; i < c->nfault; i++)
+        if (c->fault[i].id == id && c->fault[i].kind == kind)
+            known = 1;
+    if (!known && c->nfault < FSCK_EXCISE_FAULT_MAX) {
+        fsck_excise_fault *f = &c->fault[c->nfault++];
+        f->id = id;
+        f->size = size;
+        f->kind = kind;
+        snprintf(f->name, sizeof f->name, "%s", name ? name : "");
+    }
+    c->nfault_total++;
+}
+
+/* One inode's xattrs are a contiguous key run: 0x03 || id || name_len ||
+ * name, ordered by name_len then name (the WP-M7 note in invarifs.h), so the
+ * whole space is [0x03||id||0x0000, 0x03||(id+1)||0x0000). That SPACE is a
+ * filter, not a claim: an inode with no xattrs owns no key in it, and a
+ * quarantined range that swallows the space must not block on that alone. It
+ * is a filter because a rightmost torn leaf is quarantined as [lo, +inf) --
+ * and every 0x03 key sorts above such a lo, so a space test alone would refuse
+ * every range on every volume, repair included. So the space picks the inodes
+ * worth looking at and the enumeration below decides. */
+static int fsck_excise_xattr_cb(void *ctx_, const char *name, size_t nlen)
+{
+    fsck_excise_live_cb_ctx *c = (fsck_excise_live_cb_ctx *)ctx_;
+    uint8_t k[11 + INVFS_MAX_NAME + 4];
+    uint16_t kn;
+
+    if (nlen == 0 || nlen > INVFS_MAX_NAME)
+        return 0;
+    kn = (uint16_t)(11 + nlen);
+    k[0] = (uint8_t)INVFS_V3_XATTR_KEY_PREFIX;
+    fsck_be64(k + 1, c->id);
+    k[9] = (uint8_t)(nlen >> 8);
+    k[10] = (uint8_t)(nlen & 0xff);
+    memcpy(k + 11, name, nlen);
+    /* A value too big for one record continues at the same key with a 0x00
+     * marker and a u16 BE chunk index (v3_xattr_chunk_key), so this name's
+     * records run from `k` to `k || 0x00 || 0xFF 0xFF` INCLUSIVE. An exclusive
+     * upper bound that covers the last chunk index has to be one byte past
+     * that, and nothing sorts at or above `... 0xFF 0xFF 0x00` that the format
+     * can produce. */
+    k[11 + nlen] = 0x00;
+    k[12 + nlen] = 0xFF;
+    k[13 + nlen] = 0xFF;
+    k[14 + nlen] = 0x00;
+    fsck_excise_mark(c->c, c->id, INVFS_EXCISE_BLOCK_XATTR, c->name, c->size,
+                     k, kn, k + 11 + nlen, (uint16_t)(nlen + 4));
+    return 0;
+}
+
+/* Every key a live inode's own row requires. A row that cannot be read
+ * requires nothing: it is itself inside the damage, and no object left in the
+ * volume still says its recipe must exist. */
+static int fsck_excise_live_cb(invfs_volume *v, uint64_t id, const char *name,
+                               void *ctx_)
+{
+    fsck_excise_live_cb_ctx *lc = (fsck_excise_live_cb_ctx *)ctx_;
+    fsck_live_ctx *c = lc->c;
+    static const uint8_t zero[INVFS_V3_RECIPE_ADDR_LEN];
+    invfs_v3_inode in;
+    uint8_t rk[1 + INVFS_V3_RECIPE_ADDR_LEN];
+    uint8_t rhi[1 + INVFS_V3_RECIPE_ADDR_LEN + 3];
+    uint8_t xlo[11], xhi[11];
+    static char nbuf[300];
+
+    if (vol_v3_inode_get(v, id, &in) != 1)
+        return 0;                       /* row unreadable/absent: no claim */
+    c->live++;
+    if (name && !name[0]) {
+        snprintf(nbuf, sizeof nbuf, "path too long to show");
+        name = nbuf;
+    }
+
+    if (in.type != INVFS_ITYP_DIR && in.size &&
+        memcmp(in.recipe_addr, zero, INVFS_V3_RECIPE_ADDR_LEN) != 0) {
+        /* The manifest key 0x04 || addr, and -- for a recipe too big to be one
+         * value -- its 0x04 || addr || 0x00 || idx:u16 continuation chunks
+         * (v3_recipe_chunk_key). Either way it is the file's content, and it
+         * is addressed by nothing but the row that is being asked about. */
+        rk[0] = (uint8_t)INVFS_V3_RECIPE_KEY_PREFIX;
+        memcpy(rk + 1, in.recipe_addr, INVFS_V3_RECIPE_ADDR_LEN);
+        memcpy(rhi, rk, sizeof rk);
+        rhi[sizeof rk] = 0xFF;
+        rhi[sizeof rk + 1] = 0xFF;
+        rhi[sizeof rk + 2] = 0xFF;
+        fsck_excise_mark(c, id, INVFS_EXCISE_BLOCK_RECIPE, name, in.size,
+                         rk, (uint16_t)sizeof rk, rhi, (uint16_t)sizeof rhi);
+    }
+    xlo[0] = (uint8_t)INVFS_V3_XATTR_KEY_PREFIX;
+    fsck_be64(xlo + 1, id);
+    xlo[9] = 0;
+    xlo[10] = 0;
+    xhi[0] = (uint8_t)INVFS_V3_XATTR_KEY_PREFIX;
+    fsck_be64(xhi + 1, id + 1);
+    xhi[9] = 0;
+    xhi[10] = 0;
+    if (btree_quarantine_overlaps(c->q, xlo, (uint16_t)sizeof xlo,
+                                  xhi, (uint16_t)sizeof xhi)) {
+        lc->id = id;
+        lc->size = in.size;
+        lc->name = name;
+        if (vol_v3_xattr_scan(v, id, fsck_excise_xattr_cb, lc) != 0) {
+            /* The enumeration could not complete -- the scan's own descent
+             * reached the damage. That is not a reason to assume the inode has
+             * no xattrs; it is exactly the case where nothing can be proven,
+             * so the ranges overlapping its 0x03 key space stay refused. */
+            c->xa_unknown++;
+            fsck_excise_mark(c, id, INVFS_EXCISE_BLOCK_XATTR, name, in.size,
+                             xlo, (uint16_t)sizeof xlo, xhi,
+                             (uint16_t)sizeof xhi);
+        }
+    }
+    return 0;
+}
+
+/* A name that still resolves requires the inode row it resolves to, and a
+ * directory's own children are reached the same way -- so the scan descends.
+ * The descent is a WORKLIST, not a recursive call inside the scan callback:
+ * vol_v3_dirent_scan is a btree_scan, and re-entering a scan from its own
+ * callback is a shape nothing else in the tree walk does. The visited set is on
+ * inode ids (a directory cannot be its own ancestor), and the worklist is
+ * bounded, so the walk terminates whatever the volume says. */
+#define FSCK_EXCISE_DIRS_MAX 1024
+typedef struct {
+    invfs_volume *v;
+    fsck_live_ctx *c;
+    uint64_t queue[FSCK_EXCISE_DIRS_MAX];
+    int qn, qi;
+    int rc;
+} fsck_excise_dir_ctx;
+
+static int fsck_excise_dir_cb(void *ctx_, const char *name, size_t nlen,
+                              uint64_t child)
+{
+    fsck_excise_dir_ctx *d = (fsck_excise_dir_ctx *)ctx_;
+    invfs_v3_inode in;
+    uint8_t k[8];
+    int i;
+
+    if (!nlen || !child)
+        return 0;
+    if ((unsigned char)name[0] == 0x01)
+        return 0;                       /* internal owner/registry entry */
+    fsck_be64(k, child);
+    fsck_excise_mark(d->c, child, INVFS_EXCISE_BLOCK_ROW, name, 0,
+                     k, 8, NULL, 0);
+    /* a subdirectory names its children exactly as hard as the root does */
+    if (d->qn >= FSCK_EXCISE_DIRS_MAX)
+        return 0;
+    if (vol_v3_inode_get(d->v, child, &in) != 1 || in.type != INVFS_ITYP_DIR)
+        return 0;
+    for (i = 0; i < d->qn; i++)
+        if (d->queue[i] == child)
+            return 0;                   /* already queued: no second visit */
+    d->queue[d->qn++] = child;
+    return 0;
+}
+
+static void fsck_excise_dir_walk(fsck_excise_dir_ctx *d)
+{
+    if (d->rc)
+        return;
+    d->queue[0] = INVFS_V3_ROOT_INO;
+    d->qn = 1;
+    d->qi = 0;
+    while (d->qi < d->qn && !d->rc) {
+        uint64_t dir = d->queue[d->qi++];
+        if (vol_v3_dirent_scan(d->v, dir, fsck_excise_dir_cb, d) != 0)
+            d->rc = -1;
+    }
+    if (d->qn >= FSCK_EXCISE_DIRS_MAX)
+        fprintf(stderr, "fsck(v3): excision liveness: more than %d "
+                        "directories; the dirent walk stopped there\n",
+                FSCK_EXCISE_DIRS_MAX);
+}
+
+/* Fill `safe` with the quarantined ranges the liveness pass cleared. Returns
+ * 0 when at least one range is excisable, -1 when none is (the volume is then
+ * left untouched). `discard_reachable` skips the gate entirely -- and says so
+ * loudly, because it is the operator trading data for a mountable volume. */
+static int fsck_v3_excise_safety(invfs_volume *v, invfs_fsck_report *rep,
+                                 const bt_quarantine *q, bt_quarantine *safe,
+                                 int discard_reachable)
+{
+    fsck_live_ctx c;
+    fsck_excise_live_cb_ctx lc;
+    int i, refused = 0;
+
+    memset(safe, 0, sizeof *safe);
+    safe->bad_pages = q->bad_pages;
+    if (!q->n)
+        return 0;
+
+    memset(&c, 0, sizeof c);
+    memset(&lc, 0, sizeof lc);
+    c.q = q;
+    lc.c = &c;
+    if (discard_reachable) {
+        fprintf(stderr, "fsck(v3): --discard-reachable: excising every "
+                        "quarantined key range even where a live inode still "
+                        "needs a key inside it. Every key in those ranges is "
+                        "about to be DESTROYED -- the files it belongs to lose "
+                        "their content, and no later pass can bring it back.\n");
+        for (i = 0; i < q->n; i++)
+            safe->range[safe->n++] = q->range[i];
+        return 0;
+    }
+
+    /* Pass 1: what every live inode row itself requires. */
+    if (vol_v3_iter_live_inodes(v, fsck_excise_live_cb, &lc) != 0)
+        rep->v3_excise_partial = 1;
+    /* Pass 2: what every surviving name requires. */
+    {
+        fsck_excise_dir_ctx d;
+        memset(&d, 0, sizeof d);
+        d.v = v;
+        d.c = &c;
+        fsck_excise_dir_walk(&d);
+        if (d.rc)
+            rep->v3_excise_partial = 1;
+    }
+    rep->v3_excise_live = c.live;
+
+    for (i = 0; i < q->n; i++) {
+        if (c.refused[i])
+            refused++;
+        else
+            safe->range[safe->n++] = q->range[i];
+    }
+    rep->v3_excise_refused = (uint64_t)refused;
+    rep->v3_excise_blocked = c.nfault_total;
+    if (!refused)
+        return 0;
+
+    for (i = 0; i < (int)c.nfault; i++) {
+        const fsck_excise_fault *f = &c.fault[i];
+        char b[512];
+        if (f->kind == INVFS_EXCISE_BLOCK_RECIPE)
+            snprintf(b, sizeof b,
+                     "inode %llu (%s): its live row names a recipe blob at key "
+                     "0x04 || BLAKE3(recipe), and that key is inside a "
+                     "quarantined key range -- excising the range would destroy "
+                     "the %llu byte(s) of content the file still has, while its "
+                     "name and its row went on resolving",
+                     (unsigned long long)f->id,
+                     f->name[0] ? f->name : "no name resolves to it",
+                     (unsigned long long)f->size);
+        else if (f->kind == INVFS_EXCISE_BLOCK_XATTR)
+            snprintf(b, sizeof b,
+                     "inode %llu (%s): its live row has xattr records in the "
+                     "0x03 || inode key range, and that range is inside a "
+                     "quarantined key range -- excising it would drop extended "
+                     "attributes the volume can still name but not read",
+                     (unsigned long long)f->id,
+                     f->name[0] ? f->name : "no name resolves to it");
+        else
+            snprintf(b, sizeof b,
+                     "inode %llu (%s): a directory entry outside the damage "
+                     "still resolves to it, so its inode row must exist -- and "
+                     "that row key is inside a quarantined key range. Excising "
+                     "the range would leave the name pointing at nothing",
+                     (unsigned long long)f->id,
+                     f->name[0] ? f->name : "no name resolves to it");
+        fsck_v3_note(rep, b);
+    }
+    if (c.nfault_total > c.nfault)
+        fprintf(stderr, "fsck(v3): excision liveness: %llu blocked live "
+                        "inode(s) (the list above is truncated at %d)\n",
+                (unsigned long long)c.nfault_total, FSCK_EXCISE_FAULT_MAX);
+    if (c.xa_unknown)
+        fprintf(stderr, "fsck(v3): excision liveness: %llu inode(s) could not "
+                        "have their xattr records enumerated (the scan's own "
+                        "descent reached the damaged page), so the ranges "
+                        "overlapping their 0x03 key space are not cleared\n",
+                (unsigned long long)c.xa_unknown);
+    fprintf(stderr, "fsck(v3): excision REFUSED for %d of %d quarantined key "
+                    "range(s): a live inode still needs a key inside them, and "
+                    "a range that still holds it cannot be dropped without "
+                    "destroying content the volume can still read. Those keys "
+                    "stay on the page they are on (they read EIO, which is "
+                    "recoverable; an excised key is gone). Restore the image "
+                    "or the page, or re-run with --discard-reachable to "
+                    "excise anyway and lose those files' content.\n",
+            refused, q->n);
+    if (rep->v3_excise_partial)
+        fprintf(stderr, "fsck(v3): excision liveness is PARTIAL: a walk above "
+                        "failed, so the ranges marked excisable are cleared by "
+                        "a FLOOR, not a proof. Treat any future loss as "
+                        "unexplained by this pass.\n");
+    return safe->n ? 0 : -1;
+}
+
 /* WP86: the -f repair. Excise the quarantined ranges, publish the new root,
  * reclaim what the dropped subtrees held, and fold the delta back in so every
  * quarantined key the delta still covers comes back.
@@ -1603,7 +2010,8 @@ static void fsck_v3_recipe_report(invfs_volume *v, invfs_fsck_report *rep)
                 (unsigned long long)a.bad, (unsigned long long)a.checked);
 }
 
-static int fsck_v3_scan(invfs_volume *v, invfs_fsck_report *rep, int fix)
+static int fsck_v3_scan(invfs_volume *v, invfs_fsck_report *rep, int fix,
+                        int discard_reachable)
 {
     invfs_blkptr root;
     bt_stat st;
@@ -1769,5 +2177,16 @@ static int fsck_v3_scan(invfs_volume *v, invfs_fsck_report *rep, int fix)
                           "can quarantine");
         return 0;
     }
-    return fsck_v3_repair(v, rep, root, &q);
+    /* ORDERING, and it is the whole point of this gate: prove the ranges hold
+     * nothing a live object still needs BEFORE the excision that cannot be
+     * undone touches anything. A range that fails the proof is left in place,
+     * so the key stays on the page it was on and still reads EIO -- the one
+     * state from which the operator can get the bytes back. */
+    {
+        bt_quarantine sq;
+        if (fsck_v3_excise_safety(v, rep, &q, &sq, discard_reachable) != 0 ||
+            sq.n == 0)
+            return 0;                   /* refused: the volume is untouched */
+        return fsck_v3_repair(v, rep, root, &sq);
+    }
 }

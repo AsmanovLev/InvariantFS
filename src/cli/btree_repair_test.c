@@ -100,6 +100,9 @@ static void ok(int cond, const char *what)
                                              * repair must bring it back */
 
 static const char *g_bin = ".";
+/* the scratch directory argv[1] named, for the helpers that need to write a
+ * file next to the images */
+static const char *g_dir = "/tmp";
 
 /* ---- key encodings (frozen WP-M5/M6 forms) ---------------------------- */
 
@@ -391,11 +394,65 @@ static int tear_page(const char *img, uint64_t pba)
     return 0;
 }
 
+/* The same byte, back. This is the other half of the experiment and the only
+ * way to tell the two repair contracts apart: a page that is still REFERENCED
+ * and still ALLOCATED is one whose bytes a restore can bring back, and a page
+ * the excision dropped has been reclaimed and overwritten. */
+static int untear_page(const char *img, uint64_t pba)
+{
+    return tear_page(img, pba);
+}
+
+/* Read a named file back through invf-cat -- the path a user takes -- and
+ * compare it byte for byte with `fill` repeated `len` times. Returns 1 on an
+ * exact match, 0 on any difference, -1 if the tool could not produce the file
+ * at all (which is the failure this WP is about). */
+static int cat_matches(const char *img, const char *name, uint8_t fill,
+                       size_t len)
+{
+    char cmd[1600], out[600];
+    uint8_t *got;
+    FILE *f;
+    size_t n;
+    int rc;
+
+    snprintf(out, sizeof out, "%s/invf-cat-out-%ld-%s", g_dir, (long)getpid(), name);
+    snprintf(cmd, sizeof cmd, "%s/bin/invf-cat %s %s %s >/dev/null 2>&1", g_bin,
+             img, name, out);
+    rc = system(cmd);
+    if (rc != 0) {
+        unlink(out);
+        return -1;
+    }
+    f = fopen(out, "rb");
+    if (!f)
+        return -1;
+    got = (uint8_t *)malloc(len + 1);
+    n = got ? fread(got, 1, len + 1, f) : 0;
+    fclose(f);
+    unlink(out);
+    if (!got)
+        return -1;
+    {
+        size_t i;
+        int same = (n == len);
+        for (i = 0; same && i < len; i++)
+            if (got[i] != fill)
+                same = 0;
+        free(got);
+        return same;
+    }
+}
+
 /* ---- the invf-fsck CLI: the exit code IS the contract ----------------- */
 
 static char g_cli_log[512];
 
-static int fsck_cli(const char *img, int fix)
+/* `extra` is passed through verbatim. The excision is now behind an explicit
+ * operator decision (`-f --discard-reachable`), so every leg that tests the
+ * EXCISION MACHINERY -- drop the range, collapse the root, reclaim, fold --
+ * says so, and the legs that test what the DEFAULT does say nothing. */
+static int fsck_cli_x(const char *img, int fix, const char *extra)
 {
     char cmd[1400];
     FILE *f;
@@ -404,8 +461,8 @@ static int fsck_cli(const char *img, int fix)
 
     if (!g_cli_log[0])
         return -3;
-    snprintf(cmd, sizeof cmd, "%s/bin/invf-fsck %s%s >%s 2>&1",
-             g_bin, img, fix ? " -f" : "", g_cli_log);
+    snprintf(cmd, sizeof cmd, "%s/bin/invf-fsck %s%s%s >%s 2>&1",
+             g_bin, img, fix ? " -f" : "", extra ? extra : "", g_cli_log);
     rc = system(cmd);
     f = fopen(g_cli_log, "r");
     if (f) {
@@ -441,14 +498,25 @@ static int open_v(const char *img)
 }
 
 /* Run the CLI on `img` with the in-process handle released. */
-static int fsck_cli_offline(const char *img, int fix)
+static int fsck_cli_offline_x(const char *img, int fix, const char *extra)
 {
     int rc;
     close_v();
-    rc = fsck_cli(img, fix);
+    rc = fsck_cli_x(img, fix, extra);
     (void)open_v(img);
     return rc;
 }
+
+static int fsck_cli_offline(const char *img, int fix)
+{
+    return fsck_cli_offline_x(img, fix, NULL);
+}
+
+/* The operator's explicit, separately-worded decision to drop a key range a
+ * live file still needs. The excision machinery is still what runs here; the
+ * legs that use it are about THAT, and the default's refusal is asserted
+ * separately (phase J and phase K below). */
+#define DISCARD_REACHABLE " --discard-reachable"
 
 /* ---- phase A: build a namespace and fold it into the base ------------ */
 
@@ -602,6 +670,7 @@ int main(int argc, char **argv)
      * answer. Same for the fsck log beside it. */
     snprintf(g_img, sizeof g_img, "%s/invf-btree-repair-test-%ld.img",
              dir, (long)getpid());
+    g_dir = dir;
     snprintf(g_cli_log, sizeof g_cli_log, "%s/invf-btree-repair-fsck-%ld.log",
              dir, (long)getpid());
     unlink(g_img);
@@ -748,9 +817,15 @@ int main(int argc, char **argv)
     }
 
     g_phase = "E: repair";
-    /* ---- E: repair ---- */
-    cli = fsck_cli_offline(g_img, 1);
-    printf("  invf-fsck -f exit code on the damaged volume: %d\n", cli);
+    /* ---- E: repair ----
+     * The excision needs the operator's explicit word now: the quarantined
+     * range here holds the inode ROWS of 17 named files whose dirents are in
+     * a readable page, so dropping it takes those 17 files' content with it.
+     * `-f` alone refuses that (phase J asserts the refusal); this leg drives
+     * --discard-reachable to keep covering the excision machinery itself --
+     * the drop, the root rewrite, the reclaim, the fold. */
+    cli = fsck_cli_offline_x(g_img, 1, DISCARD_REACHABLE);
+    printf("  invf-fsck -f --discard-reachable exit code on the damaged volume: %d\n", cli);
     ok(cli == 3, "invf-fsck -f exits 3 too: the pass that found the damage "
                  "raises the alarm even as it repairs");
     cli = fsck_cli_offline(g_img, 0);
@@ -963,8 +1038,8 @@ int main(int argc, char **argv)
            "no key in any quarantined range reads as absent or as data");
         ok(kept2 == out2, "every key outside the three ranges still reads back");
 
-        cli = fsck_cli_offline(img3, 1);
-        printf("  invf-fsck -f with three torn pages: exit %d\n", cli);
+        cli = fsck_cli_offline_x(img3, 1, DISCARD_REACHABLE);
+        printf("  invf-fsck -f --discard-reachable with three torn pages: exit %d\n", cli);
         ok(cli == 3, "invf-fsck -f exits 3 after repairing three pages");
         err[0] = 0;
         if (vol_v3_base_root(g_v, &root) == 0 &&
@@ -1088,8 +1163,8 @@ int main(int argc, char **argv)
         ok(g_v != NULL, "vol_open succeeds with a torn page under long keys");
         if (!g_v)
             return 1;
-        cli = fsck_cli_offline(img4, 1);
-        printf("  invf-fsck -f with long keys: exit %d\n", cli);
+        cli = fsck_cli_offline_x(img4, 1, DISCARD_REACHABLE);
+        printf("  invf-fsck -f --discard-reachable with long keys: exit %d\n", cli);
         ok(cli == 3, "invf-fsck -f exits 3 (damage found) on the long-key tree");
         for (j = 0; j < 24; j++) {
             char nm[300];
@@ -1111,7 +1186,8 @@ int main(int argc, char **argv)
         unlink(img4);
     }
 
-    /* ---- J: a root that collapses to its only child ----
+    /* ---- J: the collapse repair, and the gate in front of it -------------
+     *
      * A root with exactly two children -- one unreadable leaf -- is left with
      * a single child, which btree_check rejects, so the excision hands the
      * survivor up and the new root IS that leaf: an old page with an old gen.
@@ -1121,10 +1197,25 @@ int main(int argc, char **argv)
      * below is what proves it stuck.
      *
      * Three 2000-byte xattrs on one inode (chunked to 1024 B per record)
-     * make exactly two leaves, which is the shape this needs. */
+     * make exactly two leaves, which is the shape this needs. And because the
+     * torn leaf is the LAST one it sits at the high end of the keyspace,
+     * which is where the 0x03 xattr keys and BOTH 0x04 recipe keys are: 3 + 2
+     * = the five keys it held. Their inode rows and dirents are in the OTHER
+     * leaf and survive, so excising it destroyed both files' content while
+     * their names and rows went on resolving. That is the whole defect: the
+     * repair's unit is a key RANGE, and nothing had established that the keys
+     * in the range were unreachable from a live row.
+     *
+     * J runs the default first and asserts the gate, then the operator's
+     * explicit decision and asserts the old machinery. The default half is
+     * also the only place the two are distinguishable: it flips the torn byte
+     * back afterwards. A refused excision leaves the page referenced AND
+     * allocated, so the bytes come back and both files read byte-identical.
+     * An excised one has been reclaimed -- the bytes are gone whatever anyone
+     * does next. */
     {
         char img5[512];
-        uint64_t id0 = 0, id1 = 0, keys_before = 0;
+        uint64_t id0 = 0, id1 = 0, keys_before = 0, torn_pba = 0;
         int torn_leaf_keys = 0;
         int j;
 
@@ -1197,7 +1288,8 @@ int main(int argc, char **argv)
             g_v = NULL;
             /* the xattr leaf is the last one; the dirents and inode rows
              * survive, so the collapsed root must still resolve the files */
-            if (tear_page(img5, ll.pba[ll.n - 1]) != 0)
+            torn_pba = ll.pba[ll.n - 1];
+            if (tear_page(img5, torn_pba) != 0)
                 return 2;
         }
         g_v = vol_open(img5, &err_open);
@@ -1210,13 +1302,93 @@ int main(int argc, char **argv)
             ok(vol_v3_inode_get(g_v, id0, &in) == 1,
                "both files resolve while the tree still has two children");
         }
+
+        /* ---- J1: the DEFAULT. It must refuse. ----
+         * The five keys in the torn range are not junk: two of them are the
+         * recipe blobs that hold two00.bin and two01.bin's content, and the
+         * two live rows in the OTHER leaf name them by address. Dropping the
+         * range takes the content and leaves the names -- which is why the
+         * pass used to print OK. */
         cli = fsck_cli_offline(img5, 1);
         printf("  invf-fsck -f on the collapsing root: exit %d\n", cli);
         ok(cli == 3, "invf-fsck -f exits 3 (one leaf lost)");
+        cli = fsck_cli_offline(img5, 0);
+        printf("  invf-fsck after the refused repair: exit %d\n", cli);
+        ok(cli == 3, "the volume is still DAMAGED after -f: the repair refused "
+                     "rather than reporting a clean volume it had emptied");
+        {
+            int rc, c0, c1;
+            vol_close(g_v);
+            g_v = NULL;
+            rc = cat_matches(img5, "two00.bin", 'a', 256);
+            c0 = rc;
+            rc = cat_matches(img5, "two01.bin", 'b', 256);
+            c1 = rc;
+            printf("  invf-cat on the torn (not excised) volume: two00=%d "
+                   "two01=%d\n", c0, c1);
+            /* -1 = the file cannot be produced at all: the torn page is still
+             * what holds it. 0 would be worse -- content that is present and
+             * being served wrong. The point is that it is EIO, not ABSENT,
+             * because a key that is still referenced is a key a restore can
+             * bring back. */
+            ok(c0 == -1 && c1 == -1,
+               "both files still read EIO (unreadable), NOT absent: nothing "
+               "was excised, so a restore can still get the bytes back");
+        }
+        /* The tear is the deterministic one byte, so putting it back is exact.
+         * THIS is the assertion the old repair could not pass: it had already
+         * dropped the range and reclaimed the page, so the files stayed gone. */
+        vol_close(g_v);
+        g_v = NULL;
+        if (untear_page(img5, torn_pba) != 0)
+            return 2;
+        g_v = vol_open(img5, &err_open);
+        ok(g_v != NULL, "the volume reopens after the torn page is restored");
+        if (g_v) {
+            int c0, c1;
+            static uint8_t xv[2000];
+            size_t xvlen = sizeof xv;
+            invfs_v3_inode in;
+            /* invf-cat takes the same exclusive image lock the handle does */
+            vol_close(g_v);
+            g_v = NULL;
+            c0 = cat_matches(img5, "two00.bin", 'a', 256);
+            c1 = cat_matches(img5, "two01.bin", 'b', 256);
+            g_v = vol_open(img5, &err_open);
+            if (!g_v)
+                return 2;
+            printf("  after the page is restored: two00=%d two01=%d\n", c0, c1);
+            ok(c0 == 1 && c1 == 1,
+               "BOTH files read back byte-identical once the page is restored: "
+               "the refused repair destroyed nothing");
+            memset(xv, 0, sizeof xv);
+            ok(vol_v3_xattr_get(g_v, id0, "chunky2", xv, &xvlen) == 0 &&
+               xvlen == 2000 && xv[0] == 'x' && xv[1999] == 'x',
+               "the xattr records came back too (the 0x03 keys were in the "
+               "same range and are still on the page)");
+            ok(vol_v3_inode_get(g_v, id1, &in) == 1,
+               "both rows are still live and unmodified");
+            /* re-tear for the second half: the operator's explicit decision */
+            vol_close(g_v);
+            g_v = NULL;
+            if (tear_page(img5, torn_pba) != 0)
+                return 2;
+        }
+        g_v = vol_open(img5, &err_open);
+        if (!g_v)
+            return 1;
+
+        /* ---- J2: the operator's explicit decision. The excision machinery
+         * still works, and it still costs the content -- which is the point of
+         * it being a separate, spelled-out word rather than the default. ---- */
+        cli = fsck_cli_offline_x(img5, 1, DISCARD_REACHABLE);
+        printf("  invf-fsck -f --discard-reachable: exit %d\n", cli);
+        ok(cli == 3, "the pass that found the damage raises the alarm "
+                     "(exit 3) even as it repairs");
         {
             invfs_v3_inode in;
             ok(vol_v3_inode_get(g_v, id1, &in) == 1,
-               "the file outside the torn leaf is readable after the repair");
+               "the surviving row is still readable after the excision");
         }
         vol_close(g_v);
         g_v = NULL;
@@ -1239,12 +1411,13 @@ int main(int argc, char **argv)
             } else {
                 ok(0, "the collapsed root is a valid single-leaf tree");
             }
-            /* What the 5 dropped keys actually WERE. The recipe blobs live
-             * in the same tree under 0x04, which sorts after the 0x03 xattr
-             * keys, so the LAST leaf held 3 xattr keys + both recipes --
-             * and dropping them cost the volume both files' content while
-             * their rows and names survived untouched. The rows still
-             * resolving (asserted above) is exactly why this was silent. */
+            /* What the 5 dropped keys actually WERE, and what the operator
+             * just paid for. The recipe blobs live in the same tree under
+             * 0x04, which sorts after the 0x03 xattr keys, so the LAST leaf
+             * held 3 xattr keys + both recipes -- and dropping them cost the
+             * volume both files' content while their rows and names survived
+             * untouched. The rows still resolving (asserted above) is exactly
+             * why this was silent, and it is why the default now refuses. */
             {
                 invfs_recipe_audit ra;
                 size_t fi;
@@ -1255,7 +1428,7 @@ int main(int argc, char **argv)
                     if (ra.fault[fi].id == id1) f1 = 1;
                 }
                 ok(rc == 0 && ra.nfault_total == 2,
-                   "both live inodes' recipe blobs are gone: exactly 2");
+                   "--discard-reachable destroyed both files' recipes: exactly 2");
                 ok(f0 && f1,
                    "the offender list names BOTH surviving rows "
                    "(two00.bin, two01.bin)");
@@ -1267,33 +1440,16 @@ int main(int argc, char **argv)
             g_v = NULL;
         }
         cli = fsck_cli_offline(img5, 0);
-        printf("  invf-fsck after the collapse repair: exit %d\n", cli);
-        /* The collapsed-root volume is NOT clean, and this assertion used to
-         * say it was. It was wrong: the torn leaf is the LAST one, so it is
-         * the high end of the keyspace -- the 0x03 xattr keys AND both 0x04
-         * recipe keys (3 + 2 = the 5 keys it held). The repair drops all
-         * five, so the two inode rows and their dirents survive while the
-         * recipe blobs that hold their CONTENT do not. The volume goes on
-         * listing two files it can no longer read:
-         *
-         *   $ invf-verify <img> --deep
-         *     CORRUPT: two00.bin / CORRUPT: two01.bin
-         *     deep: 0 files ok, 2 corrupt, 0 bytes verified
-         *
-         * That loss was invisible here until fsck learned to resolve a live
-         * inode's recipe (see recipe_fsck_test): every page CRC verified and
-         * the fan-in balanced, so the pass printed OK and exited 0 on a
-         * volume whose every file was unreadable. The check now reports it
-         * (exit 3, both inodes named) -- which is correct, and the loss
-         * itself is a SEPARATE, still-open defect in the WP86 collapse
-         * repair, not something this pass can fix: a recipe blob is stored
-         * under the BLAKE3 hash of its own contents and is gone for good.
-         * When that repair is fixed, this assertion and the ones under it
-         * are the gate that will say so.
-         */
-        ok(cli == 3, "the collapsed-root volume is NOT reported clean: the "
-                     "repair destroyed both files' recipes (see the comment "
-                     "above -- an open defect in the WP86 collapse repair)");
+        printf("  invf-fsck after the discarded collapse repair: exit %d\n", cli);
+        /* This leg is the operator's explicit decision, so the loss is the
+         * price and the pass must not pretend otherwise: the volume still
+         * reads as damaged (exit 3, both inodes named), which is the same
+         * verdict the recipe check gives when it finds a lost blob. The point
+         * of the split is J1 above -- the DEFAULT did not get here, and
+         * nothing on this volume was destroyed without this word. */
+        ok(cli == 3, "after --discard-reachable the volume is reported DAMAGED, "
+                     "not clean: the pass never claims a clean volume whose "
+                     "files it emptied");
         unlink(img5);
     }
 

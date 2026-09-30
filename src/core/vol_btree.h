@@ -140,6 +140,19 @@ int btree_check_tolerant(invfs_volume *v, invfs_blkptr root,
 int btree_excise(invfs_volume *v, invfs_blkptr root, const bt_quarantine *q,
                  invfs_blkptr *new_root_out);
 
+/* WP: is a quarantined key RANGE still holding something a live object needs?
+ *
+ * btree_excise drops a key INTERVAL, not a page, and the only thing its
+ * caller ever learns about an unreadable page is that interval (from the
+ * parent's separators). So "is it safe to drop this interval" is exactly
+ * "does a key I can PROVE must exist fall inside it" -- which is what these
+ * two answer. Byte-lexicographic, the engine's own key order; both bounds
+ * behave as [lo, hi) and a zero-length `hi` means unbounded (+infinity). */
+int btree_quarantine_has(const bt_quarantine *q, const uint8_t *k, uint16_t klen);
+int btree_quarantine_overlaps(const bt_quarantine *q,
+                              const uint8_t *lo, uint16_t lo_n,
+                              const uint8_t *hi, uint16_t hi_n);
+
 /* Reachability diff (design §8, D4): free every page reachable from
  * old_root but not from keep_root, via the WP-M2 allocator. Returns the number
  * of pages freed, or -1 on a walk/read error. This is the primitive WP-M15

@@ -129,8 +129,25 @@ typedef struct {
     uint64_t v3_recipe_checked;/* live inodes whose recipe was resolved */
     uint64_t v3_recipe_bad;    /* live inodes whose recipe will not load */
     int      v3_recipe_partial;/* the walk failed: this count is a floor */
+    /* Excision liveness (v3 only). The repair drops a quarantined KEY RANGE,
+     * and a range is not a page: it can hold a 0x04 recipe blob or a 0x03
+     * xattr record that a live inode -- whose row survived in a readable page
+     * -- still needs, and dropping it destroys that file's content while its
+     * name and its row go on resolving. So the repair proves, per range, that
+     * no live object requires a key inside it, and REFUSES the ranges it
+     * cannot clear. See fsck_v3_excise_safety. */
+    uint64_t v3_excise_refused;   /* quarantined ranges -f would not excise */
+    uint64_t v3_excise_blocked;   /* live inodes named as the reason */
+    uint64_t v3_excise_live;      /* live rows asked for the liveness proof */
+    int      v3_excise_partial;   /* the walk failed: a cleared range is a
+                                   * floor, not a proof */
 } invfs_fsck_report;
 int vol_fsck_scan(invfs_volume *v, invfs_fsck_report *rep, int fix);
+/* `discard_reachable` is the operator's explicit, separately-worded decision
+ * to excise a range even when the liveness proof cannot clear it. 0 (the only
+ * value any in-tree caller passes) never destroys a key a live inode needs. */
+int vol_fsck_scan_ex(invfs_volume *v, invfs_fsck_report *rep, int fix,
+                     int discard_reachable);
 int  vol_map(invfs_volume *v, uint64_t inode, uint64_t lba, uint64_t pba, uint32_t length);
 uint64_t vol_lookup(invfs_volume *v, uint64_t inode, uint64_t lba);
 int  vol_lookup_entry(invfs_volume *v, uint64_t inode, uint64_t lba,

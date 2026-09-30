@@ -27,6 +27,7 @@ int main(int argc, char **argv)
 {
     const char *img = NULL;
     int fix = 0, quiet = 0, repair = 0, i;
+    int discard_reachable = 0;
     int err = 0;
     invfs_volume *v;
     invfs_fsck_report rep;
@@ -37,7 +38,14 @@ int main(int argc, char **argv)
     memset(&r2, 0, sizeof r2);
     for (i = 1; i < argc; i++) {
         if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) {
-            fprintf(stderr, "usage: invf-fsck <image> [-f|--fix] [--repair] [-q]\n");
+            fprintf(stderr,
+                "usage: invf-fsck <image> [-f|--fix] [--repair] [-q]\n"
+                "                [--discard-reachable]\n"
+                "  --discard-reachable  with -f: excise a quarantined key\n"
+                "      range even when a live inode still needs a key inside\n"
+                "      it. That DESTROYS those files' content permanently.\n"
+                "      Without it, -f refuses every range it cannot prove is\n"
+                "      unreachable and leaves the volume damaged and intact.\n");
             return 2;
         }
         if (strcmp(argv[i], "-v") == 0 || strcmp(argv[i], "--version") == 0) {
@@ -49,13 +57,27 @@ int main(int argc, char **argv)
             fix = 1;
         else if (strcmp(argv[i], "--repair") == 0)
             repair = 1;
+        else if (strcmp(argv[i], "--discard-reachable") == 0)
+            discard_reachable = 1;
         else if (strcmp(argv[i], "-q") == 0)
             quiet = 1;
         else
             img = argv[i];
     }
     if (!img) {
-        fprintf(stderr, "usage: invf-fsck <image> [-f|--fix] [--repair] [-q]\n");
+        fprintf(stderr,
+            "usage: invf-fsck <image> [-f|--fix] [--repair] [-q]\n"
+            "                [--discard-reachable]\n");
+        return 2;
+    }
+    /* The flag is a decision to destroy data, so it is only meaningful
+     * attached to a repair. On its own it would parse, do nothing, and leave
+     * the operator believing the volume was repaired destructively. */
+    if (discard_reachable && !fix) {
+        fprintf(stderr, "invf-fsck: --discard-reachable only means something "
+                        "with -f: it is the decision to excise a key range that "
+                        "a live file still needs. Run `invf-fsck <image> -f "
+                        "--discard-reachable` if that is what you want.\n");
         return 2;
     }
 
@@ -94,6 +116,17 @@ int main(int argc, char **argv)
      * quarantined key the delta still holds) and names what is left, which is
      * gone for good.
      *
+     * The excision is the one step here that cannot be undone, and its unit
+     * is a KEY RANGE, not a page: a quarantined range can hold a 0x04 recipe
+     * blob or a 0x03 xattr record that a live inode -- whose own row survived
+     * in a readable page -- still needs. So -f proves, per range, that no live
+     * object requires a key inside it (fsck_v3_excise_safety) and REFUSES
+     * every range it cannot clear, changing nothing and leaving the volume
+     * damaged and intact: a key that reads EIO is recoverable, an excised key
+     * is gone. `--discard-reachable` is the operator's separate, explicit
+     * decision to proceed anyway; it is the only way to get the old behaviour,
+     * and it names what it is about to destroy first.
+     *
      * The exit code never softens the alarm: any damage found makes this pass
      * exit 3, repair or not (the v2 -f contract -- `issues` is computed from
      * what was found, not from what was fixed). A volume that is still
@@ -116,7 +149,7 @@ int main(int argc, char **argv)
         int mstale = -1, mstale_after = -1, mresynced = 0;
         const char *mwhy = NULL, *mwhy_after = NULL;
         (void)vol_mirror_compare(v, &mstale, &mwhy);
-        if (vol_fsck_scan(v, &rep, fix) != 0) {
+        if (vol_fsck_scan_ex(v, &rep, fix, discard_reachable) != 0) {
             fprintf(stderr, "invf-fsck: v3 scan failed\n");
             vol_close(v);
             return 1;
@@ -146,6 +179,29 @@ int main(int argc, char **argv)
                             "pass refuses. The volume is intact but unreadable: "
                             "restore it from a backup or from the original "
                             "image.\n", img);
+        } else if (fix && rep.v3_excise_refused) {
+            /* The excision is the one repair step that is not reversible, so
+             * it is the one that has to be proved safe first. A range a live
+             * inode still needs a key from is NOT excised: the key stays on the
+             * page it was on and still reads EIO, which is the one state the
+             * operator can recover from. The pass changes nothing and says so,
+             * which is exactly the contract the recipe check above already
+             * keeps (a blob is addressed by its own hash: gone is gone). */
+            degraded = 1;
+            fprintf(stderr, "invf-fsck: %s: CANNOT REPAIR: %llu of %llu "
+                            "quarantined key range(s) still hold keys %llu live "
+                            "inode(s) need -- a recipe blob (0x04) or an xattr "
+                            "record (0x03) that their own surviving rows name. "
+                            "Excising a range drops every key in it, so those "
+                            "files would lose their content while their names "
+                            "and inode rows went on resolving: this pass made NO "
+                            "change to them and left the volume damaged and "
+                            "intact. Restore the image or the page, or re-run "
+                            "with `-f --discard-reachable` to drop the range "
+                            "anyway and lose those files for good.\n", img,
+                    (unsigned long long)rep.v3_excise_refused,
+                    (unsigned long long)rep.v3_quarantined,
+                    (unsigned long long)rep.v3_excise_blocked);
         } else if (fix && rep.v3_quarantined && !rep.v3_repaired) {
             degraded = 1;
             fprintf(stderr, "invf-fsck: %s: CANNOT REPAIR: %llu unreadable base "
@@ -202,6 +258,19 @@ int main(int argc, char **argv)
                 printf("  quarantined:  %llu key range(s) -- a key inside one "
                        "reads EIO, everything else is readable\n",
                        (unsigned long long)rep.v3_quarantined);
+            /* The excision gate, in the report as well as on stderr: whether
+             * -f dropped a range or refused it is the single fact an operator
+             * deciding what to do next needs, and it must never be readable as
+             * "repaired" from the verdict line alone. */
+            if (rep.v3_excise_refused)
+                printf("  excision:     REFUSED for %llu of %llu quarantined "
+                       "range(s) -- they still hold keys %llu live inode(s) "
+                       "need; asked %llu live row(s)%s\n",
+                       (unsigned long long)rep.v3_excise_refused,
+                       (unsigned long long)rep.v3_quarantined,
+                       (unsigned long long)rep.v3_excise_blocked,
+                       (unsigned long long)rep.v3_excise_live,
+                       rep.v3_excise_partial ? ", PARTIAL walk" : "");
             printf("  cycles/shared: %llu\n",
                    (unsigned long long)rep.v3_cycles);
             /* WP75: the v3 branch used to return before the v2 free-block

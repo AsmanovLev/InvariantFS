@@ -1706,6 +1706,59 @@ int btree_excise(invfs_volume *v, invfs_blkptr root, const bt_quarantine *q,
     return 1;
 }
 
+/* The two liveness primitives the repair gates on. Both are pure interval
+ * arithmetic over the quarantine set -- no I/O -- so a caller can ask about
+ * every key a live object requires without touching the damaged page. */
+
+/* Is `k` inside any quarantined range? [lo, hi), an empty `hi` is unbounded. */
+int btree_quarantine_has(const bt_quarantine *q, const uint8_t *k, uint16_t klen)
+{
+    int j;
+    if (!q)
+        return 0;
+    for (j = 0; j < q->n; j++) {
+        const bt_range *r = &q->range[j];
+        if (r->lo_n && bt_cmp(k, klen, r->lo, r->lo_n) < 0)
+            continue;
+        if (r->hi_n) {
+            if (bt_cmp(k, klen, r->hi, r->hi_n) >= 0)
+                continue;
+        }
+        return 1;
+    }
+    return 0;
+}
+
+/* Does any quarantined range intersect the key space [lo, hi)? An empty `hi`
+ * is unbounded. Two half-open intervals meet iff each starts before the other
+ * ends -- with unbounded ends comparing as +infinity. This is the coarser of
+ * the two on purpose: a caller that knows only "every key of inode N's xattrs
+ * is somewhere in here" has an INTERVAL, not a key, and the honest question
+ * is whether that interval meets a quarantined one. */
+int btree_quarantine_overlaps(const bt_quarantine *q,
+                              const uint8_t *lo, uint16_t lo_n,
+                              const uint8_t *hi, uint16_t hi_n)
+{
+    int j;
+    if (!q)
+        return 0;
+    for (j = 0; j < q->n; j++) {
+        const bt_range *r = &q->range[j];
+        /* quarantine.lo < space.hi ? */
+        if (hi_n) {
+            if (r->lo_n && bt_cmp(r->lo, r->lo_n, hi, hi_n) >= 0)
+                continue;
+        }
+        /* space.lo < quarantine.hi ? */
+        if (r->hi_n) {
+            if (lo_n && bt_cmp(lo, lo_n, r->hi, r->hi_n) >= 0)
+                continue;
+        }
+        return 1;
+    }
+    return 0;
+}
+
 /* ------------------------------------------------------------------ */
 /* reachability-diff reclaim                                          */
 /* ------------------------------------------------------------------ */

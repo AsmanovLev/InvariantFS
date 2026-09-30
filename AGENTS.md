@@ -421,6 +421,29 @@ After a crash, the volume opens DIRTY and `vol_open` replays the **Delta Log**
 result is anomaly-free the volume transitions to CLEAN automatically;
 `invf-fsck [-f]` can also be run explicitly.
 
+> **What `invf-fsck -f` will and will not do on a damaged v3 volume.** An
+> unreadable base page is *contained*, not fatal: its key range is
+> **quarantined**, every other subtree stays readable, and a key inside a
+> quarantined range reads `EIO` rather than answering "absent". `-f` then
+> *excises* the quarantined ranges — it drops a key **range**, not a page — but
+> only after it has shown that no live, readable object requires a key inside
+> one: an inode row requires its recipe blob (keyed `0x04 || BLAKE3(recipe)`)
+> and its xattrs (`0x03 || inode || …`), and a directory entry requires the
+> row it resolves to. A range it cannot clear is **left alone**: the volume is
+> changed not at all, stays `DAMAGED`, exits 3, and prints
+> `CANNOT REPAIR` naming the files at stake. The keys stay on the page they are
+> on and keep reading `EIO`, which a restore can undo — an excised key cannot
+> be, so the pass will not take that decision for you. `-f --discard-reachable`
+> is the separate, explicit way to say "drop them anyway"; it names the cost
+> first, and the volume still reads `DAMAGED` afterwards. A damaged volume is
+> therefore never reported clean, whatever the flag.
+>
+> One consequence worth knowing: a torn **rightmost** leaf is quarantined as
+> `[its first key, +inf)`, and every `0x03`/`0x04` key sorts above such a
+> bound, so nothing in those namespaces can be enumerated while the page is
+> unreadable. `-f` therefore always refuses that case. It is the honest answer,
+> not an oversight — the flag is the way past it.
+
 To **undo** the last sweep (e.g., a sweep that mis-clustered data):
 
 ```bash
