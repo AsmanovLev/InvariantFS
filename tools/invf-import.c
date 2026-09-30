@@ -227,9 +227,26 @@ static void import_file(const char *spath, const char *vname)
     m.nlink = 1;
 
     vol_ensure_path(vol, vname);
-    if (vol_replace_file_with_meta(vol, vname, buf, len, &m) == 0 && !buf) {
-        if (vol_find(vol, vname) == 0)
-            vol_create_file_with_meta(vol, vname, NULL, 0, &m);
+    /* The volume-s answer decides whether this file arrived, and the answer
+     * used to be thrown away. vol_replace_file_with_meta returns the inode id
+     * and 0 on REFUSAL, so the old condition -- `== 0 && !buf` -- was the
+     * "refused, and there was nothing to store" case, and the fallback create
+     * below existed for a genuinely empty source file. What was missing is
+     * what happened when the volume refused for any OTHER reason: the return
+     * was dropped and n_files++ ran unconditionally, so a file that never
+     * arrived was counted as imported, n_skipped stayed 0 and the exit code
+     * was 0. That is the defect WP138 fixed on the read side, one site over --
+     * a lost file is not an import, and "did everything arrive" has to be
+     * answerable. */
+    {
+        uint64_t rid = vol_replace_file_with_meta(vol, vname, buf, len, &m);
+        if (rid == 0 && !buf && vol_find(vol, vname) == 0)
+            rid = vol_create_file_with_meta(vol, vname, NULL, 0, &m);
+        if (rid == 0) {
+            skip(vname, SKIP_VOLUME, "the volume refused the write");
+            free(buf);
+            return;
+        }
     }
     set_anchor_if_needed(vname);
     free(buf);
