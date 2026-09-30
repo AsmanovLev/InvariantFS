@@ -423,7 +423,7 @@ echo "== bit-exact cat =="
 bit_exact_all "$IMG" $PNGS_OK || exit 1
 echo "all 5 transcoded PNGs bit-exact"
 $B/invf-verify "$IMG" --deep | tee "$WORK/verify1.log" | tail -1
-grep -q "0 corrupt" "$WORK/verify1.log" || { echo "FAIL: corrupt files"; exit 1; }
+grep -q " 0 corrupt," "$WORK/verify1.log" || { echo "FAIL: corrupt files"; exit 1; }
 
 echo "== leg 1b: idempotent re-sweep =="
 $B/invf-sweep "$IMG" > "$WORK/sweep1b.log" 2>&1 || { cat "$WORK/sweep1b.log"; exit 1; }
@@ -458,7 +458,7 @@ for f in $LEG1C; do
 done
 bit_exact_all "$IMGS" $LEG1C || exit 1
 $B/invf-verify "$IMGS" --deep | tee "$WORK/verify1c.log" | tail -1
-grep -q "0 corrupt" "$WORK/verify1c.log" || { echo "FAIL: corrupt files"; exit 1; }
+grep -q " 0 corrupt," "$WORK/verify1c.log" || { echo "FAIL: corrupt files"; exit 1; }
 echo "Z_FIXED-strategy PNG + the STORED control transcoded, replayed bit-exact"
 
 echo "== leg 2: refused PNGs stay RAW, GENERIC_GUARD{PNGR,1} =="

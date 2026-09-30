@@ -625,7 +625,7 @@ $B/invf-ls "$IMG" | grep -q "fsA\.ext4!mbrmap" \
 # the empty member is a real 0-byte inode
 EINO=$(awk '$2 == "/empty.bin" && $1 == "fsA" {print $3}' "$WORK/manifest")
 ESIB=$(printf "fsA.ext4!mbr%04d-empty.bin" "$EINO")
-$B/invf-ls "$IMG" | grep "$ESIB" | grep -q "0 bytes" \
+$B/invf-ls "$IMG" | grep "$ESIB" | grep -q " 0 bytes" \
     || { echo "FAIL: empty member missing/not 0 bytes"; $B/invf-ls "$IMG" | grep empty; exit 1; }
 if $B/invf-ls "$IMG" | grep -q "plain\.ext4!"; then
     echo "FAIL: declined plain.ext4 left siblings"; exit 1

@@ -588,7 +588,26 @@ case "$out" in
       say "C: the refused restore left the post-savepoint bytes untouched" ;;
   *) echo "$out"; fail "C: the refused restore disturbed the volume" ;;
 esac
-$B/invf-fsck "$IMGF" >/dev/null 2>&1 || true
+# This ran `invf-fsck "$IMGF"` behind `|| true`. IMGF is declared at the
+# top of this file and never mkfs'd anywhere -- the "F: refusals (fresh /
+# sealed / double)" leg it was named for does not exist here (the double
+# rollback refusal is leg A3/C, on IMGA) -- so fsck was being pointed at a
+# path that was not there, and the `|| true` made "nothing to check"
+# indistinguishable from "checked and clean".
+#
+# Two things, so the line can no longer silently degrade:
+#   - it asserts that IMGF really is absent, so if a future leg starts
+#     writing that image, this stops being a no-op instead of quietly
+#     changing what is checked;
+#   - it fsck's the volume the [P] leg above actually left behind (IMGC,
+#     through the spt0 capture/restore/drop engine API) and asserts the
+#     verdict, the way the rest of this suite does.
+if [ -e "$IMGF" ]; then
+    fail "IMGF exists: a suite now writes the image this line used to fsck"
+fi
+$B/invf-fsck "$IMGC" | tee "$WORK/fsck-p.log" | grep -q "^OK$" \
+    || { cat "$WORK/fsck-p.log"; fail "P: fsck not clean after the SPT0 contract leg"; }
+say "P: the SPT0 leg's volume fscks clean"
 
 echo
 echo "ROLLBACK E2E: PASS"

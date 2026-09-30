@@ -599,7 +599,7 @@ for f in fat32.img fat16.img exfat.img; do
     $B/invf-ls "$IMG" | grep -q "$f!mbrt"  || { echo "FAIL: $f member table missing"; exit 1; }
     $B/invf-ls "$IMG" | grep -q "$f!mbrmap" || { echo "FAIL: $f member map missing"; exit 1; }
 done
-$B/invf-ls "$IMG" | grep "fat32.img!mbr[0-9]*-EMPTY.DAT" | grep -q "0 bytes" \
+$B/invf-ls "$IMG" | grep "fat32.img!mbr[0-9]*-EMPTY.DAT" | grep -q " 0 bytes" \
     || { echo "FAIL: empty member missing/not 0 bytes"; $B/invf-ls "$IMG"; exit 1; }
 if $B/invf-ls "$IMG" | grep -q "text\.img!"; then
     echo "FAIL: refused text.img gained siblings"; exit 1

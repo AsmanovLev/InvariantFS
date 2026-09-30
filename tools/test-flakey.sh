@@ -533,15 +533,32 @@ leg0() {
     import_all "$FLK/orig0b"
     $B/invf-fsck "$DM" >"$FLK/fsck0.log" 2>&1 \
         || { cat "$FLK/fsck0.log"; fail "leg0 fsck"; }
-    if grep -q "orphans:" "$FLK/fsck0.log" &&
-       ! grep -q "orphans:      0" "$FLK/fsck0.log"; then
-        echo "  re-mkfs+import leaked orphans (stale journal replayed into the fresh bitmap):"
+    # The gate used to be `grep -q "orphans:"`. That line is v2-only
+    # (src/cli/fsck.c:464): on a v3 volume -- which is every volume mkfs
+    # writes -- the report has no such line, so the gate could never fire
+    # and the leg asserted nothing. What the leg actually means on v3 is
+    # stronger and directly checkable: the re-mkfs erased the OLD volume
+    # completely, so what is left is exactly the corpus just imported.
+    # Three v3-true witnesses for that, none of them the sweep's own log:
+    local want; want=$(ls "$FLK/orig0b" | wc -l)
+    grep -qE "names/inodes: +$want name\(s\) over $want live inode\(s\)" "$FLK/fsck0.log" \
+        || { echo "  re-mkfs left something behind: expected exactly the $want names just imported" >&2
+             cat "$FLK/fsck0.log" >&2; fail "leg0 re-mkfs name/inode count"; }
+    # "orphan rows:" is printed by fsck only when a live inode has no
+    # directory entry naming it -- the v3 counterpart of a live record with
+    # no reference. A stale journal replayed into a fresh bitmap shows up
+    # here.
+    if grep -q "orphan rows:" "$FLK/fsck0.log"; then
+        echo "  re-mkfs+import leaked live rows nothing names (stale journal replayed into the fresh bitmap):"
         cat "$FLK/fsck0.log"
         fail "leg0 re-mkfs orphan gate"
     fi
     grep -q "^OK$" "$FLK/fsck0.log" \
         || { cat "$FLK/fsck0.log"; fail "leg0 fsck not clean"; }
-    echo "  re-mkfs + import: 0 orphans (stale journal fully erased)"
+    # and every freshly imported file reads back bit-exact, so "nothing left
+    # behind" is not bought by storing the wrong bytes
+    vol_files_exact "$FLK/orig0b" "leg0-reimport" || fail "leg0 re-imported content"
+    echo "  re-mkfs + import: exactly the $want fresh names, 0 orphan rows (stale journal fully erased)"
 }
 
 leg1() {
@@ -877,7 +894,15 @@ leg6() {
     # re-mkfs on a dirty device must leave NO trace of the previous volume
     # (the inode-area full-erase regression guard)
     $B/invf-fsck "$DM" >"$FLK/fsck6-postmkfs.log" 2>&1 || true
-    grep -qE 'live files:\s+0$' "$FLK/fsck6-postmkfs.log" \
+    # 'live files:' is the v2 report line too (src/cli/fsck.c:446). On a v3
+    # volume it is never printed, so this gate has been failing
+    # UNCONDITIONALLY since the format default flipped -- the suite has not
+    # run leg 6 in that time. The v3 line that says the same thing is
+    # "live recipes: ok (0 live inode(s) with content, ...)": after a fresh
+    # mkfs no live inode may carry content. Anchored on the literal ", every"
+    # so a non-zero count cannot satisfy it.
+    grep -qE 'live recipes: ok \(0 live inode\(s\) with content, every ' \
+        "$FLK/fsck6-postmkfs.log" \
         || { cat "$FLK/fsck6-postmkfs.log"; fail "mkfs left stale records (pre-compact)"; }
     gen_corpus "$FLK/orig6" $((SEED + 6)) small
     import_all "$FLK/orig6"

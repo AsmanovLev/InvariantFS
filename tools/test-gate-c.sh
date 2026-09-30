@@ -32,17 +32,22 @@ MNT=/tmp/opencode/gatec-mnt
 
 fail() { echo "FAIL: $*" >&2; exit 1; }
 
+DPID=0
+
 cleanup() {
     fusermount3 -u "$MNT" 2>/dev/null || true
-    pkill -f "invf-fuse.*c[123]\.img" 2>/dev/null || true
+    # Kill the daemon this script started, by the pid it already tracks.
+    # This used to be `pkill -f "invf-fuse.*c[123]\.img"`, a pattern kill on
+    # a host where many agents run suites at once: it reaches outside this
+    # script's own process tree and can take down somebody else's daemon
+    # whose image happens to be named c1/c2/c3.img.
+    [ "$DPID" -gt 0 ] 2>/dev/null && kill "$DPID" 2>/dev/null
     rm -rf "$MNT"
     rm -f c1.img c2.img c3.img
     rm -rf gatec
 }
 
 trap cleanup EXIT
-
-DPID=0
 
 mnt_up() { # <img>
     local img=$1
@@ -186,6 +191,26 @@ mnt_down
 
 fsck_ok c1.img
 verify_ok c1.img
+
+# invf-verify --deep only re-derives each file's checksum from the bytes the
+# volume stored, so it catches bit-rot but NOT a write that stored the wrong
+# bytes in the first place. The fillers in $FILLDIR are the suite's only
+# ground truth and nothing compared against them: read three back through
+# invf-cat and cmp against the source that invf-cp took them from.
+CMPN=0
+for f in filler_fill000.txt filler_fill001.txt filler_fill100.txt; do
+    src="$FILLDIR/${f#filler_}"
+    [ -f "$src" ] || fail "C1: source filler $src is gone; the round-trip has nothing to compare"
+    [ "$filln" -gt 100 ] || fail "C1: only $filln fillers imported; cannot reach ${f#filler_}"
+    $B/invf-cat c1.img "$f" "gatec/out.$f" >/dev/null \
+        || fail "C1: invf-cat could not read $f back"
+    cmp -s "$src" "gatec/out.$f" \
+        || fail "C1: $f did not read back byte-identical to $src"
+    rm -f "gatec/out.$f"
+    CMPN=$((CMPN + 1))
+done
+echo "  $CMPN imported fillers read back byte-identical to their sources"
+
 rm -f "$MNT"/pad_* "$MNT"/_*
 
 echo "  Leg C1: PASS"
@@ -263,7 +288,14 @@ ls "$MNT"/ > gatec/ls-c2.txt 2>&1
 LS_RC=$?
 set -e
 NFILES=$(wc -l < gatec/ls-c2.txt)
-echo "  ls after race: rc=$LS_RC, $NFILES entries"
+# NFILES itself is only reported: the two writers stop at whatever point the
+# reserve ran out, so the total is not a fixed number. What IS fixed is the
+# 20 names the volume carried BEFORE the race -- nothing either writer did may
+# drop one of them, and that is the property worth a gate.
+SURVIVORS=$(ls "$MNT"/pre_fill*.txt 2>/dev/null | wc -l)
+echo "  ls after race: rc=$LS_RC, $NFILES entries, $SURVIVORS/20 pre-filled names still resolve"
+[ "$SURVIVORS" -eq 20 ] \
+    || fail "C2: only $SURVIVORS of the 20 pre-filled files still resolve after the race"
 
 # Unmount and verify
 mnt_down

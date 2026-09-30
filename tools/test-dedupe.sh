@@ -184,7 +184,7 @@ echo "bitmap cross-check OK: +$FREED blocks returned vs control"
 
 echo "== verify --deep =="
 $B/invf-verify "$IMG" --deep | tee "$WORK/verify1.log"
-grep -q "0 corrupt" "$WORK/verify1.log" || { echo "FAIL: corrupt files"; exit 1; }
+grep -q " 0 corrupt," "$WORK/verify1.log" || { echo "FAIL: corrupt files"; exit 1; }
 
 echo "== cat bit-exact =="
 ok=1

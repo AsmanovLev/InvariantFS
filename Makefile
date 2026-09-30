@@ -860,6 +860,34 @@ e2e: all
 	$(TESTENV) bash tools/run-e2e.sh tools/test-qcow2.sh
 	$(TESTENV) bash tools/run-e2e.sh tools/test-qcow2-zlib.sh
 	$(TESTENV) bash tools/run-e2e.sh tools/test-ivpacks.sh
+	@# tools/test-sweepboot.sh was written in the WP23 era and never put in
+	@# a target or a workflow, so it counted as coverage and ran nowhere.
+	@# It is the only gate on `invf-sweep --extract-packs` and on the
+	@# self-hosting loop it exists for (the volume carrying the codecpacks
+	@# that decompose it), and it needs nothing this tier lacks: no FUSE,
+	@# no sudo, no loop device, no network -- it is an offline image suite,
+	@# so it belongs in the plain `e2e` list rather than beside `flakey`.
+	@# Verified green on its first run under run-e2e.sh (2026-09-30); the
+	@# "remains RED on main" note in INCIDENTS.md predates the WP101
+	@# `--seal` migration and is stale.
+	$(TESTENV) bash tools/run-e2e.sh tools/test-sweepboot.sh
+	@# tools/test-gate-c.sh: the ENOSPC tier. Floor breach -> READONLY flip ->
+	@# invf-sweep -> space-latch auto-release makes the volume writable again,
+	@# two writers racing the reserve, and writes landing while the daemon
+	@# sweeps. No external tooling (python3 + fusermount3), so it belongs in
+	@# the plain list. It was in no target and no workflow; read end to end
+	@# and run under run-e2e.sh before wiring (green on the first run,
+	@# 2026-09-30 -- but two of its legs only became assertions in the same
+	@# commit; see that commit's message).
+	$(TESTENV) bash tools/run-e2e.sh tools/test-gate-c.sh
+	@# tools/test-gate-d2.sh: the concurrency tier. Two writers on one file,
+	@# ten writers on ten files, and a daemon sweep pass running against a
+	@# live appender. Also in no target and no workflow before this; it is a
+	@# LOCKED suite (generic /tmp/opencode mountpoint), which run-e2e.sh
+	@# serialises on the global lock. Read end to end and run under
+	@# run-e2e.sh before wiring -- green, but only after its D2c leg was
+	@# given the assertion it claimed to have (see that commit).
+	$(TESTENV) bash tools/run-e2e.sh tools/test-gate-d2.sh
 	$(TESTENV) bash tools/run-e2e.sh tools/test-fuzz.sh
 	$(TESTENV) bash tools/run-e2e.sh tools/test-writepath.sh
 	$(TESTENV) bash tools/run-e2e.sh tools/test-acl.sh

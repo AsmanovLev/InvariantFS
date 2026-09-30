@@ -698,7 +698,7 @@ else
 fi
 grep -q "fs-a\.xfs!mbrt" <<<"$LS" || { echo "FAIL: no member table"; exit 1; }
 grep -q "fs-a\.xfs!mbrmap" <<<"$LS" || { echo "FAIL: no member map"; exit 1; }
-grep "fs-a\.xfs!mbr.*empty" <<<"$LS" | grep -q "0 bytes" \
+grep "fs-a\.xfs!mbr.*empty" <<<"$LS" | grep -q " 0 bytes" \
     || { echo "FAIL: empty member missing/not 0 bytes"; $B/invf-ls "$IMG"; exit 1; }
 if grep -q "junk\.xfs!" <<<"$LS"; then
     echo "FAIL: refused junk.xfs left siblings"; exit 1

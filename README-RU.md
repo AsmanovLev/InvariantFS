@@ -142,9 +142,18 @@ Gate-тесты в `tools/`:
 | Скрипт | Покрытие |
 |---|---|
 | `bench-gate-b.sh` | Бенчмарк v2 vs v1 |
-| `test-gate-c.sh` | ENOSPC-стресс (porог, гонка, sweep-interlock) |
-| `test-gate-d1.sh` | ACL/xattr (4096 граница, listxattr, полный объём, параллельное создание) |
+| `test-gate-c.sh` | ENOSPC-стресс (порог, гонка, sweep-interlock) |
 | `test-gate-d2.sh` | Параллельная запись (один файл, много файлов, sweep при записи) |
+
+`test-gate-d1.sh` удалён. Его ACL/xattr-покрытие шире покрыто
+`test-acl.sh` (леги A–E, побайтовое сравнение сохранённого блока
+posix_acl_xattr, enforcement от имени другого uid) и
+`test-meta-v3-xattr.sh` (значения 9000/12000/4096 байт, расщепление листьев,
+каскад при unlink); лега D1a проверяла лимит `INVFS_META_XATTR_MAX` (4096) —
+это v2-эпоха, на v3 xattr'ы именованные ключи в B+-дереве, и лимита TLV
+больше нет. Сам скрипт требовал `attr` (setfattr/getfattr, отсутствует в CI)
+и `user_allow_other` в `/etc/fuse.conf`, то есть не запускался ни в одном
+автоматическом цикле.
 
 ## Кодеки
 

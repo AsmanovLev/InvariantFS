@@ -152,7 +152,7 @@ done
 [ "$ok" = 1 ] || exit 1
 echo "all files bit-exact"
 $B/invf-verify "$IMG" --deep | tee "$WORK/verify1.log" | tail -1
-grep -q "0 corrupt" "$WORK/verify1.log" || { echo "FAIL: corrupt files"; exit 1; }
+grep -q " 0 corrupt," "$WORK/verify1.log" || { echo "FAIL: corrupt files"; exit 1; }
 $B/invf-fsck "$IMG" | tee "$WORK/fsck1.log"
 fsck_require_clean "$WORK/fsck1.log" "leg1" || exit 1
 

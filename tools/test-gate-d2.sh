@@ -26,10 +26,22 @@ cd /tmp/opencode
 
 fail() { echo "FAIL: $*" >&2; exit 1; }
 
+DPID=0
+
+# Run the daemon in the FOREGROUND under setsid, with its stderr kept.
+# Without -f, libfuse's fuse_daemonize() forks and the parent's stderr --
+# the only thing that reached $WORK/fuse.log here -- dies with it, so the
+# daemon's own output (the sweep pass lines D2c needs to prove it ran) was
+# never captured. With -f there is exactly one process, its pid is known,
+# and the log is complete. It also removes the pgrep-by-pattern process
+# hunt, which on a host where several agents run suites at once can match
+# somebody else's daemon.
 mnt_up() {
-    $B/invf-fuse "$1" "$MNT" 2>"$WORK/fuse.log"
-    for _ in $(seq 1 50); do
+    setsid $B/invf-fuse -f "$1" "$MNT" >"$WORK/fuse.log" 2>&1 < /dev/null &
+    DPID=$!
+    for _ in $(seq 1 100); do
         grep -q " $MNT " /proc/mounts && return 0
+        kill -0 "$DPID" 2>/dev/null || fail "invf-fuse died mounting $1"
         sleep 0.1
     done
     fail "mount of $1 never appeared"
@@ -42,7 +54,7 @@ mnt_down() {
         sleep 0.1
     done
     for _ in $(seq 1 300); do
-        pgrep -f "invf-fuse $1" >/dev/null || return 0
+        kill -0 "$DPID" 2>/dev/null || return 0
         sleep 0.2
     done
     fail "invf-fuse daemon did not exit after unmount"
@@ -53,7 +65,7 @@ fsck_ok() { $B/invf-fsck "$1" | tee "$WORK/fsck.last" | grep -q "^OK$" \
 
 cleanup() {
     fusermount3 -u "$MNT" 2>/dev/null || true
-    pkill -f "invf-fuse $IMG" 2>/dev/null || true
+    [ "$DPID" -gt 0 ] 2>/dev/null && kill "$DPID" 2>/dev/null
     # kill any leftover background writers from leg D2c
     if [ -n "${WRITER_PID:-}" ] && [ "$WRITER_PID" -gt 0 ] 2>/dev/null; then
         kill "$WRITER_PID" 2>/dev/null || true
@@ -173,10 +185,15 @@ fi
 echo "== [D2c] sweep during active writes =="
 rm -f "$IMG"
 $B/invf-mkfs "$IMG" 20M >/dev/null
-mnt_up "$IMG"
 
-# Import some initial data to have something to sweep
+# Seed data for the sweep to chew on. This has to happen BEFORE the mount:
+# invf-cp is an offline tool, and running it against the image while the
+# daemon holds it open writes the volume underneath a live mount (anything
+# the daemon has not flushed is lost, and the daemon's own block allocator
+# has no idea). It was on the mounted side of mnt_up here.
 $B/invf-cp "$IMG" /etc/hostname pre-sweep.txt >/dev/null 2>&1 || true
+
+mnt_up "$IMG"
 echo "seed data for sweep" > "$MNT/seed.txt"
 
 # Start a background writer
@@ -190,8 +207,17 @@ WRITER_PID=""
 WRITER_PID=$!
 sleep 0.5  # let some data accumulate
 
-# Trigger sweep via extended attribute (daemon runs it synchronously)
-setfattr -n user.invfs.sweep -v 1 "$MNT/" 2>/dev/null || true
+# Trigger the sweep. This used to be
+#     setfattr -n user.invfs.sweep -v 1 "$MNT/" 2>/dev/null || true
+# behind an unconditional '|| true', so on any host without attr(1) -- or
+# with a daemon that ignored the xattr -- the trigger silently never fired
+# and the leg below asserted that concurrent sweep+write is safe without
+# any sweep having run at all. 'kill -USR1 <pid>' is the other trigger the
+# daemon documents for the same pass (AGENTS.md §2.5: USR1 and the xattr
+# set the same in-process flag), it needs no external tool, and the pass is
+# now required to leave a witness on the volume before the leg
+# counts.
+kill -USR1 "$DPID" || fail "D2c: could not deliver SIGUSR1 to invf-fuse (pid $DPID)"
 
 # Let sweep + write run concurrently for 5 seconds
 sleep 5
@@ -200,22 +226,43 @@ sleep 5
 kill "$WRITER_PID" 2>/dev/null || true
 wait "$WRITER_PID" 2>/dev/null || true
 
-# Give the daemon's sweep thread a moment to finish if still running
-sleep 2
+# Give the daemon's sweep thread a moment to finish if still running, and
+# wait (bounded) for the pass to report DONE. A pass that never reports is
+# a pass that never ran, which is the whole point of the assertion below.
+DONE_FILES=""
+for _ in $(seq 1 150); do
+    DONE_FILES=$(sed -n 's/^\[sweep\] DONE files=\([0-9][0-9]*\).*/\1/p' "$WORK/fuse.log" | tail -1)
+    [ -n "$DONE_FILES" ] && break
+    sleep 0.2
+done
+if [ -z "$DONE_FILES" ]; then
+    echo "FAIL: the USR1 pass never completed -- no '[sweep] DONE' in the daemon log" >&2
+    cat "$WORK/fuse.log" >&2
+    fail "D2c: no sweep ran"
+fi
+[ "$DONE_FILES" -gt 0 ] \
+    || { cat "$WORK/fuse.log" >&2; fail "D2c: the sweep pass walked 0 files"; }
+grep -q '^\[manual\] save point captured' "$WORK/fuse.log" \
+    || { cat "$WORK/fuse.log" >&2; fail "D2c: the pass armed no save point (not a manual full pass)"; }
+echo "  D2c: the pass really ran (walked $DONE_FILES file(s), save point armed)"
 
 # Verify active.txt is readable and not corrupted
+D2C_OK=1
 if [ ! -f "$MNT/active.txt" ]; then
     bail "D2c: active.txt missing after concurrent sweep+write"
+    D2C_OK=0
 else
     LINE_COUNT=$(grep -c '.' "$MNT/active.txt" || true)
     if [ "$LINE_COUNT" -lt 1 ]; then
         bail "D2c: active.txt is empty after concurrent sweep+write"
+        D2C_OK=0
     else
         # Each line must match data-NNNNNNNNNNNNNNNNNNN (13-20 digit nanosecond timestamp)
         BAD=$(grep -vE '^data-[0-9]{13,20}$' "$MNT/active.txt" | wc -l || true)
         if [ "$BAD" -ne 0 ]; then
             bail "D2c: $BAD corrupted lines in active.txt"
             grep -vE '^data-[0-9]{13,20}$' "$MNT/active.txt" | head -5
+            D2C_OK=0
         else
             echo "  D2c: active.txt has $LINE_COUNT valid lines"
         fi
@@ -224,7 +271,27 @@ fi
 
 mnt_down "$IMG"
 fsck_ok "$IMG"
-pass "D2c: sweep during active writes, no corruption"
+# Proof that a pass really ran. The daemon's own stderr is not a witness
+# here: invf-fuse daemonises, and only what the foreground parent printed
+# before it forked lands in $WORK/fuse.log. The save point is. Every full
+# pass arms one in `prepare`, before the walk (AGENTS.md §2.5), and it
+# survives the unmount -- invf-fsck reports it as "save point:   live". A
+# volume with no such line is a volume no pass ever touched, which is the
+# case this leg used to pass without ever noticing.
+SPT0=$(sed -n 's/^ *save point: *\(.*\)$/\1/p' "$WORK/fsck.last" | head -1)
+[ "$SPT0" = "live" ] \
+    || { echo "FAIL: no live save point after the USR1 pass (got: '${SPT0:-none}')" >&2
+         cat "$WORK/fsck.last" >&2; fail "D2c: no sweep ran"; }
+echo "  D2c: the pass ran and armed its rollback window (save point: live)"
+# This used to be an unconditional 'pass' sitting after the whole if/else
+# chain above, so every 'bail' in D2c still printed "PASS: D2c: sweep
+# during active writes" and only the summary's FAIL counter carried the
+# failure. The verdict belongs here, where the checks actually ran.
+if [ "$D2C_OK" = 1 ]; then
+    pass "D2c: sweep during active writes, no corruption"
+else
+    echo "  D2c FAILED (see above)"
+fi
 
 # ═══════════════════════════════════════════════════════════════════════
 # Summary

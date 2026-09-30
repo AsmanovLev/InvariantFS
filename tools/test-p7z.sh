@@ -561,7 +561,7 @@ while IFS=$'\t' read -r idx sn sz; do
     $B/invf-ls "$IMG" | grep "$mbr" | grep -q "$sz bytes" \
         || { echo "FAIL: member $mbr not $sz bytes"; $B/invf-ls "$IMG"; exit 1; }
 done < "$WORK/orig/stored.table"
-$B/invf-ls "$IMG" | grep "stored\.7z!mbr....-empty\.dat" | grep -q "0 bytes" \
+$B/invf-ls "$IMG" | grep "stored\.7z!mbr....-empty\.dat" | grep -q " 0 bytes" \
     || { echo "FAIL: empty member missing/not 0 bytes"; exit 1; }
 for f in lzma2.7z enc.7z garbage.7z nomagic.7z trunc.7z; do
     if $B/invf-ls "$IMG" | grep -q "$f!"; then

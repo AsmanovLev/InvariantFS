@@ -386,6 +386,37 @@ if grep -q "exe media" "$WORK/sweep-neg.log"; then
 fi
 C=$("$WORK/classof" "$IMGNEG" game.exe)
 echo "  game.exe (neg): $C"
+# KNOWN FAILING SINCE 2026-09-30 -- deliberately not adjusted. The enum
+# numbering this line expects is correct and current:
+#   cls 5 = INVFS_CLASS_GENERIC_MEMLIMIT, cls 6 = INVFS_CLASS_GENERIC_GUARD
+#     (src/core/invarifs.h:173-176)
+#   algo 15 = INVFS_ALGO_EXER, algo 13 = INVFS_ALGO_RAWIMG
+#     (src/core/invarifs.h:130, :153)
+# The volume really gets "cls=6 algo=13 gen=1", i.e. GENERIC_GUARD stamped by
+# the raw_image codecpack, NOT the GENERIC_MEMLIMIT{EXER} that
+# vol_exer_carve writes at src/core/vol_exer.c:281 when the decode-memory
+# limit refuses the carve. That is a real defect, not stale numbering:
+#
+#   1. the carve is refused for the memory limit and stamps MEMLIMIT/EXER;
+#   2. the same sweep pass then falls through to the try-last codecpack loop
+#      (src/core/vol_sweep.c:1355), which offers the file to the raw_image
+#      pack ("[packdbg] try-last raw_image on game.exe ... prc=0" under
+#      INVFS_DEBUG_PACKS=1), the pack declines, and vol_pack_sweep stamps
+#      GENERIC_GUARD with ITS OWN algo (src/core/vol_sweep.c:2440) --
+#      clobbering the carve's refusal stamp;
+#   3. the two stamps do not mean the same thing to the retry policy.
+#      MEMLIMIT/EXER re-enters vol_exer_retry as soon as the limit admits the
+#      codec (src/core/vol_sweep.c:1571-1572 and :2124-2126); GUARD retries
+#      only when the codec's generation grows (:1591-1594, :2114-2116). With
+#      the stamp overwritten, the retry is lost -- measured: after the 128K
+#      pass, re-sweeping WITHOUT the limit does not carve, and the upgrade leg
+#      below cannot pass either.
+#
+# vol_sweep.c's own v3_stamp_generic (:1405) already refuses to overwrite an
+# existing MEMLIMIT/GUARD stamp; vol_pack_sweep's decline path bypasses that
+# guard. The fix belongs in the engine, not in this assertion, so the
+# expectation is left exactly as written: a test rewritten to match a bug is
+# worse than a red one.
 [ "$C" = "cls=5 algo=15 gen=1" ] || { echo "FAIL: want GENERIC_MEMLIMIT{EXER,1}"; exit 1; }
 # the generic fallback is still bit-exact
 ok=1

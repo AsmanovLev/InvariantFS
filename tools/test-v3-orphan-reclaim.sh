@@ -424,7 +424,38 @@ RECLAIMED=$(sed -n 's/^\[reclaim\] \([0-9]*\) orphaned.*/\1/p' sw.out | head -1)
 FREE1=$(freeblocks sw.img)
 [ -n "$FREE1" ] || fail "leg 9: could not parse the fsck free-block count after the sweep"
 echo "  transform sweep with the gate on collected $RECLAIMED base page(s)"
-echo "  free blocks: $FREE0 -> $FREE1"
+echo "  free blocks: $FREE0 -> $FREE1 (net, measured by fsck -- not by the sweep's log)"
+
+# The independent witness. FREE0/FREE1 are measured by a separate fsck
+# precisely so this leg does not have to believe the sweep's own "[reclaim] N"
+# line -- but they are a NET figure, and a sweep allocates as well as frees,
+# so the net is NOT a measurement of the collector. Measured on a clean tree
+# at this leg's own geometry (0.3 GB): the gated sweep frees 14 orphan pages
+# and the volume's free count goes 69170 -> 69170 (the sweep allocated 14 of
+# its own), while the same sweep with the collector disabled goes
+# 69170 -> 69156. A `[ "$FREE1" -gt "$FREE0" ]` gate therefore fails on a
+# perfectly healthy collector, and passes or fails with the volume size --
+# it is not the assertion this leg wants.
+#
+# The sound witness is a differential: the same corpus, the same sweep, the
+# collector off, compared against the collector on. The collector runs AFTER
+# the sweep's seven stages (the "[reclaim]" line lands past "[7/7] finalize"),
+# so everything before it is identical between the two runs and the gap
+# between them is the collector's work and nothing else.
+mkvol sw-nogate.img
+"$B/invf-import" sw-nogate.img swcorp > sw-nogate.import 2>&1 \
+    || { cat sw-nogate.import; fail "leg 9: control import failed"; }
+NG0=$(freeblocks sw-nogate.img)
+[ -n "$NG0" ] || fail "leg 9: could not parse the control image's free-block count"
+INVFS_RECLAIM_ORPHANS=0 "$B/invf-sweep" sw-nogate.img > sw-nogate.out 2> sw-nogate.err \
+    || { tail -20 sw-nogate.err; fail "leg 9: the control sweep failed"; }
+grep -q "^\[reclaim\] " sw-nogate.out \
+    && fail "leg 9: the control run collected pages with INVFS_RECLAIM_ORPHANS=0 -- the control is not a control"
+NG1=$(freeblocks sw-nogate.img)
+[ -n "$NG1" ] || fail "leg 9: could not parse the control image's free count after the sweep"
+[ "$FREE1" -gt "$NG1" ] \
+    || fail "leg 9: the collector reported $RECLAIMED page(s) but disabling it changed nothing: free $FREE0->$FREE1 with the gate on, $NG0->$NG1 with it off"
+echo "  control sweep (collector off) left $NG0 -> $NG1; the collector is worth $((FREE1 - NG1)) block(s)"
 
 # Bit-exactness, byte for byte, against the source corpus.
 BADREAD=0

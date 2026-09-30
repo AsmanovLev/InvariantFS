@@ -268,7 +268,7 @@ echo "== sibling set (incl. the WP16b member map) =="
 N=$($B/invf-ls "$IMG" | grep -c "multi\.splt!" || true)
 echo "multi.splt!* names: $N"
 [ "$N" -eq 6 ] || { echo "FAIL: want 6 (4 members + member table + map)"; $B/invf-ls "$IMG"; exit 1; }
-$B/invf-ls "$IMG" | grep "multi\.splt!mbr0001-chunk1" | grep -q "0 bytes" \
+$B/invf-ls "$IMG" | grep "multi\.splt!mbr0001-chunk1" | grep -q " 0 bytes" \
     || { echo "FAIL: empty member missing/not 0 bytes"; $B/invf-ls "$IMG"; exit 1; }
 $B/invf-ls "$IMG" | grep -q "multi\.splt!mbrt" \
     || { echo "FAIL: member table sibling missing"; exit 1; }
