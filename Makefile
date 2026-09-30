@@ -127,7 +127,9 @@ CLI_MAINS := mkfs verify fsck cp cat ls stat arctest blkio_test resize \
              sweep_publish_rollback_test \
              rollback_symlink_test \
              sibling_retire_v3_test tar_cap_test fold_delta_read_test \
-             reclaim_reader_epoch_test
+             reclaim_reader_epoch_test readdir_error_test
+$(foreach t,$(CLI_MAINS),$(eval $(call TOOL_RULE,$(t),)))
+
 # NOTE on reclaim_reader_epoch_test: it is in CLI_MAINS so it BUILDS, but it
 # is deliberately NOT in the test: run recipe below. It is the deterministic
 # red control for the OPEN base-reclaim-vs-reader defect (vol_reclaim_drain
@@ -136,7 +138,6 @@ CLI_MAINS := mkfs verify fsck cp cat ls stat arctest blkio_test resize \
 # that is not fixed yet. It moves into the recipe in the same commit that
 # wires the reclaim reader epoch. Run it by hand:
 #   ./bin/invf-reclaim_reader_epoch_test /tmp   # expect: "the read FAILED"
-$(foreach t,$(CLI_MAINS),$(eval $(call TOOL_RULE,$(t),)))
 
 # WP71: loads every containerpack .so through dlmopen/dlopen -> needs -ldl,
 # and resolves tools/codecpacks/... relative to the repo root.
@@ -707,6 +708,14 @@ test: $(TEST_BINS) $(OUT)/invf-arctest $(OUT)/invf-blkio_test $(OUT)/invf-codec_
 	$(TESTENV) $(TESTISO) $(OUT)/invf-symlink_v3_test /tmp
 	$(TESTENV) $(TESTISO) $(OUT)/invf-large_file_v3_test /tmp
 	$(TESTENV) $(TESTISO) $(OUT)/invf-read_parallel_bitexact_test /tmp
+	@# A failed listing must not look like an empty directory (readdir, and
+	@# the same shape in listxattr). It runs under $(TESTISO) normally: it
+	@# stubs fuse_get_context() to NULL, so every permission check takes the
+	@# documented uid-0 bypass and no case here depends on a denial that a
+	@# fake-root uid map would swallow. Its errno injection is INVFS_FAULT,
+	@# which is unset here -- the unset path is the one that has to stay
+	@# inert in production, so this also asserts it stays inert.
+	$(TESTENV) $(TESTISO) $(OUT)/invf-readdir_error_test /tmp
 	@# WP-arc-concurrent-safe: the content cache, under concurrency. TSAN is
 	@# the structure (arc.c had no lock at all), ASan is the borrow (an
 	@# arc_get pointer freed underneath the reader's memcpy). Both must be

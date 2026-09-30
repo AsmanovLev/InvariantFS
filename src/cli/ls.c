@@ -146,7 +146,16 @@ int main(int argc, char **argv)
             ents = (invfs_dirent *)calloc(4096, sizeof *ents);
             if (!ents) { free(st); vol_close(vol); return 1; }
             n = vol_list_dir(vol, dir, ents, 4096);
-            if (n < 0) n = 0;
+            /* A failed listing is not an empty one. `n = 0` here printed
+             * nothing for the directory, carried on, and exited 0: an
+             * unreadable subtree looked like an empty one, and the "N
+             * file(s)" tally at the end counted a total that was quietly
+             * short. Name the directory, say why, and fail. */
+            if (n < 0) {
+                fprintf(stderr, "invf-ls: cannot list %s: %s\n",
+                        dir[0] ? dir : "/", strerror(-n));
+                free(ents); free(st); vol_close(vol); return 1;
+            }
             if (n == 4096)
                 fprintf(stderr, "warning: %s%s truncated at 4096 entries\n",
                         dir, dir[0] ? "/" : "");

@@ -192,6 +192,9 @@ typedef struct {
 int vol_is_dir(invfs_volume *v, const char *name);
 uint64_t vol_mkdir(invfs_volume *v, const char *name);
 int vol_rmdir(invfs_volume *v, const char *name);   /* -2 = ENOTEMPTY */
+/* entry count, 0 for an empty directory, or -ENOMEM / -EIO. A failed
+   listing is never 0: a caller cannot tell the two apart, and "0" is what
+   a FUSE readdir turns into an empty directory reported as success. */
 int vol_list_dir(invfs_volume *v, const char *dir, invfs_dirent *ents, int max);
 /* auto-create parent directory anchors for a path ("a/b.txt" -> "a/") */
 int vol_ensure_path(invfs_volume *v, const char *name);
@@ -771,6 +774,9 @@ int vol_get_xattr(invfs_volume *v, uint64_t inode_id, const char *xn,
 int vol_set_xattr(invfs_volume *v, uint64_t inode_id, const char *xn,
                   const void *val, size_t vlen);
 int vol_remove_xattr(invfs_volume *v, uint64_t inode_id, const char *xn);
+/* bytes needed for the NUL-separated name list, 0 for an inode with no
+   xattrs, -2 for a buffer too small, -EIO if the store could not be read.
+   A read failure is never 0. */
 int vol_list_xattr(invfs_volume *v, uint64_t inode_id,
                    char *buf, size_t bcap);
 

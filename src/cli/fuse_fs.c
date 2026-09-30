@@ -1216,7 +1216,19 @@ static int invf_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
         ents = (invfs_dirent *)malloc((size_t)cap * sizeof(invfs_dirent));
         if (!ents) return -ENOMEM;
         n = vol_list_dir(g_vol, dir, ents, cap);
-        if (n < cap || n < 0) break;
+        /* A failed listing is NOT an empty one. `break`ing out and falling
+         * through to `return 0` is how a directory that could not be read
+         * reached ls(1) as a directory with nothing in it and exit 0 -- a
+         * silently wrong answer to the question the user asked, and a hole
+         * in the tree for anything walking it. Propagate the errno.
+         *
+         * Why not emit what we have and then fail: this entry point ignores
+         * `offset` and re-lists from scratch on every call, so the kernel
+         * has no resume point -- a short list would be indistinguishable
+         * from a directory that really is short. Emitting nothing and
+         * failing is the only answer a caller can tell from a complete one. */
+        if (n < 0) { free(ents); return n; }
+        if (n < cap) break;
         cap *= 2;   /* possibly truncated: retry with a bigger buffer */
     }
     int i;
@@ -1670,8 +1682,16 @@ static int invf_write(const char *path, const char *buf, size_t size, off_t offs
     wctx *c = (wctx *)(uintptr_t)fi->fh;
     size_t done = 0;
     (void)is_temp_path;
+    /* EROFS, not ENOSPC. Every other entry point that refuses a mutation
+     * on a read-only volume returns -EROFS -- mkdir, create, unlink, rmdir,
+     * symlink, link, mknod, setxattr, removexattr, truncate, rename -- and
+     * AGENTS.md 2.10 documents EROFS for this case by name. The two errnos
+     * are not interchangeable to a caller: ENOSPC means "retry, space may
+     * come back", EROFS means "stop", and a writer that retries ENOSPC (a
+     * cp -r onto a latched volume, a package script) never gives up on a
+     * volume that cannot accept the write at all. */
     if (!vol_write_enabled(g_vol))
-        return -ENOSPC;
+        return -EROFS;
     /* WP22a: the 4 GB wall is gone -- the commit writes a v2 recipe header
      * (u64 file_size) once v1's u32 overflows. MAX_FILE_SIZE (1 TB) remains
      * as the format sanity bound. */
@@ -2943,12 +2963,14 @@ static int invf_listxattr(const char *path, char *list, size_t size)
     ino = vol_find(g_vol, ename);
     if (!ino) { pthread_mutex_unlock(&g_io_lock); return 0; }
     /* engine semantics: positive = bytes written (= total needed);
-     * -2 = buffer too small; 0/-1 = no xattrs */
+     * -2 = buffer too small; 0 = no xattrs; -EIO = the xattr store could
+     * not be read. `0` and an error used to both land on `return 0`, so a
+     * scan failure told getfattr(1) the object carries no xattrs. */
     rc = vol_list_xattr(g_vol, ino, list, size);
     pthread_mutex_unlock(&g_io_lock);
-    if (rc > 0) return rc;
+    if (rc >= 0) return rc;
     if (rc == -2) return -ERANGE;
-    return 0;
+    return rc;
 }
 
 static int invf_removexattr(const char *path, const char *name)

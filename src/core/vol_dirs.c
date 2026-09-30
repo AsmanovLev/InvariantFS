@@ -2,6 +2,7 @@
  * hard links, replace/unlink. Split from volume.c. */
 
 #include "volume_internal.h"
+#include "vol_fault.h"
 
 
 /* ---- virtual directories (prefix-based; mkdir creates an empty anchor
@@ -304,7 +305,7 @@ int vol_v3_path_list_dir(invfs_volume *v, const char *dir,
     c.n = 0;
     rc = vol_v3_dirent_scan(v, pino, v3_list_cb, &c);
     if (rc != 0 && rc != 1)
-        return -1;
+        return -EIO;
     /* the tree orders by (name_len, name); v2 listings are name-sorted and
      * the FUSE readdir caller expects that, so sort here. */
     if (c.n > 1)
@@ -813,7 +814,13 @@ int vol_v3_walk(invfs_volume *v, vol_v3_walk_cb cb, void *ctx)
 }
 
 
-/* list one directory level: first path component after "dir/" */
+/* list one directory level: first path component after "dir/".
+ *
+ * Returns the entry count, 0 for a directory that is genuinely empty, or a
+ * negative errno: -ENOMEM if the dedup set could not be allocated, -EIO if
+ * the metadata scan failed. It never reports a partial listing as a count,
+ * and it never reports a failure as 0 -- a caller that treated "0" as success
+ * would hand FUSE an empty directory for one it could not read. */
 int vol_list_dir(invfs_volume *v, const char *dir, invfs_dirent *ents, int max)
 {
     char pre[300];
@@ -828,6 +835,13 @@ int vol_list_dir(invfs_volume *v, const char *dir, invfs_dirent *ents, int max)
     struct dedup { struct dedup *next; size_t at; int is_dir; char name[1]; };
     struct dedup **seen = NULL;
     size_t seen_mask = 0;
+
+    /* Test-only seam (src/core/vol_fault.h), armed by INVFS_FAULT. It stands
+     * in for the calloc below -- which is the one failure on this path that
+     * cannot be arranged on purpose -- and returns the same errno. Unset in
+     * production, where this costs one getenv and one pointer compare. */
+    if (invfs_vol_fault("vol_list_dir"))
+        return -ENOMEM;
 
     if (v->sb.vol_flags & VOLF_V3)
         return vol_v3_path_list_dir(v, dir, ents, max);
@@ -851,7 +865,7 @@ int vol_list_dir(invfs_volume *v, const char *dir, invfs_dirent *ents, int max)
         size_t sc = 64;
         while (sc < v->ncount) sc *= 2;
         seen = (struct dedup **)calloc(sc, sizeof *seen);
-        if (!seen) return -1;
+        if (!seen) return -ENOMEM;
         seen_mask = sc - 1;
     }
 

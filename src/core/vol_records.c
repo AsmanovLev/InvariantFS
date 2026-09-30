@@ -2,6 +2,7 @@
  * xattr TLVs, storage-class flag, record retire/delete. Split from volume.c. */
 
 #include "volume_internal.h"
+#include "vol_fault.h"
 
 static size_t meta_serialize(const invfs_meta_pub *m,
                              const uint8_t *xattrs, size_t xlen,
@@ -1678,6 +1679,12 @@ static void v3_xattr_namevec_free(v3_xattr_namevec *c)
     c->n = 0;
 }
 
+/* Returns the number of bytes the NUL-separated name list needs (written to
+ * `buf` when it is non-NULL and big enough), 0 when the inode has no xattrs,
+ * or a negative errno: -2 (ERANGE) for a buffer too small, -EIO when the
+ * xattr store could not be read. It never reports a read failure as 0 -- a
+ * caller that read 0 as "no xattrs" would tell the user an object carries
+ * none, which is what an unreadable xattr store looked like. */
 int vol_list_xattr(invfs_volume *v, uint64_t inode_id,
                    char *buf, size_t bcap)
 {
@@ -1685,6 +1692,10 @@ int vol_list_xattr(invfs_volume *v, uint64_t inode_id,
     uint32_t rl;
     size_t xl = 0, rem, used = 0;
     const uint8_t *p;
+    /* Test-only seam (src/core/vol_fault.h), armed by INVFS_FAULT; stands in
+     * for the scan/allocation failures below and returns the same errno. */
+    if (invfs_vol_fault("vol_list_xattr"))
+        return -EIO;
     if (v && (v->sb.vol_flags & VOLF_V3)) {
         v3_xattr_namevec c;
         size_t i;
@@ -1693,7 +1704,7 @@ int vol_list_xattr(invfs_volume *v, uint64_t inode_id,
         rc = vol_v3_xattr_scan(v, inode_id, v3_xattr_collect_name_cb, &c);
         if ((rc != 0 && rc != 1) || c.oom) {
             v3_xattr_namevec_free(&c);
-            return -1;
+            return -EIO;
         }
         if (c.n > 1)
             qsort(c.names, c.n, sizeof *c.names, v3_xattr_name_cmp);
@@ -1712,14 +1723,14 @@ int vol_list_xattr(invfs_volume *v, uint64_t inode_id,
         return (int)used;
     }
     if (meta_read_record_by_id(v, inode_id, &rb, &rl, NULL, 0, NULL) != 0)
-        return -1;
+        return -EIO;
     if (!meta_locate_ext(rb, rl, &xl)) { free(rb); return 0; }  /* none */
     {
         size_t ast = vol_ast_blob_len(rb, rl);
         const uint8_t *ext = invfs_rec_cbody((const invfs_inode_rec *)rb) + ast;
         if (meta_parse_ext(ext, xl, &(invfs_meta_pub){0}, &x, &xl) != 0) {
             free(rb);
-            return -1;
+            return -EIO;
         }
     }
     p = x; rem = xl;
