@@ -249,7 +249,7 @@ file.
 | **Meta-v3 area** | `RT30` descriptor + COW B+ tree base + append-only Delta Log | base pages are copy-on-write; the delta is merged by the background **fold**; the base-page pool may be free inside the metadata zone |
 | **RAW** | content-class tag for freshly written segments | new writes land here; drained into Shadow by the sweep |
 | **Shadow** | consolidated, type-clustered, deduplicated storage | grows as RAW drains into it |
-| **Seal parity** | optional XOR/RS parity stripes over the shadow pba extent | written by `invf-sweep --seal` |
+| **Seal parity** | *not implemented on v3* — the XOR/RS implementation was v2 and went with it | `invf-sweep --seal` refuses and says so |
 
 ### 2.4 The write path (most important caveat)
 
@@ -317,6 +317,7 @@ seven core stages, in this order (`tools/invf-sweep.c`):
 
 Two variants: a two-device volume inserts `tier` (hot/cold balancing) between
 `heat` and `dedupe` (`invf-sweep.c:1972`), and `--seal` appends `seal`
+(an 8th stage, which **refuses on v3** — see §2.3)
 (`:2124`). Under `--dry-run`, stage 3 reports as `plan`.
 
 Note the ordering: **re-encoding (stage 3) happens before reclaiming
@@ -364,7 +365,7 @@ Manual invocation:
 ```bash
 invf-sweep /path/to/volume.img                # offline (volume unmounted)
 invf-sweep /path/to/volume.img --dry-run      # show what would happen
-invf-sweep /path/to/volume.img --seal         # also write parity seals
+invf-sweep /path/to/volume.img --seal         # v2 only; refuses on v3
 
 # In FUSE: full pass, and it arms a savepoint — see the note below
 kill -USR1 $(pidof invf-fuse)                  # request sweep
@@ -481,7 +482,11 @@ over the descriptor, `src/core/invarifs.h:683-703`), and a restore publishes
 `base_root` and truncates the delta to `delta_end`. Without a savepoint,
 rollback refuses — the volume's history is gone. (The v2 `CKP0`
 sweep-checkpoint + `\x01reten` retention registry were retired with the v2
-metadata machinery.)
+metadata machinery, and their code is now gone too. Note that
+`invf-fuse -o at_checkpoint` still exists and still reaches the v2 replay
+path: it cannot succeed on v3 and never has, returning err -11. It was left
+in place deliberately — removing it would change what a reachable v3 mount
+option does, which is a behaviour change rather than a deletion.)
 
 ### 2.7 Capacity and the metadata reservation
 
@@ -603,9 +608,10 @@ be recovered bit-for-bit, regardless of what codec was applied.
     ("transcode only when smaller", `src/core/vol_cpack.c:1464-1470`), not
     a runtime `memcmp` — same category as FLAC in
     `impl_docs/AUDIT.md` H10.
-  - **ZIP → the builtin ZIP lane is v2-only** (`src/core/vol_sweep.c:1023`:
-    `if (!v3 && full[0] == 'P' ...)` — WP78's stated parity gap), so on v3
-    a ZIP falls to the generic floor or to a containerpack.
+  - **ZIP → there is no builtin lane at all.** There used to be a v2-only
+    one, behind `if (!v3 && full[0] == 'P' ...)`; it was removed with the rest
+    of the v2 branches. On v3 a ZIP falls to the generic floor or to a
+    containerpack.
 - It does not mean "metadata is preserved exactly". mtime is
   truncated to seconds (ctime64 second resolution); plain xattrs are stored
   as opaque blobs; uid/gid are preserved. **POSIX ACLs are the exception
