@@ -497,6 +497,49 @@ up in this order:
 On Windows, paths are hardcoded — see `docs/SECURITY.md`. Known risk;
 deferred fix.
 
+### 2.8b Where the tool scratch goes
+
+External helpers run on real files, so every transcode and every
+containerpack decomposition stages its intermediates in a scratch
+directory. The containerpack forward pass pins the **whole container**
+there and then extracts **every member** into the same place, so its peak
+is roughly **twice the container** — for a 3.5 GB rootfs container, ~7 GB.
+Where that lands is a decision, not a constant
+(`src/core/tool_scratch.c`):
+
+| root | order | offered |
+|---|---|---|
+| `$INVFS_TOOL_SCRATCH` | forced, nothing else searched | free space, still sized |
+| `/dev/shm` | 1st | `min(statvfs, allocation ceiling)` |
+| `/tmp` | 2nd | same |
+| `/var/tmp` | 3rd | `statvfs` (a real filesystem on most hosts) |
+
+The **allocation ceiling** is what makes the tmpfs entries safe: a tmpfs
+page is charged to the *writing cgroup*, so a tmpfs inside a cgroup with a
+finite `memory.max` fails `ENOSPC` while `df` still reports gigabytes free.
+It is `min(cgroup memory.high|max − memory.current, /proc/meminfo
+MemAvailable) × INVFS_SCRATCH_TMPFS_MAX_FRAC` (default 50) — so a scratch
+that *fits* still cannot be the thing that OOMs the box.
+
+tmpfs stays first because for a small job it is genuinely the fast path,
+and the intermediates are written once and read once. What changed is that
+a root is only eligible if it can hold **this job's byte count**, and when
+the count only becomes known mid-job (the member total arrives after
+`enumerate`) the scratch **migrates** to a root that can. If nothing can,
+the lane refuses and prints the demand, the margin, every root's number
+and the remedy — instead of dying later as an opaque `ENOSPC` from the
+middle of an extract, leaving the file silently undecomposed.
+
+| variable | default | effect |
+|---|---|---|
+| `INVFS_TOOL_SCRATCH` | unset | force one root; still capacity-checked |
+| `INVFS_SCRATCH_ROOTS` | `/dev/shm:/tmp:/var/tmp` | `:`-separated list, searched in order |
+| `INVFS_SCRATCH_MARGIN_MB` | `128` | headroom kept on top of the demand |
+| `INVFS_SCRATCH_TMPFS_MAX_FRAC` | `50` | percent of the allocation ceiling a tmpfs may be offered; `0` forces a real filesystem |
+| `INVFS_SCRATCH_VERBOSE` | unset | log the decision even when the first-choice root won |
+
+The decision is asserted by `bin/invf-scratch_policy_test` (`make test`).
+
 ### 2.9 The bit-exactness contract
 
 **What it means:** every byte of every file written to the volume can

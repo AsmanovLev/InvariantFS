@@ -2399,7 +2399,7 @@ static int vol_pack_sweep(invfs_volume *v, uint64_t inode_id, const char *name,
     if (def->estimate) {
         char dir[64], in[128];
         int ok = 0;
-        if (tool_tmpdir(dir, sizeof dir) != 0) return 0;
+        if (tool_tmpdir(dir, sizeof dir, (uint64_t)full_len) != 0) return 0;
         snprintf(in, sizeof in, "%s/in", dir);
         if (tool_write(in, full, full_len) == 0 &&
             invfs_codec_pack_estimate(pc, in, &ws) == 0)

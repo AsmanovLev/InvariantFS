@@ -17,6 +17,7 @@
 #include <unistd.h>
 
 #include "codec.h"
+#include "../core/tool_scratch.h"
 #include "lz4.h"
 #include "ppmd_codec.h"
 #include "zstd.h"
@@ -830,18 +831,16 @@ static int pack_probe_impl(pack_entry *p)
 
 /* Trampoline plumbing: spool the input buffer to a scratch file, run the
  * manifest argv through the volume.c exec hook, slurp the output file.
- * Same tmpfs-first roots as volume.c's tool_tmpdir. */
-static int pack_tmpdir(char *dir, size_t cap)
+ *
+ * This used to carry its OWN copy of the tmpfs-first root list, sized by
+ * nothing -- the same defect the volume's tool_tmpdir() had, in a second
+ * place, so a codecpack trampoline could fill a tmpfs that the sized
+ * decision had already ruled out for the lanes around it. It now shares the
+ * one decision (src/core/tool_scratch.c), told how much the trampoline will
+ * actually put there: the input spool plus the output the caller reserved. */
+static int pack_tmpdir(char *dir, size_t cap, uint64_t need)
 {
-    static const char *roots[] = { "/dev/shm", "/tmp" };
-    size_t r;
-
-    for (r = 0; r < sizeof roots / sizeof roots[0]; r++) {
-        int n = snprintf(dir, cap, "%s/invfs-pack-XXXXXX", roots[r]);
-        if (n > 0 && (size_t)n < cap && mkdtemp(dir) != NULL)
-            return 0;
-    }
-    return -1;
+    return tool_tmpdir(dir, cap, need);
 }
 
 static int pack_write(const char *path, const uint8_t *data, size_t len)
@@ -879,7 +878,8 @@ static int pack_buffer_io(pack_entry *p, int is_encode,
     size_t res_len = 0;
     int rc = -1;
 
-    if (pack_tmpdir(dir, sizeof dir) != 0) return -1;
+    if (pack_tmpdir(dir, sizeof dir, (uint64_t)inlen + (uint64_t)outcap
+                    + (1u << 20)) != 0) return -1;
     snprintf(pin, sizeof pin, "%s/in", dir);
     snprintf(pout, sizeof pout, "%s/out", dir);
     if (pack_write(pin, in, inlen) != 0) { rmdir(dir); return -1; }

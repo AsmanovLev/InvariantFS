@@ -8,6 +8,7 @@
 #endif
 #include "volume_internal.h"
 #include "helper_exec.h"
+#include "tool_scratch.h"
 #include "vol_plugin_client.h"
 #include "../codecs/deflate_repro.h"
 
@@ -194,37 +195,17 @@ static int tool_exec_strict(char *const argv[], uint64_t mem_cap,
     return invfs_helper_exec(argv, mem_cap, NULL, work_dir, 1, NULL, 0, 0);
 }
 
-int tool_tmpdir(char *dir, size_t cap)
-{
-    static const char *roots[] = { "/dev/shm", "/tmp" };
-    const char *env = getenv("INVFS_TOOL_SCRATCH");
-    size_t r, first = 0;
-
-    /* An explicit scratch root wins. The default order is tmpfs-first because
-     * the intermediate files are written and read back once, and tmpfs makes
-     * that cheap -- but a tmpfs page is charged to the writing cgroup, so on a
-     * memory-constrained host the write of a large container fails ENOSPC even
-     * while `df /dev/shm` still reports gigabytes free. The fallback above
-     * only ever engaged when mkdtemp ITSELF failed, so a tmpfs that exists and
-     * cannot hold the data was never abandoned, and the failure surfaced as an
-     * opaque "tool_write pin failed". An operator on a small machine, and every
-     * suite whose fixture exceeds available tmpfs, needs the escape hatch. */
-    if (env && *env) {
-        int n = snprintf(dir, cap, "%s/invfs-tool-XXXXXX", env);
-        if (n > 0 && (size_t)n < cap && mkdtemp(dir) != NULL)
-            return 0;
-        fprintf(stderr, "tool_tmpdir: INVFS_TOOL_SCRATCH=%s unusable: %s\n",
-                env, strerror(errno));
-        return -1;
-    }
-
-    for (r = first; r < sizeof roots / sizeof roots[0]; r++) {
-        int n = snprintf(dir, cap, "%s/invfs-tool-XXXXXX", roots[r]);
-        if (n > 0 && (size_t)n < cap && mkdtemp(dir) != NULL)
-            return 0;
-    }
-    return -1;
-}
+/* The scratch DIRECTORY is chosen by src/core/tool_scratch.c, which takes
+ * the byte count this job will put there. It used to live here as
+ * tool_tmpdir(dir, cap): a fixed {"/dev/shm", "/tmp"} list, first mkdtemp()
+ * to succeed wins, nothing anywhere asking whether the chosen root can hold
+ * the job. The containerpack forward path pins the WHOLE container and then
+ * extracts EVERY member of it below, so its peak is about twice the
+ * container, and on a host where both of those roots are tmpfs that peak is
+ * RAM: a 3.5 GB rootfs container asks ~7 GB of a 7.6 GB machine, the
+ * extract dies on ENOSPC, and the file falls through to the generic lane
+ * silently (rc 0, no stamp, no message). `INVFS_TOOL_SCRATCH` was the only
+ * way out and it had to be known in advance. */
 
 void tool_rm(const char *dir, const char *name)
 {
@@ -726,7 +707,7 @@ int invfs_jxl_compress(const uint8_t *jpeg, size_t jpeg_len,
     char dir[64], in[128], out[128];
     int rc;
 
-    if (tool_tmpdir(dir, sizeof dir) != 0) return -1;
+    if (tool_tmpdir(dir, sizeof dir, (uint64_t)jpeg_len * 2 + (1u<<20)) != 0) return -1;
     snprintf(in, sizeof in, "%s/in.jpg", dir);
     snprintf(out, sizeof out, "%s/out.jxl", dir);
     if (tool_write(in, jpeg, jpeg_len) != 0) { rmdir(dir); return -1; }
@@ -785,7 +766,7 @@ int invfs_jxl_decompress(const uint8_t *jxl, size_t jxl_len,
     char dir[64], in[128], out[128];
     int rc;
 
-    if (tool_tmpdir(dir, sizeof dir) != 0) return -1;
+    if (tool_tmpdir(dir, sizeof dir, (uint64_t)jxl_len * 2 + (1u<<20)) != 0) return -1;
     snprintf(in, sizeof in, "%s/in.jxl", dir);
     snprintf(out, sizeof out, "%s/out.jpg", dir);
     if (tool_write(in, jxl, jxl_len) != 0) { rmdir(dir); return -1; }
@@ -915,7 +896,7 @@ int invfs_pmp_compress(const uint8_t *mp3, size_t mp3_len,
     char dir[64], in[128], out[128];
     int rc;
 
-    if (tool_tmpdir(dir, sizeof dir) != 0) return -1;
+    if (tool_tmpdir(dir, sizeof dir, (uint64_t)mp3_len * 2 + (1u<<20)) != 0) return -1;
     snprintf(in, sizeof in, "%s/in.mp3", dir);
     snprintf(out, sizeof out, "%s/in.pmp", dir);
     if (tool_write(in, mp3, mp3_len) != 0) { rmdir(dir); return -1; }
@@ -958,7 +939,7 @@ int invfs_pmp_decompress(const uint8_t *pmp, size_t pmp_len,
     char dir[64], in[128], out[128];
     int rc;
 
-    if (tool_tmpdir(dir, sizeof dir) != 0) return -1;
+    if (tool_tmpdir(dir, sizeof dir, (uint64_t)pmp_len * 2 + (1u<<20)) != 0) return -1;
     snprintf(in, sizeof in, "%s/in.pmp", dir);
     snprintf(out, sizeof out, "%s/in.mp3", dir);
     if (tool_write(in, pmp, pmp_len) != 0) { rmdir(dir); return -1; }
@@ -1038,7 +1019,7 @@ int invfs_ape_compress(const uint8_t *flac, size_t flac_len,
     char dir[64], fin[128], wmid[128], aout[128], fopts[64];
     int bps = flac_bits_per_sample(flac, flac_len);
 
-    if (tool_tmpdir(dir, sizeof dir) != 0) return -1;
+    if (tool_tmpdir(dir, sizeof dir, (uint64_t)flac_len * 8 + (4u<<20)) != 0) return -1;
     snprintf(fin, sizeof fin, "%s/in.flac", dir);
     snprintf(wmid, sizeof wmid, "%s/mid.wav", dir);
     snprintf(aout, sizeof aout, "%s/out.ape", dir);
@@ -1105,7 +1086,7 @@ int invfs_ape_decompress(const uint8_t *ape, size_t ape_len,
     /* APE -> WAV (mac -d), WAV -> FLAC (ffmpeg) */
     char dir[64], ain[128], wmid[128], fout[128];
 
-    if (tool_tmpdir(dir, sizeof dir) != 0) return -1;
+    if (tool_tmpdir(dir, sizeof dir, (uint64_t)ape_len * 8 + (4u<<20)) != 0) return -1;
     snprintf(ain, sizeof ain, "%s/in.ape", dir);
     snprintf(wmid, sizeof wmid, "%s/mid.wav", dir);
     snprintf(fout, sizeof fout, "%s/out.flac", dir);
@@ -1168,7 +1149,7 @@ int invfs_ape_to_wav(const uint8_t *ape, size_t ape_len,
     /* APE -> WAV (mac -d only; the WAV feeds flacx_rebuild) */
     char dir[64], ain[128], wout[128];
 
-    if (tool_tmpdir(dir, sizeof dir) != 0) return -1;
+    if (tool_tmpdir(dir, sizeof dir, (uint64_t)ape_len * 8 + (4u<<20)) != 0) return -1;
     snprintf(ain, sizeof ain, "%s/in.ape", dir);
     snprintf(wout, sizeof wout, "%s/out.wav", dir);
     if (tool_write(ain, ape, ape_len) != 0) { rmdir(dir); return -1; }
@@ -2932,7 +2913,12 @@ int vol_containerpack_sweep(invfs_volume *v, uint64_t inode_id,
         if (vol_find(v, tn) != 0)
             vol_delete_siblings(v, name);
     }
-    if (tool_tmpdir(dir, sizeof dir) != 0) { if (getenv("INVFS_DEBUG_PACKS")) fprintf(stderr,"[cpack] tmpdir failed\n"); return 0; }
+    /* Phase 1 of the scratch decision: the PIN is the one file whose size
+     * is known before the pack has been asked anything, so the scratch is
+     * sized for it here. The member total only becomes known after
+     * `enumerate`, and the extraction below is what actually costs the
+     * memory, so there is a phase 2 after the table is parsed. */
+    if (tool_tmpdir(dir, sizeof dir, (uint64_t)full_len) != 0) { if (getenv("INVFS_DEBUG_PACKS")) fprintf(stderr,"[cpack] tmpdir failed\n"); return 0; }
     snprintf(pin, sizeof pin, "%s/in", dir);
     snprintf(ptable, sizeof ptable, "%s/table", dir);
     snprintf(precipe, sizeof precipe, "%s/recipe", dir);
@@ -2949,6 +2935,41 @@ int vol_containerpack_sweep(invfs_volume *v, uint64_t inode_id,
     if (cpack_parse_table(table, table_len, &mem, &nmem, &sum_usize) != 0 ||
         nmem == 0)
         { if (getenv("INVFS_DEBUG_PACKS")) fprintf(stderr,"[cpack] table parse failed nmem=%zu\n", nmem); goto out; }
+
+    /* 1b. Phase 2 of the scratch decision. The pin is `full_len` and the
+     * extraction loop below writes EVERY member, so the scratch peak is
+     * `full_len + sum_usize` -- about twice the container, which is the
+     * number the first phase could not know. Re-price now, while the only
+     * thing in the scratch is the pin and the table (both already in RAM
+     * here, so a migration is a re-write and not a re-read). If the root
+     * picked in phase 1 cannot hold the whole job, the scratch moves to one
+     * that can; if nothing can, the lane refuses HERE, naming the demand,
+     * rather than discovering it one ENOSPC'd extract at a time. */
+    {
+        scratch_file carried[2];
+
+        carried[0].name = "in";
+        carried[0].data = full;
+        carried[0].len = full_len;
+        carried[1].name = "table";
+        carried[1].data = table;
+        carried[1].len = table_len;
+        if (tool_scratch_grow(dir, sizeof dir,
+                              (uint64_t)full_len + sum_usize,
+                              carried, 2) != 0) {
+            if (getenv("INVFS_DEBUG_PACKS"))
+                fprintf(stderr, "[cpack] scratch refused for %s\n", name);
+            goto out;
+        }
+        /* the migration may have moved the directory: every path built from
+         * it above is stale, and they are cheap to rebuild. */
+        snprintf(pin, sizeof pin, "%s/in", dir);
+        snprintf(ptable, sizeof ptable, "%s/table", dir);
+        snprintf(precipe, sizeof precipe, "%s/recipe", dir);
+        snprintf(pout, sizeof pout, "%s/out", dir);
+        snprintf(pmap, sizeof pmap, "%s/map", dir);
+        snprintf(pmdir, sizeof pmdir, "%s/mbr", dir);
+    }
 
     /* 2. admission: decompression memory is governed by dec_mem_limit
      * (INVFS_DEC_MEM_LIMIT), not the read cache (arc_budget). Only check
@@ -3502,6 +3523,7 @@ int pack_container_rebuild(invfs_volume *v, const invfs_codec *pc,
     size_t table_len = 0, out_len = 0;
     cpack_member *mem = NULL;
     size_t nmem = 0, i;
+    uint64_t rsum = 0;
     int made = 0, rc = -1;
 
     snprintf(tn, sizeof tn, "%s!mbrt", name);
@@ -3513,12 +3535,19 @@ int pack_container_rebuild(invfs_volume *v, const invfs_codec *pc,
             return -1;
         }
     }
-    if (cpack_parse_table(table, table_len, &mem, &nmem, NULL) != 0 ||
+    if (cpack_parse_table(table, table_len, &mem, &nmem, &rsum) != 0 ||
         nmem == 0) {
         fprintf(stderr, "%s: member table '%s' corrupt\n", pc->name, tn);
         goto out;
     }
-    if (tool_tmpdir(dir, sizeof dir) != 0) goto out;
+    /* The rebuild exec is the mirror image of the sweep: every member is
+     * written back out under <scratch>/mbr and the pack writes the whole
+     * reconstructed container to <scratch>/out, so the demand is the member
+     * total plus the recipe plus the result. All three are in hand here --
+     * there is no second phase for this path. */
+    if (tool_tmpdir(dir, sizeof dir,
+                    rsum + (uint64_t)recipe_len + (uint64_t)want_len) != 0)
+        goto out;
     made = 1;
     snprintf(precipe, sizeof precipe, "%s/recipe", dir);
     snprintf(pout, sizeof pout, "%s/out", dir);

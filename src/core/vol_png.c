@@ -168,7 +168,8 @@ int invfs_png_from_jxl(invfs_volume *v, uint64_t jxl_inode,
     int ok = 0;
 
     if (vol_read_inode(v, jxl_inode, 0, &jxl, &jxl_len) != 0) return -1;
-    if (tool_tmpdir(dir, sizeof dir) != 0) { free(jxl); return -1; }
+    /* jxl in, png out: both are the size of the image being re-encoded */
+    if (tool_tmpdir(dir, sizeof dir, (uint64_t)jxl_len * 3 + (1u<<20)) != 0) { free(jxl); return -1; }
     snprintf(in, sizeof in, "%s/in.jxl", dir);
     snprintf(out, sizeof out, "%s/out.png", dir);
     if (tool_write(in, jxl, jxl_len) == 0 &&
@@ -501,7 +502,9 @@ uint64_t vol_create_png_file(invfs_volume *v, const char *name,
     }
 
     char dir[64], sp[320], jx[320], dn[320];
-    if (tool_tmpdir(dir, sizeof dir) != 0) { pngx_free(&info); return 0; }
+    /* the spool, the intermediate jxl and the decoded png are all in the
+     * same scratch dir at once */
+    if (tool_tmpdir(dir, sizeof dir, (uint64_t)png_len * 4 + (4u<<20)) != 0) { pngx_free(&info); return 0; }
     snprintf(sp, sizeof sp, "%s/spool.png", dir);
     snprintf(jx, sizeof jx, "%s/tmp.jxl", dir);
     snprintf(dn, sizeof dn, "%s/dn.png", dir);

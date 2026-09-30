@@ -40,7 +40,7 @@ STOCK_ZLIB_O := $(patsubst $(SRC)/zlib/%.c,$(OBJ)/zlib_stock_%.o,$(STOCK_ZLIB_SR
 FUSE_CFLAGS := $(shell pkg-config --cflags fuse3)
 FUSE_LIBS   := $(shell pkg-config --libs fuse3)
 
-CORE    := volume vol_cpack helper_exec vol_plugin_client vol_png vol_seal vol_repair vol_rollback \
+CORE    := volume vol_cpack helper_exec tool_scratch vol_plugin_client vol_png vol_seal vol_repair vol_rollback \
            vol_resize vol_fsck vol_crash vol_exer vol_dedupe vol_textzone \
             vol_heat vol_sweep vol_read vol_write vol_records vol_ast \
             vol_dirs vol_tier vol_meta_merge vol_metabuf vol_btree vol_delta \
@@ -121,7 +121,7 @@ CLI_MAINS := mkfs verify fsck cp cat ls stat arctest blkio_test resize \
              sweep_v3_test symlink_v3_test large_file_v3_test dedupe_v3_test deflate_repro_test window_test \
              nlink_v3_test recipe_fsck_test cpack_guard_test orphan_test rt30_slot_test anchor_test \
              fsck_rootslot_test batch_owner_test plugin_host_test plugin_mt_test rs_stability_test \
-             fsck_liveness_test
+             fsck_liveness_test scratch_policy_test
 $(foreach t,$(CLI_MAINS),$(eval $(call TOOL_RULE,$(t),)))
 
 # WP71: loads every containerpack .so through dlmopen/dlopen -> needs -ldl,
@@ -405,7 +405,9 @@ clean:
 
 # ---- tests ---------------------------------------------------------------
 # unit tier: fast, no I/O images
-$(OUT)/invf-codec_test: $(OBJ)/codec_test.o $(OBJ)/codec.o $(OBJ)/ppmd8.o $(OBJ)/ppmd8enc.o $(OBJ)/ppmd8dec.o $(OBJ)/ppmd_codec.o $(OBJ)/lz4.o $(OBJ)/bcj_x86.o
+# codec.o reaches tool_tmpdir (the scratch decision), so every link that
+# pulls codec.o in without CORE_O has to pull tool_scratch.o in too.
+$(OUT)/invf-codec_test: $(OBJ)/codec_test.o $(OBJ)/codec.o $(OBJ)/ppmd8.o $(OBJ)/ppmd8enc.o $(OBJ)/ppmd8dec.o $(OBJ)/ppmd_codec.o $(OBJ)/lz4.o $(OBJ)/bcj_x86.o $(OBJ)/tool_scratch.o
 	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
 
 # WP61: unit coverage for the shared helper containment launcher.
@@ -431,7 +433,7 @@ $(OBJ)/groupcommit_test.o: tools/groupcommit_test.c | $(OBJ)
 # fuzz tier: on-demand property/fuzz harness for the pure/parsing layers.
 # NOT part of `make test` -- `make fuzz` only builds it, run it by hand:
 #   bin/invf-fuzz [iterations] [seed]
-FUZZ_O := $(OBJ)/codec.o $(OBJ)/ppmd8.o $(OBJ)/ppmd8enc.o $(OBJ)/ppmd8dec.o \
+FUZZ_O := $(OBJ)/codec.o $(OBJ)/tool_scratch.o $(OBJ)/ppmd8.o $(OBJ)/ppmd8enc.o $(OBJ)/ppmd8dec.o \
           $(OBJ)/ppmd_codec.o $(OBJ)/lz4.o $(OBJ)/bcj_x86.o
 $(OUT)/invf-fuzz: $(OBJ)/fuzz_invfs.o $(FUZZ_O)
 	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
@@ -456,6 +458,7 @@ test: $(OUT)/invf-arctest $(OUT)/invf-blkio_test $(OUT)/invf-codec_test \
       $(OUT)/invf-window_test $(OUT)/invf-nlink_v3_test \
       $(OUT)/invf-recipe_fsck_test $(OUT)/invf-fsck_liveness_test \
       $(OUT)/invf-cpack_guard_test $(OUT)/invf-orphan_test \
+      $(OUT)/invf-scratch_policy_test \
       $(OUT)/invf-rt30_slot_test $(OUT)/invf-anchor_test $(OUT)/gzhdrfuzz \
       $(OUT)/invf-fsck_rootslot_test \
       $(OUT)/invf-batch_owner_test \
@@ -512,6 +515,7 @@ test: $(OUT)/invf-arctest $(OUT)/invf-blkio_test $(OUT)/invf-codec_test \
 	$(TESTENV) $(TESTISO) $(OUT)/invf-recipe_fsck_test /tmp
 	$(TESTENV) $(TESTISO) $(OUT)/invf-fsck_liveness_test /tmp
 	$(TESTENV) $(OUT)/invf-cpack_guard_test
+	$(TESTENV) $(OUT)/invf-scratch_policy_test
 	@# The RS parity MATH, standalone: no volume, no v2, no filesystem.
 	@# tools/test-seal.sh cannot do this -- the seal is v2-only and v2 is
 	@# retired in 0.5.0, so that test SKIPs on every volume that can exist.

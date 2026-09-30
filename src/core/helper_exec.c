@@ -298,21 +298,41 @@ static void helper_netns(void)
 /* privilege drop (child side, root only)                             */
 /* ------------------------------------------------------------------ */
 
-/* Chown only scratch trees under the tmpfs roots the engine uses; never
- * touch the volume or arbitrary user paths. */
+/* Chown only scratch trees under the tmpfs roots the engine uses, plus the
+ * work_dir the caller handed over explicitly; never touch the volume or
+ * arbitrary user paths. */
 static int helper_scratch_path(const char *p)
 {
     if (!p) return 0;
     return strncmp(p, "/dev/shm/", 9) == 0 || strncmp(p, "/tmp/", 5) == 0;
 }
 
+static int helper_under(const char *path, const char *root)
+{
+    size_t n;
+    if (!path || !root || !*root) return 0;
+    n = strlen(root);
+    return strncmp(path, root, n) == 0 &&
+           (path[n] == '\0' || path[n] == '/');
+}
+
+/* The scratch DECISION (src/core/tool_scratch.c) can now land the work dir
+ * on a REAL filesystem -- /var/tmp -- when no tmpfs root can hold the job,
+ * and that is the whole point of it. But the unprivileged child could not
+ * have used it: the prefix guard below only recognised /dev/shm and /tmp, so
+ * a /var/tmp work_dir kept root ownership after the privilege drop and every
+ * pack command in it failed as "[cpack] enumerate failed", with no message
+ * from the child to say why. `root` is the work_dir the caller passed in, so
+ * it is the engine's own scratch by construction and is chowned whole; the
+ * prefix guard still applies to anything outside it. */
 static void helper_chown_tree(const char *path, uid_t uid, gid_t gid,
-                              int depth)
+                              int depth, const char *root)
 {
     DIR *d;
     struct dirent *e;
 
-    if (depth > 8 || !helper_scratch_path(path)) return;
+    if (depth > 8) return;
+    if (!helper_under(path, root) && !helper_scratch_path(path)) return;
     int cr = lchown(path, uid, gid);
     (void)cr;
     d = opendir(path);
@@ -329,7 +349,7 @@ static void helper_chown_tree(const char *path, uid_t uid, gid_t gid,
         cr = lchown(child, uid, gid);
         (void)cr;
         if (S_ISDIR(st.st_mode) && !S_ISLNK(st.st_mode))
-            helper_chown_tree(child, uid, gid, depth + 1);
+            helper_chown_tree(child, uid, gid, depth + 1, root);
     }
     closedir(d);
 }
@@ -339,7 +359,7 @@ static int helper_drop_privs(const char *work_dir, const char *ro_path,
 {
     int rc;
 
-    if (work_dir) helper_chown_tree(work_dir, uid, gid, 0);
+    if (work_dir) helper_chown_tree(work_dir, uid, gid, 0, work_dir);
     if (helper_scratch_path(ro_path)) {
         int cr = lchown(ro_path, uid, gid);
         (void)cr;

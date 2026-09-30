@@ -1812,7 +1812,11 @@ void ret_shard_name(uint64_t shard, char *out, size_t cap);
 void alloc_state_reset(invfs_volume *v);
 
 #ifndef _WIN32   /* WP11 POSIX-only tool plumbing */
-int tool_tmpdir(char *dir, size_t cap);
+/* tool_tmpdir() now takes the byte count the job will put in the scratch
+ * directory and is implemented in src/core/tool_scratch.c, which owns the
+ * whole decision (roots, sizing, refusal). The prototype is repeated there
+ * rather than moved: this header is what every core TU already includes. */
+int tool_tmpdir(char *dir, size_t cap, uint64_t need);
 void tool_rm(const char *dir, const char *name);
 
 /* write a whole buffer, creating/truncating; 0 on success */
