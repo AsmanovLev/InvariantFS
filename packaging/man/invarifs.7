@@ -99,7 +99,8 @@ decoder working-set limit (default 512M)
 UNCOMPRESSIBLE benefit threshold (default 0.5)
 .TP
 .B INVFS_CODECPACKS
-colon-separated extra codecpack search dirs
+colon-separated codecpack search dirs; when set and non-empty, these and
+nothing else are searched (see CODECPACKS)
 .TP
 .B INVFS_TOOLS
 external codec tool search dir (first priority)
@@ -131,10 +132,15 @@ directories
 .IB name .codecpack
 containing a
 .B manifest
-(key = value) plus helper programs. Search order:
-.BR $INVFS_CODECPACKS
-(colon-separated), then
-.BR /usr/lib/invfs/codecpacks .
+(key = value) plus helper programs. If
+.B INVFS_CODECPACKS
+is set and non-empty, its colon-separated dirs ARE the registry and
+.BR /usr/lib/invfs/codecpacks
+is not searched; otherwise the system dir
+.BR /usr/lib/invfs/codecpacks
+is used (and
+.B INVFS_CODECPACKS_SYS=0
+skips it).
 Helper binaries named in the manifest resolve through
 .BR $INVFS_TOOLS ,
 .BR /usr/lib/invfs/tools ,

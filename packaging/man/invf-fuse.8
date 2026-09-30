@@ -107,10 +107,13 @@ an unset variable reproduces existing volumes byte-identically). The profile
 is re-exported to codecpack helper processes.
 .TP
 .B INVFS_CODECPACKS
-Colon-separated extra directories scanned for
+Colon-separated directories scanned for
 .B *.codecpack
-packs before
-.BR /usr/lib/invfs/codecpacks .
+packs. When set and non-empty these ARE the registry:
+.B /usr/lib/invfs/codecpacks
+is not searched. When unset, that system dir is used; set
+.B INVFS_CODECPACKS_SYS=0
+to skip it.
 .TP
 .B INVFS_TOOLS
 Directory searched first for external codec tools, before

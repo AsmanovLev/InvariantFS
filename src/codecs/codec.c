@@ -1234,29 +1234,41 @@ static void pack_scan_dir(const char *dir, size_t dlen)
     closedir(d);
 }
 
-/* scan $INVFS_CODECPACKS colon-dirs, then the system dir (PATH probing of
- * tool names is probe()-time business, not registration).
+/* Resolve the codecpack registry.
  *
- * WP101: the system dir used to be scanned unconditionally, so the registry
- * SHAPE a caller sees depended on whatever the host happened to have
- * installed under /usr/lib/invfs/codecpacks. That made the unit suite
- * non-hermetic: on a machine with packs installed, invf-codec_test's
- * "registry holds the 14 static entries" and "packs registered: 13 static +
- * ..." assertions fail through no fault of the code under test.
- * INVFS_CODECPACKS_SYS=0 skips the system dir; unset (the default) keeps
- * production behaviour identical. */
+ * INVFS_CODECPACKS, when set and non-empty, IS the registry: its colon-dirs
+ * are scanned and nothing else is. That is the only way a caller can say
+ * "use exactly these packs" -- and "point discovery at an empty dir and get
+ * no codecpacks" is what a control arm is. It used to be scanned and THEN
+ * the system dir, so the empty dir disabled only the FIRST search dir and
+ * /usr/lib/invfs/codecpacks still contributed whatever the host had
+ * installed (on this box: ext4fs, qcow2, rawdisk). Every "pack absent"
+ * control that set only INVFS_CODECPACKS was measuring the host, not the
+ * product; test-ext4fs.sh's ratio demo compared the pack lane against a
+ * control arm that ran the same lane.
+ *
+ * INVFS_CODECPACKS unset or empty keeps the deployed default: the system
+ * dir /usr/lib/invfs/codecpacks, which the packaging installs root-owned.
+ * INVFS_CODECPACKS_SYS=0 skips it in that case, which is what a hermetic
+ * unit run wants (WP101) and what it now gets without also having to blank
+ * INVFS_CODECPACKS.
+ *
+ * PATH probing of tool names is probe()-time business, not registration. */
 static void pack_scan_all(void)
 {
     static const char sysdir[] = "/usr/lib/invfs/codecpacks";
     const char *p = getenv("INVFS_CODECPACKS");
     const char *nosys = getenv("INVFS_CODECPACKS_SYS");
 
-    while (p && *p) {
-        const char *colon = strchr(p, ':');
-        size_t dlen = colon ? (size_t)(colon - p) : strlen(p);
-        if (dlen) pack_scan_dir(p, dlen);
-        if (!colon) break;
-        p = colon + 1;
+    if (p && *p) {
+        while (*p) {
+            const char *colon = strchr(p, ':');
+            size_t dlen = colon ? (size_t)(colon - p) : strlen(p);
+            if (dlen) pack_scan_dir(p, dlen);
+            if (!colon) break;
+            p = colon + 1;
+        }
+        return;                      /* explicit registry: authoritative */
     }
     if (nosys && strcmp(nosys, "0") == 0)
         return;

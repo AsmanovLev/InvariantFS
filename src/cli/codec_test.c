@@ -986,6 +986,109 @@ static void test_packs(void)
     rmdir(dir);
 }
 
+/* ---------------- registry resolution: an explicit registry IS the
+ * registry (wp/codecpack-control-env) ----------------
+ *
+ * pack_scan_all() used to scan $INVFS_CODECPACKS and THEN, unless
+ * INVFS_CODECPACKS_SYS=0, /usr/lib/invfs/codecpacks. So pointing
+ * INVFS_CODECPACKS at a directory holding nothing still yielded every pack
+ * the HOST happened to have installed. That is not a unit-test detail: a
+ * sweep leg that wants "the pack lane did not run" as its control arm got
+ * the pack lane anyway whenever the host had the pack, which is what
+ * test-ext4fs.sh's ratio demo was doing -- it compared the pack
+ * decomposition against a control volume that decomposed too.
+ *
+ * The invariant pinned here: with INVFS_CODECPACKS set and non-empty, the
+ * registered packs are exactly the ones found under those dirs. Leg 1 makes
+ * that non-vacuous (one pack IS registered), leg 2 is the control itself
+ * (point at an empty dir, get nothing), leg 3 keeps the deployed default
+ * (unset -> the system dir) from being "fixed" away. */
+
+static int count_packs(void)
+{
+    const invfs_codec *all;
+    size_t n = 0, i;
+    int k = 0;
+
+    all = invfs_codec_all(&n);
+    for (i = 0; i < n; i++)
+        if (invfs_codec_pack_def(&all[i])) k++;   /* pack entries only */
+    return k;
+}
+
+static int count_sysdir_packs(void)
+{
+    DIR *d = opendir("/usr/lib/invfs/codecpacks");
+    struct dirent *de;
+    int k = 0;
+
+    if (!d) return -1;
+    while ((de = readdir(d)) != NULL) {
+        size_t nl = strlen(de->d_name);
+        if (nl > 10 && strcmp(de->d_name + nl - 10, ".codecpack") == 0) k++;
+    }
+    closedir(d);
+    return k;
+}
+
+static void test_registry_env_scope(void)
+{
+    char dir[256], packs[320], pack[384], empty[320], path[448];
+    int sysn, r = 0;
+
+    snprintf(dir,   sizeof dir,   "/tmp/invfs_pack_scope_%d", (int)getpid());
+    snprintf(packs, sizeof packs, "%s/packs", dir);
+    snprintf(pack,  sizeof pack,  "%s/scope.codecpack", packs);
+    snprintf(empty, sizeof empty, "%s/empty", dir);
+    r |= mkdir(dir, 0755) | mkdir(packs, 0755) | mkdir(pack, 0755) |
+         mkdir(empty, 0755);
+    snprintf(path, sizeof path, "%s/manifest", pack);
+    r |= write_file(path,
+                    "name = scope\n"
+                    "algo = 61\n"
+                    "caps = external\n"
+                    "encode = cp {in} {out}\n"
+                    "decode = cp {in} {out}\n", 0);
+    if (r) { skip("registry env scope: scratch dirs"); return; }
+
+    /* INVFS_CODECPACKS_SYS deliberately left UNSET in legs 1-2: the host's
+     * /usr/lib/invfs/codecpacks is exactly what used to leak in here. */
+    unsetenv("INVFS_CODECPACKS_SYS");
+
+    setenv("INVFS_CODECPACKS", packs, 1);
+    invfs_codec_probe_reset();
+    ok(count_packs() == 1,
+       "INVFS_CODECPACKS=<dir with one pack> registers exactly that pack");
+
+    setenv("INVFS_CODECPACKS", empty, 1);
+    invfs_codec_probe_reset();
+    ok(count_packs() == 0,
+       "INVFS_CODECPACKS=<empty dir> registers NO codecpack (a control arm "
+       "is a control)");
+    ok(invfs_codec_by_algo(61) == NULL,
+       "the pack from the previous scan is gone too (probe reset honoured)");
+
+    /* the deployed default is NOT this: unset means the system dir. */
+    unsetenv("INVFS_CODECPACKS");
+    invfs_codec_probe_reset();
+    sysn = count_sysdir_packs();
+    if (sysn <= 0)
+        skip("unset INVFS_CODECPACKS: no packs under /usr/lib/invfs/codecpacks");
+    else
+        ok(count_packs() == sysn,
+           "unset INVFS_CODECPACKS keeps the deployed default (the system dir)");
+
+    /* and the WP101 hermetic knob still works on its own */
+    setenv("INVFS_CODECPACKS_SYS", "0", 1);
+    invfs_codec_probe_reset();
+    ok(count_packs() == 0, "INVFS_CODECPACKS_SYS=0 alone yields no codecpack");
+    unsetenv("INVFS_CODECPACKS");
+
+    snprintf(path, sizeof path, "%s/manifest", pack);
+    unlink(path);
+    rmdir(pack); rmdir(packs); rmdir(empty); rmdir(dir);
+}
+
 /* ---------------- WP16b: codec profiles ---------------- */
 
 static void test_profiles(void)
@@ -1060,6 +1163,7 @@ int main(void)
     test_roundtrips();
     test_probe();
     test_packs();
+    test_registry_env_scope();
     test_profiles();
 
     printf("%d checks, %d failure(s), %d skip(s)\n", checks, failures, skips);
