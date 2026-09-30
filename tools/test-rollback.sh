@@ -48,6 +48,13 @@
 #     C  spt0_drop reports "was live and now cleared", and a restore after
 #        it is refused with the volume untouched
 
+#   [S] a volume that holds SYMLINKS rolls back, and one that holds none
+#      does too -- the pair. No leg here, and no e2e anywhere, combined a
+#      symlink with a rollback, which is how a savepoint whose captured
+#      generation held one symlink came to REFUSE the restore with
+#      SPT0_RC_DAMAGED, exit 5, naming damage that does not exist. See the
+#      leg for the full account; [S] is the coverage that gap left open.
+
 # Run from the repo root after `make`:  bash tools/test-rollback.sh
 # Uses /dev/shm (tmpfs) like the other soak scripts. NOTE: blkio treats
 # /dev/* paths as raw devices, so the script cd's into /dev/shm and uses
@@ -69,9 +76,11 @@ IMGH=wp85-h.img      # WP85: append held across a rollback is refused
 IMGI=wp96-i.img      # WP96: with the pin disabled, a rollback onto reused
                      # data is REFUSED and the volume is left alone
 IMGR=wp96-r.img      # WP96: the reclaim pass gives the pin's blocks back
+IMGS=wp-rbsym-s.img  # a sweep + rollback on a volume holding SYMLINKS
+IMGT=wp-rbsym-t.img  # ... and on one holding none (the control)
 rm -rf "$WORK" && mkdir -p "$WORK/orig" "$WORK/out"
 cd /dev/shm
-rm -f "$IMGA" "$IMGB" "$IMGC" "$IMGD" "$IMGE" "$IMGF" "$IMGG" "$IMGH" "$IMGI" "$IMGR"
+rm -f "$IMGA" "$IMGB" "$IMGC" "$IMGD" "$IMGE" "$IMGF" "$IMGG" "$IMGH" "$IMGI" "$IMGR" "$IMGS" "$IMGT"
 
 fail() { echo "FAIL: $*" >&2; exit 1; }
 
@@ -608,6 +617,95 @@ fi
 $B/invf-fsck "$IMGC" | tee "$WORK/fsck-p.log" | grep -q "^OK$" \
     || { cat "$WORK/fsck-p.log"; fail "P: fsck not clean after the SPT0 contract leg"; }
 say "P: the SPT0 leg's volume fscks clean"
+
+echo
+echo "== [S] a volume that holds a SYMLINK =="
+# This leg exists because of the gap it closes, not because it re-tests the
+# unit test's finding at the CLI level: no leg in this suite, and no e2e
+# anywhere, combined a symlink with a rollback. A v3 symlink's content is
+# its target string, stored content-addressed EXACTLY like a recipe
+# (vol_v3_create_node -> vol_v3_recipe_store), so its row carries a real
+# non-zero recipe_addr. The restore's per-inode data check filtered only
+# recipe_addr == 0, loaded the target, failed vol_ast_recipe_parse on it,
+# and refused the rollback with SPT0_RC_DAMAGED -- exit 5, nothing written,
+# and a message naming damage that does not exist. Every real rootfs has
+# symlinks (/bin, /lib, /lib64, /usr/lib64/ld-*.so*), and every sweep
+# trigger arms a savepoint (AGENTS.md 2.5), so this refused the documented
+# recovery path (AGENTS.md 2.6) on a healthy volume.
+#
+# TWO volumes, identical except for the symlinks, so the pair proves the
+# symlink was the whole difference -- not the corpus, not the sweep.
+IMGS=wp-rbsym-s.img   # [S] sweep + rollback WITH symlinks  (the defect)
+IMGT=wp-rbsym-t.img   # [S] sweep + rollback WITHOUT them   (the control)
+SRCD=$WORK/src-sym
+rm -f "$IMGS" "$IMGT"
+rm -rf "$SRCD" "$WORK/src-late"
+mkdir -p "$SRCD" "$WORK/src-late"
+head -c 40000 /dev/urandom > "$SRCD/random.bin"
+printf 'hello world\n%.0s' $(seq 1 500) > "$SRCD/text.txt"
+printf '#!/bin/sh\necho hi\n' > "$SRCD/run.sh"
+head -c 30000 /dev/urandom | base64 > "$SRCD/b64.txt"
+ln -s usr/lib "$SRCD/lib64"
+ln -s /absolute/target "$SRCD/abslink"
+head -c 8192 /dev/urandom > "$WORK/src-late/after-sweep.bin"
+
+say() { echo "  $1"; }
+for tag in s t; do
+    if [ "$tag" = s ]; then img=$IMGS; else img=$IMGT; fi
+    src=$WORK/src-$tag
+    rm -rf "$src"; mkdir -p "$src"; cp -a "$SRCD/." "$src/"
+    [ "$tag" = t ] && rm -f "$src/lib64" "$src/abslink"
+    $B/invf-mkfs "$img" 0.2 >/dev/null || fail "S/$tag: mkfs failed"
+    $B/invf-import "$img" "$src" >/dev/null 2>&1 \
+        || fail "S/$tag: import failed"
+    $B/invf-sweep "$img" > "$WORK/sweep-$tag.log" 2>&1 \
+        || { cat "$WORK/sweep-$tag.log"; fail "S/$tag: sweep failed"; }
+    grep -qi "save point captured" "$WORK/sweep-$tag.log" \
+        || fail "S/$tag: the sweep did not arm a savepoint"
+    # a write AFTER the capture, so a refusal and a real restore differ
+    $B/invf-import "$img" "$WORK/src-late" >/dev/null 2>&1 \
+        || fail "S/$tag: the post-capture import failed"
+    $B/invf-cat "$img" after-sweep.bin >/dev/null 2>&1 \
+        || fail "S/$tag: PREMISE -- the post-capture file is not readable"
+    if $B/invf-rollback "$img" > "$WORK/rb-$tag.log" 2>&1; then
+        say "[S/$tag] invf-rollback exit 0 (the save point was used)"
+    else
+        rc=$?
+        cat "$WORK/rb-$tag.log"
+        fail "[S/$tag] invf-rollback REFUSED (rc=$rc) on a healthy volume"
+    fi
+    # a RESTORE, not a skip: the post-capture write is gone...
+    if $B/invf-cat "$img" after-sweep.bin >/dev/null 2>&1; then
+        fail "[S/$tag] the post-capture file survived -- exit 0 without a restore"
+    fi
+    say "[S/$tag] the post-capture write was undone"
+    # ...and the pre-sweep corpus is bit-exact, byte for byte.
+    # bin/invf-cat + cmp, NOT invf-verify --deep: that checks readability
+    # and length only (src/cli/verify.c:400-415), because
+    # invfs_ast_block_entry carries a pba and no content hash.
+    for f in $(cd "$src" && ls -1); do
+        [ -f "$src/$f" ] || continue          # the symlinks, handled below
+        $B/invf-cat "$img" "$f" > "$WORK/out/$tag.$f" 2>/dev/null \
+            || fail "[S/$tag] $f does not read back at all"
+        cmp -s "$WORK/out/$tag.$f" "$src/$f" \
+            || fail "[S/$tag] $f is NOT bit-exact after the rollback"
+    done
+    say "[S/$tag] the corpus is bit-exact (invf-cat | cmp)"
+    # and the symlink targets, where present, read back as their exact bytes
+    if [ "$tag" = s ]; then
+        for l in lib64 abslink; do
+            want=$(readlink "$SRCD/$l")
+            got=$($B/invf-cat "$img" "$l" 2>/dev/null)
+            [ "$got" = "$want" ] \
+                || fail "[S] $l reads back as '$got', want '$want'"
+        done
+        say "[S] symlink targets survive the rollback byte-exact"
+    fi
+    $B/invf-fsck "$img" 2>/dev/null | grep -q "^OK$" \
+        || fail "[S/$tag] fsck not clean after the rollback"
+    say "[S/$tag] fsck clean after the rollback"
+done
+say "[S] a volume WITH symlinks and one WITHOUT both roll back"
 
 echo
 echo "ROLLBACK E2E: PASS"

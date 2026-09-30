@@ -572,6 +572,20 @@ static int spn_walk_ino(invfs_volume *v, uint64_t inode_id,
         return 0;               /* keep walking; the caller reports it */
     }
     c->recipes++;
+    /* Same predicate as the restore-side check above, and for the same
+     * reason: a symlink's blob is a raw object, not an AST. It is
+     * harmless HERE only by accident -- the parse fails, so the loop below
+     * is skipped and nothing is marked. Accidental is not a property:
+     * invfs_ast_hdr_parse accepts any target whose first four bytes are a
+     * v1/v2 AST version word, so a crafted target parses and every
+     * attacker-controlled block entry would be marked into the pin (held
+     * for a generation by spn_reclaim) and recorded in the digest the
+     * restore cross-checks (a spurious SPT0_RC_DAMAGED on top of the one
+     * this predicate fixes). Stated explicitly, the two ends agree. */
+    if (invfs_inode_content_is_raw_blob(in->type)) {
+        free(blob);
+        return 0;
+    }
     if (vol_ast_recipe_parse(blob, blen, &ah, &ents, &n_ents) == 0 && ents) {
         for (i = 0; i < n_ents; i++) {
             uint64_t pba = ents[i].pba, plen = 0, b;
@@ -1148,6 +1162,19 @@ static int spt0_data_ino(invfs_volume *v, uint64_t inode_id,
         return -1;
     }
     c->inodes++;
+    /* The blob LOADED, which is the whole obligation for a raw-blob type.
+     * A symlink's content is its target string, stored content-addressed
+     * exactly like a recipe (vol_v3_create_node), so recipe_addr is
+     * non-zero and this row walked straight into vol_ast_recipe_parse --
+     * which cannot parse "usr/lib", refused the rollback, and named damage
+     * that does not exist. invf_inode_content_is_raw_blob is the same
+     * predicate the read path dispatches on and the fsck recipe audit is
+     * routed through: skip the PARSE, never the LOAD (a symlink whose blob
+     * really is missing is still caught by the load above). */
+    if (invfs_inode_content_is_raw_blob(in->type)) {
+        free(blob);
+        return 0;
+    }
     if (vol_ast_recipe_parse(blob, blen, &ah, &ents, &n_ents) != 0 || !ents) {
         snprintf(c->err, sizeof c->err,
                  "inode %llu's pinned recipe does not parse",

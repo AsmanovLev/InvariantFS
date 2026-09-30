@@ -125,6 +125,7 @@ CLI_MAINS := mkfs verify fsck cp cat ls stat arctest blkio_test resize \
              fsck_liveness_test scratch_policy_test v2rb_rollback_test keycmp_test \
              lane_release_test pbaref_v3_test \
              sweep_publish_rollback_test \
+             rollback_symlink_test \
              sibling_retire_v3_test tar_cap_test fold_delta_read_test \
              reclaim_reader_epoch_test
 # NOTE on reclaim_reader_epoch_test: it is in CLI_MAINS so it BUILDS, but it
@@ -641,6 +642,7 @@ test: $(TEST_BINS) $(OUT)/invf-arctest $(OUT)/invf-blkio_test $(OUT)/invf-codec_
       $(OUT)/invf-lane_release_test \
       $(OUT)/invf-pbaref_v3_test \
       $(OUT)/invf-sweep_publish_rollback_test \
+      $(OUT)/invf-rollback_symlink_test \
       $(OUT)/invf-sibling_retire_v3_test \
       $(OUT)/invf-rt30_slot_test $(OUT)/invf-anchor_test $(OUT)/gzhdrfuzz \
       $(OUT)/invf-fsck_rootslot_test \
@@ -770,6 +772,10 @@ test: $(TEST_BINS) $(OUT)/invf-arctest $(OUT)/invf-blkio_test $(OUT)/invf-codec_
 	@# the number handed BACK. Leg 1 requires the sweep to have printed the
 	@# rollback at all, so it cannot go green by never entering the state.
 	$(TESTENV) $(TESTISO) $(OUT)/invf-sweep_publish_rollback_test /tmp
+	# WP: rollback on a volume that holds a symlink. /srv, not /tmp (RAM on
+	# this host); the legs create their own dir under it. No permission
+	# denial is depended on, so TESTISO's fake root is harmless here.
+	$(TESTENV) $(OUT)/invf-rollback_symlink_test /srv/bench/scratch
 	@# The v3 KEY ORDERING. The base B+-tree, the delta log and the
 	@# fold used to carry three byte-identical private comparators and the
 	@# fold's delta/base merge is correct only while they agree. They are
