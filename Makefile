@@ -753,7 +753,8 @@ test: $(OUT)/invf-arctest $(OUT)/invf-blkio_test $(OUT)/invf-codec_test \
 	$(TESTENV) $(TESTISO) $(OUT)/invf-pbaref_v3_test /tmp rednosweep
 	$(TESTENV) $(TESTISO) $(OUT)/invf-pbaref_v3_test /tmp all
 	$(TESTENV) $(TESTISO) $(OUT)/invf-pbaref_v3_test /tmp allnosweep
-	$(TESTENV) $(TESTISO) $(OUT)/invf-sibling_retire_v3_test	@# The container MEMBER BOUND is one number in the engine and eight
+	$(TESTENV) $(TESTISO) $(OUT)/invf-sibling_retire_v3_test
+	@# The container MEMBER BOUND is one number in the engine and eight
 	@# mirrored copies in the container packs. Nothing noticed when they
 	@# drifted -- a pack left at the old cap just declines every container
 	@# over it, for that one container type, silently. Cross-checked here
