@@ -16,6 +16,9 @@ set -o pipefail
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 B=$REPO/bin
+# One definition of "this volume is consistent", shared with test-binbatch,
+# test-containerpack and the other suites that gate on it.
+. "$REPO/tools/fsck-clean.sh"
 WORK=/dev/shm/wp10tz
 IMG=wp10tz.img
 rm -rf "$WORK" && mkdir -p "$WORK/orig" "$WORK/out"
@@ -87,7 +90,7 @@ fi
 
 echo "== verify --deep =="
 $B/invf-verify "$IMG" --deep | tee "$WORK/verify1.log"
-grep -q "0 corrupt" "$WORK/verify1.log" || { echo "FAIL: corrupt files"; exit 1; }
+grep -qE ' 0 corrupt,' "$WORK/verify1.log" || { echo "FAIL: corrupt files"; exit 1; }
 
 # text-zone accounting shows up in stats while members are live
 if [ -x $B/invf-stats ]; then
@@ -153,8 +156,21 @@ if grep -q "text -> PPMd batch" "$WORK/sweep3.log"; then
 fi
 
 echo "== fsck =="
-$B/invf-fsck "$IMG" | tee "$WORK/fsck.log"
-$B/invf-verify "$IMG" --deep | tail -1
+# This block used to RUN fsck and verify, print both, and throw the verdicts
+# away -- and the suite then printed TEXTZONE E2E: PASS. There was no `^OK`
+# and no fsck_clean anywhere in the file, and the only "0 corrupt" grep was
+# 60 lines earlier, BEFORE the delete-all phase. So an entire delete/GC round
+# ended with no structural assertion of any kind: a leaked or missing block, or
+# corruption the delete phase introduced, went unreported and the transcript
+# still said PASS.
+$B/invf-fsck "$IMG" >"$WORK/fsck.log" 2>&1
+sed 's/^/  | /' "$WORK/fsck.log"
+fsck_clean "$WORK/fsck.log" || { sed 's/^/  | /' "$WORK/fsck.log"; \
+    echo "FAIL: fsck not clean after the delete/GC phase"; exit 1; }
+$B/invf-verify "$IMG" --deep >"$WORK/verify2.log" 2>&1
+tail -2 "$WORK/verify2.log" | sed 's/^/  | /'
+grep -qE ' 0 corrupt,' "$WORK/verify2.log" \
+    || { cat "$WORK/verify2.log"; echo "FAIL: corrupt files after the delete/GC phase"; exit 1; }
 
 echo "== stat =="
 $B/invf-stat "$IMG" | sed 's/\x1b\[[0-9;]*m//g' | grep -E "space|files|zones" || true

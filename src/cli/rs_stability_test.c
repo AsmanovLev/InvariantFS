@@ -284,11 +284,35 @@ int main(void)
             blk[i] = mem + (size_t)i * BSZ;
         }
         blk[0][100] ^= 0xFF;
-        int rc = rs_decode(RS_ALGO_VM, K, m, BSZ, blk, present);
-        printf("  leg 4 (erasure coding, not error correction): a PRESENT but "
-               "damaged block is returned unchanged (rc=%d) -- correct, and "
-               "the reason parity must be paired with real damage detection\n",
-               rc);
+        /* Keep a copy of what we handed in, so "returned unchanged" is a
+         * claim about BYTES and not about a return code. */
+        {
+            uint8_t *before = (uint8_t *)malloc((size_t)n * BSZ);
+            int rc, same;
+            if (!before) { failures++; printf("  FAIL: leg 4: malloc\n"); return 1; }
+            memcpy(before, mem, (size_t)n * BSZ);
+            rc = rs_decode(RS_ALGO_VM, K, m, BSZ, blk, present);
+            /* This leg had NO assertion at all: `rc` was interpolated into a
+             * printf and nothing tested it, so an rs_decode that started
+             * ERRORING on a present-but-damaged block -- or one that started
+             * silently "correcting" it -- left the suite at zero failures
+             * while printing a confident, now-false claim. The header calls
+             * this leg the one that "asserts the limit rather than hiding
+             * it"; it did not. Both halves of the claim are checked now. */
+            CHECK(rc == 0,
+                  "leg 4: erasure coding, not error correction -- a PRESENT "
+                  "damaged block must not be reported as an error (rc=%d)", rc);
+            same = memcmp(blk[0], before, BSZ) == 0;
+            CHECK(same,
+                  "leg 4: the damaged data block is returned UNCHANGED -- a "
+                  "parity layer that quietly repaired it would be claiming "
+                  "error correction it does not have");
+            free(before);
+            printf("  leg 4 (erasure coding, not error correction): a PRESENT "
+                   "but damaged block is returned unchanged (rc=%d) -- correct, "
+                   "and the reason parity must be paired with real damage "
+                   "detection\n", rc);
+        }
         free(mem);
     }
 

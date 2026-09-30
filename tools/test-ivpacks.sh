@@ -236,13 +236,26 @@ for p in $CPACKS; do
     case "$desc" in *"cmd=yes estimate=yes"*) ;; *) bad "$p: missing cmd/estimate export ($desc)"; continue ;; esac
     ok "$p: $desc"
 
-    # decline parity: the CLI's exit status must equal the plugin's return code
+    # Decline parity: the CLI's exit status must equal the plugin's return code
+    # -- AND both sides must actually have declined.
+    #
+    # The parity half alone could not fail in the direction that matters. A
+    # pack that silently ACCEPTED 64 KiB of random bytes as a container returns
+    # 0 from both sides; `crc == prc`, `prc < 100`, and the leg printed
+    #     ok  <pack>: junk.bin declined identically (cli=0 plugin=0)
+    # -- a "declined identically" line over a pair of acceptances. The comment
+    # on the line above it says "a decline (3) is the expected answer here"
+    # and the file's own header promises "decline, and CLI/so agree"; nothing
+    # enforced either. This is the same shape as the discarded 8 MiB candidate
+    # that measured GREEN before any change: a check that cannot fail.
     for img in junk.bin; do
         # `set -e` needs the non-zero exit captured in a condition, not after
         # a `;` -- a decline (3) is the expected answer here.
         crc=0; "$cli" estimate "$WORK/orig/$img" >/dev/null 2>&1 || crc=$?
         prc=0; "$WORK/bin/ivpack-probe" est "$so" "$WORK/orig/$img" >/dev/null 2>&1 || prc=$?
-        if [ "$crc" != "$prc" ]; then
+        if [ "$crc" -eq 0 ] || [ "$prc" -eq 0 ]; then
+            bad "$p: $img was NOT declined (cli=$crc plugin=$prc) -- 64 KiB of random bytes was accepted as a container, and 'both sides agreed' is not evidence"
+        elif [ "$crc" != "$prc" ]; then
             bad "$p: decline parity on $img (cli=$crc plugin=$prc)"
         elif [ "$prc" -ge 100 ]; then
             bad "$p: plugin died by signal on $img (rc=$prc)"

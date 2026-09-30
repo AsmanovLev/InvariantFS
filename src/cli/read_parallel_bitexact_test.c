@@ -191,9 +191,17 @@ static int run_frame_disagreement_leg(const char *img,
         printf("  FAIL  frame leg: recipe load/parse\n"); free(blob); vol_close(v); return 1;
     }
     if (ah.num_blocks < 16) {
-        printf("  note  frame leg: recipe has %u entries, below the 16 the "
-               "parallel fan-out needs; leg is vacuous\n", ah.num_blocks);
-        free(blob); vol_close(v); return 0;
+        /* Returning 0 here made this branch ANNOUNCE that the leg proved
+         * nothing and then report success anyway: `fails` stayed 0 and main
+         * printed PASS. A shrunk INVFS_BX_SIZE, or a write path that stopped
+         * compressing and produced fewer entries, would silently delete the
+         * leg's only discriminating power while the suite read green. The
+         * sibling vacuity guard further down (pick == (size_t)-1) correctly
+         * returns 1 with "this leg proved nothing"; this one must match. */
+        printf("  FAIL  frame leg: recipe has %u entries, below the 16 the "
+               "parallel fan-out needs; this leg proved nothing\n",
+               ah.num_blocks);
+        free(blob); vol_close(v); return 1;
     }
 
     tap = (invfs_ast_block_entry *)malloc((size_t)ah.num_blocks * sizeof *tap);

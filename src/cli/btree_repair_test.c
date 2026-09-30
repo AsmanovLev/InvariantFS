@@ -161,6 +161,14 @@ static uint64_t g_best_rows;  /* ranking of the accepted victim            */
 static int g_want_files = 1;  /* rank leaves holding a named-file row      */
 static uint64_t g_best_files;
 static leafpick g_lp;
+/* WHAT THE TORN RANGE HELD, measured BEFORE the tear. g_lp.nids counts every
+ * inode row in the range; these split it by kind, and the repair is then held
+ * to losing exactly those. This is the half `nkeys + torn_keys == keys_before`
+ * never had: that arithmetic counted what was LEFT and never what the range
+ * HELD, so a repair that excised twice its share could satisfy it. */
+static int g_range_named;    /* named-file rows inside the quarantined range */
+static int g_range_filler;   /* filler rows inside it, excluding the delta-only
+                              * rescue key (which is recovered, not lost)    */
 static uint8_t g_cur_ids[600 * 8];
 static int g_cur_n;
 
@@ -641,6 +649,8 @@ int main(int argc, char **argv)
     invfs_fsck_report rep;
     int err_open = 0, i, eio = 0, abs = 0, invented = 0, kept = 0, outside = 0;
     int lost_names = 0, cli;
+    int rescued_base = 0;   /* quarantined filler rows the delta still had */
+    int gone = 0;           /* quarantined filler rows the repair lost     */
     char cmd[1200];
 
     if (atexit(tally_on_exit) != 0) {
@@ -704,22 +714,41 @@ int main(int argc, char **argv)
     }
     {
         char a[160], b[160];
-        int nfiles = 0;
+        int nfiles = 0, nfill = 0;
         for (i = 0; i < (int)NFILE; i++)
             if (in_quarantine(g_file_id[i]))
                 nfiles++;
+        /* The fillers the range holds, counted off g_lp.ids -- the walk's own
+         * record of what was on the page -- and NOT off anything read back
+         * after the repair. This is the independent expected value the phase-E
+         * loss assertion is measured against. */
+        for (i = 0; i < g_lp.nids; i++) {
+            uint64_t id = g_lp.ids[i];
+            if (id < FIRST_ID || id >= FIRST_ID + NFILL || id == RESCUE_ID)
+                continue;
+            nfill++;
+        }
+        g_range_named = nfiles;
+        g_range_filler = nfill;
         hexkey(a, sizeof a, g_lp.vlo, g_lp.vlo_n, 0);
         hexkey(b, sizeof b, g_lp.vhi, g_lp.vhi_n, g_lp.vhi_unb);
         printf("  tree: %llu pages; tearing leaf pba %llu: key range "
-               "[%s, %s) with %d inode rows (%d of them named files)\n",
+               "[%s, %s) with %d inode rows (%d of them named files, "
+               "%d filler rows)\n",
                (unsigned long long)g_lp.pages, (unsigned long long)g_lp.victim,
-               a, b, g_lp.nids, nfiles);
+               a, b, g_lp.nids, nfiles, nfill);
         if (nfiles == 0) {
             fprintf(stderr, "btree_repair_test: victim holds no named file\n");
             return 2;
         }
         if (g_lp.vhi_unb) {
             fprintf(stderr, "btree_repair_test: victim has an unbounded top\n");
+            return 2;
+        }
+        if (nfiles + nfill != g_lp.nids) {
+            fprintf(stderr, "btree_repair_test: the range holds %d rows but "
+                            "splits into %d named + %d filler\n",
+                    g_lp.nids, nfiles, nfill);
             return 2;
         }
     }
@@ -840,7 +869,7 @@ int main(int argc, char **argv)
         ok(0, "the repaired base tree is structurally valid");
 
     {
-        int kept2 = 0, outside2 = 0, rescued = 0, gone = 0;
+        int kept2 = 0, outside2 = 0, rescued = 0;
         invfs_v3_inode in;
         for (i = 0; i < (int)NFILL; i++) {
             uint64_t id = FIRST_ID + (uint64_t)i;
@@ -850,7 +879,7 @@ int main(int argc, char **argv)
             r = vol_v3_inode_get(g_v, id, &in);
             if (in_quarantine(id)) {
                 if (r == 1)
-                    rescued++;
+                    rescued_base++;   /* the delta still had this one */
                 else
                     gone++;
             } else {
@@ -859,17 +888,36 @@ int main(int argc, char **argv)
                     kept2++;
             }
         }
-        rescued += vol_v3_inode_get(g_v, RESCUE_ID, &in) == 1 &&
-                   in.size == 0x5AFE5AFEull ? 1 : 0;
+        rescued = rescued_base +
+                  (vol_v3_inode_get(g_v, RESCUE_ID, &in) == 1 &&
+                   in.size == 0x5AFE5AFEull ? 1 : 0);
         printf("  after repair: %d/%d keys outside the range intact, "
                "%d quarantined keys recovered from the delta, %d gone\n",
                kept2, outside2, rescued, gone);
         ok(kept2 == outside2, "the repair kept every readable key");
         ok(rescued == 1, "the repair recovered the delta's copy of a "
                          "quarantined key");
+        /* `gone` was computed and printed here for years and never asserted:
+         * the leg had the measure of its own damage in hand and did not look
+         * at it. And the assertion next door, `kept2 == outside2`, counts
+         * only what SURVIVED -- a repair that excised the entire tree
+         * satisfies it perfectly. The missing half is what the range HELD,
+         * which g_lp.nids recorded before the tear. That is the direction
+         * WP86's arithmetic went wrong in: `st.nkeys + torn_keys ==
+         * keys_before` counted the survivors and never the dead.
+         *
+         * There is deliberately NO `gone == g_range_filler` assertion here.
+         * This victim's range holds named-file rows and, on this corpus, no
+         * filler rows at all, so that check would read `0 == 0` -- precisely
+         * the vacuity this leg is being fixed for, wearing a confident
+         * message. The conservation assertion below carries the whole range,
+         * fillers included, and it is not vacuous: g_lp.nids is 17. */
+        printf("  the torn page held %d rows (%d named, %d filler); "
+               "%d filler gone, %d filler kept by the delta\n",
+               g_lp.nids, g_range_named, g_range_filler, gone, rescued_base);
     }
     {
-        int still = 0;
+        int still = 0, dropped = 0;
         for (i = 0; i < (int)NFILE; i++) {
             char nm[64];
             uint64_t id = 0, sz = 0, ct = 0;
@@ -877,10 +925,66 @@ int main(int argc, char **argv)
             if (vol_v3_path_stat(g_v, nm, &id, &sz, &ct) == 0 &&
                 !in_quarantine(g_file_id[i]))
                 still++;
+            if (in_quarantine(g_file_id[i]))
+                dropped++;
         }
-        printf("  named files still resolvable by path after the repair: %d\n",
-               still);
-        ok(still > 0, "the surviving names still resolve by path");
+        printf("  named files still resolvable by path after the repair: %d "
+               "(of %u; %d rows were inside the quarantined range)\n",
+               still, (unsigned)NFILE, dropped);
+        /* `still > 0` was a floor of one on a set of forty names. A repair
+         * that lost thirty-nine of them and kept one passed it -- and the
+         * names that DID resolve are exactly the ones the excision was
+         * supposed to leave alone, so the count is fully determined and
+         * "exactly" is the only honest bound. */
+        ok(still == (int)NFILE - dropped,
+           "every named file OUTSIDE the quarantined range still resolves by "
+           "path -- all of them, not one of them");
+        ok(dropped == g_range_named,
+           "exactly the named files whose rows the torn page held are the ones "
+           "dropped: the excision took its range and nothing wider");
+        /* Conservation over the WHOLE range, which is what binds on this
+         * corpus: every row the torn page held is now in exactly one of two
+         * states -- still readable, or gone -- and the two counts must sum to
+         * what the page held. A repair that dropped one row too many, or one
+         * too few, cannot satisfy this, and neither can a survivor total. */
+        ok(gone + rescued_base + dropped == g_lp.nids,
+           "every row the torn page held is accounted for -- kept or gone, "
+           "summed against what it held, not against a survivor total");
+    }
+
+    /* And ask a LIVE INODE for its bytes. Every assertion above is about
+     * names and rows: two names resolving to one inode, a row still being
+     * readable, a path that still stats -- all of which is exactly what
+     * survived WP86, where the names and rows went on resolving over two
+     * emptied files. A file whose row is gone must come back EIO from the
+     * tool on the far side, not as an empty or invented body. */
+    {
+        int asked = 0, eio_ct = 0, wrong = 0;
+        vol_close(g_v);
+        g_v = NULL;
+        for (i = 0; i < (int)NFILE && asked < 3; i++) {
+            char nm[64];
+            int rc;
+            if (!in_quarantine(g_file_id[i]))
+                continue;
+            snprintf(nm, sizeof nm, "f%03u.bin", i);
+            rc = cat_matches(g_img, nm, (uint8_t)('A' + (i % 26)), 512);
+            asked++;
+            if (rc == -1)
+                eio_ct++;
+            else
+                wrong++;      /* 0 = served the wrong bytes; 1 = still there,
+                               * which would mean the row was not dropped at
+                               * all and the count above is lying */
+        }
+        g_v = vol_open(g_img, &err_open);
+        ok(g_v != NULL, "the volume reopens after the invf-cat probes");
+        printf("  invf-cat on %d named files whose rows were excised: "
+               "%d EIO, %d something else\n", asked, eio_ct, wrong);
+        ok(asked > 0 && eio_ct == asked,
+           "a named file whose row was excised reads EIO through invf-cat, "
+           "NOT an empty or invented body -- the far-side tool agrees with "
+           "the row count");
     }
 
     /* the repair must survive a remount */

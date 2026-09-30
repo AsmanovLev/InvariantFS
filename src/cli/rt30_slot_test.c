@@ -568,11 +568,97 @@ static int cmd_reuse(const char *img, int nallocs)
     return 0;
 }
 
+/* cmd_verify: read every file back and memcmp it against a FRESHLY REGENERATED
+ * buffer, the way src/cli/orphan_test.c's cmd_verify does.
+ *
+ * It exists because `probe <img> safe` is not a data check. It answers "is the
+ * root slot's block allocated?", and that is the whole of it: the suite header
+ * claims "leg 5 ... every file must still read back byte-identical", and no
+ * byte of any file was ever read anywhere in this file. On a volume whose
+ * newest root was torn and a non-root page destroyed on purpose -- and then
+ * repaired by `invf-fsck -f`, whose own reachability diff is the hazard this
+ * suite exists to police -- a repair that took content with it leaves a
+ * structurally perfect volume. `probe safe` passes. That is btree_repair_test
+ * reproduced in a shell suite: the repair verified with the repairer's own
+ * criteria.
+ *
+ * mode "strict":   every one of the nfiles must be present AND byte-exact.
+ * mode "tolerant": a file the excision legitimately removed may be absent, but
+ *                  every file that IS present must be byte-exact, and the count
+ *                  of survivors is printed and must be greater than zero -- so
+ *                  a volume emptied by the repair cannot report a pass.
+ *
+ * The expected bytes come from content_fill(), the same generator cmd_build
+ * used to write them, not from the volume. Comparing the volume against itself
+ * would prove nothing. */
+static int cmd_verify(const char *img, int nfiles, const char *mode)
+{
+    invfs_volume *v;
+    int err, i;
+    /* "strict":   all nfiles present and byte-exact (an undamaged volume).
+     * "tolerant": a file the excision legitimately removed may be absent.
+     * "census":   as tolerant, but PRESENT == 0 is NOT a failure -- the
+     *             caller has measured that leg 4's damage eats the dirent
+     *             page -- so the census (bad == 0, every name accounted for)
+     *             is the assertion and the survivor count is the output. */
+    int tolerant = (mode && (!strcmp(mode, "tolerant") || !strcmp(mode, "census")));
+    int strict_present = mode && !strcmp(mode, "census") ? 0 : 1;
+    int present = 0, absent = 0, bad = 0;
+
+    v = vol_open(img, &err);
+    if (!v)
+        return fail("vol_open(%s) err=%d", img, err);
+
+    for (i = 0; i < nfiles; i++) {
+        char name[64];
+        size_t len = content_len(i);
+        uint8_t *want = (uint8_t *)malloc(len);
+        uint8_t *got = NULL;
+        size_t glen = 0;
+        uint64_t id = 0;
+
+        if (!want) { vol_close(v); return fail("out of memory"); }
+        content_fill(i, 0, want, len);
+        fname(i, name, sizeof name);
+        if (vol_find(v, name) == 0 || vol_v3_path_lookup(v, name, &id) != 1) {
+            absent++;
+            free(want);
+            if (!tolerant) {
+                fprintf(stderr, "FAIL: %s is absent from %s\n", name, img);
+                bad++;
+            }
+            continue;
+        }
+        if (vol_read_file(v, id, &got, &glen) != 0 || !got ||
+            glen != len || memcmp(got, want, len) != 0) {
+            fprintf(stderr, "FAIL: %s did not read back byte-identical "
+                    "(read rc/len %zu vs expected %zu)\n", name, glen, len);
+            bad++;
+        } else {
+            present++;
+        }
+        free(want);
+        free(got);
+    }
+    vol_close(v);
+    printf("VERIFY PRESENT=%d ABSENT=%d BAD=%d MODE=%s\n",
+           present, absent, bad, mode ? mode : "strict");
+    if (present == 0 && strict_present)
+        return fail("no file could be read at all -- the leg proved nothing");
+    if (!tolerant && absent != 0)
+        return fail("%d file(s) absent on an undamaged volume", absent);
+    if (present + absent != nfiles)
+        return fail("census is incomplete: %d present + %d absent != %d",
+                    present, absent, nfiles);
+    return bad ? 1 : 0;
+}
+
 int main(int argc, char **argv)
 {
     if (argc < 3) {
         fprintf(stderr, "usage: %s <build|probe|free-adopted|damage-newest|"
-                        "damage-tree-page|reuse> <img> [args]\n", argv[0]);
+                        "damage-tree-page|reuse|verify> <img> [args]\n",
+                argv[0]);
         return 2;
     }
     if (!strcmp(argv[1], "build") && argc == 5)
@@ -587,6 +673,8 @@ int main(int argc, char **argv)
         return cmd_damage_tree_page(argv[2]);
     if (!strcmp(argv[1], "reuse") && argc == 4)
         return cmd_reuse(argv[2], atoi(argv[3]));
+    if (!strcmp(argv[1], "verify") && argc == 5)
+        return cmd_verify(argv[2], atoi(argv[3]), argv[4]);
     fprintf(stderr, "FAIL: bad arguments\n");
     return 2;
 }

@@ -48,7 +48,13 @@ int main(int argc, char **argv)
     uint8_t buf_nested[128 * 1024];
     uint8_t buf_root[64 * 1024];
     uint8_t buf_other[32 * 1024];
+    uint8_t buf_racing[24 * 1024];    /* distinct from buf_other on purpose: */
+    uint8_t buf_manual[20 * 1024];    /* three files sharing one source buffer
+                                       * cannot detect a crossover between
+                                       * them, and a crossover is the defect
+                                       * this test exists to catch. */
     uint64_t id_nested, id_root, id_other;
+    uint64_t id_racing = 0, id_manual = 0;   /* set in steps 11/12, read in 13 */
     uint8_t *read_back = NULL;
     size_t read_len = 0;
 
@@ -85,6 +91,10 @@ int main(int argc, char **argv)
         buf_root[i] = (uint8_t)("ROOT_PHOTO_DIFFERENT_"[(i % 21)]);
     for (size_t i = 0; i < sizeof buf_other; i++)
         buf_other[i] = (uint8_t)("OTHER_FILE_DATA_"[(i % 16)]);
+    for (size_t i = 0; i < sizeof buf_racing; i++)
+        buf_racing[i] = (uint8_t)("RACING_SESSION_"[(i % 15)]);
+    for (size_t i = 0; i < sizeof buf_manual; i++)
+        buf_manual[i] = (uint8_t)("MANUAL_SWEEP_"[(i % 13)]);
 
     /* 2. Create nested directories */
     ok(vol_v3_mkdir(v, "dir1") != 0, "mkdir dir1");
@@ -172,8 +182,9 @@ int main(int argc, char **argv)
 
     /* 11. Test active write session guard on nested file */
     {
-        uint64_t act_id = vol_v3_write_bulk(v, "dir1/sub2/racing.txt", buf_other,
-                                            sizeof buf_other, NULL);
+        uint64_t act_id = vol_v3_write_bulk(v, "dir1/sub2/racing.txt", buf_racing,
+                                            sizeof buf_racing, NULL);
+        id_racing = act_id;
         ok(act_id != 0, "create dir1/sub2/racing.txt in RAW");
         ok(vol_inode_first_zone(v, act_id) == INVFS_ZONE_RAW, "racing file is initially in RAW");
 
@@ -181,7 +192,7 @@ int main(int argc, char **argv)
         uint64_t sess_id = vol_write_begin(v, "dir1/sub2/racing.txt", 0, &ws);
         ok(sess_id != 0 && ws != NULL, "open write session on dir1/sub2/racing.txt");
 
-        ok(vol_write_range(ws, 0, buf_other, sizeof buf_other) == 0, "write session payload");
+        ok(vol_write_range(ws, 0, buf_racing, sizeof buf_racing) == 0, "write session payload");
         ok(vol_write_active_id(v, act_id) == 1, "vol_write_active_id detects active session on act_id");
 
         /* Queue for sweep while active */
@@ -200,12 +211,23 @@ int main(int argc, char **argv)
         ok(swept_active == 1, "vol_sweep_pending swept committed file");
         ok(vol_inode_first_zone(v, act_id) != INVFS_ZONE_RAW,
            "committed file now out of RAW");
+        /* The zone moved and the call returned 1. Neither is evidence that the
+         * CONTENT survived: the sweep re-encodes, and its failure mode is
+         * exactly "moved out of RAW, wrong bytes". Ask the file. */
+        read_back = NULL; read_len = 0;
+        ok(vol_read_inode(v, act_id, 0, &read_back, &read_len) == 0 &&
+           read_len == sizeof buf_racing &&
+           read_back &&
+           memcmp(read_back, buf_racing, sizeof buf_racing) == 0,
+           "dir1/sub2/racing.txt preserved exact bytes across the active-session sweep");
+        free(read_back);
     }
 
     /* 12. Test vol_sweep_file on v3 (manual / SIGUSR1 sweep) */
     {
-        uint64_t id_man = vol_v3_write_bulk(v, "dir1/manual.txt", buf_other,
-                                            sizeof buf_other, NULL);
+        uint64_t id_man = vol_v3_write_bulk(v, "dir1/manual.txt", buf_manual,
+                                            sizeof buf_manual, NULL);
+        id_manual = id_man;
         ok(id_man != 0, "write dir1/manual.txt");
         ok(vol_inode_first_zone(v, id_man) == INVFS_ZONE_RAW, "dir1/manual.txt starts in RAW");
 
@@ -215,6 +237,16 @@ int main(int argc, char **argv)
 
         rc = vol_sweep_file(v, id_man);
         ok(rc == 1, "second vol_sweep_file returns 1 (already swept/noop)");
+
+        /* Same for this one: rc and the zone are the sweep's own account of
+         * itself. The bytes are not. */
+        read_back = NULL; read_len = 0;
+        ok(vol_read_inode(v, id_man, 0, &read_back, &read_len) == 0 &&
+           read_len == sizeof buf_manual &&
+           read_back &&
+           memcmp(read_back, buf_manual, sizeof buf_manual) == 0,
+           "dir1/manual.txt preserved exact bytes across vol_sweep_file");
+        free(read_back);
     }
 
     /* 13. Close and remount volume — assert durable state */
@@ -236,6 +268,35 @@ int main(int argc, char **argv)
            read_len == sizeof buf_nested &&
            memcmp(read_back, buf_nested, sizeof buf_nested) == 0,
            "durable remount: dir1/sub2/photo.jpg bit-exact");
+        free(read_back);
+
+        /* The header claims "bit-exact across ALL files". Two of the five
+         * files this test sweeps were never asked for a byte, before or
+         * after the remount, so a sweep that emptied either of them was
+         * green. All five now are. */
+        read_back = NULL; read_len = 0;
+        ok(vol_read_inode(v, id_other, 0, &read_back, &read_len) == 0 &&
+           read_len == sizeof buf_other &&
+           memcmp(read_back, buf_other, sizeof buf_other) == 0,
+           "durable remount: dir1/other.txt bit-exact");
+        free(read_back);
+
+        ok(id_racing != 0, "the racing-file id survived to the remount leg");
+        read_back = NULL; read_len = 0;
+        ok(vol_read_inode(v, id_racing, 0, &read_back, &read_len) == 0 &&
+           read_len == sizeof buf_racing &&
+           read_back &&
+           memcmp(read_back, buf_racing, sizeof buf_racing) == 0,
+           "durable remount: dir1/sub2/racing.txt bit-exact");
+        free(read_back);
+
+        ok(id_manual != 0, "the manual-sweep file id survived to the remount leg");
+        read_back = NULL; read_len = 0;
+        ok(vol_read_inode(v, id_manual, 0, &read_back, &read_len) == 0 &&
+           read_len == sizeof buf_manual &&
+           read_back &&
+           memcmp(read_back, buf_manual, sizeof buf_manual) == 0,
+           "durable remount: dir1/manual.txt bit-exact");
         free(read_back);
 
         /* 14. Unlink test. WP78: a text file now lives in a SHARED batch,

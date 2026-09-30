@@ -130,6 +130,39 @@ int main(int argc, char **argv)
            "remount: 16 MiB file bit-exact");
         free(read_buf);
         read_buf = NULL;
+
+        /* Header item 7 is "Clean fsck". It used to run at the very end of
+         * the test, AFTER step 7 had unlinked the file and the volume had been
+         * closed -- so it was an exit-code assertion on a volume that no
+         * longer contained the thing under test. The one failure it could have
+         * caught is an unlink that freed the live recipe blob while leaving
+         * the base tree pointing at it: the volume then reports clean and this
+         * passed. That is the btree_repair failure mode exactly, and it is the
+         * failure a "16 MiB multi-chunk recipe" test most needs to rule out.
+         *
+         * So fsck now runs HERE, with the file present, and the file is read
+         * back again afterwards. The later run is kept as a second opinion on
+         * the post-unlink state, and its exit code is now checked rather than
+         * discarded. */
+        vol_close(v);   /* vol_open is exclusive: the CLI needs the image */
+        v = NULL;
+        {
+            char cmd[512];
+            snprintf(cmd, sizeof cmd, "./bin/invf-fsck %s >/dev/null 2>&1", img);
+            ok(system(cmd) == 0, "invf-fsck clean WITH the 16 MiB file present");
+        }
+        v = vol_open(img, &err);
+        ok(v != NULL, "the fsck-clean volume reopens");
+        if (v) {
+            read_len = 0;
+            ok(vol_read_inode(v, id, 0, &read_buf, &read_len) == 0 &&
+               read_len == file_size &&
+               memcmp(read_buf, orig_data, file_size) == 0,
+               "the file still reads back bit-exact AFTER invf-fsck ran on a "
+               "volume holding it -- fsck did not take the recipe with it");
+            free(read_buf);
+            read_buf = NULL;
+        }
     }
 
     /* 7. Unlink and data block reclamation */
@@ -141,11 +174,12 @@ int main(int argc, char **argv)
 
     vol_close(v);
 
-    /* 8. fsck clean */
+    /* 8. fsck clean after the unlink -- a second opinion on the post-unlink
+     * state, not the only one. Step 6 above is the load-bearing fsck leg. */
     {
         char cmd[512];
         snprintf(cmd, sizeof cmd, "./bin/invf-fsck %s >/dev/null 2>&1", img);
-        ok(system(cmd) == 0, "invf-fsck clean on image");
+        ok(system(cmd) == 0, "invf-fsck clean after the unlink");
     }
 
     unlink(img);

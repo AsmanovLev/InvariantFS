@@ -31,10 +31,18 @@
 #          reachability diff (vol_fsck.c:1306) run. That diff is NOT guarded
 #          against the second RT30 slot, so it frees the fallback root out
 #          from under the descriptor. Then probe.
-#   leg 5  fsck + readback: the volume must still pass invf-fsck and every
-#          file must still read back byte-identical. A reader that silently
-#          adopted a stale root would still pass invf-fsck -- that is the
-#          point of this suite, so the leg states it explicitly.
+#   leg 5  fsck + readback: the volume must still open, its root slot must
+#          still name an allocated block, and a census of every file name must
+#          come back complete with no file that IS readable being wrong. A
+#          reader that silently adopted a stale root would still pass
+#          invf-fsck -- that is the point of this suite, so the leg states it.
+#          MEASURED: on fsck.img the survivor count is ZERO -- leg 4's damage
+#          takes the dirent page, so the repair legitimately destroys every
+#          name and there is nothing left to compare. The old header claimed
+#          "every file must still read back byte-identical" here; that was not
+#          constructible, and nothing noticed, because nothing read a byte.
+#          The STRICT bit-exactness leg is therefore the one on good.img, where
+#          all 40 files must be present and byte-identical.
 #
 # BOTH directions are permanent. Leg 2 asserts the check REJECTS a freed
 # root; the red control beside it asserts the hazard is ABSENT. To
@@ -169,6 +177,44 @@ OUT=$("$T" probe fsck.img safe) || { echo "$OUT"; cat fsck3.out; fail "leg 5: th
 echo "  the repaired volume opens and its root reads (its damage is deliberate and expected)"
 OUT=$("$T" probe good.img safe) || { echo "$OUT"; fail "leg 5: the untouched volume regressed"; }
 echo "$OUT"
+
+# `probe ... safe` answers exactly one question -- is the root slot's block
+# allocated -- and the suite header's leg 5 claims "every file must still read
+# back byte-identical". No byte of any file was read anywhere in this file, so
+# that claim had nothing behind it: a repair that took content with it leaves a
+# structurally perfect volume and `probe safe` passes. This is btree_repair_test
+# reproduced in a shell suite -- the repair verified with the repairer's own
+# criteria -- so leg 5 now asks a different tool, invf-cat's read path, on the
+# far side of the operation.
+#
+# MEASURED, and it is worth stating plainly rather than papering over: on
+# fsck.img, `verify ... tolerant` reports PRESENT=0 ABSENT=40. Leg 4 tears the
+# newest root and then a non-root page, and `invf-fsck -f` excises the damage;
+# the page that goes carries the directory entries, so every name is gone and
+# there is no file left to compare. This suite therefore CANNOT assert
+# bit-exactness across its own repair -- not because the assertion was written
+# badly, but because the repair legitimately destroys the corpus it would be
+# compared against. The header's old claim that "every file must still read
+# back byte-identical" was not constructible here, and nothing in the file
+# noticed, because nothing read a byte.
+#
+# So: the census is asserted (bad == 0, every name accounted for), the survivor
+# count is printed, and the actual bit-exactness leg is the STRICT one on
+# good.img, where all 40 files must be present and byte-identical. If leg 4's
+# damage ever stops eating the dirent page, PRESENT rises above 0 and the
+# tolerant run starts carrying real weight on its own -- with the count on
+# screen either way, so nobody has to guess which happened.
+OUT=$("$T" verify fsck.img "$NFILES" census) || { echo "$OUT"; \
+    fail "leg 5: a file that WAS readable on the repaired volume did not read back byte-identical"; }
+echo "  repaired volume census: $OUT"
+case "$OUT" in
+    *"PRESENT=0 "*) echo "  NOTE: leg 4's damage took every directory entry, so"
+                   echo "        no file survives to compare on fsck.img. The"
+                   echo "        bit-exactness leg is the strict one below." ;;
+esac
+OUT=$("$T" verify good.img "$NFILES" strict) || { echo "$OUT"; \
+    fail "leg 5: a file on the UNTOUCHED volume did not read back byte-identical"; }
+echo "  untouched volume readback: $OUT"
 
 echo
 echo "PASS: the reader refuses a root slot whose block is not allocated, and"
