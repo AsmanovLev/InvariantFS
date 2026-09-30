@@ -182,11 +182,23 @@ echo
 echo "== [1] raw_watermark=25: daemon sweeps past the mark on its own =="
 mnt_up a1 "$IMGA" -- -o raw_watermark=25
 wait_log a1 "save point captured" 30
-wait_log a1 "\[sweep\] DONE files=" 60
+wait_log a1 "DONE found=[0-9]* files=" 60
 grep -q "\[watermark\] RAW fill .* over 25%: kicking a sweep pass" \
     "$WORK/fuse.a1.log" || fail "no watermark kick logged"
-grep -q "\[sweep\] DONE files=" "$WORK/fuse.a1.log" \
+grep -q "DONE found=[0-9]* files=" "$WORK/fuse.a1.log" \
     || fail "watermark pass did not finish"
+# The DONE line reports found= and files= side by side precisely so a
+# truncated collection is visible: found is what the walk SAW, files is what
+# it handed back, and found > files means the sweep only covered a prefix.
+# The old line printed files= alone, so a pass that silently swept a subset
+# was indistinguishable from one that swept everything.
+_a1_line=$(grep -ao "DONE found=[0-9]* files=[0-9]*" "$WORK/fuse.a1.log" | head -1)
+_a1_found=$(printf '%s' "$_a1_line" | sed -n 's/.*found=\([0-9]*\).*/\1/p')
+_a1_files=$(printf '%s' "$_a1_line" | sed -n 's/.*files=\([0-9]*\).*/\1/p')
+[ -n "$_a1_found" ] && [ -n "$_a1_files" ] \
+    || fail "could not read found=/files= from the DONE line: $_a1_line"
+[ "$_a1_found" -eq "$_a1_files" ] \
+    || fail "the sweep collected a PREFIX: found $_a1_found > swept $_a1_files"
 echo "  pass 1: kicked by the daemon, save point captured (no invf-sweep ran)"
 # The pass armed a rollback window, and a window is a HOLD: a capture pins
 # every block the PRE-sweep generation's recipes named (spt0_pin_take ->
@@ -228,7 +240,7 @@ FIRSTD=$(printf 'fat%02d.txt' "$FATN")
 fill_to "$IMGD" "$T45"
 mnt_up d1 "$IMGD" -- -o raw_watermark=25
 wait_log d1 "save point captured" 30
-wait_log d1 "\[sweep\] DONE files=" 60
+wait_log d1 "DONE found=[0-9]* files=" 60
 PINNED_D=$(sed -n 's/.*save point: pinned \([0-9][0-9]*\) blocks.*/\1/p' \
     "$WORK/fuse.d1.log" | head -1)
 [ -n "$PINNED_D" ] && [ "$PINNED_D" -gt 0 ] \
@@ -273,7 +285,7 @@ FIRSTE=$(printf 'fat%02d.txt' "$FATN")
 fill_to "$IMGE" "$T45"
 FILLE0=$(raw_used "$IMGE")
 mnt_up e1 "$IMGE" -- -o raw_watermark=25
-wait_log e1 "\[sweep\] DONE files=" 120
+wait_log e1 "DONE found=[0-9]* files=" 120
 PINNED_E=$(sed -n 's/.*save point: pinned \([0-9][0-9]*\) blocks.*/\1/p' \
     "$WORK/fuse.e1.log" | head -1)
 [ -n "$PINNED_E" ] && [ "$PINNED_E" -gt 0 ] \
@@ -295,7 +307,7 @@ RECLAIMED_E=$(sed -n 's/.*reclaim: \([0-9][0-9]*\) blocks.*/\1/p' \
 NP1=0; STABLE=0; LAST=-1; T_IDLE=0
 while [ "$T_IDLE" -lt 180 ]; do
     sleep 2; T_IDLE=$((T_IDLE+2))
-    N=$(grep -c "\[sweep\] DONE files=" "$WORK/fuse.e1.log")
+    N=$(grep -c "DONE found=[0-9]* files=" "$WORK/fuse.e1.log")
     if [ "$N" = "$LAST" ]; then STABLE=$((STABLE+2)); else STABLE=0; fi
     LAST=$N
     [ "$STABLE" -ge 16 ] && break
@@ -349,7 +361,7 @@ $B/invf-mkfs "$IMGB" 0.0625 >/dev/null
 fill_to "$IMGB" "$T45"
 mnt_up b1 "$IMGB" -- -o raw_watermark=25
 wait_log b1 "save point captured" 30
-wait_log b1 "\[sweep\] DONE files=" 60
+wait_log b1 "DONE found=[0-9]* files=" 60
 mnt_down "$IMGB"
 $B/invf-rollback "$IMGB" > "$WORK/rb-b.log" 2>&1 || { cat "$WORK/rb-b.log"; fail "rollback failed"; }
 grep -q "rolled back to save point" "$WORK/rb-b.log" \
@@ -367,7 +379,7 @@ $B/invf-mkfs "$IMGC" 0.0625 >/dev/null
 fill_to "$IMGC" "$T45"
 mnt_up c1 "$IMGC" INVFS_RAW_WATERMARK=25
 wait_log c1 "save point captured" 30
-wait_log c1 "\[sweep\] DONE files=" 60
+wait_log c1 "DONE found=[0-9]* files=" 60
 mnt_down "$IMGC"
 $B/invf-rollback "$IMGC" >/dev/null 2>&1 || fail "env-armed rollback failed"
 fsck_ok "$IMGC"
