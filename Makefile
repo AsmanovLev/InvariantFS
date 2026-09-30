@@ -124,6 +124,7 @@ CLI_MAINS := mkfs verify fsck cp cat ls stat arctest blkio_test resize \
              fsck_rootslot_test batch_owner_test plugin_host_test plugin_mt_test rs_stability_test \
              fsck_liveness_test scratch_policy_test v2rb_rollback_test keycmp_test \
              lane_release_test pbaref_v3_test \
+             sweep_publish_rollback_test \
              sibling_retire_v3_test tar_cap_test fold_delta_read_test
 $(foreach t,$(CLI_MAINS),$(eval $(call TOOL_RULE,$(t),)))
 
@@ -601,7 +602,14 @@ print-fuzz-objs:
 fuzz-ci: $(OUT)/invf-fuzz
 	$(TESTENV) $(OUT)/invf-fuzz 10000 0x1CF51EE5
 
-test: $(OUT)/invf-arctest $(OUT)/invf-blkio_test $(OUT)/invf-codec_test \
+# Every *_test in CLI_MAINS must be a prerequisite of test: too. The list was
+# EXPLICIT, which meant a WP that added a test binary to CLI_MAINS alone left
+# make test running whatever stale binary was on disk -- observed twice today,
+# once reporting the buggy behaviour AFTER the fix was already committed. The
+# explicit list is generated from the test binaries below it instead, so the
+# two cannot drift.
+TEST_BINS := $(foreach t,$(filter %_test,$(CLI_MAINS)),$(OUT)/invf-$(t))
+test: $(TEST_BINS) $(OUT)/invf-arctest $(OUT)/invf-blkio_test $(OUT)/invf-codec_test \
       $(OUT)/invf-helper_exec_test $(OUT)/invf-metabuf_test $(OUT)/invf-btree_test \
       $(OUT)/invf-delta_test $(OUT)/invf-groupcommit_test $(OUT)/invf-concurrency_test $(OUT)/invf-sweep_v3_test \
       $(OUT)/invf-sweep_collect_test \
@@ -623,6 +631,7 @@ test: $(OUT)/invf-arctest $(OUT)/invf-blkio_test $(OUT)/invf-codec_test \
       $(OUT)/invf-keycmp_test $(OUT)/invf-tar_cap_test \
       $(OUT)/invf-lane_release_test \
       $(OUT)/invf-pbaref_v3_test \
+      $(OUT)/invf-sweep_publish_rollback_test \
       $(OUT)/invf-sibling_retire_v3_test \
       $(OUT)/invf-rt30_slot_test $(OUT)/invf-anchor_test $(OUT)/gzhdrfuzz \
       $(OUT)/invf-fsck_rootslot_test \
@@ -742,6 +751,15 @@ test: $(OUT)/invf-arctest $(OUT)/invf-blkio_test $(OUT)/invf-codec_test \
 	@# (the row really moved in place) beside the effect (the blocks are free
 	@# AND the file is still bit-exact).
 	$(TESTENV) $(TESTISO) $(OUT)/invf-lane_release_test /tmp
+	@# WP sweep-rollback-test-conflict: the in-process, BY-ADDRESS form of
+	@# tools/test-sweep-publish-rollback.sh's assertion. That suite measures
+	@# a net over a whole sweep, which cannot say WHICH blocks went missing;
+	@# this one resolves the stranded set to pbas (allocated in the data
+	@# region, named by no live recipe), asserts it did not grow at all, and
+	@# keeps the original defect's fingerprint as blocks == 17 * segments --
+	@# the number handed BACK. Leg 1 requires the sweep to have printed the
+	@# rollback at all, so it cannot go green by never entering the state.
+	$(TESTENV) $(TESTISO) $(OUT)/invf-sweep_publish_rollback_test /tmp
 	@# The v3 KEY ORDERING. The base B+-tree, the delta log and the
 	@# fold used to carry three byte-identical private comparators and the
 	@# fold's delta/base merge is correct only while they agree. They are

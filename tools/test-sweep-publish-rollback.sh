@@ -38,6 +38,35 @@
 #
 # Run:  bash tools/test-sweep-publish-rollback.sh      (from make test)
 #   or:  bash tools/run-e2e.sh tools/test-sweep-publish-rollback.sh
+#
+# THIS SUITE WENT RED AGAIN, AND IT WAS RIGHT BOTH TIMES
+#
+# dabc5e6 ("volume: the v3 pba-ref map was built once per session, at open")
+# rewrote the publish block of vol_sweep_one_v3 and mis-braced it: the `else`
+# carrying the rollback bound to `vol_ast_recipe_serialize`, which essentially
+# never fails, instead of to `vol_v3_recipe_store`, which is the step that
+# fails for want of space. The rollback became unreachable. A failed publish
+# fell out of the outer `if` having done nothing at all: any_swept stayed 1,
+# the function returned "swept", and every block remap[] had recorded stayed
+# allocated and named by nothing.
+#
+# Measured on this suite's own corpus, 36 files, identical volume both runs:
+#
+#                        free before -> after     unclaimed        outcome
+#   48191ad (parent)     257 -> 315 (drop  -58)  0.4 -> 0.2 MiB   rolled back 221 / 13
+#   c64382d (regressed)  257 ->  94 (drop +163)  0.4 -> 1.0 MiB   NOTHING
+#
+# The brief assumed the pba_ref rebuild dabc5e6 added was the new cost inside
+# this measurement. It is not: instrumenting pba_ref_ensure with counters that
+# accumulate in alloc_blocks/vol_free_blocks while a rebuild is on the stack
+# gives 1 rebuild and **0 blocks allocated** for the whole pass. The rebuild is
+# a walk of the live inode set -- reads and a calloc, no allocation. The 163
+# were the abandoned transform's stranded segments, whole.
+#
+# So the assertion below is UNCHANGED. The measurement is not what moved; the
+# rollback is what stopped happening. bin/invf-sweep_publish_rollback_test is
+# the by-address form of the same claim (it resolves the stranded set to pbas)
+# and is what a future regression should trip first.
 set -u
 set -o pipefail
 
@@ -140,6 +169,24 @@ echo "  free after the sweep:  $FREE_AFTER blocks (drop $DROP)"
 grep -q "rolled back" "$LOG" ||
     { cat "$LOG"; fail "the sweep never reached the publish-rollback path, so this suite proved nothing"; }
 grep "rolled back" "$LOG" | sed 's/^/  /'
+
+# And the fingerprint, in the end-to-end suite too: the rollback hands back
+# exactly 17 physical blocks per rewritten segment (a 64 KiB segment is 17
+# 4 KiB blocks with its 8-byte header). It is the "17 per orphaned segment"
+# the failure message above names, INVERTED -- the number GIVEN BACK rather
+# than the number stranded. dabc5e6 mis-braced the publish block so the
+# rollback's `else` bound to the serialize test instead of the store test,
+# which made the whole branch unreachable: this suite went red with
+# "drop 163" and the sweep log had no "rolled back" line in it at all.
+RB=$(grep -m1 -o 'rolled back [0-9]* rewritten block(s) across [0-9]* segment(s)' "$LOG")
+RB_BLOCKS=$(echo "$RB" | sed -n 's/rolled back \([0-9]*\) .*/\1/p')
+RB_SEGS=$(echo "$RB" | sed -n 's/.*across \([0-9]*\) .*/\1/p')
+[ -n "$RB_BLOCKS" ] && [ -n "$RB_SEGS" ] &&
+    [ "$RB_SEGS" -ge 1 ] ||
+    fail "could not read the rollback's block/segment counts out of the sweep log"
+echo "  rolled back: $RB_BLOCKS block(s) across $RB_SEGS segment(s)"
+[ "$RB_BLOCKS" -eq $((17 * RB_SEGS)) ] ||
+    fail "the rollback gave back $RB_BLOCKS blocks for $RB_SEGS orphaned segment(s); it owes exactly 17 each"
 
 echo "== the file survived the abandoned pass, byte for byte =="
 # The superseded segments are freed only AFTER a successful publish now, so
