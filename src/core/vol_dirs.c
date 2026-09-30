@@ -692,23 +692,49 @@ int vol_v3_rename(invfs_volume *v, const char *from, const char *to)
          * hardlinks to the SAME inode is a no-op; the doc is silent and
          * M6's rename mechanics would drop one name, so the pre-existing
          * (non-POSIX, non-lossy) behaviour is kept here. */
-        if (vol_v3_dirent_delta_del(v, t_pino, tleaf) != 0)
-            return -1;
         if (t_in.nlink > 1) {
+            /* A name, not the inode: frees nothing, so it needs no map. */
+            if (vol_v3_dirent_delta_del(v, t_pino, tleaf) != 0)
+                return -1;
             t_in.nlink--;
             if (vol_v3_inode_delta_put(v, t_id, &t_in) != 0)
                 return -1;
-        } else if (pba_ref_ensure(v), vol_v3_inode_delta_delete(v, t_id) != 0) {
-            /* WP pba-ref-v3-incremental: the ensure must happen while the
-             * row still names t_in.recipe_addr -- the free below subtracts
-             * exactly that recipe's count, and a rebuild taken after the
-             * delete would not see it, so the -1 would take a live sharer's
-             * count with it (the wrong-free direction). */
-            return -1;
         } else {
+            /* WP unlink-takes-map-after-dirent-drop: THIS IS THE SAME DEFECT
+             * AS vol_v3_unlink, and it was wrong in the same way.
+             *
+             * The ensure used to be taken here, AFTER
+             * vol_v3_dirent_delta_del(v, t_pino, tleaf) had already dropped
+             * the victim's name, and the comment said the ensure must happen
+             * "while the row still names t_in.recipe_addr". Same wrong
+             * invariant as the unlink: pba_ref_ensure's build reaches an
+             * inode THROUGH ITS DIRENT (v3_walk_dir, below --
+             * vol_v3_path_list_dir, then vol_v3_path_lookup), so once the
+             * name is gone the walk cannot reach the row, whatever the row
+             * still says. A rebuild here is short by exactly the
+             * contribution the -1 below is about to take, and the block goes
+             * out from under whoever else still names it.
+             *
+             * So: the map is taken while the name is still there, and the
+             * name is dropped inside the same hold, exactly as in
+             * vol_v3_unlink. The comma-operator
+             * `pba_ref_ensure(v), vol_v3_inode_delta_delete(...)` is gone
+             * because the ordering it encoded is the thing being fixed.
+             */
+            vol_pba_ref_hold(v);
+            pba_ref_ensure(v);
+            if (vol_v3_dirent_delta_del(v, t_pino, tleaf) != 0) {
+                vol_pba_ref_release(v);
+                return -1;
+            }
+            if (vol_v3_inode_delta_delete(v, t_id) != 0) {
+                vol_pba_ref_release(v);
+                return -1;
+            }
             /* WP-N1: targeted free of overwritten destination data blocks */
             if (t_in.type == INVFS_ITYP_REG)
                 vol_v3_free_recipe_blocks(v, t_in.recipe_addr, 0);
+            vol_pba_ref_release(v);
         }
     }
     /* insert the new dirent BEFORE deleting the old (add-before-remove,

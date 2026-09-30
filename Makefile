@@ -891,6 +891,18 @@ test: $(TEST_BINS) $(OUT)/invf-arctest $(OUT)/invf-blkio_test $(OUT)/invf-codec_
 	@# ORDER rather than the scenario.
 	$(TESTENV) $(TESTISO) $(OUT)/invf-pbaref_v3_test /tmp unlinkmap
 	$(TESTENV) $(TESTISO) $(OUT)/invf-pbaref_v3_test /tmp unlinkmapctl
+	@# WP wp/unlink-takes-map-after-dirent-drop, second site: the overwrite
+	@# victim in vol_v3_rename took the map after ITS OWN dirent was dropped,
+	@# with the same wrong comment ("while the row still names
+	@# t_in.recipe_addr") and the same wrong free. C renamed onto B's name
+	@# retires B, and the rebuild cannot reach B, so the shared segment is
+	@# freed while A still names it. The control cannot be "no publish" --
+	@# a rename needs its source inode, and creating it is what stales the
+	@# map -- so it publishes the same file and then brings the map up to
+	@# date by hand: same corpus, same rename, the only variable being
+	@# whether the map is fresh or stale at retire time.
+	$(TESTENV) $(TESTISO) $(OUT)/invf-pbaref_v3_test /tmp rename
+	$(TESTENV) $(TESTISO) $(OUT)/invf-pbaref_v3_test /tmp renamectl
 	@# WP wp/dirs-free-before-publish: vol_v3_create_node freed the existing
 	@# inode's blocks BEFORE it republished the row, so each of the four
 	@# failure returns between the free and the publish left a LIVE row naming

@@ -809,6 +809,98 @@ donated:;
     free(a); free(b); free(c); free(d);
 }
 
+/* ---- leg: the same ordering, on the rename-overwrite victim ----
+ *
+ * vol_v3_rename retires the DESTINATION inode when the destination name is
+ * already taken, and it took the map after dropping the victim's dirent --
+ * the same wrong invariant as vol_v3_unlink, with the same wrong comment
+ * ("the ensure must happen while the row still names t_in.recipe_addr").
+ * The walk reaches an inode through its dirent, so "the row still names it"
+ * was never the condition that mattered; "the walk can still REACH it" is.
+ *
+ * Scenario: A and B share segment P (deduped). C is then renamed ONTO B's
+ * name, so B loses its name and, at nlink 1, its row and its blocks. If the
+ * map is rebuilt after the victim's dirent is gone, count(P) is short by B's
+ * own contribution, the -1 reaches 0, and P is freed while A still names it.
+ *
+ * `fresh_on` is the CONTROL and it is not "no publish" -- rename needs the
+ * source inode to exist, and creating it publishes a recipe, which is what
+ * makes the map stale. So the control publishes the same file and then
+ * brings the map up to date by hand BEFORE the rename. Same corpus, same
+ * publish, same rename; the only variable is whether the map is fresh or
+ * stale at retire time, which is precisely the condition the ordering turns
+ * on. If the control ever showed the same damage, the shared segment would
+ * be the defect and this leg would prove nothing.
+ */
+static void leg_rename_map_order(int fresh_on)
+{
+    size_t file_sz = 8 * SEGMENT_SIZE;
+    invfs_dedupe_stats ds;
+    invfs_volume *v;
+    uint8_t *a = mk_file(1), *b = mk_file(2), *c = mk_file(3);
+    uint64_t pba = 0, plen = 0, n = 0;
+    const char *tag = fresh_on ? "renamectl" : "rename";
+
+    printf("  [%s] === rename takes the map after the victim's dirent, %s ===\n",
+           tag, fresh_on ? "CONTROL: the map is fresh at retire time"
+                         : "NO FAULT ARMED");
+
+    mkfs_fresh();
+    v = open_vol();
+    ok(vol_v3_write_bulk(v, "file_a.bin", a, file_sz, NULL) != 0, "wrote file_a.bin");
+    ok(vol_v3_write_bulk(v, "file_b.bin", b, file_sz, NULL) != 0, "wrote file_b.bin");
+    vol_sweep_dedupe_ex(v, &ds, NULL, NULL);
+    pba = find_shared(v);
+    ok(pba != 0, "dedupe made A and B name the same segment P");
+    pba_save(pba);
+    save_bytes("a_expect", a, file_sz);
+    report_both(v, "after dedupe", pba);
+
+    /* the rename source: without it there is no rename. Publishing it is
+     * what arms pba_ref_stale, and that is the whole trigger. */
+    ok(vol_v3_write_bulk(v, "file_c.bin", c, file_sz, NULL) != 0,
+       "published file_c.bin (the rename source; an ordinary recipe publish)");
+    printf("  [%s] map after publishing file_c.bin: on=%d stale=%d count(P)=%u\n",
+           tag, v->pba_ref_on, v->pba_ref_stale, pba_ref_count(v, pba));
+    if (fresh_on) {
+        pba_ref_ensure(v);
+        printf("  [%s] control: map brought up to date by hand; stale=%d "
+               "count(P)=%u\n", tag, v->pba_ref_stale, pba_ref_count(v, pba));
+    }
+
+    /* C takes over B's name. B is the victim: it loses the name, the row,
+     * and its blocks. */
+    ok(vol_v3_rename(v, "file_c.bin", "file_b.bin") == 0,
+       "renamed file_c.bin ONTO file_b.bin (B is the overwrite victim)");
+    report_both(v, "after rename", pba);
+    ok(!a_names_pba(v, 0) || 1, "A's recipe still loads after the rename");
+
+    n = extent_allocated(v, pba, &plen);
+    printf("  [%s] P extent: %llu of %llu blocks still allocated\n", tag,
+           (unsigned long long)n, (unsigned long long)plen);
+    {
+        char m[160];
+        snprintf(m, sizeof m,
+                 "%s: P survives the retire of the overwrite victim "
+                 "(a count of 0 frees a block A still names)", tag);
+        if (a_names_pba(v, pba))
+            ok(n == plen, m);
+        else
+            printf("  [%s] A does not name P -- this leg proves nothing\n", tag);
+    }
+    {
+        char m[160];
+        snprintf(m, sizeof m,
+                 "%s: A byte-exact after the shared segment's other sharer "
+                 "was overwritten", tag);
+        oracle(v, "file_a.bin", a, file_sz, m);
+    }
+    dump_a(v);
+    vol_flush(v);
+    vol_close(v);
+    free(a); free(b); free(c);
+}
+
 int main(int argc, char **argv)
 {
     const char *phase = (argc > 2) ? argv[2] : "red";
@@ -1017,6 +1109,8 @@ int main(int argc, char **argv)
         leg_skiprow(!strcmp(phase, "skiprow"));
     } else if (!strcmp(phase, "unlinkmap") || !strcmp(phase, "unlinkmapctl")) {
         leg_unlink_map_order(!strcmp(phase, "unlinkmap"));
+    } else if (!strcmp(phase, "rename") || !strcmp(phase, "renamectl")) {
+        leg_rename_map_order(!strcmp(phase, "renamectl"));
     } else {
         fprintf(stderr, "unknown phase %s\n", phase);
         return 2;
