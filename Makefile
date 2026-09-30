@@ -529,6 +529,7 @@ e2e: all
 	$(TESTENV) bash tools/run-e2e.sh tools/test-conbatch.sh
 	$(TESTENV) bash tools/run-e2e.sh tools/test-exercarve.sh
 	$(TESTENV) bash tools/run-e2e.sh tools/test-containerpack.sh
+	$(TESTENV) bash tools/run-e2e.sh tools/test-cpack-mcost-bitexact.sh
 	$(TESTENV) bash tools/run-e2e.sh tools/test-sandbox.sh
 	$(TESTENV) bash tools/run-e2e.sh tools/test-helper-isolation.sh
 	$(TESTENV) bash tools/run-e2e.sh tools/test-rawdisk.sh

@@ -257,8 +257,19 @@ M5 full OpenRC boot, productionization (WP5/8/9 polish).
 ## 6a. FINDING 2026-09-28: the containerpack size guard refuses filesystem
 ##      images, and the member cost is why
 
-**Severity: HIGH for the rootfs target. Not a soundness defect -- the guard is
-correct. A goal blocker.**
+**Status: FIXED (wp/cpack-size-aware-member-cost, 2026-09-30).** The per-member
+cost is no longer a flat constant and is no longer a per-member block count:
+the payload is priced where the engine actually spends it (shared batch
+segments, rounded on the sum) and the per-member charge is two measured rates
+-- the packed rows a member costs and the block rounding of the 6% of members
+batching does not take. Every half was MEASURED, not reasoned -- see 6a.2,
+which also records three places this section's own arithmetic was wrong. The
+guard is unchanged in structure, in its 0.5% floor and in its kind-2
+re-deflation bound, and it still refuses WP108's shape -- on the block
+rounding this time, which is the term the original regression rode in on.
+
+**Severity was: HIGH for the rootfs target. Not a soundness defect -- the
+guard is correct. A goal blocker.**
 
 Measured on `tools/test-xfs.sh` fs-b (300 MiB XFS v4, crc=0, 256 B inodes,
 389 files), one offline sweep, host-side:
@@ -326,38 +337,148 @@ and the accounting line in 6a should be read as an upper bound.
 
 **Root cause: the cost is a hard-coded constant, not a measurement.** The
 estimate is `projected = fixed + content + member_cost`
-(`src/core/vol_cpack.c:2280`, decline at `:2284`), and `member_cost` is
-`nmem * CPACK_MEMBER_COST` (`:2308`) where `CPACK_MEMBER_COST = 16384ull` is
-`src/core/volume_internal.h:1851`. It is exactly 4 x 4096, obtained by
+(`src/core/vol_cpack.c:2306`, decline at `:2308`), and `member_cost` was
+`nmem * CPACK_MEMBER_COST` (`:2351`) where the constant was
+`CPACK_MEMBER_COST = 16384ull` in `src/core/volume_internal.h:1894` (it is now
+`CPACK_MEMBER_META`, and the block rounding it used to cover is priced in
+`content` -- see 6a.2). It was exactly 4 x 4096, obtained by
 dividing a whole-image delta residual (4935680 - 1685140) by 201 members and
 rounding up -- an apportionment of one run's total, which then silently
 absorbs every fixed per-sweep cost and is charged linearly at every member
-count forever.
+count forever. (6a.2 measures what that residual actually was: mostly
+per-sweep, and about 6x smaller per member than this division implies.)
 
-**Verdict: INFLATED, 3.67x.** For a 4 KiB member the code's own accounting is
+**Verdict (as of 6a.1, superseded on the numbers by 6a.2): INFLATED, 3.67x.**
+For a 4 KiB member the code's own accounting is
 4,096 data block + ~81 recipe row (`vol_btree.c:3733-3740`) + 114 inode row +
 ~40 dirent + ~133 delta record = ~4,464 B. Three of those five are packed into
 shared COW B+ tree pages, not one page each -- pages are frozen at 4 KiB by
 `vol_metabuf.c:101-110`. Charged 16,384 against an honest 4,464: the gap is
 almost exactly three phantom pages.
 
-**Scaling is linear by construction, so this gets worse in the rootfs regime,
-not better.** The code's own arithmetic puts a hard ceiling at
-`orig_len / 16384` members: 19,200 on a 300 MiB image, 262,144 on 4 GiB.
-50,000 members = 781 MB charged against ~25 MB of real packed metadata.
+**Scaling is linear by construction, so this got worse in the rootfs regime,
+not better (this paragraph describes the retired model).** Its arithmetic put a
+hard ceiling at `orig_len / 16384` members: 19,200 on a 300 MiB image, 262,144
+on 4 GiB. 50,000 members = 781 MB charged against ~25 MB of real packed
+metadata. 6a.2 measures the real packed metadata at 720 B/file, so the
+figure it was charging against is right and the price was 16x too high.
 
 **The honest per-member cost is sub-linear in pages**, so the constant both
 over-charges small members and keeps charging 16 KB as the shape gets cheaper
 per member.
 
-**Smallest fix, NOT applied** (it changes what the lane stores, so it is the
-author's call): round `content` up to `INVFS_BLOCK_SIZE` at
-`vol_cpack.c:2337` -- sound in both directions, and it removes the last real
-work the constant was doing -- then retune `volume_internal.h:1831` from 16384
-to ~512, which takes the 388-member term from 6,356,992 to 198,656 B. Note
-`src/cli/cpack_guard_test.c:104-110` currently PINS the pessimism (it asserts
-4978324 > 4935680) and pins the expected total; that test change is itself the
-tell that the constant is a conservative bound being treated as a constant.
+**Smallest fix, APPLIED 2026-09-30** (`wp/cpack-size-aware-member-cost`): price
+`content` as the blocks the batch segments take, and retune the per-member
+constant from 16384 to the measured packed-metadata cost. The constant is now
+`CPACK_MEMBER_META + CPACK_MEMBER_UNBATCHED` and it is no longer a page count
+in the first place -- see 6a.2 for the measurements it is fitted to and for
+three places where this section's arithmetic turned out to be wrong.
+
+### 6a.2 MEASUREMENT and the change (2026-09-30, `wp/cpack-size-aware-member-cost`)
+
+**Status: applied.** The static reading in 6a.1 was right about the
+direction and wrong three times about the numbers, every one of them in the
+direction of under-stating the truth. Measured with
+`tools/measure-cpack-member-cost.sh` (differencing the VOLUME's own free-block
+count between an N-member and a 2N-member container of the same size
+distribution, so every fixed per-sweep cost cancels) and
+`tools/measure-file-meta-cost.sh`:
+
+| regime | shape | measured marginal |
+|---|---|---|
+| A (WP108-shaped) | 201 -> 402 members, 1 KiB-64 KiB | **2,670 B/member** |
+| B (rootfs-shaped) | 12,500 -> 25,000 members, 1 KiB-8 KiB | **1,753 B/member** |
+| metadata only | 2,000 / 4,000 / 8,000 one-byte files | **721 / 717 B/file** |
+| size sweep, 2,000 -> 4,000 | 1 KiB / 4 KiB / 16 KiB / 64 KiB members | **1,268 / 1,673 / 3,234 / 7,477 B/member** |
+
+**Correction 1 -- the metadata is 720 B/member, not 368.** 6a.1's ~4,464 B
+figure counted the raw row widths (81 + 114 + 40 + 133) and set packing and
+page-level cost to zero. Measuring it directly gives ~720 B per file of pure
+bookkeeping, linear to 8,000 files. So 6a.1's suggested retune to ~512 would
+have been BELOW the measured cost.
+
+**Correction 2 -- the 16,167 B/member was never per-member.** Differencing two
+member counts at a fixed size distribution gives 2,670 B/member in exactly the
+regime the 16,167 was derived from (201 members). 201 x 2,670 = 537 KB, not
+3.25 MB. The missing 2.7 MB is per-SWEEP, not per-member: 6a.1 read a
+whole-image delta residual and divided it by a member count, and the delta
+contains the savepoint window (AGENTS.md 2.5 measures 447 blocks of pin plus
+mark set on a comparable corpus) and the COW page churn the fold has not yet
+reclaimed. Both come back on the next bare sweep. Charging them per member
+forever is what produced the ~19,200-member ceiling, and it is the whole of
+the "3.67x" gap: the phantom is real, it is just not per-member.
+
+**Correction 3 -- the members are BATCHED, and 6a's per-member page count was
+pricing a case the engine never runs.** The size sweep's stage 6
+(`tools/invf-sweep.c:2036`) concatenates member payloads into `TZ_BATCH_MAX`
+buffers and compresses each buffer as one unit (`vol_textzone.c`), and the
+sweep log says so on every corpus: "cont.splt!*: 23,496 parts -> PPMd batch"
+out of 25,000. So 94.0-94.4% of members -- at every member count and every
+member size measured -- share their blocks with their siblings, and a
+per-member block rounding bills each of them a whole 4 KiB block they do not
+get. The residue is content that fails the text/binary family sniff and takes
+the generic per-file lane. Charging the per-member rounding is the same error
+as the flat constant, one level up.
+
+**What was applied.** The payload is now priced where the engine spends it
+and the per-member charge is two measured rates:
+
+- `content = cpack_member_data_cost(sum of min(zstd19, usize))` -- the blocks
+  the shared batch segments take, rounded up ONCE on the sum. This is the
+  sound side: the batched segments can never hold more than the sum of the
+  per-member ZSTD-19 projections.
+- `member_cost = nmem * (CPACK_MEMBER_META + CPACK_MEMBER_UNBATCHED)` =
+  1,024 + 256 B. `CPACK_MEMBER_META` is the packed recipe/inode/dirent/delta
+  rows (1,024 B, 1.42x the measured 720 B). `CPACK_MEMBER_UNBATCHED` is the
+  share of block rounding taken by the 6% of members batching misses (0.06 x
+  4,096 / 2 = 123 B, charged at 256 B).
+
+Model against measurement, all sound: 1,003,520 + 1,280 = 1,004,800 vs 1,268
+measured on 1 KiB members (4.24x), 5,376 vs 1,673 on 4 KiB (3.21x), 5,376 vs
+3,234 on 16 KiB (1.66x), 9,472 vs 7,477 on 64 KiB (1.27x). The headroom
+narrows as members get bigger, which is correct: batching gains little on
+64 KiB members, so the guard should be tight there.
+
+**The guard still refuses WP108, now on the rounding alone.** 1,685,140 B of
+content rounds to 1,687,552 B of blocks, and 1,687,552 > the 1,687,409 B the
+0.5% floor allows. Remove the rounding and the shape is ACCEPTED -- which is
+exactly the 3 MB regression the guard exists to stop, and exactly what the old
+pin asserted as correct. The test carries that as a red control.
+
+**What is NOT claimed.** The guard's 1,944,832 B for WP108 is 2.6x BELOW the
+4,935,680 B the volume really charged. The refusal is right and the price is
+not accurate; the residual it cannot see is per-SWEEP. And
+`CPACK_MEMBER_UNBATCHED` is a measured RATE, not a bound: it is right for the
+corpora measured and would be wrong if batching regressed. The 6% figure is
+measured on text-shaped corpora only -- a real rootfs's unbatched fraction is
+unmeasured, and if it is much larger than 6% the rate is too low.
+
+**The false negative, and the decision taken on it (2026-09-30).** The known
+caveat was that 50,000 members whose projected total lands under one block
+are DECLINED though the volume would batch them and use about half that.
+**As described it no longer exists**: the shipped price accepts that exact
+shape from a 68,241,215 B container up, where the retired flat model
+declined it below 823 MB. The flat constant WAS the false negative.
+
+What remains is narrower and is **left in place deliberately**. The rate
+(1,280 B/member) is 1.78x the measured bookkeeping cost (720 B/file), so a
+container whose length lands in `[f + n*720, f + n*1280)` is declined
+although the real cost would have been a small gain. At 50,000 members that
+band is **[39,900,008, 67,900,008)** -- 43% of container size. Closing it
+means setting the rate to the measurement, which was rejected because:
+
+1. it is the SAFE direction. A false negative declines a decomposition and
+   the container is then stored whole -- bit-exact, and costing what it
+   cost before. The opposite error is what shipped WP108's 3 MB regression,
+   and tuning a rate DOWN to widen the accept region is how it recurs;
+2. the 1.78x is load-bearing headroom for the unmeasured rootfs unbatched
+   fraction (the paragraph above), and deleting it to gain a 43% band
+   trades a known conservative bound for an unknown one;
+3. it is bounded and asserted, so it is a tuning question with a number,
+   not an unquantified risk. Both edges are pinned in
+   `src/cli/cpack_guard_test.c` case 15. The work that would close it is
+   re-measuring the unbatched fraction on a real rootfs -- a separate WP,
+   not this one.
 
 ## 6b. FINDING 2026-09-30: the durability comment claimed a write-through
 ##      guarantee the POSIX open path does not provide

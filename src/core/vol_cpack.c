@@ -2013,9 +2013,10 @@ out:
 #define CPACK_GUARD_CHUNK  (8ull << 20)   /* map-guard read-back window */
 
 /* The containerpack SIZE GUARD's constants (CPACK_ZSTD_LANE,
- * CPACK_MEMBER_COST, CPACK_ZGAIN_MILLE, CPACK_REPRO_MAX) live next to
- * cpack_size_proj in volume_internal.h: they are the guard's contract with
- * the unit test, not private tuning. */
+ * CPACK_MEMBER_META, CPACK_ZGAIN_MILLE, CPACK_REPRO_MAX) and the
+ * size-dependent half of the per-member price (cpack_member_data_cost)
+ * live next to cpack_size_proj in volume_internal.h: they are the guard's
+ * contract with the unit test, not private tuning. */
 
 
 typedef struct {
@@ -2216,22 +2217,47 @@ static int cpack_map_validate(const cpack_map_ent *e, size_t n,
  * engine so it binds every container pack instead of one that remembered
  * to write it:
  *
- *     projected = fixed + sum_i min(zstd19(member_i), usize_i) + n*MEM_COST
+ *     projected = fixed + data_cost(sum_i min(zstd19(member_i), usize_i))
+ *                        + n * (CPACK_MEMBER_META + CPACK_MEMBER_UNBATCHED)
  *     accept only when projected * 1000 < orig_len * (1000 - ZGAIN_MILLE)
  *
  * `fixed` is the recipe + the member table + the map, which ride verbatim
  * in their own inodes. zstd-19 is the engine's generic binary lane, which
  * every member reaches even if batching never fires, so the sum is a FLOOR
  * and not a bet: whatever the guard accepts is a win before batching, and
- * batching only improves it. MEM_COST is measured, not guessed (WP108: the
- * codec projection said 1,685,140 B and the volume actually charged
- * 4,935,680 B for a 201-member archive -- 16,167 B per member the
- * projection never saw; 16 KiB is that number rounded UP).
+ * batching only improves it. The blocks are rounded up ONCE, on the sum,
+ * because that is how the engine spends them: stage 6 concatenates the
+ * members into TZ_BATCH_MAX buffers and compresses each buffer as one unit
+ * (vol_textzone.c), so a member's data costs its blocks SHARED. Measured on
+ * six containerpack corpora, 94% of members end up in a batch and 6% take
+ * the generic per-file lane and pay their own block rounding; the latter is
+ * CPACK_MEMBER_UNBATCHED. So the per-member price is a member's packed rows
+ * (CPACK_MEMBER_META) plus its share of the unbatched rounding -- and both
+ * are measured rates, not a bound on the per-member page count.
+ *
+ * The per-member page count used to be a flat 4 pages, and this paragraph is
+ * where the error lived, so the correction is worth stating: 16 KiB was NOT
+ * measured. It was one run's whole-image delta residual (4,935,680 -
+ * 1,685,140 = 3,250,540) divided by that run's 201 members -- per-SWEEP
+ * overhead charged per member forever. Differencing the volume's own
+ * free-block count between 201- and 402-member containers of the same size
+ * distribution (the fixed costs cancel) measures the true marginal at 2,670
+ * B/member, and the bookkeeping alone at 721/717 B per file. The three
+ * phantom pages were real; they were just not per member. The ZIP regression
+ * this guard exists for is still declined -- and now by the block rounding
+ * alone, 1,687,552 B against the 1,685,140 B of unrounded content that got
+ * through. See the red control in src/cli/cpack_guard_test.c.
  *
  * That is why "compressed content" is not a safety bound for a container
  * pack, and it is why the second term is not optional: the ZIP pack
  * shipped a 3 MB regression while passing a guard that only counted
- * compressed content.
+ * compressed content. What the second term must NOT be is a fiction -- a
+ * number that is right about one run and then charged at every member
+ * count forever. Equally, the first term must not price a case the engine
+ * never executes: rounding each member up individually is the same error
+ * one level up, and it is what would keep a 50,000-file rootfs image
+ * unreachable, because every small member would be billed a whole block it
+ * shares with its siblings.
  *
  * The second, independent bound is the RE-DEFLAVATION one, and it lives in
  * the size projection rather than in this comparison because it is a
@@ -2290,11 +2316,28 @@ int cpack_size_guard(uint64_t orig_len, const cpack_size_proj *p,
 }
 
 
+/* What a payload of this length costs the volume: WHOLE blocks. See the
+ * declaration in volume_internal.h for why the guard prices the batched
+ * case -- the blocks members SHARE -- and why rounding up is the sound side. */
+uint64_t cpack_member_data_cost(uint64_t projected_len)
+{
+    return (projected_len + (uint64_t)INVFS_BLOCK_SIZE - 1) &
+           ~((uint64_t)INVFS_BLOCK_SIZE - 1);
+}
+
+
 /* Project the cost of the decomposition the sweep is about to commit.
  * `fixed` is recipe + table (+ map, once the pack has produced one) and the
  * member payloads are read back from the pack's scratch dir: each is put
- * through the ZSTD-19 lane the engine itself will put it through, and
- * charged min(compressed, usize) -- the content it is guaranteed to reach.
+ * through the ZSTD-19 lane the engine itself will put it through, and the
+ * SUM of those projections is what the payloads cost, rounded up to whole
+ * blocks. The sum, not the members, because the engine does not store them
+ * separately: stage 6 concatenates them into shared batch segments and
+ * compresses each buffer as one unit (vol_textzone.c, TZ_BATCH_MAX), so the
+ * blocks are spent on the batch and not on the member.
+ * On top of the blocks, each member costs its packed metadata rows
+ * (CPACK_MEMBER_META) and its share of the block rounding the members
+ * batching does not take (CPACK_MEMBER_UNBATCHED). Both are measured rates.
  * Returns 0, or -1 when a member cannot be read (the caller abandons). */
 static int cpack_project(const cpack_member *mem, size_t nmem,
                          const char *pmdir, uint64_t orig_len, uint64_t fixed,
@@ -2305,13 +2348,15 @@ static int cpack_project(const cpack_member *mem, size_t nmem,
     memset(out, 0, sizeof *out);
     out->fixed = fixed;
     out->member_count = (uint64_t)nmem;
-    out->member_cost = (uint64_t)nmem * CPACK_MEMBER_COST;
-    /* The per-member bookkeeping alone already eats the container: no need
+    out->member_cost = (uint64_t)nmem *
+                       (CPACK_MEMBER_META + CPACK_MEMBER_UNBATCHED);
+    /* The per-member metadata alone already eats the container: no need
      * to read a single payload to know this decomposition is a loss. The
      * verdict rests on the LOW side of the projection (content >= 0), which
      * is the sound side; what goes in `content` here is the announced
-     * member total, an UPPER bound (min(zstd19, usize) <= usize), so the
-     * refusal line still shows the worst the shape could possibly cost. */
+     * member total, an UPPER bound (cpack_member_data_cost(usize) >= usize
+     * and >= min(zstd19, usize)), so the refusal line still shows the worst
+     * the shape could possibly cost. */
     if (fixed >= orig_len || out->member_cost >= orig_len - fixed) {
         out->content = sum_usize;
         out->content_bound = 1;
@@ -2334,10 +2379,14 @@ static int cpack_project(const cpack_member *mem, size_t nmem,
         /* an error, or a member that does not compress: it is stored
          * verbatim, which is the most the projection may charge for it */
         if (ZSTD_isError(cl) || cl >= mlen) cl = mlen;
+        /* Sum the projections; the blocks are rounded up ONCE, at the end,
+         * because the members share them: stage 6 seals them into shared
+         * batch segments rather than giving each one its own. */
         out->content += (uint64_t)cl;
         free(cb);
         free(mb);
     }
+    out->content = cpack_member_data_cost(out->content);
     return 0;
 }
 

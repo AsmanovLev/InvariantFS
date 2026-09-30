@@ -755,11 +755,14 @@ echo "policy refusal stored generic, bit-exact"
 # BIGGER than the container itself, and requires the sweep to refuse it.
 #
 #   regret.splt -- 200 incompressible 16 KiB members (3.28 MB). No codec
-#     can shrink them, and every exposed member costs the engine its own
-#     bookkeeping (~16 KiB measured, WP108), so committing this shape
-#     would store ~6.5 MB of what was 3.28 MB. The SAME bytes as one
-#     member would be a different question; the member COUNT is the
-#     regression.
+#     can shrink them, so the payloads cost their 3,276,800 B in whole
+#     blocks whatever the sweep does (3,280,000 B once rounded), and 200
+#     exposed members add 200 x (CPACK_MEMBER_META + CPACK_MEMBER_UNBATCHED)
+#     = 256,000 B of bookkeeping on top: committing this shape would store
+#     ~3.55 MB of what was 3.28 MB. The SAME bytes as one member would be a
+#     different question; the member COUNT is the regression. (Under the
+#     retired flat 4-pages-per-member term this shape lost by ~1.7 MB of
+#     bookkeeping it never spent; it now loses by the ~270 KB it does.)
 #   win.splt -- one 3.28 MB compressible member: the positive control, so
 #     "the guard refused" cannot be confused with "the guard refuses".
 # ---------------------------------------------------------------------------

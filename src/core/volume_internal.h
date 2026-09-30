@@ -1825,20 +1825,63 @@ int64_t cpack_map_read(invfs_volume *v, const char *name, uint64_t ino,
 
 
 /* WP119: the containerpack size guard. Its four constants, and then what the
- * sweep prices a decomposition with, in the units the volume pays:
+ * sweep prices a decomposition with, in the units the volume pays. The price
+ * of a member's PAYLOAD is now charged where the engine actually stores it --
+ * in the shared batch segments -- so the per-member price is the two things
+ * a member really adds on top of the bytes it shares with its siblings:
+ * CPACK_MEMBER_META (its packed rows) and CPACK_MEMBER_UNBATCHED (the block
+ * rounding of the members batching does not take).
  *   CPACK_ZSTD_LANE   the generic binary lane. Every member reaches it even
  *                     with batching switched off, so charging min(zstd19,
  *                     usize) is a FLOOR, not a bet: anything the guard
  *                     accepts is a win before batching, and batching only
  *                     improves it.
- *   CPACK_MEMBER_COST per exposed member -- the engine's own bookkeeping
- *                     (record, recipe, inode/dirent/index, block rounding).
- *                     MEASURED, not guessed: on WP108's 201-member archive
- *                     the codec projection said 1,685,140 B and the volume
- *                     actually charged 4,935,680 B, i.e. 16,167 B per member
- *                     the projection never saw; 16 KiB is that rounded UP.
- *                     The ZIP pack shipped a 3 MB regression behind a guard
- *                     that counted only compressed content.
+ *   CPACK_MEMBER_META  per exposed member -- the engine's own bookkeeping
+ *                     that is NOT the member's payload: the recipe row
+ *                     (vol_btree.c), the inode row (invarifs.h), the dirent
+ *                     the member is reachable by, and the delta record the
+ *                     write path appends for it. All four are ROWS: three
+ *                     pack into shared COW B+ tree pages and the fourth is
+ *                     byte-packed into a delta segment, so none of them
+ *                     takes a page of its own. The member's DATA blocks are
+ *                     not here -- they are size-dependent and are priced per
+ *                     member by cpack_member_data_cost() below.
+ *                     MEASURED, not guessed (tools/measure-file-meta-cost.sh):
+ *                     importing 2000 / 4000 / 8000 one-byte files into a v3
+ *                     volume and differencing the free-block count costs
+ *                     721 / 717 B per file, and at that size the payloads
+ *                     batch away to nothing, so all of it is bookkeeping.
+ *                     1 KiB is that rounded up to a round number.
+ *                     The constant this replaces was 4 pages -- 16 KiB -- and
+ *                     it was NOT a per-member measurement: it was one run's
+ *                     whole-image delta residual (4,935,680 - 1,685,140 =
+ *                     3,250,540) divided by that run's 201 members. That
+ *                     residual is per-SWEEP overhead (the savepoint window
+ *                     pins the pre-sweep generation's blocks; see AGENTS.md
+ *                     2.5, which measures 447 blocks of it on a comparable
+ *                     corpus), and the next bare sweep gives it back --
+ *                     charging it per member forever is what made a 50,000-
+ *                     member rootfs container unreachable.
+ *   CPACK_MEMBER_UNBATCHED  the block rounding of the members the batching
+ *                     stage does NOT take. Those are not a hypothetical:
+ *                     measured on six containerpack corpora at 2,000, 4,000,
+ *                     12,500, 25,000, 201 and 402 members and across 1 KiB to
+ *                     64 KiB members, the fraction that batches is 94.0% to
+ *                     94.4% every time (the sweep log's "N parts -> PPMd
+ *                     batch" line; the residue is content that fails the text
+ *                     or binary family sniff, which the generic per-file lane
+ *                     then rounds block by block). 6% of a 4 KiB rounding is
+ *                     ~123 B per member, charged at 256 B.
+ *                     This term is the ONLY part of the per-member price that
+ *                     is a measured RATE rather than a bound, because the
+ *                     guard cannot know which members will batch -- the
+ *                     decision is made in stage 6, long after the projection.
+ *                     It is also the only thing that would be wrong if
+ *                     batching regressed, and the way to price that risk is to
+ *                     keep this term nonzero: at 0 the guard would accept any
+ *                     container of sub-block members, which is the shape
+ *                     whose batching saves it. See the red control in
+ *                     src/cli/cpack_guard_test.c.
  *   CPACK_ZGAIN_MILLE the INVFS_MIN_GAIN_PCT default (0.5%) in thousandths.
  *   CPACK_REPRO_MAX   the largest single kind-2 re-deflation the read path
  *                     pays per request. A kind-2 entry stores nothing and
@@ -1848,21 +1891,36 @@ int64_t cpack_map_read(invfs_volume *v, const char *name, uint64_t ino,
  *                     cluster qcow2 allows (cluster_bits <= 21), so no
  *                     conformant image is refused. */
 #define CPACK_ZSTD_LANE     19
-#define CPACK_MEMBER_COST   16384ull
+#define CPACK_MEMBER_META   1024ull
+#define CPACK_MEMBER_UNBATCHED 256ull
 #define CPACK_ZGAIN_MILLE   5ull
 #define CPACK_REPRO_MAX     (4ull << 20)
 
 typedef struct {
     uint64_t fixed;        /* recipe + member table + map */
-    uint64_t content;      /* sum over members of min(zstd19(member), usize) */
+    uint64_t content;      /* cpack_member_data_cost(sum of the members'
+                             * ZSTD-19 projections): the BLOCKS the shared
+                             * batch segments take, rounded up */
     uint64_t member_count;
-    uint64_t member_cost;  /* member_count * CPACK_MEMBER_COST */
+    uint64_t member_cost;  /* member_count * (CPACK_MEMBER_META +
+                             * CPACK_MEMBER_UNBATCHED) */
     uint64_t repro_max;    /* largest kind-2 re-deflation, per request */
     uint64_t repro_bytes;  /* the map's per-pass re-deflation total */
     int      content_bound;/* content is an UPPER bound, not a measurement:
                             * the per-member bookkeeping alone already lost,
                             * so no payload was compressed to price it */
 } cpack_size_proj;
+
+/* What a payload of this length costs the volume: WHOLE blocks. The allocator
+ * hands out 4 KiB blocks, and the batching stage fills them from many members
+ * at once (vol_textzone.c concatenates payloads into a TZ_BATCH_MAX buffer and
+ * compresses the buffer as ONE unit, and the sweep log says so: "N parts ->
+ * PPMd batch"), so a member's marginal DATA cost is its blocks SHARED, not
+ * its own rounded up. Rounding the TOTAL up is the sound side of that: the
+ * batched segments can never hold more than the sum of the ZSTD-19
+ * projections, and the ~6% of members that do not batch pay their own
+ * rounding, charged at CPACK_MEMBER_UNBATCHED. */
+uint64_t cpack_member_data_cost(uint64_t projected_len);
 
 int cpack_size_guard(uint64_t orig_len, const cpack_size_proj *p,
                      const char **why);
