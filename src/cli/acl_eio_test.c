@@ -342,6 +342,43 @@ int main(int argc, char **argv)
 
     unsetenv("INVFS_FAULT");
 
+    /* ---- 4b. the DELETE-side twin: removexattr on the same unreadable
+     * row. vol_v3_xattr_delta_del returned -1 for BOTH "no such xattr" and
+     * "the existence probe could not be completed", and invf_removexattr maps
+     * -1 to ENODATA -- so an I/O error reached the application as "this
+     * attribute does not exist". Same conflation, one layer over, on the
+     * function that deletes rather than reads.
+     *
+     * A scratch attribute, because this leg REMOVES: it must not take the ACL
+     * that legs 1-4 and 5 depend on with it. An earlier version removed
+     * XATTR_ACL_ACCESS off /secret and broke three later checks -- a red
+     * control that breaks its own harness is not a red control. */
+    rc = invf_setxattr("/plain", "user.probe", "probe", 5, 0);
+    ok(rc == 0, "the scratch attribute this leg removes was set first");
+
+    arm("v3_xattr_row_read:1");
+    rc = invf_removexattr("/plain", "user.probe");
+    if (rc == -ENODATA) {
+        failures++;
+        printf("  FAIL  removexattr must not report an unreadable row as "
+               "ENODATA -- it returned -ENODATA\n");
+        printf("        ^ the attribute exists; it could not be read\n");
+    } else {
+        ok(1, "removexattr does not answer ENODATA for an unreadable row");
+        printf("        (returned %s)\n",
+               rc == -EIO ? "-EIO" : "another error");
+    }
+    checks++;
+
+    /* The genuinely-absent case is still ENODATA, so a fix that turned every
+     * failure into EIO fails here instead of passing silently. **This leg is
+     * what caught the FUSE mapping going stale**: it read
+     * `rc == -1 ? -ENODATA : -EIO`, written for the old flat -1, so the real
+     * -ENODATA the engine now returns fell through to EIO. */
+    unsetenv("INVFS_FAULT");
+    rc = invf_removexattr("/plain", "user.nope");
+    ok(rc == -ENODATA, "removexattr still answers ENODATA for a truly absent xattr");
+
     /* ---- 5. and the healthy answers are unchanged --------------------
      * A genuinely absent xattr is still ENODATA, a present one is still
      * readable, and a short buffer is still ERANGE. A fix that collapsed

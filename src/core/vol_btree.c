@@ -3160,22 +3160,33 @@ int vol_v3_xattr_delta_del(invfs_volume *v, uint64_t inode_id, const char *name)
     uint16_t kn, idx;
     int ex;
 
+    /* The DELETE-side twin of the ENODATA/EIO conflation fixed on
+     * vol_v3_xattr_get, and the same conflation this function had before that
+     * fix: -1 meant BOTH "this inode has no such xattr" and "the existence
+     * probe could not be completed", so an unreadable base page was reported
+     * to the application as "no such attribute".
+     *
+     * Same reasoning, same convention: an unreadable row is -EIO and a clean
+     * miss is -ENODATA, and they must not share a value. The probe fails the
+     * same way the read does -- bt_read makes btree_search return -1 and
+     * v3_overlay_get_key passes it through -- so this is the same I/O error
+     * the sibling now reports correctly. */
     if (!v || !name)
-        return -1;
+        return -EINVAL;
     if (v->sb.vol_flags & VOLF_READONLY)
-        return -1;
+        return -EROFS;
     nl = strlen(name);
     if (nl == 0 || nl > INVFS_MAX_NAME)
-        return -1;
+        return -EINVAL;
     if (v3_ready(v) != 0)
-        return -1;
+        return -EIO;
 
     kn = v3_xattr_key(kb, inode_id, name, nl);
     ex = v3_overlay_exists(v, kb, kn);
     if (ex < 0)
-        return -1;
+        return -EIO;
     if (ex == 0)
-        return -1;                       /* ENODATA */
+        return -ENODATA;                 /* a clean miss, not damage */
     if (v3_delta_del(v, kb, kn) != 0)
         return -1;
     for (idx = 1; idx <= V3_XATTR_MAX_CHUNKS; idx++) {

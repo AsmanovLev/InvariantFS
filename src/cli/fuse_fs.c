@@ -2956,7 +2956,18 @@ static int invf_removexattr(const char *path, const char *name)
     rc = vol_remove_xattr(g_vol, ino, name);
     if (rc == 0) { vol_flush(g_vol); table_sync_one_locked(ename); }
     pthread_mutex_unlock(&g_io_lock);
-    return rc == 0 ? 0 : (rc == -1 ? -ENODATA : -EIO);
+    /* Pass the engine-s errno through. The engine used to answer a bare -1
+     * for both "no such xattr" and "the row could not be read", so this
+     * mapping had to guess -- and it guessed ENODATA. vol_v3_xattr_delta_del
+     * now returns real errnos, which makes the guess actively wrong: -ENODATA
+     * is not -1, so a genuinely absent attribute was reported as EIO. The
+     * control on the regression test is what caught it: the leg asserting a
+     * truly absent xattr is still ENODATA. */
+    if (rc == 0)
+        return 0;
+    if (rc == -1)            /* a caller that has not been converted yet */
+        return -EIO;
+    return rc;
 }
 static void invf_destroy(void *private_data)
 {
