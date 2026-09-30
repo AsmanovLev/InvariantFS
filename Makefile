@@ -418,6 +418,16 @@ $(OUT)/invf-delta_test: $(OBJ)/delta_test.o $(CORE_O)
 $(OBJ)/delta_test.o: tools/delta_test.c | $(OBJ)
 	$(CC) $(CFLAGS) -c -o $@ $<
 
+# Group-commit durability + flush-count regression. This one DEFINES fsync()
+# so it can count physical flushes in-process: blkio.o's reference to fsync
+# is an undefined symbol in this same executable, and a definition in the
+# executable wins over libc.so. That is what lets T1 assert an EXACT count
+# rather than inferring one from wall time. -ldl is for RTLD_NEXT.
+$(OUT)/invf-groupcommit_test: $(OBJ)/groupcommit_test.o $(CORE_O)
+	$(CC) $(CFLAGS) -Itools -o $@ $< $(CORE_O) $(LDLIBS) -ldl
+$(OBJ)/groupcommit_test.o: tools/groupcommit_test.c | $(OBJ)
+	$(CC) $(CFLAGS) -c -o $@ $<
+
 # fuzz tier: on-demand property/fuzz harness for the pure/parsing layers.
 # NOT part of `make test` -- `make fuzz` only builds it, run it by hand:
 #   bin/invf-fuzz [iterations] [seed]
@@ -439,7 +449,7 @@ fuzz-ci: $(OUT)/invf-fuzz
 
 test: $(OUT)/invf-arctest $(OUT)/invf-blkio_test $(OUT)/invf-codec_test \
       $(OUT)/invf-helper_exec_test $(OUT)/invf-metabuf_test $(OUT)/invf-btree_test \
-      $(OUT)/invf-delta_test $(OUT)/invf-concurrency_test $(OUT)/invf-sweep_v3_test \
+      $(OUT)/invf-delta_test $(OUT)/invf-groupcommit_test $(OUT)/invf-concurrency_test $(OUT)/invf-sweep_v3_test \
       $(OUT)/invf-btree_repair_test \
       $(OUT)/invf-symlink_v3_test $(OUT)/invf-large_file_v3_test $(OUT)/invf-dedupe_v3_test \
       $(OUT)/invf-deflate_repro_test $(OUT)/invf-plugin_host_test $(OUT)/invf-plugin_mt_test \
@@ -490,6 +500,7 @@ test: $(OUT)/invf-arctest $(OUT)/invf-blkio_test $(OUT)/invf-codec_test \
 	$(TESTENV) $(TESTISO) $(OUT)/invf-metabuf_test
 	$(TESTENV) $(TESTISO) $(OUT)/invf-btree_test
 	$(TESTENV) $(TESTISO) $(OUT)/invf-delta_test
+	$(TESTENV) $(TESTISO) $(OUT)/invf-groupcommit_test /tmp
 	$(TESTENV) $(TESTISO) $(OUT)/invf-concurrency_test /tmp
 	$(TESTENV) $(TESTISO) $(OUT)/invf-sweep_v3_test /tmp
 	$(TESTENV) $(TESTISO) $(OUT)/invf-btree_repair_test /tmp

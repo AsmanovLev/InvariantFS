@@ -25,6 +25,8 @@
 #include <string.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <signal.h>     /* crash-append: SIGKILL */
+#include <unistd.h>     /* crash-append: getpid */
 
 #include "volume_internal.h"   /* pulls in volume.h + invarifs.h */
 #include "vol_delta.h"
@@ -850,6 +852,67 @@ static int e2e_tear(const char *img)
     return 0;
 }
 
+/* crash-append <img> <n> <kill_after>
+ *
+ * The crash half of the group-commit test. Appends records k000..k(n-1)
+ * and, IMMEDIATELY after the append of record index `kill_after` has
+ * RETURNED -- and before any later append, before vol_flush, and above all
+ * before vol_close would barrier or write CLEAN -- sends itself SIGKILL.
+ * `verify-raw` then replays the image and must find every record whose
+ * append returned, with its value intact.
+ *
+ * Everything the volume would normally do at close (the CLEAN superblock,
+ * the final flush, the DEVT bump) is deliberately absent: the image is left
+ * as a crash leaves it, not as a shutdown leaves it.
+ *
+ * WHAT THIS DOES NOT PROVE, because it is easy to believe it does: on a
+ * local ext4 this test PASSES EVEN IF THE BARRIER IS DELETED. The bytes a
+ * pwrite left sit in the kernel page cache, and the page cache outlives the
+ * process, so replay finds them. That was measured, not assumed. Telling a
+ * real barrier from a fake one needs the page cache to go away (drop_caches,
+ * or a power cut), and the syscall-level audit used for that is a separate
+ * harness -- not this one. Keep this test for what it does show: that the
+ * kill point is real, the recovery path runs, and no acknowledged record
+ * disappears across a process death. */
+static int e2e_crash_append(const char *img, int n, int kill_after)
+{
+    invfs_volume *v;
+    char key[16], val[16];
+    int i;
+
+    if (open_v3(img, &v) != 0)
+        return 2;
+    if (kill_after < 0 || kill_after >= n) {
+        fprintf(stderr, "delta_test: kill_after %d out of range [0,%d)\n",
+                kill_after, n);
+        vol_close(v);
+        return 2;
+    }
+    for (i = 0; i < n; i++) {
+        e2e_key(i, key, sizeof key);
+        e2e_val(i, val, sizeof val);
+        if (vol_delta_append(v, (const uint8_t *)key, (uint16_t)strlen(key),
+                             (const uint8_t *)val, (uint16_t)strlen(val),
+                             0) != 0) {
+            fprintf(stderr, "delta_test: append %s failed\n", key);
+            vol_close(v);
+            return 1;
+        }
+        if (i == kill_after) {
+            /* The append returned: the record is durable by contract. Die
+             * here, with nothing flushed and nothing closed. */
+            fprintf(stderr, "delta_test: SIGKILL after append %s returned\n",
+                    key);
+            fflush(stderr);
+            kill(getpid(), SIGKILL);
+            /* unreachable */
+        }
+    }
+    fprintf(stderr, "delta_test: kill_after %d never reached\n", kill_after);
+    vol_close(v);
+    return 1;
+}
+
 static void usage(const char *a0)
 {
     fprintf(stderr,
@@ -857,7 +920,10 @@ static void usage(const char *a0)
         "       %s append <img> <n>\n"
         "       %s verify <img> <n>\n"
         "       %s tear <img>\n"
-        "       %s verify-torn <img> <n>\n", a0, a0, a0, a0, a0);
+        "       %s verify-torn <img> <n>\n"
+        "       %s verify-raw <img> <n>\n"
+        "       %s crash-append <img> <n> <kill_after>\n",
+        a0, a0, a0, a0, a0, a0, a0);
 }
 
 int main(int argc, char **argv)
@@ -883,6 +949,18 @@ int main(int argc, char **argv)
     if (argc >= 2 && strcmp(argv[1], "verify") == 0) {
         if (argc != 4) { usage(argv[0]); return 2; }
         return e2e_verify(argv[2], atoi(argv[3]), 1);
+    }
+    if (argc >= 2 && strcmp(argv[1], "crash-append") == 0) {
+        if (argc != 5) { usage(argv[0]); return 2; }
+        return e2e_crash_append(argv[2], atoi(argv[3]), atoi(argv[4]));
+    }
+    if (argc >= 2 && strcmp(argv[1], "verify-raw") == 0) {
+        /* Same replay check as `verify`, but for an image written by
+         * crash-append: exactly `n` plain records and NO trailing delete
+         * marker, so every k005 check must expect its value, not the
+         * delete. Used by the group-commit durability test. */
+        if (argc != 4) { usage(argv[0]); return 2; }
+        return e2e_verify(argv[2], atoi(argv[3]), 0);
     }
     if (argc >= 2 && strcmp(argv[1], "tear") == 0) {
         if (argc != 3) { usage(argv[0]); return 2; }

@@ -17,6 +17,7 @@
 #include <sys/stat.h>
 #include <sys/ioctl.h>
 #include <errno.h>
+#include <pthread.h>   /* group commit: the flusher mutex/condvar */
 #ifdef __linux__
 #include <linux/fs.h>
 #endif
@@ -558,12 +559,45 @@ int blkio_pread(blkio *io, uint64_t off, void *buf, size_t len)
     return raw_pread(io, off, buf, len);
 }
 
+/* Group-commit watermarks. The write side counts writes (blkio_pwrite); the
+ * flush side turns "everything written so far" into durability (blkio_flush).
+ * SEQ_CST throughout: the counters are the entire synchronisation argument
+ * between a writer and a flusher, so they must not be reordered against the
+ * pwrite syscall or against each other. */
+static uint64_t gc_load(const uint64_t *p)
+{
+    return __atomic_load_n(p, __ATOMIC_SEQ_CST);
+}
+
+static void gc_store(uint64_t *p, uint64_t v)
+{
+    __atomic_store_n(p, v, __ATOMIC_SEQ_CST);
+}
+
+static void gc_bump(uint64_t *p)
+{
+    __atomic_add_fetch(p, 1, __ATOMIC_SEQ_CST);
+}
+
 int blkio_pwrite(blkio *io, uint64_t off, const void *buf, size_t len)
 {
+    int rc;
+
     if (len == 0) return 0;
     if (io->aligned)
-        return dev_pwrite(io, off, buf, len);
-    return raw_pwrite(io, off, buf, len);
+        rc = dev_pwrite(io, off, buf, len);
+    else
+        rc = raw_pwrite(io, off, buf, len);
+    /* Count the write for group commit (see blkio_flush). The bump is
+     * AFTER the transfer returns, so a flusher that samples this counter
+     * has necessarily issued its fsync after these bytes reached the page
+     * cache. It is unconditional -- raw_pwrite loops on partial writes, so
+     * a non-zero return can still have left bytes behind, and those must
+     * not escape the next barrier. Failing to count a write is the one
+     * direction that could lose a record; counting one that did not land
+     * only costs an extra fsync. */
+    gc_bump(&io->write_gen);
+    return rc;
 }
 
 int blkio_seek(blkio *io, uint64_t off)
@@ -610,13 +644,93 @@ int blkio_chsize(blkio *io, uint64_t size)
        never runs off the end of the store. */
     if (io->aligned)
         io->cap -= io->cap % BLKIO_ALIGN;
+    /* Count the resize for group commit. ftruncate changes the inode, and
+     * it is fsync -- not the write path -- that makes the new length
+     * survive a crash. Before group commit every barrier flushed, so a
+     * resize followed by a barrier was persisted as a matter of course; a
+     * watermark that ignored chsize would let that barrier be skipped and
+     * a resized image could come back shorter than it was left. The bump is
+     * placed after the change lands, so a flush that covers it was issued
+     * after ftruncate returned. */
+    gc_bump(&io->write_gen);
     return 0;
 }
 
 uint64_t blkio_capacity(blkio *io) { return io->cap; }
 int      blkio_is_device(const blkio *io) { return io->is_dev; }
 
-int blkio_flush(blkio *io)
+/* ---- group commit ----------------------------------------------------
+ *
+ * The contract blkio_flush has always had is per CALL, not per byte: when
+ * it returns 0, every write this handle had issued before the call is on
+ * stable storage. ADR-009 decision 3 made the delta log barrier on every
+ * record, which is the strongest possible reading of that contract and
+ * costs one physical flush per metadata record. Measured on a 500-file /
+ * 12-byte import: 3509 fsyncs, 7.02 per file, 387.7 s of a 390.0 s wall --
+ * 99.4% of the time blocked in fsync, ~0.05 s of CPU. Scaled to an
+ * 84,279-file rootfs that is 65,377 s (18.2 h) of metadata flush alone.
+ *
+ * Nothing about the guarantee requires a flush PER CALL. It requires that
+ * the flush which happened be one that COVERS this call's writes. So:
+ * collapse the flushes, never the guarantee.
+ *
+ * Two counters per handle do it:
+ *
+ *   write_gen    incremented once per issued write (blkio_pwrite)
+ *   flushed_gen  the highest write_gen a COMPLETED flush is known to cover
+ *
+ * and blkio_flush becomes: "make sure flushed_gen >= write_gen".
+ *
+ *   INVARIANT. If blkio_flush() returns 0, then every write issued on this
+ *   handle before the call satisfies write_gen <= flushed_gen at return,
+ *   and was completed (its pwrite had returned) strictly before the fsync
+ *   that covers it was issued. Hence its bytes were in the page cache when
+ *   that fsync ran, hence they are on stable storage when blkio_flush
+ *   returns.
+ *
+ * Why the watermark is sound. fsync(fd) makes durable every byte written to
+ * fd before the fsync CALL. So a flush that samples `cover = write_gen`
+ * immediately before calling fsync covers exactly the writes with
+ * gen <= cover: such a write incremented write_gen, so its pwrite had
+ * already returned, and we only read that counter afterwards, so our fsync
+ * call came later. flushed_gen is set to `cover` (the sample taken BEFORE
+ * the fsync), never to the post-fsync value -- a write that lands while the
+ * fsync is in flight has not been covered, and must not be claimed.
+ *
+ * Why a caller can never be skipped. my_gen is read at entry. If some
+ * thread's completed flush already set flushed_gen >= my_gen, that flush
+ * was issued after every write the caller had issued, so the caller is
+ * covered and the fsync is pure waste. Otherwise exactly one thread -- the
+ * first to find no flusher running -- becomes the flusher, and the rest
+ * wait on the condvar for the flush that covers them. A flusher samples
+ * `cover` for LATER than their gen (it re-reads write_gen after they
+ * entered), so the wake-up can never be premature.
+ *
+ * Failures: a failed fsync does not advance flushed_gen, so no caller is
+ * told it is durable, and the next barrier retries the flush. This is
+ * strictly stronger than the old code, which returned the error but left
+ * the next call to guess.
+ *
+ * Writers are counted in blkio_pwrite, NOT in the delta log, and that is
+ * the load-bearing detail. The counter has to mean "everything written to
+ * this handle", because barriers are also ORDERING barriers: the fold
+ * writes COW base pages and then barriers so that RT30 may name them, and
+ * the anchor refresh barriers so a tail descriptor follows its block-0
+ * original. Counting only delta appends would let a later barrier be
+ * skipped on the strength of an earlier flush that predates those pages --
+ * publishing a root over non-durable pages. blkio_pwrite is the single
+ * choke point every write to a backing store goes through, so counting
+ * there makes the watermark mean what the ordering rules need it to mean.
+ *
+ * The counters are reset by blkio_open's memset, so a handle with no
+ * writes has flushed_gen == write_gen == 0 and its first barrier is a
+ * no-op -- which is the truth: there is nothing to make durable. That is
+ * also why this cannot skip a needed flush on a recycled stack blkio. */
+static pthread_mutex_t g_gc_lock = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t  g_gc_cv   = PTHREAD_COND_INITIALIZER;
+
+/* The physical flush, with no group-commit logic. */
+static int blkio_flush_raw(blkio *io)
 {
     /* Devices are already FILE_FLAG_WRITE_THROUGH, so this is a no-op for
        them on Windows; it still matters for image files. */
@@ -626,3 +740,52 @@ int blkio_flush(blkio *io)
     return fsync(io->fd) == 0 ? 0 : -1;
 #endif
 }
+
+int blkio_flush(blkio *io)
+{
+    uint64_t my_gen = gc_load(&io->write_gen);
+    int rc, fd_ok;
+
+    /* A handle whose descriptor is not there cannot be fsynced, and the
+     * failure has to reach the caller: vol_close and vol_sync keep the
+     * volume DIRTY instead of writing CLEAN precisely because blkio_flush
+     * reports the error (blkio_test.c pins this). Such a handle must never
+     * take the skip below -- there is no completed flush standing behind
+     * it that anyone could rely on, and "return 0" would turn a broken
+     * descriptor into a silent success. So the skip requires a descriptor
+     * that could have been flushed in the first place. */
+#ifdef _WIN32
+    fd_ok = ((HANDLE)io->h != NULL && (HANDLE)io->h != INVALID_HANDLE_VALUE);
+#else
+    fd_ok = (io->fd >= 0);
+#endif
+
+    pthread_mutex_lock(&g_gc_lock);
+    for (;;) {
+        if (fd_ok && gc_load(&io->flushed_gen) >= my_gen) {
+            pthread_mutex_unlock(&g_gc_lock);
+            return 0;                 /* an earlier flush already covers us */
+        }
+        if (!gc_load(&io->flush_busy)) {
+            gc_store(&io->flush_busy, 1);
+            break;                    /* we are the flusher */
+        }
+        pthread_cond_wait(&g_gc_cv, &g_gc_lock);
+    }
+    pthread_mutex_unlock(&g_gc_lock);
+
+    /* Sample BEFORE the flush: this is the ceiling on what we may claim. */
+    {
+        uint64_t cover = gc_load(&io->write_gen);
+        rc = blkio_flush_raw(io);
+        if (rc == 0 && cover > gc_load(&io->flushed_gen))
+            gc_store(&io->flushed_gen, cover);
+    }
+
+    pthread_mutex_lock(&g_gc_lock);
+    gc_store(&io->flush_busy, 0);
+    pthread_cond_broadcast(&g_gc_cv);
+    pthread_mutex_unlock(&g_gc_lock);
+    return rc;
+}
+

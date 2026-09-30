@@ -171,14 +171,30 @@ The load-bearing rule is **structure-before-reference**:
 - COW base pages and their allocation bits are durable before `RT30`'s root
   slot names the new root.
 
-"Durable" in that table means *a barrier has been issued and returned 0* —
-see §4.2 for exactly what that does and does not buy on each platform. It
-does not mean each write is write-through.
+"Durable" in that table means *a barrier covering those writes has returned
+0* — under group commit that barrier may be one an earlier caller triggered,
+so returning 0 does not imply a new physical flush was issued for you, only
+that one was issued after your writes and completed. See §4.2 for exactly
+what that does and does not buy on each platform. It does not mean each
+write is write-through.
 
 ### 4.2 What the barrier actually is
 
 `blkio_flush` is `fsync(fd)` on POSIX and `FlushFileBuffers` on Windows
-(`src/core/blkio.c:619-628`). The *open* differs by platform, and the open is
+(`src/core/blkio.c:724-767`), and it is **group-committed**: several
+callers can be made durable by one physical flush. What the flush does is
+unchanged — the guarantee is still per call. `blkio_pwrite` counts every
+write it issues on a handle into `write_gen`
+(`src/core/blkio.c:582`), and `blkio_flush` returns only once some
+*completed* flush covers the caller's writes. A barrier that finds nothing
+new since the last completed flush issues no flush at all, and concurrent
+callers share one: the first to need durability becomes the flusher and the
+rest wait for that flush. A write is only ever claimed by a flush whose
+`fsync` was issued after the write's `pwrite` returned, so "returned ⇒
+durable" is preserved exactly; a failed flush claims nothing and the next
+barrier retries. See ADR-009 decision 3.
+
+The *open* differs by platform, and the open is
 what most people assume carries the guarantee:
 
 | platform | backing store | open flags | what a barrier buys |

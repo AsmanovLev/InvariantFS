@@ -93,6 +93,21 @@ typedef struct blkio {
        blkio_close print them. */
     uint64_t n_read, n_write;   /* transfers issued */
     uint64_t b_read, b_write;   /* bytes moved, including alignment padding */
+
+    /* ---- group commit (see blkio.c) --------------------------------
+     * write_gen counts writes issued on this handle; flushed_gen is the
+     * highest write_gen a COMPLETED physical flush is known to cover. Both
+     * are reset to 0 by blkio_open, so a freshly opened handle starts
+     * consistent. Plain uint64_t on purpose: they are only ever touched
+     * through __atomic_* in blkio.c, which keeps <stdatomic.h> out of every
+     * includer. The mutex and condvar that serialise the flushers are
+     * file-static in blkio.c, shared by every handle in the process. */
+    uint64_t write_gen;
+    uint64_t flushed_gen;
+    /* 1 while some thread is inside the physical flush. Guarded by the
+     * file-static mutex in blkio.c; a uint64_t so it can be read with the
+     * same __atomic_* helpers as the generations. */
+    uint64_t flush_busy;
 } blkio;
 
 /* Turn a user-supplied backing-store name into a form CreateFileW accepts:
