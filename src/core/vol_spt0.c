@@ -620,6 +620,23 @@ static int spn_walk_ino(invfs_volume *v, uint64_t inode_id,
 
 /* ---- the reclaim pass ------------------------------------------------ */
 
+/* Is block `b` inside an extent the v3 batch registry still claims? The
+ * extents are sorted by head pba and, being distinct allocations, do not
+ * overlap -- so the only candidate is the last one that starts at or before
+ * `b`. Called once per block of the volume, hence the binary search. */
+static int spn_reg_owns(const tz_v3_extent *reg, size_t n, uint64_t b)
+{
+    size_t lo = 0, hi = n;
+
+    while (lo < hi) {
+        size_t mid = lo + (hi - lo) / 2;
+        if (reg[mid].pba <= b) lo = mid + 1;
+        else hi = mid;
+    }
+    if (!lo) return 0;
+    return b < reg[lo - 1].pba + reg[lo - 1].phys;
+}
+
 /* Free every block the PREVIOUS generation's pin named that no live recipe
  * names now. That is exactly the set the previous sweep wanted to free and
  * had to hold: a recipe it replaced is not in this generation's mark set, and
@@ -654,8 +671,33 @@ static uint64_t spn_reclaim(invfs_volume *v, const uint8_t *old_map,
 {
     uint64_t total = v->sb.total_blocks;
     uint64_t b = 0, freed = 0, run = 0, start = 0;
+    tz_v3_extent *reg = NULL;
+    size_t n_reg = 0;
 
     if (!old_map)
+        return 0;
+    /* A RECIPE is not the only owner of a pinned block. The v3 batch
+     * registry (the hidden TZ_OWNER_NAME file) owns its batches' extents
+     * independently, and a batch that no live recipe names any more is dead
+     * while its registry row is still on disk -- the row is retired later, by
+     * tz_v3_gc at sweep stage 6. Freeing such a block HERE, one stage before
+     * the registry admits the batch is garbage, hands the block straight back
+     * to the shared free pool, where the transform's very next mbuf_alloc can
+     * take it as a base B+-tree page (one pool, no hard regions -- §2.3).
+     * tz_v3_gc would then free that live page through the row it never
+     * dropped, and the fold after it would rebuild the base from the
+     * pre-transform root: a file written seconds earlier becomes unreadable.
+     *
+     * So the registry is an owner set here, exactly as a live recipe is. The
+     * cost is one registry read per capture (a name lookup plus a small
+     * blob), and the debt is not deferred forever: tz_v3_gc frees the dead
+     * batch in the same sweep, after the row is gone, so the block is
+     * reclaimed one stage later rather than leaked.
+     *
+     * An unreadable registry (out of memory) is NOT treated as "no owner":
+     * that is the one answer that can lose data, so it fails closed and the
+     * reclaim does nothing. */
+    if (tz_v3_reg_owned_blocks(v, &reg, &n_reg) != 0)
         return 0;
     /* One pass, one maximal run of reclaimable blocks freed as it completes.
      *
@@ -674,7 +716,7 @@ static uint64_t spn_reclaim(invfs_volume *v, const uint8_t *old_map,
     v->retain_release = 1;
     for (b = 0; b < total; b++) {
         if (bit_get(old_map, b) && !bit_get(new_map, b) &&
-            bit_get(v->bitmap, b)) {
+            bit_get(v->bitmap, b) && !spn_reg_owns(reg, n_reg, b)) {
             if (!run) start = b;
             run++;
             continue;
@@ -687,6 +729,7 @@ static uint64_t spn_reclaim(invfs_volume *v, const uint8_t *old_map,
     if (run)
         freed += spn_free_counted(v, start, run);
     v->retain_release = 0;
+    free(reg);
     return freed;
 }
 

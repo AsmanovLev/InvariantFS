@@ -102,7 +102,7 @@ CLI_MAINS := mkfs verify fsck cp cat ls stat arctest blkio_test resize \
              metabuf_test btree_test btree_repair_test v3inode overlay_test fold_test concurrency_test \
              sweep_v3_test symlink_v3_test large_file_v3_test dedupe_v3_test deflate_repro_test window_test \
              nlink_v3_test recipe_fsck_test cpack_guard_test orphan_test rt30_slot_test anchor_test \
-             fsck_rootslot_test plugin_host_test plugin_mt_test rs_stability_test
+             fsck_rootslot_test batch_owner_test plugin_host_test plugin_mt_test rs_stability_test
 $(foreach t,$(CLI_MAINS),$(eval $(call TOOL_RULE,$(t),)))
 
 # WP71: loads every containerpack .so through dlmopen/dlopen -> needs -ldl,
@@ -411,6 +411,7 @@ test: $(OUT)/invf-arctest $(OUT)/invf-blkio_test $(OUT)/invf-codec_test \
       $(OUT)/invf-cpack_guard_test $(OUT)/invf-orphan_test \
       $(OUT)/invf-rt30_slot_test $(OUT)/invf-anchor_test $(OUT)/gzhdrfuzz \
       $(OUT)/invf-fsck_rootslot_test \
+      $(OUT)/invf-batch_owner_test \
       $(OUT)/invf-rs_stability_test \
       $(OUT)/invf-gz_header_test \
       $(OUT)/invf-ivpack_packs_test $(OUT)/invf-mkfs $(OUT)/invf-cp \
@@ -486,6 +487,15 @@ test: $(OUT)/invf-arctest $(OUT)/invf-blkio_test $(OUT)/invf-codec_test \
 	@# volume that was built, reclaimed and then damaged -- the damage leg
 	@# is what a wrong liveness predicate cannot survive.
 	$(TESTENV) $(TESTISO) bash tools/test-v3-orphan-reclaim.sh
+	@# The v3 batch REGISTRY is a block owner in its own right, not just the
+	@# recipes that point into a batch. When the savepoint reclaim freed a
+	@# block the registry still owned, the block went straight back to the
+	@# shared free pool and this same sweep's stage-6 tz_v3_gc freed it again
+	@# through the row it never dropped -- by then as a live base B+-tree page,
+	@# which cost a file its recipe (fuzz seed 0x5e9, image 1, 81 ops). The
+	@# window is intra-sweep, so the suite drives the sweep's own prepare and
+	@# reads the bitmap; leg 3 is what keeps a veto from passing as a fix.
+	$(TESTENV) $(TESTISO) bash tools/test-v3-batch-owner.sh
 	@# WP123: the RT30 reader must refuse a root slot whose block the
 	@# allocation bitmap reports as free. The suite carries its own red
 	@# control so a no-op fix cannot pass it.

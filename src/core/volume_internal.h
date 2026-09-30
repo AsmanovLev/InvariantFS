@@ -895,6 +895,26 @@ typedef struct {
 
 #define TZ_OWNER_NAME "\x01tzb"
 
+/* One block extent the v3 batch registry (the hidden TZ_OWNER_NAME file) still
+ * claims. The registry is an owner of blocks that is NOT a recipe: a batch no
+ * live recipe names any more is dead, but its registry row outlives the batch
+ * until the sweep's tz GC runs. Every other free path must therefore treat a
+ * registry-named block as still claimed, or the row becomes a stale pointer
+ * into the free pool and the next allocator may hand the block to somebody
+ * else (see the spn_reclaim comment in vol_spt0.c). */
+typedef struct {
+    uint64_t pba;      /* head block of the batch segment */
+    uint64_t phys;     /* blocks in the extent, as the registry recorded it */
+} tz_v3_extent;
+
+/* The registry's block extents as a malloc'd ASCENDING array (distinct
+ * batches hold distinct, non-overlapping extents, so a binary search on pba
+ * is exact). 0 = ok. *out may come back NULL with *n == 0: no registry, or an
+ * empty one -- the ordinary case, NOT a failure. -1 = out of memory or a
+ * malformed volume, which every caller must treat as "claim everything" (fail
+ * closed). The caller frees *out. */
+int tz_v3_reg_owned_blocks(invfs_volume *v, tz_v3_extent **out, size_t *n);
+
 
 /* owner inode state, loaded once and rewritten per change */
 typedef struct {

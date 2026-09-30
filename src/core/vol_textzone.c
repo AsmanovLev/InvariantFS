@@ -1039,6 +1039,13 @@ typedef struct {
     uint32_t phys;
 } tz_v3_reg_ent;
 
+static int tz_v3_extent_cmp(const void *a, const void *b)
+{
+    uint64_t x = ((const tz_v3_extent *)a)->pba,
+             y = ((const tz_v3_extent *)b)->pba;
+    return x < y ? -1 : x > y ? 1 : 0;
+}
+
 typedef struct {
     tz_v3_reg_ent *ents;
     size_t n, cap;
@@ -1079,6 +1086,61 @@ static int tz_v3_reg_load(invfs_volume *v, tz_v3_reg *r)
         }
     }
     free(buf);
+    return 0;
+}
+
+/* The registry's block extents, ascending, for a caller outside this file
+ * that has to decide whether a block is still claimed.
+ *
+ * WHY THIS EXISTS. A batch is dead the moment no live recipe names its pba --
+ * but the registry ROW that owns the block is only retired later, by
+ * tz_v3_gc at sweep stage 6. Between those two moments the block is garbage
+ * AND still named, and the free pool is shared with the metadata zone
+ * (§2.3: one pool, no hard regions), so the very next mbuf_alloc can hand
+ * the same block out as a base B+-tree page. A free path that consults only
+ * recipes then frees a live metadata page through a row that has been stale
+ * for the whole run: that is the v3 recipe-blob loss this closes.
+ *
+ * So the registry is published here as an owner set, and spn_reclaim
+ * (vol_spt0.c) treats these blocks as claimed. tz_v3_gc still frees the dead
+ * batches -- it is the one owner that drops the row and the blocks together,
+ * and it runs in the same sweep, so nothing leaks: the reclaim's debt on a
+ * dead batch is simply paid one stage later instead of never. */
+int tz_v3_reg_owned_blocks(invfs_volume *v, tz_v3_extent **out, size_t *n)
+{
+    tz_v3_reg reg;
+    tz_v3_extent *arr = NULL;
+    size_t i;
+
+    if (!out || !n)
+        return -1;
+    *out = NULL;
+    *n = 0;
+    if (!v)
+        return 0;
+    if (tz_v3_reg_load(v, &reg) != 0) {
+        free(reg.ents);
+        return -1;
+    }
+    if (reg.n) {
+        arr = (tz_v3_extent *)malloc(reg.n * sizeof *arr);
+        if (!arr) {
+            free(reg.ents);
+            return -1;
+        }
+        for (i = 0; i < reg.n; i++) {
+            arr[i].pba = reg.ents[i].pba;
+            /* phys == 0 would be a row that names no block at all. Give it
+             * the head block anyway: claiming one block we may not own is a
+             * bounded leak, claiming none for a row that does own blocks is
+             * the data loss this function exists to prevent. */
+            arr[i].phys = reg.ents[i].phys ? reg.ents[i].phys : 1;
+        }
+        qsort(arr, reg.n, sizeof *arr, tz_v3_extent_cmp);
+    }
+    free(reg.ents);
+    *out = arr;
+    *n = reg.n;
     return 0;
 }
 
