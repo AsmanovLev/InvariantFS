@@ -197,20 +197,10 @@ static int fold_collect_cb(void *ctx_, const uint8_t *key, uint16_t klen,
     return 0;
 }
 
-/* Byte-lexicographic key compare, matching bt_cmp / dl_key_cmp: shorter
- * prefix first. Used only for the deterministic pre-apply sort. */
-static int fold_key_cmp(const fold_ent *a, const fold_ent *b)
-{
-    uint16_t m = a->klen < b->klen ? a->klen : b->klen;
-    int c = m ? memcmp(a->key, b->key, m) : 0;
-    if (c)
-        return c < 0 ? -1 : 1;
-    if (a->klen < b->klen)
-        return -1;
-    if (a->klen > b->klen)
-        return 1;
-    return 0;
-}
+/* The ordering is vol_key_cmp() in volume_internal.h, the same one the
+ * base B+-tree and the delta log are sorted with -- which is the whole
+ * reason this sort may be trusted to make the pre-apply deterministic.
+ * This sort is what puts the delta entries into base-key order. */
 
 /* Stable insertion sort of the snapshot into key order (the list is small and
  * this keeps the owned pointers from being shuffled). */
@@ -220,7 +210,9 @@ static void fold_sort(fold_list *l)
     for (a = 1; a < l->n; a++) {
         fold_ent tmp = l->ent[a];
         b = a;
-        while (b > 0 && fold_key_cmp(&tmp, &l->ent[b - 1]) < 0) {
+        while (b > 0 && vol_key_cmp(tmp.key, tmp.klen,
+                                    l->ent[b - 1].key,
+                                    l->ent[b - 1].klen) < 0) {
             l->ent[b] = l->ent[b - 1];
             b--;
         }
@@ -228,35 +220,11 @@ static void fold_sort(fold_list *l)
     }
 }
 
-/* Persist the dirty bitmap range. Base pages come from the shared allocator
- * (WP-M2); their bits must land before RT30 names a page. Mirrors the static
- * helper in vol_btree.c rather than exporting it, so WP-M14 stays inside its
- * file scope. */
-static int fold_persist_bitmap(invfs_volume *v)
-{
-    uint64_t bm_bytes = (uint64_t)v->bitmap_blocks * INVFS_BLOCK_SIZE;
-    uint64_t base = v->sb.metadata_zone_start * INVFS_BLOCK_SIZE;
-    uint64_t lo, hi;
-
-    if (v->bm_lo > v->bm_hi)
-        return 0;
-    lo = v->bm_lo;
-    hi = v->bm_hi;
-    if (hi > bm_bytes)
-        hi = bm_bytes;
-    lo -= lo % INVFS_BLOCK_SIZE;
-    hi = ((hi + INVFS_BLOCK_SIZE - 1) / INVFS_BLOCK_SIZE) * INVFS_BLOCK_SIZE;
-    if (hi > bm_bytes)
-        hi = bm_bytes;
-    if (hi > lo) {
-        if (io_seek(&v->io, base + lo) != 0 ||
-            io_write(&v->io, v->bitmap + lo, (size_t)(hi - lo)) != 0)
-            return -1;
-    }
-    v->bm_lo = 1;
-    v->bm_hi = 0;
-    return 0;
-}
+/* Persisting the dirty bitmap range is vol_v3_bitmap_flush() (vol_btree.c),
+ * declared in volume_internal.h -- it was already exported for exactly this
+ * reason. This file used to carry a byte-identical private copy; two copies
+ * of "round the dirty range out to whole bitmap blocks, write it, clear the
+ * range" is one fewer place a persistence decision can be made differently. */
 
 /* Leaves room for WP-M15 to reclaim the pages the pre-fold root referenced
  * once the old root is no longer reachable from a save point or a reader.
@@ -453,7 +421,7 @@ int vol_v3_fold(invfs_volume *v)
 
     /* (2) durability + atomic publish: bitmap, then COW pages, then RT30 with
      * a bumped seq. mbuf_root_publish refuses a torn/gen-mismatched root. */
-    if (fold_persist_bitmap(v) != 0) {
+    if (vol_v3_bitmap_flush(v) != 0) {
         fold_list_free(&list);
         return -1;
     }

@@ -122,7 +122,7 @@ CLI_MAINS := mkfs verify fsck cp cat ls stat arctest blkio_test resize \
              read_parallel_bitexact_test arc_concurrency_test \
              nlink_v3_test recipe_fsck_test cpack_guard_test orphan_test rt30_slot_test anchor_test \
              fsck_rootslot_test batch_owner_test plugin_host_test plugin_mt_test rs_stability_test \
-             fsck_liveness_test scratch_policy_test v2rb_rollback_test
+fsck_liveness_test scratch_policy_test v2rb_rollback_test keycmp_test
 $(foreach t,$(CLI_MAINS),$(eval $(call TOOL_RULE,$(t),)))
 
 # WP71: loads every containerpack .so through dlmopen/dlopen -> needs -ldl,
@@ -499,6 +499,7 @@ test: $(OUT)/invf-arctest $(OUT)/invf-blkio_test $(OUT)/invf-codec_test \
       $(OUT)/invf-recipe_fsck_test $(OUT)/invf-fsck_liveness_test \
       $(OUT)/invf-cpack_guard_test $(OUT)/invf-orphan_test \
       $(OUT)/invf-scratch_policy_test $(OUT)/invf-v2rb_rollback_test \
+      $(OUT)/invf-keycmp_test \
       $(OUT)/invf-rt30_slot_test $(OUT)/invf-anchor_test $(OUT)/gzhdrfuzz \
       $(OUT)/invf-fsck_rootslot_test \
       $(OUT)/invf-batch_owner_test \
@@ -568,13 +569,25 @@ test: $(OUT)/invf-arctest $(OUT)/invf-blkio_test $(OUT)/invf-codec_test \
 	$(TESTENV) $(OUT)/invf-scratch_policy_test
 	@# WP201: the two v2-era paths that kept running on Meta-v3. The
 	@# containerpack MAP branch's rollback reached v3, where the commit it
-	@# rolls back superseded the row IN PLACE -- so it deleted the fresh
-	@# blob and appended a v2 TOMBSTONE into the shared metadata extent,
-	@# which on v3 is the base-page/data pool. And vol_v3_free_recipe_blocks
+	@# rolls back superseded the row IN PLACE -- so it cannot undo anything,
+	@# and its v2 retire writes a TOMBSTONE into the shared metadata extent,
+	@# which on v3 is the base-page/data pool. Measured: that block was
+	@# ALLOCATED, so this is a v2-shaped record written OVER A LIVE v3 BLOCK.
+	@# It does NOT destroy the fresh blob -- the v2 records are invisible to
+	@# v3 resolution and the row still reads back bit-exact. And vol_v3_free_recipe_blocks
 	@# reported success on a recipe it could not parse, so vol_v3_unlink
 	@# reported success over blocks that were orphaned forever. Both legs
 	@# assert on the DISK EFFECT, not on a return code alone.
 	$(TESTENV) $(TESTISO) $(OUT)/invf-v2rb_rollback_test /tmp
+	@# The v3 KEY ORDERING. The base B+-tree, the delta log and the
+	@# fold used to carry three byte-identical private comparators and the
+	@# fold's delta/base merge is correct only while they agree. They are
+	@# one function now (vol_key_cmp, volume_internal.h); this asserts it
+	@# still orders exactly as before, that the merge property is real
+	@# (with a control that breaks it on purpose), and that no second
+	@# definition has crept back into src/core. No volume, no I/O, so it
+	@# cannot be flaky.
+	$(TESTENV) $(TESTISO) $(OUT)/invf-keycmp_test
 	@# The container MEMBER BOUND is one number in the engine and eight
 	@# mirrored copies in the container packs. Nothing noticed when they
 	@# drifted -- a pack left at the old cap just declines every container

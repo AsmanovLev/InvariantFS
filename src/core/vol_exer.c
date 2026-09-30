@@ -191,7 +191,11 @@ int exer_payload_parse(const uint8_t *pay, size_t pay_len,
 /* Splice an EXER payload's glue + the decoded part buffers into dst
  * (file_size bytes). Rows come pre-validated from exer_payload_parse, so
  * the glue arithmetic cannot overrun: parts are ascending, inside the
- * file, and member_sum + glue_len == file_size. */
+ * file, and member_sum + glue_len == file_size.
+ *
+ * That bounds the GLUE cursor, not parts[i]. See the note on the
+ * prototype in volume_internal.h: the rows[i].len / parts[i] pairing is
+ * every caller's to prove, and it must be proven before the call. */
 void exer_splice(const uint8_t *pay, const exer_row *rows, size_t n,
                         uint8_t *const *parts, uint8_t *dst, uint64_t file_size)
 {
@@ -372,7 +376,7 @@ int vol_exer_carve(invfs_volume *v, uint64_t inode_id,
         uint8_t *pb[EXE_MAX_MEDIA];
         exer_row *grows = NULL;
         size_t gn = 0;
-        int okm = 0;
+        int okm = 0, lenok;
 
         if (dec && reb) {
             size_t d = ZSTD_decompress(dec, pay_len, cblob, cblob_len);
@@ -380,9 +384,25 @@ int vol_exer_carve(invfs_volume *v, uint64_t inode_id,
             if (grows && !ZSTD_isError(d) && d == pay_len &&
                 exer_payload_parse(dec, d, full_len, grows,
                                    EXE_MAX_MEDIA, &gn) == 0 && gn == kept) {
-                for (i = 0; i < kept; i++) pb[i] = pm[i].back;
-                exer_splice(dec, grows, gn, pb, reb, full_len);
-                okm = memcmp(reb, full, full_len) == 0;
+                /* rows[i].len below is the length pm[i].back was ALLOCATED
+                 * at; grows[i].len is the length that came back out of the
+                 * round-tripped payload, and it is grows[i].len that
+                 * exer_splice() copies with. Prove the two agree BEFORE
+                 * the splice. The memcmp on the next line cannot: it runs
+                 * after the copy, so if the two ever disagreed the
+                 * over-read would already have happened and the guard
+                 * would be reporting on damage rather than preventing it.
+                 * (They cannot disagree today -- d == pay_len makes the
+                 * round trip exact and parse re-validates -- which is
+                 * exactly why this is a check and not a fix.) */
+                lenok = 1;
+                for (i = 0; i < kept; i++)
+                    if (grows[i].len != rows[i].len) { lenok = 0; break; }
+                if (lenok) {
+                    for (i = 0; i < kept; i++) pb[i] = pm[i].back;
+                    exer_splice(dec, grows, gn, pb, reb, full_len);
+                    okm = memcmp(reb, full, full_len) == 0;
+                }
             }
         }
         free(dec); free(reb); free(grows);

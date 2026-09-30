@@ -96,15 +96,8 @@ int idx_dir_live(invfs_volume *v, const char *pre, size_t plen)
 
 
 
-/* Widen the dirty byte range to cover the byte holding bit i, so vol_flush
- * can write just that slice instead of the whole bitmap. */
-static void bm_dirty(invfs_volume *v, uint64_t i)
-{
-    uint64_t byte = i / 8;
-    if (v->bm_lo > v->bm_hi) { v->bm_lo = byte; v->bm_hi = byte + 1; return; }
-    if (byte < v->bm_lo) v->bm_lo = byte;
-    if (byte + 1 > v->bm_hi) v->bm_hi = byte + 1;
-}
+/* vol_bm_dirty() (volume_internal.h) widens the dirty byte range so
+ * vol_flush writes just that slice instead of the whole bitmap. */
 
 
 /* CRC convention: over the 24-byte descriptor with the crc32c field
@@ -1838,7 +1831,7 @@ free(rb);
                 if (b >= v->sb.total_blocks) break;
                 if (!bit_get(v->bitmap, b)) {
                     bit_set(v->bitmap, b);
-                    bm_dirty(v, b);
+                    vol_bm_dirty(v, b);
                     v->free_blocks--;
                     if (b >= v->sb.shadow_zone_start) v->shadow_free--;
                     else if (b >= v->sb.raw_zone_start) v->raw_free--;
@@ -1912,7 +1905,7 @@ free(rb);
                     for (k = pba; k < bend; k++) {
                         if (!bit_get(v->bitmap, k)) {
                             bit_set(v->bitmap, k);
-                            bm_dirty(v, k);
+                            vol_bm_dirty(v, k);
                             v->free_blocks--;
                             if (k >= v->sb.shadow_zone_start)
                                 v->shadow_free--;
@@ -2920,8 +2913,8 @@ uint64_t alloc_blocks(invfs_volume *v, uint64_t zone_start, uint64_t zone_len,
                     if (type == INVFS_ALLOC_META && v->meta_type_bitmap)
                         bit_set(v->meta_type_bitmap, k);
                 }
-                bm_dirty(v, start);
-                bm_dirty(v, i);
+                vol_bm_dirty(v, start);
+                vol_bm_dirty(v, i);
                 /* WP20b: fresh shadow content invalidates its stripes'
                  * parity (the block's old content was zero-as-absent) */
                 if (zone_start == v->sb.shadow_zone_start)
@@ -3099,8 +3092,8 @@ int extend_meta_extent(invfs_volume *v, uint64_t extent_idx, uint8_t new_size_cl
                 if (v->meta_type_bitmap)
                     bit_set(v->meta_type_bitmap, adj_pba + k);
             }
-            bm_dirty(v, old_pba);
-            bm_dirty(v, adj_pba + adj_blocks - 1);
+            vol_bm_dirty(v, old_pba);
+            vol_bm_dirty(v, adj_pba + adj_blocks - 1);
             v->free_blocks -= adj_blocks;
             v->meta_free_blocks -= adj_blocks;
 
@@ -4425,7 +4418,7 @@ static void vol_free_run(invfs_volume *v, uint64_t pba, uint64_t nblocks)
         wp25_on_free(v, pba, end - pba);
     for (i = pba; i < end; i++)
         bit_clr(v->bitmap, i);
-    if (end > pba) { bm_dirty(v, pba); bm_dirty(v, end - 1); }
+    if (end > pba) { vol_bm_dirty(v, pba); vol_bm_dirty(v, end - 1); }
     /* WP20b: a freed shadow block changes its stripes' membership */
     seal_dirty_mark(v, pba, end - pba);
     v->free_blocks += nblocks;

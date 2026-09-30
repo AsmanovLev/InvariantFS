@@ -211,16 +211,9 @@ int mbuf_verify_ptr(invfs_volume *v, const invfs_blkptr *p)
 /* 3. allocator                                                       */
 /* ------------------------------------------------------------------ */
 
-/* bm_dirty is static in volume.c; the metadata allocator hand-marks only
- * the metadata zone's own bits, so it carries the same two-line range
- * widening here rather than exporting the private helper. */
-static void mb_bm_dirty(invfs_volume *v, uint64_t i)
-{
-    uint64_t byte = i / 8;
-    if (v->bm_lo > v->bm_hi) { v->bm_lo = byte; v->bm_hi = byte + 1; return; }
-    if (byte < v->bm_lo) v->bm_lo = byte;
-    if (byte + 1 > v->bm_hi) v->bm_hi = byte + 1;
-}
+/* The metadata allocator hand-marks only the metadata zone's own bits,
+ * so it widens the same dirty byte range: vol_bm_dirty(), in
+ * volume_internal.h. */
 
 void mbuf_init(invfs_volume *v)
 {
@@ -276,7 +269,7 @@ static uint64_t mb_alloc_meta_zone(invfs_volume *v)
             bit_set(v->bitmap, i);
             if (v->meta_type_bitmap)
                 bit_set(v->meta_type_bitmap, i);
-            mb_bm_dirty(v, i);
+            vol_bm_dirty(v, i);
             v->free_blocks--;
             if (v->meta_free_blocks)
                 v->meta_free_blocks--;

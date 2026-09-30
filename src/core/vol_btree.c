@@ -110,23 +110,12 @@ typedef struct {
 /* key compare + small encode helpers                                 */
 /* ------------------------------------------------------------------ */
 
-static int bt_cmp(const uint8_t *a, uint16_t an,
-                  const uint8_t *b, uint16_t bn)
-{
-    uint16_t m = an < bn ? an : bn;
-    int c = m ? memcmp(a, b, m) : 0;
-    if (c)
-        return c < 0 ? -1 : 1;
-    if (an < bn)
-        return -1;
-    if (an > bn)
-        return 1;
-    return 0;
-}
-
+/* The ordering is vol_key_cmp() in volume_internal.h, shared with the delta
+ * log and the fold -- the base tree and the delta log must agree byte for
+ * byte or the fold's merge is not a merge. */
 static int bt_cmp_key(const bt_ent *e, bt_key key)
 {
-    return bt_cmp(e->k, e->klen, key.p, key.n);
+    return vol_key_cmp(e->k, e->klen, key.p, key.n);
 }
 
 static uint16_t rd16(const uint8_t *p)
@@ -557,7 +546,7 @@ static int bt_ins_rec(invfs_volume *v, invfs_blkptr node, bt_key key,
             free(e);
             return -1;
         }
-        if (bt_cmp(key.p, key.n, e[i].k, e[i].klen) < 0) {
+        if (vol_key_cmp(key.p, key.n, e[i].k, e[i].klen) < 0) {
             e[i].k = key.p;
             e[i].klen = key.n;
         }
@@ -928,7 +917,7 @@ static int bt_del_rec(invfs_volume *v, invfs_blkptr node, bt_key key,
                     free(e);
                     return -1;
                 }
-            } else if (bt_cmp(key.p, key.n, oldmin.p, oldmin.n) == 0) {
+            } else if (vol_key_cmp(key.p, key.n, oldmin.p, oldmin.n) == 0) {
                 bt_key nm;
                 if (bt_first_key(v, cd.node, ksc1, &nm) != 0) {
                     free(e);
@@ -1041,9 +1030,9 @@ static int bt_scan_rec(invfs_volume *v, invfs_blkptr ptr,
             int rc;
             k.p = e[i].k;
             k.n = e[i].klen;
-            if (lo.n && bt_cmp(k.p, k.n, lo.p, lo.n) < 0)
+            if (lo.n && vol_key_cmp(k.p, k.n, lo.p, lo.n) < 0)
                 continue;
-            if (hi.n && bt_cmp(k.p, k.n, hi.p, hi.n) >= 0)
+            if (hi.n && vol_key_cmp(k.p, k.n, hi.p, hi.n) >= 0)
                 break;
             {
                 bt_val val;
@@ -1064,10 +1053,10 @@ static int bt_scan_rec(invfs_volume *v, invfs_blkptr ptr,
         int rc;
         clo.p = e[i].k;
         clo.n = e[i].klen;
-        if (hi.n && bt_cmp(clo.p, clo.n, hi.p, hi.n) >= 0)
+        if (hi.n && vol_key_cmp(clo.p, clo.n, hi.p, hi.n) >= 0)
             break;
         if (i + 1 < n) {
-            if (lo.n && bt_cmp(e[i + 1].k, e[i + 1].klen, lo.p, lo.n) <= 0)
+            if (lo.n && vol_key_cmp(e[i + 1].k, e[i + 1].klen, lo.p, lo.n) <= 0)
                 continue;
         }
         rc = bt_scan_rec(v, e[i].child, lo, hi, cb, ctx);
@@ -1160,17 +1149,17 @@ static int bt_check_rec(invfs_volume *v, invfs_blkptr ptr, int expect_level,
             return -1;
         }
         for (i = 0; i < n; i++) {
-            if (i && bt_cmp(e[i - 1].k, e[i - 1].klen, e[i].k, e[i].klen) >= 0) {
+            if (i && vol_key_cmp(e[i - 1].k, e[i - 1].klen, e[i].k, e[i].klen) >= 0) {
                 bt_ck_err(ck, "leaf keys not strictly ordered");
                 free(e);
                 return -1;
             }
-            if (lo.n && bt_cmp(e[i].k, e[i].klen, lo.p, lo.n) < 0) {
+            if (lo.n && vol_key_cmp(e[i].k, e[i].klen, lo.p, lo.n) < 0) {
                 bt_ck_err(ck, "leaf key below parent bound");
                 free(e);
                 return -1;
             }
-            if (hi.n && bt_cmp(e[i].k, e[i].klen, hi.p, hi.n) >= 0) {
+            if (hi.n && vol_key_cmp(e[i].k, e[i].klen, hi.p, hi.n) >= 0) {
                 bt_ck_err(ck, "leaf key above parent bound");
                 free(e);
                 return -1;
@@ -1187,17 +1176,17 @@ static int bt_check_rec(invfs_volume *v, invfs_blkptr ptr, int expect_level,
         return -1;
     }
     for (i = 0; i < n; i++) {
-        if (i && bt_cmp(e[i - 1].k, e[i - 1].klen, e[i].k, e[i].klen) >= 0) {
+        if (i && vol_key_cmp(e[i - 1].k, e[i - 1].klen, e[i].k, e[i].klen) >= 0) {
             bt_ck_err(ck, "separators not strictly ordered");
             free(e);
             return -1;
         }
-        if (lo.n && bt_cmp(e[i].k, e[i].klen, lo.p, lo.n) < 0) {
+        if (lo.n && vol_key_cmp(e[i].k, e[i].klen, lo.p, lo.n) < 0) {
             bt_ck_err(ck, "separator below parent bound");
             free(e);
             return -1;
         }
-        if (hi.n && bt_cmp(e[i].k, e[i].klen, hi.p, hi.n) >= 0) {
+        if (hi.n && vol_key_cmp(e[i].k, e[i].klen, hi.p, hi.n) >= 0) {
             bt_ck_err(ck, "separator above parent bound");
             free(e);
             return -1;
@@ -1364,17 +1353,17 @@ static int bt_check_tol_rec(invfs_volume *v, invfs_blkptr ptr, int expect_level,
             return -1;
         }
         for (i = 0; i < n; i++) {
-            if (i && bt_cmp(e[i - 1].k, e[i - 1].klen, e[i].k, e[i].klen) >= 0) {
+            if (i && vol_key_cmp(e[i - 1].k, e[i - 1].klen, e[i].k, e[i].klen) >= 0) {
                 bt_ck_err(ck, "leaf keys not strictly ordered");
                 free(e);
                 return -1;
             }
-            if (lo.n && bt_cmp(e[i].k, e[i].klen, lo.p, lo.n) < 0) {
+            if (lo.n && vol_key_cmp(e[i].k, e[i].klen, lo.p, lo.n) < 0) {
                 bt_ck_err(ck, "leaf key below parent bound");
                 free(e);
                 return -1;
             }
-            if (hi.n && bt_cmp(e[i].k, e[i].klen, hi.p, hi.n) >= 0) {
+            if (hi.n && vol_key_cmp(e[i].k, e[i].klen, hi.p, hi.n) >= 0) {
                 bt_ck_err(ck, "leaf key above parent bound");
                 free(e);
                 return -1;
@@ -1391,17 +1380,17 @@ static int bt_check_tol_rec(invfs_volume *v, invfs_blkptr ptr, int expect_level,
         return -1;
     }
     for (i = 0; i < n; i++) {
-        if (i && bt_cmp(e[i - 1].k, e[i - 1].klen, e[i].k, e[i].klen) >= 0) {
+        if (i && vol_key_cmp(e[i - 1].k, e[i - 1].klen, e[i].k, e[i].klen) >= 0) {
             bt_ck_err(ck, "separators not strictly ordered");
             free(e);
             return -1;
         }
-        if (lo.n && bt_cmp(e[i].k, e[i].klen, lo.p, lo.n) < 0) {
+        if (lo.n && vol_key_cmp(e[i].k, e[i].klen, lo.p, lo.n) < 0) {
             bt_ck_err(ck, "separator below parent bound");
             free(e);
             return -1;
         }
-        if (hi.n && bt_cmp(e[i].k, e[i].klen, hi.p, hi.n) >= 0) {
+        if (hi.n && vol_key_cmp(e[i].k, e[i].klen, hi.p, hi.n) >= 0) {
             bt_ck_err(ck, "separator above parent bound");
             free(e);
             return -1;
@@ -1494,12 +1483,12 @@ int btree_check_tolerant(invfs_volume *v, invfs_blkptr root, bt_stat *out,
  * unbounded, which can only be contained by an unbounded hi. */
 static int bt_range_covers(const bt_range *r, bt_key clo, bt_key chi)
 {
-    if (r->lo_n && bt_cmp(clo.p, clo.n, r->lo, r->lo_n) < 0)
+    if (r->lo_n && vol_key_cmp(clo.p, clo.n, r->lo, r->lo_n) < 0)
         return 0;
     if (r->hi_n) {
         if (!chi.n)
             return 0;
-        if (bt_cmp(chi.p, chi.n, r->hi, r->hi_n) > 0)
+        if (vol_key_cmp(chi.p, chi.n, r->hi, r->hi_n) > 0)
             return 0;
     }
     return 1;
@@ -1718,10 +1707,10 @@ int btree_quarantine_has(const bt_quarantine *q, const uint8_t *k, uint16_t klen
         return 0;
     for (j = 0; j < q->n; j++) {
         const bt_range *r = &q->range[j];
-        if (r->lo_n && bt_cmp(k, klen, r->lo, r->lo_n) < 0)
+        if (r->lo_n && vol_key_cmp(k, klen, r->lo, r->lo_n) < 0)
             continue;
         if (r->hi_n) {
-            if (bt_cmp(k, klen, r->hi, r->hi_n) >= 0)
+            if (vol_key_cmp(k, klen, r->hi, r->hi_n) >= 0)
                 continue;
         }
         return 1;
@@ -1746,12 +1735,12 @@ int btree_quarantine_overlaps(const bt_quarantine *q,
         const bt_range *r = &q->range[j];
         /* quarantine.lo < space.hi ? */
         if (hi_n) {
-            if (r->lo_n && bt_cmp(r->lo, r->lo_n, hi, hi_n) >= 0)
+            if (r->lo_n && vol_key_cmp(r->lo, r->lo_n, hi, hi_n) >= 0)
                 continue;
         }
         /* space.lo < quarantine.hi ? */
         if (r->hi_n) {
-            if (lo_n && bt_cmp(lo, lo_n, r->hi, r->hi_n) >= 0)
+            if (lo_n && vol_key_cmp(lo, lo_n, r->hi, r->hi_n) >= 0)
                 continue;
         }
         return 1;
@@ -4373,14 +4362,14 @@ static int v3_merge_base_cb(void *ctx_, bt_key k, bt_val val)
     v3_merge_scan *m = (v3_merge_scan *)ctx_;
 
     while (m->i < m->n &&
-           bt_cmp(m->ent[m->i].key, m->ent[m->i].klen, k.p, k.n) < 0) {
+           vol_key_cmp(m->ent[m->i].key, m->ent[m->i].klen, k.p, k.n) < 0) {
         int rc = v3_merge_emit(m, &m->ent[m->i]);
         m->i++;
         if (rc)
             return rc;
     }
     if (m->i < m->n &&
-        bt_cmp(m->ent[m->i].key, m->ent[m->i].klen, k.p, k.n) == 0) {
+        vol_key_cmp(m->ent[m->i].key, m->ent[m->i].klen, k.p, k.n) == 0) {
         /* equal key: the delta copy shadows the base one (frozen rule) */
         int rc = v3_merge_emit(m, &m->ent[m->i]);
         m->i++;

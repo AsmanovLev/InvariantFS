@@ -991,6 +991,59 @@ static inline void bit_set(uint8_t *b, uint64_t i) { b[i / 8] |= (uint8_t)(1u <<
 
 static inline void bit_clr(uint8_t *b, uint64_t i) { b[i / 8] &= (uint8_t)~(1u << (i % 8)); }
 
+/* Widen the dirty byte range to cover the byte holding bit i, so a flush
+ * writes just that slice instead of the whole bitmap. This was three
+ * byte-identical private copies (volume.c's bm_dirty, vol_delta.c's
+ * dl_bm_dirty, vol_metabuf.c's mb_bm_dirty); one definition, next to the
+ * bit_* helpers it is the same kind of primitive as. */
+static inline void vol_bm_dirty(invfs_volume *v, uint64_t i)
+{
+    uint64_t byte = i / 8;
+    if (v->bm_lo > v->bm_hi) { v->bm_lo = byte; v->bm_hi = byte + 1; return; }
+    if (byte < v->bm_lo) v->bm_lo = byte;
+    if (byte + 1 > v->bm_hi) v->bm_hi = byte + 1;
+}
+
+/* THE v3 key ordering. One definition, three users: the base B+-tree's
+ * search/insert/split and page-range check (vol_btree.c), the delta log's
+ * index and ordered range cursor (vol_delta.c), and the fold's deterministic
+ * pre-apply sort (vol_fold.c). Those three were byte-identical private
+ * statics; the delta/base merge is correct only while all three agree, and
+ * no compiler, linker or test could see them disagree.
+ *
+ * The order, precisely: unsigned byte-lexicographic over the whole key,
+ * shorter-first on a strict prefix. There is no type tag in the comparison
+ * itself. The namespaces sort because their leading bytes do
+ * (INVFS_V3_XATTR_KEY_PREFIX 0x03, INVFS_V3_RECIPE_KEY_PREFIX 0x04 --
+ * invarifs.h:1337,1349), and because every field after a tag is fixed-width
+ * BIG-ENDIAN, byte order over the key IS numeric order on the inode ids,
+ * name lengths and BLAKE3 digests inside it.
+ *
+ * The shorter-first tiebreak is load-bearing, not cosmetic: a value too
+ * big for one page record is stored under its canonical key with the
+ * continuations appended -- a recipe as 0x04 || addr vs
+ * 0x04 || addr || 0x00 || idx (vol_btree.c:3771), an xattr as its name key
+ * vs name || 0x00 || chunk:u16 BE (vol_btree.c:2813) -- so in both cases
+ * the canonical key is a strict PREFIX of its own continuations, and both
+ * must come out adjacent and in that order for the B+-tree's separator and
+ * range logic (vol_btree.c:1486, :1710, :1738, :1743) to bound the subtree
+ * correctly.
+ *
+ * Returns <0, 0 or >0 -- never a raw memcmp value. */
+static inline int vol_key_cmp(const uint8_t *a, uint16_t an,
+                              const uint8_t *b, uint16_t bn)
+{
+    uint16_t m = an < bn ? an : bn;
+    int c = m ? memcmp(a, b, m) : 0;
+    if (c)
+        return c < 0 ? -1 : 1;
+    if (an < bn)
+        return -1;
+    if (an > bn)
+        return 1;
+    return 0;
+}
+
 /* ---- cross-module prototypes (were file-static in volume.c) ---- */
 
 /* WP20 (the seal parity machinery lives with the write-path WP code far
@@ -1539,7 +1592,15 @@ int exer_payload_parse(const uint8_t *pay, size_t pay_len,
 /* Splice an EXER payload's glue + the decoded part buffers into dst
  * (file_size bytes). Rows come pre-validated from exer_payload_parse, so
  * the glue arithmetic cannot overrun: parts are ascending, inside the
- * file, and member_sum + glue_len == file_size. */
+ * file, and member_sum + glue_len == file_size.
+ *
+ * That validation bounds the GLUE cursor. It says nothing about how big
+ * parts[i] is: rows[i].len is what gets copied out of it, so every caller
+ * must have established parts[i] is at least rows[i].len bytes BEFORE
+ * calling. It cannot be checked here -- by the time this returns the copy
+ * has happened -- so the pairing is each caller's to prove. Both do:
+ * vol_read.c compares against the length vol_read_file() reported, and
+ * vol_exer.c's carve compares against the length it allocated. */
 void exer_splice(const uint8_t *pay, const exer_row *rows, size_t n,
                         uint8_t *const *parts, uint8_t *dst, uint64_t file_size);
 

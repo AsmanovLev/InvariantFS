@@ -389,15 +389,8 @@ static int di_put(struct delta_index *di, const uint8_t *key, uint16_t klen,
     return 0;
 }
 
-/* bm_dirty is static in volume.c; mirror its two-line range widening (the
- * same idiom vol_metabuf uses) so reservation bookkeeping stays local. */
-static void dl_bm_dirty(invfs_volume *v, uint64_t i)
-{
-    uint64_t byte = i / 8;
-    if (v->bm_lo > v->bm_hi) { v->bm_lo = byte; v->bm_hi = byte + 1; return; }
-    if (byte < v->bm_lo) v->bm_lo = byte;
-    if (byte + 1 > v->bm_hi) v->bm_hi = byte + 1;
-}
+/* Reservation bookkeeping widens the same dirty byte range everything else
+ * does: vol_bm_dirty(), in volume_internal.h. */
 
 /* Make sure a replayed segment's blocks are marked allocated. alloc_blocks
  * already did this for a segment created in this session, but the delta is
@@ -425,7 +418,7 @@ static void dl_reserve_segment(invfs_volume *v, uint64_t pba)
         bit_set(v->bitmap, b);
         if (v->meta_type_bitmap)
             bit_set(v->meta_type_bitmap, b);
-        dl_bm_dirty(v, b);
+        vol_bm_dirty(v, b);
         if (counters_live) {
             if (v->free_blocks)
                 v->free_blocks--;
@@ -684,22 +677,9 @@ int vol_delta_iter(invfs_volume *v, vol_delta_iter_cb cb, void *ctx)
     return 0;
 }
 
-/* WP-M11: byte-lexicographic compare of two keys (shorter prefix first),
- * matching btree_scan / bt_cmp, so the delta stream and the base stream
- * merge under one ordering. */
-static int dl_key_cmp(const uint8_t *a, uint16_t an,
-                      const uint8_t *b, uint16_t bn)
-{
-    uint16_t m = an < bn ? an : bn;
-    int c = m ? memcmp(a, b, m) : 0;
-    if (c)
-        return c < 0 ? -1 : 1;
-    if (an < bn)
-        return -1;
-    if (an > bn)
-        return 1;
-    return 0;
-}
+/* The ordering is vol_key_cmp() in volume_internal.h: the delta stream and
+ * the base B+-tree's stream must be the SAME total order or the fold's
+ * merge is not a merge, so there is one definition, not two that agree. */
 
 /* One collected key + its winning ref, for the ordered range cursor. */
 typedef struct {
@@ -712,7 +692,7 @@ static int dl_rentry_cmp(const void *pa, const void *pb)
 {
     const dl_rentry *a = (const dl_rentry *)pa;
     const dl_rentry *b = (const dl_rentry *)pb;
-    return dl_key_cmp(a->key, a->klen, b->key, b->klen);
+    return vol_key_cmp(a->key, a->klen, b->key, b->klen);
 }
 
 /* ------------------------------------------------------------------ */
@@ -722,7 +702,7 @@ static int dl_rentry_cmp(const void *pa, const void *pb)
  * has to offer is an open-addressed hash table whose capacity is padded
  * to a 70% load factor. Answering it from that order means walking
  * di->cap -- the CAPACITY, not the record count -- on every call. That
- * is what made one vol_v3_dirent_scan() cost 262,144 dl_key_cmp() calls
+ * is what made one vol_v3_dirent_scan() cost 262,144 vol_key_cmp() calls
  * on the 46,245-inode reproducer, and it is the multiplier under both
  * vol_v3_name_of()'s reverse walk and vol_v3_path_of() on the read path.
  *
@@ -758,7 +738,7 @@ static int di_skey_cmp(const void *pa, const void *pb)
 {
     const di_skey *a = (const di_skey *)pa;
     const di_skey *b = (const di_skey *)pb;
-    return dl_key_cmp(a->key, a->klen, b->key, b->klen);
+    return vol_key_cmp(a->key, a->klen, b->key, b->klen);
 }
 
 static void di_sorted_release(void *p)
@@ -871,7 +851,7 @@ int vol_delta_range(invfs_volume *v,
             size_t a = 0, b = sv->n;
             while (a < b) {
                 size_t mid = a + (b - a) / 2;
-                if (dl_key_cmp(sv->v[mid].key, sv->v[mid].klen,
+                if (vol_key_cmp(sv->v[mid].key, sv->v[mid].klen,
                                lo, lolen) < 0)
                     a = mid + 1;
                 else
@@ -881,7 +861,7 @@ int vol_delta_range(invfs_volume *v,
         }
         for (i = first; i < sv->n; i++) {
             const delta_slot *s;
-            if (hilen && dl_key_cmp(sv->v[i].key, sv->v[i].klen,
+            if (hilen && vol_key_cmp(sv->v[i].key, sv->v[i].klen,
                                    hi, hilen) >= 0)
                 break;
             s = &di->slot[sv->v[i].slot];
@@ -893,9 +873,9 @@ int vol_delta_range(invfs_volume *v,
             const delta_slot *s = &di->slot[i];
             if (!s->key)
                 continue;
-            if (lolen && dl_key_cmp(s->key, s->klen, lo, lolen) < 0)
+            if (lolen && vol_key_cmp(s->key, s->klen, lo, lolen) < 0)
                 continue;
-            if (hilen && dl_key_cmp(s->key, s->klen, hi, hilen) >= 0)
+            if (hilen && vol_key_cmp(s->key, s->klen, hi, hilen) >= 0)
                 continue;
             DI_EMIT(s->key, s->klen, s);
         }
