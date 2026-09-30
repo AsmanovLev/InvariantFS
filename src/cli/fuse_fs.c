@@ -2361,12 +2361,30 @@ static int invf_rename(const char *from, const char *to, unsigned int flags)
         int was_dir = vol_is_dir(g_vol, from + 1);
         if (noreplace && strcmp(from, to) != 0) {
             /* WP65: RENAME_NOREPLACE must not clobber the destination.
-             * Checked under g_io_lock so it is atomic with the move. */
+             * Checked under g_io_lock so it is atomic with the move.
+             *
+             * vol_find_rc, NOT vol_find. vol_find returns a uint64_t whose
+             * "no such name" and "the lookup failed" are both the single
+             * value 0, so the `!= 0` below read an unreadable dirent row as
+             * "the destination is absent" -- and then vol_rename
+             * overwrote a destination this flag was explicitly told to
+             * protect, and the call returned success. A name that could
+             * not be resolved is not an absent name; refuse instead.
+             * This is the same substitution the three permission paths
+             * already made (perm_check_cred, parent_default_acl and
+             * invf_chmod) when vol_find_rc was introduced. */
+            uint64_t dino = 0;
+            int frc;
             if (vol_is_dir(g_vol, to + 1)) {
                 pthread_mutex_unlock(&g_io_lock);
                 return -ENOTEMPTY;
             }
-            if (vol_find(g_vol, to + 1) != 0) {
+            frc = vol_find_rc(g_vol, to + 1, &dino);
+            if (frc < 0) {
+                pthread_mutex_unlock(&g_io_lock);
+                return -EIO;
+            }
+            if (frc == 1) {
                 pthread_mutex_unlock(&g_io_lock);
                 return -EEXIST;
             }

@@ -476,6 +476,97 @@ int main(int argc, char **argv)
         ok(rc == -EACCES, "and the real mode governs again once the fault is spent");
     }
 
+    /* ---- 9. RENAME_NOREPLACE: a lookup that could not be done is not an
+     * absent destination.
+     *
+     * The sibling shape. vol_find returns a uint64_t whose "no such name"
+     * and "the lookup failed" are both the single value 0, and the
+     * RENAME_NOREPLACE guard read `vol_find(g_vol, to + 1) != 0` -- so an
+     * unreadable DIRENT row read as "the destination is not there", the
+     * guard did not fire, and vol_rename overwrote a destination the flag
+     * was explicitly told to protect. The call reported success.
+     *
+     * v3_dirent_row_read is the xattr WP's site, reused here because it is
+     * the same seam: it injects the -1 that bt_read makes btree_search
+     * return. arm_meta_row would fail the wrong read -- the guard resolves
+     * the DESTINATION NAME, not an inode row.
+     *
+     * The count is 3 because that is where the guard's lookup falls under
+     * this seam: invf_rename reads the dirent once for vol_is_dir(from) and
+     * once for vol_is_dir(to) before it reaches vol_find_rc(to). The
+     * assertion below is -EIO rather than "not zero" precisely so that if
+     * that arithmetic ever drifts, the leg goes RED instead of quietly
+     * measuring the healthy guard. */
+    {
+        static const char payload[] = "destination content that must survive";
+        /* "src" is a file, "dst" is a file holding different bytes. */
+        if (!vol_create_file_with_meta(v, "dst", (const uint8_t *)payload,
+                                       sizeof payload - 1, &meta)) {
+            printf("  cannot create /dst\n");
+            return 2;
+        }
+        vol_create_file_with_meta(v, "src", (const uint8_t *)"s", 1, &meta);
+        vol_flush(v);
+        pthread_mutex_lock(&g_io_lock);
+        g_table_stale = 1;
+        pthread_mutex_unlock(&g_io_lock);
+
+        /* the green control: the flag is honoured on a healthy lookup */
+        rc = invf_rename("/src", "/dst", RENAME_NOREPLACE);
+        ok(rc == -EEXIST, "RENAME_NOREPLACE reports EEXIST when the "
+            "destination really is there");
+        {
+            uint64_t st_ino = 0;
+            ok(vol_find_rc(g_vol, "dst", &st_ino) == 1,
+               "and the destination is still there afterwards");
+        }
+
+        /* THE RED: the guard's own lookup fails. Before the fix this
+         * returned 0 and /dst was overwritten; after it, the rename is
+         * refused and /dst keeps its bytes. */
+        {
+            uint64_t dino = 0;
+            arm("v3_dirent_row_read:3");
+            rc = invf_rename("/src", "/dst", RENAME_NOREPLACE);
+            unsetenv("INVFS_FAULT");
+            note("        (rename returned %d = %s)\n", rc,
+                 rc == -EIO ? "EIO" : rc == 0 ? "0 -- REPORTED APPLIED"
+                                             : "another error");
+            /* -EIO, not merely "not zero", and that is on purpose. A healthy
+             * lookup of a destination that exists answers -EEXIST, and so does
+             * a fault that landed on one of the two vol_is_dir probes ahead
+             * of the guard. Accepting any non-zero here would let the count
+             * below drift and the leg go green while measuring nothing. The
+             * byte assertion underneath is the load-bearing one; this is the
+             * guard that proves the fault reached the guard at all. */
+            ok(rc == -EIO, "a RENAME_NOREPLACE whose destination lookup FAILED "
+                           "is refused with EIO, not carried out");
+            checks++;
+            pthread_mutex_lock(&g_io_lock);
+            vol_flush(g_vol);
+            (void)vol_find_rc(g_vol, "dst", &dino);
+            pthread_mutex_unlock(&g_io_lock);
+            {
+                uint8_t *got = NULL;
+                size_t glen = 0;
+                int rrc = dino ? vol_read_file(g_vol, dino, &got, &glen) : -1;
+                int same = (rrc == 0 && glen == sizeof payload - 1 &&
+                            got && memcmp(got, payload, glen) == 0);
+                ok(same, "THE DESTINATION SURVIVED: /dst still holds its own bytes");
+                if (!same)
+                    printf("        ^ THE CLOBBER: /dst is now %zu bytes "
+                           "starting \"%.*s\"\n",
+                           glen, (int)(glen > 24 ? 24 : glen), (char *)(got ? (char *)got : ""));
+                free(got);
+            }
+            {
+                uint64_t s_ino = 0;
+                ok(vol_find_rc(g_vol, "src", &s_ino) == 1,
+                   "and the source was not renamed away either");
+            }
+        }
+    }
+
     vol_close(v);
     unlink(img);
 
