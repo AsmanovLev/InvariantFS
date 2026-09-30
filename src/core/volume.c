@@ -3823,6 +3823,23 @@ static void pba_ref_free(invfs_volume *v)
     v->pba_ref = NULL;
     v->pba_ref_mask = 0;
     v->pba_ref_on = 0;
+    v->pba_ref_stale = 0;
+}
+
+/* WP pba-ref-v3-incremental: a recipe was published by a path that does not
+ * adjust the map itself (vol_v3_inode_delta_put with a new recipe_addr).
+ * The next pba_ref_ensure rebuilds from the live set before any free gate
+ * can read a count that predates that publish. */
+void pba_ref_invalidate(invfs_volume *v)
+{
+    if (v) v->pba_ref_stale = 1;
+}
+
+/* The converse: the caller kept the map exact by hand (the sweep's segment
+ * remap, dedupe's remap), so the recipe it just published is accounted for. */
+void pba_ref_validate(invfs_volume *v)
+{
+    if (v) v->pba_ref_stale = 0;
 }
 
 /* drop the map (a path that rewrote records without the apply hooks --
@@ -3982,7 +3999,19 @@ static int pba_ref_v3_walk_cb(void *ctx_, const char *path, uint64_t inode_id,
 int pba_ref_ensure(invfs_volume *v)
 {
     pba_ref_ensure_ctx c;
-    if (v->pba_ref_on) return 0;
+    /* WP pba-ref-v3-incremental: an existing map is only reused when nothing
+     * has published a recipe behind its back. v3 has no per-record birth /
+     * death hook (vol_v3_inode_delta_put is the single choke point and it
+     * used to be silent here), so a map built at vol_open over an EMPTY
+     * volume stayed "on" and authoritative-looking for the rest of the
+     * session: every inode created afterwards was invisible to it, and the
+     * first count that reached 0 on a live pba freed a block a live recipe
+     * still named. Rebuilding here costs one walk per recipe change -- the
+     * write commit already paid exactly that (vol_write.c pba_ref_reset +
+     * pba_ref_ensure) -- and a caller that forgets to invalidate can only
+     * cost a walk, never a free on a stale count. */
+    if (v->pba_ref_on && !v->pba_ref_stale) return 0;
+    pba_ref_free(v);
     v->pba_ref_mask = 1023;
     v->pba_ref = (pba_ref_ent *)calloc(v->pba_ref_mask + 1,
                                      sizeof *v->pba_ref);
@@ -3994,6 +4023,7 @@ int pba_ref_ensure(invfs_volume *v)
         vol_v3_walk(v, pba_ref_v3_walk_cb, &c);
     else
         vol_records_walk(v, pba_ref_ensure_cb, &c);
+    v->pba_ref_stale = 0;
     return 0;
 }
 

@@ -1977,36 +1977,27 @@ static int vol_sweep_one_v3(invfs_volume *v, uint64_t inode_id,
             size_t new_blen = 0;
             uint8_t new_addr[INVFS_V3_RECIPE_ADDR_LEN];
             int published = 0;
-            if (vol_ast_recipe_serialize(in.size, new_ents, (uint32_t)n_ents, &new_blob, &new_blen) == 0 &&
-                vol_v3_recipe_store(v, new_blob, new_blen, new_addr) == 0) {
-                memcpy(in.recipe_addr, new_addr, sizeof(new_addr));
-                vol_v3_inode_delta_put(v, inode_id, &in);
-                published = 1;
-                /* WP78: the same gain verdict the v2 generic floor uses
-                 * (the per-segment sum vs the file size), so a wholly
-                 * incompressible multi-segment file is stamped
-                 * UNCOMPRESSIBLE rather than GENERIC. */
-                if ((double)new_total >=
-                    (double)in.size * (1.0 - vol_min_gain_pct() / 100.0))
-                    v3_stamp_generic(v, inode_id,
-                                     INVFS_CLASS_UNCOMPRESSIBLE, 0);
-                else
-                    v3_stamp_generic(v, inode_id,
-                                     INVFS_CLASS_GENERIC, INVFS_ALGO_ZSTD);
-            }
-            free(new_blob);
-
-            if (published) {
-                /* Structure before reference, in the only direction that is
-                 * safe: the new recipe is durable, so the segments it
-                 * replaced may go. The refcount test is the pre-existing
-                 * share guard (a pba two live recipes still name is not
-                 * freed), unchanged -- only its POSITION moved. */
-                for (size_t r = 0; r < remap_n; r++) {
-                    pba_ref_modify(v, remap[r].old_pba, -1);
-                    if (pba_ref_count(v, remap[r].old_pba) == 0)
-                        vol_free_blocks(v, remap[r].old_pba, remap[r].old_plen);
-                }
+            if (vol_ast_recipe_serialize(in.size, new_ents, (uint32_t)n_ents, &new_blob, &new_blen) == 0) {
+                if (vol_v3_recipe_store(v, new_blob, new_blen, new_addr) == 0) {
+                    memcpy(in.recipe_addr, new_addr, sizeof(new_addr));
+                    vol_v3_inode_delta_put(v, inode_id, &in);
+                    published = 1;
+                    /* WP pba-ref-v3-incremental: the remap loop above moved
+                     * the counts itself (-1 per retired pba, +1 per new
+                     * one), so the map is exact again and the staleness
+                     * vol_v3_inode_delta_put just flagged does not apply. */
+                    pba_ref_validate(v);
+                    /* WP78: the same gain verdict the v2 generic floor uses
+                     * (the per-segment sum vs the file size), so a wholly
+                     * incompressible multi-segment file is stamped
+                     * UNCOMPRESSIBLE rather than GENERIC. */
+                    if ((double)new_total >=
+                        (double)in.size * (1.0 - vol_min_gain_pct() / 100.0))
+                        v3_stamp_generic(v, inode_id,
+                                         INVFS_CLASS_UNCOMPRESSIBLE, 0);
+                    else
+                        v3_stamp_generic(v, inode_id,
+                                         INVFS_CLASS_GENERIC, INVFS_ALGO_ZSTD);                }
             } else {
                 /* The pass wrote %llu blocks and could not name a single one
                  * of them. Give them all back: nothing reachable points at

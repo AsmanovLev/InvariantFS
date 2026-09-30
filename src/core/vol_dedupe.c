@@ -315,6 +315,12 @@ static int dedup_remap_file_v3(invfs_volume *v, uint64_t inode,
     memcpy(in.recipe_addr, new_addr, sizeof(new_addr));
     if (vol_v3_inode_delta_put(v, inode, &in) != 0)
         return -1;
+    /* WP pba-ref-v3-incremental: the merge loop above moved the counts
+     * itself (-1 per loser pba, +1 per canonical pba), so the map is exact
+     * and the staleness vol_v3_inode_delta_put just flagged does not
+     * apply -- clearing it here is what keeps a dedupe pass from paying a
+     * full rebuild at its next free gate. */
+    pba_ref_validate(v);
 
     /* Free loser extents if their refcount dropped to 0 */
     for (m = 0; m < nm; m++) {

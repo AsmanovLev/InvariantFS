@@ -3680,6 +3680,32 @@ int vol_v3_inode_delta_put(invfs_volume *v, uint64_t inode_id,
         return -1;                        /* a zero-nlink row is deleted */
     if (v3_ready(v) != 0)
         return -1;
+    /* WP pba-ref-v3-incremental: this is the ONLY place a v3 recipe_addr is
+     * published, and it used to be invisible to the pba reference map --
+     * the sole gate on every block free. A map built before the publish
+     * counted a recipe that no longer exists and missed the one that does,
+     * so a pba a live sharer still named could read 0 and be freed. Marking
+     * it stale here makes the next pba_ref_ensure rebuild from the live set;
+     * the two callers that adjust the map by hand (the sweep's segment
+     * remap, dedupe's remap) clear the flag with pba_ref_validate.
+     *
+     * Both directions count: a row that does not exist yet is as much a
+     * change as one whose recipe_addr differs (an inode born after the map
+     * was built is precisely the case that used to over-free), while a row
+     * that does not change its recipe -- nlink, mode, times -- leaves the
+     * map alone. A brand-new row with no content names nothing. */
+    {
+        static const uint8_t zero_addr[INVFS_V3_RECIPE_ADDR_LEN] = {0};
+        invfs_v3_inode old;
+        if (vol_v3_inode_get(v, inode_id, &old) != 1)
+            pba_ref_invalidate(v);
+        else if (memcmp(old.recipe_addr, in->recipe_addr,
+                        INVFS_V3_RECIPE_ADDR_LEN) != 0)
+            pba_ref_invalidate(v);
+        else if (memcmp(in->recipe_addr, zero_addr,
+                        INVFS_V3_RECIPE_ADDR_LEN) == 0)
+            ; /* nothing to count either way */
+    }
     v3_ino_key(inode_id, kb);
     vl = v3_ino_encode(in, vb);
     return v3_delta_put(v, kb, sizeof kb, vb, vl);

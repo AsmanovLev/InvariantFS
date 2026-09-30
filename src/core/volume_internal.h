@@ -465,6 +465,13 @@ typedef struct invfs_volume {
     pba_ref_ent *pba_ref;
     size_t pba_ref_mask, pba_ref_n;
     int pba_ref_on;
+    /* WP pba-ref-v3-incremental: set when a recipe was published on a path
+     * that does not adjust the map itself (every vol_v3_inode_delta_put
+     * that CHANGES recipe_addr). pba_ref_ensure rebuilds from the live set
+     * when it sees this, so the map can never gate a free on a count that
+     * predates an inode. Without it the count reads 0 for a pba a live
+     * recipe still names -- the wrong-free direction, not the leak one. */
+    int pba_ref_stale;
     /* WP48: set once the id->position index has been reconciled against
      * the (authoritative) name index after a stale hint was detected.
      * Record compaction/rewrites during a session can leave the id index
@@ -1535,6 +1542,15 @@ void pba_ref_modify(invfs_volume *v, uint64_t pba, int delta);
 uint32_t pba_ref_count(invfs_volume *v, uint64_t pba);
 /* drop the map; the next pba_ref_ensure rebuilds it from the live set */
 void pba_ref_reset(invfs_volume *v);
+/* WP pba-ref-v3-incremental: the v3 hook pair. vol_v3_inode_delta_put calls
+ * pba_ref_invalidate when it publishes a DIFFERENT recipe_addr (the one
+ * place every v3 recipe publish funnels through); the two callers that
+ * adjust the map themselves (the sweep's segment remap, dedupe's remap)
+ * call pba_ref_validate afterwards. pba_ref_ensure rebuilds whenever the
+ * flag is set, so a site that forgets to invalidate can only cost a walk,
+ * never a free on a count that predates an inode. */
+void pba_ref_invalidate(invfs_volume *v);
+void pba_ref_validate(invfs_volume *v);
 
 /* WP22d consistent-cut scan set: per-name version stack built by the
  * open/fsck inode-area scan. WP27: a version is "broken" when some AST

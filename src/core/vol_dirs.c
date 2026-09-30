@@ -594,6 +594,15 @@ int vol_v3_unlink(invfs_volume *v, const char *name)
         return -1;
     if (in.nlink <= 1) {
         int rc = 0;
+        /* WP pba-ref-v3-incremental: make the map exact while this row still
+         * names its recipe. vol_v3_free_recipe_blocks below subtracts exactly
+         * this recipe's count and frees what reaches 0; if the map were
+         * rebuilt AFTER the delete it would no longer contain this row's
+         * contribution, the -1 would take some OTHER live sharer's count
+         * instead, and the block would be freed out from under it. The
+         * v2 twin retires with the same ordering (vol_records.c:547 ensures
+         * before it reads the record it is about to kill). */
+        pba_ref_ensure(v);
         if (vol_v3_inode_delta_delete(v, id) != 0)
             return -1;
         /* WP-N1: targeted free of unlinked file data blocks.
@@ -690,7 +699,12 @@ int vol_v3_rename(invfs_volume *v, const char *from, const char *to)
             t_in.nlink--;
             if (vol_v3_inode_delta_put(v, t_id, &t_in) != 0)
                 return -1;
-        } else if (vol_v3_inode_delta_delete(v, t_id) != 0) {
+        } else if (pba_ref_ensure(v), vol_v3_inode_delta_delete(v, t_id) != 0) {
+            /* WP pba-ref-v3-incremental: the ensure must happen while the
+             * row still names t_in.recipe_addr -- the free below subtracts
+             * exactly that recipe's count, and a rebuild taken after the
+             * delete would not see it, so the -1 would take a live sharer's
+             * count with it (the wrong-free direction). */
             return -1;
         } else {
             /* WP-N1: targeted free of overwritten destination data blocks */
