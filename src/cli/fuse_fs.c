@@ -1855,27 +1855,66 @@ static void *fuse_sweep_thread(void *arg)
     int interval = iv ? atoi(iv) : 0;
     int tick = 0;
     /* WP26: RAW fill (blocks) at the end of the last watermark-kicked
-     * pass; the next kick waits for the fill to rise above it. While a
-     * pass's checkpoint is live its retention holds the retired blocks,
-     * so the fill cannot drop until a later pass's realize-after-arm --
-     * without this floor the daemon would chain passes (each
-     * auto-realizing and finally disarming the previous checkpoint) and
-     * destroy the rollback window it just created. 0 = no kick yet (or
-     * the fill dropped below the mark: re-armed). */
+     * pass; the next kick waits for the fill to rise above it. 0 = no kick
+     * yet (or the fill dropped below the mark: re-armed). */
     uint64_t wm_floor = 0;
+    /* WP137: the ladder OWES the volume one capture.
+     *
+     * The floor alone is a self-deadlock. A pass's rollback window is a HOLD:
+     * the capture pins every block the pre-sweep generation's recipes named
+     * (spt0_pin_take -> vol_v3_iter_inodes_at, vol_spt0.c:795), and those
+     * are exactly the blocks the pass superseded -- so the fill the floor
+     * records at the pass's exit is the fill WITH THE HOLD, not the fill the
+     * pass produced. The reclaim that actually gives them back runs at the
+     * NEXT capture (spn_reclaim, vol_spt0.c:672, called from spt0_pin_take
+     * at :814), and the floor's own re-arm rule ("fill > wm_floor") can never
+     * fire again, because the hold is what is keeping the fill up. So the
+     * pass that creates the debt is the last pass that ever runs, and the
+     * volume stays short until an operator sweeps it by hand.
+     *
+     * This flag is the discharge the floor could not express: the pass that
+     * armed a window owes the volume the one capture that collects that
+     * window's debt, and it is spent on the next pass whether or not the
+     * fill moves. It does not weaken the window -- the held blocks are still
+     * the ones invf-rollback restores onto, and they are still freed by a
+     * CAPTURE, never at the end of the pass that armed it. See the cycle
+     * note at the decision below for why it cannot re-pin forever. */
+    int wm_owed = 0;
+    /* WP137: no pass has been taken in this session yet. The one exception
+     * to the mark gate is that first pass -- a mount is an operator action,
+     * and a window inherited from the previous session is exactly what it
+     * should go and collect. Session-scoped, so it lives out here with the
+     * rest of the ladder state and not in the per-tick block below. */
+    int wm_first = 1;
     /* A checkpoint left live by a previous mount (watermark pass or CLI
      * sweep) still holds its retired blocks, so the fill reads high from
      * the start. Kicking on that stale reading would run a no-op walk
      * whose arm auto-realizes the old checkpoint and whose end disarms
      * the new one -- the rollback window would evaporate on a plain
      * remount. Seed the floor with the current fill instead: the next
-     * pass needs genuinely NEW pressure. */
+     * pass needs genuinely NEW pressure.
+     *
+     * WP137: the test for "a window is live" has to name the right one.
+     * vol_ckp_armed() is the v2 CKP0 arm, and the default format is v3,
+     * whose window is the SPT0 save point -- so this seed never fired on a
+     * v3 volume, and a v3 remount onto a volume with a live window came up
+     * with wm_floor = 0 (i.e. an immediate kick on the stale reading the
+     * comment above is trying to avoid). Ask the format that is actually
+     * mounted. The debt flag rides along: a window inherited from a previous
+     * mount holds that mount's debt exactly as a pass this session ran would,
+     * so this session owes the volume the same one discharge capture. */
     if (g_raw_watermark > 0) {
         pthread_mutex_lock(&g_io_lock);
-        if (g_vol && vol_ckp_armed(g_vol)) {
-            uint64_t rf = 0, rt = 0;
-            vol_zone_free(g_vol, &rf, &rt, NULL, NULL);
-            if (rt) wm_floor = rt - rf;
+        if (g_vol) {
+            int live = (vol_sb(g_vol)->vol_flags & VOLF_V3)
+                     ? (spt0_info(g_vol, NULL) != 0)  /* v3: the SPT0 window */
+                     : (vol_ckp_armed(g_vol) != 0);   /* v2: the CKP0 arm */
+            if (live) {
+                uint64_t rf = 0, rt = 0;
+                vol_zone_free(g_vol, &rf, &rt, NULL, NULL);
+                if (rt) wm_floor = rt - rf;
+                wm_owed = 1;
+            }
         }
         pthread_mutex_unlock(&g_io_lock);
     }
@@ -1917,23 +1956,34 @@ static void *fuse_sweep_thread(void *arg)
          * pressure ladder (the WP23 write path adapts effort; this rung
          * reclaims). Checked after each drain pass: RAW fill above
          * raw_watermark% kicks a checkpoint-armed full sweep pass. The
-         * kick rearms only on RISING fill (a new high above the last
-         * pass's exit fill); it never chains passes by itself, so the
-         * last pass's checkpoint survives as the rollback window. Default
-         * (no raw_watermark): lazy, this block is inert. */
+         * kick rearms on RISING fill (a new high above the last pass's exit
+         * fill) OR when the pass it just ran owes the volume its discharge
+         * capture (wm_owed, above). Default (no raw_watermark): lazy, this
+         * block is inert. */
         if (g_raw_watermark > 0 && !g_shutdown && !g_sweep_busy) {
-            uint64_t rf = 0, rt = 0, fill = 0, after = 0;
+            uint64_t rf = 0, rt = 0, fill = 0, after = 0, reclaimed = 0;
+            int over, fresh, window = 0;
             pthread_mutex_lock(&g_io_lock);
             if (g_vol) vol_zone_free(g_vol, &rf, &rt, NULL, NULL);
             pthread_mutex_unlock(&g_io_lock);
             if (rt) fill = rt - rf;
-            if (rt && fill * 100 <= (uint64_t)g_raw_watermark * rt) {
+            over = rt && (fill * 100 > (uint64_t)g_raw_watermark * rt);
+            if (rt && !over)
                 wm_floor = 0;               /* below the mark: re-arm */
-            } else if (rt && fill > wm_floor) {
-                fprintf(stderr, "[watermark] RAW fill %llu/%llu over %d%%: "
-                                "kicking a sweep pass\n",
-                        (unsigned long long)fill, (unsigned long long)rt,
-                        g_raw_watermark);
+            if (rt && (wm_owed ? (over || wm_first)
+                               : (over && fill > wm_floor))) {
+                fresh = !wm_owed;    /* kicked by pressure, not by a debt */
+                if (fresh)
+                    fprintf(stderr, "[watermark] RAW fill %llu/%llu over %d%%: "
+                                    "kicking a sweep pass\n",
+                            (unsigned long long)fill, (unsigned long long)rt,
+                            g_raw_watermark);
+                else
+                    fprintf(stderr, "[watermark] the pass just run armed a "
+                                    "rollback window; taking the one capture "
+                                    "that discharges it (its held blocks are "
+                                    "why the fill is still high)\n");
+                wm_first = 0;
                 g_sweep_busy = 1;
                 invf_sweep_worker(1);
                 g_sweep_busy = 0;
@@ -1942,9 +1992,63 @@ static void *fuse_sweep_thread(void *arg)
                     rf = rt = 0;
                     vol_zone_free(g_vol, &rf, &rt, NULL, NULL);
                     if (rt) after = rt - rf;
+                    /* WP137: the cycle, and why it ends.
+                     *
+                     * A pass ARMS a window and, by re-encoding, supersedes
+                     * recipes; the blocks those recipes named stay allocated
+                     * because the window the pass just armed is holding them
+                     * -- that is the rollback guarantee, and it is not
+                     * weakened here. What the pass created is DEBT, and the
+                     * only collector of debt is a CAPTURE (spn_reclaim).
+                     * So the ladder owes exactly one capture per window, and
+                     * the sequence on a volume that needs reclaiming is
+                     *
+                     *     pass 1  over the mark: arms window 1, supersedes N
+                     *     pass 2  capture reclaims N  -> fill back under the
+                     *             mark, and the mark is the first stop
+                     *     pass 3  only if the fill is STILL over the mark
+                     *             (live data): capture reclaims 0, the
+                     *             EMPTY reclaim is the second stop
+                     *
+                     * The measurement is lag-by-one and cannot be otherwise:
+                     * a pass creates debt while it re-encodes, and only the
+                     * NEXT capture can see it. That is why pass 1 is owed a
+                     * capture in advance (fresh) rather than being trusted
+                     * to have left nothing behind.
+                     *
+                     * Two stops, both measured, and neither a constant:
+                     *   - the MARK. An owed capture is not taken on a volume
+                     *     that is not over its own watermark. Without that
+                     *     gate a workload that keeps rewriting one file
+                     *     leaves a live window with something dead in it on
+                     *     every capture, every reclaim comes back non-empty,
+                     *     and the ladder would sweep an idle volume forever.
+                     *     Under the mark there is no pressure to relieve, and
+                     *     the debt waits for the next capture of any kind --
+                     *     the next episode, a USR1, or a maintenance sweep.
+                     *     wm_first is the one exception: the first pass of a
+                     *     session runs even under the mark, because a mount
+                     *     is an operator action and a window inherited from
+                     *     the previous session is exactly what it is for.
+                     *   - the EMPTY RECLAIM. Above the mark, where the fill
+                     *     is live data rather than a hold, the chain ends on
+                     *     the first capture that frees nothing: a pass that
+                     *     superseded nothing created no debt, so an empty
+                     *     reclaim proves the window it armed is holding only
+                     *     live blocks. Re-arming "whenever the fill is high"
+                     *     instead is the churn this design exists to avoid --
+                     *     every such pass re-pins and no empty reclaim is
+                     *     ever reached. */
+                    if (vol_sb(g_vol)->vol_flags & VOLF_V3) {
+                        window  = spt0_info(g_vol, NULL) != 0;
+                        reclaimed = spt0_reclaim_last(g_vol);
+                    } else {
+                        window = vol_ckp_armed(g_vol);
+                    }
                 }
-                pthread_mutex_unlock(&g_io_lock);
                 wm_floor = after;
+                wm_owed = window && (fresh || reclaimed);
+                pthread_mutex_unlock(&g_io_lock);
             }
         }
     }

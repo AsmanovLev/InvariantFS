@@ -89,4 +89,19 @@ int spt0_info(const invfs_volume *v, invfs_spt0 *out);
  * is armed, which is every volume captured before WP96. */
 int spt0_block_pinned(invfs_volume *v, uint64_t pba, uint64_t nblocks);
 
+/* WP137: blocks the LAST spt0_capture() freed by discharging the previous
+ * window's pin -- 0 when that capture had no previous window, or when none of
+ * the blocks that window held turned out to be dead.
+ *
+ * This is the lag-by-one measurement of DEBT, and it is lag-by-one by
+ * necessity: a pass CREATES debt while it re-encodes (the blocks it
+ * supersedes stay allocated because its own window holds them) and the next
+ * pass's capture is the only thing that can COLLECT it. So a caller asking
+ * "is the space I am looking at live data, or a hold?" must decide about
+ * pass N from what pass N+1's capture found. The empty result is the fixed
+ * point: a pass that superseded nothing created no debt, so an empty reclaim
+ * proves the window that pass armed is holding only live blocks and the
+ * cycle is over. That is what stops the ladder re-pinning forever. */
+uint64_t spt0_reclaim_last(const invfs_volume *v);
+
 #endif /* INVFS_VOL_SPT0_H */

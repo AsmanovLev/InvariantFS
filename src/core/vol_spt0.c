@@ -102,6 +102,9 @@ int spt0_load(invfs_volume *v)
     v->spn_nopin = getenv("INVFS_SPT0_NOPIN") ? 1 : 0;
     v->spn_armed = 0;
     v->spn_pba = v->spn_blocks = v->spn_npinned = 0;
+    /* WP137: a fresh session has discharged nothing yet, so the ladder must
+     * not read a previous session's reclaim as its own signal. */
+    v->spn_reclaim_freed = 0;
     v->spn_delta_segs = v->spn_delta_head = 0;
     spn_map_free(v);
 
@@ -767,6 +770,10 @@ static int spt0_pin_take(invfs_volume *v, uint64_t root_pba,
     v->spn_blocks = 0;
     v->spn_npinned = 0;
     v->spn_armed = 0;
+    /* WP137: every capture restarts the debt ledger. A capture with no
+     * previous window has discharged nothing, and that zero -- not a stale
+     * count from an earlier pass -- is what the ladder is told. */
+    v->spn_reclaim_freed = 0;
 
     memset(&c, 0, sizeof c);
     c.v = v;
@@ -805,6 +812,11 @@ static int spt0_pin_take(invfs_volume *v, uint64_t root_pba,
         old_map = spn_old_map_load(v, old_pba);
         if (old_map) {
             uint64_t freed = spn_reclaim(v, old_map, map);
+            /* WP137: publish the discharge. This is the ONLY place debt is
+             * ever collected, so it is also the only place the FUSE ladder
+             * can learn that the fill it is reading high is (or is no
+             * longer) a hold rather than live data. */
+            v->spn_reclaim_freed = freed;
             if (freed)
                 fprintf(stderr, "[spt0] reclaim: %llu blocks the previous "
                         "save point held are no longer referenced by any live "
@@ -1436,4 +1448,12 @@ int spt0_info(const invfs_volume *v, invfs_spt0 *out)
     if (out)
         *out = v->spt0;
     return v->savepoint_live;
+}
+
+/* WP137: the debt the last capture discharged. Read it only immediately
+ * after a capture (a capture is the only writer, and it resets the count
+ * before reclaiming, so the value never spans two passes). */
+uint64_t spt0_reclaim_last(const invfs_volume *v)
+{
+    return v ? v->spn_reclaim_freed : 0;
 }

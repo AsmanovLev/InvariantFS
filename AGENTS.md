@@ -279,8 +279,11 @@ When you `unlink()`:
    reason a delete-then-check cycle can look like a leak:
    - a **live SPT0 savepoint** (§2.6) pins every block the captured
      generation's recipes named, so the blocks stay allocated until the
-     next bare sweep drops that window and reclaims what no live recipe
-     names (`spn_reclaim`, `src/core/vol_spt0.c`);
+     next capture drops that window and reclaims what no live recipe
+     names (`spn_reclaim`, `src/core/vol_spt0.c`). On a mount with
+     `raw_watermark` set, the ladder takes that capture itself (§2.5); on
+     a mount without one, it waits for the next sweep — by hand, via
+     `kill -USR1`, or at the next maintenance window.
    - a `zone == TEXT` entry names a *shared* batch segment, which the
      targeted free deliberately skips — `tz_v3_gc` reclaims it when the
      last live member drops (`src/core/vol_ast.c:153`).
@@ -290,7 +293,8 @@ When you `unlink()`:
 **Implications:**
 
 - A volume that sees lots of writes-then-deletes can still appear to fill up
-  until a bare sweep drops the savepoint pin described in §2.4 step 2.
+  until a sweep drops the savepoint pin described in §2.4 step 2 — which, on
+  a `raw_watermark` mount, the ladder does by itself (§2.5).
 - `df` reports the free space after the bitmap flush; mid-sweep it can look
   scary, and that is normal.
 - Don't write directly to RAW without going through the volume — the format
@@ -336,8 +340,9 @@ encoding before it gets the old space back.
 > sweeps. Part of that swing is inherent, not a defect: a successful
 > container lane stores the members *and* the recipe before the old
 > segments are given up (§2.9). So this is a **one-sweep lag, not an
-> unbounded leak** — the space comes back when the next bare sweep drops
-> the savepoint pin (§2.4 step 2) — and `invf-fsck -f` does **not** recover
+> unbounded leak** — the space comes back when the next capture drops
+> the savepoint pin (§2.4 step 2), which on a `raw_watermark` mount the
+> ladder arranges by itself (§2.5) — and `invf-fsck -f` does **not** recover
 > it on v3 (measured: unchanged after a full `-f` pass).
 > `INVFS_RECLAIM_ORPHANS=1` runs the orphan collector, which is default-off.
 
@@ -370,7 +375,8 @@ setfattr -n user.invfs.sweep -v 1 /mount/point  # same, via xattr
 >
 > **The window costs the blocks it pins, for one generation.** A capture
 > pins every block the pre-sweep generation's recipes named, so those
-> blocks stay allocated while the window is live; the next bare sweep
+> blocks stay allocated while the window is live; the next **capture** —
+> from a sweep, whether the operator ran it or the watermark ladder did —
 > drops the old window and reclaims what no live recipe still names
 > (§2.4 step 2). Measured on a 12-file / 3.0 MiB text corpus plus a
 > 3.0 MiB TAR (v3 image, `invf-mkfs` + `invf-import`, then `kill -USR1`):
@@ -378,6 +384,24 @@ setfattr -n user.invfs.sweep -v 1 /mount/point  # same, via xattr
 > free-block difference against the same sweep run with no window was
 > **447 blocks** — the pin plus the mark set, and nothing else. Same order
 > of magnitude as the 478-block lane lag above: one generation, not a leak.
+>
+> **The watermark ladder repays that generation itself.** The debt is
+> created by a pass and collected by the *next* capture (`spn_reclaim`),
+> so a re-arm rule based on the fill alone can deadlock: the hold is what
+> keeps the fill up, so the pass that armed the window is the last one
+> that ever runs and the space only came back when an operator swept by
+> hand. The ladder therefore takes the one capture it owes per window, and
+> stops on two measured conditions rather than any constant: the **mark**
+> (an owed capture is not taken on a volume that is not over its own
+> watermark — under it there is no pressure to relieve, and the debt waits
+> for the next capture of any kind), and the first capture that reclaims
+> **nothing**, which proves the live window is holding only live blocks
+> because a pass that superseded nothing created no debt. That is what
+> makes the cycle finite instead of a sweep that re-pins forever
+> (`src/cli/fuse_fs.c:1963-2053`). Measured on a 1535-block RAW zone with
+> 697 blocks staged offline: **2 passes, the second reclaiming all 697,
+> RAW fill back to 0, and quiet from ~5 s on** — with no `invf-sweep`, no
+> write, no signal and no unmount in between.
 >
 > The USR1/xattr pass **fails closed**: if the capture is refused it
 > abandons the pass rather than rewrite the data with no way back. The

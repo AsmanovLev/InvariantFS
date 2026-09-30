@@ -715,6 +715,15 @@ typedef struct invfs_volume {
     uint64_t spn_npinned;
     int      spn_armed;
     int      spn_nopin;
+    /* WP137: how many blocks the LAST capture's spn_reclaim actually freed
+     * (0 when that capture had no previous window to discharge). That is the
+     * only DIRECT measurement of debt -- blocks a live window holds that no
+     * live recipe names -- because debt is CREATED during a pass and can
+     * only be OBSERVED at the next pass's capture. spt0_reclaim_last() is
+     * how the FUSE watermark ladder tells "the fill is high because the data
+     * is live" from "the fill is high because the window that pass just
+     * armed is holding the generation it replaced"; see fuse_sweep_thread. */
+    uint64_t spn_reclaim_freed;
     /* the save point's log geometry at capture (SPN0): chain length and the
      * then-head segment. The pinned-state walk needs them to place the
      * delta_end cut, and the restore re-checks that the head is still

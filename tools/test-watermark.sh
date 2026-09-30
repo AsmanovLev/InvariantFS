@@ -28,6 +28,11 @@
 #          non-zero reclaim, RAW fill back under the mark, files still
 #          bit-exact. (A separate image on purpose: it leaves IMGA's
 #          rollback chain — legs 2 and 3 — exactly as it was.)
+#   Leg 1c: the same discharge with the DAEMON ALONE — no invf-sweep, no
+#          write, no signal, no unmount between the passes. The re-arm rule
+#          used to be satisfied only by a hand-run sweep, so the volume
+#          never recovered under daemon-only care. Asserts the reclaim, the
+#          pass count, the settle (no re-pinning), and bit-exactness.
 #   Leg 2: an offline sweep with --no-realize keeps the live save point
 #          (the rollback window survives an unrelated maintenance run).
 #   Leg 3: rollback undoes the watermark sweep — the swept file is
@@ -54,10 +59,11 @@ IMGA=wp26wm-a.img    # legs 1-3: trigger, offline maintenance, rollback
 IMGB=wp26wm-b.img    # leg 4: rollback undoes the watermark sweep
 IMGC=wp26wm-c.img    # leg 5: env fallback
 IMGD=wp26wm-d.img    # leg 1b: the pin's blocks come back on the next sweep
+IMGE=wp26wm-e.img    # leg 1c: the ladder discharges its own debt, daemon-only
 MNT=$WORK/mnt
 rm -rf "$WORK" && mkdir -p "$WORK/mnt" "$WORK/ref" "$WORK/out"
 cd /dev/shm
-rm -f "$IMGA" "$IMGB" "$IMGC" "$IMGD"
+rm -f "$IMGA" "$IMGB" "$IMGC" "$IMGD" "$IMGE"
 
 fail() { echo "FAIL: $*" >&2; exit 1; }
 
@@ -118,18 +124,22 @@ cleanup() {
 trap cleanup EXIT
 
 # ---- fixtures ---------------------------------------------------------
-# fat filler: random-word text (~1.6:1 under LZ4: 256KB -> ~41 blocks)
+# fat filler: random-word text (~1.6:1 under LZ4: 256KB -> ~41 blocks).
+# 120, not 80: five legs each stage a 45% fill of their own image, and
+# leg 1c added a sixth consumer of the same pool. (It is really five images;
+# a 45% fill of the 1535-block RAW zone costs ~17 fillers, so 80 ran out
+# mid-suite.)
 python3 - "$WORK/ref" <<'PY'
 import random, sys
 d = sys.argv[1]
 rnd = random.Random(26)
 vocab = [('w%05d' % i).encode() for i in range(12000)]
-for k in range(80):
+for k in range(120):
     with open('%s/fat%02d.txt' % (d, k), 'wb') as f:
         n = 0
         while n < 262144:
             w = rnd.choice(vocab); f.write(w); f.write(b' '); n += len(w) + 1
-print("  fixtures: 80 fat fillers (256KB each)")
+print("  fixtures: 120 fat fillers (256KB each)")
 PY
 
 # ---- geometry ----------------------------------------------------------
@@ -180,9 +190,9 @@ grep -q "\[sweep\] DONE files=" "$WORK/fuse.a1.log" \
 echo "  pass 1: kicked by the daemon, save point captured (no invf-sweep ran)"
 # The pass armed a rollback window, and a window is a HOLD: a capture pins
 # every block the PRE-sweep generation's recipes named (spt0_pin_take ->
-# vol_v3_iter_inodes_at, src/core/vol_spt0.c:745) and only the NEXT
+# vol_v3_iter_inodes_at, src/core/vol_spt0.c:795) and only the NEXT
 # capture's reclaim pass gives them back (spn_reclaim,
-# src/core/vol_spt0.c:652, called from spt0_pin_take at :764 -- it frees
+# src/core/vol_spt0.c:672, called from spt0_pin_take at :814 -- it frees
 # where the old mark set has a block, the new one does not, and the bitmap
 # still has it, :676). This leg used to assert the fill dropped below the
 # 25% mark after ONE pass, which can only hold on a volume that has lost
@@ -206,7 +216,7 @@ echo "== [1b] the space comes back on the NEXT bare sweep (one-generation pin) =
 # then :1689), and that capture's spn_reclaim discharges the daemon pass's
 # debt. Asserted as a RECLAIM (a non-zero "[spt0] reclaim:" line) AND as
 # a FILL below the mark: "the log said it reclaimed" proved nothing once
-# already, which is why spn_free_counted (src/core/vol_spt0.c:639) counts
+# already, which is why spn_free_counted (src/core/vol_spt0.c:659) counts
 # the blocks the bitmap changed rather than a run length.
 #
 # Its own image on purpose. Sweeping IMGA here would work, but it would
@@ -241,6 +251,78 @@ cmp "$WORK/ref/$FIRSTD" "$WORK/out/after2.bin" \
     || fail "the reclaiming sweep cost bit-exactness on $FIRSTD"
 fsck_ok "$IMGD"
 echo "  reclaimed, and $FIRSTD is still bit-exact"
+
+echo
+echo "== [1c] the ladder repays its own debt: recovery with the DAEMON ALONE =="
+# The regression leg for the self-deadlock. Leg 1b measures the same reclaim
+# but pays for it with a MANUAL invf-sweep, which is the operator step the
+# daemon exists to remove: a pass arms a rollback window, that window HOLDS
+# the pre-sweep generation's blocks, and the fill the ladder records at the
+# pass's exit is therefore the fill WITH the hold. The re-arm rule was
+# "fill > the last pass's exit fill", so the hold made the re-arm unsatisfiable
+# and the pass that created the debt was the last pass that ever ran. Nothing
+# but the next capture reclaims (spn_reclaim, src/core/vol_spt0.c:672, called
+# from spt0_pin_take at :814), so the volume stayed short until an operator
+# swept it by hand -- the opposite of what a watermark-enabled mount promises.
+#
+# Timeline, asserted rather than narrated: from the first pass to the
+# fixed point there is NO invf-sweep, NO write, NO signal and NO unmount in
+# this leg. The daemon has to take the further passes by itself.
+$B/invf-mkfs "$IMGE" 0.0625 >/dev/null
+FIRSTE=$(printf 'fat%02d.txt' "$FATN")
+fill_to "$IMGE" "$T45"
+FILLE0=$(raw_used "$IMGE")
+mnt_up e1 "$IMGE" -- -o raw_watermark=25
+wait_log e1 "\[sweep\] DONE files=" 120
+PINNED_E=$(sed -n 's/.*save point: pinned \([0-9][0-9]*\) blocks.*/\1/p' \
+    "$WORK/fuse.e1.log" | head -1)
+[ -n "$PINNED_E" ] && [ "$PINNED_E" -gt 0 ] \
+    || fail "the first watermark pass armed no data pin, so there is no debt to discharge"
+T_START=$(date +%s)
+# The discharge is a RECLAIM, and it can only come from a capture the daemon
+# chose to make: nothing in this leg runs invf-sweep.
+wait_log e1 "reclaim: [1-9][0-9]* blocks" 120
+T_RECLAIM=$(( $(date +%s) - T_START ))
+RECLAIMED_E=$(sed -n 's/.*reclaim: \([0-9][0-9]*\) blocks.*/\1/p' \
+    "$WORK/fuse.e1.log" | head -1)
+# ... and the ladder must then STOP on its own. The termination test is an
+# EMPTY reclaim, not a pass count: a pass that superseded nothing creates no
+# debt, so an empty capture proves the live window is holding only live
+# blocks. Without that, "re-arm whenever the fill is high" would pass this
+# leg's first half by re-pinning forever. So poll until the pass count has
+# been quiet for a while -- how long the ladder needs is not what this leg is
+# pinning down, that it goes QUIET is.
+NP1=0; STABLE=0; LAST=-1; T_IDLE=0
+while [ "$T_IDLE" -lt 180 ]; do
+    sleep 2; T_IDLE=$((T_IDLE+2))
+    N=$(grep -c "\[sweep\] DONE files=" "$WORK/fuse.e1.log")
+    if [ "$N" = "$LAST" ]; then STABLE=$((STABLE+2)); else STABLE=0; fi
+    LAST=$N
+    [ "$STABLE" -ge 16 ] && break
+done
+NP1=$LAST
+NR1=$(grep -c "reclaim: " "$WORK/fuse.e1.log")
+T_TOTAL=$(( $(date +%s) - T_START ))
+[ "$STABLE" -ge 16 ] \
+    || fail "the ladder never went quiet: still taking passes after 180s idle ($NP1 done, $NR1 reclaims); it is re-pinning instead of reaching a fixed point"
+[ "$NP1" -ge 2 ] \
+    || fail "the debt was discharged inside the pass that armed it, which would trade the rollback window for a smaller number; only $NP1 pass ran"
+[ "$NR1" -ge 1 ] || fail "no reclaim line at all"
+echo "  the daemon alone: $NP1 passes, reclaim $RECLAIMED_E blocks ${T_RECLAIM}s after the first, quiet ${T_TOTAL}s after it"
+mnt_down "$IMGE"
+FILLE1=$(raw_used "$IMGE")
+[ "$FILLE1" -lt "$T25" ] \
+    || fail "daemon-only recovery left RAW fill at $FILLE1/$RAWBLOCKS, still over the 25% mark ($T25); the space did not come back"
+echo "  RAW fill $FILLE0/$RAWBLOCKS -> $FILLE1/$RAWBLOCKS, back under the mark, no invf-sweep anywhere in this leg"
+LASTE=$(printf 'fat%02d.txt' $((FATN-1)))
+$B/invf-cat "$IMGE" "$LASTE" "$WORK/out/e.bin" >/dev/null
+cmp "$WORK/ref/$LASTE" "$WORK/out/e.bin" \
+    || fail "the self-healing passes cost bit-exactness on $LASTE"
+$B/invf-cat "$IMGE" "$FIRSTE" "$WORK/out/e0.bin" >/dev/null
+cmp "$WORK/ref/$FIRSTE" "$WORK/out/e0.bin" \
+    || fail "the self-healing passes cost bit-exactness on $FIRSTE"
+fsck_ok "$IMGE"
+echo "  bit-exact after $NP1 self-triggered passes; fsck clean"
 
 echo
 echo "== [2] offline --no-realize keeps the live save point =="
@@ -291,6 +373,6 @@ $B/invf-rollback "$IMGC" >/dev/null 2>&1 || fail "env-armed rollback failed"
 fsck_ok "$IMGC"
 echo "  env fallback armed the same machinery; rollback + fsck clean"
 
-rm -f "$IMGA" "$IMGB" "$IMGC" "$IMGD"
+rm -f "$IMGA" "$IMGB" "$IMGC" "$IMGD" "$IMGE"
 echo
 echo "WATERMARK E2E: PASS"
