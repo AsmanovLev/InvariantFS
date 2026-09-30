@@ -290,6 +290,34 @@ typedef struct {
     uint8_t      recipe_addr[INVFS_V3_RECIPE_ADDR_LEN];  /* WP-M8 BLAKE3 */
 } invfs_v3_inode;
 
+/* Is this inode type's content a RAW blob that a reader hands back verbatim,
+ * as opposed to an AST recipe it parses into segments?
+ *
+ * vol_read_inode is the authority (src/core/vol_read.c): it dispatches on
+ * the inode TYPE before it looks at recipe_addr, and the branch it takes for
+ * this type is the whole contract. For a raw-blob type it returns the loaded
+ * blob untouched and never calls vol_ast_recipe_parse -- a symlink's blob is
+ * its target string, stored content-addressed like any other recipe but not
+ * an AST.
+ *
+ * Why this exists as one predicate used by BOTH the read path and the
+ * checkers: a checker that treats "recipe_addr is set" as "AST recipe" is
+ * strictly stricter than the thing it audits, and strictness invents damage.
+ * That is how every symlink on a v3 volume came to be reported as lost
+ * content and the volume called DAMAGED (the recipe audit in
+ * src/core/vol_btree.c). `checked` bookkeeping is a different matter -- a
+ * raw-blob type's blob must still LOAD, which is exactly what the read path
+ * requires, so a checker skips the parse, never the load.
+ *
+ * Listed by the read path's own branch, not by "everything that is not a
+ * directory": a type added to INVFS_ITYP_* (invarifs.h) with verbatim content
+ * belongs here the day the read path grows its branch for it, and until then
+ * both sides agree on it, which is the property that matters. */
+static inline int invfs_inode_content_is_raw_blob(uint8_t type)
+{
+    return type == INVFS_ITYP_LNK;
+}
+
 /* Read the row for inode_id. Returns 1 = present (*out filled), 0 = absent,
  * -1 = I/O / malformed row. */
 int vol_v3_inode_get(invfs_volume *v, uint64_t inode_id, invfs_v3_inode *out);

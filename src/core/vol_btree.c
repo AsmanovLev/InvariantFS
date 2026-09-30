@@ -5383,8 +5383,11 @@ static int recipe_audit_cb(invfs_volume *v, uint64_t inode_id, const char *name,
         return 0;
     if (in.type == INVFS_ITYP_DIR)
         return 0;                  /* a directory has no recipe */
-    /* The read path short-circuits exactly these two cases and hands back
-     * zero bytes, so a row that matches is not an unreadable file. */
+    /* Two more of the read path's cases (vol_read.c): an empty or
+     * address-less row hands back zero bytes, so a row that matches is not
+     * an unreadable file. NOT the whole of them -- the read path also
+     * short-circuits on the inode TYPE, which is the case this audit used
+     * to miss, below. */
     if (in.size == 0 ||
         memcmp(in.recipe_addr, zero_addr, INVFS_V3_RECIPE_ADDR_LEN) == 0)
         return 0;
@@ -5394,6 +5397,19 @@ static int recipe_audit_cb(invfs_volume *v, uint64_t inode_id, const char *name,
         invfs_ast_hdr ah;
         const invfs_ast_block_entry *ents = NULL;
         size_t n_ents = 0;
+        /* A raw-blob type is readable once it LOADS: that is the whole of
+         * what the read path demands of it (vol_read.c returns the blob
+         * verbatim, with no vol_ast_recipe_parse at all). Parsing it as an
+         * AST anyway is what made every symlink on a v3 volume report as
+         * lost content and the volume report DAMAGED -- a checker stricter
+         * than the path it audits, inventing damage on a healthy volume.
+         * Only the PARSE is skipped, never the load above, so a genuinely
+         * missing symlink blob is still caught, and an AST-typed inode
+         * still gets its CORRUPT verdict below. */
+        if (invfs_inode_content_is_raw_blob(in.type)) {
+            free(blob);
+            return 0;
+        }
         if (vol_ast_recipe_parse(blob, blen, &ah, &ents, &n_ents) == 0) {
             free(blob);
             return 0;

@@ -72,6 +72,17 @@ sudo -n true 2>/dev/null || { fail "sudo -n does not work; cannot start qemu as 
 printf 'InvariantFS rescue medium self-test payload\nsecond line: bit-exactness or nothing\n' \
     > "$W/src/invfs-selftest.txt"
 for i in 1 2 3; do head -c 65536 /dev/urandom > "$W/src/blob.$i.bin"; done
+# A symlink, because the fsck gate at the end of this file was passing for
+# the wrong reason. That gate is `invf-fsck "$VOL" | grep -q "^OK"`, and
+# the volume carried no symlink -- so it could not fire for a checker that
+# treats a symlink's content as an AST recipe. It did not, and every
+# healthy rootfs volume was reported DAMAGED: /bin, /sbin, /lib, /lib64,
+# /usr/bin/sh and the ld.so are all symlinks, and a bootable Linux root
+# filesystem cannot exist without them. A gate that cannot fail is the same
+# class of defect as the bug it missed. The target is a file that is in
+# this same payload, so the link resolves and the guest can follow it.
+LINKTGT='invfs-selftest.txt'
+ln -s "$LINKTGT" "$W/src/invfs-selftest.link"
 WANT=$(md5sum "$W/src/invfs-selftest.txt" | cut -d' ' -f1)
 note "self-test md5 $WANT"
 
@@ -85,6 +96,15 @@ bin/invf-import "$VOL" "$W/src" >"$W/import.log" 2>&1 \
 GOT=$(bin/invf-cat "$VOL" invfs-selftest.txt 2>/dev/null | md5sum | cut -d' ' -f1)
 [ "$GOT" = "$WANT" ] || { fail "host round trip already differs ($GOT); refusing to boot"; exit 1; }
 note "host round trip byte-identical before boot"
+# The symlink, byte-compared. `invf-verify --deep` is NOT the oracle here: it
+# checks readability and length only, because invfs_ast_block_entry carries
+# a pba and no content hash. cmp against the literal target string is.
+# If this is empty the import silently skipped the link and every fsck
+# assertion below is vacuous again, so it is a hard failure of its own.
+bin/invf-cat "$VOL" invfs-selftest.link >"$W/link.out" 2>/dev/null
+printf '%s' "$LINKTGT" | cmp -s - "$W/link.out" \
+    || { fail "the imported symlink's target does not read back byte-exact"; exit 1; }
+note "imported symlink target reads back byte-exact"
 
 # ---- the medium ------------------------------------------------------------
 INVFS_SELFTEST_SUM="$WANT" INVFS_INITRAMFS_OUT="$W/initramfs.cpio.gz" \
@@ -166,6 +186,13 @@ if [ "$RC" = 0 ]; then
     HOST=$(bin/invf-cat "$VOL" invfs-selftest.txt 2>/dev/null | md5sum | cut -d' ' -f1)
     [ "$HOST" = "$WANT" ] \
         || fail "the volume's bytes changed after the guest ran ($HOST)"
+    # Same for the symlink, same reason: byte compare, not --deep.
+    bin/invf-cat "$VOL" invfs-selftest.link >"$W/link.after" 2>/dev/null
+    printf '%s' "$LINKTGT" | cmp -s - "$W/link.after" \
+        || fail "the symlink target changed after the guest ran"
+    # THE gate. It now runs on a volume that HAS a symlink, so it can
+    # actually fail: before this payload gained one, an fsck that called
+    # every healthy rootfs volume DAMAGED still passed here.
     bin/invf-fsck "$VOL" 2>&1 | grep -q "^OK" \
         || fail "invf-fsck is not OK on the volume after the guest ran"
     note "host re-read byte-identical and fsck OK after the guest ran"

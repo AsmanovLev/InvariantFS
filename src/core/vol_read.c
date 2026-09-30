@@ -1330,7 +1330,12 @@ int vol_read_inode(invfs_volume *v, uint64_t inode_id, unsigned depth,
 
         if (rc != 1)
             return -1;
-        if (in.type == INVFS_ITYP_LNK) {
+        /* The TYPE decides the shape of the content, before the address is
+         * even looked at: a raw-blob type (a symlink -- the blob IS the
+         * target string) is returned verbatim and never parsed as an AST.
+         * The predicate is shared with the checkers (volume.h) precisely so
+         * that neither side can drift from the other. */
+        if (invfs_inode_content_is_raw_blob(in.type)) {
             if (in.size == 0 ||
                 memcmp(in.recipe_addr, zero_addr, INVFS_V3_RECIPE_ADDR_LEN) == 0) {
                 *out = (uint8_t *)calloc(1, 1);

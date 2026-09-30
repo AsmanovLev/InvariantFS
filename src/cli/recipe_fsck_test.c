@@ -34,6 +34,18 @@
  *   E  an empty file and a directory      -> never flagged (no false
  *                                           positives on the two shapes that
  *                                           have no recipe at all)
+ *   F  a symlink                          -> never flagged either, and its
+ *                                           target still reads back
+ *                                           byte-exact. It is content (a
+ *                                           real recipe_addr, size = the
+ *                                           target length) but it is not an
+ *                                           AST, so the audit must not parse
+ *                                           it as one. F also pins the
+ *                                           other half: the blob must still
+ *                                           LOAD, so a symlink whose
+ *                                           address is broken is still
+ *                                           reported. The fix skips the
+ *                                           parse, never the load.
  *
  * What the test does NOT establish: it plants the damage by rewriting the
  * row's address, so it covers "the address does not resolve". It does not
@@ -218,7 +230,7 @@ static int reads_back(uint64_t id)
 int main(int argc, char **argv)
 {
     const char *dir = (argc > 1) ? argv[1] : "/tmp";
-    uint64_t id_a, id_b, id_c, id_empty;
+    uint64_t id_a, id_b, id_c, id_empty, id_link;
     int err = 0;
 
     printf("recipe_fsck_test: fsck must see a lost recipe blob\n");
@@ -291,6 +303,52 @@ int main(int argc, char **argv)
     /* 3 files with content + 1 empty + 1 directory. Only the three have a
      * recipe, and only those three are counted or checked. */
     expect_clean("leg E (empty file + directory are not false positives)", 3);
+
+    /* ---- leg F: a symlink is content, and it is not an AST recipe ----
+     *
+     * A v3 symlink row carries size = target length and a REAL, non-zero
+     * recipe_addr: the target string is stored content-addressed exactly
+     * like a file's recipe (vol_v3_create_node). It is not an AST -- the
+     * read path hands the blob back verbatim and never parses it -- but
+     * this audit used to walk it into vol_ast_recipe_parse anyway and
+     * report the inode as lost content.
+     *
+     * Why that mattered: a booted Linux root filesystem cannot exist
+     * without symlinks (/bin, /sbin, /lib, /lib64, /usr/bin/sh,
+     * /usr/lib64/ld-*.so*), so invf-fsck reported DAMAGED, exit 3, on
+     * every healthy rootfs image while `invf-verify --deep` on the very
+     * same volume said "0 corrupt" and exited 0. A checker stricter than
+     * the read path invents damage.
+     *
+     * One symlink and one regular file is the whole fixture: the smallest
+     * volume that reproduces it. */
+    id_link = vol_create_symlink(g_v, "link", "usr/lib");
+    ok(id_link != 0, "leg F: a symlink is created");
+    /* 3 files with content + 1 empty + 1 dir + 1 symlink: all four
+     * addressed inodes are checked, none of them is an offender. */
+    expect_clean("leg F (a symlink is not lost content)", 4);
+
+    /* The read path's contract, asserted HERE so the audit can never be
+     * made permissive by quietly changing what the reader does. Byte
+     * comparison, not a length: invf-verify --deep only checks readability
+     * and length, because invfs_ast_block_entry carries a pba and no
+     * content hash, so it is not an oracle for this. */
+    {
+        uint8_t *d = NULL;
+        size_t n = 0;
+        int rc = vol_read_inode(g_v, id_link, 0, &d, &n);
+        ok(rc == 0 && n == 7 && d != NULL && memcmp(d, "usr/lib", 7) == 0,
+           "leg F: the target reads back byte-exact through vol_read_inode");
+        free(d);
+    }
+
+    /* And the check the fix must NOT have weakened: a raw blob still has to
+     * LOAD. Dropping the address is real damage and is still reported, by
+     * name, with the volume marked DAMAGED. Only the AST parse is skipped. */
+    ok(lose_recipe(id_link) == 0, "leg F: the symlink's blob address is broken");
+    expect_lost("leg F (the symlink's blob really is gone)", id_link, "link", 1);
+    ok(restore_recipe(id_link) == 0, "leg F: the symlink's blob is restored");
+    expect_clean("leg F (restored)", 4);
 
     vol_close(g_v);
     unlink(g_img);
