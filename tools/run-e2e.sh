@@ -88,15 +88,26 @@ slot_mark() {              # $1 suite
 }
 
 run_suite() {              # $1 suite, $2 mode
+    # The system codecpack directory is OFF, exactly as `make test` runs the
+    # unit suite (Makefile, "run the unit suite with the system codecpack
+    # directory off"). A pack installed under /usr/lib/invfs/codecpacks
+    # claims content a builtin lane would otherwise classify -- measured on
+    # this host: a 3 MB incompressible file is stamped GENERIC_GUARD (6) by
+    # the installed `rawdisk` pack where the builtin floor stamps
+    # UNCOMPRESSIBLE (1) -- so a suite that asserts a classification goes red
+    # on a provisioned host and green on a bare one, for a reason that has
+    # nothing to do with the tree under test. The suites assert the BUILTIN
+    # lanes, which is what running with the system packs off means.
     if [ "$2" = ns ]; then
         # private mount ns: fresh tmpfs on /dev/shm; mounts vanish when the
         # namespace exits (even a crashed FUSE mount). /tmp is NOT touched.
         unshare -rm --propagation private bash -c '
             mount -t tmpfs tmpfs /dev/shm 2>/dev/null || true
+            export INVFS_CODECPACKS_SYS=0
             exec bash "$1"
         ' bash "$1"
     else
-        bash "$1"
+        INVFS_CODECPACKS_SYS=0 bash "$1"
     fi
 }
 

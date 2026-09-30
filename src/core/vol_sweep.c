@@ -1457,6 +1457,15 @@ struct sweep_worker_arg {
     int zlevel;
 };
 
+/* One superseded segment and the replacement written for it, held until the
+ * new recipe is durable. See the transaction note at the remap loop. */
+typedef struct {
+    uint64_t old_pba;
+    uint64_t old_plen;
+    uint64_t new_pba;
+    uint64_t new_plen;
+} sweep_remap_t;
+
 static void *sweep_thread_worker(void *arg_) {
     struct sweep_worker_arg *a = (struct sweep_worker_arg *)arg_;
     uint8_t orig[SEGMENT_SIZE];
@@ -1736,6 +1745,14 @@ static int vol_sweep_one_v3(invfs_volume *v, uint64_t inode_id,
         invfs_ast_block_entry *new_ents = (invfs_ast_block_entry *)malloc(n_ents * sizeof(*new_ents));
         int any_swept = 0;
         uint64_t new_total = 0;   /* sum of rewritten segment csizes (+framing) */
+        /* The remap is a TRANSACTION. Every replacement segment is written
+         * before there is anywhere to name it -- vol_v3_recipe_store below is
+         * the single point at which the file's new recipe becomes reachable,
+         * and it is the one step here that can fail for want of space. So the
+         * pairs are recorded, and the superseded segment is neither
+         * un-refcounted nor freed until the publish has succeeded. */
+        sweep_remap_t *remap = NULL;
+        size_t remap_n = 0, remap_cap = 0;
 
         /* O(1) hash map for tracking remapped duplicate pbas within the file */
         size_t map_cap = 64;
@@ -1864,11 +1881,35 @@ static int vol_sweep_one_v3(invfs_volume *v, uint64_t inode_id,
                     continue;
                 }
 
-                pba_ref_modify(v, old_pba, -1);
-                pba_ref_modify(v, pba_new, +1);
-                if (pba_ref_count(v, old_pba) == 0) {
-                    vol_free_blocks(v, old_pba, old_plen);
+                /* TRANSACTION: record the pair, but do NOT touch old_pba's
+                 * refcount and do NOT free it yet. Until
+                 * vol_v3_recipe_store below succeeds the on-disk recipe
+                 * still names old_pba, so freeing it here would leave the
+                 * file reading from blocks the volume has already given
+                 * away -- and a publish that then fails for want of space
+                 * would strand every pba_new written so far as allocated,
+                 * unreferenced garbage. Both are fixed by deferring the
+                 * supersede to after the publish. */
+                if (remap_n == remap_cap) {
+                    size_t ncap = remap_cap ? remap_cap * 2 : 64;
+                    sweep_remap_t *nr = (sweep_remap_t *)realloc(
+                        remap, ncap * sizeof(*nr));
+                    if (!nr) {
+                        /* The +1 below never happened, so there is no
+                         * refcount to undo -- only the block to give back. */
+                        vol_free_blocks(v, pba_new, phys_blocks_new);
+                        continue;   /* this segment stays RAW; the rest goes on */
+                    }
+                    remap = nr;
+                    remap_cap = ncap;
                 }
+                remap[remap_n].old_pba = old_pba;
+                remap[remap_n].old_plen = old_plen;
+                remap[remap_n].new_pba = pba_new;
+                remap[remap_n].new_plen = phys_blocks_new;
+                remap_n++;
+
+                pba_ref_modify(v, pba_new, +1);
                 e->pba = pba_new;
                 e->algo = tasks[k].algo_new;
                 e->zone = INVFS_ZONE_BINARY;
@@ -1893,25 +1934,62 @@ static int vol_sweep_one_v3(invfs_volume *v, uint64_t inode_id,
             uint8_t *new_blob = NULL;
             size_t new_blen = 0;
             uint8_t new_addr[INVFS_V3_RECIPE_ADDR_LEN];
-            if (vol_ast_recipe_serialize(in.size, new_ents, (uint32_t)n_ents, &new_blob, &new_blen) == 0) {
-                if (vol_v3_recipe_store(v, new_blob, new_blen, new_addr) == 0) {
-                    memcpy(in.recipe_addr, new_addr, sizeof(new_addr));
-                    vol_v3_inode_delta_put(v, inode_id, &in);
-                    /* WP78: the same gain verdict the v2 generic floor uses
-                     * (the per-segment sum vs the file size), so a wholly
-                     * incompressible multi-segment file is stamped
-                     * UNCOMPRESSIBLE rather than GENERIC. */
-                    if ((double)new_total >=
-                        (double)in.size * (1.0 - vol_min_gain_pct() / 100.0))
-                        v3_stamp_generic(v, inode_id,
-                                         INVFS_CLASS_UNCOMPRESSIBLE, 0);
-                    else
-                        v3_stamp_generic(v, inode_id,
-                                         INVFS_CLASS_GENERIC, INVFS_ALGO_ZSTD);
+            int published = 0;
+            if (vol_ast_recipe_serialize(in.size, new_ents, (uint32_t)n_ents, &new_blob, &new_blen) == 0 &&
+                vol_v3_recipe_store(v, new_blob, new_blen, new_addr) == 0) {
+                memcpy(in.recipe_addr, new_addr, sizeof(new_addr));
+                vol_v3_inode_delta_put(v, inode_id, &in);
+                published = 1;
+                /* WP78: the same gain verdict the v2 generic floor uses
+                 * (the per-segment sum vs the file size), so a wholly
+                 * incompressible multi-segment file is stamped
+                 * UNCOMPRESSIBLE rather than GENERIC. */
+                if ((double)new_total >=
+                    (double)in.size * (1.0 - vol_min_gain_pct() / 100.0))
+                    v3_stamp_generic(v, inode_id,
+                                     INVFS_CLASS_UNCOMPRESSIBLE, 0);
+                else
+                    v3_stamp_generic(v, inode_id,
+                                     INVFS_CLASS_GENERIC, INVFS_ALGO_ZSTD);
+            }
+            free(new_blob);
+
+            if (published) {
+                /* Structure before reference, in the only direction that is
+                 * safe: the new recipe is durable, so the segments it
+                 * replaced may go. The refcount test is the pre-existing
+                 * share guard (a pba two live recipes still name is not
+                 * freed), unchanged -- only its POSITION moved. */
+                for (size_t r = 0; r < remap_n; r++) {
+                    pba_ref_modify(v, remap[r].old_pba, -1);
+                    if (pba_ref_count(v, remap[r].old_pba) == 0)
+                        vol_free_blocks(v, remap[r].old_pba, remap[r].old_plen);
                 }
-                free(new_blob);
+            } else {
+                /* The pass wrote %llu blocks and could not name a single one
+                 * of them. Give them all back: nothing reachable points at
+                 * them, the old recipe is intact, and leaving them allocated
+                 * is a permanent leak -- measured at 152.2 MiB on a 0.5 GiB
+                 * volume, unrecoverable by any later sweep or by
+                 * invf-fsck -f, which is what wedged that volume into a
+                 * user-visible ENOSPC on a write that needed 46 blocks. */
+                uint64_t gave = 0;
+                for (size_t r = 0; r < remap_n; r++) {
+                    pba_ref_modify(v, remap[r].new_pba, -1);
+                    vol_free_blocks(v, remap[r].new_pba, remap[r].new_plen);
+                    gave += remap[r].new_plen;
+                }
+                fprintf(stderr,
+                        "sweep: %s: the new recipe could not be published "
+                        "(no room for the recipe blob or its metadata); "
+                        "rolled back %llu rewritten block(s) across %llu "
+                        "segment(s) and left the file RAW\n",
+                        name ? name : "?", (unsigned long long)gave,
+                        (unsigned long long)remap_n);
+                any_swept = 0;   /* NOT swept: the caller must count it skipped */
             }
         }
+        free(remap);
         free(new_ents);
         return any_swept ? 1 : 0;
     }

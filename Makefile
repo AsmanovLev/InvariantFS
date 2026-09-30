@@ -705,6 +705,13 @@ test: $(OUT)/invf-arctest $(OUT)/invf-blkio_test $(OUT)/invf-codec_test \
 	@# The suite carries its own red control (a volume with no anchor must
 	@# never have its tail block written), so a no-op cannot pass it.
 	$(TESTENV) $(TESTISO) bash tools/test-v3-meta-anchor.sh
+	@# A v3 sweep transform that cannot publish its new recipe must ROLL BACK
+	@# the segments it wrote, not leave them allocated and unreferenced. The
+	@# suite drives the volume to the exact state (a file whose per-segment
+	@# remap runs but whose recipe publish has nowhere to go) and asserts
+	@# the free-block count does not drop across the sweep; pre-fix it drops
+	@# by 17 per orphaned segment and nothing ever gives them back.
+	$(TESTENV) $(TESTISO) bash tools/test-sweep-publish-rollback.sh
 	$(TESTENV) $(TESTISO) $(OUT)/invf-deflate_repro_test
 	$(TESTENV) $(TESTISO) $(OUT)/invf-plugin_host_test
 	$(TESTENV) $(TESTISO) $(OUT)/invf-plugin_mt_test
