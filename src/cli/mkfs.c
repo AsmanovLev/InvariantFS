@@ -753,11 +753,28 @@ int main(int argc, char **argv)
         /* ANC0: the tail anchor, written LAST so it can only ever mirror a
          * block-0 descriptor that is already durable. Its bitmap bit was
          * set above, so the block is reserved from the moment the volume
-         * exists. On a two-device volume the anchor's address is the last
-         * block of the GLOBAL space, which is dev1's last LOCAL block --
+         * exists. On a two-device volume the anchor still belongs on dev1 --
          * the device that does NOT hold the copy of block 0 this volume
-         * already has, so on a two-device volume the two are complementary
-         * rather than redundant with each other. */
+         * already has, so the two locations are complementary rather than
+         * redundant with each other -- but "the last block" is a GLOBAL
+         * address, and blkio_pwrite() on a blkio is a LOCAL one. The two
+         * are the same block only on a single-device volume: on two devices
+         * the global tail sits dev0_blocks into dev1's slice, not at the
+         * end of the file.
+         *
+         * Passing the global address straight through (which is what this
+         * did) put the descriptor dev0_blocks blocks PAST the end of the
+         * volume -- outside the bitmap, outside anything the allocator can
+         * reach, and past the end of the dev1 image, so the write silently
+         * extended the file by dev0_blocks blocks. The reserved bitmap bit
+         * above (correct, it is a global index) then reserved a *different*
+         * live interior block, and the descriptor the recovery path would
+         * one day read sat where no bit protected it. It also survived a
+         * grow: `invf-resize` moves the volume's last block onto exactly
+         * that address, and the stale fingerprint is then a REFUSAL at the
+         * new tail -- which invf-fsck reports as DAMAGED. */
+        uint64_t anchor_local = twodev ? total_blocks - 1 - dev0_blocks
+                                       : total_blocks - 1;
         {
             invfs_anc0 a;
             memset(&a, 0, sizeof a);
@@ -770,9 +787,11 @@ int main(int argc, char **argv)
             a.rt30 = rt;          /* SPT0 is zeros: no save point yet */
             a.crc32c = anchor_crc(&a);
             if (anchor_write_raw(twodev ? (void *)&io2 : (void *)&io,
-                                 total_blocks - 1, &a) != 0) {
-                fprintf(stderr, "ANC0 tail anchor write failed at block %llu\n",
-                        (unsigned long long)(total_blocks - 1));
+                                 anchor_local, &a) != 0) {
+                fprintf(stderr, "ANC0 tail anchor write failed at block %llu "
+                        "(local %llu on device %d)\n",
+                        (unsigned long long)(total_blocks - 1),
+                        (unsigned long long)anchor_local, twodev ? 1 : 0);
                 free(bitmap);
                 if (twodev) blkio_close(&io2);
                 blkio_close(&io);
