@@ -5,8 +5,13 @@
 set -e
 
 INVFS_TOOLS="${INVFS_TOOLS:-}"
-FLAGFILE="${TMPDIR:-/tmp}/wp33_evil_cjxl_flag"
-EVILEXE="${TMPDIR:-/tmp}/wp33_evil_cjxl"
+# /tmp is a tmpfs here (it is RAM). Prefer real disk; fall back only when there
+# is no /srv. See INCIDENTS.md -- a suite that stages on tmpfs reports its own
+# exhaustion as a defect in the product.
+_e2e_scratch="${INVFS_E2E_SCRATCH:-/srv/bench}"
+[ -d "$_e2e_scratch" ] || _e2e_scratch="${TMPDIR:-/tmp}"
+FLAGFILE="$_e2e_scratch/wp33_evil_cjxl_flag"
+EVILEXE="$_e2e_scratch/wp33_evil_cjxl"
 
 cleanup() {
     rm -f "$FLAGFILE" "$EVILEXE" 2>/dev/null || true

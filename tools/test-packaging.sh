@@ -39,7 +39,13 @@
 set -uo pipefail
 
 REPO="${REPO:-$(cd "$(dirname "$0")/.." && pwd)}"
-WORK="${WORK:-${TMPDIR:-/tmp}/invfs-pkgtest.$$}"
+# /tmp is a tmpfs on this host: it is RAM. Staging a packaging run there makes
+# the run fail on space and report it as "did not install a plain page" -- a
+# claim about the product that was really about the disk (see INCIDENTS.md).
+# Prefer real disk, keep the variable overridable, fall back to tmpfs only when
+# there is no /srv.
+WORK="${WORK:-${INVFS_E2E_SCRATCH:-/srv/bench}/invfs-pkgtest.$$}"
+[ -d "${WORK%%/*}" ] || WORK="${TMPDIR:-/tmp}/invfs-pkgtest.$$"
 DEB="${INVFS_PKG_DEB:-1}"
 KEEP="${KEEP:-0}"
 NFAIL=0
