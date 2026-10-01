@@ -543,6 +543,55 @@ static void leg_d_boundary_refuses_bang(void)
        "CONTROL: the ordinary name reads back byte-exact");
 }
 
+/* ---- --stage <image> ------------------------------------------------
+ *
+ * Build a LEGACY volume: one holding `a` and `a!b` as it would look after a
+ * pre-WP135 build wrote it. The e2e suite (tools/test-bang-name.sh) needs
+ * exactly this and cannot make it for itself -- after the fix no shipped tool
+ * will write a '!' name, which is the point, so the only way to put that
+ * state on a volume is to call the lane's own creator the way this file
+ * already does for LEG A.
+ *
+ * Payloads are the PAY_A / PAY_AB below and are printed on stdout, so the
+ * caller can build its expectation from them rather than duplicating the
+ * literals. exit 0 = staged, 1 = failure. */
+static int stage_legacy(const char *img)
+{
+    invfs_volume *v;
+    int err = 0;
+
+    /* NOT unlink(img) first: the caller has just run invf-mkfs, and deleting
+     * its output here makes vol_open fail with "cannot open backing store". */
+    v = vol_open(img, &err);
+    if (!v) {
+        fprintf(stderr, "bang_name_test: --stage: vol_open(%s) failed: %d\n",
+                img, err);
+        return 1;
+    }
+    /* `a` goes in as an ordinary user file -- it is the name being UNLINKED,
+     * so it must be exactly what a user would have created. */
+    if (!vol_create_file(v, "a", (const uint8_t *)PAY_A, strlen(PAY_A))) {
+        fprintf(stderr, "bang_name_test: --stage: could not create 'a'\n");
+        vol_close(v);
+        return 1;
+    }
+    /* `a!b` goes in the way a lane writes a sibling: the name is what a
+     * pre-WP135 user write would have left, and vol_create_blob_file is the
+     * only call that still writes one. */
+    if (!vol_create_blob_file(v, "a!b", (const uint8_t *)PAY_AB, strlen(PAY_AB),
+                              (uint64_t)strlen(PAY_AB), INVFS_ALGO_NONE)) {
+        fprintf(stderr, "bang_name_test: --stage: could not create 'a!b'\n");
+        vol_close(v);
+        return 1;
+    }
+    vol_flush(v);
+    vol_close(v);
+    printf("STAGED %s\n", img);
+    printf("PAY_A %s", PAY_A);
+    printf("PAY_AB %s", PAY_AB);
+    return 0;
+}
+
 /* ---- main ---------------------------------------------------------- */
 
 int main(int argc, char **argv)
@@ -554,6 +603,12 @@ int main(int argc, char **argv)
     size_t tarlen;
 
     setvbuf(stdout, NULL, _IONBF, 0);
+
+    /* --stage is a fixture generator for tools/test-bang-name.sh, not a test
+     * run: it exits before any assertion and never touches the scratch dir. */
+    if (argc == 3 && !strcmp(argv[1], "--stage"))
+        return stage_legacy(argv[2]);
+
     printf("bang_name_test: a user file named 'a!b' must survive unlink('a')"
            " -- and sibling purging must still work\n");
 
