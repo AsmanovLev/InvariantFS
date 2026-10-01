@@ -1876,4 +1876,77 @@ comparison the guard exists to make.
 **And a lesson from getting here.** The diagnostic first printed only on the
 REFUSAL path, which is the intuitive thing to instrument — and it was blind to
 exactly the question being asked. A diagnostic for "why did this happen" must
-also speak for "why did this not happen".
+also speak for "why did this not happen".---
+---
+
+## test-rawimg: a score-0 pack overwrites another lane's class stamp
+
+**Status:** established by measurement; fix NOT landed. **This entry replaces an
+earlier one of mine, which was wrong about the mechanism — see the correction at
+the bottom.**
+
+`test-rawimg.sh` expects `encap.dcm` back as `cls=6 algo=13` (a generic guard
+over RAWIMG). It comes back `cls=6 algo=4` — `algo=4` is
+`INVFS_ALGO_JXL` (`src/core/invarifs.h:64`) — so the file carries a JXL stamp.
+
+**THE BYTES ARE BIT-EXACT**, measured in the failing case itself: `invf-cat`
+returns 236 bytes, `cmp` against the source is identical, `invf-verify --deep`
+reports 1 file ok / 0 corrupt / 236 bytes verified, sha256 equal on both sides.
+**No transcode was committed** (`prc=0`, the estimate declined). This is a
+**stamping** defect: the class stamp says JXL while nothing is JXL-encoded.
+
+**NOT A SNIFF BUG, and this is where my earlier entry was wrong.** Every magic
+check in `src/codecs/codec.c` goes through `magic_at()` and is strictly
+offset-based; the pack rules (`codec.c:747-750`) are offset-pinned too. The jxl
+magic is `FFD8FF` at offset 0. In the fixture that marker sits at **offset
+212**, so **the sniff correctly refuses.** The JPEG-in-a-DICOM shape I
+described does not exist: no lane in this tree scans for a magic anywhere.
+(`src/core/vol_exer.c:119` does walk a file for embedded JPEG/PNG, but only for
+ELF/PE/Mach-O binaries, with a 16 KiB floor and a full marker-walk validation per
+candidate — and it carves members, it does not relabel a container.)
+
+**THE ACTUAL MECHANISM — `src/core/vol_sweep.c`, the WP103 "try-last" loop.**
+`:783` is `if (pc->sniff(...) != 0) continue;` — it **skips** packs that scored
+non-zero and therefore **runs** packs that scored ZERO, deliberately, as "general
+codecs", filtered only by the gain bar. So `jxl`, which never claimed this file,
+runs anyway; its estimator does not refuse; and the refusal is then stamped:
+
+    vol_stamp_class(v, inode_id, INVFS_CLASS_GENERIC_GUARD,
+                    (uint8_t)pc->algo /* 4 = JXL */, pc->generation);
+
+at `:1769-1770`, **overwriting the correct `raw_image` stamp** the earlier WP13
+loop had already written. The comment at `:1763-1767` already names "an
+encapsulated DICOM" as the intended refusal, so that half behaves as designed.
+
+**WHY IT LOOKS INTERMITTENT, and it is worth knowing before anyone chases it.**
+The trigger is `jxlest` being **resolvable**, not the code. The jxl manifest
+says the helper is resolved by NAME, and `tools/test-jxl.sh` compiles it into a
+PATH directory at test time — so **on any host where `test-jxl.sh` has run, the
+defect fires; on a checkout where `jxlest` was never built, `test-rawimg.sh`
+passes.** A 2x2 cross of worktree binary against registry binary isolated it to
+that single variable, with `diff -r src` identical between the two.
+
+**THE FIX, argued and NOT implemented.** Not a DICOM-aware sniffer: the sniff is
+already right, and DICOM-specificity would buy nothing because the bug is in the
+dispatcher. The shape is to change the **admission rule**: a score-0 retry must
+not overwrite a stamp another lane already wrote for this file on this pass —
+i.e. when `declined_algo` is set, or when the WP13 loop already stamped a claim,
+the try-last pass leaves it alone. That keeps the lane's measured purpose (a
+general codec beating the engine on BINARY) without letting a non-claiming pack
+relabel a file another lane classified.
+
+**A regression test cannot be honest yet**: `test-rawimg.sh` would have to build
+`jxlest` first, which it does not do today, so the trigger is not reproducible
+from a clean checkout. Making the fixture deterministic is part of the fix.
+
+**CORRECTION to my earlier entry.** I wrote that "a sniff for JPEG magic finds it
+inside the container and claims the whole DICOM as an image", that the fix
+belongs in the sniff, and that this was a misclassification of a container. All
+three were wrong: the sniff is offset-0 and refuses; the file is not claimed as an
+image; and it is not a live defect on a checkout that never built `jxlest`. I
+asserted the mechanism from reading a fixture generator rather than from tracing
+the dispatcher, and I also could not measure bit-exactness and said so — that
+part was right, and the measurement confirmed the guess. **The remaining risk is
+the generic one:** `vol_sweep.c:775-798` will run ANY score-0 external pack
+against ANY file, so any future pack whose input magic sits at offset 0 inside a
+container is reachable by exactly this route.

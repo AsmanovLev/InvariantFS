@@ -194,8 +194,26 @@ echo "== fixtures: mkfs.xfs + loop-mount populate =="
 MNT=$WORK/mnt
 mkdir -p "$MNT"
 UMOUNTED=0
-cleanup() { if [ "$UMOUNTED" = 0 ]; then sudo umount "$MNT" 2>/dev/null || true; fi; \
-    rm -rf "$WORK" 2>/dev/null || true; }
+# The loop device has to come off HERE, not only on the success path inside
+    # mountxfs (:253, :260). Every `exit 1` in mountxfs -- no free device, mount
+    # failed, mount not writable -- used to leave the loop attached, and this
+    # trap then `rm -rf`'d the backing image out from under it. The residue is
+    # durable and global: measured after a few runs, five `type xfs` mounts on
+    # `(deleted)` images plus six attached loops, which shrinks the pool the
+    # NEXT run needs. `mountxfs` walks /sys/block looking for a free, non-
+    # read-only device, so a suite that poisons the pool makes itself less and
+    # less able to start -- and the residue outlives the work tree, so it also
+    # outlives this suite's own cleanup.
+    #
+    # Order matters: unmount, THEN detach. `losetup -d` on a mounted loop fails.
+    cleanup() {
+      if [ "$UMOUNTED" = 0 ]; then sudo umount "$MNT" 2>/dev/null || true; fi
+      rm -rf "$WORK" 2>/dev/null || true
+      if [ -n "$LOOPDEV" ]; then
+          sudo umount "$MNT" 2>/dev/null || true
+          sudo -n losetup -d "$LOOPDEV" 2>/dev/null || true
+      fi
+    }
 trap cleanup EXIT
 
 # mkdir, retrying until the inode lands in AG0 (ino < 65536): XFS rotates
