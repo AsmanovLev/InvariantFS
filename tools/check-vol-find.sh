@@ -76,7 +76,7 @@ src/cli/sibling_retire_v3_test.c:211:ACTS
 src/cli/sib_walk_test.c:199:SKIP   # rescan: whether a name resolves IS the measurement
 src/cli/sib_walk_test.c:214:SKIP   # setup: create the bracketing directory only if absent
 src/cli/bang_name_test.c:146:SKIP   # live(): whether a name resolves IS the measurement -- the defect was a name that resolved when it should not have, so the oracle must be the lookup itself
-src/cli/bang_name_test.c:168:SKIP   # reads_exact(): an unresolvable name is a FAILED byte-exact read, not a soft miss. Asked for by exact name -- vol_read_named splits on the bang (vol_read.c:1390) and reports a miss for a file that is present and intact
+src/cli/bang_name_test.c:168:SKIP   # reads_exact(): an unresolvable name is a FAILED byte-exact read, not a soft miss -- and WP141 made the exact-name lookup the FIRST thing vol_read_named does (src/core/vol_read.c), so a present file is never shadowed by a container member. An earlier version of this comment justified itself with the opposite claim (that vol_read_named reported a miss for a file present and intact); that was measured and REFUTED -- the defect was real but a different one, and it is fixed.
 src/cli/sweep_bang_test.c:82:ACTS   # reads_exact(): same shape as bang_name_test.c:168, but a miss here decides an assertion -- it FAILS the test, which is the only thing that makes this oracle safe
 src/cli/sweep_bang_test.c:115:ACTS  # the RAW precondition: a miss yields inode 0, whose zone is not RAW, so the precondition fails loudly rather than passing on an absent file
 src/cli/sweep_bang_test.c:117:ACTS  # as :115, on the '!'-bearing name -- and this is the half that must not be able to pass vacuously
@@ -87,6 +87,10 @@ src/cli/sweep_bang_test.c:133:ACTS  # as :132, on the '!'-bearing name: the red 
 src/cli/bang_name_test.c:289:SKIP   # LEG A setup: the two inode ids are printed to show both names were distinct inodes before the unlink
 src/cli/bang_name_test.c:290:SKIP   # LEG A setup: as above, for the bang name
 src/cli/table_sync_evict_test.c:344:SKIP
+src/cli/read_named_test.c:254:SKIP   # setup: whether a name resolves IS the measurement -- same shape as bang_name_test.c:146
+src/cli/read_named_test.c:258:SKIP   # setup: THE precondition of LEG A. The exact name must resolve, or the leg is not testing shadowing but absence
+src/cli/read_named_test.c:305:SKIP   # LEG B setup: the exact name must be GONE, or the control is not a control
+src/cli/read_named_test.c:378:SKIP   # LEG E setup: whether a name resolves IS the measurement -- the whole leg is that the bang name does not perturb the plain ones
 src/cli/tz_registry_test.c:175:SKIP
 src/cli/window_test.c:176:SKIP
 src/cli/write_create_path_test.c:243:SKIP
@@ -112,8 +116,9 @@ src/core/vol_png.c:1013:SKIP
 src/core/vol_read.c:1073:SKIP
 src/core/vol_read.c:1169:SKIP
 src/core/vol_read.c:1205:ACTS
-src/core/vol_read.c:1398:SKIP
-src/core/vol_read.c:1585:ACTS
+src/core/vol_read.c:1416:ACTS   # vol_read_named: the EXACT name decides. Found -> those are the bytes returned with status 0; absent -> the name is walked as a container path instead
+src/core/vol_read.c:1423:SKIP
+src/core/vol_read.c:1610:ACTS
 src/core/vol_read.c:811:SKIP
 src/core/vol_read.c:828:SKIP
 src/core/vol_read.c:888:SKIP
