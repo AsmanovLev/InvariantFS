@@ -1652,3 +1652,49 @@ and the fixtures need to be sized so a decomposition genuinely pays, or the
 random-data fixtures should assert that the guard *declines* them — which is
 the real contract now. That is a test-design decision, not a code fix, and it
 is not done.
+---
+
+## A suite that fails on a full tmpfs reports it as a product defect
+
+**Status:** diagnosed; the fix is a house rule and is deliberately not made
+one commit at a time (§1.8).
+
+`tools/test-packaging.sh` staged every target, held every assertion and passed
+every negative control, then exited 1 on one leg:
+
+    FAIL: negctl: WITH_GZIP_MAN=0 did not install a plain page
+
+**The installer is not at fault.** Run by hand from the test's own recipe — the
+same `packaging/man/` copy, the same `install.sh`, `WITH_GZIP_MAN=0` — it exits
+0 and leaves `usr/share/man/man8/invf-mkfs.8` in place, with 96 binaries staged.
+
+The difference is where it ran:
+
+    WORK=/srv/bench/pkw  bash tools/test-packaging.sh    -> PASS, exit 0
+    WORK unset (defaults to /tmp)                        -> exit 1
+
+`tools/test-packaging.sh:42` is
+`WORK="${WORK:-${TMPDIR:-/tmp}/invfs-pkgtest.$$}"`, and **`/tmp` is a tmpfs on
+this host — it is RAM.** The installer's own output went to `$d/log` and was
+never surfaced, so a full tmpfs surfaced as a claim about the packaging.
+
+**Three other suites default their workspace the same way** and are exposed
+identically: `test-arch-install`, `test-helper-resolution`, `test-p7z-batch`.
+
+**This is the same exhaustion as two other events today**, and treating the
+three differently is what made each one expensive to diagnose:
+
+* `fatal error: error writing to /tmp/ccCW` during a 53-suite parallel run,
+  which I read as a build failure;
+* a set of e2e suites that were red in parallel and green individually, which
+  I attributed to load;
+* this one.
+
+**The rule worth writing down:** on this host a suite that stages on `/tmp` is
+staging on RAM, and "the install failed" and "there was no room" must never be
+reported as the same thing. There is already a convention for this
+(`INVFS_TOOL_SCRATCH`); the suite default predates it.
+
+Not done: the change to move the four defaults onto `/srv`. It touches four
+suites and deserves one deliberate decision rather than four opportunistic
+commits as each happens to go red.
