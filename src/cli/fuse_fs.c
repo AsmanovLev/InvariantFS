@@ -2882,10 +2882,40 @@ static int invf_chmod(const char *path, mode_t mode, struct fuse_file_info *fi)
                 return -EIO;
             }
             if (arc == 0) {
-                if (acl_chmod_masq(acl, alen, (unsigned)(mode & 0777)) > 0)
-                    vol_set_xattr(g_vol, ino, XATTR_ACL_ACCESS, acl, alen);
-                else
-                    vol_remove_xattr(g_vol, ino, XATTR_ACL_ACCESS);
+                int keep = acl_chmod_masq(acl, alen, (unsigned)(mode & 0777)) > 0;
+                int wrc = keep
+                    ? vol_set_xattr(g_vol, ino, XATTR_ACL_ACCESS, acl, alen)
+                    : vol_remove_xattr(g_vol, ino, XATTR_ACL_ACCESS);
+                /* SAME REASONING AS THE READ ABOVE, ON THE WRITE SIDE.
+                 * Discarding this return is what made a chmod a permission
+                 * WIDENING: the mode below is applied, the chmod returns 0,
+                 * and the ACL keeps its old ACL_MASK and ACL_OTHER -- and
+                 * because this mount does not negotiate default_permissions
+                 * (AGENTS.md 2.9) the ACL, not the mode, IS the permission
+                 * decision perm_check_cred makes. A chmod 0600 that only
+                 * narrows therefore left the file exactly as readable as
+                 * before while reporting success.
+                 *
+                 * The fold already runs BEFORE meta_apply_patch, which is the
+                 * load-bearing part of this fix: the mode has not been touched
+                 * yet, so refusing here leaves nothing to undo. The reverse
+                 * order is not merely worse, it is unrecoverable in the
+                 * permissive direction. (The other interleaving -- ACL written,
+                 * meta_apply_patch then fails -- is the safe one: the ACL
+                 * already encodes the new permissions and the stale mode is
+                 * only the fallback nobody takes.)
+                 *
+                 * What the caller sees: -EIO, the same answer invf_setxattr
+                 * gives for a failed xattr write, plus a line on the daemon's
+                 * stderr naming the path. NOT a silent 0, and not a partial
+                 * application. */
+                if (wrc != 0) {
+                    fprintf(stderr, "invf: chmod %s: access ACL %s failed (%d) "
+                                    "-- refusing, mode NOT changed\n",
+                            path, keep ? "write" : "remove", wrc);
+                    pthread_mutex_unlock(&g_io_lock);
+                    return -EIO;
+                }
                 vol_flush(g_vol);
             }
         }

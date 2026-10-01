@@ -51,11 +51,11 @@ src/cli/fuse_fs.c:1922:SKIP
 src/cli/fuse_fs.c:2554:SKIP
 src/cli/fuse_fs.c:2765:SKIP
 src/cli/fuse_fs.c:2810:SKIP
-src/cli/fuse_fs.c:3027:SKIP
-src/cli/fuse_fs.c:3192:SKIP
-src/cli/fuse_fs.c:3264:SKIP
-src/cli/fuse_fs.c:3299:SKIP
-src/cli/fuse_fs.c:3336:SKIP
+src/cli/fuse_fs.c:3057:SKIP
+src/cli/fuse_fs.c:3222:SKIP
+src/cli/fuse_fs.c:3294:SKIP
+src/cli/fuse_fs.c:3329:SKIP
+src/cli/fuse_fs.c:3366:SKIP
 src/cli/otrunc_test.c:568:SKIP   # calibration: the armed lookup IS the assertion
 src/cli/otrunc_test.c:572:SKIP   # calibration: the armed lookup IS the assertion
 src/cli/lane_release_test.c:242:SKIP

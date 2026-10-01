@@ -3102,6 +3102,16 @@ int vol_v3_xattr_delta_set(invfs_volume *v, uint64_t inode_id,
     if (v3_ready(v) != 0)
         return -1;
 
+    /* Test-only seam (src/core/vol_fault.h), armed by INVFS_FAULT. This is the
+     * WRITE-side twin of "v3_xattr_row_read", and it exists because a failed
+     * delta append is otherwise unreachable from a test -- you cannot exhaust
+     * the volume on purpose. It returns the same -1 every other failure here
+     * returns, so a caller that handles a failed xattr write handles this one
+     * identically; a caller that does NOT is the defect
+     * (src/cli/chmod_acl_write_test.c). */
+    if (invfs_vol_fault("v3_xattr_row_write"))
+        return -1;
+
     cap = v3_xattr_chunk_cap((uint16_t)nl);
     if (cap > V3_XATTR_CHUNK_DATA)
         cap = (uint16_t)V3_XATTR_CHUNK_DATA;
@@ -3180,6 +3190,12 @@ int vol_v3_xattr_delta_del(invfs_volume *v, uint64_t inode_id, const char *name)
         return -EINVAL;
     if (v3_ready(v) != 0)
         return -EIO;
+
+    /* Test-only seam (src/core/vol_fault.h), armed by INVFS_FAULT: the
+     * DELETE-side twin of "v3_xattr_row_write" above, for the same reason and
+     * with the same contract. */
+    if (invfs_vol_fault("v3_xattr_row_unlink"))
+        return -1;
 
     kn = v3_xattr_key(kb, inode_id, name, nl);
     ex = v3_overlay_exists(v, kb, kn);

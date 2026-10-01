@@ -135,7 +135,7 @@ CLI_MAINS := mkfs verify fsck cp cat ls stat arctest blkio_test resize \
              walk_status_test walk_status_fuse_test no_v2_surface_test \
              heat_walk_test no_ckp0_surface_test \
 table_sync_evict_test write_create_path_test tz_registry_test \
-             otrunc_test sib_walk_test
+             otrunc_test sib_walk_test chmod_acl_write_test
 $(foreach t,$(CLI_MAINS),$(eval $(call TOOL_RULE,$(t),)))
 
 # reclaim_reader_epoch_test was, for one commit, a red control that built but
@@ -825,6 +825,21 @@ test: $(TEST_BINS) $(OUT)/invf-arctest $(OUT)/invf-blkio_test $(OUT)/invf-codec_
 	@# not-all, so a table in which every position behaves alike cannot pass.
 	@# Runs under $(TESTISO): no real uid denial anywhere in it.
 	$(TESTENV) $(TESTISO) $(OUT)/invf-acl_inherit_test /tmp
+	@# WP chmod-acl-write-widens: invf_chmod folded the new mode into the
+	@# stored access ACL and then applied the mode, and the ACL WRITE's return
+	@# was discarded on both branches. A failed write therefore left the mode
+	@# changed and the ACL standing, the chmod returned 0, and -- on a mount
+	@# that does not negotiate default_permissions (AGENTS.md 2.9), where
+	@# perm_check_cred is the sole object-level permission authority -- the
+	@# file's EFFECTIVE permissions stayed at the pre-chmod values. Its own
+	@# comment refuses the chmod when the ACL READ fails, for exactly that
+	@# reason; the write is the same condition and was unchecked.
+	@# Asserts the permission DECISION (uid 1000 by hand, both directions)
+	@# and not the errno, plus the control arm a "refuse every chmod on an
+	@# ACL-bearing file" fix would fail. CALIBRATES the seam first, so a spent
+	@# countdown cannot make the red legs measure the healthy path.
+	@# Runs under $(TESTISO): no real uid denial anywhere in it.
+	$(TESTENV) $(TESTISO) $(OUT)/invf-chmod_acl_write_test /tmp
 	@# WP meta-clobber-on-unreadable-row: vol_get_meta returned -1 for BOTH
 	@# "this inode has no meta row" and "the row could not be read", and
 	@# meta_for_path answered the merged value with meta_defaults() -- 0644,
