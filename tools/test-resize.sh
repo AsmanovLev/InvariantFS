@@ -260,7 +260,12 @@ cat "$WORK/resize-a3.log"
 [ "$RC" != 0 ] || fail "shrink to 300M succeeded with live blocks in the way"
 grep -q "live block(s) at/above the new boundary" "$WORK/resize-a3.log" \
     || fail "no honest refusal message"
-grep -q "no compaction in v1" "$WORK/resize-a3.log" || fail "no guidance in refusal"
+# d286390 corrected the message this leg was matching: the compaction limit is
+# not a property of v1, there is no compaction in ANY format. Telling an
+# operator holding a v3 volume to look for a v1 workaround sends them after one
+# that does not apply. The assertion follows the text it was written for.
+grep -q "no compaction exists in any format" "$WORK/resize-a3.log" \
+    || fail "no guidance in refusal"
 echo "  refused honestly (rc=$RC)"
 # volume untouched: still 640M, mounts, reads, fsck OK
 [ "$($PROBE "$IMG" blocks)" = "163840" ] || fail "size changed despite the refusal"
