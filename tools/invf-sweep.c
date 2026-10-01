@@ -86,6 +86,7 @@
 
 #include "invarifs.h"
 #include "volume.h"
+#include "volume_internal.h"   /* WP146: vol_name_is_container_sibling */
 #include "vol_spt0.h"
 #include "vol_walk.h"   /* WP135: a walk's status is not optional */
 #include "vol_reclaim.h"
@@ -1786,14 +1787,53 @@ int main(int argc, char **argv)
                 /* a 50k-file sweep says nothing about WHICH file failed */
                 fprintf(stderr, "sweep: %s: FAILED (rc=%d)\n",
                         names[i], rc);
+            /* WP146 -- "has a '!'" is not the question; "is this one of OURS?"
+             * is. This used to be `strchr(names[i], '!')`, which asks a
+             * question about BYTES IN A NAME, and it made the sweep say
+             * something false: part_agg_add sums under the prefix up to the
+             * first '!', so N independent user files named doc!000.txt ..
+             * doc!299.txt are reported to the operator as
+             *
+             *     doc!*: 300 parts -> PPMd batch
+             *
+             * which is one container's summary line. There is no container.
+             * The lanes were RIGHT -- WP136 made them run on these files and
+             * batch them, which is correct -- and the REPORT was the thing
+             * still answering the pre-WP135 question, so the fix made the
+             * output worse rather than better: before, the file was skipped
+             * and the sweep said nothing about it; now it is transformed
+             * correctly and MIS-ATTRIBUTED. No error anywhere: this branch
+             * prints a success line and the run exits 0.
+             *
+             * THE TOOL CAN REACH THE VOLUME. `vol` is right here, and
+             * names[i] is a name read off this volume by the collect stage
+             * (:1734), not scraped out of a log -- so this is not a case
+             * where a weaker string predicate is forced on us. The core
+             * already owns the exact question (vol_name_is_container_sibling,
+             * src/core/volume_internal.h:1045) and answers it with the
+             * volume: minted suffix shape AND a live container inode. Ask it
+             * the same question rather than adding a fourth string test.
+             *
+             * NOTE WHAT THIS DOES NOT REVIVE. Both rc==9 and rc==10 are
+             * emitted from inside `if (!vol_name_is_container_sibling(v,
+             * name))` (src/core/vol_sweep.c:695 :704 and :819 :823), so on
+             * this tree a lane-minted sibling can never reach this branch and
+             * the WP14b aggregation is currently DORMANT for real members --
+             * measured: a genuine tar decomposition reports its container and
+             * each !partN by name and produces no `box.tar!*: N parts` line
+             * at all. The call stays because that is a property of the lanes,
+             * not of the report, and a lane that returns 9/10 for a member
+             * again should aggregate rather than print one line per member
+             * (WP14b: a Silesia run logged 1573 near-identical lines). What
+             * is gone is the population that was never legitimate. */
             if (rc == 9) {
-                if (strchr(names[i], '!'))
+                if (vol_name_is_container_sibling(vol, names[i]))
                     part_agg_add(names[i], 0);
                 else if (!invfs_sweep_ui_active())
                     printf("  %s: text -> PPMd batch\n", names[i]);
             }
             else if (rc == 10) {
-                if (strchr(names[i], '!'))
+                if (vol_name_is_container_sibling(vol, names[i]))
                     part_agg_add(names[i], 1);
                 else if (!invfs_sweep_ui_active())
                     printf("  %s: binary -> ZSTD batch\n", names[i]);

@@ -136,7 +136,7 @@ CLI_MAINS := mkfs verify fsck cp cat ls stat arctest blkio_test resize \
              heat_walk_test no_ckp0_surface_test \
 table_sync_evict_test write_create_path_test tz_registry_test \
 otrunc_test sib_walk_test chmod_acl_write_test bang_name_test sweep_bang_test \
-read_named_test
+read_named_test sweep_report_bang_test
 $(foreach t,$(CLI_MAINS),$(eval $(call TOOL_RULE,$(t),)))
 
 # reclaim_reader_epoch_test was, for one commit, a red control that built but
@@ -777,6 +777,19 @@ test: helpers $(TEST_BINS) $(OUT)/invf-arctest $(OUT)/invf-blkio_test $(OUT)/inv
 	@# two names end up in, not an exit code: the sweep reports "300 swept"
 	@# either way and never mentions the skip. RED on main.
 	$(TESTENV) $(TESTISO) $(OUT)/invf-sweep_bang_test /tmp
+	@# WP146: the companion to the line above, and it asserts a different
+	@# thing. WP136 made the LANES run on '!'-named user files; what it left
+	@# behind is the REPORT mis-attributing them -- N independent user files
+	@# named doc!000.txt.. are summarised by invf-sweep as `doc!*: N parts`,
+	@# i.e. one container's parts, with no container on the volume and exit 0.
+	@# A zone assertion cannot see this (those files really are batched), so
+	@# this test runs the real bin/invf-sweep as a subprocess and matches the
+	@# REPORT TEXT, with the exit code asserted separately. It also stages a
+	@# genuine tar decomposition and requires it STILL to report as one
+	@# aggregate line, so "drop the aggregation" cannot pass.
+	@# No scratch argument: the test resolves /srv/bench/scratch itself
+	@# (/tmp is RAM here -- AGENTS.md 2.8b).
+	$(TESTENV) $(TESTISO) $(OUT)/invf-sweep_report_bang_test
 	@# WP140: the name table must not evict a LIVE name because a lookup could
 	@# not be completed. Runs under $(TESTISO): fuse_get_context() is stubbed
 	@# to NULL, so every permission check takes the documented uid-0 bypass and
