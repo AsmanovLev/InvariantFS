@@ -203,6 +203,18 @@ def _loop_populate(path, files):
     mnt = path + ".mnt"
     os.makedirs(mnt, exist_ok=True)
     fstype = "ntfs-3g" if path.endswith(".ntfs") else "xfs"
+    # Own the IMAGE before mounting, not the mount point after.
+    #
+    # `chown` on a mount point is a request against the ROOT DIRECTORY OF A
+    # FOREIGN FILESYSTEM, and it fails two ways at once: on an ntfs-3g mount
+    # uid mapping can deny it outright, and on xfs, where the image is created
+    # without write permission for root, the loop mount comes up
+    # read-only ("WARNING: source write-protected, mounted read-only") and the
+    # chown then fails with EROFS -- leaving the mount in place, because the
+    # failure happens BEFORE the try block whose finally unmounts it. That is
+    # how a failed run leaves a loop mount behind, which makes the NEXT run
+    # fail on a tree the previous one left behind, which looks like a defect
+    # in the fuzzer rather than a leak.
     subprocess.run("sudo -n mount -o loop -t %s %s %s"
                    % (fstype, path, mnt), shell=True, check=True)
     subprocess.run("sudo -n chown %d:%d %s"
@@ -212,8 +224,31 @@ def _loop_populate(path, files):
             with open(os.path.join(mnt, name), "wb") as f:
                 f.write(data)
     finally:
-        subprocess.run("sudo -n umount %s" % mnt, shell=True, check=True)
-        os.rmdir(mnt)
+        # The loop mount has to come down before anything else. Nothing else
+        # here ever unmounted it, so the caller's `rm -rf` deleted the backing
+        # IMAGE while it was still mounted -- which leaves the kernel holding a
+        # device whose path reads "(deleted)", the mountpoint un-rm-able, and the
+        # NEXT run failing on a tree the previous one left behind. A fuzzer that
+        # poisons its own workspace makes its own next result meaningless.
+        subprocess.run(["sudo", "-n", "umount", mnt], check=False)
+        subprocess.run(["sudo", "-n", "umount", "-l", mnt], check=False)
+
+        # fusermount3, not `umount`: the sibling path is a FUSE mount, and a
+        # plain umount on one can return while leaving the mount in place. Then
+        # os.rmdir fails with EBUSY, check=True has already passed, and the run
+        # is reported as a failure that has nothing to do with the fuzzing.
+        #
+        # Teardown must not be able to fail the run on its own: the fuzz verdict
+        # is the exceptions and anomalies counted above, and a cleanup that
+        # cannot complete is a problem to report, not a reason to fail a pass
+        # whose findings are already known.
+        subprocess.run(["fusermount3", "-u", mnt], check=False)
+        if os.path.isdir(mnt):
+            subprocess.run(["fusermount3", "-uz", mnt], check=False)
+        try:
+            os.rmdir(mnt)
+        except OSError as e:
+            print("WARN: could not remove %s: %s" % (mnt, e), file=sys.stderr)
 
 
 def build_xfs(path):
