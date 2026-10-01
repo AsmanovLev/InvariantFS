@@ -45,7 +45,11 @@ REPO="${REPO:-$(cd "$(dirname "$0")/.." && pwd)}"
 # Prefer real disk, keep the variable overridable, fall back to tmpfs only when
 # there is no /srv.
 WORK="${WORK:-${INVFS_E2E_SCRATCH:-/srv/bench}/invfs-pkgtest.$$}"
-[ -d "${WORK%%/*}" ] || WORK="${TMPDIR:-/tmp}/invfs-pkgtest.$$"
+# Single %, not %%: `%%/*` strips the LONGEST suffix starting with a slash,
+# which for an absolute path is the WHOLE path -- so the test saw an empty
+# string, `[ -d "" ]` was always false, and this silently fell back to /tmp on
+# every run. The fix above looked applied and was not.
+[ -d "$(dirname "$WORK")" ] || WORK="${TMPDIR:-/tmp}/invfs-pkgtest.$$"
 DEB="${INVFS_PKG_DEB:-1}"
 KEEP="${KEEP:-0}"
 NFAIL=0
@@ -297,8 +301,32 @@ stage_debian() {
     # honours DEB_BUILD_OPTIONS=nocheck (there is no --no-check flag on
     # dpkg-buildpackage itself). Set INVFS_PKG_DEB_CHECKS=1 to run it anyway.
     dbo=nocheck
-    [ "${INVFS_PKG_DEB_CHECKS:-0}" = 1 ] || dbo="nocheck"
-    if ! ( cd "$b" && DEB_BUILD_OPTIONS=$dbo dpkg-buildpackage -b -uc -us ) \
+    # This `||` fires whenever the variable is NOT 1, so the assignment was
+    # unconditional and INVFS_PKG_DEB_CHECKS=1 could never enable the checks its
+    # own comment above promises. It reads as if it tested the variable.
+    [ "${INVFS_PKG_DEB_CHECKS:-0}" = 1 ] && dbo=""
+
+    # `-uc -us` unsign the PACKAGES. The .buildinfo METADATA file is signed
+    # separately and those flags do not cover it, so with no secret key in the
+    # keyring the build compiled, packaged, and then failed on its last step:
+    #
+    #   Error: Failed to resolve --signer-userid "InvariantFS Developers <...>"
+    #   dpkg-buildpackage: error: failed to sign ../invfs_0.5.0-1_amd64.buildinfo
+    #
+    # That is a missing capability reported as a packaging failure -- exactly
+    # what the loop-mounted packs in test-fuzz were doing until they were gated
+    # on the capability rather than on a binary's presence. Same fix here: probe,
+    # and say so. The suite asserts nothing about a real signature -- its
+    # `neg_missing_signature` control checks that `--pubkey` fails CLOSED when
+    # no signature is installed -- so skipping one loses no assertion.
+    signargs=""
+    if ! gpg --list-secret-keys 2>/dev/null | grep -q '^sec'; then
+        signargs="--no-sign"
+        note "debian: no secret GPG key in the keyring -- building UNSIGNED" \
+             "and skipping the buildinfo signature; this suite asserts none."
+    fi
+    if ! ( cd "$b" && DEB_BUILD_OPTIONS=$dbo \
+            dpkg-buildpackage -b -uc -us $signargs ) \
             > "$d/log" 2>&1; then
         fail "debian: dpkg-buildpackage failed"; tail -25 "$d/log"; return 1
     fi
