@@ -471,13 +471,76 @@ static void leg_c_every_real_shape_is_collected(void)
 }
 
 /* LEG D -- the boundary. Reserving '!' in user names is what makes the hole
- * unreachable for a tag that does not exist yet; assert the refusal. */
+ * unreachable for a tag that does not exist yet; assert the refusal.
+ *
+ * It asserts at the places a USER name actually enters, which is NOT
+ * vol_create_file: that function is lane-capable (the containerpack creates
+ * its '!mbrNNNN' members through it, vol_cpack.c:3622) and refusing there
+ * stops a lane from decomposing its own container -- tools/test-p7z-batch.sh
+ * caught exactly that. The boundary is:
+ *
+ *   vol_replace_file / _with_meta   FUSE create, invf-cp, invf-import
+ *   vol_create_file_with_meta       invf-import (empty nodes)
+ *   vol_create_symlink              FUSE symlink
+ *   vol_create_special              FUSE mknod, invf-import
+ *   vol_v3_mkdir                    FUSE mkdir, invf-import
+ *   vol_v3_rename                   FUSE rename (the target only)
+ *
+ * NOT a boundary, and this test pins why: vol_create_file and
+ * vol_write_begin are LANE-CAPABLE (vol_cpack.c:3622 creates a
+ * '!mbrNNNN-<san>' member through them). Refusing there stops the
+ * containerpack from decomposing its own container -- measured by
+ * tools/test-p7z-batch.sh. And vol_write_begin is not even a create: both
+ * FUSE callers act on a name that already exists, and writing a legacy '!'
+ * name must keep working so its data can be copied off the volume.
+ *
+ * and, outside the core, invf-cp's own site (cp.c) and the six FUSE ops
+ * (fuse_reserved_name, fuse_fs.c) -- those two cannot be reached from a
+ * library test, and the e2e suite covers them through the mount. */
 static void leg_d_boundary_refuses_bang(void)
 {
-    info("LEG D: a user-supplied name containing '!' is refused at create");
-    ok(vol_create_file(g_v, "bang!name", (const uint8_t *)"X", 1) == 0,
-       "vol_create_file(\"bang!name\") is REFUSED");
-    ok(!live("bang!name"), "'bang!name' is not on the volume");
+    static const char *const N = "bang!name";
+    info("LEG D: a user-supplied name containing '!' is refused at every "
+         "user-name boundary");
+
+    ok(vol_replace_file(g_v, N, (const uint8_t *)"X", 1) == 0,
+       "vol_replace_file(\"%s\") is REFUSED", N);
+    ok(!live(N), "'%s' is not on the volume after vol_replace_file", N);
+
+    ok(vol_replace_file_with_meta(g_v, N, NULL, 0, NULL) == 0,
+       "vol_replace_file_with_meta(\"%s\") is REFUSED", N);
+    ok(!live(N), "'%s' is not on the volume after vol_replace_file_with_meta",
+       N);
+
+    ok(vol_create_file_with_meta(g_v, N, NULL, 0, NULL) == 0,
+       "vol_create_file_with_meta(\"%s\") is REFUSED", N);
+    ok(!live(N), "'%s' is not on the volume after vol_create_file_with_meta",
+       N);
+
+    ok(vol_create_symlink(g_v, "bang!link", "/target") == 0,
+       "vol_create_symlink(\"%s\") is REFUSED", N);
+    ok(!live("bang!link"), "'bang!link' is not on the volume");
+
+    ok(vol_create_special(g_v, "bang!fifo", INVFS_ITYP_FIFO, 0644, 0) == 0,
+       "vol_create_special(\"bang!fifo\") is REFUSED");
+    ok(!live("bang!fifo"), "'bang!fifo' is not on the volume");
+
+    ok(vol_mkdir(g_v, "bang!dir") == 0, "vol_mkdir(\"bang!dir\") is REFUSED");
+    ok(!live("bang!dir"), "'bang!dir' is not on the volume");
+
+    /* rename: the TARGET is refused; the SOURCE must stay usable so a file
+     * already on the reserved namespace can be moved OFF it. */
+    put("plain-src", "PAYLOAD-PLAIN\n");
+    ok(vol_v3_rename(g_v, "plain-src", N) != 0,
+       "vol_v3_rename(\"plain-src\", \"%s\") is REFUSED", N);
+    ok(live("plain-src"), "the rename SOURCE is untouched");
+    ok(!live(N), "'%s' was not created by the refused rename", N);
+
+    /* the leg is not vacuous: an ordinary name still works at the same site */
+    ok(vol_replace_file(g_v, "plain-dst", (const uint8_t *)"Y", 1) != 0,
+       "CONTROL: vol_replace_file(\"plain-dst\") still succeeds");
+    ok(reads_exact("plain-dst", "Y"),
+       "CONTROL: the ordinary name reads back byte-exact");
 }
 
 /* ---- main ---------------------------------------------------------- */

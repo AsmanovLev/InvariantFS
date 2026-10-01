@@ -1354,9 +1354,35 @@ static int invf_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
     return 0;
 }
 
+/* WP135: '!' is reserved -- it separates a container from the internal
+ * sibling inodes its payload lives in ("x.tar" -> "x.tar!part0"). Core refuses
+ * such a name where it is introduced (name_is_internal_ns,
+ * src/core/volume_internal.h: vol_v3_create_node, vol_v3_mkdir,
+ * vol_v3_rename, vol_v3_hardlink, vol_write_begin), and that check is what
+ * makes the hole unreachable. This is not that check -- it is the ERRNO.
+ *
+ * Every core create returns 0 for every kind of failure, and these callers
+ * turn a 0 into -ENOSPC (invf_create below is the clearest case: "create
+ * empty file immediately so getattr-after-create works"). So without this the
+ * operator sees "No space left on device" on a volume with gigabytes free and
+ * goes looking for a full disk. EINVAL is the honest errno for a name the
+ * filesystem will not accept, and the message says which byte and why, so the
+ * remedy is in the error rather than in a source file. */
+static int fuse_reserved_name(const char *path)
+{
+    if (!path || !strchr(path, '!'))
+        return 0;
+    fprintf(stderr,
+            "invf: '!' is reserved: it separates a container from its "
+            "internal siblings ('x.tar' -> 'x.tar!part0'), so '%s' is refused. "
+            "Rename it without the '!'.\n", path);
+    return 1;
+}
+
 static int invf_mkdir(const char *path, mode_t mode)
 {
     int rc;
+    if (fuse_reserved_name(path)) return -EINVAL;
     struct fuse_context *ctx = fuse_get_context();
     /* inheritance: the parent's default ACL (if any) becomes the child's
      * access ACL masked by the create mode, and the child's own default */
@@ -1814,7 +1840,9 @@ static int invf_open(const char *path, struct fuse_file_info *fi)
 
 static int invf_create(const char *path, mode_t mode, struct fuse_file_info *fi)
 {
-    int temp = is_temp_path(path);
+    int temp;
+    if (fuse_reserved_name(path)) return -EINVAL;
+    temp = is_temp_path(path);
     wctx *c;
     int acldeny = 0;          /* the inherited ACL could not be attached */
     struct fuse_context *ctx = fuse_get_context();
@@ -2615,6 +2643,9 @@ static int invf_rename(const char *from, const char *to, unsigned int flags)
     struct acreds c;
     if (flags & ~(unsigned int)RENAME_NOREPLACE)
         return -EOPNOTSUPP;   /* RENAME_EXCHANGE / RENAME_WHITEOUT */
+    /* WP135: only `to` introduces a name; `from` must stay usable so a file
+     * already on the reserved namespace can be moved OFF it. */
+    if (fuse_reserved_name(to)) return -EINVAL;
     if (flags & RENAME_NOREPLACE) noreplace = 1;
     acreds_get(&c);
     if (!c.bypass) {
@@ -2974,6 +3005,7 @@ static int invf_symlink(const char *target, const char *linkpath)
 {
     uint64_t nid;
     int rc;
+    if (fuse_reserved_name(linkpath)) return -EINVAL;
     if (!vol_write_enabled(g_vol))
         return -EROFS;
     if (strlen(target) >= INVFS_META_TARGET_MAX)
@@ -3027,6 +3059,7 @@ static int invf_link(const char *from, const char *dest)
 {
     int rc;
     struct acreds c;
+    if (fuse_reserved_name(dest)) return -EINVAL;
     if (!vol_write_enabled(g_vol))
         return -EROFS;
     acreds_get(&c);
@@ -3074,13 +3107,15 @@ static int invf_link(const char *from, const char *dest)
 }
 
 static int invf_mknod(const char *path, mode_t mode, dev_t rdev)
-{    uint8_t typ;
+{
+    uint8_t typ;
     uint64_t nid;
     struct fuse_context *ctx = fuse_get_context();
     uint8_t aacl[INVFS_META_XATTR_MAX];
     size_t aalen = 0, dlen = 0;
     mode_t cmode = mode & 07777;
     int rc;
+    if (fuse_reserved_name(path)) return -EINVAL;
     if (!vol_write_enabled(g_vol))
         return -EROFS;
     switch (mode & S_IFMT) {

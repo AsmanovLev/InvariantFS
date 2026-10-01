@@ -12,7 +12,25 @@ uint64_t vol_create_file(invfs_volume *v, const char *name,
                         const uint8_t *data, size_t len)
 {
     /* WP-M6: a v3 node is a dirent + inode row; content goes through the
-     * WP-M9 session path (WP-M21b glue: vol_v3_write_bulk). */
+     * WP-M9 session path (WP-M21b glue: vol_v3_write_bulk).
+     *
+     * WP135: THIS IS A LANE-CAPABLE FUNCTION, NOT A USER-NAME BOUNDARY, and
+     * it must not become one. The containerpack lane creates its member
+     * inodes through it, under names it mints itself ("x.zip!mbr0000-a.txt",
+     * vol_cpack.c:3622 :3741 :3843 :3956), so a '!' refusal here stops the
+     * lane from decomposing its own container -- measured by
+     * tools/test-p7z-batch.sh, which reported "0 member siblings" the first
+     * time the check was tried in this function.
+     *
+     * THE SHARP EDGE THAT LEAVES, STATED PLAINLY: vol_v3_write_bulk creates
+     * the node (vol_write.c:1042) BEFORE it calls vol_write_begin, and
+     * vol_write_begin is where the reserved-byte refusal lives. So calling
+     * THIS function with a '!' name returns 0 and leaves an EMPTY inode under
+     * that name. No shipped user path can reach it -- FUSE refuses at its own
+     * ops, invf-cp checks at cp.c, invf-import at vol_create_file_with_meta,
+     * and vol_replace_file checks here in spirit (the line below's sibling) --
+     * but a caller that skips those checks leaves a zero-length name rather
+     * than nothing. */
     return (data && len) ? vol_v3_write_bulk(v, name, data, len, NULL)
                          : vol_v3_create_node(v, name, NULL);
 }
@@ -26,7 +44,15 @@ uint64_t vol_create_file_with_meta(invfs_volume *v, const char *name,
                                    const invfs_meta_pub *meta)
 {
     /* WP-M6: a v3 node is a dirent + inode row; content goes through the
-     * WP-M9 session path (WP-M21b glue: vol_v3_write_bulk). */
+     * WP-M9 session path (WP-M21b glue: vol_v3_write_bulk).
+     *
+     * WP135: this IS a user-name boundary -- invf-import is its only caller
+     * (tools/invf-import.c:244 :313) -- so '!' is refused here. Note that
+     * vol_create_file, which sits directly above and is nearly the same
+     * function, deliberately has NO check: the containerpack lane creates its
+     * '!mbrNNNN' members through it (vol_cpack.c:3622). invf-cp's call to
+     * vol_create_file checks at its own site instead. */
+    if (name_refused_internal_ns(name)) return 0;
     return (data && len) ? vol_v3_write_bulk(v, name, data, len, meta)
                          : vol_v3_create_node(v, name, meta);
 }
@@ -577,6 +603,7 @@ uint64_t vol_create_symlink(invfs_volume *v, const char *name,
     size_t tl;
     if (!v || !name || !target) return 0;
     if (name_too_long(name)) return 0;
+    if (name_refused_internal_ns(name)) return 0;   /* WP135 */
     tl = strlen(target);
     if (tl == 0 || tl >= INVFS_META_TARGET_MAX) return 0;
     meta_pub_from_hdr_defaults(&m, INVFS_ITYP_LNK);
@@ -594,6 +621,7 @@ uint64_t vol_create_special(invfs_volume *v, const char *name,
     invfs_meta_pub m;
     if (!v || !name) return 0;
     if (name_too_long(name)) return 0;
+    if (name_refused_internal_ns(name)) return 0;   /* WP135 */
     if (type != INVFS_ITYP_FIFO && type != INVFS_ITYP_SOCK &&
         type != INVFS_ITYP_CHR && type != INVFS_ITYP_BLK)
         return 0;

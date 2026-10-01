@@ -270,7 +270,20 @@ int vol_v3_path_list_dir(invfs_volume *v, const char *dir,
 /* Create (or replace as an empty node) `name`, putting the inode row before
  * the dirent (a dirent must never point at a missing inode). `meta` may be
  * NULL (REG defaults). Returns the inode id, 0 on failure. Data payloads are
- * WP-M8 (recipes), so a v3 node created here is always empty. */
+ * WP-M8 (recipes), so a v3 node created here is always empty.
+ *
+ * WP135: NO '!' CHECK HERE, DELIBERATELY. This is not the user-name boundary:
+ * the containerpack lane creates its member inodes through vol_create_file
+ * -> here, under names it mints itself ("x.zip!mbr0000-a.txt",
+ * vol_cpack.c:3622 :3741 :3843 :3956). A check at this level refuses the
+ * lane's own children and the container never decomposes -- measured by
+ * tools/test-p7z-batch.sh, which went red with "0 member siblings" the first
+ * time it was tried here. The reservation belongs at the places a USER name
+ * enters: vol_replace_file, vol_replace_file_with_meta,
+ * vol_create_file_with_meta, vol_create_symlink, vol_create_special,
+ * vol_v3_mkdir, vol_v3_rename, vol_v3_hardlink, vol_write_begin, plus
+ * invf-cp's vol_create_file call and the six FUSE name-introducing ops
+ * (fuse_fs.c, fuse_reserved_name). */
 uint64_t vol_v3_create_node(invfs_volume *v, const char *name,
                             const invfs_meta_pub *meta)
 {
@@ -283,16 +296,6 @@ uint64_t vol_v3_create_node(invfs_volume *v, const char *name,
     if (!v)
         return 0;
     if (v->sb.vol_flags & VOLF_READONLY)
-        return 0;
-    /* WP135: '!' is reserved -- it separates a container's name from the
-     * sibling inodes its payload lives in. See name_is_internal_ns in
-     * volume_internal.h. This is the choke point every USER-named create
-     * passes through (vol_create_file, vol_create_file_with_meta,
-     * vol_create_symlink, vol_create_special, the v3 write commit, and so
-     * invf-import and invf-cp); the lanes do NOT come here -- they mint
-     * their '!' siblings through vol_create_blob_file, which builds the
-     * inode row itself -- so this refuses only user names. */
-    if (name_refused_internal_ns(name))
         return 0;
     if (v3_split_path(name, parent, sizeof parent, leaf, sizeof leaf) != 0)
         return 0;
@@ -1009,7 +1012,11 @@ uint64_t vol_replace_file(invfs_volume *v, const char *name,
                         const uint8_t *data, size_t len)
 {
     /* WP-M6: a v3 namespace node is the dirent tree + inode row. Content
-     * goes through the WP-M9 session path (WP-M21b glue). */
+     * goes through the WP-M9 session path (WP-M21b glue).
+     *
+     * WP135: a USER-name boundary -- FUSE's invf_create (fuse_fs.c:1892) and
+     * invf-cp (cp.c:100) are the callers -- so '!' is refused here. */
+    if (name_refused_internal_ns(name)) return 0;
     return (data && len) ? vol_v3_write_bulk(v, name, data, len, NULL)
                          : vol_v3_create_node(v, name, NULL);
 }
@@ -1019,6 +1026,9 @@ uint64_t vol_replace_file_with_meta(invfs_volume *v, const char *name,
                                     const uint8_t *data, size_t len,
                                     const invfs_meta_pub *meta)
 {
+    /* WP135: invf-import is the only caller (tools/invf-import.c:242), so
+     * this is a user-name boundary; see vol_replace_file above. */
+    if (name_refused_internal_ns(name)) return 0;
     return (data && len) ? vol_v3_write_bulk(v, name, data, len, meta)
                          : vol_v3_create_node(v, name, meta);
 }

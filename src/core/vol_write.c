@@ -66,12 +66,24 @@ uint64_t vol_write_begin(invfs_volume *v, const char *name, int truncate,
     if (!out) return 0;
     *out = NULL;
     if (!v || !name || name_too_long(name)) return 0;
-    /* WP135: refuse the reserved '!' here as well as at vol_v3_create_node,
-     * because this is where a FUSE open(O_CREAT) and a write actually enter.
-     * create_node is the choke point, but it runs at COMMIT -- by then this
-     * session has already burned an inode id (volume_internal.h:297) and is
-     * on v->wsessions, so the refusal would surface from the wrong call. */
-    if (name_refused_internal_ns(name)) return 0;
+    /* WP135: DELIBERATELY NO '!' CHECK HERE, and the reason is the same one
+     * that keeps the check out of vol_v3_write_bulk's caller and out of
+     * vol_create_file: this function is LANE-CAPABLE. A transcode commits its
+     * children through it, under the very names that carry the separator --
+     * vol_cpack.c:3622 creates a "!mbrNNNN-<san>" member with vol_create_file,
+     * which lands in vol_v3_write_bulk, which calls this (:1043). A refusal
+     * here silently stops every containerpack lane from decomposing anything;
+     * tools/test-p7z-batch.sh reported "0 member siblings" for a 308-member
+     * 7z when the check was tried here.
+     *
+     * It is also not a create: both FUSE callers of this function
+     * (fuse_fs.c:1607 on an opened handle, :2787 on a resize) act on a name
+     * that already EXISTS. Writing to a legacy '!' name must keep working --
+     * that is how the data on such a volume gets copied off it. Creation is
+     * refused at vol_replace_file, vol_replace_file_with_meta,
+     * vol_create_file_with_meta, vol_create_symlink, vol_create_special,
+     * vol_v3_mkdir, vol_v3_rename, vol_v3_hardlink, invf-cp's own site, and
+     * the six FUSE name-introducing ops. */
     if (!vol_write_enabled(v)) return 0;
     s = calloc(1, sizeof *s);
     if (!s) return 0;

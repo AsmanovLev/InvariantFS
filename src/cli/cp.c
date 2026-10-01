@@ -91,6 +91,25 @@ int main(int argc, char **argv)
     /* Ensure parent directories exist */
     vol_ensure_path(vol, name);
 
+    /* WP135: '!' is reserved -- it separates a container from the internal
+     * sibling inodes its payload lives in ("x.tar" -> "x.tar!part0"), and for
+     * years nothing reserved it, so `rm a` collected the user file `a!b` and
+     * destroyed it while reporting success. The check is HERE, at the
+     * vol_create_file call below, rather than inside that function: it is
+     * shared with the containerpack lane, which creates its own '!mbrNNNN'
+     * children through it (vol_cpack.c:3622) and must not be refused.
+     * vol_replace_file, which the ternary may select instead, carries the
+     * same check on the core side. */
+    if (strchr(name, '!')) {
+        fprintf(stderr, "invf-cp: '!' is reserved in a volume name (it "
+                "separates a container from its internal siblings, "
+                "'x.tar' -> 'x.tar!part0'), so '%s' was not written. Rename "
+                "it without the '!'.\n", name);
+        vol_close(vol);
+        free(data);
+        return 1;
+    }
+
     /* Copying onto a name that already exists is an overwrite, not a second
        file. Appending a bare INOD record reads back correctly -- the scans keep
        the newest version per name -- but the old inode's blocks and any sweep
