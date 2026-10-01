@@ -936,6 +936,66 @@ static inline int name_too_long_for_children(const char *name)
     return strlen(name) + INVFS_SIBLING_RESERVE > INVFS_MAX_NAME;
 }
 
+/* Does this name occupy the internal '!' namespace?
+ *
+ * '!' separates a container's own name from the sibling inodes its payload is
+ * stored in: "x.tar" -> "x.tar!part0", "x.tar!recipe", "x.zip!mbr0000-a.txt".
+ * The lanes mint those names by APPENDING "!<suffix>" to the name they were
+ * given (vol_cpack.c:1232 :1266 :1369 :1403 :1537 :1780 :1923 :1925 :2902
+ * :2903 :3000 :3245 :3641 :3683 :3838 :3864 :3923, vol_exer.c:266 :431,
+ * vol_png.c:442 :734, vol_sweep.c:250 :458 :516), and the read path finds them
+ * by appending the same suffix (vol_read.c:810 :827 :887 :962 :1072 :1168
+ * :1204 :1584). It is therefore a RESERVED byte, and a user name carrying one
+ * is not merely odd-looking: it is a name the read path will parse as a
+ * container path (vol_read_named, vol_read.c:1390) and the unlink cascade
+ * will try to purge as siblings (vol_delete_siblings, vol_records.c:250).
+ *
+ * WP135: for years nothing reserved it, so `a!b` was a legal user file and
+ * `rm a` DESTROYED it -- the purge's "is this my sibling" test was a prefix
+ * match on "name!" with no shape check -- while reporting success. The
+ * reservation is checked here, at the name-introduction sites
+ * (vol_v3_create_node, vol_v3_mkdir, vol_v3_rename, vol_v3_hardlink,
+ * vol_write_begin), and NOT at lookup: a volume that already holds such a
+ * name stays readable and unlinkable, so this is a restriction on creating
+ * one, never a way to strand a file that is already there.
+ *
+ * The whole name is checked, not just the leaf. A '!' in a DIRECTORY
+ * component cannot collide with a sibling -- the suffix is appended at the end
+ * of the whole path -- but several predicates in the tree test the whole name
+ * for a '!' (vol_dirs.c:662 skips the cascade, vol_sweep.c:687 :707 :761
+ * :806 :1036 skip the lanes, vol_textzone.c:686, tools/invf-sweep.c:163 :244
+ * :826). Allowing one and not the others would leave those predicates reading
+ * a directory component as "internal" and silently skip the cascade or the
+ * sweep for a real file. Reserved means reserved.
+ *
+ * COST, stated plainly: a tree containing a file or directory named with a '!'
+ * -- legal on Linux -- can no longer be imported, and FUSE refuses to create
+ * or rename one. That is a namespace restriction, and it is the price of the
+ * alternative, which is silent destruction. Nothing shipped depends on it: the
+ * only place a foreign string is interpolated into a sibling name,
+ * cpack_mbr_name (vol_cpack.c:1917), runs it through cpack_sanitize
+ * (vol_cpack.c:1902), which folds every byte outside [A-Za-z0-9._-] to '_' --
+ * so a member called "a!b" becomes "a!mbr0000-a_b". tools/invf-sweep.c:340
+ * and :414 build a "%s!%s" path only to RE-RENDER a name that already exists
+ * for the dashboard; they mint nothing. */
+static inline int name_is_internal_ns(const char *name)
+{
+    return name && strchr(name, '!') != NULL;
+}
+
+/* The same predicate, and it says why. Kept beside name_too_long, which
+ * also refuses a name and explains itself -- a silent 0 from a create is
+ * indistinguishable from ENOSPC or a corrupt volume to whoever called it, and
+ * an operator who is told "rename it without the '!'" can act on it. */
+static inline int name_refused_internal_ns(const char *name)
+{
+    if (!name_is_internal_ns(name)) return 0;
+    fprintf(stderr, "invarifs: '!' is reserved: it separates a container from "
+            "its internal siblings ('x.tar' -> 'x.tar!part0'), so the name "
+            "'%.72s' is refused. Rename it without the '!'.\n", name);
+    return 1;
+}
+
 
 /* Store a name in a record: one clamped length drives both the field and the
    length header, so the two cannot disagree even if a caller skipped the

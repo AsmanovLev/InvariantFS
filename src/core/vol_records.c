@@ -150,8 +150,13 @@ int ast_owns_siblings(const invfs_ast_hdr *ah,
  * Collect the names first: vol_delete_inode appends a tombstone, so a live
  * scan would walk into records it had just written. WP47: the collection
  * goes through the shared extent-aware record scan so siblings in
- * dynamic metadata extents are found; the per-record policy (prefix-match,
- * supersede check, first-name-wins) is unchanged. */
+ * dynamic metadata extents are found; the per-record policy (shape check,
+ * supersede check, first-name-wins) is unchanged.
+ *
+ * WP135: "name!..." no longer means "anything after name!". It means one of
+ * the shapes a lane actually mints -- see sib_suffix_is_internal below for
+ * the list and the minting site of each. Before, a '!' in a user name made
+ * that name collectable, and `rm a` destroyed `a!b` and reported success. */
 typedef struct {
     invfs_volume *v;
     char (*names)[256];
@@ -161,6 +166,91 @@ typedef struct {
 } del_siblings_ctx;
 
 
+/* ---- is this text one of the shapes a lane actually mints? -----------
+ *
+ * WP135. The "is this my sibling" test below used to be a PREFIX match on
+ * "name!" with nothing said about what followed, so it collected every name
+ * that merely started with `name!` -- and `!` was not reserved, so for a
+ * volume holding a user file `a!b` the unlink of `a` collected `a!b` and
+ * destroyed it, reporting success. No fault injection: a complete, healthy
+ * walk did it.
+ *
+ * This is the DEFENCE layer. It is necessary because the hole is reachable
+ * without the name boundary -- invf-import writes a '!' name straight to the
+ * volume, and a volume that ALREADY holds one is not rescued by refusing new
+ * ones -- but it is not sufficient on its own, and the reason is worth
+ * writing down: it couples this function to every lane's naming, and the
+ * coupling fails OPEN. A lane that mints a ninth suffix is not merely
+ * un-purged; its siblings become permanent orphans, which is exactly the
+ * leak this function exists to prevent (see its own header above). The
+ * reservation in name_is_internal_ns (volume_internal.h) is what makes the
+ * hole unreachable for a suffix that does not exist yet; this list is what
+ * protects the names already on disk.
+ *
+ * The shapes, and where each is minted -- a lane that adds one must add it
+ * HERE in the same commit, which is the coupling this layer buys and the
+ * reason it is not the whole fix:
+ *
+ *   recipe            vol_cpack.c:1232 :1369, vol_sweep.c:458
+ *   mbrt              vol_cpack.c:2902 :3245 :3641 :3838 :3864 :3923
+ *   mbrmap            vol_cpack.c:2903 :3000 :3683
+ *   jxl               vol_png.c:442 :734, vol_sweep.c:516
+ *   cover<digits>     vol_cpack.c:1266 :1403
+ *   part<digits>      vol_cpack.c:1537 :1780, vol_sweep.c:250 :477 :497
+ *   exr<digits>       vol_exer.c:266 :431
+ *   mbr<4 digits>     vol_cpack.c:1925
+ *   mbr<4 digits>-<san>  vol_cpack.c:1923, where <san> is a member name run
+ *                       through cpack_sanitize (vol_cpack.c:1902) and so holds
+ *                       only [A-Za-z0-9._-]
+ *
+ * `mbrNNNN` is pinned to FOUR digits because that is what "%04u" prints and
+ * the read side matches it at that width; a longer run is not a shape this
+ * tree mints, and accepting it would widen the hole for nothing.
+ */
+static int sib_suffix_is_internal(const char *suf, size_t n)
+{
+    size_t i = 0;
+
+    /* fixed tags */
+    if (n == 6 && (!memcmp(suf, "recipe", 6) || !memcmp(suf, "mbrmap", 6)))
+        return 1;
+    if (n == 4 && !memcmp(suf, "mbrt", 4)) return 1;
+    if (n == 3 && !memcmp(suf, "jxl", 3))   return 1;
+
+    /* <tag><digits>: cover/cover0/cover12, part0, exr0 ... */
+    {
+        static const char *dtag[] = { "cover", "part", "exr" };
+        size_t t;
+        for (t = 0; t < sizeof dtag / sizeof dtag[0]; t++) {
+            size_t tl = strlen(dtag[t]);
+            if (n <= tl || memcmp(suf, dtag[t], tl) != 0) continue;
+            for (i = tl; i < n; i++)
+                if (suf[i] < '0' || suf[i] > '9') break;
+            if (i == n) return 1;
+        }
+    }
+
+    /* mbr<4 digits>[-<san>] */
+    if (n >= 7 && !memcmp(suf, "mbr", 3)) {
+        for (i = 3; i < 7; i++)
+            if (suf[i] < '0' || suf[i] > '9') return 0;
+        if (n == 7) return 1;
+        if (suf[7] != '-') return 0;
+        /* the '-' form is only used when the sanitised name is non-empty
+         * (cpack_mbr_name: `if (san && san[0])`), so a BARE trailing '-' is
+         * not a shape this tree mints and must not be accepted as one. */
+        if (n == 8) return 0;
+        for (i = 8; i < n; i++) {
+            char c = suf[i];
+            int ok = (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
+                     (c >= '0' && c <= '9') || c == '.' || c == '_' || c == '-';
+            if (!ok) return 0;
+        }
+        return 1;
+    }
+    return 0;
+}
+
 
 static int del_siblings_v3_cb(void *ctx_, const char *path, uint64_t ino,
                               uint32_t type, uint64_t size, int64_t mtime)
@@ -168,10 +258,16 @@ static int del_siblings_v3_cb(void *ctx_, const char *path, uint64_t ino,
     del_siblings_ctx *c = (del_siblings_ctx *)ctx_;
     size_t pl;
     (void)ino; (void)type; (void)size; (void)mtime;
+    /* WP135: the prefix is necessary and NOT sufficient. Without the shape
+     * check every "name!anything" is collected, and with '!' unreserved
+     * (which it was, for years) that includes user files -- `rm a` destroyed
+     * `a!b` and said so with a zero exit status. */
     if (strncmp(path, c->name, c->nlen) != 0 || path[c->nlen] != '!')
         return 0;
     pl = strlen(path);
     if (pl >= 256) return 0;
+    if (!sib_suffix_is_internal(path + c->nlen + 1, pl - c->nlen - 1))
+        return 0;
     if (c->n >= c->cap) {
         size_t ncap = c->cap ? c->cap * 2 : 16;
         char (*nn)[256] = (char (*)[256])realloc(c->names, ncap * sizeof(*nn));

@@ -284,6 +284,16 @@ uint64_t vol_v3_create_node(invfs_volume *v, const char *name,
         return 0;
     if (v->sb.vol_flags & VOLF_READONLY)
         return 0;
+    /* WP135: '!' is reserved -- it separates a container's name from the
+     * sibling inodes its payload lives in. See name_is_internal_ns in
+     * volume_internal.h. This is the choke point every USER-named create
+     * passes through (vol_create_file, vol_create_file_with_meta,
+     * vol_create_symlink, vol_create_special, the v3 write commit, and so
+     * invf-import and invf-cp); the lanes do NOT come here -- they mint
+     * their '!' siblings through vol_create_blob_file, which builds the
+     * inode row itself -- so this refuses only user names. */
+    if (name_refused_internal_ns(name))
+        return 0;
     if (v3_split_path(name, parent, sizeof parent, leaf, sizeof leaf) != 0)
         return 0;
     if (vol_v3_path_lookup(v, parent, &pino) != 1)
@@ -482,6 +492,10 @@ uint64_t vol_v3_mkdir(invfs_volume *v, const char *name)
     if (!v)
         return 0;
     if (v->sb.vol_flags & VOLF_READONLY)
+        return 0;
+    /* WP135: a directory name is a user name like any other, and '!' is
+     * reserved for container siblings. See vol_v3_create_node above. */
+    if (name_refused_internal_ns(name))
         return 0;
     if (v3_split_path(name, parent, sizeof parent, leaf, sizeof leaf) != 0)
         return 0;
@@ -689,6 +703,11 @@ int vol_v3_rename(invfs_volume *v, const char *from, const char *to)
     if (!v || !from || !to || !from[0] || !to[0])
         return -1;
     if (v->sb.vol_flags & VOLF_READONLY)
+        return -1;
+    /* WP135: `to` INTRODUCES a name, so it is refused; `from` only reads
+     * one, and a volume that already holds a '!' name must stay renameable
+     * so its contents can be moved OFF the reserved namespace. */
+    if (name_refused_internal_ns(to))
         return -1;
     if (v3_split_path(from, fparent, sizeof fparent, fleaf, sizeof fleaf) != 0)
         return -1;
@@ -1054,6 +1073,9 @@ static int vol_v3_hardlink(invfs_volume *v, const char *from, const char *to)
         return -1;
     if (v->sb.vol_flags & VOLF_READONLY)
         return -1;                              /* EROFS */
+    /* WP135: link(2) introduces `to`, so it is refused like a rename target. */
+    if (name_refused_internal_ns(to))
+        return -1;
     if (v3_split_path(to, tparent, sizeof tparent, tleaf, sizeof tleaf) != 0)
         return -1;
     if (vol_v3_path_lookup(v, from, &id) != 1)

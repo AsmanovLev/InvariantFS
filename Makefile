@@ -135,7 +135,7 @@ CLI_MAINS := mkfs verify fsck cp cat ls stat arctest blkio_test resize \
              walk_status_test walk_status_fuse_test no_v2_surface_test \
              heat_walk_test no_ckp0_surface_test \
 table_sync_evict_test write_create_path_test tz_registry_test \
-             otrunc_test sib_walk_test chmod_acl_write_test
+otrunc_test sib_walk_test chmod_acl_write_test bang_name_test
 $(foreach t,$(CLI_MAINS),$(eval $(call TOOL_RULE,$(t),)))
 
 # reclaim_reader_epoch_test was, for one commit, a red control that built but
@@ -743,6 +743,15 @@ test: $(TEST_BINS) $(OUT)/invf-arctest $(OUT)/invf-blkio_test $(OUT)/invf-codec_
 	@# proving nothing if this binary is older than the sources it measures --
 	@# the test binaries are prerequisites of `make test`, not of `all`.
 	$(TESTENV) $(TESTISO) $(OUT)/invf-sib_walk_test /tmp
+	@# WP135: 'a!b' is a legal user name and `rm a` destroyed it --
+	@# vol_delete_siblings' "is this my sibling" test was a prefix match on
+	@# "name!" with no shape check, so any user name starting with "name!"
+	@# was collected and unlinked, and the unlink reported success. The test
+	@# asserts `a!b` still reads back BYTE-EXACT after unlink('a'), AND --
+	@# the arm that makes it a fix -- that a real vol_create_tar_file
+	@# decomposition still has all its '!partN' siblings purged, which a fix
+	@# that simply disabled sibling purging would fail.
+	$(TESTENV) $(TESTISO) $(OUT)/invf-bang_name_test /tmp
 	@# WP140: the name table must not evict a LIVE name because a lookup could
 	@# not be completed. Runs under $(TESTISO): fuse_get_context() is stubbed
 	@# to NULL, so every permission check takes the documented uid-0 bypass and

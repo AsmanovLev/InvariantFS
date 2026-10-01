@@ -66,6 +66,12 @@ uint64_t vol_write_begin(invfs_volume *v, const char *name, int truncate,
     if (!out) return 0;
     *out = NULL;
     if (!v || !name || name_too_long(name)) return 0;
+    /* WP135: refuse the reserved '!' here as well as at vol_v3_create_node,
+     * because this is where a FUSE open(O_CREAT) and a write actually enter.
+     * create_node is the choke point, but it runs at COMMIT -- by then this
+     * session has already burned an inode id (volume_internal.h:297) and is
+     * on v->wsessions, so the refusal would surface from the wrong call. */
+    if (name_refused_internal_ns(name)) return 0;
     if (!vol_write_enabled(v)) return 0;
     s = calloc(1, sizeof *s);
     if (!s) return 0;
