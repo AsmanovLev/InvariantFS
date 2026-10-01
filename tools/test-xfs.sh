@@ -211,7 +211,7 @@ UMOUNTED=0
       rm -rf "$WORK" 2>/dev/null || true
       if [ -n "$LOOPDEV" ]; then
           sudo umount "$MNT" 2>/dev/null || true
-          sudo -n losetup -d "$LOOPDEV" 2>/dev/null || true
+          timeout 15 sudo -n losetup -d "$LOOPDEV" 2>/dev/null || true
       fi
     }
 trap cleanup EXIT
@@ -254,7 +254,13 @@ mountxfs() {  # mountxfs <img>
     for c in /dev/loop[0-9]*; do
         [ -e "$c" ] || continue
         [ "$(cat /sys/block/$(basename "$c")/ro 2>/dev/null)" = "0" ] || continue
-        if losetup "$c" >/dev/null 2>&1; then continue; fi   # already attached
+        # The "is it attached" probe needs the SAME timeout as the attach below
+        # it. A loop device whose sysfs state is empty can BLOCK that ioctl, so
+        # an unbounded probe here stalls the whole walk and the suite hangs
+        # before it has measured anything -- which is how this read for hours as
+        # "test-xfs hangs", with no output past the fixture header. The attach
+        # three lines down was already bounded; the probe was not.
+        if timeout 5 losetup "$c" >/dev/null 2>&1; then continue; fi   # attached
         if timeout 30 sudo -n losetup "$c" "$img" 2>/dev/null; then d="$c"; break; fi
     done
     [ -n "$d" ] || { echo "FAIL: no free, healthy loop device (some may be wedged ro=1)"; exit 1; }
@@ -268,14 +274,14 @@ mountxfs() {  # mountxfs <img>
         echo "FAIL: $MNT is not writable -- a read-only mount looks like a dead device,"
         echo "       and populating it would blame the filesystem under test"
         sudo umount "$MNT" 2>/dev/null || true
-        sudo -n losetup -d "$LOOPDEV" 2>/dev/null || true
+        timeout 15 sudo -n losetup -d "$LOOPDEV" 2>/dev/null || true
         exit 1
     fi
     sudo -n rm -f "$MNT/.writable"
 }
 umountxfs() {
     sudo umount "$MNT" 2>/dev/null || true
-    [ -n "$LOOPDEV" ] && { sudo -n losetup -d "$LOOPDEV" 2>/dev/null || true; LOOPDEV=""; }
+    [ -n "$LOOPDEV" ] && { timeout 15 sudo -n losetup -d "$LOOPDEV" 2>/dev/null || true; LOOPDEV=""; }
     return 0
 }
 
