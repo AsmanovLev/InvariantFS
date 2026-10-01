@@ -962,8 +962,8 @@ static inline int name_too_long_for_children(const char *name)
  * The whole name is checked, not just the leaf. A '!' in a DIRECTORY
  * component cannot collide with a sibling -- the suffix is appended at the end
  * of the whole path -- but several predicates in the tree test the whole name
- * for a '!' (vol_dirs.c:662 skips the cascade, vol_sweep.c:687 :707 :761
- * :806 :1036 skip the lanes, vol_textzone.c:686, tools/invf-sweep.c:163 :244
+ * for a '!' (vol_dirs.c:679 skips the cascade, vol_sweep.c:695 :716 :773 :819
+ * :1049 :1103 skip the lanes, vol_textzone.c:686, tools/invf-sweep.c:163 :244
  * :826). Allowing one and not the others would leave those predicates reading
  * a directory component as "internal" and silently skip the cascade or the
  * sweep for a real file. Reserved means reserved.
