@@ -1395,6 +1395,31 @@ int vol_read_named(invfs_volume *v, const char *name, uint8_t **out, size_t *out
     }
     if (ncomp == 0) return -1;
 
+    /* WP141: an EXACT name always beats a container-member reading of the same
+     * string. The split below throws the distinction away -- it walks
+     * comps[0] as a container and hands back a member's bytes -- so when an
+     * inode named "a!b" exists AND "a" is a ZIP with a member "b", this used to
+     * resolve "a!b" exactly and then answer with the member. Bytes plus a
+     * success status carry no in-band error, so the caller could not tell the
+     * two apart; the same shape as the one vol_find has.
+     *
+     * invf-cat was not wrong only because cat.c:83-97 performs this lookup
+     * ITSELF and calls vol_read_named only when it misses. The precedence has
+     * to live here, so every caller inherits it rather than each re-deriving
+     * cat.c's guard.
+     *
+     * For a bang-free name `name` == comps[0], so this is also the OLD
+     * vol_find(comps[0]) and the common path costs one lookup, not two.
+     * `ncomp == 1` then means the name is absent: there is no member to walk,
+     * and a trailing bang ("plain!") used to answer with the prefix's whole
+     * bytes under a status of 0. */
+    ino = vol_find(v, name);
+    if (ino) {
+        if (vol_read_file(v, ino, out, out_len) != 0) return -1;
+        return 0;
+    }
+    if (ncomp == 1) return -1;
+
     ino = vol_find(v, comps[0]);
     if (!ino) return -1;
     if (vol_read_file(v, ino, &cur, &cur_len) != 0) return -1;

@@ -135,7 +135,8 @@ CLI_MAINS := mkfs verify fsck cp cat ls stat arctest blkio_test resize \
              walk_status_test walk_status_fuse_test no_v2_surface_test \
              heat_walk_test no_ckp0_surface_test \
 table_sync_evict_test write_create_path_test tz_registry_test \
-otrunc_test sib_walk_test chmod_acl_write_test bang_name_test sweep_bang_test
+otrunc_test sib_walk_test chmod_acl_write_test bang_name_test sweep_bang_test \
+read_named_test
 $(foreach t,$(CLI_MAINS),$(eval $(call TOOL_RULE,$(t),)))
 
 # reclaim_reader_epoch_test was, for one commit, a red control that built but
@@ -759,6 +760,17 @@ test: helpers $(TEST_BINS) $(OUT)/invf-arctest $(OUT)/invf-blkio_test $(OUT)/inv
 	@# decomposition still has all its '!partN' siblings purged, which a fix
 	@# that simply disabled sibling purging would fail.
 	$(TESTENV) $(TESTISO) $(OUT)/invf-bang_name_test /tmp
+	@# WP141: vol_read_named answered with another FILE's bytes and status 0.
+	@# When an inode named 'a!b' exists AND 'a' is a ZIP with a member 'b', the
+	@# exact name resolved (vol_find returned it) and was then discarded in
+	@# favour of the member -- same shape as the vol_find one: bytes plus a
+	@# success status carry no in-band error. invf-cat only avoided it by doing
+	@# the exact-name lookup itself (cat.c:83-97).
+	@# The CONTROL ARM is the point of this recipe line: with the exact inode
+	@# removed, 'a!b' must STILL answer with the member's bytes byte-exact and
+	@# status 0. A fix that made vol_read_named refuse every '!' name passes
+	@# the defect leg and fails that one.
+	$(TESTENV) $(TESTISO) $(OUT)/invf-read_named_test /tmp
 	@# WP136: a '!'-bearing USER name is skipped by every transform lane in
 	@# the sweep, so it silently loses batching while the byte-identical file
 	@# beside it gets the shared PPMd segment. The observable is the ZONE the
