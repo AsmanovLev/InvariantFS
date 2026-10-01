@@ -1820,4 +1820,60 @@ Not fixed here: the projection is not instrumented, and §1.8 keeps a measured
 answer out of a commit that has none. Whoever picks it up should print
 `proj.fixed`, `proj.content`, `proj.member_cost`, `full_len` and
 `cpack_gain_mille()` on the refusal path and compare against the suite's
-comment figures — that single measurement names the owner.
+comment figures — that single measurement names the owner.---
+
+## test-qcow2-zlib: the size guard is right and the SUITE's expectation is stale
+
+**Status:** MEASURED. The owner is the test, not the guard. Not changed here —
+§1.8 — but the next step is now a one-line decision rather than an
+investigation.
+
+Measured with the diagnostic added in `ca6deec`, which I then had to extend to
+the ACCEPT path, because the open question was never "why did it refuse" but
+"why did it NOT refuse":
+
+    [cpack size guard] ACCEPT: orig=377344 projected=359605
+      (fixed=336565 content=20480 member_cost=2560)
+      gain=5/1000 headroom=17739 B repro_max=65536 bound=4194304
+
+Both of the guard's levers pass, **by design**:
+
+* **Space.** `projected 359,605 < orig_len 377,344`, so it is a gain — because
+  the kind-2 entries **store nothing**. `cpack_repro_stats` skips them, so
+  `content` and `member_cost` come to 23,040 B together.
+* **CPU.** The largest single re-deflate is 65,536 B against a
+  `CPACK_REPRO_MAX` bound of 4,194,304 — a 64x margin.
+
+**The suite asserts the opposite**, on the grounds that "the Q2R3 strip keeps
+every deflate stream verbatim in the recipe ... and the members are pure
+addition on top", measured at +409 KiB. **That 409 KiB is the pre-WP119
+accounting**, in which the strip was treated as costing space. WP119 changed the
+design: kind-2 entries are regenerated on read and cost nothing to store, with
+their cost moved to the re-deflation bound instead. The guard enforces exactly
+that trade. **The suite still asserts the space model that was replaced.**
+
+So: not a regression, and not a loose guard. A test that outlived the design it
+was written for. Three things were ruled out on the way, by measurement rather
+than by reading: the corpus figures still match the suite's own comment
+(`z.qcow2 377344 bytes`), the pack manifest still declares
+`map = bin/qcow2 map {recipe} {out}`, and the guard at
+`src/core/vol_cpack.c:2372` is intact and correct.
+
+Not done: updating the suite's expectation. That is a judgement about what the
+lane is FOR, and it is worth writing down either way —
+
+* if the space model is the point, kind-2 should be priced at its storage cost
+  and the lane would decline this corpus; or
+* if the CPU-for-space trade is the point (it is what makes a container
+  decomposable at all), then the suite's negative control is asserting a model
+  the lane abandoned on purpose, and the control should be dropped or
+  re-expressed against \`CPACK_REPRO_MAX\` — which is the lever that would
+  actually stop it.
+
+The second is almost certainly right, because \`repro_max\` vs \`bound\` is the
+comparison the guard exists to make.
+
+**And a lesson from getting here.** The diagnostic first printed only on the
+REFUSAL path, which is the intuitive thing to instrument — and it was blind to
+exactly the question being asked. A diagnostic for "why did this happen" must
+also speak for "why did this not happen".

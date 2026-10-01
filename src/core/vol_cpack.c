@@ -2408,6 +2408,24 @@ int cpack_size_guard(uint64_t orig_len, const cpack_size_proj *p,
                     (unsigned long long)CPACK_REPRO_MAX);
         return 0;
     }
+    /* Also on the ACCEPT path, and that half matters more: the question that
+     * is open about `test-qcow2-zlib` is not "why did it refuse" but "why did
+     * it NOT refuse a corpus its own suite says it should refuse". A
+     * diagnostic that only speaks when it has already decided cannot answer
+     * that, which is exactly how the first version of this line failed. */
+    if (getenv("INVFS_DEBUG") && getenv("INVFS_DEBUG")[0] == '1')
+        fprintf(stderr,
+                "    [cpack size guard] ACCEPT: orig=%llu projected=%llu "
+                "(fixed=%llu content=%llu member_cost=%llu) gain=%llu/1000 "
+                "headroom=%lld B repro_max=%llu bound=%llu\n",
+                (unsigned long long)orig_len, (unsigned long long)projected,
+                (unsigned long long)p->fixed,
+                (unsigned long long)p->content,
+                (unsigned long long)p->member_cost,
+                (unsigned long long)gain,
+                (long long)orig_len - (long long)projected,
+                (unsigned long long)p->repro_max,
+                (unsigned long long)CPACK_REPRO_MAX);
     return 1;
 }
 
