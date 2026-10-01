@@ -2952,8 +2952,20 @@ static int invf_chmod(const char *path, mode_t mode, struct fuse_file_info *fi)
         }
     }
     /* the mount root has no record to patch; POSIX: chmod on "." = ENOSYS
-     * is loud but rsync fires it first -- succeed silently instead. */
-    if (strcmp(path, "/") == 0) return 0;
+     * is loud but rsync fires it first -- succeed silently instead.
+     *
+     * The unlock comes BEFORE the return. This is the only exit in this
+     * function that returned while still holding g_io_lock, and g_io_lock is a
+     * plain PTHREAD_MUTEX_INITIALIZER (src/cli/fuse_fs.c:33) -- NOT recursive
+     * -- so the next entry point on this thread to take it cannot proceed.
+     * Every other exit here unlocks first: :2904, :2912, :2947, and the -EIO
+     * refusal from the ACL-write fix. That is exactly what made this one
+     * invisible on review: the unlock sits on the next line and a reader
+     * reasonably assumes it runs. */
+    if (strcmp(path, "/") == 0) {
+        pthread_mutex_unlock(&g_io_lock);
+        return 0;
+    }
     pthread_mutex_unlock(&g_io_lock);
     memset(&patch, 0, sizeof patch);
     patch.mode = mode & 07777;
