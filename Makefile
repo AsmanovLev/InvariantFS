@@ -134,7 +134,7 @@ CLI_MAINS := mkfs verify fsck cp cat ls stat arctest blkio_test resize \
              stat_v3_counts_test acl_eio_test acl_inherit_test meta_clobber_test spn_skip_recipe_test \
              walk_status_test walk_status_fuse_test no_v2_surface_test \
              heat_walk_test no_ckp0_surface_test \
-             table_sync_evict_test write_create_path_test tz_registry_test
+             table_sync_evict_test write_create_path_test tz_registry_test otrunc_test
 $(foreach t,$(CLI_MAINS),$(eval $(call TOOL_RULE,$(t),)))
 
 # reclaim_reader_epoch_test was, for one commit, a red control that built but
@@ -832,6 +832,29 @@ test: $(TEST_BINS) $(OUT)/invf-arctest $(OUT)/invf-blkio_test $(OUT)/invf-codec_
 	@# uid map to swallow. INVFS_FAULT is unset on the healthy legs, so those
 	@# also assert the unset path stays inert.
 	$(TESTENV) $(TESTISO) $(OUT)/invf-meta_clobber_test /tmp
+	@# WP otrunc-keeps-the-old-identity: the TRUNCATE twin of the row above.
+	@# invf_open's O_TRUNC branch saved the file's identity, replaced the
+	@# file, and wrote the identity back -- but it saved it with vol_find,
+	@# whose uint64_t makes "no such name" and "the lookup could not be
+	@# completed" both 0, and it IGNORED vol_replace_file's return. So a
+	@# lost save left the file's mode at the 0644 that
+	@# vol_v3_create_node writes for every regular file, and open() said
+	@# 0. Asserts the volume's own answer -- mode, owner AND content --
+	@# after a flush, never the errno, and requires a healthy truncate to
+	@# still work and still clear the content. The composed failure needs
+	@# TWO sites (the dirent row read and the inode row read are both in
+	@# vol_btree.c and one INVFS_FAULT spec names one site), delivered by
+	@# an interposed getenv() that changes the spec's ADDRESS, which is
+	@# what re-arms the one-shot -- unsetenv+setenv does not, and a leg
+	@# that thinks it re-armed measures the healthy path. The test also
+	@# refuses to run against a binary older than its own sources:
+	@# `make -j4` does not link these binaries at all.
+	@# Runs under $(TESTISO): it calls invf_open directly with
+	@# fuse_get_context() stubbed to NULL, so every permission check takes
+	@# the documented uid-0 bypass. No real uid denial, so nothing for the
+	@# one-entry fake-root uid map to swallow. INVFS_FAULT is unset on the
+	@# healthy legs, so those also assert the unset path stays inert.
+	$(TESTENV) $(TESTISO) $(OUT)/invf-otrunc_test /tmp
 	$(TESTENV) $(TESTISO) $(OUT)/invf-spn_skip_recipe_test /srv/bench/scratch skipped
 	$(TESTENV) $(TESTISO) $(OUT)/invf-spn_skip_recipe_test /srv/bench/scratch skippedctl
 	@# WP-arc-concurrent-safe: the content cache, under concurrency. TSAN is

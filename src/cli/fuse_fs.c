@@ -1715,30 +1715,90 @@ static int invf_open(const char *path, struct fuse_file_info *fi)
          * the engine session (begun lazily at the first write) forks the
          * file's segment layout incrementally, so memory stays bounded no
          * matter how large the file is (WP4b). A failed calloc returns
-         * straight out of here, before any handle exists to release. */
+         * straight out of here, before any handle exists to release. The
+         * O_TRUNC work lives INSIDE this block so that the context is in
+         * scope on its refusal path -- see below. */
         {
             wctx *c = (wctx *)calloc(1, sizeof(wctx));
             if (!c) return -ENOMEM;
             strncpy(c->name, path + 1, 255);
             fi->fh = (uint64_t)(uintptr_t)c;
             fi->keep_cache = 1;
-        }
-        if (fi->flags & O_TRUNC) {
-            /* truncate to empty; the old file's transcode siblings describe
-             * bytes that are gone, so vol_replace_file drops them with it */
-            invfs_meta_pub keep;
-            int have_keep = 0;
-            pthread_mutex_lock(&g_io_lock);
-            {
-                uint64_t ino = vol_find(g_vol, path + 1);
-                if (ino && vol_get_meta(g_vol, ino, &keep) == 0)
-                    have_keep = 1;
-            }
-            vol_replace_file(g_vol, path + 1, NULL, 0);
-            if (have_keep)
+            if (fi->flags & O_TRUNC) {
+                /* truncate to empty; the old file's transcode siblings describe
+                 * bytes that are gone, so vol_replace_file drops them with it */
+                invfs_meta_pub keep;
+                uint64_t ino = 0;
+                int frc;
+
+                pthread_mutex_lock(&g_io_lock);
+                /* WP otrunc-keeps-the-old-identity: the file's POSIX identity
+                 * has to be IN HAND before anything is replaced.
+                 *
+                 * This used to save it with vol_find, whose uint64_t makes
+                 * "no such name" and "the lookup could not be completed" the
+                 * same 0, and then truncate regardless, writing the saved
+                 * copy back only if one had been taken. Losing the save did
+                 * not merely skip a write-back: vol_replace_file(v, name,
+                 * NULL, 0) reaches vol_v3_create_node with meta == NULL, and
+                 * the "in.type == 0" defaulting branch there (vol_dirs.c:324
+                 * -- INVFS_ITYP_REG is 0, invarifs.h:1147) cannot be false
+                 * for a regular file, so the mode is rewritten to 0644 on
+                 * EVERY truncate. Only the write-back restored it. A single
+                 * unreadable dirent row was therefore enough to land a file
+                 * at 0644; two unreadable rows -- that one, and the inode
+                 * read inside create_node whose memset also zeroed uid/gid
+                 * -- landed it at 0644 root. The POSIX ACL survived both,
+                 * because xattrs are separate 0x03 || inode keys, so the
+                 * file came out WIDER than it went in.
+                 *
+                 * REFUSE, and the reason is the ORDER: this lookup runs
+                 * before vol_replace_file, so when the identity cannot be
+                 * read nothing has been mutated and there is nothing to undo.
+                 * A truncate that cannot preserve identity must not truncate.
+                 * The caller gets -EIO, the honest answer for a truncate the
+                 * filesystem could not perform correctly, and the same answer
+                 * perm_check_cred already gives for an unreadable row.
+                 *
+                 * This is NOT the create/mkdir asymmetry. Those two differ
+                 * because invf_create writes the record FIRST and resolves
+                 * the object's own name afterwards, so there a rollback
+                 * would take the name away from a caller already holding a
+                 * handle. Here the lookup is strictly first: no object to
+                 * roll back, no name to unlink, one shape -- refuse, do not
+                 * truncate -- and the difference from those sites is the
+                 * ordering, not an omission.
+                 *
+                 * Both non-zero answers of vol_get_meta_rc fail closed:
+                 * -EIO is "the row could not be read" and -ENOENT is "there
+                 * is no such row". The second is not expected on a v3 volume
+                 * (VOLF_V3 is the only format there is), and if it happens
+                 * then the file has no recorded identity to preserve, which
+                 * is not a licence to replace it with 0644 root. */
+                frc = vol_find_rc(g_vol, path + 1, &ino);
+                if (frc != 1 || !ino ||
+                    vol_get_meta_rc(g_vol, ino, &keep) != 0) {
+                    fprintf(stderr, "invf: truncate of \"%s\" REFUSED: the "
+                            "file's identity could not be read (lookup rc=%d, "
+                            "ino=%llu). The file is untouched.\n",
+                            path, frc, (unsigned long long)ino);
+                    /* No table_sync_one_locked here: nothing changed, and the
+                     * lookup that just failed is the same read that sync
+                     * would use to decide the entry's fate. A refusal is
+                     * only honest if it changes nothing at all. */
+                    pthread_mutex_unlock(&g_io_lock);
+                    free(c);
+                    /* The handle never existed as far as the kernel is
+                     * concerned -- a failed open is sent no .release -- so
+                     * this carries the same contract as the failed calloc
+                     * above, and handle_acquired() below is not reached. */
+                    return -EIO;
+                }
+                vol_replace_file(g_vol, path + 1, NULL, 0);
                 vol_apply_meta(g_vol, path + 1, &keep);
-            table_sync_one_locked(path + 1);
-            pthread_mutex_unlock(&g_io_lock);
+                table_sync_one_locked(path + 1);
+                pthread_mutex_unlock(&g_io_lock);
+            }
         }
     } else {
         /* WP17: keep page cache across open/close. Every content change
