@@ -94,7 +94,18 @@ $(OBJ):
 $(OUT):
 	mkdir -p $@
 
-$(OBJ)/%.o: %.c | $(OBJ)
+# Several test binaries #include a .c file rather than linking it --
+# acl_eio_test.c and its descendants include fuse_fs.c, so make would have no
+# dependency edge from the test's object to that file and an edit to it would
+# leave the binary stale. That is not hypothetical: the mtime guard inside
+# those binaries caught it, and `make test` failed with the binary refusing to
+# measure. Every source and header under src/ is a prerequisite, which is blunt
+# but never wrong -- a rebuild that was not needed costs a second, and a build
+# that was needed and did not happen costs an afternoon of measuring the wrong
+# tree.
+SRC_ALL := $(shell find $(SRC) -name '*.c' -o -name '*.h' 2>/dev/null)
+
+$(OBJ)/%.o: %.c $(SRC_ALL) | $(OBJ)
 	$(CC) $(CFLAGS) -c -o $@ $<
 
 $(OBJ)/deflate_repro.o: $(SRC)/codecs/deflate_repro.c $(SRC)/codecs/deflate_backend.h $(SRC)/codecs/deflate_repro.h | $(OBJ)
