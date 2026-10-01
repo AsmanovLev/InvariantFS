@@ -232,8 +232,14 @@ typedef struct {
  * `mbrNNNN` is pinned to FOUR digits because that is what "%04u" prints and
  * the read side matches it at that width; a longer run is not a shape this
  * tree mints, and accepting it would widen the hole for nothing.
+ *
+ * WP136: no longer `static`. It is now one half of the shared predicate
+ * vol_name_is_container_sibling (below), which the sweep asks too, so the
+ * unlink cascade and the sweep can no longer disagree about what a minted
+ * sibling looks like -- which is exactly how the sweep came to skip every
+ * name with a '!' in it while the cascade correctly spared them.
  */
-static int sib_suffix_is_internal(const char *suf, size_t n)
+int sib_suffix_is_internal(const char *suf, size_t n)
 {
     size_t i = 0;
 
@@ -274,6 +280,53 @@ static int sib_suffix_is_internal(const char *suf, size_t n)
         }
         return 1;
     }
+    return 0;
+}
+
+
+/* WP136 -- the shared "is this one of OUR siblings?" test. The contract, the
+ * two halves and the cannot-strand argument are in volume_internal.h, beside
+ * the reservation it is deliberately NOT the same as; do not re-derive them
+ * here. The body is deliberately three short steps and no cleverness: a name
+ * that fails either half is a USER name, and a user name is a lane's
+ * business, not a sweep's.
+ *
+ * The FIRST '!' is the split point, matching the mint sites (every one of
+ * them appends at the end of the whole path) and matching the shape list,
+ * which describes a single suffix. `a!b!c` splits as prefix `a`, suffix
+ * `b!c` -- and `b!c` is not a shape, so it is a user's name. Good.
+ */
+int vol_name_is_container_sibling(invfs_volume *v, const char *name)
+{
+    const char *bang;
+    size_t nlen, slen;
+    char prefix[INVFS_MAX_NAME + 1];
+    uint64_t container = 0;
+
+    if (!name || !name[0]) return 0;
+    bang = strchr(name, '!');
+    if (!bang) return 0;                 /* the overwhelming majority: free */
+
+    slen = strlen(bang + 1);
+    if (!slen || slen >= 256) return 0;
+    if (!sib_suffix_is_internal(bang + 1, slen)) return 0;   /* not our shape */
+
+    nlen = (size_t)(bang - name);
+    if (!nlen || nlen > INVFS_MAX_NAME) return 0;
+    memcpy(prefix, name, nlen);
+    prefix[nlen] = '\0';
+
+    /* A shape is not ownership. If the container is not there, nothing put
+     * this name here but the user.
+     *
+     * A lookup that did not COMPLETE is not evidence that the container is
+     * absent, and the safe reading of "I do not know" here is the old
+     * behaviour rather than the new one: report a sibling and let the caller
+     * leave it alone. Failing the other way -- a tree whose namespace walk
+     * had a bad moment would start carving up its own container members as
+     * if they were user files. The asymmetry is deliberate, and it is the
+     * reason this is an ACTS site and not a SKIP. */
+    if (vol_find_rc(v, prefix, &container) != 0) return 1;
     return 0;
 }
 

@@ -996,6 +996,60 @@ static inline int name_refused_internal_ns(const char *name)
     return 1;
 }
 
+/* WP136 -- THE OTHER HALF of the '!' question, and the one the sweep needs.
+ *
+ * name_is_internal_ns above asks "is this a name shape we have RESERVED?" --
+ * a pure string question, answerable with no volume, and the right test at a
+ * funnel that is about to mint a name. The sweep is not asking that. The
+ * sweep is asking "is this one of OUR siblings?" -- that is, is this a name
+ * this tree put there, as part of a container's decomposition -- so that it
+ * can leave a container's own payload alone (WP10 12.7: a member belongs to
+ * its container's batch, not to a whole-file lane).
+ *
+ * Those are different questions with different answers for a name a pre-WP135
+ * build already left on the volume. WP135 answered the second with the first
+ * -- `strchr(name, '!')` in five sweep lane guards -- and a user file `a!b`
+ * was therefore excluded from every transform the filesystem performs, for
+ * ever, silently, while the file beside it got the full treatment. Measured
+ * at 300 files: 298 blocks (1.16 MiB) more for byte-identical content.
+ *
+ * Two parts, both necessary:
+ *
+ *   1. SHAPE. The suffix after the FIRST '!' must be one a lane actually
+ *      mints (sib_suffix_is_internal, vol_records.c -- the list, and the
+ *      minting site of each, live with it). `a!b`, `my!mbrt-backup.txt` and
+ *      `notes!draft` are not shapes this tree produces.
+ *   2. A LIVE CONTAINER. The prefix before that '!' must still name an inode
+ *      on this volume. A shape on its own is not ownership: `ghost.txt!mbr0000-x`
+ *      on a volume with no `ghost.txt` is a user's file that happens to spell
+ *      its tail like one of ours, and a lane must not carve it up on that
+ *      basis. A real sibling always has its container -- the lane creates the
+ *      container first and the members after, and the unlink cascade that
+ *      reclaims them runs from the container.
+ *
+ * WHY THIS CANNOT STRAND A NAME ALREADY ON DISK. It only ever NARROWS a
+ * skip. Every call site changes from "skip anything with a '!'" to "skip only
+ * what is provably ours", so the set of names a lane runs on grows and never
+ * shrinks: there is no name for which this makes a transform unavailable. The
+ * reservation itself is untouched -- a '!' is still refused at
+ * vol_create_file_with_meta, vol_v3_mkdir, vol_v3_rename, the rename
+ * destination, hardlink, symlink and special -- so nothing NEW can acquire one
+ * either. And bit-exactness is not what is being traded: every lane a legacy
+ * name now reaches still runs its own proof (decode-and-memcmp for the packs,
+ * whole-path rebuild for PNGR, the size guard for the container lanes).
+ *
+ * Cost: one strchr per call, and a name lookup ONLY for the rare name that
+ * has a '!' AND a minted suffix. A volume with no such name pays nothing --
+ * which is every volume a shipped tool can build today.
+ */
+int vol_name_is_container_sibling(invfs_volume *v, const char *name);
+
+/* The shape half of it, and the list of every shape a lane mints with the
+ * minting site of each. WP136 promoted this out of `static` so the unlink
+ * cascade and the sweep ask the identical question. A lane that adds a ninth
+ * suffix must add it HERE in the same commit -- see the coupling note. */
+int sib_suffix_is_internal(const char *suf, size_t n);
+
 
 /* Store a name in a record: one clamped length drives both the field and the
    length header, so the two cannot disagree even if a caller skipped the

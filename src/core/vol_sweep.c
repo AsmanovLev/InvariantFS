@@ -683,8 +683,16 @@ static int sweep_dispatch(invfs_volume *v, uint64_t inode_id,
     /* WP10 §4: every magic dispatch above declined -- classify text. Text
      * DEFERS into the sweep-run accumulator (sealed into shared PPMd batches
      * by vol_tz_flush at the end of the run); "!" sibling parts stay with
-     * their container in v1 (WP10 §12.7). */
-    if (!strchr(name, '!')) {
+     * their container in v1 (WP10 §12.7).
+     *
+     * WP136: "stays with its container" is a narrower claim than "has a '!'",
+     * and the narrow one is the true one. vol_name_is_container_sibling asks
+     * whether this is a name a lane MINTED as part of a container's
+     * decomposition, not whether the byte happens to occur in it -- so a user
+     * file `a!b` that a pre-WP135 build left behind reaches this lane like
+     * every other text file, instead of being excluded from every transform
+     * the filesystem performs, silently and for ever. */
+    if (!vol_name_is_container_sibling(v, name)) {
         int fam = invfs_text_family(name, full, full_len);
         if (fam > 0) {
             const invfs_codec *pc = invfs_codec_by_algo(INVFS_ALGO_PPMD);
@@ -701,10 +709,11 @@ static int sweep_dispatch(invfs_volume *v, uint64_t inode_id,
     /* WP14b M2: exe-as-container carving, BEFORE the binary-batch
      * deferral -- a carved exe is strictly better than a batched one (the
      * embedded media gets a real codec, the glue still gets ZSTD-19).
-     * '!'-sibling parts are never carved (WP10 §12.7). A MEMLIMIT refusal
-     * (rc 2) skips batching too. */
+     * '!'-sibling parts are never carved (WP10 §12.7) -- meaning the parts a
+     * lane minted, which is what vol_name_is_container_sibling asks (WP136);
+     * a MEMLIMIT refusal (rc 2) skips batching too. */
     int exer_no_bz = 0;
-    if (!strchr(name, '!') &&
+    if (!vol_name_is_container_sibling(v, name) &&
         invfs_binary_family(full, full_len, name) > 0) {
         uint32_t nparts = 0;
         int erc = vol_exer_carve(v, inode_id, name, full, full_len, &nparts);
@@ -757,8 +766,11 @@ static int sweep_dispatch(invfs_volume *v, uint64_t inode_id,
      *    file exactly as found and the branch below still runs.
      *
      * '!'-sibling parts never get here (WP10 §12.7): a member belongs to
-     * its container's batch, not to a whole-file pack. */
-    if (!strchr(name, '!')) {
+     * its container's batch, not to a whole-file pack. "Sibling" means one a
+     * lane minted, not any name with a '!' in it (WP136) -- a user file whose
+     * name happens to carry one gets this lane, and its bit-exactness guard
+     * with it. */
+    if (!vol_name_is_container_sibling(v, name)) {
         size_t cn = 0, ci;
         const invfs_codec *all = invfs_codec_all(&cn);
         size_t lane_ref = 0, bar = 0;
@@ -802,8 +814,9 @@ static int sweep_dispatch(invfs_volume *v, uint64_t inode_id,
 
     /* WP14a: not text either -- executable binaries (ELF/PE/Mach-O by
      * magic, >= 4 KB) defer into the BINARY accumulator and are sealed
-     * into shared ZSTD batches (x86 members BCJ-prefiltered first). */
-    if (!strchr(name, '!') && !exer_no_bz) {
+     * into shared ZSTD batches (x86 members BCJ-prefiltered first). As
+     * above: a lane-minted sibling stays with its container (WP136). */
+    if (!vol_name_is_container_sibling(v, name) && !exer_no_bz) {
         int bfam = invfs_binary_family(full, full_len, name);
         if (bfam > 0 &&
             bz_defer(v, inode_id, name, full_len, (uint32_t)bfam) == 0) {
@@ -1033,7 +1046,8 @@ static int vol_sweep_one_v3(invfs_volume *v, uint64_t inode_id,
             /* only packs that opt into the v2 map wire record a generation;
              * without the opt-in a v1 map means "no generations here" and the
              * decomposition is left alone (otherwise it would never settle) */
-            if (name && name[0] && !strchr(name, '!') && cc && cd &&
+            if (name && name[0] && !vol_name_is_container_sibling(v, name) &&
+                cc && cd &&
                 cd->decomp_gen && cc->generation > cgen &&
                 cpack_map_decomp_gen(v, name) < cc->generation) {
                 int mrc = vol_cpack_migrate(v, inode_id, name, cc);
