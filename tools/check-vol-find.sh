@@ -44,18 +44,18 @@ src/cli/acl_inherit_test.c:266:SKIP   # child_has_acl: measurement, fault spent
 src/cli/acl_inherit_test.c:291:SKIP   # setup: aborts the test if the /p anchor is not found
 src/cli/cat.c:86:SKIP
 src/cli/cat.c:99:SKIP
-src/cli/cp.c:99:SKIP
+src/cli/cp.c:118:SKIP
 src/cli/heat_walk_test.c:365:SKIP
-src/cli/fuse_fs.c:1588:SKIP
-src/cli/fuse_fs.c:1922:SKIP
-src/cli/fuse_fs.c:2554:SKIP
-src/cli/fuse_fs.c:2765:SKIP
-src/cli/fuse_fs.c:2810:SKIP
-src/cli/fuse_fs.c:3057:SKIP
-src/cli/fuse_fs.c:3222:SKIP
-src/cli/fuse_fs.c:3294:SKIP
+src/cli/fuse_fs.c:1614:SKIP
+src/cli/fuse_fs.c:1950:SKIP
+src/cli/fuse_fs.c:2582:SKIP
+src/cli/fuse_fs.c:2796:SKIP
+src/cli/fuse_fs.c:2841:SKIP
+src/cli/fuse_fs.c:3090:SKIP
+src/cli/fuse_fs.c:3257:SKIP
 src/cli/fuse_fs.c:3329:SKIP
-src/cli/fuse_fs.c:3366:SKIP
+src/cli/fuse_fs.c:3364:SKIP
+src/cli/fuse_fs.c:3401:SKIP
 src/cli/otrunc_test.c:568:SKIP   # calibration: the armed lookup IS the assertion
 src/cli/otrunc_test.c:572:SKIP   # calibration: the armed lookup IS the assertion
 src/cli/lane_release_test.c:242:SKIP
@@ -75,6 +75,10 @@ src/cli/sibling_retire_v3_test.c:196:ACTS
 src/cli/sibling_retire_v3_test.c:211:ACTS
 src/cli/sib_walk_test.c:199:SKIP   # rescan: whether a name resolves IS the measurement
 src/cli/sib_walk_test.c:214:SKIP   # setup: create the bracketing directory only if absent
+src/cli/bang_name_test.c:146:SKIP   # live(): whether a name resolves IS the measurement -- the defect was a name that resolved when it should not have, so the oracle must be the lookup itself
+src/cli/bang_name_test.c:168:SKIP   # reads_exact(): an unresolvable name is a FAILED byte-exact read, not a soft miss. Asked for by exact name -- vol_read_named splits on the bang (vol_read.c:1390) and reports a miss for a file that is present and intact
+src/cli/bang_name_test.c:289:SKIP   # LEG A setup: the two inode ids are printed to show both names were distinct inodes before the unlink
+src/cli/bang_name_test.c:290:SKIP   # LEG A setup: as above, for the bang name
 src/cli/table_sync_evict_test.c:344:SKIP
 src/cli/tz_registry_test.c:175:SKIP
 src/cli/window_test.c:176:SKIP
