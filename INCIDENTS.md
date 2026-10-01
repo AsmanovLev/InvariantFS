@@ -1949,4 +1949,46 @@ the dispatcher, and I also could not measure bit-exactness and said so — that
 part was right, and the measurement confirmed the guess. **The remaining risk is
 the generic one:** `vol_sweep.c:775-798` will run ANY score-0 external pack
 against ANY file, so any future pack whose input magic sits at offset 0 inside a
-container is reachable by exactly this route.
+container is reachable by exactly this route.---
+
+## test-xfs: the residue is unrecoverable on this host, and the cause is fixed
+
+**Status:** cause FIXED and committed (`c90a9fd`). The residue is **not
+recoverable in place** — this is the reason the suite still does not finish, and
+it needs a host-level reset, not another code change.
+
+`test-xfs.sh` hangs with no output past `fs-a.xfs (v5)`. Three causes were found
+and fixed — the EXIT trap never detached its loop device, and two `losetup`
+ioctls were unbounded. **It still hangs after all three**, and this is why.
+
+**The blocker is not the shell.** Mid-flight, the suite's shell sits in
+`do_wait` and its child is:
+
+    3076154  D  xlog_wait_on_iclog  python3 - /srv/bench/wpxfs-3075966
+
+`D` is **uninterruptible sleep** and `xlog_wait_on_iclog` is a wait inside the
+**XFS journal**. A process in `D` cannot be killed by `timeout`, by `SIGKILL`,
+or by anything else — so bounding the ioctl was necessary and not sufficient,
+and the trace ending on an already-bounded `losetup -d` was the clue rather
+than the cause.
+
+**So the five wedged loop devices are not just attached — their filesystems are
+hung.** They are the residue of the leak this commit fixes: `cleanup` used to
+`rm -rf` the work tree with a live mount on top of it, the XFS journal never
+completed, and from that point `losetup -d` on those devices returns 0 without
+detaching. Five `type xfs` mounts on `(deleted)` images, six attached loops.
+
+**Nothing in this repository can clear that.** It needs the loop devices reset at
+the host level, which means a reboot or explicit loop-control reset. The
+**cause** is fixed so it cannot recur; the **effect** outlives every process that
+could clean it.
+
+What was measured, so the next person does not re-chase it:
+* after the trap fix, a hanging run leaks **no new device** (5 before, 5 after);
+* `losetup -f` still hands out free devices, so the pool is usable;
+* the suite spends its time in the fixture stage, not in any code under test.
+
+**And the honest summary of this suite's week:** four of its five red/green
+transitions were its own harness — a trap that leaked, a probe that blocked, a
+detach that blocked, and a mount whose filesystem hangs. None of them was the
+containerpack.
