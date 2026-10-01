@@ -41,10 +41,18 @@ cleanup() {
     # a host where many agents run suites at once: it reaches outside this
     # script's own process tree and can take down somebody else's daemon
     # whose image happens to be named c1/c2/c3.img.
-    [ "$DPID" -gt 0 ] 2>/dev/null && kill "$DPID" 2>/dev/null
+    #
+    # `|| true` is load-bearing, not noise. This is an EXIT trap under
+    # `set -euo pipefail`: `kill` on an already-reaped pid fails, `set -e`
+    # aborts the trap ON THAT LINE, the rest of the cleanup never runs, and the
+    # script exits with the kill's status. So the suite printed "Gate C: PASS
+    # (3 passed, 0 failed)" and still exited 1 -- which is worse than failing
+    # loudly, because the PASS line is the part a reader takes.
+    [ "$DPID" -gt 0 ] 2>/dev/null && kill "$DPID" 2>/dev/null || true
     rm -rf "$MNT"
     rm -f c1.img c2.img c3.img
     rm -rf gatec
+    return 0
 }
 
 trap cleanup EXIT
