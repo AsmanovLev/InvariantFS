@@ -2389,6 +2389,23 @@ int cpack_size_guard(uint64_t orig_len, const cpack_size_proj *p,
         reason = "the decomposition is not a gain";
     if (reason) {
         if (why) *why = reason;
+        /* The numbers behind the verdict. A refusal says WHICH rule fired but
+         * not what it was refusing, so a lane whose corpus drifts starts
+         * declining for reasons nobody can reconstruct from the log. Off by
+         * default; INVFS_DEBUG=1 turns it on, as it does elsewhere. */
+        if (getenv("INVFS_DEBUG") && getenv("INVFS_DEBUG")[0] == '1')
+            fprintf(stderr,
+                    "    [cpack size guard] %s: orig=%llu projected=%llu "
+                    "(fixed=%llu content=%llu member_cost=%llu) gain=%llu/1000 "
+                    "repro_max=%llu bound=%llu\n",
+                    reason, (unsigned long long)orig_len,
+                    (unsigned long long)projected,
+                    (unsigned long long)p->fixed,
+                    (unsigned long long)p->content,
+                    (unsigned long long)p->member_cost,
+                    (unsigned long long)gain,
+                    (unsigned long long)p->repro_max,
+                    (unsigned long long)CPACK_REPRO_MAX);
         return 0;
     }
     return 1;
