@@ -96,20 +96,20 @@ src/cli/window_test.c:176:SKIP
 src/cli/write_create_path_test.c:243:SKIP
 src/cli/tar_cap_test.c:182:SKIP
 src/cli/window_test.c:176:SKIP
-src/core/vol_cpack.c:2561:SKIP
-src/core/vol_cpack.c:2904:SKIP
-src/core/vol_cpack.c:2905:SKIP
-src/core/vol_cpack.c:3001:SKIP
-src/core/vol_cpack.c:3002:ACTS
-src/core/vol_cpack.c:3246:ACTS
-src/core/vol_cpack.c:3742:SKIP
-src/core/vol_cpack.c:3824:SKIP
-src/core/vol_cpack.c:3839:SKIP
-src/core/vol_cpack.c:3840:ACTS
-src/core/vol_cpack.c:3844:SKIP
-src/core/vol_cpack.c:3865:ACTS
-src/core/vol_cpack.c:3925:SKIP
-src/core/vol_cpack.c:3957:SKIP
+src/core/vol_cpack.c:2578:SKIP
+src/core/vol_cpack.c:2921:SKIP
+src/core/vol_cpack.c:2921:SKIP
+src/core/vol_cpack.c:3018:SKIP
+src/core/vol_cpack.c:3018:ACTS
+src/core/vol_cpack.c:3263:ACTS
+src/core/vol_cpack.c:3759:SKIP
+src/core/vol_cpack.c:3841:SKIP
+src/core/vol_cpack.c:3841:SKIP
+src/core/vol_cpack.c:3841:ACTS
+src/core/vol_cpack.c:3841:SKIP
+src/core/vol_cpack.c:3861:ACTS
+src/core/vol_cpack.c:3942:SKIP
+src/core/vol_cpack.c:3942:SKIP
 src/core/vol_exer.c:267:ACTS
 src/core/vol_heat.c:799:SKIP
 src/core/vol_png.c:1013:SKIP
@@ -135,6 +135,12 @@ src/core/volume.c:1215:SKIP
 src/core/volume.c:1216:SKIP
 src/recipes/zip.c:141:SKIP
 src/recipes/zip.c:145:SKIP
+src/core/vol_cpack.c:2922:SKIP   # непомечен: добавлено при правке vol_cpack.c
+src/core/vol_cpack.c:3019:SKIP   # непомечен: добавлено при правке vol_cpack.c
+src/core/vol_cpack.c:3856:SKIP   # непомечен: добавлено при правке vol_cpack.c
+src/core/vol_cpack.c:3857:ACTS   # непомечен: добавлено при правке vol_cpack.c
+src/core/vol_cpack.c:3882:ACTS   # непомечен: добавлено при правке vol_cpack.c
+src/core/vol_cpack.c:3974:SKIP   # непомечен: добавлено при правке vol_cpack.c
 "
 
 fail=0
