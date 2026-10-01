@@ -56,12 +56,9 @@ src/cli/fuse_fs.c:3075:SKIP
 src/cli/fuse_fs.c:3147:SKIP
 src/cli/fuse_fs.c:3182:SKIP
 src/cli/fuse_fs.c:3219:SKIP
-src/cli/fuse_fs.c:347:SKIP
 src/cli/lane_release_test.c:242:SKIP
 src/cli/ls.c:105:SKIP
 src/cli/ls.c:119:SKIP
-src/cli/ls.c:90:ACTS
-src/cli/meta_clobber_test.c:484:ACTS
 src/cli/read_parallel_bitexact_test.c:427:SKIP
 src/cli/rollback_symlink_test.c:207:SKIP
 src/cli/rollback_symlink_test.c:223:SKIP
@@ -75,15 +72,9 @@ src/cli/sibling_retire_v3_test.c:185:ACTS
 src/cli/sibling_retire_v3_test.c:196:ACTS
 src/cli/sibling_retire_v3_test.c:211:ACTS
 src/cli/table_sync_evict_test.c:344:SKIP
-src/cli/table_sync_evict_test.c:6:SKIP
-src/cli/tz_registry_test.c:13:SKIP
 src/cli/tz_registry_test.c:175:SKIP
-src/cli/tz_registry_test.c:477:SKIP
-src/cli/tz_registry_test.c:9:SKIP
 src/cli/window_test.c:176:SKIP
-src/cli/write_create_path_test.c:16:SKIP
 src/cli/write_create_path_test.c:243:SKIP
-src/cli/write_create_path_test.c:7:SKIP
 src/cli/tar_cap_test.c:182:SKIP
 src/cli/window_test.c:176:SKIP
 src/core/vol_cpack.c:2561:SKIP
@@ -122,8 +113,6 @@ src/core/vol_textzone.c:679:SKIP
 src/core/vol_tier.c:304:SKIP
 src/core/volume.c:1240:SKIP
 src/core/volume.c:1241:SKIP
-src/core/vol_write.c:80:ACTS
-src/core/vol_write.c:998:SKIP
 src/recipes/zip.c:141:SKIP
 src/recipes/zip.c:145:SKIP
 "
@@ -134,10 +123,28 @@ trap 'rm -f "$found_list"' EXIT
 
 # Every non-definition call site, tests included: a test can hide the same
 # mistake, and sibling_retire_v3_test and rollback_symlink_test both do.
+#
+# The comment filter must match the CONTENT, not the start of the output line.
+# grep -rn prints "file:line:content", so an anchored ^\s*\* can never match
+# anything -- which is how eight ledger entries ended up being citations of
+# call sites rather than call sites. A comment describing a retired API is a
+# 1.7 doc bug, not a call, and counting it makes the ledger churn every time a
+# comment is edited.
 grep -rn 'vol_find[[:space:]]*(' src --include='*.c' --include='*.h' 2>/dev/null \
   | grep -vE 'vol_find_rc|vol_find_ex|vol_find_strict' \
-  | grep -vE 'uint64_t vol_find\(|^\s*\*' \
-  | cut -d: -f1,2 \
+  | grep -vE 'uint64_t vol_find\(' \
+  | awk -F: '
+      # a call site is code: the line is not a comment.
+      { content = $0; sub(/^[^:]*:[0-9]+:/, "", content) }
+      content ~ /^[[:space:]]*\*/      { next }   # block-comment continuation
+      content ~ /^[[:space:]]*\/\//    { next }   # line comment
+      content ~ /\/\*.*vol_find/        { next }   # block comment on this line
+      # Deliberately NOT /*.*vol_find/: that also matches a POINTER
+      # DEREFERENCE standing before the call -- "invfs_volume *v) { return
+      # vol_find(...)" -- and it silently swallowed a real call site. The
+      # detector has to have been SEEN failing, or it is not known to detect.
+      { print $1 ":" $2 }
+    ' \
   | sort -u > "$found_list"
 
 if [ ! -s "$found_list" ]; then
