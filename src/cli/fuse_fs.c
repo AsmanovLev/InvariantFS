@@ -2836,7 +2836,17 @@ static int invf_truncate(const char *path, off_t len, struct fuse_file_info *fi)
     if (rc == 0) {
         if (c->have_meta) {
             c->meta.mtime = (int64_t)time(NULL);
-            vol_apply_meta(g_vol, c->name, &c->meta);
+            /* Same shape, same handling as the close path's stamp (see
+             * :2579-2580): the truncate itself is already committed, so this
+             * is NOT data loss -- what is lost when it fails is the mtime, and
+             * a file whose mtime did not move on a truncate is a metadata lie
+             * an operator can act on wrongly (a restore that trusts mtime, a
+             * sync that skips what it believes unchanged). It was checked on
+             * the close path and discarded here, which is the inconsistency,
+             * not the check. */
+            if (!vol_apply_meta(g_vol, c->name, &c->meta))
+                fprintf(stderr, "invf: truncate stamp FAILED %s (area full?)\n",
+                        c->name);
         }
         vol_mark_pending(g_vol, vol_find(g_vol, c->name));
         vol_flush(g_vol);
