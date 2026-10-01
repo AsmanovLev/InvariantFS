@@ -1770,4 +1770,54 @@ and this is a §1.8 commit:
   suite still ignored its `$WORK` in some paths when I read it mid-investigation.
   That was my misreading, not the suite's — recorded because it is the second
   time in this session that I read a line and concluded something about it
-  without checking the line above.
+  without checking the line above.---
+
+## test-qcow2-zlib: the containerpack size guard no longer refuses this image
+
+**Status:** localised one level deeper; NOT fixed, and deliberately so. This is
+pre-existing — bisected to `11eb51a`, before this session — and closing it needs
+measurement, not more reading.
+
+The suite asserts the guard REFUSES to decompose the zlib-backed qcow2 image,
+because the Q2R3 strip keeps every deflate stream verbatim in the recipe and
+regenerates it per read (kind 2), so the recipe is 336,565 B of a 377,344 B
+container and the members are pure addition on top. Measured packs-on vs
+packs-off, that shape holds +409 KiB more than storing the container whole.
+
+It decomposes. The sweep prints
+
+      z.qcow2: qcow2 (codecpack)
+
+and the suite fails on the negative control.
+
+WHERE IT IS. `src/core/vol_cpack.c:3554`:
+
+    cpack_repro_stats(ments, nmembers, &proj);
+    proj.fixed += (uint64_t)map_len;
+    if (!cpack_size_guard((uint64_t)full_len, &proj, &why)) {
+        cpack_size_refusal(pc->name, name, (uint64_t)full_len, &proj, why);
+        goto out;
+    }
+
+and the guard itself (`:2372`) is intact and reads correctly: it refuses on a
+kind-2 entry that re-deflates more than the read path bounds, on an
+overflowing projection, and when the projection is not a gain against
+`cpack_gain_mille()`.
+
+**So the guard is not mis-written — the projection it is handed does not trip
+it.** Either `proj.content`/`member_cost`/`fixed` now sum below the threshold,
+or `orig_len` is no longer the 377,344 B the comment assumes, or the member set
+changed. **Which one is a measurement, and the three have different owners:**
+a recipe accounting change would be ours, a corpus change would be the suite's,
+and a `CPACK_REPRO_MAX` change would be the read-path bound.
+
+**What is NOT at risk.** The 1:1 rebuild-and-memcmp guard runs after this and is
+untouched, so a decomposition that happens is still bit-exact — this is space
+accounting, not the invariant. That is why it stayed red for a long time without
+anyone treating it as urgent.
+
+Not fixed here: the projection is not instrumented, and §1.8 keeps a measured
+answer out of a commit that has none. Whoever picks it up should print
+`proj.fixed`, `proj.content`, `proj.member_cost`, `full_len` and
+`cpack_gain_mille()` on the refusal path and compare against the suite's
+comment figures — that single measurement names the owner.
