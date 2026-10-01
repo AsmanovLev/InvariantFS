@@ -341,12 +341,12 @@ void mbuf_free(invfs_volume *v, uint64_t pba)
     vol_free_blocks(v, pba, 1);
     /* vol_free_blocks has no metadata-zone branch (metadata pbas sit below
      * raw_zone_start), so keep the metadata counters symmetric here and
-     * rewind the cursor so the hole is found again. Mirror the retention
-     * guard: while a checkpoint holds blocks, vol_free_blocks leaves the
-     * bit set and the counters untouched, so this must too. */
+     * rewind the cursor so the hole is found again. Mirror the save-point
+     * pin: while a pin holds blocks, vol_free_blocks leaves the bit set and
+     * the counters untouched, so this must too. */
     if (pba >= v->sb.metadata_zone_start &&
         pba < v->sb.metadata_zone_start + v->sb.metadata_zone_blocks &&
-        !((v->retain || v->ck_present) && !v->retain_release)) {
+        !v->retain_release) {
         v->meta_free_blocks++;
         v->mb_alloc_fail_run = 0;
         if (pba < v->mb_alloc_cursor && v->mb_alloc_cursor != 0)

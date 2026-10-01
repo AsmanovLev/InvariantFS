@@ -6,7 +6,7 @@
 - Base: `main` @ `26ef748`
 
 ## Context from compressed orchestration (b6)
-No v3 save-point exists yet. The v2 rollback (`vol_rollback.c`) uses CKP0 + retention registry, completely different mechanism. The new v3 save point is `{base_root, delta_end, flags}` with a new block-0 descriptor `SPT0`. WP-M14 fold publishes new bases and calls `fold_reclaim_hook` (M15). WP-M15 needs `pinned_root` from this WP.
+No v3 save-point exists yet. The v2 rollback (the now-deleted `vol_rollback` core file) uses CKP0 + retention registry, completely different mechanism. The new v3 save point is `{base_root, delta_end, flags}` with a new block-0 descriptor `SPT0`. WP-M14 fold publishes new bases and calls `fold_reclaim_hook` (M15). WP-M15 needs `pinned_root` from this WP.
 
 ## Scope (from WP-M16 spec, impl_docs/WP-M16-savepoint-rollback.md)
 
@@ -14,7 +14,7 @@ No v3 save-point exists yet. The v2 rollback (`vol_rollback.c`) uses CKP0 + rete
 
 Files:
 - `src/core/invarifs.h` — SPT0 descriptor at a new block-0 offset (e.g. `INVFS_SPT0_OFF`)
-- `src/core/vol_rollback.c` — v3 save point capture/restore/drop (rework CKP0 logic)
+- (deleted since) the `vol_rollback` core file — v3 save point capture/restore/drop (rework CKP0 logic)
 - `src/core/volume.c` — load SPT0 at open; expose `pinned_root` on volume struct
 - `src/core/vol_delta.c` — truncate to `delta_end` (new `vol_delta_truncate`)
 - `src/core/vol_fold.c` — pass `pinned_root` to `fold_reclaim_hook`
@@ -61,7 +61,7 @@ Files:
 
 3. In `volume.c` open path: load SPT0 if present, set `v->pinned_root` and `v->savepoint_live`.
 
-4. Create `vol_spt0.c` (or add to `vol_rollback.c`):
+4. Create `vol_spt0.c` (WP-M16 shipped it standalone; the CKP0 file it might have gone in is gone):
    - `vol_spt0_capture(v)` — record current root + delta_end, write SPT0
    - `vol_spt0_restore(v)` — rollback procedure above
    - `vol_spt0_drop(v)` — clear SPT0, release pin
@@ -121,7 +121,7 @@ Remaining TODOs: (list any deferred decisions or open issues)
 ```
 
 ## Key source touchpoints verified in this tree
-- `vol_rollback.c:835` — existing v2 `vol_rollback` for structure reference
+- (deleted) the v2 `vol_rollback` for structure reference
 - `vol_fold.c:264` — `fold_reclaim_hook` receives `pinned_root` from volume struct
 - `vol_delta.c` — delta chain structure; `vol_delta_close` resets index
 - `invarifs.h` — block-0 layout: PCK0 @ 0x3C4, next free after

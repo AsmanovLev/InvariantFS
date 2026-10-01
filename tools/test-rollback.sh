@@ -87,9 +87,8 @@ fail() { echo "FAIL: $*" >&2; exit 1; }
 echo "== build the probe helper (public API only; sealpick convention) =="
 mkdir -p "$WORK/tools"
 cat > "$WORK/tools/rbpick.c" <<'RBPICK_EOF'
-/* rbpick — WP21 test helper (uses only the public volume.h API).
+/* rbpick — test helper (uses only the public volume.h API).
  *
- *   rbpick <img> ckp        -> "present=<0|1> seq=<n>" (the CKP0 state)
  *   rbpick <img> rm <name>  -> delete a file (no CLI rm exists)
  */
 #include <stdio.h>
@@ -107,14 +106,6 @@ int main(int argc, char **argv)
     v = vol_open(argv[1], &err);
     if (!v) { fprintf(stderr, "open err %d\n", err); return 1; }
 
-    if (!strcmp(argv[2], "ckp")) {
-        invfs_ckp0 ck;
-        int p = vol_ckp_info(v, &ck);
-        printf("present=%d seq=%llu\n", p,
-               p ? (unsigned long long)ck.sweep_seq : 0ull);
-        vol_close(v);
-        return 0;
-    }
     if (!strcmp(argv[2], "rm") && argc == 4) {
         int rc = vol_delete_file(v, argv[3]);
         if (rc == 0) rc = vol_flush(v);

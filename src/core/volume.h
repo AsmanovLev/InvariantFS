@@ -18,24 +18,6 @@ int invfs_sweep_ui_active(void);
 #define INVFS_MAX_NAME 255
 
 invfs_volume *vol_open(const char *path, int *err);
-/* ---- WP24-lite: read-only time-travel view at the live sweep checkpoint
- * (the non-destructive twin of vol_rollback). Opens the volume normally,
- * then applies a VIRTUAL CUT: the L2P journal is replayed from the
- * checkpoint's staged prefix (never the live post-sweep slots) and the
- * inode-area scan stops at the checkpoint's append pointer -- the mounted
- * view is exactly the sweep-start state, with the WP22d consistent-cut
- * machinery hiding anything the cut cannot prove. The retention registry
- * (live exactly while CKP0 is) keeps the post-checkpoint-freed blocks the
- * cut references readable; the present is never written (the handle is
- * VOLF_READONLY + every mutation path refuses at vol_mark_dirty;
- * vol_flush/vol_sync/vol_close persist nothing).
- * ckpt_seq == 0 names the live checkpoint (K=1: the only one that exists);
- * a nonzero ckpt_seq must equal it.
- * err: same codes as vol_open, plus -11 = no live checkpoint / sequence
- * mismatch / the checkpoint's staging failed verification (the present is
- * untouched). Returns NULL on failure. */
-invfs_volume *vol_open_at(const char *path, uint64_t ckpt_seq, int *err);
-/* 1 = this handle is a time-travel view (all write paths refuse) */
 void vol_close(invfs_volume *v);
 int  vol_flush(invfs_volume *v);
 /* vol_flush + a real storage barrier (fsync on image files, no-op-ish on
@@ -61,13 +43,6 @@ typedef struct {
      * (a drop window took the data after the maps survived) -- the
      * content-level consistent cut. Quarantined like the map-level cut. */
     uint64_t corrupt_files;
-    /* Allocated-but-unreferenced blocks while a sweep checkpoint is live:
-     * retention holds them (never reused), but non-arming processes do not
-     * register them in \x01reten, so they are indistinguishable from true
-     * orphans until the checkpoint resolves. Reported separately, never
-     * counted as issues, and reclaimed by fsck -f after the checkpoint is
-     * gone (report mode then shows them as orphans again). */
-    uint64_t held_ckpt;
     /* WP-M4: metadata-v3 base-tree validation (VOLF_V3 volumes only; all
      * zero for the v2 path). The v3 checker detects and reports, it does
      * not repair. `v3_*` are additive: no v2 field changes meaning. */
@@ -1108,32 +1083,6 @@ typedef struct {
 
 int vol_seal2_repair(invfs_volume *v, invfs_seal2_repair *rep);
 
-/* ---- WP21: sweep checkpoint + rollback (CKP0 descriptor, invarifs.h) ----
- * invf-sweep arms a checkpoint BEFORE the walk (vol_ckp_begin): the CKP0
- * descriptor records the inode-area and journal append pointers plus a
- * staging run holding the journal prefix (the journal is append-only but
- * compactions replace the active slot, so the pre-sweep L2P survives the
- * sweep only as that copy). While a checkpoint-armed sweep runs,
- * vol_free_blocks does NOT free: the blocks stay allocated and are
- * remembered in the retention registry (the hidden "\x01reten" owner
- * inode, written by vol_ckp_end at sweep end).
- * Post-sweep sessions free immediately as before (documented best-effort
- * hole for deletes between sweep and rollback).
- *
- * vol_ckp_realize (invf-sweep --realize) deletes the registry -- freeing
- * every retained block -- and clears CKP0: the point of no return. A bare
- * sweep instead realizes AFTER arming (WP22d): vol_ckp_begin stages the
- * current journal and writes the new CKP0 first, and only then deletes
- * the old registry -- the volume always has one live net.
- *
- * vol_rollback (invf-rollback, offline) restores the staged journal and
- * truncates the inode area to the checkpoint pointers, then runs the
- * ordinary fsck rebuild: post-sweep records/journal entries vanish
- * wholesale, pre-sweep record versions resurrect with their (retained,
- * never-reallocated) blocks, and everything the sweep allocated is
- * reclaimed as orphans. */
-/* 1 = a live (magic+CRC-valid) CKP0 descriptor was read at open */
-int  vol_ckp_armed(const invfs_volume *v);
 /* 1 = the previous session did not close cleanly (and did not
  * auto-recover); rollback tools proceed anyway -- they ARE the recovery */
 int  vol_needs_recovery(invfs_volume *v);
@@ -1141,25 +1090,6 @@ int  vol_needs_recovery(invfs_volume *v);
  * FUSE read path refuses on it (loud beats maybe-phantom); a volume that
  * merely opened dirty stays readable for inspection. */
 int  vol_io_latched(invfs_volume *v);
-/* 1 = live (+ a copy of the descriptor), 0 = absent */
-int  vol_ckp_info(const invfs_volume *v, invfs_ckp0 *out);
-/* sweep start: 1 = armed (retention active), 0 = declined (the volume is
- * read-only/recovering, a redundancy seal is live, or the environment
- * opted out), -1 = hard error. Declined is NOT an error: the sweep runs
- * uncheckpointed. */
-int  vol_ckp_begin(invfs_volume *v, int no_realize);
-/* sweep end: write the retention registry (the "\x01reten" owner + L2P
- * maps, sharded like the seal owners). 0 = ok (or nothing armed). */
-int  vol_ckp_end(invfs_volume *v, uint64_t *ranges_out, uint64_t *blocks_out);
-/* realize: delete the registry (freeing its blocks) + clear CKP0.
- * 1 = something was realized, 0 = nothing live, -1 = error. */
-int  vol_ckp_realize(invfs_volume *v, uint64_t *freed_blocks_out);
-/* rollback: 0 = rolled back, 1 = no checkpoint, -2 = refused (a live
- * redundancy seal would be invalidated; --free-redundant first), -3 = the
- * checkpoint or its staging failed verification (the post-sweep state is
- * untouched), -1 = io/rebuild error (re-run; the steps are idempotent).
- * *reclaimed_out (optional) takes the orphan-block count the rebuild freed. */
-int  vol_rollback(invfs_volume *v, uint64_t *reclaimed_out);
 
 /* WP-M21: inode-area compaction retired. The v3 inode area lives in
  * dynamic metadata extents (WP30), and dead-record reclaim happens via

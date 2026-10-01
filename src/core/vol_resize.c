@@ -214,29 +214,18 @@ int vol_rsz0_apply(invfs_volume *v, const invfs_rsz0 *rz)
             goto out;
     }
 
-    /* -- journal: staged bytes verbatim, then a fresh terminator (the
-     *    vol_flush convention) so replay can never run into the stale bytes
-     *    the overlapping old areas left behind. WP22d: the staged bytes
-     *    ARE the winning slot's [header + image + chained log] when the
-     *    volume is slotted (the chain terminates the replay by itself;
-     *    the terminator is a harmless extra bad entry then) -- and slot 1
-     *    of the new area must hold no stale JRN0 header that could compete
-     *    with the staged slot 0. -- */
+    /* -- the gap: staged bytes verbatim, then a fresh terminator (the
+     *    vol_flush convention) so nothing can run into the stale bytes the
+     *    overlapping old areas left behind. On a v3 volume the gap holds no
+     *    staged bytes at all, so this is the terminator alone. -- */
     {
         uint64_t left = rz->j_bytes, off = sbase + rz->bm_bytes;
         uint64_t dst = new_js * (uint64_t)INVFS_BLOCK_SIZE;
-        int slotted = 0;
         while (left) {
             size_t n = left > BLKIO_BOUNCE ? BLKIO_BOUNCE : (size_t)left;
             if (io_seek(&v->io, off) != 0 || io_read(&v->io, buf, n) != 0 ||
                 io_seek(&v->io, dst) != 0 || io_write(&v->io, buf, n) != 0)
                 goto out;
-            if (off == sbase + rz->bm_bytes) {
-                invfs_jrn_hdr jh;
-                memcpy(&jh, buf, sizeof jh);
-                slotted = memcmp(jh.magic, INVFS_JRN_MAGIC, 4) == 0 &&
-                          jh.version == INVFS_JRN_VERSION;
-            }
             off += n;
             dst += n;
             left -= n;
@@ -247,16 +236,6 @@ int vol_rsz0_apply(invfs_volume *v, const invfs_rsz0 *rz)
             z.crc = ~invfs_crc32c(&z, offsetof(invfs_l2p_entry, crc));
             if (io_seek(&v->io, dst) != 0 ||
                 io_write(&v->io, &z, sizeof z) != 0)
-                goto out;
-        }
-        if (slotted) {
-            /* the staged content IS slot 0 of the new area; slot 1 must
-             * read as absent (stale bytes there could otherwise parse as
-             * a competing header after a later drop) */
-            memset(wbuf, 0, INVFS_BLOCK_SIZE);
-            if (io_seek(&v->io, (new_js + INVFS_JRN_SLOT_BLOCKS) *
-                        (uint64_t)INVFS_BLOCK_SIZE) != 0 ||
-                io_write(&v->io, wbuf, INVFS_BLOCK_SIZE) != 0)
                 goto out;
         }
     }
@@ -347,13 +326,10 @@ int vol_rsz0_apply(invfs_volume *v, const invfs_rsz0 *rz)
             goto out;
         memcpy(blk, nsb, sizeof *nsb);
         memset(blk + INVFS_RSZ0_OFF, 0, sizeof(invfs_rsz0));
-        /* WP21: the resize moved the journal + inode area, so a live sweep
-         * checkpoint's positions are meaningless from here on. Live CKP0 is
-         * refused at preflight (see resize.c); a descriptor that still slips
-         * through (crash between preflight and commit) is cleared here and
-         * its staging/registry blocks are reclaimed by the next sweep's
-         * defensive realize -- never freed blindly from under the L2P. */
-        memset(blk + INVFS_CKP0_OFF, 0, sizeof(invfs_ckp0));
+        /* 0x220..0x258 is reserved and nothing has written there since the
+         * sweep checkpoint went; the bytes are left exactly as they were
+         * found rather than re-zeroed, so this commit writes no field the
+         * layout does not account for. */
         /* WP25: the device table follows the growth (the tail device
          * absorbed it) -- same block-0 write, so the table and the
          * superblock never disagree on disk. */

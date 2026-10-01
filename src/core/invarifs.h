@@ -46,34 +46,6 @@
 #define INVFS_JOURNAL_BLOCKS 8192
 #define INVFS_META_RESERVED_PCT_DFLT 10  /* WP30: default 10% free pool for metadata */
 
-/* The retired mapping log's slot geometry, and its record header. invf-resize
- * still reads slot headers out of the reserved gap to decide how to move the
- * region (src/cli/resize.c, src/core/vol_resize.c), so the header layout has
- * to keep parsing. Nothing in this build WRITES one: the gap is zero-filled
- * on a volume this code creates and stays that way for the life of the
- * volume. Do not add a writer. */
-#define INVFS_JRN_SLOTS       2
-#define INVFS_JRN_SLOT_BLOCKS (INVFS_JOURNAL_BLOCKS / INVFS_JRN_SLOTS)
-#define INVFS_JRN_MAGIC   "JRN0"
-#define INVFS_JRN_VERSION 1
-
-/* sb.pad2 slot selector. sb.pad2 is RESERVED and must be 0 on a volume this
- * build writes; resize only ever reads it. */
-#define INVFS_JSEL_LEGACY 0
-#define INVFS_JSEL_SLOT0  1
-#define INVFS_JSEL_SLOT1  2
-
-#pragma pack(push, 1)
-typedef struct {
-    char     magic[4];      /* "JRN0" */
-    uint32_t version;       /* INVFS_JRN_VERSION */
-    uint64_t seq;           /* compaction sequence, monotone per volume */
-    uint64_t image_bytes;   /* compacted-image bytes behind the header block */
-    uint32_t image_crc;     /* CRC32C over the image bytes (0 when empty) */
-    uint32_t crc32c;        /* over the header with this field read as zero */
-} invfs_jrn_hdr;            /* 28 bytes, occupies the slot's first block */
-#pragma pack(pop)
-
 /* Volume state */
 #define INVFS_STATE_CLEAN    0xCA
 #define INVFS_STATE_DIRTY    0xDA
@@ -168,8 +140,8 @@ typedef struct {
 } invfs_class_tlv;   /* 4 bytes */
 #pragma pack(pop)
 
-/* Record types of the retired mapping log, in the same never-written gap
- * (see above). Same rule: parsed on resize, written by nothing. */
+/* Record types of the retired mapping log. Nothing reads them and nothing
+ * writes them; the gap they lived in stays reserved (see above). */
 #define INVFS_JRN_MAP       0x01
 #define INVFS_JRN_UNMAP     0x02
 #define INVFS_JRN_SWEEP     0x03
@@ -351,53 +323,23 @@ typedef struct {
 } invfs_rszs;                   /* 40 bytes, block-padded */
 #pragma pack(pop)
 
-/* ---- WP21: CKP0 sweep-checkpoint descriptor (block 0 reserved area) ----
- * Lives at byte offset 0x220 of block 0, past the superblock (0x00..0x90),
- * the RDP0 descriptor (0x100..0x118) and the RSZ0 descriptor
- * (0x140..0x20C -- 0x180, the offset the WP21 spec suggested, lies INSIDE
- * the RSZ0 payload, so CKP0 moved to the first free 0x20 boundary).
- * Pre-WP21 images carry zeros there, which read as "absent" (magic
- * mismatch) -- the RDP0 convention.
- *
- * Written by invf-sweep BEFORE the walk (the checkpoint = the two append
- * pointers at sweep start), then every block the sweep retires is held by
- * the retention registry ("\x01reten" owner inode) instead of being freed.
- * invf-rollback restores the STAGED journal prefix (vol_flush rewrites the
- * journal in place, so the pre-sweep L2P survives only as a copy), zeroes
- * the inode area at inode_area_pos (append-only: the pre-sweep records are
- * byte-intact), and lets the fsck rebuild machinery reconcile the rest.
- *
- *   0x220  char magic[4]        "CKP0"
- *   0x224  u32 crc32c           over the descriptor with this field 0
- *   0x228  u64 inode_area_pos   inode-area append pointer at checkpoint
- *   0x230  u64 journal_pos      journal append pointer at checkpoint
- *   0x238  u64 stage_pba        staging run holding the journal prefix
- *   0x240  u64 stage_blocks     (content length = journal_pos - jstart)
- *   0x248  u64 sweep_seq        per-volume monotone checkpoint counter
- *   0x250  u64 time_unix        checkpoint wall time
- * 56 bytes total; the rest of block 0 stays reserved-zero. */
-#define INVFS_CKP0_OFF 0x220
-#pragma pack(push, 1)
-typedef struct {
-    char     magic[4];          /* 0x220 "CKP0" */
-    uint32_t crc32c;            /* 0x224 */
-    uint64_t inode_area_pos;    /* 0x228 */
-    uint64_t journal_pos;       /* 0x230 */
-    uint64_t stage_pba;         /* 0x238 */
-    uint64_t stage_blocks;      /* 0x240 */
-    uint64_t sweep_seq;         /* 0x248 */
-    uint64_t time_unix;         /* 0x250 */
-} invfs_ckp0;                   /* 0x258 = 56 bytes */
-#pragma pack(pop)
+/* 0x220..0x258 of block 0 is RESERVED and stays reserved-zero: it held the
+ * WP21 sweep-checkpoint descriptor, which format v3 retired with the inode
+ * area it described (the record area no longer carries the absolute
+ * append-pointer tombstones a checkpoint could protect). Nothing in this
+ * build writes there and nothing reads it; v3's rollback window is the SPT0
+ * save point at 0xA00. The bytes are not renumbered -- see the layout notes
+ * below, which still account for the span. */
 
 /* WP-M21: CMP0/CMPS gone. The v3 inode area is a sequence of dynamic
  * metadata extents in the mapper; no in-place compaction machinery exists.
- * The reserved layout jumps from CKP0 (0x220..0x258) to DEVT (0x2A0). */
+ * The reserved span 0x220..0x258 and 0x260..0x290 both stay reserved-zero;
+ * the next descriptor after them is DEVT (0x2A0). */
 
 /* ---- WP25: DEVT device-table descriptor (block 0 reserved area) ----
  * Lives at byte offset 0x2A0 of block 0, past the superblock (0x00..0x90),
- * RDP0 (0x100..0x118), RSZ0 (0x140..0x20C), CKP0 (0x220..0x258) and CMP0
- * (0x260..0x290). Single-device (pre-WP25) images carry zeros there, which
+ * RDP0 (0x100..0x118), RSZ0 (0x140..0x20C), the reserved spans
+ * (0x220..0x258) and (0x260..0x290). Single-device (pre-WP25) images carry zeros there, which
  * read as "absent" (magic mismatch) -- the RDP0 convention, and the reason
  * single-device volumes are byte-identical to what they were.
  *
@@ -454,7 +396,7 @@ typedef struct {
 
 /* ---- WP27: CVT0 v1->v2 conversion descriptor (block 0 reserved area) ---
  * Lives at byte offset 0x360 of block 0, past the superblock, RDP0
- * (0x100), RSZ0 (0x140), CKP0 (0x220) and DEVT (0x2A0).
+ * (0x100), RSZ0 (0x140), the reserved span 0x220 and DEVT (0x2A0).
  * Volumes that never saw a converter carry zeros there ("absent").
  *
  * invf-migrate-v2 rewrites a v1 volume in place: records grow 8 bytes per
@@ -513,8 +455,8 @@ typedef struct {
 
 /* WP30: MET0 dynamic metadata extent mapper descriptor (block 0 reserved area)
  * Lives at byte offset 0x3A0 of block 0, past the superblock (0x00..0x90),
- * RDP0 (0x100), RSZ0 (0x140), CKP0 (0x220), CMP0 (0x260), DEVT (0x2A0)
- * and CVT0 (0x360). Volumes that never saw dynamic metadata carry zeros there
+ * RDP0 (0x100), RSZ0 (0x140), the reserved spans 0x220 and 0x260, DEVT
+ * (0x2A0) and CVT0 (0x360). Volumes that never saw dynamic metadata carry zeros there
  * ("absent" - magic mismatch with MET0 magic).
  *
  * The mapper table is stored in the metadata zone (not block 0), and this
@@ -603,7 +545,7 @@ typedef struct {
  * Lives at byte offset 0x9D0 of block 0 -- the first FREE 16-byte-aligned
  * offset after the existing descriptors. Used ranges (read from this
  * header, not invented): superblock 0x00..0x90, RDP0 0x100..0x118,
- * RSZ0 0x140..0x20C, CKP0 0x220..0x258, CMP0 0x260..0x290,
+ * RSZ0 0x140..0x20C, the reserved spans 0x220..0x258 and 0x260..0x290,
  * DEVT 0x2A0..0x35C, CVT0 0x360..0x39C, MET0 0x3A0..0x3C4, and PCK0
  * 0x3C4..0x9D0. PCK0 is a fixed-size struct (63 codec refs max), so it
  * always ends at exactly 0x9D0, which is 16-byte aligned; a pre-v3 image
@@ -642,8 +584,8 @@ typedef struct {
 
 /* ---- WP-M16: SPT0 v3 save-point descriptor (block 0 reserved area) ----
  * Lives at byte offset 0xA00 of block 0, past the superblock (0x00..0x90),
- * RDP0 (0x100), RSZ0 (0x140), CKP0 (0x220), CMP0 (0x260), DEVT (0x2A0),
- * CVT0 (0x360), MET0 (0x3A0), PCK0 (0x3C4..0x9CC) and RT30 (0x9D0..0xA00).
+ * RDP0 (0x100), RSZ0 (0x140), the reserved spans 0x220 and 0x260, DEVT
+ * (0x2A0), CVT0 (0x360), MET0 (0x3A0), PCK0 (0x3C4..0x9CC) and RT30 (0x9D0..0xA00).
  * Volumes that never captured a save point carry zeros there ("absent").
  *
  * The save point records {base_root, delta_end} at capture time. base_root
@@ -681,10 +623,10 @@ typedef struct {
  * the pinned state naming blocks whose content now belongs to somebody else:
  * invf-rollback returns 0, invf-fsck says OK, and the first read of the
  * restored file fails with "segment CRC mismatch" (impl_docs/AUDIT.md, P0).
- * WP21's v2 answer was the CKP0 + "\x01reten" registry: while the checkpoint
- * was armed, vol_free_blocks freed nothing and the skipped blocks were
- * registered. WP-M21 retired both with the v2 metadata machinery, so this
- * descriptor is the v3 re-expression: `pba` names a run of `blocks` blocks
+ * This descriptor is the only v3 data pin: while a save point is armed,
+ * vol_free_blocks frees nothing. (WP21's v2 answer was a coarse sweep
+ * checkpoint plus a "\x01reten" registry; both went with the v2 metadata
+ * machinery.) `pba` names a run of `blocks` blocks
  * holding a bitmap of total_blocks bits -- one bit per volume block, the same
  * shape as the retired per-run retmap. A set bit means "the live save point's
  * data references this block": the block stays ALLOCATED in the real bitmap

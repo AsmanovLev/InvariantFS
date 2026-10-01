@@ -1130,7 +1130,8 @@ sweep had already freed. Observed on a 5-file volume as
   position-kill tombstone in place at the owner's own position;
   `vol_retire_inode` routes `\x01*` deletes through it.
 - `vol_fsck.c`: mark live mapper extents used in the bitmap rebuild.
-- `vol_rollback.c`: free the CKP0 staging run on clear; delete the
+- `vol_rollback.c` (deleted since; the CKP0 machinery it fixed went with
+  format v2 — see "v2 rollback" below): free the CKP0 staging run on clear; delete the
   retention registry before the phase-2 rebuild; purge the sweep's other
   derived owners (`\x01tzb`/tier/rawm) so their post-sweep ASTs stop
   pinning swept segments; free shard ranges from the owner AST.
@@ -1548,31 +1549,38 @@ WP-M21, and the test was asserting a string the engine cannot produce.
 
 **The evidence, in the tree:**
 
-- `src/core/vol_rollback.c:65` — `vol_ckp_begin` is a stub that returns 0
-  ("declined") unconditionally. Its body is one comment and a `return 0`.
-  Nothing arms a CKP0 sweep checkpoint any more.
-- `src/core/vol_rollback.c:75` — `vol_ckp_end` returns 0 blocks retained; the
-  `\x01reten` registry is not written. The sweep's registry write is gated on
-  `!VOLF_V3` anyway (`tools/invf-sweep.c:2085`).
-- `src/core/vol_rollback.c:109` — `ckp_stage_replay`, the function that
-  reconstructed the pre-sweep namespace for a read-only view, is a stub
-  returning `-3`. Its own comment says it was "the open_at path that replayed
-  the staged journal".
-- The only caller of `ckp_stage_replay` is `vol_open_at`
-  (`src/core/volume.c:1511`), and `vol_open_at` first requires `v->ck_present`
-  (`src/core/volume.c:1444-1452`). A v3 volume has no CKP0, so `ck_present` is
-  always 0 and `vol_open_at` always fails with `-11`.
+These are the citations as they stood when this was diagnosed. Every one of
+them names code that has since been DELETED — the whole CKP0 surface went
+with format v2 (`wp/drop-ckp0-surface`, which removed vol_rollback.c`
+entirely along with `vol_ckp_begin`/`vol_ckp_end`/`ckp_stage_replay`/
+`vol_open_at` and the `vol_open` read of the descriptor). They are kept as the
+record of what the mechanism was; the current tree is the spec.
+
+- vol_rollback.c:65` — `vol_ckp_begin` was a stub that returned 0
+  ("declined") unconditionally. Its body was one comment and a `return 0`.
+  Nothing armed a CKP0 sweep checkpoint even then.
+- vol_rollback.c:75` — `vol_ckp_end` returned 0 blocks retained; the
+  `\x01reten` registry was not written.
+- vol_rollback.c:109` — `ckp_stage_replay`, the function that
+  reconstructed the pre-sweep namespace for a read-only view, was a stub
+  returning `-3`.
+- The only caller of `ckp_stage_replay` was `vol_open_at`, which first
+  required `v->ck_present`. A v3 volume had no CKP0, so `ck_present` was
+  always 0 and `vol_open_at` always failed with `-11`.
 - The strings the test grepped for, `"checkpoint: #N armed"` and `"N retained
   blocks held for rollback"`, do not occur anywhere in `src/` or `tools/` except
   in the test itself. `grep -rn "checkpoint: #" src/ tools/` returns only
   the old suite's lines 203 and 329 (`git show e3761fb:tools/test-rocp.sh`).
-- `src/core/invarifs.h:410` still defines `INVFS_CKP0_OFF` / `invfs_ckp0` and
-  `src/core/volume.c:1414-1437` still *validates* the descriptor at open — that
-  is the legacy-volume read path, and it is harmless: the result is unused, as
-  `vol_rollback.c:14-19` states.
+- `src/core/invarifs.h` then still defined `INVFS_CKP0_OFF` / `invfs_ckp0` and
+  `src/core/volume.c` still *validated* the descriptor at open — that was the
+  legacy-volume read path, and it was harmless: the result was unused. Both
+  are gone now; the 56-byte span at block 0 `[0x220,0x258)` is
+  reserved-zero and the layout is not renumbered.
 
 **So the test was wrong, not the code** (AGENTS.md §1.7), and it was ported
-rather than the feature restored.
+rather than the feature restored. That conclusion held: when the CKP0 surface
+was finally deleted the port needed no change, because there had never been a
+v3 path to it.
 
 **The capability that did not survive the port.** v3 rollback is the SPT0 save
 point (`src/core/vol_spt0.c`), and SPT0 is a **restore**, not a view:

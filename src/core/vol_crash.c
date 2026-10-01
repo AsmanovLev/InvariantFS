@@ -77,12 +77,6 @@
  */
 int vol_mark_dirty(invfs_volume *v)
 {
-    if (v->time_travel) {
-        fprintf(stderr, "vol: write refused: this is a read-only "
-                "time-travel view of sweep checkpoint #%llu\n",
-                (unsigned long long)v->ck.sweep_seq);
-        return -1;
-    }
     if (!vol_write_enabled(v)) {
         if (v->degraded)
             fprintf(stderr, "vol: write refused: DEGRADED mount (device 0 "

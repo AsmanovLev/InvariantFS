@@ -1111,31 +1111,6 @@ static invfs_volume *vol_open_inner(const char *path, int *err_out)
         }
     }
 
-    /* WP21: the CKP0 sweep-checkpoint descriptor at 0x220 (past the RSZ0
-     * block above, so an applied resize has already cleared it). Valid
-     * magic+crc loads the checkpoint; anything else reads as absent. A CRC
-     * mismatch is a torn arm/clear -- treated as absent rather than fatal:
-     * the retention registry, if one was ever written, is reclaimed by the
-     * next sweep's defensive realize (owner present, CKP0 absent). */
-    {
-        invfs_ckp0 ck;
-        if (io_seek(&v->io, INVFS_CKP0_OFF) == 0 &&
-            io_read(&v->io, &ck, sizeof ck) == 0 &&
-            memcmp(ck.magic, "CKP0", 4) == 0) {
-            if (ckp0_crc(&ck) == ck.crc32c) {
-                v->ck = ck;
-                v->ck_present = 1;
-                v->ck_prev_seq = ck.sweep_seq;
-                if (getenv("INVFS_DEBUG"))
-                    printf("[vol_open] checkpoint #%llu live (swept at %llu)\n",
-                           (unsigned long long)ck.sweep_seq,
-                           (unsigned long long)ck.time_unix);
-            } else {
-                fprintf(stderr, "vol_open: CKP0 checkpoint descriptor CRC "
-                                "mismatch; checkpoint ignored\n");
-            }
-        }
-    }
     v->bitmap_blocks = (v->sb.total_blocks / 8 + INVFS_BLOCK_SIZE - 1) / INVFS_BLOCK_SIZE;
     v->bitmap = (uint8_t *)calloc(1, (size_t)v->bitmap_blocks * INVFS_BLOCK_SIZE);
     if (!v->bitmap) { *err = -6; goto fail; }
@@ -1575,7 +1550,6 @@ void vol_close(invfs_volume *v)
     free(v->heat_tab);
     free(v->pba_ref);
     free(v->seal_dirty);
-    free(v->retmap);
     free(v->spn_bitmap);        /* WP96: the save point's in-memory mark set */
     free(v->tz);
     free(v->bz);
@@ -3012,38 +2986,12 @@ void vol_free_blocks(invfs_volume *v, uint64_t pba, uint64_t nblocks)
     uint64_t end = pba + nblocks;
     if (end > v->sb.total_blocks)
         end = v->sb.total_blocks;
-    /* WP21: while a sweep checkpoint (CKP0) is live, NOTHING is freed. The
-     * blocks stay allocated in the bitmap (that is what bars their reuse
-     * for the rest of the checkpoint's life -- the rollback fidelity
-     * guarantee) and are recorded in retmap, the realize-time registry
-     * list. Content does not change, so seal stripes stay valid and the
-     * free counters stay honest (the blocks are NOT free). Idempotent per
-     * block, so the PB7 shared-pba cases mark twice without consequence.
-     *
-     * Retention keys on the ON-DISK state (ck_present), not on this
-     * session having armed the checkpoint (v->retain): the arming sweep
-     * exits with the checkpoint still live, and a later process' frees
-     * (a FUSE write's retire path, a delete, an unseal's parity release)
-     * would otherwise free PRE-checkpoint blocks for real and let a
-     * post-checkpoint allocation reuse them -- invf-rollback then
-     * resurrects the pre-sweep record over somebody else's bytes (F4, the
-     * leg-5 soak's THIRD STATE). A NULL retmap (any process that did not
-     * arm) degrades registration to "stays allocated, unregistered": the
-     * rollback rebuild still keeps the resurrected references live, and
-     * the post-resolution fsck reclaims what nothing references.
-     * retain_release exempts the checkpoint machinery's own deliberate
-     * frees (realize / arm unwind / no-op disarm). */
-    if ((v->retain || v->ck_present) && !v->retain_release) {
-        if (v->retmap)
-            for (i = pba; i < end; i++)
-                bit_set(v->retmap, i);
-        return;
-    }
-    /* WP96: the v3 save point's DATA pin, the one place a v3 volume has one.
-     * Same rule as the v2 checkpoint above, keyed on the on-disk pin (v->
-     * spn_armed, loaded at open) rather than on this session having armed
-     * anything: the sweep that armed the window is not the only writer on
-     * the volume, and a FUSE write's retire path, a delete, or a later
+    /* WP96: the v3 save point's DATA pin, the one and only hold a v3 volume
+     * has (WP21's coarse checkpoint and its retention registry went with the
+     * v2 metadata machinery). It keys on the on-disk pin (v->spn_armed,
+     * loaded at open) rather than on this session having armed anything: the
+     * sweep that armed the window is not the only writer on the volume, and a
+     * FUSE write's retire path, a delete, or a later
      * process' sweep must all see the hold. Sitting HERE rather than at the
      * publishers that replace recipes is the point -- vol_v3_free_recipe_
      * blocks has four v3 call sites and the drain frees directly, and a
@@ -3054,17 +3002,7 @@ void vol_free_blocks(invfs_volume *v, uint64_t pba, uint64_t nblocks)
      * them, so the hold costs one generation, not the volume. */
     if (!v->retain_release && spt0_block_pinned(v, pba, end - pba))
         return;
-    /* WP96: the v3 save point's DATA pin, the one place a v3 volume has one.
-     * Same rule as the v2 checkpoint above, keyed on the on-disk pin (v->
-     * spn_armed, loaded at open) rather than on this session having armed
-     * anything: the sweep that armed the window is not the only writer on
-     * the volume, and a FUSE write's retire path, a delete, or a later
-     * process' sweep must all see the hold. Sitting HERE rather than at the
-     * publishers that replace recipes is the point -- vol_v3_free_recipe_
-     * blocks has four v3 call sites and the drain frees directly, and a
-     * missing one is exactly the silent corruption this refuses: a rollback
-     * republishing a recipe over a block somebody else now owns.
-     *
+    /* WP96, continued: the per-block split of that run.
      * PER BLOCK, not per run. A held block must not hold its neighbours: the
      * reclaim pass can only discharge the PIN's own debt (it walks the
      * previous mark set), so a block that is unpinned but got dragged along by

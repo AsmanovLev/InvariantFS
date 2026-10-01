@@ -472,45 +472,11 @@ typedef struct invfs_volume {
     int rd_present;
     uint32_t seal_k1;
     uint8_t *seal_dirty;
-    /* WP21: sweep checkpoint (the CKP0 descriptor at block 0 offset
-     * INVFS_CKP0_OFF) + the retention registry (the "\x01reten" owner)
-     * behind it. ck/ck_present: the descriptor as read at open (absent =
-     * zero-filled). ck_prev_seq: the last armed/realized sequence number,
-     * so the next arm increments across a realize. Retention is a VOLUME
-     * state, not a session state: while CKP0 is live on disk EVERY process
-     * routes vol_free_blocks into retmap instead of freeing (a post-
-     * checkpoint rewrite/delete that freed a pre-checkpoint block for real
-     * would let a rollback resurrect a record whose pba was reallocated --
-     * F4, the leg-5 soak's THIRD STATE). retmap is a bitmap over
-     * total_blocks of the blocks held for the checkpoint; they stay
-     * allocated in the real bitmap too (that is what bars reuse), retmap
-     * is only the realize/registry list. A NULL retmap (every process that
-     * did not arm the checkpoint itself) degrades registration to "blocks
-     * stay allocated, nothing is registered" -- rollback is unaffected (it
-     * never reads the registry); the unregistered ranges are reclaimed by
-     * the fsck rebuild after the checkpoint resolves. retain_release: the
-     * checkpoint machinery's own deliberate frees (the realize's registry
-     * delete, the arm's staging unwind, the no-op disarm) bypass
-     * retention. ck_stage_*: the journal staging run allocated at arm
-     * time. */
-    invfs_ckp0 ck;
-    int ck_present;
-    uint64_t ck_prev_seq;
-    int retain;
+    /* retain_release exempts the save-point machinery's own deliberate frees
+     * (the reclaim pass, the tier arena's own compaction) from the data pin
+     * in vol_free_blocks -- without it a capture could never collect the
+     * blocks it is collecting. */
     int retain_release;
-    uint8_t *retmap;
-    uint64_t ck_stage_pba, ck_stage_blocks;
-    /* WP24-lite: this handle is a READ-ONLY time-travel view at the live
-     * CKP0 checkpoint (vol_open_at): the L2P was replayed from the
-     * checkpoint's staged journal prefix and the inode scan stopped at the
-     * checkpoint's append pointer, so the in-memory view is exactly the
-     * sweep-start state. NOTHING may be written through it -- the
-     * checkpoint pins absolute positions of the PRESENT (post-checkpoint)
-     * records, and an append at the cut would clobber them. The flag is
-     * the engine-level refusal (vol_mark_dirty fails loud; vol_flush and
-     * vol_sync are no-ops; vol_close persists nothing); the VOLF_READONLY
-     * flag is set too so every vol_write_enabled caller reports EROFS. */
-    int time_travel;
     /* Crash consistency (doc/08). `dirty` remembers that the on-disk state
        has already been set to DIRTY this session, so the mark costs one
        superblock write per mount instead of one per mutation.
@@ -1146,26 +1112,6 @@ static inline int invfs_inode_is_anchored(invfs_volume *v, uint64_t inode_id)
  * demands anyway. The in-memory copy follows the disk state. */
 int vol_write_rdp0(invfs_volume *v, const invfs_rdp0 *rd);
 
-/* ---- WP21: CKP0 sweep-checkpoint descriptor --------------------------
- * Same block-0 RMW convention as RDP0 (above). The descriptor makes a
- * sweep checkpoint findable without scanning the inode area for the
- * "\x01reten" owner, and pins the two append pointers the journal staging
- * can roll the volume back to. */
-
-/* CRC convention: over the full descriptor with the crc32c field read as
- * zero (the RDP0 rule). */
-uint32_t ckp0_crc(const invfs_ckp0 *ck);
-
-/* WP24-lite (definition with the checkpoint machinery in vol_rollback.c):
- * read-only replay of the live checkpoint's staged journal prefix -- the
- * vol_rollback twin that never writes. Verifies the staged bytes exactly
- * the way rollback's phase 1 does (slot-header sniff, whole-image CRC,
- * chained log walked to its end / legacy bare-CRC walk), then folds them
- * into the in-memory L2P: the table afterwards describes precisely the
- * checkpoint cut. Also validates the descriptor bounds the caller's
- * cut-scan relies on. 0 = ok, -3 = descriptor/staging failed verification
- * (the volume's on-disk state was never touched), -1 = io/alloc error. */
-int ckp_stage_replay(invfs_volume *v);
 
 /* (Re)allocate the dirty bitmap and mark every shadow block: the state
  * before that moment is simply not tracked, so the next reseal must be a
@@ -1837,7 +1783,6 @@ int seal_recover_segment(invfs_volume *v, uint64_t pba, uint64_t plen,
 void seal2_map_load(const invfs_volume *v, const seal_view *sv,
                            uint64_t shard_stripes, uint32_t m2,
                            uint64_t n_stripes, uint64_t *par);
-void ret_shard_name(uint64_t shard, char *out, size_t cap);
 void alloc_state_reset(invfs_volume *v);
 
 #ifndef _WIN32   /* WP11 POSIX-only tool plumbing */

@@ -40,7 +40,7 @@ STOCK_ZLIB_O := $(patsubst $(SRC)/zlib/%.c,$(OBJ)/zlib_stock_%.o,$(STOCK_ZLIB_SR
 FUSE_CFLAGS := $(shell pkg-config --cflags fuse3)
 FUSE_LIBS   := $(shell pkg-config --libs fuse3)
 
-CORE    := volume vol_cpack helper_exec tool_scratch vol_plugin_client vol_png vol_seal vol_repair vol_rollback \
+CORE    := volume vol_cpack helper_exec tool_scratch vol_plugin_client vol_png vol_seal vol_repair \
            vol_resize vol_fsck vol_crash vol_exer vol_dedupe vol_textzone \
             vol_heat vol_sweep vol_read vol_write vol_records vol_ast \
             vol_dirs vol_tier vol_meta_merge vol_metabuf vol_btree vol_delta \
@@ -133,7 +133,7 @@ CLI_MAINS := mkfs verify fsck cp cat ls stat arctest blkio_test resize \
              reclaim_reader_epoch_test readdir_error_test dedupe_symlink_test dirs_free_before_publish_test \
              stat_v3_counts_test acl_eio_test meta_clobber_test spn_skip_recipe_test \
              walk_status_test walk_status_fuse_test no_v2_surface_test \
-heat_walk_test \
+             heat_walk_test no_ckp0_surface_test \
              table_sync_evict_test write_create_path_test tz_registry_test
 $(foreach t,$(CLI_MAINS),$(eval $(call TOOL_RULE,$(t),)))
 
@@ -870,6 +870,12 @@ test: $(TEST_BINS) $(OUT)/invf-arctest $(OUT)/invf-blkio_test $(OUT)/invf-codec_
 	@# assert on the DISK EFFECT, not on a return code alone.
 	$(TESTENV) $(TESTISO) $(OUT)/invf-v2rb_rollback_test /tmp
 	$(TESTENV) $(TESTISO) $(OUT)/invf-no_v2_surface_test /tmp
+	@# The CKP0 sweep checkpoint is gone (WP drop-ckp0-surface). Its slot
+	@# is block 0 [0x220,0x258) -- a DIFFERENT region from the 32 MiB gap
+	@# no_v2_surface_test scans, so it needs its own disk scan. The control
+	@# cell plants a descriptor in the span and requires the scan to report
+	@# it: a detector that has never gone red is not a detector.
+	$(TESTENV) $(TESTISO) $(OUT)/invf-no_ckp0_surface_test /tmp
 	$(TESTENV) $(TESTISO) $(OUT)/invf-v2_open_test /tmp
 	@# WP202: a builtin container lane that supersedes a file on v3 gave the
 	@# superseded recipe's data blocks to nobody, while the containerpack

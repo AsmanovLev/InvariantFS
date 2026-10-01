@@ -506,61 +506,6 @@ static int cmd_f2cp(const char *img, const char *host, const char *name)
     return 0;
 }
 
-/* WP65: rename under a live sweep checkpoint now REALIZES the checkpoint
- * (the point of no return) and proceeds -- no more -4/EBUSY. Asserts the
- * move is bit-exact in-session and after reopen, no checkpoint survives,
- * and no source resurrection. */
-static int cmd_f2mvlive(const char *img, const char *name,
-                        const char *newname, const char *host)
-{
-    int err = 0;
-    invfs_volume *v = vol_open(img, &err);
-    FILE *f;
-    long len;
-    uint8_t *want, *got = NULL;
-    size_t glen = 0;
-    uint64_t id;
-    int rc = 1;
-    if (!v) die("open");
-    if (!vol_ckp_armed(v)) die("no live checkpoint to test");
-    f = fopen(host, "rb");
-    if (!f) die("host fopen");
-    if (fseek(f, 0, SEEK_END) != 0 || (len = ftell(f)) < 0 ||
-        fseek(f, 0, SEEK_SET) != 0) die("host size");
-    want = malloc((size_t)len);
-    if (!want) die("oom");
-    if (fread(want, 1, (size_t)len, f) != (size_t)len) die("host read");
-    fclose(f);
-    if (vol_rename(v, name, newname) != 0)
-        die("rename under a live checkpoint not realized");
-    if (vol_ckp_armed(v)) die("checkpoint still live after the rename");
-    if (vol_find(v, name)) die("source survived the rename");
-    id = vol_find(v, newname);
-    if (!id) die("renamed file missing in-session");
-    if (vol_read_file(v, id, &got, &glen) != 0)
-        die("renamed file unreadable in-session");
-    if (glen != (size_t)len || memcmp(want, got, glen) != 0)
-        die("renamed content mismatch in-session");
-    free(got); got = NULL;
-    vol_close(v);
-    v = vol_open(img, &err);
-    if (!v) die("reopen");
-    if (vol_ckp_armed(v)) die("checkpoint resurrected at reopen");
-    if (vol_find(v, name)) die("source resurrected at reopen");
-    id = vol_find(v, newname);
-    if (!id) die("renamed file missing after reopen");
-    if (vol_read_file(v, id, &got, &glen) != 0)
-        die("renamed file unreadable after reopen");
-    if (glen != (size_t)len || memcmp(want, got, glen) != 0)
-        die("renamed content mismatch after reopen");
-    rc = 0;
-    free(got);
-    free(want);
-    vol_close(v);
-    if (rc == 0) printf("F2MVLIVE-OK\n");
-    return rc;
-}
-
 /* rename name->newname, then bit-compare newname against the host file,
  * in-session and after a full reopen */
 static int cmd_f2mv(const char *img, const char *name, const char *newname,
@@ -644,8 +589,6 @@ int main(int argc, char **argv)
         return cmd_f4dirty(argv[2]);
     if (strcmp(argv[1], "f2cp") == 0 && argc == 5)
         return cmd_f2cp(argv[2], argv[3], argv[4]);
-    if (strcmp(argv[1], "f2mvlive") == 0 && argc == 6)
-        return cmd_f2mvlive(argv[2], argv[3], argv[4], argv[5]);
     if (strcmp(argv[1], "f2mv") == 0 && argc == 6)
         return cmd_f2mv(argv[2], argv[3], argv[4], argv[5]);
     fprintf(stderr, "bad args\n");
@@ -706,7 +649,7 @@ echo "   survivor bit-exact in-session and after reopen; fsck/verify clean"
 # exercise the retired v2 machinery: the contiguous inode-area record
 # stream and its vol_inode_next walk (D, I), the flat/slotted v2 journal
 # and mid-compaction crash stages (F, G, G2, H), and the CKP0 sweep
-# checkpoint that f2mvlive arms (E). None of that exists on a v3 volume,
+# rename leg (E). None of that exists on a v3 volume,
 # so they cannot run. The v3 equivalents of rename/retire/fsck honesty are
 # covered by tools/test-meta-v3.sh, test-meta-v3-fold.sh and
 # test-meta-v3-delta.sh. Legs A-C above run on the live format.
@@ -781,13 +724,7 @@ $B/invf-sweep $IMG_E >"$WORK/sweep-e.log" 2>&1 || { cat "$WORK/sweep-e.log"; fai
 # the TARR decomposition is proven by the CONTAINER{TARR} class stamp
 [ "$($B/meta_probe $IMG_E --heat t.tar 2>/dev/null | sed -n 's/^class=\([0-9a-z]*\).*/\1/p')" = "3" ] \
     || { cat "$WORK/sweep-e.log"; fail "t.tar not CONTAINER post-sweep"; }
-# WP65: a rename under the sweep's live checkpoint REALIZES the
-# checkpoint (the point of no return) and moves the pair; a rollback can
-# no longer tear it. Asserts bit-exact in-session + after reopen and that
-# no checkpoint survives.
-"$H" f2mvlive $IMG_E t.tar t2.tar "$WORK/t.tar" || fail "f2mvlive"
-# with no checkpoint live anymore, a second rename still moves cleanly
-"$H" f2mv $IMG_E t2.tar t3.tar "$WORK/t.tar" || fail "f2mv"
+"$H" f2mv $IMG_E t.tar t2.tar "$WORK/t.tar" || fail "f2mv"
 $B/invf-fsck $IMG_E >"$WORK/fsck-e.log" 2>&1 || true
 grep -q "^OK$" "$WORK/fsck-e.log" || { cat "$WORK/fsck-e.log"; fail "fsck E not OK"; }
 set +e

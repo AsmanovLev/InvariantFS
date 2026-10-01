@@ -391,20 +391,6 @@ int main(int argc, char **argv)
         return (rep.v3_damaged || (mstale >= 0 && !mresynced)) ? 3 : 0;
     }
 
-    /* WP21: with a sweep checkpoint live, the rebuild's orphan reclaim is
-     * the one pass that could free a not-yet-registered retained block
-     * out from under a future rollback. Report mode is unaffected; -f is
-     * refused until the checkpoint is resolved. (invf-rollback drives the
-     * same engine with the checkpoint in place -- it is not blocked.) */
-    if (fix && vol_ckp_armed(v)) {
-        fprintf(stderr, "invf-fsck: %s: a sweep checkpoint is live; -f "
-                "would break rollback. Resolve it first: invf-rollback %s "
-                "(undo the sweep) or invf-sweep %s --realize (accept it)\n",
-                img, img, img);
-        vol_close(v);
-        return 1;
-    }
-
     /* WP-M21: CMP0/CMPS retired with online compaction. No descriptor is
      * ever armed, no staging run can be stranded. The fall-through scan
      * (below) is the only thing needed. */
@@ -457,21 +443,11 @@ int main(int argc, char **argv)
                    fix ? " -> quarantined" : "");
         printf("  orphans:      %llu%s\n", (unsigned long long)rep.orphans,
                rep.orphans ? (fix ? " -> freed" : " (use -f to free)") : "");
-        if (rep.held_ckpt)
-            printf("  held for checkpoint: %llu (retained until "
-                   "rollback/realize)\n", (unsigned long long)rep.held_ckpt);
         printf("  missing:      %llu%s\n", (unsigned long long)rep.missing,
                rep.missing ? (fix ? " -> restored" : " (use -f)") : "");
         printf("  bad records:  %llu\n", (unsigned long long)rep.bad_recs);
         printf("  free blocks:  %llu\n",
                (unsigned long long)vol_free_blocks_cached(v));
-        {
-            invfs_ckp0 ck;
-            if (vol_ckp_info(v, &ck))
-                printf("  checkpoint:   sweep #%llu live (undo: "
-                       "invf-rollback; accept: invf-sweep --realize)\n",
-                       (unsigned long long)ck.sweep_seq);
-        }
         printf("%s\n", issues ? (fix ? "REPAIRED" : "ISSUES FOUND")
                               : "OK");
     }

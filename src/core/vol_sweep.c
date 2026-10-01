@@ -1654,13 +1654,6 @@ int vol_sweep_pending(invfs_volume *v)
 {
     size_t n = v->n_pending;
     int done = 0;
-    /* WP21: a live checkpoint (CKP0) holds every sweep-time free in the
-     * retention registry -- but only the offline invf-sweep runs
-     * checkpoint-armed. The on-demand drain has no registry of its own,
-     * so it defers the whole queue until the checkpoint is resolved
-     * (invf-rollback / invf-sweep --realize): an unregistered free here
-     * is exactly the block a rollback would have resurrected. */
-    if (v->ck_present) return 0;
     vol_heat_sweep_begin(v);   /* WP19: one decay pass per sweep run */
     while (n > 0) {
         uint64_t id = v->pending[0];

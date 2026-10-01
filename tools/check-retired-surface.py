@@ -44,17 +44,18 @@ import sys
 
 # The identifiers THIS deletion removed. A tripwire has to be green the
 # moment it is installed, so this is exactly what went with the mapping
-# journal -- not "everything retired-sounding".
+# journal and the sweep checkpoint -- not "everything retired-sounding".
 #
 # Deliberately NOT in this list yet, because they are still in the tree and
 # are a separate piece of work, not a tripwire that should fail today:
-#   invfs_ckp0 / ckp0_crc / vol_ckp_*   the sweep-checkpoint descriptor
-#                                        (volume.c reads it at open; the FUSE
-#                                        sweep arm and invf-rollback use it)
-#   invfs_jrn_hdr / INVFS_JRN_MAGIC     parsed by invf-resize to decide how to
-#                                        move the reserved gap
 #   INVFS_JOURNAL_BLOCKS                the gap's skip distance itself; it is
 #                                        load-bearing geometry, see invarifs.h
+#   INVFS_JRN_MAP / _UNMAP / _SWEEP /   the retired log's record-type numbers.
+#   _CHECKPOINT / _META_*              They name a wire encoding nothing writes.
+#                                       Dropping them is a naming decision, not
+#                                       a reachability one, and invarifs.h
+#                                       still cites them explaining the CRC
+#                                       convention the gap's terminator uses.
 RETIRED = [
     "vol_map", "vol_lookup", "vol_lookup_entry", "vol_l2p", "vol_l2p_remove",
     "l2p_replay", "l2p_apply", "l2p_remove", "l2p_remove_mem",
@@ -64,6 +65,15 @@ RETIRED = [
     "jrn_write_image", "jrn_append_pending", "jrn_append_legacy",
     "jrn_abort_at", "jops", "mjops", "open_cuts",
     "INVFS_JRN_FORCE_COMPACT", "INVFS_COMPACT_ABORT_AT",
+    # The WP21 sweep checkpoint: the block-0 descriptor, the reader that
+    # loaded it at open, the arm the FUSE sweep could have taken, and the
+    # reserved-gap slot header invf-resize used to parse.
+    "invfs_ckp0", "ckp0_crc", "vol_ckp_armed", "vol_ckp_info",
+    "vol_ckp_begin", "vol_ckp_end", "vol_ckp_realize", "vol_rollback",
+    "ckp_stage_replay", "ret_shard_name", "vol_open_at",
+    "INVFS_CKP0_OFF", "INVFS_JRN_SLOTS", "INVFS_JRN_SLOT_BLOCKS",
+    "INVFS_JRN_MAGIC", "INVFS_JRN_VERSION", "invfs_jrn_hdr",
+    "INVFS_JSEL_LEGACY", "INVFS_JSEL_SLOT0", "INVFS_JSEL_SLOT1",
 ]
 
 # Where the scan looks. Not impl_docs/, not INCIDENTS.md, not packaging/

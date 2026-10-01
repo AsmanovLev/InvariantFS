@@ -121,108 +121,31 @@ static uint64_t parse_size(const char *s)
  * metadata scans (vol_open's own walk semantics, replicated on blkio)
  * ------------------------------------------------------------------ */
 
-/* used journal bytes. WP22d: if a valid slot header exists, the journal
- * payload worth staging is the winning slot's [header + image + chained
- * log]; *src_out moves to that slot's base. Otherwise the area is the
- * legacy flat log: entries until the first CRC failure (replay's rule)
- * from js_byte. */
+/* used journal bytes. The gap is zero-filled on every volume this build
+ * creates and nothing in it has been written since the mapping log went
+ * away, so the walk is the only shape there is: entries from js_byte until
+ * the first CRC failure (replay's own rule). The flat log is empty on a
+ * v3 volume, so this returns 0 used bytes -- stated here because "the scan
+ * found nothing" and "the scan is looking in the wrong place" have to be
+ * told apart by a reader. */
 static int scan_journal(blkio *io, uint64_t js_byte, uint64_t *src_out,
-                        uint64_t *used_out, int *slotted_out)
+                        uint64_t *used_out)
 {
-    invfs_jrn_hdr h[2];
-    int ok[2] = {0, 0};
-    int pick = -1;
-    uint32_t s;
+    uint64_t jp = js_byte;
+    uint64_t jend = js_byte + (uint64_t)INVFS_JOURNAL_BLOCKS *
+                    INVFS_BLOCK_SIZE;
 
-    for (s = 0; s < INVFS_JRN_SLOTS; s++) {
-        uint64_t off = js_byte + (uint64_t)s * INVFS_JRN_SLOT_BLOCKS *
-                       INVFS_BLOCK_SIZE;
-        if (blkio_pread(io, off, &h[s], sizeof h[s]) != 0)
+    while (jp + sizeof(invfs_l2p_entry) <= jend) {
+        invfs_l2p_entry e;
+        if (blkio_pread(io, jp, &e, sizeof e) != 0)
             return -1;
-        if (memcmp(h[s].magic, INVFS_JRN_MAGIC, 4) != 0 ||
-            h[s].version != INVFS_JRN_VERSION ||
-            h[s].image_bytes % sizeof(invfs_l2p_entry) != 0 ||
-            h[s].image_bytes >
-                (uint64_t)(INVFS_JRN_SLOT_BLOCKS - 1) * INVFS_BLOCK_SIZE ||
-            invfs_crc32c(&h[s], offsetof(invfs_jrn_hdr, crc32c)) !=
-                h[s].crc32c)
-            continue;
-        ok[s] = 1;
+        if (invfs_crc32c(&e, offsetof(invfs_l2p_entry, crc)) != e.crc)
+            break;
+        jp += sizeof e;
     }
-    if (ok[0] && ok[1]) pick = h[0].seq >= h[1].seq ? 0 : 1;
-    else if (ok[0]) pick = 0;
-    else if (ok[1]) pick = 1;
-
-    if (pick >= 0) {
-        /* validate the winner's image wholesale, then walk the chained
-         * log; a torn image falls back to the other slot (it holds the
-         * full pre-compaction state) */
-        int order[2];
-        int oi;
-        order[0] = pick;
-        order[1] = pick ^ 1;
-        for (oi = 0; oi < 2; oi++) {
-            int s = order[oi];
-            uint64_t base, jend, jp;
-            uint32_t prev;
-            if (!ok[s]) continue;
-            base = js_byte + (uint64_t)s * INVFS_JRN_SLOT_BLOCKS *
-                   INVFS_BLOCK_SIZE;
-            jend = base + (uint64_t)INVFS_JRN_SLOT_BLOCKS *
-                   INVFS_BLOCK_SIZE;
-            jp = base + INVFS_BLOCK_SIZE;
-            prev = invfs_crc32c(&h[s], offsetof(invfs_jrn_hdr, image_crc));
-            if (h[s].image_bytes) {
-                uint8_t *img = (uint8_t *)malloc((size_t)h[s].image_bytes);
-                invfs_l2p_entry last;
-                int good;
-                if (!img) return -1;
-                good = blkio_pread(io, jp, img, (size_t)h[s].image_bytes) == 0 &&
-                       invfs_crc32c(img, (size_t)h[s].image_bytes) ==
-                           h[s].image_crc;
-                free(img);
-                if (!good) continue;   /* torn compaction */
-                if (blkio_pread(io, jp + h[s].image_bytes - sizeof last,
-                                &last, sizeof last) != 0)
-                    return -1;
-                prev = last.crc;
-                jp += h[s].image_bytes;
-            }
-            while (jp + sizeof(invfs_l2p_entry) <= jend) {
-                invfs_l2p_entry e;
-                if (blkio_pread(io, jp, &e, sizeof e) != 0)
-                    return -1;
-                if (invfs_crc32c_update(prev, &e,
-                                        offsetof(invfs_l2p_entry, crc)) != e.crc)
-                    break;
-                prev = e.crc;
-                jp += sizeof e;
-            }
-            *src_out = base;
-            *used_out = jp - base;
-            *slotted_out = 1;
-            return 0;
-        }
-        return -1;   /* both slots torn */
-    }
-
-    {
-        uint64_t jp = js_byte;
-        uint64_t jend = js_byte + (uint64_t)INVFS_JOURNAL_BLOCKS *
-                        INVFS_BLOCK_SIZE;
-        while (jp + sizeof(invfs_l2p_entry) <= jend) {
-            invfs_l2p_entry e;
-            if (blkio_pread(io, jp, &e, sizeof e) != 0)
-                return -1;
-            if (invfs_crc32c(&e, offsetof(invfs_l2p_entry, crc)) != e.crc)
-                break;
-            jp += sizeof e;
-        }
-        *src_out = js_byte;
-        *used_out = jp - js_byte;
-        *slotted_out = 0;
-        return 0;
-    }
+    *src_out = js_byte;
+    *used_out = jp - js_byte;
+    return 0;
 }
 
 /* Live parity-owner tracking for the seal refusal: the owners are ordinary
@@ -417,8 +340,7 @@ int main(int argc, char **argv)
     uint64_t bm_old, bm_new, js_old, is_old, iend_old, meta_blocks;
     uint64_t new_js, new_is, new_iend;
     uint64_t j_used = 0, i_used = 0, anomalies = 0;
-    uint64_t j_src = 0;             /* active slot base when slotted */
-    int j_slotted = 0;
+    uint64_t j_src = 0;
     uint64_t stage_start, stage_blocks, payload, free_old, free_new;
     uint64_t i, blocked, first_bad = 0;
     size_t parity_live = 0;
@@ -572,28 +494,6 @@ int main(int argc, char **argv)
             }
         }
     }
-    {
-        /* WP21/WP22d: a live sweep checkpoint pins the journal + inode-area
-         * positions the resize is about to move (and its staging run is
-         * L2P-covered scratch). Refuse like the seal refusal above: resolve
-         * the checkpoint first. */
-        invfs_ckp0 ck;
-        memset(&ck, 0, sizeof ck);
-        if (blkio_pread(&io, INVFS_CKP0_OFF, &ck, sizeof ck) == 0 &&
-            memcmp(ck.magic, "CKP0", 4) == 0) {
-            invfs_ckp0 t = ck;
-            t.crc32c = 0;
-            if (invfs_crc32c(&t, sizeof t) == ck.crc32c) {
-                fprintf(stderr, "invf-resize: %s: a sweep checkpoint is "
-                        "live (sweep #%llu) -- resolve it first: "
-                        "invf-rollback %s  or  invf-sweep %s --realize\n",
-                        path, (unsigned long long)ck.sweep_seq, path, path);
-                blkio_close(&io);
-                return 1;
-            }
-        }
-    }
-
     /* ---- current derived layout ---- */
     old_total = sb.total_blocks;
     meta_blocks = sb.metadata_zone_blocks;
@@ -712,8 +612,8 @@ int main(int argc, char **argv)
         }
 
     if (scan_journal(&io, js_old * (uint64_t)INVFS_BLOCK_SIZE,
-                     &j_src, &j_used, &j_slotted) != 0) {
-        fprintf(stderr, "invf-resize: cannot scan the L2P journal\n");
+                     &j_src, &j_used) != 0) {
+        fprintf(stderr, "invf-resize: cannot scan the reserved gap\n");
         goto fail;
     }
     if (scan_inode_area(&io, is_old * (uint64_t)INVFS_BLOCK_SIZE,
@@ -981,9 +881,9 @@ int main(int argc, char **argv)
     /* the ENOSPC policy scales with the volume (mkfs's formulas) */
     nsb.reserved_blocks = (uint32_t)(new_total / 128 + 64);
     nsb.hard_min_blocks = (uint32_t)(new_total / 1024 + 16);
-    /* WP22d: a slotted journal is staged into the new slot 0 (the apply
-     * writes it at the area base); a legacy journal stays legacy */
-    nsb.pad2 = j_slotted ? INVFS_JSEL_SLOT0 : INVFS_JSEL_LEGACY;
+    /* pad2 is reserved and must be 0 on a volume this build writes
+     * (invarifs.h); the slot selector it carried went with the journal. */
+    nsb.pad2 = 0;
     nsb.state = INVFS_STATE_CLEAN;   /* the committed state, once applied */
     nsb.checksum = invfs_crc32c(&nsb, offsetof(invfs_superblock, checksum));
 

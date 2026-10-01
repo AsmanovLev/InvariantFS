@@ -1948,32 +1948,27 @@ static void sweep_rollback_warning(const char *img, const char *mnt)
  * rewrite with no way back is worse than no rewrite. The watermark path
  * keeps its pre-existing fail-open behaviour.
  *
- * On v2 the CKP0 arm (vol_ckp_begin / vol_ckp_end) stays watermark-only:
- * it is the retired WP21 machinery, not the SPT0 save point, and a pass
- * that retires nothing arms nothing on v2 (vol_ckp_end disarms an
- * identity). */
+ * There is no second arm: the v3 save point above is the only window this
+ * build has. The coarse WP21 sweep checkpoint it replaced had no writer,
+ * so there was never a v3 path to it. */
 static void invf_sweep_worker(int full_pass)
 {
     uint64_t *ids = NULL;
     size_t cap = 0, n = 0, found = 0, i;
     long swept = 0, skipped = 0, failed = 0;
-    int armed = 0;
-    int is_v3 = 0;
     int complete;
     const char *tag = full_pass ? "watermark" : "manual";
 
     pthread_mutex_lock(&g_io_lock);
     if (!g_vol) { pthread_mutex_unlock(&g_io_lock); free(ids); return; }
-    is_v3 = (vol_sb(g_vol)->vol_flags & VOLF_V3) != 0;
-    if (is_v3) {
-        /* WP77: v3 rollback window is the SPT0 save point. K=1: a
+    {
+        /* WP77: the rollback window is the SPT0 save point. K=1: a
          * previous pass's save point is dropped first, so the live
          * window is always the LAST sweep. */
         invfs_spt0 sp;
         if (spt0_info(g_vol, NULL))
             (void)spt0_drop(g_vol);
         if (spt0_capture(g_vol) == 0) {
-            armed = 1;
             if (spt0_info(g_vol, &sp))
                 fprintf(stderr, "[%s] save point captured "
                                 "(base_root=%llu delta_end=%llu)\n", tag,
@@ -1996,17 +1991,8 @@ static void invf_sweep_worker(int full_pass)
             }
         }
     }
-    if (full_pass) {
-        if (!is_v3) {
-            armed = vol_ckp_begin(g_vol, 0);  /* 1 armed, 0 declined, -1 error */
-            if (armed < 0) {
-                fprintf(stderr, "[watermark] checkpoint arm failed; sweeping "
-                                "without one\n");
-                armed = 0;
-            }
-        }
+    if (full_pass)
         vol_heat_sweep_begin(g_vol);   /* one decay pass per sweep run */
-    }
     /* WP-fuse-sweep-inode-cap: GROW, and know whether the list is whole.
      *
      * This used to be a fixed `malloc(300000 * 8)` and a bare
@@ -2122,16 +2108,6 @@ static void invf_sweep_worker(int full_pass)
         if (full_pass)
             vol_heat_promote(g_vol);   /* extract read-hot batch members */
         vol_tz_flush(g_vol);   /* seal anything the walk deferred */
-        if (armed && !is_v3) {
-            uint64_t rr = 0, rb = 0;
-            if (vol_ckp_end(g_vol, &rr, &rb) != 0)
-                fprintf(stderr, "[watermark] checkpoint registry write "
-                                "failed (the checkpoint itself is intact)\n");
-            else if (rb)
-                fprintf(stderr, "[watermark] checkpoint: %llu retained "
-                                "blocks held for rollback (%llu ranges)\n",
-                        (unsigned long long)rb, (unsigned long long)rr);
-        }
         vol_flush(g_vol);
     }
     pthread_mutex_unlock(&g_io_lock);
@@ -2198,29 +2174,21 @@ static void *fuse_sweep_thread(void *arg)
      * should go and collect. Session-scoped, so it lives out here with the
      * rest of the ladder state and not in the per-tick block below. */
     int wm_first = 1;
-    /* A checkpoint left live by a previous mount (watermark pass or CLI
-     * sweep) still holds its retired blocks, so the fill reads high from
-     * the start. Kicking on that stale reading would run a no-op walk
-     * whose arm auto-realizes the old checkpoint and whose end disarms
-     * the new one -- the rollback window would evaporate on a plain
-     * remount. Seed the floor with the current fill instead: the next
-     * pass needs genuinely NEW pressure.
+    /* A save point left live by a previous mount (watermark pass, USR1
+     * pass, xattr pass, or the offline invf-sweep) still holds its
+     * superseded blocks, so the fill reads high from the start. Kicking on
+     * that stale reading would run a no-op walk whose arm drops the old
+     * window -- the rollback window would evaporate on a plain remount.
+     * Seed the floor with the current fill instead: the next pass needs
+     * genuinely NEW pressure.
      *
-     * WP137: the test for "a window is live" has to name the right one.
-     * vol_ckp_armed() is the v2 CKP0 arm, and the default format is v3,
-     * whose window is the SPT0 save point -- so this seed never fired on a
-     * v3 volume, and a v3 remount onto a volume with a live window came up
-     * with wm_floor = 0 (i.e. an immediate kick on the stale reading the
-     * comment above is trying to avoid). Ask the format that is actually
-     * mounted. The debt flag rides along: a window inherited from a previous
+     * The debt flag rides along: a window inherited from a previous
      * mount holds that mount's debt exactly as a pass this session ran would,
      * so this session owes the volume the same one discharge capture. */
     if (g_raw_watermark > 0) {
         pthread_mutex_lock(&g_io_lock);
         if (g_vol) {
-            int live = (vol_sb(g_vol)->vol_flags & VOLF_V3)
-                     ? (spt0_info(g_vol, NULL) != 0)  /* v3: the SPT0 window */
-                     : (vol_ckp_armed(g_vol) != 0);   /* v2: the CKP0 arm */
+            int live = spt0_info(g_vol, NULL) != 0;
             if (live) {
                 uint64_t rf = 0, rt = 0;
                 vol_zone_free(g_vol, &rf, &rt, NULL, NULL);
@@ -2376,12 +2344,8 @@ static void *fuse_sweep_thread(void *arg)
                      *     instead is the churn this design exists to avoid --
                      *     every such pass re-pins and no empty reclaim is
                      *     ever reached. */
-                    if (vol_sb(g_vol)->vol_flags & VOLF_V3) {
-                        window  = spt0_info(g_vol, NULL) != 0;
-                        reclaimed = spt0_reclaim_last(g_vol);
-                    } else {
-                        window = vol_ckp_armed(g_vol);
-                    }
+                    window  = spt0_info(g_vol, NULL) != 0;
+                    reclaimed = spt0_reclaim_last(g_vol);
                 }
                 wm_floor = after;
                 wm_owed = window && (fresh || reclaimed);
