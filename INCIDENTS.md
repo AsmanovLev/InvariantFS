@@ -1697,4 +1697,34 @@ reported as the same thing. There is already a convention for this
 
 Not done: the change to move the four defaults onto `/srv`. It touches four
 suites and deserves one deliberate decision rather than four opportunistic
-commits as each happens to go red.
+commits as each happens to go red.---
+
+## test-fuzz: XFS loop fixtures cannot be mounted read-write on this host
+
+**Status:** localised; the code half is fixed, the environment half is not.
+
+`tools/test-fuzz.sh` is non-zero on the XFS pack leg. The Python traceback is
+fixed (see 442eea4) and the run now reaches `failures: 0, anomalies: 0`; what
+remains is:
+
+    subprocess.CalledProcessError: Command 'sudo -n chown 1000:1000
+      /dev/shm/.../fixtures/xfs.xfs.mnt' returned non-zero
+
+`chown` on a mount point is a request against the root directory of a FOREIGN
+filesystem, and it fails with EROFS because **the filesystem is mounted
+read-only**. Two hypotheses were tested and both are wrong:
+
+- `-o loop,rw` does not help — reproduced by hand with `mkfs.xfs` on a 400 MiB
+  image, the mount is still read-only;
+- moving the fixture off `/dev/shm` does not help either — **the same mount on
+  `/srv/bench` is read-only too**, so this is NOT the tmpfs question that
+  `test-packaging` turned out to be (that one is recorded above).
+
+So the XFS pack leg cannot run on this host, and the leg reports it as a
+`chown` failure rather than as "XFS is unavailable here" — which is the part
+worth fixing. **A leg that cannot run should say so and skip, not fail with an
+error about a permission it never had.**
+
+Not done: the skip, and why `mkfs.xfs` output mounts read-only here (a
+kernel or container restriction on loop-mounted XFS is the likely answer).
+Not investigated, because the fix does not depend on knowing which.
