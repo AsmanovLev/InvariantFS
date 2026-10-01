@@ -33,6 +33,7 @@
  */
 
 #include "volume_internal.h"
+#include "vol_walk.h"
 
 /* 64-bit mix (splitmix64 finalizer) for the per-inode tables */
 static uint64_t idx_mix_heat(uint64_t x)
@@ -531,23 +532,57 @@ void vol_heat_persist(invfs_volume *v)
  * See the section comment at the top for the full rules. */
 
 /* WP43: per-record body of the decay pass, fed by the namespace walk.
- * `end` is the walk bound frozen before the pass started: heat_write()
- * stamps persist as NEW record versions (a stamp is a record append),
- * and each append bumps the active-extent cursor, so an unfrozen walk
- * would see its own stamps and decay them again -- a runaway append
- * loop. Records at or past the frozen end were appended by this pass;
- * aborting there keeps exactly one decay per stored value. */
+ *
+ * WP145: the walk here is FALLIBLE, and a stopped walk always reports
+ * "I saw exactly what I stored" -- so a pass that writes as it walks cannot
+ * tell a whole live set from a prefix of one, and leaves every inode the
+ * walk did not reach hot for good. That is placement, and it persists: the
+ * next sweep stops on the same unreadable page.
+ *
+ * So the pass COLLECTS during the walk and APPLIES after the receipt is
+ * committed. The old `end` field (the walk bound frozen before the pass, to
+ * stop a heat stamp -- which is a record append, which bumps that bound --
+ * from being decayed again by the same pass) goes with it: no write happens
+ * while the walk is running, so there is nothing left to outrun. */
+typedef struct {
+    uint64_t inode;
+    uint16_t r;
+    uint8_t  w;
+} heat_decay_rec;
+
 typedef struct {
     invfs_volume *v;
-    uint64_t      end;
-    int           any_r;
-    int           any_w;
+    heat_decay_rec *rec;   /* the decayed values, NOT yet written */
+    size_t   n_rec, cap_rec;
+    size_t   n_seen;       /* every row the walk handed us, changed or not */
+    int      oom;
+    int      any_r;
+    int      any_w;
 } heat_decay_ctx;
 
+static int heat_decay_push(heat_decay_ctx *c, uint64_t ino, uint16_t r,
+                           uint8_t w)
+{
+    if (c->n_rec == c->cap_rec) {
+        size_t nc = c->cap_rec ? c->cap_rec * 2 : 64;
+        heat_decay_rec *n2 =
+            (heat_decay_rec *)realloc(c->rec, nc * sizeof *n2);
+        if (!n2) { c->oom = 1; return -1; }
+        c->rec = n2;
+        c->cap_rec = nc;
+    }
+    c->rec[c->n_rec].inode = ino;
+    c->rec[c->n_rec].r = r;
+    c->rec[c->n_rec].w = w;
+    c->n_rec++;
+    return 0;
+}
 
 
-/* WP78: v3 decay body -- one pass over the live inode set, reading and
- * rewriting the heat xattr through the format-agnostic xattr API. */
+
+/* WP78: v3 decay body -- one pass over the live inode set, reading the
+ * heat xattr through the format-agnostic xattr API. Reads and RECORDS; it
+ * does not write (see heat_decay_ctx above). */
 static int heat_decay_v3_cb(invfs_volume *v, uint64_t inode_id,
                             const char *name, void *ctx_)
 {
@@ -555,6 +590,7 @@ static int heat_decay_v3_cb(invfs_volume *v, uint64_t inode_id,
     uint16_t r = 0, nr;
     uint8_t w = 0, nw;
 
+    ctx->n_seen++;
     if (!name || (unsigned char)name[0] == 0x01)
         return 0;
     if (heat_get(v, inode_id, &r, &w) != 0)
@@ -562,7 +598,7 @@ static int heat_decay_v3_cb(invfs_volume *v, uint64_t inode_id,
     nr = (uint16_t)(r >> 1);
     nw = w ? (uint8_t)(w - 1) : 0;
     if (nr != r || nw != w)
-        heat_write(v, inode_id, nr, nw);
+        heat_decay_push(ctx, inode_id, nr, nw);
     if (nr >= INVFS_HEAT_HOT) ctx->any_r = 1;
     if (nw >= INVFS_WHEAT_HOT) ctx->any_w = 1;
     return 0;
@@ -571,25 +607,58 @@ static int heat_decay_v3_cb(invfs_volume *v, uint64_t inode_id,
 void vol_heat_sweep_begin(invfs_volume *v)
 {
     heat_decay_ctx ctx;
+    vol_walk_t w;
+    int rc;
+    size_t i;
+
     /* the fold first: reads this process observed count into the decayed
      * totals exactly once */
     heat_fold(v);
 
     if (!v || !vol_write_enabled(v)) return;
     /* walk the live records (mapper extents via the shared walker on
-     * v0.3.0+, the legacy area otherwise); collect warm files (stored
-     * TLV != 0), then persist their decayed counters -- collect-in-cb,
-     * stamps land past the frozen walk end */
+     * v0.3.0+, the legacy area otherwise); collect the warm files (stored
+     * TLV != 0) and their decayed counters -- the stamps land after the
+     * walk, never during it. */
+    memset(&ctx, 0, sizeof ctx);
     ctx.v = v;
-    ctx.end = v->inode_area_pos;
-    ctx.any_r = 0;
-    ctx.any_w = 0;
-    (void)vol_v3_iter_live_inodes(v, heat_decay_v3_cb, &ctx);
+    rc = vol_v3_iter_live_inodes(v, heat_decay_v3_cb, &ctx);
+
+    /* WP145: the RECEIPT, and the only mechanism for it -- vol_walk_t is a
+     * caller-side value, not a channel on the walk. found == n on purpose:
+     * an iterator has no caller-imposed cap, so nothing but rc < 0 can make
+     * this walk short, and catching that one thing is what the commit is
+     * for. (An array-filling walk needs `found` too because the walk can
+     * stop on the caller's own buffer; this one cannot.) */
+    vol_walk_init(&w, v, "vol_heat_sweep_begin");
+    vol_walk_result(&w, rc, ctx.n_seen, ctx.n_seen);
+    if (vol_walk_commit(&w) != 0) {
+        fprintf(stderr,
+                "[heat] decay REFUSED: the live-inode walk did not complete "
+                "(%zu inode(s) reached, and it stopped rather than finished). "
+                "Decaying only those would leave every cold file the walk "
+                "never reached hot in perpetuity -- and would republish "
+                "\"is anything hot\" from a subset, which is the flag the "
+                "promotion pass and the tier migration both gate on. Heat is "
+                "UNCHANGED for this run; the next sweep decays all of it, "
+                "because rheat only ever falls.\n", ctx.n_seen);
+        free(ctx.rec);
+        return;
+    }
+    if (ctx.oom) {
+        fprintf(stderr, "[heat] decay REFUSED: out of memory collecting the "
+                "decay set. Heat is UNCHANGED for this run.\n");
+        free(ctx.rec);
+        return;
+    }
+
+    for (i = 0; i < ctx.n_rec; i++)
+        heat_write(v, ctx.rec[i].inode, ctx.rec[i].r, ctx.rec[i].w);
     pthread_mutex_lock(&v->heat_mu);   /* WP-heat-table-concurrent-safe */
     v->heat_any_rhot = ctx.any_r;
     v->heat_any_whot = ctx.any_w;
     pthread_mutex_unlock(&v->heat_mu);
-    (void)v;
+    free(ctx.rec);
 }
 
 
@@ -627,6 +696,7 @@ typedef struct {
     heat_cand *cand;
     size_t n_cand, cap_cand;
     size_t text_members;
+    size_t n_seen;       /* every row the walk handed us */
     int err;
 } heat_cand_ctx;
 
@@ -642,6 +712,7 @@ static int heat_promote_v3_cb(invfs_volume *v, uint64_t inode_id,
     uint16_t cg = 0, r;
     size_t nl;
 
+    ctx->n_seen++;
     if (!name || (unsigned char)name[0] == 0x01)
         return 0;
     if (vol_get_class(v, inode_id, &cc, &ca, &cg) != 0)
@@ -719,8 +790,9 @@ int vol_heat_promote(invfs_volume *v)
 {
     uint64_t owner;
     heat_cand_ctx ctx;
+    vol_walk_t w;
     size_t budget = 0, i;
-    int promoted = 0;
+    int promoted = 0, rc;
 
     if (!v || !vol_write_enabled(v)) return 0;
     if (!heat_any_rhot(v)) return 0;   /* cold volume: skip the walk */
@@ -730,8 +802,28 @@ int vol_heat_promote(invfs_volume *v)
     /* walk the live inodes; TEXT class + hot -> candidate */
     memset(&ctx, 0, sizeof ctx);
     ctx.v = v;
-    (void)vol_v3_iter_live_inodes(v, heat_promote_v3_cb, &ctx);
-    if (ctx.err) goto out;   /* realloc failed mid-collection */
+    rc = vol_v3_iter_live_inodes(v, heat_promote_v3_cb, &ctx);
+
+    /* WP145: the RECEIPT -- see vol_heat_sweep_begin for why found == n is
+     * the right pair here. This pass only COLLECTS in its callback, so
+     * unlike the decay pass nothing has been written yet and refusing costs
+     * no undo. `ctx.err` needs no separate branch below: it is set only by
+     * the callback returning non-zero, which is what makes the walk stop,
+     * which is exactly what the commit below refuses on. */
+    vol_walk_init(&w, v, "vol_heat_promote");
+    vol_walk_result(&w, rc, ctx.n_seen, ctx.n_seen);
+    if (vol_walk_commit(&w) != 0) {
+        fprintf(stderr,
+                "[heat] promotion REFUSED: the live-inode walk did not "
+                "complete (%zu inode(s) reached, and it stopped rather than "
+                "finished). The candidate list AND its budget (10%% of the "
+                "live TEXT members) would both come from that subset, so "
+                "this pass would extract data out of a partial view of the "
+                "volume and print it as a whole one. Nothing was promoted; "
+                "the next sweep retries with a complete scan.\n", ctx.n_seen);
+        free(ctx.cand);
+        return 0;
+    }
     /* NOTE: heat_any_rhot is NOT reset when the walk finds no TEXT
      * candidate: the summary means "some file is read-hot", and the tier
      * migration (vol_tier_migrate) keys on exactly that for
@@ -778,7 +870,6 @@ int vol_heat_promote(invfs_volume *v)
             fprintf(stderr, "[heat] %s: rheat %u -> extracted to generic "
                             "ZSTD\n", ctx.cand[i].name, ctx.cand[i].r);
     }
-out:
     if (!invfs_sweep_ui_active())
         printf("heat: %zu hot text member(s), %d promoted "
                "(budget %zu of %zu live)\n", ctx.n_cand, promoted, budget,

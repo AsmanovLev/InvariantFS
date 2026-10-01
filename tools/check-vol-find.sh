@@ -56,6 +56,7 @@ src/cli/fuse_fs.c:3075:SKIP
 src/cli/fuse_fs.c:3147:SKIP
 src/cli/fuse_fs.c:3182:SKIP
 src/cli/fuse_fs.c:3219:SKIP
+src/cli/heat_walk_test.c:365:SKIP
 src/cli/lane_release_test.c:242:SKIP
 src/cli/ls.c:105:SKIP
 src/cli/ls.c:119:SKIP
@@ -92,7 +93,7 @@ src/core/vol_cpack.c:3865:ACTS
 src/core/vol_cpack.c:3925:SKIP
 src/core/vol_cpack.c:3957:SKIP
 src/core/vol_exer.c:267:ACTS
-src/core/vol_heat.c:727:SKIP
+src/core/vol_heat.c:799:SKIP
 src/core/vol_png.c:1013:SKIP
 src/core/vol_read.c:1073:SKIP
 src/core/vol_read.c:1169:SKIP

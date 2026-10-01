@@ -133,6 +133,7 @@ CLI_MAINS := mkfs verify fsck cp cat ls stat arctest blkio_test resize \
              reclaim_reader_epoch_test readdir_error_test dedupe_symlink_test dirs_free_before_publish_test \
              stat_v3_counts_test acl_eio_test meta_clobber_test spn_skip_recipe_test \
              walk_status_test walk_status_fuse_test no_v2_surface_test \
+heat_walk_test \
              table_sync_evict_test write_create_path_test tz_registry_test
 $(foreach t,$(CLI_MAINS),$(eval $(call TOOL_RULE,$(t),)))
 
@@ -725,6 +726,14 @@ test: $(TEST_BINS) $(OUT)/invf-arctest $(OUT)/invf-blkio_test $(OUT)/invf-codec_
 	@# which is the same staleness trap the comment on `all` describes.
 	$(TESTENV) $(TESTISO) $(OUT)/invf-walk_status_test /tmp
 	$(TESTENV) $(TESTISO) $(OUT)/invf-walk_status_fuse_test /tmp
+	@# WP145: the sweep's HEAT stage, which is the same class one stage
+	@# away from the collect -- on the in-FUSE path the decay runs BEFORE
+	@# the collect (src/cli/fuse_fs.c:2008 then :2037), so the collect's
+	@# receipt cannot cover a walk that already stopped. Needs invf-mkfs on
+	@# disk (the `all` prerequisite), and greps /proc/self/exe for its own
+	@# refusal diagnostic so a `make -j4` that did not relink this binary
+	@# fails loudly instead of proving nothing.
+	$(TESTENV) $(TESTISO) $(OUT)/invf-heat_walk_test /tmp
 	@# WP140: the name table must not evict a LIVE name because a lookup could
 	@# not be completed. Runs under $(TESTISO): fuse_get_context() is stubbed
 	@# to NULL, so every permission check takes the documented uid-0 bypass and

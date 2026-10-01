@@ -55,6 +55,7 @@
 #include <pthread.h>
 
 #include "volume_internal.h"
+#include "vol_walk.h"
 
 /* Weak on purpose: see the header comment. NULL on a tree that predates the
  * fix, and the table is then touched with no lock at all -- which is the
@@ -431,6 +432,20 @@ int vol_v3_iter_live_inodes(invfs_volume *v,
                             int (*cb)(invfs_volume *, uint64_t, const char *, void *),
                             void *ctx)
 { (void)v; (void)cb; (void)ctx; return 0; }
+
+/* WP145: vol_heat.c's two passes now DISCHARGE a walk receipt
+ * (vol_walk_t, src/core/vol_walk.h), and src/core/vol_walk.c is not part of
+ * this standalone link -- so these three are the minimum the symbol table
+ * needs. They are not a second receipt: the real ones live in vol_walk.c and
+ * every production caller uses those. Here the receipt can only ever report
+ * a COMPLETE walk, because the stubbed iterator above always returns 0 and
+ * delivers nothing -- which is the right answer for this test, whose subject
+ * is the heat TABLE under concurrency and not the walk. */
+void vol_walk_init(vol_walk_t *w, invfs_volume *v, const char *what)
+{ if (w) { memset(w, 0, sizeof *w); w->v = v; w->what = what; } }
+void vol_walk_result(vol_walk_t *w, int rc, size_t n, size_t found)
+{ if (w) { w->rc = rc; w->n = n; w->found = found; w->armed = 1; } }
+int vol_walk_commit(vol_walk_t *w) { return (w && w->rc) ? -1 : 0; }
 uint64_t vol_v3_publish_blob_inode(invfs_volume *v, uint64_t inode,
                                    const uint8_t *blob, size_t blob_len,
                                    uint64_t orig_size, uint32_t algo)

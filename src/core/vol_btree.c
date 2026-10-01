@@ -5245,6 +5245,32 @@ static int v3_iter_mark(v3_iter_ctx *ic, uint64_t id)
     return 1;
 }
 
+/* WP145: test-only seam (src/core/vol_fault.h), armed by
+ * INVFS_FAULT="iter_live_inodes_row:<n>". It stands in for ONE live-inode row
+ * of the iteration failing to read -- a quarantined or otherwise unreadable
+ * base page, which is what stops a real walk here -- and it is consulted once
+ * per row the iteration is about to DELIVER, immediately before the caller's
+ * callback runs. So the ordinal in the spec is a position WITHIN the walk: n=1
+ * leaves exactly one inode visited and every later one unreached.
+ *
+ * The distinction from the iter_live_inodes site above is the whole point of
+ * this one, and it is not a nicety. That site fires before the first row, so
+ * every caller sees the same thing: nothing at all. It cannot tell a caller
+ * that it "saw something", which is the state that actually has to be
+ * recognised -- a walk that delivered a prefix is not a small whole set, and
+ * no count derived from it is a count of the volume.
+ *
+ * ONE site name, checked from both passes (the base scan below and the delta
+ * pass), because they are two halves of ONE iteration: whichever half carries
+ * the live rows consumes the countdown, so the ordinal means the same thing
+ * whether or not the volume has been folded.
+ *
+ * Unset in production, where it costs one getenv and one pointer compare. */
+static int v3_iter_row_stop(void)
+{
+    return invfs_vol_fault("iter_live_inodes_row");
+}
+
 static int v3_iter_base_cb(void *ctx_, bt_key k, bt_val val)
 {
     v3_iter_ctx *ic = (v3_iter_ctx *)ctx_;
@@ -5272,6 +5298,9 @@ static int v3_iter_base_cb(void *ctx_, bt_key k, bt_val val)
     if (!v3_iter_mark(ic, inode_id))
         return -1;
 
+    if (v3_iter_row_stop())            /* WP145: see v3_iter_row_stop */
+        return -1;
+
     return ic->cb(ic->v, inode_id, v3_iter_name(ic, inode_id), ic->ctx);
 }
 
@@ -5297,6 +5326,9 @@ static int v3_iter_delta_cb(void *ctx_, const uint8_t *key, uint16_t klen,
     if (v3_iter_seen(ic, inode_id))
         return 0;                   /* base row (possibly updated): done */
     if (!v3_iter_mark(ic, inode_id))
+        return -1;
+
+    if (v3_iter_row_stop())            /* WP145: see v3_iter_row_stop */
         return -1;
 
     return ic->cb(ic->v, inode_id, v3_iter_name(ic, inode_id), ic->ctx);
