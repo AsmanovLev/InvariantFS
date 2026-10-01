@@ -239,7 +239,47 @@ typedef struct {
  * sibling looks like -- which is exactly how the sweep came to skip every
  * name with a '!' in it while the cascade correctly spared them.
  */
+static int sib_segment_is_internal_shape(const char *suf, size_t n);
+
 int sib_suffix_is_internal(const char *suf, size_t n)
+{
+    /* A NESTED decomposition mints names with more than one '!': a container
+     * inside a container is itself decomposed, and its members are named after
+     * the OUTER member -- `nest.splt!mbr0000-chunk0!mbrmap`, which is a real
+     * name on disk (tools/test-containerpack.sh builds it, and its regression
+     * leg deletes it).
+     *
+     * Validating the whole remainder with the sanitised-name alphabet, which
+     * deliberately excludes '!', therefore rejected every nested member. And
+     * that was not a conservative miss: a member the shape check refused
+     * became a SURVIVOR, so deleting a nested container left its members
+     * behind and the caller reported success. That is the one direction this
+     * check must never fail in -- every other site here narrows a skip, this
+     * one decides what gets destroyed.
+     *
+     * Each '!'-separated segment after the first is validated on its own,
+     * which is what the lanes do: they ask the question per level, so the TTY
+     * tree (WP147) answers `a!b!c` the same way this does. A trailing '!'
+     * names nothing and is rejected rather than accepted as a bare segment.
+     */
+    for (;;) {
+        const char *bang = memchr(suf, '!', n);
+        size_t seg = bang ? (size_t)(bang - suf) : n;
+
+        if (!sib_segment_is_internal_shape(suf, seg))
+            return 0;
+        if (!bang)
+            return 1;
+        suf = bang + 1;
+        n -= seg + 1;
+        if (n == 0)
+            return 0;
+    }
+}
+
+/* one '!'-separated segment; the shapes and their minting sites are listed
+ * above this file's own header comment and must be updated with them */
+static int sib_segment_is_internal_shape(const char *suf, size_t n)
 {
     size_t i = 0;
 
