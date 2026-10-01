@@ -65,7 +65,10 @@ fsck_ok() { $B/invf-fsck "$1" | tee "$WORK/fsck.last" | grep -q "^OK$" \
 
 cleanup() {
     fusermount3 -u "$MNT" 2>/dev/null || true
-    [ "$DPID" -gt 0 ] 2>/dev/null && kill "$DPID" 2>/dev/null
+    # `|| true`: under `set -e` in an EXIT trap, a `kill` on an already-reaped
+    # pid aborts the cleanup on that line and becomes the script's exit status.
+    # Same shape as test-gate-c's, which printed a PASS line and exited 1.
+    [ "$DPID" -gt 0 ] 2>/dev/null && kill "$DPID" 2>/dev/null || true
     # kill any leftover background writers from leg D2c
     if [ -n "${WRITER_PID:-}" ] && [ "$WRITER_PID" -gt 0 ] 2>/dev/null; then
         kill "$WRITER_PID" 2>/dev/null || true
