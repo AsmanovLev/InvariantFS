@@ -77,6 +77,13 @@ src/cli/sib_walk_test.c:199:SKIP   # rescan: whether a name resolves IS the meas
 src/cli/sib_walk_test.c:214:SKIP   # setup: create the bracketing directory only if absent
 src/cli/bang_name_test.c:146:SKIP   # live(): whether a name resolves IS the measurement -- the defect was a name that resolved when it should not have, so the oracle must be the lookup itself
 src/cli/bang_name_test.c:168:SKIP   # reads_exact(): an unresolvable name is a FAILED byte-exact read, not a soft miss. Asked for by exact name -- vol_read_named splits on the bang (vol_read.c:1390) and reports a miss for a file that is present and intact
+src/cli/sweep_bang_test.c:82:ACTS   # reads_exact(): same shape as bang_name_test.c:168, but a miss here decides an assertion -- it FAILS the test, which is the only thing that makes this oracle safe
+src/cli/sweep_bang_test.c:115:ACTS  # the RAW precondition: a miss yields inode 0, whose zone is not RAW, so the precondition fails loudly rather than passing on an absent file
+src/cli/sweep_bang_test.c:117:ACTS  # as :115, on the '!'-bearing name -- and this is the half that must not be able to pass vacuously
+src/cli/sweep_bang_test.c:122:SKIP  # setup: marks whatever id the name resolves to; a miss marks 0, which is inert, and the sweep assertions downstream still fail
+src/cli/sweep_bang_test.c:123:SKIP  # as :122
+src/cli/sweep_bang_test.c:132:ACTS  # the control's own zone read: a miss is not TEXT, so all_text_a clears and the harness-live control FAILS -- the control cannot be satisfied by a name that is not there
+src/cli/sweep_bang_test.c:133:ACTS  # as :132, on the '!'-bearing name: the red control's input
 src/cli/bang_name_test.c:289:SKIP   # LEG A setup: the two inode ids are printed to show both names were distinct inodes before the unlink
 src/cli/bang_name_test.c:290:SKIP   # LEG A setup: as above, for the bang name
 src/cli/table_sync_evict_test.c:344:SKIP

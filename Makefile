@@ -135,7 +135,7 @@ CLI_MAINS := mkfs verify fsck cp cat ls stat arctest blkio_test resize \
              walk_status_test walk_status_fuse_test no_v2_surface_test \
              heat_walk_test no_ckp0_surface_test \
 table_sync_evict_test write_create_path_test tz_registry_test \
-otrunc_test sib_walk_test chmod_acl_write_test bang_name_test
+otrunc_test sib_walk_test chmod_acl_write_test bang_name_test sweep_bang_test
 $(foreach t,$(CLI_MAINS),$(eval $(call TOOL_RULE,$(t),)))
 
 # reclaim_reader_epoch_test was, for one commit, a red control that built but
@@ -759,6 +759,12 @@ test: helpers $(TEST_BINS) $(OUT)/invf-arctest $(OUT)/invf-blkio_test $(OUT)/inv
 	@# decomposition still has all its '!partN' siblings purged, which a fix
 	@# that simply disabled sibling purging would fail.
 	$(TESTENV) $(TESTISO) $(OUT)/invf-bang_name_test /tmp
+	@# WP136: a '!'-bearing USER name is skipped by every transform lane in
+	@# the sweep, so it silently loses batching while the byte-identical file
+	@# beside it gets the shared PPMd segment. The observable is the ZONE the
+	@# two names end up in, not an exit code: the sweep reports "300 swept"
+	@# either way and never mentions the skip. RED on main.
+	$(TESTENV) $(TESTISO) $(OUT)/invf-sweep_bang_test /tmp
 	@# WP140: the name table must not evict a LIVE name because a lookup could
 	@# not be completed. Runs under $(TESTISO): fuse_get_context() is stubbed
 	@# to NULL, so every permission check takes the documented uid-0 bypass and
