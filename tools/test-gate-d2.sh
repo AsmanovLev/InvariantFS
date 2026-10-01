@@ -231,7 +231,12 @@ wait "$WRITER_PID" 2>/dev/null || true
 # a pass that never ran, which is the whole point of the assertion below.
 DONE_FILES=""
 for _ in $(seq 1 150); do
-    DONE_FILES=$(sed -n 's/^\[sweep\] DONE files=\([0-9][0-9]*\).*/\1/p' "$WORK/fuse.log" | tail -1)
+    # `found=` is printed BEFORE `files=` (src/cli/fuse_fs.c:2312, since
+    # b07a890 added it when the FUSE sweep stopped truncating at 300,000
+    # inodes), so a pattern anchored at `DONE files=` can never match and this
+    # leg failed on every run regardless of whether a pass ran. Match the shape
+    # the code actually emits, the way the other eight suites already do.
+    DONE_FILES=$(sed -n 's/^\[sweep\] DONE found=[0-9][0-9]* files=\([0-9][0-9]*\).*/\1/p' "$WORK/fuse.log" | tail -1)
     [ -n "$DONE_FILES" ] && break
     sleep 0.2
 done
