@@ -1381,10 +1381,12 @@ static int invf_mkdir(const char *path, mode_t mode)
     pthread_mutex_lock(&g_io_lock);
     vol_ensure_path(g_vol, path + 1);
     uint64_t d = vol_mkdir(g_vol, path + 1);
+    int acldeny = 0;
     if (d) {
         /* stamp real owner/mode on the "dir/" anchor record */
         invfs_meta_pub m;
         char anchor[300];
+        uint64_t anchor_ino;
         snprintf(anchor, sizeof anchor, "%s/", path + 1);
         memset(&m, 0, sizeof m);
         m.type = INVFS_ITYP_DIR;
@@ -1394,11 +1396,63 @@ static int invf_mkdir(const char *path, mode_t mode)
         m.gid = ctx ? ctx->gid : 0;
         m.nlink = 2;
         m.mtime = m.atime = (int64_t)time(NULL);
-        if (!vol_apply_meta(g_vol, anchor, &m))
+        anchor_ino = vol_apply_meta(g_vol, anchor, &m);
+        if (!anchor_ino)
             fprintf(stderr, "invf: mkdir stamp FAILED %s (area full?)\n", anchor);
         if (dlen) {
-            uint64_t ino2 = vol_find(g_vol, anchor);
-            if (ino2) {
+            /* The ACL goes on the anchor record, and vol_apply_meta ALREADY
+             * RESOLVED that name and handed the id back -- it is the same
+             * record vol_find would have gone looking for, one line later, for
+             * no new information.
+             *
+             * That second lookup WAS the defect. vol_find returns a uint64_t,
+             * so its "there is no such name" and its "the lookup could not be
+             * completed" are both 0, and `if (ino2)` acted on their union: an
+             * unreadable dirent row on a name this function had written
+             * microseconds earlier produced a directory that EXISTS, carries
+             * the ACL-masked mode triad, and carries NO ACL AT ALL.
+             *
+             * On this mount that is a widening and not a mislabel. It does not
+             * negotiate default_permissions (AGENTS.md 2.9), so perm_check_cred
+             * is the sole object-level permission authority, and an object with
+             * no access ACL is evaluated on its mode triad alone (acl_eval,
+             * :796-800). The triad reproduces u::, the group class and o::;
+             * every NAMED entry in the inherited ACL is a per-identity decision
+             * the triad cannot express. Dropping the ACL therefore hands the
+             * owning group what the ACL denied a member of it, and drops the
+             * child's own default ACL, so nothing below it inherits the
+             * restriction either.
+             *
+             * So the id comes from the write. The lookup is now only the
+             * fallback for a stamp that returned nothing at all. */
+            uint64_t ino2 = anchor_ino;
+            if (!ino2) {
+                int frc = vol_find_rc(g_vol, anchor, &ino2);
+                if (frc < 0) {
+                    /* Not "this directory has no ACL": the lookup did not
+                     * COMPLETE, and an error is not entitled to assert a
+                     * negative about the volume. The create is refused -- and
+                     * the directory removed again, because leaving it behind
+                     * is the fail-open with a louder log attached. The undo is
+                     * exact and provable: this call created it, under
+                     * g_io_lock, and it is empty by construction, so there is
+                     * nothing of anybody else's to destroy. */
+                    fprintf(stderr, "invf: mkdir: could not resolve \"%s\" to "
+                            "attach the ACL inherited from \"%s\"; the "
+                            "directory is removed again rather than left "
+                            "without it\n", anchor, path + 1);
+                    if (vol_rmdir(g_vol, path + 1) == 0) {
+                        table_remove_name(anchor);
+                        d = 0;
+                        acldeny = 1;
+                    } else {
+                        fprintf(stderr, "invf: mkdir: the rollback of \"%s\" "
+                                "FAILED -- it is on the volume with no ACL\n",
+                                anchor);
+                    }
+                }
+            }
+            if (!acldeny && ino2) {
                 if (aalen &&
                     vol_set_xattr(g_vol, ino2, XATTR_ACL_ACCESS, aacl, aalen) != 0)
                     fprintf(stderr, "invf: mkdir ACL inherit FAILED %s\n", anchor);
@@ -1406,9 +1460,12 @@ static int invf_mkdir(const char *path, mode_t mode)
                     fprintf(stderr, "invf: mkdir defACL inherit FAILED %s\n", anchor);
             }
         }
-        table_sync_one_locked(anchor);
+        if (d)
+            table_sync_one_locked(anchor);
     }
     pthread_mutex_unlock(&g_io_lock);
+    if (acldeny)
+        return -EIO;              /* never reported to the caller as success */
     rc = d ? 0 : -EEXIST;
     return rc;
 }
@@ -1699,6 +1756,7 @@ static int invf_create(const char *path, mode_t mode, struct fuse_file_info *fi)
 {
     int temp = is_temp_path(path);
     wctx *c;
+    int acldeny = 0;          /* the inherited ACL could not be attached */
     struct fuse_context *ctx = fuse_get_context();
     uint8_t aacl[INVFS_META_XATTR_MAX];
     size_t aalen = 0;
@@ -1751,6 +1809,7 @@ static int invf_create(const char *path, mode_t mode, struct fuse_file_info *fi)
         /* stamp owner/mode right away; re-stamped at flush (the replace
          * in commit_wctx builds a fresh record) */
         invfs_meta_pub m;
+        uint64_t file_ino;
         memset(&m, 0, sizeof m);
         m.type = INVFS_ITYP_REG;
         m.mode = cmode;
@@ -1758,11 +1817,41 @@ static int invf_create(const char *path, mode_t mode, struct fuse_file_info *fi)
         m.gid = ctx ? ctx->gid : 0;
         m.nlink = 1;
         m.mtime = m.atime = (int64_t)time(NULL);
-        if (!vol_apply_meta(g_vol, path + 1, &m))
+        file_ino = vol_apply_meta(g_vol, path + 1, &m);
+        if (!file_ino)
             fprintf(stderr, "invf: mknod stamp FAILED %s\n", path);
         if (aalen) {
-            uint64_t ino2 = vol_find(g_vol, path + 1);
-            if (ino2 &&
+            /* The create-side twin of invf_mkdir's stamp, and the same
+             * defect: the id of the record just written is what
+             * vol_apply_meta returns, and it used to be thrown away in favour
+             * of a second name resolution whose failure read as "no such
+             * name". See the long form at the mkdir site above. */
+            uint64_t ino2 = file_ino;
+            if (!ino2) {
+                int frc = vol_find_rc(g_vol, path + 1, &ino2);
+                if (frc < 0) {
+                    /* Refuse -- the same conclusion as mkdir, but WITHOUT the
+                     * rollback, and the difference is the argument rather than
+                     * an omission. vol_replace_file above has already replaced
+                     * whatever the name referred to, so any pre-existing
+                     * content is gone before this decision is reached;
+                     * unlinking now would take the NAME as well and leave a
+                     * caller holding a handle to a deleted inode, which is
+                     * strictly more loss than an empty file that was never
+                     * going to be trusted. The volume is left as an O_CREAT
+                     * that failed after the record was written, the caller is
+                     * told so, and the condition is unmissable in the log. */
+                    fprintf(stderr, "invf: create: could not resolve \"%s\" to "
+                            "attach the ACL inherited from its parent; the "
+                            "create is FAILED and \"%s\" is on the volume "
+                            "WITHOUT that ACL -- it is empty and its mode is "
+                            "the ACL-masked triad, so it is WIDER than its "
+                            "parent's ACL. Remove it before anything is "
+                            "written to it.\n", path, path);
+                    acldeny = 1;
+                }
+            }
+            if (!acldeny && ino2 &&
                 vol_set_xattr(g_vol, ino2, XATTR_ACL_ACCESS, aacl, aalen) != 0)
                 fprintf(stderr, "invf: create ACL inherit FAILED %s\n", path);
         }
@@ -1779,6 +1868,10 @@ static int invf_create(const char *path, mode_t mode, struct fuse_file_info *fi)
         table_sync_one_locked(path + 1);
     }
     pthread_mutex_unlock(&g_io_lock);
+    /* Same contract as the calloc failure below: returning here is BEFORE the
+     * handle exists, so nothing is acquired and no .release is owed. */
+    if (acldeny)
+        return -EIO;
     /* From here the handle is ours to release. A failed calloc above returns
      * before this point, so it acquires nothing -- and so is sent no
      * .release. */

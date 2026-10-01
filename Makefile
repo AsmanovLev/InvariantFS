@@ -131,7 +131,7 @@ CLI_MAINS := mkfs verify fsck cp cat ls stat arctest blkio_test resize \
              rollback_symlink_test \
              sibling_retire_v3_test tar_cap_test fold_delta_read_test \
              reclaim_reader_epoch_test readdir_error_test dedupe_symlink_test dirs_free_before_publish_test \
-             stat_v3_counts_test acl_eio_test meta_clobber_test spn_skip_recipe_test \
+             stat_v3_counts_test acl_eio_test acl_inherit_test meta_clobber_test spn_skip_recipe_test \
              walk_status_test walk_status_fuse_test no_v2_surface_test \
              heat_walk_test no_ckp0_surface_test \
              table_sync_evict_test write_create_path_test tz_registry_test
@@ -800,6 +800,22 @@ test: $(TEST_BINS) $(OUT)/invf-arctest $(OUT)/invf-blkio_test $(OUT)/invf-codec_
 	@# INVFS_FAULT, unset here, so this leg also asserts the unset path stays
 	@# inert.
 	$(TESTENV) $(TESTISO) $(OUT)/invf-acl_eio_test /tmp
+	@# WP acl-inherit-on-failed-lookup: the CREATE side of the same class. The
+	@# mkdir and create paths read the parent's POSIX ACL fail-closed, fold it
+	@# against the create mode, and then had to resolve the object's OWN name a
+	@# second time to stamp the result on -- with vol_find, whose uint64_t makes
+	@# "no such name" and "the lookup could not be completed" both 0. One
+	@# unreadable dirent row therefore produced an object that EXISTS, carries
+	@# the ACL-masked mode triad, and carries NO ACL: on a mount that does not
+	@# negotiate default_permissions (AGENTS.md 2.9) that is the widening, and
+	@# the mode triad cannot express the per-identity decision the named ACL
+	@# entries carried. Asserts the permission DECISION (perm_check_cred by
+	@# hand, uid 2000/gid 0: denied by the ACL, allowed by the bare triad), and
+	@# SEARCHES the seam ordinals because the site is consulted once per path
+	@# component and the ordinal is not a constant -- requiring at-least-one AND
+	@# not-all, so a table in which every position behaves alike cannot pass.
+	@# Runs under $(TESTISO): no real uid denial anywhere in it.
+	$(TESTENV) $(TESTISO) $(OUT)/invf-acl_inherit_test /tmp
 	@# WP meta-clobber-on-unreadable-row: vol_get_meta returned -1 for BOTH
 	@# "this inode has no meta row" and "the row could not be read", and
 	@# meta_for_path answered the merged value with meta_defaults() -- 0644,

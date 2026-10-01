@@ -40,23 +40,23 @@ cd "$(dirname "$0")/.." || exit 1
 # Keep this sorted; it is the ledger.
 LEDGER="
 src/cli/batch_owner_test.c:92:SKIP
+src/cli/acl_inherit_test.c:266:SKIP   # child_has_acl: measurement, fault spent
+src/cli/acl_inherit_test.c:291:SKIP   # setup: aborts the test if the /p anchor is not found
 src/cli/cat.c:86:SKIP
 src/cli/cat.c:99:SKIP
 src/cli/cp.c:99:SKIP
 src/cli/heat_walk_test.c:365:SKIP
-src/cli/fuse_fs.c:2401:SKIP
-src/cli/fuse_fs.c:2612:SKIP
-src/cli/fuse_fs.c:2657:SKIP
-src/cli/fuse_fs.c:2874:SKIP
-src/cli/fuse_fs.c:3039:SKIP
-src/cli/fuse_fs.c:3111:SKIP
-src/cli/fuse_fs.c:3146:SKIP
-src/cli/fuse_fs.c:3183:SKIP
-src/cli/fuse_fs.c:1400:SKIP
-src/cli/fuse_fs.c:1531:SKIP
-src/cli/fuse_fs.c:1676:SKIP
-src/cli/fuse_fs.c:1764:SKIP
-src/cli/fuse_fs.c:1773:SKIP
+src/cli/fuse_fs.c:2494:SKIP
+src/cli/fuse_fs.c:2705:SKIP
+src/cli/fuse_fs.c:2750:SKIP
+src/cli/fuse_fs.c:2967:SKIP
+src/cli/fuse_fs.c:3132:SKIP
+src/cli/fuse_fs.c:3204:SKIP
+src/cli/fuse_fs.c:3239:SKIP
+src/cli/fuse_fs.c:3276:SKIP
+src/cli/fuse_fs.c:1588:SKIP
+src/cli/fuse_fs.c:1733:SKIP
+src/cli/fuse_fs.c:1862:SKIP
 src/cli/lane_release_test.c:242:SKIP
 src/cli/ls.c:105:SKIP
 src/cli/ls.c:119:SKIP
