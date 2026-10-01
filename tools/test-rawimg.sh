@@ -37,6 +37,25 @@ echo "== tools =="
 command -v cjxl >/dev/null || { echo "FAIL: cjxl not installed"; exit 1; }
 command -v djxl >/dev/null || { echo "FAIL: djxl not installed"; exit 1; }
 command -v python3 >/dev/null || { echo "FAIL: python3 not installed"; exit 1; }
+command -v cc >/dev/null || { echo "FAIL: cc not installed"; exit 1; }
+
+echo "== build the jxl pack's estimator and put it on PATH =="
+# WP jpeg-sniff-claims-a-dicom-container. The encap.dcm assertion below
+# used to pass VACUOUSLY: it only holds because the jxl codecpack could not
+# run. The pack is admitted iff its tools resolve, and jxlest is the one it
+# resolves by NAME (the rawdisk convention -- <pack>/bin, $INVFS_TOOLS,
+# /usr/lib/invfs/tools, PATH). test-jxl.sh compiles it into a PATH dir, so
+# on any host or CI job where test-jxl.sh ran first the pack WAS available
+# here, the WP103 try-last pass offered it a file it does not claim, and
+# encap.dcm came back stamped GENERIC_GUARD{JXL,4} instead of {RAWIMG,13}.
+# Compiling it here makes the suite cover that case whether or not anything
+# else has run on the host -- it is the difference between this assertion
+# testing something and testing the ambient environment.
+cc -std=c11 -O2 -Wall -Wextra -o "$WORK/jxlest" \
+   "$REPO/tools/codecpacks/jxl.codecpack/jxlest.c"
+export PATH="$WORK:$PATH"                 # jxlest resolves by name
+command -v jxlest >/dev/null || { echo "FAIL: jxlest did not land on PATH"; exit 1; }
+echo "jxlest on PATH: $(command -v jxlest)"
 
 echo "== generate fixtures =="
 python3 - "$WORK/orig" <<'PY'

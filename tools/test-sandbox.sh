@@ -13,9 +13,9 @@
 #       NOTE: /etc/passwd, not /etc/shadow — shadow is mode-000 root-only,
 #       so DAC would deny the read even with the sandbox off (uid 1000
 #       here) and the OFF leg could not prove the canary works.
-#   (b) REGRESSION: the three pack-heavy suites — test-containerpack.sh,
-#       test-rawimg.sh, test-jxl.sh — run end-to-end with the sandbox ON
-#       (default env).
+#   (b) REGRESSION: the pack-heavy suites — test-containerpack.sh,
+#       test-rawimg.sh, test-jxl.sh, test-jpeg-sniff-container.sh — run
+#       end-to-end with the sandbox ON (default env).
 #
 # Run from the repo root after `make`:
 #   bash tools/run-e2e.sh tools/test-sandbox.sh
@@ -212,7 +212,8 @@ echo "read canary succeeded (CODEC{47,1}), marker landed, sandboxed decode bit-e
 
 echo "== leg B: pack-suite regressions with the sandbox ON (default env) =="
 unset INVFS_PACK_SANDBOX   # belt + braces: the default must be ON
-for t in test-containerpack.sh test-rawimg.sh test-jxl.sh; do
+for t in test-containerpack.sh test-rawimg.sh test-jxl.sh \
+         test-jpeg-sniff-container.sh; do
     echo "-- $t"
     # plain bash: the outer run-e2e holds the global e2e flock already
     bash "$WT/tools/$t" > "$WORK/reg-$t.log" 2>&1 \

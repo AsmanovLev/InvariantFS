@@ -784,6 +784,15 @@ static int sweep_dispatch(invfs_volume *v, uint64_t inode_id,
             if ((int)pc->algo == declined_algo) continue;  /* had its turn */
             if (!pc->encode || !pc->decode) continue;      /* not a claim */
             if (!pc->probe || !pc->probe()) continue;     /* tools absent */
+            /* A pack with claim rules that scored 0 above has ALREADY had
+             * its turn: it looked at this file and said no. WP103's second
+             * chance is for the claim-free general codecs, which score 0
+             * because they have nothing to score with, not because they
+             * recognised the file and declined. Without this, a pack can
+             * reach a whole-file encode on a file it does not claim -- and
+             * its refusal stamp then overwrites the one a lane that DID
+             * claim the file wrote (see the stamp note at the call). */
+            if (invfs_codec_pack_claims(pc)) continue;
             if (!have_ref) {
                 /* the lane's own answer for this file, discounted by the
                  * gain guard -- measured once per file, not once per pack */

@@ -111,6 +111,13 @@ typedef struct invfs_pack_def {
  * records, so callers cannot rely on pointer identity). */
 const invfs_pack_def *invfs_codec_pack_def(const invfs_codec *c);
 
+/* 1 when the pack behind this entry carries a claim rule (a sniff.magic or
+ * a sniff.ext), 0 when it is a claim-free `family = code` general codec and
+ * 0 for a builtin entry. The sweep's WP103 try-last pass is the only caller:
+ * it is the second chance for the CLAIM-FREE packs, so one that looked at
+ * the file and declined must not be offered a trial run there. */
+int invfs_codec_pack_claims(const invfs_codec *c);
+
 /* Run the pack's encode (is_encode=1) or decode argv with {in}/{out}
  * substituted by the given paths. Returns the child's exit code, -1 on
  * failure to launch. */

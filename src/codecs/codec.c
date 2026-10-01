@@ -1336,6 +1336,37 @@ const invfs_pack_def *invfs_codec_pack_def(const invfs_codec *c)
     return NULL;
 }
 
+/* Does this pack carry any claim rule -- a sniff.magic or a sniff.ext?
+ *
+ * The distinction matters to the sweep's try-last pass (WP103, vol_sweep.c),
+ * documented as a SECOND chance for a pack that "scored 0 ... (no
+ * sniff.magic AND no sniff.ext -- a `family = code` general codec)". A pack
+ * that HAS claim rules and scored 0 did not fail to recognise the file; it
+ * recognised it and said no. Offering that pack a trial run anyway lets a
+ * non-claim reach a whole-file encode, and -- when it declines -- lets its
+ * GENERIC_GUARD stamp overwrite the one a lane that DID claim the file
+ * already wrote. That stamp is terminal for the file until the stamped
+ * codec's generation grows (the sweep's class policy), so the overwrite
+ * does not merely mislabel: it freezes the file out of every later sweep.
+ *
+ * Returns 1 for a pack with at least one magic rule or a non-empty
+ * extension list; 0 for a claim-free general codec, and 0 for a builtin
+ * entry (there is no pack record to hold rules). */
+int invfs_codec_pack_claims(const invfs_codec *c)
+{
+    size_t i;
+
+    if (!c) return 0;
+    packs_ensure();
+    for (i = 0; i < packs_n; i++) {
+        if (packs[i].pub.algo != c->algo) continue;
+        if (packs[i].n_magic > 0) return 1;
+        if (packs[i].exts && packs[i].exts[0]) return 1;
+        return 0;
+    }
+    return 0;
+}
+
 const invfs_codec *invfs_codec_by_algo(uint32_t algo)
 {
     size_t i;
