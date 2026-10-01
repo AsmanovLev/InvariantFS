@@ -147,31 +147,115 @@ static uint64_t        g_tree_done, g_tree_total;
 static uint64_t        g_tree_leaves;
 static size_t          g_tree_rows;    /* rows the last paint occupied */
 static invfs_volume   *g_tree_vol;
+/* WP147: sw_tree_set consults the dashboard's opt-in flag, and the flag is
+ * declared with the dashboard block below. A tentative definition here (C11
+ * 6.9.2p2: a file-scope declaration with no initializer and no storage-class
+ * specifier is a tentative definition, and two of them in one TU are the same
+ * object) -- not a second variable that could ever drift from the real one. */
+static int             g_dash_on;
+
+/* ---- split a name into the chain THIS VOLUME can prove ------------------
+ *
+ * WP147. This used to be `while (*p) { cut at the next '!' }` -- a question
+ * about a BYTE. A user file `notes!final.txt` was therefore drawn as container
+ * `notes` with member `final.txt`, and the panel under it said `depth 2` for a
+ * file with no container anywhere on the volume: the same false statement
+ * WP146 removed from the report lines, drawn as a tree instead.
+ *
+ * The core owns the real question (vol_name_is_container_sibling,
+ * src/core/volume_internal.h:1045) -- a minted suffix shape AND a live
+ * container inode -- and this tool CAN ask it: `v` is the volume the collect
+ * stage walked (vol_v3_walk_strict, :1637) and `name` is a path off that walk.
+ *
+ * WHY A CHAIN SPLITTER AND NOT ONE PREDICATE CALL. The tree is a TREE, so the
+ * decision is per LEVEL, not per file: a real member must still hang under its
+ * container. So the predicate is asked on the path-so-far at every '!', and the
+ * first level it does not vouch for ends the chain -- the remainder is carried
+ * UNSPLIT as one row, under its own name, with its own size. A fix that made
+ * every '!' name flat would break the nesting a real decomposition needs; this
+ * one stops claiming a nesting nobody can prove, and nothing else.
+ *
+ * Two consequences worth stating:
+ *
+ *   - `box.tar!part0`: at the first '!' the path-so-far is the whole name, the
+ *     predicate says yes (`part0` is minted, `box.tar` is live), so the chain
+ *     nests exactly as before.
+ *   - `nest.splt!mbr0000-chunk0!mbrmap` (a real nested decomposition --
+ *     tools/test-containerpack.sh:399 lists that name on a volume): level 0
+ *     passes, level 1 cannot, because the core predicate deliberately answers
+ *     "not a sibling" for a name carrying two '!' (src/core/vol_records.c:296:
+ *     `a!b!c` splits as `a` + `b!c`, and `b!c` is not a minted shape). So the
+ *     tail is shown whole rather than broken into a nesting nothing here can
+ *     vouch for. That is the same answer the sweep LANES give that name, not a
+ *     new one -- the tree and the lanes cannot disagree about a chain.
+ *
+ * Returns the number of segments written; seg[0..n-1] joined by '!' is the
+ * original name again. */
+#define TREE_SEG_MAX 288
+static size_t sw_chain_split(invfs_volume *v, const char *name,
+                             char seg[][TREE_SEG_MAX], size_t max)
+{
+    const char *start = name;
+    size_t n = 0;
+
+    if (!name || !name[0] || !seg || !max) return 0;
+    /* n + 1 < max: the unsplit remainder always needs a row of its own. */
+    while (n + 1 < max) {
+        const char *bang = strchr(start, '!');
+        const char *segend;
+        char path[TREE_PATH_MAX];
+        size_t plen, slen;
+
+        if (!bang) break;
+        /* The predicate judges THIS LEVEL, not its container: the path-so-far
+         * runs from the start of the name to the end of the segment `bang`
+         * closes -- `box.tar!part3`, NOT `box.tar`. Asking about the prefix
+         * would ask whether the CONTAINER is a sibling of something, which it
+         * is not (a container is a prefix, never a member), and every real
+         * decomposition would flatten to one row. */
+        segend = strchr(bang + 1, '!');
+        if (!segend) segend = name + strlen(name);
+        plen = (size_t)(segend - name);
+        if (plen >= sizeof path) break;         /* unsplittable: carry the rest */
+        memcpy(path, name, plen);
+        path[plen] = '\0';
+        /* Not ours -> everything from here on is ONE name, the user's. */
+        if (!vol_name_is_container_sibling(v, path)) break;
+        slen = (size_t)(bang - start);
+        if (slen >= TREE_SEG_MAX) slen = TREE_SEG_MAX - 1;
+        memcpy(seg[n], start, slen);
+        seg[n][slen] = '\0';
+        n++;
+        start = bang + 1;
+    }
+    {
+        size_t rlen = strlen(start);
+        int truncated = rlen >= TREE_SEG_MAX;
+        if (truncated) rlen = TREE_SEG_MAX - 1;
+        memcpy(seg[n], start, rlen);
+        seg[n][rlen] = '\0';
+        if (truncated) snprintf(seg[n], TREE_SEG_MAX, "...");
+        n++;
+    }
+    return n;
+}
 
 /* remember the chain we were handed; a shorter name is a sibling, so the
  * path is simply rebuilt from scratch every time */
 static void sw_tree_set(invfs_volume *v, const char *name,
                         uint64_t done, uint64_t total)
 {
-    const char *p = name;
-    size_t n = 0;
-
     g_tree_vol = v;
     g_tree_done = done;
     g_tree_total = total;
     if (!name || !name[0]) { g_tree_depth = 0; return; }
-    while (*p && n < TREE_MAX_DEPTH) {
-        const char *e = strchr(p, '!');
-        size_t len = e ? (size_t)(e - p) : strlen(p);
-        if (len >= sizeof g_tree[0]) len = sizeof g_tree[0] - 1;
-        memcpy(g_tree[n], p, len);
-        g_tree[n][len] = '\0';
-        n++;
-        if (!e) break;
-        p = e + 1;
-    }
-    if (*p) snprintf(g_tree[TREE_MAX_DEPTH - 1], sizeof g_tree[0], "...");
-    g_tree_depth = n;
+    /* Nothing consumes the chain unless the panel owns the terminal or
+     * --dash is on, and the predicate costs a name lookup on the rare name
+     * that has both a '!' and a minted suffix. A redirected run -- the shape
+     * every benchmark and every CI log has -- must not start paying for a
+     * picture nobody sees, and before WP147 this was pure string work. */
+    if (!g_progress_tty && !g_dash_on) { g_tree_depth = 0; return; }
+    g_tree_depth = sw_chain_split(v, name, g_tree, TREE_MAX_DEPTH);
 }
 
 /* ---- live dashboard (opt-in: invf-sweep --dash <file.html>) -------------
@@ -240,10 +324,23 @@ static void sw_dash_note_container(invfs_volume *v, const char *name)
     g_recent[slot].size = total;
     g_recent[slot].members = members;
     {
-        const char *p = name;
-        int d = 0;
-        while ((p = strchr(p, '!'))) { d++; p++; }
-        g_recent[slot].depth = d;
+        /* WP147: this used to be "how many '!' does the name contain?", which
+         * is not the question. Depth is how many ENCLOSING containers this
+         * volume can vouch for, and the answer is the chain sw_tree_set draws
+         * -- the same function, so the dashboard's indentation and the TTY
+         * panel cannot drift apart the way two string tests did (WP136).
+         *
+         * The reachable case that mattered: a name a USER typed, holding a '!'
+         * (`photos.img!backup`), beside a real `photos.img!backup!mbr0001-x`
+         * left by a lane that decomposed it. Counting '!' said depth 1 and the
+         * dashboard indented the file as a member of a container `photos.img`
+         * that has never existed. sw_chain_split says one segment, depth 0:
+         * the name the user typed, at the level the user put it. A genuine
+         * member still nests -- `box.tar!part0` is two segments, depth 1 --
+         * because that is a chain this tree minted. */
+        char chain[TREE_MAX_DEPTH][TREE_SEG_MAX];
+        size_t n = sw_chain_split(v, name, chain, TREE_MAX_DEPTH);
+        g_recent[slot].depth = n ? (int)(n - 1) : 0;
     }
 }
 

@@ -147,7 +147,7 @@ CLI_MAINS := mkfs verify fsck cp cat ls stat arctest blkio_test resize \
              heat_walk_test no_ckp0_surface_test \
 table_sync_evict_test write_create_path_test tz_registry_test \
 otrunc_test sib_walk_test chmod_acl_write_test bang_name_test sweep_bang_test \
-read_named_test sweep_report_bang_test
+read_named_test sweep_report_bang_test sweep_tree_bang_test
 $(foreach t,$(CLI_MAINS),$(eval $(call TOOL_RULE,$(t),)))
 
 # reclaim_reader_epoch_test was, for one commit, a red control that built but
@@ -801,6 +801,21 @@ test: helpers $(TEST_BINS) $(OUT)/invf-arctest $(OUT)/invf-blkio_test $(OUT)/inv
 	@# No scratch argument: the test resolves /srv/bench/scratch itself
 	@# (/tmp is RAM here -- AGENTS.md 2.8b).
 	$(TESTENV) $(TESTISO) $(OUT)/invf-sweep_report_bang_test
+	@# WP147: the last two '!'-bytes-remaining sites, and the INVERSE of the
+	@# line above in one respect: both live behind invfs_sweep_ui_active(),
+	@# which is isatty(STDERR_FILENO) with no --log. WP146 had to force the UI
+	@# OFF and so could not reach them; this test allocates a real pty and puts
+	@# the sweep's fd 1 and 2 on the slave end, so the tree panel is live. On
+	@# the TTY a user file `notes!final.txt` was DRAWN as container `notes` with
+	@# member `final.txt` (depth 2), and the --dashboard indented a user-named
+	@# transcoded file as a member of a container that does not exist.
+	@# Asserts the RENDERED TEXT plus the exit code separately, and carries a
+	@# control arm in each leg (rows really were drawn / the container really
+	@# was recorded) so an absent row can never pass as an absent phantom: the
+	@# vacuity the last two fixes here had to work around.
+	@# The middle leg is the one a too-eager fix fails: a genuine tar
+	@# decomposition must STILL nest -- container row, then its member row.
+	$(TESTENV) $(TESTISO) $(OUT)/invf-sweep_tree_bang_test
 	@# WP140: the name table must not evict a LIVE name because a lookup could
 	@# not be completed. Runs under $(TESTISO): fuse_get_context() is stubbed
 	@# to NULL, so every permission check takes the documented uid-0 bypass and
