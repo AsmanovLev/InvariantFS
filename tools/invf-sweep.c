@@ -30,16 +30,13 @@
  * redundancy flags) on a volume with a live descriptor auto-reseals after
  * the sweep. --redundant-bench prints rs-vm vs rs-cauchy MB/s and exits.
  *
- * WP21: every non-dry run arms a sweep checkpoint (CKP0) BEFORE the walk
- * and holds the blocks it retires in the "\x01reten" retention registry
- * (see vol_ckp_begin); invf-rollback undoes the last sweep from it.
- * --realize is the point of no return: the previous run's retained blocks
- * are freed and CKP0 is cleared, then a normal (freshly checkpointed)
- * sweep proceeds. The next bare sweep auto-realizes the same way --
- * K=1 means one checkpoint, and only --realize or invf-rollback resolve
- * it by hand. Checkpointing is declined (the sweep runs without one) on
- * read-only/recovering volumes, under a live redundancy seal (rollback
- * would invalidate the parity stripes), and with INVFS_CHECKPOINT=0.
+ * Every non-dry run captures an SPT0 SAVEPOINT in "prepare", before the
+ * walk, and the window it opens is what invf-rollback undoes the sweep from.
+ * There is no retention registry and no second checkpoint kind: the savepoint
+ * pins the blocks the captured generation's recipes named, and the NEXT
+ * capture discharges it (AGENTS.md 2.5). Checkpointing is declined (the sweep
+ * runs without one) on read-only/recovering volumes and with
+ * INVFS_CHECKPOINT=0.
  *
  * WP22e: --fast narrows the per-file decision to "generic or nothing"
  * (RAW files take the per-segment profile recompress; classification,
@@ -49,8 +46,8 @@
  *
  * WP22e: the run ends with online inode-area compaction when the dead
  * share of the area (superseded versions + tombstones) exceeds ~30% of the
- * used bytes ("inode area compacted: X -> Y bytes"). Never while a CKP0
- * checkpoint is live (rollback truncates to absolute checkpoint positions)
+ * used bytes ("inode area compacted: X -> Y bytes"). Never while a
+ * savepoint is live (rollback truncates to its recorded positions)
  * or on a read-only volume; INVFS_NO_COMPACT=1 disables the automatic
  * pass. --compact forces the pass alone (no walk, no checkpoint).
  *
@@ -1193,7 +1190,7 @@ int main(int argc, char **argv)
                 "           [--redundant-paranoic <f>[:rs-vm|rs-cauchy]]\n"
                 "           [--free-redundant] [--redundant-bench]\n"
                 "           [--realize]  (accept the last sweep: free its\n"
-                "                         retention registry, clear CKP0)\n"
+                "                         the savepoint that opened this window)\n"
                 "           [--no-realize] (keep the previous checkpoint live;\n"
                 "                         blocks stay held until the next sweep)\n"
                 "           [--log <file>] (append combined stdout/stderr)\n"
@@ -1227,7 +1224,7 @@ int main(int argc, char **argv)
                 "           [--redundant-paranoic <f>[:rs-vm|rs-cauchy]]\n"
                 "           [--free-redundant] [--redundant-bench]\n"
                 "           [--realize]  (accept the last sweep: free its\n"
-                "                         retention registry, clear CKP0)\n"
+                "                         the savepoint that opened this window)\n"
                 "           [--no-realize] (keep the previous checkpoint live;\n"
                 "                         blocks stay held until the next sweep)\n"
                 "           [--log <file>] (append combined stdout/stderr)\n"
