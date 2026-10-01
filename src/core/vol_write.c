@@ -990,7 +990,52 @@ uint64_t vol_v3_write_bulk(invfs_volume *v, const char *name,
                 "(EROFS)\n", v->degraded ? " (DEGRADED)" : "");
         return 0;
     }
-    nid = vol_find(v, name);
+    /* THE DECISION, and the one place on this path where getting it wrong
+     * loses bytes rather than space.
+     *
+     * This used to be:
+     *
+     *     nid = vol_find(v, name);
+     *     if (!nid) { nid = vol_v3_create_node(v, name, meta); ... }
+     *
+     * and vol_find returns a uint64_t, so "there is no such name" and "the
+     * lookup could not be COMPLETED" are both the value 0. On the second one
+     * this takes the CREATE branch -- and create-on-v3 is not "add a name",
+     * it is "install an EMPTY node over whatever was there": same inode id,
+     * recipe address zeroed, old recipe's blocks freed
+     * (src/core/vol_dirs.c:340-344 and :365-367). So if vol_write_begin
+     * then fails (:998), or the range write fails (:1000), or len == 0
+     * (:1000 writes nothing at all), the name's PRIOR CONTENT IS GONE with
+     * nothing written back. That is the whole of invf-import's and
+     * invf-cp's write path.
+     *
+     * NOTE THAT :80/:99 DOES NOT COVER THIS. vol_write_begin's vol_find_rc
+     * (WP "7791a87") is a different call in a different function and it runs
+     * at :998 -- strictly AFTER vol_v3_create_node has already emptied the
+     * row and released the blocks. By the time it is asked, the content it
+     * was supposed to supersede is already gone; no amount of correctness
+     * there can put it back.
+     *
+     * So the distinction has to be made HERE, at the call that decides:
+     * a lookup that could not be completed is not entitled to assert that
+     * the name is absent. That is the same asymmetry 42ea0a6 fixed in
+     * table_sync_one_locked, and it cuts the same way -- the only safe
+     * answer to "I do not know what is there" is to change nothing. */
+    {
+        uint64_t found = 0;
+        int frc = vol_find_rc(v, name, &found);
+        if (frc < 0) {
+            fprintf(stderr, "invarifs: %s: the name's lookup did not COMPLETE "
+                    "(rc=%d), so it is not known whether the name is absent. "
+                    "A failed read is not entitled to assert that the name is "
+                    "not there, and taking the create path would empty the "
+                    "name's existing inode and free its blocks before a "
+                    "single byte was written. Nothing was written; whatever "
+                    "the name held is untouched.\n", name, frc);
+            return 0;
+        }
+        nid = found;
+    }
     if (!nid) {
         nid = vol_v3_create_node(v, name, meta);
         if (!nid) return 0;
@@ -1011,5 +1056,27 @@ uint64_t vol_v3_write_bulk(invfs_volume *v, const char *name,
     if (meta && vol_v3_set_meta(v, name, meta) == 0)
         fprintf(stderr, "invarifs: %s: warning: metadata apply failed "
                 "(content is committed)\n", name);
-    return vol_find(v, name);
+    /* The content is DURABLE at this point. The re-lookup exists only to hand
+     * back the live inode id, and it used to be a bare vol_find, so a lookup
+     * that could not be completed returned 0 -- telling invf-cp and
+     * invf-import that a write which IS on the volume did not happen, and
+     * (via cp.c:99's "write failed (volume full?)") blaming the disk for a
+     * read error. The uncertainty here is about the ANSWER, not about the
+     * write, so it is reported rather than collapsed, and the id this call
+     * already established is returned. `nid` is that id in both branches: on
+     * the present path it is the row the commit updated in place
+     * (vol_write_commit_v3, s->have_old), and on the create path it is the
+     * row vol_v3_create_node installed, which vol_write_begin then resolved
+     * and the commit updated. */
+    {
+        uint64_t done = 0;
+        int frc = vol_find_rc(v, name, &done);
+        if (frc == 1 && done)
+            return done;
+        fprintf(stderr, "invarifs: %s: warning: the content is committed, but "
+                "the confirming re-lookup did not COMPLETE (rc=%d), so the "
+                "inode id is the one this write established (%llu), not a "
+                "freshly read one\n", name, frc, (unsigned long long)nid);
+        return nid;
+    }
 }

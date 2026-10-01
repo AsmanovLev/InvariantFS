@@ -133,7 +133,7 @@ CLI_MAINS := mkfs verify fsck cp cat ls stat arctest blkio_test resize \
              reclaim_reader_epoch_test readdir_error_test dedupe_symlink_test dirs_free_before_publish_test \
              stat_v3_counts_test acl_eio_test meta_clobber_test spn_skip_recipe_test \
              walk_status_test walk_status_fuse_test no_v2_surface_test \
-             table_sync_evict_test
+             table_sync_evict_test write_create_path_test tz_registry_test
 $(foreach t,$(CLI_MAINS),$(eval $(call TOOL_RULE,$(t),)))
 
 # reclaim_reader_epoch_test was, for one commit, a red control that built but
@@ -734,6 +734,34 @@ test: $(TEST_BINS) $(OUT)/invf-arctest $(OUT)/invf-blkio_test $(OUT)/invf-codec_
 	@# countdown is per-translation-unit), and it is DISARMED after every
 	@# probe, so the unset path stays inert here too.
 	$(TESTENV) $(TESTISO) $(OUT)/invf-table_sync_evict_test /tmp
+	@# WP142: a bulk write whose name lookup did not COMPLETE must not take
+	@# the create branch -- on v3 that empties the name's inode and frees its
+	@# blocks before a byte is written. Three legs: `create` and `replace` are
+	@# the green controls (a refuse-on-failure fix is indistinguishable from a
+	@# refuse-always fix without them), `red` is the control, and it asserts
+	@# BYTES: the file's content read back before and after. Its failure is
+	@# INVFS_FAULT armed through invfs_vol_btree_fault_reload() (the site is in
+	@# vol_btree.c and the countdown is per-translation-unit), DISARMED after
+	@# every probe, so the unset path stays inert here too.
+	$(TESTENV) $(TESTISO) $(OUT)/invf-write_create_path_test create /tmp
+	$(TESTENV) $(TESTISO) $(OUT)/invf-write_create_path_test replace /tmp
+	$(TESTENV) $(TESTISO) $(OUT)/invf-write_create_path_test red /tmp
+	@# WP143: a batch-registry lookup that did not COMPLETE is not "the
+	@# registry is empty". Reading it that way makes the flush publish a blob
+	@# holding THIS RUN'S entries only, and those rows are the only record
+	@# that a batch segment exists -- irreversible, and the segments become
+	@# orphans no GC can reclaim. Two legs: `ctl` is the green control (a flush
+	@# with a READABLE registry preserves the earlier run's entries AND adds
+	@# its own -- a fix that froze the registry would pass the first half), `red`
+	@# is the control. It parses the registry blob off the volume with
+	@# vol_find + vol_read_file rather than asking the engine, so it does not
+	@# only build when the fix is present, and it compares the WHOLE row rather
+	@# than its seq -- the overwriting flush mints a new row that REUSES the
+	@# lost row's seq, which is exactly how the loss stays hidden. Fault
+	@# injection is INVFS_FAULT through invfs_vol_btree_fault_reload(), DISARMED
+	@# after every probe.
+	$(TESTENV) $(TESTISO) $(OUT)/invf-tz_registry_test ctl /tmp
+	$(TESTENV) $(TESTISO) $(OUT)/invf-tz_registry_test red /tmp
 	$(TESTENV) $(TESTISO) $(OUT)/invf-btree_repair_test /tmp
 	$(TESTENV) $(TESTISO) $(OUT)/invf-symlink_v3_test /tmp
 	$(TESTENV) $(TESTISO) $(OUT)/invf-large_file_v3_test /tmp
