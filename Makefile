@@ -134,7 +134,8 @@ CLI_MAINS := mkfs verify fsck cp cat ls stat arctest blkio_test resize \
              stat_v3_counts_test acl_eio_test acl_inherit_test meta_clobber_test spn_skip_recipe_test \
              walk_status_test walk_status_fuse_test no_v2_surface_test \
              heat_walk_test no_ckp0_surface_test \
-             table_sync_evict_test write_create_path_test tz_registry_test otrunc_test
+table_sync_evict_test write_create_path_test tz_registry_test \
+             otrunc_test sib_walk_test
 $(foreach t,$(CLI_MAINS),$(eval $(call TOOL_RULE,$(t),)))
 
 # reclaim_reader_epoch_test was, for one commit, a red control that built but
@@ -734,6 +735,14 @@ test: $(TEST_BINS) $(OUT)/invf-arctest $(OUT)/invf-blkio_test $(OUT)/invf-codec_
 	@# refusal diagnostic so a `make -j4` that did not relink this binary
 	@# fails loudly instead of proving nothing.
 	$(TESTENV) $(TESTISO) $(OUT)/invf-heat_walk_test /tmp
+	@# WP/delete-siblings-short-walk-leaves-orphans: the SIBLING PURGE is the
+	@# same walk-receipt class with a permanent consequence -- a short walk
+	@# leaves 'name!partN' orphans that no pass can ever collect. Its failure
+	@# is INVFS_FAULT on two seams in src/core/vol_dirs.c, armed through
+	@# invfs_vol_dirs_fault_reload(), and it fails loudly (exit 3) rather than
+	@# proving nothing if this binary is older than the sources it measures --
+	@# the test binaries are prerequisites of `make test`, not of `all`.
+	$(TESTENV) $(TESTISO) $(OUT)/invf-sib_walk_test /tmp
 	@# WP140: the name table must not evict a LIVE name because a lookup could
 	@# not be completed. Runs under $(TESTISO): fuse_get_context() is stubbed
 	@# to NULL, so every permission check takes the documented uid-0 bypass and

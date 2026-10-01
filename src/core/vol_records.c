@@ -3,6 +3,7 @@
 
 #include "volume_internal.h"
 #include "vol_fault.h"
+#include "vol_walk.h"
 
 /* ---- inode area (append-only records) ---- */
 
@@ -182,16 +183,116 @@ static int del_siblings_v3_cb(void *ctx_, const char *path, uint64_t ino,
     return 0;
 }
 
+/* Retire every `name!` sibling of a container: the `!partN` payloads, the
+ * `!recipe` / `!mbrt` blobs, whatever the lane that wrote them called them.
+ * Returns the number unlinked.
+ *
+ * WP-delete-siblings-short-walk-leaves-orphans. The enumeration is a v3
+ * WALK, and a walk is FALLIBLE: v3_walk_dir stops at a quarantined base page,
+ * a failed listing, a depth cap or an OOM, and returns -1 having delivered a
+ * PREFIX of the namespace. A stopped walk reports found == n -- it saw
+ * exactly what it stored -- so with the status on the floor there is no way
+ * to tell a whole sibling set from a prefix of one. Unlinking the prefix is
+ * what this function used to do, and what it leaves behind is not
+ * recoverable: the sweep walks the namespace but never retires an internal
+ * '!' name, spn_reclaim cannot free a block a live recipe names, and
+ * invf-fsck counts the survivors as live files. There is no decay pass and no
+ * retry, so a short walk here is a PERMANENT leak -- the same walk-receipt
+ * class as the heat stage (src/core/vol_heat.c), where the cost of refusing
+ * was one sweep interval, and here it is not that.
+ *
+ * WHY IT REFUSES RATHER THAN PURGING THE PREFIX
+ * =============================================
+ *
+ * Both answers leak the siblings outside the prefix; neither pass will ever
+ * collect them. They are not equal, though, because the prefix purge also
+ * DESTROYS what it did see, and a container's siblings are a set rather than
+ * a bag: freeing `!part0..part2` and leaving `!part3` (and possibly the
+ * `!recipe` that says how many parts there were) is a state no reader can
+ * interpret and no pass can collect -- while reporting success. So:
+ *
+ *   refuse  -> costs DISK SPACE until a later pass. Visible in `df`, bounded
+ *              by one container, and it comes back: the containerpack lane
+ *              re-probes `name!mbrt` before every decomposition
+ *              (src/core/vol_cpack.c:3244), the EXER lane re-probes
+ *              `name!exr0` (src/core/vol_exer.c:265), and vol_transcode_abort
+ *              runs on every abort of the lane that left them. The two
+ *              callers with no later pass are vol_v3_unlink's cascade
+ *              (src/core/vol_dirs.c:663) and the v3 write commit
+ *              (src/core/vol_write.c:905); those are exactly the two where
+ *              the space does not come back, and the message says so.
+ *   prefix  -> costs CORRECTNESS, permanently and silently.
+ *
+ * And the answer must not depend on WHERE the walk happened to stop: a
+ * caller that purges one container may otherwise legitimately get its
+ * siblings freed and the next one's left behind, with nothing to tell the
+ * difference.
+ *
+ * WHY THE STRICT WALK AND NOT JUST THE RECEIPT
+ * ============================================
+ *
+ * The receipt below covers a walk that STOPS. It cannot cover a walk that
+ * steps over an entry and still reports success, and the lenient walk does
+ * exactly that: an entry whose inode row cannot be read is a `continue`
+ * (src/core/vol_dirs.c:902-913), not an error. Measured on the fixture in
+ * src/cli/sib_walk_test.c, one unreadable sibling of a four-part container
+ * left the walk returning 0 -- and the old code then freed the other three.
+ * That is the half-destroyed container the argument above is about, reached
+ * through a walk that claims to be whole, so this function asks for
+ * vol_v3_walk_strict: the one mode whose own comment (src/core/vol_dirs.c:937)
+ * says its answer "must not be a partial view of the namespace".
+ *
+ * The strict mode is also the fail-CLOSED choice: one unreadable row
+ * anywhere on the volume makes a destructive operation decline rather than
+ * guess. That costs the purge on an otherwise healthy volume -- which is the
+ * trade, and it is why the refusal is printed on stderr rather than left to
+ * the latch alone. */
 int vol_delete_siblings(invfs_volume *v, const char *name)
 {
     del_siblings_ctx c;
+    vol_walk_t w;
     size_t i;
-    int n;
+    int rc, n;
+
     memset(&c, 0, sizeof c);
     c.v = v;
     c.name = name;
     c.nlen = strlen(name);
-    vol_v3_walk(v, del_siblings_v3_cb, &c);
+
+    rc = vol_v3_walk_strict(v, del_siblings_v3_cb, &c);
+
+    /* WP-delete-siblings-short-walk-leaves-orphans: the RECEIPT, the same
+     * mechanism and no second one (src/core/vol_walk.h). found == n on
+     * purpose: this walk has no caller-imposed cap, so nothing but a walk
+     * that did not finish can make it short. */
+    vol_walk_init(&w, v, "vol_delete_siblings");
+    vol_walk_result(&w, rc, c.n, c.n);
+    if (vol_walk_commit(&w) != 0) {
+        fprintf(stderr,
+                "[vol] %s: sibling purge REFUSED -- the namespace walk did "
+                "not complete (it reached %zu sibling(s) and then stopped "
+                "rather than finishing), so it is not known whether these are "
+                "all of them or a prefix. NOTHING was unlinked: unlinking a "
+                "prefix would leave '!part0..partN' half gone with the rest "
+                "live, and the sweep never retires an internal '!' name and "
+                "invf-fsck counts the survivors as live files, so nothing "
+                "would ever collect them. The space these siblings occupy is "
+                "NOT reclaimed by this pass; it comes back on the next pass "
+                "that completes the walk (the containerpack and EXER lanes "
+                "re-probe their leftovers, and vol_transcode_abort runs on "
+                "every abort of the lane that left them). Until then the "
+                "container is stored TWICE on the volume: the superseded "
+                "siblings below, and whatever the caller wrote to replace "
+                "them. The two callers with no later pass are an unlink of a "
+                "container (vol_v3_unlink) and a v3 overwrite of one "
+                "(vol_write_commit); for those the space stays until the "
+                "volume is rebuilt from a backup or the names are removed by "
+                "hand.\n",
+                name, c.n);
+        free(c.names);
+        return 0;
+    }
+
     n = (int)c.n;
     for (i = 0; i < c.n; i++)
         vol_v3_unlink(v, c.names[i]);

@@ -73,6 +73,8 @@ src/cli/sibling_retire_v3_test.c:158:ACTS
 src/cli/sibling_retire_v3_test.c:185:ACTS
 src/cli/sibling_retire_v3_test.c:196:ACTS
 src/cli/sibling_retire_v3_test.c:211:ACTS
+src/cli/sib_walk_test.c:199:SKIP   # rescan: whether a name resolves IS the measurement
+src/cli/sib_walk_test.c:214:SKIP   # setup: create the bracketing directory only if absent
 src/cli/table_sync_evict_test.c:344:SKIP
 src/cli/tz_registry_test.c:175:SKIP
 src/cli/window_test.c:176:SKIP
