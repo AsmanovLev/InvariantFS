@@ -177,6 +177,14 @@ if [ "$viol" -eq 0 ]; then
     python3 tools/check-citations.py || viol=1
 fi
 
+# The vol_find ledger runs HERE rather than in make test: it is a repo-shape
+# property, not a behavioural test, and a tripwire that lives in the suite is
+# one nobody runs before pushing.
+vf=$(bash "$(dirname "$0")/check-vol-find.sh" 2>&1)
+vfrc=$?
+echo "$vf"
+if [ "$vfrc" -ne 0 ]; then viol=1; fi
+
 if [ "$viol" -eq 0 ]; then
     echo "repo hygiene: OK ($(git ls-files | wc -l) tracked files, no binaries/oversize outside allowlist)"
 else
