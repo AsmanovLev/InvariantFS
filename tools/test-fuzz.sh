@@ -86,11 +86,47 @@ command -v mkfs.ext4 >/dev/null && command -v debugfs >/dev/null \
     && PACKS="$PACKS ext4fs"
 command -v mkfs.vfat >/dev/null && command -v mcopy >/dev/null \
     && PACKS="$PACKS fatfs"
+
+# A LOOP-MOUNTED FS PACK NEEDS A WRITABLE LOOP MOUNT, and on this host it does
+# not get one: `mkfs.xfs` is present, `sudo -n` works, the mount succeeds, and
+# the filesystem comes up READ-ONLY — so the fixture's `chown` of the mount
+# point fails with EROFS and the whole suite goes red on a permission it never
+# had. Verified on /dev/shm AND on /srv, and with `-o loop,rw`, so this is not
+# the tmpfs question and not a missing flag.
+#
+# **Gate the CAPABILITY, not the binary's presence.** A detector that cannot
+# detect should say so and skip; the presence of `mkfs.xfs` is evidence that a
+# binary is installed, not that the thing the binary is for can run.
+loop_writable() { # <mkfs-args...> -- <fstype>
+    local img mnt
+    img=$(mktemp -p "$SHM" invfs-loopprobe.XXXX.img) || return 1
+    mnt="$img.mnt"; mkdir -p "$mnt"
+    truncate -s 400M "$img" 2>/dev/null || { rm -rf "$img" "$mnt"; return 1; }
+    sudo -n "$@" "$img" >/dev/null 2>&1 || { rm -rf "$img" "$mnt"; return 1; }
+    sudo -n mount -o loop -t "$fstype" "$img" "$mnt" >/dev/null 2>&1 \
+        || { rm -rf "$img" "$mnt"; return 1; }
+    if touch "$mnt/probe" 2>/dev/null; then ok=1; else ok=0; fi
+    sudo -n umount -l "$mnt" >/dev/null 2>&1
+    rm -rf "$img" "$mnt"
+    return $((1 - ok))
+}
+
 if command -v mkfs.xfs >/dev/null && sudo -n true 2>/dev/null; then
-    PACKS="$PACKS xfs"
+    if loop_writable mkfs.xfs -q -f xfs; then
+        PACKS="$PACKS xfs"
+    else
+        echo "NOTE: skipping the xfs pack -- a loop-mounted xfs is not" \
+             "writable here (mounted read-only). The rest of the matrix runs."
+    fi
 fi
 if command -v mkfs.ntfs >/dev/null && sudo -n true 2>/dev/null; then
-    PACKS="$PACKS ntfs"
+    if loop_writable mkfs.ntfs -q -F ntfs; then
+        PACKS="$PACKS ntfs"
+    else
+        echo "NOTE: skipping the ntfs pack -- a loop-mounted ntfs is not" \
+             "writable here, so the fixture cannot populate it. The rest of" \
+             "the matrix runs."
+    fi
 fi
 command -v qemu-img >/dev/null && command -v qemu-io >/dev/null \
     && PACKS="$PACKS qcow2"
