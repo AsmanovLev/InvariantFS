@@ -3719,12 +3719,16 @@ int main(int argc, char *argv[])
     build_file_table();
     fprintf(stderr, "InvariantFS mounted: %d files\n", g_nentries);
 
-    /* background on-demand sweep thread (drains pending list when idle) */
-    {
-        pthread_t tid;
-        if (pthread_create(&tid, NULL, fuse_sweep_thread, NULL) == 0)
-            pthread_detach(tid);
-    }
+    /* The background on-demand sweep thread USED to be created here, twelve
+     * lines above the fuse_daemonize() further down, and that was the whole
+     * bug: fork keeps exactly ONE thread, so the daemon -- the process an
+     * operator signals with `kill -USR1 $(pidof invf-fuse)` -- was left with
+     * main and libfuse's workers and NOBODY consuming g_sweep_now. Both
+     * documented triggers only set that flag (on_sweep_signal below, the
+     * user.invfs.sweep xattr), so on a default mount they were silent no-ops:
+     * the watermark ladder never evaluated, the pending drain never ran, and
+     * no rollback window was ever armed -- none of which AGENTS.md 2.5/2.6
+     * had stopped promising. It is created in the daemon, after the fork. */
 
     /* build fuse args: [progname] [-f] [-o opts]; mountpoint handled
      * explicitly below so we control the full lifecycle.
@@ -3790,6 +3794,48 @@ int main(int argc, char *argv[])
         if (!fg) fuse_daemonize(0);
         se = fuse_get_session(f);
         fuse_set_signal_handlers(se);
+
+        /* The sweep thread belongs to the DAEMON, so it is created here --
+         * after the fork above, which is the entire point (see the note where
+         * it used to be created). Everything it touches was already set
+         * before the mount: g_vol (:3565), g_raw_watermark (:3620),
+         * g_img_path/g_mnt_path (:3623-3624), all inherited across the fork
+         * unchanged, so its watermark-seed block behaves identically.
+         *
+         * SIGUSR1 is installed HERE, by main, not by the thread. The handler
+         * used to live only in fuse_sweep_thread, and the daemon inherited it
+         * solely because that thread was scheduled before fuse_daemonize
+         * forked -- a race, and the losing side of the race is a daemon whose
+         * SIGUSR1 disposition is the default, i.e. one that DIES on the
+         * documented `kill -USR1 $(pidof invf-fuse)`. main is the process that
+         * survives the fork, so main is what owns the handler. After
+         * fuse_set_signal_handlers, so libfuse cannot overwrite it; and
+         * idempotent with the thread's own signal() at the top of its body,
+         * which stays.
+         *
+         * If the thread cannot be created the daemon says so, loudly, rather
+         * than accepting USR1 forever: without a worker g_sweep_now is a flag
+         * nobody reads, and that is exactly the failure this placement fixes. */
+        signal(SIGUSR1, on_sweep_signal);
+        {
+            pthread_t tid;
+            if (pthread_create(&tid, NULL, fuse_sweep_thread, NULL) == 0) {
+                pthread_detach(tid);
+            } else {
+                fprintf(stderr,
+                        "invf: FATAL: cannot start the background sweep "
+                        "thread. `kill -USR1` and the user.invfs.sweep xattr "
+                        "would be accepted and do nothing, the raw_watermark "
+                        "ladder would never run, and no sweep pass could arm "
+                        "a rollback window. Unmount; a daemon without this "
+                        "thread is a daemon with no background reclaim.\n");
+                fuse_remove_signal_handlers(se);
+                fuse_unmount(f);
+                fuse_destroy(f);
+                if (g_vol) { g_shutdown = 1; vol_close(g_vol); g_vol = NULL; }
+                return 1;
+            }
+        }
 
         /* WP17: multithreaded loop. When this was written the claim was that
          * the core has NO internal locks, so all engine/table state stays

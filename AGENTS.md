@@ -378,12 +378,15 @@ setfattr -n user.invfs.sweep -v 1 /mount/point  # same, via xattr
 > daemon runs: the watermark pass (`-o raw_watermark=<pct>`) and, since
 > WP134, `kill -USR1` and the `user.invfs.sweep` xattr too. All three
 > in-FUSE triggers set the same in-process flag
-> (`src/cli/fuse_fs.c:1678`, `:1889`), and the sweep thread's
+> (`src/cli/fuse_fs.c:1990`, `:3169`), and the sweep thread's
 > `invf_sweep_worker` takes the same capture at the same point: under
-> `g_io_lock`, after policy and before `vol_collect_sweepables`
-> (`src/cli/fuse_fs.c:1753-1782`, the walk at `:1795`). **So a USR1 or
+> `g_io_lock`, after policy and before the live-set walk
+> (`src/cli/fuse_fs.c:2055-2086`, the walk at `:2116`). **So a USR1 or
 > xattr sweep on v3 CAN be rolled back**: unmount, then `invf-rollback`.
-> The daemon prints that command when it arms the window, and
+> The daemon prints that command when it arms the window — but only on a
+> mount started with `-f`, because `fuse_daemonize` sends the daemon's own
+> stdout and stderr to `/dev/null`; on a default mount the xattr
+> `savepoint=` view is the only place that output can be read.
 > `getfattr -n user.invfs -m- /` reports `savepoint=live|none` so the
 > operator can see the window instead of taking the daemon's word for it.
 >
@@ -412,7 +415,7 @@ setfattr -n user.invfs.sweep -v 1 /mount/point  # same, via xattr
 > **nothing**, which proves the live window is holding only live blocks
 > because a pass that superseded nothing created no debt. That is what
 > makes the cycle finite instead of a sweep that re-pins forever
-> (`src/cli/fuse_fs.c:1963-2053`). Measured on a 1535-block RAW zone with
+> (`src/cli/fuse_fs.c:2361-2447`). Measured on a 1535-block RAW zone with
 > 697 blocks staged offline: **2 passes, the second reclaiming all 697,
 > RAW fill back to 0, and quiet from ~5 s on** — with no `invf-sweep`, no
 > write, no signal and no unmount in between.
@@ -421,12 +424,17 @@ setfattr -n user.invfs.sweep -v 1 /mount/point  # same, via xattr
 > abandons the pass rather than rewrite the data with no way back. The
 > watermark pass keeps its older fail-open behaviour.
 
-`INVFS_SWEEP_INTERVAL=<seconds>` is **not** the worker above. It enables a
-1 Hz in-daemon loop that drains only `vol_sweep_pending` — the write path's
-partial-pending list — and flushes the volume
-(`src/cli/fuse_fs.c:1848-1858`). It never reaches `transform`, never
-dedupes, never re-encodes, and arms no savepoint. Default is OFF — opt in
-explicitly.
+`INVFS_SWEEP_INTERVAL=<seconds>` is **not** the worker above, and it does
+**not** switch the pending drain on. The drain — and only the drain, never
+`transform`, never dedupe, never re-encode, never a savepoint — is what the
+sweep thread's 1 Hz tick does on every tick
+(`src/cli/fuse_fs.c:2294`, the drain at `:2340-2350`). The variable gates how
+often the thread re-evaluates the *handle-open deferral* around it
+(`:2306-2334`): at `N` it checks every Nth tick, and with the default (unset,
+so `N == 0`) it never checks at all, which means the drain runs even while a
+file handle is open. Both facts used to be invisible, because until the thread
+was created in the daemon and not in the `fuse_daemonize` parent, none of this
+ran. Reported, not changed; see the WP.
 
 ### 2.6 Recovery and rollback
 

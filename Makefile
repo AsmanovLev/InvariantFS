@@ -1186,6 +1186,19 @@ e2e: all
 	@# run-e2e.sh before wiring -- green, but only after its D2c leg was
 	@# given the assertion it claimed to have (see that commit).
 	$(TESTENV) bash tools/run-e2e.sh tools/test-gate-d2.sh
+	@# tools/test-fuse-sweep-thread.sh: the daemon must HAVE its background
+	@# sweep thread. It was created before fuse_daemonize, so fork kept it in
+	@# the parent and the daemon had no consumer for g_sweep_now at all --
+	@# `kill -USR1`, the user.invfs.sweep xattr, the raw_watermark ladder and
+	@# the on-demand pending drain were all silent no-ops, and no in-FUSE pass
+	@# could arm a rollback window (AGENTS.md 2.5/2.6 promised all of it).
+	@# LOCKED (its `id -u` preflight refuses root, which is a real requirement
+	@# -- the daemon is its own object-level permission authority), so it
+	@# serialises on the global lock. Asserts EFFECTS (thread table, save
+	@# point, a rollback that restores) not log lines: a daemonized daemon
+	@# sends its own stderr to /dev/null, so a log assertion could not tell
+	@# "broken" from "not logged".
+	$(TESTENV) bash tools/run-e2e.sh tools/test-fuse-sweep-thread.sh green
 	$(TESTENV) bash tools/run-e2e.sh tools/test-fuzz.sh
 	$(TESTENV) bash tools/run-e2e.sh tools/test-writepath.sh
 	$(TESTENV) bash tools/run-e2e.sh tools/test-acl.sh
