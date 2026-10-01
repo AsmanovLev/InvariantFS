@@ -317,14 +317,44 @@ typedef struct {
     uint64_t owner_id;
 } tz_v3_reg;
 
+/* THREE ANSWERS, and the third one used to be the second one.
+ *
+ * `reg.n == 0` is a legitimate answer -- it means this volume has never
+ * batched anything -- and 0 is the SUCCESS return. What 0 also used to mean
+ * is "the lookup did not COMPLETE": vol_find returns a uint64_t, so "there is
+ * no registry" and "the dirent row could not be read" are both the value 0.
+ *
+ * That collapse is not a bookkeeping slip here. A registry ROW is the only
+ * record that a batch segment exists and who owns it (:270-291), and
+ * tz_v3_reg_store rewrites the WHOLE blob from the in-memory array. So a load
+ * that answered "empty" on a failed read is handed straight to a flush that
+ * seals this run's batches, appends them to the empty array and publishes a
+ * blob containing THIS RUN'S ENTRIES ONLY. Every earlier row is gone, the
+ * segments they owned have no record anywhere, tz_v3_gc can never see them and
+ * can never free them, and tz_v3_reg_owned_blocks (:385 -- the owner set
+ * spn_reclaim consults before freeing into the shared pool) stops claiming
+ * their blocks too. Irreversible: the old blob is overwritten, not shadowed.
+ *
+ * A failed read is not entitled to assert a negative about the volume, so the
+ * third answer now REFUSES. Every caller already handles a non-zero return as
+ * failure -- :385, :601 and :824 are all `if (tz_v3_reg_load(v, &reg) != 0)
+ * return -1;` -- so refusing here aborts the flush BEFORE anything is sealed,
+ * which is also the cheap place to refuse: a refused run orphans nothing.
+ *
+ * The twin site is tz_v3_reg_store's own lookup (:422). It has to move with
+ * this one: leaving it alone keeps the same loss reachable by the path where
+ * the load succeeded and the later lookup did not. */
 static int tz_v3_reg_load(invfs_volume *v, tz_v3_reg *r)
 {
     uint8_t *buf = NULL;
     size_t len = 0;
+    int frc;
 
     memset(r, 0, sizeof *r);
     r->next_seq = 1;
-    r->owner_id = vol_find(v, TZ_OWNER_NAME);
+    frc = vol_find_rc(v, TZ_OWNER_NAME, &r->owner_id);
+    if (frc < 0) return -1;              /* did not COMPLETE: not "empty" */
+    if (frc == 0) return 0;              /* genuinely absent: empty, fine */
     if (!r->owner_id) return 0;
     if (vol_read_file(v, r->owner_id, &buf, &len) != 0 || !buf) {
         free(buf);
@@ -408,19 +438,40 @@ int tz_v3_reg_owned_blocks(invfs_volume *v, tz_v3_extent **out, size_t *n)
     return 0;
 }
 
+/* THE SAME THREE ANSWERS, on the write side, and it matters just as much.
+ *
+ * This is the second of the two sites, and it is the more dangerous of the
+ * pair, because it runs LATER: by the time this executes the flush has already
+ * sealed this run's batches and rewritten every member's recipe to point at
+ * them. So the branch below is not "which of two equivalent ways to write the
+ * blob" -- on the else arm it is `vol_create_blob_file`, which on v3 installs
+ * an EMPTY node over the existing one (vol_dirs.c:299 keeps the inode id,
+ * :340-344 zeroes the recipe address, :365-367 frees the old blocks) and then
+ * publishes the new content. The earlier rows are not merged; they are
+ * destroyed by a lookup that never completed.
+ *
+ * Refusing costs this run's registry write and reports an error to the sweep,
+ * which is the honest outcome: the run sealed segments and committed members
+ * against a registry it could not confirm, and the operator gets a message
+ * instead of a silent, irreversible loss of every row written before. */
 static int tz_v3_reg_store(invfs_volume *v, tz_v3_reg *r)
 {
     size_t len = 8 + r->n * sizeof(tz_v3_reg_ent);
     uint8_t *buf = (uint8_t *)calloc(1, len);
     uint32_t magic = TZ_V3_REG_MAGIC, n = (uint32_t)r->n;
-    uint64_t id;
+    uint64_t id = 0;
+    int frc;
 
     if (!buf) return -1;
     memcpy(buf, &magic, 4);
     memcpy(buf + 4, &n, 4);
     if (r->n) memcpy(buf + 8, r->ents, r->n * sizeof *r->ents);
-    id = vol_find(v, TZ_OWNER_NAME);
-    if (id) {
+    frc = vol_find_rc(v, TZ_OWNER_NAME, &id);
+    if (frc < 0) {
+        free(buf);
+        return -1;          /* the registry's own row could not be resolved */
+    }
+    if (frc == 1 && id) {
         if (!vol_v3_publish_blob_inode(v, id, buf, len, len, INVFS_ALGO_NONE)) {
             free(buf);
             return -1;
