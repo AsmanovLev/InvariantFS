@@ -1099,8 +1099,24 @@ static int vol_sweep_one_v3(invfs_volume *v, uint64_t inode_id,
                     full = NULL;
                 }
             }
-        } else if (name && name[0] && !strstr(name, "!mbrt") &&
-                   !strstr(name, "!mbrmap")) {
+        } else if (name && name[0] &&
+                   !vol_name_is_container_sibling(v, name)) {
+            /* WP136, and the weaker of the two shapes this replaced. The old
+             * test was `!strstr(name, "!mbrt") && !strstr(name, "!mbrmap")`:
+             * a SUBSTRING match ANYWHERE in the name, which is not the
+             * question at all. It says "internal" about `my!mbrt-backup.txt`
+             * -- a user's file whose middle happens to spell a tag -- and it
+             * says it without asking whether a container is there, so it also
+             * says "internal" about `ghost.txt!mbrt` on a volume with no
+             * `ghost.txt`. Both lose the containerpack head sniff on the
+             * over-large path, silently, the same way the five lane guards
+             * lost every lane.
+             *
+             * Own commit, deliberately. This is reachable only for a file
+             * over INVFS_SWEEP_MAX_FILE, so it is not the same population as
+             * the lane guards, and it can be reverted without touching them:
+             * the two are not the same finding and are not the same blast
+             * radius. */
             size_t cn = 0, ci;
             const invfs_codec *all = invfs_codec_all(&cn);
             uint8_t head[8192];
