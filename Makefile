@@ -621,7 +621,14 @@ fuzz-ci: $(OUT)/invf-fuzz
 # explicit list is generated from the test binaries below it instead, so the
 # two cannot drift.
 TEST_BINS := $(foreach t,$(filter %_test,$(CLI_MAINS)),$(OUT)/invf-$(t))
-test: $(TEST_BINS) $(OUT)/invf-arctest $(OUT)/invf-blkio_test $(OUT)/invf-codec_test \
+# `helpers` is a prerequisite and not an optional extra: several suites build
+# the binary they exercise themselves (test-p7z-batch.sh compiles the p7z pack)
+# rather than taking it from TEST_BINS, so without this the suite runs against
+# whatever `bin/p7z` happened to be. A stale helper reads as a regression in the
+# code under test, which is worse than no test at all -- and that misreading has
+# been made more than once in this repo. $(HELPERS) is also the pack binaries
+# the lanes exec, so they are current for the same reason.
+test: helpers $(TEST_BINS) $(OUT)/invf-arctest $(OUT)/invf-blkio_test $(OUT)/invf-codec_test \
       $(OUT)/invf-helper_exec_test $(OUT)/invf-metabuf_test $(OUT)/invf-btree_test \
       $(OUT)/invf-delta_test $(OUT)/invf-groupcommit_test $(OUT)/invf-concurrency_test $(OUT)/invf-sweep_v3_test \
       $(OUT)/invf-sweep_collect_test $(OUT)/invf-verify \
