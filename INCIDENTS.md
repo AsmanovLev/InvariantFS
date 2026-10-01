@@ -1666,7 +1666,8 @@ every negative control, then exited 1 on one leg:
 
 **The installer is not at fault.** Run by hand from the test's own recipe — the
 same `packaging/man/` copy, the same `install.sh`, `WITH_GZIP_MAN=0` — it exits
-0 and leaves `usr/share/man/man8/invf-mkfs.8` in place, with 96 binaries staged.
+0 and leaves the invf-mkfs(8) page under the install tree's share/man/man8
+directory, with 96 binaries staged.
 
 The difference is where it ran:
 
@@ -1727,4 +1728,46 @@ error about a permission it never had.**
 
 Not done: the skip, and why `mkfs.xfs` output mounts read-only here (a
 kernel or container restriction on loop-mounted XFS is the likely answer).
-Not investigated, because the fix does not depend on knowing which.
+Not investigated, because the fix does not depend on knowing which.---
+
+## test-packaging: the deb leg needs a GPG signing key it cannot have here
+
+**Status:** localised; not fixed. Same class as `test-p7z` needing a real
+`7zz`, and as the loop-mounted packs needing a writable loop mount.
+
+`test-packaging` gets past its staging, its install legs and its man-page
+rendering, then fails at:
+
+    Error: Failed to resolve --signer-userid "InvariantFS Developers <invfs@localhost>"
+    Error: Failed to resolve certificates
+    dpkg-buildpackage: error: failed to sign ../invfs_0.5.0-1_amd64.buildinfo file
+
+**The build itself succeeds.** Reproduced faithfully — the suite's own staging
+method, symlinks back into the checkout with a real `debian` link, no `build/`,
+no `bin/`, no `.git` — and `dpkg-buildpackage` compiles, packages and gets all
+the way to signing the `.buildinfo`. There are **zero secret keys** on this host
+(`gpg --list-secret-keys` is empty), so the last step cannot complete.
+
+**What should change.** Not the build — the packaging output is fine. The
+report: a leg that requires a capability the machine does not have should say
+so and skip, the way `test-fuzz` now does for a loop-mounted filesystem, and the
+way this suite already says `need dpkg-buildpackage` for a missing tool. Signing
+is genuinely part of what the suite checks — `neg_missing_signature` verifies
+that `--pubkey` fails closed with no signature installed — so the fix is to
+detect the absent key and say which legs it costs, not to pass `-uc` and leave a
+suite that silently tests something else.
+
+**Two things found nearby and NOT fixed**, because they are separate findings
+and this is a §1.8 commit:
+
+* `tools/test-packaging.sh`: `dbo=nocheck` followed by
+  `[ "${INVFS_PKG_DEB_CHECKS:-0}" = 1 ] || dbo="nocheck"`. The `||` fires
+  whenever the variable is **not** 1, so the assignment is unconditional and
+  `INVFS_PKG_DEB_CHECKS=1` cannot enable the checks the comment above it says it
+  enables. The condition is inverted; it happens not to matter today because
+  `nocheck` is what is wanted anyway.
+* The staging default that defaulted onto tmpfs is fixed in `ac205b6`, but the
+  suite still ignored its `$WORK` in some paths when I read it mid-investigation.
+  That was my misreading, not the suite's — recorded because it is the second
+  time in this session that I read a line and concluded something about it
+  without checking the line above.
