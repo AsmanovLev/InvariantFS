@@ -280,7 +280,10 @@ This configures:
 - Serial console getty on `ttyS0`
 - `sshd` with root login (test VM only)
 - Default runlevels (sshd, dhcpcd)
-- Portage `locks.py` patch for InvariantFS dcache ghosts
+- Portage hardlink-lock patch for InvariantFS dcache ghosts
+  (`tools/configure-guest.sh:161-237`; it rewrites the guest's own portage
+  lock handler in place, and is skipped silently when the guest's python
+  puts portage somewhere other than the path that script names)
 - `getuto` stubs (real gpg needs mmap support)
 - `installkernel` with dracut backend
 
@@ -653,10 +656,15 @@ Ensure the kernel includes:
 
 ### Portage EEXIST errors
 
-The `configure-guest.sh` script patches `portage/locks.py` to handle
-InvariantFS dcache ghosts from recycled PIDs. If you see
+The `configure-guest.sh` script patches the guest's portage hardlink-lock
+handler (`tools/configure-guest.sh:161-237`) to tolerate InvariantFS
+dcache ghosts from recycled PIDs. If you see
 `OSError: [Errno 17] File exists` during `emerge`, re-run the patch
 or manually add the `EEXIST` handling as shown in the script.
+
+Note that the script names one absolute path for the file it patches and
+skips the patch when it is not there, so a guest whose portage lives
+elsewhere gets no patch and no warning.
 
 ### Read-only root at boot
 
@@ -668,11 +676,32 @@ the default) handles this at the next mount. To force:
 invf-fsck -f /dev/sda3
 ```
 
-### emege fails through FUSE
+### emerge fails through FUSE
 
-The Linux kernel VFS layer (`fs/fuse/file.c`) strips execute bits from
-files on FUSE mounts. bash cannot `source` `.ebuild` files, so
-`emerge` always fails inside an InvFS chroot.
+**This section previously claimed that the kernel "strips execute bits
+from files on FUSE mounts" and that bash therefore cannot `source` an
+`.ebuild` on the mount. That claim is not supportable and has been
+removed (AGENTS.md §1.7: a claim that cannot be pointed at is deleted,
+not softened).**
 
-**Workaround:** compile packages on a separate machine and upload the
-binaries. For the kernel and dracut, this is the recommended approach.
+Measured on Debian GNU/Linux 13 (trixie), guest kernel
+`6.12.107+deb13-cloud-amd64`, this tree's `main` (`4252d0c`), with the
+volume mounted through `invf-fuse`:
+
+- the execute bit survives the write. `cp -p` of a `0755` shell script
+  produced a file the mount reports as `rwx------` (owner-execute
+  present), and `chmod 755` through the mount then sticks;
+- `bash -c 'source /mnt/ie/probe.sh'` succeeds with exit 0 both before
+  and after that `chmod`, so bash does not refuse to source it.
+
+What a caller does see through the mount, in the same run, is that a
+file created by a root process through the mount comes back owned by
+root with no group/other bits, which does change who may read it — a
+permission problem, not an execute-bit one.
+
+**Not measured here:** `emerge` itself against a Gentoo guest. This
+repository has no Gentoo host and no portage, so nothing on this
+machine can confirm or refute how `emerge` behaves through the mount on
+Gentoo. If you hit it, capture the actual `emerge` error before working
+around it; the previous text told you the cause in advance and was
+wrong.

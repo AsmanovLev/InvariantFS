@@ -4,6 +4,13 @@ on:
   push:
     branches: ["**"]
   pull_request:
+  # The distro install harnesses are heavy: they download a full Arch
+  # bootstrap (~120 MB) or a Void ROOTFS, build a 1.8 GB staging tree, and
+  # then mkfs + import it. They are not a per-push gate; they are a loop,
+  # which is the point (see docs/INSTALL-MATRIX.md §7). Weekly + on demand.
+  schedule:
+    - cron: "17 5 * * 1"
+  workflow_dispatch:
 
 jobs:
   engine:
@@ -56,3 +63,57 @@ jobs:
           done
           [ "$FAIL" = 0 ] || { echo "engine e2e: at least one suite FAILED"; exit 1; }
           echo "engine e2e: ALL SUITES PASS"
+
+  # The four-target packaging gate. Until this job existed,
+  # tools/test-packaging.sh was in neither `make e2e` nor this workflow, so
+  # the packaging layer had never run in any automated loop -- which is how
+  # "packaging/install.sh exited 1 on every host with a C compiler" survived
+  # as an undiscovered state. Cheap (no network, no sudo, seconds), so it
+  # runs on every push alongside `make test`.
+  packaging:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq build-essential pkg-config \
+            libfuse3-dev zlib1g-dev libzstd-dev zstd python3
+
+      - name: build
+        run: make -j"$(nproc)" && make helpers
+
+      - name: packaging recipes + bootstrap negative controls
+        run: bash tools/test-packaging.sh
+
+  # The distro install harnesses, which build a real Arch and a real Void
+  # root and take them through mkfs/import/fsck/verify/bit-exact reads.
+  # Offline only (no boot, no FUSE) -- see the header of each script. Scratch
+  # is pinned under RUNNER_TEMP so a 1.8 GB staging tree never lands on the
+  # runner's small /tmp.
+  distro-install:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq build-essential pkg-config \
+            libfuse3-dev zlib1g-dev libzstd-dev zstd xz-utils curl python3
+
+      - name: build
+        run: make -j"$(nproc)" && make helpers
+
+      - name: arch root -> InvariantFS volume
+        run: |
+          ARCH_WORK="$RUNNER_TEMP/arch" \
+            bash tools/test-arch-install.sh
+
+      - name: void root -> InvariantFS volume
+        run: |
+          INVFS_VOID_WORK="$RUNNER_TEMP/void" \
+            bash tools/test-void-install.sh
