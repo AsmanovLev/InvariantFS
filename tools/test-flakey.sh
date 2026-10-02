@@ -51,8 +51,11 @@
 #      image + all logs under tools/flakey/artifacts/<leg>-<ts>/.)
 #
 # Env knobs: FLAKEY_SEED (default 20260831), FLAKEY_SOAK_S (default 210),
-#            FLAKEY_WORK (default /tmp/invfs-flakey — tmpfs, needs ~4G of
-#            quota headroom; /dev/shm is too full on this box),
+#            FLAKEY_WORK (default /srv/invfs-flakey, else the first of
+#            /var/tmp /opt /var/lib that is NOT tmpfs, else /tmp/invfs-flakey
+#            — picked by disk_work_root() because the old hardcoded /tmp
+#            default was tmpfs: 3871 MiB against this suite's own 4000 MB
+#            floor, so `make flakey` exited 2 unconditionally),
 #            FLAKEY_ONLY (e.g. "3" runs just that leg, a dev aid),
 #            FLAKEY_PC_WORK (leg 7 scratch; MUST be on a disk-backed
 #            filesystem — default /var/tmp/invfs-flakey-pagecache),
@@ -61,7 +64,8 @@
 #            unprivileged path),
 #            FLAKEY_PC_SIZE_MB (leg 7 volume size, default 512),
 #            FLAKEY_RC_WORK (leg 8 scratch; same disk-backed rule as leg 7,
-#            default /srv/invfs-flakey-reclaim then /var/tmp/...),
+#            same picker, default <disk_work_root>/invfs-flakey-reclaim —
+#            /srv/... in practice),
 #            FLAKEY_RC_SIZE_MB (leg 8 volume size, default 512),
 #            FLAKEY_RC_ROUNDS (leg 8 ARM A cuts, default 3),
 #            FLAKEY_MIN_FREE_MB (hard scratch-space floor, default 4000; 0 to
@@ -77,7 +81,28 @@ set -uo pipefail
 
 REPO="${REPO:-$(cd "$(dirname "$0")/.." && pwd)}"   # override with the worktree when testing a branch
 B=$REPO/bin
-FLK=${FLAKEY_WORK:-/tmp/invfs-flakey}
+
+# The default scratch used to be hardcoded to /tmp. /tmp is tmpfs on this box
+# and holds 3.8 GiB -- 3891 MiB against this suite's own 4000 MB floor -- so
+# the space guard below failed UNCONDITIONALLY and `make flakey` always
+# exited 2 before a single leg ran. Worse, the same hardcoding put legs 7/8's
+# reasoning in a corner: the whole point of the page-cache tier is that
+# drop_caches can evict its pages, and it cannot evict a tmpfs page.
+#
+# Route the default through the same disk-backed scan leg 8 already uses
+# (rc_work_pick) -- which is why leg 8 lands on /srv/invfs-flakey-reclaim
+# while leg 0 lands in /tmp and dies. One picker, one answer.
+disk_work_root() {   # echo the first candidate on a non-tmpfs filesystem
+    local c
+    for c in /srv /var/tmp /opt /var/lib; do
+        [ -d "$c" ] || continue
+        [ "$(stat -f -c %T "$c" 2>/dev/null)" = tmpfs ] && continue
+        printf '%s\n' "$c"; return 0
+    done
+    printf '/tmp\n'    # nothing disk-backed: the guard below says so loudly
+}
+
+FLK=${FLAKEY_WORK:-$(disk_work_root)/invfs-flakey}
 ART=$REPO/tools/flakey/artifacts
 DEV=${FLAKEY_DEV:-invfs_flakey}
 DM=/dev/mapper/$DEV
@@ -96,7 +121,7 @@ FAILED=0
 T0=$SECONDS
 
 # ---- leg 7 (WP83): the page-cache power-loss tier ----
-# Its own scratch, and its own volume: legs 0-6 all run on the dm-flakey
+# Its own scratch, and its own volume: legs 0-5 all run on the dm-flakey
 # device over a loop file inside $FLK, and $FLK is tmpfs on this box --
 # drop_caches cannot evict a tmpfs page (there is no writeback to drop), so
 # the page-cache cut would be a silent NO-OP there. This leg refuses to
@@ -112,7 +137,7 @@ PC_WRITER_PID=""
 
 # ---- leg 8 (WP130): the orphan-collector's power-loss leg ----
 # Same page-cache technique as leg 7 and for the same reason: a loop device
-# transfers zero bytes in this sandbox, so legs 0-6's dm-flakey tier cannot
+# transfers zero bytes in this sandbox, so legs 0-5's dm-flakey tier cannot
 # run and leg 7's file-backed path is the only crash surrogate that works
 # here. This leg therefore also lives on a DISK-backed scratch and cuts with
 # sync + drop_caches, and its subject is the collector rather than the
@@ -1154,14 +1179,11 @@ rc_driver() {
 }
 
 rc_work_pick() {   # a DISK-backed scratch: drop_caches is a no-op on tmpfs
-    local c
     if [ -z "$RC_WORK" ]; then
-        for c in /srv /var/tmp /opt /var/lib; do
-            [ -d "$c" ] || continue
-            [ "$(stat -f -c %T "$c" 2>/dev/null)" = tmpfs ] && continue
-            RC_WORK="$c/invfs-flakey-reclaim"
-            break
-        done
+        # Same scan as FLK's default and PC_WORK's, through the one picker:
+        # a suite where three scratch pickers disagree is a suite where the
+        # answer depends on which leg you are reading.
+        RC_WORK="$(disk_work_root)/invfs-flakey-reclaim"
     fi
     [ -n "$RC_WORK" ] || RC_WORK=/tmp/invfs-flakey-reclaim
     rm -rf "$RC_WORK" && mkdir -p "$RC_WORK" || return 1
@@ -1515,6 +1537,37 @@ scratch silently turns their power cut into a no-op.
 EOF
     exit 2
 fi
+
+# The space guard above and this one answer DIFFERENT questions, and until now
+# only the first was asked. Space: can the scratch hold the image at all.
+# Filesystem type: can anything here be dropped from the page cache at all --
+# and on a tmpfs, nothing can, because a tmpfs page has no writeback behind
+# it. The comment above this guard and the STOP text both state that legs 7
+# and 8 need a DISK-backed scratch, and the condition enforced neither. So a
+# host with a large /tmp passed the guard, legs 7 and 8 ran their cuts, every
+# cut was a NO-OP, and the banner said PASS. A test that cannot fail is worse
+# than a test that is missing, because it is counted.
+#
+# Stopping is right here for the same reason the space guard stops: the
+# override is one env var, and quietly relocating the scratch would change
+# what the leg proves -- which is exactly the thing that must not change
+# silently.
+if [ "$AVAIL_FS" = tmpfs ] && { want_leg 7 || want_leg 8; }; then
+    cat >&2 <<EOF
+
+STOP: the scratch for this run is tmpfs, and this run selects legs 7/8.
+
+  scratch:   $FLK   (on $AVAIL_FS)
+  selected:  ${ONLY:-all legs}
+  override:  FLAKEY_WORK=/srv/bench/<name> bash $0
+
+Legs 7 and 8 cut with sync + drop_caches. A tmpfs page cannot be evicted --
+there is no writeback to drop -- so on this scratch both power cuts become
+no-ops that still report green. This is a condition the space check above
+cannot see: a large tmpfs passes it happily.
+EOF
+    exit 2
+fi
 info "scratch: $FLK on $AVAIL_FS, ${AVAIL} MB free (need >= ${NEED_MB})"
 # clear OUR leftovers from a previous run
 sudo -n dmsetup remove "$DEV" >/dev/null 2>&1
@@ -1528,15 +1581,34 @@ mkdir -p "$ART"
 dev_create
 exec > >(tee "$FLK/run.log") 2>&1
 
-want_leg 0 && leg0
-want_leg 1 && leg1
-want_leg 2 && leg2
-want_leg 3 && leg3
-want_leg 4 && leg4
-want_leg 5 && leg5
-want_leg 7 && leg7
-want_leg 8 && leg8
+RAN_LEGS=""      # "<n>:<name>" per leg that ACTUALLY ran, and the complement.
+SKIPPED_LEGS=""  # The closing banner prints both. Nothing else writes to them.
+for n in 0 1 2 3 4 5 7 8; do
+    if want_leg "$n"; then
+        case "$n" in
+            0) nm="re-mkfs-orphans" ;;
+            1) nm="baseline" ;;
+            2) nm="error-storm" ;;
+            3) nm="torn-sweep" ;;
+            4) nm="mid-seal kill" ;;
+            5) nm="${SOAK_S}s soak" ;;
+            7) nm="page-cache power loss" ;;
+            8) nm="reclaim power loss" ;;
+            *) nm="leg$n" ;;
+        esac
+        RAN_LEGS="$RAN_LEGS $n:$nm"
+        "leg$n"
+    else
+        SKIPPED_LEGS="$SKIPPED_LEGS $n"
+    fi
+done
 
 say "FLAKEY E2E: PASS  (seed=$SEED, $((SECONDS - T0))s total)"
-echo "  legs: re-mkfs-orphans / baseline / error-storm / torn-sweep / mid-seal kill / ${SOAK_S}s soak / compact-flip chaos / page-cache power loss / reclaim power loss"
+# This line used to be a literal list of all nine legs, printed whatever ran --
+# including "compact-flip chaos" (leg 6) for a leg deleted in 841a272, and
+# including legs 7 and 8 for runs where FLAKEY_ONLY excluded them. It is the
+# reason a suite that was quietly dead for two days still read as full
+# coverage: the summary is the only thing a reader sees.
+echo "  legs RUN this invocation:${RAN_LEGS:- NONE}"
+echo "  legs NOT run:${SKIPPED_LEGS:- none}"
 echo "  scratch $FLK cleaned; on failure the image + logs land in $ART"
