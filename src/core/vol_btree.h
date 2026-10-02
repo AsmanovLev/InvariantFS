@@ -177,6 +177,18 @@ int btree_reclaim(invfs_volume *v, invfs_blkptr old_root, invfs_blkptr keep_root
 int btree_reclaim_pinned(invfs_volume *v, invfs_blkptr old_root,
                          invfs_blkptr keep_root, invfs_blkptr pinned_root);
 
+/* The MARK half of the reachability walk, on its own: every page reachable
+ * from `root` is set in the caller's bitmap and NOTHING is freed. `seen` must
+ * hold at least ceil(total/8) bytes. 0 = marked, -1 = the walk failed and
+ * `seen` is INCOMPLETE -- there is no partial answer, so a caller must not
+ * read an unmarked block as unowned.
+ *
+ * vol_spt0.c's reclaim pass uses it because the save point's mark set is a
+ * list of addresses: a block no live recipe names may still belong to the
+ * base tree, which a recipe scan cannot see at all. */
+int btree_mark_reachable(invfs_volume *v, invfs_blkptr root, uint8_t *seen,
+                         uint64_t total);
+
 /* WP121: the FULL-POOL orphan collector. Unlike btree_reclaim_pinned this
  * is not a generation diff -- it walks every allocated block in the volume
  * and frees each one that is a v3 base page (BPG3, CRC-valid) and is not

@@ -1885,6 +1885,31 @@ static int bt_free_rec(invfs_volume *v, invfs_blkptr ptr, uint8_t *seen,
     return 0;
 }
 
+/* Mark every page reachable from `root` into the caller's bitmap, without
+ * freeing anything. This is the mark half of btree_reclaim_pinned, published
+ * on its own for callers that need the owner set as DATA rather than as a
+ * free decision.
+ *
+ * The save point's reclaim pass needs it (vol_spt0.c): a block the captured
+ * generation's recipes no longer name may still be owned by the base tree
+ * itself, and a B+-tree page is exactly the block class a recipe scan cannot
+ * see -- so "no live recipe names this any more" is not evidence that nothing
+ * owns it.
+ *
+ * `seen` must hold at least ceil(total/8) bytes. 0 = marked, -1 = the walk
+ * failed (an unreadable page, a pointer that does not verify) and the
+ * caller's set is INCOMPLETE. There is no partial answer here: a caller that
+ * cannot prove reachability must not read the unmarked blocks as unowned. */
+int btree_mark_reachable(invfs_volume *v, invfs_blkptr root, uint8_t *seen,
+                         uint64_t total)
+{
+    if (!v || !seen)
+        return -1;
+    if (root.pba == 0)
+        return 0;
+    return bt_mark_rec(v, root, seen, total);
+}
+
 int btree_reclaim(invfs_volume *v, invfs_blkptr old_root, invfs_blkptr keep_root)
 {
     uint8_t *seen;

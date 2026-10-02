@@ -393,6 +393,47 @@ static uint64_t spn_map_off(uint32_t ndig)
     return (uint64_t)sizeof(spn_file_hdr) + (uint64_t)ndig * sizeof(spn_dig);
 }
 
+/* How many bytes of mark bitmap to pull out of a pin run.
+ *
+ * THE RUN DESCRIBES THE VOLUME SIZE IT WAS TAKEN ON, and invf-resize moves
+ * that size. spn_map_bytes(v) is ceil(total_blocks/8) NOW, which is not
+ * necessarily what the run holds: the header records the byte count the
+ * writer used (fh.bitmap_bytes), and reading the CURRENT size out of the run
+ * instead is how this module used to read past the end of the bitmap.
+ *
+ * Measured (this is the sweep-damages-a-clean-volume finding): a pin taken on
+ * a 131072-block volume (16384 bytes) was read on a 163840-block volume with
+ * spn_map_bytes() == 20480, so 4096 bytes -- one whole block of the image,
+ * straight past the end of the bitmap -- were taken as mark bits for blocks
+ * 131072..163839. 150 of those were live v3 base B+tree pages at
+ * 159857..160166, the reclaim freed every one of them, and the capture then
+ * recorded 160165 -- a block inside the range it had just released -- as
+ * base_root.
+ *
+ * So the read is CLAMPED to what the run actually holds, and the caller
+ * leaves the rest of its zeroed buffer alone. A block the run does not
+ * describe is not in the mark set, and the reclaim's first test is
+ * `bit_get(old_map, b)`, so an undescribed block is never a release
+ * candidate. That is the fail-closed direction: a window taken at a size this
+ * volume no longer has describes LESS, so it pins less and releases less.
+ *
+ * A stored size of 0 describes nothing, and is answered with 0 rather than
+ * with `want`: no run this module writes can produce it (the capture stores
+ * spn_map_bytes(v), which is at least 1), so reaching it means the header is
+ * not one of ours -- and reading a full-size map out of a run that has none is
+ * precisely the bug above. spn_map_load treats that empty answer as a pin it
+ * cannot establish, not as a pin that holds nothing. */
+static size_t spn_map_read_len(const invfs_volume *v, uint64_t stored)
+{
+    size_t want = spn_map_bytes(v);
+
+    if (stored == 0)
+        return 0;
+    if (stored > (uint64_t)want)
+        return want;
+    return (size_t)stored;
+}
+
 /* Read a pin file's header. pba = 0 means "this handle's run".
  * 0 = ok, -1 = absent/unreadable. */
 static int spn_file_hdr_read(invfs_volume *v, uint64_t pba, spn_file_hdr *out)
@@ -427,6 +468,7 @@ static int spn_file_hdr_read(invfs_volume *v, uint64_t pba, spn_file_hdr *out)
 static int spn_map_load(invfs_volume *v)
 {
     spn_file_hdr fh;
+    size_t len;
 
     if (v->spn_bitmap)
         return 0;
@@ -434,11 +476,19 @@ static int spn_map_load(invfs_volume *v)
         return 0;
     if (spn_file_hdr_read(v, v->spn_pba, &fh) != 0)
         return -1;
+    len = spn_map_read_len(v, fh.bitmap_bytes);
+    /* An armed pin whose run describes no blocks is a pin this process cannot
+     * establish, and reporting that is better than installing an all-zero map
+     * that answers spt0_block_pinned() "nothing is held" for every block the
+     * window is holding. The caller's existing message says the hold is
+     * inactive; that is honest. */
+    if (len == 0)
+        return -1;
     v->spn_bitmap = (uint8_t *)calloc(1, spn_map_bytes(v));
     if (!v->spn_bitmap)
         return -1;
     return spn_run_read(v, v->spn_pba, spn_map_off(fh.ndig), v->spn_bitmap,
-                        spn_map_bytes(v));
+                        len);
 }
 
 /* Read the pin file's digest table (sorted by pba; a shared pba can appear
@@ -480,14 +530,24 @@ static uint8_t *spn_old_map_load(invfs_volume *v, uint64_t pba)
 {
     spn_file_hdr fh;
     uint8_t *m;
+    size_t len;
 
     if (spn_file_hdr_read(v, pba, &fh) != 0)
         return NULL;
     m = (uint8_t *)calloc(1, spn_map_bytes(v));
     if (!m)
         return NULL;
-    if (spn_run_read(v, pba, spn_map_off(fh.ndig), m,
-                     spn_map_bytes(v)) != 0) {
+    len = spn_map_read_len(v, fh.bitmap_bytes);
+    if (fh.bitmap_bytes != (uint64_t)spn_map_bytes(v))
+        fprintf(stderr, "[spt0] the previous save point was taken on a "
+                "volume of a different size: its mark set describes %llu "
+                "block(s) and this one has %llu. Reading the %llu byte(s) it "
+                "actually holds and treating everything above that as "
+                "undescribed, so it cannot be released (see spn_map_read_len).\n",
+                (unsigned long long)(fh.bitmap_bytes * 8),
+                (unsigned long long)v->sb.total_blocks,
+                (unsigned long long)len);
+    if (spn_run_read(v, pba, spn_map_off(fh.ndig), m, len) != 0) {
         free(m);
         return NULL;
     }
@@ -732,6 +792,67 @@ static int spn_reg_owns(const tz_v3_extent *reg, size_t n, uint64_t b)
     return b < reg[lo - 1].pba + reg[lo - 1].phys;
 }
 
+/* Rebuild a blkptr for a bare pba so a reachability walk can VERIFY the page
+ * it is about to mark. mbuf_read_ptr refuses a pointer whose checksum or gen
+ * does not match the page's own header, so a hand-assembled pba-only pointer
+ * is a pointer no walk can follow -- which would silently mark nothing and
+ * hand the reclaim an empty protect-set. Same reasoning as
+ * spt0_pinned_from_pba, for the same reason. 0 = built, -1 = unverifiable. */
+static int spt0_ptr_from_pba(invfs_volume *v, uint64_t pba, invfs_blkptr *out)
+{
+    uint8_t page[INVFS_BLOCK_SIZE];
+
+    memset(out, 0, sizeof *out);
+    if (!pba || pba >= v->sb.total_blocks)
+        return -1;
+    if (mbuf_read(v, pba, page) != 0 || !mbuf_page_validate(page))
+        return -1;
+    mbuf_ptr_set(out, pba, page, INVFS_BP_ROOT);
+    return 0;
+}
+
+/* The v3 BASE TREE is an owner set here, for the same reason a live recipe
+ * and the batch registry are.
+ *
+ * The mark set holds every block the CAPTURED generation's recipes named, and
+ * that is a list of addresses, not of owners. A block in it can since have
+ * been freed and handed to somebody else: this pool is shared and has no hard
+ * regions (AGENTS.md 2.3), so a v3 base B+tree page allocated by the fold lands
+ * wherever the free pool gives it. When the capture that took the mark set ran
+ * on a volume of a DIFFERENT total_blocks than the one reading it back, the
+ * read ran off the end of the stored bitmap (spn_map_read_len above) and
+ * marked tens of thousands of blocks the window had never seen -- among them
+ * the base tree, whose pages the fold had allocated inside the freshly grown
+ * tail. This pass then freed 150 live base pages and the capture recorded one
+ * of them, 160165, as the base_root it was about to publish.
+ *
+ * So the tree the capture is publishing is marked, and a page reachable from
+ * it is not a release candidate. This is the same fail-closed trade the two
+ * owner sets above already make and it costs one walk of the tree, which the
+ * capture has already done twice by this point (spt0_tree_ok, then the inode
+ * walk). A walk that cannot complete -- an unreadable page, a pointer that
+ * does not verify -- is a FAILURE, not an absence: it frees nothing. */
+static uint8_t *spn_meta_mark(invfs_volume *v, uint64_t root_pba, int *ok)
+{
+    uint8_t *m = (uint8_t *)calloc(1, spn_map_bytes(v));
+    invfs_blkptr root;
+
+    *ok = 0;
+    if (!m)
+        return NULL;
+    memset(&root, 0, sizeof root);
+    root.pba = root_pba;
+    /* btree_mark_reachable needs a pointer it can verify, so the root's own
+     * blkptr is rebuilt from the page the capture already has in hand (the
+     * same spt0_pinned_from_pba reasoning, applied to the capture root). */
+    if (root_pba && spt0_ptr_from_pba(v, root_pba, &root) != 0)
+        return m;             /* unverifiable: an empty mark set, *ok stays 0 */
+    if (btree_mark_reachable(v, root, m, v->sb.total_blocks) != 0)
+        return m;             /* walk failed: an empty mark set, *ok stays 0 */
+    *ok = 1;
+    return m;
+}
+
 /* Free every block the PREVIOUS generation's pin named that no live recipe
  * names now. That is exactly the set the previous sweep wanted to free and
  * had to hold: a recipe it replaced is not in this generation's mark set, and
@@ -762,12 +883,15 @@ static uint64_t spn_free_counted(invfs_volume *v, uint64_t pba, uint64_t n)
 }
 
 static uint64_t spn_reclaim(invfs_volume *v, const uint8_t *old_map,
-                            const uint8_t *new_map, int new_map_complete)
+                            const uint8_t *new_map, int new_map_complete,
+                            uint64_t root_pba)
 {
     uint64_t total = v->sb.total_blocks;
     uint64_t b = 0, freed = 0, run = 0, start = 0;
     tz_v3_extent *reg = NULL;
+    uint8_t *meta = NULL;
     size_t n_reg = 0;
+    int meta_ok = 0;
 
     if (!old_map)
         return 0;
@@ -819,6 +943,22 @@ static uint64_t spn_reclaim(invfs_volume *v, const uint8_t *old_map,
      * reclaim does nothing. */
     if (tz_v3_reg_owned_blocks(v, &reg, &n_reg) != 0)
         return 0;
+    /* And the tree this capture is ABOUT TO PUBLISH is an owner set too (the
+     * reasoning is at spn_meta_mark, above). An unmarked base page is the one
+     * block class the other two owner sets cannot see: no recipe names a
+     * B+-tree page, so `no live recipe names this any more` is TRUE of the
+     * root of the volume. */
+    meta = spn_meta_mark(v, root_pba, &meta_ok);
+    if (!meta || !meta_ok) {
+        fprintf(stderr, "[spt0] reclaim: the base tree this capture would "
+                "publish (block %llu) could not be walked, so nothing is "
+                "released this run -- a tree that cannot be marked is not a "
+                "basis for saying no live object owns a block\n",
+                (unsigned long long)root_pba);
+        free(meta);
+        free(reg);
+        return 0;
+    }
     /* One pass, one maximal run of reclaimable blocks freed as it completes.
      *
      * WP96 FIX: the first version of this loop ran its inner scan to the end
@@ -836,7 +976,8 @@ static uint64_t spn_reclaim(invfs_volume *v, const uint8_t *old_map,
     v->retain_release = 1;
     for (b = 0; b < total; b++) {
         if (bit_get(old_map, b) && !bit_get(new_map, b) &&
-            bit_get(v->bitmap, b) && !spn_reg_owns(reg, n_reg, b)) {
+            bit_get(v->bitmap, b) && !spn_reg_owns(reg, n_reg, b) &&
+            !bit_get(meta, b)) {
             if (!run) start = b;
             run++;
             continue;
@@ -849,6 +990,7 @@ static uint64_t spn_reclaim(invfs_volume *v, const uint8_t *old_map,
     if (run)
         freed += spn_free_counted(v, start, run);
     v->retain_release = 0;
+    free(meta);
     free(reg);
     return freed;
 }
@@ -933,7 +1075,7 @@ static int spt0_pin_take(invfs_volume *v, uint64_t root_pba,
         old_map = spn_old_map_load(v, old_pba);
         if (old_map) {
             uint64_t freed = spn_reclaim(v, old_map, map,
-                                         c.indeterminate == 0);
+                                         c.indeterminate == 0, root_pba);
             /* WP137: publish the discharge. This is the ONLY place debt is
              * ever collected, so it is also the only place the FUSE ladder
              * can learn that the fill it is reading high is (or is no
@@ -947,6 +1089,29 @@ static int spt0_pin_take(invfs_volume *v, uint64_t root_pba,
             fprintf(stderr, "[spt0] the previous pin's block set is "
                     "unreadable; nothing reclaimed this run\n");
         }
+    }
+
+    /* FAIL CLOSED, at the only place that can still stop it: the root this
+     * capture was taken on is about to be named in the SPT0 descriptor, and
+     * the reclaim above just ran. A save point that names a block the same
+     * capture released is not a stale save point, it is a save point that
+     * restores freed pages -- and if the block is back in the shared pool,
+     * the next mbuf_alloc overwrites the root of the volume.
+     *
+     * The owner sets in spn_reclaim make this unreachable; it is here because
+     * an error is not entitled to assert a negative about the volume, and
+     * because the alternative -- publishing a root and finding out later --
+     * is the failure this whole module exists to prevent. */
+    if (root_pba && !bit_get(v->bitmap, root_pba)) {
+        fprintf(stderr, "[spt0] save point: REFUSED -- block %llu, the base "
+                "root this capture was taken on, is no longer allocated: the "
+                "previous window's reclaim pass released the tree it was "
+                "about to publish. No pin is armed and no save point is "
+                "recorded.\n", (unsigned long long)root_pba);
+        free(map);
+        free(c.dig);
+        free(old_map);
+        return -1;
     }
 
     /* [header][digests][mark bitmap] in one run */
