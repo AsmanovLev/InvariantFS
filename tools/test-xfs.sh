@@ -241,6 +241,7 @@ MNT="$XFSMNT"
 # xfs will not mkfs below 300 MiB, and the fs-a fixture wants headroom on top
 # of the 8 MiB multi-extent file and its decoy.
 XFSMIN_BYTES=$((300 * 1024 * 1024))
+XFS_FS_UUID=""
 
 xfs_skip() {
     echo "NOTE: skipping the xfs pack -- $*"
@@ -391,6 +392,10 @@ mkxfs() {  # mkxfs <mkfs args...>
             findmnt -rn -M "$XFSMNT" >/dev/null 2>&1 \
                 || { echo "FAIL: $XFSDEV did not come up on $XFSMNT"; exit 1; }
             sudo -n chown "$(id -un):$(id -gn)" "$XFSMNT"
+            # Remember which filesystem this fixture actually populates, so
+            # finishxfs can prove the image it captured is the same one.
+            XFS_FS_UUID=$(sudo -n xfs_db -r -c "sb 0" -c "p uuid" "$XFSDEV" 2>/dev/null \
+                          | awk '/uuid/ {print $3; exit}')
             return 0
         fi
         case "$err" in
@@ -433,6 +438,27 @@ finishxfs() {  # finishxfs <img>
         || { echo "FAIL: could not copy $XFSDEV out to $1"; exit 1; }
     [ "$(stat -c %s "$1")" = "$(lsblk -nbdo SIZE "$XFSDEV" | head -1)" ] \
         || { echo "FAIL: $1 is $(stat -c %s "$1") bytes but $XFSDEV is $(lsblk -nbdo SIZE "$XFSDEV" | head -1) -- the copy is short"; exit 1; }
+    # Prove the captured image is the filesystem this fixture just populated.
+    # Every mkfs mints a fresh UUID, so a UUID that is not the one recorded by
+    # mkxfs means the device was formatted again between the populate and this
+    # dd -- another run sharing the fixture partition, or a stale read of the
+    # previous filesystem. The signature is unmistakable and it is what this
+    # suite actually produced once: an image in its just-mkfs'd state
+    # (icount=64, ifree=61) with none of the fixture's names in it, which the
+    # pack reported much later as "no regular files (a zero-member container
+    # goes generic)" -- a failure that names the pack and not the cause.
+    if [ -n "$XFS_FS_UUID" ]; then
+        img_uuid=$(xfs_db -r -c "sb 0" -c "p uuid" "$1" 2>/dev/null \
+                   | awk '/uuid/ {print $3; exit}')
+        if [ -n "$img_uuid" ] && [ "$img_uuid" != "$XFS_FS_UUID" ]; then
+            echo "FAIL: $1 holds filesystem $img_uuid but this fixture populated"
+            echo "      $XFS_FS_UUID. $XFSDEV was formatted again between the populate"
+            echo "      and the copy, so the image is a different filesystem. If"
+            echo "      another test-xfs.sh is running, it is sharing the fixture"
+            echo "      partition (give it its own INVFS_XFS_DEV/INVFS_XFS_MNT)."
+            exit 1
+        fi
+    fi
     # Deliberately NOT probing the superblock's lsn to detect a torn read. It
     # is the obvious probe and it is wrong, twice over: on a v4 (crc=0)
     # fixture it reads 0 on a filesystem that is entirely whole (measured:
