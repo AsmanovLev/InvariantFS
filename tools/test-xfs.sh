@@ -2,21 +2,30 @@
 # test-xfs.sh — the xfs containerpack (tools/codecpacks/xfs.codecpack)
 # end-to-end (persistent regression).
 #
-#   fixtures (mkfs.xfs + sudo loop-mount populate):
+#   fixtures (mkfs.xfs on a real partition, populate it, dd the image out --
+#   see "capability" below for why there is no loop mount):
 #     fs-a.xfs — 300 MiB XFS v5 (crc=1, finobt, no rmap/reflink/nrext64,
-#       512B inodes, agcount=2) populated with: busybox .c text files, a
+#       512B inodes) populated with: busybox .c text files, a
 #       real x86-64 ELF, a sparse file, a hardlink pair, a deep tree
 #       (a/b/c/d/e{1..5}), an 8 MiB multi-extent file (bmap BTREE, depth
 #       1), an empty file, a shortform symlink, a fifo, an unwritten-
 #       extent file (fallocate). Every regular file's inode is forced
 #       into AG0 (< 65536, the FS idx cap) by a create-and-check loop --
 #       XFS rotates new directories across AGs and AG1 inode numbers
-#       exceed the cap (that case is its own refusal fixture, fs-d.xfs).
+#       exceed the cap (that case is its own fixture, fs-d.xfs).
+#       mkfs.xfs 6.13 chooses agcount=4 at EVERY size from 64 MiB to 8 GiB
+#       and REFUSES -d agcount=1 ("Filesystem must have at least 2
+#       superblocks"), so agcount=1 is not an option to size for. Measured
+#       on this host: directories come out AG1, AG2, AG3, AG0, AG1... in
+#       rotation, so the rotor lands on AG0 within ~4 tries of its budget
+#       of 80, and a file created inside an AG0 directory takes an AG0
+#       inode.
 #     fs-b.xfs — 300 MiB XFS v4 (crc=0, 256B inodes): block-format dir,
 #       leaf-format dir (300 files), BTREE-format file, sparse, hardlink.
 #     fs-c.xfs — mkfs.xfs DEFAULTS (rmapbt+reflink+nrext64): declined.
-#     fs-d.xfs — supported features but a regular file in AG1
-#       (ino > 65535): declined.
+#     fs-d.xfs — supported features but a regular file outside AG0
+#       (ino >= 262144): the idx-cap refusal leg. Unreachable at 300 MiB —
+#       see the hand self-test for the measured contract.
 #     junk.xfs — a text file carrying the .xfs extension: declined.
 #
 #   hand self-test first (enumerate/extract/strip/rebuild bit-exact, MRMP
@@ -75,9 +84,11 @@ rm -f "$IMG" "$IMGMEM" "$IMGMEM2" "$IMGNEG"
 
 echo "== tools =="
 command -v cc >/dev/null || { echo "FAIL: cc not installed"; exit 1; }
-command -v mkfs.xfs >/dev/null || { echo "FAIL: mkfs.xfs not installed"; exit 1; }
+# mkfs.xfs is NOT checked here: its absence is a missing fixture capability,
+# not a broken tree, and the capability gate below reports it as a skip. cc
+# and python3 are different -- the pack and the fixture generator cannot be
+# built at all without them.
 command -v python3 >/dev/null || { echo "FAIL: python3 not installed"; exit 1; }
-sudo -n true 2>/dev/null || { echo "FAIL: need passwordless sudo (loop mounts)"; exit 1; }
 
 echo "== build the pack (cc -O2 -Wall -Wextra; warnings are errors) =="
 mkdir -p "$PACK/bin"
@@ -190,35 +201,141 @@ gcc -std=gnu11 -O2 -I$REPO/src -I$REPO/src/core -I$REPO/src/codecs -I$REPO/src/r
 gcc -std=gnu11 -O2 -I$REPO/src -I$REPO/src/core -I$REPO/src/codecs -I$REPO/src/recipes -I$REPO/src/vendor7z -o "$WORK/cbrm" "$WORK/cbrm.c" \
     $CORE_O -Wl,-l:libzstd.so.1 -lz -lpthread
 
-echo "== fixtures: mkfs.xfs + loop-mount populate =="
-MNT=$WORK/mnt
-mkdir -p "$MNT"
-UMOUNTED=0
-# The loop device has to come off HERE, not only on the success path inside
-    # mountxfs (:253, :260). Every `exit 1` in mountxfs -- no free device, mount
-    # failed, mount not writable -- used to leave the loop attached, and this
-    # trap then `rm -rf`'d the backing image out from under it. The residue is
-    # durable and global: measured after a few runs, five `type xfs` mounts on
-    # `(deleted)` images plus six attached loops, which shrinks the pool the
-    # NEXT run needs. `mountxfs` walks /sys/block looking for a free, non-
-    # read-only device, so a suite that poisons the pool makes itself less and
-    # less able to start -- and the residue outlives the work tree, so it also
-    # outlives this suite's own cleanup.
-    #
-    # Order matters: unmount, THEN detach. `losetup -d` on a mounted loop fails.
-    cleanup() {
-      if [ "$UMOUNTED" = 0 ]; then sudo umount "$MNT" 2>/dev/null || true; fi
-      rm -rf "$WORK" 2>/dev/null || true
-      if [ -n "$LOOPDEV" ]; then
-          sudo umount "$MNT" 2>/dev/null || true
-          timeout 15 sudo -n losetup -d "$LOOPDEV" 2>/dev/null || true
-      fi
-    }
+echo "== fixtures: mkfs.xfs on a real filesystem, populate, dd the image out =="
+
+# THE CAPABILITY, AND WHY IT IS GATED RATHER THAN ASSUMED.
+#
+# A fixture is a POPULATED xfs filesystem, and the only way to get one is to
+# mount something and write files into it. `mkfs.xfs -d name=DIR` does NOT
+# help: that option populates a FILE already inside a filesystem, not a
+# mounted one. So the suite needs a mount point.
+#
+# It used to get one with `mount -o loop` over an image file it had just
+# mkfs'd. On this host a loop-mounted XFS wedges into uninterruptible sleep
+# (D) under this suite's write pattern: a D-state process cannot be killed by
+# `timeout` or SIGKILL, the loop cannot be detached, and every later run is
+# poisoned until the host is rebooted. That is what this suite read as "it
+# hangs". test-fuzz.sh hit the same wall from the other direction and now
+# probes for a writable loop mount and skips with a printed reason
+# (tools/test-fuzz.sh:90-121).
+#
+# So there is no loop device anywhere in this flow. The fixtures are built on
+# a REAL xfs filesystem on a REAL block device (default /dev/sda3, mounted at
+# /srv/xfs), formatted, populated, and then read back out with `dd` into the
+# image file the pack consumes. That last step matters: it hands the pack a
+# byte-for-byte 300 MiB xfs image, which is exactly what the loop mount used
+# to hand it, so every downstream assertion that depends on the container's
+# size (the ARC-budget admission leg refuses a 300 MiB container under the
+# default 256M budget; fs-b's size-guard accounting is computed against
+# 314572800 bytes) keeps measuring the thing it always measured.
+# `xfs_metadump` would NOT do that: it drops unused blocks, so the fs-a
+# fixture would arrive as a ~20 MiB image, comfortably under the 256M ARC
+# budget, and the admission leg would stop testing admission at all.
+#
+# The device is a CAPABILITY, so probe it. A suite that cannot build its
+# fixtures must say so and exit 0; a suite that always fails has stopped
+# reporting anything at all. Same shape as the test-fuzz.sh skip.
+XFSDEV=${INVFS_XFS_DEV:-/dev/sda3}
+XFSMNT=${INVFS_XFS_MNT:-/srv/xfs}
+MNT="$XFSMNT"
+# xfs will not mkfs below 300 MiB, and the fs-a fixture wants headroom on top
+# of the 8 MiB multi-extent file and its decoy.
+XFSMIN_BYTES=$((300 * 1024 * 1024))
+
+xfs_skip() {
+    echo "NOTE: skipping the xfs pack -- $*"
+    echo "xfs pack: SKIPPED (no fixture filesystem)"
+    exit 0
+}
+
+# Is $1 (a partition) currently backing some mount other than $XFSMNT? On this
+# host a mistyped INVFS_XFS_DEV would mkfs over the root filesystem, and the
+# damage is the machine rather than the test -- so this is checked, not assumed.
+xfs_dev_is_busy() {
+    local d="$1" src tgt smm dmm
+    dmm=$(lsblk -ndo MAJ:MIN "$d" 2>/dev/null | head -1)
+    [ -n "$dmm" ] || return 1
+    while read -r src tgt; do
+        [ "$tgt" = "$XFSMNT" ] && continue
+        case "$src" in /dev/*) ;; *) continue ;; esac
+        smm=$(lsblk -ndo MAJ:MIN "$src" 2>/dev/null | head -1)
+        [ "$smm" = "$dmm" ] && return 0
+    done < <(findmnt -rn -o SOURCE,TARGET 2>/dev/null)
+    return 1
+}
+
+xfs_gate() {
+    local sz lk cur
+    command -v mkfs.xfs >/dev/null \
+        || xfs_skip "mkfs.xfs is not installed."
+    sudo -n true 2>/dev/null \
+        || xfs_skip "passwordless sudo is needed to mkfs and mount the fixture filesystem."
+    [ -b "$XFSDEV" ] \
+        || xfs_skip "no block device at \$INVFS_XFS_DEV ($XFSDEV). Point it at a spare partition of 300 MiB or more, or set INVFS_XFS_MNT to an existing mount."
+    if xfs_dev_is_busy "$XFSDEV"; then
+        xfs_skip "\$INVFS_XFS_DEV ($XFSDEV) is backing a mounted filesystem other than $XFSMNT. This suite mkfs it, so it has to be a spare partition."
+    fi
+    # lsblk reads sysfs, so it works unprivileged; blockdev has to open the
+    # node, and a partition is normally root:disk 0660. Either answer is fine.
+    sz=$(lsblk -nbdo SIZE "$XFSDEV" 2>/dev/null | head -1 | tr -d ' ')
+    [ -n "$sz" ] || sz=$(sudo -n blockdev --getsize64 "$XFSDEV" 2>/dev/null || echo 0)
+    [ "${sz:-0}" -ge "$XFSMIN_BYTES" ] \
+        || xfs_skip "$XFSDEV is ${sz:-0} bytes; xfs needs >= $XFSMIN_BYTES (300 MiB) for a fixture this suite can populate."
+    [ -d "$XFSMNT" ] \
+        || xfs_skip "mount point $XFSMNT does not exist -- mkdir it, or set INVFS_XFS_MNT."
+    # Mount ONLY when nothing is mounted there, and never STACK. `mount` on
+    # an already-mounted mountpoint does not replace what is there, it stacks
+    # a second mount on top -- verified on this host: two `mount` calls leave
+    # /srv/xfs in /proc/mounts twice, one `umount` leaves it once, and
+    # mkfs.xfs on the device underneath then refuses with "contains a mounted
+    # filesystem". That single mechanism produced BOTH failures seen here: the
+    # e2e EBUSY at mkfs, and -- once the umount failure went unchecked -- an
+    # image dd'd out from under a live mount, which the pack read as a valid
+    # container with "no regular files".
+    if findmnt -rn -M "$XFSMNT" >/dev/null 2>&1; then
+        cur=$(findmnt -rn -M "$XFSMNT" -o SOURCE | head -1)
+        [ "$(readlink -f "$cur" 2>/dev/null)" = "$(readlink -f "$XFSDEV")" ] \
+            || xfs_skip "$XFSMNT is already mounted from $cur, not $XFSDEV."
+    else
+        sudo -n mount "$XFSDEV" "$XFSMNT" 2>/dev/null \
+            || xfs_skip "$XFSDEV could not be mounted on $XFSMNT."
+    fi
+    # Prove the mount is writable before spending a fixture on it: a read-only
+    # mount is indistinguishable from a dead device, and populating it then
+    # fails with EROFS pointing at the wrong subsystem.
+    sudo -n touch "$XFSMNT/.xfs-probe" 2>/dev/null \
+        || xfs_skip "$XFSMNT came up read-only, so the fixture cannot be populated into it."
+    sudo -n rm -f "$XFSMNT/.xfs-probe"
+    # One fixture filesystem, shared by every concurrent run. Two suites
+    # mkfs-ing the same partition interleave their fixtures, and each then
+    # asserts against the other's data -- a failure that reads like a bug in
+    # the pack. Serialise on a lock beside the work tree.
+    if command -v flock >/dev/null; then
+        lk="${INVFS_XFS_LOCK:-$(dirname "$WORK")/.test-xfs-fixture.lock}"
+        mkdir -p "$(dirname "$lk")" 2>/dev/null || true
+        exec 9>"$lk" 2>/dev/null \
+            && flock -w 900 9 2>/dev/null \
+            || xfs_skip "another test-xfs.sh is holding the fixture filesystem ($lk)."
+    fi
+    echo "  fixture filesystem: $XFSDEV on $XFSMNT ($(( sz / 1024 / 1024 )) MiB)"
+}
+
+# Leave nothing mounted behind on the fixture filesystem: a suite that exits
+# with the fixture still mounted would have the next run mkfs a live device.
+cleanup() {
+    sudo -n umount "$XFSMNT" 2>/dev/null || true
+}
 trap cleanup EXIT
 
-# mkdir, retrying until the inode lands in AG0 (ino < 65536): XFS rotates
-# new directories across allocation groups, and AG1 inode numbers exceed
-# the FS member-idx cap (see fs-d.xfs for the refusal leg).
+xfs_gate
+
+# mkdir, retrying until the inode lands in AG0 (ino < 65536): XFS rotates new
+# directories across allocation groups, and AG1 inode numbers exceed the FS
+# member-idx cap (see fs-d.xfs for the refusal leg). The rotation is round
+# robin, so this converges in a few tries -- measured on xfsprogs 6.13 with
+# agcount=4, dirs came out AG1, AG2, AG3, AG0, AG1, ... -- and a file created
+# inside an AG0 directory takes an AG0 inode, which is what makes the "every
+# regular file in AG0" assertion satisfiable at all.
 mkag0() {
     local d="$1" i tries=0
     while :; do
@@ -231,70 +348,107 @@ mkag0() {
     done
 }
 
-# Mount a fixture through an EXPLICIT, checked loop device.
+# Unmount the fixture filesystem and WAIT until it is really gone.
 #
-# `mount -o loop` picks a device by itself, and a device that is present but
-# wedged read-only (/sys/block/loopN/ro == 1, which happened on this host and
-# made every loop mount silently land read-only -- a read-only mount is
-# indistinguishable from a dead device, and a test that populates it then
-# fails with "Read-only file system" pointing at the wrong subsystem) is
-# accepted without complaint. So: choose the device, refuse a read-only one,
-# and prove the mount is writable before populating it. Abort rather than run
-# the fixture against a mount that cannot be written.
-LOOPDEV=""
-mountxfs() {  # mountxfs <img>
-    local img="$1" d
-    # Do NOT trust `losetup --find`. On this host it kept handing back a
-    # wedged device (/sys/block/loop4/ro == 1, size 8 sectors, which
-    # `losetup -d` cannot clear), so every run would be poisoned by whichever
-    # loop happened to be broken. Walk the devices instead and take the first
-    # one that is free AND healthy, so one bad device on the machine does not
-    # stop the suite from measuring anything.
-    d=""
-    for c in /dev/loop[0-9]*; do
-        [ -e "$c" ] || continue
-        [ "$(cat /sys/block/$(basename "$c")/ro 2>/dev/null)" = "0" ] || continue
-        # The "is it attached" probe needs the SAME timeout as the attach below
-        # it. A loop device whose sysfs state is empty can BLOCK that ioctl, so
-        # an unbounded probe here stalls the whole walk and the suite hangs
-        # before it has measured anything -- which is how this read for hours as
-        # "test-xfs hangs", with no output past the fixture header. The attach
-        # three lines down was already bounded; the probe was not.
-        if timeout 5 losetup "$c" >/dev/null 2>&1; then continue; fi   # attached
-        if timeout 30 sudo -n losetup "$c" "$img" 2>/dev/null; then d="$c"; break; fi
+# `umount` detaches the mount from the namespace, but the block device can stay
+# exclusively claimed for a moment afterwards. Both symptoms of ignoring that
+# were measured here rather than imagined:
+#   * mkfs.xfs opens the device O_EXCL and gets EBUSY while the claim is live.
+#     An e2e run stopped at "mkfs.xfs failed on /dev/sda3"; the identical
+#     command then succeeded against the same, idle, unmounted device.
+#   * `dd` of a device that is still coming down yields a TORN image. The pack
+#     reads that as a valid container with no members -- fs-d came back
+#     "no regular files (a zero-member container goes generic)" -- which is a
+#     fixture defect that reads like a pack bug.
+# So: unmount, then confirm the mount is gone, rather than assuming it. The
+# loop also pops any STACKED mounts (see xfs_gate): `mount` does not replace a
+# mountpoint, it stacks on it, so one umount is not necessarily one mount.
+xfs_unmount() {
+    local i
+    for i in $(seq 1 30); do
+        findmnt -rn -M "$XFSMNT" >/dev/null 2>&1 || return 0
+        sudo -n umount "$XFSMNT" 2>/dev/null || true
+        sleep 1
     done
-    [ -n "$d" ] || { echo "FAIL: no free, healthy loop device (some may be wedged ro=1)"; exit 1; }
-    LOOPDEV="$d"
-    sudo mount "$LOOPDEV" "$MNT" || {
-        echo "FAIL: mount $LOOPDEV failed"; exit 1; }
-    # Probe at the privilege the suite itself mounts with. Probing as the
-    # invoking user would fail on a perfectly good mount that the suite is
-    # about to `sudo chown` -- a test that cries wolf is worse than none.
-    if ! sudo -n touch "$MNT/.writable" 2>/dev/null; then
-        echo "FAIL: $MNT is not writable -- a read-only mount looks like a dead device,"
-        echo "       and populating it would blame the filesystem under test"
-        sudo umount "$MNT" 2>/dev/null || true
-        timeout 15 sudo -n losetup -d "$LOOPDEV" 2>/dev/null || true
-        exit 1
-    fi
-    sudo -n rm -f "$MNT/.writable"
-}
-umountxfs() {
-    sudo umount "$MNT" 2>/dev/null || true
-    [ -n "$LOOPDEV" ] && { timeout 15 sudo -n losetup -d "$LOOPDEV" 2>/dev/null || true; LOOPDEV=""; }
-    return 0
+    echo "FAIL: $XFSMNT is still mounted after 30s. Refusing to mkfs or dd a"
+    echo "      live device -- a torn fixture is worse than no fixture."
+    exit 1
 }
 
-mkxfs() {  # mkxfs <img> <mkfs args...>
-    dd if=/dev/zero of="$1" bs=1M count=300 status=none
-    mkfs.xfs -f "${@:2}" "$1" >/dev/null
+# Format the fixture filesystem and mount it ready for population. mkfs.xfs
+# refuses a mounted device, so the previous fixture's mount is dropped first.
+mkxfs() {  # mkxfs <mkfs args...>
+    local i err
+    xfs_unmount
+    # Belt and braces against the claim lag described above: a refusal that is
+    # a busy device is retried, anything else is reported verbatim. A FAIL
+    # that cannot say why it failed is the kind that sends the next reader to
+    # the wrong subsystem.
+    for i in $(seq 1 20); do
+        if err=$(sudo -n mkfs.xfs -f "$@" "$XFSDEV" 2>&1 >/dev/null); then
+            sudo -n mount "$XFSDEV" "$XFSMNT" 2>/dev/null \
+                || { echo "FAIL: mounting $XFSDEV on $XFSMNT failed"; exit 1; }
+            findmnt -rn -M "$XFSMNT" >/dev/null 2>&1 \
+                || { echo "FAIL: $XFSDEV did not come up on $XFSMNT"; exit 1; }
+            sudo -n chown "$(id -un):$(id -gn)" "$XFSMNT"
+            return 0
+        fi
+        case "$err" in
+            *"Device or resource busy"*|*"contains a mounted filesystem"*)
+                # A block device can stay exclusively claimed with NOTHING
+                # mounted on it: the XFS instance is gone from the mount
+                # table but not from the kernel -- `xfsaild/<dev>` and its
+                # `kworker/*-xfs-*` siblings are still running -- and mkfs.xfs
+                # then refuses with EBUSY. Reproduced on this host by freezing
+                # the fixture filesystem; the residue survives the unmount and
+                # outlives the run that left it, so the NEXT run is the one
+                # that cannot mkfs. (Verified recovery: the instance is gone
+                # after mount -> `xfs_freeze -u` -> sync -> umount, and mkfs
+                # succeeds.) Guarded on the device NOT being mounted, so this
+                # can never unmount something in use, and only reached when
+                # mkfs has already said the device is busy.
+                if ! findmnt -rn -M "$XFSMNT" >/dev/null 2>&1; then
+                    sudo -n mount "$XFSDEV" "$XFSMNT" 2>/dev/null && {
+                        sudo -n xfs_freeze -u "$XFSMNT" 2>/dev/null || true
+                        sync
+                        sudo -n umount "$XFSMNT" 2>/dev/null || true
+                    }
+                fi
+                sleep 1 ;;
+            *) break ;;
+        esac
+    done
+    echo "FAIL: mkfs.xfs failed on $XFSDEV"
+    printf '%s\n' "$err" | sed 's/^/      /'
+    exit 1
+}
+
+# Unmount the populated fixture and copy it out to the image the pack reads.
+# This is the fixture's old `umountxfs`: it runs AFTER the populate, which is
+# the whole point. An image taken before the files are written is a dump of an
+# empty filesystem, and every assertion downstream then measures nothing.
+finishxfs() {  # finishxfs <img>
+    xfs_unmount
+    sudo -n dd if="$XFSDEV" of="$1" bs=4M status=none \
+        || { echo "FAIL: could not copy $XFSDEV out to $1"; exit 1; }
+    [ "$(stat -c %s "$1")" = "$(lsblk -nbdo SIZE "$XFSDEV" | head -1)" ] \
+        || { echo "FAIL: $1 is $(stat -c %s "$1") bytes but $XFSDEV is $(lsblk -nbdo SIZE "$XFSDEV" | head -1) -- the copy is short"; exit 1; }
+    # Deliberately NOT probing the superblock's lsn to detect a torn read. It
+    # is the obvious probe and it is wrong, twice over: on a v4 (crc=0)
+    # fixture it reads 0 on a filesystem that is entirely whole (measured:
+    # icount=448, ifree=53, 389 members enumerated), and an unanchored
+    # `*= 0*` match against "lsn = 0x100003088" flags healthy v5 images too.
+    # A check that fires on good fixtures teaches you to ignore it. A torn
+    # image is caught where it actually shows up instead -- the hand
+    # self-test's `enumerate` declines ("no regular files") and the suite
+    # fails there -- and the real cause is the stacked-mount bug xfs_gate
+    # now refuses to create, not a missing assertion.
+    echo "    $(basename "$1"): $(stat -c %s "$1") bytes"
 }
 
 echo "  fs-a.xfs (v5)"
-mkxfs "$WORK/orig/fs-a.xfs" -m crc=1,finobt=1,rmapbt=0,reflink=0,inobtcount=0,bigtime=1 \
+mkxfs -m crc=1,finobt=1,rmapbt=0,reflink=0,inobtcount=0,bigtime=1 \
     -i size=512,sparse=0,nrext64=0 -n ftype=1
-mountxfs "$WORK/orig/fs-a.xfs"
-sudo chown user:user "$MNT"
 for d in a a/b a/b/c a/b/c/d a/b/c/d/e1 a/b/c/d/e2 a/b/c/d/e3 a/b/c/d/e4 a/b/c/d/e5 sub; do
     mkag0 "$MNT/$d"
 done
@@ -366,13 +520,11 @@ find "$MNT" -xdev -type f -printf "%i %P\n" | sort -n > "$WORK/ref/fs-a.inos"
 mkdir -p "$WORK/ref/fs-a.tree" && cp -a "$MNT/." "$WORK/ref/fs-a.tree/"
 awk '$1 >= 65536 {bad++} END {exit (bad+0) > 0}' "$WORK/ref/fs-a.inos" \
     || { echo "FAIL: fs-a has a regular file outside AG0"; cat "$WORK/ref/fs-a.inos"; exit 1; }
-umountxfs
 echo "    $(wc -l < "$WORK/ref/fs-a.inos") files (incl. hardlink), all in AG0"
+finishxfs "$WORK/orig/fs-a.xfs"
 
 echo "  fs-b.xfs (v4)"
-mkxfs "$WORK/orig/fs-b.xfs" -m crc=0 -i size=256 -n ftype=1
-mountxfs "$WORK/orig/fs-b.xfs"
-sudo chown user:user "$MNT"
+mkxfs -m crc=0 -i size=256 -n ftype=1
 mkag0 "$MNT/blkdir"
 mkag0 "$MNT/bigdir"
 python3 - "$MNT" <<'PY'
@@ -455,22 +607,18 @@ find "$MNT" -xdev -type f -printf "%i %P\n" | sort -n > "$WORK/ref/fs-b.inos"
 mkdir -p "$WORK/ref/fs-b.tree" && cp -a "$MNT/." "$WORK/ref/fs-b.tree/"
 awk '$1 >= 65536 {bad++} END {exit (bad+0) > 0}' "$WORK/ref/fs-b.inos" \
     || { echo "FAIL: fs-b has a regular file outside AG0 ($(awk '$1 >= 65536' "$WORK/ref/fs-b.inos" | wc -l) of $(wc -l < "$WORK/ref/fs-b.inos")):"; awk '$1 >= 65536' "$WORK/ref/fs-b.inos" | head -5 | sed 's/^/  ino /'; exit 1; }
-umountxfs
 echo "    $(wc -l < "$WORK/ref/fs-b.inos") files (incl. hardlink), all in AG0"
+finishxfs "$WORK/orig/fs-b.xfs"
 
 echo "  fs-c.xfs (default mkfs: rmapbt+reflink+nrext64 -> declined)"
-mkxfs "$WORK/orig/fs-c.xfs"
-mountxfs "$WORK/orig/fs-c.xfs"
-sudo chown user:user "$MNT"
+mkxfs
 echo "default features file" > "$MNT/file.txt"
 sync
-umountxfs
+finishxfs "$WORK/orig/fs-c.xfs"
 
-echo "  fs-d.xfs (regular file in AG1 -> ino > 65535 -> declined)"
-mkxfs "$WORK/orig/fs-d.xfs" -m crc=1,finobt=1,rmapbt=0,reflink=0,inobtcount=0,bigtime=1 \
+echo "  fs-d.xfs (regular file outside AG0 -> the idx-cap refusal leg)"
+mkxfs -m crc=1,finobt=1,rmapbt=0,reflink=0,inobtcount=0,bigtime=1 \
     -i size=512,sparse=0,nrext64=0 -n ftype=1
-mountxfs "$WORK/orig/fs-d.xfs"
-sudo chown user:user "$MNT"
 echo "ag0 file" > "$MNT/ag0.txt"
 i=0
 while :; do
@@ -481,13 +629,12 @@ while :; do
 done
 echo "ag1 file (ino ${ino}000-ish)" > "$MNT/d$i/ag1.txt"
 sync
-umountxfs
 echo "    ag1.txt lives under dir ino $ino"
+finishxfs "$WORK/orig/fs-d.xfs"
 
 echo "  junk.xfs (a text file carrying the extension)"
 python3 -c "open('$WORK/orig/junk.xfs','w').write('this is not a filesystem image, just text\n' * 40)"
 
-UMOUNTED=1
 trap - EXIT
 
 echo "== hand self-test: strip/rebuild bit-exact, map guard emulation =="
@@ -577,12 +724,46 @@ roundtrip('fs-b.xfs')
 PY
 
 echo "== hand self-test: refusals (exit 3) =="
-for f in fs-c.xfs fs-d.xfs junk.xfs; do
+for f in fs-c.xfs junk.xfs; do
     rc=0
     $X enumerate "$WORK/orig/$f" /dev/null 2>"$WORK/out/$f.err" || rc=$?
     [ "$rc" = 3 ] || { echo "FAIL: $f: want exit 3, got $rc"; exit 1; }
     echo "  $f declined: $(head -1 "$WORK/out/$f.err")"
 done
+# fs-d.xfs is the "member inode beyond the FS idx cap" fixture, and that
+# refusal is UNREACHABLE at this fixture size. It used to be reachable: the
+# cap was MAX_IDX 65535, so a regular file in AG1 tripped it outright. Commit
+# 4db1872 ("cpack: the 65536 member cap was a RAM bound, not a format limit")
+# raised MAX_IDX to 1048575, correctly -- the old number bounded RAM, not the
+# format. But a 300 MiB filesystem holds 614400 inodes IN TOTAL (300 MiB /
+# 512 B), so no layout at any agcount puts a member above 1048575, and the
+# fixture went on asserting the old number. It could not have passed; the
+# suite simply could not run far enough to find out.
+#
+# So assert the MEASURED contract, which is what the fs-b leg already does for
+# the size guard: the pack either declines WITH the idx-cap reason, or it
+# enumerates -- and if it enumerates, the out-of-AG0 members are listed, so the
+# leg says what it actually found instead of asserting an unreachable outcome.
+rc=0
+$X enumerate "$WORK/orig/fs-d.xfs" "$WORK/out/fs-d.xfs.tab" \
+    2>"$WORK/out/fs-d.xfs.err" || rc=$?
+case "$rc" in
+3)
+    grep -q "idx cap" "$WORK/out/fs-d.xfs.err" \
+        || { echo "FAIL: fs-d declined, but not for the idx cap:"; cat "$WORK/out/fs-d.xfs.err"; exit 1; }
+    echo "  fs-d.xfs declined: $(head -1 "$WORK/out/fs-d.xfs.err")"
+    ;;
+0)
+    echo "  fs-d.xfs: accepted. No member can exceed MAX_IDX=1048575 on a 300 MiB"
+    echo "             filesystem (614400 inodes total), so the idx-cap refusal is"
+    echo "             unreachable here. Its members (idx = inode):"
+    sed 's/^/    /' "$WORK/out/fs-d.xfs.tab"
+    ;;
+*)
+    echo "FAIL: fs-d.xfs: want exit 0 or 3, got $rc"
+    cat "$WORK/out/fs-d.xfs.err"; exit 1
+    ;;
+esac
 
 echo "== mkfs + import =="
 $B/invf-mkfs "$IMG" 2 >/dev/null
