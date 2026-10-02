@@ -37,6 +37,18 @@ if ! mkdir -p "$WORK" 2>/dev/null; then
     mkdir -p "$WORK"
 fi
 STAGE="${ARCH_STAGE:-$WORK/stage}"
+# Guard the two removals below (:64 and the VOL cleanup) against a STAGE that
+# resolved to a system directory. `STAGE` comes straight from the environment,
+# and `rm -rf "$STAGE"` on it is unguarded -- so one `ARCH_STAGE=/dev` in a CI
+# job, a cron env, or a stale export empties /dev on a LIVE host, which is
+# exactly what happened on 2026-10-02: every `2>/dev/null` in the tree silently
+# started failing and every tool died with ENOENT.
+case "$STAGE" in
+    /|/dev|/proc|/sys|/boot|/etc|/var|/usr|/srv|/home|"")
+        echo "FAIL: ARCH_STAGE resolved to '$STAGE'. Refusing to continue:"
+        echo "      it is a system directory, and this script removes it."
+        exit 1 ;;
+esac
 VOL="$WORK/vol"
 IMG="$WORK/archlinux-bootstrap-x86_64.tar.zst"
 BOOTSTRAP_URL="${ARCH_BOOTSTRAP_URL:-https://geo.mirror.pkgbuild.com/iso/latest/archlinux-bootstrap-x86_64.tar.zst}"
