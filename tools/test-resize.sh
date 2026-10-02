@@ -14,8 +14,12 @@
 #   Add a 300MB incompressible file whose shadow occupancy crosses the
 #   300MB boundary: shrink 640M -> 300M refuses honestly (count + first
 #   block named), volume untouched (still mounts, reads, fsck OK).
-#   Shrink 640M -> 448M with the file in place (tail above 448M is free):
-#   works, bit-exact.
+#   Shrink 640M -> 448M with the file in place: refuses honestly. big.bin's own
+#   tail is below 448M (highest live-recipe pba ~93041), but the v3 base B+tree
+#   holds live pages at ~160165, above the boundary, so 448M is unreachable on
+#   this volume whatever reclaim does. Volume untouched, fsck OK, bit-exact.
+#   (This leg used to assert success; see the comment at A6 for the measurement
+#   that shows the assertion was never achievable.)
 #
 #   image B (batches + container members): text corpus (real C sources ->
 #   PPMd batches) + a tar of 26 real ELF binaries (TARR + ZSTD member
@@ -275,14 +279,46 @@ cmp -s "$WORK/big.bin" "$WORK/out/big.bin" || fail "big.bin not bit-exact after 
 check_all "post-refusal" "$WORK/orig"
 
 echo
-echo "== [A6] shrink 640M -> 448M (tail above 448M is free) =="
-# big.bin's shadow tail sits below block 114688 (448M), so this one works.
-$B/invf-resize "$IMG" 448M | tee "$WORK/resize-a4.log"
-grep -q "invf-resize: OK" "$WORK/resize-a4.log" || fail "shrink to 448M failed"
-$B/invf-fsck "$IMG" | grep -q "^OK$" || fail "fsck not clean post-shrink-448M"
+echo "== [A6] shrink 640M -> 448M: honest refusal (metadata high-water mark) =="
+# 448M is block 114688. big.bin's own tail DOES sit below it (the highest pba
+# any live recipe names is ~93041), and this leg used to assert that the
+# shrink therefore succeeds. It cannot, and the blocker is not big.bin: the v3
+# base B+tree holds LIVE pages up at ~160165, far above the boundary, and
+# truncating a metadata page destroys the volume rather than freeing space.
+#
+# Measured on this exact corpus (A6 leg state, boundary 114688):
+#   blocks the check counted at/above the boundary ....... 5891
+#   ... named by a live recipe ............................ 0
+#   ... carrying the BPG3 base-page magic ................. 309  (LIVE metadata,
+#       159857..160165; clearing these made EVERY file unreadable)
+#   ... framed payload, referenced by nothing ............ 5582 (orphans the
+#       post.bin delete in A4 left behind)
+# Clearing the 5582 orphans in the bitmap left all 13 files bit-exact and the
+# shrink STILL refused, now with 309. So 448M is unreachable on this volume
+# whatever reclaim does, and the assertion this leg made is not achievable --
+# it made the suite red for something that was never a bug in the shrink.
+# The orphan half is a separate core finding; see the WP.
+#
+# The count is deliberately NOT pinned: it moves with the corpus (5891 and
+# 5874 measured on two runs) because that delete leaks a variable tail. What
+# is asserted is the honest refusal plus an untouched, readable volume.
+set +e
+$B/invf-resize "$IMG" 448M > "$WORK/resize-a4.log" 2>&1
+RC=$?
+set -e
+cat "$WORK/resize-a4.log"
+[ "$RC" != 0 ] || fail "shrink to 448M succeeded with live metadata above the boundary"
+grep -q "live block(s) at/above the new boundary" "$WORK/resize-a4.log" \
+    || fail "no honest refusal message"
+grep -q "no compaction exists in any format" "$WORK/resize-a4.log" \
+    || fail "no guidance in refusal"
+echo "  refused honestly (rc=$RC)"
+# volume untouched: still 640M, mounts, reads, fsck OK
+[ "$($PROBE "$IMG" blocks)" = "163840" ] || fail "size changed despite the refusal"
+$B/invf-fsck "$IMG" | grep -q "^OK$" || fail "fsck not clean after refused shrink"
 $B/invf-cat "$IMG" big.bin "$WORK/out/big.bin.2" >/dev/null
-cmp -s "$WORK/big.bin" "$WORK/out/big.bin.2" || fail "big.bin not bit-exact post-448M"
-check_all "post-shrink-448M" "$WORK/orig"
+cmp -s "$WORK/big.bin" "$WORK/out/big.bin.2" || fail "big.bin not bit-exact after refusal"
+check_all "post-refusal-448M" "$WORK/orig"
 rm -f "$WORK/big.bin"   # host copy: 300MB of tmpfs back
 
 echo
