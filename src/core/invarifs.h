@@ -1363,6 +1363,19 @@ uint32_t invfs_crc32c(const void *data, size_t len);
  * equals invfs_crc32c over the concatenation; start from 0. Used where the
  * input does not fit in memory at once (WP18 resize staging). */
 uint32_t invfs_crc32c_update(uint32_t crc, const void *data, size_t len);
+/* WP-crc32c-slice8-wrong: pin the software path (crc32c_slice8), which is
+ * otherwise reachable ONLY on a CPU without SSE4.2 -- QEMU's default
+ * `qemu64` is such a CPU, and the slice-by-8 fallback shipped with a wrong
+ * T[0] that only a test able to force it could have caught. Also settable via
+ * INVFS_CRC32C_FORCE_FALLBACK=1 so a SUBPROCESS (invf-mkfs, invf-import)
+ * checksums the way the volume's writer did; an explicit call overrides it. */
+void invfs_crc32c_force_fallback(int on);
+/* Which path the two functions above would take RIGHT NOW: 1 = software. A
+ * test asserts this rather than assuming it armed. */
+int invfs_crc32c_using_fallback(void);
+/* Test-only view of slice-by-8's T[k][i] (0 for an out-of-range index). It is
+ * static, so this is the only way a test can assert that T[0] was built. */
+uint32_t invfs_crc32c_slice8_table(unsigned k, unsigned i);
 
 /* Byte-order helpers: all on-disk values are little-endian.
  * Host is assumed little-endian (x86/x64/ARM LE); on BE platforms

@@ -8,22 +8,37 @@
  * byte-at-a-time table loop is a strictly serial dependency chain -- one
  * byte per iteration, each iteration waiting on the previous CRC.
  *
- * Three implementations, same polynomial and same results:
+ * Two implementations, same polynomial and same results:
  *   1. SSE4.2  — the hardware carry-less-multiply instruction, 8 bytes at
  *      a time. Selected at runtime via CPUID, so a binary built for a
  *      baseline x86-64 still runs on an old CPU.
  *   2. slice-by-8 — eight tables, eight parallel chains. ~3-4x over the
- *      byte loop, portable, used when SSE4.2 is absent.
- *   3. the original byte loop — the floor, and the reference the other two
- *      are checked against.
+ *      byte loop, portable, used when SSE4.2 is absent, and the byte loop
+ *      remains its tail.
+ *
+ * "same results" is ASSERTED, not assumed: src/cli/crc32c_test.c pins the
+ * two against an independent textbook CRC32C and against each other at every
+ * length class, with the fallback FORCED so the check runs on an SSE4.2 host
+ * too. Before that test existed there was no comparison anywhere in the tree,
+ * and the two paths did not agree.
  */
 #include "invarifs.h"
+#include <stdlib.h>   /* getenv, for INVFS_CRC32C_FORCE_FALLBACK */
 
 static uint32_t crc32c_table[256];
 static uint32_t crc32c_table8[8][256];
 static int crc32c_table_ready = 0;
 /* -1 = not probed yet, 0 = no SSE4.2, 1 = hardware path available. */
 static int crc32c_have_sse42 = -1;
+/* -1 = not consulted yet, 0 = CPUID decides, 1 = software path pinned. */
+static int crc32c_pinned_fallback = -1;
+
+/* The fallback pin. crc32c_slice8 is static and unreachable from a test
+ * binary, so on an SSE4.2 host there was NO WAY to exercise it -- which is how
+ * a fallback that disagreed with the hardware for every n >= 8 shipped (see
+ * src/cli/crc32c_test.c). Declared here and defined next to the dispatch it
+ * steers, so the state and both dispatchers that read it are on one screen. */
+static int crc32c_fallback_pinned(void);
 
 static void crc32c_init(void)
 {
@@ -39,6 +54,14 @@ static void crc32c_init(void)
      * bytes can be consumed per iteration across independent chains */
     for (i = 0; i < 256; i++) {
         uint32_t c = crc32c_table[i];
+        /* crc32c_table8[0] IS crc32c_table: slice-by-8's T[0] is the plain
+         * byte table, and the slicing loop reads it as the contribution of the
+         * eighth byte of every 8-byte group (crc32c_slice8's last term). The
+         * k loop starts at 1, so without this store T[0] kept the static
+         * zero-fill and every eighth byte was checksummed as 0x00 -- correct
+         * for n < 8, wrong for every n >= 8, on any CPU without SSE4.2.
+         * src/cli/crc32c_test.c asserts this equality directly. */
+        crc32c_table8[0][i] = c;
         for (k = 1; k < 8; k++) {
             c = crc32c_table[c & 0xFF] ^ (c >> 8);
             crc32c_table8[k][i] = c;
@@ -46,6 +69,8 @@ static void crc32c_init(void)
     }
     crc32c_table_ready = 1;
 }
+
+static int crc32c_probe_sse42(void);
 
 static int crc32c_probe_sse42(void)
 {
@@ -125,6 +150,52 @@ static uint32_t crc32c_slice8(uint32_t crc, const uint8_t *p, size_t len)
     return ~c;
 }
 
+/* ---- test hooks -------------------------------------------------------
+ * These live here, beside the dispatch they steer, rather than at the top of
+ * the file where they would have to forward-declare crc32c_init(). */
+
+/* Force the software path. The environment is not consulted once this has
+ * been called, so a test can toggle it between vol_close() and vol_open() to
+ * model "written on one machine, read on another". */
+void invfs_crc32c_force_fallback(int on)
+{
+    crc32c_pinned_fallback = on ? 1 : 0;
+}
+
+static int crc32c_fallback_pinned(void)
+{
+    if (crc32c_pinned_fallback < 0) {
+        const char *e = getenv("INVFS_CRC32C_FORCE_FALLBACK");
+        crc32c_pinned_fallback = (e && *e && strcmp(e, "0") != 0) ? 1 : 0;
+    }
+    return crc32c_pinned_fallback;
+}
+
+/* Which path invfs_crc32c()/invfs_crc32c_update() would take RIGHT NOW. A
+ * test asserts this rather than assuming: "I asked for the fallback" is not
+ * the same claim as "the fallback ran", and only the second one is a control. */
+int invfs_crc32c_using_fallback(void)
+{
+    if (!crc32c_table_ready)
+        crc32c_init();
+    if (crc32c_have_sse42 < 0)
+        crc32c_have_sse42 = crc32c_probe_sse42();
+    return crc32c_fallback_pinned() || !crc32c_have_sse42;
+}
+
+/* Test-only view of the slice-by-8 table. It is static, so a test cannot
+ * otherwise assert that T[0] -- the eighth byte's term, and the row the
+ * shipped fallback left zero-filled -- was built at all. Returns 0 for an
+ * out-of-range (k, i) so a typo in a test cannot read past the end. */
+uint32_t invfs_crc32c_slice8_table(unsigned k, unsigned i)
+{
+    if (!crc32c_table_ready)
+        crc32c_init();
+    if (k >= 8 || i >= 256)
+        return 0;
+    return crc32c_table8[k][i];
+}
+
 uint32_t invfs_crc32c(const void *data, size_t len)
 {
     if (!crc32c_table_ready)
@@ -132,7 +203,7 @@ uint32_t invfs_crc32c(const void *data, size_t len)
     if (crc32c_have_sse42 < 0)
         crc32c_have_sse42 = crc32c_probe_sse42();
 #if defined(__x86_64__) || defined(__i386__)
-    if (crc32c_have_sse42)
+    if (crc32c_have_sse42 && !crc32c_fallback_pinned())
         return crc32c_hw(0, (const uint8_t *)data, len);
 #endif
     return crc32c_slice8(0, (const uint8_t *)data, len);
@@ -145,7 +216,7 @@ uint32_t invfs_crc32c_update(uint32_t crc, const void *data, size_t len)
     if (crc32c_have_sse42 < 0)
         crc32c_have_sse42 = crc32c_probe_sse42();
 #if defined(__x86_64__) || defined(__i386__)
-    if (crc32c_have_sse42)
+    if (crc32c_have_sse42 && !crc32c_fallback_pinned())
         return crc32c_hw(crc, (const uint8_t *)data, len);
 #endif
     return crc32c_slice8(crc, (const uint8_t *)data, len);

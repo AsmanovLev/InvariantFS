@@ -86,6 +86,10 @@ src/cli/sweep_bang_test.c:132:ACTS  # the control's own zone read: a miss is not
 src/cli/sweep_bang_test.c:133:ACTS  # as :132, on the '!'-bearing name: the red control's input
 src/cli/bang_name_test.c:289:SKIP   # LEG A setup: the two inode ids are printed to show both names were distinct inodes before the unlink
 src/cli/bang_name_test.c:290:SKIP   # LEG A setup: as above, for the bang name
+src/cli/crc32c_test.c:364:ACTS  # LEG 4: a miss FAILS the test. Whether the name resolves IS the measurement -- a CRC bug that loses a written file on reopen shows up exactly here, so the result has to decide the assertion.
+src/cli/crc32c_test.c:368:ACTS  # LEG 4: the diagnostic that names the name whose lookup missed. Reached only after :364 has already failed, so it reports rather than decides.
+src/cli/crc32c_test.c:413:ACTS  # LEG 5: as :364, on the cross-machine reopen, where a miss is the reported symptom.
+src/cli/crc32c_test.c:417:ACTS  # LEG 5: as :368, on the cross-machine reopen.
 src/cli/table_sync_evict_test.c:344:SKIP
 src/cli/read_named_test.c:254:SKIP   # setup: whether a name resolves IS the measurement -- same shape as bang_name_test.c:146
 src/cli/read_named_test.c:258:SKIP   # setup: THE precondition of LEG A. The exact name must resolve, or the leg is not testing shadowing but absence

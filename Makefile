@@ -147,7 +147,8 @@ CLI_MAINS := mkfs verify fsck cp cat ls stat arctest blkio_test resize \
              heat_walk_test no_ckp0_surface_test \
 table_sync_evict_test write_create_path_test tz_registry_test \
 otrunc_test sib_walk_test chmod_acl_write_test bang_name_test sweep_bang_test \
-read_named_test sweep_report_bang_test sweep_tree_bang_test
+read_named_test sweep_report_bang_test sweep_tree_bang_test \
+crc32c_test
 $(foreach t,$(CLI_MAINS),$(eval $(call TOOL_RULE,$(t),)))
 
 # reclaim_reader_epoch_test was, for one commit, a red control that built but
@@ -816,6 +817,22 @@ test: helpers $(TEST_BINS) $(OUT)/invf-arctest $(OUT)/invf-blkio_test $(OUT)/inv
 	@# The middle leg is the one a too-eager fix fails: a genuine tar
 	@# decomposition must STILL nest -- container row, then its member row.
 	$(TESTENV) $(TESTISO) $(OUT)/invf-sweep_tree_bang_test
+	@# WP-crc32c-slice8-wrong: the CRC32C fallback taken on every CPU
+	@# without SSE4.2 (QEMU's default `qemu64` is one) returned a different
+	@# value from the SSE4.2 path for every n >= 8 -- its T[0] was never
+	@# stored, so every eighth byte was checksummed as 0x00 -- and nothing
+	@# in the tree compared the two. crc32c_slice8 and crc32c_hw are static
+	@# and the public entry points dispatch on CPUID, so on an SSE4.2 host
+	@# NEITHER was reachable from a test and on a non-SSE4.2 host the other
+	@# had nothing to be compared against. This one forces the software path
+	@# (invfs_crc32c_force_fallback, plus INVFS_CRC32C_FORCE_FALLBACK=1 so
+	@# the invf-mkfs SUBPROCESS checksums the same way), ASSERTS that it
+	@# actually ran, checks known-answer vectors over the length classes the
+	@# defect was measured at, and then writes, closes, REOPENS and reads a
+	@# volume back byte-exact -- both through the fallback and, with the pin
+	@# released, through the CPU's own path, which is the cross-machine case.
+	@# Needs invf-mkfs on disk (the `all` prerequisite).
+	$(TESTENV) $(TESTISO) $(OUT)/invf-crc32c_test /tmp
 	@# WP140: the name table must not evict a LIVE name because a lookup could
 	@# not be completed. Runs under $(TESTISO): fuse_get_context() is stubbed
 	@# to NULL, so every permission check takes the documented uid-0 bypass and
