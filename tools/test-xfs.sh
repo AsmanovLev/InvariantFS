@@ -385,7 +385,11 @@ mkxfs() {  # mkxfs <mkfs args...>
     # a busy device is retried, anything else is reported verbatim. A FAIL
     # that cannot say why it failed is the kind that sends the next reader to
     # the wrong subsystem.
-    for i in $(seq 1 20); do
+    # The window is a minute, not a few seconds: a block device here can stay
+    # exclusively claimed for a while after a clean unmount, with nothing
+    # mounted and no process holding it open, and it clears on its own (measured
+    # -- the same mkfs that refused 20 times in a row succeeded seconds later).
+    for i in $(seq 1 60); do
         if err=$(sudo -n mkfs.xfs -f "$@" "$XFSDEV" 2>&1 >/dev/null); then
             sudo -n mount "$XFSDEV" "$XFSMNT" 2>/dev/null \
                 || { echo "FAIL: mounting $XFSDEV on $XFSMNT failed"; exit 1; }
