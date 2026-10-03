@@ -457,7 +457,27 @@ run_installer() {  # $1 = app/source root
 }
 
 do_release() {
-    base=$(release_base)
+    # WP218: `base` is resolved LAZILY, in the branch that actually downloads.
+    #
+    # It used to be computed here, unconditionally, and release_base() calls
+    # resolve_latest() when VERSION is the default `latest` -- a curl to
+    # github.com. So `bootstrap.sh --file <local-artifact> --prefix /usr
+    # --yes` demanded NETWORK ACCESS for an install where every byte it needs
+    # is already on disk, and failed with
+    #
+    #   bootstrap.sh: ERROR: could not resolve latest release for
+    #   AsmanovLev/InvariantFS
+    #
+    # on an air-gapped host. It also made the installer's behaviour depend on
+    # something the caller never asked for: --file says "use this", not "also
+    # go and find out what the newest release is".
+    #
+    # Found by tools/test-packaging.sh's truncated-artifact negative control,
+    # which was trying to assert a checksum failure and got this instead --
+    # i.e. the control was measuring the wrong thing for as long as the
+    # default was `latest`. An offline install is a normal case (an air-gapped
+    # host, a vendored artifact, a CI runner with no egress), and the sig
+    # tests only missed it because they pin --version explicitly.
     artifact="invfs-$VERSION-$ARCH.tar.zst"
     mkdir -p "$CACHE"
 
@@ -468,6 +488,7 @@ do_release() {
         [ -f "$TARBALL" ] || die "artifact not found: $TARBALL"
         info "using local artifact $TARBALL"
     else
+        base=$(release_base)      # only here, where it is needed
         TARBALL=$CACHE/$artifact
         SUMS=$CACHE/SHA256SUMS
         if [ "$RUN" = 1 ] && [ -f "$TARBALL" ] && [ -f "$SUMS" ]; then
