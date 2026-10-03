@@ -16,6 +16,24 @@
 #include "core/invf_plugin_ipc.h"
 #include "core/vol_plugin_client.h"
 
+/* WP205: is an executable on PATH? The qcow2 fixture below needs qemu-img and
+ * qemu-io (Debian package qemu-utils), and this test is in `make test` on a
+ * runner whose dependency list does not include them -- so the ASSERT that
+ * followed reported a MISSING TOOL as a product failure:
+ *
+ *   FAIL: r == 0 (src/cli/plugin_mt_test.c:60)
+ *
+ * The same dependency is already gated in three other places in this tree:
+ * tools/test-ivpacks.sh (HAVE_QEMU, "qcow2+vdi fixtures skipped"),
+ * tools/test-fuzz.sh (the pack is dropped from the matrix) and
+ * tools/plugin-daemon-smoke.sh ("SKIP: qemu-img not installed", exit 0). */
+static int have_tool(const char *name)
+{
+    char cmd[64];
+    snprintf(cmd, sizeof cmd, "command -v %s >/dev/null 2>&1", name);
+    return system(cmd) == 0;
+}
+
 #define ASSERT(expr) do { \
     if (!(expr)) { \
         fprintf(stderr, "FAIL: %s (%s:%d)\n", #expr, __FILE__, __LINE__); \
@@ -55,6 +73,12 @@ int main(int argc, char **argv)
     }
 
     /* Create sample qcow2 */
+    if (!have_tool("qemu-img") || !have_tool("qemu-io")) {
+        printf("  SKIP  qcow2 fixture: qemu-img/qemu-io not installed "
+               "(apt: qemu-utils)\n");
+        printf("  SKIP\n");
+        return 0;
+    }
     unlink(g_qcow2_file);
     int r = system("qemu-img create -f qcow2 /tmp/mt_test.qcow2 4M >/dev/null && qemu-io -c 'write 0 64k' /tmp/mt_test.qcow2 >/dev/null");
     ASSERT(r == 0);

@@ -49,11 +49,14 @@ set -u
 set -o pipefail
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
+# WP205: one scratch-root answer for the whole suite set (see
+# tools/lib-scratch.sh).
+. "$REPO/tools/lib-scratch.sh"
 B=$REPO/bin
 T=$B/invf-fsck_rootslot_test
 # Per-process scratch: several agents run `make test` concurrently, and a
 # fixed path makes them delete each other's images.
-WORK=${INVFS_RT30_SAME_ROOT_WORK:-/srv/bench/rt30-same-root-$$}
+WORK=${INVFS_RT30_SAME_ROOT_WORK:-$(invfs_scratch_root)/rt30-same-root-$$}
 NFILES=${INVFS_RT30_SAME_ROOT_FILES:-24}
 
 rm -rf "$WORK" && mkdir -p "$WORK" || exit 1

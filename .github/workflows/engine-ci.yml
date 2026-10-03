@@ -22,8 +22,13 @@ jobs:
       - name: dependencies
         run: |
           sudo apt-get update -qq
+          # WP205: qemu-utils is not optional for the unit gate. invf-plugin_mt_test
+          # builds its qcow2 fixture with qemu-img + qemu-io and was never able to
+          # run here -- the test skipped itself, so the 4-thread IPC leg went
+          # unmeasured and nothing said so. It skips again if these are absent,
+          # which is right, but CI should not be that host.
           sudo apt-get install -y -qq build-essential pkg-config \
-            libfuse3-dev zlib1g-dev libzstd-dev python3
+            libfuse3-dev zlib1g-dev libzstd-dev python3 qemu-utils
 
       - name: build
         run: make -j"$(nproc)"

@@ -46,6 +46,9 @@ set -e
 set -o pipefail
 
 REPO="${REPO:-$(cd "$(dirname "$0")/.." && pwd)}"   # override with the worktree when testing a branch
+# WP205: one scratch-root answer for the whole suite set (see
+# tools/lib-scratch.sh).
+. "$REPO/tools/lib-scratch.sh"
 
 # Hardened loop mounting: walks for a free device that is not wedged
 # read-only, and proves the mount is writable before any fixture is
@@ -53,7 +56,7 @@ REPO="${REPO:-$(cd "$(dirname "$0")/.." && pwd)}"   # override with the worktree
 . "$REPO/tools/lib-loopmount.sh"
 B=$REPO/bin
 PACK=$REPO/tools/codecpacks/ntfs.codecpack
-WORK=${INVFS_NTFS_WORK:-/srv/bench/wp16ntfs-$$}
+WORK=${INVFS_NTFS_WORK:-$(invfs_scratch_root)/wp16ntfs-$$}
 # The containerpack lane stages every container in a scratch dir (see
 # tool_tmpdir in src/core/vol_cpack.c), and this suite also holds a 120 MB
 # filler plus a 64 MB fixture plus a 0.24 GiB image. Under /dev/shm all of

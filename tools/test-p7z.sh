@@ -54,10 +54,13 @@ set -e
 set -o pipefail
 
 REPO="${REPO:-$(cd "$(dirname "$0")/.." && pwd)}"   # override with the worktree when testing a branch
+# WP205: one scratch-root answer for the whole suite set (see
+# tools/lib-scratch.sh).
+. "$REPO/tools/lib-scratch.sh"
 export REPO
 B=$REPO/bin
 PACK=$REPO/tools/codecpacks/p7z.codecpack
-WORK=${INVFS_P7Z_WORK:-/srv/bench/wpp7z-$$}
+WORK=${INVFS_P7Z_WORK:-$(invfs_scratch_root)/wpp7z-$$}
 IMG=wp16p7z.img
 IMGMEM=wp16p7z-mem.img
 IMGWS=wp16p7z-ws.img

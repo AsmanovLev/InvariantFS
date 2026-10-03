@@ -38,6 +38,9 @@
 set -u
 MODE=${1:-green}
 HERE=$(cd "$(dirname "$0")/.." && pwd)
+# WP205: one scratch-root answer for the whole suite set (see
+# tools/lib-scratch.sh).
+. "$HERE/tools/lib-scratch.sh"
 BIN=$HERE/bin
 rc=0
 
@@ -54,7 +57,7 @@ fi
 # A per-run scratch, so two runs never share an image (a shared image plus a
 # leaked daemon is the "image is in use" failure). INVFS_TOOL_SCRATCH is on
 # /srv here: /tmp is RAM.
-SCR=$(mktemp -d "${INVFS_TOOL_SCRATCH:-/srv/bench}/sweepthread.XXXXXX")
+SCR=$(mktemp -d "${INVFS_TOOL_SCRATCH:-$(invfs_scratch_root)}/sweepthread.XXXXXX")
 mkdir -p "$SCR"
 
 # daemon pid for THIS image only -- never `pgrep -f` on a typed pattern.

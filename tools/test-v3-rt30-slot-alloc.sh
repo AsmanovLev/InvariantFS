@@ -56,6 +56,10 @@ set -u
 set -o pipefail
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
+# WP205: one scratch-root answer for the whole suite set (see
+# tools/lib-scratch.sh). The default used to name the author's bench disk,
+# which no other host has.
+. "$REPO/tools/lib-scratch.sh"
 B=$REPO/bin
 T=$B/invf-rt30_slot_test
 # WP123-FIX: a single fixed scratch made this suite collide with itself.
@@ -65,7 +69,7 @@ T=$B/invf-rt30_slot_test
 # leg 4, then leg 1, then leg 2), which is the signature of the collision
 # rather than of any one bug. Default to a per-process directory; the
 # explicit override is still honoured, and each run cleans up only its own.
-WORK=${INVFS_RT30_SLOT_WORK:-/srv/bench/rt30-slot-$$}
+WORK=${INVFS_RT30_SLOT_WORK:-$(invfs_scratch_root)/rt30-slot-$$}
 NFILES=40
 NGENS=60
 

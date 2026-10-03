@@ -6,10 +6,11 @@ set -e
 
 INVFS_TOOLS="${INVFS_TOOLS:-}"
 # /tmp is a tmpfs here (it is RAM). Prefer real disk; fall back only when there
-# is no /srv. See INCIDENTS.md -- a suite that stages on tmpfs reports its own
-# exhaustion as a defect in the product.
-_e2e_scratch="${INVFS_E2E_SCRATCH:-/srv/bench}"
-[ -d "$_e2e_scratch" ] || _e2e_scratch="${TMPDIR:-/tmp}"
+# is none. See INCIDENTS.md -- a suite that stages on tmpfs reports its own
+# exhaustion as a defect in the product. WP205: the picker, shared, instead of
+# this file's own copy of the rule.
+. "$(cd "$(dirname "$0")/.." && pwd)/tools/lib-scratch.sh"
+_e2e_scratch="$(invfs_scratch_root)"
 FLAGFILE="$_e2e_scratch/wp33_evil_cjxl_flag"
 EVILEXE="$_e2e_scratch/wp33_evil_cjxl"
 

@@ -39,12 +39,15 @@
 set -uo pipefail
 
 REPO="${REPO:-$(cd "$(dirname "$0")/.." && pwd)}"
+# WP205: one scratch-root answer for the whole suite set (see
+# tools/lib-scratch.sh).
+. "$REPO/tools/lib-scratch.sh"
 # /tmp is a tmpfs on this host: it is RAM. Staging a packaging run there makes
 # the run fail on space and report it as "did not install a plain page" -- a
 # claim about the product that was really about the disk (see INCIDENTS.md).
-# Prefer real disk, keep the variable overridable, fall back to tmpfs only when
-# there is no /srv.
-WORK="${WORK:-${INVFS_E2E_SCRATCH:-/srv/bench}/invfs-pkgtest.$$}"
+# WP205: the root comes from the shared picker, which prefers real disk for
+# exactly that reason; keep the variable overridable.
+WORK="${WORK:-$(invfs_scratch_root)/invfs-pkgtest.$$}"
 # Single %, not %%: `%%/*` strips the LONGEST suffix starting with a slash,
 # which for an absolute path is the WHOLE path -- so the test saw an empty
 # string, `[ -d "" ]` was always false, and this silently fell back to /tmp on

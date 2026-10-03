@@ -51,6 +51,9 @@ set -e
 set -o pipefail
 
 REPO="${REPO:-$(cd "$(dirname "$0")/.." && pwd)}"   # override with the worktree when testing a branch
+# WP205: one scratch-root answer for the whole suite set (see
+# tools/lib-scratch.sh).
+. "$REPO/tools/lib-scratch.sh"
 
 # the format-aware "volume is clean" gate (v3 has no L2P orphans counter)
 . "$REPO/tools/fsck-clean.sh"
@@ -67,7 +70,7 @@ PACK=$REPO/tools/codecpacks/xfs.codecpack
 # and then left 1327 MB of scratch behind, which filled /tmp for every other
 # job on the machine. Per-process directory on the disk-backed volume, with
 # the override still honoured.
-WORK=${INVFS_XFS_WORK:-/srv/bench/wpxfs-$$}
+WORK=${INVFS_XFS_WORK:-$(invfs_scratch_root)/wpxfs-$$}
 IMG=wp16xfs.img
 IMGMEM=wp16xfs-mem.img
 IMGMEM2=wp16xfs-mem2.img
