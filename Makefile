@@ -58,7 +58,22 @@ CORE_OBJS_FILE := build/core_objs.txt
 # WP101: hermetic unit-suite env, applied per recipe line (see `test:`).
 # Unset in production: pack_scan_all() scanning /usr/lib/invfs/codecpacks
 # is the deployed behaviour.
-TESTENV := INVFS_CODECPACKS_SYS=0
+#
+# WP214: ...and /sbin on PATH. mkfs.ext4, e2fsck, debugfs, mkfs.xfs,
+# mkfs.vfat, mkfs.ntfs, losetup and mkfs.btrfs all live in /sbin, which is on
+# root's PATH and on NOBODY ELSE'S. So every filesystem-suite gate in `make
+# test` and `make e2e` -- test-ext4fs, test-xfs, test-fatfs, test-ntfs,
+# test-vdi, test-resize, test-multidev -- could not find its own tools for an
+# ordinary developer, and reported the missing tool as a failure rather than
+# as a missing capability. Found by running `make e2e` as a normal user: the
+# sweep died three times on capability gaps that were installed the whole time,
+# and the diagnosis was four rounds of installing packages before someone
+# checked `command -v mkfs.ext4`.
+#
+# APPENDED, not prepended: a developer's own PATH keeps priority, so this
+# adds what is missing rather than overriding a deliberate choice. A /sbin
+# that does not exist is harmless in a PATH search.
+TESTENV := INVFS_CODECPACKS_SYS=0 PATH="$(PATH):/sbin"
 
 # WP104: run every unit-suite command in a private /tmp + /dev/shm (mount
 # namespace, no root required, same shape as run-e2e.sh's ISOLATED mode).
