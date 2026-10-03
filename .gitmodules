@@ -1,3 +1,6 @@
 [submodule "tools/busybox-src"]
 	path = tools/busybox-src
 	url = https://github.com/mirror/busybox.git
+[submodule "registry"]
+	path = registry
+	url = https://github.com/AsmanovLev/InvariantFS-registry.git
