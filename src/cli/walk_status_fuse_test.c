@@ -47,6 +47,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdarg.h>
+#include <stdint.h>   /* WP209: intptr_t, for the reader's own fd */
 #include <errno.h>
 #include <unistd.h>
 #include <fcntl.h>
@@ -133,13 +134,31 @@ static pthread_mutex_t cap_mtx = PTHREAD_MUTEX_INITIALIZER;
 static int cap_saved = -1;
 static int cap_pipe[2] = { -1, -1 };
 static volatile int cap_stop;
+/* WP209: the reader is joinable, so its handle has to outlive cap_start(). */
+static pthread_t cap_thread;
+static int cap_thread_live;
 
+/* WP209: the reader takes its OWN fd as an argument.
+ *
+ * It used to re-read the global `cap_pipe[0]` on every iteration. That is
+ * only safe if no reader ever outlives its capture, and one did: the thread
+ * was DETACHED and cap_stop_and_get() closed `cap_pipe[0]` under it. A
+ * reader still blocked in read() then either saw EBADF or -- once the next
+ * cap_start() reused the fd number -- read the NEXT probe's pipe and
+ * appended it to the next probe's buffer, because cap_start() had already
+ * reset cap_len = 0. One capture could therefore contain another pass's
+ * output, which is not cosmetic here: legs 1e-1h assert that the operator
+ * pass prints no DONE line at all (1h), and legs 1j-1l assert the
+ * watermark pass's DONE carries INCOMPLETE (1k). A splice fails them in
+ * BOTH directions, and the 1h direction reads as "the pre-fix bug is back" --
+ * a fixed defect reporting itself unfixed. Observed once in ~6 full `make
+ * test` runs, under load, never standalone. */
 static void *cap_reader(void *arg)
 {
-    (void)arg;
+    int rfd = (int)(intptr_t)arg;
     for (;;) {
         char b[512];
-        ssize_t k = read(cap_pipe[0], b, sizeof b);
+        ssize_t k = read(rfd, b, sizeof b);
         if (k <= 0)
             break;
         pthread_mutex_lock(&cap_mtx);
@@ -165,15 +184,39 @@ static void cap_start(void)
     dup2(cap_pipe[1], 2);
     close(cap_pipe[1]);
     cap_len = 0; cap_buf[0] = 0; cap_stop = 0;
-    pthread_create(&th, NULL, cap_reader, NULL);
-    pthread_detach(th);
+    /* WP209: JOINABLE. This thread was detached, which is what let it
+     * outlive its capture and read the next probe's pipe (see cap_reader).
+     * cap_stop_and_get() joins it, and the join cannot hang: restoring fd 2
+     * with dup2 also closes the last reference to this pipe's write end, so
+     * a reader blocked in read() sees EOF and returns. */
+    cap_thread_live = pthread_create(&th, NULL, cap_reader,
+                                     (void *)(intptr_t)cap_pipe[0]) == 0;
+    if (cap_thread_live)
+        cap_thread = th;
 }
 
+/* WP209: stop the capture WITHOUT leaving anything behind that can write to
+ * cap_buf or read from a recycled fd.
+ *
+ * Order matters and is the whole fix:
+ *   1. flush, so nothing the pass printed is still sitting in stdio;
+ *   2. restore fd 2 -- dup2 closes the pipe's last write end, so a blocked
+ *      reader gets EOF rather than staying blocked;
+ *   3. JOIN the reader, so cap_buf is quiescent and no reader survives into
+ *      the next cap_start() where cap_len = 0 would splice it;
+ *   4. only then close the read end (closing it earlier is what closed the
+ *      fd under a live thread);
+ *   5. snapshot under the mutex.
+ * Steps 2-3 are why this cannot hang and cannot bleed. */
 static void cap_stop_and_get(char *out, size_t cap)
 {
     fflush(stderr);
     if (cap_saved >= 0) { dup2(cap_saved, 2); close(cap_saved); cap_saved = -1; }
     cap_stop = 1;
+    if (cap_thread_live) {
+        pthread_join(cap_thread, NULL);
+        cap_thread_live = 0;
+    }
     if (cap_pipe[0] >= 0) { close(cap_pipe[0]); cap_pipe[0] = -1; }
     pthread_mutex_lock(&cap_mtx);
     snprintf(out, cap, "%s", cap_buf);
@@ -618,7 +661,18 @@ int main(int argc, char **argv)
            "1j. the watermark pass also says INCOMPLETE even though it does "
            "not refuse");
         {
-            const char *done = strstr(log2, "[sweep] DONE");
+            /* WP209: find the watermark pass's OWN DONE line, not the first
+             * one in the capture. `strstr(log2, "[sweep] DONE")` took the
+             * first, which is the operator pass's when both passes' output
+             * ends up in one buffer -- and that is not only the harness's
+             * splice, it is a legitimate state of the daemon: the log is a
+             * stream, and a reader who greps the tail of it must not be told
+             * the wrong pass's line is the answer. The anchor is the pass's
+             * own start banner, printed by fuse_fs.c immediately before the
+             * per-file loop and therefore immediately before its DONE. */
+            const char *anchor = strstr(log2, "watermark pass started");
+            const char *done = anchor ? strstr(anchor, "[sweep] DONE")
+                                      : strstr(log2, "[sweep] DONE");
             char line[512];
             const char *eol = done ? strchr(done, '\n') : NULL;
             size_t len = eol ? (size_t)(eol - done) + 1
@@ -627,7 +681,8 @@ int main(int argc, char **argv)
             if (len) { memcpy(line, done, len); line[len] = 0; }
             else line[0] = 0;
             ok(strstr(line, "INCOMPLETE") != NULL,
-               "1k. and the DONE line itself carries the marker: %s", line);
+               "1k. and the WATERMARK pass's own DONE line carries the "
+               "marker: %s", line);
             if (line[0] && strstr(line, "INCOMPLETE") == NULL)
                 printf("        ^ this is the line that let unbounded "
                        "dead-segment accumulation look like a clean pass\n");
