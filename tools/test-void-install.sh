@@ -91,15 +91,36 @@ etc/fstab etc/hostname etc/shadow usr/lib/libc.so.6"
 
 check_volume() { # <label> <img> [extra env already exported]
     local label="$1" img="$2"
-    local objs lsout="$WORK/ls-$label.txt"
+    local objs dirs listed lsout="$WORK/ls-$label.txt"
     # Capture once: `invf-ls | grep -q` under pipefail reports the producer's
     # SIGPIPE as a pipeline failure even when grep matched.
     "$B/invf-ls" "$img" > "$lsout" 2>/dev/null \
         || fail "$label: invf-ls failed"
+    # WP211: count the ENTRIES, not invf-ls's summary number.
+    #
+    # The summary line is "N file(s)" and it counts NON-DIRECTORIES only:
+    # ls.c prints directory anchors as "0 bytes  inode N  name/" lines and
+    # deliberately keeps them out of the tally (the byte-shaped listing
+    # contract is written out at src/cli/ls.c:49-54). So on this corpus the
+    # tally is 7338 = 6460 files + 878 symlinks, while $EXPECT is 7961
+    # = those plus 623 directories -- and comparing the two failed with
+    # "invf-ls 7338 != staged 7961" on a volume where NOTHING was missing:
+    # all 623 directory lines were in the listing, one per staged directory.
+    #
+    # The failure message made that unguessable (it never said the difference
+    # was exactly the directory count), so the count is now derived from the
+    # listing itself, and the tally is reported alongside it rather than
+    # compared to it. This is the idiom tools/test-arch-install.sh:249-250
+    # already uses -- the two harnesses disagreed, and this one was wrong.
+    listed=$(grep -cE '^[[:space:]]*[0-9]+ bytes  inode [0-9]+  ' "$lsout" || true)
     objs=$(tail -1 "$lsout" | awk '{print $1}')
-    [ -n "$objs" ] || fail "$label: invf-ls produced no count"
-    [ "$objs" = "$EXPECT" ] || fail "$label: invf-ls $objs != staged $EXPECT"
-    echo "$label: invf-ls reports $objs objects (== staged)"
+    dirs=$(grep -cE '/$' "$lsout" || true)
+    [ -n "$listed" ] || fail "$label: invf-ls produced no entry lines"
+    [ "$listed" = "$EXPECT" ] \
+        || fail "$label: listed $listed entries != staged $EXPECT \
+(dirs=$dirs, invf-ls tally=$objs -- the tally excludes directories by design)"
+    echo "$label: invf-ls listed $listed entries (== staged $EXPECT: \
+$dirs dirs + $((EXPECT - dirs)) files/symlinks, tally=$objs)"
     # provisioned symlinks are visible in the volume tree
     grep -q 'runit/runsvdir/default/sshd' "$lsout" \
         || fail "$label: sshd service symlink missing from volume"
