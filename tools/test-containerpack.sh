@@ -48,6 +48,7 @@ set -e
 set -o pipefail
 
 REPO="${REPO:-$(cd "$(dirname "$0")/.." && pwd)}"   # override with the worktree when testing a branch
+export REPO
 
 # the format-aware "volume is clean" gate (v3 has no L2P orphans counter)
 . "$REPO/tools/fsck-clean.sh"
@@ -83,7 +84,19 @@ rnd = random.Random(16)
 # text member: a real C source (content-sniffs as text; the member name
 # "chunk0" carries no extension on purpose)
 text = None
-src = "/home/user/InvariantFS/tools/busybox-src"
+_repo = os.environ.get("REPO") or os.getcwd()
+def _c_sources(root):
+    for rt, ds, fs in os.walk(root):
+        ds.sort()
+        for n in sorted(fs):
+            if n.endswith(".c"):
+                yield os.path.join(rt, n)
+src = os.path.join(_repo, "tools", "busybox-src")
+if not any(True for _ in _c_sources(src)):
+    src = os.path.join(_repo, "src")   # submodule not checked out
+if not any(True for _ in _c_sources(src)):
+    print("SKIP: no C sources for a corpus under %s" % _repo)
+    raise SystemExit(0)
 for root, dirs, files in os.walk(src):
     dirs.sort()
     for n in sorted(files):

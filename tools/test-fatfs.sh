@@ -59,6 +59,7 @@ set -e
 set -o pipefail
 
 REPO="${REPO:-$(cd "$(dirname "$0")/.." && pwd)}"   # override with the worktree when testing a branch
+export REPO
 
 # Hardened loop mounting: walks for a free device that is not wedged
 # read-only, and proves the mount is writable before any fixture is
@@ -106,7 +107,19 @@ d = sys.argv[1]
 # text member: a real busybox .c, >20KB (content-sniffs as text; the name
 # "README" carries no extension on purpose, like the splt fixture)
 text = None
-src = "/home/user/InvariantFS/tools/busybox-src"
+_repo = os.environ.get("REPO") or os.getcwd()
+def _c_sources(root):
+    for rt, ds, fs in os.walk(root):
+        ds.sort()
+        for n in sorted(fs):
+            if n.endswith(".c"):
+                yield os.path.join(rt, n)
+src = os.path.join(_repo, "tools", "busybox-src")
+if not any(True for _ in _c_sources(src)):
+    src = os.path.join(_repo, "src")   # submodule not checked out
+if not any(True for _ in _c_sources(src)):
+    print("SKIP: no C sources for a corpus under %s" % _repo)
+    raise SystemExit(0)
 for root, dirs, files in os.walk(src):
     dirs.sort()
     for n in sorted(files):
