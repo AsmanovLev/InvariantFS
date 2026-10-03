@@ -1536,10 +1536,21 @@ It needs an owner.
 bit-exact; the refusal is a storage-efficiency decision and the sweep commits
 nothing.
 
-## OPEN (WP122) — v3 has no read-only view at a point in time; the mount option that promised one is dead code that always refuses
+## OPEN (WP122) — v3 has no read-only view at a point in time
 
-**Status:** Open. Filed by WP122 (`test-rocp.sh` v2 → `tools/test-imagelock.sh` v3 port), `main` `e3761fb`.
-**Severity:** Medium — a lost capability, not a corruption. Nothing on the v3 write or rollback path misbehaves because of it.
+(Originally headed "…; the mount option that promised one is dead code that
+always refuses". That half is closed as of `841a272` — see the status note.
+The heading said what was true on the day it was filed and would now send a
+reader looking for dead code that no longer exists.)
+
+**Status:** Open — the LOST CAPABILITY only. Filed by WP122 (`test-rocp.sh`
+v2 → `tools/test-imagelock.sh` v3 port), `main` `e3761fb`.
+**Severity:** Medium — a lost capability, not a corruption. Nothing on the v3
+write or rollback path misbehaves because of it.
+**2026-10-04 (WP206): the dead-surface half of this entry is CLOSED, and its
+prose is corrected.** What it recorded as "surviving" was true when written
+and is now false: `841a272` ("v2: purge the L2P journal layer") removed it.
+The capability finding stands and is kept below, restated against the tree.
 
 **What is gone.** `test-rocp.sh` was the WP24-lite suite for the v2
 read-only time-travel mount: `vol_open_at(path, ckpt_seq)` with FUSE's
@@ -1588,10 +1599,13 @@ point (`src/core/vol_spt0.c`), and SPT0 is a **restore**, not a view:
 that root and truncates the delta — it is destructive by construction
 (`src/core/vol_spt0.h:63-77`). There is no `spt0_open_view`, no
 read-only handle, nothing that can be opened against a pinned generation
-without consuming it. The `VOLF_READONLY` / `time_travel` machinery
-(`src/core/volume.h:37-39`, `src/core/volume_internal.h:524`,
-`src/core/vol_crash.c:43`) survives and is still compiled, but nothing can
-ever set `time_travel` on a v3 volume.
+without consuming it.
+
+(The `time_travel` flag this entry used to cite is GONE — zero references in
+`src/`, `tools/` or `packaging/` as of `841a272`. `VOLF_READONLY` does still
+exist, but it is not that: it is the ENOSPC `hard_min` latch, documented at
+`src/core/invarifs.h:184` and `:213` and set by `vol_set_readonly` and the
+allocator, not a way to read an old generation.)
 
 The operational consequence: **you cannot look at a volume as it was before a
 sweep without destroying the present.** `invf-rollback` is the only verb, it
@@ -1600,22 +1614,22 @@ mis-clustered my data" is not a question the v3 engine can answer without
 committing to the answer. That is a real regression against v2's guarantee and
 it is why this is filed rather than closed as test rot.
 
-**Dead CLI surface that survives it.** `invf-fuse` still parses
-`-o at_checkpoint` and `-o at_checkpoint=<seq>` (`src/cli/fuse_fs.c:2956-2964`)
-and always fails with `cannot mount at_checkpoint: no live sweep checkpoint`
-(`src/cli/fuse_fs.c:3021-3025`). `packaging/man/invf-fuse.8:58` still
-documents the option as working. A user reading the man page gets a mount
-failure with no indication the feature is retired. Cleaning that up is a
-separate WP (it touches `src/cli/` and the packaging, not `tools/`), so it is
-not bundled here.
+**Dead CLI surface — CLOSED in `841a272`.** This entry recorded that
+`invf-fuse` still parsed `-o at_checkpoint` and always refused it, and that
+`packaging/man/invf-fuse.8` still documented the option as working. Both are
+gone: `grep -rn at_checkpoint src/ tools/ packaging/ docs/` returns three
+lines, all of them comments in `tools/test-imagelock.sh` saying the option was
+deleted with it. libfuse now rejects it as unknown and the daemon says nothing
+about it, so the trap this entry described — a man page promising a working
+option — no longer exists.
 
-**What was done instead of a test that proves nothing.** Leg [V] of
-`test-imagelock.sh` asserts the *refusal* — that `-o at_checkpoint` and
-`-o at_checkpoint=1` mount nothing and say why, and that the refusal names the
-missing checkpoint rather than the flock. That is a real contract: it pins the
-current answer so the option cannot silently drift into looking functional, and
-it will fail loudly if a future WP gives SPT0 a read-only view. The guarantee
-itself is NOT covered by any test, because there is nothing to test.
+**What was done instead of a test that proves nothing — now moot.** Leg [V]
+of `test-imagelock.sh` asserted that `-o at_checkpoint` refused with a message
+naming the missing checkpoint. It was deleted with the option, and the suite
+says why at `tools/test-imagelock.sh:220`: a leg that greps for a message the
+code no longer emits tests nothing. So neither the dead surface nor its
+regression gate remains, and the capability below is covered by no test —
+there is nothing to test.
 
 **Not fixed here.** Giving SPT0 a read-only view is a design change, not a
 test port: it needs a way to open a volume against a pinned generation without
