@@ -147,12 +147,18 @@ WARN=$( build_pack "$PACK/qcow2.c" "$WORK/bin_qcow2" 2>&1 ) \
 [ -z "$WARN" ] || { echo "FAIL: pack build not warning-clean:"; echo "$WARN"; exit 1; }
 
 echo "== pack dir: a private registry-shaped copy (the engine scans *.codecpack) =="
-cp -a "$PACK" "$WORK/packs/qcow2.codecpack"
+# WP220: --no-preserve=ownership, for the reason given at length in
+# tools/test-qcow2.sh (this is its twin; the reasoning is identical and is not
+# repeated here). `cp -a` preserves ownership, this suite runs ISOLATED under
+# `unshare -r`, and a user namespace's uid map holds one uid -- so cp fails:
+#   cp: failed to preserve ownership for '.../qcow2.codecpack/bin': Invalid argument
+# The fixture copy needs contents and modes, never ownership.
+cp -a --no-preserve=ownership "$PACK" "$WORK/packs/qcow2.codecpack"
 mkdir -p "$WORK/packs/qcow2.codecpack/bin"
 cp "$WORK/bin_qcow2" "$WORK/packs/qcow2.codecpack/bin/qcow2"
 rm -f "$WORK/bin_qcow2"
 # The negative-test pack: identical, with the map template reverted to {in}.
-cp -a "$WORK/packs/qcow2.codecpack" "$WORK/nbad/qcow2.codecpack"
+cp -a --no-preserve=ownership "$WORK/packs/qcow2.codecpack" "$WORK/nbad/qcow2.codecpack"
 sed -i 's|^map = .*|map = bin/qcow2 map {in} {out}|' "$WORK/nbad/qcow2.codecpack/manifest"
 
 echo "== MANIFEST CONTRACT (the thing WP107 fixed) =="
