@@ -105,10 +105,39 @@ jobs:
       - uses: actions/checkout@v7
 
       - name: dependencies
+        # WP224: this list was short in exactly the ways the suites are brittle
+        # about, each found by RUNNING them rather than by reading them:
+        #   fuse3           -- fusermount3 lives here; libfuse3-dev does NOT pull
+        #                       it, and without it nothing can mount anything
+        #   libjxl-tools    -- cjxl/djxl, which test-jxl.sh hard-requires
+        #   p7zip-full      -- 7z/7za for the p7z and qcow2 fixtures
+        #   qemu-system-x86 -- the BOOT harnesses below
+        #   e2fsprogs xfsprogs dosfstools exfatprogs unzip zip
+        #                    -- mkfs.* / debugfs / e2fsck / 7z: these install
+        #                       into /sbin, which is on root's PATH and NOT on
+        #                       a normal user's, so the suites could not find
+        #                       their own tools
+        #   python3-numpy python3-pil -- the fixture generators in test-jxl
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y -qq build-essential pkg-config \
-            libfuse3-dev zlib1g-dev libzstd-dev zstd xz-utils curl python3
+            libfuse3-dev fuse3 zlib1g-dev libzstd-dev zstd xz-utils curl \
+            python3 python3-numpy python3-pil \
+            libjxl-tools p7zip-full qemu-system-x86 qemu-utils \
+            e2fsprogs xfsprogs dosfstools exfatprogs unzip zip acl
+
+      - name: host capability preflight
+        # One report of every gap instead of a sweep dying at the first one.
+        run: bash tools/e2e-preflight.sh --quiet || true
+
+      - name: "fuse: allow other users"   # quoted: a colon-space in an
+        # unquoted YAML scalar makes the parser read this as a mapping key
+        # test-acl.sh mounts with -o allow_other; without this the suite stops
+        # with "/etc/fuse.conf needs user_allow_other".
+        run: |
+          sudo sh -c 'grep -q "^user_allow_other" /etc/fuse.conf \
+            || echo user_allow_other >> /etc/fuse.conf'
+          grep -v "^#" /etc/fuse.conf || true
 
       - name: build
         run: make -j"$(nproc)" && make helpers
@@ -118,7 +147,46 @@ jobs:
           ARCH_WORK="$RUNNER_TEMP/arch" \
             bash tools/test-arch-install.sh
 
-      - name: void root -> InvariantFS volume
+      - name: void root -> InvariantFS volume (offline)
         run: |
           INVFS_VOID_WORK="$RUNNER_TEMP/void" \
             bash tools/test-void-install.sh
+
+      # WP224: THE BOOT. Until now this job imported a Void root and checked it
+      # offline -- invf-import, invf-fsck, offline invf-cat -- and never booted
+      # it, so a volume that could not serve a running system passed here. That
+      # is the gap docs/INSTALL-MATRIX.md 7 describes, and it is the one that
+      # hides a broken FUSE mount: offline reads go through a different path
+      # than a live one.
+      - name: initramfs for the boot harnesses
+        run: bash tools/mkinitramfs.sh
+
+      - name: void root BOOTS on InvariantFS (single device)
+        run: |
+          set -o pipefail
+          INVFS_VOID_WORK="$RUNNER_TEMP/voidboot" \
+          INVFS_VOID_LOGDIR="$RUNNER_TEMP/voidboot-logs" \
+          INVFS_VOID_KEEP=0 \
+            bash tools/boot-void-qemu.sh 2>&1 | tee "$RUNNER_TEMP/voidboot.log"
+          # logs survive a failure: the serial console is the evidence
+          cp -r "$RUNNER_TEMP/voidboot-logs" "$RUNNER_TEMP/artifacts" \
+            2>/dev/null || true
+
+      - name: void root BOOTS on InvariantFS (two devices)
+        run: |
+          set -o pipefail
+          INVFS_VOID_MODE=multi \
+          INVFS_VOID_WORK="$RUNNER_TEMP/voidboot2" \
+          INVFS_VOID_LOGDIR="$RUNNER_TEMP/voidboot2-logs" \
+          INVFS_VOID_KEEP=0 \
+            bash tools/boot-void-qemu.sh 2>&1 | tee "$RUNNER_TEMP/voidboot2.log"
+
+      - name: upload serial logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: boot-serial-logs
+          path: |
+            ${{ runner.temp }}/voidboot-logs
+            ${{ runner.temp }}/voidboot2-logs
+          if-no-files-found: ignore

@@ -123,7 +123,19 @@ fi
 # --------------------------------------------------------------------------
 # Boot under QEMU
 # --------------------------------------------------------------------------
-QOPTS=(-machine q35,accel=kvm -cpu host -m "$MEM" -smp 2
+# WP223: adaptive accel. A host with /dev/kvm that cannot OPEN it (a
+# container without the device, or without the kvm group) otherwise dies with
+# "failed to initialize kvm", which reads like a QEMU fault rather than a host
+# capability one. Same reasoning as the qcow2/qemu-img gate in the unit tier,
+# and the same reasoning as tools/boot-debian-qemu.sh.
+ACCEL="${INVFS_ACCEL:-auto}"
+if [ "$ACCEL" = auto ]; then
+    if [ -r /dev/kvm ] && [ -w /dev/kvm ]; then ACCEL=kvm; else
+        ACCEL=tcg; echo "note: /dev/kvm not usable here; falling back to TCG (slower)"
+    fi
+fi
+[ "$ACCEL" = kvm ] && CPU=${INVFS_CPU:-host} || CPU=${INVFS_CPU:-max}
+QOPTS=(-machine "q35,accel=$ACCEL" -cpu "$CPU" -m "$MEM" -smp 2
        -kernel "$KERNEL" -initrd "$INITRD"
        -append 'console=ttyS0,115200'
        -drive "file=$IMG,format=raw,if=virtio")
