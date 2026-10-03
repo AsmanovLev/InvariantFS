@@ -19,6 +19,7 @@
 
 #ifndef _WIN32
 #include <fcntl.h>
+#include <sys/stat.h>
 #include <unistd.h>
 #endif
 
@@ -98,8 +99,46 @@ int main(int argc, char **argv)
             if (rc == 0) blkio_close(&d);
         }
 #else
-        ok(blkio_looks_like_device("/dev/sdb1") == 1, "/dev/sdb1 is a device");
+        /* WP203: the positive case needs a path that IS a block device on
+         * THIS host. blkio_looks_like_device() answers by stat(2) -- "a
+         * path is a device when it IS one", and a path that is not there
+         * answers 0 -- so the old fixed choice of /dev/sdb1 asserted a
+         * property of the host, not of the predicate, and `make test` went
+         * red on every box without that one device. Ask for a real block
+         * device instead, and say so out loud when there is none rather
+         * than skipping the check silently. */
+        {
+            static const char *const candidates[] = {
+                "/dev/sdb1", "/dev/sda1", "/dev/sda", "/dev/sdb",
+                "/dev/vda1", "/dev/vda", "/dev/xvda", "/dev/nvme0n1",
+                "/dev/mmcblk0", "/dev/hda"
+            };
+            const char *dev = NULL;
+            size_t ci;
+            for (ci = 0; ci < sizeof candidates / sizeof candidates[0]; ci++) {
+                struct stat st;
+                if (stat(candidates[ci], &st) == 0 && S_ISBLK(st.st_mode)) {
+                    dev = candidates[ci];
+                    break;
+                }
+            }
+            if (dev) {
+                ok(blkio_looks_like_device(dev) == 1,
+                   "a real block device is a device");
+            } else {
+                printf("  skip  %s: no block device found under /dev "
+                       "(searched %zu names), so the positive half of the "
+                       "predicate is uncovered here\n",
+                       dev ? dev : "/dev/*", ci);
+            }
+        }
         ok(blkio_looks_like_device("/tmp/a.img") == 0, "a file path is not a device");
+        ok(blkio_looks_like_device("a.img") == 0, "a bare name is not a device");
+        /* a path that is not there is not a device -- the branch the
+         * BLKIO_CREATE case in blkio_open() takes, and nothing covered
+         * it: it is how a volume image is classified before it exists. */
+        ok(blkio_looks_like_device("/tmp/invfs-blkio-absent.img") == 0,
+           "a path that does not exist is not a device");
         (void)buf;
 #endif
     }
