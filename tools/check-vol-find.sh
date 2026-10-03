@@ -95,9 +95,9 @@ src/cli/read_named_test.c:254:SKIP   # setup: whether a name resolves IS the mea
 src/cli/read_named_test.c:258:SKIP   # setup: THE precondition of LEG A. The exact name must resolve, or the leg is not testing shadowing but absence
 src/cli/read_named_test.c:305:SKIP   # LEG B setup: the exact name must be GONE, or the control is not a control
 src/cli/read_named_test.c:378:SKIP   # LEG E setup: whether a name resolves IS the measurement -- the whole leg is that the bang name does not perturb the plain ones
-src/cli/tz_registry_test.c:175:SKIP
+src/cli/tz_registry_test.c:178:SKIP
 src/cli/window_test.c:176:SKIP
-src/cli/write_create_path_test.c:243:SKIP
+src/cli/write_create_path_test.c:248:SKIP
 src/cli/tar_cap_test.c:182:SKIP
 src/cli/window_test.c:176:SKIP
 src/core/vol_cpack.c:2596:SKIP

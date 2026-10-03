@@ -68,6 +68,22 @@ TESTENV := INVFS_CODECPACKS_SYS=0
 # A killed run therefore leaves residue the next run trips over. See
 # tools/run-unit-isolated.sh for what this does and does NOT fix.
 TESTISO := bash tools/run-unit-isolated.sh
+
+# WP204: the scratch root the volume-building unit binaries get.
+#
+# It used to be /srv/bench/scratch, baked into this file at three recipe
+# lines and into four test binaries as a compiled-in default. That
+# directory is the AUTHOR's bench disk: it does not exist on a CI runner,
+# on a container, or on any host that is not that one box, so four unit
+# suites failed with "mkfs failed" / "Permission denied" before running a
+# single check -- on this host, and on the project's own GitHub workflow,
+# which is `make test` with no /srv at all.
+#
+# /tmp is what the surrounding recipes already pass (and TESTISO gives each
+# command a private tmpfs there anyway, which is exactly the property the
+# unit tier wants). An author who keeps volumes on a real disk sets
+# INVFS_UNIT_SCRATCH; nothing else has to change.
+UNIT_SCRATCH ?= $(if $(INVFS_UNIT_SCRATCH),$(INVFS_UNIT_SCRATCH),/tmp)
 # wp/dirs-free-before-publish needs cross-process state, and $(TESTISO) gives
 # every command a private /tmp. build/ is gitignored and per-worktree.
 FRB_T := $(CURDIR)/build/frbtest
@@ -969,8 +985,8 @@ test: helpers $(TEST_BINS) $(OUT)/invf-arctest $(OUT)/invf-blkio_test $(OUT)/inv
 	@# one-entry fake-root uid map to swallow. INVFS_FAULT is unset on the
 	@# healthy legs, so those also assert the unset path stays inert.
 	$(TESTENV) $(TESTISO) $(OUT)/invf-otrunc_test /tmp
-	$(TESTENV) $(TESTISO) $(OUT)/invf-spn_skip_recipe_test /srv/bench/scratch skipped
-	$(TESTENV) $(TESTISO) $(OUT)/invf-spn_skip_recipe_test /srv/bench/scratch skippedctl
+	$(TESTENV) $(TESTISO) $(OUT)/invf-spn_skip_recipe_test $(UNIT_SCRATCH) skipped
+	$(TESTENV) $(TESTISO) $(OUT)/invf-spn_skip_recipe_test $(UNIT_SCRATCH) skippedctl
 	@# WP-arc-concurrent-safe: the content cache, under concurrency. TSAN is
 	@# the structure (arc.c had no lock at all), ASan is the borrow (an
 	@# arc_get pointer freed underneath the reader's memcpy). Both must be
@@ -1002,7 +1018,7 @@ test: helpers $(TEST_BINS) $(OUT)/invf-arctest $(OUT)/invf-blkio_test $(OUT)/inv
 	    $(TESTENV) $(TESTISO) $(OUT)/invf-cpack_map_conc_asan
 	INVFS_CPACK_SAN_LEG=all $(TESTENV) $(TESTISO) $(OUT)/invf-cpack_map_conc_test
 	$(TESTENV) $(TESTISO) $(OUT)/invf-dedupe_v3_test /tmp
-	$(TESTENV) $(OUT)/invf-dedupe_symlink_test /srv/bench/scratch
+	$(TESTENV) $(OUT)/invf-dedupe_symlink_test $(UNIT_SCRATCH)
 	$(TESTENV) $(TESTISO) $(OUT)/invf-window_test /tmp
 	$(TESTENV) $(TESTISO) $(OUT)/invf-nlink_v3_test /tmp
 	$(TESTENV) $(TESTISO) $(OUT)/invf-recipe_fsck_test /tmp
@@ -1045,10 +1061,11 @@ test: helpers $(TEST_BINS) $(OUT)/invf-arctest $(OUT)/invf-blkio_test $(OUT)/inv
 	@# the number handed BACK. Leg 1 requires the sweep to have printed the
 	@# rollback at all, so it cannot go green by never entering the state.
 	$(TESTENV) $(TESTISO) $(OUT)/invf-sweep_publish_rollback_test /tmp
-	# WP: rollback on a volume that holds a symlink. /srv, not /tmp (RAM on
-	# this host); the legs create their own dir under it. No permission
-	# denial is depended on, so TESTISO's fake root is harmless here.
-	$(TESTENV) $(OUT)/invf-rollback_symlink_test /srv/bench/scratch
+	# WP: rollback on a volume that holds a symlink. UNIT_SCRATCH, not a
+	# compiled-in /srv path (WP204); the legs create their own dir under it.
+	# No permission denial is depended on, so TESTISO's fake root is
+	# harmless here.
+	$(TESTENV) $(OUT)/invf-rollback_symlink_test $(UNIT_SCRATCH)
 	@# The v3 KEY ORDERING. The base B+-tree, the delta log and the
 	@# fold used to carry three byte-identical private comparators and the
 	@# fold's delta/base merge is correct only while they agree. They are

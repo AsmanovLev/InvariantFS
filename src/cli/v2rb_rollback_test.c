@@ -92,10 +92,19 @@ static int   g_errfd = -1;
 static int   g_saved_err = -1;
 static char  g_errbuf[8192];
 
+/* WP204: where the stderr-capture file goes. This used to be a compiled-in
+ * /srv/bench/wt-v2rb-stderr-XXXXXX template: the author's bench disk, which
+ * does not exist on a CI runner or in a container, so mkstemp failed, the
+ * capture never started, and the legs that assert on the diagnostic read an
+ * EMPTY log and failed as if the engine had said nothing. The harness
+ * passes a scratch root; honour it, and default to /tmp. */
+static char g_tmpdir[512] = "/tmp";
+
 static void err_capture_begin(void)
 {
-    char tmpl[] = "/srv/bench/wt-v2rb-stderr-XXXXXX";
+    char tmpl[600];
     g_saved_err = dup(2);
+    snprintf(tmpl, sizeof tmpl, "%s/wt-v2rb-stderr-XXXXXX", g_tmpdir);
     g_errfd = mkstemp(tmpl);
     if (g_errfd < 0) return;
     unlink(tmpl);
@@ -522,6 +531,8 @@ int main(int argc, char **argv)
 {
     const char *dir = (argc > 1) ? argv[1] : "/tmp";
     int err = 0;
+
+    snprintf(g_tmpdir, sizeof g_tmpdir, "%s", dir);
 
     printf("v2rb_rollback_test: v2 rollback paths must not run on v3\n");
 

@@ -91,7 +91,10 @@ extern void invfs_vol_btree_fault_reload(void);
 #define NFILES          6
 
 static int checks = 0, failures = 0;
-static const char *g_dir = "/srv/bench/scratch";
+/* WP204: see write_create_path_test.c -- the Makefile passes this binary a
+ * scratch root and this binary ignored it in favour of a compiled-in
+ * /srv/bench/scratch, so the legs never ran off the author's bench box. */
+static const char *g_dir = "/tmp";
 static char g_img[512];
 
 static void ok(int cond, const char *msg)
@@ -516,6 +519,9 @@ static void leg_red(void)
 int main(int argc, char **argv)
 {
     const char *leg = (argc > 1) ? argv[1] : "red";
+
+    if (argc > 2 && argv[2][0])
+        g_dir = argv[2];
 
     if (stale_guard() == 3) return 3;
     snprintf(g_img, sizeof g_img, "%s/wf_tz_registry.img", g_dir);

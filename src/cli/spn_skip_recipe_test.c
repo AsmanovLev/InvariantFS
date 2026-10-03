@@ -56,6 +56,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <sys/stat.h>
+#include <sys/types.h>
 #include <assert.h>
 
 #include "invarifs.h"
@@ -73,7 +75,10 @@ extern void invfs_vol_btree_fault_reload(void);
 #define MAXPB 64
 
 static int checks = 0, failures = 0;
-static const char *g_dir = "/srv/bench/scratch";
+/* WP204: the default is a path every host has; the Makefile passes one
+ * explicitly (UNIT_SCRATCH). The old /srv/bench/scratch default meant the
+ * suite could not run anywhere but the author's bench box. */
+static const char *g_dir = "/tmp";
 static char g_img[512];
 
 static void ok(int cond, const char *msg)
@@ -373,6 +378,10 @@ int main(int argc, char **argv)
     const char *phase = (argc > 2) ? argv[2] : "skipped";
 
     if (argc > 1) g_dir = argv[1];
+    /* WP204: the dump legs below write into g_dir, and the harness now
+     * passes whatever UNIT_SCRATCH says -- which may not exist yet. One
+     * level is all this ever needs; an existing dir returns EEXIST. */
+    (void)mkdir(g_dir, 0777);
     snprintf(g_img, sizeof g_img, "%s/spn-skip.img", g_dir);
     printf("spn_skip_recipe_test: phase=%s img=%s\n", phase, g_img);
 

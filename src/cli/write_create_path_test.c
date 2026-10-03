@@ -108,7 +108,12 @@
 extern void invfs_vol_btree_fault_reload(void);
 
 static int checks = 0, failures = 0;
-static const char *g_dir = "/srv/bench/scratch";
+/* WP204: the scratch root. The Makefile passes one (it passes /tmp to every
+ * other volume test); this binary dropped it on the floor and used a
+ * compiled-in /srv/bench/scratch, so the suite failed at "mkfs failed"
+ * before running a check on any host that is not the author's bench box --
+ * including the CI runner, which is `make test` with no /srv at all. */
+static const char *g_dir = "/tmp";
 static char g_img[512];
 
 static void ok(int cond, const char *msg)
@@ -446,6 +451,9 @@ static void leg_stale(void)
 int main(int argc, char **argv)
 {
     const char *leg = (argc > 1) ? argv[1] : "red";
+
+    if (argc > 2 && argv[2][0])
+        g_dir = argv[2];
     int sg = stale_guard();
 
     if (sg == 3 && strcmp(leg, "stale") != 0) return 3;

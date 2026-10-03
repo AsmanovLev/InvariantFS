@@ -381,7 +381,9 @@ int main(int argc, char **argv)
 {
     /* argv[1] is the scratch root (the Makefile passes the same one the
      * other volume tests get); INVFS_TOOL_SCRATCH overrides it, and the
-     * default is on /srv because /tmp is RAM on this host. */
+     * default is /tmp. WP204: the default used to be a compiled-in
+     * /srv/bench/scratch, so on a host without that bench disk the suite
+     * died with "Permission denied" before running a leg. */
     const char *base = getenv("INVFS_TOOL_SCRATCH");
     int i;
 
@@ -390,7 +392,7 @@ int main(int argc, char **argv)
     else if (argc > 1 && argv[1][0])
         snprintf(g_dir, sizeof g_dir, "%s/rb-symlink-test", argv[1]);
     else
-        snprintf(g_dir, sizeof g_dir, "/srv/bench/scratch/rb-symlink-test");
+        snprintf(g_dir, sizeof g_dir, "/tmp/rb-symlink-test");
     if (mkdir_p(g_dir) != 0) {
         fprintf(stderr, "cannot create %s: %s\n", g_dir, strerror(errno));
         return 2;
