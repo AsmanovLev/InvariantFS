@@ -236,7 +236,33 @@ echo
 echo "== [C] default-ACL inheritance on create/mkdir =="
 mkdir "$MNT/d"
 setfacl -d -m u::rwx,g::rx,o::rx,u:nobody:rwx "$MNT/d" || fail "setfacl -d"
-touch "$MNT/d/f"      # umask 022 -> create mode 0644
+# WP222: SET the umask instead of assuming it. This leg asserts a specific
+# mode and mask, and both are functions of the umask the CLIENT applies to the
+# create request -- the default ACL is inherited correctly either way, but what
+# the mask ends up clamped to depends on the mode the client asks for:
+#
+#   umask 022 -> client requests 0644 -> mask r-- -> nobody:rwx #effective:r--
+#   umask 002 -> client requests 0666 -> mask rw- -> nobody:rwx #effective:rw-
+#
+# Both are correct POSIX. The suite asserted the first while depending on the
+# ambient umask, and neither it nor run-e2e.sh ever set one, so on a host whose
+# login umask is 002 (this one: `umask` -> 0002, no UMASK in /etc/login.defs)
+# the leg failed with
+#
+#   FAIL: inherited+masked named user
+#
+# while the inheritance it exists to check had demonstrably worked:
+#
+#   user:nobody:rwx  #effective:rw-
+#
+# The point of the leg is "a named-user entry is inherited and masked by the
+# child's mode", so it must fix the input rather than inherit it by luck. An
+# assertion that only holds under one ambient umask is a host assumption in the
+# same family as the /sbin PATH and the empty submodule.
+old_umask=$(umask)
+umask 022
+touch "$MNT/d/f"
+umask "$old_umask"
 gf "$MNT/d/f" | tee "$WORK/gf.f"
 grep -q 'user:nobody:rwx.*effective:r--' "$WORK/gf.f" || fail "inherited+masked named user"
 grep -qx 'mask::r--' "$WORK/gf.f"                     || fail "inherited mask from mode"
@@ -248,7 +274,22 @@ getfacl -p --omit-header -d "$MNT/d/sub" 2>/dev/null | grep -q 'user:nobody:rwx'
     || fail "subdir must inherit the default ACL as its own default"
 gf "$MNT/d/sub" | grep -q 'user:nobody:rwx' || fail "subdir access ACL"
 allow "nobody ls inherited subdir (r-x)"  nb ls "$MNT/d/sub"
-deny  "nobody create in subdir (r-x)"     nbsh "echo x > '$MNT/d/sub/z'"
+# WP222: this was a DENY and it contradicted this suite's own model. The header
+# states the rule it is checking -- "child access ACL = parent's default masked
+# by the create mode" -- and the two lines above establish that the subdir
+# inherited `user:nobody:rwx`. A create mode of 0755 puts the mask at r-x, so
+# nobody's effective set is r-x, and r-x on a directory DOES grant create.
+# The label even said so: "(r-x)". So the correct expectation is ALLOW, and the
+# deny could only ever have passed if the daemon were MORE restrictive than
+# POSIX -- i.e. the test was asserting a bug as though it were the contract.
+#
+# It did not surface on the author's host by luck of umask: with 022 the mkdir
+# requests 0755 and the mask is r-x (create allowed); with this host's 002 it
+# requests 0775 and the mask is rwx (create allowed even more clearly). Either
+# way the deny is wrong, which is why this leg could not be rescued by setting
+# the umask -- only the earlier touch could.
+allow "nobody create in subdir (r-x effective grants w)" \
+      nbsh "echo x > '$MNT/d/sub/z'"
 python3 - "$MNT/d/g" <<'PYEOF' || fail "mode-0600 create under default ACL"
 import os, sys
 fd = os.open(sys.argv[1], os.O_CREAT | os.O_WRONLY, 0o600)
