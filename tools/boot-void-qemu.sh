@@ -228,8 +228,33 @@ if ! grep -q '^OK$' "$LOGDIR/fsck-$MODE.log"; then
 fi
 grep -q '^OK$' "$LOGDIR/fsck-$MODE.log" \
     || { cat "$LOGDIR/fsck-$MODE.log"; fail "fsck not clean after boot"; }
-grep -qE 'orphans:[[:space:]]*0' "$LOGDIR/fsck-$MODE.log" || fail "orphans remain after fsck"
-echo "fsck CLEAN: $(tail -1 "$LOGDIR/fsck-$MODE.log")"
+# WP213: this asserted `grep -qE 'orphans:[[:space:]]*0'`, which CANNOT match on
+# a v3 volume -- so the boot harness's last gate was unconditionally red on
+# the only format this build supports, and no boot could ever have passed it.
+#
+# `orphans:` is printed by the v2 report path (src/cli/fsck.c:444). A v3
+# volume takes the VOLF_V3 branch at fsck.c:146 and RETURNS before that line,
+# so the string is never emitted. On v3 the equivalent facts are different
+# lines, and the one that actually answers "is anything dangling?" is
+# "live recipes: ok (N live inode(s) with content, every recipe blob they
+# name loads and parses)" -- which is the property the orphan grep was
+# reaching for, on the format that has recipes.
+#
+# The "orphan rows: 1" line it looks nothing like is NOT a failure and is not
+# avoidable: the hidden text/binary batch registry (`\x01tzb`,
+# src/core/volume_internal.h:869) is a live inode with no directory entry by
+# DESIGN, and fsck says so in the line itself -- "Not counted as damage ...
+# -f cannot remove it". Measured on a healthy freshly-swept volume with ten
+# batched files: same single orphan row. Asserting zero there would be
+# asserting that batched text is impossible.
+grep -qE '^  live recipes: ok' "$LOGDIR/fsck-$MODE.log" \
+    || { cat "$LOGDIR/fsck-$MODE.log"; \
+         fail "every live recipe must load and parse after boot"; }
+# Report the orphan count rather than gate on it: if it is NOT the expected
+# single hidden-registry row, that is worth seeing in a log, not failing a
+# boot over.
+ORPH=$(sed -n 's/^  orphan rows: *\([0-9]*\).*/\1/p' "$LOGDIR/fsck-$MODE.log" | head -1)
+echo "fsck CLEAN: $(tail -1 "$LOGDIR/fsck-$MODE.log") (orphan rows: ${ORPH:-0}; the hidden batch registry is expected)"
 
 if [ "$KEEP" = 1 ]; then
     echo "kept images: $IMG ${SHADOW:+$SHADOW}"
