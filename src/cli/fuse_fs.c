@@ -89,6 +89,38 @@ static double g_attr_t = 1.0;   /* -o attr_t= override; 0 = bench-honest */
 static int g_raw_watermark = 0;
 static tmp_area_mode g_tmp_area = TMP_AREA_AUTO;
 static size_t g_tmp_max_bytes = 128 * 1024 * 1024;
+/* WP212: -o survive_term. SIGTERM is ignored when set.
+ *
+ * WHY IT EXISTS, and why it is opt-in rather than the default. The obvious
+ * contract for a FUSE daemon is that SIGTERM unmounts it -- the comment at
+ * the fuse_set_signal_handlers() call says exactly that, and it is right for
+ * every mount a person makes on purpose.
+ *
+ * It is wrong for the ONE mount that is not a person making a choice: the
+ * boot root. tools/initramfs-init.sh backgrounds the daemon and then `exec`s
+ * the guest's /sbin/init, so the daemon is just another process in the
+ * guest's PID namespace. The guest's own shutdown then does what Void's does
+ * -- "=> Sending TERM signal to processes..." -- and that TERM reaches the
+ * daemon serving the guest's root. Measured, 2 of 2 Void shutdowns:
+ *
+ *   => Sending TERM signal to processes...
+ *   Bus error
+ *   /etc/runit/3: 3: shutdown.d/70-pkill.sh: sleep: Transport endpoint is
+ *       not connected
+ *   /etc/runit/3: 5: shutdown.d/70-pkill.sh: pkill: Transport endpoint is
+ *       not connected
+ *
+ * ENOTCONN from exec(2) is libfuse saying the session is gone, and 70-pkill.sh
+ * cannot run because `sleep` and `pkill` are binaries ON the root the daemon
+ * was providing. The guest breaks its own shutdown because the filesystem
+ * underneath it left first. The kernel takes the mount down at poweroff
+ * regardless, so ignoring TERM costs nothing on the path that matters and
+ * loses nothing but the ability to unmount by signalling -- which is not a
+ * thing anyone does to their root filesystem.
+ *
+ * So: OFF by default, ON for the initramfs, where the caller has already
+ * decided this mount is the OS. */
+static int g_survive_term = 0;
 /* WP59: codec-policy mount gate flags (-o ignore-missing-codecs,
  * -o ignore-codec-versions) */
 static int g_ignore_missing_codecs = 0;
@@ -3769,6 +3801,10 @@ int main(int argc, char *argv[])
                 else
                     fprintf(stderr, "invf: bad -o raw_watermark=%s; ignored\n",
                             tok + 14);
+            } else if (strcmp(tok, "survive_term") == 0) {
+                /* WP212: this mount is the boot root -- see the note on
+                 * g_survive_term. Set by tools/initramfs-init.sh only. */
+                g_survive_term = 1;
             } else if (strncmp(tok, "tmp_area=", 9) == 0) {
                 const char *mode = tok + 9;
                 if (strcmp(mode, "ram") == 0)
@@ -3941,6 +3977,23 @@ int main(int argc, char *argv[])
         if (!fg) fuse_daemonize(0);
         se = fuse_get_session(f);
         fuse_set_signal_handlers(se);
+        /* WP212: for the boot-root mount, take SIGTERM back AFTER
+         * fuse_set_signal_handlers (which installs the exit handler), so the
+         * daemon survives the guest's shutdown sweep. Everything else --
+         * SIGHUP/SIGINT/SIGPIPE, and the SIGUSR1 sweep hook installed by the
+         * daemon's own thread setup -- is untouched. See g_survive_term. */
+        if (g_survive_term) {
+            struct sigaction sa;
+            memset(&sa, 0, sizeof sa);
+            sa.sa_handler = SIG_IGN;
+            sigemptyset(&sa.sa_mask);
+            if (sigaction(SIGTERM, &sa, NULL) != 0)
+                fprintf(stderr, "[survive_term: cannot ignore SIGTERM: %s]\n",
+                        strerror(errno));
+            else
+                fprintf(stderr, "[survive_term] ignoring SIGTERM: this mount "
+                                "is the boot root\n");
+        }
 
         /* The sweep thread belongs to the DAEMON, so it is created here --
          * after the fork above, which is the entire point (see the note where

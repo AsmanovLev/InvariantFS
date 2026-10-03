@@ -192,10 +192,20 @@ fi
 
 # ---- mount -----------------------------------------------------------------
 mkdir -p /tmp /mnt/invfs
+# WP212: survive_term, because this mount is the OS.
+#
+# The daemon is backgrounded and the guest's /sbin/init is exec'd below, so
+# the daemon is a process in the GUEST's pid namespace. Void's shutdown runs
+# "Sending TERM signal to processes..." over that namespace, which reaches
+# the daemon serving the guest's root -- and then the guest cannot run its
+# own shutdown scripts, because 70-pkill.sh and the `sleep`/`pkill` it execs
+# live on that root. Measured on 2 of 2 Void shutdowns: ENOTCONN from exec(2)
+# plus a SIGBUS, every time. The kernel removes the mount at poweroff
+# regardless, so nothing is lost by ignoring TERM here.
 if [ -n "$INVFS_DEV1" ]; then
-    INVFS_DEV1="$INVFS_DEV1" invf-fuse -f "$INVFS_RAW" /mnt/invfs >/tmp/fuse.log 2>&1 &
+    INVFS_DEV1="$INVFS_DEV1" invf-fuse -o survive_term -f "$INVFS_RAW" /mnt/invfs >/tmp/fuse.log 2>&1 &
 else
-    invf-fuse -f "$INVFS_RAW" /mnt/invfs >/tmp/fuse.log 2>&1 &
+    invf-fuse -o survive_term -f "$INVFS_RAW" /mnt/invfs >/tmp/fuse.log 2>&1 &
 fi
 
 READY=""
@@ -214,8 +224,19 @@ if [ "$READY" != "1" ]; then
     cat /tmp/fuse.log
     rescue_shell
 fi
-
 grep "InvariantFS mounted" /tmp/fuse.log
+
+# WP212: put the daemon's own log where an operator can read it WITHOUT a
+# rescue shell. It used to live only in this initramfs's /tmp -- i.e. on the
+# tmpfs that disappears at poweroff -- so a boot that failed AFTER the mount
+# (which is every interesting failure) left no trace anywhere: the serial
+# console showed only the guest's side of events. The mount line and any
+# error the daemon printed are cheap, bounded, and are what a bug report
+# needs first. The full log stays in /tmp/fuse.log for the rescue shell,
+# which can still cat it.
+echo "--- invf-fuse log (WP212) ---"
+cat /tmp/fuse.log
+echo "--- end invf-fuse log ---"
 
 # ---- self-test (invfs.selftest on the cmdline) ------------------------------
 # A rescue medium is only as good as what an operator can do with it, and
