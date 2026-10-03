@@ -51,6 +51,7 @@ set -e
 set -o pipefail
 
 REPO="${REPO:-$(cd "$(dirname "$0")/.." && pwd)}"   # override with the worktree when testing a branch
+export REPO
 # WP205: one scratch-root answer for the whole suite set (see
 # tools/lib-scratch.sh).
 . "$REPO/tools/lib-scratch.sh"
@@ -489,13 +490,20 @@ python3 - "$MNT" <<'PY'
 import os, random, subprocess, sys
 mnt = sys.argv[1]
 # text files: real busybox .c sources
+# WP219: the C corpus comes from tools/corpus.py, which prefers the
+# busybox submodule and falls back to this tree's src/. It used to walk
+# tools/busybox-src directly, and that directory is a git SUBMODULE --
+# empty on CI and on every fresh clone, because actions/checkout@v7 does
+# not recurse submodules -- so these suites died on their own fixtures
+# (an empty corpus, or an assert on a hardcoded absolute path) before
+# they had asserted anything about the product. Selection is by size, not
+# by a hardcoded relative path.
+sys.path.insert(0, os.path.join(os.environ.get("REPO", "."), "tools"))
+from corpus import c_sources
 srcs = []
-for root, dirs, files in os.walk('/home/user/InvariantFS/tools/busybox-src'):
-    dirs.sort()
-    for n in sorted(files):
-        p = os.path.join(root, n)
-        if n.endswith('.c') and os.path.getsize(p) > 20000:
-            srcs.append(p)
+for p in c_sources(20000):
+    if p.endswith('.c'):
+        srcs.append(p)
     if len(srcs) >= 3:
         break
 assert len(srcs) >= 3, "busybox .c fixtures missing"
@@ -563,16 +571,15 @@ mkag0 "$MNT/bigdir"
 python3 - "$MNT" <<'PY'
 import os, sys
 mnt = sys.argv[1]
+# WP219: tools/corpus.py -- prefers the busybox submodule, falls back to
+# this tree's src/. The submodule is empty on CI and on every fresh clone.
+sys.path.insert(0, os.path.join(os.environ.get("REPO", "."), "tools"))
+from corpus import c_sources
 src = None
-for root, dirs, files in os.walk('/home/user/InvariantFS/tools/busybox-src'):
-    dirs.sort()
-    for n in sorted(files):
-        p = os.path.join(root, n)
-        if n.endswith('.c') and os.path.getsize(p) > 30000:
-            src = p
-            break
-    if src:
-        break
+for p in c_sources(30000, n=1):
+    if p.endswith('.c'):
+        src = p
+    break
 open(f'{mnt}/hello.c', 'wb').write(open(src, 'rb').read())
 elf = None
 for p in ('/usr/bin/passwd', '/bin/ls', '/usr/bin/ls', '/bin/bash'):

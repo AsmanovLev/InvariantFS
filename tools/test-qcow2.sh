@@ -239,17 +239,20 @@ def tile(blob, n):
 # FILESYSTEM, not of the commit: this suite picked archival/dpkg.c in one
 # worktree and scripts/kconfig/expr.c in another, and the suite's result
 # differed with it. dirs.sort() makes the fixture the same everywhere.
+# WP219: the C corpus comes from tools/corpus.py, which prefers the
+# busybox submodule and falls back to this tree's src/. It used to walk
+# tools/busybox-src directly, and that directory is a git SUBMODULE --
+# empty on CI and on every fresh clone, because actions/checkout@v7 does
+# not recurse submodules -- so these suites died on their own fixtures
+# (an empty corpus, or an assert on a hardcoded absolute path) before
+# they had asserted anything about the product. Selection is by size, not
+# by a hardcoded relative path.
+sys.path.insert(0, os.path.join(os.environ.get("REPO", "."), "tools"))
+from corpus import c_sources
 text = None
-for root, dirs, files in os.walk(os.environ["REPO"] + "/tools/busybox-src"):  # fixture input (submodule)
-    dirs.sort()
-    for n in sorted(files):
-        if n.endswith(".c"):
-            p = os.path.join(root, n)
-            if os.path.getsize(p) > 20000:
-                text = open(p, "rb").read()
-                break
-    if text:
-        break
+for _p in c_sources(20000, n=1):          # fixture input
+    text = open(_p, "rb").read()
+    break
 assert text, "no busybox .c fixture found"
 elf = None
 for p in ("/usr/bin/passwd", "/usr/bin/gpg", "/bin/ls", "/usr/bin/ls",
