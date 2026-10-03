@@ -44,6 +44,7 @@ set -e
 set -o pipefail
 
 REPO="${REPO:-$(cd "$(dirname "$0")/.." && pwd)}"   # override with the worktree when testing a branch
+export REPO
 B=$REPO/bin
 PACKDIR=$REPO/tools/codecpacks/ext4fs.codecpack
 E4=$PACKDIR/bin/ext4fs
@@ -179,12 +180,35 @@ for h in classof rngread cbrm; do
 done
 
 echo "== generate staging content =="
-BB=$REPO/tools/busybox-src
-for f in coreutils/cat.c coreutils/cp.c coreutils/ls.c archival/tar.c \
-         editors/vi.c networking/ping.c; do
-    [ -f "$BB/$f" ] || { echo "FAIL: missing busybox source $f"; exit 1; }
-    cp "$BB/$f" "$WORK/stage/"
+# WP216: the C corpus comes from lib-corpus.sh, which prefers the busybox
+# submodule and falls back to this tree's src/. It used to name six busybox
+# paths directly and fail on the first missing one -- and on any fresh checkout
+# (CI included) every one of them is missing, because that is a submodule.
+. "$REPO/tools/lib-corpus.sh"
+BB=$(invfs_c_corpus_root) \
+    || { echo "SKIP: no C sources available for the staging corpus"; exit 0; }
+# The NAMES below are load-bearing: the debugfs command file further down
+# writes each file to /src/<name> and later legs assert on /src/cat.c by name.
+# So the fallback does not invent names -- it fills the ones the suite already
+# expects, biggest source first. That keeps every downstream assertion valid
+# whether the corpus came from the submodule or from src/.
+n=0
+for f in $(invfs_c_biggest_n 20000 "$BB" 6); do
+    n=$((n + 1))
+    case $n in
+        1) cp "$f" "$WORK/stage/cat.c" ;;
+        2) cp "$f" "$WORK/stage/cp.c" ;;
+        3) cp "$f" "$WORK/stage/ls.c" ;;
+        4) cp "$f" "$WORK/stage/tar.c" ;;
+        5) cp "$f" "$WORK/stage/vi.c" ;;
+        6) cp "$f" "$WORK/stage/ping.c" ;;
+    esac
 done
+n=0
+for nm in cat.c cp.c ls.c tar.c vi.c ping.c; do
+    [ -s "$WORK/stage/$nm" ] && n=$((n + 1))
+done
+[ "$n" -eq 6 ] || { echo "FAIL: only $n/6 C sources staged from $BB"; exit 1; }
 cp "$REPO/bin/busybox-static" "$WORK/stage/busybox.elf"
 [ "$(head -c4 "$WORK/stage/busybox.elf")" = $'\x7fELF' ] \
     || { echo "FAIL: busybox-static is not an ELF"; exit 1; }

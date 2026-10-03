@@ -49,6 +49,7 @@ set -e
 set -o pipefail
 
 REPO="${REPO:-$(cd "$(dirname "$0")/.." && pwd)}"   # override with the worktree when testing a branch
+export REPO
 B=$REPO/bin
 PACK=$REPO/tools/codecpacks/rawdisk.codecpack
 WORK=/dev/shm/rawdiskwp
@@ -81,7 +82,12 @@ import sys
 import zlib
 
 SEC = 512
-REPO = "/home/user/InvariantFS"
+# WP216: this REDEFINED REPO to the author's checkout path, which is how the
+# fix below was still reading a directory that does not exist on this host --
+# the shell had derived REPO correctly at :51 and the heredoc threw it away
+# twenty lines later, the same mistake as the three suites in wp/215. It comes
+# from the environment now, so there is exactly one answer.
+REPO = os.environ.get("REPO") or os.getcwd()
 
 def xorshift_stream(seed, n):
     """Deterministic 'arbitrary content' for gaps (incompressible-ish)."""
@@ -106,18 +112,26 @@ def mark(img, off, m):
 
 def text_bytes(n):
     """A real busybox .c file, repeated/truncated to exactly n bytes."""
+    # WP216: prefers the busybox submodule, falls back to this tree's src/ --
+    # an assertion on an empty submodule is how this suite died on CI.
+    roots = [os.path.join(REPO, "tools", "busybox-src"), os.path.join(REPO, "src")]
     src = None
-    for root, dirs, files in os.walk(os.path.join(REPO, "tools/busybox-src")):
-        dirs.sort()
-        for fn in sorted(files):
-            if fn.endswith(".c"):
-                p = os.path.join(root, fn)
-                if os.path.getsize(p) > 100000:
-                    src = p
-                    break
+    for r in roots:
+        if not os.path.isdir(r):
+            continue
+        for root, dirs, files in os.walk(r):
+            dirs.sort()
+            for fn in sorted(files):
+                if fn.endswith(".c"):
+                    p = os.path.join(root, fn)
+                    if os.path.getsize(p) > 100000:
+                        src = p
+                        break
+            if src:
+                break
         if src:
             break
-    assert src, "no big busybox .c found"
+    assert src, "no >100KB C source found under %s" % os.pathsep.join(roots)
     data = open(src, "rb").read()
     reps = (n + len(data) - 1) // len(data)
     return (data * reps)[:n]

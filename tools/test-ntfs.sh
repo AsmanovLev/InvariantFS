@@ -46,6 +46,7 @@ set -e
 set -o pipefail
 
 REPO="${REPO:-$(cd "$(dirname "$0")/.." && pwd)}"   # override with the worktree when testing a branch
+export REPO
 # WP205: one scratch-root answer for the whole suite set (see
 # tools/lib-scratch.sh).
 . "$REPO/tools/lib-scratch.sh"
@@ -101,18 +102,18 @@ echo "pack binary: $NTFS"
 echo "== generate content fixtures =="
 # text member: a real busybox .c (>100 KB); the .txt name keeps it in the
 # text family for the same-run PPMd batching leg
-for c in editors/awk.c editors/vi.c miscutils/bc.c networking/tls.c shell/ash.c; do
-    if [ -f "$REPO/tools/busybox-src/$c" ] && [ "$(stat -c%s "$REPO/tools/busybox-src/$c")" -gt 100000 ]; then
-        cp "$REPO/tools/busybox-src/$c" "$WORK/src/big.txt"; break
-    fi
-done
+# WP216: size-selected from a resolvable C corpus (lib-corpus.sh) instead of
+# five named busybox paths, which do not exist on a checkout without the
+# submodule -- i.e. on CI, and on every fresh clone.
+. "$REPO/tools/lib-corpus.sh"
+CORPUS=$(invfs_c_corpus_root) \
+    || { echo "SKIP: no C sources available for the fixtures"; exit 0; }
+_c=$(invfs_c_biggest 100000 "$CORPUS")
+[ -n "$_c" ] && cp "$_c" "$WORK/src/big.txt"
 [ -s "$WORK/src/big.txt" ] || { echo "FAIL: no >100KB busybox .c fixture"; exit 1; }
 # a second, smaller .c for the subdir member
-for c in coreutils/ls.c util-linux/fdisk.c networking/ping.c shell/hush.c; do
-    if [ -f "$REPO/tools/busybox-src/$c" ] && [ "$(stat -c%s "$REPO/tools/busybox-src/$c")" -gt 20000 ]; then
-        cp "$REPO/tools/busybox-src/$c" "$WORK/src/nested.c"; break
-    fi
-done
+_c2=$(invfs_c_biggest 20000 "$CORPUS")
+[ -n "$_c2" ] && cp "$_c2" "$WORK/src/nested.c"
 [ -s "$WORK/src/nested.c" ] || { echo "FAIL: no >20KB busybox .c fixture"; exit 1; }
 # ELF member: a real x86-64 binary
 for p in /usr/bin/ls /bin/ls /usr/bin/passwd /usr/bin/gpg /bin/bash; do
