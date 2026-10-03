@@ -358,7 +358,9 @@ encoding before it gets the old space back.
 > the two candidates are the pin and the superseded recipe blob no longer
 > loading. Keep the 478 figure as the historical observation it is, and do
 > not attribute it to a lane policy.
-> `INVFS_RECLAIM_ORPHANS=1` runs the orphan collector, which is default-off.
+> `INVFS_RECLAIM_ORPHANS=0` turns the orphan collector OFF. It is **on by
+> default** since 2026-09-28 (`src/core/vol_reclaim.c:29`); this line used to
+> say "default-off" and did not describe the build.
 
 Manual invocation:
 

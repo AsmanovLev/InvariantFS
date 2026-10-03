@@ -27,10 +27,24 @@
 /* WP121: the orphan collector's gate. WP126 bounds its cost.            */
 /* ------------------------------------------------------------------ */
 
-/* DEFAULT OFF. The collector frees metadata pages in a way that a wrong
- * answer to "is this page reachable" turns into silent data loss rather
- * than a crash, so it does not ship enabled. INVFS_RECLAIM_ORPHANS=1 turns
- * it on; nothing else does. The value is read once per process and cached:
+/* DEFAULT ON since 2026-09-28 (author's call). The collector frees metadata
+ * pages in a way that a wrong answer to "is this page reachable" turns into
+ * silent data loss rather than a crash, so this used to ship opt-in
+ * (INVFS_RECLAIM_ORPHANS=1) with that safety argument recorded here instead
+ * of in the code. Both promotion conditions WP121 listed are now closed, the
+ * reader enforces the invariant tree-wide (WP123 at the root slot, then WP-D
+ * 7ea939d), and the sweep is the only thing that can return the space -- so
+ * it ships enabled, and INVFS_RECLAIM_ORPHANS=0 turns it off.
+ *
+ * WHAT A READER SHOULD TAKE FROM THIS: the dangerous property has NOT gone
+ * away. A default-ON pass that frees COW B+tree base pages still rests
+ * entirely on its liveness predicate, and what stands behind it is the READER
+ * refusing an unallocated page (mbuf_read_ptr) -- not the reclaimer's own
+ * caution. A change that widens what counts as reachable is a safety change,
+ * not a performance one, and the cost measurement quoted below is the ceiling
+ * of what turning it ON buys, not a licence to widen it.
+ *
+ * The value is read once per process and cached:
  * a volume is opened once per process, so re-reading getenv per fold buys
  * nothing and makes the gate depend on call order.
  *

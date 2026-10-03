@@ -35,8 +35,18 @@
     (`src/core/vol_spt0.c:134`/`:1188`), `fsck_v3_slot_page`/`fsck_v3_ptr_at`
     (`src/core/vol_fsck.c:1038`/`:1057`). Regression test
     `test_freed_page` in `src/cli/metabuf_test.c`, written and run failing first.
-  Still **open**, and tracked separately: the collector is default-OFF behind
-  `INVFS_RECLAIM_ORPHANS=1` (`src/core/vol_reclaim.c:48-51`).    **Impact:** On a volume where the v3 fold has run and the newest root page is
+  **WP208 (2026-10-04): the reader-side condition above is closed and the
+  collector now ships ENABLED.** `orphan_gate()` has returned "on when
+  unset" since 2026-09-28 (author's call) — `INVFS_RECLAIM_ORPHANS=0` is the
+  switch, not `=1`. Measured on a 120-file corpus, unset, `invf-sweep` prints
+  `vol_reclaim: collected 189 orphaned v3 base page(s)` and the same count as
+  `[reclaim]`; with `=0` it prints neither. Three places still said
+  "default-OFF" — this sentence, `src/core/vol_reclaim.c:29` and
+  `impl_docs/AUDIT.md:574` — and a default-ON metadata-freeing pass described
+  as opt-in is the wrong thing to hand a reviewer. **What did NOT change:** the
+  hazard. A wrong liveness predicate is still silent data loss, and what makes
+  this safe is the READER refusing an unallocated page (WP123 + WP-D), not the
+  reclaimer's caution.    **Impact:** On a volume where the v3 fold has run and the newest root page is
   subsequently damaged, `mbuf_root_read` falls back to an RT30 slot naming a
   root whose pages have already been freed — and adopts a **stale namespace**
   without any error. Files created after that root can become invisible. Not
@@ -124,8 +134,10 @@
   - `btree_collect_orphans` (`src/core/vol_btree.c`) marks **both** RT30 slots
     and `v->pinned_root`, refuses to collect at all if a named slot cannot be
     turned into a valid blkptr, and treats a page whose generation exceeds the
-    newest live root's as live (an uncommitted COW copy). **Default OFF**
-    (`INVFS_RECLAIM_ORPHANS=1`).
+    newest live root's as live (an uncommitted COW copy). **It shipped
+    default-OFF** when this was written (`INVFS_RECLAIM_ORPHANS=1`); it has
+    shipped default-ON since 2026-09-28 — see the WP208 note at the top of this
+    entry.
   - `fold_reclaim_hook` (`src/core/vol_fold.c`) no longer runs the
     one-generation diff when `old_root` is still named by an RT30 slot. This is
     the *existing* trigger for this incident, and it fires on every fold; leaving

@@ -571,14 +571,21 @@ telling the truth in the comment, which is what this commit does.
 ##    transformed, because the save point's pinned root was a pointer no
 ##    walk could ever verify
 
-**Status: FIXED (`wp/reclaim-collector-abort`). The gate stays default-OFF —
-whether to ship it ON is a separate decision, and this finding does not make
-it. Severity: HIGH for the rootfs target — a collector that aborts is not a
-collector, and the volume latches read-only on fill
+**Status: FIXED (`wp/reclaim-collector-abort`). The gate is default-ON now —
+`orphan_gate()` treats "unset" as on since 2026-09-28 (author's call), and
+`INVFS_RECLAIM_ORPHANS=0` is the switch. This row froze the old policy, which
+is how the collector came to be described as opt-in in four places long after
+it stopped being opt-in (WP208 corrected them). Whether to ship it on was a
+separate decision, and this finding did not make it — it was made later, on
+the measured space argument in `src/core/vol_reclaim.c`. Severity: HIGH for
+the rootfs target — a collector that aborts is not a collector, and the volume
+latches read-only on fill
 (`src/core/volume.c:2871-2882`) while the sweep is offline-only.**
 
 **The symptom, reproduced.** `invf-mkfs` + `invf-import` of a 20-file text
-corpus, then `INVFS_RECLAIM_ORPHANS=1 invf-sweep img`:
+corpus, then `invf-sweep img` (the reproduction as written named
+`INVFS_RECLAIM_ORPHANS=1`, which by 2026-09-28 had become a no-op: unset
+already means on — WP208):
 
 ```
 [spt0] save point: pinned 420 blocks (40 segments, 0 already damaged) in 513 blocks of mark set at pba 4201320

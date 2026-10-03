@@ -830,8 +830,15 @@ static int cmd_reuse(const char *img, uint64_t root_pba, uint64_t root_gen,
 
 /* WP126: THE COST LEG. Everything else in this driver is about whether the
  * collector frees the right pages. This one is about whether it can be
- * called on every fold, which is the only reason INVFS_RECLAIM_ORPHANS is
- * still default-off.
+ * called on every fold, which is what INVFS_RECLAIM_ORPHANS being
+ * default-off used to be about.
+ *
+ * WP208 (2026-10-04): the question this leg answered has since been closed
+ * -- the collector is ON by default (2026-09-28) and the cost was measured,
+ * not estimated -- so the leg no longer gates anything. It stays because it is
+ * the measurement that answer rests on: if the candidate set ever regresses,
+ * this is what notices, and it is cheaper to notice here than on a 1 TiB
+ * volume.
  *
  * `cost <img> <nfiles> <ngen> <nfold>`: populate and fold, then take the
  * SINGLE BOUNDED PASS -- vol_reclaim_orphans, exactly what

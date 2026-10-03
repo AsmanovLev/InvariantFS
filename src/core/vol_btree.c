@@ -2039,10 +2039,18 @@ int btree_reclaim_pinned(invfs_volume *v, invfs_blkptr old_root,
 /* WP121's cost: one 4 KiB block read per ALLOCATED block, per CALL --  */
 /* 48,732 reads on a 1 GB Silesia volume -- and fold_reclaim_hook calls */
 /* it on every fold, so a volume that folds often pays the whole volume */
-/* every fold. That is the whole reason INVFS_RECLAIM_ORPHANS is        */
-/* default-off: not because the collector is wrong, but because it is   */
-/* O(volume) on a path a live root filesystem takes thousands of times  */
-/* a minute.                                                           */
+/* every fold. That was the whole reason INVFS_RECLAIM_ORPHANS was      */
+/* default-off: not because the collector is wrong, but because it     */
+/* was O(volume) on a path a live root filesystem takes thousands of   */
+/* times a minute.                                                     */
+/*                                                                   */
+/* WP208 (2026-10-04): that sentence used to read "is default-off", and */
+/* it stopped being true on 2026-09-28. The cost question was answered  */
+/* -- by the candidate set below, measured at +0.29% sweep wall and     */
+/* +2072 kB peak RSS on a 1 TiB volume (AUDIT.md 8) -- and the author   */
+/* flipped the default on. The collector is ON by default now. The     */
+/* O(volume) worry is WHY THE CANDIDATE SET EXISTS, not why the gate is */
+/* shut; do not read the history below as a statement about the build. */
 /*                                                                   */
 /* The fix is to stop asking "is this block a base page?" about every   */
 /* block in the volume. A v3 base page is a page mbuf_alloc handed      */
