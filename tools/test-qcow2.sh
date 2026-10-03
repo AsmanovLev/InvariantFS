@@ -91,10 +91,31 @@ WARN=$( {
 echo "  bin/qcow2 built, -Wall -Wextra -Werror clean (stock/system zlib backends)"
 
 echo "== pack dir: private copies (the shared dir is full at INVFS_PACK_MAX=8) =="
-cp -a "$PACK" "$WORK/packs/qcow2.codecpack"
+# WP220: --no-preserve=ownership, and the flag is the whole point.
+#
+# `cp -a` is `-dR --preserve=all`, which includes preserving OWNERSHIP. This
+# suite runs ISOLATED (run-e2e.sh puts it in `unshare -r -m`), and a user
+# namespace's uid map holds exactly ONE uid. Copying a file whose owner is not
+# in that map cannot be reproduced, so cp fails:
+#
+#   cp: failed to preserve ownership for
+#       '/dev/shm/wp16qcow2/packs/qcow2.codecpack/bin/qcow2': Invalid argument
+#
+# and the suite died before it asserted anything about the product. The fixture
+# copy needs the CONTENTS and the modes; it never needs the ownership, so the
+# only correct edit is to stop asking for what cannot work here. Reproduced and
+# confirmed fixed under the same namespace:
+#
+#   unshare -r -m -- cp -a --no-preserve=ownership <pack> /dev/shm/...   # OK
+#   unshare -r -m -- cp -a                  <pack> /dev/shm/...          # EINVAL
+#
+# The other cp -a in tools/test-packaging.sh is deliberately NOT changed: that
+# suite is LOCKED (it needs the real uid), so it never sees this, and touching
+# a passing site for no reason is how regressions get introduced.
+cp -a --no-preserve=ownership "$PACK" "$WORK/packs/qcow2.codecpack"
 RAWDISK=$REPO/tools/codecpacks/rawdisk.codecpack
 if [ -f "$RAWDISK/manifest" ]; then
-    cp -a "$RAWDISK" "$WORK/packs/rawdisk.codecpack"
+    cp -a --no-preserve=ownership "$RAWDISK" "$WORK/packs/rawdisk.codecpack"
     echo "  qcow2 + rawdisk copied into \$WORK/packs"
 else
     echo "  qcow2 copied into \$WORK/packs (no rawdisk pack — nested leg will skip)"
@@ -1103,7 +1124,7 @@ grep -q " 0 corrupt" <($B/invf-verify "$IMG" --deep) \
 # code: the FS reads the original bytes back through the stored map and lets
 # the pack strip them again. Proof: decomp_gen follows the manifest, the file
 # stays bit-exact, and the sweep is idempotent afterwards.
-cp -a "$WORK/packs" "$WORK/packs-mig"
+cp -a --no-preserve=ownership "$WORK/packs" "$WORK/packs-mig"
 sed -i 's/^generation = .*/generation = 7/' "$WORK/packs-mig/qcow2.codecpack/manifest"
 grep -q "^generation = 7" "$WORK/packs-mig/qcow2.codecpack/manifest" \
     || { echo "FAIL: could not bump the private pack generation"; exit 1; }
