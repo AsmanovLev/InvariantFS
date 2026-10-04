@@ -135,8 +135,8 @@ src/core/vol_sweep.c:498:ACTS
 src/core/vol_sweep.c:517:ACTS
 src/core/vol_textzone.c:679:SKIP
 src/core/vol_tier.c:304:SKIP
-src/core/volume.c:1215:SKIP
-src/core/volume.c:1216:SKIP
+src/core/volume.c:1229:SKIP   # tier_owner / rawm_owner anchors (vol_open_inner)
+src/core/volume.c:1230:SKIP   # shifted by the PERF_PROFILING counters in volume.c
 src/recipes/zip.c:141:SKIP
 src/recipes/zip.c:145:SKIP
 src/core/vol_cpack.c:2939:SKIP   # непомечен: добавлено при правке vol_cpack.c
