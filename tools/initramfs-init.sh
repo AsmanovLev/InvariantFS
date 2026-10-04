@@ -16,6 +16,8 @@
 #   invfs.dev1_uuid=<hex>  force the second (shadow/mirror) volume
 #   invfs.sweepboot        maintenance boot (WP23): sweep engine-side and
 #                          reboot, never FUSE-mounting the volume
+#   invfs.no_allow_other   mount WITHOUT allow_other, reproducing the WP225-era
+#                          guest state on demand (see FUSE_OPTS below)
 # Without them the first InvFS device is RAW; a second distinct one is DEV1.
 
 export PATH=/usr/local/bin:/sbin:/bin:/usr/sbin:/usr/bin
@@ -202,10 +204,39 @@ mkdir -p /tmp /mnt/invfs
 # live on that root. Measured on 2 of 2 Void shutdowns: ENOTCONN from exec(2)
 # plus a SIGBUS, every time. The kernel removes the mount at poweroff
 # regardless, so nothing is lost by ignoring TERM here.
-if [ -n "$INVFS_DEV1" ]; then
-    INVFS_DEV1="$INVFS_DEV1" invf-fuse -o survive_term -f "$INVFS_RAW" /mnt/invfs >/tmp/fuse.log 2>&1 &
+# allow_other is NOT optional here, and its absence is invisible to every
+# boot test ever written for this tree.
+#
+# A FUSE mount without allow_other is accessible ONLY to the uid that mounted
+# it. This mount is made from the initramfs as root, so the guest's root
+# filesystem belongs to uid 0 and every OTHER uid in the guest gets EACCES on
+# every file. Measured on a Debian trixie guest: dbus.service fails every boot
+# with status=203/EXEC because systemd runs it as User=messagebus and cannot
+# exec /usr/bin/dbus-daemon, while root execs the same binary fine;
+# `runuser -u messagebus -- sh` fails the same way. A guest in that state is
+# unusable for any non-root process -- no package manager, no unprivileged ssh
+# login, no services.
+#
+# Every boot harness in this repo asserts as root over SSH, so this class of
+# bug cannot fail a test; it is invisible until something runs unprivileged.
+# tools/test-acl.sh already requires user_allow_other for HOST mounts and
+# bench-gate-b.sh / prepare-livecd.sh already pass -o allow_other, so this was
+# an inconsistency between the host and initramfs paths rather than a decision.
+#
+# Root may always request allow_other without /etc/fuse.conf, which the
+# initramfs has no reason to carry. INVFS_NO_ALLOW_OTHER=1 exists only so the
+# regression can be demonstrated by turning it back off.
+FUSE_OPTS="survive_term"
+if [ "${INVFS_NO_ALLOW_OTHER:-0}" = 1 ] || has_opt invfs.no_allow_other; then
+    FUSE_OPTS="survive_term"
 else
-    invf-fuse -o survive_term -f "$INVFS_RAW" /mnt/invfs >/tmp/fuse.log 2>&1 &
+    FUSE_OPTS="survive_term,allow_other"
+fi
+
+if [ -n "$INVFS_DEV1" ]; then
+    INVFS_DEV1="$INVFS_DEV1" invf-fuse -o "$FUSE_OPTS" -f "$INVFS_RAW" /mnt/invfs >/tmp/fuse.log 2>&1 &
+else
+    invf-fuse -o "$FUSE_OPTS" -f "$INVFS_RAW" /mnt/invfs >/tmp/fuse.log 2>&1 &
 fi
 
 READY=""
