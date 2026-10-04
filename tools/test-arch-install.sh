@@ -334,7 +334,22 @@ check_one() {  # $1 = image, $2 = label, $3 = optional dev1
           # is about the shape you would get if symlinks are not all listed.
           # Print the head, the tail and the stderr so the next run answers that
           # instead of repeating the same two numbers.
-          echo "   listing: $ls_n lines, counted $listed, import reported $n" >&2
+          # An INCOMPLETE listing cannot be counted against the import totals.
+          # invf-ls caps at 4096 entries per directory and says so in its summary;
+          # usr/share/man/man3/ is larger than that. invf-ls is now HONEST about
+          # it (dcaa197) -- but this check went on comparing a knowingly short
+          # tally with the import counters and calling the difference "loss",
+          # which is how six CI runs accused the filesystem of dropping 7,108
+          # files. So: decline to compare, and say why.
+          if grep -q 'INCOMPLETE' "$lsf"; then
+              echo "   NOTE: invf-ls reports the enumeration INCOMPLETE -- a" >&2
+              echo "         directory exceeded its 4096-entry cap -- so the" >&2
+              echo "         count cannot be compared with the import totals." >&2
+              echo "         import reported $n; listing counted $listed (partial)." >&2
+              grep -m3 'truncated at' "$WORK/ls-$label.err" >&2 || true
+              echo "   $label: import reported $n entries; count NOT verified" >&2
+              return 0
+          fi
           echo "   --- first 6 ---" >&2; sed -n '1,6p' "$lsf" >&2
           echo "   --- last 6 ---" >&2;  tail -6 "$lsf" >&2
           if [ -s "$WORK/ls-$label.err" ]; then
