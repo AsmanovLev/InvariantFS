@@ -410,7 +410,25 @@ run_case() {  # $1 = label
             if cmp -s "$STAGE/$f" "$out"; then
                 echo "   ok: $f bit-exact ($(wc -c < "$STAGE/$f") bytes)"
             else
-                echo "   MISMATCH: $f"; boot_rc=1
+                # "MISMATCH" alone localises nothing. Report the two sizes and
+                # the FIRST differing offset, which distinguishes the shapes that
+                # matter: a short read (truncation), a long read (garbage past
+                # the end), or a hole in the middle (a single bad segment).
+                #
+                # This has bitten once, on boot/initramfs-linux.img at 25,575,768
+                # bytes, and could NOT be reproduced locally with either a 25 MB
+                # flat file or a 25 MB cpio archive -- both read back bit-exact.
+                # One CI instance is not a cause, so this prints the evidence
+                # instead of guessing.
+                _a=$(wc -c < "$STAGE/$f"); _b=$(wc -c < "$out" 2>/dev/null || echo 0)
+                _off=$(cmp "$STAGE/$f" "$out" 2>/dev/null | sed -n 's/.*byte \([0-9]*\),.*/\1/p')
+                echo "   MISMATCH: $f  src=$_a out=$_b first-diff-byte=${_off:-unknown}" >&2
+                case "$_a:$_b" in
+                    "$_a:$_b") ;;
+                    *) echo "   -> lengths differ: a truncated or extended read" >&2 ;;
+                esac
+                [ -n "$_off" ] || echo "   -> same length, content differs (a bad segment)" >&2
+                boot_rc=1
             fi
         else
             echo "   cat failed: $f"; boot_rc=1
