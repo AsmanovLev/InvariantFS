@@ -50,7 +50,34 @@ splt_test    mirror  -           -
 #     the registry cannot carry (it builds standalone, with no engine
 #     headers: registry tools/build-helpers.sh:47). p7z also carries the
 #     self_path fallback, rawdisk the fork-window init, xfs the estimate
-#     wrapper, ext4fs one memset. ZERO registry-only code lines in all seven.
+#     wrapper, ext4fs one memset.
+#
+#     CORRECTION (2026-10-04). The first version of this comment said "ZERO
+#     registry-only code lines in all seven" and described the fork difference
+#     as being only plugin glue. That understates vdi and xfs, and the
+#     understatement is not cosmetic -- deleting a fork in favour of the
+#     registry's copy would SILENTLY REVERT a real fix:
+#
+#       xfs  registry  #define MAX_MEMBERS 65536u   MAX_IDX 65535u
+#            vendored  #define MAX_MEMBERS 1048576u MAX_IDX 1048575u
+#       vdi  registry  #define MAP_MAX_ENTS 262148u          <- literal
+#            vendored  #define MAP_MAX_ENTS (4u * CPACK_MAX_MEMBERS + 4u)
+#
+#     That is commit 4db1872, "the 65536 member cap was a RAM bound, not a
+#     format limit": a 16x raise of the member bound, plus vdi's derivation
+#     turned from a hardcoded literal into a symbolic one so it cannot rot
+#     again on the next raise. Neither change reached the registry, so the
+#     registry is the STALE side here.
+#
+#     This corrects a claim in commit f11a8d9's message, which said vdi and xfs
+#     were BEHIND the registry because it "has MAP_MAX_ENTS/MAX_MEMBERS/MAX_IDX
+#     the vendored copy lacks". Both directions were wrong: those symbols exist
+#     on BOTH sides, and the vendored copies are ahead. Published history is
+#     left alone rather than rewritten; the measurement above is the record.
+#
+#     So the registry MUST receive 4db1872 before any fork is deleted, and the
+#     plugin glue must land there too -- which is what "reconcile, then move
+#     the .so glue so forks are deletable, then delete" means in practice.
 ext4fs       fork    -           -
 fatfs        fork    -           -
 ntfs         fork    -           -
