@@ -766,12 +766,33 @@ static pthread_cond_t  g_gc_cv   = PTHREAD_COND_INITIALIZER;
 /* The physical flush, with no group-commit logic. */
 static int blkio_flush_raw(blkio *io)
 {
-    /* Devices are already FILE_FLAG_WRITE_THROUGH, so this is a no-op for
-       them on Windows; it still matters for image files. */
+    /* PERF: THE counter that matters, and the one missing while I was reporting
+     * import as "not I/O bound".
+     *
+     * I instrumented vol_flush and blkio_write, saw 2 flushes and 0 blkio
+     * writes for a 2,000-file import, and concluded ~90% CPU. Wrong:
+     * vol_flush is the VOLUME-level flush. The fsync(2) calls happen here, one
+     * layer down, uncounted.
+     *
+     * The evidence already in this file that I did not read (blkio.c:703):
+     *
+     *   "12-byte import: 3509 fsyncs, 7.02 per file, 387.7 s of a 390.0 s wall
+     *    -- 99.4% of the time blocked in fsync, ~0.05 s of CPU."
+     *
+     * ~7 fsyncs per file, 99.4% of wall time inside them. A tmpfs control
+     * confirmed it from outside: same 3.0 writes/file, same bytes, but
+     * 5,000 files/s with no block device under the volume against 10.3 on an
+     * SSD -- 500x, purely the presence of the sync path.
+     */
+    INVFS_PERF_ADD(PERF_FSYNC_CALLS, 1);
 #ifdef _WIN32
-    return FlushFileBuffers((HANDLE)io->h) ? 0 : -1;
+    if (FlushFileBuffers((HANDLE)io->h)) return 0;
+    INVFS_PERF_ADD(PERF_FSYNC_ERR, 1);
+    return -1;
 #else
-    return fsync(io->fd) == 0 ? 0 : -1;
+    if (fsync(io->fd) == 0) return 0;
+    INVFS_PERF_ADD(PERF_FSYNC_ERR, 1);
+    return -1;
 #endif
 }
 

@@ -22,6 +22,7 @@ static const char *const names[PERF_MAX] = {
     "superblock writes",    "mark_dirty calls",
     "vmux writes",          "vmux write bytes",
     "vmux reads",           "vmux read bytes",
+    "fsync calls",          "fsync errors",
 };
 
 /* Ratios are the point of this file. The raw counts are only interesting next
@@ -71,6 +72,19 @@ void invfs_perf_dump(const char *why)
                             (double)vw / (double)(pw ? pw : 1));
             if (vr) fprintf(out, "  read/write ratio at the volume layer: %.4f\n",
                             (double)vr / (double)(vw ? vw : 1));
+            if (f && pw) {
+                /* fsyncs per vol_flush AND per file are the numbers that decide
+                 * whether a --no-sync install mode is worth building. */
+                fprintf(out, "  fsyncs per file                  : %.2f\n",
+                        (double)invfs_perf_counters[PERF_FSYNC_CALLS] /
+                        (double)(invfs_perf_counters[PERF_VOL_WRITE_CALLS] +
+                                 invfs_perf_counters[PERF_READ_CALLS] ?: 1));
+                fprintf(out, "  fsyncs / vol_flush               : %.2f\n",
+                        (double)invfs_perf_counters[PERF_FSYNC_CALLS] / (double)f);
+                fprintf(out, "  fsyncs / vmux write              : %.2f\n",
+                        (double)invfs_perf_counters[PERF_FSYNC_CALLS] /
+                        (double)(vw ? invfs_perf_counters[PERF_VMUX_WRITES] : 1));
+            }
         }
         if (w) fprintf(out, "  avg bytes per vol_write             : %.1f\n",
                        (double)pw / (double)w);

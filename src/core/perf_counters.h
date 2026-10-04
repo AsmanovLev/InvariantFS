@@ -72,6 +72,8 @@ enum {
     PERF_VMUX_WRITE_BYTES,
     PERF_VMUX_READS,
     PERF_VMUX_READ_BYTES,
+    PERF_FSYNC_CALLS,        /* fsync(2) -- THE one that matters            */
+    PERF_FSYNC_ERR,
     PERF_MAX
 };
 
