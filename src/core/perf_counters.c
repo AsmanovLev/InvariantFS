@@ -23,6 +23,7 @@ static const char *const names[PERF_MAX] = {
     "vmux writes",          "vmux write bytes",
     "vmux reads",           "vmux read bytes",
     "fsync calls",          "fsync errors",
+    "fsync deferred",
 };
 
 /* Ratios are the point of this file. The raw counts are only interesting next

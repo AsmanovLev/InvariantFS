@@ -74,6 +74,7 @@ enum {
     PERF_VMUX_READ_BYTES,
     PERF_FSYNC_CALLS,        /* fsync(2) -- THE one that matters            */
     PERF_FSYNC_ERR,
+    PERF_FSYNC_DEFERRED,   /* flushes skipped by the commit policy */
     PERF_MAX
 };
 

@@ -8,6 +8,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #ifdef _WIN32
 #include <windows.h>
@@ -209,6 +210,11 @@ static int dev_lock(HANDLE h)
 
 #endif /* _WIN32 */
 
+/* Forward declarations: blkio_write (above) needs the policy clock, and
+ * blkio_open needs the policy applier, but both are defined further down with
+ * the rest of the policy code. */
+static uint64_t pf_now_ms(void);
+
 int blkio_open(blkio *io, const char *path, int flags)
 {
     /* INVFS_FORCE_DEV=1 makes an image file take the device code path:
@@ -227,6 +233,17 @@ int blkio_open(blkio *io, const char *path, int flags)
     int force_dev = (fdev && *fdev && *fdev != '0');
 
     memset(io, 0, sizeof *io);
+    /* Deferred-commit policy comes from the environment so every tool inherits
+     * it without a new argument on every CLI. With no environment set, all
+     * thresholds stay zero, which IS strict -- byte-for-byte the behaviour
+     * from before this existed.
+     *
+     * MUST BE AFTER THE memset ABOVE. Calling it before the memset silently
+     * wipes every threshold, which is exactly what happened twice: the policy
+     * appeared to do nothing, no error was raised, and INVFS_COMMIT_BYTES=16
+     * produced byte-identical results to strict. If a similar call is ever
+     * needed earlier in this function, do not move it up. */
+    blkio_apply_env_policy(io);
     /* Before anything that can fail into blkio_close(): the bounce mutex is
        destroyed there, and destroying an uninitialised mutex is undefined. */
     (void)pthread_mutex_init(&io->bounce_mu, NULL);
@@ -650,6 +667,9 @@ int blkio_write(blkio *io, const void *buf, size_t len)
      * hide it. */
     INVFS_PERF_ADD(PERF_BLKIO_WRITES, 1);
     INVFS_PERF_ADD(PERF_BLKIO_WRITE_BYTES, len);
+    /* Accumulate for the deferred-commit policy, at the layer that fsyncs. */
+    io->dirty_bytes   += len;
+    io->last_write_ms  = pf_now_ms();
     if (blkio_pwrite(io, io->pos, buf, len) != 0)
         return -1;
     io->pos += len;
@@ -796,6 +816,122 @@ static int blkio_flush_raw(blkio *io)
 #endif
 }
 
+/* ---- deferred commit policy ------------------------------------------
+ * docs/benchmarks/commit-policy.md. The decision is made HERE rather than at
+ * the volume level because vol_flush is called only twice in a 34,209-file
+ * import while every fsync happens inside this file -- counting the volume
+ * flush says nothing about the cost. */
+#define INVFS_MIN_COMMIT_BYTES 4096u
+
+static uint64_t pf_now_ms(void)
+{
+    struct timespec ts;
+    if (clock_gettime(CLOCK_MONOTONIC, &ts) == 0)
+        return (uint64_t)ts.tv_sec * 1000u + (uint64_t)(ts.tv_nsec / 1000000);
+    return (uint64_t)time(NULL) * 1000u;
+}
+
+/* Bare number = MiB. Suffixed K/M/G accepted. Returns 0 for absent, malformed
+ * or sub-block values -- the sub-block case prints why and returns 0 so the
+ * caller falls back to STRICT rather than to a silent clamp. */
+static uint64_t pf_parse_bytes(const char *v)
+{
+    char *end = NULL;
+    unsigned long long n;
+
+    if (!v || !*v) return 0;
+    n = strtoull(v, &end, 10);
+    if (end == v) return 0;
+    while (*end == ' ') end++;
+    if (*end == 'K' || *end == 'k')      n *= 1024ULL;
+    else if (*end == 'M' || *end == 'm') n *= 1024ULL * 1024ULL;
+    else if (*end == 'G' || *end == 'g') n *= 1024ULL * 1024ULL * 1024ULL;
+    else                                   n *= 1024ULL * 1024ULL;  /* bare = MiB */
+
+    if (n && n < INVFS_MIN_COMMIT_BYTES) {
+        fprintf(stderr,
+                "[blkio] commit threshold %llu B is below the %u B block size;\n"
+                "        refusing rather than clamping, because a sub-block\n"
+                "        bound silently behaves like --sync. Use\n"
+                "        INVFS_COMMIT_STRICT=1 if that is what you meant.\n",
+                n, INVFS_MIN_COMMIT_BYTES);
+        return 0;
+    }
+    return (uint64_t)n;
+}
+
+static int pf_env_flag(const char *name)
+{
+    const char *v = getenv(name);
+    return (v && *v && strcmp(v, "0") != 0);
+}
+
+void blkio_set_commit(blkio *io, uint64_t bytes, uint64_t ms, uint64_t idle_ms)
+{
+    if (!io) return;
+    io->commit_bytes = bytes;
+    io->commit_ms    = ms;
+    io->idle_ms      = idle_ms;
+    io->dirty_bytes  = 0;
+    io->last_write_ms = pf_now_ms();
+}
+
+void blkio_force_flush(blkio *io)
+{
+    if (io) io->force_flush = 1;
+}
+
+/* Environment so that every tool inherits the policy without a new argument on
+ * every CLI:
+ *   INVFS_COMMIT_STRICT=1    fsync every flush (the default)
+ *   INVFS_COMMIT_NONE=1      never sync before close
+ *   INVFS_COMMIT_BYTES=16    bare number = MiB; 4K / 512K / 1M / 1G accepted
+ *   INVFS_COMMIT_MS=1000     wall-clock bound
+ *   INVFS_COMMIT_IDLE_MS=500 idle bound
+ */
+void blkio_apply_env_policy(blkio *io)
+{
+    const char *v;
+    uint64_t b = 0, t = 0, d = 0;
+
+    if (!io) return;
+
+    if (pf_env_flag("INVFS_COMMIT_STRICT")) { blkio_set_commit(io, 0, 0, 0); return; }
+
+    if (pf_env_flag("INVFS_COMMIT_NONE")) {
+        /* No reachable threshold: (uint64_t)-1 exceeds any dirty-byte count or
+         * elapsed-ms comparison a real run can produce, so nothing fires and
+         * only the flush vol_close forces happens. */
+        blkio_set_commit(io, (uint64_t)-1, (uint64_t)-1, (uint64_t)-1);
+        return;
+    }
+
+    b = pf_parse_bytes(getenv("INVFS_COMMIT_BYTES"));
+    if ((v = getenv("INVFS_COMMIT_MS"))      && *v) t = (uint64_t)strtoull(v, NULL, 10);
+    if ((v = getenv("INVFS_COMMIT_IDLE_MS")) && *v) d = (uint64_t)strtoull(v, NULL, 10);
+
+    if (b || t || d) blkio_set_commit(io, b, t, d);
+}
+
+/* 1 = a real fsync must happen now. */
+static int pf_should_flush(blkio *io)
+{
+    uint64_t now, dirty, last;
+
+    if (io->force_flush) return 1;
+    if (io->commit_bytes == 0 && io->commit_ms == 0 && io->idle_ms == 0)
+        return 1;                             /* strict: unchanged behaviour */
+
+    now   = pf_now_ms();
+    dirty = __atomic_load_n(&io->dirty_bytes, __ATOMIC_RELAXED);
+    last  = io->last_write_ms;
+
+    if (io->commit_bytes && dirty >= io->commit_bytes) return 1;
+    if (io->commit_ms    && now - last >= io->commit_ms) return 1;
+    if (io->idle_ms      && now - last >= io->idle_ms) return 1;
+    return 0;
+}
+
 int blkio_flush(blkio *io)
 {
     uint64_t my_gen = gc_load(&io->write_gen);
@@ -814,6 +950,20 @@ int blkio_flush(blkio *io)
 #else
     fd_ok = (io->fd >= 0);
 #endif
+
+    /* Deferral gate. Deliberately AFTER fd_ok: a handle with no descriptor must
+     * never take this skip, because "return 0" would turn a broken descriptor
+     * into a silent success, which is the reason fd_ok exists at all.
+     *
+     * A deferred flush does NOT advance flushed_gen. That is the safety
+     * property: flushed_gen means "a COMPLETED physical flush covers this", so
+     * leaving it alone keeps the volume honestly owing durability and the next
+     * trigger -- or vol_close -- pays it. */
+    if (!pf_should_flush(io)) {
+        io->last_write_ms = pf_now_ms();
+        INVFS_PERF_ADD(PERF_FSYNC_DEFERRED, 1);
+        return 0;
+    }
 
     pthread_mutex_lock(&g_gc_lock);
     for (;;) {
@@ -836,6 +986,12 @@ int blkio_flush(blkio *io)
         if (rc == 0 && cover > gc_load(&io->flushed_gen))
             gc_store(&io->flushed_gen, cover);
     }
+
+    /* The window is satisfied: reset the accumulators and clear any forced
+     * flush so the next window is measured from here. */
+    io->dirty_bytes   = 0;
+    io->last_write_ms = pf_now_ms();
+    io->force_flush   = 0;
 
     pthread_mutex_lock(&g_gc_lock);
     gc_store(&io->flush_busy, 0);

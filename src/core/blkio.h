@@ -116,6 +116,40 @@ typedef struct blkio {
      * file-static in blkio.c, shared by every handle in the process. */
     uint64_t write_gen;
     uint64_t flushed_gen;
+
+    /* ---- deferred commit policy (docs/benchmarks/commit-policy.md) -------
+     * Import is fsync-bound: measured on a real Arch root, 248,947 fsyncs for
+     * 34,209 files = 7.28 per file at 3.97 ms each, which accounts for
+     * essentially all of a 988 s import. vol_flush runs only TWICE in that
+     * import -- the fsyncs are one layer down, here -- so a volume-level
+     * flush counter does not see the cost at all.
+     *
+     * Any threshold may be 0, meaning that trigger is off. All three zero means
+     * STRICT, which is the behaviour from before this existed.
+     *
+     *   commit_bytes  sync once this many dirty BYTES accumulate. Bytes rather
+     *                 than files because fsync cost scales with dirty data, and
+     *                 because a file-count interval is inverted: it batches 100
+     *                 tiny files and does nothing for one huge file.
+     *   commit_ms     sync at least this often, bounding wall-clock loss.
+     *   idle_ms       flush this long after the last write -- when a sync is
+     *                 cheapest, and when an installer would otherwise sit
+     *                 dirty while waiting.
+     *
+     * dirty_bytes / last_write_ms are the accumulators. They are NOT advanced
+     * when a flush is DEFERRED, so a deferred flush leaves the volume honestly
+     * still owing durability: flushed_gen is untouched, and the next trigger or
+     * vol_close pays it.
+     *
+     * force_flush is set by whoever is closing or explicitly syncing: one real
+     * sync must always happen then, whatever the policy says.
+     */
+    uint64_t commit_bytes;
+    uint64_t commit_ms;
+    uint64_t idle_ms;
+    uint64_t dirty_bytes;
+    uint64_t last_write_ms;
+    int force_flush;
     /* 1 while some thread is inside the physical flush. Guarded by the
      * file-static mutex in blkio.c; a uint64_t so it can be read with the
      * same __atomic_* helpers as the generations. */
@@ -159,5 +193,18 @@ uint64_t blkio_capacity(blkio *io);
 
 int  blkio_is_device(const blkio *io);
 int  blkio_flush(blkio *io);
+
+/* Deferred-commit policy. Zero thresholds all round means strict.
+ * commit_bytes is in BYTES; the env parser treats a bare number as MiB.
+ * A threshold below one block must be REFUSED by the parser, not clamped:
+ * a clamped sub-block bound behaves exactly like --sync, which is the one
+ * thing a durability knob must never do quietly. */
+void blkio_set_commit(blkio *io, uint64_t bytes, uint64_t ms, uint64_t idle_ms);
+void blkio_apply_env_policy(blkio *io);
+
+/* Force the next blkio_flush to really sync regardless of policy. vol_close
+ * calls this, so a clean shutdown loses nothing under any policy -- only an
+ * unclean power loss widens the window. */
+void blkio_force_flush(blkio *io);
 
 #endif /* INVFS_BLKIO_H */

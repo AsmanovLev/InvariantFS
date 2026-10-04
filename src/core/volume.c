@@ -1475,6 +1475,12 @@ invfs_volume *vol_open(const char *path, int *err)
 
 void vol_close(invfs_volume *v)
 {
+    /* A clean shutdown loses nothing under ANY commit policy: the volume is
+     * about to stop being written, so this is where an owed sync is always
+     * paid. Only an unclean power loss is affected by the policy. */
+    if (v && v->io_open[0]) blkio_force_flush(&v->io);
+    if (v && v->ndev == 2 && v->io_open[1]) blkio_force_flush(&v->io2);
+
     if (!v) return;
     /* WP135: the anti-forgetting half of the walk receipt. A caller that
      * drops a walk's status -- including with an explicit (void) cast,
