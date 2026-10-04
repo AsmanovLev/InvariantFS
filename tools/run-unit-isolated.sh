@@ -142,11 +142,17 @@ if [ "${1:-}" = "--inner" ]; then
         done
     fi
 
-  if [ -n "$stage" ] && [ "${INVFS_TEST_DEBUG:-0}" = 1 ]; then
-      echo "$PROG: staged root=$stage (bind of $repo)" >&2
+  if [ "${INVFS_TEST_DEBUG:-0}" = 1 ]; then
+      echo "$PROG: stage=[$stage] repo=[$repo] cwd=$PWD" >&2
       for a in "$@"; do
-          printf '%s: %s\n' "$PROG" "  arg $a exists=$([ -e "$a" ] && echo yes || echo NO)" >&2
+          if [ -e "$a" ]; then ae=yes; else ae=NO; fi
+          echo "$PROG:   arg $a exists=$ae" >&2
       done
+      # ENOENT on exec of a file that EXISTS is the signature of a missing
+      # INTERPRETER: for a dynamically linked binary that is the loader, not
+      # the file. A namespace can hide it, so print it instead of guessing.
+      if [ -e /lib64/ld-linux-x86-64.so.2 ]; then le=yes; else le=NO; fi
+      echo "$PROG:   loader /lib64/ld-linux-x86-64.so.2 exists=$le" >&2
   fi
     exec "$@"
 fi
