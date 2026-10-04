@@ -123,9 +123,25 @@ jobs:
           sudo apt-get install -y -qq build-essential pkg-config \
             libfuse3-dev fuse3 zlib1g-dev libzstd-dev zstd xz-utils curl \
             python3 python3-numpy python3-pil \
-            libjxl-tools p7zip-full qemu-system-x86 qemu-utils \
             e2fsprogs xfsprogs dosfstools exfatprogs unzip zip acl \
-              || echo "::warning::some packages unavailable on this image"
+            debhelper devscripts
+          # Best-effort: qemu for the boot harnesses, p7zip-full and
+          # libjxl-tools for the e2e fixtures. The e2e PREFLIGHT is advisory by
+          # design -- it reports missing tools rather than failing a run -- so a
+          # runner image without these must not take the job down.
+          #
+          # ONE PACKAGE PER CALL, deliberately. `apt-get install a b c` installs
+          # NOTHING when any single name is unavailable: one unknown package
+          # aborts the whole transaction. So wrapping the full list in
+          # `|| echo warning` was WORSE than no tolerance at all -- it silently
+          # turned "one advisory tool is missing" into "no dependencies at all".
+          # That is exactly how this job lost libfuse3-dev and then died at the
+          # build step reporting "FAIL: build first (make)": make was fine, the
+          # headers were not there.
+          for p in libjxl-tools p7zip-full qemu-system-x86 qemu-utils; do
+            sudo apt-get install -y -qq "$p" \
+              || echo "::warning::$p unavailable on this image (advisory)"
+          done
 
       - name: host capability preflight
         # One report of every gap instead of a sweep dying at the first one.
