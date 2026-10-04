@@ -624,6 +624,19 @@ static void gc_bump(uint64_t *p)
 
 int blkio_pwrite(blkio *io, uint64_t off, const void *buf, size_t len)
 {
+    /* Accumulate for the deferred-commit policy HERE, not in blkio_write.
+     *
+     * Measured: with the accumulator in blkio_write, `blkio writes` was 0 for
+     * a real 34,209-file import, because vmux_pwrite calls blkio_pwrite
+     * directly and never goes through blkio_write. dirty_bytes therefore stayed
+     * 0, the 16 MB threshold could never be satisfied, and the whole 26.4x
+     * improvement came from the close-time flush alone -- 1 fsync instead of the
+     * ~170 that 2.7 GB / 16 MB predicts.
+     *
+     * Every byte that reaches the descriptor passes through here, so this is
+     * the only place the accumulator sees the real traffic. */
+    io->dirty_bytes   += len;
+    io->last_write_ms  = pf_now_ms();
     int rc;
 
     if (len == 0) return 0;
@@ -667,9 +680,6 @@ int blkio_write(blkio *io, const void *buf, size_t len)
      * hide it. */
     INVFS_PERF_ADD(PERF_BLKIO_WRITES, 1);
     INVFS_PERF_ADD(PERF_BLKIO_WRITE_BYTES, len);
-    /* Accumulate for the deferred-commit policy, at the layer that fsyncs. */
-    io->dirty_bytes   += len;
-    io->last_write_ms  = pf_now_ms();
     if (blkio_pwrite(io, io->pos, buf, len) != 0)
         return -1;
     io->pos += len;
