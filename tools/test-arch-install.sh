@@ -91,7 +91,7 @@ build_stage() {
     $SUDO mount -t proc proc "$STAGE/proc"
     $SUDO mount --rbind /sys "$STAGE/sys"
     $SUDO mount --rbind /dev "$STAGE/dev"
-    trap '$SUDO umount -R "$STAGE/proc" "$STAGE/sys" "$STAGE/dev" 2>/dev/null || true' EXIT
+    trap 'unmount_stage "$SUDO" "$STAGE" >/dev/null 2>&1 || true' EXIT
     note "pacman-key + base + linux + mkinitcpio + openssh + dhcpcd"
     $SUDO chroot "$STAGE" /bin/bash -c '
         pacman-key --init >/dev/null 2>&1
@@ -99,9 +99,46 @@ build_stage() {
         pacman -Sy --noconfirm >/dev/null 2>&1
         pacman -S --noconfirm --needed base linux linux-firmware mkinitcpio openssh dhcpcd iproute2 iputils >/dev/null 2>&1
     ' || fail "pacman install"
-    $SUDO umount -R "$STAGE/proc" "$STAGE/sys" "$STAGE/dev" 2>/dev/null || true
+    unmount_stage "$SUDO" "$STAGE" || fail "staging tree still has /proc, /sys or /dev mounted -- refusing to import"
     trap - EXIT
     provision_stage
+}
+
+# Unmount /proc, /sys and /dev from the staging tree AND VERIFY it worked.
+#
+# The old line here was `umount -R ... 2>/dev/null || true`, which cannot
+# distinguish "unmounted cleanly" from "umount -R failed on a busy submount" --
+# and on a busy rbind of /sys (which carries securityfs and cgroup2) it does
+# fail. The import then ran anyway, against LIVE kernel state:
+#
+#   invf-import: skipped .../stage/sys/bus/platform/drivers/broxton-pinctrl/bind:
+#       unreadable source (DATA LOSS -- this path is NOT in the volume)
+#
+# 1106 such paths on the run that hit this. Every one costs a failed open plus
+# the importer's per-file fsync barriers, so the import crawls, and the volume
+# ends up carrying a baked-in copy of /sys and 175 devtmpfs device nodes that
+# have no business being in a root filesystem -- the kernel mounts both at boot.
+#
+# Retry the lazy unmount, then refuse to continue if anything is left. A silent
+# best-effort cleanup step that gates an expensive, fsync-bound import is how a
+# 3000s timeout happens with nobody noticing why.
+unmount_stage() {
+    local sudo="$1" s="$2" d
+    for d in proc sys dev; do
+        $sudo umount -R "$s/$d" 2>/dev/null || true
+        $sudo umount -l  "$s/$d" 2>/dev/null || true
+    done
+    # Busy submounts (sys/fs/cgroup, sys/kernel/security, dev/pts) are the
+    # common case; drop them by whatever route is left.
+    $sudo umount -R "$s" 2>/dev/null || true
+    local left
+    left=$(findmnt -R -n -o TARGET "$s" 2>/dev/null | grep -E "^$s/(proc|sys|dev)(/|$)" || true)
+    if [ -n "$left" ]; then
+        echo "ERROR: these remain mounted under $s:" >&2
+        echo "$left" | sed 's/^/  /' >&2
+        return 1
+    fi
+    return 0
 }
 
 provision_stage() {
