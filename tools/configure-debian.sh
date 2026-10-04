@@ -73,6 +73,39 @@ cat > "$E/etc/default/locale" <<'EOF'
 LANG=C.UTF-8
 EOF
 
+# --- networking -------------------------------------------------------------
+# The boot harness reaches the guest over QEMU's user-mode hostfwd, which needs
+# the GUEST to have an address: SLIRP hands out 10.0.2.15 via DHCP, and
+# nothing configures it unless something asks. A minbase Debian has no DHCP
+# client enabled, so the first boot came all the way up -- systemd reached
+# multi-user.target on the FUSE root -- and then the harness could not reach
+# sshd, which looked like a boot failure and was not one. The guest booted; it
+# simply had no IP.
+#
+# configure-void.sh enables dhcpcd for exactly this reason. Here systemd-networkd
+# is the equivalent, and it needs no extra package.
+mkdir -p "$E/etc/systemd/network"
+cat > "$E/etc/systemd/network/20-wired.network" <<'EOF'
+[Match]
+Name=en* eth*
+
+[Network]
+DHCP=yes
+EOF
+
+# The .network file alone does NOTHING: systemd-networkd must also be enabled.
+# debootstrap enables neither, so the first two boots came up with systemd
+# reaching multi-user.target and then an unreachable guest -- no networkd, no
+# carrier, no DHCP lease, and not one networking line in the serial log. The
+# wants symlink is what actually starts the service; writing config without it
+# is the systemd equivalent of writing an fstab entry for a unit that is off.
+mkdir -p "$E/etc/systemd/system/sys-subsystem-networking.target.wants"
+ln -sfn /usr/lib/systemd/systemd-networkd.service \
+        "$E/etc/systemd/system/sys-subsystem-networking.target.wants/systemd-networkd.service"
+# sys-subsystem-network.target is the other alias some units hang off; the
+# wants dir is harmless if unused and avoids a "unit not found" on older roots.
+mkdir -p "$E/etc/systemd/system/sys-subsystem-network.target.wants"
+
 # --- sshd (optional; the harness uses it to assert the root is alive) -------
 if [ "$WITH_SSHD" = "sshd" ]; then
     if [ ! -e "$E/etc/ssh/ssh_host_rsa_key" ]; then
