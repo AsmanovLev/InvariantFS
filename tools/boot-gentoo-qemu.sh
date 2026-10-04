@@ -170,7 +170,7 @@ qemu-system-x86_64 \
     -machine q35,accel=kvm -cpu host -m 3072 -smp 2 \
     -kernel "$WP62_KERNEL" -initrd "$INITRD" \
     -append 'console=ttyS0,115200' \
-    -drive file="$IMG",format=raw,if=ide \
+    -drive file="$IMG",format=raw,if=virtio \
     -netdev "user,id=net0,hostfwd=tcp::${WP62_SSH_PORT}-:22" \
     -device virtio-net-pci,netdev=net0 \
     -display none -serial file:"$WP62_LOG" -monitor none -no-reboot &

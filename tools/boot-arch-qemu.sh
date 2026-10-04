@@ -114,7 +114,7 @@ if [ "$BOOTLOADER" = 1 ]; then
     QEMU_ARGS=(
         -machine q35,accel=kvm -cpu host -m "$RAM" -smp 2
         -drive "if=pflash,format=raw,readonly=on,file=$OVMF"
-        -drive "id=root,file=$DISK_IMG,format=raw,if=ide"
+        -drive "id=root,file=$DISK_IMG,format=raw,if=virtio"
         -append "console=ttyS0,115200"
         -netdev user,id=net0,hostfwd=tcp::${PORT}-:22
         -device virtio-net-pci,netdev=net0
@@ -122,9 +122,9 @@ if [ "$BOOTLOADER" = 1 ]; then
     )
 else
     # --single/--multi: direct -kernel/-initrd boot (host kernel).
-    DRIVES=(-drive "id=root,file=$IMG,format=raw,if=ide")
+    DRIVES=(-drive "id=root,file=$IMG,format=raw,if=virtio")
     if [ "$MODE" = multi ]; then
-        DRIVES+=(-drive "id=shadow,file=$SHADOW,format=raw,if=ide")
+        DRIVES+=(-drive "id=shadow,file=$SHADOW,format=raw,if=virtio")
     fi
     note "booting $MODE volume(s): IMG=$IMG${SHADOW:+ SHADOW=$SHADOW}"
     note "kernel=$KERNEL initrd=$INITRD ram=${RAM}M port=$PORT"
