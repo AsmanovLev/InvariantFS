@@ -86,9 +86,20 @@ int main(int argc, char **argv)
                     dir[0] ? dir : "/", strerror(-n));
             free(ents); free(st); vol_close(vol); return 1;
         }
-        if (n == 4096)
-            fprintf(stderr, "warning: %s%s truncated at 4096 entries\n",
-                    dir, dir[0] ? "/" : "");
+          if (n == 4096) {
+              /* The end-of-run tally can only be trusted if every directory
+               * enumerated completely. usr/share/man/man3/ is larger than this
+               * cap, and for six CI runs invf-ls reported a SHORT count in the
+               * authoritative "N file(s)" form, which the Arch check read as
+               * 7,108 lost files.
+               *
+               * dcaa197 meant to set the flag here and did not: the edit did not
+               * apply, and the commit went in anyway because the BUILD was clean.
+               * A build is not a behaviour. */
+              truncated = 1;
+              fprintf(stderr, "warning: %s%s truncated at %d entries\n",
+                      dir, dir[0] ? "/" : "", 4096);
+          }
         for (int i = 0; i < n; i++) {
             /* dir (INVFS_MAX_NAME) + '/' + name (INVFS_MAX_NAME): the
              * old buffer was INVFS_MAX_NAME+2, so a deep path was

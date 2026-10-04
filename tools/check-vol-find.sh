@@ -59,8 +59,8 @@ src/cli/fuse_fs.c:3455:SKIP
 src/cli/otrunc_test.c:568:SKIP   # calibration: the armed lookup IS the assertion
 src/cli/otrunc_test.c:572:SKIP   # calibration: the armed lookup IS the assertion
 src/cli/lane_release_test.c:242:SKIP
-src/cli/ls.c:110:SKIP   # shifted by the invf-ls truncation flag
-src/cli/ls.c:124:SKIP   # was 105/119 before it
+src/cli/ls.c:121:SKIP
+src/cli/ls.c:135:SKIP
 src/cli/read_parallel_bitexact_test.c:427:SKIP
 src/cli/rollback_symlink_test.c:207:SKIP
 src/cli/rollback_symlink_test.c:223:SKIP
