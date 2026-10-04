@@ -218,7 +218,7 @@ CLI_MAINS := mkfs verify fsck cp cat ls stat arctest blkio_test resize \
              sweep_publish_rollback_test \
              rollback_symlink_test \
              sibling_retire_v3_test tar_cap_test fold_delta_read_test \
-             reclaim_reader_epoch_test readdir_error_test dedupe_symlink_test dirs_free_before_publish_test \
+             reclaim_reader_epoch_test dedupe_symlink_test dirs_free_before_publish_test \
              stat_v3_counts_test acl_eio_test acl_inherit_test meta_clobber_test spn_skip_recipe_test \
              walk_status_test walk_status_fuse_test no_v2_surface_test \
              heat_walk_test no_ckp0_surface_test \
@@ -249,6 +249,17 @@ $(OBJ)/invf-zip.o: $(SRC)/recipes/zip.c | $(OBJ)
 	$(CC) $(CFLAGS) -c -o $@ $<
 $(OUT)/invf-zip: $(OBJ)/invf-zip.o $(filter-out $(OBJ)/miniz.o,$(CORE_O))
 	$(CC) $(CFLAGS) -o $@ $< $(filter-out $(OBJ)/miniz.o,$(CORE_O)) $(LDLIBS)
+
+# readdir_error_test calls fuse_new(), so it needs the FUSE cflags AND the FUSE
+# libs. In CLI_MAINS it went through the generic TOOL_RULE, which passes no
+# libs, so CI failed at the link with
+#     readdir_error_test.c: undefined reference to `fuse_new'
+# after the whole build had already succeeded. Own rules instead, mirroring the
+# invf-fuse ones below.
+$(OUT)/invf-readdir_error_test: $(OBJ)/readdir_error_test.o $(CORE_O) | $(OUT)
+	$(CC) $(CFLAGS) $(FUSE_CFLAGS) -o $@ $< $(CORE_O) $(LDLIBS) $(FUSE_LIBS)
+$(OBJ)/readdir_error_test.o: src/cli/readdir_error_test.c | $(OBJ)
+	$(CC) $(CFLAGS) $(FUSE_CFLAGS) -c -o $@ $<
 
 $(OUT)/invf-fuse: $(OBJ)/fuse_fs.o $(OBJ)/tmpstore.o $(CORE_O)
 	$(CC) $(CFLAGS) $(FUSE_CFLAGS) -o $@ $< $(OBJ)/tmpstore.o $(CORE_O) $(LDLIBS) $(FUSE_LIBS)

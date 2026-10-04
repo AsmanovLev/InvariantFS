@@ -85,7 +85,8 @@ jobs:
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y -qq build-essential pkg-config \
-            libfuse3-dev zlib1g-dev libzstd-dev zstd python3
+            libfuse3-dev zlib1g-dev libzstd-dev zstd python3 \
+            debhelper devscripts
 
       - name: build
         run: make -j"$(nproc)" && make helpers
