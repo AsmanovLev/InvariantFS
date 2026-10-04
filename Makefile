@@ -183,7 +183,7 @@ $(OUT):
 SRC_ALL := $(shell find $(SRC) -name '*.c' -o -name '*.h' 2>/dev/null)
 
 $(OBJ)/%.o: %.c $(SRC_ALL) | $(OBJ)
-	$(CC) $(CFLAGS) -c -o $@ $<
+	$(CC) $(CFLAGS) $(if $($(basename $*)_FUSE),$(FUSE_CFLAGS)) -c -o $@ $<
 
 $(OBJ)/deflate_repro.o: $(SRC)/codecs/deflate_repro.c $(SRC)/codecs/deflate_backend.h $(SRC)/codecs/deflate_repro.h | $(OBJ)
 	$(CC) $(CFLAGS) -fPIC -c -o $@ $<
@@ -201,9 +201,25 @@ $(OBJ)/deflate_backend_stock.o: $(SRC)/codecs/deflate_backend_zlib.c $(SRC)/code
 # zip.c includes miniz internally, so it links without $(OBJ)/miniz.o
 MINIZLESS := $(filter-out miniz.o,$(notdir $(CORE_O)))
 
+# Sources that call FUSE entry points (fuse_new, fuse_main, fuse_session, ...)
+# need BOTH $(FUSE_CFLAGS) to compile and $(FUSE_LIBS) to link. A source that
+# uses them and appears only in CLI_MAINS gets the generic TOOL_RULE, which
+# passes no libraries -- so the whole build succeeds and then THAT one binary
+# fails at the link with "undefined reference to `fuse_new'". It has now
+# happened in two consecutive CI rounds (readdir_error_test, then
+# acl_eio_test), so it is fixed here for the class rather than file by file.
+FUSE_LINKED := acl_eio_test acl_inherit_test chmod_acl_write_test \
+               meta_clobber_test otrunc_test table_sync_evict_test \
+               walk_status_fuse_test
+
+# TOOL_RULE and the object pattern rule both read <name>_FUSE, so adding a
+# FUSE-using test is one line in this list rather than a bespoke rule that
+# would collide with the one CLI_MAINS already generated for it.
+$(foreach t,$(FUSE_LINKED),$(eval $(t)_FUSE = 1))
+
 define TOOL_RULE
 $(OUT)/invf-$(1): $$(OBJ)/$(1).o $(CORE_O) | $(OUT)
-	$$(CC) $$(CFLAGS) -o $$@ $$< $(CORE_O) $$(LDLIBS) $$(2)
+	$$(CC) $$(CFLAGS) $$(if $$($(1)_FUSE),$$(FUSE_CFLAGS)) -o $$@ $$< $$(CORE_O) $$(LDLIBS) $$(2) $$(if $$($(1)_FUSE),$$(FUSE_LIBS))
 endef
 
 # CLI tools (main in src/cli/<name>.c)

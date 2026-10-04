@@ -222,7 +222,7 @@ stage_gentoo() {
     # the ONLY things stubbed: portage's unit-file helper, and its shell setup
     systemd_dounit() { :; }        # portage: installs unit files into $ED
     ( set -e
-      . "$REPO/packaging/gentoo/invfs-$PV.ebuild" 2>/dev/null
+        . "$REPO/packaging/gentoo/invfs-$PV.ebuild"
       src_install
     ) > "$d/log" 2>&1
     rc=$?
