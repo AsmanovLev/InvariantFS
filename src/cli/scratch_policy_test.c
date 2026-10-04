@@ -55,7 +55,14 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
-#include <sys/statvfs.h>
+/* The filesystem-type magic lives in struct statfs. struct statvfs has no
+ * f_type member, so this was
+ *     error: 'struct statvfs' has no member named 'f_type'
+ * and the test could never compile. Same fix, same reason, as
+ * src/core/tool_scratch.c -- which means the bug existed in two files and I
+ * fixed the one I happened to be shown, without grepping for the pattern. */
+#include <sys/statfs.h>
+#include <sys/statvfs.h>   /* fs_free() legitimately uses statvfs for free space */
 #include <sys/wait.h>
 #include <unistd.h>
 
@@ -177,8 +184,8 @@ static void child_grow(void)
 
 static int is_tmpfs(const char *p)
 {
-    struct statvfs v;
-    return statvfs(p, &v) == 0 && (unsigned long)v.f_type == TMPFS_MAGIC;
+    struct statfs v;
+    return statfs(p, &v) == 0 && (unsigned long)v.f_type == TMPFS_MAGIC;
 }
 
 static uint64_t fs_free(const char *p)
