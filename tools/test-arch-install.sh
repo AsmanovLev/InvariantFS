@@ -100,6 +100,29 @@ build_stage() {
         pacman -S --noconfirm --needed base linux linux-firmware mkinitcpio openssh dhcpcd iproute2 iputils >/dev/null 2>&1
     ' || fail "pacman install"
     unmount_stage "$SUDO" "$STAGE" || fail "staging tree still has /proc, /sys or /dev mounted -- refusing to import"
+    # ...and the directory itself must be empty of kernel state. Being UNMOUNTED
+    # is not the same as being clean: a run observed 33,528 real regular files
+    # under stage/sys -- attribute files like kernel/warn_count and
+    # kernel/mm/lru_gen/enabled -- with nothing mounted at all. A real root has
+    # an empty /sys; the kernel populates it at boot. Importing that produces a
+    # volume carrying a frozen snapshot of the build host's kernel.
+    #
+    # I could not establish how those files got there. The mount-based theory
+    # does not fit -- a bind mount does not copy -- and guessing a cause here
+    # would be worse than recording the observation, so this checks the OUTCOME
+    # instead: whatever the provenance, refuse to import kernel state.
+    for d in proc sys dev; do
+        n=$(find "$STAGE/$d" -mindepth 1 2>/dev/null | wc -l)
+        if [ "$n" -gt 0 ]; then
+            echo "ERROR: $STAGE/$d holds $n entries after unmount; a root filesystem" >&2
+            echo "       must have an empty /$d (the kernel mounts it at boot)." >&2
+            echo "       Refusing to import a snapshot of the build host's kernel." >&2
+            echo "       First few:" >&2
+            find "$STAGE/$d" -mindepth 1 2>/dev/null | head -5 | sed "s#^#         #" >&2
+            fail "staging tree still holds kernel state under $d"
+        fi
+    done
+    note "staging tree clean: proc/ sys/ dev/ all empty"
     trap - EXIT
     provision_stage
 }
