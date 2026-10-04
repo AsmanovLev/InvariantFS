@@ -46,19 +46,46 @@ nonroot_gate() {
     # selected on the HOST side where quoting is not in play.
     out=$("${ssh_cmd[@]}" '
         id -u nobody >/dev/null 2>&1 || { echo "GUARD-SKIP no nobody user"; exit 0; }
-        if command -v su >/dev/null 2>&1; then
-            as_nobody() { su -s /bin/sh nobody -c "$1" 2>&1; }
-            DROPPED=su
-        elif command -v setpriv >/dev/null 2>&1; then
-            as_nobody() { setpriv --reuid=nobody --regid=nogroup --clear-groups /bin/sh -c "$1" 2>&1; }
+        # setpriv FIRST, su only as a fallback -- and the fallback triggers on su
+        # FAILING, not merely on it being absent.
+        #
+        # The question is "can this uid read/exec/list on /", and setpriv answers
+        # exactly that: it setresuid()s and execs, consulting nothing. su routes
+        # through PAM and the shadow entry, so it can refuse for reasons that
+        # have nothing to do with the filesystem. Arch ships nobody with a
+        # locked password field, and su answered
+        #
+        #     "Your account has expired; please contact your system administrator."
+        #
+        # which made this gate report read/exec/list FAIL on a root filesystem
+        # where all four operations passed under setpriv. A correct filesystem
+        # reported as broken, because the probe was measuring the password
+        # database.
+        if command -v setpriv >/dev/null 2>&1; then
             DROPPED=setpriv
+            # NUMERIC ids, resolved at run time. setpriv does not accept a GROUP
+            # NAME: `--regid=nogroup` fails with "failed to parse regid", so a
+            # name-based form fails on every system including working ones --
+            # which is the worst possible failure for a regression guard, because
+            # it looks exactly like the bug it exists to catch.
+            NID=$(id -u nobody); NGID=$(id -g nobody)
+            as_nobody() { setpriv --reuid=$NID --regid=$NGID --clear-groups /bin/sh -c "$1" 2>&1; }
+            as_nobody_exec() { setpriv --reuid=$NID --regid=$NGID --clear-groups "$@"; }
+            if ! as_nobody_exec /bin/true >/dev/null 2>&1; then
+                echo "GUARD-SKIP setpriv cannot drop to nobody"
+                exit 0
+            fi
+        elif command -v su >/dev/null 2>&1; then
+            DROPPED=su
+            as_nobody() { su -s /bin/sh nobody -c "$1" 2>&1; }
+            as_nobody_exec() { su -s /bin/sh nobody -c "$1" 2>&1; }
         else
-            echo "GUARD-SKIP neither su nor setpriv"; exit 0
+            echo "GUARD-SKIP neither setpriv nor su"; exit 0
         fi
         echo "    drop mechanism: $DROPPED"
-        printf "    read  RD_FILE : "; as_nobody "cat RD_FILE" >/dev/null 2>&1 && echo PASS || echo FAIL
-        printf "    exec  EXE_BIN : "; as_nobody "EXE_BIN -c :" >/dev/null 2>&1 && echo PASS || echo FAIL
-        printf "    list  LIST_DIR: "; as_nobody "ls LIST_DIR" >/dev/null 2>&1 && echo PASS || echo FAIL
+        printf "    read  RD_FILE : "; as_nobody_exec /bin/cat RD_FILE >/dev/null 2>&1 && echo PASS || echo FAIL
+        printf "    exec  EXE_BIN : "; as_nobody_exec EXE_BIN -c : >/dev/null 2>&1 && echo PASS || echo FAIL
+        printf "    list  LIST_DIR: "; as_nobody_exec /bin/ls LIST_DIR >/dev/null 2>&1 && echo PASS || echo FAIL
         echo "    mountopts-for-slash: $(cat /proc/mounts | grep " / ")"
     ' 2>&1 | sed -e "s|RD_FILE|$rd|g" -e "s|EXE_BIN|$exe|g" -e "s|LIST_DIR|$dir|g" -e "s|/bin/sh|$sh_bin|g")
 
