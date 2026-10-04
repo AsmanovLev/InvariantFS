@@ -215,6 +215,44 @@ PROBES = [
     ("dbus-unit", "systemctl cat dbus.service 2>&1 | grep -vE '^#|^$' | head -25"),
     ("target-deps", "SYSTEMD_COLORS=0 systemctl show multi-user.target "
                     "-p Wants -p Requires -p After --no-pager"),
+
+    # THE REGRESSION THIS TREE COULD NOT SEE. Every boot harness in this repo
+    # asserts as root, so "the guest booted" and "the guest is usable by a
+    # normal user" looked identical for the entire life of the test suite --
+    # right up to a guest where invf-fuse mounted the root WITHOUT allow_other,
+    # which makes the mount private to the mounting uid (root). Every other uid
+    # then gets EACCES on every file, and dbus.service fails every boot with
+    # 203/EXEC purely because systemd runs it as User=messagebus.
+    #
+    # So assert what root cannot see. A green boot here says nothing about this;
+    # a red one means the guest is unusable to anyone but root.
+    #
+    # Mount options are dumped unfiltered on purpose (WP225): filtering
+    # /proc/mounts down to the lines you expect is how the missing `noexec` /
+    # missing `allow_other` distinction got missed twice.
+    ("nonroot-access", "echo '--- mount options for / (unfiltered):'; "
+                       "awk '$2==\"/\"{print \"    \"$0}' /proc/mounts; "
+                       "grep -c 'allow_other' /proc/mounts >/dev/null 2>&1; "
+                       "awk '$2==\"/\"' /proc/mounts | grep -q 'allow_other' "
+                       "&& echo '    allow_other on / : PRESENT' || echo '    allow_other on / : ABSENT'; "
+                       "echo '--- can an unprivileged uid READ a root-owned file on / ?'; "
+                       "setpriv --reuid=messagebus --regid=messagebus --clear-groups "
+                       "/usr/bin/head -c 8 /etc/hostname >/dev/null 2>&1 "
+                       "&& echo '    messagebus read /etc/hostname : PASS' || echo '    messagebus read /etc/hostname : FAIL'; "
+                       "echo '--- can it EXEC a root-owned world-executable file on / ?'; "
+                       "setpriv --reuid=messagebus --regid=messagebus --clear-groups "
+                       "/usr/bin/dbus-daemon --version >/dev/null 2>&1 "
+                       "&& echo '    messagebus exec dbus-daemon : PASS' || echo '    messagebus exec dbus-daemon : FAIL'; "
+                       "echo '--- can it traverse and list a directory on / ?'; "
+                       "setpriv --reuid=messagebus --regid=messagebus --clear-groups "
+                       "/usr/bin/ls /usr/bin >/dev/null 2>&1 "
+                       "&& echo '    messagebus ls /usr/bin : PASS' || echo '    messagebus ls /usr/bin : FAIL'; "
+                       "echo '--- and the same binary on a NON-InvFS filesystem, as the control:'; "
+                       "cp /usr/bin/dbus-daemon /dev/shm/nbd 2>/dev/null && chmod 0755 /dev/shm/nbd; "
+                       "setpriv --reuid=messagebus --regid=messagebus --clear-groups "
+                       "/dev/shm/nbd --version >/dev/null 2>&1 "
+                       "&& echo '    messagebus exec on /dev/shm (tmpfs) : PASS' || echo '    messagebus exec on /dev/shm (tmpfs) : FAIL'; "
+                       "rm -f /dev/shm/nbd"),
 ]
 
 
