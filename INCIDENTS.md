@@ -2155,3 +2155,37 @@ person.
 the console socket), and treat a missing serial marker as *no information*
 rather than as failure. tools/ki3b-jobs.py already does the in-guest part
 correctly and is the model to copy.
+
+### ...and the same shape exists in a CI-gated script
+
+WP226 was filed against `tools/boot-debian-qemu.sh`, which is not in CI, so the
+finding had no teeth -- it could only ever be a documentation note. Checking the
+other three boot harnesses for the same shape:
+
+    tools/boot-arch-qemu.sh     0 serial-grep assertions  (asserts over SSH)
+    tools/boot-gentoo-qemu.sh   0 serial-grep assertions  (asserts over SSH)
+    tools/boot-void-qemu.sh     2 serial-grep assertions  <-- both hard-fail
+
+    boot-void-qemu.sh:181  grep -q 'InvariantFS mounted' "$SERIAL" || fail "initramfs did not report InvariantFS mounted"
+    boot-void-qemu.sh:182  grep -q 'FUSE root detected' "$SERIAL" || fail "FUSE-root core-service guard did not fire"
+
+**Why this one matters more than the Debian case.** `tools/boot-void-qemu.sh`
+IS wired into `distro-install` (commit 5f2dec9), single- and two-device. So an
+absent marker here produces a red X on someone else's change, with a message
+naming the FILESYSTEM -- "the initramfs did not report InvariantFS mounted" --
+when the only thing actually unobserved is a line of console text.
+
+**Honest scoping, though: the risk is lower here, and I have not shown it
+fires.** Both markers are emitted by `tools/initramfs-init.sh` very early, before
+PID1, and both were present in every file-based Debian log examined today --
+unlike systemd's own `[ OK ] Reached target ...` lines, which vanished entirely
+under the socket transport. So: same defect shape, same fix, but a demonstrated
+failure rate of zero rather than 8/8. It is recorded here as an untested
+exposure, not as an active incident.
+
+The fix is the same in both files and is deliberately not applied blind: assert
+in-guest over a console socket (`tools/ki3b-jobs.py` is the working model),
+treat a missing serial marker as *no information* rather than as failure, and
+keep the marker as a diagnostic in the failure message rather than as the
+predicate. Changing CI on an untested hypothesis is how a green job becomes a
+red one for the wrong reason.
