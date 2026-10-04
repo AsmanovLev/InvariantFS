@@ -218,10 +218,11 @@ on a global lock.
   so systemd, running the unit as `User=messagebus`, cannot exec anything on `/`.
   Verified by mounting the same volume both ways on the boot kernel: without the
   option every non-root read/exec/list returns `EACCES`; with it, all succeed.
-  Fixed in `wp/allow-other-initramfs` (`allow_other` is always permitted for
-  root, so this does not require `CONFIG_FUSE_ALLOW_ALL`). See `INCIDENTS.md`
-  WP227; **WP225-RESOLVED-PARTIAL is superseded -- it exonerated the filesystem
-  incorrectly.**
+  **Fixed** (commit `612d0fe`) and confirmed end to end: `dbus.service` now
+  reports `ExecMainStatus=0`, `is-system-running` reports `running`, and no units
+  fail. `allow_other` is always permitted for root, so this does not require
+  `CONFIG_FUSE_ALLOW_ALL`. See `INCIDENTS.md` WP227; **WP225-RESOLVED-PARTIAL is
+  superseded -- it exonerated the filesystem incorrectly.**
   Because of this, **the busybox/OpenRC/runit fallback is still the
   recommendation for unattended boots** — the reachability target is met, but a
   working message bus is not.

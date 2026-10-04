@@ -2305,3 +2305,34 @@ boot harness in this repo asserts as root over SSH, so "the guest booted" and
 "the guest is usable by an ordinary user" were the same test for the entire life
 of the suite. A guest that boots perfectly and is unusable to everyone but root
 is not a state any existing test can express.
+
+### WP227 — confirmed end to end, merged as `612d0fe`
+
+Debian guest booted from the rebuilt initramfs, same volume, same probes:
+
+    dbus.service        Result=success   ExecMainStatus=0   (was exit-code / 203)
+    is-system-running   running                              (was degraded)
+    failed-units        <empty>                              (was dbus.service, dbus.socket)
+    mount line for /    invfs[vda] / fuse rw,nosuid,nodev,relatime,user_id=0,group_id=0,allow_other,...
+
+    messagebus: test -x PASS   test -r PASS   read first byte PASS
+                read via an inherited fd = 248408 bytes
+                cat /etc/hostname = "debian"    ls /usr/bin works
+
+and the measurement that caused the wrongful exoneration now reads:
+
+    root   exec on exec-tmpfs : PASS      messagebus exec on exec-tmpfs : PASS
+    messagebus exec on invfs  : PASS      uid1000     exec on exec-tmpfs : PASS
+
+**So the tmpfs anomaly is fully explained and there is no second mechanism.**
+`setpriv`, `cat`, `head` and `ls` all live on the root filesystem, so with the
+root mounted without `allow_other`, `messagebus` could not exec the probe's own
+instruments either. Every failing tmpfs line was that, not tmpfs. The one
+control I built to clear the filesystem was the thing the bug prevented from
+running.
+
+**Net effect of the bug, for anyone reading this later:** a guest that booted
+perfectly, mounted its root, reached `graphical.target`, accepted ssh as root,
+and passed every harness in this repository — while being unusable to every
+unprivileged user on it. Root-only assertions could not see it, which is why it
+survived from WP66 to now.
