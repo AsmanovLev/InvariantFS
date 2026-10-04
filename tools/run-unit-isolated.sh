@@ -81,6 +81,19 @@ if [ "${1:-}" = "--inner" ]; then
             cand="$root/$PROG-$$"
             mkdir -p "$cand" 2>/dev/null || continue
             if mount --bind "$repo" "$cand" 2>/dev/null; then
+                  # A bind mount does not change mount options, so a noexec
+                  # root stays noexec and every exec out of the staged tree
+                  # fails with "Permission denied" -- which surfaces as
+                  #   run-unit-isolated.sh: line 127: .../invf-<test>: Permission denied
+                  #   make: *** [Makefile:988: test] Error 127
+                  # i.e. as though the binary did not exist. Ask the kernel
+                  # rather than guessing per image: that is how this stayed
+                  # invisible while passing everywhere the root is exec-capable.
+                  if findmnt -no OPTIONS -T "$cand" 2>/dev/null \
+                       | tr ',' '\n' | grep -qx noexec; then
+                      rmdir "$cand" 2>/dev/null || true
+                      continue
+                  fi
                 stage=$cand
                 case "$root" in
                 /dev/shm) ;;                                    # tmpfs

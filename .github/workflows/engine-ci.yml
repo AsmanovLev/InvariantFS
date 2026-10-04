@@ -17,7 +17,19 @@ jobs:
     runs-on: ubuntu-22.04
     timeout-minutes: 60
     steps:
+      # fetch-depth 0 so TAGS are present. Without them `git describe` degrades
+      # to a bare commit hash, VERSION inside the release artifact becomes the
+      # hash instead of v0.5.0, and three separate checks then fail for what is
+      # really one cause:
+      #
+      #   gentoo   .ebuild path invfs-<hash>.ebuild does not exist -> rc=127
+      #   debian   .deb Version=0.5.0-1 does not match <hash>
+      #   sig      the SHA256SUMS assertion, downstream of the same mismatch
+      #
+      # Locally this never shows, because a working tree has its tags.
       - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
 
       - name: dependencies
         run: |
@@ -79,7 +91,19 @@ jobs:
     runs-on: ubuntu-22.04
     timeout-minutes: 20
     steps:
+      # fetch-depth 0 so TAGS are present. Without them `git describe` degrades
+      # to a bare commit hash, VERSION inside the release artifact becomes the
+      # hash instead of v0.5.0, and three separate checks then fail for what is
+      # really one cause:
+      #
+      #   gentoo   .ebuild path invfs-<hash>.ebuild does not exist -> rc=127
+      #   debian   .deb Version=0.5.0-1 does not match <hash>
+      #   sig      the SHA256SUMS assertion, downstream of the same mismatch
+      #
+      # Locally this never shows, because a working tree has its tags.
       - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
 
       - name: dependencies
         run: |
@@ -103,7 +127,19 @@ jobs:
     runs-on: ubuntu-22.04
     timeout-minutes: 90
     steps:
+      # fetch-depth 0 so TAGS are present. Without them `git describe` degrades
+      # to a bare commit hash, VERSION inside the release artifact becomes the
+      # hash instead of v0.5.0, and three separate checks then fail for what is
+      # really one cause:
+      #
+      #   gentoo   .ebuild path invfs-<hash>.ebuild does not exist -> rc=127
+      #   debian   .deb Version=0.5.0-1 does not match <hash>
+      #   sig      the SHA256SUMS assertion, downstream of the same mismatch
+      #
+      # Locally this never shows, because a working tree has its tags.
       - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
 
       - name: dependencies
         # WP224: this list was short in exactly the ways the suites are brittle
