@@ -2018,3 +2018,65 @@ What was measured, so the next person does not re-chase it:
 transitions were its own harness — a trap that leaked, a probe that blocked, a
 detach that blocked, and a mount whose filesystem hangs. None of them was the
 containerpack.
+---
+
+## WP224-OPEN: systemd boot on a FUSE root is NONDETERMINISTIC
+
+**Status:** OPEN — observed 2026-10-04, not localised. This is a new finding,
+not a correction of an old entry.
+
+README "Known issues" #3 says *"systemd-as-PID-1 on a FUSE root: runtime lookup
+corruption on two-device volumes (H2)"*, with a busybox/OpenRC fallback. There
+was no way to test it: the repo has boot harnesses for Arch, Gentoo and Void and
+**no Debian boot script at all**, so no systemd root had ever been booted here.
+tools/boot-debian-qemu.sh plus tools/configure-debian.sh now close that gap
+(debootstrap a Debian trixie minbase, boot it with
+`invfs.init=/lib/systemd/systemd`).
+
+**What works.** systemd 257.13 does come up as PID 1 on an InvariantFS root and
+complete its boot:
+
+    [  OK  ] Reached target multi-user.target - Multi-User System.
+    [  OK  ] Reached target graphical.target  - Graphical Interface.
+    systemd 257.13-1~deb13u1 running in system mode
+    InvariantFS mounted: 9495 files
+    OK: Mounted sys-fs-fuse-connections.mount - FUSE Control File System
+
+with zero `runit` occurrences in the guest console. So INCIDENTS.md's **H1
+("early-mount units fail and daemon startup hangs") does not describe a
+permanent condition** — the initramfs accommodation at tools/initramfs-init.sh:295-300
+(`/run` as tmpfs and cgroup2 before PID1 starts, WP66 H1) does its job.
+
+**What does not.** Across 15 attempts on ONE volume and ONE staged root, the boot
+alternated between completing and stalling:
+
+  reached multi-user.target    attempts 5, 7, 9, 11, 12, 13, 14
+  stalled, no multi-user in 900s              8, 15
+
+The stall point is early and consistent — the last messages are
+
+    Mounting sys-fs-fuse-connections.mount - FUSE Control File System...
+    Starting systemd-sysctl.service - Apply Kernel Variables...   (never Finished)
+    Finished systemd-udev-load-credentials.service
+    Started systemd-journald.service
+
+with `swap.target` the last target reached. Runs that stalled had already got
+udevd going (13 udev lines), so this is NOT the missing-`udev` stall that an
+earlier attempt showed: that one is fixed, and this is a different, later
+failure that happens with udev present.
+
+**Why this matters more than the README's wording.** What is observed is a
+*stall in early boot*, not "runtime lookup corruption". If #3 and this are the
+same problem, the description is wrong; if they are different, there is a second
+undocumented failure mode. **Not yet determined which**, and this row deliberately
+does not guess.
+
+**Next step:** a capture loop (boot N times, keep every serial log, diff the
+stalling runs against the passing ones). The variance is the finding; a single
+run cannot distinguish a timing race from a state-dependent one.
+
+**Also unproven by this harness:** the in-guest SSH assertions (`ps -p 1`,
+`/proc/mounts`, `systemctl is-system-running`, `systemctl poweroff`). A minbase
+Debian has no `procps`, so `ps` has nothing to run -- suspected, not verified.
+The harness therefore asserts from the SERIAL console and treats SSH as
+best-effort depth, and it does not print PASS.
