@@ -2189,3 +2189,64 @@ treat a missing serial marker as *no information* rather than as failure, and
 keep the marker as a diagnostic in the failure message rather than as the
 predicate. Changing CI on an untested hypothesis is how a green job becomes a
 red one for the wrong reason.
+
+## WP225-RESOLVED-PARTIAL: dbus 203/EXEC is NOT an InvariantFS defect
+
+**Status:** cause localised to "not us"; the underlying guest cause is still open.
+
+The original report in this row was that `dbus.service` fails every boot with
+`status=203/EXEC` and `User=messagebus`. Chasing it further changed the finding
+rather than completing it, and the change is the useful part.
+
+**What narrowed it.** `runuser -u messagebus -- /usr/bin/dbus-daemon --version`
+and `setpriv --reuid=messagebus --regid=messagebus --clear-groups
+/usr/bin/dbus-daemon --version` BOTH fail with `Permission denied` from a plain
+login shell -- and so does `runuser -u messagebus -- sh`. Meanwhile
+`dbus-ns-props` shows every systemd hardening knob is unset
+(`ProtectSystem=no`, `ProtectHome=no`, `DynamicUser=no`, `NoNewPrivileges=no`,
+`PrivateTmp=no`, `SystemCallFilter=~`), so systemd's per-unit sandbox is not
+implicated, and `dbus-exec-props` shows an ordinary
+`ExecStart=/usr/bin/dbus-daemon --system --address=systemd: ...` with no
+`RootDirectory`, `WorkingDirectory` or `RuntimeDirectory`. So 203/EXEC is
+systemd failing to exec a binary, as an unprivileged uid, that it can exec as root.
+
+**The control, and what it excludes.** Copying the binary to a tmpfs mounted
+by root with `exec` stated explicitly (`mount -t tmpfs -o exec,mode=0755`) and
+retrying:
+
+    root        exec /mnt/dbus-daemon  -> PASS   (D-Bus Message Bus Daemon 1.16.2)
+    messagebus  exec /mnt/dbus-daemon  -> FAIL   Permission denied
+    uid 1000    exec /mnt/dbus-daemon  -> FAIL   Permission denied
+    messagebus  exec /usr/bin/dbus-daemon (invfs) -> FAIL   Permission denied
+
+**Non-root exec is broken across every filesystem in this guest, including one
+that is not FUSE and was mounted with exec explicitly.** The InvariantFS mount
+carries `rw,nosuid,nodev,relatime,user_id=0,group_id=0,max_read=1048576` -- no
+`noexec`. PID1 and the probing shell both report `NoNewPrivs: 0`,
+`Seccomp: 0`, `Seccomp_filters: 0`, `CapEff: 000001ffffffffff`,
+`CapBnd: 000001ffffffffff`, and `/proc/cmdline` is just
+`console=ttyS0,115200 invfs.init=/lib/systemd/systemd`.
+
+**Conclusion: InvariantFS is not implicated.** A guest in which no unprivileged
+uid can exec anything, on any filesystem, is a guest-environment fault. That
+does not make the symptom harmless -- it is still 8/8, `is-system-running`
+still reports `degraded`, and `systemd-run` / `systemctl start` / `loginctl` /
+anything polkit-gated are all still broken -- but it is not a filesystem bug,
+and the README must not present it as one.
+
+**Still unexplained:** why execve returns EACCES for an unprivileged uid on a
+0755 root-owned file on a root-mounted `exec` tmpfs. The obvious candidates are
+all ruled out by the evidence above (noexec absent, no LSM in the guest, no
+seccomp, no_new_privs unset, DAC correct). The next thing to check is the
+guest's own uid mapping and whatever the initramfs does before handing off to
+PID1, since the fault is inherited from the handoff rather than from the mount.
+
+**A note on the measurements, because two of them were wrong before the third
+was right.** The `/dev/shm` control was discarded on the belief that systemd
+mounts it `noexec` by default; the unfiltered `/proc/mounts` dump shows
+`tmpfs /dev/shm tmpfs rw,nosuid,nodev` -- no `noexec`, so that control was valid
+and its FAILURE was real evidence. Every cheap control in this investigation
+inherited a default that was not what I assumed, and in this case I discarded a
+good measurement while announcing that I had. The pattern is not "controls are
+useless", it is that I should read the mount options before theorising about
+them.

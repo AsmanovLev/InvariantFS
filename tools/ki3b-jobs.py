@@ -106,6 +106,98 @@ PROBES = [
                     "/usr/bin/dbus-daemon --version 2>&1 | head -3"),
     # What systemd changes about the unit's namespace by default for an
     # unprivileged User=, and whether the uid can traverse the exec path at all.
+    # 203/EXEC localised: `runuser -u messagebus -- dbus-daemon --version` and
+    # `setpriv --reuid=messagebus -- dbus-daemon --version` BOTH fail with
+    # "Permission denied" from a plain shell, while the same binary as root
+    # works, and dbus-ns-props shows every hardening knob = no. So this is not
+    # systemd's per-unit sandbox and not dbus's config: a non-root uid cannot
+    # exec a world-executable file. The binary is -rwxr-xr-x root:root and uid
+    # 996 is neither owner nor group, so the OTHER r-x must grant it.
+    #
+    # These probes separate the three things that could produce EACCES here,
+    # because "Permission denied" from execve collapses all of them:
+    #   (a) the DAC check itself is wrong  -> test -x disagrees with ls
+    #   (b) only exec is broken            -> read works, exec does not
+    #   (c) it is systemic, not dbus       -> /bin/true and a fresh 0755 file
+    #                                           behave the same way
+    # plus the mode-storage control, since a mode that never reaches the kernel
+    # would make every one of the others a lie.
+    ("dac-asuser", "runuser -u messagebus -- sh -c '"
+                   "echo -n \"  test -x dbus-daemon : \"; test -x /usr/bin/dbus-daemon && echo PASS || echo FAIL; "
+                   "echo -n \"  test -r dbus-daemon : \"; test -r /usr/bin/dbus-daemon && echo PASS || echo FAIL; "
+                   "echo -n \"  read first byte    : \"; head -c1 /usr/bin/dbus-daemon >/dev/null 2>&1 && echo PASS || echo FAIL; "
+                   "echo -n \"  ls -l as messagebus: \"; ls -l /usr/bin/dbus-daemon 2>&1; "
+                   "echo -n \"  id                 : \"; id' 2>&1"),
+    ("dac-modestore", "echo '--- are mode bits even reaching the kernel?'; "
+                      "umask 022; rm -f /tmp/dacmod; touch /tmp/dacmod; chmod 0755 /tmp/dacmod; chmod 0700 /tmp/dacmod; "
+                      "for m in 0755 0700 0755 0077 0700; do chmod $m /tmp/dacmod; "
+                      "printf '  requested %s -> kernel reports %s\\n' \"$m\" \"$(stat -c %a /tmp/dacmod)\"; done; "
+                      "echo '  --- as messagebus, per-bit test on a 0755 file:'; "
+                      "chmod 0755 /tmp/dacmod; runuser -u messagebus -- sh -c "
+                      "'test -r /tmp/dacmod && echo \"    read ok\" || echo \"    read DENIED\"; "
+                      "test -w /tmp/dacmod && echo \"    write ok\" || echo \"    write DENIED (expected)\"; "
+                      "test -x /tmp/dacmod && echo \"    exec ok\" || echo \"    exec DENIED\"' 2>&1"),
+    # Every non-root exec has failed so far (`sh` and `dbus-daemon` both, via
+    # runuser AND setpriv, from a plain shell with no systemd involved), which
+    # means no non-root program can run AT ALL -- so I cannot test a non-root
+    # READ, because reading requires executing cat, which requires the thing
+    # under test. The control has to come from a filesystem that is not
+    # InvariantFS. /dev/shm is devtmpfs/tmpfs, never FUSE, so it separates
+    # "non-root cannot exec on InvariantFS" from "non-root cannot exec here".
+    #
+    # dac-tmpfs-control also dumps the InvariantFS mount options verbatim. If
+    # noexec is among them that explains the symptom outright (and would also
+    # have to explain how root succeeded, which is the interesting part).
+    ("dac-tmpfs-control", "echo '--- InvariantFS mount options, verbatim:'; "
+                         "grep -E ' / |invfs|fuse' /proc/mounts 2>&1; "
+                         "echo '--- same binary, non-root uid, on a NON-FUSE filesystem (/dev/shm):'; "
+                         "cp /usr/bin/dbus-daemon /dev/shm/dbus-daemon 2>&1 && chmod 0755 /dev/shm/dbus-daemon && ls -l /dev/shm/dbus-daemon; "
+                         "setpriv --reuid=messagebus --regid=messagebus --clear-groups /dev/shm/dbus-daemon --version 2>&1 && echo '  tmpfs exec as messagebus : PASS' || echo '  tmpfs exec as messagebus : FAIL'; "
+                         "echo '--- and the SAME binary on InvariantFS for comparison:'; "
+                         "setpriv --reuid=messagebus --regid=messagebus --clear-groups /usr/bin/dbus-daemon --version 2>&1 && echo '  invfs exec as messagebus : PASS' || echo '  invfs exec as messagebus : FAIL'; "
+                         "echo '--- is /dev itself FUSE-backed? (if so /dev/shm proves nothing):'; "
+                         "df -T /dev/shm /usr/bin/dbus-daemon /tmp 2>&1 | sed 's/^/  /'"),
+    # A non-root OPEN without a non-root exec: root opens the file and hands
+    # the descriptor over via a pipe, so the only thing being varied is the uid
+    # that read()s from an already-open fd. If that works while exec does not,
+    # the fault is in the exec path specifically (or in the kernel's per-file
+    # open-for-exec), not in InvariantFS's read path.
+    ("dac-open-test", "echo '--- non-root READ of an already-open fd (no exec involved):'; "
+                      "cat /usr/bin/dbus-daemon | setpriv --reuid=messagebus --regid=messagebus --clear-groups /usr/bin/wc -c 2>&1; "
+                      "echo '--- non-root read of a 0755 file it did not open (cat the file):'; "
+                      "setpriv --reuid=messagebus --regid=messagebus --clear-groups /bin/cat /etc/hostname 2>&1; "
+                      "echo '--- non-root read of a WORLD-READABLE file:'; "
+                      "setpriv --reuid=messagebus --regid=messagebus --clear-groups /usr/bin/head -c 20 /etc/hostname 2>&1; echo; "
+                      "echo '--- dirs: can non-root even traverse into /usr/bin?'; "
+                      "setpriv --reuid=messagebus --regid=messagebus --clear-groups /usr/bin/ls /usr/bin 2>&1 | head -3"),
+    # /dev/shm was NOT a valid control. It failed too, which looks like proof the
+    # filesystem is innocent -- but /dev/shm is mounted by systemd with
+    # noexec,nosuid,nodev by DEFAULT, so I had tested "a non-FUSE filesystem"
+    # while actually testing "a non-executable filesystem". I had filtered
+    # /proc/mounts down to invfs|fuse and discarded the line that would have
+    # said so. Third wrong control in this investigation; the pattern is that
+    # every cheap control I reach for inherits a default that is not what I
+    # think it is.
+    #
+    # So: mount a tmpfs with exec stated EXPLICITLY, rather than inheriting
+    # anyone's default, and dump every mount option unfiltered.
+    ("dac-ctl3", "echo '=== ALL mounts, unfiltered (options matter):'; "
+                 "cat /proc/mounts; "
+                 "echo; echo '=== root sanity: exec the control binary as ROOT'; "
+                 "mount -t tmpfs -o exec,mode=0755 tmpfs /mnt 2>&1 && echo '  mounted /mnt exec' || echo '  MOUNT FAILED'; "
+                 "cp /usr/bin/dbus-daemon /mnt/dbus-daemon && chmod 0755 /mnt/dbus-daemon && ls -l /mnt/dbus-daemon; "
+                 "/mnt/dbus-daemon --version 2>&1 && echo '  root exec on exec-tmpfs : PASS' || echo '  root exec on exec-tmpfs : FAIL'; "
+                 "echo; echo '=== THE CONTROL: same binary, same explicitly-exec tmpfs, as messagebus'; "
+                 "setpriv --reuid=messagebus --regid=messagebus --clear-groups /mnt/dbus-daemon --version 2>&1 && echo '  messagebus exec on exec-tmpfs : PASS' || echo '  messagebus exec on exec-tmpfs : FAIL'; "
+                 "echo; echo '=== and on InvariantFS, same binary, same uid'; "
+                 "setpriv --reuid=messagebus --regid=messagebus --clear-groups /usr/bin/dbus-daemon --version 2>&1 && echo '  messagebus exec on invfs : PASS' || echo '  messagebus exec on invfs : FAIL'; "
+                 "echo; echo '=== another non-root uid, to rule out something odd about 996'; "
+                 "setpriv --reuid=1000 --regid=1000 --clear-groups /mnt/dbus-daemon --version 2>&1 && echo '  uid1000 exec on exec-tmpfs : PASS' || echo '  uid1000 exec on exec-tmpfs : FAIL'; "
+                 "echo; echo '=== PID1 confinement (would explain a guest-wide exec block):'; "
+                 "grep -E '^(NoNewPrivs|Seccomp|Seccomp_filters|CapEff|CapBnd):' /proc/1/status; "
+                 "echo -n '  our own: '; grep -E '^(NoNewPrivs|Seccomp|CapEff):' /proc/self/status | tr '\\n' ' '; echo; "
+                 "echo '=== kernel cmdline:'; cat /proc/cmdline; "
+                 "umount /mnt 2>&1"),
     ("dbus-ns-props", "SYSTEMD_COLORS=0 systemctl show dbus.service "
                       "-p ProtectSystem -p ProtectHome -p PrivateTmp "
                       "-p PrivateDevices -p ProtectKernelTunables "
@@ -447,13 +539,22 @@ def main():
     good = summary["reached_multi_user"]
     log("")
     log(f"SUMMARY: {good}/{len(results)} reached multi-user.target")
+    # A probe result is sometimes a str and sometimes a dict -- the dict form
+    # carries `__echo_only__` when the console only ever saw its own typed line
+    # back and never any output. Calling .splitlines() on the dict raised
+    # AttributeError and killed the run AFTER run01.json was written, so the
+    # data survived but the exit status lied and the traceback buried the
+    # summary. Normalise to text instead.
     for r in results:
         if not r["reached_multi_user"]:
             log(f"  FAILING run {r['run']}: last_target={r.get('last_target')}")
             for name, out in (r.get("probes") or {}).items():
-                if out:
-                    for line in out.splitlines()[:14]:
-                        log(f"      {line}")
+                if not out:
+                    continue
+                text = out if isinstance(out, str) else "\n".join(
+                    f"{k}: {v}" for k, v in out.items())
+                for line in text.splitlines()[:14]:
+                    log(f"      {line}")
     return 0
 
 
