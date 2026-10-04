@@ -80,3 +80,14 @@ tools/flakey/artifacts
 # block cites .claude/skills/*/SKILL.md and a tracked file must not cite an
 # ignored path -- that is exactly what made `repo hygiene` fail in CI with seven
 # DOCROT lines while passing locally.
+
+# .gitnexus/ is NOT entirely ignored. The 181 MB lbug graph store is, but
+# run.cjs and gitnexus.json must ship: the committed AGENTS.md block and the
+# committed .claude/skills/*/SKILL.md files both cite .gitnexus/run.cjs, and
+# `repo hygiene` fails on a tracked file citing a missing path. This is the
+# second time this exact shape bit us -- first .claude/ was ignored while
+# AGENTS.md cited it, now .gitnexus/ is ignored while those cite it. A tracked
+# file may not cite an ignored path, and the generated artifacts cite each
+# other, so the shim has to be tracked even though the store must not be.
+.gitnexus/lbug
+.gitnexus/*.db
