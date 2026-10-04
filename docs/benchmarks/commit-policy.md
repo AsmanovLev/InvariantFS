@@ -32,7 +32,9 @@ Two named extremes, plus intervals for everything between:
 
     --sync                 fsync on every transaction        (today's behaviour)
     --no-sync              never sync until unmount/close   (install-from-media)
-    --commit-bytes <MB>    sync once N MB are dirty
+    --commit-bytes <N>     sync once N are dirty. Bare number = MiB.
+                           Suffixed values accepted: 4K, 512K, 1M. Minimum: one
+                           block -- anything smaller is REFUSED, not clamped.
     --commit-time  <ms>    sync at most every T ms
     --commit-idle  <ms>    flush T ms after the last write
 
@@ -54,9 +56,35 @@ and not a data-loss change.
 
 Mutually exclusive with each other; last one on the command line wins.
 
+### Units, and why a bare number is MiB
+
+Dirty tracking is per page, and the minimum block is 4 KB, so a byte threshold
+below one block is meaningless: any write crosses it, which makes `--commit-bytes 1`
+behave exactly like `--commit-bytes 0`. Those are three spellings of "sync every
+write", which is an ambiguity this interface must not have.
+
+So: **a bare number is MiB.** `--commit-bytes 1` is 1 MiB, `16` is 16 MiB. One
+number, one meaning, no suffix to forget. A suffixed value is accepted when
+finer granularity is genuinely wanted (`4K`, `512K`, `1M`).
+
+A threshold below one block is REFUSED with an explanation, not clamped and not
+accepted silently:
+
+    --commit-bytes 1    error: below the 4K block size; use --sync to mean
+                             "fsync on every transaction"
+
+Rejected rather than clamped because the failure mode is invisible otherwise:
+asking for a threshold that cannot be honoured and quietly getting --sync
+behaviour is how you end up believing you configured a durability policy you did
+not configure.
+
+A binary multiplier shorthand (1=1B, 2=2B, 3=4B, 4=8B) was considered and
+rejected: `--commit-bytes 3` silently meaning 4 bytes reads as a typo for 3, and
+nobody debugs that. It trades a visible error for an invisible one.
+
 ## Defaults
 
-**Default (all workloads):** `bytes=1  time=1000  idle=500`
+**Default (all workloads):** `bytes=1 (MiB)  time=1000  idle=500`
 
 Chosen deliberately over the more aggressive numbers that were considered
 (`bytes=16 time=5000 idle=1000` — 16x the bytes, 5x the window). Those are
