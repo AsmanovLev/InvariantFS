@@ -447,7 +447,7 @@ Properties:
 rejected by sha256 and installs nothing, that a tampered `SHA256SUMS` is
 rejected, and that `--pubkey` with no signature fails closed.
 
-## 7. Booting a distro root: not verified here
+## 7. Booting a distro root: now verified for Void, and open for systemd
 
 This is the honest gap, and it is larger than it looks.
 
@@ -474,6 +474,17 @@ that build a root, `invf-mkfs` + `invf-import` it, then `invf-fsck`,
 - There is no Debian install guide at all, and no Debian boot script. Debian
   is the one target whose *package* is verified here; its *rootfs on
   InvariantFS* is entirely unexplored.
+
+  > **CLOSED (2026-10-04).** `docs/DEBIAN-INSTALL.md`,
+  > `tools/configure-debian.sh` and `tools/boot-debian-qemu.sh` now exist, and
+  > the rootfs is **not** unexplored any more: systemd 257.13 boots as PID 1 on
+  > an InvariantFS root and reaches `graphical.target` with the FUSE control
+  > filesystem mounted in-guest and zero runit. What replaced this gap is a
+  > different and smaller one — **the boot transaction does not always
+  > complete** (8 of 15 boots; `INCIDENTS.md` WP224-OPEN, cause unestablished,
+  > `tools/ki3b-jobs.py` added to ask systemd from inside which job holds
+  > `multi-user.target`). Debian is in the same category as Void below: booted
+  > and working, with an open flake on top.
 - Bootable partition layout: the guides use direct `-kernel`/`-initrd` boot
   with the volume on a separate disk, and Arch additionally uses
   `mkdisk-arch.sh`. There is no GRUB/systemd-boot integration, no ESP

@@ -198,10 +198,25 @@ on a global lock.
 
 ## Known issues
 
-* **systemd as PID 1 on a FUSE root is partially working** — WP66 added
-  `/run` tmpfs + cgroup2 pre-mount (H1) and fallocate/ioctl stubs (H3).
-  Remaining: runtime lookup corruption on two-device volumes (H2) needs
-  investigation; use the busybox/OpenRC/runit fallback meanwhile.
+* **systemd as PID 1 on a FUSE root works, but not reliably** — WP66 added
+  `/run` tmpfs + cgroup2 pre-mount (H1) and fallocate/ioctl stubs (H3), and
+  those do their job: systemd 257.13 comes up as PID 1 on an InvariantFS root
+  and, when the boot completes, reaches `graphical.target` with the FUSE
+  control filesystem mounted in-guest and zero runit (`docs/DEBIAN-INSTALL.md`,
+  measured — **8 of 15 boots**).
+  **H1 therefore does not describe a permanent condition.**
+  What remains open (`INCIDENTS.md` WP224-OPEN) is that the *boot transaction*
+  sometimes does not finish: 2 of those boots stopped at `getty.target` with
+  `multi-user.target` never reached, while every unit that started also
+  finished and the guest was still usable at a login prompt. Cause not yet
+  established; `tools/ki3b-jobs.py` boots the guest repeatedly and asks systemd
+  from inside which job is holding the target.
+  README previously called this "runtime lookup corruption on two-device
+  volumes (H2)". That wording does not match what is observed — nothing here
+  shows corrupted lookups — so #3 is restated above rather than replaced, and
+  whether it is the same problem or a second one is **not decided**.
+  Until it is: the busybox/OpenRC/runit fallback remains the supported path for
+  unattended boots.
 * **`invf-fsck -f` after a fresh import** can break runtime FUSE directory
   lookups; offline reads stay fine. Under investigation.
 * **Two-device FUSE:** the first write can poison symlink-directory lookups
@@ -213,7 +228,8 @@ on a global lock.
 
 ```
 docs/        architecture (concept + Meta-v3), ADRs, CLI guide, benchmarks,
-             per-distro install guides, SECURITY.md
+             per-distro install guides (Arch, Debian, Gentoo, Void),
+             SECURITY.md
 src/core/    invarifs.h IS the on-disk spec; volume_internal.h the engine map
 impl_docs/   AUDIT.md (live findings), DOCMAP/FILEMAP (doc-to-code lanes)
 ```
