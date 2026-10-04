@@ -227,7 +227,14 @@ stage_gentoo() {
     ) > "$d/log" 2>&1
     rc=$?
     if [ $rc -ne 0 ]; then
-        fail "gentoo: ebuild src_install() failed (rc=$rc)"; tail -15 "$d/log"
+          # The log BEFORE fail, not after. `fail` exits, so trailing it on the
+          # same line is the same as never printing it -- which is exactly what
+          # CI showed: a bare "rc=127" with no indication which command was
+          # missing. Same discard-the-signal shape as the invf-ls check.
+          echo "   --- ebuild src_install log (last 20 lines) ---" >&2
+          tail -20 "$d/log" >&2
+          echo "   --- end log ---" >&2
+          fail "gentoo: ebuild src_install() failed (rc=$rc)"
         return 1
     fi
     pass "gentoo: ebuild src_install() ran clean"
