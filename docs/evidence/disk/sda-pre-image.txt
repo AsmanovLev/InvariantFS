@@ -1,0 +1,7 @@
+label: gpt
+label-id: C84A500E-D3E3-4075-8629-5D9EE8164B74
+device: /dev/sda
+unit: sectors
+first-lba: 34
+last-lba: 3907029134
+sector-size: 512
