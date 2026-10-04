@@ -68,6 +68,26 @@ CORE_O  += $(OBJ)/perf_counters.o
 endif
 $(OBJ)/perf_counters.o: $(SRC)/core/perf_counters.c | $(OBJ)
 	$(CC) $(CFLAGS) -c -o $@ $<
+
+# Switching PERF on/off changes CFLAGS, and this Makefile does not track
+# CFLAGS as a prerequisite -- so a `make PERF=1` followed by a plain `make`
+# links PERF-built objects against a non-PERF link line and dies with
+#
+#     undefined reference to `invfs_perf_counters'
+#
+# which reads like a source bug and is not one. The stamp makes the flag
+# change force the rebuild that actually reflects it. Cost is one file and a
+# rebuild the first time PERF is toggled; benefit is never again mistaking a
+# stale object for a compile error.
+# A NORMAL prerequisite, not an order-only one: an order-only prereq (written
+# `| stamp`) is never consulted when deciding whether a target is stale, which
+# is the whole point of order-only -- so the first attempt at this fix created
+# the stamp, made it newer than volume.o, and still did not rebuild. The stamp
+# is also created at PARSE time via $(shell ...), so it exists before any
+# staleness comparison happens.
+PERF_STAMP := $(OBJ)/.perf-$(if $(PERF),1,0)
+$(shell mkdir -p $(OBJ); [ -f $(PERF_STAMP) ] || touch $(PERF_STAMP))
+$(CORE_O) $(OBJ)/volume.o $(OBJ)/blkio.o: $(PERF_STAMP)
 B3      := blake3 blake3_dispatch blake3_portable
 
 # Canonical core object list for the e2e helper link lines in tools/test-*.sh.
