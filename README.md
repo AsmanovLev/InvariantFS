@@ -206,13 +206,23 @@ on a global lock.
   (`docs/DEBIAN-INSTALL.md`, measured **8 of 8 boots** in-guest via
   `tools/ki3b-jobs.py`).
   **H1 therefore does not describe a permanent condition.**
-  The live defect is separate: `dbus.service` fails on **every** boot with
-  `status=203/EXEC` — systemd cannot exec `/usr/bin/dbus-daemon`, even though it
-  runs fine from a shell — so the system message bus is never up and
-  `systemctl is-system-running` reports `degraded`. That breaks `systemd-run`,
-  `systemctl start`/`stop`, `loginctl`, and polkit-gated operations; plain
-  `systemctl is-active` still works because it talks to PID 1 over
-  `/run/systemd/private`. Not yet localised (`INCIDENTS.md` WP225-OPEN).
+  A separate defect leaves the system bus dead on **every** boot: `dbus.service`
+  fails with `status=203/EXEC`, so `systemctl is-system-running` reports
+  `degraded` and `systemd-run` / `systemctl start` / `loginctl` / anything
+  polkit-gated are broken. Plain `systemctl is-active` still works because it
+  talks to PID 1 over `/run/systemd/private`, which is how the boot targets were
+  queryable while the bus was dead.
+  **This is not an InvariantFS bug.** systemd runs the unit as `User=messagebus`
+  and cannot exec it as that uid, while the same binary execs fine as root. The
+  cause was isolated by mounting a tmpfs with `exec` stated explicitly — not
+  FUSE, not InvariantFS — where root execs the binary and *both* `messagebus`
+  and `uid 1000` get `Permission denied`. Non-root exec is broken on every
+  filesystem in this guest: the `invfs` mount has no `noexec`, and PID 1 reports
+  `NoNewPrivs: 0`, `Seccomp: 0` and full capabilities. It is a guest-environment
+  fault, still unexplained (`INCIDENTS.md` WP225-RESOLVED-PARTIAL).
+  Because of this, **the busybox/OpenRC/runit fallback is still the
+  recommendation for unattended boots** — the reachability target is met, but a
+  working message bus is not.
   A system that boots to `graphical.target` with no bus is not a usable
   multi-user system, so unattended operation should still use the
   busybox/OpenRC/runit fallback until WP225 is fixed.
