@@ -144,7 +144,11 @@ jobs:
 
       - name: arch root -> InvariantFS volume
         run: |
+          # KEEP=1: the volume has to survive for the boot step below.
+          # Without it cleanup() removes $VOL on exit and the boot has nothing
+          # to boot. It is sparse -- ~2 GB on disk for a 16 GB image.
           ARCH_WORK="$RUNNER_TEMP/arch" \
+          KEEP=1 \
             bash tools/test-arch-install.sh
 
       - name: void root -> InvariantFS volume (offline)
@@ -180,6 +184,30 @@ jobs:
           INVFS_VOID_LOGDIR="$RUNNER_TEMP/voidboot2-logs" \
           INVFS_VOID_KEEP=0 \
             bash tools/boot-void-qemu.sh 2>&1 | tee "$RUNNER_TEMP/voidboot2.log"
+
+      # The Arch harness had never been executed by anything, human or CI, and
+      # it carried a latent bug for its whole life: `-drive if=ide` on a q35
+      # machine, which QEMU accepts SILENTLY and never presents to the guest.
+      # The first real run failed with "no InvariantFS volume found on any block
+      # device" and the volume verified clean at 45,399 files / 0 corrupt --
+      # the harness, not the filesystem. So this step is not ceremony: it is the
+      # first time this code has ever run.
+      #
+      # The volume is built by the "arch root -> InvariantFS volume" step above
+      # and reused here. Arch's single --bootloader mode (OVMF + GRUB from a
+      # real ESP) is NOT wired in: it has never run either, and putting an
+      # unexercised path in CI is how the if=ide bug stayed invisible.
+      - name: arch root BOOTS on InvariantFS (single device)
+        run: |
+          set -o pipefail
+          ARCH_WORK="$RUNNER_TEMP/arch" \
+          ARCH_LOG=/tmp/invfs-arch-boot-single.log \
+          ARCH_SSH_LOG=/tmp/invfs-arch-boot-single.ssh.log \
+            bash tools/boot-arch-qemu.sh --single "$RUNNER_TEMP/arch/vol/single.img" \
+              2>&1 | tee "$RUNNER_TEMP/archboot.log"
+          # The serial console is the evidence; keep it on failure.
+          cp /tmp/invfs-arch-boot-single.log /tmp/invfs-arch-boot-single.ssh.log \
+            "$RUNNER_TEMP/artifacts/" 2>/dev/null || true
 
       - name: upload serial logs
         if: always()
