@@ -20,6 +20,35 @@ Group commit already exists (`blkio_flush` + `write_gen` watermark) but cannot
 help: it batches *concurrent* flushes, and `invf-import` is a single sequential
 loop, so every flush degenerates into its own fsync.
 
+## Baseline to beat
+
+The "before" number, on a real SSD, both synthetic and real-root:
+
+    synthetic, flat       8,000 files / 1 dir     75.7 s   = 105.7 files/s
+                         8,000 files ->  48,054 fsyncs, 24,002 vmux writes
+                         fsyncs/file = 6.01, writes/file = 3.00
+
+    Arch Linux root      34,209 files             2,416.4 s =  14.2 files/s
+                         + 11,186 symlinks, 3,085 dirs, 0 skipped
+                         volume 2.2 GB real of a 16 GB sparse image
+
+**The synthetic benchmark is optimistic by ~7x.** It holds the corpus flat in one
+directory and every file the same size, which is the easy case for any
+directory-tree cost. A real root has 3,085 directories, symlinks and wildly
+varied content.
+
+Two consequences, both load-bearing:
+
+  - **Never quote the synthetic number as an import speed.** 14.2 files/s on a
+    real root is the honest figure; 105.7 is a lab instrument.
+  - **fsyncs/file is stable at 6.01** across 500 / 2,000 / 8,000 files, so the
+    deferred-commit win scales with file count: cutting fsyncs by the batching
+    factor applies to the real 34,209-file case almost exactly as it does to the
+    synthetic one, even though the wall-clock does not.
+
+If a future corpus wants to predict real-world import time, it needs directory
+depth and size distribution, not just more files in one directory.
+
 ## The unit is dirty BYTES, not files
 
 A file-count interval is inverted: it batches 100 tiny files well and does
