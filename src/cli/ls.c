@@ -6,6 +6,11 @@
 #define _CRT_SECURE_NO_WARNINGS
 
 #include <stdio.h>
+
+/* Set when any directory returned exactly the 4096-entry cap, so the summary
+ * can say INCOMPLETE. The listing walk and the summary live in different
+ * functions, so this cannot be a local of either. */
+static int truncated;
 #include <stdlib.h>
 #include <string.h>
 
@@ -127,7 +132,13 @@ int main(int argc, char **argv)
         free(ents);
     }
     free(st);
-    printf("%llu file(s)\n", (unsigned long long)live);
+    if (truncated)
+        /* Say INCOMPLETE, and exit non-zero, so no caller can mistake this for
+         * a complete enumeration. */
+        printf("%llu file(s) INCOMPLETE -- at least one directory exceeded %d "
+               "entries\n", (unsigned long long)live, 4096);
+    else
+        printf("%llu file(s)\n", (unsigned long long)live);
     vol_close(vol);
     return 0;
 }
