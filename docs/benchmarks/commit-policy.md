@@ -28,14 +28,31 @@ honest unit, with time and idle bounding the two risks files cannot.
 
 ## Interface
 
-    --commit-bytes <MB>   sync once N MB are dirty        default: see below
-    --commit-time  <ms>   sync at most every T ms
-    --commit-idle   <ms>   flush T ms after the last write
-    --commit-strict        bytes=0 time=0 idle=0 == today's behaviour, exactly
+Two named extremes, plus intervals for everything between:
 
-whichever threshold is reached first. **Always flush on clean shutdown**
+    --sync                 fsync on every transaction        (today's behaviour)
+    --no-sync              never sync until unmount/close   (install-from-media)
+    --commit-bytes <MB>    sync once N MB are dirty
+    --commit-time  <ms>    sync at most every T ms
+    --commit-idle  <ms>    flush T ms after the last write
+
+`--sync` and `--no-sync` are shorthand, not separate code paths:
+
+    --sync        ==  --commit-bytes 0 --commit-time 0 --commit-idle 0
+    --no-sync     ==  --commit-bytes 0 --commit-time 0 --commit-idle 0
+                     ... plus "do not sync on ANY threshold, only at close"
+
+The distinction has to be explicit rather than a degenerate value, because
+`bytes=0` could mean either "every write" or "never". They therefore map to
+distinct internal modes rather than to numbers, so that neither can be reached
+by accident from a mis-typed threshold.
+
+Whichever threshold is reached first. **Always flush on clean shutdown**
 (`vol_flush` is called at `vol_close`), so power loss is bounded while a normal
-reboot loses nothing.
+reboot loses nothing -- which is why `--no-sync` is a durability-window change
+and not a data-loss change.
+
+Mutually exclusive with each other; last one on the command line wins.
 
 ## Defaults
 
@@ -50,8 +67,8 @@ minutes. A bulk importer can pass `--commit-bytes 16 --commit-time 5000` and get
 the throughput; nothing has to opt IN to a five-second durability hole.
 
     default              bytes=1   time=1000  idle=500     <- conservative, always on
-    install profile      bytes=16  time=5000  idle=1000    <- opt in per invocation
-    --commit-strict      bytes=0   time=0    idle=0       <- exactly today's behaviour
+    --sync               bytes=0   time=0    idle=0       <- today's behaviour, exactly
+    --no-sync            unbounded until close              <- install-from-media
 
 ## Sequence
 
