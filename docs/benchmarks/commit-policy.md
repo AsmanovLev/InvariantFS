@@ -147,3 +147,44 @@ only ever been tested assuming a write is durable when `write()` returns.
 
 That is what step 2 tests. If it fails, we have found the real boundary of what
 the format tolerates — worth more than the import speedup.
+
+## Measured on the real Arch root (2026-10-05)
+
+Strict, from the same corpus and the same machine:
+
+    34,209 files  988.2 s   fsync 248,947   deferred 0
+
+Deferred, `INVFS_COMMIT_BYTES=16`:
+
+    34,209 files   37.4 s   fsync       1   deferred 286,122   errors 0
+
+**26.4x**, and fsync=1 is `vol_close` paying the single owed flush -- the safety
+property doing exactly what it was designed to do.
+
+### But the byte threshold never fired, and that must not be glossed over
+
+The 26.4x is NOT byte-batched committing. It is "sync only at close" -- the
+`--no-sync` path reached by accident, because:
+
+    blkio writes   0     ← import does not go through blkio_write
+
+`vmux_pwrite` calls `blkio_pwrite` directly, and the dirty-byte accumulator was
+added to `blkio_write`. So `dirty_bytes` stays 0 and `commit_bytes` can never be
+satisfied. Nothing triggered until `vol_close` forced the final flush.
+
+Consequences, stated plainly:
+
+  - The win is real, measured, and reproducible -- but it is the close-time-only
+    behaviour, not the batching this design was for.
+  - `INVFS_COMMIT_BYTES` and `INVFS_COMMIT_MS` are currently **dead triggers** for
+    any workload writing through `vmux_pwrite`, which is all of them.
+  - Only `INVFS_COMMIT_IDLE_MS` and the `vol_close` force actually fire.
+
+**The fix is one line of accounting**: move `dirty_bytes += len` from
+`blkio_write` to `blkio_pwrite`, so it counts everything that reaches the
+descriptor. Until then, do not read the 26.4x as "16 MB batching works".
+
+After that, re-measure. The expected result is that fsync rises from 1 to
+roughly 2.7 GB / 16 MB ~= 170, which is the number the design predicted, and
+the elapsed time should stay near the 37 s measured here -- which is itself the
+interesting result, because it says the per-fsync cost was ~all of the 988 s.
