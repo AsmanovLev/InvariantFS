@@ -75,6 +75,8 @@ tools/fuzz/seeds/
 # regardless; this line keeps the link out of `git status` so it is never swept
 # in by `git add -A`.
 tools/flakey/artifacts
-# GitNexus-generated agent scaffolding (regenerate with: npx gitnexus analyze)
-CLAUDE.md
-.claude/
+# GitNexus-generated agent scaffolding (regenerate with: npx gitnexus analyze).
+# CLAUDE.md stays ignored; .claude/ does NOT, because the committed AGENTS.md
+# block cites .claude/skills/*/SKILL.md and a tracked file must not cite an
+# ignored path -- that is exactly what made `repo hygiene` fail in CI with seven
+# DOCROT lines while passing locally.
