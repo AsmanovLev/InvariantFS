@@ -4,6 +4,7 @@
  */
 #define _CRT_SECURE_NO_WARNINGS
 
+#include "perf_counters.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -633,6 +634,8 @@ int blkio_seek(blkio *io, uint64_t off)
 
 int blkio_read(blkio *io, void *buf, size_t len)
 {
+    INVFS_PERF_ADD(PERF_BLKIO_READS, 1);
+    INVFS_PERF_ADD(PERF_BLKIO_READ_BYTES, len);
     if (blkio_pread(io, io->pos, buf, len) != 0)
         return -1;
     io->pos += len;
@@ -641,6 +644,12 @@ int blkio_read(blkio *io, void *buf, size_t len)
 
 int blkio_write(blkio *io, const void *buf, size_t len)
 {
+    /* The single most important counter in the build: everything the engine
+     * asks for passes here on its way to the device, so write amplification
+     * is (these bytes) / (vol_write bytes), and nothing below this line can
+     * hide it. */
+    INVFS_PERF_ADD(PERF_BLKIO_WRITES, 1);
+    INVFS_PERF_ADD(PERF_BLKIO_WRITE_BYTES, len);
     if (blkio_pwrite(io, io->pos, buf, len) != 0)
         return -1;
     io->pos += len;

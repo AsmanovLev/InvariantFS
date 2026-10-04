@@ -48,6 +48,26 @@ CORE    := volume vol_cpack helper_exec tool_scratch vol_plugin_client vol_png v
             arc crc32c lz4 flacx tarx pngx blkio miniz blake3 blake3_dispatch blake3_portable ppmd8 ppmd8enc ppmd8dec ppmd_codec codec bcj_x86 rs deflate_repro \
             deflate_backend_system deflate_backend_stock
 CORE_O  := $(addprefix $(OBJ)/,$(addsuffix .o,$(CORE))) $(STOCK_ZLIB_O)
+
+# --- PERF_PROFILING (src/core/perf_counters.c) ------------------------------
+# Build with:  make PERF=1
+#
+# Counters only, no behaviour change. perf_counters.o is linked ONLY under
+# this flag, because it defines the counter array and the dump; without the
+# array, every INVFS_PERF_ADD() in volume.c and blkio.c would be a link error.
+# With PERF unset the macros expand to ((void)0) and neither the array nor the
+# dump code is in the binary at all -- which is the point of a compile flag over
+# an env-gated one: the binary you measure is the binary you ship.
+#
+# Deliberately NOT named INVFS_PROFILE: that env var is taken, in volume.c:1298,
+# by the WP16b codec profile (fast|balanced|dense|archive) which selects the
+# sweep's ZSTD level.
+ifdef PERF
+CFLAGS  += -DPERF_PROFILING
+CORE_O  += $(OBJ)/perf_counters.o
+endif
+$(OBJ)/perf_counters.o: $(SRC)/core/perf_counters.c | $(OBJ)
+	$(CC) $(CFLAGS) -c -o $@ $<
 B3      := blake3 blake3_dispatch blake3_portable
 
 # Canonical core object list for the e2e helper link lines in tools/test-*.sh.

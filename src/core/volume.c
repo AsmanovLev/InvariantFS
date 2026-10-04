@@ -25,6 +25,7 @@
 #define _GNU_SOURCE
 #endif
 
+#include "perf_counters.h"
 #include "volume_internal.h"
 #include "vol_metabuf.h"
 #include "vol_delta.h"
@@ -193,6 +194,8 @@ int vmux_pread(invfs_volume *v, uint64_t off, void *buf, size_t len)
 
 int vmux_read(invfs_volume *v, void *buf, size_t len)
 {
+    INVFS_PERF_ADD(PERF_VMUX_READS, 1);
+    INVFS_PERF_ADD(PERF_VMUX_READ_BYTES, len);
     uint64_t off = v->mux_pos;
     int rc = vmux_pread(v, off, buf, len);
     if (rc == 0) v->mux_pos = off + len;
@@ -280,6 +283,16 @@ int vmux_pwrite(invfs_volume *v, uint64_t off, const void *buf, size_t len)
 int vmux_write(invfs_volume *v, const void *buf, size_t len)
 {
     uint64_t off = v->mux_pos;
+    /* PERF: this is the REAL storage layer, not blkio_write. volume_internal.h:184
+     * defines io_write(c,buf,len) as vmux_write(v_of_blk(c),buf,len), so every
+     * metadata and delta write in the engine funnels through here and never
+     * touches blkio_write. Instrumenting blkio first produced a dump of all
+     * zeros for blkio writes on a 50-file import, which is how this was found.
+     * vmux_pwrite is what fans out to the two devices, so the ratio of
+     * (blkio write bytes) to (vmux write bytes) is the write amplification of
+     * the multi-device path. */
+    INVFS_PERF_ADD(PERF_VMUX_WRITES, 1);
+    INVFS_PERF_ADD(PERF_VMUX_WRITE_BYTES, len);
     int rc = vmux_pwrite(v, off, buf, len);
     if (rc == 0) v->mux_pos = off + len;
     return rc;
@@ -320,6 +333,7 @@ uint32_t devt_crc(const invfs_devt *d)
 int vol_write_devt(invfs_volume *v)
 {
     invfs_devt t;
+    INVFS_PERF_ADD(PERF_DEVT_WRITES, 1);
     if (v->ndev != 2) return 0;
     t = v->devt;
     memcpy(t.magic, "DEVT", 4);
@@ -1449,6 +1463,12 @@ fail:
 
 invfs_volume *vol_open(const char *path, int *err)
 {
+    /* PERF: installs the SIGUSR1 dumper and enables exit dumps when
+     * INVFS_PERF_DUMP is set. vol_open is the one place every tool passes
+     * through -- the tools hold one volume per process -- so it is enough to
+     * cover invf-import, invf-fuse, invf-sweep and the rest without touching
+     * each main(). Compiled to nothing unless -DPERF_PROFILING. */
+    INVFS_PERF_ENABLE_WHEN_REQUESTED();
     return vol_open_inner(path, err);
 }
 
@@ -1614,6 +1634,7 @@ unsigned vol_get_profile(const invfs_volume *v)
    volume unopenable -- vol_open rejects it with err -5. */
 int vol_write_sb(invfs_volume *v)
 {
+    INVFS_PERF_ADD(PERF_SB_WRITES, 1);
     v->sb.checksum = invfs_crc32c(&v->sb, offsetof(invfs_superblock, checksum));
     if (io_seek(&v->io, 0) != 0 ||
         io_write(&v->io, &v->sb, sizeof(v->sb)) != 0)
@@ -1625,6 +1646,11 @@ int vol_write_sb(invfs_volume *v)
 
 int vol_flush(invfs_volume *v)
 {
+    /* PERF: the hypothesis this build exists to test is that the FUSE close
+     * path (invf_release -> vol_flush) pays a full metadata flush plus a DEVT
+     * descriptor rewrite per file. If that is true, vol_flush and DEVT_WRITES
+     * will scale with the file count; if it is false, they will be flat. */
+    INVFS_PERF_ADD(PERF_VOL_FLUSH_CALLS, 1);
     /* Test hook, same shape as sync_fail_at (volume_internal.h): the Nth
      * flush of this process reports -1 without touching the image. It is
      * here, at the top of the function, so it fires for every caller --
@@ -1693,6 +1719,7 @@ int vol_flush(invfs_volume *v)
  * successful barrier moves inode_area_durable. */
 int vol_sync(invfs_volume *v)
 {
+    INVFS_PERF_ADD(PERF_VOL_SYNC_CALLS, 1);
     if (!v) return -1;
     /* WP24-lite: nothing of this handle's can be in flight (mutations are
      * refused), so the durability contract is already met without touching
