@@ -407,6 +407,27 @@ run_case() {  # $1 = label
         fi
         out="$VOL/cat-$(basename "$f")"
         if env "${envdev[@]}" "$B/invf-cat" "$img" "$f" "$out" >/dev/null 2>&1; then
+            # The STAGING file must be readable before "MISMATCH" means anything.
+            #
+            # cmp -s returns non-zero for "cannot read either file" just as it
+            # does for "contents differ", so an unreadable staging file is
+            # reported as a read mismatch -- which is exactly what happened for
+            # boot/initramfs-linux.img across several runs. It looked like a
+            # large-file read bug; it was a permission problem in the fixture,
+            # and it was invisible because cmp never says which of the two it
+            # found. mkinitcpio's output is not world-readable the way
+            # vmlinuz-linux is, so the SAME loop read one and not the other.
+            #
+            # Ask first, then compare. This is the third instance in this file of
+            # an assertion that could not distinguish "wrong" from "unreadable".
+            if [ ! -r "$STAGE/$f" ]; then
+                echo "   UNREADABLE (not compared): $f" >&2
+                echo "     $(ls -l "$STAGE/$f" 2>/dev/null)" >&2
+                echo "     -- this is a fixture permission problem, NOT a read" >&2
+                echo "        mismatch. Read it as the user that will compare." >&2
+                boot_rc=1
+                continue
+            fi
             if cmp -s "$STAGE/$f" "$out"; then
                 echo "   ok: $f bit-exact ($(wc -c < "$STAGE/$f") bytes)"
             else
