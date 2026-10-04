@@ -39,12 +39,19 @@ reboot loses nothing.
 
 ## Defaults
 
-    installation / bulk import    bytes=16  time=5000  idle=1000
-    conservative default          bytes=1   time=1000  idle=500
+**Default (all workloads):** `bytes=1  time=1000  idle=500`
 
-One global default cannot be right for both: 16 MB / 5 s is right when
-installing and wrong for a live guest root. Hence the sequence below, not a
-compromise number.
+Chosen deliberately over the more aggressive numbers that were considered
+(`bytes=16 time=5000 idle=1000` — 16x the bytes, 5x the window). Those are
+better for a bulk install and worse for a live guest root, and until the
+crash-consistency suite has run under deferred commit (step 2 below) the
+default has to be the one whose loss window is measured in seconds rather than
+minutes. A bulk importer can pass `--commit-bytes 16 --commit-time 5000` and get
+the throughput; nothing has to opt IN to a five-second durability hole.
+
+    default              bytes=1   time=1000  idle=500     <- conservative, always on
+    install profile      bytes=16  time=5000  idle=1000    <- opt in per invocation
+    --commit-strict      bytes=0   time=0    idle=0       <- exactly today's behaviour
 
 ## Sequence
 
