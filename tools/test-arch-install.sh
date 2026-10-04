@@ -306,7 +306,24 @@ check_one() {  # $1 = image, $2 = label, $3 = optional dev1
     local n; n=$(entries_of "$(tail -1 "$log")")
     [ -n "$n" ] || fail "$label: cannot parse import counts"
     local envdev=(); [ -n "$dev1" ] && envdev=(INVFS_DEV1="$dev1")
-    local ls_n; ls_n=$(env "${envdev[@]}" "$B/invf-ls" "$img" 2>/dev/null | wc -l || true)
+      # Capture invf-ls's OWN exit status and stderr. The previous form was
+      #   ... invf-ls "$img" 2>/dev/null | wc -l || true
+      # which discarded both: a listing that failed partway still counted the
+      # lines it managed to print, and `|| true` guaranteed nothing noticed. So
+      # "listed 41376 < imported 48484 (loss)" arrived as a plain count rather
+      # than as what it probably was -- a truncated listing. Same
+      # discard-the-signal shape that has bitten this session repeatedly.
+      local lsf="$WORK/ls-$label.txt"
+      if ! env "${envdev[@]}" "$B/invf-ls" "$img" >"$lsf" 2>"$WORK/ls-$label.err"; then
+        echo "   invf-ls exited non-zero; stderr:" >&2
+        sed -n '1,10p' "$WORK/ls-$label.err" >&2
+        fail "$label: invf-ls failed, so the entry count cannot be trusted"
+      fi
+      local ls_n; ls_n=$(wc -l <"$lsf")
+      # A listing this size not ending in a newline is truncated mid-write.
+      if [ -s "$lsf" ] && [ "$(tail -c1 "$lsf" | wc -l)" -eq 0 ]; then
+        fail "$label: invf-ls output is truncated at $ls_n lines (no trailing newline)"
+      fi
     local listed=$((ls_n - 2))       # invf-ls prints a header + path line
     [ "$listed" -ge "$n" ] || fail "$label: listed $listed < imported $n (loss)"
     [ "$listed" -le "$((n + 8))" ] || fail "$label: listed $listed >> imported $n"
