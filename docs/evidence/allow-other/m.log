@@ -1,0 +1,2 @@
+vol_open: /mnt/invfs-scratch/aotest/v.img: format v3 (metadata-v3 inode tree): base root engine up, v2 paths refused
+InvariantFS mounted: 2 files

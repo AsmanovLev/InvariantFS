@@ -2250,3 +2250,58 @@ inherited a default that was not what I assumed, and in this case I discarded a
 good measurement while announcing that I had. The pattern is not "controls are
 useless", it is that I should read the mount options before theorising about
 them.
+
+## WP227-RESOLVED: the exoneration was wrong — the root cause is a missing `allow_other`
+
+**Status:** resolved on the host, 2026-10-04. End-to-end guest confirmation pending.
+
+WP225-RESOLVED-PARTIAL concluded that InvariantFS was **not** implicated in the
+`203/EXEC` failures. **That conclusion was wrong**, and it was wrong in the most
+expensive direction available: it cleared the filesystem of blame on the strength
+of a control that could not have detected the actual mechanism.
+
+**The mechanism.** A FUSE mount without `allow_other` is accessible only to the
+uid that mounted it. `tools/initramfs-init.sh` mounted the guest's root as
+
+    invf-fuse -o survive_term -f "$INVFS_RAW" /mnt/invfs &
+
+from the initramfs, as root. So the root filesystem belonged to uid 0, and
+systemd — running `dbus.service` as `User=messagebus` — could not exec anything
+on it. Every non-root process in the guest got EACCES on every file.
+
+**Measured directly**, same image, same two files, only the mount option varied:
+
+                            no allow_other        with allow_other
+    root      read         Permission denied     hello-from-invfs
+    nobody    read         Permission denied     hello-from-invfs
+    nobody    exec         Permission denied     ran-as-nobody
+    nobody    ls           Permission denied     probe.txt run.sh
+
+**Why the original exoneration failed.** The evidence that seemed to clear
+InvariantFS was that `messagebus` also failed to exec on a **root-mounted tmpfs
+with `-o exec` stated explicitly**, and tmpfs is untouched by `allow_other`.
+That observation was sound; the inference from it was not. Those runs were made
+against a guest whose *entire* world — PID 1, the initramfs, every tool used to
+run the test — lived on the no-`allow_other` InvariantFS root, so the probe's
+*own* binaries (`setpriv`, `cat`, `head`, `ls`, `dbus-daemon` under test) could
+not be exec'd by `messagebus` for that reason regardless of where the target
+file lived. The tmpfs path was not a control on InvariantFS; it was a target
+reached through it.
+
+**Why the kernel question did not sink the fix.** `CONFIG_FUSE_ALLOW_ALL` is
+**not set** on the boot kernel, which looked like it would make `-o allow_other`
+fail the mount outright. It does not: that option gates *unprivileged* users
+requesting `allow_other`, and root may always request it. Verified by mounting,
+not by reasoning — the host mount line came back
+`...,allow_other,max_read=1048576`.
+
+**Still open:** whether anything beyond the missing option was also wrong. The
+`nonroot-access` probe added in `wp/allow-other-initramfs` tests `/` **and**
+`/dev/shm` as `messagebus`, and a persistent `/dev/shm` failure after this fix
+would mean a second mechanism.
+
+**The durable lesson, which is about the tests and not the filesystem.** Every
+boot harness in this repo asserts as root over SSH, so "the guest booted" and
+"the guest is usable by an ordinary user" were the same test for the entire life
+of the suite. A guest that boots perfectly and is unusable to everyone but root
+is not a state any existing test can express.

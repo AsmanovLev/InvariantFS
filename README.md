@@ -212,14 +212,16 @@ on a global lock.
   polkit-gated are broken. Plain `systemctl is-active` still works because it
   talks to PID 1 over `/run/systemd/private`, which is how the boot targets were
   queryable while the bus was dead.
-  **This is not an InvariantFS bug.** systemd runs the unit as `User=messagebus`
-  and cannot exec it as that uid, while the same binary execs fine as root. The
-  cause was isolated by mounting a tmpfs with `exec` stated explicitly — not
-  FUSE, not InvariantFS — where root execs the binary and *both* `messagebus`
-  and `uid 1000` get `Permission denied`. Non-root exec is broken on every
-  filesystem in this guest: the `invfs` mount has no `noexec`, and PID 1 reports
-  `NoNewPrivs: 0`, `Seccomp: 0` and full capabilities. It is a guest-environment
-  fault, still unexplained (`INCIDENTS.md` WP225-RESOLVED-PARTIAL).
+  **The cause is ours: a missing `allow_other` on the initramfs mount.** A FUSE
+  mount without `allow_other` is accessible only to the uid that mounted it, and
+  `tools/initramfs-init.sh` mounts the guest root as root from the initramfs --
+  so systemd, running the unit as `User=messagebus`, cannot exec anything on `/`.
+  Verified by mounting the same volume both ways on the boot kernel: without the
+  option every non-root read/exec/list returns `EACCES`; with it, all succeed.
+  Fixed in `wp/allow-other-initramfs` (`allow_other` is always permitted for
+  root, so this does not require `CONFIG_FUSE_ALLOW_ALL`). See `INCIDENTS.md`
+  WP227; **WP225-RESOLVED-PARTIAL is superseded -- it exonerated the filesystem
+  incorrectly.**
   Because of this, **the busybox/OpenRC/runit fallback is still the
   recommendation for unattended boots** — the reachability target is met, but a
   working message bus is not.
