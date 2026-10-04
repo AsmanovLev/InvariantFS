@@ -1,3 +1,0 @@
-__anon17f38b0f0108 struct       45 /home/user/InvariantFS/src-extracted/VFS/src/core/arc.h typedef struct {
-invfs_arc        typedef      43 /home/user/InvariantFS/src-extracted/VFS/src/core/arc.h typedef struct invfs_arc invfs_arc;
-invfs_arc_stats  typedef      59 /home/user/InvariantFS/src-extracted/VFS/src/core/arc.h } invfs_arc_stats;

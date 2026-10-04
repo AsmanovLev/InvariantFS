@@ -1,2 +1,0 @@
-__anon70d94d660108 struct      505 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_heat.c typedef struct {
-heat_cand        typedef     509 /home/user/InvariantFS/src-extracted/VFS/src/core/vol_heat.c } heat_cand;

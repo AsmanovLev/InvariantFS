@@ -1,4 +1,0 @@
-__anonc0e2e6070108 struct      152 /home/user/InvariantFS/src-extracted/VFS/src/cli/sweep.c typedef struct {
-__anonc0e2e6070208 struct      329 /home/user/InvariantFS/src-extracted/VFS/src/cli/sweep.c typedef struct {
-dedup_seg        typedef     157 /home/user/InvariantFS/src-extracted/VFS/src/cli/sweep.c } dedup_seg;
-scan_reader      typedef     335 /home/user/InvariantFS/src-extracted/VFS/src/cli/sweep.c } scan_reader;

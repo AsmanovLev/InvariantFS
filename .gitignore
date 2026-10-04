@@ -75,3 +75,6 @@ tools/fuzz/seeds/
 # regardless; this line keeps the link out of `git status` so it is never swept
 # in by `git add -A`.
 tools/flakey/artifacts
+# GitNexus-generated agent scaffolding (regenerate with: npx gitnexus analyze)
+CLAUDE.md
+.claude/
