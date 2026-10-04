@@ -148,6 +148,12 @@ TOOLS   := invf-mkfs invf-verify invf-fsck invf-cp invf-cat invf-ls invf-stat \
            invf-stats invf-resize invf-rollback invfs-pack \
            invf-v3inode invf-plugin-host
 
+# Declared FIRST so it stays the default goal: make uses the first target in
+# the file, and the PERF_PROFILING rules below (line ~69) would otherwise
+# become the default -- `make` then built exactly one object and exited 0,
+# which is what broke `make && make helpers` in CI.
+.DEFAULT_GOAL := all
+
 all: $(TOOLS:%=$(OUT)/%) $(CORE_OBJS_FILE)
 
 $(CORE_OBJS_FILE): $(CORE_O) | $(OBJ)
