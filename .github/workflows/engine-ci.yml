@@ -49,7 +49,7 @@ jobs:
         run: bash tools/check-repo-hygiene.sh
 
       - name: unit tests
-        run: make test
+        run: make test TESTENV='INVFS_TEST_DEBUG=1'
 
       - name: engine e2e suites
         run: |

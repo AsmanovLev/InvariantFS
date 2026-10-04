@@ -95,6 +95,11 @@ if [ "${1:-}" = "--inner" ]; then
                       continue
                   fi
                 stage=$cand
+                  # Name the choice when the exec below fails. A bind mount
+                  # that did not land, or a root that is not exec-capable, both
+                  # surface as a two-word exec error naming the ORIGINAL repo
+                  # path -- which tells the reader nothing about which of the
+                  # three candidate roots was actually used.
                 case "$root" in
                 /dev/shm) ;;                                    # tmpfs
                 *) trap 'rmdir "$cand" 2>/dev/null' EXIT ;;
@@ -137,6 +142,12 @@ if [ "${1:-}" = "--inner" ]; then
         done
     fi
 
+  if [ -n "$stage" ] && [ "${INVFS_TEST_DEBUG:-0}" = 1 ]; then
+      echo "$PROG: staged root=$stage (bind of $repo)" >&2
+      for a in "$@"; do
+          printf '%s: %s\n' "$PROG" "  arg $a exists=$([ -e "$a" ] && echo yes || echo NO)" >&2
+      done
+  fi
     exec "$@"
 fi
 
