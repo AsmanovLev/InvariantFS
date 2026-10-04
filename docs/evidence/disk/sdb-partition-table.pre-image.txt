@@ -1,0 +1,10 @@
+label: gpt
+label-id: D38E0243-411E-4C4A-87B5-68B086EAE740
+device: /dev/sdb
+unit: sectors
+first-lba: 34
+last-lba: 250069646
+sector-size: 512
+
+/dev/sdb1 : start=   187570176, size=    62498816, type=0FC63DAF-8483-4772-8E79-3D69D8477DE4, uuid=CA22E3E1-A5DB-4AA3-9EEC-32AF09F97F4F
+/dev/sdb2 : start=   185616384, size=     1953792, type=C12A7328-F81F-11D2-BA4B-00A0C93EC93B, uuid=7D09B0DF-01D3-4C95-811C-DF7770E8A150, attrs="LegacyBIOSBootable"
