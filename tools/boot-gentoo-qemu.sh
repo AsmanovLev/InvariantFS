@@ -226,6 +226,16 @@ if [ "$ssh_ok" != 1 ]; then
     fatal_boot "ssh root@127.0.0.1 -p $WP62_SSH_PORT did not succeed"
 fi
 grep -qF "INVFS_SSH_OK" "$SSH_OUT" || die "ssh ran but produced no marker"
+# WP227: every other assertion here runs as root, so none can see a root
+# filesystem that is unusable to unprivileged users -- which shipped from WP66
+# until 612d0fe. See tools/lib-nonroot-gate.sh.
+log "WP227 guard: non-root access to /"
+. "$ROOT/tools/lib-nonroot-gate.sh"   # this script calls its repo root ROOT, not REPO
+nonroot_gate_ssh() { $SSH root@127.0.0.1 "$1"; }
+nonroot_gate nonroot_gate_ssh -- /bin/bash /bin/bash /etc/os-release /usr/bin \
+    || die "WP227 non-root guard failed"
+[ "${nonroot_gate_skipped:-0}" = 1 ] && \
+    log "WARNING: WP227 guard SKIPPED -- guest could not be checked, which is NOT a pass"
 log "SSH login OK on port $WP62_SSH_PORT:"
 sed 's/^/   /' "$SSH_OUT"
 

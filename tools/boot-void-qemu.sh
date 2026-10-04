@@ -168,6 +168,8 @@ wait_marker() { # <ere>
 
 SSH_OPTS=(-p "$PORT" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null
           -o LogLevel=ERROR -o ConnectTimeout=5 -o PreferredAuthentications=password)
+. "$(dirname "${BASH_SOURCE[0]}")/lib-nonroot-gate.sh"
+
 ssh_guest() { sshpass -p root ssh "${SSH_OPTS[@]}" root@127.0.0.1 "$@"; }
 # Wall-clock-bounded probe: `timeout` cannot exec a shell function, so it
 # wraps the external sshpass directly.
@@ -205,6 +207,15 @@ echo "$IP"
 printf '%s\n' "$IP" | grep -q '10.0.2.15' || fail "dhcpcd did not configure 10.0.2.15"
 KREL=$(ssh_guest "uname -r" 2>/dev/null || true)
 echo "guest kernel: $KREL"
+
+# ---------------------------------------------------------------------------
+# WP227 REGRESSION GUARD -- see tools/lib-nonroot-gate.sh for why. Everything
+# above this line asserts as root; this is the one that cannot.
+# ---------------------------------------------------------------------------
+note "non-root access to / (WP227 guard)"
+nonroot_gate ssh_guest -- /bin/sh /bin/dash /etc/os-release /usr/bin
+[ "${nonroot_gate_skipped:-0}" = 1 ] && \
+    note "WARNING: WP227 guard SKIPPED -- the guest could not be checked, which is NOT a pass"
 
 note "poweroff over SSH"
 ssh_guest "poweroff" 2>/dev/null || true
