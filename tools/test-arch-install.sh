@@ -325,7 +325,23 @@ check_one() {  # $1 = image, $2 = label, $3 = optional dev1
         fail "$label: invf-ls output is truncated at $ls_n lines (no trailing newline)"
       fi
     local listed=$((ls_n - 2))       # invf-ls prints a header + path line
-    [ "$listed" -ge "$n" ] || fail "$label: listed $listed < imported $n (loss)"
+      if [ "$listed" -lt "$n" ]; then
+          # SHOW THE EVIDENCE. This assertion has now failed six times with the
+          # same two numbers, and the listing it is complaining about is written
+          # to a file nobody reads. fsck and verify --deep both PASS, so the
+          # interesting question is what invf-ls actually emits -- 11,186
+          # symlinks were imported and the listing is 7,108 entries short, which
+          # is about the shape you would get if symlinks are not all listed.
+          # Print the head, the tail and the stderr so the next run answers that
+          # instead of repeating the same two numbers.
+          echo "   listing: $ls_n lines, counted $listed, import reported $n" >&2
+          echo "   --- first 6 ---" >&2; sed -n '1,6p' "$lsf" >&2
+          echo "   --- last 6 ---" >&2;  tail -6 "$lsf" >&2
+          if [ -s "$WORK/ls-$label.err" ]; then
+              echo "   --- stderr ---" >&2; sed -n '1,10p' "$WORK/ls-$label.err" >&2
+          fi
+          fail "$label: listed $listed < imported $n (loss)"
+      fi
     [ "$listed" -le "$((n + 8))" ] || fail "$label: listed $listed >> imported $n"
     echo "   $label: $n imported, $listed listed ($ls_n lines)"
 }
