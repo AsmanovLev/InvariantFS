@@ -745,14 +745,15 @@ TEST_BINS := $(foreach t,$(filter %_test,$(CLI_MAINS)),$(OUT)/invf-$(t))
 # code under test, which is worse than no test at all -- and that misreading has
 # been made more than once in this repo. $(HELPERS) is also the pack binaries
 # the lanes exec, so they are current for the same reason.
+# readdir_error_test is listed explicitly below because it is NOT in
+# $(TEST_BINS): it is not in CLI_MAINS, since it needs FUSE cflags/libs and
+# gets those from <name>_FUSE instead (see FUSE_LINKED). That removed it from
+# TEST_BINS too, so `make test` stopped building it and CI failed with
+#     arg bin/invf-readdir_error_test exists=NO
+# -- the binary was never linked. Do not "helpfully" move it back to
+# CLI_MAINS: that is what took it out of the build in the first place.
 test: helpers $(TEST_BINS) $(OUT)/invf-arctest $(OUT)/invf-blkio_test $(OUT)/invf-codec_test \
         $(OUT)/invf-readdir_error_test \
-        # readdir_error_test is NOT in $(TEST_BINS): it is not in CLI_MAINS,
-        # because it needs FUSE cflags/libs and gets them from <name>_FUSE
-        # instead (see FUSE_LINKED). That also removed it from TEST_BINS,
-        # so `make test` no longer built it and CI failed with
-        #     arg bin/invf-readdir_error_test exists=NO
-        # i.e. the binary was never linked at all. Named explicitly here.
       $(OUT)/invf-helper_exec_test $(OUT)/invf-metabuf_test $(OUT)/invf-btree_test \
       $(OUT)/invf-delta_test $(OUT)/invf-groupcommit_test $(OUT)/invf-concurrency_test $(OUT)/invf-sweep_v3_test \
       $(OUT)/invf-sweep_collect_test $(OUT)/invf-verify \
