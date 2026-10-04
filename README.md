@@ -198,25 +198,29 @@ on a global lock.
 
 ## Known issues
 
-* **systemd as PID 1 on a FUSE root works, but not reliably** — WP66 added
-  `/run` tmpfs + cgroup2 pre-mount (H1) and fallocate/ioctl stubs (H3), and
-  those do their job: systemd 257.13 comes up as PID 1 on an InvariantFS root
-  and, when the boot completes, reaches `graphical.target` with the FUSE
-  control filesystem mounted in-guest and zero runit (`docs/DEBIAN-INSTALL.md`,
-  measured — **8 of 15 boots**).
+* **systemd as PID 1 on a FUSE root boots, but the system bus is dead** — WP66
+  added `/run` tmpfs + cgroup2 pre-mount (H1) and fallocate/ioctl stubs (H3),
+  and those do their job: systemd 257.13 comes up as PID 1 on an InvariantFS
+  root and reaches **both** `multi-user.target` and `graphical.target`, with the
+  FUSE control filesystem mounted in-guest and zero runit
+  (`docs/DEBIAN-INSTALL.md`, measured **8 of 8 boots** in-guest via
+  `tools/ki3b-jobs.py`).
   **H1 therefore does not describe a permanent condition.**
-  What remains open (`INCIDENTS.md` WP224-OPEN) is that the *boot transaction*
-  sometimes does not finish: 2 of those boots stopped at `getty.target` with
-  `multi-user.target` never reached, while every unit that started also
-  finished and the guest was still usable at a login prompt. Cause not yet
-  established; `tools/ki3b-jobs.py` boots the guest repeatedly and asks systemd
-  from inside which job is holding the target.
+  The live defect is separate: `dbus.service` fails on **every** boot with
+  `status=203/EXEC` — systemd cannot exec `/usr/bin/dbus-daemon`, even though it
+  runs fine from a shell — so the system message bus is never up and
+  `systemctl is-system-running` reports `degraded`. That breaks `systemd-run`,
+  `systemctl start`/`stop`, `loginctl`, and polkit-gated operations; plain
+  `systemctl is-active` still works because it talks to PID 1 over
+  `/run/systemd/private`. Not yet localised (`INCIDENTS.md` WP225-OPEN).
+  A system that boots to `graphical.target` with no bus is not a usable
+  multi-user system, so unattended operation should still use the
+  busybox/OpenRC/runit fallback until WP225 is fixed.
   README previously called this "runtime lookup corruption on two-device
   volumes (H2)". That wording does not match what is observed — nothing here
-  shows corrupted lookups — so #3 is restated above rather than replaced, and
-  whether it is the same problem or a second one is **not decided**.
-  Until it is: the busybox/OpenRC/runit fallback remains the supported path for
-  unattended boots.
+  shows corrupted lookups, and the boot completes — so #3 is restated above
+  rather than replaced, and whether it is the same problem or a second one is
+  **not decided**.
 * **`invf-fsck -f` after a fresh import** can break runtime FUSE directory
   lookups; offline reads stay fine. Under investigation.
 * **Two-device FUSE:** the first write can poison symlink-directory lookups

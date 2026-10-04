@@ -2020,81 +2020,138 @@ detach that blocked, and a mount whose filesystem hangs. None of them was the
 containerpack.
 ---
 
-## WP224-OPEN: systemd boot on a FUSE root is NONDETERMINISTIC
+## WP224-RESOLVED: the systemd boot was never flaky -- the serial line was
 
-**Status:** OPEN — observed 2026-10-04, not localised. This is a new finding,
-not a correction of an old entry.
+**Status:** RESOLVED 2026-10-04. Not a filesystem defect. Superseded by
+WP225 for the one real problem this uncovered.
 
-README "Known issues" #3 says *"systemd-as-PID-1 on a FUSE root: runtime lookup
+README "Known issues" #3 said *"systemd-as-PID-1 on a FUSE root: runtime lookup
 corruption on two-device volumes (H2)"*, with a busybox/OpenRC fallback. There
 was no way to test it: the repo has boot harnesses for Arch, Gentoo and Void and
 **no Debian boot script at all**, so no systemd root had ever been booted here.
-tools/boot-debian-qemu.sh plus tools/configure-debian.sh now close that gap
+tools/boot-debian-qemu.sh plus tools/configure-debian.sh closed that gap
 (debootstrap a Debian trixie minbase, boot it with
 `invfs.init=/lib/systemd/systemd`).
 
-**What works.** systemd 257.13 does come up as PID 1 on an InvariantFS root and
-complete its boot:
+**The boot is deterministic. It completes, 8 out of 8.**
 
-    [  OK  ] Reached target multi-user.target - Multi-User System.
-    [  OK  ] Reached target graphical.target  - Graphical Interface.
-    InvariantFS mounted: 9495 files
-    OK: Mounted sys-fs-fuse-connections.mount - FUSE Control File System
+tools/ki3b-jobs.py boots the same volume 8 times, drives the guest over a
+console socket, and asks systemd itself rather than reading the log:
 
-with zero `runit` occurrences in the guest console. So INCIDENTS.md's **H1
-("early-mount units fail and daemon startup hangs") does not describe a
-permanent condition** — the initramfs accommodation at tools/initramfs-init.sh:295-300
-(`/run` as tmpfs and cgroup2 before PID1 starts, WP66 H1) does its job.
+| run | serial printed `Reached target multi-user.target` | in-guest `multi-user.target` | in-guest `graphical.target` | `last_target` seen on serial |
+|---|---|---|---|---|
+| 1-8 | **false (0/8)** | **active (8/8)** | **active (8/8)** | `swap.target` (8/8) |
 
-**What does not.** Across 10 boots on ONE volume and ONE staged root, 8 complete
-and 2 do not. The divergence is narrow and reproducible in shape:
+`systemctl show multi-user.target` reports `ActiveState=active SubState=active`
+with a real `ActiveEnterTimestamp` on every run. The boot finishes every time.
 
-  boots reaching multi-user.target   5, 7, 9, 11, 12, 13, 14
-  boots stopping at getty.target      8, 15
+**What was actually wrong: an absent oracle, read as evidence.** Under this
+harness the serial console emits no `Reached target` line *at all*, so
+`last_target` sits at `swap.target` even on runs where multi-user.target is
+demonstrably active. The serial log was not reporting a stall; it was not
+reporting anything. Two sessions of diagnosis -- an early "it hangs near
+sys-fs-fuse-connections.mount", then a correction to "the multi-user transaction
+does not complete", then a correction of *that* -- were all inferences drawn
+from a marker that was not there. The in-guest answer was available the whole
+time, and it took a harness that could type at the guest to get it.
 
-**A failed boot is NOT a boot that hung.** This corrects an earlier draft of this
-entry, which described attempts 8 and 15 as stalling early near
-`sys-fs-fuse-connections.mount` / `systemd-sysctl`. That was wrong, and it was
-wrong in the way that matters: it made the failure look like a hang in early
-boot, when in fact both of those boots ran to completion of everything they had
-started. Measured from the serial logs:
+**Caveat on scope, because it bounds the claim.** The two harnesses differ in
+how the console is attached, and that may be the entire variance:
 
-  * every run reached `getty.target`, printed `debian login:`, started
-    `ssh.service`, and delivered a root shell on the console — including both
-    runs counted as failures;
-  * the set of units that print `Starting` and the set that print `Started` are
-    **identical** between the good and bad runs — no unit starts without
-    finishing, and no unit is missing from either;
-  * the target sequence is identical up to and including `getty.target`;
-  * the *only* difference is that `multi-user.target` and `graphical.target`
-    are never reached in the two bad runs.
+  * tools/ki3b-jobs.py      -> `-serial unix:PATH,server=on,wait=on` (socket)
+  * tools/boot-debian-qemu.sh -> `-serial file:` (write-only)
 
-So systemd completes every unit it dispatches, and then the
-`multi-user.target` transaction does not complete. That is a different failure
-from a hung unit, and the two drafts of this entry described two different bugs.
+The earlier "8 of 10 complete, 2 stop at getty.target" split came from the
+**file**-based harness; the 8/8 completion came from the **socket**-based one.
+Those are different I/O paths, so this entry does **not** claim the file-based
+variance was a capture artifact -- only that the socket harness proves the boot
+completes. The file-based 2-of-10 result is unexplained and, on this evidence,
+may be a capture artifact. Anyone re-testing must say which harness produced
+their number.
 
-**Unresolved, and deliberately not guessed at:** the two bad logs are the only
-ones carrying raw timestamped `systemd[1]:` manager lines (69 and 65 lines,
-against 54 and 58 in the good runs), and those lines stop at ~3.3 s while
-`[  OK  ]` status rendering continues normally afterwards. Whether that is the
-cause or an artifact of console state is **not established**.
+**Consequences that survive:**
 
-**Why this is filed against README "Known issues" #3 rather than replacing it.**
-#3 says "runtime lookup corruption on two-device volumes (H2)". What is observed
-is a boot transaction that does not complete; nothing here exhibits corrupted
-lookups. If #3 and this are the same problem the description is wrong; if they
-differ, there is a second undocumented failure mode. The row says so and does
-not pick a side.
+  * INCIDENTS.md's **H1 ("early-mount units fail and daemon startup hangs") is
+    not a permanent condition.** The initramfs accommodation at
+    tools/initramfs-init.sh:295-300 (`/run` as tmpfs and cgroup2 mounted before
+    PID1 starts, WP66 H1) is what makes this work; without it the boot would
+    hang, and with it the boot finishes 8/8.
+  * A boot harness must assert **in-guest**, never on a serial marker. See
+    WP226 for the harness fix this implies.
 
-**Next step:** the guest is *usable* in the failing case, so the question is
-answerable from inside rather than only from the serial line — `systemctl list-
-jobs` and `systemctl --failed` from the console of a failing boot would say
-which job is holding `multi-user.target`. Ten more boots to raise the sample
-count is the fallback. The VARIANCE is the finding; a single run cannot
-distinguish a timing race from a state-dependent one.
+**One real defect survived the correction**, and it is not in this entry:
+`dbus.service` fails on **every** boot with 203/EXEC. It was hiding here --
+because it fails identically on boots that do reach multi-user.target, it read
+as background noise next to an imaginary stall. Filed as WP225.
 
-**Also unproven by this harness:** the in-guest SSH assertions (`ps -p 1`,
-`/proc/mounts`, `systemctl is-system-running`, `systemctl poweroff`). A minbase
-Debian has no `procps`, so `ps` has nothing to run -- suspected, not verified.
-The harness therefore asserts from the SERIAL console and treats SSH as
-best-effort depth, and it does not print PASS.
+
+## WP225-OPEN: systemd cannot exec dbus-daemon on an InvariantFS root
+
+**Status:** OPEN, deterministic, not localised. Found while resolving WP224.
+
+Every boot of a Debian trixie root on InvariantFS, systemd fails the system
+message bus:
+
+    dbus.service: Main process exited, code=exited, status=203/EXEC
+    dbus.service: Failed with result 'exit-code'.
+    dbus.service: Failed to start D-Bus System Message Bus.
+    systemd-run: Failed to connect to system scope bus via local transport:
+                 Connection refused
+
+Measured over the 8-run sweep: **8/8**. `dbus.service` and `dbus.socket` both
+end `loaded failed failed`, `ExecMainStatus=203`, `NRestarts=0`, `Type=notify`,
+`Result=exit-code`, and `systemctl is-system-running` reports **degraded**
+(exit 1) on every boot.
+
+**This is why `is-system-running=degraded` is not a boot-incomplete signal.** It
+means "some units failed", not "the boot has not finished". Reading it as the
+latter is how the WP224 phantom stall survived so long.
+
+**What breaks.** Anything that needs the system bus: `systemd-run`,
+`systemctl start`/`stop`, `loginctl`, and every polkit-gated operation. Plain
+`systemctl is-active`/`show` still work, because they talk to PID 1 over
+`/run/systemd/private` rather than over the bus -- which is how the targets could
+be queried while the bus was dead, and why this was easy to miss.
+
+**What is ruled out so far:**
+
+  * **not the binary** -- `/usr/bin/dbus-daemon` exists and runs from a guest
+    shell: `D-Bus Message Bus Daemon 1.16.2`
+  * **not sandboxing** -- no `Protect*`, `Private*` or `NoNewPrivileges=` is
+    set on the unit; `CapabilityBoundingSet` is the default broad set
+  * **not a crash or exit code** -- 203/EXEC is systemd failing to *exec* the
+    program at all, so the process never ran
+  * **not dbus configuration** -- it fails before reading any config
+
+**Leading hypothesis, not yet established.** Something about the *exec path
+itself* on the FUSE root: the ELF interpreter
+(`/lib64/ld-linux-x86-64.so.2`), a failing `access()`/`stat()` on the binary or
+its interpreter, or a systemd-created runtime/state directory that is unusable
+on the FUSE mount. `namei -l`, `stat`, ELF magic and `ldd` probes are written
+into tools/ki3b-jobs.py; a boot that captures them will settle it.
+
+**Impact on the README claim.** README "Known issues" #1 now says systemd
+reaches `graphical.target`, which is true and confirmed 8/8. It does not yet
+mention that the system bus is dead on every boot, which is the more
+user-visible half of the same picture: a system that is up but has no bus is not
+a usable multi-user system.
+
+## WP226-OPEN: boot harnesses assert on serial markers, which can be absent
+
+**Status:** OPEN, harness defect, not a filesystem defect.
+
+tools/boot-debian-qemu.sh decides whether a boot succeeded by grepping the
+serial log for `Reached target multi-user.target`. WP224 established that this
+marker can be **completely absent** while the guest is fully booted, so the
+harness reports a failure that did not happen -- or, in the file-based variant,
+passes and fails on capture artifacts rather than on guest behaviour.
+
+This harness is not in CI (only the Void, Arch and Gentoo boot scripts are), so
+it does not gate anything today. But it is the harness someone will reach for
+when re-testing KI3b, and it would reproduce the WP224 confusion for the next
+person.
+
+**Fix:** assert in-guest (`systemctl show -p ActiveState,SubState <target>` over
+the console socket), and treat a missing serial marker as *no information*
+rather than as failure. tools/ki3b-jobs.py already does the in-guest part
+correctly and is the model to copy.

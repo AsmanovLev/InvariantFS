@@ -37,13 +37,67 @@ REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 # rest are context -- a stuck job with a failed dependency needs both.
 PROBES = [
     ("is-system-running", "systemctl is-system-running --no-pager"),
-    ("list-jobs", "systemctl list-jobs --no-pager --no-legend"),
-    ("failed-units", "systemctl --failed --no-pager --no-legend"),
-    ("failed-jobs", "systemctl list-jobs --state=failed --no-pager --no-legend"),
-    ("target-deps", "systemctl show multi-user.target -p Wants -p Requires "
-                    "-p After --no-pager"),
-    ("boot-count", "systemctl --failed --no-pager | wc -l"),
-    ("kernel-tail", "dmesg 2>/dev/null | tail -25"),
+    ("list-jobs", "SYSTEMD_COLORS=0 systemctl list-jobs --no-pager --no-legend"),
+    ("failed-units", "SYSTEMD_COLORS=0 systemctl --failed --no-pager --no-legend"),
+    # WHY does dbus fail? It Wants= and is ordered After= dbus.service, and it
+    # restarts forever, so multi-user.target never gets its dependency
+    # satisfied. The mechanism is established; the cause is not. These probes
+    # are the ones that go after the cause.
+    ("dbus-status", "SYSTEMD_COLORS=0 systemctl status dbus.service --no-pager -l | head -40"),
+    ("dbus-journal", "journalctl -u dbus.service --no-pager -n 40 2>&1 | tail -40"),
+    ("dbus-props", "SYSTEMD_COLORS=0 systemctl show dbus.service "
+                   "-p Type -p Restart -p RestartUSec -p Result -p ExecMainStatus "
+                   "-p NRestarts -p After --no-pager"),
+    ("machine-id", "echo machine-id=$(cat /etc/machine-id 2>&1); ls -l /run/dbus 2>&1; ls -ld /var/lib/dbus 2>&1"),
+    ("dbus-bin", "command -v dbus-daemon; dbus-daemon --version 2>&1 | head -2"),
+    # Is multi-user ACTUALLY unreached, or did systemd complete and merely fail
+    # to PRINT it? `list-jobs` came back empty -- no pending jobs -- which is
+    # not what a boot waiting on something looks like. The serial log is the
+    # only witness so far, and it has already lied once (the raw
+    # `systemd[1]:` lines present only in the "stalling" logs). So ask the
+    # manager for the target's state directly instead of believing the console.
+    ("target-active", "for t in multi-user.target graphical.target basic.target "
+                      "sysinit.target; do printf '%s ' $t; "
+                      "systemctl is-active $t 2>&1; done"),
+    ("target-state", "SYSTEMD_COLORS=0 systemctl show multi-user.target "
+                     "-p ActiveState -p SubState -p ActiveEnterTimestamp "
+                     "-p Result --no-pager"),
+    ("system-state", "systemctl is-system-running --no-pager; "
+                     "systemctl is-system-running --wait >/dev/null 2>&1; "
+                     "echo exit=$?"),
+    # Does systemd's exec fail in GENERAL on this root, or only for dbus?
+    ("exec-test", "systemd-run --unit=ki3b-exec-probe --wait --collect "
+                  "/bin/echo ki3b-exec-ok 2>&1 | tail -3"),
+    ("dbus-hardening", "SYSTEMD_COLORS=0 systemctl show dbus.service "
+                       "-p ProtectSystem -p ProtectHome -p PrivateTmp "
+                       "-p PrivateDevices -p NoNewPrivileges "
+                       "-p RestrictNamespaces -p CapabilityBoundingSet "
+                       "-p MemoryDenyWriteExecute -p SystemCallFilter --no-pager"),
+    # 203/EXEC with NO hardening set means the failure is in the path, not in
+    # the sandbox. systemd answers 203/EXEC for any failure to get the program
+    # running -- including a failed access() on the binary, a missing ELF
+    # interpreter, or a directory systemd created itself being unusable -- so
+    # the exec line alone cannot tell us which. Walk the path.
+    ("dbus-path", "namei -l /usr/bin/dbus-daemon 2>&1 | tail -12; "
+                  "stat -c '%n %A %U:%G %s' /usr/bin/dbus-daemon "
+                  "/lib64/ld-linux-x86-64.so.2 2>&1"),
+    ("dbus-interp", "head -c 20 /usr/bin/dbus-daemon 2>/dev/null | od -c | head -2; "
+                    "ls -l /lib64 2>&1 | head -3; ldd /usr/bin/dbus-daemon 2>&1 | head -6"),
+    ("dbus-exec-props", "SYSTEMD_COLORS=0 systemctl show dbus.service "
+                        "-p ExecStart -p ExecStartPre -p ExecStartPost "
+                        "-p User -p Group -p RootDirectory -p RootImage "
+                        "-p WorkingDirectory -p RuntimeDirectory "
+                        "-p RuntimeDirectoryPreserve -p StateDirectory "
+                        "-p CacheDirectory -p LogsDirectory "
+                        "-p ReadWritePaths -p InaccessiblePaths --no-pager"),
+    ("dbus-manual-start", "systemctl reset-failed dbus.service dbus.socket 2>&1; "
+                          "systemctl start dbus.socket 2>&1; "
+                          "systemctl start dbus.service 2>&1; "
+                          "echo ---; systemctl is-active dbus.socket dbus.service 2>&1; "
+                          "SYSTEMD_COLORS=0 systemctl status dbus.service --no-pager -l 2>&1 | head -12"),
+    ("dbus-unit", "systemctl cat dbus.service 2>&1 | grep -vE '^#|^$' | head -25"),
+    ("target-deps", "SYSTEMD_COLORS=0 systemctl show multi-user.target "
+                    "-p Wants -p Requires -p After --no-pager"),
 ]
 
 
@@ -122,43 +176,80 @@ class Guest:
     def send(self, line):
         self.sock.sendall((line + "\n").encode())
 
-    def wait_for(self, needle, timeout, since=0):
-        """Wait for `needle` to appear in the console stream AFTER offset
-        `since`. Returns the offset of the match, or None. The offset matters:
-        'systemctl --failed' appears in the command I type and again in its
-        output, and matching my own echo would report success having learned
-        nothing -- the same shape as the 'SSH OK' bug in b7921c6."""
-        deadline = time.time() + timeout
-        while time.time() < deadline:
-            with self.lock:
-                hay = self.buf[since:]
-                if needle in hay:
-                    return since + hay.index(needle)
-            time.sleep(0.3)
-        return None
-
     def read_all(self):
         with self.lock:
             return self.buf
 
     def marker(self, n):
-        return f"###KI3B{n}###"
+        # NO '#' in this token. '#' starts a comment in sh, so a marker like
+        # ###KI3B0###BEGIN turned the entire probe line into a comment:
+        #   echo ###KI3B0###BEGIN; systemctl is-system-running; echo ###KI3B0###END
+        # runs NOTHING. The tty still echoes the typed line, so the console
+        # looked responsive and the tool reported 'captured' with the command
+        # text in it -- three separate layers of plausible-looking nothing.
+        # Shell-safe token, no metacharacters that bash would interpret.
+        return f"__KI3B{n}__"
 
     def probe(self, n, cmd, timeout=90):
-        """Run one command and return its output, delimited by markers."""
+        """Run one command and return its OUTPUT.
+
+        The subtlety, which cost the first version of this tool a full sweep of
+        12 boots plus a validation run: the tty ECHOES every character typed
+        into it. So the console stream contains the whole line I sent --
+
+            echo __KI3B0__BEGIN; systemctl is-system-running; echo __KI3B0__END
+
+        -- twice over in effect: once as the echo, once as real output. The
+        first occurrence of the END marker is therefore inside my own echo, and
+        naively waiting for it 'succeeds' instantly and returns the command
+        back, having learned nothing. Every probe came back 'captured' with the
+        command text in it.
+
+        So: wait for the marker TWICE and take the second. The echo is the
+        first, the real one is the second, and nothing else can contain it
+        because the command cannot produce a string it does not know.
+        """
         start = len(self.read_all())
         m = self.marker(n)
         self.send(f"echo {m}BEGIN; {cmd}; echo {m}END")
-        end_at = self.wait_for(f"{m}END", timeout, since=start)
+        end_at = self._wait_for_nth(f"{m}END", 2, timeout, since=start)
         if end_at is None:
             return None
         with self.lock:
             hay = self.buf[start:end_at]
-        b = hay.find(f"{m}BEGIN")
-        if b < 0:
+        b = self._nth_index(hay, f"{m}BEGIN", 2)
+        if b is None:
             return None
         body = hay[b + len(f"{m}BEGIN"):]
-        return body.replace("\r\n", "\n").strip()
+        body = body.replace("\r\n", "\n").strip()
+        # If the capture degenerates back into the echo, say so rather than
+        # storing it as if it were an answer. An empty result is legitimate
+        # (e.g. `systemctl --failed` with nothing failed); a result that is
+        # just the command text is not.
+        if body and cmd.split()[0] in body and "__KI3B" not in body \
+                and len(body) < len(cmd) + 4:
+            return {"__echo_only__": body}
+        return body
+
+    def _nth_index(self, hay, needle, n):
+        """Index of the nth occurrence of `needle`, or None."""
+        idx = -1
+        for _ in range(n):
+            idx = hay.find(needle, idx + 1)
+            if idx < 0:
+                return None
+        return idx
+
+    def _wait_for_nth(self, needle, n, timeout, since=0):
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            with self.lock:
+                hay = self.buf[since:]
+                found = self._nth_index(hay, needle, n)
+            if found is not None:
+                return since + found
+            time.sleep(0.3)
+        return None
 
     def kill(self):
         try:
@@ -226,6 +317,11 @@ def one_run(idx, args, port):
         # before we attached, so nothing is echoed back until we poke it.
         g.send("")
         time.sleep(1.5)
+        # Deliberately NOT `stty -echo`. I added that as belt-and-braces and it
+        # inverted the bug: probe() counts on the marker appearing TWICE (echo,
+        # then real output), so with echo disabled every probe timed out and
+        # reported 'console wedged?' when the console was fine. The two
+        # mechanisms are opposites; pick one. Echo stays on.
 
         for n, (name, cmd) in enumerate(PROBES):
             out = g.probe(n, cmd, timeout=args.probe_timeout)
@@ -236,9 +332,27 @@ def one_run(idx, args, port):
                 rec["error"] = f"probe {name} got no response -- console wedged?"
                 break
 
+        # Did the boot transaction FINISH? getty.target legitimately precedes
+        # multi-user.target, so a shell at t=0 says nothing about whether the
+        # target is EVER reached -- and reading the flag straight after the
+        # shell appeared marked 4/4 runs as failures when the earlier harness
+        # measured 8/15 succeeding. The guest is still booting; the answer does
+        # not exist yet. So wait for it, and only a boot that never arrives
+        # pays the full window.
+        settle_deadline = time.time() + args.settle_multi
+        while time.time() < settle_deadline:
+            if "Reached target multi-user.target" in g.read_all():
+                break
+            time.sleep(3.0)
+        with g_read(g) as full:
+            rec["reached_multi_user"] = "Reached target multi-user.target" in full
+            targets = re.findall(r"Reached target ([A-Za-z0-9._-]+)", full)
+            rec["targets_reached"] = targets
+            rec["last_target"] = targets[-1] if targets else None
+
         if not args.no_poweroff:
             g.send("(sleep 1; poweroff) &")
-        time.sleep(min(args.settle, 20))
+        time.sleep(8)
         return rec
     finally:
         rec["qemu_stderr"] = g.kill()
@@ -263,6 +377,9 @@ def main():
     ap.add_argument("--timeout", type=int, default=900)
     ap.add_argument("--probe-timeout", type=int, default=90)
     ap.add_argument("--settle", type=int, default=20)
+    ap.add_argument("--settle-multi", type=int, default=180,
+                    help="how long to let the boot transaction FINISH before "
+                         "recording whether multi-user.target was reached")
     ap.add_argument("--port", type=int, default=2426)
     ap.add_argument("--mem", type=int, default=3072)
     ap.add_argument("--kernel", default=f"/boot/vmlinuz-{os.uname().release}")
