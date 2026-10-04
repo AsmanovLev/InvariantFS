@@ -33,7 +33,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
-#include <sys/statvfs.h>
+#include <sys/statfs.h>
 #include <unistd.h>
 
 #include "tool_scratch.h"
@@ -200,13 +200,19 @@ static uint64_t scratch_mem_available(void)
 uint64_t tool_scratch_headroom(const char *root, uint64_t *fs_avail,
                                uint64_t *alloc)
 {
-    struct statvfs vfs;
+    struct statfs vfs;
     uint64_t fs, a = 0;
 
     if (fs_avail) *fs_avail = 0;
     if (alloc) *alloc = 0;
-    if (!root || !*root || statvfs(root, &vfs) != 0) return 0;
-    fs = (uint64_t)vfs.f_bavail * (uint64_t)vfs.f_frsize;
+    /* statfs, not statvfs: the filesystem-type magic lives in struct statfs.
+     * `struct statvfs` has no f_type member at all, so this was
+     *     error: 'struct statvfs' has no member named 'f_type'
+     * on every toolchain that actually compiles it -- it only built locally
+     * by never being compiled there. statfs carries everything this needs:
+     * f_type for the magic, f_bavail * f_bsize for the free space. */
+    if (!root || !*root || statfs(root, &vfs) != 0) return 0;
+    fs = (uint64_t)vfs.f_bavail * (uint64_t)vfs.f_bsize;
     if (fs_avail) *fs_avail = fs;
     if ((unsigned long)vfs.f_type != SCRATCH_TMPFS_MAGIC) return fs;
 
