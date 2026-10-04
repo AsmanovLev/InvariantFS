@@ -2038,7 +2038,6 @@ complete its boot:
 
     [  OK  ] Reached target multi-user.target - Multi-User System.
     [  OK  ] Reached target graphical.target  - Graphical Interface.
-    systemd 257.13-1~deb13u1 running in system mode
     InvariantFS mounted: 9495 files
     OK: Mounted sys-fs-fuse-connections.mount - FUSE Control File System
 
@@ -2047,33 +2046,52 @@ with zero `runit` occurrences in the guest console. So INCIDENTS.md's **H1
 permanent condition** — the initramfs accommodation at tools/initramfs-init.sh:295-300
 (`/run` as tmpfs and cgroup2 before PID1 starts, WP66 H1) does its job.
 
-**What does not.** Across 15 attempts on ONE volume and ONE staged root, the boot
-alternated between completing and stalling:
+**What does not.** Across 10 boots on ONE volume and ONE staged root, 8 complete
+and 2 do not. The divergence is narrow and reproducible in shape:
 
-  reached multi-user.target    attempts 5, 7, 9, 11, 12, 13, 14
-  stalled, no multi-user in 900s              8, 15
+  boots reaching multi-user.target   5, 7, 9, 11, 12, 13, 14
+  boots stopping at getty.target      8, 15
 
-The stall point is early and consistent — the last messages are
+**A failed boot is NOT a boot that hung.** This corrects an earlier draft of this
+entry, which described attempts 8 and 15 as stalling early near
+`sys-fs-fuse-connections.mount` / `systemd-sysctl`. That was wrong, and it was
+wrong in the way that matters: it made the failure look like a hang in early
+boot, when in fact both of those boots ran to completion of everything they had
+started. Measured from the serial logs:
 
-    Mounting sys-fs-fuse-connections.mount - FUSE Control File System...
-    Starting systemd-sysctl.service - Apply Kernel Variables...   (never Finished)
-    Finished systemd-udev-load-credentials.service
-    Started systemd-journald.service
+  * every run reached `getty.target`, printed `debian login:`, started
+    `ssh.service`, and delivered a root shell on the console — including both
+    runs counted as failures;
+  * the set of units that print `Starting` and the set that print `Started` are
+    **identical** between the good and bad runs — no unit starts without
+    finishing, and no unit is missing from either;
+  * the target sequence is identical up to and including `getty.target`;
+  * the *only* difference is that `multi-user.target` and `graphical.target`
+    are never reached in the two bad runs.
 
-with `swap.target` the last target reached. Runs that stalled had already got
-udevd going (13 udev lines), so this is NOT the missing-`udev` stall that an
-earlier attempt showed: that one is fixed, and this is a different, later
-failure that happens with udev present.
+So systemd completes every unit it dispatches, and then the
+`multi-user.target` transaction does not complete. That is a different failure
+from a hung unit, and the two drafts of this entry described two different bugs.
 
-**Why this matters more than the README's wording.** What is observed is a
-*stall in early boot*, not "runtime lookup corruption". If #3 and this are the
-same problem, the description is wrong; if they are different, there is a second
-undocumented failure mode. **Not yet determined which**, and this row deliberately
-does not guess.
+**Unresolved, and deliberately not guessed at:** the two bad logs are the only
+ones carrying raw timestamped `systemd[1]:` manager lines (69 and 65 lines,
+against 54 and 58 in the good runs), and those lines stop at ~3.3 s while
+`[  OK  ]` status rendering continues normally afterwards. Whether that is the
+cause or an artifact of console state is **not established**.
 
-**Next step:** a capture loop (boot N times, keep every serial log, diff the
-stalling runs against the passing ones). The variance is the finding; a single
-run cannot distinguish a timing race from a state-dependent one.
+**Why this is filed against README "Known issues" #3 rather than replacing it.**
+#3 says "runtime lookup corruption on two-device volumes (H2)". What is observed
+is a boot transaction that does not complete; nothing here exhibits corrupted
+lookups. If #3 and this are the same problem the description is wrong; if they
+differ, there is a second undocumented failure mode. The row says so and does
+not pick a side.
+
+**Next step:** the guest is *usable* in the failing case, so the question is
+answerable from inside rather than only from the serial line — `systemctl list-
+jobs` and `systemctl --failed` from the console of a failing boot would say
+which job is holding `multi-user.target`. Ten more boots to raise the sample
+count is the fallback. The VARIANCE is the finding; a single run cannot
+distinguish a timing race from a state-dependent one.
 
 **Also unproven by this harness:** the in-guest SSH assertions (`ps -p 1`,
 `/proc/mounts`, `systemctl is-system-running`, `systemctl poweroff`). A minbase
