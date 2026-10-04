@@ -90,6 +90,31 @@ PROBES = [
                         "-p RuntimeDirectoryPreserve -p StateDirectory "
                         "-p CacheDirectory -p LogsDirectory "
                         "-p ReadWritePaths -p InaccessiblePaths --no-pager"),
+    # The exec path is proven fine as root: real ELF, 0755 root:root, the
+    # /lib64 -> usr/lib64 interpreter symlink resolves, and ldd binds every
+    # library. The one thing dbus-exec-props adds that the rest do not is
+    # User=messagebus -- systemd drops to that uid BEFORE execve. So exec the
+    # binary AS that uid from a shell. If it works here and fails under systemd,
+    # the fault is systemd's own setup (mount namespace, capability bounding,
+    # the PrivateTmp/MountPrivate defaults it applies to unprivileged units),
+    # not the filesystem.
+    ("dbus-asuser", "getent passwd messagebus; getent group messagebus; "
+                    "id messagebus 2>&1; "
+                    "runuser -u messagebus -- /usr/bin/dbus-daemon --version 2>&1 "
+                    "| head -3; "
+                    "setpriv --reuid=messagebus --regid=messagebus --clear-groups "
+                    "/usr/bin/dbus-daemon --version 2>&1 | head -3"),
+    # What systemd changes about the unit's namespace by default for an
+    # unprivileged User=, and whether the uid can traverse the exec path at all.
+    ("dbus-ns-props", "SYSTEMD_COLORS=0 systemctl show dbus.service "
+                      "-p ProtectSystem -p ProtectHome -p PrivateTmp "
+                      "-p PrivateDevices -p ProtectKernelTunables "
+                      "-p ProtectKernelModules -p ProtectControlGroups "
+                      "-p NoNewPrivileges -p DynamicUser -p RestrictNamespaces "
+                      "-p SystemCallFilter -p MemoryDenyWriteExecute "
+                      "-p RestrictAddressFamilies -p KeyringMode "
+                      "-p UMask -p DynamicUser --no-pager; "
+                      "ls -ld / /usr /usr/bin /lib64 /usr/lib64 2>&1"),
     ("dbus-manual-start", "systemctl reset-failed dbus.service dbus.socket 2>&1; "
                           "systemctl start dbus.socket 2>&1; "
                           "systemctl start dbus.service 2>&1; "
