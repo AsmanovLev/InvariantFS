@@ -43,6 +43,11 @@ source=("invfs-v$pkgver-$arch.tar.zst")
 # which really runs makepkg; CI's arch leg only ever ran package()).
 sha256sums=('3fc20b159cc9d6abf691f2e9260dc8af60b3b4926ea49f54b41b9f55a47037b7')
 
+# makepkg-only needs: the artifact ships compiled, so there is nothing to
+# strip (and stripping would rewrite the checksummed bytes); fakeroot is
+# still required for package(). !strip keeps base-devel out of the loop.
+options=('!strip')
+
 # The one place the FHS layout is defined. WITH_MKINITCPIO=1 because this
 # IS Arch; dracut is Gentoo/Fedora and stays off here.
 package() {
