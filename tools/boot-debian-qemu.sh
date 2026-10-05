@@ -109,6 +109,28 @@ grep -o 'imported:.*' "$LOGDIR/import.log"
 fi   # end INVFS_DEB_VOLUME reuse branch
 
 # ---- boot ------------------------------------------------------------------
+# The host kernel is not always readable by the user running this.
+#
+# GitHub runners ship /boot/vmlinuz-<ver> root-only, so qemu fails with
+#     could not open kernel file '/boot/vmlinuz-...': Permission denied
+# and the harness reports a boot failure when qemu never started. Same
+# helper as boot-arch-qemu.sh / boot-void-qemu.sh: copy the kernel
+# somewhere readable rather than requiring it to already be. `install
+# -m 0444` keeps this to one step and never leaves a group- or
+# other-writable copy behind.
+readable_kernel() {
+    [ -n "$1" ] && [ -r "$1" ] && { printf '%s\n' "$1"; return 0; }
+    [ -r "$1" ] || {
+        local dst
+        dst="$(mktemp -d)/vmlinuz"
+        sudo install -m 0444 "$1" "$dst" 2>/dev/null \
+            || { echo "FAIL: cannot read kernel $1 (mode $(stat -c %a "$1" 2>/dev/null))" >&2
+                 echo "     pass one with INVFS_DEB_KERNEL, or install one readable" >&2
+                 return 1; }
+        printf '%s\n' "$dst"
+    }
+}
+KERNEL="$(readable_kernel "$KERNEL")" || exit 1
 # invfs.init is named EXPLICITLY so the assertion below is about systemd
 # starting, not about /sbin/init happening to resolve.
 CMDLINE="console=ttyS0,115200 invfs.init=/lib/systemd/systemd"
