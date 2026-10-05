@@ -95,7 +95,12 @@ else
     if [ "$MODE" = multi ]; then
         [ -f "$SHADOW" ] || { echo "FAIL: no such shadow volume: $SHADOW"; exit 1; }
     fi
-    [ -r "$KERNEL" ] || { echo "FAIL: no kernel: $KERNEL"; exit 1; }
+    # -e, not -r: readable_kernel() is what makes an unreadable kernel
+      # usable, and it runs LATER in this script. Requiring readability here
+      # made the fix unreachable -- the Arch step died with
+      #     FAIL: no kernel: /boot/vmlinuz-6.8.0-1064-azure
+      # before the code that solves that exact problem was ever reached.
+      [ -e "$KERNEL" ] || { echo "FAIL: no kernel: $KERNEL"; exit 1; }
     [ -r "$INITRD" ] || { echo "FAIL: no initramfs: $INITRD"; exit 1; }
 fi
 # The host kernel is not always readable by the user running this.
