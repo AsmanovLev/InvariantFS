@@ -44,9 +44,12 @@ source=("invfs-v$pkgver-$arch.tar.zst")
 sha256sums=('3fc20b159cc9d6abf691f2e9260dc8af60b3b4926ea49f54b41b9f55a47037b7')
 
 # makepkg-only needs: the artifact ships compiled, so there is nothing to
-# strip (and stripping would rewrite the checksummed bytes); fakeroot is
-# still required for package(). !strip keeps base-devel out of the loop.
-options=('!strip')
+# strip or debug-package (and both would rewrite the checksummed bytes);
+# fakeroot is still required for package(). !strip+!debug keeps base-devel
+# and debugedit out of the loop -- which matters on RAM-overlay live media,
+# where they do not fit next to the install target (attempts 4 and 5 died
+# in pacman on disk space / missing debugedit).
+options=('!strip' '!debug')
 
 # The one place the FHS layout is defined. WITH_MKINITCPIO=1 because this
 # IS Arch; dracut is Gentoo/Fedora and stays off here.
