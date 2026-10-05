@@ -342,3 +342,91 @@ jobs:
             # failure. Without this path the artifact is void-only, and the first
             # Arch boot in CI reported five failures with no console to read.
           if-no-files-found: ignore
+
+  # Fedora: the RPM spec's native home. The spec was debugged to green on
+  # Ubuntu (where its macros do not exist); this job builds it where
+  # systemd-rpm-macros DOES exist, covering the fallback's no-op direction
+  # and the real dependency resolution Ubuntu skips with --nodeps.
+  # Runs the same suite: the rpm leg builds natively, the debian leg
+  # loud-skips, the staged arch/void/gentoo legs are distro-agnostic.
+  fedora:
+    runs-on: ubuntu-22.04
+    container: fedora:latest
+    timeout-minutes: 40
+    steps:
+      # fetch-depth 0 so TAGS are present (same VERSION reason as above).
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: ccache
+        uses: actions/cache@v4
+        with:
+          path: ~/.ccache
+          key: ccache-v1-fedora-${{ hashFiles('Makefile', 'src/**/*.c', 'src/**/*.h', 'tools/codecpacks/**/*.c') }}
+          restore-keys: |
+            ccache-v1-fedora-
+
+      - name: dependencies
+        run: |
+          dnf install -y gcc make pkgconf-pkg-config fuse3-devel zlib-devel \
+            libzstd-devel systemd-rpm-macros rpm-build ccache python3 \
+            tar gzip file awk findutils
+
+      - name: build
+        run: |
+          ccache --zero-stats >/dev/null 2>&1 || true
+          ccache --max-size=1G >/dev/null 2>&1 || true
+          CC="ccache gcc" make -j"$(nproc)" && CC="ccache gcc" make helpers
+          ccache --show-stats || true
+
+      - name: packaging suite (rpm native)
+        run: bash tools/test-packaging.sh
+
+  # Gentoo: a real emerge of the ebuild against the HEAD-built artifact.
+  # The ebuild installs prebuilt binaries (no BUILD_DEPENDS); the RDEPENDs
+  # come from the official binhost so nothing compiles but our own tree
+  # (built by `make release` below). Distfiles are staged locally and the
+  # Manifest regenerated -- the ebuild's BLAKE2B/SIZE pins are provenance
+  # notes, portage's Manifest does the real verification.
+  gentoo:
+    runs-on: ubuntu-22.04
+    container: gentoo/stage3:latest
+    timeout-minutes: 60
+    steps:
+      # fetch-depth 0 so TAGS are present (same VERSION reason as above).
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: portage snapshot (webrsync, not a full git sync)
+        run: emerge-webrsync -q || emerge --sync -q
+
+      - name: build the release artifact this ebuild will install
+        run: |
+          emerge -g -q app-arch/zstd sys-libs/zlib sys-fs/fuse:3 || emerge -q app-arch/zstd sys-libs/zlib sys-fs/fuse:3
+          make -j"$(nproc)" && make release
+
+      - name: local overlay with HEAD distfiles
+        run: |
+          set -euo pipefail
+          ART=$(ls dist/invfs-*-x86_64.tar.zst | head -1)
+          VER=$(cut -d- -f2 <<<"$(basename "$ART")")
+          PV=${VER#v}
+          OVERLAY=/var/db/repos/invfs-local
+          mkdir -p "$OVERLAY/metadata" "$OVERLAY/sys-apps/invfs" "$OVERLAY/profiles"
+          echo 'masters = gentoo' > "$OVERLAY/metadata/layout.conf"
+          echo 'invfs-local' > "$OVERLAY/profiles/repo_name"
+          printf '[invfs-local]\nlocation = %s\n' "$OVERLAY" > /etc/portage/repos.conf/invfs-local.conf
+          cp "packaging/gentoo/invfs-$PV.ebuild" "$OVERLAY/sys-apps/invfs/" || cp packaging/gentoo/invfs-*.ebuild "$OVERLAY/sys-apps/invfs/"
+          EB=$(ls "$OVERLAY/sys-apps/invfs"/invfs-*.ebuild | head -1)
+          cp "$ART" dist/SHA256SUMS "$(portageq envvar DISTDIR)/"
+          ( cd "$OVERLAY/sys-apps/invfs" && ebuild "$(basename "$EB")" manifest )
+          mkdir -p /etc/portage/package.accept_keywords
+          echo 'sys-apps/invfs ~amd64' >> /etc/portage/package.accept_keywords/invfs
+
+      - name: emerge from the overlay, verify the install
+        run: |
+          set -euo pipefail
+          EMERGE_DEFAULT_OPTS="--getbinpkg --usepkg" emerge -g -q sys-apps/invfs
+          invf-mkfs --version
