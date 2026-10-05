@@ -37,8 +37,11 @@ optdepends=(
 )
 # makepkg resolves sources relative to the directory holding the PKGBUILD.
 source=("invfs-v$pkgver-$arch.tar.zst")
-sha256sums=('3fc20b159cc9d6abf691f2e9260dc8af60b3b4926ea49f54b41b9f55a47037b7'
-            '  invfs-v0.5.0-x86_64.tar.zst')
+# One entry per source file. `make release-sums` prints '<hash>  <file>';
+# paste ONLY the hash -- a filename in this array fails the build with
+# '<name> is not a valid integrity check' (caught by the ISO install test,
+# which really runs makepkg; CI's arch leg only ever ran package()).
+sha256sums=('3fc20b159cc9d6abf691f2e9260dc8af60b3b4926ea49f54b41b9f55a47037b7')
 
 # The one place the FHS layout is defined. WITH_MKINITCPIO=1 because this
 # IS Arch; dracut is Gentoo/Fedora and stays off here.
