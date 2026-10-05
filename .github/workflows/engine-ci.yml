@@ -123,24 +123,15 @@ jobs:
   # Offline only (no boot, no FUSE) -- see the header of each script. Scratch
   # is pinned under RUNNER_TEMP so a 1.8 GB staging tree never lands on the
   # runner's small /tmp.
-  distro-install:
+  arch-install:
     runs-on: ubuntu-22.04
-    timeout-minutes: 90
+    timeout-minutes: 30
     steps:
-      # fetch-depth 0 so TAGS are present. Without them `git describe` degrades
-      # to a bare commit hash, VERSION inside the release artifact becomes the
-      # hash instead of v0.5.0, and three separate checks then fail for what is
-      # really one cause:
-      #
-      #   gentoo   .ebuild path invfs-<hash>.ebuild does not exist -> rc=127
-      #   debian   .deb Version=0.5.0-1 does not match <hash>
-      #   sig      the SHA256SUMS assertion, downstream of the same mismatch
-      #
-      # Locally this never shows, because a working tree has its tags.
+    # Arch root: offline volume build (mkfs/import/fsck/verify) plus
+    # the single-device QEMU boot. Scratch pinned under RUNNER_TEMP.
       - uses: actions/checkout@v7
         with:
           fetch-depth: 0
-
       - name: dependencies
         # WP224: this list was short in exactly the ways the suites are brittle
         # about, each found by RUNNING them rather than by reading them:
@@ -179,11 +170,9 @@ jobs:
             sudo apt-get install -y -qq "$p" \
               || echo "::warning::$p unavailable on this image (advisory)"
           done
-
       - name: host capability preflight
         # One report of every gap instead of a sweep dying at the first one.
         run: bash tools/e2e-preflight.sh --quiet || true
-
       - name: "fuse: allow other users"   # quoted: a colon-space in an
         # unquoted YAML scalar makes the parser read this as a mapping key
         # test-acl.sh mounts with -o allow_other; without this the suite stops
@@ -192,7 +181,6 @@ jobs:
           sudo sh -c 'grep -q "^user_allow_other" /etc/fuse.conf \
             || echo user_allow_other >> /etc/fuse.conf'
           grep -v "^#" /etc/fuse.conf || true
-
       - name: build
         run: make -j"$(nproc)" && make helpers
 
@@ -218,7 +206,6 @@ jobs:
           ssh-keygen -t ed25519 -N '' -C ci-arch -f "$K" >/dev/null
           echo "ARCH_SSH_KEY=$K" >> "$GITHUB_ENV"
           echo "::group::key generated at $K"
-
       - name: arch root -> InvariantFS volume
         run: |
           # KEEP=1: the volume has to survive for the boot step below.
@@ -266,11 +253,106 @@ jobs:
       # Void is back: it was green at 2675cbd and was only set aside while the
       # Arch boot -- the harness that had never succeeded anywhere -- was the
       # thing being chased. Arch now passes, so both run again.
+      # Serial consoles are the evidence; kept per-distro so a
+      # red job arrives with its own console to read.
+      - name: upload serial logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: boot-serial-logs-arch
+          path: |
+            ${{ runner.temp }}/artifacts
+            ${{ runner.temp }}/archboot.log
+          if-no-files-found: ignore
+
+  void-install:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 45
+    steps:
+    # Void root: offline volume plus single- and two-device boots.
+    # Scratch pinned under RUNNER_TEMP.
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - name: dependencies
+        # WP224: this list was short in exactly the ways the suites are brittle
+        # about, each found by RUNNING them rather than by reading them:
+        #   fuse3           -- fusermount3 lives here; libfuse3-dev does NOT pull
+        #                       it, and without it nothing can mount anything
+        #   libjxl-tools    -- cjxl/djxl, which test-jxl.sh hard-requires
+        #   p7zip-full      -- 7z/7za for the p7z and qcow2 fixtures
+        #   qemu-system-x86 -- the BOOT harnesses below
+        #   e2fsprogs xfsprogs dosfstools exfatprogs unzip zip
+        #                    -- mkfs.* / debugfs / e2fsck / 7z: these install
+        #                       into /sbin, which is on root's PATH and NOT on
+        #                       a normal user's, so the suites could not find
+        #                       their own tools
+        #   python3-numpy python3-pil -- the fixture generators in test-jxl
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq build-essential pkg-config \
+            libfuse3-dev fuse3 zlib1g-dev libzstd-dev zstd xz-utils curl \
+            python3 python3-numpy python3-pil debootstrap \
+            e2fsprogs xfsprogs dosfstools exfatprogs unzip zip acl \
+            debhelper devscripts
+          # Best-effort: qemu for the boot harnesses, p7zip-full and
+          # libjxl-tools for the e2e fixtures. The e2e PREFLIGHT is advisory by
+          # design -- it reports missing tools rather than failing a run -- so a
+          # runner image without these must not take the job down.
+          #
+          # ONE PACKAGE PER CALL, deliberately. `apt-get install a b c` installs
+          # NOTHING when any single name is unavailable: one unknown package
+          # aborts the whole transaction. So wrapping the full list in
+          # `|| echo warning` was WORSE than no tolerance at all -- it silently
+          # turned "one advisory tool is missing" into "no dependencies at all".
+          # That is exactly how this job lost libfuse3-dev and then died at the
+          # build step reporting "FAIL: build first (make)": make was fine, the
+          # headers were not there.
+          for p in libjxl-tools p7zip-full qemu-system-x86 qemu-utils; do
+            sudo apt-get install -y -qq "$p" \
+              || echo "::warning::$p unavailable on this image (advisory)"
+          done
+      - name: host capability preflight
+        # One report of every gap instead of a sweep dying at the first one.
+        run: bash tools/e2e-preflight.sh --quiet || true
+      - name: "fuse: allow other users"   # quoted: a colon-space in an
+        # unquoted YAML scalar makes the parser read this as a mapping key
+        # test-acl.sh mounts with -o allow_other; without this the suite stops
+        # with "/etc/fuse.conf needs user_allow_other".
+        run: |
+          sudo sh -c 'grep -q "^user_allow_other" /etc/fuse.conf \
+            || echo user_allow_other >> /etc/fuse.conf'
+          grep -v "^#" /etc/fuse.conf || true
+      - name: build
+        run: make -j"$(nproc)" && make helpers
+
+      # A throwaway keypair for the Arch guest, so the boot uses publickey auth
+      # instead of sshpass.
+      #
+      # sshpass drives the password prompt through a PSEUDO-TERMINAL, and the
+      # runner's /dev/pts cannot allocate one -- sshpass answered "Failed to get
+      # a pseudo terminal: No such device" hundreds of times while the guest was
+      # up and its sshd was listening on 0.0.0.0:22. The harness already supports
+      # ARCH_SSH_KEY and the provisioner already installs it as
+      # /root/.ssh/authorized_keys; nothing was passing it, so the only path
+      # exercised was the one that needs a pty.
+      #
+      # Generated BEFORE the volume build, because that step is what bakes the
+      # authorized_keys into the image. Exported to GITHUB_ENV so the boot step
+      # picks it up too. Disposable: this key only ever reaches a throwaway
+      # volume on a runner that dies with the job.
+      - name: initramfs for the boot harnesses
+        run: bash tools/mkinitramfs.sh
+
+      # Void boot: DISABLED TEMPORARILY. It passes and has cost real time on
+      # every run; the signal the user wants right now is the Arch boot, which is
+      # the first of these harnesses that has never succeeded anywhere. Re-enable
+      # by deleting this comment -- the steps themselves are unchanged in
+      # tools/boot-void-qemu.sh and were green at 2675cbd.
       - name: void root -> InvariantFS volume (offline)
         run: |
           INVFS_VOID_WORK="$RUNNER_TEMP/void" \
             bash tools/test-void-install.sh
-
       - name: void root BOOTS on InvariantFS (single device)
         run: |
           set -o pipefail
@@ -281,7 +363,6 @@ jobs:
             bash tools/boot-void-qemu.sh 2>&1 | tee "$RUNNER_TEMP/voidboot.log" || rc=${PIPESTATUS[0]}
           cp -r "$RUNNER_TEMP/voidboot-logs" "$RUNNER_TEMP/artifacts" 2>/dev/null || true
           exit $rc
-
       - name: void root BOOTS on InvariantFS (two devices)
         run: |
           set -o pipefail
@@ -301,6 +382,103 @@ jobs:
       # populates it; boot-debian-qemu.sh then either imports it (INVFS_DEB_STAGE)
       # or reuses a volume (INVFS_DEB_VOLUME). Written against the real interface
       # after first getting it wrong in a draft.
+      # Serial consoles are the evidence; kept per-distro so a
+      # red job arrives with its own console to read.
+      - name: upload serial logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: boot-serial-logs-void
+          path: |
+            ${{ runner.temp }}/voidboot-logs
+            ${{ runner.temp }}/voidboot2-logs
+            ${{ runner.temp }}/artifacts
+          if-no-files-found: ignore
+
+  debian-install:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 60
+    steps:
+    # Debian root (systemd PID 1): debootstrap, provisioning, offline
+    # import, then the single-device boot. Scratch under RUNNER_TEMP.
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - name: dependencies
+        # WP224: this list was short in exactly the ways the suites are brittle
+        # about, each found by RUNNING them rather than by reading them:
+        #   fuse3           -- fusermount3 lives here; libfuse3-dev does NOT pull
+        #                       it, and without it nothing can mount anything
+        #   libjxl-tools    -- cjxl/djxl, which test-jxl.sh hard-requires
+        #   p7zip-full      -- 7z/7za for the p7z and qcow2 fixtures
+        #   qemu-system-x86 -- the BOOT harnesses below
+        #   e2fsprogs xfsprogs dosfstools exfatprogs unzip zip
+        #                    -- mkfs.* / debugfs / e2fsck / 7z: these install
+        #                       into /sbin, which is on root's PATH and NOT on
+        #                       a normal user's, so the suites could not find
+        #                       their own tools
+        #   python3-numpy python3-pil -- the fixture generators in test-jxl
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq build-essential pkg-config \
+            libfuse3-dev fuse3 zlib1g-dev libzstd-dev zstd xz-utils curl \
+            python3 python3-numpy python3-pil debootstrap \
+            e2fsprogs xfsprogs dosfstools exfatprogs unzip zip acl \
+            debhelper devscripts
+          # Best-effort: qemu for the boot harnesses, p7zip-full and
+          # libjxl-tools for the e2e fixtures. The e2e PREFLIGHT is advisory by
+          # design -- it reports missing tools rather than failing a run -- so a
+          # runner image without these must not take the job down.
+          #
+          # ONE PACKAGE PER CALL, deliberately. `apt-get install a b c` installs
+          # NOTHING when any single name is unavailable: one unknown package
+          # aborts the whole transaction. So wrapping the full list in
+          # `|| echo warning` was WORSE than no tolerance at all -- it silently
+          # turned "one advisory tool is missing" into "no dependencies at all".
+          # That is exactly how this job lost libfuse3-dev and then died at the
+          # build step reporting "FAIL: build first (make)": make was fine, the
+          # headers were not there.
+          for p in libjxl-tools p7zip-full qemu-system-x86 qemu-utils; do
+            sudo apt-get install -y -qq "$p" \
+              || echo "::warning::$p unavailable on this image (advisory)"
+          done
+      - name: host capability preflight
+        # One report of every gap instead of a sweep dying at the first one.
+        run: bash tools/e2e-preflight.sh --quiet || true
+      - name: "fuse: allow other users"   # quoted: a colon-space in an
+        # unquoted YAML scalar makes the parser read this as a mapping key
+        # test-acl.sh mounts with -o allow_other; without this the suite stops
+        # with "/etc/fuse.conf needs user_allow_other".
+        run: |
+          sudo sh -c 'grep -q "^user_allow_other" /etc/fuse.conf \
+            || echo user_allow_other >> /etc/fuse.conf'
+          grep -v "^#" /etc/fuse.conf || true
+      - name: build
+        run: make -j"$(nproc)" && make helpers
+
+      # A throwaway keypair for the Arch guest, so the boot uses publickey auth
+      # instead of sshpass.
+      #
+      # sshpass drives the password prompt through a PSEUDO-TERMINAL, and the
+      # runner's /dev/pts cannot allocate one -- sshpass answered "Failed to get
+      # a pseudo terminal: No such device" hundreds of times while the guest was
+      # up and its sshd was listening on 0.0.0.0:22. The harness already supports
+      # ARCH_SSH_KEY and the provisioner already installs it as
+      # /root/.ssh/authorized_keys; nothing was passing it, so the only path
+      # exercised was the one that needs a pty.
+      #
+      # Generated BEFORE the volume build, because that step is what bakes the
+      # authorized_keys into the image. Exported to GITHUB_ENV so the boot step
+      # picks it up too. Disposable: this key only ever reaches a throwaway
+      # volume on a runner that dies with the job.
+      - name: initramfs for the boot harnesses
+        run: bash tools/mkinitramfs.sh
+
+      # Void boot: DISABLED TEMPORARILY. It passes and has cost real time on
+      # every run; the signal the user wants right now is the Arch boot, which is
+      # the first of these harnesses that has never succeeded anywhere. Re-enable
+      # by deleting this comment -- the steps themselves are unchanged in
+      # tools/boot-void-qemu.sh and were green at 2675cbd.
       - name: debian root -> InvariantFS volume
         run: |
           set -euo pipefail
@@ -318,7 +496,6 @@ jobs:
           sudo chown -R "$(id -u):$(id -g)" "$S"
           bash tools/configure-debian.sh "$S"
           INVFS_DEB_STAGE="$S" bash tools/boot-debian-qemu.sh
-
       - name: debian root BOOTS on InvariantFS (single device)
         run: |
           set -o pipefail
@@ -328,27 +505,17 @@ jobs:
               2>&1 | tee "$RUNNER_TEMP/debianboot.log" || rc=${PIPESTATUS[0]}
           cp /tmp/invfs-debian-boot-single.log "$RUNNER_TEMP/artifacts/" 2>/dev/null || true
           exit $rc
-
+      # Serial consoles are the evidence; kept per-distro so a
+      # red job arrives with its own console to read.
       - name: upload serial logs
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: boot-serial-logs
+          name: boot-serial-logs-debian
           path: |
-            ${{ runner.temp }}/voidboot-logs
-            ${{ runner.temp }}/voidboot2-logs
             ${{ runner.temp }}/artifacts
-            # The boot steps copy console logs into runner.temp/artifacts on
-            # failure. Without this path the artifact is void-only, and the first
-            # Arch boot in CI reported five failures with no console to read.
+            ${{ runner.temp }}/debianboot.log
           if-no-files-found: ignore
-
-  # Fedora: the RPM spec's native home. The spec was debugged to green on
-  # Ubuntu (where its macros do not exist); this job builds it where
-  # systemd-rpm-macros DOES exist, covering the fallback's no-op direction
-  # and the real dependency resolution Ubuntu skips with --nodeps.
-  # Runs the same suite: the rpm leg builds natively, the debian leg
-  # loud-skips, the staged arch/void/gentoo legs are distro-agnostic.
   fedora:
     runs-on: ubuntu-22.04
     container: fedora:latest
