@@ -263,6 +263,62 @@ jobs:
             "$RUNNER_TEMP/artifacts/" 2>/dev/null || true
           exit $rc
 
+      # Void is back: it was green at 2675cbd and was only set aside while the
+      # Arch boot -- the harness that had never succeeded anywhere -- was the
+      # thing being chased. Arch now passes, so both run again.
+      - name: void root -> InvariantFS volume (offline)
+        run: |
+          INVFS_VOID_WORK="$RUNNER_TEMP/void" \
+            bash tools/test-void-install.sh
+
+      - name: void root BOOTS on InvariantFS (single device)
+        run: |
+          set -o pipefail
+          rc=0
+          INVFS_VOID_WORK="$RUNNER_TEMP/voidboot" \
+          INVFS_VOID_LOGDIR="$RUNNER_TEMP/voidboot-logs" \
+          INVFS_VOID_KEEP=0 \
+            bash tools/boot-void-qemu.sh 2>&1 | tee "$RUNNER_TEMP/voidboot.log" || rc=${PIPESTATUS[0]}
+          cp -r "$RUNNER_TEMP/voidboot-logs" "$RUNNER_TEMP/artifacts" 2>/dev/null || true
+          exit $rc
+
+      - name: void root BOOTS on InvariantFS (two devices)
+        run: |
+          set -o pipefail
+          rc=0
+          INVFS_VOID_MODE=multi \
+          INVFS_VOID_WORK="$RUNNER_TEMP/voidboot2" \
+          INVFS_VOID_LOGDIR="$RUNNER_TEMP/voidboot2-logs" \
+          INVFS_VOID_KEEP=0 \
+            bash tools/boot-void-qemu.sh 2>&1 | tee "$RUNNER_TEMP/voidboot2.log" || rc=${PIPESTATUS[0]}
+          cp -r "$RUNNER_TEMP/voidboot2-logs" "$RUNNER_TEMP/artifacts" 2>/dev/null || true
+          exit $rc
+
+      # Debian: the third boot harness, and the only one that reaches
+      # multi-user.target on systemd. Never in CI before -- every boot result in
+      # this project has been Void's and Arch's until now.
+      # configure-debian.sh takes the staged root as a POSITIONAL argument and
+      # populates it; boot-debian-qemu.sh then either imports it (INVFS_DEB_STAGE)
+      # or reuses a volume (INVFS_DEB_VOLUME). Written against the real interface
+      # after first getting it wrong in a draft.
+      - name: debian root -> InvariantFS volume
+        run: |
+          set -euo pipefail
+          S="$RUNNER_TEMP/debian"
+          mkdir -p "$S"
+          bash tools/configure-debian.sh "$S"
+          INVFS_DEB_STAGE="$S" bash tools/boot-debian-qemu.sh
+
+      - name: debian root BOOTS on InvariantFS (single device)
+        run: |
+          set -o pipefail
+          rc=0
+          INVFS_DEB_STAGE="$RUNNER_TEMP/debian" \
+            bash tools/boot-debian-qemu.sh \
+              2>&1 | tee "$RUNNER_TEMP/debianboot.log" || rc=${PIPESTATUS[0]}
+          cp /tmp/invfs-debian-boot-single.log "$RUNNER_TEMP/artifacts/" 2>/dev/null || true
+          exit $rc
+
       - name: upload serial logs
         if: always()
         uses: actions/upload-artifact@v4

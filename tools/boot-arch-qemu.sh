@@ -312,13 +312,13 @@ if [ "$ok" = 1 ]; then
     # can see a root filesystem that is unusable to unprivileged users. That is
     # not hypothetical -- it shipped from WP66 until 612d0fe. See
     # tools/lib-nonroot-gate.sh.
-    log "WP227 guard: non-root access to /"
+    note "WP227 guard: non-root access to /"
     . "$REPO/tools/lib-nonroot-gate.sh"
     nonroot_gate_ssh() { $SSH root@127.0.0.1 "$1"; }
     nonroot_gate nonroot_gate_ssh -- /bin/bash /bin/bash /etc/os-release /usr/bin \
         || die "WP227 non-root guard failed"
     [ "${nonroot_gate_skipped:-0}" = 1 ] && \
-        log "WARNING: WP227 guard SKIPPED -- guest could not be checked, which is NOT a pass"
+        note "WARNING: WP227 guard SKIPPED -- guest could not be checked, which is NOT a pass"
 
     $SSH root@127.0.0.1 "busybox poweroff -f" >>"$SSHLOG" 2>&1 || true
 fi
