@@ -169,6 +169,19 @@ provision_stage() {
     local S="$STAGE"
     # root password + sshd
     $SUDO chroot "$S" /bin/bash -c 'echo root:root | chpasswd; ssh-keygen -A >/dev/null 2>&1 || true'
+
+    # The staging tree is built by pacman and mkinitcpio running as ROOT in a
+    # chroot, so most of it comes out root-owned but world-readable while
+    # mkinitcpio's output does not: boot/initramfs-linux.img arrives unreadable
+    # to the user running the checks. `cmp -s` cannot tell "contents differ"
+    # from "cannot read", so for several CI runs an unreadable FIXTURE was
+    # reported as a corrupt read of a 25 MB file -- which is why it looked like a
+    # large-file bug and would not reproduce with any large file at all.
+    #
+    # Everything here only ever needs to be READ. Normalise the whole tree once,
+    # rather than special-casing the file that happened to fail first: any
+    # future package with a restrictive umask would otherwise reproduce this.
+    $SUDO chmod -R a+rX "$S"
     $SUDO awk 'BEGIN{OFS=" "}
         /^#?PermitRootLogin/ {print "PermitRootLogin yes"; next}
         /^#?PasswordAuthentication/ {print "PasswordAuthentication yes"; next}
