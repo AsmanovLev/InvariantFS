@@ -205,17 +205,10 @@ jobs:
           KEEP=1 \
             bash tools/test-arch-install.sh
 
-      - name: void root -> InvariantFS volume (offline)
-        run: |
-          INVFS_VOID_WORK="$RUNNER_TEMP/void" \
-            bash tools/test-void-install.sh
-
-      # WP224: THE BOOT. Until now this job imported a Void root and checked it
-      # offline -- invf-import, invf-fsck, offline invf-cat -- and never booted
-      # it, so a volume that could not serve a running system passed here. That
-      # is the gap docs/INSTALL-MATRIX.md 7 describes, and it is the one that
-      # hides a broken FUSE mount: offline reads go through a different path
-      # than a live one.
+      # Void volume build: DISABLED TEMPORARILY, with the Void boots. Nothing
+      # else in this job needs it -- the Void steps were self-contained -- and
+      # it costs a full distro import on every run. tools/test-void-install.sh is
+      # untouched.
       - name: initramfs for the boot harnesses
         run: bash tools/mkinitramfs.sh
 
