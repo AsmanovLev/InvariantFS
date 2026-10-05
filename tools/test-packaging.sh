@@ -408,7 +408,15 @@ stage_debian() {
         | gzip -c > "$d/rpmtop/SOURCES/invfs-$SVER.tar.gz" \
         || { fail "rpm: cannot build Source0 tarball"; return 1; }
 
-    if ! ( cd "$d/rpmtop" && rpmbuild -bb --define "_topdir $d/rpmtop" \
+    # rpmbuild on Ubuntu resolves ONLY its own nomenclature for the dep
+    # check, while this spec's BuildRequires are Fedora names (correct FOR
+    # an RPM spec: fuse3-devel, zlib-devel, ...). CI's packaging job has
+    # every one of them under Debian names, so the check answers 'missing'
+    # before %prep although nothing is missing -- the compile itself is the
+    # real dep check and it already runs. --nodeps skips the name lookup,
+    # nothing else. Do NOT 'fix' this by renaming the spec's BuildRequires:
+    # Fedora's rpm would then fail the same way in reverse.
+    if ! ( cd "$d/rpmtop" && rpmbuild -bb --nodeps --define "_topdir $d/rpmtop" \
              SPECS/invfs.spec ) > "$d/log" 2>&1; then
         fail "rpm: rpmbuild failed"; tail -25 "$d/log"; return 1
     fi
