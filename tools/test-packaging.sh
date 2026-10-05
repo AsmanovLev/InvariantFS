@@ -79,6 +79,11 @@ if ! make release > "$WORK/release.log" 2>&1; then
 fi
 VER=$(cut -d- -f2 < <(ls dist/invfs-*-x86_64.tar.zst 2>/dev/null | head -1 | xargs -r basename) 2>/dev/null)
 ART=$(ls dist/invfs-*-x86_64.tar.zst | head -1)
+# Absolute, because the rpm leg unpacks it from inside a staging directory and a
+# relative "dist/..." does not resolve after the cd. CI said
+#     FAIL: rpm: cannot unpack dist/invfs-v0.5.0-x86_64.tar.zst
+# which reads like a corrupt archive and is really just tar not finding the file.
+ART_ABS=$(cd "$(dirname "$ART")" && pwd)/$(basename "$ART")
 SUM=dist/SHA256SUMS
 ARTBASE=$(basename "$ART")
 note "artifact: $ARTBASE"
@@ -396,8 +401,8 @@ stage_debian() {
 
     # Build a source tarball here rather than reaching into dist/, so this leg
     # cannot pass or fail on whether `make release` happened to run first.
-    ( cd "$d" && tar --zstd -xf "$ART" ) 2>/dev/null \
-        || { fail "rpm: cannot unpack $ART"; return 1; }
+    ( cd "$d" && tar --zstd -xf "$ART_ABS" ) 2>/dev/null \
+        || { fail "rpm: cannot unpack $ART_ABS"; return 1; }
     src=$(find "$d" -maxdepth 1 -type d -name 'invfs-*' | head -1)
     [ -n "$src" ] || { fail "rpm: unpacked tree not found"; return 1; }
     cp -a "$src/." "$d/rpmtop/SOURCES/"
