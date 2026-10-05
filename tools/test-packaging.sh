@@ -79,11 +79,6 @@ if ! make release > "$WORK/release.log" 2>&1; then
 fi
 VER=$(cut -d- -f2 < <(ls dist/invfs-*-x86_64.tar.zst 2>/dev/null | head -1 | xargs -r basename) 2>/dev/null)
 ART=$(ls dist/invfs-*-x86_64.tar.zst | head -1)
-# Absolute, because the rpm leg unpacks it from inside a staging directory and a
-# relative "dist/..." does not resolve after the cd. CI said
-#     FAIL: rpm: cannot unpack dist/invfs-v0.5.0-x86_64.tar.zst
-# which reads like a corrupt archive and is really just tar not finding the file.
-ART_ABS=$(cd "$(dirname "$ART")" && pwd)/$(basename "$ART")
 SUM=dist/SHA256SUMS
 ARTBASE=$(basename "$ART")
 note "artifact: $ARTBASE"
@@ -396,19 +391,25 @@ stage_debian() {
         return 0
     fi
     note "rpm: rpmbuild -bb (compiles; may take a few minutes)"
-    mkdir -p "$d/rpmtop/SOURCES"
-    cp -a "$REPO/packaging/invfs.spec" "$d/rpmtop/SOURCES/"
+    mkdir -p "$d/rpmtop/SPECS" "$d/rpmtop/SOURCES"
+    cp -a "$REPO/packaging/invfs.spec" "$d/rpmtop/SPECS/"
 
-    # Build a source tarball here rather than reaching into dist/, so this leg
-    # cannot pass or fail on whether `make release` happened to run first.
-    ( cd "$d" && tar --zstd -xf "$ART_ABS" ) 2>/dev/null \
-        || { fail "rpm: cannot unpack $ART_ABS"; return 1; }
-    src=$(find "$d" -maxdepth 1 -type d -name 'invfs-*' | head -1)
-    [ -n "$src" ] || { fail "rpm: unpacked tree not found"; return 1; }
-    cp -a "$src/." "$d/rpmtop/SOURCES/"
+    # Source0 must be SOURCE, not the binary release artifact: %build runs
+    # %make_build, and the artifact ships no Makefile or src/ (VERSION, bin/,
+    # packaging/, tools/codecpacks only), so a build from it dies with
+    # "No targets specified and no makefile found". Archive the checkout
+    # instead -- tracked files only, so no build/ or bin/ contamination --
+    # under the spec's %{name}-%{version} top dir. A git archive has no .git,
+    # so this also exercises the Makefile's header VERSION fallback, the same
+    # tarball case the debian leg deliberately probes.
+    SVER=$(sed -n 's/^Version:[[:space:]]*//p' "$REPO/packaging/invfs.spec")
+    [ -n "$SVER" ] || { fail "rpm: cannot read Version from invfs.spec"; return 1; }
+    git -C "$REPO" archive --format=tar --prefix="invfs-$SVER/" HEAD \
+        | gzip -c > "$d/rpmtop/SOURCES/invfs-$SVER.tar.gz" \
+        || { fail "rpm: cannot build Source0 tarball"; return 1; }
 
     if ! ( cd "$d/rpmtop" && rpmbuild -bb --define "_topdir $d/rpmtop" \
-             invfs.spec ) > "$d/log" 2>&1; then
+             SPECS/invfs.spec ) > "$d/log" 2>&1; then
         fail "rpm: rpmbuild failed"; tail -25 "$d/log"; return 1
     fi
     rpmf=$(find "$d/rpmtop/RPMS" -name 'invfs-*.rpm' 2>/dev/null | head -1)

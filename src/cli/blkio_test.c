@@ -199,6 +199,14 @@ int main(int argc, char **argv)
             for (i = 0; i < (int)len; i++) src[i] = pat(off + (uint64_t)i + c);
 
             ok(blkio_pwrite(&io, off, src, len) == 0, cases[c].what);
+            /* All cases are constructed inside the image, but say so: it is
+               the bound -Wstringop-overflow cannot derive (off/len come out
+               of a table), and without it the memcpy below warns about a
+               2 GiB+ write into the 4 MiB model. */
+            if (off > IMG_SIZE || len > IMG_SIZE - off) {
+                printf("  case %zu exceeds the image\n", c);
+                return 1;
+            }
             memcpy(model + off, src, len);
 
             /* the write must be visible through the same layer... */

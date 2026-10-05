@@ -1,5 +1,13 @@
 # the engine Makefile builds -O2 without -g; there is no debuginfo to split
 %global debug_package %{nil}
+# _unitdir comes from systemd-rpm-macros (a Fedora BuildRequires). Ubuntu's
+# rpm has no such macro package, so without this fallback every unit-dir
+# entry expands to a relative path and %files dies with 'File must begin
+# with "/"'. The value matches packaging/install.sh's SYSTEMDDIR
+# ($PREFIX/lib/systemd/system with this spec's PREFIX, i.e. /usr -- written
+# out longhand because even a macro-looking token inside a comment expands
+# and warns.)
+%{!?_unitdir: %global _unitdir /usr/lib/systemd/system}
 
 Name:           invfs
 Version:        0.5.0
@@ -47,8 +55,9 @@ mkdir -p bin
 DESTDIR=%{buildroot} PREFIX=%{_prefix} \
     WITH_SYSTEMD=1 WITH_DRACUT=1 WITH_MKINITCPIO=0 WITH_INITRAMFS_TOOLS=0 \
     sh packaging/install.sh
-install -Dm644 README.md %{buildroot}%{_docdir}/%{name}/README.md
-install -Dm644 README-RU.md %{buildroot}%{_docdir}/%{name}/README-RU.md
+# NOTE: no manual README install here: %doc below packages README.md into
+# the versioned docdir by itself, and a second copy under the unversioned
+# docdir trips 'Installed (but unpackaged) file(s)'.
 
 %post
 %systemd_post invfs-sweep.timer invfs-verify.timer
@@ -61,7 +70,7 @@ install -Dm644 README-RU.md %{buildroot}%{_docdir}/%{name}/README-RU.md
 
 %files
 %license src/LICENSE
-%doc README.md README-RU.md
+%doc README.md
 %{_bindir}/invf*
 /usr/lib/invfs/codecpacks/
 %{_mandir}/man7/invarifs.7*
