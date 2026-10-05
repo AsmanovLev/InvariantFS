@@ -370,7 +370,7 @@ jobs:
       - name: dependencies
         run: |
           dnf install -y gcc make pkgconf-pkg-config fuse3-devel zlib-devel \
-            libzstd-devel systemd-rpm-macros rpm-build ccache python3 \
+            libzstd-devel systemd-rpm-macros rpm-build ccache python3 git \
             tar gzip file awk findutils
 
       - name: build
@@ -417,6 +417,7 @@ jobs:
           mkdir -p "$OVERLAY/metadata" "$OVERLAY/sys-apps/invfs" "$OVERLAY/profiles"
           echo 'masters = gentoo' > "$OVERLAY/metadata/layout.conf"
           echo 'invfs-local' > "$OVERLAY/profiles/repo_name"
+          mkdir -p /etc/portage/repos.conf
           printf '[invfs-local]\nlocation = %s\n' "$OVERLAY" > /etc/portage/repos.conf/invfs-local.conf
           cp "packaging/gentoo/invfs-$PV.ebuild" "$OVERLAY/sys-apps/invfs/" || cp packaging/gentoo/invfs-*.ebuild "$OVERLAY/sys-apps/invfs/"
           EB=$(ls "$OVERLAY/sys-apps/invfs"/invfs-*.ebuild | head -1)
