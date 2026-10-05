@@ -91,3 +91,8 @@ tools/flakey/artifacts
 # other, so the shim has to be tracked even though the store must not be.
 .gitnexus/lbug
 .gitnexus/*.db
+
+# GitNexus agent scaffolding: regenerated per machine by `npx gitnexus analyze`.
+# Untracked because the committed AGENTS.md used to cite it and a tracked file may not
+# cite an ignored path.
+.claude/

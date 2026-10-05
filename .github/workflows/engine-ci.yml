@@ -227,6 +227,7 @@ jobs:
           INVFS_VOID_KEEP=0 \
             bash tools/boot-void-qemu.sh 2>&1 | tee "$RUNNER_TEMP/voidboot.log"
           # logs survive a failure: the serial console is the evidence
+          mkdir -p "$RUNNER_TEMP/artifacts"
           cp -r "$RUNNER_TEMP/voidboot-logs" "$RUNNER_TEMP/artifacts" \
             2>/dev/null || true
 
@@ -260,6 +261,7 @@ jobs:
             bash tools/boot-arch-qemu.sh --single "$RUNNER_TEMP/arch/vol/single.img" \
               2>&1 | tee "$RUNNER_TEMP/archboot.log"
           # The serial console is the evidence; keep it on failure.
+          mkdir -p "$RUNNER_TEMP/artifacts"
           cp /tmp/invfs-arch-boot-single.log /tmp/invfs-arch-boot-single.ssh.log \
             "$RUNNER_TEMP/artifacts/" 2>/dev/null || true
 
@@ -271,4 +273,8 @@ jobs:
           path: |
             ${{ runner.temp }}/voidboot-logs
             ${{ runner.temp }}/voidboot2-logs
+            ${{ runner.temp }}/artifacts
+            # The boot steps copy console logs into runner.temp/artifacts on
+            # failure. Without this path the artifact is void-only, and the first
+            # Arch boot in CI reported five failures with no console to read.
           if-no-files-found: ignore

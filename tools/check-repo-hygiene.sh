@@ -120,7 +120,7 @@ while IFS= read -r -d '' md; do
         echo "$md" >> "$tmpd/rot"
     done
 #    Scan EVERY tracked markdown, not just docs/ and impl_docs/ top level:
-#    Benchmark.md, CHANGELOG.md, INCIDENTS.md and README-RU.md sit at the
+#    Benchmark.md, CHANGELOG.md and INCIDENTS.md sit at the
 #    repo root and were previously never checked -- nor, because the old
 #    `[^/]+\.md$` tail also excluded subdirs, were docs/adr/*, docs/guides/*,
 #    docs/architecture/* or impl_docs/tasks/*.
