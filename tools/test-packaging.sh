@@ -371,6 +371,65 @@ stage_debian() {
     else fail "debian: $nungz uncompressed man page(s) in the .deb"; fi
 }
 
+  # --------------------------------------------------------------------------
+  # RPM (packaging/invfs.spec)
+  # --------------------------------------------------------------------------
+  # packaging/invfs.spec has existed the whole time and NOTHING here ever built
+  # it -- grep for "rpmbuild" in this file returned zero before this. Same
+  # disease as the boot harnesses: written, committed, never executed. RPM was
+  # also the one format missing from an otherwise complete matrix (dpkg, ebuild,
+  # xbps).
+  #
+  # Skipped LOUDLY when rpmbuild is absent rather than failed: a missing build
+  # tool is not a packaging bug, and reporting it as one is how a real one gets
+  # lost -- which is how this leg would have stayed invisible for months.
+  stage_rpm() {
+    d="$WORK/rpm"; mkdir -p "$d"
+    if ! command -v rpmbuild >/dev/null 2>&1; then
+        note "rpm: rpmbuild not installed -- SKIPPED (not a failure)"
+        note "      install it with:  apt-get install -y rpm"
+        return 0
+    fi
+    note "rpm: rpmbuild -bb (compiles; may take a few minutes)"
+    mkdir -p "$d/rpmtop/SOURCES"
+    cp -a "$REPO/packaging/invfs.spec" "$d/rpmtop/SOURCES/"
+
+    # Build a source tarball here rather than reaching into dist/, so this leg
+    # cannot pass or fail on whether `make release` happened to run first.
+    ( cd "$d" && tar --zstd -xf "$ART" ) 2>/dev/null \
+        || { fail "rpm: cannot unpack $ART"; return 1; }
+    src=$(find "$d" -maxdepth 1 -type d -name 'invfs-*' | head -1)
+    [ -n "$src" ] || { fail "rpm: unpacked tree not found"; return 1; }
+    cp -a "$src/." "$d/rpmtop/SOURCES/"
+
+    if ! ( cd "$d/rpmtop" && rpmbuild -bb --define "_topdir $d/rpmtop" \
+             invfs.spec ) > "$d/log" 2>&1; then
+        fail "rpm: rpmbuild failed"; tail -25 "$d/log"; return 1
+    fi
+    rpmf=$(find "$d/rpmtop/RPMS" -name 'invfs-*.rpm' 2>/dev/null | head -1)
+    [ -n "$rpmf" ] || { fail "rpm: no .rpm produced"; tail -10 "$d/log"; return 1; }
+    note "rpm: built $(basename "$rpmf")"
+
+    rm -rf "$d/root"; mkdir -p "$d/root"
+    ( cd "$d/root" && rpm2cpio "$rpmf" | cpio -idmu --quiet ) 2>/dev/null \
+        || { fail "rpm: cannot unpack $rpmf (rpm2cpio or cpio missing)"; return 1; }
+    assert_tree "$d/root" "rpm"
+    assert_version "$d/root" "rpm"
+
+    nungz=$(find "$d/root/usr/share/man" -type f ! -name '*.gz' 2>/dev/null | wc -l)
+    if [ "$nungz" = 0 ]; then pass "rpm: every man page in the .rpm is gzipped"
+    else fail "rpm: $nungz uncompressed man page(s) in the .rpm"; fi
+
+    # %post is where RPM differs STRUCTURALLY from dpkg: scriptlets, not files
+    # under debian/. A silent no-op %post is the classic RPM packaging bug and
+    # this is the only leg that can see it.
+    if grep -qE '^%post' "$REPO/packaging/invfs.spec"; then
+        pass "rpm: invfs.spec declares a %post scriptlet"
+    else
+        fail "rpm: invfs.spec has no %post -- post-install wiring never runs"
+    fi
+  }
+
 # --------------------------------------------------------------------------
 # NEGATIVE CONTROLS
 # --------------------------------------------------------------------------
@@ -565,6 +624,7 @@ sig_tests() {
 
 # --------------------------------------------------------------------------
 note "=== staging each target's own recipe ==="
+stage_rpm      || true
 stage_arch    || true
 stage_gentoo  || true
 stage_void    || true
