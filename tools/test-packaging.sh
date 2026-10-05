@@ -279,7 +279,12 @@ stage_debian() {
         assert_tree "$d/tmp" "debian(staged)"
         return 0
     fi
-    need dpkg-buildpackage
+    # Loud skip when dpkg-buildpackage is absent (foreign distro job),
+    # mirroring the rpm leg: a missing build tool is not a packaging bug.
+    if ! command -v dpkg-buildpackage >/dev/null 2>&1; then
+        note "debian: dpkg-buildpackage not installed -- SKIPPED (not a failure)"
+        return 0
+    fi
     # dpkg-buildpackage insists on ./debian at the tree root, but this repo
     # keeps the packaging in packaging/debian (it is shared with the RPM,
     # Arch, Gentoo and Void recipes, so it is not a Debian-only directory).
