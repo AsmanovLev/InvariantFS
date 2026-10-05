@@ -254,16 +254,26 @@ jobs:
       # unexercised path in CI is how the if=ide bug stayed invisible.
       - name: arch root BOOTS on InvariantFS (single device)
         run: |
-          set -o pipefail
+          # The exit status is captured rather than allowed to propagate through
+          # the pipe. With `set -o pipefail` a failing harness makes the PIPELINE
+          # fail, and under `bash -e` the step aborts THERE -- so every line after
+          # it, including the console copy, never runs. That is why Arch failures
+          # arrived with no serial log at all: the one step that would show the
+          # cause is the step being skipped BY the failure. Void looked fine
+          # because it passes.
+          set +e
           ARCH_WORK="$RUNNER_TEMP/arch" \
           ARCH_LOG=/tmp/invfs-arch-boot-single.log \
           ARCH_SSH_LOG=/tmp/invfs-arch-boot-single.ssh.log \
             bash tools/boot-arch-qemu.sh --single "$RUNNER_TEMP/arch/vol/single.img" \
               2>&1 | tee "$RUNNER_TEMP/archboot.log"
+          rc=${PIPESTATUS[0]}
+          set -e
           # The serial console is the evidence; keep it on failure.
           mkdir -p "$RUNNER_TEMP/artifacts"
           cp /tmp/invfs-arch-boot-single.log /tmp/invfs-arch-boot-single.ssh.log \
             "$RUNNER_TEMP/artifacts/" 2>/dev/null || true
+          exit $rc
 
       - name: upload serial logs
         if: always()
