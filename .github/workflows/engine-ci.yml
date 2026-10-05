@@ -159,7 +159,7 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y -qq build-essential pkg-config \
             libfuse3-dev fuse3 zlib1g-dev libzstd-dev zstd xz-utils curl \
-            python3 python3-numpy python3-pil \
+            python3 python3-numpy python3-pil debootstrap \
             e2fsprogs xfsprogs dosfstools exfatprogs unzip zip acl \
             debhelper devscripts
           # Best-effort: qemu for the boot harnesses, p7zip-full and
@@ -306,6 +306,16 @@ jobs:
           set -euo pipefail
           S="$RUNNER_TEMP/debian"
           mkdir -p "$S"
+          # configure-debian.sh provisions an EXISTING Debian root (it
+          # exits 1 unless sbin/init or lib/systemd is present) and
+          # installs no packages itself, so the root has to be created
+          # first. debootstrap a minbase with the boot-required packages
+          # (docs/DEBIAN-INSTALL.md §1 table: systemd, dbus, udev,
+          # openssh-server -- udev ships separately from systemd).
+          sudo debootstrap --variant=minbase \
+            --include=systemd,dbus,udev,openssh-server \
+            trixie "$S"
+          sudo chown -R "$(id -u):$(id -g)" "$S"
           bash tools/configure-debian.sh "$S"
           INVFS_DEB_STAGE="$S" bash tools/boot-debian-qemu.sh
 
