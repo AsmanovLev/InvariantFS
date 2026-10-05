@@ -201,8 +201,33 @@ provision_stage() {
     $SUDO chmod 600 "$S/etc/ssh/sshd_config"
     [ -n "${ARCH_SSH_KEY:-}" ] && {
         $SUDO mkdir -p "$S/root/.ssh"; $SUDO chmod 700 "$S/root/.ssh"
-        printf '%s\n' "$ARCH_SSH_KEY" | $SUDO tee "$S/root/.ssh/authorized_keys" >/dev/null
+        # ARCH_SSH_KEY means a PATH to a private key in boot-arch-qemu.sh (it
+        # is passed to ssh -i), but this provisioner used to treat the same
+        # variable as the pubkey's CONTENTS and wrote it into authorized_keys.
+        # So CI, which correctly exported a key path, baked the literal string
+        # "/tmp/.../arch_id" in as the guest's authorized key:
+        #     root@127.0.0.1: Permission denied (publickey,password).
+        # with the client visibly offering publickey. Accept either form -- a
+        # readable path (take its .pub) or a literal key.
+        if [ -r "${ARCH_SSH_KEY}" ]; then
+            _pk="${ARCH_SSH_KEY}.pub"
+            if [ ! -r "$_pk" ]; then
+                # not "<path>.pub" -- maybe the public half is inline, header and all
+                if grep -q 'BEGIN .*PUBLIC KEY' "$ARCH_SSH_KEY" 2>/dev/null; then
+                    _pk="$ARCH_SSH_KEY"
+                else
+                    echo "FAIL: ARCH_SSH_KEY=$ARCH_SSH_KEY has no $ARCH_SSH_KEY.pub" >&2
+                    exit 1
+                fi
+            fi
+            $SUDO cp "$_pk" "$S/root/.ssh/authorized_keys"
+        else
+            printf '%s\n' "$ARCH_SSH_KEY" | $SUDO tee "$S/root/.ssh/authorized_keys" >/dev/null
+        fi
         $SUDO chmod 600 "$S/root/.ssh/authorized_keys"
+        # State which key landed, because the failure mode when this is wrong is
+        # "Permission denied" from the far side of a VM with no other signal.
+        echo "   authorized_keys from: $( [ -r "${ARCH_SSH_KEY:-}" ] && echo "$_pk" || echo 'ARCH_SSH_KEY contents')"
     }
 
     # fstab: root is the FUSE mount, handled by the initramfs. Volatile
