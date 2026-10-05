@@ -184,9 +184,24 @@ else
 fi
 
 KERNEL="$(readable_kernel "$KERNEL")" || exit 1
-qemu-system-x86_64 "${QEMU_ARGS[@]}" >/dev/null 2>&1 &
+# QEMU's stderr is KEPT. It used to go to /dev/null, which is why an Arch boot
+# that died in under a second produced a 0-byte serial log and five assertions
+# with no reason anywhere: the one stream that said why was the one being
+# thrown away. boot-void-qemu.sh has always kept it, which is why Void failures
+# have always been diagnosable.
+QERR="$(mktemp -t invfs-arch-qemu-err.XXXXXX)"
+qemu-system-x86_64 "${QEMU_ARGS[@]}" 2>"$QERR" &
 QPID=$!
-cleanup() { kill "$QPID" 2>/dev/null; wait "$QPID" 2>/dev/null; }
+cleanup() {
+    kill "$QPID" 2>/dev/null; wait "$QPID" 2>/dev/null
+    # Print whatever QEMU said on its way out. Cheap, and it is the whole
+    # difference between "the guest did not boot" and a named cause.
+    if [ -s "$QERR" ]; then
+        echo "--- qemu stderr ---" >&2
+        sed -n '1,20p' "$QERR" >&2
+    fi
+    rm -f "$QERR" 2>/dev/null
+}
 trap cleanup EXIT
 
 # The serial console writes CRLF; strip CR before anything anchored to EOL.
