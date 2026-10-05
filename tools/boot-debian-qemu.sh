@@ -175,6 +175,18 @@ say "booting: qemu-system-x86_64 -machine q35,accel=$ACCEL $CMDLINE"
 # and it was invisible because the very thing that would have said so was
 # redirected to /dev/null. So: keep stderr, and clean up the guest.
 QEMU_ERR="$LOGDIR/qemu.err"
+# The port has to be free BEFORE starting, or QEMU exits instantly and every
+# later assertion is measuring nothing. This check must run before the
+# launch below: placed after it, it finds our OWN qemu holding the port
+# and refuses every run (CI 37306407583 died exactly this way -- the
+# 'leaked qemu' it reported was itself).
+_port_in_use() { ss -ltn 2>/dev/null | grep -q ":$1 " ||                  netstat -ltn 2>/dev/null | grep -q ":$1 "; }
+if _port_in_use "$PORT"; then
+    echo "port $PORT is already in use -- refusing to start a guest that" >&2
+    echo "cannot bind. A leaked qemu from an earlier run holds it; kill it," >&2
+    echo "or pass INVFS_DEB_PORT=<n>." >&2
+    exit 1
+fi
 # NOT setsid. `setsid cmd &` makes $! the PID of setsid, which FORKS when it
 # is already a process group leader and then exits -- so $! is not QEMU, and the
 # EXIT trap kills nothing while the guest keeps running and keeps holding the
@@ -184,16 +196,6 @@ QEMU_ERR="$LOGDIR/qemu.err"
 qemu-system-x86_64 "${QOPTS[@]}" >"$QEMU_ERR" 2>&1 &
 QPID=$!
 qpid_alive() { kill -0 "$QPID" 2>/dev/null; }
-
-# The port has to be free, or QEMU exits instantly and every later assertion
-# is measuring nothing.
-_port_in_use() { ss -ltn 2>/dev/null | grep -q ":$1 " ||                  netstat -ltn 2>/dev/null | grep -q ":$1 "; }
-if _port_in_use "$PORT"; then
-    echo "port $PORT is already in use -- refusing to start a guest that" >&2
-    echo "cannot bind. A leaked qemu from an earlier run holds it; kill it," >&2
-    echo "or pass INVFS_DEB_PORT=<n>." >&2
-    exit 1
-fi
 
 # WP224: every signal here is `|| true`. Under `set -e` a `kill` that finds the
 # process already gone returns non-zero, and since this function is also the
