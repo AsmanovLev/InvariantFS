@@ -142,7 +142,7 @@ Shadow, re-encodes with ZSTD where bit-exactness is proven, and updates recipes
 via inode-id-keyed publication.
 
 ```
-unlink()  ->  delta delete entry appended; space reclaimed at next fold + sweep
+unlink()  ->  delta delete entry appended; on last link v3 attempts targeted free immediately (savepoint pins/shared TEXT segments can defer visible reclaim)
 ```
 
 For complete architecture specifications, see:
