@@ -76,10 +76,14 @@ tools/fuzz/seeds/
 # in by `git add -A`.
 tools/flakey/artifacts
 # GitNexus-generated agent scaffolding (regenerate with: npx gitnexus analyze).
-# CLAUDE.md stays ignored; .claude/ does NOT, because the committed AGENTS.md
-# block cites .claude/skills/*/SKILL.md and a tracked file must not cite an
-# ignored path -- that is exactly what made `repo hygiene` fail in CI with seven
-# DOCROT lines while passing locally.
+# GitNexus agent scaffolding -- regenerate per machine with
+#   npx gitnexus analyze
+# All of it is untracked. It was tracked once, and the committed CLAUDE.md cited
+# the per-skill markdown under .claude/, so removing .claude/ without also
+# removing CLAUDE.md turned "repo hygiene" red in CI again -- DOCROT on a file
+# that was only ever meant to be generated.
+CLAUDE.md
+.claude/
 
 # .gitnexus/ is NOT entirely ignored. The 181 MB lbug graph store is, but
 # run.cjs and gitnexus.json must ship: the committed AGENTS.md block and the
