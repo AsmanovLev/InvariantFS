@@ -184,6 +184,19 @@ else
 fi
 
 KERNEL="$(readable_kernel "$KERNEL")" || exit 1
+# QEMU_ARGS was built ABOVE, and `QEMU_ARGS=( ... -kernel "$KERNEL" ... )`
+# expands $KERNEL INTO THE ARRAY at that moment. Reassigning KERNEL here
+# changes nothing, so QEMU was handed the original root-only
+# /boot/vmlinuz-$(uname -r) that runners ship, failed to read it, and exited
+# in about a second with an empty serial log and five assertions and no cause.
+#
+# e190ca0 fixed the -r/-e half of this and missed the array half. Void has
+# always been right: it substitutes into the array after building it. Done the
+# same way here rather than relying on ordering, so the two harnesses cannot
+# drift apart in this way again.
+for _i in "${!QEMU_ARGS[@]}"; do
+    [ "${QEMU_ARGS[$_i]}" = "-kernel" ] && QEMU_ARGS[$((_i + 1))]="$KERNEL"
+done
 # QEMU's stderr is KEPT. It used to go to /dev/null, which is why an Arch boot
 # that died in under a second produced a 0-byte serial log and five assertions
 # with no reason anywhere: the one stream that said why was the one being
