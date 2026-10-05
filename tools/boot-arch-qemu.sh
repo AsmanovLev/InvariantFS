@@ -98,6 +98,30 @@ else
     [ -r "$KERNEL" ] || { echo "FAIL: no kernel: $KERNEL"; exit 1; }
     [ -r "$INITRD" ] || { echo "FAIL: no initramfs: $INITRD"; exit 1; }
 fi
+# The host kernel is not always readable by the user running this.
+#
+# GitHub runners ship /boot/vmlinuz-<ver> root-only, so qemu fails with
+#     could not open kernel file '/boot/vmlinuz-...': Permission denied
+# and the harness reports "did not reach runit stage 2 within 300s" -- which
+# reads as a boot failure and is not one: qemu never started. The guest never
+# got a kernel.
+#
+# Copy the kernel somewhere readable rather than requiring it to already be.
+# `install -m 0444` keeps this to one step and never leaves a group- or
+# other-writable copy behind.
+readable_kernel() {
+    [ -n "$1" ] && [ -r "$1" ] && { printf '%s\n' "$1"; return 0; }
+    [ -r "$1" ] || {
+        local dst
+        dst="$(mktemp -d)/vmlinuz"
+        sudo install -m 0444 "$1" "$dst" 2>/dev/null \
+            || { echo "FAIL: cannot read kernel $1 (mode $(stat -c %a "$1" 2>/dev/null))" >&2
+                 echo "     pass one with INVFS_*_KERNEL, or install one readable" >&2
+                 return 1; }
+        printf '%s\n' "$dst"
+    }
+}
+
 command -v qemu-system-x86_64 >/dev/null || { echo "FAIL: qemu not found"; exit 1; }
 
 rm -f "$LOG" "$SSHLOG"
@@ -139,6 +163,7 @@ else
     )
 fi
 
+KERNEL="$(readable_kernel "$KERNEL")" || exit 1
 qemu-system-x86_64 "${QEMU_ARGS[@]}" >/dev/null 2>&1 &
 QPID=$!
 cleanup() { kill "$QPID" 2>/dev/null; wait "$QPID" 2>/dev/null; }
