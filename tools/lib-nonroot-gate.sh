@@ -83,9 +83,28 @@ nonroot_gate() {
             echo "GUARD-SKIP neither setpriv nor su"; exit 0
         fi
         echo "    drop mechanism: $DROPPED"
-        printf "    read  RD_FILE : "; as_nobody_exec /bin/cat RD_FILE >/dev/null 2>&1 && echo PASS || echo FAIL
-        printf "    exec  EXE_BIN : "; as_nobody_exec EXE_BIN -c : >/dev/null 2>&1 && echo PASS || echo FAIL
-        printf "    list  LIST_DIR: "; as_nobody_exec /bin/ls LIST_DIR >/dev/null 2>&1 && echo PASS || echo FAIL
+        _t() { [ -e "$1" ] && echo present || echo absent; }
+        printf "    read  RD_FILE : "
+        if [ "$( _t RD_FILE )" = absent ]; then
+            echo "N/A (not on this root -- NOT a filesystem fault)"
+        else
+            as_nobody_exec /bin/cat RD_FILE >/dev/null 2>&1 \
+                && echo PASS || echo "FAIL (present, but nobody cannot read it)"
+        fi
+        printf "    exec  EXE_BIN : "
+        if [ "$( _t EXE_BIN )" = absent ]; then
+            echo "N/A (not on this root)"
+        else
+            as_nobody_exec EXE_BIN -c : >/dev/null 2>&1 \
+                && echo PASS || echo "FAIL (present, but nobody cannot exec it)"
+        fi
+        printf "    list  LIST_DIR: "
+        if [ "$( _t LIST_DIR )" = absent ]; then
+            echo "N/A (not on this root)"
+        else
+            as_nobody_exec /bin/ls LIST_DIR >/dev/null 2>&1 \
+                && echo PASS || echo "FAIL (present, but nobody cannot list it)"
+        fi
         echo "    mountopts-for-slash: $(cat /proc/mounts | grep " / ")"
     ' 2>&1 | sed -e "s|RD_FILE|$rd|g" -e "s|EXE_BIN|$exe|g" -e "s|LIST_DIR|$dir|g" -e "s|/bin/sh|$sh_bin|g")
 
@@ -95,13 +114,23 @@ nonroot_gate() {
         return 0
     fi
     nonroot_gate_skipped=0
-    printf '%s' "$out" | grep -q "read  $rd : PASS" || {
-        fail "WP227: an unprivileged user cannot read $rd on / -- the root filesystem is mounted without allow_other, or is otherwise root-only"; }
-    printf '%s' "$out" | grep -q "exec  $exe : PASS" || \
+    # Require an actual FAIL verdict, not the ABSENCE of a PASS.
+    #
+    # The old `|| { ... }` form was also a latent bug: if the read check PASSED,
+    # the whole brace group was skipped and the exec, list and allow_other checks
+    # never ran at all -- the guard verified LESS as the filesystem got
+    # healthier, which is the worst direction for a regression guard.
+    #
+    # A check whose target is absent from the root is N/A, not a WP227 failure.
+    # Void has no /etc/os-release where Debian does, and no amount of
+    # allow_other will fix a probe file that is not there.
+    printf '%s' "$out" | grep -q 'read  .*: FAIL' && \
+        fail "WP227: an unprivileged user cannot read $rd on / -- the root filesystem is mounted without allow_other,"
+    printf '%s' "$out" | grep -q "exec  .*: FAIL" && \
         fail "WP227: an unprivileged user cannot exec $exe on /"
-    printf '%s' "$out" | grep -q "list  $dir: PASS" || \
+    printf '%s' "$out" | grep -q "list  .*: FAIL" && \
         fail "WP227: an unprivileged user cannot list $dir on /"
-    printf '%s' "$out" | sed -n 's/^.*mountopts-for-slash: //p' | grep -q 'allow_other' || \
+    printf '%s' "$out" | grep -q 'mountopts-for-slash:.*allow_other' || \
         fail "WP227: / is not mounted with allow_other -- see INCIDENTS.md WP227"
     return 0
 }
