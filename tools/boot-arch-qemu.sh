@@ -241,12 +241,19 @@ wait_marker "Chrooting to InvFS root" "chroot to InvFS root" || fail "no chroot 
 wait_marker "invfs-arch: rc[.]invfs done" "rc.invfs finished" || fail "rc.invfs did not finish"
 
 if [ "$MODE" = single ]; then
-    log_grep -q "^INVFS_RAW=/dev/sda DEV1=$" \
-        && echo "   ok: INVFS_RAW=/dev/sda DEV1=" \
+    # /dev/vda, NOT /dev/sda. b4473e7 changed the drives from if=ide to
+    # if=virtio because q35 has no PIIX IDE controller and QEMU accepts if=ide
+    # silently without ever giving the guest the disk -- that fix is correct and
+    # the guest now enumerates virtio -- but these two assertions were left
+    # asserting the old IDE name, so a perfectly healthy boot was reported as
+    # "unexpected device selection". The serial line even prints the real value
+    # in the failure branch, which is how it was spotted.
+    log_grep -q "^INVFS_RAW=/dev/vda DEV1=$" \
+        && echo "   ok: INVFS_RAW=/dev/vda DEV1=" \
         || { log_grep "^INVFS_RAW="; fail "unexpected device selection (single)"; }
 else
-    log_grep -q "^INVFS_RAW=/dev/sda DEV1=/dev/sdb$" \
-        && echo "   ok: INVFS_RAW=/dev/sda DEV1=/dev/sdb" \
+    log_grep -q "^INVFS_RAW=/dev/vda DEV1=/dev/vdb$" \
+        && echo "   ok: INVFS_RAW=/dev/vda DEV1=/dev/vdb" \
         || { log_grep "^INVFS_RAW="; fail "unexpected device selection (multi)"; }
 fi
 

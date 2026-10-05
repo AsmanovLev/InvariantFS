@@ -182,6 +182,16 @@ provision_stage() {
     # rather than special-casing the file that happened to fail first: any
     # future package with a restrictive umask would otherwise reproduce this.
     $SUDO chmod -R a+rX "$S"
+    # ...but a+rX adds READ to everything, so it made every ssh host key 0644
+    # and sshd then refused all four and exited:
+    #     Permissions 0644 for '/etc/ssh/ssh_host_rsa_key' are too open.
+    #     sshd: no hostkeys available -- exiting.
+    # which the harness reported as "SSH not reachable" -- a guest that booted
+    # fine, with sshd refusing to start, for a reason one permission word long.
+    # Private keys back to 0600, public keys and .pub stay readable.
+    $SUDO find "$S/etc/ssh" -maxdepth 1 -type f \
+        \( -name 'ssh_host_*_key' -o -name 'id_*' \) -exec chmod 0600 {} + 2>/dev/null || true
+    $SUDO find "$S/etc/ssh" -maxdepth 1 -type f -name '*.pub' -exec chmod 0644 {} + 2>/dev/null || true
     $SUDO awk 'BEGIN{OFS=" "}
         /^#?PermitRootLogin/ {print "PermitRootLogin yes"; next}
         /^#?PasswordAuthentication/ {print "PasswordAuthentication yes"; next}
