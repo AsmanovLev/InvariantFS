@@ -196,6 +196,29 @@ jobs:
       - name: build
         run: make -j"$(nproc)" && make helpers
 
+      # A throwaway keypair for the Arch guest, so the boot uses publickey auth
+      # instead of sshpass.
+      #
+      # sshpass drives the password prompt through a PSEUDO-TERMINAL, and the
+      # runner's /dev/pts cannot allocate one -- sshpass answered "Failed to get
+      # a pseudo terminal: No such device" hundreds of times while the guest was
+      # up and its sshd was listening on 0.0.0.0:22. The harness already supports
+      # ARCH_SSH_KEY and the provisioner already installs it as
+      # /root/.ssh/authorized_keys; nothing was passing it, so the only path
+      # exercised was the one that needs a pty.
+      #
+      # Generated BEFORE the volume build, because that step is what bakes the
+      # authorized_keys into the image. Exported to GITHUB_ENV so the boot step
+      # picks it up too. Disposable: this key only ever reaches a throwaway
+      # volume on a runner that dies with the job.
+      - name: throwaway ssh key for the Arch guest
+        run: |
+          set -euo pipefail
+          K="$RUNNER_TEMP/arch_id"
+          ssh-keygen -t ed25519 -N '' -C ci-arch -f "$K" >/dev/null
+          echo "ARCH_SSH_KEY=$K" >> "$GITHUB_ENV"
+          echo "::group::key generated at $K"
+
       - name: arch root -> InvariantFS volume
         run: |
           # KEEP=1: the volume has to survive for the boot step below.
