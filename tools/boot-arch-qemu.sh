@@ -124,6 +124,21 @@ readable_kernel() {
 
 command -v qemu-system-x86_64 >/dev/null || { echo "FAIL: qemu not found"; exit 1; }
 
+# Same precondition as boot-void-qemu.sh: the scripted-SSH path uses sshpass,
+# which drives the password prompt through a pseudo-terminal, so it needs
+# /dev/pts on THIS machine. Without it the guest is reported as unreachable
+# when in fact it booted fine and the client could not allocate a pty.
+if [ -z "$KEY" ] && { [ ! -e /dev/ptmx ] || ! mountpoint -q /dev/pts 2>/dev/null; }; then
+    if sudo mountpoint -q /dev/pts 2>/dev/null || sudo mount -t devpts devpts /dev/pts 2>/dev/null; then
+        echo "   mounted /dev/pts (sshpass needs a pty; it was not available)"
+    else
+        echo "FAIL: no /dev/pts and no ARCH_SSH_KEY -- scripted SSH cannot work." >&2
+        echo "     This is the machine running the harness, not the guest." >&2
+        echo "     Fix:  sudo mount -t devpts devpts /dev/pts   or   export ARCH_SSH_KEY=<file>" >&2
+        exit 1
+    fi
+fi
+
 rm -f "$LOG" "$SSHLOG"
 : > "$LOG"      # so early log_grep[] reads do not race qemu -serial file:
 : > "$SSHLOG"

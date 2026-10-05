@@ -92,6 +92,28 @@ command -v qemu-system-x86_64 >/dev/null || fail "qemu-system-x86_64 not found"
 [ -e /dev/kvm ] || fail "/dev/kvm not available"
 command -v sshpass >/dev/null || fail "sshpass not found (needed for scripted SSH)"
 
+# sshpass drives the password prompt through a PSEUDO-TERMINAL, so it needs
+# /dev/pts on the machine RUNNING the harness. A runner without devpts mounted
+# gives, from the ssh probe:
+#
+#     Failed to get a pseudo terminal: No such device
+#
+# and the guest is then reported as "SSH not reachable within 300s" -- which
+# reads as a boot failure and is not one. The serial log shows the guest
+# perfectly healthy: runit stage 2, autologin, udevd starting.
+#
+# Refuse here, naming the cause, instead of waiting 300s to report the
+# consequence.
+if [ ! -e /dev/ptmx ] || ! mountpoint -q /dev/pts 2>/dev/null; then
+    if sudo mountpoint -q /dev/pts 2>/dev/null || sudo mount -t devpts devpts /dev/pts 2>/dev/null; then
+        note "mounted /dev/pts (sshpass needs a pty; it was not available)"
+    else
+        fail "no /dev/pts: sshpass cannot allocate a pseudo-terminal, so scripted SSH cannot work.
+     This is a property of the machine running the harness, not of the guest.
+     Fix with:  sudo mount -t devpts devpts /dev/pts"
+    fi
+fi
+
 mkdir -p "$WORK" "$LOGDIR"
 
 # --------------------------------------------------------------------------
