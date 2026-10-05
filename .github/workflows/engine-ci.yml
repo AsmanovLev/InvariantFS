@@ -123,7 +123,7 @@ jobs:
   # Offline only (no boot, no FUSE) -- see the header of each script. Scratch
   # is pinned under RUNNER_TEMP so a 1.8 GB staging tree never lands on the
   # runner's small /tmp.
-  arch-install:
+  validate-arch-bootable:
     runs-on: ubuntu-22.04
     timeout-minutes: 30
     steps:
@@ -265,7 +265,7 @@ jobs:
             ${{ runner.temp }}/archboot.log
           if-no-files-found: ignore
 
-  void-install:
+  validate-void-bootable:
     runs-on: ubuntu-22.04
     timeout-minutes: 45
     steps:
@@ -395,7 +395,7 @@ jobs:
             ${{ runner.temp }}/artifacts
           if-no-files-found: ignore
 
-  debian-install:
+  validate-debian-bootable:
     runs-on: ubuntu-22.04
     timeout-minutes: 60
     steps:
