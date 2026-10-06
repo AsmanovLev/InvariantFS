@@ -793,8 +793,10 @@ jobs:
           cd /tmp/vp && ./xbps-src binary-bootstrap
           # ethereal model: swap the bootstrapped masterdir for a symlink
           # to / (the container root, which already carries base-devel).
+          # NOTE the name: under ethereal the default masterdir is plain
+          # 'masterdir', not 'masterdir-<arch>'.
           rm -rf /tmp/vp/masterdir-*
-          ln -s / /tmp/vp/masterdir-$(uname -m)
+          ln -s / /tmp/vp/masterdir
 
       - name: build
         run: make -j"$(nproc)" && make helpers
