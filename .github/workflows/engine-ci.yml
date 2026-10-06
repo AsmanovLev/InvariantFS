@@ -598,3 +598,32 @@ jobs:
           set -euo pipefail
           EMERGE_DEFAULT_OPTS="--getbinpkg --usepkg" emerge -g -q sys-apps/invfs
           invf-mkfs --version
+
+  # Stock-Arch-ISO install onto InvariantFS. Boots the pinned, checksummed
+  # ISO pristine and fetches everything InvFS-specific from a local server
+  # (recipe + release artifact + guest script); the guest makepkgs,
+  # pacman -Us, pacstraps, images, verifies, and must print PASS and power
+  # off. No KVM on runners: the driver falls back to TCG (slow), hence the
+  # generous timeout. See tools/iso-arch-install.sh.
+  iso-install:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 150
+    steps:
+      # fetch-depth 0 so TAGS are present (same VERSION reason as above).
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq build-essential pkg-config \
+            libfuse3-dev zlib1g-dev libzstd-dev zstd xz-utils curl \
+            python3 qemu-system-x86 qemu-utils
+
+      - name: build
+        run: make -j"$(nproc)"
+
+      - name: arch ISO install onto InvFS
+        run: |
+          WORK="$RUNNER_TEMP/iso" bash tools/iso-arch-install.sh
