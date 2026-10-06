@@ -2292,6 +2292,16 @@ static void pba_ref_mu_init(void)
     pthread_mutex_init(&g_pba_ref_mu, &a);
     pthread_mutexattr_destroy(&a);
 }
+/* The ONLY way to take the map lock. It must be recursive from the first
+ * take (walk callbacks re-enter it), however the first take arrives --
+ * direct lock sites bypassed the once and deadlocked on a zero mutex
+ * (walk_status_test, fault-injected verify). Never lock g_pba_ref_mu
+ * directly. */
+static inline void pba_ref_lock(void)
+{
+    pthread_once(&g_pba_ref_once, pba_ref_mu_init);
+    pthread_mutex_lock(&g_pba_ref_mu);  /* NOT pba_ref_lock: this IS it */
+}
 
 /* Depth of the hold/release pairs below. A count and not a flag, so a
  * nested retire inside an outer one cannot unlock early. */
@@ -2306,7 +2316,7 @@ void vol_pba_ref_hold(invfs_volume *v)
 {
     (void)v;
     pthread_once(&g_pba_ref_once, pba_ref_mu_init);
-    pthread_mutex_lock(&g_pba_ref_mu);
+    pba_ref_lock();
     g_pba_ref_held++;
 }
 
@@ -2334,7 +2344,7 @@ static void pba_ref_free(invfs_volume *v)
 void pba_ref_invalidate(invfs_volume *v)
 {
     pthread_once(&g_pba_ref_once, pba_ref_mu_init);
-    pthread_mutex_lock(&g_pba_ref_mu);
+    pba_ref_lock();
     if (v) v->pba_ref_stale = 1;
     pthread_mutex_unlock(&g_pba_ref_mu);
 }
@@ -2343,7 +2353,7 @@ void pba_ref_invalidate(invfs_volume *v)
  * remap, dedupe's remap), so the recipe it just published is accounted for. */
 void pba_ref_validate(invfs_volume *v)
 {
-    pthread_mutex_lock(&g_pba_ref_mu);
+    pba_ref_lock();
     if (v) v->pba_ref_stale = 0;
     pthread_mutex_unlock(&g_pba_ref_mu);
 }
@@ -2353,7 +2363,7 @@ void pba_ref_validate(invfs_volume *v)
  * rebuilds it lazily from the live set */
 void pba_ref_reset(invfs_volume *v)
 {
-    pthread_mutex_lock(&g_pba_ref_mu);
+    pba_ref_lock();
     pba_ref_free(v);
     pthread_mutex_unlock(&g_pba_ref_mu);
 }
@@ -2407,7 +2417,7 @@ static void pba_ref_modify_locked(invfs_volume *v, uint64_t pba, int delta)
 
 void pba_ref_modify(invfs_volume *v, uint64_t pba, int delta)
 {
-    pthread_mutex_lock(&g_pba_ref_mu);
+    pba_ref_lock();
     pba_ref_modify_locked(v, pba, delta);
     pthread_mutex_unlock(&g_pba_ref_mu);
 }
@@ -2447,7 +2457,7 @@ static void pba_ref_apply_locked(invfs_volume *v, const uint8_t *rec,
 void pba_ref_apply(invfs_volume *v, const uint8_t *rec, uint32_t rec_len,
                    int delta)
 {
-    pthread_mutex_lock(&g_pba_ref_mu);
+    pba_ref_lock();
     pba_ref_apply_locked(v, rec, rec_len, delta);
     pthread_mutex_unlock(&g_pba_ref_mu);
 }
@@ -2456,7 +2466,7 @@ uint32_t pba_ref_count(invfs_volume *v, uint64_t pba)
 {
     size_t k;
     uint32_t n;
-    pthread_mutex_lock(&g_pba_ref_mu);
+    pba_ref_lock();
     if (!v->pba_ref_on || !v->pba_ref) { pthread_mutex_unlock(&g_pba_ref_mu); return 2; }  /* unknown: never free */
     k = (size_t)pba_ref_hash(pba) & v->pba_ref_mask;
     n = 0;
@@ -2668,7 +2678,7 @@ static int pba_ref_ensure_locked(invfs_volume *v)
 int pba_ref_ensure(invfs_volume *v)
 {
     int rc;
-    pthread_mutex_lock(&g_pba_ref_mu);
+    pba_ref_lock();
     rc = pba_ref_ensure_locked(v);
     pthread_mutex_unlock(&g_pba_ref_mu);
     return rc;
