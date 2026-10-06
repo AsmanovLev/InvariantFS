@@ -19,8 +19,11 @@
  * metadata EXTENT pool the tree's base pages are allocated from.
  */
 
-/* _GNU_SOURCE for PTHREAD_RECURSIVE_MUTEX_INITIALIZER_NP (the pba-ref map's
- * own lock, see g_pba_ref_mu below) — the vol_cpack.c pattern */
+/* _GNU_SOURCE for assorted GNU extensions used below. The pba-ref map
+ * lock (g_pba_ref_mu) is recursive because callers re-enter it with the
+ * lock held (the vol_cpack.c pattern); it is built at runtime via
+ * pthread_once + PTHREAD_MUTEX_RECURSIVE instead of the _NP static
+ * initializer, which is glibc-only and breaks musl builds. */
 #if defined(__linux__) && !defined(_GNU_SOURCE)
 #define _GNU_SOURCE
 #endif
@@ -2279,7 +2282,16 @@ static uint64_t pba_ref_hash(uint64_t pba)
  * namespace and calls pba_ref_modify once per block entry, and the retire
  * paths nest -- vol_v3_unlink calls vol_delete_siblings, which calls
  * vol_v3_unlink again. */
-static pthread_mutex_t g_pba_ref_mu = PTHREAD_RECURSIVE_MUTEX_INITIALIZER_NP;
+static pthread_mutex_t g_pba_ref_mu;
+static pthread_once_t g_pba_ref_once = PTHREAD_ONCE_INIT;
+static void pba_ref_mu_init(void)
+{
+    pthread_mutexattr_t a;
+    pthread_mutexattr_init(&a);
+    pthread_mutexattr_settype(&a, PTHREAD_MUTEX_RECURSIVE);
+    pthread_mutex_init(&g_pba_ref_mu, &a);
+    pthread_mutexattr_destroy(&a);
+}
 
 /* Depth of the hold/release pairs below. A count and not a flag, so a
  * nested retire inside an outer one cannot unlock early. */
@@ -2293,6 +2305,7 @@ static int g_pba_ref_held;
 void vol_pba_ref_hold(invfs_volume *v)
 {
     (void)v;
+    pthread_once(&g_pba_ref_once, pba_ref_mu_init);
     pthread_mutex_lock(&g_pba_ref_mu);
     g_pba_ref_held++;
 }
@@ -2320,6 +2333,7 @@ static void pba_ref_free(invfs_volume *v)
  * can read a count that predates that publish. */
 void pba_ref_invalidate(invfs_volume *v)
 {
+    pthread_once(&g_pba_ref_once, pba_ref_mu_init);
     pthread_mutex_lock(&g_pba_ref_mu);
     if (v) v->pba_ref_stale = 1;
     pthread_mutex_unlock(&g_pba_ref_mu);
