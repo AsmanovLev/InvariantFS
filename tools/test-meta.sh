@@ -1,7 +1,7 @@
 #!/bin/bash
 # test-meta.sh — WP-M1 e2e leg 0: the metadata-v3 on-disk skeleton.
 #
-# mkfs writes format_version=3 + VOLF_META, a zeroed root area and
+# mkfs writes format_version=0 (v0 generation) + VOLF_META, a zeroed root area and
 # the RT30 root-area descriptor (seq=0, empty root slots, no delta). The
 # mount presents an empty namespace and closes CLEAN; fsck accepts it.
 #
@@ -64,14 +64,14 @@ $B/invf-mkfs "$IMG" 0.2 >"$WORK/mkfs.log" 2>&1 \
 grep -q "format: v0 metadata skeleton" "$WORK/mkfs.log" \
     || fail "mkfs did not report the v0 format"
 
-# --- on-disk marker: format_version=3, VOLF_META, RT30 descriptor ----------
+# --- on-disk marker: format_version=0, VOLF_META, RT30 descriptor ----------
 python3 - "$IMG" <<'PY' || fail "v3 on-disk marker/RT30 descriptor wrong"
 import struct, sys
 blk = open(sys.argv[1], 'rb').read(4096)
 assert len(blk) == 4096, "short block 0"
 fmt = blk[0x90]
 flags = struct.unpack_from('<I', blk, 0x88)[0]
-assert fmt == 3, "format_version=%d, want 3" % fmt
+assert fmt == 0, "format_version=%d, want 0 (v0)" % fmt
 assert flags & 0x10, "VOLF_META not set (vol_flags=0x%08x)" % flags
 off = 0x9D0
 magic = blk[off:off+4]
@@ -83,7 +83,7 @@ assert page_size == 4096, "RT30 page_size %d" % page_size
 assert slot0 == 0 and slot1 == 0, "root slots not empty: %d/%d" % (slot0, slot1)
 assert delta == 0, "delta_pba not empty: %d" % delta
 assert seq == 0, "seq not 0: %d" % seq
-print("on-disk: format_version=3 VOLF_META set RT30 version=1 page_size=%d "
+print("on-disk: format_version=0 VOLF_META set RT30 version=1 page_size=%d "
       "slots empty seq=0" % page_size)
 PY
 

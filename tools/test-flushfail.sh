@@ -63,7 +63,7 @@ rm -f "$IMG_A" "$IMG_B" "$IMG_C" "$IMG_D" "$IMG_E"
 
 fail() { echo "FAIL: $*" >&2; exit 1; }
 
-# WP80: on-disk format probe (format_version byte at 0x90; 3 = Meta-v3).
+# WP80: on-disk format probe (format_version byte at 0x90; 0 = v0 generation).
 img_is_meta() {
     python3 - "$1" <<'PY'
 import sys
@@ -72,7 +72,7 @@ try:
         sb = f.read(0x91)
 except OSError:
     sys.exit(1)
-sys.exit(0 if len(sb) >= 0x91 and sb[0x90] == 3 else 1)
+sys.exit(0 if len(sb) >= 0x91 and sb[0x90] == 0 else 1)
 PY
 }
 
