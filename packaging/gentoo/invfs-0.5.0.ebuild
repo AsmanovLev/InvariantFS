@@ -69,6 +69,11 @@ src_compile() {
 }
 
 src_install() {
+	if [ ! -d "${S}/${MY_PN}" ]; then
+		echo "--- WORKDIR layout (unpack produced something unexpected) ---" >&2
+		ls -la "${S}" >&2
+		die "artifact did not unpack to ${MY_PN}"
+	fi
 	cd "${S}/${MY_PN}" || die "artifact did not unpack to ${MY_PN}"
 
 	local -x DESTDIR="${ED}"
