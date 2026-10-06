@@ -527,7 +527,7 @@ jobs:
             ${{ runner.temp }}/artifacts
             ${{ runner.temp }}/debianboot.log
           if-no-files-found: ignore
-  fedora:
+  packaging-fedora:
     runs-on: ubuntu-22.04
     container: fedora:latest
     timeout-minutes: 40
@@ -567,7 +567,7 @@ jobs:
   # (built by `make release` below). Distfiles are staged locally and the
   # Manifest regenerated -- the ebuild's BLAKE2B/SIZE pins are provenance
   # notes, portage's Manifest does the real verification.
-  gentoo:
+  packaging-gentoo:
     runs-on: ubuntu-22.04
     container: gentoo/stage3:latest
     timeout-minutes: 60
