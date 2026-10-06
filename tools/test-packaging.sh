@@ -216,7 +216,7 @@ stage_arch() {
 stage_gentoo() {
     d="$WORK/gentoo"; mkdir -p "$d" "$d/image"
     tar --zstd -xf "$ART" -C "$d"
-    S="$d/invfs-$VFILE-x86_64"     # portage's $S
+    WORKDIR="$d"                 # portage's $WORKDIR; the ebuild derives $S
     ED="$d/image"                  # portage's $ED (the staging root)
     PV=$(echo "$VFILE" | sed 's/^v//')
     # the ONLY things stubbed: portage's unit-file helper, and its shell setup

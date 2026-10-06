@@ -25,6 +25,8 @@ EAPI=8
 # the same chain packaging/bootstrap.sh --check-only --pubkey checks.
 
 MY_PN="invfs-v${PV}-x86_64"
+# The tarball unpacks to WORKDIR/${MY_PN}, not WORKDIR/${P}.
+S="${WORKDIR}"
 
 # Pinned digest of the release artifact, as portage wants it
 # (`make release-sums` prints the pair; re-pin on every release).
