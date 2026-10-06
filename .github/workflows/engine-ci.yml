@@ -781,7 +781,7 @@ jobs:
           # static toolchain).
           xbps-install -Syu git base-devel pkg-config \
             fuse3-devel zlib-devel libzstd-devel zstd python3 tar \
-            gzip curl 2>&1 | tail -2
+            gzip curl file 2>&1 | tail -2
           [ -d /tmp/vp ] || git clone --depth 1 https://github.com/void-linux/void-packages /tmp/vp
           # xbps-src refuses root; the whole tree belongs to a builder.
           id builder >/dev/null 2>&1 || useradd -m builder
