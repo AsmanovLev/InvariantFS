@@ -770,7 +770,11 @@ jobs:
       - name: toolchain + void-packages tree
         run: |
           set -euo pipefail
-          xbps-install -Syu xbps-src git base-devel pkg-config \
+          # No xbps-src binary here: the package is absent from the repo
+          # pool in this image, and the git clone + binary-bootstrap below
+          # is the self-sufficient documented path (it fetches its own
+          # static toolchain).
+          xbps-install -Syu git base-devel pkg-config \
             fuse3-devel zlib-devel libzstd-devel zstd python3 tar \
             gzip curl 2>&1 | tail -2
           [ -d /tmp/vp ] || git clone --depth 1 https://github.com/void-linux/void-packages /tmp/vp
