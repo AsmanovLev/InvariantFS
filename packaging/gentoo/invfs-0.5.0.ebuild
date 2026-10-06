@@ -68,6 +68,16 @@ src_compile() {
 	: # prebuilt
 }
 
+# Explicit unpack with diagnostics: the default src_unpack once left an
+# empty WORKDIR with no error, and the cause was invisible from outside.
+src_unpack() {
+	echo "--- src_unpack: A=[${A}] DISTDIR content: ---" >&2
+	ls -la "$(portageq envvar DISTDIR)" >&2 || true
+	unpack ${A} || die "unpack failed"
+	echo "--- src_unpack: WORKDIR content: ---" >&2
+	ls -la "${WORKDIR}" >&2
+}
+
 src_install() {
 	if [ ! -d "${S}/${MY_PN}" ]; then
 		echo "--- WORKDIR layout (unpack produced something unexpected) ---" >&2
