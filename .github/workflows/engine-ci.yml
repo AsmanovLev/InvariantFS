@@ -588,7 +588,12 @@ jobs:
           fetch-depth: 0
 
       - name: portage snapshot (webrsync, not a full git sync)
-        run: emerge-webrsync -q || emerge --sync -q
+        run: |
+          # Fresh stage3 ships repos.conf pointing at /var/db/repos/gentoo
+          # but not the directory; portage validates the location before
+          # it can populate it, so create it first.
+          mkdir -p /var/db/repos/gentoo
+          emerge-webrsync -q || emerge --sync -q
 
       - name: build the release artifact this ebuild will install
         run: |
@@ -692,11 +697,11 @@ jobs:
         run: bash tools/test-packaging.sh
 
   # Arch, natively: full suite in an Arch container (arch leg staged as
-  # elsewhere) PLUS a real makepkg --asroot of the recipe against the
+  # elsewhere) PLUS a real makepkg of the recipe against the
   # HEAD-built artifact -- the exact proof the staged leg cannot give
   # (it executes package(), never makepkg: the sha256sums filename bug
-  # lived there). Containers run as root; --asroot is the documented
-  # test-only way (never for real packages).
+  # lived there). Containers run as root but makepkg refuses root (and
+  # current pacman removed --asroot), so the build runs as a builder user.
   packaging-arch:
     runs-on: ubuntu-22.04
     container: archlinux:base
@@ -728,7 +733,11 @@ jobs:
           cd "$D"
           H=$(cut -d' ' -f1 SHA256SUMS)
           sed -i "s/'[0-9a-f]\{64\}'/'$H'/" PKGBUILD
-          makepkg --asroot --noconfirm
+          # makepkg refuses root and current pacman removed --asroot:
+          # build as an unprivileged user instead (HOME + cwd are his).
+          id builder >/dev/null 2>&1 || useradd -m builder
+          chown -R builder:builder "$D"
+          runuser -u builder -- makepkg --noconfirm
           ls invfs-*.pkg.tar.zst
           pacman -Qip invfs-*.pkg.tar.zst | head -5
 
@@ -739,7 +748,7 @@ jobs:
   # (same test-staging shape as the Gentoo job).
   packaging-void:
     runs-on: ubuntu-22.04
-    container: ghcr.io/void-linux/void-linux:latest
+    container: ghcr.io/void-linux/void-glibc-full:latest
     timeout-minutes: 90
     needs: [engine]
     steps:
