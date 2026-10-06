@@ -16,22 +16,27 @@ all cover runit/OpenRC. Nothing here tests those.
 
 ## 1. Get a Debian rootfs
 
-Either a container base, or debootstrap:
+Either debootstrap, or a container base:
 
 ```bash
-# container base (what CI uses)
+# debootstrap (what CI uses -- .github/workflows/engine-ci.yml).
+# The --include list is load-bearing, see the warning below.
+debootstrap --variant=minbase \
+  --include=systemd,dbus,udev,openssh-server \
+  trixie /var/tmp/debroot
+
+# or a container base, if you would rather not use debootstrap
 docker pull debian:trixie
 docker create --name invfs-deb debian:trixie
 docker export invfs-deb | tar -C /var/tmp/debroot -xf -
 docker rm invfs-deb
-
-# or debootstrap, if you would rather not use docker
-debootstrap --variant=minbase trixie /var/tmp/debroot
 ```
 
 ⚠️ A **minbase** has no `systemd` and no `procps`. `tools/configure-debian.sh`
-installs the packages the boot needs (§3), but if you assemble a root by hand,
-those are not optional:
+does NOT install them -- it only provisions files (see §3) -- so the packages
+have to arrive here, via `--include` (or a manual install into the root).
+Without them the boot stalls early with zero udev lines in the serial log,
+which looks like a different failure entirely. What each one is for:
 
 | package | why |
 |---|---|
@@ -71,7 +76,10 @@ are each easy to miss:
   and then had **no network**: a guest that boots perfectly and is unreachable.
 - **`openssh-server`**, if you pass `sshd`
 
-It runs `apt` inside a chroot, so it needs network and about 400 MB of scratch.
+It runs no package manager and touches no chroot -- it only writes files,
+so it needs neither network nor scratch beyond the root itself. (An older
+revision of this guide claimed it runs `apt` inside a chroot; it never
+did, and following that claim produced roots with no systemd in them.)
 
 ## 4. Format the volume
 

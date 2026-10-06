@@ -1,7 +1,11 @@
 # Deferred-commit policy — design decision, 2026-10-05
 
-**Status:** decided, not implemented. Recorded so the design survives whoever
-implements it, and so the rationale is not re-derived from scratch.
+**Status:** decided and partly implemented. The mechanism lives in
+`src/core/blkio.c` as env knobs (`INVFS_COMMIT_BYTES` / `INVFS_COMMIT_MS` /
+`INVFS_COMMIT_IDLE_MS`); the CLI flags (`--sync`, `--commit-*`) are still
+pending, and step 2 below (crash-consistency under deferred commit) is still
+open. Recorded so the design survives whoever implements the rest, and so
+the rationale is not re-derived from scratch.
 
 ## Why
 
