@@ -61,6 +61,14 @@ grep -q "'  " "$B/PKGBUILD" && { say "PKGBUILD sums array has a non-hash entry";
 # options=('!strip' '!debug') in the recipe, no binutils/base-devel. The live
 # ISO root is a RAM overlay -- a full base-devel does not fit next to the
 # pacstrap target.
+# Rolling-release race first: the ISO's keyring predates the mirror's
+# packages, so a fresh package can arrive signed by a key the ISO never
+# saw ('unknown trust', CI archiso-validation). Refresh from the mirror
+# before trusting it for anything -- including the fakeroot install below
+# and pacstrap later (both -Sy against the same mirror).
+# (The keyring package is signed by master keys the ISO already trusts.)
+pacman -Sy --needed --noconfirm archlinux-keyring || exit 1
+pacman-key --populate archlinux || exit 1
 command -v fakeroot >/dev/null 2>&1 || pacman -Sy --needed --noconfirm fakeroot || exit 1
 chown -R builder:builder "$B"
 su builder -c "cd '$B' && makepkg --noconfirm" || exit 1

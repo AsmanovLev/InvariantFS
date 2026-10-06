@@ -409,9 +409,22 @@ stage_debian() {
     # tarball case the debian leg deliberately probes.
     SVER=$(sed -n 's/^Version:[[:space:]]*//p' "$REPO/packaging/invfs.spec")
     [ -n "$SVER" ] || { fail "rpm: cannot read Version from invfs.spec"; return 1; }
-    git -C "$REPO" archive --format=tar --prefix="invfs-$SVER/" HEAD \
-        | gzip -c > "$d/rpmtop/SOURCES/invfs-$SVER.tar.gz" \
-        || { fail "rpm: cannot build Source0 tarball"; return 1; }
+    # Tracked tree preferred (no build/ or bin/ contamination); tarball of
+    # the workdir when git is absent or $REPO is not a checkout (Fedora
+    # container job: 'not a git repository' -- checkout mounts oddly there).
+    # The fallback excludes what git would never have archived.
+    if git -C "$REPO" rev-parse --show-toplevel >/dev/null 2>&1; then
+        git -C "$REPO" archive --format=tar --prefix="invfs-$SVER/" HEAD \
+            | gzip -c > "$d/rpmtop/SOURCES/invfs-$SVER.tar.gz" \
+            || { fail "rpm: cannot build Source0 tarball"; return 1; }
+    else
+        note "rpm: no git checkout at $REPO -- tarring workdir (excl. build artifacts)"
+        tar --exclude-vcs --exclude=build --exclude=bin --exclude=dist \
+            --exclude=impl_docs --exclude=tools/flakey/artifacts -czf \
+            "$d/rpmtop/SOURCES/invfs-$SVER.tar.gz" -C "$REPO" \
+            --transform "s,^./,invfs-$SVER/," . \
+            || { fail "rpm: cannot build Source0 tarball"; return 1; }
+    fi
 
     # rpmbuild on Ubuntu resolves ONLY its own nomenclature for the dep
     # check, while this spec's BuildRequires are Fedora names (correct FOR

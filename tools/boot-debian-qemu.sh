@@ -155,6 +155,10 @@ QOPTS=(-machine "q35,accel=$ACCEL" -cpu "$CPU" -m "$MEM" -smp 2
        -drive "file=$RAW,format=raw,if=virtio"
        -netdev "user,id=net0,hostfwd=tcp::$PORT-:22"
        -device virtio-net-pci,netdev=net0
+        # virtio-rng: guests without it stall saving the RNG seed at shutdown
+        # (entropy-starved VM hung a CI void boot after stage 3 with 60s left).
+        -object rng-random,filename=/dev/urandom,id=rng0
+        -device virtio-rng-pci,rng=rng0
        -display none -serial "file:$SERIAL" -monitor none -no-reboot)
 [ "$MODE" = multi ] && QOPTS+=(-drive "file=$SHADOW,format=raw,if=virtio")
 
@@ -340,13 +344,19 @@ fi
 # ---- offline --------------------------------------------------------------
 say "offline bit-exact invf-cat + fsck"
 mkdir -p "$WORK/out"
+# Collect EVERY file's verdict, never fail fast: a single unreadable file
+# next to four good ones is the evidence (quarantine? torn recipe?), and
+# the cat stderr is kept -- >/dev/null here once hid the actual error.
+catrc=0
 for f in etc/hostname etc/passwd lib/systemd/systemd usr/bin/systemctl etc/os-release; do
     [ -n "$STAGE" ] || break
     [ -f "$STAGE/$f" ] || continue
-    "$B/invf-cat" "$IMG" "$f" "$WORK/out/$(basename "$f")" >/dev/null 2>&1 \
-        || fail "invf-cat $f"
+    if ! "$B/invf-cat" "$IMG" "$f" "$WORK/out/$(basename "$f")" >"$WORK/out/$(basename "$f").err" 2>&1; then
+        echo "FAIL: invf-cat $f: $(head -c 200 "$WORK/out/$(basename "$f").err")"
+        catrc=1; continue
+    fi
     cmp -s "$STAGE/$f" "$WORK/out/$(basename "$f")" \
-        || fail "$f not bit-exact after the systemd boot"
+        || { echo "FAIL: $f not bit-exact after the systemd boot"; catrc=1; continue; }
     say "  $f bit-exact"
 done
 
@@ -357,6 +367,7 @@ if ! grep -q '^OK$' "$LOGDIR/fsck.log"; then
 fi
 grep -q '^OK$' "$LOGDIR/fsck.log" || { cat "$LOGDIR/fsck.log"; fail "fsck not clean"; }
 say "fsck CLEAN: $(tail -1 "$LOGDIR/fsck.log")"
+[ "$catrc" = 0 ] || fail "offline bit-exact: at least one file failed (see FAIL lines above)"
 
 echo
 echo "PASS: Debian boot on InvariantFS -- PID 1 was systemd, multi-user.target"

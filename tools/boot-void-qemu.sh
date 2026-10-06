@@ -188,6 +188,10 @@ QOPTS=(-machine "q35,accel=$ACCEL" -cpu "$CPU" -m "$MEM" -smp 2
 [ "$MODE" = multi ] && QOPTS+=(-drive "file=$SHADOW,format=raw,if=virtio")
 QOPTS+=(-netdev "user,id=net0,hostfwd=tcp::$PORT-:22"
         -device virtio-net-pci,netdev=net0
+        # virtio-rng: guests without it stall saving the RNG seed at shutdown
+        # (entropy-starved VM hung a CI void boot after stage 3 with 60s left).
+        -object rng-random,filename=/dev/urandom,id=rng0
+        -device virtio-rng-pci,rng=rng0
         -display none -serial "file:$SERIAL" -monitor none -no-reboot)
 
 note "booting ($MODE): qemu-system-x86_64 ${QOPTS[*]}"
@@ -271,9 +275,9 @@ note "poweroff over SSH"
 ssh_guest "poweroff" 2>/dev/null || true
 wait_marker 'runit: enter stage: /etc/runit/3' \
     || fail "did not reach runit stage 3 after poweroff"
-qexit_deadline=$((SECONDS + 60))
+qexit_deadline=$((SECONDS + 180))
 while qpid_alive && [ "$SECONDS" -lt "$qexit_deadline" ]; do sleep 1; done
-qpid_alive && fail "QEMU did not exit within 60s of poweroff"
+qpid_alive && fail "QEMU did not exit within 180s of poweroff"
 wait "$QPID" 2>/dev/null || true
 QPID=0
 echo "poweroff OK (QEMU exited)"

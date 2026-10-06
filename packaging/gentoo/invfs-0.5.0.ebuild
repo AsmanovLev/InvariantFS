@@ -53,7 +53,7 @@ RDEPEND="
 # jpeg -> lossless JXL is a codecpack; without cjxl/djxl the pack probes
 # absent and the content waits RAW (the builtin codecs still work). Weak,
 # matching the RPM/Debian `Recommends`/`optdepends` treatment.
-RDEPEND+=" media-libs/jpeg:0 media-video/x264-utils app-arch/libjxl-utils"
+RDEPEND+=" media-libs/libjpeg-turbo media-video/x264-utils app-arch/libjxl-utils"
 # p7zip powers the 7z containerpack.
 RDEPEND+=" app-arch/p7zip"
 

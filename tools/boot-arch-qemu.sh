@@ -162,6 +162,10 @@ if [ "$BOOTLOADER" = 1 ]; then
         -append "console=ttyS0,115200"
         -netdev user,id=net0,hostfwd=tcp::${PORT}-:22
         -device virtio-net-pci,netdev=net0
+        # virtio-rng: guests without it stall saving the RNG seed at shutdown
+        # (entropy-starved VM hung a CI void boot after stage 3 with 60s left).
+        -object rng-random,filename=/dev/urandom,id=rng0
+        -device virtio-rng-pci,rng=rng0
         -display none -serial "file:$LOG" -monitor none -no-reboot
     )
 else
@@ -179,6 +183,10 @@ else
         "${DRIVES[@]}"
         -netdev user,id=net0,hostfwd=tcp::${PORT}-:22
         -device virtio-net-pci,netdev=net0
+        # virtio-rng: guests without it stall saving the RNG seed at shutdown
+        # (entropy-starved VM hung a CI void boot after stage 3 with 60s left).
+        -object rng-random,filename=/dev/urandom,id=rng0
+        -device virtio-rng-pci,rng=rng0
         -display none -serial "file:$LOG" -monitor none -no-reboot
     )
 fi
