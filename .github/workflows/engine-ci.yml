@@ -794,8 +794,13 @@ jobs:
           # ethereal model: swap the bootstrapped masterdir for a symlink
           # to / (the container root, which already carries base-devel).
           # NOTE the name: under ethereal the default masterdir is plain
-          # 'masterdir', not 'masterdir-<arch>'.
-          rm -rf /tmp/vp/masterdir-*
+          # 'masterdir', not 'masterdir-<arch>'. Remove by existence, not
+          # by glob (an unmatched glob plus set -e aborts the step; an
+          # existing dir makes ln try to link *inside* it and fail).
+          for d in /tmp/vp/masterdir /tmp/vp/masterdir-*/; do
+            [ -e "$d" ] || [ -L "$d" ] || continue
+            rm -rf "$d"
+          done
           ln -s / /tmp/vp/masterdir
 
       - name: build
