@@ -22,8 +22,10 @@ pkgname=invfs
 version=0.5.0
 revision=1
 _artifact="invfs-v${version}-x86_64"
-build_style=generic
-# The artifact is prebuilt, so there is nothing to configure or compile.
+# No build_style: the artifact is prebuilt, so there is nothing to
+# configure or compile (upstream requires do_install() for exactly this
+# shape; there is no 'generic' build style, and naming one fails the
+# build at extract time).
 configure_style=none
 makeopts=()
 hostmakedepends=
@@ -50,7 +52,9 @@ checksum="3fc20b159cc9d6abf691f2e9260dc8af60b3b4926ea49f54b41b9f55a47037b7"
 
 do_install() {
 	vmkdir "$PKGDESTDIR"
-	cd "$srcdir/${_artifact}"
+	# srcdir is the staged-test harness's variable; under real xbps-src the
+	# extracted tree is $wrksrc (tarball top dir == ${_artifact}).
+	cd "${srcdir:-$wrksrc}/${_artifact}"
 	# Void initramfs is mkinitcpio-compatible; keep the dracut module out.
 	DESTDIR="$PKGDESTDIR" PREFIX=/usr \
 		WITH_SYSTEMD=1 WITH_DRACUT=0 WITH_MKINITCPIO=1 \
