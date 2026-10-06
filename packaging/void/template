@@ -52,9 +52,13 @@ checksum="3fc20b159cc9d6abf691f2e9260dc8af60b3b4926ea49f54b41b9f55a47037b7"
 
 do_install() {
 	vmkdir "$PKGDESTDIR"
-	# srcdir is the staged-test harness's variable; under real xbps-src the
-	# extracted tree is $wrksrc (tarball top dir == ${_artifact}).
-	cd "${srcdir:-$wrksrc}/${_artifact}"
+	# srcdir is the staged-test harness's variable (it extracts the tarball
+	# itself, top dir intact); under real xbps-src the tree is $wrksrc,
+	# because do-extract renames a single-top-dir tarball to $wrksrc.
+	# Accept both layouts.
+	_src="${srcdir:-$wrksrc}"
+	[ -d "$_src/${_artifact}" ] && _src="$_src/${_artifact}"
+	cd "$_src"
 	# Void initramfs is mkinitcpio-compatible; keep the dracut module out.
 	DESTDIR="$PKGDESTDIR" PREFIX=/usr \
 		WITH_SYSTEMD=1 WITH_DRACUT=0 WITH_MKINITCPIO=1 \
