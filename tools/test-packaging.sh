@@ -656,11 +656,15 @@ sig_tests() {
 
 # --------------------------------------------------------------------------
 note "=== staging each target's own recipe ==="
-stage_rpm      || true
-stage_arch    || true
-stage_gentoo  || true
-stage_void    || true
-stage_debian  || true
+# No `|| true` here, deliberately: every leg returns 0 on skip (missing
+# tool is not a packaging bug) and nonzero only on real failure. A staged
+# leg that fails silently is how the ebuild S= and void distfile defects
+# hid until the native builds caught them -- never again.
+stage_rpm
+stage_arch
+stage_gentoo
+stage_void
+stage_debian
 
 note ""
 note "=== negative controls (a check that cannot fail verifies nothing) ==="
