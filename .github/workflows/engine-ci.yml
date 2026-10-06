@@ -91,43 +91,11 @@ jobs:
           done
           [ "$FAIL" = 0 ] || { echo "engine e2e: at least one suite FAILED"; exit 1; }
           echo "engine e2e: ALL SUITES PASS"
-  # The four-target packaging gate. Until this job existed,
-  # tools/test-packaging.sh was in neither `make e2e` nor this workflow, so
-  # the packaging layer had never run in any automated loop -- which is how
-  # "packaging/install.sh exited 1 on every host with a C compiler" survived
-  # as an undiscovered state. Cheap (no network, no sudo, seconds), so it
-  # runs on every push alongside `make test`.
-  packaging:
-    needs: [engine]
-    runs-on: ubuntu-22.04
-    timeout-minutes: 20
-    steps:
-      # fetch-depth 0 so TAGS are present. Without them `git describe` degrades
-      # to a bare commit hash, VERSION inside the release artifact becomes the
-      # hash instead of v0.5.0, and three separate checks then fail for what is
-      # really one cause:
-      #
-      #   gentoo   .ebuild path invfs-<hash>.ebuild does not exist -> rc=127
-      #   debian   .deb Version=0.5.0-1 does not match <hash>
-      #   sig      the SHA256SUMS assertion, downstream of the same mismatch
-      #
-      # Locally this never shows, because a working tree has its tags.
-      - uses: actions/checkout@v7
-        with:
-          fetch-depth: 0
-
-      - name: dependencies
-        run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq build-essential pkg-config \
-            libfuse3-dev zlib1g-dev libzstd-dev zstd python3 \
-            debhelper devscripts
-
-      - name: build
-        run: make -j"$(nproc)" && make helpers
-
-      - name: packaging recipes + bootstrap negative controls
-        run: bash tools/test-packaging.sh
+  # NOTE: there is deliberately no plain `packaging` job. The full
+  # test-packaging.sh suite (all targets staged + sig negative controls)
+  # already runs inside each native packaging-* job, so a fifth run only
+  # duplicated them. Each installation below gates on its MATCHING native
+  # packaging job instead of a shared staged gate.
 
   # The distro install harnesses, which build a real Arch and a real Void
   # root and take them through mkfs/import/fsck/verify/bit-exact reads.
@@ -135,7 +103,7 @@ jobs:
   # is pinned under RUNNER_TEMP so a 1.8 GB staging tree never lands on the
   # runner's small /tmp.
   installation-bootstrap-arch:
-    needs: [engine, packaging]
+    needs: [engine, packaging-arch]
     # DISABLED: the bootstrap-tarball path (test-arch-install.sh) tests the
     # same ground as the stock-ISO flow (archiso-validation) with less
     # realism for the same CI minutes. Re-enable by deleting this condition;
@@ -283,7 +251,7 @@ jobs:
           if-no-files-found: ignore
 
   installation-bootstrap-void:
-    needs: [engine, packaging]
+    needs: [engine, packaging-void]
     runs-on: ubuntu-22.04
     timeout-minutes: 45
     steps:
@@ -414,7 +382,7 @@ jobs:
           if-no-files-found: ignore
 
   installation-bootstrap-debian:
-    needs: [engine, packaging]
+    needs: [engine, packaging-debian]
     runs-on: ubuntu-22.04
     timeout-minutes: 60
     steps:
@@ -632,7 +600,7 @@ jobs:
   # off. No KVM on runners: the driver falls back to TCG (slow), hence the
   # generous timeout. See tools/iso-arch-install.sh.
   installation-iso-arch:
-    needs: [engine, packaging]
+    needs: [engine, packaging-arch]
     runs-on: ubuntu-22.04
     timeout-minutes: 150
     steps:
