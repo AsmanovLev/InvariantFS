@@ -503,6 +503,31 @@ jobs:
             ${{ runner.temp }}/artifacts
             ${{ runner.temp }}/debianboot.log
           if-no-files-found: ignore
+
+  # Fedora root (offline only for now): pinned Container-Base-Minimal OCI
+  # tarball, hash-verified, layer-extracted, offline import (single +
+  # two-device), fsck clean, bit-exact reads. No boot yet -- that needs
+  # boot-fedora-qemu.sh, which does not exist. Scratch under RUNNER_TEMP.
+  installation-bootstrap-fedora:
+    needs: [engine, packaging-fedora]
+    runs-on: ubuntu-22.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - name: dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq build-essential pkg-config \
+            libfuse3-dev fuse3 zlib1g-dev libzstd-dev zstd xz-utils curl \
+            python3
+      - name: build
+        run: make -j"$(nproc)" && make helpers
+      - name: fedora root -> InvariantFS volume (offline)
+        run: |
+          INVFS_FEDORA_WORK="$RUNNER_TEMP/fedora" \
+            bash tools/test-fedora-install.sh
   packaging-fedora:
     needs: [engine]
     runs-on: ubuntu-22.04
@@ -634,6 +659,49 @@ jobs:
           path: |
             ${{ runner.temp }}/iso/serial.log
             ${{ runner.temp }}/iso/serve.log
+          if-no-files-found: warn
+
+  # Stock-Void-ISO install onto InvariantFS. Boots the pinned, checksummed
+  # ISO's kernel+initramfs pristine, breaks to the dracut debug shell
+  # (rd.break=pre-pivot, driven over a bidirectional serial pipe), chroots
+  # into the live root and runs the Handbook XBPS-method install
+  # (xbps-install -r base-system) onto the volume: mkfs, batched import,
+  # fsck, bit-exact spot checks, PASS, poweroff. No KVM on runners: the
+  # driver falls back to TCG (slow), hence the generous timeout. See
+  # tools/iso-void-install.sh. No void-installer TUI is driven anywhere.
+  installation-iso-void:
+    needs: [engine, packaging-void]
+    runs-on: ubuntu-22.04
+    timeout-minutes: 150
+    steps:
+      # fetch-depth 0 so TAGS are present (same VERSION reason as above).
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq build-essential pkg-config \
+            libfuse3-dev zlib1g-dev libzstd-dev zstd xz-utils curl \
+            python3 qemu-system-x86 qemu-utils
+
+      - name: build
+        run: make -j"$(nproc)"
+
+      - name: void ISO install onto InvFS
+        run: |
+          WORK="$RUNNER_TEMP/iso-void" bash tools/iso-void-install.sh
+
+      # Same evidence rationale as the Arch ISO job above.
+      - name: upload install evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: iso-void-install-logs
+          path: |
+            ${{ runner.temp }}/iso-void/serial.log
+            ${{ runner.temp }}/iso-void/serve.log
           if-no-files-found: warn
 
   # Debian, natively: the same dpkg-buildpackage the matrix runs, but on
