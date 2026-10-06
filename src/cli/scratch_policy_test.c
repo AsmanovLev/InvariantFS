@@ -231,7 +231,7 @@ int main(void)
     struct outcome o;
     struct envkv e[8];
     int n, groups = 0;
-    uint64_t shm_fs, disk_fs, shm_max, shm_default, need, impossible;
+    uint64_t shm_fs, disk_fs, shm_max, shm_default, need = 0, impossible;
     uint64_t fs_a = 0, alloc_a = 0, offered;
 
     /* One tmpfs root -- the memory-backed branch has to be real -- and one

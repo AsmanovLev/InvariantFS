@@ -29,6 +29,7 @@
 #endif
 
 #include <errno.h>
+#include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -266,6 +267,23 @@ static int scratch_roots(char *buf, size_t cap, const char **out,
     return n;
 }
 
+/* Append to a fixed buffer without ever running past it: on truncation
+ * the tail is dropped and the cursor pins at the end (CodeQL
+ * overflowing-snprintf: m += snprintf(msg+m, sizeof msg - m) wraps the
+ * size to huge once m passes the end and writes off the stack). */
+static void scratch_msg(char *msg, size_t cap, size_t *m, const char *fmt, ...)
+{
+    va_list ap;
+    int r;
+    if (*m >= cap) { *m = cap ? cap - 1 : 0; return; }
+    va_start(ap, fmt);
+    r = vsnprintf(msg + *m, cap - *m, fmt, ap);
+    va_end(ap);
+    if (r < 0) return;
+    *m += (size_t)r;
+    if (*m >= cap) *m = cap - 1;
+}
+
 /* The one diagnostic an operator gets when the scratch cannot hold the
  * job. It names the demand, the margin, every root with the number that
  * ruled it out, and what to do about it -- a bare ENOSPC from a tmpfs has
@@ -278,28 +296,28 @@ static int scratch_refuse(const char **roots, int nroots, uint64_t need,
     size_t m = 0;
     int i;
 
-    m += (size_t)snprintf(msg + m, sizeof msg - m,
+    scratch_msg(msg, sizeof msg, &m,
         "tool_tmpdir: REFUSED: this job needs %llu B of scratch and a "
         "%llu B margin, and no configured root can hold that.\n",
         (unsigned long long)need, (unsigned long long)margin);
 
     if (forced) {
         uint64_t fs = 0, a = 0, hr = tool_scratch_headroom(forced, &fs, &a);
-        m += (size_t)snprintf(msg + m, sizeof msg - m,
+        scratch_msg(msg, sizeof msg, &m,
             "  INVFS_TOOL_SCRATCH=%s: %llu B offered (statvfs %llu B%s)\n",
             forced, (unsigned long long)hr, (unsigned long long)fs,
             a ? ", allocation ceiling scaled" : "");
     }
     for (i = 0; i < nroots; i++) {
         uint64_t fs = 0, a = 0, hr = tool_scratch_headroom(roots[i], &fs, &a);
-        m += (size_t)snprintf(msg + m, sizeof msg - m,
+        scratch_msg(msg, sizeof msg, &m,
             "  %s: %llu B offered (statvfs %llu B%s)%s\n",
             roots[i], (unsigned long long)hr, (unsigned long long)fs,
             a ? ", allocation ceiling scaled" : "",
             (hr >= need + margin) ? " -- ENOUGH ROOM, but the directory "
                                     "could not be created" : "");
     }
-    m += (size_t)snprintf(msg + m, sizeof msg - m,
+    scratch_msg(msg, sizeof msg, &m,
         "  nothing is written; the file is left to its other lanes.\n"
         "  fix: point the scratch at a directory with room, e.g.\n"
         "    INVFS_TOOL_SCRATCH=/srv/invfs-scratch <command>\n"

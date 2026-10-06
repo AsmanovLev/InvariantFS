@@ -1,5 +1,11 @@
 name: engine-ci
 
+# Least privilege: checkout needs contents:read, the serial-log upload
+# needs actions:write, nothing else in this file calls the API.
+permissions:
+  contents: read
+  actions: write
+
 on:
   push:
     branches: ["**"]

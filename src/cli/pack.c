@@ -18,6 +18,7 @@
 #include <dirent.h>
 #include <sys/stat.h>
 #include <sys/types.h>
+#include <sys/wait.h>
 #include <unistd.h>
 #include <errno.h>
 
@@ -348,11 +349,23 @@ static void cmd_install(const char *name)
         /* create host root if needed */
         mkdir("/.invariantfs", 0755);
         mkdir(HOST_ROOT, 0755);
-        /* recursive copy */
-        char cmd[MAX_PATH * 2 + 32];
-        snprintf(cmd, sizeof cmd, "cp -a '%s' '%s'", src, dst);
-        int rc = system(cmd);
-        if (rc != 0) {
+        /* recursive copy. No shell: the pack name comes from outside
+         * (registry listing, CLI arg), and single-quote wrapping breaks
+         * out on a \' in the path (CodeQL command-line-injection).
+         * fork+execlp passes src/dst as argv, never parsed. */
+        pid_t pid = fork();
+        if (pid < 0) {
+            fprintf(stderr, "failed to fork for copy: %s -> %s\n", src, dst);
+            return;
+        }
+        if (pid == 0) {
+            execlp("cp", "cp", "-a", src, dst, (char *)NULL);
+            _exit(127);
+        }
+        int status = 0;
+        while (waitpid(pid, &status, 0) < 0 && errno == EINTR)
+            ;
+        if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) {
             fprintf(stderr, "failed to copy pack: %s -> %s\n", src, dst);
             return;
         }
@@ -371,10 +384,20 @@ static void cmd_remove(const char *name)
         fprintf(stderr, "pack '%s' not installed at %s\n", name, HOST_ROOT);
         return;
     }
-    char cmd[MAX_PATH * 2 + 32];
-    snprintf(cmd, sizeof cmd, "rm -rf '%s'", dst);
-    int rc = system(cmd);
-    if (rc != 0) {
+    /* No shell (see cmd_install): dst derives from the pack name. */
+    pid_t pid = fork();
+    if (pid < 0) {
+        fprintf(stderr, "failed to fork for remove %s\n", dst);
+        return;
+    }
+    if (pid == 0) {
+        execlp("rm", "rm", "-rf", dst, (char *)NULL);
+        _exit(127);
+    }
+    int status = 0;
+    while (waitpid(pid, &status, 0) < 0 && errno == EINTR)
+        ;
+    if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) {
         fprintf(stderr, "failed to remove %s\n", dst);
         return;
     }
