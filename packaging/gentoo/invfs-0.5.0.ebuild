@@ -68,11 +68,19 @@ src_compile() {
 	: # prebuilt
 }
 
-# Explicit unpack with diagnostics: the default src_unpack once left an
-# empty WORKDIR with no error, and the cause was invisible from outside.
+# Explicit unpack: the default left an empty WORKDIR with no
+# error, so unpack here is explicit tar/cp plus a listing.
 src_unpack() {
-	echo "--- src_unpack: A=[${A}] ---" >&2
-	unpack ${A} || die "unpack failed"
+	mkdir -p "${WORKDIR}" && cd "${WORKDIR}" || die "cannot cd WORKDIR"
+	local t
+	for t in ${A}; do
+		case "$t" in
+			*.tar.zst|*.tar.zstd)
+				tar --zstd -xf "${DISTDIR}/$t" || die "tar failed: $t" ;;
+			*)
+				cp "${DISTDIR}/$t" . || die "cp failed: $t" ;;
+		esac
+	done
 	echo "--- src_unpack: WORKDIR content: ---" >&2
 	ls -la "${WORKDIR}" >&2
 }
