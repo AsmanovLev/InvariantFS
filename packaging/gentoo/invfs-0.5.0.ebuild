@@ -57,8 +57,9 @@ RDEPEND="
 # was measured and shelved; if it ever ships, its atom goes here as
 # media-video/x264-encoder, not the nonexistent media-video/x264-utils.)
 RDEPEND+=" media-libs/libjpeg-turbo media-libs/libjxl"
-# p7zip powers the 7z containerpack.
-RDEPEND+=" app-arch/p7zip"
+# 7zip powers the 7z containerpack (app-arch/p7zip was masked 2026-08,
+# replaced by app-arch/7zip).
+RDEPEND+=" app-arch/7zip"
 
 # Nothing to build: the artifact ships the compiled engine.
 src_compile() {

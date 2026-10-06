@@ -750,9 +750,10 @@ jobs:
     runs-on: ubuntu-22.04
     container:
       image: ghcr.io/void-linux/void-glibc-full:latest
-      # xbps-src builds as non-root inside user+mount namespaces; the
-      # default docker seccomp profile denies unshare(2), so lift it.
-      options: --security-opt seccomp=unconfined
+      # xbps-src builds as non-root inside user+mount namespaces and bind-
+      # mounts /proc into its masterdir: needs real privilege, seccomp-
+      # unconfined was not enough (bind mount denied).
+      options: --privileged
     timeout-minutes: 90
     needs: [engine]
     # The full image ships no bash, so the runner falls back to sh and
