@@ -266,17 +266,33 @@ int main(int argc, char **argv)
     }
     ok(g_fails == 0, "leg 1: concurrent windowed reads are bit-exact");
 
-    /* leg 2 -- the cache itself, on the same live volume */
-    pthread_barrier_init(&g_start, NULL, (unsigned)nthreads + 1);
+    /* leg 2 -- the cache itself, on the same live volume.
+     * Hits need two threads' references to overlap in time; on a loaded
+     * runner (parallel shards) one thread can lap the rest and the whole
+     * storm misses -- a scheduling outcome, not a cache defect. So the
+     * storm repeats, bounded, until it hits: a cache that genuinely never
+     * hits still fails after the last attempt, while the byte-correctness
+     * counters below stay cumulative across attempts, so corruption in any
+     * storm is still caught. */
     {
-        pthread_t th[32];
-        for (i = 0; i < nthreads; i++)
-            pthread_create(&th[i], NULL, arc_worker, (void *)i);
-        pthread_barrier_wait(&g_start);
-        for (i = 0; i < nthreads; i++) pthread_join(th[i], NULL);
+        int attempt;
+        for (attempt = 0; attempt < 4; attempt++) {
+            pthread_barrier_init(&g_start, NULL, (unsigned)nthreads + 1);
+            {
+                pthread_t th[32];
+                for (i = 0; i < nthreads; i++)
+                    pthread_create(&th[i], NULL, arc_worker, (void *)i);
+                pthread_barrier_wait(&g_start);
+                for (i = 0; i < nthreads; i++) pthread_join(th[i], NULL);
+            }
+            pthread_barrier_destroy(&g_start);
+            arc_stats(v->arc, &st);
+            if (st.hits > 0)
+                break;
+            printf("  ..    storm %d: zero hits under load, repeating (bounded)\n",
+                   attempt);
+        }
     }
-
-    arc_stats(v->arc, &st);
     printf("  ..    cache: entries=%u ghosts=%u bytes=%zu budget=%zu "
            "hits=%llu misses=%llu evictions=%llu\n",
            st.entries, st.ghosts, st.bytes, st.budget,
