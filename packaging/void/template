@@ -41,10 +41,12 @@ replaces=""
 
 distfiles="
 	https://github.com/AsmanovLev/InvariantFS/releases/download/v${version}/${_artifact}.tar.zst
-	https://github.com/AsmanovLev/InvariantFS/releases/download/v${version}/SHA256SUMS
 "
-# Checksum of ${_artifact}.tar.zst, copied from the published SHA256SUMS.
-sha256sums="3fc20b159cc9d6abf691f2e9260dc8af60b3b4926ea49f54b41b9f55a47037b7  ${_artifact}.tar.zst"
+# Bare positional hash for the one distfile above (modern xbps-src reads
+# $checksum, not the legacy $sha256sums). CI re-pins this to the
+# HEAD-built artifact; the SHA256SUMS provenance chain (dist/SHA256SUMS ->
+# .sig -> author pubkey) is verified by packaging/bootstrap.sh, not fetched.
+checksum="3fc20b159cc9d6abf691f2e9260dc8af60b3b4926ea49f54b41b9f55a47037b7"
 
 do_install() {
 	vmkdir "$PKGDESTDIR"

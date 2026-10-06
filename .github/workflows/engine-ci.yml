@@ -798,16 +798,17 @@ jobs:
         run: |
           set -euo pipefail
           ART=$(ls dist/invfs-*-x86_64.tar.zst | head -1)
-          ARTBASE=$(basename "$ART")
           OVER=/tmp/vp/srcpkgs/invfs
           mkdir -p "$OVER"
           cp packaging/void/template "$OVER/template"
-          cp "$ART" dist/SHA256SUMS /tmp/vp/hostdir/sources/ 2>/dev/null || {
-            mkdir -p /tmp/vp/hostdir/sources
-            cp "$ART" dist/SHA256SUMS /tmp/vp/hostdir/sources/
-          }
+          VER=$(sed -n 's/^version=//p' "$OVER/template")
+          # xbps-src only looks inside hostdir/sources/<pkg>-<ver>/; a copy
+          # at the sources root is invisible and triggers a real fetch.
+          SRCDIST=/tmp/vp/hostdir/sources/invfs-$VER
+          mkdir -p "$SRCDIST"
+          cp "$ART" "$SRCDIST/"
           H=$(cut -d' ' -f1 dist/SHA256SUMS)
-          sed -i "s/^[[:space:]]*sha256sums=.*/sha256sums=\"$H  $ARTBASE\"/" "$OVER/template" || true
-          grep -q "$H" "$OVER/template" || { echo "re-pin failed"; grep -n "sha256" "$OVER/template"; exit 1; }
+          sed -i "s/^checksum=.*/checksum=$H/" "$OVER/template"
+          grep -q "^checksum=$H$" "$OVER/template" || { echo "re-pin failed"; exit 1; }
           cd /tmp/vp && runuser -u builder -- ./xbps-src pkg invfs
           ls hostdir/binpkgs/invfs-*.xbps
