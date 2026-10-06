@@ -748,7 +748,11 @@ jobs:
   # (same test-staging shape as the Gentoo job).
   packaging-void:
     runs-on: ubuntu-22.04
-    container: ghcr.io/void-linux/void-glibc-full:latest
+    container:
+      image: ghcr.io/void-linux/void-glibc-full:latest
+      # xbps-src builds as non-root inside user+mount namespaces; the
+      # default docker seccomp profile denies unshare(2), so lift it.
+      options: --security-opt seccomp=unconfined
     timeout-minutes: 90
     needs: [engine]
     # The full image ships no bash, so the runner falls back to sh and
