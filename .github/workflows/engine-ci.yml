@@ -129,7 +129,7 @@ jobs:
   # Offline only (no boot, no FUSE) -- see the header of each script. Scratch
   # is pinned under RUNNER_TEMP so a 1.8 GB staging tree never lands on the
   # runner's small /tmp.
-  validate-arch-bootable:
+  installation-bootstrap-arch:
     # DISABLED: the bootstrap-tarball path (test-arch-install.sh) tests the
     # same ground as the stock-ISO flow (archiso-validation) with less
     # realism for the same CI minutes. Re-enable by deleting this condition;
@@ -276,7 +276,7 @@ jobs:
             ${{ runner.temp }}/archboot.log
           if-no-files-found: ignore
 
-  validate-void-bootable:
+  installation-bootstrap-void:
     runs-on: ubuntu-22.04
     timeout-minutes: 45
     steps:
@@ -406,7 +406,7 @@ jobs:
             ${{ runner.temp }}/artifacts
           if-no-files-found: ignore
 
-  validate-debian-bootable:
+  installation-bootstrap-debian:
     runs-on: ubuntu-22.04
     timeout-minutes: 60
     steps:
@@ -616,7 +616,7 @@ jobs:
   # pacman -Us, pacstraps, images, verifies, and must print PASS and power
   # off. No KVM on runners: the driver falls back to TCG (slow), hence the
   # generous timeout. See tools/iso-arch-install.sh.
-  archiso-validation:
+  installation-iso-arch:
     runs-on: ubuntu-22.04
     timeout-minutes: 150
     steps:
