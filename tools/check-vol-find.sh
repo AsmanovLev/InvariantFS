@@ -42,8 +42,8 @@ LEDGER="
 src/cli/batch_owner_test.c:92:SKIP
 src/cli/acl_inherit_test.c:266:SKIP   # child_has_acl: measurement, fault spent
 src/cli/acl_inherit_test.c:291:SKIP   # setup: aborts the test if the /p anchor is not found
-src/cli/cat.c:86:SKIP
-src/cli/cat.c:99:SKIP
+src/cli/cat.c:95:SKIP
+src/cli/cat.c:121:SKIP
 src/cli/cp.c:118:SKIP
 src/cli/heat_walk_test.c:365:SKIP
 src/cli/fuse_fs.c:1644:SKIP
