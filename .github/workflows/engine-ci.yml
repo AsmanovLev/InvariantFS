@@ -778,7 +778,10 @@ jobs:
             fuse3-devel zlib-devel libzstd-devel zstd python3 tar \
             gzip curl 2>&1 | tail -2
           [ -d /tmp/vp ] || git clone --depth 1 https://github.com/void-linux/void-packages /tmp/vp
-          cd /tmp/vp && ./xbps-src binary-bootstrap
+          # xbps-src refuses root; the whole tree belongs to a builder.
+          id builder >/dev/null 2>&1 || useradd -m builder
+          chown -R builder:builder /tmp/vp
+          runuser -u builder -- sh -c 'cd /tmp/vp && ./xbps-src binary-bootstrap'
 
       - name: build
         run: make -j"$(nproc)" && make helpers
@@ -801,5 +804,5 @@ jobs:
           H=$(cut -d' ' -f1 dist/SHA256SUMS)
           sed -i "s/^[[:space:]]*sha256sums=.*/sha256sums=\"$H  $ARTBASE\"/" "$OVER/template" || true
           grep -q "$H" "$OVER/template" || { echo "re-pin failed"; grep -n "sha256" "$OVER/template"; exit 1; }
-          cd /tmp/vp && ./xbps-src pkg invfs
+          cd /tmp/vp && runuser -u builder -- ./xbps-src pkg invfs
           ls hostdir/binpkgs/invfs-*.xbps
