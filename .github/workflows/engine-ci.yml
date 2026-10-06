@@ -658,3 +658,121 @@ jobs:
             ${{ runner.temp }}/iso/serial.log
             ${{ runner.temp }}/iso/serve.log
           if-no-files-found: warn
+
+  # Debian, natively: the same dpkg-buildpackage the matrix runs, but on
+  # the real Debian toolchain instead of Ubuntu's. Full suite (foreign
+  # legs skip, staged legs run, debian leg native).
+  packaging-debian:
+    runs-on: ubuntu-22.04
+    container: debian:bookworm
+    timeout-minutes: 40
+    needs: [engine]
+    steps:
+      # fetch-depth 0 so TAGS are present (same VERSION reason as above).
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: dependencies
+        run: |
+          apt-get update -qq
+          apt-get install -y -qq build-essential pkg-config git \
+            libfuse3-dev zlib1g-dev libzstd-dev zstd xz-utils curl \
+            python3 file gawk gzip debhelper devscripts \
+            ca-certificates
+
+      - name: build
+        run: make -j"$(nproc)" && make helpers
+
+      - name: packaging suite (deb native)
+        run: bash tools/test-packaging.sh
+
+  # Arch, natively: full suite in an Arch container (arch leg staged as
+  # elsewhere) PLUS a real makepkg --asroot of the recipe against the
+  # HEAD-built artifact -- the exact proof the staged leg cannot give
+  # (it executes package(), never makepkg: the sha256sums filename bug
+  # lived there). Containers run as root; --asroot is the documented
+  # test-only way (never for real packages).
+  packaging-arch:
+    runs-on: ubuntu-22.04
+    container: archlinux:base
+    timeout-minutes: 40
+    needs: [engine]
+    steps:
+      # fetch-depth 0 so TAGS are present (same VERSION reason as above).
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: dependencies
+        run: |
+          pacman -Sy --needed --noconfirm gcc make pkgconf fuse3 zstd zlib \
+            python3 tar gzip file awk fakeroot libarchive git
+
+      - name: build
+        run: make -j"$(nproc)" && make helpers
+
+      - name: packaging suite (arch staged)
+        run: bash tools/test-packaging.sh
+
+      - name: real makepkg of the recipe
+        run: |
+          set -euo pipefail
+          ART=$(ls dist/invfs-*-x86_64.tar.zst | head -1)
+          D=/tmp/archpkg; rm -rf "$D"; mkdir -p "$D"
+          cp packaging/PKGBUILD dist/SHA256SUMS "$ART" "$D/"
+          cd "$D"
+          H=$(cut -d' ' -f1 SHA256SUMS)
+          sed -i "s/'[0-9a-f]\{64\}'/'$H'/" PKGBUILD
+          makepkg --asroot --noconfirm
+          ls invfs-*.pkg.tar.zst
+          pacman -Qip invfs-*.pkg.tar.zst | head -5
+
+  # Void, natively: real xbps-src build of the template against the
+  # HEAD-built artifact (staged do_install() runs inside the suite too).
+  # xbps-src wants its void-packages tree: shallow clone + binary
+  # bootstrap, then a local srcpkgs overlay with re-pinned distfiles
+  # (same test-staging shape as the Gentoo job).
+  packaging-void:
+    runs-on: ubuntu-22.04
+    container: ghcr.io/void-linux/void-linux:latest
+    timeout-minutes: 90
+    needs: [engine]
+    steps:
+      # fetch-depth 0 so TAGS are present (same VERSION reason as above).
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: toolchain + void-packages tree
+        run: |
+          set -euo pipefail
+          xbps-install -Syu xbps-src git base-devel pkg-config \
+            fuse3-devel zlib-devel libzstd-devel zstd python3 tar \
+            gzip curl 2>&1 | tail -2
+          [ -d /tmp/vp ] || git clone --depth 1 https://github.com/void-linux/void-packages /tmp/vp
+          cd /tmp/vp && ./xbps-src binary-bootstrap
+
+      - name: build
+        run: make -j"$(nproc)" && make helpers
+
+      - name: packaging suite (void staged)
+        run: bash tools/test-packaging.sh
+
+      - name: real xbps-src build of the template
+        run: |
+          set -euo pipefail
+          ART=$(ls dist/invfs-*-x86_64.tar.zst | head -1)
+          ARTBASE=$(basename "$ART")
+          OVER=/tmp/vp/srcpkgs/invfs
+          mkdir -p "$OVER"
+          cp packaging/void/template "$OVER/template"
+          cp "$ART" dist/SHA256SUMS /tmp/vp/hostdir/sources/ 2>/dev/null || {
+            mkdir -p /tmp/vp/hostdir/sources
+            cp "$ART" dist/SHA256SUMS /tmp/vp/hostdir/sources/
+          }
+          H=$(cut -d' ' -f1 dist/SHA256SUMS)
+          sed -i "s/^[[:space:]]*sha256sums=.*/sha256sums=\"$H  $ARTBASE\"/" "$OVER/template" || true
+          grep -q "$H" "$OVER/template" || { echo "re-pin failed"; grep -n "sha256" "$OVER/template"; exit 1; }
+          cd /tmp/vp && ./xbps-src pkg invfs
+          ls hostdir/binpkgs/invfs-*.xbps
