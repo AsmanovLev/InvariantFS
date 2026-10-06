@@ -151,6 +151,7 @@ fi
 [ "$ACCEL" = kvm ] && CPU=${INVFS_CPU:-host} || CPU=${INVFS_CPU:-max}
 
 QOPTS=(-machine "q35,accel=$ACCEL" -cpu "$CPU" -m "$MEM" -smp 2
+       -vga none
        -kernel "$KERNEL" -initrd "$INITRD" -append "$CMDLINE"
        -drive "file=$RAW,format=raw,if=virtio"
        -netdev "user,id=net0,hostfwd=tcp::$PORT-:22"
