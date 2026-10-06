@@ -9,7 +9,7 @@ transcode cannot be proven reversible, the bytes are stored verbatim. Files are
 stored as **content + a recipe**, not as a block range, which is what makes
 deduplication, codec selection and partial reads fall out naturally.
 
-FUSE-based, single-host, append-oriented. Written in C11.
+FUSE-based, single-host, content-addressed. Written in C11.
 
 **Status: experimental.** No frozen on-disk format, no power-loss durability
 contract. Not a replacement for ext4/XFS on general workloads.
@@ -31,7 +31,7 @@ contract. Not a replacement for ext4/XFS on general workloads.
   PNG (`PNGR`), PE/EXE (`EXER`).
 * **Containers kept original** — ZIP/TAR/7z/VDI/qcow2/... are stored
   byte-original with members exposed as on-demand windows.
-* **Write-once ingestion + offline sweep** — writes land once in RAW as new
+* **Immutable segments + offline sweep** — new bytes land in RAW as new
   segments, then the sweep drains them into Shadow, re-encoding where proven
   bit-exact. The zone fields are advisory policy over one shared free pool,
   not fixed regions.
@@ -84,7 +84,7 @@ internally. The optimizations that matter:
 
 * **FUSE writeback cache** (`FUSE_CAP_WRITEBACK_CACHE`) — kernel
   aggregates small writes into large aligned chunks; the daemon receives
-  ideal 1 MiB+ sequential I/O for its append-only RAW layer.
+  ideal 1 MiB+ sequential I/O for its shared-pool RAW landing zone.
 * **In-memory AST cache** — recipes loaded once at open, resolved from
   RAM on every subsequent read. Zero disk metadata lookups in steady
   state.
@@ -103,7 +103,7 @@ codec CPU cost.
 
 * Not a drop-in ext4/XFS/ZFS replacement for general workloads.
 * No network/SAN support; single host only.
-* No high write throughput: writes are write-once, consolidation is offline.
+* No high write throughput: new bytes always allocate fresh segments (never patched in place) and consolidation is offline.
 * No power-loss durability guarantee (`make flakey` is a soak, not a contract).
 * No snapshots/CoW clones in the btrfs/ZFS sense — savepoints/rollback only.
 * The on-disk format is not frozen; the v3 record layout is a deliberate

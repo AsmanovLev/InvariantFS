@@ -23,7 +23,7 @@ InvariantFS decouples immediate write ingestion from offline storage optimizatio
          │
 ┌────────▼────────────────────────────────────────┐
 │                   DATA PLANE                    │
-│  - RAW Zone (Append-only LZ4 write landing)     │
+│  - RAW Zone (immutable write landing, LZ4)     │
 │  - Shadow Zone (Offline consolidated storage)  │
 │  - Sweep Worker (Type clustering, PPMd8/ZSTD)   │
 │  - ARC Cache (Adaptive Replacement Cache)      │

@@ -666,8 +666,8 @@ be recovered bit-for-bit, regardless of what codec was applied.
 
 ### 2.11 When NOT to use InvariantFS
 
-- High-throughput write workloads (it's write-append, not
-  write-in-place).
+- High-throughput write workloads (updates allocate fresh segments instead of
+  patching in place, plus delta/fold overhead and offline consolidation).
 - Filesystems where metadata space dominates (e.g., 1M empty files).
 - Anything where a kernel panic mid-syscall must not lose data (the
   crash recovery is good but not POSIX-perfect).
