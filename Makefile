@@ -650,9 +650,9 @@ test-gzhdr: $(OUT)/gzhdrfuzz gzhdr-seeds
 # clock, because "no crash" without a count is not evidence.
 #   make FUZZ_CC=/usr/lib/llvm-19/bin/clang gzhdrfuzz-soak SECS=240
 gzhdrfuzz-soak: $(OUT)/gzhdrfuzz-libfuzzer gzhdr-seeds
-	@# libFuzzer takes ONE corpus directory, not a directory plus a file
-	@# list -- "Not a directory: <file>; exiting". So the seeds are seeded
-	@# INTO the corpus dir rather than appended to the argument list.
+# libFuzzer takes ONE corpus directory, not a directory plus a file
+# list -- "Not a directory: <file>; exiting". So the seeds are seeded
+# INTO the corpus dir rather than appended to the argument list.
 	@mkdir -p $(OBJ)/gzhdrfuzz-corpus
 	@cp -n $(GZHDR_SEEDS) $(OBJ)/gzhdrfuzz-corpus/ 2>/dev/null || true
 	ASAN_OPTIONS=hard_rss_limit_mb=4096 \
@@ -752,7 +752,7 @@ TEST_BINS := $(foreach t,$(filter %_test,$(CLI_MAINS)),$(OUT)/invf-$(t))
 #     arg bin/invf-readdir_error_test exists=NO
 # -- the binary was never linked. Do not "helpfully" move it back to
 # CLI_MAINS: that is what took it out of the build in the first place.
-test: helpers $(TEST_BINS) $(OUT)/invf-arctest $(OUT)/invf-blkio_test $(OUT)/invf-codec_test \
+TEST_SHARD_DEPS = helpers $(TEST_BINS) $(OUT)/invf-arctest $(OUT)/invf-blkio_test $(OUT)/invf-codec_test \
         $(OUT)/invf-readdir_error_test \
       $(OUT)/invf-helper_exec_test $(OUT)/invf-metabuf_test $(OUT)/invf-btree_test \
       $(OUT)/invf-delta_test $(OUT)/invf-groupcommit_test $(OUT)/invf-concurrency_test $(OUT)/invf-sweep_v3_test \
@@ -789,35 +789,45 @@ test: helpers $(TEST_BINS) $(OUT)/invf-arctest $(OUT)/invf-blkio_test $(OUT)/inv
       $(OUT)/invf-sweep $(OUT)/invf-fsck $(OUT)/invf-plugin-host \
       plugin-so helpers $(CORE_OBJS_FILE) all
 
-	@# The explicit tool list above was the only set of prerequisites, and it
-	@# is incomplete: the suites also invoke invf-ls, invf-cat, invf-verify,
-	@# invf-stat, invf-import, invf-stats, invf-resize and invf-rollback,
-	@# none of which were in it. So those binaries were whatever was last
-	@# built, and adding a new source to CORE left them stale -- observed
-	@# directly: after the ANC0 merge, invf-fsck had the anchor code and
-	@# invf-ls did not, so a suite asserted on an old binary and failed for a
-	@# reason that had nothing to do with the tree. A test that runs against a
-	@# stale binary is worse than no test, because it reports a result. `all`
-	@# is the one prerequisite that cannot drift from the source list.
-	@# WP101: run the unit suite with the system codecpack directory off.
-	@# invf-codec_test's registry-shape assertions count the STATIC
-	@# codecs, but pack_scan_all() also scans /usr/lib/invfs/codecpacks,
-	@# so on a host that has codecpacks installed `make test` went red for
-	@# a reason that has nothing to do with the tree. Unset is what a
-	@# deployed binary gets, so this is not a behaviour change.
-	@# (Note: `export` in a recipe does not survive to the next line here,
-	@# so the variable is applied per command as $(TESTENV).)
-	@#
-	@# WP104: every command below runs through $(TESTISO), which gives it
-	@# a private /tmp and /dev/shm (mount namespace, no root). Two
-	@# exceptions, both deliberate:
-	@#   invf-helper_exec_test -- it branches on getuid(): unprivileged it
-	@#     SKIPs the privilege-drop checks, and inside a user namespace
-	@#     (fake root) those checks run and FAIL. Changing what a test
-	@#     asserts is not isolation, it is sabotage; it already uses a
-	@#     per-pid scratch dir, so it has no residue to collide with.
-	@#   check-repo-hygiene.sh -- it reads git, which must see the real
-	@#     worktree; nothing in it writes outside it.
+
+# The explicit tool list above was the only set of prerequisites, and it
+# is incomplete: the suites also invoke invf-ls, invf-cat, invf-verify,
+# invf-stat, invf-import, invf-stats, invf-resize and invf-rollback,
+# none of which were in it. So those binaries were whatever was last
+# built, and adding a new source to CORE left them stale -- observed
+# directly: after the ANC0 merge, invf-fsck had the anchor code and
+# invf-ls did not, so a suite asserted on an old binary and failed for a
+# reason that had nothing to do with the tree. A test that runs against a
+# stale binary is worse than no test, because it reports a result. `all`
+# is the one prerequisite that cannot drift from the source list.
+# WP101: run the unit suite with the system codecpack directory off.
+# invf-codec_test's registry-shape assertions count the STATIC
+# codecs, but pack_scan_all() also scans /usr/lib/invfs/codecpacks,
+# so on a host that has codecpacks installed `make test` went red for
+# a reason that has nothing to do with the tree. Unset is what a
+# deployed binary gets, so this is not a behaviour change.
+# (Note: `export` in a recipe does not survive to the next line here,
+# so the variable is applied per command as $(TESTENV).)
+#
+# WP104: every command below runs through $(TESTISO), which gives it
+# a private /tmp and /dev/shm (mount namespace, no root). Two
+# exceptions, both deliberate:
+#   invf-helper_exec_test -- it branches on getuid(): unprivileged it
+#     SKIPs the privilege-drop checks, and inside a user namespace
+#     (fake root) those checks run and FAIL. Changing what a test
+#     asserts is not isolation, it is sabotage; it already uses a
+#     per-pid scratch dir, so it has no residue to collide with.
+#   check-repo-hygiene.sh -- it reads git, which must see the real
+#     worktree; nothing in it writes outside it.
+test: $(TEST_SHARD_DEPS) test-shard-check test-shard-1 test-shard-2 test-shard-3 test-shard-4
+
+# Coverage guard: every binary the build prerequisites provide must be
+# invoked by at least one shard. A test with no entry runs nowhere,
+# which reads green and proves nothing. Fails loud, runs everywhere.
+test-shard-check:
+	python3 tools/check-test-shards.py
+
+test-shard-1: $(TEST_SHARD_DEPS) test-shard-check
 	$(TESTENV) $(TESTISO) $(OUT)/invf-arctest
 	$(TESTENV) $(TESTISO) $(OUT)/invf-blkio_test
 	$(TESTENV) $(TESTISO) $(OUT)/invf-codec_test
@@ -827,288 +837,292 @@ test: helpers $(TEST_BINS) $(OUT)/invf-arctest $(OUT)/invf-blkio_test $(OUT)/inv
 	$(TESTENV) $(TESTISO) $(OUT)/invf-delta_test
 	$(TESTENV) $(TESTISO) $(OUT)/invf-groupcommit_test /tmp
 	$(TESTENV) $(TESTISO) $(OUT)/invf-concurrency_test /tmp
-	@# WP-inode-get-fold-race: the fold frees the retired delta chain, and a
-	@# reader that had already resolved a ref was reading those blocks
-	@# afterwards. The interleave is PLANNED (a weak seam inside the value
-	@# read), not raced for: pre-fix the fold completes and the reader comes
-	@# back with ANOTHER inode's row; post-fix the fold cannot get past the
-	@# reader. It fails if the red control does not arm, so it cannot go
-	@# green by the allocator quietly changing.
+# WP-inode-get-fold-race: the fold frees the retired delta chain, and a
+# reader that had already resolved a ref was reading those blocks
+# afterwards. The interleave is PLANNED (a weak seam inside the value
+# read), not raced for: pre-fix the fold completes and the reader comes
+# back with ANOTHER inode's row; post-fix the fold cannot get past the
+# reader. It fails if the red control does not arm, so it cannot go
+# green by the allocator quietly changing.
 	$(TESTENV) $(TESTISO) $(OUT)/invf-fold_delta_read_test /tmp
-	@# The base-tree half of the same question (wp/reclaim-blocking-drain):
-	@# the fold's reachability diff frees a retired generation, and a reader
-	@# that had already captured its root walked pages that were gone --
-	@# measured at ~1e-6 of reads and reported by mbuf_read_ptr's
-	@# allocation check as a plain -1, with no error having happened.
-	@# vol_reclaim_drain waited on g_readers_in_flight and nothing in the
-	@# tree ever incremented it. The interleave is PLANNED (a weak seam in
-	@# v3_base_root, fired once the root is captured and before one page of
-	@# it is read), and the assertion is the read-path outcome -- the row,
-	@# field for field -- not a counter. Pre-fix the folds complete and the
-	@# read fails; post-fix the fold cannot get past the reader. It also
-	@# fails if the interleave is not decided at all, so it cannot go green
-	@# by the setup quietly changing. It is in CLI_MAINS, so $(TEST_BINS)
-	@# above already has it as a prerequisite.
+# The base-tree half of the same question (wp/reclaim-blocking-drain):
+# the fold's reachability diff frees a retired generation, and a reader
+# that had already captured its root walked pages that were gone --
+# measured at ~1e-6 of reads and reported by mbuf_read_ptr's
+# allocation check as a plain -1, with no error having happened.
+# vol_reclaim_drain waited on g_readers_in_flight and nothing in the
+# tree ever incremented it. The interleave is PLANNED (a weak seam in
+# v3_base_root, fired once the root is captured and before one page of
+# it is read), and the assertion is the read-path outcome -- the row,
+# field for field -- not a counter. Pre-fix the folds complete and the
+# read fails; post-fix the fold cannot get past the reader. It also
+# fails if the interleave is not decided at all, so it cannot go green
+# by the setup quietly changing. It is in CLI_MAINS, so $(TEST_BINS)
+# above already has it as a prerequisite.
 	$(TESTENV) $(TESTISO) $(OUT)/invf-reclaim_reader_epoch_test /tmp
 	$(TESTENV) $(TESTISO) $(OUT)/invf-sweep_v3_test /tmp
 	$(TESTENV) $(TESTISO) $(OUT)/invf-sweep_collect_test /tmp
-	@# WP135: the walk-receipt controls. invf-verify and invf-sweep are
-	@# invoked as SUBPROCESSES by walk_status_test (they are separate mains,
-	@# and a fresh process is also a fresh fault countdown), so they have to
-	@# be built before it runs. Neither was in the prerequisite list above,
-	@# which is the same staleness trap the comment on `all` describes.
+# WP135: the walk-receipt controls. invf-verify and invf-sweep are
+# invoked as SUBPROCESSES by walk_status_test (they are separate mains,
+# and a fresh process is also a fresh fault countdown), so they have to
+# be built before it runs. Neither was in the prerequisite list above,
+# which is the same staleness trap the comment on `all` describes.
 	$(TESTENV) $(TESTISO) $(OUT)/invf-walk_status_test /tmp
 	$(TESTENV) $(TESTISO) $(OUT)/invf-walk_status_fuse_test /tmp
-	@# WP145: the sweep's HEAT stage, which is the same class one stage
-	@# away from the collect -- on the in-FUSE path the decay runs BEFORE
-	@# the collect (src/cli/fuse_fs.c:2008 then :2037), so the collect's
-	@# receipt cannot cover a walk that already stopped. Needs invf-mkfs on
-	@# disk (the `all` prerequisite), and greps /proc/self/exe for its own
-	@# refusal diagnostic so a `make -j4` that did not relink this binary
-	@# fails loudly instead of proving nothing.
+# WP145: the sweep's HEAT stage, which is the same class one stage
+# away from the collect -- on the in-FUSE path the decay runs BEFORE
+# the collect (src/cli/fuse_fs.c:2008 then :2037), so the collect's
+# receipt cannot cover a walk that already stopped. Needs invf-mkfs on
+# disk (the `all` prerequisite), and greps /proc/self/exe for its own
+# refusal diagnostic so a `make -j4` that did not relink this binary
+# fails loudly instead of proving nothing.
 	$(TESTENV) $(TESTISO) $(OUT)/invf-heat_walk_test /tmp
-	@# WP/delete-siblings-short-walk-leaves-orphans: the SIBLING PURGE is the
-	@# same walk-receipt class with a permanent consequence -- a short walk
-	@# leaves 'name!partN' orphans that no pass can ever collect. Its failure
-	@# is INVFS_FAULT on two seams in src/core/vol_dirs.c, armed through
-	@# invfs_vol_dirs_fault_reload(), and it fails loudly (exit 3) rather than
-	@# proving nothing if this binary is older than the sources it measures --
-	@# the test binaries are prerequisites of `make test`, not of `all`.
+# WP/delete-siblings-short-walk-leaves-orphans: the SIBLING PURGE is the
+# same walk-receipt class with a permanent consequence -- a short walk
+# leaves 'name!partN' orphans that no pass can ever collect. Its failure
+# is INVFS_FAULT on two seams in src/core/vol_dirs.c, armed through
+# invfs_vol_dirs_fault_reload(), and it fails loudly (exit 3) rather than
+# proving nothing if this binary is older than the sources it measures --
+# the test binaries are prerequisites of `make test`, not of `all`.
 	$(TESTENV) $(TESTISO) $(OUT)/invf-sib_walk_test /tmp
-	@# WP135: 'a!b' is a legal user name and `rm a` destroyed it --
-	@# vol_delete_siblings' "is this my sibling" test was a prefix match on
-	@# "name!" with no shape check, so any user name starting with "name!"
-	@# was collected and unlinked, and the unlink reported success. The test
-	@# asserts `a!b` still reads back BYTE-EXACT after unlink('a'), AND --
-	@# the arm that makes it a fix -- that a real vol_create_tar_file
-	@# decomposition still has all its '!partN' siblings purged, which a fix
-	@# that simply disabled sibling purging would fail.
+# WP135: 'a!b' is a legal user name and `rm a` destroyed it --
+# vol_delete_siblings' "is this my sibling" test was a prefix match on
+# "name!" with no shape check, so any user name starting with "name!"
+# was collected and unlinked, and the unlink reported success. The test
+# asserts `a!b` still reads back BYTE-EXACT after unlink('a'), AND --
+# the arm that makes it a fix -- that a real vol_create_tar_file
+# decomposition still has all its '!partN' siblings purged, which a fix
+# that simply disabled sibling purging would fail.
 	$(TESTENV) $(TESTISO) $(OUT)/invf-bang_name_test /tmp
-	@# WP141: vol_read_named answered with another FILE's bytes and status 0.
-	@# When an inode named 'a!b' exists AND 'a' is a ZIP with a member 'b', the
-	@# exact name resolved (vol_find returned it) and was then discarded in
-	@# favour of the member -- same shape as the vol_find one: bytes plus a
-	@# success status carry no in-band error. invf-cat only avoided it by doing
-	@# the exact-name lookup itself (cat.c:83-97).
-	@# The CONTROL ARM is the point of this recipe line: with the exact inode
-	@# removed, 'a!b' must STILL answer with the member's bytes byte-exact and
-	@# status 0. A fix that made vol_read_named refuse every '!' name passes
-	@# the defect leg and fails that one.
+
+test-shard-2: $(TEST_SHARD_DEPS) test-shard-check
+# WP141: vol_read_named answered with another FILE's bytes and status 0.
+# When an inode named 'a!b' exists AND 'a' is a ZIP with a member 'b', the
+# exact name resolved (vol_find returned it) and was then discarded in
+# favour of the member -- same shape as the vol_find one: bytes plus a
+# success status carry no in-band error. invf-cat only avoided it by doing
+# the exact-name lookup itself (cat.c:83-97).
+# The CONTROL ARM is the point of this recipe line: with the exact inode
+# removed, 'a!b' must STILL answer with the member's bytes byte-exact and
+# status 0. A fix that made vol_read_named refuse every '!' name passes
+# the defect leg and fails that one.
 	$(TESTENV) $(TESTISO) $(OUT)/invf-read_named_test /tmp
-	@# WP136: a '!'-bearing USER name is skipped by every transform lane in
-	@# the sweep, so it silently loses batching while the byte-identical file
-	@# beside it gets the shared PPMd segment. The observable is the ZONE the
-	@# two names end up in, not an exit code: the sweep reports "300 swept"
-	@# either way and never mentions the skip. RED on main.
+# WP136: a '!'-bearing USER name is skipped by every transform lane in
+# the sweep, so it silently loses batching while the byte-identical file
+# beside it gets the shared PPMd segment. The observable is the ZONE the
+# two names end up in, not an exit code: the sweep reports "300 swept"
+# either way and never mentions the skip. RED on main.
 	$(TESTENV) $(TESTISO) $(OUT)/invf-sweep_bang_test /tmp
-	@# WP146: the companion to the line above, and it asserts a different
-	@# thing. WP136 made the LANES run on '!'-named user files; what it left
-	@# behind is the REPORT mis-attributing them -- N independent user files
-	@# named doc!000.txt.. are summarised by invf-sweep as `doc!*: N parts`,
-	@# i.e. one container's parts, with no container on the volume and exit 0.
-	@# A zone assertion cannot see this (those files really are batched), so
-	@# this test runs the real bin/invf-sweep as a subprocess and matches the
-	@# REPORT TEXT, with the exit code asserted separately. It also stages a
-	@# genuine tar decomposition and requires it STILL to report as one
-	@# aggregate line, so "drop the aggregation" cannot pass.
-	@# No scratch argument: the test resolves /srv/bench/scratch itself
-	@# (/tmp is RAM here -- AGENTS.md 2.8b).
+# WP146: the companion to the line above, and it asserts a different
+# thing. WP136 made the LANES run on '!'-named user files; what it left
+# behind is the REPORT mis-attributing them -- N independent user files
+# named doc!000.txt.. are summarised by invf-sweep as `doc!*: N parts`,
+# i.e. one container's parts, with no container on the volume and exit 0.
+# A zone assertion cannot see this (those files really are batched), so
+# this test runs the real bin/invf-sweep as a subprocess and matches the
+# REPORT TEXT, with the exit code asserted separately. It also stages a
+# genuine tar decomposition and requires it STILL to report as one
+# aggregate line, so "drop the aggregation" cannot pass.
+# No scratch argument: the test resolves /srv/bench/scratch itself
+# (/tmp is RAM here -- AGENTS.md 2.8b).
 	$(TESTENV) $(TESTISO) $(OUT)/invf-sweep_report_bang_test
-	@# WP147: the last two '!'-bytes-remaining sites, and the INVERSE of the
-	@# line above in one respect: both live behind invfs_sweep_ui_active(),
-	@# which is isatty(STDERR_FILENO) with no --log. WP146 had to force the UI
-	@# OFF and so could not reach them; this test allocates a real pty and puts
-	@# the sweep's fd 1 and 2 on the slave end, so the tree panel is live. On
-	@# the TTY a user file `notes!final.txt` was DRAWN as container `notes` with
-	@# member `final.txt` (depth 2), and the --dashboard indented a user-named
-	@# transcoded file as a member of a container that does not exist.
-	@# Asserts the RENDERED TEXT plus the exit code separately, and carries a
-	@# control arm in each leg (rows really were drawn / the container really
-	@# was recorded) so an absent row can never pass as an absent phantom: the
-	@# vacuity the last two fixes here had to work around.
-	@# The middle leg is the one a too-eager fix fails: a genuine tar
-	@# decomposition must STILL nest -- container row, then its member row.
+# WP147: the last two '!'-bytes-remaining sites, and the INVERSE of the
+# line above in one respect: both live behind invfs_sweep_ui_active(),
+# which is isatty(STDERR_FILENO) with no --log. WP146 had to force the UI
+# OFF and so could not reach them; this test allocates a real pty and puts
+# the sweep's fd 1 and 2 on the slave end, so the tree panel is live. On
+# the TTY a user file `notes!final.txt` was DRAWN as container `notes` with
+# member `final.txt` (depth 2), and the --dashboard indented a user-named
+# transcoded file as a member of a container that does not exist.
+# Asserts the RENDERED TEXT plus the exit code separately, and carries a
+# control arm in each leg (rows really were drawn / the container really
+# was recorded) so an absent row can never pass as an absent phantom: the
+# vacuity the last two fixes here had to work around.
+# The middle leg is the one a too-eager fix fails: a genuine tar
+# decomposition must STILL nest -- container row, then its member row.
 	$(TESTENV) $(TESTISO) $(OUT)/invf-sweep_tree_bang_test
-	@# WP-crc32c-slice8-wrong: the CRC32C fallback taken on every CPU
-	@# without SSE4.2 (QEMU's default `qemu64` is one) returned a different
-	@# value from the SSE4.2 path for every n >= 8 -- its T[0] was never
-	@# stored, so every eighth byte was checksummed as 0x00 -- and nothing
-	@# in the tree compared the two. crc32c_slice8 and crc32c_hw are static
-	@# and the public entry points dispatch on CPUID, so on an SSE4.2 host
-	@# NEITHER was reachable from a test and on a non-SSE4.2 host the other
-	@# had nothing to be compared against. This one forces the software path
-	@# (invfs_crc32c_force_fallback, plus INVFS_CRC32C_FORCE_FALLBACK=1 so
-	@# the invf-mkfs SUBPROCESS checksums the same way), ASSERTS that it
-	@# actually ran, checks known-answer vectors over the length classes the
-	@# defect was measured at, and then writes, closes, REOPENS and reads a
-	@# volume back byte-exact -- both through the fallback and, with the pin
-	@# released, through the CPU's own path, which is the cross-machine case.
-	@# Needs invf-mkfs on disk (the `all` prerequisite).
+# WP-crc32c-slice8-wrong: the CRC32C fallback taken on every CPU
+# without SSE4.2 (QEMU's default `qemu64` is one) returned a different
+# value from the SSE4.2 path for every n >= 8 -- its T[0] was never
+# stored, so every eighth byte was checksummed as 0x00 -- and nothing
+# in the tree compared the two. crc32c_slice8 and crc32c_hw are static
+# and the public entry points dispatch on CPUID, so on an SSE4.2 host
+# NEITHER was reachable from a test and on a non-SSE4.2 host the other
+# had nothing to be compared against. This one forces the software path
+# (invfs_crc32c_force_fallback, plus INVFS_CRC32C_FORCE_FALLBACK=1 so
+# the invf-mkfs SUBPROCESS checksums the same way), ASSERTS that it
+# actually ran, checks known-answer vectors over the length classes the
+# defect was measured at, and then writes, closes, REOPENS and reads a
+# volume back byte-exact -- both through the fallback and, with the pin
+# released, through the CPU's own path, which is the cross-machine case.
+# Needs invf-mkfs on disk (the `all` prerequisite).
 	$(TESTENV) $(TESTISO) $(OUT)/invf-crc32c_test /tmp
-	@# WP140: the name table must not evict a LIVE name because a lookup could
-	@# not be completed. Runs under $(TESTISO): fuse_get_context() is stubbed
-	@# to NULL, so every permission check takes the documented uid-0 bypass and
-	@# no leg here depends on a denial the one-entry fake-root uid map would
-	@# swallow. Its failure is INVFS_FAULT, armed through
-	@# invfs_vol_btree_fault_reload() (the site is in vol_btree.c and the
-	@# countdown is per-translation-unit), and it is DISARMED after every
-	@# probe, so the unset path stays inert here too.
+# WP140: the name table must not evict a LIVE name because a lookup could
+# not be completed. Runs under $(TESTISO): fuse_get_context() is stubbed
+# to NULL, so every permission check takes the documented uid-0 bypass and
+# no leg here depends on a denial the one-entry fake-root uid map would
+# swallow. Its failure is INVFS_FAULT, armed through
+# invfs_vol_btree_fault_reload() (the site is in vol_btree.c and the
+# countdown is per-translation-unit), and it is DISARMED after every
+# probe, so the unset path stays inert here too.
 	$(TESTENV) $(TESTISO) $(OUT)/invf-table_sync_evict_test /tmp
-	@# WP142: a bulk write whose name lookup did not COMPLETE must not take
-	@# the create branch -- on v3 that empties the name's inode and frees its
-	@# blocks before a byte is written. Three legs: `create` and `replace` are
-	@# the green controls (a refuse-on-failure fix is indistinguishable from a
-	@# refuse-always fix without them), `red` is the control, and it asserts
-	@# BYTES: the file's content read back before and after. Its failure is
-	@# INVFS_FAULT armed through invfs_vol_btree_fault_reload() (the site is in
-	@# vol_btree.c and the countdown is per-translation-unit), DISARMED after
-	@# every probe, so the unset path stays inert here too.
+# WP142: a bulk write whose name lookup did not COMPLETE must not take
+# the create branch -- on v3 that empties the name's inode and frees its
+# blocks before a byte is written. Three legs: `create` and `replace` are
+# the green controls (a refuse-on-failure fix is indistinguishable from a
+# refuse-always fix without them), `red` is the control, and it asserts
+# BYTES: the file's content read back before and after. Its failure is
+# INVFS_FAULT armed through invfs_vol_btree_fault_reload() (the site is in
+# vol_btree.c and the countdown is per-translation-unit), DISARMED after
+# every probe, so the unset path stays inert here too.
 	$(TESTENV) $(TESTISO) $(OUT)/invf-write_create_path_test create /tmp
 	$(TESTENV) $(TESTISO) $(OUT)/invf-write_create_path_test replace /tmp
 	$(TESTENV) $(TESTISO) $(OUT)/invf-write_create_path_test red /tmp
-	@# WP143: a batch-registry lookup that did not COMPLETE is not "the
-	@# registry is empty". Reading it that way makes the flush publish a blob
-	@# holding THIS RUN'S entries only, and those rows are the only record
-	@# that a batch segment exists -- irreversible, and the segments become
-	@# orphans no GC can reclaim. Two legs: `ctl` is the green control (a flush
-	@# with a READABLE registry preserves the earlier run's entries AND adds
-	@# its own -- a fix that froze the registry would pass the first half), `red`
-	@# is the control. It parses the registry blob off the volume with
-	@# vol_find + vol_read_file rather than asking the engine, so it does not
-	@# only build when the fix is present, and it compares the WHOLE row rather
-	@# than its seq -- the overwriting flush mints a new row that REUSES the
-	@# lost row's seq, which is exactly how the loss stays hidden. Fault
-	@# injection is INVFS_FAULT through invfs_vol_btree_fault_reload(), DISARMED
-	@# after every probe.
+# WP143: a batch-registry lookup that did not COMPLETE is not "the
+# registry is empty". Reading it that way makes the flush publish a blob
+# holding THIS RUN'S entries only, and those rows are the only record
+# that a batch segment exists -- irreversible, and the segments become
+# orphans no GC can reclaim. Two legs: `ctl` is the green control (a flush
+# with a READABLE registry preserves the earlier run's entries AND adds
+# its own -- a fix that froze the registry would pass the first half), `red`
+# is the control. It parses the registry blob off the volume with
+# vol_find + vol_read_file rather than asking the engine, so it does not
+# only build when the fix is present, and it compares the WHOLE row rather
+# than its seq -- the overwriting flush mints a new row that REUSES the
+# lost row's seq, which is exactly how the loss stays hidden. Fault
+# injection is INVFS_FAULT through invfs_vol_btree_fault_reload(), DISARMED
+# after every probe.
 	$(TESTENV) $(TESTISO) $(OUT)/invf-tz_registry_test ctl /tmp
 	$(TESTENV) $(TESTISO) $(OUT)/invf-tz_registry_test red /tmp
 	$(TESTENV) $(TESTISO) $(OUT)/invf-btree_repair_test /tmp
 	$(TESTENV) $(TESTISO) $(OUT)/invf-symlink_v3_test /tmp
 	$(TESTENV) $(TESTISO) $(OUT)/invf-large_file_v3_test /tmp
 	$(TESTENV) $(TESTISO) $(OUT)/invf-read_parallel_bitexact_test /tmp
-	@# A failed listing must not look like an empty directory (readdir, and
-	@# the same shape in listxattr). It runs under $(TESTISO) normally: it
-	@# stubs fuse_get_context() to NULL, so every permission check takes the
-	@# documented uid-0 bypass and no case here depends on a denial that a
-	@# fake-root uid map would swallow. Its errno injection is INVFS_FAULT,
-	@# which is unset here -- the unset path is the one that has to stay
-	@# inert in production, so this also asserts it stays inert.
+# A failed listing must not look like an empty directory (readdir, and
+# the same shape in listxattr). It runs under $(TESTISO) normally: it
+# stubs fuse_get_context() to NULL, so every permission check takes the
+# documented uid-0 bypass and no case here depends on a denial that a
+# fake-root uid map would swallow. Its errno injection is INVFS_FAULT,
+# which is unset here -- the unset path is the one that has to stay
+# inert in production, so this also asserts it stays inert.
 	$(TESTENV) $(TESTISO) $(OUT)/invf-readdir_error_test /tmp
-	@# WP stat-counts-v3: invf-stat's file counts against invf-ls's, on one
-	@# image. Two oracles on purpose -- the defect is that one of them read an
-	@# empty v2 inode area on a v3 volume and printed a confident zero, so an
-	@# expectation pinned to a literal would only encode today's count. Needs
-	@# invf-mkfs, invf-ls and invf-stat on disk (the `all` prerequisite).
+
+test-shard-3: $(TEST_SHARD_DEPS) test-shard-check
+# WP stat-counts-v3: invf-stat's file counts against invf-ls's, on one
+# image. Two oracles on purpose -- the defect is that one of them read an
+# empty v2 inode area on a v3 volume and printed a confident zero, so an
+# expectation pinned to a literal would only encode today's count. Needs
+# invf-mkfs, invf-ls and invf-stat on disk (the `all` prerequisite).
 	$(TESTENV) $(TESTISO) $(OUT)/invf-stat_v3_counts_test /tmp
-	@# WP xattr-enodata-vs-eio: vol_get_xattr returned -1 for BOTH "no such
-	@# xattr" and "the row could not be read", and perm_check_cred used that
-	@# to decide "this inode has no ACL" -- so a read error on the inode row
-	@# degraded ACL enforcement to the plain mode triad and the mount started
-	@# ALLOWING what the ACL denied. Runs under $(TESTISO) because it never
-	@# asks the kernel for a permission: it builds struct acreds by hand and
-	@# calls the evaluator directly, so there is no real uid denial in it for
-	@# the one-entry fake-root uid map to swallow. The row-read failure is
-	@# INVFS_FAULT, unset here, so this leg also asserts the unset path stays
-	@# inert.
+# WP xattr-enodata-vs-eio: vol_get_xattr returned -1 for BOTH "no such
+# xattr" and "the row could not be read", and perm_check_cred used that
+# to decide "this inode has no ACL" -- so a read error on the inode row
+# degraded ACL enforcement to the plain mode triad and the mount started
+# ALLOWING what the ACL denied. Runs under $(TESTISO) because it never
+# asks the kernel for a permission: it builds struct acreds by hand and
+# calls the evaluator directly, so there is no real uid denial in it for
+# the one-entry fake-root uid map to swallow. The row-read failure is
+# INVFS_FAULT, unset here, so this leg also asserts the unset path stays
+# inert.
 	$(TESTENV) $(TESTISO) $(OUT)/invf-acl_eio_test /tmp
-	@# WP acl-inherit-on-failed-lookup: the CREATE side of the same class. The
-	@# mkdir and create paths read the parent's POSIX ACL fail-closed, fold it
-	@# against the create mode, and then had to resolve the object's OWN name a
-	@# second time to stamp the result on -- with vol_find, whose uint64_t makes
-	@# "no such name" and "the lookup could not be completed" both 0. One
-	@# unreadable dirent row therefore produced an object that EXISTS, carries
-	@# the ACL-masked mode triad, and carries NO ACL: on a mount that does not
-	@# negotiate default_permissions (AGENTS.md 2.9) that is the widening, and
-	@# the mode triad cannot express the per-identity decision the named ACL
-	@# entries carried. Asserts the permission DECISION (perm_check_cred by
-	@# hand, uid 2000/gid 0: denied by the ACL, allowed by the bare triad), and
-	@# SEARCHES the seam ordinals because the site is consulted once per path
-	@# component and the ordinal is not a constant -- requiring at-least-one AND
-	@# not-all, so a table in which every position behaves alike cannot pass.
-	@# Runs under $(TESTISO): no real uid denial anywhere in it.
+# WP acl-inherit-on-failed-lookup: the CREATE side of the same class. The
+# mkdir and create paths read the parent's POSIX ACL fail-closed, fold it
+# against the create mode, and then had to resolve the object's OWN name a
+# second time to stamp the result on -- with vol_find, whose uint64_t makes
+# "no such name" and "the lookup could not be completed" both 0. One
+# unreadable dirent row therefore produced an object that EXISTS, carries
+# the ACL-masked mode triad, and carries NO ACL: on a mount that does not
+# negotiate default_permissions (AGENTS.md 2.9) that is the widening, and
+# the mode triad cannot express the per-identity decision the named ACL
+# entries carried. Asserts the permission DECISION (perm_check_cred by
+# hand, uid 2000/gid 0: denied by the ACL, allowed by the bare triad), and
+# SEARCHES the seam ordinals because the site is consulted once per path
+# component and the ordinal is not a constant -- requiring at-least-one AND
+# not-all, so a table in which every position behaves alike cannot pass.
+# Runs under $(TESTISO): no real uid denial anywhere in it.
 	$(TESTENV) $(TESTISO) $(OUT)/invf-acl_inherit_test /tmp
-	@# WP chmod-acl-write-widens: invf_chmod folded the new mode into the
-	@# stored access ACL and then applied the mode, and the ACL WRITE's return
-	@# was discarded on both branches. A failed write therefore left the mode
-	@# changed and the ACL standing, the chmod returned 0, and -- on a mount
-	@# that does not negotiate default_permissions (AGENTS.md 2.9), where
-	@# perm_check_cred is the sole object-level permission authority -- the
-	@# file's EFFECTIVE permissions stayed at the pre-chmod values. Its own
-	@# comment refuses the chmod when the ACL READ fails, for exactly that
-	@# reason; the write is the same condition and was unchecked.
-	@# Asserts the permission DECISION (uid 1000 by hand, both directions)
-	@# and not the errno, plus the control arm a "refuse every chmod on an
-	@# ACL-bearing file" fix would fail. CALIBRATES the seam first, so a spent
-	@# countdown cannot make the red legs measure the healthy path.
-	@# Runs under $(TESTISO): no real uid denial anywhere in it.
+# WP chmod-acl-write-widens: invf_chmod folded the new mode into the
+# stored access ACL and then applied the mode, and the ACL WRITE's return
+# was discarded on both branches. A failed write therefore left the mode
+# changed and the ACL standing, the chmod returned 0, and -- on a mount
+# that does not negotiate default_permissions (AGENTS.md 2.9), where
+# perm_check_cred is the sole object-level permission authority -- the
+# file's EFFECTIVE permissions stayed at the pre-chmod values. Its own
+# comment refuses the chmod when the ACL READ fails, for exactly that
+# reason; the write is the same condition and was unchecked.
+# Asserts the permission DECISION (uid 1000 by hand, both directions)
+# and not the errno, plus the control arm a "refuse every chmod on an
+# ACL-bearing file" fix would fail. CALIBRATES the seam first, so a spent
+# countdown cannot make the red legs measure the healthy path.
+# Runs under $(TESTISO): no real uid denial anywhere in it.
 	$(TESTENV) $(TESTISO) $(OUT)/invf-chmod_acl_write_test /tmp
-	@# WP meta-clobber-on-unreadable-row: vol_get_meta returned -1 for BOTH
-	@# "this inode has no meta row" and "the row could not be read", and
-	@# meta_for_path answered the merged value with meta_defaults() -- 0644,
-	@# owner root -- and meta_apply_patch then WROTE that back. So a chmod /
-	@# utimens / chown on an inode whose row would not read silently reset its
-	@# mode and owner and returned success: the volume was changed by a call
-	@# that said it worked. The test reads mode and owner back OFF THE VOLUME,
-	@# because an errno-only control would pass against a fix that renamed the
-	@# return value and left the write-back in place.
-	@# Runs under $(TESTISO): it calls the entry points directly with
-	@# fuse_get_context() stubbed to NULL, so every permission check takes the
-	@# documented uid-0 bypass and the only failure injected is the row read
-	@# under test. No real uid denial, so nothing for the one-entry fake-root
-	@# uid map to swallow. INVFS_FAULT is unset on the healthy legs, so those
-	@# also assert the unset path stays inert.
+# WP meta-clobber-on-unreadable-row: vol_get_meta returned -1 for BOTH
+# "this inode has no meta row" and "the row could not be read", and
+# meta_for_path answered the merged value with meta_defaults() -- 0644,
+# owner root -- and meta_apply_patch then WROTE that back. So a chmod /
+# utimens / chown on an inode whose row would not read silently reset its
+# mode and owner and returned success: the volume was changed by a call
+# that said it worked. The test reads mode and owner back OFF THE VOLUME,
+# because an errno-only control would pass against a fix that renamed the
+# return value and left the write-back in place.
+# Runs under $(TESTISO): it calls the entry points directly with
+# fuse_get_context() stubbed to NULL, so every permission check takes the
+# documented uid-0 bypass and the only failure injected is the row read
+# under test. No real uid denial, so nothing for the one-entry fake-root
+# uid map to swallow. INVFS_FAULT is unset on the healthy legs, so those
+# also assert the unset path stays inert.
 	$(TESTENV) $(TESTISO) $(OUT)/invf-meta_clobber_test /tmp
-	@# WP otrunc-keeps-the-old-identity: the TRUNCATE twin of the row above.
-	@# invf_open's O_TRUNC branch saved the file's identity, replaced the
-	@# file, and wrote the identity back -- but it saved it with vol_find,
-	@# whose uint64_t makes "no such name" and "the lookup could not be
-	@# completed" both 0, and it IGNORED vol_replace_file's return. So a
-	@# lost save left the file's mode at the 0644 that
-	@# vol_v3_create_node writes for every regular file, and open() said
-	@# 0. Asserts the volume's own answer -- mode, owner AND content --
-	@# after a flush, never the errno, and requires a healthy truncate to
-	@# still work and still clear the content. The composed failure needs
-	@# TWO sites (the dirent row read and the inode row read are both in
-	@# vol_btree.c and one INVFS_FAULT spec names one site), delivered by
-	@# an interposed getenv() that changes the spec's ADDRESS, which is
-	@# what re-arms the one-shot -- unsetenv+setenv does not, and a leg
-	@# that thinks it re-armed measures the healthy path. The test also
-	@# refuses to run against a binary older than its own sources:
-	@# `make -j4` does not link these binaries at all.
-	@# Runs under $(TESTISO): it calls invf_open directly with
-	@# fuse_get_context() stubbed to NULL, so every permission check takes
-	@# the documented uid-0 bypass. No real uid denial, so nothing for the
-	@# one-entry fake-root uid map to swallow. INVFS_FAULT is unset on the
-	@# healthy legs, so those also assert the unset path stays inert.
+# WP otrunc-keeps-the-old-identity: the TRUNCATE twin of the row above.
+# invf_open's O_TRUNC branch saved the file's identity, replaced the
+# file, and wrote the identity back -- but it saved it with vol_find,
+# whose uint64_t makes "no such name" and "the lookup could not be
+# completed" both 0, and it IGNORED vol_replace_file's return. So a
+# lost save left the file's mode at the 0644 that
+# vol_v3_create_node writes for every regular file, and open() said
+# 0. Asserts the volume's own answer -- mode, owner AND content --
+# after a flush, never the errno, and requires a healthy truncate to
+# still work and still clear the content. The composed failure needs
+# TWO sites (the dirent row read and the inode row read are both in
+# vol_btree.c and one INVFS_FAULT spec names one site), delivered by
+# an interposed getenv() that changes the spec's ADDRESS, which is
+# what re-arms the one-shot -- unsetenv+setenv does not, and a leg
+# that thinks it re-armed measures the healthy path. The test also
+# refuses to run against a binary older than its own sources:
+# `make -j4` does not link these binaries at all.
+# Runs under $(TESTISO): it calls invf_open directly with
+# fuse_get_context() stubbed to NULL, so every permission check takes
+# the documented uid-0 bypass. No real uid denial, so nothing for the
+# one-entry fake-root uid map to swallow. INVFS_FAULT is unset on the
+# healthy legs, so those also assert the unset path stays inert.
 	$(TESTENV) $(TESTISO) $(OUT)/invf-otrunc_test /tmp
 	$(TESTENV) $(TESTISO) $(OUT)/invf-spn_skip_recipe_test $(UNIT_SCRATCH) skipped
 	$(TESTENV) $(TESTISO) $(OUT)/invf-spn_skip_recipe_test $(UNIT_SCRATCH) skippedctl
-	@# WP-arc-concurrent-safe: the content cache, under concurrency. TSAN is
-	@# the structure (arc.c had no lock at all), ASan is the borrow (an
-	@# arc_get pointer freed underneath the reader's memcpy). Both must be
-	@# silent: either one reporting is this gate going red.
+# WP-arc-concurrent-safe: the content cache, under concurrency. TSAN is
+# the structure (arc.c had no lock at all), ASan is the borrow (an
+# arc_get pointer freed underneath the reader's memcpy). Both must be
+# silent: either one reporting is this gate going red.
 	$(TESTENV) $(TESTISO) $(OUT)/invf-arc-conc-tsan
 	ASAN_OPTIONS=$(GZHDR_TEST_ASAN) $(TESTENV) $(TESTISO) $(OUT)/invf-arc-conc-asan
 	$(TESTENV) $(TESTISO) $(OUT)/invf-arc_concurrency_test /tmp
-	@# WP-heat-table-concurrent-safe: the read-heat table, under concurrency.
-	@# TSAN is the structure (vol_heat.c had no lock and the read path reaches
-	@# it with g_io_lock released); ASan is the lifetime, and its planned leg
-	@# schedules the grow's free() with -Wl,--wrap=free instead of racing for
-	@# it; the plain build asserts the table's own invariants. Any one of the
-	@# three reporting is this gate going red.
+# WP-heat-table-concurrent-safe: the read-heat table, under concurrency.
+# TSAN is the structure (vol_heat.c had no lock and the read path reaches
+# it with g_io_lock released); ASan is the lifetime, and its planned leg
+# schedules the grow's free() with -Wl,--wrap=free instead of racing for
+# it; the plain build asserts the table's own invariants. Any one of the
+# three reporting is this gate going red.
 	$(TESTENV) $(TESTISO) $(OUT)/invf-heat-conc-tsan
 	ASAN_OPTIONS=$(GZHDR_TEST_ASAN) INVFS_HEAT_SAN_LEG=all \
 	    $(TESTENV) $(TESTISO) $(OUT)/invf-heat-conc-asan
 	$(TESTENV) $(TESTISO) $(OUT)/invf-heat_table_concurrency_test
-	@# WP-cpack-map-copy-out: the parsed !mbrmap cache, under concurrency. It
-	@# is the THIRD instance of the ARC shape on the same lock-free call site:
-	@# no lock at all, a realloc that invalidates every pointer into the
-	@# array, a borrowed pointer handed to a reader that copies bytes out of
-	@# it, and a serve that reports success. TSAN is the structure; ASan's two
-	@# planned legs schedule the grow's realloc and a retire's free with
-	@# -Wl,--wrap=realloc / -Wl,--wrap=free instead of racing for them; the
-	@# plain build asserts every read got its own container's bytes. Any one
-	@# of the three reporting is this gate going red.
+# WP-cpack-map-copy-out: the parsed !mbrmap cache, under concurrency. It
+# is the THIRD instance of the ARC shape on the same lock-free call site:
+# no lock at all, a realloc that invalidates every pointer into the
+# array, a borrowed pointer handed to a reader that copies bytes out of
+# it, and a serve that reports success. TSAN is the structure; ASan's two
+# planned legs schedule the grow's realloc and a retire's free with
+# -Wl,--wrap=realloc / -Wl,--wrap=free instead of racing for them; the
+# plain build asserts every read got its own container's bytes. Any one
+# of the three reporting is this gate going red.
 	$(TESTENV) $(TESTISO) $(OUT)/invf-cpack_map_conc_tsan
 	ASAN_OPTIONS=$(CPACK_SAN_ASAN) INVFS_CPACK_SAN_LEG=all \
 	    $(TESTENV) $(TESTISO) $(OUT)/invf-cpack_map_conc_asan
@@ -1122,127 +1136,129 @@ test: helpers $(TEST_BINS) $(OUT)/invf-arctest $(OUT)/invf-blkio_test $(OUT)/inv
 	$(TESTENV) $(OUT)/invf-cpack_guard_test
 	$(TESTENV) $(OUT)/invf-scratch_policy_test
 	$(TESTENV) $(TESTISO) $(OUT)/invf-tar_cap_test /tmp
-	@# WP201: the two v2-era paths that kept running on Meta-v3. The
-	@# containerpack MAP branch's rollback reached v3, where the commit it
-	@# rolls back superseded the row IN PLACE -- so it cannot undo anything,
-	@# and its v2 retire writes a TOMBSTONE into the shared metadata extent,
-	@# which on v3 is the base-page/data pool. Measured: that block was
-	@# ALLOCATED, so this is a v2-shaped record written OVER A LIVE v3 BLOCK.
-	@# It does NOT destroy the fresh blob -- the v2 records are invisible to
-	@# v3 resolution and the row still reads back bit-exact. And vol_v3_free_recipe_blocks
-	@# reported success on a recipe it could not parse, so vol_v3_unlink
-	@# reported success over blocks that were orphaned forever. Both legs
-	@# assert on the DISK EFFECT, not on a return code alone.
+
+test-shard-4: $(TEST_SHARD_DEPS) test-shard-check
+# WP201: the two v2-era paths that kept running on Meta-v3. The
+# containerpack MAP branch's rollback reached v3, where the commit it
+# rolls back superseded the row IN PLACE -- so it cannot undo anything,
+# and its v2 retire writes a TOMBSTONE into the shared metadata extent,
+# which on v3 is the base-page/data pool. Measured: that block was
+# ALLOCATED, so this is a v2-shaped record written OVER A LIVE v3 BLOCK.
+# It does NOT destroy the fresh blob -- the v2 records are invisible to
+# v3 resolution and the row still reads back bit-exact. And vol_v3_free_recipe_blocks
+# reported success on a recipe it could not parse, so vol_v3_unlink
+# reported success over blocks that were orphaned forever. Both legs
+# assert on the DISK EFFECT, not on a return code alone.
 	$(TESTENV) $(TESTISO) $(OUT)/invf-v2rb_rollback_test /tmp
 	$(TESTENV) $(TESTISO) $(OUT)/invf-no_v2_surface_test /tmp
-	@# The CKP0 sweep checkpoint is gone (WP drop-ckp0-surface). Its slot
-	@# is block 0 [0x220,0x258) -- a DIFFERENT region from the 32 MiB gap
-	@# no_v2_surface_test scans, so it needs its own disk scan. The control
-	@# cell plants a descriptor in the span and requires the scan to report
-	@# it: a detector that has never gone red is not a detector.
+# The CKP0 sweep checkpoint is gone (WP drop-ckp0-surface). Its slot
+# is block 0 [0x220,0x258) -- a DIFFERENT region from the 32 MiB gap
+# no_v2_surface_test scans, so it needs its own disk scan. The control
+# cell plants a descriptor in the span and requires the scan to report
+# it: a detector that has never gone red is not a detector.
 	$(TESTENV) $(TESTISO) $(OUT)/invf-no_ckp0_surface_test /tmp
 	$(TESTENV) $(TESTISO) $(OUT)/invf-v2_open_test /tmp
-	@# WP202: a builtin container lane that supersedes a file on v3 gave the
-	@# superseded recipe's data blocks to nobody, while the containerpack
-	@# lane released them. One implementation now, and this pins the premise
-	@# (the row really moved in place) beside the effect (the blocks are free
-	@# AND the file is still bit-exact).
+# WP202: a builtin container lane that supersedes a file on v3 gave the
+# superseded recipe's data blocks to nobody, while the containerpack
+# lane released them. One implementation now, and this pins the premise
+# (the row really moved in place) beside the effect (the blocks are free
+# AND the file is still bit-exact).
 	$(TESTENV) $(TESTISO) $(OUT)/invf-lane_release_test /tmp
-	@# WP sweep-rollback-test-conflict: the in-process, BY-ADDRESS form of
-	@# tools/test-sweep-publish-rollback.sh's assertion. That suite measures
-	@# a net over a whole sweep, which cannot say WHICH blocks went missing;
-	@# this one resolves the stranded set to pbas (allocated in the data
-	@# region, named by no live recipe), asserts it did not grow at all, and
-	@# keeps the original defect's fingerprint as blocks == 17 * segments --
-	@# the number handed BACK. Leg 1 requires the sweep to have printed the
-	@# rollback at all, so it cannot go green by never entering the state.
+# WP sweep-rollback-test-conflict: the in-process, BY-ADDRESS form of
+# tools/test-sweep-publish-rollback.sh's assertion. That suite measures
+# a net over a whole sweep, which cannot say WHICH blocks went missing;
+# this one resolves the stranded set to pbas (allocated in the data
+# region, named by no live recipe), asserts it did not grow at all, and
+# keeps the original defect's fingerprint as blocks == 17 * segments --
+# the number handed BACK. Leg 1 requires the sweep to have printed the
+# rollback at all, so it cannot go green by never entering the state.
 	$(TESTENV) $(TESTISO) $(OUT)/invf-sweep_publish_rollback_test /tmp
 	# WP: rollback on a volume that holds a symlink. UNIT_SCRATCH, not a
 	# compiled-in /srv path (WP204); the legs create their own dir under it.
 	# No permission denial is depended on, so TESTISO's fake root is
 	# harmless here.
 	$(TESTENV) $(OUT)/invf-rollback_symlink_test $(UNIT_SCRATCH)
-	@# The v3 KEY ORDERING. The base B+-tree, the delta log and the
-	@# fold used to carry three byte-identical private comparators and the
-	@# fold's delta/base merge is correct only while they agree. They are
-	@# one function now (vol_key_cmp, volume_internal.h); this asserts it
-	@# still orders exactly as before, that the merge property is real
-	@# (with a control that breaks it on purpose), and that no second
-	@# definition has crept back into src/core. No volume, no I/O, so it
-	@# cannot be flaky.
+# The v3 KEY ORDERING. The base B+-tree, the delta log and the
+# fold used to carry three byte-identical private comparators and the
+# fold's delta/base merge is correct only while they agree. They are
+# one function now (vol_key_cmp, volume_internal.h); this asserts it
+# still orders exactly as before, that the merge property is real
+# (with a control that breaks it on purpose), and that no second
+# definition has crept back into src/core. No volume, no I/O, so it
+# cannot be flaky.
 	$(TESTENV) $(TESTISO) $(OUT)/invf-keycmp_test
-	@# WP pba-ref-v3-incremental: the pba reference map is the sole gate on
-	@# every v3 block free, and v3 had no birth/death hook for it. The red
-	@# leg (`wrongfree`) is the sequence that freed a live sharer's segment;
-	@# `red`/`rednosweep` are the audit's (i)(ii)(iii) with and without the
-	@# map-rebuild leg; `hookctl` publishes a second sharer through the
-	@# recipe-publish path and unlinks the first.
+# WP pba-ref-v3-incremental: the pba reference map is the sole gate on
+# every v3 block free, and v3 had no birth/death hook for it. The red
+# leg (`wrongfree`) is the sequence that freed a live sharer's segment;
+# `red`/`rednosweep` are the audit's (i)(ii)(iii) with and without the
+# map-rebuild leg; `hookctl` publishes a second sharer through the
+# recipe-publish path and unlinks the first.
 	$(TESTENV) $(TESTISO) $(OUT)/invf-pbaref_v3_test /tmp wrongfree
 	$(TESTENV) $(TESTISO) $(OUT)/invf-pbaref_v3_test /tmp hookctl
 	$(TESTENV) $(TESTISO) $(OUT)/invf-pbaref_v3_test /tmp red
 	$(TESTENV) $(TESTISO) $(OUT)/invf-pbaref_v3_test /tmp rednosweep
 	$(TESTENV) $(TESTISO) $(OUT)/invf-pbaref_v3_test /tmp all
 	$(TESTENV) $(TESTISO) $(OUT)/invf-pbaref_v3_test /tmp allnosweep
-	@# WP wp/pbaref-skipped-row-is-not-exact: pba_ref_ensure SKIPPED an inode
-	@# row it could not read, discarded the walk's status, and set
-	@# pba_ref_stale = 0 -- the "this map is exact" flag -- on a map built
-	@# from a partial view of the namespace. One unreadable row is a live
-	@# reference the map does not hold, and a count that is missing one frees
-	@# a block a live recipe still names. `skiprow` fails ONE inode-row read
-	@# during the build (src/core/vol_btree.c, via the cross-TU
-	@# invfs_vol_btree_fault_reload door) and shows the shared block freed
-	@# under the surviving file; `skiprowctl` is the identical sequence with
-	@# the fault off, so the damage is measured against the fault and not
-	@# against the scenario. The countdown is SEARCHED, not fixed: how many
-	@# row reads a build performs is the volume's business, and a hard-coded
-	@# n goes stale silently and leaves the leg green on the healthy path.
+# WP wp/pbaref-skipped-row-is-not-exact: pba_ref_ensure SKIPPED an inode
+# row it could not read, discarded the walk's status, and set
+# pba_ref_stale = 0 -- the "this map is exact" flag -- on a map built
+# from a partial view of the namespace. One unreadable row is a live
+# reference the map does not hold, and a count that is missing one frees
+# a block a live recipe still names. `skiprow` fails ONE inode-row read
+# during the build (src/core/vol_btree.c, via the cross-TU
+# invfs_vol_btree_fault_reload door) and shows the shared block freed
+# under the surviving file; `skiprowctl` is the identical sequence with
+# the fault off, so the damage is measured against the fault and not
+# against the scenario. The countdown is SEARCHED, not fixed: how many
+# row reads a build performs is the volume's business, and a hard-coded
+# n goes stale silently and leaves the leg green on the healthy path.
 	$(TESTENV) $(TESTISO) $(OUT)/invf-pbaref_v3_test /tmp skiprow
 	$(TESTENV) $(TESTISO) $(OUT)/invf-pbaref_v3_test /tmp skiprowctl
-	@# WP wp/unlink-takes-map-after-dirent-drop: vol_v3_unlink took the
-	@# pba-ref map AFTER it had already dropped the dirent, and the map's
-	@# build reaches an inode THROUGH ITS DIRENT (v3_walk_dir ->
-	@# vol_v3_path_list_dir + vol_v3_path_lookup), so a rebuild taken after
-	@# the delete cannot see the row whose blocks the -1 is about to
-	@# subtract: count(P) comes back 1 where a correct map says 2, the -1
-	@# reaches 0, and P is freed while the other sharer still names it.
-	@# NO FAULT IS INJECTED -- that is the point of this leg. The rebuild
-	@# is routine, because pba_ref_stale is set by any recipe publish
-	@# (vol_btree.c:3881/3884), so publishing one more file arms it and an
-	@# ordinary import is the whole trigger. `unlinkmapctl` is the
-	@# identical sequence with nothing published in between, so the map is
-	@# still exact, the ensure is a no-op, and the leg measures the
-	@# ORDER rather than the scenario.
+# WP wp/unlink-takes-map-after-dirent-drop: vol_v3_unlink took the
+# pba-ref map AFTER it had already dropped the dirent, and the map's
+# build reaches an inode THROUGH ITS DIRENT (v3_walk_dir ->
+# vol_v3_path_list_dir + vol_v3_path_lookup), so a rebuild taken after
+# the delete cannot see the row whose blocks the -1 is about to
+# subtract: count(P) comes back 1 where a correct map says 2, the -1
+# reaches 0, and P is freed while the other sharer still names it.
+# NO FAULT IS INJECTED -- that is the point of this leg. The rebuild
+# is routine, because pba_ref_stale is set by any recipe publish
+# (vol_btree.c:3881/3884), so publishing one more file arms it and an
+# ordinary import is the whole trigger. `unlinkmapctl` is the
+# identical sequence with nothing published in between, so the map is
+# still exact, the ensure is a no-op, and the leg measures the
+# ORDER rather than the scenario.
 	$(TESTENV) $(TESTISO) $(OUT)/invf-pbaref_v3_test /tmp unlinkmap
 	$(TESTENV) $(TESTISO) $(OUT)/invf-pbaref_v3_test /tmp unlinkmapctl
-	@# WP wp/unlink-takes-map-after-dirent-drop, second site: the overwrite
-	@# victim in vol_v3_rename took the map after ITS OWN dirent was dropped,
-	@# with the same wrong comment ("while the row still names
-	@# t_in.recipe_addr") and the same wrong free. C renamed onto B's name
-	@# retires B, and the rebuild cannot reach B, so the shared segment is
-	@# freed while A still names it. The control cannot be "no publish" --
-	@# a rename needs its source inode, and creating it is what stales the
-	@# map -- so it publishes the same file and then brings the map up to
-	@# date by hand: same corpus, same rename, the only variable being
-	@# whether the map is fresh or stale at retire time.
+# WP wp/unlink-takes-map-after-dirent-drop, second site: the overwrite
+# victim in vol_v3_rename took the map after ITS OWN dirent was dropped,
+# with the same wrong comment ("while the row still names
+# t_in.recipe_addr") and the same wrong free. C renamed onto B's name
+# retires B, and the rebuild cannot reach B, so the shared segment is
+# freed while A still names it. The control cannot be "no publish" --
+# a rename needs its source inode, and creating it is what stales the
+# map -- so it publishes the same file and then brings the map up to
+# date by hand: same corpus, same rename, the only variable being
+# whether the map is fresh or stale at retire time.
 	$(TESTENV) $(TESTISO) $(OUT)/invf-pbaref_v3_test /tmp rename
 	$(TESTENV) $(TESTISO) $(OUT)/invf-pbaref_v3_test /tmp renamectl
-	@# WP wp/dirs-free-before-publish: vol_v3_create_node freed the existing
-	@# inode's blocks BEFORE it republished the row, so each of the four
-	@# failure returns between the free and the publish left a LIVE row naming
-	@# freed, re-allocatable blocks -- reachable from an ordinary O_TRUNC on
-	@# a volume that cannot append a delta record.
-	@#
-	@# The legs are SEPARATE PROCESSES and `setup` writes the volume each time,
-	@# so the arming (setenv at process start, before vol_open) is read on the
-	@# FIRST vol_v3_inode_delta_put call in the process -- which is the
-	@# truncate's, because nothing else publishes a row in that process. That
-	@# is what lets the injector stay `static inline` with no reload helper.
-	@# `red` must follow its `setup` and precede any leg that mkfs's afresh;
-	@# `hookctl` mkfs's its own volume, so it goes last. `ok` asserts the
-	@# pre-existing safe path still SUCCEEDS and still reclaims, which is the
-	@# leg a fix that refuses every truncate would fail.
-	@#
-	@# The scratch dir is $(FRB_T), NOT /tmp, and that is load-bearing:
+# WP wp/dirs-free-before-publish: vol_v3_create_node freed the existing
+# inode's blocks BEFORE it republished the row, so each of the four
+# failure returns between the free and the publish left a LIVE row naming
+# freed, re-allocatable blocks -- reachable from an ordinary O_TRUNC on
+# a volume that cannot append a delta record.
+#
+# The legs are SEPARATE PROCESSES and `setup` writes the volume each time,
+# so the arming (setenv at process start, before vol_open) is read on the
+# FIRST vol_v3_inode_delta_put call in the process -- which is the
+# truncate's, because nothing else publishes a row in that process. That
+# is what lets the injector stay `static inline` with no reload helper.
+# `red` must follow its `setup` and precede any leg that mkfs's afresh;
+# `hookctl` mkfs's its own volume, so it goes last. `ok` asserts the
+# pre-existing safe path still SUCCEEDS and still reclaims, which is the
+# leg a fix that refuses every truncate would fail.
+#
+# The scratch dir is $(FRB_T), NOT /tmp, and that is load-bearing:
 	# $(TESTISO) mounts a FRESH private tmpfs on /tmp for every single
 	# command, so a phase's state cannot survive into the next one. build/ is
 	# gitignored, inside the repo (which the wrapper keeps visible), and
@@ -1253,114 +1269,118 @@ test: helpers $(TEST_BINS) $(OUT)/invf-arctest $(OUT)/invf-blkio_test $(OUT)/inv
 	$(TESTENV) $(TESTISO) $(OUT)/invf-dirs_free_before_publish_test $(FRB_T) ok
 	$(TESTENV) $(TESTISO) $(OUT)/invf-dirs_free_before_publish_test $(FRB_T) hookctl
 	$(TESTENV) $(TESTISO) $(OUT)/invf-sibling_retire_v3_test
-	@# The container MEMBER BOUND is one number in the engine and eight
-	@# mirrored copies in the container packs. Nothing noticed when they
-	@# drifted -- a pack left at the old cap just declines every container
-	@# over it, for that one container type, silently. Cross-checked here
-	@# because a C unit test cannot see the eight sources the packs are
-	@# compiled from.
+# The container MEMBER BOUND is one number in the engine and eight
+# mirrored copies in the container packs. Nothing noticed when they
+# drifted -- a pack left at the old cap just declines every container
+# over it, for that one container type, silently. Cross-checked here
+# because a C unit test cannot see the eight sources the packs are
+# compiled from.
 	$(TESTENV) $(TESTISO) bash tools/test-cpack-max-members.sh
-	@# WP140: the containerpack lane's COST SHAPE. p7z re-parses the whole
-	@# 7z header on every extract, so a lane that exec'd it once per member
-	@# was O(n^2) in the header size -- 13+ days at 84k members. The gate is
-	@# a COUNT of header parses (the pack's own counter, plus the lane's own
-	@# batch-vs-extract call count), never a wall clock: this box is shared
-	@# and a timing threshold would flake with no code change. Carries its
-	@# own red control -- the per-member extract arm -- and cmp's every
-	@# member back against its source, because a parse-once path that
-	@# spliced the wrong extents would pass a count assertion.
+# WP140: the containerpack lane's COST SHAPE. p7z re-parses the whole
+# 7z header on every extract, so a lane that exec'd it once per member
+# was O(n^2) in the header size -- 13+ days at 84k members. The gate is
+# a COUNT of header parses (the pack's own counter, plus the lane's own
+# batch-vs-extract call count), never a wall clock: this box is shared
+# and a timing threshold would flake with no code change. Carries its
+# own red control -- the per-member extract arm -- and cmp's every
+# member back against its source, because a parse-once path that
+# spliced the wrong extents would pass a count assertion.
 	$(TESTENV) $(TESTISO) bash tools/test-p7z-batch.sh
 
-	@# The RS parity MATH, standalone: no volume, no v2, no filesystem.
-	@# tools/test-seal.sh cannot do this -- the seal is v2-only and v2 is
-	@# retired in 0.5.0, so that test SKIPs on every volume that can exist.
-	@# Asserts determinism, bit-exact recovery from m erasures, refusal at
-	@# m+1, and states the erasure-vs-error-correction boundary.
+# The RS parity MATH, standalone: no volume, no v2, no filesystem.
+# tools/test-seal.sh cannot do this -- the seal is v2-only and v2 is
+# retired in 0.5.0, so that test SKIPs on every volume that can exist.
+# Asserts determinism, bit-exact recovery from m erasures, refusal at
+# m+1, and states the erasure-vs-error-correction boundary.
 	$(TESTENV) $(OUT)/invf-rs_stability_test
-	@# WP129: the GZR gzip header parse, under ASan+UBSan, against the real
-	@# engine function and the generated seed corpus. This gate is what keeps
-	@# the 18-byte over-read out; the libFuzzer soak (make gzhdrfuzz-soak) is
-	@# the depth behind it, but it needs clang and so cannot be a build-
-	@# anywhere requirement.
+# WP129: the GZR gzip header parse, under ASan+UBSan, against the real
+# engine function and the generated seed corpus. This gate is what keeps
+# the 18-byte over-read out; the libFuzzer soak (make gzhdrfuzz-soak) is
+# the depth behind it, but it needs clang and so cannot be a build-
+# anywhere requirement.
 	$(TESTENV) $(TESTISO) bash tools/run-gzhdr-gate.sh
-	@# The same parser again, through the PUBLIC engine entry point, with
-	@# the malformed cases AND the well-formed ones. Built with sanitizers
-	@# because on main the malformed cases are only a memory error, not a
-	@# wrong return value -- an uninstrumented build would pass them. The
-	@# accept leg is the one that matters commercially: a bounds check
-	@# that started refusing valid gzip would cost compression silently.
+# The same parser again, through the PUBLIC engine entry point, with
+# the malformed cases AND the well-formed ones. Built with sanitizers
+# because on main the malformed cases are only a memory error, not a
+# wrong return value -- an uninstrumented build would pass them. The
+# accept leg is the one that matters commercially: a bounds check
+# that started refusing valid gzip would cost compression silently.
 	ASAN_OPTIONS=$(GZHDR_TEST_ASAN) $(TESTENV) $(TESTISO) $(OUT)/invf-gz_header_test
-	@# WP121: the orphan collector is DEFAULT OFF, so the unit run proves the
-	@# gate (subprocess with a clean env) and the on-disk geometry of a
-	@# volume that was built, reclaimed and then damaged -- the damage leg
-	@# is what a wrong liveness predicate cannot survive.
+# WP121: the orphan collector is DEFAULT OFF, so the unit run proves the
+# gate (subprocess with a clean env) and the on-disk geometry of a
+# volume that was built, reclaimed and then damaged -- the damage leg
+# is what a wrong liveness predicate cannot survive.
 	$(TESTENV) $(TESTISO) bash tools/test-v3-orphan-reclaim.sh
-	@# WP138: invf-import must never DROP a path without naming it. This is
-	@# the silent-absence shape -- run as an ordinary user, /etc/shadow and
-	@# every other root-only path were skipped, the tool exited 0, and
-	@# invf-fsck reported OK on the volume because nothing in it references
-	@# what is missing. The suite builds the fixture as the ordinary user
-	@# and mode-denies it to itself, so it needs no root and no privileges:
-	@# the kernel returns the same EACCES, at the same line, for the same
-	@# reason. It asserts BOTH that each unreadable path is absent AND that
-	@# it is named, because either half alone passes on the old code.
-	@#
-	@# NOT $(TESTISO), for the invf-helper_exec_test reason: unshare -r maps
-	@# the caller to uid 0 in a namespace whose uid map holds exactly one
-	@# uid, so the suite would see a fake root, its fixture's mode-000 files
-	@# would be readable, and every leg would pass VACUOUSLY. A suite that
-	@# needs to BE the ordinary user whose /etc/shadow is unreadable cannot
-	@# be run as an isolation wrapper's fake root. It needs no isolation
-	@# either -- a private mktemp -d under /dev/shm and a trap, no fixed
-	@# path, nothing in /tmp. If it does land on a real uid 0 it re-execs
-	@# itself as nobody via setpriv, and declines loudly if it cannot.
+# WP138: invf-import must never DROP a path without naming it. This is
+# the silent-absence shape -- run as an ordinary user, /etc/shadow and
+# every other root-only path were skipped, the tool exited 0, and
+# invf-fsck reported OK on the volume because nothing in it references
+# what is missing. The suite builds the fixture as the ordinary user
+# and mode-denies it to itself, so it needs no root and no privileges:
+# the kernel returns the same EACCES, at the same line, for the same
+# reason. It asserts BOTH that each unreadable path is absent AND that
+# it is named, because either half alone passes on the old code.
+#
+# NOT $(TESTISO), for the invf-helper_exec_test reason: unshare -r maps
+# the caller to uid 0 in a namespace whose uid map holds exactly one
+# uid, so the suite would see a fake root, its fixture's mode-000 files
+# would be readable, and every leg would pass VACUOUSLY. A suite that
+# needs to BE the ordinary user whose /etc/shadow is unreadable cannot
+# be run as an isolation wrapper's fake root. It needs no isolation
+# either -- a private mktemp -d under /dev/shm and a trap, no fixed
+# path, nothing in /tmp. If it does land on a real uid 0 it re-execs
+# itself as nobody via setpriv, and declines loudly if it cannot.
 	$(TESTENV) bash tools/test-import-skip-report.sh
-	@# The v3 batch REGISTRY is a block owner in its own right, not just the
-	@# recipes that point into a batch. When the savepoint reclaim freed a
-	@# block the registry still owned, the block went straight back to the
-	@# shared free pool and this same sweep's stage-6 tz_v3_gc freed it again
-	@# through the row it never dropped -- by then as a live base B+-tree page,
-	@# which cost a file its recipe (fuzz seed 0x5e9, image 1, 81 ops). The
-	@# window is intra-sweep, so the suite drives the sweep's own prepare and
-	@# reads the bitmap; leg 3 is what keeps a veto from passing as a fix.
+# The v3 batch REGISTRY is a block owner in its own right, not just the
+# recipes that point into a batch. When the savepoint reclaim freed a
+# block the registry still owned, the block went straight back to the
+# shared free pool and this same sweep's stage-6 tz_v3_gc freed it again
+# through the row it never dropped -- by then as a live base B+-tree page,
+# which cost a file its recipe (fuzz seed 0x5e9, image 1, 81 ops). The
+# window is intra-sweep, so the suite drives the sweep's own prepare and
+# reads the bitmap; leg 3 is what keeps a veto from passing as a fix.
 	$(TESTENV) $(TESTISO) bash tools/test-v3-batch-owner.sh
-	@# WP123: the RT30 reader must refuse a root slot whose block the
-	@# allocation bitmap reports as free. The suite carries its own red
-	@# control so a no-op fix cannot pass it.
+# WP123: the RT30 reader must refuse a root slot whose block the
+# allocation bitmap reports as free. The suite carries its own red
+# control so a no-op fix cannot pass it.
 	$(TESTENV) $(TESTISO) bash tools/test-v3-rt30-slot-alloc.sh
-	@# Two RT30 slots at the same gen are TWO different things: both slots
-	@# naming ONE root is what an ordinary rollback produces (clean, and it
-	@# used to be reported DAMAGED with exit 3), while two DISTINCT pages
-	@# at one gen is a real ambiguous publish and must still be caught. The
-	@# negative leg is the one that stops a fix which silences the tiebreak
-	@# outright; the red control proves the false positive was real.
+# Two RT30 slots at the same gen are TWO different things: both slots
+# naming ONE root is what an ordinary rollback produces (clean, and it
+# used to be reported DAMAGED with exit 3), while two DISTINCT pages
+# at one gen is a real ambiguous publish and must still be caught. The
+# negative leg is the one that stops a fix which silences the tiebreak
+# outright; the red control proves the false positive was real.
 	$(TESTENV) $(TESTISO) bash tools/test-v3-rt30-same-root.sh
-	@# The ANC0 tail anchor: a second LOCATION for the block-0 descriptors.
-	@# The suite carries its own red control (a volume with no anchor must
-	@# never have its tail block written), so a no-op cannot pass it.
+# The ANC0 tail anchor: a second LOCATION for the block-0 descriptors.
+# The suite carries its own red control (a volume with no anchor must
+# never have its tail block written), so a no-op cannot pass it.
 	$(TESTENV) $(TESTISO) bash tools/test-v3-meta-anchor.sh
-	@# A v3 sweep transform that cannot publish its new recipe must ROLL BACK
-	@# the segments it wrote, not leave them allocated and unreferenced. The
-	@# suite drives the volume to the exact state (a file whose per-segment
-	@# remap runs but whose recipe publish has nowhere to go) and asserts
-	@# the free-block count does not drop across the sweep; pre-fix it drops
-	@# by 17 per orphaned segment and nothing ever gives them back.
+# A v3 sweep transform that cannot publish its new recipe must ROLL BACK
+# the segments it wrote, not leave them allocated and unreferenced. The
+# suite drives the volume to the exact state (a file whose per-segment
+# remap runs but whose recipe publish has nowhere to go) and asserts
+# the free-block count does not drop across the sweep; pre-fix it drops
+# by 17 per orphaned segment and nothing ever gives them back.
 	$(TESTENV) $(TESTISO) bash tools/test-sweep-publish-rollback.sh
 	$(TESTENV) $(TESTISO) $(OUT)/invf-deflate_repro_test
 	$(TESTENV) $(TESTISO) $(OUT)/invf-plugin_host_test
 	$(TESTENV) $(TESTISO) $(OUT)/invf-plugin_mt_test
+# Built-but-never-run until now: invf-plugin-host only ran via this
+# smoke script, which no gate invoked. check-test-shards caught it.
+	$(TESTENV) $(TESTISO) bash tools/plugin-daemon-smoke.sh
 	$(TESTENV) $(TESTISO) $(OUT)/invf-ivpack_packs_test
 	$(TESTENV) $(TESTISO) bash tools/test-sweep-ui.sh
 	$(TESTENV) $(TESTISO) bash tools/lint-test-heredocs.sh
 	$(TESTENV) bash tools/check-repo-hygiene.sh
-	@# WP112: the vendored codecpacks (tools/codecpacks/) and the registry
-	@# repo's codecpacks/<name>/<version>/ are two copies of the same packs
-	@# with nothing cross-checking them; a manifest bug in the registry
-	@# (qcow2 `map {in}`, no `decomp_gen`) shipped unnoticed for exactly
-	@# that reason. This line is what makes the next one loud. A host with
-	@# no registry checkout gets a loud SKIP on stderr, not a silent pass;
-	@# `make check-codecpacks` is the strict form.
+# WP112: the vendored codecpacks (tools/codecpacks/) and the registry
+# repo's codecpacks/<name>/<version>/ are two copies of the same packs
+# with nothing cross-checking them; a manifest bug in the registry
+# (qcow2 `map {in}`, no `decomp_gen`) shipped unnoticed for exactly
+# that reason. This line is what makes the next one loud. A host with
+# no registry checkout gets a loud SKIP on stderr, not a silent pass;
+# `make check-codecpacks` is the strict form.
 	$(TESTENV) bash tools/check-codecpack-sync.sh
+
 
 # repo hygiene is also a standalone gate, for when you do not want a rebuild
 check-hygiene:
@@ -1388,10 +1408,10 @@ e2e: all
 	$(TESTENV) bash tools/run-e2e.sh tools/test-sandbox.sh
 	$(TESTENV) bash tools/run-e2e.sh tools/test-helper-isolation.sh
 	$(TESTENV) bash tools/run-e2e.sh tools/test-rawdisk.sh
-	@# WP114: the packaging gate. INVFS_PKG_DEB=0 keeps it off the full
-	@# compile inside dpkg-buildpackage (that is `make test`'s job, not this
-	@# one's); INVFS_PKG_DEB=1 builds the real .deb and inspects it, and is
-	@# what a release should be cut with.
+# WP114: the packaging gate. INVFS_PKG_DEB=0 keeps it off the full
+# compile inside dpkg-buildpackage (that is `make test`'s job, not this
+# one's); INVFS_PKG_DEB=1 builds the real .deb and inspects it, and is
+# what a release should be cut with.
 	$(TESTENV) INVFS_PKG_DEB=0 bash tools/run-e2e.sh tools/test-packaging.sh
 	$(TESTENV) bash tools/run-e2e.sh tools/test-ext4fs.sh
 	$(TESTENV) bash tools/run-e2e.sh tools/test-fatfs.sh
@@ -1408,46 +1428,46 @@ e2e: all
 	$(TESTENV) bash tools/run-e2e.sh tools/test-qcow2.sh
 	$(TESTENV) bash tools/run-e2e.sh tools/test-qcow2-zlib.sh
 	$(TESTENV) bash tools/run-e2e.sh tools/test-ivpacks.sh
-	@# tools/test-sweepboot.sh was written in the WP23 era and never put in
-	@# a target or a workflow, so it counted as coverage and ran nowhere.
-	@# It is the only gate on `invf-sweep --extract-packs` and on the
-	@# self-hosting loop it exists for (the volume carrying the codecpacks
-	@# that decompose it), and it needs nothing this tier lacks: no FUSE,
-	@# no sudo, no loop device, no network -- it is an offline image suite,
-	@# so it belongs in the plain `e2e` list rather than beside `flakey`.
-	@# Verified green on its first run under run-e2e.sh (2026-09-30); the
-	@# "remains RED on main" note in INCIDENTS.md predates the WP101
-	@# `--seal` migration and is stale.
+# tools/test-sweepboot.sh was written in the WP23 era and never put in
+# a target or a workflow, so it counted as coverage and ran nowhere.
+# It is the only gate on `invf-sweep --extract-packs` and on the
+# self-hosting loop it exists for (the volume carrying the codecpacks
+# that decompose it), and it needs nothing this tier lacks: no FUSE,
+# no sudo, no loop device, no network -- it is an offline image suite,
+# so it belongs in the plain `e2e` list rather than beside `flakey`.
+# Verified green on its first run under run-e2e.sh (2026-09-30); the
+# "remains RED on main" note in INCIDENTS.md predates the WP101
+# `--seal` migration and is stale.
 	$(TESTENV) bash tools/run-e2e.sh tools/test-sweepboot.sh
-	@# tools/test-gate-c.sh: the ENOSPC tier. Floor breach -> READONLY flip ->
-	@# invf-sweep -> space-latch auto-release makes the volume writable again,
-	@# two writers racing the reserve, and writes landing while the daemon
-	@# sweeps. No external tooling (python3 + fusermount3), so it belongs in
-	@# the plain list. It was in no target and no workflow; read end to end
-	@# and run under run-e2e.sh before wiring (green on the first run,
-	@# 2026-09-30 -- but two of its legs only became assertions in the same
-	@# commit; see that commit's message).
+# tools/test-gate-c.sh: the ENOSPC tier. Floor breach -> READONLY flip ->
+# invf-sweep -> space-latch auto-release makes the volume writable again,
+# two writers racing the reserve, and writes landing while the daemon
+# sweeps. No external tooling (python3 + fusermount3), so it belongs in
+# the plain list. It was in no target and no workflow; read end to end
+# and run under run-e2e.sh before wiring (green on the first run,
+# 2026-09-30 -- but two of its legs only became assertions in the same
+# commit; see that commit's message).
 	$(TESTENV) bash tools/run-e2e.sh tools/test-gate-c.sh
-	@# tools/test-gate-d2.sh: the concurrency tier. Two writers on one file,
-	@# ten writers on ten files, and a daemon sweep pass running against a
-	@# live appender. Also in no target and no workflow before this; it is a
-	@# LOCKED suite (generic /tmp/opencode mountpoint), which run-e2e.sh
-	@# serialises on the global lock. Read end to end and run under
-	@# run-e2e.sh before wiring -- green, but only after its D2c leg was
-	@# given the assertion it claimed to have (see that commit).
+# tools/test-gate-d2.sh: the concurrency tier. Two writers on one file,
+# ten writers on ten files, and a daemon sweep pass running against a
+# live appender. Also in no target and no workflow before this; it is a
+# LOCKED suite (generic /tmp/opencode mountpoint), which run-e2e.sh
+# serialises on the global lock. Read end to end and run under
+# run-e2e.sh before wiring -- green, but only after its D2c leg was
+# given the assertion it claimed to have (see that commit).
 	$(TESTENV) bash tools/run-e2e.sh tools/test-gate-d2.sh
-	@# tools/test-fuse-sweep-thread.sh: the daemon must HAVE its background
-	@# sweep thread. It was created before fuse_daemonize, so fork kept it in
-	@# the parent and the daemon had no consumer for g_sweep_now at all --
-	@# `kill -USR1`, the user.invfs.sweep xattr, the raw_watermark ladder and
-	@# the on-demand pending drain were all silent no-ops, and no in-FUSE pass
-	@# could arm a rollback window (AGENTS.md 2.5/2.6 promised all of it).
-	@# LOCKED (its `id -u` preflight refuses root, which is a real requirement
-	@# -- the daemon is its own object-level permission authority), so it
-	@# serialises on the global lock. Asserts EFFECTS (thread table, save
-	@# point, a rollback that restores) not log lines: a daemonized daemon
-	@# sends its own stderr to /dev/null, so a log assertion could not tell
-	@# "broken" from "not logged".
+# tools/test-fuse-sweep-thread.sh: the daemon must HAVE its background
+# sweep thread. It was created before fuse_daemonize, so fork kept it in
+# the parent and the daemon had no consumer for g_sweep_now at all --
+# `kill -USR1`, the user.invfs.sweep xattr, the raw_watermark ladder and
+# the on-demand pending drain were all silent no-ops, and no in-FUSE pass
+# could arm a rollback window (AGENTS.md 2.5/2.6 promised all of it).
+# LOCKED (its `id -u` preflight refuses root, which is a real requirement
+# -- the daemon is its own object-level permission authority), so it
+# serialises on the global lock. Asserts EFFECTS (thread table, save
+# point, a rollback that restores) not log lines: a daemonized daemon
+# sends its own stderr to /dev/null, so a log assertion could not tell
+# "broken" from "not logged".
 	$(TESTENV) bash tools/run-e2e.sh tools/test-fuse-sweep-thread.sh green
 	$(TESTENV) bash tools/run-e2e.sh tools/test-fuzz.sh
 	$(TESTENV) bash tools/run-e2e.sh tools/test-writepath.sh
@@ -1499,25 +1519,25 @@ release: all helpers
 	rm -rf $(RELEASE_DIR) $(DIST)/$(RELEASE_NAME).tar.zst $(DIST)/SHA256SUMS \
 	       $(DIST)/SHA256SUMS.sig
 	mkdir -p $(RELEASE_DIR)/tools $(RELEASE_DIR)/bin
-	@# Ship EXACTLY $(TOOLS), not the whole bin/. `all` also builds ~23 unit
-	@# harnesses (invf-anchor_test, invf-delta_test, invf-ivpack_packs_test,
-	@# gzhdrfuzz, ...) into bin/, and packaging/install.sh installs
-	@# `bin/invf-*` -- so a `cp -a bin` shipped every one of those test
-	@# binaries into the user-facing package on all four targets. $(TOOLS) is
-	@# this repo's own definition of what ships; use it as the single filter
-	@# rather than maintaining an exclusion list (which is how
-	@# invf-codec_test/invf-fuzz came to be special-cased before).
+# Ship EXACTLY $(TOOLS), not the whole bin/. `all` also builds ~23 unit
+# harnesses (invf-anchor_test, invf-delta_test, invf-ivpack_packs_test,
+# gzhdrfuzz, ...) into bin/, and packaging/install.sh installs
+# `bin/invf-*` -- so a `cp -a bin` shipped every one of those test
+# binaries into the user-facing package on all four targets. $(TOOLS) is
+# this repo's own definition of what ships; use it as the single filter
+# rather than maintaining an exclusion list (which is how
+# invf-codec_test/invf-fuzz came to be special-cased before).
 	@for t in $(TOOLS); do \
 	    install -m755 $(OUT)/$$t $(RELEASE_DIR)/bin/ || exit 1; \
 	done
 	cp -a packaging $(RELEASE_DIR)/packaging
-	@# The target-native RECIPES are not payload -- they are inputs to build a
-	@# package, and packaging/install.sh never reads them. Leaving them in
-	@# would also make the release a fixed-point problem: each recipe pins
-	@# the artifact's digest, and the artifact contains the recipe, so
-	@# pasting a digest in would change the digest. What install.sh actually
-	@# needs (install.sh, man/, systemd/, dracut/, mkinitcpio/, and the two
-	@# debian/invfs.initramfs-* payload files) all stays.
+# The target-native RECIPES are not payload -- they are inputs to build a
+# package, and packaging/install.sh never reads them. Leaving them in
+# would also make the release a fixed-point problem: each recipe pins
+# the artifact's digest, and the artifact contains the recipe, so
+# pasting a digest in would change the digest. What install.sh actually
+# needs (install.sh, man/, systemd/, dracut/, mkinitcpio/, and the two
+# debian/invfs.initramfs-* payload files) all stays.
 	rm -f $(RELEASE_DIR)/packaging/PKGBUILD \
 	      $(RELEASE_DIR)/packaging/invfs.spec
 	rm -rf $(RELEASE_DIR)/packaging/gentoo $(RELEASE_DIR)/packaging/void
@@ -1528,20 +1548,20 @@ release: all helpers
 	      $(RELEASE_DIR)/packaging/debian/install
 	cp -a tools/codecpacks $(RELEASE_DIR)/tools/codecpacks
 	printf '%s\n' '$(RELEASE_VERSION)' > $(RELEASE_DIR)/VERSION
-	@# owner/mtime pinned so a rebuild of the same tree is byte-identical
+# owner/mtime pinned so a rebuild of the same tree is byte-identical
 	tar --sort=name --owner=0 --group=0 --numeric-owner \
 	    --mtime='@0' -C $(DIST) -cf - $(RELEASE_NAME) \
 		| zstd -q -T0 -19 -f -o $(DIST)/$(RELEASE_NAME).tar.zst
 	( cd $(DIST) && sha256sum $(RELEASE_NAME).tar.zst > SHA256SUMS )
-	@# detach-sign SHA256SUMS (which pins the artifact) -- never the tarball
-	@# directly, so one signature covers every file published under the tag.
-	@#
-	@# WP114: this block used to print "signed" after an `sq` invocation that
-	@# had silently failed (wrong flag names, and `sq sign --signer-file`
-	@# wants a SECRET key file, not an armored public one), so a release
-	@# could be announced as signed with no .sig on disk at all. The rule now
-	@# is: SIGNING_KEY means a signature is produced AND verifies, or the
-	@# build fails. Verify-after-sign is the whole point.
+# detach-sign SHA256SUMS (which pins the artifact) -- never the tarball
+# directly, so one signature covers every file published under the tag.
+#
+# WP114: this block used to print "signed" after an `sq` invocation that
+# had silently failed (wrong flag names, and `sq sign --signer-file`
+# wants a SECRET key file, not an armored public one), so a release
+# could be announced as signed with no .sig on disk at all. The rule now
+# is: SIGNING_KEY means a signature is produced AND verifies, or the
+# build fails. Verify-after-sign is the whole point.
 	@if [ -z "$(SIGNING_KEY)" ]; then \
 	    echo "release: NOTE: UNSIGNED (no SIGNING_KEY= given); do not publish this"; \
 	elif command -v gpg >/dev/null 2>&1; then \
@@ -1569,8 +1589,8 @@ release: all helpers
 # (BLAKE2B, which is what portage wants) and packaging/void/files/ (the
 # .sha256 xbps-src checks).
 release-sums: release
-	@# portage wants BLAKE2B (32-byte digest) + size, which is b2sum -l 256
-	@# output -- NOT openssl's blake2b512, which is a different length.
+# portage wants BLAKE2B (32-byte digest) + size, which is b2sum -l 256
+# output -- NOT openssl's blake2b512, which is a different length.
 	@s=$$(cut -d' ' -f1 $(DIST)/SHA256SUMS); n=$(RELEASE_NAME); \
 	f=$(DIST)/$$n.tar.zst; \
 	echo "artifact: $$n"; \

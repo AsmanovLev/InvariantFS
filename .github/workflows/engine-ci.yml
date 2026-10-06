@@ -54,8 +54,9 @@ jobs:
       - name: repo hygiene
         run: bash tools/check-repo-hygiene.sh
 
-      - name: unit tests
-        run: make test TESTENV='INVFS_TEST_DEBUG=1'
+      # Unit tests run fanned out as unit-1..4 below (this job keeps
+      # build + hygiene + the engine e2e suites). `make test` stays the
+      # local all-in-one gate and runs the same four shards sequentially.
 
       - name: engine e2e suites
         run: |
@@ -86,6 +87,105 @@ jobs:
           done
           [ "$FAIL" = 0 ] || { echo "engine e2e: at least one suite FAILED"; exit 1; }
           echo "engine e2e: ALL SUITES PASS"
+
+  # Unit shard 1 of 4: one quarter of `make test` (see TEST_SHARD_DEPS
+  # and tools/check-test-shards.py -- the guard fails loud if a binary
+  # lands in no shard). Self-contained: checkout, deps, build, shard.
+  unit-1:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+    steps:
+      # fetch-depth 0 so TAGS are present (same VERSION reason as above).
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq build-essential pkg-config \
+            libfuse3-dev zlib1g-dev libzstd-dev python3 qemu-utils
+
+      - name: build
+        run: make -j"$(nproc)"
+
+      - name: unit tests (shard 1 of 4)
+        run: make test-shard-1 TESTENV='INVFS_TEST_DEBUG=1'
+
+
+  # Unit shard 2 of 4: one quarter of `make test` (see TEST_SHARD_DEPS
+  # and tools/check-test-shards.py -- the guard fails loud if a binary
+  # lands in no shard). Self-contained: checkout, deps, build, shard.
+  unit-2:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+    steps:
+      # fetch-depth 0 so TAGS are present (same VERSION reason as above).
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq build-essential pkg-config \
+            libfuse3-dev zlib1g-dev libzstd-dev python3 qemu-utils
+
+      - name: build
+        run: make -j"$(nproc)"
+
+      - name: unit tests (shard 2 of 4)
+        run: make test-shard-2 TESTENV='INVFS_TEST_DEBUG=1'
+
+
+  # Unit shard 3 of 4: one quarter of `make test` (see TEST_SHARD_DEPS
+  # and tools/check-test-shards.py -- the guard fails loud if a binary
+  # lands in no shard). Self-contained: checkout, deps, build, shard.
+  unit-3:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+    steps:
+      # fetch-depth 0 so TAGS are present (same VERSION reason as above).
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq build-essential pkg-config \
+            libfuse3-dev zlib1g-dev libzstd-dev python3 qemu-utils
+
+      - name: build
+        run: make -j"$(nproc)"
+
+      - name: unit tests (shard 3 of 4)
+        run: make test-shard-3 TESTENV='INVFS_TEST_DEBUG=1'
+
+
+  # Unit shard 4 of 4: one quarter of `make test` (see TEST_SHARD_DEPS
+  # and tools/check-test-shards.py -- the guard fails loud if a binary
+  # lands in no shard). Self-contained: checkout, deps, build, shard.
+  unit-4:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+    steps:
+      # fetch-depth 0 so TAGS are present (same VERSION reason as above).
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq build-essential pkg-config \
+            libfuse3-dev zlib1g-dev libzstd-dev python3 qemu-utils
+
+      - name: build
+        run: make -j"$(nproc)"
+
+      - name: unit tests (shard 4 of 4)
+        run: make test-shard-4 TESTENV='INVFS_TEST_DEBUG=1'
 
   # The four-target packaging gate. Until this job existed,
   # tools/test-packaging.sh was in neither `make e2e` nor this workflow, so
