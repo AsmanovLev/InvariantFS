@@ -56,7 +56,7 @@ RDEPEND="
 # (No x264 dep: nothing in the tree consumes it. The lossless-H.264 lane
 # was measured and shelved; if it ever ships, its atom goes here as
 # media-video/x264-encoder, not the nonexistent media-video/x264-utils.)
-RDEPEND+=" media-libs/libjpeg-turbo app-arch/libjxl-utils"
+RDEPEND+=" media-libs/libjpeg-turbo media-libs/libjxl"
 # p7zip powers the 7z containerpack.
 RDEPEND+=" app-arch/p7zip"
 

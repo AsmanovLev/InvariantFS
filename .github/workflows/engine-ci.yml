@@ -751,11 +751,21 @@ jobs:
     container: ghcr.io/void-linux/void-glibc-full:latest
     timeout-minutes: 90
     needs: [engine]
+    # The full image ships no bash, so the runner falls back to sh and
+    # every `set -euo pipefail` step dies with "Illegal option". The
+    # bootstrap step installs bash under sh; everything after runs bash.
+    defaults:
+      run:
+        shell: bash {0}
     steps:
       # fetch-depth 0 so TAGS are present (same VERSION reason as above).
       - uses: actions/checkout@v7
         with:
           fetch-depth: 0
+
+      - name: bootstrap bash (no bash in the image; runner falls back to sh)
+        shell: sh {0}
+        run: xbps-install -Sy bash
 
       - name: toolchain + void-packages tree
         run: |
