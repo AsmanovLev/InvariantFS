@@ -194,7 +194,9 @@ stage_arch() {
     d="$WORK/arch"; mkdir -p "$d/src" "$d/pkg"
     tar --zstd -xf "$ART" -C "$d/src"
     # makepkg's variables, and the only makepkg function PKGBUILD uses.
-    srcdir="$d/src/invfs-$VFILE-x86_64"
+    # srcdir is the EXTRACTION ROOT (makepkg unpacks the tarball there
+    # itself); package() cds into the top dir on its own.
+    srcdir="$d/src"
     pkgdir="$d/pkg"
     startdir="$REPO/packaging"
     ( set -e
