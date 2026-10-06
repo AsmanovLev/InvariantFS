@@ -71,8 +71,7 @@ src_compile() {
 # Explicit unpack with diagnostics: the default src_unpack once left an
 # empty WORKDIR with no error, and the cause was invisible from outside.
 src_unpack() {
-	echo "--- src_unpack: A=[${A}] DISTDIR content: ---" >&2
-	ls -la "$(portageq envvar DISTDIR)" >&2 || true
+	echo "--- src_unpack: A=[${A}] ---" >&2
 	unpack ${A} || die "unpack failed"
 	echo "--- src_unpack: WORKDIR content: ---" >&2
 	ls -la "${WORKDIR}" >&2
