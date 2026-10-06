@@ -94,6 +94,7 @@ jobs:
   # as an undiscovered state. Cheap (no network, no sudo, seconds), so it
   # runs on every push alongside `make test`.
   packaging:
+    needs: [engine]
     runs-on: ubuntu-22.04
     timeout-minutes: 20
     steps:
@@ -130,6 +131,7 @@ jobs:
   # is pinned under RUNNER_TEMP so a 1.8 GB staging tree never lands on the
   # runner's small /tmp.
   installation-bootstrap-arch:
+    needs: [engine, packaging]
     # DISABLED: the bootstrap-tarball path (test-arch-install.sh) tests the
     # same ground as the stock-ISO flow (archiso-validation) with less
     # realism for the same CI minutes. Re-enable by deleting this condition;
@@ -277,6 +279,7 @@ jobs:
           if-no-files-found: ignore
 
   installation-bootstrap-void:
+    needs: [engine, packaging]
     runs-on: ubuntu-22.04
     timeout-minutes: 45
     steps:
@@ -407,6 +410,7 @@ jobs:
           if-no-files-found: ignore
 
   installation-bootstrap-debian:
+    needs: [engine, packaging]
     runs-on: ubuntu-22.04
     timeout-minutes: 60
     steps:
@@ -528,6 +532,7 @@ jobs:
             ${{ runner.temp }}/debianboot.log
           if-no-files-found: ignore
   packaging-fedora:
+    needs: [engine]
     runs-on: ubuntu-22.04
     container: fedora:latest
     timeout-minutes: 40
@@ -568,6 +573,7 @@ jobs:
   # Manifest regenerated -- the ebuild's BLAKE2B/SIZE pins are provenance
   # notes, portage's Manifest does the real verification.
   packaging-gentoo:
+    needs: [engine]
     runs-on: ubuntu-22.04
     container: gentoo/stage3:latest
     timeout-minutes: 60
@@ -617,6 +623,7 @@ jobs:
   # off. No KVM on runners: the driver falls back to TCG (slow), hence the
   # generous timeout. See tools/iso-arch-install.sh.
   installation-iso-arch:
+    needs: [engine, packaging]
     runs-on: ubuntu-22.04
     timeout-minutes: 150
     steps:
