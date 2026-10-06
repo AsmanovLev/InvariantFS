@@ -385,6 +385,11 @@ uint64_t vol_inode_alloc(invfs_volume *v);
 /* Path-level namespace entry points. `name` is a mount-relative path
  * ("dir/file"; a trailing '/' is accepted and ignored). */
 int vol_path_lookup(invfs_volume *v, const char *name, uint64_t *ino_out);
+/* vol_path_lookup with open() semantics: a final-component symlink is
+ * followed to its target (ELOOP cap included). Read paths that take a
+ * user path to file bytes (invf-cat --follow) use this; write paths and
+ * link inspectors keep vol_path_lookup's lstat behavior. */
+int vol_path_resolve(invfs_volume *v, const char *name, uint64_t *ino_out);
 int vol_path_is_dir(invfs_volume *v, const char *name);
 int vol_path_list_dir(invfs_volume *v, const char *dir,
                          invfs_dirent *ents, int max);

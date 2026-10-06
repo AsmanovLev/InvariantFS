@@ -638,6 +638,7 @@ printf '#!/bin/sh\necho hi\n' > "$SRCD/run.sh"
 head -c 30000 /dev/urandom | base64 > "$SRCD/b64.txt"
 ln -s usr/lib "$SRCD/lib64"
 ln -s /absolute/target "$SRCD/abslink"
+ln -s text.txt "$SRCD/alias.txt"
 head -c 8192 /dev/urandom > "$WORK/src-late/after-sweep.bin"
 
 say() { echo "  $1"; }
@@ -645,7 +646,7 @@ for tag in s t; do
     if [ "$tag" = s ]; then img=$IMGS; else img=$IMGT; fi
     src=$WORK/src-$tag
     rm -rf "$src"; mkdir -p "$src"; cp -a "$SRCD/." "$src/"
-    [ "$tag" = t ] && rm -f "$src/lib64" "$src/abslink"
+    [ "$tag" = t ] && rm -f "$src/lib64" "$src/abslink" "$src/alias.txt"
     $B/invf-mkfs "$img" 0.2 >/dev/null || fail "S/$tag: mkfs failed"
     $B/invf-import "$img" "$src" >/dev/null 2>&1 \
         || fail "S/$tag: import failed"
@@ -675,6 +676,7 @@ for tag in s t; do
     # and length only (src/cli/verify.c:357-364), because
     # invfs_ast_block_entry carries a pba and no content hash.
     for f in $(cd "$src" && ls -1); do
+        [ "$f" = alias.txt ] && continue  # link-to-file, asserted below
         [ -f "$src/$f" ] || continue          # the symlinks, handled below
         $B/invf-cat "$img" "$f" > "$WORK/out/$tag.$f" 2>/dev/null \
             || fail "[S/$tag] $f does not read back at all"
@@ -684,13 +686,22 @@ for tag in s t; do
     say "[S/$tag] the corpus is bit-exact (invf-cat | cmp)"
     # and the symlink targets, where present, read back as their exact bytes
     if [ "$tag" = s ]; then
-        for l in lib64 abslink; do
+        for l in lib64 abslink alias.txt; do
             want=$(readlink "$SRCD/$l")
             got=$($B/invf-cat "$img" "$l" 2>/dev/null)
             [ "$got" = "$want" ] \
                 || fail "[S] $l reads back as '$got', want '$want'"
         done
         say "[S] symlink targets survive the rollback byte-exact"
+        # --follow resolves a FINAL-component link to the file (open()
+        # semantics): alias.txt -> text.txt must come back as text.txt's
+        # bytes, like the FUSE read does. The Debian boot gate leans on
+        # this for merged-usr /etc/os-release -> ../usr/lib/os-release.
+        $B/invf-cat --follow "$img" alias.txt > "$WORK/out/$tag.alias" 2>/dev/null \
+            || fail "[S] --follow alias.txt does not resolve at all"
+        cmp -s "$WORK/out/$tag.alias" "$src/text.txt" \
+            || fail "[S] --follow alias.txt is NOT text.txt's bytes"
+        say "[S] --follow resolves a final-component link to the file"
     fi
     $B/invf-fsck "$img" 2>/dev/null | grep -q "^OK$" \
         || fail "[S/$tag] fsck not clean after the rollback"

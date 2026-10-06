@@ -4,7 +4,10 @@
  *   invf-cat <image> <name> [output-file]
  *
  * If output file is given, writes it. With --verify it compares
- * against a host file and reports bit-perfect status.
+ * against a host file and reports bit-perfect status. With --follow a
+ * symlink in the final path position is followed to its target (open()
+ * semantics); without it the link's own target string is returned
+ * (lstat semantics, historical default).
  */
 #define _CRT_SECURE_NO_WARNINGS
 
@@ -30,6 +33,7 @@ int main(int argc, char **argv)
     int err;
     const char *out = NULL;
     int ignore_missing_codecs = 0;
+    int follow = 0;
 
 #ifdef _WIN32
     /* stdout must not convert LF -> CRLF on binary file dumps */
@@ -39,8 +43,12 @@ int main(int argc, char **argv)
 
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) {
-            fprintf(stderr, "usage: invf-cat [--ignore-missing-codecs] <image> <name> [output-file]\n");
+            fprintf(stderr, "usage: invf-cat [--ignore-missing-codecs] [--follow] <image> <name> [output-file]\n");
             return 2;
+        }
+        if (strcmp(argv[i], "--follow") == 0) {
+            follow = 1;
+            continue;
         }
         if (strcmp(argv[i], "-v") == 0 || strcmp(argv[i], "--version") == 0) {
             fprintf(stderr, "%s version %s (build %s)\n  Author: %s\n  License: %s\n",
@@ -53,14 +61,15 @@ int main(int argc, char **argv)
         }
     }
 
-    if (argc < 3 || argc > 5) {
-        fprintf(stderr, "usage: invf-cat [--ignore-missing-codecs] <image> <name> [output-file]\n");
+    if (argc < 3 || argc > 6) {
+        fprintf(stderr, "usage: invf-cat [--ignore-missing-codecs] [--follow] <image> <name> [output-file]\n");
         return 2;
     }
-    /* skip past --ignore-missing-codecs to find positional args */
+    /* skip past flags to find positional args */
     {
         int ai = 1;
-        while (ai < argc && strcmp(argv[ai], "--ignore-missing-codecs") == 0) ai++;
+        while (ai < argc && (strcmp(argv[ai], "--ignore-missing-codecs") == 0 ||
+                             strcmp(argv[ai], "--follow") == 0)) ai++;
         img = argv[ai++];
         name = argv[ai++];
         if (ai < argc) out = argv[ai];
@@ -92,6 +101,19 @@ int main(int argc, char **argv)
             }
         } else if (vol_read_named(vol, name, &data, &len) != 0) {
             fprintf(stderr, "'%s' not found / extract failed\n", name);
+            vol_close(vol);
+            return 1;
+        }
+    } else if (follow) {
+        uint64_t rino = 0;
+        if (vol_path_resolve(vol, name, &rino) != 1 || rino == 0) {
+            fprintf(stderr, "'%s' not found\n", name);
+            vol_close(vol);
+            return 1;
+        }
+        inode_id = rino;
+        if (vol_read_file(vol, inode_id, &data, &len) != 0) {
+            fprintf(stderr, "read failed\n");
             vol_close(vol);
             return 1;
         }

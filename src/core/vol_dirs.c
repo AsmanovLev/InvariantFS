@@ -132,8 +132,9 @@ int vol_path_lookup(invfs_volume *v, const char *name, uint64_t *ino_out)
              * followed, like the kernel does -- without this, every path
              * through a merged-usr /lib -> usr/lib (or any link) fails
              * offline while the same bytes read fine through FUSE (the
-             * kernel walks links for us there). The final component keeps
-             * historical behavior (returns the link itself). */
+             * kernel walks links for us there). A FINAL-component link
+             * keeps lstat behavior here (returns the link itself); callers
+             * that want open() semantics use vol_path_resolve below. */
             invfs_inode in;
             if (vol_inode_get(v, child, &in) != 1)
                 return -1;
@@ -181,6 +182,133 @@ int vol_path_lookup(invfs_volume *v, const char *name, uint64_t *ino_out)
     *ino_out = cur;
     return 1;
     rewalk: ;
+    }
+}
+
+/* Lexically collapse "/./" and "a/../" segments. The .. pop assumes the
+ * popped component is a real directory (never a symlink): true for the
+ * paths this chase builds, where .. arrives inside a symlink target
+ * (merged-usr ../usr/lib/...) spliced under already-walked system dirs.
+ * A .. past the root stays at the root, like the kernel. */
+static void lookup_norm_dots(char *work)
+{
+    char *comp[2048];
+    size_t idx[2048];
+    size_t n = 0, k = 0, i;
+    char *p = work;
+    int abs_ = (*p == '/');
+    char *d;
+
+    if (abs_)
+        p++;
+    while (*p) {
+        while (*p == '/')
+            p++;
+        if (*p == 0)
+            break;
+        if (n >= 2048)
+            return;                       /* absurd; lookup bounds it */
+        comp[n++] = p;
+        while (*p && *p != '/')
+            p++;
+        if (*p)
+            *p++ = 0;
+    }
+    for (i = 0; i < n; i++) {
+        if (comp[i][0] == '.' && comp[i][1] == 0)
+            continue;
+        if (comp[i][0] == '.' && comp[i][1] == '.' && comp[i][2] == 0) {
+            if (k)
+                k--;
+            continue;
+        }
+        idx[k++] = i;
+    }
+    d = work;
+    if (abs_)
+        *d++ = '/';
+    for (i = 0; i < k; i++) {
+        size_t l;
+        if (i)
+            *d++ = '/';
+        l = strlen(comp[idx[i]]);
+        memmove(d, comp[idx[i]], l);      /* d <= source: only shrinks */
+        d += l;
+    }
+    *d = 0;
+}
+
+/* vol_path_lookup with open() semantics: a symlink in the final position
+ * is followed to its target, like the kernel does for open()/cat. Without
+ * this, invf-cat on a merged-usr /etc/os-release -> ../usr/lib/os-release
+ * returns the 21 target-string bytes instead of the file, while the same
+ * path reads fine through FUSE. Relative targets resolve against the
+ * link's parent directory; absolute targets from the root. Targets
+ * carrying .. (merged-usr ../usr/lib/...) are collapsed lexically after
+ * the splice. The chase is
+ * capped at VOL_LOOKUP_MAX_HOPS, so a self-referential link reads ELOOP
+ * (-1), not a hang. Write paths (create/replace/unlink) must NOT use
+ * this: they act on the link itself. */
+int vol_path_resolve(invfs_volume *v, const char *name, uint64_t *ino_out)
+{
+    char work[VOL_LOOKUP_PATH_MAX + 1];
+    unsigned hops = 0;
+    int rc;
+
+    if (!v || !ino_out || !name)
+        return -1;
+    if (strlen(name) > VOL_LOOKUP_PATH_MAX)
+        return -1;
+    strcpy(work, name);
+    lookup_norm_dots(work);
+    for (;;) {
+        uint64_t ino = 0;
+        invfs_inode in;
+        uint8_t *blob = NULL;
+        size_t blen = 0;
+        char target[INVFS_META_TARGET_MAX];
+        char *slash;
+        size_t tlen;
+
+        rc = vol_path_lookup(v, work, &ino);
+        if (rc != 1)
+            return rc;                    /* 0 absent, -1 error */
+        if (vol_inode_get(v, ino, &in) != 1)
+            return -1;
+        if (in.type != INVFS_ITYP_LNK) {
+            *ino_out = ino;
+            return 1;
+        }
+        if (++hops > VOL_LOOKUP_MAX_HOPS)
+            return -1;                    /* ELOOP, kernel parity */
+        if (vol_recipe_load(v, in.recipe_addr, &blob, &blen) != 0 ||
+            blen == 0 || blen >= sizeof target) {
+            free(blob);
+            return -1;
+        }
+        memcpy(target, blob, blen);
+        target[blen] = 0;
+        free(blob);
+        tlen = strlen(target);
+        if (target[0] == '/') {
+            if (tlen > VOL_LOOKUP_PATH_MAX)
+                return -1;
+            strcpy(work, target);
+        } else {
+            /* Relative targets resolve against the link's parent. */
+            slash = strrchr(work, '/');
+            if (slash) {
+                size_t dirlen = (size_t)(slash - work) + 1; /* keep '/' */
+                if (dirlen + tlen > VOL_LOOKUP_PATH_MAX)
+                    return -1;
+                memmove(work + dirlen, target, tlen + 1);
+            } else {
+                if (tlen > VOL_LOOKUP_PATH_MAX)
+                    return -1;
+                strcpy(work, target);
+            }
+        }
+        lookup_norm_dots(work);
     }
 }
 

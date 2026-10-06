@@ -351,7 +351,12 @@ catrc=0
 for f in etc/hostname etc/passwd lib/systemd/systemd usr/bin/systemctl etc/os-release; do
     [ -n "$STAGE" ] || break
     [ -f "$STAGE/$f" ] || continue
-    if ! "$B/invf-cat" "$IMG" "$f" "$WORK/out/$(basename "$f")" >"$WORK/out/$(basename "$f").err" 2>&1; then
+    # --follow: a final-component symlink (merged-usr /etc/os-release ->
+    # ../usr/lib/os-release) must resolve to the file, like the FUSE read
+    # the guest just booted through did. Without it invf-cat returns the
+    # link's target string and the cmp below fails on bytes that were
+    # never wrong on the volume.
+    if ! "$B/invf-cat" --follow "$IMG" "$f" "$WORK/out/$(basename "$f")" >"$WORK/out/$(basename "$f").err" 2>&1; then
         echo "FAIL: invf-cat $f: $(head -c 200 "$WORK/out/$(basename "$f").err")"
         catrc=1; continue
     fi
