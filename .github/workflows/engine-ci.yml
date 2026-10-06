@@ -130,6 +130,11 @@ jobs:
   # is pinned under RUNNER_TEMP so a 1.8 GB staging tree never lands on the
   # runner's small /tmp.
   validate-arch-bootable:
+    # DISABLED: the bootstrap-tarball path (test-arch-install.sh) tests the
+    # same ground as the stock-ISO flow (archiso-validation) with less
+    # realism for the same CI minutes. Re-enable by deleting this condition;
+    # delete test-arch-install.sh outright once the ISO job is green twice.
+    if: false
     runs-on: ubuntu-22.04
     timeout-minutes: 30
     steps:
@@ -633,3 +638,16 @@ jobs:
       - name: arch ISO install onto InvFS
         run: |
           WORK="$RUNNER_TEMP/iso" bash tools/iso-arch-install.sh
+
+      # The guest serial + serve log are the only evidence when the marker
+      # never comes; without them a failed run is undebuggable (the driver
+      # only prints its own lines, the guest's stay on the runner).
+      - name: upload install evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: iso-install-logs
+          path: |
+            ${{ runner.temp }}/iso/serial.log
+            ${{ runner.temp }}/iso/serve.log
+          if-no-files-found: warn
