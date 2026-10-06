@@ -68,8 +68,8 @@ src_compile() {
 	: # prebuilt
 }
 
-# Explicit unpack: the default left an empty WORKDIR with no
-# error, so unpack here is explicit tar/cp plus a listing.
+# Explicit unpack: the default left an empty WORKDIR with no error,
+# so unpack here is explicit tar/cp (loud on failure) instead.
 src_unpack() {
 	mkdir -p "${WORKDIR}" && cd "${WORKDIR}" || die "cannot cd WORKDIR"
 	local t
@@ -81,8 +81,6 @@ src_unpack() {
 				cp "${DISTDIR}/$t" . || die "cp failed: $t" ;;
 		esac
 	done
-	echo "--- src_unpack: WORKDIR content: ---" >&2
-	ls -la "${WORKDIR}" >&2
 }
 
 src_install() {
