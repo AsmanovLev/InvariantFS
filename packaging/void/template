@@ -27,7 +27,7 @@ build_style=generic
 configure_style=none
 makeopts=()
 hostmakedepends=
-depends="fuse3-devel zstd-devel zlib-devel"
+depends="fuse3-devel libzstd-devel zlib-devel"
 # Runtime needs only -- no compiler toolchain to install a prebuilt artifact.
 makedepends=
 short_desc="Semantic content-addressed filesystem with a bit-exactness invariant"
