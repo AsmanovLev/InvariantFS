@@ -611,7 +611,7 @@ jobs:
   # pacman -Us, pacstraps, images, verifies, and must print PASS and power
   # off. No KVM on runners: the driver falls back to TCG (slow), hence the
   # generous timeout. See tools/iso-arch-install.sh.
-  iso-install:
+  archiso-validation:
     runs-on: ubuntu-22.04
     timeout-minutes: 150
     steps:
