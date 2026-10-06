@@ -86,7 +86,7 @@ ln -s "$LINKTGT" "$W/src/invfs-selftest.link"
 WANT=$(md5sum "$W/src/invfs-selftest.txt" | cut -d' ' -f1)
 note "self-test md5 $WANT"
 
-INVFS_V3=1 bin/invf-mkfs "$VOL" 0.3 >"$W/mkfs.log" 2>&1 \
+bin/invf-mkfs "$VOL" 0.3 >"$W/mkfs.log" 2>&1 \
     || { cat "$W/mkfs.log"; fail "mkfs"; exit 1; }
 bin/invf-import "$VOL" "$W/src" >"$W/import.log" 2>&1 \
     || { tail -5 "$W/import.log"; fail "import"; exit 1; }

@@ -1,4 +1,4 @@
-/* sibling_retire_v3_test.c — a v3 overwrite must retire the superseded
+/* sibling_retire_test.c — a v3 overwrite must retire the superseded
  * content's "name!..." siblings, exactly as its v2 twin does.
  *
  * The divergence this exists for (WP meta-write-dup-audit, finding A): the
@@ -128,7 +128,7 @@ int main(int argc, char **argv)
     static const char payload[] = "NEW CONTENT, NOT A TAR AT ALL";
     int err = 0, i;
 
-    printf("sibling_retire_v3_test: v3 overwrite retires name! siblings\n");
+    printf("sibling_retire_test: v3 overwrite retires name! siblings\n");
 
     snprintf(g_img, sizeof g_img, "%s/invf-sibling-retire-test.img", dir);
     unlink(g_img);
@@ -144,7 +144,7 @@ int main(int argc, char **argv)
     }
     g_v = vol_open(g_img, &err);
     if (!g_v) {
-        fprintf(stderr, "sibling_retire_v3_test: vol_open failed: err=%d\n", err);
+        fprintf(stderr, "sibling_retire_test: vol_open failed: err=%d\n", err);
         return 2;
     }
 
@@ -202,7 +202,7 @@ int main(int argc, char **argv)
     vol_close(g_v);
     g_v = vol_open(g_img, &err);
     if (!g_v) {
-        fprintf(stderr, "sibling_retire_v3_test: reopen failed: err=%d\n", err);
+        fprintf(stderr, "sibling_retire_test: reopen failed: err=%d\n", err);
         return 2;
     }
     ok(count_siblings("a.tar") == 0,

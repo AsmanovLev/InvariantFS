@@ -115,8 +115,8 @@ uint32_t mbuf_page_size(const invfs_volume *v);
 
 /* ---- RT30 root-area descriptor ---------------------------------------- */
 
-/* Read block 0's RT30 at INVFS_RT30_OFF, validate version + CRC, and
- * persist it on the volume (v->rt30 / v->rt30_present). 0 = present and
+/* Read block 0's RT30 at INVFS_RT_OFF, validate version + CRC, and
+ * persist it on the volume (v->rt / v->rt_present). 0 = present and
  * valid, 1 = no descriptor at all (a base that was never written, the RDP0
  * convention), 2 = WP86: a descriptor that is NAMED but fails version/CRC --
  * damage, which must never be presented as an empty root -- -1 = io error. */
@@ -147,7 +147,7 @@ int mbuf_root_publish(invfs_volume *v, uint64_t root_pba, uint64_t root_gen);
  * remains is narrower than it was: a page reached WITHOUT mbuf_read_ptr, of
  * which there are four, each with its own check -- orphan_slot_ptr (this
  * file's sibling in vol_btree.c), spt0_tree_ok and spt0_restore
- * (vol_spt0.c), and fsck_v3_ptr_at (vol_fsck.c).
+ * (vol_spt0.c), and fsck_ptr_at (vol_fsck.c).
  *
  * And on current main no shipped path frees a block a live slot names -- the
  * alternating slots consume the fallback's name on the next publish before any

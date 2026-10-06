@@ -25,7 +25,7 @@
  * STAGING. WP135 refuses '!' at every user-name funnel, and correctly so --
  * no shipped tool writes one any more. The state this is about is a
  * pre-WP135 volume, and the way to put it there is the write call the lanes
- * themselves use, bypassing the refusal: vol_v3_write_bulk (the call
+ * themselves use, bypassing the refusal: vol_write_bulk (the call
  * vol_create_file wraps), which is what src/cli/sweep_bang_test.c does.
  *
  * ORACLE. No vol_find here at all, deliberately: this test never asks whether
@@ -178,12 +178,12 @@ static int stage_bang_users(const char *img)
     if (!v) return 0;
     for (i = 0; i < NBANG; i++) {
         snprintf(name, sizeof name, "doc!%03d.txt", i);
-        if (!vol_v3_write_bulk(v, name, g_buf, BUFSZ, NULL)) good = 0;
+        if (!vol_write_bulk(v, name, g_buf, BUFSZ, NULL)) good = 0;
     }
     /* the harness-live arm: ordinary names, same bytes, same sweep */
     for (i = 0; i < NPLAIN; i++) {
         snprintf(name, sizeof name, "plain%d.txt", i);
-        if (!vol_v3_write_bulk(v, name, g_buf, BUFSZ, NULL)) good = 0;
+        if (!vol_write_bulk(v, name, g_buf, BUFSZ, NULL)) good = 0;
     }
     vol_flush(v);
     vol_close(v);
@@ -249,8 +249,8 @@ static int stage_real_container(const char *img)
     tarlen = build_tar(&tar);
     if (tarlen) {
         /* one ordinary user file too, so the run is not container-only */
-        if (vol_v3_write_bulk(v, "beside.txt", g_buf, BUFSZ, NULL) &&
-            vol_v3_write_bulk(v, "box.tar", tar, tarlen, NULL))
+        if (vol_write_bulk(v, "beside.txt", g_buf, BUFSZ, NULL) &&
+            vol_write_bulk(v, "box.tar", tar, tarlen, NULL))
             good = 1;
         free(tar);
     }

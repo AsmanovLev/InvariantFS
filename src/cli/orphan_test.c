@@ -5,13 +5,13 @@
  * reached" is SILENT DATA LOSS, not a crash, so this driver is built to
  * fail on the wrong answer rather than to pass on an empty run.
  *
- * Subcommands (the image is a v3 volume made by `INVFS_V3=1 invf-mkfs`):
+ * Subcommands (the image is a v3 volume made by `invf-mkfs`):
  *
  *   build <img> <nfiles> <ngen>
  *       Write nfiles files with deterministic content through the public
  *       write path, fold them into the base (so the content is in the base
  *       tree, not just the delta), then force ngen further base
- *       generations with vol_v3_inode_put on scratch ids. Each of those
+ *       generations with vol_inode_put on scratch ids. Each of those
  *       publishes a root and abandons the previous one, which is the leak.
  *       Prints: FILES=<n> PAGES_ALLOC=<n> PAGES_LIVE=<n> PAGES_ORPHAN=<n>
  *
@@ -27,8 +27,8 @@
  *
  *   fold <img> <nfiles> <ngen>
  *       The PRODUCTION path, not a direct collector call: write content so
- *       the delta is non-empty (an empty delta makes vol_v3_fold a no-op
- *       and the hook never runs), force generations, then vol_v3_fold. That
+ *       the delta is non-empty (an empty delta makes vol_fold a no-op
+ *       and the hook never runs), force generations, then vol_fold. That
  *       reaches fold_reclaim_hook -> the RT30-slot guard ->
  *       vol_reclaim_orphans, which is exactly the chain the FUSE drain
  *       walks. The collector's "collected N pages" line goes to stderr, so
@@ -280,10 +280,10 @@ static int slot_info(invfs_volume *v, uint64_t pba[2], uint64_t gen[2],
     uint8_t page[INVFS_BLOCK_SIZE];
     int i, ni;
 
-    if (!v->rt30_present)
+    if (!v->rt_present)
         return -1;
     for (i = 0; i < 2; i++) {
-        pba[i] = v->rt30.root_slot[i];
+        pba[i] = v->rt.root_slot[i];
         gen[i] = 0;
         valid[i] = 0;
         if (!pba[i] || pba[i] >= v->sb.total_blocks)
@@ -345,15 +345,15 @@ static int cmd_build(const char *img, int nfiles, int ngen)
     /* (2) push the delta into the base so the tree -- not the overlay --
      * holds the namespace. That is what makes the orphan pages matter:
      * they are the superseded COW copies of THIS content. */
-    if (vol_v3_fold(v) != 0)
-        return fail("vol_v3_fold failed");
+    if (vol_fold(v) != 0)
+        return fail("vol_fold failed");
 
-    /* (3) force generations. Each vol_v3_inode_put publishes a new base
+    /* (3) force generations. Each vol_inode_put publishes a new base
      * root and abandons the old one; that abandoned page is the leak, one
      * per call. Scratch ids above every real id so the namespace the
      * bit-exactness check reads is untouched. */
     for (i = 0; i < ngen; i++) {
-        invfs_v3_inode ino;
+        invfs_inode ino;
         uint64_t id = 0x7000000000000000ull + (uint64_t)i;
         memset(&ino, 0, sizeof ino);
         ino.type = INVFS_ITYP_REG;
@@ -361,8 +361,8 @@ static int cmd_build(const char *img, int nfiles, int ngen)
         ino.nlink = 1;
         ino.size = (uint64_t)(i + 1);
         ino.mtime = ino.atime = 1700000000;
-        if (vol_v3_inode_put(v, id, &ino) != 0)
-            return fail("vol_v3_inode_put(gen %d) failed", i);
+        if (vol_inode_put(v, id, &ino) != 0)
+            return fail("vol_inode_put(gen %d) failed", i);
     }
     if (vol_flush(v) != 0)
         return fail("vol_flush failed");
@@ -370,8 +370,8 @@ static int cmd_build(const char *img, int nfiles, int ngen)
     alloc = count_alloc_pages(v);
     {
         invfs_blkptr root;
-        if (vol_v3_base_root(v, &root) != 0)
-            return fail("vol_v3_base_root failed");
+        if (vol_base_root(v, &root) != 0)
+            return fail("vol_base_root failed");
         if (btree_check(v, root, &bs, ebuf, sizeof ebuf) != 0)
             return fail("btree_check: %s", ebuf);
         live = bs.n_pages;
@@ -392,8 +392,8 @@ static int cmd_build(const char *img, int nfiles, int ngen)
 }
 
 /* The PRODUCTION path, not a direct collector call: write content so the
- * delta is non-empty (an empty delta makes vol_v3_fold a no-op and the hook
- * never runs), force generations, then vol_v3_fold. That reaches
+ * delta is non-empty (an empty delta makes vol_fold a no-op and the hook
+ * never runs), force generations, then vol_fold. That reaches
  * fold_reclaim_hook -> the RT30-slot guard -> vol_reclaim_orphans, which is
  * exactly the chain the FUSE drain walks. Prints the same census `build`
  * prints so the caller can assert orphans actually went away. */
@@ -424,7 +424,7 @@ static int cmd_fold(const char *img, int nfiles, int ngen)
             return fail("vol_replace_file(%s) failed", name);
     }
     for (i = 0; i < ngen; i++) {
-        invfs_v3_inode ino;
+        invfs_inode ino;
         uint64_t id = 0x7000000000000000ull + (uint64_t)i;
         memset(&ino, 0, sizeof ino);
         ino.type = INVFS_ITYP_REG;
@@ -432,18 +432,18 @@ static int cmd_fold(const char *img, int nfiles, int ngen)
         ino.nlink = 1;
         ino.size = (uint64_t)(i + 1);
         ino.mtime = ino.atime = 1700000000;
-        if (vol_v3_inode_put(v, id, &ino) != 0)
-            return fail("vol_v3_inode_put(gen %d) failed", i);
+        if (vol_inode_put(v, id, &ino) != 0)
+            return fail("vol_inode_put(gen %d) failed", i);
     }
-    if (vol_v3_fold(v) != 0)
-        return fail("vol_v3_fold failed");
+    if (vol_fold(v) != 0)
+        return fail("vol_fold failed");
     if (vol_flush(v) != 0)
         return fail("vol_flush failed");
     alloc = count_alloc_pages(v);
     {
         invfs_blkptr root;
-        if (vol_v3_base_root(v, &root) != 0)
-            return fail("vol_v3_base_root failed");
+        if (vol_base_root(v, &root) != 0)
+            return fail("vol_base_root failed");
         if (btree_check(v, root, &bs, ebuf, sizeof ebuf) != 0)
             return fail("btree_check: %s", ebuf);
         live = bs.n_pages;
@@ -640,7 +640,7 @@ static int cmd_damage_newest(const char *img)
     return 0;
 }
 
-/* NEGATIVE CONTROL. See the file header. Only v->rt30 in RAM is touched and
+/* NEGATIVE CONTROL. See the file header. Only v->rt in RAM is touched and
  * the descriptor is deliberately NOT left doctored -- the two slot values
  * are restored before the flush -- so the on-disk RT30 still names both
  * roots exactly as it did before this ran. What changes on disk is only
@@ -671,8 +671,8 @@ static int emulate_wrong_predicate(const char *img, int pin_older, const char *t
 
     /* "live == reachable from the newest root" <=> both slots name the
      * newest root. The shipped collector is unchanged; only its input is. */
-    v->rt30.root_slot[0] = newest;
-    v->rt30.root_slot[1] = newest;
+    v->rt.root_slot[0] = newest;
+    v->rt.root_slot[1] = newest;
     if (pin_older) {
         /* WP121 leg 5: the save point's pinned root is a liveness source in
          * its own right. Pinning the older root here -- while the slots
@@ -689,15 +689,15 @@ static int emulate_wrong_predicate(const char *img, int pin_older, const char *t
     }
 
     if (vol_reclaim_orphans_full(v, &freed) < 0) {
-        v->rt30.root_slot[0] = save[0];
-        v->rt30.root_slot[1] = save[1];
+        v->rt.root_slot[0] = save[0];
+        v->rt.root_slot[1] = save[1];
         vol_close(v);
         return fail("collector failed under the emulated predicate");
     }
     /* Restore the descriptor BEFORE the flush so nothing can persist the
      * doctored slots. */
-    v->rt30.root_slot[0] = save[0];
-    v->rt30.root_slot[1] = save[1];
+    v->rt.root_slot[0] = save[0];
+    v->rt.root_slot[1] = save[1];
     /* Make the frees durable; the RT30 restore above means the on-disk
      * descriptor is the honest one. */
     if (freed && vol_flush(v) != 0) {
@@ -874,7 +874,7 @@ static int cmd_cost(const char *img, int nfiles, int ngen, int nfold)
         free(buf);
     }
     for (i = 0; i < ngen; i++) {
-        invfs_v3_inode ino;
+        invfs_inode ino;
         uint64_t id = 0x7200000000000000ull + (uint64_t)i;
         memset(&ino, 0, sizeof ino);
         ino.type = INVFS_ITYP_REG;
@@ -882,17 +882,17 @@ static int cmd_cost(const char *img, int nfiles, int ngen, int nfold)
         ino.nlink = 1;
         ino.size = (uint64_t)(i + 1);
         ino.mtime = ino.atime = 1700000000;
-        if (vol_v3_inode_put(v, id, &ino) != 0) {
-            vol_close(v); return fail("vol_v3_inode_put(gen %d) failed", i);
+        if (vol_inode_put(v, id, &ino) != 0) {
+            vol_close(v); return fail("vol_inode_put(gen %d) failed", i);
         }
     }
-    if (vol_v3_fold(v) != 0) { vol_close(v); return fail("fold failed"); }
+    if (vol_fold(v) != 0) { vol_close(v); return fail("fold failed"); }
     {
         uint64_t base = count_alloc_pages(v);
         uint64_t live = 0;
         char ebuf[128];
         invfs_blkptr r0;
-        if (vol_v3_base_root(v, &r0) == 0) {
+        if (vol_base_root(v, &r0) == 0) {
             bt_stat bs;
             if (btree_check(v, r0, &bs, ebuf, sizeof ebuf) == 0)
                 live = bs.n_pages;
@@ -928,7 +928,7 @@ static int cmd_cost(const char *img, int nfiles, int ngen, int nfold)
          * this is the steady state a live root is in, one abandoned root
          * per generation. */
         {
-            invfs_v3_inode ino;
+            invfs_inode ino;
             uint64_t id = 0x7300000000000000ull + (uint64_t)i;
             memset(&ino, 0, sizeof ino);
             ino.type = INVFS_ITYP_REG;
@@ -936,8 +936,8 @@ static int cmd_cost(const char *img, int nfiles, int ngen, int nfold)
             ino.nlink = 1;
             ino.size = (uint64_t)(i + 1);
             ino.mtime = ino.atime = 1700000000;
-            if (vol_v3_inode_put(v, id, &ino) != 0) {
-                vol_close(v); return fail("vol_v3_inode_put(fold %d) failed", i);
+            if (vol_inode_put(v, id, &ino) != 0) {
+                vol_close(v); return fail("vol_inode_put(fold %d) failed", i);
             }
         }
     }

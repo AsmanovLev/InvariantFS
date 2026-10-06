@@ -6,7 +6,7 @@
 #
 # vol_sweep_one_v3's multi-segment path (src/core/vol_sweep.c) allocated and
 # wrote every replacement segment BEFORE it had anywhere to name them.
-# vol_v3_recipe_store is the single point at which the file's new recipe
+# vol_recipe_store is the single point at which the file's new recipe
 # becomes reachable, and it is the one step in the pass that can fail for
 # want of space. When it did, the function still returned `any_swept ? 1 : 0`
 # — "swept" — and every block it had written stayed ALLOCATED and referenced
@@ -44,7 +44,7 @@
 # dabc5e6 ("volume: the v3 pba-ref map was built once per session, at open")
 # rewrote the publish block of vol_sweep_one_v3 and mis-braced it: the `else`
 # carrying the rollback bound to `vol_ast_recipe_serialize`, which essentially
-# never fails, instead of to `vol_v3_recipe_store`, which is the step that
+# never fails, instead of to `vol_recipe_store`, which is the step that
 # fails for want of space. The rollback became unreachable. A failed publish
 # fell out of the outer `if` having done nothing at all: any_swept stayed 1,
 # the function returned "swept", and every block remap[] had recorded stayed

@@ -4,7 +4,7 @@
  * THE SITE. dedup_v3_walk_cb (src/core/vol_dedupe.c) hashes every segment of
  * every live inode by PARSING its blob with vol_ast_recipe_parse. A symlink's
  * blob is its TARGET STRING, stored content-addressed exactly like a recipe
- * (vol_v3_create_node, src/core/vol_dirs.c), so it is indistinguishable from
+ * (vol_create_node, src/core/vol_dirs.c), so it is indistinguishable from
  * a recipe by address alone. invfs_ast_hdr_parse (src/core/invarifs.h)
  * accepts ANY blob whose first four bytes are a v1 or v2 AST version word,
  * so a symlink that false-parses donates its fabricated block entries to the
@@ -30,7 +30,7 @@
  * checker -- and the guard that states it is the whole reason the next
  * symlink writer does not turn an accidental `return 0` into silent data
  * loss. Leg F is that next writer: it forges the blob through the same
- * public primitives (vol_v3_recipe_store + vol_v3_inode_delta_put on a LNK
+ * public primitives (vol_recipe_store + vol_inode_delta_put on a LNK
  * row) that any
  * non-strlen symlink content path would use, and asserts the damage by
  * BYTES -- what vol_read_inode hands back for the link -- not by exit code.
@@ -39,7 +39,7 @@
  *   R  reachability control, in two halves. R1 sweeps all 256 possible
  *      leading bytes at the string level -- which is what the writers
  *      compute, since they store strlen(target) bytes. R2 puts the three
- *      shapes that matter through the real vol_v3_create_node writer on a
+ *      shapes that matter through the real vol_create_node writer on a
  *      real volume, which is the half R1 assumes. Characterisation: it
  *      passes before AND after the fix, and that is the point -- it is the
  *      evidence that the guard is currently redundant.
@@ -147,7 +147,7 @@ static invfs_volume *make_volume(const char *img, int with_link)
     if (mkfs_image(img) != 0) return NULL;
     v = vol_open(img, &err);
     if (!v) return NULL;
-    if (!(v->sb.vol_flags & VOLF_V3)) { vol_close(v); return NULL; }
+    if (!(v->sb.vol_flags & VOLF_META)) { vol_close(v); return NULL; }
 
     body = (uint8_t *)malloc(SEG_SZ * NSEG_F0);
     if (!body) { vol_close(v); return NULL; }
@@ -156,10 +156,10 @@ static invfs_volume *make_volume(const char *img, int with_link)
 
     memset(&m, 0, sizeof m);
     m.type = INVFS_ITYP_REG; m.mode = 0644; m.nlink = 1;
-    if (!vol_v3_write_bulk(v, "f0.bin", body, SEG_SZ * NSEG_F0, &m)) {
+    if (!vol_write_bulk(v, "f0.bin", body, SEG_SZ * NSEG_F0, &m)) {
         free(body); vol_close(v); return NULL;
     }
-    if (!vol_v3_write_bulk(v, "f1.bin", g_dup, SEG_SZ, &m)) {
+    if (!vol_write_bulk(v, "f1.bin", g_dup, SEG_SZ, &m)) {
         free(body); vol_close(v); return NULL;
     }
     free(body);
@@ -169,7 +169,7 @@ static invfs_volume *make_volume(const char *img, int with_link)
         memset(&lm, 0, sizeof lm);
         lm.type = INVFS_ITYP_LNK; lm.mode = 0777; lm.nlink = 1;
         snprintf(lm.target, sizeof lm.target, "%s", LINK_TARGET);
-        if (!vol_v3_create_node(v, LINK_NAME, &lm)) { vol_close(v); return NULL; }
+        if (!vol_create_node(v, LINK_NAME, &lm)) { vol_close(v); return NULL; }
     }
     if (vol_flush(v) != 0) { vol_close(v); return NULL; }
     return v;
@@ -179,16 +179,16 @@ static invfs_volume *make_volume(const char *img, int with_link)
 static uint64_t seg_pba(invfs_volume *v, const char *name, uint32_t idx)
 {
     uint64_t ino = 0, pba = 0;
-    invfs_v3_inode in;
+    invfs_inode in;
     uint8_t *blob = NULL;
     size_t blen = 0;
     invfs_ast_hdr ah;
     const invfs_ast_block_entry *ents = NULL;
     size_t n_ents = 0;
 
-    if (vol_v3_path_lookup(v, name, &ino) != 1) return 0;
-    if (vol_v3_inode_get(v, ino, &in) != 1) return 0;
-    if (vol_v3_recipe_load(v, in.recipe_addr, &blob, &blen) != 0 || !blob) return 0;
+    if (vol_path_lookup(v, name, &ino) != 1) return 0;
+    if (vol_inode_get(v, ino, &in) != 1) return 0;
+    if (vol_recipe_load(v, in.recipe_addr, &blob, &blen) != 0 || !blob) return 0;
     if (vol_ast_recipe_parse(blob, blen, &ah, &ents, &n_ents) == 0 && ents &&
         idx < n_ents)
         pba = ents[idx].pba;
@@ -203,14 +203,14 @@ static uint64_t seg_pba(invfs_volume *v, const char *name, uint32_t idx)
  * leg R's job to show. */
 static int forge_symlink_blob(invfs_volume *v, const char *name, uint64_t pba)
 {
-    invfs_v3_inode in;
+    invfs_inode in;
     uint64_t ino = 0;
-    uint8_t addr[INVFS_V3_RECIPE_ADDR_LEN];
+    uint8_t addr[INVFS_RECIPE_ADDR_LEN];
     uint8_t blob[INVFS_AST_HDR_V1_LEN + sizeof(invfs_ast_block_entry)];
     invfs_ast_block_entry e;
 
-    if (vol_v3_path_lookup(v, name, &ino) != 1) return -1;
-    if (vol_v3_inode_get(v, ino, &in) != 1) return -1;
+    if (vol_path_lookup(v, name, &ino) != 1) return -1;
+    if (vol_inode_get(v, ino, &in) != 1) return -1;
 
     memset(blob, 0, sizeof blob);
     memset(&e, 0, sizeof e);
@@ -231,9 +231,9 @@ static int forge_symlink_blob(invfs_volume *v, const char *name, uint64_t pba)
         memcpy(blob + 10, &nc, 2);
         memcpy(blob + 12, &ck, 4);
     }
-    if (vol_v3_recipe_store(v, blob, sizeof blob, addr) != 0) return -1;
+    if (vol_recipe_store(v, blob, sizeof blob, addr) != 0) return -1;
     memcpy(in.recipe_addr, addr, sizeof addr);
-    return vol_v3_inode_delta_put(v, ino, &in) == 0 ? 0 : -1;
+    return vol_inode_delta_put(v, ino, &in) == 0 ? 0 : -1;
 }
 
 /* ---------------------------------------------------------------- LEG R */
@@ -301,7 +301,7 @@ static void leg_reachability(const char *img)
         m.type = INVFS_ITYP_LNK; m.mode = 0777; m.nlink = 1;
         memcpy(m.target, cases[b].t, sizeof m.target);
         snprintf(nm, sizeof nm, "r%d", b);
-        ino[b] = vol_v3_create_node(v, nm, &m);
+        ino[b] = vol_create_node(v, nm, &m);
         if (!ino[b] ||
             vol_read_inode(v, ino[b], 0, &out, &out_len) != 0 || !out) {
             ok(0, "leg R2: the crafted target read back");
@@ -334,7 +334,7 @@ static int read_back_eq(invfs_volume *v, const char *name,
     size_t out_len = 0;
     int same;
 
-    if (vol_v3_path_lookup(v, name, &ino) != 1) return -1;
+    if (vol_path_lookup(v, name, &ino) != 1) return -1;
     if (vol_read_inode(v, ino, 0, &out, &out_len) != 0 || !out) return -1;
     if (got_len) *got_len = out_len;
     same = (out_len == wantlen) && (memcmp(out, want, wantlen) == 0);
@@ -352,7 +352,7 @@ static uint8_t *snap_link(invfs_volume *v, const char *name, size_t *len)
     size_t out_len = 0;
 
     *len = 0;
-    if (vol_v3_path_lookup(v, name, &ino) != 1) return NULL;
+    if (vol_path_lookup(v, name, &ino) != 1) return NULL;
     if (vol_read_inode(v, ino, 0, &out, &out_len) != 0 || !out) return NULL;
     *len = out_len;
     return out;
@@ -472,8 +472,8 @@ static void leg_forge(const char *img_f, const char *img_c, const char *img_o)
     ok(cnt_f == cnt_c,
        "F3 REFCOUNTS: no phantom reference survives on the canonical block");
 
-    /* LEG P -- the in-file divergence, v3_read_range (src/core/vol_read.c:1678).
-     * vol_read_inode is the authority and hands the target back verbatim; v3_read_range had
+    /* LEG P -- the in-file divergence, read_range (src/core/vol_read.c:1678).
+     * vol_read_inode is the authority and hands the target back verbatim; read_range had
      * no branch for a raw-blob type and fell into the AST parse, which
      * cannot succeed, and answered EIO. Unreachable through FUSE (the
      * kernel resolves a symlink) but not through the core, where every
@@ -483,7 +483,7 @@ static void leg_forge(const char *img_f, const char *img_c, const char *img_o)
         uint64_t lino = 0;
         uint8_t win[64];
         int r;
-        if (vol_v3_path_lookup(vo, LINK_NAME, &lino) != 1) {
+        if (vol_path_lookup(vo, LINK_NAME, &lino) != 1) {
             ok(0, "P: the ordinary symlink is still resolvable");
         } else {
             r = vol_read_range(vo, lino, 0, 4, win);

@@ -40,7 +40,7 @@ fsck_clean() {
     # greps then run against a herestring (a re-readable temp file).
     body=$(cat "$log" 2>/dev/null) || return 1
     [ -n "$body" ] || return 1
-    if grep -q "format:       v3" <<<"$body"; then
+    if grep -q "format:       v0" <<<"$body"; then
         grep -q "bad pages:    0" <<<"$body" &&
         grep -q "cycles/shared: 0" <<<"$body" &&
         grep -q "nlink/fan-in:  ok" <<<"$body" &&

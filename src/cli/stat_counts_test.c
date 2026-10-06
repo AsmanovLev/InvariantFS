@@ -4,7 +4,7 @@
  *
  * The defect: invf-stat populated its file table from vol_records_walk(), the
  * v2 inode-area scan, which finds nothing on a v3 volume. Every volume this
- * build opens is v3 (vol_open refuses anything without VOLF_V3), so the tool
+ * build opens is v3 (vol_open refuses anything without VOLF_META), so the tool
  * printed
  *
  *     files : 0 live of 0 names (0 tombstones), 0.0 B logical, largest 0.0 B
@@ -205,7 +205,7 @@ int main(int argc, char **argv)
 
     /* a directory, so "names" and "files" are different numbers and each tool
      * has to draw that line in the same place */
-    if (vol_v3_mkdir(v, "d") == 0) {
+    if (vol_mkdir(v, "d") == 0) {
         fprintf(stderr, "  cannot mkdir d\n");
         vol_close(v);
         return 2;
@@ -218,7 +218,7 @@ int main(int argc, char **argv)
         if (!b) { vol_close(v); return 2; }
         for (uint64_t j = 0; j < sizes[i]; j++)
             b[j] = (uint8_t)(j * 7 + i);
-        if (vol_v3_write_bulk(v, name, b, sizes[i], NULL) == 0) {
+        if (vol_write_bulk(v, name, b, sizes[i], NULL) == 0) {
             fprintf(stderr, "  cannot write %s\n", name);
             free(b); vol_close(v); return 2;
         }
@@ -229,7 +229,7 @@ int main(int argc, char **argv)
     {   /* one file inside the directory */
         uint8_t b[321];
         for (size_t j = 0; j < sizeof b; j++) b[j] = (uint8_t)j;
-        if (vol_v3_write_bulk(v, "d/g", b, sizeof b, NULL) == 0) {
+        if (vol_write_bulk(v, "d/g", b, sizeof b, NULL) == 0) {
             fprintf(stderr, "  cannot write d/g\n");
             vol_close(v); return 2;
         }

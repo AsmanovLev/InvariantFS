@@ -1,7 +1,7 @@
 #!/bin/bash
-# test-meta-v3-write.sh — WP-M9 e2e: the full v3 write path on the base tree.
+# test-meta-write.sh — WP-M9 e2e: the full v3 write path on the base tree.
 #
-# A VOLF_V3 volume must support the same streaming/ranged write session the
+# A VOLF_META volume must support the same streaming/ranged write session the
 # v2 path has (vol_write_begin / vol_write_range / vol_write_truncate /
 # vol_write_commit), but with the file's recipe published as an immutable
 # content-addressed blob and the inode row committed through the base
@@ -20,7 +20,7 @@
 #   trunc-extend  truncate to a larger size (zero extension)
 #
 # Run from the repo root after `make`:
-#   bash tools/run-e2e.sh tools/test-meta-v3-write.sh
+#   bash tools/run-e2e.sh tools/test-meta-write.sh
 set -e
 set -o pipefail
 
@@ -114,10 +114,10 @@ cmp_fuse() {
 echo "== WP-M9: full v3 write path (ranged writes + truncate on the base tree) =="
 
 # --- mkfs v3 -------------------------------------------------------------
-INVFS_V3=1 $B/invf-mkfs "$IMG" 0.5 >"$WORK/mkfs.log" 2>&1 \
-    || { cat "$WORK/mkfs.log"; fail "INVFS_V3=1 mkfs failed"; }
-grep -q "format: v3 metadata skeleton" "$WORK/mkfs.log" \
-    || fail "mkfs did not report the v3 format"
+$B/invf-mkfs "$IMG" 0.5 >"$WORK/mkfs.log" 2>&1 \
+    || { cat "$WORK/mkfs.log"; fail "mkfs failed"; }
+grep -q "format: v0 metadata skeleton" "$WORK/mkfs.log" \
+    || fail "mkfs did not report the v0 format"
 
 # --- seed source files (built by the same op driver, then copied in) ------
 SEG=65536
@@ -125,8 +125,8 @@ head -c 200000 /dev/urandom > "$SRC/base"
 echo "base: $(stat -c %s "$SRC/base") bytes"
 
 mnt_up
-grep -q "format v3" "$WORK/fuse.log" \
-    || { cat "$WORK/fuse.log"; fail "mount did not take the v3 open path"; }
+grep -q "format v0" "$WORK/fuse.log" \
+    || { cat "$WORK/fuse.log"; fail "mount did not take the v0 open path"; }
 
 # --- create the base file through FUSE (multi-segment write) -------------
 cp "$SRC/base" "$MNT/base" || fail "FUSE create/write of base failed"
@@ -195,4 +195,4 @@ assert blk[0x18] == 0xCA, "state=0x%02X, want CLEAN" % blk[0x18]
 print("state: CLEAN after all round-trips")
 PY
 
-echo "ALL META-V3 WRITE LEGS PASS"
+echo "ALL META WRITE LEGS PASS"

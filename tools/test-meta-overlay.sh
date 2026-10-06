@@ -1,7 +1,7 @@
 #!/bin/bash
-# test-meta-v3-overlay.sh — WP-M11 e2e: metadata-v3 overlay reads.
+# test-meta-overlay.sh — WP-M11 e2e: metadata-v3 overlay reads.
 #
-# Proves the two-tier read contract end to end on a real VOLF_V3 image:
+# Proves the two-tier read contract end to end on a real VOLF_META image:
 #   leg 0  mkfs v3 (no base rows, empty recent tier);
 #   leg 1  base rows are written, then delta records are appended through the
 #          WP-M10 API (invf-overlay_test scenario): a delta value shadows an
@@ -10,7 +10,7 @@
 #          page is byte-identical throughout (base untouched on disk);
 #   leg 2  the readdir merge (base a,b,d + delta b=202,c=103,delete d)
 #          yields the sorted, deduped a,b=202,c and the same through the
-#          public CLI (invf-v3inode get sees the delta row);
+#          public CLI (invf-vnode get sees the delta row);
 #   leg 3  a fresh mount replays the delta chain and every overlay result is
 #          identical (remount persistence).
 #
@@ -18,7 +18,7 @@
 # appends with vol_delta_append directly.
 #
 # Run from the repo root after `make`/`make test`:
-#   bash tools/run-e2e.sh tools/test-meta-v3-overlay.sh
+#   bash tools/run-e2e.sh tools/test-meta-overlay.sh
 set -e
 set -o pipefail
 
@@ -39,10 +39,10 @@ if [ ! -x "$B/invf-overlay_test" ]; then
 fi
 
 echo "== leg 0: mkfs v3 =="
-INVFS_V3=1 $B/invf-mkfs "$IMG" 0.3 >"$WORK/mkfs.log" 2>&1 \
-    || { cat "$WORK/mkfs.log"; fail "INVFS_V3=1 mkfs failed"; }
-grep -q "format: v3 metadata skeleton" "$WORK/mkfs.log" \
-    || fail "mkfs did not report the v3 format"
+$B/invf-mkfs "$IMG" 0.3 >"$WORK/mkfs.log" 2>&1 \
+    || { cat "$WORK/mkfs.log"; fail "mkfs failed"; }
+grep -q "format: v0 metadata skeleton" "$WORK/mkfs.log" \
+    || fail "mkfs did not report the v0 format"
 echo "mkfs: v3 metadata skeleton"
 
 echo "== leg 1: overlay reads (delta shadows base; base untouched) =="
@@ -55,15 +55,15 @@ grep -q "base root page byte-identical" "$WORK/scenario.log" \
 cat "$WORK/scenario.log"
 
 echo "== leg 2: readdir merge + the public CLI sees the same overlay =="
-# public by-name get: WP-M11 makes vol_v3_inode_get consult the delta first
-OUT=$($B/invf-v3inode "$IMG" get 42) \
-    || { echo "$OUT" >&2; fail "invf-v3inode get 42 failed"; }
+# public by-name get: WP-M11 makes vol_inode_get consult the delta first
+OUT=$($B/invf-vnode "$IMG" get 42) \
+    || { echo "$OUT" >&2; fail "invf-vnode get 42 failed"; }
 echo "$OUT" | grep -q "mode=0666" \
     || { echo "$OUT" >&2; fail "public get did not see the delta update (0666)"; }
 # a delta delete hides the base row from the public surface too
-if $B/invf-v3inode "$IMG" get 43 >"$WORK/get43.out" 2>&1; then
+if $B/invf-vnode "$IMG" get 43 >"$WORK/get43.out" 2>&1; then
     cat "$WORK/get43.out" >&2
-    fail "invf-v3inode get 43 present (want hidden by the delta delete)"
+    fail "invf-vnode get 43 present (want hidden by the delta delete)"
 fi
 echo "public get: inode 42 = 0666 (delta), inode 43 absent (delta delete)"
 
@@ -85,4 +85,4 @@ assert blk[0x18] == 0xCA, "state=0x%02X, want CLEAN" % blk[0x18]
 print("state: CLEAN after all round-trips")
 PY
 
-echo "ALL META-V3 OVERLAY LEGS PASS"
+echo "ALL META OVERLAY LEGS PASS"

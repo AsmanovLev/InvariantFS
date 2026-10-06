@@ -24,8 +24,8 @@
   - **Root-slot half — WP123.** `mbuf_page_allocated` is asked *before*
     integrity in the root-slot acceptance path (`src/core/vol_metabuf.c:445`,
     defined `:92-99`), and the reclaimer refuses to free a root the RT30 still
-    names (`src/core/vol_fold.c:290-295`). Covered by `src/cli/rt30_slot_test.c`
-    and `tools/test-v3-rt30-slot-alloc.sh:89-171`.
+    names (`src/core/vol_fold.c:290-295`). Covered by `src/cli/rt_slot_test.c`
+    and `tools/test-rt-slot-alloc.sh:89-171`.
   - **Tree-wide half — WP-D (`wp/bitmap-validate`).** WP123 closed only the page
     that *is* the root; its own scope note said it does not verify the pages
     that root reaches. WP-D closed those, at the chokepoint every base-tree walk
@@ -107,7 +107,7 @@
 
   ### The sequence is reachable: it has been run
 
-  WP121 built it. `tools/test-v3-orphan-reclaim.sh` leg 4/4b, driver
+  WP121 built it. `tools/test-orphan-reclaim.sh` leg 4/4b, driver
   `src/cli/orphan_test.c`:
 
   1. build a v3 volume (40 files through the public write path, folded into the
@@ -1384,7 +1384,7 @@ both refuse loudly and change nothing.
   `11eb3d2`.** It also asserts the gate did not disable the repair: a bounded
   range holding only dead keys is still excised and the volume still reaches
   CLEAN.
-- `tools/test-meta-v3-fsck.sh`, `test-meta-v3-fold.sh`, `test-writepath.sh`,
+- `tools/test-meta-fsck.sh`, `test-meta-v3-fold.sh`, `test-writepath.sh`,
   `test-meta-v3-{,delta,write,inode,dirent,mut,overlay,hardlink,xattr,recipe}.sh`:
   PASS. `make test`: PASS.
 - flakey leg 5 with WP86: the same `drop_writes` window that used to dead-end

@@ -163,12 +163,12 @@ int main(int argc, char **argv)
     uint64_t size2_bytes = 0, dev0_blocks = 0, dev1_blocks = 0;
     int is_dev2 = 0, twodev = 0;
     invfs_devt devt;
-    /* metadata-v3 (RT30 root descriptor + B+-tree base + delta log) is the
-     * only format invf-mkfs writes. INVFS_V3=0 and INVFS_V2=1 are still
-     * recognised, and still REFUSE, so a script that carries one of them
-     * fails loudly instead of silently getting a volume it did not ask
-     * for. INVFS_V3=1 is accepted and idempotent. */
-    int v3 = 1;
+    /* The Meta layout (RT30 root descriptor + B+-tree base + delta log)
+     * is the only format invf-mkfs writes. INVFS_V2=1 is still recognised
+     * and still REFUSES, so a script that carries it fails loudly instead
+     * of silently getting a volume it did not ask for. (INVFS_V3 was an
+     * accepted no-op; it is gone -- see INVFS_FORMAT_VERSION.) */
+    /* no generation switch: this build writes format v0, unconditionally. */
     /* ANC0 tail anchor: the reserved block, reported by mkfs so the
      * reservation is visible in the format summary rather than only in the
      * bitmap. */
@@ -209,17 +209,14 @@ int main(int argc, char **argv)
         const char *v2e = getenv("INVFS_V2");
         if (v2e && *v2e && strcmp(v2e, "0") != 0) {
             fprintf(stderr, "invf-mkfs: INVFS_V2 asks for a format this "
-                            "build does not write; format v3 is the only "
-                            "one. Unset it.\n");
+                            "build does not write; format v%d is the only "
+                            "one. Unset it.\n", INVFS_FORMAT_VERSION);
             return 2;
         }
-        const char *v3e = getenv("INVFS_V3");
-        if (v3e && *v3e && strcmp(v3e, "0") == 0) {
-            fprintf(stderr, "invf-mkfs: INVFS_V3=0 asks for a format this "
-                            "build does not write; format v3 is the only "
-                            "one. Unset it.\n");
-            return 2;
-        }
+        /* No generation knob: this build writes format v%d and nothing
+         * else. (INVFS_V3 used to be accepted idempotently; it did
+         * nothing, so keeping it would be a knob-shaped lie. A script
+         * carrying it gets exactly what it always got.) */
     }
     path = blkio_normalize(argv[1], devbuf, sizeof devbuf);
     is_dev = blkio_looks_like_device(path);
@@ -385,9 +382,9 @@ int main(int argc, char **argv)
      * ordinary writes must keep (reserved + hard_min) free */
     sb.reserved_blocks = (uint32_t)(sb.total_blocks / 128 + 64);
     sb.hard_min_blocks = (uint32_t)(sb.total_blocks / 1024 + 16);
-    sb.vol_flags = VOLF_META2 | VOLF_ASTV2 | (v3 ? VOLF_V3 : 0);
+    sb.vol_flags = VOLF_META2 | VOLF_ASTV2 | VOLF_META;
     sb.pad2 = 0;
-    sb.format_version = v3 ? 3 : 1;  /* 3 = metadata-v3 skeleton (WP-M1) */
+    sb.format_version = INVFS_FORMAT_VERSION;  /* 0 = current (unstable) generation */
     sb.pad3[0] = sb.pad3[1] = sb.pad3[2] = 0;
     sb.checksum = invfs_crc32c(&sb, offsetof(invfs_superblock, checksum));
 
@@ -506,7 +503,7 @@ int main(int argc, char **argv)
      * base pages -- inside the mirrored metadata span the mux dual-writes.
      * Single-device v3 keeps the whole metadata zone allocated (byte-
      * identical to WP-M1). */
-    uint64_t v3_root_pba = v3 ? mapper_pba + INVFS_META_EXT_BLOCKS : 0;
+    uint64_t root_pba = mapper_pba + INVFS_META_EXT_BLOCKS;
 
     /* Initialize MET0 with active_extent=0, extent_count=0 (first extent allocated on first write) */
     {
@@ -598,8 +595,8 @@ int main(int argc, char **argv)
      * mux), instead of the dev1 shadow fallback. The reserved root area
      * (mb_boot_cursor) stays marked used -- it is skipped at open and must
      * never be re-handed. Single-device v3 keeps every bit set. */
-    if (v3 && twodev) {
-        uint64_t base_lo = v3_root_pba + 2;
+    if (twodev) {
+        uint64_t base_lo = root_pba + 2;
         uint64_t base_hi = sb.metadata_zone_start + metadata_blocks;
         for (i = base_lo; i < base_hi; i++)
             bitmap[i / 8] &= (uint8_t)~(1u << (i % 8));
@@ -611,7 +608,7 @@ int main(int argc, char **argv)
      * block is claimed. On a two-device volume the last GLOBAL block is the
      * last block of dev1, and the bitmap below is the one dev1 mirrors, so
      * this single bit covers both. */
-    if (v3 && total_blocks >= 2) {
+    if (total_blocks >= 2) {
         i = total_blocks - 1;
         bitmap[i / 8] |= (uint8_t)(1u << (i % 8));
     }
@@ -677,7 +674,8 @@ int main(int argc, char **argv)
      * root_pba = mapper_pba + INVFS_META_EXT_BLOCKS.
      * WP-M19: on a two-device volume the same zeroed span lands on dev1
      * too -- the metadata mirror is byte-identical from the first mount. */
-    if (v3) {
+    /* Always taken: this build writes one format only. */
+    {
         uint8_t *rz = (uint8_t *)calloc(1, 2u * INVFS_BLOCK_SIZE);
         if (!rz) {
             fprintf(stderr, "out of memory\n");
@@ -685,18 +683,18 @@ int main(int argc, char **argv)
             blkio_close(&io);
             return 1;
         }
-        if (blkio_seek(&io, v3_root_pba * INVFS_BLOCK_SIZE) != 0 ||
+        if (blkio_seek(&io, root_pba * INVFS_BLOCK_SIZE) != 0 ||
             blkio_write(&io, rz, 2u * INVFS_BLOCK_SIZE) != 0) {
-            fprintf(stderr, "v3 root-area write failed\n");
+            fprintf(stderr, "root-area write failed\n");
             free(rz);
             free(bitmap);
             blkio_close(&io);
             return 1;
         }
         if (twodev &&
-            (blkio_seek(&io2, v3_root_pba * INVFS_BLOCK_SIZE) != 0 ||
+            (blkio_seek(&io2, root_pba * INVFS_BLOCK_SIZE) != 0 ||
              blkio_write(&io2, rz, 2u * INVFS_BLOCK_SIZE) != 0)) {
-            fprintf(stderr, "v3 root-area write failed on dev1\n");
+            fprintf(stderr, "root-area write failed on dev1\n");
             free(rz);
             free(bitmap);
             blkio_close(&io2);
@@ -722,19 +720,21 @@ int main(int argc, char **argv)
 
     /* WP-M1: RT30 root-area descriptor, written LAST (after the root area
      * and the clean superblock are durable). seq=0, empty root slots, no
-     * delta: an empty v3 namespace. */
-    if (v3) {
-        invfs_rt30 rt;
+     * delta: an empty namespace. (The RT30 magic predates the versioning
+     * discipline; its digits are historical, not a version. See the
+     * INVFS_FORMAT_VERSION comment in invarifs.h.) */
+    {
+        invfs_rt rt;
         memset(&rt, 0, sizeof rt);
         memcpy(rt.magic, "RT30", 4);
-        rt.version = INVFS_RT30_VERSION;
-        rt.page_size = INVFS_V3_PAGE_SIZE_DEFAULT;
+        rt.version = INVFS_RT_VERSION;
+        rt.page_size = INVFS_PAGE_SIZE_DEFAULT;
         rt.root_slot[0] = 0;   /* empty base root slot A */
         rt.root_slot[1] = 0;   /* empty base root slot B */
         rt.delta_pba = 0;      /* no delta segment yet */
         rt.seq = 0;
-        rt.crc32c = invfs_crc32c(&rt, offsetof(invfs_rt30, crc32c));
-        if (blkio_seek(&io, INVFS_RT30_OFF) != 0 ||
+        rt.crc32c = invfs_crc32c(&rt, offsetof(invfs_rt, crc32c));
+        if (blkio_seek(&io, INVFS_RT_OFF) != 0 ||
             blkio_write(&io, &rt, sizeof rt) != 0) {
             fprintf(stderr, "RT30 root descriptor write failed\n");
             free(bitmap);
@@ -744,7 +744,7 @@ int main(int argc, char **argv)
         /* WP-M19: mirror the descriptor onto dev1 (degraded open reads it
          * from there when dev0 is absent). */
         if (twodev &&
-            (blkio_seek(&io2, INVFS_RT30_OFF) != 0 ||
+            (blkio_seek(&io2, INVFS_RT_OFF) != 0 ||
              blkio_write(&io2, &rt, sizeof rt) != 0)) {
             fprintf(stderr, "RT30 root descriptor write failed on dev1\n");
             free(bitmap);
@@ -786,7 +786,7 @@ int main(int argc, char **argv)
             a.block_size = INVFS_BLOCK_SIZE;
             a.format_version = sb.format_version;
             memcpy(a.vol_uuid, sb.uuid, 16);
-            a.rt30 = rt;          /* SPT0 is zeros: no save point yet */
+            a.rt = rt;          /* SPT0 is zeros: no save point yet */
             a.crc32c = anchor_crc(&a);
             if (anchor_write_raw(twodev ? (void *)&io2 : (void *)&io,
                                  anchor_local, &a) != 0) {
@@ -870,17 +870,16 @@ int main(int argc, char **argv)
                "redundant copies only)\n",
                (unsigned long long)(sb.raw_zone_start + raw_blocks),
                (unsigned long long)(dev0_blocks - 1));
-    if (v3)
-        printf("  format: v3 metadata skeleton (VOLF_V3; RT30 @0x%X, "
-               "root area blocks %llu..%llu)\n",
-               (unsigned)INVFS_RT30_OFF,
-               (unsigned long long)v3_root_pba,
-               (unsigned long long)(v3_root_pba + 1));
+    printf("  format: v%d metadata skeleton (VOLF_META; RT30 @0x%X, "
+               "root area blocks %llu..%llu)\n", INVFS_FORMAT_VERSION,
+               (unsigned)INVFS_RT_OFF,
+               (unsigned long long)root_pba,
+               (unsigned long long)(root_pba + 1));
     if (anchor_pba_mkfs)
         printf("  tail anchor:   ANC0 at block %llu (RESERVED; mirrors RT30 "
                "@0x%X and SPT0 @0x%X)\n",
                (unsigned long long)anchor_pba_mkfs,
-               (unsigned)INVFS_RT30_OFF, (unsigned)INVFS_SPT0_OFF);
+               (unsigned)INVFS_RT_OFF, (unsigned)INVFS_SPT0_OFF);
     printf("  state: CLEAN, uuid: ");
     for (i = 0; i < 16; i++)
         printf("%02x", sb.uuid[i]);

@@ -1,4 +1,4 @@
-/* rt30_slot_test.c — WP123: does the RT30 READER enforce the allocation
+/* rt_slot_test.c — WP123: does the RT30 READER enforce the allocation
  * invariant, or only the page-integrity one?
  *
  * Meta-v3's RT30 is a DOUBLE-slot root descriptor (WP86): mbuf_root_publish
@@ -16,7 +16,7 @@
  *
  *   build <img> <nfiles> <ngen>
  *       Write nfiles files through the public write path, fold them into the
- *       base, then force ngen further base generations with vol_v3_inode_put
+ *       base, then force ngen further base generations with vol_inode_put
  *       on scratch ids. Each forced generation publishes a root and abandons
  *       the previous one, so RT30 ends up naming two DISTINCT roots and the
  *       pool is full of superseded COW copies. Prints
@@ -156,7 +156,7 @@ static void slot_census(invfs_volume *v, uint64_t pba[2], uint64_t gen[2],
     int i;
 
     for (i = 0; i < 2; i++) {
-        pba[i] = v->rt30.root_slot[i];
+        pba[i] = v->rt.root_slot[i];
         gen[i] = 0;
         valid[i] = 0;
         alloc[i] = 0;
@@ -300,9 +300,9 @@ static int cmd_build(const char *img, int nfiles, int ngen)
         free(buf);
         if (id == 0) { vol_close(v); return fail("vol_replace_file(%s) failed", name); }
     }
-    if (vol_v3_fold(v) != 0) { vol_close(v); return fail("vol_v3_fold failed"); }
+    if (vol_fold(v) != 0) { vol_close(v); return fail("vol_fold failed"); }
     for (i = 0; i < ngen; i++) {
-        invfs_v3_inode ino;
+        invfs_inode ino;
         uint64_t id = 0x7000000000000000ull + (uint64_t)i;
         memset(&ino, 0, sizeof ino);
         ino.type = INVFS_ITYP_REG;
@@ -310,9 +310,9 @@ static int cmd_build(const char *img, int nfiles, int ngen)
         ino.nlink = 1;
         ino.size = (uint64_t)(i + 1);
         ino.mtime = ino.atime = 1700000000;
-        if (vol_v3_inode_put(v, id, &ino) != 0) {
+        if (vol_inode_put(v, id, &ino) != 0) {
             vol_close(v);
-            return fail("vol_v3_inode_put(gen %d) failed", i);
+            return fail("vol_inode_put(gen %d) failed", i);
         }
     }
     if (vol_flush(v) != 0) { vol_close(v); return fail("vol_flush failed"); }
@@ -356,7 +356,7 @@ static int cmd_probe(const char *img, const char *mode)
     slot_census(v, pba, gen, valid, alloc);
     rc = adopt(v, &ap, &ag);
     aalloc = (rc == 0) ? adopted_allocated(v, ap) : 0;
-    newest = (int)(v->rt30.seq & 1u);
+    newest = (int)(v->rt.seq & 1u);
 
     for (i = 0; i < 2; i++)
         printf("SLOT%d=%llu SEQ_PARITY=%d PAGE_VALID=%d BLOCK_ALLOC=%d "
@@ -423,9 +423,9 @@ static int cmd_free_adopted(const char *img)
     }
     /* Make the free durable exactly the way btree_collect_orphans does, so
      * the next open sees the same thing a real reclaim would leave behind. */
-    if (vol_v3_bitmap_flush(v) != 0) {
+    if (vol_bitmap_flush(v) != 0) {
         vol_close(v);
-        return fail("vol_v3_bitmap_flush failed");
+        return fail("vol_bitmap_flush failed");
     }
     printf("FREED=%llu GEN=%llu (page bytes left intact, so it still "
            "validates)\n", (unsigned long long)ap, (unsigned long long)ag);
@@ -492,8 +492,8 @@ static int cmd_damage_tree_page(const char *img)
     for (i = 0; i < 2; i++) {
         uint64_t k;
         for (k = 0; k < n; k++) {
-            if (pages[k] != ap && pages[k] != v->rt30.root_slot[0] &&
-                pages[k] != v->rt30.root_slot[1]) {
+            if (pages[k] != ap && pages[k] != v->rt.root_slot[0] &&
+                pages[k] != v->rt.root_slot[1]) {
                 victim = pages[k];
                 break;
             }
@@ -550,9 +550,9 @@ static int cmd_reuse(const char *img, int nallocs)
                 reused++;
     printf("ALLOCS=%llu SLOT0_FREED=%d SLOT1_FREED=%d REUSED=%d\n",
            (unsigned long long)n, bad_slot[0], bad_slot[1], reused);
-    if (n && vol_v3_bitmap_flush(v) != 0) {
+    if (n && vol_bitmap_flush(v) != 0) {
         free(got); vol_close(v);
-        return fail("vol_v3_bitmap_flush failed");
+        return fail("vol_bitmap_flush failed");
     }
     for (i = (int)n - 1; i >= 0; i--)
         mbuf_free(v, got[i]);
@@ -620,7 +620,7 @@ static int cmd_verify(const char *img, int nfiles, const char *mode)
         if (!want) { vol_close(v); return fail("out of memory"); }
         content_fill(i, 0, want, len);
         fname(i, name, sizeof name);
-        if (vol_find(v, name) == 0 || vol_v3_path_lookup(v, name, &id) != 1) {
+        if (vol_find(v, name) == 0 || vol_path_lookup(v, name, &id) != 1) {
             absent++;
             free(want);
             if (!tolerant) {

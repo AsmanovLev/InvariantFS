@@ -130,11 +130,11 @@ static void fake_vol_reset(invfs_volume *v)
     v->mb_boot_end = 0;
     v->mb_alloc_cursor = 0;
     v->mb_alloc_fail_run = 0;
-    memset(&v->rt30, 0, sizeof v->rt30);
-    memcpy(v->rt30.magic, "RT30", 4);
-    v->rt30.version = INVFS_RT30_VERSION;
-    v->rt30.page_size = INVFS_V3_PAGE_SIZE_DEFAULT;
-    v->rt30_present = 1;
+    memset(&v->rt, 0, sizeof v->rt);
+    memcpy(v->rt.magic, "RT30", 4);
+    v->rt.version = INVFS_RT_VERSION;
+    v->rt.page_size = INVFS_PAGE_SIZE_DEFAULT;
+    v->rt_present = 1;
     mbuf_init(v);
 }
 
@@ -389,7 +389,7 @@ static invfs_blkptr empty_root(void)
  *   309 + 693 + 85 + 3112 + 693 + 693 + 245 + 85 + 20 = 5935 bytes
  *
  * and every cut leaves an overfull half: s=3 -> right 4848, s=4 -> left 4219.
- * bt_ins_rec() then returned -1, vol_v3_recipe_store() failed, vol_write_commit()
+ * bt_ins_rec() then returned -1, vol_recipe_store() failed, vol_write_commit()
  * failed, and the containerpack sweep reported "member inode failed" and
  * abandoned the decomposition of the whole container (WP88 Bug B).
  *
@@ -498,7 +498,7 @@ static void test_wide_records(invfs_volume *v)
  * page went out as a parent whose LAST child was null: its own CRC and gen
  * check out, so nothing downstream could tell -- until the next
  * btree_search for a key past that separator walked into the hole and
- * returned -1. That is the "vol_v3_recipe_store failed" in the qcow2 e2e's
+ * returned -1. That is the "vol_recipe_store failed" in the qcow2 e2e's
  * dedupe pass, the batch flush that followed it, and the non-zero sweep
  * exit (WP89).
  *

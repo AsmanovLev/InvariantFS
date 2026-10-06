@@ -6,7 +6,7 @@
  * of the pinned generation and verifies the segments its recipe names
  * (src/core/vol_spt0.c). The walk's callback filtered only recipe_addr == 0,
  * so a symlink -- whose content is its target string, stored
- * content-addressed like any recipe (vol_v3_create_node, src/core/vol_dirs.c)
+ * content-addressed like any recipe (vol_create_node, src/core/vol_dirs.c)
  * -- loaded fine and then failed vol_ast_recipe_parse, because "usr/lib" is
  * not an AST. That is SPT0_RC_DAMAGED: exit 5, nothing written, and a
  * message naming damage that does not exist.
@@ -153,7 +153,7 @@ static invfs_volume *make_volume(const char *img, int with_link)
     if (mkfs_image(img) != 0) return NULL;
     v = vol_open(img, &err);
     if (!v) return NULL;
-    if (!(v->sb.vol_flags & VOLF_V3)) { vol_close(v); return NULL; }
+    if (!(v->sb.vol_flags & VOLF_META)) { vol_close(v); return NULL; }
 
     memset(&m, 0, sizeof m);
     m.type = INVFS_ITYP_REG;
@@ -162,7 +162,7 @@ static invfs_volume *make_volume(const char *img, int with_link)
     for (i = 0; i < NFILES; i++) {
         g_files[i].len = sizeof g_files[i].body;
         snprintf(path, sizeof path, "f%d.bin", i);
-        if (!vol_v3_write_bulk(v, path, g_files[i].body, g_files[i].len, &m)) {
+        if (!vol_write_bulk(v, path, g_files[i].body, g_files[i].len, &m)) {
             vol_close(v);
             return NULL;
         }
@@ -174,7 +174,7 @@ static invfs_volume *make_volume(const char *img, int with_link)
         lm.mode = 0777;
         lm.nlink = 1;
         snprintf(lm.target, sizeof lm.target, "%s", LINK_TARGET);
-        if (!vol_v3_create_node(v, LINK_NAME, &lm)) { vol_close(v); return NULL; }
+        if (!vol_create_node(v, LINK_NAME, &lm)) { vol_close(v); return NULL; }
     }
     if (vol_flush(v) != 0) { vol_close(v); return NULL; }
     return v;
@@ -187,7 +187,7 @@ static uint64_t write_post_capture(invfs_volume *v)
     m.type = INVFS_ITYP_REG;
     m.mode = 0644;
     m.nlink = 1;
-    return vol_v3_write_bulk(v, "post.txt",
+    return vol_write_bulk(v, "post.txt",
                              (const uint8_t *)"written after the capture\n",
                              26, &m);
 }
@@ -296,8 +296,8 @@ static void leg_regular_file_still_refuses(void)
 {
     char img[640];
     invfs_volume *v;
-    invfs_v3_inode in;
-    uint8_t addr[INVFS_V3_RECIPE_ADDR_LEN];
+    invfs_inode in;
+    uint8_t addr[INVFS_RECIPE_ADDR_LEN];
     uint8_t *blob = NULL;
     size_t blen = 0;
     uint64_t id;
@@ -312,18 +312,18 @@ static void leg_regular_file_still_refuses(void)
     /* The damage has to be in the PINNED generation for the restore to see
      * it, so the row is repointed BEFORE the capture. */
     id = vol_find(v, "f0.bin");
-    ok(id != 0 && vol_v3_inode_get(v, id, &in) == 1,
+    ok(id != 0 && vol_inode_get(v, id, &in) == 1,
        "leg D: the victim's row is readable");
-    ok(vol_v3_recipe_store(v, (const uint8_t *)"NOT AN AST AT ALL", 16,
+    ok(vol_recipe_store(v, (const uint8_t *)"NOT AN AST AT ALL", 16,
                            addr) == 0, "leg D: a non-AST blob is stored");
     memcpy(in.recipe_addr, addr, sizeof addr);
-    /* DELTA put, not vol_v3_inode_put: the write path left the live row in
+    /* DELTA put, not vol_inode_put: the write path left the live row in
      * the delta overlay, and the pinned walk reads the delta first -- so a
      * base-tree write here would be shadowed by the very record it is
      * meant to supersede, and this leg would pass vacuously. */
-    ok(vol_v3_inode_delta_put(v, id, &in) == 0,
+    ok(vol_inode_delta_put(v, id, &in) == 0,
        "leg D: the row is repointed at it, before the capture");
-    ok(vol_v3_recipe_load(v, addr, &blob, &blen) == 0 && blob,
+    ok(vol_recipe_load(v, addr, &blob, &blen) == 0 && blob,
        "leg D: PREMISE -- the blob LOADS. A checker must not be made "
        "permissive about the LOAD, only about the parse.");
     free(blob);

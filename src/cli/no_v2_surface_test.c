@@ -30,7 +30,7 @@
  *     sweep / fsck cycle. Every v2 entry point wrote there and nowhere
  *     else: `vol_map` and `l2p_remove` queued ops that only `jrn_flush`
  *     ever made durable, and `jrn_flush` was already unreachable (it sat
- *     below vol_flush's VOLF_V3 early return). So "the gap is still zero"
+ *     below vol_flush's VOLF_META early return). So "the gap is still zero"
  *     is not a proxy for "no symbol is called" -- it is the direct
  *     statement that nothing in the write path reached the mapping log,
  *     under whatever name it answers to. Bring back any caller of the
@@ -144,7 +144,7 @@ static int run(const char *fmt, ...)
     return WIFEXITED(rc) ? WEXITSTATUS(rc) : 128;
 }
 
-/* Copy an image, then clear VOLF_V3 (recomputing the checksum, which does
+/* Copy an image, then clear VOLF_META (recomputing the checksum, which does
  * not actually move -- vol_flags sits outside the CRC32C span, 0..0x7B --
  * but recomputing makes the edit correct if that ever changes). */
 static int demote(const char *src, const char *dst)
@@ -158,7 +158,7 @@ static int demote(const char *src, const char *dst)
     if (run(cmd) != 0) return -1;
     if (blkio_open(&io, dst, 0) != 0) return -1;
     if (blkio_pread(&io, 0, &sb, sizeof sb) == 0) {
-        sb.vol_flags &= ~(uint32_t)VOLF_V3;
+        sb.vol_flags &= ~(uint32_t)VOLF_META;
         sb.checksum = invfs_crc32c(&sb, offsetof(invfs_superblock, checksum));
         if (blkio_pwrite(&io, 0, &sb, sizeof sb) == 0)
             rc = 0;

@@ -337,12 +337,12 @@ $B/invf-mkfs "$IMG2" 0.5 > "$WORK/mkfs2.log"
 # and parity bitmap are all still v2 L2P machinery). Assert the refusal
 # rather than a mystery "seal failed", and keep leg 6 -- it does not need the
 # seal. The port is tracked in impl_docs/AUDIT.md.
-if grep -q "v3" "$WORK/mkfs2.log" || $B/invf-fsck "$IMG2" 2>/dev/null | grep -q "format:.*v3"; then
+if grep -q "v3" "$WORK/mkfs2.log" || $B/invf-fsck "$IMG2" 2>/dev/null | grep -q "format:.*v0"; then
     rc=0; $DZ "$IMG2" seal > "$WORK/seal-b.log" 2>&1 || rc=$?
     [ "$rc" -ne 0 ] || fail "leg5: seal reported success on v3 (it must refuse)"
-    grep -q "NOT IMPLEMENTED on Meta-v3" "$WORK/seal-b.log" \
+    grep -q "which has no parity seal" "$WORK/seal-b.log" \
         || { cat "$WORK/seal-b.log"; fail "leg5: seal failed without saying why"; }
-    echo "  SKIP: parity seal is not implemented on Meta-v3 (refused, rc=$rc)"
+    echo "  SKIP: parity seal is which has no parity seal (refused, rc=$rc)"
     SEALS=skip
 else
     SEALS=on
@@ -409,7 +409,7 @@ echo "  grow: share unchanged, tail absorbed shadow-side, content bit-exact"
 rm -f "$IMG1" "$IMG2"
 echo
 if [ "$SEALS" = skip ]; then
-    echo "DYNZONE E2E: PASS (leg 5 skipped: no parity seal on Meta-v3 -- impl_docs/AUDIT.md)"
+    echo "DYNZONE E2E: PASS (leg 5 skipped: no parity seal on Meta -- impl_docs/AUDIT.md)"
 else
     echo "DYNZONE E2E: PASS"
 fi

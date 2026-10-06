@@ -185,22 +185,22 @@ size_t vol_pending_count(invfs_volume *v)
    blob has no sibling, so it checks the zone directly. */
 int vol_inode_first_zone(invfs_volume *v, uint64_t inode_id)
 {
-    invfs_v3_inode in;
+    invfs_inode in;
     invfs_ast_hdr ah;
     const invfs_ast_block_entry *ents = NULL;
     size_t n_ents = 0;
     uint8_t *blob = NULL;
     size_t blen = 0;
     int zone = -1;
-    static const uint8_t zero_addr[INVFS_V3_RECIPE_ADDR_LEN];
+    static const uint8_t zero_addr[INVFS_RECIPE_ADDR_LEN];
 
-    if (vol_v3_inode_get(v, inode_id, &in) != 1)
+    if (vol_inode_get(v, inode_id, &in) != 1)
         return -1;
     if (in.size == 0 ||
         memcmp(in.recipe_addr, zero_addr,
-               INVFS_V3_RECIPE_ADDR_LEN) == 0)
+               INVFS_RECIPE_ADDR_LEN) == 0)
         return -1;                  /* empty file: no zone */
-    if (vol_v3_recipe_load(v, in.recipe_addr, &blob, &blen) != 0)
+    if (vol_recipe_load(v, in.recipe_addr, &blob, &blen) != 0)
         return -1;
     if (vol_ast_recipe_parse(blob, blen, &ah, &ents, &n_ents) == 0 &&
         n_ents > 0)
@@ -417,18 +417,18 @@ static int sweep_dispatch(invfs_volume *v, uint64_t inode_id,
      * below can supersede it in place.
      *
      * Every builtin container lane ends in vol_create_*_file ->
-     * vol_create_blob_file -> vol_v3_create_content_node, which reuses the
+     * vol_create_blob_file -> vol_create_content_node, which reuses the
      * dirent's inode id and replaces the row: the moment the lane lands, the
      * recipe that named the ORIGINAL file's segments is unreachable, and
      * nothing frees it. vol_create_blob_file is handed the NEW address and
      * never the old one, so the capture has to happen here, at the call site
      * -- the same discipline (and the same reasoning) as the containerpack
      * commit at vol_cpack.c:3276-3282. */
-    uint8_t old_addr[INVFS_V3_RECIPE_ADDR_LEN];
+    uint8_t old_addr[INVFS_RECIPE_ADDR_LEN];
     memset(old_addr, 0, sizeof old_addr);
 
-    invfs_v3_inode in;
-    if (vol_v3_inode_get(v, inode_id, &in) == 1)
+    invfs_inode in;
+    if (vol_inode_get(v, inode_id, &in) == 1)
         memcpy(old_addr, in.recipe_addr, sizeof old_addr);
 
     if (!name || !name[0] || !full || full_len < 4)
@@ -465,7 +465,7 @@ static int sweep_dispatch(invfs_volume *v, uint64_t inode_id,
         }
         /* WP202: the lane SUPERSEDED the row in place, so the old recipe's
          * data segments are the lane's to release. */
-        vol_v3_release_superseded_blob(v, inode_id, old_addr);
+        vol_release_superseded_blob(v, inode_id, old_addr);
         vol_stamp_class(v, nino, INVFS_CLASS_CONTAINER,
                         INVFS_ALGO_FLACR, tz_codec_gen(INVFS_ALGO_FLACR));
         return 2;   /* FLAC */
@@ -484,7 +484,7 @@ static int sweep_dispatch(invfs_volume *v, uint64_t inode_id,
         }
         /* WP202: the lane SUPERSEDED the row in place, so the old recipe's
          * data segments are the lane's to release. */
-        vol_v3_release_superseded_blob(v, inode_id, old_addr);
+        vol_release_superseded_blob(v, inode_id, old_addr);
         vol_stamp_class(v, nino, INVFS_CLASS_CONTAINER,
                         INVFS_ALGO_TARR, tz_codec_gen(INVFS_ALGO_TARR));
         defer_container_parts(v, name);   /* WP14b: batch parts this run */
@@ -504,7 +504,7 @@ static int sweep_dispatch(invfs_volume *v, uint64_t inode_id,
         }
         /* WP202: the lane SUPERSEDED the row in place, so the old recipe's
          * data segments are the lane's to release. */
-        vol_v3_release_superseded_blob(v, inode_id, old_addr);
+        vol_release_superseded_blob(v, inode_id, old_addr);
         vol_stamp_class(v, nino, INVFS_CLASS_CONTAINER,
                         INVFS_ALGO_GZR, tz_codec_gen(INVFS_ALGO_GZR));
         defer_container_parts(v, name);   /* WP14b: batch parts this run */
@@ -545,7 +545,7 @@ static int sweep_dispatch(invfs_volume *v, uint64_t inode_id,
         }
         /* WP202: the lane SUPERSEDED the row in place, so the old recipe's
          * data segments are the lane's to release. */
-        vol_v3_release_superseded_blob(v, inode_id, old_addr);
+        vol_release_superseded_blob(v, inode_id, old_addr);
         vol_stamp_class(v, nino, INVFS_CLASS_CONTAINER,
                         INVFS_ALGO_PNGR, tz_codec_gen(INVFS_ALGO_PNGR));
         return 5;   /* PNG */
@@ -600,7 +600,7 @@ static int sweep_dispatch(invfs_volume *v, uint64_t inode_id,
             /* WP202: on v3 the lane SUPERSEDED the row in place, so the old
              * recipe's data segments are the lane's to release; on v2 the row
              * still exists and the tombstone is the whole job. */
-            vol_v3_release_superseded_blob(v, inode_id, old_addr);
+            vol_release_superseded_blob(v, inode_id, old_addr);
                 vol_stamp_class(v, nino, INVFS_CLASS_CODEC,
                             INVFS_ALGO_PMP, tz_codec_gen(INVFS_ALGO_PMP));
             return 8;   /* MP3 */
@@ -842,7 +842,7 @@ static int sweep_dispatch(invfs_volume *v, uint64_t inode_id,
  * (GENERIC_MEMLIMIT / GENERIC_GUARD) carries retry semantics the gain
  * verdict knows nothing about, so it must win -- mirrors
  * vol_sweep_file_inner's rule. */
-static void v3_stamp_generic(invfs_volume *v, uint64_t id, uint8_t cls,
+static void stamp_generic(invfs_volume *v, uint64_t id, uint8_t cls,
                              uint8_t algo)
 {
     uint8_t oc = 0, oa = 0;
@@ -863,7 +863,7 @@ static void v3_stamp_generic(invfs_volume *v, uint64_t id, uint8_t cls,
  * -> ZSTD encode -> decode round-trip guard (publish only bit-exact)
  * -> publish via vol_create_blob_file's v3 branch (content-addressed
  * recipe blob + in-place row supersede; the superseded RAW data segments
- * are reclaimed immediately via targeted free vol_v3_free_recipe_blocks).
+ * are reclaimed immediately via targeted free vol_free_recipe_blocks).
  * Class stamps (v3 xattrs, WP-M7) keep the WP10 policy: drained files
  * skip, uncompressible files are generation-gated, ENOSPC defers.
  * Deliberate M18-remainder gaps (v2 owner-record machinery, not yet
@@ -979,7 +979,7 @@ static int vol_sweep_one_v3(invfs_volume *v, uint64_t inode_id,
 {
     uint8_t ccls = 0, calgo = 0;
     uint16_t cgen = 0;
-    invfs_v3_inode in;
+    invfs_inode in;
     uint8_t *full = NULL, *enc = NULL, *back = NULL;
     size_t full_len = 0, enc_cap, enc_len = 0;
     const invfs_codec *zc;
@@ -1069,7 +1069,7 @@ static int vol_sweep_one_v3(invfs_volume *v, uint64_t inode_id,
         }
     }
 
-    if (vol_v3_inode_get(v, inode_id, &in) != 1)
+    if (vol_inode_get(v, inode_id, &in) != 1)
         return -1;
     if (in.size == 0)
         return 0;               /* nothing to drain: skip */
@@ -1167,12 +1167,12 @@ static int vol_sweep_one_v3(invfs_volume *v, uint64_t inode_id,
          * published yet. A sibling re-created by THIS sweep (a container
          * decomposition commit, or a migration re-deriving one) lands exactly
          * here: there is nothing stored, so there is nothing to sweep. */
-        static const uint8_t zero_addr[INVFS_V3_RECIPE_ADDR_LEN];
+        static const uint8_t zero_addr[INVFS_RECIPE_ADDR_LEN];
         if (memcmp(in.recipe_addr, zero_addr,
-                   INVFS_V3_RECIPE_ADDR_LEN) == 0)
+                   INVFS_RECIPE_ADDR_LEN) == 0)
             return 0;
     }
-    if (vol_v3_recipe_load(v, in.recipe_addr, &blob, &blen) != 0 || !blob)
+    if (vol_recipe_load(v, in.recipe_addr, &blob, &blen) != 0 || !blob)
         return -1;
     if (vol_ast_recipe_parse(blob, blen, &ah, &ents, &n_ents) != 0) {
         free(blob);
@@ -1202,7 +1202,7 @@ static int vol_sweep_one_v3(invfs_volume *v, uint64_t inode_id,
         int any_swept = 0;
         uint64_t new_total = 0;   /* sum of rewritten segment csizes (+framing) */
         /* The remap is a TRANSACTION. Every replacement segment is written
-         * before there is anywhere to name it -- vol_v3_recipe_store below is
+         * before there is anywhere to name it -- vol_recipe_store below is
          * the single point at which the file's new recipe becomes reachable,
          * and it is the one step here that can fail for want of space. So the
          * pairs are recorded, and the superseded segment is neither
@@ -1354,7 +1354,7 @@ static int vol_sweep_one_v3(invfs_volume *v, uint64_t inode_id,
 
                 /* TRANSACTION: record the pair, but do NOT touch old_pba's
                  * refcount and do NOT free it yet. Until
-                 * vol_v3_recipe_store below succeeds the on-disk recipe
+                 * vol_recipe_store below succeeds the on-disk recipe
                  * still names old_pba, so freeing it here would leave the
                  * file reading from blocks the volume has already given
                  * away -- and a publish that then fails for want of space
@@ -1404,7 +1404,7 @@ static int vol_sweep_one_v3(invfs_volume *v, uint64_t inode_id,
         if (any_swept) {
             uint8_t *new_blob = NULL;
             size_t new_blen = 0;
-            uint8_t new_addr[INVFS_V3_RECIPE_ADDR_LEN];
+            uint8_t new_addr[INVFS_RECIPE_ADDR_LEN];
             int published = 0;
             /* WP sweep-rollback-test-conflict: this MUST stay ONE `&&`
              * condition, never a nested `if` whose `else` binds to the wrong
@@ -1419,14 +1419,14 @@ static int vol_sweep_one_v3(invfs_volume *v, uint64_t inode_id,
              * land in the rollback below, which is what its comment has
              * always claimed. */
             if (vol_ast_recipe_serialize(in.size, new_ents, (uint32_t)n_ents, &new_blob, &new_blen) == 0 &&
-                vol_v3_recipe_store(v, new_blob, new_blen, new_addr) == 0) {
+                vol_recipe_store(v, new_blob, new_blen, new_addr) == 0) {
                 memcpy(in.recipe_addr, new_addr, sizeof(new_addr));
-                vol_v3_inode_delta_put(v, inode_id, &in);
+                vol_inode_delta_put(v, inode_id, &in);
                 published = 1;
                 /* WP pba-ref-v3-incremental: the remap loop above moved
                  * the counts itself (-1 per retired pba, +1 per new
                  * one), so the map is exact again and the staleness
-                 * vol_v3_inode_delta_put just flagged does not apply. */
+                 * vol_inode_delta_put just flagged does not apply. */
                 pba_ref_validate(v);
                 /* WP78: the same gain verdict the v2 generic floor uses
                  * (the per-segment sum vs the file size), so a wholly
@@ -1434,10 +1434,10 @@ static int vol_sweep_one_v3(invfs_volume *v, uint64_t inode_id,
                  * UNCOMPRESSIBLE rather than GENERIC. */
                 if ((double)new_total >=
                     (double)in.size * (1.0 - vol_min_gain_pct() / 100.0))
-                    v3_stamp_generic(v, inode_id,
+                    stamp_generic(v, inode_id,
                                      INVFS_CLASS_UNCOMPRESSIBLE, 0);
                 else
-                    v3_stamp_generic(v, inode_id,
+                    stamp_generic(v, inode_id,
                                      INVFS_CLASS_GENERIC, INVFS_ALGO_ZSTD);
             }
             free(new_blob);
@@ -1533,12 +1533,12 @@ static int vol_sweep_one_v3(invfs_volume *v, uint64_t inode_id,
     if (algo == INVFS_ALGO_NONE) {
         /* turbo: identity. No codec, no round-trip guard needed -- what goes
          * in is what comes out, which is the whole point of the profile. */
-        newino = vol_v3_publish_blob_inode(v, inode_id, full, full_len,
+        newino = vol_publish_blob_inode(v, inode_id, full, full_len,
                                            full_len, INVFS_ALGO_NONE);
         free(full);
         if (!newino)
             return 0;       /* store failed (ENOSPC): stay RAW */
-        v3_stamp_generic(v, inode_id, INVFS_CLASS_GENERIC, INVFS_ALGO_NONE);
+        stamp_generic(v, inode_id, INVFS_CLASS_GENERIC, INVFS_ALGO_NONE);
         return 1;
     }
 
@@ -1555,7 +1555,7 @@ static int vol_sweep_one_v3(invfs_volume *v, uint64_t inode_id,
         if (l4n <= 0 || (size_t)l4n >= full_len) {
             free(enc);
             free(full);
-            v3_stamp_generic(v, inode_id, INVFS_CLASS_UNCOMPRESSIBLE, 0);
+            stamp_generic(v, inode_id, INVFS_CLASS_UNCOMPRESSIBLE, 0);
             return 0;
         }
         dec = (uint8_t *)malloc(full_len ? full_len : 1);
@@ -1565,13 +1565,13 @@ static int vol_sweep_one_v3(invfs_volume *v, uint64_t inode_id,
             return 0;       /* the round-trip guard refused: stay RAW */
         }
         free(dec);
-        newino = vol_v3_publish_blob_inode(v, inode_id, enc, (size_t)l4n,
+        newino = vol_publish_blob_inode(v, inode_id, enc, (size_t)l4n,
                                            full_len, INVFS_ALGO_LZ4);
         free(enc);
         free(full);
         if (!newino)
             return 0;
-        v3_stamp_generic(v, inode_id, INVFS_CLASS_GENERIC, INVFS_ALGO_LZ4);
+        stamp_generic(v, inode_id, INVFS_CLASS_GENERIC, INVFS_ALGO_LZ4);
         return 1;
     }
 
@@ -1584,7 +1584,7 @@ static int vol_sweep_one_v3(invfs_volume *v, uint64_t inode_id,
         /* no gain or exceeds blob cap: generation-gated skip until the registry grows */
         free(enc);
         free(full);
-        v3_stamp_generic(v, inode_id, INVFS_CLASS_UNCOMPRESSIBLE, 0);
+        stamp_generic(v, inode_id, INVFS_CLASS_UNCOMPRESSIBLE, 0);
         return 0;
     }
     enc_len = zrc;
@@ -1602,14 +1602,14 @@ static int vol_sweep_one_v3(invfs_volume *v, uint64_t inode_id,
     /* WP-M23: id-keyed publication directly supersedes the inode's recipe address.
      * All metadata (mode, uid, gid, mtime, atime) and all dirents (nested,
      * root, hardlinks) remain completely preserved without path resolution. */
-    newino = vol_v3_publish_blob_inode(v, inode_id, enc, enc_len, full_len,
+    newino = vol_publish_blob_inode(v, inode_id, enc, enc_len, full_len,
                                        INVFS_ALGO_ZSTD);
     free(enc);
     free(full);
     if (!newino)
         return 0;           /* store failed (ENOSPC): stay RAW */
 
-    v3_stamp_generic(v, inode_id, INVFS_CLASS_GENERIC, INVFS_ALGO_ZSTD);
+    stamp_generic(v, inode_id, INVFS_CLASS_GENERIC, INVFS_ALGO_ZSTD);
     return 1;
     }
 }
@@ -1680,7 +1680,7 @@ int vol_sweep_name_of(invfs_volume *v, uint64_t id, char *nm, size_t cap)
     if (!v || !nm || cap == 0) return 0;
     /* WP-M18: the dirent tree, delta-first. The v2 alternative walked the
      * append-only inode area to find the record carrying the name. */
-    rc = vol_v3_name_of(v, id, nm, cap, &parent);
+    rc = vol_name_of(v, id, nm, cap, &parent);
     if (rc < 0) { nm[0] = 0; return -1; }
     return (rc > 0) ? 1 : 0;
 }
@@ -1722,7 +1722,7 @@ int vol_sweep_pending(invfs_volume *v)
     /* WP-M18: after sweep walk + meta merge, try to fold the delta and then
      * schedule reclaim. Both are idempotent stubs in this WP; M15 fills them. */
     if (!(v->sb.vol_flags & VOLF_READONLY)) {
-        (void)vol_v3_fold_request(v);
+        (void)vol_fold_request(v);
         (void)vol_reclaim_schedule(v);
     }
     return done;
@@ -1813,10 +1813,10 @@ static int vol_pack_sweep(invfs_volume *v, uint64_t inode_id, const char *name,
         if (back &&
             pc->decode(enc, enc_len, back, full_len) == 0 &&
             memcmp(back, full, full_len) == 0) {
-            /* vol_v3_publish_blob_inode carries the inode row forward in
+            /* vol_publish_blob_inode carries the inode row forward in
              * place; the v2 shape had to snapshot the ext and re-apply it
              * over a freshly created blob record. */
-            uint64_t newino = vol_v3_publish_blob_inode(v, inode_id, enc,
+            uint64_t newino = vol_publish_blob_inode(v, inode_id, enc,
                                                        enc_len, full_len,
                                                        pc->algo);
             if (newino) {
@@ -1867,12 +1867,12 @@ typedef struct {
 /* WP-M21b: collector callback for the v3 live-set iterator. Internal
  * (\x01) rows and nameless rows are not sweep targets; the iterator has
  * already dropped deleted rows and de-duplicated nlink-shared inodes. */
-struct v3_sweep_ids { uint64_t *ids; size_t max, n; size_t found; int full; };
+struct sweep_ids { uint64_t *ids; size_t max, n; size_t found; int full; };
 
-static int collect_sweepables_v3_cb(invfs_volume *v, uint64_t id,
+static int collect_sweepables_cb(invfs_volume *v, uint64_t id,
                                     const char *name, void *ctx)
 {
-    struct v3_sweep_ids *c = (struct v3_sweep_ids *)ctx;
+    struct sweep_ids *c = (struct sweep_ids *)ctx;
     (void)v;
     if (!name || !name[0] || (unsigned char)name[0] == 0x01)
         return 0;
@@ -1884,7 +1884,7 @@ static int collect_sweepables_v3_cb(invfs_volume *v, uint64_t id,
     c->found++;
     if (c->n >= c->max) {
         /* The callback's non-zero return is how the iteration STOPS, and
-         * vol_v3_iter_live_inodes propagates a non-zero callback result as
+         * vol_iter_live_inodes propagates a non-zero callback result as
          * its own (-1). So a buffer that simply filled up arrives at the
          * caller indistinguishable from a walk that failed -- which is
          * exactly the confusion this WP exists to end, one level down. The
@@ -1899,7 +1899,7 @@ static int collect_sweepables_v3_cb(invfs_volume *v, uint64_t id,
 
 /* WP135: the live-set collect, and the walk's STATUS.
  *
- * `*rc_out` is vol_v3_iter_live_inodes' own return value. It is a separate
+ * `*rc_out` is vol_iter_live_inodes' own return value. It is a separate
  * out-param rather than being folded into the return because the return is a
  * count and callers legitimately want the count they got even on a short
  * walk -- what they must not do is mistake it for the whole set, and only
@@ -1907,12 +1907,12 @@ static int collect_sweepables_v3_cb(invfs_volume *v, uint64_t id,
 size_t vol_collect_sweepables_ex(invfs_volume *v, uint64_t *ids, size_t max,
                                  size_t *found_out, int *rc_out)
 {
-    struct v3_sweep_ids vc;
+    struct sweep_ids vc;
     int rc;
 
     vc.ids = ids; vc.max = max; vc.n = 0; vc.found = 0; vc.full = 0;
     /* WP135: this status was discarded, and the discard is the sharpest of
-     * the five. vol_v3_iter_live_inodes returns -1 when the base scan
+     * the five. vol_iter_live_inodes returns -1 when the base scan
      * fails, and the two things that follow from that were both silent:
      *
      *   1. the DELTA pass is skipped entirely (vol_btree.c:5300 only runs
@@ -1928,7 +1928,7 @@ size_t vol_collect_sweepables_ex(invfs_volume *v, uint64_t *ids, size_t max,
      * and reclaims, so this is unbounded dead-segment accumulation behind a
      * clean log -- the exact failure 2.5 warns the operator about, reached
      * by a damaged volume rather than by a disabled worker. */
-    rc = vol_v3_iter_live_inodes(v, collect_sweepables_v3_cb, &vc);
+    rc = vol_iter_live_inodes(v, collect_sweepables_cb, &vc);
     /* *rc_out answers ONE question: did the walk fail for a reason of its
      * own? A stop this callback asked for (the buffer filled) is not that,
      * and reporting it as one would make every growing collect give up
@@ -1982,7 +1982,7 @@ int vol_collect_sweepables_grow(invfs_volume *v, uint64_t **ids_io, size_t *cap_
             break;                 /* the walk STOPPED: growing cannot help */
         if (found <= n) break;     /* reached the end: this is the live set */
         /* found > n: the buffer is full and the volume has more. Double
-         * and walk again -- the same shape tz_v3_gc already uses
+         * and walk again -- the same shape tz_gc already uses
          * (vol_textzone.c:1569) and the same shape the offline sweep's own
          * collector uses (tools/invf-sweep.c:1203). */
         if (cap > (size_t)-1 / (2 * sizeof *ids)) { break; }
@@ -2019,17 +2019,12 @@ uint64_t vol_zone_used_bytes(invfs_volume *v, uint64_t start_blk, uint64_t end_b
  * live in dynamic meta extents. ctx carries the
  * claimed bitmap and the stats accumulator; rb INCLUDES the trailing
  * CRC and is owned by the walker (never freed here). */
-typedef struct {
-    invfs_volume *v;
-    invfs_volume_stats *out;
-    uint8_t *claimed;
-    int have_ms;
-} wstats_ctx;
+/* (A duplicate ctx struct stood here (WP41, plus unused have_ms); deleted. Single ctx below. */
 
 
 
 /* WP-M21b: per-inode body of the v3 stats pass -- type straight from the
- * row (invfs_v3_inode.type), logical bytes from the row size. Internal
+ * row (invfs_inode.type), logical bytes from the row size. Internal
  * \x01 owners are excluded from the file count (the v2 body's rule).
  * WP78: a live recipe's zone==TEXT entries also feed the TEXT accounting
  * (logic = slice lengths, physical = each shared batch extent once), so the
@@ -2038,7 +2033,7 @@ typedef struct {
     invfs_volume *v;
     invfs_volume_stats *out;
     uint8_t *claimed;
-} wstats_v3_ctx;
+} wstats_ctx;
 
 /* Attribute one segment extent to a content class. Each physical block is
  * counted once no matter how many live recipes name it (a shared TEXT batch
@@ -2063,19 +2058,19 @@ static void wstats_claim(invfs_volume *v, uint8_t *claimed, uint64_t pba,
     }
 }
 
-static int wstats_v3_cb(invfs_volume *v, uint64_t inode_id,
+static int wstats_cb(invfs_volume *v, uint64_t inode_id,
                         const char *name, void *ctx_)
 {
-    wstats_v3_ctx *c = (wstats_v3_ctx *)ctx_;
+    wstats_ctx *c = (wstats_ctx *)ctx_;
     invfs_volume_stats *out = c->out;
-    invfs_v3_inode in;
+    invfs_inode in;
     uint8_t *blob = NULL;
     size_t blen = 0;
     invfs_ast_hdr ah;
     const invfs_ast_block_entry *ents = NULL;
     size_t ne = 0, i;
 
-    if (vol_v3_inode_get(v, inode_id, &in) != 1)
+    if (vol_inode_get(v, inode_id, &in) != 1)
         return 0;
     switch (in.type) {
     case INVFS_ITYP_DIR:
@@ -2097,7 +2092,7 @@ static int wstats_v3_cb(invfs_volume *v, uint64_t inode_id,
     out->logical_bytes += in.size;
     if (in.size == 0)
         return 0;
-    if (vol_v3_recipe_load(v, in.recipe_addr, &blob, &blen) != 0 || !blob) {
+    if (vol_recipe_load(v, in.recipe_addr, &blob, &blen) != 0 || !blob) {
         free(blob);
         return 0;
     }
@@ -2132,7 +2127,7 @@ int vol_compute_stats(invfs_volume *v, invfs_volume_stats *out)
      * it (dedupe shares, the TEXT owner/member double references). */
     uint8_t *claimed = NULL;
     int have_ms = 0;
-    wstats_v3_ctx vc;
+    wstats_ctx vc;
     if (!v || !out) return -1;
     memset(out, 0, sizeof(*out));
     claimed = (uint8_t *)calloc((size_t)(v->sb.total_blocks + 7) / 8, 1);
@@ -2147,7 +2142,7 @@ int vol_compute_stats(invfs_volume *v, invfs_volume_stats *out)
      * its own pba, each block claimed once), so it is a CONTENT-CLASS measure
      * here exactly as the volume.h contract requires. */
     vc.v = v; vc.out = out; vc.claimed = claimed;
-    (void)vol_v3_iter_live_inodes(v, wstats_v3_cb, &vc);
+    (void)vol_iter_live_inodes(v, wstats_cb, &vc);
     /* raw/shadow/text_used_bytes are already CONTENT-CLASS measures,
      * filled by the callback above. Do NOT recompute them as a scan of
      * the raw/shadow REGIONS: zone boundaries are advisory and raw-class

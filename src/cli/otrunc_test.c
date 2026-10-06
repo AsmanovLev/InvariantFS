@@ -17,7 +17,7 @@
  * lookup could not be completed" (src/core/vol_ast.c, the comment above
  * vol_find_rc). A failed lookup therefore drops the saved copy -- and then
  * the IDENTITY OF THE FILE IS DECIDED BY A READ THAT ALSO DID NOT
- * COMPLETE, inside vol_v3_create_node (src/core/vol_dirs.c).
+ * COMPLETE, inside vol_create_node (src/core/vol_dirs.c).
  *
  * WHAT THAT SECOND READ COSTS, MEASURED
  * -------------------------------------
@@ -291,13 +291,13 @@ static void arm_two_sites(int switch_at)
     g_cur_buf = NULL;
     g_sched_n = switch_at < 1 ? 1 : switch_at;
     for (i = 0; i < g_sched_n; i++)
-        g_sched[i] = "v3_dirent_row_read:1";
+        g_sched[i] = "dirent_row_read:1";
     for (; i < OT_SCHED_MAX; i++)
-        g_sched[i] = "v3_inode_row_read:1";
+        g_sched[i] = "inode_row_read:1";
     g_pos = 0;
     invfs_vol_btree_fault_reload();
     invfs_vol_dirs_fault_reload();
-    setenv("INVFS_FAULT", "v3_dirent_row_read:1", 1);
+    setenv("INVFS_FAULT", "dirent_row_read:1", 1);
 }
 
 static void disarm(void)
@@ -568,12 +568,12 @@ int main(int argc, char **argv)
     ino = vol_find(g_vol, "victim");
     ok(ino == victim_ino,
        "the victim resolves to its inode on a healthy read");
-    arm("v3_dirent_row_read:1");
+    arm("dirent_row_read:1");
     ino = vol_find(g_vol, "victim");
     ok(ino == 0, "the dirent row-read seam fires: an armed lookup resolves to "
         "0 while the file is there (0 == \"absent\" AND \"unreadable\")");
     disarm();
-    arm("v3_inode_row_read:1");
+    arm("inode_row_read:1");
     rc = vol_get_meta_rc(g_vol, victim_ino, &meta);
     ok(rc < 0, "the inode row-read seam fires: an armed read of the row "
         "reports an error");
@@ -612,7 +612,7 @@ int main(int argc, char **argv)
      * moves, because vol_replace_file(..., NULL, 0) defaults it to 0644 on
      * every REG (src/core/vol_dirs.c:324). One failure, mode gone. */
     reset_victim();
-    arm("v3_dirent_row_read:1");
+    arm("dirent_row_read:1");
     rc = do_trunc_open();
     disarm();
     report_open(rc);
@@ -625,7 +625,7 @@ int main(int argc, char **argv)
      * because the read that produced it failed, and the truncate still
      * resets the mode. */
     reset_victim();
-    arm("v3_inode_row_read:1");
+    arm("inode_row_read:1");
     rc = do_trunc_open();
     disarm();
     report_open(rc);
@@ -636,7 +636,7 @@ int main(int argc, char **argv)
     /* ---- 4. THE RED: BOTH reads fail --------------------------------
      * Composed, at the pinned switch position. The saved copy is dropped
      * (the lookup failed) and the identity is then decided by a read that
-     * ALSO failed -- so vol_v3_create_node memsets the row and the owner
+     * ALSO failed -- so vol_create_node memsets the row and the owner
      * goes to root as well. This is the leg the two-failure shape belongs
      * to, and the only one that moves uid/gid. */
     reset_victim();

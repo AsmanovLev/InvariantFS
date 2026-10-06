@@ -6,7 +6,7 @@
  *
  *     nid = vol_find(v, name);
  *     if (!nid) {
- *         nid = vol_v3_create_node(v, name, meta);   // :995  <-- DESTRUCTIVE
+ *         nid = vol_create_node(v, name, meta);   // :995  <-- DESTRUCTIVE
  *         if (!nid) return 0;
  *     }
  *     if (vol_write_begin(v, name, 1, &ws) == 0 || !ws)
@@ -20,11 +20,11 @@
  * the CREATE branch, and create-on-v3 is not "add a new name" -- it is
  * "install an EMPTY node over whatever was there" (src/core/vol_dirs.c:
  *
- *     :294  rc = vol_v3_dirent_get(v, pino, leaf, &existing);
+ *     :294  rc = vol_dirent_get(v, pino, leaf, &existing);
  *     :299  if (rc == 1) { id = existing; ... }        <- the SAME inode id
  *     :340-344   in.size = 0; memset(in.recipe_addr, 0, ...)   <- recipe address
- *     :345  vol_v3_inode_delta_put(v, id, &in)          <- durable, now
- *     :365-367 vol_v3_free_recipe_blocks(v, old_addr, 0) <- blocks gone
+ *     :345  vol_inode_delta_put(v, id, &in)          <- durable, now
+ *     :365-367 vol_free_recipe_blocks(v, old_addr, 0) <- blocks gone
  *
  * ). So the old inode is emptied and its blocks freed BEFORE vol_write_begin
  * is ever reached. If the write session then cannot be opened (:998), or the
@@ -34,7 +34,7 @@
  *
  * :80/:99 (WP "7791a87", vol_write_begin's vol_find_rc) DOES NOT COVER THIS.
  * It is a different call in a different function, and it runs at :998 --
- * strictly AFTER vol_v3_create_node has already emptied the row and freed the
+ * strictly AFTER vol_create_node has already emptied the row and freed the
  * blocks. Even a fully-correct vol_write_begin cannot undo that; by the time it
  * is asked, the content it was supposed to supersede is already released.
  *
@@ -54,8 +54,8 @@
  * call return an error" -- it is "are the bytes still there".
  *
  * SEAM DISCIPLINE (src/core/vol_fault.h). The failure is armed with
- * INVFS_FAULT="v3_dirent_row_read:<n>" -- the dirent row read inside
- * vol_v3_dirent_get, which is what a quarantined base page fails.
+ * INVFS_FAULT="dirent_row_read:<n>" -- the dirent row read inside
+ * vol_dirent_get, which is what a quarantined base page fails.
  *   - The site lives in src/core/vol_btree.c, so arming needs
  *     invfs_vol_btree_fault_reload(). unsetenv+setenv is NOT equivalent (the
  *     freed spec string is very often handed back at the same address, the
@@ -103,7 +103,7 @@
 #include "invarifs.h"
 #include "volume_internal.h"
 
-/* The cross-TU fault door: the site is vol_v3_dirent_get, inside
+/* The cross-TU fault door: the site is vol_dirent_get, inside
  * vol_btree.c, so its arming state is that file's TU statics. */
 extern void invfs_vol_btree_fault_reload(void);
 
@@ -165,7 +165,7 @@ static int oracle(invfs_volume *v, const char *name, const uint8_t *want,
     size_t len = 0, i;
     int rc, same;
 
-    if (vol_v3_path_lookup(v, name, &id) != 1) {
+    if (vol_path_lookup(v, name, &id) != 1) {
         printf("  [oracle %s] %s: THE NAME IS GONE\n", tag, name);
         return 0;
     }
@@ -246,8 +246,8 @@ static void leg_create(void)
     mkfs_fresh();
     open_vol_or_die(&v);
     ok(vol_find(v, "fresh.bin") == 0, "the name is absent before the write");
-    ok(vol_v3_write_bulk(v, "fresh.bin", d, n, NULL) != 0,
-       "vol_v3_write_bulk returned a live inode id");
+    ok(vol_write_bulk(v, "fresh.bin", d, n, NULL) != 0,
+       "vol_write_bulk returned a live inode id");
     ok(oracle(v, "fresh.bin", d, n, "create"),
        "create: the new file is byte-exact");
     free(d);
@@ -266,10 +266,10 @@ static void leg_replace(void)
            "==\n");
     mkfs_fresh();
     open_vol_or_die(&v);
-    ok(vol_v3_write_bulk(v, "hot.bin", a, n, NULL) != 0, "wrote the first body");
+    ok(vol_write_bulk(v, "hot.bin", a, n, NULL) != 0, "wrote the first body");
     ok(oracle(v, "hot.bin", a, n, "replace/pre"),
        "replace/pre: the first body is byte-exact");
-    ok(vol_v3_write_bulk(v, "hot.bin", b, n, NULL) != 0, "wrote the second body");
+    ok(vol_write_bulk(v, "hot.bin", b, n, NULL) != 0, "wrote the second body");
     ok(oracle(v, "hot.bin", b, n, "replace/post"),
        "replace/post: the SECOND body is byte-exact (the replace happened)");
     free(a);
@@ -279,7 +279,7 @@ static void leg_replace(void)
 
 /* ---- THE CONTROL: prior content, one failed lookup -------------------- */
 /* One scenario from a fresh image, with a dirent row read made to fail at
- * countdown position `n`. Sets *refused when vol_v3_write_bulk reported the
+ * countdown position `n`. Sets *refused when vol_write_bulk reported the
  * write as not done. Returns 1 if the prior content SURVIVED -- which is what
  * the fix makes true at the position where the fault landed on the write's own
  * decision -- and 0 if it did not. */
@@ -299,7 +299,7 @@ static int red_attempt(int n, int *refused, int zero)
     open_vol_or_die(&v);
 
     /* The PRIOR CONTENT. This is what must still be there afterwards. */
-    id = vol_v3_write_bulk(v, "victim.bin", prior, nbytes, NULL);
+    id = vol_write_bulk(v, "victim.bin", prior, nbytes, NULL);
     if (!id) { printf("  [n=%d] could not lay down the prior content\n", n);
                free(prior); free(repl); vol_close(v); return 0; }
     if (!oracle(v, "victim.bin", prior, nbytes, "pre")) {
@@ -308,8 +308,8 @@ static int red_attempt(int n, int *refused, int zero)
         free(prior); free(repl); vol_close(v); return 0;
     }
     {
-        invfs_v3_inode in;
-        vol_v3_inode_get(v, id, &in);
+        invfs_inode in;
+        vol_inode_get(v, id, &in);
         printf("  [n=%d] victim.bin: inode %llu, size %llu, recipe addr "
                "%02x%02x%02x%02x...\n", n, (unsigned long long)id,
                (unsigned long long)in.size, in.recipe_addr[0], in.recipe_addr[1],
@@ -330,10 +330,10 @@ static int red_attempt(int n, int *refused, int zero)
      * normally because the fault landed elsewhere, and "neither" is the data
      * loss. A diagnostic that cannot tell those last two apart names one
      * cause when there are two, and ends the search. */
-    snprintf(spec, sizeof spec, "v3_dirent_row_read:%d", n);
+    snprintf(spec, sizeof spec, "dirent_row_read:%d", n);
     setenv("INVFS_FAULT", spec, 1);
     invfs_vol_btree_fault_reload();
-    id = vol_v3_write_bulk(v, "victim.bin", repl, rbytes, NULL);
+    id = vol_write_bulk(v, "victim.bin", repl, rbytes, NULL);
     unsetenv("INVFS_FAULT");
     invfs_vol_btree_fault_reload();
 
@@ -376,8 +376,8 @@ static void leg_red(void)
      * replace decision at vol_write.c:993 the call does only three things
      * that touch no dirent row -- the argument checks, the MAX_FILE_SIZE
      * check and vol_write_enabled -- and then vol_find goes straight to
-     * vol_v3_path_lookup, whose first act for a bare name is ONE
-     * vol_v3_dirent_get. So the first dirent row read after arming IS the
+     * vol_path_lookup, whose first act for a bare name is ONE
+     * vol_dirent_get. So the first dirent row read after arming IS the
      * lookup that decides what this write does to the name, and the
      * scenario below is exactly "that lookup did not complete". */
     printf("  -- position n=1: the write's OWN lookup, deterministically\n");
@@ -385,7 +385,7 @@ static void leg_red(void)
     r2 = refused;
     ok(r1, "n=1: the prior content is still byte-exact after a lookup that "
            "did not complete");
-    ok(r2, "n=1: vol_v3_write_bulk reported the write as not done");
+    ok(r2, "n=1: vol_write_bulk reported the write as not done");
     if (failures)
         printf("  -- position n=1: *** DATA LOSS REPRODUCED -- a live "
                "file's content was released by a lookup that never "

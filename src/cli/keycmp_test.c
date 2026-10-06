@@ -18,7 +18,7 @@
  *
  * The ordering, for the record: unsigned byte-lexicographic over the whole
  * key, shorter-first on a strict prefix. The leading byte orders the
- * namespaces (INVFS_V3_XATTR_KEY_PREFIX 0x03, INVFS_V3_RECIPE_KEY_PREFIX
+ * namespaces (INVFS_XATTR_KEY_PREFIX 0x03, INVFS_RECIPE_KEY_PREFIX
  * 0x04 — invarifs.h:1337,1349); every field after it is fixed-width
  * big-endian, so byte order over the key is also numeric order on the inode
  * ids, name lengths and digests inside it; and the shorter-first tiebreak is
@@ -318,7 +318,7 @@ static void add_xattr(uint64_t id, const char *name)
 {
     tkey *t = &g_real[g_nreal++];
     size_t nl = strlen(name);
-    t->k[0] = INVFS_V3_XATTR_KEY_PREFIX;
+    t->k[0] = INVFS_XATTR_KEY_PREFIX;
     put8(t->k + 1, id);
     put16(t->k + 9, (uint16_t)nl);
     memcpy(t->k + 11, name, nl);
@@ -330,7 +330,7 @@ static void add_recipe(uint8_t seed)
 {
     tkey *t = &g_real[g_nreal++];
     int i;
-    t->k[0] = INVFS_V3_RECIPE_KEY_PREFIX;
+    t->k[0] = INVFS_RECIPE_KEY_PREFIX;
     for (i = 0; i < 32; i++)
         t->k[1 + i] = (uint8_t)(seed * 7u + (unsigned)i);
     t->n = 33;

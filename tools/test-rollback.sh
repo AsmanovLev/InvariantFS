@@ -189,7 +189,7 @@ int main(int argc, char **argv)
     m.type = INVFS_ITYP_REG;
     m.mode = 0644;
     m.nlink = 1;
-    vol_v3_write_bulk(v, "post.txt", (const uint8_t *)"post-savepoint\n", 16, &m);
+    vol_write_bulk(v, "post.txt", (const uint8_t *)"post-savepoint\n", 16, &m);
 
     /* the append handle, opened BEFORE the rollback */
     if (!vol_write_begin(v, name, 0, &ws) || !ws) {
@@ -615,7 +615,7 @@ echo "== [S] a volume that holds a SYMLINK =="
 # unit test's finding at the CLI level: no leg in this suite, and no e2e
 # anywhere, combined a symlink with a rollback. A v3 symlink's content is
 # its target string, stored content-addressed EXACTLY like a recipe
-# (vol_v3_create_node -> vol_v3_recipe_store), so its row carries a real
+# (vol_create_node -> vol_recipe_store), so its row carries a real
 # non-zero recipe_addr. The restore's per-inode data check filtered only
 # recipe_addr == 0, loaded the target, failed vol_ast_recipe_parse on it,
 # and refused the rollback with SPT0_RC_DAMAGED -- exit 5, nothing written,

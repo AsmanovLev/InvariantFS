@@ -72,7 +72,7 @@ Files:
 3. E2E gates (run with `INVFS_E2E_AGENT=wp-M15-reclaim`):
    ```
    bash tools/run-e2e.sh tools/test-rollback.sh
-   bash tools/run-e2e.sh tools/test-meta-v3.sh
+   bash tools/run-e2e.sh tools/test-meta.sh
    bash tools/run-e2e.sh tools/test-writepath.sh
    ```
 
@@ -88,7 +88,7 @@ Tests run:
   ... (output)
   $ make test
   ... (output)
-  $ INVFS_E2E_AGENT=wp-M15-reclaim bash tools/run-e2e.sh tools/test-meta-v3.sh
+  $ INVFS_E2E_AGENT=wp-M15-reclaim bash tools/run-e2e.sh tools/test-meta.sh
   ... (output)
 Result: PASS
 Remaining TODOs: (list any deferred decisions or open issues)

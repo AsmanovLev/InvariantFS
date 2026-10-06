@@ -1,4 +1,4 @@
-/* sweep_v3_test.c — WP-M23 offline test for v3 id-keyed sweep publication
+/* sweep_test.c — WP-M23 offline test for v3 id-keyed sweep publication
  * and nested-corpus safety.
  *
  * Verifies:
@@ -58,7 +58,7 @@ int main(int argc, char **argv)
     uint8_t *read_back = NULL;
     size_t read_len = 0;
 
-    printf("sweep_v3_test (WP-M23): id-keyed publication & nested corpus safety\n");
+    printf("sweep_test (WP-M23): id-keyed publication & nested corpus safety\n");
 
     snprintf(img, sizeof img, "%s/invf-sweep-v3-test.img", dir);
     unlink(img);
@@ -79,7 +79,7 @@ int main(int argc, char **argv)
         int err = 0;
         v = vol_open(img, &err);
         if (!v) {
-            fprintf(stderr, "sweep_v3_test: vol_open(%s) failed: err=%d\n", img, err);
+            fprintf(stderr, "sweep_test: vol_open(%s) failed: err=%d\n", img, err);
             return 2;
         }
     }
@@ -97,21 +97,21 @@ int main(int argc, char **argv)
         buf_manual[i] = (uint8_t)("MANUAL_SWEEP_"[(i % 13)]);
 
     /* 2. Create nested directories */
-    ok(vol_v3_mkdir(v, "dir1") != 0, "mkdir dir1");
-    ok(vol_v3_mkdir(v, "dir1/sub2") != 0, "mkdir dir1/sub2");
+    ok(vol_mkdir(v, "dir1") != 0, "mkdir dir1");
+    ok(vol_mkdir(v, "dir1/sub2") != 0, "mkdir dir1/sub2");
 
     /* 3. Write nested file: dir1/sub2/photo.jpg */
-    id_nested = vol_v3_write_bulk(v, "dir1/sub2/photo.jpg", buf_nested,
+    id_nested = vol_write_bulk(v, "dir1/sub2/photo.jpg", buf_nested,
                                   sizeof buf_nested, NULL);
     ok(id_nested != 0, "write dir1/sub2/photo.jpg");
 
     /* 4. Write root file with same leaf name: photo.jpg */
-    id_root = vol_v3_write_bulk(v, "photo.jpg", buf_root,
+    id_root = vol_write_bulk(v, "photo.jpg", buf_root,
                                 sizeof buf_root, NULL);
     ok(id_root != 0 && id_root != id_nested, "write root photo.jpg with distinct id");
 
     /* 5. Write another nested file: dir1/other.txt */
-    id_other = vol_v3_write_bulk(v, "dir1/other.txt", buf_other,
+    id_other = vol_write_bulk(v, "dir1/other.txt", buf_other,
                                  sizeof buf_other, NULL);
     ok(id_other != 0, "write dir1/other.txt");
 
@@ -148,11 +148,11 @@ int main(int argc, char **argv)
     /* 9. Verify NO stray entries at root and path lookup still resolves correctly */
     {
         uint64_t found_root_id = 0, found_nested_id = 0, found_other_id = 0;
-        ok(vol_v3_path_lookup(v, "photo.jpg", &found_root_id) == 1 &&
+        ok(vol_path_lookup(v, "photo.jpg", &found_root_id) == 1 &&
            found_root_id == id_root, "lookup photo.jpg matches root id");
-        ok(vol_v3_path_lookup(v, "dir1/sub2/photo.jpg", &found_nested_id) == 1 &&
+        ok(vol_path_lookup(v, "dir1/sub2/photo.jpg", &found_nested_id) == 1 &&
            found_nested_id == id_nested, "lookup dir1/sub2/photo.jpg matches nested id");
-        ok(vol_v3_path_lookup(v, "dir1/other.txt", &found_other_id) == 1 &&
+        ok(vol_path_lookup(v, "dir1/other.txt", &found_other_id) == 1 &&
            found_other_id == id_other, "lookup dir1/other.txt matches id");
     }
 
@@ -182,7 +182,7 @@ int main(int argc, char **argv)
 
     /* 11. Test active write session guard on nested file */
     {
-        uint64_t act_id = vol_v3_write_bulk(v, "dir1/sub2/racing.txt", buf_racing,
+        uint64_t act_id = vol_write_bulk(v, "dir1/sub2/racing.txt", buf_racing,
                                             sizeof buf_racing, NULL);
         id_racing = act_id;
         ok(act_id != 0, "create dir1/sub2/racing.txt in RAW");
@@ -225,7 +225,7 @@ int main(int argc, char **argv)
 
     /* 12. Test vol_sweep_file on v3 (manual / SIGUSR1 sweep) */
     {
-        uint64_t id_man = vol_v3_write_bulk(v, "dir1/manual.txt", buf_manual,
+        uint64_t id_man = vol_write_bulk(v, "dir1/manual.txt", buf_manual,
                                             sizeof buf_manual, NULL);
         id_manual = id_man;
         ok(id_man != 0, "write dir1/manual.txt");
@@ -303,10 +303,10 @@ int main(int argc, char **argv)
          * so its blocks are reclaimed by the batch GC once no live member
          * names the batch -- not at unlink time. Verify the name is gone
          * (the recipe/blocks are unreachable, never served). */
-        ok(vol_v3_unlink(v, "photo.jpg") == 0, "unlink photo.jpg");
+        ok(vol_unlink(v, "photo.jpg") == 0, "unlink photo.jpg");
         {
             uint64_t gone = 0;
-            ok(vol_v3_path_lookup(v, "photo.jpg", &gone) != 1,
+            ok(vol_path_lookup(v, "photo.jpg", &gone) != 1,
                "photo.jpg no longer resolves after unlink");
         }
 

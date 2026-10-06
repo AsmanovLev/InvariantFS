@@ -95,7 +95,7 @@ int main(int argc, char **argv)
      * v3 return skipped it and `invf-fsck -f` happily ran its repair pass
      * against a read-only, degraded mount -- writing to the dev1 mirror
      * alone, which on v3 nothing detects or repairs (no DEVT sync_seq bump
-     * and no mirror_resync: vol_flush returns before that tail for VOLF_V3,
+     * and no mirror_resync: vol_flush returns before that tail for VOLF_META,
      * volume.c:2435). Hoisted above both branches, so the refusal is format
      * independent. Report mode is unaffected. */
     if (fix && vol_degraded(v)) {
@@ -120,7 +120,7 @@ int main(int argc, char **argv)
      * is a KEY RANGE, not a page: a quarantined range can hold a 0x04 recipe
      * blob or a 0x03 xattr record that a live inode -- whose own row survived
      * in a readable page -- still needs. So -f proves, per range, that no live
-     * object requires a key inside it (fsck_v3_excise_safety) and REFUSES
+     * object requires a key inside it (fsck_excise_safety) and REFUSES
      * every range it cannot clear, changing nothing and leaving the volume
      * damaged and intact: a key that reads EIO is recoverable, an excised key
      * is gone. `--discard-reachable` is the operator's separate, explicit
@@ -143,7 +143,7 @@ int main(int argc, char **argv)
      * devices directly (vol_mirror_compare, the same call the mount path
      * makes) and a stale mirror is named, never folded into a clean OK. A
      * resync the pass itself performed is reported as such. */
-    if (vol_sb(v)->vol_flags & VOLF_V3) {
+    if (vol_sb(v)->vol_flags & VOLF_META) {
         const invfs_superblock *sb = vol_sb(v);
         int degraded = 0;
         int mstale = -1, mstale_after = -1, mresynced = 0;
@@ -169,7 +169,7 @@ int main(int argc, char **argv)
             if (mstale_after < 0)
                 mresynced = 1;
         }
-        if (rep.v3_rt30_bad || rep.v3_root_lost) {
+        if (rep.rt30_bad || rep.root_lost) {
             degraded = 1;
             fprintf(stderr, "invf-fsck: %s: CANNOT REPAIR: the base tree is "
                             "unreachable (no valid RT30 root). Only the delta "
@@ -179,7 +179,7 @@ int main(int argc, char **argv)
                             "pass refuses. The volume is intact but unreadable: "
                             "restore it from a backup or from the original "
                             "image.\n", img);
-        } else if (fix && rep.v3_excise_refused) {
+        } else if (fix && rep.excise_refused) {
             /* The excision is the one repair step that is not reversible, so
              * it is the one that has to be proved safe first. A range a live
              * inode still needs a key from is NOT excised: the key stays on the
@@ -199,16 +199,16 @@ int main(int argc, char **argv)
                             "intact. Restore the image or the page, or re-run "
                             "with `-f --discard-reachable` to drop the range "
                             "anyway and lose those files for good.\n", img,
-                    (unsigned long long)rep.v3_excise_refused,
-                    (unsigned long long)rep.v3_quarantined,
-                    (unsigned long long)rep.v3_excise_blocked);
-        } else if (fix && rep.v3_quarantined && !rep.v3_repaired) {
+                    (unsigned long long)rep.excise_refused,
+                    (unsigned long long)rep.quarantined,
+                    (unsigned long long)rep.excise_blocked);
+        } else if (fix && rep.quarantined && !rep.repaired) {
             degraded = 1;
             fprintf(stderr, "invf-fsck: %s: CANNOT REPAIR: %llu unreadable base "
                             "page(s) could not be quarantined away; the volume "
                             "is unchanged and still degraded\n", img,
-                    (unsigned long long)rep.v3_bad_pages);
-        } else if (fix && rep.v3_recipe_bad) {
+                    (unsigned long long)rep.bad_pages);
+        } else if (fix && rep.recipe_bad) {
             /* The blob is addressed by the BLAKE3 hash of its own contents.
              * There is nothing to rebuild it from, so -f does not touch
              * these files and does not claim to have: the verdict stays
@@ -223,7 +223,7 @@ int main(int argc, char **argv)
                             "content is gone. Restore it from a backup or from "
                             "the original image; the other files on this volume "
                             "are unaffected and readable.\n", img,
-                    (unsigned long long)rep.v3_recipe_bad);
+                    (unsigned long long)rep.recipe_bad);
         }
         if (!quiet) {
             printf("InvariantFS fsck: %s\n", img);
@@ -231,55 +231,55 @@ int main(int argc, char **argv)
                    sb->state == INVFS_STATE_CLEAN ? "CLEAN" :
                    sb->state == INVFS_STATE_DIRTY ? "DIRTY" :
                    sb->state == INVFS_STATE_RECOVERY ? "RECOVERY" : "UNKNOWN");
-            printf("  format:       v3 (metadata-v3 base tree)\n");
-            if (rep.v3_rt30_bad)
+            printf("  format:       v%d (metadata base tree)\n", INVFS_FORMAT_VERSION);
+            if (rep.rt30_bad)
                 printf("  root desc:    TORN (magic/version/CRC)\n");
             printf("  root seq:     %llu\n",
-                   (unsigned long long)rep.v3_root_seq);
+                   (unsigned long long)rep.root_seq);
             printf("  pages walked: %llu\n",
-                   (unsigned long long)rep.v3_pages_walked);
+                   (unsigned long long)rep.pages_walked);
             printf("  base keys:    %llu\n",
-                   (unsigned long long)rep.v3_keys);
+                   (unsigned long long)rep.keys);
             printf("  torn slots:   %llu\n",
-                   (unsigned long long)rep.v3_slots_torn);
-            if (rep.v3_slots_ambiguous)
+                   (unsigned long long)rep.slots_torn);
+            if (rep.slots_ambiguous)
                 printf("  ambiguous slots: %llu (two DIFFERENT root pages "
                        "valid at the same gen -- the publish order is not "
                        "observable)\n",
-                       (unsigned long long)rep.v3_slots_ambiguous);
-            if (rep.v3_slots_same_root)
+                       (unsigned long long)rep.slots_ambiguous);
+            if (rep.slots_same_root)
                 printf("  same-root slots: %llu (both slots name the SAME "
                        "root page at the same gen -- one root, normal after "
                        "a rollback; not damage)\n",
-                       (unsigned long long)rep.v3_slots_same_root);
+                       (unsigned long long)rep.slots_same_root);
             printf("  bad pages:    %llu\n",
-                   (unsigned long long)rep.v3_bad_pages);
-            if (rep.v3_quarantined)
+                   (unsigned long long)rep.bad_pages);
+            if (rep.quarantined)
                 printf("  quarantined:  %llu key range(s) -- a key inside one "
                        "reads EIO, everything else is readable\n",
-                       (unsigned long long)rep.v3_quarantined);
+                       (unsigned long long)rep.quarantined);
             /* The excision gate, in the report as well as on stderr: whether
              * -f dropped a range or refused it is the single fact an operator
              * deciding what to do next needs, and it must never be readable as
              * "repaired" from the verdict line alone. */
-            if (rep.v3_excise_refused)
+            if (rep.excise_refused)
                 printf("  excision:     REFUSED for %llu of %llu quarantined "
                        "range(s) -- they still hold keys %llu live inode(s) "
                        "need; asked %llu live row(s)%s\n",
-                       (unsigned long long)rep.v3_excise_refused,
-                       (unsigned long long)rep.v3_quarantined,
-                       (unsigned long long)rep.v3_excise_blocked,
-                       (unsigned long long)rep.v3_excise_live,
-                       rep.v3_excise_partial ? ", PARTIAL walk" : "");
+                       (unsigned long long)rep.excise_refused,
+                       (unsigned long long)rep.quarantined,
+                       (unsigned long long)rep.excise_blocked,
+                       (unsigned long long)rep.excise_live,
+                       rep.excise_partial ? ", PARTIAL walk" : "");
             printf("  cycles/shared: %llu\n",
-                   (unsigned long long)rep.v3_cycles);
+                   (unsigned long long)rep.cycles);
             /* WP75: the v3 branch used to return before the v2 free-block
              * line, so free-block accounting was invisible on v3 volumes. */
             printf("  free blocks:  %llu\n",
                    (unsigned long long)vol_free_blocks_cached(v));
-            if (rep.v3_reachable_free)
+            if (rep.reachable_free)
                 printf("  reachable-but-free pages: %llu (bitmap divergence)\n",
-                       (unsigned long long)rep.v3_reachable_free);
+                       (unsigned long long)rep.reachable_free);
             /* WP118: the namespace accounting. Every line above describes the
              * metadata; this one describes the NAMES -- the check that puts
              * the number of directory entries against the link counts the
@@ -314,34 +314,34 @@ int main(int argc, char **argv)
              * asks -- can the content a live row names still be produced?
              * Reported, never repaired: a blob is addressed by the hash of
              * its own contents, so -f has nothing to rebuild it from. */
-            if (rep.v3_recipe_partial)
+            if (rep.recipe_partial)
                 printf("  live recipes: PARTIAL -- the walk failed, so the "
                        "count is a floor, not a total\n");
-            else if (rep.v3_recipe_bad)
+            else if (rep.recipe_bad)
                 printf("  live recipes: %llu UNREADABLE of %llu live inode(s) "
                         "with content (each offender is named above)\n",
-                        (unsigned long long)rep.v3_recipe_bad,
-                        (unsigned long long)rep.v3_recipe_checked);
+                        (unsigned long long)rep.recipe_bad,
+                        (unsigned long long)rep.recipe_checked);
             else
                 printf("  live recipes: ok (%llu live inode(s) with content, "
                         "every recipe blob they name loads and parses)\n",
-                        (unsigned long long)rep.v3_recipe_checked);
+                        (unsigned long long)rep.recipe_checked);
             if (spt0_info(v, NULL))
                 printf("  save point:   %s\n",
-                       rep.v3_savepoint_bad
+                       rep.savepoint_bad
                        ? "live, pinning a DAMAGED base tree -- invf-rollback "
                          "refuses it; invf-fsck -f drops it"
                        : "live");
-            if (rep.v3_repaired) {
+            if (rep.repaired) {
                 printf("  repaired:     %llu quarantined range(s) excised; "
                        "%llu key(s) recovered from the delta\n",
-                       (unsigned long long)rep.v3_quarantined,
-                       (unsigned long long)rep.v3_keys_quarantined);
-                if (rep.v3_lost_names)
+                       (unsigned long long)rep.quarantined,
+                       (unsigned long long)rep.keys_quarantined);
+                if (rep.lost_names)
                     printf("  LOST:         %llu name(s) -- their base page is "
                            "unreadable and the data is NOT recoverable (each "
                            "one is named above)\n",
-                           (unsigned long long)rep.v3_lost_names);
+                           (unsigned long long)rep.lost_names);
                 else
                     printf("  LOST:         unrecoverable, and not "
                            "attributable by name: the directory entries that "
@@ -377,18 +377,18 @@ int main(int argc, char **argv)
              * WP99 adds MIRROR STALE, a verdict of its own for a volume whose
              * one device is behind: the tree is walkable, so DAMAGED would be
              * wrong, and OK would be the silent lie this pass exists to stop. */
-            if (!rep.v3_damaged && mstale >= 0 && !mresynced)
+            if (!rep.damaged && mstale >= 0 && !mresynced)
                 printf("MIRROR STALE\n");
-            else if (!rep.v3_damaged)
+            else if (!rep.damaged)
                 printf("OK\n");
-            else if (rep.v3_repaired)
+            else if (rep.repaired)
                 printf("REPAIRED\n");
             else
                 printf("DAMAGED\n");
             (void)degraded;
         }
         vol_close(v);
-        return (rep.v3_damaged || (mstale >= 0 && !mresynced)) ? 3 : 0;
+        return (rep.damaged || (mstale >= 0 && !mresynced)) ? 3 : 0;
     }
 
     /* WP-M21: CMP0/CMPS retired with online compaction. No descriptor is

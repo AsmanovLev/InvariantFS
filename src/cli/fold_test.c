@@ -1,7 +1,7 @@
 /* fold_test.c — WP-M14 e2e driver for the metadata-v3 fold.
  *
  * This is the offline counterpart of the sweep's fold step (WP-M18): it
- * exercises the public WP-M14 API on a real VOLF_V3 image through vol_open.
+ * exercises the public WP-M14 API on a real VOLF_META image through vol_open.
  *
  *   scenario <img>   write a base inode row + dirent, append delta records
  *                    that both update and delete base keys and add new ones,
@@ -72,12 +72,12 @@ static void child_val(uint8_t v[8], uint64_t child)
         v[i] = (uint8_t)(child >> (56 - 8 * i));
 }
 
-/* The delta value for an inode key is the frozen invfs_v3_inode_row. */
+/* The delta value for an inode key is the frozen invfs_inode_row. */
 static uint16_t ino_row(uint8_t *buf, uint16_t mode, uint64_t size)
 {
-    invfs_v3_inode_row r;
+    invfs_inode_row r;
     memset(&r, 0, sizeof r);
-    r.row_version = INVFS_V3_INODE_ROW_VERSION;
+    r.row_version = INVFS_INODE_ROW_VERSION;
     r.type = INVFS_ITYP_REG;
     r.mode = mode;
     r.uid = 1000;
@@ -102,7 +102,7 @@ static int open_v3(const char *img)
         fprintf(stderr, "fold_test: vol_open(%s) failed: err=%d\n", img, err);
         return -1;
     }
-    if (!(vol_sb(g_v)->vol_flags & VOLF_V3)) {
+    if (!(vol_sb(g_v)->vol_flags & VOLF_META)) {
         fprintf(stderr, "fold_test: %s is not a v3 volume\n", img);
         vol_close(g_v);
         g_v = NULL;
@@ -113,7 +113,7 @@ static int open_v3(const char *img)
 
 static int base_put(uint64_t id, uint16_t mode, uint64_t size)
 {
-    invfs_v3_inode in;
+    invfs_inode in;
     memset(&in, 0, sizeof in);
     in.type = INVFS_ITYP_REG;
     in.mode = mode;
@@ -121,12 +121,12 @@ static int base_put(uint64_t id, uint16_t mode, uint64_t size)
     in.nlink = 1;
     in.size = size;
     in.mtime = in.atime = (int64_t)time(NULL);
-    return vol_v3_inode_put(g_v, id, &in);
+    return vol_inode_put(g_v, id, &in);
 }
 
 static int base_dirent_put(uint64_t parent, const char *name, uint64_t child)
 {
-    return vol_v3_dirent_put(g_v, parent, name, child);
+    return vol_dirent_put(g_v, parent, name, child);
 }
 
 /* Base-only read (bypasses the overlay) so a test can prove what fold put
@@ -136,17 +136,17 @@ static int base_ino_mode(uint64_t id, uint16_t *mode_out, uint64_t *size_out)
     uint8_t k[8];
     invfs_blkptr root;
     bt_val val;
-    invfs_v3_inode_row r;
+    invfs_inode_row r;
     int found = 0;
 
     ino_key(id, k);
-    if (vol_v3_base_root(g_v, &root) != 0)
+    if (vol_base_root(g_v, &root) != 0)
         return -1;
     if (btree_search(g_v, root, (bt_key){k, 8}, &val, &found) != 0)
         return -1;
     if (!found)
         return 0;
-    if (val.n < INVFS_V3_INODE_ROW_FIXED)
+    if (val.n < INVFS_INODE_ROW_FIXED)
         return -1;
     memcpy(&r, val.p, sizeof r);
     if (mode_out)
@@ -164,7 +164,7 @@ static int base_dirent_get(uint64_t parent, const char *name, uint64_t *child)
     uint16_t kn = dirent_key(k, parent, name);
     int found = 0;
 
-    if (vol_v3_base_root(g_v, &root) != 0)
+    if (vol_base_root(g_v, &root) != 0)
         return -1;
     if (btree_search(g_v, root, (bt_key){k, kn}, &val, &found) != 0)
         return -1;
@@ -185,7 +185,7 @@ static int base_dirent_get(uint64_t parent, const char *name, uint64_t *child)
 
 static int delta_put_inode(uint64_t id, uint16_t mode, uint64_t size)
 {
-    uint8_t k[8], v[INVFS_V3_INODE_ROW_FIXED];
+    uint8_t k[8], v[INVFS_INODE_ROW_FIXED];
     uint16_t vl;
     ino_key(id, k);
     vl = ino_row(v, mode, size);
@@ -221,14 +221,14 @@ typedef struct {
     uint64_t slot[2];
     uint64_t seq;
     uint64_t delta_pba;
-} rt30_snap;
+} rt_snap;
 
-static void rt30_take(rt30_snap *s)
+static void rt_take(rt_snap *s)
 {
-    s->slot[0] = g_v->rt30.root_slot[0];
-    s->slot[1] = g_v->rt30.root_slot[1];
-    s->seq = g_v->rt30.seq;
-    s->delta_pba = g_v->rt30.delta_pba;
+    s->slot[0] = g_v->rt.root_slot[0];
+    s->slot[1] = g_v->rt.root_slot[1];
+    s->seq = g_v->rt.seq;
+    s->delta_pba = g_v->rt.delta_pba;
 }
 
 static const uint64_t PARENT = 77;
@@ -240,18 +240,18 @@ static const uint64_t PARENT = 77;
  * the post-reset endpoint. */
 static void check_reader_contract(void)
 {
-    invfs_v3_inode in;
-    ok(vol_v3_inode_get(g_v, 42, &in) == 1 && in.mode == 0666,
+    invfs_inode in;
+    ok(vol_inode_get(g_v, 42, &in) == 1 && in.mode == 0666,
        "reader after fold resolves merged 42 (delta-then-base)");
-    ok(vol_v3_inode_get(g_v, 44, &in) == 1 && in.mode == 0700,
+    ok(vol_inode_get(g_v, 44, &in) == 1 && in.mode == 0700,
        "reader after fold resolves untouched base 44");
 }
 
 static void scenario(const char *img)
 {
-    invfs_v3_inode in;
+    invfs_inode in;
     invfs_blkptr root;
-    rt30_snap before, after;
+    rt_snap before, after;
     uint16_t mode;
     uint64_t size, child;
 
@@ -274,26 +274,26 @@ static void scenario(const char *img)
     ok(delta_put_dirent(PARENT, "c", 103) == 0, "delta add dirent c");
     ok(delta_del_dirent(PARENT, "b") == 0, "delta delete dirent b");
 
-    rt30_take(&before);
+    rt_take(&before);
     ok(before.delta_pba != 0, "delta segment is named before fold");
 
     /* pre-fold overlay: delta wins for 42/45, delete hides 43 */
-    ok(vol_v3_inode_get(g_v, 42, &in) == 1 && in.mode == 0666 && in.size == 30,
+    ok(vol_inode_get(g_v, 42, &in) == 1 && in.mode == 0666 && in.size == 30,
        "pre-fold overlay: inode 42 = 0666/30 (delta)");
-    ok(vol_v3_inode_get(g_v, 43, &in) == 0, "pre-fold overlay: 43 hidden");
-    ok(vol_v3_inode_get(g_v, 45, &in) == 1 && in.mode == 0644,
+    ok(vol_inode_get(g_v, 43, &in) == 0, "pre-fold overlay: 43 hidden");
+    ok(vol_inode_get(g_v, 45, &in) == 1 && in.mode == 0644,
        "pre-fold overlay: delta-only 45 visible");
     ok(base_ino_mode(42, &mode, &size) == 1 && mode == 0640 && size == 10,
        "pre-fold base still holds the old inode 42");
 
     /* FOLD */
-    ok(vol_v3_fold(g_v) == 0, "fold returns 0");
+    ok(vol_fold(g_v) == 0, "fold returns 0");
 
     /* delta emptied + RT30 reset */
     ok(vol_delta_count(g_v) == 0, "delta index empty after fold");
     ok(g_v->delta_seg_pba == 0 || g_v->delta_bump == INVFS_DELTA_SEG_HDR_LEN,
        "delta bump cursor reset");
-    rt30_take(&after);
+    rt_take(&after);
     ok(after.delta_pba == 0, "RT30.delta_pba cleared after fold");
     ok(after.seq == before.seq + 1, "RT30 seq advanced by exactly one");
     ok((after.slot[0] != before.slot[0] || after.slot[1] != before.slot[1]),
@@ -310,19 +310,19 @@ static void scenario(const char *img)
        "post-fold base dirent c added");
 
     /* overlay reads agree with the base (nothing shadows it now) */
-    ok(vol_v3_inode_get(g_v, 42, &in) == 1 && in.mode == 0666,
+    ok(vol_inode_get(g_v, 42, &in) == 1 && in.mode == 0666,
        "post-fold overlay inode 42 = 0666");
-    ok(vol_v3_inode_get(g_v, 43, &in) == 0, "post-fold overlay 43 absent");
-    ok(vol_v3_inode_get(g_v, 45, &in) == 1 && in.mode == 0644,
+    ok(vol_inode_get(g_v, 43, &in) == 0, "post-fold overlay 43 absent");
+    ok(vol_inode_get(g_v, 45, &in) == 1 && in.mode == 0644,
        "post-fold overlay 45 present");
-    ok(vol_v3_dirent_get(g_v, PARENT, "b", &child) == 0,
+    ok(vol_dirent_get(g_v, PARENT, "b", &child) == 0,
        "post-fold overlay dirent b absent");
-    ok(vol_v3_dirent_get(g_v, PARENT, "c", &child) == 1 && child == 103,
+    ok(vol_dirent_get(g_v, PARENT, "c", &child) == 1 && child == 103,
        "post-fold overlay dirent c present");
 
     /* the base tree must still be structurally valid: 42,44,45 (inodes) and
      * a,c (dirents) survive, so five keys. */
-    if (vol_v3_base_root(g_v, &root) == 0) {
+    if (vol_base_root(g_v, &root) == 0) {
         char err[128];
         bt_stat st;
         err[0] = 0;
@@ -333,14 +333,14 @@ static void scenario(const char *img)
     }
 
     /* idempotent second fold on an empty delta */
-    rt30_take(&before);
-    ok(vol_v3_fold(g_v) == 0, "fold on empty delta is a no-op (rc 0)");
-    rt30_take(&after);
+    rt_take(&before);
+    ok(vol_fold(g_v) == 0, "fold on empty delta is a no-op (rc 0)");
+    rt_take(&after);
     ok(after.seq == before.seq && after.delta_pba == 0,
        "empty-delta fold did not publish or touch the delta");
 
     /* fold_request below threshold is a no-op */
-    ok(vol_v3_fold_request(g_v) == 0, "fold_request below threshold = 0");
+    ok(vol_fold_request(g_v) == 0, "fold_request below threshold = 0");
 
     check_reader_contract();
 
@@ -358,7 +358,7 @@ static void scenario(const char *img)
 
 static void verify(const char *img)
 {
-    invfs_v3_inode in;
+    invfs_inode in;
     uint16_t mode;
     uint64_t size, child;
 
@@ -367,7 +367,7 @@ static void verify(const char *img)
     printf("fold verify (WP-M14 remount)\n");
 
     ok(vol_delta_count(g_v) == 0, "remount: delta is empty");
-    ok(g_v->rt30.delta_pba == 0, "remount: RT30 names no delta segment");
+    ok(g_v->rt.delta_pba == 0, "remount: RT30 names no delta segment");
 
     /* everything must now come from the base tier */
     ok(base_ino_mode(42, &mode, &size) == 1 && mode == 0666 && size == 30,
@@ -379,12 +379,12 @@ static void verify(const char *img)
     ok(base_dirent_get(PARENT, "c", &child) == 1 && child == 103,
        "remount base dirent c = 103");
 
-    ok(vol_v3_inode_get(g_v, 42, &in) == 1 && in.mode == 0666,
+    ok(vol_inode_get(g_v, 42, &in) == 1 && in.mode == 0666,
        "remount overlay inode 42 = 0666");
-    ok(vol_v3_inode_get(g_v, 43, &in) == 0, "remount overlay inode 43 absent");
-    ok(vol_v3_inode_get(g_v, 44, &in) == 1 && in.mode == 0700,
+    ok(vol_inode_get(g_v, 43, &in) == 0, "remount overlay inode 43 absent");
+    ok(vol_inode_get(g_v, 44, &in) == 1 && in.mode == 0700,
        "remount overlay inode 44 = 0700");
-    ok(vol_v3_dirent_get(g_v, PARENT, "c", &child) == 1 && child == 103,
+    ok(vol_dirent_get(g_v, PARENT, "c", &child) == 1 && child == 103,
        "remount overlay dirent c = 103");
 
     vol_close(g_v);
@@ -420,7 +420,7 @@ static void crash_setup(const char *img)
         exit(1);
     }
     /* force the fold; the env hook kills us mid-window */
-    (void)vol_v3_fold(g_v);
+    (void)vol_fold(g_v);
     fprintf(stderr, "fold_test: crash setup survived the fold (hook not "
             "set?); nothing to verify\n");
     vol_close(g_v);
@@ -433,20 +433,20 @@ static void crash_setup(const char *img)
  * identical either way. */
 static void crash_verify(const char *img)
 {
-    invfs_v3_inode in;
+    invfs_inode in;
     uint64_t child;
 
     if (open_v3(img) != 0)
         exit(2);
     printf("fold crash verify (WP-M14 remount after publish/reset window)\n");
 
-    ok(vol_v3_inode_get(g_v, 42, &in) == 1 && in.mode == 0600 && in.size == 20,
+    ok(vol_inode_get(g_v, 42, &in) == 1 && in.mode == 0600 && in.size == 20,
        "crash remount: inode 42 = 0600/20 (merged)");
-    ok(vol_v3_inode_get(g_v, 43, &in) == 0, "crash remount: inode 43 absent");
-    ok(vol_v3_inode_get(g_v, 41, &in) == 0, "crash remount: inode 41 absent");
-    ok(vol_v3_dirent_get(g_v, PARENT, "a", &child) == 1 && child == 101,
+    ok(vol_inode_get(g_v, 43, &in) == 0, "crash remount: inode 43 absent");
+    ok(vol_inode_get(g_v, 41, &in) == 0, "crash remount: inode 41 absent");
+    ok(vol_dirent_get(g_v, PARENT, "a", &child) == 1 && child == 101,
        "crash remount: dirent a = 101 (untouched)");
-    ok(vol_v3_dirent_get(g_v, PARENT, "c", &child) == 1 && child == 103,
+    ok(vol_dirent_get(g_v, PARENT, "c", &child) == 1 && child == 103,
        "crash remount: dirent c = 103 (merged)");
 
     vol_close(g_v);

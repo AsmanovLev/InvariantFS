@@ -1,7 +1,7 @@
 #!/bin/bash
-# test-meta-v3-recipe.sh — WP-M8 e2e: content-addressed recipe blobs + v3 read.
+# test-meta-recipe.sh — WP-M8 e2e: content-addressed recipe blobs + v3 read.
 #
-# A VOLF_V3 volume stores a file's AST recipe as an immutable,
+# A VOLF_META volume stores a file's AST recipe as an immutable,
 # content-addressed blob (key 0x04||BLAKE3-256(recipe)) referenced from the
 # inode row. The read path fetches the blob, VERIFIES BLAKE3, then decodes
 # the segments with the shared v2 segment decoder. This leg drives the whole
@@ -10,7 +10,7 @@
 # fails LOUDLY instead of returning wrong bytes.
 #
 # Run from the repo root after `make`:
-#   bash tools/run-e2e.sh tools/test-meta-v3-recipe.sh
+#   bash tools/run-e2e.sh tools/test-meta-recipe.sh
 set -e
 set -o pipefail
 
@@ -72,10 +72,10 @@ cmp_offline() {
 echo "== WP-M8: content-addressed recipe blobs + verified v3 read path =="
 
 # --- mkfs v3 -------------------------------------------------------------
-INVFS_V3=1 $B/invf-mkfs "$IMG" 0.5 >"$WORK/mkfs.log" 2>&1 \
-    || { cat "$WORK/mkfs.log"; fail "INVFS_V3=1 mkfs failed"; }
-grep -q "format: v3 metadata skeleton" "$WORK/mkfs.log" \
-    || fail "mkfs did not report the v3 format"
+$B/invf-mkfs "$IMG" 0.5 >"$WORK/mkfs.log" 2>&1 \
+    || { cat "$WORK/mkfs.log"; fail "mkfs failed"; }
+grep -q "format: v0 metadata skeleton" "$WORK/mkfs.log" \
+    || fail "mkfs did not report the v0 format"
 
 # --- source files covering the AST shapes -------------------------------
 : > "$SRC/empty"
@@ -98,8 +98,8 @@ echo "sources: $(for n in $NAMES; do printf '%s(%s) ' "$n" "$(stat -c %s "$SRC/$
 
 # --- write through FUSE and read back identical -------------------------
 mnt_up
-grep -q "format v3" "$WORK/fuse.log" \
-    || { cat "$WORK/fuse.log"; fail "mount did not take the v3 open path"; }
+grep -q "format v0" "$WORK/fuse.log" \
+    || { cat "$WORK/fuse.log"; fail "mount did not take the v0 open path"; }
 for n in $NAMES; do
     cp "$SRC/$n" "$MNT/$n" || fail "FUSE write of $n failed"
     cmp_fuse "$n"
@@ -212,4 +212,4 @@ assert blk[0x18] == 0xCA, "state=0x%02X, want CLEAN" % blk[0x18]
 print("state: CLEAN after all round-trips")
 PY
 
-echo "ALL META-V3 RECIPE LEGS PASS"
+echo "ALL META RECIPE LEGS PASS"

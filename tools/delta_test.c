@@ -11,8 +11,8 @@
  *   through the same blkio + synthetic geometry metabuf_test uses.
  *
  * E2E mode (`invf-delta_test append|verify|tear|verify-torn <img> <n>`):
- *   drives a real mkfs'd VOLF_V3 image through vol_open (which runs mount
- *   replay) and vol_delta_append, so tools/test-meta-v3-delta.sh can test
+ *   drives a real mkfs'd VOLF_META image through vol_open (which runs mount
+ *   replay) and vol_delta_append, so tools/test-meta-delta.sh can test
  *   crash/remount reconstruction and a torn tail end to end.
  *
  * The record framing is frozen in invarifs.h; this harness never invents
@@ -136,11 +136,11 @@ static int fake_vol_open(invfs_volume *v, const char *path)
     v->free_blocks = FB_TOTAL - alloc;
     alloc_state_reset(v);
 
-    memset(&v->rt30, 0, sizeof v->rt30);
-    memcpy(v->rt30.magic, "RT30", 4);
-    v->rt30.version = INVFS_RT30_VERSION;
-    v->rt30.page_size = INVFS_V3_PAGE_SIZE_DEFAULT;
-    v->rt30_present = 1;
+    memset(&v->rt, 0, sizeof v->rt);
+    memcpy(v->rt.magic, "RT30", 4);
+    v->rt.version = INVFS_RT_VERSION;
+    v->rt.page_size = INVFS_PAGE_SIZE_DEFAULT;
+    v->rt_present = 1;
     mbuf_init(v);
     return 0;
 }
@@ -445,7 +445,7 @@ static void test_bitmap_before_delta_gap(const char *dir)
     seg = v->delta_seg_pba;
     ok(seg != 0, "the append created a delta segment");
     ok(bit_get(v->bitmap, seg), "append reserved the segment in RAM");
-    ok(v->rt30_present && v->rt30.delta_pba == seg,
+    ok(v->rt_present && v->rt.delta_pba == seg,
        "RT30 names the segment (the record is durable and reachable)");
 
     /* The deferred window, exactly: the record and its segment are on the
@@ -582,18 +582,18 @@ static void test_rollover(const char *dir)
  * root untouched (the base stays immutable between folds). Drives the public
  * v3 mutation entry points on a synthetic volume whose base tree is empty, so
  * "base unchanged" is exactly "the base root blkptr did not move". */
-static void test_v3_metadata_delta(const char *dir)
+static void test_metadata_delta(const char *dir)
 {
     char img[512];
     invfs_volume *v;
-    invfs_v3_inode in;
+    invfs_inode in;
     invfs_blkptr b0, b1;
     uint64_t child = 0;
     char vbuf[16];
     size_t vlen;
 
     printf("v3 metadata mutations append to the delta (base untouched)\n");
-    snprintf(img, sizeof img, "%s/invf-delta_v3mut.img", dir);
+    snprintf(img, sizeof img, "%s/invf-delta_mut.img", dir);
     if (image_make(img, FB_TOTAL) != 0) { ok(0, "make v3mut image"); return; }
     v = (invfs_volume *)calloc(1, sizeof *v);
     if (!v) { ok(0, "calloc v3mut volume"); return; }
@@ -602,7 +602,7 @@ static void test_v3_metadata_delta(const char *dir)
         free(v);
         return;
     }
-    if (vol_v3_base_root(v, &b0) != 0) {
+    if (vol_base_root(v, &b0) != 0) {
         ok(0, "read base root before mutations");
         vol_delta_close(v);
         fake_vol_close(v);
@@ -617,34 +617,34 @@ static void test_v3_metadata_delta(const char *dir)
     in.nlink = 1;
     in.size = 0;
 
-    ok(vol_v3_inode_delta_put(v, 42, &in) == 0, "delta put inode 42");
-    ok(vol_v3_inode_get(v, 42, &in) == 1 && in.mode == 0640,
+    ok(vol_inode_delta_put(v, 42, &in) == 0, "delta put inode 42");
+    ok(vol_inode_get(v, 42, &in) == 1 && in.mode == 0640,
        "overlay reads the delta inode row");
-    ok(vol_v3_dirent_delta_put(v, 77, "a", 42) == 0, "delta put dirent");
-    ok(vol_v3_dirent_get(v, 77, "a", &child) == 1 && child == 42,
+    ok(vol_dirent_delta_put(v, 77, "a", 42) == 0, "delta put dirent");
+    ok(vol_dirent_get(v, 77, "a", &child) == 1 && child == 42,
        "overlay reads the delta dirent");
-    ok(vol_v3_xattr_delta_set(v, 42, "user.k", "v", 1) == 0,
+    ok(vol_xattr_delta_set(v, 42, "user.k", "v", 1) == 0,
        "delta set xattr");
     vlen = sizeof vbuf;
-    ok(vol_v3_xattr_get(v, 42, "user.k", vbuf, &vlen) == 0 &&
+    ok(vol_xattr_get(v, 42, "user.k", vbuf, &vlen) == 0 &&
        vlen == 1 && vbuf[0] == 'v', "overlay reads the delta xattr");
-    ok(vol_v3_inode_alloc(v) == 43,
+    ok(vol_inode_alloc(v) == 43,
        "id allocator resumes above the delta-only inode");
 
-    ok(vol_v3_dirent_delta_del(v, 77, "a") == 0, "delta delete dirent");
-    ok(vol_v3_dirent_get(v, 77, "a", &child) == 0, "deleted dirent hidden");
-    ok(vol_v3_inode_delta_delete(v, 42) == 0, "delta delete inode");
-    ok(vol_v3_inode_get(v, 42, &in) == 0, "deleted inode hidden");
+    ok(vol_dirent_delta_del(v, 77, "a") == 0, "delta delete dirent");
+    ok(vol_dirent_get(v, 77, "a", &child) == 0, "deleted dirent hidden");
+    ok(vol_inode_delta_delete(v, 42) == 0, "delta delete inode");
+    ok(vol_inode_get(v, 42, &in) == 0, "deleted inode hidden");
     vlen = sizeof vbuf;
     /* -ENODATA, not the bare -1 this used to assert. The cascade removes
      * the keys, so the honest answer is "this xattr is not there" -- and
      * the bare -1 was the very value the row-read failure also returned,
      * which is how an unreadable inode row could read as an inode carrying
      * no ACLs. The assertion is now stronger, not weaker. */
-    ok(vol_v3_xattr_get(v, 42, "user.k", vbuf, &vlen) == -ENODATA,
+    ok(vol_xattr_get(v, 42, "user.k", vbuf, &vlen) == -ENODATA,
        "inode delete cascaded the xattr keys");
 
-    if (vol_v3_base_root(v, &b1) != 0) {
+    if (vol_base_root(v, &b1) != 0) {
         ok(0, "read base root after mutations");
     } else {
         ok(b1.pba == b0.pba && b1.gen == b0.gen,
@@ -694,7 +694,7 @@ static void test_spt0_truncate_multiseg(const char *dir)
 
     printf("rollback truncates correctly across a segment rollover\n");
     /* A REAL v3 volume, not the synthetic substrate: spt0_capture refuses
-     * anything without a VOLF_V3 base root, and this leg exists to hold
+     * anything without a VOLF_META base root, and this leg exists to hold
      * the real producer (not a restatement of its formula) to the real
      * consumer. */
     snprintf(img, sizeof img, "%s/invf-delta_spt0trunc.img", dir);
@@ -714,9 +714,9 @@ static void test_spt0_truncate_multiseg(const char *dir)
      * (an empty leaf fails the tree check). So put real content in the base
      * and fold it first; the fold also empties the delta, which is what
      * makes the segment geometry below start from a known place. */
-    ok(vol_v3_write_bulk(v, "seed", (const uint8_t *)"seed content", 12,
+    ok(vol_write_bulk(v, "seed", (const uint8_t *)"seed content", 12,
                          NULL) != 0, "seed file written");
-    ok(vol_v3_fold(v) == 0, "folded the seed into the base tree");
+    ok(vol_fold(v) == 0, "folded the seed into the base tree");
 
     memset(val, 'y', sizeof val);
     for (i = 0; i < n_before; i++) {
@@ -846,13 +846,13 @@ static void run_unit(const char *dir)
     test_bitmap_before_delta_gap(dir);
     test_rollover(dir);
     test_spt0_truncate_multiseg(dir);
-    test_v3_metadata_delta(dir);
+    test_metadata_delta(dir);
 
     printf("%d checks, %d failure(s)\n", checks, failures);
 }
 
 /* ================================================================== */
-/* e2e driver (real VOLF_V3 image via vol_open)                        */
+/* e2e driver (real VOLF_META image via vol_open)                        */
 /* ================================================================== */
 
 #define E2E_N 40
@@ -874,7 +874,7 @@ static int open_v3(const char *img, invfs_volume **out)
         fprintf(stderr, "delta_test: vol_open(%s) failed: err=%d\n", img, err);
         return -1;
     }
-    if (!(vol_sb(v)->vol_flags & VOLF_V3)) {
+    if (!(vol_sb(v)->vol_flags & VOLF_META)) {
         fprintf(stderr, "delta_test: %s is not a v3 volume\n", img);
         vol_close(v);
         return -1;

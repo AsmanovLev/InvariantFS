@@ -68,7 +68,7 @@
  * spans (dl_reserve_segment, vol_delta.c:409) before any allocator call can
  * hand it out again. The deferred window can therefore strand space, never
  * alias a live block. The v3 commit-point table is
- * docs/architecture/META-V3.md 4.1; ADR-009 is the decision behind the
+ * docs/architecture/META.md 4.1; ADR-009 is the decision behind the
  * v3 fsync contract.
  *
  * WP80: the barrier before CLEAN -- vol_close barriers before it writes the

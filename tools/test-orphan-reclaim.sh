@@ -1,5 +1,5 @@
 #!/bin/bash
-# test-v3-orphan-reclaim.sh — WP121: safety proof for the v3 orphan collector.
+# test-orphan-reclaim.sh — WP121: safety proof for the v3 orphan collector.
 #
 # The collector (btree_collect_orphans) frees base pages that no live root
 # can reach. A wrong answer to that question is SILENT DATA LOSS, not a
@@ -46,8 +46,8 @@
 # finding those is the seed scan's job. Same collector, same predicate;
 # leg 8 is what pins down that bounding it did not cost anything.
 #
-# Run:  bash tools/run-e2e.sh tools/test-v3-orphan-reclaim.sh
-#   or:  bash tools/test-v3-orphan-reclaim.sh     (from make test)
+# Run:  bash tools/run-e2e.sh tools/test-orphan-reclaim.sh
+#   or:  bash tools/test-orphan-reclaim.sh     (from make test)
 set -u
 set -o pipefail
 
@@ -72,7 +72,7 @@ fi
 
 mkvol() {  # mkvol <img>
     rm -f "$1"
-    INVFS_V3=1 "$B/invf-mkfs" "$1" 0.3 >"$1.mkfs" 2>&1 \
+    "$B/invf-mkfs" "$1" 0.3 >"$1.mkfs" 2>&1 \
         || { cat "$1.mkfs"; fail "mkfs failed for $1"; }
 }
 
@@ -255,7 +255,7 @@ echo "$FSCK" | grep -q "^OK$" || { echo "$FSCK"; fail "fsck not OK after the sec
 
 echo "== leg 7: the production fold path, not a direct collector call =="
 # Legs 1-5 call vol_reclaim_orphans directly. This leg goes through
-# vol_v3_fold -> fold_reclaim_hook, which is what the FUSE drain
+# vol_fold -> fold_reclaim_hook, which is what the FUSE drain
 # (vol_sweep.c:2361-2364) actually reaches, including the RT30-slot guard
 # that stops fold_reclaim_hook's one-generation diff from freeing the root
 # the other slot still names.
@@ -297,7 +297,7 @@ echo "  gate off on the fold path: $GO orphans retained, nothing collected (expl
 # INVFS_RECLAIM_ORPHANS default-off: what does ONE CALL cost, on the path
 # fold_reclaim_hook takes on every fold?
 #
-# It drives the production fold path (vol_v3_fold -> fold_reclaim_hook ->
+# It drives the production fold path (vol_fold -> fold_reclaim_hook ->
 # vol_reclaim_orphans, the same bounded single pass) and asserts:
 #   1. no single call exceeds the hard seed-pass cap;
 #   2. the LAST fold's cost is a small fraction of one full-pool pass over

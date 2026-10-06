@@ -127,7 +127,7 @@ void invfs_test_delta_read_hook(const void *ref);
 
 /* ---- locking helpers (for callers that mutate delta state) ------------- */
 
-/* Lock the delta append mutex. Call before vol_v3_fold or any operation
+/* Lock the delta append mutex. Call before vol_fold or any operation
  * that rebuilds the delta_index. */
 void vol_delta_lock(void);
 

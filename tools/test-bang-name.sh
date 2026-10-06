@@ -1,7 +1,7 @@
 #!/bin/bash
 # test-bang-name.sh — WP135: a user file named 'a!b' must survive `rm a`.
 #
-# THE DEFECT (src/core/vol_records.c:171, inside del_siblings_v3_cb, as it
+# THE DEFECT (src/core/vol_records.c:171, inside del_siblings_cb, as it
 # stood on main 0f27208):
 #
 #     if (strncmp(path, c->name, c->nlen) != 0 || path[c->nlen] != '!')
@@ -9,7 +9,7 @@
 #
 # A PREFIX match on "name!" with no shape check on the suffix, so
 # vol_delete_siblings collected every name that merely started with "name!".
-# '!' was reserved by convention and not by construction -- vol_v3_create_node
+# '!' was reserved by convention and not by construction -- vol_create_node
 # (src/core/vol_dirs.c:274), vol_write_begin (src/core/vol_write.c:68) and
 # invf-import (tools/invf-import.c:244 -> vol_create_file_with_meta) all
 # accepted it -- so `a!b` was a perfectly legal user file, and `rm a`

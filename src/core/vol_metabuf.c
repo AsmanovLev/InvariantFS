@@ -107,7 +107,7 @@ uint32_t mbuf_page_size(const invfs_volume *v)
      * anything else rather than mis-address the bitmap. TODO(WP-M2): a
      * 16 KiB variant needs a sub-block scheme and is out of this WP. */
     (void)v;
-    return INVFS_V3_PAGE_SIZE_DEFAULT;
+    return INVFS_PAGE_SIZE_DEFAULT;
 }
 
 /* ------------------------------------------------------------------ */
@@ -224,10 +224,10 @@ void mbuf_init(invfs_volume *v)
     v->mb_boot_end = 0;
     v->mb_alloc_cursor = v->sb.metadata_zone_start;
     v->mb_alloc_fail_run = 0;
-    if (v->rt30_present && v->rt30.page_size != INVFS_BLOCK_SIZE) {
+    if (v->rt_present && v->rt.page_size != INVFS_BLOCK_SIZE) {
         fprintf(stderr, "vol_metabuf: RT30 page_size=%u is not the supported "
                 "4 KiB (D3); metadata allocator disabled\n",
-                (unsigned)v->rt30.page_size);
+                (unsigned)v->rt.page_size);
         v->mb_alloc_cursor = 0;
         return;
     }
@@ -304,7 +304,7 @@ uint64_t mbuf_alloc(invfs_volume *v, uint64_t gen)
      * value and is already handled by every caller. */
     if (v->sb.vol_flags & VOLF_READONLY)
         return 0;
-    if (v->rt30_present && v->rt30.page_size != INVFS_BLOCK_SIZE)
+    if (v->rt_present && v->rt.page_size != INVFS_BLOCK_SIZE)
         return 0;
 
     if (v->mb_boot_cursor && v->mb_boot_cursor < v->mb_boot_end) {
@@ -366,8 +366,8 @@ void mbuf_free(invfs_volume *v, uint64_t pba)
  * media says. So this prints, once per open, naming the source. */
 static void anchor_adopt_rt30(invfs_volume *v, const invfs_anc0 *a)
 {
-    v->rt30 = a->rt30;
-    v->rt30_present = 1;
+    v->rt = a->rt;
+    v->rt_present = 1;
     v->anchor_adopted = 1;
     fprintf(stderr,
             "vol_open: *** ANC0 TAIL ANCHOR ADOPTED *** block %llu: the RT30 "
@@ -375,27 +375,27 @@ static void anchor_adopt_rt30(invfs_volume *v, const invfs_anc0 *a)
             "root descriptor is being taken from the mirror at block %llu "
             "(seq=%llu, root_slot={%llu,%llu}). This volume is running on a "
             "RESTORED descriptor: block 0 is damaged and must be replaced.\n",
-            (unsigned long long)anchor_pba(v), (unsigned)INVFS_RT30_OFF,
+            (unsigned long long)anchor_pba(v), (unsigned)INVFS_RT_OFF,
             (unsigned long long)anchor_pba(v),
-            (unsigned long long)a->rt30.seq,
-            (unsigned long long)a->rt30.root_slot[0],
-            (unsigned long long)a->rt30.root_slot[1]);
+            (unsigned long long)a->rt.seq,
+            (unsigned long long)a->rt.root_slot[0],
+            (unsigned long long)a->rt.root_slot[1]);
 }
 
 int mbuf_rt30_load(invfs_volume *v)
 {
-    invfs_rt30 rt;
+    invfs_rt rt;
     if (!v)
         return -1;
-    v->rt30_present = 0;
-    memset(&v->rt30, 0, sizeof v->rt30);
-    if (io_pread(&v->io, INVFS_RT30_OFF, &rt, sizeof rt) != 0)
+    v->rt_present = 0;
+    memset(&v->rt, 0, sizeof v->rt);
+    if (io_pread(&v->io, INVFS_RT_OFF, &rt, sizeof rt) != 0)
         return -1;
     if (memcmp(rt.magic, "RT30", 4) == 0 &&
-        rt.version == INVFS_RT30_VERSION &&
-        invfs_crc32c(&rt, offsetof(invfs_rt30, crc32c)) == rt.crc32c) {
-        v->rt30 = rt;
-        v->rt30_present = 1;
+        rt.version == INVFS_RT_VERSION &&
+        invfs_crc32c(&rt, offsetof(invfs_rt, crc32c)) == rt.crc32c) {
+        v->rt = rt;
+        v->rt_present = 1;
         return 0;
     }
     /* Block 0's RT30 is either absent (magic) or torn (version/CRC). On a
@@ -405,10 +405,10 @@ int mbuf_rt30_load(invfs_volume *v)
      * and a bad CRC is still damage, with the same return values callers
      * have always seen. */
     if (v->anchor_state == INVFS_ANCHOR_OK &&
-        memcmp(v->anchor.rt30.magic, "RT30", 4) == 0 &&
-        v->anchor.rt30.version == INVFS_RT30_VERSION &&
-        invfs_crc32c(&v->anchor.rt30,
-                     offsetof(invfs_rt30, crc32c)) == v->anchor.rt30.crc32c) {
+        memcmp(v->anchor.rt.magic, "RT30", 4) == 0 &&
+        v->anchor.rt.version == INVFS_RT_VERSION &&
+        invfs_crc32c(&v->anchor.rt,
+                     offsetof(invfs_rt, crc32c)) == v->anchor.rt.crc32c) {
         anchor_adopt_rt30(v, &v->anchor);
         return 0;
     }
@@ -424,8 +424,8 @@ int mbuf_rt30_store(invfs_volume *v)
 {
     if (!v)
         return -1;
-    v->rt30.crc32c = invfs_crc32c(&v->rt30, offsetof(invfs_rt30, crc32c));
-    if (io_pwrite(&v->io, INVFS_RT30_OFF, &v->rt30, sizeof v->rt30) != 0)
+    v->rt.crc32c = invfs_crc32c(&v->rt, offsetof(invfs_rt, crc32c));
+    if (io_pwrite(&v->io, INVFS_RT_OFF, &v->rt, sizeof v->rt) != 0)
         return -1;
     /* The mirror is stale the instant the primary lands. Refreshing it here
      * rather than at the callers is deliberate: mbuf_rt30_store is the ONE
@@ -447,12 +447,12 @@ int mbuf_root_publish(invfs_volume *v, uint64_t root_pba, uint64_t root_gen)
 
     if (!v || root_pba == 0)
         return -1;
-    if (!v->rt30_present) {
-        memset(&v->rt30, 0, sizeof v->rt30);
-        memcpy(v->rt30.magic, "RT30", 4);
-        v->rt30.version = INVFS_RT30_VERSION;
-        v->rt30.page_size = INVFS_V3_PAGE_SIZE_DEFAULT;
-        v->rt30_present = 1;
+    if (!v->rt_present) {
+        memset(&v->rt, 0, sizeof v->rt);
+        memcpy(v->rt.magic, "RT30", 4);
+        v->rt.version = INVFS_RT_VERSION;
+        v->rt.page_size = INVFS_PAGE_SIZE_DEFAULT;
+        v->rt_present = 1;
     }
     /* The pointer is only published once its page is durable (caller
      * barriers COW pages first), so verify the page here: a torn or
@@ -472,20 +472,20 @@ int mbuf_root_publish(invfs_volume *v, uint64_t root_pba, uint64_t root_gen)
      * refuse a live root. That is the failure mode this must never have, so
      * the ordering that prevents it cannot live in four separate callers
      * that a fifth caller may forget. (All four existing call sites --
-     * v3_publish, vol_v3_fold, the fsck repair and spt0_restore -- already
+     * publish, vol_fold, the fsck repair and spt0_restore -- already
      * do this; re-flushing an already-clean range is a no-op, so this is
      * belt-and-braces, not duplicated I/O.) */
-    if (vol_v3_bitmap_flush(v) != 0)
+    if (vol_bitmap_flush(v) != 0)
         return -1;
 
-    slot = (uint32_t)(v->rt30.seq & 1u);
-    v->rt30.root_slot[slot] = root_pba;
-    v->rt30.seq++;
+    slot = (uint32_t)(v->rt.seq & 1u);
+    v->rt.root_slot[slot] = root_pba;
+    v->rt.seq++;
     /* One barrier covers the bitmap and the descriptor together: the
      * descriptor must never become durable before the allocation it names. */
     if (mbuf_rt30_store(v) != 0)
         return -1;
-    return vmux_barrier(v, "rt30 root publish") < 0 ? -1 : 0;
+    return vmux_barrier(v, "rt root publish") < 0 ? -1 : 0;
 }
 
 int mbuf_root_read(invfs_volume *v, uint64_t *root_pba_out,
@@ -504,7 +504,7 @@ int mbuf_root_read(invfs_volume *v, uint64_t *root_pba_out,
 
     if (!v)
         return -1;
-    if (!v->rt30_present) {
+    if (!v->rt_present) {
         int rc = mbuf_rt30_load(v);
         if (rc < 0)
             return -1;
@@ -514,7 +514,7 @@ int mbuf_root_read(invfs_volume *v, uint64_t *root_pba_out,
             return -1;  /* WP86: torn descriptor -- see mbuf_rt30_load */
     }
     for (i = 0; i < 2; i++) {
-        uint64_t pba = v->rt30.root_slot[i];
+        uint64_t pba = v->rt.root_slot[i];
         invfs_page_hdr *h;
         if (!pba)
             continue;
@@ -543,7 +543,7 @@ int mbuf_root_read(invfs_volume *v, uint64_t *root_pba_out,
          * parity points at (the most recently published one). */
         if (!have || h->gen > best_gen ||
             (h->gen == best_gen &&
-             (uint32_t)i == (uint32_t)(v->rt30.seq & 1u))) {
+             (uint32_t)i == (uint32_t)(v->rt.seq & 1u))) {
             have = 1;
             best_pba = pba;
             best_gen = h->gen;
@@ -563,7 +563,7 @@ int mbuf_root_read(invfs_volume *v, uint64_t *root_pba_out,
          * and the volume is standing on a block the allocator may re-issue"
          * without re-deriving it from a hex dump. */
         for (i = 0; i < 2; i++) {
-            uint64_t pba = v->rt30.root_slot[i];
+            uint64_t pba = v->rt.root_slot[i];
             const char *why;
             if (!pba)
                 continue;
@@ -582,9 +582,9 @@ int mbuf_root_read(invfs_volume *v, uint64_t *root_pba_out,
                     "vol: RT30 root_slot[%d] (pba %llu, %s per seq %llu) "
                     "is not usable: %s\n",
                     i, (unsigned long long)pba,
-                    ((uint32_t)i == (uint32_t)(v->rt30.seq & 1u))
+                    ((uint32_t)i == (uint32_t)(v->rt.seq & 1u))
                         ? "the newer slot" : "the older slot",
-                    (unsigned long long)v->rt30.seq, why);
+                    (unsigned long long)v->rt.seq, why);
         }
         /* The read failing above also sets `named`, so this is just "a slot
          * names a page". */

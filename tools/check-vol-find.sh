@@ -46,16 +46,16 @@ src/cli/cat.c:86:SKIP
 src/cli/cat.c:99:SKIP
 src/cli/cp.c:118:SKIP
 src/cli/heat_walk_test.c:365:SKIP
-src/cli/fuse_fs.c:1646:SKIP
-src/cli/fuse_fs.c:1982:SKIP
-src/cli/fuse_fs.c:2614:SKIP
-src/cli/fuse_fs.c:2828:SKIP
-src/cli/fuse_fs.c:2883:SKIP
-src/cli/fuse_fs.c:3144:SKIP
-src/cli/fuse_fs.c:3311:SKIP
-src/cli/fuse_fs.c:3383:SKIP
-src/cli/fuse_fs.c:3418:SKIP
-src/cli/fuse_fs.c:3455:SKIP
+src/cli/fuse_fs.c:1644:SKIP
+src/cli/fuse_fs.c:1980:SKIP
+src/cli/fuse_fs.c:2612:SKIP
+src/cli/fuse_fs.c:2826:SKIP
+src/cli/fuse_fs.c:2881:SKIP
+src/cli/fuse_fs.c:3142:SKIP
+src/cli/fuse_fs.c:3309:SKIP
+src/cli/fuse_fs.c:3381:SKIP
+src/cli/fuse_fs.c:3416:SKIP
+src/cli/fuse_fs.c:3453:SKIP
 src/cli/otrunc_test.c:568:SKIP   # calibration: the armed lookup IS the assertion
 src/cli/otrunc_test.c:572:SKIP   # calibration: the armed lookup IS the assertion
 src/cli/lane_release_test.c:242:SKIP
@@ -67,12 +67,12 @@ src/cli/rollback_symlink_test.c:223:SKIP
 src/cli/rollback_symlink_test.c:256:ACTS
 src/cli/rollback_symlink_test.c:283:ACTS
 src/cli/rollback_symlink_test.c:314:SKIP
-src/cli/rt30_slot_test.c:623:ACTS
-src/cli/sibling_retire_v3_test.c:117:ACTS
-src/cli/sibling_retire_v3_test.c:158:ACTS
-src/cli/sibling_retire_v3_test.c:185:ACTS
-src/cli/sibling_retire_v3_test.c:196:ACTS
-src/cli/sibling_retire_v3_test.c:211:ACTS
+src/cli/rt_slot_test.c:623:ACTS
+src/cli/sibling_retire_test.c:117:ACTS
+src/cli/sibling_retire_test.c:158:ACTS
+src/cli/sibling_retire_test.c:185:ACTS
+src/cli/sibling_retire_test.c:196:ACTS
+src/cli/sibling_retire_test.c:211:ACTS
 src/cli/sib_walk_test.c:199:SKIP   # rescan: whether a name resolves IS the measurement
 src/cli/sib_walk_test.c:214:SKIP   # setup: create the bracketing directory only if absent
 src/cli/bang_name_test.c:146:SKIP   # live(): whether a name resolves IS the measurement -- the defect was a name that resolved when it should not have, so the oracle must be the lookup itself
@@ -135,8 +135,8 @@ src/core/vol_sweep.c:498:ACTS
 src/core/vol_sweep.c:517:ACTS
 src/core/vol_textzone.c:679:SKIP
 src/core/vol_tier.c:304:SKIP
-src/core/volume.c:1240:SKIP   # tier_owner / rawm_owner anchors (vol_open_inner)
-src/core/volume.c:1241:SKIP   # shifted by the PERF_PROFILING counters in volume.c
+src/core/volume.c:1253:SKIP   # tier_owner / rawm_owner anchors (vol_open_inner)
+src/core/volume.c:1254:SKIP   # shifted by the PERF_PROFILING counters in volume.c
 src/recipes/zip.c:141:SKIP
 src/recipes/zip.c:145:SKIP
 src/core/vol_cpack.c:2939:SKIP   # непомечен: добавлено при правке vol_cpack.c
@@ -158,7 +158,7 @@ found_list=$(mktemp)
 trap 'rm -f "$found_list"' EXIT
 
 # Every non-definition call site, tests included: a test can hide the same
-# mistake, and sibling_retire_v3_test and rollback_symlink_test both do.
+# mistake, and sibling_retire_test and rollback_symlink_test both do.
 #
 # The comment filter must match the CONTENT, not the start of the output line.
 # grep -rn prints "file:line:content", so an anchored ^\s*\* can never match

@@ -1,5 +1,5 @@
 #!/bin/bash
-# test-v3-meta-anchor.sh — the ANC0 tail anchor: a redundant LOCATION for the
+# test-meta-anchor.sh — the ANC0 tail anchor: a redundant LOCATION for the
 # block-0 descriptors that decide whether the volume can be opened at all.
 #
 # WHAT THIS EXISTS FOR. RT30 (block 0, 0x9D0, 48 bytes) is the only copy of the
@@ -59,8 +59,8 @@
 #          must not print the recovery line -- a fallback that chatters is one
 #          nobody reads.
 #
-# Run:  bash tools/run-e2e.sh tools/test-v3-meta-anchor.sh
-#   or:  bash tools/test-v3-meta-anchor.sh     (from make test)
+# Run:  bash tools/run-e2e.sh tools/test-meta-anchor.sh
+#   or:  bash tools/test-meta-anchor.sh     (from make test)
 set -u
 set -o pipefail
 
@@ -91,7 +91,7 @@ fi
 
 mkvol() {  # mkvol <img> [MB]
     rm -f "$1"
-    INVFS_V3=1 "$B/invf-mkfs" "$1" "${2:-0.3}" >"$1.mkfs" 2>&1 \
+    "$B/invf-mkfs" "$1" "${2:-0.3}" >"$1.mkfs" 2>&1 \
         || { cat "$1.mkfs"; fail "mkfs failed for $1"; }
 }
 

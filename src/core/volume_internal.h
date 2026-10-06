@@ -195,7 +195,7 @@ int  vmux_barrier(struct invfs_volume *v, const char *what);
    name lookup without re-reading the append-only inode area on every call
    (the quadratic-mount problem they were built for). That area is gone, and
    with it the indexes: names resolve through the dirent B+-tree
-   (vol_v3_path_lookup and friends), a directory's liveness through the
+   (vol_path_lookup and friends), a directory's liveness through the
    dirents themselves, and an inode's segments through its recipe blob.
    WP-M21 had already reduced the whole set to no-op stubs; these are the
    declarations that kept the call sites compiling. */
@@ -291,7 +291,7 @@ typedef struct invfs_volume {
     uint64_t next_inode_id;
     /* WP111: the v3 inode-id allocator recovers next_inode_id from the
      * base tree + delta exactly ONCE per mount. That recovery used to be
-     * gated on `next_inode_id <= INVFS_V3_ROOT_INO` -- i.e. on the counter
+     * gated on `next_inode_id <= INVFS_ROOT_INO` -- i.e. on the counter
      * still holding its post-vol_open sentinel -- so ANY other code path
      * that incremented the counter first disabled it for the rest of the
      * mount. vol_write_begin (vol_write.c) burns an id on its first call
@@ -301,8 +301,8 @@ typedef struct invfs_volume {
      * that was already live: two dirents, one inode row, the older file's
      * content silently replaced, fsck clean. Recovery is now gated on this
      * flag, which nothing else can close. */
-    uint8_t  v3_id_recovered;
-    /* WP-M18: the pre-fold root stored at vol_v3_fold_request start so that
+    uint8_t  id_recovered;
+    /* WP-M18: the pre-fold root stored at vol_fold_request start so that
      * fold_reclaim_hook (called after fold) can diff old vs new. Cleared
      * after reclaim runs. */
     invfs_blkptr fold_pre_root;
@@ -391,7 +391,7 @@ typedef struct invfs_volume {
     size_t pba_ref_mask, pba_ref_n;
     int pba_ref_on;
     /* WP pba-ref-v3-incremental: set when a recipe was published on a path
-     * that does not adjust the map itself (every vol_v3_inode_delta_put
+     * that does not adjust the map itself (every vol_inode_delta_put
      * that CHANGES recipe_addr). pba_ref_ensure rebuilds from the live set
      * when it sees this, so the map can never gate a free on a count that
      * predates an inode. Without it the count reads 0 for a pba a live
@@ -451,7 +451,7 @@ typedef struct invfs_volume {
      * one) read in many small ranges used to reload it every time, which is
      * quadratic. */
     struct {
-        uint8_t addr[INVFS_V3_RECIPE_ADDR_LEN];
+        uint8_t addr[INVFS_RECIPE_ADDR_LEN];
         uint8_t *blob;
         size_t   len;
         int      used;
@@ -582,12 +582,12 @@ typedef struct invfs_volume {
     uint64_t meta_free_blocks;      /* metadata free block counter */
     uint8_t *meta_type_bitmap;      /* per-block type (DATA=0/META=1), allocated */
     /* ---- WP-M2: metadata-v3 base-page state (design §12, D3) ----------
-     * rt30 is the RT30 root-area descriptor as loaded from block 0 and
-     * CRC-validated (mbuf_rt30_load); rt30_present is 1 exactly when that
+     * rt is the RT30 root-area descriptor as loaded from block 0 and
+     * CRC-validated (mbuf_rt30_load); rt_present is 1 exactly when that
      * validation passed. The descriptor's root_slot[2] is the double-slot
      * base root and seq is the monotone publication generation; recovery
      * picks the slot whose page validates and carries the higher gen
-     * (mbuf_root_read). v3_probe_rt30 reports this same state for the
+     * (mbuf_root_read). probe_rt30 reports this same state for the
      * skeleton log line (it used to do its own read of block 0, which made
      * a volume that had just recovered off the ANC0 tail anchor also print
      * "presenting an empty namespace"); wiring it to mbuf_rt30_load belongs to the
@@ -596,10 +596,10 @@ typedef struct invfs_volume {
      * pages WP-M1 reserved after the mapper table before falling through
      * to the free-space pool; mb_alloc_cursor/fail_run are the per-pool
      * cursors mirroring the v2 raw/shadow pair. */
-    invfs_rt30 rt30;
-    int      rt30_present;
+    invfs_rt rt;
+    int      rt_present;
     /* ---- ANC0 tail anchor (see vol_anchor.c) --------------------------
-     * The second LOCATION for rt30 and spt0, at total_blocks - 1, readable
+     * The second LOCATION for rt and spt0, at total_blocks - 1, readable
      * without touching block 0. anchor_state is the open-time probe verdict
      * (INVFS_ANCHOR_*): INVFS_ANCHOR_OK only when the tail block really is
      * this volume's anchor, and every path that would refresh the mirror is
@@ -616,7 +616,7 @@ typedef struct invfs_volume {
     /* WP-M5: the metadata-v3 base-tree engine has been brought up on this
      * handle (mbuf_init called once). mbuf_init resets the bootstrap
      * cursor, so it must not run per operation. */
-    int      v3_mbuf_ready;
+    int      mbuf_ready;
     uint64_t mb_boot_cursor;        /* next reserved root-area pba */
     uint64_t mb_boot_end;           /* one past the reserved root-area pages */
     uint64_t mb_alloc_cursor;       /* free-space cursor within the meta zone */
@@ -878,7 +878,7 @@ typedef struct {
 typedef struct {
     uint64_t pba;      /* head block of the batch segment */
     uint64_t phys;     /* blocks in the extent, as the registry recorded it */
-} tz_v3_extent;
+} tz_extent;
 
 /* The registry's block extents as a malloc'd ASCENDING array (distinct
  * batches hold distinct, non-overlapping extents, so a binary search on pba
@@ -886,7 +886,7 @@ typedef struct {
  * empty one -- the ordinary case, NOT a failure. -1 = out of memory or a
  * malformed volume, which every caller must treat as "claim everything" (fail
  * closed). The caller frees *out. */
-int tz_v3_reg_owned_blocks(invfs_volume *v, tz_v3_extent **out, size_t *n);
+int tz_reg_owned_blocks(invfs_volume *v, tz_extent **out, size_t *n);
 
 
 /* owner inode state, loaded once and rewritten per change */
@@ -954,7 +954,7 @@ static inline int name_too_long_for_children(const char *name)
  * `rm a` DESTROYED it -- the purge's "is this my sibling" test was a prefix
  * match on "name!" with no shape check -- while reporting success. The
  * reservation is checked here, at the name-introduction sites
- * (vol_v3_create_node, vol_v3_mkdir, vol_v3_rename, vol_v3_hardlink,
+ * (vol_create_node, vol_mkdir, vol_rename, vol_v3_hardlink,
  * vol_write_begin), and NOT at lookup: a volume that already holds such a
  * name stays readable and unlinkable, so this is a restriction on creating
  * one, never a way to strand a file that is already there.
@@ -1032,7 +1032,7 @@ static inline int name_refused_internal_ns(const char *name)
  * what is provably ours", so the set of names a lane runs on grows and never
  * shrinks: there is no name for which this makes a transform unavailable. The
  * reservation itself is untouched -- a '!' is still refused at
- * vol_create_file_with_meta, vol_v3_mkdir, vol_v3_rename, the rename
+ * vol_create_file_with_meta, vol_mkdir, vol_rename, the rename
  * destination, hardlink, symlink and special -- so nothing NEW can acquire one
  * either. And bit-exactness is not what is being traded: every lane a legacy
  * name now reaches still runs its own proof (decode-and-memcmp for the packs,
@@ -1092,7 +1092,7 @@ static inline void vol_bm_dirty(invfs_volume *v, uint64_t i)
  * The order, precisely: unsigned byte-lexicographic over the whole key,
  * shorter-first on a strict prefix. There is no type tag in the comparison
  * itself. The namespaces sort because their leading bytes do
- * (INVFS_V3_XATTR_KEY_PREFIX 0x03, INVFS_V3_RECIPE_KEY_PREFIX 0x04 --
+ * (INVFS_XATTR_KEY_PREFIX 0x03, INVFS_RECIPE_KEY_PREFIX 0x04 --
  * invarifs.h:1337,1349), and because every field after a tag is fixed-width
  * BIG-ENDIAN, byte order over the key IS numeric order on the inode ids,
  * name lengths and BLAKE3 digests inside it.
@@ -1428,7 +1428,7 @@ void pba_ref_modify(invfs_volume *v, uint64_t pba, int delta);
 uint32_t pba_ref_count(invfs_volume *v, uint64_t pba);
 /* drop the map; the next pba_ref_ensure rebuilds it from the live set */
 void pba_ref_reset(invfs_volume *v);
-/* WP pba-ref-v3-incremental: the v3 hook pair. vol_v3_inode_delta_put calls
+/* WP pba-ref-v3-incremental: the v3 hook pair. vol_inode_delta_put calls
  * pba_ref_invalidate when it publishes a DIFFERENT recipe_addr (the one
  * place every v3 recipe publish funnels through); the two callers that
  * adjust the map themselves (the sweep's segment remap, dedupe's remap)
@@ -1458,11 +1458,11 @@ void pba_ref_validate(invfs_volume *v);
  *     pba_ref_ensure(v);               // the map, while the name is there
  *     <drop the dirent>                // the walk can no longer reach it
  *     <drop the row>
- *     vol_v3_free_recipe_blocks(...);  // the -1, against a map that held us
+ *     vol_free_recipe_blocks(...);  // the -1, against a map that held us
  *     vol_pba_ref_release(v);
  *
  * Depth-counted and built on a RECURSIVE mutex, because the retire paths
- * nest: vol_v3_unlink calls vol_delete_siblings, which calls vol_v3_unlink
+ * nest: vol_unlink calls vol_delete_siblings, which calls vol_unlink
  * again, so a flag would unlock early. */
 void vol_pba_ref_hold(invfs_volume *v);
 void vol_pba_ref_release(invfs_volume *v);
@@ -1630,15 +1630,15 @@ int vol_read_inode(invfs_volume *v, uint64_t inode_id, unsigned depth,
                           uint8_t **out, size_t *out_len);
 
 /* WP75: persist the dirty range of the v3 block bitmap (vol_btree.c). Called
- * by v3_publish before it names a page, and by vol_flush so allocations and
+ * by publish before it names a page, and by vol_flush so allocations and
  * frees that land after the last publish are not dropped at close. */
-int vol_v3_bitmap_flush(invfs_volume *v);
+int vol_bitmap_flush(invfs_volume *v);
 
 /* WP-M8: content-addressed immutable recipe blobs (vol_btree.c). */
-int vol_v3_recipe_store(invfs_volume *v, const uint8_t *blob, size_t blen,
-                        uint8_t addr_out[INVFS_V3_RECIPE_ADDR_LEN]);
-int vol_v3_recipe_load(invfs_volume *v,
-                       const uint8_t addr[INVFS_V3_RECIPE_ADDR_LEN],
+int vol_recipe_store(invfs_volume *v, const uint8_t *blob, size_t blen,
+                        uint8_t addr_out[INVFS_RECIPE_ADDR_LEN]);
+int vol_recipe_load(invfs_volume *v,
+                       const uint8_t addr[INVFS_RECIPE_ADDR_LEN],
                        uint8_t **blob_out, size_t *blen_out);
 /* WP-M8: recipe blob serialize/parse (vol_ast.c). */
 int vol_ast_recipe_serialize(uint64_t file_size,
@@ -1653,7 +1653,7 @@ int vol_ast_recipe_windows(const uint8_t *blob, size_t blen,
                            const invfs_ast_hdr *hdr,
                            const invfs_ast_window_entry **wins_out,
                            uint32_t *n_out);
-uint64_t vol_v3_publish_window_inode(invfs_volume *v, const char *name,
+uint64_t vol_publish_window_inode(invfs_volume *v, const char *name,
                                      uint64_t src_inode, uint64_t src_off,
                                      uint64_t length, uint64_t src_len,
                                      uint32_t transform,
@@ -1664,12 +1664,12 @@ int vol_ast_recipe_parse(const uint8_t *blob, size_t blen,
                          invfs_ast_hdr *hdr_out,
                          const invfs_ast_block_entry **ents_out,
                          size_t *nents_out);
-int vol_v3_free_recipe_blocks(invfs_volume *v,
-                             const uint8_t recipe_addr[INVFS_V3_RECIPE_ADDR_LEN],
+int vol_free_recipe_blocks(invfs_volume *v,
+                             const uint8_t recipe_addr[INVFS_RECIPE_ADDR_LEN],
                              uint64_t keep_pba);
-void vol_v3_release_superseded_blob(
+void vol_release_superseded_blob(
     invfs_volume *v, uint64_t inode_id,
-    const uint8_t old_addr[INVFS_V3_RECIPE_ADDR_LEN]);
+    const uint8_t old_addr[INVFS_RECIPE_ADDR_LEN]);
 int sweep_enospc(invfs_volume *v, uint64_t need_bytes);
 uint16_t tz_codec_gen(uint32_t algo);
 
@@ -1936,7 +1936,7 @@ void cpack_rollback_commit(invfs_volume *v, uint64_t newino,
 uint64_t vol_create_blob_file(invfs_volume *v, const char *name,
                                      const uint8_t *blob, size_t blob_len,
                                      uint64_t orig_size, uint32_t algo);
-uint64_t vol_v3_publish_blob_inode(invfs_volume *v, uint64_t inode_id,
+uint64_t vol_publish_blob_inode(invfs_volume *v, uint64_t inode_id,
                                    const uint8_t *blob, size_t blob_len,
                                    uint64_t orig_size, uint32_t algo);
 void cpack_map_cache_reset(invfs_volume *v);

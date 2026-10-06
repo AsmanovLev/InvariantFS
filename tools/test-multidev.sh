@@ -27,9 +27,9 @@
 #   leg 8  resize: grow lands on the tail device (dev1); shrink refused
 #   leg 9  fsck clean on both legs + a single-device smoke (compat)
 #
-# All nine legs pass on BOTH formats. Legs 7-8 were red on Meta-v3 because
+# All nine legs pass on BOTH formats. Legs 7-8 were red on Meta because
 # the whole two-device commit tail -- vol_write_devt with its sync_seq bump,
-# and mirror_resync -- sat in the v2 half of vol_flush, which the VOLF_V3
+# and mirror_resync -- sat in the v2 half of vol_flush, which the VOLF_META
 # branch returns out of (volume.c, the early return WP98 already had to fix
 # once for the tier/RAW-mirror indexes). The DEVT sync_seq was therefore
 # frozen at its mkfs value for the life of every v3 volume, so the staleness
@@ -77,9 +77,9 @@ pba0() {
 }
 # which format is this volume? Printed once so a failure names the format it
 # happened on. Nothing gates on it any more: WP98 made the WP25 owner indexes
-# (tier + RAW mirror) durable on Meta-v3 as well as v2, so every assertion
+# (tier + RAW mirror) durable on Meta as well as v2, so every assertion
 # below is format-independent (see leg 4).
-vol_is_v3() { $B/invf-fsck "$1" 2>/dev/null | grep -q "format:       v3"; }
+vol_is_meta() { $B/invf-fsck "$1" 2>/dev/null | grep -q "format:       v0"; }
 
 echo "== leg 1: build the two-device volume =="
 $B/invf-mkfs "$D0" 0.125 "$D1" 0.25 | tee "$WORK/mkfs.log"
@@ -96,7 +96,7 @@ AR_HI=$(sed -n 's/.*tier arena: *blocks [0-9]* \.\. \([0-9]*\).*/\1/p' "$WORK/mk
 dd if="$D0" bs=1 skip=672 count=4 status=none | grep -q DEVT || fail "no DEVT on dev0"
 dd if="$D1" bs=1 skip=672 count=4 status=none | grep -q DEVT || fail "no DEVT on dev1"
 echo "geometry: raw $RAW_LO..$RAW_HI, arena $AR_LO..$AR_HI, shadow $SH_LO.."
-if vol_is_v3 "$D0"; then echo "format: v3 (Meta-v3)"; else echo "format: v2"; fi
+if vol_is_meta "$D0"; then echo "format: v3 (Meta-v3)"; else echo "format: v2"; fi
 
 echo "== leg 2: import mixed corpus -> sweep -> verify --deep =="
 python3 - <<'PY'
@@ -163,10 +163,10 @@ TC=$($B/invf-stats "$D0" | sed -n 's/.*tier (dev0 copies): \([0-9]*\) live.*/\1/
 # v2-only, with a byte-scan fallback for v3, because the two WP25 indexes were
 # persisted through v2 owner records and wp25_index_load_one() read them back
 # with meta_read_record_by_id() -- a v2 record-stream lookup that finds nothing
-# on Meta-v3, so both indexes were RAM-only across a reopen. On v3 the owner is
+# on Meta, so both indexes were RAM-only across a reopen. On v3 the owner is
 # a hidden file whose content IS the index (a recipe blob whose AST entries
 # carry each copy's pba and block count), published with
-# vol_v3_publish_blob_inode and read back with vol_read_file. So invf-stats --
+# vol_publish_blob_inode and read back with vol_read_file. So invf-stats --
 # a fresh open -- must now see the copies the sweep made, on either format.
 [ "${TC:-0}" -ge 1 ] || fail "no live tier copies after the sweep (index did not survive the reopen)"
 # the dev0 copy is byte-identical to the canonical dev1 segment
@@ -247,7 +247,7 @@ PY
     $B/invf-sweep "$E0" > "$WORK/e-sweepA.log" 2>&1 || fail "sweep promote A"
     grep -q "^tier: [1-9]" "$WORK/e-sweepA.log" || fail "A not promoted"
     # the two "copies live" counts come from invf-stats, i.e. a REOPEN, and
-    # WP98 made the WP25 index survive one on Meta-v3 as well as v2 (leg 4
+    # WP98 made the WP25 index survive one on Meta as well as v2 (leg 4
     # explains the shape), so both are asserted unconditionally now. The
     # promotion and the demotion themselves are also read out of the sweep's
     # own tier: line, asserted below.
@@ -327,8 +327,8 @@ echo "reattach: RW resumed, writes + reads bit-exact"
 echo "== leg 7: mirror resync (stale dev0) =="
 # WP99: the DEVT sync_seq is the protocol's own staleness sequence, bumped
 # once per two-device flush. It is asserted here MOVING, because it used to
-# be frozen at its mkfs value on Meta-v3: the bump lived in the v2 tail of
-# vol_flush, which the VOLF_V3 branch returns out of (the same early-return
+# be frozen at its mkfs value on Meta: the bump lived in the v2 tail of
+# vol_flush, which the VOLF_META branch returns out of (the same early-return
 # trap WP98 hit for the tier/RAW-mirror indexes). A frozen sequence means
 # the divergence DETECTION below can never fire -- and the rewind this leg
 # performs rolls dev0's block 0 back, which on v3 carries the RT30 root
@@ -436,7 +436,7 @@ grep -q "invf-resize: OK" "$WORK/resize.log" || fail "resize not OK"
 [ "$(stat -c %s "$D1")" -gt "$SZ1_BEFORE" ] || fail "dev1 did not grow"
 # dev0's size must not move
 [ "$(stat -c %s "$D0")" = "134217728" ] || fail "dev0 changed size"
-# WP99: this `0 corrupt` used to be red on Meta-v3, and it was never a
+# WP99: this `0 corrupt` used to be red on Meta, and it was never a
 # resize bug -- leg 7's rewind had already rolled dev0's block 0 back, so
 # the RT30 root descriptor inside it was a rolled-back generation and the
 # next write published from it, dropping the delta records past it. Leg 7

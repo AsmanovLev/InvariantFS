@@ -5,26 +5,26 @@
  * THE DEFECT, at src/core/vol_textzone.c:327 and :422 -- ONE collapse, TWO
  * sites, and they have to move together:
  *
- *     :320  static int tz_v3_reg_load(invfs_volume *v, tz_v3_reg *r)
+ *     :320  static int tz_reg_load(invfs_volume *v, tz_reg *r)
  *     :327      r->owner_id = vol_find(v, TZ_OWNER_NAME);
  *     :328      if (!r->owner_id) return 0;        <-- 0 == SUCCESS, n == 0
  *
- *     :411  static int tz_v3_reg_store(invfs_volume *v, tz_v3_reg *r)
+ *     :411  static int tz_reg_store(invfs_volume *v, tz_reg *r)
  *     :422      id = vol_find(v, TZ_OWNER_NAME);
  *     :423      if (id) { ...publish over the existing inode... }
  *     :428      else    { vol_create_blob_file(...); }   <-- overwrites anyway
  *
  * vol_find returns a uint64_t, so "there is no registry" and "the lookup could
- * not be COMPLETED" are both 0. tz_v3_reg_load therefore returns 0 -- its
- * SUCCESS answer -- with reg.n == 0. tz_v3_flush (:601) accepts that, seals
- * this run's batches, appends them to the empty reg, and tz_v3_reg_store
+ * not be COMPLETED" are both 0. tz_reg_load therefore returns 0 -- its
+ * SUCCESS answer -- with reg.n == 0. tz_flush (:601) accepts that, seals
+ * this run's batches, appends them to the empty reg, and tz_reg_store
  * (:792/:422) PUBLISHES THE BLOB WITH THIS RUN'S ENTRIES ONLY.
  *
  * Every pre-existing entry is gone. And those rows are not bookkeeping: a
  * registry row is the ONLY record that a batch segment exists and who owns it
  * (the header comment at vol_textzone.c:270-291 says so). Losing them makes
- * live batch segments unreachable -- tz_v3_gc can never see them, so it can
- * never free them, and tz_v3_reg_owned_blocks (:385, the owner set spn_reclaim
+ * live batch segments unreachable -- tz_gc can never see them, so it can
+ * never free them, and tz_reg_owned_blocks (:385, the owner set spn_reclaim
  * consults) stops claiming their blocks too. The loss is IRREVERSIBLE: the
  * old blob is overwritten, not shadowed.
  *
@@ -39,12 +39,12 @@
  * been written, and a read that did not complete has established nothing of
  * the kind. So both lookups use vol_find_rc and REFUSE on the third answer.
  * At :327 that is `return -1`, which every caller already handles as failure
- * (:385, :601, :824 all do `if (tz_v3_reg_load(v, &reg) != 0) return -1;`), so
+ * (:385, :601, :824 all do `if (tz_reg_load(v, &reg) != 0) return -1;`), so
  * the sweep reports an error instead of rewriting the registry. At :422 it is
- * `return -1`, which tz_v3_flush turns into rc = -1 (:792).
+ * `return -1`, which tz_flush turns into rc = -1 (:792).
  *
- * SEAM DISCIPLINE (src/core/vol_fault.h). INVFS_FAULT="v3_dirent_row_read:<n>"
- * -- the dirent row read in vol_v3_dirent_get, which is what a quarantined base
+ * SEAM DISCIPLINE (src/core/vol_fault.h). INVFS_FAULT="dirent_row_read:<n>"
+ * -- the dirent row read in vol_dirent_get, which is what a quarantined base
  * page fails. The site is in vol_btree.c, so arming goes through
  * invfs_vol_btree_fault_reload(); unsetenv+setenv is NOT equivalent (the freed
  * spec string is very often handed back at the same address, the pointer
@@ -57,7 +57,7 @@
  *
  * THE REGISTRY IS PARSED HERE, NOT TAKEN FROM THE ENGINE. The on-disk format
  * is [4B "TZV3"][4B n][n * {u32 seq, u32 algo, u64 pba, u32 phys}]
- * (TZ_V3_REG_MAGIC / tz_v3_reg_ent, src/core/vol_textzone.c), read here with
+ * (TZ_REG_MAGIC / tz_reg_ent, src/core/vol_textzone.c), read here with
  * vol_find + vol_read_file -- both long-standing public entry points. A
  * regression test that only builds because the fix introduced an accessor is a
  * tautology, not a red control. A row that does not parse (a pba outside the
@@ -85,7 +85,7 @@
 extern void invfs_vol_btree_fault_reload(void);
 
 #define TZ_REG_MAGIC   0x33565a54u   /* "TZV3", vol_textzone.c:291 */
-#define TZ_ROW_SZ      24u           /* tz_v3_reg_ent on LP64 */
+#define TZ_ROW_SZ      24u           /* tz_reg_ent on LP64 */
 #define TZ_OFF_PBA      8u
 #define TZ_OFF_PHYS    16u
 #define NFILES          6
@@ -313,7 +313,7 @@ static int one_run(invfs_volume *v, const char *run, int armed, int n)
     for (i = 0; i < NFILES; i++) {
         uint64_t id;
         snprintf(name, sizeof name, "%s%u.txt", run, (unsigned)i);
-        id = vol_v3_write_bulk(v, name, body, blen, NULL);
+        id = vol_write_bulk(v, name, body, blen, NULL);
         if (!id) {
             printf("  [%s] could not write %s\n", run, name);
             free(body);
@@ -323,7 +323,7 @@ static int one_run(invfs_volume *v, const char *run, int armed, int n)
     for (i = 0; i < NFILES; i++) {
         uint64_t id = 0;
         snprintf(name, sizeof name, "%s%u.txt", run, (unsigned)i);
-        if (vol_v3_path_lookup(v, name, &id) != 1) {
+        if (vol_path_lookup(v, name, &id) != 1) {
             printf("  [%s] %s does not resolve\n", run, name);
             free(body);
             return -1;
@@ -338,7 +338,7 @@ static int one_run(invfs_volume *v, const char *run, int armed, int n)
     free(body);
 
     if (armed) {
-        snprintf(spec, sizeof spec, "v3_dirent_row_read:%d", n);
+        snprintf(spec, sizeof spec, "dirent_row_read:%d", n);
         setenv("INVFS_FAULT", spec, 1);
         invfs_vol_btree_fault_reload();
     }
@@ -476,10 +476,10 @@ static void leg_red(void)
 
     /* PART A -- the deterministic assertion, at countdown position 1.
      * Position 1 is not a guess: vol_tz_flush calls tz_flush_one_v3(v, 0)
-     * first, and its FIRST act is tz_v3_reg_load (vol_textzone.c:601), whose
-     * first act is vol_find(TZ_OWNER_NAME) (:327) -> vol_v3_path_lookup ->
-     * one vol_v3_dirent_get. Nothing else touches a dirent row before it. */
-    printf("  -- position n=1: tz_v3_reg_load's OWN lookup, "
+     * first, and its FIRST act is tz_reg_load (vol_textzone.c:601), whose
+     * first act is vol_find(TZ_OWNER_NAME) (:327) -> vol_path_lookup ->
+     * one vol_dirent_get. Nothing else touches a dirent row before it. */
+    printf("  -- position n=1: tz_reg_load's OWN lookup, "
            "deterministically\n");
     fflush(stdout);
     red_attempt(1, &p);

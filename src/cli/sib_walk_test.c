@@ -4,7 +4,7 @@
  *
  * THE DEFECT (src/core/vol_records.c:194, inside vol_delete_siblings):
  *
- *     vol_v3_walk(v, del_siblings_v3_cb, &c);     // status discarded
+ *     vol_walk(v, del_siblings_cb, &c);     // status discarded
  *
  * The callback collects the `name!partN` siblings of a container and the
  * caller unlinks exactly `c.n` of them. A walk that stops reports
@@ -17,13 +17,13 @@
  * WHY "NOTHING" AND NOT "THE PREFIX" -- and the test measures both halves
  * ================================================================
  *
- * Leg B (STOP) is the assigned defect: arm `v3_walk_dir_stop`, the seam at
- * the top of v3_walk_dir, and the walk returns -1 having delivered a prefix
+ * Leg B (STOP) is the assigned defect: arm `walk_dir_stop`, the seam at
+ * the top of walk_dir, and the walk returns -1 having delivered a prefix
  * of the namespace. The prefix purge frees the containers it reached and
  * leaves the rest live forever.
  *
  * Leg C (SKIP) is the arm that makes "unlink half a container's parts is
- * worse than leaving them all" NON-HYPOTHETICAL. `v3_walk_dir_row` makes
+ * worse than leaving them all" NON-HYPOTHETICAL. `walk_dir_row` makes
  * one entry's inode row fail to read, and the LENIENT walk `continue`s past
  * it -- the walk returns 0, "complete", having silently skipped exactly one
  * sibling. A prefix purge then frees 3 of a 4-part container and leaves the
@@ -51,9 +51,9 @@
  * and the leg then measures the healthy path and goes green proving nothing
  * (src/core/vol_fault.h:68-87).
  *
- * THE SEAM'S ORDINAL IS NOT A CONSTANT. v3_walk_dir is RECURSIVE and
- * consults `v3_walk_dir_stop` once per directory LEVEL, so the ordinal is a
- * level, not an entry; `v3_walk_dir_row` is consulted once per ENTRY of the
+ * THE SEAM'S ORDINAL IS NOT A CONSTANT. walk_dir is RECURSIVE and
+ * consults `walk_dir_stop` once per directory LEVEL, so the ordinal is a
+ * level, not an entry; `walk_dir_row` is consulted once per ENTRY of the
  * level being walked. Which entry sits at position 1 depends on the listing
  * order, and the listing order is a qsort of whatever the dirent tree yields
  * (src/core/vol_dirs.c:266). So this test SEARCHES every position, prints a
@@ -104,7 +104,7 @@ extern void invfs_vol_dirs_fault_reload(void);
  *     z.tar  z.tar!part0 .. z.tar!part3
  *
  * strcmp order at the root is exactly that ("b.tar" < "b.tar!part0" <
- * "m_dir" < "z.tar"), and v3_walk_dir recurses into a directory at the point
+ * "m_dir" < "z.tar"), and walk_dir recurses into a directory at the point
  * it reaches it in the listing (src/core/vol_dirs.c:918), so a stop on
  * entering m_dir has delivered every b.tar sibling and no z.tar one. That is
  * the partial view this finding is about. */
@@ -205,9 +205,9 @@ static int build_fixture(void)
     for (c = 0; c < NC; c++) {
         for (p = 0; p < NPARTS; p++) {
             snprintf(sib[c][p], sizeof sib[c][p], "%s!part%d", cname[c], p);
-            (void)vol_v3_unlink(g_v, sib[c][p]);   /* start from a clean slate */
+            (void)vol_unlink(g_v, sib[c][p]);   /* start from a clean slate */
         }
-        (void)vol_v3_unlink(g_v, cname[c]);
+        (void)vol_unlink(g_v, cname[c]);
         if (vol_replace_file(g_v, cname[c], g_tar, g_tar_len) == 0) return -1;
         if (vol_create_tar_file(g_v, cname[c], g_tar, g_tar_len) == 0) return -1;
     }
@@ -263,7 +263,7 @@ static void disarm(void)
 /* ---- the probe walk (read-only) ------------------------------------ */
 
 /* Records which fixture siblings the walk delivered. Identical before and
- * after the fix -- it calls vol_v3_walk directly and never mutates -- so the
+ * after the fix -- it calls vol_walk directly and never mutates -- so the
  * POSITION SEARCH cannot itself depend on the fix. That matters: the fix
  * makes the purge write NOTHING on a short walk, so a search that
  * discriminated on "some siblings went and some did not" would find no
@@ -294,7 +294,7 @@ static int probe_at(const char *site, int pos, int *total)
     for (i = 0; i < NPARTS; i++) probe_p[i] = 0;
     arm(site, pos);
     nseen = 0;
-    rc = vol_v3_walk(g_v, probe_cb, NULL);
+    rc = vol_walk(g_v, probe_cb, NULL);
     disarm();
     for (i = 0; i < nseen; i++) {
         int c, p;
@@ -431,11 +431,11 @@ int main(int argc, char **argv)
        "siblings live (%d expected)", NC, n, NC * NPARTS);
 
     /* ---- POSITION SEARCH: the STOP seam (one per directory LEVEL) ---- */
-    info("position search, v3_walk_dir_stop (consulted once per directory "
+    info("position search, walk_dir_stop (consulted once per directory "
          "LEVEL -- it is not an entry ordinal):");
     for (i = 1; i <= NPOS; i++) {
         int total;
-        int rc = probe_at("v3_walk_dir_stop", i, &total);
+        int rc = probe_at("walk_dir_stop", i, &total);
         info("  pos %2d: walk rc=%d, reached %d/%d sibling(s)  [b.tar %d/%d, "
              "z.tar %d/%d]%s", i, rc, total, NC * NPARTS,
              probe_c[0], NPARTS, probe_c[1], NPARTS,
@@ -457,12 +457,12 @@ int main(int argc, char **argv)
        "partial view under test", ndisc_stop, NC * NPARTS);
 
     /* ---- POSITION SEARCH: the ROW seam (once per ENTRY of a level) ---- */
-    info("position search, v3_walk_dir_row (consulted once per ENTRY; the "
+    info("position search, walk_dir_row (consulted once per ENTRY; the "
          "LENIENT walk steps over a row it cannot read and still says "
          "complete):");
     for (i = 1; i <= NPOS; i++) {
         int total;
-        int rc = probe_at("v3_walk_dir_row", i, &total);
+        int rc = probe_at("walk_dir_row", i, &total);
         info("  pos %2d: walk rc=%d, reached %d/%d sibling(s)  [b.tar %d/%d, "
              "z.tar %d/%d]%s", i, rc, total, NC * NPARTS,
              probe_c[0], NPARTS, probe_c[1], NPARTS,
@@ -515,7 +515,7 @@ int main(int argc, char **argv)
      * fix changes is that it is REPORTED instead of silent. */
     if (stop_pos > 0 && build_fixture() == NC * NPARTS) {
         int p, z_alive = 0, b_alive = 0;
-        arm("v3_walk_dir_stop", stop_pos);
+        arm("walk_dir_stop", stop_pos);
         run_capture(purge_second);
         disarm();
         rescan();
@@ -557,7 +557,7 @@ int main(int argc, char **argv)
      * stop, and a caller can never be handed a partial sibling set. */
     if (stop_pos > 0 && build_fixture() == NC * NPARTS) {
         int alive = 0, c, p;
-        arm("v3_walk_dir_stop", stop_pos);
+        arm("walk_dir_stop", stop_pos);
         run_capture(purge_first);
         disarm();
         rescan();
@@ -587,7 +587,7 @@ int main(int argc, char **argv)
      * survivors. Nothing recovers that. */
     if (row_pos > 0 && build_fixture() == NC * NPARTS) {
         int alive = 0, c, p, b_alive = 0;
-        arm("v3_walk_dir_row", row_pos);
+        arm("walk_dir_row", row_pos);
         run_capture(purge_first);
         disarm();
         rescan();

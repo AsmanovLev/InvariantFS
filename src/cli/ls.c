@@ -52,7 +52,7 @@ int main(int argc, char **argv)
 
     /* WP-M21b: on a v3 volume there is no v2 record stream to scan -- the
      * namespace IS the dirent tree. Walk it recursively (vol_list_dir is
-     * v3-aware via vol_v3_path_list_dir) and keep the listing contract
+     * v3-aware via vol_path_list_dir) and keep the listing contract
      * byte-shaped as before: "  %8llu bytes  inode %llu  %s" per live
      * name, directory anchors as "0 bytes ... name/", and the live count
      * as the final "N file(s)" line. Container-member lines are v2-AST

@@ -48,7 +48,7 @@ The contract needed to be made explicit, correct, and testable.
    becoming the flusher and the rest waiting on that one flush. The
    guarantee is per CALL and is unchanged; the flush count is per flush
    window. See `src/core/blkio.c` and
-   `docs/architecture/META-V3.md` §4.
+   `docs/architecture/META.md` §4.
 
    Two things this explicitly does **not** authorise, which the measurement
    surfaced and which remain open:
@@ -79,7 +79,7 @@ The contract needed to be made explicit, correct, and testable.
    refused mutations, and the no-CLEAN close are what is exercised.
 
 The full contract, including the commit-point table and the
-structure-before-reference rule, is in `docs/architecture/META-V3.md` §4.
+structure-before-reference rule, is in `docs/architecture/META.md` §4.
 
 ## Consequences
 

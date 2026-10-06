@@ -2,13 +2,13 @@
  *
  * WHAT THIS IS
  * ------------
- * `vol_v3_inode_get` returned -1 for an inode that was present, live and
+ * `vol_inode_get` returned -1 for an inode that was present, live and
  * internally consistent, at ~1e-5 of all reads under a concurrent fold
  * (src/cli/concurrency_test.c measured it; it is gated there now).
  *
  * The cause was NOT "the lookup races the publisher", which is what the
- * original report claimed. Instrumenting every -1 return of vol_v3_inode_get
- * put 100% of them in one place -- v3_ino_decode() failing on a DELTA row
+ * original report claimed. Instrumenting every -1 return of vol_inode_get
+ * put 100% of them in one place -- ino_decode() failing on a DELTA row
  * (vol_btree.c:3591) -- and the bytes it was handed were all zeros:
  *
  *     TAG3 seg=897947 off=5402 vlen=114 rlen=114 b0=00000000 b4=00000000
@@ -19,7 +19,7 @@
  *      copies the ref {seg, off, vlen} BY VALUE, then RELEASES the lock.
  *   2. vol_delta_read_value re-reads the record with two bare preads, with no
  *      lock at all. The ref names a block range, not a copy of the bytes.
- *   3. vol_v3_fold's tail drops the index and frees every block of the retired
+ *   3. vol_fold's tail drops the index and frees every block of the retired
  *      chain -- outside the lock that guards the index.
  *   4. The next delta_new_segment gets those blocks straight back from the
  *      allocator and writes a segment header plus ZEROS over all 128 KiB.
@@ -142,9 +142,9 @@ static void ino_key(uint64_t id, uint8_t k[8])
 
 static uint16_t ino_row(uint8_t *buf, uint64_t size)
 {
-    invfs_v3_inode_row r;
+    invfs_inode_row r;
     memset(&r, 0, sizeof r);
-    r.row_version = INVFS_V3_INODE_ROW_VERSION;
+    r.row_version = INVFS_INODE_ROW_VERSION;
     r.type = INVFS_ITYP_REG;
     r.mode = INO_MODE;
     r.uid = 1000;
@@ -159,13 +159,13 @@ static uint16_t ino_row(uint8_t *buf, uint64_t size)
 
 static int delta_put_inode(uint64_t id, uint64_t size)
 {
-    uint8_t k[8], v[INVFS_V3_INODE_ROW_FIXED];
+    uint8_t k[8], v[INVFS_INODE_ROW_FIXED];
     ino_key(id, k);
     return vol_delta_append(g_v, k, sizeof k, v, ino_row(v, size), 0);
 }
 
 /* The reader thread. One call; the test parks it inside the seam. */
-static invfs_v3_inode g_got;
+static invfs_inode g_got;
 static int            g_rc;
 
 static void *reader_thread(void *arg)
@@ -173,7 +173,7 @@ static void *reader_thread(void *arg)
     (void)arg;
     memset(&g_got, 0, sizeof g_got);
     g_reader = pthread_self();
-    g_rc = vol_v3_inode_get(g_v, INO_ID, &g_got);
+    g_rc = vol_inode_get(g_v, INO_ID, &g_got);
     return NULL;
 }
 
@@ -182,7 +182,7 @@ static volatile int g_fold_done;
 static void *fold_thread(void *arg)
 {
     (void)arg;
-    (void)vol_v3_fold(g_v);
+    (void)vol_fold(g_v);
     g_fold_done = 1;
     return NULL;
 }
@@ -203,7 +203,7 @@ int main(int argc, char **argv)
     char img[512], cmd[1024];
     pthread_t rt, ft;
     int err = 0, i, recycled = 0, fold_returned_early;
-    uint8_t probe[INVFS_V3_INODE_ROW_FIXED];
+    uint8_t probe[INVFS_INODE_ROW_FIXED];
     delta_ref ref;
 
     printf("fold/delta-read race test (WP-inode-get-fold-race)\n");
@@ -225,8 +225,8 @@ int main(int argc, char **argv)
      * deliberately resolved from the DELTA, so the seam is reached: a base
      * read never enters vol_delta_read_value. */
     {
-        invfs_v3_inode in;
-        uint8_t k[8], v[INVFS_V3_INODE_ROW_FIXED];
+        invfs_inode in;
+        uint8_t k[8], v[INVFS_INODE_ROW_FIXED];
         memset(&in, 0, sizeof in);
         in.type = INVFS_ITYP_REG;
         in.mode = INO_MODE;
@@ -234,7 +234,7 @@ int main(int argc, char **argv)
         in.nlink = 1;
         in.size = 4321;
         in.mtime = in.atime = (int64_t)1700000000;
-        ok(vol_v3_inode_put(g_v, INO_ID, &in) == 0, "base put inode 42");
+        ok(vol_inode_put(g_v, INO_ID, &in) == 0, "base put inode 42");
         /* Now a DELTA row for the same id: newer, different size, so the
          * test can tell which copy the reader returned. */
         ino_key(INO_ID, k);
@@ -249,8 +249,8 @@ int main(int argc, char **argv)
 
     /* Sanity: the read resolves out of the delta and matches the delta row. */
     {
-        invfs_v3_inode in;
-        ok(vol_v3_inode_get(g_v, INO_ID, &in) == 1 && in.size == INO_SIZE,
+        invfs_inode in;
+        ok(vol_inode_get(g_v, INO_ID, &in) == 1 && in.size == INO_SIZE,
            "pre-state: the delta row shadows the base row");
     }
 
@@ -286,7 +286,7 @@ int main(int argc, char **argv)
          * needs a new segment allocates a fresh 32-block stripe from the pool
          * the fold just freed (delta_new_segment zeroes it), so enough records
          * walk the allocator across the whole freed range. */
-        uint8_t want[INVFS_V3_INODE_ROW_FIXED];
+        uint8_t want[INVFS_INODE_ROW_FIXED];
         (void)ino_row(want, INO_SIZE);
         for (i = 0; i < 4000; i++)
             delta_put_inode(5000 + (uint64_t)i, 20);
@@ -326,7 +326,7 @@ int main(int argc, char **argv)
     /* THE ASSERTION: the read-path outcome. Not "did it return" -- the row
      * itself, field for field, against the exact bytes that were appended.
      * Pre-fix g_rc is -1 (decoded from the recycled block). */
-    ok(g_rc == 1, "vol_v3_inode_get returned the row (1), not an error");
+    ok(g_rc == 1, "vol_inode_get returned the row (1), not an error");
     if (g_rc == 1) {
         ok(g_got.type == INVFS_ITYP_REG, "row: type is REG");
         ok((g_got.mode & 07777) == INO_MODE, "row: mode is 0644");
@@ -346,8 +346,8 @@ int main(int argc, char **argv)
     /* And the volume is still whole: the same key reads back correctly with
      * no threads running at all. */
     {
-        invfs_v3_inode in;
-        int r = vol_v3_inode_get(g_v, INO_ID, &in);
+        invfs_inode in;
+        int r = vol_inode_get(g_v, INO_ID, &in);
         ok(r == 1 && in.size == INO_SIZE,
            "post-state: inode 42 still reads back with its own value");
     }

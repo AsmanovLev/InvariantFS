@@ -4,8 +4,8 @@
  * The defect. src/core/vol_heat.c took the status of a live-inode walk and
  * threw it away, twice:
  *
- *     :587   (void)vol_v3_iter_live_inodes(v, heat_decay_v3_cb,  &ctx);
- *     :733   (void)vol_v3_iter_live_inodes(v, heat_promote_v3_cb, &ctx);
+ *     :587   (void)vol_iter_live_inodes(v, heat_decay_cb,  &ctx);
+ *     :733   (void)vol_iter_live_inodes(v, heat_promote_cb, &ctx);
  *
  * A stopped walk always reports "I saw exactly what I stored" -- found == n,
  * because that is literally true -- so a caller with no truncation signal
@@ -295,7 +295,7 @@ static int probe_at(int pos, int *files_reached)
     arm_row(spec);
     probe_rows = 0;
     memset(probe_hit, 0, sizeof probe_hit);
-    rc = vol_v3_iter_live_inodes(g_v, probe_cb, NULL);
+    rc = vol_iter_live_inodes(g_v, probe_cb, NULL);
     disarm();
     for (k = 0; k < NFILES; k++)
         n += probe_hit[k];

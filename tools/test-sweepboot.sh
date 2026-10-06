@@ -173,7 +173,7 @@ echo
 echo "== [6] the maintenance pass itself: invf-sweep --seal =="
 # the exact argv sweepboot-init.sh issues (step 3) on the swept image.
 # WP101: --seal does NOT seal a Meta-v3 volume. vol_seal.c refuses it up
-# front ("NOT IMPLEMENTED on Meta-v3", see impl_docs/AUDIT.md WP-SEAL-V3)
+# front ("which has no parity seal", see impl_docs/AUDIT.md WP-SEAL-V3)
 # and mkfs writes v3, so the old "seal succeeded and printed [seal]" pair
 # of assertions had been a hard failure since the v2 machinery was retired.
 # What is asserted here is the refusal plus the volume being untouched by
@@ -181,7 +181,7 @@ echo "== [6] the maintenance pass itself: invf-sweep --seal =="
 INVFS_CODECPACKS="$WORK/packs2" $B/invf-sweep "$IMG" --seal > "$WORK/seal.log" 2>&1 \
     && sealrc=0 || sealrc=$?   # a non-zero rc is the expected v3 answer here
 [ "$sealrc" -ne 0 ] || fail "v3: --seal reported success (it must refuse)"
-grep -q "NOT IMPLEMENTED on Meta-v3" "$WORK/seal.log" \
+grep -q "which has no parity seal" "$WORK/seal.log" \
     || { cat "$WORK/seal.log"; fail "v3: --seal failed without saying why"; }
 echo "  --seal refused with a diagnostic (rc=$sealrc), as it must on v3"
 # everything still bit-exact, volume clean

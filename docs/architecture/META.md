@@ -114,13 +114,13 @@ namespaces are kept disjoint by key *length* and by a prefix byte
   A directory's own anchor entry has `name_len == 0`.
 - **Xattrs**: `0x03 || inode_id:u64 BE || name_len:u16 BE || name`
   (`v3_xattr_key`, `src/core/vol_btree.c:2780-2792`; prefix
-  `INVFS_V3_XATTR_KEY_PREFIX` = `0x03`, `src/core/invarifs.h:1272`). The
+  `INVFS_XATTR_KEY_PREFIX` = `0x03`, `src/core/invarifs.h:1272`). The
   value is the raw xattr value bytes. Values too large for one base page use
   **continuation keys**: the same key with `0x00 || chunk_index:u16 BE`
   appended (`v3_xattr_chunk_key`, `src/core/vol_btree.c:2795-2803`); an xattr
   name cannot contain NUL, so the two key shapes are unambiguous.
 - **Recipe blobs**: `0x04 || BLAKE3-256(serialized recipe)[32]`
-  (`INVFS_V3_RECIPE_KEY_PREFIX` = `0x04`, `src/core/invarifs.h:1282`). This
+  (`INVFS_RECIPE_KEY_PREFIX` = `0x04`, `src/core/invarifs.h:1282`). This
   is why identical recipes dedup to one key, and why a recipe lookup
   recomputes the hash and hard-fails on mismatch rather than decoding.
 
@@ -293,4 +293,4 @@ volume and report EIO (`tools/test-flushfail.sh`). On v3 the delta tail is
 already barriered, so the hook's v2 inode-area zeroing is a no-op; what it
 exercises on v3 is the latch, the refused later mutations, and the
 no-CLEAN close. The fsync-durability crash test is
-`tools/test-v3-fsync-crash.sh`.
+`tools/test-fsync-crash.sh`.

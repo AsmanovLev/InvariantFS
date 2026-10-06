@@ -1,4 +1,4 @@
-/* v3inode.c — WP-M5 e2e driver for the metadata-v3 inode tree.
+/* vnode.c — WP-M5 e2e driver for the metadata-v3 inode tree.
  *
  * Until WP-M6 (dirents) lands there is no name -> inode resolution on a v3
  * volume, so the inode tree is exercised directly by id. This tool is the
@@ -6,14 +6,14 @@
  * at the library level), mutates/reads one inode row, and closes cleanly.
  *
  * usage:
- *   invf-v3inode <img> put <id> <type> <mode-octal> <uid> <gid> <size>
- *   invf-v3inode <img> get <id>
- *   invf-v3inode <img> del <id>
- *   invf-v3inode <img> dirent get <parent-id> <name>
- *   invf-v3inode <img> dirent put <parent-id> <name> <child-id>
- *   invf-v3inode <img> dirent del <parent-id> <name>
- *   invf-v3inode <img> nlink put <id> <nlink>
- *   invf-v3inode <img> nlink audit
+ *   invf-vnode <img> put <id> <type> <mode-octal> <uid> <gid> <size>
+ *   invf-vnode <img> get <id>
+ *   invf-vnode <img> del <id>
+ *   invf-vnode <img> dirent get <parent-id> <name>
+ *   invf-vnode <img> dirent put <parent-id> <name> <child-id>
+ *   invf-vnode <img> dirent del <parent-id> <name>
+ *   invf-vnode <img> nlink put <id> <nlink>
+ *   invf-vnode <img> nlink audit
  *
  * get prints one line and exits 0 when the row is present, 1 when absent,
  * 2 on a usage/open error. `nlink audit` exits 3 on a fan-in mismatch, like
@@ -69,8 +69,8 @@ static int cmd_dirent(const char *img, int argc, char **argv)
         /* the DELTA tier, like every live namespace write: a base put on a
          * volume whose entries have not been folded yet would be shadowed
          * by the delta and read back as "not there" */
-        if (vol_v3_dirent_delta_put(v, parent, argv[5], child) != 0) {
-            fprintf(stderr, "vol_v3_dirent_delta_put(%llu, %s, %llu) failed\n",
+        if (vol_dirent_delta_put(v, parent, argv[5], child) != 0) {
+            fprintf(stderr, "vol_dirent_delta_put(%llu, %s, %llu) failed\n",
                     (unsigned long long)parent, argv[5],
                     (unsigned long long)child);
             vol_close(v);
@@ -84,8 +84,8 @@ static int cmd_dirent(const char *img, int argc, char **argv)
     }
     if (!strcmp(op, "del")) {
         if (argc != 6) { usage(argv[0]); vol_close(v); return 2; }
-        if (vol_v3_dirent_delta_del(v, parent, argv[5]) != 0) {
-            fprintf(stderr, "vol_v3_dirent_delta_del(%llu, %s) failed\n",
+        if (vol_dirent_delta_del(v, parent, argv[5]) != 0) {
+            fprintf(stderr, "vol_dirent_delta_del(%llu, %s) failed\n",
                     (unsigned long long)parent, argv[5]);
             vol_close(v);
             return 2;
@@ -97,7 +97,7 @@ static int cmd_dirent(const char *img, int argc, char **argv)
     }
     if (strcmp(op, "get") != 0) { usage(argv[0]); vol_close(v); return 2; }
     if (argc != 6) { usage(argv[0]); vol_close(v); return 2; }
-    rc = vol_v3_dirent_get(v, parent, argv[5], &got);
+    rc = vol_dirent_get(v, parent, argv[5], &got);
     if (rc != 1) {
         printf("absent parent=%llu name=%s (rc=%d)\n",
                (unsigned long long)parent, argv[5], rc);
@@ -119,7 +119,7 @@ static int cmd_nlink(const char *img, int argc, char **argv)
 {
     invfs_volume *v;
     const char *op;
-    invfs_v3_inode in;
+    invfs_inode in;
     invfs_nlink_audit a;
     uint64_t id, i;
     int rc;
@@ -131,7 +131,7 @@ static int cmd_nlink(const char *img, int argc, char **argv)
     if (!strcmp(op, "put")) {
         if (argc != 6) { usage(argv[0]); vol_close(v); return 2; }
         id = strtoull(argv[4], NULL, 0);
-        if (vol_v3_inode_get(v, id, &in) != 1) {
+        if (vol_inode_get(v, id, &in) != 1) {
             fprintf(stderr, "inode %llu is absent\n", (unsigned long long)id);
             vol_close(v);
             return 1;
@@ -139,8 +139,8 @@ static int cmd_nlink(const char *img, int argc, char **argv)
         in.nlink = (uint32_t)strtoul(argv[5], NULL, 0);
         /* delta tier, like vol_v3_hardlink: a base put is shadowed by the
          * delta's copy of the same row */
-        if (vol_v3_inode_delta_put(v, id, &in) != 0) {
-            fprintf(stderr, "vol_v3_inode_delta_put(%llu) failed\n",
+        if (vol_inode_delta_put(v, id, &in) != 0) {
+            fprintf(stderr, "vol_inode_delta_put(%llu) failed\n",
                     (unsigned long long)id);
             vol_close(v);
             return 2;
@@ -152,9 +152,9 @@ static int cmd_nlink(const char *img, int argc, char **argv)
     }
     if (strcmp(op, "audit") != 0) { usage(argv[0]); vol_close(v); return 2; }
     if (argc != 4) { usage(argv[0]); vol_close(v); return 2; }
-    rc = vol_v3_nlink_audit(v, &a);
+    rc = vol_nlink_audit(v, &a);
     if (rc != 0) {
-        fprintf(stderr, "vol_v3_nlink_audit failed (rc=%d)\n", rc);
+        fprintf(stderr, "vol_nlink_audit failed (rc=%d)\n", rc);
         vol_close(v);
         return 2;
     }
@@ -182,7 +182,7 @@ static int open_vol(const char *path, invfs_volume **out)
         fprintf(stderr, "vol_open(%s) failed: err=%d\n", path, err);
         return -1;
     }
-    if (!(vol_sb(v)->vol_flags & VOLF_V3)) {
+    if (!(vol_sb(v)->vol_flags & VOLF_META)) {
         fprintf(stderr, "%s: not a v3 volume (vol_flags=0x%08x)\n",
                 path, (unsigned)vol_sb(v)->vol_flags);
         vol_close(v);
@@ -195,7 +195,7 @@ static int open_vol(const char *path, invfs_volume **out)
 static int cmd_put(const char *img, int argc, char **argv)
 {
     invfs_volume *v;
-    invfs_v3_inode in;
+    invfs_inode in;
     uint64_t id;
     time_t now;
 
@@ -216,8 +216,8 @@ static int cmd_put(const char *img, int argc, char **argv)
 
     if (open_vol(img, &v) != 0)
         return 2;
-    if (vol_v3_inode_put(v, id, &in) != 0) {
-        fprintf(stderr, "vol_v3_inode_put(%llu) failed\n",
+    if (vol_inode_put(v, id, &in) != 0) {
+        fprintf(stderr, "vol_inode_put(%llu) failed\n",
                 (unsigned long long)id);
         vol_close(v);
         return 2;
@@ -232,7 +232,7 @@ static int cmd_put(const char *img, int argc, char **argv)
 static int cmd_get(const char *img, int argc, char **argv)
 {
     invfs_volume *v;
-    invfs_v3_inode in;
+    invfs_inode in;
     invfs_meta_pub m;
     uint64_t id;
     int rc;
@@ -242,7 +242,7 @@ static int cmd_get(const char *img, int argc, char **argv)
     if (open_vol(img, &v) != 0)
         return 2;
 
-    rc = vol_v3_inode_get(v, id, &in);
+    rc = vol_inode_get(v, id, &in);
     if (rc != 1) {
         printf("absent id=%llu (rc=%d)\n", (unsigned long long)id, rc);
         vol_close(v);
@@ -278,8 +278,8 @@ static int cmd_del(const char *img, int argc, char **argv)
     id = strtoull(argv[3], NULL, 0);
     if (open_vol(img, &v) != 0)
         return 2;
-    if (vol_v3_inode_delete(v, id) != 0) {
-        fprintf(stderr, "vol_v3_inode_delete(%llu) failed\n",
+    if (vol_inode_delete(v, id) != 0) {
+        fprintf(stderr, "vol_inode_delete(%llu) failed\n",
                 (unsigned long long)id);
         vol_close(v);
         return 2;

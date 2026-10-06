@@ -100,3 +100,4 @@ CLAUDE.md
 # Untracked because the committed AGENTS.md used to cite it and a tracked file may not
 # cite an ignored path.
 .claude/
+.pi/

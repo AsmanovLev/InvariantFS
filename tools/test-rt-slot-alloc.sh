@@ -1,5 +1,5 @@
 #!/bin/bash
-# test-v3-rt30-slot-alloc.sh — WP123: the RT30 READER must enforce the
+# test-rt-slot-alloc.sh — WP123: the RT30 READER must enforce the
 # allocation invariant, not just the page-integrity one.
 #
 # RT30 is a double-slot root descriptor (WP86): mbuf_root_publish writes one
@@ -50,8 +50,8 @@
 # against a pre-WP123 binary -- it exits 0 only when the reader adopts the
 # freed block, which is exactly the bug.
 #
-# Run:  bash tools/run-e2e.sh tools/test-v3-rt30-slot-alloc.sh
-#   or:  bash tools/test-v3-rt30-slot-alloc.sh     (from make test)
+# Run:  bash tools/run-e2e.sh tools/test-rt-slot-alloc.sh
+#   or:  bash tools/test-rt-slot-alloc.sh     (from make test)
 set -u
 set -o pipefail
 
@@ -61,7 +61,7 @@ REPO="$(cd "$(dirname "$0")/.." && pwd)"
 # which no other host has.
 . "$REPO/tools/lib-scratch.sh"
 B=$REPO/bin
-T=$B/invf-rt30_slot_test
+T=$B/invf-rt_slot_test
 # WP123-FIX: a single fixed scratch made this suite collide with itself.
 # Every worktree's `make test` starts with `rm -rf "$WORK"`, so two agents
 # running `make test` concurrently deleted each other's images and reported
@@ -69,7 +69,7 @@ T=$B/invf-rt30_slot_test
 # leg 4, then leg 1, then leg 2), which is the signature of the collision
 # rather than of any one bug. Default to a per-process directory; the
 # explicit override is still honoured, and each run cleans up only its own.
-WORK=${INVFS_RT30_SLOT_WORK:-$(invfs_scratch_root)/rt30-slot-$$}
+WORK=${INVFS_RT_SLOT_WORK:-$(invfs_scratch_root)/rt30-slot-$$}
 NFILES=40
 NGENS=60
 
@@ -78,13 +78,13 @@ cd "$WORK" || exit 1
 
 fail() { echo "FAIL: $*" >&2; exit 1; }
 
-[ -x "$T" ] || make -C "$REPO" bin/invf-rt30_slot_test >/dev/null 2>&1 \
-    || fail "cannot build bin/invf-rt30_slot_test"
+[ -x "$T" ] || make -C "$REPO" bin/invf-rt_slot_test >/dev/null 2>&1 \
+    || fail "cannot build bin/invf-rt_slot_test"
 [ -x "$B/invf-fsck" ] || fail "bin/invf-fsck missing (run make)"
 
 mkvol() {  # mkvol <img>
     rm -f "$1"
-    INVFS_V3=1 "$B/invf-mkfs" "$1" 0.3 >"$1.mkfs" 2>&1 \
+    "$B/invf-mkfs" "$1" 0.3 >"$1.mkfs" 2>&1 \
         || { cat "$1.mkfs"; fail "mkfs failed for $1"; }
 }
 

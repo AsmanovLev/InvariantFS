@@ -41,7 +41,7 @@
  * before the file ends, so forward-declare rather than include it twice. */
 typedef struct invfs_volume invfs_volume;
 
-/* Test seam: called by v3_base_root immediately after it has captured the
+/* Test seam: called by base_root immediately after it has captured the
  * current base root into *out, and before ANY caller walks it. That is the
  * one point every base-tree read passes through, and it sits exactly on the
  * boundary the reclaim reader epoch has to span -- the reader is holding a

@@ -1,6 +1,6 @@
 /* bang_name_test.c — WP135: `a!b` must SURVIVE `rm a`.
  *
- * THE DEFECT (src/core/vol_records.c:171, inside del_siblings_v3_cb):
+ * THE DEFECT (src/core/vol_records.c:171, inside del_siblings_cb):
  *
  *     if (strncmp(path, c->name, c->nlen) != 0 || path[c->nlen] != '!')
  *         return 0;
@@ -8,7 +8,7 @@
  * That is a PREFIX match on "name!" with no shape check on the suffix, so
  * every name that merely starts with `name!` is collected by
  * vol_delete_siblings and then unlinked (src/core/vol_records.c:297-298).
- * `!` is reserved by convention and not by construction: vol_v3_create_node
+ * `!` is reserved by convention and not by construction: vol_create_node
  * (src/core/vol_dirs.c:274), vol_write_begin (src/core/vol_write.c:68) and
  * vol_create_file / vol_create_file_with_meta (src/core/vol_records.c:11,
  * :24 -- `invf-cp` and `invf-import`) all accept it. So `a!b` is a legal user
@@ -295,7 +295,7 @@ static void leg_a_user_name_survives(void)
        "the unlink");
     (void)id_a; (void)id_ab;
 
-    ok(vol_v3_unlink(g_v, "a") == 0,
+    ok(vol_unlink(g_v, "a") == 0,
        "unlink('a') reports success -- which is what it did before the fix too");
 
     /* THE RED ASSERTION. It must be that the file is GONE, not that the
@@ -350,7 +350,7 @@ static void leg_a2_neighbour_names_survive(void)
         put_internal(collide[i], "PAYLOAD-COLLIDE\n");
     put(victim, PAY_A);
 
-    ok(vol_v3_unlink(g_v, victim) == 0, "unlink('n') reports success");
+    ok(vol_unlink(g_v, victim) == 0, "unlink('n') reports success");
 
     for (i = 0; i < sizeof safe / sizeof safe[0]; i++)
         ok(live(safe[i]),
@@ -396,7 +396,7 @@ static void leg_b_purge_still_works(const uint8_t *tar, size_t tarlen)
        parts_live, TAR_PARTS, CN);
     info("setup: '%s' live=%d", rn, live(rn));
 
-    ok(vol_v3_unlink(g_v, CN) == 0, "unlink('%s') reports success", CN);
+    ok(vol_unlink(g_v, CN) == 0, "unlink('%s') reports success", CN);
 
     ok(!live(CN), "'%s' is gone", CN);
     for (i = 0; i < TAR_PARTS; i++) {
@@ -458,7 +458,7 @@ static void leg_c_every_real_shape_is_collected(void)
        "setup: %d/%d sibling shapes live before the unlink",
        n_before, (int)(sizeof shapes / sizeof shapes[0]));
 
-    ok(vol_v3_unlink(g_v, PARENT) == 0, "unlink('%s') reports success", PARENT);
+    ok(vol_unlink(g_v, PARENT) == 0, "unlink('%s') reports success", PARENT);
 
     for (i = 0; i < sizeof shapes / sizeof shapes[0]; i++)
         n_after += live(shapes[i]);
@@ -483,8 +483,8 @@ static void leg_c_every_real_shape_is_collected(void)
  *   vol_create_file_with_meta       invf-import (empty nodes)
  *   vol_create_symlink              FUSE symlink
  *   vol_create_special              FUSE mknod, invf-import
- *   vol_v3_mkdir                    FUSE mkdir, invf-import
- *   vol_v3_rename                   FUSE rename (the target only)
+ *   vol_mkdir                    FUSE mkdir, invf-import
+ *   vol_rename                   FUSE rename (the target only)
  *
  * NOT a boundary, and this test pins why: vol_create_file and
  * vol_write_begin are LANE-CAPABLE (vol_cpack.c:3622 creates a
@@ -531,8 +531,8 @@ static void leg_d_boundary_refuses_bang(void)
     /* rename: the TARGET is refused; the SOURCE must stay usable so a file
      * already on the reserved namespace can be moved OFF it. */
     put("plain-src", "PAYLOAD-PLAIN\n");
-    ok(vol_v3_rename(g_v, "plain-src", N) != 0,
-       "vol_v3_rename(\"plain-src\", \"%s\") is REFUSED", N);
+    ok(vol_rename(g_v, "plain-src", N) != 0,
+       "vol_rename(\"plain-src\", \"%s\") is REFUSED", N);
     ok(live("plain-src"), "the rename SOURCE is untouched");
     ok(!live(N), "'%s' was not created by the refused rename", N);
 

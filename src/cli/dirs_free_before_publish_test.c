@@ -1,18 +1,18 @@
 /*
  * dirs_free_before_publish_test.c — WP wp/dirs-free-before-publish
  *
- * THE FINDING. vol_v3_create_node (src/core/vol_dirs.c:319) frees the
+ * THE FINDING. vol_create_node (src/core/vol_dirs.c:319) frees the
  * existing inode's data blocks BEFORE it republishes the inode row, and four
  * `return 0` sites sit between the free and the publish. Every one of them
  * leaves a LIVE row naming blocks that are now free and re-allocatable. Its
- * own twin, vol_v3_unlink (:600), deletes the row first and frees second, and
+ * own twin, vol_unlink (:600), deletes the row first and frees second, and
  * says why at :640-644: freeing first "would let a failure between the two
  * leave a LIVE row pointing at freed blocks, which is a bit-exactness
  * violation and strictly worse than the leak this reports."
  *
  * Reachability is ordinary use: vol_replace_file dispatches an O_TRUNC
  * open(2) (src/cli/fuse_fs.c:1541) and an empty create to
- * vol_v3_create_node(vol_dirs.c:990). The trigger is a volume that cannot
+ * vol_create_node(vol_dirs.c:990). The trigger is a volume that cannot
  * append the delta record -- a volume filling up, the normal end of every
  * filesystem's life.
  *
@@ -24,7 +24,7 @@
  * old value the cache still points at. Rather than add a reload helper to a
  * shared header to work around that, the setup runs in its OWN PROCESS:
  * `setup` writes victim.bin and closes; `red` then opens with the arming
- * already in its environment, so the FIRST v3_inode_delta_put call in
+ * already in its environment, so the FIRST inode_delta_put call in
  * the process is the truncate's. No re-arm, no reload helper, no cached
  * state. The `ok(rc == 0)` assertion in the `red` leg is what PROVES that:
  * if the armed call were not the truncate's, the truncate would succeed and
@@ -46,7 +46,7 @@
  * Phases (argv[2]):
  *
  *   setup    mkfs, write victim.bin, record the pbas its recipe names.
- *   hookctl  prove the injector fires on v3_inode_delta_put and is
+ *   hookctl  prove the injector fires on inode_delta_put and is
  *            one-shot, so `red` cannot pass vacuously.
  *   red      O_TRUNC with the armed publish. Red without the fix.
  *   ok       the pre-existing safe path: the truncate must still SUCCEED,
@@ -98,13 +98,13 @@ static void note(const char *fmt, ...)
 /* ---- what does the LIVE row name? ---- */
 
 static int inode_row(invfs_volume *v, const char *path, uint64_t *id_out,
-                     invfs_v3_inode *in_out)
+                     invfs_inode *in_out)
 {
     uint64_t id = 0;
-    invfs_v3_inode in;
+    invfs_inode in;
 
-    if (vol_v3_path_lookup(v, path, &id) != 1) return -1;
-    if (vol_v3_inode_get(v, id, &in) != 1) return -1;
+    if (vol_path_lookup(v, path, &id) != 1) return -1;
+    if (vol_inode_get(v, id, &in) != 1) return -1;
     if (id_out) *id_out = id;
     if (in_out) *in_out = in;
     return 0;
@@ -112,12 +112,12 @@ static int inode_row(invfs_volume *v, const char *path, uint64_t *id_out,
 
 /* Every non-TEXT pba the LIVE row for `path` names. zone==TEXT entries are
  * shared batch segments owned by the batch registry, and
- * vol_v3_free_recipe_blocks deliberately skips them (vol_ast.c:159-161), so
+ * vol_free_recipe_blocks deliberately skips them (vol_ast.c:159-161), so
  * counting them would report blocks this path never freed. */
 static int recipe_pbas(invfs_volume *v, const char *path,
                        uint64_t *out, int max, int *n_out)
 {
-    invfs_v3_inode in;
+    invfs_inode in;
     uint8_t *blob = NULL;
     size_t blen = 0;
     invfs_ast_hdr ah;
@@ -128,7 +128,7 @@ static int recipe_pbas(invfs_volume *v, const char *path,
     *n_out = 0;
     if (inode_row(v, path, NULL, &in) != 0) return -1;
     if (in.size == 0) return 0;
-    if (vol_v3_recipe_load(v, in.recipe_addr, &blob, &blen) != 0 || !blob)
+    if (vol_recipe_load(v, in.recipe_addr, &blob, &blen) != 0 || !blob)
         return -1;
     if (vol_ast_recipe_parse(blob, blen, &ah, &ents, &n) == 0 && ents) {
         for (i = 0; i < n && m < max; i++)
@@ -248,7 +248,7 @@ static int count_free(invfs_volume *v, const uint64_t *pbas, int n,
 static void print_row(invfs_volume *v, const char *label, const char *path,
                       const uint8_t *old_addr)
 {
-    invfs_v3_inode in;
+    invfs_inode in;
     uint64_t id = 0, pa[MAXPB];
     int na = 0, i, nfree;
 
@@ -262,7 +262,7 @@ static void print_row(invfs_volume *v, const char *label, const char *path,
          label, path, (unsigned long long)id, (int)in.type,
          (unsigned long long)in.size,
          old_addr ? (memcmp(in.recipe_addr, old_addr,
-                            INVFS_V3_RECIPE_ADDR_LEN) == 0
+                            INVFS_RECIPE_ADDR_LEN) == 0
                         ? "UNCHANGED (still the pre-truncate recipe)"
                         : "moved") : "?");
     note("  [%s] %s: row names %d pba(s), %d of them FREE in the bitmap\n",
@@ -283,7 +283,7 @@ static int oracle(invfs_volume *v, const char *name, const uint8_t *want,
     size_t len = 0, i, firstbad = want_len;
     int rc, same;
 
-    if (vol_v3_path_lookup(v, name, &id) != 1) {
+    if (vol_path_lookup(v, name, &id) != 1) {
         printf("  [oracle %s] %s: NAME IS GONE\n", tag, name);
         ok(0, "%s", tag);
         return 0;
@@ -325,7 +325,7 @@ static int leg_setup(void)
     printf("== leg setup: write victim.bin (%zu bytes) ==\n", FILE_SZ);
     mkfs_fresh();
     v = open_vol();
-    ok(vol_v3_write_bulk(v, "victim.bin", a, FILE_SZ, NULL) != 0,
+    ok(vol_write_bulk(v, "victim.bin", a, FILE_SZ, NULL) != 0,
        "wrote victim.bin");
     ok(recipe_pbas(v, "victim.bin", pa, MAXPB, &n) == 0 && n > 0,
        "victim.bin's recipe names %d pba(s)", n);
@@ -350,14 +350,14 @@ static int leg_hookctl(void)
     uint64_t rc;
     invfs_volume *v;
 
-    printf("== leg hookctl: the injector really fires on v3_inode_delta_put ==\n");
+    printf("== leg hookctl: the injector really fires on inode_delta_put ==\n");
     mkfs_fresh();
-    setenv("INVFS_FAULT", "v3_inode_delta_put:1", 1);
+    setenv("INVFS_FAULT", "inode_delta_put:1", 1);
     v = open_vol();
-    rc = vol_v3_write_bulk(v, "ctl.bin", a, FILE_SZ, NULL);
-    ok(rc == 0, "a plain write is refused when v3_inode_delta_put:1 is armed");
+    rc = vol_write_bulk(v, "ctl.bin", a, FILE_SZ, NULL);
+    ok(rc == 0, "a plain write is refused when inode_delta_put:1 is armed");
     /* one-shot: the very next attempt takes the normal path */
-    rc = vol_v3_write_bulk(v, "ctl.bin", a, FILE_SZ, NULL);
+    rc = vol_write_bulk(v, "ctl.bin", a, FILE_SZ, NULL);
     ok(rc != 0, "the fault is one-shot: the next write succeeds");
     oracle(v, "ctl.bin", a, FILE_SZ,
            "the file written after the one-shot fault is byte-exact");
@@ -373,7 +373,7 @@ static int leg_hookctl(void)
 static int leg_red(void)
 {
     uint8_t *a = mk_file(0), *b = mk_file(1);
-    uint8_t old_addr[INVFS_V3_RECIPE_ADDR_LEN];
+    uint8_t old_addr[INVFS_RECIPE_ADDR_LEN];
     uint64_t old_pba[MAXPB], new_pba[MAXPB];
     int n_old, n_new = 0, nfree, nshared;
     uint64_t first_free = 0, rc;
@@ -387,13 +387,13 @@ static int leg_red(void)
     printf("\n");
 
     /* The arming is in this process's environment BEFORE vol_open, so the
-     * first v3_inode_delta_put call in the process is the truncate's.
+     * first inode_delta_put call in the process is the truncate's.
      * The rc == 0 assertion below is what proves it. */
-    setenv("INVFS_FAULT", "v3_inode_delta_put:1", 1);
+    setenv("INVFS_FAULT", "inode_delta_put:1", 1);
     v = open_vol();
 
     {
-        invfs_v3_inode in;
+        invfs_inode in;
         if (inode_row(v, "victim.bin", NULL, &in) != 0) {
             fprintf(stderr, "victim.bin is gone -- run `setup` first\n");
             return 2;
@@ -427,7 +427,7 @@ static int leg_red(void)
        "names is free");
 
     /* ASSERTION 2 (BYTES): the consequence */
-    if (vol_v3_write_bulk(v, "thief.bin", b, FILE_SZ, NULL) == 0) {
+    if (vol_write_bulk(v, "thief.bin", b, FILE_SZ, NULL) == 0) {
         printf("  (thief.bin write refused -- volume full; ASSERTION 1 "
                "already stands)\n");
     } else {
@@ -445,7 +445,7 @@ static int leg_red(void)
         oracle(v, "thief.bin", b, FILE_SZ, "control: thief.bin is byte-exact");
         {
             uint64_t id; uint8_t *buf; size_t len;
-            if (vol_v3_path_lookup(v, "victim.bin", &id) == 1 &&
+            if (vol_path_lookup(v, "victim.bin", &id) == 1 &&
                 vol_read_inode(v, id, 0, &buf, &len) == 0) {
                 dump_bytes("victim_readback", buf, len);
                 free(buf);
@@ -468,7 +468,7 @@ done:
 static int leg_ok(void)
 {
     uint8_t *a = mk_file(0), *b = mk_file(1), *c;
-    uint8_t old_addr[INVFS_V3_RECIPE_ADDR_LEN];
+    uint8_t old_addr[INVFS_RECIPE_ADDR_LEN];
     uint64_t old_pba[MAXPB], new_pba[MAXPB];
     int n_old, n_new = 0, nfree, nshared;
     uint64_t rc;
@@ -478,11 +478,11 @@ static int leg_ok(void)
     v = open_vol();
     n_old = pbas_read(old_pba, MAXPB);
     {
-        invfs_v3_inode in;
+        invfs_inode in;
         inode_row(v, "victim.bin", NULL, &in);
         memcpy(old_addr, in.recipe_addr, sizeof old_addr);
     }
-    ok(vol_v3_write_bulk(v, "bystander.bin", b, FILE_SZ, NULL) != 0,
+    ok(vol_write_bulk(v, "bystander.bin", b, FILE_SZ, NULL) != 0,
        "setup: wrote bystander.bin (shares nothing with victim.bin)");
     oracle(v, "victim.bin", a, FILE_SZ, "setup: victim.bin byte-exact");
     oracle(v, "bystander.bin", b, FILE_SZ, "setup: bystander.bin byte-exact");
@@ -502,7 +502,7 @@ static int leg_ok(void)
     ok(nfree == n_old,
        "RECLAIM: the successful truncate freed every block the old recipe named");
 
-    ok(vol_v3_write_bulk(v, "thief.bin", b, FILE_SZ, NULL) != 0,
+    ok(vol_write_bulk(v, "thief.bin", b, FILE_SZ, NULL) != 0,
        "a new file can be written into the reclaimed space");
     if (recipe_pbas(v, "thief.bin", new_pba, MAXPB, &n_new) == 0) {
         nshared = shares_pba(old_pba, n_old, new_pba, n_new);
@@ -515,7 +515,7 @@ static int leg_ok(void)
     }
 
     c = mk_file(1);
-    ok(vol_v3_write_bulk(v, "victim.bin", c, FILE_SZ, NULL) != 0,
+    ok(vol_write_bulk(v, "victim.bin", c, FILE_SZ, NULL) != 0,
        "rewrote victim.bin after the truncate");
     oracle(v, "victim.bin", c, FILE_SZ,
            "BIT-EXACT: victim.bin is byte-exact after truncate + rewrite");

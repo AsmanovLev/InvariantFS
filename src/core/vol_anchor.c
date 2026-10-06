@@ -96,7 +96,7 @@ void anchor_build(const invfs_volume *v, invfs_anc0 *out)
     /* Verbatim copies, CRC fields included: the mirror is the descriptors as
      * they were when they were last STORED, and mbuf_rt30_store /
      * spt0_store have already stamped them by the time they call us. */
-    out->rt30 = v->rt30;
+    out->rt = v->rt;
     out->spt0 = v->spt0;
     out->crc32c = 0;
     out->crc32c = anchor_crc(out);

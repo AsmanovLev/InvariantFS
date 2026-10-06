@@ -1,7 +1,7 @@
 /*
- * pbaref_v3_test.c — WP: pba-ref-v3-incremental
+ * pbaref_test.c — WP: pba-ref-v3-incremental
  *
- * MEASUREMENT harness for the pba reference map on Meta-v3, the sole gate
+ * MEASUREMENT harness for the pba reference map on Meta, the sole gate
  * on every block free (pba_ref_ensure -> src/core/volume.c:3975, v3 branch
  * at :3986-3987; the gate at src/core/vol_ast.c:177-182).
  *
@@ -12,13 +12,13 @@
  *   setup        mkfs, write A + B with a shared 64 KiB segment, dedupe so
  *                both recipes name segment P, record P.
  *   sweep        second sweep (vol_sweep_dedupe_ex)  -- leg (i)
- *   rewrite      vol_v3_write_bulk over A             -- leg (ii)
- *   unlink       vol_v3_unlink(B)                    -- leg (iii)
+ *   rewrite      vol_write_bulk over A             -- leg (ii)
+ *   unlink       vol_unlink(B)                    -- leg (iii)
  *   check        report P's allocation state, dump A for `cmp`
  *   red          (i)(ii)(iii) in ONE session, rewrite KEEPS P
  *   rednosweep   same WITHOUT leg (i)
  *   all / allnosweep  (i)(ii)(iii) in one session, rewrite DROPS P
- *   hookctl      red control for "vol_v3_inode_delta_put has no pba_ref hook"
+ *   hookctl      red control for "vol_inode_delta_put has no pba_ref hook"
  *
  * The oracle is always read-back-bytes, never invf-verify --deep: an
  * invfs_ast_block_entry carries a pba, not a content hash, so a recipe that
@@ -34,8 +34,8 @@
 #include "invarifs.h"
 #include "volume_internal.h"
 
-/* The cross-TU fault door. The site is v3_inode_row_read, inside
- * vol_v3_inode_get (src/core/vol_btree.c), and the arming state is that
+/* The cross-TU fault door. The site is inode_row_read, inside
+ * vol_inode_get (src/core/vol_btree.c), and the arming state is that
  * file's TU statics -- so a test in this one must reload them through the
  * door, NOT with unsetenv+setenv. That frees the old string, setenv very
  * often gets the same address back, the pointer compare in invfs_vol_fault
@@ -94,7 +94,7 @@ static int recipe_pbas(invfs_volume *v, const char *path,
                        uint64_t *out, int max, int *n_out)
 {
     uint64_t id = 0;
-    invfs_v3_inode in;
+    invfs_inode in;
     uint8_t *blob = NULL;
     size_t blen = 0;
     invfs_ast_hdr ah;
@@ -103,10 +103,10 @@ static int recipe_pbas(invfs_volume *v, const char *path,
     int m = 0;
 
     *n_out = 0;
-    if (vol_v3_path_lookup(v, path, &id) != 1) return -1;
-    if (vol_v3_inode_get(v, id, &in) != 1) return -1;
+    if (vol_path_lookup(v, path, &id) != 1) return -1;
+    if (vol_inode_get(v, id, &in) != 1) return -1;
     if (in.size == 0) return 0;
-    if (vol_v3_recipe_load(v, in.recipe_addr, &blob, &blen) != 0 || !blob)
+    if (vol_recipe_load(v, in.recipe_addr, &blob, &blen) != 0 || !blob)
         return -1;
     if (vol_ast_recipe_parse(blob, blen, &ah, &ents, &n) == 0 && ents) {
         for (i = 0; i < n && m < max; i++)
@@ -245,7 +245,7 @@ static int oracle(invfs_volume *v, const char *name, const uint8_t *want,
     size_t len = 0, i, firstbad = 0;
     int rc, same;
 
-    if (vol_v3_path_lookup(v, name, &id) != 1) {
+    if (vol_path_lookup(v, name, &id) != 1) {
         printf("  [oracle %s] %s: NAME IS GONE\n", tag, name);
         ok(0, tag);
         return 0;
@@ -288,8 +288,8 @@ static uint8_t *leg_rewrite(invfs_volume *v, int keep_seg0)
 {
     size_t file_sz = 8 * SEGMENT_SIZE;
     uint8_t *d = mk_file_keep(2, keep_seg0);
-    uint64_t id = vol_v3_write_bulk(v, "file_a.bin", d, file_sz, NULL);
-    ok(id != 0, "leg (ii): vol_v3_write_bulk rewrote file_a.bin");
+    uint64_t id = vol_write_bulk(v, "file_a.bin", d, file_sz, NULL);
+    ok(id != 0, "leg (ii): vol_write_bulk rewrote file_a.bin");
     save_bytes("a_expect", d, file_sz);
     return d;
 }
@@ -319,7 +319,7 @@ static uint8_t *leg_rewrite_ranged(invfs_volume *v)
 
 static void leg_unlink(invfs_volume *v)
 {
-    ok(vol_v3_unlink(v, "file_b.bin") == 0, "leg (iii): unlinked file_b.bin");
+    ok(vol_unlink(v, "file_b.bin") == 0, "leg (iii): unlinked file_b.bin");
 }
 
 static void leg_assert_pba_live(invfs_volume *v, uint64_t pba, const char *tag)
@@ -342,7 +342,7 @@ static void dump_a(invfs_volume *v)
     uint64_t id = 0;
     uint8_t *buf = NULL;
     size_t len = 0;
-    if (vol_v3_path_lookup(v, "file_a.bin", &id) == 1 &&
+    if (vol_path_lookup(v, "file_a.bin", &id) == 1 &&
         vol_read_inode(v, id, 0, &buf, &len) == 0) {
         save_bytes("a_readback", buf, len);
         printf("  [dump] %zu bytes of file_a.bin -> %s/pbaref_a_readback.bin\n",
@@ -365,8 +365,8 @@ static void run_session(int do_sweep, int ranged)
 
     mkfs_fresh();
     v = open_vol();
-    vol_v3_write_bulk(v, "file_a.bin", a, file_sz, NULL);
-    vol_v3_write_bulk(v, "file_b.bin", b, file_sz, NULL);
+    vol_write_bulk(v, "file_a.bin", a, file_sz, NULL);
+    vol_write_bulk(v, "file_b.bin", b, file_sz, NULL);
     vol_sweep_dedupe_ex(v, &ds, NULL, NULL);
     pba = find_shared(v);
     ok(pba != 0, "dedupe made A and B name the same segment P");
@@ -388,7 +388,7 @@ static void run_session(int do_sweep, int ranged)
                "so A keeps naming P)\n");
         expect = leg_rewrite_ranged(v);
     } else {
-        printf("  -- leg (ii): FULL rewrite of A via vol_v3_write_bulk\n");
+        printf("  -- leg (ii): FULL rewrite of A via vol_write_bulk\n");
         expect = leg_rewrite(v, 0);
     }
     report_both(v, "2 after rewrite", pba);
@@ -420,17 +420,17 @@ static void run_session(int do_sweep, int ranged)
  * pba both recipes name. Then ONE row read is failed, the build runs, and the
  * OTHER sharer is retired.
  *
- * THE RETIRE IS vol_v3_free_recipe_blocks CALLED DIRECTLY, with B's row still
- * live, and that is deliberate. It is the free half of vol_v3_unlink -- the
+ * THE RETIRE IS vol_free_recipe_blocks CALLED DIRECTLY, with B's row still
+ * live, and that is deliberate. It is the free half of vol_unlink -- the
  * unlink calls exactly this at src/core/vol_dirs.c:572 -- but calling it
  * directly keeps the state the map is supposed to be built in: B still NAMED.
- * Going through vol_v3_unlink instead would take a SECOND build at
+ * Going through vol_unlink instead would take a SECOND build at
  * vol_dirs.c:552, and that one runs after the dirent has already been
  * dropped at :540, so the walk cannot see the row whose blocks are about to
  * be subtracted. That is a separate defect with its own cause (an ordering,
  * not a skip) and it is not what this leg measures; putting it in the path
  * here would mean a failure of either fix looked like a failure of both.
- * The control leg runs the real vol_v3_unlink, so the unlink path is
+ * The control leg runs the real vol_unlink, so the unlink path is
  * exercised -- just not as the thing under test.
  *
  * `armed == 0` is the CONTROL: the identical sequence with the fault off. It
@@ -445,7 +445,7 @@ static void leg_skiprow(int armed)
     invfs_volume *v;
     uint8_t *a = mk_file(1), *b = mk_file(2);
     uint64_t pa[MAXPB];
-    uint8_t b_recipe[INVFS_V3_RECIPE_ADDR_LEN];
+    uint8_t b_recipe[INVFS_RECIPE_ADDR_LEN];
     uint64_t b_id = 0, pba, plen = 0, donor = 0, donor_plen = 0, n, got;
     int na = 0, rc, map_on;
     char tag[64];
@@ -456,9 +456,9 @@ static void leg_skiprow(int armed)
 
     mkfs_fresh();
     v = open_vol();
-    ok(vol_v3_write_bulk(v, "file_a.bin", a, file_sz, NULL) != 0,
+    ok(vol_write_bulk(v, "file_a.bin", a, file_sz, NULL) != 0,
        "wrote file_a.bin");
-    ok(vol_v3_write_bulk(v, "file_b.bin", b, file_sz, NULL) != 0,
+    ok(vol_write_bulk(v, "file_b.bin", b, file_sz, NULL) != 0,
        "wrote file_b.bin");
     vol_sweep_dedupe_ex(v, &ds, NULL, NULL);
     pba = find_shared(v);
@@ -469,9 +469,9 @@ static void leg_skiprow(int armed)
      * still live and still named. */
     memset(b_recipe, 0, sizeof b_recipe);
     {
-        invfs_v3_inode bin;
-        if (vol_v3_path_lookup(v, "file_b.bin", &b_id) == 1 &&
-            vol_v3_inode_get(v, b_id, &bin) == 1)
+        invfs_inode bin;
+        if (vol_path_lookup(v, "file_b.bin", &b_id) == 1 &&
+            vol_inode_get(v, b_id, &bin) == 1)
             memcpy(b_recipe, bin.recipe_addr, sizeof b_recipe);
     }
     ok(b_recipe[0] != 0, "resolved B's recipe address while B is still named");
@@ -510,7 +510,7 @@ static void leg_skiprow(int armed)
         int n2, found = 0;
         for (n2 = 1; n2 <= 64 && !found; n2++) {
             char spec[64];
-            snprintf(spec, sizeof spec, "v3_inode_row_read:%d", n2);
+            snprintf(spec, sizeof spec, "inode_row_read:%d", n2);
             setenv("INVFS_FAULT", spec, 1);
             invfs_vol_btree_fault_reload();
             pba_ref_reset(v);
@@ -519,7 +519,7 @@ static void leg_skiprow(int armed)
             invfs_vol_btree_fault_reload();
             if (rc != 0 || pba_ref_count(v, pba) < 2) {
                 found = n2;
-                printf("  [%s] armed INVFS_FAULT=\"v3_inode_row_read:%d\" "
+                printf("  [%s] armed INVFS_FAULT=\"inode_row_read:%d\" "
                        "(via invfs_vol_btree_fault_reload): the build stopped "
                        "being exact there\n", tag, n2);
             }
@@ -562,7 +562,7 @@ static void leg_skiprow(int armed)
      * The map is now whatever the build above produced, and B's row is still
      * live and still named -- which is the state the unlink's free is
      * supposed to run in (see the comment at the top of this function). */
-    ok(vol_v3_free_recipe_blocks(v, b_recipe, 0) == 0,
+    ok(vol_free_recipe_blocks(v, b_recipe, 0) == 0,
        "retired B's data blocks (the free half of the unlink)");
     report_pba(v, "after B's blocks are retired", pba);
     ok(a_names_pba(v, pba), "A still names P after B's blocks are retired");
@@ -636,7 +636,7 @@ static void leg_skiprow(int armed)
     free(a); free(b);
 }
 
-/* ---- leg: vol_v3_unlink takes the map AFTER the dirent is gone ----
+/* ---- leg: vol_unlink takes the map AFTER the dirent is gone ----
  *
  * NO FAULT IS INJECTED HERE, and that is the entire point of this leg. The
  * other legs in this file all need a fault door armed; this one walks off a
@@ -645,12 +645,12 @@ static void leg_skiprow(int armed)
  *   src/core/vol_dirs.c:540   the dirent is dropped (a delta delete appended)
  *   src/core/vol_dirs.c:552   pba_ref_ensure(v)  <- a rebuild HERE cannot
  *                             see the row at :540
- *   src/core/vol_dirs.c:572   vol_v3_free_recipe_blocks -> the -1 at
+ *   src/core/vol_dirs.c:572   vol_free_recipe_blocks -> the -1 at
  *                             src/core/vol_ast.c:180
  *
  * pba_ref_ensure's build reaches an inode THROUGH ITS DIRENT: the walk is
- * v3_walk_dir (src/core/vol_dirs.c:722), which enumerates
- * vol_v3_path_list_dir and resolves each name with vol_v3_path_lookup
+ * walk_dir (src/core/vol_dirs.c:722), which enumerates
+ * vol_path_list_dir and resolves each name with vol_path_lookup
  * (:761-765). Dropping the dirent at :540 therefore removes B from the walk's
  * view even though B's row is still live -- it is not deleted until :553. A
  * rebuild at :552 is a rebuild that cannot see B, so count(P) comes back 1
@@ -661,7 +661,7 @@ static void leg_skiprow(int armed)
  * WHY THE MAP IS EVEN REBUILT: pba_ref_ensure is a no-op unless the map is
  * absent or pba_ref_stale (src/core/volume.c:3620), and pba_ref_stale is set
  * by pba_ref_invalidate from the single place a recipe_addr is published --
- * vol_v3_inode_delta_put, src/core/vol_btree.c:3881/3884. So ANY recipe
+ * vol_inode_delta_put, src/core/vol_btree.c:3881/3884. So ANY recipe
  * publish since the last map build arms it, and the rebuild at :552 is
  * routine rather than exceptional. Publishing a third file is all it takes;
  * that is what the armed leg does, and it is an ordinary import, not a fault.
@@ -703,8 +703,8 @@ static void leg_unlink_map_order(int stale_on)
 
     mkfs_fresh();
     v = open_vol();
-    ok(vol_v3_write_bulk(v, "file_a.bin", a, file_sz, NULL) != 0, "wrote file_a.bin");
-    ok(vol_v3_write_bulk(v, "file_b.bin", b, file_sz, NULL) != 0, "wrote file_b.bin");
+    ok(vol_write_bulk(v, "file_a.bin", a, file_sz, NULL) != 0, "wrote file_a.bin");
+    ok(vol_write_bulk(v, "file_b.bin", b, file_sz, NULL) != 0, "wrote file_b.bin");
     vol_sweep_dedupe_ex(v, &ds, NULL, NULL);
     pba = find_shared(v);
     ok(pba != 0, "dedupe made A and B name the same segment P");
@@ -719,7 +719,7 @@ static void leg_unlink_map_order(int stale_on)
         /* The trigger, and it is completely ordinary: publishing a recipe
          * sets pba_ref_stale (vol_btree.c:3881/3884), so the ensure the
          * unlink takes has to rebuild -- and it rebuilds AFTER :540. */
-        ok(vol_v3_write_bulk(v, "file_c.bin", c, file_sz, NULL) != 0,
+        ok(vol_write_bulk(v, "file_c.bin", c, file_sz, NULL) != 0,
            "published file_c.bin (an ordinary recipe publish, no fault)");
         printf("  [%s] map after publishing file_c.bin: on=%d stale=%d count(P)=%u "
                "-- a correct map says 2 and still names both A and B\n", tag,
@@ -732,7 +732,7 @@ static void leg_unlink_map_order(int stale_on)
      * inherit the fault and stop being a control. (It did, the first time:
      * the donor-in-front leg failed identically in both arms.) The donor is
      * only ever READ, so nothing about it has to exist before the unlink. */
-    ok(vol_v3_unlink(v, "file_b.bin") == 0, "unlinked file_b.bin via vol_v3_unlink");
+    ok(vol_unlink(v, "file_b.bin") == 0, "unlinked file_b.bin via vol_unlink");
     report_both(v, "after unlink", pba);
 
     n = extent_allocated(v, pba, &plen);
@@ -745,7 +745,7 @@ static void leg_unlink_map_order(int stale_on)
          * (src/cli/verify.c:357-364); a real segment of the same length is
          * not, because an invfs_ast_block_entry carries a pba and no content
          * hash. */
-        ok(vol_v3_write_bulk(v, "file_d.bin", d, file_sz, NULL) != 0,
+        ok(vol_write_bulk(v, "file_d.bin", d, file_sz, NULL) != 0,
            "wrote file_d.bin (the donor)");
         recipe_pbas(v, "file_d.bin", pa, MAXPB, &na);
         donor = na ? pa[0] : 0;
@@ -811,9 +811,9 @@ donated:;
 
 /* ---- leg: the same ordering, on the rename-overwrite victim ----
  *
- * vol_v3_rename retires the DESTINATION inode when the destination name is
+ * vol_rename retires the DESTINATION inode when the destination name is
  * already taken, and it took the map after dropping the victim's dirent --
- * the same wrong invariant as vol_v3_unlink, with the same wrong comment
+ * the same wrong invariant as vol_unlink, with the same wrong comment
  * ("the ensure must happen while the row still names t_in.recipe_addr").
  * The walk reaches an inode through its dirent, so "the row still names it"
  * was never the condition that mattered; "the walk can still REACH it" is.
@@ -847,8 +847,8 @@ static void leg_rename_map_order(int fresh_on)
 
     mkfs_fresh();
     v = open_vol();
-    ok(vol_v3_write_bulk(v, "file_a.bin", a, file_sz, NULL) != 0, "wrote file_a.bin");
-    ok(vol_v3_write_bulk(v, "file_b.bin", b, file_sz, NULL) != 0, "wrote file_b.bin");
+    ok(vol_write_bulk(v, "file_a.bin", a, file_sz, NULL) != 0, "wrote file_a.bin");
+    ok(vol_write_bulk(v, "file_b.bin", b, file_sz, NULL) != 0, "wrote file_b.bin");
     vol_sweep_dedupe_ex(v, &ds, NULL, NULL);
     pba = find_shared(v);
     ok(pba != 0, "dedupe made A and B name the same segment P");
@@ -858,7 +858,7 @@ static void leg_rename_map_order(int fresh_on)
 
     /* the rename source: without it there is no rename. Publishing it is
      * what arms pba_ref_stale, and that is the whole trigger. */
-    ok(vol_v3_write_bulk(v, "file_c.bin", c, file_sz, NULL) != 0,
+    ok(vol_write_bulk(v, "file_c.bin", c, file_sz, NULL) != 0,
        "published file_c.bin (the rename source; an ordinary recipe publish)");
     printf("  [%s] map after publishing file_c.bin: on=%d stale=%d count(P)=%u\n",
            tag, v->pba_ref_on, v->pba_ref_stale, pba_ref_count(v, pba));
@@ -870,7 +870,7 @@ static void leg_rename_map_order(int fresh_on)
 
     /* C takes over B's name. B is the victim: it loses the name, the row,
      * and its blocks. */
-    ok(vol_v3_rename(v, "file_c.bin", "file_b.bin") == 0,
+    ok(vol_rename(v, "file_c.bin", "file_b.bin") == 0,
        "renamed file_c.bin ONTO file_b.bin (B is the overwrite victim)");
     report_both(v, "after rename", pba);
     ok(!a_names_pba(v, 0) || 1, "A's recipe still loads after the rename");
@@ -907,7 +907,7 @@ int main(int argc, char **argv)
 
     g_dir = (argc > 1) ? argv[1] : "/tmp";
     snprintf(g_img, sizeof g_img, "%s/pbaref-v3.img", g_dir);
-    printf("pbaref_v3_test: phase=%s img=%s\n", phase, g_img);
+    printf("pbaref_test: phase=%s img=%s\n", phase, g_img);
 
     if (!strcmp(phase, "red") || !strcmp(phase, "rednosweep")) {
         run_session(!strcmp(phase, "red"), 1);
@@ -921,8 +921,8 @@ int main(int argc, char **argv)
         uint64_t pba;
         mkfs_fresh();
         v = open_vol();
-        ok(vol_v3_write_bulk(v, "file_a.bin", a, file_sz, NULL) != 0, "wrote file_a.bin");
-        ok(vol_v3_write_bulk(v, "file_b.bin", b, file_sz, NULL) != 0, "wrote file_b.bin");
+        ok(vol_write_bulk(v, "file_a.bin", a, file_sz, NULL) != 0, "wrote file_a.bin");
+        ok(vol_write_bulk(v, "file_b.bin", b, file_sz, NULL) != 0, "wrote file_b.bin");
         printf("  [setup] dedupe: %d merged\n", vol_sweep_dedupe_ex(v, &ds, NULL, NULL));
         pba = find_shared(v);
         ok(pba != 0, "dedupe made A and B name the same segment P");
@@ -967,7 +967,7 @@ int main(int argc, char **argv)
          * One session: mkfs, open (pba_ref_ensure builds the map over an
          * EMPTY volume, src/core/volume.c:2091), then A and B are created.
          * Nothing on the v3 write path applies a +1 for a new inode
-         * (vol_v3_inode_delta_put, src/core/vol_btree.c:3672, has no pba_ref
+         * (vol_inode_delta_put, src/core/vol_btree.c:3672, has no pba_ref
          * hook), so the map is empty when the two files land. Dedupe merges
          * B's copy of the shared segment into A's pba P and hand-adjusts the
          * map by -1/+1 (src/core/vol_dedupe.c:288-289), which is why the
@@ -982,8 +982,8 @@ int main(int argc, char **argv)
 
         mkfs_fresh();
         v = open_vol();
-        vol_v3_write_bulk(v, "file_a.bin", a, file_sz, NULL);
-        vol_v3_write_bulk(v, "file_b.bin", b, file_sz, NULL);
+        vol_write_bulk(v, "file_a.bin", a, file_sz, NULL);
+        vol_write_bulk(v, "file_b.bin", b, file_sz, NULL);
         vol_sweep_dedupe_ex(v, &ds, NULL, NULL);
         pba = find_shared(v);
         ok(pba != 0, "wrongfree: A and B name the same segment P");
@@ -994,7 +994,7 @@ int main(int argc, char **argv)
                "(a correct map says 2)\n", pba_ref_count(v, pba));
         oracle(v, "file_a.bin", a, file_sz, "wrongfree: A byte-exact before the unlink");
 
-        ok(vol_v3_unlink(v, "file_b.bin") == 0, "wrongfree: unlinked file_b.bin");
+        ok(vol_unlink(v, "file_b.bin") == 0, "wrongfree: unlinked file_b.bin");
         n = extent_allocated(v, pba, &plen);
         report_pba(v, "wrongfree/after unlink", pba);
         printf("  [wrongfree] P extent %llu of %llu blocks still allocated\n",
@@ -1028,14 +1028,14 @@ int main(int argc, char **argv)
         vol_flush(v); vol_close(v);
         free(a); free(b);
     } else if (!strcmp(phase, "hookctl")) {
-        /* RED CONTROL for the missing hook at vol_v3_inode_delta_put
+        /* RED CONTROL for the missing hook at vol_inode_delta_put
          * (src/core/vol_btree.c:3672).
          *
          * One session. A and B share P after dedupe; B is unlinked, leaving
          * A the sole live sharer. A SECOND inode is then published naming P
-         * through the real v3 recipe-publish pair (vol_v3_recipe_store +
-         * vol_v3_create_content_node) -- the same pair every lane that
-         * supersedes or publishes a recipe uses. vol_v3_inode_delta_put has
+         * through the real v3 recipe-publish pair (vol_recipe_store +
+         * vol_create_content_node) -- the same pair every lane that
+         * supersedes or publishes a recipe uses. vol_inode_delta_put has
          * no pba_ref hook, so the map never hears about the new sharer; the
          * next unlink of a P-namer drives the count to 0 and frees P out
          * from under the live inode.
@@ -1044,20 +1044,20 @@ int main(int argc, char **argv)
         invfs_dedupe_stats ds;
         invfs_volume *v;
         uint64_t pba, id2, id_a = 0, plen = 0;
-        uint8_t addr[INVFS_V3_RECIPE_ADDR_LEN];
+        uint8_t addr[INVFS_RECIPE_ADDR_LEN];
         invfs_ast_hdr ah;
         const invfs_ast_block_entry *ents = NULL;
         uint8_t *blob = NULL;
         size_t blen = 0, n = 0;
-        invfs_v3_inode in;
+        invfs_inode in;
         uint8_t *a = mk_file(1), *b = mk_file(2);
 
         mkfs_fresh();
         v = open_vol();
-        vol_v3_write_bulk(v, "file_a.bin", a, file_sz, NULL);
-        vol_v3_write_bulk(v, "file_b.bin", b, file_sz, NULL);
+        vol_write_bulk(v, "file_a.bin", a, file_sz, NULL);
+        vol_write_bulk(v, "file_b.bin", b, file_sz, NULL);
         vol_sweep_dedupe_ex(v, &ds, NULL, NULL);
-        ok(vol_v3_unlink(v, "file_b.bin") == 0, "control: B unlinked");
+        ok(vol_unlink(v, "file_b.bin") == 0, "control: B unlinked");
         {
             uint64_t pa[MAXPB];
             int na = 0;
@@ -1069,13 +1069,13 @@ int main(int argc, char **argv)
         report_pba(v, "control/after B unlink", pba);
         extent_allocated(v, pba, &plen);
 
-        if (vol_v3_path_lookup(v, "file_a.bin", &id_a) != 1) return 2;
-        if (vol_v3_inode_get(v, id_a, &in) != 1) return 2;
-        if (vol_v3_recipe_load(v, in.recipe_addr, &blob, &blen) != 0) return 2;
+        if (vol_path_lookup(v, "file_a.bin", &id_a) != 1) return 2;
+        if (vol_inode_get(v, id_a, &in) != 1) return 2;
+        if (vol_recipe_load(v, in.recipe_addr, &blob, &blen) != 0) return 2;
         if (vol_ast_recipe_parse(blob, blen, &ah, &ents, &n) != 0) return 2;
-        if (vol_v3_recipe_store(v, blob, blen, addr) != 0) return 2;
+        if (vol_recipe_store(v, blob, blen, addr) != 0) return 2;
         free(blob);
-        id2 = vol_v3_create_content_node(v, "file_c.bin", in.size, addr);
+        id2 = vol_create_content_node(v, "file_c.bin", in.size, addr);
         ok(id2 != 0, "control: second inode (file_c.bin) published naming P");
         report_pba(v, "control/after C published", pba);
         /* the map is stale, not wrong: the next pba_ref_ensure (the one the
@@ -1088,7 +1088,7 @@ int main(int argc, char **argv)
            "control: the map knows about the new sharer");
         oracle(v, "file_c.bin", a, file_sz, "control: C byte-exact when published");
 
-        ok(vol_v3_unlink(v, "file_a.bin") == 0, "control: A unlinked");
+        ok(vol_unlink(v, "file_a.bin") == 0, "control: A unlinked");
         report_pba(v, "control/after A unlink", pba);
         {
             uint64_t p2 = 0;

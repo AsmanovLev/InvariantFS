@@ -24,7 +24,7 @@ Files:
 - `src/core/vol_delta.c` — `vol_delta_mount` (already exists from WP-M10)
 - `src/core/vol_btree.c` — RT30 root slot read
 - `src/core/volume_internal.h` — delta/replay state fields if needed
-- `tools/test-meta-v3.sh` — add mount-replay leg
+- `tools/test-meta.sh` — add mount-replay leg
 
 NOT in scope: fold (WP-M14), reclaim (WP-M15), save point (WP-M16), 
 repair of corrupt base tree (WP-M4: detect only).
@@ -46,7 +46,7 @@ repair of corrupt base tree (WP-M4: detect only).
 4. **Double-replay idempotency**: `vol_delta_mount` must be safe to call twice 
    (replay from scratch = same result). Verify this.
 
-5. **Add e2e leg**: In `tools/test-meta-v3.sh`, add a leg that:
+5. **Add e2e leg**: In `tools/test-meta.sh`, add a leg that:
    - Creates files on a v3 volume
    - Unmounts
    - Remounts
@@ -63,7 +63,7 @@ repair of corrupt base tree (WP-M4: detect only).
 
 3. E2E gates:
    ```
-   INVFS_E2E_AGENT=wp-M13-mount-replay bash tools/run-e2e.sh tools/test-meta-v3.sh
+   INVFS_E2E_AGENT=wp-M13-mount-replay bash tools/run-e2e.sh tools/test-meta.sh
    INVFS_E2E_AGENT=wp-M13-mount-replay bash tools/run-e2e.sh tools/test-writepath.sh
    ```
 
@@ -78,7 +78,7 @@ Files changed: (list)
 Tests run:
   $ make -j$(nproc) ... (output)
   $ make test ... (output)
-  $ INVFS_E2E_AGENT=wp-M13-mount-replay bash tools/run-e2e.sh tools/test-meta-v3.sh ... (output)
+  $ INVFS_E2E_AGENT=wp-M13-mount-replay bash tools/run-e2e.sh tools/test-meta.sh ... (output)
 Result: PASS
 Remaining TODOs: (list)
 ```

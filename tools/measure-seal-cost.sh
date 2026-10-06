@@ -51,7 +51,7 @@ for corpus in "$@"; do
     v="$W/$name.img"
     echo "=== $name ($(du -sh "$corpus" 2>/dev/null | cut -f1)) ==="
 
-    INVFS_V3=1 bin/invf-mkfs "$v" "$MIB" >"$W/$name.mkfs.log" 2>&1 \
+    bin/invf-mkfs "$v" "$MIB" >"$W/$name.mkfs.log" 2>&1 \
         || { say "mkfs failed"; tail -3 "$W/$name.mkfs.log"; continue; }
 
     t0=$(date +%s)

@@ -67,11 +67,11 @@ uint64_t vol_write_begin(invfs_volume *v, const char *name, int truncate,
     *out = NULL;
     if (!v || !name || name_too_long(name)) return 0;
     /* WP135: DELIBERATELY NO '!' CHECK HERE, and the reason is the same one
-     * that keeps the check out of vol_v3_write_bulk's caller and out of
+     * that keeps the check out of vol_write_bulk's caller and out of
      * vol_create_file: this function is LANE-CAPABLE. A transcode commits its
      * children through it, under the very names that carry the separator --
      * vol_cpack.c:3622 creates a "!mbrNNNN-<san>" member with vol_create_file,
-     * which lands in vol_v3_write_bulk, which calls this (:1043). A refusal
+     * which lands in vol_write_bulk, which calls this (:1043). A refusal
      * here silently stops every containerpack lane from decomposing anything;
      * tools/test-p7z-batch.sh reported "0 member siblings" for a 308-member
      * 7z when the check was tried here.
@@ -82,7 +82,7 @@ uint64_t vol_write_begin(invfs_volume *v, const char *name, int truncate,
      * that is how the data on such a volume gets copied off it. Creation is
      * refused at vol_replace_file, vol_replace_file_with_meta,
      * vol_create_file_with_meta, vol_create_symlink, vol_create_special,
-     * vol_v3_mkdir, vol_v3_rename, vol_v3_hardlink, invf-cp's own site, and
+     * vol_mkdir, vol_rename, vol_v3_hardlink, invf-cp's own site, and
      * the six FUSE name-introducing ops. */
     if (!vol_write_enabled(v)) return 0;
     s = calloc(1, sizeof *s);
@@ -496,8 +496,8 @@ static uint32_t wsession_filled(const invfs_wsession *s)
  * recipe is an empty old file. */
 static int wsession_load_old_v3(invfs_wsession *s)
 {
-    static const uint8_t zero_addr[INVFS_V3_RECIPE_ADDR_LEN];
-    invfs_v3_inode in;
+    static const uint8_t zero_addr[INVFS_RECIPE_ADDR_LEN];
+    invfs_inode in;
     invfs_ast_hdr ah;
     const invfs_ast_block_entry *ents = NULL;
     size_t nents = 0, i;
@@ -506,15 +506,15 @@ static int wsession_load_old_v3(invfs_wsession *s)
 
     if (!s->have_old)
         return 0;
-    if (vol_v3_inode_get(s->v, s->old_id, &in) != 1)
+    if (vol_inode_get(s->v, s->old_id, &in) != 1)
         return -1;
     s->old_size = in.size;
     s->wheat_carry = 1;   /* heat is not part of the v3 row (WP-M9) */
     if (in.size == 0 ||
-        memcmp(in.recipe_addr, zero_addr, INVFS_V3_RECIPE_ADDR_LEN) == 0)
+        memcmp(in.recipe_addr, zero_addr, INVFS_RECIPE_ADDR_LEN) == 0)
         return 0;         /* empty old content: nothing to alias */
 
-    if (vol_v3_recipe_load(s->v, in.recipe_addr, &blob, &blen) != 0)
+    if (vol_recipe_load(s->v, in.recipe_addr, &blob, &blen) != 0)
         return -1;
     if (vol_ast_recipe_parse(blob, blen, &ah, &ents, &nents) != 0) {
         free(blob);
@@ -537,7 +537,7 @@ static int wsession_load_old_v3(invfs_wsession *s)
     /* snapshot the old pbas so commit can free whatever the new recipe
      * drops. WP78: TEXT entries name SHARED batch segments owned by the
      * batch registry, so they are recorded as 0 (never freed here) --
-     * tz_v3_gc reclaims a dead batch once no live member names it. */
+     * tz_gc reclaims a dead batch once no live member names it. */
     s->old_n_ents = (uint32_t)nents;
     if (nents) {
         s->old_pbas = (uint64_t *)malloc(nents * sizeof(uint64_t));
@@ -802,8 +802,8 @@ static int vol_write_commit_v3(invfs_wsession *s)
     invfs_volume *v = s->v;
     uint8_t *blob = NULL;
     size_t blen = 0;
-    uint8_t addr[INVFS_V3_RECIPE_ADDR_LEN];
-    invfs_v3_inode in;
+    uint8_t addr[INVFS_RECIPE_ADDR_LEN];
+    invfs_inode in;
     uint64_t id, now = (uint64_t)time(NULL);
     uint32_t i, k;
     int rc;
@@ -846,7 +846,7 @@ static int vol_write_commit_v3(invfs_wsession *s)
                                      &blob, &blen) != 0)
             return -1;   /* TODO(WP-M9): recipe larger than one base page
                           * (multi-page/streamed blob) -- deferred. */
-        if (vol_v3_recipe_store(v, blob, blen, addr) != 0) {
+        if (vol_recipe_store(v, blob, blen, addr) != 0) {
             free(blob);
             return -1;
         }
@@ -856,20 +856,20 @@ static int vol_write_commit_v3(invfs_wsession *s)
     if (s->have_old) {
         /* in-place update: the row keeps its id, so the dirent (and any
          * hardlink) stays pointed at it. */
-        if (vol_v3_inode_get(v, s->old_id, &in) != 1)
+        if (vol_inode_get(v, s->old_id, &in) != 1)
             return -1;
         id = s->old_id;
         in.size = s->logical_size;
-        memcpy(in.recipe_addr, addr, INVFS_V3_RECIPE_ADDR_LEN);
+        memcpy(in.recipe_addr, addr, INVFS_RECIPE_ADDR_LEN);
         memset(&in.recipe, 0, sizeof in.recipe);
         if (in.nlink == 0)
             in.nlink = 1;
         in.mtime = now;
-        if (vol_v3_inode_delta_put(v, id, &in) != 0)
+        if (vol_inode_delta_put(v, id, &in) != 0)
             return -1;
     } else {
         /* new name: row (with content) first, then the dirent */
-        id = vol_v3_create_content_node(v, s->name, s->logical_size, addr);
+        id = vol_create_content_node(v, s->name, s->logical_size, addr);
         if (!id)
             return -1;
     }
@@ -944,7 +944,7 @@ int vol_write_commit(invfs_wsession *ws)
     /* WP-M8: v3 content lives in a recipe blob + inode row, not a record.
      * The guard is a precondition on the session, not a format choice: vol_open
      * refuses a non-v3 volume, so this only fires on a malformed session. */
-    if (v && (v->sb.vol_flags & VOLF_V3))
+    if (v && (v->sb.vol_flags & VOLF_META))
         return vol_write_commit_v3(s);
     return -1;
 }
@@ -988,7 +988,7 @@ void vol_write_abort(invfs_wsession *ws)
  * applied after the commit (the row rewrite is a delta append; commit
  * carries the created row's fields, set_meta is the authoritative
  * last word for mode/uid/gid/times). Returns the live inode id or 0. */
-uint64_t vol_v3_write_bulk(invfs_volume *v, const char *name,
+uint64_t vol_write_bulk(invfs_volume *v, const char *name,
                            const uint8_t *data, size_t len,
                            const invfs_meta_pub *meta)
 {
@@ -996,7 +996,7 @@ uint64_t vol_v3_write_bulk(invfs_volume *v, const char *name,
     uint64_t nid;
     int rc;
 
-    if (!v || !name || !(v->sb.vol_flags & VOLF_V3)) return 0;
+    if (!v || !name || !(v->sb.vol_flags & VOLF_META)) return 0;
     if (len > MAX_FILE_SIZE) {
         fprintf(stderr, "invarifs: %s: %llu bytes exceeds the format "
                 "limit (%llu bytes)\n", name, (unsigned long long)len,
@@ -1014,7 +1014,7 @@ uint64_t vol_v3_write_bulk(invfs_volume *v, const char *name,
      * This used to be:
      *
      *     nid = vol_find(v, name);
-     *     if (!nid) { nid = vol_v3_create_node(v, name, meta); ... }
+     *     if (!nid) { nid = vol_create_node(v, name, meta); ... }
      *
      * and vol_find returns a uint64_t, so "there is no such name" and "the
      * lookup could not be COMPLETED" are both the value 0. On the second one
@@ -1029,7 +1029,7 @@ uint64_t vol_v3_write_bulk(invfs_volume *v, const char *name,
      *
      * NOTE THAT :80/:99 DOES NOT COVER THIS. vol_write_begin's vol_find_rc
      * (WP "7791a87") is a different call in a different function and it runs
-     * at :998 -- strictly AFTER vol_v3_create_node has already emptied the
+     * at :998 -- strictly AFTER vol_create_node has already emptied the
      * row and released the blocks. By the time it is asked, the content it
      * was supposed to supersede is already gone; no amount of correctness
      * there can put it back.
@@ -1055,7 +1055,7 @@ uint64_t vol_v3_write_bulk(invfs_volume *v, const char *name,
         nid = found;
     }
     if (!nid) {
-        nid = vol_v3_create_node(v, name, meta);
+        nid = vol_create_node(v, name, meta);
         if (!nid) return 0;
     }
     if (vol_write_begin(v, name, 1, &ws) == 0 || !ws)
@@ -1071,7 +1071,7 @@ uint64_t vol_v3_write_bulk(invfs_volume *v, const char *name,
         vol_write_abort(ws);
         return 0;
     }
-    if (meta && vol_v3_set_meta(v, name, meta) == 0)
+    if (meta && vol_set_meta(v, name, meta) == 0)
         fprintf(stderr, "invarifs: %s: warning: metadata apply failed "
                 "(content is committed)\n", name);
     /* The content is DURABLE at this point. The re-lookup exists only to hand
@@ -1084,7 +1084,7 @@ uint64_t vol_v3_write_bulk(invfs_volume *v, const char *name,
      * already established is returned. `nid` is that id in both branches: on
      * the present path it is the row the commit updated in place
      * (vol_write_commit_v3, s->have_old), and on the create path it is the
-     * row vol_v3_create_node installed, which vol_write_begin then resolved
+     * row vol_create_node installed, which vol_write_begin then resolved
      * and the commit updated. */
     {
         uint64_t done = 0;

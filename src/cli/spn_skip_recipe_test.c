@@ -4,7 +4,7 @@
  *
  * THE TWO ENDS OF ONE SAVE POINT DISAGREE.
  *
- *   capture  src/core/vol_spt0.c:571-574   vol_v3_recipe_load fails ->
+ *   capture  src/core/vol_spt0.c:571-574   vol_recipe_load fails ->
  *                                          c->unreadable++; return 0;  (skip)
  *   reclaim  src/core/vol_spt0.c:736       free every block in old_map that
  *                                          is NOT in new_map
@@ -22,7 +22,7 @@
  * same treatment.
  *
  * THE TRIGGER is one-shot injected read failure on the recipe load
- * (`v3_recipe_load`, vol_btree.c, re-armed through the cross-TU door
+ * (`recipe_load`, vol_btree.c, re-armed through the cross-TU door
  * invfs_vol_btree_fault_reload), and it is transient on purpose:
  *
  *   - A PERSISTENT unreadable recipe (a scribbled blob, a quarantined base
@@ -64,7 +64,7 @@
 #include "volume_internal.h"
 #include "vol_spt0.h"
 
-/* The cross-TU fault door: the site is vol_v3_recipe_load, inside
+/* The cross-TU fault door: the site is vol_recipe_load, inside
  * vol_btree.c, and the arming state is that file's TU statics. Reload through
  * the door -- unsetenv+setenv is NOT a substitute (it frees the old spec
  * string, setenv usually gets the same address back, the pointer compare in
@@ -119,7 +119,7 @@ static int recipe_pbas(invfs_volume *v, const char *path, uint64_t *out,
                        int max, int *n_out)
 {
     uint64_t id = 0;
-    invfs_v3_inode in;
+    invfs_inode in;
     uint8_t *blob = NULL;
     size_t blen = 0, i;
     invfs_ast_hdr ah;
@@ -128,10 +128,10 @@ static int recipe_pbas(invfs_volume *v, const char *path, uint64_t *out,
     int m = 0;
 
     *n_out = 0;
-    if (vol_v3_path_lookup(v, path, &id) != 1) return -1;
-    if (vol_v3_inode_get(v, id, &in) != 1) return -1;
+    if (vol_path_lookup(v, path, &id) != 1) return -1;
+    if (vol_inode_get(v, id, &in) != 1) return -1;
     if (in.size == 0) return 0;
-    if (vol_v3_recipe_load(v, in.recipe_addr, &blob, &blen) != 0 || !blob)
+    if (vol_recipe_load(v, in.recipe_addr, &blob, &blen) != 0 || !blob)
         return -1;
     if (vol_ast_recipe_parse(blob, blen, &ah, &ents, &n) == 0 && ents)
         for (i = 0; i < n && m < max; i++)
@@ -178,7 +178,7 @@ static int oracle(invfs_volume *v, const char *name, const uint8_t *want,
     size_t len = 0, i, firstbad = 0;
     int rc, same;
 
-    if (vol_v3_path_lookup(v, name, &id) != 1) {
+    if (vol_path_lookup(v, name, &id) != 1) {
         printf("  [oracle %s] %s: NAME IS GONE\n", tag, name);
         ok(0, tag);
         return 0;
@@ -248,7 +248,7 @@ static int attempt(int armed, int n)
     snprintf(tag, sizeof tag, "%s:%d", armed ? "skipped" : "skippedctl", n);
     mkfs_fresh();
     v = open_vol();
-    ok(vol_v3_write_bulk(v, "file_a.bin", a, file_sz, NULL) != 0,
+    ok(vol_write_bulk(v, "file_a.bin", a, file_sz, NULL) != 0,
        "wrote file_a.bin");
 
     /* ---- CAPTURE #1: healthy. This is the generation whose pin becomes the
@@ -288,7 +288,7 @@ static int attempt(int armed, int n)
 
     /* ---- CAPTURE #2, with the recipe load made to fail once. */
     if (armed) {
-        snprintf(spec, sizeof spec, "v3_recipe_load:%d", n);
+        snprintf(spec, sizeof spec, "recipe_load:%d", n);
         setenv("INVFS_FAULT", spec, 1);
     }
     invfs_vol_btree_fault_reload();

@@ -47,7 +47,7 @@ int vol_ast_recipe_serialize_win(uint64_t file_size,
         wlen = 8 + (size_t)n_wins * sizeof(*wins);
     }
     total = hlen + (size_t)n * sizeof(*ents) + wlen;
-    if (total > INVFS_V3_RECIPE_STREAM_MAX)
+    if (total > INVFS_RECIPE_STREAM_MAX)
         return -1;   /* WP-M25: recipe stream capped at 64 MiB */
     blob = (uint8_t *)malloc(total ? total : 1);
     if (!blob)
@@ -133,11 +133,11 @@ int vol_ast_recipe_parse(const uint8_t *blob, size_t blen,
  * caller that trusts the return believes the space is back, deletes the
  * row, and leaves every block the recipe named allocated, referenced by
  * nothing and reachable by no name. */
-int vol_v3_free_recipe_blocks(invfs_volume *v,
-                             const uint8_t recipe_addr[INVFS_V3_RECIPE_ADDR_LEN],
+int vol_free_recipe_blocks(invfs_volume *v,
+                             const uint8_t recipe_addr[INVFS_RECIPE_ADDR_LEN],
                              uint64_t keep_pba)
 {
-    static const uint8_t zero_addr[INVFS_V3_RECIPE_ADDR_LEN] = {0};
+    static const uint8_t zero_addr[INVFS_RECIPE_ADDR_LEN] = {0};
     uint8_t *blob = NULL;
     size_t blen = 0;
     invfs_ast_hdr ah;
@@ -150,7 +150,7 @@ int vol_v3_free_recipe_blocks(invfs_volume *v,
         return -1;
     if (memcmp(recipe_addr, zero_addr, sizeof zero_addr) == 0)
         return 0;
-    if (vol_v3_recipe_load(v, recipe_addr, &blob, &blen) != 0 || !blob)
+    if (vol_recipe_load(v, recipe_addr, &blob, &blen) != 0 || !blob)
         return -1;
     parsed = (vol_ast_recipe_parse(blob, blen, &ah, &ents, &n_ents) == 0 &&
               ents != NULL);
@@ -162,7 +162,7 @@ int vol_v3_free_recipe_blocks(invfs_volume *v,
                 continue;
             /* WP78: a zone==TEXT entry names a SHARED batch segment owned
              * by the batch registry -- dropping this member's reference
-             * must not free it; tz_v3_gc reclaims it when no live member
+             * must not free it; tz_gc reclaims it when no live member
              * names it any more. */
             if (ents[i].zone == INVFS_ZONE_TEXT)
                 continue;
@@ -193,7 +193,7 @@ int vol_v3_free_recipe_blocks(invfs_volume *v,
  * (cpack_release_superseded in vol_cpack.c, which is now a one-line
  * forward to this) and the builtin container lanes in
  * sweep_dispatch (vol_sweep.c), which did the same supersede through
- * vol_create_blob_file -> vol_v3_create_content_node and, until now,
+ * vol_create_blob_file -> vol_create_content_node and, until now,
  * gave the space back to nobody.
  *
  * The caller must have captured `old_addr` from the inode row BEFORE
@@ -211,24 +211,24 @@ int vol_v3_free_recipe_blocks(invfs_volume *v,
  *    guard cpack_release_superseded already carried.
  *
  *  - `zone == INVFS_ZONE_TEXT` entries are skipped inside
- *    vol_v3_free_recipe_blocks (a shared batch segment is owned by the
+ *    vol_free_recipe_blocks (a shared batch segment is owned by the
  *    batch registry, not by this member), and the pba refcount means a
  *    block another live recipe still names is not freed here. */
-void vol_v3_release_superseded_blob(
+void vol_release_superseded_blob(
     invfs_volume *v, uint64_t inode_id,
-    const uint8_t old_addr[INVFS_V3_RECIPE_ADDR_LEN])
+    const uint8_t old_addr[INVFS_RECIPE_ADDR_LEN])
 {
-    static const uint8_t zero_addr[INVFS_V3_RECIPE_ADDR_LEN] = {0};
-    invfs_v3_inode now;
+    static const uint8_t zero_addr[INVFS_RECIPE_ADDR_LEN] = {0};
+    invfs_inode now;
 
     if (!v || !old_addr ||
         memcmp(old_addr, zero_addr, sizeof zero_addr) == 0)
         return;
-    if (vol_v3_inode_get(v, inode_id, &now) != 1)
+    if (vol_inode_get(v, inode_id, &now) != 1)
         return;
-    if (memcmp(now.recipe_addr, old_addr, INVFS_V3_RECIPE_ADDR_LEN) == 0)
+    if (memcmp(now.recipe_addr, old_addr, INVFS_RECIPE_ADDR_LEN) == 0)
         return;
-    vol_v3_free_recipe_blocks(v, old_addr, 0);
+    vol_free_recipe_blocks(v, old_addr, 0);
 }
 
 
@@ -342,7 +342,7 @@ uint64_t vol_find(invfs_volume *v, const char *name)
      * an O(1) in-memory index lookup (idx_get), and that index has been a
      * no-op returning NULL since WP-M21 retired it. */
     uint64_t ino = 0;
-    if (vol_v3_path_lookup(v, name, &ino) != 1)
+    if (vol_path_lookup(v, name, &ino) != 1)
         return 0;
     return ino;
 }
@@ -372,7 +372,7 @@ int vol_find_rc(invfs_volume *v, const char *name, uint64_t *ino_out)
 
     if (!ino_out)
         return -1;
-    rc = vol_v3_path_lookup(v, name, &ino);
+    rc = vol_path_lookup(v, name, &ino);
     if (rc != 1)
         return rc;
     *ino_out = ino;
@@ -387,7 +387,7 @@ uint64_t vol_find_ex(invfs_volume *v, const char *name,
                      uint64_t *size_out, uint64_t *ctime_out)
 {
     uint64_t ino = 0;
-    if (vol_v3_path_stat(v, name, &ino, size_out, ctime_out) != 0)
+    if (vol_path_stat(v, name, &ino, size_out, ctime_out) != 0)
         return 0;
     return ino;
 }

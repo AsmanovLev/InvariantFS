@@ -13,7 +13,7 @@
 #   barriered file is present and bit-exact while the un-barriered one is
 #   absent on v2 (complete-or-absent, never silently lost after an ack).
 #   WP80: v3 is the only format mkfs writes now. Its delta append is
-#   itself barriered (see docs/architecture/META-V3.md), so the second
+#   itself barriered (see docs/architecture/META.md), so the second
 #   create is durable BEFORE the failing sync; the failure still latches
 #   and refuses later mutations, and the file comes back bit-exact
 #   (complete-or-absent, here: complete).
@@ -64,7 +64,7 @@ rm -f "$IMG_A" "$IMG_B" "$IMG_C" "$IMG_D" "$IMG_E"
 fail() { echo "FAIL: $*" >&2; exit 1; }
 
 # WP80: on-disk format probe (format_version byte at 0x90; 3 = Meta-v3).
-img_is_v3() {
+img_is_meta() {
     python3 - "$1" <<'PY'
 import sys
 try:
@@ -124,13 +124,13 @@ static void assert_file(invfs_volume *v, const char *name, size_t len,
 /* WP80: the leg-A post-crash assertion depends on the format. On v3 the
  * delta append is barriered, so an un-fsync'd create is already durable;
  * on v2 it is not. Read the on-disk format marker directly. */
-static int img_is_v3(const char *img)
+static int img_is_meta(const char *img)
 {
     FILE *f = fopen(img, "rb");
     invfs_superblock sb;
     int v3 = 0;
     if (f && fread(&sb, sizeof sb, 1, f) == 1)
-        v3 = (sb.vol_flags & VOLF_V3) != 0;
+        v3 = (sb.vol_flags & VOLF_META) != 0;
     if (f) fclose(f);
     return v3;
 }
@@ -186,7 +186,7 @@ static int cmd_f1check(const char *img)
     /* complete-or-absent: never torn, never silently lost after an ack.
      * v3's per-append barrier makes the un-fsync'd create durable, so it
      * must be present and bit-exact; v2 loses the un-barriered tail. */
-    if (img_is_v3(img)) {
+    if (img_is_meta(img)) {
         assert_file(v, "hole1.bin", 200 * 1024, 22);
     } else if (vol_find(v, "hole1.bin")) {
         die("hole1.bin survived a failed sync");
@@ -651,10 +651,10 @@ echo "   survivor bit-exact in-session and after reopen; fsck/verify clean"
 # and mid-compaction crash stages (F, G, G2, H), and the CKP0 sweep
 # rename leg (E). None of that exists on a v3 volume,
 # so they cannot run. The v3 equivalents of rename/retire/fsck honesty are
-# covered by tools/test-meta-v3.sh, test-meta-v3-fold.sh and
-# test-meta-v3-delta.sh. Legs A-C above run on the live format.
-if img_is_v3 "$IMG_A"; then
-    echo "== legs D-I: SKIP (v2-only machinery retired on Meta-v3; see test-meta-v3*.sh) =="
+# covered by tools/test-meta.sh, test-meta-fold.sh and
+# test-meta-delta.sh. Legs A-C above run on the live format.
+if img_is_meta "$IMG_A"; then
+    echo "== legs D-I: SKIP (v2-only machinery retired on Meta; see test-meta*.sh) =="
     echo "PASS: WP22c (v3: flush/sync failure latch + rename/retire)"
     exit 0
 fi

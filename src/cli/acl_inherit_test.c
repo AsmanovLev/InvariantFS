@@ -46,14 +46,14 @@
  *
  * HOW THE LOOKUP IS FAILED
  * ------------------------
- * INVFS_FAULT="v3_dirent_row_read:<n>" (src/core/vol_fault.h), the one-shot
- * site in vol_v3_dirent_get (src/core/vol_btree.c:4427) that stands in for
+ * INVFS_FAULT="dirent_row_read:<n>" (src/core/vol_fault.h), the one-shot
+ * site in vol_dirent_get (src/core/vol_btree.c:4427) that stands in for
  * the dirent row read failing. It injects the same -1 the real failure
  * produces, so the name-resolution path cannot tell it from the real thing.
  *
  * THE ORDINAL IS NOT A CONSTANT, AND THAT IS THE POINT
  * -----------------------------------------------------
- * vol_v3_path_lookup consults the site ONCE PER PATH COMPONENT, and
+ * vol_path_lookup consults the site ONCE PER PATH COMPONENT, and
  * invf_mkdir/invf_create resolve several names before the one under test:
  * perm_check_traversal, perm_check_parent, parent_default_acl, then the
  * mkdir/replace itself, and only then the stamp. So "<n>" is not a fixed
@@ -307,7 +307,7 @@ static int run_leg(int pos, int is_mkdir, const char *name, int quiet)
      * setup; nothing after is inside the fault. */
     {
         char spec[64];
-        snprintf(spec, sizeof spec, "v3_dirent_row_read:%d", pos);
+        snprintf(spec, sizeof spec, "dirent_row_read:%d", pos);
         arm(spec);
     }
 
@@ -432,7 +432,7 @@ int main(int argc, char **argv)
      * Both the "at least one fail-open" and the "at least one not" halves
      * are required; see the header comment on why the second is not
      * bookkeeping. */
-    printf("\n  -- mkdir path: INVFS_FAULT=v3_dirent_row_read:<n> --\n");
+    printf("\n  -- mkdir path: INVFS_FAULT=dirent_row_read:<n> --\n");
     n_open = n_ref = n_inh = 0;
     for (pos = 1; pos <= NPOS; pos++) {
         char name[32];
@@ -458,7 +458,7 @@ int main(int argc, char **argv)
                "same site, produces a table like this one.\n", n_ref, n_inh);
 
     /* ---- 3. the same search on the create path ----------------------- */
-    printf("\n  -- create path: INVFS_FAULT=v3_dirent_row_read:<n> --\n");
+    printf("\n  -- create path: INVFS_FAULT=dirent_row_read:<n> --\n");
     n_open = n_ref = n_inh = 0;
     for (pos = 1; pos <= NPOS; pos++) {
         char name[32];

@@ -127,12 +127,12 @@ static int fake_vol_open(invfs_volume *v, const char *path)
     v->free_blocks = FB_TOTAL - alloc;
     alloc_state_reset(v);
 
-    memset(&v->rt30, 0, sizeof v->rt30);
-    memcpy(v->rt30.magic, "RT30", 4);
-    v->rt30.version = INVFS_RT30_VERSION;
-    v->rt30.page_size = INVFS_V3_PAGE_SIZE_DEFAULT;
-    v->rt30.seq = 0;
-    v->rt30_present = 1;
+    memset(&v->rt, 0, sizeof v->rt);
+    memcpy(v->rt.magic, "RT30", 4);
+    v->rt.version = INVFS_RT_VERSION;
+    v->rt.page_size = INVFS_PAGE_SIZE_DEFAULT;
+    v->rt.seq = 0;
+    v->rt_present = 1;
     mbuf_init(v);
     return 0;
 }
@@ -153,7 +153,7 @@ static void test_layout(void)
     printf("layout / packed structs\n");
     ok(sizeof(invfs_page_hdr) == 20, "sizeof(invfs_page_hdr) == 20");
     ok(sizeof(invfs_blkptr) == 24, "sizeof(invfs_blkptr) == 24");
-    ok(sizeof(invfs_rt30) == 48, "sizeof(invfs_rt30) == 48");
+    ok(sizeof(invfs_rt) == 48, "sizeof(invfs_rt) == 48");
     ok(offsetof(invfs_page_hdr, magic) == 0, "page magic at 0");
     ok(offsetof(invfs_page_hdr, gen) == 4, "page gen at 4");
     ok(offsetof(invfs_page_hdr, level) == 12, "page level at 12");
@@ -163,9 +163,9 @@ static void test_layout(void)
     ok(offsetof(invfs_blkptr, checksum) == 8, "blkptr checksum at 8");
     ok(offsetof(invfs_blkptr, gen) == 12, "blkptr gen at 12");
     ok(offsetof(invfs_blkptr, flags) == 20, "blkptr flags at 20");
-    ok(offsetof(invfs_rt30, root_slot) == 0xC, "rt30 root_slot at 0xC");
-    ok(offsetof(invfs_rt30, seq) == 0x24, "rt30 seq at 0x24");
-    ok(offsetof(invfs_rt30, crc32c) == 0x2C, "rt30 crc at 0x2C");
+    ok(offsetof(invfs_rt, root_slot) == 0xC, "rt root_slot at 0xC");
+    ok(offsetof(invfs_rt, seq) == 0x24, "rt seq at 0x24");
+    ok(offsetof(invfs_rt, crc32c) == 0x2C, "rt crc at 0x2C");
 }
 
 static void test_page_format(void)
@@ -385,14 +385,14 @@ static void test_rt30(invfs_volume *v)
     uint64_t rp = 0, rg = 0, a, b;
 
     printf("RT30 store / double-slot root publish\n");
-    v->rt30.seq = 0;
-    v->rt30.root_slot[0] = v->rt30.root_slot[1] = 0;
-    v->rt30_present = 1;
-    ok(mbuf_rt30_store(v) == 0, "rt30 store");
-    v->rt30_present = 0;
-    ok(mbuf_rt30_load(v) == 0, "rt30 load validates");
-    ok(v->rt30_present == 1, "rt30 marked present");
-    ok(v->rt30.page_size == 4096, "rt30 page_size 4096");
+    v->rt.seq = 0;
+    v->rt.root_slot[0] = v->rt.root_slot[1] = 0;
+    v->rt_present = 1;
+    ok(mbuf_rt30_store(v) == 0, "rt store");
+    v->rt_present = 0;
+    ok(mbuf_rt30_load(v) == 0, "rt load validates");
+    ok(v->rt_present == 1, "rt marked present");
+    ok(v->rt.page_size == 4096, "rt page_size 4096");
 
     ok(mbuf_root_read(v, &rp, &rg) == 1, "empty root reports 1");
 
@@ -410,15 +410,15 @@ static void test_rt30(invfs_volume *v)
     ok(mbuf_root_publish(v, b, 2) == 0, "publish root gen 2");
     ok(mbuf_root_read(v, &rp, &rg) == 0 && rp == b && rg == 2,
        "root read returns gen-2 root (higher gen wins)");
-    ok(v->rt30.seq == 2, "seq advanced once per publish");
-    ok(v->rt30.root_slot[0] == a && v->rt30.root_slot[1] == b,
+    ok(v->rt.seq == 2, "seq advanced once per publish");
+    ok(v->rt.root_slot[0] == a && v->rt.root_slot[1] == b,
        "slots alternate");
 
     /* a rejected publish (gen mismatch) must not move seq */
     {
-        uint64_t seq_before = v->rt30.seq;
+        uint64_t seq_before = v->rt.seq;
         ok(mbuf_root_publish(v, a, 99) != 0, "gen mismatch refused");
-        ok(v->rt30.seq == seq_before, "refused publish leaves seq alone");
+        ok(v->rt.seq == seq_before, "refused publish leaves seq alone");
     }
 
     /* tear the newer slot's page: the older root must still be selected */

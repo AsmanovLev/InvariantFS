@@ -45,17 +45,17 @@
  * THAT IS NOW CLOSED by the reclaim reader epoch. Every base-tree read in
  * this file announces itself (vol_reclaim_reader_snapshot) BEFORE it captures
  * the root and releases (vol_reclaim_reader_release) after the walk:
- *   - point reads go through v3_base_get(), which owns the section and has a
- *     single exit -- v3_overlay_exists, v3_overlay_get_key, vol_v3_inode_get,
- *     vol_v3_dirent_get and the base half of vol_v3_recipe_load (whose RMC1
+ *   - point reads go through base_get(), which owns the section and has a
+ *     single exit -- overlay_exists, overlay_get_key, vol_inode_get,
+ *     vol_dirent_get and the base half of vol_recipe_load (whose RMC1
  *     chunk loop is why that last one is its own function);
- *   - the scans pair the two calls around the walk: vol_v3_xattr_scan,
- *     v3_delta_shadow_xattr_keys, vol_v3_dirent_scan, vol_v3_inode_alloc,
- *     vol_v3_iter_live_inodes, vol_v3_nlink_audit -- plus spt0_capture in
+ *   - the scans pair the two calls around the walk: vol_xattr_scan,
+ *     delta_shadow_xattr_keys, vol_dirent_scan, vol_inode_alloc,
+ *     vol_iter_live_inodes, vol_nlink_audit -- plus spt0_capture in
  *     vol_spt0.c;
- *   - three walks deliberately do NOT participate: vol_v3_fold (it IS the
+ *   - three walks deliberately do NOT participate: vol_fold (it IS the
  *     reclaimer, so it would spin the drain on itself), btree_check in
- *     vol_fsck.c (exclusive), and vol_v3_iter_inodes_at, which walks a
+ *     vol_fsck.c (exclusive), and vol_iter_inodes_at, which walks a
  *     PINNED savepoint root the reclaim keeps as a mark root.
  * The mutating base paths (inode_put/delete, xattr_set, dirent_del, ...) do
  * a btree_search on the current root before their COW and are not announced:
@@ -64,7 +64,7 @@
  * property to preserve and cite, not one to rely on silently.
  *
  * The order inside is the part that is easy to get backwards and the reason
- * the announce is not inside v3_base_root: the window between mbuf_root_read
+ * the announce is not inside base_root: the window between mbuf_root_read
  * returning a root and the reader being counted is exactly the window in
  * which a fold can publish, drain (count still 0) and free. Announce-then-
  * capture is load-bearing; capture-then-announce is the same defect with an
@@ -95,7 +95,7 @@
 #include <string.h>
 #include <stdlib.h>
 
-/* Test seam: fired by v3_base_root once it has a root and before anyone
+/* Test seam: fired by base_root once it has a root and before anyone
  * walks it. Weak, so this no-op definition is what links unless a test
  * supplies its own -- production pays one predicted call on a path that
  * already did a block read, and no state. It exists so the
@@ -448,7 +448,7 @@ static int bt_split_point(int level, const bt_ent *e, int n)
  * 309/693/85-byte recipes: cutting before the chunk leaves 4848 bytes on the
  * right, cutting after it leaves 4219 on the left. The old code reported that
  * as an insert failure (bt_ins_rec -> -1), which surfaced as
- * "vol_v3_recipe_store failed" and cost the containerpack sweep the whole
+ * "vol_recipe_store failed" and cost the containerpack sweep the whole
  * decomposition of the file.
  *
  * So: try the balanced 2-way split first and keep its exact behaviour; only
@@ -647,7 +647,7 @@ static int bt_ins_rec(invfs_volume *v, invfs_blkptr node, bt_key key,
              * written. That slot kept whatever the malloc gave it, the page
              * went out as a parent whose LAST child was null, and every
              * later btree_search for a key past that separator returned -1
-             * (WP89: "vol_v3_recipe_store failed" in the sweep's dedupe
+             * (WP89: "vol_recipe_store failed" in the sweep's dedupe
              * pass, then a non-zero sweep exit). Read the source `add`
              * slots lower, not one. */
             for (j = n + add - 1; j > i + add; j--)
@@ -1715,7 +1715,7 @@ int btree_excise(invfs_volume *v, invfs_blkptr root, const bt_quarantine *q,
         return 0;                    /* nothing matched: the tree stands */
     if (top.node.pba == 0) {
         /* everything under the root was quarantined: the convention is a
-         * fresh empty leaf (v3_publish), never a null root slot. */
+         * fresh empty leaf (publish), never a null root slot. */
         uint8_t page[INVFS_BLOCK_SIZE];
         uint64_t pba;
         pba = mbuf_alloc(v, gen);
@@ -1971,7 +1971,7 @@ int btree_reclaim_pinned(invfs_volume *v, invfs_blkptr old_root,
 /* WP121: orphan collector. WP126 makes its COST bounded.               */
 /*                                                                   */
 /* Why this exists, and why it is not btree_reclaim_pinned: every       */
-/* publisher of a new base root (v3_publish, vol_btree.c:1993)         */
+/* publisher of a new base root (publish, vol_btree.c:1993)         */
 /* abandons the root it supersedes and frees nothing.                   */
 /* btree_reclaim_pinned is a ONE-GENERATION diff: it is handed the      */
 /* previous root and frees what that root reaches which the new one    */
@@ -1983,7 +1983,7 @@ int btree_reclaim_pinned(invfs_volume *v, invfs_blkptr old_root,
 /*                                                                   */
 /* THE LIVENESS PREDICATE. This is the load-bearing part. RT30 has     */
 /* TWO root slots and mbuf_root_publish only ever writes ONE of them   */
-/* per publish (vol_metabuf.c:349: slot = rt30.seq & 1), so the other  */
+/* per publish (vol_metabuf.c:349: slot = rt.seq & 1), so the other  */
 /* slot still names the previous root -- that is WP86's damage         */
 /* tolerance, not a bug to clean up here. mbuf_root_read               */
 /* (vol_metabuf.c:375) loops over BOTH slots and adopts the highest    */
@@ -2033,7 +2033,7 @@ int btree_reclaim_pinned(invfs_volume *v, invfs_blkptr old_root,
 /* collector looks and HOW MUCH that costs. It did not change a single   */
 /* one of the rules above; the predicate below is WP121's, verbatim,    */
 /* and a page it frees is a page WP121's full-pool sweep would also     */
-/* have freed. The red control in tools/test-v3-orphan-reclaim.sh      */
+/* have freed. The red control in tools/test-orphan-reclaim.sh      */
 /* still exercises this code, not a copy of it.                         */
 /*                                                                   */
 /* WP121's cost: one 4 KiB block read per ALLOCATED block, per CALL --  */
@@ -2206,7 +2206,7 @@ static void orph_seed_scan(invfs_volume *v, uint64_t budget, uint8_t *page)
     }
 }
 
-/* Offset of invfs_blkptr recipe inside invfs_v3_inode_row. The row is the */
+/* Offset of invfs_blkptr recipe inside invfs_inode_row. The row is the */
 /* only leaf VALUE in the v3 base trees that can contain a blkptr (every   */
 /* other value is a dirent child id or an opaque recipe chunk). Today       */
 /* every producer memsets it to zero -- vol_dirs.c:376,379,437,            */
@@ -2218,8 +2218,8 @@ static void orph_seed_scan(invfs_volume *v, uint64_t budget, uint8_t *page)
 /* that moves the field breaks the build instead of silently disabling the */
 /* guard.                                                                    */
 #define ORPHAN_ROW_OFF 54u
-_Static_assert(offsetof(invfs_v3_inode_row, recipe) == ORPHAN_ROW_OFF,
-               "ORPHAN_ROW_OFF must track invfs_v3_inode_row.recipe");
+_Static_assert(offsetof(invfs_inode_row, recipe) == ORPHAN_ROW_OFF,
+               "ORPHAN_ROW_OFF must track invfs_inode_row.recipe");
 
 /* Does this leaf value look like an encoded inode row (the only shape    */
 /* that carries a blkptr)? Deliberately strict: a false positive costs a   */
@@ -2234,11 +2234,11 @@ static int orphan_row_recipe(const uint8_t *val, uint16_t n, uint64_t *pba_out)
 
     if (n < ORPHAN_ROW_OFF + sizeof(invfs_blkptr))
         return 0;
-    if (n > sizeof(invfs_v3_inode_row) + INVFS_V3_INODE_XATTR_MAX)
+    if (n > sizeof(invfs_inode_row) + INVFS_INODE_XATTR_MAX)
         return 0;
     memcpy(&ver, val, sizeof ver);
     memcpy(&type, val + 4, sizeof type);
-    if (ver != 1u && ver != INVFS_V3_INODE_ROW_VERSION)
+    if (ver != 1u && ver != INVFS_INODE_ROW_VERSION)
         return 0;
     if (type > INVFS_ITYP_BLK)
         return 0;
@@ -2376,7 +2376,7 @@ int btree_collect_orphans(invfs_volume *v, uint64_t *freed_out)
     /* No descriptor, or no in-RAM bitmap to work from: nothing to say, and
      * nothing that can change inside this open, so a drain must stop here
      * rather than spin on a state it can never leave. */
-    if (!v->rt30_present || !v->bitmap) {
+    if (!v->rt_present || !v->bitmap) {
         v->orph.cands = 0;
         v->orph.settled = 1;
         return 0;
@@ -2388,7 +2388,7 @@ int btree_collect_orphans(invfs_volume *v, uint64_t *freed_out)
 
     /* (1) BOTH RT30 slots are liveness roots. See the header comment. */
     for (i = 0; i < 2; i++) {
-        uint64_t pba = v->rt30.root_slot[i];
+        uint64_t pba = v->rt.root_slot[i];
         if (!pba)
             continue;
         if (pba >= total || orphan_slot_ptr(v, pba, &root[nroot], &gen) != 0) {
@@ -2525,7 +2525,7 @@ int btree_collect_orphans(invfs_volume *v, uint64_t *freed_out)
     v->orph.freed += freed;
     /* Make the frees durable in the same breath. A crash before this point
      * leaves the blocks allocated (a leak), never shared. */
-    if (freed && vol_v3_bitmap_flush(v) != 0)
+    if (freed && vol_bitmap_flush(v) != 0)
         return -1;
     return 0;
 }
@@ -2583,7 +2583,7 @@ int btree_collect_orphans_full(invfs_volume *v, uint64_t *freed_out)
 /* is inode_id as u64 big-endian so the tree's byte-lexicographic order  */
 /* equals numeric inode order (WP-M5 freezes this; WP-M6's dirent keys   */
 /* live in a separate prefix namespace). The value is the versioned      */
-/* invfs_v3_inode_row from invarifs.h.                                   */
+/* invfs_inode_row from invarifs.h.                                   */
 /*                                                                    */
 /* This WP does NOT free superseded pages (COW; the reachability diff    */
 /* is btree_reclaim, scheduled by WP-M15) and does NOT implement the     */
@@ -2592,7 +2592,7 @@ int btree_collect_orphans_full(invfs_volume *v, uint64_t *freed_out)
 /* ------------------------------------------------------------------ */
 
 /* Inode key: u64 big-endian, 8 bytes. */
-static void v3_ino_key(uint64_t id, uint8_t k[8])
+static void ino_key(uint64_t id, uint8_t k[8])
 {
     int i;
     for (i = 0; i < 8; i++)
@@ -2601,11 +2601,11 @@ static void v3_ino_key(uint64_t id, uint8_t k[8])
 
 /* Encode the fixed row prefix. WP-M5 writes xattr_len == 0 (the xattr tree
  * is WP-M7); the field is frozen so that WP needs no format break. */
-static uint16_t v3_ino_encode(const invfs_v3_inode *in, uint8_t *buf)
+static uint16_t ino_encode(const invfs_inode *in, uint8_t *buf)
 {
-    invfs_v3_inode_row r;
+    invfs_inode_row r;
     memset(&r, 0, sizeof r);
-    r.row_version = INVFS_V3_INODE_ROW_VERSION;
+    r.row_version = INVFS_INODE_ROW_VERSION;
     r.type        = in->type;
     r.mode        = in->mode;
     r.uid         = in->uid;
@@ -2616,21 +2616,21 @@ static uint16_t v3_ino_encode(const invfs_v3_inode *in, uint8_t *buf)
     r.rdev        = in->rdev;
     r.size        = in->size;
     r.recipe      = in->recipe;
-    memcpy(r.recipe_addr, in->recipe_addr, INVFS_V3_RECIPE_ADDR_LEN);
+    memcpy(r.recipe_addr, in->recipe_addr, INVFS_RECIPE_ADDR_LEN);
     r.xattr_len   = 0;
     memcpy(buf, &r, sizeof r);
     return (uint16_t)sizeof r;
 }
 
-static int v3_ino_decode(const uint8_t *buf, uint16_t len, invfs_v3_inode *out)
+static int ino_decode(const uint8_t *buf, uint16_t len, invfs_inode *out)
 {
-    invfs_v3_inode_row r;
-    if (len < INVFS_V3_INODE_ROW_FIXED)
+    invfs_inode_row r;
+    if (len < INVFS_INODE_ROW_FIXED)
         return -1;
     memcpy(&r, buf, sizeof r);
-    if (r.row_version != INVFS_V3_INODE_ROW_VERSION)
+    if (r.row_version != INVFS_INODE_ROW_VERSION)
         return -1;   /* a newer format: fail loudly, never misread */
-    if (r.xattr_len > (uint32_t)(len - INVFS_V3_INODE_ROW_FIXED))
+    if (r.xattr_len > (uint32_t)(len - INVFS_INODE_ROW_FIXED))
         return -1;
     out->type   = r.type;
     out->mode   = r.mode;
@@ -2642,19 +2642,19 @@ static int v3_ino_decode(const uint8_t *buf, uint16_t len, invfs_v3_inode *out)
     out->rdev   = r.rdev;
     out->size   = r.size;
     out->recipe = r.recipe;
-    memcpy(out->recipe_addr, r.recipe_addr, INVFS_V3_RECIPE_ADDR_LEN);
+    memcpy(out->recipe_addr, r.recipe_addr, INVFS_RECIPE_ADDR_LEN);
     return 0;
 }
 
 /* Bring the v3 base engine up once per handle. mbuf_init resets the
  * bootstrap cursor, so calling it per operation would re-hand out the
- * reserved root-area pages; the open path sets v3_mbuf_ready after calling
+ * reserved root-area pages; the open path sets mbuf_ready after calling
  * it, and this guard covers callers that reach the API another way. */
-static int v3_ready(invfs_volume *v)
+static int ready(invfs_volume *v)
 {
     if (!v)
         return -1;
-    if (!v->v3_mbuf_ready) {
+    if (!v->mbuf_ready) {
         mbuf_init(v);
         /* WP-M5: do NOT draw base pages from the WP-M2 bootstrap pool (the
          * two pages WP-M1 reserved after the mapper table). mbuf_init resets
@@ -2666,14 +2666,14 @@ static int v3_ready(invfs_volume *v)
          * a v3 mkfs should leave a base-page region free; until then the
          * reserved pair stays unused. */
         v->mb_boot_cursor = v->mb_boot_end;
-        v->v3_mbuf_ready = 1;
+        v->mbuf_ready = 1;
     }
     return 0;
 }
 
 /* Current base root as a verified blkptr (pba/gen/checksum). pba == 0 means
  * the tree is empty. */
-static int v3_base_root(invfs_volume *v, invfs_blkptr *out)
+static int base_root(invfs_volume *v, invfs_blkptr *out)
 {
     uint8_t page[INVFS_BLOCK_SIZE];
     uint64_t pba = 0, gen = 0;
@@ -2704,7 +2704,7 @@ static int v3_base_root(invfs_volume *v, invfs_blkptr *out)
  * whole metadata zone allocated); their bits must land before RT30 names a
  * page, or a reopen could hand the same block out again. Mirrors the v2
  * partial-bitmap write in vol_flush. */
-int vol_v3_bitmap_flush(invfs_volume *v)
+int vol_bitmap_flush(invfs_volume *v)
 {
     uint64_t bm_bytes = (uint64_t)v->bitmap_blocks * INVFS_BLOCK_SIZE;
     uint64_t base = v->sb.metadata_zone_start * INVFS_BLOCK_SIZE;
@@ -2738,7 +2738,7 @@ int vol_v3_bitmap_flush(invfs_volume *v)
  * name pba 0. TODO(WP-M4/M5): the M4 fsck walker must accept an empty leaf
  * as the empty-tree root (btree_check currently rejects it); alternatively
  * M6+ can store the empty base as a null root slot. */
-static int v3_publish(invfs_volume *v, invfs_blkptr root, uint64_t old_gen)
+static int publish(invfs_volume *v, invfs_blkptr root, uint64_t old_gen)
 {
     if (root.pba == 0) {
         uint8_t page[INVFS_BLOCK_SIZE];
@@ -2759,18 +2759,18 @@ static int v3_publish(invfs_volume *v, invfs_blkptr root, uint64_t old_gen)
     }
     /* structure-before-reference (WP-M3): the COW pages + the allocation
      * bitmap are durable before RT30 points at the new root. */
-    if (vol_v3_bitmap_flush(v) != 0)
+    if (vol_bitmap_flush(v) != 0)
         return -1;
     if (vmux_barrier(v, "v3 inode pages") < 0)
         return -1;
     return mbuf_root_publish(v, root.pba, root.gen);
 }
 
-int vol_v3_base_root(invfs_volume *v, invfs_blkptr *out)
+int vol_base_root(invfs_volume *v, invfs_blkptr *out)
 {
-    if (v3_ready(v) != 0)
+    if (ready(v) != 0)
         return -1;
-    return v3_base_root(v, out);
+    return base_root(v, out);
 }
 
 /* The reclaim reader epoch, applied to a base-tree POINT read: announce,
@@ -2785,7 +2785,7 @@ int vol_v3_base_root(invfs_volume *v, invfs_blkptr *out)
  * that a property of the code's shape rather than of a reviewer's care.
  *
  * The order inside is the part that is easy to get backwards. The announce
- * precedes v3_base_root because the alternative leaves a window: mbuf_root_read
+ * precedes base_root because the alternative leaves a window: mbuf_root_read
  * returns a root, and a fold that publishes, drains (count still 0) and frees
  * in the gap before the increment leaves the reader walking a root whose
  * generation is already gone. Announce-then-capture is load-bearing;
@@ -2794,14 +2794,14 @@ int vol_v3_base_root(invfs_volume *v, invfs_blkptr *out)
  * val/found are exactly btree_search's, and its value still points into the
  * per-thread buffer that the next search invalidates -- the caller copies it
  * out, as it did before. */
-static int v3_base_get(invfs_volume *v, const uint8_t *key, uint16_t klen,
+static int base_get(invfs_volume *v, const uint8_t *key, uint16_t klen,
                        bt_val *val, int *found)
 {
     invfs_blkptr root;
     int rc;
 
     (void)vol_reclaim_reader_snapshot();
-    rc = v3_base_root(v, &root);
+    rc = base_root(v, &root);
     if (rc == 0)
         rc = btree_search(v, root, (bt_key){key, klen}, val, found);
     vol_reclaim_reader_release();
@@ -2832,7 +2832,7 @@ static int v3_base_get(invfs_volume *v, const uint8_t *key, uint16_t klen,
 /* same lock to replace it. It was read as covering the BYTES, and that */
 /* is where the read path broke: the ref this helper hands back names a */
 /* block range, the fold frees that range the moment it drops the index */
-/* (vol_v3_fold step 3), and the caller read it afterwards with bare    */
+/* (vol_fold step 3), and the caller read it afterwards with bare    */
 /* preads. vol_delta_read_value now holds the same lock across the read, */
 /* so a ref is a promise for exactly as long as the caller's next call */
 /* -- do not cache one, and do not read one without vol_delta_read_    */
@@ -2841,7 +2841,7 @@ static int v3_base_get(invfs_volume *v, const uint8_t *key, uint16_t klen,
 
 /* 1 = delta wins (*ref filled; a DELETE flag means "shadowed/absent"),
  * 0 = delta miss (the caller must consult the base), -1 = error. */
-static int v3_overlay_lookup(invfs_volume *v, const uint8_t *key, uint16_t klen,
+static int overlay_lookup(invfs_volume *v, const uint8_t *key, uint16_t klen,
                              delta_ref *ref)
 {
     return vol_delta_lookup(v, key, klen, ref);
@@ -2854,11 +2854,11 @@ static int v3_overlay_lookup(invfs_volume *v, const uint8_t *key, uint16_t klen,
 /* instead of COW-upserting the base B+-tree: the base stays immutable  */
 /* between folds (design §4/§13), so a create/unlink/rename/chmod/xattr */
 /* is O(1) append + index, never a base-root publish. The base-only     */
-/* helpers (vol_v3_inode_put/... above) are kept unchanged for the fold */
+/* helpers (vol_inode_put/... above) are kept unchanged for the fold */
 /* (WP-M14) and the WP-M11 overlay driver; the *_delta_* entry points   */
 /* below are what the production namespace/attr paths call. The record  */
 /* shapes are exactly the ones the WP-M11 overlay already interprets:   */
-/* inode row = the frozen invfs_v3_inode_row, dirent = u64 BE child,    */
+/* inode row = the frozen invfs_inode_row, dirent = u64 BE child,    */
 /* xattr = the raw value at the WP-M7 key (chunked as in the base).     */
 /*                                                                     */
 /* Ordering (load-bearing): appends are made in the durability order the */
@@ -2867,23 +2867,23 @@ static int v3_overlay_lookup(invfs_volume *v, const uint8_t *key, uint16_t klen,
 /* layer (INVFS_DELTA_FLAG_DELETE) that shadows the base entry.          */
 /* ------------------------------------------------------------------ */
 
-static int v3_delta_put(invfs_volume *v, const uint8_t *key, uint16_t klen,
+static int delta_put(invfs_volume *v, const uint8_t *key, uint16_t klen,
                         const uint8_t *val, uint16_t vlen)
 {
     return vol_delta_append(v, key, klen, val, vlen, 0);
 }
 
-static int v3_delta_del(invfs_volume *v, const uint8_t *key, uint16_t klen)
+static int delta_del(invfs_volume *v, const uint8_t *key, uint16_t klen)
 {
     return vol_delta_append(v, key, klen, NULL, 0, INVFS_DELTA_FLAG_DELETE);
 }
 
 /* Overlay existence: 1 = present (delta value or base entry), 0 = absent
  * (delta miss + base miss, or a delta delete shadowing the base), -1 = error. */
-static int v3_overlay_exists(invfs_volume *v, const uint8_t *key, uint16_t klen)
+static int overlay_exists(invfs_volume *v, const uint8_t *key, uint16_t klen)
 {
     delta_ref dr;
-    int drc = v3_overlay_lookup(v, key, klen, &dr);
+    int drc = overlay_lookup(v, key, klen, &dr);
     if (drc < 0)
         return -1;
     if (drc == 1)
@@ -2891,7 +2891,7 @@ static int v3_overlay_exists(invfs_volume *v, const uint8_t *key, uint16_t klen)
     {
         bt_val val;
         int found = 0;
-        if (v3_base_get(v, key, klen, &val, &found) != 0)
+        if (base_get(v, key, klen, &val, &found) != 0)
             return -1;
         return found;
     }
@@ -2899,7 +2899,7 @@ static int v3_overlay_exists(invfs_volume *v, const uint8_t *key, uint16_t klen)
 
 /* Overlay point value: 1 = present (value copied to buf, *vlen_out set),
  * 0 = absent (delta delete or neither tier), -1 = error/too small. */
-static int v3_overlay_get_key(invfs_volume *v, const uint8_t *key, uint16_t klen,
+static int overlay_get_key(invfs_volume *v, const uint8_t *key, uint16_t klen,
                               uint8_t *buf, size_t cap, uint16_t *vlen_out)
 {
     /* One critical section for the resolve AND the read: a delta_ref names a
@@ -2918,7 +2918,7 @@ static int v3_overlay_get_key(invfs_volume *v, const uint8_t *key, uint16_t klen
     {
         bt_val val;
         int found = 0;
-        if (v3_base_get(v, key, klen, &val, &found) != 0)
+        if (base_get(v, key, klen, &val, &found) != 0)
             return -1;
         if (!found)
             return 0;
@@ -2957,7 +2957,7 @@ static int v3_overlay_get_key(invfs_volume *v, const uint8_t *key, uint16_t klen
 /*                                                                    */
 /* Mutations are COW and publish once through the WP-M2 double slot.   */
 /* unlink/rmdir at nlink 0 reaches the cascade through                  */
-/* vol_v3_inode_delete, which drops the whole xattr range.             */
+/* vol_inode_delete, which drops the whole xattr range.             */
 /*                                                                    */
 /* TODO(WP-M12): xattr get/scan still read the base only. WP-M11's      */
 /* overlay covers inode rows, dirents and recipes (lookup/getattr/read) */
@@ -2966,78 +2966,78 @@ static int v3_overlay_get_key(invfs_volume *v, const uint8_t *key, uint16_t klen
 /* starts writing them.                                                 */
 /* ------------------------------------------------------------------ */
 
-#define V3_XATTR_FIXED       11u   /* 0x03 + u64 BE + u16 BE */
-#define V3_XATTR_CHUNK_EXTRA  3u   /* 0x00 marker + u16 BE chunk index */
+#define XATTR_FIXED       11u   /* 0x03 + u64 BE + u16 BE */
+#define XATTR_CHUNK_EXTRA  3u   /* 0x00 marker + u16 BE chunk index */
 /* Continuation records are capped well below a page so WP-M3's splitter can
  * always rebalance a leaf that holds several of them (a record near a full
  * page cannot be partitioned between two siblings). 64 KiB / 1 KiB = 64
  * chunks worst case for one xattr. */
-#define V3_XATTR_CHUNK_DATA  1024u
-#define V3_XATTR_MAX_CHUNKS  130u
-#define V3_XATTR_MAX_TOTAL   (64u * 1024u)
+#define XATTR_CHUNK_DATA  1024u
+#define XATTR_MAX_CHUNKS  130u
+#define XATTR_MAX_TOTAL   (64u * 1024u)
 
-static uint16_t v3_xattr_key(uint8_t *kb, uint64_t ino,
+static uint16_t xattr_key(uint8_t *kb, uint64_t ino,
                              const char *name, size_t nlen)
 {
     int i;
-    kb[0] = (uint8_t)INVFS_V3_XATTR_KEY_PREFIX;
+    kb[0] = (uint8_t)INVFS_XATTR_KEY_PREFIX;
     for (i = 0; i < 8; i++)
         kb[1 + i] = (uint8_t)(ino >> (56 - 8 * i));
     kb[9]  = (uint8_t)(nlen >> 8);
     kb[10] = (uint8_t)(nlen & 0xFF);
     if (nlen)
-        memcpy(kb + V3_XATTR_FIXED, name, nlen);
-    return (uint16_t)(V3_XATTR_FIXED + nlen);
+        memcpy(kb + XATTR_FIXED, name, nlen);
+    return (uint16_t)(XATTR_FIXED + nlen);
 }
 
-static uint16_t v3_xattr_chunk_key(uint8_t *kb, uint64_t ino,
+static uint16_t xattr_chunk_key(uint8_t *kb, uint64_t ino,
                                    const char *name, size_t nlen, uint16_t idx)
 {
-    uint16_t n = v3_xattr_key(kb, ino, name, nlen);
+    uint16_t n = xattr_key(kb, ino, name, nlen);
     kb[n]     = 0x00;
     kb[n + 1] = (uint8_t)(idx >> 8);
     kb[n + 2] = (uint8_t)(idx & 0xFF);
-    return (uint16_t)(n + V3_XATTR_CHUNK_EXTRA);
+    return (uint16_t)(n + XATTR_CHUNK_EXTRA);
 }
 
 /* Validate one key in the 0x03 namespace. 1 = canonical (chunk 0) or
  * continuation chunk, 0 = not an xattr key. */
-static int v3_xattr_key_decode(const uint8_t *p, uint16_t n,
+static int xattr_key_decode(const uint8_t *p, uint16_t n,
                                const uint8_t **name_out, uint16_t *nlen_out,
                                int *chunk_out, uint16_t *idx_out)
 {
     uint16_t nl, base;
-    if (n < V3_XATTR_FIXED || p[0] != (uint8_t)INVFS_V3_XATTR_KEY_PREFIX)
+    if (n < XATTR_FIXED || p[0] != (uint8_t)INVFS_XATTR_KEY_PREFIX)
         return 0;
     nl = (uint16_t)(((uint16_t)p[9] << 8) | p[10]);
     if (nl == 0 || nl > INVFS_MAX_NAME)
         return 0;
-    base = (uint16_t)(V3_XATTR_FIXED + nl);
+    base = (uint16_t)(XATTR_FIXED + nl);
     if (n == base) {
         if (chunk_out) *chunk_out = 0;
         if (idx_out)   *idx_out = 0;
-    } else if (n == base + V3_XATTR_CHUNK_EXTRA && p[base] == 0x00) {
+    } else if (n == base + XATTR_CHUNK_EXTRA && p[base] == 0x00) {
         if (chunk_out) *chunk_out = 1;
         if (idx_out)
             *idx_out = (uint16_t)(((uint16_t)p[base + 1] << 8) | p[base + 2]);
     } else {
         return 0;
     }
-    if (name_out) *name_out = p + V3_XATTR_FIXED;
+    if (name_out) *name_out = p + XATTR_FIXED;
     if (nlen_out) *nlen_out = nl;
     return 1;
 }
 
 /* Largest value an inline / continuation record can hold for this name. */
-static uint16_t v3_xattr_inline_cap(uint16_t nlen)
+static uint16_t xattr_inline_cap(uint16_t nlen)
 {
     uint32_t used = (uint32_t)sizeof(invfs_page_hdr) + 4u
-                    + (V3_XATTR_FIXED + (uint32_t)nlen);
+                    + (XATTR_FIXED + (uint32_t)nlen);
     return (uint16_t)(INVFS_BLOCK_SIZE - used);
 }
-static uint16_t v3_xattr_chunk_cap(uint16_t nlen)
+static uint16_t xattr_chunk_cap(uint16_t nlen)
 {
-    return (uint16_t)(v3_xattr_inline_cap(nlen) - V3_XATTR_CHUNK_EXTRA);
+    return (uint16_t)(xattr_inline_cap(nlen) - XATTR_CHUNK_EXTRA);
 }
 
 /* A chained mutation: COW upserts/deletes update `root` without publishing
@@ -3048,9 +3048,9 @@ typedef struct {
     invfs_blkptr  root;
     uint64_t      old_gen;
     int           changed;
-} v3_xmut;
+} xmut;
 
-static int v3_xmut_upsert(v3_xmut *m, bt_key k, bt_val val)
+static int xmut_upsert(xmut *m, bt_key k, bt_val val)
 {
     invfs_blkptr nr;
     if (btree_upsert(m->v, m->root, k, val, &nr) != 0)
@@ -3060,7 +3060,7 @@ static int v3_xmut_upsert(v3_xmut *m, bt_key k, bt_val val)
     return 0;
 }
 
-static int v3_xmut_delete(v3_xmut *m, bt_key k, int *found)
+static int xmut_delete(xmut *m, bt_key k, int *found)
 {
     invfs_blkptr nr;
     bt_val val;
@@ -3077,29 +3077,29 @@ static int v3_xmut_delete(v3_xmut *m, bt_key k, int *found)
     return 0;
 }
 
-static int v3_xmut_commit(v3_xmut *m)
+static int xmut_commit(xmut *m)
 {
     if (!m->changed)
         return 0;
-    return v3_publish(m->v, m->root, m->old_gen);
+    return publish(m->v, m->root, m->old_gen);
 }
 
 /* Delete the canonical key and every continuation chunk for one name. */
-static int v3_xattr_delete_name(v3_xmut *m, uint64_t ino,
+static int xattr_delete_name(xmut *m, uint64_t ino,
                                 const char *name, size_t nl, int *removed)
 {
-    uint8_t kb[V3_XATTR_FIXED + INVFS_MAX_NAME + V3_XATTR_CHUNK_EXTRA];
+    uint8_t kb[XATTR_FIXED + INVFS_MAX_NAME + XATTR_CHUNK_EXTRA];
     uint16_t kn, idx;
     int found = 0, any = 0;
 
-    kn = v3_xattr_key(kb, ino, name, nl);
-    if (v3_xmut_delete(m, (bt_key){kb, kn}, &found) != 0)
+    kn = xattr_key(kb, ino, name, nl);
+    if (xmut_delete(m, (bt_key){kb, kn}, &found) != 0)
         return -1;
     if (found)
         any = 1;
-    for (idx = 1; idx <= V3_XATTR_MAX_CHUNKS; idx++) {
-        kn = v3_xattr_chunk_key(kb, ino, name, nl, idx);
-        if (v3_xmut_delete(m, (bt_key){kb, kn}, &found) != 0)
+    for (idx = 1; idx <= XATTR_MAX_CHUNKS; idx++) {
+        kn = xattr_chunk_key(kb, ino, name, nl, idx);
+        if (xmut_delete(m, (bt_key){kb, kn}, &found) != 0)
             return -1;
         if (!found)
             break;
@@ -3114,10 +3114,10 @@ static int v3_xattr_delete_name(v3_xmut *m, uint64_t ino,
  * The key/value shapes mirror the base chunking exactly, so a later fold is
  * a per-key upsert (WP-M14) and the read overlay walks both tiers with one
  * rule. Returns 0 ok, -1 error, -2 ERANGE (too large). */
-int vol_v3_xattr_delta_set(invfs_volume *v, uint64_t inode_id,
+int vol_xattr_delta_set(invfs_volume *v, uint64_t inode_id,
                            const char *name, const void *val, size_t vlen)
 {
-    uint8_t kb[V3_XATTR_FIXED + INVFS_MAX_NAME + V3_XATTR_CHUNK_EXTRA];
+    uint8_t kb[XATTR_FIXED + INVFS_MAX_NAME + XATTR_CHUNK_EXTRA];
     size_t nl, off = 0;
     uint16_t cap, kn, idx = 0;
 
@@ -3128,34 +3128,34 @@ int vol_v3_xattr_delta_set(invfs_volume *v, uint64_t inode_id,
     nl = strlen(name);
     if (nl == 0 || nl > INVFS_MAX_NAME)
         return -1;
-    if (vlen > V3_XATTR_MAX_TOTAL)
+    if (vlen > XATTR_MAX_TOTAL)
         return -2;
     if (vlen && !val)
         return -1;
-    if (v3_ready(v) != 0)
+    if (ready(v) != 0)
         return -1;
 
     /* Test-only seam (src/core/vol_fault.h), armed by INVFS_FAULT. This is the
-     * WRITE-side twin of "v3_xattr_row_read", and it exists because a failed
+     * WRITE-side twin of "xattr_row_read", and it exists because a failed
      * delta append is otherwise unreachable from a test -- you cannot exhaust
      * the volume on purpose. It returns the same -1 every other failure here
      * returns, so a caller that handles a failed xattr write handles this one
      * identically; a caller that does NOT is the defect
      * (src/cli/chmod_acl_write_test.c). */
-    if (invfs_vol_fault("v3_xattr_row_write"))
+    if (invfs_vol_fault("xattr_row_write"))
         return -1;
 
-    cap = v3_xattr_chunk_cap((uint16_t)nl);
-    if (cap > V3_XATTR_CHUNK_DATA)
-        cap = (uint16_t)V3_XATTR_CHUNK_DATA;
+    cap = xattr_chunk_cap((uint16_t)nl);
+    if (cap > XATTR_CHUNK_DATA)
+        cap = (uint16_t)XATTR_CHUNK_DATA;
     if (cap == 0)
         return -1;
 
     if (vlen <= cap) {
         /* one (sub-page) record: the frozen canonical key, raw bytes; an
          * empty value is a present record with vlen 0, not a delete. */
-        kn = v3_xattr_key(kb, inode_id, name, nl);
-        if (v3_delta_put(v, kb, kn, val ? (const uint8_t *)val : NULL,
+        kn = xattr_key(kb, inode_id, name, nl);
+        if (delta_put(v, kb, kn, val ? (const uint8_t *)val : NULL,
                          (uint16_t)vlen) != 0)
             return -1;
         idx = 1;
@@ -3165,15 +3165,15 @@ int vol_v3_xattr_delta_set(invfs_volume *v, uint64_t inode_id,
             if (chunk > cap)
                 chunk = cap;
             if (idx == 0)
-                kn = v3_xattr_key(kb, inode_id, name, nl);
+                kn = xattr_key(kb, inode_id, name, nl);
             else
-                kn = v3_xattr_chunk_key(kb, inode_id, name, nl, idx);
-            if (v3_delta_put(v, kb, kn, (const uint8_t *)val + off,
+                kn = xattr_chunk_key(kb, inode_id, name, nl, idx);
+            if (delta_put(v, kb, kn, (const uint8_t *)val + off,
                              (uint16_t)chunk) != 0)
                 return -1;
             off += chunk;
             idx++;
-        } while (off < vlen && idx <= V3_XATTR_MAX_CHUNKS);
+        } while (off < vlen && idx <= XATTR_MAX_CHUNKS);
         if (off < vlen)
             return -2;   /* more chunks than the format allows */
     }
@@ -3181,30 +3181,30 @@ int vol_v3_xattr_delta_set(invfs_volume *v, uint64_t inode_id,
     /* shadow any continuation key past the new representation's last chunk:
      * the canonical/new chunks already win at their own keys, so only a
      * longer OLD value leaves a stale tail to delete. */
-    while (idx <= V3_XATTR_MAX_CHUNKS) {
+    while (idx <= XATTR_MAX_CHUNKS) {
         int ex;
-        kn = v3_xattr_chunk_key(kb, inode_id, name, nl, idx);
-        ex = v3_overlay_exists(v, kb, kn);
+        kn = xattr_chunk_key(kb, inode_id, name, nl, idx);
+        ex = overlay_exists(v, kb, kn);
         if (ex < 0)
             return -1;
         if (!ex)
             break;
-        if (v3_delta_del(v, kb, kn) != 0)
+        if (delta_del(v, kb, kn) != 0)
             return -1;
         idx++;
     }
     return 0;
 }
 
-int vol_v3_xattr_delta_del(invfs_volume *v, uint64_t inode_id, const char *name)
+int vol_xattr_delta_del(invfs_volume *v, uint64_t inode_id, const char *name)
 {
-    uint8_t kb[V3_XATTR_FIXED + INVFS_MAX_NAME + V3_XATTR_CHUNK_EXTRA];
+    uint8_t kb[XATTR_FIXED + INVFS_MAX_NAME + XATTR_CHUNK_EXTRA];
     size_t nl;
     uint16_t kn, idx;
     int ex;
 
     /* The DELETE-side twin of the ENODATA/EIO conflation fixed on
-     * vol_v3_xattr_get, and the same conflation this function had before that
+     * vol_xattr_get, and the same conflation this function had before that
      * fix: -1 meant BOTH "this inode has no such xattr" and "the existence
      * probe could not be completed", so an unreadable base page was reported
      * to the application as "no such attribute".
@@ -3212,7 +3212,7 @@ int vol_v3_xattr_delta_del(invfs_volume *v, uint64_t inode_id, const char *name)
      * Same reasoning, same convention: an unreadable row is -EIO and a clean
      * miss is -ENODATA, and they must not share a value. The probe fails the
      * same way the read does -- bt_read makes btree_search return -1 and
-     * v3_overlay_get_key passes it through -- so this is the same I/O error
+     * overlay_get_key passes it through -- so this is the same I/O error
      * the sibling now reports correctly. */
     if (!v || !name)
         return -EINVAL;
@@ -3221,42 +3221,42 @@ int vol_v3_xattr_delta_del(invfs_volume *v, uint64_t inode_id, const char *name)
     nl = strlen(name);
     if (nl == 0 || nl > INVFS_MAX_NAME)
         return -EINVAL;
-    if (v3_ready(v) != 0)
+    if (ready(v) != 0)
         return -EIO;
 
     /* Test-only seam (src/core/vol_fault.h), armed by INVFS_FAULT: the
-     * DELETE-side twin of "v3_xattr_row_write" above, for the same reason and
+     * DELETE-side twin of "xattr_row_write" above, for the same reason and
      * with the same contract. */
-    if (invfs_vol_fault("v3_xattr_row_unlink"))
+    if (invfs_vol_fault("xattr_row_unlink"))
         return -1;
 
-    kn = v3_xattr_key(kb, inode_id, name, nl);
-    ex = v3_overlay_exists(v, kb, kn);
+    kn = xattr_key(kb, inode_id, name, nl);
+    ex = overlay_exists(v, kb, kn);
     if (ex < 0)
         return -EIO;
     if (ex == 0)
         return -ENODATA;                 /* a clean miss, not damage */
-    if (v3_delta_del(v, kb, kn) != 0)
+    if (delta_del(v, kb, kn) != 0)
         return -1;
-    for (idx = 1; idx <= V3_XATTR_MAX_CHUNKS; idx++) {
-        kn = v3_xattr_chunk_key(kb, inode_id, name, nl, idx);
-        ex = v3_overlay_exists(v, kb, kn);
+    for (idx = 1; idx <= XATTR_MAX_CHUNKS; idx++) {
+        kn = xattr_chunk_key(kb, inode_id, name, nl, idx);
+        ex = overlay_exists(v, kb, kn);
         if (ex < 0)
             return -1;
         if (!ex)
             break;
-        if (v3_delta_del(v, kb, kn) != 0)
+        if (delta_del(v, kb, kn) != 0)
             return -1;
     }
     return 0;
 }
 
-int vol_v3_xattr_set(invfs_volume *v, uint64_t inode_id, const char *name,
+int vol_xattr_set(invfs_volume *v, uint64_t inode_id, const char *name,
                      const void *val, size_t vlen)
 {
-    uint8_t kb[V3_XATTR_FIXED + INVFS_MAX_NAME + V3_XATTR_CHUNK_EXTRA];
+    uint8_t kb[XATTR_FIXED + INVFS_MAX_NAME + XATTR_CHUNK_EXTRA];
     invfs_blkptr root;
-    v3_xmut m;
+    xmut m;
     size_t nl, off = 0;
     uint16_t cap, kn, idx = 0;
 
@@ -3267,58 +3267,58 @@ int vol_v3_xattr_set(invfs_volume *v, uint64_t inode_id, const char *name,
     nl = strlen(name);
     if (nl == 0 || nl > INVFS_MAX_NAME)
         return -1;
-    if (vlen > V3_XATTR_MAX_TOTAL)
+    if (vlen > XATTR_MAX_TOTAL)
         return -2;
     if (vlen && !val)
         return -1;
-    if (v3_ready(v) != 0)
+    if (ready(v) != 0)
         return -1;
-    if (v3_base_root(v, &root) != 0)
+    if (base_root(v, &root) != 0)
         return -1;
     m.v = v; m.root = root; m.old_gen = root.gen; m.changed = 0;
 
     /* replace: drop any previous inline/chunked representation */
-    if (v3_xattr_delete_name(&m, inode_id, name, nl, NULL) != 0)
+    if (xattr_delete_name(&m, inode_id, name, nl, NULL) != 0)
         return -1;
 
-    cap = v3_xattr_chunk_cap((uint16_t)nl);
-    if (cap > V3_XATTR_CHUNK_DATA)
-        cap = (uint16_t)V3_XATTR_CHUNK_DATA;
+    cap = xattr_chunk_cap((uint16_t)nl);
+    if (cap > XATTR_CHUNK_DATA)
+        cap = (uint16_t)XATTR_CHUNK_DATA;
     if (cap == 0)
         return -1;
     if (vlen <= cap) {
         /* fits one (sub-page) record: the frozen key/value shape, raw bytes */
-        kn = v3_xattr_key(kb, inode_id, name, nl);
-        if (v3_xmut_upsert(&m, (bt_key){kb, kn},
+        kn = xattr_key(kb, inode_id, name, nl);
+        if (xmut_upsert(&m, (bt_key){kb, kn},
                            (bt_val){val ? (const uint8_t *)val : NULL,
                                     (uint16_t)vlen}) != 0)
             return -1;
-        return v3_xmut_commit(&m);
+        return xmut_commit(&m);
     }
     do {
         size_t chunk = vlen - off;
         if (chunk > cap)
             chunk = cap;
         if (idx == 0)
-            kn = v3_xattr_key(kb, inode_id, name, nl);
+            kn = xattr_key(kb, inode_id, name, nl);
         else
-            kn = v3_xattr_chunk_key(kb, inode_id, name, nl, idx);
-        if (v3_xmut_upsert(&m, (bt_key){kb, kn},
+            kn = xattr_chunk_key(kb, inode_id, name, nl, idx);
+        if (xmut_upsert(&m, (bt_key){kb, kn},
                            (bt_val){val ? (const uint8_t *)val + off : NULL,
                                     (uint16_t)chunk}) != 0)
             return -1;
         off += chunk;
         idx++;
-    } while (off < vlen && idx <= V3_XATTR_MAX_CHUNKS);
+    } while (off < vlen && idx <= XATTR_MAX_CHUNKS);
     if (off < vlen)
         return -2;   /* would need more chunks than the format allows */
-    return v3_xmut_commit(&m);
+    return xmut_commit(&m);
 }
 
-int vol_v3_xattr_del(invfs_volume *v, uint64_t inode_id, const char *name)
+int vol_xattr_del(invfs_volume *v, uint64_t inode_id, const char *name)
 {
     invfs_blkptr root;
-    v3_xmut m;
+    xmut m;
     size_t nl;
     int removed = 0;
 
@@ -3329,16 +3329,16 @@ int vol_v3_xattr_del(invfs_volume *v, uint64_t inode_id, const char *name)
     nl = strlen(name);
     if (nl == 0 || nl > INVFS_MAX_NAME)
         return -1;
-    if (v3_ready(v) != 0)
+    if (ready(v) != 0)
         return -1;
-    if (v3_base_root(v, &root) != 0)
+    if (base_root(v, &root) != 0)
         return -1;
     m.v = v; m.root = root; m.old_gen = root.gen; m.changed = 0;
-    if (v3_xattr_delete_name(&m, inode_id, name, nl, &removed) != 0)
+    if (xattr_delete_name(&m, inode_id, name, nl, &removed) != 0)
         return -1;
     if (!removed)
         return -1;                       /* ENODATA */
-    return v3_xmut_commit(&m);
+    return xmut_commit(&m);
 }
 
 /* Test-only door (src/core/vol_fault.h): reach the arming state of THIS
@@ -3365,17 +3365,17 @@ void invfs_vol_btree_fault_reload(void)
  *              from is a clean miss at idx == 0.
  *   -EIO       the row could not be read (an unreadable/quarantined base
  *              page, a delta record that will not parse), the value is over
- *              V3_XATTR_MAX_TOTAL, or the accumulator could not be grown.
+ *              XATTR_MAX_TOTAL, or the accumulator could not be grown.
  *              Never a statement about whether the xattr exists.
  *   -EINVAL    the arguments are not usable (NULL, or a name outside
  *              1..INVFS_MAX_NAME). A caller bug, not a volume condition.
  *   -ERANGE    the caller's buffer is smaller than the value.
  */
-int vol_v3_xattr_get(invfs_volume *v, uint64_t inode_id, const char *name,
+int vol_xattr_get(invfs_volume *v, uint64_t inode_id, const char *name,
                      void *val, size_t *vlen)
 {
-    uint8_t kb[V3_XATTR_FIXED + INVFS_MAX_NAME + V3_XATTR_CHUNK_EXTRA];
-    uint8_t one[V3_XATTR_CHUNK_DATA + 1];
+    uint8_t kb[XATTR_FIXED + INVFS_MAX_NAME + XATTR_CHUNK_EXTRA];
+    uint8_t one[XATTR_CHUNK_DATA + 1];
     uint8_t *acc = NULL;
     size_t nl, total = 0, cap = 0;
     uint16_t kn, idx;
@@ -3385,13 +3385,13 @@ int vol_v3_xattr_get(invfs_volume *v, uint64_t inode_id, const char *name,
     nl = strlen(name);
     if (nl == 0 || nl > INVFS_MAX_NAME)
         return -EINVAL;
-    if (v3_ready(v) != 0)
+    if (ready(v) != 0)
         return -EIO;
 
     /* WP-M12: walk the canonical + continuation keys through the overlay
      * (delta first, then base) so a value written since the last fold is
      * visible. A delta delete at any key ends the walk; a delta miss falls
-     * through to the base chunk. Each per-key value is <= V3_XATTR_CHUNK_DATA
+     * through to the base chunk. Each per-key value is <= XATTR_CHUNK_DATA
      * (the WP-M7 writer caps every chunk), so `one` is always large enough. */
     for (idx = 0; ; idx++) {
         uint16_t got = 0;
@@ -3399,20 +3399,20 @@ int vol_v3_xattr_get(invfs_volume *v, uint64_t inode_id, const char *name,
         int rc;
 
         if (idx == 0)
-            kn = v3_xattr_key(kb, inode_id, name, nl);
+            kn = xattr_key(kb, inode_id, name, nl);
         else
-            kn = v3_xattr_chunk_key(kb, inode_id, name, nl, idx);
+            kn = xattr_chunk_key(kb, inode_id, name, nl, idx);
         /* Test-only seam (src/core/vol_fault.h), armed by INVFS_FAULT. It
          * stands in for the ROW READ failing, which in production is a
          * quarantined or otherwise unreadable base page: bt_read makes
-         * btree_search return -1 (vol_btree.c:522) and v3_overlay_get_key
+         * btree_search return -1 (vol_btree.c:522) and overlay_get_key
          * passes that -1 through (:2893). The site injects the same -1, so
          * nothing downstream -- including the code below that has to tell a
          * read error from a missing key -- can tell it from the real thing. */
-        if (invfs_vol_fault("v3_xattr_row_read"))
+        if (invfs_vol_fault("xattr_row_read"))
             rc = -1;
         else
-            rc = v3_overlay_get_key(v, kb, kn, one, sizeof one, &got);
+            rc = overlay_get_key(v, kb, kn, one, sizeof one, &got);
         if (rc < 0) {                     /* the row could not be READ */
             free(acc);
             return -EIO;
@@ -3425,7 +3425,7 @@ int vol_v3_xattr_get(invfs_volume *v, uint64_t inode_id, const char *name,
             break;                       /* end of the chunk chain */
         }
         add = got;
-        if (total + add > V3_XATTR_MAX_TOTAL) {
+        if (total + add > XATTR_MAX_TOTAL) {
             free(acc);
             return -EIO;
         }
@@ -3443,7 +3443,7 @@ int vol_v3_xattr_get(invfs_volume *v, uint64_t inode_id, const char *name,
             memcpy(acc + total, one, add);
         total += add;
 
-        if (idx >= V3_XATTR_MAX_CHUNKS)
+        if (idx >= XATTR_MAX_CHUNKS)
             break;                       /* chain length cap (defensive) */
     }
     if (*vlen == 0) {                    /* size query */
@@ -3478,22 +3478,22 @@ int vol_v3_xattr_get(invfs_volume *v, uint64_t inode_id, const char *name,
 typedef struct {
     char name[INVFS_MAX_NAME + 1];
     int  deleted;
-} v3_xa_ent;
+} xa_ent;
 
 typedef struct {
-    v3_xa_ent *e;
+    xa_ent *e;
     size_t     n, cap;
     int        oom;
-} v3_xa_list;
+} xa_list;
 
-static void v3_xa_free(v3_xa_list *l)
+static void xa_free(xa_list *l)
 {
     free(l->e);
     l->e = NULL;
     l->n = l->cap = 0;
 }
 
-static v3_xa_ent *v3_xa_find(v3_xa_list *l, const char *nm)
+static xa_ent *xa_find(xa_list *l, const char *nm)
 {
     size_t i;
     for (i = 0; i < l->n; i++)
@@ -3502,12 +3502,12 @@ static v3_xa_ent *v3_xa_find(v3_xa_list *l, const char *nm)
     return NULL;
 }
 
-static v3_xa_ent *v3_xa_add(v3_xa_list *l, const char *nm)
+static xa_ent *xa_add(xa_list *l, const char *nm)
 {
-    v3_xa_ent *e;
+    xa_ent *e;
     if (l->n == l->cap) {
         size_t ncap = l->cap ? l->cap * 2 : 16;
-        v3_xa_ent *ne = (v3_xa_ent *)realloc(l->e, ncap * sizeof *ne);
+        xa_ent *ne = (xa_ent *)realloc(l->e, ncap * sizeof *ne);
         if (!ne) {
             l->oom = 1;
             return NULL;
@@ -3521,14 +3521,14 @@ static v3_xa_ent *v3_xa_add(v3_xa_list *l, const char *nm)
     return e;
 }
 
-static int v3_xa_canon_name(const uint8_t *key, uint16_t klen,
+static int xa_canon_name(const uint8_t *key, uint16_t klen,
                             char nbuf[INVFS_MAX_NAME + 1], uint16_t *nlen_out)
 {
     const uint8_t *name;
     uint16_t nl;
     int chunk;
 
-    if (!v3_xattr_key_decode(key, klen, &name, &nl, &chunk, NULL) || chunk)
+    if (!xattr_key_decode(key, klen, &name, &nl, &chunk, NULL) || chunk)
         return 0;
     memcpy(nbuf, name, nl);
     nbuf[nl] = 0;
@@ -3537,70 +3537,70 @@ static int v3_xa_canon_name(const uint8_t *key, uint16_t klen,
     return 1;
 }
 
-static int v3_xa_delta_cb(void *ctx_, const uint8_t *key, uint16_t klen,
+static int xa_delta_cb(void *ctx_, const uint8_t *key, uint16_t klen,
                           const delta_ref *ref)
 {
-    v3_xa_list *l = (v3_xa_list *)ctx_;
+    xa_list *l = (xa_list *)ctx_;
     char nbuf[INVFS_MAX_NAME + 1];
-    v3_xa_ent *e;
+    xa_ent *e;
 
-    if (!v3_xa_canon_name(key, klen, nbuf, NULL))
+    if (!xa_canon_name(key, klen, nbuf, NULL))
         return 0;
-    e = v3_xa_find(l, nbuf);
+    e = xa_find(l, nbuf);
     if (!e)
-        e = v3_xa_add(l, nbuf);
+        e = xa_add(l, nbuf);
     if (!e)
         return 1;                        /* OOM: abort the cursor */
     e->deleted = (ref->flags & INVFS_DELTA_FLAG_DELETE) ? 1 : 0;
     return 0;
 }
 
-static int v3_xa_base_cb(void *ctx_, bt_key k, bt_val val)
+static int xa_base_cb(void *ctx_, bt_key k, bt_val val)
 {
-    v3_xa_list *l = (v3_xa_list *)ctx_;
+    xa_list *l = (xa_list *)ctx_;
     char nbuf[INVFS_MAX_NAME + 1];
     (void)val;
 
-    if (!v3_xa_canon_name(k.p, k.n, nbuf, NULL))
+    if (!xa_canon_name(k.p, k.n, nbuf, NULL))
         return 0;
-    if (v3_xa_find(l, nbuf))
+    if (xa_find(l, nbuf))
         return 0;                        /* a delta record owns the name */
-    if (!v3_xa_add(l, nbuf))
+    if (!xa_add(l, nbuf))
         return 1;                        /* OOM: abort the scan */
     return 0;
 }
 
-static int v3_xa_ent_cmp(const void *pa, const void *pb)
+static int xa_ent_cmp(const void *pa, const void *pb)
 {
-    const v3_xa_ent *a = (const v3_xa_ent *)pa;
-    const v3_xa_ent *b = (const v3_xa_ent *)pb;
+    const xa_ent *a = (const xa_ent *)pa;
+    const xa_ent *b = (const xa_ent *)pb;
     size_t an = strlen(a->name), bn = strlen(b->name);
     if (an != bn)
         return an < bn ? -1 : 1;
     return strcmp(a->name, b->name);
 }
 
-int vol_v3_xattr_scan(invfs_volume *v, uint64_t inode_id,
-                      vol_v3_xattr_cb cb, void *ctx)
+int vol_xattr_scan(invfs_volume *v, uint64_t inode_id,
+                      vol_xattr_cb cb, void *ctx)
 {
-    uint8_t lo[V3_XATTR_FIXED], hi[V3_XATTR_FIXED];
+    uint8_t lo[XATTR_FIXED], hi[XATTR_FIXED];
     invfs_blkptr root;
-    v3_xa_list l;
+    xa_list l;
     size_t i;
     int rc;
 
     if (!v || !cb)
         return -1;
-    if (v3_ready(v) != 0)
+    if (ready(v) != 0)
         return -1;
     memset(&l, 0, sizeof l);
-    v3_xattr_key(lo, inode_id, NULL, 0);         /* name_len 0: smallest */
-    v3_xattr_key(hi, inode_id + 1, NULL, 0);
+    xattr_key(lo, inode_id, NULL, 0);         /* name_len 0: smallest */
+    xattr_key(hi, inode_id + 1, NULL, 0);
 
-    rc = vol_delta_range(v, lo, V3_XATTR_FIXED, hi, V3_XATTR_FIXED,
-                         v3_xa_delta_cb, &l);
+    rc = vol_delta_range(v, lo, XATTR_FIXED, hi, XATTR_FIXED,
+                         xa_delta_cb, &l);
     if (rc != 0 || l.oom) {
-        v3_xa_free(&l);
+        xa_free(&l);
         return -1;
     }
     /* Reclaim reader epoch: announce BEFORE the capture, release after the
@@ -3608,23 +3608,23 @@ int vol_v3_xattr_scan(invfs_volume *v, uint64_t inode_id,
      * function's exit, because everything below it (the sort and the caller
      * callback) touches only the collected list. */
     (void)vol_reclaim_reader_snapshot();
-    if (v3_base_root(v, &root) != 0) {
+    if (base_root(v, &root) != 0) {
         vol_reclaim_reader_release();
-        v3_xa_free(&l);
+        xa_free(&l);
         return -1;
     }
-    rc = btree_scan(v, root, (bt_key){lo, V3_XATTR_FIXED},
-                    (bt_key){hi, V3_XATTR_FIXED}, v3_xa_base_cb, &l);
+    rc = btree_scan(v, root, (bt_key){lo, XATTR_FIXED},
+                    (bt_key){hi, XATTR_FIXED}, xa_base_cb, &l);
     vol_reclaim_reader_release();
     if (rc != 0 || l.oom) {
-        v3_xa_free(&l);
+        xa_free(&l);
         return -1;
     }
 
     /* the documented key order is name_len then name; the only in-tree
      * caller sorts anyway but the contract is kept. */
     if (l.n > 1)
-        qsort(l.e, l.n, sizeof *l.e, v3_xa_ent_cmp);
+        qsort(l.e, l.n, sizeof *l.e, xa_ent_cmp);
     rc = 0;
     for (i = 0; i < l.n; i++) {
         if (l.e[i].deleted)
@@ -3633,19 +3633,19 @@ int vol_v3_xattr_scan(invfs_volume *v, uint64_t inode_id,
         if (rc)
             break;
     }
-    v3_xa_free(&l);
+    xa_free(&l);
     return rc;
 }
 
 /* Collect every key in one inode's xattr range, then delete them all. Used
- * by vol_v3_inode_delete: a dying inode must not strand its xattrs. */
+ * by vol_inode_delete: a dying inode must not strand its xattrs. */
 typedef struct {
     uint8_t *buf;
     size_t   len, cap;
-} v3_keybuf;
+} keybuf;
 
 /* Append one raw key with a u16 length prefix. 0 = ok, -1 = OOM. */
-static int v3_keybuf_append(v3_keybuf *b, const uint8_t *k, uint16_t kn)
+static int keybuf_append(keybuf *b, const uint8_t *k, uint16_t kn)
 {
     if (b->len + 2 + kn > b->cap) {
         size_t ncap = b->cap ? b->cap * 2 : 4096;
@@ -3665,66 +3665,66 @@ static int v3_keybuf_append(v3_keybuf *b, const uint8_t *k, uint16_t kn)
     return 0;
 }
 
-static int v3_xattr_collect_cb(void *ctx_, bt_key k, bt_val val)
+static int xattr_collect_cb(void *ctx_, bt_key k, bt_val val)
 {
-    v3_keybuf *b = (v3_keybuf *)ctx_;
+    keybuf *b = (keybuf *)ctx_;
     const uint8_t *name;
     uint16_t nl;
     int chunk;
     (void)val;
 
-    if (!v3_xattr_key_decode(k.p, k.n, &name, &nl, &chunk, NULL))
+    if (!xattr_key_decode(k.p, k.n, &name, &nl, &chunk, NULL))
         return 0;
-    return v3_keybuf_append(b, k.p, k.n) == 0 ? 0 : -1;
+    return keybuf_append(b, k.p, k.n) == 0 ? 0 : -1;
 }
 
 /* vol_delta_range callback for the same collection (WP-M12): the delta side
  * of an inode's xattr keys, including keys already shadowed by a delete. */
-static int v3_xattr_collect_delta_cb(void *ctx_, const uint8_t *key,
+static int xattr_collect_delta_cb(void *ctx_, const uint8_t *key,
                                      uint16_t klen, const delta_ref *ref)
 {
-    v3_keybuf *b = (v3_keybuf *)ctx_;
+    keybuf *b = (keybuf *)ctx_;
     (void)ref;
-    return v3_keybuf_append(b, key, klen) == 0 ? 0 : 1;
+    return keybuf_append(b, key, klen) == 0 ? 0 : 1;
 }
 
 /* WP-M12: append a delete for EVERY xattr key of `inode_id` in both tiers,
  * so a dying inode leaves no stranded key for a later fold (WP-M14). The
  * base keys are scanned first, then the delta's; a key present in both is
  * coalesced by the append. Returns 0 ok, -1 error. */
-static int v3_delta_shadow_xattr_keys(invfs_volume *v, uint64_t inode_id)
+static int delta_shadow_xattr_keys(invfs_volume *v, uint64_t inode_id)
 {
-    uint8_t lo[V3_XATTR_FIXED], hi[V3_XATTR_FIXED];
+    uint8_t lo[XATTR_FIXED], hi[XATTR_FIXED];
     invfs_blkptr root;
-    v3_keybuf b;
+    keybuf b;
     size_t off = 0;
     int rc;
 
     b.buf = NULL;
     b.len = 0;
     b.cap = 0;
-    v3_xattr_key(lo, inode_id, NULL, 0);
-    v3_xattr_key(hi, inode_id + 1, NULL, 0);
+    xattr_key(lo, inode_id, NULL, 0);
+    xattr_key(hi, inode_id + 1, NULL, 0);
 
     /* The base SCAN is a read of a freshly captured root, so it is inside
      * the reclaim reader epoch. The delta appends below are not: the section
      * is released before the first vol_delta_* call, so nothing in this
      * function ever holds the announce across g_delta_lock. */
     (void)vol_reclaim_reader_snapshot();
-    if (v3_base_root(v, &root) != 0) {
+    if (base_root(v, &root) != 0) {
         vol_reclaim_reader_release();
         free(b.buf);
         return -1;
     }
-    rc = btree_scan(v, root, (bt_key){lo, V3_XATTR_FIXED},
-                    (bt_key){hi, V3_XATTR_FIXED}, v3_xattr_collect_cb, &b);
+    rc = btree_scan(v, root, (bt_key){lo, XATTR_FIXED},
+                    (bt_key){hi, XATTR_FIXED}, xattr_collect_cb, &b);
     vol_reclaim_reader_release();
     if (rc != 0) {
         free(b.buf);
         return -1;
     }
-    rc = vol_delta_range(v, lo, V3_XATTR_FIXED, hi, V3_XATTR_FIXED,
-                         v3_xattr_collect_delta_cb, &b);
+    rc = vol_delta_range(v, lo, XATTR_FIXED, hi, XATTR_FIXED,
+                         xattr_collect_delta_cb, &b);
     if (rc != 0) {
         free(b.buf);
         return -1;
@@ -3736,7 +3736,7 @@ static int v3_delta_shadow_xattr_keys(invfs_volume *v, uint64_t inode_id)
             free(b.buf);
             return -1;
         }
-        if (v3_delta_del(v, b.buf + off, kl) != 0) {
+        if (delta_del(v, b.buf + off, kl) != 0) {
             free(b.buf);
             return -1;
         }
@@ -3746,20 +3746,20 @@ static int v3_delta_shadow_xattr_keys(invfs_volume *v, uint64_t inode_id)
     return 0;
 }
 
-static int v3_xattr_remove_all(v3_xmut *m, uint64_t inode_id)
+static int xattr_remove_all(xmut *m, uint64_t inode_id)
 {
-    uint8_t lo[V3_XATTR_FIXED], hi[V3_XATTR_FIXED];
-    v3_keybuf b;
+    uint8_t lo[XATTR_FIXED], hi[XATTR_FIXED];
+    keybuf b;
     size_t off = 0;
     int rc;
 
     b.buf = NULL;
     b.len = 0;
     b.cap = 0;
-    v3_xattr_key(lo, inode_id, NULL, 0);
-    v3_xattr_key(hi, inode_id + 1, NULL, 0);
-    rc = btree_scan(m->v, m->root, (bt_key){lo, V3_XATTR_FIXED},
-                    (bt_key){hi, V3_XATTR_FIXED}, v3_xattr_collect_cb, &b);
+    xattr_key(lo, inode_id, NULL, 0);
+    xattr_key(hi, inode_id + 1, NULL, 0);
+    rc = btree_scan(m->v, m->root, (bt_key){lo, XATTR_FIXED},
+                    (bt_key){hi, XATTR_FIXED}, xattr_collect_cb, &b);
     if (rc != 0) {
         free(b.buf);
         return -1;
@@ -3771,7 +3771,7 @@ static int v3_xattr_remove_all(v3_xmut *m, uint64_t inode_id)
             free(b.buf);
             return -1;
         }
-        if (v3_xmut_delete(m, (bt_key){b.buf + off, kl}, NULL) != 0) {
+        if (xmut_delete(m, (bt_key){b.buf + off, kl}, NULL) != 0) {
             free(b.buf);
             return -1;
         }
@@ -3781,7 +3781,7 @@ static int v3_xattr_remove_all(v3_xmut *m, uint64_t inode_id)
     return 0;
 }
 
-int vol_v3_inode_get(invfs_volume *v, uint64_t inode_id, invfs_v3_inode *out)
+int vol_inode_get(invfs_volume *v, uint64_t inode_id, invfs_inode *out)
 {
     uint8_t kb[8];
     bt_val val;
@@ -3789,10 +3789,10 @@ int vol_v3_inode_get(invfs_volume *v, uint64_t inode_id, invfs_v3_inode *out)
 
     if (!v || !out)
         return -1;
-    if (v3_ready(v) != 0)
+    if (ready(v) != 0)
         return -1;
     /* Test-only seam (src/core/vol_fault.h), armed by INVFS_FAULT: the
-     * v3_inode_row_read twin of the xattr row-read site at :3352. It stands
+     * inode_row_read twin of the xattr row-read site at :3352. It stands
      * in for the ROW READ failing, which in production is a quarantined or
      * otherwise unreadable base page, or a torn delta chain -- both answer
      * -1 below. The site injects the same -1, so nothing downstream,
@@ -3802,15 +3802,15 @@ int vol_v3_inode_get(invfs_volume *v, uint64_t inode_id, invfs_v3_inode *out)
      * This is the read pba_ref_ensure's build depends on being able to make,
      * because the map it builds is the sole gate on every data-block free: a
      * row that cannot be read is a live reference the map does not hold.
-     * src/cli/pbaref_v3_test.c (leg "skiprow") fails one of them there. */
-    if (invfs_vol_fault("v3_inode_row_read"))
+     * src/cli/pbaref_test.c (leg "skiprow") fails one of them there. */
+    if (invfs_vol_fault("inode_row_read"))
         return -1;
-    v3_ino_key(inode_id, kb);
+    ino_key(inode_id, kb);
 
     /* Test-only seam (src/core/vol_fault.h), armed by INVFS_FAULT. It stands
      * in for the inode ROW READ failing, which in production is a
      * quarantined or otherwise unreadable base page: bt_read makes
-     * btree_search return -1 (vol_btree.c:522) and v3_base_get passes that
+     * btree_search return -1 (vol_btree.c:522) and base_get passes that
      * through, exactly as it passes through below at the decode. The site
      * injects the same -1, so nothing downstream -- including
      * vol_get_meta_rc, which has to tell this from "there is no such row" --
@@ -3823,7 +3823,7 @@ int vol_v3_inode_get(invfs_volume *v, uint64_t inode_id, invfs_v3_inode *out)
      * (:3288). A test in another translation unit must call it -- see the
      * declaration in vol_fault.h for why unsetenv+setenv is not a
      * substitute. */
-    if (invfs_vol_fault("v3_inode_row_read"))
+    if (invfs_vol_fault("inode_row_read"))
         return -1;
 
     /* WP-M11: delta first -- a delta row (or delete) shadows the base.
@@ -3834,7 +3834,7 @@ int vol_v3_inode_get(invfs_volume *v, uint64_t inode_id, invfs_v3_inode *out)
      * answered -1 for an inode that was present and whose row the fold had
      * already copied into the new base. */
     {
-        uint8_t rb[INVFS_V3_INODE_ROW_FIXED];
+        uint8_t rb[INVFS_INODE_ROW_FIXED];
         uint16_t rlen = 0, dflags = 0;
         int drc = vol_delta_lookup_value(v, kb, sizeof kb, rb, sizeof rb,
                                          &dflags, &rlen);
@@ -3845,28 +3845,28 @@ int vol_v3_inode_get(invfs_volume *v, uint64_t inode_id, invfs_v3_inode *out)
                 return 0;                /* hidden by a delta delete */
             /* The delta value is the frozen fixed row. TODO(WP-M12): if a
              * later writer inlines xattr bytes (xattr_len > 0) the value can
-             * exceed INVFS_V3_INODE_ROW_FIXED; -2 above is that case, and it
+             * exceed INVFS_INODE_ROW_FIXED; -2 above is that case, and it
              * keeps answering -1 as it always did. */
-            if (v3_ino_decode(rb, rlen, out) != 0)
+            if (ino_decode(rb, rlen, out) != 0)
                 return -1;
             return 1;
         }
     }
 
-    if (v3_base_get(v, kb, 8, &val, &found) != 0)
+    if (base_get(v, kb, 8, &val, &found) != 0)
         return -1;
     if (!found)
         return 0;
-    if (v3_ino_decode(val.p, val.n, out) != 0)
+    if (ino_decode(val.p, val.n, out) != 0)
         return -1;
     return 1;
 }
 
-int vol_v3_inode_put(invfs_volume *v, uint64_t inode_id,
-                     const invfs_v3_inode *in)
+int vol_inode_put(invfs_volume *v, uint64_t inode_id,
+                     const invfs_inode *in)
 {
     uint8_t kb[8];
-    uint8_t vb[INVFS_V3_INODE_ROW_FIXED];
+    uint8_t vb[INVFS_INODE_ROW_FIXED];
     invfs_blkptr root, nr;
     bt_val val;
     uint16_t vl;
@@ -3874,22 +3874,22 @@ int vol_v3_inode_put(invfs_volume *v, uint64_t inode_id,
 
     if (!v || !in || in->nlink == 0)
         return -1;
-    if (v3_ready(v) != 0)
+    if (ready(v) != 0)
         return -1;
-    if (v3_base_root(v, &root) != 0)
+    if (base_root(v, &root) != 0)
         return -1;
     old_gen = root.gen;
 
-    v3_ino_key(inode_id, kb);
-    vl = v3_ino_encode(in, vb);
+    ino_key(inode_id, kb);
+    vl = ino_encode(in, vb);
     val.p = vb;
     val.n = vl;
     if (btree_upsert(v, root, (bt_key){kb, 8}, val, &nr) != 0)
         return -1;
-    return v3_publish(v, nr, old_gen);
+    return publish(v, nr, old_gen);
 }
 
-int vol_v3_inode_delete(invfs_volume *v, uint64_t inode_id)
+int vol_inode_delete(invfs_volume *v, uint64_t inode_id)
 {
     uint8_t kb[8];
     invfs_blkptr root;
@@ -3899,11 +3899,11 @@ int vol_v3_inode_delete(invfs_volume *v, uint64_t inode_id)
 
     if (!v)
         return -1;
-    if (v3_ready(v) != 0)
+    if (ready(v) != 0)
         return -1;
-    if (v3_base_root(v, &root) != 0)
+    if (base_root(v, &root) != 0)
         return -1;
-    v3_ino_key(inode_id, kb);
+    ino_key(inode_id, kb);
     if (btree_search(v, root, (bt_key){kb, 8}, &val, &found) != 0)
         return -1;
     if (!found)
@@ -3911,33 +3911,33 @@ int vol_v3_inode_delete(invfs_volume *v, uint64_t inode_id)
     old_gen = root.gen;
     /* WP-M7 cascade: a dying inode must not strand its xattr keys. */
     {
-        v3_xmut m;
+        xmut m;
         m.v = v;
         m.root = root;
         m.old_gen = old_gen;
         m.changed = 0;
-        if (v3_xattr_remove_all(&m, inode_id) != 0)
+        if (xattr_remove_all(&m, inode_id) != 0)
             return -1;
-        if (v3_xmut_delete(&m, (bt_key){kb, 8}, NULL) != 0)
+        if (xmut_delete(&m, (bt_key){kb, 8}, NULL) != 0)
             return -1;
-        return v3_xmut_commit(&m);
+        return xmut_commit(&m);
     }
 }
 
 /* WP-M12: the delta-backed inode mutations the namespace paths call. The
  * base helpers above stay the fold/base path (WP-M14 + the WP-M11 driver). */
-int vol_v3_inode_delta_put(invfs_volume *v, uint64_t inode_id,
-                           const invfs_v3_inode *in)
+int vol_inode_delta_put(invfs_volume *v, uint64_t inode_id,
+                           const invfs_inode *in)
 {
-    if (invfs_vol_fault("v3_inode_delta_put"))
+    if (invfs_vol_fault("inode_delta_put"))
         return -1;   /* test hook: pretend the delta append failed */
     uint8_t kb[8];
-    uint8_t vb[INVFS_V3_INODE_ROW_FIXED];
+    uint8_t vb[INVFS_INODE_ROW_FIXED];
     uint16_t vl;
 
     if (!v || !in || in->nlink == 0)
         return -1;                        /* a zero-nlink row is deleted */
-    if (v3_ready(v) != 0)
+    if (ready(v) != 0)
         return -1;
     /* WP pba-ref-v3-incremental: this is the ONLY place a v3 recipe_addr is
      * published, and it used to be invisible to the pba reference map --
@@ -3954,46 +3954,46 @@ int vol_v3_inode_delta_put(invfs_volume *v, uint64_t inode_id,
      * that does not change its recipe -- nlink, mode, times -- leaves the
      * map alone. A brand-new row with no content names nothing. */
     {
-        static const uint8_t zero_addr[INVFS_V3_RECIPE_ADDR_LEN] = {0};
-        invfs_v3_inode old;
-        if (vol_v3_inode_get(v, inode_id, &old) != 1)
+        static const uint8_t zero_addr[INVFS_RECIPE_ADDR_LEN] = {0};
+        invfs_inode old;
+        if (vol_inode_get(v, inode_id, &old) != 1)
             pba_ref_invalidate(v);
         else if (memcmp(old.recipe_addr, in->recipe_addr,
-                        INVFS_V3_RECIPE_ADDR_LEN) != 0)
+                        INVFS_RECIPE_ADDR_LEN) != 0)
             pba_ref_invalidate(v);
         else if (memcmp(in->recipe_addr, zero_addr,
-                        INVFS_V3_RECIPE_ADDR_LEN) == 0)
+                        INVFS_RECIPE_ADDR_LEN) == 0)
             ; /* nothing to count either way */
     }
-    v3_ino_key(inode_id, kb);
-    vl = v3_ino_encode(in, vb);
-    return v3_delta_put(v, kb, sizeof kb, vb, vl);
+    ino_key(inode_id, kb);
+    vl = ino_encode(in, vb);
+    return delta_put(v, kb, sizeof kb, vb, vl);
 }
 
 /* Delete the row and shadow its xattr keys. The xattr deletes are appended
  * BEFORE the row delete so a crash cannot expose a live row whose xattrs
  * have vanished; the reverse order would strand the keys. The inode needs
  * no base check: a delete for an absent (base or delta) row is harmless,
- * but an overlay-absent row is a no-op to match vol_v3_inode_delete. */
-int vol_v3_inode_delta_delete(invfs_volume *v, uint64_t inode_id)
+ * but an overlay-absent row is a no-op to match vol_inode_delete. */
+int vol_inode_delta_delete(invfs_volume *v, uint64_t inode_id)
 {
     uint8_t kb[8];
 
     if (!v)
         return -1;
-    if (v3_ready(v) != 0)
+    if (ready(v) != 0)
         return -1;
-    v3_ino_key(inode_id, kb);
+    ino_key(inode_id, kb);
     {
-        int ex = v3_overlay_exists(v, kb, sizeof kb);
+        int ex = overlay_exists(v, kb, sizeof kb);
         if (ex < 0)
             return -1;
         if (ex == 0)
             return 0;                     /* absent: nothing to do */
     }
-    if (v3_delta_shadow_xattr_keys(v, inode_id) != 0)
+    if (delta_shadow_xattr_keys(v, inode_id) != 0)
         return -1;
-    return v3_delta_del(v, kb, sizeof kb);
+    return delta_del(v, kb, sizeof kb);
 }
 
 
@@ -4017,99 +4017,99 @@ int vol_v3_inode_delta_delete(invfs_volume *v, uint64_t inode_id)
 /* can move the key, so the lookup always goes through the tree.       */
 /* ------------------------------------------------------------------ */
 
-#define V3_RECIPE_KEY_LEN      (1u + INVFS_V3_RECIPE_ADDR_LEN)   /* 33 */
+#define RECIPE_KEY_LEN      (1u + INVFS_RECIPE_ADDR_LEN)   /* 33 */
 /* One page = 4096; header 20 + key record (2+33) + value record (2+n)
  * must fit, with headroom so a split can always partition two records. */
-#define V3_RECIPE_BLOB_MAX     INVFS_V3_RECIPE_BLOB_MAX
+#define RECIPE_BLOB_MAX     INVFS_RECIPE_BLOB_MAX
 
-static void v3_recipe_key(uint8_t kb[V3_RECIPE_KEY_LEN],
-                          const uint8_t addr[INVFS_V3_RECIPE_ADDR_LEN])
+static void recipe_key(uint8_t kb[RECIPE_KEY_LEN],
+                          const uint8_t addr[INVFS_RECIPE_ADDR_LEN])
 {
-    kb[0] = (uint8_t)INVFS_V3_RECIPE_KEY_PREFIX;
-    memcpy(kb + 1, addr, INVFS_V3_RECIPE_ADDR_LEN);
+    kb[0] = (uint8_t)INVFS_RECIPE_KEY_PREFIX;
+    memcpy(kb + 1, addr, INVFS_RECIPE_ADDR_LEN);
 }
 
-static void v3_recipe_chunk_key(uint8_t kb[INVFS_V3_RECIPE_CHUNK_KEY_LEN],
-                                const uint8_t addr[INVFS_V3_RECIPE_ADDR_LEN],
+static void recipe_chunk_key(uint8_t kb[INVFS_RECIPE_CHUNK_KEY_LEN],
+                                const uint8_t addr[INVFS_RECIPE_ADDR_LEN],
                                 uint16_t chunk_idx)
 {
-    kb[0] = (uint8_t)INVFS_V3_RECIPE_KEY_PREFIX;
-    memcpy(kb + 1, addr, INVFS_V3_RECIPE_ADDR_LEN);
+    kb[0] = (uint8_t)INVFS_RECIPE_KEY_PREFIX;
+    memcpy(kb + 1, addr, INVFS_RECIPE_ADDR_LEN);
     kb[33] = 0x00;
     kb[34] = (uint8_t)(chunk_idx >> 8);
     kb[35] = (uint8_t)(chunk_idx & 0xFF);
 }
 
-static void v3_blake3(const uint8_t *buf, size_t len,
-                      uint8_t out[INVFS_V3_RECIPE_ADDR_LEN])
+static void blake3_addr(const uint8_t *buf, size_t len,
+                      uint8_t out[INVFS_RECIPE_ADDR_LEN])
 {
     blake3_hasher hx;
     blake3_hasher_init(&hx);
     blake3_hasher_update(&hx, buf, len);
-    blake3_hasher_finalize(&hx, out, INVFS_V3_RECIPE_ADDR_LEN);
+    blake3_hasher_finalize(&hx, out, INVFS_RECIPE_ADDR_LEN);
 }
 
 /* Store `blob` (immutable) under its content address. On success
  * addr_out holds BLAKE3-256(blob). Identical bytes already present are a
  * no-op (dedup) and return the same address. 0 = ok, -1 = error.
- * Recipes <= V3_RECIPE_BLOB_MAX (3800 B) fit directly in one page value.
- * Larger recipes (> 3800 B, up to INVFS_V3_RECIPE_STREAM_MAX) are chunked
+ * Recipes <= RECIPE_BLOB_MAX (3800 B) fit directly in one page value.
+ * Larger recipes (> 3800 B, up to INVFS_RECIPE_STREAM_MAX) are chunked
  * across multiple keys: descriptor at 0x04||addr, chunks at 0x04||addr||0x00||idx. */
-int vol_v3_recipe_store(invfs_volume *v, const uint8_t *blob, size_t blen,
-                        uint8_t addr_out[INVFS_V3_RECIPE_ADDR_LEN])
+int vol_recipe_store(invfs_volume *v, const uint8_t *blob, size_t blen,
+                        uint8_t addr_out[INVFS_RECIPE_ADDR_LEN])
 {
-    if (invfs_vol_fault("v3_recipe_store"))
+    if (invfs_vol_fault("recipe_store"))
         return -1;   /* test hook: pretend the base-tree publish failed */
-    uint8_t kb[V3_RECIPE_KEY_LEN], addr[INVFS_V3_RECIPE_ADDR_LEN];
+    uint8_t kb[RECIPE_KEY_LEN], addr[INVFS_RECIPE_ADDR_LEN];
     invfs_blkptr root, nr;
     bt_val val;
     int found = 0;
 
-    if (!v || !blob || blen == 0 || blen > INVFS_V3_RECIPE_STREAM_MAX)
+    if (!v || !blob || blen == 0 || blen > INVFS_RECIPE_STREAM_MAX)
         return -1;
-    if (v3_ready(v) != 0)
+    if (ready(v) != 0)
         return -1;
-    if (v3_base_root(v, &root) != 0)
+    if (base_root(v, &root) != 0)
         return -1;
-    v3_blake3(blob, blen, addr);
-    v3_recipe_key(kb, addr);
+    blake3_addr(blob, blen, addr);
+    recipe_key(kb, addr);
     /* Dedup: an identical recipe is already immutable, so the reference
      * alone is the whole write. */
-    if (btree_search(v, root, (bt_key){kb, V3_RECIPE_KEY_LEN}, &val,
+    if (btree_search(v, root, (bt_key){kb, RECIPE_KEY_LEN}, &val,
                      &found) != 0)
         return -1;
     if (!found) {
         uint64_t old_gen = root.gen;
-        if (blen <= V3_RECIPE_BLOB_MAX) {
+        if (blen <= RECIPE_BLOB_MAX) {
             val.p = blob;
             val.n = (uint16_t)blen;
-            if (btree_upsert(v, root, (bt_key){kb, V3_RECIPE_KEY_LEN}, val,
+            if (btree_upsert(v, root, (bt_key){kb, RECIPE_KEY_LEN}, val,
                              &nr) != 0)
                 return -1;
-            if (v3_publish(v, nr, old_gen) != 0)
+            if (publish(v, nr, old_gen) != 0)
                 return -1;
         } else {
-            uint32_t n_chunks = (uint32_t)((blen + INVFS_V3_RECIPE_CHUNK_DATA - 1) /
-                                           INVFS_V3_RECIPE_CHUNK_DATA);
+            uint32_t n_chunks = (uint32_t)((blen + INVFS_RECIPE_CHUNK_DATA - 1) /
+                                           INVFS_RECIPE_CHUNK_DATA);
             if (n_chunks > 0xFFFFu)
                 return -1;
-            invfs_v3_recipe_desc desc;
-            desc.magic = INVFS_V3_RECIPE_MAGIC_RMC1;
+            invfs_recipe_desc desc;
+            desc.magic = INVFS_RECIPE_MAGIC_RMC1;
             desc.total_len = (uint32_t)blen;
             desc.n_chunks = (uint16_t)n_chunks;
 
             invfs_blkptr cur_root = root;
             for (uint32_t i = 0; i < n_chunks; i++) {
-                uint8_t ckb[INVFS_V3_RECIPE_CHUNK_KEY_LEN];
-                size_t off = (size_t)i * INVFS_V3_RECIPE_CHUNK_DATA;
-                size_t clen = (blen - off > INVFS_V3_RECIPE_CHUNK_DATA)
-                            ? INVFS_V3_RECIPE_CHUNK_DATA
+                uint8_t ckb[INVFS_RECIPE_CHUNK_KEY_LEN];
+                size_t off = (size_t)i * INVFS_RECIPE_CHUNK_DATA;
+                size_t clen = (blen - off > INVFS_RECIPE_CHUNK_DATA)
+                            ? INVFS_RECIPE_CHUNK_DATA
                             : (blen - off);
-                v3_recipe_chunk_key(ckb, addr, (uint16_t)i);
+                recipe_chunk_key(ckb, addr, (uint16_t)i);
                 val.p = blob + off;
                 val.n = (uint16_t)clen;
                 if (btree_upsert(v, cur_root,
-                                 (bt_key){ckb, INVFS_V3_RECIPE_CHUNK_KEY_LEN},
+                                 (bt_key){ckb, INVFS_RECIPE_CHUNK_KEY_LEN},
                                  val, &nr) != 0)
                     return -1;
                 cur_root = nr;
@@ -4117,15 +4117,15 @@ int vol_v3_recipe_store(invfs_volume *v, const uint8_t *blob, size_t blen,
             /* Insert multi-chunk descriptor under main key */
             val.p = (const uint8_t *)&desc;
             val.n = (uint16_t)sizeof(desc);
-            if (btree_upsert(v, cur_root, (bt_key){kb, V3_RECIPE_KEY_LEN},
+            if (btree_upsert(v, cur_root, (bt_key){kb, RECIPE_KEY_LEN},
                              val, &nr) != 0)
                 return -1;
-            if (v3_publish(v, nr, old_gen) != 0)
+            if (publish(v, nr, old_gen) != 0)
                 return -1;
         }
     }
     if (addr_out)
-        memcpy(addr_out, addr, INVFS_V3_RECIPE_ADDR_LEN);
+        memcpy(addr_out, addr, INVFS_RECIPE_ADDR_LEN);
     return 0;
 }
 
@@ -4136,7 +4136,7 @@ int vol_v3_recipe_store(invfs_volume *v, const uint8_t *blob, size_t blen,
  * always correct and nothing ever needs invalidating -- the only cost is a
  * copy, which is what the caller was going to do anyway. Two slots: the hot
  * inode plus whatever a walk touches next. */
-static int v3_rcache_get(invfs_volume *v, const uint8_t *addr,
+static int rcache_get(invfs_volume *v, const uint8_t *addr,
                          uint8_t **blob_out, size_t *blen_out)
 {
     int i, hit = -1;
@@ -4144,7 +4144,7 @@ static int v3_rcache_get(invfs_volume *v, const uint8_t *addr,
     pthread_mutex_lock(&v->rc_mu);
     for (i = 0; i < 2; i++)
         if (v->rcache[i].used &&
-            memcmp(v->rcache[i].addr, addr, INVFS_V3_RECIPE_ADDR_LEN) == 0) {
+            memcmp(v->rcache[i].addr, addr, INVFS_RECIPE_ADDR_LEN) == 0) {
             hit = i;
             break;
         }
@@ -4161,7 +4161,7 @@ static int v3_rcache_get(invfs_volume *v, const uint8_t *addr,
     return hit >= 0 && *blob_out ? 0 : -1;
 }
 
-static void v3_rcache_put(invfs_volume *v, const uint8_t *addr,
+static void rcache_put(invfs_volume *v, const uint8_t *addr,
                           const uint8_t *blob, size_t len)
 {
     int i, victim = 0;
@@ -4176,7 +4176,7 @@ static void v3_rcache_put(invfs_volume *v, const uint8_t *addr,
     for (i = 0; i < 2; i++)
         if (!v->rcache[i].used) { victim = i; break; }
     free(v->rcache[victim].blob);
-    memcpy(v->rcache[victim].addr, addr, INVFS_V3_RECIPE_ADDR_LEN);
+    memcpy(v->rcache[victim].addr, addr, INVFS_RECIPE_ADDR_LEN);
     v->rcache[victim].blob = copy;
     v->rcache[victim].len = len;
     v->rcache[victim].used = 1;
@@ -4186,21 +4186,21 @@ static void v3_rcache_put(invfs_volume *v, const uint8_t *addr,
 /* Forward: the base half owns the reclaim reader epoch across the RMC1
  * chunk loop and has a single exit, so it is a separate function (see its
  * definition below). */
-static int v3_recipe_base_blob(invfs_volume *v,
-    const uint8_t addr[INVFS_V3_RECIPE_ADDR_LEN], const uint8_t *kb,
+static int recipe_base_blob(invfs_volume *v,
+    const uint8_t addr[INVFS_RECIPE_ADDR_LEN], const uint8_t *kb,
     uint8_t **blob_out, size_t *blen_out);
 
-int vol_v3_recipe_load(invfs_volume *v, const uint8_t addr[INVFS_V3_RECIPE_ADDR_LEN],
+int vol_recipe_load(invfs_volume *v, const uint8_t addr[INVFS_RECIPE_ADDR_LEN],
                        uint8_t **blob_out, size_t *blen_out)
 {
-    uint8_t kb[V3_RECIPE_KEY_LEN], chk[INVFS_V3_RECIPE_ADDR_LEN];
+    uint8_t kb[RECIPE_KEY_LEN], chk[INVFS_RECIPE_ADDR_LEN];
     uint8_t *blob;
 
     if (!v || !addr || !blob_out || !blen_out)
         return -1;
     *blob_out = NULL;
     *blen_out = 0;
-    if (v3_ready(v) != 0)
+    if (ready(v) != 0)
         return -1;
     /* WP141: one-shot injectible read failure, for the SAME reason the inode-
      * row site above exists. Every failure path of this function returns -1,
@@ -4213,11 +4213,11 @@ int vol_v3_recipe_load(invfs_volume *v, const uint8_t addr[INVFS_V3_RECIPE_ADDR_
      * this address once in the same session would otherwise be served from
      * the cache and the injected failure would never be reached, so the leg
      * would measure the healthy path and go green. */
-    if (invfs_vol_fault("v3_recipe_load"))
+    if (invfs_vol_fault("recipe_load"))
         return -1;
-    if (v3_rcache_get(v, addr, blob_out, blen_out) == 0)
+    if (rcache_get(v, addr, blob_out, blen_out) == 0)
         return 0;
-    v3_recipe_key(kb, addr);
+    recipe_key(kb, addr);
 
     /* WP-M11: the delta owns the key if it was rewritten since the fold;
      * a delete shadows the base blob. The BLAKE3 check below still governs
@@ -4229,18 +4229,18 @@ int vol_v3_recipe_load(invfs_volume *v, const uint8_t addr[INVFS_V3_RECIPE_ADDR_
      * (a fold in between means the key is in the base, which is the fall
      * through below). */
     {
-        uint8_t sbuf[V3_XATTR_CHUNK_DATA];
+        uint8_t sbuf[XATTR_CHUNK_DATA];
         uint16_t dflags = 0, dlen = 0, got = 0;
         uint8_t *dbuf = sbuf;
         size_t dcap = sizeof sbuf;
-        int drc = vol_delta_lookup_value(v, kb, V3_RECIPE_KEY_LEN,
+        int drc = vol_delta_lookup_value(v, kb, RECIPE_KEY_LEN,
                                          dbuf, dcap, &dflags, &dlen);
         if (drc == -2) {
             dbuf = (uint8_t *)malloc(dlen ? dlen : 1);
             if (!dbuf)
                 return -1;
             dcap = dlen;
-            drc = vol_delta_lookup_value(v, kb, V3_RECIPE_KEY_LEN,
+            drc = vol_delta_lookup_value(v, kb, RECIPE_KEY_LEN,
                                          dbuf, dcap, &dflags, &dlen);
             got = dlen;
         }
@@ -4265,8 +4265,8 @@ int vol_v3_recipe_load(invfs_volume *v, const uint8_t addr[INVFS_V3_RECIPE_ADDR_
             }
             if (blob != dbuf)
                 memcpy(blob, dbuf, dlen);
-            v3_blake3(blob, dlen, chk);
-            if (memcmp(chk, addr, INVFS_V3_RECIPE_ADDR_LEN) != 0) {
+            blake3_addr(blob, dlen, chk);
+            if (memcmp(chk, addr, INVFS_RECIPE_ADDR_LEN) != 0) {
                 fprintf(stderr, "v3 recipe blob (delta): BLAKE3 mismatch "
                         "(corrupt or forged); refusing the read\n");
                 free(blob);
@@ -4274,15 +4274,15 @@ int vol_v3_recipe_load(invfs_volume *v, const uint8_t addr[INVFS_V3_RECIPE_ADDR_
             }
             *blob_out = blob;
             *blen_out = dlen;
-            v3_rcache_put(v, addr, blob, dlen);
+            rcache_put(v, addr, blob, dlen);
             return 0;
         }
     }
 
-    return v3_recipe_base_blob(v, addr, kb, blob_out, blen_out);
+    return recipe_base_blob(v, addr, kb, blob_out, blen_out);
 }
 
-/* The BASE half of vol_v3_recipe_load, split out because it is the one
+/* The BASE half of vol_recipe_load, split out because it is the one
  * point-read site that is not a one-liner, and for the reason the whole
  * reclaim reader epoch is shaped the way it is.
  *
@@ -4296,11 +4296,11 @@ int vol_v3_recipe_load(invfs_volume *v, const uint8_t addr[INVFS_V3_RECIPE_ADDR_
  * error paths, which is exactly where a hand-written announce/release pair
  * goes wrong. So it is not hand-written: this function owns the section and
  * has one exit, and the code below is otherwise the code that was there. */
-static int v3_recipe_base_blob(invfs_volume *v,
-    const uint8_t addr[INVFS_V3_RECIPE_ADDR_LEN], const uint8_t *kb,
+static int recipe_base_blob(invfs_volume *v,
+    const uint8_t addr[INVFS_RECIPE_ADDR_LEN], const uint8_t *kb,
     uint8_t **blob_out, size_t *blen_out)
 {
-    uint8_t chk[INVFS_V3_RECIPE_ADDR_LEN];
+    uint8_t chk[INVFS_RECIPE_ADDR_LEN];
     invfs_blkptr root;
     bt_val val;
     uint8_t *blob = NULL;
@@ -4308,36 +4308,36 @@ static int v3_recipe_base_blob(invfs_volume *v,
     int rc = -1;
 
     (void)vol_reclaim_reader_snapshot();
-    if (v3_base_root(v, &root) != 0)
+    if (base_root(v, &root) != 0)
         goto out;
-    if (btree_search(v, root, (bt_key){kb, V3_RECIPE_KEY_LEN}, &val,
+    if (btree_search(v, root, (bt_key){kb, RECIPE_KEY_LEN}, &val,
                      &found) != 0)
         goto out;
     if (!found)
         goto out;
 
     /* WP-M25: check if this is an RMC1 multi-chunk descriptor */
-    if (val.n == sizeof(invfs_v3_recipe_desc)) {
-        invfs_v3_recipe_desc desc;
+    if (val.n == sizeof(invfs_recipe_desc)) {
+        invfs_recipe_desc desc;
         memcpy(&desc, val.p, sizeof(desc));
-        if (desc.magic == INVFS_V3_RECIPE_MAGIC_RMC1) {
+        if (desc.magic == INVFS_RECIPE_MAGIC_RMC1) {
             uint32_t total_len = desc.total_len;
             uint16_t n_chunks = desc.n_chunks;
-            if (total_len == 0 || total_len > INVFS_V3_RECIPE_STREAM_MAX)
+            if (total_len == 0 || total_len > INVFS_RECIPE_STREAM_MAX)
                 goto out;
             blob = (uint8_t *)malloc(total_len);
             if (!blob)
                 goto out;
             for (uint16_t i = 0; i < n_chunks; i++) {
-                uint8_t ckb[INVFS_V3_RECIPE_CHUNK_KEY_LEN];
+                uint8_t ckb[INVFS_RECIPE_CHUNK_KEY_LEN];
                 bt_val cval;
                 int cfound = 0;
-                size_t off = (size_t)i * INVFS_V3_RECIPE_CHUNK_DATA;
-                size_t exp_len = (total_len - off > INVFS_V3_RECIPE_CHUNK_DATA)
-                               ? INVFS_V3_RECIPE_CHUNK_DATA
+                size_t off = (size_t)i * INVFS_RECIPE_CHUNK_DATA;
+                size_t exp_len = (total_len - off > INVFS_RECIPE_CHUNK_DATA)
+                               ? INVFS_RECIPE_CHUNK_DATA
                                : (total_len - off);
-                v3_recipe_chunk_key(ckb, addr, i);
-                if (btree_search(v, root, (bt_key){ckb, INVFS_V3_RECIPE_CHUNK_KEY_LEN},
+                recipe_chunk_key(ckb, addr, i);
+                if (btree_search(v, root, (bt_key){ckb, INVFS_RECIPE_CHUNK_KEY_LEN},
                                  &cval, &cfound) != 0 || !cfound || cval.n != exp_len) {
                     free(blob);
                     blob = NULL;
@@ -4345,8 +4345,8 @@ static int v3_recipe_base_blob(invfs_volume *v,
                 }
                 memcpy(blob + off, cval.p, exp_len);
             }
-            v3_blake3(blob, total_len, chk);
-            if (memcmp(chk, addr, INVFS_V3_RECIPE_ADDR_LEN) != 0) {
+            blake3_addr(blob, total_len, chk);
+            if (memcmp(chk, addr, INVFS_RECIPE_ADDR_LEN) != 0) {
                 fprintf(stderr, "v3 recipe blob %p: BLAKE3 mismatch (corrupt or "
                         "forged); refusing the read\n", (const void *)addr);
                 free(blob);
@@ -4355,7 +4355,7 @@ static int v3_recipe_base_blob(invfs_volume *v,
             }
             *blob_out = blob;
             *blen_out = total_len;
-            v3_rcache_put(v, addr, blob, total_len);
+            rcache_put(v, addr, blob, total_len);
             rc = 0;
             goto out;
         }
@@ -4368,8 +4368,8 @@ static int v3_recipe_base_blob(invfs_volume *v,
         goto out;
     if (val.n)
         memcpy(blob, val.p, val.n);
-    v3_blake3(blob, val.n, chk);
-    if (memcmp(chk, addr, INVFS_V3_RECIPE_ADDR_LEN) != 0) {
+    blake3_addr(blob, val.n, chk);
+    if (memcmp(chk, addr, INVFS_RECIPE_ADDR_LEN) != 0) {
         fprintf(stderr, "v3 recipe blob %p: BLAKE3 mismatch (corrupt or "
                 "forged); refusing the read\n", (const void *)addr);
         free(blob);
@@ -4378,7 +4378,7 @@ static int v3_recipe_base_blob(invfs_volume *v,
     }
     *blob_out = blob;
     *blen_out = val.n;
-    v3_rcache_put(v, addr, blob, val.n);
+    rcache_put(v, addr, blob, val.n);
     rc = 0;
 
 out:
@@ -4410,10 +4410,10 @@ out:
 /* Escapes outside the listed set must not collide with the 8-byte inode
  * keys: a dirent key is always >= 10 bytes, so an inode key can never equal
  * it, and byte-lexicographic order keeps the two namespaces disjoint. */
-#define V3_DIRENT_KEY_FIXED 10u
+#define DIRENT_KEY_FIXED 10u
 
 /* Build a key; returns its length. `kb` must hold 10 + name_len bytes. */
-static uint16_t v3_dirent_key(uint8_t *kb, uint64_t parent,
+static uint16_t dirent_key(uint8_t *kb, uint64_t parent,
                               const char *name, size_t nlen)
 {
     int i;
@@ -4422,24 +4422,24 @@ static uint16_t v3_dirent_key(uint8_t *kb, uint64_t parent,
     kb[8] = (uint8_t)(nlen >> 8);
     kb[9] = (uint8_t)(nlen & 0xFF);
     if (nlen)
-        memcpy(kb + V3_DIRENT_KEY_FIXED, name, nlen);
-    return (uint16_t)(V3_DIRENT_KEY_FIXED + nlen);
+        memcpy(kb + DIRENT_KEY_FIXED, name, nlen);
+    return (uint16_t)(DIRENT_KEY_FIXED + nlen);
 }
 
-static uint16_t v3_dirent_key_len(const uint8_t *kb)
+static uint16_t dirent_key_len(const uint8_t *kb)
 {
-    return (uint16_t)(V3_DIRENT_KEY_FIXED +
+    return (uint16_t)(DIRENT_KEY_FIXED +
                       (((uint16_t)kb[8] << 8) | kb[9]));
 }
 
-static void v3_dirent_val(uint8_t vb[8], uint64_t child)
+static void dirent_val(uint8_t vb[8], uint64_t child)
 {
     int i;
     for (i = 0; i < 8; i++)
         vb[i] = (uint8_t)(child >> (56 - 8 * i));
 }
 
-static uint64_t v3_dirent_val_get(const uint8_t *p, uint16_t n)
+static uint64_t dirent_val_get(const uint8_t *p, uint16_t n)
 {
     uint64_t id = 0;
     int i;
@@ -4450,10 +4450,10 @@ static uint64_t v3_dirent_val_get(const uint8_t *p, uint16_t n)
     return id;
 }
 
-int vol_v3_dirent_get(invfs_volume *v, uint64_t parent, const char *name,
+int vol_dirent_get(invfs_volume *v, uint64_t parent, const char *name,
                       uint64_t *child_out)
 {
-    uint8_t kb[V3_DIRENT_KEY_FIXED + INVFS_MAX_NAME];
+    uint8_t kb[DIRENT_KEY_FIXED + INVFS_MAX_NAME];
     bt_val val;
     uint16_t kn;
     size_t nlen = name ? strlen(name) : 0;
@@ -4461,19 +4461,19 @@ int vol_v3_dirent_get(invfs_volume *v, uint64_t parent, const char *name,
 
     if (!v || nlen > INVFS_MAX_NAME)
         return -1;
-    if (v3_ready(v) != 0)
+    if (ready(v) != 0)
         return -1;
-    kn = v3_dirent_key(kb, parent, name, nlen);
+    kn = dirent_key(kb, parent, name, nlen);
 
     /* Test-only seam (src/core/vol_fault.h), armed by INVFS_FAULT. Stands in
      * for the DIRENT row read failing -- an unreadable or quarantined base
      * page holding this name's entry -- and injects the same -1 the read
      * failure below produces, so the name-resolution path cannot tell it
      * from the real thing. It is the second trigger for the same fail-open
-     * the xattr row read is: when this returns -1, vol_v3_path_lookup
+     * the xattr row read is: when this returns -1, vol_path_lookup
      * returns -1, and a caller that only tests the name for existence goes
      * on as though the name were not there. */
-    if (invfs_vol_fault("v3_dirent_row_read"))
+    if (invfs_vol_fault("dirent_row_read"))
         return -1;
 
     /* WP-M11: delta first; a delete shadows the base dirent.
@@ -4491,24 +4491,24 @@ int vol_v3_dirent_get(invfs_volume *v, uint64_t parent, const char *name,
             if (got != 8)
                 return -1;
             if (child_out)
-                *child_out = v3_dirent_val_get(vb, got);
+                *child_out = dirent_val_get(vb, got);
             return 1;
         }
     }
 
-    if (v3_base_get(v, kb, kn, &val, &found) != 0)
+    if (base_get(v, kb, kn, &val, &found) != 0)
         return -1;
     if (!found)
         return 0;
     if (child_out)
-        *child_out = v3_dirent_val_get(val.p, val.n);
+        *child_out = dirent_val_get(val.p, val.n);
     return 1;
 }
 
-int vol_v3_dirent_put(invfs_volume *v, uint64_t parent, const char *name,
+int vol_dirent_put(invfs_volume *v, uint64_t parent, const char *name,
                       uint64_t child)
 {
-    uint8_t kb[V3_DIRENT_KEY_FIXED + INVFS_MAX_NAME];
+    uint8_t kb[DIRENT_KEY_FIXED + INVFS_MAX_NAME];
     uint8_t vb[8];
     invfs_blkptr root, nr;
     uint16_t kn;
@@ -4517,21 +4517,21 @@ int vol_v3_dirent_put(invfs_volume *v, uint64_t parent, const char *name,
 
     if (!v || nlen > INVFS_MAX_NAME || child == 0)
         return -1;
-    if (v3_ready(v) != 0)
+    if (ready(v) != 0)
         return -1;
-    if (v3_base_root(v, &root) != 0)
+    if (base_root(v, &root) != 0)
         return -1;
     old_gen = root.gen;
-    kn = v3_dirent_key(kb, parent, name, nlen);
-    v3_dirent_val(vb, child);
+    kn = dirent_key(kb, parent, name, nlen);
+    dirent_val(vb, child);
     if (btree_upsert(v, root, (bt_key){kb, kn}, (bt_val){vb, 8}, &nr) != 0)
         return -1;
-    return v3_publish(v, nr, old_gen);
+    return publish(v, nr, old_gen);
 }
 
-int vol_v3_dirent_del(invfs_volume *v, uint64_t parent, const char *name)
+int vol_dirent_del(invfs_volume *v, uint64_t parent, const char *name)
 {
-    uint8_t kb[V3_DIRENT_KEY_FIXED + INVFS_MAX_NAME];
+    uint8_t kb[DIRENT_KEY_FIXED + INVFS_MAX_NAME];
     invfs_blkptr root, nr;
     bt_val val;
     uint16_t kn;
@@ -4541,11 +4541,11 @@ int vol_v3_dirent_del(invfs_volume *v, uint64_t parent, const char *name)
 
     if (!v || nlen > INVFS_MAX_NAME)
         return -1;
-    if (v3_ready(v) != 0)
+    if (ready(v) != 0)
         return -1;
-    if (v3_base_root(v, &root) != 0)
+    if (base_root(v, &root) != 0)
         return -1;
-    kn = v3_dirent_key(kb, parent, name, nlen);
+    kn = dirent_key(kb, parent, name, nlen);
     if (btree_search(v, root, (bt_key){kb, kn}, &val, &found) != 0)
         return -1;
     if (!found)
@@ -4553,67 +4553,67 @@ int vol_v3_dirent_del(invfs_volume *v, uint64_t parent, const char *name)
     old_gen = root.gen;
     if (btree_delete(v, root, (bt_key){kb, kn}, &nr) != 0)
         return -1;
-    return v3_publish(v, nr, old_gen);
+    return publish(v, nr, old_gen);
 }
 
 /* WP-M12: the delta-backed dirent mutations. The value is the same u64 BE
  * child id the base stores, so the WP-M11 merge treats both streams alike;
  * the insert is always appended BEFORE the source delete on rename
  * (add-before-remove, design §3). */
-int vol_v3_dirent_delta_put(invfs_volume *v, uint64_t parent,
+int vol_dirent_delta_put(invfs_volume *v, uint64_t parent,
                             const char *name, uint64_t child)
 {
-    uint8_t kb[V3_DIRENT_KEY_FIXED + INVFS_MAX_NAME];
+    uint8_t kb[DIRENT_KEY_FIXED + INVFS_MAX_NAME];
     uint8_t vb[8];
     uint16_t kn;
     size_t nlen = name ? strlen(name) : 0;
 
     if (!v || nlen > INVFS_MAX_NAME || child == 0)
         return -1;
-    if (v3_ready(v) != 0)
+    if (ready(v) != 0)
         return -1;
-    kn = v3_dirent_key(kb, parent, name, nlen);
-    v3_dirent_val(vb, child);
-    return v3_delta_put(v, kb, kn, vb, sizeof vb);
+    kn = dirent_key(kb, parent, name, nlen);
+    dirent_val(vb, child);
+    return delta_put(v, kb, kn, vb, sizeof vb);
 }
 
-int vol_v3_dirent_delta_del(invfs_volume *v, uint64_t parent, const char *name)
+int vol_dirent_delta_del(invfs_volume *v, uint64_t parent, const char *name)
 {
-    uint8_t kb[V3_DIRENT_KEY_FIXED + INVFS_MAX_NAME];
+    uint8_t kb[DIRENT_KEY_FIXED + INVFS_MAX_NAME];
     uint16_t kn;
     size_t nlen = name ? strlen(name) : 0;
     int ex;
 
     if (!v || nlen > INVFS_MAX_NAME)
         return -1;
-    if (v3_ready(v) != 0)
+    if (ready(v) != 0)
         return -1;
-    kn = v3_dirent_key(kb, parent, name, nlen);
-    ex = v3_overlay_exists(v, kb, kn);
+    kn = dirent_key(kb, parent, name, nlen);
+    ex = overlay_exists(v, kb, kn);
     if (ex < 0)
         return -1;
     if (ex == 0)
         return 0;   /* absent: nothing to do */
-    return v3_delta_del(v, kb, kn);
+    return delta_del(v, kb, kn);
 }
 
 /* Decode one raw dirent key + child id and hand the user callback the
  * NUL-terminated name. Malformed keys and the anchor (name_len 0) are
  * skipped. Shared by the base stream and the delta stream of the merge. */
-static int v3_emit_dirent(vol_v3_dirent_cb cb, void *ctx,
+static int emit_dirent(vol_dirent_cb cb, void *ctx,
                           const uint8_t *kp, uint16_t klen, uint64_t child)
 {
     char name[INVFS_MAX_NAME + 1];
     uint16_t nlen;
 
-    if (klen < V3_DIRENT_KEY_FIXED)
+    if (klen < DIRENT_KEY_FIXED)
         return 0;
-    if (v3_dirent_key_len(kp) != klen)
+    if (dirent_key_len(kp) != klen)
         return 0;   /* malformed: not one of our keys */
     nlen = (uint16_t)(((uint16_t)kp[8] << 8) | kp[9]);
     if (nlen == 0 || nlen > INVFS_MAX_NAME)
         return 0;   /* anchor (or malformed) */
-    memcpy(name, kp + V3_DIRENT_KEY_FIXED, nlen);
+    memcpy(name, kp + DIRENT_KEY_FIXED, nlen);
     name[nlen] = 0;
     return cb(ctx, name, nlen, child);
 }
@@ -4638,15 +4638,15 @@ typedef struct {
     uint16_t klen;
     uint8_t  deleted;   /* delete record / anchor / malformed: never emitted */
     uint64_t child;
-} v3_merge_ent;
+} merge_ent;
 
 typedef struct {
-    v3_merge_ent *ent;
+    merge_ent *ent;
     size_t        n, cap;
     int           oom;
-} v3_merge_list;
+} merge_list;
 
-static void v3_merge_list_free(v3_merge_list *l)
+static void merge_list_free(merge_list *l)
 {
     size_t i;
     for (i = 0; i < l->n; i++)
@@ -4661,20 +4661,20 @@ static void v3_merge_list_free(v3_merge_list *l)
  * callback needs it through the list struct. */
 typedef struct {
     invfs_volume  *v;
-    v3_merge_list *l;
-} v3_merge_collect_ctx;
+    merge_list *l;
+} merge_collect_ctx;
 
-static int v3_merge_collect(void *ctx_, const uint8_t *key, uint16_t klen,
+static int merge_collect(void *ctx_, const uint8_t *key, uint16_t klen,
                             const delta_ref *ref)
 {
-    v3_merge_collect_ctx *c = (v3_merge_collect_ctx *)ctx_;
-    v3_merge_list *l = c->l;
-    v3_merge_ent *e;
+    merge_collect_ctx *c = (merge_collect_ctx *)ctx_;
+    merge_list *l = c->l;
+    merge_ent *e;
     uint16_t nlen;
 
     if (l->n == l->cap) {
         size_t ncap = l->cap ? l->cap * 2 : 16;
-        v3_merge_ent *ne = (v3_merge_ent *)realloc(l->ent, ncap * sizeof *ne);
+        merge_ent *ne = (merge_ent *)realloc(l->ent, ncap * sizeof *ne);
         if (!ne) {
             l->oom = 1;
             return 1;                    /* abort the cursor */
@@ -4694,7 +4694,7 @@ static int v3_merge_collect(void *ctx_, const uint8_t *key, uint16_t klen,
     e->klen = klen;
     e->deleted = 1;                      /* anchor/malformed/delete default */
     l->n++;                              /* owned by the list from here */
-    if (klen >= V3_DIRENT_KEY_FIXED && v3_dirent_key_len(key) == klen) {
+    if (klen >= DIRENT_KEY_FIXED && dirent_key_len(key) == klen) {
         nlen = (uint16_t)(((uint16_t)key[8] << 8) | key[9]);
         if (nlen >= 1 && nlen <= INVFS_MAX_NAME &&
             !(ref->flags & INVFS_DELTA_FLAG_DELETE) && ref->vlen == 8) {
@@ -4705,7 +4705,7 @@ static int v3_merge_collect(void *ctx_, const uint8_t *key, uint16_t klen,
                 l->oom = 1;
                 return 1;
             }
-            e->child = v3_dirent_val_get(vb, got);
+            e->child = dirent_val_get(vb, got);
             e->deleted = 0;
         }
     }
@@ -4714,28 +4714,28 @@ static int v3_merge_collect(void *ctx_, const uint8_t *key, uint16_t klen,
 
 /* Merge cursor: the delta snapshot `ent[0..n)` at index `i`. */
 typedef struct {
-    vol_v3_dirent_cb     cb;
+    vol_dirent_cb     cb;
     void                *ctx;
-    const v3_merge_ent  *ent;
+    const merge_ent  *ent;
     size_t               n, i;
-} v3_merge_scan;
+} merge_scan;
 
-static int v3_merge_emit(v3_merge_scan *m, const v3_merge_ent *e)
+static int merge_emit(merge_scan *m, const merge_ent *e)
 {
     if (e->deleted)
         return 0;
-    return v3_emit_dirent(m->cb, m->ctx, e->key, e->klen, e->child);
+    return emit_dirent(m->cb, m->ctx, e->key, e->klen, e->child);
 }
 
 /* btree_scan callback: emit delta keys ordered before this base key, then
  * either the delta copy (delta wins on an equal key) or the base entry. */
-static int v3_merge_base_cb(void *ctx_, bt_key k, bt_val val)
+static int merge_base_cb(void *ctx_, bt_key k, bt_val val)
 {
-    v3_merge_scan *m = (v3_merge_scan *)ctx_;
+    merge_scan *m = (merge_scan *)ctx_;
 
     while (m->i < m->n &&
            vol_key_cmp(m->ent[m->i].key, m->ent[m->i].klen, k.p, k.n) < 0) {
-        int rc = v3_merge_emit(m, &m->ent[m->i]);
+        int rc = merge_emit(m, &m->ent[m->i]);
         m->i++;
         if (rc)
             return rc;
@@ -4743,40 +4743,40 @@ static int v3_merge_base_cb(void *ctx_, bt_key k, bt_val val)
     if (m->i < m->n &&
         vol_key_cmp(m->ent[m->i].key, m->ent[m->i].klen, k.p, k.n) == 0) {
         /* equal key: the delta copy shadows the base one (frozen rule) */
-        int rc = v3_merge_emit(m, &m->ent[m->i]);
+        int rc = merge_emit(m, &m->ent[m->i]);
         m->i++;
         return rc;
     }
-    return v3_emit_dirent(m->cb, m->ctx, k.p, k.n,
-                          v3_dirent_val_get(val.p, val.n));
+    return emit_dirent(m->cb, m->ctx, k.p, k.n,
+                          dirent_val_get(val.p, val.n));
 }
 
-int vol_v3_dirent_scan(invfs_volume *v, uint64_t parent,
-                       vol_v3_dirent_cb cb, void *ctx)
+int vol_dirent_scan(invfs_volume *v, uint64_t parent,
+                       vol_dirent_cb cb, void *ctx)
 {
-    uint8_t lo[V3_DIRENT_KEY_FIXED], hi[V3_DIRENT_KEY_FIXED];
+    uint8_t lo[DIRENT_KEY_FIXED], hi[DIRENT_KEY_FIXED];
     invfs_blkptr root;
-    v3_merge_list list;
-    v3_merge_collect_ctx cc;
-    v3_merge_scan m;
+    merge_list list;
+    merge_collect_ctx cc;
+    merge_scan m;
     int rc;
 
     if (!v || !cb)
         return -1;
-    if (v3_ready(v) != 0)
+    if (ready(v) != 0)
         return -1;
     /* [parent||0x0000, (parent+1)||0x0000): the anchor first, then every
      * child, all under one contiguous parent prefix. */
-    v3_dirent_key(lo, parent, NULL, 0);
-    v3_dirent_key(hi, parent + 1, NULL, 0);
+    dirent_key(lo, parent, NULL, 0);
+    dirent_key(hi, parent + 1, NULL, 0);
 
     memset(&list, 0, sizeof list);
     cc.v = v;
     cc.l = &list;
-    rc = vol_delta_range(v, lo, V3_DIRENT_KEY_FIXED, hi, V3_DIRENT_KEY_FIXED,
-                         v3_merge_collect, &cc);
+    rc = vol_delta_range(v, lo, DIRENT_KEY_FIXED, hi, DIRENT_KEY_FIXED,
+                         merge_collect, &cc);
     if (rc != 0 || list.oom) {
-        v3_merge_list_free(&list);
+        merge_list_free(&list);
         return -1;
     }
 
@@ -4786,9 +4786,9 @@ int vol_v3_dirent_scan(invfs_volume *v, uint64_t parent,
      * immediately after btree_scan; the delta-tail flush below works from
      * the already-collected list. */
     (void)vol_reclaim_reader_snapshot();
-    if (v3_base_root(v, &root) != 0) {
+    if (base_root(v, &root) != 0) {
         vol_reclaim_reader_release();
-        v3_merge_list_free(&list);
+        merge_list_free(&list);
         return -1;
     }
     m.cb = cb;
@@ -4796,14 +4796,14 @@ int vol_v3_dirent_scan(invfs_volume *v, uint64_t parent,
     m.ent = list.ent;
     m.n = list.n;
     m.i = 0;
-    rc = btree_scan(v, root, (bt_key){lo, V3_DIRENT_KEY_FIXED},
-                    (bt_key){hi, V3_DIRENT_KEY_FIXED},
-                    v3_merge_base_cb, &m);
+    rc = btree_scan(v, root, (bt_key){lo, DIRENT_KEY_FIXED},
+                    (bt_key){hi, DIRENT_KEY_FIXED},
+                    merge_base_cb, &m);
     vol_reclaim_reader_release();
     if (rc == 0) {
         /* flush the delta tail (keys after the last base key) */
         while (m.i < m.n) {
-            int erc = v3_merge_emit(&m, &m.ent[m.i]);
+            int erc = merge_emit(&m, &m.ent[m.i]);
             m.i++;
             if (erc) {
                 rc = erc;
@@ -4811,7 +4811,7 @@ int vol_v3_dirent_scan(invfs_volume *v, uint64_t parent,
             }
         }
     }
-    v3_merge_list_free(&list);
+    merge_list_free(&list);
     return rc;
 }
 
@@ -4819,7 +4819,7 @@ int vol_v3_dirent_scan(invfs_volume *v, uint64_t parent,
  * resume the id allocator after a reopen: RT30 carries no counter, and
  * reusing an id would alias two inodes. One full scan per mount, not per
  * create. */
-static int v3_max_inode_cb(void *ctx, bt_key k, bt_val val)
+static int max_inode_cb(void *ctx, bt_key k, bt_val val)
 {
     uint64_t *max = (uint64_t *)ctx;
     uint64_t id = 0;
@@ -4840,7 +4840,7 @@ static int v3_max_inode_cb(void *ctx, bt_key k, bt_val val)
  * inodes would alias. klen 8 is the inode namespace (dirents >= 10, xattrs
  * >= 11, recipes 33). A delete record still names the id, which is exactly
  * what we want (never reuse an id that a tombstone shadows). */
-static int v3_max_inode_delta_cb(void *ctx, const uint8_t *key, uint16_t klen,
+static int max_inode_delta_cb(void *ctx, const uint8_t *key, uint16_t klen,
                                  const delta_ref *ref)
 {
     uint64_t *max = (uint64_t *)ctx;
@@ -4856,7 +4856,7 @@ static int v3_max_inode_delta_cb(void *ctx, const uint8_t *key, uint16_t klen,
     return 0;
 }
 
-uint64_t vol_v3_inode_alloc(invfs_volume *v)
+uint64_t vol_inode_alloc(invfs_volume *v)
 {
     if (!v)
         return 0;
@@ -4868,22 +4868,22 @@ uint64_t vol_v3_inode_alloc(invfs_volume *v)
      * that is already live -- two dirents naming one inode row, the older
      * file's content silently replaced, invf-fsck clean. The early returns
      * below deliberately leave the flag clear so the next call retries. */
-    if (!v->v3_id_recovered) {
+    if (!v->id_recovered) {
         invfs_blkptr root;
         uint64_t max = 0;
-        if (v3_ready(v) != 0)
+        if (ready(v) != 0)
             return 0;
         /* Reclaim reader epoch. This is a READ and the easy one to miss:
          * the high-water-mark scan runs once per mount, from the create
          * path, and it walks the whole base tree exactly as a readdir
          * would. */
         (void)vol_reclaim_reader_snapshot();
-        if (v3_base_root(v, &root) != 0) {
+        if (base_root(v, &root) != 0) {
             vol_reclaim_reader_release();
             return 0;
         }
         if (btree_scan(v, root, (bt_key){NULL, 0}, (bt_key){NULL, 0},
-                       v3_max_inode_cb, &max) != 0) {
+                       max_inode_cb, &max) != 0) {
             vol_reclaim_reader_release();
             return 0;
         }
@@ -4891,14 +4891,14 @@ uint64_t vol_v3_inode_alloc(invfs_volume *v)
         /* WP-M12: a create since the last fold is delta-only, so the base
          * scan alone would miss it. Unbounded range; only 8-byte keys count. */
         if (vol_delta_range(v, NULL, 0, NULL, 0,
-                            v3_max_inode_delta_cb, &max) != 0)
+                            max_inode_delta_cb, &max) != 0)
             return 0;
         if (v->next_inode_id > max + 1)
             max = v->next_inode_id - 1;   /* never go backwards */
         v->next_inode_id = max + 1;
-        if (v->next_inode_id <= INVFS_V3_ROOT_INO)
-            v->next_inode_id = INVFS_V3_ROOT_INO + 1;
-        v->v3_id_recovered = 1;
+        if (v->next_inode_id <= INVFS_ROOT_INO)
+            v->next_inode_id = INVFS_ROOT_INO + 1;
+        v->id_recovered = 1;
     }
     return v->next_inode_id++;
 }
@@ -4913,12 +4913,12 @@ typedef struct {
     size_t   name_cap;
     uint64_t *parent_out;
     int      found;
-} v3_name_of_ctx;
+} name_of_ctx;
 
-static int v3_name_of_walk_cb(void *ctx_, const char *path, uint64_t ino,
+static int name_of_walk_cb(void *ctx_, const char *path, uint64_t ino,
                               uint32_t type, uint64_t size, int64_t mtime)
 {
-    v3_name_of_ctx *c = (v3_name_of_ctx *)ctx_;
+    name_of_ctx *c = (name_of_ctx *)ctx_;
     (void)type; (void)size; (void)mtime;
     if (ino == c->target) {
         size_t n = strlen(path);
@@ -4935,12 +4935,12 @@ static int v3_name_of_walk_cb(void *ctx_, const char *path, uint64_t ino,
  * For nlink == 1 this is unique; for nlink > 1 any name suffices.
  * Returns 1 found, 0 absent, -1 error. *name may be "": absent.
  * *parent_out is set to the parent inode on success (may be NULL). */
-int vol_v3_name_of(invfs_volume *v, uint64_t inode_id,
+int vol_name_of(invfs_volume *v, uint64_t inode_id,
                    char *name, size_t name_cap,
                    uint64_t *parent_out)
 {
-    v3_name_of_ctx c;
-    invfs_v3_inode in;
+    name_of_ctx c;
+    invfs_inode in;
     int rc;
 
     if (!v || !name || name_cap == 0)
@@ -4949,7 +4949,7 @@ int vol_v3_name_of(invfs_volume *v, uint64_t inode_id,
     if (parent_out)
         *parent_out = 0;
 
-    if (vol_v3_inode_get(v, inode_id, &in) != 1)
+    if (vol_inode_get(v, inode_id, &in) != 1)
         return 0;
 
     c.target = inode_id;
@@ -4962,21 +4962,21 @@ int vol_v3_name_of(invfs_volume *v, uint64_t inode_id,
      * quarantined base page, an OOM -- answered 0, "absent". Two callers
      * act on that: vol_sweep_name_of() turns it into "this file is gone"
      * and skips the inode, and the iterator's per-inode fallback turns it
-     * into NULL, which v3_iter_live_inodes documents as the ordinary "no
+     * into NULL, which iter_live_inodes documents as the ordinary "no
      * dirent reference" case. A short walk is -1, which is what this
      * function's own contract already promised. */
     /* WP135: the STRICT walk. "This inode has no name" and "the tree
      * could not be read" are different answers and only one of them is 0.
      * The lenient walk cannot express the difference: it steps over the
      * unreadable row and returns 0, which is what this function did. */
-    rc = vol_v3_walk_strict(v, v3_name_of_walk_cb, &c);
+    rc = vol_walk_strict(v, name_of_walk_cb, &c);
     if (rc < 0)
         return -1;
     return c.found ? 1 : 0;
 }
 
 /* WP-M21b: compose the full "dir/sub/file" path of an inode by walking
- * parent inodes up to the root (vol_v3_name_of gives one leaf + its
+ * parent inodes up to the root (vol_name_of gives one leaf + its
  * parent per hop). v2 record names are full relative paths and every
  * name-keyed consumer (vol_stat/vol_find/create_blob_file, the sweep
  * collector's dedupe table) expects that shape, while the v3 dirent
@@ -4984,17 +4984,17 @@ int vol_v3_name_of(invfs_volume *v, uint64_t inode_id,
  * (too deep / cyclic / buffer too small).
  *
  * The hop loop below runs ONCE on a well-formed volume, and that is not
- * an optimisation: v3_name_of_walk_cb copies the whole path and never
- * assigns *parent_out, so vol_v3_name_of() always reports parent 0 and
+ * an optimisation: name_of_walk_cb copies the whole path and never
+ * assigns *parent_out, so vol_name_of() always reports parent 0 and
  * the loop exits on it. The cost is therefore one reverse walk of the
  * ENTIRE dirent tree per call -- 3,399 directory listings on the
  * 46,245-inode reproducer, each one a vol_delta_range() over the delta
  * index. That is the FUSE open and read path (vol_read.c:1230), not an
  * offline tool. WP117's second commit made vol_delta_range O(log G + k)
- * and took one measured vol_v3_path_of from 44.5 ms to 1.3 ms, but the
+ * and took one measured vol_path_of from 44.5 ms to 1.3 ms, but the
  * whole-tree walk is still there. NOT fixed here: it needs its own WP
  * and its own risk assessment. */
-int vol_v3_path_of(invfs_volume *v, uint64_t inode_id, char *buf,
+int vol_path_of(invfs_volume *v, uint64_t inode_id, char *buf,
                    size_t cap)
 {
     char parts[64][INVFS_MAX_NAME + 1];
@@ -5006,13 +5006,13 @@ int vol_v3_path_of(invfs_volume *v, uint64_t inode_id, char *buf,
     if (!v || !buf || cap == 0)
         return -1;
     buf[0] = 0;
-    if (inode_id == INVFS_V3_ROOT_INO)
+    if (inode_id == INVFS_ROOT_INO)
         return 0;                       /* root has no name */
-    while (cur != INVFS_V3_ROOT_INO && cur != 0) {
+    while (cur != INVFS_ROOT_INO && cur != 0) {
         uint64_t parent = 0;
         if (n >= 64)
             return -1;                  /* too deep: refuse, never loop */
-        if (vol_v3_name_of(v, cur, parts[n], sizeof parts[n],
+        if (vol_name_of(v, cur, parts[n], sizeof parts[n],
                            &parent) != 1)
             return 0;                   /* unlinked between hops */
         chain[n] = cur;
@@ -5043,41 +5043,41 @@ int vol_v3_path_of(invfs_volume *v, uint64_t inode_id, char *buf,
 
 /* WP117: one-shot inode-id -> leaf-name map for the iterator below.
  *
- * vol_v3_name_of() answers "what dirent names this inode" with a full
+ * vol_name_of() answers "what dirent names this inode" with a full
  * reverse dirent walk of the whole tree (see the note on
- * vol_v3_path_of), and every directory listing it performs is one
+ * vol_path_of), and every directory listing it performs is one
  * vol_delta_range(), which walks the whole capacity of an open-addressed
  * hash table. The iterator used to call it once PER LIVE INODE, so a
  * sweep cost O(K x D x G) -- K inodes, D directory listings per lookup
  * (3,399 measured on the 46,245-inode reproducer), G the delta index
  * capacity (262,144). That put vol_heat_sweep_begin at a projected
- * 6-14 days. One vol_v3_walk() builds the whole map, so the cost drops
+ * 6-14 days. One vol_walk() builds the whole map, so the cost drops
  * to D x G + K -- the single walk the sweep's collect stage already pays.
  *
  * The stored string is the dirent's LEAF name, exactly what
  * The stored string is the full mount-relative path of ONE dirent
- * naming the inode -- byte for byte what vol_v3_name_of() returned, so
- * every caller of vol_v3_iter_live_inodes keeps its current contract
- * (heat_promote_v3_cb hands the name straight to vol_stat_full, which
+ * naming the inode -- byte for byte what vol_name_of() returned, so
+ * every caller of vol_iter_live_inodes keeps its current contract
+ * (heat_promote_cb hands the name straight to vol_stat_full, which
  * needs the full path, not a basename). The first name wins on a
- * hardlink (nlink > 1), which is also vol_v3_name_of()'s "any name
+ * hardlink (nlink > 1), which is also vol_name_of()'s "any name
  * suffices" rule: both walk the tree in the same order and stop at the
  * first dirent whose child id matches. A path too long for the caller's
- * buffer is stored as "", which is again what vol_v3_name_of() leaves
+ * buffer is stored as "", which is again what vol_name_of() leaves
  * behind for such a path (it refuses rather than truncates). */
 typedef struct {
     uint64_t id;
     uint32_t off;          /* name offset in pool, +1; 0 = empty slot */
-} v3_nidx_slot;
+} nidx_slot;
 
 typedef struct {
-    v3_nidx_slot *tab;
+    nidx_slot *tab;
     size_t cap;            /* power of two, load factor <= 0.5 */
     size_t n;
     char *pool;            /* NUL-separated names */
     size_t pool_n, pool_cap;
     int oom;
-} v3_name_index;
+} name_index;
 
 typedef struct {
     invfs_volume *v;
@@ -5087,12 +5087,12 @@ typedef struct {
     size_t visited_cap;
     size_t visited_n;
     int oom;
-    v3_name_index nidx;    /* WP117: built once, before the base scan */
+    name_index nidx;    /* WP117: built once, before the base scan */
     int nidx_ok;
     char namebuf[INVFS_MAX_NAME + 1];   /* fallback path only */
-} v3_iter_ctx;
+} iter_ctx;
 
-static size_t v3_nidx_hash(uint64_t id)
+static size_t nidx_hash(uint64_t id)
 {
     id ^= id >> 33; id *= 0xff51afd7ed558ccdULL;
     id ^= id >> 33; id *= 0xc4ceb9fe1a85ec53ULL;
@@ -5100,7 +5100,7 @@ static size_t v3_nidx_hash(uint64_t id)
     return (size_t)id;
 }
 
-static void v3_nidx_free(v3_name_index *ni)
+static void nidx_free(name_index *ni)
 {
     if (!ni)
         return;
@@ -5111,17 +5111,17 @@ static void v3_nidx_free(v3_name_index *ni)
     ni->cap = ni->n = ni->pool_n = ni->pool_cap = 0;
 }
 
-static int v3_nidx_grow(v3_name_index *ni)
+static int nidx_grow(name_index *ni)
 {
     size_t nc = ni->cap ? ni->cap * 2 : 1024, i;
-    v3_nidx_slot *nt = (v3_nidx_slot *)calloc(nc, sizeof *nt);
+    nidx_slot *nt = (nidx_slot *)calloc(nc, sizeof *nt);
 
     if (!nt) { ni->oom = 1; return -1; }
     for (i = 0; i < ni->cap; i++) {
         size_t h;
         if (!ni->tab[i].off)
             continue;
-        h = v3_nidx_hash(ni->tab[i].id) & (nc - 1);
+        h = nidx_hash(ni->tab[i].id) & (nc - 1);
         while (nt[h].off)
             h = (h + 1) & (nc - 1);
         nt[h] = ni->tab[i];
@@ -5134,21 +5134,21 @@ static int v3_nidx_grow(v3_name_index *ni)
 
 /* Record id -> `leaf`. Returns 1 on success (an id already present
  * keeps its first name), 0 on OOM. */
-static int v3_nidx_put(v3_name_index *ni, uint64_t id, const char *leaf)
+static int nidx_put(name_index *ni, uint64_t id, const char *leaf)
 {
     size_t h, nl;
 
     if (!ni)
         return 0;
     if (ni->cap) {
-        h = v3_nidx_hash(id) & (ni->cap - 1);
+        h = nidx_hash(id) & (ni->cap - 1);
         while (ni->tab[h].off) {
             if (ni->tab[h].id == id)
                 return 1;                   /* first name wins (hardlink) */
             h = (h + 1) & (ni->cap - 1);
         }
     }
-    if ((ni->n + 1) * 2 >= ni->cap && v3_nidx_grow(ni) != 0)
+    if ((ni->n + 1) * 2 >= ni->cap && nidx_grow(ni) != 0)
         return 0;
     nl = strlen(leaf) + 1;
     if (ni->pool_n + nl > ni->pool_cap) {
@@ -5163,7 +5163,7 @@ static int v3_nidx_put(v3_name_index *ni, uint64_t id, const char *leaf)
         ni->pool = np;
         ni->pool_cap = nc;
     }
-    h = v3_nidx_hash(id) & (ni->cap - 1);
+    h = nidx_hash(id) & (ni->cap - 1);
     while (ni->tab[h].off)
         h = (h + 1) & (ni->cap - 1);
     memcpy(ni->pool + ni->pool_n, leaf, nl);
@@ -5175,13 +5175,13 @@ static int v3_nidx_put(v3_name_index *ni, uint64_t id, const char *leaf)
 }
 
 /* The dirent path for an inode, or NULL if no dirent names it. */
-static const char *v3_nidx_get(const v3_name_index *ni, uint64_t id)
+static const char *nidx_get(const name_index *ni, uint64_t id)
 {
     size_t h;
 
     if (!ni || !ni->cap)
         return NULL;
-    h = v3_nidx_hash(id) & (ni->cap - 1);
+    h = nidx_hash(id) & (ni->cap - 1);
     while (ni->tab[h].off) {
         if (ni->tab[h].id == id)
             return ni->pool + (ni->tab[h].off - 1);
@@ -5191,34 +5191,34 @@ static const char *v3_nidx_get(const v3_name_index *ni, uint64_t id)
 }
 
 /* One dirent's mount-relative path per inode, exactly as
- * vol_v3_name_of() would have reported it: the full path, or "" when
- * the path does not fit the iterator's name buffer. vol_v3_walk's own
+ * vol_name_of() would have reported it: the full path, or "" when
+ * the path does not fit the iterator's name buffer. vol_walk's own
  * path buffer is 600 bytes, so a path longer than either is a corrupt
  * namespace rather than a name to keep. */
-static int v3_nidx_build_cb(void *ctx_, const char *path, uint64_t ino,
+static int nidx_build_cb(void *ctx_, const char *path, uint64_t ino,
                             uint32_t type, uint64_t size, int64_t mtime)
 {
-    v3_name_index *ni = (v3_name_index *)ctx_;
+    name_index *ni = (name_index *)ctx_;
 
     (void)type; (void)size; (void)mtime;
     if (!ni || !path)
         return 0;
-    return v3_nidx_put(ni, ino,
+    return nidx_put(ni, ino,
                        strlen(path) < INVFS_MAX_NAME + 1 ? path : "")
            ? 0
            : 1;                                  /* 1 stops the walk */
 }
 
-/* One vol_v3_walk() for the whole iteration. 0 = map ready, -1 = could
+/* One vol_walk() for the whole iteration. 0 = map ready, -1 = could
  * not build it (the caller then falls back to the per-inode walk). */
-static int v3_nidx_build(invfs_volume *v, v3_name_index *ni)
+static int nidx_build(invfs_volume *v, name_index *ni)
 {
     int rc;
 
     memset(ni, 0, sizeof *ni);
-    rc = vol_v3_walk(v, v3_nidx_build_cb, ni);
+    rc = vol_walk(v, nidx_build_cb, ni);
     if (rc != 0 || ni->oom) {
-        v3_nidx_free(ni);
+        nidx_free(ni);
         return -1;
     }
     return 0;
@@ -5228,14 +5228,14 @@ static int v3_nidx_build(invfs_volume *v, v3_name_index *ni)
  * inode has no dirent reference -- the documented "may be NULL" case.
  * Falls back to the per-inode reverse walk only if the one-shot map
  * could not be built, i.e. exactly the pre-WP117 behaviour. */
-static const char *v3_iter_name(v3_iter_ctx *ic, uint64_t inode_id)
+static const char *iter_name(iter_ctx *ic, uint64_t inode_id)
 {
     uint64_t parent;
 
     if (ic->nidx_ok)
-        return v3_nidx_get(&ic->nidx, inode_id);
+        return nidx_get(&ic->nidx, inode_id);
     ic->namebuf[0] = 0;
-    if (vol_v3_name_of(ic->v, inode_id, ic->namebuf,
+    if (vol_name_of(ic->v, inode_id, ic->namebuf,
                        sizeof ic->namebuf, &parent) != 1)
         return NULL;
     return ic->namebuf;
@@ -5247,7 +5247,7 @@ static const char *v3_iter_name(v3_iter_ctx *ic, uint64_t inode_id)
  * visit, not fine for the delta pass below, which must reliably tell
  * "this delta row already reported from base" apart from "delta-only
  * row". Load factor is kept <= 0.5 with rehash on growth. */
-static int v3_iter_seen(const v3_iter_ctx *ic, uint64_t id)
+static int iter_seen(const iter_ctx *ic, uint64_t id)
 {
     size_t h;
     if (!ic->visited_cap)
@@ -5263,11 +5263,11 @@ static int v3_iter_seen(const v3_iter_ctx *ic, uint64_t id)
 
 /* Returns 1 on success (already present counts as success), 0 on OOM
  * (sets ic->oom). */
-static int v3_iter_mark(v3_iter_ctx *ic, uint64_t id)
+static int iter_mark(iter_ctx *ic, uint64_t id)
 {
     size_t h;
 
-    if (v3_iter_seen(ic, id))
+    if (iter_seen(ic, id))
         return 1;
     if (ic->visited_n * 2 >= ic->visited_cap) {
         size_t nc = ic->visited_cap ? ic->visited_cap * 2 : 64;
@@ -5315,14 +5315,14 @@ static int v3_iter_mark(v3_iter_ctx *ic, uint64_t id)
  * whether or not the volume has been folded.
  *
  * Unset in production, where it costs one getenv and one pointer compare. */
-static int v3_iter_row_stop(void)
+static int iter_row_stop(void)
 {
     return invfs_vol_fault("iter_live_inodes_row");
 }
 
-static int v3_iter_base_cb(void *ctx_, bt_key k, bt_val val)
+static int iter_base_cb(void *ctx_, bt_key k, bt_val val)
 {
-    v3_iter_ctx *ic = (v3_iter_ctx *)ctx_;
+    iter_ctx *ic = (iter_ctx *)ctx_;
     uint64_t inode_id = 0;
     int i;
 
@@ -5344,13 +5344,13 @@ static int v3_iter_base_cb(void *ctx_, bt_key k, bt_val val)
     /* every base id is marked visited: nlink > 1 hardlinks share one row
      * (one key in the inode range, so no intra-base dupes) and the delta
      * pass below skips rows whose id was already reported from base */
-    if (!v3_iter_mark(ic, inode_id))
+    if (!iter_mark(ic, inode_id))
         return -1;
 
-    if (v3_iter_row_stop())            /* WP145: see v3_iter_row_stop */
+    if (iter_row_stop())            /* WP145: see iter_row_stop */
         return -1;
 
-    return ic->cb(ic->v, inode_id, v3_iter_name(ic, inode_id), ic->ctx);
+    return ic->cb(ic->v, inode_id, iter_name(ic, inode_id), ic->ctx);
 }
 
 /* WP-M21b: delta pass. Rows created (or recreated) since the last fold
@@ -5359,10 +5359,10 @@ static int v3_iter_base_cb(void *ctx_, bt_key k, bt_val val)
  * empty: measured, invf-cp of 5 files then sweep reported "live entries:
  * 0 (of 0 walked)". Visit every delta PUT in the inode range whose id
  * the base pass did not already report. */
-static int v3_iter_delta_cb(void *ctx_, const uint8_t *key, uint16_t klen,
+static int iter_delta_cb(void *ctx_, const uint8_t *key, uint16_t klen,
                             const delta_ref *ref)
 {
-    v3_iter_ctx *ic = (v3_iter_ctx *)ctx_;
+    iter_ctx *ic = (iter_ctx *)ctx_;
     uint64_t inode_id = 0;
     int i;
 
@@ -5372,33 +5372,33 @@ static int v3_iter_delta_cb(void *ctx_, const uint8_t *key, uint16_t klen,
         inode_id = (inode_id << 8) | key[i];
     if (ref->flags & INVFS_DELTA_FLAG_DELETE)
         return 0;                   /* created and deleted between folds */
-    if (v3_iter_seen(ic, inode_id))
+    if (iter_seen(ic, inode_id))
         return 0;                   /* base row (possibly updated): done */
-    if (!v3_iter_mark(ic, inode_id))
+    if (!iter_mark(ic, inode_id))
         return -1;
 
-    if (v3_iter_row_stop())            /* WP145: see v3_iter_row_stop */
+    if (iter_row_stop())            /* WP145: see iter_row_stop */
         return -1;
 
-    return ic->cb(ic->v, inode_id, v3_iter_name(ic, inode_id), ic->ctx);
+    return ic->cb(ic->v, inode_id, iter_name(ic, inode_id), ic->ctx);
 }
 
 /* Public entry point. Callback is invoked once per live inode (nlink > 1
  * visited once). Callback receives name (may be NULL if not found via
  * dirent). Returns 0 complete, -1 error, callback non-zero propagated. */
-int vol_v3_iter_live_inodes(invfs_volume *v,
+int vol_iter_live_inodes(invfs_volume *v,
     int (*cb)(invfs_volume *v, uint64_t inode_id, const char *name, void *ctx),
     void *ctx)
 {
     invfs_blkptr root;
-    v3_iter_ctx ic;
+    iter_ctx ic;
     uint64_t max_id = 0;
     uint8_t lo[8], hi[8];
     int rc;
 
     if (!v || !cb)
         return -1;
-    if (v3_ready(v) != 0)
+    if (ready(v) != 0)
         return -1;
     /* WP86: the base root read below can now fail on a torn root (it used to
      * answer "no root"), and `root` was left uninitialised for the scan that
@@ -5410,7 +5410,7 @@ int vol_v3_iter_live_inodes(invfs_volume *v,
     {
         uint64_t m = 0;
         (void)vol_delta_range(v, NULL, 0, NULL, 0,
-                              v3_max_inode_delta_cb, &m);
+                              max_inode_delta_cb, &m);
         max_id = m;
     }
     /* Reclaim reader epoch. One section spans BOTH base walks and the name
@@ -5419,7 +5419,7 @@ int vol_v3_iter_live_inodes(invfs_volume *v,
      * walker, so on a large volume it is the longest single hold on the
      * counter in the tree -- the drain's measured worst case. */
     /* WP135: test-only seam -- the BASE scan fails, which is the state that
-     * costs the most. vol_v3_iter_live_inodes skips the delta pass entirely
+     * costs the most. vol_iter_live_inodes skips the delta pass entirely
      * once rc is set (see `if (rc == 0)` below), so the caller loses every
      * inode created since the last fold as well -- and the count it stored
      * still matches the count it SAW, which is how the sweep read the
@@ -5428,18 +5428,18 @@ int vol_v3_iter_live_inodes(invfs_volume *v,
         return -1;
 
     (void)vol_reclaim_reader_snapshot();
-    if (v3_base_root(v, &root) == 0 && root.pba != 0) {
+    if (base_root(v, &root) == 0 && root.pba != 0) {
         uint64_t m = 0;
         (void)btree_scan(v, root, (bt_key){NULL, 0}, (bt_key){NULL, 0},
-                         v3_max_inode_cb, &m);
+                         max_inode_cb, &m);
         if (m > max_id)
             max_id = m;
     }
     if (max_id == 0)
-        max_id = INVFS_V3_ROOT_INO;
+        max_id = INVFS_ROOT_INO;
 
-    v3_ino_key(INVFS_V3_ROOT_INO, lo);
-    v3_ino_key(max_id + 1, hi);
+    ino_key(INVFS_ROOT_INO, lo);
+    ino_key(max_id + 1, hi);
 
     memset(&ic, 0, sizeof ic);
     ic.v = v;
@@ -5447,11 +5447,11 @@ int vol_v3_iter_live_inodes(invfs_volume *v,
     ic.ctx = ctx;
     /* WP117: ONE dirent walk for the whole iteration feeds the name map
      * both passes below read from. Before this, each live inode paid its
-     * own whole-tree reverse walk (see v3_name_index). */
-    ic.nidx_ok = (v3_nidx_build(v, &ic.nidx) == 0);
+     * own whole-tree reverse walk (see name_index). */
+    ic.nidx_ok = (nidx_build(v, &ic.nidx) == 0);
 
     rc = btree_scan(v, root, (bt_key){lo, 8}, (bt_key){hi, 8},
-                    v3_iter_base_cb, &ic);
+                    iter_base_cb, &ic);
     vol_reclaim_reader_release();
     if (rc != 0 || ic.oom)
         rc = -1;
@@ -5459,11 +5459,11 @@ int vol_v3_iter_live_inodes(invfs_volume *v,
      * visit the ones the base pass did not already report. Same key range
      * (max_id above already accounts for the delta's highest id). */
     if (rc == 0) {
-        int drc = vol_delta_range(v, lo, 8, hi, 8, v3_iter_delta_cb, &ic);
+        int drc = vol_delta_range(v, lo, 8, hi, 8, iter_delta_cb, &ic);
         if (drc != 0 || ic.oom)
             rc = -1;
     }
-    v3_nidx_free(&ic.nidx);
+    nidx_free(&ic.nidx);
     free(ic.visited);
     return rc;
 }
@@ -5491,7 +5491,7 @@ int vol_v3_iter_live_inodes(invfs_volume *v,
  *
  * One case is counted but NOT fatal: a live row that NO name resolves to
  * (fan-in 0, nlink > 0) is an orphan row. The v3 write order is row first,
- * dirent second (vol_v3_create_content_node), so a crash between the two
+ * dirent second (vol_create_content_node), so a crash between the two
  * legitimately leaves a row nobody names -- and nothing in the repair path
  * removes it, so making it fatal would leave a volume permanently DAMAGED
  * over a state fsck cannot fix. It is reported, loudly, on its own line;
@@ -5505,14 +5505,14 @@ int vol_v3_iter_live_inodes(invfs_volume *v,
  *     engine's own bookkeeping, not a namespace invariant;
  *   - the root inode, which has no name at all.
  *
- * `names` counts what vol_v3_walk -- the walk the read/verify path itself
+ * `names` counts what vol_walk -- the walk the read/verify path itself
  * uses -- reaches, so a name whose inode row does not resolve is outside
  * both sides of the comparison (that loss is reported by the base-page
  * damage path, which owns it).
  *
  * Cost: one btree range scan of the inode keyspace, one delta pass (both
  * O(pages)) and one hierarchical namespace walk. Deliberately NOT
- * vol_v3_iter_live_inodes: that resolves a name per inode through a full
+ * vol_iter_live_inodes: that resolves a name per inode through a full
  * reverse dirent walk (O(depth x live) each -- the WP117 quadratic), and
  * this check runs inside fsck, where a large volume must still finish. */
 
@@ -5599,7 +5599,7 @@ static int nlink_row_cb(void *ctx_, bt_key k, bt_val val)
 {
     nlink_ctx *c = (nlink_ctx *)ctx_;
     uint64_t id = 0;
-    invfs_v3_inode in;
+    invfs_inode in;
     nlink_ent *e;
     int fresh;
 
@@ -5611,12 +5611,12 @@ static int nlink_row_cb(void *ctx_, bt_key k, bt_val val)
         for (i = 0; i < 8; i++)
             id = (id << 8) | k.p[i];
     }
-    if (id == INVFS_V3_ROOT_INO)
+    if (id == INVFS_ROOT_INO)
         return 0;
-    /* vol_v3_inode_get consults the delta overlay, so a row the delta
+    /* vol_inode_get consults the delta overlay, so a row the delta
      * deleted reads back absent and a row the delta replaced reads back
      * current -- one truth for both passes. */
-    if (vol_v3_inode_get(c->v, id, &in) != 1)
+    if (vol_inode_get(c->v, id, &in) != 1)
         return 0;
     if (in.type == INVFS_ITYP_DIR)
         return 0;                       /* dir nlink is not a name count */
@@ -5628,7 +5628,7 @@ static int nlink_row_cb(void *ctx_, bt_key k, bt_val val)
     e->nlink = in.nlink;
     /* an id the delta shadows is visited by BOTH passes (base key, delta
      * key); count the row once. The nlink it carries is the same either
-     * way -- vol_v3_inode_get resolves the overlay -- so re-reading it is
+     * way -- vol_inode_get resolves the overlay -- so re-reading it is
      * harmless; counting it twice would not be. */
     if (fresh)
         c->a->inodes++;
@@ -5664,8 +5664,8 @@ static int nlink_name_cb(void *ctx_, const char *path, uint64_t ino,
      * a stale dirent. (The walk already skips names whose row does not
      * resolve at all, so this is belt and braces.) */
     {
-        invfs_v3_inode in;
-        if (vol_v3_inode_get(c->v, ino, &in) == 1 &&
+        invfs_inode in;
+        if (vol_inode_get(c->v, ino, &in) == 1 &&
             (in.nlink == 0 || in.nlink == 0xFFFFFFFFu))
             return 0;
     }
@@ -5678,7 +5678,7 @@ static int nlink_name_cb(void *ctx_, const char *path, uint64_t ino,
     return 0;
 }
 
-int vol_v3_nlink_audit(invfs_volume *v, invfs_nlink_audit *out)
+int vol_nlink_audit(invfs_volume *v, invfs_nlink_audit *out)
 {
     nlink_ctx c;
     invfs_blkptr root;
@@ -5689,7 +5689,7 @@ int vol_v3_nlink_audit(invfs_volume *v, invfs_nlink_audit *out)
     if (!v || !out)
         return -1;
     memset(out, 0, sizeof *out);
-    if (v3_ready(v) != 0)
+    if (ready(v) != 0)
         return -1;
 
     memset(&c, 0, sizeof c);
@@ -5697,16 +5697,16 @@ int vol_v3_nlink_audit(invfs_volume *v, invfs_nlink_audit *out)
     c.v = v;
 
     memset(&root, 0, sizeof root);
-    v3_ino_key(INVFS_V3_ROOT_INO, lo);
+    ino_key(INVFS_ROOT_INO, lo);
     rc = 0;
     /* Reclaim reader epoch. The announce has to sit OUTSIDE the condition
-     * below, because v3_base_root is inside it: announcing after the capture
+     * below, because base_root is inside it: announcing after the capture
      * would leave exactly the window this mechanism exists to close. */
     (void)vol_reclaim_reader_snapshot();
-    if (v3_base_root(v, &root) == 0 && root.pba &&
+    if (base_root(v, &root) == 0 && root.pba &&
         mbuf_read(v, root.pba, page) == 0) {
         /* the root page's level decides the blkptr flags btree_scan wants
-         * (the same pairing spt0_tree_ok / vol_v3_iter_inodes_at build) */
+         * (the same pairing spt0_tree_ok / vol_iter_inodes_at build) */
         mbuf_ptr_set(&root, root.pba, page,
                      mbuf_page_chdr(page)->level == INVFS_PAGE_LEVEL_LEAF
                      ? INVFS_BP_ROOT | INVFS_BP_LEAF
@@ -5724,7 +5724,7 @@ int vol_v3_nlink_audit(invfs_volume *v, invfs_nlink_audit *out)
     if (rc == 0)
         rc = vol_delta_range(v, lo, 8, NULL, 0, nlink_row_delta_cb, &c);
     if (rc == 0)
-        rc = vol_v3_walk(v, nlink_name_cb, &c);
+        rc = vol_walk(v, nlink_name_cb, &c);
     if (c.oom)
         rc = -1;
 
@@ -5770,16 +5770,16 @@ int vol_v3_nlink_audit(invfs_volume *v, invfs_nlink_audit *out)
 /* A v3 inode row does not carry its content: it carries a 32-byte
  * BLAKE3 content address, and the recipe blob lives under its own key
  * (0x04 || addr) in the SAME base tree the page walk already verified
- * (v3_recipe_key, above). So the tree walk cannot find it -- not by
+ * (recipe_key, above). So the tree walk cannot find it -- not by
  * following a pointer, because there is no pointer to follow, and not by
  * counting keys, because a key that is gone leaves no trace in the page's
  * own CRC. The only thing in the volume that still says the blob must be
  * there is the address in the row, and nothing in the fsck path was
  * reading it. That is the whole defect: the read path resolves the
- * address (vol_read_inode -> vol_v3_recipe_load) and fsck did not, so a
+ * address (vol_read_inode -> vol_recipe_load) and fsck did not, so a
  * volume with an unreadable file passed every structural check fsck ran.
  *
- * The walk itself is the one vol_v3_iter_live_inodes already performs
+ * The walk itself is the one vol_iter_live_inodes already performs
  * (base range + delta overlay, one visit per inode, names resolved), so
  * the audit adds no new traversal shape to the volume. */
 
@@ -5804,13 +5804,13 @@ static int recipe_audit_cb(invfs_volume *v, uint64_t inode_id, const char *name,
                            void *ctx_)
 {
     recipe_audit_ctx *c = (recipe_audit_ctx *)ctx_;
-    static const uint8_t zero_addr[INVFS_V3_RECIPE_ADDR_LEN];
-    invfs_v3_inode in;
+    static const uint8_t zero_addr[INVFS_RECIPE_ADDR_LEN];
+    invfs_inode in;
     uint8_t *blob = NULL;
     size_t blen = 0;
     uint32_t kind;
 
-    if (vol_v3_inode_get(v, inode_id, &in) != 1)
+    if (vol_inode_get(v, inode_id, &in) != 1)
         return 0;
     if (in.type == INVFS_ITYP_DIR)
         return 0;                  /* a directory has no recipe */
@@ -5820,11 +5820,11 @@ static int recipe_audit_cb(invfs_volume *v, uint64_t inode_id, const char *name,
      * short-circuits on the inode TYPE, which is the case this audit used
      * to miss, below. */
     if (in.size == 0 ||
-        memcmp(in.recipe_addr, zero_addr, INVFS_V3_RECIPE_ADDR_LEN) == 0)
+        memcmp(in.recipe_addr, zero_addr, INVFS_RECIPE_ADDR_LEN) == 0)
         return 0;
 
     c->a->checked++;
-    if (vol_v3_recipe_load(v, in.recipe_addr, &blob, &blen) == 0 && blob) {
+    if (vol_recipe_load(v, in.recipe_addr, &blob, &blen) == 0 && blob) {
         invfs_ast_hdr ah;
         const invfs_ast_block_entry *ents = NULL;
         size_t n_ents = 0;
@@ -5855,7 +5855,7 @@ static int recipe_audit_cb(invfs_volume *v, uint64_t inode_id, const char *name,
     return 0;
 }
 
-int vol_v3_recipe_audit(invfs_volume *v, invfs_recipe_audit *out)
+int vol_recipe_audit(invfs_volume *v, invfs_recipe_audit *out)
 {
     recipe_audit_ctx c;
     int rc;
@@ -5863,11 +5863,11 @@ int vol_v3_recipe_audit(invfs_volume *v, invfs_recipe_audit *out)
     if (!v || !out)
         return -1;
     memset(out, 0, sizeof *out);
-    if (v3_ready(v) != 0)
+    if (ready(v) != 0)
         return -1;
     memset(&c, 0, sizeof c);
     c.a = out;
-    rc = vol_v3_iter_live_inodes(v, recipe_audit_cb, &c);
+    rc = vol_iter_live_inodes(v, recipe_audit_cb, &c);
     return rc < 0 ? -1 : 0;
 }
 
@@ -5875,7 +5875,7 @@ int vol_v3_recipe_audit(invfs_volume *v, invfs_recipe_audit *out)
 /* WP96: live-set iteration at an ARBITRARY save-point generation       */
 /* ------------------------------------------------------------------ */
 
-/* vol_v3_iter_live_inodes above always walks the CURRENT base root and the
+/* vol_iter_live_inodes above always walks the CURRENT base root and the
  * CURRENT delta overlay. WP96 needs the inode set of a PAST generation --
  * the one an SPT0 save point pinned -- twice: at capture, to take the data
  * pin, and at restore, to verify the pinned state before republishing it.
@@ -5922,12 +5922,12 @@ typedef struct {
     uint64_t seq;          /* log order; the highest wins for a key */
     uint16_t flags;
     uint16_t vlen;
-} v3_gen_rec;
+} gen_rec;
 
 typedef struct {
     invfs_volume *v;
     int (*cb)(invfs_volume *v, uint64_t inode_id,
-              const invfs_v3_inode *in, void *ctx);
+              const invfs_inode *in, void *ctx);
     void *ctx;
     uint64_t delta_end;
     uint64_t delta_segs;
@@ -5936,19 +5936,19 @@ typedef struct {
     int64_t   head_depth;    /* where that head sits in the CURRENT chain */
     uint64_t *seg_pba;       /* chain_pba[depth], head first */
     size_t    nseg;
-    v3_gen_rec *recs;        /* the prefix's inode records, log order */
+    gen_rec *recs;        /* the prefix's inode records, log order */
     size_t    nrecs, crecs;
     uint64_t *visited;
     size_t    visited_cap;
     size_t    visited_n;
     int       oom;
-} v3_gen_ctx;
+} gen_ctx;
 
-static int v3_gen_rec_push(v3_gen_ctx *gc, const v3_gen_rec *r)
+static int gen_rec_push(gen_ctx *gc, const gen_rec *r)
 {
     if (gc->nrecs == gc->crecs) {
         size_t nc = gc->crecs ? gc->crecs * 2 : 64;
-        v3_gen_rec *nr = (v3_gen_rec *)realloc(gc->recs, nc * sizeof *nr);
+        gen_rec *nr = (gen_rec *)realloc(gc->recs, nc * sizeof *nr);
         if (!nr) { gc->oom = 1; return -1; }
         gc->recs = nr;
         gc->crecs = nc;
@@ -5957,9 +5957,9 @@ static int v3_gen_rec_push(v3_gen_ctx *gc, const v3_gen_rec *r)
     return 0;
 }
 
-static int v3_gen_rec_cmp(const void *a, const void *b)
+static int gen_rec_cmp(const void *a, const void *b)
 {
-    const v3_gen_rec *x = (const v3_gen_rec *)a, *y = (const v3_gen_rec *)b;
+    const gen_rec *x = (const gen_rec *)a, *y = (const gen_rec *)b;
     if (x->id != y->id)
         return x->id < y->id ? -1 : 1;
     if (x->seq != y->seq)
@@ -5970,7 +5970,7 @@ static int v3_gen_rec_cmp(const void *a, const void *b)
 /* Replay the pinned prefix of the log, collecting its inode records. The
  * chain is walked newest -> oldest to build seg_pba, then replayed oldest ->
  * newest (log order) so `seq` is monotone. */
-static int v3_gen_prefix_replay(invfs_volume *v, v3_gen_ctx *gc)
+static int gen_prefix_replay(invfs_volume *v, gen_ctx *gc)
 {
     uint64_t cur = v->delta_seg_pba, seq = 0;
     uint32_t guard = 0;
@@ -6045,7 +6045,7 @@ static int v3_gen_prefix_replay(invfs_volume *v, v3_gen_ctx *gc)
             size_t rl;
             int rc = vol_delta_rec_parse(buf + h.hdr_size, plen, off,
                                          &kl, &vl, &fl, &rl);
-            v3_gen_rec r;
+            gen_rec r;
             if (rc <= 0)
                 break;                       /* clean end or torn tail */
             if (kl == 8) {
@@ -6054,14 +6054,14 @@ static int v3_gen_prefix_replay(invfs_volume *v, v3_gen_ctx *gc)
                 for (i = 0; i < 8; i++)
                     id = (id << 8) | buf[h.hdr_size + off +
                                           INVFS_DELTA_REC_HDR_LEN + i];
-                if (id >= INVFS_V3_ROOT_INO) {
+                if (id >= INVFS_ROOT_INO) {
                     r.id = id;
                     r.seg = gc->seg_pba[d];
                     r.off = (uint64_t)h.hdr_size + off;
                     r.seq = seq;
                     r.flags = fl;
                     r.vlen = vl;
-                    if (v3_gen_rec_push(gc, &r) != 0) {
+                    if (gen_rec_push(gc, &r) != 0) {
                         free(buf);
                         return -1;
                     }
@@ -6075,12 +6075,12 @@ static int v3_gen_prefix_replay(invfs_volume *v, v3_gen_ctx *gc)
             return -1;
     }
     if (gc->nrecs > 1)
-        qsort(gc->recs, gc->nrecs, sizeof *gc->recs, v3_gen_rec_cmp);
+        qsort(gc->recs, gc->nrecs, sizeof *gc->recs, gen_rec_cmp);
     return 0;
 }
 
 /* how many consecutive entries share recs[lo]'s id */
-static size_t v3_gen_run(const v3_gen_ctx *gc, size_t lo)
+static size_t gen_run(const gen_ctx *gc, size_t lo)
 {
     size_t n = 1;
     while (lo + n < gc->nrecs && gc->recs[lo + n].id == gc->recs[lo].id)
@@ -6091,7 +6091,7 @@ static size_t v3_gen_run(const v3_gen_ctx *gc, size_t lo)
 /* the winning prefix record for `id`, or NULL. Records are sorted by
  * (id, log order), so the last entry of the id's run is the one replay would
  * have kept. */
-static const v3_gen_rec *v3_gen_find(const v3_gen_ctx *gc, uint64_t id)
+static const gen_rec *gen_find(const gen_ctx *gc, uint64_t id)
 {
     size_t lo = 0, hi = gc->nrecs;
     while (lo < hi) {
@@ -6102,11 +6102,11 @@ static const v3_gen_rec *v3_gen_find(const v3_gen_ctx *gc, uint64_t id)
             hi = mid;
     }
     if (lo < gc->nrecs && gc->recs[lo].id == id)
-        return &gc->recs[lo + v3_gen_run(gc, lo) - 1];
+        return &gc->recs[lo + gen_run(gc, lo) - 1];
     return NULL;
 }
 
-static int v3_gen_seen_id(const v3_gen_ctx *gc, uint64_t id)
+static int gen_seen_id(const gen_ctx *gc, uint64_t id)
 {
     size_t h;
     if (!gc->visited_cap)
@@ -6120,7 +6120,7 @@ static int v3_gen_seen_id(const v3_gen_ctx *gc, uint64_t id)
     return 0;
 }
 
-static int v3_gen_mark(v3_gen_ctx *gc, uint64_t id)
+static int gen_mark(gen_ctx *gc, uint64_t id)
 {
     size_t h;
 
@@ -6147,13 +6147,13 @@ static int v3_gen_mark(v3_gen_ctx *gc, uint64_t id)
     return 1;
 }
 
-static int v3_gen_emit_row(v3_gen_ctx *gc, uint64_t id, const uint8_t *row,
+static int gen_emit_row(gen_ctx *gc, uint64_t id, const uint8_t *row,
                            uint16_t rlen)
 {
-    invfs_v3_inode in;
-    if (!v3_gen_mark(gc, id))
+    invfs_inode in;
+    if (!gen_mark(gc, id))
         return -1;
-    if (v3_ino_decode(row, rlen, &in) != 0)
+    if (ino_decode(row, rlen, &in) != 0)
         return 0;                        /* a row we cannot decode names no
                                          * recipe we could verify */
     if (in.nlink == 0)
@@ -6161,9 +6161,9 @@ static int v3_gen_emit_row(v3_gen_ctx *gc, uint64_t id, const uint8_t *row,
     return gc->cb(gc->v, id, &in, gc->ctx);
 }
 
-static int v3_gen_emit_ref(v3_gen_ctx *gc, uint64_t id, const v3_gen_rec *r)
+static int gen_emit_ref(gen_ctx *gc, uint64_t id, const gen_rec *r)
 {
-    uint8_t rb[INVFS_V3_INODE_ROW_FIXED];
+    uint8_t rb[INVFS_INODE_ROW_FIXED];
     uint16_t rlen = 0;
     delta_ref ref;
 
@@ -6174,13 +6174,13 @@ static int v3_gen_emit_ref(v3_gen_ctx *gc, uint64_t id, const v3_gen_rec *r)
     ref.vlen = r->vlen;
     if (vol_delta_read_value(gc->v, &ref, rb, sizeof rb, &rlen) != 0)
         return -1;
-    return v3_gen_emit_row(gc, id, rb, rlen);
+    return gen_emit_row(gc, id, rb, rlen);
 }
 
-static int v3_gen_base_cb(void *ctx_, bt_key k, bt_val val)
+static int gen_base_cb(void *ctx_, bt_key k, bt_val val)
 {
-    v3_gen_ctx *gc = (v3_gen_ctx *)ctx_;
-    const v3_gen_rec *r;
+    gen_ctx *gc = (gen_ctx *)ctx_;
+    const gen_rec *r;
     uint64_t id = 0;
     uint16_t i;
 
@@ -6189,28 +6189,28 @@ static int v3_gen_base_cb(void *ctx_, bt_key k, bt_val val)
         return 0;
     for (i = 0; i < 8; i++)
         id = (id << 8) | k.p[i];
-    if (id < INVFS_V3_ROOT_INO)
+    if (id < INVFS_ROOT_INO)
         return 0;
-    r = v3_gen_find(gc, id);
+    r = gen_find(gc, id);
     if (r) {
         if (r->flags & INVFS_DELTA_FLAG_DELETE)
             return 0;                      /* the pinned generation deleted it */
-        return v3_gen_emit_ref(gc, id, r);
+        return gen_emit_ref(gc, id, r);
     }
-    return v3_gen_emit_row(gc, id, val.p, val.n);
+    return gen_emit_row(gc, id, val.p, val.n);
 }
 
 /* the delta pass: pinned-prefix records for inodes the base tree never had */
-static int v3_gen_delta_pass(v3_gen_ctx *gc)
+static int gen_delta_pass(gen_ctx *gc)
 {
     size_t i = 0;
 
     while (i < gc->nrecs) {
-        size_t run = v3_gen_run(gc, i);
-        const v3_gen_rec *r = &gc->recs[i + run - 1];
-        if (!v3_gen_seen_id(gc, r->id) &&
+        size_t run = gen_run(gc, i);
+        const gen_rec *r = &gc->recs[i + run - 1];
+        if (!gen_seen_id(gc, r->id) &&
             !(r->flags & INVFS_DELTA_FLAG_DELETE)) {
-            if (v3_gen_emit_ref(gc, r->id, r) != 0)
+            if (gen_emit_ref(gc, r->id, r) != 0)
                 return -1;
         }
         i += run;
@@ -6218,14 +6218,14 @@ static int v3_gen_delta_pass(v3_gen_ctx *gc)
     return 0;
 }
 
-int vol_v3_iter_inodes_at(invfs_volume *v, uint64_t root_pba,
+int vol_iter_inodes_at(invfs_volume *v, uint64_t root_pba,
                           uint64_t delta_end, uint64_t delta_segs,
                           uint64_t delta_head_pba,
                           int (*cb)(invfs_volume *v, uint64_t inode_id,
-                                    const invfs_v3_inode *in, void *ctx),
+                                    const invfs_inode *in, void *ctx),
                           void *ctx)
 {
-    v3_gen_ctx gc;
+    gen_ctx gc;
     invfs_blkptr root;
     uint8_t lo[8];
     int rc = 0;
@@ -6246,7 +6246,7 @@ int vol_v3_iter_inodes_at(invfs_volume *v, uint64_t root_pba,
     if (gc.head_bump < INVFS_DELTA_SEG_HDR_LEN)
         gc.head_bump = INVFS_DELTA_SEG_HDR_LEN;
 
-    if (v3_gen_prefix_replay(v, &gc) != 0 || gc.oom) {
+    if (gen_prefix_replay(v, &gc) != 0 || gc.oom) {
         free(gc.seg_pba);
         free(gc.recs);
         return -1;
@@ -6265,12 +6265,12 @@ int vol_v3_iter_inodes_at(invfs_volume *v, uint64_t root_pba,
                      ? INVFS_BP_ROOT | INVFS_BP_LEAF
                      : INVFS_BP_ROOT | INVFS_BP_INTERNAL);
     }
-    v3_ino_key(INVFS_V3_ROOT_INO, lo);
+    ino_key(INVFS_ROOT_INO, lo);
     if (root_pba)
         rc = btree_scan(v, root, (bt_key){lo, 8}, (bt_key){NULL, 0},
-                        v3_gen_base_cb, &gc);
+                        gen_base_cb, &gc);
     if (rc == 0)
-        rc = v3_gen_delta_pass(&gc);
+        rc = gen_delta_pass(&gc);
     if (rc != 0 || gc.oom)
         rc = -1;
     free(gc.seg_pba);

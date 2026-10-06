@@ -202,7 +202,7 @@ _a1_files=$(printf '%s' "$_a1_line" | sed -n 's/.*files=\([0-9]*\).*/\1/p')
 echo "  pass 1: kicked by the daemon, save point captured (no invf-sweep ran)"
 # The pass armed a rollback window, and a window is a HOLD: a capture pins
 # every block the PRE-sweep generation's recipes named (spt0_pin_take ->
-# vol_v3_iter_inodes_at, src/core/vol_spt0.c:795) and only the NEXT
+# vol_iter_inodes_at, src/core/vol_spt0.c:795) and only the NEXT
 # capture's reclaim pass gives them back (spn_reclaim,
 # src/core/vol_spt0.c:672, called from spt0_pin_take at :814 -- it frees
 # where the old mark set has a block, the new one does not, and the bitmap

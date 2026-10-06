@@ -45,8 +45,8 @@
  * the owner is a hidden file whose CONTENT is the index: a recipe blob
  * whose AST entries carry each copy's pba and block count directly (the
  * WP27 invariant every v3 file recipe already has), published with
- * vol_v3_publish_blob_inode and read back with vol_read_file. That is the
- * tz_v3_reg_store registry-over-a-hidden-file shape (vol_textzone.c:1085)
+ * vol_publish_blob_inode and read back with vol_read_file. That is the
+ * tz_reg_store registry-over-a-hidden-file shape (vol_textzone.c:1085)
  * and it is a re-expression, not a second mapping structure: the v2 L2P
  * map existed only to carry (pba, plen) that the AST entry now carries, so
  * on v3 it is not written at all (wp25_map/wp25_unmap below are no-ops).
@@ -199,8 +199,8 @@ uint64_t vol_rawm_count(invfs_volume *v, uint64_t *blocks_out)
  * AST entries carry every copy's pba and block count directly (the WP27
  * invariant -- the field has been in the entry since WP27 and the v2 writer
  * below already fills it; only the v2 LOADER still prefers the WAL map).
- * Publication is vol_v3_publish_blob_inode, the same
- * registry-over-a-hidden-file shape tz_v3_reg_store uses
+ * Publication is vol_publish_blob_inode, the same
+ * registry-over-a-hidden-file shape tz_reg_store uses
  * (vol_textzone.c:1085): the index bytes are CRC-framed as a segment and
  * the inode row names them, so a torn flush leaves the PREVIOUS index
  * intact -- exactly the "worst case an orphan block fsck reclaims"
@@ -243,7 +243,7 @@ static int wp25_owner_write_v3(invfs_volume *v, uint64_t *owner_slot,
     free(ae);
     owner = *owner_slot;
     if (owner) {
-        if (!vol_v3_publish_blob_inode(v, owner, blob, blen, blen,
+        if (!vol_publish_blob_inode(v, owner, blob, blen, blen,
                                        INVFS_ALGO_NONE)) {
             free(blob);
             return -1;
@@ -371,7 +371,7 @@ void wp25_index_load(invfs_volume *v)
 /* vol_flush hook: rewrite dirty owner records so they
  * name exactly the current index entries. The maps/unmaps are already
  * durable in this same flush. WP98: on v3 vol_flush's v2 tail is not
- * reached at all (volume.c:2435 returns for VOLF_V3 right after the bitmap
+ * reached at all (volume.c:2435 returns for VOLF_META right after the bitmap
  * flush), so the call site in vol_flush has a v3 branch of its own -- the
  * ordering rule is unchanged and satisfied there by the bitmap barrier. */
 int wp25_owner_sync(invfs_volume *v)
@@ -655,11 +655,11 @@ typedef struct {
  * rules, so the two passes cannot drift: internal \x01 rows, anchored
  * files, cold files and non-shadow (RAW / arena / metadata) pbas are all
  * still skipped. */
-static int tier_heat_v3_cb(invfs_volume *v, uint64_t inode_id,
+static int tier_heat_cb(invfs_volume *v, uint64_t inode_id,
                            const char *name, void *ctx_)
 {
     tier_heat_ctx *c = (tier_heat_ctx *)ctx_;
-    invfs_v3_inode in;
+    invfs_inode in;
     invfs_ast_hdr ah;
     const invfs_ast_block_entry *ents = NULL;
     uint8_t *blob = NULL;
@@ -670,7 +670,7 @@ static int tier_heat_v3_cb(invfs_volume *v, uint64_t inode_id,
     if (invfs_inode_is_anchored(v, inode_id)) return 0;   /* WP59a */
     r = heat_file_r(v, inode_id);
     if (!r) return 0;
-    if (vol_v3_inode_get(v, inode_id, &in) != 1) return 0;
+    if (vol_inode_get(v, inode_id, &in) != 1) return 0;
     /* A symlink's blob is its target string, not an AST: it names no
      * segment, so it has no block to be hot or cold. What this function
      * consumes is ents[i].pba alone, and a symlink's pba set is empty --
@@ -682,7 +682,7 @@ static int tier_heat_v3_cb(invfs_volume *v, uint64_t inode_id,
      * unrelated block address would move a real segment between tiers
      * because of a symlink's NAME. */
     if (invfs_inode_content_is_raw_blob(in.type)) return 0;
-    if (vol_v3_recipe_load(v, in.recipe_addr, &blob, &blen) != 0 || !blob)
+    if (vol_recipe_load(v, in.recipe_addr, &blob, &blen) != 0 || !blob)
         return 0;
     if (vol_ast_recipe_parse(blob, blen, &ah, &ents, &n_ents) != 0 || !ents) {
         free(blob);
@@ -710,7 +710,7 @@ static int tier_heat_build(invfs_volume *v, tier_heat_map *m)
      * came back empty on every v3 volume, so vol_tier_migrate's
      * `heat_any_rhot && hm.t` gate never opened and the whole WP25 tier
      * migration was inert on the only format invf-mkfs produces. */
-    return vol_v3_iter_live_inodes(v, tier_heat_v3_cb, &c);
+    return vol_iter_live_inodes(v, tier_heat_cb, &c);
 }
 
 

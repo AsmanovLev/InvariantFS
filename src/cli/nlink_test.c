@@ -1,4 +1,4 @@
-/* nlink_v3_test.c — WP118: the nlink-vs-dirent-fan-in invariant.
+/* nlink_test.c — WP118: the nlink-vs-dirent-fan-in invariant.
  *
  * The bug this exists for (WP111b, commit 1771a0d): a rootfs with 7 names
  * reported "5 files ok, 0 corrupt" under `invf-verify --deep` and "OK"
@@ -21,7 +21,7 @@
  *   C  the same volume after a remount        -> still balances
  *   D  ALIASING: a raw second name on an inode whose nlink was never
  *      bumped -- the exact on-disk shape of the WP111b loss -- detected,
- *      with the inode id and the discrepancy, by BOTH vol_v3_nlink_audit
+ *      with the inode id and the discrepancy, by BOTH vol_nlink_audit
  *      and vol_fsck_scan
  *   E  the same volume once the accounting is put right -> balances again
  *   F  the other direction: a name removed behind nlink's back (reported
@@ -65,7 +65,7 @@ static void expect_balanced(const char *what, uint64_t names, uint64_t inodes)
 {
     invfs_nlink_audit a;
     char b[160];
-    int rc = vol_v3_nlink_audit(g_v, &a);
+    int rc = vol_nlink_audit(g_v, &a);
     snprintf(b, sizeof b, "%s: audit completes", what);
     ok(rc == 0, b);
     snprintf(b, sizeof b, "%s: no fan-in mismatch (names=%llu inodes=%llu "
@@ -93,7 +93,7 @@ static void expect_fault(const char *what, uint64_t id, uint64_t stale,
     size_t i;
     int found = 0;
 
-    if (vol_v3_nlink_audit(g_v, &a) != 0) {
+    if (vol_nlink_audit(g_v, &a) != 0) {
         snprintf(b, sizeof b, "%s: audit completes", what);
         ok(0, b);
         return;
@@ -132,7 +132,7 @@ static void expect_fsck(const char *what, int bad, uint64_t stale)
         ok(rep.nlink_stale == stale, b);
         /* damage is not optional: the verdict and the exit code follow it */
         snprintf(b, sizeof b, "%s: fsck marks the volume damaged", what);
-        ok(rep.v3_damaged, b);
+        ok(rep.damaged, b);
     }
 }
 
@@ -142,7 +142,7 @@ static uint64_t write_file(const char *name, const char *body)
     memset(&m, 0, sizeof m);
     m.type = INVFS_ITYP_REG;
     m.mode = 0644;
-    return vol_v3_write_bulk(g_v, name, (const uint8_t *)body,
+    return vol_write_bulk(g_v, name, (const uint8_t *)body,
                              strlen(body), &m);
 }
 
@@ -150,10 +150,10 @@ int main(int argc, char **argv)
 {
     const char *dir = (argc > 1) ? argv[1] : "/tmp";
     uint64_t id_a, id_b, id_c, id_d, child = 0;
-    invfs_v3_inode in;
+    invfs_inode in;
     int err = 0;
 
-    printf("nlink_v3_test (WP118): nlink vs dirent fan-in on v3\n");
+    printf("nlink_test (WP118): nlink vs dirent fan-in on v3\n");
 
     snprintf(g_img, sizeof g_img, "%s/invf-nlink-v3-test.img", dir);
     unlink(g_img);
@@ -169,7 +169,7 @@ int main(int argc, char **argv)
     }
     g_v = vol_open(g_img, &err);
     if (!g_v) {
-        fprintf(stderr, "nlink_v3_test: vol_open failed: err=%d\n", err);
+        fprintf(stderr, "nlink_test: vol_open failed: err=%d\n", err);
         return 2;
     }
 
@@ -188,10 +188,10 @@ int main(int argc, char **argv)
      * a volume that is perfectly correct: `ln` is supposed to do this. */
     ok(vol_hardlink(g_v, "a.txt", "a-link.txt") == 0, "leg B: ln a.txt a-link.txt");
     ok(vol_hardlink(g_v, "a.txt", "a-link2.txt") == 0, "leg B: ln a.txt a-link2.txt");
-    ok(vol_v3_mkdir(g_v, "sub") != 0, "leg B: mkdir sub");
+    ok(vol_mkdir(g_v, "sub") != 0, "leg B: mkdir sub");
     ok(vol_hardlink(g_v, "a.txt", "sub/a-in-subdir.txt") == 0,
        "leg B: hardlink into a subdirectory");
-    ok(vol_v3_inode_get(g_v, id_a, &in) == 1 && in.nlink == 4,
+    ok(vol_inode_get(g_v, id_a, &in) == 1 && in.nlink == 4,
        "leg B: the shared inode's nlink is 4");
     /* 6 files + the "sub" directory = 7 names over 3 inodes: four of those
      * names are the SAME inode, which is exactly what a hardlink is. */
@@ -202,7 +202,7 @@ int main(int argc, char **argv)
     vol_close(g_v);
     g_v = vol_open(g_img, &err);
     if (!g_v) {
-        fprintf(stderr, "nlink_v3_test: reopen failed: err=%d\n", err);
+        fprintf(stderr, "nlink_test: reopen failed: err=%d\n", err);
         return 2;
     }
     expect_balanced("leg C (after remount)", 7, 3);
@@ -213,17 +213,17 @@ int main(int argc, char **argv)
      * one, and the row's nlink is not bumped. On the fixed write path the
      * allocator can no longer hand out a colliding id (that was 1771a0d),
      * so the raw dirent primitive builds the on-disk state the bug left. */
-    ok(vol_v3_dirent_get(g_v, INVFS_V3_ROOT_INO, "intruder.txt", &child) == 0,
+    ok(vol_dirent_get(g_v, INVFS_ROOT_INO, "intruder.txt", &child) == 0,
        "leg D: the intruder name does not exist yet");
-    ok(vol_v3_dirent_delta_put(g_v, INVFS_V3_ROOT_INO, "intruder.txt", id_a) == 0,
+    ok(vol_dirent_delta_put(g_v, INVFS_ROOT_INO, "intruder.txt", id_a) == 0,
        "leg D: a second name is put on inode a");
     expect_fault("leg D (stale dirent)", id_a, 1, 0);
     expect_fsck("leg D", 1, 1);
     /* and the two names really are the same inode: that is the data loss */
     {
         uint64_t r1 = 0, r2 = 0;
-        ok(vol_v3_path_lookup(g_v, "a.txt", &r1) == 1 &&
-           vol_v3_path_lookup(g_v, "intruder.txt", &r2) == 1 && r1 == r2,
+        ok(vol_path_lookup(g_v, "a.txt", &r1) == 1 &&
+           vol_path_lookup(g_v, "intruder.txt", &r2) == 1 && r1 == r2,
            "leg D: both names resolve to one inode (the aliasing)");
     }
 
@@ -233,14 +233,14 @@ int main(int argc, char **argv)
      * legitimate links plus one that never should have existed", so the
      * operator resolves it by declaring the intruder a link and then
      * removing it. Either way the invariant must come out balanced. */
-    ok(vol_v3_inode_get(g_v, id_a, &in) == 1, "leg E: read the shared row");
+    ok(vol_inode_get(g_v, id_a, &in) == 1, "leg E: read the shared row");
     in.nlink = 5;
     /* the delta tier, not the base: on a fresh volume the shared row lives
      * in the delta (that is where vol_hardlink writes it) and the overlay
      * shadows a base write, which is why a base put here would look like it
      * took and then not be seen at all. */
-    ok(vol_v3_inode_delta_put(g_v, id_a, &in) == 0, "leg E: declare the 5th link");
-    ok(vol_v3_unlink(g_v, "intruder.txt") == 0, "leg E: unlink the intruder");
+    ok(vol_inode_delta_put(g_v, id_a, &in) == 0, "leg E: declare the 5th link");
+    ok(vol_unlink(g_v, "intruder.txt") == 0, "leg E: unlink the intruder");
     expect_balanced("leg E (accounting restored)", 7, 3);
     expect_fsck("leg E", 0, 0);
 
@@ -253,14 +253,14 @@ int main(int argc, char **argv)
      * that NO name resolves to is an ORPHAN ROW: the v3 write order is row
      * then dirent, so a crash between the two legitimately produces one and
      * no repair removes it -- it is reported loudly and is deliberately not
-     * counted as damage (see vol_v3_nlink_audit). */
-    ok(vol_v3_dirent_delta_del(g_v, INVFS_V3_ROOT_INO, "d.txt") == 0,
+     * counted as damage (see vol_nlink_audit). */
+    ok(vol_dirent_delta_del(g_v, INVFS_ROOT_INO, "d.txt") == 0,
        "leg F1: the dirent is removed behind nlink's back");
     {
         invfs_nlink_audit a;
         size_t i;
         int found = 0;
-        ok(vol_v3_nlink_audit(g_v, &a) == 0, "leg F1: audit completes");
+        ok(vol_nlink_audit(g_v, &a) == 0, "leg F1: audit completes");
         for (i = 0; i < a.nfault; i++)
             if (a.fault[i].id == id_d &&
                 !strcmp(a.fault[i].reason, "orphan-row"))
@@ -269,7 +269,7 @@ int main(int argc, char **argv)
         ok(a.orphan_rows == 1, "leg F1: exactly one orphan row");
         ok(!a.mismatch, "leg F1: an orphan row is reported, not damage");
     }
-    ok(vol_v3_dirent_delta_put(g_v, INVFS_V3_ROOT_INO, "d.txt", id_d) == 0,
+    ok(vol_dirent_delta_put(g_v, INVFS_ROOT_INO, "d.txt", id_d) == 0,
        "leg F1: the name is restored");
     expect_balanced("leg F1 (name restored)", 8, 4);
 
@@ -278,13 +278,13 @@ int main(int argc, char **argv)
      * This is the "fan-in < nlink: a name is missing" case, and unlike the
      * orphan row it is unambiguous: a live, named inode cannot have three
      * links and one name. */
-    ok(vol_v3_inode_get(g_v, id_d, &in) == 1, "leg F2: read d.txt's row");
+    ok(vol_inode_get(g_v, id_d, &in) == 1, "leg F2: read d.txt's row");
     in.nlink = 3;
-    ok(vol_v3_inode_delta_put(g_v, id_d, &in) == 0, "leg F2: nlink inflated to 3");
+    ok(vol_inode_delta_put(g_v, id_d, &in) == 0, "leg F2: nlink inflated to 3");
     expect_fault("leg F2 (missing name)", id_d, 0, 2);
     expect_fsck("leg F2", 1, 0);
     in.nlink = 1;
-    ok(vol_v3_inode_delta_put(g_v, id_d, &in) == 0, "leg F2: nlink back to 1");
+    ok(vol_inode_delta_put(g_v, id_d, &in) == 0, "leg F2: nlink back to 1");
     expect_balanced("leg F2 (nlink corrected)", 8, 4);
     expect_fsck("leg F2", 0, 0);
 
@@ -292,15 +292,15 @@ int main(int argc, char **argv)
     /* The end of a hardlink's life must not leave a dangling count
      * behind: unlinking one name keeps the row for the survivors, and the
      * last unlink takes the row with it. */
-    ok(vol_v3_unlink(g_v, "a-link.txt") == 0, "leg G: unlink one hardlink name");
-    ok(vol_v3_unlink(g_v, "a-link2.txt") == 0, "leg G: unlink the second");
-    ok(vol_v3_inode_get(g_v, id_a, &in) == 1 && in.nlink == 2,
+    ok(vol_unlink(g_v, "a-link.txt") == 0, "leg G: unlink one hardlink name");
+    ok(vol_unlink(g_v, "a-link2.txt") == 0, "leg G: unlink the second");
+    ok(vol_inode_get(g_v, id_a, &in) == 1 && in.nlink == 2,
        "leg G: the survivor count is 2 (a.txt + sub/a-in-subdir.txt)");
     expect_balanced("leg G (one hardlink name unlinked)", 6, 4);
     expect_fsck("leg G", 0, 0);
 
     vol_close(g_v);
     unlink(g_img);
-    printf("nlink_v3_test: %d checks, %d failures\n", checks, failures);
+    printf("nlink_test: %d checks, %d failures\n", checks, failures);
     return failures ? 1 : 0;
 }

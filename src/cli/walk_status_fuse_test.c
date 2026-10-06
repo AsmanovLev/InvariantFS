@@ -4,9 +4,9 @@
  * part a USER sees, and it is the sharpest evidence the finding is real
  * rather than theoretical:
  *
- *   3  src/cli/fuse_fs.c:228  build_file_table_v3() dropped vol_v3_walk's
- *      status. Underneath, v3_walk_dir() in vol_dirs.c did
- *      `if (vol_v3_path_lookup(...) != 1) continue;` -- and because the
+ *   3  src/cli/fuse_fs.c:228  build_file_table_v3() dropped vol_walk's
+ *      status. Underneath, walk_dir() in vol_dirs.c did
+ *      `if (vol_path_lookup(...) != 1) continue;` -- and because the
  *      recursion into a directory's contents is inside that same loop, ONE
  *      unresolvable entry took its whole SUBTREE out of the table, while the
  *      walk reported 0, i.e. COMPLETE. fuse_fs.c:132 then cleared
@@ -253,7 +253,7 @@ static void arm_btree_pos(const char *site, int n)
     arm_btree(spec);
 }
 
-/* Which vol_v3_iter_live_inodes call is the sweep COLLECT's, rather than the
+/* Which vol_iter_live_inodes call is the sweep COLLECT's, rather than the
  * savepoint capture's? Found by trying positions: each run that is refused
  * at the collect is the right one, and 0 means the seam moved somewhere this
  * test can no longer reach (which is itself worth failing on -- a red
@@ -323,7 +323,7 @@ static void build_degraded_window(void)
 {
     g_table_degraded = 0;
     g_table_stale = 1;
-    arm_dirs("v3_walk_dir_entry:2");
+    arm_dirs("walk_dir_entry:2");
     table_refresh_if_stale_locked();
     disarm();
 }
@@ -341,7 +341,7 @@ static void build_degraded_window(void)
 static void build_degraded_window_open(void)
 {
     build_degraded_window();
-    arm_dirs("v3_walk_dir_entry:2");
+    arm_dirs("walk_dir_entry:2");
 }
 
 /* ------------------------------------------------------------------ */
@@ -364,12 +364,12 @@ int main(int argc, char **argv)
     g_vol = v;                    /* the daemon's only handle on the volume */
 
     /* The ROOT order matters and is chosen deliberately:
-     * vol_v3_path_list_dir sorts by (name_len, name), so the root comes back
+     * vol_path_list_dir sorts by (name_len, name), so the root comes back
      * "a", "b", "d1" -- a file, then a DIRECTORY, then the directory the
      * readdir legs use.
      *
      * That is what makes the seam land on a directory rather than on a
-     * file. v3_walk_dir consults it once per entry, INCLUDING the entries
+     * file. walk_dir consults it once per entry, INCLUDING the entries
      * it recurses into, so ":2" is the second entry the walk touches; with
      * "a" first (a file, no recursion) that second entry is "b", and what
      * goes missing is b's whole SUBTREE -- the claim under test. With "b"
@@ -514,7 +514,7 @@ int main(int argc, char **argv)
     }
 
     /* the other readdir shape from site 3: the directory's OWN dirent
-     * EIOs. vol_v3_path_list_dir used to answer 0 for that, and 0 is an
+     * EIOs. vol_path_list_dir used to answer 0 for that, and 0 is an
      * EMPTY DIRECTORY -- while damage in the children range, one level down,
      * has always given -EIO. The same volume, two answers. */
     {
@@ -576,7 +576,7 @@ int main(int argc, char **argv)
         g_table_stale = 1;
         table_refresh_if_stale_locked();
 
-        if (vol_v3_path_lookup(v, "d1/f0", &ino) != 1) return 2;
+        if (vol_path_lookup(v, "d1/f0", &ino) != 1) return 2;
         ok(vol_read_file(v, ino, &buf, &blen) == 0 && blen == 1 &&
            buf && buf[0] == 'x',
            "1a. fixture: d1/f0 reads back bit-exactly before the pass");

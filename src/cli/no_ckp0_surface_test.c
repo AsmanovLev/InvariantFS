@@ -83,7 +83,7 @@ static void fail(const char *fmt, ...)
 /* The region, read back from the superblock the way vol_open reads it, so
  * this is a test of the layout and not of a number someone typed. */
 static int vol_geometry(const char *img, uint64_t *total_blocks,
-                        int *is_v3)
+                        int *is_meta)
 {
     blkio io;
     invfs_superblock sb;
@@ -93,7 +93,7 @@ static int vol_geometry(const char *img, uint64_t *total_blocks,
         return -1;
     if (blkio_pread(&io, 0, &sb, sizeof sb) == 0) {
         *total_blocks = sb.total_blocks;
-        *is_v3 = (sb.vol_flags & VOLF_V3) != 0;
+        *is_meta = (sb.vol_flags & VOLF_META) != 0;
         rc = 0;
     }
     blkio_close(&io);
@@ -163,7 +163,7 @@ int main(int argc, char **argv)
     const char *b = "./bin";
     char img[512], can[512], src[512], out[1024], f1[1024], f2[1024];
     uint64_t total_blocks = 0, first = 0;
-    int is_v3 = 0, i, nz, nfiles = 6;
+    int is_meta = 0, i, nz, nfiles = 6;
 
     snprintf(img, sizeof img, "%s/no_ckp0.img", dir);
     snprintf(can, sizeof can, "%s/no_ckp0_canary.img", dir);
@@ -197,12 +197,12 @@ int main(int argc, char **argv)
         fprintf(stderr, "cannot create volume with invf-mkfs (%s)\n", img);
         return 2;
     }
-    if (vol_geometry(img, &total_blocks, &is_v3) != 0) {
+    if (vol_geometry(img, &total_blocks, &is_meta) != 0) {
         fprintf(stderr, "cannot read the superblock of %s\n", img);
         return 2;
     }
-    if (!is_v3) {
-        fail("CONTROL: invf-mkfs produced a volume without VOLF_V3; every "
+    if (!is_meta) {
+        fail("CONTROL: invf-mkfs produced a volume without VOLF_META; every "
              "leg below would be testing a format this build refuses");
         return 1;
     }

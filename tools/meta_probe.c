@@ -95,15 +95,15 @@ static int heat_dump(invfs_volume *v, const char *name)
     /* AST entries: the segment table is the inode's RMC1 recipe, read
      * through the same loader the engine uses. */
     {
-        invfs_v3_inode in;
+        invfs_inode in;
         uint8_t *blob = NULL;
         size_t blen = 0;
         invfs_ast_hdr ah;
         const invfs_ast_block_entry *ents = NULL;
         size_t n_ents = 0, k;
 
-        if (vol_v3_inode_get(v, id, &in) != 1) { printf("v3 inode read FAIL\n"); return 1; }
-        if (vol_v3_recipe_load(v, in.recipe_addr, &blob, &blen) != 0 || !blob) {
+        if (vol_inode_get(v, id, &in) != 1) { printf("v3 inode read FAIL\n"); return 1; }
+        if (vol_recipe_load(v, in.recipe_addr, &blob, &blen) != 0 || !blob) {
             printf("v3 recipe load FAIL\n");
             return 1;
         }

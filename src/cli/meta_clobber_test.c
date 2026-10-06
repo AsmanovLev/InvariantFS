@@ -22,8 +22,8 @@
  * ----------------------
  * The two cases have to diverge, and only one of them is damage:
  *
- *   rc == 0 ("no such inode row") is NORMAL. volume.c sets v3_mbuf_ready
- *   unconditionally on open, so v3_ready() never refuses, and on a volume
+ *   rc == 0 ("no such inode row") is NORMAL. volume.c sets mbuf_ready
+ *   unconditionally on open, so ready() never refuses, and on a volume
  *   whose records predate the v3 inode row -- every pre-v3 volume -- the row
  *   will never be found. Falling back to type defaults there is the
  *   documented v1->v2 upgrade path, and letting the patch apply on top is
@@ -50,10 +50,10 @@
  *
  * HOW THE ROW READ IS FAILED
  * --------------------------
- * INVFS_FAULT="v3_inode_row_read:<n>" (src/core/vol_fault.h), a one-shot
+ * INVFS_FAULT="inode_row_read:<n>" (src/core/vol_fault.h), a one-shot
  * site that stands in for the row read failing and injects the same -1 the
  * real failure produces (a quarantined base page makes bt_read fail,
- * btree_search return -1, and v3_base_get pass it through).
+ * btree_search return -1, and base_get pass it through).
  *
  * THE COUNT IS n, NOT 1, AND THAT IS LOAD-BEARING. invf_chmod and
  * invf_chown each read the metadata row TWICE -- once for the
@@ -165,7 +165,7 @@ static void arm(const char *spec)
 }
 
 /* Which call of the pair is the write-back read; see the header. */
-static void arm_meta_row(int n) { char b[64]; snprintf(b, sizeof b, "v3_inode_row_read:%d", n); arm(b); }
+static void arm_meta_row(int n) { char b[64]; snprintf(b, sizeof b, "inode_row_read:%d", n); arm(b); }
 
 /* ---- the oracle: read mode/owner back OFF THE VOLUME ------------------ */
 
@@ -300,7 +300,7 @@ int main(int argc, char **argv)
     reset_victim();
 
     /* ---- 2. THE RED: chmod with an unreadable row -------------------
-     * The write-back read is the SECOND vol_v3_inode_get of the call (the
+     * The write-back read is the SECOND vol_inode_get of the call (the
      * first is the ownership test), so the fault is armed on it. Before the
      * fix this returned 0 and left the volume at 0644/root. */
     arm_meta_row(2);
@@ -375,7 +375,7 @@ int main(int argc, char **argv)
      * the defaults, and the chmod still applies.
      *
      * This is the leg a "just fail closed everywhere" fix fails. rc == 0
-     * from vol_v3_inode_get is not damage: it is a record with no metadata
+     * from vol_inode_get is not damage: it is a record with no metadata
      * row, which is every pre-v3 volume, and the v1->v2 upgrade path is
      * built on answering it with type defaults and letting the patch apply
      * on top. Deleting the inode row out from under a live dirent
@@ -383,7 +383,7 @@ int main(int argc, char **argv)
     {
         uint64_t other = vol_create_file_with_meta(v, "legacy", NULL, 0, &meta);
         pthread_mutex_lock(&g_io_lock);
-        vol_v3_inode_delete(g_vol, other);
+        vol_inode_delete(g_vol, other);
         vol_flush(g_vol);
         g_table_stale = 1;
         pthread_mutex_unlock(&g_io_lock);
@@ -486,7 +486,7 @@ int main(int argc, char **argv)
      * guard did not fire, and vol_rename overwrote a destination the flag
      * was explicitly told to protect. The call reported success.
      *
-     * v3_dirent_row_read is the xattr WP's site, reused here because it is
+     * dirent_row_read is the xattr WP's site, reused here because it is
      * the same seam: it injects the -1 that bt_read makes btree_search
      * return. arm_meta_row would fail the wrong read -- the guard resolves
      * the DESTINATION NAME, not an inode row.
@@ -526,7 +526,7 @@ int main(int argc, char **argv)
          * refused and /dst keeps its bytes. */
         {
             uint64_t dino = 0;
-            arm("v3_dirent_row_read:3");
+            arm("dirent_row_read:3");
             rc = invf_rename("/src", "/dst", RENAME_NOREPLACE);
             unsetenv("INVFS_FAULT");
             note("        (rename returned %d = %s)\n", rc,

@@ -2,7 +2,7 @@
  * finished", at any of the five sites, and the receipt that says so must not
  * cry wolf on an empty volume.
  *
- * The class. A v3 walk is fallible: vol_v3_inode_get() returns -1 for a
+ * The class. A v3 walk is fallible: vol_inode_get() returns -1 for a
  * quarantined or unreadable base page and the walk stops there, having
  * delivered a PREFIX. Every primitive returns a status for exactly that.
  * Five callers took the status and dropped it, and each turned a partial
@@ -15,7 +15,7 @@
  *   3 src/cli/fuse_fs.c:228     the name table lost whole SUBTREES and the
  *     user's `ls` got ENOENT for files still on the disk
  *   4 tools/invf-sweep.c:1768   warned "walk did not complete", then swept
- *   5 src/core/vol_btree.c:4854 vol_v3_name_of answered "no such name"
+ *   5 src/core/vol_btree.c:4854 vol_name_of answered "no such name"
  *
  * The engine half of site 3 and sites 1, 2, 4 and 5 are here. The FUSE half
  * of site 3 -- the name table, the ENOENT, the DONE line -- is
@@ -284,7 +284,7 @@ static int binary_has(const char *path, const char *needle)
 static int ino_of(invfs_volume *v, const char *path)
 {
     uint64_t ino = 0;
-    if (vol_v3_path_lookup(v, path, &ino) != 1)
+    if (vol_path_lookup(v, path, &ino) != 1)
         return 0;
     return (int)ino;
 }
@@ -309,8 +309,8 @@ int main(int argc, char **argv)
     if (!v) { fprintf(stderr, "vol_open failed: %d\n", err); return 2; }
 
     /* A tree with two directories, each holding a file, plus a root file.
-     * vol_v3_path_list_dir sorts by (name_len, name), so the root entries
-     * come back d1, d2, f0 and the Nth iteration of v3_walk_dir's entry
+     * vol_path_list_dir sorts by (name_len, name), so the root entries
+     * come back d1, d2, f0 and the Nth iteration of walk_dir's entry
      * loop is predictable -- which is what lets the fault name a position
      * instead of "somewhere". */
     if (!vol_mkdir(v, "d1") || !vol_mkdir(v, "d2")) return 2;
@@ -402,14 +402,14 @@ int main(int argc, char **argv)
     /* =================================================================
      * SITE 3, engine half — src/core/vol_dirs.c.
      *
-     * (a) vol_v3_path_list_dir: `else if (vol_v3_path_lookup(...) != 1)
+     * (a) vol_path_list_dir: `else if (vol_path_lookup(...) != 1)
      *     return 0;` collapsed "the name resolves to nothing" and "the
      *     lookup FAILED" into one answer, and 0 is an EMPTY DIRECTORY.
      *     Damage in the CHILDREN range already produced -EIO further down,
      *     so the same volume answered `ls` two different ways depending on
      *     which range was unreadable.
      *
-     * (b) v3_walk_dir: `if (... != 1) continue;` dropped the entry AND —
+     * (b) walk_dir: `if (... != 1) continue;` dropped the entry AND —
      *     because the recursion is inside the same loop — its whole
      *     SUBTREE, from a walk that returned 0, i.e. COMPLETE.
      * ================================================================= */
@@ -417,14 +417,14 @@ int main(int argc, char **argv)
         invfs_dirent ents[16];
 
         /* (a) green: a directory that reads. */
-        rc = vol_v3_path_list_dir(v, "d1", ents, 16);
+        rc = vol_path_list_dir(v, "d1", ents, 16);
         ok(rc == 1, "3a. CONTROL: listing d1 returns its 1 entry (rc=%d)", rc);
         ok(rc == 1 && strcmp(ents[0].name, "f0") == 0,
            "3b. and names it %s", rc == 1 ? ents[0].name : "?");
 
         /* (a) red: d1's OWN dirent is unreadable. */
         arm_dirs("path_list_dir_lookup:1");
-        rc = vol_v3_path_list_dir(v, "d1", ents, 16);
+        rc = vol_path_list_dir(v, "d1", ents, 16);
         ok(rc == -EIO,
            "3c. a directory whose own dirent EIOs returns -EIO (rc=%d, want "
            "%d)", rc, -EIO);
@@ -432,14 +432,14 @@ int main(int argc, char **argv)
             printf("        ^ returned 0 = AN EMPTY DIRECTORY: `ls d1` prints "
                    "nothing and exits 0 on a volume it could not read\n");
         /* one shot: the next call is the real one again */
-        rc = vol_v3_path_list_dir(v, "d1", ents, 16);
+        rc = vol_path_list_dir(v, "d1", ents, 16);
         ok(rc == 1, "3d. and the call after the spent fault is the real one "
                     "(rc=%d)", rc);
         disarm();
 
         /* (b) green: the whole tree is reachable. */
         memset(&g_seen, 0, sizeof g_seen);
-        rc = vol_v3_walk(v, walk_record_cb, &g_seen);
+        rc = vol_walk(v, walk_record_cb, &g_seen);
         ok(rc == 0 && g_seen.n == 5,
            "3e. CONTROL: a healthy walk returns 0 and delivers all 5 namespace "
            "entries (rc=%d n=%d)", rc, g_seen.n);
@@ -450,9 +450,9 @@ int main(int argc, char **argv)
          * d2/f1 is what disappears.
          *
          * There are TWO walks here and the difference between them IS the
-         * finding. vol_v3_walk() is lenient: it steps over an entry it
+         * finding. vol_walk() is lenient: it steps over an entry it
          * cannot resolve and returns 0, i.e. COMPLETE, having silently
-         * dropped that entry AND its subtree. vol_v3_walk_strict() stops.
+         * dropped that entry AND its subtree. vol_walk_strict() stops.
          * Upstream added the strict variant and gave it exactly one caller
          * (pba_ref_ensure, whose map gates every data-block free); the four
          * callers whose partial views get PRINTED -- verify's file list,
@@ -460,15 +460,15 @@ int main(int argc, char **argv)
          * lookup -- were left on the lenient one. So both halves are
          * asserted: the lenient one loses a subtree and claims success,
          * and the strict one is what actually reports it. */
-        /* ":3", not ":2": v3_walk_dir consults the seam once per entry
+        /* ":3", not ":2": walk_dir consults the seam once per entry
          * INCLUDING the entries it recurses into, and the root sorts d1,
          * d2, f0 -- so check 1 is d1, check 2 is d1's own child, and check
          * 3 is d2. ":3" is therefore the first check that lands on a
          * DIRECTORY, which is the case that takes a subtree. ":2" would
          * lose one file and call that the same bug. */
         memset(&g_seen, 0, sizeof g_seen);
-        arm_dirs("v3_walk_dir_entry:3");
-        rc = vol_v3_walk(v, walk_record_cb, &g_seen);
+        arm_dirs("walk_dir_entry:3");
+        rc = vol_walk(v, walk_record_cb, &g_seen);
         ok(rc == 0,
            "3g. the LENIENT walk returns 0 having stepped over the entry -- "
            "COMPLETE, and the caller cannot tell (rc=%d, %d entries)",
@@ -479,8 +479,8 @@ int main(int argc, char **argv)
         disarm();
 
         memset(&g_seen, 0, sizeof g_seen);
-        arm_dirs("v3_walk_dir_entry:3");
-        rc = vol_v3_walk_strict(v, walk_record_cb, &g_seen);
+        arm_dirs("walk_dir_entry:3");
+        rc = vol_walk_strict(v, walk_record_cb, &g_seen);
         ok(rc < 0,
            "3h. the STRICT walk returns an error on the same damage (rc=%d) -- "
            "and all four of the callers this WP moves use THIS one", rc);
@@ -498,24 +498,24 @@ int main(int argc, char **argv)
          * decides whether its subtree is walked at all, so a skipped row
          * drops a directory just as surely. */
         memset(&g_seen, 0, sizeof g_seen);
-        arm_dirs("v3_walk_dir_row:2");
-        rc = vol_v3_walk_strict(v, walk_record_cb, &g_seen);
+        arm_dirs("walk_dir_row:2");
+        rc = vol_walk_strict(v, walk_record_cb, &g_seen);
         ok(rc < 0,
            "3j. an unreadable inode ROW stops the strict walk too (rc=%d, "
            "%d entries)", rc, g_seen.n);
         disarm();
 
         memset(&g_seen, 0, sizeof g_seen);
-        rc = vol_v3_walk_strict(v, walk_record_cb, &g_seen);
+        rc = vol_walk_strict(v, walk_record_cb, &g_seen);
         ok(rc == 0 && g_seen.n == 5,
            "3k. both walks recover once the fault is spent (rc=%d n=%d)",
            rc, g_seen.n);
     }
 
     /* =================================================================
-     * SITE 5 — src/core/vol_btree.c:4854, vol_v3_name_of.
+     * SITE 5 — src/core/vol_btree.c:4854, vol_name_of.
      *
-     * THE WRONG ANSWER: `(void)vol_v3_walk(...)` then `return c.found ? 1 : 0`.
+     * THE WRONG ANSWER: `(void)vol_walk(...)` then `return c.found ? 1 : 0`.
      * A walk that stopped found nothing, so it answered 0, ABSENT. Two
      * callers act on that: vol_sweep_name_of() turned it into "this file is
      * gone" and skipped the inode, and the iterator's per-inode fallback
@@ -526,16 +526,16 @@ int main(int argc, char **argv)
         char nm[256];
         uint64_t parent = 0, ino = 0;
 
-        ok(vol_v3_path_lookup(v, "d1/f0", &ino) == 1,
+        ok(vol_path_lookup(v, "d1/f0", &ino) == 1,
            "5a. fixture: resolved d1/f0 to inode %llu",
            (unsigned long long)ino);
 
-        rc = vol_v3_name_of(v, ino, nm, sizeof nm, &parent);
+        rc = vol_name_of(v, ino, nm, sizeof nm, &parent);
         ok(rc == 1, "5b. CONTROL: the reverse lookup finds the name (rc=%d, "
                     "name=%s)", rc, nm);
 
-        arm_dirs("v3_walk_dir_stop:1");
-        rc = vol_v3_name_of(v, ino, nm, sizeof nm, &parent);
+        arm_dirs("walk_dir_stop:1");
+        rc = vol_name_of(v, ino, nm, sizeof nm, &parent);
         ok(rc == -1,
            "5c. a stopped walk makes the reverse lookup return -1, not 0 "
            "(rc=%d)", rc);
@@ -544,14 +544,14 @@ int main(int argc, char **argv)
                    "sweep then skips it as deleted\n");
 
         /* and the wrapper on top, which used to flatten the -1 to 0 */
-        arm_dirs("v3_walk_dir_stop:1");
+        arm_dirs("walk_dir_stop:1");
         rc = vol_sweep_name_of(v, ino, nm, sizeof nm);
         ok(rc == -1,
            "5d. vol_sweep_name_of propagates it too (rc=%d) — it used to be "
            "`(rc > 0) ? 1 : 0`", rc);
         disarm();
 
-        rc = vol_v3_name_of(v, ino, nm, sizeof nm, &parent);
+        rc = vol_name_of(v, ino, nm, sizeof nm, &parent);
         ok(rc == 1, "5e. and the lookup recovers once the fault is spent "
                     "(rc=%d)", rc);
     }
@@ -671,7 +671,7 @@ int main(int argc, char **argv)
      * WRONG ANSWER before the fix: "N files ok, 0 corrupt", exit 0.
      *
      * Identification is BY OUTPUT, never by a pinned ordinal. The deep pass
-     * is not the first vol_v3_walk in the process -- vol_open's own scan,
+     * is not the first vol_walk in the process -- vol_open's own scan,
      * and the nlink audit afterwards, are walks too -- and how many precede
      * it moves whenever any of them grows a walk. So every position in a
      * range is tried and the one that produces the DEEP PASS'S OWN message
@@ -688,7 +688,7 @@ int main(int argc, char **argv)
      * reported as what it is.
      *
      * SEVERAL positions matching is correct and expected, and the reason is
-     * worth writing down because it looks like a bug: v3_walk_dir is
+     * worth writing down because it looks like a bug: walk_dir is
      * RECURSIVE, and the seam is consulted at the top of every recursion,
      * so one top-level walk spends one countdown value PER DIRECTORY LEVEL
      * on its way down. The volume here is root + d1 + d2, so the deep
@@ -719,7 +719,7 @@ int main(int argc, char **argv)
                    diagnose(bin, "src/cli/verify.c", fresh));
 
         for (n = 1; n <= 8; n++) {
-            snprintf(spec, sizeof spec, "v3_walk_dir_stop:%d", n);
+            snprintf(spec, sizeof spec, "walk_dir_stop:%d", n);
             snprintf(cmd, sizeof cmd, "INVFS_FAULT=%s %s/bin/invf-verify --deep %s",
                      spec, verify_bin, img);
             st = run_capture(cmd, out, sizeof out);
@@ -836,7 +836,7 @@ int main(int argc, char **argv)
         }
         for (n = 1; n <= 8; n++) {
             snprintf(cmd, sizeof cmd,
-                     "INVFS_FAULT=v3_walk_dir_stop:%d %s/bin/invf-sweep %s",
+                     "INVFS_FAULT=walk_dir_stop:%d %s/bin/invf-sweep %s",
                      n, getenv("PWD") ? getenv("PWD") : ".", img);
             st = run_capture(cmd, out, sizeof out);
             if (strstr(out, "Refusing to sweep") != NULL ||
@@ -944,7 +944,7 @@ int main(int argc, char **argv)
         ve = vol_open(empty, &e3);
         if (!ve) { fprintf(stderr, "empty vol_open failed: %d\n", e3); return 2; }
 
-        rc = vol_v3_walk(ve, walk_count_cb, &esz);
+        rc = vol_walk(ve, walk_count_cb, &esz);
         ok(rc == 0 && esz == 0,
            "7a. a walk of an empty namespace COMPLETES with 0 entries "
            "(rc=%d n=%d)", rc, esz);

@@ -37,10 +37,10 @@ static void hsv_to_rgb(int hue, int min, int max, rgb_t *p)
   } else {
     const double h_dbl = fmod(color_rotate + 1e-4 + 4.0 * (hue - min) / (max - min), 6);
     const double c_dbl = 255 * saturation;
-    const double X_dbl = c_dbl * (1 - fabs(fmod(h_dbl, 2) - 1));
+    const double dbl = c_dbl * (1 - fabs(fmod(h_dbl, 2) - 1));
     const int h = (int)h_dbl;
     const int c = (int)c_dbl;
-    const int X = (int)X_dbl;
+    const int X = (int)dbl;
 
     p->r = p->g = p->b = 0;
 

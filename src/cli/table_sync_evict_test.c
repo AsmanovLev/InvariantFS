@@ -28,8 +28,8 @@
  * bytes are on the disk while the mount has stopped serving them.
  *
  * SEAM DISCIPLINE (src/core/vol_fault.h). The failure is arranged with
- * INVFS_FAULT="v3_dirent_row_read:<n>" -- the dirent row read inside
- * vol_v3_dirent_get, which is the read a quarantined base page fails. Two
+ * INVFS_FAULT="dirent_row_read:<n>" -- the dirent row read inside
+ * vol_dirent_get, which is the read a quarantined base page fails. Two
  * things about it are load-bearing:
  *
  *   - The site lives in src/core/vol_btree.c, so arming it needs
@@ -282,7 +282,7 @@ static int probe(int n)
     int rc;
 
     fixture_rebuild();
-    snprintf(spec, sizeof spec, "v3_dirent_row_read:%d", n);
+    snprintf(spec, sizeof spec, "dirent_row_read:%d", n);
     cap_start();
     arm_btree(spec);
     rc = trigger();
@@ -308,7 +308,7 @@ static int find_sync_position(int *tried, int *matched)
     for (n = 1; n <= MAXPOS; n++) {
         int sig = probe(n);
         t++;
-        printf("        [search] v3_dirent_row_read:%-2d -> %s\n", n,
+        printf("        [search] dirent_row_read:%-2d -> %s\n", n,
                sig == 1 ? "SIGNAL: the entry was EVICTED (the defect)" :
                sig == 2 ? "SIGNAL: the daemon said it KEPT the entry" :
                           "no signal (the failure landed elsewhere, or nowhere)");
@@ -484,7 +484,7 @@ int main(int argc, char **argv)
         int se;
 
         fixture_rebuild();
-        snprintf(spec, sizeof spec, "v3_dirent_row_read:%d", pos);
+        snprintf(spec, sizeof spec, "dirent_row_read:%d", pos);
         cap_start();
         arm_btree(spec);
         rc = trigger();

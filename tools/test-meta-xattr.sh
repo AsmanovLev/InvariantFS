@@ -1,17 +1,17 @@
 #!/bin/bash
-# test-meta-v3-xattr.sh — WP-M7 e2e: the metadata-v3 xattr tree.
+# test-meta-xattr.sh — WP-M7 e2e: the metadata-v3 xattr tree.
 #
-# A VOLF_V3 volume must expose named xattrs through the normal FUSE xattr
+# A VOLF_META volume must expose named xattrs through the normal FUSE xattr
 # operations, stored in the base B+-tree (key 0x03||inode||name_len||name)
 # rather than the v2 INO2 TLV area: set/get round-trip, a multi-xattr
 # listxattr that is name-sorted, removexattr, per-inode isolation, values
 # larger than one 4 KiB base page (chunked across tree records), overwrite in
 # both directions (inline <-> chunked), an empty value, and persistence across
 # unmount/remount. Unlinking a file must drop its xattr keys (the
-# vol_v3_inode_delete cascade) and leave fsck clean.
+# vol_inode_delete cascade) and leave fsck clean.
 #
 # Run from the repo root after `make`:
-#   bash tools/run-e2e.sh tools/test-meta-v3-xattr.sh
+#   bash tools/run-e2e.sh tools/test-meta-xattr.sh
 set -e
 set -o pipefail
 
@@ -58,14 +58,14 @@ trap cleanup EXIT
 echo "== WP-M7: v3 xattr tree (set/get/list/remove, large values, persist) =="
 
 # --- mkfs v3 -------------------------------------------------------------
-INVFS_V3=1 $B/invf-mkfs "$IMG" 0.5 >"$WORK/mkfs.log" 2>&1 \
-    || { cat "$WORK/mkfs.log"; fail "INVFS_V3=1 mkfs failed"; }
-grep -q "format: v3 metadata skeleton" "$WORK/mkfs.log" \
-    || fail "mkfs did not report the v3 format"
+$B/invf-mkfs "$IMG" 0.5 >"$WORK/mkfs.log" 2>&1 \
+    || { cat "$WORK/mkfs.log"; fail "mkfs failed"; }
+grep -q "format: v0 metadata skeleton" "$WORK/mkfs.log" \
+    || fail "mkfs did not report the v0 format"
 
 mnt_up
-grep -q "format v3" "$WORK/fuse.log" \
-    || { cat "$WORK/fuse.log"; fail "mount did not take the v3 open path"; }
+grep -q "format v0" "$WORK/fuse.log" \
+    || { cat "$WORK/fuse.log"; fail "mount did not take the v0 open path"; }
 
 touch "$MNT/a" "$MNT/b"
 mkdir "$MNT/xd"
@@ -232,4 +232,4 @@ FSCK=$($B/invf-fsck "$IMG" 2>&1) || { echo "$FSCK"; fail "fsck exited nonzero"; 
 echo "$FSCK" | grep -q "^OK$" || { echo "$FSCK"; fail "fsck not OK"; }
 echo "fsck: OK"
 
-echo "ALL META-V3 XATTR LEGS PASS"
+echo "ALL META XATTR LEGS PASS"

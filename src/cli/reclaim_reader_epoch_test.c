@@ -25,7 +25,7 @@
  * in the arc_san_test.c / heat_san_test.c / fold_delta_read_test.c
  * tradition:
  *
- *   - v3_base_root (src/core/vol_btree.c) calls the weak seam
+ *   - base_root (src/core/vol_btree.c) calls the weak seam
  *     invfs_test_base_read_hook(root) at the exact moment the base root is
  *     captured and before any page of it is read. This file defines it, so
  *     it runs; on any other build the weak definition in vol_btree.c is what
@@ -45,7 +45,7 @@
  *
  * Before the epoch was wired: the folds complete, R0's pages are collected,
  * the reader walks R0, mbuf_read_ptr refuses the root page, and
- * vol_v3_inode_get returns -1. RED -- deterministically, 12/12 runs.
+ * vol_inode_get returns -1. RED -- deterministically, 12/12 runs.
  * With the epoch: the fold blocks in vol_reclaim_drain behind the reader,
  * the pages are still there, and the read returns the row. GREEN.
  *
@@ -125,9 +125,9 @@ static int  g_folds_completed;
 static int  g_first_fold_blocked;
 static int  g_any_fold_blocked;
 
-static invfs_v3_inode g_seed;      /* the row that was seeded for INO_ID  */
+static invfs_inode g_seed;      /* the row that was seeded for INO_ID  */
 
-/* Called from inside v3_base_root, with the root it just captured. Only the
+/* Called from inside base_root, with the root it just captured. Only the
  * read this test armed parks: the setup folds and the post-state read below
  * capture roots too, and parking those would deadlock the very window the
  * test is trying to open. */
@@ -147,7 +147,7 @@ void invfs_test_base_read_hook(const invfs_blkptr *root)
 
 /* ---- helpers --------------------------------------------------------- */
 
-static void seed_row(uint64_t id, uint32_t size, invfs_v3_inode *out)
+static void seed_row(uint64_t id, uint32_t size, invfs_inode *out)
 {
     memset(out, 0, sizeof *out);
     out->type  = INVFS_ITYP_REG;
@@ -166,9 +166,9 @@ static void seed_row(uint64_t id, uint32_t size, invfs_v3_inode *out)
  * rewrite replaces the leaf the old root reaches and nothing is shared. */
 static int touch(uint64_t id, uint32_t size)
 {
-    invfs_v3_inode in;
+    invfs_inode in;
     seed_row(id, size, &in);
-    return vol_v3_inode_delta_put(g_v, id, &in);
+    return vol_inode_delta_put(g_v, id, &in);
 }
 
 static void msleep(long ms)
@@ -181,7 +181,7 @@ static void msleep(long ms)
 
 /* ---- the reader ------------------------------------------------------ */
 
-static invfs_v3_inode g_got;
+static invfs_inode g_got;
 static int            g_rc;
 
 static void *reader_thread(void *arg)
@@ -189,7 +189,7 @@ static void *reader_thread(void *arg)
     (void)arg;
     memset(&g_got, 0, sizeof g_got);
     g_reader = pthread_self();
-    g_rc = vol_v3_inode_get(g_v, INO_ID, &g_got);
+    g_rc = vol_inode_get(g_v, INO_ID, &g_got);
     return NULL;
 }
 
@@ -214,7 +214,7 @@ static void *folder_thread(void *arg)
         /* A fold is a no-op on an empty delta, so give it something to do. */
         if (touch(90000ULL + (uint64_t)round, 16u) != 0)
             break;
-        r = vol_v3_fold(g_v);
+        r = vol_fold(g_v);
 
         pthread_mutex_lock(&g_mu);
         g_first_fold_blocked = 0;
@@ -269,17 +269,17 @@ int main(int argc, char **argv)
      * is several leaves deep and every one of R0's pages is unique to R0 --
      * nothing is shared with the empty tree it grew out of. */
     for (i = 0; i < NFILL; i++) {
-        invfs_v3_inode in;
+        invfs_inode in;
         seed_row((uint64_t)(i + 1), (uint32_t)(100 + i), &in);
         if (i + 1 == (int)INO_ID)
             g_seed = in;
-        if (vol_v3_inode_delta_put(g_v, (uint64_t)(i + 1), &in) != 0) {
-            printf("  seed: vol_v3_inode_delta_put(%d) failed\n", i + 1);
+        if (vol_inode_delta_put(g_v, (uint64_t)(i + 1), &in) != 0) {
+            printf("  seed: vol_inode_delta_put(%d) failed\n", i + 1);
             vol_close(g_v);
             return 2;
         }
     }
-    if (vol_v3_fold(g_v) != 0) {
+    if (vol_fold(g_v) != 0) {
         printf("  seed: the initial fold failed\n");
         vol_close(g_v);
         return 2;
@@ -287,8 +287,8 @@ int main(int argc, char **argv)
     /* Sanity: the read resolves out of the BASE now (the delta is empty),
      * which is the path the seam is on. */
     {
-        invfs_v3_inode in;
-        if (vol_v3_inode_get(g_v, INO_ID, &in) != 1) {
+        invfs_inode in;
+        if (vol_inode_get(g_v, INO_ID, &in) != 1) {
             printf("  seed: the base read of inode %llu failed\n",
                    (unsigned long long)INO_ID);
             vol_close(g_v);
@@ -356,7 +356,7 @@ int main(int argc, char **argv)
      * itself, field for field, against the exact row that was seeded. On the
      * unfixed tree g_rc is -1: mbuf_read_ptr refused the root page because
      * the allocation bitmap says the volume has given that block away. */
-    ok(g_rc == 1, "vol_v3_inode_get returned the row (1), not an error");
+    ok(g_rc == 1, "vol_inode_get returned the row (1), not an error");
     if (g_rc == 1) {
         ok(g_got.size  == g_seed.size,  "read row: size");
         ok(g_got.mode  == g_seed.mode,  "read row: mode");
@@ -384,10 +384,10 @@ int main(int argc, char **argv)
     /* The volume must still be consistent afterwards: the reclaimer only
      * ever had permission to take pages no live root reaches. */
     {
-        invfs_v3_inode in;
+        invfs_inode in;
         int bad = 0;
         for (i = 1; i <= NFILL; i++)
-            if (vol_v3_inode_get(g_v, (uint64_t)i, &in) != 1 ||
+            if (vol_inode_get(g_v, (uint64_t)i, &in) != 1 ||
                 in.mode != INO_MODE)
                 bad++;
         ok(bad == 0, "every seeded inode is still readable after the race");

@@ -3,11 +3,11 @@
  *
  * THE DEFECT
  * ----------
- * vol_get_xattr (src/core/vol_records.c:368) forwards vol_v3_xattr_get
+ * vol_get_xattr (src/core/vol_records.c:368) forwards vol_xattr_get
  * (src/core/vol_btree.c:3284) verbatim, and that function returned -1 for
  * BOTH "this inode has no such xattr" and "the row could not be read". The
  * row read fails for real whenever the base page is quarantined: bt_read
- * makes btree_search return -1 (vol_btree.c:522) and v3_overlay_get_key
+ * makes btree_search return -1 (vol_btree.c:522) and overlay_get_key
  * passes that -1 through (vol_btree.c:2893).
  *
  * perm_check_cred (src/cli/fuse_fs.c:721) decided "this inode has an access
@@ -33,7 +33,7 @@
  *
  * HOW THE ROW READ IS FAILED
  * --------------------------
- * INVFS_FAULT="v3_xattr_row_read:1" (src/core/vol_fault.h), a one-shot site
+ * INVFS_FAULT="xattr_row_read:1" (src/core/vol_fault.h), a one-shot site
  * that stands in for the row read failing and injects the same -1 the real
  * failure produces. It sits in the xattr path only, so the path lookup that
  * perm_check_cred does first (vol_find -> the base tree) is untouched and
@@ -245,7 +245,7 @@ int main(int argc, char **argv)
      * the mode says 0666; the ONLY reason uid 1000 is refused above is
      * the ACL. When the row cannot be read, the decision must not become
      * "allowed". */
-    arm("v3_xattr_row_read:1");
+    arm("xattr_row_read:1");
     rc = perm_check_cred(&c, "/secret", R_OK);
     if (rc == 0) {
         failures++;
@@ -273,7 +273,7 @@ int main(int argc, char **argv)
      * mount reached acl_eval with aclp still NULL, the plain mode triad,
      * and the same allow. This leg exists so the fix cannot be declared
      * done on the strength of the xattr change alone. */
-    arm("v3_dirent_row_read:1");
+    arm("dirent_row_read:1");
     rc = perm_check_cred(&c, "/secret", R_OK);
     if (rc == 0) {
         failures++;
@@ -296,8 +296,8 @@ int main(int argc, char **argv)
      * which creates the object with nothing inherited. */
     {
         struct { const char *site; const char *what; } legs[] = {
-            { "v3_dirent_row_read:1", "name lookup" },
-            { "v3_xattr_row_read:1", "default-ACL row" },
+            { "dirent_row_read:1", "name lookup" },
+            { "xattr_row_read:1", "default-ACL row" },
         };
         size_t li;
         for (li = 0; li < sizeof legs / sizeof legs[0]; li++) {
@@ -325,7 +325,7 @@ int main(int argc, char **argv)
      * Asserted AFTER the decision, and separately: an errno-only control
      * would pass against a fix that renamed the return value and left the
      * ACL lookup degrading. */
-    arm("v3_xattr_row_read:1");
+    arm("xattr_row_read:1");
     rc = invf_getxattr("/secret", XATTR_ACL_ACCESS, (char *)acl, sizeof acl);
     if (rc == -ENODATA) {
         failures++;
@@ -343,7 +343,7 @@ int main(int argc, char **argv)
     unsetenv("INVFS_FAULT");
 
     /* ---- 4b. the DELETE-side twin: removexattr on the same unreadable
-     * row. vol_v3_xattr_delta_del returned -1 for BOTH "no such xattr" and
+     * row. vol_xattr_delta_del returned -1 for BOTH "no such xattr" and
      * "the existence probe could not be completed", and invf_removexattr maps
      * -1 to ENODATA -- so an I/O error reached the application as "this
      * attribute does not exist". Same conflation, one layer over, on the
@@ -356,7 +356,7 @@ int main(int argc, char **argv)
     rc = invf_setxattr("/plain", "user.probe", "probe", 5, 0);
     ok(rc == 0, "the scratch attribute this leg removes was set first");
 
-    arm("v3_xattr_row_read:1");
+    arm("xattr_row_read:1");
     rc = invf_removexattr("/plain", "user.probe");
     if (rc == -ENODATA) {
         failures++;

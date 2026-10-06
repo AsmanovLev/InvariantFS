@@ -497,7 +497,7 @@ check_all() { # <label>
 # because the alternative was a half-run seal that allocated parity, left an
 # empty owner node behind and failed with no message. The port is tracked in
 # impl_docs/AUDIT.md; when it lands this branch becomes the real seal legs.
-if $B/invf-fsck "$IMG" 2>/dev/null | grep -q "format:.*v3"; then
+if $B/invf-fsck "$IMG" 2>/dev/null | grep -q "format:.*v0"; then
     echo "== [0] Meta-v3: parity seal is not implemented; asserting the refusal =="
     for i in 1 2 3 4; do head -c 100000 /dev/urandom > "$WORK/orig/r$i.bin"; done
     $B/invf-import "$IMG" "$WORK/orig" >/dev/null 2>&1 \
@@ -505,7 +505,7 @@ if $B/invf-fsck "$IMG" 2>/dev/null | grep -q "format:.*v3"; then
     $B/invf-sweep "$IMG" >/dev/null 2>&1
     rc=0; $B/invf-sweep "$IMG" --seal > "$WORK/seal-v3.log" 2>&1 || rc=$?
     [ "$rc" -ne 0 ] || fail "v3: --seal reported success (it must refuse)"
-    grep -q "NOT IMPLEMENTED on Meta-v3" "$WORK/seal-v3.log" \
+    grep -q "which has no parity seal" "$WORK/seal-v3.log" \
         || { cat "$WORK/seal-v3.log"; fail "v3: --seal failed without saying why"; }
     echo "  --seal refused with a diagnostic (rc=$rc)"
     urc=0; $B/invf-sweep "$IMG" --unseal > "$WORK/unseal-v3.log" 2>&1 || urc=$?
@@ -522,7 +522,7 @@ if $B/invf-fsck "$IMG" 2>/dev/null | grep -q "format:.*v3"; then
     [ "$n" = 0 ] || fail "v3: the refused seal left $n owner shard(s) behind"
     echo "  volume untouched by the refusal: bit-exact, fsck clean, no owner shards"
     echo
-    echo "SEAL E2E: SKIP (parity seal is not implemented on Meta-v3 -- see impl_docs/AUDIT.md)"
+    echo "SEAL E2E: SKIP (parity seal is which has no parity seal -- see impl_docs/AUDIT.md)"
     exit 0
 fi
 

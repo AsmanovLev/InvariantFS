@@ -65,7 +65,7 @@ static int cmp_deep_ent_id(const void *a, const void *b)
 }
 
 /* WP-M21b: v3 collector for the deep pass -- same deep_ent array, fed by
- * vol_v3_walk in a single O(n) hierarchical walk instead of reverse-resolving
+ * vol_walk in a single O(n) hierarchical walk instead of reverse-resolving
  * leaves. Sizes come straight from the inode row. */
 static int deep_v3_walk_cb(void *ctx_, const char *path, uint64_t inode_id,
                            uint32_t type, uint64_t size, int64_t mtime)
@@ -161,16 +161,17 @@ int main(int argc, char **argv)
      * a format this build cannot read is a verdict about a volume the tool
      * never opened and no tool can open: the same defect as a confident
      * zero. Name what the image is, and refuse. */
-    if (!(sb.vol_flags & VOLF_V3)) {
+    if (!(sb.vol_flags & VOLF_META)) {
         fprintf(stderr,
-                "FAIL: %s: this is not a format v3 volume: the image reports "
-                "%s (VOLF_V3 is not set). This build reads format v3 only "
+                "FAIL: %s: this is not a format v%d volume: the image reports "
+                "%s (VOLF_META is not set). This build reads format v%d only "
                 "(INVFS_VERSION=%s) and carries no reader for any other "
                 "format, so there is nothing here it can verify.\n"
                 "  The image is untouched by this attempt.\n",
                 path,
+                INVFS_FORMAT_VERSION,
                 (sb.vol_flags & VOLF_ASTV2) ? "format v2" : "format v1",
-                INVFS_VERSION_STRING);
+                INVFS_FORMAT_VERSION, INVFS_VERSION_STRING);
         return 1;
     }
 
@@ -293,7 +294,7 @@ int main(int argc, char **argv)
      * meta_mapper_pba + meta_mapper_blocks. Non-v3 volumes, and v3 volumes
      * with no mapper recorded, keep the whole-region rule. */
     uint64_t meta_reserved_end = sb.metadata_zone_start + sb.metadata_zone_blocks;
-    if ((sb.vol_flags & VOLF_V3) && sb.meta_mapper_pba && sb.meta_mapper_blocks) {
+    if ((sb.vol_flags & VOLF_META) && sb.meta_mapper_pba && sb.meta_mapper_blocks) {
         uint64_t root_end = sb.meta_mapper_pba + sb.meta_mapper_blocks
                           + INVFS_MBUF_BOOT_PAGES;
         if (root_end < meta_reserved_end)
@@ -370,7 +371,7 @@ int main(int argc, char **argv)
             vol_walk_init(&w, vol, "verify --deep namespace walk");
             /* WP135: the STRICT walk -- a deep pass that skipped a
              * subtree would report a short volume as a clean one. */
-            wrc = vol_v3_walk_strict(vol, deep_v3_walk_cb, &dc);
+            wrc = vol_walk_strict(vol, deep_v3_walk_cb, &dc);
             vol_walk_result(&w, wrc, dc.nents, dc.nents);
             if (vol_walk_commit(&w) != 0) {
                 printf("  CORRUPT: the deep pass could not walk the whole "
@@ -426,7 +427,7 @@ int main(int argc, char **argv)
          * reason are on screen together and the exit code is non-zero. */
         {
             invfs_nlink_audit na;
-            if (vol_v3_nlink_audit(vol, &na) != 0) {
+            if (vol_nlink_audit(vol, &na) != 0) {
                 printf("  CORRUPT: the nlink/fan-in audit could not be "
                        "completed (the namespace walk failed); the counts "
                        "above are partial\n");

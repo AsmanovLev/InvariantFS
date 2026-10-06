@@ -181,7 +181,7 @@ static int dedup_remap_file_v3(invfs_volume *v, uint64_t inode,
                                uint64_t *freed_out, size_t *applied_out,
                                size_t *cross_applied_out)
 {
-    invfs_v3_inode in;
+    invfs_inode in;
     uint8_t *blob = NULL;
     size_t blen = 0;
     invfs_ast_hdr ah;
@@ -193,13 +193,13 @@ static int dedup_remap_file_v3(invfs_volume *v, uint64_t inode,
     size_t m, j;
     uint8_t *new_blob = NULL;
     size_t new_blen = 0;
-    uint8_t new_addr[INVFS_V3_RECIPE_ADDR_LEN];
+    uint8_t new_addr[INVFS_RECIPE_ADDR_LEN];
 
     *freed_out = 0;
     *applied_out = 0;
     *cross_applied_out = 0;
 
-    if (vol_v3_inode_get(v, inode, &in) != 1) return -1;
+    if (vol_inode_get(v, inode, &in) != 1) return -1;
     /* The destructive end of the same chain the collector guards above.
      * This is the function that REPUBLISHES: it serialises a synthesised
      * recipe over the inode and moves pba refcounts, so a raw-blob type
@@ -210,7 +210,7 @@ static int dedup_remap_file_v3(invfs_volume *v, uint64_t inode,
      * assumed upstream. Returning 1 ("nothing applied") is the honest
      * answer: there are no merges for a symlink. */
     if (invfs_inode_content_is_raw_blob(in.type)) return 1;
-    if (vol_v3_recipe_load(v, in.recipe_addr, &blob, &blen) != 0 || !blob) return -1;
+    if (vol_recipe_load(v, in.recipe_addr, &blob, &blen) != 0 || !blob) return -1;
     if (vol_ast_recipe_parse(blob, blen, &ah, &ents, &n_ents) != 0 || !ents) {
         free(blob);
         return -1;
@@ -247,18 +247,18 @@ static int dedup_remap_file_v3(invfs_volume *v, uint64_t inode,
     }
     free(new_ents);
 
-    if (vol_v3_recipe_store(v, new_blob, new_blen, new_addr) != 0) {
+    if (vol_recipe_store(v, new_blob, new_blen, new_addr) != 0) {
         free(new_blob);
         return -1;
     }
     free(new_blob);
 
     memcpy(in.recipe_addr, new_addr, sizeof(new_addr));
-    if (vol_v3_inode_delta_put(v, inode, &in) != 0)
+    if (vol_inode_delta_put(v, inode, &in) != 0)
         return -1;
     /* WP pba-ref-v3-incremental: the merge loop above moved the counts
      * itself (-1 per loser pba, +1 per canonical pba), so the map is exact
-     * and the staleness vol_v3_inode_delta_put just flagged does not
+     * and the staleness vol_inode_delta_put just flagged does not
      * apply -- clearing it here is what keeps a dedupe pass from paying a
      * full rebuild at its next free gate. */
     pba_ref_validate(v);
@@ -301,7 +301,7 @@ static int dedup_v3_walk_cb(void *ctx_, const char *path, uint64_t inode_id,
 {
     dedup_hash_ctx *ctx = (dedup_hash_ctx *)ctx_;
     invfs_volume *v = ctx->v;
-    invfs_v3_inode in;
+    invfs_inode in;
     uint8_t *blob = NULL;
     size_t blen = 0;
     invfs_ast_hdr ah;
@@ -313,7 +313,7 @@ static int dedup_v3_walk_cb(void *ctx_, const char *path, uint64_t inode_id,
     if (type == INVFS_ITYP_DIR || !inode_id) return 0;
     if (path && (unsigned char)path[0] == 0x01) return 0;
     /* A symlink's blob is its TARGET STRING, stored content-addressed like
-     * any recipe (vol_v3_create_node, src/core/vol_dirs.c) -- the address
+     * any recipe (vol_create_node, src/core/vol_dirs.c) -- the address
      * does not say "AST". invfs_ast_hdr_parse accepts any blob whose first
      * four bytes are a v1/v2 AST version word, so a symlink that
      * false-parses donates attacker-chosen block entries to this pass and
@@ -337,9 +337,9 @@ static int dedup_v3_walk_cb(void *ctx_, const char *path, uint64_t inode_id,
      * and a symlink has no segments to contribute. Reading a blob whose
      * bytes are already known to be the wrong shape would be wasted I/O. */
     if (invfs_inode_content_is_raw_blob(type)) return 0;
-    if (vol_v3_inode_get(v, inode_id, &in) != 1) return 0;
+    if (vol_inode_get(v, inode_id, &in) != 1) return 0;
     if (in.size == 0) return 0;
-    if (vol_v3_recipe_load(v, in.recipe_addr, &blob, &blen) != 0 || !blob) return 0;
+    if (vol_recipe_load(v, in.recipe_addr, &blob, &blen) != 0 || !blob) return 0;
     if (vol_ast_recipe_parse(blob, blen, &ah, &ents, &n_ents) != 0 || !ents) {
         free(blob);
         return 0;
@@ -441,7 +441,7 @@ int vol_sweep_dedupe_ex(invfs_volume *v, invfs_dedupe_stats *stats,
          ctx.progress_user = report_user;
          ctx.stop = 0;
         ctx.err = 0;
-        wrc = vol_v3_walk(v, dedup_v3_walk_cb, &ctx);
+        wrc = vol_walk(v, dedup_v3_walk_cb, &ctx);
         segs = ctx.segs;        /* the callback may have grown the array */
         blob = ctx.blob;
         n = ctx.n;
@@ -496,8 +496,8 @@ int vol_sweep_dedupe_ex(invfs_volume *v, invfs_dedupe_stats *stats,
                             free(cur_blob);
                             cur_blob = NULL;
                             last_inode = s->inode;
-                            invfs_v3_inode in;
-                            if (vol_v3_inode_get(v, s->inode, &in) == 1) {
+                            invfs_inode in;
+                            if (vol_inode_get(v, s->inode, &in) == 1) {
                                 /* The third reader of a raw-blob type's
                                  * blob in this file: a symlink names no
                                  * segment, so there is no cur_pba to
@@ -510,7 +510,7 @@ int vol_sweep_dedupe_ex(invfs_volume *v, invfs_dedupe_stats *stats,
                                 if (invfs_inode_content_is_raw_blob(in.type)) {
                                     last_inode = 0;   /* nothing cached */
                                 } else
-                                if (vol_v3_recipe_load(v, in.recipe_addr, &cur_blob, &cur_blen) == 0 && cur_blob) {
+                                if (vol_recipe_load(v, in.recipe_addr, &cur_blob, &cur_blen) == 0 && cur_blob) {
                                     if (vol_ast_recipe_parse(cur_blob, cur_blen, &cur_ah, &cur_ents, &cur_nents) != 0) {
                                         free(cur_blob); cur_blob = NULL;
                                     }

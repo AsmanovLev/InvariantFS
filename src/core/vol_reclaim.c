@@ -231,7 +231,7 @@ static uint64_t g_readers_in_flight = 0;
  * process-global and the drain spins under g_io_lock; see fold_reclaim_hook).
  *
  * 30 s, chosen against the measured worst case: the longest base-tree walk
- * a drain can be waiting behind (vol_v3_iter_live_inodes / vol_v3_dirent_scan
+ * a drain can be waiting behind (vol_iter_live_inodes / vol_dirent_scan
  * over a large namespace) is single-digit seconds, so 30 s is ~an order of
  * magnitude of headroom over a walk that has merely gone slow, while still
  * bounding the stall at something an operator will notice and can act on.

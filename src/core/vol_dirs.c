@@ -22,31 +22,13 @@ void invfs_vol_dirs_fault_reload(void)
 /* does a directory exist? anchor "name/" or any file under "name/" */
 int vol_is_dir(invfs_volume *v, const char *name)
 {
-    return vol_v3_path_is_dir(v, name);
+    return vol_path_is_dir(v, name);
 }
 
 
 /* create empty directory anchor "name/" */
-uint64_t vol_mkdir(invfs_volume *v, const char *name)
-{
-    return (v->sb.vol_flags & VOLF_READONLY) ? 0 : vol_v3_mkdir(v, name);
-}
-
-
 /* remove directory: must be empty (only the anchor, no files inside) */
-int vol_rmdir(invfs_volume *v, const char *name)
-{
-    return vol_v3_rmdir(v, name);
-}
-
-
 /* auto-create parent anchors for a path: "a/b/c.txt" -> "a/", "a/b/" */
-int vol_ensure_path(invfs_volume *v, const char *name)
-{
-    return vol_v3_ensure_path(v, name);
-}
-
-
 static int dirent_cmp(const void *a, const void *b)
 {
     return strcmp(((const invfs_dirent *)a)->name,
@@ -62,14 +44,14 @@ static int dirent_cmp(const void *a, const void *b)
 /* helpers resolve mount-relative paths componentwise and back the    */
 /* public vol_* namespace API so FUSE keeps calling by name.          */
 /*                                                                    */
-/* The root directory is INVFS_V3_ROOT_INO. A path component is       */
+/* The root directory is INVFS_ROOT_INO. A path component is       */
 /* looked up as (parent inode, name) -> child inode; a directory's    */
 /* own anchor (name_len 0) marks it as a directory. Mutations COW the */
 /* base tree and publish the root (WP-M2 double slot); there is no    */
 /* delta yet (WP-M7).                                                 */
 /* ================================================================== */
 
-static const char *v3_skip_slash(const char *p)
+static const char *skip_slash(const char *p)
 {
     if (!p)
         return "";
@@ -80,10 +62,10 @@ static const char *v3_skip_slash(const char *p)
 
 /* Split "a/b/c" into parent "a/b" and leaf "c" (leading/trailing slashes
  * ignored). parent may be empty (the root). 0 = ok, -1 = malformed. */
-static int v3_split_path(const char *name, char *parent, size_t pcap,
+static int split_path(const char *name, char *parent, size_t pcap,
                          char *leaf, size_t lcap)
 {
-    const char *p = v3_skip_slash(name);
+    const char *p = skip_slash(name);
     size_t n = strlen(p), k, pl, ll;
 
     while (n > 0 && p[n - 1] == '/')
@@ -108,14 +90,27 @@ static int v3_split_path(const char *name, char *parent, size_t pcap,
     return 0;
 }
 
-int vol_v3_path_lookup(invfs_volume *v, const char *name, uint64_t *ino_out)
+/* Symlink hops during lookup are bounded like the kernel's MAXSYMLINKS. */
+#define VOL_LOOKUP_MAX_HOPS 40
+/* Longest path the lookup will rewrite (dir + target + rest). */
+#define VOL_LOOKUP_PATH_MAX 4096
+int vol_path_lookup(invfs_volume *v, const char *name, uint64_t *ino_out)
 {
-    const char *p = v3_skip_slash(name);
-    uint64_t cur = INVFS_V3_ROOT_INO;
+    /* Resolved-path buffer: intermediate symlinks rewrite the walk (see
+     * below), so the walk runs over a mutable copy, not the input. */
+    char work[VOL_LOOKUP_PATH_MAX + 1];
+    const char *p;
+    uint64_t cur = INVFS_ROOT_INO;
     char comp[INVFS_MAX_NAME + 1];
+    unsigned hops = 0;
 
-    if (!v || !ino_out)
+    if (!v || !ino_out || !name)
         return -1;
+    if (strlen(name) > VOL_LOOKUP_PATH_MAX)
+        return -1;
+    strcpy(work, name);
+    p = skip_slash(work);
+    for (;;) {
     while (*p) {
         const char *s = strchr(p, '/');
         size_t n = s ? (size_t)(s - p) : strlen(p);
@@ -127,11 +122,57 @@ int vol_v3_path_lookup(invfs_volume *v, const char *name, uint64_t *ino_out)
             return -1;
         memcpy(comp, p, n);
         comp[n] = 0;
-        rc = vol_v3_dirent_get(v, cur, comp, &child);
+        rc = vol_dirent_get(v, cur, comp, &child);
         if (rc != 1)
             return rc;                    /* 0 absent, -1 error */
         if (!child)
             return 0;                     /* dangling dirent */
+        if (s) {
+            /* More components remain: an intermediate symlink must be
+             * followed, like the kernel does -- without this, every path
+             * through a merged-usr /lib -> usr/lib (or any link) fails
+             * offline while the same bytes read fine through FUSE (the
+             * kernel walks links for us there). The final component keeps
+             * historical behavior (returns the link itself). */
+            invfs_inode in;
+            if (vol_inode_get(v, child, &in) != 1)
+                return -1;
+            if (in.type == INVFS_ITYP_LNK) {
+                uint8_t *blob = NULL;
+                size_t blen = 0;
+                char target[INVFS_META_TARGET_MAX];
+                size_t tlen, rest;
+                if (++hops > VOL_LOOKUP_MAX_HOPS)
+                    return -1;            /* ELOOP, kernel parity */
+                if (vol_recipe_load(v, in.recipe_addr, &blob, &blen) != 0 ||
+                    blen == 0 || blen >= sizeof target) {
+                    free(blob);
+                    return -1;
+                }
+                memcpy(target, blob, blen);
+                target[blen] = 0;
+                free(blob);
+                tlen = strlen(target);
+                rest = strlen(s);
+                if (target[0] == '/') {
+                    if (tlen + rest > VOL_LOOKUP_PATH_MAX)
+                        return -1;
+                    memmove(work, target, tlen);
+                    memmove(work + tlen, s, rest + 1);
+                    cur = INVFS_ROOT_INO;
+                } else {
+                    size_t dirlen = (size_t)(p - work);
+                    if (dirlen + tlen + rest > VOL_LOOKUP_PATH_MAX)
+                        return -1;
+                    memmove(work + dirlen + tlen, s, rest + 1);
+                    memcpy(work + dirlen, target, tlen);
+                    /* cur still names the link's parent, which is what a
+                     * relative target resolves against. */
+                }
+                p = skip_slash(work);
+                goto rewalk;
+            }
+        }
         cur = child;
         if (!s)
             break;
@@ -139,35 +180,37 @@ int vol_v3_path_lookup(invfs_volume *v, const char *name, uint64_t *ino_out)
     }
     *ino_out = cur;
     return 1;
+    rewalk: ;
+    }
 }
 
-int vol_v3_path_is_dir(invfs_volume *v, const char *name)
+int vol_path_is_dir(invfs_volume *v, const char *name)
 {
     uint64_t ino;
-    invfs_v3_inode in;
+    invfs_inode in;
 
     if (!v)
         return 0;
-    if (v3_skip_slash(name)[0] == 0)
+    if (skip_slash(name)[0] == 0)
         return 1;                         /* root always exists */
-    if (vol_v3_path_lookup(v, name, &ino) != 1)
+    if (vol_path_lookup(v, name, &ino) != 1)
         return 0;
-    if (vol_v3_inode_get(v, ino, &in) != 1)
+    if (vol_inode_get(v, ino, &in) != 1)
         return 0;
     return in.type == INVFS_ITYP_DIR;
 }
 
-int vol_v3_path_stat(invfs_volume *v, const char *name, uint64_t *id_out,
+int vol_path_stat(invfs_volume *v, const char *name, uint64_t *id_out,
                      uint64_t *size_out, uint64_t *ctime_out)
 {
     uint64_t ino;
-    invfs_v3_inode in;
+    invfs_inode in;
 
     if (!v)
         return -1;
-    if (vol_v3_path_lookup(v, name, &ino) != 1)
+    if (vol_path_lookup(v, name, &ino) != 1)
         return -1;
-    if (vol_v3_inode_get(v, ino, &in) != 1)
+    if (vol_inode_get(v, ino, &in) != 1)
         return -1;
     if (id_out)
         *id_out = ino;
@@ -182,12 +225,12 @@ typedef struct {
     invfs_volume *v;
     invfs_dirent *ents;
     int max, n;
-} v3_list_ctx;
+} list_ctx;
 
-static int v3_list_cb(void *ctx_, const char *nm, size_t nlen, uint64_t child)
+static int list_cb(void *ctx_, const char *nm, size_t nlen, uint64_t child)
 {
-    v3_list_ctx *c = (v3_list_ctx *)ctx_;
-    invfs_v3_inode in;
+    list_ctx *c = (list_ctx *)ctx_;
+    invfs_inode in;
     int irc;
 
     if (c->n >= c->max)
@@ -196,7 +239,7 @@ static int v3_list_cb(void *ctx_, const char *nm, size_t nlen, uint64_t child)
         return 0;                         /* internal owner/registry */
     if (nlen >= sizeof c->ents[0].name)
         return 0;
-    irc = vol_v3_inode_get(c->v, child, &in);
+    irc = vol_inode_get(c->v, child, &in);
     /* WP86: -1 is EIO (a quarantined or unreadable inode row), not a dangling
      * dirent. Skipping it silently would hand readdir a shorter listing that
      * looks complete -- the file would simply be gone. Abort the scan so the
@@ -214,17 +257,17 @@ static int v3_list_cb(void *ctx_, const char *nm, size_t nlen, uint64_t child)
     return 0;
 }
 
-int vol_v3_path_list_dir(invfs_volume *v, const char *dir,
+int vol_path_list_dir(invfs_volume *v, const char *dir,
                          invfs_dirent *ents, int max)
 {
     uint64_t pino;
-    v3_list_ctx c;
+    list_ctx c;
     int rc;
 
     if (!v || !ents || max <= 0)
         return 0;
-    if (v3_skip_slash(dir)[0] == 0) {
-        pino = INVFS_V3_ROOT_INO;
+    if (skip_slash(dir)[0] == 0) {
+        pino = INVFS_ROOT_INO;
     } else {
         /* WP135: test-only seam for the case the `else` below used to turn
          * into an empty directory -- the directory's OWN dirent sits in an
@@ -233,7 +276,7 @@ int vol_v3_path_list_dir(invfs_volume *v, const char *dir,
         if (invfs_vol_fault("path_list_dir_lookup"))
             return -EIO;
         /* WP135: `!= 1` collapsed two different volume states into one
-         * answer. vol_v3_path_lookup returns 1 found, 0 absent and -1
+         * answer. vol_path_lookup returns 1 found, 0 absent and -1
          * ERROR, and 0 was returned for both of the others -- so a
          * directory whose OWN dirent sits in a quarantined range (the
          * name lookup EIOs) was reported as an EMPTY DIRECTORY, with rc 0,
@@ -247,7 +290,7 @@ int vol_v3_path_list_dir(invfs_volume *v, const char *dir,
          * error to invent (a dirent can be unlinked between the lookup and
          * the listing, and the caller's ENOENT is the honest answer there).
          * Only a lookup that FAILED becomes -EIO. */
-        int lrc = vol_v3_path_lookup(v, dir, &pino);
+        int lrc = vol_path_lookup(v, dir, &pino);
         if (lrc < 0)
             return -EIO;
         if (lrc == 0)
@@ -257,7 +300,7 @@ int vol_v3_path_list_dir(invfs_volume *v, const char *dir,
     c.ents = ents;
     c.max = max;
     c.n = 0;
-    rc = vol_v3_dirent_scan(v, pino, v3_list_cb, &c);
+    rc = vol_dirent_scan(v, pino, list_cb, &c);
     if (rc != 0 && rc != 1)
         return -EIO;
     /* the tree orders by (name_len, name); v2 listings are name-sorted and
@@ -281,35 +324,35 @@ int vol_v3_path_list_dir(invfs_volume *v, const char *dir,
  * time it was tried here. The reservation belongs at the places a USER name
  * enters: vol_replace_file, vol_replace_file_with_meta,
  * vol_create_file_with_meta, vol_create_symlink, vol_create_special,
- * vol_v3_mkdir, vol_v3_rename, vol_v3_hardlink, vol_write_begin, plus
+ * vol_mkdir, vol_rename, vol_v3_hardlink, vol_write_begin, plus
  * invf-cp's vol_create_file call and the six FUSE name-introducing ops
  * (fuse_fs.c, fuse_reserved_name). */
-uint64_t vol_v3_create_node(invfs_volume *v, const char *name,
+uint64_t vol_create_node(invfs_volume *v, const char *name,
                             const invfs_meta_pub *meta)
 {
     char parent[600], leaf[INVFS_MAX_NAME + 1];
-    uint8_t old_addr[INVFS_V3_RECIPE_ADDR_LEN];
+    uint8_t old_addr[INVFS_RECIPE_ADDR_LEN];
     uint64_t pino, id, existing = 0;
-    invfs_v3_inode in;
+    invfs_inode in;
     int rc, had_content = 0;
 
     if (!v)
         return 0;
     if (v->sb.vol_flags & VOLF_READONLY)
         return 0;
-    if (v3_split_path(name, parent, sizeof parent, leaf, sizeof leaf) != 0)
+    if (split_path(name, parent, sizeof parent, leaf, sizeof leaf) != 0)
         return 0;
-    if (vol_v3_path_lookup(v, parent, &pino) != 1)
+    if (vol_path_lookup(v, parent, &pino) != 1)
         return 0;
-    if (!vol_v3_path_is_dir(v, parent))
+    if (!vol_path_is_dir(v, parent))
         return 0;
     memset(old_addr, 0, sizeof old_addr);
-    rc = vol_v3_dirent_get(v, pino, leaf, &existing);
+    rc = vol_dirent_get(v, pino, leaf, &existing);
     if (rc < 0)
         return 0;
     if (rc == 1) {
         id = existing;
-        if (vol_v3_inode_get(v, id, &in) != 1)
+        if (vol_inode_get(v, id, &in) != 1)
             memset(&in, 0, sizeof in);
         else if (in.type == INVFS_ITYP_REG && in.size > 0) {
             /* CAPTURE the superseded recipe; the free waits for the row that
@@ -320,7 +363,7 @@ uint64_t vol_v3_create_node(invfs_volume *v, const char *name,
             had_content = 1;
         }
     } else {
-        id = vol_v3_inode_alloc(v);
+        id = vol_inode_alloc(v);
         if (!id)
             return 0;
         memset(&in, 0, sizeof in);
@@ -346,7 +389,7 @@ uint64_t vol_v3_create_node(invfs_volume *v, const char *name,
         size_t tl = strlen(meta->target);
         if (tl >= INVFS_META_TARGET_MAX)
             return 0;
-        if (vol_v3_recipe_store(v, (const uint8_t *)meta->target, tl, in.recipe_addr) != 0)
+        if (vol_recipe_store(v, (const uint8_t *)meta->target, tl, in.recipe_addr) != 0)
             return 0;
         in.size = tl;
         memset(&in.recipe, 0, sizeof in.recipe);
@@ -355,33 +398,33 @@ uint64_t vol_v3_create_node(invfs_volume *v, const char *name,
         memset(&in.recipe, 0, sizeof in.recipe);
         memset(in.recipe_addr, 0, sizeof in.recipe_addr);
     }
-    if (vol_v3_inode_delta_put(v, id, &in) != 0)
+    if (vol_inode_delta_put(v, id, &in) != 0)
         return 0;
     /* The supersede is now durable in the delta log and the live row names
      * the NEW recipe, so the old blocks are unreachable by anything that can
-     * still be read -- free them now, and only now. Mirrors vol_v3_unlink:
+     * still be read -- free them now, and only now. Mirrors vol_unlink:
      * the row goes first, the blocks second.
      *
      * Deferring costs nothing here. The row this publishes names NO recipe
      * for a REG/DIR replacement (recipe_addr is memset to zero, and a zero
-     * address names no blocks -- vol_v3_free_recipe_blocks, vol_ast.c:151),
+     * address names no blocks -- vol_free_recipe_blocks, vol_ast.c:151),
      * so nothing live points into the old recipe when the free runs; the
      * recipe BLOB is a base-tree value under 0x04 || BLAKE3(blob), reclaimed
      * by the fold, not here. Where a recipe IS published (a symlink target)
      * the address is BLAKE3 of the blob, so identical content recurs at the
      * SAME address -- which is exactly why the free is guarded on the row
-     * having MOVED. That is the guard vol_v3_release_superseded_blob already
-     * carries, and it is load-bearing twice over: vol_v3_inode_delta_put only
+     * having MOVED. That is the guard vol_release_superseded_blob already
+     * carries, and it is load-bearing twice over: vol_inode_delta_put only
      * invalidates the pba map when recipe_addr changes, so freeing an
      * address the row still names would decrement counts the map attributes
      * to nothing. */
     if (had_content &&
-        memcmp(in.recipe_addr, old_addr, INVFS_V3_RECIPE_ADDR_LEN) != 0)
-        vol_v3_free_recipe_blocks(v, old_addr, 0);
-    if (vol_v3_dirent_delta_put(v, pino, leaf, id) != 0)
+        memcmp(in.recipe_addr, old_addr, INVFS_RECIPE_ADDR_LEN) != 0)
+        vol_free_recipe_blocks(v, old_addr, 0);
+    if (vol_dirent_delta_put(v, pino, leaf, id) != 0)
         return 0;
     if (in.type == INVFS_ITYP_DIR)
-        vol_v3_dirent_delta_put(v, id, "", id);  /* directory anchor */
+        vol_dirent_delta_put(v, id, "", id);  /* directory anchor */
     return id;
 }
 
@@ -391,34 +434,34 @@ uint64_t vol_v3_create_node(invfs_volume *v, const char *name,
  * ordering), so a crash between the two leaves an orphaned row, never a
  * dirent that names an empty or partial inode. Returns the inode id, or 0
  * with the volume untouched. */
-uint64_t vol_v3_create_content_node(invfs_volume *v, const char *name,
+uint64_t vol_create_content_node(invfs_volume *v, const char *name,
                                     uint64_t size,
-                                    const uint8_t recipe_addr[INVFS_V3_RECIPE_ADDR_LEN])
+                                    const uint8_t recipe_addr[INVFS_RECIPE_ADDR_LEN])
 {
     char parent[600], leaf[INVFS_MAX_NAME + 1];
     uint64_t pino, id, existing = 0;
-    invfs_v3_inode in;
+    invfs_inode in;
     int rc;
 
     if (!v || !recipe_addr)
         return 0;
     if (v->sb.vol_flags & VOLF_READONLY)
         return 0;
-    if (v3_split_path(name, parent, sizeof parent, leaf, sizeof leaf) != 0)
+    if (split_path(name, parent, sizeof parent, leaf, sizeof leaf) != 0)
         return 0;
-    if (vol_v3_path_lookup(v, parent, &pino) != 1)
+    if (vol_path_lookup(v, parent, &pino) != 1)
         return 0;
-    if (!vol_v3_path_is_dir(v, parent))
+    if (!vol_path_is_dir(v, parent))
         return 0;
-    rc = vol_v3_dirent_get(v, pino, leaf, &existing);
+    rc = vol_dirent_get(v, pino, leaf, &existing);
     if (rc < 0)
         return 0;
     if (rc == 1) {
         id = existing;
-        if (vol_v3_inode_get(v, id, &in) != 1)
+        if (vol_inode_get(v, id, &in) != 1)
             memset(&in, 0, sizeof in);
     } else {
-        id = vol_v3_inode_alloc(v);
+        id = vol_inode_alloc(v);
         if (!id)
             return 0;
         memset(&in, 0, sizeof in);
@@ -432,29 +475,29 @@ uint64_t vol_v3_create_content_node(invfs_volume *v, const char *name,
     in.mtime = in.atime = (int64_t)time(NULL);
     in.size = size;
     memset(&in.recipe, 0, sizeof in.recipe);
-    memcpy(in.recipe_addr, recipe_addr, INVFS_V3_RECIPE_ADDR_LEN);
+    memcpy(in.recipe_addr, recipe_addr, INVFS_RECIPE_ADDR_LEN);
     /* row first, dirent second: a torn create is an orphan, not a dangling
      * name. An already-present dirent is left in place (replace-in-place). */
-    if (vol_v3_inode_delta_put(v, id, &in) != 0)
+    if (vol_inode_delta_put(v, id, &in) != 0)
         return 0;
-    if (rc != 1 && vol_v3_dirent_delta_put(v, pino, leaf, id) != 0)
+    if (rc != 1 && vol_dirent_delta_put(v, pino, leaf, id) != 0)
         return 0;
     return id;
 }
 
-uint64_t vol_v3_set_meta(invfs_volume *v, const char *name,
+uint64_t vol_set_meta(invfs_volume *v, const char *name,
                          const invfs_meta_pub *meta)
 {
     uint64_t id;
-    invfs_v3_inode in;
+    invfs_inode in;
 
     if (!v || !meta)
         return 0;
     if (v->sb.vol_flags & VOLF_READONLY)
         return 0;
-    if (vol_v3_path_lookup(v, name, &id) != 1)
+    if (vol_path_lookup(v, name, &id) != 1)
         return 0;
-    if (vol_v3_inode_get(v, id, &in) != 1)
+    if (vol_inode_get(v, id, &in) != 1)
         return 0;
     if (meta->type)
         in.type = meta->type;
@@ -472,24 +515,24 @@ uint64_t vol_v3_set_meta(invfs_volume *v, const char *name,
         size_t tl = strlen(meta->target);
         if (tl >= INVFS_META_TARGET_MAX)
             return 0;
-        uint8_t addr[INVFS_V3_RECIPE_ADDR_LEN];
-        if (vol_v3_recipe_store(v, (const uint8_t *)meta->target, tl, addr) != 0)
+        uint8_t addr[INVFS_RECIPE_ADDR_LEN];
+        if (vol_recipe_store(v, (const uint8_t *)meta->target, tl, addr) != 0)
             return 0;
-        memcpy(in.recipe_addr, addr, INVFS_V3_RECIPE_ADDR_LEN);
+        memcpy(in.recipe_addr, addr, INVFS_RECIPE_ADDR_LEN);
         in.size = tl;
     }
-    if (vol_v3_inode_delta_put(v, id, &in) != 0)
+    if (vol_inode_delta_put(v, id, &in) != 0)
         return 0;
     if (in.type == INVFS_ITYP_DIR)
-        vol_v3_dirent_delta_put(v, id, "", id);  /* ensure the anchor */
+        vol_dirent_delta_put(v, id, "", id);  /* ensure the anchor */
     return id;
 }
 
-uint64_t vol_v3_mkdir(invfs_volume *v, const char *name)
+uint64_t vol_mkdir(invfs_volume *v, const char *name)
 {
     char parent[600], leaf[INVFS_MAX_NAME + 1];
     uint64_t pino, id, existing = 0;
-    invfs_v3_inode in;
+    invfs_inode in;
     int rc;
 
     if (!v)
@@ -497,21 +540,21 @@ uint64_t vol_v3_mkdir(invfs_volume *v, const char *name)
     if (v->sb.vol_flags & VOLF_READONLY)
         return 0;
     /* WP135: a directory name is a user name like any other, and '!' is
-     * reserved for container siblings. See vol_v3_create_node above. */
+     * reserved for container siblings. See vol_create_node above. */
     if (name_refused_internal_ns(name))
         return 0;
-    if (v3_split_path(name, parent, sizeof parent, leaf, sizeof leaf) != 0)
+    if (split_path(name, parent, sizeof parent, leaf, sizeof leaf) != 0)
         return 0;
-    if (vol_v3_path_lookup(v, parent, &pino) != 1)
+    if (vol_path_lookup(v, parent, &pino) != 1)
         return 0;
-    if (!vol_v3_path_is_dir(v, parent))
+    if (!vol_path_is_dir(v, parent))
         return 0;
-    rc = vol_v3_dirent_get(v, pino, leaf, &existing);
+    rc = vol_dirent_get(v, pino, leaf, &existing);
     if (rc == 1)
         return 0;                         /* EEXIST */
     if (rc < 0)
         return 0;
-    id = vol_v3_inode_alloc(v);
+    id = vol_inode_alloc(v);
     if (!id)
         return 0;
     memset(&in, 0, sizeof in);
@@ -519,16 +562,16 @@ uint64_t vol_v3_mkdir(invfs_volume *v, const char *name)
     in.mode = 0755;
     in.nlink = 2;
     in.mtime = in.atime = (int64_t)time(NULL);
-    if (vol_v3_inode_delta_put(v, id, &in) != 0)
+    if (vol_inode_delta_put(v, id, &in) != 0)
         return 0;
-    if (vol_v3_dirent_delta_put(v, id, "", id) != 0)     /* anchor */
+    if (vol_dirent_delta_put(v, id, "", id) != 0)     /* anchor */
         return 0;
-    if (vol_v3_dirent_delta_put(v, pino, leaf, id) != 0)
+    if (vol_dirent_delta_put(v, pino, leaf, id) != 0)
         return 0;
     return id;
 }
 
-static int v3_count_cb(void *ctx_, const char *nm, size_t nlen, uint64_t child)
+static int count_cb(void *ctx_, const char *nm, size_t nlen, uint64_t child)
 {
     int *n = (int *)ctx_;
     (void)nm; (void)nlen; (void)child;
@@ -536,7 +579,7 @@ static int v3_count_cb(void *ctx_, const char *nm, size_t nlen, uint64_t child)
     return 0;
 }
 
-int vol_v3_rmdir(invfs_volume *v, const char *name)
+int vol_rmdir(invfs_volume *v, const char *name)
 {
     char parent[600], leaf[INVFS_MAX_NAME + 1];
     uint64_t id, pino;
@@ -546,45 +589,45 @@ int vol_v3_rmdir(invfs_volume *v, const char *name)
         return -1;
     if (v->sb.vol_flags & VOLF_READONLY)
         return -1;
-    if (v3_split_path(name, parent, sizeof parent, leaf, sizeof leaf) != 0)
+    if (split_path(name, parent, sizeof parent, leaf, sizeof leaf) != 0)
         return -1;
-    if (vol_v3_path_lookup(v, name, &id) != 1)
+    if (vol_path_lookup(v, name, &id) != 1)
         return -1;
-    if (!vol_v3_path_is_dir(v, name))
+    if (!vol_path_is_dir(v, name))
         return -1;
-    rc = vol_v3_dirent_scan(v, id, v3_count_cb, &n);
+    rc = vol_dirent_scan(v, id, count_cb, &n);
     if (rc != 0 && rc != 1)
         return -1;
     if (n > 0)
         return -2;                        /* ENOTEMPTY */
-    if (vol_v3_path_lookup(v, parent, &pino) != 1)
+    if (vol_path_lookup(v, parent, &pino) != 1)
         return -1;
-    if (vol_v3_dirent_delta_del(v, pino, leaf) != 0)
+    if (vol_dirent_delta_del(v, pino, leaf) != 0)
         return -1;
-    if (vol_v3_dirent_delta_del(v, id, "") != 0)
+    if (vol_dirent_delta_del(v, id, "") != 0)
         return -1;
-    if (vol_v3_inode_delta_delete(v, id) != 0)
+    if (vol_inode_delta_delete(v, id) != 0)
         return -1;
     return 0;
 }
 
-int vol_v3_unlink(invfs_volume *v, const char *name)
+int vol_unlink(invfs_volume *v, const char *name)
 {
     char parent[600], leaf[INVFS_MAX_NAME + 1];
     uint64_t id, pino;
-    invfs_v3_inode in;
+    invfs_inode in;
 
     if (!v)
         return -1;
-    if (v3_split_path(name, parent, sizeof parent, leaf, sizeof leaf) != 0)
+    if (split_path(name, parent, sizeof parent, leaf, sizeof leaf) != 0)
         return -1;
-    if (vol_v3_path_lookup(v, name, &id) != 1)
+    if (vol_path_lookup(v, name, &id) != 1)
         return -1;
-    if (vol_v3_inode_get(v, id, &in) != 1)
+    if (vol_inode_get(v, id, &in) != 1)
         return -1;
     if (in.type == INVFS_ITYP_DIR)
         return -1;                        /* EISDIR: use rmdir */
-    if (vol_v3_path_lookup(v, parent, &pino) != 1)
+    if (vol_path_lookup(v, parent, &pino) != 1)
         return -1;
     if (in.nlink <= 1) {
         int rc = 0;
@@ -601,8 +644,8 @@ int vol_v3_unlink(invfs_volume *v, const char *name)
          * comment there said the ensure had to happen "while this row still
          * names its recipe". That is the wrong invariant, and c47cf65 is
          * what says so: pba_ref_ensure's build reaches an inode THROUGH ITS
-         * DIRENT (v3_walk_dir, below -- vol_v3_path_list_dir, then
-         * vol_v3_path_lookup at :761-765), so once the dirent is gone the
+         * DIRENT (walk_dir, below -- vol_path_list_dir, then
+         * vol_path_lookup at :761-765), so once the dirent is gone the
          * walk cannot reach the row AT ALL, whatever the row still says. A
          * rebuild after the delete is short by exactly this row's
          * contribution:
@@ -616,7 +659,7 @@ int vol_v3_unlink(invfs_volume *v, const char *name)
          * and the rebuild is ROUTINE, not exceptional: pba_ref_ensure is a
          * no-op unless the map is absent or pba_ref_stale (volume.c:3620),
          * and pba_ref_stale is set from the single place a recipe_addr is
-         * published (vol_v3_inode_delta_put, vol_btree.c:3881/:3884). Any
+         * published (vol_inode_delta_put, vol_btree.c:3881/:3884). Any
          * recipe publish since the last build arms it, so writing one more
          * file is the whole trigger -- which is why this fires on a clean
          * volume with no injected fault.
@@ -640,11 +683,11 @@ int vol_v3_unlink(invfs_volume *v, const char *name)
         /* the map, taken while the NAME is still there, so this recipe's own
          * contribution is in it and the -1 below has something to take */
         pba_ref_ensure(v);
-        if (vol_v3_dirent_delta_del(v, pino, leaf) != 0) {
+        if (vol_dirent_delta_del(v, pino, leaf) != 0) {
             vol_pba_ref_release(v);
             return -1;
         }
-        if (vol_v3_inode_delta_delete(v, id) != 0) {
+        if (vol_inode_delta_delete(v, id) != 0) {
             vol_pba_ref_release(v);
             return -1;
         }
@@ -658,14 +701,14 @@ int vol_v3_unlink(invfs_volume *v, const char *name)
          * gone and the unlink has happened; what is left to say is whether
          * the space came back.
          *
-         * It may not: vol_v3_free_recipe_blocks returns -1 when the recipe
+         * It may not: vol_free_recipe_blocks returns -1 when the recipe
          * will not load or will not parse, having freed nothing. Returning
          * 0 there told the caller "gone and reclaimed" while every block the
          * recipe named stayed allocated under no reachable name -- forever.
          * Report it, and name the file, so the operator knows which reclaim
          * to chase. */
         if (in.type == INVFS_ITYP_REG &&
-            vol_v3_free_recipe_blocks(v, in.recipe_addr, 0) != 0) {
+            vol_free_recipe_blocks(v, in.recipe_addr, 0) != 0) {
             fprintf(stderr, "invarifs: unlink %s: recipe does not load or "
                     "parse, so its data blocks were NOT reclaimed; the name "
                     "is gone and the space is still allocated. Run "
@@ -673,7 +716,7 @@ int vol_v3_unlink(invfs_volume *v, const char *name)
             rc = -1;
         }
         /* Cascade delete container/transcode siblings if main file is
-         * unlinked. Still inside the hold: this is a nested vol_v3_unlink
+         * unlinked. Still inside the hold: this is a nested vol_unlink
          * per sibling, and the hold is depth-counted over a RECURSIVE mutex,
          * so it nests correctly instead of unlocking early. */
         if (strchr(name, '!') == NULL)
@@ -685,21 +728,21 @@ int vol_v3_unlink(invfs_volume *v, const char *name)
          * the inode, and frees nothing -- so it needs no map at all. The row
          * keeps naming its recipe and every surviving name still reaches it,
          * which is exactly the condition a map build requires. */
-        if (vol_v3_dirent_delta_del(v, pino, leaf) != 0)
+        if (vol_dirent_delta_del(v, pino, leaf) != 0)
             return -1;
         in.nlink--;
-        if (vol_v3_inode_delta_put(v, id, &in) != 0)
+        if (vol_inode_delta_put(v, id, &in) != 0)
             return -1;
     }
     return 0;
 }
 
-int vol_v3_rename(invfs_volume *v, const char *from, const char *to)
+int vol_rename(invfs_volume *v, const char *from, const char *to)
 {
     char fparent[600], fleaf[INVFS_MAX_NAME + 1];
     char tparent[600], tleaf[INVFS_MAX_NAME + 1];
     uint64_t f_id, f_pino, t_id = 0, t_pino;
-    invfs_v3_inode f_in, t_in;
+    invfs_inode f_in, t_in;
     const char *fn, *tn;
     int rc;
 
@@ -712,33 +755,33 @@ int vol_v3_rename(invfs_volume *v, const char *from, const char *to)
      * so its contents can be moved OFF the reserved namespace. */
     if (name_refused_internal_ns(to))
         return -1;
-    if (v3_split_path(from, fparent, sizeof fparent, fleaf, sizeof fleaf) != 0)
+    if (split_path(from, fparent, sizeof fparent, fleaf, sizeof fleaf) != 0)
         return -1;
-    if (v3_split_path(to, tparent, sizeof tparent, tleaf, sizeof tleaf) != 0)
+    if (split_path(to, tparent, sizeof tparent, tleaf, sizeof tleaf) != 0)
         return -1;
-    if (vol_v3_path_lookup(v, from, &f_id) != 1)
+    if (vol_path_lookup(v, from, &f_id) != 1)
         return -1;
-    if (vol_v3_inode_get(v, f_id, &f_in) != 1)
+    if (vol_inode_get(v, f_id, &f_in) != 1)
         return -1;
-    if (vol_v3_path_lookup(v, tparent, &t_pino) != 1)
+    if (vol_path_lookup(v, tparent, &t_pino) != 1)
         return -1;
-    if (!vol_v3_path_is_dir(v, tparent))
+    if (!vol_path_is_dir(v, tparent))
         return -1;
     if (strcmp(fparent, tparent) == 0 && strcmp(fleaf, tleaf) == 0)
         return 0;                         /* same path: no-op */
-    fn = v3_skip_slash(from);
-    tn = v3_skip_slash(to);
+    fn = skip_slash(from);
+    tn = skip_slash(to);
     /* "a" -> "a/b": moving a directory inside itself */
     if (f_in.type == INVFS_ITYP_DIR) {
         size_t fl = strlen(fn);
         if (strncmp(tn, fn, fl) == 0 && tn[fl] == '/')
             return -1;
     }
-    rc = vol_v3_dirent_get(v, t_pino, tleaf, &t_id);
+    rc = vol_dirent_get(v, t_pino, tleaf, &t_id);
     if (rc < 0)
         return -1;
     if (rc == 1) {
-        if (vol_v3_inode_get(v, t_id, &t_in) != 1)
+        if (vol_inode_get(v, t_id, &t_in) != 1)
             return -1;
         if (t_in.type == INVFS_ITYP_DIR)
             return -2;                    /* EEXIST: dir destination */
@@ -753,22 +796,22 @@ int vol_v3_rename(invfs_volume *v, const char *from, const char *to)
          * (non-POSIX, non-lossy) behaviour is kept here. */
         if (t_in.nlink > 1) {
             /* A name, not the inode: frees nothing, so it needs no map. */
-            if (vol_v3_dirent_delta_del(v, t_pino, tleaf) != 0)
+            if (vol_dirent_delta_del(v, t_pino, tleaf) != 0)
                 return -1;
             t_in.nlink--;
-            if (vol_v3_inode_delta_put(v, t_id, &t_in) != 0)
+            if (vol_inode_delta_put(v, t_id, &t_in) != 0)
                 return -1;
         } else {
             /* WP unlink-takes-map-after-dirent-drop: THIS IS THE SAME DEFECT
-             * AS vol_v3_unlink, and it was wrong in the same way.
+             * AS vol_unlink, and it was wrong in the same way.
              *
              * The ensure used to be taken here, AFTER
-             * vol_v3_dirent_delta_del(v, t_pino, tleaf) had already dropped
+             * vol_dirent_delta_del(v, t_pino, tleaf) had already dropped
              * the victim's name, and the comment said the ensure must happen
              * "while the row still names t_in.recipe_addr". Same wrong
              * invariant as the unlink: pba_ref_ensure's build reaches an
-             * inode THROUGH ITS DIRENT (v3_walk_dir, below --
-             * vol_v3_path_list_dir, then vol_v3_path_lookup), so once the
+             * inode THROUGH ITS DIRENT (walk_dir, below --
+             * vol_path_list_dir, then vol_path_lookup), so once the
              * name is gone the walk cannot reach the row, whatever the row
              * still says. A rebuild here is short by exactly the
              * contribution the -1 below is about to take, and the block goes
@@ -776,39 +819,39 @@ int vol_v3_rename(invfs_volume *v, const char *from, const char *to)
              *
              * So: the map is taken while the name is still there, and the
              * name is dropped inside the same hold, exactly as in
-             * vol_v3_unlink. The comma-operator
-             * `pba_ref_ensure(v), vol_v3_inode_delta_delete(...)` is gone
+             * vol_unlink. The comma-operator
+             * `pba_ref_ensure(v), vol_inode_delta_delete(...)` is gone
              * because the ordering it encoded is the thing being fixed.
              */
             vol_pba_ref_hold(v);
             pba_ref_ensure(v);
-            if (vol_v3_dirent_delta_del(v, t_pino, tleaf) != 0) {
+            if (vol_dirent_delta_del(v, t_pino, tleaf) != 0) {
                 vol_pba_ref_release(v);
                 return -1;
             }
-            if (vol_v3_inode_delta_delete(v, t_id) != 0) {
+            if (vol_inode_delta_delete(v, t_id) != 0) {
                 vol_pba_ref_release(v);
                 return -1;
             }
             /* WP-N1: targeted free of overwritten destination data blocks */
             if (t_in.type == INVFS_ITYP_REG)
-                vol_v3_free_recipe_blocks(v, t_in.recipe_addr, 0);
+                vol_free_recipe_blocks(v, t_in.recipe_addr, 0);
             vol_pba_ref_release(v);
         }
     }
     /* insert the new dirent BEFORE deleting the old (add-before-remove,
      * design §3): a crash between the two leaves the file under both names,
      * never under neither. */
-    if (vol_v3_dirent_delta_put(v, t_pino, tleaf, f_id) != 0)
+    if (vol_dirent_delta_put(v, t_pino, tleaf, f_id) != 0)
         return -1;
-    if (vol_v3_path_lookup(v, fparent, &f_pino) != 1)
+    if (vol_path_lookup(v, fparent, &f_pino) != 1)
         return -1;
-    if (vol_v3_dirent_delta_del(v, f_pino, fleaf) != 0)
+    if (vol_dirent_delta_del(v, f_pino, fleaf) != 0)
         return -1;
     return 0;
 }
 
-int vol_v3_ensure_path(invfs_volume *v, const char *name)
+int vol_ensure_path(invfs_volume *v, const char *name)
 {
     char tmp[600];
     size_t n, i;
@@ -823,8 +866,8 @@ int vol_v3_ensure_path(invfs_volume *v, const char *name)
         if (tmp[i] == '/') {
             char save = tmp[i];
             tmp[i] = 0;
-            if (tmp[0] && !vol_v3_path_is_dir(v, tmp))
-                vol_v3_mkdir(v, tmp);
+            if (tmp[0] && !vol_path_is_dir(v, tmp))
+                vol_mkdir(v, tmp);
             tmp[i] = save;
         }
     }
@@ -835,7 +878,7 @@ int vol_v3_ensure_path(invfs_volume *v, const char *name)
  *
  * `strict` is the whole of the difference between this and a walker that
  * enumerates whatever it managed to read, and it exists for ONE caller
- * (vol_v3_walk_strict, below) whose answer must not be a partial view.
+ * (vol_walk_strict, below) whose answer must not be a partial view.
  *
  * A listing walk legitimately skips: its consumer wants a best-effort sweep,
  * and a row it cannot read is not something it can act on either way. The pba
@@ -845,7 +888,7 @@ int vol_v3_ensure_path(invfs_volume *v, const char *name)
  * missing one frees a block somebody still names. There is no third answer:
  * the walk either saw every live inode or the caller must be told it did not.
  *
- * That is why this is a parameter and not a change to vol_v3_walk: the other
+ * That is why this is a parameter and not a change to vol_walk: the other
  * five callers (vol_btree.c:4854, :5099, :5566, vol_dedupe.c:448,
  * vol_records.c:194) each want a listing, and tightening the walk under them
  * would turn one damaged row into five unrelated failures.
@@ -854,8 +897,8 @@ int vol_v3_ensure_path(invfs_volume *v, const char *name)
  * the walk could not be completed (a listing or a row read failed, or the
  * depth cap was hit). In strict mode a row read that fails is that last
  * case; out of it, the same read is a `continue`. */
-static int v3_walk_dir(invfs_volume *v, const char *dir,
-                       vol_v3_walk_cb cb, void *ctx, int depth, int strict)
+static int walk_dir(invfs_volume *v, const char *dir,
+                       vol_walk_cb cb, void *ctx, int depth, int strict)
 {
     invfs_dirent *ents;
     int cap = 256, n, i, lrc, irc;
@@ -864,15 +907,15 @@ static int v3_walk_dir(invfs_volume *v, const char *dir,
         return -1;
     /* WP135: test-only seam -- the walk itself stops (a quarantined base
      * page, an OOM in the callback). This is the state all three of the
-     * v3_walk() callers failed to act on, and the one the red controls
+     * walk() callers failed to act on, and the one the red controls
      * need to reach without corrupting a tree. Unset in production. */
-    if (invfs_vol_fault("v3_walk_dir_stop"))
+    if (invfs_vol_fault("walk_dir_stop"))
         return -1;
     ents = (invfs_dirent *)malloc((size_t)cap * sizeof *ents);
     if (!ents)
         return -1;
     for (;;) {
-        n = vol_v3_path_list_dir(v, dir, ents, cap);
+        n = vol_path_list_dir(v, dir, ents, cap);
         if (n < 0) { free(ents); return -1; }
         if (n < cap)
             break;
@@ -886,7 +929,7 @@ static int v3_walk_dir(invfs_volume *v, const char *dir,
     for (i = 0; i < n; i++) {
         char path[600];
         uint64_t ino;
-        invfs_v3_inode in;
+        invfs_inode in;
 
         int pr;
         if (dir[0])
@@ -894,7 +937,7 @@ static int v3_walk_dir(invfs_volume *v, const char *dir,
         else
             pr = snprintf(path, sizeof path, "%s", ents[i].name);
         if (pr < 0 || (size_t)pr >= sizeof path) {
-            fprintf(stderr, "v3_walk_dir: path exceeds buffer capacity (%s/%s)\n",
+            fprintf(stderr, "walk_dir: path exceeds buffer capacity (%s/%s)\n",
                     dir, ents[i].name);
             if (strict) { free(ents); return -1; }
             continue;
@@ -902,33 +945,33 @@ static int v3_walk_dir(invfs_volume *v, const char *dir,
         /* Both of these distinguish three answers already -- found, absent,
          * could not read -- and the middle one is the only one a walk can
          * step over. A name whose inode could not be RESOLVED is an error
-         * (vol_v3_path_lookup says so), and a row that could not be READ is
-         * an error (vol_v3_inode_get says so, and volume.h is explicit that
+         * (vol_path_lookup says so), and a row that could not be READ is
+         * an error (vol_inode_get says so, and volume.h is explicit that
          * a caller must not map its -1 to 0). In strict mode neither is a
          * `continue`.
          *
          * WP135: this branch is now the whole of the "which caller asked"
          * question, and the answer is that four of the six callers of a v3
-         * walk still ask for the LENIENT one -- see vol_v3_walk_strict's
+         * walk still ask for the LENIENT one -- see vol_walk_strict's
          * own comment, which names pba_ref_ensure as "the one caller whose
          * answer must not be a partial view of the namespace". A file list
          * for invf-verify, a name table for the mount, a live set for the
          * sweep and a reverse name lookup are all partial views too; they
          * are just partial views that get PRINTED rather than used to drop
          * a block reference, which is what made them look safe. WP135
-         * moves those four to vol_v3_walk_strict.
+         * moves those four to vol_walk_strict.
          *
          * The fault seam below stands in for the failed RESOLUTION and then
          * defers to this same branch, so the red control measures the
          * lenient/lenient choice rather than a private copy of it. */
-        lrc = invfs_vol_fault("v3_walk_dir_entry")
-                  ? -1 : vol_v3_path_lookup(v, path, &ino);
+        lrc = invfs_vol_fault("walk_dir_entry")
+                  ? -1 : vol_path_lookup(v, path, &ino);
         if (lrc != 1) {
             if (strict) { free(ents); return -1; }
             continue;
         }
-        irc = invfs_vol_fault("v3_walk_dir_row")
-                  ? -1 : vol_v3_inode_get(v, ino, &in);
+        irc = invfs_vol_fault("walk_dir_row")
+                  ? -1 : vol_inode_get(v, ino, &in);
         if (irc != 1) {
             if (strict) { free(ents); return -1; }
             continue;
@@ -938,7 +981,7 @@ static int v3_walk_dir(invfs_volume *v, const char *dir,
             return 1;
         }
         if (in.type == INVFS_ITYP_DIR) {
-            int sub_rc = v3_walk_dir(v, path, cb, ctx, depth + 1, strict);
+            int sub_rc = walk_dir(v, path, cb, ctx, depth + 1, strict);
             if (sub_rc != 0) {
                 free(ents);
                 return sub_rc;
@@ -949,21 +992,21 @@ static int v3_walk_dir(invfs_volume *v, const char *dir,
     return 0;
 }
 
-int vol_v3_walk(invfs_volume *v, vol_v3_walk_cb cb, void *ctx)
+int vol_walk(invfs_volume *v, vol_walk_cb cb, void *ctx)
 {
     if (!v)
         return -1;
-    return v3_walk_dir(v, "", cb, ctx, 0, 0);
+    return walk_dir(v, "", cb, ctx, 0, 0);
 }
 
 /* The same walk, with every unreadable row reported instead of stepped over.
- * See the comment on v3_walk_dir for why this is a second entry point and
- * not a change to vol_v3_walk. One caller: pba_ref_ensure. */
-int vol_v3_walk_strict(invfs_volume *v, vol_v3_walk_cb cb, void *ctx)
+ * See the comment on walk_dir for why this is a second entry point and
+ * not a change to vol_walk. One caller: pba_ref_ensure. */
+int vol_walk_strict(invfs_volume *v, vol_walk_cb cb, void *ctx)
 {
     if (!v)
         return -1;
-    return v3_walk_dir(v, "", cb, ctx, 0, 1);
+    return walk_dir(v, "", cb, ctx, 0, 1);
 }
 
 
@@ -989,7 +1032,7 @@ int vol_list_dir(invfs_volume *v, const char *dir, invfs_dirent *ents, int max)
      * been a no-op returning an empty set since WP-M21 -- so it reported
      * every directory as empty, which is the same "a failure reads as
      * nothing" shape this entry point is now built not to have. */
-    return vol_v3_path_list_dir(v, dir, ents, max);
+    return vol_path_list_dir(v, dir, ents, max);
 }
 
 
@@ -1017,8 +1060,8 @@ uint64_t vol_replace_file(invfs_volume *v, const char *name,
      * WP135: a USER-name boundary -- FUSE's invf_create (fuse_fs.c:1892) and
      * invf-cp (cp.c:100) are the callers -- so '!' is refused here. */
     if (name_refused_internal_ns(name)) return 0;
-    return (data && len) ? vol_v3_write_bulk(v, name, data, len, NULL)
-                         : vol_v3_create_node(v, name, NULL);
+    return (data && len) ? vol_write_bulk(v, name, data, len, NULL)
+                         : vol_create_node(v, name, NULL);
 }
 
 
@@ -1029,14 +1072,14 @@ uint64_t vol_replace_file_with_meta(invfs_volume *v, const char *name,
     /* WP135: invf-import is the only caller (tools/invf-import.c:242), so
      * this is a user-name boundary; see vol_replace_file above. */
     if (name_refused_internal_ns(name)) return 0;
-    return (data && len) ? vol_v3_write_bulk(v, name, data, len, meta)
-                         : vol_v3_create_node(v, name, meta);
+    return (data && len) ? vol_write_bulk(v, name, data, len, meta)
+                         : vol_create_node(v, name, meta);
 }
 
 
 int vol_delete_file(invfs_volume *v, const char *name)
 {
-    return vol_v3_unlink(v, name);
+    return vol_unlink(v, name);
 }
 
 
@@ -1048,23 +1091,11 @@ int vol_delete_file(invfs_volume *v, const char *name)
  * retirement; fsck recount fixes it). */
 int vol_unlink_name(invfs_volume *v, const char *name)
 {
-    return vol_v3_unlink(v, name);
-}
-
-
-int vol_unlink(invfs_volume *v, const char *name)
-{
-    return vol_v3_unlink(v, name);
+    return vol_unlink(v, name);
 }
 
 
 /* ---- rename / move ---- */
-
-int vol_rename(invfs_volume *v, const char *from, const char *to)
-{
-    return vol_v3_rename(v, from, to);
-}
-
 
 /* WP-M17: hard link on the v3 namespace. A second (parent, name) dirent
  * points at the SAME inode id; the shared row's nlink is incremented so
@@ -1072,11 +1103,11 @@ int vol_rename(invfs_volume *v, const char *from, const char *to)
  * and only the last unlink frees it. No block refcounts: the data plane is
  * refcount-free reachability (WP-M15), which is why the nlink==0 gate is
  * the only inode-free condition. */
-static int vol_v3_hardlink(invfs_volume *v, const char *from, const char *to)
+int vol_hardlink(invfs_volume *v, const char *from, const char *to)
 {
     char tparent[600], tleaf[INVFS_MAX_NAME + 1];
     uint64_t id, t_pino = 0, existing = 0;
-    invfs_v3_inode in;
+    invfs_inode in;
     int rc;
 
     if (!v || !from || !to || !from[0] || !to[0])
@@ -1086,19 +1117,19 @@ static int vol_v3_hardlink(invfs_volume *v, const char *from, const char *to)
     /* WP135: link(2) introduces `to`, so it is refused like a rename target. */
     if (name_refused_internal_ns(to))
         return -1;
-    if (v3_split_path(to, tparent, sizeof tparent, tleaf, sizeof tleaf) != 0)
+    if (split_path(to, tparent, sizeof tparent, tleaf, sizeof tleaf) != 0)
         return -1;
-    if (vol_v3_path_lookup(v, from, &id) != 1)
+    if (vol_path_lookup(v, from, &id) != 1)
         return -1;                              /* ENOENT */
-    if (vol_v3_inode_get(v, id, &in) != 1)
+    if (vol_inode_get(v, id, &in) != 1)
         return -1;
     if (in.type == INVFS_ITYP_DIR)
         return -3;                              /* EPERM: dirs cannot link */
-    if (vol_v3_path_lookup(v, tparent, &t_pino) != 1)
+    if (vol_path_lookup(v, tparent, &t_pino) != 1)
         return -1;                              /* destination parent missing */
-    if (!vol_v3_path_is_dir(v, tparent))
+    if (!vol_path_is_dir(v, tparent))
         return -1;
-    rc = vol_v3_dirent_get(v, t_pino, tleaf, &existing);
+    rc = vol_dirent_get(v, t_pino, tleaf, &existing);
     if (rc < 0)
         return -1;
     if (rc == 1)
@@ -1109,11 +1140,11 @@ static int vol_v3_hardlink(invfs_volume *v, const char *from, const char *to)
      * leaves a count >= the name count, never a dirent whose inode is
      * under-counted and could be freed by a later unlink. */
     in.nlink++;
-    if (vol_v3_inode_delta_put(v, id, &in) != 0)
+    if (vol_inode_delta_put(v, id, &in) != 0)
         return -1;
-    if (vol_v3_dirent_delta_put(v, t_pino, tleaf, id) != 0) {
+    if (vol_dirent_delta_put(v, t_pino, tleaf, id) != 0) {
         in.nlink--;                             /* roll back the count */
-        vol_v3_inode_delta_put(v, id, &in);
+        vol_inode_delta_put(v, id, &in);
         return -1;
     }
     return 0;
@@ -1124,15 +1155,6 @@ static int vol_v3_hardlink(invfs_volume *v, const char *from, const char *to)
  * same AST/L2P blocks). LIMITATION: no block refcounts yet -- unlinking
  * EITHER name retires the shared blocks and dangles the survivor
  * (audit WP6). Portage lock files and similar transient links are fine. */
-int vol_hardlink(invfs_volume *v, const char *from, const char *to)
-{
-    /* WP-M17: the v3 namespace tracks hardlinks through the shared inode
-     * row's nlink; the v2 record-clone path is gone. */
-    return vol_v3_hardlink(v, from, to);
-}
-
-
-
 /* REMOVED: vol_forget_name().
  *
  * It existed to drop a name left behind by the v2 name index when a process

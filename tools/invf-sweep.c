@@ -165,7 +165,7 @@ static int             g_dash_on;
  * The core owns the real question (vol_name_is_container_sibling,
  * src/core/volume_internal.h:1045) -- a minted suffix shape AND a live
  * container inode -- and this tool CAN ask it: `v` is the volume the collect
- * stage walked (vol_v3_walk_strict, :1637) and `name` is a path off that walk.
+ * stage walked (vol_walk_strict, :1637) and `name` is a path off that walk.
  *
  * WHY A CHAIN SPLITTER AND NOT ONE PREDICATE CALL. The tree is a TREE, so the
  * decision is per LEVEL, not per file: a real member must still hang under its
@@ -1162,7 +1162,7 @@ static void sw_insert(sw_bucket ***tabp, size_t *maskp, size_t *countp,
 }
 
 
-/* WP-M21b: v3 live-set collector, fed by vol_v3_walk in a single O(n)
+/* WP-M21b: v3 live-set collector, fed by vol_walk in a single O(n)
  * hierarchical pass. A v3 volume has no record stream to walk, so the
  * WP42 walker above finds nothing and the sweep silently no-ops; this
  * feeds the same arrays instead. Sizes come directly from the inode row;
@@ -1175,12 +1175,12 @@ typedef struct {
     size_t *tmask, *tcount;
     int *count, *cap;
     int oom;
-} v3_collect_ctx;
+} collect_ctx;
 
-static int v3_sweep_walk_cb(void *ctx_, const char *path, uint64_t inode_id,
+static int sweep_walk_cb(void *ctx_, const char *path, uint64_t inode_id,
                             uint32_t type, uint64_t size, int64_t mtime)
 {
-    v3_collect_ctx *c = (v3_collect_ctx *)ctx_;
+    collect_ctx *c = (collect_ctx *)ctx_;
     char (*names)[256] = *c->names;
     uint64_t *inodes = *c->inodes;
     uint64_t *sizes = *c->sizes;
@@ -1415,9 +1415,9 @@ int main(int argc, char **argv)
         fprintf(stderr, "--seal conflicts with --redundant-*\n");
         return 2;
     }
-    /* WP-M21: --compact retired; the fold (vol_v3_fold_request) is the
+    /* WP-M21: --compact retired; the fold (vol_fold_request) is the
      * only reclaim path. WP116: it does NOT run here. The only callers of
-     * vol_v3_fold_request / vol_reclaim_schedule are in vol_sweep.c's
+     * vol_fold_request / vol_reclaim_schedule are in vol_sweep.c's
      * vol_sweep_pending(), which this offline tool never reaches -- the
      * FUSE daemon path, and the only one that drains. An earlier version
      * of this comment claimed the fold "always runs as part of a normal
@@ -1535,7 +1535,7 @@ int main(int argc, char **argv)
      * accept "invf-sweep --compact foo.img" as a synonym for a normal
      * sweep of foo.img). WP116 corrected the rationale: the fold is NOT
      * unconditional inside this run -- nothing here calls
-     * vol_v3_fold_request; only the FUSE drain (vol_sweep_pending) does. */
+     * vol_fold_request; only the FUSE drain (vol_sweep_pending) does. */
 
     /* WP23 --extract-packs: a standalone, read-only, engine-side mode for
      * the sweepboot maintenance boot (tools/sweepboot-init.sh). No sweep,
@@ -1716,12 +1716,12 @@ int main(int argc, char **argv)
 
 
     /* Collect the live set from the namespace (base tree + delta overlay).
-     * vol_open refuses any volume without VOLF_V3, so there is no record
+     * vol_open refuses any volume without VOLF_META, so there is no record
      * stream to walk and no second collector. */
     {
         vol_walk_t w;
         int wrc;
-        v3_collect_ctx vc;
+        collect_ctx vc;
         memset(&vc, 0, sizeof vc);
         vc.vol = vol;
         vc.names = &names; vc.inodes = &inodes;
@@ -1731,7 +1731,7 @@ int main(int argc, char **argv)
         vol_walk_init(&w, vol, "invf-sweep collect");
         /* WP135: the STRICT walk -- the collect's output is the input to
          * every mutating stage below it. */
-        wrc = vol_v3_walk_strict(vol, v3_sweep_walk_cb, &vc);
+        wrc = vol_walk_strict(vol, sweep_walk_cb, &vc);
         /* `vc.count` is the int the collect callback increments, by POINTER:
          * *(vc.count) is what the walk delivered. Casting the pointer itself
          * is how the first draft of this line printed a 47-bit address as an

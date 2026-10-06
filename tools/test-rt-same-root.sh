@@ -1,5 +1,5 @@
 #!/bin/bash
-# test-v3-rt30-same-root.sh — WP fsck-rt30-same-page: two RT30 slots at the
+# test-rt-same-root.sh — WP fsck-rt30-same-page: two RT30 slots at the
 # same generation are TWO different things, and invf-fsck must not conflate
 # them.
 #
@@ -17,7 +17,7 @@
 #   TWO DISTINCT PAGES, SAME GEN -- the publish order is genuinely not
 #     observable. This is what the ambiguous-publish detector exists for.
 #
-# fsck_v3_root's tiebreak fired on `gen == best_gen` without first comparing
+# fsck_root's tiebreak fired on `gen == best_gen` without first comparing
 # pba (vol_fsck.c:1138 before the fix). gen is read out of the page's own
 # header, so the SAME-page shape lands on that test by construction: a clean
 # volume came out DAMAGED with exit 3, which is the failure an operator acts
@@ -43,8 +43,8 @@
 #   leg 4  the volume must still read back byte-identical, and the shipped
 #          invf-fsck binary's own text must distinguish the two conditions.
 #
-# Run:  bash tools/run-e2e.sh tools/test-v3-rt30-same-root.sh
-#   or:  bash tools/test-v3-rt30-same-root.sh     (from make test)
+# Run:  bash tools/run-e2e.sh tools/test-rt-same-root.sh
+#   or:  bash tools/test-rt-same-root.sh     (from make test)
 set -u
 set -o pipefail
 
@@ -56,8 +56,8 @@ B=$REPO/bin
 T=$B/invf-fsck_rootslot_test
 # Per-process scratch: several agents run `make test` concurrently, and a
 # fixed path makes them delete each other's images.
-WORK=${INVFS_RT30_SAME_ROOT_WORK:-$(invfs_scratch_root)/rt30-same-root-$$}
-NFILES=${INVFS_RT30_SAME_ROOT_FILES:-24}
+WORK=${INVFS_RT_SAME_ROOT_WORK:-$(invfs_scratch_root)/rt30-same-root-$$}
+NFILES=${INVFS_RT_SAME_ROOT_FILES:-24}
 
 rm -rf "$WORK" && mkdir -p "$WORK" || exit 1
 cd "$WORK" || exit 1
@@ -80,7 +80,7 @@ make -C "$REPO" bin/invf-fsck_rootslot_test bin/invf-fsck >/dev/null 2>&1 \
 
 mkvol() {  # mkvol <img>
     rm -f "$1"
-    INVFS_V3=1 "$B/invf-mkfs" "$1" 0.3 >"$1.mkfs" 2>&1 \
+    "$B/invf-mkfs" "$1" 0.3 >"$1.mkfs" 2>&1 \
         || { cat "$1.mkfs"; fail "mkfs failed for $1"; }
 }
 

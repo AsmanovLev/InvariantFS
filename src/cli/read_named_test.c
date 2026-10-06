@@ -301,14 +301,14 @@ static void leg_b_control_member_still_reads(void)
     info("LEG B (CONTROL): with no exact inode of that name, a genuine member "
          "of a genuine container must STILL read back byte-exact");
 
-    ok(vol_v3_unlink(g_v, "a!b") == 0, "setup: unlink('a!b')");
+    ok(vol_unlink(g_v, "a!b") == 0, "setup: unlink('a!b')");
     ok(vol_find(g_v, "a!b") == 0, "setup: 'a!b' no longer resolves exactly");
 
     expect_bytes("LEG B", "a!b", (const uint8_t *)PAY_MEMBER_B,
                  LEN(PAY_MEMBER_B), 0);
 
     /* and the second shape, whose member is the same payload under 'z' */
-    ok(vol_v3_unlink(g_v, "z!p") == 0, "setup: unlink('z!p')");
+    ok(vol_unlink(g_v, "z!p") == 0, "setup: unlink('z!p')");
     expect_bytes("LEG B", "z!p", (const uint8_t *)PAY_MEMBER_B,
                  LEN(PAY_MEMBER_B), 0);
 }
@@ -345,7 +345,7 @@ static void leg_c_nested_member(void)
        "setup: exact inode 'n!inner.zip' created");
     expect_bytes("LEG C", "n!inner.zip", (const uint8_t *)PAY_INODE_1,
                  LEN(PAY_INODE_1), 0);
-    ok(vol_v3_unlink(g_v, "n!inner.zip") == 0, "setup: unlink('n!inner.zip')");
+    ok(vol_unlink(g_v, "n!inner.zip") == 0, "setup: unlink('n!inner.zip')");
 }
 
 /* ---- LEG 4: the plain-name path ---------------------------------------- */

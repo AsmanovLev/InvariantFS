@@ -316,7 +316,7 @@ int main(int argc, char **argv)
      * If somebody later adds O_SYNC or O_DIRECT the guarantee really has
      * been raised, and that is a good day -- but it is a different contract
      * with a measured cost, so it must be a deliberate commit that rewrites
-     * the text in blkio.h, vol_crash.c and META-V3.md. This test is the
+     * the text in blkio.h, vol_crash.c and META.md. This test is the
      * thing that makes it impossible to do that quietly. */
     {
         blkio d;

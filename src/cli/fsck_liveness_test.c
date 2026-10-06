@@ -280,7 +280,7 @@ int main(int argc, char **argv)
             m.nlink = 1;
             m.mtime = m.atime = (int64_t)time(NULL);
             m.size = sizeof d;
-            id[j] = vol_v3_write_bulk(g_v, nm, d, sizeof d, &m);
+            id[j] = vol_write_bulk(g_v, nm, d, sizeof d, &m);
             if (!id[j]) {
                 fprintf(stderr, "fsck_liveness_test: write failed\n");
                 return 2;
@@ -292,14 +292,14 @@ int main(int argc, char **argv)
             for (j = 0; j < 3; j++) {
                 char nm[32];
                 snprintf(nm, sizeof nm, "chunky%d", j);
-                if (vol_v3_xattr_set(g_v, id[0], nm, big, sizeof big) != 0) {
+                if (vol_xattr_set(g_v, id[0], nm, big, sizeof big) != 0) {
                     fprintf(stderr, "fsck_liveness_test: xattr_set failed\n");
                     return 2;
                 }
             }
         }
     }
-    if (vol_v3_fold(g_v) != 0) {
+    if (vol_fold(g_v) != 0) {
         fprintf(stderr, "fsck_liveness_test: fold failed\n");
         return 2;
     }
@@ -310,7 +310,7 @@ int main(int argc, char **argv)
         int nleaves;
 
         memset(&ll, 0, sizeof ll);
-        if (vol_v3_base_root(g_v, &root) != 0)
+        if (vol_base_root(g_v, &root) != 0)
             return 2;
         list_rec(root, &ll);
         nleaves = ll.n;
@@ -403,19 +403,19 @@ int main(int argc, char **argv)
         uint64_t base = 100000;
         int j;
         for (j = 0; j < 192; j++) {
-            invfs_v3_inode in;
+            invfs_inode in;
             memset(&in, 0, sizeof in);
             in.type = INVFS_ITYP_REG;
             in.mode = 0644;
             in.nlink = 1;
             in.mtime = in.atime = (int64_t)time(NULL);
             in.size = 0;
-            if (vol_v3_inode_put(g_v, base + (uint64_t)j, &in) != 0) {
+            if (vol_inode_put(g_v, base + (uint64_t)j, &in) != 0) {
                 fprintf(stderr, "fsck_liveness_test: inode_put failed\n");
                 return 2;
             }
         }
-        if (vol_v3_fold(g_v) != 0)
+        if (vol_fold(g_v) != 0)
             return 2;
         {
             invfs_blkptr root;
@@ -423,7 +423,7 @@ int main(int argc, char **argv)
             uint64_t victim;
 
             memset(&ll, 0, sizeof ll);
-            if (vol_v3_base_root(g_v, &root) != 0)
+            if (vol_base_root(g_v, &root) != 0)
                 return 2;
             list_rec(root, &ll);
             printf("  orphan-row tree: %d leaves\n", ll.n);

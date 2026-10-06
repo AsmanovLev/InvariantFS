@@ -31,7 +31,7 @@
  * long the bytes a resolved ref names stay allocated, and the answer was "one
  * fold". A reader resolved a ref under this lock and then re-read the record
  * with two bare preads AFTER releasing it, while the fold's tail frees the
- * whole retired chain the moment the index is dropped (vol_v3_fold ->
+ * whole retired chain the moment the index is dropped (vol_fold ->
  * vol_reclaim_delta_segments). The reader then decoded the recycled block --
  * measured at ~1e-5 of all reads, an -1 for a key that was present and whose
  * row was intact. So the index lookup and the value read are now ONE critical
@@ -530,18 +530,18 @@ int vol_delta_append(invfs_volume *v, const uint8_t *key, uint16_t klen,
         }
         /* structure-before-reference: the segment (header + zeroed payload)
          * is durable before RT30 names it as the active segment. */
-        v->rt30.delta_pba = pba;
-        if (!v->rt30_present) {
+        v->rt.delta_pba = pba;
+        if (!v->rt_present) {
             /* First delta allocation on a handle whose RT30 was absent (a
              * fresh synthetic volume, or a v3 image interrupted before its
              * descriptor write). Build the descriptor the way
              * mbuf_root_publish does; mbuf_rt30_store only stamps the CRC. */
-            memset(&v->rt30, 0, sizeof v->rt30);
-            memcpy(v->rt30.magic, "RT30", 4);
-            v->rt30.version = INVFS_RT30_VERSION;
-            v->rt30.page_size = INVFS_V3_PAGE_SIZE_DEFAULT;
-            v->rt30_present = 1;
-            v->rt30.delta_pba = pba;
+            memset(&v->rt, 0, sizeof v->rt);
+            memcpy(v->rt.magic, "RT30", 4);
+            v->rt.version = INVFS_RT_VERSION;
+            v->rt.page_size = INVFS_PAGE_SIZE_DEFAULT;
+            v->rt_present = 1;
+            v->rt.delta_pba = pba;
         }
         if (mbuf_rt30_store(v) != 0) {
             pthread_mutex_unlock(&g_delta_lock);
@@ -646,7 +646,7 @@ int vol_delta_lookup(invfs_volume *v, const uint8_t *key, uint16_t klen,
 
 /* Read a ref's value bytes. THE LOCK MUST BE HELD: a ref names a block range,
  * and the fold frees the retired chain's blocks in the same critical section
- * that drops the index (vol_v3_fold step 3), after which the allocator hands
+ * that drops the index (vol_fold step 3), after which the allocator hands
  * them straight back -- delta_new_segment writes a header and zeros over a
  * whole 128 KiB stripe. Reading outside the lock is therefore not a race with
  * the APPEND (which is serialized by this same lock) but a race with the FREE,
@@ -657,7 +657,7 @@ int vol_delta_lookup(invfs_volume *v, const uint8_t *key, uint16_t klen,
  * record never crosses a segment (vol_delta_append refuses one that would), so
  * reading exactly the record is in-bounds by construction. 1 KiB of value
  * covers every inode row (114 B), every dirent (8 B) and every xattr chunk
- * (V3_XATTR_CHUNK_DATA); anything larger takes the two-pread path. */
+ * (XATTR_CHUNK_DATA); anything larger takes the two-pread path. */
 #define DL_ONEPREAD_VMAX 1024u
 #define DL_ONEPREAD_MAX  (INVFS_DELTA_REC_HDR_LEN + 256u + DL_ONEPREAD_VMAX)
 static __thread uint8_t dl_tls_record[DL_ONEPREAD_MAX];
@@ -859,9 +859,9 @@ static int dl_rentry_cmp(const void *pa, const void *pb)
  * has to offer is an open-addressed hash table whose capacity is padded
  * to a 70% load factor. Answering it from that order means walking
  * di->cap -- the CAPACITY, not the record count -- on every call. That
- * is what made one vol_v3_dirent_scan() cost 262,144 vol_key_cmp() calls
+ * is what made one vol_dirent_scan() cost 262,144 vol_key_cmp() calls
  * on the 46,245-inode reproducer, and it is the multiplier under both
- * vol_v3_name_of()'s reverse walk and vol_v3_path_of() on the read path.
+ * vol_name_of()'s reverse walk and vol_path_of() on the read path.
  *
  * So: keep the occupied slots in key order alongside the table, once,
  * and answer the query with a bsearch for `lo` plus a walk to `hi` --
@@ -1149,14 +1149,14 @@ int vol_delta_mount(invfs_volume *v)
     v->delta_oldest_seq = 0;
     v->delta_oldest_when = 0;
 
-    if (!v->rt30_present || v->rt30.delta_pba == 0) {
+    if (!v->rt_present || v->rt.delta_pba == 0) {
         v->delta_ready = 1;              /* empty recent tier */
         return 0;
     }
-    if (v->rt30.delta_pba >= v->sb.total_blocks) {
+    if (v->rt.delta_pba >= v->sb.total_blocks) {
         fprintf(stderr, "vol_delta: RT30 delta_pba %llu out of range; "
                 "presenting an empty recent tier\n",
-                (unsigned long long)v->rt30.delta_pba);
+                (unsigned long long)v->rt.delta_pba);
         v->delta_ready = 1;
         return 0;
     }
@@ -1168,7 +1168,7 @@ int vol_delta_mount(invfs_volume *v)
      * has rather than refusing the mount (TODO: WP-M13 may tighten this
      * to a repair/quarantine policy). */
     {
-        uint64_t cur = v->rt30.delta_pba;
+        uint64_t cur = v->rt.delta_pba;
         while (cur && nchain < DELTA_MAX_SEGMENTS) {
             invfs_delta_seg_hdr h;
             if (delta_read_hdr(v, cur, &h) != 0) {
@@ -1279,16 +1279,16 @@ static int delta_cut_to(invfs_volume *v, uint64_t seg_pba, uint64_t trunc_off,
     free(buf);
 
     /* PUBLISH the new head before anything frees. This is the same rule the
-     * rollover obeys on its way up (vol_delta_append: `v->rt30.delta_pba =
+     * rollover obeys on its way up (vol_delta_append: `v->rt.delta_pba =
      * pba; mbuf_rt30_store(v)`), and skipping it is what made a rollback
      * undo itself: the truncate moved v->delta_seg_pba in RAM only, so the
      * caller's own re-index -- spt0_restore does `vol_delta_close(v);
      * vol_delta_mount(v)` two lines later, and vol_delta_mount starts from
-     * v->rt30.delta_pba -- followed RT30 straight back to the segment the
+     * v->rt.delta_pba -- followed RT30 straight back to the segment the
      * rollback had just abandoned and replayed every post-savepoint record
      * in it. rc was still 0. Structure-before-reference, in both
      * directions. */
-    v->rt30.delta_pba = seg_pba;
+    v->rt.delta_pba = seg_pba;
     if (mbuf_rt30_store(v) != 0)
         return -1;
     v->delta_seg_pba = seg_pba;

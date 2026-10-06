@@ -20,7 +20,7 @@ Files in scope:
 - `src/core/volume.c` — `vol_open`/`vol_close` accept v3 and mount an
   empty namespace; `vol_sync`/`vol_flush` stay no-ops on empty v3.
 - `src/core/vol_fsck.c` / `src/cli/fsck.c` — minimal v3 accept.
-- `tools/test-meta-v3.sh` — new e2e leg 0 (mkfs/open/close/fsck).
+- `tools/test-meta.sh` — new e2e leg 0 (mkfs/open/close/fsck).
 
 Do **not** delete v2 yet (that is WP-M21). v3 lands alongside; the default
 `mkfs` may keep writing v2 until WP-M2 wires the v3 engine, but the v3
@@ -78,7 +78,7 @@ uint32_t crc32c          over the descriptor with this field read as 0
 1. `make test` — all 4 unit binaries pass.
 2. `INVFS_V3=1 invf-mkfs t.img 1` then `invf-fuse` mount: empty root
    lists cleanly; `invf-fsck t.img` exits 0; unmount CLEAN.
-3. `bash tools/run-e2e.sh tools/test-meta-v3.sh` (leg 0) PASS.
+3. `bash tools/run-e2e.sh tools/test-meta.sh` (leg 0) PASS.
 4. A plain (v2) `invf-mkfs` volume still mounts and behaves as before.
 
 ---

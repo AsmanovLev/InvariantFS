@@ -165,7 +165,7 @@ static void table_refresh_if_stale_locked(void)
 {
     if (g_table_stale && g_vol) {
         table_rebuild_locked();
-        /* WP135: build_file_table_v3 leaves the flag SET when the walk did
+        /* WP135: build_file_table leaves the flag SET when the walk did
          * not finish, and only on a rebuild that completed is the
          * question answered. Clearing it unconditionally here is what made
          * the daemon stop retrying after the one walk that failed -- the
@@ -223,12 +223,14 @@ typedef struct {
 
 
 /* WP-M6: a v3 volume has no v2 record stream, so the table is built from
- * the dirent tree via vol_v3_walk. Files land under their path; directories
+ * the dirent tree via vol_walk. Files land under their path; directories
  * additionally land under "path/" so meta_for_path's anchor lookup (shared
  * with the v2 path) finds them. pos is unused after the build. */
-typedef struct { fs_entry *v; int n, cap; } v3_bft_ctx;
+/* File-table builder ctx (was v3_bft_ctx; renamed: bft_ctx was taken
+ * by the WP49 pass-1 collector above -- distinct structs, distinct jobs. */
+typedef struct { fs_entry *v; int n, cap; } ftable_ctx;
 
-static int v3_bft_add(v3_bft_ctx *c, const char *name, uint64_t ino,
+static int bft_add(ftable_ctx *c, const char *name, uint64_t ino,
                       uint64_t size, uint64_t ctime)
 {
     if (c->n == c->cap) {
@@ -248,24 +250,24 @@ static int v3_bft_add(v3_bft_ctx *c, const char *name, uint64_t ino,
     return 0;
 }
 
-static int v3_bft_cb(void *ctx_, const char *path, uint64_t ino,
+static int bft_cb(void *ctx_, const char *path, uint64_t ino,
                      uint32_t type, uint64_t size, int64_t mtime)
 {
-    v3_bft_ctx *c = (v3_bft_ctx *)ctx_;
-    if (v3_bft_add(c, path, ino, type == INVFS_ITYP_DIR ? 0 : size,
+    ftable_ctx *c = (ftable_ctx *)ctx_;
+    if (bft_add(c, path, ino, type == INVFS_ITYP_DIR ? 0 : size,
                    (uint64_t)mtime) != 0)
         return 1;
     if (type == INVFS_ITYP_DIR) {
         char anchor[300];
         snprintf(anchor, sizeof anchor, "%s/", path);
-        if (v3_bft_add(c, anchor, ino, 0, (uint64_t)mtime) != 0)
+        if (bft_add(c, anchor, ino, 0, (uint64_t)mtime) != 0)
             return 1;
     }
     return 0;
 }
 
 /* WP135: the walk's status was dropped here, and that is what made whole
- * SUBTREES vanish from a live mount. v3_walk_dir used to `continue` past an
+ * SUBTREES vanish from a live mount. walk_dir used to `continue` past an
  * entry it could not resolve, so one unreadable dirent took its directory and
  * everything under it out of the table -- silently, with a return value of 0
  * meaning COMPLETE. Every path under a lost directory then missed in
@@ -279,20 +281,20 @@ static int v3_bft_cb(void *ctx_, const char *path, uint64_t ino,
  * volume that could not finish reading itself, it is a claim the daemon has
  * no standing to make. The rebuild is also left marked stale, so the next
  * op retries instead of the one-shot clear at :132 retiring the question. */
-static void build_file_table_v3(void)
+static void build_file_table(void)
 {
-    v3_bft_ctx c;
+    ftable_ctx c;
     vol_walk_t w;
     int rc;
 
     memset(&c, 0, sizeof c);
-    vol_walk_init(&w, g_vol, "build_file_table_v3");
+    vol_walk_init(&w, g_vol, "build_file_table");
     /* WP135: the STRICT walk. A name table is a partial view of the
      * namespace presented to the kernel as a whole one, and the lenient
      * walk's `continue` is what takes a whole subtree out of it. See
-     * vol_v3_walk_strict's comment: it names pba_ref_ensure as the one
+     * vol_walk_strict's comment: it names pba_ref_ensure as the one
      * caller that must not get a partial view, and this is a second. */
-    rc = vol_v3_walk_strict(g_vol, v3_bft_cb, &c);
+    rc = vol_walk_strict(g_vol, bft_cb, &c);
     vol_walk_result(&w, rc, (size_t)(c.n > 0 ? c.n : 0), (size_t)(c.n > 0 ? c.n : 0));
     if (c.n > 1)
         qsort(c.v, (size_t)c.n, sizeof *c.v, cmp_entry_name_pos);
@@ -308,10 +310,6 @@ static void build_file_table_v3(void)
     }
 }
 
-static void build_file_table(void)
-{
-    build_file_table_v3();
-}
 
 
 static fs_entry *find_entry(const char *name)
@@ -1389,8 +1387,8 @@ static int invf_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
 /* WP135: '!' is reserved -- it separates a container from the internal
  * sibling inodes its payload lives in ("x.tar" -> "x.tar!part0"). Core refuses
  * such a name where it is introduced (name_is_internal_ns,
- * src/core/volume_internal.h: vol_v3_create_node, vol_v3_mkdir,
- * vol_v3_rename, vol_v3_hardlink, vol_write_begin), and that check is what
+ * src/core/volume_internal.h: vol_create_node, vol_mkdir,
+ * vol_rename, vol_v3_hardlink, vol_write_begin), and that check is what
  * makes the hole unreachable. This is not that check -- it is the ERRNO.
  *
  * Every core create returns 0 for every kind of failure, and these callers
@@ -1728,7 +1726,7 @@ static void table_rebuild_locked(void)
     /* WP135: clear the degraded mark BEFORE the rebuild, so it is this
      * rebuild's verdict and not the last one's. A rebuild that completes
      * leaves it 0 and the table is authority again; one that does not sets
-     * it in build_file_table_v3. */
+     * it in build_file_table. */
     g_table_degraded = 0;
     build_file_table();
 }
@@ -1798,7 +1796,7 @@ static int invf_open(const char *path, struct fuse_file_info *fi)
                  * same 0, and then truncate regardless, writing the saved
                  * copy back only if one had been taken. Losing the save did
                  * not merely skip a write-back: vol_replace_file(v, name,
-                 * NULL, 0) reaches vol_v3_create_node with meta == NULL, and
+                 * NULL, 0) reaches vol_create_node with meta == NULL, and
                  * the "in.type == 0" defaulting branch there (vol_dirs.c:324
                  * -- INVFS_ITYP_REG is 0, invarifs.h:1147) cannot be false
                  * for a regular file, so the mode is rewritten to 0644 on
@@ -1830,7 +1828,7 @@ static int invf_open(const char *path, struct fuse_file_info *fi)
                  * Both non-zero answers of vol_get_meta_rc fail closed:
                  * -EIO is "the row could not be read" and -ENOENT is "there
                  * is no such row". The second is not expected on a v3 volume
-                 * (VOLF_V3 is the only format there is), and if it happens
+                 * (VOLF_META is the only format there is), and if it happens
                  * then the file has no recorded identity to preserve, which
                  * is not a licence to replace it with 0644 root. */
                 frc = vol_find_rc(g_vol, path + 1, &ino);
@@ -2239,7 +2237,7 @@ static void invf_sweep_worker(int full_pass)
          * found > n is the buffer-full case (the growth ran out of memory);
          * found == n is the WALK case, where the collector could not
          * enumerate the live set at all -- a quarantined base page, and the
-         * delta pass that vol_v3_iter_live_inodes skips after a failed base
+         * delta pass that vol_iter_live_inodes skips after a failed base
          * scan, so the list is missing every inode created since the last
          * fold. Before the fix the second case reached here as `complete`
          * with a matching count and printed an ordinary DONE line: the
@@ -2363,7 +2361,7 @@ static void *fuse_sweep_thread(void *arg)
      *
      * The floor alone is a self-deadlock. A pass's rollback window is a HOLD:
      * the capture pins every block the pre-sweep generation's recipes named
-     * (spt0_pin_take -> vol_v3_iter_inodes_at, vol_spt0.c:795), and those
+     * (spt0_pin_take -> vol_iter_inodes_at, vol_spt0.c:795), and those
      * are exactly the blocks the pass superseded -- so the fill the floor
      * records at the pass's exit is the fill WITH THE HOLD, not the fill the
      * pass produced. The reclaim that actually gives them back runs at the
@@ -3137,7 +3135,7 @@ static int invf_link(const char *from, const char *dest)
          * retiring blocks. On v3 vol_hardlink already maintains the shared
          * row's nlink; forcing it back to 2 here would corrupt a third or
          * later link. */
-        if (!(vol_sb(g_vol)->vol_flags & VOLF_V3)) {
+        if (!(vol_sb(g_vol)->vol_flags & VOLF_META)) {
             const char *names[2] = { from + 1, dest + 1 };
             for (int q = 0; q < 2; q++) {
                 invfs_meta_pub mm;
@@ -3459,7 +3457,7 @@ static int invf_removexattr(const char *path, const char *name)
     pthread_mutex_unlock(&g_io_lock);
     /* Pass the engine-s errno through. The engine used to answer a bare -1
      * for both "no such xattr" and "the row could not be read", so this
-     * mapping had to guess -- and it guessed ENODATA. vol_v3_xattr_delta_del
+     * mapping had to guess -- and it guessed ENODATA. vol_xattr_delta_del
      * now returns real errnos, which makes the guess actively wrong: -ENODATA
      * is not -1, so a genuinely absent attribute was reported as EIO. The
      * control on the regression test is what caught it: the leg asserting a

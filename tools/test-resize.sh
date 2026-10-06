@@ -419,8 +419,8 @@ echo "== [C] sealed volume refuses, unsealed resizes =="
 # tools/test-seal.sh already covers the v3 behaviour properly -- it asserts
 # that the refusal is CLEAN and debris-free. So there is nothing to add here
 # but the skip, and it is a loud one, not a silent pass.
-if "$B/invf-fsck" "$IMG" 2>/dev/null | grep -q "format:.*v3"; then
-    echo "  SKIP: parity seal is not implemented on Meta-v3 (see \
+if "$B/invf-fsck" "$IMG" 2>/dev/null | grep -q "format:.*v0"; then
+    echo "  SKIP: parity seal is which has no parity seal (see \
 impl_docs/AUDIT.md); tools/test-seal.sh asserts the refusal"
     echo "== [C] skipped =="
     SEAL_SKIP=1

@@ -1,5 +1,5 @@
 /*
- * dedupe_v3_test.c — Meta-v3 segment deduplication unit test
+ * dedupe_test.c — Meta-v3 segment deduplication unit test
  *
  * Tests:
  *   1. Intra-file duplicate segments (identical 64 KB blocks within the same file)
@@ -65,7 +65,7 @@ int main(int argc, char **argv)
     snprintf(img, sizeof img, "%s/invf-dedupe-v3-test.img", dir);
     unlink(img);
 
-    printf("dedupe_v3_test: Meta-v3 segment deduplication (intra- and inter-file)\n");
+    printf("dedupe_test: Meta-v3 segment deduplication (intra- and inter-file)\n");
 
     pat_common = (uint8_t *)malloc(seg_sz);
     pat_unique = (uint8_t *)malloc(seg_sz);
@@ -123,9 +123,9 @@ int main(int argc, char **argv)
     }
 
     /* 2. Write File A and File B */
-    id_a = vol_v3_write_bulk(v, "file_a.bin", file_a_data, file_sz, NULL);
+    id_a = vol_write_bulk(v, "file_a.bin", file_a_data, file_sz, NULL);
     ok(id_a != 0, "write file_a.bin");
-    id_b = vol_v3_write_bulk(v, "file_b.bin", file_b_data, file_sz, NULL);
+    id_b = vol_write_bulk(v, "file_b.bin", file_b_data, file_sz, NULL);
     ok(id_b != 0, "write file_b.bin");
 
     uint64_t free_before = v->free_blocks;

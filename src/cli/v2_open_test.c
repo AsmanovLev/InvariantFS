@@ -41,8 +41,8 @@ static void fail(const char *fmt, ...)
     fails++;
 }
 
-/* Rewrite the superblock with VOLF_V3 cleared (and the CRC repaired), which
- * is exactly what a pre-v0.5 volume carries: VOLF_ASTV2 set, VOLF_V3 clear.
+/* Rewrite the superblock with VOLF_META cleared (and the CRC repaired), which
+ * is exactly what a pre-v0.5 volume carries: VOLF_ASTV2 set, VOLF_META clear.
  * mkfs writes VOLF_ASTV2 unconditionally (src/cli/mkfs.c:385), so clearing
  * the v3 bit is the whole edit -- no other field distinguishes the two. */
 static int demote_to_v2(const char *img)
@@ -58,7 +58,7 @@ static int demote_to_v2(const char *img)
             fprintf(stderr, "  image lacks VOLF_ASTV2; cannot demote\n");
             goto out;
         }
-        sb.vol_flags &= ~VOLF_V3;
+        sb.vol_flags &= ~VOLF_META;
         /* vol_flags sits OUTSIDE the CRC32C span (0..0x7B), so the checksum
          * is unchanged -- recomputed anyway so the edit is correct whether
          * or not that ever changes. */

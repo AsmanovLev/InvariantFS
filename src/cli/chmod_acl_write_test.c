@@ -60,9 +60,9 @@
  *
  * HOW THE WRITE IS FAILED
  * -----------------------
- * INVFS_FAULT="v3_xattr_row_write:1" / "v3_xattr_row_unlink:1"
+ * INVFS_FAULT="xattr_row_write:1" / "xattr_row_unlink:1"
  * (src/core/vol_fault.h), the WRITE-side twins of the existing
- * "v3_xattr_row_read" site. They stand in for the delta append failing, which
+ * "xattr_row_read" site. They stand in for the delta append failing, which
  * is otherwise unreachable from a test (you cannot exhaust the disk on
  * purpose), and they return the same -1 the function already returns for every
  * other error, so invf_chmod fails exactly as it would for a real ENOSPC.
@@ -353,15 +353,15 @@ int main(int argc, char **argv)
      * never reached -- those legs are measuring the HEALTHY path and would go
      * green for entirely the wrong reason. So require the engine call itself
      * to fail while the site is armed, and to succeed once it is spent. */
-    arm("v3_xattr_row_write:1");
+    arm("xattr_row_write:1");
     alen = 8;
     rc = vol_set_xattr(v, ino_plain, "user.calib", "x", 1);
     if (rc == 0)
-        fail("the v3_xattr_row_write seam fires on a real xattr write",
+        fail("the xattr_row_write seam fires on a real xattr write",
              "it did not fail, so the red legs below would measure the healthy "
              "path and prove nothing");
     else
-        ok(1, "the v3_xattr_row_write seam fires on a real xattr write");
+        ok(1, "the xattr_row_write seam fires on a real xattr write");
     disarm();
     rc = vol_set_xattr(v, ino_plain, "user.calib", "x", 1);
     ok(rc == 0, "and the same write succeeds once the one-shot is spent");
@@ -417,7 +417,7 @@ int main(int argc, char **argv)
         ok(m0 == 0666 && d0 == 0, "precondition: /named is 0666 and uid 1000 "
                                    "is ALLOWED");
 
-        arm("v3_xattr_row_write:1");
+        arm("xattr_row_write:1");
         rc = invf_chmod("/named", 0600, NULL);
         if (rc == 0)
             fail("a chmod whose ACL write failed must be REFUSED, not reported 0",
@@ -467,7 +467,7 @@ int main(int argc, char **argv)
         ok(m0 == 0600 && d0 != 0, "precondition: /named is 0600 and uid 1000 "
                                    "is DENIED");
 
-        arm("v3_xattr_row_write:1");
+        arm("xattr_row_write:1");
         rc = invf_chmod("/named", 0666, NULL);
         if (rc == 0)
             fail("the same failure in the WIDENING direction must be refused too",
@@ -500,7 +500,7 @@ int main(int argc, char **argv)
      * invf_chmod then DROPS the xattr. That is a second write with the same
      * unchecked return, and on /plain it is the same split state: the mode
      * narrows to 0600 while the ACL still grants uid 1000 through ACL_OTHER. */
-    arm("v3_xattr_row_unlink:1");
+    arm("xattr_row_unlink:1");
     {
         unsigned m0 = cur_mode("/plain");
         int d0 = perm_check_cred(&c, "/plain", R_OK);

@@ -1,4 +1,4 @@
-/* fsck_rootslot_test.c — WP fsck-rt30-same-page: two RT30 slots, two
+/* fsck_rootslot_test.c — WP fsck-rt-same-page: two RT30 slots, two
  * different meanings.
  *
  * RT30 is a DOUBLE-slot root descriptor. mbuf_root_publish writes one slot per
@@ -45,9 +45,9 @@
  *
  *   verify <img> <clean|ambiguous>
  *       Assert the slot shape the mode names, then the verdict:
- *         clean     -- FAIL if v3_damaged, or v3_slots_ambiguous > 0, or
- *                      v3_slots_same_root != 1.
- *         ambiguous -- FAIL if !v3_damaged or v3_slots_ambiguous != 1. This
+ *         clean     -- FAIL if damaged, or slots_ambiguous > 0, or
+ *                      slots_same_root != 1.
+ *         ambiguous -- FAIL if !damaged or slots_ambiguous != 1. This
  *                      is the leg that must not regress: silencing it would
  *                      trade a false positive for silent corruption.
  *
@@ -135,7 +135,7 @@ static void slot_census(invfs_volume *v, uint64_t pba[2], uint64_t gen[2],
     int i;
 
     for (i = 0; i < 2; i++) {
-        pba[i] = v->rt30.root_slot[i];
+        pba[i] = v->rt.root_slot[i];
         gen[i] = 0;
         valid[i] = 0;
         alloc[i] = 0;
@@ -162,7 +162,7 @@ static void show_slots(invfs_volume *v, const char *tag)
            valid[0], alloc[0],
            (unsigned long long)pba[1], (unsigned long long)gen[1],
            valid[1], alloc[1],
-           (unsigned long long)v->rt30.seq);
+           (unsigned long long)v->rt.seq);
 }
 
 /* ---- subcommands ------------------------------------------------------ */
@@ -192,7 +192,7 @@ static int cmd_build(const char *img, int nfiles)
             return fail("vol_replace_file(%s) failed", name);
         }
     }
-    if (vol_v3_fold(v) != 0) { vol_close(v); return fail("vol_v3_fold failed"); }
+    if (vol_fold(v) != 0) { vol_close(v); return fail("vol_fold failed"); }
     if (vol_flush(v) != 0) { vol_close(v); return fail("vol_flush failed"); }
 
     rc = mbuf_root_read(v, &rp, &rg);
@@ -203,7 +203,7 @@ static int cmd_build(const char *img, int nfiles)
            (unsigned long long)pba[0], (unsigned long long)gen[0],
            valid[0], alloc[0],
            (unsigned long long)pba[1], (unsigned long long)gen[1],
-           valid[1], alloc[1], (unsigned long long)v->rt30.seq);
+           valid[1], alloc[1], (unsigned long long)v->rt.seq);
     vol_close(v);
     if (rc != 0 || !rp)
         return fail("the built volume has no root to publish");
@@ -280,9 +280,9 @@ static int cmd_fork_root(const char *img)
         return fail("cannot write the forked page to block %llu",
                     (unsigned long long)fork);
     }
-    if (vol_v3_bitmap_flush(v) != 0) {
+    if (vol_bitmap_flush(v) != 0) {
         vol_close(v);
-        return fail("vol_v3_bitmap_flush failed");
+        return fail("vol_bitmap_flush failed");
     }
     slot_census(v, pba, gen, valid, alloc);
     if (mbuf_root_publish(v, fork, rg) != 0) {
@@ -365,31 +365,31 @@ static int cmd_verify(const char *img, const char *mode)
     vol_close(v);
 
     printf("VERDICT damaged=%d ambiguous=%llu same_root=%llu torn=%llu "
-           "bad_pages=%llu\n", rep.v3_damaged,
-           (unsigned long long)rep.v3_slots_ambiguous,
-           (unsigned long long)rep.v3_slots_same_root,
-           (unsigned long long)rep.v3_slots_torn,
-           (unsigned long long)rep.v3_bad_pages);
+           "bad_pages=%llu\n", rep.damaged,
+           (unsigned long long)rep.slots_ambiguous,
+           (unsigned long long)rep.slots_same_root,
+           (unsigned long long)rep.slots_torn,
+           (unsigned long long)rep.bad_pages);
 
     if (want_amb) {
         /* The detection this suite exists to protect. A fix that silenced
          * the equal-gen tiebreak outright -- the easy way to stop the false
          * positive -- fails HERE, and fails loudly. */
-        if (!rep.v3_damaged)
+        if (!rep.damaged)
             return fail("TWO DIFFERENT roots are valid at the same gen "
                         "(pba %llu and %llu, gen %llu) and fsck did NOT report "
                         "damage -- an ambiguous publish would now pass "
                         "silently", (unsigned long long)pba[0],
                         (unsigned long long)pba[1],
                         (unsigned long long)gen[0]);
-        if (rep.v3_slots_ambiguous != 1)
-            return fail("expected v3_slots_ambiguous == 1 for a genuinely "
+        if (rep.slots_ambiguous != 1)
+            return fail("expected slots_ambiguous == 1 for a genuinely "
                         "ambiguous publish, got %llu",
-                        (unsigned long long)rep.v3_slots_ambiguous);
-        if (rep.v3_slots_same_root != 0)
+                        (unsigned long long)rep.slots_ambiguous);
+        if (rep.slots_same_root != 0)
             return fail("a two-distinct-page publish was also counted as the "
                         "same root (%llu)",
-                        (unsigned long long)rep.v3_slots_same_root);
+                        (unsigned long long)rep.slots_same_root);
         printf("OK: fsck still CATCHES two different roots at the same "
                "generation (pba %llu and %llu, gen %llu) -- DAMAGED\n",
                (unsigned long long)pba[0], (unsigned long long)pba[1],
@@ -398,21 +398,21 @@ static int cmd_verify(const char *img, const char *mode)
     }
 
     /* The false positive this WP removes. */
-    if (rep.v3_damaged)
+    if (rep.damaged)
         return fail("a volume whose two slots name the SAME root (pba %llu, "
                     "gen %llu) was reported DAMAGED: ambiguous=%llu torn=%llu "
                     "-- a clean volume must not send an operator to a repair",
                     (unsigned long long)pba[0], (unsigned long long)gen[0],
-                    (unsigned long long)rep.v3_slots_ambiguous,
-                    (unsigned long long)rep.v3_slots_torn);
-    if (rep.v3_slots_ambiguous)
+                    (unsigned long long)rep.slots_ambiguous,
+                    (unsigned long long)rep.slots_torn);
+    if (rep.slots_ambiguous)
         return fail("the same-root shape was counted as an ambiguous publish "
                     "(%llu)",
-                    (unsigned long long)rep.v3_slots_ambiguous);
-    if (rep.v3_slots_same_root != 1)
-        return fail("expected v3_slots_same_root == 1 so the operator is TOLD "
+                    (unsigned long long)rep.slots_ambiguous);
+    if (rep.slots_same_root != 1)
+        return fail("expected slots_same_root == 1 so the operator is TOLD "
                     "the two slots name one root, got %llu",
-                    (unsigned long long)rep.v3_slots_same_root);
+                    (unsigned long long)rep.slots_same_root);
     printf("OK: both slots name one root (pba %llu, gen %llu) and fsck "
            "reports it as such, not as damage\n",
            (unsigned long long)pba[0], (unsigned long long)gen[0]);

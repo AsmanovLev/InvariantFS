@@ -1,7 +1,7 @@
 /* v2rb_rollback_test.c — the two v2-era paths that kept running on v3.
  *
  * Both bugs are the same shape: a retired v2 mechanism that was correct in
- * its own time is still being driven on Meta-v3, where it is either a
+ * its own time is still being driven on Meta, where it is either a
  * no-op or actively destructive. In both cases the RETIRED TWIN is the one
  * that is right and the current implementation diverged.
  *
@@ -39,16 +39,16 @@
  * ---------------------------------------------------------------------------
  * LEG D — the free path reports success when it freed nothing.
  *
- * vol_v3_free_recipe_blocks() (vol_ast.c:125) returns -1 when the recipe
+ * vol_free_recipe_blocks() (vol_ast.c:125) returns -1 when the recipe
  * LOAD fails but 0 when it does not PARSE, having freed nothing. Its v2
  * twin bails on parse failure too (vol_records.c:551-557). So unlinking a
- * v3 inode whose recipe does not parse makes vol_v3_unlink report SUCCESS,
+ * v3 inode whose recipe does not parse makes vol_unlink report SUCCESS,
  * the row is deleted, and every block the recipe named is allocated,
  * referenced by nothing, and reachable by no name.
  *
  * The honest assertion is on BOTH halves, and they currently disagree:
  *   D1 — what the free function returns, and whether it freed.
- *   D2 — what the caller (vol_v3_unlink) is told, and what happened to the
+ *   D2 — what the caller (vol_unlink) is told, and what happened to the
  *        blocks. After the fix both halves agree: the free reports failure,
  *        the blocks are still allocated, and unlink says so instead of
  *        reporting success.
@@ -208,7 +208,7 @@ static uint64_t write_file(const char *name, const uint8_t *body, size_t n)
     memset(&m, 0, sizeof m);
     m.type = INVFS_ITYP_REG;
     m.mode = 0644;
-    return vol_v3_write_bulk(g_v, name, body, n, &m);
+    return vol_write_bulk(g_v, name, body, n, &m);
 }
 
 /* ---------------------------------------------------------------- LEG A -- */
@@ -219,8 +219,8 @@ static void leg_a_map_rollback_on_v3(void)
 {
     static uint8_t body[96 * 1024];
     static uint8_t container[40 * 1024];
-    invfs_v3_inode in;
-    uint8_t addr_at_commit[INVFS_V3_RECIPE_ADDR_LEN] = {0};
+    invfs_inode in;
+    uint8_t addr_at_commit[INVFS_RECIPE_ADDR_LEN] = {0};
     uint8_t *snap = NULL;
     size_t snap_len = 0;
     uint64_t old_id, newino, pos_before, off_before, ext_pba, wpos;
@@ -235,7 +235,7 @@ static void leg_a_map_rollback_on_v3(void)
 
     old_id = write_file("pack.tar", body, sizeof body);
     ok(old_id != 0, "leg A: the original file is written");
-    ok(vol_v3_inode_get(g_v, old_id, &in) == 1, "leg A: its row is readable");
+    ok(vol_inode_get(g_v, old_id, &in) == 1, "leg A: its row is readable");
 
     /* the commit, exactly as vol_cpack.c:3292 does it */
     newino = vol_create_blob_file(g_v, "pack.tar", container,
@@ -253,10 +253,10 @@ static void leg_a_map_rollback_on_v3(void)
 
     /* snapshot exactly what the commit published */
     {
-        invfs_v3_inode ci;
-        if (vol_v3_inode_get(g_v, newino, &ci) == 1) {
-            memcpy(addr_at_commit, ci.recipe_addr, INVFS_V3_RECIPE_ADDR_LEN);
-            vol_v3_recipe_load(g_v, ci.recipe_addr, &snap, &snap_len);
+        invfs_inode ci;
+        if (vol_inode_get(g_v, newino, &ci) == 1) {
+            memcpy(addr_at_commit, ci.recipe_addr, INVFS_RECIPE_ADDR_LEN);
+            vol_recipe_load(g_v, ci.recipe_addr, &snap, &snap_len);
         }
     }
 
@@ -357,7 +357,7 @@ static void leg_a_map_rollback_on_v3(void)
     /* --- and the row it was supposed to preserve --- */
     {
         uint64_t got = 0;
-        ok(vol_v3_path_lookup(g_v, "pack.tar", &got) == 1 && got == newino,
+        ok(vol_path_lookup(g_v, "pack.tar", &got) == 1 && got == newino,
            "leg A: the committed row still resolves after close/reopen");
     }
     {
@@ -372,14 +372,14 @@ static void leg_a_map_rollback_on_v3(void)
          * address is the AST recipe framing the container, not the
          * container itself, and the container read path is not what this
          * control is about.) */
-        invfs_v3_inode after;
+        invfs_inode after;
         uint8_t *d = NULL;
         size_t n = 0;
         int exact = 0;
-        if (vol_v3_inode_get(g_v, newino, &after) == 1 &&
+        if (vol_inode_get(g_v, newino, &after) == 1 &&
             memcmp(after.recipe_addr, addr_at_commit,
-                   INVFS_V3_RECIPE_ADDR_LEN) == 0 &&
-            vol_v3_recipe_load(g_v, after.recipe_addr, &d, &n) == 0 &&
+                   INVFS_RECIPE_ADDR_LEN) == 0 &&
+            vol_recipe_load(g_v, after.recipe_addr, &d, &n) == 0 &&
             d && n == snap_len && snap && memcmp(d, snap, n) == 0)
             exact = 1;
         ok(exact,
@@ -402,19 +402,19 @@ static void leg_a_map_rollback_on_v3(void)
  * loads (its BLAKE3 still matches its own address -- this is a recipe that
  * is present and intact as a blob but is not a recipe) and still names the
  * same real, allocated blocks, and store it back under its new address. */
-static int poison_recipe(uint64_t id, uint8_t new_addr[INVFS_V3_RECIPE_ADDR_LEN],
+static int poison_recipe(uint64_t id, uint8_t new_addr[INVFS_RECIPE_ADDR_LEN],
                          uint64_t *pbas, size_t *npbas, uint64_t *size_out)
 {
-    invfs_v3_inode in;
+    invfs_inode in;
     uint8_t *blob = NULL;
     size_t blen = 0, n = 0, i;
     invfs_ast_hdr ah;
     const invfs_ast_block_entry *ents = NULL;
     size_t nents = 0;
 
-    if (vol_v3_inode_get(g_v, id, &in) != 1) return -1;
+    if (vol_inode_get(g_v, id, &in) != 1) return -1;
     if (size_out) *size_out = in.size;
-    if (vol_v3_recipe_load(g_v, in.recipe_addr, &blob, &blen) != 0 || !blob)
+    if (vol_recipe_load(g_v, in.recipe_addr, &blob, &blen) != 0 || !blob)
         return -1;
     if (vol_ast_recipe_parse(blob, blen, &ah, &ents, &nents) != 0) {
         free(blob);
@@ -431,21 +431,21 @@ static int poison_recipe(uint64_t id, uint8_t new_addr[INVFS_V3_RECIPE_ADDR_LEN]
      * still names the same segments. */
     blob[0] = 0xEE; blob[1] = 0xEE; blob[2] = 0xEE; blob[3] = 0xEE;
 
-    if (vol_v3_recipe_store(g_v, blob, blen, new_addr) != 0) {
+    if (vol_recipe_store(g_v, blob, blen, new_addr) != 0) {
         free(blob);
         return -1;
     }
     free(blob);
-    if (vol_v3_inode_get(g_v, id, &in) != 1) return -1;
+    if (vol_inode_get(g_v, id, &in) != 1) return -1;
     in.recipe = (invfs_blkptr){0};
-    memcpy(in.recipe_addr, new_addr, INVFS_V3_RECIPE_ADDR_LEN);
-    return vol_v3_inode_delta_put(g_v, id, &in);
+    memcpy(in.recipe_addr, new_addr, INVFS_RECIPE_ADDR_LEN);
+    return vol_inode_delta_put(g_v, id, &in);
 }
 
 static void leg_d_unparseable_recipe(void)
 {
     static uint8_t body[256 * 1024];
-    uint8_t addr[INVFS_V3_RECIPE_ADDR_LEN];
+    uint8_t addr[INVFS_RECIPE_ADDR_LEN];
     uint64_t pbas[64], npbas;
     uint64_t id, size = 0;
     const char *log;
@@ -469,13 +469,13 @@ static void leg_d_unparseable_recipe(void)
        "leg D1: every block the recipe names is allocated before the free");
 
     {
-        int rc = vol_v3_free_recipe_blocks(g_v, addr, 0);
+        int rc = vol_free_recipe_blocks(g_v, addr, 0);
         if (rc == 0)
-            printf("          (vol_v3_free_recipe_blocks returned 0 having "
+            printf("          (vol_free_recipe_blocks returned 0 having "
                    "freed nothing -- %llu blocks are now orphaned)\n",
                    (unsigned long long)npbas);
         ok(rc != 0,
-           "leg D1: vol_v3_free_recipe_blocks REPORTS FAILURE on a recipe that "
+           "leg D1: vol_free_recipe_blocks REPORTS FAILURE on a recipe that "
            "does not parse (v2 twin bails here too, vol_records.c:551-557)");
     }
     {
@@ -487,7 +487,7 @@ static void leg_d_unparseable_recipe(void)
            "and the block fate AGREE");
     }
 
-    /* ---- D2: what vol_v3_unlink tells the caller ---- */
+    /* ---- D2: what vol_unlink tells the caller ---- */
     id = write_file("d2.bin", body, sizeof body);
     ok(id != 0, "leg D2: a second such file is written");
     npbas = sizeof pbas / sizeof pbas[0];
@@ -496,19 +496,19 @@ static void leg_d_unparseable_recipe(void)
 
     err_capture_begin();
     {
-        int rc = vol_v3_unlink(g_v, "d2.bin");
+        int rc = vol_unlink(g_v, "d2.bin");
         log = err_capture_end();
         if (rc == 0)
-            printf("          (vol_v3_unlink reported SUCCESS; the row is gone "
+            printf("          (vol_unlink reported SUCCESS; the row is gone "
                    "and %llu blocks are unreachable)\n",
                    (unsigned long long)npbas);
         ok(rc != 0,
-           "leg D2: vol_v3_unlink does NOT report success when it could not "
+           "leg D2: vol_unlink does NOT report success when it could not "
            "reclaim the recipe's blocks");
     }
     {
         uint64_t got = 0;
-        ok(vol_v3_path_lookup(g_v, "d2.bin", &got) != 1,
+        ok(vol_path_lookup(g_v, "d2.bin", &got) != 1,
            "leg D2: the name is still gone (the unlink itself is not undone "
            "-- rolling it back would be worse)");
     }
@@ -553,7 +553,7 @@ int main(int argc, char **argv)
         fprintf(stderr, "v2rb_rollback_test: vol_open failed: err=%d\n", err);
         return 2;
     }
-    if (!(g_v->sb.vol_flags & VOLF_V3)) {
+    if (!(g_v->sb.vol_flags & VOLF_META)) {
         printf("  volume is not v3 -- this test is meaningless on it\n");
         return 2;
     }

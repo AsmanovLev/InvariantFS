@@ -15,7 +15,7 @@
  * one source, two binaries, linked against src/core/vol_heat.c ALONE.
  * vol_heat.c is NOT as self-contained as arc.c — it needs the real
  * volume_internal.h for the struct and calls 25 project symbols (vol_find,
- * vol_get_xattr, vol_v3_inode_get, meta_locate_ext, ...). All 25 are defined
+ * vol_get_xattr, vol_inode_get, meta_locate_ext, ...). All 25 are defined
  * as stubs at the bottom of THIS FILE, so the link needs nothing outside
  * libc + libzstd and a sanitizer build still costs about a second. No volume,
  * no image, no /dev/shm.
@@ -426,9 +426,9 @@ int vol_stat_full(invfs_volume *v, const char *name, uint64_t *id_out,
 int vol_store_generic(invfs_volume *v, uint64_t inode, const char *name,
                       uint8_t cls, uint8_t calgo)
 { (void)v; (void)inode; (void)name; (void)cls; (void)calgo; return -1; }
-int vol_v3_inode_get(invfs_volume *v, uint64_t inode, invfs_v3_inode *out)
+int vol_inode_get(invfs_volume *v, uint64_t inode, invfs_inode *out)
 { (void)v; (void)inode; (void)out; return -1; }
-int vol_v3_iter_live_inodes(invfs_volume *v,
+int vol_iter_live_inodes(invfs_volume *v,
                             int (*cb)(invfs_volume *, uint64_t, const char *, void *),
                             void *ctx)
 { (void)v; (void)cb; (void)ctx; return 0; }
@@ -446,7 +446,7 @@ void vol_walk_init(vol_walk_t *w, invfs_volume *v, const char *what)
 void vol_walk_result(vol_walk_t *w, int rc, size_t n, size_t found)
 { if (w) { w->rc = rc; w->n = n; w->found = found; w->armed = 1; } }
 int vol_walk_commit(vol_walk_t *w) { return (w && w->rc) ? -1 : 0; }
-uint64_t vol_v3_publish_blob_inode(invfs_volume *v, uint64_t inode,
+uint64_t vol_publish_blob_inode(invfs_volume *v, uint64_t inode,
                                    const uint8_t *blob, size_t blob_len,
                                    uint64_t orig_size, uint32_t algo)
 { (void)v; (void)inode; (void)blob; (void)blob_len; (void)orig_size; (void)algo; return 0; }

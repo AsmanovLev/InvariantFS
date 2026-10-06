@@ -5,7 +5,7 @@
  *
  * A v3 sweep transform that allocates and writes replacement segments and
  * then CANNOT publish the recipe that would name them must give every one of
- * those blocks back. `vol_v3_recipe_store` is the single point at which the
+ * those blocks back. `vol_recipe_store` is the single point at which the
  * new recipe becomes reachable and the one step in the pass that can fail for
  * want of space; the blocks written before it are, until then, allocated and
  * referenced by nothing.
@@ -13,7 +13,7 @@
  * That rollback lived in `vol_sweep_one_v3` (src/core/vol_sweep.c). A merge
  * rewrote the publish block and mis-braced it: the `else` carrying the
  * rollback was bound to the `vol_ast_recipe_serialize` test instead of the
- * `vol_v3_recipe_store` test. `vol_ast_recipe_serialize` essentially never
+ * `vol_recipe_store` test. `vol_ast_recipe_serialize` essentially never
  * fails, so the rollback became UNREACHABLE -- a failed publish fell out of
  * the outer `if` having done nothing at all, `any_swept` stayed 1, the
  * function returned "swept", and every block it had recorded in `remap[]`
@@ -138,7 +138,7 @@ static uint64_t write_file(const char *name, const uint8_t *body, size_t n)
     memset(&m, 0, sizeof m);
     m.type = INVFS_ITYP_REG;
     m.mode = 0644;
-    return vol_v3_write_bulk(g_v, name, body, n, &m);
+    return vol_write_bulk(g_v, name, body, n, &m);
 }
 
 /* ------------------------------------------------------------------ */
@@ -164,7 +164,7 @@ static int named_cb(invfs_volume *v, uint64_t inode_id, const char *name,
 {
     named_ctx *c = (named_ctx *)ctx_;
     blockmap *m = c->m;
-    invfs_v3_inode in;
+    invfs_inode in;
     uint8_t *blob = NULL;
     size_t blen = 0, i;
     invfs_ast_hdr ah;
@@ -172,14 +172,14 @@ static int named_cb(invfs_volume *v, uint64_t inode_id, const char *name,
     size_t n_ents = 0;
     (void)name;
 
-    if (vol_v3_inode_get(v, inode_id, &in) != 1) return 0;
+    if (vol_inode_get(v, inode_id, &in) != 1) return 0;
     if (in.size == 0) return 0;
-    if (vol_v3_recipe_load(v, in.recipe_addr, &blob, &blen) != 0 || !blob) return 0;
+    if (vol_recipe_load(v, in.recipe_addr, &blob, &blen) != 0 || !blob) return 0;
     if (vol_ast_recipe_parse(blob, blen, &ah, &ents, &n_ents) == 0 && ents) {
         for (i = 0; i < n_ents; i++) {
             uint64_t pba = ents[i].pba, plen = 0, k;
             /* zone == TEXT names a SHARED batch segment owned by the batch
-             * registry (tz_v3_gc), exactly as vol_sweep_stats counts it. */
+             * registry (tz_gc), exactly as vol_sweep_stats counts it. */
             if (ents[i].zone == INVFS_ZONE_TEXT || !pba) continue;
             /* The WHOLE extent, not just its head: a recipe entry names the
              * segment's first pba, and one 64 KiB segment occupies 17
@@ -214,7 +214,7 @@ static void snapshot_unclaimed(blockmap *m)
     for (b = 0; b < m->n; b++)
         if (bit_get(g_v->bitmap, b))
             m->alloc[b / 8] |= (uint8_t)(1u << (b % 8));
-    { named_ctx c; c.m = m; vol_v3_iter_live_inodes(g_v, named_cb, &c); }
+    { named_ctx c; c.m = m; vol_iter_live_inodes(g_v, named_cb, &c); }
 }
 
 /* ------------------------------------------------------------------ */
@@ -258,7 +258,7 @@ static int parse_rollback(const char *buf, unsigned long long *blocks,
 
 #define MAX_ENTS 8192
 
-static int recipe_pbas(const uint8_t addr[INVFS_V3_RECIPE_ADDR_LEN],
+static int recipe_pbas(const uint8_t addr[INVFS_RECIPE_ADDR_LEN],
                        uint64_t *out, size_t cap, size_t *n_out)
 {
     uint8_t *blob = NULL;
@@ -268,7 +268,7 @@ static int recipe_pbas(const uint8_t addr[INVFS_V3_RECIPE_ADDR_LEN],
     size_t n_ents = 0;
 
     *n_out = 0;
-    if (vol_v3_recipe_load(g_v, addr, &blob, &blen) != 0 || !blob) return -1;
+    if (vol_recipe_load(g_v, addr, &blob, &blen) != 0 || !blob) return -1;
     if (vol_ast_recipe_parse(blob, blen, &ah, &ents, &n_ents) != 0 ||
         ents == NULL) { free(blob); return -1; }
     for (i = 0; i < n_ents && *n_out < cap; i++)
@@ -286,8 +286,8 @@ int main(int argc, char **argv)
     uint64_t id = 0, free_before, free_after;
     uint64_t unc_before, unc_after;
     uint64_t old_pbas[MAX_ENTS];
-    uint8_t old_addr[INVFS_V3_RECIPE_ADDR_LEN];
-    invfs_v3_inode before, after;
+    uint8_t old_addr[INVFS_RECIPE_ADDR_LEN];
+    invfs_inode before, after;
     blockmap bm;
     unsigned long long rb_blocks = 0, rb_segs = 0;
     char cap_path[600], cmd[900];
@@ -364,7 +364,7 @@ int main(int argc, char **argv)
     bm.alloc = (uint8_t *)calloc((size_t)((bm.n + 7) / 8), 1);
     if (!bm.named || !bm.alloc) { fprintf(stderr, "setup: bitmap\n"); return 2; }
 
-    ok(vol_v3_inode_get(g_v, id, &before) == 1, "the target's row is readable");
+    ok(vol_inode_get(g_v, id, &before) == 1, "the target's row is readable");
     memcpy(old_addr, before.recipe_addr, sizeof old_addr);
     ok(recipe_pbas(old_addr, old_pbas, MAX_ENTS, &n_old) == 0 && n_old > 0,
        "PREMISE: its recipe names at least one data block");
@@ -437,8 +437,8 @@ int main(int argc, char **argv)
        "the sweep left the volume no smaller than it found it");
 
     printf("leg 5: the data-safety half -- the file is still RAW and bit-exact\n");
-    ok(vol_v3_inode_get(g_v, id, &after) == 1, "the target's row is still readable");
-    ok(memcmp(after.recipe_addr, old_addr, INVFS_V3_RECIPE_ADDR_LEN) == 0,
+    ok(vol_inode_get(g_v, id, &after) == 1, "the target's row is still readable");
+    ok(memcmp(after.recipe_addr, old_addr, INVFS_RECIPE_ADDR_LEN) == 0,
        "the recipe address did not move: the transform never published");
     {
         int all_alloc = 1;

@@ -767,7 +767,7 @@ uint64_t vol_create_blob_file(invfs_volume *v, const char *name,
     invfs_ast_block_entry e;
 
 
-    uint8_t addr[INVFS_V3_RECIPE_ADDR_LEN];
+    uint8_t addr[INVFS_RECIPE_ADDR_LEN];
     uint8_t *rblob = NULL;
     size_t rlen = 0;
 
@@ -840,25 +840,25 @@ uint64_t vol_create_blob_file(invfs_volume *v, const char *name,
             vol_free_blocks(v, pba, phys_blocks);
             return 0;
         }
-        if (vol_v3_recipe_store(v, rblob, rlen, addr) != 0) {
+        if (vol_recipe_store(v, rblob, rlen, addr) != 0) {
             free(rblob);
             vol_free_blocks(v, pba, phys_blocks);
             return 0;
         }
         free(rblob);
     }
-    return vol_v3_create_content_node(v, name, orig_size, addr);
+    return vol_create_content_node(v, name, orig_size, addr);
 }
 
 
 /* WP-M23: supersede an existing v3 inode's recipe address with a newly
  * packed blob in Shadow, completely by inode id. Dirents, attributes, and
  * hardlinks are untouched. */
-uint64_t vol_v3_publish_blob_inode(invfs_volume *v, uint64_t inode_id,
+uint64_t vol_publish_blob_inode(invfs_volume *v, uint64_t inode_id,
                                    const uint8_t *blob, size_t blob_len,
                                    uint64_t orig_size, uint32_t algo)
 {
-    /* pba doubles as vol_v3_free_recipe_blocks' keep_pba ("do not free this
+    /* pba doubles as vol_free_recipe_blocks' keep_pba ("do not free this
      * one"), and the empty-blob branch below never allocates one -- so it must
      * start at 0, like the explicit 0 the unlink paths pass. Uninitialised,
      * a stack value that happens to equal an old recipe pba silently keeps
@@ -866,9 +866,9 @@ uint64_t vol_v3_publish_blob_inode(invfs_volume *v, uint64_t inode_id,
     uint64_t phys_blocks = 0, pba = 0;
     uint8_t hdr4[8];
     invfs_ast_block_entry e;
-    invfs_v3_inode in;
-    uint8_t addr[INVFS_V3_RECIPE_ADDR_LEN];
-    uint8_t old_addr[INVFS_V3_RECIPE_ADDR_LEN];
+    invfs_inode in;
+    uint8_t addr[INVFS_RECIPE_ADDR_LEN];
+    uint8_t old_addr[INVFS_RECIPE_ADDR_LEN];
     uint8_t *rblob = NULL;
     size_t rlen = 0;
 
@@ -886,7 +886,7 @@ uint64_t vol_v3_publish_blob_inode(invfs_volume *v, uint64_t inode_id,
         return 0;
     }
 
-    if (vol_v3_inode_get(v, inode_id, &in) != 1)
+    if (vol_inode_get(v, inode_id, &in) != 1)
         return 0;
     memcpy(old_addr, in.recipe_addr, sizeof old_addr);
 
@@ -924,7 +924,7 @@ uint64_t vol_v3_publish_blob_inode(invfs_volume *v, uint64_t inode_id,
             vol_free_blocks(v, pba, phys_blocks);
             return 0;
         }
-        if (vol_v3_recipe_store(v, rblob, rlen, addr) != 0) {
+        if (vol_recipe_store(v, rblob, rlen, addr) != 0) {
             free(rblob);
             vol_free_blocks(v, pba, phys_blocks);
             return 0;
@@ -936,12 +936,12 @@ uint64_t vol_v3_publish_blob_inode(invfs_volume *v, uint64_t inode_id,
      * uid, gid, nlink, or timestamps */
     in.size = orig_size;
     memset(&in.recipe, 0, sizeof in.recipe);
-    memcpy(in.recipe_addr, addr, INVFS_V3_RECIPE_ADDR_LEN);
-    if (vol_v3_inode_delta_put(v, inode_id, &in) != 0)
+    memcpy(in.recipe_addr, addr, INVFS_RECIPE_ADDR_LEN);
+    if (vol_inode_delta_put(v, inode_id, &in) != 0)
         return 0;
 
     /* WP-N1: targeted free of old RAW/shadow data blocks superseded by the new blob */
-    vol_v3_free_recipe_blocks(v, old_addr, pba);
+    vol_free_recipe_blocks(v, old_addr, pba);
 
     return inode_id;
 }
@@ -962,7 +962,7 @@ uint64_t vol_v3_publish_blob_inode(invfs_volume *v, uint64_t inode_id,
  * read from the source, so a verbatim window has length == src_len and an
  * inflating one has src_len = the compressed cluster and length = the
  * decompressed size. */
-uint64_t vol_v3_publish_window_inode(invfs_volume *v, const char *name,
+uint64_t vol_publish_window_inode(invfs_volume *v, const char *name,
                                      uint64_t src_inode, uint64_t src_off,
                                      uint64_t length, uint64_t src_len,
                                      uint32_t transform,
@@ -972,9 +972,9 @@ uint64_t vol_v3_publish_window_inode(invfs_volume *v, const char *name,
 {
     invfs_ast_block_entry e;
     invfs_ast_window_entry w;
-    invfs_v3_inode in;
-    uint8_t addr[INVFS_V3_RECIPE_ADDR_LEN];
-    uint8_t old_addr[INVFS_V3_RECIPE_ADDR_LEN];
+    invfs_inode in;
+    uint8_t addr[INVFS_RECIPE_ADDR_LEN];
+    uint8_t old_addr[INVFS_RECIPE_ADDR_LEN];
     uint8_t *rblob = NULL;
     size_t rlen = 0;
     uint64_t id;
@@ -1000,7 +1000,7 @@ uint64_t vol_v3_publish_window_inode(invfs_volume *v, const char *name,
         return 0;
     /* the source must exist right now: a window into a missing inode would
      * publish a file that can only ever read EIO */
-    if (vol_v3_inode_get(v, src_inode, &in) != 1) {
+    if (vol_inode_get(v, src_inode, &in) != 1) {
         fprintf(stderr, "invarifs: window %s: source inode %llu is not live\n",
                 name, (unsigned long long)src_inode);
         return 0;
@@ -1012,7 +1012,7 @@ uint64_t vol_v3_publish_window_inode(invfs_volume *v, const char *name,
     memset(old_addr, 0, sizeof old_addr);
     id = vol_find(v, name);
     if (id) {
-        if (vol_v3_inode_get(v, id, &in) != 1) return 0;
+        if (vol_inode_get(v, id, &in) != 1) return 0;
         memcpy(old_addr, in.recipe_addr, sizeof old_addr);
     } else {
         id = vol_create_file(v, name, NULL, 0);
@@ -1039,17 +1039,17 @@ uint64_t vol_v3_publish_window_inode(invfs_volume *v, const char *name,
 
     if (vol_ast_recipe_serialize_win(length, &e, 1, &w, 1, &rblob, &rlen) != 0)
         return 0;
-    if (vol_v3_recipe_store(v, rblob, rlen, addr) != 0) { free(rblob); return 0; }
+    if (vol_recipe_store(v, rblob, rlen, addr) != 0) { free(rblob); return 0; }
     free(rblob);
 
-    if (vol_v3_inode_get(v, id, &in) != 1) return 0;
+    if (vol_inode_get(v, id, &in) != 1) return 0;
     in.size = length;
     memset(&in.recipe, 0, sizeof in.recipe);
-    memcpy(in.recipe_addr, addr, INVFS_V3_RECIPE_ADDR_LEN);
-    if (vol_v3_inode_delta_put(v, id, &in) != 0) return 0;
+    memcpy(in.recipe_addr, addr, INVFS_RECIPE_ADDR_LEN);
+    if (vol_inode_delta_put(v, id, &in) != 0) return 0;
     /* the window holds no blocks, so keep_pba is 0: free whatever the old
      * recipe of this inode used to own */
-    vol_v3_free_recipe_blocks(v, old_addr, 0);
+    vol_free_recipe_blocks(v, old_addr, 0);
     return id;
 }
 

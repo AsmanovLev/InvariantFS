@@ -101,7 +101,7 @@ static int run_leg(const char *img, const char *label, int force_dev,
     v = vol_open(img, &err);
     if (!v) { printf("  FAIL  %s: vol_open (%d)\n", label, err); return 1; }
 
-    id = vol_v3_write_bulk(v, "bx.bin", (uint8_t *)orig, fsize, NULL);
+    id = vol_write_bulk(v, "bx.bin", (uint8_t *)orig, fsize, NULL);
     if (!id) { printf("  FAIL  %s: write\n", label); vol_close(v); return 1; }
     vol_flush(v);
 
@@ -166,13 +166,13 @@ static int run_frame_disagreement_leg(const char *img,
     invfs_volume *v;
     int err = 0, fails = 0, one_rc, par_rc;
     uint64_t id;
-    invfs_v3_inode in;
+    invfs_inode in;
     invfs_ast_hdr ah;
     const invfs_ast_block_entry *ents = NULL;
     invfs_ast_block_entry *tap = NULL;
     uint8_t *blob = NULL, *nblob = NULL;
     size_t blen = 0, nblen = 0;
-    uint8_t naddr[INVFS_V3_RECIPE_ADDR_LEN];
+    uint8_t naddr[INVFS_RECIPE_ADDR_LEN];
     char cmd[600], tb[16];
 
     unsetenv("INVFS_FORCE_DEV");
@@ -181,12 +181,12 @@ static int run_frame_disagreement_leg(const char *img,
     v = vol_open(img, &err);
     if (!v) { printf("  FAIL  frame leg: vol_open (%d)\n", err); return 1; }
 
-    id = vol_v3_write_bulk(v, "frame.bin", (uint8_t *)orig, fsize, NULL);
+    id = vol_write_bulk(v, "frame.bin", (uint8_t *)orig, fsize, NULL);
     if (!id) { printf("  FAIL  frame leg: write\n"); vol_close(v); return 1; }
-    if (vol_v3_inode_get(v, id, &in) != 1) {
+    if (vol_inode_get(v, id, &in) != 1) {
         printf("  FAIL  frame leg: inode_get\n"); vol_close(v); return 1;
     }
-    if (vol_v3_recipe_load(v, in.recipe_addr, &blob, &blen) != 0 || !blob ||
+    if (vol_recipe_load(v, in.recipe_addr, &blob, &blen) != 0 || !blob ||
         vol_ast_recipe_parse(blob, blen, &ah, &ents, NULL) != 0) {
         printf("  FAIL  frame leg: recipe load/parse\n"); free(blob); vol_close(v); return 1;
     }
@@ -238,17 +238,17 @@ static int run_frame_disagreement_leg(const char *img,
 
     if (vol_ast_recipe_serialize(ah.file_size, tap, ah.num_blocks,
                                  &nblob, &nblen) != 0 ||
-        vol_v3_recipe_store(v, nblob, nblen, naddr) != 0) {
+        vol_recipe_store(v, nblob, nblen, naddr) != 0) {
         printf("  FAIL  frame leg: could not republish recipe\n");
         free(nblob); free(tap); vol_close(v); return 1;
     }
     free(nblob); free(tap);
     memcpy(in.recipe_addr, naddr, sizeof naddr);
-    /* The DELTA setter, not vol_v3_inode_put(): write_bulk left the row in the
-       delta overlay, and vol_v3_inode_get resolves overlay-first -- a
+    /* The DELTA setter, not vol_inode_put(): write_bulk left the row in the
+       delta overlay, and vol_inode_get resolves overlay-first -- a
        base-tree write would be shadowed by the overlay entry and the reader
        would never see the tampered recipe at all. */
-    if (vol_v3_inode_delta_put(v, id, &in) != 0) {
+    if (vol_inode_delta_put(v, id, &in) != 0) {
         printf("  FAIL  frame leg: inode_delta_put\n"); vol_close(v); return 1;
     }
     vol_flush(v);
@@ -336,13 +336,13 @@ static int run_sweep_frame_disagreement_leg(const char *img,
     invfs_volume *v;
     int err = 0, fails = 0, sweep_rc, read_rc;
     uint64_t id, rid;
-    invfs_v3_inode in;
+    invfs_inode in;
     invfs_ast_hdr ah;
     const invfs_ast_block_entry *ents = NULL;
     invfs_ast_block_entry *tap = NULL;
     uint8_t *blob = NULL, *nblob = NULL;
     size_t blen = 0, nblen = 0;
-    uint8_t naddr[INVFS_V3_RECIPE_ADDR_LEN];
+    uint8_t naddr[INVFS_RECIPE_ADDR_LEN];
     uint8_t *got = NULL;
     size_t glen = 0;
     char cmd[600];
@@ -354,12 +354,12 @@ static int run_sweep_frame_disagreement_leg(const char *img,
     v = vol_open(img, &err);
     if (!v) { printf("  FAIL  sweep leg: vol_open (%d)\n", err); return 1; }
 
-    id = vol_v3_write_bulk(v, "sweepframe.bin", (uint8_t *)orig, fsize, NULL);
+    id = vol_write_bulk(v, "sweepframe.bin", (uint8_t *)orig, fsize, NULL);
     if (!id) { printf("  FAIL  sweep leg: write\n"); vol_close(v); return 1; }
-    if (vol_v3_inode_get(v, id, &in) != 1) {
+    if (vol_inode_get(v, id, &in) != 1) {
         printf("  FAIL  sweep leg: inode_get\n"); vol_close(v); return 1;
     }
-    if (vol_v3_recipe_load(v, in.recipe_addr, &blob, &blen) != 0 || !blob ||
+    if (vol_recipe_load(v, in.recipe_addr, &blob, &blen) != 0 || !blob ||
         vol_ast_recipe_parse(blob, blen, &ah, &ents, NULL) != 0) {
         printf("  FAIL  sweep leg: recipe load/parse\n"); free(blob); vol_close(v); return 1;
     }
@@ -399,13 +399,13 @@ static int run_sweep_frame_disagreement_leg(const char *img,
 
     if (vol_ast_recipe_serialize(ah.file_size, tap, ah.num_blocks,
                                  &nblob, &nblen) != 0 ||
-        vol_v3_recipe_store(v, nblob, nblen, naddr) != 0) {
+        vol_recipe_store(v, nblob, nblen, naddr) != 0) {
         printf("  FAIL  sweep leg: could not republish recipe\n");
         free(nblob); free(tap); vol_close(v); return 1;
     }
     free(nblob); free(tap);
     memcpy(in.recipe_addr, naddr, sizeof naddr);
-    if (vol_v3_inode_delta_put(v, id, &in) != 0) {
+    if (vol_inode_delta_put(v, id, &in) != 0) {
         printf("  FAIL  sweep leg: inode_delta_put\n"); vol_close(v); return 1;
     }
     vol_flush(v);

@@ -53,14 +53,14 @@
  * mbuf_read_ptr reported it as -1 (src/core/vol_metabuf.c:192), measured at
  * 0-3 per ~3M reads over ~1500 folds (~1e-6). Every base-tree read now
  * announces itself BEFORE it captures the root and releases after the walk
- * (vol_btree.c: v3_base_get and the paired calls around each scan;
+ * (vol_btree.c: base_get and the paired calls around each scan;
  * vol_spt0.c: spt0_capture), the drain really waits, and it is BOUNDED: at
  * the bound it returns -1 and this hook skips BOTH frees rather than doing
  * them unsafely.
  *
  * What that costs, stated plainly because it is the reason the drain is
  * bounded rather than merely correct: the drain blocks under the sweep's
- * g_io_lock, so a large vol_v3_dirent_scan or vol_v3_iter_live_inodes in
+ * g_io_lock, so a large vol_dirent_scan or vol_iter_live_inodes in
  * flight stalls other metadata work for the length of that walk. A missed
  * release is a mount-wide hang, not a leak -- the count is process-global and
  * the drain spins under g_io_lock -- which is why the bound exists and why it
@@ -99,7 +99,7 @@
 #include <unistd.h>
 #endif
 
-/* Test hook (tools/test-meta-v3-fold.sh): die inside the publish/reset
+/* Test hook (tools/test-meta-fold.sh): die inside the publish/reset
  * window. "published" fires after the new base root is durable and published
  * but BEFORE the delta is reset -- the exact crash window the ordering rule
  * exists for. The next mount must replay the old delta against the new base
@@ -118,7 +118,7 @@ static int fold_abort_at(const char *stage)
 
 #define FOLD_FLAG_DELETE     ((uint16_t)INVFS_DELTA_FLAG_DELETE)
 
-void vol_v3_fold_trigger(uint64_t *bytes, uint64_t *records, uint64_t *age_s)
+void vol_fold_trigger(uint64_t *bytes, uint64_t *records, uint64_t *age_s)
 {
     if (bytes)   *bytes   = FOLD_TRIGGER_BYTES;
     if (records) *records = FOLD_TRIGGER_RECORDS;
@@ -251,7 +251,7 @@ static void fold_sort(fold_list *l)
     }
 }
 
-/* Persisting the dirty bitmap range is vol_v3_bitmap_flush() (vol_btree.c),
+/* Persisting the dirty bitmap range is vol_bitmap_flush() (vol_btree.c),
  * declared in volume_internal.h -- it was already exported for exactly this
  * reason. This file used to carry a byte-identical private copy; two copies
  * of "round the dirty range out to whole bitmap blocks, write it, clear the
@@ -271,7 +271,7 @@ void fold_reclaim_hook(invfs_volume *v, invfs_blkptr old_root,
      *
      * This BLOCKS, and it blocks under the sweep's g_io_lock (the hook is
      * reached from vol_sweep.c under that lock), so a reader in the middle
-     * of a large vol_v3_dirent_scan or vol_v3_iter_live_inodes stalls other
+     * of a large vol_dirent_scan or vol_iter_live_inodes stalls other
      * metadata work for the length of that walk. That is the known cost of
      * the decision, accepted deliberately: the alternative is freeing a
      * generation under a reader that captured its root, which is a read
@@ -315,8 +315,8 @@ void fold_reclaim_hook(invfs_volume *v, invfs_blkptr old_root,
      * which keeps the union of both slots -- reclaims those pages the
      * next time a root is published and neither slot names them. */
     if (old_root.pba != 0 &&
-        (old_root.pba == v->rt30.root_slot[0] ||
-         old_root.pba == v->rt30.root_slot[1])) {
+        (old_root.pba == v->rt.root_slot[0] ||
+         old_root.pba == v->rt.root_slot[1])) {
         (void)vol_reclaim_orphans(v, NULL);
         return;
     }
@@ -350,13 +350,13 @@ void fold_reclaim_hook(invfs_volume *v, invfs_blkptr old_root,
 static int fold_delta_reset(invfs_volume *v)
 {
     vol_delta_close(v);                  /* drop the index + segment state */
-    v->rt30.delta_pba = 0;
-    if (!v->rt30_present) {
-        memset(&v->rt30, 0, sizeof v->rt30);
-        memcpy(v->rt30.magic, "RT30", 4);
-        v->rt30.version = INVFS_RT30_VERSION;
-        v->rt30.page_size = INVFS_V3_PAGE_SIZE_DEFAULT;
-        v->rt30_present = 1;
+    v->rt.delta_pba = 0;
+    if (!v->rt_present) {
+        memset(&v->rt, 0, sizeof v->rt);
+        memcpy(v->rt.magic, "RT30", 4);
+        v->rt.version = INVFS_RT_VERSION;
+        v->rt.page_size = INVFS_PAGE_SIZE_DEFAULT;
+        v->rt_present = 1;
     }
     if (mbuf_rt30_store(v) != 0)
         return -1;
@@ -373,7 +373,7 @@ static int fold_delta_reset(invfs_volume *v)
 
 /* ---------------------------------------------------------------- fold */
 
-int vol_v3_fold(invfs_volume *v)
+int vol_fold(invfs_volume *v)
 {
     fold_list list;
     invfs_blkptr old_root, root, nr;
@@ -384,7 +384,7 @@ int vol_v3_fold(invfs_volume *v)
 
     if (!v)
         return -1;
-    if (!(v->sb.vol_flags & VOLF_V3))
+    if (!(v->sb.vol_flags & VOLF_META))
         return -1;                       /* fold is a v3-only operation */
     if (v->sb.vol_flags & VOLF_READONLY)
         return -1;
@@ -403,7 +403,7 @@ int vol_v3_fold(invfs_volume *v)
     }
     fold_sort(&list);
 
-    if (vol_v3_base_root(v, &old_root) != 0) {
+    if (vol_base_root(v, &old_root) != 0) {
         fold_list_free(&list);
         return -1;
     }
@@ -472,7 +472,7 @@ int vol_v3_fold(invfs_volume *v)
 
     /* (2) durability + atomic publish: bitmap, then COW pages, then RT30 with
      * a bumped seq. mbuf_root_publish refuses a torn/gen-mismatched root. */
-    if (vol_v3_bitmap_flush(v) != 0) {
+    if (vol_bitmap_flush(v) != 0) {
         fold_list_free(&list);
         return -1;
     }
@@ -505,14 +505,14 @@ int vol_v3_fold(invfs_volume *v)
      * this is the code that frees the very blocks that ref names the moment
      * the index is gone. The allocator hands them straight back
      * (delta_new_segment writes a header and zeros across a 128 KiB stripe),
-     * so the reader decoded zeros and vol_v3_inode_get answered -1 for an
+     * so the reader decoded zeros and vol_inode_get answered -1 for an
      * inode that was present, live and internally consistent -- ~1e-5 of all
      * reads, and a wrong row rather than an error whenever the recycled block
      * happened to hold one. Dropping the index and freeing what the index
      * named is ONE step as far as a reader is concerned, so it is one critical
      * section; vol_delta_read_value now takes this same lock across its
      * preads, which is what makes the pairing work. */
-    uint64_t old_delta_pba = v->rt30.delta_pba;
+    uint64_t old_delta_pba = v->rt.delta_pba;
     vol_delta_lock();
     if (fold_delta_reset(v) != 0)
         failed_reset = 1;
@@ -529,14 +529,14 @@ int vol_v3_fold(invfs_volume *v)
 
 /* ---------------------------------------------------------------- trigger */
 
-int vol_v3_fold_request(invfs_volume *v)
+int vol_fold_request(invfs_volume *v)
 {
     uint64_t bytes = 0, records = 0, now;
     int need = 0;
     invfs_blkptr new_root;
     int rc;
 
-    if (!v || !(v->sb.vol_flags & VOLF_V3))
+    if (!v || !(v->sb.vol_flags & VOLF_META))
         return -1;
     if (v->sb.vol_flags & VOLF_READONLY)
         return -1;
@@ -555,21 +555,21 @@ int vol_v3_fold_request(invfs_volume *v)
         return 0;
 
     /* WP-M18: capture pre-fold root for reclaim_hook (called after fold) */
-    if (vol_v3_base_root(v, &v->fold_pre_root) != 0)
+    if (vol_base_root(v, &v->fold_pre_root) != 0)
         return -1;
 
-    rc = vol_v3_fold(v);
+    rc = vol_fold(v);
     if (rc != 0)
         return -1;
 
     /* fold succeeded: call the reclaim hook with old and new roots */
-    if (vol_v3_base_root(v, &new_root) == 0)
+    if (vol_base_root(v, &new_root) == 0)
         fold_reclaim_hook(v, v->fold_pre_root, new_root);
 
     return 1;
 }
 
-void vol_v3_fold_reset_age(invfs_volume *v)
+void vol_fold_reset_age(invfs_volume *v)
 {
     if (v)
         v->delta_oldest_when = 0;
@@ -587,7 +587,7 @@ void vol_reclaim_schedule(invfs_volume *v)
         return;
     if (v->fold_pre_root.pba == 0)
         return;
-    if (vol_v3_base_root(v, &new_root) != 0)
+    if (vol_base_root(v, &new_root) != 0)
         return;
     fold_reclaim_hook(v, v->fold_pre_root, new_root);
     v->fold_pre_root.pba = 0;

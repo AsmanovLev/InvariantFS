@@ -1,7 +1,7 @@
 #!/bin/bash
-# test-meta-v3-delta.sh — WP-M10 e2e: the metadata-v3 delta log.
+# test-meta-delta.sh — WP-M10 e2e: the metadata-v3 delta log.
 #
-# Exercises the recent-changes tier end to end on a real VOLF_V3 image:
+# Exercises the recent-changes tier end to end on a real VOLF_META image:
 #   leg 0  mkfs v3 leaves RT30.delta_pba == 0 (empty recent tier);
 #   leg 1  appending through the engine fills the active segment and RT30
 #          now names it (structure-before-reference);
@@ -14,7 +14,7 @@
 # drives vol_delta_append/vol_delta_lookup directly.
 #
 # Run from the repo root after `make`/`make test`:
-#   bash tools/run-e2e.sh tools/test-meta-v3-delta.sh
+#   bash tools/run-e2e.sh tools/test-meta-delta.sh
 set -e
 set -o pipefail
 
@@ -38,10 +38,10 @@ fi
 N=40
 
 echo "== leg 0: mkfs v3 (empty recent tier) =="
-INVFS_V3=1 $B/invf-mkfs "$IMG" 0.3 >"$WORK/mkfs.log" 2>&1 \
-    || { cat "$WORK/mkfs.log"; fail "INVFS_V3=1 mkfs failed"; }
-grep -q "format: v3 metadata skeleton" "$WORK/mkfs.log" \
-    || fail "mkfs did not report the v3 format"
+$B/invf-mkfs "$IMG" 0.3 >"$WORK/mkfs.log" 2>&1 \
+    || { cat "$WORK/mkfs.log"; fail "mkfs failed"; }
+grep -q "format: v0 metadata skeleton" "$WORK/mkfs.log" \
+    || fail "mkfs did not report the v0 format"
 python3 - "$IMG" <<'PY' || fail "RT30 not empty at mkfs"
 import struct, sys
 blk = open(sys.argv[1], 'rb').read(4096)
@@ -98,4 +98,4 @@ assert blk[0x18] == 0xCA, "state=0x%02X, want CLEAN" % blk[0x18]
 print("state: CLEAN after the delta round-trips")
 PY
 
-echo "ALL META-V3 DELTA LEGS PASS"
+echo "ALL META DELTA LEGS PASS"

@@ -43,42 +43,42 @@ typedef struct {
      * (a drop window took the data after the maps survived) -- the
      * content-level consistent cut. Quarantined like the map-level cut. */
     uint64_t corrupt_files;
-    /* WP-M4: metadata-v3 base-tree validation (VOLF_V3 volumes only; all
+    /* WP-M4: metadata-v3 base-tree validation (VOLF_META volumes only; all
      * zero for the v2 path). The v3 checker detects and reports, it does
      * not repair. `v3_*` are additive: no v2 field changes meaning. */
-    uint64_t v3_pages_walked;   /* reachable base pages walked (a page that
+    uint64_t pages_walked;   /* reachable base pages walked (a page that
                                   * is quarantined is walked but not verified:
-                                  * see v3_bad_pages) */
-    uint64_t v3_keys;           /* live leaf entries seen */
-    uint64_t v3_slots_torn;     /* RT30 root slots whose page failed CRC/gen */
-    uint64_t v3_bad_pages;      /* reachable pages that failed validation */
-    uint64_t v3_cycles;         /* cycles / shared children detected */
-    uint64_t v3_root_seq;       /* RT30 seq as read */
-    uint64_t v3_rt30_bad;       /* RT30 magic/version/CRC failed */
-    uint64_t v3_slots_ambiguous;/* two DISTINCT root pages valid at equal gen */
-    uint64_t v3_slots_same_root; /* both slots name the SAME page at equal gen:
+                                  * see bad_pages) */
+    uint64_t keys;           /* live leaf entries seen */
+    uint64_t slots_torn;     /* RT30 root slots whose page failed CRC/gen */
+    uint64_t bad_pages;      /* reachable pages that failed validation */
+    uint64_t cycles;         /* cycles / shared children detected */
+    uint64_t root_seq;       /* RT30 seq as read */
+    uint64_t rt30_bad;       /* RT30 magic/version/CRC failed */
+    uint64_t slots_ambiguous;/* two DISTINCT root pages valid at equal gen */
+    uint64_t slots_same_root; /* both slots name the SAME page at equal gen:
                                     one root with two names. REPORTED, never
                                     damage -- an ordinary rollback publishes
                                     the still-current root into the other
                                     slot, so this is a normal volume shape. */
-    uint64_t v3_reachable_free; /* reachable page free in the metadata bitmap */
+    uint64_t reachable_free; /* reachable page free in the metadata bitmap */
     /* WP86: an unreadable base page is CONTAINED, not fatal. The walk skips
      * the page, records the key range it owned as quarantined, and keeps
      * verifying the rest of the tree; a key in a quarantined range reads EIO
      * (never "absent"), so no data is invented and none is hidden. */
-    uint64_t v3_quarantined;    /* key ranges lost to unreadable pages */
-    uint64_t v3_keys_quarantined;/* keys the delta still covers in them:
+    uint64_t quarantined;    /* key ranges lost to unreadable pages */
+    uint64_t keys_quarantined;/* keys the delta still covers in them:
                                   * recovered by the repair, not lost */
-    uint64_t v3_keys_lost;      /* keys dropped with a quarantined range */
-    uint64_t v3_lost_names;     /* names whose inode row is gone after -f */
-    uint64_t v3_root_lost;      /* every named root slot page is unreadable */
-    uint64_t v3_savepoint_bad;  /* a live save point pins a damaged base */
-    uint64_t v3_anchor_restored;/* the open ran on the ANC0 tail anchor: the
+    uint64_t keys_lost;      /* keys dropped with a quarantined range */
+    uint64_t lost_names;     /* names whose inode row is gone after -f */
+    uint64_t root_lost;      /* every named root slot page is unreadable */
+    uint64_t savepoint_bad;  /* a live save point pins a damaged base */
+    uint64_t anchor_restored;/* the open ran on the ANC0 tail anchor: the
                                  * volume is readable but block 0 is damaged */
-    uint64_t v3_anchor_stale;   /* an ANC0 refresh FAILED during the session */
-    uint64_t v3_anchor_refused; /* the tail anchor did not match this volume */
-    uint64_t v3_repaired;       /* -f rebuilt the tree (quarantine excised) */
-    int      v3_damaged;        /* 1 = any v3 structural damage found */
+    uint64_t anchor_stale;   /* an ANC0 refresh FAILED during the session */
+    uint64_t anchor_refused; /* the tail anchor did not match this volume */
+    uint64_t repaired;       /* -f rebuilt the tree (quarantine excised) */
+    int      damaged;        /* 1 = any v3 structural damage found */
     /* WP118: nlink vs dirent fan-in accounting (v3 only; zero on the v2
      * path, whose format invf-mkfs can no longer produce). The namespace
      * invariant every other check here missed: the names that resolve to
@@ -91,7 +91,7 @@ typedef struct {
     uint64_t nlink_stale;      /* fan-in > nlink: a stale/aliased dirent */
     uint64_t nlink_dead;       /* a name whose inode row is not live */
     uint64_t nlink_orphans;    /* live rows no name resolves to: reported,
-                                 * NOT damage (vol_v3_nlink_audit) */
+                                 * NOT damage (vol_nlink_audit) */
     uint64_t nlink_faults;     /* offending inodes (sum, not per name) */
     int      nlink_bad;        /* 1 = the accounting does not balance */
     /* Recipe resolvability (v3 only). The nlink audit above compares names
@@ -100,20 +100,20 @@ typedef struct {
      * cannot be loaded used to pass this pass clean while its file read
      * back EIO. Reported, never repaired: a blob named by its own hash
      * cannot be rebuilt. */
-    uint64_t v3_recipe_checked;/* live inodes whose recipe was resolved */
-    uint64_t v3_recipe_bad;    /* live inodes whose recipe will not load */
-    int      v3_recipe_partial;/* the walk failed: this count is a floor */
+    uint64_t recipe_checked;/* live inodes whose recipe was resolved */
+    uint64_t recipe_bad;    /* live inodes whose recipe will not load */
+    int      recipe_partial;/* the walk failed: this count is a floor */
     /* Excision liveness (v3 only). The repair drops a quarantined KEY RANGE,
      * and a range is not a page: it can hold a 0x04 recipe blob or a 0x03
      * xattr record that a live inode -- whose row survived in a readable page
      * -- still needs, and dropping it destroys that file's content while its
      * name and its row go on resolving. So the repair proves, per range, that
      * no live object requires a key inside it, and REFUSES the ranges it
-     * cannot clear. See fsck_v3_excise_safety. */
-    uint64_t v3_excise_refused;   /* quarantined ranges -f would not excise */
-    uint64_t v3_excise_blocked;   /* live inodes named as the reason */
-    uint64_t v3_excise_live;      /* live rows asked for the liveness proof */
-    int      v3_excise_partial;   /* the walk failed: a cleared range is a
+     * cannot clear. See fsck_excise_safety. */
+    uint64_t excise_refused;   /* quarantined ranges -f would not excise */
+    uint64_t excise_blocked;   /* live inodes named as the reason */
+    uint64_t excise_live;      /* live rows asked for the liveness proof */
+    int      excise_partial;   /* the walk failed: a cleared range is a
                                    * floor, not a proof */
 } invfs_fsck_report;
 int vol_fsck_scan(invfs_volume *v, invfs_fsck_report *rep, int fix);
@@ -286,8 +286,8 @@ typedef struct {
     uint64_t     rdev;
     uint64_t     size;
     invfs_blkptr recipe;    /* reserved 0 (WP-M8 keeps the layout) */
-    uint8_t      recipe_addr[INVFS_V3_RECIPE_ADDR_LEN];  /* WP-M8 BLAKE3 */
-} invfs_v3_inode;
+    uint8_t      recipe_addr[INVFS_RECIPE_ADDR_LEN];  /* WP-M8 BLAKE3 */
+} invfs_inode;
 
 /* Is this inode type's content a RAW blob that a reader hands back verbatim,
  * as opposed to an AST recipe it parses into segments?
@@ -322,27 +322,27 @@ static inline int invfs_inode_content_is_raw_blob(uint8_t type)
  *
  * -1 IS AN ERROR, NEVER AN ABSENCE, AND NOT A RETRY SIGNAL. It means the row
  * could not be produced: an I/O error, or bytes that are not a row of this
- * format (v3_ino_decode refuses a row_version it does not know -- correctly).
+ * format (ino_decode refuses a row_version it does not know -- correctly).
  * Until WP-inode-get-fold-race it could ALSO mean "a concurrent fold freed the
  * delta block this read was about to touch", which is how it reached ~1e-5 of
  * reads on an inode that was present, live and internally consistent. That
  * cause is gone -- the value read and the chain free now share one critical
  * section (vol_delta.c, vol_fold.c) -- so nothing here is transient and a
  * caller must not map -1 to 0. Callers that still cannot tell the two apart
- * (vol_v3_create_node zeroes a row it did not read) should say so where they
+ * (vol_create_node zeroes a row it did not read) should say so where they
  * do it. */
-int vol_v3_inode_get(invfs_volume *v, uint64_t inode_id, invfs_v3_inode *out);
+int vol_inode_get(invfs_volume *v, uint64_t inode_id, invfs_inode *out);
 /* Insert or replace the row. `in->nlink` must be >= 1 (a zero-nlink row is
  * deleted, not stored). COW-writes the base pages, makes them durable, then
  * publishes the new root. 0 = ok, -1 = error/ENOSPC. */
-int vol_v3_inode_put(invfs_volume *v, uint64_t inode_id,
-                     const invfs_v3_inode *in);
+int vol_inode_put(invfs_volume *v, uint64_t inode_id,
+                     const invfs_inode *in);
 /* Physical delete of the row (no tombstone). An absent id is not an error.
  * 0 = ok, -1 = error. */
-int vol_v3_inode_delete(invfs_volume *v, uint64_t inode_id);
+int vol_inode_delete(invfs_volume *v, uint64_t inode_id);
 /* The current base root (pba/gen/checksum); pba == 0 for an empty tree.
  * WP-M6/M11 read it to scan the namespace. 0 = ok, -1 = error. */
-int vol_v3_base_root(invfs_volume *v, invfs_blkptr *out);
+int vol_base_root(invfs_volume *v, invfs_blkptr *out);
 
 /* ---- WP-M6: v3 dirent tree (base B+-tree namespace) -----------------
  * The v3 namespace maps (parent_inode_id, name) -> child_inode_id. The key
@@ -353,82 +353,82 @@ int vol_v3_base_root(invfs_volume *v, invfs_blkptr *out);
  * value == that inode); it lets mkdir/rmdir and readdir bound a directory's
  * range self-containedly. The value is the child inode id as u64 BE.
  *
- * The root directory is INVFS_V3_ROOT_INO; it has no row and no anchor.
+ * The root directory is INVFS_ROOT_INO; it has no row and no anchor.
  * These helpers are the stable-tier engine WP-M6's path layer is built on;
  * WP-M7's delta keys reuse this encoding so an overlay merge shares one
  * ordering. All mutations COW the tree and publish the root through the
  * WP-M2 double slot (no delta yet). */
-#define INVFS_V3_ROOT_INO 1ULL
+#define INVFS_ROOT_INO 1ULL
 /* 1 = present (*child_out filled), 0 = absent, -1 = I/O / malformed. */
-int vol_v3_dirent_get(invfs_volume *v, uint64_t parent, const char *name,
+int vol_dirent_get(invfs_volume *v, uint64_t parent, const char *name,
                       uint64_t *child_out);
 /* Insert or replace (parent, name) -> child. 0 = ok, -1 = error/ENOSPC. */
-int vol_v3_dirent_put(invfs_volume *v, uint64_t parent, const char *name,
+int vol_dirent_put(invfs_volume *v, uint64_t parent, const char *name,
                       uint64_t child);
 /* Physical delete (no tombstone). An absent key is not an error.
  * 0 = ok, -1 = error. */
-int vol_v3_dirent_del(invfs_volume *v, uint64_t parent, const char *name);
+int vol_dirent_del(invfs_volume *v, uint64_t parent, const char *name);
 /* Ordered range scan of a directory's children (name_len >= 1; the anchor is
  * skipped). The callback receives a NUL-terminated name and the child id and
  * runs under btree_scan's lifetime rules (name valid only for the call). A
  * non-zero return aborts the scan and is propagated. 0 = complete. */
-typedef int (*vol_v3_dirent_cb)(void *ctx, const char *name, size_t nlen,
+typedef int (*vol_dirent_cb)(void *ctx, const char *name, size_t nlen,
                                 uint64_t child);
-int vol_v3_dirent_scan(invfs_volume *v, uint64_t parent,
-                       vol_v3_dirent_cb cb, void *ctx);
+int vol_dirent_scan(invfs_volume *v, uint64_t parent,
+                       vol_dirent_cb cb, void *ctx);
 /* Allocate a fresh, never-reused inode id. The on-disk counter is not
  * persisted in WP-M6 (RT30 has no field for it), so the first allocation
  * after a mount scans the base tree once for the highest inode id and
  * resumes above it. Ids 0 and 1 (root) are reserved. Returns 0 on error
  * (an id is never 0 for a live inode). */
-uint64_t vol_v3_inode_alloc(invfs_volume *v);
+uint64_t vol_inode_alloc(invfs_volume *v);
 /* Path-level namespace entry points. `name` is a mount-relative path
  * ("dir/file"; a trailing '/' is accepted and ignored). */
-int vol_v3_path_lookup(invfs_volume *v, const char *name, uint64_t *ino_out);
-int vol_v3_path_is_dir(invfs_volume *v, const char *name);
-int vol_v3_path_list_dir(invfs_volume *v, const char *dir,
+int vol_path_lookup(invfs_volume *v, const char *name, uint64_t *ino_out);
+int vol_path_is_dir(invfs_volume *v, const char *name);
+int vol_path_list_dir(invfs_volume *v, const char *dir,
                          invfs_dirent *ents, int max);
-int vol_v3_path_stat(invfs_volume *v, const char *name, uint64_t *id_out,
+int vol_path_stat(invfs_volume *v, const char *name, uint64_t *id_out,
                      uint64_t *size_out, uint64_t *ctime_out);
-uint64_t vol_v3_create_node(invfs_volume *v, const char *name,
+uint64_t vol_create_node(invfs_volume *v, const char *name,
                             const invfs_meta_pub *meta);
 /* WP-M9: create/replace `name` with a row that already carries its content
  * address and size, then insert the dirent (row before dirent). Used by the
  * v3 write commit. Returns the inode id, 0 on failure. */
-uint64_t vol_v3_create_content_node(invfs_volume *v, const char *name,
+uint64_t vol_create_content_node(invfs_volume *v, const char *name,
                                     uint64_t size,
-                                    const uint8_t recipe_addr[INVFS_V3_RECIPE_ADDR_LEN]);
+                                    const uint8_t recipe_addr[INVFS_RECIPE_ADDR_LEN]);
 /* WP-M23: publish a blob to an existing v3 inode by id (supersedes the
  * inode's recipe address in place; dirents, attributes, and hardlinks stay intact).
  * Used by the v3 sweep engine. Returns inode_id on success, 0 on failure. */
-uint64_t vol_v3_publish_blob_inode(invfs_volume *v, uint64_t inode_id,
+uint64_t vol_publish_blob_inode(invfs_volume *v, uint64_t inode_id,
                                    const uint8_t *blob, size_t blob_len,
                                    uint64_t orig_size, uint32_t algo);
-uint64_t vol_v3_set_meta(invfs_volume *v, const char *name,
+uint64_t vol_set_meta(invfs_volume *v, const char *name,
                          const invfs_meta_pub *meta);
 /* WP-M21b: bulk content write on v3 through the WP-M9 session path (the
  * offline CLI glue; node-first then begin/range/commit). id or 0. */
-uint64_t vol_v3_write_bulk(invfs_volume *v, const char *name,
+uint64_t vol_write_bulk(invfs_volume *v, const char *name,
                            const uint8_t *data, size_t len,
                            const invfs_meta_pub *meta);
-uint64_t vol_v3_mkdir(invfs_volume *v, const char *name);
-int vol_v3_rmdir(invfs_volume *v, const char *name);
-int vol_v3_unlink(invfs_volume *v, const char *name);
-int vol_v3_rename(invfs_volume *v, const char *from, const char *to);
-int vol_v3_ensure_path(invfs_volume *v, const char *name);
+uint64_t vol_mkdir(invfs_volume *v, const char *name);
+int vol_rmdir(invfs_volume *v, const char *name);
+int vol_unlink(invfs_volume *v, const char *name);
+int vol_rename(invfs_volume *v, const char *from, const char *to);
+int vol_ensure_path(invfs_volume *v, const char *name);
 /* Enumerate the whole namespace (for the FUSE name table): one callback per
  * dirent, with the mount-relative path and the child row. */
-typedef int (*vol_v3_walk_cb)(void *ctx, const char *path, uint64_t ino,
+typedef int (*vol_walk_cb)(void *ctx, const char *path, uint64_t ino,
                               uint32_t type, uint64_t size, int64_t mtime);
-int vol_v3_walk(invfs_volume *v, vol_v3_walk_cb cb, void *ctx);
-/* vol_v3_walk, but a name or a row it cannot read ABORTS the walk with -1
+int vol_walk(invfs_volume *v, vol_walk_cb cb, void *ctx);
+/* vol_walk, but a name or a row it cannot read ABORTS the walk with -1
  * instead of being stepped over. For the one caller whose answer must not be
  * a partial view of the namespace: pba_ref_ensure, whose map is the sole
  * gate on every data-block free (src/core/volume.c). A listing walk may
  * skip a row it cannot read -- its consumer cannot act on one either way --
  * but a walk that builds a reference count cannot, because the reference it
  * drops is a block a live recipe still names. */
-int vol_v3_walk_strict(invfs_volume *v, vol_v3_walk_cb cb, void *ctx);
+int vol_walk_strict(invfs_volume *v, vol_walk_cb cb, void *ctx);
 
 /* ---- WP-M18: live-set iteration for sweep driver ---------------------
  * Walk the base B-tree inode range, consult the delta overlay for each
@@ -443,11 +443,11 @@ int vol_v3_walk_strict(invfs_volume *v, vol_v3_walk_cb cb, void *ctx);
  * first), or NULL if the inode has no dirent reference, or "" if the
  * path does not fit the buffer. Returns 0 complete, -1 error, or
  * non-zero callback return code propagated. */
-int vol_v3_iter_live_inodes(invfs_volume *v,
+int vol_iter_live_inodes(invfs_volume *v,
     int (*cb)(invfs_volume *v, uint64_t inode_id, const char *name, void *ctx),
     void *ctx);
 /* ---- WP96: the same walk at an ARBITRARY save-point generation -------
- * vol_v3_iter_live_inodes reads the CURRENT base root and the CURRENT delta
+ * vol_iter_live_inodes reads the CURRENT base root and the CURRENT delta
  * overlay. An SPT0 save point pins {base_root, delta_end} -- a PAST
  * generation -- so the save-point machinery needs the inode set of that
  * generation twice: at capture (to take the data pin) and at restore (to
@@ -464,22 +464,22 @@ int vol_v3_iter_live_inodes(invfs_volume *v,
  * resolution: the callback gets the inode id and the decoded row. Returns 0
  * complete, -1 error (including a prefix that is no longer in the chain),
  * non-zero callback propagated. */
-int vol_v3_iter_inodes_at(invfs_volume *v, uint64_t root_pba,
+int vol_iter_inodes_at(invfs_volume *v, uint64_t root_pba,
                           uint64_t delta_end, uint64_t delta_segs,
                           uint64_t delta_head_pba,
     int (*cb)(invfs_volume *v, uint64_t inode_id,
-              const invfs_v3_inode *in, void *ctx),
+              const invfs_inode *in, void *ctx),
     void *ctx);
 /* Reverse lookup: find the canonical full path ("dir/sub/file.txt") mapping
  * to `inode_id`. Returns 1 found (*name filled with full path, *parent_out set),
  * 0 absent, -1 error. */
-int vol_v3_name_of(invfs_volume *v, uint64_t inode_id,
+int vol_name_of(invfs_volume *v, uint64_t inode_id,
                    char *name, size_t name_cap,
                    uint64_t *parent_out);
 /* WP-M21b: compose the full relative path ("dir/sub/file") of an inode
  * by walking parent inodes to the root. Returns 1 composed, 0 not
  * found, -1 error (too deep/cyclic/buffer too small). */
-int vol_v3_path_of(invfs_volume *v, uint64_t inode_id, char *buf,
+int vol_path_of(invfs_volume *v, uint64_t inode_id, char *buf,
                    size_t cap);
 
 /* ---- WP118: nlink vs dirent fan-in accounting --------------------------
@@ -523,7 +523,7 @@ typedef struct {
     invfs_nlink_fault fault[INVFS_NLINK_FAULT_MAX];
 } invfs_nlink_audit;
 
-int vol_v3_nlink_audit(invfs_volume *v, invfs_nlink_audit *out);
+int vol_nlink_audit(invfs_volume *v, invfs_nlink_audit *out);
 
 /* ---- recipe-resolvability audit (v3, fsck) ---------------------------
  * The other half of "can this volume still be read". The nlink audit above
@@ -545,7 +545,7 @@ int vol_v3_nlink_audit(invfs_volume *v, invfs_nlink_audit *out);
  * hash of its own contents, so there is nothing left to rebuild it from.
  * See the -f contract in src/cli/fsck.c.
  *
- *   INVFS_RECIPE_BAD_MISSING  vol_v3_recipe_load refused: the key is not
+ *   INVFS_RECIPE_BAD_MISSING  vol_recipe_load refused: the key is not
  *                             in the base tree, the delta shadows it with a
  *                             delete, or the blob's bytes do not hash to
  *                             the address the row names
@@ -571,7 +571,7 @@ typedef struct {
 
 /* Returns 0 = audit completed (read *out*), -1 = the live-inode walk
  * failed, in which case the caller must treat the result as PARTIAL. */
-int vol_v3_recipe_audit(invfs_volume *v, invfs_recipe_audit *out);
+int vol_recipe_audit(invfs_volume *v, invfs_recipe_audit *out);
 
 /* ---- WP-M14: v3 fold (merge delta into base, atomic publish, reset) --
  * Fold applies every live delta record to a COW copy of the base B+-tree,
@@ -586,47 +586,47 @@ int vol_v3_recipe_audit(invfs_volume *v, invfs_recipe_audit *out);
  * no-op when the delta is empty), -1 = error (the volume is left at its
  * pre-fold state, or at the published-but-not-reset state on an error after
  * publish, which replay handles idempotently). */
-int vol_v3_fold(invfs_volume *v);
+int vol_fold(invfs_volume *v);
 /* Fold only when the D2 trigger fires (delta byte threshold, record count,
  * or oldest-record age); otherwise a no-op. Returns 1 = folded, 0 = below
  * threshold / empty, -1 = error. This is what WP-M18's sweep calls. */
-int vol_v3_fold_request(invfs_volume *v);
+int vol_fold_request(invfs_volume *v);
 /* Force the next fold regardless of the age component of the trigger (used
  * by tests and by an explicit operator sweep). */
-void vol_v3_fold_reset_age(invfs_volume *v);
+void vol_fold_reset_age(invfs_volume *v);
 /* WP-M18: M15 reclaim hook. Called after fold (or stand-alone) to diff
  * old vs new root and free unreferenced pages. Currently a stub; M15 fills it.
  * Idempotent: safe to call even if fold has not run. */
 void vol_reclaim_schedule(invfs_volume *v);
 /* Fold trigger thresholds (D2; measured in vol_fold.c). */
-void vol_v3_fold_trigger(uint64_t *bytes, uint64_t *records, uint64_t *age_s);
+void vol_fold_trigger(uint64_t *bytes, uint64_t *records, uint64_t *age_s);
 
 /* ---- WP-M7: v3 xattr tree (base B+-tree namespace) ------------------
  * Named xattrs are keyed by
  *     0x03 || inode_id:u64 BE || name_len:u16 BE || name
  * and carry the raw value bytes (name is in the key), so one inode's xattrs
  * are a contiguous key range (ordered by name_len, then name). This replaces the v2 INO2 TLV
- * area for VOLF_V3 volumes; the v2 path is untouched when VOLF_V3 is clear.
+ * area for VOLF_META volumes; the v2 path is untouched when VOLF_META is clear.
  * Mutations go straight to the base tree (no delta yet) and publish the root
- * through the WP-M2 double slot. `vol_v3_inode_delete` drops the whole xattr
+ * through the WP-M2 double slot. `vol_inode_delete` drops the whole xattr
  * range, which is how unlink/rmdir at nlink 0 reclaims an inode's keys.
  * These are the engine behind the `vol_*_xattr` (volume.h) dispatch. */
 /* getxattr(2) semantics: 0 = ok with *vlen set; *vlen == 0 on input is a
  * size query; -1 = ENODATA; -2 = ERANGE (buffer too small). */
-int vol_v3_xattr_get(invfs_volume *v, uint64_t inode_id, const char *name,
+int vol_xattr_get(invfs_volume *v, uint64_t inode_id, const char *name,
                      void *val, size_t *vlen);
 /* Insert or replace. 0 = ok, -1 = error, -2 = ERANGE (value too large). */
-int vol_v3_xattr_set(invfs_volume *v, uint64_t inode_id, const char *name,
+int vol_xattr_set(invfs_volume *v, uint64_t inode_id, const char *name,
                      const void *val, size_t vlen);
 /* Physical delete of the named xattr. An absent name is -1 (ENODATA). */
-int vol_v3_xattr_del(invfs_volume *v, uint64_t inode_id, const char *name);
+int vol_xattr_del(invfs_volume *v, uint64_t inode_id, const char *name);
 /* Ordered scan of an inode's xattr names (one callback per name, no
  * duplicates, in key order: name_len then name). The name is NUL-terminated
  * and valid only for the duration of the callback; a non-zero return aborts
  * the scan and is propagated. 0 = complete. */
-typedef int (*vol_v3_xattr_cb)(void *ctx, const char *name, size_t nlen);
-int vol_v3_xattr_scan(invfs_volume *v, uint64_t inode_id,
-                      vol_v3_xattr_cb cb, void *ctx);
+typedef int (*vol_xattr_cb)(void *ctx, const char *name, size_t nlen);
+int vol_xattr_scan(invfs_volume *v, uint64_t inode_id,
+                      vol_xattr_cb cb, void *ctx);
 
 /* ---- WP-M12: delta-backed mutations (the recent tier) ----------------
  * The WP-M5/M6/M7 entry points above stay the base-only path (COW + root
@@ -638,16 +638,16 @@ int vol_v3_xattr_scan(invfs_volume *v, uint64_t inode_id,
  * inode cascades the inode's xattr keys. Return 0 = ok, -1 = error, and
  * the xattr set's -2 = value too large. All are no-ops/errors on a v2
  * volume, and honour VOLF_READONLY like vol_delta_append. */
-int vol_v3_inode_delta_put(invfs_volume *v, uint64_t inode_id,
-                           const invfs_v3_inode *in);
-int vol_v3_inode_delta_delete(invfs_volume *v, uint64_t inode_id);
-int vol_v3_dirent_delta_put(invfs_volume *v, uint64_t parent,
+int vol_inode_delta_put(invfs_volume *v, uint64_t inode_id,
+                           const invfs_inode *in);
+int vol_inode_delta_delete(invfs_volume *v, uint64_t inode_id);
+int vol_dirent_delta_put(invfs_volume *v, uint64_t parent,
                             const char *name, uint64_t child);
-int vol_v3_dirent_delta_del(invfs_volume *v, uint64_t parent,
+int vol_dirent_delta_del(invfs_volume *v, uint64_t parent,
                             const char *name);
-int vol_v3_xattr_delta_set(invfs_volume *v, uint64_t inode_id,
+int vol_xattr_delta_set(invfs_volume *v, uint64_t inode_id,
                            const char *name, const void *val, size_t vlen);
-int vol_v3_xattr_delta_del(invfs_volume *v, uint64_t inode_id,
+int vol_xattr_delta_del(invfs_volume *v, uint64_t inode_id,
                            const char *name);
 
 /* rewrite `name`'s record carrying `meta` (xattrs preserved); data blocks and
@@ -672,7 +672,7 @@ uint64_t vol_create_symlink(invfs_volume *v, const char *name,
                             const char *target);
 uint64_t vol_create_special(invfs_volume *v, const char *name,
                             uint8_t type, uint16_t mode, uint64_t rdev);
-/* hard link: a second name for the same inode. On a v3 (VOLF_V3) volume
+/* hard link: a second name for the same inode. On a v3 (VOLF_META) volume
  * the shared inode row's nlink is incremented, so unlinking one name
  * leaves the row, its xattrs and its data reachable through the survivors;
  * the row is deleted only at nlink == 0. On v2 the old record-clone path
@@ -1093,8 +1093,8 @@ int  vol_io_latched(invfs_volume *v);
 
 /* WP-M21: inode-area compaction retired. The v3 inode area lives in
  * dynamic metadata extents (WP30), and dead-record reclaim happens via
- * the fold (vol_v3_fold, vol_reclaim_schedule). Per-extent reclaim runs
- * inside invf-sweep via vol_v3_fold_request; readers see no difference
+ * the fold (vol_fold, vol_reclaim_schedule). Per-extent reclaim runs
+ * inside invf-sweep via vol_fold_request; readers see no difference
  * from the old cut-and-replay shape, but no on-line cut has to keep an
  * absolute-position tombstone alive. The CMP0/CMPS descriptors + their
  * reserved block-0 slots are gone. */
@@ -1139,6 +1139,6 @@ uint64_t vol_rawm_count(invfs_volume *v, uint64_t *blocks_out);
 int  vol_tier_migrate(invfs_volume *v);
 
 /* WP-M21: extent shrink/merge run retired. The mapper is pre-allocated at
- * mkfs; fold (vol_v3_fold) is the reclaim path. */
+ * mkfs; fold (vol_fold) is the reclaim path. */
 
 #endif /* VOL_INTERNALS_H */

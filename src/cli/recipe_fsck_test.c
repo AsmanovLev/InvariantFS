@@ -50,7 +50,7 @@
  * What the test does NOT establish: it plants the damage by rewriting the
  * row's address, so it covers "the address does not resolve". It does not
  * cover a blob whose bytes survive but no longer hash to the address --
- * that path exists in vol_v3_recipe_load and is folded into the same
+ * that path exists in vol_recipe_load and is folded into the same
  * finding, but nothing here produces it. It also does not cover a recipe
  * that loads and parses yet names a data segment that is gone; that is a
  * different check (invf-verify --deep reads the bytes) and is out of
@@ -93,7 +93,7 @@ static uint64_t write_file(const char *name, const char *body)
     memset(&m, 0, sizeof m);
     m.type = INVFS_ITYP_REG;
     m.mode = 0644;
-    return vol_v3_write_bulk(g_v, name, (const uint8_t *)body,
+    return vol_write_bulk(g_v, name, (const uint8_t *)body,
                              strlen(body), &m);
 }
 
@@ -102,20 +102,20 @@ static uint64_t write_file(const char *name, const char *body)
  * intact, every page CRC verifies, and the file cannot be read. */
 static int lose_recipe(uint64_t id)
 {
-    invfs_v3_inode in;
-    if (vol_v3_inode_get(g_v, id, &in) != 1)
+    invfs_inode in;
+    if (vol_inode_get(g_v, id, &in) != 1)
         return -1;
     in.recipe_addr[0] ^= 0x5Au;
-    return vol_v3_inode_delta_put(g_v, id, &in);
+    return vol_inode_delta_put(g_v, id, &in);
 }
 
 static int restore_recipe(uint64_t id)
 {
-    invfs_v3_inode in;
-    if (vol_v3_inode_get(g_v, id, &in) != 1)
+    invfs_inode in;
+    if (vol_inode_get(g_v, id, &in) != 1)
         return -1;
     in.recipe_addr[0] ^= 0x5Au;
-    return vol_v3_inode_delta_put(g_v, id, &in);
+    return vol_inode_delta_put(g_v, id, &in);
 }
 
 /* The audit as the check, with the numbers spelled out: a bare "no
@@ -124,7 +124,7 @@ static void expect_clean(const char *what, uint64_t checked)
 {
     invfs_recipe_audit a;
     char b[192];
-    int rc = vol_v3_recipe_audit(g_v, &a);
+    int rc = vol_recipe_audit(g_v, &a);
     snprintf(b, sizeof b, "%s: audit completes", what);
     ok(rc == 0, b);
     if (rc != 0)
@@ -153,9 +153,9 @@ static void expect_clean(const char *what, uint64_t checked)
             return;
         }
         snprintf(b, sizeof b, "%s: fsck reports no unreadable recipe", what);
-        ok(rep.v3_recipe_bad == 0 && !rep.v3_recipe_partial, b);
+        ok(rep.recipe_bad == 0 && !rep.recipe_partial, b);
         snprintf(b, sizeof b, "%s: fsck does not call the volume damaged", what);
-        ok(!rep.v3_damaged, b);
+        ok(!rep.damaged, b);
     }
 }
 
@@ -168,7 +168,7 @@ static void expect_lost(const char *what, uint64_t id, const char *name,
     size_t i;
     int found = 0, named = 0;
 
-    if (vol_v3_recipe_audit(g_v, &a) != 0) {
+    if (vol_recipe_audit(g_v, &a) != 0) {
         snprintf(b, sizeof b, "%s: audit completes", what);
         ok(0, b);
         return;
@@ -209,10 +209,10 @@ static void expect_lost(const char *what, uint64_t id, const char *name,
     }
     snprintf(b, sizeof b, "%s: fsck counts %llu unreadable recipe(s)", what,
              (unsigned long long)offenders);
-    ok(rep.v3_recipe_bad == offenders, b);
+    ok(rep.recipe_bad == offenders, b);
     /* THE point of the check: the verdict is not OK and the exit code is 3 */
     snprintf(b, sizeof b, "%s: fsck marks the volume DAMAGED", what);
-    ok(rep.v3_damaged, b);
+    ok(rep.damaged, b);
     snprintf(b, sizeof b, "%s: fsck still balances the nlink accounting "
              "(the damage is not visible to that check)", what);
     ok(!rep.nlink_bad, b);
@@ -286,7 +286,7 @@ int main(int argc, char **argv)
         invfs_recipe_audit a;
         size_t i;
         int found = 0;
-        if (vol_v3_recipe_audit(g_v, &a) == 0) {
+        if (vol_recipe_audit(g_v, &a) == 0) {
             for (i = 0; i < a.nfault; i++)
                 if (a.fault[i].id == id_c)
                     found = 1;
@@ -299,7 +299,7 @@ int main(int argc, char **argv)
        "leg E: both addresses are restored");
     id_empty = write_file("empty.txt", "");
     ok(id_empty != 0, "leg E: an empty file is created");
-    ok(vol_v3_mkdir(g_v, "sub") != 0, "leg E: mkdir sub");
+    ok(vol_mkdir(g_v, "sub") != 0, "leg E: mkdir sub");
     /* 3 files with content + 1 empty + 1 directory. Only the three have a
      * recipe, and only those three are counted or checked. */
     expect_clean("leg E (empty file + directory are not false positives)", 3);
@@ -308,7 +308,7 @@ int main(int argc, char **argv)
      *
      * A v3 symlink row carries size = target length and a REAL, non-zero
      * recipe_addr: the target string is stored content-addressed exactly
-     * like a file's recipe (vol_v3_create_node). It is not an AST -- the
+     * like a file's recipe (vol_create_node). It is not an AST -- the
      * read path hands the blob back verbatim and never parses it -- but
      * this audit used to walk it into vol_ast_recipe_parse anyway and
      * report the inode as lost content.

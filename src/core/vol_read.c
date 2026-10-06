@@ -410,11 +410,11 @@ static void *decode_thread_worker(void *arg_) {
  * batches and ZSTD binary batches -- the lanes that carry essentially every
  * byte a sweep or a read touches -- never look at it.
  *
- * On a v3 volume, though, OBTAINING it is not free: vol_v3_path_of() is a
- * reverse walk of the whole dirent tree, one vol_v3_dirent_scan() per
+ * On a v3 volume, though, OBTAINING it is not free: vol_path_of() is a
+ * reverse walk of the whole dirent tree, one vol_dirent_scan() per
  * directory, each of which runs a vol_delta_range() and one
  * vol_delta_read_value() pread per delta-resident child (see the note on
- * vol_v3_path_of in vol_btree.c). Resolving it eagerly therefore made every
+ * vol_path_of in vol_btree.c). Resolving it eagerly therefore made every
  * whole-file read cost O(number of inodes in the volume) -- and the sweep
  * reads every file whole exactly once (vol_sweep_one_v3), so its transform
  * stage grew superlinearly. On one content mix held constant, that stage
@@ -462,10 +462,10 @@ static const char *recname_of(vol_recname *rn)
         if (rn->pre && rn->pre[0]) {
             snprintf(rn->buf, sizeof rn->buf, "%s", rn->pre);
         } else if (rn->v) {
-            /* return value ignored on purpose: vol_v3_path_of() leaves a
+            /* return value ignored on purpose: vol_path_of() leaves a
              * partial prefix in the buffer when the path does not fit, and
              * that is what the eager call handed the lanes. */
-            (void)vol_v3_path_of(rn->v, rn->inode_id, rn->buf,
+            (void)vol_path_of(rn->v, rn->inode_id, rn->buf,
                                  sizeof rn->buf);
         }
     }
@@ -626,8 +626,8 @@ static int vol_decode_ast_entries(invfs_volume *v, uint64_t inode_id,
                     }
                     w = &wins[e->block_id];
                     {
-                        invfs_v3_inode sin;
-                        if (!e->pba || vol_v3_inode_get(v, e->pba, &sin) != 1) {
+                        invfs_inode sin;
+                        if (!e->pba || vol_inode_get(v, e->pba, &sin) != 1) {
                             fprintf(stderr, "inode %llu: window source inode "
                                     "%llu is gone\n",
                                     (unsigned long long)inode_id,
@@ -1256,7 +1256,7 @@ static int vol_decode_ast_entries(invfs_volume *v, uint64_t inode_id,
 int vol_read_inode(invfs_volume *v, uint64_t inode_id, unsigned depth,
                           uint8_t **out, size_t *out_len)
 {
-    invfs_v3_inode in;
+    invfs_inode in;
     invfs_ast_hdr ah;
     const invfs_ast_block_entry *ents = NULL;
     size_t n_ents = 0;
@@ -1265,17 +1265,17 @@ int vol_read_inode(invfs_volume *v, uint64_t inode_id, unsigned depth,
     uint8_t *data = NULL;
     size_t len = 0;
     int rc;
-    static const uint8_t zero_addr[INVFS_V3_RECIPE_ADDR_LEN];
+    static const uint8_t zero_addr[INVFS_RECIPE_ADDR_LEN];
 
     /* WP-M8: a v3 volume has no append-only record stream. The inode row in
      * the base tree carries a content-addressed recipe *reference*; fetch
      * and BLAKE3-verify the immutable blob, then decode its segments with
      * the exact same codec code (vol_decode_ast_entries).
      * An empty file (size 0 / no address) is the "no content" case.
-     * WP-M11: vol_v3_inode_get and vol_v3_recipe_load resolve through the
+     * WP-M11: vol_inode_get and vol_recipe_load resolve through the
      * delta overlay (delta first, then base), so a read observes the recent
      * tier without this function knowing about it. */
-    rc = vol_v3_inode_get(v, inode_id, &in);
+    rc = vol_inode_get(v, inode_id, &in);
     if (rc != 1)
         return -1;
     /* The TYPE decides the shape of the content, before the address is
@@ -1285,27 +1285,27 @@ int vol_read_inode(invfs_volume *v, uint64_t inode_id, unsigned depth,
      * that neither side can drift from the other. */
     if (invfs_inode_content_is_raw_blob(in.type)) {
         if (in.size == 0 ||
-            memcmp(in.recipe_addr, zero_addr, INVFS_V3_RECIPE_ADDR_LEN) == 0) {
+            memcmp(in.recipe_addr, zero_addr, INVFS_RECIPE_ADDR_LEN) == 0) {
             *out = (uint8_t *)calloc(1, 1);
             if (!*out) return -1;
             *out_len = 0;
             return 0;
         }
-        if (vol_v3_recipe_load(v, in.recipe_addr, &blob, &blen) != 0)
+        if (vol_recipe_load(v, in.recipe_addr, &blob, &blen) != 0)
             return -1;
         *out = blob;
         *out_len = blen;
         return 0;
     }
     if (in.size == 0 ||
-        memcmp(in.recipe_addr, zero_addr, INVFS_V3_RECIPE_ADDR_LEN) == 0) {
+        memcmp(in.recipe_addr, zero_addr, INVFS_RECIPE_ADDR_LEN) == 0) {
         *out = (uint8_t *)malloc(1);
         if (!*out)
             return -1;
         *out_len = 0;
         return 0;
     }
-    if (vol_v3_recipe_load(v, in.recipe_addr, &blob, &blen) != 0) {
+    if (vol_recipe_load(v, in.recipe_addr, &blob, &blen) != 0) {
         fprintf(stderr, "vol_read_inode: v3 inode %llu: recipe blob "
                 "missing/corrupt\n", (unsigned long long)inode_id);
         return -1;
@@ -1473,7 +1473,7 @@ int vol_stat_full(invfs_volume *v, const char *name, uint64_t *id_out,
      * alternative was one idx_get lookup -- and that index has been a no-op
      * returning NULL since WP-M21 retired it, so the v2 stat reported every
      * name as absent. */
-    return vol_v3_path_stat(v, name, id_out, size_out, ctime_out);
+    return vol_path_stat(v, name, id_out, size_out, ctime_out);
 }
 
 
@@ -1518,11 +1518,11 @@ static int algo_is_whole_file(uint32_t algo)
  * vol_read_text_slice; a whole-file unit (codecpack/container) has no
  * cheaper read than the full reconstruction, so it falls back to
  * vol_read_inode once and slices the window. Returns bytes read or -1. */
-static int v3_read_range(invfs_volume *v, uint64_t inode_id, uint64_t offset,
+static int read_range(invfs_volume *v, uint64_t inode_id, uint64_t offset,
                          size_t len, void *buf)
 {
-    static const uint8_t zero_addr[INVFS_V3_RECIPE_ADDR_LEN];
-    invfs_v3_inode in;
+    static const uint8_t zero_addr[INVFS_RECIPE_ADDR_LEN];
+    invfs_inode in;
     invfs_ast_hdr ah;
     const invfs_ast_block_entry *ents = NULL;
     size_t n_ents = 0, i, got = 0;
@@ -1531,11 +1531,11 @@ static int v3_read_range(invfs_volume *v, uint64_t inode_id, uint64_t offset,
     int container_no_map = 0;
     int rc;
 
-    rc = vol_v3_inode_get(v, inode_id, &in);
+    rc = vol_inode_get(v, inode_id, &in);
     if (rc != 1)
         return -1;
     if (in.size == 0 ||
-        memcmp(in.recipe_addr, zero_addr, INVFS_V3_RECIPE_ADDR_LEN) == 0)
+        memcmp(in.recipe_addr, zero_addr, INVFS_RECIPE_ADDR_LEN) == 0)
         return 0;
     if (offset >= in.size)
         return 0;
@@ -1565,7 +1565,7 @@ static int v3_read_range(invfs_volume *v, uint64_t inode_id, uint64_t offset,
      * must not become readable past it. */
     if (invfs_inode_content_is_raw_blob(in.type)) {
         size_t avail;
-        if (vol_v3_recipe_load(v, in.recipe_addr, &blob, &blen) != 0)
+        if (vol_recipe_load(v, in.recipe_addr, &blob, &blen) != 0)
             return -1;
         avail = (blen < in.size) ? blen : (size_t)in.size;
         if (offset >= avail) {
@@ -1579,7 +1579,7 @@ static int v3_read_range(invfs_volume *v, uint64_t inode_id, uint64_t offset,
         return (int)len;
     }
 
-    if (vol_v3_recipe_load(v, in.recipe_addr, &blob, &blen) != 0)
+    if (vol_recipe_load(v, in.recipe_addr, &blob, &blen) != 0)
         return -1;
     if (vol_ast_recipe_parse(blob, blen, &ah, &ents, &n_ents) != 0 ||
         ah.file_size != in.size) {
@@ -1604,7 +1604,7 @@ static int v3_read_range(invfs_volume *v, uint64_t inode_id, uint64_t offset,
         if (seek || !pc) {
             char iname[600];
             iname[0] = 0;
-            if (vol_v3_path_of(v, inode_id, iname, sizeof iname) > 0 && iname[0]) {
+            if (vol_path_of(v, inode_id, iname, sizeof iname) > 0 && iname[0]) {
                 char mbn[640];
                 snprintf(mbn, sizeof mbn, "%s!mbrmap", iname);
                 if (vol_find(v, mbn) != 0) {
@@ -1766,7 +1766,7 @@ int vol_read_range(invfs_volume *v, uint64_t inode_id, uint64_t offset,
      * and decodes only the segments the window needs. The v2 alternative
      * located the inode record in the append-only inode area and walked it;
      * vol_open no longer admits a volume that has one. */
-    return v3_read_range(v, inode_id, offset, len, (uint8_t *)buf);
+    return read_range(v, inode_id, offset, len, (uint8_t *)buf);
 }
 
 

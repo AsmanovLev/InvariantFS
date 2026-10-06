@@ -310,7 +310,7 @@ grep -q '^OK$' "$LOGDIR/fsck-$MODE.log" \
 # the only format this build supports, and no boot could ever have passed it.
 #
 # `orphans:` is printed by the v2 report path (src/cli/fsck.c:444). A v3
-# volume takes the VOLF_V3 branch at fsck.c:146 and RETURNS before that line,
+# volume takes the VOLF_META branch at fsck.c:146 and RETURNS before that line,
 # so the string is never emitted. On v3 the equivalent facts are different
 # lines, and the one that actually answers "is anything dangling?" is
 # "live recipes: ok (N live inode(s) with content, every recipe blob they

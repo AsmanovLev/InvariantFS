@@ -12,7 +12,7 @@ uint64_t vol_create_file(invfs_volume *v, const char *name,
                         const uint8_t *data, size_t len)
 {
     /* WP-M6: a v3 node is a dirent + inode row; content goes through the
-     * WP-M9 session path (WP-M21b glue: vol_v3_write_bulk).
+     * WP-M9 session path (WP-M21b glue: vol_write_bulk).
      *
      * WP135: THIS IS A LANE-CAPABLE FUNCTION, NOT A USER-NAME BOUNDARY, and
      * it must not become one. The containerpack lane creates its member
@@ -22,7 +22,7 @@ uint64_t vol_create_file(invfs_volume *v, const char *name,
      * tools/test-p7z-batch.sh, which reported "0 member siblings" the first
      * time the check was tried in this function.
      *
-     * THE SHARP EDGE THAT LEAVES, STATED PLAINLY: vol_v3_write_bulk creates
+     * THE SHARP EDGE THAT LEAVES, STATED PLAINLY: vol_write_bulk creates
      * the node (vol_write.c:1042) BEFORE it calls vol_write_begin, and
      * vol_write_begin is where the reserved-byte refusal lives. So calling
      * THIS function with a '!' name returns 0 and leaves an EMPTY inode under
@@ -31,8 +31,8 @@ uint64_t vol_create_file(invfs_volume *v, const char *name,
      * and vol_replace_file checks here in spirit (the line below's sibling) --
      * but a caller that skips those checks leaves a zero-length name rather
      * than nothing. */
-    return (data && len) ? vol_v3_write_bulk(v, name, data, len, NULL)
-                         : vol_v3_create_node(v, name, NULL);
+    return (data && len) ? vol_write_bulk(v, name, data, len, NULL)
+                         : vol_create_node(v, name, NULL);
 }
 
 
@@ -44,7 +44,7 @@ uint64_t vol_create_file_with_meta(invfs_volume *v, const char *name,
                                    const invfs_meta_pub *meta)
 {
     /* WP-M6: a v3 node is a dirent + inode row; content goes through the
-     * WP-M9 session path (WP-M21b glue: vol_v3_write_bulk).
+     * WP-M9 session path (WP-M21b glue: vol_write_bulk).
      *
      * WP135: this IS a user-name boundary -- invf-import is its only caller
      * (tools/invf-import.c:244 :313) -- so '!' is refused here. Note that
@@ -53,8 +53,8 @@ uint64_t vol_create_file_with_meta(invfs_volume *v, const char *name,
      * '!mbrNNNN' members through it (vol_cpack.c:3622). invf-cp's call to
      * vol_create_file checks at its own site instead. */
     if (name_refused_internal_ns(name)) return 0;
-    return (data && len) ? vol_v3_write_bulk(v, name, data, len, meta)
-                         : vol_v3_create_node(v, name, meta);
+    return (data && len) ? vol_write_bulk(v, name, data, len, meta)
+                         : vol_create_node(v, name, meta);
 }
 
 
@@ -108,7 +108,7 @@ uint64_t vol_create_file_with_meta(invfs_volume *v, const char *name,
 
 
 /* v3 retires an inode by moving the dirent, not by retiring a record:
- * vol_v3_unlink drops the dirent and vol_v3_free_recipe_blocks frees the
+ * vol_unlink drops the dirent and vol_free_recipe_blocks frees the
  * segments when the last name goes. There is nothing left for a
  * record-level retire to do. */
 int vol_delete_inode(invfs_volume *v, uint64_t inode_id, const char *name)
@@ -371,7 +371,7 @@ int vol_name_is_container_sibling(invfs_volume *v, const char *name)
 }
 
 
-static int del_siblings_v3_cb(void *ctx_, const char *path, uint64_t ino,
+static int del_siblings_cb(void *ctx_, const char *path, uint64_t ino,
                               uint32_t type, uint64_t size, int64_t mtime)
 {
     del_siblings_ctx *c = (del_siblings_ctx *)ctx_;
@@ -403,7 +403,7 @@ static int del_siblings_v3_cb(void *ctx_, const char *path, uint64_t ino,
  * Returns the number unlinked.
  *
  * WP-delete-siblings-short-walk-leaves-orphans. The enumeration is a v3
- * WALK, and a walk is FALLIBLE: v3_walk_dir stops at a quarantined base page,
+ * WALK, and a walk is FALLIBLE: walk_dir stops at a quarantined base page,
  * a failed listing, a depth cap or an OOM, and returns -1 having delivered a
  * PREFIX of the namespace. A stopped walk reports found == n -- it saw
  * exactly what it stored -- so with the status on the floor there is no way
@@ -432,7 +432,7 @@ static int del_siblings_v3_cb(void *ctx_, const char *path, uint64_t ino,
  *              (src/core/vol_cpack.c:3244), the EXER lane re-probes
  *              `name!exr0` (src/core/vol_exer.c:265), and vol_transcode_abort
  *              runs on every abort of the lane that left them. The two
- *              callers with no later pass are vol_v3_unlink's cascade
+ *              callers with no later pass are vol_unlink's cascade
  *              (src/core/vol_dirs.c:663) and the v3 write commit
  *              (src/core/vol_write.c:905); those are exactly the two where
  *              the space does not come back, and the message says so.
@@ -454,7 +454,7 @@ static int del_siblings_v3_cb(void *ctx_, const char *path, uint64_t ino,
  * left the walk returning 0 -- and the old code then freed the other three.
  * That is the half-destroyed container the argument above is about, reached
  * through a walk that claims to be whole, so this function asks for
- * vol_v3_walk_strict: the one mode whose own comment (src/core/vol_dirs.c:937)
+ * vol_walk_strict: the one mode whose own comment (src/core/vol_dirs.c:937)
  * says its answer "must not be a partial view of the namespace".
  *
  * The strict mode is also the fail-CLOSED choice: one unreadable row
@@ -474,7 +474,7 @@ int vol_delete_siblings(invfs_volume *v, const char *name)
     c.name = name;
     c.nlen = strlen(name);
 
-    rc = vol_v3_walk_strict(v, del_siblings_v3_cb, &c);
+    rc = vol_walk_strict(v, del_siblings_cb, &c);
 
     /* WP-delete-siblings-short-walk-leaves-orphans: the RECEIPT, the same
      * mechanism and no second one (src/core/vol_walk.h). found == n on
@@ -499,7 +499,7 @@ int vol_delete_siblings(invfs_volume *v, const char *name)
                 "container is stored TWICE on the volume: the superseded "
                 "siblings below, and whatever the caller wrote to replace "
                 "them. The two callers with no later pass are an unlink of a "
-                "container (vol_v3_unlink) and a v3 overwrite of one "
+                "container (vol_unlink) and a v3 overwrite of one "
                 "(vol_write_commit); for those the space stays until the "
                 "volume is rebuilt from a backup or the names are removed by "
                 "hand.\n",
@@ -510,7 +510,7 @@ int vol_delete_siblings(invfs_volume *v, const char *name)
 
     n = (int)c.n;
     for (i = 0; i < c.n; i++)
-        vol_v3_unlink(v, c.names[i]);
+        vol_unlink(v, c.names[i]);
     free(c.names);
     return n;
 }
@@ -617,16 +617,16 @@ int vol_get_meta(invfs_volume *v, uint64_t inode_id, invfs_meta_pub *out)
  *
  *   -ENOENT  the row is not there. NORMAL, and the answer the v1->v2
  *            metadata upgrade path is built on: volume.c sets
- *            v3_mbuf_ready unconditionally on open, so on a volume whose
+ *            mbuf_ready unconditionally on open, so on a volume whose
  *            records predate the v3 inode row -- i.e. every pre-v3 volume,
- *            see the contract note in volume.h -- vol_v3_inode_get answers
+ *            see the contract note in volume.h -- vol_inode_get answers
  *            0 and no row will ever be found. A caller stamping metadata
  *            onto such a record legitimately starts from type defaults
  *            (uid/gid 0, 0644 files / 0755 dirs) and applies its patch on
  *            top; the defaults stand in for a row that was never written.
  *
  *   -EIO     the row could not be READ. DAMAGE: a quarantined base page
- *            makes bt_read fail, btree_search return -1 and v3_base_get
+ *            makes bt_read fail, btree_search return -1 and base_get
  *            pass that through, and a value that will not decode lands here
  *            too. There is no honest default for an inode whose recorded
  *            mode and owner are exactly what could not be read -- the
@@ -643,13 +643,13 @@ int vol_get_meta(invfs_volume *v, uint64_t inode_id, invfs_meta_pub *out)
  * a "no". */
 int vol_get_meta_rc(invfs_volume *v, uint64_t inode_id, invfs_meta_pub *out)
 {
-    invfs_v3_inode in;
+    invfs_inode in;
     int rc;
     if (!out) return -EIO;
     /* WP-M5/WP-M24: there is no INO2 ext -- the row in the base tree is the
      * authority. Map it onto the same public view (size/recipe included);
      * the symlink target rides in the recipe blob (WP-M8/WP-M24). */
-    rc = vol_v3_inode_get(v, inode_id, &in);
+    rc = vol_inode_get(v, inode_id, &in);
     if (rc < 0) return -EIO;      /* the row could not be read */
     if (rc == 0) return -ENOENT;  /* there is no such row; see above */
     memset(out, 0, sizeof(*out));
@@ -666,7 +666,7 @@ int vol_get_meta_rc(invfs_volume *v, uint64_t inode_id, invfs_meta_pub *out)
     if (in.type == INVFS_ITYP_LNK && in.size > 0) {
         uint8_t *blob = NULL;
         size_t blen = 0;
-        if (vol_v3_recipe_load(v, in.recipe_addr, &blob, &blen) == 0 && blob) {
+        if (vol_recipe_load(v, in.recipe_addr, &blob, &blen) == 0 && blob) {
             size_t cpsz = blen < sizeof(out->target) - 1 ? blen : sizeof(out->target) - 1;
             memcpy(out->target, blob, cpsz);
             out->target[cpsz] = '\0';
@@ -685,7 +685,7 @@ uint64_t vol_apply_meta(invfs_volume *v, const char *name,
                         const invfs_meta_pub *meta)
 {
     /* WP-M6: update the v3 inode row behind the name (no INO2 ext). */
-    return vol_v3_set_meta(v, name, meta);
+    return vol_set_meta(v, name, meta);
 }
 
 
@@ -704,7 +704,7 @@ uint64_t vol_create_symlink(invfs_volume *v, const char *name,
     m.size = tl;
     memcpy(m.target, target, tl + 1);
     m.mtime = m.atime = (int64_t)time(NULL);
-    return vol_v3_create_node(v, name, &m);
+    return vol_create_node(v, name, &m);
 }
 
 
@@ -722,7 +722,7 @@ uint64_t vol_create_special(invfs_volume *v, const char *name,
     m.mode = mode;
     m.rdev = rdev;
     m.mtime = m.atime = (int64_t)time(NULL);
-    return vol_v3_create_node(v, name, &m);
+    return vol_create_node(v, name, &m);
 }
 
 
@@ -736,20 +736,20 @@ int vol_get_xattr(invfs_volume *v, uint64_t inode_id, const char *xn,
                   void *val, size_t *vlen)
 {
     /* WP-M7: v3 named xattrs live in the base B+-tree, not the INO2 ext. */
-    return vol_v3_xattr_get(v, inode_id, xn, val, vlen);
+    return vol_xattr_get(v, inode_id, xn, val, vlen);
 }
 
 
 int vol_set_xattr(invfs_volume *v, uint64_t inode_id, const char *xn,
                   const void *val, size_t vlen)
 {
-    return vol_v3_xattr_delta_set(v, inode_id, xn, val, vlen);
+    return vol_xattr_delta_set(v, inode_id, xn, val, vlen);
 }
 
 
 int vol_remove_xattr(invfs_volume *v, uint64_t inode_id, const char *xn)
 {
-    return vol_v3_xattr_delta_del(v, inode_id, xn);
+    return vol_xattr_delta_del(v, inode_id, xn);
 }
 
 
@@ -761,11 +761,11 @@ typedef struct {
     char **names;
     size_t n, cap;
     int    oom;
-} v3_xattr_namevec;
+} xattr_namevec;
 
-static int v3_xattr_collect_name_cb(void *ctx_, const char *name, size_t nlen)
+static int xattr_collect_name_cb(void *ctx_, const char *name, size_t nlen)
 {
-    v3_xattr_namevec *c = (v3_xattr_namevec *)ctx_;
+    xattr_namevec *c = (xattr_namevec *)ctx_;
     char *s;
     if (c->n == c->cap) {
         size_t ncap = c->cap ? c->cap * 2 : 16;
@@ -782,12 +782,12 @@ static int v3_xattr_collect_name_cb(void *ctx_, const char *name, size_t nlen)
     return 0;
 }
 
-static int v3_xattr_name_cmp(const void *a, const void *b)
+static int xattr_name_cmp(const void *a, const void *b)
 {
     return strcmp(*(const char *const *)a, *(const char *const *)b);
 }
 
-static void v3_xattr_namevec_free(v3_xattr_namevec *c)
+static void xattr_namevec_free(xattr_namevec *c)
 {
     size_t i;
     for (i = 0; i < c->n; i++)
@@ -806,7 +806,7 @@ static void v3_xattr_namevec_free(v3_xattr_namevec *c)
 int vol_list_xattr(invfs_volume *v, uint64_t inode_id,
                    char *buf, size_t bcap)
 {
-    v3_xattr_namevec c;
+    xattr_namevec c;
     size_t i, used = 0;
     int rc, overflow = 0;
     /* Test-only seam (src/core/vol_fault.h), armed by INVFS_FAULT; stands in
@@ -814,13 +814,13 @@ int vol_list_xattr(invfs_volume *v, uint64_t inode_id,
     if (invfs_vol_fault("vol_list_xattr"))
         return -EIO;
     memset(&c, 0, sizeof c);
-    rc = vol_v3_xattr_scan(v, inode_id, v3_xattr_collect_name_cb, &c);
+    rc = vol_xattr_scan(v, inode_id, xattr_collect_name_cb, &c);
     if ((rc != 0 && rc != 1) || c.oom) {
-        v3_xattr_namevec_free(&c);
+        xattr_namevec_free(&c);
         return -EIO;
     }
     if (c.n > 1)
-        qsort(c.names, c.n, sizeof *c.names, v3_xattr_name_cmp);
+        qsort(c.names, c.n, sizeof *c.names, xattr_name_cmp);
     for (i = 0; i < c.n; i++) {
         size_t nl = strlen(c.names[i]);
         if (buf) {
@@ -830,7 +830,7 @@ int vol_list_xattr(invfs_volume *v, uint64_t inode_id,
         }
         used += nl + 1;
     }
-    v3_xattr_namevec_free(&c);
+    xattr_namevec_free(&c);
     if (overflow)
         return -2;
     return (int)used;
@@ -930,7 +930,7 @@ int vol_stamp_class(invfs_volume *v, uint64_t inode_id,
 
 /* WP27 fold-churn backstop: the inode area is append-only and format v2
  * churns it harder than v1 ever did (every rewrite/meta-stamp/heat fold
- * appends). The fold path (vol_v3_fold) reclaims dead prefix bytes; with
+ * appends). The fold path (vol_fold) reclaims dead prefix bytes; with
  * vol_inode_compact gone, inode_area_make_room's mapper-extent allocator
  * is the only path that takes a v3 append from ENOSPC back to 0, and the
  * legacy inode area (format_version=0) is read-only on mount so no

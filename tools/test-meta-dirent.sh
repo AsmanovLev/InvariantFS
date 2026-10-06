@@ -1,14 +1,14 @@
 #!/bin/bash
-# test-meta-v3-dirent.sh — WP-M6 e2e: the metadata-v3 dirent tree + namespace.
+# test-meta-dirent.sh — WP-M6 e2e: the metadata-v3 dirent tree + namespace.
 #
-# A VOLF_V3 volume must expose a real namespace through FUSE: create files
+# A VOLF_META volume must expose a real namespace through FUSE: create files
 # and directories, look them up by name (getattr/stat), readdir in sorted
 # order, unlink removes, rename moves (files and directories), and every one
 # of those survives unmount/remount. v3 nodes are empty (content/recipe
 # blobs are WP-M8), so files are created with touch.
 #
 # Run from the repo root after `make`:
-#   bash tools/run-e2e.sh tools/test-meta-v3-dirent.sh
+#   bash tools/run-e2e.sh tools/test-meta-dirent.sh
 set -e
 set -o pipefail
 
@@ -71,14 +71,14 @@ expect_list() {
 echo "== WP-M6: v3 dirent tree + namespace (create/lookup/readdir/unlink/rename) =="
 
 # --- mkfs v3 -------------------------------------------------------------
-INVFS_V3=1 $B/invf-mkfs "$IMG" 0.5 >"$WORK/mkfs.log" 2>&1 \
-    || { cat "$WORK/mkfs.log"; fail "INVFS_V3=1 mkfs failed"; }
-grep -q "format: v3 metadata skeleton" "$WORK/mkfs.log" \
-    || fail "mkfs did not report the v3 format"
+$B/invf-mkfs "$IMG" 0.5 >"$WORK/mkfs.log" 2>&1 \
+    || { cat "$WORK/mkfs.log"; fail "mkfs failed"; }
+grep -q "format: v0 metadata skeleton" "$WORK/mkfs.log" \
+    || fail "mkfs did not report the v0 format"
 
 mnt_up
-grep -q "format v3" "$WORK/fuse.log" \
-    || { cat "$WORK/fuse.log"; fail "mount did not take the v3 open path"; }
+grep -q "format v0" "$WORK/fuse.log" \
+    || { cat "$WORK/fuse.log"; fail "mount did not take the v0 open path"; }
 
 # --- create files and directories ---------------------------------------
 mkdir -p "$MNT/dir/sub"
@@ -163,4 +163,4 @@ FSCK=$($B/invf-fsck "$IMG" 2>&1) || { echo "$FSCK"; fail "fsck exited nonzero"; 
 echo "$FSCK" | grep -q "^OK$" || { echo "$FSCK"; fail "fsck not OK"; }
 echo "fsck: OK"
 
-echo "ALL META-V3 DIRENT LEGS PASS"
+echo "ALL META DIRENT LEGS PASS"

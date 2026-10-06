@@ -1,4 +1,4 @@
-/* symlink_v3_test.c — WP-M24 offline test for v3 symlinks and special files.
+/* symlink_test.c — WP-M24 offline test for v3 symlinks and special files.
  *
  * Verifies:
  *   1. vol_create_symlink works on v3 (root and nested paths).
@@ -50,7 +50,7 @@ int main(int argc, char **argv)
     uint8_t *read_buf = NULL;
     size_t read_len = 0;
 
-    printf("symlink_v3_test (WP-M24): v3 symlinks, special files, and mkfs v2 retirement\n");
+    printf("symlink_test (WP-M24): v3 symlinks, special files, and mkfs v2 retirement\n");
 
     snprintf(img, sizeof img, "%s/invf-symlink-v3-test.img", dir);
     unlink(img);
@@ -71,14 +71,14 @@ int main(int argc, char **argv)
         int err = 0;
         v = vol_open(img, &err);
         if (!v) {
-            fprintf(stderr, "symlink_v3_test: vol_open(%s) failed: err=%d\n", img, err);
+            fprintf(stderr, "symlink_test: vol_open(%s) failed: err=%d\n", img, err);
             return 2;
         }
     }
 
     /* 2. Setup directory hierarchy */
-    ok(vol_v3_mkdir(v, "dir1") != 0, "mkdir dir1");
-    ok(vol_v3_mkdir(v, "dir1/sub2") != 0, "mkdir dir1/sub2");
+    ok(vol_mkdir(v, "dir1") != 0, "mkdir dir1");
+    ok(vol_mkdir(v, "dir1/sub2") != 0, "mkdir dir1/sub2");
 
     /* 3. Test symlink creation */
     id_link_root = vol_create_symlink(v, "link_to_somewhere", "/usr/bin/python3");
@@ -193,6 +193,6 @@ int main(int argc, char **argv)
         unlink(dead_img);
     }
 
-    printf("\nsymlink_v3_test summary: %d checks, %d failures\n", checks, failures);
+    printf("\nsymlink_test summary: %d checks, %d failures\n", checks, failures);
     return failures ? 1 : 0;
 }

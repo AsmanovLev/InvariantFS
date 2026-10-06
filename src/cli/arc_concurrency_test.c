@@ -249,7 +249,7 @@ int main(int argc, char **argv)
         }
     }
     g_fsize = fsize;
-    g_fid = vol_v3_write_bulk(v, "arc.bin", g_ref, fsize, NULL);
+    g_fid = vol_write_bulk(v, "arc.bin", g_ref, fsize, NULL);
     if (!g_fid) { printf("  FAIL  write\n"); vol_close(v); return 1; }
     vol_flush(v);
     printf("  ..    inode %llu, %zu bytes, %zu segments\n",

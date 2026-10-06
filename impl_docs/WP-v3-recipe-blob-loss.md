@@ -11,7 +11,7 @@ Agent: `wp-v3-recipe-loss`
 | `src/core/vol_textzone.c` | new `tz_v3_reg_owned_blocks` — the registry's block extents as an owner set |
 | `src/core/volume_internal.h` | `tz_v3_extent` + the declaration |
 | `src/cli/batch_owner_test.c` | **new** — the regression driver |
-| `tools/test-v3-batch-owner.sh` | **new** — the regression suite |
+| `tools/test-batch-owner.sh` | **new** — the regression suite |
 | `Makefile` | build the driver, run the suite from `make test` |
 
 ## Why
@@ -131,7 +131,7 @@ Other seeds, 120 ops, image 1 — before / after:
 | `0x77` | OK | OK |
 | `0x2024` | FAILURE at op 104 | OK |
 
-New gate: `make test` runs `tools/test-v3-batch-owner.sh`, which drives the
+New gate: `make test` runs `tools/test-batch-owner.sh`, which drives the
 production `spt0_drop` + `spt0_capture` and reads the allocation bitmap (and
 the blocks' bytes) across the capture. Without the fix it reports
 `RECLAIMED_DEAD=7`; with it, `RECLAIMED_DEAD=0`.

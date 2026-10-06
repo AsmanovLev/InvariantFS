@@ -36,7 +36,7 @@
  *
  * STAGING. WP135 refuses '!' at every user-name funnel and no shipped tool
  * writes one any more, so the state this is about (a pre-WP135 volume) is
- * staged with vol_v3_write_bulk -- the call vol_create_file wraps -- exactly as
+ * staged with vol_write_bulk -- the call vol_create_file wraps -- exactly as
  * sweep_bang_test.c and sweep_report_bang_test.c do. Exact names, never
  * vol_read_named (WP141).
  *
@@ -355,7 +355,7 @@ static int stage_files(const char *img, char *const *names, int n)
     v = vol_open(img, &err);
     if (!v) { printf("  vol_open failed err=%d\n", err); return 0; }
     for (i = 0; i < n; i++)
-        if (!vol_v3_write_bulk(v, names[i], g_buf, BUFSZ, NULL)) {
+        if (!vol_write_bulk(v, names[i], g_buf, BUFSZ, NULL)) {
             printf("  staging %s failed\n", names[i]);
             good = 0;
         }
@@ -418,7 +418,7 @@ static int stage_tar(const char *img)
     if (!v) return 0;
     tarlen = build_tar(&tar);
     if (tarlen) {
-        if (vol_v3_write_bulk(v, "box.tar", tar, tarlen, NULL)) good = 1;
+        if (vol_write_bulk(v, "box.tar", tar, tarlen, NULL)) good = 1;
         free(tar);
     }
     vol_flush(v);

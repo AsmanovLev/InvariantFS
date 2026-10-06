@@ -422,7 +422,7 @@ the cap is the thing to raise.
    makes an 84,279-file container ingestible, and it is untouched by the
    cost-model work that landed on `main` during this WP (§4.5). If it stays,
    document it as a hard ingest ceiling in
-   `docs/architecture/META-V3.md` §2.7 alongside the `INVFS_META_FRAC`
+   `docs/architecture/META.md` §2.7 alongside the `INVFS_META_FRAC`
    guidance — right now it is discoverable only by reading
    `vol_cpack.c:1826`. And correct f42434e's rationale, which claims the
    flat 16 KiB price was what declined a rootfs-shaped container; the

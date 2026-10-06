@@ -1,5 +1,5 @@
 /*
- * large_file_v3_test.c — WP-M25: streaming & multi-chunk recipe blobs for files > 7.7 MiB
+ * large_file_test.c — WP-M25: streaming & multi-chunk recipe blobs for files > 7.7 MiB
  *
  * Validates:
  *   1. Writing a 16 MiB file (256 segments, recipe ~8.2 KiB > 3800 B single-page limit)
@@ -48,7 +48,7 @@ int main(int argc, char **argv)
     snprintf(img, sizeof img, "%s/invf-large-v3-test.img", dir);
     unlink(img);
 
-    printf("large_file_v3_test (WP-M25): multi-chunk recipe blobs (> 7.7 MiB)\n");
+    printf("large_file_test (WP-M25): multi-chunk recipe blobs (> 7.7 MiB)\n");
 
     orig_data = (uint8_t *)malloc(file_size);
     if (!orig_data) {
@@ -81,13 +81,13 @@ int main(int argc, char **argv)
     }
 
     /* 2. Write 16 MiB file */
-    id = vol_v3_write_bulk(v, "large_16m.bin", orig_data, file_size, NULL);
-    ok(id != 0, "write 16 MiB file via vol_v3_write_bulk");
+    id = vol_write_bulk(v, "large_16m.bin", orig_data, file_size, NULL);
+    ok(id != 0, "write 16 MiB file via vol_write_bulk");
 
     /* 3. Stat size check */
     {
         uint64_t stat_id = 0, stat_sz = 0, stat_ct = 0;
-        ok(vol_v3_path_stat(v, "large_16m.bin", &stat_id, &stat_sz, &stat_ct) == 0 &&
+        ok(vol_path_stat(v, "large_16m.bin", &stat_id, &stat_sz, &stat_ct) == 0 &&
            stat_id == id && stat_sz == file_size,
            "path_stat matches 16 MiB size and inode id");
     }
@@ -168,7 +168,7 @@ int main(int argc, char **argv)
     /* 7. Unlink and data block reclamation */
     {
         uint64_t free_before = v->free_blocks;
-        ok(vol_v3_unlink(v, "large_16m.bin") == 0, "unlink 16 MiB file");
+        ok(vol_unlink(v, "large_16m.bin") == 0, "unlink 16 MiB file");
         ok(v->free_blocks > free_before, "free blocks increased after unlinking 16 MiB file");
     }
 

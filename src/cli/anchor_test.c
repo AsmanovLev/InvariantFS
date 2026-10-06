@@ -1,4 +1,4 @@
-/* anchor_test.c — the ANC0 tail anchor driver for test-v3-meta-anchor.sh.
+/* anchor_test.c — the ANC0 tail anchor driver for test-meta-anchor.sh.
  *
  * RT30 (block 0, 0x9D0) and SPT0 (0xA00) are the only copies of the two
  * descriptors that decide whether a metadata-v3 volume can be opened at all.
@@ -148,14 +148,14 @@ static int cmd_build(const char *img, int nfiles)
     /* Fold so the base tree holds the keys and RT30 names a real root --
      * otherwise the recovery legs would be recovering an EMPTY base, which
      * they would pass whether or not the anchor works. */
-    if (vol_v3_fold(v) != 0) { vol_close(v); return fail("vol_v3_fold failed"); }
+    if (vol_fold(v) != 0) { vol_close(v); return fail("vol_fold failed"); }
     if (vol_flush(v) != 0) { vol_close(v); return fail("vol_flush failed"); }
     printf("FILES=%d ROOT_SLOT0=%llu ROOT_SLOT1=%llu SEQ=%llu\n", nfiles,
-           (unsigned long long)v->rt30.root_slot[0],
-           (unsigned long long)v->rt30.root_slot[1],
-           (unsigned long long)v->rt30.seq);
+           (unsigned long long)v->rt.root_slot[0],
+           (unsigned long long)v->rt.root_slot[1],
+           (unsigned long long)v->rt.seq);
     /* A base that is still empty makes every damage leg vacuous. */
-    if (v->rt30.root_slot[0] == 0 && v->rt30.root_slot[1] == 0) {
+    if (v->rt.root_slot[0] == 0 && v->rt.root_slot[1] == 0) {
         vol_close(v);
         return fail("leg 0: the base tree is still empty after the build -- "
                     "the damage legs would recover nothing and pass anyway");
@@ -240,7 +240,7 @@ static int cmd_reserve(const char *img, int nfiles)
                         (unsigned long long)apba, i);
         }
     }
-    if (vol_v3_fold(v) != 0) { vol_close(v); return fail("vol_v3_fold failed"); }
+    if (vol_fold(v) != 0) { vol_close(v); return fail("vol_fold failed"); }
     if (vol_flush(v) != 0) { vol_close(v); return fail("vol_flush failed"); }
     for (i = 0; i < nfiles; i++) {
         char name[64];
@@ -287,7 +287,7 @@ static int cmd_writecycle(const char *img, int nfiles)
         }
         free(buf);
     }
-    if (vol_v3_fold(v) != 0) { vol_close(v); return fail("vol_v3_fold failed"); }
+    if (vol_fold(v) != 0) { vol_close(v); return fail("vol_fold failed"); }
     if (vol_flush(v) != 0) { vol_close(v); return fail("vol_flush failed"); }
     printf("WRITECYCLE=%d\n", nfiles);
     vol_close(v);
@@ -376,7 +376,7 @@ static int cmd_probe(const char *img)
         printf("ANCHOR_STATE=%s ANCHOR_PBA=%llu TAIL_BIT=%d TAIL_FREE=%d "
                "FP_MATCH=%d MIRROR_SEQ=%llu ADOPTED=%d\n",
                state_name(st), (unsigned long long)apba, bit, isfree, fp,
-               (unsigned long long)a.rt30.seq, adopted);
+               (unsigned long long)a.rt.seq, adopted);
     }
     return 0;
 }
@@ -384,11 +384,11 @@ static int cmd_probe(const char *img)
 static int cmd_corrupt_rt30(const char *img, const char *what)
 {
     blkio io;
-    invfs_rt30 rt;
+    invfs_rt rt;
 
     if (raw_open(&io, img) != 0)
         return fail("cannot open %s", img);
-    if (raw_read_at(&io, INVFS_RT30_OFF, &rt, sizeof rt) != 0) {
+    if (raw_read_at(&io, INVFS_RT_OFF, &rt, sizeof rt) != 0) {
         blkio_close(&io);
         return fail("cannot read RT30");
     }
@@ -399,18 +399,18 @@ static int cmd_corrupt_rt30(const char *img, const char *what)
     else if (!strcmp(what, "seq")) {
         rt.seq = 0xDEADBEEF;
         rt.crc32c = 0;
-        rt.crc32c = invfs_crc32c(&rt, offsetof(invfs_rt30, crc32c));
+        rt.crc32c = invfs_crc32c(&rt, offsetof(invfs_rt, crc32c));
     } else {
         blkio_close(&io);
         return fail("corrupt-rt30: bad selector '%s'", what);
     }
-    if (blkio_pwrite(&io, INVFS_RT30_OFF, &rt, sizeof rt) != 0) {
+    if (blkio_pwrite(&io, INVFS_RT_OFF, &rt, sizeof rt) != 0) {
         blkio_close(&io);
         return fail("RT30 rewrite failed");
     }
     blkio_flush(&io);
     blkio_close(&io);
-    printf("CORRUPTED=rt30:%s\n", what);
+    printf("CORRUPTED=rt:%s\n", what);
     return 0;
 }
 

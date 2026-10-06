@@ -146,7 +146,7 @@ FRB_T := $(CURDIR)/build/frbtest
 TOOLS   := invf-mkfs invf-verify invf-fsck invf-cp invf-cat invf-ls invf-stat \
            invf-zip invf-arctest invf-blkio_test invf-fuse invf-import invf-sweep meta_probe \
            invf-stats invf-resize invf-rollback invfs-pack \
-           invf-v3inode invf-plugin-host
+           invf-vnode invf-plugin-host
 
 # Declared FIRST so it stays the default goal: make uses the first target in
 # the file, and the PERF_PROFILING rules below (line ~69) would otherwise
@@ -224,18 +224,18 @@ endef
 
 # CLI tools (main in src/cli/<name>.c)
 CLI_MAINS := mkfs verify fsck cp cat ls stat arctest blkio_test resize \
-             metabuf_test btree_test btree_repair_test v3inode overlay_test fold_test concurrency_test \
-             sweep_v3_test sweep_collect_test symlink_v3_test large_file_v3_test dedupe_v3_test deflate_repro_test window_test \
+             metabuf_test btree_test btree_repair_test vnode overlay_test fold_test concurrency_test \
+             sweep_test sweep_collect_test symlink_test large_file_test dedupe_test deflate_repro_test window_test \
              read_parallel_bitexact_test arc_concurrency_test \
-             nlink_v3_test recipe_fsck_test cpack_guard_test orphan_test rt30_slot_test anchor_test \
+             nlink_test recipe_fsck_test cpack_guard_test orphan_test rt_slot_test anchor_test \
              fsck_rootslot_test batch_owner_test plugin_host_test plugin_mt_test rs_stability_test \
              fsck_liveness_test scratch_policy_test v2rb_rollback_test keycmp_test \
-             lane_release_test pbaref_v3_test v2_open_test \
+             lane_release_test pbaref_test v2_open_test \
              sweep_publish_rollback_test \
              rollback_symlink_test \
-             sibling_retire_v3_test tar_cap_test fold_delta_read_test \
+             sibling_retire_test tar_cap_test fold_delta_read_test \
              reclaim_reader_epoch_test dedupe_symlink_test dirs_free_before_publish_test \
-             stat_v3_counts_test acl_eio_test acl_inherit_test meta_clobber_test spn_skip_recipe_test \
+             stat_counts_test acl_eio_test acl_inherit_test meta_clobber_test spn_skip_recipe_test \
              walk_status_test walk_status_fuse_test no_v2_surface_test \
              heat_walk_test no_ckp0_surface_test \
 table_sync_evict_test write_create_path_test tz_registry_test \
@@ -510,7 +510,7 @@ $(OUT)/invf-arc-conc-asan: src/cli/arc_san_test.c src/core/arc.c src/core/arc.h 
 # It is standalone for the same reason arc.c's is: src/core/vol_heat.c needs no
 # object outside libc + libzstd. It does need the real volume_internal.h for
 # the struct, and it calls 25 project symbols (vol_find, vol_get_xattr,
-# vol_v3_inode_get, meta_locate_ext, ...), so src/cli/heat_san_test.c defines
+# vol_inode_get, meta_locate_ext, ...), so src/cli/heat_san_test.c defines
 # all 25 as stubs at the bottom of itself. No volume, no image, no codecpack,
 # so a sanitizer build still costs about a second.
 #
@@ -755,11 +755,11 @@ TEST_BINS := $(foreach t,$(filter %_test,$(CLI_MAINS)),$(OUT)/invf-$(t))
 TEST_SHARD_DEPS = helpers $(TEST_BINS) $(OUT)/invf-arctest $(OUT)/invf-blkio_test $(OUT)/invf-codec_test \
         $(OUT)/invf-readdir_error_test \
       $(OUT)/invf-helper_exec_test $(OUT)/invf-metabuf_test $(OUT)/invf-btree_test \
-      $(OUT)/invf-delta_test $(OUT)/invf-groupcommit_test $(OUT)/invf-concurrency_test $(OUT)/invf-sweep_v3_test \
+      $(OUT)/invf-delta_test $(OUT)/invf-groupcommit_test $(OUT)/invf-concurrency_test $(OUT)/invf-sweep_test \
       $(OUT)/invf-sweep_collect_test $(OUT)/invf-verify \
       $(OUT)/invf-fold_delta_read_test \
       $(OUT)/invf-btree_repair_test \
-      $(OUT)/invf-symlink_v3_test $(OUT)/invf-large_file_v3_test $(OUT)/invf-dedupe_v3_test \
+      $(OUT)/invf-symlink_test $(OUT)/invf-large_file_test $(OUT)/invf-dedupe_test \
       $(OUT)/invf-read_parallel_bitexact_test \
       $(OUT)/invf-arc-conc-tsan $(OUT)/invf-arc-conc-asan \
       $(OUT)/invf-arc_concurrency_test \
@@ -768,17 +768,17 @@ TEST_SHARD_DEPS = helpers $(TEST_BINS) $(OUT)/invf-arctest $(OUT)/invf-blkio_tes
       $(OUT)/invf-cpack_map_conc_tsan $(OUT)/invf-cpack_map_conc_asan \
       $(OUT)/invf-cpack_map_conc_test \
       $(OUT)/invf-deflate_repro_test $(OUT)/invf-plugin_host_test $(OUT)/invf-plugin_mt_test \
-      $(OUT)/invf-window_test $(OUT)/invf-nlink_v3_test \
+      $(OUT)/invf-window_test $(OUT)/invf-nlink_test \
       $(OUT)/invf-recipe_fsck_test $(OUT)/invf-fsck_liveness_test \
       $(OUT)/invf-cpack_guard_test $(OUT)/invf-orphan_test \
       $(OUT)/invf-scratch_policy_test $(OUT)/invf-v2rb_rollback_test \
       $(OUT)/invf-keycmp_test $(OUT)/invf-tar_cap_test \
       $(OUT)/invf-lane_release_test \
-      $(OUT)/invf-pbaref_v3_test \
+      $(OUT)/invf-pbaref_test \
       $(OUT)/invf-sweep_publish_rollback_test \
       $(OUT)/invf-rollback_symlink_test \
-      $(OUT)/invf-sibling_retire_v3_test \
-      $(OUT)/invf-rt30_slot_test $(OUT)/invf-anchor_test $(OUT)/gzhdrfuzz \
+      $(OUT)/invf-sibling_retire_test \
+      $(OUT)/invf-rt_slot_test $(OUT)/invf-anchor_test $(OUT)/gzhdrfuzz \
       $(OUT)/invf-fsck_rootslot_test \
       $(OUT)/invf-batch_owner_test \
       $(OUT)/invf-rs_stability_test \
@@ -860,7 +860,7 @@ test-shard-1: $(TEST_SHARD_DEPS) test-shard-check
 # by the setup quietly changing. It is in CLI_MAINS, so $(TEST_BINS)
 # above already has it as a prerequisite.
 	$(TESTENV) $(TESTISO) $(OUT)/invf-reclaim_reader_epoch_test /tmp
-	$(TESTENV) $(TESTISO) $(OUT)/invf-sweep_v3_test /tmp
+	$(TESTENV) $(TESTISO) $(OUT)/invf-sweep_test /tmp
 	$(TESTENV) $(TESTISO) $(OUT)/invf-sweep_collect_test /tmp
 # WP135: the walk-receipt controls. invf-verify and invf-sweep are
 # invoked as SUBPROCESSES by walk_status_test (they are separate mains,
@@ -995,8 +995,8 @@ test-shard-2: $(TEST_SHARD_DEPS) test-shard-check
 	$(TESTENV) $(TESTISO) $(OUT)/invf-tz_registry_test ctl /tmp
 	$(TESTENV) $(TESTISO) $(OUT)/invf-tz_registry_test red /tmp
 	$(TESTENV) $(TESTISO) $(OUT)/invf-btree_repair_test /tmp
-	$(TESTENV) $(TESTISO) $(OUT)/invf-symlink_v3_test /tmp
-	$(TESTENV) $(TESTISO) $(OUT)/invf-large_file_v3_test /tmp
+	$(TESTENV) $(TESTISO) $(OUT)/invf-symlink_test /tmp
+	$(TESTENV) $(TESTISO) $(OUT)/invf-large_file_test /tmp
 	$(TESTENV) $(TESTISO) $(OUT)/invf-read_parallel_bitexact_test /tmp
 # A failed listing must not look like an empty directory (readdir, and
 # the same shape in listxattr). It runs under $(TESTISO) normally: it
@@ -1008,12 +1008,12 @@ test-shard-2: $(TEST_SHARD_DEPS) test-shard-check
 	$(TESTENV) $(TESTISO) $(OUT)/invf-readdir_error_test /tmp
 
 test-shard-3: $(TEST_SHARD_DEPS) test-shard-check
-# WP stat-counts-v3: invf-stat's file counts against invf-ls's, on one
+# WP stat-counts: invf-stat's file counts against invf-ls's, on one
 # image. Two oracles on purpose -- the defect is that one of them read an
 # empty v2 inode area on a v3 volume and printed a confident zero, so an
 # expectation pinned to a literal would only encode today's count. Needs
 # invf-mkfs, invf-ls and invf-stat on disk (the `all` prerequisite).
-	$(TESTENV) $(TESTISO) $(OUT)/invf-stat_v3_counts_test /tmp
+	$(TESTENV) $(TESTISO) $(OUT)/invf-stat_counts_test /tmp
 # WP xattr-enodata-vs-eio: vol_get_xattr returned -1 for BOTH "no such
 # xattr" and "the row could not be read", and perm_check_cred used that
 # to decide "this inode has no ACL" -- so a read error on the inode row
@@ -1127,10 +1127,10 @@ test-shard-3: $(TEST_SHARD_DEPS) test-shard-check
 	ASAN_OPTIONS=$(CPACK_SAN_ASAN) INVFS_CPACK_SAN_LEG=all \
 	    $(TESTENV) $(TESTISO) $(OUT)/invf-cpack_map_conc_asan
 	INVFS_CPACK_SAN_LEG=all $(TESTENV) $(TESTISO) $(OUT)/invf-cpack_map_conc_test
-	$(TESTENV) $(TESTISO) $(OUT)/invf-dedupe_v3_test /tmp
+	$(TESTENV) $(TESTISO) $(OUT)/invf-dedupe_test /tmp
 	$(TESTENV) $(OUT)/invf-dedupe_symlink_test $(UNIT_SCRATCH)
 	$(TESTENV) $(TESTISO) $(OUT)/invf-window_test /tmp
-	$(TESTENV) $(TESTISO) $(OUT)/invf-nlink_v3_test /tmp
+	$(TESTENV) $(TESTISO) $(OUT)/invf-nlink_test /tmp
 	$(TESTENV) $(TESTISO) $(OUT)/invf-recipe_fsck_test /tmp
 	$(TESTENV) $(TESTISO) $(OUT)/invf-fsck_liveness_test /tmp
 	$(TESTENV) $(OUT)/invf-cpack_guard_test
@@ -1138,7 +1138,7 @@ test-shard-3: $(TEST_SHARD_DEPS) test-shard-check
 	$(TESTENV) $(TESTISO) $(OUT)/invf-tar_cap_test /tmp
 
 test-shard-4: $(TEST_SHARD_DEPS) test-shard-check
-# WP201: the two v2-era paths that kept running on Meta-v3. The
+# WP201: the two v2-era paths that kept running on Meta. The
 # containerpack MAP branch's rollback reached v3, where the commit it
 # rolls back superseded the row IN PLACE -- so it cannot undo anything,
 # and its v2 retire writes a TOMBSTONE into the shared metadata extent,
@@ -1187,18 +1187,18 @@ test-shard-4: $(TEST_SHARD_DEPS) test-shard-check
 # definition has crept back into src/core. No volume, no I/O, so it
 # cannot be flaky.
 	$(TESTENV) $(TESTISO) $(OUT)/invf-keycmp_test
-# WP pba-ref-v3-incremental: the pba reference map is the sole gate on
+# WP pba-ref-incremental: the pba reference map is the sole gate on
 # every v3 block free, and v3 had no birth/death hook for it. The red
 # leg (`wrongfree`) is the sequence that freed a live sharer's segment;
 # `red`/`rednosweep` are the audit's (i)(ii)(iii) with and without the
 # map-rebuild leg; `hookctl` publishes a second sharer through the
 # recipe-publish path and unlinks the first.
-	$(TESTENV) $(TESTISO) $(OUT)/invf-pbaref_v3_test /tmp wrongfree
-	$(TESTENV) $(TESTISO) $(OUT)/invf-pbaref_v3_test /tmp hookctl
-	$(TESTENV) $(TESTISO) $(OUT)/invf-pbaref_v3_test /tmp red
-	$(TESTENV) $(TESTISO) $(OUT)/invf-pbaref_v3_test /tmp rednosweep
-	$(TESTENV) $(TESTISO) $(OUT)/invf-pbaref_v3_test /tmp all
-	$(TESTENV) $(TESTISO) $(OUT)/invf-pbaref_v3_test /tmp allnosweep
+	$(TESTENV) $(TESTISO) $(OUT)/invf-pbaref_test /tmp wrongfree
+	$(TESTENV) $(TESTISO) $(OUT)/invf-pbaref_test /tmp hookctl
+	$(TESTENV) $(TESTISO) $(OUT)/invf-pbaref_test /tmp red
+	$(TESTENV) $(TESTISO) $(OUT)/invf-pbaref_test /tmp rednosweep
+	$(TESTENV) $(TESTISO) $(OUT)/invf-pbaref_test /tmp all
+	$(TESTENV) $(TESTISO) $(OUT)/invf-pbaref_test /tmp allnosweep
 # WP wp/pbaref-skipped-row-is-not-exact: pba_ref_ensure SKIPPED an inode
 # row it could not read, discarded the walk's status, and set
 # pba_ref_stale = 0 -- the "this map is exact" flag -- on a map built
@@ -1212,8 +1212,8 @@ test-shard-4: $(TEST_SHARD_DEPS) test-shard-check
 # against the scenario. The countdown is SEARCHED, not fixed: how many
 # row reads a build performs is the volume's business, and a hard-coded
 # n goes stale silently and leaves the leg green on the healthy path.
-	$(TESTENV) $(TESTISO) $(OUT)/invf-pbaref_v3_test /tmp skiprow
-	$(TESTENV) $(TESTISO) $(OUT)/invf-pbaref_v3_test /tmp skiprowctl
+	$(TESTENV) $(TESTISO) $(OUT)/invf-pbaref_test /tmp skiprow
+	$(TESTENV) $(TESTISO) $(OUT)/invf-pbaref_test /tmp skiprowctl
 # WP wp/unlink-takes-map-after-dirent-drop: vol_v3_unlink took the
 # pba-ref map AFTER it had already dropped the dirent, and the map's
 # build reaches an inode THROUGH ITS DIRENT (v3_walk_dir ->
@@ -1228,8 +1228,8 @@ test-shard-4: $(TEST_SHARD_DEPS) test-shard-check
 # identical sequence with nothing published in between, so the map is
 # still exact, the ensure is a no-op, and the leg measures the
 # ORDER rather than the scenario.
-	$(TESTENV) $(TESTISO) $(OUT)/invf-pbaref_v3_test /tmp unlinkmap
-	$(TESTENV) $(TESTISO) $(OUT)/invf-pbaref_v3_test /tmp unlinkmapctl
+	$(TESTENV) $(TESTISO) $(OUT)/invf-pbaref_test /tmp unlinkmap
+	$(TESTENV) $(TESTISO) $(OUT)/invf-pbaref_test /tmp unlinkmapctl
 # WP wp/unlink-takes-map-after-dirent-drop, second site: the overwrite
 # victim in vol_v3_rename took the map after ITS OWN dirent was dropped,
 # with the same wrong comment ("while the row still names
@@ -1240,8 +1240,8 @@ test-shard-4: $(TEST_SHARD_DEPS) test-shard-check
 # map -- so it publishes the same file and then brings the map up to
 # date by hand: same corpus, same rename, the only variable being
 # whether the map is fresh or stale at retire time.
-	$(TESTENV) $(TESTISO) $(OUT)/invf-pbaref_v3_test /tmp rename
-	$(TESTENV) $(TESTISO) $(OUT)/invf-pbaref_v3_test /tmp renamectl
+	$(TESTENV) $(TESTISO) $(OUT)/invf-pbaref_test /tmp rename
+	$(TESTENV) $(TESTISO) $(OUT)/invf-pbaref_test /tmp renamectl
 # WP wp/dirs-free-before-publish: vol_v3_create_node freed the existing
 # inode's blocks BEFORE it republished the row, so each of the four
 # failure returns between the free and the publish left a LIVE row naming
@@ -1268,7 +1268,7 @@ test-shard-4: $(TEST_SHARD_DEPS) test-shard-check
 	$(TESTENV) $(TESTISO) $(OUT)/invf-dirs_free_before_publish_test $(FRB_T) setup
 	$(TESTENV) $(TESTISO) $(OUT)/invf-dirs_free_before_publish_test $(FRB_T) ok
 	$(TESTENV) $(TESTISO) $(OUT)/invf-dirs_free_before_publish_test $(FRB_T) hookctl
-	$(TESTENV) $(TESTISO) $(OUT)/invf-sibling_retire_v3_test
+	$(TESTENV) $(TESTISO) $(OUT)/invf-sibling_retire_test
 # The container MEMBER BOUND is one number in the engine and eight
 # mirrored copies in the container packs. Nothing noticed when they
 # drifted -- a pack left at the old cap just declines every container
@@ -1310,7 +1310,7 @@ test-shard-4: $(TEST_SHARD_DEPS) test-shard-check
 # gate (subprocess with a clean env) and the on-disk geometry of a
 # volume that was built, reclaimed and then damaged -- the damage leg
 # is what a wrong liveness predicate cannot survive.
-	$(TESTENV) $(TESTISO) bash tools/test-v3-orphan-reclaim.sh
+	$(TESTENV) $(TESTISO) bash tools/test-orphan-reclaim.sh
 # WP138: invf-import must never DROP a path without naming it. This is
 # the silent-absence shape -- run as an ordinary user, /etc/shadow and
 # every other root-only path were skipped, the tool exited 0, and
@@ -1339,22 +1339,22 @@ test-shard-4: $(TEST_SHARD_DEPS) test-shard-check
 # which cost a file its recipe (fuzz seed 0x5e9, image 1, 81 ops). The
 # window is intra-sweep, so the suite drives the sweep's own prepare and
 # reads the bitmap; leg 3 is what keeps a veto from passing as a fix.
-	$(TESTENV) $(TESTISO) bash tools/test-v3-batch-owner.sh
+	$(TESTENV) $(TESTISO) bash tools/test-batch-owner.sh
 # WP123: the RT30 reader must refuse a root slot whose block the
 # allocation bitmap reports as free. The suite carries its own red
 # control so a no-op fix cannot pass it.
-	$(TESTENV) $(TESTISO) bash tools/test-v3-rt30-slot-alloc.sh
+	$(TESTENV) $(TESTISO) bash tools/test-rt-slot-alloc.sh
 # Two RT30 slots at the same gen are TWO different things: both slots
 # naming ONE root is what an ordinary rollback produces (clean, and it
 # used to be reported DAMAGED with exit 3), while two DISTINCT pages
 # at one gen is a real ambiguous publish and must still be caught. The
 # negative leg is the one that stops a fix which silences the tiebreak
 # outright; the red control proves the false positive was real.
-	$(TESTENV) $(TESTISO) bash tools/test-v3-rt30-same-root.sh
+	$(TESTENV) $(TESTISO) bash tools/test-rt-same-root.sh
 # The ANC0 tail anchor: a second LOCATION for the block-0 descriptors.
 # The suite carries its own red control (a volume with no anchor must
 # never have its tail block written), so a no-op cannot pass it.
-	$(TESTENV) $(TESTISO) bash tools/test-v3-meta-anchor.sh
+	$(TESTENV) $(TESTISO) bash tools/test-meta-anchor.sh
 # A v3 sweep transform that cannot publish its new recipe must ROLL BACK
 # the segments it wrote, not leave them allocated and unreferenced. The
 # suite drives the volume to the exact state (a file whose per-segment

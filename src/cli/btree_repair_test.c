@@ -531,8 +531,8 @@ static int fsck_cli_offline(const char *img, int fix)
 static int build_and_fold(void)
 {
     int err = 0, i;
-    uint8_t k[8], val[INVFS_V3_INODE_ROW_FIXED];
-    invfs_v3_inode_row r;
+    uint8_t k[8], val[INVFS_INODE_ROW_FIXED];
+    invfs_inode_row r;
 
     g_v = vol_open(g_img, &err);
     if (!g_v) {
@@ -540,7 +540,7 @@ static int build_and_fold(void)
                 g_img, err);
         return -1;
     }
-    if (!(vol_sb(g_v)->vol_flags & VOLF_V3)) {
+    if (!(vol_sb(g_v)->vol_flags & VOLF_META)) {
         fprintf(stderr, "btree_repair_test: %s is not a v3 volume\n", g_img);
         return -1;
     }
@@ -560,7 +560,7 @@ static int build_and_fold(void)
         m.nlink = 1;
         m.mtime = m.atime = (int64_t)time(NULL);
         m.size = sizeof data;
-        id = vol_v3_write_bulk(g_v, name, data, sizeof data, &m);
+        id = vol_write_bulk(g_v, name, data, sizeof data, &m);
         if (!id) {
             fprintf(stderr, "btree_repair_test: write_bulk(%s) failed\n", name);
             return -1;
@@ -570,7 +570,7 @@ static int build_and_fold(void)
 
     /* filler rows: enough keys to force a multi-level tree */
     memset(&r, 0, sizeof r);
-    r.row_version = INVFS_V3_INODE_ROW_VERSION;
+    r.row_version = INVFS_INODE_ROW_VERSION;
     r.type = INVFS_ITYP_REG;
     r.mode = 0600;
     r.uid = r.gid = 1000;
@@ -588,7 +588,7 @@ static int build_and_fold(void)
         }
     }
 
-    if (vol_v3_fold(g_v) != 0) {
+    if (vol_fold(g_v) != 0) {
         fprintf(stderr, "btree_repair_test: fold failed\n");
         return -1;
     }
@@ -597,7 +597,7 @@ static int build_and_fold(void)
         bt_stat st;
         char e[128];
         e[0] = 0;
-        if (vol_v3_base_root(g_v, &root) != 0) {
+        if (vol_base_root(g_v, &root) != 0) {
             fprintf(stderr, "btree_repair_test: base root unreadable\n");
             return -1;
         }
@@ -619,10 +619,10 @@ static int build_and_fold(void)
      * key falls inside the key range the tear will quarantine. The repair must
      * bring it back (it is not lost -- the delta still has it). */
     {
-        invfs_v3_inode_row rr;
+        invfs_inode_row rr;
         uint64_t id = RESCUE_ID;
         memset(&rr, 0, sizeof rr);
-        rr.row_version = INVFS_V3_INODE_ROW_VERSION;
+        rr.row_version = INVFS_INODE_ROW_VERSION;
         rr.type = INVFS_ITYP_REG;
         rr.mode = 0640;
         rr.uid = rr.gid = 1000;
@@ -700,7 +700,7 @@ int main(int argc, char **argv)
     g_phase = "B: pick a leaf, tear it";
     /* ---- B: pick a leaf, tear it ---- */
     memset(&g_lp, 0, sizeof g_lp);
-    if (vol_v3_base_root(g_v, &root) != 0)
+    if (vol_base_root(g_v, &root) != 0)
         return 2;
     scan_rec(root);
     g_lp.pages = g_pages;
@@ -772,14 +772,14 @@ int main(int argc, char **argv)
     err[0] = 0;
     vol_fsck_scan(g_v, &rep, 0);
     printf("  fsck report: damaged=%d bad_pages=%llu keys=%llu pages=%llu "
-           "(of %llu)\n", rep.v3_damaged, (unsigned long long)rep.v3_bad_pages,
-           (unsigned long long)rep.v3_keys, (unsigned long long)rep.v3_pages_walked,
+           "(of %llu)\n", rep.damaged, (unsigned long long)rep.bad_pages,
+           (unsigned long long)rep.keys, (unsigned long long)rep.pages_walked,
            (unsigned long long)g_lp.pages);
-    ok(rep.v3_damaged == 1, "fsck reports the volume DAMAGED");
-    ok(rep.v3_bad_pages >= 1, "fsck counts the unreadable page");
-    ok(rep.v3_pages_walked == g_lp.pages,
+    ok(rep.damaged == 1, "fsck reports the volume DAMAGED");
+    ok(rep.bad_pages >= 1, "fsck counts the unreadable page");
+    ok(rep.pages_walked == g_lp.pages,
        "fsck walks the WHOLE tree past the bad page (containment, not abort)");
-    ok(rep.v3_quarantined >= 1,
+    ok(rep.quarantined >= 1,
        "fsck names the quarantined key range(s)");
 
     /* the CLI is the contract: nonzero on damage, always */
@@ -790,8 +790,8 @@ int main(int argc, char **argv)
     g_phase = "D: reads";
     /* ---- D: reads ---- */
     for (i = 0; i < (int)NFILE; i++) {
-        invfs_v3_inode in;
-        int r = vol_v3_inode_get(g_v, g_file_id[i], &in);
+        invfs_inode in;
+        int r = vol_inode_get(g_v, g_file_id[i], &in);
         if (!in_quarantine(g_file_id[i]))
             continue;
         lost_names++;
@@ -804,11 +804,11 @@ int main(int argc, char **argv)
     }
     for (i = 0; i < (int)NFILL; i++) {
         uint64_t id = FIRST_ID + (uint64_t)i;
-        invfs_v3_inode in;
+        invfs_inode in;
         int r;
         if (id == RESCUE_ID)
             continue;          /* delta-only: asserted separately below */
-        r = vol_v3_inode_get(g_v, id, &in);
+        r = vol_inode_get(g_v, id, &in);
         if (in_quarantine(id)) {
             if (r < 0)
                 eio++;
@@ -823,8 +823,8 @@ int main(int argc, char **argv)
         }
     }
     {
-        invfs_v3_inode in;
-        int r = vol_v3_inode_get(g_v, RESCUE_ID, &in);
+        invfs_inode in;
+        int r = vol_inode_get(g_v, RESCUE_ID, &in);
         ok(r == 1 && in.size == 0x5AFE5AFEull,
            "a delta-only key inside the quarantined range still reads back");
     }
@@ -840,7 +840,7 @@ int main(int argc, char **argv)
      * must not silently come back shorter (WP86: never invent, never hide). */
     {
         invfs_dirent ents[256];
-        int n = vol_v3_path_list_dir(g_v, "", ents, 256);
+        int n = vol_path_list_dir(g_v, "", ents, 256);
         printf("  readdir of the root: %d entries\n", n);
         ok(n < 0, "readdir fails loudly instead of silently listing fewer names");
     }
@@ -862,7 +862,7 @@ int main(int argc, char **argv)
     ok(cli == 0, "invf-fsck is clean (exit 0) once the volume is repaired");
 
     err[0] = 0;
-    if (vol_v3_base_root(g_v, &root) == 0 &&
+    if (vol_base_root(g_v, &root) == 0 &&
         btree_check(g_v, root, &st, err, sizeof err) == 0)
         ok(1, "the repaired base tree is structurally valid");
     else
@@ -870,13 +870,13 @@ int main(int argc, char **argv)
 
     {
         int kept2 = 0, outside2 = 0, rescued = 0;
-        invfs_v3_inode in;
+        invfs_inode in;
         for (i = 0; i < (int)NFILL; i++) {
             uint64_t id = FIRST_ID + (uint64_t)i;
             int r;
             if (id == RESCUE_ID)
                 continue;      /* delta-only: counted as `rescued` below */
-            r = vol_v3_inode_get(g_v, id, &in);
+            r = vol_inode_get(g_v, id, &in);
             if (in_quarantine(id)) {
                 if (r == 1)
                     rescued_base++;   /* the delta still had this one */
@@ -889,7 +889,7 @@ int main(int argc, char **argv)
             }
         }
         rescued = rescued_base +
-                  (vol_v3_inode_get(g_v, RESCUE_ID, &in) == 1 &&
+                  (vol_inode_get(g_v, RESCUE_ID, &in) == 1 &&
                    in.size == 0x5AFE5AFEull ? 1 : 0);
         printf("  after repair: %d/%d keys outside the range intact, "
                "%d quarantined keys recovered from the delta, %d gone\n",
@@ -922,7 +922,7 @@ int main(int argc, char **argv)
             char nm[64];
             uint64_t id = 0, sz = 0, ct = 0;
             snprintf(nm, sizeof nm, "f%03u.bin", i);
-            if (vol_v3_path_stat(g_v, nm, &id, &sz, &ct) == 0 &&
+            if (vol_path_stat(g_v, nm, &id, &sz, &ct) == 0 &&
                 !in_quarantine(g_file_id[i]))
                 still++;
             if (in_quarantine(g_file_id[i]))
@@ -994,7 +994,7 @@ int main(int argc, char **argv)
     ok(g_v != NULL, "the repaired volume reopens");
     if (g_v) {
         err[0] = 0;
-        if (vol_v3_base_root(g_v, &root) == 0 &&
+        if (vol_base_root(g_v, &root) == 0 &&
             btree_check(g_v, root, &st, err, sizeof err) == 0)
             ok(1, "the repaired tree is still valid after a remount");
         else
@@ -1029,10 +1029,10 @@ int main(int argc, char **argv)
         if (!g_v)
             return 2;
         {
-            uint8_t kk[8], vv[INVFS_V3_INODE_ROW_FIXED];
-            invfs_v3_inode_row rr;
+            uint8_t kk[8], vv[INVFS_INODE_ROW_FIXED];
+            invfs_inode_row rr;
             memset(&rr, 0, sizeof rr);
-            rr.row_version = INVFS_V3_INODE_ROW_VERSION;
+            rr.row_version = INVFS_INODE_ROW_VERSION;
             rr.type = INVFS_ITYP_REG;
             rr.mode = 0600;
             rr.uid = rr.gid = 1000;
@@ -1046,14 +1046,14 @@ int main(int argc, char **argv)
                                      (uint16_t)sizeof rr, 0) != 0)
                     return 2;
             }
-            if (vol_v3_fold(g_v) != 0)
+            if (vol_fold(g_v) != 0)
                 return 2;
         }
         /* collect every leaf, then take three spread across the tree */
         {
             leaflist ll;
             memset(&ll, 0, sizeof ll);
-            if (vol_v3_base_root(g_v, &root) != 0)
+            if (vol_base_root(g_v, &root) != 0)
                 return 2;
             list_rec(root, &ll);
             if (ll.n < 6) {
@@ -1103,25 +1103,25 @@ int main(int argc, char **argv)
         memset(&rep, 0, sizeof rep);
         vol_fsck_scan(g_v, &rep, 0);
         printf("  fsck report: bad_pages=%llu quarantined=%llu pages=%llu\n",
-               (unsigned long long)rep.v3_bad_pages,
-               (unsigned long long)rep.v3_quarantined,
-               (unsigned long long)rep.v3_pages_walked);
-        ok(rep.v3_bad_pages == 3, "fsck counts ALL THREE unreadable pages "
+               (unsigned long long)rep.bad_pages,
+               (unsigned long long)rep.quarantined,
+               (unsigned long long)rep.pages_walked);
+        ok(rep.bad_pages == 3, "fsck counts ALL THREE unreadable pages "
                                   "(the pre-fix walk stopped at the first)");
-        ok(rep.v3_quarantined == 3, "fsck reports three quarantined ranges");
+        ok(rep.quarantined == 3, "fsck reports three quarantined ranges");
 
         /* every key in a quarantined range reads EIO; every other key reads */
         for (k = 0; k < (int)NFILL; k++) {
             uint64_t id = FIRST_ID + (uint64_t)k;
             uint8_t kk[8];
-            invfs_v3_inode in;
+            invfs_inode in;
             int r, inq = 0;
             ino_key(kk, id);
             for (l = 0; l < nv; l++)
                 if (keycmp(kk, 8, vlos[l], vlos_n[l], 0) >= 0 &&
                     keycmp(kk, 8, vhis[l], vhis_n[l], vhi_unb[l]) < 0)
                     inq = 1;
-            r = vol_v3_inode_get(g_v, id, &in);
+            r = vol_inode_get(g_v, id, &in);
             if (inq) {
                 if (r < 0)
                     eio2++;
@@ -1146,7 +1146,7 @@ int main(int argc, char **argv)
         printf("  invf-fsck -f --discard-reachable with three torn pages: exit %d\n", cli);
         ok(cli == 3, "invf-fsck -f exits 3 after repairing three pages");
         err[0] = 0;
-        if (vol_v3_base_root(g_v, &root) == 0 &&
+        if (vol_base_root(g_v, &root) == 0 &&
             btree_check(g_v, root, &st, err, sizeof err) == 0)
             ok(1, "the tree with three excised subtrees is structurally valid");
         else
@@ -1156,14 +1156,14 @@ int main(int argc, char **argv)
             for (k = 0; k < (int)NFILL; k++) {
                 uint64_t id = FIRST_ID + (uint64_t)k;
                 uint8_t kk[8];
-                invfs_v3_inode in;
+                invfs_inode in;
                 int r, inq = 0;
                 ino_key(kk, id);
                 for (l = 0; l < nv; l++)
                     if (keycmp(kk, 8, vlos[l], vlos_n[l], 0) >= 0 &&
                         keycmp(kk, 8, vhis[l], vhis_n[l], vhi_unb[l]) < 0)
                         inq = 1;
-                r = vol_v3_inode_get(g_v, id, &in);
+                r = vol_inode_get(g_v, id, &in);
                 if (inq)
                     continue;
                 out3++;
@@ -1218,18 +1218,18 @@ int main(int argc, char **argv)
             m.nlink = 1;
             m.mtime = m.atime = (int64_t)time(NULL);
             m.size = sizeof d;
-            id = vol_v3_write_bulk(g_v, nm, d, sizeof d, &m);
+            id = vol_write_bulk(g_v, nm, d, sizeof d, &m);
             if (!id) {
                 fprintf(stderr, "btree_repair_test: long-name write failed\n");
                 return 2;
             }
         }
-        if (vol_v3_fold(g_v) != 0)
+        if (vol_fold(g_v) != 0)
             return 2;
         {
             leaflist ll;
             memset(&ll, 0, sizeof ll);
-            if (vol_v3_base_root(g_v, &root) != 0)
+            if (vol_base_root(g_v, &root) != 0)
                 return 2;
             list_rec(root, &ll);
             if (ll.n < 4) {
@@ -1274,7 +1274,7 @@ int main(int argc, char **argv)
             char nm[300];
             uint64_t id = 0, sz = 0, ct = 0;
             snprintf(nm, sizeof nm, "%03d-%s", j, longname);
-            if (vol_v3_path_stat(g_v, nm, &id, &sz, &ct) == 0)
+            if (vol_path_stat(g_v, nm, &id, &sz, &ct) == 0)
                 survivors++;
         }
         printf("  long-named files still resolvable after the repair: %d of 24\n",
@@ -1346,7 +1346,7 @@ int main(int argc, char **argv)
             m.nlink = 1;
             m.mtime = m.atime = (int64_t)time(NULL);
             m.size = sizeof d;
-            id = vol_v3_write_bulk(g_v, nm, d, sizeof d, &m);
+            id = vol_write_bulk(g_v, nm, d, sizeof d, &m);
             if (!id)
                 return 2;
             if (j == 0)
@@ -1360,19 +1360,19 @@ int main(int argc, char **argv)
             for (j = 0; j < 3; j++) {
                 char nm[32];
                 snprintf(nm, sizeof nm, "chunky%d", j);
-                if (vol_v3_xattr_set(g_v, id0, nm, big, sizeof big) != 0) {
+                if (vol_xattr_set(g_v, id0, nm, big, sizeof big) != 0) {
                     fprintf(stderr, "btree_repair_test: xattr_set failed\n");
                     return 2;
                 }
             }
         }
-        if (vol_v3_fold(g_v) != 0)
+        if (vol_fold(g_v) != 0)
             return 2;
         {
             leaflist ll;
             char e0[128];
             memset(&ll, 0, sizeof ll);
-            if (vol_v3_base_root(g_v, &root) != 0)
+            if (vol_base_root(g_v, &root) != 0)
                 return 2;
             e0[0] = 0;
             if (btree_check(g_v, root, &st, e0, sizeof e0) != 0)
@@ -1402,8 +1402,8 @@ int main(int argc, char **argv)
         if (!g_v)
             return 1;
         {
-            invfs_v3_inode in;
-            ok(vol_v3_inode_get(g_v, id0, &in) == 1,
+            invfs_inode in;
+            ok(vol_inode_get(g_v, id0, &in) == 1,
                "both files resolve while the tree still has two children");
         }
 
@@ -1452,7 +1452,7 @@ int main(int argc, char **argv)
             int c0, c1;
             static uint8_t xv[2000];
             size_t xvlen = sizeof xv;
-            invfs_v3_inode in;
+            invfs_inode in;
             /* invf-cat takes the same exclusive image lock the handle does */
             vol_close(g_v);
             g_v = NULL;
@@ -1466,11 +1466,11 @@ int main(int argc, char **argv)
                "BOTH files read back byte-identical once the page is restored: "
                "the refused repair destroyed nothing");
             memset(xv, 0, sizeof xv);
-            ok(vol_v3_xattr_get(g_v, id0, "chunky2", xv, &xvlen) == 0 &&
+            ok(vol_xattr_get(g_v, id0, "chunky2", xv, &xvlen) == 0 &&
                xvlen == 2000 && xv[0] == 'x' && xv[1999] == 'x',
                "the xattr records came back too (the 0x03 keys were in the "
                "same range and are still on the page)");
-            ok(vol_v3_inode_get(g_v, id1, &in) == 1,
+            ok(vol_inode_get(g_v, id1, &in) == 1,
                "both rows are still live and unmodified");
             /* re-tear for the second half: the operator's explicit decision */
             vol_close(g_v);
@@ -1490,8 +1490,8 @@ int main(int argc, char **argv)
         ok(cli == 3, "the pass that found the damage raises the alarm "
                      "(exit 3) even as it repairs");
         {
-            invfs_v3_inode in;
-            ok(vol_v3_inode_get(g_v, id1, &in) == 1,
+            invfs_inode in;
+            ok(vol_inode_get(g_v, id1, &in) == 1,
                "the surviving row is still readable after the excision");
         }
         vol_close(g_v);
@@ -1499,12 +1499,12 @@ int main(int argc, char **argv)
         g_v = vol_open(img5, &err_open);
         ok(g_v != NULL, "the collapsed-root volume reopens");
         if (g_v) {
-            invfs_v3_inode in;
-            ok(vol_v3_inode_get(g_v, id1, &in) == 1,
+            invfs_inode in;
+            ok(vol_inode_get(g_v, id1, &in) == 1,
                "the file is STILL readable after a remount (the recopied root "
                "won the RT30 slot)");
             err[0] = 0;
-            if (vol_v3_base_root(g_v, &root) == 0 &&
+            if (vol_base_root(g_v, &root) == 0 &&
                 btree_check(g_v, root, &st, err, sizeof err) == 0) {
                 ok(1, "the collapsed root is a valid single-leaf tree");
                 printf("  keys after the repair: %llu (was %llu, torn leaf "
@@ -1525,7 +1525,7 @@ int main(int argc, char **argv)
             {
                 invfs_recipe_audit ra;
                 size_t fi;
-                int rc = vol_v3_recipe_audit(g_v, &ra);
+                int rc = vol_recipe_audit(g_v, &ra);
                 int f0 = 0, f1 = 0;
                 for (fi = 0; rc == 0 && fi < ra.nfault; fi++) {
                     if (ra.fault[fi].id == id0) f0 = 1;
@@ -1536,7 +1536,7 @@ int main(int argc, char **argv)
                 ok(f0 && f1,
                    "the offender list names BOTH surviving rows "
                    "(two00.bin, two01.bin)");
-                ok(vol_v3_inode_get(g_v, id0, &in) == 1,
+                ok(vol_inode_get(g_v, id0, &in) == 1,
                    "the inode ROW survives anyway -- only the content is "
                    "gone, which is what the recipe check is for");
             }
@@ -1561,7 +1561,7 @@ int main(int argc, char **argv)
     /* ---- F: a torn root page ---- */
     {
         char img2[512];
-        invfs_v3_inode in;
+        invfs_inode in;
         int r;
 
         snprintf(img2, sizeof img2, "%s/invf-btree-repair-root-%ld.img", dir, (long)getpid());
@@ -1574,10 +1574,10 @@ int main(int argc, char **argv)
         if (!g_v)
             return 2;
         {
-            uint8_t k[8], val[INVFS_V3_INODE_ROW_FIXED];
-            invfs_v3_inode_row row;
+            uint8_t k[8], val[INVFS_INODE_ROW_FIXED];
+            invfs_inode_row row;
             memset(&row, 0, sizeof row);
-            row.row_version = INVFS_V3_INODE_ROW_VERSION;
+            row.row_version = INVFS_INODE_ROW_VERSION;
             row.type = INVFS_ITYP_REG;
             row.mode = 0644;
             row.nlink = 1;
@@ -1587,12 +1587,12 @@ int main(int argc, char **argv)
             memcpy(val, &row, sizeof row);
             if (vol_delta_append(g_v, k, sizeof k, val,
                                  (uint16_t)sizeof row, 0) != 0 ||
-                vol_v3_fold(g_v) != 0) {
+                vol_fold(g_v) != 0) {
                 fprintf(stderr, "btree_repair_test: root-image seed failed\n");
                 return 2;
             }
         }
-        if (vol_v3_base_root(g_v, &root) != 0)
+        if (vol_base_root(g_v, &root) != 0)
             return 2;
         vol_close(g_v);
         g_v = NULL;
@@ -1604,7 +1604,7 @@ int main(int argc, char **argv)
         ok(g_v != NULL, "vol_open still succeeds with a torn base root");
         if (!g_v)
             return 1;
-        r = vol_v3_inode_get(g_v, FIRST_ID, &in);
+        r = vol_inode_get(g_v, FIRST_ID, &in);
         printf("  torn root: inode_get(%llu) = %d\n",
                (unsigned long long)FIRST_ID, r);
         ok(r < 0, "a torn base root reads EIO, not 'absent' "
@@ -1616,7 +1616,7 @@ int main(int argc, char **argv)
         cli = fsck_cli_offline(img2, 1);
         printf("  invf-fsck -f on a torn root: exit %d\n", cli);
         ok(cli == 3, "invf-fsck -f refuses a torn root instead of pretending");
-        r = vol_v3_inode_get(g_v, FIRST_ID, &in);
+        r = vol_inode_get(g_v, FIRST_ID, &in);
         ok(r < 0, "the refused repair left the torn root unreadable "
                   "(no tree was fabricated)");
         vol_close(g_v);
@@ -1640,11 +1640,11 @@ int main(int argc, char **argv)
             return 2;
         g_v = v3;
         {
-            uint8_t k[8], val[INVFS_V3_INODE_ROW_FIXED];
-            invfs_v3_inode_row row;
+            uint8_t k[8], val[INVFS_INODE_ROW_FIXED];
+            invfs_inode_row row;
             int j;
             memset(&row, 0, sizeof row);
-            row.row_version = INVFS_V3_INODE_ROW_VERSION;
+            row.row_version = INVFS_INODE_ROW_VERSION;
             row.type = INVFS_ITYP_REG;
             row.mode = 0644;
             row.nlink = 1;
@@ -1659,7 +1659,7 @@ int main(int argc, char **argv)
                     return 2;
                 }
             }
-            if (vol_v3_fold(v3) != 0)
+            if (vol_fold(v3) != 0)
                 return 2;
         }
         sp_rc = spt0_capture(v3);
@@ -1671,7 +1671,7 @@ int main(int argc, char **argv)
         g_best_rows = 0;
         g_want_files = 0;      /* this image has no named files */
         g_pages = 0;
-        if (vol_v3_base_root(v3, &root) != 0)
+        if (vol_base_root(v3, &root) != 0)
             return 2;
         scan_rec(root);
         if (!g_lp.victim) {
@@ -1689,7 +1689,7 @@ int main(int argc, char **argv)
             return 1;
         g_v = v3;
         ok(spt0_info(v3, &sp) == 1, "the save point is still live");
-        if (vol_v3_base_root(v3, &root) == 0)
+        if (vol_base_root(v3, &root) == 0)
             ok(1, "base root readable before the rollback attempt");
         else
             return 2;
@@ -1698,7 +1698,7 @@ int main(int argc, char **argv)
         ok(restore_rc != 0, "spt0_restore refuses a damaged save point base");
         {
             invfs_blkptr after;
-            int same = (vol_v3_base_root(v3, &after) == 0) &&
+            int same = (vol_base_root(v3, &after) == 0) &&
                        after.pba == root.pba && after.gen == root.gen;
             ok(same, "the refused rollback published nothing (the volume is "
                      "exactly as it was)");

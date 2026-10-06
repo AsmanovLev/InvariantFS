@@ -1,11 +1,11 @@
 #!/bin/bash
-# test-meta-v3-fold.sh — WP-M14 e2e: fold (merge delta into base, atomic
+# test-meta-fold.sh — WP-M14 e2e: fold (merge delta into base, atomic
 # publish, reset).
 #
 # WP-M14's fold applies every live delta record to a COW copy of the base
 # B+-tree, publishes the new root through the WP-M2 double slot, and only
 # then resets the delta. This leg proves the whole contract on a real
-# VOLF_V3 image through the public engine surface:
+# VOLF_META image through the public engine surface:
 #   leg 0  mkfs v3 (empty base, empty recent tier);
 #   leg 1  base rows are written, delta records update a base inode, delete
 #          a base inode, add a delta-only inode and dirent, and delete a
@@ -24,10 +24,10 @@
 #   leg 4  fsck is clean and the superblock stays CLEAN.
 #
 # No sweep (WP-M18) or reclaim (WP-M15) is involved: the driver calls
-# vol_v3_fold() directly and fold retains the displaced pages by design.
+# vol_fold() directly and fold retains the displaced pages by design.
 #
 # Run from the repo root after `make`:
-#   bash tools/run-e2e.sh tools/test-meta-v3-fold.sh
+#   bash tools/run-e2e.sh tools/test-meta-fold.sh
 set -e
 set -o pipefail
 
@@ -48,10 +48,10 @@ if [ ! -x "$B/invf-fold_test" ]; then
 fi
 
 echo "== leg 0: mkfs v3 =="
-INVFS_V3=1 $B/invf-mkfs "$IMG" 0.3 >"$WORK/mkfs.log" 2>&1 \
-    || { cat "$WORK/mkfs.log"; fail "INVFS_V3=1 mkfs failed"; }
-grep -q "format: v3 metadata skeleton" "$WORK/mkfs.log" \
-    || fail "mkfs did not report the v3 format"
+$B/invf-mkfs "$IMG" 0.3 >"$WORK/mkfs.log" 2>&1 \
+    || { cat "$WORK/mkfs.log"; fail "mkfs failed"; }
+grep -q "format: v0 metadata skeleton" "$WORK/mkfs.log" \
+    || fail "mkfs did not report the v0 format"
 echo "mkfs: v3 metadata skeleton"
 
 echo "== leg 1: append deltas then fold (base merged, delta reset) =="
@@ -71,7 +71,7 @@ cat "$WORK/verify.log"
 echo "== leg 3: crash in the publish/reset window (idempotent replay) =="
 CIMG=metav3foldcrash.img
 rm -f "$CIMG"
-INVFS_V3=1 $B/invf-mkfs "$CIMG" 0.3 >/dev/null 2>&1 \
+$B/invf-mkfs "$CIMG" 0.3 >/dev/null 2>&1 \
     || fail "crash-leg mkfs failed"
 # The fold SIGKILLs itself right after publishing the new base and before the
 # delta reset, so the process exits 137 and never returns.
@@ -113,4 +113,4 @@ assert blk[0x18] == 0xCA, "state=0x%02X, want CLEAN" % blk[0x18]
 print("state: CLEAN after fold + remount")
 PY
 
-echo "ALL META-V3 FOLD LEGS PASS"
+echo "ALL META FOLD LEGS PASS"

@@ -288,9 +288,9 @@ static int tz_flush_class_ok(int binary, uint8_t cc)
  * TEXT entries and frees the unmarked registry rows.
  * =================================================================== */
 
-#define TZ_V3_REG_MAGIC 0x33565a54u   /* "TZV3" */
+#define TZ_REG_MAGIC 0x33565a54u   /* "TZV3" */
 
-static int tz_v3_u64_cmp(const void *a, const void *b)
+static int tz_u64_cmp(const void *a, const void *b)
 {
     uint64_t x = *(const uint64_t *)a, y = *(const uint64_t *)b;
     return x < y ? -1 : x > y ? 1 : 0;
@@ -301,21 +301,21 @@ typedef struct {
     uint32_t algo;
     uint64_t pba;
     uint32_t phys;
-} tz_v3_reg_ent;
+} tz_reg_ent;
 
-static int tz_v3_extent_cmp(const void *a, const void *b)
+static int tz_extent_cmp(const void *a, const void *b)
 {
-    uint64_t x = ((const tz_v3_extent *)a)->pba,
-             y = ((const tz_v3_extent *)b)->pba;
+    uint64_t x = ((const tz_extent *)a)->pba,
+             y = ((const tz_extent *)b)->pba;
     return x < y ? -1 : x > y ? 1 : 0;
 }
 
 typedef struct {
-    tz_v3_reg_ent *ents;
+    tz_reg_ent *ents;
     size_t n, cap;
     uint32_t next_seq;
     uint64_t owner_id;
-} tz_v3_reg;
+} tz_reg;
 
 /* THREE ANSWERS, and the third one used to be the second one.
  *
@@ -326,25 +326,25 @@ typedef struct {
  *
  * That collapse is not a bookkeeping slip here. A registry ROW is the only
  * record that a batch segment exists and who owns it (:270-291), and
- * tz_v3_reg_store rewrites the WHOLE blob from the in-memory array. So a load
+ * tz_reg_store rewrites the WHOLE blob from the in-memory array. So a load
  * that answered "empty" on a failed read is handed straight to a flush that
  * seals this run's batches, appends them to the empty array and publishes a
  * blob containing THIS RUN'S ENTRIES ONLY. Every earlier row is gone, the
- * segments they owned have no record anywhere, tz_v3_gc can never see them and
- * can never free them, and tz_v3_reg_owned_blocks (:385 -- the owner set
+ * segments they owned have no record anywhere, tz_gc can never see them and
+ * can never free them, and tz_reg_owned_blocks (:385 -- the owner set
  * spn_reclaim consults before freeing into the shared pool) stops claiming
  * their blocks too. Irreversible: the old blob is overwritten, not shadowed.
  *
  * A failed read is not entitled to assert a negative about the volume, so the
  * third answer now REFUSES. Every caller already handles a non-zero return as
- * failure -- :385, :601 and :824 are all `if (tz_v3_reg_load(v, &reg) != 0)
+ * failure -- :385, :601 and :824 are all `if (tz_reg_load(v, &reg) != 0)
  * return -1;` -- so refusing here aborts the flush BEFORE anything is sealed,
  * which is also the cheap place to refuse: a refused run orphans nothing.
  *
- * The twin site is tz_v3_reg_store's own lookup (:422). It has to move with
+ * The twin site is tz_reg_store's own lookup (:422). It has to move with
  * this one: leaving it alone keeps the same loss reachable by the path where
  * the load succeeded and the later lookup did not. */
-static int tz_v3_reg_load(invfs_volume *v, tz_v3_reg *r)
+static int tz_reg_load(invfs_volume *v, tz_reg *r)
 {
     uint8_t *buf = NULL;
     size_t len = 0;
@@ -364,11 +364,11 @@ static int tz_v3_reg_load(invfs_volume *v, tz_v3_reg *r)
         uint32_t magic = 0, n = 0;
         memcpy(&magic, buf, 4);
         memcpy(&n, buf + 4, 4);
-        if (magic == TZ_V3_REG_MAGIC) {
-            size_t avail = (len - 8) / sizeof(tz_v3_reg_ent);
+        if (magic == TZ_REG_MAGIC) {
+            size_t avail = (len - 8) / sizeof(tz_reg_ent);
             if ((size_t)n > avail) n = (uint32_t)avail;
             if (n) {
-                r->ents = (tz_v3_reg_ent *)malloc((size_t)n * sizeof *r->ents);
+                r->ents = (tz_reg_ent *)malloc((size_t)n * sizeof *r->ents);
                 if (r->ents) {
                     memcpy(r->ents, buf + 8, (size_t)n * sizeof *r->ents);
                     r->n = r->cap = n;
@@ -388,7 +388,7 @@ static int tz_v3_reg_load(invfs_volume *v, tz_v3_reg *r)
  *
  * WHY THIS EXISTS. A batch is dead the moment no live recipe names its pba --
  * but the registry ROW that owns the block is only retired later, by
- * tz_v3_gc at sweep stage 6. Between those two moments the block is garbage
+ * tz_gc at sweep stage 6. Between those two moments the block is garbage
  * AND still named, and the free pool is shared with the metadata zone
  * (§2.3: one pool, no hard regions), so the very next mbuf_alloc can hand
  * the same block out as a base B+-tree page. A free path that consults only
@@ -396,14 +396,14 @@ static int tz_v3_reg_load(invfs_volume *v, tz_v3_reg *r)
  * for the whole run: that is the v3 recipe-blob loss this closes.
  *
  * So the registry is published here as an owner set, and spn_reclaim
- * (vol_spt0.c) treats these blocks as claimed. tz_v3_gc still frees the dead
+ * (vol_spt0.c) treats these blocks as claimed. tz_gc still frees the dead
  * batches -- it is the one owner that drops the row and the blocks together,
  * and it runs in the same sweep, so nothing leaks: the reclaim's debt on a
  * dead batch is simply paid one stage later instead of never. */
-int tz_v3_reg_owned_blocks(invfs_volume *v, tz_v3_extent **out, size_t *n)
+int tz_reg_owned_blocks(invfs_volume *v, tz_extent **out, size_t *n)
 {
-    tz_v3_reg reg;
-    tz_v3_extent *arr = NULL;
+    tz_reg reg;
+    tz_extent *arr = NULL;
     size_t i;
 
     if (!out || !n)
@@ -412,12 +412,12 @@ int tz_v3_reg_owned_blocks(invfs_volume *v, tz_v3_extent **out, size_t *n)
     *n = 0;
     if (!v)
         return 0;
-    if (tz_v3_reg_load(v, &reg) != 0) {
+    if (tz_reg_load(v, &reg) != 0) {
         free(reg.ents);
         return -1;
     }
     if (reg.n) {
-        arr = (tz_v3_extent *)malloc(reg.n * sizeof *arr);
+        arr = (tz_extent *)malloc(reg.n * sizeof *arr);
         if (!arr) {
             free(reg.ents);
             return -1;
@@ -430,7 +430,7 @@ int tz_v3_reg_owned_blocks(invfs_volume *v, tz_v3_extent **out, size_t *n)
              * the data loss this function exists to prevent. */
             arr[i].phys = reg.ents[i].phys ? reg.ents[i].phys : 1;
         }
-        qsort(arr, reg.n, sizeof *arr, tz_v3_extent_cmp);
+        qsort(arr, reg.n, sizeof *arr, tz_extent_cmp);
     }
     free(reg.ents);
     *out = arr;
@@ -454,11 +454,11 @@ int tz_v3_reg_owned_blocks(invfs_volume *v, tz_v3_extent **out, size_t *n)
  * which is the honest outcome: the run sealed segments and committed members
  * against a registry it could not confirm, and the operator gets a message
  * instead of a silent, irreversible loss of every row written before. */
-static int tz_v3_reg_store(invfs_volume *v, tz_v3_reg *r)
+static int tz_reg_store(invfs_volume *v, tz_reg *r)
 {
-    size_t len = 8 + r->n * sizeof(tz_v3_reg_ent);
+    size_t len = 8 + r->n * sizeof(tz_reg_ent);
     uint8_t *buf = (uint8_t *)calloc(1, len);
-    uint32_t magic = TZ_V3_REG_MAGIC, n = (uint32_t)r->n;
+    uint32_t magic = TZ_REG_MAGIC, n = (uint32_t)r->n;
     uint64_t id = 0;
     int frc;
 
@@ -472,7 +472,7 @@ static int tz_v3_reg_store(invfs_volume *v, tz_v3_reg *r)
         return -1;          /* the registry's own row could not be resolved */
     }
     if (frc == 1 && id) {
-        if (!vol_v3_publish_blob_inode(v, id, buf, len, len, INVFS_ALGO_NONE)) {
+        if (!vol_publish_blob_inode(v, id, buf, len, len, INVFS_ALGO_NONE)) {
             free(buf);
             return -1;
         }
@@ -489,9 +489,9 @@ static int tz_v3_reg_store(invfs_volume *v, tz_v3_reg *r)
  * prefilter already ran per member slice), mandatory decode+memcmp guard,
  * size guard, write the segment in Shadow. 0 = sealed, 1 = refused
  * (fallback; no segment written), -1 = hard error. */
-static int tz_v3_seal(invfs_volume *v, int binary, const uint8_t *bbuf,
+static int tz_seal(invfs_volume *v, int binary, const uint8_t *bbuf,
                       size_t blen, uint32_t algo, uint64_t seq,
-                      tz_v3_reg_ent *out)
+                      tz_reg_ent *out)
 {
     size_t cap = blen + blen / 2 + 4096;
     uint8_t *enc = NULL, *ver = NULL, *seg = NULL;
@@ -567,16 +567,16 @@ static int tz_v3_seal(invfs_volume *v, int binary, const uint8_t *bbuf,
 
 /* Rewrite one member's v3 recipe with TEXT entries naming the sealed
  * batches. Returns 0 on success/soft-skip, -1 on hard error. */
-static int tz_v3_commit_member(invfs_volume *v, int binary,
+static int tz_commit_member(invfs_volume *v, int binary,
                                const tz_candidate *cand, tz_member *m,
                                const tz_sealed *sealed, size_t n_sealed)
 {
     invfs_ast_block_entry *ents;
     uint8_t *rblob = NULL;
     size_t rlen = 0, i, j;
-    uint8_t addr[INVFS_V3_RECIPE_ADDR_LEN];
-    invfs_v3_inode in;
-    uint8_t old_addr[INVFS_V3_RECIPE_ADDR_LEN];
+    uint8_t addr[INVFS_RECIPE_ADDR_LEN];
+    invfs_inode in;
+    uint8_t old_addr[INVFS_RECIPE_ADDR_LEN];
 
     if (!m->complete || m->fallback || m->committed || !m->n_slices)
         return 0;
@@ -602,20 +602,20 @@ static int tz_v3_commit_member(invfs_volume *v, int binary,
         return -1;
     }
     free(ents);
-    if (vol_v3_recipe_store(v, rblob, rlen, addr) != 0) {
+    if (vol_recipe_store(v, rblob, rlen, addr) != 0) {
         free(rblob);
         return -1;
     }
     free(rblob);
-    if (vol_v3_inode_get(v, cand->inode_id, &in) != 1)
+    if (vol_inode_get(v, cand->inode_id, &in) != 1)
         return -1;
     memcpy(old_addr, in.recipe_addr, sizeof old_addr);
     in.size = m->file_size;
     memset(&in.recipe, 0, sizeof in.recipe);
     memcpy(in.recipe_addr, addr, sizeof addr);
-    if (vol_v3_inode_delta_put(v, cand->inode_id, &in) != 0)
+    if (vol_inode_delta_put(v, cand->inode_id, &in) != 0)
         return -1;
-    vol_v3_free_recipe_blocks(v, old_addr, 0);
+    vol_free_recipe_blocks(v, old_addr, 0);
     if (binary)
         vol_stamp_class(v, cand->inode_id, INVFS_CLASS_BATCHED_BIN,
                         (uint8_t)m->algo, invfs_registry_generation());
@@ -633,7 +633,7 @@ static int tz_flush_one_v3(invfs_volume *v, int binary)
 {
     tz_candidate *acc = binary ? v->bz : v->tz;
     size_t n = binary ? v->bz_n : v->tz_n;
-    tz_v3_reg reg;
+    tz_reg reg;
     tz_sealed *sealed = NULL;
     size_t n_sealed = 0, cap_sealed = 0;
     uint8_t *bbuf = NULL;
@@ -649,7 +649,7 @@ static int tz_flush_one_v3(invfs_volume *v, int binary)
         if (binary) v->bz_n = 0; else v->tz_n = 0;
         return 1;
     }
-    if (tz_v3_reg_load(v, &reg) != 0) return -1;
+    if (tz_reg_load(v, &reg) != 0) return -1;
     open_seq = reg.next_seq;
     open_algo = binary ? INVFS_ALGO_ZSTD : INVFS_ALGO_PPMD;
 
@@ -703,8 +703,8 @@ static int tz_flush_one_v3(invfs_volume *v, int binary)
                       bfam == INVFS_BIN_FAMILY_ELF_X86);
             m->algo = m->bcj ? INVFS_ALGO_ZSTD_BCJ : INVFS_ALGO_ZSTD;
             if (blen && open_bcj != m->bcj) {
-                tz_v3_reg_ent re;
-                int sr = tz_v3_seal(v, binary, bbuf, blen, open_algo,
+                tz_reg_ent re;
+                int sr = tz_seal(v, binary, bbuf, blen, open_algo,
                                     open_seq, &re);
                 if (sr < 0) { rc = -1; free(data); goto out; }
                 if (sr == 0) {
@@ -742,8 +742,8 @@ static int tz_flush_one_v3(invfs_volume *v, int binary)
         while (off < dlen) {
             size_t take;
             if (blen == bcap) {
-                tz_v3_reg_ent re;
-                int sr = tz_v3_seal(v, binary, bbuf, blen, open_algo,
+                tz_reg_ent re;
+                int sr = tz_seal(v, binary, bbuf, blen, open_algo,
                                     open_seq, &re);
                 if (sr < 0) { rc = -1; free(data); goto out; }
                 if (sr == 0) {
@@ -791,8 +791,8 @@ static int tz_flush_one_v3(invfs_volume *v, int binary)
     }
     /* drain the partial batch */
     if (blen) {
-        tz_v3_reg_ent re;
-        int sr = tz_v3_seal(v, binary, bbuf, blen, open_algo, open_seq, &re);
+        tz_reg_ent re;
+        int sr = tz_seal(v, binary, bbuf, blen, open_algo, open_seq, &re);
         if (sr < 0) { rc = -1; goto out; }
         if (sr == 0) {
             if (n_sealed == cap_sealed) {
@@ -818,7 +818,7 @@ static int tz_flush_one_v3(invfs_volume *v, int binary)
     }
     /* commit every complete member whose slices all reference sealed batches */
     for (i = 0; i < n; i++) {
-        if (tz_v3_commit_member(v, binary, &sc[i], &members[i], sealed,
+        if (tz_commit_member(v, binary, &sc[i], &members[i], sealed,
                                 n_sealed) != 0) {
             rc = -1;
             goto out;
@@ -829,7 +829,7 @@ static int tz_flush_one_v3(invfs_volume *v, int binary)
         for (i = 0; i < n_sealed; i++) {
             if (reg.n == reg.cap) {
                 size_t nc = reg.cap ? reg.cap * 2 : 16;
-                tz_v3_reg_ent *ne = (tz_v3_reg_ent *)realloc(reg.ents,
+                tz_reg_ent *ne = (tz_reg_ent *)realloc(reg.ents,
                                         nc * sizeof *ne);
                 if (!ne) { rc = -1; goto out; }
                 reg.ents = ne; reg.cap = nc;
@@ -840,7 +840,7 @@ static int tz_flush_one_v3(invfs_volume *v, int binary)
             reg.ents[reg.n].phys = sealed[i].phys;
             reg.n++;
         }
-        if (tz_v3_reg_store(v, &reg) != 0) rc = -1;
+        if (tz_reg_store(v, &reg) != 0) rc = -1;
     }
 out:
     for (i = 0; i < n; i++) {
@@ -863,16 +863,16 @@ out:
 
 /* WP78: v3 batch GC. A batch is live iff some live recipe has a zone==TEXT
  * entry naming its pba; unmarked registry rows are freed. */
-static int tz_v3_gc(invfs_volume *v)
+static int tz_gc(invfs_volume *v)
 {
-    tz_v3_reg reg;
+    tz_reg reg;
     uint64_t *ids = NULL;
     size_t cap = 4096, n_ids = 0, i, j;
     uint64_t *live = NULL;
     size_t n_live = 0, cap_live = 0;
     int freed = 0;
 
-    if (tz_v3_reg_load(v, &reg) != 0) return -1;
+    if (tz_reg_load(v, &reg) != 0) return -1;
     if (reg.n == 0) { free(reg.ents); return 0; }
     if (!vol_write_enabled(v)) { free(reg.ents); return 0; }
 
@@ -887,13 +887,13 @@ static int tz_v3_gc(invfs_volume *v)
         ids = ni;
     }
     for (i = 0; i < n_ids; i++) {
-        invfs_v3_inode in;
+        invfs_inode in;
         uint8_t *blob = NULL;
         size_t blen = 0;
         invfs_ast_hdr ah;
         const invfs_ast_block_entry *ents = NULL;
         size_t ne = 0;
-        if (vol_v3_inode_get(v, ids[i], &in) != 1) continue;
+        if (vol_inode_get(v, ids[i], &in) != 1) continue;
         /* A symlink's blob is its target string, not an AST. What this
          * loop collects is ents[j].pba for zone==TEXT entries, and a
          * symlink has no entries at all -- it is a member id in
@@ -902,12 +902,12 @@ static int tz_v3_gc(invfs_volume *v)
          * and "names a shared batch segment" are different questions.
          * Stated with the predicate the read path dispatches on
          * (src/core/volume.h) rather than left to the parse failing on a
-         * strlen-delimited target: this list feeds tz_v3_gc's liveness
+         * strlen-delimited target: this list feeds tz_gc's liveness
          * test, and a fabricated pba admitted here would keep an
          * unrelated batch segment alive -- or let a real one be freed
          * while it is still referenced. */
         if (invfs_inode_content_is_raw_blob(in.type)) continue;
-        if (vol_v3_recipe_load(v, in.recipe_addr, &blob, &blen) != 0 || !blob) {
+        if (vol_recipe_load(v, in.recipe_addr, &blob, &blen) != 0 || !blob) {
             free(blob);
             continue;
         }
@@ -927,7 +927,7 @@ static int tz_v3_gc(invfs_volume *v)
     }
     free(ids);
     if (n_live > 1)
-        qsort(live, n_live, sizeof *live, tz_v3_u64_cmp);
+        qsort(live, n_live, sizeof *live, tz_u64_cmp);
     {
         size_t w = 0;
         for (i = 0; i < reg.n; i++) {
@@ -948,7 +948,7 @@ static int tz_v3_gc(invfs_volume *v)
         }
         reg.n = w;
     }
-    if (freed > 0 && tz_v3_reg_store(v, &reg) != 0) freed = -1;
+    if (freed > 0 && tz_reg_store(v, &reg) != 0) freed = -1;
     free(live);
     free(reg.ents);
     return freed;
@@ -1008,5 +1008,5 @@ typedef struct {
 int vol_tz_gc(invfs_volume *v)
 {
     if (!v) return -1;
-    return tz_v3_gc(v);
+    return tz_gc(v);
 }

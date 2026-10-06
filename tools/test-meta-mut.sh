@@ -1,7 +1,7 @@
 #!/bin/bash
-# test-meta-v3-mut.sh — WP-M12 e2e: v3 metadata mutations go to the delta.
+# test-meta-mut.sh — WP-M12 e2e: v3 metadata mutations go to the delta.
 #
-# A VOLF_V3 volume must route create/unlink/rename/setattr/xattr through the
+# A VOLF_META volume must route create/unlink/rename/setattr/xattr through the
 # WP-M10 delta append instead of a base B+-tree rewrite, so the base root
 # stays immutable between folds (design-meta-v3.md §1/§4/§13). The WP-M11
 # overlay (delta first, then base) must make every mutation visible
@@ -22,7 +22,7 @@
 #   leg 5  fsck clean and the superblock CLEAN.
 #
 # Run from the repo root after `make`:
-#   bash tools/run-e2e.sh tools/test-meta-v3-mut.sh
+#   bash tools/run-e2e.sh tools/test-meta-mut.sh
 set -e
 set -o pipefail
 
@@ -97,10 +97,10 @@ PY
 }
 
 echo "== leg 0: mkfs v3 =="
-INVFS_V3=1 $B/invf-mkfs "$IMG" 0.5 >"$WORK/mkfs.log" 2>&1 \
-    || { cat "$WORK/mkfs.log"; fail "INVFS_V3=1 mkfs failed"; }
-grep -q "format: v3 metadata skeleton" "$WORK/mkfs.log" \
-    || fail "mkfs did not report the v3 format"
+$B/invf-mkfs "$IMG" 0.5 >"$WORK/mkfs.log" 2>&1 \
+    || { cat "$WORK/mkfs.log"; fail "mkfs failed"; }
+grep -q "format: v0 metadata skeleton" "$WORK/mkfs.log" \
+    || fail "mkfs did not report the v0 format"
 echo "mkfs: v3 metadata skeleton"
 
 echo "== leg 1: seed content (non-empty, stable base root) =="
@@ -119,8 +119,8 @@ echo "baseline: base root slots $S0/$S1 seq $SSEQ; delta hash ${BEFORE_HASH:0:16
 
 echo "== leg 2: metadata mutations append to the delta =="
 mnt_up
-grep -q "format v3" "$WORK/fuse.log" \
-    || { cat "$WORK/fuse.log"; fail "mount did not take the v3 open path"; }
+grep -q "format v0" "$WORK/fuse.log" \
+    || { cat "$WORK/fuse.log"; fail "mount did not take the v0 open path"; }
 
 touch "$MNT/alpha" "$MNT/beta" "$MNT/doomed"
 mkdir "$MNT/dir"
@@ -207,7 +207,7 @@ mnt_down
 echo "== leg 5: fsck clean =="
 FSCK=$($B/invf-fsck "$IMG" 2>&1) || { echo "$FSCK"; fail "fsck exited nonzero"; }
 echo "$FSCK" | grep -q "^OK$" || { echo "$FSCK"; fail "fsck not OK"; }
-echo "$FSCK" | grep -q "format:       v3" || { echo "$FSCK"; fail "fsck not v3"; }
+echo "$FSCK" | grep -q "format:       v0" || { echo "$FSCK"; fail "fsck not v0"; }
 python3 - "$IMG" <<'PY' || fail "volume not CLEAN at the end"
 import sys
 blk = open(sys.argv[1], 'rb').read(0x20)
@@ -215,4 +215,4 @@ assert blk[0x18] == 0xCA, "state=0x%02X, want CLEAN" % blk[0x18]
 print("state: CLEAN")
 PY
 
-echo "ALL META-V3 MUTATION LEGS PASS"
+echo "ALL META MUTATION LEGS PASS"

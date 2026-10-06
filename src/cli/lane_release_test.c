@@ -5,13 +5,13 @@
  * THE FINDING.
  *
  * vol_create_blob_file's v3 branch publishes through
- * vol_v3_create_content_node (src/core/vol_dirs.c:397), which REUSES the
+ * vol_create_content_node (src/core/vol_dirs.c:397), which REUSES the
  * dirent's inode id and replaces the row in place. So the instant a sweep lane
  * lands, the recipe that named the ORIGINAL file's segments is unreachable —
  * and vol_create_blob_file is handed the NEW recipe address and never the old
  * one, so it cannot free them. The comment on that function says exactly this
  * and names the two callers that do ask for the space back
- * (vol_v3_publish_blob_inode and the containerpack commit).
+ * (vol_publish_blob_inode and the containerpack commit).
  *
  * The builtin container lanes in sweep_dispatch (src/core/vol_sweep.c: FLAC /
  * TAR / GZIP / PNG / MP3) are the ones that did not ask. Each ended in
@@ -144,7 +144,7 @@ static uint64_t write_file(const char *name, const uint8_t *body, size_t n)
     memset(&m, 0, sizeof m);
     m.type = INVFS_ITYP_REG;
     m.mode = 0644;
-    return vol_v3_write_bulk(g_v, name, body, n, &m);
+    return vol_write_bulk(g_v, name, body, n, &m);
 }
 
 static int block_allocated(uint64_t pba)
@@ -156,7 +156,7 @@ static int block_allocated(uint64_t pba)
 /* Every data PBAs the recipe at `addr` names, loaded the way the read path
  * loads it (a v3 recipe is a content-addressed blob, not a record). */
 #define MAX_ENTS 4096
-static int recipe_pbas(const uint8_t addr[INVFS_V3_RECIPE_ADDR_LEN],
+static int recipe_pbas(const uint8_t addr[INVFS_RECIPE_ADDR_LEN],
                        uint64_t *out, size_t cap, size_t *n_out)
 {
     uint8_t *blob = NULL;
@@ -166,7 +166,7 @@ static int recipe_pbas(const uint8_t addr[INVFS_V3_RECIPE_ADDR_LEN],
     size_t n_ents = 0;
 
     *n_out = 0;
-    if (vol_v3_recipe_load(g_v, addr, &blob, &blen) != 0 || !blob) return -1;
+    if (vol_recipe_load(g_v, addr, &blob, &blen) != 0 || !blob) return -1;
     if (vol_ast_recipe_parse(blob, blen, &ah, &ents, &n_ents) != 0 ||
         ents == NULL) { free(blob); return -1; }
     for (i = 0; i < n_ents && *n_out < cap; i++)
@@ -189,9 +189,9 @@ int main(int argc, char **argv)
     uint8_t *tar;
     size_t tar_len = 0;
     uint64_t id, newino;
-    invfs_v3_inode before, after;
-    uint8_t old_addr[INVFS_V3_RECIPE_ADDR_LEN];
-    uint8_t new_addr[INVFS_V3_RECIPE_ADDR_LEN];
+    invfs_inode before, after;
+    uint8_t old_addr[INVFS_RECIPE_ADDR_LEN];
+    uint8_t new_addr[INVFS_RECIPE_ADDR_LEN];
     uint64_t old_pbas[MAX_ENTS], new_pbas[MAX_ENTS];
     size_t n_old = 0, n_new = 0;
     int old_alloc_before, old_alloc_after, rc;
@@ -222,7 +222,7 @@ int main(int argc, char **argv)
     id = write_file("corpus.tar", tar, tar_len);
     ok(id != 0, "the original file is written");
     if (!id) { free(tar); return 1; }
-    ok(vol_v3_inode_get(g_v, id, &before) == 1, "its row is readable");
+    ok(vol_inode_get(g_v, id, &before) == 1, "its row is readable");
     memcpy(old_addr, before.recipe_addr, sizeof old_addr);
     ok(recipe_pbas(old_addr, old_pbas, MAX_ENTS, &n_old) == 0 && n_old > 0,
        "its recipe names at least one data block");
@@ -242,9 +242,9 @@ int main(int argc, char **argv)
     newino = vol_find(g_v, "corpus.tar");
     ok(newino == id,
        "PREMISE: the lane superseded the row IN PLACE (same inode id)");
-    ok(vol_v3_inode_get(g_v, id, &after) == 1, "the new row is readable");
+    ok(vol_inode_get(g_v, id, &after) == 1, "the new row is readable");
     memcpy(new_addr, after.recipe_addr, sizeof new_addr);
-    ok(memcmp(new_addr, old_addr, INVFS_V3_RECIPE_ADDR_LEN) != 0,
+    ok(memcmp(new_addr, old_addr, INVFS_RECIPE_ADDR_LEN) != 0,
        "PREMISE: the recipe address really changed");
 
     /* ---- LEG 2a: what the release was asked for ---- */

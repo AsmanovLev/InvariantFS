@@ -1,7 +1,7 @@
 /* concurrency_test.c — WP-M20 lock-free base-read / delta-append test.
  *
  * Exercises the WP-M20 concurrency design:
- *   - Base reads (vol_v3_inode_get) take no lock beyond the delta index's:
+ *   - Base reads (vol_inode_get) take no lock beyond the delta index's:
  *     the base is immutable between folds, and a delta_ref is read under the
  *     delta lock for exactly as long as the bytes it names are allocated
  *     (WP-inode-get-fold-race -- "immutable between folds" is true of the
@@ -30,7 +30,7 @@ static int failures = 0;
 static volatile int g_stop = 0;
 
 /* Cross-thread tallies. The reader threads used to discard every
- * vol_v3_inode_get result (`(void)r`), so the one assertion this file exists
+ * vol_inode_get result (`(void)r`), so the one assertion this file exists
  * to make -- a base read racing a delta append returns a whole, consistent
  * row -- was never made: the suite stayed green on a completely dead
  * delta-append path. main() asserts on these numbers, so a bad read is
@@ -40,7 +40,7 @@ static volatile uint64_t g_read_torn;   /* got a row from no single gen  */
 static volatile uint64_t g_read_absent; /* got 0: a live inode vanished  */
 static volatile uint64_t g_read_ioerr;  /* got -1: gated in main()      */
 static volatile uint64_t g_write_ops;   /* successful writer mutations   */
-static volatile uint64_t g_folds;       /* vol_v3_fold calls             */
+static volatile uint64_t g_folds;       /* vol_fold calls             */
 
 static void ok(int cond, const char *what)
 {
@@ -62,9 +62,9 @@ static void ino_key(uint64_t id, uint8_t k[8])
 
 static uint16_t ino_row(uint8_t *buf, uint16_t mode, uint64_t size)
 {
-    invfs_v3_inode_row r;
+    invfs_inode_row r;
     memset(&r, 0, sizeof r);
-    r.row_version = INVFS_V3_INODE_ROW_VERSION;
+    r.row_version = INVFS_INODE_ROW_VERSION;
     r.type = INVFS_ITYP_REG;
     r.mode = mode;
     r.uid = 1000;
@@ -83,7 +83,7 @@ static invfs_volume *g_v;
 
 static int delta_put_inode(uint64_t id, uint16_t mode, uint64_t size)
 {
-    uint8_t k[8], v[INVFS_V3_INODE_ROW_FIXED];
+    uint8_t k[8], v[INVFS_INODE_ROW_FIXED];
     uint16_t vl;
     ino_key(id, k);
     vl = ino_row(v, mode, size);
@@ -119,8 +119,8 @@ static void *reader_thread(void *arg)
     (void)arg;
     uint64_t ops = 0;
     while (!g_stop) {
-        invfs_v3_inode in;
-        int r = vol_v3_inode_get(g_v, 42, &in);
+        invfs_inode in;
+        int r = vol_inode_get(g_v, 42, &in);
         if (r < 0) {
             g_read_ioerr++;
             continue;
@@ -168,7 +168,7 @@ static void *writer_thread(void *arg)
             ops++;
         }
         if (fold_iter > 0 && fold_iter % 20 == 0) {
-            vol_v3_fold(g_v);
+            vol_fold(g_v);
             ops++;
             g_folds++;
         }
@@ -218,7 +218,7 @@ int main(int argc, char **argv)
 
     /* seed base inodes */
     {
-        invfs_v3_inode in;
+        invfs_inode in;
         memset(&in, 0, sizeof in);
         in.type = INVFS_ITYP_REG;
         in.mode = 0644;
@@ -226,7 +226,7 @@ int main(int argc, char **argv)
         in.nlink = 1;
         in.size = 100;
         in.mtime = in.atime = (int64_t)time(NULL);
-        ok(vol_v3_inode_put(g_v, 42, &in) == 0, "base put inode 42");
+        ok(vol_inode_put(g_v, 42, &in) == 0, "base put inode 42");
         memset(&in, 0, sizeof in);
         in.type = INVFS_ITYP_REG;
         in.mode = 0644;
@@ -234,17 +234,17 @@ int main(int argc, char **argv)
         in.nlink = 1;
         in.size = 200;
         in.mtime = in.atime = (int64_t)time(NULL);
-        ok(vol_v3_inode_put(g_v, 43, &in) == 0, "base put inode 43");
+        ok(vol_inode_put(g_v, 43, &in) == 0, "base put inode 43");
     }
 
     /* verify pre-state */
     {
-        invfs_v3_inode in;
-        ok(vol_v3_inode_get(g_v, 42, &in) == 1 && in.mode == 0644 && in.size == 100,
+        invfs_inode in;
+        ok(vol_inode_get(g_v, 42, &in) == 1 && in.mode == 0644 && in.size == 100,
            "pre-state: inode 42 visible with correct mode/size");
-        ok(vol_v3_inode_get(g_v, 43, &in) == 1 && in.mode == 0644 && in.size == 200,
+        ok(vol_inode_get(g_v, 43, &in) == 1 && in.mode == 0644 && in.size == 200,
            "pre-state: inode 43 visible with correct mode/size");
-        ok(vol_v3_inode_get(g_v, 44, &in) == 0,
+        ok(vol_inode_get(g_v, 44, &in) == 0,
            "pre-state: inode 44 not visible (not yet in delta)");
     }
 
@@ -288,7 +288,7 @@ int main(int argc, char **argv)
            (unsigned long long)g_read_ioerr,
            (unsigned long long)g_write_ops, (unsigned long long)g_folds);
     ok(g_read_torn == 0,
-       "no concurrent vol_v3_inode_get returned a row from no single writer generation");
+       "no concurrent vol_inode_get returned a row from no single writer generation");
     ok(g_read_absent == 0,
        "inode 42 was never reported absent while it was live");
     ok(g_read_ops > 0,
@@ -306,8 +306,8 @@ int main(int argc, char **argv)
      * index and freed the whole retired chain outside it, and the next
      * delta_new_segment got the blocks back and wrote zeros over the stripe.
      * Instrumenting every -1 return over 35M reads put 100% of them in one
-     * place -- v3_ino_decode() failing on a DELTA row, all-zero bytes -- and
-     * none in btree_search, v3_base_root or the overlay lookup. FIXED
+     * place -- ino_decode() failing on a DELTA row, all-zero bytes -- and
+     * none in btree_search, base_root or the overlay lookup. FIXED
      * (WP-inode-get-fold-race): the resolve and the value read are one
      * critical section and the chain free is inside it.
      *
@@ -342,20 +342,20 @@ int main(int argc, char **argv)
      * statistical backstop over the whole run, including paths the
      * interleave test does not reach. */
     ok(g_read_ioerr == 0,
-       "no concurrent vol_v3_inode_get call returned -1 for a live, "
+       "no concurrent vol_inode_get call returned -1 for a live, "
        "well-formed key (base-tree reclaim vs reader -- see the comment "
        "above this line in concurrency_test.c)");
 
     /* verify post-state */
     {
-        invfs_v3_inode in;
-        int r42 = vol_v3_inode_get(g_v, 42, &in);
+        invfs_inode in;
+        int r42 = vol_inode_get(g_v, 42, &in);
         ok(r42 == 1, "post-state: inode 42 still readable");
         if (r42 == 1) {
             ok(in.mode != 0, "post-state: inode 42 has valid mode");
             ok(in.size != 0, "post-state: inode 42 has valid size");
         }
-        ok(vol_v3_inode_get(g_v, 43, &in) == 1,
+        ok(vol_inode_get(g_v, 43, &in) == 1,
            "post-state: inode 43 still readable");
     }
 

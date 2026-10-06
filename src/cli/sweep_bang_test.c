@@ -13,7 +13,7 @@
  * STAGING. A '!' name cannot be created through any shipped user path --
  * WP135 refuses it at the name-introduction funnels, which is correct and is
  * not what this test is about. The tree already has the way round it:
- * vol_v3_write_bulk is the underlying write call that vol_create_file and
+ * vol_write_bulk is the underlying write call that vol_create_file and
  * vol_replace_file wrap with their own refusal, and it is what the tree
  * itself uses to put a name on a volume. That is what a PRE-WP135 build
  * left behind, so it is exactly the state this defect is about.
@@ -106,9 +106,9 @@ int main(int argc, char **argv)
     if (!va || !vb) { if (va) vol_close(va); if (vb) vol_close(vb); return 2; }
 
     for (i = 0; i < NCOPY; i++) {
-        ok(vol_v3_write_bulk(va, names_a[i], g_buf, BUFSZ, NULL) != 0,
+        ok(vol_write_bulk(va, names_a[i], g_buf, BUFSZ, NULL) != 0,
            "plain name staged on volume A");
-        ok(vol_v3_write_bulk(vb, names_b[i], g_buf, BUFSZ, NULL) != 0,
+        ok(vol_write_bulk(vb, names_b[i], g_buf, BUFSZ, NULL) != 0,
            "'!'-bearing name staged on volume B");
     }
     for (i = 0; i < NCOPY; i++) {
@@ -173,8 +173,8 @@ int main(int argc, char **argv)
         uint64_t box, part;
         int zbox, zpart;
         if (!v) return 2;
-        box = vol_v3_write_bulk(v, "box.txt", g_buf, BUFSZ, NULL);
-        part = vol_v3_write_bulk(v, "box.txt!part0", g_buf, BUFSZ, NULL);
+        box = vol_write_bulk(v, "box.txt", g_buf, BUFSZ, NULL);
+        part = vol_write_bulk(v, "box.txt!part0", g_buf, BUFSZ, NULL);
         ok(box != 0 && part != 0, "container + a real '!part0' sibling staged");
         vol_mark_pending(v, box);
         vol_mark_pending(v, part);
@@ -193,7 +193,7 @@ int main(int argc, char **argv)
          * minted shape but has no live container is not one of ours, and
          * must be treated as the user name it is. */
         {
-            uint64_t orphan = vol_v3_write_bulk(v, "ghost.txt!mbr0000-x",
+            uint64_t orphan = vol_write_bulk(v, "ghost.txt!mbr0000-x",
                                                 g_buf, BUFSZ, NULL);
             int zo = 0;
             ok(orphan != 0, "a '!mbr0000-x' name with NO live container staged");

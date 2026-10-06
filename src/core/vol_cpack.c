@@ -2553,13 +2553,13 @@ static int cpack_recipe_seg(invfs_volume *v, uint64_t ino,
     invfs_ast_hdr ah;
 
 
-    invfs_v3_inode in;
-    if (vol_v3_inode_get(v, ino, &in) != 1) {
+    invfs_inode in;
+    if (vol_inode_get(v, ino, &in) != 1) {
             return -1;
     }
     uint8_t *rblob = NULL;
     size_t rblen = 0;
-    if (vol_v3_recipe_load(v, in.recipe_addr, &rblob, &rblen) != 0 || !rblob) {
+    if (vol_recipe_load(v, in.recipe_addr, &rblob, &rblen) != 0 || !rblob) {
             return -1;
     }
     const invfs_ast_block_entry *ents = NULL;
@@ -3085,7 +3085,7 @@ int64_t cpack_map_read(invfs_volume *v, const char *name, uint64_t ino,
  * a guard/map failure rolls the name back onto the untouched old record, which
  * has to stay readable.
  *
- * WP202: the body is vol_v3_release_superseded_blob (src/core/vol_ast.c), so
+ * WP202: the body is vol_release_superseded_blob (src/core/vol_ast.c), so
  * the "only when the row really MOVED" guard lives in ONE place. It used to
  * live here, and the builtin container lanes in sweep_dispatch (src/core/
  * vol_sweep.c) superseded a row exactly the same way with no release at all --
@@ -3094,9 +3094,9 @@ int64_t cpack_map_read(invfs_volume *v, const char *name, uint64_t ino,
  * drifted in the first place. */
 static void cpack_release_superseded(
     invfs_volume *v, uint64_t inode_id,
-    const uint8_t old_addr[INVFS_V3_RECIPE_ADDR_LEN])
+    const uint8_t old_addr[INVFS_RECIPE_ADDR_LEN])
 {
-    vol_v3_release_superseded_blob(v, inode_id, old_addr);
+    vol_release_superseded_blob(v, inode_id, old_addr);
 }
 
 
@@ -3252,8 +3252,8 @@ int vol_containerpack_sweep(invfs_volume *v, uint64_t inode_id,
     invfs_meta_pub keep;
     int have_keep, rc = 0;
     /* the superseded parent recipe, released once the commit is complete */
-    invfs_v3_inode old_in;
-    uint8_t old_addr[INVFS_V3_RECIPE_ADDR_LEN];
+    invfs_inode old_in;
+    uint8_t old_addr[INVFS_RECIPE_ADDR_LEN];
     if (!pc->probe || !pc->probe()) {
         /* "tools absent: wait" is rc 1, which is ALSO what the DEFER_ENOSPC
          * path below returns -- but that one leaves a cls=9 stamp and this one
@@ -3623,22 +3623,22 @@ int vol_containerpack_sweep(invfs_volume *v, uint64_t inode_id,
      * normal pipeline owns them from here), then the member table, then
      * the name-owning recipe record; retire the old record last. */
     have_keep = vol_get_meta(v, inode_id, &keep) == 0;
-    /* v3: the parent's row is superseded IN PLACE -- vol_v3_create_content_node
+    /* v3: the parent's row is superseded IN PLACE -- vol_create_content_node
      * reuses the dirent's inode id -- so the moment the new record lands the
      * superseded recipe's DATA SEGMENTS are unreachable, and nothing in the
      * tree ever frees them: vol_create_blob_file cannot (it is handed the new
      * address, never the old one), and the WP-M15 reachability reclaim diffs
      * B+ tree PAGES only -- a recipe blob IS a page, but the segments it
      * points at are data blocks. Capture the address here and release it at
-     * the end of the commit, the way vol_v3_publish_blob_inode and the WP78
+     * the end of the commit, the way vol_publish_blob_inode and the WP78
      * batch publishers do. Skipping this stranded the whole original import
      * (measured: 25.5 MiB of a 40 MiB rawdisk fixture, allocated, named by no
      * live recipe, and no sweep, fsck or fold reclaimed it). */
     memset(old_addr, 0, sizeof old_addr);
     {
         uint64_t pid = 0;
-        if (vol_v3_path_lookup(v, name, &pid) == 1 &&
-            vol_v3_inode_get(v, pid, &old_in) == 1)
+        if (vol_path_lookup(v, name, &pid) == 1 &&
+            vol_inode_get(v, pid, &old_in) == 1)
             memcpy(old_addr, old_in.recipe_addr, sizeof old_addr);
     }
     for (i = 0; i < nmem; i++) {

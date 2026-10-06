@@ -177,7 +177,7 @@ Consequences, and they are binding:
   change that made it wrong.
 - **A subsystem doc cites `file:line`.** A claim that cannot be pointed at in
   the tree is deleted, not softened. `src/core/invarifs.h` is the on-disk
-  format authority; `docs/architecture/META-V3.md` is the concept layer over
+  format authority; `docs/architecture/META.md` is the concept layer over
   it; `impl_docs/DOCMAP.md` is the subsystem→code map.
 - **Shipped design rationale lives in the commit that shipped it**
   (`git log -p -- <path>`), not in a side file. The WP docs were deleted for

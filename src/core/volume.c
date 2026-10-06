@@ -432,7 +432,7 @@ static int mirror_resync(invfs_volume *v)
  * devices carry the same state.
  *
  * WP99: this used to be the inline tail of the v2 path only. vol_flush's
- * VOLF_V3 branch returns before it, so on Meta-v3 the DEVT sync_seq was
+ * VOLF_META branch returns before it, so on Meta the DEVT sync_seq was
  * frozen at its mkfs value for the life of the volume -- which made BOTH
  * halves of the mirror protocol inert: the staleness DETECTION could never
  * fire, and a divergence detected some other way (a dev0 barrier failure,
@@ -485,7 +485,7 @@ int vol_mirror_stale(const invfs_volume *v)
  *                   two-device flush (vol_commit_mirror). It is blind on
  *                   any volume whose flushes never reached the bump --
  *                   which, before WP99, was EVERY Meta-v3 volume, because
- *                   vol_flush returned out of its VOLF_V3 branch above the
+ *                   vol_flush returned out of its VOLF_META branch above the
  *                   tail that holds the bump. The DEVT on such a volume
  *                   still carries its mkfs value forever, so a rewound (or
  *                   half-lost) dev0 block 0 brings back a matching
@@ -493,8 +493,8 @@ int vol_mirror_stale(const invfs_volume *v)
  *                   blind in the other direction: a dev0 that lost only the
  *                   0x9D0..0xA00 region of block 0 keeps an intact DEVT.
  *
- *   block-0 gen     the RT30 root generation at INVFS_RT30_OFF: monotone,
- *                   rewritten on every publish, and on Meta-v3 it is the
+ *   block-0 gen     the RT30 root generation at INVFS_RT_OFF: monotone,
+ *                   rewritten on every publish, and on Meta it is the
  *                   ONLY content of block 0 that orders two copies of the
  *                   same volume against each other. It does not exist on
  *                   v2 (the area is reserved-zero), so a signal that is
@@ -519,7 +519,7 @@ static void mirror_signal(const uint8_t *blk, unsigned long long *devt_seq,
                           int *devt_ok, unsigned long long *gen, int *gen_ok)
 {
     const invfs_devt *d = (const invfs_devt *)(blk + INVFS_DEVT_OFF);
-    const invfs_rt30 *r = (const invfs_rt30 *)(blk + INVFS_RT30_OFF);
+    const invfs_rt *r = (const invfs_rt *)(blk + INVFS_RT_OFF);
 
     *devt_ok = 0;
     *gen_ok = 0;
@@ -530,8 +530,8 @@ static void mirror_signal(const uint8_t *blk, unsigned long long *devt_seq,
         *devt_seq = d->sync_seq;
         *devt_ok = 1;
     }
-    if (memcmp(r->magic, "RT30", 4) == 0 && r->version == INVFS_RT30_VERSION
-        && invfs_crc32c(r, offsetof(invfs_rt30, crc32c)) == r->crc32c) {
+    if (memcmp(r->magic, "RT30", 4) == 0 && r->version == INVFS_RT_VERSION
+        && invfs_crc32c(r, offsetof(invfs_rt, crc32c)) == r->crc32c) {
         *gen = r->seq;
         *gen_ok = 1;
     }
@@ -698,7 +698,7 @@ static int wp25_open_dev1(invfs_volume *v, const char *hint)
      * which asks both devices for the two staleness signals and declares a
      * divergence when EITHER available one fires. The v2 behaviour is a
      * strict subset of it: the DEVT sync_seq branch below used to be the
-     * ONLY check, so on Meta-v3 -- where no flush ever bumped sync_seq, see
+     * ONLY check, so on Meta -- where no flush ever bumped sync_seq, see
      * vol_commit_mirror -- it could never fire, and a rewound dev0 block 0
      * was adopted as the live generation. The RT30 root generation is the
      * signal that sees it. */
@@ -751,12 +751,13 @@ static int wp25_open_degraded(invfs_volume *v)
     /* The degraded leg is the same format gate as the primary one in
      * vol_open, and says the same thing: the mirror's superblock decides
      * the format, and this build reads v3 only. */
-    if (!(v->sb.vol_flags & VOLF_V3)) {
-        fprintf(stderr, "vol_open: %s: this is not a format v3 volume: the "
-                "device 1 image reports %s (VOLF_V3 is not set). This build "
-                "reads format v3 only (INVFS_VERSION=%s).\n",
-                d1, (v->sb.vol_flags & VOLF_ASTV2) ? "format v2" : "format v1",
-                INVFS_VERSION_STRING);
+    if (!(v->sb.vol_flags & VOLF_META)) {
+        fprintf(stderr, "vol_open: %s: this is not a format v%d volume: the "
+                "device 1 image reports %s (VOLF_META is not set). This build "
+                "reads format v%d only (INVFS_VERSION=%s).\n",
+                d1, INVFS_FORMAT_VERSION,
+                (v->sb.vol_flags & VOLF_ASTV2) ? "format v2" : "format v1",
+                INVFS_FORMAT_VERSION, INVFS_VERSION_STRING);
         goto bad;
     }
     memcpy(&d2, blk + INVFS_DEVT_OFF, sizeof d2);
@@ -802,11 +803,11 @@ bad:
  * absent or torn is still a warning, not a refusal -- the RDP0 "absent"
  * convention, which keeps a v3 mkfs interrupted before the RT30 write
  * openable. */
-static void v3_probe_rt30(invfs_volume *v)
+static void probe_rt30(invfs_volume *v)
 {
-    const invfs_rt30 *rt = &v->rt30;
+    const invfs_rt *rt = &v->rt;
 
-    if (!v->rt30_present) {
+    if (!v->rt_present) {
         fprintf(stderr, "vol_open: %s: RT30 v3 root descriptor absent or "
                 "torn; presenting an empty namespace\n", v->path);
         return;
@@ -830,7 +831,7 @@ static invfs_volume *vol_open_inner(const char *path, int *err_out)
     char devbuf[64];
     const char *real;
     int rc;
-    int is_v3 = 0;
+    int is_meta = 0;
     invfs_volume *v = (invfs_volume *)calloc(1, sizeof(invfs_volume));
     if (!v) { *err = -1; return NULL; }
     (void)pthread_rwlock_init(&v->meta_lock, NULL);
@@ -906,7 +907,7 @@ static invfs_volume *vol_open_inner(const char *path, int *err_out)
     if (invfs_crc32c(&v->sb, offsetof(invfs_superblock, checksum)) != v->sb.checksum)
         { *err = -5; goto fail; }
 
-    /* VOLF_V3 is the authoritative format marker, and it is the first thing
+    /* VOLF_META is the authoritative format marker, and it is the first thing
      * checked. Every structure below this line is read through it.
      *
      * A volume without it is not readable by this build. Say so plainly, and
@@ -918,19 +919,35 @@ static invfs_volume *vol_open_inner(const char *path, int *err_out)
      * operator's time are the one they already half-know (this build reads
      * v3 only) and the one they cannot guess (their image is untouched, so
      * trying something else cannot hurt it). */
-    is_v3 = (v->sb.vol_flags & VOLF_V3) != 0;
-    if (!is_v3) {
+    is_meta = (v->sb.vol_flags & VOLF_META) != 0;
+    if (!is_meta) {
         const int is_v1 = !(v->sb.vol_flags & VOLF_ASTV2);
         fprintf(stderr,
-                "vol_open: %s: this is not a format v3 volume: the image "
-                "reports %s (VOLF_V3 is not set). This build reads format v3 "
+                "vol_open: %s: this is not a format v%d volume: the image "
+                "reports %s (VOLF_META is not set). This build reads format v%d "
                 "only (INVFS_VERSION=%s) and carries no reader for any other "
                 "format.\n"
                 "  The image is untouched by this attempt. To get at the data, "
                 "create a new volume with invf-mkfs and re-import from a copy "
                 "of the source tree, or restore from a backup.\n",
-                real, is_v1 ? "format v1" : "format v2", INVFS_VERSION_STRING);
+                real, INVFS_FORMAT_VERSION,
+                is_v1 ? "format v1" : "format v2", INVFS_FORMAT_VERSION,
+                INVFS_VERSION_STRING);
         *err = -12;
+        goto fail;
+    }
+
+    /* Generation gate: only INVFS_FORMAT_VERSION opens. A volume stamped
+     * otherwise (including pre-flip images stamped 3, which are byte-wise
+     * readable but renumbered out from under themselves) is refused by
+     * number, loudly, with the image untouched -- same contract as the
+     * flag refusal above. */
+    if (v->sb.format_version != INVFS_FORMAT_VERSION) {
+        fprintf(stderr,
+                "vol_open: %s: format version %u refused; this build reads "
+                "format v%d only. The image is untouched by this attempt.\n",
+                real, v->sb.format_version, INVFS_FORMAT_VERSION);
+        *err = -13;
         goto fail;
     }
 
@@ -1000,17 +1017,13 @@ static invfs_volume *vol_open_inner(const char *path, int *err_out)
     }
 
     /* WP30 Phase 3: load MET0 descriptor at 0x3A0.
-     * v0.3.0+: dynamic metadata extents are mandatory.
-     * format_version 0 = legacy volume (no dynamic extents support):
-     * allow read-only fallback so users can mount and extract data.
-     * Writes are disabled via VOLF_READONLY (every mutation path refuses). */
-    if (v->sb.format_version == 0) {
-        fprintf(stderr, "vol_open: volume format version 0 (pre-v0.3.0) opened in "
-                        "READ-ONLY mode; dynamic metadata extents are unavailable. "
-                        "Reformat with invf-mkfs to upgrade.\n");
-        v->sb.vol_flags |= VOLF_READONLY;
-        v->met0_present = 0;
-    } else {
+     * Dynamic metadata extents are mandatory: every volume this build
+     * opens carries VOLF_META, and every volume it writes stamps
+     * format_version 0 WITH a MET0. The old format_version-0-means-legacy
+     * fallback is gone with the legacy numbering itself -- there is no
+     * read-only past to fall back to, only the current layout or refusal
+     * (above). A missing/invalid MET0 below is corruption, not legacy. */
+    {
         invfs_met0 m0;
         if (io_seek(&v->io, INVFS_MET0_OFF) == 0 &&
             io_read(&v->io, &m0, sizeof(m0)) == 0 &&
@@ -1183,7 +1196,7 @@ static invfs_volume *vol_open_inner(const char *path, int *err_out)
      *
      * WP-M5: bring the metadata-v3 base-tree engine up. The root lives
      * in RT30 and the allocator + dirty-bitmap flush are owned by
-     * vol_metabuf/vol_btree; the inode API (vol_v3_inode_*) writes the
+     * vol_metabuf/vol_btree; the inode API (vol_inode_*) writes the
      * base tree directly (no delta yet). The v2 write engine still does
      * not apply to a v3 namespace, so refuse its mutations: keep
      * needs_recovery = 1 (the engine-level backstop vol_write_enabled /
@@ -1206,13 +1219,13 @@ static invfs_volume *vol_open_inner(const char *path, int *err_out)
      * SPT0 to mirror and its tail is never touched. */
     anchor_probe(v, NULL);
     if (mbuf_rt30_load(v) < 0) { *err = -6; goto fail; }
-    v3_probe_rt30(v);
+    probe_rt30(v);
     mbuf_init(v);
-    /* WP-M5: skip the WP-M2 bootstrap pool (see v3_ready in
+    /* WP-M5: skip the WP-M2 bootstrap pool (see ready in
      * vol_btree.c) -- its cursor resets every open, so reusing it would
      * let a COW write clobber a live page from a previous session. */
     v->mb_boot_cursor = v->mb_boot_end;
-    v->v3_mbuf_ready = 1;
+    v->mbuf_ready = 1;
     v->needs_recovery = 1;
     /* WP-M19: a degraded v3 mount (dev0 absent) serves only from the
      * dev1 metadata mirror; keep it READ-ONLY, exactly like the v2
@@ -1230,8 +1243,8 @@ static invfs_volume *vol_open_inner(const char *path, int *err_out)
     /* WP-M16: load the save-point descriptor if one exists. */
     if (spt0_load(v) < 0) { *err = -6; goto fail; }
     if (!invfs_sweep_ui_active())
-        fprintf(stderr, "vol_open: %s: format v3 (metadata-v3 inode tree): "
-                "base root engine up, v2 paths refused\n", real);
+        fprintf(stderr, "vol_open: %s: format v%d (metadata inode tree): "
+                "base root engine up, v2 paths refused\n", real, INVFS_FORMAT_VERSION);
 
     /* WP25: with the name/id indexes live, load the tier + RAW-mirror
      * indexes from their owner records (2-device volumes only; a degraded
@@ -1531,7 +1544,7 @@ void vol_close(invfs_volume *v)
          * there -- io_latched can. A latched volume must never write CLEAN:
          * its in-RAM state may sit past bytes that never reached the device. */
         int latched = v->io_latched ||
-                      (v->needs_recovery && !(v->sb.vol_flags & VOLF_V3));
+                      (v->needs_recovery && !(v->sb.vol_flags & VOLF_META));
         if (latched) {
             /* WP22c: an io error latched this session. Do NOT run the
              * usual final flush: the in-RAM journal/bitmap may reflect
@@ -1686,13 +1699,13 @@ int vol_flush(invfs_volume *v)
      * only trip the mirror's read-only refusal. */
     if (v->degraded) return 0;
     /* WP75: the volume keeps its block bitmap dirty in RAM between
-     * publishes -- v3_publish (via vol_v3_bitmap_flush) is the only other
+     * publishes -- publish (via vol_bitmap_flush) is the only other
      * writer. A flush must persist it too, or the sweep's post-publish
      * dedupe frees (and any allocation after the last publish) are dropped
      * at close and a reopen can re-hand those blocks.
      * Structure-before-reference: make the bitmap durable before
-     * returning, mirroring v3_publish. */
-    if (vol_v3_bitmap_flush(v) != 0) {
+     * returning, mirroring publish. */
+    if (vol_bitmap_flush(v) != 0) {
         vol_io_error_latch(v, "v3 bitmap flush");
         return -1;
     }
@@ -1744,7 +1757,7 @@ int vol_sync(invfs_volume *v)
     /* WP80/A: v3 is the default full format now, not the empty/read-only
      * skeleton the WP-M1 comment described. Its pending state is the dirty
      * block bitmap, which vol_flush persists (WP75); the delta records are
-     * already barriered at append (see Bug C in docs/architecture/META-V3.md)
+     * already barriered at append (see Bug C in docs/architecture/META.md)
      * and the data segments they name are written before that barrier, so a
      * vol_flush + one barrier covers the whole fsync contract exactly as the
      * v2 path does. Returning early here silently made FUSE .fsync a no-op. */
@@ -2280,8 +2293,8 @@ static uint64_t pba_ref_hash(uint64_t pba)
  *
  * RECURSIVE, for two reasons that are both real: pba_ref_ensure walks the
  * namespace and calls pba_ref_modify once per block entry, and the retire
- * paths nest -- vol_v3_unlink calls vol_delete_siblings, which calls
- * vol_v3_unlink again. */
+ * paths nest -- vol_unlink calls vol_delete_siblings, which calls
+ * vol_unlink again. */
 static pthread_mutex_t g_pba_ref_mu;
 static pthread_once_t g_pba_ref_once = PTHREAD_ONCE_INIT;
 static void pba_ref_mu_init(void)
@@ -2302,7 +2315,6 @@ static inline void pba_ref_lock(void)
     pthread_once(&g_pba_ref_once, pba_ref_mu_init);
     pthread_mutex_lock(&g_pba_ref_mu);  /* NOT pba_ref_lock: this IS it */
 }
-
 /* Depth of the hold/release pairs below. A count and not a flag, so a
  * nested retire inside an outer one cannot unlock early. */
 static int g_pba_ref_held;
@@ -2311,11 +2323,10 @@ static int g_pba_ref_held;
  * take the map, drop the name, drop the row, and subtract -- and all four
  * have to be one atomic thing with respect to the map, because a rebuild
  * that lands between the first and the last rebuilds against a live set the
- * pending -1 does not belong to. See vol_v3_unlink. */
+ * pending -1 does not belong to. See vol_unlink. */
 void vol_pba_ref_hold(invfs_volume *v)
 {
     (void)v;
-    pthread_once(&g_pba_ref_once, pba_ref_mu_init);
     pba_ref_lock();
     g_pba_ref_held++;
 }
@@ -2338,12 +2349,11 @@ static void pba_ref_free(invfs_volume *v)
 }
 
 /* WP pba-ref-v3-incremental: a recipe was published by a path that does not
- * adjust the map itself (vol_v3_inode_delta_put with a new recipe_addr).
+ * adjust the map itself (vol_inode_delta_put with a new recipe_addr).
  * The next pba_ref_ensure rebuilds from the live set before any free gate
  * can read a count that predates that publish. */
 void pba_ref_invalidate(invfs_volume *v)
 {
-    pthread_once(&g_pba_ref_once, pba_ref_mu_init);
     pba_ref_lock();
     if (v) v->pba_ref_stale = 1;
     pthread_mutex_unlock(&g_pba_ref_mu);
@@ -2496,7 +2506,7 @@ static int pba_ref_v3_walk_cb(void *ctx_, const char *path, uint64_t inode_id,
 {
     pba_ref_ensure_ctx *c = (pba_ref_ensure_ctx *)ctx_;
     invfs_volume *v = c->v;
-    invfs_v3_inode in;
+    invfs_inode in;
     uint8_t *blob = NULL;
     size_t blen = 0;
     invfs_ast_hdr ah;
@@ -2536,7 +2546,7 @@ static int pba_ref_v3_walk_cb(void *ctx_, const char *path, uint64_t inode_id,
      * Everything from here on is a statement about whether this build can
      * be trusted, and a return of 0 there is a lie with a body count behind
      * it. This map is the SOLE gate on every data-block free
-     * (vol_v3_free_recipe_blocks :179, the write commit's retire loop
+     * (vol_free_recipe_blocks :179, the write commit's retire loop
      * vol_write.c:860, the sweep remap vol_sweep.c:1418, dedupe's loser
      * retire vol_dedupe.c:275), so a live reference the map does not hold is
      * a block that gets freed while a live recipe still names it -- silent,
@@ -2549,7 +2559,7 @@ static int pba_ref_v3_walk_cb(void *ctx_, const char *path, uint64_t inode_id,
      *   B is unlinked           (the -1 takes the count to 0)
      *   X is FREED              -- while A still names it
      *
-     * So each of these is a non-zero return: it aborts v3_walk_dir, and
+     * So each of these is a non-zero return: it aborts walk_dir, and
      * pba_ref_ensure below throws the whole partial map away rather than
      * declaring it exact. Non-zero is not "skip this inode" -- a skip is
      * precisely the bug.
@@ -2566,7 +2576,7 @@ static int pba_ref_v3_walk_cb(void *ctx_, const char *path, uint64_t inode_id,
      * run yet is already in.
      */
     {
-        int grc = vol_v3_inode_get(v, inode_id, &in);
+        int grc = vol_inode_get(v, inode_id, &in);
         if (grc != 1) {
             fprintf(stderr, "pba_ref: inode %llu's row is not readable "
                     "(rc=%d); the reference map cannot be built exact, so no "
@@ -2585,7 +2595,7 @@ static int pba_ref_v3_walk_cb(void *ctx_, const char *path, uint64_t inode_id,
      * (spn_data_check_ino, src/core/vol_spt0.c:1182-1187), which is the
      * proof that the two ends are supposed to agree and that this one did
      * not. */
-    if (vol_v3_recipe_load(v, in.recipe_addr, &blob, &blen) != 0 || !blob) {
+    if (vol_recipe_load(v, in.recipe_addr, &blob, &blen) != 0 || !blob) {
         fprintf(stderr, "pba_ref: inode %llu's recipe blob does not load; "
                 "the reference map cannot be built exact, so no block will be "
                 "freed through it this session\n",
@@ -2616,7 +2626,7 @@ static int pba_ref_ensure_locked(invfs_volume *v)
     pba_ref_ensure_ctx c;
     /* WP pba-ref-v3-incremental: an existing map is only reused when nothing
      * has published a recipe behind its back. v3 has no per-record birth /
-     * death hook (vol_v3_inode_delta_put is the single choke point and it
+     * death hook (vol_inode_delta_put is the single choke point and it
      * used to be silent here), so a map built at vol_open over an EMPTY
      * volume stayed "on" and authoritative-looking for the rest of the
      * session: every inode created afterwards was invisible to it, and the
@@ -2634,7 +2644,7 @@ static int pba_ref_ensure_locked(invfs_volume *v)
     v->pba_ref_n = 0;
     v->pba_ref_on = 1;
     c.v = v;
-    /* vol_v3_walk_STICT, and the status is CHECKED.
+    /* vol_walk_STICT, and the status is CHECKED.
      *
      * Both halves of that are the fix. The walk is strict because a row it
      * cannot read is a live reference the map would not hold, and
@@ -2666,7 +2676,7 @@ static int pba_ref_ensure_locked(invfs_volume *v)
      * not be read may well be readable a moment later (that is the whole
      * shape of a fold racing a read), and a permanent failure costs a walk
      * per attempt on a volume that is already damaged. */
-    if (vol_v3_walk_strict(v, pba_ref_v3_walk_cb, &c) != 0) {
+    if (vol_walk_strict(v, pba_ref_v3_walk_cb, &c) != 0) {
         pba_ref_free(v);
         v->pba_ref_stale = 1;
         return -1;
@@ -2927,7 +2937,7 @@ int vol_write_enabled(invfs_volume *v)
      * flush/sync barrier failed THIS session, so the append tail is past
      * unpersisted bytes. The v3 namespace must refuse mutations then just
      * like v2, or a latched volume keeps appending into the hole. */
-    if (v->sb.vol_flags & VOLF_V3)
+    if (v->sb.vol_flags & VOLF_META)
         return !(v->sb.vol_flags & VOLF_READONLY) && !v->degraded &&
                !v->io_latched;
     /* A volume awaiting recovery is read-only for the same reason a
@@ -3058,7 +3068,7 @@ void vol_free_blocks(invfs_volume *v, uint64_t pba, uint64_t nblocks)
      * sweep that armed the window is not the only writer on the volume, and a
      * FUSE write's retire path, a delete, or a later
      * process' sweep must all see the hold. Sitting HERE rather than at the
-     * publishers that replace recipes is the point -- vol_v3_free_recipe_
+     * publishers that replace recipes is the point -- vol_free_recipe_
      * blocks has four v3 call sites and the drain frees directly, and a
      * missing one is exactly the silent corruption this refuses: a rollback
      * republishing a recipe over a block somebody else now owns. The blocks

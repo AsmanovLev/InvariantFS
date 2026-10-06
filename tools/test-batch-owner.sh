@@ -1,9 +1,9 @@
 #!/bin/bash
-# test-v3-batch-owner.sh — the v3 batch REGISTRY is a block owner.
+# test-batch-owner.sh — the v3 batch REGISTRY is a block owner.
 #
 # Red control for the recipe-blob loss: a sweep could free a block that the
 # v3 batch registry still owned, the block was handed straight back to the
-# shared free pool, and the same sweep's stage-6 tz_v3_gc then freed it a
+# shared free pool, and the same sweep's stage-6 tz_gc then freed it a
 # SECOND time through the row it never dropped -- by then as a live base
 # B+-tree page. The fold after it rebuilt the base from the pre-transform
 # root, and a file written seconds earlier became unreadable ("recipe blob
@@ -34,8 +34,8 @@
 #          blocks come back, one generation later, which is the whole point
 #          of skipping it in the reclaim.
 #
-# Run:  bash tools/run-e2e.sh tools/test-v3-batch-owner.sh
-#   or:  bash tools/test-v3-batch-owner.sh     (from make test)
+# Run:  bash tools/run-e2e.sh tools/test-batch-owner.sh
+#   or:  bash tools/test-batch-owner.sh     (from make test)
 set -u
 set -o pipefail
 
@@ -79,7 +79,7 @@ sweep() {  # sweep <img> -- the offline sweep, quietly; keeps a running log
 
 echo "== leg 0: build a LIVE, PINNED text batch =="
 rm -f m.img
-INVFS_V3=1 "$B/invf-mkfs" m.img 0.3 >m.img.mkfs 2>&1 \
+"$B/invf-mkfs" m.img 0.3 >m.img.mkfs 2>&1 \
     || { cat m.img.mkfs; fail "mkfs failed"; }
 for i in $(seq 1 $NFILES); do
     "$B/invf-cp" m.img "orig$i.txt" "a$i.txt" >/dev/null 2>&1 \
@@ -125,7 +125,7 @@ FAIL: the savepoint reclaim freed a block the v3 batch registry still owns.
 
 That is the recipe-blob loss. The registry row is now a stale pointer into
 the free pool; the next base-page allocation may take the block, and this
-sweep's own stage-6 tz_v3_gc will then free that LIVE page through the row.
+sweep's own stage-6 tz_gc will then free that LIVE page through the row.
 EOF
         exit 1; }
 DEAD=$(field "$OUT" RECLAIMED_DEAD)
@@ -156,7 +156,7 @@ FSCK=$("$B/invf-fsck" m.img 2>&1) || { echo "$FSCK"; fail "fsck exited nonzero";
 echo "$FSCK" | grep -q "^OK$" || { echo "$FSCK"; fail "fsck not OK"; }
 
 echo "== leg 3: the dead batch is still reclaimed, one generation later =="
-# The fix defers the batch's blocks to tz_v3_gc instead of never freeing
+# The fix defers the batch's blocks to tz_gc instead of never freeing
 # them. A "fix" that only added a veto would pass leg 1 and leak forever,
 # so this leg is what tells the two apart.
 OUT=$("$T" rows m.img) || { echo "$OUT"; fail "rows failed after the sweeps"; }

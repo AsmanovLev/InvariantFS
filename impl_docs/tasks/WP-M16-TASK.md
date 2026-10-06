@@ -98,7 +98,7 @@ Files:
 3. E2E gates (run with `INVFS_E2E_AGENT=wp-M16-savepoint-rollback`):
    ```
    bash tools/run-e2e.sh tools/test-rollback.sh
-   bash tools/run-e2e.sh tools/test-meta-v3.sh
+   bash tools/run-e2e.sh tools/test-meta.sh
    bash tools/run-e2e.sh tools/test-writepath.sh
    ```
 

@@ -1,10 +1,10 @@
 /* overlay_test.c — WP-M11 e2e driver for the metadata-v3 overlay reads.
  *
  * The delta overlay (delta first, then base; the delta wins) is exercised
- * end to end on a real VOLF_V3 image through the public engine surface:
+ * end to end on a real VOLF_META image through the public engine surface:
  *   scenario <img>   write base inode rows and dirents, then append delta
  *                    records through the WP-M10 API and assert that
- *                    vol_v3_inode_get / vol_v3_dirent_get / vol_v3_dirent_scan
+ *                    vol_inode_get / vol_dirent_get / vol_dirent_scan
  *                    prefer the delta, that a delta delete hides a base
  *                    entry, that a delta update wins, and that the base root
  *                    page is byte-identical (untouched) throughout;
@@ -69,12 +69,12 @@ static void child_val(uint8_t v[8], uint64_t child)
         v[i] = (uint8_t)(child >> (56 - 8 * i));
 }
 
-/* The delta value for an inode key is the frozen invfs_v3_inode_row. */
+/* The delta value for an inode key is the frozen invfs_inode_row. */
 static uint16_t ino_row(uint8_t *buf, uint16_t mode, uint64_t size)
 {
-    invfs_v3_inode_row r;
+    invfs_inode_row r;
     memset(&r, 0, sizeof r);
-    r.row_version = INVFS_V3_INODE_ROW_VERSION;
+    r.row_version = INVFS_INODE_ROW_VERSION;
     r.type = INVFS_ITYP_REG;
     r.mode = mode;
     r.uid = 1000;
@@ -99,7 +99,7 @@ static int open_v3(const char *img)
         fprintf(stderr, "overlay_test: vol_open(%s) failed: err=%d\n", img, err);
         return -1;
     }
-    if (!(vol_sb(g_v)->vol_flags & VOLF_V3)) {
+    if (!(vol_sb(g_v)->vol_flags & VOLF_META)) {
         fprintf(stderr, "overlay_test: %s is not a v3 volume\n", img);
         vol_close(g_v);
         g_v = NULL;
@@ -110,7 +110,7 @@ static int open_v3(const char *img)
 
 static int base_put(uint64_t id, uint16_t mode, uint64_t size)
 {
-    invfs_v3_inode in;
+    invfs_inode in;
     memset(&in, 0, sizeof in);
     in.type = INVFS_ITYP_REG;
     in.mode = mode;
@@ -118,12 +118,12 @@ static int base_put(uint64_t id, uint16_t mode, uint64_t size)
     in.nlink = 1;
     in.size = size;
     in.mtime = in.atime = (int64_t)time(NULL);
-    return vol_v3_inode_put(g_v, id, &in);
+    return vol_inode_put(g_v, id, &in);
 }
 
 static int base_dirent_put(uint64_t parent, const char *name, uint64_t child)
 {
-    return vol_v3_dirent_put(g_v, parent, name, child);
+    return vol_dirent_put(g_v, parent, name, child);
 }
 
 /* Base-only reads: bypass the overlay so a test can prove the base tier is
@@ -133,17 +133,17 @@ static int base_ino_mode(uint64_t id, uint16_t *mode_out)
     uint8_t k[8];
     invfs_blkptr root;
     bt_val val;
-    invfs_v3_inode_row r;
+    invfs_inode_row r;
     int found = 0;
 
     ino_key(id, k);
-    if (vol_v3_base_root(g_v, &root) != 0)
+    if (vol_base_root(g_v, &root) != 0)
         return -1;
     if (btree_search(g_v, root, (bt_key){k, 8}, &val, &found) != 0)
         return -1;
     if (!found)
         return 0;
-    if (val.n < INVFS_V3_INODE_ROW_FIXED)
+    if (val.n < INVFS_INODE_ROW_FIXED)
         return -1;
     memcpy(&r, val.p, sizeof r);
     if (mode_out)
@@ -159,7 +159,7 @@ static int base_dirent_get(uint64_t parent, const char *name, uint64_t *child)
     uint16_t kn = dirent_key(k, parent, name);
     int found = 0;
 
-    if (vol_v3_base_root(g_v, &root) != 0)
+    if (vol_base_root(g_v, &root) != 0)
         return -1;
     if (btree_search(g_v, root, (bt_key){k, kn}, &val, &found) != 0)
         return -1;
@@ -180,7 +180,7 @@ static int base_dirent_get(uint64_t parent, const char *name, uint64_t *child)
 
 static int delta_put_inode(uint64_t id, uint16_t mode, uint64_t size)
 {
-    uint8_t k[8], v[INVFS_V3_INODE_ROW_FIXED];
+    uint8_t k[8], v[INVFS_INODE_ROW_FIXED];
     uint16_t vl;
     ino_key(id, k);
     vl = ino_row(v, mode, size);
@@ -248,7 +248,7 @@ static int base_snap_take(base_snap *s)
 {
     invfs_blkptr root;
     memset(s, 0, sizeof *s);
-    if (vol_v3_base_root(g_v, &root) != 0)
+    if (vol_base_root(g_v, &root) != 0)
         return -1;
     s->pba = root.pba;
     s->gen = root.gen;
@@ -264,7 +264,7 @@ static int base_snap_equal(const base_snap *s)
 {
     invfs_blkptr root;
     uint8_t page[INVFS_BLOCK_SIZE];
-    if (vol_v3_base_root(g_v, &root) != 0)
+    if (vol_base_root(g_v, &root) != 0)
         return 0;
     if (root.pba != s->pba || root.gen != s->gen)
         return 0;
@@ -317,37 +317,37 @@ static void check_base_only(void)
 
 static void check_inode_overlay(void)
 {
-    invfs_v3_inode in;
+    invfs_inode in;
     int rc;
 
     /* 42: delta value shadows the base row */
-    rc = vol_v3_inode_get(g_v, 42, &in);
+    rc = vol_inode_get(g_v, 42, &in);
     ok(rc == 1 && in.mode == 0640, "overlay inode 42 base-only == 0640");
     ok(delta_put_inode(42, 0600, 20) == 0, "delta put inode 42 == 0600");
-    rc = vol_v3_inode_get(g_v, 42, &in);
+    rc = vol_inode_get(g_v, 42, &in);
     ok(rc == 1 && in.mode == 0600 && in.size == 20,
        "delta value shadows base (mode 0600 size 20)");
     ok(base_ino_mode(42, NULL) == 1, "base inode 42 still present after delta put");
 
     /* delta update wins over the older delta value */
     ok(delta_put_inode(42, 0666, 30) == 0, "delta update inode 42 == 0666");
-    rc = vol_v3_inode_get(g_v, 42, &in);
+    rc = vol_inode_get(g_v, 42, &in);
     ok(rc == 1 && in.mode == 0666 && in.size == 30,
        "delta update wins (mode 0666 size 30)");
 
     /* delta-only inode (no base row) */
     ok(delta_put_inode(45, 0644, 5) == 0, "delta-only put inode 45");
-    rc = vol_v3_inode_get(g_v, 45, &in);
+    rc = vol_inode_get(g_v, 45, &in);
     ok(rc == 1 && in.mode == 0644, "delta-only inode 45 visible");
     ok(base_ino_mode(45, NULL) == 0, "inode 45 absent from the base");
 
     /* base-only inode still resolves through the overlay */
-    rc = vol_v3_inode_get(g_v, 44, &in);
+    rc = vol_inode_get(g_v, 44, &in);
     ok(rc == 1 && in.mode == 0700, "base-only inode 44 visible");
 
     /* delta delete shadows a base row */
     ok(delta_del_inode(43) == 0, "delta delete inode 43");
-    rc = vol_v3_inode_get(g_v, 43, &in);
+    rc = vol_inode_get(g_v, 43, &in);
     ok(rc == 0, "delta delete hides base inode 43");
     ok(base_ino_mode(43, NULL) == 1, "base inode 43 intact after delta delete");
 }
@@ -359,7 +359,7 @@ static void check_dirent_overlay(void)
     int rc;
 
     /* base reads before the delta */
-    ok(vol_v3_dirent_get(g_v, PARENT, "b", &child) == 1 && child == 102,
+    ok(vol_dirent_get(g_v, PARENT, "b", &child) == 1 && child == 102,
        "overlay dirent b base-only == 102");
 
     ok(delta_put_dirent(PARENT, "b", 202) == 0, "delta dirent b -> 202");
@@ -367,18 +367,18 @@ static void check_dirent_overlay(void)
     ok(delta_del_dirent(PARENT, "d") == 0, "delta delete dirent d");
 
     /* point lookup: delta wins */
-    ok(vol_v3_dirent_get(g_v, PARENT, "b", &child) == 1 && child == 202,
+    ok(vol_dirent_get(g_v, PARENT, "b", &child) == 1 && child == 202,
        "delta dirent b shadows base (202)");
-    ok(vol_v3_dirent_get(g_v, PARENT, "d", &child) == 0,
+    ok(vol_dirent_get(g_v, PARENT, "d", &child) == 0,
        "delta delete hides base dirent d");
-    ok(vol_v3_dirent_get(g_v, PARENT, "c", &child) == 1 && child == 103,
+    ok(vol_dirent_get(g_v, PARENT, "c", &child) == 1 && child == 103,
        "delta-only dirent c visible");
-    ok(vol_v3_dirent_get(g_v, PARENT, "a", &child) == 1 && child == 101,
+    ok(vol_dirent_get(g_v, PARENT, "a", &child) == 1 && child == 101,
        "base-only dirent a visible");
 
     /* ordered merge: base a,b,d; delta b->202, c=103, delete d */
     dir_reset(&cap);
-    rc = vol_v3_dirent_scan(g_v, PARENT, dir_cb, &cap);
+    rc = vol_dirent_scan(g_v, PARENT, dir_cb, &cap);
     ok(rc == 0 && cap.n == 3, "readdir merge yields 3 entries");
     if (cap.n == 3) {
         ok(strcmp(cap.name[0], "a") == 0 && cap.child[0] == 101,
@@ -400,15 +400,15 @@ static void check_dirent_overlay(void)
  * sees no transient ENOENT. */
 static void check_add_before_remove(void)
 {
-    invfs_v3_inode in;
+    invfs_inode in;
     int rc;
 
     /* delta still owns 42 (fold has not removed it): delta value */
-    rc = vol_v3_inode_get(g_v, 42, &in);
+    rc = vol_inode_get(g_v, 42, &in);
     ok(rc == 1 && in.mode == 0666, "pre-remove stage resolves via the delta");
 
     /* delta no longer owns 44 (fold already published it): base value */
-    rc = vol_v3_inode_get(g_v, 44, &in);
+    rc = vol_inode_get(g_v, 44, &in);
     ok(rc == 1 && in.mode == 0700, "post-remove stage resolves via the base");
 }
 
@@ -450,7 +450,7 @@ static void scenario(const char *img)
 
 static void verify(const char *img)
 {
-    invfs_v3_inode in;
+    invfs_inode in;
     uint64_t child = 0;
     dir_capture cap;
 
@@ -459,13 +459,13 @@ static void verify(const char *img)
     printf("overlay verify (WP-M11 remount)\n");
 
     /* delta rows replay */
-    ok(vol_v3_inode_get(g_v, 42, &in) == 1 && in.mode == 0666 && in.size == 30,
+    ok(vol_inode_get(g_v, 42, &in) == 1 && in.mode == 0666 && in.size == 30,
        "remount: delta update inode 42 == 0666");
-    ok(vol_v3_inode_get(g_v, 45, &in) == 1 && in.mode == 0644,
+    ok(vol_inode_get(g_v, 45, &in) == 1 && in.mode == 0644,
        "remount: delta-only inode 45 visible");
-    ok(vol_v3_inode_get(g_v, 43, &in) == 0,
+    ok(vol_inode_get(g_v, 43, &in) == 0,
        "remount: delta delete still hides inode 43");
-    ok(vol_v3_inode_get(g_v, 44, &in) == 1 && in.mode == 0700,
+    ok(vol_inode_get(g_v, 44, &in) == 1 && in.mode == 0700,
        "remount: base-only inode 44 visible");
 
     /* base rows replay untouched */
@@ -473,12 +473,12 @@ static void verify(const char *img)
     ok(base_ino_mode(43, NULL) == 1, "remount: base inode 43 intact");
 
     /* the readdir merge replays identically */
-    ok(vol_v3_dirent_get(g_v, PARENT, "b", &child) == 1 && child == 202,
+    ok(vol_dirent_get(g_v, PARENT, "b", &child) == 1 && child == 202,
        "remount: delta dirent b shadows base (202)");
-    ok(vol_v3_dirent_get(g_v, PARENT, "d", &child) == 0,
+    ok(vol_dirent_get(g_v, PARENT, "d", &child) == 0,
        "remount: delta delete still hides dirent d");
     dir_reset(&cap);
-    ok(vol_v3_dirent_scan(g_v, PARENT, dir_cb, &cap) == 0 && cap.n == 3 &&
+    ok(vol_dirent_scan(g_v, PARENT, dir_cb, &cap) == 0 && cap.n == 3 &&
        strcmp(cap.name[0], "a") == 0 && cap.child[0] == 101 &&
        strcmp(cap.name[1], "b") == 0 && cap.child[1] == 202 &&
        strcmp(cap.name[2], "c") == 0 && cap.child[2] == 103,

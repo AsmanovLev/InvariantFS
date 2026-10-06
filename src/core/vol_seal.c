@@ -81,14 +81,14 @@ int vol_seal(invfs_volume *v, int unseal, invfs_seal_report *rep)
 {
     if (!v || !rep) return -1;
     memset(rep, 0, sizeof *rep);
-    fprintf(stderr, "seal: parity sealing is NOT IMPLEMENTED on Meta-v3. "
+    fprintf(stderr, "seal: parity sealing is which has no parity seal. "
                     "The implementation that existed was format-v2 "
                     "machinery -- it rebuilt the parity bitmap by scanning "
                     "the L2P journal and persisted each shard as a hidden "
                     "\"\\x01parityN\" inode record -- and it was removed with "
                     "the format. This is not a partial seal that could be "
                     "finished; there is no code left to finish. This build "
-                    "reads format v3 only, which has no parity seal.\n");
+                    "reads format v%d only, which has no parity seal.\n", INVFS_FORMAT_VERSION);
     (void)unseal;
     return -1;
 }

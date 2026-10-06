@@ -75,7 +75,7 @@ echo "== WP118: nlink vs dirent fan-in (hardlink control + alias detection) =="
 
 # ---------------------------------------------------------------- leg A
 echo "-- leg A: POSITIVE CONTROL, a volume with real hardlinks --"
-INVFS_V3=1 $B/invf-mkfs "$IMG" 0.5 >"$WORK/mkfs.log" 2>&1 \
+$B/invf-mkfs "$IMG" 0.5 >"$WORK/mkfs.log" 2>&1 \
     || { cat "$WORK/mkfs.log"; fail "mkfs failed"; }
 
 head -c 200000 /dev/urandom >"$WORK/a.bin"
@@ -98,7 +98,7 @@ mnt_down
 # a.bin, two on b.bin, one on sub/c.bin. A hardlink is NOT a fault, and
 # saying so here is the whole point -- a check of the form "no two names
 # may share an inode id" fails on this very volume.
-AUDIT=$($B/invf-v3inode "$IMG" nlink audit 2>/dev/null) \
+AUDIT=$($B/invf-vnode "$IMG" nlink audit 2>/dev/null) \
     || { echo "$AUDIT"; fail "the audit rejected a volume with hardlinks"; }
 echo "$AUDIT" | grep -q "verdict=OK" \
     || { echo "$AUDIT"; fail "hardlink volume did not audit OK"; }
@@ -132,12 +132,12 @@ echo "  a.bin is engine inode $AID"
 # whose nlink was not bumped. `dirent put` deliberately does not touch the
 # link count -- doing the accounting is the caller's job, and the failure
 # being reproduced is precisely a caller that forgot.
-$B/invf-v3inode "$IMG" dirent put 1 intruder.bin "$AID" >/dev/null \
+$B/invf-vnode "$IMG" dirent put 1 intruder.bin "$AID" >/dev/null \
     || fail "could not inject the aliased dirent"
 echo "  injected: dirent (1, intruder.bin) -> inode $AID, nlink untouched"
 
 set +e
-AUDIT=$($B/invf-v3inode "$IMG" nlink audit 2>/dev/null); ARC=$?
+AUDIT=$($B/invf-vnode "$IMG" nlink audit 2>/dev/null); ARC=$?
 set -e
 [ "$ARC" -ne 0 ] || { echo "$AUDIT"; fail "the audit passed an aliased volume"; }
 echo "$AUDIT" | grep -q "verdict=MISMATCH" \
@@ -183,9 +183,9 @@ echo "  fsck -f: exit $FIXED_RC, $(echo "$FIXED" | tail -1) (not repairable, and
 
 # ---------------------------------------------------------------- leg C
 echo "-- leg C: removing the intruder restores the verdict --"
-$B/invf-v3inode "$IMG" dirent del 1 intruder.bin >/dev/null \
+$B/invf-vnode "$IMG" dirent del 1 intruder.bin >/dev/null \
     || fail "could not remove the aliased dirent"
-$B/invf-v3inode "$IMG" nlink audit >/dev/null 2>&1 \
+$B/invf-vnode "$IMG" nlink audit >/dev/null 2>&1 \
     || fail "the audit still fails after the intruder is gone"
 FSCK=$($B/invf-fsck "$IMG" 2>&1) || { echo "$FSCK"; fail "fsck is not OK again"; }
 echo "$FSCK" | grep -q "^OK$" || { echo "$FSCK"; fail "fsck did not return to OK"; }

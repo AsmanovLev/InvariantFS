@@ -35,9 +35,19 @@
 #define INVFS_BLOCK_SIZE  4096
 /* Wire version of the AST block entry (WP27: entries carry the physical
  * block address, 24B -> 32B) and of the INO2 metadata extension. This
- * number is NOT the volume format: the format marker is VOLF_V3 in
+ * number is NOT the volume format: the format marker is VOLF_META in
  * sb.vol_flags, and vol_open refuses every volume without it. */
 #define INVFS_VERSION     2
+/* Format generation label: this tree writes generation 0 (no stable
+ * release exists yet, so the count starts here). This is the number
+ * user-facing messages print ("format v0"). It is deliberately NOT the
+ * same thing as either of the other two numbers, and confusing them has
+ * caused real bugs, so:
+ *   - INVFS_VERSION above is the WIRE version of AST/INO2 entries.
+ *   - sb.format_version below is the on-disk compatibility encoding
+ *     (0 = legacy read-only volume, 1 = current Meta layout); its 0 does
+ *     NOT mean "generation 0". Do not renumber it. */
+#define INVFS_FORMAT_VERSION 0
 /* Reserved gap in the metadata zone, between the metadata extent mapper and
  * the record area: 32 MiB, never read and never written by this build. The
  * record area's block number is DERIVED from it (volume.c, vol_open), so the
@@ -183,7 +193,7 @@ typedef struct {
     uint32_t hard_min_blocks;       /* 0x84 below this -> READONLY */
     uint32_t vol_flags;             /* 0x88 bit0 = VOLF_READONLY */
     uint32_t pad2;                  /* 0x8C reserved, must be 0 */
-    uint8_t  format_version;       /* 0x90 format version: 0=legacy, 1=v0.3.0 */
+    uint8_t  format_version;       /* 0x90 == INVFS_FORMAT_VERSION (0: current unstable generation; nonzero: refuse) */
     uint8_t  pad3[3];              /* 0x91 padding */
     /* WP30: dynamic metadata extents (outside checksum - 0 on old images) */
     uint32_t meta_reserved_pct;     /* 0x94 min free pool % for metadata */
@@ -204,12 +214,12 @@ typedef struct {
 #define VOLF_ASTV2    0x00000008
 /* WP-M1: format v3 (metadata-v3 programme, design-meta-v3.md). A v3 volume
  * replaces the v2 append-only inode records + owner WAL with a two-tier
- * metadata store (immutable B+-tree base + append-only delta). VOLF_V3 is
+ * metadata store (immutable B+-tree base + append-only delta). VOLF_META is
  * the authoritative format marker: vol_open checks it BEFORE the VOLF_ASTV2
  * reader gate, because a v3 volume carries no v2 record stream. Lives
  * outside the superblock checksum, like every other policy flag. The v3
  * on-disk skeleton is the RT30 root-area descriptor (block 0, 0x9D0). */
-#define VOLF_V3       0x00000010
+#define VOLF_META       0x00000010
 /* WP22a/H5: WHY the volume is read-only. alloc_blocks raises VOLF_READONLY
  * together with VOLF_RO_SPACE when the free count hits hard_min (the space
  * latch); an operator/tool hold (vol_set_readonly) sets VOLF_READONLY alone.
@@ -567,19 +577,19 @@ typedef struct {
  *   0x9F4  u64  seq            root generation (monotone; higher = newer)
  *   0x9FC  u32  crc32c         over the descriptor with this field read 0
  * 48 bytes total; the rest of block 0 stays reserved-zero. */
-#define INVFS_RT30_OFF      0x9D0
-#define INVFS_RT30_VERSION  1
-#define INVFS_V3_PAGE_SIZE_DEFAULT 4096
+#define INVFS_RT_OFF      0x9D0
+#define INVFS_RT_VERSION  1
+#define INVFS_PAGE_SIZE_DEFAULT 4096
 #pragma pack(push, 1)
 typedef struct {
     char     magic[4];          /* 0x9D0 "RT30" */
-    uint32_t version;           /* 0x9D4 INVFS_RT30_VERSION */
+    uint32_t version;           /* 0x9D4 INVFS_RT_VERSION */
     uint32_t page_size;         /* 0x9D8 metadata base-page size */
     uint64_t root_slot[2];      /* 0x9DC base root slot A/B pba (0=empty) */
     uint64_t delta_pba;         /* 0x9EC active delta segment pba (0=none) */
     uint64_t seq;               /* 0x9F4 root generation (monotone) */
     uint32_t crc32c;            /* 0x9FC over descriptor, this field 0 */
-} invfs_rt30;                   /* 0x9D0 + 48 -> ends 0xA00 */
+} invfs_rt;                   /* 0x9D0 + 48 -> ends 0xA00 */
 #pragma pack(pop)
 
 /* ---- WP-M16: SPT0 v3 save-point descriptor (block 0 reserved area) ----
@@ -712,7 +722,7 @@ typedef struct {
  *                             that matters for a same-size re-mkfs, which
  *                             keeps every geometry field identical and
  *                             leaves the old tail bytes in place.
- *   0x28  invfs_rt30 rt30     the mirrored RT30, verbatim
+ *   0x28  invfs_rt rt     the mirrored RT30, verbatim
  *   0x58  invfs_spt0 spt0     the mirrored SPT0, verbatim
  *   0x78  u32  crc32c         over the descriptor with this field read 0
  * 124 bytes total, at byte offset 0 of the anchor block. */
@@ -727,7 +737,7 @@ typedef struct {
     uint32_t block_size;        /* 0x10 geometry fingerprint */
     uint32_t format_version;    /* 0x14 geometry fingerprint */
     char     vol_uuid[16];      /* 0x18 geometry fingerprint */
-    invfs_rt30 rt30;            /* 0x28 mirrored root descriptor (48) */
+    invfs_rt rt;            /* 0x28 mirrored root descriptor (48) */
     invfs_spt0 spt0;            /* 0x58 mirrored save-point descriptor (32) */
     uint32_t crc32c;            /* 0x78 over descriptor, this field 0 */
 } invfs_anc0;                   /* 124 bytes at offset 0 of the tail block */
@@ -1183,7 +1193,7 @@ typedef struct invfs_meta_ext_hdr {
  * stays small and cacheable. The symlink target lives in the recipe blob,
  * as v2 kept it in the INO2 ext.
  *
- *   u32 row_version   = INVFS_V3_INODE_ROW_VERSION
+ *   u32 row_version   = INVFS_INODE_ROW_VERSION
  *   u32 type          INVFS_ITYP_* (invarifs.h)
  *   u16 mode          permission bits
  *   u32 uid, gid
@@ -1203,26 +1213,26 @@ typedef struct invfs_meta_ext_hdr {
  *
  * WP-M5 always writes xattr_len == 0: the xattr tree is WP-M7. The field
  * is frozen here so that WP does not need a format break. */
-#define INVFS_V3_INODE_ROW_VERSION 2u
-#define INVFS_V3_INODE_XATTR_MAX   4096u
-#define INVFS_V3_RECIPE_ADDR_LEN   32u
+#define INVFS_INODE_ROW_VERSION 2u
+#define INVFS_INODE_XATTR_MAX   4096u
+#define INVFS_RECIPE_ADDR_LEN   32u
 /* WP-M8: a recipe blob must fit one base page (4096 B). Header 20 +
  * key record (2+33) + value record (2+n) must fit with split headroom;
  * 3800 B is ~7.7 MiB of file at 64 KiB segments. Larger recipes need a
  * multi-page/streamed blob (TODO WP-M9/WP-M15). */
-#define INVFS_V3_RECIPE_BLOB_MAX   3800u
+#define INVFS_RECIPE_BLOB_MAX   3800u
 /* WP-M25: streamed / multi-chunk recipe blobs for large files (> 7.7 MiB) */
-#define INVFS_V3_RECIPE_STREAM_MAX (64u * 1024u * 1024u)  /* 64 MiB recipe cap */
-#define INVFS_V3_RECIPE_CHUNK_DATA 3072u                  /* 3 KiB per chunk */
-#define INVFS_V3_RECIPE_CHUNK_KEY_LEN (1u + INVFS_V3_RECIPE_ADDR_LEN + 3u) /* 36 B */
-#define INVFS_V3_RECIPE_MAGIC_RMC1 0x31434D52u            /* 'RMC1' */
+#define INVFS_RECIPE_STREAM_MAX (64u * 1024u * 1024u)  /* 64 MiB recipe cap */
+#define INVFS_RECIPE_CHUNK_DATA 3072u                  /* 3 KiB per chunk */
+#define INVFS_RECIPE_CHUNK_KEY_LEN (1u + INVFS_RECIPE_ADDR_LEN + 3u) /* 36 B */
+#define INVFS_RECIPE_MAGIC_RMC1 0x31434D52u            /* 'RMC1' */
 
 #pragma pack(push, 1)
 typedef struct {
-    uint32_t     magic;      /* INVFS_V3_RECIPE_MAGIC_RMC1 */
+    uint32_t     magic;      /* INVFS_RECIPE_MAGIC_RMC1 */
     uint32_t     total_len;  /* Total unchunked recipe byte length */
     uint16_t     n_chunks;   /* Number of 3072-byte chunks */
-} invfs_v3_recipe_desc;
+} invfs_recipe_desc;
 #pragma pack(pop)
 #pragma pack(push, 1)
 typedef struct {
@@ -1238,9 +1248,9 @@ typedef struct {
     uint64_t     size;
     invfs_blkptr recipe;
     uint32_t     xattr_len;
-    uint8_t      recipe_addr[INVFS_V3_RECIPE_ADDR_LEN];
-} invfs_v3_inode_row;    /* 114 bytes; [xattr bytes] follow */
-#define INVFS_V3_INODE_ROW_FIXED ((uint32_t)sizeof(invfs_v3_inode_row))
+    uint8_t      recipe_addr[INVFS_RECIPE_ADDR_LEN];
+} invfs_inode_row;    /* 114 bytes; [xattr bytes] follow */
+#define INVFS_INODE_ROW_FIXED ((uint32_t)sizeof(invfs_inode_row))
 #pragma pack(pop)
 
 /* WP-M7: xattr key prefix. Named xattrs live in the base B+-tree under a
@@ -1253,7 +1263,7 @@ typedef struct {
  * bytes; the name is in the key, so one inode's xattrs are a contiguous key
  * range (ordered by name_len, then name -- the same shape as WP-M6 dirents)
  * and listxattr is a single ordered scan. */
-#define INVFS_V3_XATTR_KEY_PREFIX 0x03u
+#define INVFS_XATTR_KEY_PREFIX 0x03u
 
 /* WP-M8: recipe-blob key prefix. Immutable AST recipes are content-addressed
  * and stored in the base B+-tree under
@@ -1263,7 +1273,7 @@ typedef struct {
  * small high byte of an inode id), WP-M6 dirent keys (>= 10 bytes) and
  * WP-M7 xattr keys (0x03). Read recomputes BLAKE3 and compares to the key;
  * a mismatch is a hard error, never a best-effort decode (design §16). */
-#define INVFS_V3_RECIPE_KEY_PREFIX 0x04u
+#define INVFS_RECIPE_KEY_PREFIX 0x04u
 
 /* Longest record this format can produce: the header, the (v2) recipe
    header, the most segments a v2 num_blocks can count, and the largest

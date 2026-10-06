@@ -69,13 +69,13 @@ int main(int argc, char **argv)
 
     /* ---- D: delete after the savepoint must be undone by the restore ---- */
     m.size = 4;
-    vol_v3_write_bulk(v, "d.txt", (const uint8_t *)"AAAA", 4, &m);
+    vol_write_bulk(v, "d.txt", (const uint8_t *)"AAAA", 4, &m);
     show(v, "d_pre_capture", "d.txt");
 
     rc = spt0_capture(v);
     printf("d_capture_rc=%d %s\n", rc, EN(rc));
 
-    rc = vol_v3_unlink(v, "d.txt");
+    rc = vol_unlink(v, "d.txt");
     printf("d_unlink_rc=%d %s\n", rc, EN(rc));
     show(v, "d_after_unlink", "d.txt");
 
@@ -85,11 +85,11 @@ int main(int argc, char **argv)
 
     /* ---- G: overwrite under a live savepoint keeps the old bytes ---- */
     m.size = 6;
-    vol_v3_write_bulk(v, "g.txt", (const uint8_t *)"GGGGGG", 6, &m);
+    vol_write_bulk(v, "g.txt", (const uint8_t *)"GGGGGG", 6, &m);
     rc = spt0_capture(v);
     printf("g_capture_rc=%d %s\n", rc, EN(rc));
     m.size = 4;
-    vol_v3_write_bulk(v, "g.txt", (const uint8_t *)"ZZZZ", 4, &m);
+    vol_write_bulk(v, "g.txt", (const uint8_t *)"ZZZZ", 4, &m);
     show(v, "g_after_overwrite", "g.txt");
     rc = spt0_restore(v);
     printf("g_restore_rc=%d %s\n", rc, EN(rc));
@@ -97,7 +97,7 @@ int main(int argc, char **argv)
 
     /* ---- C: drop is the point of no return ---- */
     m.size = 4;
-    vol_v3_write_bulk(v, "c.txt", (const uint8_t *)"CCCC", 4, &m);
+    vol_write_bulk(v, "c.txt", (const uint8_t *)"CCCC", 4, &m);
     rc = spt0_capture(v);
     printf("c_capture_rc=%d %s\n", rc, EN(rc));
     spt0_info(v, &sp);

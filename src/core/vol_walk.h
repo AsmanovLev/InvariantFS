@@ -1,10 +1,10 @@
 /*
  * vol_walk.h -- the status of a v3 walk is not optional.
  *
- * A v3 walk is FALLIBLE. vol_v3_inode_get() returns -1 for a quarantined or
- * unreadable base page, v3_walk_dir() stops there, and the walk returns -1
+ * A v3 walk is FALLIBLE. vol_inode_get() returns -1 for a quarantined or
+ * unreadable base page, walk_dir() stops there, and the walk returns -1
  * having delivered a PREFIX of the namespace. The primitives are all honest
- * about it: vol_v3_walk, vol_v3_iter_live_inodes, vol_v3_dirent_scan and
+ * about it: vol_walk, vol_iter_live_inodes, vol_dirent_scan and
  * btree_scan return a status, and the doc comment on every one of them says
  * "0 complete, -1 error".
  *
@@ -19,7 +19,7 @@
  *   src/cli/fuse_fs.c       the file table lost whole subtrees, and the
  *                           user's `ls` got ENOENT for files still on disk
  *   tools/invf-sweep.c      warned, then swept anyway
- *   src/core/vol_btree.c    vol_v3_name_of answered "no such name" instead
+ *   src/core/vol_btree.c    vol_name_of answered "no such name" instead
  *                           of "the tree could not be read"
  *
  * Five `if` statements would fix five sites and change nothing about the
@@ -32,8 +32,8 @@
  * walk finished, in one value the caller already has to carry.
  *
  *     vol_walk_t w;
- *     vol_walk_init(&w, g_vol, "vol_v3_walk");
- *     vol_walk_result(&w, vol_v3_walk(g_vol, cb, &c), c.n, c.n);
+ *     vol_walk_init(&w, g_vol, "vol_walk");
+ *     vol_walk_result(&w, vol_walk(g_vol, cb, &c), c.n, c.n);
  *     if (vol_walk_commit(&w) != 0)
  *         return -EIO;            // the walk did not finish
  *     ... now, and only now, is w.n a safe number ...
@@ -49,7 +49,7 @@
  *     result to void does NOT suppress it -- `(void)vol_walk_commit(&w)`
  *     still warns -Wunused-result. That was checked rather than assumed,
  *     because the usual claim is that a void cast silences the attribute,
- *     and if that were true here the four `(void)vol_v3_walk(...)` sites
+ *     and if that were true here the four `(void)vol_walk(...)` sites
  *     would be exactly the case this mechanism misses. It is not, on this
  *     compiler. What it DOES miss is a caller that BINDS the result and
  *     never reads it: `int rc = vol_walk_commit(&w);` and then nothing. The

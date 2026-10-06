@@ -73,7 +73,7 @@ dedupe_field() {  # <log> <merged|cross|intra|freed>
 
 # Meta-v3 stores text as generic ZSTD (no deferred PPMd batches), so the
 # leg-2 expectations differ between formats. Meta-v3 is the default.
-is_v3() { $B/invf-fsck "$1" 2>/dev/null | grep -q "format:       v3"; }
+is_meta() { $B/invf-fsck "$1" 2>/dev/null | grep -q "format:       v0"; }
 
 echo "== generate tree (leg 1) =="
 python3 - <<'PY'
@@ -100,7 +100,7 @@ for f in sorted(os.listdir(d)):
 # nothing. Keeping the rest identical keeps the sweep's non-dedupe metadata
 # footprint (and compression geometry) the same, so the control image
 # captures the metadata allocations that make the naive
-# FREE0+FREED==FREE1 identity false on Meta-v3 (WP75 Bug C).
+# FREE0+FREED==FREE1 identity false on Meta (WP75 Bug C).
 import shutil
 c = "/dev/shm/wp12dedupe/origctl"
 def copy_flip(src, dst, offs):
@@ -244,7 +244,7 @@ $B/invf-sweep "$IMGT" > "$WORK/sweept1.log" 2>&1 || { cat "$WORK/sweept1.log"; e
 TZL=$(grep -c "text -> PPMd batch" "$WORK/sweept1.log" || true)
 DEDUPT=$(grep "dedupe: " "$WORK/sweept1.log" || true)
 echo "$DEDUPT"
-if is_v3 "$IMGT"; then
+if is_meta "$IMGT"; then
     # WP78 taught v3 to defer texts into PPMd batches too (published as v3
     # recipe deltas), so v3 batches here exactly like v2 -- the old "v3 stores
     # text as generic ZSTD, expect no batching" expectation predates it. What
@@ -273,7 +273,7 @@ for f in $TFILES; do
 done
 [ "$ok" = 1 ] || exit 1
 echo "all $(echo "$TFILES" | wc -w) files bit-exact"
-if is_v3 "$IMGT"; then
+if is_meta "$IMGT"; then
     echo "v3: no TEXT class line (generic ZSTD), skipping stats check"
 else
     $B/invf-stats "$IMGT" | grep "TEXT  :" || { echo "FAIL: no TEXT stats line"; exit 1; }

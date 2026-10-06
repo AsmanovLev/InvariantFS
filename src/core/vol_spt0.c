@@ -567,7 +567,7 @@ static void spn_sync_armed(invfs_volume *v)
     invfs_spn0 s;
     int rc;
 
-    if (!v || !(v->sb.vol_flags & VOLF_V3)) {
+    if (!v || !(v->sb.vol_flags & VOLF_META)) {
         if (v) v->spn_armed = 0;
         return;
     }
@@ -656,7 +656,7 @@ typedef enum {
  * which of them this is and why -- the restore refuses with it, the capture
  * counts it. */
 static spn_set_rc spn_inode_block_set(invfs_volume *v,
-                                      const invfs_v3_inode *in,
+                                      const invfs_inode *in,
                                       uint8_t **blob, size_t *blen,
                                       invfs_ast_hdr *ah,
                                       const invfs_ast_block_entry **ents,
@@ -670,9 +670,9 @@ static spn_set_rc spn_inode_block_set(invfs_volume *v,
     *ents = NULL;
     *n_ents = 0;
     if (memcmp(in->recipe_addr, "\0\0\0\0\0\0\0\0",
-               INVFS_V3_RECIPE_ADDR_LEN) == 0)
+               INVFS_RECIPE_ADDR_LEN) == 0)
         return SPN_SET_NONE;          /* no recipe: names no blocks */
-    if (vol_v3_recipe_load(v, in->recipe_addr, &b, &l) != 0 || !b) {
+    if (vol_recipe_load(v, in->recipe_addr, &b, &l) != 0 || !b) {
         if (why && whylen)
             snprintf(why, whylen, "inode's pinned recipe is unreadable");
         return SPN_SET_UNKNOWN;
@@ -699,7 +699,7 @@ static spn_set_rc spn_inode_block_set(invfs_volume *v,
 /* The walk: for every live inode of the captured generation, mark the blocks
  * its recipe names and record each segment's identity. */
 static int spn_walk_ino(invfs_volume *v, uint64_t inode_id,
-                        const invfs_v3_inode *in, void *ctx_)
+                        const invfs_inode *in, void *ctx_)
 {
     spn_walk_ctx *c = (spn_walk_ctx *)ctx_;
     uint8_t *blob = NULL;
@@ -779,7 +779,7 @@ static int spn_walk_ino(invfs_volume *v, uint64_t inode_id,
  * extents are sorted by head pba and, being distinct allocations, do not
  * overlap -- so the only candidate is the last one that starts at or before
  * `b`. Called once per block of the volume, hence the binary search. */
-static int spn_reg_owns(const tz_v3_extent *reg, size_t n, uint64_t b)
+static int spn_reg_owns(const tz_extent *reg, size_t n, uint64_t b)
 {
     size_t lo = 0, hi = n;
 
@@ -888,7 +888,7 @@ static uint64_t spn_reclaim(invfs_volume *v, const uint8_t *old_map,
 {
     uint64_t total = v->sb.total_blocks;
     uint64_t b = 0, freed = 0, run = 0, start = 0;
-    tz_v3_extent *reg = NULL;
+    tz_extent *reg = NULL;
     uint8_t *meta = NULL;
     size_t n_reg = 0;
     int meta_ok = 0;
@@ -924,24 +924,24 @@ static uint64_t spn_reclaim(invfs_volume *v, const uint8_t *old_map,
      * registry (the hidden TZ_OWNER_NAME file) owns its batches' extents
      * independently, and a batch that no live recipe names any more is dead
      * while its registry row is still on disk -- the row is retired later, by
-     * tz_v3_gc at sweep stage 6. Freeing such a block HERE, one stage before
+     * tz_gc at sweep stage 6. Freeing such a block HERE, one stage before
      * the registry admits the batch is garbage, hands the block straight back
      * to the shared free pool, where the transform's very next mbuf_alloc can
      * take it as a base B+-tree page (one pool, no hard regions -- §2.3).
-     * tz_v3_gc would then free that live page through the row it never
+     * tz_gc would then free that live page through the row it never
      * dropped, and the fold after it would rebuild the base from the
      * pre-transform root: a file written seconds earlier becomes unreadable.
      *
      * So the registry is an owner set here, exactly as a live recipe is. The
      * cost is one registry read per capture (a name lookup plus a small
-     * blob), and the debt is not deferred forever: tz_v3_gc frees the dead
+     * blob), and the debt is not deferred forever: tz_gc frees the dead
      * batch in the same sweep, after the row is gone, so the block is
      * reclaimed one stage later rather than leaked.
      *
      * An unreadable registry (out of memory) is NOT treated as "no owner":
      * that is the one answer that can lose data, so it fails closed and the
      * reclaim does nothing. */
-    if (tz_v3_reg_owned_blocks(v, &reg, &n_reg) != 0)
+    if (tz_reg_owned_blocks(v, &reg, &n_reg) != 0)
         return 0;
     /* And the tree this capture is ABOUT TO PUBLISH is an owner set too (the
      * reasoning is at spn_meta_mark, above). An unmarked base page is the one
@@ -1051,7 +1051,7 @@ static int spt0_pin_take(invfs_volume *v, uint64_t root_pba,
             return -1;
         c.map = map;
     }
-    if (vol_v3_iter_inodes_at(v, root_pba, delta_end, delta_segs,
+    if (vol_iter_inodes_at(v, root_pba, delta_end, delta_segs,
                               delta_head_pba, spn_walk_ino, &c) != 0) {
         free(map);
         free(c.dig);
@@ -1220,7 +1220,7 @@ int spt0_capture(invfs_volume *v)
 
     if (!v)
         return -1;
-    if (!(v->sb.vol_flags & VOLF_V3))
+    if (!(v->sb.vol_flags & VOLF_META))
         return 1;
     if (v->savepoint_live)
         return 1;
@@ -1239,7 +1239,7 @@ int spt0_capture(invfs_volume *v)
      * otherwise free nothing and read pages that are gone. */
     (void)vol_reclaim_reader_snapshot();
 
-    if (vol_v3_base_root(v, &root) != 0) {
+    if (vol_base_root(v, &root) != 0) {
         rc = -1;
         goto out;
     }
@@ -1291,7 +1291,7 @@ int spt0_capture(invfs_volume *v)
     (void)spt0_pin_take(v, root.pba, v->spt0.delta_end, v->spn_delta_segs,
                         v->spn_delta_head);
 
-    /* `root` is the blkptr vol_v3_base_root() just read and verified, so it
+    /* `root` is the blkptr vol_base_root() just read and verified, so it
      * is copied whole rather than rebuilt field by field: pinned_root is
      * walked through mbuf_read_ptr like any other root, and a hand-assembled
      * one with checksum = 0 / gen = 0 fails that check (spt0_pinned_from_pba).
@@ -1439,7 +1439,7 @@ typedef struct {
 #define SPT0_SEG_ERR 128
 
 static int spt0_data_ino(invfs_volume *v, uint64_t inode_id,
-                         const invfs_v3_inode *in, void *ctx_)
+                         const invfs_inode *in, void *ctx_)
 {
     spt0_data_ctx *c = (spt0_data_ctx *)ctx_;
     uint8_t *blob = NULL;
@@ -1565,7 +1565,7 @@ static int spt0_data_ok(invfs_volume *v, char *err, size_t errlen)
                  "be proven -- refusing rather than rolling back blind");
         return 0;
     }
-    if (vol_v3_iter_inodes_at(v, v->spt0.base_root, v->spt0.delta_end,
+    if (vol_iter_inodes_at(v, v->spt0.base_root, v->spt0.delta_end,
                               delta_segs, head, spt0_data_ino, &c) != 0) {
         snprintf(err, errlen, "%s", c.err[0] ? c.err
                               : "the pinned generation could not be walked");
@@ -1591,7 +1591,7 @@ int spt0_restore(invfs_volume *v)
 
     if (!v)
         return -1;
-    if (!(v->sb.vol_flags & VOLF_V3))
+    if (!(v->sb.vol_flags & VOLF_META))
         return 1;
     if (!v->savepoint_live)
         return 1;

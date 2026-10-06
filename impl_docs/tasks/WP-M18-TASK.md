@@ -66,7 +66,7 @@ Files:
    bash tools/run-e2e.sh tools/test-heat.sh
    bash tools/run-e2e.sh tools/test-seal.sh
    bash tools/run-e2e.sh tools/test-sweep-mapper.sh
-   bash tools/run-e2e.sh tools/test-meta-v3.sh
+   bash tools/run-e2e.sh tools/test-meta.sh
    ```
 
 4. Scenario: `INVFS_V3=1 invf-mkfs t.img` → write/delete/rewrite, sweep, verify content bit-exact and space reclaimed (no dead-record growth); `invf-fsck` clean; `df` recovers after sweep+fold+reclaim.

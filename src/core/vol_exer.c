@@ -458,7 +458,7 @@ int vol_exer_carve(invfs_volume *v, uint64_t inode_id,
         /* WP78: on v3 vol_create_blob_file supersedes the inode row IN PLACE
          * (newino == inode_id), so deleting the old id would destroy the
          * fresh blob. */
-        if (!(v->sb.vol_flags & VOLF_V3) || newino != inode_id)
+        if (!(v->sb.vol_flags & VOLF_META) || newino != inode_id)
             vol_delete_inode(v, inode_id, name);
         /* the fresh blob record has no ext; carry the old meta across,
          * exactly like the vol_jxl_retry flow does */

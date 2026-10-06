@@ -1,5 +1,5 @@
 #!/bin/bash
-# test-meta-v3-multidev.sh — WP-M19 e2e: v3 two-device placement + metadata
+# test-meta-multidev.sh — WP-M19 e2e: v3 two-device placement + metadata
 # mirror.
 #
 # A v3 volume over dev0 (fast: metadata + base tree) + dev1 (capacity:
@@ -8,7 +8,7 @@
 # shadow fallback; RT30 and DEVT are written consistently on both devices;
 # the metadata span stays byte-identical.
 #
-#   leg 1  build: INVFS_V3=1 mkfs dev0+dev1, RT30 + DEVT on both, geometry
+#   leg 1  build: mkfs dev0+dev1, RT30 + DEVT on both, geometry
 #   leg 2  placement: metadata span byte-identical; base root pages live in
 #          the mirrored metadata span (dev0), not on the dev1 shadow
 #   leg 3  FUSE mount, create a file + dir/nested file, unmount
@@ -19,7 +19,7 @@
 #          reattach -> RW resumes
 #
 # Run from the repo root after `make`:
-#   bash tools/run-e2e.sh tools/test-meta-v3-multidev.sh
+#   bash tools/run-e2e.sh tools/test-meta-multidev.sh
 set -e
 set -o pipefail
 
@@ -79,11 +79,11 @@ PY
 }
 
 echo "== leg 1: build the v3 two-device volume =="
-INVFS_V3=1 $B/invf-mkfs "$D0" 0.125 "$D1" 0.25 > "$WORK/mkfs.log" 2>&1 \
-    || { cat "$WORK/mkfs.log"; fail "INVFS_V3=1 two-device mkfs failed"; }
+$B/invf-mkfs "$D0" 0.125 "$D1" 0.25 > "$WORK/mkfs.log" 2>&1 \
+    || { cat "$WORK/mkfs.log"; fail "two-device mkfs failed"; }
 grep -q "devices:         2" "$WORK/mkfs.log" || fail "mkfs did not report 2 devices"
-grep -q "format: v3 metadata skeleton" "$WORK/mkfs.log" \
-    || fail "mkfs did not report the v3 format"
+grep -q "format: v0 metadata skeleton" "$WORK/mkfs.log" \
+    || fail "mkfs did not report the v0 format"
 META_HI=$(sed -n 's/.*metadata zone: *blocks [0-9]* \.\. \([0-9]*\).*/\1/p' "$WORK/mkfs.log")
 [ -n "$META_HI" ] || fail "could not parse the metadata geometry"
 META_SPAN=$(( (META_HI + 1) * 4096 ))
@@ -94,7 +94,7 @@ for d in "$D0" "$D1"; do
     [ "$(dd if="$d" bs=1 skip=$((0x2A0)) count=4 status=none)" = "DEVT" ] \
         || fail "no DEVT on $d"
 done
-echo "built: format v3, DEVT + RT30 on both devices (metadata zone ends at $META_HI)"
+echo "built: format v0, DEVT + RT30 on both devices (metadata zone ends at $META_HI)"
 
 echo "== leg 2: placement — metadata span mirrored, base pages in it =="
 cmp <(head -c "$META_SPAN" "$D0") <(head -c "$META_SPAN" "$D1") \
@@ -103,8 +103,8 @@ echo "metadata span ($((META_HI + 1)) blocks) byte-identical on both devices"
 
 echo "== leg 3: FUSE mount, create namespace =="
 mnt_up
-grep -q "format v3" "$WORK/fuse.log" \
-    || { cat "$WORK/fuse.log"; fail "mount did not take the v3 open path"; }
+grep -q "format v0" "$WORK/fuse.log" \
+    || { cat "$WORK/fuse.log"; fail "mount did not take the v0 open path"; }
 mkdir -p "$MNT/dir/sub"
 touch "$MNT/hello.txt" "$MNT/dir/sub/deep"
 [ -f "$MNT/hello.txt" ] || fail "hello.txt not created"
@@ -134,7 +134,7 @@ mnt_down
 echo "== leg 5: fsck clean; mirror still byte-identical =="
 FSCK=$($B/invf-fsck "$D0" 2>&1) || { echo "$FSCK"; fail "fsck exited nonzero"; }
 echo "$FSCK" | grep -q "^OK$" || { echo "$FSCK"; fail "fsck not OK"; }
-echo "$FSCK" | grep -q "format:       v3" || { echo "$FSCK"; fail "fsck not v3"; }
+echo "$FSCK" | grep -q "format:       v0" || { echo "$FSCK"; fail "fsck not v0"; }
 cmp <(head -c "$META_SPAN" "$D0") <(head -c "$META_SPAN" "$D1") \
     || fail "metadata span differs after writes"
 echo "fsck OK (v3 base tree); metadata mirror byte-identical after writes"

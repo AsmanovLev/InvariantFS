@@ -1,7 +1,7 @@
 # DOCMAP — subsystem → code map
 
 **The code is the spec.** `src/core/invarifs.h` IS the on-disk format
-definition; `docs/architecture/META-V3.md` is the concept layer over it. The
+definition; `docs/architecture/META.md` is the concept layer over it. The
 v2-era design prose (18 files under `src/doc/`) was **deleted** — git history
 keeps it, but it described a format the engine retired (L2P mapper, CKP0 /
 `reten`), and 15 of 18 files never mentioned Meta-v3 at all. Do not
@@ -13,9 +13,9 @@ This map answers "where does X live". Source layout is in `FILEMAP.md`;
 
 | subsystem / concern | primary sources | doc |
 |---|---|---|
-| on-disk format, zones, magics, window recipe | `invarifs.h`, `volume_internal.h` | `docs/architecture/META-V3.md` |
-| volume open/close, superblock, allocator, bitmap | `volume.c` (open/close/alloc), `vol_dirs.c`, `vol_resize.c` | `META-V3.md` (RT30 double-slot) |
-| COW B+ tree base, fold, savepoint, reclaim | `vol_btree.c`, `vol_fold.c`, `vol_spt0.c`, `vol_reclaim.c`, `vol_delta.c`, `vol_metabuf.c` | `META-V3.md`, `design-meta-v3.md`, ADR-002/003/005/006 |
+| on-disk format, zones, magics, window recipe | `invarifs.h`, `volume_internal.h` | `docs/architecture/META.md` |
+| volume open/close, superblock, allocator, bitmap | `volume.c` (open/close/alloc), `vol_dirs.c`, `vol_resize.c` | `META.md` (RT30 double-slot) |
+| COW B+ tree base, fold, savepoint, reclaim | `vol_btree.c`, `vol_fold.c`, `vol_spt0.c`, `vol_reclaim.c`, `vol_delta.c`, `vol_metabuf.c` | `META.md`, `design-meta-v3.md`, ADR-002/003/005/006 |
 | read path, container map splice (MRMP/MRM2, REPRO), windows (WINDOW_SRC) | `vol_read.c`, `vol_cpack.c`, `vol_ast.c` | ADR-010 + amendment2 |
 | write path, sessions, ESTALE, xattrs | `vol_write.c`, `fuse_fs.c` | ADR-009 (durability) |
 | sweep: walk, class policy, text/binary batches, migration | `vol_sweep.c`, `vol_textzone.c`, `vol_cpack.c`, `vol_heat.c` | ADR-010-amendment2 |

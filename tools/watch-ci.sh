@@ -18,7 +18,7 @@ WF="engine-ci.yml"
 API="https://api.github.com/repos/AsmanovLev/InvariantFS/actions"
 DEADLINE=$(( $(date +%s) + ${1:-45} * 60 ))
 
-runs() { curl -sS --max-time 30 -H "Authorization: Bearer $T" -H "Accept: application/vnd.github+json" \
+runs() { curl -sS --noproxy '*' --max-time 30 -H "Authorization: Bearer $T" -H "Accept: application/vnd.github+json" \
            "$API/workflows/$WF/runs?per_page=1"; }
 top() { python3 -c 'import json,sys
 d=json.load(sys.stdin)
@@ -29,11 +29,18 @@ START=$(runs | top | cut -d' ' -f1)
 [ -n "$START" ] || { echo "could not read the workflow's latest run" >&2; exit 1; }
 echo "watching $WF from run $START (up to ${1:-45}m)"
 
+run_status() { curl -sS --noproxy '*' --max-time 30 -H "Authorization: Bearer $T" -H "Accept: application/vnd.github+json" \
+           "$API/runs/$START" | python3 -c 'import json,sys
+d=json.load(sys.stdin)
+print(d["status"], d["conclusion"] or "-", d["head_sha"][:7])'; }
 while :; do
   sleep 20
-  set -- $(runs | top)
-  RID=$1; STATUS=$2; CONC=$3; SHA=$4
-  [ "$RID" = "$START" ] && continue
+  if [ "$(date +%s)" -ge "$DEADLINE" ]; then
+    echo "watcher: deadline reached, run $START not completed" >&2
+    exit 2
+  fi
+  set -- $(run_status)
+  STATUS=$1; CONC=$2; SHA=$3; RID=$START
   case "$STATUS" in
     completed) ;;
     *) echo "  $SHA $STATUS ..."; continue ;;
@@ -41,7 +48,7 @@ while :; do
   echo
   echo "=== $WF $SHA -> ${CONC:-unknown} (run $RID)"
 
-  curl -sS --max-time 30 -H "Authorization: Bearer $T" -H "Accept: application/vnd.github+json" \
+  curl -sS --noproxy '*' --max-time 30 -H "Authorization: Bearer $T" -H "Accept: application/vnd.github+json" \
     "$API/runs/$RID/jobs" | python3 -c 'import json,sys
 for j in json.load(sys.stdin).get("jobs", []):
     bad=[s["name"] for s in j.get("steps",[]) if s.get("conclusion")=="failure"]
@@ -49,7 +56,7 @@ for j in json.load(sys.stdin).get("jobs", []):
 
   if [ "${CONC:-}" != "success" ]; then
     TMP=$(mktemp -d); trap 'rm -rf "$TMP"' EXIT
-    curl -sSL --max-time 120 -H "Authorization: Bearer $T" -H "Accept: application/vnd.github+json" \
+    curl -sS --noproxy '*'L --max-time 120 -H "Authorization: Bearer $T" -H "Accept: application/vnd.github+json" \
       "$API/runs/$RID/logs" -o "$TMP/l.zip" 2>/dev/null
     ( cd "$TMP" && unzip -qqo l.zip 2>/dev/null || tar xf l.zip 2>/dev/null )
     echo "--- failures and their neighbourhood ---"

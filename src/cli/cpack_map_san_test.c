@@ -17,7 +17,7 @@
  * g_io_lock at src/cli/fuse_fs.c:1407 and THEN calls vol_read_range at :1423,
  * and the daemon runs fuse_loop_mt (:3362). The three cpack_map_read call
  * sites -- src/core/vol_read.c:1259 (vol_decode_ast_entries), :1729
- * (v3_read_range) and :1972 (vol_read_range) -- are all under it.
+ * (read_range) and :1972 (vol_read_range) -- are all under it.
  *
  * This is the sibling of src/cli/arc_san_test.c and src/cli/heat_san_test.c
  * and it is built their way: one source, several binaries, linked against
@@ -195,7 +195,7 @@ static invfs_volume *mkvol(void)
 {
     invfs_volume *v = (invfs_volume *)calloc(1, sizeof *v);
     if (!v) return NULL;
-    v->sb.vol_flags |= VOLF_V3;      /* take cpack_recipe_seg's v3 branch */
+    v->sb.vol_flags |= VOLF_META;      /* take cpack_recipe_seg's v3 branch */
     v->sb.total_blocks = 100000;
     /* Fixed tree: take the lock down properly. Unfixed tree: the weak symbol
      * is NULL and this is exactly the pre-fix state. */
@@ -655,9 +655,9 @@ int vol_read_file(invfs_volume *v, uint64_t inode, uint8_t **out, size_t *out_le
     return -1;
 }
 
-/* cpack_recipe_seg's v3 branch: vol_v3_inode_get -> vol_v3_recipe_load ->
+/* cpack_recipe_seg's v3 branch: vol_inode_get -> vol_recipe_load ->
  * vol_ast_recipe_parse -> seg_read_checked. */
-int vol_v3_inode_get(invfs_volume *v, uint64_t inode_id, invfs_v3_inode *out)
+int vol_inode_get(invfs_volume *v, uint64_t inode_id, invfs_inode *out)
 {
     int c = sid_cont(inode_id);
     (void)v;
@@ -667,8 +667,8 @@ int vol_v3_inode_get(invfs_volume *v, uint64_t inode_id, invfs_v3_inode *out)
     return 1;
 }
 
-int vol_v3_recipe_load(invfs_volume *v,
-                       const uint8_t addr[INVFS_V3_RECIPE_ADDR_LEN],
+int vol_recipe_load(invfs_volume *v,
+                       const uint8_t addr[INVFS_RECIPE_ADDR_LEN],
                        uint8_t **blob_out, size_t *blen_out)
 {
     (void)v;
@@ -778,15 +778,15 @@ int vol_stat_full(invfs_volume *v, const char *name, uint64_t *id_out, uint64_t 
   if (ctime_out) *ctime_out = 0;
   return -1; }
 uint64_t vol_transcode_abort(invfs_volume *v, const char *name) { (void)v; (void)name; return 0; }
-int vol_v3_free_recipe_blocks(invfs_volume *v, const uint8_t recipe_addr[INVFS_V3_RECIPE_ADDR_LEN], uint64_t keep_pba)
+int vol_free_recipe_blocks(invfs_volume *v, const uint8_t recipe_addr[INVFS_RECIPE_ADDR_LEN], uint64_t keep_pba)
 { (void)v; (void)recipe_addr; (void)keep_pba; return 0; }
 /* WP202: cpack_release_superseded is now a one-line forward to the shared
- * vol_v3_release_superseded_blob (src/core/vol_ast.c), so this file -- which
+ * vol_release_superseded_blob (src/core/vol_ast.c), so this file -- which
  * links vol_cpack.c ALONE, per its own header -- needs its stub, the same way
- * it already stubs vol_v3_free_recipe_blocks just above. It is off the
+ * it already stubs vol_free_recipe_blocks just above. It is off the
  * map-cache path under test. */
-void vol_v3_release_superseded_blob(invfs_volume *v, uint64_t inode_id,
-                                    const uint8_t old_addr[INVFS_V3_RECIPE_ADDR_LEN])
+void vol_release_superseded_blob(invfs_volume *v, uint64_t inode_id,
+                                    const uint8_t old_addr[INVFS_RECIPE_ADDR_LEN])
 { (void)v; (void)inode_id; (void)old_addr; }
-int vol_v3_path_lookup(invfs_volume *v, const char *name, uint64_t *ino_out)
+int vol_path_lookup(invfs_volume *v, const char *name, uint64_t *ino_out)
 { (void)v; (void)name; if (ino_out) *ino_out = 0; return -1; }

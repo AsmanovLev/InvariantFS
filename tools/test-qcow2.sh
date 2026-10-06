@@ -1190,7 +1190,7 @@ echo "containers + all members + tables + maps deleted"
 
 echo "== fsck =="
 $B/invf-fsck "$IMG" | tee "$WORK/fsck.log"
-if grep -q "format:       v3" "$WORK/fsck.log"; then
+if grep -q "format:       v0" "$WORK/fsck.log"; then
     grep -q "^OK" "$WORK/fsck.log" || { echo "FAIL: fsck not OK"; exit 1; }
 else
     grep -q "^OK" "$WORK/fsck.log" || { echo "FAIL: fsck not OK"; exit 1; }

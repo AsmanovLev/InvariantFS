@@ -128,16 +128,16 @@ typedef struct {
  * L2P journal layer is deliberately still in the tree), so it still ran, still
  * found nothing, and invf-stat printed "0 live of 0 names, 0.0 B logical,
  * largest 0.0 B" for a volume with files on it. vol_open refuses anything
- * without VOLF_V3, so every volume this build opens is v3 and every count this
+ * without VOLF_META, so every volume this build opens is v3 and every count this
  * tool printed was zero.
  *
- * vol_v3_walk() is the v3 equivalent, and it is what the rest of the tool
+ * vol_walk() is the v3 equivalent, and it is what the rest of the tool
  * already uses: the FUSE build_file_table_v3 (src/cli/fuse_fs.c:224) is built
  * on it, and invf-ls reaches the same tree through vol_list_dir ->
- * vol_v3_path_list_dir. Its callback hands (path, ino, type, size, mtime) --
+ * vol_path_list_dir. Its callback hands (path, ino, type, size, mtime) --
  * the whole fent row plus the file/dir distinction.
  *
- * vol_v3_iter_live_inodes() was the other candidate and is the wrong shape
+ * vol_iter_live_inodes() was the other candidate and is the wrong shape
  * here: it fires once per INODE (not once per name, so a hardlinked volume
  * would under-report against invf-ls), and it hands no size, so fsz would cost
  * a vol_stat_full() per inode on top of a walk that already resolves a name
@@ -154,12 +154,12 @@ typedef struct {
     size_t nfiles, fcap;
     uint64_t ndirs, max_live_ino;
     int oom;
-} stat_v3_ctx;
+} stat_ctx;
 
-static int stat_v3_cb(void *ctx_, const char *path, uint64_t ino,
+static int stat_cb(void *ctx_, const char *path, uint64_t ino,
                       uint32_t type, uint64_t size, int64_t mtime)
 {
-    stat_v3_ctx *c = (stat_v3_ctx *)ctx_;
+    stat_ctx *c = (stat_ctx *)ctx_;
     size_t nl;
     (void)mtime;
 
@@ -219,12 +219,12 @@ int main(int argc, char **argv)
     uint64_t total = sb->total_blocks;
 
     /* The file table, straight from the namespace. vol_open refuses any
-     * volume without VOLF_V3, so this walk is the only source of names
+     * volume without VOLF_META, so this walk is the only source of names
      * there is -- there is no record stream to fall back to. */
-    stat_v3_ctx vc;
+    stat_ctx vc;
     int rc;
     memset(&vc, 0, sizeof vc);
-    rc = vol_v3_walk(vol, stat_v3_cb, &vc);
+    rc = vol_walk(vol, stat_cb, &vc);
     if (rc != 0 || vc.oom) {
         /* A walk that did not finish, or a table that stopped growing, has
          * no count. Printing the part that was collected would present a

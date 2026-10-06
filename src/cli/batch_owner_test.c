@@ -3,7 +3,7 @@
  * THE BUG THIS EXISTS FOR. A v3 text/binary batch segment is owned by TWO
  * things at once: by the recipe of every member that points into it (its
  * zone==TEXT entries), and by the batch registry -- the hidden "\x01tzb"
- * file whose row is what tz_v3_gc frees the block through. The two owners do
+ * file whose row is what tz_gc frees the block through. The two owners do
  * not die at the same time. A batch stops being named by any live recipe the
  * moment its last member is rewritten or deleted, but its registry row
  * survives until the sweep's stage-6 GC runs.
@@ -14,7 +14,7 @@
  * shared with the metadata zone (one pool, no hard regions, AGENTS.md
  * 2.3), so the very next base-page allocation could take it,
  * mbuf_root_publish could make it the live base root, and the same sweep's
- * stage-6 tz_v3_gc would then free that LIVE page through the row it had
+ * stage-6 tz_gc would then free that LIVE page through the row it had
  * never dropped. The fold that follows rebuilds the base from the
  * pre-transform root, and a file written seconds earlier is unreadable:
  * "recipe blob missing/corrupt". End-to-end repro:
@@ -30,7 +30,7 @@
  *
  * THE REGISTRY IS PARSED HERE, NOT TAKEN FROM THE ENGINE. The on-disk row
  * format is [4B "TZV3"][4B n][n * {u32 seq, u32 algo, u64 pba, u32 phys}]
- * (TZ_V3_REG_MAGIC and tz_v3_reg_ent, src/core/vol_textzone.c). Reading it
+ * (TZ_REG_MAGIC and tz_reg_ent, src/core/vol_textzone.c). Reading it
  * with vol_find + vol_read_file -- both long-standing public entry points --
  * keeps this test from depending on any accessor the fix introduces. A
  * regression test that only builds when the fix is present is not a red
@@ -39,7 +39,7 @@
  * off the end of the volume, a zero-length extent) is reported as MALFORMED
  * rather than quietly testing nothing.
  *
- * Subcommands (the image is a v3 volume built by tools/test-v3-batch-owner.sh):
+ * Subcommands (the image is a v3 volume built by tools/test-batch-owner.sh):
  *
  *   rows <img>
  *       Print the registry's block extents and whether each is currently
@@ -63,7 +63,7 @@
 #include "vol_spt0.h"
 
 #define BATCH_OWNER_REG_MAGIC 0x33565a54u   /* "TZV3" */
-/* tz_v3_reg_ent, on LP64: seq u32 @0, algo u32 @4, pba u64 @8,
+/* tz_reg_ent, on LP64: seq u32 @0, algo u32 @4, pba u64 @8,
  * phys u32 @16, sizeof 24. */
 #define BATCH_OWNER_ROW_SZ    24u
 #define BATCH_OWNER_OFF_PBA    8u
@@ -304,7 +304,7 @@ static int cmd_capture(const char *img)
         fprintf(stderr, "FAIL: vol_open(%s) err=%d\n", img, err);
         return 1;
     }
-    if (!(vol_sb(v)->vol_flags & VOLF_V3)) {
+    if (!(vol_sb(v)->vol_flags & VOLF_META)) {
         fprintf(stderr, "FAIL: not a v3 volume\n");
         vol_close(v);
         return 1;
@@ -332,7 +332,7 @@ static int cmd_capture(const char *img)
     if (freed) {
         fprintf(stderr, "FAIL: %d registry block(s) were ALREADY surrendered "
                 "before the capture; the state under test is not the one "
-                "tools/test-v3-batch-owner.sh builds\n", freed);
+                "tools/test-batch-owner.sh builds\n", freed);
         snapshot_free(&before);
         registry_free(&reg);
         vol_close(v);
@@ -364,7 +364,7 @@ static int cmd_capture(const char *img)
         fprintf(stderr, "FAIL: the savepoint reclaim freed %d block(s) the "
                 "batch registry still owns. That row is now a stale pointer "
                 "into the free pool: the next base-page allocation may take "
-                "one of them, and this same sweep's stage-6 tz_v3_gc will "
+                "one of them, and this same sweep's stage-6 tz_gc will "
                 "then free that LIVE page through it.\n", freed);
         return 1;
     }

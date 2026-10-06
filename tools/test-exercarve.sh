@@ -412,7 +412,7 @@ echo "  game.exe (neg): $C"
 #      pass, re-sweeping WITHOUT the limit does not carve, and the upgrade leg
 #      below cannot pass either.
 #
-# vol_sweep.c's own v3_stamp_generic (:1405) already refuses to overwrite an
+# vol_sweep.c's own stamp_generic (:1405) already refuses to overwrite an
 # existing MEMLIMIT/GUARD stamp; vol_pack_sweep's decline path bypasses that
 # guard. The fix belongs in the engine, not in this assertion, so the
 # expectation is left exactly as written: a test rewritten to match a bug is

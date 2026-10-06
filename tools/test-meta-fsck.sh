@@ -1,5 +1,5 @@
 #!/bin/bash
-# test-meta-v3-fsck.sh — WP-M4: metadata-v3 fsck (root + base-tree validation).
+# test-meta-fsck.sh — WP-M4: metadata-v3 fsck (root + base-tree validation).
 #
 # The v3 write path is not wired yet (WP-M2/M3 own the engine), so this leg
 # builds a small base B+-tree by hand in a real mkfs'd v3 image and checks the
@@ -35,9 +35,9 @@
 #             trap is real, and that the second reader sees it -- so the trap
 #             stays documented instead of being an argument in a commit message.
 #
-# This file is NEW for WP-M4; it does not edit tools/test-meta-v3.sh (owned by
+# This file is NEW for WP-M4; it does not edit tools/test-meta.sh (owned by
 # WP-M1). Run from the repo root after `make`:
-#   bash tools/run-e2e.sh tools/test-meta-v3-fsck.sh
+#   bash tools/run-e2e.sh tools/test-meta-fsck.sh
 set -e
 set -o pipefail
 
@@ -295,11 +295,11 @@ WANT_NO_BG="TREE KEYS=alpha=one"
 echo "== WP-M4: v3 fsck (RT30 + base-tree walk) =="
 
 # --- leg 0: empty v3 volume is clean ------------------------------------
-INVFS_V3=1 $B/invf-mkfs "$IMG" 0.2 >"$WORK/mkfs.log" 2>&1 \
-    || { cat "$WORK/mkfs.log"; fail "INVFS_V3=1 mkfs failed"; }
+$B/invf-mkfs "$IMG" 0.2 >"$WORK/mkfs.log" 2>&1 \
+    || { cat "$WORK/mkfs.log"; fail "mkfs failed"; }
 OUT=$(fsck_out "$IMG") || { echo "$OUT"; fail "empty v3 volume: fsck exited nonzero"; }
 echo "$OUT" | grep -q "^OK$" || { echo "$OUT"; fail "empty v3 volume: not OK"; }
-echo "$OUT" | grep -q "format:       v3" \
+echo "$OUT" | grep -q "format:       v0" \
     || { echo "$OUT"; fail "empty v3 volume: not reported as v3"; }
 echo "empty v3 volume: OK (exit 0)"
 
@@ -331,7 +331,7 @@ echo "$OUT" | grep -qE "bad pages:    [1-9]" \
 echo "corrupted base page: DAMAGED, exit $RC"
 
 # --- leg 3: corrupted RT30 descriptor is DAMAGED, nonzero exit ----------
-INVFS_V3=1 $B/invf-mkfs "$IMG" 0.2 >/dev/null 2>&1
+$B/invf-mkfs "$IMG" 0.2 >/dev/null 2>&1
 craft_base "$IMG" badrt30 >"$WORK/craft3.log" 2>&1 \
     || { cat "$WORK/craft3.log"; fail "craft bad RT30 failed"; }
 cat "$WORK/craft3.log"
@@ -401,7 +401,7 @@ echo "leg 4: the second reader finds alpha=one beta=two gamma=three, CRCs recomp
 # --- leg 5: -f drops exactly the quarantined range, measured independently --
 RIMG=metav3fsck-repair.img
 rm -f "$RIMG"
-INVFS_V3=1 $B/invf-mkfs "$RIMG" 0.2 >/dev/null 2>&1 || fail "leg 5: mkfs failed"
+$B/invf-mkfs "$RIMG" 0.2 >/dev/null 2>&1 || fail "leg 5: mkfs failed"
 craft_base "$RIMG" badpage >"$WORK/craft5.log" 2>&1 \
     || { cat "$WORK/craft5.log"; fail "leg 5: craft the bad page failed"; }
 set +e
@@ -433,7 +433,7 @@ echo "leg 5: exactly the pair on the torn page is gone; the readable page's two 
 # --- leg 6: RED CONTROL, differential -- the same assertion, other leaf ---
 DIMG=metav3fsck-diff.img
 rm -f "$DIMG"
-INVFS_V3=1 $B/invf-mkfs "$DIMG" 0.2 >/dev/null 2>&1 || fail "leg 6: mkfs failed"
+$B/invf-mkfs "$DIMG" 0.2 >/dev/null 2>&1 || fail "leg 6: mkfs failed"
 craft_base "$DIMG" badpage2 >"$WORK/craft6.log" 2>&1 \
     || { cat "$WORK/craft6.log"; fail "leg 6: craft the second bad page failed"; }
 set +e
@@ -456,7 +456,7 @@ echo "leg 6: red control fired -- the other tear yields the other answer, so the
 # still passed, and it printed OK over a volume whose files were empty. This
 # is the assertion that was missing then, kept permanently now.
 FIMG=metav3fsck-f.log
-INVFS_V3=1 $B/invf-mkfs "$RIMG" 0.2 >/dev/null 2>&1 || fail "leg 7: mkfs failed"
+$B/invf-mkfs "$RIMG" 0.2 >/dev/null 2>&1 || fail "leg 7: mkfs failed"
 craft_base "$RIMG" badpage >"$WORK/craft7.log" 2>&1 \
     || { cat "$WORK/craft7.log"; fail "leg 7: craft the bad page failed"; }
 set +e
@@ -497,7 +497,7 @@ echo "leg 7: -f named the loss and did not call the volume clean (exit $RC, verd
 # second reader really does name the wrong bytes (which is why it can).
 WIMG=metav3fsck-wrong.img
 rm -f "$WIMG"
-INVFS_V3=1 $B/invf-mkfs "$WIMG" 0.2 >/dev/null 2>&1 || fail "leg 8: mkfs failed"
+$B/invf-mkfs "$WIMG" 0.2 >/dev/null 2>&1 || fail "leg 8: mkfs failed"
 craft_base "$WIMG" wrongvalue >"$WORK/craft8.log" 2>&1 \
     || { cat "$WORK/craft8.log"; fail "leg 8: craft the wrong-value tree failed"; }
 cat "$WORK/craft8.log"

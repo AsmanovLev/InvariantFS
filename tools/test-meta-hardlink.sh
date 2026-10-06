@@ -1,10 +1,10 @@
 #!/bin/bash
-# test-meta-v3-hardlink.sh — WP-M17 e2e: hardlinks via the inode nlink field.
+# test-meta-hardlink.sh — WP-M17 e2e: hardlinks via the inode nlink field.
 #
-# A VOLF_V3 volume must let many (parent, name) dirents share one inode row.
+# A VOLF_META volume must let many (parent, name) dirents share one inode row.
 # `ln` inserts a second dirent and increments nlink; `unlink` drops the dirent
 # and decrements, and only the last unlink deletes the row (and, through
-# vol_v3_inode_delete, its xattr keys). getattr exposes nlink. Everything must
+# vol_inode_delete, its xattr keys). getattr exposes nlink. Everything must
 # survive unmount/remount. v3 nodes are still empty (recipes are WP-M8), so
 # the "content" that must stay alive is the shared inode row + its xattrs.
 #
@@ -14,7 +14,7 @@
 # requires invf-fsck to report the accounting as balanced.
 #
 # Run from the repo root after `make`:
-#   bash tools/run-e2e.sh tools/test-meta-v3-hardlink.sh
+#   bash tools/run-e2e.sh tools/test-meta-hardlink.sh
 set -e
 set -o pipefail
 
@@ -63,14 +63,14 @@ nlink_of() { stat -c %h "$1"; }
 echo "== WP-M17: v3 hardlinks (link/nlink/unlink-at-zero/xattr cascade/remount) =="
 
 # --- mkfs v3 -------------------------------------------------------------
-INVFS_V3=1 $B/invf-mkfs "$IMG" 0.5 >"$WORK/mkfs.log" 2>&1 \
-    || { cat "$WORK/mkfs.log"; fail "INVFS_V3=1 mkfs failed"; }
-grep -q "format: v3 metadata skeleton" "$WORK/mkfs.log" \
-    || fail "mkfs did not report the v3 format"
+$B/invf-mkfs "$IMG" 0.5 >"$WORK/mkfs.log" 2>&1 \
+    || { cat "$WORK/mkfs.log"; fail "mkfs failed"; }
+grep -q "format: v0 metadata skeleton" "$WORK/mkfs.log" \
+    || fail "mkfs did not report the v0 format"
 
 mnt_up
-grep -q "format v3" "$WORK/fuse.log" \
-    || { cat "$WORK/fuse.log"; fail "mount did not take the v3 open path"; }
+grep -q "format v0" "$WORK/fuse.log" \
+    || { cat "$WORK/fuse.log"; fail "mount did not take the v0 open path"; }
 
 # --- first namespace object, then calibrate its engine inode id ----------
 # The id allocator hands ids out sequentially from 2 on a fresh volume, but
@@ -80,7 +80,7 @@ touch "$MNT/orig"
 mnt_down
 FID=""
 for id in $(seq 2 16); do
-    if $B/invf-v3inode "$IMG" get "$id" >/dev/null 2>&1; then
+    if $B/invf-vnode "$IMG" get "$id" >/dev/null 2>&1; then
         [ -z "$FID" ] || fail "calibration: several inode rows present"
         FID=$id
     fi
@@ -199,15 +199,15 @@ echo "$FSCK" | grep -q "nlink/fan-in:  ok" \
     || { echo "$FSCK"; fail "fsck does not report the nlink/fan-in accounting as ok"; }
 echo "$FSCK" | grep -q "DO NOT BALANCE" \
     && { echo "$FSCK"; fail "fsck reports a hardlink volume as unbalanced"; }
-NA=$($B/invf-v3inode "$IMG" nlink audit 2>/dev/null) \
+NA=$($B/invf-vnode "$IMG" nlink audit 2>/dev/null) \
     || { echo "$NA"; fail "the nlink audit rejected a volume full of hardlinks"; }
 echo "$NA" | grep -q "verdict=OK" \
     || { echo "$NA"; fail "nlink audit did not verdict OK on a hardlink volume"; }
 echo "fsck: OK -- $(echo "$FSCK" | sed -n 's/^  names\/inodes: *//p')"
 echo "  audit: $NA"
-if $B/invf-v3inode "$IMG" get "$FID" >/dev/null 2>&1; then
+if $B/invf-vnode "$IMG" get "$FID" >/dev/null 2>&1; then
     fail "engine inode $FID still present after its last name was unlinked"
 fi
 echo "inode $FID: gone after nlink reached 0 (xattr cascade ran)"
 
-echo "ALL META-V3 HARDLINK LEGS PASS"
+echo "ALL META HARDLINK LEGS PASS"

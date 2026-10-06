@@ -74,7 +74,7 @@ int main(int argc, char **argv)
     v = vol_open(img, &err);
     if (!v) { fprintf(stderr, "vol_open failed (%d)\n", err); return 2; }
 
-    id_src = vol_v3_write_bulk(v, "src.bin", src, src_sz, NULL);
+    id_src = vol_write_bulk(v, "src.bin", src, src_sz, NULL);
     ok(id_src != 0, "wrote the source file");
     if (!id_src) return 1;
 
@@ -87,11 +87,11 @@ int main(int argc, char **argv)
     }
 
     /* 1 + 2: verbatim windows, including one at a non-zero source offset */
-    id_win = vol_v3_publish_window_inode(v, "win_head.bin", id_src, 0,
+    id_win = vol_publish_window_inode(v, "win_head.bin", id_src, 0,
                                          seg, seg, 0, 0, 0, 0, 0, 0);
     ok(id_win != 0, "published a verbatim window at offset 0");
 
-    id_bad = vol_v3_publish_window_inode(v, "win_mid.bin", id_src, seg,
+    id_bad = vol_publish_window_inode(v, "win_mid.bin", id_src, seg,
                                          seg, seg, 0, 0, 0, 0, 0, 0);
     ok(id_bad != 0, "published a verbatim window at a non-zero offset");
 
@@ -120,12 +120,12 @@ int main(int argc, char **argv)
 
     /* 3: an inflating window -- the source bytes are the deflate stream */
     {
-        uint64_t id_c = vol_v3_write_bulk(v, "src_comp.bin", comp, comp_len, NULL);
+        uint64_t id_c = vol_write_bulk(v, "src_comp.bin", comp, comp_len, NULL);
         uint64_t id_i = 0;
         uint8_t *buf = NULL;
         size_t blen = 0;
         ok(id_c != 0, "wrote the compressed source");
-        id_i = vol_v3_publish_window_inode(v, "win_infl.bin", id_c, 0,
+        id_i = vol_publish_window_inode(v, "win_infl.bin", id_c, 0,
                                             plain_len, comp_len, 1,
                                             INVFS_DEFLATE_ENGINE_ZLIB_STOCK,
                                             6, 8, 0, -12);
@@ -197,7 +197,7 @@ int main(int argc, char **argv)
          * memcmp that would have caught it is one line away and already used
          * twice in this file. */
         /* point a window at an inode id that is not live */
-        id_gone = vol_v3_publish_window_inode(v, "win_ghost.bin",
+        id_gone = vol_publish_window_inode(v, "win_ghost.bin",
                                               id_src + 999999, 0,
                                               seg, seg, 0, 0, 0, 0, 0, 0);
         ok(id_gone == 0, "refused to publish a window into a missing source");
