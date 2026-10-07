@@ -662,6 +662,7 @@ static void sw_stage_begin(unsigned current, const char *name,
                            uint64_t goal, const char *detail)
 {
     uint64_t now = sw_now_ms();
+    CD_SET(name);   /* CORRUPT_DEBUG: attribute allocs/frees to this stage */
     g_ui.current = current;
     g_ui.name = name;
     g_ui.start_ms = now;

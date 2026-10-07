@@ -704,8 +704,14 @@ static int vol_decode_ast_entries(invfs_volume *v, uint64_t inode_id,
                  * read; a shadow-zone failure gets one WP20 seal-parity
                  * recovery attempt inside before the error propagates */
                 if (seg_read_checked(v, pba, 0, 1, &hdr, &blob) != 0) {
-                    fprintf(stderr, "segment CRC mismatch: inode %llu seg %u (corrupt)\n",
-                            (unsigned long long)inode_id, e->block_id);
+                    /* The pba/algo/len name the recipe entry that failed, so a
+                     * post-mortem can grep the CORRUPT_DEBUG alloc/free trace
+                     * (make CORRUPT_DEBUG=1) for who freed or handed out that
+                     * block. Error path only: silent when healthy. */
+                    fprintf(stderr, "segment CRC mismatch: inode %llu seg %u pba %llu algo %u len %llu (corrupt)\n",
+                            (unsigned long long)inode_id, e->block_id,
+                            (unsigned long long)pba, e->algo,
+                            (unsigned long long)e->length);
                     return -1;
                 }
                 if (ast_frame_ok(e->algo, hdr, e->length,

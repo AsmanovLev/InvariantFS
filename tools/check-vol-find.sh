@@ -48,14 +48,14 @@ src/cli/cp.c:118:SKIP
 src/cli/heat_walk_test.c:365:SKIP
 src/cli/fuse_fs.c:1644:SKIP
 src/cli/fuse_fs.c:1980:SKIP
-src/cli/fuse_fs.c:2620:SKIP
-src/cli/fuse_fs.c:2834:SKIP
-src/cli/fuse_fs.c:2889:SKIP
-src/cli/fuse_fs.c:3150:SKIP
-src/cli/fuse_fs.c:3317:SKIP
-src/cli/fuse_fs.c:3389:SKIP
-src/cli/fuse_fs.c:3424:SKIP
-src/cli/fuse_fs.c:3461:SKIP
+src/cli/fuse_fs.c:2622:SKIP
+src/cli/fuse_fs.c:2836:SKIP
+src/cli/fuse_fs.c:2891:SKIP
+src/cli/fuse_fs.c:3152:SKIP
+src/cli/fuse_fs.c:3319:SKIP
+src/cli/fuse_fs.c:3391:SKIP
+src/cli/fuse_fs.c:3426:SKIP
+src/cli/fuse_fs.c:3463:SKIP
 src/cli/otrunc_test.c:568:SKIP   # calibration: the armed lookup IS the assertion
 src/cli/otrunc_test.c:572:SKIP   # calibration: the armed lookup IS the assertion
 src/cli/lane_release_test.c:242:SKIP
@@ -117,16 +117,16 @@ src/core/vol_cpack.c:3960:SKIP
 src/core/vol_exer.c:267:ACTS
 src/core/vol_heat.c:799:SKIP
 src/core/vol_png.c:1013:SKIP
-src/core/vol_read.c:1073:SKIP
-src/core/vol_read.c:1169:SKIP
-src/core/vol_read.c:1205:ACTS
-src/core/vol_read.c:1416:ACTS   # vol_read_named: the EXACT name decides. Found -> those are the bytes returned with status 0; absent -> the name is walked as a container path instead
-src/core/vol_read.c:1423:SKIP
-src/core/vol_read.c:1610:ACTS
-src/core/vol_read.c:811:SKIP
-src/core/vol_read.c:828:SKIP
-src/core/vol_read.c:888:SKIP
-src/core/vol_read.c:963:SKIP
+src/core/vol_read.c:1079:SKIP
+src/core/vol_read.c:1175:SKIP
+src/core/vol_read.c:1211:ACTS
+src/core/vol_read.c:1422:ACTS   # vol_read_named: the EXACT name decides. Found -> those are the bytes returned with status 0; absent -> the name is walked as a container path instead
+src/core/vol_read.c:1429:SKIP
+src/core/vol_read.c:1616:ACTS
+src/core/vol_read.c:817:SKIP
+src/core/vol_read.c:834:SKIP
+src/core/vol_read.c:894:SKIP
+src/core/vol_read.c:969:SKIP
 src/core/vol_sweep.c:1631:SKIP
 src/core/vol_sweep.c:251:SKIP
 src/core/vol_sweep.c:459:ACTS
@@ -135,8 +135,8 @@ src/core/vol_sweep.c:498:ACTS
 src/core/vol_sweep.c:517:ACTS
 src/core/vol_textzone.c:679:SKIP
 src/core/vol_tier.c:304:SKIP
-src/core/volume.c:1253:SKIP   # tier_owner / rawm_owner anchors (vol_open_inner)
-src/core/volume.c:1254:SKIP   # shifted by the PERF_PROFILING counters in volume.c
+src/core/volume.c:1291:SKIP   # tier_owner / rawm_owner anchors (vol_open_inner)
+src/core/volume.c:1292:SKIP   # shifted by the PERF_PROFILING counters in volume.c
 src/recipes/zip.c:141:SKIP
 src/recipes/zip.c:145:SKIP
 src/core/vol_cpack.c:2939:SKIP   # непомечен: добавлено при правке vol_cpack.c

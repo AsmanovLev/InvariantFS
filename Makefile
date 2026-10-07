@@ -88,6 +88,28 @@ $(OBJ)/perf_counters.o: $(SRC)/core/perf_counters.c | $(OBJ)
 PERF_STAMP := $(OBJ)/.perf-$(if $(PERF),1,0)
 $(shell mkdir -p $(OBJ); [ -f $(PERF_STAMP) ] || touch $(PERF_STAMP))
 $(CORE_O) $(OBJ)/volume.o $(OBJ)/blkio.o: $(PERF_STAMP)
+
+# --- CORRUPT_DEBUG (sweep-time corruption tracing) --------------------------
+# Build with:  make CORRUPT_DEBUG=1
+#
+# Every block alloc/free is logged with the stage tag in force on that
+# thread, so a corrupt recipe PBA greps back to the stage that freed or
+# handed it out. Adds -g (the trace is for gdb post-mortems too) and keeps
+# -O2, so the traced binary still behaves like the shipped one -- but it
+# is NOT the shipped binary: tracing changes timing, and this flag must
+# never be set in CI. Off by default: zero footprint (see volume.h).
+# The stamp forces the rebuild that reflects a flag toggle, same mechanism
+# as PERF_STAMP above. Call sites live in CORE (volume.c) and in two
+# non-core objects (invf-sweep, fuse_fs), so all three are stamped: a
+# flagged caller against an unflagged volume.o would die at the link with
+# "undefined reference to `invfs_cd_set_tag'", which reads like a source
+# bug and is not one.
+ifdef CORRUPT_DEBUG
+CFLAGS  += -DINVFS_CORRUPT_DEBUG -g
+endif
+CD_STAMP := $(OBJ)/.cd-$(if $(CORRUPT_DEBUG),1,0)
+$(shell mkdir -p $(OBJ); [ -f $(CD_STAMP) ] || touch $(CD_STAMP))
+$(CORE_O) $(OBJ)/invf-sweep.o $(OBJ)/fuse_fs.o: $(CD_STAMP)
 B3      := blake3 blake3_dispatch blake3_portable
 
 # Canonical core object list for the e2e helper link lines in tools/test-*.sh.

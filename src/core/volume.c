@@ -34,6 +34,9 @@
 #include "vol_delta.h"
 #include "vol_spt0.h"
 #include "vol_anchor.h"
+#ifdef INVFS_CORRUPT_DEBUG
+#include <stdarg.h>
+#endif
 
 
 static const uint64_t JOURNAL_BLOCKS = INVFS_JOURNAL_BLOCKS;
@@ -48,6 +51,41 @@ int invfs_sweep_ui_active(void)
 {
     return g_sweep_ui_active;
 }
+
+#ifdef INVFS_CORRUPT_DEBUG
+/* CORRUPT_DEBUG sink + per-thread stage tag (see volume.h). One line per
+ * event, line-buffered; $INVFS_CORRUPT_TRACE names a shared append file
+ * (daemon and offline sweep can write the same one -- lines are short so
+ * O_APPEND keeps them whole), otherwise stderr. */
+static __thread const char *cd_tag_tls = NULL;
+static FILE *cd_sink = NULL;
+#ifdef _WIN32
+#define CD_PID() ((int)GetCurrentProcessId())
+#else
+#define CD_PID() ((int)getpid())
+#endif
+void invfs_cd_set_tag(const char *tag)
+{
+    cd_tag_tls = tag;
+}
+void invfs_cd_log(const char *fmt, ...)
+{
+    va_list ap;
+    if (!cd_sink) {
+        const char *p = getenv("INVFS_CORRUPT_TRACE");
+        cd_sink = (p && *p) ? fopen(p, "a") : stderr;
+        if (!cd_sink)
+            cd_sink = stderr;
+        setvbuf(cd_sink, NULL, _IOLBF, 0);
+    }
+    fprintf(cd_sink, "[CD %s pid=%d] ", cd_tag_tls ? cd_tag_tls : "?",
+            CD_PID());
+    va_start(ap, fmt);
+    vfprintf(cd_sink, fmt, ap);
+    va_end(ap);
+    fputc('\n', cd_sink);
+}
+#endif
 
 
 /* vol_bm_dirty() (volume_internal.h) widens the dirty byte range so
@@ -1898,6 +1936,8 @@ uint64_t alloc_blocks(invfs_volume *v, uint64_t zone_start, uint64_t zone_len,
                 /* WP30: track metadata free blocks separately */
                 if (type == INVFS_ALLOC_META)
                     v->meta_free_blocks -= n;
+                CD("ALLOC pba=%llu n=%llu type=%d", (unsigned long long)start,
+                   (unsigned long long)n, type);
                 return start;
             }
         } else {
@@ -3017,6 +3057,8 @@ static void vol_free_run(invfs_volume *v, uint64_t pba, uint64_t nblocks)
     uint64_t end = pba + nblocks;
     if (end > v->sb.total_blocks)
         end = v->sb.total_blocks;
+    CD("FREE pba=%llu n=%llu", (unsigned long long)pba,
+       (unsigned long long)(end - pba));
     /* WP25: a REAL free (retention above holds its blocks) drops the
      * redundant second copy: the dev1 mirror of a raw-zone run, or the
      * dev0 acceleration copy of a canonical dev1-shadow run. */

@@ -2169,6 +2169,7 @@ static void invf_sweep_worker(int full_pass)
     long swept = 0, skipped = 0, failed = 0;
     int complete;
     const char *tag = full_pass ? "watermark" : "manual";
+    CD_SET(full_pass ? "fuse-watermark" : "fuse-manual");
 
     pthread_mutex_lock(&g_io_lock);
     if (!g_vol) { pthread_mutex_unlock(&g_io_lock); free(ids); return; }
@@ -2575,6 +2576,7 @@ static int commit_wctx(wctx *c)
 {
     int rc = 0;
     if (!c) return 0;
+    CD_SET("fuse-write");
     pthread_mutex_lock(&g_io_lock);
     if (!g_vol) { pthread_mutex_unlock(&g_io_lock); return -EIO; }
     if (!c->ws) { pthread_mutex_unlock(&g_io_lock); return 0; }
@@ -3495,6 +3497,7 @@ static int invf_unlink(const char *path)
     int rc;
     struct acreds c;
     (void)is_temp_path;
+    CD_SET("fuse-unlink");
     /* A delete is deliberately allowed under the ordinary
      * read-only space latch (H5, it is the way out). */
     acreds_get(&c);

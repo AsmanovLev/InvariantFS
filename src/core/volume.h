@@ -10,6 +10,29 @@ typedef struct invfs_volume invfs_volume;
 void invfs_sweep_ui_set(int active);
 int invfs_sweep_ui_active(void);
 
+/* CORRUPT_DEBUG: sweep-time corruption tracing. Build with
+ * `make CORRUPT_DEBUG=1` (needs a `make clean` first when toggling --
+ * same CFLAGS-tracking caveat as PERF, enforced by the .cd-N stamp in
+ * the Makefile). When the flag is OFF this whole block vanishes: no
+ * functions, no globals, no behaviour change, and the binary is the
+ * binary CI ships.
+ *
+ * When ON: every block alloc/free is logged with the stage tag in force
+ * on that thread (sweep stage, fuse-write, fuse-unlink, ...), so a
+ * post-mortem recipe PBA (see the enriched CRC message in vol_read.c)
+ * can be grepped back to the exact stage that freed or handed it out.
+ * Sink is $INVFS_CORRUPT_TRACE (appended, line-buffered) or stderr.
+ * Tags are __thread: the FUSE daemon and the offline sweep set their own. */
+#ifdef INVFS_CORRUPT_DEBUG
+void invfs_cd_set_tag(const char *tag);
+void invfs_cd_log(const char *fmt, ...);
+#define CD_SET(t) invfs_cd_set_tag(t)
+#define CD(...) invfs_cd_log(__VA_ARGS__)
+#else
+#define CD_SET(t) ((void)0)
+#define CD(...) ((void)0)
+#endif
+
 /* Longest name the on-disk record can hold, in bytes. invfs_inode_rec.name is
    256 bytes with a NUL, and name_len must agree with what is actually stored,
    so a longer name is refused rather than truncated. Callers that build names
