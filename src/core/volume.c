@@ -1244,7 +1244,7 @@ static invfs_volume *vol_open_inner(const char *path, int *err_out)
     if (spt0_load(v) < 0) { *err = -6; goto fail; }
     if (!invfs_sweep_ui_active())
         fprintf(stderr, "vol_open: %s: format v%d (metadata inode tree): "
-                "base root engine up, v2 paths refused\n", real, INVFS_FORMAT_VERSION);
+                "base root engine up\n", real, INVFS_FORMAT_VERSION);
 
     /* WP25: with the name/id indexes live, load the tier + RAW-mirror
      * indexes from their owner records (2-device volumes only; a degraded
