@@ -261,6 +261,49 @@ also shows transient segment/text-batch CRC mismatches for many other
 inodes mid-run. Next: bitmap/alloc audit of pba 16460 (free vs live
 reference) + which sweep stage last touched inode 58.
 
+## F7 -- sweep starting in drop mode publishes without a landed window
+(seed 20261331 traced with CORRUPT_DEBUG, artifacts
+leg5-soak-20261007-215754, trace /home/user/flakey-work/cd-20261331.log)
+
+**Symptom:** run dead-ends at round 4 (t=+8.2): fsck rc=3, four base
+pages unreadable (121589, 121591, 118100, 121593) + torn root_slot[1]
+(pba 118101), CANNOT REPAIR without --discard-reachable, and
+`invf-rollback` says `no save point`. A full generation published with
+no way back.
+
+**Attribution (the trace earns its keep):** all five dead pages were
+ALLOC'd as META (type=1) under tag `batches` (trace lines 1099-1114,
+the sweep's batches stage) and never freed. The allocator is EXONERATED:
+a full bitmap-model replay of the trace (every ALLOC/FREE from mkfs on)
+shows zero double-allocs and zero free-of-free. The blocks were freed by
+nobody and written once -- the writes just never landed: the whole sweep
+ran inside a drop_writes window (`cli sweep (mode=drop)` at t=7.8) and
+returned rc=0 `volume durable`.
+
+**Mechanism:** prepare's `spt0_capture()` got rc=0 for a write the device
+discarded, and `spt0_info()` -- which reads IN-MEMORY state
+(`v->savepoint_live`, vol_spt0.c) -- confirmed it. The sweep proceeded
+believing a rollback window existed. It did not (rollback: `no save
+point`). Root publish landed, page writes did not: torn generation, no
+fallback. The USR1/xattr path has the SAME shape (fail-closed only
+covers explicit refusal, never a silently dropped capture), so all four
+sweep triggers are fail-open under drop-at-capture.
+
+**Fix direction:** verify-after-capture -- re-read SPT0 from the DEVICE
+and compare base_root/delta_end against what was just captured; on
+mismatch abandon the pass before writing anything (under drop, reads
+return stale data, so a dropped capture is detectable; under error,
+reads EIO, also detectable). Applies to offline prepare AND the FUSE
+worker captures. Separate harness question: the ladder dead-ends on
+DAMAGED without trying invf-rollback first -- for THIS incident there
+was no window so rollback could not have helped, but a landed window
+with a torn publish is exactly what rollback is for and the ladder
+never pulls it.
+
+**Status 2026-10-07:** diagnosed, not fixed. Note the manifestation
+moves with timing: same seed gave F6-shape (s30), stale-PBA (s18), now
+F7 (base pages) -- the seed is a bug FAMILY, not one bug.
+
 ## Tier status
 
 legs 1 (baseline), 3 (torn sweep), 4 (crash mid-seal) PASS;
