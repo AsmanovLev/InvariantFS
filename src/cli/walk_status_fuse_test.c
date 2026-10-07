@@ -133,7 +133,6 @@ static size_t cap_len;
 static pthread_mutex_t cap_mtx = PTHREAD_MUTEX_INITIALIZER;
 static int cap_saved = -1;
 static int cap_pipe[2] = { -1, -1 };
-static volatile int cap_stop;
 /* WP209: the reader is joinable, so its handle has to outlive cap_start(). */
 static pthread_t cap_thread;
 static int cap_thread_live;
@@ -168,8 +167,12 @@ static void *cap_reader(void *arg)
             cap_buf[cap_len] = 0;
         }
         pthread_mutex_unlock(&cap_mtx);
-        if (cap_stop)
-            break;
+        /* No early break on cap_stop: the join in cap_stop_and_get
+         * already guarantees EOF (dup2 restore closed the last write
+         * end), so breaking here only abandons unread pipe data. That
+         * dropped the TAIL of a fast pass -- observed as CI engine 1k
+         * (watermark DONE missing after a complete INCOMPLETE/PARTIAL
+         * log) on a loaded 4-shard run, never standalone. */
     }
     return NULL;
 }
@@ -183,7 +186,7 @@ static void cap_start(void)
     cap_saved = dup(2);
     dup2(cap_pipe[1], 2);
     close(cap_pipe[1]);
-    cap_len = 0; cap_buf[0] = 0; cap_stop = 0;
+    cap_len = 0; cap_buf[0] = 0;
     /* WP209: JOINABLE. This thread was detached, which is what let it
      * outlive its capture and read the next probe's pipe (see cap_reader).
      * cap_stop_and_get() joins it, and the join cannot hang: restoring fd 2
@@ -212,7 +215,6 @@ static void cap_stop_and_get(char *out, size_t cap)
 {
     fflush(stderr);
     if (cap_saved >= 0) { dup2(cap_saved, 2); close(cap_saved); cap_saved = -1; }
-    cap_stop = 1;
     if (cap_thread_live) {
         pthread_join(cap_thread, NULL);
         cap_thread_live = 0;

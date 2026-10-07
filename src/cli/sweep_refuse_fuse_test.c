@@ -115,7 +115,6 @@ static size_t cap_len;
 static pthread_mutex_t cap_mtx = PTHREAD_MUTEX_INITIALIZER;
 static int cap_saved = -1;
 static int cap_pipe[2] = { -1, -1 };
-static volatile int cap_stop;
 static pthread_t cap_thread;
 static int cap_thread_live;
 
@@ -134,8 +133,10 @@ static void *cap_reader(void *arg)
             cap_buf[cap_len] = 0;
         }
         pthread_mutex_unlock(&cap_mtx);
-        if (cap_stop)
-            break;
+        /* No early break on cap_stop: the join in cap_stop_and_get
+         * already guarantees EOF, so breaking here only abandons unread
+         * pipe data (same tail-drop that took CI engine 1k in
+         * walk_status_fuse_test). */
     }
     return NULL;
 }
@@ -149,7 +150,7 @@ static void cap_start(void)
     cap_saved = dup(2);
     dup2(cap_pipe[1], 2);
     close(cap_pipe[1]);
-    cap_len = 0; cap_buf[0] = 0; cap_stop = 0;
+    cap_len = 0; cap_buf[0] = 0;
     cap_thread_live = pthread_create(&th, NULL, cap_reader,
                                      (void *)(intptr_t)cap_pipe[0]) == 0;
     if (cap_thread_live)
@@ -160,7 +161,6 @@ static size_t cap_stop_and_get(char *out, size_t outcap)
 {
     size_t n;
     fflush(stderr);
-    cap_stop = 1;
     if (cap_saved >= 0) {
         dup2(cap_saved, 2);
         close(cap_saved);
