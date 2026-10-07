@@ -62,7 +62,7 @@ say "serve dir reachable"
     sleep 60
   done ) &
 mkdir -p "$B"
-for f in invfs-v0.5.0-x86_64.tar.zst SHA256SUMS; do
+for f in invfs-v0.6.0-x86_64.tar.zst SHA256SUMS; do
     fetch "$SRV/$f" "$B/$f" || exit 1
 done
 say "artifact fetched"
@@ -70,8 +70,8 @@ say "artifact fetched"
 # anything trusts it.
 ( cd "$B" && sha256sum -c SHA256SUMS ) || exit 1
 say "artifact matches SHA256SUMS"
-mkdir -p "$B/x" && tar --zstd -xf "$B/invfs-v0.5.0-x86_64.tar.zst" -C "$B/x" || exit 1
-( cd "$B/x/invfs-v0.5.0-x86_64" && DESTDIR=/ PREFIX=/usr sh packaging/install.sh ) || exit 1
+mkdir -p "$B/x" && tar --zstd -xf "$B/invfs-v0.6.0-x86_64.tar.zst" -C "$B/x" || exit 1
+( cd "$B/x/invfs-v0.6.0-x86_64" && DESTDIR=/ PREFIX=/usr sh packaging/install.sh ) || exit 1
 command -v invf-mkfs >/dev/null 2>&1 || exit 1
 say "installed: $(invf-mkfs --version 2>&1 | head -1)"
 

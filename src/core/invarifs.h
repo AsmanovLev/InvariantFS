@@ -14,7 +14,7 @@
 #include <string.h>
 
 #ifndef INVFS_VERSION_STRING
-#define INVFS_VERSION_STRING "v0.5.0"
+#define INVFS_VERSION_STRING "v0.6.0"
 #endif
 #ifndef INVFS_BUILD_DATE
 #define INVFS_BUILD_DATE "2026-09-25"

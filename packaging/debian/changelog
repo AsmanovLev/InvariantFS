@@ -1,3 +1,11 @@
+invfs (0.6.0-1) unstable; urgency=medium
+
+  * Crash-consistency hardening: complete-or-absent writes, savepoint
+    capture verification, fail-closed generation walks, refused-sweep
+    purity (worker included).
+
+ -- InvariantFS Developers <invfs@localhost>  Thu, 08 Oct 2026 02:50:07 +1000
+
 invfs (0.5.0-1) unstable; urgency=medium
 
   * Meta-v3 cutover: B+-tree base + append-only delta metadata architecture.

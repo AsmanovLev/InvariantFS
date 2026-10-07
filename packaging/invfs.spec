@@ -10,7 +10,7 @@
 %{!?_unitdir: %global _unitdir /usr/lib/systemd/system}
 
 Name:           invfs
-Version:        0.5.0
+Version:        0.6.0
 Release:        1%{?dist}
 Summary:        Semantic content-addressed filesystem with a bit-exactness invariant
 
@@ -86,6 +86,8 @@ DESTDIR=%{buildroot} PREFIX=%{_prefix} \
 /usr/lib/dracut/modules.d/90invfs/
 
 %changelog
+* Thu Oct 08 2026 InvariantFS Developers <invfs@localhost> - 0.6.0-1
+- Crash-consistency hardening: complete-or-absent writes, savepoint capture verification, fail-closed generation walks, refused-sweep purity
 * Tue Sep 22 2026 InvariantFS Developers <invfs@localhost> - 0.5.0-1
 - Meta-v3 default cutover: B+-tree base + append-only delta architecture
 - Inode-id-keyed sweep publication and RAW block reclamation

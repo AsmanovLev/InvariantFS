@@ -22,7 +22,7 @@
 # `make release` prints the line to paste here after each release:
 #     make release-sums
 pkgname=invfs
-pkgver=0.5.0
+pkgver=0.6.0
 pkgrel=1
 pkgdesc="Semantic content-addressed filesystem with a bit-exactness invariant"
 arch=('x86_64' 'aarch64')

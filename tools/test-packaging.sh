@@ -328,7 +328,7 @@ stage_debian() {
     # keyring the build compiled, packaged, and then failed on its last step:
     #
     #   Error: Failed to resolve --signer-userid "InvariantFS Developers <...>"
-    #   dpkg-buildpackage: error: failed to sign ../invfs_0.5.0-1_amd64.buildinfo
+    #   dpkg-buildpackage: error: failed to sign ../invfs_0.6.0-1_amd64.buildinfo
     #
     # That is a missing capability reported as a packaging failure -- exactly
     # what the loop-mounted packs in test-fuzz were doing until they were gated
@@ -566,11 +566,11 @@ sig_setup() {
         "InvFS Test Bad <bad@localhost>" ed25519 sign never >/dev/null 2>&1
     gpg --armor --export good@localhost > "$SIGDIR/good.pub" 2>/dev/null
     gpg --armor --export bad@localhost  > "$SIGDIR/bad.pub"  2>/dev/null
-    mkdir -p "$SIGDIR/pub/v0.5.0"
-    cp "$ART" "$SUM" "$SIGDIR/pub/v0.5.0/"
+    mkdir -p "$SIGDIR/pub/v0.6.0"
+    cp "$ART" "$SUM" "$SIGDIR/pub/v0.6.0/"
     gpg --batch --yes --local-user good@localhost \
-        --output "$SIGDIR/pub/v0.5.0/SHA256SUMS.sig" \
-        --detach-sign "$SIGDIR/pub/v0.5.0/SHA256SUMS" >/dev/null 2>&1
+        --output "$SIGDIR/pub/v0.6.0/SHA256SUMS.sig" \
+        --detach-sign "$SIGDIR/pub/v0.6.0/SHA256SUMS" >/dev/null 2>&1
     return 0
 }
 
@@ -584,7 +584,7 @@ sig_case() {
     # DESTDIR so the case runs unprivileged: --prefix outside $HOME would
     # (correctly) demand root, which would make this a test of sudo rather
     # than of signature verification.
-    set -- --release --version v0.5.0 --prefix /usr --yes "$@"
+    set -- --release --version v0.6.0 --prefix /usr --yes "$@"
     [ -n "$key" ] && set -- --pubkey "$key" "$@"
     out=$(env INVFS_CACHE_DIR="$d/cache" INVFS_RELEASE_BASE="http://127.0.0.1:$SIGPORT" \
           DESTDIR="$d/root" PREFIX=/usr \
@@ -643,7 +643,7 @@ sig_tests() {
 
     # negative: tamper the artifact AFTER signing -- sha256 must catch it
     sig_case tampered "$SIGDIR/good.pub"
-    d="$SIGDIR/pub/v0.5.0"
+    d="$SIGDIR/pub/v0.6.0"
     cp "$d/$ARTBASE" /tmp/.sigcase.bak 2>/dev/null
     printf 'x' >> "$d/$ARTBASE"
     sig_case tampered2 "$SIGDIR/good.pub"

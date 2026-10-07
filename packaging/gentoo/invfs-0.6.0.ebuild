@@ -11,7 +11,7 @@ EAPI=8
 #
 # AUR-style local install:
 #     mkdir -p /var/db/repos/local/invfs
-#     cp invfs-0.5.0.ebuild /var/db/repos/local/invfs/
+#     cp invfs-0.6.0.ebuild /var/db/repos/local/invfs/
 #     echo 'sys-apps/invfs' >> /etc/portage/package.accept_keywords
 #     echo 'sys-apps/invfs **' >> /etc/portage/package.mask   # only if needed
 #     emerge --ask sys-apps/invfs

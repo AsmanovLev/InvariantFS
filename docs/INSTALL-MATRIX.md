@@ -63,7 +63,7 @@ recipe does not change the artifact, which is checked below.
 | target | install recipe | format | native tooling | built/run here? |
 |---|---|---|---|---|
 | **Arch Linux** | `packaging/PKGBUILD` | makepkg | `makepkg -si` | recipe's `package()` executed against the artifact; `makepkg` itself **not installed on this Debian host** |
-| **Gentoo Linux** | `packaging/gentoo/invfs-0.5.0.ebuild` (EAPI 8) | portage | `emerge sys-apps/invfs` | ebuild's `src_install()` executed against the artifact — see below; `ebuild`/`portage` **not installed here and no Gentoo host exists on this machine** |
+| **Gentoo Linux** | `packaging/gentoo/invfs-0.6.0.ebuild` (EAPI 8) | portage | `emerge sys-apps/invfs` | ebuild's `src_install()` executed against the artifact — see below; `ebuild`/`portage` **not installed here and no Gentoo host exists on this machine** |
 | **Void Linux** | `packaging/void/template` | xbps-src | `xbps-src` + `xbps-install` | template's `do_install()` executed against the artifact; `xbps-src` **not available in Debian** |
 | **Debian** | `packaging/debian/` | `.deb` | `dpkg-buildpackage` + `apt`/`dpkg` | **built, then installed in a clean VM and exercised** — see §3 |
 
@@ -116,7 +116,7 @@ There is no Gentoo host, no portage and no `xbps-src` on this machine, so
 `emerge` and `xbps-src` were **not** run and no row above should imply
 otherwise. What was done instead, on 2026-10-02:
 
-- the release artifact was unpacked to `$S/invfs-v0.5.0-x86_64` (the name
+- the release artifact was unpacked to `$S/invfs-v0.6.0-x86_64` (the name
   `MY_PN` resolves to) and the ebuild was sourced with `S`, `ED`, `PV` set
   as portage would set them, then **`src_install()` was called** with
   `die`/`elog` and `systemd_dounit` stubbed. It returned 0 and produced:
@@ -202,7 +202,7 @@ from a pristine base image with a cloud-init seed; scratch images under
 make -j"$(nproc)"
 cp -a packaging/debian debian
 INVFS_CODECPACK_REGISTRY=none DEB_BUILD_OPTIONS=nocheck \
-    dpkg-buildpackage -us -uc -b      # -> ../invfs_0.5.0-1_amd64.deb
+    dpkg-buildpackage -us -uc -b      # -> ../invfs_0.6.0-1_amd64.deb
 ```
 
 Two things about that command are worth knowing, because both are what a
@@ -223,8 +223,8 @@ maintainer will hit:
 ### Installing and exercising it in the guest
 
 ```bash
-scp invfs_0.5.0-1_amd64.deb debian@guest:/tmp/
-ssh guest 'sudo apt-get install -y /tmp/invfs_0.5.0-1_amd64.deb'
+scp invfs_0.6.0-1_amd64.deb debian@guest:/tmp/
+ssh guest 'sudo apt-get install -y /tmp/invfs_0.6.0-1_amd64.deb'
 ```
 
 Result: `install ok installed`, 192 paths from `dpkg -L invfs`.
@@ -571,7 +571,7 @@ bash tools/test-packaging.sh                # all four targets + negative contro
 
 # Debian only, natively:
 dpkg-buildpackage -b -uc -us
-sudo dpkg -i ../invfs_0.5.0-1_amd64.deb
+sudo dpkg -i ../invfs_0.6.0-1_amd64.deb
 man -l /usr/share/man/man8/invf-mkfs.8.gz
 ```
 

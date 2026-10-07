@@ -9,7 +9,7 @@
 #
 #   cd packaging/void && xbps-src binary-bootstrap <host> x86_64
 #   ./xbps-src --fetch yes ...          # per the normal xbps-src flow
-#   xbps-install -s ./hostpkgdir/invfs-0.5.0_1.x86_64.xbps
+#   xbps-install -s ./hostpkgdir/invfs-0.6.0_1.x86_64.xbps
 #
 # Checksum provenance: the sha256 in distfiles/MANIFEST below is the one in
 # the published dist/SHA256SUMS, which `make release SIGNING_KEY=...`
@@ -19,7 +19,7 @@
 # the same chain packaging/bootstrap.sh --check-only --pubkey checks.
 
 pkgname=invfs
-version=0.5.0
+version=0.6.0
 revision=1
 _artifact="invfs-v${version}-x86_64"
 # No build_style: the artifact is prebuilt, so there is nothing to
