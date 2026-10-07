@@ -93,7 +93,12 @@ truncate -s 12G "$VOL"
 # void harness: tmpfs caps at half of RAM, a stage3 + cache overflows
 # it; disk-backed staging removes RAM sizing from the equation).
 truncate -s 8G "$STAGEDISK"
-mkfs.ext4 -F -q -L stage "$STAGEDISK" || fail "mkfs.ext4 stage failed"
+# mkfs lives in sbin/, which is not on every PATH -- resolve it.
+if command -v mkfs.ext4 >/dev/null 2>&1; then MKFS_EXT4=mkfs.ext4
+elif [ -x /sbin/mkfs.ext4 ]; then MKFS_EXT4=/sbin/mkfs.ext4
+elif [ -x /usr/sbin/mkfs.ext4 ]; then MKFS_EXT4=/usr/sbin/mkfs.ext4
+else fail "mkfs.ext4 not found (needs e2fsprogs)"; fi
+"$MKFS_EXT4" -F -q -L stage "$STAGEDISK" || fail "mkfs.ext4 stage failed"
 # Serial doubles as evidence AND as the fallback eyes: if SSH never comes
 # up, the serial log is the only diagnosis. Pipe form keeps .out readable
 # while running (file: only flushes at qemu exit).
