@@ -101,6 +101,21 @@ done
 grep -a "INVFS-ISO-SETUP:" "$SER" 2>/dev/null | tail -2
 if grep -aq "INVFS-ISO-SETUP: PASS" "$SER" 2>/dev/null; then
     note "volume left at $VOL"
+    # Reap our qemu: the guest powers off after PASS, but slowly under TCG,
+    # and the boot step needs the image lock 8s later. A guest whose
+    # poweroff hung (the stale-guest hazard the guest script documents)
+    # holds the lock forever, so a lingering qemu is killed loudly rather
+    # than left to fail the boot with "Failed to get write lock".
+    for _ in $(seq 1 90); do
+        kill -0 $QPIDE 2>/dev/null || break
+        sleep 2
+    done
+    if kill -0 $QPIDE 2>/dev/null; then
+        note "install qemu still alive 3 min after PASS; killing (the guest"
+        note "already verified the image, and the volume is crash-consistent)"
+        kill -KILL $QPIDE 2>/dev/null
+        wait $QPIDE 2>/dev/null
+    fi
     exit 0
 else
     fail "no PASS marker (see $SER)"
