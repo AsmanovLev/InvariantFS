@@ -86,10 +86,19 @@ mkdir -p "$STAGE"
 mount -L stage "$STAGE" || mount /dev/disk/by-label/stage "$STAGE" || exit 1
 say "staged on disk-backed $STAGE (not the RAM overlay)"
 say "stage3 $STAGE3_VER -> $STAGE"
-fetch "$STAGE3_URL" "$B/stage3.tar.xz" || exit 1
+# Host-staged first (driver serves it; reliable NAT route, verified pin).
+# Internet fallback preserves the standalone path. Either way the sha512
+# below is authoritative -- and the -s check turns a silent no-file fetch
+# (observed once: fetch rc=0, nothing on disk) into a loud failure.
+STAGE3_FILE="stage3-amd64-openrc-$STAGE3_VER.tar.xz"
+if ! fetch "$SRV/stage3.tar.xz" "$B/$STAGE3_FILE"; then
+    say "host stage3 missing; falling back to $STAGE3_URL"
+    fetch "$STAGE3_URL" "$B/$STAGE3_FILE" || exit 1
+fi
+[ -s "$B/$STAGE3_FILE" ] || { say "stage3 fetch produced no file"; exit 1; }
 ( cd "$B" && echo "$STAGE3_SHA512" | sha512sum -c - ) || exit 1
 say "stage3 checksum OK"
-tar -xpf "$B/stage3.tar.xz" -C "$STAGE" || exit 1
+tar -xpf "$B/$STAGE3_FILE" -C "$STAGE" || exit 1
 # Minimal config for an offline-verified root: hostname only. No kernel,
 # no bootloader, no users -- this job proves installation onto InvFS,
 # not bootability (the bootstrap-qemu jobs own boot).

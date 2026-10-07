@@ -82,6 +82,21 @@ ART=$(ls "$REPO"/dist/invfs-*-x86_64.tar.zst | head -1)
 cp "$ART" "$REPO/dist/SHA256SUMS" "$REPO/tools/iso-guest-gentoo-setup.sh" "$SERVEDIR/"
 note "serving: $(ls "$SERVEDIR" | tr '\n' ' ')"
 
+# Stage3 comes from the host server, not the guest's internet: a guest-side
+# fetch failure is silent-or-cryptic (observed: curl rc=0 with no file,
+# then a bare sha512sum miss), while the host path is loud and shares the
+# already-proven NAT route. Pin mirrors tools/iso-guest-gentoo-setup.sh
+# STAGE3_VER/URL/SHA512 -- bump together (guest re-verifies authoritatively).
+STAGE3_VER="20261004T164559Z"
+STAGE3_URL="https://distfiles.gentoo.org/releases/amd64/autobuilds/current-stage3-amd64-openrc/stage3-amd64-openrc-$STAGE3_VER.tar.xz"
+STAGE3_SHA512="2cf0030d683481ef9a5aac737b636abb3532c88a15972709811423564945ef8694685003dccb5c78e453633b792af2af27c504f0a0e69101bd472b26d892aea8  stage3.tar.xz"
+if [ ! -f "$SERVEDIR/stage3.tar.xz" ]; then
+    note "downloading stage3 $STAGE3_VER"
+    curl -fsSL -o "$SERVEDIR/stage3.tar.xz" "$STAGE3_URL" || fail "stage3 download failed"
+fi
+( cd "$SERVEDIR" && echo "$STAGE3_SHA512" | sha512sum -c - ) || fail "stage3 checksum mismatch"
+note "stage3 staged: $(du -h "$SERVEDIR/stage3.tar.xz" | cut -f1)"
+
 if [ "$ACCEL" = auto ]; then
     if [ -r /dev/kvm ] && [ -w /dev/kvm ]; then ACCEL=kvm; CPU=host
     else ACCEL=tcg; CPU=max; note "/dev/kvm unusable; TCG fallback (slower)"; fi
