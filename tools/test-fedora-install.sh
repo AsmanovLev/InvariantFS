@@ -38,6 +38,11 @@ for t in invf-mkfs invf-import invf-ls invf-fsck invf-cat; do
 done
 command -v tar >/dev/null || fail "tar not found"
 command -v python3 >/dev/null || fail "python3 not found (OCI manifest)"
+# The Fedora tree contains root-only files (shadow, sudo); the import runs
+# under sudo so they land in the volume instead of being skipped (the
+# tool's own contract). Fail here, not mid-run, if sudo would prompt.
+command -v sudo >/dev/null || fail "sudo not found"
+sudo -n true 2>/dev/null || fail "need passwordless sudo (root-only files)"
 
 mkdir -p "$WORK"
 # Fedora trees contain read-only dirs (ca-trust); plain rm -rf fails on
@@ -96,6 +101,11 @@ printf 'invfs-fedora\n' > "$STAGE/etc/hostname"
 
 # Regular files used for the bit-exact comparison. --follow resolves the
 # merged-usr symlinks (bin/sh) to the file, like the FUSE read does.
+# NOTE what is NOT here: /usr/bin/sudo*, /etc/shadow*, /etc/gshadow* are
+# root-only (0400/0600 or restricted) in the Fedora tree, so a user-level
+# cmp cannot open them. They ARE imported (see sudo below) but cannot be
+# verified without root; asserting them would fail on the open, not on
+# the bytes. Count stays honest via MATCHED.
 BITEXACT="etc/os-release usr/lib/os-release etc/passwd etc/group \
 etc/hostname usr/bin/bash bin/sh"
 MATCHED=0
@@ -157,7 +167,9 @@ INVFS_META_FRAC=16 "$B/invf-mkfs" "$SINGLE" 15 \
     | tee "$WORK/mkfs-single.log"
 grep -q 'devices:.*2' "$WORK/mkfs-single.log" \
     && fail "single-device mkfs unexpectedly reported 2 devices" || true
-"$B/invf-import" "$SINGLE" "$STAGE" 2>&1 | tee "$WORK/import-single.log"
+# Root-only files (shadow, sudo) exist in the Fedora tree; the tool's own
+# contract says to re-run as root rather than silently drop them.
+sudo "$B/invf-import" "$SINGLE" "$STAGE" 2>&1 | tee "$WORK/import-single.log"
 grep -q '0 skipped' "$WORK/import-single.log" || fail "single: import skipped files"
 check_volume single "$SINGLE"
 
@@ -174,7 +186,7 @@ METAHI=$(sed -n 's/.*metadata zone: *blocks [0-9]* \.\. \([0-9]*\).*/\1/p' \
          "$WORK/mkfs-multi.log")
 [ -n "$METAHI" ] || fail "could not parse metadata geometry"
 export INVFS_DEV1="$MD_SH"
-"$B/invf-import" "$MD_RAW" "$STAGE" 2>&1 | tee "$WORK/import-multi.log"
+sudo env "INVFS_DEV1=$MD_SH" "$B/invf-import" "$MD_RAW" "$STAGE" 2>&1 | tee "$WORK/import-multi.log"
 grep -q '0 skipped' "$WORK/import-multi.log" || fail "multi: import skipped files"
 check_volume multi "$MD_RAW"
 cmp <(head -c $(( (METAHI + 1) * 4096 )) "$MD_RAW") \
