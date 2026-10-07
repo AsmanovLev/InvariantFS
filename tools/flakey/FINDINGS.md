@@ -440,7 +440,9 @@ blob round-trips byte-exact) so no leg can pass vacuously.
 **Status 2026-10-08:** fixed, unit-proven. Owner-confirmed design
 follow-ups live elsewhere: sealed-volume recovery UX (refuse loudly +
 tool asks + parity rebuild -- gated on seal-v3), and the `/.InvariantFS`
-self-deploying reserve (ADR-011 proposed), which makes pack signatures
+self-deploying reserve (covered by ADR-007, which already specifies on-volume
+.invariantfs -- a separate ADR-011 is moot; gap analysis vs the tree in owner
+notes 2026-10-08), which makes pack signatures
 mandatory rather than future.
 
 ## Tier status
