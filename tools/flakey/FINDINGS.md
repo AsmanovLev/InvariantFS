@@ -191,6 +191,61 @@ of that change silently skipped every leg — a "1 s PASS" suite).
 reads + byte-offset shift executed a `_leg` fragment mid-suite once);
 edit between runs only.
 
+## F6 -- read during error window returns wrong/short bytes as success
+(leg 5 soak; reproduces with `FLAKEY_ONLY=5 FLAKEY_SEED=20260831 bash
+tools/test-flakey.sh`, soak seed = SEED+500; confirmed 3/3 incl. one
+quiet-box run. Artifacts: tools/flakey/artifacts/leg5-soak-20261007-175219
+(first) and leg5-soak-20261007-210622 (with captured garbage bytes).)
+
+**Symptom:** after a drop-mode sweep, a FUSE readback issued while the dm
+device is in full-error mode returns 34,484 bytes of high-entropy content
+for a 958,369-byte text file -- hash matches nothing ever written -- with
+SUCCESS (no error). Same-run offline reads (before and after, via
+invf-cat) return the correct bytes: on-disk state is and was correct.
+Distinct from F4 (zero rollbacks in the run; nothing resurrected) and
+from F2 (file stays readable).
+
+**Established by elimination:**
+- Not on-disk corruption: offline reads correct before, during (other
+  files), and after. Not harness history: deterministic model, one write.
+- Not whole-file aliasing: the garbage hash occurs NOWHERE else in the
+  run (48 unique content hashes checked); not a torn mix either (zero
+  common prefix bytes with the correct content).
+- Not zstd-framed data (rejected by unzstd); LZ4-block-or-foreign-segment
+  shaped, unproven which.
+- The read ran in error mode (oplog t=+22.3, chaos still error): segment
+  fetches were failing. A sibling readback in the same mode correctly
+  ERRORED (rand.bin EIO). So partial success is per-read, not per-mode.
+
+**Candidate loci (unproven):**
+- (a) read_range's segment loop (src/core/vol_read.c) skips non-covering
+  entries via break/continue and returns short `got` with SUCCESS -- the
+  one shape in the read path that yields short-without-error. Fits the
+  SHORT half, not the foreign-from-byte-0 half.
+- (b) Stale in-memory recipe/overlay view in the daemon (drop-sweep wrote
+  recipe updates that partially landed), combined with (a).
+- (c) ARC serving a foreign/decoded-mismatched window for the head.
+- Ruled out: RACE-F4 resurrection (no rollback), harness model bug,
+  contention (quiet-box repro), geometry (100G sparse control passes).
+
+**Fix direction:** regardless of which locus produced THESE bytes, a read
+that cannot assemble the requested window must fail EIO, never return
+wrong/short bytes as success. Audit read_range + FUSE handler + ARC get
+paths for partial-success returns; regression test: FUSE read of a live
+file with dm in error mode must EIO (never short-success). The captured
+garbage blob (garbage-s30.bin.bin in the 210622 artifacts) is the oracle
+for dissecting head-origin once the return-code contract holds.
+
+**Status 2026-10-07:** two halves landed. (1) read_range returns -1 on
+coverage shortfall (writer contract: no unmapped LBA ever exists, so a
+hole is corruption). (2) commit_wctx failure now table_remove_name
+instead of table_sync_one (complete-or-absent via absent, mirroring
+invf_fsync's barrier path) -- proven on a deterministic 30s repro
+(O_TRUNC write fails under dm-error, readback EIOs instead of serving
+the failed bytes), guarded by new leg 9 (trunc-abort readability).
+The F4 seed still fails, LOUDLY at readback instead of silently: the
+foreign-head origin (stale mapping vs ARC vs torn recipe) is open.
+
 ## Tier status
 
 legs 1 (baseline), 3 (torn sweep), 4 (crash mid-seal) PASS;

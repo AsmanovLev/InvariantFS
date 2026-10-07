@@ -106,7 +106,11 @@ FLK=${FLAKEY_WORK:-$(disk_work_root)/invfs-flakey}
 ART=$REPO/tools/flakey/artifacts
 DEV=${FLAKEY_DEV:-invfs_flakey}
 DM=/dev/mapper/$DEV
-BACK=$FLK/backing.img
+# BACK may be a raw block device (FLAKEY_BACKING=/dev/sdb2): no host
+# filesystem between dm-flakey and silicon then -- no CoW, no journal,
+# no host page-cache writeback muddying the chaos. A file gets the
+# loop treatment as before.
+BACK=${FLAKEY_BACKING:-$FLK/backing.img}
 MNT=$FLK/mnt
 SEED=${FLAKEY_SEED:-20260831}
 SOAK_S=${FLAKEY_SOAK_S:-210}
@@ -219,6 +223,7 @@ preserve() {   # copy the ground truth + every log for replay
     local dst="$ART/${LEG:-preflight}-$(date +%Y%m%d-%H%M%S)"
     mkdir -p "$dst"
     cp -a "$FLK"/*.log "$dst/" 2>/dev/null
+    cp -a "$FLK"/garbage-*.bin "$dst/" 2>/dev/null
     cp -a "$FLK"/manifest* "$dst/" 2>/dev/null
     cp -a "$FLK"/orig* "$dst/" 2>/dev/null
     [ -f "$FLK/oplog.txt" ]  && cp -a "$FLK/oplog.txt" "$dst/"
@@ -258,15 +263,15 @@ want_leg() { [ -z "$ONLY" ] && return 0; case ",$ONLY," in *",$1,"*) return 0;; 
 dm_set() {   # dm_set up|drop|drop_slow|error — swap the live dm table
     local spec
     case "$1" in
-        up)    spec="0 $SEC flakey $LOOP 0 3600 0";;
-        drop)  spec="0 $SEC flakey $LOOP 0 1 1 1 drop_writes";;
+        up)    spec="0 $SEC flakey ${LOOP:-$BACK} 0 3600 0";;
+        drop)  spec="0 $SEC flakey ${LOOP:-$BACK} 0 1 1 1 drop_writes";;
         # drop_slow: the same acknowledged-write loss, but biased hard toward
         # UP. `drop` is a 50/50 duty cycle, and a vol_open that lands in a
         # down window fails with "device 0 is smaller than the device table
         # says" (volume.c:1256-1261) -- which reads like a capacity bug and
         # is really just the window. A long up window keeps the arm about
         # write loss instead of about retry loops.
-        drop_slow) spec="0 $SEC flakey $LOOP 0 20 1 1 drop_writes";;
+        drop_slow) spec="0 $SEC flakey ${LOOP:-$BACK} 0 20 1 1 drop_writes";;
         error) spec="0 $SEC error";;
         *)     echo "dm_set: bad mode $1" >&2; return 2;;
     esac
@@ -285,10 +290,17 @@ dm_set() {   # dm_set up|drop|drop_slow|error — swap the live dm table
 
 dev_create() {
     rm -rf "$FLK" && mkdir -p "$FLK" "$MNT"
-    truncate -s "${SIZE_GB}G" "$BACK"
-    LOOP=$(sudo -n losetup -f --show "$BACK") || { echo "losetup failed" >&2; exit 2; }
-    SEC=$(sudo -n blockdev --getsz "$LOOP")
-    sudo -n dmsetup create "$DEV" --table "0 $SEC flakey $LOOP 0 3600 0" \
+    if [ -b "$BACK" ]; then
+        # Raw device: use it directly, no loop layer, no truncate.
+        # SIZE_GB is ignored; the dm table spans the whole device.
+        LOOP=""
+        SEC=$(sudo -n blockdev --getsz "$BACK")
+    else
+        truncate -s "${SIZE_GB}G" "$BACK"
+        LOOP=$(sudo -n losetup -f --show "$BACK") || { echo "losetup failed" >&2; exit 2; }
+        SEC=$(sudo -n blockdev --getsz "$LOOP")
+    fi
+    sudo -n dmsetup create "$DEV" --table "0 $SEC flakey ${LOOP:-$BACK} 0 3600 0" \
         || { echo "dmsetup create failed" >&2; exit 2; }
     sudo -n chmod 666 "$DM"
     info "backing: $BACK (${SIZE_GB}G sparse) on $LOOP, dm: $DM ($SEC sectors)"
@@ -767,7 +779,7 @@ leg3() {
     done
     grep -q "save point captured" "$FLK/sweep3.log" || fail "save point never armed"
     info "save point armed; seeded drop_writes windows on"
-    python3 "$REPO/tools/flakey/dmchaos.py" "$DEV" "$LOOP" "$SEC" \
+    python3 "$REPO/tools/flakey/dmchaos.py" "$DEV" "${LOOP:-$BACK}" "$SEC" \
         $((SEED + 300)) 600 "$FLK/stop3" drop >"$FLK/chaos3.log" 2>&1 &
     CHAOS_PID=$!
     wait $swpid
@@ -804,7 +816,7 @@ leg4() {
         grep -q "save point captured" "$FLK/seal4a.log" 2>/dev/null && break
         sleep 0.1
     done
-    python3 "$REPO/tools/flakey/dmchaos.py" "$DEV" "$LOOP" "$SEC" \
+    python3 "$REPO/tools/flakey/dmchaos.py" "$DEV" "${LOOP:-$BACK}" "$SEC" \
         $((SEED + 400)) 600 "$FLK/stop4" droponly >"$FLK/chaos4.log" 2>&1 &
     CHAOS_PID=$!
     wait $swpid
@@ -826,7 +838,7 @@ leg4() {
         grep -q "save point captured" "$FLK/seal4b.log" 2>/dev/null && break
         sleep 0.1
     done
-    python3 "$REPO/tools/flakey/dmchaos.py" "$DEV" "$LOOP" "$SEC" \
+    python3 "$REPO/tools/flakey/dmchaos.py" "$DEV" "${LOOP:-$BACK}" "$SEC" \
         $((SEED + 401)) 600 "$FLK/stop4b" drop >"$FLK/chaos4b.log" 2>&1 &
     CHAOS_PID=$!
     wait $swpid
@@ -890,7 +902,7 @@ leg5() {
     import_all "$FLK/orig5"
     fsck_ok "pre-soak" || fail "fsck pre-soak"
     python3 "$REPO/tools/flakey/soak.py" \
-        --dev "$DM" --dmname "$DEV" --loop "$LOOP" --sectors "$SEC" \
+        --dev "$DM" --dmname "$DEV" --loop "${LOOP:-$BACK}" --sectors "$SEC" \
         --mnt "$MNT" --bin "$B" --work "$FLK" \
         --seed $((SEED + 500)) --seconds "$SOAK_S" \
         --corpus "$FLK/orig5" 2>&1 | tee "$FLK/soak.log" | grep -E "GATE|FAIL|SOAK|chaos|round" | tail -40
@@ -1481,6 +1493,53 @@ was vacuous, so it proved nothing about write loss"
     echo "  ARM C, dm-flakey drop_writes: $c_freed freed; bit-exactness held"
 }
 
+# F6 regression: a failed O_TRUNC rewrite must leave the name
+# complete-or-absent, never torn-readable. The soak caught this as
+# SILENT GARBAGE (34KB of never-committed bytes served with success
+# for a 958KB file after its rewrite died in an error window); the
+# minimal shape is one O_TRUNC write failing mid-way followed by a
+# readback. Runs on the suite dm device (needs the error target).
+leg9() {
+    LEG=leg9-trunc-abort
+    say "[9] failed O_TRUNC rewrite leaves the name complete-or-absent"
+    mkfs_fresh
+    mnt_up
+    head -c 200000 /dev/urandom > "$FLK/good.bin"
+    cp "$FLK/good.bin" "$MNT/victim.bin" || fail "leg9 setup copy"
+    sync; sleep 1
+    GOOD=$(sha256sum < "$MNT/victim.bin" | cut -d' ' -f1)
+    dm_set error || fail "leg9 dm error"
+    head -c 500000 /dev/urandom > "$FLK/evil.bin"
+    if cp "$FLK/evil.bin" "$MNT/victim.bin" 2>/dev/null; then
+        echo "  NOTE: write succeeded under error (unexpected, continuing)"
+    else
+        echo "  write failed as expected under error"
+    fi
+    sleep 1
+    dm_set up || fail "leg9 dm up"
+    sleep 1
+    if cp "$MNT/victim.bin" "$FLK/out.bin" 2>"$FLK/readback.err"; then
+        GOT=$(sha256sum < "$FLK/out.bin" | cut -d' ' -f1)
+        SZ=$(stat -c %s "$FLK/out.bin")
+        EVIL=$(sha256sum < "$FLK/evil.bin" | cut -d' ' -f1)
+        if [ "$GOT" = "$GOOD" ]; then
+            echo "  readback: old version intact (complete)"
+        elif [ "$GOT" = "$EVIL" ]; then
+            echo "  readback: full new version ($SZ bytes)"
+            echo "  (a failed close that landed everything is POSIX-legal;"
+            echo "   the suite model treats it as failure, the engine as"
+            echo "   complete -- both self-consistent, no torn state)"
+        else
+            echo "  readback: NEITHER old NOR new ($SZ bytes, sha ${GOT:0:12})"
+            fail "leg9 torn readback after failed rewrite"
+        fi
+    else
+        echo "  readback: loud failure (complete-or-absent via absent)"
+    fi
+    mnt_down
+    echo "  leg9 OK: no torn-readable state"
+}
+
 # -------------------------------------------------------------- main ----
 
 echo "WP22b flakey soak: seed=$SEED soak=${SOAK_S}s dev=$DM work=$FLK"
@@ -1583,7 +1642,7 @@ exec > >(tee "$FLK/run.log") 2>&1
 
 RAN_LEGS=""      # "<n>:<name>" per leg that ACTUALLY ran, and the complement.
 SKIPPED_LEGS=""  # The closing banner prints both. Nothing else writes to them.
-for n in 0 1 2 3 4 5 7 8; do
+for n in 0 1 2 3 4 5 7 8 9; do
     if want_leg "$n"; then
         case "$n" in
             0) nm="re-mkfs-orphans" ;;
@@ -1594,6 +1653,7 @@ for n in 0 1 2 3 4 5 7 8; do
             5) nm="${SOAK_S}s soak" ;;
             7) nm="page-cache power loss" ;;
             8) nm="reclaim power loss" ;;
+            9) nm="trunc-abort readability" ;;
             *) nm="leg$n" ;;
         esac
         RAN_LEGS="$RAN_LEGS $n:$nm"

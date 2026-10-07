@@ -48,14 +48,14 @@ src/cli/cp.c:118:SKIP
 src/cli/heat_walk_test.c:365:SKIP
 src/cli/fuse_fs.c:1644:SKIP
 src/cli/fuse_fs.c:1980:SKIP
-src/cli/fuse_fs.c:2612:SKIP
-src/cli/fuse_fs.c:2826:SKIP
-src/cli/fuse_fs.c:2881:SKIP
-src/cli/fuse_fs.c:3142:SKIP
-src/cli/fuse_fs.c:3309:SKIP
-src/cli/fuse_fs.c:3381:SKIP
-src/cli/fuse_fs.c:3416:SKIP
-src/cli/fuse_fs.c:3453:SKIP
+src/cli/fuse_fs.c:2620:SKIP
+src/cli/fuse_fs.c:2834:SKIP
+src/cli/fuse_fs.c:2889:SKIP
+src/cli/fuse_fs.c:3150:SKIP
+src/cli/fuse_fs.c:3317:SKIP
+src/cli/fuse_fs.c:3389:SKIP
+src/cli/fuse_fs.c:3424:SKIP
+src/cli/fuse_fs.c:3461:SKIP
 src/cli/otrunc_test.c:568:SKIP   # calibration: the armed lookup IS the assertion
 src/cli/otrunc_test.c:572:SKIP   # calibration: the armed lookup IS the assertion
 src/cli/lane_release_test.c:242:SKIP

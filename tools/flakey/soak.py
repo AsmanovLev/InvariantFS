@@ -302,16 +302,24 @@ class Soak:
         name = self.rng.choice(live)
         try:
             with open(os.path.join(self.a.mnt, name), "rb") as f:
-                got = hashlib.sha256(f.read()).hexdigest()
+                blob = f.read()
+                got = hashlib.sha256(blob).hexdigest()
         except OSError as e:
             self.log("op readback %s -> ERR %s (mode=%s)"
                      % (name, e.strerror or e, self.mode))
             return
         if got not in self.model[name]["hist"]:
+            # Preserve the offending bytes: transient states (ARC/stale
+            # merge) do not survive unmount, and a hash alone cannot be
+            # dissected (torn window? foreign content? stale generation?).
+            gp = os.path.join(self.a.work, "garbage-%s.bin" % name)
+            with open(gp, "wb") as g:
+                g.write(blob)
             raise SoakFail("SILENT GARBAGE: %s reads as sha %s, never "
-                           "written (hist=%s)"
+                           "written (hist=%s); %d bytes saved to %s"
                            % (name, got[:12],
-                              [h[:12] for h in self.model[name]["hist"]]))
+                              [h[:12] for h in self.model[name]["hist"]],
+                              len(blob), gp))
         self.log("op readback %s ok (mode=%s)" % (name, self.mode))
 
     # ------------------------------------------------------------ gates ---

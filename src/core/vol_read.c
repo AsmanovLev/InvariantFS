@@ -1756,6 +1756,19 @@ static int read_range(invfs_volume *v, uint64_t inode_id, uint64_t offset,
     }
     free(all);
     free(blob);
+    /* The writer materializes zero segments for every gap (vol_write.c:
+     * "no unmapped LBA ever exists"), and len was already clamped to
+     * [offset, size) above -- so a shortfall here is a coverage hole in
+     * a persisted recipe, i.e. corruption, not a sparse file and not
+     * EOF. Serve it and a later readback hashes bytes that were never
+     * written (F6). Fail loud: EIO, never short-success. */
+    if (got != len) {
+        fprintf(stderr, "inode %llu range [%llu,%llu): recipe covers %zu"
+                " of %zu bytes -- refusing short read\n",
+                (unsigned long long)inode_id, (unsigned long long)offset,
+                (unsigned long long)(offset + len), got, len);
+        return -1;
+    }
     return (int)got;
 }
 

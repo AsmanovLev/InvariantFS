@@ -2588,14 +2588,22 @@ static int commit_wctx(wctx *c)
          * state, so a failed commit never leaves a torn file. WP85: for a
          * stale handle the abort is the WHOLE point -- the session's
          * segments belong to a retired generation, so retiring it here is
-         * what hands their blocks back instead of leaking them. */
+         * what hands their blocks back instead of leaking them.
+         * F6: REMOVE the name instead of re-syncing it. A failed commit
+         * may have persisted PART of the session (size row without all
+         * segments, or vice versa); re-syncing re-exposes that torn
+         * state to readers as success (34KB of never-committed bytes
+         * served for a 958KB file, hash matching nothing ever written).
+         * Removal makes the failure complete-or-absent -- the project's
+         * own contract (see invf_fsync below) -- instead of torn-visible.
+         * A later create re-adds the name; reads until then fail loud. */
         fprintf(stderr, "invf: commit %s failed (%s)\n", c->name,
                 rc == -2 ? "ENOSPC" : (rc == -ESTALE ? "ESTALE" : "io"));
         vol_write_abort(c->ws);
         c->ws = NULL;
         dirty_del_locked(c);
+        table_remove_name(c->name);
         vol_flush(g_vol);
-        table_sync_one_locked(c->name);
         pthread_mutex_unlock(&g_io_lock);
         return wrc_eno(rc);
     }
