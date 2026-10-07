@@ -106,10 +106,10 @@ rm -f "$SPIPE.in" "$SPIPE.out"
 mkfifo "$SPIPE.in" "$SPIPE.out" 2>/dev/null || true
 : > "$SER"
 cat "$SPIPE.out" >>"$SER" &
-# Dummy writer: qemu opens .in O_RDONLY (blocks with no writer) and .out
-# O_WRONLY (blocks with no reader). Reader is above; this unblocks .in.
-# Nothing is ever sent -- SSH is the control channel, serial is evidence.
-exec 9>"$SPIPE.in"
+# NOTE: no dummy writer here. Opening .in O_WRONLY blocks until a reader
+# appears, and the only reader is qemu -- which starts below. Opening it
+# here deadlocks the driver forever (nothing ever launches qemu). The
+# writer opens after launch, mirroring iso-void-install.sh.
 note "starting server on :$PORT"
 bash "$REPO/tools/invfs-serve.sh" "$SERVEDIR" "$PORT" >"$SLOG" 2>&1 &
 SRVPID=$!
@@ -131,9 +131,14 @@ qemu-system-x86_64 -machine q35,accel=$ACCEL -cpu "$CPU" -m "$MEM" -smp 2 \
   -netdev "user,id=net0,hostfwd=tcp::$SSHPORT-:22" -device virtio-net-pci,netdev=net0 \
   -vga none -serial "pipe:$SPIPE" -display none -no-reboot >"$QLOG" 2>&1 &
 QPIDE=$!
+# Dummy writer, only now that qemu has both pipe ends open (same order as
+# iso-void-install.sh): qemu opens .in O_RDONLY and .out O_WRONLY, the cat
+# above reads .out; this fd unblocks .in. Nothing is ever sent -- SSH is the
+# control channel, serial is evidence. Opening it before launch deadlocks.
+exec 9>"$SPIPE.in"
 # The trap must kill qemu too: on FAIL the driver exits while the guest
 # (a live shell) would otherwise idle forever, holding locks.
-cleanup() { kill $QPIDE $SRVPID 2>/dev/null; }
+cleanup() { kill $QPIDE $SRVPID 2>/dev/null; exec 9>&- 2>/dev/null; }
 note "qemu pid $QPIDE; waiting for SSH (up to 30 min)"
 ssh_up() {
     sshpass -p "$GUEST_PW" ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
