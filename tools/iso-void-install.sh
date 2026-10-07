@@ -99,7 +99,12 @@ truncate -s 8G "$VOL"
 # Staging disk: ext4, LABEL=stage, so the guest mounts it by label
 # (virtio disk order is stable, but labels don't depend on it).
 truncate -s 6G "$STAGEDISK"
-mkfs.ext4 -F -q -L stage "$STAGEDISK" || fail "mkfs.ext4 stage failed"
+# mkfs lives in sbin/, which is not on every PATH -- resolve it.
+if command -v mkfs.ext4 >/dev/null 2>&1; then MKFS_EXT4=mkfs.ext4
+elif [ -x /sbin/mkfs.ext4 ]; then MKFS_EXT4=/sbin/mkfs.ext4
+elif [ -x /usr/sbin/mkfs.ext4 ]; then MKFS_EXT4=/usr/sbin/mkfs.ext4
+else fail "mkfs.ext4 not found (needs e2fsprogs)"; fi
+"$MKFS_EXT4" -F -q -L stage "$STAGEDISK" || fail "mkfs.ext4 stage failed"
 note "starting server on :$PORT"
 bash "$REPO/tools/invfs-serve.sh" "$SERVEDIR" "$PORT" >"$SLOG" 2>&1 &
 SRVPID=$!
