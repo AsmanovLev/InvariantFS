@@ -375,6 +375,17 @@ int blkio_open(blkio *io, const char *path, int flags)
     return 0;
 }
 
+/* F7: raw fd for cache-invalidate ioctls. See blkio.h. */
+int blkio_raw_fd(const blkio *io)
+{
+#ifdef _WIN32
+    (void)io;
+    return -1;
+#else
+    return io ? io->fd : -1;
+#endif
+}
+
 void blkio_close(blkio *io)
 {
     {

@@ -23,6 +23,12 @@
  *       instead of "silent corruption".
  */
 
+/* O_DIRECT needs _GNU_SOURCE on Linux (same guard as volume.c). Must come
+ * before any system header -- volume_internal.h pulls in fcntl.h itself. */
+#if defined(__linux__) && !defined(_GNU_SOURCE)
+#define _GNU_SOURCE
+#endif
+#include <fcntl.h>
 #include "volume_internal.h"
 #include "vol_spt0.h"
 #include "vol_btree.h"
@@ -1253,7 +1259,22 @@ int spt0_capture(invfs_volume *v)
     memset(&v->spt0, 0, sizeof v->spt0);
     memcpy(v->spt0.magic, "SPT0", 4);
     v->spt0.version = INVFS_SPT0_VERSION;
-    v->spt0.flags = 0;
+    /* F7: the capture generation nonce. One more than whatever valid
+     * descriptor is on disk now (1 when none is), so the verify
+     * read-back compares an identity only THIS capture could have
+     * written: without it, a dropped store over an unchanged volume
+     * reads back the previous identical capture and verifies falsely.
+     * The read is best-effort -- on an unreadable device the store
+     * below fails loudly anyway and the old rc!=0 path owns it. */
+    v->spt0.flags = 1;
+    {
+        invfs_spt0 cur;
+        if (io_pread(&v->io, INVFS_SPT0_OFF, &cur, sizeof cur) == 0 &&
+            memcmp(cur.magic, "SPT0", 4) == 0 &&
+            cur.version == INVFS_SPT0_VERSION &&
+            spt0_crc(&cur) == cur.crc32c)
+            v->spt0.flags = cur.flags + 1;
+    }
     v->spt0.base_root = root.pba;
     v->spt0.delta_end = 0;
 
@@ -1757,6 +1778,87 @@ int spt0_info(const invfs_volume *v, invfs_spt0 *out)
     if (out)
         *out = v->spt0;
     return v->savepoint_live;
+}
+
+#ifdef __linux__
+/* F7: uncached small read at a 512-aligned offset, via a fresh O_DIRECT
+ * open of the same device (path resolved from /proc/self/fd, so no
+ * plumbing through blkio/vol structs). 0 = `len` bytes landed in `out`,
+ * -1 = anything at all went wrong -- the caller fails closed, never back
+ * to a cached read. */
+static int spt0_pread_uncached(blkio *io, uint64_t off, void *out, size_t len)
+{
+    char fdpath[64], devpath[4096];
+    ssize_t n;
+    int dfd, rc = -1;
+    void *abuf = NULL;
+    int fd = blkio_raw_fd(io);
+    if (fd < 0 || (off & 511) || len == 0 || len > 512)
+        return -1;
+    snprintf(fdpath, sizeof fdpath, "/proc/self/fd/%d", fd);
+    n = readlink(fdpath, devpath, sizeof devpath - 1);
+    if (n <= 0 || n >= (ssize_t)(sizeof devpath - 1))
+        return -1;
+    devpath[n] = '\0';
+    dfd = open(devpath, O_RDONLY | O_DIRECT);
+    if (dfd < 0)
+        return -1;
+    if (posix_memalign(&abuf, 512, 512) == 0 &&
+        pread(dfd, abuf, 512, (off_t)(off & ~(uint64_t)511)) == 512) {
+        memcpy(out, (uint8_t *)abuf + (off & 511), len);
+        rc = 0;
+    }
+    free(abuf);
+    close(dfd);
+    return rc;
+}
+#endif
+
+int spt0_verify_live(invfs_volume *v)
+{
+    invfs_spt0 s;
+    if (!v || !v->savepoint_live)
+        return -1;
+#ifdef __linux__
+    /* F7, second half: the verify must see the DEVICE, not our own page
+     * cache. A just-stored descriptor sits in cache as clean (the barrier
+     * wrote it back and the kernel marked the pages up-to-date), so a
+     * plain pread returns our own bytes even when the device discarded
+     * them -- the re-read would prove nothing. BLKFLSBUF would invalidate
+     * the cache, but it needs privilege (EACCES as non-root) and ignoring
+     * that failure re-opens the hole silently. So on devices the re-read
+     * goes through a fresh O_DIRECT open (no privilege needed, bypasses
+     * the cache by construction); the path comes from /proc/self/fd so no
+     * plumbing is needed. Regular files cannot silently discard an
+     * acknowledged write -- their page cache IS coherent -- so plain
+     * pread stays sufficient there. Any failure of the uncached path
+     * fails the verification (fail closed), never falls back to trust. */
+    if (blkio_is_device(&v->io)) {
+        if (spt0_pread_uncached(&v->io, INVFS_SPT0_OFF, &s,
+                                sizeof s) != 0)
+            return -1;
+    } else if (io_pread(&v->io, INVFS_SPT0_OFF, &s, sizeof s) != 0)
+        return -1;
+#else
+    /* Non-Linux: no O_DIRECT/proc-fd equivalent wired; plain pread.
+     * The lying-device case is Linux dm-flakey territory; elsewhere the
+     * check still catches torn writes and stale descriptors. */
+    if (io_pread(&v->io, INVFS_SPT0_OFF, &s, sizeof s) != 0)
+        return -1;
+#endif
+    /* No anchor-mirror fallback: the question is narrowly "did THIS
+     * capture land", and a mirror would answer a different one. Under
+     * drop_writes the (uncached) read returns stale bytes; under error it
+     * EIOs -- both are -1 here, which is the point. */
+    if (memcmp(s.magic, "SPT0", 4) != 0 ||
+        s.version != INVFS_SPT0_VERSION ||
+        spt0_crc(&s) != s.crc32c)
+        return -1;
+    if (s.base_root != v->spt0.base_root ||
+        s.delta_end != v->spt0.delta_end ||
+        s.flags != v->spt0.flags)
+        return -1;
+    return 0;
 }
 
 /* WP137: the debt the last capture discharged. Read it only immediately

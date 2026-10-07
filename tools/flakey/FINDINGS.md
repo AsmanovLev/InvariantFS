@@ -304,6 +304,16 @@ never pulls it.
 moves with timing: same seed gave F6-shape (s30), stale-PBA (s18), now
 F7 (base pages) -- the seed is a bug FAMILY, not one bug.
 
+**Status 2026-10-07 late:** FIXED (commit pending in this batch):
+capture-verify-refuse -- `spt0_verify_live()` re-reads SPT0 from the
+device and requires base_root+delta_end+generation-nonce identity, with
+the re-read through a fresh O_DIRECT open (page cache would return our
+own bytes; BLKFLSBUF needs privilege). All sweep triggers abandon the
+pass on mismatch. Proven on a deterministic always-drop dm-flakey
+repro: pre-fix the sweep returned rc=0 `volume durable`; post-fix it
+refuses rc=1 `capture did not land`, volume byte-untouched, and a
+healthy-mode sweep still completes. Chaos-soak validation pending.
+
 ## Tier status
 
 legs 1 (baseline), 3 (torn sweep), 4 (crash mid-seal) PASS;

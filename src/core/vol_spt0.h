@@ -83,6 +83,20 @@ int spt0_drop(invfs_volume *v);
 /* Query the save point state. out may be NULL. Returns 1 if live, 0 if not. */
 int spt0_info(const invfs_volume *v, invfs_spt0 *out);
 
+/* F7: verify the capture actually LANDED. The device can acknowledge a
+ * write it discarded (dm-flakey drop_writes), so a capture that returned
+ * 0 may still not exist on disk -- and spt0_info() above only reports
+ * in-memory state. Re-reads the SPT0 descriptor from the device and
+ * requires the identity just captured (base_root + delta_end + capture
+ * generation nonce), not mere liveness: a dropped K=1 drop-then-capture
+ * leaves the PREVIOUS descriptor on disk, and liveness alone would bless
+ * it -- and without the nonce even the identity would match whenever the
+ * volume did not change between the two captures. 0 = the window
+ * is on disk as captured; -1 = it is not (stale, torn, or unreadable).
+ * Callers treat -1 like a refused capture AND abandon the pass: with no
+ * provable window a torn publish has no way back. */
+int spt0_verify_live(invfs_volume *v);
+
 /* WP96: does the live save point's pin name any block of [pba, pba+n)?
  * vol_free_blocks calls this before it frees; 1 = at least one block is held
  * (it must stay allocated), 0 = free normally. A zero-cost no-op when no pin

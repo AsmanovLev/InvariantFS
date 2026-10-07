@@ -2186,6 +2186,21 @@ static void invf_sweep_worker(int full_pass)
                                 "(base_root=%llu delta_end=%llu)\n", tag,
                         (unsigned long long)sp.base_root,
                         (unsigned long long)sp.delta_end);
+            /* F7: capture rc=0 is not proof under a lying device
+             * (acknowledged-but-discarded writes), and spt0_info above
+             * only reports memory. On verification failure abandon the
+             * pass unconditionally -- even a watermark pass: proceeding
+             * without a provable window risks a torn publish with no way
+             * back, while refusing leaves the volume untouched. */
+            if (spt0_verify_live(g_vol) != 0) {
+                fprintf(stderr, "[%s] save point capture did not land "
+                                "(re-read mismatch); REFUSING the pass "
+                                "(the volume is unchanged)\n", tag);
+                (void)spt0_drop(g_vol);
+                pthread_mutex_unlock(&g_io_lock);
+                free(ids);
+                return;
+            }
             if (!full_pass)
                 /* WP134: the operator asked for this pass in the
                  * foreground, so tell them -- before the walk, while it

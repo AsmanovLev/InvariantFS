@@ -1704,6 +1704,22 @@ int main(int argc, char **argv)
                                     "(base_root=%llu delta_end=%llu)\n",
                             (unsigned long long)sp.base_root,
                             (unsigned long long)sp.delta_end);
+                /* F7: a capture that returned 0 may still not exist on
+                 * disk (acknowledged-but-discarded writes), and spt0_info
+                 * above only reports memory. Without a PROVABLE window a
+                 * torn publish has no way back, so a failed verification
+                 * abandons the pass -- fail closed, like the manual pass
+                 * on explicit refusal. spt0_drop unwinds the in-memory
+                 * window and its pin; the volume is unchanged. */
+                if (spt0_verify_live(vol) != 0) {
+                    sw_progress_suspend();
+                    fprintf(stderr, "save point: capture did not land "
+                                    "(re-read mismatch); REFUSING the pass "
+                                    "(the volume is unchanged)\n");
+                    (void)spt0_drop(vol);
+                    vol_close(vol);
+                    return 1;
+                }
             } else {
                 sw_progress_suspend();
                 fprintf(stderr, "save point: capture failed; sweeping "

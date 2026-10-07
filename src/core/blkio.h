@@ -194,6 +194,10 @@ uint64_t blkio_capacity(blkio *io);
 int  blkio_is_device(const blkio *io);
 int  blkio_flush(blkio *io);
 
+/* F7: raw fd for cache-invalidate ioctls (BLKFLSBUF). -1 when there is no
+ * OS fd to invalidate (win32 handle builds). Callers must tolerate -1. */
+int  blkio_raw_fd(const blkio *io);
+
 /* Deferred-commit policy. Zero thresholds all round means strict.
  * commit_bytes is in BYTES; the env parser treats a bare number as MiB.
  * A threshold below one block must be REFUSED by the parser, not clamped:

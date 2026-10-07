@@ -425,6 +425,21 @@ setfattr -n user.invfs.sweep -v 1 /mount/point  # same, via xattr
 > The USR1/xattr pass **fails closed**: if the capture is refused it
 > abandons the pass rather than rewrite the data with no way back. The
 > watermark pass keeps its older fail-open behaviour.
+>
+> **Every trigger fails closed when the window cannot be proven** (F7).
+> A capture that returns 0 may still not exist on disk: a device can
+> acknowledge a write it discarded (dm-flakey `drop_writes`), and the old
+> `spt0_info` check only reported in-memory state, so a sweep that started
+> in a drop window published a torn generation with no savepoint behind
+> it. All triggers now re-read the SPT0 descriptor from the device --
+> through a fresh O_DIRECT open, since the page cache would return the
+> sweep's own bytes -- and require the captured identity *including a
+> per-capture generation nonce* (without it, a dropped store over an
+> unchanged volume reads back the previous identical capture and verifies
+> falsely). On mismatch the pass is abandoned and the volume is untouched.
+> On *explicit* capture refusal the older split remains: USR1/xattr abandon,
+> while the watermark pass and the offline explicit-refusal path proceed
+> windowless.
 
 `INVFS_SWEEP_INTERVAL=<seconds>` is **not** the worker above, and it does
 **not** switch the pending drain on. The drain — and only the drain, never

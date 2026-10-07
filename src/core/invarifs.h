@@ -606,7 +606,7 @@ typedef struct {
  *
  *   0xA00  char magic[4]       "SPT0"
  *   0xA04  u32  version        1
- *   0xA08  u32  flags          0 (reserved)
+ *   0xA08  u32  gen            capture generation nonce (F7)
  *   0xA0C  u64  base_root      pinned RT30 root pba at capture
  *   0xA14  u64  delta_end      delta byte offset at capture
  *   0xA1C  u32  crc32c         over descriptor with this field 0
@@ -617,7 +617,13 @@ typedef struct {
 typedef struct {
     char     magic[4];          /* 0xA00 "SPT0" */
     uint32_t version;           /* 0xA04 INVFS_SPT0_VERSION */
-    uint32_t flags;             /* 0xA08 reserved */
+    /* 0xA08 generation nonce (F7): every capture stores one more than
+     * whatever valid descriptor is on disk (1 when none is), so the
+     * capture-verify read-back can tell "my write landed" from "the
+     * platter still holds an identical older capture whose store was
+     * dropped". Readers that predate the nonce ignore it (load checks
+     * magic+version+crc only; restore uses base_root/delta_end). */
+    uint32_t flags;             /* 0xA08 generation nonce */
     uint64_t base_root;         /* 0xA0C pinned RT30 root pba */
     uint64_t delta_end;         /* 0xA14 delta byte offset at capture */
     uint32_t crc32c;            /* 0xA1C over descriptor with this field 0 */
