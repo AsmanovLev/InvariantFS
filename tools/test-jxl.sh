@@ -20,9 +20,10 @@
 #   five MEMLIMIT-stamped photos upgrade to JXL through vol_jxl_retry ->
 #   vol_pack_sweep (class CODEC{4,1}) and stay bit-exact; tiny.jpg is
 #   already JXL and must not be re-processed.
-#   Pack-proof: fresh image, INVFS_CODECPACKS without the jxl pack ->
-#   JPEGs stay RAW and UNSTAMPED even though cjxl/djxl sit on PATH (the
-#   placeholder's PACKONLY defer); restore the pack -> they transcode.
+#   Builtin: same corpus, pack hidden -> the BUILTIN lane transcodes all 6
+#   (": jxl (builtin)" lines, CODEC{JXL,*} stamps), bit-exact through djxl,
+#   and a re-sweep moves nothing. Pack precedence is proved by the main leg
+#   (pack loaded -> ": jxl (codecpack)" lines, builtin silent).
 #   Guard: fake cjxl via INVFS_TOOLS (writes garbage, exits 0) -> the
 #   decode-back memcmp guard refuses -> GENERIC_GUARD{4,1}, generic
 #   storage, bit-exact; a re-sweep does NOT refire (same generation).
@@ -173,33 +174,58 @@ done
 [ "$ok" = 1 ] || exit 1
 echo "all $(echo "$FILES" | wc -w) files bit-exact"
 
-echo "== pack-proof: INVFS_CODECPACKS without the jxl pack =="
-# cjxl/djxl stay on PATH the whole time: if anything but the pack could
-# still transcode JPEGs (the retired builtin branch), it would fire here.
+echo "== builtin: INVFS_CODECPACKS without the jxl pack =="
+# cjxl/djxl stay on PATH the whole time, but the BUILTIN lane resolves
+# strict ($INVFS_TOOLS, then /usr/lib/invfs/tools -- AGENTS.md 2.8, the
+# test-exercarve.sh convention): PATH alone never resolves there. Stage a
+# trusted tools dir, the same shape a packaged install provides.
+mkdir -p "$WORK/tools"
+for t in cjxl djxl; do
+    p=$(command -v "$t") || { echo "FAIL: $t not installed"; exit 1; }
+    ln -sf "$p" "$WORK/tools/$t"
+done
+# The jxl lane is BUILTIN now (optional, like wav/ape): with the pack
+# (optional, like wav/ape): with the pack hidden the builtin transcodes;
+# with the pack loaded the pack replaces it (precedence, proved by the
+# main leg's ": jxl (codecpack)" lines above).
 $B/invf-mkfs "$IMGPA" 0.2 >/dev/null
 for f in $FILES; do
     $B/invf-cp "$IMGPA" "$WORK/orig/$f" "$f" >/dev/null
 done
-INVFS_CODECPACKS="$WORK/nopacks" $B/invf-sweep "$IMGPA" > "$WORK/sweep-pa.log" 2>&1 \
+INVFS_CODECPACKS="$WORK/nopacks" INVFS_TOOLS="$WORK/tools" $B/invf-sweep "$IMGPA" > "$WORK/sweep-pa.log" 2>&1 \
     || { cat "$WORK/sweep-pa.log"; exit 1; }
-if grep -q "codecpack\|JPEG -> JXL" "$WORK/sweep-pa.log"; then
-    echo "FAIL: a JPEG transcoded with the pack hidden"; cat "$WORK/sweep-pa.log"; exit 1
+BI_LINES=$(grep -c ": jxl (builtin)" "$WORK/sweep-pa.log" || true)
+echo "builtin transcodes: $BI_LINES"
+[ "$BI_LINES" -eq 6 ] || { echo "FAIL: builtin lane did not transcode all 6"; cat "$WORK/sweep-pa.log"; exit 1; }
+if grep -q ": jxl (codecpack)" "$WORK/sweep-pa.log"; then
+    echo "FAIL: pack ran with the pack hidden"; cat "$WORK/sweep-pa.log"; exit 1
 fi
 for f in $FILES; do
-    C=$(INVFS_CODECPACKS="$WORK/nopacks" "$WORK/classof" "$IMGPA" "$f")
+    C=$(INVFS_CODECPACKS="$WORK/nopacks" INVFS_TOOLS="$WORK/tools" "$WORK/classof" "$IMGPA" "$f")
     echo "  $f: $C"
-    [ "$C" = "none" ] || { echo "FAIL: $f: want unstamped RAW wait, got $C"; exit 1; }
-    $B/invf-cat "$IMGPA" "$f" "$WORK/out/$f.pa" >/dev/null   # RAW: no pack needed
-    cmp -s "$WORK/orig/$f" "$WORK/out/$f.pa" || { echo "FAIL: $f unreadable RAW"; exit 1; }
+    case "$C" in cls=2\ algo=4\ gen=*) ;;
+        *) echo "FAIL: $f: want builtin CODEC{JXL,*} got $C"; exit 1 ;;
+    esac
 done
-echo "pack hidden -> all 6 wait RAW + unstamped (bit-exact)"
-# restore the pack: the very next sweep transcodes them
-$B/invf-sweep "$IMGPA" > "$WORK/sweep-pa2.log" 2>&1 || { cat "$WORK/sweep-pa2.log"; exit 1; }
-PA_LINES=$(grep -c ": jxl (codecpack)" "$WORK/sweep-pa2.log" || true)
-echo "after restore: $PA_LINES pack transcodes"
-[ "$PA_LINES" -eq 6 ] || { echo "FAIL: pack restore did not pick the files up"; exit 1; }
-C=$("$WORK/classof" "$IMGPA" p1.jpg)
-[ "$C" = "cls=2 algo=4 gen=1" ] || { echo "FAIL: p1.jpg after restore: $C"; exit 1; }
+echo "== builtin bit-exact (reads route through djxl directly) =="
+ok=1
+for f in $FILES; do
+    $B/invf-cat "$IMGPA" "$f" "$WORK/out/$f.pa" >/dev/null
+    a=$(sha256sum "$WORK/orig/$f" | cut -d' ' -f1)
+    b=$(sha256sum "$WORK/out/$f.pa" | cut -d' ' -f1)
+    if [ "$a" != "$b" ]; then echo "MISMATCH $f"; ok=0; fi
+done
+[ "$ok" = 1 ] || exit 1
+echo "builtin: all 6 transcoded + bit-exact"
+# idempotence: a second sweep changes nothing and stays exact
+BEFORE=$(INVFS_CODECPACKS="$WORK/nopacks" INVFS_TOOLS="$WORK/tools" "$WORK/classof" "$IMGPA" p1.jpg)
+INVFS_CODECPACKS="$WORK/nopacks" INVFS_TOOLS="$WORK/tools" $B/invf-sweep "$IMGPA" > "$WORK/sweep-pa2.log" 2>&1 \
+    || { cat "$WORK/sweep-pa2.log"; exit 1; }
+AFTER=$(INVFS_CODECPACKS="$WORK/nopacks" INVFS_TOOLS="$WORK/tools" "$WORK/classof" "$IMGPA" p1.jpg)
+[ "$BEFORE" = "$AFTER" ] || { echo "FAIL: re-sweep moved p1.jpg $BEFORE -> $AFTER"; exit 1; }
+$B/invf-cat "$IMGPA" p1.jpg "$WORK/out/p1.pa2" >/dev/null
+cmp -s "$WORK/orig/p1.jpg" "$WORK/out/p1.pa2" || { echo "FAIL: p1.jpg changed under re-sweep"; exit 1; }
+echo "re-sweep: stamps stable, bytes stable"
 
 echo "== negative: INVFS_DEC_MEM_LIMIT=256K (the pack's estimate command gates) =="
 $B/invf-mkfs "$IMGNEG" 0.2 >/dev/null

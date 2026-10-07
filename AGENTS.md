@@ -618,11 +618,15 @@ be recovered bit-for-bit, regardless of what codec was applied.
 - It does not mean "lossless compression of everything" — but it also does
   not mean "already-compressed files are stored verbatim". What actually
   happens per kind, on v3:
-  - **JPEG → JXL lossless**, via the `jxl.codecpack` lane
-    (`tools/codecpacks/jxl.codecpack/manifest`;
-    `src/core/vol_sweep.c:333-336`, `:866-882`, `:1100`). It is a
-    *transcode*, guarded by a decode-back
-    `memcmp`, so the bytes come back identical through a different codec.
+  - **JPEG → JXL lossless**, via the BUILT-IN JXL lane
+    (`src/core/vol_sweep.c`, the JPEG branch of `sweep_dispatch`;
+    `tools/test-jxl.sh` is the contract). It is a *transcode*, guarded
+    by a decode-back `memcmp`, so the bytes come back identical through
+    a different codec. Optional like the other lanes: tools absent
+    leaves the file RAW and unstamped (retried, never the generic
+    floor). A loaded `jxl.codecpack` replaces the builtin for files it
+    sniffs (and any loaded pack sniffing the same magic wins over the
+    builtin) -- the main test leg proves pack precedence.
   - **PNG → JXL lossless**, via the built-in PNGR lane
     (`src/core/vol_sweep.c:1100-1136`). The whole-path rebuild+memcmp guard
     refuses anything it cannot prove, and a refused PNG is simply left RAW

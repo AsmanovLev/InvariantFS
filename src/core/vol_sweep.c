@@ -551,6 +551,95 @@ static int sweep_dispatch(invfs_volume *v, uint64_t inode_id,
         return 5;   /* PNG */
     }
 
+    /* JPEG -> JXL lossless (whole-file JPEG bitstream reconstruction,
+     * bit-exact). BUILTIN lane, optional like wav/ape (owner decision).
+     * Precedence: any loaded pack that sniffs this file owns it -- the
+     * builtin falls through to the pack loop below, whether the pack
+     * claims algo JXL or another algo over the same magic
+     * (a test hog pack sniffs FFD8FF for algo 41). Placeholders don't
+     * count: NULL encode/decode means no pack is loaded, and the lane
+     * must run. Absent tools leave the file RAW and UNSTAMPED and stop
+     * the dispatch (never the generic floor, whose stamp would be
+     * terminal); the next sweep retries. Every guard failure stamps JXL
+     * so only a raised limit or a newer generation re-arms, via the same
+     * vol_jxl_retry the pack path uses. */
+    if (full_len >= 3 &&
+        full[0] == 0xFF && full[1] == 0xD8 && full[2] == 0xFF) {
+        size_t pcn = 0, pci;
+        const invfs_codec *pall = invfs_codec_all(&pcn);
+        int pack_claims = 0;
+        for (pci = 0; pci < pcn; pci++) {
+            const invfs_codec *pc = &pall[pci];
+            if (!(pc->caps & INVFS_CODEC_CAP_EXTERNAL) || !pc->sniff ||
+                !pc->encode || !pc->decode)
+                continue;
+            if (pc->sniff(full, full_len, name) > 0) {
+                pack_claims = 1;
+                break;
+            }
+        }
+        if (!pack_claims) {
+            const invfs_codec *jc = invfs_codec_by_algo(INVFS_ALGO_JXL);
+            uint64_t raw;
+            uint8_t *jxl = NULL;
+            size_t jxl_len = 0;
+            if (!jc || !jc->probe || !jc->probe())
+                return 0;   /* tools absent: RAW, unstamped, retried */
+            /* admission from the SOF geometry (WP10 section 12.2);
+             * past the decode-memory policy the file goes generic,
+             * stamped so a raised limit re-arms the JXL path */
+            raw = jpeg_raw_estimate(full, full_len);
+            if (raw && raw > vol_get_dec_mem_limit(v)) {
+                vol_stamp_class(v, inode_id, INVFS_CLASS_GENERIC_MEMLIMIT,
+                                INVFS_ALGO_JXL, tz_codec_gen(INVFS_ALGO_JXL));
+                return 0;
+            }
+            if (invfs_jxl_compress(full, full_len, &jxl, &jxl_len) == 0 &&
+                jxl_len < full_len) {
+                /* guard: the blob must djxl back to the exact original
+                 * JPEG bytes before anything is replaced */
+                uint8_t *back = NULL;
+                size_t back_len = 0;
+                int exact =
+                    invfs_jxl_decompress(jxl, jxl_len, &back, &back_len) == 0 &&
+                    back_len == full_len &&
+                    memcmp(back, full, full_len) == 0;
+                free(back);
+                if (exact) {
+                    uint64_t nino = vol_create_jxl_file(v, name, jxl,
+                                                        jxl_len, full_len);
+                    free(jxl);
+                    if (!nino) {
+                        vol_stamp_class(v, inode_id,
+                                        INVFS_CLASS_GENERIC_GUARD,
+                                        INVFS_ALGO_JXL,
+                                        tz_codec_gen(INVFS_ALGO_JXL));
+                        return 0;
+                    }
+                    /* WP202: the lane SUPERSEDED the row in place, so
+                     * the old recipe's data segments are the lane's to
+                     * release. */
+                    vol_release_superseded_blob(v, inode_id, old_addr);
+                    vol_stamp_class(v, nino, INVFS_CLASS_CODEC,
+                                    INVFS_ALGO_JXL,
+                                    tz_codec_gen(INVFS_ALGO_JXL));
+                    if (getenv("INVFS_DEBUG_PACKS"))
+                        fprintf(stderr, "[packdbg] builtin jxl on %s\n",
+                                name);
+                    fprintf(stderr, "[sweep] %s: jxl (builtin)\n", name);
+                    return 12;  /* JPEG */
+                }
+            }
+            free(jxl);
+            /* declined (tool failed, no gain, or the round-trip guard
+             * refused): guard-stamp so the next sweep skips the retry
+             * until the codec generation rolls over */
+            vol_stamp_class(v, inode_id, INVFS_CLASS_GENERIC_GUARD,
+                            INVFS_ALGO_JXL, tz_codec_gen(INVFS_ALGO_JXL));
+            return 0;
+        }
+    }
+
     /* MP3 -> PMP (packMP3, bit-exact). Matches an ID3v2 tag or a bare
        frame sync; packMP3 re-checks the content itself and refuses
        MPEG-2/2.5 Layer III, which we detect by a missing blob rather
