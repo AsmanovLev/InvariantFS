@@ -463,6 +463,7 @@ jobs:
             trixie "$S"
           sudo chown -R "$(id -u):$(id -g)" "$S"
           bash tools/configure-debian.sh "$S"
+          INVFS_DEB_BOOT_TIMEOUT=1500 \
           INVFS_DEB_STAGE="$S" bash tools/boot-debian-qemu.sh
       - name: debian root BOOTS on InvariantFS (single device)
         run: |
