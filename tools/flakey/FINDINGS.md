@@ -360,6 +360,46 @@ Note: ARC/overlay masking is why op readbacks stay green while the
 platter is bad (verify reads offline/cold) -- that observation stands
 but was not the mechanism here.
 
+## F9 -- refused sweeps must leave the volume untouched; drop is out of contract
+(seed 20261331, full-suite leg 5, artifacts leg5-soak-20261007-225843)
+
+**Symptom:** `recovery ladder dead-ended`: both RT30 slots naming blocks
+the bitmap reports free (seq 189, pbas 118386/118911, contents intact),
+fsck refusing (`unreachable, no valid RT30 root`), rollback with no save
+point. Arrived at round 64, right after a drop-mode sweep that REFUSED
+at collect -- too late.
+
+**Attribution:** the daemon-side trace (flagged build logs to stderr,
+so fuse.log caught it) showed both root pages ALLOC'd as fresh meta
+pages with no matching FREE anywhere: the bits cleared without
+vol_free_run, whose only other caller is... none. RAM bits clear with
+no logged free means the free ran in the OFFLINE sweep (its stderr is
+soak-captured, not traced): its prepare freed the live roots, then
+collect refused. Stale-but-valid drop reads are undetectable -- F8's
+fail-closed walk covers torn reads, never stale ones -- so no read-path
+check can save a sweep that runs in permanent drop.
+
+**Fix, two halves:** (1) engine order: K=1 drop, fresh capture, verify
+and reclaim moved to after the live set validates (collect is
+read-only). Refused ⟹ bit-identical to never run; the window still
+brackets every mutation. Heat decay stays with the mutating stages.
+(2) harness contract: the soak ran whole cli mutations in permanent
+drop 50/50. A device that acks-and-discards everything is out of
+contract -- no per-op detector can exist (F7's nonce proves only my
+own bytes, never the walk's reads); drop models torn windows (leg 3's
+design), not a void volume. cli ops run in up; file ops keep all three
+modes; legs 3/4 keep the window chaos.
+
+**Explicitly NOT fixed:** stale-read reclaim inside an ACCEPTED sweep
+still has no detector; that wants read-back-of-own-writes at publish
+time, a separate project. The suite no longer drives into the corner.
+The FUSE worker keeps its capture-first order (ladder accounting
+untouched without a red control covering it) -- noted, not done.
+
+**Status 2026-10-07:** fixed + harness corrected, `make test` green,
+confirmation soak PASS (37 files / 0 corrupt). Third green leg-5 in a
+row counting the F8 exam (which ran pre-harness-fix).
+
 ## Tier status
 
 legs 1 (baseline), 3 (torn sweep), 4 (crash mid-seal) PASS;
