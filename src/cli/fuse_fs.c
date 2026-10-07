@@ -2173,53 +2173,13 @@ static void invf_sweep_worker(int full_pass)
 
     pthread_mutex_lock(&g_io_lock);
     if (!g_vol) { pthread_mutex_unlock(&g_io_lock); free(ids); return; }
-    {
-        /* WP77: the rollback window is the SPT0 save point. K=1: a
-         * previous pass's save point is dropped first, so the live
-         * window is always the LAST sweep. */
-        invfs_spt0 sp;
-        if (spt0_info(g_vol, NULL))
-            (void)spt0_drop(g_vol);
-        if (spt0_capture(g_vol) == 0) {
-            if (spt0_info(g_vol, &sp))
-                fprintf(stderr, "[%s] save point captured "
-                                "(base_root=%llu delta_end=%llu)\n", tag,
-                        (unsigned long long)sp.base_root,
-                        (unsigned long long)sp.delta_end);
-            /* F7: capture rc=0 is not proof under a lying device
-             * (acknowledged-but-discarded writes), and spt0_info above
-             * only reports memory. On verification failure abandon the
-             * pass unconditionally -- even a watermark pass: proceeding
-             * without a provable window risks a torn publish with no way
-             * back, while refusing leaves the volume untouched. */
-            if (spt0_verify_live(g_vol) != 0) {
-                fprintf(stderr, "[%s] save point capture did not land "
-                                "(re-read mismatch); REFUSING the pass "
-                                "(the volume is unchanged)\n", tag);
-                (void)spt0_drop(g_vol);
-                pthread_mutex_unlock(&g_io_lock);
-                free(ids);
-                return;
-            }
-            if (!full_pass)
-                /* WP134: the operator asked for this pass in the
-                 * foreground, so tell them -- before the walk, while it
-                 * is still true -- how to take it back. */
-                sweep_rollback_warning(g_img_path, g_mnt_path);
-        } else {
-            fprintf(stderr, "[%s] save point capture failed; %s\n", tag,
-                    full_pass ? "sweeping without one"
-                              : "REFUSING the pass (the volume is unchanged)");
-            if (!full_pass) {
-                /* fail closed: no window, no rewrite */
-                pthread_mutex_unlock(&g_io_lock);
-                free(ids);
-                return;
-            }
-        }
-    }
-    if (full_pass)
-        vol_heat_sweep_begin(g_vol);   /* one decay pass per sweep run */
+    /* F9-worker: no capture here. An earlier shape armed the window (K=1
+     * drop + capture + reclaim) and even ran the heat decay before the
+     * list was validated, so every refuse path below -- capture-failed
+     * manual, verify-failed, incomplete-list manual -- mutated first and
+     * refused second, each printing "unchanged" over a changed bitmap
+     * and window. The list build is read-only; the window arms after it
+     * validates, mirroring the offline driver. */
     /* WP-fuse-sweep-inode-cap: GROW, and know whether the list is whole.
      *
      * This used to be a fixed `malloc(300000 * 8)` and a bare
@@ -2292,6 +2252,52 @@ static void invf_sweep_worker(int full_pass)
     }
     fprintf(stderr, "[sweep] %s pass started: %zu files%s\n", tag, n,
             complete ? "" : " (PARTIAL -- see INCOMPLETE above)");
+    {
+        /* F9-worker: arm the rollback window HERE, after the list
+         * validated and before the first mutation (heat decay, then the
+         * per-file loop). WP77 K=1: the previous window drops only once
+         * the new capture is verified live -- never the reverse -- so a
+         * refused pass leaves the prior window, the pin, and the bitmap
+         * exactly as found. Manual still refuses on capture failure and
+         * on verification failure (F7, both modes); watermark keeps its
+         * fail-open on explicit capture failure only. */
+        invfs_spt0 sp;
+        if (spt0_info(g_vol, NULL))
+            (void)spt0_drop(g_vol);
+        if (spt0_capture(g_vol) == 0) {
+            if (spt0_info(g_vol, &sp))
+                fprintf(stderr, "[%s] save point captured "
+                                "(base_root=%llu delta_end=%llu)\n", tag,
+                        (unsigned long long)sp.base_root,
+                        (unsigned long long)sp.delta_end);
+            if (spt0_verify_live(g_vol) != 0) {
+                fprintf(stderr, "[%s] save point capture did not land "
+                                "(re-read mismatch); REFUSING the pass "
+                                "(the volume is unchanged)\n", tag);
+                (void)spt0_drop(g_vol);
+                pthread_mutex_unlock(&g_io_lock);
+                free(ids);
+                return;
+            }
+            if (!full_pass)
+                /* WP134: the operator asked for this pass in the
+                 * foreground, so tell them -- before any rewrite, while
+                 * it is still true -- how to take it back. */
+                sweep_rollback_warning(g_img_path, g_mnt_path);
+        } else {
+            fprintf(stderr, "[%s] save point capture failed; %s\n", tag,
+                    full_pass ? "sweeping without one"
+                              : "REFUSING the pass (the volume is unchanged)");
+            if (!full_pass) {
+                /* fail closed: no window, no rewrite */
+                pthread_mutex_unlock(&g_io_lock);
+                free(ids);
+                return;
+            }
+        }
+    }
+    if (full_pass)
+        vol_heat_sweep_begin(g_vol);   /* one decay pass per sweep run */
     for (i = 0; i < n; i++) {
         int rc;
         if (g_shutdown || !g_vol) break;

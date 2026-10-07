@@ -383,9 +383,11 @@ setfattr -n user.invfs.sweep -v 1 /mount/point  # same, via xattr
 > FUSE daemon runs: the watermark pass (`-o raw_watermark=<pct>`) and,
 > since WP134, `kill -USR1` and the `user.invfs.sweep` xattr too. All three
 > in-FUSE triggers set the same in-process flag
-> (`src/cli/fuse_fs.c:1990`, `:3169`), and the sweep thread's
-> `invf_sweep_worker` takes the same capture at the same point: under
-> `g_io_lock`, after policy and before the live-set walk
+> (`src/cli/fuse_fs.c:2108`, `:3377`), and the sweep thread's
+> `invf_sweep_worker` takes the same capture under `g_io_lock`, after the
+> sweepable list validates and before the first mutation (F9-worker: the
+> capture used to run at entry, so every refuse path mutated first and
+> refused second -- same fix as the offline reorder).
 > (`src/cli/fuse_fs.c:2055-2086`, the walk at `:2116`). **So a USR1 or
 > xattr sweep on v3 CAN be rolled back**: unmount, then `invf-rollback`.
 > The daemon prints that command when it arms the window — but only on a

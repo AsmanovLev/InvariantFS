@@ -400,6 +400,21 @@ untouched without a red control covering it) -- noted, not done.
 confirmation soak PASS (37 files / 0 corrupt). Third green leg-5 in a
 row counting the F8 exam (which ran pre-harness-fix).
 
+**Worker half (2026-10-08):** `invf_sweep_worker` had the same flaw three
+times over (incomplete-list refuse, capture-fail refuse, verify-fail
+refuse -- all after K=1-drop + capture + reclaim). Moved the whole
+arm block (drop only after proven, capture, verify, heat, warning) to
+after the list validates; manual still refuses on capture failure,
+watermark keeps fail-open on explicit failure. Regression
+`sweep_refuse_fuse_test` (shard-1, fuse_fs.c-included pattern): faulted
+collect must refuse with zero bitmap delta (red pre-fix, green
+post-fix, red re-verified via stash). A planned K=1-refusal leg was
+deleted before landing: both drivers drop before attempting capture, so
+that refusal cannot occur in a sweep -- the residual (failed capture
+after K=1 drop loses the window) is accepted and documented: single-slot
+SPT0 cannot replace atomically, capture fails only on damaged-base or
+ENOSPC, and no data path precedes a successful capture.
+
 ## Tier status
 
 legs 1 (baseline), 3 (torn sweep), 4 (crash mid-seal) PASS;

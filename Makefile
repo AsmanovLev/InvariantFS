@@ -232,7 +232,7 @@ MINIZLESS := $(filter-out miniz.o,$(notdir $(CORE_O)))
 # acl_eio_test), so it is fixed here for the class rather than file by file.
 FUSE_LINKED := acl_eio_test acl_inherit_test chmod_acl_write_test \
                meta_clobber_test otrunc_test table_sync_evict_test \
-               walk_status_fuse_test
+               walk_status_fuse_test sweep_refuse_fuse_test
 
 # TOOL_RULE and the object pattern rule both read <name>_FUSE, so adding a
 # FUSE-using test is one line in this list rather than a bespoke rule that
@@ -259,7 +259,7 @@ CLI_MAINS := mkfs verify fsck cp cat ls stat arctest blkio_test resize \
              spn_walk_tear_test \
              reclaim_reader_epoch_test dedupe_symlink_test dirs_free_before_publish_test \
              stat_counts_test acl_eio_test acl_inherit_test meta_clobber_test spn_skip_recipe_test \
-             walk_status_test walk_status_fuse_test no_v2_surface_test \
+             walk_status_test walk_status_fuse_test sweep_refuse_fuse_test no_v2_surface_test \
              heat_walk_test no_ckp0_surface_test \
 table_sync_evict_test write_create_path_test tz_registry_test \
 otrunc_test sib_walk_test chmod_acl_write_test bang_name_test sweep_bang_test \
@@ -893,6 +893,7 @@ test-shard-1: $(TEST_SHARD_DEPS) test-shard-check
 # which is the same staleness trap the comment on `all` describes.
 	$(TESTENV) $(TESTISO) $(OUT)/invf-walk_status_test /tmp
 	$(TESTENV) $(TESTISO) $(OUT)/invf-walk_status_fuse_test /tmp
+	$(TESTENV) $(TESTISO) $(OUT)/invf-sweep_refuse_fuse_test /tmp
 # WP145: the sweep's HEAT stage, which is the same class one stage
 # away from the collect -- on the in-FUSE path the decay runs BEFORE
 # the collect (src/cli/fuse_fs.c:2008 then :2037), so the collect's
