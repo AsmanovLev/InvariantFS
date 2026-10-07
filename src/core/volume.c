@@ -36,6 +36,9 @@
 #include "vol_anchor.h"
 #ifdef INVFS_CORRUPT_DEBUG
 #include <stdarg.h>
+#ifndef _WIN32
+#include <sys/syscall.h>
+#endif
 #endif
 
 
@@ -60,9 +63,9 @@ int invfs_sweep_ui_active(void)
 static __thread const char *cd_tag_tls = NULL;
 static FILE *cd_sink = NULL;
 #ifdef _WIN32
-#define CD_PID() ((int)GetCurrentProcessId())
+#define CD_TID() ((int)GetCurrentProcessId())
 #else
-#define CD_PID() ((int)getpid())
+#define CD_TID() ((int)syscall(SYS_gettid))
 #endif
 void invfs_cd_set_tag(const char *tag)
 {
@@ -71,6 +74,8 @@ void invfs_cd_set_tag(const char *tag)
 void invfs_cd_log(const char *fmt, ...)
 {
     va_list ap;
+    struct timespec ts;
+    long ms;
     if (!cd_sink) {
         const char *p = getenv("INVFS_CORRUPT_TRACE");
         cd_sink = (p && *p) ? fopen(p, "a") : stderr;
@@ -78,8 +83,10 @@ void invfs_cd_log(const char *fmt, ...)
             cd_sink = stderr;
         setvbuf(cd_sink, NULL, _IOLBF, 0);
     }
-    fprintf(cd_sink, "[CD %s pid=%d] ", cd_tag_tls ? cd_tag_tls : "?",
-            CD_PID());
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    ms = (long)(ts.tv_sec * 1000 + ts.tv_nsec / 1000000);
+    fprintf(cd_sink, "[CD t=%ld.%03ld %s tid=%d] ", ms / 1000, ms % 1000,
+            cd_tag_tls ? cd_tag_tls : "?", (int)CD_TID());
     va_start(ap, fmt);
     vfprintf(cd_sink, fmt, ap);
     va_end(ap);

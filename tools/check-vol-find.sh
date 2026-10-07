@@ -127,7 +127,7 @@ src/core/vol_read.c:817:SKIP
 src/core/vol_read.c:834:SKIP
 src/core/vol_read.c:894:SKIP
 src/core/vol_read.c:969:SKIP
-src/core/vol_sweep.c:1631:SKIP
+src/core/vol_sweep.c:1636:SKIP
 src/core/vol_sweep.c:251:SKIP
 src/core/vol_sweep.c:459:ACTS
 src/core/vol_sweep.c:478:ACTS
@@ -135,8 +135,8 @@ src/core/vol_sweep.c:498:ACTS
 src/core/vol_sweep.c:517:ACTS
 src/core/vol_textzone.c:679:SKIP
 src/core/vol_tier.c:304:SKIP
-src/core/volume.c:1291:SKIP   # tier_owner / rawm_owner anchors (vol_open_inner)
-src/core/volume.c:1292:SKIP   # shifted by the PERF_PROFILING counters in volume.c
+src/core/volume.c:1298:SKIP   # tier_owner / rawm_owner anchors (vol_open_inner)
+src/core/volume.c:1299:SKIP   # shifted by the PERF_PROFILING counters in volume.c
 src/recipes/zip.c:141:SKIP
 src/recipes/zip.c:145:SKIP
 src/core/vol_cpack.c:2939:SKIP   # непомечен: добавлено при правке vol_cpack.c

@@ -934,6 +934,9 @@ int vol_write_commit(invfs_wsession *ws)
     int rc;
 
     if (!s || s->committed) return -1;
+    CD("COMMIT name=%s old=%llu new=%llu size=%llu nsegs=%u", s->name,
+       (unsigned long long)s->old_id, (unsigned long long)s->new_id,
+       (unsigned long long)s->logical_size, s->n_ents);
     /* WP85: the commit is the last chance to publish the retired
      * generation's segments as a live recipe. A refused session never gets
      * here -- the caller aborts it, which frees the segments it wrote. */

@@ -1454,8 +1454,13 @@ static int vol_sweep_one_v3(invfs_volume *v, uint64_t inode_id,
                  * growth that suite measures. */
                 for (size_t r = 0; r < remap_n; r++) {
                     pba_ref_modify(v, remap[r].old_pba, -1);
-                    if (pba_ref_count(v, remap[r].old_pba) == 0)
+                    if (pba_ref_count(v, remap[r].old_pba) == 0) {
+                        CD("SWEEP-REMAP-FREE inode=%llu pba=%llu n=%llu",
+                           (unsigned long long)inode_id,
+                           (unsigned long long)remap[r].old_pba,
+                           (unsigned long long)remap[r].old_plen);
                         vol_free_blocks(v, remap[r].old_pba, remap[r].old_plen);
+                    }
                 }
             } else {
                 /* The pass wrote %llu blocks and could not name a single one

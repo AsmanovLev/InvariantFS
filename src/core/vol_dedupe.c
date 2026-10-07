@@ -274,6 +274,10 @@ static int dedup_remap_file_v3(invfs_volume *v, uint64_t inode,
         if (pba_ref_count(v, ms[m].cur_pba) == 0) {
             uint64_t plen = 0;
             if (seg_extent_checked(v, ms[m].cur_pba, &plen) == 0 && plen > 0) {
+                CD("DEDUPE-FREE inode=%llu pba=%llu n=%llu",
+                   (unsigned long long)ms[m].inode,
+                   (unsigned long long)ms[m].cur_pba,
+                   (unsigned long long)plen);
                 vol_free_blocks(v, ms[m].cur_pba, plen);
                 freed += plen;
             }

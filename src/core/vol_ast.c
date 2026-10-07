@@ -228,6 +228,7 @@ void vol_release_superseded_blob(
         return;
     if (memcmp(now.recipe_addr, old_addr, INVFS_RECIPE_ADDR_LEN) == 0)
         return;
+    CD("RETIRE inode=%llu", (unsigned long long)inode_id);
     vol_free_recipe_blocks(v, old_addr, 0);
 }
 
