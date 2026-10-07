@@ -1418,6 +1418,26 @@ check-hygiene:
 check-codecpacks:
 	INVFS_CODECPACK_STRICT=1 bash tools/check-codecpack-sync.sh
 
+# test-packs: the pack-subject suites in one place (owner decision: packs
+# get their own tier as codecpack work grows). Membership rule: the suite's
+# SUBJECT is packs -- pack lanes, pack archives, the plugin runtime, the
+# self-hosting loop -- not merely suites that touch a pack helper.
+# test-pngflac qualifies on the boundary (jxlest resolution + PNGR/JXL
+# interplay); test-exercarve does not (its subject is carving).
+# Invocation mirrors each suite's existing gate (run-e2e.sh isolation
+# where the e2e tier uses it, direct TESTENV where the shards do), so this
+# target introduces no new execution context. The e2e list below stays the
+# list of record; this is a focused alias for pack work.
+test-packs: all
+	$(TESTENV) bash tools/run-e2e.sh tools/test-containerpack.sh
+	$(TESTENV) bash tools/run-e2e.sh tools/test-cpack-mcost-bitexact.sh
+	$(TESTENV) bash tools/run-e2e.sh tools/test-ivpacks.sh
+	$(TESTENV) bash tools/run-e2e.sh tools/test-jxl.sh
+	$(TESTENV) bash tools/run-e2e.sh tools/test-pngflac.sh
+	$(TESTENV) bash tools/run-e2e.sh tools/test-sweepboot.sh
+	$(TESTENV) $(TESTISO) bash tools/test-cpack-max-members.sh
+	$(TESTENV) $(TESTISO) bash tools/plugin-daemon-smoke.sh
+
 # e2e tier: tmpfs images under /dev/shm; test-jxl needs cjxl/djxl installed
 e2e: all
 	$(TESTENV) bash tools/run-e2e.sh tools/test-textzone.sh
