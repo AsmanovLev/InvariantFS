@@ -13,11 +13,11 @@
 > a path that cannot be pointed at in the tree — a name you cannot follow is
 > rot whether or not it once existed.
 
-## OPEN (reclaimer by WP121, reader by WP-D) — the RT30 fallback root can be reclaimed while still live
+## READER RESOLVED / COLLECTOR SHIPPED; residual risk accepted (reclaimer by WP121, reader by WP-D) — the RT30 fallback root can be reclaimed while still live
 
   **Date:** Sep 27, 2026  
   **Severity:** High (silent namespace rollback)  
-  **Status:** **Reader side RESOLVED, in two halves; one condition still open.**
+  **Status:** **READER RESOLVED, COLLECTOR SHIPPED.** Residual: the unsettled SPT0-pins-generation question noted below; accepted risk, reader-contained (unallocated pages are refused, never silently served).
   Superseded 2026-09-28. The entry has been rewritten twice today, and both
   rewrites were wrong in opposite directions, so the halves are named
   explicitly:
@@ -165,7 +165,7 @@
     negative answer: `mbuf_page_allocated` returns -1 for "cannot tell" and
     every site falls through to integrity alone, so a future edit cannot
     quietly turn missing authority into invented damage.
-## FIXED (WP117) — `invf-sweep` hung in `vol_heat_sweep_begin` above ~46k live inodes
+## PARTIALLY FIXED (WP117 — heat done, transform/batches open) — `invf-sweep` hung above ~46k live inodes
 
   **Date:** Sep 27, 2026  
   **Severity:** High (availability — the sweep never returns)  
@@ -580,6 +580,7 @@ In the success path (line 1076), `blkio_close(&io)` is called, followed by `free
 The volume did resize correctly (confirmed: 515 GiB → 1978 GiB, shadow zone 77M → 461M blocks). The crash is cosmetic — happens after the commit. Needs investigation: likely `rz2.io2` should be NULLed after the resize commits, or the `fail` label should check if `io2` was already closed.
 
 ### Status
+**Status: OPEN — cosmetic crash after commit (NULL-after-close fix needed).**
 Volume is healthy post-resize. 2 bad records (corrupt inode records at positions 129141138 and 131260860, rec_len=2119422) — likely artifacts from the crash but non-fatal (skipped by vol_open).
 
 ---
@@ -628,6 +629,8 @@ Added `--max` flag to `invf-resize`: when passed instead of a size, the tool aut
 ### Future Fix
 Host-side `losetup` + chroot directly into raw `/dev/sda3` (no FUSE layer)
 
+**Status: OPEN — design limitation (documented non-target workflow), workaround-documented.**
+
 ---
 
 ## Gentoo Install — Portage Snapshot Extraction
@@ -644,6 +647,8 @@ Concurrent writers on the FUSE mount create competing tombstones during rename o
 
 ### Fix
 Sequential extraction only. O(N²) tombstone processing fix (WP30) prevented mount hangs after the explosion.
+
+**Status: RESOLVED (workaround + WP30).**
 
 ---
 
@@ -670,6 +675,8 @@ Two compounding issues:
 - Don't unmount before `switch_root`; use `mount --move` to transfer mounts
 - Added multiple init path fallbacks: `/sbin/init` → `/usr/sbin/init` → `/usr/lib/systemd/systemd` → `/bin/sh`
 - Created `/usr/bin/init` → `openrc-init` symlink on the InvFS root
+
+**Status: RESOLVED (v3 initramfs).**
 
 ### Lesson
 - Always verify `/sbin/init` exists after stage3 import on usr-merge systems
@@ -716,6 +723,8 @@ The 76K orphans consume metadata space, causing `vol_apply_meta()` to return 0 (
 - Avoid rsync to InvFS FUSE mounts — use `invf-import` for bulk data
 - If using rsync, ensure temp file operations work (mkstemp fix in commit `da08ed6`)
 - Monitor orphan count via `invf-fsck` regularly
+
+**Status: OPEN — documented workaround, no code fix (orphan accrual still possible).**
 
 ---
 
@@ -814,6 +823,8 @@ The FS itself is verified working.
 - `/mnt/sde/invfs-shadow.img` (20GB raw): shadow device
 - `/mnt/sde/invfs-uki/uki.efi` (25MB): custom 7.3-rc2 UKI
 
+**Status: OPEN — environment (demo-blocker only, zero engine signal), workaround-documented.**
+
 ---
 
 ## WP40-WP47 — Mapper-aware record-walker sweep
@@ -858,13 +869,13 @@ bigvol fixture 3/0; test-meta-extent-walk 6/0; test-stats-mapper 6/0;
 test-heat-mapper 4/0 (100/100 touched); test-sweep-mapper 6/0.
 
 ### Follow-ups (open)
-- **WP48**: re-enable cross-file batch deferral on mapper volumes.
+- **WP48-deferral: OPEN**: re-enable cross-file batch deferral on mapper volumes.
   Routing `tz_owner_write`/`wp25_owner_write` through `vol_append_slot`
   makes the flush-time owner sync append into dev1 shadow extents and fail
   (io-error latch -> READ-ONLY; big-volume import regressed at ~8k files).
   Owner appends reverted; WP42's mapper gate keeps files on the generic
   sweep floor until a flush-safe owner append exists.
-- Pre-existing `invf-fsck` orphan count / exit-3 quirk seen by
+- **fsck-orphan-quirk: OPEN**: pre-existing `invf-fsck` orphan count / exit-3 quirk seen by
   `tools/test-dedupe.sh` and historically by `test-meta-extent-walk.sh`
   Leg C (128 orphans) — needs its own WP.
 
@@ -914,11 +925,11 @@ position-driven walk cycled.
   test-sweep-mapper 6/0; test-heat-mapper 4/0.
 
 ### Follow-ups (open)
-- WP49: remaining `vol_inode_next` loops (vol_fsck.c, vol_repair.c,
+- WP49 walker conversions: RESOLVED (`32fe8b3`/`1704513`). Remaining `vol_inode_next` loops (vol_fsck.c, vol_repair.c,
   fuse_fs.c build_file_table, sizes.c/stat.c/verify.c/meta_probe.c) should
   move to `vol_records_walk` for robustness against a future non-monotonic
   table.
-- Interrupted-sweep durability: a kill mid-checkpoint/compaction used to
+- kill-mid-sweep crash leg: still OPEN. Interrupted-sweep durability: a kill mid-checkpoint/compaction used to
   leave duplicate mapper entries. A full clean sweep no longer reproduces
   it (the cyclic walker was the likely writer of the duplicates), but the
   kill-mid-sweep path has not been re-exercised; add a targeted crash leg.
@@ -1108,7 +1119,7 @@ failure is content/fixture-dependent — likely in the text/binary batch commit
 path re-enabled by WP52 interacting with the new owner-extent allocation
 (duplicate pba) and the checkpoint retained-range release (realize leak).
 
-**Status: Open, and no longer reproducible as written.** Neither suite that
+**Status: OPEN (v3-equivalent repro needed; suspected F8/F9-overlapped — duplicate-pba-after-failed-commit and realize-leak sit in their territory — but unproven, do not claim).** Neither suite that
 observed it exists any more — both were removed with the v2 metadata machinery
 in `4954d9b`, so there is no fixture left to re-run this against. What it
 needed, as recorded at the time: reproduce with the crash-suite fixture, fix
@@ -1682,8 +1693,7 @@ is not done.
 
 ## A suite that fails on a full tmpfs reports it as a product defect
 
-**Status:** diagnosed; the fix is a house rule and is deliberately not made
-one commit at a time (§1.8).
+**Status:** OPEN — house rule accepted (§1.8); the 4-suite /srv move is not done.
 
 `tools/test-packaging.sh` staged every target, held every assertion and passed
 every negative control, then exited 1 on one leg:
@@ -1728,7 +1738,7 @@ commits as each happens to go red.---
 
 ## test-fuzz: XFS loop fixtures cannot be mounted read-write on this host
 
-**Status:** localised; the code half is fixed, the environment half is not.
+**Status:** OPEN (env-skip + host cause still to investigate). Code half fixed; environment half not.
 
 `tools/test-fuzz.sh` is non-zero on the XFS pack leg. The Python traceback is
 fixed (see 442eea4) and the run now reaches `failures: 0, anomalies: 0`; what
@@ -1848,7 +1858,7 @@ answer out of a commit that has none. Whoever picks it up should print
 `cpack_gain_mille()` on the refusal path and compare against the suite's
 comment figures — that single measurement names the owner.---
 
-## test-qcow2-zlib: the size guard is right and the SUITE's expectation is stale
+## test-qcow2-zlib (continued -- single OPEN with the entry above, owner: test): the size guard is right and the SUITE's expectation is stale
 
 **Status:** MEASURED. The owner is the test, not the guard. Not changed here —
 §1.8 — but the next step is now a one-line decision rather than an
@@ -1907,7 +1917,7 @@ also speak for "why did this not happen".---
 
 ## test-rawimg: a score-0 pack overwrites another lane's class stamp
 
-**Status:** established by measurement; fix NOT landed. **This entry replaces an
+**Status:** OPEN — fix argued, not landed (established by measurement). **This entry replaces an
 earlier one of mine, which was wrong about the mechanism — see the correction at
 the bottom.**
 
@@ -2085,7 +2095,7 @@ because it fails identically on boots that do reach multi-user.target, it read
 as background noise next to an imaginary stall. Filed as WP225.
 
 
-## WP225-OPEN: systemd cannot exec dbus-daemon on an InvariantFS root
+## WP225-OPEN (SUPERSEDED by WP227-RESOLVED, do not triage independently): systemd cannot exec dbus-daemon on an InvariantFS root
 
 **Status:** OPEN, deterministic, not localised. Found while resolving WP224.
 
@@ -2190,7 +2200,7 @@ keep the marker as a diagnostic in the failure message rather than as the
 predicate. Changing CI on an untested hypothesis is how a green job becomes a
 red one for the wrong reason.
 
-## WP225-RESOLVED-PARTIAL: dbus 203/EXEC is NOT an InvariantFS defect
+## WP225-RESOLVED-PARTIAL (SUPERSEDED by WP227-RESOLVED): dbus 203/EXEC is NOT an InvariantFS defect
 
 **Status:** cause localised to "not us"; the underlying guest cause is still open.
 
