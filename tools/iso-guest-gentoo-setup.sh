@@ -114,9 +114,14 @@ echo 3 > /proc/sys/vm/drop_caches 2>/dev/null || true
 invf-import "$VOL" "$STAGE" || exit 1
 unset INVFS_COMMIT_BYTES INVFS_COMMIT_MS INVFS_COMMIT_IDLE_MS
 # Lock-holder snapshot: if fsck below reports 'in use by another process',
-# this names the holder.
+# this names the holder. /proc/locks is authoritative (flock holders with
+# pids); the fd scan catches plain open handles; mount catches a daemon.
 say "holders of $VOL:"
-ls -l /proc/[0-9]*/fd 2>/dev/null | grep -a "$(basename "$VOL")$" || say "(none visible)"
+base=$(basename "$VOL")
+cat /proc/locks 2>/dev/null | grep -a "$base" || say "(no flock holders)"
+ls -l /proc/[0-9]*/fd 2>/dev/null | grep -a "${base}$" || say "(no open fds visible)"
+mount 2>/dev/null | grep -a "$VOL" || say "(not mounted)"
+ps aux 2>/dev/null | grep -a "invf" | grep -av grep || say "(no invf processes)"
 invf-fsck "$VOL" || exit 1
 
 # ---- phase 3: asserts ----

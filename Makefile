@@ -1539,7 +1539,18 @@ DIST := dist
 RELEASE_DIR := $(DIST)/$(RELEASE_NAME)
 SIGNING_KEY ?=
 
-release: all helpers
+# A release ships the shipping binary, never a debug one: `all` reuses
+# whatever objects are already in build/, so a tree previously built
+# with CORRUPT_DEBUG=1 or PERF=1 would otherwise ship tracing/counters
+# (observed: guest serial full of [CD ...] lines from a flagged CORE).
+# This prerequisite runs before `all` (left to right) and removes the
+# flag stamps, forcing every flag-dependent object to rebuild unflagged;
+# the stamp rules cover all such call sites.
+.PHONY: unflag
+unflag:
+	rm -f $(OBJ)/.cd-1 $(OBJ)/.perf-1
+
+release: unflag all helpers
 	rm -rf $(RELEASE_DIR) $(DIST)/$(RELEASE_NAME).tar.zst $(DIST)/SHA256SUMS \
 	       $(DIST)/SHA256SUMS.sig
 	mkdir -p $(RELEASE_DIR)/tools $(RELEASE_DIR)/bin
