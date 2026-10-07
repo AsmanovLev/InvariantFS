@@ -52,6 +52,7 @@ IMGPA=wp11jxl-pa.img
 IMGG=wp11jxl-guard.img
 IMGT=wp11jxl-tools.img
 IMGHOG=wp11jxl-hog.img
+IMGBR=wp11jxl-br.img
 rm -rf "$WORK" && mkdir -p "$WORK/orig" "$WORK/out" "$WORK/bin" \
     "$WORK/binonly" "$WORK/packs" "$WORK/nopacks" "$WORK/faketools" \
     "$WORK/hogpacks/hog.codecpack"
@@ -226,6 +227,40 @@ AFTER=$(INVFS_CODECPACKS="$WORK/nopacks" INVFS_TOOLS="$WORK/tools" "$WORK/classo
 $B/invf-cat "$IMGPA" p1.jpg "$WORK/out/p1.pa2" >/dev/null
 cmp -s "$WORK/orig/p1.jpg" "$WORK/out/p1.pa2" || { echo "FAIL: p1.jpg changed under re-sweep"; exit 1; }
 echo "re-sweep: stamps stable, bytes stable"
+
+echo "== builtin retry: MEMLIMIT then raised, no pack (retry fallback) =="
+# Same shape as the pack upgrade leg, but nothing is installed: the
+# MEMLIMIT files must upgrade through the BUILTIN attempt inside
+# vol_jxl_retry, not wait for a pack that never comes.
+$B/invf-mkfs "$IMGBR" 0.2 >/dev/null
+for f in $FILES; do
+    $B/invf-cp "$IMGBR" "$WORK/orig/$f" "$f" >/dev/null
+done
+INVFS_CODECPACKS="$WORK/nopacks" INVFS_TOOLS="$WORK/tools" INVFS_DEC_MEM_LIMIT=256K \
+    $B/invf-sweep "$IMGBR" > "$WORK/sweep-br.log" 2>&1 \
+    || { cat "$WORK/sweep-br.log"; exit 1; }
+for f in p1.jpg p2.jpg p3.jpg p4.jpg p5.jpg; do
+    C=$(INVFS_CODECPACKS="$WORK/nopacks" "$WORK/classof" "$IMGBR" "$f")
+    [ "$C" = "cls=5 algo=4 gen=1" ] || { echo "FAIL: $f: want builtin MEMLIMIT, got $C"; exit 1; }
+done
+CT=$(INVFS_CODECPACKS="$WORK/nopacks" "$WORK/classof" "$IMGBR" tiny.jpg)
+case "$CT" in cls=2\ algo=4\ gen=*) echo "  tiny.jpg: $CT (control: admitted)" ;;
+    *) echo "FAIL: tiny.jpg should transcode even at 256K"; exit 1 ;;
+esac
+INVFS_CODECPACKS="$WORK/nopacks" INVFS_TOOLS="$WORK/tools" $B/invf-sweep "$IMGBR" > "$WORK/sweep-br2.log" 2>&1 \
+    || { cat "$WORK/sweep-br2.log"; exit 1; }
+BR_LINES=$(grep -c ": jxl (builtin)" "$WORK/sweep-br2.log" || true)
+echo "builtin upgrade lines: $BR_LINES"
+[ "$BR_LINES" -eq 5 ] || { echo "FAIL: expected 5 builtin upgrades"; grep "jxl" "$WORK/sweep-br2.log"; exit 1; }
+ok=1
+for f in $FILES; do
+    $B/invf-cat "$IMGBR" "$f" "$WORK/out/$f.br" >/dev/null
+    a=$(sha256sum "$WORK/orig/$f" | cut -d' ' -f1)
+    b=$(sha256sum "$WORK/out/$f.br" | cut -d' ' -f1)
+    if [ "$a" != "$b" ]; then echo "MISMATCH br $f"; ok=0; fi
+done
+[ "$ok" = 1 ] || exit 1
+echo "builtin retry: all 5 upgraded + bit-exact"
 
 echo "== negative: INVFS_DEC_MEM_LIMIT=256K (the pack's estimate command gates) =="
 $B/invf-mkfs "$IMGNEG" 0.2 >/dev/null

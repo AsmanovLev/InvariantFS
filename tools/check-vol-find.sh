@@ -129,12 +129,12 @@ src/core/vol_read.c:817:SKIP
 src/core/vol_read.c:834:SKIP
 src/core/vol_read.c:894:SKIP
 src/core/vol_read.c:969:SKIP
-src/core/vol_sweep.c:1725:SKIP
+src/core/vol_sweep.c:1770:SKIP
 src/core/vol_sweep.c:251:SKIP
-src/core/vol_sweep.c:459:ACTS
-src/core/vol_sweep.c:478:ACTS
-src/core/vol_sweep.c:498:ACTS
-src/core/vol_sweep.c:517:ACTS
+src/core/vol_sweep.c:556:ACTS
+src/core/vol_sweep.c:575:ACTS
+src/core/vol_sweep.c:595:ACTS
+src/core/vol_sweep.c:614:ACTS
 src/core/vol_textzone.c:708:SKIP
 src/core/vol_tier.c:304:SKIP
 src/core/volume.c:1298:SKIP   # tier_owner / rawm_owner anchors (vol_open_inner)

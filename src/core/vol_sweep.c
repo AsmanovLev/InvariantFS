@@ -280,6 +280,11 @@ void defer_container_parts(invfs_volume *v, const char *name)
 }
 
 
+static int vol_jxl_builtin_attempt(invfs_volume *v, uint64_t inode_id,
+                                   const char *name, const uint8_t *full,
+                                   size_t full_len,
+                                   const uint8_t old_addr[INVFS_RECIPE_ADDR_LEN]);
+
 /* WP12(b): JPEG upgrade retry for a file the class predicate just re-armed
  * (GENERIC_MEMLIMIT: the raised dec_mem limit admits it; GENERIC_GUARD: a
  * newer codec generation). By the time either stamp exists the file is
@@ -305,8 +310,30 @@ int vol_jxl_retry(invfs_volume *v, uint64_t inode_id, const char *name)
 
     /* the pack (or its tools) vanished since the stamp was written: keep
      * the stamp -- the first sweep after it returns picks the file up
-     * again. A placeholder entry (no pack override) has no trampolines. */
-    if (!jc || !jc->encode || !jc->decode) return 0;
+     * again. A placeholder entry (no pack override) has no trampolines:
+     * fall back to the BUILTIN attempt on the current bytes, so a
+     * packless volume still retries (raised limit, new tools) instead of
+     * waiting forever. The builtin is optional the same way: absent tools
+     * leave everything exactly as found. */
+    if (!jc || !jc->encode || !jc->decode) {
+        uint8_t old_addr[INVFS_RECIPE_ADDR_LEN];
+        invfs_inode in;
+        int jrc;
+        memset(old_addr, 0, sizeof old_addr);
+        if (vol_read_file(v, inode_id, &full, &full_len) != 0)
+            return -1;
+        if (full_len < 3 || full[0] != 0xFF || full[1] != 0xD8 ||
+            full[2] != 0xFF) {
+            free(full);
+            return 0;
+        }
+        if (vol_inode_get(v, inode_id, &in) == 1)
+            memcpy(old_addr, in.recipe_addr, sizeof old_addr);
+        jrc = vol_jxl_builtin_attempt(v, inode_id, name, full, full_len,
+                                      old_addr);
+        free(full);
+        return jrc;
+    }
     if (vol_read_file(v, inode_id, &full, &full_len) != 0) return -1;
     /* the stamp says "JPEG rejected earlier"; if the content is not one
      * any more the stamp is stale -- leave file and stamp alone */
@@ -405,6 +432,76 @@ static int sweep_lane_ref_size(const char *name, const uint8_t *full,
     free(enc);
     free(work);
     return rc;
+}
+
+/* JPEG -> JXL lossless, builtin attempt (whole-file JPEG bitstream
+ * reconstruction, bit-exact). Shared by the dispatch branch below and the
+ * vol_jxl_retry fallback: one implementation, two call sites. Optional
+ * like wav/ape -- absent tools leave the file RAW and unstamped and stop
+ * the dispatch (never the generic floor, whose stamp would be terminal).
+ * Returns 12 on transcode, 0 otherwise (stamped or waiting as below). */
+static int vol_jxl_builtin_attempt(invfs_volume *v, uint64_t inode_id,
+                                   const char *name, const uint8_t *full,
+                                   size_t full_len,
+                                   const uint8_t old_addr[INVFS_RECIPE_ADDR_LEN])
+{
+    const invfs_codec *jc = invfs_codec_by_algo(INVFS_ALGO_JXL);
+    uint64_t raw;
+    uint8_t *jxl = NULL;
+    size_t jxl_len = 0;
+    if (!jc || !jc->probe || !jc->probe())
+        return 0;   /* tools absent: RAW, unstamped, retried */
+    /* admission from the SOF geometry (WP10 section 12.2); past the
+     * decode-memory policy the file goes generic, stamped so a raised
+     * limit re-arms the JXL path */
+    raw = jpeg_raw_estimate(full, full_len);
+    if (raw && raw > vol_get_dec_mem_limit(v)) {
+        vol_stamp_class(v, inode_id, INVFS_CLASS_GENERIC_MEMLIMIT,
+                        INVFS_ALGO_JXL, tz_codec_gen(INVFS_ALGO_JXL));
+        return 0;
+    }
+    if (invfs_jxl_compress(full, full_len, &jxl, &jxl_len) == 0 &&
+        jxl_len < full_len) {
+        /* guard: the blob must djxl back to the exact original JPEG
+         * bytes before anything is replaced */
+        uint8_t *back = NULL;
+        size_t back_len = 0;
+        int exact =
+            invfs_jxl_decompress(jxl, jxl_len, &back, &back_len) == 0 &&
+            back_len == full_len &&
+            memcmp(back, full, full_len) == 0;
+        free(back);
+        if (exact) {
+            uint64_t nino = vol_create_jxl_file(v, name, jxl,
+                                                jxl_len, full_len);
+            free(jxl);
+            if (!nino) {
+                vol_stamp_class(v, inode_id,
+                                INVFS_CLASS_GENERIC_GUARD,
+                                INVFS_ALGO_JXL,
+                                tz_codec_gen(INVFS_ALGO_JXL));
+                return 0;
+            }
+            /* WP202: the lane SUPERSEDED the row in place, so the old
+             * recipe's data segments are the lane's to release. */
+            vol_release_superseded_blob(v, inode_id, old_addr);
+            vol_stamp_class(v, nino, INVFS_CLASS_CODEC,
+                            INVFS_ALGO_JXL,
+                            tz_codec_gen(INVFS_ALGO_JXL));
+            if (getenv("INVFS_DEBUG_PACKS"))
+                fprintf(stderr, "[packdbg] builtin jxl on %s\n",
+                        name);
+            fprintf(stderr, "[sweep] %s: jxl (builtin)\n", name);
+            return 12;  /* JPEG */
+        }
+    }
+    free(jxl);
+    /* declined (tool failed, no gain, or the round-trip guard refused):
+     * guard-stamp so the next sweep skips the retry until the codec
+     * generation rolls over */
+    vol_stamp_class(v, inode_id, INVFS_CLASS_GENERIC_GUARD,
+                    INVFS_ALGO_JXL, tz_codec_gen(INVFS_ALGO_JXL));
+    return 0;
 }
 
 static int sweep_dispatch(invfs_volume *v, uint64_t inode_id,
@@ -558,11 +655,8 @@ static int sweep_dispatch(invfs_volume *v, uint64_t inode_id,
      * claims algo JXL or another algo over the same magic
      * (a test hog pack sniffs FFD8FF for algo 41). Placeholders don't
      * count: NULL encode/decode means no pack is loaded, and the lane
-     * must run. Absent tools leave the file RAW and UNSTAMPED and stop
-     * the dispatch (never the generic floor, whose stamp would be
-     * terminal); the next sweep retries. Every guard failure stamps JXL
-     * so only a raised limit or a newer generation re-arms, via the same
-     * vol_jxl_retry the pack path uses. */
+     * must run. The attempt itself is vol_jxl_builtin_attempt (shared
+     * with the vol_jxl_retry fallback below). */
     if (full_len >= 3 &&
         full[0] == 0xFF && full[1] == 0xD8 && full[2] == 0xFF) {
         size_t pcn = 0, pci;
@@ -579,63 +673,14 @@ static int sweep_dispatch(invfs_volume *v, uint64_t inode_id,
             }
         }
         if (!pack_claims) {
-            const invfs_codec *jc = invfs_codec_by_algo(INVFS_ALGO_JXL);
-            uint64_t raw;
-            uint8_t *jxl = NULL;
-            size_t jxl_len = 0;
-            if (!jc || !jc->probe || !jc->probe())
-                return 0;   /* tools absent: RAW, unstamped, retried */
-            /* admission from the SOF geometry (WP10 section 12.2);
-             * past the decode-memory policy the file goes generic,
-             * stamped so a raised limit re-arms the JXL path */
-            raw = jpeg_raw_estimate(full, full_len);
-            if (raw && raw > vol_get_dec_mem_limit(v)) {
-                vol_stamp_class(v, inode_id, INVFS_CLASS_GENERIC_MEMLIMIT,
-                                INVFS_ALGO_JXL, tz_codec_gen(INVFS_ALGO_JXL));
-                return 0;
-            }
-            if (invfs_jxl_compress(full, full_len, &jxl, &jxl_len) == 0 &&
-                jxl_len < full_len) {
-                /* guard: the blob must djxl back to the exact original
-                 * JPEG bytes before anything is replaced */
-                uint8_t *back = NULL;
-                size_t back_len = 0;
-                int exact =
-                    invfs_jxl_decompress(jxl, jxl_len, &back, &back_len) == 0 &&
-                    back_len == full_len &&
-                    memcmp(back, full, full_len) == 0;
-                free(back);
-                if (exact) {
-                    uint64_t nino = vol_create_jxl_file(v, name, jxl,
-                                                        jxl_len, full_len);
-                    free(jxl);
-                    if (!nino) {
-                        vol_stamp_class(v, inode_id,
-                                        INVFS_CLASS_GENERIC_GUARD,
-                                        INVFS_ALGO_JXL,
-                                        tz_codec_gen(INVFS_ALGO_JXL));
-                        return 0;
-                    }
-                    /* WP202: the lane SUPERSEDED the row in place, so
-                     * the old recipe's data segments are the lane's to
-                     * release. */
-                    vol_release_superseded_blob(v, inode_id, old_addr);
-                    vol_stamp_class(v, nino, INVFS_CLASS_CODEC,
-                                    INVFS_ALGO_JXL,
-                                    tz_codec_gen(INVFS_ALGO_JXL));
-                    if (getenv("INVFS_DEBUG_PACKS"))
-                        fprintf(stderr, "[packdbg] builtin jxl on %s\n",
-                                name);
-                    fprintf(stderr, "[sweep] %s: jxl (builtin)\n", name);
-                    return 12;  /* JPEG */
-                }
-            }
-            free(jxl);
-            /* declined (tool failed, no gain, or the round-trip guard
-             * refused): guard-stamp so the next sweep skips the retry
-             * until the codec generation rolls over */
-            vol_stamp_class(v, inode_id, INVFS_CLASS_GENERIC_GUARD,
-                            INVFS_ALGO_JXL, tz_codec_gen(INVFS_ALGO_JXL));
+            int jrc = vol_jxl_builtin_attempt(v, inode_id, name, full,
+                                              full_len, old_addr);
+            if (jrc != 0)
+                return jrc;
+            /* declined or waiting: the attempt stamped (or deliberately
+             * did not), and either way the file is decided for this
+             * run -- stop the dispatch like the pack loop's own
+             * tool-absent defer does. */
             return 0;
         }
     }

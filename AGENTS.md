@@ -626,7 +626,9 @@ be recovered bit-for-bit, regardless of what codec was applied.
     leaves the file RAW and unstamped (retried, never the generic
     floor). A loaded `jxl.codecpack` replaces the builtin for files it
     sniffs (and any loaded pack sniffing the same magic wins over the
-    builtin) -- the main test leg proves pack precedence.
+    builtin) -- the main test leg proves pack precedence. Upgrade
+    retries fall back to the builtin attempt when no pack is loaded,
+    so a raised limit re-arms packless files too.
   - **PNG → JXL lossless**, via the built-in PNGR lane
     (`src/core/vol_sweep.c:1100-1136`). The whole-path rebuild+memcmp guard
     refuses anything it cannot prove, and a refused PNG is simply left RAW
