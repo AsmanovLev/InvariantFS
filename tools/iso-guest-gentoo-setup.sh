@@ -82,6 +82,7 @@ say "installed: $(invf-mkfs --version 2>&1 | head -1)"
 VOL="$(tr ' ' '\n' < /proc/cmdline | sed -n 's/^invfsvol=//p' | head -1)"
 [ -b "${VOL:-none}" ] || { say "no volume disk (cmdline has no invfsvol=)"; exit 1; }
 STAGE=/stage
+mkdir -p "$STAGE"
 mount -L stage "$STAGE" || mount /dev/disk/by-label/stage "$STAGE" || exit 1
 say "staged on disk-backed $STAGE (not the RAM overlay)"
 say "stage3 $STAGE3_VER -> $STAGE"
