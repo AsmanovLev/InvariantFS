@@ -220,6 +220,12 @@ done
 # thrown away. boot-void-qemu.sh has always kept it, which is why Void failures
 # have always been diagnosable.
 QERR="$(mktemp -t invfs-arch-qemu-err.XXXXXX)"
+# Pre-launch environment dump: a qemu that dies in ~1s with an empty
+# serial log AND empty stderr leaves nothing otherwise. Known unknowns
+# this answers: wrong qemu, unreadable inputs, no memory.
+qemu-system-x86_64 --version 2>&1 | head -1
+free -m | head -2
+ls -la "$KERNEL" "$INITRD" "$IMG" 2>&1
 qemu-system-x86_64 "${QEMU_ARGS[@]}" 2>"$QERR" &
 QPID=$!
 cleanup() {
@@ -229,6 +235,12 @@ cleanup() {
     if [ -s "$QERR" ]; then
         echo "--- qemu stderr ---" >&2
         sed -n '1,20p' "$QERR" >&2
+    else
+        # Empty stderr + instant death = killed from outside (OOM) or
+        # never execed. The kernel ring names OOM kills; sudo exists
+        # on CI runners for exactly this.
+        echo "--- qemu stderr empty; host dmesg tail (OOM?) ---" >&2
+        sudo dmesg 2>/dev/null | grep -aiE "oom|killed process.*qemu|out of memory" | tail -5 >&2 || true
     fi
     rm -f "$QERR" 2>/dev/null
 }
