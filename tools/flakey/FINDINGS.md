@@ -350,7 +350,12 @@ sabotaged mid-chain header. Control must visit the victim (fails
 pre-fix: 0 rows visited); torn chain must refuse (fails pre-fix:
 silent rc=0). 12/12 post-fix; both legs verified red via stash.
 
-**Status 2026-10-07:** fixed, unit-proven, soak validation pending.
+**Status 2026-10-07:** fixed, unit-proven, SOAK-PROVEN: leg 5
+(soak seed 20261331) PASS, 37 files / 0 corrupt / 213 s -- the first
+green run after five consecutive reds across four shapes (F6 s30,
+s18 stale-PBA, F7 dead-end, r00 x2). The s18-shape collapses into F8:
+same quiescent-file + healthy-sweep + stale-recipe signature, same
+PBA region, and no other candidate survived the trace.
 Note: ARC/overlay masking is why op readbacks stay green while the
 platter is bad (verify reads offline/cold) -- that observation stands
 but was not the mechanism here.
