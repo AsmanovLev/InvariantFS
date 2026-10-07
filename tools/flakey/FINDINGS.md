@@ -246,6 +246,21 @@ the failed bytes), guarded by new leg 9 (trunc-abort readability).
 The F4 seed still fails, LOUDLY at readback instead of silently: the
 foreign-head origin (stale mapping vs ARC vs torn recipe) is open.
 
+**Status 2026-10-07 late:** same seed (20261331) re-run WITH the F6 fix
+(binary built 21:28 from fixed source, commit 2dde445) STILL fails --
+but a different file and shape: s18.bin (inode 58, 22083 B) CORRUPT at
+final verify (artifacts leg5-soak-20261007-214056). Timeline exonerates
+F6: last write t=36.0 ok, readback ok t=60.5, then sweeps at t=68.0
+(130 orphan pages) and t=70.1, corrupt at t=74.7 -- the file was
+quiescent; a sweep damaged it. Recipe seg0 names pba 16460 (algo 5,
+len 22083) but that block holds non-segment bytes (framing reads
+csize=1290470656, payload looks like metadata records): stale-PBA /
+use-after-free shape -- sweep freed or moved the segment while the
+recipe still names it, and the block now serves metadata. Fuse.log
+also shows transient segment/text-batch CRC mismatches for many other
+inodes mid-run. Next: bitmap/alloc audit of pba 16460 (free vs live
+reference) + which sweep stage last touched inode 58.
+
 ## Tier status
 
 legs 1 (baseline), 3 (torn sweep), 4 (crash mid-seal) PASS;
