@@ -68,6 +68,12 @@ grep -q "'  " "$B/PKGBUILD" && { say "PKGBUILD sums array has a non-hash entry";
 # and pacstrap later (both -Sy against the same mirror).
 # (The keyring package is signed by master keys the ISO already trusts.)
 pacman -Sy --needed --noconfirm archlinux-keyring || exit 1
+# --populate needs a local secret key; a current keyring package SKIPS the
+# install that used to create it implicitly, exposing an uninitialized
+# gnupg home ('no secret key ... use pacman-key --init'). Init explicitly;
+# virtio-rng (driver) feeds the keygen under TCG so it can't stall on
+# entropy.
+pacman-key --init || exit 1
 pacman-key --populate archlinux || exit 1
 command -v fakeroot >/dev/null 2>&1 || pacman -Sy --needed --noconfirm fakeroot || exit 1
 chown -R builder:builder "$B"

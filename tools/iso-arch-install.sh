@@ -87,6 +87,8 @@ qemu-system-x86_64 -machine q35,accel=$ACCEL -cpu "$CPU" -m "$MEM" -smp 2 \
   -cdrom "$ISO" \
   -drive "file=$VOL,format=raw,if=virtio" \
   -netdev user,id=net0 -device virtio-net-pci,netdev=net0 \
+  -object rng-random,filename=/dev/urandom,id=rng0 \
+  -device virtio-rng-pci,rng=rng0 \
   -serial "file:$SER" -display none -no-reboot &
 QPIDE=$!
 note "qemu pid $QPIDE; waiting for marker (up to $TIMEOUT_MIN min)"
