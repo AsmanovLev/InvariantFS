@@ -187,6 +187,7 @@ else
     note "kernel=$KERNEL initrd=$INITRD ram=${RAM}M port=$PORT"
     QEMU_ARGS=(
         -machine q35,accel=$ACCEL -cpu "$CPU" -m "$RAM" -smp 2
+        -vga none
         -kernel "$KERNEL" -initrd "$INITRD"
         -append "console=ttyS0,115200 invfs.init=/bin/invfs-init"
         "${DRIVES[@]}"
@@ -361,7 +362,6 @@ if kill -0 "$QPID" 2>/dev/null; then
     kill "$QPID" 2>/dev/null
 fi
 wait "$QPID" 2>/dev/null
-trap - EXIT
 
 echo
 if [ "$FAILED" = 0 ]; then
