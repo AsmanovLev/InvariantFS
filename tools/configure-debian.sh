@@ -81,8 +81,14 @@ EOF
 # never completes -- identical tree, green twice then red three times.
 # A fixed test id removes the race entirely (and keeps offline
 # bit-exact checks deterministic, which a generated id would not).
-printf '%s' 'deadbea7dec0de000000000000000001' > "$E/etc/machine-id"
-chmod 444 "$E/etc/machine-id"
+printf '%s' 'deadbea7dec0de000000000000000001' > "$E/etc/machine-id" 2>/dev/null || {
+    # debootstrap (or a package postinst) may leave a root-owned
+    # machine-id behind; replace it deterministically either way.
+    sudo rm -f "$E/etc/machine-id" 2>/dev/null || rm -f "$E/etc/machine-id"
+    printf '%s' 'deadbea7dec0de000000000000000001' > "$E/etc/machine-id" \
+        || echo "configure-debian: WARNING: cannot write $E/etc/machine-id" >&2
+}
+chmod 444 "$E/etc/machine-id" 2>/dev/null || true
 
 # --- networking -------------------------------------------------------------
 # The boot harness reaches the guest over QEMU's user-mode hostfwd, which needs
