@@ -1666,68 +1666,26 @@ int main(int argc, char **argv)
 
     /* Resolve the previous sweep's rollback window. --realize is the
      * standalone point of no return (drop the previous save point), then a
-     * normal sweep proceeds. A bare sweep instead captures the NEW window
-     * FIRST and drops the old one only with the new state already live
-     * (realize-after-arm): a torn sweep never leaves the volume with
-     * neither a save point nor intact data. A dry run touches nothing. A
-     * failed capture never stops the sweep -- the run just goes
-     * unsavepointed. */
-    if (!dry) {
+     * normal sweep proceeds. A dry run touches nothing. A failed capture
+     * never stops the sweep -- the run just goes unsavepointed.
+     *
+     * F9: NOTHING destructive happens here. An earlier shape captured (and
+     * reclaimed!) in prepare and refused in collect, leaving a refused
+     * sweep's frees behind (leg-5 dead-end: live roots freed by a drop-mode
+     * prepare, collect refusing too late). Collect is read-only, so the
+     * K=1 drop and the fresh capture move to after the live set validates
+     * (below, before transform): a refused sweep is then bit-identical to
+     * one never run. The --realize drop moves with it for the same reason:
+     * an explicit point of no return is still no return when it happens
+     * after a read-only validation. */
+    if (!dry && no_realize) {
         /* --no-realize keeps the previous save point live; every other run
-         * drops it (realize) and captures a fresh one BEFORE the walk, so
-         * the live window is always the LAST sweep. K=1. */
-        if (no_realize) {
-            if (!invfs_sweep_ui_active())
-                fprintf(stderr, "save point: kept previous (--no-realize)\n");
-        } else {
-            if (realize) {
-                int drc = spt0_drop(vol);
-                if (drc < 0) {
-                    sw_progress_suspend();
-                    fprintf(stderr, "save point: realizing the previous "
-                                    "run failed\n");
-                    vol_close(vol);
-                    return 1;
-                }
-                if (!invfs_sweep_ui_active())
-                    fprintf(stderr, drc > 0
-                            ? "save point: previous run realized\n"
-                            : "save point: nothing to realize\n");
-            } else if (spt0_info(vol, NULL)) {
-                /* bare sweep: replace the previous window (K=1) */
-                (void)spt0_drop(vol);
-            }
-            if (spt0_capture(vol) == 0) {
-                invfs_spt0 sp;
-                if (spt0_info(vol, &sp) && !invfs_sweep_ui_active())
-                    fprintf(stderr, "save point captured "
-                                    "(base_root=%llu delta_end=%llu)\n",
-                            (unsigned long long)sp.base_root,
-                            (unsigned long long)sp.delta_end);
-                /* F7: a capture that returned 0 may still not exist on
-                 * disk (acknowledged-but-discarded writes), and spt0_info
-                 * above only reports memory. Without a PROVABLE window a
-                 * torn publish has no way back, so a failed verification
-                 * abandons the pass -- fail closed, like the manual pass
-                 * on explicit refusal. spt0_drop unwinds the in-memory
-                 * window and its pin; the volume is unchanged. */
-                if (spt0_verify_live(vol) != 0) {
-                    sw_progress_suspend();
-                    fprintf(stderr, "save point: capture did not land "
-                                    "(re-read mismatch); REFUSING the pass "
-                                    "(the volume is unchanged)\n");
-                    (void)spt0_drop(vol);
-                    vol_close(vol);
-                    return 1;
-                }
-            } else {
-                sw_progress_suspend();
-                fprintf(stderr, "save point: capture failed; sweeping "
-                                "without one\n");
-            }
-        }
+         * arms a fresh one after the walk, so the live window is always
+         * the LAST sweep. K=1. */
+        if (!invfs_sweep_ui_active())
+            fprintf(stderr, "save point: kept previous (--no-realize)\n");
     }
-    sw_stage_end(dry ? "dry-run policy ready" : "savepoint ready");
+    sw_stage_end(dry ? "dry-run policy ready" : "policy ready");
 
     sw_stage_begin(2, "collect", 0, "walking live inodes");
 
@@ -1826,9 +1784,67 @@ int main(int argc, char **argv)
         sw_stage_end(detail);
     }
 
-    /* WP19: the once-per-RUN heat decay (rheat >>= 1, wheat -= 1), before
-     * the walk so the walk's write-hot skip and the promotion pass below
-     * both see post-decay values. */
+    /* F9: arm the rollback window HERE, after the live set validated and
+     * before the first mutating stage. Collect above is read-only, so a
+     * sweep refused there leaves the volume bit-identical (the prepare
+     * used to capture and reclaim first, and a refused sweep kept its
+     * frees). K=1: the previous window is dropped only once the new one
+     * is captured and proven -- never the reverse. A dry run and
+     * --no-realize still touch nothing. */
+    if (!dry && !no_realize) {
+        if (realize) {
+            int drc = spt0_drop(vol);
+            if (drc < 0) {
+                sw_progress_suspend();
+                fprintf(stderr, "save point: realizing the previous "
+                                "run failed\n");
+                vol_close(vol);
+                return 1;
+            }
+            if (!invfs_sweep_ui_active())
+                fprintf(stderr, drc > 0
+                        ? "save point: previous run realized\n"
+                        : "save point: nothing to realize\n");
+        } else if (spt0_info(vol, NULL)) {
+            /* bare sweep: replace the previous window (K=1) */
+            (void)spt0_drop(vol);
+        }
+        if (spt0_capture(vol) == 0) {
+            invfs_spt0 sp;
+            if (spt0_info(vol, &sp) && !invfs_sweep_ui_active())
+                fprintf(stderr, "save point captured "
+                                "(base_root=%llu delta_end=%llu)\n",
+                        (unsigned long long)sp.base_root,
+                        (unsigned long long)sp.delta_end);
+            /* F7: a capture that returned 0 may still not exist on
+             * disk (acknowledged-but-discarded writes), and spt0_info
+             * above only reports memory. Without a PROVABLE window a
+             * torn publish has no way back, so a failed verification
+             * abandons the pass -- fail closed. spt0_drop unwinds the
+             * in-memory window and its pin; the volume is unchanged. */
+            if (spt0_verify_live(vol) != 0) {
+                sw_progress_suspend();
+                fprintf(stderr, "save point: capture did not land "
+                                "(re-read mismatch); REFUSING the pass "
+                                "(the volume is unchanged)\n");
+                (void)spt0_drop(vol);
+                vol_close(vol);
+                return 1;
+            }
+        } else {
+            sw_progress_suspend();
+            fprintf(stderr, "save point: capture failed; sweeping "
+                            "without one\n");
+        }
+        if (!invfs_sweep_ui_active())
+            fprintf(stderr, "savepoint ready\n");
+    }
+
+    /* WP19: the once-per-RUN heat decay (rheat >>= 1, wheat -= 1), after the
+     * savepoint arms and before transform, so the lane dispatch below sees
+     * post-decay values. (It used to run before the walk; F9 moved the
+     * capture after collect, and the decay stays with the mutating
+     * stages -- a refused sweep must leave the volume untouched.) */
     if (!dry)
         vol_heat_sweep_begin(vol);
 

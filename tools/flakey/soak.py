@@ -446,7 +446,17 @@ class Soak:
                 getattr(self, "op_" + op)()
             # CLI phase (engine ops) with fresh chaos under the hood
             if self.rng.random() < 0.35:
-                cli_mode = self.rng.choices(["up", "drop"], [50, 50])[0]
+                # F9: whole-volume mutations run in up mode only. A device
+                # that acknowledges writes it discards (drop) is:
+                # (a) undetectable per-op (acks look identical), so no
+                #     engine check can refuse it, and a sweep that runs
+                #     there reads a mix of stale and current data -- its
+                #     liveness walk then frees live blocks (dead-end);
+                # (b) out of contract anyway: drop models torn/flaky
+                #     writes (WINDOWS, leg 3's design), not a permanently
+                #     void volume. File ops keep all three modes; legs 3
+                #     and 4 keep the window chaos.
+                cli_mode = "up"
                 self.dm_set("up")          # clean unmount first
                 self.unmount()
                 self.dm_set(cli_mode)

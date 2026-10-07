@@ -307,18 +307,18 @@ seven core stages, in this order (`tools/invf-sweep.c`):
 
 | # | stage | what it does | cite |
 |---|---|---|---|
-| 1 | `prepare` | policy, and on v3 the **savepoint capture** that brackets the run | `invf-sweep.c:1574`, `:1689` |
-| 2 | `collect` | walk the live inodes | `:1734` |
-| 3 | `transform` | per-file lane dispatch: builtin container lanes, codecpack/containerpack lanes, text/binary batching, EXER carve, generic ZSTD floor — each only after its own bit-exactness guard passes | `:1822` |
-| 4 | `heat` | promote hot batch members to standalone segments | `:1955` |
-| 5 | `dedupe` | per-segment BLAKE3; cross-file and intra-file merge | `:1991` |
-| 6 | `batches` | GC of dead text/binary batches + the shared batch flush | `:2036` |
-| 7 | `finalize` | the durability point: checkpoint and volume flush | `:2067`, `:2106` |
+| 1 | `prepare` | policy only (F9: the capture used to live here; it moved to after `collect` validates, so a refused sweep leaves the volume untouched) | `invf-sweep.c:1787` |
+| 2 | `collect` | walk the live inodes | `:1690` |
+| 3 | `transform` | per-file lane dispatch: builtin container lanes, codecpack/containerpack lanes, text/binary batching, EXER carve, generic ZSTD floor — each only after its own bit-exactness guard passes | `:1850` |
+| 4 | `heat` | promote hot batch members to standalone segments | `:2035` |
+| 5 | `dedupe` | per-segment BLAKE3; cross-file and intra-file merge | `:2071` |
+| 6 | `batches` | GC of dead text/binary batches + the shared batch flush | `:2116` |
+| 7 | `finalize` | the durability point: checkpoint and volume flush | `:2147` |
 
 Two variants: a two-device volume inserts `tier` (hot/cold balancing) between
-`heat` and `dedupe` (`invf-sweep.c:1972`), and `--seal` appends `seal`
+`heat` and `dedupe` (`invf-sweep.c:2052`), and `--seal` appends `seal`
 (an 8th stage, which **refuses on v3** — see §2.3)
-(`:2124`). Under `--dry-run`, stage 3 reports as `plan`.
+(`:2190`). Under `--dry-run`, stage 3 reports as `plan`.
 
 Note the ordering: **re-encoding (stage 3) happens before reclaiming
 (stages 5–6)**, not after. A sweep therefore needs free space for the new
@@ -375,10 +375,13 @@ setfattr -n user.invfs.sweep -v 1 /mount/point  # same, via xattr
 ```
 
 > **Which triggers arm a rollback savepoint (v3).** All of them. The
-> offline `invf-sweep` captures an SPT0 savepoint in `prepare`, before the
-> walk (`tools/invf-sweep.c:1689`), and so does every full pass the FUSE
-> daemon runs: the watermark pass (`-o raw_watermark=<pct>`) and, since
-> WP134, `kill -USR1` and the `user.invfs.sweep` xattr too. All three
+> offline `invf-sweep` captures an SPT0 savepoint after the live set
+> validates, before `transform` (F9: capturing in `prepare` meant a sweep
+> refused at `collect` kept its prepare-time frees -- a refused sweep must
+> be bit-identical to one never run, and `collect` is read-only so the
+> window still brackets every mutation), and so does every full pass the
+> FUSE daemon runs: the watermark pass (`-o raw_watermark=<pct>`) and,
+> since WP134, `kill -USR1` and the `user.invfs.sweep` xattr too. All three
 > in-FUSE triggers set the same in-process flag
 > (`src/cli/fuse_fs.c:1990`, `:3169`), and the sweep thread's
 > `invf_sweep_worker` takes the same capture at the same point: under
