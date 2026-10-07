@@ -468,6 +468,10 @@ jobs:
         run: |
           set -o pipefail
           rc=0
+          # TCG boots on shared runners vary 13-16+ min wall; the script's
+          # 900 s default turns variance into red. 1500 s still catches a
+          # true hang (which never finishes) while surviving slow hosts.
+          INVFS_DEB_BOOT_TIMEOUT=1500 \
           INVFS_DEB_STAGE="$RUNNER_TEMP/debian" \
             bash tools/boot-debian-qemu.sh \
               2>&1 | tee "$RUNNER_TEMP/debianboot.log" || rc=${PIPESTATUS[0]}
