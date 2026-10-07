@@ -119,25 +119,35 @@ unset INVFS_COMMIT_BYTES INVFS_COMMIT_MS INVFS_COMMIT_IDLE_MS
 say "holders of $VOL:"
 base=$(basename "$VOL")
 cat /proc/locks 2>/dev/null | grep -a "$base" || say "(no flock holders)"
-ls -l /proc/[0-9]*/fd 2>/dev/null | grep -a "${base}$" || say "(no open fds visible)"
+# pid-prefixed fd scan: a bare grep loses which process holds the fd.
+for d in /proc/[0-9]*/fd; do
+    pid=${d#/proc/}; pid=${pid%%/*}
+    ls -l "$d" 2>/dev/null | grep -a "${base}$" | sed "s/^/pid $pid: /"
+done | grep -a . || say "(no open fds visible)"
 mount 2>/dev/null | grep -a "$VOL" || say "(not mounted)"
 ps aux 2>/dev/null | grep -a "invf" | grep -av grep || say "(no invf processes)"
 invf-fsck "$VOL" || exit 1
 
 # ---- phase 3: asserts ----
 # Paths are slashless by repo convention (all harnesses call invf-cat with
-# etc/passwd, not /etc/passwd); a leading slash reads nothing and cmp then
-# reports a MISMATCH that is really a lookup miss.
+# etc/passwd, not /etc/passwd); a leading slash reads nothing and the hash
+# compare then reports a MISMATCH that is really a lookup miss.
 # --follow resolves symlinks to the file, like the FUSE read does.
 # Fully synchronous reads: invf-cat writes a temp FILE and exits (lock
-# released) before cmp starts. Retries stay (a genuine transient still
-# shouldn't fail the install) and no invf-cat stderr is ever discarded.
+# released) before comparing starts. Retries stay (a genuine transient
+# still shouldn't fail the install) and no invf-cat stderr is ever
+# discarded.
+# Comparison is by hash, not cmp(1): the minimal live ISO has no cmp
+# (md5sum exists -- it is used below -- so hashes are the portable test).
+file_same() { # file_same <a> <b>: 0 when byte-identical
+    [ "$(md5sum < "$1")" = "$(md5sum < "$2")" ]
+}
 mkdir -p "$B"
 for f in etc/os-release etc/gentoo-release etc/passwd bin/bash usr/bin/emerge; do
     [ -f "$STAGE/$f" ] || continue
     ok=0
     for r in 1 2 3; do
-        if invf-cat --follow "$VOL" "$f" "$B/out" 2>"$B/cat-$r.err" && cmp -s "$STAGE/$f" "$B/out"; then
+        if invf-cat --follow "$VOL" "$f" "$B/out" 2>"$B/cat-$r.err" && file_same "$STAGE/$f" "$B/out"; then
             ok=$r; break
         fi
         say "try $r FAILED for $f: $(head -c 200 "$B/cat-$r.err" | tr '\n' '|')"
