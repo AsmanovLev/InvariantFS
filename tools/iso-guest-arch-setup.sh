@@ -88,8 +88,72 @@ if [ -z "$VOL" ]; then
 fi
 [ -b "${VOL:-none}" ] || { say "no volume disk (cmdline: $(tr ' ' '\n' < /proc/cmdline | grep -o 'invfsvol=[^ ]*' || echo none); disks: $(lsblk -dn -o NAME,RO | tr '\n' ' '))"; exit 1; }
 say "pacstrap base + linux to /mnt (native Arch install)"
-pacstrap /mnt base linux || exit 1
+# openssh/dhcpcd/iproute2/iputils: not in base, required for the
+# post-install BOOT phase (rc.invfs runs dhcpcd + sshd; boot-arch
+# asserts over SSH). linux-firmware stays out (no hardware to init).
+pacstrap /mnt base linux openssh dhcpcd iproute2 iputils || exit 1
 say "pacstrap done: $(du -sh /mnt | cut -f1) in /mnt"
+# ---- boot provisioning: make the imaged root bootable the same way
+# test-arch-install.sh does (busybox-init: systemd is not usable as PID1
+# on a FUSE root). Sourced from there -- keep the two in sync.
+BB=$B/busybox-static
+curl -fsS -o "$BB" "$SRV/busybox-static" || exit 1
+cp "$BB" /mnt/bin/busybox && chmod 755 /mnt/bin/busybox
+cat > /mnt/bin/invfs-init <<'EOF'
+#!/bin/sh
+# PID1 entry for the busybox-init fallback (invfs.init=/bin/invfs-init).
+exec /bin/busybox init
+EOF
+chmod 755 /mnt/bin/invfs-init
+cat > /mnt/etc/inittab <<'EOF'
+::sysinit:/etc/rc.invfs
+ttyS0::respawn:/usr/bin/agetty --autologin root --noclear -L 115200 ttyS0 vt100
+::ctrlaltdel:/usr/bin/reboot
+::shutdown:/bin/umount -a -r
+EOF
+cat > /mnt/etc/rc.invfs <<'EOF'
+#!/bin/sh
+export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+mountpoint -q /proc || mount -t proc proc /proc
+mountpoint -q /sys  || mount -t sysfs sysfs /sys
+mountpoint -q /dev  || mount -t devtmpfs devtmpfs /dev
+mkdir -p /run /tmp /var/tmp /var
+mountpoint -q /run     || mount -t tmpfs -o mode=0755,nosuid,nodev tmpfs /run
+mountpoint -q /tmp     || mount -t tmpfs -o mode=1777,nosuid,nodev tmpfs /tmp
+mountpoint -q /var/tmp || mount -t tmpfs -o mode=1777,nosuid,nodev tmpfs /var/tmp
+mountpoint -q /var     || mount -t tmpfs -o mode=0755,nosuid,nodev tmpfs /var
+mkdir -p /var/empty /var/log /var/lib /run/sshd /run/systemd/resolve
+hostname arch-invfs 2>/dev/null || true
+IFACE=""
+for n in /sys/class/net/*; do
+    [ -e "$n" ] || continue
+    b=$(basename "$n"); [ "$b" = lo ] && continue
+    IFACE="$b"; break
+done
+if [ -n "$IFACE" ]; then
+    ip link set "$IFACE" up
+    dhcpcd -b --nohook resolv.conf "$IFACE" 2>/dev/null
+    sleep 2
+    if ! ip -o -4 addr show dev "$IFACE" 2>/dev/null | grep -q 'inet '; then
+        ip addr add 10.0.2.15/24 dev "$IFACE" 2>/dev/null
+        ip route add default via 10.0.2.2 2>/dev/null
+    fi
+fi
+printf 'nameserver 10.0.2.3\n' > /run/systemd/resolve/stub-resolv.conf 2>/dev/null || true
+/usr/bin/sshd -D -e &
+echo "invfs-arch: rc.invfs done"
+EOF
+chmod 755 /mnt/etc/rc.invfs
+ln -sf /run/systemd/resolve/stub-resolv.conf /mnt/etc/resolv.conf
+arch-chroot /mnt bash -c 'echo root:root | chpasswd; ssh-keygen -A >/dev/null 2>&1 || true' || exit 1
+awk 'BEGIN{OFS=" "}
+/^#?PermitRootLogin/ {print "PermitRootLogin yes"; next}
+/^#?PasswordAuthentication/ {print "PasswordAuthentication yes"; next}
+{print}' /mnt/etc/ssh/sshd_config > "$B/sshd_config" || exit 1
+cp "$B/sshd_config" /mnt/etc/ssh/sshd_config
+chmod 600 /mnt/etc/ssh/sshd_config
+find /mnt/etc/ssh -maxdepth 1 -type f \( -name 'ssh_host_*_key' -o -name 'id_*' \) -exec chmod 0600 {} + 2>/dev/null || true
+say "boot provisioning done (busybox-init, root pw, host keys, sshd)"
 invf-mkfs "$VOL" 8 || exit 1
 # Bulk-import profile from docs/benchmarks/commit-policy.md: the default
 # commit intervals are conservative (live-root safe); an install may batch

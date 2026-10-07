@@ -64,7 +64,7 @@ sudo umount "$MNT"
 note "building the release artifact the guest will install"
 ( cd "$REPO" && make release >/dev/null 2>&1 ) || fail "make release failed"
 ART=$(ls "$REPO"/dist/invfs-*-x86_64.tar.zst | head -1)
-cp "$ART" "$REPO/dist/SHA256SUMS" "$REPO/packaging/PKGBUILD" "$REPO/tools/iso-guest-arch-setup.sh" "$SERVEDIR/"
+cp "$ART" "$REPO/dist/SHA256SUMS" "$REPO/packaging/PKGBUILD" "$REPO/tools/iso-guest-arch-setup.sh" "$REPO/bin/busybox-static" "$SERVEDIR/"
 note "serving: $(ls "$SERVEDIR" | tr '\n' ' ')"
 
 if [ "$ACCEL" = auto ]; then

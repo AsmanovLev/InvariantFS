@@ -200,18 +200,9 @@ jobs:
           KEEP=1 \
             bash tools/test-arch-install.sh
 
-      # Void volume build: DISABLED TEMPORARILY, with the Void boots. Nothing
-      # else in this job needs it -- the Void steps were self-contained -- and
-      # it costs a full distro import on every run. tools/test-void-install.sh is
-      # untouched.
       - name: initramfs for the boot harnesses
         run: bash tools/mkinitramfs.sh
 
-      # Void boot: DISABLED TEMPORARILY. It passes and has cost real time on
-      # every run; the signal the user wants right now is the Arch boot, which is
-      # the first of these harnesses that has never succeeded anywhere. Re-enable
-      # by deleting this comment -- the steps themselves are unchanged in
-      # tools/boot-void-qemu.sh and were green at 2675cbd.
       - name: arch root BOOTS on InvariantFS (single device)
         run: |
           # The exit status is captured rather than allowed to propagate through
@@ -330,11 +321,6 @@ jobs:
       - name: initramfs for the boot harnesses
         run: bash tools/mkinitramfs.sh
 
-      # Void boot: DISABLED TEMPORARILY. It passes and has cost real time on
-      # every run; the signal the user wants right now is the Arch boot, which is
-      # the first of these harnesses that has never succeeded anywhere. Re-enable
-      # by deleting this comment -- the steps themselves are unchanged in
-      # tools/boot-void-qemu.sh and were green at 2675cbd.
       - name: void root -> InvariantFS volume (offline)
         run: |
           INVFS_VOID_WORK="$RUNNER_TEMP/void" \
@@ -461,11 +447,6 @@ jobs:
       - name: initramfs for the boot harnesses
         run: bash tools/mkinitramfs.sh
 
-      # Void boot: DISABLED TEMPORARILY. It passes and has cost real time on
-      # every run; the signal the user wants right now is the Arch boot, which is
-      # the first of these harnesses that has never succeeded anywhere. Re-enable
-      # by deleting this comment -- the steps themselves are unchanged in
-      # tools/boot-void-qemu.sh and were green at 2675cbd.
       - name: debian root -> InvariantFS volume
         run: |
           set -euo pipefail
@@ -648,9 +629,34 @@ jobs:
         run: |
           WORK="$RUNNER_TEMP/iso" bash tools/iso-arch-install.sh
 
+      # Post-installation proof: boot the just-imaged volume the same way
+      # the (disabled) bootstrap job did. The ISO guest provisions
+      # busybox-init + root pw + host keys for exactly this.
+      - name: initramfs for the boot harness
+        run: bash tools/mkinitramfs.sh
+
+      - name: installed arch BOOTS on InvariantFS
+        run: |
+          set +e
+          ARCH_WORK="$RUNNER_TEMP/archboot" \
+          ARCH_LOG=/tmp/invfs-archboot.log \
+          ARCH_SSH_LOG=/tmp/invfs-archboot.ssh.log \
+            bash tools/boot-arch-qemu.sh --single "$RUNNER_TEMP/iso/vol.img" \
+              2>&1 | tee "$RUNNER_TEMP/archboot.log"
+          rc=${PIPESTATUS[0]}
+          set -e
+          mkdir -p "$RUNNER_TEMP/artifacts"
+          cp /tmp/invfs-archboot.log /tmp/invfs-archboot.ssh.log \
+            "$RUNNER_TEMP/artifacts/" 2>/dev/null || true
+          exit $rc
+
       # The guest serial + serve log are the only evidence when the marker
       # never comes; without them a failed run is undebuggable (the driver
       # only prints its own lines, the guest's stay on the runner).
+      # The guest serial + serve log are the only evidence when the marker
+      # never comes; without them a failed run is undebuggable (the driver
+      # only prints its own lines, the guest's stay on the runner).
+      # Boot-phase consoles ride along too (see the boot step above).
       - name: upload install evidence
         if: always()
         uses: actions/upload-artifact@v4
@@ -659,6 +665,7 @@ jobs:
           path: |
             ${{ runner.temp }}/iso/serial.log
             ${{ runner.temp }}/iso/serve.log
+            ${{ runner.temp }}/artifacts
           if-no-files-found: warn
 
   # Stock-Void-ISO install onto InvariantFS. Boots the pinned, checksummed
