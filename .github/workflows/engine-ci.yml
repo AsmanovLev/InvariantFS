@@ -691,7 +691,7 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y -qq build-essential pkg-config \
             libfuse3-dev zlib1g-dev libzstd-dev zstd xz-utils curl \
-            python3 qemu-system-x86 qemu-utils
+            python3 qemu-system-x86 qemu-utils e2fsprogs
 
       - name: build
         run: make -j"$(nproc)"
@@ -709,6 +709,50 @@ jobs:
           path: |
             ${{ runner.temp }}/iso-void/serial.log
             ${{ runner.temp }}/iso-void/serve.log
+          if-no-files-found: warn
+
+  # Stock-Gentoo-minimal-ISO install onto InvariantFS. Boots the pinned,
+  # checksummed ISO's kernel+initramfs pristine with the Handbook's own
+  # unattended-install pair (dosshd + passwd=), SSHes in and runs the
+  # Handbook stage3 install (pinned stage3 + SHA512): unpack, minimal
+  # config, mkfs, batched import, fsck, bit-exact spot checks, PASS,
+  # poweroff. No KVM on runners: the driver falls back to TCG (slow),
+  # hence the generous timeout. See tools/iso-gentoo-install.sh. Gentoo
+  # has no installer TUI; the Handbook install IS the CLI flow.
+  installation-iso-gentoo:
+    needs: [engine, packaging-gentoo]
+    runs-on: ubuntu-22.04
+    timeout-minutes: 150
+    steps:
+      # fetch-depth 0 so TAGS are present (same VERSION reason as above).
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq build-essential pkg-config \
+            libfuse3-dev zlib1g-dev libzstd-dev zstd xz-utils curl \
+            python3 qemu-system-x86 qemu-utils sshpass e2fsprogs
+
+      - name: build
+        run: make -j"$(nproc)"
+
+      - name: gentoo ISO install onto InvFS
+        run: |
+          WORK="$RUNNER_TEMP/iso-gentoo" bash tools/iso-gentoo-install.sh
+
+      # Same evidence rationale as the Arch ISO job above.
+      - name: upload install evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: iso-gentoo-install-logs
+          path: |
+            ${{ runner.temp }}/iso-gentoo/serial.log
+            ${{ runner.temp }}/iso-gentoo/serve.log
+            ${{ runner.temp }}/iso-gentoo/ssh.log
           if-no-files-found: warn
 
   # Debian, natively: the same dpkg-buildpackage the matrix runs, but on

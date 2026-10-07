@@ -35,12 +35,18 @@ BREAK_BANNER="Dropping to debug shell."
 # dracut live root lookup (confirmed: volume label of the ISO).
 ISO_LABEL="VOID_LIVE"
 PORT="${INVFS_ISO_PORT:-8001}"
+# 6G is plenty: the live system is the only RAM resident. The distro
+# staging lives on a DISK (see STAGEDISK), not in the live overlay -- a
+# tmpfs overlay caps at half of RAM, and base-system + xbps cache + the
+# unpacked tree overflowed 3G (measured ENOSPC). Disk-backed staging
+# removes RAM sizing from the equation entirely.
 MEM="${INVFS_ISO_MEM:-6G}"
 TIMEOUT_MIN="${INVFS_ISO_TIMEOUT_MIN:-100}"
 ACCEL="${INVFS_ACCEL:-auto}"
 
 ISO="$WORK/void-live-x86_64-$ISO_VER-base.iso"
 VOL="$WORK/vol.img"
+STAGEDISK="$WORK/stage.img"
 SER="$WORK/serial.log"
 SPIPE="$WORK/serial.pipe"
 SLOG="$WORK/serve.log"
@@ -70,9 +76,12 @@ note "ISO verified: $(basename "$ISO")"
 note "extracting kernel+initramfs from the ISO"
 mkdir -p "$MNT"
 sudo mount -o loop,ro "$ISO" "$MNT" || fail "loop-mount failed"
-cp "$MNT/$ISO_KERNEL" "$WORK/vmlinuz-void" || { sudo umount "$MNT"; fail "no $ISO_KERNEL in ISO"; }
-cp "$MNT/$ISO_INITRD" "$WORK/initramfs-void.img" || { sudo umount "$MNT"; fail "no $ISO_INITRD in ISO"; }
+# The ISO's files are root-owned and not user-readable; copy as root,
+# then take ownership (qemu runs as the user and must read them).
+sudo cp "$MNT/$ISO_KERNEL" "$WORK/vmlinuz-void" || { sudo umount "$MNT"; fail "no $ISO_KERNEL in ISO"; }
+sudo cp "$MNT/$ISO_INITRD" "$WORK/initramfs-void.img" || { sudo umount "$MNT"; fail "no $ISO_INITRD in ISO"; }
 sudo umount "$MNT"
+sudo chown "$(id -u):$(id -g)" "$WORK/vmlinuz-void" "$WORK/initramfs-void.img"
 
 note "building the release artifact the guest will install"
 ( cd "$REPO" && make release >/dev/null 2>&1 ) || fail "make release failed"
@@ -87,6 +96,10 @@ fi
 [ "$ACCEL" = kvm ] && CPU=${INVFS_CPU:-host} || CPU=${INVFS_CPU:-max}
 
 truncate -s 8G "$VOL"
+# Staging disk: ext4, LABEL=stage, so the guest mounts it by label
+# (virtio disk order is stable, but labels don't depend on it).
+truncate -s 6G "$STAGEDISK"
+mkfs.ext4 -F -q -L stage "$STAGEDISK" || fail "mkfs.ext4 stage failed"
 note "starting server on :$PORT"
 bash "$REPO/tools/invfs-serve.sh" "$SERVEDIR" "$PORT" >"$SLOG" 2>&1 &
 SRVPID=$!
@@ -111,26 +124,64 @@ serial_wait() { # serial_wait <pattern> <timeout-10s-units> ; 0 on match
     done
     return 1
 }
+# serial_run <tag> <command>: send one command line, then an RC echo, and
+# wait for the shell's OWN expansion (RC=0 <tag>). Matching our echoed
+# command text would prove nothing (serial echo shows what we SENT, with
+# $? unexpanded); the RC= line only appears when the shell RAN it.
+serial_run() {
+    local tag=$1; shift
+    serial_send "$*"
+    serial_send "echo \"RC=\$? $tag\""
+    serial_wait "RC=0 $tag" 12
+}
 
 note "starting qemu (accel=$ACCEL, stock ISO kernel+initramfs, rd.break hook)"
+# qemu's own stdout goes to a file, NOT the driver's: it inherits the
+# driver's stdout pipe, and a live qemu would hold it open forever,
+# hanging any downstream `| tail` (or CI log capture) past the run.
+QLOG="$WORK/qemu.log"
 qemu-system-x86_64 -machine q35,accel=$ACCEL -cpu "$CPU" -m "$MEM" -smp 2 \
   -kernel "$WORK/vmlinuz-void" -initrd "$WORK/initramfs-void.img" \
-  -append "root=live:CDLABEL=$ISO_LABEL rd.live.image ip=dhcp rd.break=pre-pivot console=ttyS0,115200 voidisosearchuuid=$ISO_LABEL" \
+  -append "root=live:CDLABEL=$ISO_LABEL rd.live.image ip=dhcp rd.break=pre-pivot console=ttyS0,115200 voidisosearchuuid=$ISO_LABEL invfsvol=/dev/vda" \
   -cdrom "$ISO" \
   -drive "file=$VOL,format=raw,if=virtio" \
+  -drive "file=$STAGEDISK,format=raw,if=virtio" \
   -netdev user,id=net0 -device virtio-net-pci,netdev=net0 \
-  -serial "pipe:$SPIPE" -display none -no-reboot &
+  -serial "pipe:$SPIPE" -display none -no-reboot >"$QLOG" 2>&1 &
 QPIDE=$!
+# The trap must kill qemu too: on FAIL the driver exits while the guest
+# (a live dracut shell) would otherwise idle forever, holding locks.
+cleanup() { kill $QPIDE $SRVPID 2>/dev/null; exec 9>&- 2>/dev/null; }
 # Writer only now that qemu has both pipe ends open (see comment above).
 exec 9>"$SPIPE.in"
 note "qemu pid $QPIDE; waiting for dracut break (up to $TIMEOUT_MIN min)"
 N=$(( TIMEOUT_MIN * 6 ))
 serial_wait "$BREAK_BANNER" "$N" || fail "dracut break prompt never appeared (see $SER)"
-note "break shell up; entering live root and running guest"
+note "break shell up; bringing up guest net, then running guest"
+# dracut's ip=dhcp leaves eth0 DOWN (measured: interface present, no
+# address, no resolv.conf), so DHCP explicitly. dhclient ships in the
+# initramfs; qemu user-net answers instantly. DNS is 10.0.2.3 always.
+serial_run NET_UP "dhclient -1 eth0 && ip addr show eth0 | grep -q 'inet '" \
+    || fail "DHCP failed in initramfs (see $SER)"
+# The fetch URL is an IP literal (no initramfs DNS needed), but the live
+# root's xbps must resolve void mirrors -- give it the known resolver.
+serial_run RESOLV "echo nameserver 10.0.2.3 > /etc/resolv.conf && cp -f /etc/resolv.conf /sysroot/etc/resolv.conf && grep -q nameserver /sysroot/etc/resolv.conf" \
+    || fail "live resolv.conf unwritable (see $SER)"
+note "live net ready; binding real /dev into the chroot, then running guest"
+# /sysroot/dev at pre-pivot is an EMPTY static dir (udev never populated
+# it): kernel-created nodes (console, fuse) appear only in the initramfs
+# devtmpfs. Bind it over, and prove it with /dev/null (absent statically).
+serial_run DEVBIND "mount --bind /dev /sysroot/dev && [ -e /sysroot/dev/null ]" \
+    || fail "cannot bind /dev into sysroot (see $SER)"
+note "chroot devices ready; entering live root and running guest"
+# The live root has NO curl/wget/python3 (verified against the ISO tree);
+# xbps-fetch ships with xbps and saves under the remote basename in cwd.
+# Trailing poweroff: if the chroot/fetch fails, the dracut shell would idle
+# forever (the guest trap never runs) -- attempt poweroff regardless.
+serial_send "chroot /sysroot /bin/bash -c 'cd /tmp && xbps-fetch http://10.0.2.2:$PORT/iso-guest-void-setup.sh && bash iso-guest-void-setup.sh'; poweroff -f"
 # One chrooted command, no nested prompts: the driver only ever waits for
 # echo-markers and the final PASS, never for a shell prompt (prompt text
 # also matches our own echo, so matching it proves nothing).
-serial_send "chroot /sysroot /bin/bash -c 'curl -fsS http://10.0.2.2:$PORT/iso-guest-void-setup.sh | bash'"
 note "guest launched; waiting for marker (up to $TIMEOUT_MIN min)"
 for _ in $(seq 1 "$N"); do
     sleep 10
