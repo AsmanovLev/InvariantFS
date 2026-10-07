@@ -99,6 +99,17 @@ read the Arch/Gentoo/Void rows as "tested on Arch/Gentoo/Void".
 
 ### Gentoo, measured directly because it has the thinnest history
 
+2026-10-08: first full local validation green -- stock minimal ISO
+(KVM), Handbook stage3 install onto InvFS, 54,239 files imported and
+fsck CLEAN, bit-exact spot checks pass
+(`INVFS-ISO-SETUP: PASS files=54239`). Harness fixes that fell out of
+the run: serial-pipe dummy writer must open after qemu launch (it
+deadlocked before), stage3 is host-staged (guest fetch is silent on
+failure), guest spot checks compare hashes (no `cmp` on the minimal
+ISO), guest lock snapshot names flock holders, `make release` strips
+flag stamps. CI's iso-gentoo job timed out at its 150 min ceiling
+under TCG before these fixes; untested whether it fits now.
+
 `65f9b47` introduced the ebuild and the Void template as new packaging for
 two of the four targets, so they are the least-exercised paths in the tree.
 There is no Gentoo host, no portage and no `xbps-src` on this machine, so
