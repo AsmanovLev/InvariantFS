@@ -68,7 +68,7 @@ EOF
 mkdir -p "$E/etc/issue.d"
 : > "$E/etc/issue"
 # No splash, no animations on a 115200 baud console.
-mkdir -p "$E/etc/default/locale" 2>/dev/null || true
+mkdir -p "$E/etc/default"
 cat > "$E/etc/default/locale" <<'EOF'
 LANG=C.UTF-8
 EOF
