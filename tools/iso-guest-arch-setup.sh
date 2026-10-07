@@ -67,20 +67,26 @@ grep -q "'  " "$B/PKGBUILD" && { say "PKGBUILD sums array has a non-hash entry";
 # before trusting it for anything -- including the fakeroot install below
 # and pacstrap later (both -Sy against the same mirror).
 # (The keyring package is signed by master keys the ISO already trusts.)
-pacman -Sy --needed --noconfirm archlinux-keyring || exit 1
+say "refreshing keyring from mirror..."
+pacman -Sy --needed --noconfirm archlinux-keyring || { say "STEP FAILED: keyring refresh"; exit 1; }
 # --populate needs a local secret key; a current keyring package SKIPS the
 # install that used to create it implicitly, exposing an uninitialized
 # gnupg home ('no secret key ... use pacman-key --init'). Init explicitly;
 # virtio-rng (driver) feeds the keygen under TCG so it can't stall on
 # entropy.
-pacman-key --init || exit 1
-pacman-key --populate archlinux || exit 1
-command -v fakeroot >/dev/null 2>&1 || pacman -Sy --needed --noconfirm fakeroot || exit 1
+say "pacman-key --init..."
+pacman-key --init || { say "STEP FAILED: pacman-key --init"; exit 1; }
+say "pacman-key --populate..."
+pacman-key --populate archlinux || { say "STEP FAILED: pacman-key --populate"; exit 1; }
+command -v fakeroot >/dev/null 2>&1 || { say "installing fakeroot..."; pacman -Sy --needed --noconfirm fakeroot || { say "STEP FAILED: fakeroot install"; exit 1; }; }
 chown -R builder:builder "$B"
-su builder -c "cd '$B' && makepkg --noconfirm" || exit 1
+say "makepkg (builder) ..."
+su builder -c "cd '$B' && makepkg --noconfirm" || { say "STEP FAILED: makepkg"; exit 1; }
 PKG=$(ls "$B"/invfs-*.pkg.tar.zst | head -1)
-pacman -U --noconfirm "$PKG" || exit 1
-pacman -Q invfs || exit 1
+say "installing $PKG ..."
+pacman -U --noconfirm "$PKG" || { say "STEP FAILED: pacman -U"; exit 1; }
+say "querying installed package..."
+pacman -Q invfs || { say "STEP FAILED: pacman -Q invfs"; exit 1; }
 pacman -Qk invfs 2>&1 | tail -2
 say "installed: $(pacman -Q invfs)"
 
