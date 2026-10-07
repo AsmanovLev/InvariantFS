@@ -76,6 +76,7 @@ src/cli/sibling_retire_test.c:211:ACTS
 src/cli/sib_walk_test.c:199:SKIP   # rescan: whether a name resolves IS the measurement
 src/cli/sib_walk_test.c:214:SKIP   # setup: create the bracketing directory only if absent
 src/cli/spn_walk_tear_test.c:176:SKIP   # oracle: whether the victim resolves IS the setup check -- the walk is measured against this id
+src/cli/tz_reg_collapse_test.c:158:SKIP   # oracle: whether the owner row resolves IS the fixture check -- the load is measured against this blob
 src/cli/bang_name_test.c:146:SKIP   # live(): whether a name resolves IS the measurement -- the defect was a name that resolved when it should not have, so the oracle must be the lookup itself
 src/cli/bang_name_test.c:168:SKIP   # reads_exact(): an unresolvable name is a FAILED byte-exact read, not a soft miss -- and WP141 made the exact-name lookup the FIRST thing vol_read_named does (src/core/vol_read.c), so a present file is never shadowed by a container member. An earlier version of this comment justified itself with the opposite claim (that vol_read_named reported a miss for a file present and intact); that was measured and REFUTED -- the defect was real but a different one, and it is fixed.
 src/cli/sweep_bang_test.c:82:ACTS   # reads_exact(): same shape as bang_name_test.c:168, but a miss here decides an assertion -- it FAILS the test, which is the only thing that makes this oracle safe
@@ -134,7 +135,7 @@ src/core/vol_sweep.c:459:ACTS
 src/core/vol_sweep.c:478:ACTS
 src/core/vol_sweep.c:498:ACTS
 src/core/vol_sweep.c:517:ACTS
-src/core/vol_textzone.c:679:SKIP
+src/core/vol_textzone.c:708:SKIP
 src/core/vol_tier.c:304:SKIP
 src/core/volume.c:1298:SKIP   # tier_owner / rawm_owner anchors (vol_open_inner)
 src/core/volume.c:1299:SKIP   # shifted by the PERF_PROFILING counters in volume.c

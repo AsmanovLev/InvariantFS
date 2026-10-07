@@ -3,6 +3,14 @@
  * Split from volume.c. */
 
 #include "volume_internal.h"
+#include "vol_fault.h"   /* test-only seams (P0-2 red control) */
+
+/* Test-only reload door for this TU's fault sites (same shape as the
+ * btree/dirs doors). Inert in production: nothing calls it but a test. */
+void invfs_vol_textzone_fault_reload(void)
+{
+    invfs_vol_fault_reload();
+}
 
 #define TZ_BATCH_MAX  (4ull << 20)    /* user-confirmed PPMd optimum (§3) */
 
@@ -356,23 +364,44 @@ static int tz_reg_load(invfs_volume *v, tz_reg *r)
     if (frc < 0) return -1;              /* did not COMPLETE: not "empty" */
     if (frc == 0) return 0;              /* genuinely absent: empty, fine */
     if (!r->owner_id) return 0;
+    /* P0-2: a failed read is not entitled to assert a negative about the
+     * volume. Every caller already treats nonzero as failure, so -1 here
+     * aborts the flush before anything is sealed (see the header note).
+     * The fault site is the red control (tz_reg_collapse_test). */
+    if (invfs_vol_fault("tz_reg_blob_read")) return -1;
     if (vol_read_file(v, r->owner_id, &buf, &len) != 0 || !buf) {
         free(buf);
-        return 0;
+        return -1;
     }
     if (len >= 8) {
         uint32_t magic = 0, n = 0;
         memcpy(&magic, buf, 4);
         memcpy(&n, buf + 4, 4);
-        if (magic == TZ_REG_MAGIC) {
+        if (magic != TZ_REG_MAGIC) {
+            /* torn blob wearing a readable length: not a registry, not
+             * empty -- refuse, same rule (P0-2). */
+            free(buf);
+            return -1;
+        }
+        {
             size_t avail = (len - 8) / sizeof(tz_reg_ent);
-            if ((size_t)n > avail) n = (uint32_t)avail;
+            if ((size_t)n > avail) {
+                /* entry count overruns the blob: torn tail. Clamping
+                 * would silently drop rows the store then forgets --
+                 * refuse instead (P0-2). */
+                free(buf);
+                return -1;
+            }
             if (n) {
                 r->ents = (tz_reg_ent *)malloc((size_t)n * sizeof *r->ents);
-                if (r->ents) {
-                    memcpy(r->ents, buf + 8, (size_t)n * sizeof *r->ents);
-                    r->n = r->cap = n;
+                if (!r->ents) {
+                    /* OOM masquerading as empty would orphan the same
+                     * way (P0-2). */
+                    free(buf);
+                    return -1;
                 }
+                memcpy(r->ents, buf + 8, (size_t)n * sizeof *r->ents);
+                r->n = r->cap = n;
             }
             for (size_t i = 0; i < r->n; i++)
                 if (r->ents[i].seq >= r->next_seq)

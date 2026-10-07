@@ -415,6 +415,34 @@ after K=1 drop loses the window) is accepted and documented: single-slot
 SPT0 cannot replace atomically, capture fails only on damaged-base or
 ENOSPC, and no data path precedes a successful capture.
 
+## P0-2 -- registry load refuses instead of reporting empty (audit triage)
+
+**Finding (WP207-NEW):** `tz_reg_load` answered 0 ("empty") when the
+registry blob failed to read -- and `tz_reg_store` rewrites the whole blob
+from memory, so the next flush sealed only its own batches over an empty
+array, irreversibly orphaning every prior row's segments. Same confusion
+at three adjacent arms: torn magic accepted as empty, overcount entry
+count silently clamped (then forgotten by the store), OOM read as empty.
+
+**Fix:** all four arms return -1. Every caller (`tz_reg_owned_blocks`,
+flush, GC) already treats nonzero as failure, and the owned-blocks doc
+comment already promised -1 for malformed volumes -- the code now matches
+its own docs. Plus a test-only fault site (`tz_reg_blob_read`) on the
+established per-TU pattern.
+
+**Regression:** `tz_reg_collapse_test` (shard-1): crafted 1-row registry
+through the real load path -- intact loads the row; faulted read, bad
+magic, and torn count each refuse; row survives; valid restores. 14/14
+post-fix; all three red legs verified failing pre-fix (fault/magic/
+clamp). Fixture discipline is asserted throughout (owner resolves,
+blob round-trips byte-exact) so no leg can pass vacuously.
+
+**Status 2026-10-08:** fixed, unit-proven. Owner-confirmed design
+follow-ups live elsewhere: sealed-volume recovery UX (refuse loudly +
+tool asks + parity rebuild -- gated on seal-v3), and the `/.InvariantFS`
+self-deploying reserve (ADR-011 proposed), which makes pack signatures
+mandatory rather than future.
+
 ## Tier status
 
 legs 1 (baseline), 3 (torn sweep), 4 (crash mid-seal) PASS;
