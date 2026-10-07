@@ -149,6 +149,15 @@ rm -f "$LOG" "$SSHLOG"
 : > "$SSHLOG"
 
 # -- build QEMU arguments ----------------------------------------------------
+# KVM if the host offers it, TCG otherwise (runners have no /dev/kvm;
+# hardcoded accel=kvm died instantly there -- the Arch boot that had
+# never succeeded anywhere). Same shape as boot-void-qemu.sh.
+ACCEL="${INVFS_ACCEL:-auto}"
+if [ "$ACCEL" = auto ]; then
+    if [ -r /dev/kvm ] && [ -w /dev/kvm ]; then ACCEL=kvm
+    else ACCEL=tcg; echo "note: /dev/kvm not usable here; falling back to TCG (slower)"; fi
+fi
+[ "$ACCEL" = kvm ] && CPU=${INVFS_CPU:-host} || CPU=${INVFS_CPU:-max}
 if [ "$BOOTLOADER" = 1 ]; then
     # --bootloader: OVMF + GRUB reading the ESP from the GPT disk image.
     # The disk image has p1=ESP(FAT32) with GRUB+kernel+initramfs,
@@ -156,7 +165,7 @@ if [ "$BOOTLOADER" = 1 ]; then
     note "booting via OVMF+GRUB from disk: $DISK_IMG"
     note "OVMF=$OVMF ram=${RAM}M port=$PORT"
     QEMU_ARGS=(
-        -machine q35,accel=kvm -cpu host -m "$RAM" -smp 2
+        -machine q35,accel=$ACCEL -cpu "$CPU" -m "$RAM" -smp 2
         -drive "if=pflash,format=raw,readonly=on,file=$OVMF"
         -drive "id=root,file=$DISK_IMG,format=raw,if=virtio"
         -append "console=ttyS0,115200"
@@ -177,7 +186,7 @@ else
     note "booting $MODE volume(s): IMG=$IMG${SHADOW:+ SHADOW=$SHADOW}"
     note "kernel=$KERNEL initrd=$INITRD ram=${RAM}M port=$PORT"
     QEMU_ARGS=(
-        -machine q35,accel=kvm -cpu host -m "$RAM" -smp 2
+        -machine q35,accel=$ACCEL -cpu "$CPU" -m "$RAM" -smp 2
         -kernel "$KERNEL" -initrd "$INITRD"
         -append "console=ttyS0,115200 invfs.init=/bin/invfs-init"
         "${DRIVES[@]}"
