@@ -718,6 +718,8 @@ static int spn_walk_ino(invfs_volume *v, uint64_t inode_id,
     c->n_inodes++;
     set = spn_inode_block_set(v, in, &blob, &blen, &ah, &ents, &n_ents,
                               NULL, 0);
+    CD("WALK inode=%llu set=%d nsegs=%zu pba0=%llu", (unsigned long long)inode_id,
+       (int)set, n_ents, n_ents ? (unsigned long long)ents[0].pba : 0ULL);
     if (set == SPN_SET_UNKNOWN) {
         /* THE RULE, capture side. This walk still completes and the pin is
          * still armed with whatever it did determine -- a hold is best-effort

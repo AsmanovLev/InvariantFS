@@ -314,6 +314,47 @@ repro: pre-fix the sweep returned rc=0 `volume durable`; post-fix it
 refuses rc=1 `capture did not land`, volume byte-untouched, and a
 healthy-mode sweep still completes. Chaos-soak validation pending.
 
+## F8 -- generation walk replays the wrong side of the pinned head
+(seed 20261331, artifacts leg5-soak-20261007-222059 and -222550)
+
+**Symptom (the s18/r00 shape):** a quiescent small file is CORRUPT at
+final verify (segment CRC mismatch, recipe still naming the blocks)
+after a HEALTHY-device sweep, while every op readback stayed green.
+Same PBA region dies every run (16460, then 16453 -- deterministic
+allocator, deterministic victim).
+
+**Attribution (upgraded CD trace: ms timestamps, tids, COMMIT/RETIRE):**
+the victim's 4 blocks were ALLOC'd once by a file COMMIT, never freed
+-- then a sweep's PREPARE stage freed them (spn_reclaim, tag `prepare`)
+with no RETIRE anywhere, and daemon writes reallocated the range with
+foreign bytes. Use-after-free with both ends named in the trace.
+Allocator exonerated again (bitmap replay: zero violations).
+
+**Mechanism:** `gen_prefix_replay`'s loop skipped `d > head_depth` --
+exactly backwards. Segments are collected newest-first, so that replays
+the captured head plus everything NEWER and skips everything OLDER,
+while the comment above it describes the opposite contract (and the
+head_bump cut only makes sense that way). With captured==current head
+-- the normal offline-sweep case -- the replay covered ONLY the head
+segment: any row whose latest record sat in a non-head segment and was
+not yet folded to base was never visited, zero indeterminacy counted,
+and the reclaim freed its blocks. One flipped comparison (`>` to `<`).
+Two adjacent silent gaps failed closed at the same time: a torn segment
+header broke collection mutely, and a torn record tail broke parsing
+mutely (`rc <= 0` conflated clean end with torn). The walk now refuses
+on any unreadable delta data; the capture (hence the sweep) refuses
+with it. The restore path shares the walk and inherits the refusal.
+
+**Regression:** `spn_walk_tear_test` (in-shard): buried victim +
+sabotaged mid-chain header. Control must visit the victim (fails
+pre-fix: 0 rows visited); torn chain must refuse (fails pre-fix:
+silent rc=0). 12/12 post-fix; both legs verified red via stash.
+
+**Status 2026-10-07:** fixed, unit-proven, soak validation pending.
+Note: ARC/overlay masking is why op readbacks stay green while the
+platter is bad (verify reads offline/cold) -- that observation stands
+but was not the mechanism here.
+
 ## Tier status
 
 legs 1 (baseline), 3 (torn sweep), 4 (crash mid-seal) PASS;

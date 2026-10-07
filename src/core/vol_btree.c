@@ -5981,8 +5981,16 @@ static int gen_prefix_replay(invfs_volume *v, gen_ctx *gc)
     while (cur && guard++ < DELTA_MAX_SEGMENTS) {
         invfs_delta_seg_hdr h;
         uint64_t *np;
+        /* F8: a torn/unreadable segment header used to BREAK here, silently
+         * amputating every older segment from the walk: rows whose only
+         * record lay below the tear were never visited, no indeterminacy
+         * was counted, and spn_reclaim freed their blocks under live
+         * recipes (leg-5 s18/r00 shape: quiescent file, healthy-device
+         * sweep, recipe still naming the freed blocks). A chain that cannot
+         * be walked whole is not a basis for "no live recipe names this",
+         * so the walk fails and the capture (hence the sweep) refuses. */
         if (delta_read_hdr(v, cur, &h) != 0)
-            break;
+            return -1;
         np = (uint64_t *)realloc(gc->seg_pba, (gc->nseg + 1) * sizeof *np);
         if (!np)
             return -1;
@@ -5992,6 +6000,9 @@ static int gen_prefix_replay(invfs_volume *v, gen_ctx *gc)
             break;
         cur = h.prev_pba;
     }
+    if (cur)
+        return -1;   /* chain longer than DELTA_MAX_SEGMENTS: partial replay
+                      * would amputate the same way, so refuse instead */
     /* Where the CAPTURED head sits in the chain as it is NOW. The log is
      * append-only, so a sweep that filled the head rolled a NEW segment in
      * front of it: the captured head is then at depth > 0 and everything in
@@ -6012,7 +6023,17 @@ static int gen_prefix_replay(invfs_volume *v, gen_ctx *gc)
         size_t plen, off = 0, limit;
         invfs_delta_seg_hdr h;
 
-        if ((int64_t)d > gc->head_depth)
+        /* F8: replay the captured head and everything OLDER; segments newer
+         * than the captured head are post-capture and must not overlay the
+         * pinned view. (This used to read `d > head_depth`, which is
+         * exactly backwards: it replayed the captured head plus everything
+         * NEWER at full stride -- handing the restore post-sweep recipes,
+         * the very thing the head_bump cut below exists to prevent -- while
+         * skipping every older segment, so a row whose latest record sat in
+         * a non-head segment was never visited, no indeterminacy was
+         * counted, and spn_reclaim freed its blocks under the live recipe.
+         * Leg-5 s18/r00 shape: quiescent file, healthy-device sweep.) */
+        if ((int64_t)d < gc->head_depth)
             continue;                        /* newer than the captured head */
         if (delta_read_hdr(v, gc->seg_pba[d], &h) != 0)
             return -1;
@@ -6046,8 +6067,15 @@ static int gen_prefix_replay(invfs_volume *v, gen_ctx *gc)
             int rc = vol_delta_rec_parse(buf + h.hdr_size, plen, off,
                                          &kl, &vl, &fl, &rl);
             gen_rec r;
-            if (rc <= 0)
-                break;                       /* clean end or torn tail */
+            if (rc == 0)
+                break;                       /* clean end of used prefix */
+            if (rc < 0) {
+                /* F8, same class as the header break above: a torn tail
+                 * hides this segment's remaining records (rows only they
+                 * name) while reporting success. Fail the walk instead. */
+                free(buf);
+                return -1;
+            }
             if (kl == 8) {
                 uint64_t id = 0;
                 uint16_t i;
