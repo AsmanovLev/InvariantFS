@@ -91,11 +91,97 @@ jobs:
           done
           [ "$FAIL" = 0 ] || { echo "engine e2e: at least one suite FAILED"; exit 1; }
           echo "engine e2e: ALL SUITES PASS"
+
+      # Bins for the e2e-full gate below: the tools, the unit harnesses
+      # and the built codecpack helpers (in-tree build products, not in
+      # git). Scripts ride the checkout; only build products ride this.
+      - name: upload e2e bins
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-bins
+          path: |
+            bin/
+            tools/codecpacks/
+          if-no-files-found: error
   # NOTE: there is deliberately no plain `packaging` job. The full
   # test-packaging.sh suite (all targets staged + sig negative controls)
   # already runs inside each native packaging-* job, so a fifth run only
   # duplicated them. Each installation below gates on its MATCHING native
   # packaging job instead of a shared staged gate.
+
+  # Full FUSE e2e gate: every `make e2e` suite (the list is extracted from
+  # the Makefile, so it cannot drift), plus the multidev chaos leg (not in
+  # `make e2e`). Skipped, with reasons: the two known-reds (test-resize A6
+  # pre-war, test-qcow2-zlib stale expectation -- both tracked, neither
+  # caused by this tree). Bins ride the engine artifact; scripts come from
+  # the checkout. Per-suite timeout so one wedged suite cannot eat the job.
+  e2e-full:
+    needs: [engine]
+    runs-on: ubuntu-22.04
+    timeout-minutes: 300
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+      - uses: actions/download-artifact@v4
+        with:
+          name: e2e-bins
+          path: .
+      - name: dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq libfuse3-dev fuse3 zlib1g-dev libzstd-dev zstd xz-utils curl python3 qemu-utils make
+          for p in libjxl-tools p7zip-full; do
+            sudo apt-get install -y -qq "$p" \
+              || echo "::warning::$p unavailable on this image (some suites degrade)"
+          done
+          sudo chmod +x bin/*
+          grep -q "^user_allow_other" /etc/fuse.conf \
+            || echo user_allow_other | sudo tee -a /etc/fuse.conf
+      - name: full e2e (minus known reds) + multidev
+        run: |
+          export INVFS_CODECPACKS_SYS=0
+          export PATH="$PATH:/sbin:/usr/sbin"
+          SKIP="test-resize.sh test-qcow2-zlib.sh"
+          FAIL=0
+          for s in $(make -n e2e | grep -o 'tools/test-[a-z0-9-]*\.sh' | sort -u) tools/test-flakey-multidev.sh; do
+            base="${s##*/}"
+            case " $SKIP " in *" $base "*) echo "SKIP (known red, tracked): $base"; continue;; esac
+            echo "::group::$base"
+            if timeout 1800 bash tools/run-e2e.sh "$s"; then echo "$base: PASS"; else echo "$base: FAIL"; FAIL=1; fi
+            echo "::endgroup::"
+          done
+          [ "$FAIL" = 0 ] || { echo "e2e-full: at least one suite FAILED"; exit 1; }
+          echo "e2e-full: ALL SUITES PASS"
+
+  # Chaos soak, informational only (continue-on-error): the power-loss /
+  # unstable-device storm has known pre-war reds and D-state hang modes
+  # that need a human, not a gate. Runs the same bins while they are hot.
+  soak-flakey:
+    needs: [engine]
+    runs-on: ubuntu-22.04
+    timeout-minutes: 150
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+      - uses: actions/download-artifact@v4
+        with:
+          name: e2e-bins
+          path: .
+      - name: dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq libfuse3-dev fuse3 zlib1g-dev libzstd-dev zstd xz-utils curl python3
+          sudo chmod +x bin/*
+      - name: flakey soak (informational)
+        run: |
+          export INVFS_CODECPACKS_SYS=0
+          export PATH="$PATH:/sbin:/usr/sbin"
+          timeout 5400 bash tools/run-e2e.sh tools/test-flakey.sh; rc=$?
+          echo "soak rc=$rc (informational; pre-war reds tracked, not gating)"
+          exit 0
 
   # The distro install harnesses, which build a real Arch and a real Void
   # root and take them through mkfs/import/fsck/verify/bit-exact reads.
