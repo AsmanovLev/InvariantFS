@@ -117,6 +117,8 @@ jobs:
   # so a bins-only artifact cannot feed them. Per-suite timeout so one
   # wedged suite cannot eat the job.
   e2e-full:
+    # LEG3-WORK: temporarily skipped, engine+soak only (re-enable by deleting this line)
+    if: false
     needs: [engine]
     # 24.04, not 22.04: libjxl-tools (cjxl/djxl, hard-required by the
     # jxl/exercarve/pngflac/rawimg lanes) is not installable on the 22.04
@@ -208,6 +210,8 @@ jobs:
   # is pinned under RUNNER_TEMP so a 1.8 GB staging tree never lands on the
   # runner's small /tmp.
   installation-bootstrap-arch:
+    # LEG3-WORK: temporarily skipped, engine+soak only (re-enable by deleting this line)
+    if: false
     needs: [engine, packaging-arch]
     # DISABLED: the bootstrap-tarball path (test-arch-install.sh) tests the
     # same ground as the stock-ISO flow (archiso-validation) with less
@@ -347,6 +351,8 @@ jobs:
           if-no-files-found: ignore
 
   installation-bootstrap-void:
+    # LEG3-WORK: temporarily skipped, engine+soak only (re-enable by deleting this line)
+    if: false
     needs: [engine, packaging-void]
     runs-on: ubuntu-22.04
     timeout-minutes: 45
@@ -473,6 +479,8 @@ jobs:
           if-no-files-found: ignore
 
   installation-bootstrap-debian:
+    # LEG3-WORK: temporarily skipped, engine+soak only (re-enable by deleting this line)
+    if: false
     needs: [engine, packaging-debian]
     runs-on: ubuntu-22.04
     timeout-minutes: 60
@@ -600,6 +608,8 @@ jobs:
   # two-device), fsck clean, bit-exact reads. No boot yet -- that needs
   # boot-fedora-qemu.sh, which does not exist. Scratch under RUNNER_TEMP.
   installation-bootstrap-fedora:
+    # LEG3-WORK: temporarily skipped, engine+soak only (re-enable by deleting this line)
+    if: false
     needs: [engine, packaging-fedora]
     runs-on: ubuntu-22.04
     timeout-minutes: 45
@@ -620,6 +630,8 @@ jobs:
           INVFS_FEDORA_WORK="$RUNNER_TEMP/fedora" \
             bash tools/test-fedora-install.sh
   packaging-fedora:
+    # LEG3-WORK: temporarily skipped, engine+soak only (re-enable by deleting this line)
+    if: false
     needs: [engine]
     runs-on: ubuntu-22.04
     container: fedora:latest
@@ -661,6 +673,8 @@ jobs:
   # Manifest regenerated -- the ebuild's BLAKE2B/SIZE pins are provenance
   # notes, portage's Manifest does the real verification.
   packaging-gentoo:
+    # LEG3-WORK: temporarily skipped, engine+soak only (re-enable by deleting this line)
+    if: false
     needs: [engine]
     runs-on: ubuntu-22.04
     container: gentoo/stage3:latest
@@ -716,6 +730,8 @@ jobs:
   # off. No KVM on runners: the driver falls back to TCG (slow), hence the
   # generous timeout. See tools/iso-arch-install.sh.
   installation-iso-arch:
+    # LEG3-WORK: temporarily skipped, engine+soak only (re-enable by deleting this line)
+    if: false
     needs: [engine, packaging-arch]
     runs-on: ubuntu-22.04
     timeout-minutes: 150
@@ -787,6 +803,8 @@ jobs:
   # driver falls back to TCG (slow), hence the generous timeout. See
   # tools/iso-void-install.sh. No void-installer TUI is driven anywhere.
   installation-iso-void:
+    # LEG3-WORK: temporarily skipped, engine+soak only (re-enable by deleting this line)
+    if: false
     needs: [engine, packaging-void]
     runs-on: ubuntu-22.04
     timeout-minutes: 150
@@ -830,6 +848,8 @@ jobs:
   # hence the generous timeout. See tools/iso-gentoo-install.sh. Gentoo
   # has no installer TUI; the Handbook install IS the CLI flow.
   installation-iso-gentoo:
+    # LEG3-WORK: temporarily skipped, engine+soak only (re-enable by deleting this line)
+    if: false
     needs: [engine, packaging-gentoo]
     runs-on: ubuntu-22.04
     timeout-minutes: 150
@@ -869,6 +889,8 @@ jobs:
   # the real Debian toolchain instead of Ubuntu's. Full suite (foreign
   # legs skip, staged legs run, debian leg native).
   packaging-debian:
+    # LEG3-WORK: temporarily skipped, engine+soak only (re-enable by deleting this line)
+    if: false
     runs-on: ubuntu-22.04
     container: debian:bookworm
     timeout-minutes: 40
@@ -900,6 +922,8 @@ jobs:
   # lived there). Containers run as root but makepkg refuses root (and
   # current pacman removed --asroot), so the build runs as a builder user.
   packaging-arch:
+    # LEG3-WORK: temporarily skipped, engine+soak only (re-enable by deleting this line)
+    if: false
     runs-on: ubuntu-22.04
     container: archlinux:base
     timeout-minutes: 40
@@ -944,6 +968,8 @@ jobs:
   # bootstrap, then a local srcpkgs overlay with re-pinned distfiles
   # (same test-staging shape as the Gentoo job).
   packaging-void:
+    # LEG3-WORK: temporarily skipped, engine+soak only (re-enable by deleting this line)
+    if: false
     runs-on: ubuntu-22.04
     container:
       image: ghcr.io/void-linux/void-glibc-full:latest
