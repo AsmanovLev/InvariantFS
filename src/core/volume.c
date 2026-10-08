@@ -869,6 +869,68 @@ static void probe_rt30(invfs_volume *v)
 }
 
 
+/* Reserve/bootstrap (owner request): scan the volume's own pack
+ * store into its registry section. Best-effort and read-only: a
+ * missing .invariantfs (the common case), an unreadable manifest, or
+ * an os/arch mismatch skips silently-or-loudly (the register call
+ * logs), and NEVER fails the open. Runs at the end of vol_open_inner,
+ * when reads already work. */
+static void vol_load_volume_packs(invfs_volume *v)
+{
+    static const char *packdir = ".invariantfs/codecpacks";
+    int cap = 64, n = 0, i, loaded = 0;
+    invfs_dirent *ents = NULL;
+    for (;;) {
+        free(ents);
+        ents = (invfs_dirent *)malloc((size_t)cap * sizeof *ents);
+        if (!ents)
+            return;
+        n = vol_list_dir(v, packdir, ents, cap);
+        if (n < 0) {
+            free(ents);
+            return;   /* no store on this volume: the common case */
+        }
+        if (n < cap)
+            break;
+        cap *= 2;
+    }
+    for (i = 0; i < n; i++) {
+        char nm[256];
+        size_t nl;
+        char mpath[320];
+        /* vol_list_dir returns directory names with a trailing '/'
+         * (anchor convention); strip it before the suffix match. */
+        snprintf(nm, sizeof nm, "%s", ents[i].name);
+        nl = strlen(nm);
+        while (nl && nm[nl - 1] == '/')
+            nm[--nl] = '\0';
+        uint64_t ino;
+        uint8_t *buf = NULL;
+        size_t blen = 0;
+        char dirlabel[352];
+        if (nl < 11 || strcmp(nm + nl - 10, ".codecpack") != 0)
+            continue;
+        if (snprintf(mpath, sizeof mpath, "%s/%s/manifest", packdir,
+                     nm) >= (int)sizeof mpath)
+            continue;
+        ino = vol_find(v, mpath);
+        if (!ino)
+            continue;
+        if (vol_read_file(v, ino, &buf, &blen) != 0 || !buf) {
+            free(buf);
+            continue;
+        }
+        snprintf(dirlabel, sizeof dirlabel, "%s/%s", packdir, nm);
+        if (invfs_codec_register_pack_mem(dirlabel, buf, blen, v) == 0)
+            loaded++;
+        free(buf);
+    }
+    free(ents);
+    if (loaded)
+        fprintf(stderr, "vol: %d pack(s) loaded from this volume's"
+                " .invariantfs\n", loaded);
+}
+
 static invfs_volume *vol_open_inner(const char *path, int *err_out)
 {
     int dummy_err = 0;
@@ -1503,6 +1565,7 @@ static invfs_volume *vol_open_inner(const char *path, int *err_out)
     }
     if (v->degraded)
         v->needs_recovery = 1;   /* a degraded mount is always read-only */
+    vol_load_volume_packs(v);
     return v;
 fail:
     vol_delta_close(v);   /* WP-M10: free any replay index (no-op if none) */
@@ -1544,6 +1607,10 @@ invfs_volume *vol_open(const char *path, int *err)
 
 void vol_close(invfs_volume *v)
 {
+    /* Reserve/bootstrap: evict this volume's pack section first (no
+     * volume state involved; later teardown must not see stale
+     * entries, and no new lookup may resolve through them). */
+    invfs_codec_unload_volume(v);
     /* A clean shutdown loses nothing under ANY commit policy: the volume is
      * about to stop being written, so this is where an owed sync is always
      * paid. Only an unclean power loss is affected by the policy. */

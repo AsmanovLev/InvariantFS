@@ -139,8 +139,9 @@ src/core/vol_sweep.c:595:ACTS
 src/core/vol_sweep.c:614:ACTS
 src/core/vol_textzone.c:708:SKIP
 src/core/vol_tier.c:304:SKIP
-src/core/volume.c:1298:SKIP   # tier_owner / rawm_owner anchors (vol_open_inner)
-src/core/volume.c:1299:SKIP   # shifted by the PERF_PROFILING counters in volume.c
+src/core/volume.c:916:SKIP   # reserve scan: manifest miss skips the pack; registration is the measurement
+src/core/volume.c:1360:SKIP   # tier_owner / rawm_owner anchors (vol_open_inner)
+src/core/volume.c:1361:SKIP   # shifted by the PERF_PROFILING counters in volume.c
 src/recipes/zip.c:141:SKIP
 src/recipes/zip.c:145:SKIP
 src/core/vol_cpack.c:2946:SKIP   # непомечен: добавлено при правке vol_cpack.c

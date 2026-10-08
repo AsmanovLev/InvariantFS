@@ -21,6 +21,7 @@
 
 #include "codec.h"
 #include "invarifs.h"
+#include "volume.h"   /* vol_open/vol_close for the volume-section legs */
 
 static int checks, failures;
 
@@ -67,8 +68,119 @@ static const invfs_codec *find_algo(uint32_t algo)
     return NULL;
 }
 
-int main(void)
+/* ---------------- reserve/bootstrap: volume pack sections ----------------
+ *
+ * A volume carrying .invariantfs/codecpacks registers them into its own
+ * section at open; two volumes may hold different packs under one algo
+ * without colliding, and closing unloads only the closed volume's.
+ * Built with real images (mkfs+import binaries, tz_reg_collapse_test
+ * pattern): the scan path is the production vol_open tail.
+ */
+static int write_pack_tree(const char *root, const char *pname,
+                           const char *algo, const char *extra)
 {
+    char d[512], p[576];
+    int r;
+    snprintf(d, sizeof d, "%s/.invariantfs/codecpacks/%s.codecpack", root,
+             pname);
+    snprintf(p, sizeof p, "%s/manifest", d);
+    mkdir(root, 0755);
+    {
+        char a[512], b[512];
+        snprintf(a, sizeof a, "%s/.invariantfs", root);
+        snprintf(b, sizeof b, "%s/.invariantfs/codecpacks", root);
+        mkdir(a, 0755);
+        mkdir(b, 0755);
+    }
+    mkdir(d, 0755);
+    {
+        char man[768];
+        snprintf(man, sizeof man,
+                 "name = %s\nalgo = %s\ncaps = external\n%s"
+                 "encode = bin/enc {in} {out}\n"
+                 "decode = bin/dec {in} {out}\n",
+                 pname, algo, extra ? extra : "");
+        r = write_file(p, man, 0);
+    }
+    snprintf(p, sizeof p, "%s/bin", d);
+    mkdir(p, 0755);
+    snprintf(p, sizeof p, "%s/bin/enc", d);
+    r |= write_file(p, "#!/bin/sh\ncp \"$1\" \"$2\"\n", 1);
+    snprintf(p, sizeof p, "%s/bin/dec", d);
+    r |= write_file(p, "#!/bin/sh\ncp \"$1\" \"$2\"\n", 1);
+    return r;
+}
+
+static const invfs_codec *vol_algo(invfs_volume *v, uint32_t algo)
+{
+    return invfs_codec_by_algo_vol(v, algo);
+}
+
+static void test_volume_sections(const char *dir, const char *root)
+{
+    char imgA[384], imgB[384], srcA[384], srcB[384], cmd[1024];
+    invfs_volume *vA = NULL, *vB = NULL;
+    const invfs_codec *e;
+    int err = 0;
+    snprintf(imgA, sizeof imgA, "%s/invfs-volpack-a.img", dir);
+    snprintf(imgB, sizeof imgB, "%s/invfs-volpack-b.img", dir);
+    snprintf(srcA, sizeof srcA, "%s/vsrcA", dir);
+    snprintf(srcB, sizeof srcB, "%s/vsrcB", dir);
+    unlink(imgA);
+    unlink(imgB);
+    unsetenv("INVFS_CODECPACKS");
+    invfs_codec_probe_reset();
+    ok(write_pack_tree(srcA, "vpack", "44", NULL) == 0,
+       "fixture: volume A pack tree");
+    ok(write_pack_tree(srcA, "badpack", "45",
+                       "os = definitely-not-an-os\n") == 0,
+       "fixture: volume A foreign-os pack tree");
+    ok(write_pack_tree(srcB, "vpack", "44", NULL) == 0,
+       "fixture: volume B pack tree (same algo, other pack)");
+    snprintf(cmd, sizeof cmd, "%s/bin/invf-mkfs %s 32 >/dev/null 2>&1",
+             root, imgA);
+    ok(system(cmd) == 0, "fixture: mkfs A");
+    snprintf(cmd, sizeof cmd, "%s/bin/invf-mkfs %s 32 >/dev/null 2>&1",
+             root, imgB);
+    ok(system(cmd) == 0, "fixture: mkfs B");
+    snprintf(cmd, sizeof cmd, "%s/bin/invf-import %s %s >/dev/null 2>&1",
+             root, imgA, srcA);
+    ok(system(cmd) == 0, "fixture: import A pack tree");
+    snprintf(cmd, sizeof cmd, "%s/bin/invf-import %s %s >/dev/null 2>&1",
+             root, imgB, srcB);
+    ok(system(cmd) == 0, "fixture: import B pack tree");
+    vA = vol_open(imgA, &err);
+    ok(vA != NULL, "setup: open A");
+    e = vol_algo(vA, 44);
+    ok(e && strcmp(e->name, "vpack") == 0,
+       "volume section: A's pack visible to A");
+    ok(vol_algo(vA, 45) == NULL,
+       "volume section: foreign-os pack refused at open");
+    vB = vol_open(imgB, &err);
+    ok(vB != NULL, "setup: open B");
+    e = vol_algo(vB, 44);
+    ok(e && strcmp(e->name, "vpack") == 0,
+       "volume section: B's pack visible to B");
+    e = vol_algo(vA, 44);
+    ok(e && strcmp(e->name, "vpack") == 0,
+       "volume section: A's view undisturbed by B (no collision)");
+    vol_close(vA);
+    vA = NULL;
+    e = vol_algo(vB, 44);
+    ok(e != NULL, "volume section: B survives A's close");
+    vol_close(vB);
+    vB = NULL;
+    ok(invfs_codec_by_algo(44) == NULL,
+       "volume section: close unloads (global clean)");
+    invfs_codec_probe_reset();
+    unlink(imgA);
+    unlink(imgB);
+}
+
+int main(int argc, char **argv)
+{
+    const char *root = getenv("PWD") ? getenv("PWD") : ".";
+    const char *tdir = (argc > 1) ? argv[1] : "/tmp";
     char dir[256], packs[320], empty[320], bin[320];
     char cpack[384], kpack[384], path[448];
     char sent_probe[384], sent_exec[384], sent_cmd[384];
@@ -235,6 +347,7 @@ int main(void)
     invfs_set_no_autopack(0);
 
     invfs_codec_probe_reset();
+    test_volume_sections(tdir, root);
     printf("noautopack: %d checks, %d failures\n", checks, failures);
     return failures != 0;
 }

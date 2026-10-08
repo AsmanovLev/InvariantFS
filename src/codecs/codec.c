@@ -441,12 +441,10 @@ static uint32_t parse_caps(const char *s)
 /* Minimal key=value parser: trims whitespace, ignores blank lines and
  * #-comments, skips unknown keys. sniff.offset applies to the most recent
  * sniff.magic rule (or to the first one, when it comes first). */
-static int parse_manifest(const char *path, struct pack_manifest *m)
+static int pack_parse_lines(FILE *f, struct pack_manifest *m)
 {
-    FILE *f = fopen(path, "r");
     char line[1024];
 
-    if (!f) return 0;
     memset(m, 0, sizeof *m);
     m->algo = -1;
     m->pack_version = -1;
@@ -531,8 +529,17 @@ static int parse_manifest(const char *path, struct pack_manifest *m)
             else            m->pending_off = off;
         }
     }
-    fclose(f);
     return 1;
+}
+
+static int parse_manifest(const char *path, struct pack_manifest *m)
+{
+    FILE *f = fopen(path, "r");
+    int rc;
+    if (!f) return 0;
+    rc = pack_parse_lines(f, m);
+    fclose(f);
+    return rc;
 }
 
 static int executable(const char *path)
@@ -781,13 +788,20 @@ typedef struct {
                                           * builtin EXTERNAL entry (its algo
                                           * is pub.algo); packs_ensure drops
                                           * the builtin from the view */
+    /* Reserve/bootstrap: which volume's .invariantfs this pack was
+     * scanned from, NULL for host-dir scans. Volume packs never drop a
+     * builtin from the shared view (that would lie to other volumes);
+     * _vol lookups prefer the volume's own section instead. */
+    const void      *origin_vol;
     int              probed;    /* memoized availability probe */
     int              avail;
 } pack_entry;
 
 static pack_entry packs[INVFS_PACK_MAX];
 static size_t     packs_n;
-static int        packs_built;      /* 1 = dirs scanned + registry materialized */
+static int        packs_built;      /* 1 = host dirs scanned once */
+static int        packs_dirty = 1;  /* 1 = volume sections changed: rebuild the view */
+static void       packs_ensure(void);
 static size_t     g_all_n;          /* live entries in g_all (below) */
 
 /* generic manifest-sniff: any magic rule -> 100, else extension list -> 50 */
@@ -1008,6 +1022,54 @@ PACK_TRAMPOLINES(12)
 PACK_TRAMPOLINES(13)
 PACK_TRAMPOLINES(14)
 PACK_TRAMPOLINES(15)
+PACK_TRAMPOLINES(16)
+PACK_TRAMPOLINES(17)
+PACK_TRAMPOLINES(18)
+PACK_TRAMPOLINES(19)
+PACK_TRAMPOLINES(20)
+PACK_TRAMPOLINES(21)
+PACK_TRAMPOLINES(22)
+PACK_TRAMPOLINES(23)
+PACK_TRAMPOLINES(24)
+PACK_TRAMPOLINES(25)
+PACK_TRAMPOLINES(26)
+PACK_TRAMPOLINES(27)
+PACK_TRAMPOLINES(28)
+PACK_TRAMPOLINES(29)
+PACK_TRAMPOLINES(30)
+PACK_TRAMPOLINES(31)
+PACK_TRAMPOLINES(32)
+PACK_TRAMPOLINES(33)
+PACK_TRAMPOLINES(34)
+PACK_TRAMPOLINES(35)
+PACK_TRAMPOLINES(36)
+PACK_TRAMPOLINES(37)
+PACK_TRAMPOLINES(38)
+PACK_TRAMPOLINES(39)
+PACK_TRAMPOLINES(40)
+PACK_TRAMPOLINES(41)
+PACK_TRAMPOLINES(42)
+PACK_TRAMPOLINES(43)
+PACK_TRAMPOLINES(44)
+PACK_TRAMPOLINES(45)
+PACK_TRAMPOLINES(46)
+PACK_TRAMPOLINES(47)
+PACK_TRAMPOLINES(48)
+PACK_TRAMPOLINES(49)
+PACK_TRAMPOLINES(50)
+PACK_TRAMPOLINES(51)
+PACK_TRAMPOLINES(52)
+PACK_TRAMPOLINES(53)
+PACK_TRAMPOLINES(54)
+PACK_TRAMPOLINES(55)
+PACK_TRAMPOLINES(56)
+PACK_TRAMPOLINES(57)
+PACK_TRAMPOLINES(58)
+PACK_TRAMPOLINES(59)
+PACK_TRAMPOLINES(60)
+PACK_TRAMPOLINES(61)
+PACK_TRAMPOLINES(62)
+PACK_TRAMPOLINES(63)
 
 static const struct pack_slot_fns {
     int (*sniff)(const uint8_t *, size_t, const char *);
@@ -1031,6 +1093,54 @@ static const struct pack_slot_fns {
     { pack_sniff_13, pack_probe_13, pack_encode_13, pack_decode_13 },
     { pack_sniff_14, pack_probe_14, pack_encode_14, pack_decode_14 },
     { pack_sniff_15, pack_probe_15, pack_encode_15, pack_decode_15 },
+    { pack_sniff_16, pack_probe_16, pack_encode_16, pack_decode_16 },
+    { pack_sniff_17, pack_probe_17, pack_encode_17, pack_decode_17 },
+    { pack_sniff_18, pack_probe_18, pack_encode_18, pack_decode_18 },
+    { pack_sniff_19, pack_probe_19, pack_encode_19, pack_decode_19 },
+    { pack_sniff_20, pack_probe_20, pack_encode_20, pack_decode_20 },
+    { pack_sniff_21, pack_probe_21, pack_encode_21, pack_decode_21 },
+    { pack_sniff_22, pack_probe_22, pack_encode_22, pack_decode_22 },
+    { pack_sniff_23, pack_probe_23, pack_encode_23, pack_decode_23 },
+    { pack_sniff_24, pack_probe_24, pack_encode_24, pack_decode_24 },
+    { pack_sniff_25, pack_probe_25, pack_encode_25, pack_decode_25 },
+    { pack_sniff_26, pack_probe_26, pack_encode_26, pack_decode_26 },
+    { pack_sniff_27, pack_probe_27, pack_encode_27, pack_decode_27 },
+    { pack_sniff_28, pack_probe_28, pack_encode_28, pack_decode_28 },
+    { pack_sniff_29, pack_probe_29, pack_encode_29, pack_decode_29 },
+    { pack_sniff_30, pack_probe_30, pack_encode_30, pack_decode_30 },
+    { pack_sniff_31, pack_probe_31, pack_encode_31, pack_decode_31 },
+    { pack_sniff_32, pack_probe_32, pack_encode_32, pack_decode_32 },
+    { pack_sniff_33, pack_probe_33, pack_encode_33, pack_decode_33 },
+    { pack_sniff_34, pack_probe_34, pack_encode_34, pack_decode_34 },
+    { pack_sniff_35, pack_probe_35, pack_encode_35, pack_decode_35 },
+    { pack_sniff_36, pack_probe_36, pack_encode_36, pack_decode_36 },
+    { pack_sniff_37, pack_probe_37, pack_encode_37, pack_decode_37 },
+    { pack_sniff_38, pack_probe_38, pack_encode_38, pack_decode_38 },
+    { pack_sniff_39, pack_probe_39, pack_encode_39, pack_decode_39 },
+    { pack_sniff_40, pack_probe_40, pack_encode_40, pack_decode_40 },
+    { pack_sniff_41, pack_probe_41, pack_encode_41, pack_decode_41 },
+    { pack_sniff_42, pack_probe_42, pack_encode_42, pack_decode_42 },
+    { pack_sniff_43, pack_probe_43, pack_encode_43, pack_decode_43 },
+    { pack_sniff_44, pack_probe_44, pack_encode_44, pack_decode_44 },
+    { pack_sniff_45, pack_probe_45, pack_encode_45, pack_decode_45 },
+    { pack_sniff_46, pack_probe_46, pack_encode_46, pack_decode_46 },
+    { pack_sniff_47, pack_probe_47, pack_encode_47, pack_decode_47 },
+    { pack_sniff_48, pack_probe_48, pack_encode_48, pack_decode_48 },
+    { pack_sniff_49, pack_probe_49, pack_encode_49, pack_decode_49 },
+    { pack_sniff_50, pack_probe_50, pack_encode_50, pack_decode_50 },
+    { pack_sniff_51, pack_probe_51, pack_encode_51, pack_decode_51 },
+    { pack_sniff_52, pack_probe_52, pack_encode_52, pack_decode_52 },
+    { pack_sniff_53, pack_probe_53, pack_encode_53, pack_decode_53 },
+    { pack_sniff_54, pack_probe_54, pack_encode_54, pack_decode_54 },
+    { pack_sniff_55, pack_probe_55, pack_encode_55, pack_decode_55 },
+    { pack_sniff_56, pack_probe_56, pack_encode_56, pack_decode_56 },
+    { pack_sniff_57, pack_probe_57, pack_encode_57, pack_decode_57 },
+    { pack_sniff_58, pack_probe_58, pack_encode_58, pack_decode_58 },
+    { pack_sniff_59, pack_probe_59, pack_encode_59, pack_decode_59 },
+    { pack_sniff_60, pack_probe_60, pack_encode_60, pack_decode_60 },
+    { pack_sniff_61, pack_probe_61, pack_encode_61, pack_decode_61 },
+    { pack_sniff_62, pack_probe_62, pack_encode_62, pack_decode_62 },
+    { pack_sniff_63, pack_probe_63, pack_encode_63, pack_decode_63 },
 };
 
 static char *pack_strdup(const char *s)
@@ -1082,6 +1192,7 @@ void invfs_codec_probe_reset(void)
     for (i = 0; i < packs_n; i++) pack_entry_free(&packs[i]);
     packs_n = 0;
     packs_built = 0;
+    packs_dirty = 1;   /* the view rebuilds (empty) on next lookup */
     g_all_n = 0;
 }
 
@@ -1151,8 +1262,15 @@ static const invfs_codec registry[] = {
 _Static_assert(REGISTRY_N < 64,
     "builtin registry rows must fit the 6-bit AST algo field");
 
-/* materialized registry: static entries + loaded packs, PPMD last */
+/* materialized registry: static entries + loaded packs, PPMD last.
+ * g_all_vol tags each slot's origin in lockstep (NULL = static/host);
+ * the tags are what _vol lookups scope by. The arrays are rebuilt in
+ * place when volume sections change, so entry POINTERS stay valid but
+ * their TARGETS may move: do not hold them across vol_open/vol_close
+ * of any volume. In practice nothing does (sweeps hold their volume
+ * open throughout). */
 static invfs_codec g_all[REGISTRY_N + INVFS_PACK_MAX];
+static const void *g_all_vol[REGISTRY_N + INVFS_PACK_MAX];
 
 /* ---------------- pack registration + materialized view (WP13) ---------- */
 
@@ -1235,7 +1353,33 @@ static int pack_host_matches(const struct pack_manifest *m)
     return 1;
 }
 
-static void pack_register(const char *dir, const struct pack_manifest *m)
+/* Trampolines close over the SLOT index, not the entry: any structural
+ * change (register, unload-compact) must rebind every live entry to
+ * its current slot, or an entry silently drives its neighbour's
+ * pack (or a dead slot past packs_n, which declines everything). */
+static void pack_rebind_all(void)
+{
+    size_t i;
+    for (i = 0; i < packs_n; i++) {
+        packs[i].pub.sniff = pack_fns[i].sniff;
+        packs[i].pub.probe = pack_fns[i].probe;
+        if (packs[i].is_container) {
+            packs[i].pub.encode = NULL;
+            packs[i].pub.decode = NULL;
+        } else {
+            packs[i].pub.encode = pack_fns[i].encode;
+            packs[i].pub.decode = pack_fns[i].decode;
+        }
+    }
+}
+
+/* vol == NULL for host-dir scans, else the volume whose .invariantfs
+ * the manifest was read from. Origin scopes duplicates (two volumes
+ * may carry different packs under one algo or name) and volume packs
+ * never drop a builtin from the shared view -- _vol lookups prefer the
+ * volume's own section instead. */
+static void pack_register_inner(const char *dir, const struct pack_manifest *m,
+                                const void *vol)
 {
     pack_entry *p;
     size_t i;
@@ -1282,10 +1426,13 @@ static void pack_register(const char *dir, const struct pack_manifest *m)
         if (registry[i].algo == (uint32_t)m->algo) {
             if (!(registry[i].caps & INVFS_CODEC_CAP_EXTERNAL))
                 return;                     /* algo taken, not overridable */
-            overrides = 1;
+            if (!vol)
+                overrides = 1;
             break;
         }
     for (i = 0; i < packs_n; i++) {
+        if (packs[i].origin_vol != vol)
+            continue;   /* another folder's same algo/name is fine */
         if (packs[i].pub.algo == (uint32_t)m->algo) return;
         if (strcmp(packs[i].name, m->name) == 0) return;     /* seen already */
     }
@@ -1330,8 +1477,7 @@ static void pack_register(const char *dir, const struct pack_manifest *m)
     p->pub.caps          = m->caps;
     p->pub.dec_mem_bytes = m->dec_mem;
     p->pub.generation    = (uint16_t)m->generation;
-    p->pub.sniff         = pack_fns[packs_n].sniff;
-    p->pub.probe         = pack_fns[packs_n].probe;
+    /* sniff/probe/encode/decode come from pack_rebind_all() below. */
     if (p->is_container) {
         /* a container pack never whole-file transcodes: the WP13 sweep
          * loop skips NULL encode/decode, and the WP16a container branch
@@ -1352,10 +1498,8 @@ static void pack_register(const char *dir, const struct pack_manifest *m)
             p->pub.caps &= ~INVFS_CODEC_CAP_SEEK;
         p->pub.encode = NULL;
         p->pub.decode = NULL;
-    } else {
-        p->pub.encode = pack_fns[packs_n].encode;
-        p->pub.decode = pack_fns[packs_n].decode;
     }
+    /* codec packs: encode/decode bound by pack_rebind_all() below. */
 
     p->def.dir      = p->dir;
     p->def.encode   = p->encode;
@@ -1369,7 +1513,81 @@ static void pack_register(const char *dir, const struct pack_manifest *m)
     p->def.rebuild   = p->rebuild;
     p->def.map       = p->map;
     p->def.batch     = p->batch;
+    p->origin_vol = vol;
     packs_n++;
+    pack_rebind_all();
+    packs_dirty = 1;
+    memset(probe_cache, 0, sizeof probe_cache);
+}
+
+/* Reserve/bootstrap: register one manifest from a memory buffer (the
+ * volume scan reads manifests with vol_read_file, not stdio). Returns
+ * 0 on registration, -1 when skipped or unparseable. */
+int invfs_codec_register_pack_mem(const char *dir, const uint8_t *buf,
+                                  size_t blen, const void *vol)
+{
+#ifdef _WIN32
+    (void)dir; (void)buf; (void)blen; (void)vol;
+    return -1;   /* volume packs need fmemopen; Windows is parked */
+#else
+    struct pack_manifest m;
+    FILE *f;
+    size_t before = packs_n;
+    if (!dir || !buf || !blen || !vol)
+        return -1;
+    f = fmemopen((void *)buf, blen, "r");
+    if (!f)
+        return -1;
+    if (!pack_parse_lines(f, &m)) {
+        fclose(f);
+        return -1;
+    }
+    fclose(f);
+    pack_register_inner(dir, &m, vol);
+    return packs_n > before ? 0 : -1;
+#endif
+}
+
+/* Reserve/bootstrap: drop every pack a volume brought. Called at
+ * vol_close (before teardown) and by the probe-reset hook. Entries
+ * compact by swap-with-last plus full rebind (trampolines close over
+ * the slot); the materialized view rebuilds lazily on next lookup. */
+void invfs_codec_unload_volume(const void *vol)
+{
+    size_t i, n;
+    if (!vol)
+        return;
+    n = 0;
+    for (i = 0; i < packs_n; i++) {
+        if (packs[i].origin_vol == vol) {
+            pack_entry_free(&packs[i]);
+            continue;
+        }
+        if (n != i)
+            packs[n] = packs[i];
+        n++;
+    }
+    if (n != packs_n) {
+        packs_n = n;
+        pack_rebind_all();
+        packs_dirty = 1;
+        memset(probe_cache, 0, sizeof probe_cache);
+    }
+}
+
+/* Reserve/bootstrap: the volume's own section first, then the shared
+ * view. A volume pack never shadows another volume's entry -- only
+ * its own volume's lookups see it preferred. */
+const invfs_codec *invfs_codec_by_algo_vol(const void *vol, uint32_t algo)
+{
+    size_t i;
+    packs_ensure();
+    if (vol) {
+        for (i = 0; i < packs_n; i++)
+            if (packs[i].origin_vol == vol && packs[i].pub.algo == algo)
+                return &packs[i].pub;
+    }
+    return invfs_codec_by_algo(algo);
 }
 
 static void pack_scan_dir(const char *dir, size_t dlen)
@@ -1397,7 +1615,7 @@ static void pack_scan_dir(const char *dir, size_t dlen)
         memcpy(path + plen, "/manifest", 10);
         if (!parse_manifest(path, &m)) continue;
         path[plen] = '\0';
-        pack_register(path, &m);
+        pack_register_inner(path, &m, NULL);
     }
     closedir(d);
 }
@@ -1452,24 +1670,49 @@ static void packs_ensure(void)
 {
     size_t i, j, n;
 
-    if (packs_built) return;
-    packs_built = 1;
-    pack_scan_all();
+    if (!packs_built) {
+        packs_built = 1;
+        pack_scan_all();
+    }
+    if (!packs_dirty)
+        return;
+    packs_dirty = 0;
     n = 0;
     for (i = 0; i < REGISTRY_N; i++) {
         int taken = 0;
         if (registry[i].algo == INVFS_ALGO_PPMD) continue;
         for (j = 0; j < packs_n; j++)
-            if (packs[j].overrides_builtin &&
+            if (!packs[j].origin_vol && packs[j].overrides_builtin &&
                 packs[j].pub.algo == registry[i].algo) {
                 taken = 1;
                 break;
             }
-        if (!taken) g_all[n++] = registry[i];
+        if (taken) continue;
+        g_all[n] = registry[i];
+        g_all_vol[n] = NULL;
+        n++;
     }
-    for (i = 0; i < packs_n; i++) g_all[n++] = packs[i].pub;
+    /* Host packs first (registration order), then volume sections: the
+     * shared by_algo() answer stays host-deterministic no matter when
+     * a volume was opened. */
+    for (i = 0; i < packs_n; i++) {
+        if (packs[i].origin_vol) continue;
+        g_all[n] = packs[i].pub;
+        g_all_vol[n] = NULL;
+        n++;
+    }
+    for (i = 0; i < packs_n; i++) {
+        if (!packs[i].origin_vol) continue;
+        g_all[n] = packs[i].pub;
+        g_all_vol[n] = packs[i].origin_vol;
+        n++;
+    }
     for (i = 0; i < REGISTRY_N; i++)
-        if (registry[i].algo == INVFS_ALGO_PPMD) g_all[n++] = registry[i];
+        if (registry[i].algo == INVFS_ALGO_PPMD) {
+            g_all[n] = registry[i];
+            g_all_vol[n] = NULL;
+            n++;
+        }
     g_all_n = n;
 }
 

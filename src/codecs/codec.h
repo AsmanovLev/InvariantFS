@@ -55,6 +55,21 @@ typedef struct invfs_codec {
 
 const invfs_codec *invfs_codec_by_algo(uint32_t algo);
 const invfs_codec *invfs_codec_all(size_t *count);   /* order = sniff priority: specific magics first, text LAST */
+
+/* Reserve/bootstrap: per-volume pack sections (owner request). A volume's
+ * own .invariantfs packs register under its identity tag (its
+ * invfs_volume*, passed opaque so this header stays low-level) and its
+ * lookups prefer them; others never see them preferred. Entry pointers
+ * are valid until any volume loads/unloads packs (the view rebuilds in
+ * place); sweeps hold their volume open throughout, so nothing dangles.
+ * register_pack_mem parses one manifest from memory (volumes have no
+ * stdio paths); 0 = registered, -1 = skipped/unparseable. */
+int                invfs_codec_register_pack_mem(const char *dir,
+                                                 const uint8_t *buf,
+                                                 size_t blen,
+                                                 const void *vol);
+void               invfs_codec_unload_volume(const void *vol);
+const invfs_codec *invfs_codec_by_algo_vol(const void *vol, uint32_t algo);
 uint16_t           invfs_registry_generation(void);  /* max generation over all codecs */
 void               invfs_codec_probe_reset(void);    /* test hook: clear memoized probe() results + unload packs */
 
