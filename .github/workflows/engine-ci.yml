@@ -210,8 +210,6 @@ jobs:
   # is pinned under RUNNER_TEMP so a 1.8 GB staging tree never lands on the
   # runner's small /tmp.
   installation-bootstrap-arch:
-    # LEG3-WORK: temporarily skipped, engine+soak only (re-enable by deleting this line)
-    if: false
     needs: [engine, packaging-arch]
     # DISABLED: the bootstrap-tarball path (test-arch-install.sh) tests the
     # same ground as the stock-ISO flow (archiso-validation) with less
