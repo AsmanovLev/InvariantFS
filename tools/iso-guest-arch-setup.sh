@@ -77,7 +77,20 @@ pacman -Sy --needed --noconfirm archlinux-keyring || { say "STEP FAILED: keyring
 say "pacman-key --init..."
 pacman-key --init || { say "STEP FAILED: pacman-key --init"; exit 1; }
 say "pacman-key --populate..."
-pacman-key --populate archlinux || { say "STEP FAILED: pacman-key --populate"; exit 1; }
+# TCG guest flake (2 of 3 CI runs): --populate races the keyboxd/agent
+# startup from --init -- gpg lock contention ("waiting for lock") and
+# keydb errors on a slow first attempt. The failed attempt's locks are
+# stale (its gpg exited), so clear + retry; a first-try success behaves
+# exactly as before.
+pop_ok=0
+for attempt in 1 2 3; do
+    if pacman-key --populate archlinux; then pop_ok=1; break; fi
+    say "populate attempt $attempt failed; clearing stale gpg locks..."
+    rm -f /etc/pacman.d/gnupg/*.lock
+    gpgconf --kill gpg-agent 2>/dev/null || true
+    sleep 20
+done
+[ "$pop_ok" = 1 ] || { say "STEP FAILED: pacman-key --populate"; exit 1; }
 command -v fakeroot >/dev/null 2>&1 || { say "installing fakeroot..."; pacman -Sy --needed --noconfirm fakeroot || { say "STEP FAILED: fakeroot install"; exit 1; }; }
 chown -R builder:builder "$B"
 say "makepkg (builder) ..."
