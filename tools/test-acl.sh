@@ -294,8 +294,15 @@ allow "nobody ls inherited subdir (r-x)"  nb ls "$MNT/d/sub"
 # requests 0775 and the mask is rwx (create allowed even more clearly). Either
 # way the deny is wrong, which is why this leg could not be rescued by setting
 # the umask -- only the earlier touch could.
-allow "nobody create in subdir (r-x effective grants w)" \
-      nbsh "echo x > '$MNT/d/sub/z'"
+# runner-only failure triage lives here, not in a rerun: dump the inputs
+# the daemon decided on.
+nbsh "echo x > '$MNT/d/sub/z'" >/dev/null 2>&1 || {
+    echo "--- acl leg C debug (runner-only failure triage) ---" >&2
+    echo "umask: $(umask), id nobody: $(id nobody 2>&1)" >&2
+    stat -c 'sub mode: %a uid=%u gid=%g' "$MNT/d/sub" >&2
+    getfacl -p "$MNT/d/sub" 2>&1 | head -n 12 >&2
+    fail "nobody create in subdir (r-x effective grants w)"
+}
 python3 - "$MNT/d/g" <<'PYEOF' || fail "mode-0600 create under default ACL"
 import os, sys
 fd = os.open(sys.argv[1], os.O_CREAT | os.O_WRONLY, 0o600)

@@ -766,7 +766,7 @@ TEST_BINS := $(foreach t,$(filter %_test,$(CLI_MAINS)),$(OUT)/invf-$(t))
 # Build-only gate for CI jobs that run e2e suites without running unit
 # tests: every harness the e2e tier reaches for, plus the tools `all`
 # does not ship (invf-why). `make e2e` assumes them present.
-test-bins: $(TEST_BINS) $(OUT)/invf-why
+test-bins: $(TEST_BINS) $(OUT)/invf-why $(OUT)/invf-helper_exec_test
 # `helpers` is a prerequisite and not an optional extra: several suites build
 # the binary they exercise themselves (test-p7z-batch.sh compiles the p7z pack)
 # rather than taking it from TEST_BINS, so without this the suite runs against

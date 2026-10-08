@@ -409,16 +409,26 @@ echo "  ht0: 3000-entry htree, indirect levels 0"
 F=$WORK/ht1.ext4
 dd if=/dev/zero of="$F" bs=1M count=48 status=none
 mkfs.ext4 -q -F "$F"
+# e2fsprogs versions disagree on when a directory tips into indirect
+# level 1 (newer ones pack wider dx blocks). Grow the entry count until
+# the shape holds, so the fixture guarantees interior nodes everywhere.
+HTN=3200
+for round in 1 2 3 4 5; do
+WO=$WORK
 python3 -c "
+import os
 print('mkdir /deep')
-for i in range(3200): print('write $WORK/stage/frag1k.bin /deep/longerfilename%06d.dat' % i)
+for i in range($HTN): print('write %s/stage/frag1k.bin /deep/longerfilename%06d.dat' % (os.environ['WO'], i))
 " > "$WORK/ht1.cmds"
 dbg "$F" "$WORK/ht1.cmds"
 rc=0
 e2fsck -f -D -y "$F" >/dev/null 2>&1 || rc=$?
 [ $rc -le 1 ] || { echo "FAIL: e2fsck -D ht1 rc=$rc"; exit 1; }
 LV=$(debugfs -R "htree_dump /deep" "$F" 2>/dev/null | sed -n 's/.*Indirect levels: \([0-9]*\).*/\1/p')
-[ "$LV" = "1" ] || { echo "FAIL: ht1 indirect levels = '$LV', want 1"; exit 1; }
+[ "$LV" = "1" ] && break
+HTN=$((HTN + 4000))
+[ $round -lt 5 ] || { echo "FAIL: ht1 indirect levels = '$LV', want 1 (e2fsprogs shape?)"; exit 1; }
+done
 echo "  ht1: 3200-entry htree, indirect levels 1 (interior nodes present)"
 
 echo "== refuse-battery fixtures =="
