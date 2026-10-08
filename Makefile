@@ -1611,6 +1611,7 @@ release: unflag all helpers
 	      $(RELEASE_DIR)/packaging/debian/copyright \
 	      $(RELEASE_DIR)/packaging/debian/install
 	cp -a tools/codecpacks $(RELEASE_DIR)/tools/codecpacks
+	cp -a tools/sbin $(RELEASE_DIR)/tools/sbin
 	printf '%s\n' '$(RELEASE_VERSION)' > $(RELEASE_DIR)/VERSION
 # owner/mtime pinned so a rebuild of the same tree is byte-identical
 	tar --sort=name --owner=0 --group=0 --numeric-owner \
