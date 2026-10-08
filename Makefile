@@ -245,7 +245,7 @@ $(OUT)/invf-$(1): $$(OBJ)/$(1).o $(CORE_O) | $(OUT)
 endef
 
 # CLI tools (main in src/cli/<name>.c)
-CLI_MAINS := mkfs verify fsck cp cat ls stat arctest blkio_test resize \
+CLI_MAINS := mkfs verify fsck cp cat ls stat why arctest blkio_test resize \
              metabuf_test btree_test btree_repair_test vnode overlay_test fold_test concurrency_test \
              sweep_test sweep_collect_test symlink_test large_file_test dedupe_test deflate_repro_test window_test \
              read_parallel_bitexact_test arc_concurrency_test \
@@ -1458,6 +1458,7 @@ e2e: all
 	$(TESTENV) bash tools/run-e2e.sh tools/test-sandbox.sh
 	$(TESTENV) bash tools/run-e2e.sh tools/test-helper-isolation.sh
 	$(TESTENV) bash tools/run-e2e.sh tools/test-rawdisk.sh
+	$(TESTENV) bash tools/run-e2e.sh tools/test-why.sh
 # WP114: the packaging gate. INVFS_PKG_DEB=0 keeps it off the full
 # compile inside dpkg-buildpackage (that is `make test`'s job, not this
 # one's); INVFS_PKG_DEB=1 builds the real .deb and inspects it, and is

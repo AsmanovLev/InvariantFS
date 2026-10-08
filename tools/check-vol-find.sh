@@ -99,6 +99,7 @@ src/cli/read_named_test.c:305:SKIP   # LEG B setup: the exact name must be GONE,
 src/cli/read_named_test.c:378:SKIP   # LEG E setup: whether a name resolves IS the measurement -- the whole leg is that the bang name does not perturb the plain ones
 src/cli/tz_registry_test.c:178:SKIP
 src/cli/window_test.c:176:SKIP
+src/cli/why.c:116:SKIP   # inspector: a miss aborts; the layout measurement needs the row, or there is nothing to report
 src/cli/write_create_path_test.c:248:SKIP
 src/cli/tar_cap_test.c:182:SKIP
 src/cli/window_test.c:176:SKIP
