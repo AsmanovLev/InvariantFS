@@ -2440,3 +2440,31 @@ on the dev box and fail deterministically on GH runners; neither is understood.
   ht0/ht1/fsA/fsB legs pass on the same run; only the orphan shape
   declines. e2fsprogs-version shape suspected (same family as ht1), not
   shown.
+
+### leg3 root cause (2026-10-09, local repro under CPU load): reclaim frees
+unprovable pages + the ladder never rolls back
+
+Reproduced locally 3/3 by loading the box (7 busy loops) so the seeded
+drop windows land mid-sweep; artifacts preserved under
+`tools/flakey/artifacts/leg3-torn-sweep-20261009-022950/`. Chain:
+
+1. Drops tear base pages holding recipe blobs (pba 123557/60/63, three
+   single-key `0x04` ranges quarantined). Expected chaos event.
+2. The sweep's own tail reclaims 84 "orphaned" base pages. The mark walk
+   cannot traverse torn pages, so pages below them are unprovable -- and
+   the collector frees them anyway (absence of proof taken as proof of
+   absence). The savepoint pin (`pinned_root` second mark root,
+   `vol_reclaim.c:353-357`) does not save what the walk cannot reach.
+3. First fsck reads OK (freed-but-intact blocks still hold bytes);
+   `fsck -f` refuses the 3 live-keyed ranges (correct); final fsck walks
+   an emptied tree (0 inodes) over reused blocks: DAMAGED forever.
+4. The ladder never attempts `invf-rollback` despite a live pre-sweep
+   SPT0 savepoint (it only rolls back on a live CKP0 checkpoint).
+   Manual rollback on the preserved image restores base_root with "7
+   inodes, 1811 segments verified all intact" but still ends DAMAGED +
+   1 corrupt -- the pinned content is already gone by then.
+
+Fix shape (WP): reclaim must treat unreadable pages as mark ROOTS
+(keep the subtree), never as empty; i.e. fail closed on EIO during
+the mark walk. Separately, teach the ladder to attempt SPT0 rollback
+when it exists (cheap rung, necessary but not sufficient alone).
