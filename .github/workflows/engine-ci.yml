@@ -91,18 +91,6 @@ jobs:
           done
           [ "$FAIL" = 0 ] || { echo "engine e2e: at least one suite FAILED"; exit 1; }
           echo "engine e2e: ALL SUITES PASS"
-
-      # Bins for the e2e-full gate below: the tools, the unit harnesses
-      # and the built codecpack helpers (in-tree build products, not in
-      # git). Scripts ride the checkout; only build products ride this.
-      - name: upload e2e bins
-        uses: actions/upload-artifact@v4
-        with:
-          name: e2e-bins
-          path: |
-            bin/
-            tools/codecpacks/
-          if-no-files-found: error
   # NOTE: there is deliberately no plain `packaging` job. The full
   # test-packaging.sh suite (all targets staged + sig negative controls)
   # already runs inside each native packaging-* job, so a fifth run only
@@ -113,8 +101,10 @@ jobs:
   # the Makefile, so it cannot drift), plus the multidev chaos leg (not in
   # `make e2e`). Skipped, with reasons: the two known-reds (test-resize A6
   # pre-war, test-qcow2-zlib stale expectation -- both tracked, neither
-  # caused by this tree). Bins ride the engine artifact; scripts come from
-  # the checkout. Per-suite timeout so one wedged suite cannot eat the job.
+  # caused by this tree). This job builds the tree itself: the suites are
+  # white-box on build products (build/core_objs.txt, cc-built fixtures),
+  # so a bins-only artifact cannot feed them. Per-suite timeout so one
+  # wedged suite cannot eat the job.
   e2e-full:
     needs: [engine]
     runs-on: ubuntu-22.04
@@ -122,22 +112,23 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
-          fetch-depth: 1
-      - uses: actions/download-artifact@v4
-        with:
-          name: e2e-bins
-          path: .
+          fetch-depth: 0
       - name: dependencies
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y -qq libfuse3-dev fuse3 zlib1g-dev libzstd-dev zstd xz-utils curl python3 qemu-utils make
+          sudo apt-get install -y -qq build-essential pkg-config \
+            libfuse3-dev fuse3 zlib1g-dev libzstd-dev zstd xz-utils curl \
+            python3 qemu-utils acl
+          sudo add-apt-repository -y universe >/dev/null 2>&1 || true
+          sudo apt-get update -qq || true
           for p in libjxl-tools p7zip-full; do
             sudo apt-get install -y -qq "$p" \
               || echo "::warning::$p unavailable on this image (some suites degrade)"
           done
-          sudo chmod +x bin/*
           grep -q "^user_allow_other" /etc/fuse.conf \
             || echo user_allow_other | sudo tee -a /etc/fuse.conf
+      - name: build
+        run: make -j"$(nproc)" && make helpers
       - name: full e2e (minus known reds) + multidev
         run: |
           export INVFS_CODECPACKS_SYS=0
@@ -156,7 +147,8 @@ jobs:
 
   # Chaos soak, informational only (continue-on-error): the power-loss /
   # unstable-device storm has known pre-war reds and D-state hang modes
-  # that need a human, not a gate. Runs the same bins while they are hot.
+  # that need a human, not a gate. Builds the tree itself, same white-box
+  # reason as e2e-full (it compiles orphan_test mid-run).
   soak-flakey:
     needs: [engine]
     runs-on: ubuntu-22.04
@@ -165,16 +157,14 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
-          fetch-depth: 1
-      - uses: actions/download-artifact@v4
-        with:
-          name: e2e-bins
-          path: .
+          fetch-depth: 0
       - name: dependencies
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y -qq libfuse3-dev fuse3 zlib1g-dev libzstd-dev zstd xz-utils curl python3
-          sudo chmod +x bin/*
+          sudo apt-get install -y -qq build-essential pkg-config \
+            libfuse3-dev fuse3 zlib1g-dev libzstd-dev zstd xz-utils curl python3
+      - name: build
+        run: make -j"$(nproc)" && make helpers
       - name: flakey soak (informational)
         run: |
           export INVFS_CODECPACKS_SYS=0
