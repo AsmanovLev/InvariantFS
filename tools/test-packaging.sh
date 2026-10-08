@@ -111,10 +111,13 @@ assert_tree() {
     else pass "$label: all $(echo "$want" | wc -w) artifact binaries present + exec"; fi
 
     # --- /sbin front-ends: every tools/sbin/* source must be installed exec ---
+    # Location is usr/sbin, except merged-usr targets (Void) which forbid
+    # /usr/sbin and carry them in usr/bin (reachable as /sbin/*).
     sbmiss=
     for s in tools/sbin/*; do
         [ -f "$s" ] || continue
-        [ -x "$root/usr/sbin/${s##*/}" ] || sbmiss="$sbmiss ${s##*/}"
+        { [ -x "$root/usr/sbin/${s##*/}" ] || [ -x "$root/usr/bin/${s##*/}" ]; } \
+            || sbmiss="$sbmiss ${s##*/}"
     done
     if [ -n "$sbmiss" ]; then fail "$label: missing/non-exec sbin front-ends:$sbmiss"
     else pass "$label: sbin front-ends present + exec"; fi

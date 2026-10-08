@@ -60,7 +60,9 @@ do_install() {
 	[ -d "$_src/${_artifact}" ] && _src="$_src/${_artifact}"
 	cd "$_src"
 	# Void initramfs is mkinitcpio-compatible; keep the dracut module out.
-	DESTDIR="$PKGDESTDIR" PREFIX=/usr \
+	# Void forbids /usr/sbin in packages (merged-usr): sbin front-ends
+	# land in /usr/bin, reachable as /sbin/* via the symlink.
+	DESTDIR="$PKGDESTDIR" PREFIX=/usr SBINDIR=/usr/bin \
 		WITH_SYSTEMD=1 WITH_DRACUT=0 WITH_MKINITCPIO=1 \
 		WITH_INITRAMFS_TOOLS=0 \
 		sh packaging/install.sh
