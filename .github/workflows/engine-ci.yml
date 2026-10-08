@@ -6,6 +6,13 @@ permissions:
   contents: read
   actions: write
 
+# One active run per branch: at ~20-40 pushes a day of multi-hour
+# filesystem runs, concurrent runs would stack dozens deep. A new push
+# cancels the stale run -- only the newest tree needs a verdict.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 on:
   push:
     branches: ["**"]
