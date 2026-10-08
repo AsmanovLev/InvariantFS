@@ -744,7 +744,13 @@ static int probe_external(const char *name, const char *tool)
  * the PPMD text heuristic in registry order (specific magics first, text
  * LAST) and after the builtin entries.
  */
-#define INVFS_PACK_MAX 16
+/* Owner decision 2026-10-08: roomy headroom, no rationale needed beyond
+ * "enough". Slots are NOT algo values: the AST algo field is 6 bits
+ * (0..63, shared with the builtins), so at most 64-REGISTRY_N distinct
+ * pack algos can ever register -- pack_register refuses algo >= 64 and
+ * duplicate algos at runtime. Extra slots simply stay empty; the arrays
+ * below are small (manifest metadata + strdup'd strings). */
+#define INVFS_PACK_MAX 64
 
 typedef struct {
     invfs_codec      pub;       /* what the registry exposes */
@@ -1124,6 +1130,13 @@ static const invfs_codec registry[] = {
 };
 
 #define REGISTRY_N (sizeof registry / sizeof registry[0])
+
+/* The 6-bit AST algo field is the hard ceiling both sides share:
+ * builtins must leave room for packs. This fires when someone adds a
+ * builtin row past the pack space, not when packs fill up (that is a
+ * runtime refusal with a log line). */
+_Static_assert(REGISTRY_N < 64,
+    "builtin registry rows must fit the 6-bit AST algo field");
 
 /* materialized registry: static entries + loaded packs, PPMD last */
 static invfs_codec g_all[REGISTRY_N + INVFS_PACK_MAX];
