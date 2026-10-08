@@ -46,16 +46,17 @@ src/cli/cat.c:95:SKIP
 src/cli/cat.c:121:SKIP
 src/cli/cp.c:118:SKIP
 src/cli/heat_walk_test.c:365:SKIP
-src/cli/fuse_fs.c:1645:SKIP
-src/cli/fuse_fs.c:1981:SKIP
-src/cli/fuse_fs.c:2644:SKIP
-src/cli/fuse_fs.c:2858:SKIP
-src/cli/fuse_fs.c:2913:SKIP
-src/cli/fuse_fs.c:3174:SKIP
-src/cli/fuse_fs.c:3341:SKIP
-src/cli/fuse_fs.c:3413:SKIP
-src/cli/fuse_fs.c:3448:SKIP
-src/cli/fuse_fs.c:3485:SKIP
+src/cli/fuse_fs.c:1419:SKIP   # readdirplus: snapshot/row miss degrades to NULL (kernel re-stats); the lookup decides nothing
+src/cli/fuse_fs.c:1693:SKIP
+src/cli/fuse_fs.c:2029:SKIP
+src/cli/fuse_fs.c:2692:SKIP
+src/cli/fuse_fs.c:2906:SKIP
+src/cli/fuse_fs.c:2961:SKIP
+src/cli/fuse_fs.c:3222:SKIP
+src/cli/fuse_fs.c:3389:SKIP
+src/cli/fuse_fs.c:3461:SKIP
+src/cli/fuse_fs.c:3496:SKIP
+src/cli/fuse_fs.c:3533:SKIP
 src/cli/otrunc_test.c:568:SKIP   # calibration: the armed lookup IS the assertion
 src/cli/otrunc_test.c:572:SKIP   # calibration: the armed lookup IS the assertion
 src/cli/lane_release_test.c:242:SKIP

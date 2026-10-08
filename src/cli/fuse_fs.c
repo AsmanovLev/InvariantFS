@@ -1377,6 +1377,54 @@ static int invf_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
     for (i = 0; i < n; i++) {
         /* internal names (WP10 batch owner "\x01tzb") stay hidden */
         if ((unsigned char)ents[i].name[0] == 0x01) continue;
+        /* Plus-mode attrs: the rows are in hand, so answer inline and
+         * spare the kernel a LOOKUP+GETATTR round trip per entry.
+         * The mapping MUST be what getattr would answer -- it is built
+         * by the same helpers (snapshot_entry/meta_for_path/
+         * fill_stat_from_meta as invf_getattr), plus st_ino, which
+         * getattr gets from the lookup reply and a plus entry must
+         * carry itself. Any resolution failure falls back to NULL,
+         * i.e. exactly today's behaviour (kernel re-stats). */
+        {
+            char full[768], ename[300];
+            invfs_meta_pub m;
+            uint64_t size = 0, ctime = 0, ino = 0;
+            struct stat st;
+            int se, mrc;
+            if (dir[0])
+                snprintf(full, sizeof full, "%s/%s", dir, ents[i].name);
+            else
+                snprintf(full, sizeof full, "%s", ents[i].name);
+            /* Same decision tree as invf_getattr (which owns the
+             * mapping): traversal, snapshot, engine record, dir
+             * fallback. Any failure degrades to NULL -- i.e. exactly
+             * today's behaviour, the kernel re-stats the entry. */
+            if (perm_check_traversal(full))
+                goto nostat;
+            se = snapshot_entry(full, &ino, &size, &ctime);
+            if (se <= 0 && !(g_vol && vol_is_dir(g_vol, full)))
+                goto nostat;
+            mrc = meta_for_path(full, ename, sizeof ename, &m);
+            if (mrc < 0)
+                goto nostat;
+            if (mrc == 0) {
+                int isd = g_vol ? vol_is_dir(g_vol, full) : 0;
+                meta_defaults(full, size, &m);
+                if (isd) {
+                    m.type = INVFS_ITYP_DIR;
+                    m.nlink = 2;
+                }
+            }
+            if (!ino)
+                ino = g_vol ? vol_find(g_vol, full) : 0;
+            if (!ino)
+                goto nostat;
+            fill_stat_from_meta(&st, &m, size, ctime);
+            st.st_ino = (ino_t)ino;
+            filler(buf, ents[i].name, &st, 0, FUSE_FILL_DIR_PLUS);
+            continue;
+        }
+nostat:
         /* no cached stat: let the kernel re-stat each entry through
          * getattr, which knows about v2 types (dirs, symlinks, devices) */
         filler(buf, ents[i].name, NULL, 0, 0);
