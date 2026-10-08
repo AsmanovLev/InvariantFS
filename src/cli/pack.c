@@ -1,9 +1,9 @@
 /*
  * pack.c — codec-pack registry manager for InvariantFS
  *
- *   invfs-pack list [family]
+ *   invfs-pack list [--installed|-i] [family]
  *   invfs-pack info <pack>
- *   invfs-pack install <pack>
+ *   invfs-pack install [-y|-n] <pack|./path>
  *   invfs-pack remove <pack>
  *   invfs-pack verify [<pack>]
  *   invfs-pack alternatives <family>
@@ -245,15 +245,17 @@ static void cmd_where(void)
 }
 
 
-static void cmd_list(const char *filter_family)
+static void cmd_list(const char *filter_family, int installed_only)
 {
-    const char *roots[] = {
+    const char *roots_all[] = {
         env_codecpacks(),
         HOST_ROOT,
         LEGACY_ROOT,
         USR_ROOT,
         NULL
     };
+    const char *roots_inst[] = { HOST_ROOT, NULL };
+    const char **roots = installed_only ? roots_inst : roots_all;
     int found = 0;
     printf("%-20s %-8s %-6s %-12s %-10s %s\n",
            "NAME", "ALGO", "VER", "FAMILY", "PRIORITY", "SOURCE");
@@ -269,6 +271,15 @@ static void cmd_list(const char *filter_family)
             struct stat st;
             if (stat(full, &st) != 0 || !S_ISDIR(st.st_mode)) continue;
             if (!is_codecpack(full)) continue;
+            /* installed = same dirname present under the host root */
+            char probe[MAX_PATH + 64];
+            struct stat pst;
+            int is_host = (strcmp(roots[r], HOST_ROOT) == 0);
+            int is_inst = is_host; /* --installed scans the host root itself */
+            if (!is_inst &&
+                pathf(probe, sizeof probe, "%s/%s", HOST_ROOT, de->d_name) == 0 &&
+                stat(probe, &pst) == 0 && S_ISDIR(pst.st_mode))
+                is_inst = 1;
             pack_info pi;
             memset(&pi, 0, sizeof pi);
             char mp[MAX_PATH + 64];
@@ -276,13 +287,14 @@ static void cmd_list(const char *filter_family)
             parse_manifest(mp, &pi);
             if (filter_family[0] && strcmp(pi.family, filter_family) != 0)
                 continue;
-            printf("%-20s %-8s %-6s %-12s %-10s %s\n",
+            printf("%-20s %-8s %-6s %-12s %-10s %s%s\n",
                    pi.name[0] ? pi.name : de->d_name,
                    pi.algo,
                    pi.pack_version,
                    pi.family,
                    pi.priority[0] ? pi.priority : "-",
-                   roots[r]);
+                   roots[r],
+                   is_inst ? " [installed]" : "");
             found++;
         }
         closedir(d);
@@ -330,49 +342,148 @@ static void cmd_info(const char *name)
     fprintf(stderr, "pack '%s' not found\n", name);
 }
 
-static void cmd_install(const char *name)
+/* copy a pack dir to the host root (fork+exec cp -a, no shell). */
+static void copy_pack_dir(const char *src, const char *dst)
 {
-    const char *roots[] = { env_codecpacks(), HOST_ROOT, LEGACY_ROOT, USR_ROOT, NULL };
-    for (int r = 0; roots[r]; r++) {
-        char src[MAX_PATH];
-        snprintf(src, sizeof src, "%s/%s.codecpack", roots[r], name);
+    pid_t pid = fork();
+    if (pid < 0) {
+        fprintf(stderr, "failed to fork for copy: %s -> %s\n", src, dst);
+        return;
+    }
+    if (pid == 0) {
+        execlp("cp", "cp", "-a", src, dst, (char *)NULL);
+        _exit(127);
+    }
+    int status = 0;
+    while (waitpid(pid, &status, 0) < 0 && errno == EINTR)
+        ;
+    if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) {
+        fprintf(stderr, "failed to copy pack: %s -> %s\n", src, dst);
+        return;
+    }
+    printf("installed '%s' -> %s\n", src, dst);
+}
+
+static void cmd_install(const char *name, int overwrite, int dry_run)
+{
+    char src[MAX_PATH];
+    char dstname[128 + 16];
+    src[0] = 0;
+
+    if (strchr(name, '/')) {
+        /* explicit path to a .codecpack dir (./path, ../, absolute) */
         struct stat st;
-        if (stat(src, &st) != 0 || !S_ISDIR(st.st_mode)) continue;
-        if (!is_codecpack(src)) continue;
-        /* already installed? */
+        size_t l;
+        const char *base;
+        if (stat(name, &st) != 0 || !S_ISDIR(st.st_mode)) {
+            fprintf(stderr, "pack path '%s' is not a directory\n", name);
+            return;
+        }
+        if (snprintf(src, sizeof src, "%s", name) >= (int)sizeof src) {
+            fprintf(stderr, "pack path too long: %s\n", name);
+            return;
+        }
+        /* strip trailing slashes for the manifest check + basename */
+        l = strlen(src);
+        while (l > 1 && src[l - 1] == '/') src[--l] = 0;
+        if (!is_codecpack(src)) {
+            fprintf(stderr, "pack path '%s' has no manifest (not a .codecpack)\n", name);
+            return;
+        }
+        base = strrchr(src, '/');
+        base = base ? base + 1 : src;
+        if (snprintf(dstname, sizeof dstname, "%s", base) >= (int)sizeof dstname) {
+            fprintf(stderr, "pack name too long: %s\n", base);
+            return;
+        }
+        if (strlen(dstname) <= 10 || strcmp(dstname + strlen(dstname) - 10, ".codecpack") != 0) {
+            if (snprintf(dstname, sizeof dstname, "%s.codecpack", base) >= (int)sizeof dstname) {
+                fprintf(stderr, "pack name too long: %s\n", base);
+                return;
+            }
+        }
+    } else {
+        const char *roots[] = { env_codecpacks(), HOST_ROOT, LEGACY_ROOT, USR_ROOT, NULL };
+        const char *want = name;
+        char wantbuf[128 + 16];
+        /* allow both "jxl" and "jxl.codecpack" spellings */
+        if (strlen(want) <= 10 || strcmp(want + strlen(want) - 10, ".codecpack") != 0) {
+            if (snprintf(wantbuf, sizeof wantbuf, "%s.codecpack", name) >= (int)sizeof wantbuf) {
+                fprintf(stderr, "pack name too long: %s\n", name);
+                return;
+            }
+            want = wantbuf;
+        }
+        if (snprintf(dstname, sizeof dstname, "%s", want) >= (int)sizeof dstname) {
+            fprintf(stderr, "pack name too long: %s\n", name);
+            return;
+        }
+        for (int r = 0; roots[r]; r++) {
+            char cand[MAX_PATH];
+            struct stat st;
+            if (snprintf(cand, sizeof cand, "%s/%s", roots[r], want) >= (int)sizeof cand)
+                continue;
+            if (stat(cand, &st) != 0 || !S_ISDIR(st.st_mode)) continue;
+            if (!is_codecpack(cand)) continue;
+            if (snprintf(src, sizeof src, "%s", cand) >= (int)sizeof src) continue;
+            break;
+        }
+        if (!src[0]) {
+            fprintf(stderr, "pack '%s' not found in any root\n", name);
+            return;
+        }
+    }
+
+    {
         char dst[MAX_PATH];
-        snprintf(dst, sizeof dst, "%s/%s.codecpack", HOST_ROOT, name);
-        if (stat(dst, &st) == 0) {
-            fprintf(stderr, "pack '%s' already installed at %s\n", name, dst);
+        struct stat st;
+        int exists;
+        if (snprintf(dst, sizeof dst, "%s/%s", HOST_ROOT, dstname) >= (int)sizeof dst) {
+            fprintf(stderr, "pack name too long: %s\n", dstname);
+            return;
+        }
+        exists = (stat(dst, &st) == 0 && S_ISDIR(st.st_mode));
+        if (dry_run) {
+            if (exists)
+                printf("would reinstall '%s' -> %s (%s)\n", src, dst,
+                       overwrite ? "overwrite" : "exists, needs -y");
+            else
+                printf("would install '%s' -> %s\n", src, dst);
+            return;
+        }
+        if (exists && !overwrite) {
+            fprintf(stderr, "pack '%s' already installed at %s (use -y to overwrite)\n",
+                    dstname, dst);
             return;
         }
         /* create host root if needed */
         mkdir("/.invariantfs", 0755);
         mkdir(HOST_ROOT, 0755);
+        if (exists) {
+            /* -y overwrite: drop the old tree first (no shell; see below) */
+            pid_t pid = fork();
+            if (pid < 0) {
+                fprintf(stderr, "failed to fork for remove %s\n", dst);
+                return;
+            }
+            if (pid == 0) {
+                execlp("rm", "rm", "-rf", dst, (char *)NULL);
+                _exit(127);
+            }
+            int status = 0;
+            while (waitpid(pid, &status, 0) < 0 && errno == EINTR)
+                ;
+            if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) {
+                fprintf(stderr, "failed to remove %s\n", dst);
+                return;
+            }
+        }
         /* recursive copy. No shell: the pack name comes from outside
          * (registry listing, CLI arg), and single-quote wrapping breaks
          * out on a \' in the path (CodeQL command-line-injection).
          * fork+execlp passes src/dst as argv, never parsed. */
-        pid_t pid = fork();
-        if (pid < 0) {
-            fprintf(stderr, "failed to fork for copy: %s -> %s\n", src, dst);
-            return;
-        }
-        if (pid == 0) {
-            execlp("cp", "cp", "-a", src, dst, (char *)NULL);
-            _exit(127);
-        }
-        int status = 0;
-        while (waitpid(pid, &status, 0) < 0 && errno == EINTR)
-            ;
-        if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) {
-            fprintf(stderr, "failed to copy pack: %s -> %s\n", src, dst);
-            return;
-        }
-        printf("installed '%s' -> %s\n", name, dst);
-        return;
+        copy_pack_dir(src, dst);
     }
-    fprintf(stderr, "pack '%s' not found in any root\n", name);
 }
 
 static void cmd_remove(const char *name)
@@ -582,9 +693,9 @@ static void cmd_use(const char *family, const char *pack)
 static void usage(void)
 {
     fprintf(stderr,
-        "usage: invfs-pack list [family]\n"
+        "usage: invfs-pack list [--installed|-i] [family]\n"
         "       invfs-pack info <pack>\n"
-        "       invfs-pack install <pack>\n"
+        "       invfs-pack install [-y|--yes] [-n|--dry-run] <pack|./path>\n"
         "       invfs-pack remove <pack>\n"
         "       invfs-pack verify [<pack>]\n"
         "       invfs-pack alternatives <family>\n"
@@ -609,13 +720,39 @@ int main(int argc, char **argv)
     if (strcmp(cmd, "where") == 0) {
         cmd_where();
     } else if (strcmp(cmd, "list") == 0) {
-        cmd_list(argc > 2 ? argv[2] : "");
+        int installed_only = 0;
+        const char *family = "";
+        for (int i = 2; i < argc; i++) {
+            if (strcmp(argv[i], "--installed") == 0 || strcmp(argv[i], "-i") == 0)
+                installed_only = 1;
+            else if (!family[0])
+                family = argv[i];
+            else {
+                fprintf(stderr, "usage: invfs-pack list [--installed|-i] [family]\n");
+                return 2;
+            }
+        }
+        cmd_list(family, installed_only);
     } else if (strcmp(cmd, "info") == 0) {
         if (argc < 3) { fprintf(stderr, "usage: invfs-pack info <pack>\n"); return 2; }
         cmd_info(argv[2]);
     } else if (strcmp(cmd, "install") == 0) {
-        if (argc < 3) { fprintf(stderr, "usage: invfs-pack install <pack>\n"); return 2; }
-        cmd_install(argv[2]);
+        int overwrite = 0, dry_run = 0;
+        const char *target = NULL;
+        for (int i = 2; i < argc; i++) {
+            if (strcmp(argv[i], "-y") == 0 || strcmp(argv[i], "--yes") == 0)
+                overwrite = 1;
+            else if (strcmp(argv[i], "-n") == 0 || strcmp(argv[i], "--dry-run") == 0)
+                dry_run = 1;
+            else if (!target)
+                target = argv[i];
+            else {
+                fprintf(stderr, "usage: invfs-pack install [-y|--yes] [-n|--dry-run] <pack|./path>\n");
+                return 2;
+            }
+        }
+        if (!target) { fprintf(stderr, "usage: invfs-pack install [-y|--yes] [-n|--dry-run] <pack|./path>\n"); return 2; }
+        cmd_install(target, overwrite, dry_run);
     } else if (strcmp(cmd, "remove") == 0) {
         if (argc < 3) { fprintf(stderr, "usage: invfs-pack remove <pack>\n"); return 2; }
         cmd_remove(argv[2]);
