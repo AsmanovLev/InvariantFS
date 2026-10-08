@@ -234,8 +234,14 @@ wait_marker 'runit: enter stage: /etc/runit/2' \
     || fail "did not reach runit stage 2 within ${BOOT_TIMEOUT}s"
 wait_marker 'automatic login|login: root' \
     || fail "no root autologin on ttyS0 within ${BOOT_TIMEOUT}s"
-grep -q 'InvariantFS mounted' "$SERIAL" || fail "initramfs did not report InvariantFS mounted"
-grep -q 'FUSE root detected' "$SERIAL" || fail "FUSE-root core-service guard did not fire"
+# WP226: serial markers are evidence, not verdicts. A missing marker
+# means the capture missed it, not that the guest failed -- the hard
+# asserts for both facts live over SSH below. These stay as warn-only
+# tripwires so the log still names what was (not) seen.
+grep -q 'InvariantFS mounted' "$SERIAL" || \
+    note "WP226: no 'InvariantFS mounted' marker in serial capture (no information; SSH asserts below decide)"
+grep -q 'FUSE root detected' "$SERIAL" || \
+    note "WP226: no 'FUSE root detected' marker in serial capture (no information; SSH asserts below decide)"
 echo "stage 2 + autologin OK"
 
 note "waiting for sshd (hostfwd tcp::$PORT -> :22)"

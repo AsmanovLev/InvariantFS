@@ -2146,9 +2146,10 @@ mention that the system bus is dead on every boot, which is the more
 user-visible half of the same picture: a system that is up but has no bus is not
 a usable multi-user system.
 
-## WP226-OPEN: boot harnesses assert on serial markers, which can be absent
+## WP226 (void FIXED, Debian KEPT): boot harnesses assert on serial markers, which can be absent
 
-**Status:** OPEN, harness defect, not a filesystem defect.
+**Status:** FIXED for the CI-gated case (void), deliberately KEPT for
+Debian, harness defect throughout, never a filesystem defect.
 
 tools/boot-debian-qemu.sh decides whether a boot succeeded by grepping the
 serial log for `Reached target multi-user.target`. WP224 established that this
@@ -2199,6 +2200,14 @@ treat a missing serial marker as *no information* rather than as failure, and
 keep the marker as a diagnostic in the failure message rather than as the
 predicate. Changing CI on an untested hypothesis is how a green job becomes a
 red one for the wrong reason.
+
+**Fix landed 2026-10-08 for the void script** (`tools/boot-void-qemu.sh`:
+the two marker greps are warn-only tripwires now; the hard asserts for both
+facts already lived over SSH -- `/proc/mounts` fuse+invfs and the runit
+service states -- so nothing was weakened). Debian deliberately keeps its
+serial architecture per WP224 (SSH there is best-effort: DHCP/network is a
+second failure surface, and none of its assertions need a shell), so the
+Debian half of this entry stays a documented exposure, not a defect.
 
 ## WP225-RESOLVED-PARTIAL (SUPERSEDED by WP227-RESOLVED): dbus 203/EXEC is NOT an InvariantFS defect
 
