@@ -470,6 +470,42 @@ int vol_fold(invfs_volume *v)
         mbuf_ptr_set(&root, pba, page, INVFS_BP_LEAF | INVFS_BP_ROOT);
     }
 
+    /* WP-leg3: verify-before-publish. The merge above wrote COW pages;
+     * after an unclean shutdown the page cache is cold, so this walk
+     * reads DEVICE bytes and catches pages that tore before the crash
+     * (drop_writes-class tears mid-pass). It does NOT catch tears still
+     * hidden behind a hot page cache -- same-process re-reads hit cache,
+     * so a torn device write made seconds ago reads back clean here;
+     * live-drop coverage needs cache bypass (O_DIRECT/fadvise), which
+     * is a separate WP. Walk the WHOLE new tree before anything becomes
+     * durable: any unreadable page aborts the publish and the old root
+     * stays live -- a loud refusal with zero loss, never a torn tree.
+     * The walk is one read pass over what this fold just wrote plus the
+     * shared spine, bounded like any fsck walk, and folds are
+     * threshold-gated. */
+    {
+        bt_stat st;
+        bt_quarantine q;
+        char verr[256];
+        memset(&st, 0, sizeof st);
+        memset(&q, 0, sizeof q);
+        if (btree_check_tolerant(v, root, &st, &q, verr,
+                                 sizeof verr) != 0 ||
+            q.bad_pages > 0 || q.qfull) {
+            fprintf(stderr,
+                    "fold: REFUSING publish: the merged tree has %llu "
+                    "unreadable page(s)%s%s -- keeping the old root, "
+                    "volume unchanged\n",
+                    (unsigned long long)q.bad_pages,
+                    q.qfull ? " (quarantine incomplete)" : "",
+                    verr[0] ? ": " : "");
+            if (verr[0])
+                fprintf(stderr, "fold: walk error: %s\n", verr);
+            fold_list_free(&list);
+            return -1;
+        }
+    }
+
     /* (2) durability + atomic publish: bitmap, then COW pages, then RT30 with
      * a bumped seq. mbuf_root_publish refuses a torn/gen-mismatched root. */
     if (vol_bitmap_flush(v) != 0) {

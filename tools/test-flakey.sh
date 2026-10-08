@@ -407,6 +407,19 @@ recover() { # <label>
     fi
     $B/invf-fsck "$DM" -f >"$FLK/rec-fsckf.log" 2>&1
     grep -E "REPAIRED|ISSUES|OK$" "$FLK/rec-fsckf.log" | sed 's/^/  fsck -f: /'
+    # WP-leg3: the ladder never attempted the SPT0 savepoint even with one
+    # live from before the damage (it only rolled back CKP0 checkpoints).
+    # A pre-sweep savepoint restores the publishable past wholesale; try it
+    # before declaring the dead end. A refusal (no savepoint, damaged pin)
+    # is not a failure -- fall through to the final verdict below.
+    if grep -q "save point:.*live" "$FLK/rec-fsck1.log" 2>/dev/null; then
+        info "save point live -> SPT0 rollback attempt ($label)"
+        if $B/invf-rollback "$DM" >"$FLK/rec-rb-spt0.log" 2>&1; then
+            info "SPT0 rollback done ($label)"
+        else
+            info "SPT0 rollback declined; continuing the ladder ($label)"
+        fi
+    fi
     $B/invf-fsck "$DM" >"$FLK/rec-fsck2.log" 2>&1
     grep -q "^OK$" "$FLK/rec-fsck2.log" && return 0
     echo "  fsck not clean after recovery ($label)" >&2; cat "$FLK/rec-fsck2.log" >&2
