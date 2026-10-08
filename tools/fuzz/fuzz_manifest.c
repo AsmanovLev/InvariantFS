@@ -40,6 +40,13 @@
 
 /* ---- stubs for the volume.c exec hooks (never called by the fuzz legs,
  * but codec.o references the symbol) ---- */
+int invfs_vol_pack_materialize(const void *vol, const char *volrel,
+                               char *out, size_t cap)
+{
+    (void)vol; (void)volrel; (void)out; (void)cap;
+    return -1;
+}
+void invfs_vol_pack_release(const void *vol) { (void)vol; }
 int invfs_codec_pack_exec(const invfs_codec *c, int is_encode,
                           const char *in_path, const char *out_path)
 {

@@ -177,6 +177,149 @@ static void test_volume_sections(const char *dir, const char *root)
     unlink(imgB);
 }
 
+/* ---------------- reserve 3/3: volume-pack exec materialization -----
+ * A volume carrying a codecpack with runnable helpers must EXECUTE them:
+ * probe answers from the staged host dir, pack_exec runs the staged
+ * helper (its output marker proves the VOLUME's binary ran, not a host
+ * tool -- algo 46 exists nowhere else), close unloads the section and
+ * removes the staging, and noautopack declines before anything is staged.
+ */
+static int write_xpack_tree(const char *root)
+{
+    char d[512], p[576];
+    int r;
+    snprintf(d, sizeof d, "%s/.invariantfs/codecpacks/vxp.codecpack",
+             root);
+    snprintf(p, sizeof p, "%s/manifest", d);
+    mkdir(root, 0755);
+    {
+        char a[512], b[512];
+        snprintf(a, sizeof a, "%s/.invariantfs", root);
+        snprintf(b, sizeof b, "%s/.invariantfs/codecpacks", root);
+        mkdir(a, 0755);
+        mkdir(b, 0755);
+    }
+    mkdir(d, 0755);
+    r = write_file(p,
+                   "name = vxp\nalgo = 46\ncaps = external\n"
+                   "encode = bin/enc {in} {out}\n"
+                   "decode = bin/dec {in} {out}\n", 0);
+    snprintf(p, sizeof p, "%s/bin", d);
+    mkdir(p, 0755);
+    snprintf(p, sizeof p, "%s/bin/enc", d);
+    /* the marker is the proof: only this volume's helper appends it */
+    r |= write_file(p, "#!/bin/sh\ncat \"$1\" > \"$2\"\n"
+                       "echo VOLPACK >> \"$2\"\n", 1);
+    snprintf(p, sizeof p, "%s/bin/dec", d);
+    r |= write_file(p, "#!/bin/sh\ncp \"$1\" \"$2\"\n", 1);
+    return r;
+}
+
+static int file_has_suffix(const char *path, const char *suffix)
+{
+    FILE *f = fopen(path, "rb");
+    long n;
+    size_t sl = strlen(suffix);
+    char *buf;
+    int hit = 0;
+    if (!f) return 0;
+    if (fseek(f, 0, SEEK_END) != 0 || (n = ftell(f)) < 0) {
+        fclose(f);
+        return 0;
+    }
+    rewind(f);
+    buf = (char *)malloc((size_t)n + 1);
+    if (!buf) { fclose(f); return 0; }
+    if (fread(buf, 1, (size_t)n, f) != (size_t)n) {
+        free(buf);
+        fclose(f);
+        return 0;
+    }
+    fclose(f);
+    buf[n] = 0;
+    if ((size_t)n >= sl && strcmp(buf + n - sl, suffix) == 0) hit = 1;
+    free(buf);
+    return hit;
+}
+
+static void test_volume_exec(const char *dir, const char *root)
+{
+    char img[384], src[384], cmd[1024];
+    char infile[384], outfile[384];
+    invfs_volume *v = NULL;
+    const invfs_codec *e;
+    const char *hd;
+    char staged[4096];
+    struct stat st;
+    int err = 0;
+    snprintf(img, sizeof img, "%s/invfs-volpack-x.img", dir);
+    snprintf(src, sizeof src, "%s/vsrcX", dir);
+    snprintf(infile, sizeof infile, "%s/x-in.bin", dir);
+    snprintf(outfile, sizeof outfile, "%s/x-out.bin", dir);
+    unlink(img);
+    unsetenv("INVFS_CODECPACKS");
+    invfs_set_no_autopack(0);
+    invfs_codec_probe_reset();
+    ok(write_xpack_tree(src) == 0, "fixture: volume exec-pack tree");
+    ok(write_file(infile, "exec-probe", 0) == 0,
+       "fixture: exec input written");
+    snprintf(cmd, sizeof cmd, "%s/bin/invf-mkfs %s 32 >/dev/null 2>&1",
+             root, img);
+    ok(system(cmd) == 0, "fixture: mkfs X");
+    snprintf(cmd, sizeof cmd, "%s/bin/invf-import %s %s >/dev/null 2>&1",
+             root, img, src);
+    ok(system(cmd) == 0, "fixture: import X pack tree");
+    v = vol_open(img, &err);
+    ok(v != NULL, "setup: open X");
+    e = vol_algo(v, 46);
+    ok(e && strcmp(e->name, "vxp") == 0,
+       "exec: volume pack visible to its volume");
+    /* probe materializes: avail means the staged helper resolved */
+    ok(e && e->probe && e->probe() == 1,
+       "exec: volume pack probes available (staged)");
+    hd = e ? invfs_codec_pack_host_dir(e) : NULL;
+    ok(hd != NULL, "exec: host dir resolved for volume pack");
+    if (hd) {
+        snprintf(staged, sizeof staged, "%s", hd);
+        ok(stat(staged, &st) == 0 && S_ISDIR(st.st_mode),
+           "exec: staged dir exists on host");
+    } else {
+        staged[0] = 0;
+    }
+    /* the marker proves the VOLUME's helper ran, not a host tool */
+    unlink(outfile);
+    ok(e && invfs_codec_pack_exec(e, 1, infile, outfile) == 0,
+       "exec: volume pack encode runs");
+    ok(file_has_suffix(outfile, "exec-probeVOLPACK\n"),
+       "exec: output carries the volume helper's marker");
+    /* guard: decline before anything is staged */
+    vol_close(v);
+    v = NULL;
+    invfs_set_no_autopack(1);
+    invfs_codec_probe_reset();
+    v = vol_open(img, &err);
+    ok(v != NULL, "setup: reopen X under guard");
+    e = vol_algo(v, 46);
+    ok(e && strcmp(e->name, "vxp") == 0,
+       "guard: registration unaffected (manifests still read)");
+    ok(e && (!e->probe || e->probe() == 0),
+       "guard: volume pack probes absent");
+    ok(e && invfs_codec_pack_exec(e, 1, infile, outfile) != 0,
+       "guard: volume pack exec declines");
+    ok(e && invfs_codec_pack_host_dir(e) == NULL,
+       "guard: nothing staged under noautopack");
+    invfs_set_no_autopack(0);
+    /* close unloads the section and removes the staging */
+    vol_close(v);
+    v = NULL;
+    ok(invfs_codec_by_algo(46) == NULL,
+       "exec: close unloads the volume section");
+    ok(!staged[0] || stat(staged, &st) != 0,
+       "exec: close removed the host staging");
+    invfs_codec_probe_reset();
+    unlink(img);
+}
+
 int main(int argc, char **argv)
 {
     const char *root = getenv("PWD") ? getenv("PWD") : ".";
@@ -348,6 +491,7 @@ int main(int argc, char **argv)
 
     invfs_codec_probe_reset();
     test_volume_sections(tdir, root);
+    test_volume_exec(tdir, root);
     printf("noautopack: %d checks, %d failures\n", checks, failures);
     return failures != 0;
 }

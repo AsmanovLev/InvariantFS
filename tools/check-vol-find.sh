@@ -104,33 +104,34 @@ src/cli/why.c:116:SKIP   # inspector: a miss aborts; the layout measurement need
 src/cli/write_create_path_test.c:248:SKIP
 src/cli/tar_cap_test.c:182:SKIP
 src/cli/window_test.c:176:SKIP
-src/core/vol_cpack.c:2603:SKIP
-src/core/vol_cpack.c:2946:SKIP
-src/core/vol_cpack.c:2946:SKIP
-src/core/vol_cpack.c:3043:SKIP
-src/core/vol_cpack.c:3043:ACTS
-src/core/vol_cpack.c:3288:ACTS
-src/core/vol_cpack.c:3784:SKIP
-src/core/vol_cpack.c:3866:SKIP
-src/core/vol_cpack.c:3866:SKIP
-src/core/vol_cpack.c:3866:ACTS
-src/core/vol_cpack.c:3866:SKIP
-src/core/vol_cpack.c:3866:ACTS
-src/core/vol_cpack.c:3967:SKIP
-src/core/vol_cpack.c:3967:SKIP
+src/core/vol_cpack.c:395:ACTS   # mat_copy_one: a missing pack member declines the whole staging (fail closed, no partial exec dir)
+src/core/vol_cpack.c:2856:SKIP
+src/core/vol_cpack.c:3199:SKIP
+src/core/vol_cpack.c:3199:SKIP
+src/core/vol_cpack.c:3296:SKIP
+src/core/vol_cpack.c:3296:ACTS
+src/core/vol_cpack.c:3541:ACTS
+src/core/vol_cpack.c:4037:SKIP
+src/core/vol_cpack.c:4119:SKIP
+src/core/vol_cpack.c:4119:SKIP
+src/core/vol_cpack.c:4119:ACTS
+src/core/vol_cpack.c:4119:SKIP
+src/core/vol_cpack.c:4119:ACTS
+src/core/vol_cpack.c:4220:SKIP
+src/core/vol_cpack.c:4220:SKIP
 src/core/vol_exer.c:267:ACTS
 src/core/vol_heat.c:799:SKIP
 src/core/vol_png.c:1013:SKIP
-src/core/vol_read.c:1079:SKIP
-src/core/vol_read.c:1175:SKIP
-src/core/vol_read.c:1211:ACTS
-src/core/vol_read.c:1422:ACTS   # vol_read_named: the EXACT name decides. Found -> those are the bytes returned with status 0; absent -> the name is walked as a container path instead
-src/core/vol_read.c:1429:SKIP
-src/core/vol_read.c:1616:ACTS
-src/core/vol_read.c:817:SKIP
-src/core/vol_read.c:834:SKIP
-src/core/vol_read.c:894:SKIP
-src/core/vol_read.c:969:SKIP
+src/core/vol_read.c:1080:SKIP
+src/core/vol_read.c:1176:SKIP
+src/core/vol_read.c:1214:ACTS
+src/core/vol_read.c:1425:ACTS   # vol_read_named: the EXACT name decides. Found -> those are the bytes returned with status 0; absent -> the name is walked as a container path instead
+src/core/vol_read.c:1432:SKIP
+src/core/vol_read.c:1622:ACTS
+src/core/vol_read.c:818:SKIP
+src/core/vol_read.c:835:SKIP
+src/core/vol_read.c:895:SKIP
+src/core/vol_read.c:970:SKIP
 src/core/vol_sweep.c:1770:SKIP
 src/core/vol_sweep.c:251:SKIP
 src/core/vol_sweep.c:556:ACTS
@@ -144,18 +145,18 @@ src/core/volume.c:1360:SKIP   # tier_owner / rawm_owner anchors (vol_open_inner)
 src/core/volume.c:1361:SKIP   # shifted by the PERF_PROFILING counters in volume.c
 src/recipes/zip.c:141:SKIP
 src/recipes/zip.c:145:SKIP
-src/core/vol_cpack.c:2946:SKIP   # непомечен: добавлено при правке vol_cpack.c
-src/core/vol_cpack.c:3043:SKIP   # непомечен: добавлено при правке vol_cpack.c
-src/core/vol_cpack.c:3866:SKIP   # непомечен: добавлено при правке vol_cpack.c
-src/core/vol_cpack.c:3866:ACTS   # непомечен: добавлено при правке vol_cpack.c
-src/core/vol_cpack.c:3886:ACTS   # непомечен: добавлено при правке vol_cpack.c
-src/core/vol_cpack.c:3967:SKIP   # непомечен: добавлено при правке vol_cpack.c
-src/core/vol_cpack.c:2947:SKIP   # непомечен: добавлено при правке vol_cpack.c
-src/core/vol_cpack.c:3044:SKIP   # непомечен: добавлено при правке vol_cpack.c
-src/core/vol_cpack.c:3881:SKIP   # непомечен: добавлено при правке vol_cpack.c
-src/core/vol_cpack.c:3882:ACTS   # непомечен: добавлено при правке vol_cpack.c
-src/core/vol_cpack.c:3907:ACTS   # непомечен: добавлено при правке vol_cpack.c
-src/core/vol_cpack.c:3999:SKIP   # непомечен: добавлено при правке vol_cpack.c
+src/core/vol_cpack.c:3199:SKIP   # непомечен: добавлено при правке vol_cpack.c
+src/core/vol_cpack.c:3296:SKIP   # непомечен: добавлено при правке vol_cpack.c
+src/core/vol_cpack.c:4119:SKIP   # непомечен: добавлено при правке vol_cpack.c
+src/core/vol_cpack.c:4119:ACTS   # непомечен: добавлено при правке vol_cpack.c
+src/core/vol_cpack.c:4139:ACTS   # непомечен: добавлено при правке vol_cpack.c
+src/core/vol_cpack.c:4220:SKIP   # непомечен: добавлено при правке vol_cpack.c
+src/core/vol_cpack.c:3200:SKIP   # непомечен: добавлено при правке vol_cpack.c
+src/core/vol_cpack.c:3297:SKIP   # непомечен: добавлено при правке vol_cpack.c
+src/core/vol_cpack.c:4134:SKIP   # непомечен: добавлено при правке vol_cpack.c
+src/core/vol_cpack.c:4135:ACTS   # непомечен: добавлено при правке vol_cpack.c
+src/core/vol_cpack.c:4160:ACTS   # непомечен: добавлено при правке vol_cpack.c
+src/core/vol_cpack.c:4252:SKIP   # непомечен: добавлено при правке vol_cpack.c
 "
 
 fail=0

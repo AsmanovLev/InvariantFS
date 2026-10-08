@@ -85,6 +85,17 @@ int invfs_codec_pack_estimate(const invfs_codec *c, const char *in_path,
     return -1;
 }
 
+/* Reserve 3/3: the staging hooks live in vol_cpack.c (not linked here);
+ * the codec_test fixtures are host packs, so staging never triggers --
+ * decline unconditionally, same shape as the exec stubs above. */
+int invfs_vol_pack_materialize(const void *vol, const char *volrel,
+                               char *out, size_t cap)
+{
+    (void)vol; (void)volrel; (void)out; (void)cap;
+    return -1;
+}
+void invfs_vol_pack_release(const void *vol) { (void)vol; }
+
 
 /* WP105: the size of the BUILTIN codec table in src/codecs/codec.c
  * (REGISTRY_N). Pinned here on purpose -- adding a builtin codec must be a

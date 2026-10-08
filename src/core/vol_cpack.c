@@ -11,6 +11,8 @@
 #include "tool_scratch.h"
 #include "vol_plugin_client.h"
 #include "../codecs/deflate_repro.h"
+#include <dirent.h>
+#include <sys/stat.h>
 
 
 /* WP61: the pack-child containment (Landlock + namespaces + rlimits +
@@ -278,6 +280,242 @@ static int tool_exec_out_lim(char *const argv[], char *buf, size_t cap,
 /* ---- codecpack execution hooks (WP13; declared in codec.h, called by the
  * codec.c trampolines and the sweep's pack branch) ---- */
 
+/* Reserve 3/3: stage a volume-relative pack dir to a host exec dir.
+ *
+ * A volume pack's `dir` (`.invariantfs/codecpacks/<name>.codecpack` as
+ * scanned) names volume content, not host files, so every host access
+ * in the probe/argv paths declines until the tree is staged. Staging is
+ * a plain recursive copy through the volume read API -- integrity comes
+ * from the content-addressed store itself (recipes are BLAKE3-addressed),
+ * not from a second hash gate -- into a per-(process, volume, pack) dir
+ * under a disk-backed root (exec staging skips the tmpfs-first scratch
+ * policy: noexec tmpfs is common, and the staging must survive across
+ * calls). bin/ members land +x, the rest 0644; a `.ok` sentinel marks a
+ * complete staging, which is reused without re-copying. Caps: 256 MiB
+ * total per pack, depth 4, and any `..` component fails the whole staging
+ * (a hostile namespace must not write outside its dir). Idempotent and
+ * best-effort like the volume scan: -1 is a decline, never fatal. */
+#define VOL_PACK_MAT_MAX_BYTES (256u << 20)
+#define VOL_PACK_MAT_MAX_DEPTH 4
+
+static int mat_rm_tree(const char *path)
+{
+    DIR *d = opendir(path);
+    struct dirent *de;
+    struct stat st;
+    if (!d) {
+        /* not a dir: unlink the file (absent is fine) */
+        if (unlink(path) == 0 || errno == ENOENT) return 0;
+        return -1;
+    }
+    while ((de = readdir(d)) != NULL) {
+        char full[4096];
+        if (!strcmp(de->d_name, ".") || !strcmp(de->d_name, ".."))
+            continue;
+        if (snprintf(full, sizeof full, "%s/%s", path,
+                     de->d_name) >= (int)sizeof full) {
+            closedir(d);
+            return -1;
+        }
+        if (lstat(full, &st) != 0) continue;
+        if (S_ISDIR(st.st_mode)) {
+            if (mat_rm_tree(full) != 0) { closedir(d); return -1; }
+        } else if (unlink(full) != 0 && errno != ENOENT) {
+            closedir(d);
+            return -1;
+        }
+    }
+    closedir(d);
+    return rmdir(path);
+}
+
+static int mat_mkdir_p(const char *path)
+{
+    char tmp[4096];
+    size_t len;
+    if (snprintf(tmp, sizeof tmp, "%s", path) >= (int)sizeof tmp)
+        return -1;
+    len = strlen(tmp);
+    while (len > 1 && tmp[len - 1] == '/') tmp[--len] = '\0';
+    for (char *p = tmp + 1; *p; p++) {
+        if (*p == '/') {
+            *p = '\0';
+            if (mkdir(tmp, 0700) != 0 && errno != EEXIST) return -1;
+            *p = '/';
+        }
+    }
+    if (mkdir(tmp, 0700) != 0 && errno != EEXIST) return -1;
+    return 0;
+}
+
+/* Staging root for exec materialization. Deliberately NOT the tmpfs-first
+ * tool-scratch decision: staged helpers must be executable (noexec tmpfs
+ * is widespread) and stable across calls. $INVFS_TOOL_SCRATCH wins when
+ * set (the operator chose the root); else /var/tmp, else /tmp. */
+static int mat_root(char *dst, size_t cap)
+{
+    const char *e = getenv("INVFS_TOOL_SCRATCH");
+    if (e && *e) {
+        if (snprintf(dst, cap, "%s", e) >= (int)cap) return -1;
+        return 0;
+    }
+    if (access("/var/tmp", W_OK | X_OK) == 0) {
+        if (snprintf(dst, cap, "/var/tmp") >= (int)cap) return -1;
+        return 0;
+    }
+    if (snprintf(dst, cap, "/tmp") >= (int)cap) return -1;
+    return 0;
+}
+
+static int mat_stage_path(const void *vol, const char *volrel,
+                          char *dst, size_t cap)
+{
+    char root[4096], base[256];
+    const char *b;
+    if (mat_root(root, sizeof root) != 0) return -1;
+    b = strrchr(volrel, '/');
+    b = b ? b + 1 : volrel;
+    if (snprintf(base, sizeof base, "%s", b) >= (int)sizeof base)
+        return -1;
+    if (snprintf(dst, cap, "%s/invfs-mat-%d/vol-%lx/%s", root,
+                 (int)getpid(), (unsigned long)vol,
+                 base) >= (int)cap)
+        return -1;
+    return 0;
+}
+
+static int mat_copy_one(invfs_volume *v, const char *volpath,
+                        const char *hostpath, int is_bin,
+                        uint64_t *total)
+{
+    uint64_t ino;
+    uint8_t *buf = NULL;
+    size_t blen = 0;
+    FILE *f;
+    ino = vol_find(v, volpath);
+    if (!ino) return -1;
+    if (vol_read_file(v, ino, &buf, &blen) != 0) return -1;
+    if (blen && !buf) {
+        free(buf);
+        return -1;
+    }
+    if (*total + blen > VOL_PACK_MAT_MAX_BYTES) {
+        free(buf);
+        return -1;
+    }
+    f = fopen(hostpath, "wb");
+    if (!f) { free(buf); return -1; }
+    if (blen && fwrite(buf, 1, blen, f) != blen) {
+        fclose(f);
+        free(buf);
+        return -1;
+    }
+    free(buf);
+    if (fclose(f) != 0) return -1;
+    if (chmod(hostpath, is_bin ? 0755 : 0644) != 0) return -1;
+    *total += blen;
+    return 0;
+}
+
+static int mat_copy_tree(invfs_volume *v, const char *volrel,
+                         const char *hostdir, int depth, uint64_t *total)
+{
+    int cap = 64, n = 0, i;
+    invfs_dirent *ents = NULL;
+    if (depth > VOL_PACK_MAT_MAX_DEPTH) return -1;
+    for (;;) {
+        free(ents);
+        ents = (invfs_dirent *)malloc((size_t)cap * sizeof *ents);
+        if (!ents) return -1;
+        n = vol_list_dir(v, volrel, ents, cap);
+        if (n < 0) { free(ents); return -1; }
+        if (n < cap) break;
+        cap *= 2;
+    }
+    for (i = 0; i < n; i++) {
+        char nm[256], volpath[1024], hostpath[4096];
+        size_t nl;
+        snprintf(nm, sizeof nm, "%s", ents[i].name);
+        nl = strlen(nm);
+        while (nl && nm[nl - 1] == '/') nm[--nl] = '\0';
+        /* hostile namespace guard: no escapes, no hidden absolute paths */
+        if (!nl || strstr(nm, "..") || strchr(nm, '/')) {
+            free(ents);
+            return -1;
+        }
+        if (snprintf(volpath, sizeof volpath, "%s/%s", volrel,
+                     nm) >= (int)sizeof volpath) {
+            free(ents);
+            return -1;
+        }
+        if (snprintf(hostpath, sizeof hostpath, "%s/%s", hostdir,
+                     nm) >= (int)sizeof hostpath) {
+            free(ents);
+            return -1;
+        }
+        if (ents[i].is_dir) {
+            if (mat_mkdir_p(hostpath) != 0) { free(ents); return -1; }
+            if (mat_copy_tree(v, volpath, hostpath, depth + 1,
+                              total) != 0) {
+                free(ents);
+                return -1;
+            }
+        } else {
+            int is_bin = (strstr(volpath, "/bin/") != NULL);
+            if (mat_copy_one(v, volpath, hostpath, is_bin,
+                             total) != 0) {
+                free(ents);
+                return -1;
+            }
+        }
+    }
+    free(ents);
+    return 0;
+}
+
+int invfs_vol_pack_materialize(const void *vol, const char *volrel,
+                               char *out, size_t cap)
+{
+    invfs_volume *v = (invfs_volume *)vol;
+    char stage[4096], okpath[4200];
+    uint64_t total = 0;
+    struct stat st;
+    FILE *f;
+    if (!v || !volrel || !volrel[0] || !out || !cap) return -1;
+    if (invfs_no_autopack()) return -1;
+    if (mat_stage_path(vol, volrel, stage, sizeof stage) != 0) return -1;
+    if (snprintf(out, cap, "%s", stage) >= (int)cap) return -1;
+    if (snprintf(okpath, sizeof okpath, "%s/.ok",
+                 stage) >= (int)sizeof okpath)
+        return -1;
+    /* complete staging: reuse without re-copying */
+    if (stat(okpath, &st) == 0) return 0;
+    /* stale partial (no sentinel): start clean */
+    mat_rm_tree(stage);
+    if (mat_mkdir_p(stage) != 0) return -1;
+    if (mat_copy_tree(v, volrel, stage, 0, &total) != 0) {
+        mat_rm_tree(stage);
+        return -1;
+    }
+    f = fopen(okpath, "wb");
+    if (!f) { mat_rm_tree(stage); return -1; }
+    fclose(f);
+    return 0;
+}
+
+void invfs_vol_pack_release(const void *vol)
+{
+    char voltop[4096];
+    char root[4096];
+    if (!vol) return;
+    /* drop the whole per-volume staging top (every pack of this vol) */
+    if (mat_root(root, sizeof root) != 0) return;
+    if (snprintf(voltop, sizeof voltop, "%s/invfs-mat-%d/vol-%lx", root,
+                 (int)getpid(), (unsigned long)vol) >= (int)sizeof voltop)
+        return;
+    mat_rm_tree(voltop);
+}
+
 /* Substitute {in} {out} {pack} {idx} {dir} {recipe} in one argv token.
  * Returns 0 on overflow. */
 static size_t pack_subst(char *dst, size_t cap, const char *tok,
@@ -311,7 +549,8 @@ static size_t pack_subst(char *dst, size_t cap, const char *tok,
  * placeholders per token (no shell — WP10 §10). A bare argv[0] stays bare
  * (execvp does the PATH search); a relative path containing '/' is taken
  * relative to the pack dir (mirrors manifest_tool_ok). */
-static int pack_argv_build(const invfs_pack_def *def, const char *tmpl,
+static int pack_argv_build(const invfs_pack_def *def, const char *hostdir,
+                           const char *tmpl,
                            const char *in, const char *out,
                            const char *idx, const char *dir,
                            const char *recipe,
@@ -335,18 +574,20 @@ static int pack_argv_build(const invfs_pack_def *def, const char *tmpl,
         tmpl += tl;
         if (argc + 1 >= maxa) return -1;
         w = pack_subst(arena + used, acap - used, tok,
-                       def->dir, in ? in : "", out ? out : "",
+                       hostdir, in ? in : "", out ? out : "",
                        idx ? idx : "", dir ? dir : "", recipe ? recipe : "");
         if (!w && tok[0]) return -1;    /* arena overflow */
         if (argc == 0 && !strchr(arena + used, '/')) {
             /* WP16e: a bare argv[0] resolves exactly the way the pack
              * probe (codec.c pack_tool_resolvable) and the builtin tool
              * layer do: <pack>/bin/<name> -> $INVFS_TOOLS/<name> ->
-             * /usr/lib/invfs/tools/<name> -> bare name (execvp's PATH search). */
+             * /usr/lib/invfs/tools/<name> -> bare name (execvp's PATH search).
+             * Reserve 3/3: <pack> is the materialized host dir, so volume
+             * packs resolve their staged helpers here. */
             char rb[4096];
             const char *rp = NULL;
-            if (def && def->dir) {
-                int n = snprintf(rb, sizeof rb, "%s/bin/%s", def->dir, arena + used);
+            if (hostdir) {
+                int n = snprintf(rb, sizeof rb, "%s/bin/%s", hostdir, arena + used);
                 if (n > 0 && (size_t)n < sizeof rb && access(rb, X_OK) == 0)
                     rp = rb;
             }
@@ -357,10 +598,12 @@ static int pack_argv_build(const invfs_pack_def *def, const char *tmpl,
             if (rp != arena + used) memcpy(arena + used, rp, rl + 1);
             w = rl;
         } else if (argc == 0 && strchr(arena + used, '/') && arena[used] != '/') {
-            /* relative path: resolve against the pack dir */
+            /* relative path: resolve against the (materialized) pack dir */
             char joined[4096];
-            int n = snprintf(joined, sizeof joined, "%s/%s",
-                             def->dir, arena + used);
+            int n;
+            if (!hostdir) return -1;
+            n = snprintf(joined, sizeof joined, "%s/%s",
+                             hostdir, arena + used);
             if (n <= 0 || (size_t)n >= sizeof joined ||
                 (size_t)n + 1 > acap - used) return -1;
             memcpy(arena + used, joined, (size_t)n + 1);
@@ -387,6 +630,9 @@ int invfs_codec_pack_exec(const invfs_codec *c, int is_encode,
         return -1;
     const invfs_pack_def *def = invfs_codec_pack_def(c);
     const char *tmpl;
+    /* Reserve 3/3: exec runs from the materialized host dir; NULL
+     * declines exactly like the pre-3/3 volume-pack behaviour. */
+    const char *hd = invfs_codec_pack_host_dir(c);
     char *argv[24];
     char arena[4096];
     invfs_helper_sandbox sb;
@@ -395,14 +641,15 @@ int invfs_codec_pack_exec(const invfs_codec *c, int is_encode,
     if (!def) return -1;
     tmpl = is_encode ? def->encode : def->decode;
     if (!tmpl || !in_path || !out_path) return -1;
-    if (pack_argv_build(def, tmpl, in_path, out_path, NULL, NULL, NULL,
+    if (!hd) return -1;
+    if (pack_argv_build(def, hd, tmpl, in_path, out_path, NULL, NULL, NULL,
                         argv, 24, arena, sizeof arena) != 0)
         return -1;
     /* WP12(d): the child runs under the pack's RLIMIT_AS ceiling
      * (max(2*dec_mem, 256MB) when the manifest declares dec_mem, else the
      * 2GB default) + the WP12d Landlock whitelist: pack dir RO, the input
      * file RO, the scratch dir (the output's parent) RW, the rest denied */
-    sb.pack_dir = def->dir;
+    sb.pack_dir = hd;
     sb.ro_path = in_path;
     sb.rw_dir = sb_dirname(rwbuf, sizeof rwbuf, out_path);
     sb.requires = def->requires;   /* grandchildren tools (e.g. 7zz) */
@@ -428,12 +675,15 @@ int invfs_codec_pack_cmd(const invfs_codec *c, int cmd,
         return -1;
     const invfs_pack_def *def = invfs_codec_pack_def(c);
     const char *tmpl;
+    /* Reserve 3/3: .so + CLI both run from the materialized host dir. */
+    const char *hd = invfs_codec_pack_host_dir(c);
     char *argv[24];
     char arena[4096];
     invfs_helper_sandbox sb;
     char rwbuf[4096];
 
     if (!def || !def->is_container) return -1;
+    if (!hd) return -1;
 
     /* ADR-007: the worker pool daemon runs the pack's .so in RAM instead of
      * fork()+execve()'ing the CLI helper. The operands are routed exactly the
@@ -453,7 +703,7 @@ int invfs_codec_pack_cmd(const invfs_codec *c, int cmd,
      * which falls through to the CLI exec below. */
     if (invfs_plugin_pool_is_available() && c && c->name) {
         char so_path[512];
-        snprintf(so_path, sizeof(so_path), "%s/lib%s.so", def->dir, c->name);
+        snprintf(so_path, sizeof(so_path), "%s/lib%s.so", hd, c->name);
         if (access(so_path, R_OK) == 0) {
             int pcmd = 0;
             const char *p_in = NULL, *p_out = NULL;
@@ -496,7 +746,7 @@ int invfs_codec_pack_cmd(const invfs_codec *c, int cmd,
     default: return -1;
     }
     if (!tmpl) return -1;
-    if (pack_argv_build(def, tmpl, in, out, idx, dir, recipe,
+    if (pack_argv_build(def, hd, tmpl, in, out, idx, dir, recipe,
                         argv, 24, arena, sizeof arena) != 0)
         return -1;
     /* WP12d sandbox: every container command writes only under {out}'s
@@ -507,7 +757,7 @@ int invfs_codec_pack_cmd(const invfs_codec *c, int cmd,
      * scratch root the child is already granted RW, so no new path is
      * opened -- the caller passes {out} with a trailing '/' so this still
      * resolves to the member dir and not its parent. */
-    sb.pack_dir = def->dir;
+    sb.pack_dir = hd;
     sb.ro_path = in ? in : recipe;
     sb.rw_dir = sb_dirname(rwbuf, sizeof rwbuf, out);
     sb.requires = def->requires;   /* grandchildren tools (e.g. 7zz) */
@@ -524,6 +774,8 @@ int invfs_codec_pack_estimate(const invfs_codec *c, const char *in_path,
     return -1;
 #else
     const invfs_pack_def *def = invfs_codec_pack_def(c);
+    /* Reserve 3/3: estimate runs from the materialized host dir. */
+    const char *hd = invfs_codec_pack_host_dir(c);
     char *argv[24];
     char arena[4096];
     char out[256];
@@ -533,11 +785,12 @@ int invfs_codec_pack_estimate(const invfs_codec *c, const char *in_path,
     char rwbuf[4096];
 
     if (!def || !def->estimate || !in_path) return -1;
+    if (!hd) return -1;
 
     /* ADR-007: Try worker pool daemon first for estimate */
     if (invfs_plugin_pool_is_available() && c && c->name) {
         char so_path[512];
-        snprintf(so_path, sizeof(so_path), "%s/lib%s.so", def->dir, c->name);
+        snprintf(so_path, sizeof(so_path), "%s/lib%s.so", hd, c->name);
         if (access(so_path, R_OK) == 0) {
             uint64_t est_sz = 0;
             if (invfs_plugin_pool_container_estimate(c->name, so_path, in_path, &est_sz) == 0) {
@@ -546,7 +799,7 @@ int invfs_codec_pack_estimate(const invfs_codec *c, const char *in_path,
             }
         }
     }
-    if (pack_argv_build(def, def->estimate, in_path, NULL, NULL, NULL, NULL,
+    if (pack_argv_build(def, hd, def->estimate, in_path, NULL, NULL, NULL, NULL,
                         argv, 24, arena, sizeof arena) != 0)
         return -1;
     /* WP12d: the estimate child reads its input and prints a number — it
@@ -556,7 +809,7 @@ int invfs_codec_pack_estimate(const invfs_codec *c, const char *in_path,
      * encoded-header decode stages a temp file for 7zz) needs a TMPDIR
      * inside the whitelist, and the launcher only points TMPDIR at rw_dir. Without this the grandchild's mkstemp hits EACCES and the
      * estimate fails closed (GENERIC_GUARD) on a file the pack accepts. */
-    sb.pack_dir = def->dir;
+    sb.pack_dir = hd;
     sb.ro_path = in_path;
     sb.rw_dir = sb_dirname(rwbuf, sizeof rwbuf, in_path);
     sb.requires = def->requires;

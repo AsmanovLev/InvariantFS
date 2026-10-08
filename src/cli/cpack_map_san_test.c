@@ -105,6 +105,7 @@
 #include "volume_internal.h"
 /* only for the TYPES of the stubs below -- none of these headers is needed
  * for anything on the path under test */
+#include "codec.h"
 #include "helper_exec.h"
 #include "tool_scratch.h"
 #include "deflate_repro.h"
@@ -686,6 +687,21 @@ int vol_recipe_load(invfs_volume *v,
 int invfs_no_autopack(void)
 {
     return 0;
+}
+
+/* Reserve 3/3: exec materialization (vol_cpack.c) needs the registry's
+ * host-dir hook (codec.c, not linked here) and vol_list_dir (volume.c,
+ * not linked here). This harness never execs packs -- decline both. */
+const char *invfs_codec_pack_host_dir(const invfs_codec *c)
+{
+    (void)c;
+    return 0;
+}
+int vol_list_dir(invfs_volume *v, const char *dir, invfs_dirent *ents,
+                 int max)
+{
+    (void)v; (void)dir; (void)ents; (void)max;
+    return -5;   /* -EIO: the harness stages nothing */
 }
 
 /* One AST entry, whose pba NAMES the container, so seg_read_checked below

@@ -82,6 +82,16 @@ int invfs_codec_pack_estimate(const invfs_codec *c, const char *in_path,
     return -1;
 }
 
+/* Reserve 3/3: staging hooks live in vol_cpack.c (not linked here).
+ * Same contract as above: the fuzzer never stages. */
+int invfs_vol_pack_materialize(const void *vol, const char *volrel,
+                               char *out, size_t cap)
+{
+    (void)vol; (void)volrel; (void)out; (void)cap;
+    return -1;
+}
+void invfs_vol_pack_release(const void *vol) { (void)vol; }
+
 /* ---- minimal zip member_data for fuzz leg 9 ---- */
 
 #define ZIP_LOCAL  0x04034b50u

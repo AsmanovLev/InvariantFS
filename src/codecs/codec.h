@@ -141,6 +141,26 @@ typedef struct invfs_pack_def {
  * records, so callers cannot rely on pointer identity). */
 const invfs_pack_def *invfs_codec_pack_def(const invfs_codec *c);
 
+/* Reserve 3/3: exec materialization (owner request). A host pack's dir
+ * is already a host path; a volume pack's dir is volume-relative
+ * (.invariantfs/... as scanned) and unusable until staged to the host.
+ * Returns the executable host dir for c's pack (materializing volume
+ * packs on first use, memoized per registration), or NULL when there
+ * is no pack behind c, noautopack is armed, or staging failed -- every
+ * caller treats NULL as a decline, exactly like the pre-3/3 volume-pack
+ * behaviour. Entry pointers stay valid across calls (same rule as the
+ * registry view); the string stays valid until unload/reset. */
+const char *invfs_codec_pack_host_dir(const invfs_codec *c);
+
+/* Staging hooks, IMPLEMENTED in vol_cpack.c (tool layer) like the exec
+ * hooks below: copy the volume-relative pack dir of one open volume to
+ * a host exec dir. 0 = staged (out holds the path), -1 = decline.
+ * Idempotent: a complete staging (`.ok` sentinel) is reused without
+ * re-copying. release drops every staging of one closed volume. */
+int  invfs_vol_pack_materialize(const void *vol, const char *volrel,
+                                char *out, size_t cap);
+void invfs_vol_pack_release(const void *vol);
+
 /* 1 when the pack behind this entry carries a claim rule (a sniff.magic or
  * a sniff.ext), 0 when it is a claim-free `family = code` general codec and
  * 0 for a builtin entry. The sweep's WP103 try-last pass is the only caller:

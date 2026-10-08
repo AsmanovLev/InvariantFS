@@ -795,6 +795,13 @@ typedef struct {
     const void      *origin_vol;
     int              probed;    /* memoized availability probe */
     int              avail;
+    /* Reserve 3/3: materialized host dir for a volume pack (pack_host_dir
+     * below). mat_ok 1 = mat_dir valid; 0 = never tried. No negative
+     * cache: a transient staging failure retries next probe/exec, and a
+     * complete staging short-circuits inside the volume hook. Freed with
+     * the record; host staging itself is dropped by release (unload). */
+    char             mat_dir[4096];
+    int              mat_ok;
 } pack_entry;
 
 static pack_entry packs[INVFS_PACK_MAX];
@@ -840,6 +847,40 @@ static int pack_sniff_impl(const pack_entry *p, const uint8_t *head,
     return 0;
 }
 
+/* Reserve 3/3: volume tags with live host staging (pointer values only;
+ * release never dereferences, so dangling tags after close are safe).
+ * unload drops one volume's staging, probe_reset drops everything. */
+#define STAGE_VOL_MAX 16
+static const void *stage_vols[STAGE_VOL_MAX];
+static size_t stage_n;
+
+static void stage_tag(const void *vol)
+{
+    size_t i;
+    for (i = 0; i < stage_n; i++)
+        if (stage_vols[i] == vol) return;
+    if (stage_n < STAGE_VOL_MAX)
+        stage_vols[stage_n++] = vol;
+}
+
+static void stage_untag(const void *vol)
+{
+    size_t i, n = 0;
+    for (i = 0; i < stage_n; i++) {
+        if (stage_vols[i] == vol) {
+            invfs_vol_pack_release(vol);
+            continue;
+        }
+        stage_vols[n++] = stage_vols[i];
+    }
+    stage_n = n;
+}
+
+/* Reserve 3/3: record/host-dir resolution (defined after the
+ * materialized view, which owns packs[]/g_all). */
+static pack_entry *pack_record_for(const invfs_codec *c);
+static const char *pack_host_dir(pack_entry *p);
+
 /* a `requires` tool must resolve the way the exec layer will look for it:
  * $INVFS_TOOLS/<name> -> /usr/lib/invfs/tools/<name> -> <pack>/bin/<name>
  * (the pack-sibling convention the helpers themselves use) -> PATH */
@@ -868,30 +909,36 @@ static int pack_tool_resolvable(const char *pdir, const char *tool)
 static int pack_probe_impl(pack_entry *p)
 {
     const char *r;
+    const char *hd;
 
     if (p->probed) return p->avail;
     p->probed = 1;
     p->avail = 0;
+    /* Reserve 3/3: volume packs answer from their staged host dir
+     * (materialized on first probe, memoized with the verdict). A
+     * staging failure is a decline, exactly like an absent host tool. */
+    hd = pack_host_dir(p);
+    if (!hd) return 0;
     if (p->is_container) {
-        if (!manifest_tool_ok(p->dir, p->enumerate) ||
-            !manifest_tool_ok(p->dir, p->extract) ||
-            !manifest_tool_ok(p->dir, p->strip) ||
-            !manifest_tool_ok(p->dir, p->rebuild))
+        if (!manifest_tool_ok(hd, p->enumerate) ||
+            !manifest_tool_ok(hd, p->extract) ||
+            !manifest_tool_ok(hd, p->strip) ||
+            !manifest_tool_ok(hd, p->rebuild))
             return 0;
-        if (p->map && !manifest_tool_ok(p->dir, p->map))
+        if (p->map && !manifest_tool_ok(hd, p->map))
             return 0;
         /* WP140: a declared batch whose argv0 does not resolve must make the
          * pack UNAVAILABLE, not silently degrade it to per-member extract:
          * the lane prefers batch, and "declared but unrunnable" is a pack
          * that cannot be installed as written. */
-        if (p->batch && !manifest_tool_ok(p->dir, p->batch))
+        if (p->batch && !manifest_tool_ok(hd, p->batch))
             return 0;
     } else {
-        if (!manifest_tool_ok(p->dir, p->encode) ||
-            !manifest_tool_ok(p->dir, p->decode))
+        if (!manifest_tool_ok(hd, p->encode) ||
+            !manifest_tool_ok(hd, p->decode))
             return 0;
     }
-    if (p->estimate && !manifest_tool_ok(p->dir, p->estimate))
+    if (p->estimate && !manifest_tool_ok(hd, p->estimate))
         return 0;
     r = p->requires;
     while (r && *r) {
@@ -902,7 +949,7 @@ static int pack_probe_impl(pack_entry *p)
         if (!tl || tl >= sizeof tok) return 0;
         memcpy(tok, r, tl);
         tok[tl] = '\0';
-        if (!pack_tool_resolvable(p->dir, tok)) return 0;
+        if (!pack_tool_resolvable(hd, tok)) return 0;
         if (!comma) break;
         r = comma + 1;
     }
@@ -1189,6 +1236,11 @@ void invfs_codec_probe_reset(void)
     size_t i;
 
     memset(probe_cache, 0, sizeof probe_cache);
+    /* Reserve 3/3: the test hook drops every section; staged host dirs
+     * go with them (release is tag-based, safe past close). */
+    for (i = 0; i < stage_n; i++)
+        invfs_vol_pack_release(stage_vols[i]);
+    stage_n = 0;
     for (i = 0; i < packs_n; i++) pack_entry_free(&packs[i]);
     packs_n = 0;
     packs_built = 0;
@@ -1573,6 +1625,8 @@ void invfs_codec_unload_volume(const void *vol)
         packs_dirty = 1;
         memset(probe_cache, 0, sizeof probe_cache);
     }
+    /* Reserve 3/3: drop this volume's host staging with its section. */
+    stage_untag(vol);
 }
 
 /* Reserve/bootstrap: the volume's own section first, then the shared
@@ -1716,15 +1770,54 @@ static void packs_ensure(void)
     g_all_n = n;
 }
 
-const invfs_pack_def *invfs_codec_pack_def(const invfs_codec *c)
+/* Reserve 3/3 bodies (see forwards above). */
+static pack_entry *pack_record_for(const invfs_codec *c)
 {
     size_t i;
-
     if (!c) return NULL;
     packs_ensure();
+    if (c >= g_all && c < g_all + g_all_n) {
+        const void *ov = g_all_vol[c - g_all];
+        for (i = 0; i < packs_n; i++)
+            if (packs[i].pub.algo == c->algo &&
+                packs[i].origin_vol == ov)
+                return &packs[i];
+        return NULL;
+    }
     for (i = 0; i < packs_n; i++)
-        if (packs[i].pub.algo == c->algo) return &packs[i].def;
+        if (&packs[i].pub == c) return &packs[i];
     return NULL;
+}
+
+static const char *pack_host_dir(pack_entry *p)
+{
+    char staged[4096];
+    if (!p || !p->dir) return NULL;
+    if (!p->origin_vol) return p->dir;
+    if (p->mat_ok == 1) return p->mat_dir;
+    if (invfs_no_autopack()) return NULL;
+    if (invfs_vol_pack_materialize(p->origin_vol, p->dir,
+                                   staged, sizeof staged) != 0)
+        return NULL;
+    if (snprintf(p->mat_dir, sizeof p->mat_dir, "%s", staged) >=
+        (int)sizeof p->mat_dir)
+        return NULL;
+    p->mat_ok = 1;
+    stage_tag(p->origin_vol);
+    return p->mat_dir;
+}
+
+const char *invfs_codec_pack_host_dir(const invfs_codec *c)
+{
+    pack_entry *p = pack_record_for(c);
+    if (!p) return NULL;
+    return pack_host_dir(p);
+}
+
+const invfs_pack_def *invfs_codec_pack_def(const invfs_codec *c)
+{
+    pack_entry *p = pack_record_for(c);
+    return p ? &p->def : NULL;
 }
 
 /* Does this pack carry any claim rule -- a sniff.magic or a sniff.ext?
@@ -1745,16 +1838,10 @@ const invfs_pack_def *invfs_codec_pack_def(const invfs_codec *c)
  * entry (there is no pack record to hold rules). */
 int invfs_codec_pack_claims(const invfs_codec *c)
 {
-    size_t i;
-
-    if (!c) return 0;
-    packs_ensure();
-    for (i = 0; i < packs_n; i++) {
-        if (packs[i].pub.algo != c->algo) continue;
-        if (packs[i].n_magic > 0) return 1;
-        if (packs[i].exts && packs[i].exts[0]) return 1;
-        return 0;
-    }
+    pack_entry *p = pack_record_for(c);
+    if (!p) return 0;
+    if (p->n_magic > 0) return 1;
+    if (p->exts && p->exts[0]) return 1;
     return 0;
 }
 

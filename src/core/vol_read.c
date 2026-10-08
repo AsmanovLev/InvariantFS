@@ -746,8 +746,9 @@ static int vol_decode_ast_entries(invfs_volume *v, uint64_t inode_id,
                      * the builtin placeholder has no decode: the builtin
                      * djxl wrapper answers, so pre-migration blobs and
                      * EXER-carved JXL parts (which never needed a pack)
-                     * stay readable. */
-                    const invfs_codec *jc = invfs_codec_by_algo(INVFS_ALGO_JXL);
+                     * stay readable. Reserve 3/3: the operating volume's
+                     * section wins (its pack likely wrote these bytes). */
+                    const invfs_codec *jc = invfs_codec_by_algo_vol(v, INVFS_ALGO_JXL);
                     if (jc && jc->decode) {
                         if (jc->decode(blob, hdr, data + dst_off,
                                        (size_t)e->length) != 0) {
@@ -1194,7 +1195,9 @@ static int vol_decode_ast_entries(invfs_volume *v, uint64_t inode_id,
                 } else if (e->algo == INVFS_ALGO_NONE) {
                     memcpy(data + dst_off, blob, hdr);
                 } else {
-                    const invfs_codec *pc = invfs_codec_by_algo(e->algo);
+                    /* Reserve 3/3: decode prefers the operating volume's
+                     * section (its pack likely wrote this segment). */
+                    const invfs_codec *pc = invfs_codec_by_algo_vol(v, e->algo);
                     const invfs_pack_def *pd =
                         pc ? invfs_codec_pack_def(pc) : NULL;
                     /* WP16b: a seekable pack container (map command ->
@@ -1493,7 +1496,7 @@ int vol_stat_full(invfs_volume *v, const char *name, uint64_t *id_out,
    purpose -- they decode per 64 KB segment, which is already bounded, and
    caching them would spend the budget evicting the entries that cost a
    subprocess to produce. */
-static int algo_is_whole_file(uint32_t algo)
+static int algo_is_whole_file(invfs_volume *v, uint32_t algo)
 {
     const invfs_codec *c;
     if (algo == INVFS_ALGO_FLACR || algo == INVFS_ALGO_TARR ||
@@ -1502,7 +1505,9 @@ static int algo_is_whole_file(uint32_t algo)
         algo == INVFS_ALGO_JXL   || algo == INVFS_ALGO_EXER)
         return 1;
     /* WP13: codecpack codecs declare WHOLEFILE in their manifest caps */
-    c = invfs_codec_by_algo(algo);
+    /* Reserve 3/3: the operating volume's section decides (a volume
+     * container pack with a map command is SEEKABLE on its own volume). */
+    c = invfs_codec_by_algo_vol(v, algo);
     if (!c || !(c->caps & INVFS_CODEC_CAP_WHOLEFILE))
         return 0;
     /* WP16b: a container pack carrying a map command (CAP_SEEK) has NO
@@ -1604,7 +1609,8 @@ static int read_range(invfs_volume *v, uint64_t inode_id, uint64_t offset,
 
     /* WP16b: check for seekable container with !mbrmap sibling */
     if (n_ents >= 1) {
-        const invfs_codec *pc = invfs_codec_by_algo(ents[0].algo);
+        /* Reserve 3/3: the operating volume's section decides SEEK. */
+        const invfs_codec *pc = invfs_codec_by_algo_vol(v, ents[0].algo);
         const invfs_pack_def *pd = pc ? invfs_codec_pack_def(pc) : NULL;
         int seek = pd && pd->is_container && (pc->caps & INVFS_CODEC_CAP_SEEK) != 0;
         if (seek || !pc) {
@@ -1682,7 +1688,7 @@ static int read_range(invfs_volume *v, uint64_t inode_id, uint64_t offset,
          * decode exists -- rebuild once and slice the requested window.
          * container_no_map: a seekable container whose !mbrmap is gone has
          * the same shape (vol_read_inode runs the pack's rebuild exec). */
-        if (container_no_map || algo_is_whole_file(e->algo)) {
+        if (container_no_map || algo_is_whole_file(v, e->algo)) {
             if (!all) {
                 if (vol_read_inode(v, inode_id, 0, &all, &all_len) != 0) {
                     free(blob);
