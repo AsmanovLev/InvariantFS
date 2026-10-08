@@ -2396,3 +2396,47 @@ their green history is unverified either way.
 - **usr1-savepoint leg A**: `cap=7 walk=4`, save point not armed before the
   walk, identically local and CI. Untouched code paths (sweep arming);
   counting/timing semantics not yet read.
+
+## test-flakey leg2-error-storm OPEN: fsync-acked storm file reads back wrong bytes
+
+**Date:** 2026-10-09 (CI soak, engine-ci run 37791141670). **Status:** OPEN.
+First seen on the informational soak; deterministic seed chain pending
+confirmation (storm seed derives from the suite SEED).
+
+**Failure mode** (`tools/test-flakey.sh` leg2, oracle at `:717-719`):
+after a 6 s dm-error storm during active FUSE writes + heal + clean
+unmount + fsck/`-f` clean + deep verify 0 corrupt, the storm-file audit
+reports `storm files: 109 present+bit-exact (109 of them pinned)` plus
+`BAD: present file storm-046.bin has WRONG BYTES` ->
+`FAIL[leg2-error-storm]: storm files: torn bytes or a lost pinned write`.
+
+**Why this is durability-class, not chaos fallout:** the writer
+(`test-flakey.sh:638-658`) logs `OK` only after the full 2 MiB write AND
+a successful `fsync`, with the sha256 of exactly those bytes. An `OK`
+line is an acknowledged durable write; reading different bytes back
+afterwards breaks the fsync honesty boundary (ADR-009), whether the
+torn write landed under the error window with a lying ack or the
+post-storm recovery (fsck `-f`, reclaim, fold) damaged a live file.
+
+**Not determined:** whether storm-046 was pinned (outside `[T_ON,T_OFF]`)
+or an in-storm OK (the BAD line does not say; the storm.log + leg
+artifacts live only on the runner and are not uploaded -- consider
+uploading flakey artifacts on failure); which stage tore it (write,
+flush, fold, reclaim, `-f`); exact repro seed for a local WP run.
+
+## test-fuse-sweep-thread + test-ext4fs-orphan OPEN (runner-only reds)
+
+**Date:** 2026-10-09 (e2e-full, 24.04 runners). **Status:** OPEN. Both pass
+on the dev box and fail deterministically on GH runners; neither is understood.
+
+- **sweep-thread**: `setup()` mounts fine (`mountpoint` passes), then
+  `daemon_pid($IMG)` finds no `/proc` cmdline containing the image path
+  ("no daemon pid"), and the leftover mount breaks cleanup (`rm ... Is a
+  directory`). Same-uid visibility rules out hidepid-style causes on its
+  own; whether the daemon exits between mount and scan (watermark worker
+  crash?) or the scan misses (argv shape?) is not established.
+- **ext4fs orphan leg**: `$E4 enumerate` declines the default 8 MB image
+  (`mkfs.ext4 -q -F`, orphan_file on) that must yield exactly 1 member.
+  ht0/ht1/fsA/fsB legs pass on the same run; only the orphan shape
+  declines. e2fsprogs-version shape suspected (same family as ht1), not
+  shown.
