@@ -179,6 +179,10 @@ jobs:
         run: |
           export INVFS_CODECPACKS_SYS=0
           export PATH="$PATH:/sbin:/usr/sbin"
+          # the suite's scratch defaults to /srv/invfs-flakey (box
+          # convention); runners use their temp dir via the suite's own
+          # FLAKEY_WORK override instead.
+          export FLAKEY_WORK="$RUNNER_TEMP/flakey"
           timeout 5400 bash tools/run-e2e.sh tools/test-flakey.sh; rc=$?
           echo "soak rc=$rc (informational; pre-war reds tracked, not gating)"
           exit 0
