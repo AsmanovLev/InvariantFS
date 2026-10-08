@@ -2464,7 +2464,27 @@ drop windows land mid-sweep; artifacts preserved under
    inodes, 1811 segments verified all intact" but still ends DAMAGED +
    1 corrupt -- the pinned content is already gone by then.
 
-Fix shape (WP): reclaim must treat unreadable pages as mark ROOTS
-(keep the subtree), never as empty; i.e. fail closed on EIO during
-the mark walk. Separately, teach the ladder to attempt SPT0 rollback
-when it exists (cheap rung, necessary but not sufficient alone).
+Update 2026-10-09 (deeper forensics, same artifacts): two of the
+above claims are corrected.
+- The stale-anchor theory is DEAD: the RT30 CRC "mismatch" was my
+  error (zlib CRC32 vs the on-disk CRC32C). No ADOPTED message anywhere;
+  block-0 opens directly. The near-empty current root (seq 20, 44 keys)
+  is genuinely published, not a fallback.
+- The reclaim-misfree theory is UNPROVEN and unlikely as stated: all
+  three collectors (`btree_reclaim_pinned`, the orphan collector's
+  mark over both RT30 slots + pinned_root) abort without freeing on
+  unreadable pages, on paper. The 84 freed pages may be legitimately
+  stale generations. What is NOT explained yet is the near-empty
+  namespace (0 inodes over 44 keys) with only 3 tiny ranges
+  quarantined -- the walk-artifact vs genuinely-published-empty
+  distinction is open.
+- CONFIRMED gap, stands: the ladder never attempts SPT0 rollback
+  (only CKP0). Manual rollback on the preserved image restores
+  base_root=118089 with "7 inodes, 1811 segments verified all intact"
+  yet still ends DAMAGED + 1 corrupt -- so rollback is a necessary
+  rung but not sufficient alone; the torn recipe page of 1 file (and
+  whatever emptied the current root) is beyond what any root-swap
+  can heal.
+Fix shape (WP): (1) teach the ladder the SPT0 rung; (2) establish how
+the published root lost the namespace (walk artifact vs empty publish
+vs reclaim) before touching the collectors.
