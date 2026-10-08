@@ -2488,3 +2488,16 @@ above claims are corrected.
 Fix shape (WP): (1) teach the ladder the SPT0 rung; (2) establish how
 the published root lost the namespace (walk artifact vs empty publish
 vs reclaim) before touching the collectors.
+
+## test-flakey leg2 FIXED (harness-caused): the SPT0 rung rolled back healthy volumes
+
+**Date:** 2026-10-09. **Status:** FIXED in the leg3 WP (`test-flakey.sh`
+`recover()` gates the SPT0 attempt on a non-OK first fsck).
+
+The newly added SPT0 rung fired unconditionally on a live savepoint --
+including after clean fscks -- truncating the delta and deleting healthy
+storm writes the oracle then demanded back (`pinned file storm-089.bin
+... is ABSENT` ×3, locally reproduced under CPU load). The recovery
+deleted what the chaos never touched. Rollback is destructive to
+post-savepoint writes by design and is only justified against a damaged
+tree. Verified: leg2 green under load after the gate (237 s).
