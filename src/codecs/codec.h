@@ -58,6 +58,21 @@ const invfs_codec *invfs_codec_all(size_t *count);   /* order = sniff priority: 
 uint16_t           invfs_registry_generation(void);  /* max generation over all codecs */
 void               invfs_codec_probe_reset(void);    /* test hook: clear memoized probe() results + unload packs */
 
+/* P0-1 guard (owner policy, not a bug: the user decides whom to trust).
+ * When armed, no pack-supplied binary is ever executed: the manifest
+ * probe (tool_self_describes) reports absent and the pack exec/cmd
+ * trampolines decline, so the sweep defers pack files instead of running
+ * third-party code. Builtin lanes that exec vetted system tools through
+ * the trusted-dirs policy (docs/SECURITY.md) are unaffected -- the guard
+ * is about unvetted pack binaries, not about exec as such.
+ * Session-fixed: set before the first probe (mount option or env below).
+ * Sources, in precedence order: invfs_set_no_autopack(1), then the
+ * INVFS_NO_AUTOPACK environment variable (any non-empty value starting
+ * with a character other than '0'). The env form covers the offline
+ * tools (invf-sweep, invf-import), which share this TU. */
+void               invfs_set_no_autopack(int on);
+int                invfs_no_autopack(void);
+
 /* ---- codecpack execution boundary (WP13) ----
  *
  * Dynamically registered packs (invfs_codec_load_packs, lazy on first

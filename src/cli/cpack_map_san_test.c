@@ -680,6 +680,14 @@ int vol_recipe_load(invfs_volume *v,
     return 0;
 }
 
+/* P0-1 guard: vol_cpack.c calls invfs_no_autopack() (codec.c, not
+ * linked here). Stubbed off: this harness predates the guard and does
+ * not exercise it -- pack exec is driven by other tests. */
+int invfs_no_autopack(void)
+{
+    return 0;
+}
+
 /* One AST entry, whose pba NAMES the container, so seg_read_checked below
  * can tell the containers apart (it has nothing else to go on). */
 int vol_ast_recipe_parse(const uint8_t *blob, size_t blen,

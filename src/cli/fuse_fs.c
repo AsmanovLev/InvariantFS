@@ -25,6 +25,7 @@
 
 #include "invarifs.h"
 #include "volume.h"
+#include "codec.h"   /* P0-1 guard: invfs_set_no_autopack for -o noautopack */
 #include "vol_spt0.h"
 #include "vol_walk.h"   /* WP135: a walk's status is not optional */
 #include "tmpstore.h"
@@ -3835,6 +3836,12 @@ int main(int argc, char *argv[])
                 /* WP212: this mount is the boot root -- see the note on
                  * g_survive_term. Set by tools/initramfs-init.sh only. */
                 g_survive_term = 1;
+            } else if (strcmp(tok, "noautopack") == 0) {
+                /* P0-1 guard (owner policy): mount an untrusted volume
+                 * without ever executing a pack-supplied binary. Probes
+                 * report absent, pack lanes decline, files stay generic
+                 * or defer. See codec.h invfs_set_no_autopack. */
+                invfs_set_no_autopack(1);
             } else if (strncmp(tok, "tmp_area=", 9) == 0) {
                 const char *mode = tok + 9;
                 if (strcmp(mode, "ram") == 0)

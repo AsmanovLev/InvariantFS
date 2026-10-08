@@ -381,6 +381,10 @@ int invfs_codec_pack_exec(const invfs_codec *c, int is_encode,
     (void)c; (void)is_encode; (void)in_path; (void)out_path;
     return -1;   /* the POSIX tool layer does not exist on Windows */
 #else
+    /* P0-1 guard: never execute a pack-supplied binary under noautopack.
+     * The caller treats nonzero as a decline and defers the file. */
+    if (invfs_no_autopack())
+        return -1;
     const invfs_pack_def *def = invfs_codec_pack_def(c);
     const char *tmpl;
     char *argv[24];
@@ -419,6 +423,9 @@ int invfs_codec_pack_cmd(const invfs_codec *c, int cmd,
     (void)out;
     return -1;   /* the POSIX tool layer does not exist on Windows */
 #else
+    /* P0-1 guard, same as pack_exec above (container commands). */
+    if (invfs_no_autopack())
+        return -1;
     const invfs_pack_def *def = invfs_codec_pack_def(c);
     const char *tmpl;
     char *argv[24];

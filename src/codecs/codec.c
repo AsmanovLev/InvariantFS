@@ -627,6 +627,26 @@ static int probe_pack_dir(const char *dir, size_t dlen, const char *name)
     return manifest_tool_ok(packdir, m.encode) && manifest_tool_ok(packdir, m.decode);
 }
 
+/* P0-1 guard state. See codec.h: the flag is set once per session
+ * (mount option or setter); the env var is read lazily so the offline
+ * tools need no init plumbing. Neither site below is hot (both fork),
+ * so a getenv per call is lost in the noise. */
+static int g_no_autopack;
+
+void invfs_set_no_autopack(int on)
+{
+    g_no_autopack = on ? 1 : 0;
+}
+
+int invfs_no_autopack(void)
+{
+    const char *e;
+    if (g_no_autopack)
+        return 1;
+    e = getenv("INVFS_NO_AUTOPACK");
+    return e && e[0] && e[0] != '0';
+}
+
 /* self-describing binary convention: <tool> --invfs-manifest prints a
  * manifest on stdout and exits 0; fixed argv, no shell */
 static int tool_self_describes(const char *tool)
@@ -638,6 +658,12 @@ static int tool_self_describes(const char *tool)
     char buf[512];
     ssize_t r;
 
+    /* P0-1 guard: the probe forks a pack-supplied binary with the full
+     * unsanitised environment (AUDIT WP210-NEW-2). Under noautopack the
+     * tool is reported absent without executing anything; PACKONLY
+     * entries then defer instead of admitting. */
+    if (invfs_no_autopack())
+        return 0;
     if (pipe(pfd) != 0) return 0;
     pid = fork();
     if (pid < 0) { close(pfd[0]); close(pfd[1]); return 0; }
@@ -674,6 +700,13 @@ static int probe_external(const char *name, const char *tool)
 {
     static const char sysdir[] = "/usr/lib/invfs/codecpacks";
     const char *p = getenv("INVFS_CODECPACKS");
+
+    /* P0-1 guard: the entry is not available for use, so it probes
+     * absent -- before any fork (self-describe) or access() shortcut
+     * (on_path) below. Manifest *reads* still register the pack; the
+     * exec/cmd trampolines are the enforcement. */
+    if (invfs_no_autopack())
+        return 0;
 
     while (p && *p) {
         const char *colon = strchr(p, ':');

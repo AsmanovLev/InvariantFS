@@ -46,16 +46,16 @@ src/cli/cat.c:95:SKIP
 src/cli/cat.c:121:SKIP
 src/cli/cp.c:118:SKIP
 src/cli/heat_walk_test.c:365:SKIP
-src/cli/fuse_fs.c:1644:SKIP
-src/cli/fuse_fs.c:1980:SKIP
-src/cli/fuse_fs.c:2643:SKIP
-src/cli/fuse_fs.c:2857:SKIP
-src/cli/fuse_fs.c:2912:SKIP
-src/cli/fuse_fs.c:3173:SKIP
-src/cli/fuse_fs.c:3340:SKIP
-src/cli/fuse_fs.c:3412:SKIP
-src/cli/fuse_fs.c:3447:SKIP
-src/cli/fuse_fs.c:3484:SKIP
+src/cli/fuse_fs.c:1645:SKIP
+src/cli/fuse_fs.c:1981:SKIP
+src/cli/fuse_fs.c:2644:SKIP
+src/cli/fuse_fs.c:2858:SKIP
+src/cli/fuse_fs.c:2913:SKIP
+src/cli/fuse_fs.c:3174:SKIP
+src/cli/fuse_fs.c:3341:SKIP
+src/cli/fuse_fs.c:3413:SKIP
+src/cli/fuse_fs.c:3448:SKIP
+src/cli/fuse_fs.c:3485:SKIP
 src/cli/otrunc_test.c:568:SKIP   # calibration: the armed lookup IS the assertion
 src/cli/otrunc_test.c:572:SKIP   # calibration: the armed lookup IS the assertion
 src/cli/lane_release_test.c:242:SKIP
@@ -102,20 +102,20 @@ src/cli/window_test.c:176:SKIP
 src/cli/write_create_path_test.c:248:SKIP
 src/cli/tar_cap_test.c:182:SKIP
 src/cli/window_test.c:176:SKIP
-src/core/vol_cpack.c:2596:SKIP
-src/core/vol_cpack.c:2939:SKIP
-src/core/vol_cpack.c:2939:SKIP
-src/core/vol_cpack.c:3036:SKIP
-src/core/vol_cpack.c:3036:ACTS
-src/core/vol_cpack.c:3281:ACTS
-src/core/vol_cpack.c:3777:SKIP
-src/core/vol_cpack.c:3859:SKIP
-src/core/vol_cpack.c:3859:SKIP
-src/core/vol_cpack.c:3859:ACTS
-src/core/vol_cpack.c:3859:SKIP
-src/core/vol_cpack.c:3859:ACTS
-src/core/vol_cpack.c:3960:SKIP
-src/core/vol_cpack.c:3960:SKIP
+src/core/vol_cpack.c:2603:SKIP
+src/core/vol_cpack.c:2946:SKIP
+src/core/vol_cpack.c:2946:SKIP
+src/core/vol_cpack.c:3043:SKIP
+src/core/vol_cpack.c:3043:ACTS
+src/core/vol_cpack.c:3288:ACTS
+src/core/vol_cpack.c:3784:SKIP
+src/core/vol_cpack.c:3866:SKIP
+src/core/vol_cpack.c:3866:SKIP
+src/core/vol_cpack.c:3866:ACTS
+src/core/vol_cpack.c:3866:SKIP
+src/core/vol_cpack.c:3866:ACTS
+src/core/vol_cpack.c:3967:SKIP
+src/core/vol_cpack.c:3967:SKIP
 src/core/vol_exer.c:267:ACTS
 src/core/vol_heat.c:799:SKIP
 src/core/vol_png.c:1013:SKIP
@@ -141,18 +141,18 @@ src/core/volume.c:1298:SKIP   # tier_owner / rawm_owner anchors (vol_open_inner)
 src/core/volume.c:1299:SKIP   # shifted by the PERF_PROFILING counters in volume.c
 src/recipes/zip.c:141:SKIP
 src/recipes/zip.c:145:SKIP
-src/core/vol_cpack.c:2939:SKIP   # непомечен: добавлено при правке vol_cpack.c
-src/core/vol_cpack.c:3036:SKIP   # непомечен: добавлено при правке vol_cpack.c
-src/core/vol_cpack.c:3859:SKIP   # непомечен: добавлено при правке vol_cpack.c
-src/core/vol_cpack.c:3859:ACTS   # непомечен: добавлено при правке vol_cpack.c
-src/core/vol_cpack.c:3879:ACTS   # непомечен: добавлено при правке vol_cpack.c
-src/core/vol_cpack.c:3960:SKIP   # непомечен: добавлено при правке vol_cpack.c
-src/core/vol_cpack.c:2940:SKIP   # непомечен: добавлено при правке vol_cpack.c
-src/core/vol_cpack.c:3037:SKIP   # непомечен: добавлено при правке vol_cpack.c
-src/core/vol_cpack.c:3874:SKIP   # непомечен: добавлено при правке vol_cpack.c
-src/core/vol_cpack.c:3875:ACTS   # непомечен: добавлено при правке vol_cpack.c
-src/core/vol_cpack.c:3900:ACTS   # непомечен: добавлено при правке vol_cpack.c
-src/core/vol_cpack.c:3992:SKIP   # непомечен: добавлено при правке vol_cpack.c
+src/core/vol_cpack.c:2946:SKIP   # непомечен: добавлено при правке vol_cpack.c
+src/core/vol_cpack.c:3043:SKIP   # непомечен: добавлено при правке vol_cpack.c
+src/core/vol_cpack.c:3866:SKIP   # непомечен: добавлено при правке vol_cpack.c
+src/core/vol_cpack.c:3866:ACTS   # непомечен: добавлено при правке vol_cpack.c
+src/core/vol_cpack.c:3886:ACTS   # непомечен: добавлено при правке vol_cpack.c
+src/core/vol_cpack.c:3967:SKIP   # непомечен: добавлено при правке vol_cpack.c
+src/core/vol_cpack.c:2947:SKIP   # непомечен: добавлено при правке vol_cpack.c
+src/core/vol_cpack.c:3044:SKIP   # непомечен: добавлено при правке vol_cpack.c
+src/core/vol_cpack.c:3881:SKIP   # непомечен: добавлено при правке vol_cpack.c
+src/core/vol_cpack.c:3882:ACTS   # непомечен: добавлено при правке vol_cpack.c
+src/core/vol_cpack.c:3907:ACTS   # непомечен: добавлено при правке vol_cpack.c
+src/core/vol_cpack.c:3999:SKIP   # непомечен: добавлено при правке vol_cpack.c
 "
 
 fail=0

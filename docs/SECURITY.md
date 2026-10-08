@@ -128,6 +128,7 @@ a deferred fix — the Windows build is not the primary target of WP33.
 | `INVFS_HELPER_FSIZE_MB` | `RLIMIT_FSIZE` (MiB per file) | 8192 |
 | `INVFS_HELPER_PATH` | Overrides the child's minimal `PATH` | system path |
 | `INVFS_HELPER_KEEPENV` | Comma/space list of parent vars copied into the child (never `LD_*`) | (unset) |
+| `INVFS_NO_AUTOPACK` | P0-1 guard: never execute a pack-supplied binary (probe, encode/decode, container commands); files defer instead | (unset) |
 
 ## Other security considerations
 
@@ -148,6 +149,38 @@ is a whitelist:
 
 If Landlock is unavailable on the build host, the process falls back to
 `prctl(PR_SET_NO_NEW_PRIVS)` + `RLIMIT_AS` only.
+
+### Pack trust policy (P0-1: owner decision, not a bug)
+
+Mounting or sweeping a volume EXECUTES third-party code by design: the
+manifest probe runs each candidate tool with `--invfs-manifest`
+(`src/codecs/codec.c:632`, `tool_self_describes`), and admitted packs run
+their encode/decode and container commands as subprocesses
+(`src/core/vol_cpack.c:377` `invfs_codec_pack_exec`, `:410`
+`invfs_codec_pack_cmd`). The user decides whom to trust -- per-pack
+consent prompts were considered and rejected as overkill. Trust roots
+are the probe search dirs (`$INVFS_CODECPACKS`, then
+`/usr/lib/invfs/codecpacks`, then self-describing tools on `PATH`).
+
+Known exception, documented rather than fixed: the probe child inherits
+the FULL unsanitised environment (`HOME`, `LD_*`, everything) and none
+of the `helper_child_setup` containment (`impl_docs/AUDIT.md` WP210-NEW-2).
+It runs before admission, so a hostile pack is unvetted at that point.
+Signatures (verify before first exec) are the planned fix; they are not
+implemented yet.
+
+Escape hatch, for mounting an untrusted volume: `-o noautopack`
+(`src/cli/fuse_fs.c:3839`) or `INVFS_NO_AUTOPACK=1` (covers the offline
+tools, which share the codec TU). When armed, the probe reports every
+tool absent without forking, and the pack exec/cmd trampolines decline
+before forking (`src/codecs/codec.c:665`, `src/core/vol_cpack.c:386`,
+`:427`): pack files stay generic or defer to a later run. What it does
+NOT cover: builtin lanes that exec vetted system tools through the
+trusted-dirs resolution above (a hostile volume cannot inject its own
+`cjxl` there), manifest *file* reads (no exec involved), and the
+separately-launched `invf-plugin-host` pool (the operator starts it
+deliberately). Proven by `src/cli/noautopack_test.c`: hostile fixtures
+that fingerprint on execution, with guard-off controls.
 
 ### Crash safety
 

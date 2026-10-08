@@ -261,7 +261,7 @@ CLI_MAINS := mkfs verify fsck cp cat ls stat arctest blkio_test resize \
              reclaim_reader_epoch_test dedupe_symlink_test dirs_free_before_publish_test \
              stat_counts_test acl_eio_test acl_inherit_test meta_clobber_test spn_skip_recipe_test \
              walk_status_test walk_status_fuse_test sweep_refuse_fuse_test no_v2_surface_test \
-             heat_walk_test no_ckp0_surface_test \
+             heat_walk_test no_ckp0_surface_test noautopack_test \
 table_sync_evict_test write_create_path_test tz_registry_test \
 otrunc_test sib_walk_test chmod_acl_write_test bang_name_test sweep_bang_test \
 read_named_test sweep_report_bang_test sweep_tree_bang_test \
@@ -855,6 +855,9 @@ test-shard-1: $(TEST_SHARD_DEPS) test-shard-check
 	$(TESTENV) $(TESTISO) $(OUT)/invf-arctest
 	$(TESTENV) $(TESTISO) $(OUT)/invf-blkio_test
 	$(TESTENV) $(TESTISO) $(OUT)/invf-codec_test
+# P0-1 guard: hostile-pack fixtures prove no pack binary executes under
+# noautopack, with guard-off controls so no leg passes vacuously.
+	$(TESTENV) $(TESTISO) $(OUT)/invf-noautopack_test
 	$(TESTENV) $(OUT)/invf-helper_exec_test
 	$(TESTENV) $(TESTISO) $(OUT)/invf-metabuf_test
 	$(TESTENV) $(TESTISO) $(OUT)/invf-btree_test
