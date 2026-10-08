@@ -2355,3 +2355,24 @@ perfectly, mounted its root, reached `graphical.target`, accepted ssh as root,
 and passed every harness in this repository — while being unusable to every
 unprivileged user on it. Root-only assertions could not see it, which is why it
 survived from WP66 to now.
+
+## test-flakey leg3-torn-sweep OPEN: post-recovery verify finds corrupt files
+
+**Date:** 2026-10-08. **Status:** OPEN, pre-war (red before the current work;
+HANDOVER lists it as a pre-existing red). Found twice by the CI soak job,
+in two seed variants.
+
+**Failure mode** (`tools/test-flakey.sh:763-797`, oracle at `:792-797`):
+a sweep torn by seeded `drop_writes` windows recovers (fsck clean), but the
+post-recovery `invf-verify --deep` reports corrupt content:
+engine-ci run 37789051461, `FAIL[leg3-torn-sweep]: verify after recovery`
+with `7 files ok, 2 corrupt, 103809152 bytes verified` (an earlier soak on
+the same tree dead-ended at `recover` instead -- same leg, same oracle
+family, different seed). The leg asserts the full durability promise
+(torn sweep -> full recovery, zero loss, bit-exact vs originals), so any
+corrupt byte after recovery is a defect, not a flake signature.
+
+**Not determined:** whether the 2 corrupt files are torn segments the
+recovery honestly reports (EIO + named loss would be correct behaviour the
+oracle still counts as failure) or silently wrong bytes. The ladder logs
+(`rec-fsck*.log`, `rec-verify*.log` in the leg artifacts) decide it.
