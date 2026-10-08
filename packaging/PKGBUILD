@@ -55,7 +55,9 @@ options=('!strip' '!debug')
 # IS Arch; dracut is Gentoo/Fedora and stays off here.
 package() {
     cd "$srcdir/invfs-v$pkgver-$arch"
-    DESTDIR="$pkgdir" PREFIX=/usr \
+    # Arch is merged-usr without /usr/sbin in packages (filesystem owns
+    # the path): sbin front-ends land in /usr/bin, reachable as /sbin/*.
+    DESTDIR="$pkgdir" PREFIX=/usr SBINDIR=/usr/bin \
         WITH_SYSTEMD=1 WITH_DRACUT=0 WITH_MKINITCPIO=1 \
         WITH_INITRAMFS_TOOLS=0 \
         sh packaging/install.sh

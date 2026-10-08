@@ -70,8 +70,8 @@ record_tree() {
 }
 
 BINDIR=$PREFIX/bin
-# SBINDIR is overridable (Void forbids /usr/sbin in packages: merged-usr
-# puts admin helpers in /usr/bin, reachable as /sbin/* via the symlink).
+# SBINDIR is overridable (Void and Arch forbid /usr/sbin in packages:
+# merged-usr puts admin helpers in /usr/bin, reachable as /sbin/*).
 SBINDIR=${SBINDIR:-$PREFIX/sbin}
 LIBDIR=$PREFIX/lib/invfs
 MANDIR=$PREFIX/share/man
