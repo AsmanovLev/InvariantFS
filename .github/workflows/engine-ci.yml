@@ -107,7 +107,11 @@ jobs:
   # wedged suite cannot eat the job.
   e2e-full:
     needs: [engine]
-    runs-on: ubuntu-22.04
+    # 24.04, not 22.04: libjxl-tools (cjxl/djxl, hard-required by the
+    # jxl/exercarve/pngflac/rawimg lanes) is not installable on the 22.04
+    # image. The version split is coverage, not drift: engine still gates
+    # on 22.04.
+    runs-on: ubuntu-24.04
     timeout-minutes: 300
     steps:
       - uses: actions/checkout@v7
