@@ -39,6 +39,9 @@ or
 .TP
 .B list [family]
 List installed and available packs, optionally filtered by family.
+With
+.B \-\-volume IMG
+list the packs carried by an offline volume image instead.
 .TP
 .B search \fIterm\fR
 Substring match over pack name, format id, provided family and description.
@@ -53,6 +56,10 @@ policy is to
 that covers the same family; both remain and
 .B alternatives
 shows which is primary.
+With
+.B \-\-volume IMG
+install onto an offline volume image (via the import path) instead of
+the host root.
 .TP
 .B remove \fIpack\fR
 Uninstall every installed version of the pack (and its legacy symlink).

@@ -116,6 +116,12 @@ invfs_mount_handler() {
     fi
 
     msg ":: mounting InvariantFS volume '$dev' on real root"
+    # pre-mount check, warn-only: fsck.invfs -a never repairs (only -y
+    # does, and nothing here passes it). A DAMAGED-but-readable volume
+    # still mounts; the verdict stays on the console instead of silent.
+    if type fsck.invfs >/dev/null 2>&1; then
+        fsck.invfs -a "$dev" || msg "WARNING: pre-mount check of $dev reported damage; mounting anyway"
+    fi
     # rootflags ride into the daemon as -o options; invf-fuse pulls out its
     # own keys (arc_limit=, raw_watermark=, ...) and passes the rest to libfuse
     if [ -n "${rootflags:-}" ]; then

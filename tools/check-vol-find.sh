@@ -59,6 +59,8 @@ src/cli/fuse_fs.c:3496:SKIP
 src/cli/fuse_fs.c:3533:SKIP
 src/cli/otrunc_test.c:568:SKIP   # calibration: the armed lookup IS the assertion
 src/cli/otrunc_test.c:572:SKIP   # calibration: the armed lookup IS the assertion
+src/cli/pack.c:295:SKIP   # list --volume: unreadable manifest skips the pack row
+src/cli/pack.c:635:ACTS   # install --volume: present manifest refuses the duplicate (needs -y)
 src/cli/lane_release_test.c:242:SKIP
 src/cli/ls.c:121:SKIP
 src/cli/ls.c:135:SKIP

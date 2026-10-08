@@ -51,8 +51,9 @@ installkernel() {
 # called by dracut
 install() {
     # the daemon + the offline tools (fsck/verify rescue in the initramfs,
-    # invf-sweep for maintenance boots)
-    inst_multiple invf-fuse invf-sweep invf-verify invf-fsck invf-rollback
+    # invf-sweep for maintenance boots). fsck.invfs rides along so any
+    # pre-mount check uses the standard-named entry point.
+    inst_multiple invf-fuse invf-sweep invf-verify invf-fsck invf-rollback fsck.invfs
 
     # the system codecpack dir, staged wholesale: the sweep/read paths
     # resolve packs via /usr/lib/invfs/codecpacks inside the initramfs too.

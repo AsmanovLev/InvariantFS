@@ -33,6 +33,17 @@ while [ ! -b "$rootdev" ]; do
 done
 
 info "invfs: mounting InvariantFS volume $rootdev on $NEWROOT"
+# pre-mount check, warn-only: fsck.invfs -a never repairs (only -y does).
+# A DAMAGED-but-readable volume still mounts; the verdict stays in the
+# journal instead of silent.
+if command -v fsck.invfs >/dev/null 2>&1; then
+    if fsck.invfs -a "$rootdev" >/tmp/invfs-fsck.log 2>&1; then
+        vinfo < /tmp/invfs-fsck.log
+    else
+        vinfo < /tmp/invfs-fsck.log
+        info "invfs: WARNING: pre-mount check of $rootdev reported damage; mounting anyway"
+    fi
+fi
 invf-fuse "$rootdev" "$NEWROOT" 2>&1 | vinfo
 
 if ! ismounted "$NEWROOT"; then

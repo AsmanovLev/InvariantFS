@@ -33,6 +33,7 @@ build() {
     add_binary invf-fuse
     add_binary invf-sweep
     add_binary invf-fsck
+    add_binary fsck.invfs
     add_binary invf-verify
     add_binary invf-rollback
     add_binary chroot

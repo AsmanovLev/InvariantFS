@@ -26,10 +26,16 @@ esac
 manual_add_modules fuse
 
 # the daemon + offline tools (fsck/verify rescue in the initramfs shell,
-# sweep + rollback for maintenance boots)
+# sweep + rollback for maintenance boots). sbin shims ride along so the
+# checkfs() override below runs the standard-named fsck.invfs.
 for tool in invf-fuse invf-sweep invf-fsck invf-verify invf-rollback; do
 	if [ -x /usr/bin/"$tool" ]; then
 		copy_exec /usr/bin/"$tool" /usr/bin
+	fi
+done
+for tool in fsck.invfs; do
+	if [ -x /usr/sbin/"$tool" ]; then
+		copy_exec /usr/sbin/"$tool" /usr/sbin
 	fi
 done
 

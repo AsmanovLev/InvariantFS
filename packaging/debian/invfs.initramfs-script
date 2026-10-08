@@ -11,8 +11,11 @@
 #       succeed on the device; libblkid does not know the InvariFS
 #       signature, so the stock wait loop would panic after the slumber.
 #       The override waits with resolve_device() only.
-#   checkfs():  no-op for the invfs root (invf-fsck is a manual tool;
-#       a DIRTY-but-sound volume self-heals at mount).
+#   checkfs(): pre-mount `fsck.invfs -a` (check only, NEVER repairs:
+#       boot-time preen must not excise data). A DIRTY-but-sound volume
+#       self-heals at mount; a DAMAGED verdict is logged loudly and the
+#       boot proceeds -- the failure stays visible instead of blocking
+#       the machine with no shell.
 #   mount():    intercepts exactly the `mount -t invfs ROOT rootmnt` call
 #       local_mount_root() finishes with, and routes it to invf-fuse.
 #       Everything else delegates to the real mount binary.
@@ -79,9 +82,20 @@ local_device_setup()
 
 checkfs()
 {
-	# invf-fsck is a manual/offline tool; a DIRTY-but-sound volume
-	# self-heals at mount (INVFS_AUTO_RECOVER). Nothing to do here.
-	:
+	# fsck.invfs -a is check-only by construction (only -y repairs,
+	# and nothing here passes it). Warn loudly, never fail the boot:
+	# the mount self-heals DIRTY, and a DAMAGED-but-readable volume
+	# still mounts (quarantined ranges read EIO).
+	if [ -x /usr/sbin/fsck.invfs ]; then
+		if ! fsck.invfs -a "${DEV}" ; then
+			log_warning_msg "invfs: pre-mount check of ${DEV} reported damage (see above); mounting anyway"
+		fi
+	elif [ -x /usr/bin/invf-fsck ]; then
+		if ! invf-fsck "${DEV}" >/dev/null 2>&1; then
+			log_warning_msg "invfs: pre-mount check of ${DEV} reported damage; mounting anyway"
+		fi
+	fi
+	return 0
 }
 
 mount()
