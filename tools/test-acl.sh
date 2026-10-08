@@ -269,7 +269,13 @@ grep -qx 'mask::r--' "$WORK/gf.f"                     || fail "inherited mask fr
 [ "$(stat -c '%a' "$MNT/d/f")" = "644" ]              || fail "child mode 644"
 allow "nobody read inherited file"   nb cat "$MNT/d/f"
 deny  "nobody write inherited file"  nbsh "echo x > '$MNT/d/f'"
+# WP222-family: the subdir's create mode (and hence its mask) is a function
+# of the ambient umask, like the touch above. Pin it so the ALLOW below
+# does not depend on the host login default.
+sub_umask=$(umask)
+umask 022
 mkdir "$MNT/d/sub"
+umask "$sub_umask"
 getfacl -p --omit-header -d "$MNT/d/sub" 2>/dev/null | grep -q 'user:nobody:rwx' \
     || fail "subdir must inherit the default ACL as its own default"
 gf "$MNT/d/sub" | grep -q 'user:nobody:rwx' || fail "subdir access ACL"
