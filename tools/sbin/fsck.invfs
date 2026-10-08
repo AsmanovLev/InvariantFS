@@ -1,0 +1,113 @@
+#!/bin/sh
+# fsck.invfs -- standard fsck(8) front-end for InvariantFS (fstype invfs).
+#
+# Called by fsck(8), systemd-fsck@, or by hand as:
+#   fsck.invfs [-a|-p|-y|-n] [-f] [-v] [-V] [-C [fd]] [-t fstype] filesys
+#
+# Exit codes follow fsck(8), not invf-fsck:
+#   0  no errors (includes MIRROR STALE: the tree is walkable, the mirror
+#      is behind -- a loud warning, not a boot-stopper)
+#   1  errors corrected (invf-fsck printed REPAIRED)
+#   4  errors left uncorrected (DAMAGED with -a/-p/-n, or -f refused a range)
+#   8  operational error (cannot open/scan, DEGRADED repair refused)
+#   16 usage error
+# (2 = reboot and 32 = cancelled never occur.)
+#
+# Safety rule: ONLY -y repairs, and -y maps to `invf-fsck --fix`, which
+# still refuses every key range it cannot prove unreachable. -a/-p/-n and
+# the bare default NEVER repair: boot-time preen must not excise data.
+# --discard-reachable is refused outright (exit 16): it destroys files
+# and stays a manual `invf-fsck -f --discard-reachable` decision.
+PROG=fsck.invfs
+MODE=check
+FORCE=0
+VERBOSE=0
+FSTYPE_OK=""
+
+find_tool() {
+    # $1 = tool name; prints path or nothing
+    _t=$1
+    if [ -n "${INVFS_TOOLS:-}" ]; then
+        _ifs=$IFS; IFS=:
+        for _d in $INVFS_TOOLS; do
+            [ -x "$_d/$_t" ] && { printf '%s\n' "$_d/$_t"; IFS=$_ifs; return 0; }
+        done
+        IFS=$_ifs
+    fi
+    _selfdir=$(CDPATH= cd -- "$(dirname "$0")" && pwd)
+    for _d in "$_selfdir/../../bin" "$_selfdir/../bin"; do
+        [ -x "$_d/$_t" ] && { printf '%s\n' "$_d/$_t"; return 0; }
+    done
+    if command -v "$_t" >/dev/null 2>&1; then
+        command -v "$_t"; return 0
+    fi
+    [ -x "/usr/lib/invfs/tools/$_t" ] && { printf '%s\n' "/usr/lib/invfs/tools/$_t"; return 0; }
+    return 1
+}
+
+usage() {
+    echo "usage: $PROG [-a|-p|-y|-n] [-f] [-v] [-V] [-C [fd]] [-t fstype] filesys" >&2
+    exit 16
+}
+
+FSCK=$(find_tool invf-fsck) || { echo "$PROG: invf-fsck not found" >&2; exit 8; }
+
+TARGET=""
+while [ $# -gt 0 ]; do
+    case "$1" in
+        -a|-p) MODE=check; shift;;
+        -y) MODE=yes; shift;;
+        -n) MODE=no; shift;;
+        -f) FORCE=1; shift;;
+        -v) VERBOSE=1; shift;;
+        -V) echo "$PROG (InvariantFS sbin front-end)"; "$FSCK" -v; exit 0;;
+        -C) # optional fd argument: -C, -C3, -C 3
+            if [ "${1#-C}" != "" ] && [ "$1" != "-C" ]; then shift; else
+                shift
+                case "${1:-}" in ''|-[!-0-9]*|--) :;; *) [ "$1" -eq "$1" ] 2>/dev/null && shift;; esac
+            fi;;
+        -C*) shift;; # -C3 form
+        -t) [ -n "${2:-}" ] || usage
+            [ "$2" = "invfs" ] || { echo "$PROG: fstype '$2' is not invfs" >&2; exit 16; }
+            shift 2;;
+        --discard-reachable)
+            echo "$PROG: --discard-reachable destroys files; run it by hand as invf-fsck -f --discard-reachable" >&2
+            exit 16;;
+        -h|--help) usage;;
+        --*) echo "$PROG: unknown option $1" >&2; exit 16;;
+        -?*) echo "$PROG: unknown option $1" >&2; exit 16;;
+        *) if [ -n "$TARGET" ]; then echo "$PROG: only one filesys argument" >&2; exit 16; fi
+            TARGET=$1; shift;;
+    esac
+done
+[ -n "$TARGET" ] || usage
+
+[ "$VERBOSE" = 1 ] && echo "$PROG: checking $TARGET (mode=$MODE)" >&2
+
+TMPD=${TMPDIR:-/tmp}
+OUT=$(mktemp "$TMPD/fsck.invfs.XXXXXX") || { echo "$PROG: cannot stage output" >&2; exit 8; }
+trap 'rm -f "$OUT"' EXIT INT TERM
+
+if [ "$MODE" = "yes" ]; then
+    "$FSCK" "$TARGET" --fix >"$OUT" 2>&1
+else
+    "$FSCK" "$TARGET" >"$OUT" 2>&1
+fi
+RC=$?
+cat "$OUT"
+
+case $RC in
+    0) R=0;;
+    2) R=16;;
+    1) R=8;;
+    3)
+        if grep -q "^REPAIRED$" "$OUT" 2>/dev/null; then R=1;
+        elif grep -q "^MIRROR STALE$" "$OUT" 2>/dev/null; then
+            echo "$PROG: warning: $TARGET: mirror behind (STALE); tree is walkable, boot may proceed" >&2
+            R=0
+        else R=4; fi;;
+    *) R=8;;
+esac
+rm -f "$OUT"
+trap - EXIT INT TERM
+exit $R

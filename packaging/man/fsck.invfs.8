@@ -1,0 +1,66 @@
+.TH FSCK.INVFS 8 "2026-10" "InvariantFS" "System Administration"
+.SH NAME
+fsck.invfs \- check an InvariantFS volume (fsck(8) front-end)
+.SH SYNOPSIS
+.B fsck.invfs
+.RB [ \-a | \-p | \-y | \-n ]
+.RB [ \-f ]
+.RB [ \-v ]
+.RB [ \-V ]
+.RB [ \-C
+.RI [ fd ]]
+.RB [ \-t
+.IR fstype ]
+.I filesys
+.SH DESCRIPTION
+.B fsck.invfs
+is the standard
+.BR fsck (8)
+entry point for fstype
+.BR invfs .
+It runs
+.B invf-fsck
+and translates its verdict to the exit codes boot tooling expects.
+.PP
+Only
+.B \-y
+repairs, by passing
+.B \-\-fix
+to
+.BR invf-fsck ,
+which still refuses every key range it cannot prove unreachable.
+.BR \-a ,
+.BR \-p ,
+.B \-n
+and the bare default never repair: a boot-time preen must not excise data.
+.B \-\-discard-reachable
+is refused outright; it destroys files and stays a manual
+.B "invf-fsck \-f \-\-discard-reachable"
+decision.
+.B \-f
+forces the (always full) check,
+.B \-C
+is accepted and ignored (no progress reporting),
+.B \-V
+prints versions.
+.SH EXIT STATUS
+.TP
+.B 0
+no errors (includes MIRROR STALE: the tree is walkable, the mirror is
+behind \(em a warning, not a boot-stopper)
+.TP
+.B 1
+errors corrected (invf-fsck printed REPAIRED)
+.TP
+.B 4
+errors left uncorrected (DAMAGED)
+.TP
+.B 8
+operational error (cannot open or scan; repair refused on a DEGRADED volume)
+.TP
+.B 16
+usage error
+.SH SEE ALSO
+.BR invf-fsck (8),
+.BR fsck (8),
+.BR invarifs (7)

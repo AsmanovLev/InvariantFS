@@ -70,6 +70,7 @@ record_tree() {
 }
 
 BINDIR=$PREFIX/bin
+SBINDIR=$PREFIX/sbin
 LIBDIR=$PREFIX/lib/invfs
 MANDIR=$PREFIX/share/man
 SYSTEMDDIR=$PREFIX/lib/systemd/system
@@ -92,6 +93,16 @@ for b in "$ROOT"/bin/invf*; do
     [ -f "$b" ] || continue
     install -m755 "$b" "$DESTDIR$BINDIR/"
     record "$DESTDIR$BINDIR/${b##*/}"
+done
+
+# ---- /sbin front-ends (fstype invfs) --------------------------------------
+# mkfs.invfs / fsck.invfs / mount.invfs: the names mkfs(8), fsck(8) and
+# mount(8) dispatch on. Thin POSIX-sh shims over the invf-* tools above.
+install -dm755 "$DESTDIR$SBINDIR"
+for s in "$ROOT"/tools/sbin/*; do
+    [ -f "$s" ] || continue
+    install -m755 "$s" "$DESTDIR$SBINDIR/"
+    record "$DESTDIR$SBINDIR/${s##*/}"
 done
 
 # ---- codecpacks ------------------------------------------------------------

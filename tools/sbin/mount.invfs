@@ -1,0 +1,86 @@
+#!/bin/sh
+# mount.invfs -- standard mount(8) helper for InvariantFS (fstype invfs).
+#
+# mount(8) calls it as: mount.invfs device dir [-o opts] [-v] [-n] [-s]
+# -n/-s (no mtab write) are accepted and ignored: FUSE mounts never
+# touch mtab. -f prints the daemon command without running it.
+# -r appends the `ro` mount option. Unknown options fail the mount
+# (exit 1), they do not get silently dropped.
+PROG=mount.invfs
+OPTS=""
+FAKE=0
+VERBOSE=0
+FSTYPE=""
+
+find_tool() {
+    _t=$1
+    if [ -n "${INVFS_TOOLS:-}" ]; then
+        _ifs=$IFS; IFS=:
+        for _d in $INVFS_TOOLS; do
+            [ -x "$_d/$_t" ] && { printf '%s\n' "$_d/$_t"; IFS=$_ifs; return 0; }
+        done
+        IFS=$_ifs
+    fi
+    _selfdir=$(CDPATH= cd -- "$(dirname "$0")" && pwd)
+    for _d in "$_selfdir/../../bin" "$_selfdir/../bin"; do
+        [ -x "$_d/$_t" ] && { printf '%s\n' "$_d/$_t"; return 0; }
+    done
+    if command -v "$_t" >/dev/null 2>&1; then
+        command -v "$_t"; return 0
+    fi
+    [ -x "/usr/lib/invfs/tools/$_t" ] && { printf '%s\n' "/usr/lib/invfs/tools/$_t"; return 0; }
+    return 1
+}
+
+usage() {
+    echo "usage: $PROG device dir [-o opts] [-r] [-v] [-n] [-s] [-f]" >&2
+    exit 1
+}
+
+add_opt() {
+    if [ -z "$OPTS" ]; then OPTS=$1; else OPTS="$OPTS,$1"; fi
+}
+
+FUSE=$(find_tool invf-fuse) || { echo "$PROG: invf-fuse not found" >&2; exit 1; }
+
+DEV=""
+DIR=""
+while [ $# -gt 0 ]; do
+    case "$1" in
+        -o) [ -n "${2:-}" ] || usage
+            add_opt "$2"; shift 2;;
+        -o*) add_opt "${1#-o}"; shift;;
+        -r|--read-only) add_opt "ro"; shift;;
+        -v|--verbose) VERBOSE=1; shift;;
+        -n|--no-mtab|-s|--sloppy) shift;; # accepted, ignored: no mtab on FUSE
+        -f|--fake) FAKE=1; shift;;
+        -t) [ -n "${2:-}" ] || usage
+            [ "$2" = "invfs" ] || { echo "$PROG: fstype '$2' is not invfs" >&2; exit 1; }
+            FSTYPE=$2; shift 2;;
+        -h|--help) usage;;
+        --*) echo "$PROG: unknown option $1" >&2; exit 1;;
+        -?*) echo "$PROG: unknown option $1" >&2; exit 1;;
+        *) if [ -z "$DEV" ]; then DEV=$1;
+            elif [ -z "$DIR" ]; then DIR=$1;
+            else echo "$PROG: too many positional arguments" >&2; exit 1; fi
+            shift;;
+    esac
+done
+[ -n "$DEV" ] && [ -n "$DIR" ] || usage
+
+if [ -n "$OPTS" ]; then
+    set -- "$FUSE" -o "$OPTS" "$DEV" "$DIR"
+else
+    set -- "$FUSE" "$DEV" "$DIR"
+fi
+[ "$VERBOSE" = 1 ] || [ "$FAKE" = 1 ] && echo "$PROG: $*" >&2
+if [ "$FAKE" = 1 ]; then exit 0; fi
+
+"$@" || exit $?
+# The daemon forks; wait for the mount to show up before reporting success.
+for _i in 1 2 3 4 5; do
+    grep -q " $DIR " /proc/mounts 2>/dev/null && exit 0
+    sleep 1
+done
+echo "$PROG: daemon started but $DIR never appeared in /proc/mounts" >&2
+exit 32

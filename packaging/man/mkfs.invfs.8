@@ -1,0 +1,40 @@
+.TH MKFS.INVFS 8 "2026-10" "InvariantFS" "System Administration"
+.SH NAME
+mkfs.invfs \- make an InvariantFS volume (mkfs(8) front-end)
+.SH SYNOPSIS
+.B mkfs.invfs
+.RB [ \-V ]
+.RB [ \-v ]
+.RB [ \-q ]
+.I device
+.RI [ size_gb ]
+.br
+.B mkfs.invfs
+.RB [ \-V ]
+.RB [ \-v ]
+.RB [ \-q ]
+.I dev0 size0_gb dev1 size1_gb
+.SH DESCRIPTION
+.B mkfs.invfs
+is the standard
+.BR mkfs (8)
+entry point for fstype
+.BR invfs .
+It forwards to
+.BR invf-mkfs :
+one device (or image) plus an optional size in gigabytes, or the
+two-device dev0/dev1 form with a size per device.
+.PP
+Label and UUID options
+.RB ( \-L ,
+.BR \-U )
+are refused, not ignored: format v0 carries a generated volume UUID
+but no label field, and silently dropping a
+.B \-L
+would be a lie the fstab
+.B LABEL=
+lookup then pays for.
+.SH SEE ALSO
+.BR invf-mkfs (8),
+.BR mkfs (8),
+.BR invarifs (7)

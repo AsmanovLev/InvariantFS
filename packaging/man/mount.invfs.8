@@ -1,0 +1,59 @@
+.TH MOUNT.INVFS 8 "2026-10" "InvariantFS" "System Administration"
+.SH NAME
+mount.invfs \- mount an InvariantFS volume (mount(8) helper)
+.SH SYNOPSIS
+.B mount.invfs
+.I device dir
+.RB [ \-o
+.IR opts ]
+.RB [ \-r ]
+.RB [ \-v ]
+.RB [ \-n ]
+.RB [ \-s ]
+.RB [ \-f ]
+.SH DESCRIPTION
+.B mount.invfs
+is the
+.BR mount (8)
+helper for fstype
+.BR invfs ,
+so fstab entries and
+.B "mount \-t invfs"
+work without naming the daemon.
+It translates to
+.B "invf-fuse [-o opts] device dir"
+and waits for the mountpoint to appear in
+.I /proc/mounts
+before reporting success.
+.PP
+.B \-o
+options pass through to the daemon,
+.B \-r
+appends the
+.B ro
+option,
+.B \-f
+prints the daemon command without running it,
+.B \-n
+and
+.B \-s
+are accepted and ignored (FUSE mounts never touch mtab).
+Unknown options fail the mount; they are not silently dropped.
+.SH EXAMPLE
+.EX
+/dev/sda4    /      invfs  defaults          0 1
+/dev/sdb1    /data  invfs  noautopack,ro     0 2
+.EE
+.PP
+Device paths are used above because
+.BR blkid (8)
+does not know the InvariantFS superblock magic yet, so
+.B UUID=
+lookups do not resolve. The initramfs identifies volumes with
+.B invf-fuse --probe-uuid
+instead.
+.SH SEE ALSO
+.BR invf-fuse (8),
+.BR mount (8),
+.BR fstab (5),
+.BR invarifs (7)

@@ -107,7 +107,26 @@ Checks the B+ tree base, delta log, and page integrity:
 ```bash
 # Check volume status
 bin/invf-fsck volume.img
-
-# Read-only dry run
-bin/invf-fsck -n volume.img
 ```
+
+## 8. OS Integration: `mkfs.invfs` / `fsck.invfs` / `mount.invfs`
+
+The fstype name is `invfs`. The three `/sbin` front-ends
+(`tools/sbin/`, installed by `packaging/install.sh`) are what
+`mkfs -t`, `fsck -A`, fstab and `mount -t invfs` dispatch on:
+
+```bash
+mkfs -t invfs /dev/sdb1 64          # 64 GB single-device volume
+fsck.invfs -a /dev/sdb1             # preen: check only, never repairs
+fsck.invfs -y /dev/sdb1             # repair via invf-fsck --fix
+mount -t invfs /dev/sdb1 /data      # via mount.invfs -> invf-fuse
+```
+
+Rules: only `-y` repairs (and even it never passes
+`--discard-reachable`); `-a`/`-p`/`-n` and the bare default only check.
+Exit codes follow `fsck(8)`: 0 clean, 1 corrected (REPAIRED),
+4 uncorrected (DAMAGED), 8 operational error, 16 usage.
+`-L`/`-U` are refused: format v0 has a generated UUID and no label field.
+`blkid` does not know the superblock magic yet, so fstab `UUID=` lookups
+do not resolve -- use device paths (the initramfs identifies volumes with
+`invf-fuse --probe-uuid`).

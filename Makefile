@@ -1459,6 +1459,7 @@ e2e: all
 	$(TESTENV) bash tools/run-e2e.sh tools/test-helper-isolation.sh
 	$(TESTENV) bash tools/run-e2e.sh tools/test-rawdisk.sh
 	$(TESTENV) bash tools/run-e2e.sh tools/test-why.sh
+	$(TESTENV) bash tools/run-e2e.sh tools/test-sbin-shims.sh
 	$(TESTENV) bash tools/run-e2e.sh tools/test-readdirplus.sh
 # WP114: the packaging gate. INVFS_PKG_DEB=0 keeps it off the full
 # compile inside dpkg-buildpackage (that is `make test`'s job, not this

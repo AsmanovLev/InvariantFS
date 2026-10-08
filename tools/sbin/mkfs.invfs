@@ -1,0 +1,78 @@
+#!/bin/sh
+# mkfs.invfs -- standard mkfs(8) front-end for InvariantFS (fstype invfs).
+#
+#   mkfs.invfs [-V] [-v] [-q] device [size_gb]
+#   mkfs.invfs [-V] [-v] [-q] dev0 size0_gb dev1 size1_gb   (two-device)
+#
+# size is gigabytes (invf-mkfs unit). Label/UUID options (-L/-U) are
+# REFUSED, not ignored: format v0 has a generated volume UUID but no
+# label field, and silently dropping a -L would be a lie the fstab
+# LABEL= lookup then pays for.
+PROG=mkfs.invfs
+VERBOSE=0
+QUIET=0
+
+find_tool() {
+    _t=$1
+    if [ -n "${INVFS_TOOLS:-}" ]; then
+        _ifs=$IFS; IFS=:
+        for _d in $INVFS_TOOLS; do
+            [ -x "$_d/$_t" ] && { printf '%s\n' "$_d/$_t"; IFS=$_ifs; return 0; }
+        done
+        IFS=$_ifs
+    fi
+    _selfdir=$(CDPATH= cd -- "$(dirname "$0")" && pwd)
+    for _d in "$_selfdir/../../bin" "$_selfdir/../bin"; do
+        [ -x "$_d/$_t" ] && { printf '%s\n' "$_d/$_t"; return 0; }
+    done
+    if command -v "$_t" >/dev/null 2>&1; then
+        command -v "$_t"; return 0
+    fi
+    [ -x "/usr/lib/invfs/tools/$_t" ] && { printf '%s\n' "/usr/lib/invfs/tools/$_t"; return 0; }
+    return 1
+}
+
+usage() {
+    echo "usage: $PROG [-V] [-v] [-q] device [size_gb]" >&2
+    echo "       $PROG [-V] [-v] [-q] dev0 size0_gb dev1 size1_gb" >&2
+    exit 2
+}
+
+is_number() {
+    case "$1" in ''|*[!0-9]*) return 1;; *) return 0;; esac
+}
+
+MKFS=$(find_tool invf-mkfs) || { echo "$PROG: invf-mkfs not found" >&2; exit 1; }
+
+ARGS=""
+while [ $# -gt 0 ]; do
+    case "$1" in
+        -V|--version) echo "$PROG (InvariantFS sbin front-end)"; "$MKFS" -v; exit 0;;
+        -v|--verbose) VERBOSE=1; shift;;
+        -q|--quiet) QUIET=1; shift;;
+        -L|--label|-U|--uuid)
+            echo "$PROG: $1 is unsupported: format v0 carries a generated UUID and no label field" >&2
+            exit 2;;
+        -h|--help) usage;;
+        --*) echo "$PROG: unknown option $1" >&2; exit 2;;
+        -?*) echo "$PROG: unknown option $1" >&2; exit 2;;
+        *) ARGS="$ARGS $1"; shift;;
+    esac
+done
+# shellcheck disable=SC2086
+set -- $ARGS
+[ $# -ge 1 ] && [ $# -le 4 ] && [ $# -ne 3 ] || usage
+if [ $# -ge 2 ]; then
+    is_number "$2" || { echo "$PROG: size must be a whole number of GB, got '$2'" >&2; exit 2; }
+fi
+if [ $# -eq 4 ]; then
+    is_number "$2" || { echo "$PROG: size0 must be a whole number of GB, got '$2'" >&2; exit 2; }
+    is_number "$4" || { echo "$PROG: size1 must be a whole number of GB, got '$4'" >&2; exit 2; }
+fi
+
+[ "$VERBOSE" = 1 ] && echo "$PROG: $MKFS $*" >&2
+if [ "$QUIET" = 1 ]; then
+    "$MKFS" "$@" >/dev/null
+else
+    "$MKFS" "$@"
+fi
