@@ -269,11 +269,12 @@ grep -qx 'mask::r--' "$WORK/gf.f"                     || fail "inherited mask fr
 [ "$(stat -c '%a' "$MNT/d/f")" = "644" ]              || fail "child mode 644"
 allow "nobody read inherited file"   nb cat "$MNT/d/f"
 deny  "nobody write inherited file"  nbsh "echo x > '$MNT/d/f'"
-# WP222-family: the subdir's create mode (and hence its mask) is a function
-# of the ambient umask, like the touch above. Pin it so the ALLOW below
-# does not depend on the host login default.
+# Create needs w on the parent (perm_check_parent W|X): pin umask 002 so
+# mkdir yields 0775 and the inherited mask stays rwx (create ALLOWED).
+# A 0755 subdir (mask r-x) correctly DENIES create -- r-x never granted
+# it; the old comment claiming otherwise asserted a bug as contract.
 sub_umask=$(umask)
-umask 022
+umask 002
 mkdir "$MNT/d/sub"
 umask "$sub_umask"
 getfacl -p --omit-header -d "$MNT/d/sub" 2>/dev/null | grep -q 'user:nobody:rwx' \

@@ -414,7 +414,7 @@ mkfs.ext4 -q -F "$F"
 # the shape holds, so the fixture guarantees interior nodes everywhere.
 HTN=3200
 for round in 1 2 3 4 5; do
-WO=$WORK
+export WO="$WORK"
 python3 -c "
 import os
 print('mkdir /deep')

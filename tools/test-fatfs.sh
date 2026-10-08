@@ -253,7 +253,15 @@ mcopy -i "$WORK/orig/fat16.img" "$WORK/stage/BULK.TXT" ::BULK.TXT
 # --- exfat.img: 32MB, loop-mount populated (mtools has no exFAT) ----------
 dd if=/dev/zero of="$WORK/orig/exfat.img" bs=1M count=32 status=none
 mkfs.exfat "$WORK/orig/exfat.img" >/dev/null
-invfs_loop_mount "$WORK/orig/exfat.img" "$WORK/mnt" -o "uid=$(id -u)"
+# exFAT needs a kernel driver mtools cannot replace: without it there is
+# nothing to populate. Unknown-fstype is an environment SKIP (like the
+# dm-flakey gate), any other mount failure stays a FAIL.
+if ! (invfs_loop_mount "$WORK/orig/exfat.img" "$WORK/mnt" -o "uid=$(id -u)"); then
+    grep -q exfat /proc/filesystems 2>/dev/null \
+        || { echo "SKIP: kernel has no exfat support"; exit 0; }
+    echo "FAIL: exfat loop mount failed (kernel lists exfat but mount refused)"
+    exit 1
+fi
 cp -r "$WORK/stage"/* "$WORK/mnt/"
 head -c 3145728 /dev/urandom > "$WORK/mnt/frag.bin"
 sync
