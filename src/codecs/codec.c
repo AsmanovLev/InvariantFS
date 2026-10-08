@@ -14,6 +14,9 @@
 #include <string.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
+#ifndef _WIN32
+#include <sys/utsname.h>
+#endif
 #include <unistd.h>
 
 #include "codec.h"
@@ -333,6 +336,12 @@ struct pack_manifest {
     char     name[64];
     long     algo;            /* -1 when absent */
     long     pack_version;    /* parsed, not acted on (parser-level version) */
+    /* Reserve/bootstrap: os/arch the pack's binaries were built for
+     * (lowercase uname sysname/machine, e.g. linux/x86_64). Empty =
+     * wildcard: manifests written before this key match every host,
+     * so all existing packs keep registering. */
+    char     os[32];
+    char     arch[32];
     uint32_t caps;
     uint64_t dec_mem;
     unsigned generation;
@@ -494,6 +503,10 @@ static int parse_manifest(const char *path, struct pack_manifest *m)
             m->algo = strtol(val, NULL, 0);
         } else if (strcmp(s, "pack_version") == 0) {
             m->pack_version = strtol(val, NULL, 0);
+        } else if (strcmp(s, "os") == 0) {
+            str_copy(m->os, sizeof m->os, val);
+        } else if (strcmp(s, "arch") == 0) {
+            str_copy(m->arch, sizeof m->arch, val);
         } else if (strcmp(s, "caps") == 0) {
             m->caps = parse_caps(val);
         } else if (strcmp(s, "dec_mem") == 0) {
@@ -1143,11 +1156,100 @@ static invfs_codec g_all[REGISTRY_N + INVFS_PACK_MAX];
 
 /* ---------------- pack registration + materialized view (WP13) ---------- */
 
+/* Reserve/bootstrap host identity: lowercase uname sysname/machine
+ * (linux/x86_64). Manifest os/arch match case-insensitively; empty
+ * is a wildcard so pre-os/arch manifests keep registering. */
+static void pack_host_id(char os[32], char arch[32])
+{
+#ifdef _WIN32
+    str_copy(os, 32, "windows");
+    str_copy(arch, 32, "");    /* undetectable here: arch always matches */
+#else
+    struct utsname u;
+    size_t i;
+    if (uname(&u) != 0) {
+        str_copy(os, 32, "");
+        str_copy(arch, 32, "");
+        return;
+    }
+    str_copy(os, 32, u.sysname);
+    str_copy(arch, 32, u.machine);
+    for (i = 0; os[i]; i++)
+        if (os[i] >= 'A' && os[i] <= 'Z') os[i] += (char)('a' - 'A');
+    for (i = 0; arch[i]; i++)
+        if (arch[i] >= 'A' && arch[i] <= 'Z') arch[i] += (char)('a' - 'A');
+#endif
+}
+
+static int pack_word_matches(const char *want, const char *have)
+{
+    size_t i;
+    if (!want[0])
+        return 1;   /* wildcard */
+    for (i = 0; ; i++) {
+        unsigned char a = (unsigned char)want[i];
+        unsigned char b = (unsigned char)have[i];
+        if (a >= 'A' && a <= 'Z') a += (unsigned char)('a' - 'A');
+        if (b >= 'A' && b <= 'Z') b += (unsigned char)('a' - 'A');
+        if (a != b)
+            return 0;
+        if (!a)
+            return 1;
+    }
+}
+
+static const char *pack_host_os(void)
+{
+    static char os[32];
+    static int once;
+    if (!once) {
+        char arch[32];
+        pack_host_id(os, arch);
+        once = 1;
+    }
+    return os;
+}
+
+static const char *pack_host_arch(void)
+{
+    static char arch[32];
+    static int once;
+    if (!once) {
+        char os[32];
+        pack_host_id(os, arch);
+        once = 1;
+    }
+    return arch;
+}
+
+static int pack_host_matches(const struct pack_manifest *m)
+{
+    /* An arch this host cannot detect (_WIN32 above) matches anything:
+     * refusing on unknown hardware would brick every stamped pack. */
+    if (m->arch[0] && pack_host_arch()[0] &&
+        !pack_word_matches(m->arch, pack_host_arch()))
+        return 0;
+    if (m->os[0] && pack_host_os()[0] &&
+        !pack_word_matches(m->os, pack_host_os()))
+        return 0;
+    return 1;
+}
+
 static void pack_register(const char *dir, const struct pack_manifest *m)
 {
     pack_entry *p;
     size_t i;
     int overrides = 0;
+
+    if (!pack_host_matches(m)) {
+        /* Reserve/bootstrap: a pack built for another OS/arch is not
+         * silently absent -- the volume that needs it names the gap. */
+        fprintf(stderr, "[codecpack] %s/%s skipped: built for %s/%s"
+                " (this host is %s/%s)\n", dir, m->name,
+                m->os[0] ? m->os : "any", m->arch[0] ? m->arch : "any",
+                pack_host_os(), pack_host_arch());
+        return;
+    }
 
     if (packs_n >= INVFS_PACK_MAX) {
         fprintf(stderr, "[codecpack] WARNING: pack table full (%d), %s/%s dropped\n",

@@ -1089,6 +1089,117 @@ static void test_registry_env_scope(void)
     rmdir(pack); rmdir(packs); rmdir(empty); rmdir(dir);
 }
 
+/* ---------------- reserve/bootstrap: manifest os/arch ----------------
+ *
+ * A pack built for another OS/arch must not register (loudly skipped,
+ * not silently absent); empty os/arch is a wildcard so pre-os/arch
+ * manifests keep working. */
+#ifndef _WIN32
+#include <sys/utsname.h>
+#endif
+
+static const invfs_codec *find_reg_algo(uint32_t algo)
+{
+    size_t n = 0, i;
+    const invfs_codec *all = invfs_codec_all(&n);
+    for (i = 0; i < n; i++)
+        if (all[i].algo == algo)
+            return &all[i];
+    return NULL;
+}
+
+static void test_pack_osarch(void)
+{
+    char dir[256], packs[320], okp[384], badp[384], path[448];
+    char hos[32], harch[32];
+    int r;
+#ifdef _WIN32
+    skip("manifest os/arch: uname matching is POSIX-only");
+    return;
+#else
+    {
+        struct utsname u;
+        size_t i;
+        if (uname(&u) != 0) {
+            skip("uname() unavailable: cannot stage matching os/arch");
+            return;
+        }
+        snprintf(hos, sizeof hos, "%.31s", u.sysname);
+        snprintf(harch, sizeof harch, "%.31s", u.machine);
+        for (i = 0; hos[i]; i++)
+            if (hos[i] >= 'A' && hos[i] <= 'Z') hos[i] += (char)('a' - 'A');
+        for (i = 0; harch[i]; i++)
+            if (harch[i] >= 'A' && harch[i] <= 'Z')
+                harch[i] += (char)('a' - 'A');
+    }
+#endif
+    snprintf(dir, sizeof dir, "/tmp/invfs_osarch_test_%d", (int)getpid());
+    snprintf(packs, sizeof packs, "%s/packs", dir);
+    snprintf(okp, sizeof okp, "%s/ospack.codecpack", packs);
+    snprintf(badp, sizeof badp, "%s/badpack.codecpack", packs);
+    r = mkdir(dir, 0755) | mkdir(packs, 0755) | mkdir(okp, 0755) |
+        mkdir(badp, 0755);
+    ok(r == 0, "fixture: os/arch pack dirs");
+    /* matching os/arch registers */
+    snprintf(path, sizeof path, "%s/manifest", okp);
+    {
+        char man[512];
+        snprintf(man, sizeof man,
+                 "name = ospack\nalgo = 42\ncaps = external\n"
+                 "os = %s\narch = %s\n"
+                 "encode = bin/enc {in} {out}\n"
+                 "decode = bin/dec {in} {out}\n",
+                 hos, harch);
+        r = write_file(path, man, 0);
+    }
+    snprintf(path, sizeof path, "%s/bin", okp);
+    mkdir(path, 0755);
+    snprintf(path, sizeof path, "%s/bin/enc", okp);
+    r |= write_file(path, "#!/bin/sh\nexit 0\n", 1);
+    snprintf(path, sizeof path, "%s/bin/dec", okp);
+    r |= write_file(path, "#!/bin/sh\nexit 0\n", 1);
+    /* foreign os does not */
+    snprintf(path, sizeof path, "%s/manifest", badp);
+    r |= write_file(path,
+                   "name = badpack\nalgo = 43\ncaps = external\n"
+                   "os = definitely-not-an-os\n"
+                   "encode = bin/enc {in} {out}\n"
+                   "decode = bin/dec {in} {out}\n", 0);
+    snprintf(path, sizeof path, "%s/bin", badp);
+    mkdir(path, 0755);
+    snprintf(path, sizeof path, "%s/bin/enc", badp);
+    r |= write_file(path, "#!/bin/sh\nexit 0\n", 1);
+    snprintf(path, sizeof path, "%s/bin/dec", badp);
+    r |= write_file(path, "#!/bin/sh\nexit 0\n", 1);
+    ok(r == 0, "fixture: os/arch manifests written");
+    setenv("INVFS_CODECPACKS", packs, 1);
+    invfs_codec_probe_reset();
+    ok(find_reg_algo(42) != NULL, "matching os/arch pack registers");
+    ok(find_reg_algo(43) == NULL, "foreign-os pack is refused");
+    unsetenv("INVFS_CODECPACKS");
+    invfs_codec_probe_reset();
+    snprintf(path, sizeof path, "%s/bin/enc", okp);
+    unlink(path);
+    snprintf(path, sizeof path, "%s/bin/dec", okp);
+    unlink(path);
+    snprintf(path, sizeof path, "%s/manifest", okp);
+    unlink(path);
+    snprintf(path, sizeof path, "%s/bin/enc", badp);
+    unlink(path);
+    snprintf(path, sizeof path, "%s/bin/dec", badp);
+    unlink(path);
+    snprintf(path, sizeof path, "%s/manifest", badp);
+    unlink(path);
+    snprintf(path, sizeof path, "%s/bin", okp);
+    rmdir(path);
+    snprintf(path, sizeof path, "%s/bin", badp);
+    rmdir(path);
+    rmdir(okp);
+    rmdir(badp);
+    rmdir(packs);
+    rmdir(dir);
+}
+
 /* ---------------- WP16b: codec profiles ---------------- */
 
 static void test_profiles(void)
@@ -1163,6 +1274,7 @@ int main(void)
     test_roundtrips();
     test_probe();
     test_packs();
+    test_pack_osarch();
     test_registry_env_scope();
     test_profiles();
 
