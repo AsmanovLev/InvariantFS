@@ -2376,3 +2376,23 @@ corrupt byte after recovery is a defect, not a flake signature.
 recovery honestly reports (EIO + named loss would be correct behaviour the
 oracle still counts as failure) or silently wrong bytes. The ladder logs
 (`rec-fsck*.log`, `rec-verify*.log` in the leg artifacts) decide it.
+
+## test-fuzz bitflip + test-usr1-savepoint OPEN (deterministic, pre-existing)
+
+**Date:** 2026-10-09. **Status:** OPEN. Both reproduce on the pre-reserve-3/3
+tree (`git worktree` at 99c1a8f + rebuild + rerun), so neither is a 3/3
+regression; both are also absent from the 49/53 green runs' red list, so
+their green history is unverified either way.
+
+- **fuzz bitflip setup** (`tools/fuzz/bitflip.py`, iters 7,15,23,31,39,47,55
+  i.e. exactly the `--seal-every 8` iters): the setup `invf-sweep` on a
+  fresh image declines every file (`swept=0 skipped=6`) and exits 1, which
+  the harness counts as setup failure. The same corpus swept by hand
+  claims lanes and exits 0; a pre-3/3 sweep binary fails identically.
+  Ruled out: content (byte-identical a.txt claims standalone), env
+  (clean-env rerun fails), image size/path/cwd (replicated exactly).
+  Still open: why the harness-built image declines while a hand-built
+  twin does not.
+- **usr1-savepoint leg A**: `cap=7 walk=4`, save point not armed before the
+  walk, identically local and CI. Untouched code paths (sweep arming);
+  counting/timing semantics not yet read.
