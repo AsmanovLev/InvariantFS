@@ -72,10 +72,12 @@ DESTDIR=%{buildroot} PREFIX=%{_prefix} \
 %license src/LICENSE
 %doc README.md
 %{_bindir}/invf*
+%{_sbindir}/*.invfs
 /usr/lib/invfs/codecpacks/
 %{_mandir}/man7/invarifs.7*
 %{_mandir}/man1/invf-*.1*
 %{_mandir}/man8/invf-*.8*
+%{_mandir}/man8/*.invfs.8*
 %{_mandir}/man*/ru/invf-*.8*
 %{_mandir}/man*/ru/invf-*.1*
 %{_mandir}/man*/ru/invarifs.7*

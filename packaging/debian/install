@@ -10,6 +10,9 @@
 #   * WITH_GZIP_MAN=1 (the default) means the files are *.N.gz, so a `*.N`
 #     glob would miss them too. A directory entry is compression-agnostic.
 usr/bin/invf*
+usr/sbin/fsck.invfs
+usr/sbin/mkfs.invfs
+usr/sbin/mount.invfs
 usr/lib/invfs/codecpacks
 usr/share/man/man1
 usr/share/man/man7

@@ -110,6 +110,15 @@ assert_tree() {
     if [ -n "$miss" ]; then fail "$label: missing/non-exec binaries:$miss"
     else pass "$label: all $(echo "$want" | wc -w) artifact binaries present + exec"; fi
 
+    # --- /sbin front-ends: every tools/sbin/* source must be installed exec ---
+    sbmiss=
+    for s in tools/sbin/*; do
+        [ -f "$s" ] || continue
+        [ -x "$root/usr/sbin/${s##*/}" ] || sbmiss="$sbmiss ${s##*/}"
+    done
+    if [ -n "$sbmiss" ]; then fail "$label: missing/non-exec sbin front-ends:$sbmiss"
+    else pass "$label: sbin front-ends present + exec"; fi
+
     # --- codecpack helpers ---
     nhelp=$(find "$root/usr/lib/invfs/codecpacks" -name bin -type d 2>/dev/null | wc -l)
     hlist=$(find "$root/usr/lib/invfs/codecpacks" -path '*/bin/*' -type f 2>/dev/null | wc -l)
