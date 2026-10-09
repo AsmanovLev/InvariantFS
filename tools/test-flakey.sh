@@ -422,6 +422,11 @@ recover() { # <label>
             info "SPT0 rollback done ($label)"
         else
             info "SPT0 rollback declined; continuing the ladder ($label)"
+            # WP-leg3 (2/2): a bare "declined" dead-ends the forensics.
+            # The refuse reason names the file at stake (usually a pinned
+            # recipe the drops tore, shared with the live tree) -- surface
+            # it so the terminal verdict says what to restore from backup.
+            grep -h "refusing\|DAMAGED\|unreadable" "$FLK/rec-rb-spt0.log" 2>/dev/null | sed 's/^/  spt0: /' | head -n 3
         fi
     fi
     $B/invf-fsck "$DM" >"$FLK/rec-fsck2.log" 2>&1

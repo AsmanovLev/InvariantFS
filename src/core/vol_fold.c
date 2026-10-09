@@ -83,6 +83,11 @@
  * to reclaim (WP-M15). These are diagnostics, not format: changing them
  * changes when fold runs, never what is on disk.
  */
+/* O_DIRECT/fadvise need _GNU_SOURCE on Linux (same guard as vol_spt0.c).
+ * Must come before any system header. */
+#if defined(__linux__) && !defined(_GNU_SOURCE)
+#define _GNU_SOURCE
+#endif
 #include "volume_internal.h"
 #include "vol_btree.h"
 #include "vol_delta.h"
@@ -95,6 +100,7 @@
 #include <string.h>
 #include <time.h>
 #ifndef _WIN32
+#include <fcntl.h>
 #include <signal.h>
 #include <unistd.h>
 #endif
@@ -178,6 +184,37 @@ static void fold_list_free(fold_list *l)
     l->ent = NULL;
     l->n = l->cap = 0;
 }
+
+#ifdef __linux__
+/* WP-leg3 (2/2): drop this process's page cache over both present devices
+ * so the verify walk below re-reads from the device instead of proving our
+ * own cache back to us. Best-effort: fadvise is advisory (a tmpfs-backed
+ * image may keep its pages) and any failure is tolerated -- the walk still
+ * runs, and still catches everything a cold-cache walk would. Must run
+ * AFTER the barrier: DONTNEED skips dirty pages, so invalidating first
+ * would leave this pass's own writes cached and the walk would prove
+ * nothing. Harmless on a stale device: invalidation changes no bytes. */
+static void fold_cache_invalidate(invfs_volume *v)
+{
+    int i;
+    for (i = 0; i < 2; i++) {
+        blkio *io = i ? &v->io2 : &v->io;
+        int fd, adv;
+        if (!v->io_open[i])
+            continue;
+        fd = blkio_raw_fd(io);
+        if (fd < 0)
+            continue;
+        adv = posix_fadvise(fd, 0, 0, POSIX_FADV_DONTNEED);
+        (void)adv;
+    }
+}
+#else
+static void fold_cache_invalidate(invfs_volume *v)
+{
+    (void)v;
+}
+#endif
 
 /* Snapshot the winning record per key, value bytes included, so the base
  * writes below never issue delta I/O from inside a callback. Returns 0 or 1
@@ -470,19 +507,31 @@ int vol_fold(invfs_volume *v)
         mbuf_ptr_set(&root, pba, page, INVFS_BP_LEAF | INVFS_BP_ROOT);
     }
 
-    /* WP-leg3: verify-before-publish. The merge above wrote COW pages;
-     * after an unclean shutdown the page cache is cold, so this walk
-     * reads DEVICE bytes and catches pages that tore before the crash
-     * (drop_writes-class tears mid-pass). It does NOT catch tears still
-     * hidden behind a hot page cache -- same-process re-reads hit cache,
-     * so a torn device write made seconds ago reads back clean here;
-     * live-drop coverage needs cache bypass (O_DIRECT/fadvise), which
-     * is a separate WP. Walk the WHOLE new tree before anything becomes
-     * durable: any unreadable page aborts the publish and the old root
-     * stays live -- a loud refusal with zero loss, never a torn tree.
-     * The walk is one read pass over what this fold just wrote plus the
-     * shared spine, bounded like any fsck walk, and folds are
-     * threshold-gated. */
+    /* (2) durability + atomic publish: bitmap, then COW pages, then RT30 with
+     * a bumped seq. mbuf_root_publish refuses a torn/gen-mismatched root. */
+    if (vol_bitmap_flush(v) != 0) {
+        fold_list_free(&list);
+        return -1;
+    }
+    if (vmux_barrier(v, "fold base pages") < 0) {
+        fold_list_free(&list);
+        return -1;
+    }
+    /* WP-leg3 (2/2): verify-after-durable-before-named. The merge wrote COW
+     * pages and the barrier made them durable; the walk below must see
+     * DEVICE bytes, not our own page cache -- after a hot pass every page
+     * it would check is cached good, including ones the device just tore
+     * (drop_writes discards below the cache, and mbuf has no userspace
+     * cache to defeat, so the page cache is the only layer in the way).
+     * The invalidate drops the clean pages and the walk re-faults from the
+     * device: any unreadable page aborts the publish and the old root stays
+     * live -- a loud refusal with zero loss, never a torn tree. Refusing
+     * here is strictly safer than refusing before the barrier: the retired
+     * pages are already durable orphans the orphan collector reclaims, not
+     * dirty cache at the mercy of crash timing. The walk is one read pass
+     * over what this fold just wrote plus the shared spine, bounded like
+     * any fsck walk, and folds are threshold-gated. */
+    fold_cache_invalidate(v);
     {
         bt_stat st;
         bt_quarantine q;
@@ -504,17 +553,6 @@ int vol_fold(invfs_volume *v)
             fold_list_free(&list);
             return -1;
         }
-    }
-
-    /* (2) durability + atomic publish: bitmap, then COW pages, then RT30 with
-     * a bumped seq. mbuf_root_publish refuses a torn/gen-mismatched root. */
-    if (vol_bitmap_flush(v) != 0) {
-        fold_list_free(&list);
-        return -1;
-    }
-    if (vmux_barrier(v, "fold base pages") < 0) {
-        fold_list_free(&list);
-        return -1;
     }
     if (mbuf_root_publish(v, root.pba, root.gen) != 0) {
         fold_list_free(&list);
