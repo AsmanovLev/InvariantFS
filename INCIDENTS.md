@@ -2502,6 +2502,11 @@ above plus the I/O lifecycle trace (alloc -> write -> free-before-failed-put
 -> realloc -> overwrite, all timestamped inside one dm-error window) and this
 clean re-run close the leg2 wrong-bytes variant as an engine defect with an
 engine fix. Leg2 returns to FIXED (watch the soak for confirmation).
+
+**Confirmation 2026-10-09 -- SOAK GREEN:** engine-ci run 37909671330
+(`soak-flakey: success`, `FLAKEY E2E: PASS 400 s`): leg2 163 present+bit-exact
+(162 pinned), deep 177/0; leg3 9/0 + 7/0 + 7/0; op-soak 784 rounds PASS; legs
+7/8 parked loudly. First fully-green soak in weeks. Leg2 FIXED stands.
 Residual: no fsck content double-ownership check (detection gap, filed not
 fixed); the `INVFS_FAULT=inode_delta_put` seam exists for a targeted
 regression test of this exact shape (not yet written).
