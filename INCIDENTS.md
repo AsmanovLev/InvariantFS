@@ -2606,3 +2606,31 @@ What parking does NOT do: re-implement `pc_dev_create / pc_mnt_up / pc_mnt_down 
 pc_kill / pc_cut / pc_fsck / pc_verify` on v3, fix the `PC_SIZE_GB` reference,
 or prove leg 8 (whose `rc_*` helpers exist but which has never run on CI -- it
 is next in line after 7 and may carry its own rot). All three are one WP.
+
+## test-flakey leg8 PARKED (harness): same deleted helpers + CI-unwritable scratch default
+
+**Date:** 2026-10-09 (CI soak run 37894671150 + local probe). **Status:** PARKED --
+leg8 SKIPs loudly until the restoration WP lands; not a red, not a pass.
+
+Two stacked defects, found in order. First, the scratch default: `rc_work_pick`
+scanned `/srv /var/tmp /opt /var/lib` and died on CI (`/srv` exists there but is
+root-owned: `mkdir` failed -> `FAIL[leg8-reclaim]: no scratch` with zero chaos
+run), while `$FLAKEY_WORK` -- proven disk-backed by the suite's own startup
+guard, legs 0-5 green on it -- sat unused. Fixed in this entry's commit:
+`rc_work_pick` defaults under `$FLK/reclaim` (`$FLAKEY_RC_WORK` still wins;
+`preserve()`/`cleanup()` are path-independent, and the tmpfs guard makes the
+old keep-out-of-`$FLK` comment stale).
+
+Second, revealed by the first local run of leg 8 anywhere (scratch fix
+proven: 40 files / 200 gens built, **401 orphan pages armed**, then
+`pc_run: command not found` at `rc_verify`): leg 8 needs the same deleted
+`pc_*` set as leg 7 (`pc_run` x5, `pc_dev_create` x3, `pc_verify`/`pc_mnt_up`/
+`pc_mnt_down`/`pc_fsck` x2, `pc_kill`/`pc_cut` x1 -- artifact
+`leg8-reclaim-20261009-165043`). The driver now gates leg 8 on `leg_ready`
+too. Restoration WP, scoped: port the eight bodies from
+`841a272^:tools/test-flakey.sh` (`pc_work_pick`..`pc_verify`, old lines
+967-1130), re-route scratch through current `$FLK`/picker conventions (the old
+`pc_work_pick` hardcoded `/tmp`), fix the `PC_SIZE_GB` reference (only
+`PC_SIZE_MB` exists), and validate legs 7+8 green locally and on CI. V3 risk
+is low (shell + dmsetup + drop_caches, no journal paths) but must be checked
+per-helper, not assumed.

@@ -267,6 +267,7 @@ want_leg() { [ -z "$ONLY" ] && return 0; case ",$ONLY," in *",$1,"*) return 0;; 
 leg_ready() {
     case "$1" in
         7) command -v pc_dev_create >/dev/null 2>&1 ;;
+        8) command -v pc_run >/dev/null 2>&1 ;;
         *) return 0 ;;
     esac
 }
@@ -1225,12 +1226,16 @@ rc_driver() {
     RC_T=$B/invf-orphan_test
 }
 
-rc_work_pick() {   # a DISK-backed scratch: drop_caches is a no-op on tmpfs
+rc_work_pick() {   # leg 8's scratch, under $FLK: the startup guard already
+    # refused a tmpfs scratch when 7/8 are selected, so $FLK is PROVEN
+    # disk-backed wherever leg 8 runs -- and a suite where three scratch
+    # pickers disagree is a suite where the answer depends on which leg you
+    # are reading. The old default scanned /srv /var/tmp /opt /var/lib and
+    # died on CI (/srv exists there, root-owned: mkdir failed -> FAIL with
+    # no chaos run at all), while $FLAKEY_WORK -- known good, legs 0-5 ran
+    # on it -- sat unused. $FLAKEY_RC_WORK still wins when set.
     if [ -z "$RC_WORK" ]; then
-        # Same scan as FLK's default and PC_WORK's, through the one picker:
-        # a suite where three scratch pickers disagree is a suite where the
-        # answer depends on which leg you are reading.
-        RC_WORK="$(disk_work_root)/invfs-flakey-reclaim"
+        RC_WORK="$FLK/reclaim"
     fi
     [ -n "$RC_WORK" ] || RC_WORK=/tmp/invfs-flakey-reclaim
     rm -rf "$RC_WORK" && mkdir -p "$RC_WORK" || return 1
