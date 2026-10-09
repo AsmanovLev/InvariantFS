@@ -2438,6 +2438,25 @@ WRONG-BYTES single-file variant was not individually root-caused -- only
 closed by the seed going green twice. If it recurs on soak, reopen with the
 new log; the storm.log upload ask above stands.
 
+**Update 2026-10-09 (later same day) -- REOPENED: the wrong-bytes variant recurred
+on CI (engine-ci run 37895897326, inform-soak).** `deep: 130 files ok, 0 corrupt`,
+corpus bit-exact, `storm files: 114 present+bit-exact (114 of them pinned)` -- and
+one `BAD: present file storm-054.bin has WRONG BYTES`. Every exact file is pinned,
+so 054 is an in-storm OK (write+fsync returned success with the log timestamp inside
+`[T_ON,T_OFF]`); the pinned set is perfect for the third run straight, so the
+DAMAGED-gate fix holds and this is a different defect. Why it matters: an OK line
+means acknowledged durability, and acknowledged bytes must read back (ADR-009).
+Suspects, narrowed: NOT the sweep (standalone leg2 sweeps pre-storm on a healthy
+device), NOT metadata (fsck OK, deep clean, names balance) -- leaving (a) the
+`fsck -f` orphan freeing the ladder comment promises (`storm orphans are freed
+by the -f pass`) misclassifying one live object, (b) an early-ack flush (fsync
+returning before the barrier's device ack, so an OK at the window edge never
+landed), or (c) a torn log timestamp (write+fsync issued healthy, logged late).
+Timestamps that would separate (b)/(c) died with the runner (no upload -- the
+ask above is now load-bearing, not nice-to-have). Local repro loop running on the
+deterministic seed; the variant hit 2 of the last 4 CI soaks, so a few iterations
+should show it. Until then: OPEN, durability-class.
+
 ## test-fuse-sweep-thread + test-ext4fs-orphan OPEN (runner-only reds)
 
 **Date:** 2026-10-09 (e2e-full, 24.04 runners). **Status:** OPEN. Both pass
