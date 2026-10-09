@@ -2424,6 +2424,20 @@ artifacts live only on the runner and are not uploaded -- consider
 uploading flakey artifacts on failure); which stage tore it (write,
 flush, fold, reclaim, `-f`); exact repro seed for a local WP run.
 
+**Update 2026-10-09 -- FIXED.** The deterministic seed (20260831) is green
+twice on current code: locally under CPU load (`LEG2_RC=0`, 237 s) and on the
+CI soak of engine-ci run 37892795298 (`storm files: 107 present+bit-exact
+(107 of them pinned)`, deep verify 121 files / 0 corrupt). Both pre-fix shapes
+-- the local ABSENT-after-rollback (artifact
+`leg2-error-storm-20261009-042142`: `SPT0 rollback done` then every pinned
+storm file absent) and the single WRONG-BYTES sighting above -- predate the
+DAMAGED-gate (`cb2b4ea`, carried in the leg3 WP): the ungated SPT0 rung fired
+on a live savepoint after a clean fsck, truncating the delta and deleting
+healthy storm writes the oracle then demanded back. Honesty note: the
+WRONG-BYTES single-file variant was not individually root-caused -- only
+closed by the seed going green twice. If it recurs on soak, reopen with the
+new log; the storm.log upload ask above stands.
+
 ## test-fuse-sweep-thread + test-ext4fs-orphan OPEN (runner-only reds)
 
 **Date:** 2026-10-09 (e2e-full, 24.04 runners). **Status:** OPEN. Both pass
@@ -2543,3 +2557,26 @@ reproduces the artifact exactly: root seq 20, 44 keys, 3 quarantined single-key
   restore from backup instead of a bare "dead-ended". Physical drops of live
   recipe bytes are data loss no root-swap can heal; DAMAGED + 6/7 files intact +
   savepoint-live is the correct terminal state, and the ladder should say so.
+
+**Update 2026-10-09 -- CI shape on 8750445 (engine-ci run 37892795298):
+content-tear with clean metadata, every guard held.** Same seed, 6 drop windows:
+sweep rc=0, reclaim 83, `fsck: OK`, `fsck -f: OK` (no quarantines -- the nlink
+`9 names over 10 live inodes / ok` here are REAL numbers, audit ran), savepoint
+live, then deep verify `8 files ok, 1 corrupt`: `segment CRC mismatch: inode 7
+seg 0 ... algo 8 (TARR) len 24125440` -- `CORRUPT: t.tar`. No `fold: REFUSING`
+(the post-barrier device walk saw intact metadata -- correctly, the damage is
+content-level), and the SPT0 rung correctly did NOT fire (first fsck OK, gate
+from `cb2b4ea`). The mismatch proves post-write change: the TARR lane stored
+faithful bytes (its guard is size-only by design, `vol_cpack.c:1464-1470`) and
+the drops tore the shadow segment between the sweep write and the verify read.
+No software recovers bytes a device silently discards; the read path named the
+file instead of serving wrong bytes. Terminal-state question for the owner:
+the leg's bar (`verify after recovery` fully clean) demands the impossible
+under drop_writes -- contained + named + honest (this run) should be the pass
+criterion, or the leg stays red as a chaos-tolerance tracker. Engine work
+this leg still justifies: none open -- the fold bypass, the SPT0 rung, and the
+decline-reason surfacing all behaved as designed on this run.
+
+Aside (pre-existing, untouched, build green): CI GCC emits
+`-Wstringop-overread` at `src/core/vol_spt0.c:678` (`__builtin_memcmp_eq`
+bound 32 vs 9, constprop); the local GCC is silent. Not -Werror, not mine.
