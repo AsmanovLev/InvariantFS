@@ -1555,24 +1555,48 @@ static int vol_sweep_one_v3(invfs_volume *v, uint64_t inode_id,
             if (vol_ast_recipe_serialize(in.size, new_ents, (uint32_t)n_ents, &new_blob, &new_blen) == 0 &&
                 vol_recipe_store(v, new_blob, new_blen, new_addr) == 0) {
                 memcpy(in.recipe_addr, new_addr, sizeof(new_addr));
-                vol_inode_delta_put(v, inode_id, &in);
-                published = 1;
+                /* WP-leg2-root-cause: the row publish is the durability
+                 * point, not a formality. A delta_put failure here (EIO
+                 * under dm-error mid-pass) with published=1 anyway runs
+                 * the supersede below and frees blocks the live row still
+                 * names; the next allocator hands them out and the victim
+                 * reads the donor's bytes with valid framing -- silent
+                 * cross-file corruption no fsck pass names. Fail into the
+                 * rollback like a store failure. */
+                if (vol_inode_delta_put(v, inode_id, &in) == 0)
+                    published = 1;
+                else
+                    fprintf(stderr,
+                            "sweep: %s: row publish failed (device error "
+                            "mid-pass); rolling back\n",
+                            name ? name : "?");
                 /* WP pba-ref-v3-incremental: the remap loop above moved
                  * the counts itself (-1 per retired pba, +1 per new
                  * one), so the map is exact again and the staleness
-                 * vol_inode_delta_put just flagged does not apply. */
-                pba_ref_validate(v);
+                 * vol_inode_delta_put just flagged does not apply -- but
+                 * only when the publish actually landed. On a failed put
+                 * the rollback below un-counts and frees the new blocks,
+                 * leaving the old counts exact; invalidate so the next
+                 * free gate rebuilds instead of trusting either state. */
+                if (published)
+                    pba_ref_validate(v);
+                else
+                    pba_ref_invalidate(v);
                 /* WP78: the same gain verdict the v2 generic floor uses
                  * (the per-segment sum vs the file size), so a wholly
                  * incompressible multi-segment file is stamped
-                 * UNCOMPRESSIBLE rather than GENERIC. */
-                if ((double)new_total >=
-                    (double)in.size * (1.0 - vol_min_gain_pct() / 100.0))
-                    stamp_generic(v, inode_id,
-                                     INVFS_CLASS_UNCOMPRESSIBLE, 0);
-                else
-                    stamp_generic(v, inode_id,
-                                     INVFS_CLASS_GENERIC, INVFS_ALGO_ZSTD);
+                 * UNCOMPRESSIBLE rather than GENERIC. Stamps describe a
+                 * publish that happened: on a rolled-back rewrite the file
+                 * is unchanged and stays unstamped for the next pass. */
+                if (published) {
+                    if ((double)new_total >=
+                        (double)in.size * (1.0 - vol_min_gain_pct() / 100.0))
+                        stamp_generic(v, inode_id,
+                                         INVFS_CLASS_UNCOMPRESSIBLE, 0);
+                    else
+                        stamp_generic(v, inode_id,
+                                         INVFS_CLASS_GENERIC, INVFS_ALGO_ZSTD);
+                }
             }
             free(new_blob);
 

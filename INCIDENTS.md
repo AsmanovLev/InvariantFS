@@ -2457,6 +2457,47 @@ ask above is now load-bearing, not nice-to-have). Local repro loop running on th
 deterministic seed; the variant hit 2 of the last 4 CI soaks, so a few iterations
 should show it. Until then: OPEN, durability-class.
 
+**Update 2026-10-09 (evening) -- ROOT CAUSE FOUND (engine) + FIXED: unchecked
+row publish in the multi-segment sweep remap frees live blocks.** Local flap
+probe (`/srv/flakey` scratch scripts, 150-300 dm linear<->error swaps under
+sustained fsync'd writes) reproduced at ~8% per file with full device-level
+forensics (expected bytes regenerated from the deterministic RNG; victim
+blocks read raw via dd; row/recipe/pba dumps via throwaway probes):
+
+- Every victim row is written exactly once (its own commit; a row-addr tracer
+  on `vol_inode_delta_put` shows no successful post-commit rewrite, only an
+  occasional EIO-dropped intent). Victim mtimes are never re-stamped.
+- Victim recipes resolve to pbas holding the donor's exact full-file bytes;
+  framing self-consistent, sizes identical -- silent, fsck-blind (no
+  content double-ownership check exists; the bitmap is consistent post-reuse).
+- I/O trace of one victim's pbas: alloc+write at victim-commit, then a
+  `vol_free_blocks` of the same range ~1.2 s later, then donor alloc+write.
+  The free ran 112 us after a drain-remap row-put intent, both inside a
+  dm-error window.
+- The remap computed fresh pbas + stored the blob, then `vol_inode_delta_put`
+  EIO'd -- and `published = 1` ran UNCONDITIONALLY on the next line
+  (`src/core/vol_sweep.c`), so the supersede freed blocks the live row still
+  named. Next allocator handed them out; content-blind recipe keys
+  (same pbas+layout, no content hash) collided, so donor and victim rows name
+  one blob. The WP sweep-rollback-test-conflict comment two lines above
+  fixed the serialize/store-failure shape and missed the put-failure shape.
+- Suspend-mode control (flushing vs --noflush suspend) reproduces identically:
+  the bug is above the block layer. Drain-deferred control runs clean: the
+  author is in the 1 Hz tick body (the remap runs there via pending sweeps).
+- Sibling site checked clean: dedupe's remap checks its put (`vol_dedupe.c`).
+
+Fix (this entry's commit): check the put; on failure print and fall into the
+existing rollback (frees the new blocks, keeps old, leaves unstamped for
+retry). `pba_ref_validate`/stamps now run only when published; on failure
+the map is invalidated (rebuild, never trust). Single-sweep blob publish,
+commit, and dedupe paths already order put-before-free correctly.
+
+Validation: `make test` green (existing publish-rollback suite covers the
+sibling shape); flap-probe re-run expected 0 wrong (was 8/76) -- see follow-up.
+Residual: no fsck content double-ownership check (detection gap, filed not
+fixed); the `INVFS_FAULT=inode_delta_put` seam exists for a targeted
+regression test of this exact shape (not yet written).
+
 ## test-fuse-sweep-thread + test-ext4fs-orphan OPEN (runner-only reds)
 
 **Date:** 2026-10-09 (e2e-full, 24.04 runners). **Status:** OPEN. Both pass
