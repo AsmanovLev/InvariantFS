@@ -57,6 +57,8 @@
 #            default was tmpfs: 3871 MiB against this suite's own 4000 MB
 #            floor, so `make flakey` exited 2 unconditionally),
 #            FLAKEY_ONLY (e.g. "3" runs just that leg, a dev aid),
+#            FLAKEY_STORM_S (leg 2 error-window seconds, default 6; longer
+#            windows raise in-storm-OK exposure for edge-hunting),
 #            FLAKEY_PC_WORK (leg 7 scratch; MUST be on a disk-backed
 #            filesystem — default /var/tmp/invfs-flakey-pagecache),
 #            FLAKEY_PC_BACKING (leg 7: loop = a loop device over the image
@@ -706,7 +708,7 @@ PY
     T_ON=$(date +%s.%N)
     dm_set error || fail "dm_set error"
     info "storm ON (error target, 6s)"
-    sleep 6
+    sleep ${FLAKEY_STORM_S:-6}
     dm_set up || fail "dm_set up"
     T_OFF=$(date +%s.%N)
     info "storm OFF"
