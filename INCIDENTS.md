@@ -2580,3 +2580,29 @@ decline-reason surfacing all behaved as designed on this run.
 Aside (pre-existing, untouched, build green): CI GCC emits
 `-Wstringop-overread` at `src/core/vol_spt0.c:678` (`__builtin_memcmp_eq`
 bound 32 vs 9, constprop); the local GCC is silent. Not -Werror, not mine.
+
+## test-flakey leg7 PARKED (harness): power-cut helpers never restored, suite crashed reaching it
+
+**Date:** 2026-10-09 (CI soak, engine-ci run 37893581527). **Status:** PARKED --
+leg7 SKIPs loudly until a WP re-implements its helpers; not a red, not a pass.
+
+Legs 0-5 all green on that run (leg2 101 pinned+exact, leg3 9 files / 0 corrupt
+-- a second fully-green leg3), so execution reached leg 7 for the first time
+since Oct 2 and died immediately: `pc_dev_create: command not found`, then
+`PC_SIZE_GB: unbound variable` -- with no `FAIL[]` banner and no artifacts
+(the crash is outside `fail()`, so `preserve` never ran). Root cause in the
+harness: `841a272` (v2 purge) deleted all nine `pc_*` helpers plus leg6, and
+`83c65cf` ("restore the nine power-cut helpers") restored exactly one
+(`disk_work_root`) -- the commit message over-claimed, and the `leg7()` body
+plus its `PC_SIZE_GB` reference (only `PC_SIZE_MB` is declared) were never
+checked because legs 2/3 always failed first and the suite never got there.
+Locally it never fired either: the tmpfs scratch guard exits 2 before any leg
+when 7/8 are selected, and dev runs pin `FLAKEY_ONLY` to the leg under work.
+
+Fix in the leg3 WP (this entry's commit): the driver loop gates each leg on
+`leg_ready` -- a leg with absent helpers moves from `RAN_LEGS` to
+`SKIPPED_LEGS` with a `SKIP [7 ...]: helpers absent` line pointing here.
+What parking does NOT do: re-implement `pc_dev_create / pc_mnt_up / pc_mnt_down /
+pc_kill / pc_cut / pc_fsck / pc_verify` on v3, fix the `PC_SIZE_GB` reference,
+or prove leg 8 (whose `rc_*` helpers exist but which has never run on CI -- it
+is next in line after 7 and may carry its own rot). All three are one WP.

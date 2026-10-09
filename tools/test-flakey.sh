@@ -258,6 +258,19 @@ fail() { echo; echo "FAIL[$LEG]: $*" >&2; FAILED=1; preserve; exit 1; }
 
 want_leg() { [ -z "$ONLY" ] && return 0; case ",$ONLY," in *",$1,"*) return 0;; esac; return 1; }
 
+# A leg whose helpers are gone must SKIP loudly, never crash the suite.
+# leg7's pc_* power-cut helpers were deleted in 841a272 and 83c65cf only
+# restored disk_work_root, so leg7 died as `pc_dev_create: command not
+# found` (plus PC_SIZE_GB unbound) the first time legs 0-5 all passed and
+# execution reached it -- with no FAIL[] banner and no artifacts. A missing
+# helper is a parked leg, not a red one; the INCIDENTS entry says where.
+leg_ready() {
+    case "$1" in
+        7) command -v pc_dev_create >/dev/null 2>&1 ;;
+        *) return 0 ;;
+    esac
+}
+
 # ------------------------------------------------------------- devices --
 
 dm_set() {   # dm_set up|drop|drop_slow|error — swap the live dm table
@@ -1679,7 +1692,13 @@ for n in 0 1 2 3 4 5 7 8 9; do
             *) nm="leg$n" ;;
         esac
         RAN_LEGS="$RAN_LEGS $n:$nm"
-        "leg$n"
+        if leg_ready "$n"; then
+            "leg$n"
+        else
+            RAN_LEGS=${RAN_LEGS% $n:$nm}
+            SKIPPED_LEGS="$SKIPPED_LEGS $n(helpers-absent)"
+            say "SKIP [$n $nm]: helpers absent (parked leg, see INCIDENTS)"
+        fi
     else
         SKIPPED_LEGS="$SKIPPED_LEGS $n"
     fi
