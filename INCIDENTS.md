@@ -2494,6 +2494,14 @@ commit, and dedupe paths already order put-before-free correctly.
 
 Validation: `make test` green (existing publish-rollback suite covers the
 sibling shape); flap-probe re-run expected 0 wrong (was 8/76) -- see follow-up.
+
+**Follow-up 2026-10-09 -- PROVEN:** same 150-swap flap torture against fixed
+binaries: `EDGE_OK=86 EDGE_WRONG=0`, zero duplicate recipe addrs (baseline
+unfixed: 8 wrong of 76 with 7 dup groups). The victim-row/mtime/key forensics
+above plus the I/O lifecycle trace (alloc -> write -> free-before-failed-put
+-> realloc -> overwrite, all timestamped inside one dm-error window) and this
+clean re-run close the leg2 wrong-bytes variant as an engine defect with an
+engine fix. Leg2 returns to FIXED (watch the soak for confirmation).
 Residual: no fsck content double-ownership check (detection gap, filed not
 fixed); the `INVFS_FAULT=inode_delta_put` seam exists for a targeted
 regression test of this exact shape (not yet written).
