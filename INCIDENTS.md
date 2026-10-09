@@ -2501,3 +2501,45 @@ storm writes the oracle then demanded back (`pinned file storm-089.bin
 deleted what the chaos never touched. Rollback is destructive to
 post-savepoint writes by design and is only justified against a damaged
 tree. Verified: leg2 green under load after the gate (237 s).
+
+## leg3 CORRECTION 2 (2026-10-09): the namespace was never lost -- 0/0 is a skipped check, not a measurement
+
+**Date:** 2026-10-09. **Status:** MECHANISM ESTABLISHED (forensics; no code
+change in this entry). The previous correction entry's "genuinely published,
+near-empty root" is wrong; the error is mine (forensics, not engine).
+Re-reading the same artifacts (`tools/flakey/artifacts/leg3-torn-sweep-20261009-022950/`)
+against the code, on a private copy of its `backing.img` (`bin/invf-fsck`
+reproduces the artifact exactly: root seq 20, 44 keys, 3 quarantined single-key
+`0x04` ranges, DAMAGED, savepoint live):
+
+- `names/inodes: 0 name(s) over 0 live inode(s)` is NOT a census. When
+  quarantines exist, `vol_fsck_scan_ex` SKIPS the nlink audit (`src/core/vol_fsck.c`,
+  the `q.n || q.qfull` gate before `fsck_nlink_report`), so `rep.nlink_names` /
+  `rep.nlink_inodes` stay zero-initialised and `src/cli/fsck.c` prints 0/0 plus
+  a vacuous `nlink/fan-in: ok`. A skipped check reporting as a number is a
+  reporting wart, not an empty tree. (`tools/test-flakey.sh:594` greps that
+  line's format on the healthy pre-chaos fsck, so the format stays; the wart
+  is filed here, not fixed.)
+- The same volume's `-f` pass asks every live row (`vol_iter_live_inodes`) and
+  walks every surviving name down from the root (`fsck_excise_dir_walk`): **10
+  live rows resolve through root seq 20** -- root dir + 7 files + 2 `t.tar!*`
+  siblings -- and `rand.bin`'s "name and row went on resolving" (`rec-fsckf.log`:
+  "asked 10 live row(s)", excision refused because inode 5 needs a quarantined
+  key). 44 walked keys is the right order for that tree (10 rows + dirents +
+  chunked `0x04` recipe keys + batch keys), not an empty one.
+- Consequence: the "empty publish" hypothesis is dead alongside the anchor
+  theory. The sweep published a coherent tree; the drops tore 3 shared recipe
+  pages underneath it (pre- and post-sweep trees share them -- COW takes no
+  copy). The 84 reclaimed pages are almost certainly stale pre-fold generations:
+  every live row and key still resolves post-reclaim, which a misfree of live
+  pages would have broken. No collector change is warranted by this leg.
+- What remains of WP-leg3: (1) fold-verify cache-bypass hardening -- the `a81aada`
+  gate walks through the page cache, so on its own target case (drops tearing
+  pages the pass just wrote, still hot) it proves our cache back to us; landed
+  separately as verify-after-durable-before-named with `fadvise(DONTNEED)`
+  invalidation (`src/core/vol_fold.c`); (2) ladder terminal clarity when rollback
+  is refused-damaged -- the decline reason (pinned recipe unreadable, shared with
+  the live tree) is now surfaced in `recover()` so the verdict names the file to
+  restore from backup instead of a bare "dead-ended". Physical drops of live
+  recipe bytes are data loss no root-swap can heal; DAMAGED + 6/7 files intact +
+  savepoint-live is the correct terminal state, and the ladder should say so.
