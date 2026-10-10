@@ -45,7 +45,7 @@ CORE    := volume vol_cpack helper_exec tool_scratch vol_plugin_client vol_png v
             vol_heat vol_sweep vol_read vol_write vol_records vol_ast \
             vol_dirs vol_tier vol_meta_merge vol_metabuf vol_btree vol_delta \
             vol_fold vol_reclaim vol_spt0 vol_anchor vol_walk \
-            arc crc32c lz4 flacx tarx pngx blkio miniz blake3 blake3_dispatch blake3_portable ppmd8 ppmd8enc ppmd8dec ppmd_codec codec bcj_x86 rs deflate_repro \
+            arc crc32c lz4 flacx tarx pngx blkio miniz blake3 blake3_dispatch blake3_portable ppmd8 ppmd8enc ppmd8dec ppmd_codec codec bcj_x86 rs deflate_repro ed25519 \
             deflate_backend_system deflate_backend_stock
 CORE_O  := $(addprefix $(OBJ)/,$(addsuffix .o,$(CORE))) $(STOCK_ZLIB_O)
 
@@ -280,8 +280,10 @@ $(foreach t,$(CLI_MAINS),$(eval $(call TOOL_RULE,$(t),)))
 $(eval $(call TOOL_RULE,ivpack_packs_test,-ldl))
 
 # WP60: invfs-pack is named differently (invfs- not invf-)
-$(OUT)/invfs-pack: $(OBJ)/pack.o $(CORE_O) | $(OUT)
-	$(CC) $(CFLAGS) -o $@ $< $(CORE_O) $(LDLIBS)
+# WP203: pack signatures (src/cli/pack_sig.o) gate install; ed25519.o
+# comes in through CORE_O above.
+$(OUT)/invfs-pack: $(OBJ)/pack.o $(OBJ)/pack_sig.o $(CORE_O) | $(OUT)
+	$(CC) $(CFLAGS) -o $@ $(OBJ)/pack.o $(OBJ)/pack_sig.o $(CORE_O) $(LDLIBS)
 $(OBJ)/pack.o: $(SRC)/cli/pack.c | $(OBJ)
 	$(CC) $(CFLAGS) -c -o $@ $<
 
@@ -296,6 +298,18 @@ $(OUT)/invf-zip: $(OBJ)/invf-zip.o $(filter-out $(OBJ)/miniz.o,$(CORE_O))
 #     readdir_error_test.c: undefined reference to `fuse_new'
 # after the whole build had already succeeded. Own rules instead, mirroring the
 # invf-fuse ones below.
+# WP203: pack signatures v1. Unit round trip (keygen->sign->verify->
+# tamper->refuse) plus the RFC 8032 vectors that pin the vendored
+# ed25519, the malformed-sidecar corpus, and the install-gate matrix.
+# Explicit rules (not CLI_MAINS): like readdir_error_test, the link needs
+# pack_sig.o beside the test object, which TOOL_RULE cannot express.
+$(OUT)/invf-pack_sign_test: $(OBJ)/pack_sign_test.o $(OBJ)/pack_sig.o $(CORE_O) | $(OUT)
+	$(CC) $(CFLAGS) -o $@ $(OBJ)/pack_sign_test.o $(OBJ)/pack_sig.o $(CORE_O) $(LDLIBS)
+$(OBJ)/pack_sign_test.o: src/cli/pack_sign_test.c | $(OBJ)
+	$(CC) $(CFLAGS) -c -o $@ $<
+$(OBJ)/pack_sig.o: src/cli/pack_sig.c | $(OBJ)
+	$(CC) $(CFLAGS) -c -o $@ $<
+
 $(OUT)/invf-readdir_error_test: $(OBJ)/readdir_error_test.o $(CORE_O) | $(OUT)
 	$(CC) $(CFLAGS) $(FUSE_CFLAGS) -o $@ $< $(CORE_O) $(LDLIBS) $(FUSE_LIBS)
 $(OBJ)/readdir_error_test.o: src/cli/readdir_error_test.c | $(OBJ)
@@ -821,6 +835,7 @@ TEST_SHARD_DEPS = helpers $(TEST_BINS) $(OUT)/invf-arctest $(OUT)/invf-blkio_tes
       $(OUT)/invf-rs_stability_test \
       $(OUT)/invf-seal_test \
       $(OUT)/sealfuzz \
+      $(OUT)/invf-pack_sign_test \
       $(OUT)/invf-arc_concurrency_test \
       $(OUT)/invf-arc-conc-tsan $(OUT)/invf-arc-conc-asan \
       $(OUT)/invf-gz_header_test \
@@ -1415,6 +1430,10 @@ test-shard-4: $(TEST_SHARD_DEPS) test-shard-check
 # by 17 per orphaned segment and nothing ever gives them back.
 	$(TESTENV) $(TESTISO) bash tools/test-sweep-publish-rollback.sh
 	$(TESTENV) $(TESTISO) $(OUT)/invf-deflate_repro_test
+# WP203: pack signatures v1 — RFC 8032 vectors, round trip, malformed
+# sidecars, gate matrix. Pure unit (fixture dirs under argv /tmp), so
+# TESTISO isolation is harmless.
+	$(TESTENV) $(TESTISO) $(OUT)/invf-pack_sign_test /tmp
 	$(TESTENV) $(TESTISO) $(OUT)/invf-plugin_host_test
 	$(TESTENV) $(TESTISO) $(OUT)/invf-plugin_mt_test
 # Built-but-never-run until now: invf-plugin-host only ran via this
@@ -1454,6 +1473,7 @@ check-codecpacks:
 # target introduces no new execution context. The e2e list below stays the
 # list of record; this is a focused alias for pack work.
 test-packs: all
+	$(TESTENV) bash tools/run-e2e.sh tools/test-pack-sign.sh
 	$(TESTENV) bash tools/run-e2e.sh tools/test-containerpack.sh
 	$(TESTENV) bash tools/run-e2e.sh tools/test-cpack-mcost-bitexact.sh
 	$(TESTENV) bash tools/run-e2e.sh tools/test-ivpacks.sh
@@ -1483,6 +1503,7 @@ e2e: all
 	$(TESTENV) bash tools/run-e2e.sh tools/test-why.sh
 	$(TESTENV) bash tools/run-e2e.sh tools/test-sbin-shims.sh
 	$(TESTENV) bash tools/run-e2e.sh tools/test-pack-volume.sh
+	$(TESTENV) bash tools/run-e2e.sh tools/test-pack-sign.sh
 	$(TESTENV) bash tools/run-e2e.sh tools/test-readdirplus.sh
 # WP114: the packaging gate. INVFS_PKG_DEB=0 keeps it off the full
 # compile inside dpkg-buildpackage (that is `make test`'s job, not this

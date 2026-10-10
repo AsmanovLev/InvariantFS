@@ -3,12 +3,19 @@
  *
  *   invfs-pack list [--volume IMG] [--installed|-i] [family]
  *   invfs-pack info <pack>
- *   invfs-pack install [-y|-n] [--volume IMG] <pack|./path>
+ *   invfs-pack install [-y|-n] [--skip-signature-verification] [--volume IMG] <pack|./path>
  *   invfs-pack remove <pack>
  *   invfs-pack verify [<pack>]
+ *   invfs-pack keygen [--keyring DIR] [name]
+ *   invfs-pack sign --key SECFILE <pack|./path>
  *   invfs-pack alternatives <family>
  *   invfs-pack use <family> <pack>
  *   invfs-pack where
+ *
+ * Pack signatures v1 (WP203): `sign` binds the manifest (+ its integrity
+ * line over every helper file) with ed25519 into manifest.sig; `install`
+ * verifies and REFUSES a bad signature always, prompting on a missing
+ * one. See src/cli/pack_sig.h for the trust model and file formats.
  */
 #define _CRT_SECURE_NO_WARNINGS
 
@@ -23,6 +30,7 @@
 #include <errno.h>
 
 #include "blake3.h"
+#include "pack_sig.h"
 #include "volume.h"   /* vol_open for --volume (links CORE_O) */
 
 #define HOST_ROOT "/.invariantfs/codecpacks"
@@ -57,6 +65,7 @@ typedef struct {
     char caps[128];
     char type[32];
     char requires[256];
+    char integrity[128];
     int  field_count;
     field fields[MAX_FIELDS];
 } pack_info;
@@ -138,6 +147,12 @@ static int parse_manifest_stream(FILE *f, pack_info *pi)
             strncpy(pi->type, v, 31);
         } else if (strcmp(k, "requires") == 0) {
             strncpy(pi->requires, v, 255);
+        } else if (strcmp(k, "integrity") == 0) {
+            /* WP203: helper-content binding, signed via manifest.sig.
+             * Parsed like any other field; enforced by pack_sig, not
+             * by this parser (which stays total: unknown keys land in
+             * fields[] and never fail the parse). */
+            strncpy(pi->integrity, v, 127);
         }
     }
     return 0;
@@ -706,14 +721,43 @@ static int cmd_install_volume(const char *src, const char *dstname,
            volume, dstname);
     return 0;
 }
+/* Resolve the signature keyring once per install/verify run. On failure
+ * (INVFS_KEYRING unset and HOME unset) the ring is empty: signed packs
+ * then refuse as unverifiable, unsigned packs are unaffected. The
+ * warning names the cause so the refusal below reads complete. */
+static void resolve_keyring(char *out, size_t cap)
+{
+    char err[256];
+    if (pack_sig_default_keyring(out, cap, err, sizeof err) != 0) {
+        fprintf(stderr, "pack signatures: %s\n", err);
+        out[0] = 0;
+    }
+}
+
 static int cmd_install(const char *name, int overwrite, int dry_run,
-                       const char *volume)
+                       const char *volume, int skip_sig)
 {
     char src[MAX_PATH];
     char dstname[128 + 16];
     if (resolve_pack_source(name, src, sizeof src, dstname,
                             sizeof dstname) != 0)
         return 1;
+    /* WP203 install gate: bad signature refuses (always, no knob);
+     * missing signature prompts (-y answers yes, -n reports and
+     * installs nothing, --skip proceeds). Runs before EITHER target
+     * (host root or --volume import): the trust boundary is the
+     * install, not the destination. */
+    {
+        char keyring[MAX_PATH];
+        char why[512];
+        resolve_keyring(keyring, sizeof keyring);
+        if (pack_sig_gate_install(src, dstname, keyring, overwrite,
+                                  dry_run, skip_sig, NULL, NULL,
+                                  why, sizeof why) != 0) {
+            fprintf(stderr, "%s\n", why);
+            return 1;
+        }
+    }
     if (volume && volume[0])
         return cmd_install_volume(src, dstname, volume, overwrite, dry_run);
 
@@ -770,6 +814,57 @@ static int cmd_install(const char *name, int overwrite, int dry_run,
     return 0;
 }
 
+/* ---- WP203: keygen + sign ---- */
+
+static int cmd_keygen(const char *keyring_opt, const char *name)
+{
+    char keyring[MAX_PATH];
+    char err[512];
+    if (!name || !name[0])
+        name = "default";
+    if (keyring_opt && keyring_opt[0]) {
+        if (snprintf(keyring, sizeof keyring, "%s",
+                     keyring_opt) >= (int)sizeof keyring) {
+            fprintf(stderr, "keyring path too long: %s\n", keyring_opt);
+            return 1;
+        }
+    } else {
+        resolve_keyring(keyring, sizeof keyring);
+        if (!keyring[0])
+            return 1;
+    }
+    if (pack_sig_keygen(keyring, name, err, sizeof err) != 0) {
+        fprintf(stderr, "keygen: %s\n", err);
+        return 1;
+    }
+    printf("keygen: wrote %s/%s.sec (0600, keep secret) + %s/%s.pub\n",
+           keyring, name, keyring, name);
+    printf("keygen: install %s/%s.pub into the keyring of every host that "
+           "should trust this signer\n", keyring, name);
+    return 0;
+}
+
+static int cmd_sign(const char *keyfile, const char *target)
+{
+    char src[MAX_PATH];
+    char dstname[128 + 16];
+    char err[512];
+    if (!keyfile || !target) {
+        fprintf(stderr,
+                "usage: invfs-pack sign --key SECFILE <pack|./path>\n");
+        return 2;
+    }
+    if (resolve_pack_source(target, src, sizeof src, dstname,
+                            sizeof dstname) != 0)
+        return 1;
+    if (pack_sig_sign_dir(src, keyfile, err, sizeof err) != 0) {
+        fprintf(stderr, "sign: %s\n", err);
+        return 1;
+    }
+    printf("signed '%s' (+ integrity binding, manifest.sig)\n", src);
+    return 0;
+}
+
 static void cmd_remove(const char *name)
 {
     char dst[MAX_PATH];
@@ -799,12 +894,33 @@ static void cmd_remove(const char *name)
     printf("removed '%s'\n", name);
 }
 
-static void verify_pack(const char *name, const char *root)
+/* Signature status of one installed pack dir. Printed by verify next
+ * to the content hash: SIG-OK (signed, key trusted), UNSIGNED (no
+ * sidecar — absence, not evidence), BAD (refuse-class: tampered or
+ * untrusted). Returns 0/1/2 in pack_sig_status terms for the exit code
+ * (BAD is the only one that fails the run: unsigned is the prompt's
+ * case at install time, not a verify failure). */
+static int sig_status_of(const char *dir, const char *keyring)
+{
+    char why[512];
+    pack_sig_status st =
+        pack_sig_verify_dir(dir, keyring, why, sizeof why);
+    if (st == PACK_SIG_OK)
+        printf("  sig: OK (signed, key trusted)\n");
+    else if (st == PACK_SIG_UNSIGNED)
+        printf("  sig: UNSIGNED (no manifest.sig)\n");
+    else
+        printf("  sig: BAD (%s)\n", why);
+    return (int)st;
+}
+
+static int verify_pack(const char *name, const char *root,
+                       const char *keyring)
 {
     char dir[MAX_PATH];
     snprintf(dir, sizeof dir, "%s/%s.codecpack", root, name);
     struct stat st;
-    if (stat(dir, &st) != 0 || !S_ISDIR(st.st_mode)) return;
+    if (stat(dir, &st) != 0 || !S_ISDIR(st.st_mode)) return PACK_SIG_UNSIGNED;
 
     /* read existing sha256 file if present */
     char sha_path[MAX_PATH + 16];
@@ -821,7 +937,7 @@ static void verify_pack(const char *name, const char *root)
     blake3_hasher_init(&bh);
 
     DIR *d = opendir(dir);
-    if (!d) return;
+    if (!d) return PACK_SIG_UNSIGNED;
     struct dirent *de;
     int count = 0;
     while ((de = readdir(d)) != NULL) {
@@ -860,15 +976,20 @@ static void verify_pack(const char *name, const char *root)
         printf("%-20s (no sha256 file) blake3: %s\n", name, hex);
     }
     (void)count;
+    return sig_status_of(dir, keyring);
 }
 
-static void cmd_verify(const char *name)
+static int cmd_verify(const char *name)
 {
     const char *roots[] = { env_codecpacks(), HOST_ROOT, LEGACY_ROOT, USR_ROOT, NULL };
+    char keyring[MAX_PATH];
+    int bad = 0;
+    resolve_keyring(keyring, sizeof keyring);
     if (name && name[0]) {
         for (int r = 0; roots[r]; r++)
-            verify_pack(name, roots[r]);
-        return;
+            if (verify_pack(name, roots[r], keyring) == PACK_SIG_BAD)
+                bad = 1;
+        return bad;
     }
     /* verify all packs */
     for (int r = 0; roots[r]; r++) {
@@ -890,10 +1011,12 @@ static void cmd_verify(const char *name)
             strncpy(n, p, 127); n[127] = 0;
             char *dot = strstr(n, ".codecpack");
             if (dot) *dot = 0;
-            verify_pack(n, roots[r]);
+            if (verify_pack(n, roots[r], keyring) == PACK_SIG_BAD)
+                bad = 1;
         }
         closedir(d);
     }
+    return bad;
 }
 
 static void cmd_alternatives(const char *family)
@@ -979,12 +1102,21 @@ static void usage(void)
     fprintf(stderr,
         "usage: invfs-pack list [--volume IMG] [--installed|-i] [family]\n"
         "       invfs-pack info <pack>\n"
-        "       invfs-pack install [-y|--yes] [-n|--dry-run] [--volume IMG] <pack|./path>\n"
+        "       invfs-pack install [-y|--yes] [-n|--dry-run] [--skip-signature-verification] [--volume IMG] <pack|./path>\n"
         "       invfs-pack remove <pack>\n"
         "       invfs-pack verify [<pack>]\n"
+        "       invfs-pack keygen [--keyring DIR] [name]\n"
+        "       invfs-pack sign --key SECFILE <pack|./path>\n"
         "       invfs-pack alternatives <family>\n"
         "       invfs-pack use <family> <pack>\n"
         "       invfs-pack where\n"
+        "\n"
+        "signatures (v1, ed25519 over the manifest): a pack with a BAD\n"
+        "signature is REFUSED, always, no knob. A pack with NO signature\n"
+        "prompts `Install unsigned pack? [y/N]` unless -y (yes),\n"
+        "--skip-signature-verification (proceed), or -n (dry-run: report\n"
+        "only, install nothing). Keys live in $INVFS_KEYRING, else\n"
+        "~/.config/invfs/keys.\n"
     );
 }
 
@@ -1033,7 +1165,7 @@ int main(int argc, char **argv)
         if (argc < 3) { fprintf(stderr, "usage: invfs-pack info <pack>\n"); return 2; }
         cmd_info(argv[2]);
     } else if (strcmp(cmd, "install") == 0) {
-        int overwrite = 0, dry_run = 0;
+        int overwrite = 0, dry_run = 0, skip_sig = 0;
         const char *target = NULL;
         const char *volume = NULL;
         for (int i = 2; i < argc; i++) {
@@ -1041,9 +1173,11 @@ int main(int argc, char **argv)
                 overwrite = 1;
             else if (strcmp(argv[i], "-n") == 0 || strcmp(argv[i], "--dry-run") == 0)
                 dry_run = 1;
+            else if (strcmp(argv[i], "--skip-signature-verification") == 0)
+                skip_sig = 1;
             else if (strcmp(argv[i], "--volume") == 0) {
                 if (++i >= argc) {
-                    fprintf(stderr, "usage: invfs-pack install [-y|--yes] [-n|--dry-run] [--volume IMG] <pack|./path>\n");
+                    fprintf(stderr, "usage: invfs-pack install [-y|--yes] [-n|--dry-run] [--skip-signature-verification] [--volume IMG] <pack|./path>\n");
                     return 2;
                 }
                 volume = argv[i];
@@ -1051,17 +1185,55 @@ int main(int argc, char **argv)
             else if (!target)
                 target = argv[i];
             else {
-                fprintf(stderr, "usage: invfs-pack install [-y|--yes] [-n|--dry-run] [--volume IMG] <pack|./path>\n");
+                fprintf(stderr, "usage: invfs-pack install [-y|--yes] [-n|--dry-run] [--skip-signature-verification] [--volume IMG] <pack|./path>\n");
                 return 2;
             }
         }
-        if (!target) { fprintf(stderr, "usage: invfs-pack install [-y|--yes] [-n|--dry-run] [--volume IMG] <pack|./path>\n"); return 2; }
-        return cmd_install(target, overwrite, dry_run, volume);
+        if (!target) { fprintf(stderr, "usage: invfs-pack install [-y|--yes] [-n|--dry-run] [--skip-signature-verification] [--volume IMG] <pack|./path>\n"); return 2; }
+        return cmd_install(target, overwrite, dry_run, volume, skip_sig);
+    } else if (strcmp(cmd, "keygen") == 0) {
+        const char *keyring = NULL;
+        const char *name = NULL;
+        for (int i = 2; i < argc; i++) {
+            if (strcmp(argv[i], "--keyring") == 0) {
+                if (++i >= argc) {
+                    fprintf(stderr, "usage: invfs-pack keygen [--keyring DIR] [name]\n");
+                    return 2;
+                }
+                keyring = argv[i];
+            }
+            else if (!name)
+                name = argv[i];
+            else {
+                fprintf(stderr, "usage: invfs-pack keygen [--keyring DIR] [name]\n");
+                return 2;
+            }
+        }
+        return cmd_keygen(keyring, name);
+    } else if (strcmp(cmd, "sign") == 0) {
+        const char *keyfile = NULL;
+        const char *target = NULL;
+        for (int i = 2; i < argc; i++) {
+            if (strcmp(argv[i], "--key") == 0) {
+                if (++i >= argc) {
+                    fprintf(stderr, "usage: invfs-pack sign --key SECFILE <pack|./path>\n");
+                    return 2;
+                }
+                keyfile = argv[i];
+            }
+            else if (!target)
+                target = argv[i];
+            else {
+                fprintf(stderr, "usage: invfs-pack sign --key SECFILE <pack|./path>\n");
+                return 2;
+            }
+        }
+        return cmd_sign(keyfile, target);
     } else if (strcmp(cmd, "remove") == 0) {
         if (argc < 3) { fprintf(stderr, "usage: invfs-pack remove <pack>\n"); return 2; }
         cmd_remove(argv[2]);
     } else if (strcmp(cmd, "verify") == 0) {
-        cmd_verify(argc > 2 ? argv[2] : NULL);
+        return cmd_verify(argc > 2 ? argv[2] : NULL);
     } else if (strcmp(cmd, "alternatives") == 0) {
         if (argc < 3) { fprintf(stderr, "usage: invfs-pack alternatives <family>\n"); return 2; }
         cmd_alternatives(argv[2]);
