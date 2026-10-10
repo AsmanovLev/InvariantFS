@@ -3,6 +3,7 @@
  *
  *   invf-sweep <image> [--dry-run] [--log <file>]
  *                      [--seal [5|10|20|25]|--unseal]
+ *                      [--stale-mode=auto|notify|off]
  *                      [--redundant-blocks <f>]
  *                      [--redundant-paranoic <f>[:rs-vm|rs-cauchy]]
  *                      [--free-redundant]
@@ -33,6 +34,17 @@
  * seal (same as --unseal). A bare run (no redundancy flags) on a sealed
  * volume auto-reseals after the sweep. --redundant-bench prints rs-vm vs
  * rs-cauchy MB/s and exits (it benchmarks the shared rs.c math).
+ *
+ * WP403 (--stale-mode): post-seal writes make parity stale, and the bare
+ * run's response is a MODE, not a constant. auto (DEFAULT) is today's
+ * behavior: reseal stale groups, print what was resealed. notify does NOT
+ * reseal: it prints the detector's stale report (sealed-at-gen + uncovered
+ * bytes, from vol_seal_verify -- the detection itself is untouched) and
+ * exits 0 with the volume still sealed-but-stale. off prints one line
+ * (for frozen pipelines that check staleness elsewhere). Explicit
+ * --seal/--unseal/--redundant-* always wins over the mode, and an unsealed
+ * volume prints no mode output at all. Under --dry-run the bare-run plan
+ * is annotated with what the mode WOULD do.
  *
  * Every non-dry run captures an SPT0 SAVEPOINT in "prepare", before the
  * walk, and the window it opens is what invf-rollback undoes the sweep from.
@@ -1367,6 +1379,11 @@ int main(int argc, char **argv)
     double rb_f = -1.0, rp_f = -1.0;   /* <0: flag absent */
     int rp_algo = 0;                   /* explicit :rs-vm/:rs-cauchy suffix */
     int auto_reseal = 0;
+    /* WP403: the bare-run seal response is a mode (default auto = today's
+     * behavior). notify_stale/stale_off arm the non-resealing branches at
+     * the seal stage; dry_live_seal arms the mode-annotated dry-run plan. */
+    int stale_mode = 0;   /* 0=auto, 1=notify, 2=off */
+    int notify_stale = 0, stale_off = 0, dry_live_seal = 0;
     int count = 0, cap = 0, kept = 0, swept = 0, skipped = 0, failed = 0;
     /* A vol_flush that failed at the durability point. LATCHED, not a
      * counter: a run whose data was rewritten but whose flush failed has
@@ -1393,6 +1410,7 @@ int main(int argc, char **argv)
             fprintf(stderr,
                 "usage: %s <image> [--dry-run] [--fast] [--compact]\n"
                 "           [--seal [5|10|20|25]|--unseal]\n"
+                "           [--stale-mode=auto|notify|off]\n"
                 "           [--redundant-blocks <f>]\n"
                 "           [--redundant-paranoic <f>[:rs-vm|rs-cauchy]]\n"
                 "           [--free-redundant] [--redundant-bench]\n"
@@ -1406,6 +1424,10 @@ int main(int argc, char **argv)
                 "                         the sweep rewrites it ~1x/sec, open it\n"
                 "                         in a browser -- no server, no network)\n"
                 "           [--color auto|always|never] (default: auto; NO_COLOR honored)\n"
+                "  --stale-mode  bare-run seal response (WP403): auto reseals\n"
+                "              (default), notify reports without resealing,\n"
+                "              off prints one line; explicit --seal/--unseal\n"
+                "              always wins; unsealed volumes stay silent\n"
                 "  --fast      cheap pass: RAW files take the generic\n"
                 "              per-segment recompress only (no classification,\n"
                 "              transcodes, decomposition, batching or dedupe)\n"
@@ -1427,6 +1449,7 @@ int main(int argc, char **argv)
         fprintf(stderr,
                 "usage: %s <image> [--dry-run] [--fast] [--compact]\n"
                 "           [--seal [5|10|20|25]|--unseal]\n"
+                "           [--stale-mode=auto|notify|off]\n"
                 "           [--redundant-blocks <f>]\n"
                 "           [--redundant-paranoic <f>[:rs-vm|rs-cauchy]]\n"
                 "           [--free-redundant] [--redundant-bench]\n"
@@ -1492,6 +1515,35 @@ int main(int argc, char **argv)
         } else if (strcmp(a, "--unseal") == 0 ||
                    strcmp(a, "--free-redundant") == 0) {
             unseal = 1;
+        } else if (strncmp(a, "--stale-mode", 12) == 0) {
+            /* WP403: --stale-mode=auto|notify|off (or --stale-mode <mode>).
+             * Default auto = today's behavior; unknown values are refused,
+             * never coerced, so a typo cannot silently change the reseal. */
+            const char *v = NULL;
+            if (a[12] == '=')
+                v = a + 13;
+            else if (a[12] == '\0') {
+                if (i + 1 >= argc) {
+                    fprintf(stderr,
+                            "--stale-mode: want auto|notify|off\n");
+                    return 2;
+                }
+                v = argv[++i];
+            } else {
+                fprintf(stderr, "unknown flag '%s'\n", a);
+                return 2;
+            }
+            if (strcmp(v, "auto") == 0)
+                stale_mode = 0;
+            else if (strcmp(v, "notify") == 0)
+                stale_mode = 1;
+            else if (strcmp(v, "off") == 0)
+                stale_mode = 2;
+            else {
+                fprintf(stderr, "--stale-mode: want auto|notify|off, "
+                                "got '%s'\n", v);
+                return 2;
+            }
         } else if (strcmp(a, "--redundant-bench") == 0) {
             bench = 1;
         } else if (strcmp(a, "--redundant-blocks") == 0 && i + 1 < argc) {
@@ -1729,18 +1781,44 @@ int main(int argc, char **argv)
         }
         vol_redun_config(vol, mk, algo, mm);
     }
-    /* auto-reseal: no redundancy flags but a live descriptor -> continue
-     * the persisted configuration after the sweep */
+    /* WP403: the bare-run seal response is a MODE (--stale-mode=...).
+     * auto (default) keeps today's behavior: continue the persisted
+     * configuration after the sweep. notify arms the staleness report
+     * with no reseal; off arms the one-line leave-alone. Explicit
+     * --seal/--unseal/--redundant-* always wins (this block only runs
+     * with none of them), and an unsealed volume arms nothing, so no
+     * mode ever prints on one. */
     if (!seal && !unseal && !dry && rb_f < 0 && rp_f < 0) {
         uint32_t k1c, m2c;
         int l2c;
         if (vol_redun_state(vol, &k1c, &l2c, &m2c)) {
-            auto_reseal = 1;
-            if (!invfs_sweep_ui_active())
-                fprintf(stderr, "redundancy: live RDP0 descriptor (k1=%u, "
-                        "l2=%s m2=%u) -- auto-reseal after sweep\n",
-                        (unsigned)k1c, rs_algo_name(l2c), (unsigned)m2c);
+            if (stale_mode == 1) {
+                notify_stale = 1;
+                if (!invfs_sweep_ui_active())
+                    fprintf(stderr, "redundancy: live RDP0 descriptor (k1=%u, "
+                            "l2=%s m2=%u) -- stale-mode=notify, no reseal; "
+                            "staleness report follows the sweep\n",
+                            (unsigned)k1c, rs_algo_name(l2c), (unsigned)m2c);
+            } else if (stale_mode == 2) {
+                stale_off = 1;
+            } else {
+                auto_reseal = 1;
+                if (!invfs_sweep_ui_active())
+                    fprintf(stderr, "redundancy: live RDP0 descriptor (k1=%u, "
+                            "l2=%s m2=%u) -- auto-reseal after sweep "
+                            "(stale-mode=auto)\n",
+                            (unsigned)k1c, rs_algo_name(l2c), (unsigned)m2c);
+            }
         }
+    }
+    /* WP403 --dry-run: a bare --dry-run on a sealed volume arms the
+     * mode-annotated seal plan at the seal stage (read-only -- the
+     * volume is not touched). Unsealed volumes stay silent. */
+    if (!seal && !unseal && dry && rb_f < 0 && rp_f < 0) {
+        uint32_t k1c, m2c;
+        int l2c;
+        if (vol_redun_state(vol, &k1c, &l2c, &m2c))
+            dry_live_seal = 1;
     }
 
     /* WP20 --unseal: free all parity blocks and remove the owners; no sweep
@@ -2291,19 +2369,47 @@ progress:
      * fully flushed (parity covers the post-sweep state); a live seal
      * with no flags auto-reseals (full recompute). Under --dry-run the
      * stage is a read-only plan: what WOULD be sealed, in groups, bytes
-     * and overhead — the volume is not touched. */
-    if (seal || rb_f >= 0 || rp_f >= 0 || auto_reseal) {
+     * and overhead — the volume is not touched.
+     *
+     * WP403: the gate also admits the bare-run modes. notify reports the
+     * detector's staleness truth with no reseal (exit stays 0: stale is
+     * not failure); off prints one line. A bare --dry-run on a sealed
+     * volume plans with the mode annotated. */
+    if (seal || rb_f >= 0 || rp_f >= 0 || auto_reseal || notify_stale ||
+        stale_off || (dry && dry_live_seal)) {
         if (dry) {
             /* Read-only plan: the REQUESTED menu over walked REG sizes.
-             * Nothing here configures or writes (no vol_redun_config). */
+             * Nothing here configures or writes (no vol_redun_config).
+             * A bare dry run on a sealed volume (dry_live_seal) plans the
+             * LIVE persisted shape instead -- that is what auto WOULD
+             * reseal -- and says what the mode would do. */
             unsigned pk = 9, pm = 1;
             int pa = RS_ALGO_VM;
             vol_walk_t pw;
             seal_plan_ctx pc;
             uint64_t pg = 0, ppb = 0;
+            const char *mode_note = "";
             memset(&pc, 0, sizeof pc);
-            seal_request_menu(vol, seal, seal_pct, rb_f, rp_f, rp_algo, 0,
-                              &pk, &pm, &pa);
+            if (dry_live_seal) {
+                uint32_t lk = 0, lm = 0;
+                int la = 0;
+                if (vol_redun_state(vol, &lk, &la, &lm) && lk) {
+                    pk = lk;
+                    pm = lm;
+                    pa = la;
+                } else {
+                    seal_request_menu(vol, seal, seal_pct, rb_f, rp_f,
+                                      rp_algo, 0, &pk, &pm, &pa);
+                }
+                mode_note = stale_mode == 1
+                    ? " (stale-mode=notify: would report, no reseal)"
+                    : stale_mode == 2
+                    ? " (stale-mode=off: no action)"
+                    : " (stale-mode=auto: would reseal)";
+            } else {
+                seal_request_menu(vol, seal, seal_pct, rb_f, rp_f, rp_algo, 0,
+                                  &pk, &pm, &pa);
+            }
             vol_walk_init(&pw, vol, "seal plan walk");
             vol_walk_result(&pw, vol_walk_strict(vol, seal_plan_cb, &pc),
                             pc.n, pc.n);
@@ -2317,12 +2423,59 @@ progress:
                 seal_plan(pk, pm, pc.bytes, &pg, &ppb);
                 printf("[seal] plan: %llu files, %llu data bytes -> "
                        "%llu groups (k=%u,m=%u,%s, 64 KiB symbols), "
-                       "%llu parity bytes (~%.1f%%); no changes (dry-run)\n",
+                       "%llu parity bytes (~%.1f%%); no changes (dry-run)%s\n",
                        (unsigned long long)pc.n,
                        (unsigned long long)pc.bytes,
                        (unsigned long long)pg, pk, pm, rs_algo_name(pa),
-                       (unsigned long long)ppb, ov);
+                       (unsigned long long)ppb, ov, mode_note);
             }
+        } else if (notify_stale) {
+            /* WP403 stale-mode=notify: no reseal. vol_seal_verify IS the
+             * detector -- its own report (sealed-at-gen + uncovered bytes)
+             * is the staleness truth, consumed here, never redefined -- and
+             * it is read-only, so the parity bytes are identical after.
+             * The mode line says what the sweep did about it (nothing) and
+             * why. Exit stays 0: sealed-but-stale is reported, not failed. */
+            invfs_seal_verify sv;
+            sw_stage_begin(ui_seal, "seal", 0,
+                           "staleness report (no reseal)");
+            if (vol_seal_verify(vol, &sv) != 0) {
+                sw_progress_suspend();
+                fprintf(stderr, "seal: stale-mode=notify report unavailable "
+                        "(verify I/O failure); no reseal performed\n");
+                sw_stage_end("report unavailable");
+            } else if (sv.sealed == 0) {
+                /* Descriptor seen at prepare, gone now: say so, once. */
+                if (!invfs_sweep_ui_active())
+                    printf("[seal] stale-mode=notify: seal retired mid-run; "
+                           "nothing to report, no reseal\n");
+                sw_stage_end("seal gone");
+            } else if (sv.mismatched || sv.missing || sv.extra) {
+                if (!invfs_sweep_ui_active())
+                    printf("[seal] stale-mode=notify: %llu sealed groups "
+                           "(%llu mismatched, %llu missing, %llu extra); "
+                           "no reseal, volume still sealed-but-stale\n",
+                           (unsigned long long)sv.sealed,
+                           (unsigned long long)sv.mismatched,
+                           (unsigned long long)sv.missing,
+                           (unsigned long long)sv.extra);
+                sw_stage_end("stale, no reseal");
+            } else {
+                if (!invfs_sweep_ui_active())
+                    printf("[seal] stale-mode=notify: seal clean "
+                           "(%llu groups); no reseal needed\n",
+                           (unsigned long long)sv.sealed);
+                sw_stage_end("clean, no reseal");
+            }
+        } else if (stale_off) {
+            /* WP403 stale-mode=off: one line, no reseal, no report. The
+             * verify call is deliberately absent -- it would print the
+             * detector's report, which is more than one line. */
+            sw_stage_begin(ui_seal, "seal", 0, "left as-is");
+            if (!invfs_sweep_ui_active())
+                printf("[seal] stale-mode=off: seal left as-is "
+                       "(no reseal, no report)\n");
+            sw_stage_end("left as-is");
         } else {
         sw_stage_begin(ui_seal, "seal", 0, "updating parity stripes");
         invfs_seal_report rep;
@@ -2378,7 +2531,7 @@ progress:
                      (unsigned long long)rep.parity_blocks);
             sw_stage_end(frc == 0 ? detail : "flush failed after seal");
         }
-        } /* end WP201 dry-plan else (live seal) */
+        } /* end WP201 dry-plan / WP403 mode else (live seal) */
     }
 
     /* WP121: the offline sweep holds the volume exclusively, so this is the

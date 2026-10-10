@@ -20,6 +20,17 @@
 #   image D (dry-run): --dry-run --seal prints the plan (groups, parity
 #   bytes, overhead) and changes nothing (verify still shows the old seal).
 #
+#   image E (WP403 stale-mode): seal -> write-more (stale) -> bare
+#   --dry-run annotates the plan per mode (auto would reseal / notify
+#   would report / off no action) -> --stale-mode=notify reports STALE
+#   (gen + uncovered bytes), exits 0, parity bytes identical, verify
+#   still STALE -> --stale-mode=off prints one line, no reseal ->
+#   explicit --seal under notify still reseals (explicit wins) ->
+#   bad --stale-mode refused.
+#
+#   image F (WP403 unsealed silence): --stale-mode=notify/off on an
+#   unsealed volume prints no mode output at all.
+#
 # Run from the repo root after `make`:  bash tools/test-seal.sh
 # Uses /dev/shm (tmpfs) like the other soak scripts. NOTE: blkio treats
 # /dev/* paths as raw devices, so the script cd's into /dev/shm and uses
@@ -38,9 +49,11 @@ IMG=wp201seal.img        # image A: the main seal/stale/unseal line
 IMGB=wp201seal-b.img     # image B: menu geometry legs
 IMGC=wp201seal-c.img     # image C: crash-mid-seal probe
 IMGD=wp201seal-d.img     # image D: dry-run plan
+IMGE=wp201seal-e.img     # image E: WP403 stale-mode legs
+IMGF=wp201seal-f.img     # image F: WP403 unsealed silence
 rm -rf "$WORK" && mkdir -p "$WORK/orig" "$WORK/out"
 cd /dev/shm
-rm -f "$IMG" "$IMGB" "$IMGC" "$IMGD"
+rm -f "$IMG" "$IMGB" "$IMGC" "$IMGD" "$IMGE" "$IMGF"
 
 fail() { echo "FAIL: $*" >&2; exit 1; }
 
@@ -318,6 +331,127 @@ AFTER=$($B/invf-verify "$IMGD" --deep 2>&1 | grep -c "^parity:" || true)
 [ "$BEFORE" = "$AFTER" ] && [ "$BEFORE" = 1 ] \
     || fail "dry-run mutated the seal (parity legs: $BEFORE -> $AFTER)"
 echo "  dry-run left the live seal untouched"
+
+echo
+echo "== [E] stale-mode legs (WP403; fresh image) =="
+$B/invf-mkfs "$IMGE" 0.5 >/dev/null
+$B/invf-cp "$IMGE" "$WORK/orig/a.c" a.c >/dev/null
+$B/invf-cp "$IMGE" "$WORK/orig/big.log" big.log >/dev/null
+$B/invf-sweep "$IMGE" >/dev/null 2>&1 || fail "E baseline sweep failed"
+$B/invf-sweep "$IMGE" --seal >/dev/null 2>&1 || fail "E seal failed"
+echo "stale-mode probe" > "$WORK/orig/probe.txt"
+$B/invf-cp "$IMGE" "$WORK/orig/probe.txt" probe.txt >/dev/null
+set +e
+$B/invf-verify "$IMGE" --deep > "$WORK/emode-pre.log" 2>&1
+set -e
+grep -q "STALE: .* uncovered bytes" "$WORK/emode-pre.log" \
+    || fail "E fixture is not stale"
+GEN_PRE=$(grep -o "sealed-at-gen-[0-9]*" "$WORK/emode-pre.log" | head -n 1)
+[ -n "$GEN_PRE" ] || fail "E no sealed-at-gen in the stale report"
+$B/invf-cat "$IMGE" $'\x01seal-parity' "$WORK/epar-before" >/dev/null 2>&1 \
+    || fail "E cannot dump parity bytes"
+echo "  fixture stale ($GEN_PRE)"
+
+echo "  -- [E1] dry-run plans annotate the mode --"
+$B/invf-sweep "$IMGE" --dry-run > "$WORK/edry-auto.log" 2>&1 \
+    || fail "E dry-run auto failed"
+grep -q "\[seal\] plan:" "$WORK/edry-auto.log" \
+    || fail "E auto dry plan missing"
+grep -q "stale-mode=auto: would reseal" "$WORK/edry-auto.log" \
+    || fail "E auto dry plan not annotated"
+$B/invf-sweep "$IMGE" --dry-run --stale-mode=notify > "$WORK/edry-notify.log" 2>&1 \
+    || fail "E dry-run notify failed"
+grep -q "stale-mode=notify: would report, no reseal" "$WORK/edry-notify.log" \
+    || fail "E notify dry plan not annotated"
+$B/invf-sweep "$IMGE" --dry-run --stale-mode off > "$WORK/edry-off.log" 2>&1 \
+    || fail "E dry-run off failed"
+grep -q "stale-mode=off: no action" "$WORK/edry-off.log" \
+    || fail "E off dry plan not annotated"
+set +e
+$B/invf-verify "$IMGE" --deep > "$WORK/emode-dry.log" 2>&1
+set -e
+grep -q "$GEN_PRE" "$WORK/emode-dry.log" \
+    || fail "E dry-run mutated the seal"
+echo "  dry plans annotated; seal untouched"
+
+echo "  -- [E2] notify: report, no reseal, exit 0 --"
+$B/invf-sweep "$IMGE" --stale-mode=notify > "$WORK/enotify.log" 2>&1 \
+    || fail "E notify run failed (exit nonzero)"
+grep -q "stale-mode=notify" "$WORK/enotify.log" \
+    || fail "E no notify diagnostic"
+grep -q "STALE: .* uncovered bytes" "$WORK/enotify.log" \
+    || fail "E no stale report in notify output"
+grep -q "$GEN_PRE" "$WORK/enotify.log" \
+    || fail "E notify lost the generation"
+grep -q "sealed-but-stale" "$WORK/enotify.log" \
+    || fail "E no sealed-but-stale line"
+$B/invf-cat "$IMGE" $'\x01seal-parity' "$WORK/epar-notify" >/dev/null 2>&1 \
+    || fail "E cannot re-dump parity bytes"
+cmp -s "$WORK/epar-before" "$WORK/epar-notify" \
+    || fail "E notify resealed (parity bytes differ)"
+set +e
+$B/invf-verify "$IMGE" --deep > "$WORK/emode-notify.log" 2>&1
+VRC=$?
+set -e
+[ "$VRC" != 0 ] || fail "E verify passed over notify-stale volume"
+grep -q "STALE: .* uncovered bytes" "$WORK/emode-notify.log" \
+    || fail "E verify not STALE after notify"
+grep -q "$GEN_PRE" "$WORK/emode-notify.log" \
+    || fail "E generation advanced under notify"
+echo "  notify reported ($GEN_PRE), parity identical, verify still STALE"
+
+echo "  -- [E3] off: one line, no reseal --"
+$B/invf-sweep "$IMGE" --stale-mode off > "$WORK/eoff.log" 2>&1 \
+    || fail "E off run failed (exit nonzero)"
+[ "$(grep -c "stale-mode" "$WORK/eoff.log")" = 1 ] \
+    || fail "E off printed more/less than one mode line"
+grep -q "no reseal, no report" "$WORK/eoff.log" || fail "E off line wrong"
+if grep -q "STALE:" "$WORK/eoff.log"; then
+    fail "E off leaked a stale report"
+fi
+$B/invf-cat "$IMGE" $'\x01seal-parity' "$WORK/epar-off" >/dev/null 2>&1 \
+    || fail "E cannot re-dump parity bytes (off)"
+cmp -s "$WORK/epar-before" "$WORK/epar-off" \
+    || fail "E off resealed (parity bytes differ)"
+set +e
+$B/invf-verify "$IMGE" --deep > "$WORK/emode-off.log" 2>&1
+set -e
+grep -q "$GEN_PRE" "$WORK/emode-off.log" \
+    || fail "E generation advanced under off"
+echo "  off: one line, parity identical, still $GEN_PRE"
+
+echo "  -- [E4] explicit --seal wins over notify --"
+$B/invf-sweep "$IMGE" --stale-mode=notify --seal > "$WORK/eexplicit.log" 2>&1 \
+    || fail "E explicit seal failed"
+grep -q "full recompute" "$WORK/eexplicit.log" \
+    || fail "E explicit did not reseal"
+$B/invf-verify "$IMGE" --deep > "$WORK/emode-exp.log" 2>&1 \
+    || fail "E verify not clean after explicit reseal"
+grep -q " 0 mismatched, 0 missing, 0 extra" "$WORK/emode-exp.log" \
+    || fail "E parity leg not clean after explicit reseal"
+echo "  explicit --seal resealed; verify clean"
+
+echo "  -- [E5] bad mode refused --"
+rc=0; $B/invf-sweep "$IMGE" --stale-mode=bogus > "$WORK/ebad.log" 2>&1 || rc=$?
+[ "$rc" -ne 0 ] || fail "E bad stale-mode accepted"
+grep -q "want auto|notify|off" "$WORK/ebad.log" || fail "E no mode diagnostic"
+echo "  bogus mode refused (rc=$rc)"
+
+echo
+echo "== [F] unsealed volumes: no mode output (WP403) =="
+$B/invf-mkfs "$IMGF" 0.5 >/dev/null
+$B/invf-cp "$IMGF" "$WORK/orig/a.c" a.c >/dev/null
+$B/invf-sweep "$IMGF" --stale-mode=notify > "$WORK/eunsealed.log" 2>&1 \
+    || fail "F unsealed notify run failed"
+if grep -q "stale-mode\|auto-reseal\|\[seal\]" "$WORK/eunsealed.log"; then
+    fail "F mode output on an unsealed volume"
+fi
+$B/invf-sweep "$IMGF" --stale-mode=off > "$WORK/eunsealed-off.log" 2>&1 \
+    || fail "F unsealed off run failed"
+if grep -q "stale-mode\|auto-reseal\|\[seal\]" "$WORK/eunsealed-off.log"; then
+    fail "F off output on an unsealed volume"
+fi
+echo "  unsealed runs silent"
 
 echo
 echo "SEAL E2E: PASS"
