@@ -117,8 +117,6 @@ jobs:
   # so a bins-only artifact cannot feed them. Per-suite timeout so one
   # wedged suite cannot eat the job.
   e2e-full:
-    # LEG3-WORK: temporarily skipped, engine+soak only (re-enable by deleting this line)
-    if: false
     needs: [engine]
     # 24.04, not 22.04: libjxl-tools (cjxl/djxl, hard-required by the
     # jxl/exercarve/pngflac/rawimg lanes) is not installable on the 22.04
