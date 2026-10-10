@@ -403,6 +403,7 @@ verify_consistent() { # <label> <origdir>
         return 1
     fi
     $B/invf-verify "$DM" --deep >"$FLK/consistent-verify.log" 2>&1 || true
+    info "consistent: verify says: $(grep -acE '^  CORRUPT' "$FLK/consistent-verify.log") corrupt lines"
     # D as newline lists (fixed strings; corpus names are simple but be safe).
     # Content evidence is ONLY bare `CORRUPT: <name>` lines (a file whose
     # bytes fail). `CORRUPT: inode N (...)` lines are namespace-audit damage
@@ -428,7 +429,8 @@ verify_consistent() { # <label> <origdir>
         fi
     done
     rm -f "$FLK/consistent-out.bin"
-    info "consistent: $exact_n exact,$(echo "$failed" | wc -w) unreadable-or-wrong ($label)"
+    info "consistent: $exact_n exact,$(echo "$failed" | wc -w) unreadable-or-wrong ($label):${failed:- none}"
+    info "consistent: ledger fsck:[$(tr '\n' ' ' <"$FLK/consistent-dfsck.txt")] verify:[$(tr '\n' ' ' <"$FLK/consistent-dverify.txt")]"
     # (a) every failure named.
     for f in $failed; do
         if ! grep -Fqx "$f" "$FLK/consistent-d.txt"; then
@@ -455,12 +457,22 @@ verify_consistent() { # <label> <origdir>
         fi
         return 1
     done <"$FLK/consistent-d.txt"
-    # (c) OK verdict implies empty ledger and all exact.
+    # (c) OK verdict implies an empty *fsck* ledger. Content-tear
+    # (verify-only damage with fsck OK) is legitimate damage, not
+    # inconsistency: those files are policed by (a) against the union
+    # including verify names, so here every failed file must be in
+    # verify's list (fsck's list is already proven empty).
     if [ "$verdict" = "OK" ]; then
-        if [ -s "$FLK/consistent-d.txt" ] || [ -n "$failed" ]; then
-            echo "  UNEXPLAINED ($label): fsck OK but damage listed or files failed" >&2
+        if [ -s "$FLK/consistent-dfsck.txt" ]; then
+            echo "  UNEXPLAINED ($label): fsck OK but its ledger is non-empty" >&2
             return 1
         fi
+        for f in $failed; do
+            if ! grep -Fqx "$f" "$FLK/consistent-dverify.txt"; then
+                echo "  UNEXPLAINED ($label): fsck OK but $f failed unread and verify did not name it" >&2
+                return 1
+            fi
+        done
     fi
     # (d) holds by construction: the loop above cmp-checks every success.
     return 0

@@ -2724,3 +2724,12 @@ exit codes untouched. Proven on preserved artifacts (022950/030229: exactly
 `rand.bin torn-recipe`, rest exact) before any live chaos run. Mount view
 (`user.invfs.damaged`) explicitly deferred: diagnostic xattr scans must stay
 cheap, and the offline flag carries the suite already.
+
+**Update: the gate's own bug, found by CI on its first run.** Leg-3 came back
+fsck-OK with one verify-CORRUPT file (content-tear shape, same as the earlier
+CI `t.tar`): my assert (c) demanded OK-implies-all-exact and failed a
+consistent volume. Fixed: (c) now demands OK-implies-empty-*fsck*-ledger
+only; verify-named failures pass via (a). Plus debuggability (failed names +
+both ledger lists in the summary line) after a round of log-starved
+forensics. Proven: synthetic torn-block volume (fsck OK + CORRUPT + cat-fail
+-> PASS) and ghost-file negative control (-> FAIL naming the file).
