@@ -12,6 +12,12 @@
 #
 # Hermetic: images under /dev/shm (relative paths); the helper is a
 # shell script (no external tools); no mount, no daemon.
+#
+# WP203: the fixture pack is UNSIGNED, so every install below carries
+# --skip-signature-verification. That flag is about the prompt, not the
+# duplicate logic: leg 2's without--y refusal still refuses (at the
+# duplicate check, after the gate), and the -n leg still changes nothing.
+# Signed-install coverage lives in tools/test-pack-sign.sh.
 set -e
 set -o pipefail
 
@@ -38,7 +44,7 @@ printf '#!/bin/sh\ncp "$1" "$2"\n' > "$WORK/src/.invariantfs/codecpacks/vxp.code
 chmod 755 "$WORK/src/.invariantfs/codecpacks/vxp.codecpack/bin/enc" \
           "$WORK/src/.invariantfs/codecpacks/vxp.codecpack/bin/dec"
 $B/invf-mkfs "$IMG" 1 >/dev/null
-$B/invfs-pack install --volume "$IMG" "$WORK/src/.invariantfs/codecpacks/vxp.codecpack" \
+$B/invfs-pack install --skip-signature-verification --volume "$IMG" "$WORK/src/.invariantfs/codecpacks/vxp.codecpack" \
     || fail "install --volume rc=$?"
 $B/invfs-pack list --volume "$IMG" > "$WORK/list.txt" \
     || fail "list --volume rc=$?"
@@ -48,12 +54,12 @@ $B/invfs-pack list --volume "$IMG" 2>&1 | grep -q "1 pack(s)" \
     || fail "leg1: pack count"
 
 echo "== [2] refusals =="
-$B/invfs-pack install --volume "$IMG" "$WORK/src/.invariantfs/codecpacks/vxp.codecpack" \
+$B/invfs-pack install --skip-signature-verification --volume "$IMG" "$WORK/src/.invariantfs/codecpacks/vxp.codecpack" \
     >/dev/null 2>&1 || RC=$?
 [ "${RC:-0}" -ne 0 ] || fail "leg2: duplicate rc=0 without -y"
-$B/invfs-pack install -n --volume "$IMG" "$WORK/src/.invariantfs/codecpacks/vxp.codecpack" \
+$B/invfs-pack install --skip-signature-verification -n --volume "$IMG" "$WORK/src/.invariantfs/codecpacks/vxp.codecpack" \
     | grep -q "would import" || fail "leg2: -n output"
-$B/invfs-pack install -y --volume "$IMG" "$WORK/src/.invariantfs/codecpacks/vxp.codecpack" \
+$B/invfs-pack install --skip-signature-verification -y --volume "$IMG" "$WORK/src/.invariantfs/codecpacks/vxp.codecpack" \
     >/dev/null || fail "leg2: -y re-import rc=$?"
 $B/invfs-pack list --volume "$IMG" 2>&1 | grep -q "1 pack(s)" \
     || fail "leg2: pack count after -y"
