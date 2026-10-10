@@ -60,7 +60,7 @@
 #            FLAKEY_STORM_S (leg 2 error-window seconds, default 6; longer
 #            windows raise in-storm-OK exposure for edge-hunting),
 #            FLAKEY_PC_WORK (leg 7 scratch; MUST be on a disk-backed
-#            filesystem — default /var/tmp/invfs-flakey-pagecache),
+#            filesystem — default under $FLK, same rule as leg 8),
 #            FLAKEY_PC_BACKING (leg 7: loop = a loop device over the image
 #            (default when losetup works), file = the image file itself, the
 #            unprivileged path),
@@ -128,10 +128,11 @@ T0=$SECONDS
 
 # ---- leg 7 (WP83): the page-cache power-loss tier ----
 # Its own scratch, and its own volume: legs 0-5 all run on the dm-flakey
-# device over a loop file inside $FLK, and $FLK is tmpfs on this box --
-# drop_caches cannot evict a tmpfs page (there is no writeback to drop), so
-# the page-cache cut would be a silent NO-OP there. This leg refuses to
-# pretend: it picks a disk-backed scratch or says so loudly.
+# device over a loop file inside $FLK, and a tmpfs $FLK would make
+# drop_caches a silent NO-OP there (no writeback to drop). The startup
+# guard already refused a tmpfs scratch when 7/8 are selected, so $FLK is
+# PROVEN disk-backed wherever this leg runs -- default under it, same rule
+# as leg 8's rc_work_pick. $FLAKEY_PC_WORK still wins when set.
 PC_WORK=${FLAKEY_PC_WORK:-}
 PC_VOL=""
 PC_LOOP=""
@@ -1066,6 +1067,200 @@ leg5() {
 # wp/purge-v2-l2p-journal -- and its env hook with them. The drop_writes chaos
 # coverage it shared is unchanged in legs 2, 3 and 5.
 
+# ---------------------------------------------- leg 7 (WP83): page cache --
+# The tier legs 0-5 structurally cannot reach: there the DEVICE is the
+# thing that lies (dm-flakey drop_writes / error). Here the device is
+# healthy for the whole leg and the bytes never leave the host page cache
+# -- which is exactly how `cp` "loses" a file that `ls` showed a second
+# earlier on a real block device.
+#
+#   1. write 9 files through the FUSE mount, fsync() each one, and rewrite
+#      two of them in place: one rewrite fsynced, one NOT (its fd is held
+#      open by a live writer so the commit can never happen). No unmount,
+#      no vol_close -- the fsync barriers are the only thing pinning the
+#      acknowledged bytes.
+#   2. record the expected sha256 of every generation
+#   3. kill -9 the daemon (started with -f, so the PID is the daemon)
+#   4. sync + `echo 3 > /proc/sys/vm/drop_caches`: the power-cut surrogate.
+#      Every byte that is not on the medium is gone, and the reopen has to
+#      re-read structure AND data from the medium.
+#   5. reopen: every file present and bit-exact -- through the offline
+#      tools AND through a fresh FUSE mount -- verify --deep 0 corrupt,
+#      fsck OK.
+#   6. THE assertion: a file rewritten in place must be the COMPLETE old
+#      content or the COMPLETE new content, never a splice of the two. The
+#      fsynced rewrite must be exactly the new content (it was
+#      acknowledged); the un-acked one may be either.
+#
+# What this tier can and cannot prove, stated honestly:
+# drop_caches evicts CLEAN pages only -- the kernel will not discard dirty
+# ones, so a write that reached the page cache can still be written back
+# after the "cut" (v3 barriers every delta append, so the un-acked file
+# usually comes back NEW; the leg accepts either generation). Discarding
+# un-acked bytes for real is dm-flakey drop_writes = legs 3/4. What this
+# tier uniquely proves is that the acknowledged bytes, their delta records
+# and the bitmap are on the MEDIUM and that the on-disk image is
+# self-consistent when re-read from scratch -- i.e. the FUSE fsync ack
+# (commit_wctx + vol_sync) is real on v3, which is what the pre-WP80
+# `vol_sync` early return made a silent no-op.
+#
+# v3 audit (WP202): none of the eight bodies below touches the deleted v2
+# mapping journal, L2P or checkpoint paths. pc_run retries on the two live
+# vol_open failure strings (flock race, dm down-window sizing); pc_cut is
+# sync + drop_caches with no format assumption; pc_fsck/pc_verify drive the
+# current invf-fsck/invf-verify. The loop/file device handling stays local
+# to this leg (its own volume, never the suite dm device) -- it does not
+# fork dev_create/dm_set, which keep owning legs 0-5's shared device.
+
+pc_work_pick() {   # leg 7's scratch, under $FLK: the startup guard already
+    # refused a tmpfs scratch when 7/8 are selected, so $FLK is PROVEN
+    # disk-backed wherever leg 7 runs -- same rule as leg 8's rc_work_pick.
+    # $FLAKEY_PC_WORK still wins when set.
+    if [ -z "$PC_WORK" ]; then
+        PC_WORK="$FLK/pagecache"
+    fi
+    [ -n "$PC_WORK" ] || PC_WORK=/tmp/invfs-flakey-pagecache
+    PC_MNT="$PC_WORK/mnt"
+    rm -rf "$PC_WORK" && mkdir -p "$PC_WORK" "$PC_MNT" || return 1
+    if [ "$(stat -f -c %T "$PC_WORK" 2>/dev/null)" = tmpfs ]; then
+        echo "  WARN: $PC_WORK is tmpfs -- drop_caches cannot evict a tmpfs" >&2
+        echo "        page, so the page-cache cut below is a NO-OP there." >&2
+    fi
+    info "page-cache scratch: $PC_WORK ($(stat -f -c %T "$PC_WORK" 2>/dev/null))"
+}
+
+pc_dev_create() {  # a loop device when privileged (the raw-device path,
+                   # like production), the image file itself otherwise
+    pc_work_pick || fail "no scratch for the page-cache leg"
+    PC_VOL="$PC_WORK/pc.img"
+    PC_SIZE_GB=$(awk -v m="$PC_SIZE_MB" 'BEGIN{printf "%.4f", m/1024}')
+    truncate -s "${PC_SIZE_MB}M" "$PC_VOL" || fail "truncate $PC_VOL"
+    PC_LOOP=""
+    if [ "${FLAKEY_PC_BACKING:-loop}" != file ] &&
+       sudo -n true 2>/dev/null &&
+       PC_LOOP=$(sudo -n losetup -f --show "$PC_VOL" 2>/dev/null) &&
+       [ -n "$PC_LOOP" ]; then
+        sudo -n chmod 666 "$PC_LOOP" || fail "chmod $PC_LOOP"
+        PC_VOL="$PC_LOOP"
+        PC_MODE="loop device $PC_LOOP over pc.img"
+    else
+        PC_LOOP=""
+        PC_VOL="$PC_WORK/pc.img"
+        PC_MODE="image file (no loop device: FLAKEY_PC_BACKING=file or no losetup)"
+    fi
+}
+
+# A volume open on a freshly created LOOP DEVICE can lose a race with the
+# host's block-device prober: on this box a ROOT udev worker takes a LOCK_SH
+# flock on the new /dev/loopN for a moment (seen in /proc/locks, pid from
+# `fuser`), and vol_open's LOCK_EX then fails with "image is in use by
+# another process". A LOCK_SH holder is a reader, so retrying cannot endanger
+# the volume -- but a persistent conflict IS a real problem (two writers on
+# one image) and must still fail. Bounded, and it says so out loud.
+pc_run() {         # <label> <logfile> <cmd...>
+    local label=$1 log=$2 i rc=1
+    shift 2
+    for i in $(seq 1 12); do
+        "$@" >"$log" 2>&1
+        rc=$?
+        [ "$rc" = 0 ] && return 0
+        # A lost race for the image with a device prober, OR a vol_open that
+        # landed inside a dm-flakey down window. Both are transient and both
+        # are read-mostly (a prober holds LOCK_SH; a down window is read
+        # nothing and write nothing), so retrying cannot endanger the volume
+        # -- but a persistent conflict IS a real problem and must still fail.
+        grep -qE "image is in use by another process|smaller than the device table" \
+            "$log" || return "$rc"
+        if [ "$i" = 1 ]; then
+            echo "  NOTE: $label lost a flock race with a device prober" >&2
+            echo "        (root holds LOCK_SH on the new loop device);" >&2
+            echo "        retrying -- a reader cannot endanger the volume." >&2
+        fi
+        sleep 0.4
+    done
+    echo "  $label: still locked after 12 attempts" >&2
+    cat "$log" >&2
+    return "$rc"
+}
+
+pc_mnt_up() {     # -f: the daemon stays in the foreground, so $! IS the
+                  # daemon and kill -9 $! is an abrupt death (the default
+                  # daemonizes, and then $! is a process that already
+                  # exited -- the leg would silently become a clean close)
+    local i
+    for i in $(seq 1 12); do
+        $B/invf-fuse -f "$PC_VOL" "$PC_MNT" 2>"$PC_WORK/fuse.log" &
+        PC_FUSE_PID=$!
+        local j
+        for j in $(seq 1 50); do
+            grep -q " $PC_MNT " /proc/mounts && return 0
+            kill -0 "$PC_FUSE_PID" 2>/dev/null || break   # it gave up
+            sleep 0.1
+        done
+        grep -q "image is in use by another process" "$PC_WORK/fuse.log" || {
+            cat "$PC_WORK/fuse.log"; fail "mount of $PC_VOL never appeared"; }
+        [ "$i" = 1 ] && echo "  NOTE: mount lost a flock race; retrying" >&2
+        sleep 0.4
+    done
+    cat "$PC_WORK/fuse.log"
+    fail "mount of $PC_VOL never appeared (persistent flock conflict)"
+}
+
+pc_mnt_down() {   # clean unmount (the leg's LAST mount; the crash mount is
+                  # torn down by pc_kill)
+    local n=${1:-450} i
+    fusermount3 -u "$PC_MNT" 2>/dev/null
+    for i in $(seq 1 "$n"); do
+        kill -0 "$PC_FUSE_PID" 2>/dev/null || return 0
+        sleep 0.2
+    done
+    kill -9 "$PC_FUSE_PID" 2>/dev/null
+    sleep 0.5
+    return 1
+}
+
+# the power cut: the writer dies first (its fd would otherwise hold the
+# stale mount busy), then the daemon dies abruptly -- no vol_close, so no
+# final flush and no CLEAN superblock -- then the page cache goes away
+pc_kill() { # <writer-pid>
+    # wait on both: it reaps them (no stray "Killed" job notice in the log)
+    # and proves the death before the leg claims it was abrupt
+    [ -n "$1" ] && { kill -9 "$1" 2>/dev/null; wait "$1" 2>/dev/null; }
+    kill -9 "$PC_FUSE_PID" 2>/dev/null
+    wait "$PC_FUSE_PID" 2>/dev/null
+    kill -0 "$PC_FUSE_PID" 2>/dev/null && { echo "  daemon survived kill -9" >&2; return 1; }
+    fusermount3 -uz "$PC_MNT" 2>/dev/null
+    return 0
+}
+
+pc_cut() {        # the surrogate: write back, then drop the page cache
+    sync
+    if sudo -n true 2>/dev/null &&
+       sudo -n sh -c 'echo 3 > /proc/sys/vm/drop_caches' 2>/dev/null; then
+        info "page cache dropped (drop_caches=3): the reopen re-reads the medium"
+        return 0
+    fi
+    echo "  WARN: no root -- the page-cache cut was SKIPPED; this leg" >&2
+    echo "        degraded to kill -9 + reopen (process-death only)." >&2
+    return 1
+}
+
+pc_fsck() {       # <label>: structural gate, log in the page-cache scratch
+    pc_run "invf-fsck ($1)" "$PC_WORK/fsck.last" \
+        $B/invf-fsck "$PC_VOL" || return 1
+    tail -2 "$PC_WORK/fsck.last"
+    grep -q "^OK$" "$PC_WORK/fsck.last" && return 0
+    echo "  fsck not clean ($1):" >&2; cat "$PC_WORK/fsck.last" >&2
+    return 1
+}
+
+pc_verify() {     # <label>: rc==0 (0 corrupt AND parity clean-or-absent)
+    pc_run "invf-verify ($1)" "$PC_WORK/verify.last" \
+        $B/invf-verify "$PC_VOL" --deep || return 1
+    grep -E "^parity|^deep" "$PC_WORK/verify.last"
+    return 0
+}
+
 leg7() {
     LEG=leg7-pagecache
     say "[7] page-cache power loss: fsynced writes vs kill -9 + drop_caches"
@@ -1394,7 +1589,9 @@ rc_verify() {      # <label>: the bit-exactness invariant, two readers
         echo "  BIT-EXACTNESS BROKEN after $1:" >&2
         cat "$RC_WORK/verify-$1.log" >&2; return 1; }
     pc_run "invf-verify --deep ($1)" "$RC_WORK/deep-$1.log" \
-        $B/invf-verify "$RC_VOL" --deep || return 1
+        $B/invf-verify "$RC_VOL" --deep || {
+        echo "  invf-verify --deep failed after $1 (rc=$?):" >&2
+        cat "$RC_WORK/deep-$1.log" >&2; return 1; }
     grep -E "corrupt" "$RC_WORK/deep-$1.log" | sed 's/^/  /'
     grep -qE "[1-9][0-9]* corrupt" "$RC_WORK/deep-$1.log" && {
         echo "  invf-verify reports corrupt files after $1" >&2
