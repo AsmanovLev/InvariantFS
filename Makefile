@@ -1521,6 +1521,7 @@ e2e: all
 	$(TESTENV) bash tools/run-e2e.sh tools/test-usr1-savepoint.sh
 	$(TESTENV) bash tools/run-e2e.sh tools/test-dynzone.sh
 	$(TESTENV) bash tools/run-e2e.sh tools/test-imagelock.sh
+	$(TESTENV) bash tools/run-e2e.sh tools/test-put-failure.sh
 	$(TESTENV) bash tools/run-e2e.sh tools/test-verify-size.sh
 	$(TESTENV) bash tools/run-e2e.sh tools/test-p7z.sh
 	$(TESTENV) bash tools/run-e2e.sh tools/test-qcow2.sh
