@@ -9,6 +9,7 @@
  *   - bad inode records (CRC/length)
  *
  * Usage: invf-fsck <image> [-f|--fix] [-q] [--discard-reachable]
+ *   [--list-damaged]
  *   default: read-only report; -f applies fixes (rewrites the bitmap and
  *   the superblock state=CLEAN).
  *
@@ -29,7 +30,7 @@ int main(int argc, char **argv)
 {
     const char *img = NULL;
     int fix = 0, quiet = 0, repair = 0, i;
-    int discard_reachable = 0;
+    int discard_reachable = 0, list_damaged = 0;
     int err = 0;
     invfs_volume *v;
     invfs_fsck_report rep;
@@ -40,12 +41,19 @@ int main(int argc, char **argv)
         if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) {
             fprintf(stderr,
                 "usage: invf-fsck <image> [-f|--fix] [-q]\n"
-                "                [--discard-reachable]\n"
+                "                [--discard-reachable] [--list-damaged]\n"
                 "  --discard-reachable  with -f: excise a quarantined key\n"
                 "      range even when a live inode still needs a key inside\n"
                 "      it. That DESTROYS those files' content permanently.\n"
                 "      Without it, -f refuses every range it cannot prove is\n"
-                "      unreachable and leaves the volume damaged and intact.\n");
+                "      unreachable and leaves the volume damaged and intact.\n"
+                "  --list-damaged  read-only: after the report, print one\n"
+                "      TAB-separated line per live file the volume cannot\n"
+                "      read back fully: damaged<TAB><id><TAB><name><TAB>"
+                "<reason><TAB><size>. Reasons: torn-recipe, torn-xattr,\n"
+                "      torn-row, recipe-corrupt, recipe-missing. Empty list\n"
+                "      with an OK verdict means nothing is damaged. Exit\n"
+                "      code unchanged.\n");
             return 2;
         }
         if (strcmp(argv[i], "-v") == 0 || strcmp(argv[i], "--version") == 0) {
@@ -59,6 +67,8 @@ int main(int argc, char **argv)
             repair = 1;
         else if (strcmp(argv[i], "--discard-reachable") == 0)
             discard_reachable = 1;
+        else if (strcmp(argv[i], "--list-damaged") == 0)
+            list_damaged = 1;
         else if (strcmp(argv[i], "-q") == 0)
             quiet = 1;
         else
@@ -67,7 +77,7 @@ int main(int argc, char **argv)
     if (!img) {
         fprintf(stderr,
             "usage: invf-fsck <image> [-f|--fix] [--repair] [-q]\n"
-            "                [--discard-reachable]\n");
+            "                [--discard-reachable] [--list-damaged]\n");
         return 2;
     }
     /* The flag is a decision to destroy data, so it is only meaningful
@@ -385,6 +395,31 @@ int main(int argc, char **argv)
                 printf("REPAIRED\n");
             else
                 printf("DAMAGED\n");
+            /* WP-J damage ledger: machine-readable per-file damage list.
+             * Runs after the normal report without changing it (same scan,
+             * same verdict, same exit code): one TAB-separated line per
+             * live file the volume cannot read back fully. Empty list +
+             * OK verdict means nothing is damaged. A partial enumeration
+             * fails closed on stderr and never prints a short list as
+             * complete. */
+            if (list_damaged) {
+                invfs_damaged_file dmg[INVFS_DMG_MAX];
+                int nd, k;
+                memset(dmg, 0, sizeof dmg);
+                nd = vol_damaged_files(v, dmg, INVFS_DMG_MAX);
+                if (nd < 0) {
+                    fprintf(stderr, "invf-fsck: damaged-partial: the "
+                            "damage walk could not complete, so no "
+                            "complete list exists\n");
+                } else {
+                    for (k = 0; k < nd; k++)
+                        printf("damaged\t%llu\t%s\t%s\t%llu\n",
+                               (unsigned long long)dmg[k].id,
+                               dmg[k].name,
+                               vol_damaged_kind(dmg[k].kind),
+                               (unsigned long long)dmg[k].size);
+                }
+            }
             (void)degraded;
         }
         vol_close(v);

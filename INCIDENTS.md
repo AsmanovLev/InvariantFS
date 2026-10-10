@@ -2707,3 +2707,20 @@ too. Restoration WP, scoped: port the eight bodies from
 `PC_SIZE_MB` exists), and validate legs 7+8 green locally and on CI. V3 risk
 is low (shell + dmsetup + drop_caches, no journal paths) but must be checked
 per-helper, not assumed.
+
+## leg3 bar changed (owner decision 1a): contained+named+honest passes (WP-J)
+
+**Date:** 2026-10-10. **Status:** SHIPPED (this entry's commit). The old bar
+(all-clean after chaos) demanded the impossible under drop_writes and kept
+a correct tree red. New bar, enforced by `verify_consistent` in leg-3:
+(a) every unreadable file is named in the ledger (fsck `--list-damaged`
+plus verify `--deep` CORRUPT); (b) every listed name is either unreadable
+or torn-xattr-only; (c) fsck OK implies empty ledger and all-exact (the old
+strict bar, automatically); (d) every successful read is bit-exact (no
+silent corruption, ever). Ledger source: new read-only `vol_damaged_files`
+retaining the -f liveness proof's own fault lists (no new walk, no behavior
+change); `--list-damaged` prints `damaged<TAB>id<TAB>name<TAB>reason<TAB>size`,
+exit codes untouched. Proven on preserved artifacts (022950/030229: exactly
+`rand.bin torn-recipe`, rest exact) before any live chaos run. Mount view
+(`user.invfs.damaged`) explicitly deferred: diagnostic xattr scans must stay
+cheap, and the offline flag carries the suite already.

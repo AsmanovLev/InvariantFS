@@ -601,6 +601,32 @@ typedef struct {
  * failed, in which case the caller must treat the result as PARTIAL. */
 int vol_recipe_audit(invfs_volume *v, invfs_recipe_audit *out);
 
+/* ---- damage ledger (WP-J): per-file damage enumeration, read-only ----
+ * One row per live file the volume cannot read back fully, as named by the
+ * same walks fsck runs: quarantined key ranges blocking live rows (torn-*)
+ * plus unloadable recipe blobs. Content-tear (segment CRC) is verify's
+ * beat, not fsck's -- suites union both lists for the full ledger.
+ * Kinds are stable strings via vol_damaged_kind(). At most `cap` rows;
+ * returns stored count, or -1 when any walk failed OR the list truncated
+ * (caller must treat -1 as PARTIAL: an incomplete ledger proves nothing
+ * and a gate built on it must fail closed, never pass open). */
+#define INVFS_DMG_MAX 32
+enum {
+    INVFS_DMG_TORN_RECIPE = 0,  /* live row needs a 0x04 key in quarantine */
+    INVFS_DMG_TORN_XATTR  = 1,  /* live row needs a 0x03 key in quarantine */
+    INVFS_DMG_TORN_ROW    = 2,  /* a resolving name needs a row in quarantine */
+    INVFS_DMG_RECIPE_CORRUPT = 3, /* blob loads but does not parse */
+    INVFS_DMG_RECIPE_MISSING = 4  /* blob absent/shadowed/hash-mismatched */
+};
+typedef struct {
+    uint64_t id;
+    uint64_t size;
+    uint32_t kind;       /* INVFS_DMG_* */
+    char     name[192];  /* one resolving name, or "" */
+} invfs_damaged_file;
+const char *vol_damaged_kind(uint32_t kind);
+int vol_damaged_files(invfs_volume *v, invfs_damaged_file *out, int cap);
+
 /* ---- WP-M14: v3 fold (merge delta into base, atomic publish, reset) --
  * Fold applies every live delta record to a COW copy of the base B+-tree,
  * publishes the new root through the WP-M2 double slot, and only then resets

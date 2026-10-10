@@ -910,6 +910,116 @@ static int fsck_excise_safety(invfs_volume *v, invfs_fsck_report *rep,
     return safe->n ? 0 : -1;
 }
 
+const char *vol_damaged_kind(uint32_t kind)
+{
+    switch (kind) {
+    case INVFS_DMG_TORN_RECIPE:    return "torn-recipe";
+    case INVFS_DMG_TORN_XATTR:     return "torn-xattr";
+    case INVFS_DMG_TORN_ROW:       return "torn-row";
+    case INVFS_DMG_RECIPE_CORRUPT: return "recipe-corrupt";
+    case INVFS_DMG_RECIPE_MISSING: return "recipe-missing";
+    default:                       return "unknown";
+    }
+}
+
+/* Damage ledger (WP-J): the -f liveness proof's two passes plus the recipe
+ * audit, run read-only, with their fault lists retained instead of only
+ * printed. No excision, no repair, no mutation of any kind: every call
+ * below is a read (the mark callbacks only consult). Anything that would
+ * make the list incomplete -- a walk that stopped, a truncated fault list,
+ * a quarantine that overflowed its representation -- returns -1, so a gate
+ * built on this fails closed instead of passing a volume whose damage it
+ * could not fully name. */
+int vol_damaged_files(invfs_volume *v, invfs_damaged_file *out, int cap)
+{
+    invfs_blkptr root;
+    bt_stat st;
+    bt_quarantine q;
+    char err[128];
+    int i, n = 0;
+
+    if (!v || !out || cap <= 0)
+        return -1;
+    if (vol_base_root(v, &root) != 0)
+        return -1;
+    memset(&st, 0, sizeof st);
+    memset(&q, 0, sizeof q);
+    if (root.pba != 0) {
+        err[0] = 0;
+        if (btree_check_tolerant(v, root, &st, &q, err, sizeof err) != 0)
+            return -1;
+        if (q.qfull)
+            return -1;
+    }
+    if (q.n) {
+        fsck_live_ctx c;
+        fsck_excise_live_cb_ctx lc;
+        fsck_excise_dir_ctx d;
+        memset(&c, 0, sizeof c);
+        memset(&lc, 0, sizeof lc);
+        c.q = &q;
+        lc.c = &c;
+        /* Pass 1: what every live inode row itself requires. */
+        if (vol_iter_live_inodes(v, fsck_excise_live_cb, &lc) != 0)
+            return -1;
+        /* Pass 2: what every surviving name requires. */
+        memset(&d, 0, sizeof d);
+        d.v = v;
+        d.c = &c;
+        fsck_excise_dir_walk(&d);
+        if (d.rc)
+            return -1;
+        if (c.nfault_total > c.nfault)
+            return -1;
+        for (i = 0; i < (int)c.nfault; i++) {
+            const fsck_excise_fault *f = &c.fault[i];
+            invfs_damaged_file *o;
+            uint32_t kind;
+            if (n >= cap)
+                return -1;
+            switch (f->kind) {
+            case INVFS_EXCISE_BLOCK_RECIPE: kind = INVFS_DMG_TORN_RECIPE; break;
+            case INVFS_EXCISE_BLOCK_XATTR:  kind = INVFS_DMG_TORN_XATTR;  break;
+            default:                        kind = INVFS_DMG_TORN_ROW;    break;
+            }
+            o = &out[n++];
+            o->id = f->id;
+            o->size = f->size;
+            o->kind = kind;
+            snprintf(o->name, sizeof o->name, "%s", f->name);
+        }
+    }
+    {
+        invfs_recipe_audit a;
+        memset(&a, 0, sizeof a);
+        if (vol_recipe_audit(v, &a) != 0)
+            return -1;
+        if (a.nfault_total > a.nfault)
+            return -1;
+        for (i = 0; i < (int)a.nfault; i++) {
+            const invfs_recipe_fault *f = &a.fault[i];
+            invfs_damaged_file *o;
+            int j, dup = 0;
+            /* Quarantine-blocked rows are already listed above with the
+             * more precise torn-* kind; the recipe audit has no quarantine
+             * awareness, so it may name the same file again. */
+            for (j = 0; j < n; j++)
+                if (out[j].id == f->id) { dup = 1; break; }
+            if (dup)
+                continue;
+            if (n >= cap)
+                return -1;
+            o = &out[n++];
+            o->id = f->id;
+            o->size = f->size;
+            o->kind = (f->kind == INVFS_RECIPE_BAD_CORRUPT)
+                     ? INVFS_DMG_RECIPE_CORRUPT : INVFS_DMG_RECIPE_MISSING;
+            snprintf(o->name, sizeof o->name, "%s", f->name);
+        }
+    }
+    return n;
+}
+
 /* WP86: the -f repair. Excise the quarantined ranges, publish the new root,
  * reclaim what the dropped subtrees held, and fold the delta back in so every
  * quarantined key the delta still covers comes back.

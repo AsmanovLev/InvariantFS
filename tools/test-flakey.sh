@@ -378,6 +378,94 @@ verify_clean() { # <label>: rc==0 (0 corrupt AND parity clean-or-absent)
     return 1
 }
 
+# Consistency bar (WP-J, owner decision: contained+named+honest passes).
+# After chaos + best-effort recovery the volume need not be clean -- but
+# every failure must be NAMED. D = fsck --list-damaged names plus verify
+# --deep CORRUPT names. Asserts: (a) every unreadable corpus file is in D
+# (nothing silent, nothing missing from the ledger); (b) every fsck-listed
+# name is either unreadable or torn-xattr-only (xattr damage reads fine,
+# content damage does not); (c) an OK fsck verdict implies empty D and
+# all-exact (the old strict bar, automatically); (d) every successful read
+# is bit-exact (the anti-silent-corruption core: a read that returns is
+# either right or the suite fails). Any violation FAILs (artifacts kept).
+verify_consistent() { # <label> <origdir>
+    local label=$1 orig=$2 f verdict rc
+    local failed="" exact_n=0
+    $B/invf-fsck "$DM" --list-damaged >"$FLK/consistent-fsck.log" 2>&1
+    rc=$?
+    verdict=$(grep -E "^(OK|DAMAGED|REPAIRED|MIRROR STALE)$" "$FLK/consistent-fsck.log" | tail -1)
+    case "$verdict:$rc" in
+        OK:0|DAMAGED:3|REPAIRED:3) ;;
+        *) echo "  fsck verdict/rc unexpected ($label): verdict=$verdict rc=$rc" >&2; return 1;;
+    esac
+    if grep -q "damaged-partial" "$FLK/consistent-fsck.log"; then
+        echo "  ledger incomplete ($label): --list-damaged could not enumerate; nothing provable" >&2
+        return 1
+    fi
+    $B/invf-verify "$DM" --deep >"$FLK/consistent-verify.log" 2>&1 || true
+    # D as newline lists (fixed strings; corpus names are simple but be safe).
+    # Content evidence is ONLY bare `CORRUPT: <name>` lines (a file whose
+    # bytes fail). `CORRUPT: inode N (...)` lines are namespace-audit damage
+    # (nlink/fan-in, unwalkable ranges): content may read fine, so they must
+    # NOT join D -- but they must never accompany an OK fsck (checked below).
+    grep -E "^damaged"$'\t' "$FLK/consistent-fsck.log" | cut -f3 >"$FLK/consistent-dfsck.txt"
+    grep -E "^  CORRUPT: [^ ]+$" "$FLK/consistent-verify.log" | sed 's/^  CORRUPT: //' >"$FLK/consistent-dverify.txt"
+    if grep -Eq "^  CORRUPT: inode [0-9]+ \(" "$FLK/consistent-verify.log" && [ "$verdict" = "OK" ]; then
+        echo "  UNEXPLAINED ($label): verify reports namespace damage but fsck says OK" >&2
+        return 1
+    fi
+    if grep -Eq "could not be completed" "$FLK/consistent-verify.log" && [ "$verdict" = "OK" ]; then
+        echo "  UNEXPLAINED ($label): verify could not complete an audit but fsck says OK -- partial evidence" >&2
+        return 1
+    fi
+    cat "$FLK/consistent-dfsck.txt" "$FLK/consistent-dverify.txt" | sort -u >"$FLK/consistent-d.txt"
+    for f in $(cd "$orig" && ls); do
+        if $B/invf-cat "$DM" "$f" "$FLK/consistent-out.bin" >/dev/null 2>&1 && \
+           cmp -s "$orig/$f" "$FLK/consistent-out.bin"; then
+            exact_n=$((exact_n + 1))
+        else
+            failed="$failed $f"
+        fi
+    done
+    rm -f "$FLK/consistent-out.bin"
+    info "consistent: $exact_n exact,$(echo "$failed" | wc -w) unreadable-or-wrong ($label)"
+    # (a) every failure named.
+    for f in $failed; do
+        if ! grep -Fqx "$f" "$FLK/consistent-d.txt"; then
+            echo "  UNEXPLAINED ($label): $f unreadable but listed nowhere -- silent corruption or ledger gap" >&2
+            return 1
+        fi
+    done
+    # (b) every listed name either failed or is excused: fsck torn-xattr
+    # rows are metadata-only damage (content reads fine); a verify-CORRUPT
+    # name that reads exact is a read-path disagreement (verify vs cat) and
+    # fails -- both paths promise identical bytes, so divergence is a bug.
+    while IFS= read -r f; do
+        [ -n "$f" ] || continue
+        case " $failed " in *" $f "*) continue;; esac
+        reason=$(grep -E "^damaged"$'\t' "$FLK/consistent-fsck.log" | awk -F'\t' -v n="$f" '$3==n{print $4; exit}')
+        if [ "$reason" = "torn-xattr" ]; then
+            info "  ledger names $f (torn-xattr: metadata-only, content reads exact)"
+            continue
+        fi
+        if grep -Fqx "$f" "$FLK/consistent-dverify.txt"; then
+            echo "  UNEXPLAINED ($label): verify calls $f corrupt but it reads exact -- read-path disagreement" >&2
+        else
+            echo "  UNEXPLAINED ($label): ledger names $f ($reason) but it reads fine -- stale ledger or misattribution" >&2
+        fi
+        return 1
+    done <"$FLK/consistent-d.txt"
+    # (c) OK verdict implies empty ledger and all exact.
+    if [ "$verdict" = "OK" ]; then
+        if [ -s "$FLK/consistent-d.txt" ] || [ -n "$failed" ]; then
+            echo "  UNEXPLAINED ($label): fsck OK but damage listed or files failed" >&2
+            return 1
+        fi
+    fi
+    # (d) holds by construction: the loop above cmp-checks every success.
+    return 0
+}
+
 # Recovery ladder: auto-recover (any open) -> resolve a live checkpoint via
 # rollback (freeing a live seal first if it refuses) -> fsck -f -> OK.
 # Any dead end is a finding: the caller FAILs and preserves the image.
@@ -827,11 +915,12 @@ leg3() {
     info "sweep rc=$src under chaos ($(grep -c drop "$FLK/chaos3.log") drop windows)"
     [ "$src" = 0 ] || info "sweep failed loudly (acceptable): rc=$src"
     tail -2 "$FLK/sweep3.log"
-    recover "leg3" || fail "recovery ladder dead-ended"
-    fsck_ok "leg3" || fail "fsck after recovery"
-    verify_clean "leg3" || fail "verify after recovery"
-    # sweep never changes file bytes: every file must equal its original
-    vol_files_exact "$FLK/orig3" "post-recovery" || fail "third state content"
+    # The ladder is best effort: it returns nonzero when damage remains,
+    # which under drop windows is the honest outcome, not a ladder bug.
+    # The consistency gate below is the arbiter, not the ladder's rc.
+    if recover "leg3"; then info "recovery ladder converged clean";
+    else info "ladder ended with residual damage (expected when chaos tore bytes)"; fi
+    verify_consistent "leg3" "$FLK/orig3" || fail "inconsistent recovery state"
     if [ -s "$FLK/rec-rb.log" ]; then info "recovery path: rollback engaged"; else info "recovery path: fsck only"; fi
 }
 
