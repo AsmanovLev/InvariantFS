@@ -2746,3 +2746,13 @@ volume on a 2G dm device) tripped over it on its first restored run.
 Fix: refuse only truncation (backing < superblock), tolerate larger.
 Regression: `tools/test-verify-size.sh` (grow-then-verify clean +
 bit-exact, shrink-then-verify refused with a diagnostic).
+
+## arc_concurrency_test runner flake (engine-ci, S-wave merge)
+
+**Date:** 2026-10-11. **Status:** FLAKE (green on rerun-failed-jobs, no
+code change). `test-shard-3` died at `arc_concurrency_test` startup (6
+threads x 6 rounds header printed, no summary, make Error 1) on the
+f056627 merge run. None of the merged branches touch ARC; all four were
+green independently. Rerun of the failed job passed. If it recurs,
+suspect runner oversubscription (concurrency + timing-sensitive cache
+budget test), not the tree.
