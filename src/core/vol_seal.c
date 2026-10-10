@@ -16,10 +16,24 @@
  *
  * WHAT V1 DOES NOT DO (locked, see the WP doc): no healing — verify reports
  * into the existing counters, never rewrites (seal_recover_segment stays a
- * loud -1); no incremental re-seal — every seal is a full recompute (the
- * allocator's dirty-stripe bitmap is still maintained, v1 just never
- * consults it); no second layer (l2_* report fields stay 0); no par2 byte
+ * loud -1); no second layer (l2_* report fields stay 0); no par2 byte
  * compat; no giant stripes (k+m <= 256).
+ *
+ * WP404 INCREMENTAL RE-SEAL. A re-seal over a live prior seal restripes
+ * only the groups the fresh encoding proves dirty: every group's parity is
+ * re-encoded from the live bytes and byte-compared against the stored
+ * parity, and only differing groups are rewritten (skipped groups count in
+ * unchanged AND dirty_skipped, and the report line names the count plus the
+ * parity bytes of writes saved). The gate is the allocator's dirty bitmap:
+ * all-ones/NULL (fresh mount — seal_dirty_reset starts all-dirty and marks
+ * only ever set) proves NOTHING, so the pass is a full recompute; a bitmap
+ * this session's seal cleared proves continuity, and an all-zero one skips
+ * every group write outright (the verify-after-write still proves the
+ * result). Config change (session k/m/algo != footer), an unreadable
+ * footer/parity, a changed group count, or --reseal-full force the full
+ * pass too. When in doubt, do the work. Commit order is unchanged (parity,
+ * fault seam, header, footer last), so a killed incremental reseal reads
+ * healed-or-prior exactly like a killed full one.
  *
  * WHERE THE CONFIG LIVES. vol_redun_config stores a menu-checked (k, algo,
  * m) in v->rd IN MEMORY ONLY (rd_present=1); nothing reaches block 0, so a
@@ -89,6 +103,37 @@ void seal_dirty_mark(invfs_volume *v, uint64_t pba, uint64_t n)
         end = ss + v->sb.shadow_zone_blocks;
     for (b = pba; b < end; b++)
         bit_set(v->seal_dirty, b - ss);
+}
+
+/* WP404: clear the bitmap after a successful seal (allocate first when
+ * this session never had one — the v3 open leaves it NULL). From here to
+ * the next seal every mark is proof of a post-seal write, which is what
+ * makes the next reseal's incremental gate honest. */
+static void seal_dirty_clear(invfs_volume *v)
+{
+    size_t bytes = (size_t)((v->sb.shadow_zone_blocks + 7) / 8);
+    if (!bytes)
+        return;
+    if (!v->seal_dirty)
+        v->seal_dirty = (uint8_t *)malloc(bytes);
+    if (v->seal_dirty)
+        memset(v->seal_dirty, 0, bytes);
+}
+
+/* WP404: 1 when the bitmap proves NOTHING this session (NULL, empty, or
+ * still all-ones from seal_dirty_reset — marks only ever set bits, so a
+ * non-all-ones bitmap was cleared by this session's seal). Untouched =>
+ * the reseal is a full recompute; no trust is moved, only work skipped. */
+static int seal_dirty_untouched(const invfs_volume *v)
+{
+    size_t bytes = (size_t)((v->sb.shadow_zone_blocks + 7) / 8);
+    size_t i;
+    if (!bytes || !v->seal_dirty)
+        return 1;                       /* doubt: prove nothing, do the work */
+    for (i = 0; i < bytes; i++)
+        if (v->seal_dirty[i] != 0xFF)
+            return 0;
+    return 1;
 }
 
 
@@ -794,7 +839,201 @@ static void seal_crc_feed(seal_crc *s, const void *p, size_t n)
     s->body_len += n;
 }
 
+/* WP404: is the stored seal a usable incremental baseline for geometry
+ * (k,m,algo) over namespace col? 1 with ngroups/pino filled, 0 for a
+ * full recompute. EVERY doubt answers 0: footer absent or failing the
+ * strict parse, geometry/algo drift, parity header disagreeing with the
+ * footer (or the wrong size), an unreadable symlink target, or a live
+ * stream whose group count would not land exactly on the stored one. The
+ * caller additionally requires session continuity (bitmap) and no config
+ * change before trusting a 1 here. */
+static int seal_prior_usable(invfs_volume *v, unsigned k, unsigned m,
+                             unsigned algo, const seal_collect *col,
+                             uint64_t *ngroups_out, uint64_t *pino_out)
+{
+    uint64_t fsz = 0, psz = 0, ctime = 0, pino = 0, fino = 0;
+    uint8_t *fb = NULL;
+    uint8_t phdr[SEAL_PARHDR_LEN];
+    uint8_t p28[SEAL_PRELUDE_LEN];
+    seal_footinfo fi;
+    unsigned pk = 0, pm = 0;
+    uint32_t png = 0;
+    uint64_t pseq = 0;
+    uint64_t total = 0, symbols, expect;
+    size_t i;
+
+    if (ngroups_out) *ngroups_out = 0;
+    if (pino_out) *pino_out = 0;
+    if (!col)
+        return 0;
+    if (vol_find_rc(v, SEAL_FOOTER_NAME, &fino) != 1 || !fino)
+        return 0;
+    if (vol_stat_full(v, SEAL_FOOTER_NAME, &fino, &fsz, &ctime) != 0)
+        return 0;
+    if (fsz < SEAL_PRELUDE_LEN + SEAL_TRAILER_LEN ||
+        fsz >= (uint64_t)1 << 26)
+        return 0;
+    fb = malloc((size_t)fsz);
+    if (!fb)
+        return 0;
+    if (seal_read_full(v, fino, 0, fb, (size_t)fsz) != (int)fsz) {
+        free(fb);
+        return 0;
+    }
+    if (seal_footer_parse(fb, (size_t)fsz, &fi, NULL, NULL) != 0) {
+        free(fb);
+        return 0;
+    }
+    free(fb);
+    if (fi.k != k || fi.m != m)
+        return 0;
+    if (seal_read_full(v, fino, 0, p28, sizeof p28) != (int)sizeof p28)
+        return 0;
+    if (get16(p28 + 18) != algo)
+        return 0;
+    if (vol_find_rc(v, SEAL_PARITY_NAME, &pino) != 1 || !pino)
+        return 0;
+    if (vol_stat_full(v, SEAL_PARITY_NAME, &pino, &psz, &ctime) != 0)
+        return 0;
+    if (seal_read_full(v, pino, 0, phdr, sizeof phdr) != (int)sizeof phdr)
+        return 0;
+    if (seal_parhdr_parse(phdr, sizeof phdr, &pk, &pm, &png, &pseq) != 0)
+        return 0;
+    if (pk != fi.k || pm != fi.m || png != fi.ngroups || pseq != fi.seq)
+        return 0;
+    if (psz != SEAL_PARHDR_LEN + (uint64_t)png * pm * SEAL_SYM_BYTES)
+        return 0;
+    /* Shape pre-scan: the live stream must land on exactly fi.ngroups,
+     * or per-group compare has no baseline to compare against. */
+    for (i = 0; i < col->n; i++) {
+        if (col->ents[i].type == INVFS_ITYP_REG) {
+            if (total + col->ents[i].size < total)
+                return 0;
+            total += col->ents[i].size;
+        } else if (col->ents[i].type == INVFS_ITYP_LNK) {
+            uint8_t *t = NULL;
+            size_t tl = 0;
+            if (vol_read_file(v, col->ents[i].ino, &t, &tl) != 0) {
+                free(t);
+                return 0;
+            }
+            if (total + tl < total) {
+                free(t);
+                return 0;
+            }
+            total += tl;
+            free(t);
+        }
+        if (total >= (uint64_t)1 << 40)
+            return 0;   /* absurd: doubt, do the work */
+    }
+    symbols = (total + SEAL_SYM_BYTES - 1) / SEAL_SYM_BYTES;
+    expect = k ? (symbols + k - 1) / k : 0;
+    if (expect != fi.ngroups)
+        return 0;
+    if (ngroups_out) *ngroups_out = fi.ngroups;
+    if (pino_out) *pino_out = pino;
+    return 1;
+}
+
+/* WP404: incremental emit — byte-compare the just-encoded group against
+ * the stored parity and rewrite only on difference. par_off still advances
+ * over skipped groups (offsets stay dense) and the footer group entry is
+ * always written (the footer is rewritten whole every seal). Returns
+ * 0 = skipped (same), 1 = rewritten (dirty), -2 = the stream outgrew the
+ * baseline (caller aborts both sessions and restarts as a full pass),
+ * -1 = hard error. A stored-parity short read compares unequal (parity
+ * damage is rewritten, loudly, by the rewrite itself) — it is never
+ * trusted and never fatal here. */
+static int seal_emit_group_inc(invfs_volume *v, invfs_wsession *pws,
+                               seal_grouper *gr, uint64_t *par_off,
+                               invfs_wsession *fws, uint64_t *foot_off,
+                               seal_crc *fcrc, uint32_t *ngroups,
+                               unsigned datasyms, uint64_t databytes,
+                               uint64_t pino, uint64_t stored_ng,
+                               uint64_t *skipped, uint64_t *saved_bytes)
+{
+    /* m <= 2 on the fixed menu (same file-static pattern as the verify
+     * group's compare buffer below). */
+    static uint8_t old[2 * SEAL_SYM_BYTES];
+    uint8_t ge[10];
+    uint64_t want = (uint64_t)gr->m * SEAL_SYM_BYTES;
+    unsigned i;
+    int same = 0;
+    (void)v;
+    if (!pws || !gr || !par_off || !fws || !foot_off || !fcrc ||
+        !ngroups || !datasyms || !skipped || !saved_bytes)
+        return -1;
+    if ((uint64_t)*ngroups >= stored_ng)
+        return -2;
+    if (gr->m > 2)
+        return -1;
+    if (seal_read_full(v, pino,
+                        SEAL_PARHDR_LEN + (uint64_t)(*ngroups) * want,
+                        old, (size_t)want) == (int)want) {
+        same = 1;
+        for (i = 0; i < gr->m; i++)
+            if (memcmp(old + (size_t)i * SEAL_SYM_BYTES,
+                       gr->par + (size_t)i * SEAL_SYM_BYTES,
+                       SEAL_SYM_BYTES) != 0) {
+                same = 0;
+                break;
+            }
+    }
+    if (!same) {
+        for (i = 0; i < gr->m; i++)
+            if (seal_write_full(pws,
+                                *par_off + (uint64_t)i * SEAL_SYM_BYTES,
+                                gr->par + (size_t)i * SEAL_SYM_BYTES,
+                                SEAL_SYM_BYTES) != 0)
+                return -1;
+    } else {
+        (*skipped)++;
+        (*saved_bytes) += want;
+    }
+    *par_off += want;
+    if (!seal_group_enc(ge, datasyms, databytes))
+        return -1;
+    if (seal_write_full(fws, *foot_off, ge, sizeof ge) != 0)
+        return -1;
+    seal_crc_feed(fcrc, ge, sizeof ge);
+    *foot_off += sizeof ge;
+    (*ngroups)++;
+    seal_grouper_next(gr);
+    return same ? 0 : 1;
+}
+
 int vol_seal(invfs_volume *v, int unseal, invfs_seal_report *rep)
+{
+    return vol_seal_ex(v, unseal, 0, rep);
+}
+
+/* WP404: one completed group, full or incremental. Returns 0 (emitted or
+ * skipped), -2 (incremental baseline outgrown — caller restarts full),
+ * -1 (hard error). rewrote counts restriped groups when non-NULL. */
+static int seal_emit_dispatch(invfs_volume *v, int inc,
+                              invfs_wsession *pws, seal_grouper *gr,
+                              uint64_t *par_off, invfs_wsession *fws,
+                              uint64_t *foot_off, seal_crc *fcrc,
+                              uint32_t *ngroups, unsigned datasyms,
+                              uint64_t databytes, uint64_t pino,
+                              uint64_t stored_ng, uint64_t *skipped,
+                              uint64_t *saved_bytes, uint64_t *rewrote)
+{
+    if (inc) {
+        int er = seal_emit_group_inc(v, pws, gr, par_off, fws, foot_off,
+                                     fcrc, ngroups, datasyms, databytes,
+                                     pino, stored_ng, skipped, saved_bytes);
+        if (er > 0 && rewrote)
+            (*rewrote)++;
+        return er;
+    }
+    return seal_emit_group(v, pws, gr, par_off, fws, foot_off,
+                           fcrc, ngroups, datasyms, databytes);
+}
+
+int vol_seal_ex(invfs_volume *v, int unseal, int force_full,
+                invfs_seal_report *rep)
 {
     if (rep) memset(rep, 0, sizeof *rep);
     if (!v || !rep)
@@ -837,6 +1076,9 @@ int vol_seal(invfs_volume *v, int unseal, invfs_seal_report *rep)
     /* ---- seal -------------------------------------------------------- */
     {
         unsigned k = 9, m = 1, algo = RS_ALGO_VM;
+        unsigned sk = 9, sm = 1, salgo = RS_ALGO_VM;
+        unsigned palgo = RS_ALGO_VM;
+        int sess_has = 0;
         seal_footinfo prior;
         uint64_t seq = 1;
         int have_prior = 0;
@@ -851,6 +1093,13 @@ int vol_seal(invfs_volume *v, int unseal, invfs_seal_report *rep)
         seal_crc fcrc;
         size_t fi;
         int gr_init = 0, rc = -1;
+        /* WP404 incremental state. inc = restripe-only-dirty over the
+         * stored baseline (stored_ng groups at parity file pino);
+         * skipped/saved_bytes/rewrote feed the report. retried forces
+         * the full pass after a mid-stream shape surprise. */
+        int inc = 0, retried = 0;
+        uint64_t stored_ng = 0, pino = 0;
+        uint64_t skipped = 0, saved_bytes = 0, rewrote = 0;
 
         memset(&col, 0, sizeof col);
         memset(&gr, 0, sizeof gr);
@@ -863,30 +1112,72 @@ int vol_seal(invfs_volume *v, int unseal, invfs_seal_report *rep)
          * seq (lineage survives reconfiguration) and is the geometry
          * fallback. Geometry precedence is session config > footer >
          * default — the driver configures every run, so a session-first
-         * test here would blind the seq (every seal gen-1). */
+         * test here would blind the seq (every seal gen-1). A session
+         * config that DIFFERS from the footer is a reconfig: the next
+         * pass is full (the WP404 gate below keeps that). */
+        sess_has = seal_mem_cfg(v, &sk, &salgo, &sm);
         if (seal_read_prelude(v, &prior, NULL) == 0) {
             uint8_t p28[SEAL_PRELUDE_LEN];
             uint64_t ino = 0;
             have_prior = 1;
             seq = prior.seq + 1;
             if (!seq) seq = 1;   /* u64 wrap: never seal at generation 0 */
-            if (!seal_mem_cfg(v, &k, &algo, &m)) {
-                k = prior.k; m = prior.m;
-                if (vol_find_rc(v, SEAL_FOOTER_NAME, &ino) == 1 && ino &&
-                    seal_read_full(v, ino, 0, p28, sizeof p28) ==
-                    (int)sizeof p28 &&
-                    (get16(p28 + 18) == RS_ALGO_VM ||
-                     get16(p28 + 18) == RS_ALGO_CAUCHY))
-                    algo = get16(p28 + 18);
+            if (vol_find_rc(v, SEAL_FOOTER_NAME, &ino) == 1 && ino &&
+                seal_read_full(v, ino, 0, p28, sizeof p28) ==
+                (int)sizeof p28 &&
+                (get16(p28 + 18) == RS_ALGO_VM ||
+                 get16(p28 + 18) == RS_ALGO_CAUCHY))
+                palgo = get16(p28 + 18);
+            if (sess_has) {
+                k = sk; m = sm; algo = salgo;
+            } else {
+                k = prior.k; m = prior.m; algo = palgo;
             }
-        } else if (seal_mem_cfg(v, &k, &algo, &m)) {
-            /* session config wins (no prior seal to continue) */
+        } else if (sess_has) {
+            k = sk; m = sm; algo = salgo;
         }
+seal_attempt:
+        /* Per-attempt reset: a retry restarts from a fresh collect, never
+         * resumes (the aborted sessions below left the prior seal live,
+         * so the full pass starts from the same volume state). */
+        free(col.ents);
+        memset(&col, 0, sizeof col);
+        if (gr_init) {
+            seal_grouper_free(&gr);
+            gr_init = 0;
+        }
+        memset(&gr, 0, sizeof gr);
+        pws = NULL;
+        fws = NULL;
+        par_off = SEAL_PARHDR_LEN;
+        foot_off = 0;
+        ngroups = 0;
+        data_bytes = 0;
+        parity_bytes = 0;
+        skipped = 0;
+        saved_bytes = 0;
+        rewrote = 0;
+        memset(&fcrc, 0, sizeof fcrc);
+        rc = -1;
         if (seal_collect_sorted(v, &col) != 0) {
             fprintf(stderr, "seal: namespace walk stopped; refusing a "
                     "partial seal\n");
             return -1;
         }
+        /* WP404 gate: incremental ONLY over a baseline this session can
+         * prove — a cleared-then-marked bitmap (continuity), unchanged
+         * geometry, and a stored seal that fully validates with the
+         * exact group count the live stream will produce. force_full
+         * (--reseal-full) and any retry skip straight to the full pass. */
+        inc = 0;
+        stored_ng = 0;
+        pino = 0;
+        if (!retried && have_prior && !force_full &&
+            !seal_dirty_untouched(v) &&
+            (!sess_has ||
+             (sk == prior.k && sm == prior.m && salgo == palgo)) &&
+            seal_prior_usable(v, k, m, algo, &col, &stored_ng, &pino))
+            inc = 1;
         if (seal_grouper_init(&gr, k, m, algo) != 0) {
             fprintf(stderr, "seal: out of memory\n");
             goto out;
@@ -1014,11 +1305,23 @@ int vol_seal(invfs_volume *v, int unseal, invfs_seal_report *rep)
                             fprintf(stderr, "seal: parity encode failed\n");
                             goto out;
                         }
-                        if (c > 0 && seal_emit_group(v, pws, &gr, &par_off,
-                                                    fws, &foot_off, &fcrc,
-                                                    &ngroups, ds, db) != 0) {
-                            free(t);
-                            goto out;
+                        if (c > 0) {
+                            int er = seal_emit_dispatch(v, inc, pws, &gr,
+                                                        &par_off, fws,
+                                                        &foot_off, &fcrc,
+                                                        &ngroups, ds, db,
+                                                        pino, stored_ng,
+                                                        &skipped,
+                                                        &saved_bytes,
+                                                        &rewrote);
+                            if (er == -2) {
+                                free(t);
+                                goto seal_retry_full;
+                            }
+                            if (er < 0) {
+                                free(t);
+                                goto out;
+                            }
                         }
                     }
                 }
@@ -1048,10 +1351,19 @@ int vol_seal(invfs_volume *v, int unseal, invfs_seal_report *rep)
                         fprintf(stderr, "seal: parity encode failed\n");
                         goto out;
                     }
-                    if (c > 0 && seal_emit_group(v, pws, &gr, &par_off,
-                                                fws, &foot_off, &fcrc,
-                                                &ngroups, ds, db) != 0)
-                        goto out;
+                    if (c > 0) {
+                        int er = seal_emit_dispatch(v, inc, pws, &gr,
+                                                    &par_off, fws,
+                                                    &foot_off, &fcrc,
+                                                    &ngroups, ds, db,
+                                                    pino, stored_ng,
+                                                    &skipped, &saved_bytes,
+                                                    &rewrote);
+                        if (er == -2)
+                            goto seal_retry_full;
+                        if (er < 0)
+                            goto out;
+                    }
                 }
                 data_bytes += want;
                 off += want;
@@ -1067,10 +1379,23 @@ int vol_seal(invfs_volume *v, int unseal, invfs_seal_report *rep)
                 fprintf(stderr, "seal: parity encode failed (tail)\n");
                 goto out;
             }
-            if (has && seal_emit_group(v, pws, &gr, &par_off, fws, &foot_off,
-                                       &fcrc, &ngroups, ds, db) != 0)
-                goto out;
+            if (has) {
+                int er = seal_emit_dispatch(v, inc, pws, &gr, &par_off,
+                                            fws, &foot_off, &fcrc,
+                                            &ngroups, ds, db, pino,
+                                            stored_ng, &skipped,
+                                            &saved_bytes, &rewrote);
+                if (er == -2)
+                    goto seal_retry_full;
+                if (er < 0)
+                    goto out;
+            }
         }
+        /* Incremental group-count check: the stream must end exactly on
+         * the baseline (the pre-scan proved it; a mismatch is a live
+         * concurrent mutation — restart as a full pass, never claim). */
+        if (inc && ngroups != stored_ng)
+            goto seal_retry_full;
         parity_bytes = (uint64_t)ngroups * m * SEAL_SYM_BYTES;
         if (ngroups >= SEAL_MAX_NGROUPS) {
             fprintf(stderr, "seal: absurd group count; refusing\n");
@@ -1154,15 +1479,66 @@ int vol_seal(invfs_volume *v, int unseal, invfs_seal_report *rep)
         }
         rep->stripes = ngroups;
         rep->parity_blocks = parity_bytes / SEAL_SYM_BYTES;
-        rep->updated = ngroups;   /* v1: full recompute, always rewritten */
-        rep->unchanged = 0;
+        if (inc) {
+            /* WP404: only proven-dirty groups were rewritten; the rest
+             * kept their stored bytes (dirty_skipped is exact: every
+             * skipped group compared byte-equal against a fresh
+             * encoding of the live bytes). */
+            rep->updated = (uint32_t)rewrote;
+            rep->unchanged = (uint32_t)skipped;
+            rep->dirty_skipped = skipped;
+            fprintf(stderr,
+                    "seal: incremental reseal: %llu groups restriped, "
+                    "%llu skipped (%llu parity bytes of writes saved)\n",
+                    (unsigned long long)rewrote,
+                    (unsigned long long)skipped,
+                    (unsigned long long)saved_bytes);
+        } else {
+            rep->updated = ngroups;   /* full recompute, always rewritten */
+            rep->unchanged = 0;
+            rep->dirty_skipped = 0;
+        }
         rep->added = have_prior ? 0 : ngroups;
         rep->freed = 0;
         rep->unprotected = 0;
         rep->overhead_pct = data_bytes ?
             100.0 * (double)parity_bytes / (double)data_bytes : 0.0;
-        rep->dirty_skipped = 0;   /* v1 never consults the dirty bitmap */
+        /* Continuity for the next reseal: from here every dirty mark is
+         * proof of a post-seal write (see seal_dirty_untouched). */
+        seal_dirty_clear(v);
         rc = 0;
+    seal_retry_full:
+        /* WP404: the live stream outgrew the incremental baseline
+         * mid-pass (a concurrent mutation moved the shape after the
+         * pre-scan proved it). The aborted sessions left the prior seal
+         * live, so restart the attempt as a full recompute — doubt means
+         * work, never a partial claim. Unreachable on an exclusive
+         * offline volume; loud when it fires. Fall-through always lands
+         * here with rc == 0 (success); only the shape-surprise goto
+         * lands with rc < 0 (and inc set, the only source of -2). */
+        if (rc < 0 && inc) {
+            if (pws) {
+                vol_write_abort(pws);
+                pws = NULL;
+            }
+            if (fws) {
+                vol_write_abort(fws);
+                fws = NULL;
+            }
+            if (gr_init) {
+                seal_grouper_free(&gr);
+                gr_init = 0;
+            }
+            free(col.ents);
+            col.ents = NULL;
+            col.n = col.cap = 0;
+            col.oom = 0;
+            inc = 0;
+            retried = 1;   /* the re-attempt below is a full pass */
+            fprintf(stderr, "seal: incremental baseline outgrown "
+                    "mid-stream; restarting as a full recompute\n");
+            goto seal_attempt;
+        }
     out:
         if (pws) vol_write_abort(pws);
         if (fws) vol_write_abort(fws);
