@@ -2,7 +2,7 @@
  * invf-sweep.c — offline sweep driver for Linux
  *
  *   invf-sweep <image> [--dry-run] [--log <file>]
- *                      [--seal|--unseal]
+ *                      [--seal [5|10|20|25]|--unseal]
  *                      [--redundant-blocks <f>]
  *                      [--redundant-paranoic <f>[:rs-vm|rs-cauchy]]
  *                      [--free-redundant]
@@ -17,18 +17,22 @@
  * run, after the dead-batch GC (vol_tz_gc). The author's sweep.c CLI is
  * Windows-only.
  *
- * WP20: --seal re-seals the shadow-zone XOR parity AFTER the sweep is fully
- * flushed (idempotent check-and-update, see vol_seal); --unseal frees every
- * parity block and removes the owners, without sweeping.
+ * WP201 (native v3 seal, par2-inspired, no compat): --seal [pct] seals
+ * AFTER the sweep is fully flushed (full recompute, footer committed last,
+ * verify-after-write before the run may claim success; see vol_seal).
+ * pct picks the fixed (k,m) menu — 5->(20,1), 10->(9,1, default),
+ * 20->(8,2), 25->(6,2) — over 64 KiB symbols; --unseal retires the seal
+ * files, without sweeping. With --dry-run, --seal prints the seal plan
+ * (groups, parity bytes, overhead) and changes nothing.
  *
- * WP20b: --redundant-blocks <f> configures layer-1 XOR with stripe
- * k = clamp(round(1/f), 8..128) (f = overhead fraction);
- * --redundant-paranoic <f>[:algo] adds layer-2 RS(32+m2, 32) with
- * m2 = clamp(round(f*32/(1-f)), 2..8) (algo picked by --redundant-bench on
- * first use, persisted in the RDP0 descriptor); --free-redundant removes
- * both layers and the descriptor (same as --unseal). A bare run (no
- * redundancy flags) on a volume with a live descriptor auto-reseals after
- * the sweep. --redundant-bench prints rs-vm vs rs-cauchy MB/s and exits.
+ * The --redundant-* flags are the v2 spelling of the same knob and are
+ * mapped onto the fixed menu: --redundant-blocks <f> snaps 1/f to the
+ * nearest menu k (20/9/8/6); --redundant-paranoic <f>[:algo] snaps f*100
+ * to the nearest menu pct (5/10/20/25) and honours the :rs-vm|:rs-cauchy
+ * suffix for the group code (default rs-vm); --free-redundant removes the
+ * seal (same as --unseal). A bare run (no redundancy flags) on a sealed
+ * volume auto-reseals after the sweep. --redundant-bench prints rs-vm vs
+ * rs-cauchy MB/s and exits (it benchmarks the shared rs.c math).
  *
  * Every non-dry run captures an SPT0 SAVEPOINT in "prepare", before the
  * walk, and the window it opens is what invf-rollback undoes the sweep from.
@@ -92,6 +96,7 @@
 #include "vol_reclaim.h"
 #include "codec.h"
 #include "rs.h"
+#include "vol_seal.h"   /* WP201: fixed seal menu + dry-run plan */
 
 typedef struct sw_bucket { struct sw_bucket *next; int slot; } sw_bucket;
 
@@ -107,6 +112,108 @@ typedef struct {
 
 static part_agg *g_parts;
 static size_t   g_parts_n, g_parts_cap;
+
+/* WP201: --dry-run seal plan accumulator (read-only namespace walk). */
+typedef struct {
+    uint64_t n;       /* coverable entries (REG + LNK content carriers) */
+    uint64_t bytes;   /* REG bytes (LNK targets are small; plan rounds up) */
+} seal_plan_ctx;
+
+static int seal_plan_cb(void *ctx_, const char *path, uint64_t ino,
+                        uint32_t type, uint64_t size, int64_t mtime)
+{
+    seal_plan_ctx *c = ctx_;
+    (void)ino; (void)mtime;
+    if (!path || !path[0] || (unsigned char)path[0] == 0x01)
+        return 0;
+    if (type != INVFS_ITYP_REG && type != INVFS_ITYP_LNK)
+        return 0;
+    c->n++;
+    if (type == INVFS_ITYP_REG)
+        c->bytes += size;
+    else
+        c->bytes += 4096;   /* symlink target: bounded over-estimate */
+    return 0;
+}
+
+static void sw_progress_suspend(void);   /* static UI helper, defined below */
+/* invfs_sweep_ui_active is global (src/core/volume.h). */
+
+/* Map a seal request onto the fixed menu. do_bench!=0 allows the rs_bench
+ * fallback for a suffix-less --redundant-paranoic (live path only; the
+ * dry-run plan takes VM and says so). 0 ok, -1 bench failure (the caller
+ * owns the volume close + exit). */
+static int seal_request_menu(invfs_volume *vol, int seal, int seal_pct,
+                             double rb_f, double rp_f, int rp_algo,
+                             int do_bench, unsigned *mk, unsigned *mm,
+                             int *algo)
+{
+    unsigned k = 9, m = 1;
+    int a = RS_ALGO_VM;
+    if (seal) {
+        seal_menu(seal_pct, &k, &m);
+    } else if (rb_f >= 0) {
+        /* 1/f snaps to the nearest menu k (20/9/8/6). */
+        long lk = (long)(1.0 / rb_f + 0.5);
+        unsigned cands[] = { 20, 9, 8, 6 };
+        unsigned best = 9, i;
+        long bd = labs(lk - 9);
+        for (i = 0; i < 4; i++) {
+            long d = labs(lk - (long)cands[i]);
+            if (d < bd) { bd = d; best = cands[i]; }
+        }
+        seal_menu(best == 20 ? 5 : best == 9 ? 10 : best == 8 ? 20 : 25,
+                  &k, &m);
+        if (!invfs_sweep_ui_active())
+            fprintf(stderr, "redundant-blocks: %g snaps to the fixed "
+                    "menu (k=%u,m=%u)\n", rb_f, k, m);
+    } else if (rp_f >= 0) {
+        /* f*100 snaps to the nearest menu pct (5/10/20/25). */
+        double p = rp_f * 100.0;
+        int pcts[] = { 5, 10, 20, 25 };
+        int best = 10, i;
+        double bd = p >= 10 ? p - 10 : 10 - p;
+        for (i = 0; i < 4; i++) {
+            double d = p >= pcts[i] ? p - pcts[i] : pcts[i] - p;
+            if (d < bd) { bd = d; best = pcts[i]; }
+        }
+        seal_menu(best, &k, &m);
+        a = rp_algo;
+        if (!a) {
+            /* no explicit suffix: keep the live algo; on the first
+             * paranoic configure the bench picks the winner */
+            uint32_t ok1, om;
+            int oa;
+            vol_redun_state(vol, &ok1, &oa, &om);
+            if (oa) {
+                a = oa;
+            } else if (!do_bench) {
+                a = RS_ALGO_VM;   /* dry-run: no bench, say the default */
+            } else {
+                double vm, ca;
+                if (rs_bench(32, 4, INVFS_BLOCK_SIZE, 512, &vm, &ca) != 0) {
+                    sw_progress_suspend();
+                    fprintf(stderr, "redundant-paranoic: internal "
+                                    "bench failed\n");
+                    return -1;
+                }
+                a = vm >= ca ? RS_ALGO_VM : RS_ALGO_CAUCHY;
+                if (!invfs_sweep_ui_active())
+                    fprintf(stderr, "redundant-paranoic: bench picked %s "
+                            "(rs-vm %.1f vs rs-cauchy %.1f MB/s)\n",
+                            rs_algo_name(a), vm, ca);
+            }
+        }
+        if (!invfs_sweep_ui_active())
+            fprintf(stderr, "redundant-paranoic: %g snaps to the fixed "
+                    "menu (k=%u,m=%u,%s)\n", rp_f, k, m,
+                    rs_algo_name(a));
+    }
+    if (mk) *mk = k;
+    if (mm) *mm = m;
+    if (algo) *algo = a;
+    return 0;
+}
 
 typedef struct {
     unsigned current;
@@ -1251,6 +1358,7 @@ int main(int argc, char **argv)
 {
     invfs_volume *vol;
     int err, dry = 0, seal = 0, unseal = 0, bench = 0, realize = 0;
+    int seal_pct = 10;               /* WP201: --seal [5|10|20|25] */
     int no_realize = 0, stopped = 0;
     int fast = 0;
     const char *extract_dir = NULL;    /* WP23 --extract-packs mode */
@@ -1284,7 +1392,7 @@ int main(int argc, char **argv)
         if (strcmp(argv[j], "-h") == 0 || strcmp(argv[j], "--help") == 0) {
             fprintf(stderr,
                 "usage: %s <image> [--dry-run] [--fast] [--compact]\n"
-                "           [--seal|--unseal]\n"
+                "           [--seal [5|10|20|25]|--unseal]\n"
                 "           [--redundant-blocks <f>]\n"
                 "           [--redundant-paranoic <f>[:rs-vm|rs-cauchy]]\n"
                 "           [--free-redundant] [--redundant-bench]\n"
@@ -1318,7 +1426,7 @@ int main(int argc, char **argv)
     if (argc < 2) {
         fprintf(stderr,
                 "usage: %s <image> [--dry-run] [--fast] [--compact]\n"
-                "           [--seal|--unseal]\n"
+                "           [--seal [5|10|20|25]|--unseal]\n"
                 "           [--redundant-blocks <f>]\n"
                 "           [--redundant-paranoic <f>[:rs-vm|rs-cauchy]]\n"
                 "           [--free-redundant] [--redundant-bench]\n"
@@ -1361,7 +1469,26 @@ int main(int argc, char **argv)
         } else if (strcmp(a, "--extract-packs") == 0 && i + 1 < argc) {
             extract_dir = argv[++i];
         } else if (strcmp(a, "--seal") == 0) {
+            /* WP201: optional percent (default 10); a following bare
+             * 5|10|20|25 is consumed, anything else stays an operand. */
             seal = 1;
+            if (i + 1 < argc && argv[i + 1][0] >= '0' &&
+                argv[i + 1][0] <= '9') {
+                /* A leading-digit operand is a percent (or an error).
+                 * Non-numeric operands (image paths never start with a
+                 * digit... unless they do — then spell --seal last) are
+                 * rejected here rather than silently sealed over. */
+                char *endp = NULL;
+                long p = strtol(argv[i + 1], &endp, 10);
+                if (!endp || *endp != '\0' ||
+                    (p != 5 && p != 10 && p != 20 && p != 25)) {
+                    fprintf(stderr, "--seal: want 5|10|20|25, got '%s'\n",
+                            argv[i + 1]);
+                    return 2;
+                }
+                seal_pct = (int)p;
+                i++;
+            }
         } else if (strcmp(a, "--unseal") == 0 ||
                    strcmp(a, "--free-redundant") == 0) {
             unseal = 1;
@@ -1402,8 +1529,15 @@ int main(int argc, char **argv)
             return 2;
         }
     }
-    if (dry + unseal + bench > 0 &&
+    /* WP201: --dry-run with a seal request is the seal plan (read-only
+     * estimate, no mutation); dry with unseal/bench/realize still
+     * conflicts. */
+    if (unseal + bench > 0 &&
         (seal || rb_f >= 0 || rp_f >= 0 || realize || extract_dir)) {
+        fprintf(stderr, "conflicting flags\n");
+        return 2;
+    }
+    if (dry && (realize || extract_dir)) {
         fprintf(stderr, "conflicting flags\n");
         return 2;
     }
@@ -1580,50 +1714,20 @@ int main(int argc, char **argv)
         sw_stage_begin(1, "prepare", 0, "checkpoint + policy");
     }
 
-    /* WP20b: apply the requested redundancy configuration (persisted into
-     * the RDP0 descriptor by vol_seal at the end of the run) */
-    if (rb_f >= 0 || rp_f >= 0) {
-        uint32_t k1 = 0, m2 = 0;
-        int l2 = -1;
-        if (rb_f >= 0) {
-            long lk = (long)(1.0 / rb_f + 0.5);
-            if (lk < 8) lk = 8;
-            if (lk > 128) lk = 128;
-            k1 = (uint32_t)lk;
+    /* WP201: the requested seal configuration, mapped onto the fixed menu
+     * (in-memory only — vol_redun_config never touches the volume, so the
+     * dry-run plan below may share the mapping). --seal [pct] is the
+     * native spelling; the v2 --redundant-* spellings snap onto the same
+     * menu. */
+    if (!dry && (seal || rb_f >= 0 || rp_f >= 0)) {
+        unsigned mk = 9, mm = 1;
+        int algo = RS_ALGO_VM;
+        if (seal_request_menu(vol, seal, seal_pct, rb_f, rp_f, rp_algo, 1,
+                              &mk, &mm, &algo) != 0) {
+            vol_close(vol);
+            return 1;
         }
-        if (rp_f >= 0) {
-            long lm = (long)(rp_f * 32.0 / (1.0 - rp_f) + 0.5);
-            if (lm < 2) lm = 2;
-            if (lm > 8) lm = 8;
-            m2 = (uint32_t)lm;
-            l2 = rp_algo;
-            if (!l2) {
-                /* no explicit suffix: keep the persisted algo; on the
-                 * first paranoic configure the bench picks the winner */
-                uint32_t ok1, om;
-                int oa;
-                vol_redun_state(vol, &ok1, &oa, &om);
-                if (oa) {
-                    l2 = oa;
-                } else {
-                    double vm, ca;
-                    if (rs_bench(32, 4, INVFS_BLOCK_SIZE, 512,
-                                 &vm, &ca) != 0) {
-                        sw_progress_suspend();
-                        fprintf(stderr, "redundant-paranoic: internal "
-                                        "bench failed\n");
-                        vol_close(vol);
-                        return 1;
-                    }
-                    l2 = vm >= ca ? RS_ALGO_VM : RS_ALGO_CAUCHY;
-                    if (!invfs_sweep_ui_active())
-                        fprintf(stderr, "redundant-paranoic: bench picked %s "
-                                "(rs-vm %.1f vs rs-cauchy %.1f MB/s)\n",
-                                rs_algo_name(l2), vm, ca);
-                }
-            }
-        }
-        vol_redun_config(vol, k1, l2, m2);
+        vol_redun_config(vol, mk, algo, mm);
     }
     /* auto-reseal: no redundancy flags but a live descriptor -> continue
      * the persisted configuration after the sweep */
@@ -2183,12 +2287,43 @@ progress:
         sw_stage_end(frc == 0 ? "volume durable" : "flush failed");
     }
 
-    /* WP20 --seal / WP20b: (re)seal the shadow-zone parity AFTER the sweep
-     * is fully flushed -- the parity covers the post-sweep state.
-     * Idempotent check-and-update: an unchanged volume reports 0 stripes
-     * updated. Runs for --seal, the --redundant-* configures, and the
-     * auto-reseal (live descriptor, no flags). */
+    /* WP201: the seal stage. A requested seal runs AFTER the sweep is
+     * fully flushed (parity covers the post-sweep state); a live seal
+     * with no flags auto-reseals (full recompute). Under --dry-run the
+     * stage is a read-only plan: what WOULD be sealed, in groups, bytes
+     * and overhead — the volume is not touched. */
     if (seal || rb_f >= 0 || rp_f >= 0 || auto_reseal) {
+        if (dry) {
+            /* Read-only plan: the REQUESTED menu over walked REG sizes.
+             * Nothing here configures or writes (no vol_redun_config). */
+            unsigned pk = 9, pm = 1;
+            int pa = RS_ALGO_VM;
+            vol_walk_t pw;
+            seal_plan_ctx pc;
+            uint64_t pg = 0, ppb = 0;
+            memset(&pc, 0, sizeof pc);
+            seal_request_menu(vol, seal, seal_pct, rb_f, rp_f, rp_algo, 0,
+                              &pk, &pm, &pa);
+            vol_walk_init(&pw, vol, "seal plan walk");
+            vol_walk_result(&pw, vol_walk_strict(vol, seal_plan_cb, &pc),
+                            pc.n, pc.n);
+            if (vol_walk_commit(&pw) != 0) {
+                sw_progress_suspend();
+                fprintf(stderr, "seal plan: namespace walk stopped; "
+                        "no plan available\n");
+            } else {
+                double ov = pc.bytes ? 100.0 * (double)(pm * SEAL_SYM_BYTES) /
+                    ((double)pk * SEAL_SYM_BYTES) : 0.0;
+                seal_plan(pk, pm, pc.bytes, &pg, &ppb);
+                printf("[seal] plan: %llu files, %llu data bytes -> "
+                       "%llu groups (k=%u,m=%u,%s, 64 KiB symbols), "
+                       "%llu parity bytes (~%.1f%%); no changes (dry-run)\n",
+                       (unsigned long long)pc.n,
+                       (unsigned long long)pc.bytes,
+                       (unsigned long long)pg, pk, pm, rs_algo_name(pa),
+                       (unsigned long long)ppb, ov);
+            }
+        } else {
         sw_stage_begin(ui_seal, "seal", 0, "updating parity stripes");
         invfs_seal_report rep;
         uint32_t k1c, m2c;
@@ -2201,16 +2336,18 @@ progress:
             vol_close(vol);
             return 1;
         }
+        /* WP201: v1 report line. l2c carries the GROUP code here (there is
+         * no second layer; l2_* report fields stay 0 and no [seal2] line
+         * is printed). Every seal is a full recompute, so updated ==
+         * groups and unchanged == 0 by construction, not by accident. */
         if (!invfs_sweep_ui_active()) {
-            printf("[seal] %llu stripes, %llu parity blocks, overhead %.2f%% of "
-                   "occupied shadow; %llu stripes updated, %llu unchanged, "
-                   "%llu dirty-skipped (k1=%u)",
+            printf("[seal] %llu groups, %llu parity blocks, overhead "
+                   "%.2f%% of covered data; %llu groups (re)written "
+                   "(full recompute, k=%u, m=%u, %s)",
                    (unsigned long long)rep.stripes,
                    (unsigned long long)rep.parity_blocks, rep.overhead_pct,
                    (unsigned long long)rep.updated,
-                   (unsigned long long)rep.unchanged,
-                   (unsigned long long)rep.dirty_skipped,
-                   (unsigned)k1c);
+                   (unsigned)k1c, (unsigned)m2c, rs_algo_name(l2c));
             if (rep.added || rep.freed)
                 printf(" (%llu added, %llu stale freed)",
                        (unsigned long long)rep.added,
@@ -2219,26 +2356,6 @@ progress:
                 printf(", %llu unprotected (ENOSPC)",
                        (unsigned long long)rep.unprotected);
             printf("\n");
-            if (l2c) {
-                printf("[seal2] %llu stripes, %llu parity blocks, overhead "
-                       "%.2f%% of occupied shadow; %llu stripes updated, "
-                       "%llu unchanged, %llu dirty-skipped (%s, k=32, m=%u)",
-                       (unsigned long long)rep.l2_stripes,
-                       (unsigned long long)rep.l2_parity_blocks,
-                       rep.l2_overhead_pct,
-                       (unsigned long long)rep.l2_updated,
-                       (unsigned long long)rep.l2_unchanged,
-                       (unsigned long long)rep.l2_dirty_skipped,
-                       rs_algo_name(l2c), (unsigned)m2c);
-                if (rep.l2_added || rep.l2_freed)
-                    printf(" (%llu added, %llu stale freed)",
-                           (unsigned long long)rep.l2_added,
-                           (unsigned long long)rep.l2_freed);
-                if (rep.l2_unprotected)
-                    printf(", %llu unprotected (ENOSPC)",
-                           (unsigned long long)rep.l2_unprotected);
-                printf("\n");
-            }
         }
         {
             int frc = vol_flush(vol);
@@ -2255,12 +2372,13 @@ progress:
                         "parity stripes just written are NOT durable.\n");
             }
             snprintf(detail, sizeof detail,
-                     "stripes=%llu updated=%llu parity=%llu",
+                     "groups=%llu updated=%llu parity=%llu",
                      (unsigned long long)rep.stripes,
                      (unsigned long long)rep.updated,
                      (unsigned long long)rep.parity_blocks);
             sw_stage_end(frc == 0 ? detail : "flush failed after seal");
         }
+        } /* end WP201 dry-plan else (live seal) */
     }
 
     /* WP121: the offline sweep holds the volume exclusively, so this is the

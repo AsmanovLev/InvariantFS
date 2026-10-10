@@ -250,7 +250,7 @@ CLI_MAINS := mkfs verify fsck cp cat ls stat why arctest blkio_test resize \
              sweep_test sweep_collect_test symlink_test large_file_test dedupe_test deflate_repro_test window_test \
              read_parallel_bitexact_test arc_concurrency_test \
              nlink_test recipe_fsck_test cpack_guard_test orphan_test rt_slot_test anchor_test \
-             fsck_rootslot_test batch_owner_test plugin_host_test plugin_mt_test rs_stability_test \
+             fsck_rootslot_test batch_owner_test plugin_host_test plugin_mt_test rs_stability_test seal_test \
              fsck_liveness_test scratch_policy_test v2rb_rollback_test keycmp_test \
              lane_release_test pbaref_test v2_open_test \
              sweep_publish_rollback_test \
@@ -644,6 +644,14 @@ $(OUT)/invf-gz_header_test: src/cli/gz_header_test.c $(CORE_O)
 	$(CC) $(GZHDR_SAN_CFLAGS) -o $@ $< $(CORE_O) \
 	      -fsanitize=address,undefined $(LDLIBS)
 
+# WP201: the seal footer/parity-header parse, fuzzed against the REAL engine
+# functions (non-static in vol_seal.o, so no #include hack is needed).
+# Same shape as gzhdrfuzz: the standalone driver is the make-test gate
+# (tools/run-sealfuzz-gate.sh); no libFuzzer soak is wired here.
+$(OUT)/sealfuzz: tools/fuzz/sealfuzz.c $(CORE_O)
+	$(CC) $(GZHDR_SAN_CFLAGS) -o $@ $< $(CORE_O) \
+	      -fsanitize=address,undefined -Wl,-l:libzstd.so.1 -lz -lpthread
+
 $(OUT)/gzhdrfuzz: tools/fuzz/gzhdrfuzz.c $(CORE_O)
 	$(CC) $(GZHDR_SAN_CFLAGS) -o $@ $< $(GZHDRFUZZ_OBJS) \
 	      -fsanitize=address,undefined -Wl,-l:libzstd.so.1 -lz -lpthread
@@ -811,6 +819,8 @@ TEST_SHARD_DEPS = helpers $(TEST_BINS) $(OUT)/invf-arctest $(OUT)/invf-blkio_tes
       $(OUT)/invf-fsck_rootslot_test \
       $(OUT)/invf-batch_owner_test \
       $(OUT)/invf-rs_stability_test \
+      $(OUT)/invf-seal_test \
+      $(OUT)/sealfuzz \
       $(OUT)/invf-arc_concurrency_test \
       $(OUT)/invf-arc-conc-tsan $(OUT)/invf-arc-conc-asan \
       $(OUT)/invf-gz_header_test \
@@ -1328,6 +1338,13 @@ test-shard-4: $(TEST_SHARD_DEPS) test-shard-check
 # Asserts determinism, bit-exact recovery from m erasures, refusal at
 # m+1, and states the erasure-vs-error-correction boundary.
 	$(TESTENV) $(OUT)/invf-rs_stability_test
+# WP201: the native seal's unit gate (menu + group math at the menu shapes
+# + strict footer/parity-header parser). No volume, no filesystem; the
+# volume behaviour on top is tools/test-seal.sh's job.
+	$(TESTENV) $(TESTISO) $(OUT)/invf-seal_test
+# WP201: the seal footer/parity-header parse, fuzzed against the shipped
+# functions under ASan+UBSan (deterministic PRNG sweep; same args, same run).
+	$(TESTENV) $(TESTISO) bash tools/run-sealfuzz-gate.sh
 # WP129: the GZR gzip header parse, under ASan+UBSan, against the real
 # engine function and the generated seed corpus. This gate is what keeps
 # the 18-byte over-read out; the libFuzzer soak (make gzhdrfuzz-soak) is
