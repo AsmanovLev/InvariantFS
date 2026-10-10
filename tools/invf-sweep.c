@@ -3,6 +3,7 @@
  *
  *   invf-sweep <image> [--dry-run] [--log <file>]
  *                      [--seal [5|10|20|25]|--unseal]
+ *                      [--heal [group ...]]
  *                      [--redundant-blocks <f>]
  *                      [--redundant-paranoic <f>[:rs-vm|rs-cauchy]]
  *                      [--free-redundant]
@@ -24,6 +25,14 @@
  * 20->(8,2), 25->(6,2) — over 64 KiB symbols; --unseal retires the seal
  * files, without sweeping. With --dry-run, --seal prints the seal plan
  * (groups, parity bytes, overhead) and changes nothing.
+ *
+ * WP402 (explicit heal only, never automatic): --heal [group ...]
+ * rebuilds drifted seal groups from parity -- reconstruct, verify the
+ * reconstruction against the manifest hashes, write back, re-verify.
+ * No group args heals every group detection names (the same recompute
+ * the scrub uses; printed as `seal-heal-needed <group> <reason>`);
+ * explicit group ids heal exactly those. No sweep walk runs with --heal;
+ * with --dry-run it prints the plan and changes nothing.
  *
  * The --redundant-* flags are the v2 spelling of the same knob and are
  * mapped onto the fixed menu: --redundant-blocks <f> snaps 1/f to the
@@ -1359,6 +1368,9 @@ int main(int argc, char **argv)
     invfs_volume *vol;
     int err, dry = 0, seal = 0, unseal = 0, bench = 0, realize = 0;
     int seal_pct = 10;               /* WP201: --seal [5|10|20|25] */
+    int heal = 0;                    /* WP402: --heal [group ...] */
+    uint32_t *heal_gids = NULL;
+    size_t heal_n = 0, heal_cap = 0;
     int no_realize = 0, stopped = 0;
     int fast = 0;
     const char *extract_dir = NULL;    /* WP23 --extract-packs mode */
@@ -1393,6 +1405,7 @@ int main(int argc, char **argv)
             fprintf(stderr,
                 "usage: %s <image> [--dry-run] [--fast] [--compact]\n"
                 "           [--seal [5|10|20|25]|--unseal]\n"
+                "           [--heal [group ...]]\n"
                 "           [--redundant-blocks <f>]\n"
                 "           [--redundant-paranoic <f>[:rs-vm|rs-cauchy]]\n"
                 "           [--free-redundant] [--redundant-bench]\n"
@@ -1427,6 +1440,7 @@ int main(int argc, char **argv)
         fprintf(stderr,
                 "usage: %s <image> [--dry-run] [--fast] [--compact]\n"
                 "           [--seal [5|10|20|25]|--unseal]\n"
+                "           [--heal [group ...]]\n"
                 "           [--redundant-blocks <f>]\n"
                 "           [--redundant-paranoic <f>[:rs-vm|rs-cauchy]]\n"
                 "           [--free-redundant] [--redundant-bench]\n"
@@ -1492,6 +1506,44 @@ int main(int argc, char **argv)
         } else if (strcmp(a, "--unseal") == 0 ||
                    strcmp(a, "--free-redundant") == 0) {
             unseal = 1;
+        } else if (strcmp(a, "--heal") == 0) {
+            /* WP402: explicit group ids are the following all-digit
+             * operands (none = heal every group detection names).
+             * Non-numeric operands are NOT consumed here: an unknown
+             * flag after --heal must still be rejected below, never
+             * silently healed over. */
+            heal = 1;
+            while (i + 1 < argc) {
+                const char *q = argv[i + 1];
+                size_t qi = 0;
+                unsigned long g;
+                char *endp = NULL;
+                if (!*q) break;
+                while (q[qi] && q[qi] >= '0' && q[qi] <= '9') qi++;
+                if (q[qi] != '\0') break;
+                g = strtoul(argv[i + 1], &endp, 10);
+                if (endp == argv[i + 1] || *endp != '\0' ||
+                    g > 16777216ul) {
+                    fprintf(stderr, "--heal: bad group id '%s'\n",
+                            argv[i + 1]);
+                    free(heal_gids);
+                    return 2;
+                }
+                if (heal_n == heal_cap) {
+                    size_t nc = heal_cap ? heal_cap * 2 : 8;
+                    uint32_t *ng = realloc(heal_gids,
+                                           nc * sizeof *ng);
+                    if (!ng) {
+                        fprintf(stderr, "--heal: out of memory\n");
+                        free(heal_gids);
+                        return 1;
+                    }
+                    heal_gids = ng;
+                    heal_cap = nc;
+                }
+                heal_gids[heal_n++] = (uint32_t)g;
+                i++;
+            }
         } else if (strcmp(a, "--redundant-bench") == 0) {
             bench = 1;
         } else if (strcmp(a, "--redundant-blocks") == 0 && i + 1 < argc) {
@@ -1531,7 +1583,16 @@ int main(int argc, char **argv)
     }
     /* WP201: --dry-run with a seal request is the seal plan (read-only
      * estimate, no mutation); dry with unseal/bench/realize still
-     * conflicts. */
+     * conflicts. WP402: --heal runs no sweep walk at all, so it stands
+     * alone apart from --dry-run (plan mode), --log and --color. */
+    if (heal &&
+        (seal || unseal || bench || rb_f >= 0 || rp_f >= 0 || realize ||
+         no_realize || fast || extract_dir)) {
+        fprintf(stderr, "--heal is a standalone mode (only --dry-run may "
+                "join it)\n");
+        free(heal_gids);
+        return 2;
+    }
     if (unseal + bench > 0 &&
         (seal || rb_f >= 0 || rp_f >= 0 || realize || extract_dir)) {
         fprintf(stderr, "conflicting flags\n");
@@ -1730,8 +1791,9 @@ int main(int argc, char **argv)
         vol_redun_config(vol, mk, algo, mm);
     }
     /* auto-reseal: no redundancy flags but a live descriptor -> continue
-     * the persisted configuration after the sweep */
-    if (!seal && !unseal && !dry && rb_f < 0 && rp_f < 0) {
+     * the persisted configuration after the sweep. Never with --heal:
+     * the heal verdict must be read against the seal it repaired. */
+    if (!seal && !unseal && !heal && !dry && rb_f < 0 && rp_f < 0) {
         uint32_t k1c, m2c;
         int l2c;
         if (vol_redun_state(vol, &k1c, &l2c, &m2c)) {
@@ -1766,6 +1828,43 @@ int main(int argc, char **argv)
         }
         vol_close(vol);
         return 0;
+    }
+
+    /* WP402 --heal: explicit drift repair, no sweep walk runs. Detection
+     * (no group args) or the listed groups are reconstructed from
+     * parity, verified against the manifest hashes, written back, and
+     * re-verified; the footer is never rewritten. Under --dry-run the
+     * engine detects and prints the plan, changing nothing. */
+    if (heal) {
+        invfs_seal_heal_report hrep;
+        int hrc;
+        memset(&hrep, 0, sizeof hrep);
+        hrc = vol_seal_heal(vol, heal_n ? heal_gids : NULL, heal_n, dry,
+                            &hrep);
+        free(heal_gids);
+        heal_gids = NULL;
+        if (!dry && (hrep.groups_healed || hrep.groups_parity)) {
+            /* Durability point for the bytes just committed: same rule
+             * as the seal stage -- an unflushed heal is not a heal. */
+            if (vol_flush(vol) != 0) {
+                fprintf(stderr,
+                        "FATAL: the flush after --heal failed -- the "
+                        "reconstructed bytes just written are NOT "
+                        "durable.\n");
+                vol_close(vol);
+                return 1;
+            }
+        }
+        if (!dry && hrc == 0)
+            printf("[heal] %llu healed, %llu parity-rewritten, %llu "
+                   "already clean, %llu failed (%llu bytes rewritten)\n",
+                   (unsigned long long)hrep.groups_healed,
+                   (unsigned long long)hrep.groups_parity,
+                   (unsigned long long)hrep.groups_clean,
+                   (unsigned long long)hrep.groups_failed,
+                   (unsigned long long)hrep.bytes_rewritten);
+        vol_close(vol);
+        return hrc == 0 ? 0 : 1;
     }
 
     /* Resolve the previous sweep's rollback window. --realize is the

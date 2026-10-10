@@ -1136,6 +1136,28 @@ typedef struct {
 
 int vol_seal_verify(invfs_volume *v, invfs_seal_verify *out);
 
+/* WP402 explicit heal (invf-sweep --heal): reconstruct drifted groups
+ * from parity, verify the reconstruction (whole-file BLAKE3s, never a
+ * bare parity memcmp), write back only verified bytes, reverify.
+ * gids == NULL heals every group detection names; explicit gids heal
+ * exactly those. dry != 0 detects + prints the plan, writes nothing.
+ * Groups whose erased symbols implicate symlink bytes, type-changed
+ * names, or more losses than the m parity symbols cover are refused
+ * per group (untouched); the footer is never rewritten. 0 = every
+ * targeted group healed-or-clean and reverified, -1 otherwise. */
+typedef struct {
+    uint64_t groups_scanned;    /* sealed groups examined */
+    uint64_t groups_targeted;   /* groups detection named (or listed) */
+    uint64_t groups_healed;     /* data reconstructed + written + reverified */
+    uint64_t groups_parity;     /* parity rewritten over intact data */
+    uint64_t groups_clean;      /* targeted but already good (no writes) */
+    uint64_t groups_failed;     /* refused or missed reverify, untouched */
+    uint64_t bytes_rewritten;   /* file + parity bytes committed */
+} invfs_seal_heal_report;
+
+int vol_seal_heal(invfs_volume *v, const uint32_t *gids, size_t ngids,
+                  int dry, invfs_seal_heal_report *rep);
+
 /* WP20b layer-2 repair (invf-fsck --repair): scan every live shadow-zone
  * segment's framing CRC, then for each layer-2 stripe with failures try to
  * reconstruct the bad blocks with rs_decode (erasure search bounded by the
