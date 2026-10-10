@@ -156,11 +156,10 @@ jobs:
           # tool-version-pinned (transcode counts differ), so they gate
           # locally where the new toolchain lives, not here. Follow-up:
           # cache a built libjxl and un-skip.
-          # fuzz bitflip setup + usr1 leg A: deterministic pre-existing
-          # failures under triage (see INCIDENTS), not this tree.
-          # fuse-sweep-thread + ext4fs: runner-only reds, green locally
-          # (see INCIDENTS); e2fsprogs/kernel-shaped, under triage.
-          SKIP="test-resize.sh test-qcow2-zlib.sh test-packaging.sh test-jxl.sh test-pngflac.sh test-rawimg.sh test-exercarve.sh test-sandbox.sh test-fuzz.sh test-usr1-savepoint.sh test-fuse-sweep-thread.sh test-ext4fs.sh"
+          # fuzz bitflip setup (WP301), usr1 leg A (WP302),
+          # fuse-sweep-thread pid-scan + ext4fs orphan pin (WP305):
+          # fixed, un-skipped 2026-10-11 (were triage reds, see INCIDENTS).
+          SKIP="test-resize.sh test-qcow2-zlib.sh test-packaging.sh test-jxl.sh test-pngflac.sh test-rawimg.sh test-exercarve.sh test-sandbox.sh"
           FAIL=0
           for s in $(make -n e2e | grep -o 'tools/test-[a-z0-9-]*\.sh' | sort -u) tools/test-flakey-multidev.sh; do
             base="${s##*/}"
