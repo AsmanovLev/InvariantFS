@@ -1136,6 +1136,42 @@ typedef struct {
 
 int vol_seal_verify(invfs_volume *v, invfs_seal_verify *out);
 
+/* WP401 seal scrub: read-only per-group parity report. The scrub walks
+ * the same re-encode-and-compare path vol_seal_verify does and, on top
+ * of its counters, records WHICH groups drifted for WP402's --heal.
+ * group is the 0-based index in parity-file order. reason is one of
+ * "mismatched" (stored parity reads but disagrees), "missing" (the
+ * group cannot be proven: parity unreadable, content hole where a sealed
+ * file was deleted, trailing groups the live stream never completed, or
+ * no parity file at all), "extra" (content past the sealed group
+ * count). Precedence on a group marked twice is mismatched > missing /
+ * extra (a positive disagreement beats "cannot prove").
+ *
+ * totals_out counts EXACTLY as vol_seal_verify would on the same volume
+ * (same code path, same increments -- the scrub's `parity:` summary line
+ * and verify --deep's agree), except the ledger carries the precise
+ * reason where verify only has a counter: an unreadable parity block, a
+ * trailing unprovable group, and an overflow group are listed missing /
+ * missing / extra but counted mismatched, as verify counts them.
+ *
+ * Returns 0 = scrubbed (totals + ledger filled; ngroups may be 0),
+ *         1 = unsealed (no footer file; totals zeroed, *nbad_out = 0),
+ *         2 = footer present but untrusted/torn (the shapes verify
+ *             reports as "treated as unsealed, never trusted"; totals
+ *             zeroed, *nbad_out = 0),
+ *        -1 = I/O or namespace failure (totals undefined).
+ * Never writes. One walk fills a caller-owned ledger (*bad_out set,
+ * NULL when no group drifted); free(*bad_out) when done. Layer 2 (RS)
+ * has no live stripes on v3 (sealed2 et al. stay zero); the scrub covers
+ * the native v1 seal only. */
+typedef struct {
+    uint32_t group;      /* group index in parity-file order */
+    char reason[16];    /* "mismatched" | "missing" | "extra" */
+} invfs_seal_badgroup;
+
+int vol_seal_scrub(invfs_volume *v, invfs_seal_badgroup **bad_out,
+                   size_t *nbad_out, invfs_seal_verify *totals_out);
+
 /* WP20b layer-2 repair (invf-fsck --repair): scan every live shadow-zone
  * segment's framing CRC, then for each layer-2 stripe with failures try to
  * reconstruct the bad blocks with rs_decode (erasure search bounded by the

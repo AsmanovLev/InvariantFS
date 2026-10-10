@@ -38,9 +38,10 @@ IMG=wp201seal.img        # image A: the main seal/stale/unseal line
 IMGB=wp201seal-b.img     # image B: menu geometry legs
 IMGC=wp201seal-c.img     # image C: crash-mid-seal probe
 IMGD=wp201seal-d.img     # image D: dry-run plan
+IMGS=wp201seal-s.img     # image S: WP401 scrub legs (fresh; see [S])
 rm -rf "$WORK" && mkdir -p "$WORK/orig" "$WORK/out"
 cd /dev/shm
-rm -f "$IMG" "$IMGB" "$IMGC" "$IMGD"
+rm -f "$IMG" "$IMGB" "$IMGC" "$IMGD" "$IMGS"
 
 fail() { echo "FAIL: $*" >&2; exit 1; }
 
@@ -318,6 +319,180 @@ AFTER=$($B/invf-verify "$IMGD" --deep 2>&1 | grep -c "^parity:" || true)
 [ "$BEFORE" = "$AFTER" ] && [ "$BEFORE" = 1 ] \
     || fail "dry-run mutated the seal (parity legs: $BEFORE -> $AFTER)"
 echo "  dry-run left the live seal untouched"
+
+echo
+echo "== [S] WP401 seal scrub (read-only per-group drift report) =="
+# Placement: this file, not a new script -- the sealed corpus states the
+# scrub must distinguish (clean seal, stale-after-write, deleted-member,
+# unsealed) are built above; a focused script would re-scaffold all of
+# them. Image S is fresh so its group count and parity bytes are known.
+cat > "$WORK/tools/sealflip.c" <<'SEALFLIP_EOF'
+/* sealflip -- WP401 test helper: sealflip <img> <group> flips the first
+ * byte of <group>'s first parity symbol in the hidden \x01seal-parity
+ * file, through the public read/replace API (recipe fork, bitmap
+ * consistent): surgical parity damage, content untouched. Refuses
+ * anything with unexpected magic/geometry/size. */
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <stdint.h>
+#include "volume.h"
+static uint16_t g16(const uint8_t *p){return (uint16_t)(p[0]|(p[1]<<8));}
+static uint32_t g32(const uint8_t *p){return (uint32_t)(p[0]|(p[1]<<8)|(p[2]<<16)|((uint32_t)p[3]<<24));}
+int main(int argc, char **argv)
+{
+    int err = 0;
+    invfs_volume *v;
+    uint8_t *d = NULL; size_t dl = 0;
+    uint64_t grp, m, ng, off;
+    uint32_t sym;
+    if (argc != 3) { fprintf(stderr, "usage: sealflip <img> <group>\n"); return 2; }
+    grp = strtoull(argv[2], 0, 10);
+    v = vol_open(argv[1], &err);
+    if (!v) { fprintf(stderr, "open err %d\n", err); return 1; }
+    if (vol_read_named(v, "\x01seal-parity", &d, &dl) != 0 || !d || dl < 34) {
+        fprintf(stderr, "sealflip: no parity file\n"); vol_close(v); return 1;
+    }
+    if (memcmp(d, "INVFSEAP", 8) != 0) { fprintf(stderr, "sealflip: bad parity magic\n"); free(d); vol_close(v); return 1; }
+    m = g16(d + 12); sym = g32(d + 14); ng = g32(d + 18);
+    if (m < 1 || m > 2 || sym != 65536 || grp >= ng) {
+        fprintf(stderr, "sealflip: implausible geometry\n");
+        free(d); vol_close(v); return 1;
+    }
+    if (dl != 34 + ng * m * (uint64_t)sym) { fprintf(stderr, "sealflip: size mismatch (%lu)\n", (unsigned long)dl); free(d); vol_close(v); return 1; }
+    off = 34 + grp * m * (uint64_t)sym;
+    d[off] ^= 0x01;
+    if (!vol_replace_file(v, "\x01seal-parity", d, dl)) { fprintf(stderr, "sealflip: replace failed\n"); free(d); vol_close(v); return 1; }
+    if (vol_flush(v) != 0) { fprintf(stderr, "sealflip: flush failed\n"); free(d); vol_close(v); return 1; }
+    printf("sealflip: flipped parity byte at file offset %llu (group %llu)\n",
+           (unsigned long long)off, (unsigned long long)grp);
+    free(d); vol_close(v);
+    return 0;
+}
+SEALFLIP_EOF
+gcc -std=gnu11 -O2 -I$REPO/src -I$REPO/src/core -I$REPO/src/codecs -o "$WORK/tools/sealflip" \
+    "$WORK/tools/sealflip.c" \
+    $(for t in volume vol_cpack helper_exec tool_scratch vol_plugin_client vol_png vol_seal vol_repair vol_resize vol_fsck vol_crash vol_exer vol_dedupe vol_textzone vol_heat vol_sweep vol_read vol_write vol_records vol_ast vol_dirs vol_tier vol_meta_merge vol_metabuf vol_btree vol_delta vol_fold vol_reclaim vol_spt0 vol_anchor vol_walk arc crc32c lz4 flacx tarx pngx blkio miniz blake3 blake3_dispatch blake3_portable ppmd8 ppmd8enc ppmd8dec ppmd_codec codec bcj_x86 rs deflate_repro deflate_backend_system deflate_backend_stock; do printf "$REPO/build/obj/$t.o "; done) \
+    $REPO/build/obj/zlib_stock_*.o \
+    -Wl,-l:libzstd.so.1 -lz -lpthread
+FLIP="$WORK/tools/sealflip"
+
+echo "-- [S1] sealed-clean volume scrubs 0 on both CLIs, byte-identical --"
+$B/invf-mkfs "$IMGS" 0.5 >/dev/null
+$B/invf-cp "$IMGS" "$WORK/orig/a.c" a.c >/dev/null
+$B/invf-cp "$IMGS" "$WORK/orig/big.log" big.log >/dev/null
+$B/invf-sweep "$IMGS" >/dev/null 2>&1 || fail "S1 baseline sweep failed"
+$B/invf-sweep "$IMGS" --seal > "$WORK/scrub-seal.log" 2>&1 || { cat "$WORK/scrub-seal.log"; exit 1; }
+SNGROUPS=$(grep "\[seal\]" "$WORK/scrub-seal.log" | sed 's/.*\[seal\] \([0-9]*\) groups.*/\1/')
+[ "$SNGROUPS" -ge 2 ] || fail "S1 wants >=2 groups, got $SNGROUPS"
+echo "  sealed $SNGROUPS groups"
+sha256sum "$IMGS" | cut -d' ' -f1 > "$WORK/scrub.pre"
+$B/invf-sweep "$IMGS" --verify-seal > "$WORK/scrub-sweep.log" 2>"$WORK/scrub-sweep.err" || fail "S1 sweep scrub rc=$? (want 0)"
+$B/invf-verify "$IMGS" --verify-seal > "$WORK/scrub-verify.log" 2>"$WORK/scrub-verify.err" || fail "S1 verify scrub rc=$? (want 0)"
+[ "$(grep -c "^seal-heal-needed" "$WORK/scrub-sweep.log")" = 0 ] || fail "S1 ledger lines on a clean seal (sweep)"
+[ "$(grep -c "^seal-heal-needed" "$WORK/scrub-verify.log")" = 0 ] || fail "S1 ledger lines on a clean seal (verify)"
+grep -q "parity: $SNGROUPS sealed stripes, 0 mismatched, 0 missing, 0 extra" "$WORK/scrub-sweep.log" \
+    || fail "S1 sweep scrub summary not clean"
+grep -q "parity: $SNGROUPS sealed stripes, 0 mismatched, 0 missing, 0 extra" "$WORK/scrub-verify.log" \
+    || fail "S1 verify scrub summary not clean"
+# scrub summary == verify --deep parity leg on the same volume
+$B/invf-verify "$IMGS" --deep > "$WORK/scrub-deep.log" 2>&1 || { cat "$WORK/scrub-deep.log"; exit 1; }
+[ "$(grep "^parity:" "$WORK/scrub-sweep.log")" = "$(grep "^parity:" "$WORK/scrub-deep.log")" ] \
+    || fail "S1 scrub summary != verify --deep parity leg"
+sha256sum "$IMGS" | cut -d' ' -f1 > "$WORK/scrub.post"
+cmp -s "$WORK/scrub.pre" "$WORK/scrub.post" || fail "S1 scrub mutated the image"
+echo "  both CLIs rc=0, summaries agree, image bytes identical"
+
+echo "-- [S2] flipped parity byte: LOUD, exact ledger line, rc=3 --"
+SLAST=$((SNGROUPS - 1))
+"$FLIP" "$IMGS" "$SLAST" >/dev/null 2>&1 || fail "S2 sealflip failed"
+sha256sum "$IMGS" | cut -d' ' -f1 > "$WORK/scrub-flip.pre"
+set +e
+$B/invf-sweep "$IMGS" --verify-seal > "$WORK/scrub-flip.log" 2>"$WORK/scrub-flip.err"
+SRC=$?
+$B/invf-verify "$IMGS" --verify-seal > "$WORK/scrub-flipv.log" 2>"$WORK/scrub-flipv.err"
+VRC=$?
+set -e
+[ "$SRC" = 3 ] || fail "S2 sweep scrub rc=$SRC (want 3)"
+[ "$VRC" = 3 ] || fail "S2 verify scrub rc=$VRC (want 3)"
+grep -q "^seal-heal-needed $SLAST mismatched$" "$WORK/scrub-flip.log" \
+    || { cat "$WORK/scrub-flip.log"; fail "S2 no exact ledger line for group $SLAST"; }
+grep -q "^seal-heal-needed $SLAST mismatched$" "$WORK/scrub-flipv.log" \
+    || fail "S2 verify CLI ledger line differs"
+grep -q "^parity: $SNGROUPS sealed stripes, 1 mismatched, 0 missing, 0 extra$" "$WORK/scrub-flip.log" \
+    || fail "S2 scrub summary wrong"
+[ "$(grep "^parity:" "$WORK/scrub-flip.log")" = "$(grep "^parity:" "$WORK/scrub-flipv.log")" ] \
+    || fail "S2 CLI summaries disagree"
+grep -q "SEAL-SCRUB DRIFT: $IMGS: 1 group(s) need healing" "$WORK/scrub-flip.err" \
+    || fail "S2 no stderr banner naming the volume+count"
+grep -q "1 mismatched, 0 missing, 0 extra" "$WORK/scrub-flip.err" \
+    || fail "S2 banner missing the drift counts"
+grep -q "invf-sweep --heal $IMGS" "$WORK/scrub-flip.err" \
+    || fail "S2 banner missing the exact heal command"
+# verify --deep sees the same drift (same engine counters)
+$B/invf-verify "$IMGS" --deep > "$WORK/scrub-flip-deep.log" 2>&1 || true
+[ "$(grep "^parity:" "$WORK/scrub-flip.log")" = "$(grep "^parity:" "$WORK/scrub-flip-deep.log")" ] \
+    || fail "S2 scrub summary != verify --deep parity leg"
+# parity damage heals nothing and breaks nothing: content bit-exact
+$B/invf-cat "$IMGS" a.c "$WORK/out/scrub-a.c" >/dev/null 2>&1
+cmp -s "$WORK/orig/a.c" "$WORK/out/scrub-a.c" || fail "S2 a.c not bit-exact after parity damage"
+$B/invf-cat "$IMGS" big.log "$WORK/out/scrub-big.log" >/dev/null 2>&1
+cmp -s "$WORK/orig/big.log" "$WORK/out/scrub-big.log" || fail "S2 big.log not bit-exact after parity damage"
+sha256sum "$IMGS" | cut -d' ' -f1 > "$WORK/scrub-flip.post"
+cmp -s "$WORK/scrub-flip.pre" "$WORK/scrub-flip.post" || fail "S2 scrub on drift mutated the image"
+echo "  rc=3 both CLIs, exact ledger line, banner, bit-exact, read-only"
+
+echo "-- [S3] write-more (no sweep): stale, LOUD --"
+$B/invf-sweep "$IMGS" --seal >/dev/null 2>&1 || fail "S3 re-seal failed"
+echo "stale bytes" > "$WORK/orig/stale.txt"
+$B/invf-cp "$IMGS" "$WORK/orig/stale.txt" stale.txt >/dev/null
+set +e
+$B/invf-sweep "$IMGS" --verify-seal > "$WORK/scrub-stale.log" 2>"$WORK/scrub-stale.err"
+SRC=$?
+set -e
+[ "$SRC" = 3 ] || fail "S3 scrub rc=$SRC (want 3)"
+grep -qE "^seal-heal-needed [0-9]+ (mismatched|missing|extra)$" "$WORK/scrub-stale.log" \
+    || fail "S3 no well-formed ledger line"
+grep -q " 1 extra$" "$WORK/scrub-stale.log" || fail "S3 added file not reported as extra"
+grep -q "SEAL-SCRUB DRIFT: $IMGS:" "$WORK/scrub-stale.err" || fail "S3 no banner"
+$RM "$IMGS" stale.txt || fail "S3 cleanup rm failed"
+rm -f "$WORK/orig/stale.txt"
+
+echo "-- [S4] delete a sealed file: missing, LOUD --"
+set +e
+$B/invf-sweep "$IMGS" --verify-seal > "$WORK/scrub-reclean.log" 2>&1
+SRC=$?
+set -e
+[ "$SRC" = 0 ] || fail "S4 stale.txt delete did not restore the seal (rc=$SRC)"
+$RM "$IMGS" a.c || fail "S4 rm a.c failed"
+set +e
+$B/invf-sweep "$IMGS" --verify-seal > "$WORK/scrub-del.log" 2>"$WORK/scrub-del.err"
+SRC=$?
+set -e
+[ "$SRC" = 3 ] || fail "S4 scrub rc=$SRC (want 3)"
+grep -qE "^seal-heal-needed [0-9]+ (mismatched|missing|extra)$" "$WORK/scrub-del.log" \
+    || fail "S4 no well-formed ledger line"
+grep -q " 1 missing" "$WORK/scrub-del.log" || fail "S4 deleted file not reported missing"
+grep -q "SEAL-SCRUB DRIFT: $IMGS:" "$WORK/scrub-del.err" || fail "S4 no banner"
+echo "  delete drift loud (rc=3, missing counted, ledger well-formed)"
+
+echo "-- [S5] unsealed volume: quiet 0, 'not sealed' --"
+$B/invf-mkfs "$IMGS" 0.5 >/dev/null
+$B/invf-cp "$IMGS" "$WORK/orig/big.log" big.log >/dev/null
+$B/invf-sweep "$IMGS" --verify-seal > "$WORK/scrub-unsealed.log" 2>"$WORK/scrub-unsealed.err" || fail "S5 scrub rc=$? (want 0)"
+$B/invf-verify "$IMGS" --verify-seal > "$WORK/scrub-unsealedv.log" 2>&1 || fail "S5 verify scrub rc=$? (want 0)"
+grep -q "^not sealed$" "$WORK/scrub-unsealed.log" || fail "S5 no 'not sealed' line (sweep)"
+grep -q "^not sealed$" "$WORK/scrub-unsealedv.log" || fail "S5 no 'not sealed' line (verify)"
+[ "$(grep -c "^seal-heal-needed" "$WORK/scrub-unsealed.log")" = 0 ] || fail "S5 ledger lines on unsealed volume"
+[ "$(grep -c "SEAL-SCRUB" "$WORK/scrub-unsealed.err")" = 0 ] || fail "S5 banner on unsealed volume"
+echo "  quiet 0, 'not sealed', never an error"
+
+echo "-- [S6] flag conflicts refused with rc=2 --"
+rc=0; $B/invf-sweep "$IMGS" --verify-seal --seal > "$WORK/scrub-conf.log" 2>&1 || rc=$?
+[ "$rc" = 2 ] || fail "S6 --verify-seal --seal rc=$rc (want 2)"
+rc=0; $B/invf-verify "$IMGS" --deep --verify-seal > "$WORK/scrub-confv.log" 2>&1 || rc=$?
+[ "$rc" = 2 ] || fail "S6 --deep --verify-seal rc=$rc (want 2)"
+echo "  conflicting modes refused"
 
 echo
 echo "SEAL E2E: PASS"

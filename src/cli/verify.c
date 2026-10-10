@@ -35,6 +35,76 @@ static void err(const char *fmt, ...)
     errors++;
 }
 
+/* WP401 seal scrub: read-only per-group parity report. Same wave
+ * contract as invf-sweep --verify-seal (see tools/invf-sweep.c): one
+ * `seal-heal-needed <group> <reason>` line per bad group on stdout,
+ * then the existing `parity:` summary line; drift is LOUD on stderr
+ * with the volume, the group count, and the heal command.
+ * 0 = clean or not sealed; 3 = drift (fsck-style damage code); 1 = tool
+ * failure. The existing --deep leg below is unchanged. */
+static int seal_scrub_report(invfs_volume *vol, const char *img)
+{
+    invfs_seal_verify tot;
+    invfs_seal_badgroup *bad = NULL;
+    size_t nbad = 0, i;
+    uint64_t drift;
+    int rc;
+    vol_set_readonly(vol, 1);   /* defense in depth: scrub never writes */
+    memset(&tot, 0, sizeof tot);
+    /* Single read-only walk fills the ledger (a count-then-fill two-pass
+     * overcounts groups marked twice: a hole's `missing` upgraded by a
+     * later parity disagreement -- one walk, one truth). */
+    rc = vol_seal_scrub(vol, &bad, &nbad, &tot);
+    if (rc == 1) {
+        printf("not sealed\n");
+        return 0;
+    }
+    if (rc == 2) {
+        fprintf(stderr,
+                "SEAL-SCRUB DRIFT: %s: seal footer present but untrusted "
+                "(torn write?); no group can be proven -- run "
+                "'invf-sweep --heal %s' to rebuild the seal (WP402)\n",
+                img, img);
+        return 3;
+    }
+    if (rc != 0) {
+        fprintf(stderr, "seal scrub: %s: namespace/I-O failure; "
+                "no verdict\n", img);
+        return 1;
+    }
+    for (i = 0; i < nbad; i++)
+        printf("seal-heal-needed %u %s\n", bad[i].group, bad[i].reason);
+    free(bad);
+    printf("parity: %llu sealed stripes, %llu mismatched, "
+           "%llu missing, %llu extra\n",
+           (unsigned long long)tot.sealed,
+           (unsigned long long)tot.mismatched,
+           (unsigned long long)tot.missing,
+           (unsigned long long)tot.extra);
+    if (tot.sealed2 || tot.mismatched2 || tot.missing2 || tot.extra2)
+        printf("parity2: %llu sealed stripes, %llu mismatched, "
+               "%llu missing, %llu extra\n",
+               (unsigned long long)tot.sealed2,
+               (unsigned long long)tot.mismatched2,
+               (unsigned long long)tot.missing2,
+               (unsigned long long)tot.extra2);
+    drift = tot.mismatched + tot.missing + tot.extra +
+            tot.mismatched2 + tot.missing2 + tot.extra2;
+    if (drift) {
+        fprintf(stderr,
+                "SEAL-SCRUB DRIFT: %s: %llu group(s) need healing "
+                "(%llu mismatched, %llu missing, %llu extra); content "
+                "reads are unaffected -- run 'invf-sweep --heal %s' to "
+                "rebuild the seal (WP402)\n",
+                img, (unsigned long long)nbad,
+                (unsigned long long)tot.mismatched,
+                (unsigned long long)tot.missing,
+                (unsigned long long)tot.extra, img);
+        return 3;
+    }
+    return 0;
+}
+
 static int fail(const char *msg, int code) { fprintf(stderr, "FAIL: %s\n", msg); return code; }
 
 /* WP49b: one row per live inode id. Same-id record chains (meta rewrites,
@@ -105,11 +175,14 @@ int main(int argc, char **argv)
     size_t bitmap_bytes;
     uint8_t *bitmap;
     int deep = 0;
+    int verify_seal = 0;   /* WP401: --verify-seal seal scrub */
     int ignore_missing_codecs = 0;
 
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) {
-            fprintf(stderr, "usage: invf-verify [--ignore-missing-codecs] <image|device> [--deep]\n");
+            fprintf(stderr, "usage: invf-verify [--ignore-missing-codecs] <image|device> [--deep|--verify-seal]\n"
+                    "  --verify-seal: WP401 seal scrub (read-only per-group parity\n"
+                    "                 report; exits 0 clean / 3 on drift / 1 on failure)\n");
             return 2;
         }
         if (strcmp(argv[i], "-v") == 0 || strcmp(argv[i], "--version") == 0) {
@@ -121,6 +194,8 @@ int main(int argc, char **argv)
             ignore_missing_codecs = 1;
         if (strcmp(argv[i], "--deep") == 0)
             deep = 1;
+        if (strcmp(argv[i], "--verify-seal") == 0)
+            verify_seal = 1;
     }
 
     /* count positional args (skip flags) */
@@ -130,9 +205,13 @@ int main(int argc, char **argv)
             if (argv[i][0] != '-') positional++;
         }
         if (positional < 1 || positional > 2) {
-            fprintf(stderr, "usage: invf-verify [--ignore-missing-codecs] <image|device> [--deep]\n");
+            fprintf(stderr, "usage: invf-verify [--ignore-missing-codecs] <image|device> [--deep|--verify-seal]\n");
             return 2;
         }
+    }
+    if (deep && verify_seal) {
+        fprintf(stderr, "--deep and --verify-seal are standalone modes\n");
+        return 2;
     }
 
     /* Read-only inspection, so the volume is not locked or dismounted: a
@@ -341,6 +420,27 @@ int main(int argc, char **argv)
                (unsigned long long)sb.shadow_zone_blocks);
     }
 
+    /* WP401 --verify-seal: standalone scrub mode. Runs after the same
+     * superblock/zone/bitmap pre-checks as --deep (so a structurally
+     * damaged volume still says so), then opens the volume read-only
+     * and reports per-group parity drift. The --deep leg below keeps
+     * its exact semantics. */
+    if (verify_seal) {
+        invfs_volume *vol;
+        int open_err = 0;
+        int src;
+        blkio_close(&io);
+        vol = vol_open(path, &open_err);
+        if (!vol) {
+            fprintf(stderr, "seal scrub: cannot open volume (err %d)\n",
+                    open_err);
+            return 1;
+        }
+        src = seal_scrub_report(vol, path);
+        vol_close(vol);
+        if (src) return src;
+        return errors ? 1 : 0;
+    }
     /* --deep: read every live file end-to-end; per-segment CRC32C is
      * verified on the read path, so silent corruption is caught here */
     if (deep) {
