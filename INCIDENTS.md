@@ -1975,6 +1975,16 @@ relabel a file another lane classified.
 `jxlest` first, which it does not do today, so the trigger is not reproducible
 from a clean checkout. Making the fixture deterministic is part of the fix.
 
+**CLOSED 2026-10-11 (WP501, no code change).** The argued fix already
+landed independently as `dd68985` ("a pack that declined a file must not
+claim it in try-last": `if (invfs_codec_pack_claims(pc)) continue;`,
+`src/core/vol_sweep.c:929`). Phase-1 probe with `jxlest` on PATH:
+`encap.dcm` comes back `cls=6 algo=13`, 10/10 bit-exact, suite PASS;
+with the guard commented out the exact symptom returns (`algo=4`, suite
+FAIL). The honest-trigger half landed too (the suite builds `jxlest`
+onto PATH itself). No engine change, no suite change; this entry stands
+as the mechanism record.
+
 **CORRECTION to my earlier entry.** I wrote that "a sniff for JPEG magic finds it
 inside the container and claims the whole DICOM as an image", that the fix
 belongs in the sniff, and that this was a misclassification of a container. All
