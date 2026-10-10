@@ -61,26 +61,48 @@ SCR=$(mktemp -d "${INVFS_TOOL_SCRATCH:-$(invfs_scratch_root)}/sweepthread.XXXXXX
 mkdir -p "$SCR"
 
 # daemon pid for THIS image only -- never `pgrep -f` on a typed pattern.
+# WP305: do NOT identify by libfuse's worker thread names. libfuse names
+# its pool threads "fuse_worker" only since 3.16 (upstream 43ec53d "lib:
+# Set thread names"); noble's 3.14.0 never sets that name (zero
+# occurrences in the .so; 3.17.2 has one), so requiring the comm misses a
+# LIVE daemon on the GH 24.04 runners -- the "mount fine, then no daemon
+# pid" red, a scan-miss, not a daemon exit. Identify by argv shape
+# instead: argv[0] is invf-fuse and argv carries this image (this also
+# excludes the python scanner itself, whose cmdline carries the image as
+# an argument but whose argv[0] is python3). The daemonize parent matches
+# too but has exactly 1 thread -- the sweep thread and the workers exist
+# only in the daemon -- so take the match with the most threads and
+# require >= 2. Diagnostics go to stderr so PID capture stays clean; on a
+# miss they are the daemon-exit-vs-scan-miss evidence in the log.
 daemon_pid() {
     python3 - "$1" <<'PY'
 import os, sys
-want = sys.argv[1]
+want = sys.argv[1].encode()
+cands = []
 for p in os.listdir("/proc"):
     if not p.isdigit():
         continue
     try:
         c = open(f"/proc/{p}/cmdline", "rb").read().split(b"\0")
-        if want.encode() not in c:
+        if not c or not c[0].endswith(b"invf-fuse"):
             continue
-        tdir = f"/proc/{p}/task"
-        comms = [open(f"{tdir}/{t}/comm").read().strip() for t in os.listdir(tdir)]
+        if want not in c:
+            continue
+        n = len(os.listdir(f"/proc/{p}/task"))
+        cands.append((n, p))
     except OSError:
         continue
-    # the daemonize PARENT carries this image in its cmdline too and has
-    # different threads. Only the MOUNTED daemon has a libfuse worker, so
-    # identify by that rather than by "the last match".
-    if "fuse_worker" in comms:
-        print(p)
+if not cands:
+    sys.stderr.write(f"  (daemon_pid: no invf-fuse has {sys.argv[1]} in argv; "
+                     f"the daemon exited between mount and scan?)\n")
+    raise SystemExit
+cands.sort()
+n, p = cands[-1]
+if n < 2:
+    sys.stderr.write(f"  (daemon_pid: only a 1-thread invf-fuse ({p}); "
+                     f"the daemonize parent outlived the daemon?)\n")
+    raise SystemExit
+print(p)
 PY
 }
 
@@ -92,8 +114,30 @@ nthreads() { ls "/proc/$1/task" 2>/dev/null | wc -l; }
 # NOT libfuse workers: the unfixed daemon has exactly one (main), the fixed
 # one has two (main plus the sweep thread, which inherits the process name
 # because pthread_create does not set one).
-nonworker_threads() {
+# WP305: the WORKER NAME is not stable across libfuse versions either --
+# libfuse <3.16 (e.g. noble's 3.14.0) never names its workers, so every
+# thread reads as "invf-fuse". has_worker_names reports whether the new
+# names exist; without them the callers fall back to a TOTAL count, which
+# is still sound: main + sweep + >= 1 worker. The >= 1 worker holds
+# because any FUSE traffic spawns one (both legs do I/O before counting)
+# and the pool never shrinks by default (3.14 fuse_loop_mt.c destroys
+# threads only when max_idle != -1; the default IS -1), and the main+sweep
+# pair holds because the sweep thread is created in the daemon unconditionally.
+has_worker_names() {
     python3 - "$1" <<'PY'
+import os, sys
+try:
+    names = [open(f"/proc/{sys.argv[1]}/task/{x}/comm").read().strip()
+             for x in os.listdir(f"/proc/{sys.argv[1]}/task")]
+except OSError:
+    print(0)
+else:
+    print(1 if "fuse_worker" in names else 0)
+PY
+}
+nonworker_threads() {
+    if [ "$(has_worker_names "$1")" = 1 ]; then
+        python3 - "$1" <<'PY'
 import os, sys
 t = f"/proc/{sys.argv[1]}/task"
 n = 0
@@ -105,6 +149,11 @@ for x in os.listdir(t):
         pass
 print(n)
 PY
+    else
+        # unnamed libfuse: every thread is a "non-worker" by name;
+        # the callers compare against the total instead (see above).
+        ls "/proc/$1/task" 2>/dev/null | wc -l
+    fi
 }
 
 ctl() { python3 - "$1" <<'PY'
@@ -170,9 +219,17 @@ stage() {   # stage <mnt>: data to reclaim
 assert_absent() {
     local PID=$1 MNT=$2
     local n; n=$(nonworker_threads "$PID")
-    echo "  threads in the daemon: $(nthreads "$PID") total, $n of them not libfuse workers"
-    [ "$n" -ge 2 ] && bad "a daemon with $n non-worker threads HAS a sweep thread" \
-                    || ok "no sweep thread ($n non-worker thread: main only)"
+    echo "  threads in the daemon: $(nthreads "$PID") total, $n non-worker by name (worker names: $(has_worker_names "$PID"))"
+    if [ "$(has_worker_names "$PID")" = 1 ]; then
+        [ "$n" -ge 2 ] && bad "a daemon with $n non-worker threads HAS a sweep thread" \
+                        || ok "no sweep thread ($n non-worker thread: main only)"
+    else
+        # unnamed libfuse: main + >= 2 workers would read as 3; the red
+        # leg's sequential traffic grows exactly 1 worker, so < 3 is the
+        # absence shape (see nonworker_threads for why the pool never shrinks).
+        [ "$n" -ge 3 ] && bad "a daemon with $n threads HAS a sweep thread" \
+                        || ok "no sweep thread ($n threads: main + worker only)"
+    fi
     [ "$(ctlval "$MNT" savepoint)" = none ] \
         && ok "savepoint=none (no worker to consume g_sweep_now)" \
         || bad "savepoint=$(ctlval "$MNT" savepoint)"
@@ -185,9 +242,18 @@ assert_absent() {
 assert_present() {
     local PID=$1 MNT=$2
     local n; n=$(nonworker_threads "$PID")
-    echo "  threads in the daemon: $(nthreads "$PID") total, $n of them not libfuse workers"
-    [ "$n" -ge 2 ] && ok "the sweep thread is in the daemon ($n non-worker threads)" \
-                    || bad "only $n non-worker thread -- the sweep thread is gone again"
+    echo "  threads in the daemon: $(nthreads "$PID") total, $n non-worker by name (worker names: $(has_worker_names "$PID"))"
+    if [ "$(has_worker_names "$PID")" = 1 ]; then
+        [ "$n" -ge 2 ] && ok "the sweep thread is in the daemon ($n non-worker threads)" \
+                        || bad "only $n non-worker thread -- the sweep thread is gone again"
+    else
+        # unnamed libfuse (noble 3.14): main + sweep + >= 1 worker.
+        # The thread TABLE cannot isolate the sweep thread here, so this
+        # is auxiliary -- savepoint=live + pending_sweep draining below
+        # are the proof the thread exists and works.
+        [ "$n" -ge 3 ] && ok "the sweep thread is in the daemon ($n threads, workers unnamed)" \
+                        || bad "only $n threads with unnamed workers -- the sweep thread is gone again"
+    fi
     [ "$(ctlval "$MNT" savepoint)" = live ] \
         && ok "savepoint=live (a window the operator can take back)" \
         || bad "savepoint=$(ctlval "$MNT" savepoint) after USR1"
@@ -198,7 +264,10 @@ run_red() {
     local s PID MNT IMG
     s=$(setup red) || { rc=1; return; }
     IMG=${s%% *}; MNT=${s#* }
-    PID=$(daemon_pid "$IMG"); [ -n "$PID" ] || { bad "no daemon pid"; return; }
+    PID=$(daemon_pid "$IMG")
+    # a scan miss must not leave the mount behind: the leftover mount is
+    # what broke cleanup in the runner red, hiding the real failure.
+    [ -n "$PID" ] || { bad "no daemon pid"; fusermount3 -u "$MNT" 2>/dev/null; return; }
     stage "$MNT"
     kill -USR1 "$PID" 2>/dev/null; sleep 4
     kill -0 "$PID" 2>/dev/null && ok "SIGUSR1 did not kill the daemon" \
@@ -215,7 +284,8 @@ run_green() {
     local s PID MNT IMG before after
     s=$(setup green) || { rc=1; return; }
     IMG=${s%% *}; MNT=${s#* }
-    PID=$(daemon_pid "$IMG"); [ -n "$PID" ] || { bad "no daemon pid"; return; }
+    PID=$(daemon_pid "$IMG")
+    [ -n "$PID" ] || { bad "no daemon pid"; fusermount3 -u "$MNT" 2>/dev/null; return; }
     stage "$MNT"
     before=$(cd "$SCR" && find green-mnt -type f | sort | xargs md5sum 2>/dev/null | cut -d" " -f1)
     kill -USR1 "$PID" 2>/dev/null; sleep 6
