@@ -565,7 +565,12 @@ int vol_nlink_audit(invfs_volume *v, invfs_nlink_audit *out);
  *
  * This walks the live inode set and asks, for each inode that claims
  * content, exactly the question vol_read_inode asks: does the recipe load,
- * and does it parse? The segment DECODE is deliberately not part of it --
+ * does it parse, and does it AGREE with the row (WP303: the row's size
+ * must equal the recipe header's file_size, every entry must land inside
+ * it without overlapping, and the entries must cover exactly the row's
+ * size -- vol_read_inode and vol_decode_ast_entries refuse anything else,
+ * so a row that disagrees is an unreadable file fsck used to call clean).
+ * The segment DECODE is deliberately not part of it --
  * that reads every byte and is `invf-verify --deep`'s job; this is the
  * metadata pass, and it must stay one.
  *
@@ -578,9 +583,18 @@ int vol_nlink_audit(invfs_volume *v, invfs_nlink_audit *out);
  *                             delete, or the blob's bytes do not hash to
  *                             the address the row names
  *   INVFS_RECIPE_BAD_CORRUPT  the blob loaded and failed to parse
+ *   INVFS_RECIPE_BAD_INCOHERENT the blob loads and parses, but the row
+ *                             and the recipe disagree (size mismatch,
+ *                             entry out of bounds, overlapping entries, or
+ *                             coverage break). The read path refuses the
+ *                             file; fsck names it. Sharing alone is NOT
+ *                             incoherence: dedupe legitimately leaves two
+ *                             rows on one blob, so a shared blob whose
+ *                             rows all agree stays clean.
  */
 #define INVFS_RECIPE_BAD_MISSING 1
 #define INVFS_RECIPE_BAD_CORRUPT 2
+#define INVFS_RECIPE_BAD_INCOHERENT 3
 #define INVFS_RECIPE_BAD_MAX 16
 typedef struct {
     uint64_t id;             /* the inode whose content is unreadable */
@@ -616,7 +630,10 @@ enum {
     INVFS_DMG_TORN_XATTR  = 1,  /* live row needs a 0x03 key in quarantine */
     INVFS_DMG_TORN_ROW    = 2,  /* a resolving name needs a row in quarantine */
     INVFS_DMG_RECIPE_CORRUPT = 3, /* blob loads but does not parse */
-    INVFS_DMG_RECIPE_MISSING = 4  /* blob absent/shadowed/hash-mismatched */
+    INVFS_DMG_RECIPE_MISSING = 4, /* blob absent/shadowed/hash-mismatched */
+    INVFS_DMG_RECIPE_INCOHERENT = 5 /* blob loads+parses but the row and the
+                                      * recipe disagree (WP303): the read
+                                      * path refuses the file */
 };
 typedef struct {
     uint64_t id;

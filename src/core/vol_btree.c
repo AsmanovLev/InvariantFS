@@ -5800,6 +5800,63 @@ static void recipe_fault(invfs_recipe_audit *a, uint64_t id, uint32_t kind,
     a->nfault_total++;
 }
 
+/* WP303: the read path's predicates, factored so the checker and the
+ * report share one implementation. `in` is the live row, `blob`/`blen`
+ * its loaded recipe. The ORDER of the checks is the diagnostic order:
+ * the size disagreement first (it is the whole story for a row pointed
+ * at another file's recipe -- two live inodes, one blob -- and the read
+ * path's own message leads with it), then the decode's bounds/overlap,
+ * then the tiling sum. */
+int vol_recipe_coherence(const char *name, const invfs_inode *in,
+                         const uint8_t *blob, size_t blen)
+{
+    invfs_ast_hdr ah;
+    const invfs_ast_block_entry *ents = NULL;
+    size_t n_ents = 0, i;
+    uint64_t cov = 0, prev_end = 0;
+
+    /* Engine-internal owners (the tz batch owner, seal parity, retention)
+     * carry index blobs, not files; their rows are the engine's own
+     * bookkeeping, not a namespace invariant -- the same exclusion the
+     * nlink audit (WP118) makes, for the same reason. */
+    if (name && (unsigned char)name[0] == 0x01)
+        return INVFS_COH_OK;
+    if (!in || !blob || !blen)
+        return INVFS_COH_PARSE;
+    if (vol_ast_recipe_parse(blob, blen, &ah, &ents, &n_ents) != 0 || !ents)
+        return INVFS_COH_PARSE;
+    /* vol_read_inode: "the row's size and the blob's header must agree; a
+     * disagreement is corruption, not something to paper over with a
+     * clamp". */
+    if (ah.file_size != in->size)
+        return INVFS_COH_SIZE;
+    /* vol_decode_ast_entries: every entry inside the header size, no
+     * wraparound, no overlap in entry order. */
+    for (i = 0; i < n_ents; i++) {
+        uint64_t end = ents[i].file_offset + ents[i].length;
+        if (end < ents[i].file_offset ||
+            ents[i].file_offset > ah.file_size || end > ah.file_size)
+            return INVFS_COH_BOUNDS;
+        if (i > 0 && ents[i].file_offset < prev_end)
+            return INVFS_COH_OVERLAP;
+        prev_end = end;
+        {
+            uint64_t ncov = cov + ents[i].length;
+            if (ncov < cov)
+                return INVFS_COH_COVERAGE;
+            cov = ncov;
+        }
+    }
+    /* The entries tile [0, size): bounds + order + exact sum. A gap would
+     * decode into malloc'd-but-unwritten bytes (vol_read_inode allocates
+     * with malloc, not calloc), so a short sum is not a short file, it
+     * is nondeterministic bytes -- damage, not sparseness (the format has
+     * no sparse representation; ranged writes alias, never punch). */
+    if (cov != in->size)
+        return INVFS_COH_COVERAGE;
+    return INVFS_COH_OK;
+}
+
 static int recipe_audit_cb(invfs_volume *v, uint64_t inode_id, const char *name,
                            void *ctx_)
 {
@@ -5842,10 +5899,19 @@ static int recipe_audit_cb(invfs_volume *v, uint64_t inode_id, const char *name,
             return 0;
         }
         if (vol_ast_recipe_parse(blob, blen, &ah, &ents, &n_ents) == 0) {
-            free(blob);
-            return 0;
+            /* Loads and parses -- but a row that disagrees with its
+             * recipe is an unreadable file all the same (vol_read_inode
+             * refuses it), and until WP303 nothing asked. Sharing alone
+             * is not incoherence: dedupe leaves two agreeing rows on one
+             * blob, and those stay clean. */
+            if (vol_recipe_coherence(name, &in, blob, blen) == INVFS_COH_OK) {
+                free(blob);
+                return 0;
+            }
+            kind = INVFS_RECIPE_BAD_INCOHERENT;
+        } else {
+            kind = INVFS_RECIPE_BAD_CORRUPT;
         }
-        kind = INVFS_RECIPE_BAD_CORRUPT;
     } else {
         kind = INVFS_RECIPE_BAD_MISSING;
     }
