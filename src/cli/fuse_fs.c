@@ -2299,8 +2299,6 @@ static void invf_sweep_worker(int full_pass)
          * leaves the volume worse. It sweeps what it got -- loudly, and
          * the DONE line below carries the marker. */
     }
-    fprintf(stderr, "[sweep] %s pass started: %zu files%s\n", tag, n,
-            complete ? "" : " (PARTIAL -- see INCOMPLETE above)");
     {
         /* F9-worker: arm the rollback window HERE, after the list
          * validated and before the first mutation (heat decay, then the
@@ -2345,6 +2343,8 @@ static void invf_sweep_worker(int full_pass)
             }
         }
     }
+    fprintf(stderr, "[sweep] %s pass started: %zu files%s\n", tag, n,
+            complete ? "" : " (PARTIAL -- see INCOMPLETE above)");
     if (full_pass)
         vol_heat_sweep_begin(g_vol);   /* one decay pass per sweep run */
     for (i = 0; i < n; i++) {
