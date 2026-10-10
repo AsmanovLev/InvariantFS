@@ -581,10 +581,21 @@ rc=0
 $E4 enumerate "$F" "$WORK/decline.tab" 2>/dev/null || rc=$?
 [ $rc -eq 3 ] || { echo "FAIL: empty fs rc=$rc, want 3 (zero members)"; exit 1; }
 echo "  declined (rc=3): zero-member filesystem (no orphan_file feature)"
-# and the default empty image: exactly one member (the orphan file)
+# and the default empty image: exactly one member (the orphan file).
+# WP305: the orphan_file feature MUST be pinned explicitly. Whether a bare
+# `mkfs.ext4 -q -F` creates one is distro config, not e2fsprogs behavior:
+# Debian trixie (1.47.2) enables orphan_file in the ext4 stanza and
+# 1024-byte blocks for the small type (orphan inode 12 -> 1 member),
+# while Ubuntu 24.04 noble (1.47.0) enables NEITHER (no orphan_file stanza
+# entry; small/floppy inherit 4K blocks), so the same command yields ZERO
+# regular files there and enumerate honestly declines ("no regular files
+# (zero members)", rc=3 -- verified byte-for-byte with noble's own mkfs).
+# Pinning -O orphan_file keeps the 1-member shape deterministic everywhere
+# (verified: noble 1.47.0 + -O orphan_file -> 1 member, ino12); an mkfs
+# that cannot provide it fails loudly here instead of declining later.
 F=$WORK/onlyorphan.ext4
 dd if=/dev/zero of="$F" bs=1M count=8 status=none
-mkfs.ext4 -q -F "$F"
+mkfs.ext4 -q -F -O orphan_file "$F"
 $E4 enumerate "$F" "$WORK/orphan.tab" || { echo "FAIL: orphan-only image declined"; exit 1; }
 N=$(wc -l < "$WORK/orphan.tab")
 [ "$N" -eq 1 ] || { echo "FAIL: orphan-only image has $N members, want 1"; exit 1; }
