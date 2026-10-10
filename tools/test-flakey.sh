@@ -1017,9 +1017,204 @@ leg4() {
     seal_resolve "4b"
 }
 
+# Proven-exhausted verdict (WP502): chaos can be unrecoverable, and the
+# leg must be able to say so without lying. After convergence has failed
+# (corrupt bytes under a live seal, or an absent seal with a dead-ended
+# ladder), seal_exhausted passes iff ALL of (a)-(f) hold, each asserted on
+# the log artifacts the leg already writes (rec-*.log, the SPT0 diagnostic,
+# fsck/verify logs) -- never on exit codes alone. Anything short of all
+# six returns nonzero and the caller FAILs exactly as before, so
+# proven-exhausted is hard to earn, never a blanket excuse.
+#
+# (a) no complete seal is trusted: the seal is absent (no ^parity: line --
+#     the footer rule, kept: verify prints parity iff the footer committed)
+#     or torn-and-named (mismatches/missing/extra nonzero, verify said so
+#     honestly). A clean parity line next to damage refuses: that would be
+#     a torn footer misread as committed.
+# (b) the SPT0 rollback was ATTEMPTED (attempted here when the ladder never
+#     got to it) and DECLINED with a named cause: "the save point is
+#     DAMAGED (...)" plus the invf-spt0 diagnostic naming the unreadable
+#     pinned recipe/page.
+# (c) fsck -f was ATTEMPTED (run here when the ladder never got to it) and
+#     refused with CANNOT REPAIR naming the cause: torn slots with pbas
+#     and base-unreachable stated, or quarantined ranges still holding keys
+#     live inodes need (excision refused).
+# (d) every loss NAMED: the (a)-half of verify_consistent, mirrored here
+#     (same ledger extraction, same probe loops over orig files AND
+#     ledger-only siblings; verify_consistent itself is untouched): every
+#     unreadable-or-wrong probe file is in the fsck/verify ledger -- or,
+#     when the ledger declares total namespace loss (damaged-partial with
+#     "no valid base root" plus an unwalkable namespace), covered by that
+#     volume-wide statement. A merely-wrong read is never covered by the
+#     volume-wide statement (that would hide silent corruption), and an
+#     emptied ledger names nothing and refuses.
+# (e) NO silent reads: every file readable anywhere is cmp-verified
+#     bit-exact vs orig (vol_files_exact's exactness core: an
+#     exact-but-unnamed file is fine, a wrong-but-unflagged file refuses).
+# (f) the verdict line states EXHAUSTED with the cause chain, never
+#     converged/COMPLETE.
+seal_exhausted() { # <label>: gather evidence, then assert; rc=0 iff proven
+    local label=$1
+    # Every ladder step the verdict asserts on must have RUN: reuse the
+    # ladder's own logs when it got there, else run the step now. The two
+    # runs a step performs here are both read-only on refusal (rollback
+    # declines without writing; -f CANNOT REPAIR makes no change), and the
+    # rollback is only attempted against a live savepoint on a damaged tree
+    # -- rolling back a clean volume would discard healthy writes.
+    if ! grep -q "the save point is DAMAGED" "$FLK/rec-rb-spt0.log" 2>/dev/null; then
+        if ! grep -q "save point:.*live" "$FLK/rec-fsck1.log" 2>/dev/null; then
+            echo "  EXHAUSTED refused ($label): (b) no SPT0 attempt on record and no live save point to attempt" >&2
+            return 1
+        fi
+        if grep -q "^OK$" "$FLK/rec-fsck1.log" 2>/dev/null; then
+            echo "  EXHAUSTED refused ($label): (b) tree is clean -- a rollback would destroy healthy writes" >&2
+            return 1
+        fi
+        info "save point live -> SPT0 rollback attempt for the exhaustion proof ($label)"
+        $B/invf-rollback "$DM" >"$FLK/rec-rb-spt0.log" 2>&1 || true
+    fi
+    if ! grep -q "CANNOT REPAIR" "$FLK/rec-fsckf.log" 2>/dev/null; then
+        info "fsck -f for the exhaustion proof ($label)"
+        $B/invf-fsck "$DM" -f >"$FLK/rec-fsckf.log" 2>&1 || true
+    fi
+    # Ledger evidence, rebuilt fresh from read-only tools (same extraction
+    # as verify_consistent; that gate itself is untouched).
+    $B/invf-fsck "$DM" --list-damaged >"$FLK/consistent-fsck.log" 2>&1 || true
+    $B/invf-verify "$DM" --deep >"$FLK/consistent-verify.log" 2>&1 || true
+    info "exhausted: verify says: $(grep -acE '^  CORRUPT' "$FLK/consistent-verify.log") corrupt lines"
+    grep -E "^damaged"$'\t' "$FLK/consistent-fsck.log" | cut -f3 >"$FLK/consistent-dfsck.txt"
+    grep -E "^  CORRUPT: [^ ]+$" "$FLK/consistent-verify.log" | sed 's/^  CORRUPT: //' >"$FLK/consistent-dverify.txt"
+    cat "$FLK/consistent-dfsck.txt" "$FLK/consistent-dverify.txt" | sort -u >"$FLK/consistent-d.txt"
+    seal_exhausted_assert "$label"
+}
+
+seal_exhausted_assert() { # <label>: log-only assertion over $FLK logs; rc=0 iff proven
+    local label=$1 why_seal why_rb why_fsck diag slots
+    local failed="" wrong="" exact_n=0 f total_loss=0 n_failed
+    # --- (a) no complete seal is trusted (footer rule, kept) ---
+    if ! grep -q "^parity:" "$FLK/rec-verify1.log"; then
+        why_seal="seal absent (no footer committed)"
+    else
+        if grep -qE "^parity: [0-9]+ sealed stripes, 0 mismatched, 0 missing, 0 extra" \
+                "$FLK/rec-verify1.log"; then
+            echo "  EXHAUSTED refused ($label): (a) seal reads COMPLETE but recovery failed -- torn footer misread as committed, or stale ledger" >&2
+            return 1
+        fi
+        why_seal="seal torn ($(grep -E '^parity:' "$FLK/rec-verify1.log" | head -1 | sed 's/^parity: //'), honestly reported, never trusted as committed)"
+    fi
+    # --- (b) rollback attempted + declined with a named cause ---
+    if ! grep -q "the save point is DAMAGED" "$FLK/rec-rb-spt0.log" 2>/dev/null; then
+        echo "  EXHAUSTED refused ($label): (b) SPT0 rollback not declined-for-cause (no 'save point is DAMAGED' in rec-rb-spt0.log)" >&2
+        return 1
+    fi
+    diag=$(grep -E "refusing to roll back: " "$FLK/rec-rb-spt0.log" | head -1 | sed 's/^.*refusing to roll back: //')
+    case "$diag" in
+        *"unreadable"*|*"does not walk"*) why_rb="rollback declined: save point DAMAGED ($diag)";;
+        *) echo "  EXHAUSTED refused ($label): (b) decline names no unreadable pinned recipe/page: ${diag:-none}" >&2; return 1;;
+    esac
+    # --- (c) fsck -f attempted + CANNOT REPAIR naming the cause ---
+    if ! grep -q "CANNOT REPAIR" "$FLK/rec-fsckf.log" 2>/dev/null; then
+        echo "  EXHAUSTED refused ($label): (c) no CANNOT REPAIR in rec-fsckf.log -- damage was repairable, not exhaustion" >&2
+        return 1
+    fi
+    if grep -q "no valid base root" "$FLK/rec-fsckf.log"; then
+        slots=$(grep -oE "root_slot\[[01]\] pba [0-9]+" "$FLK/rec-fsckf.log" | sort -u | tr '\n' ' ')
+        why_fsck="fsck -f CANNOT REPAIR: no valid base root (${slots:-slots unnamed}-- base tree unreachable)"
+    elif grep -qE "quarantined.*key range" "$FLK/rec-fsckf.log" && \
+         grep -qE "excision REFUSED|still hold keys" "$FLK/rec-fsckf.log"; then
+        why_fsck="fsck -f CANNOT REPAIR: quarantined range(s) still hold keys live inodes need (excision refused)"
+    else
+        echo "  EXHAUSTED refused ($label): (c) CANNOT REPAIR names no cause (neither torn slots + base-unreachable nor refused quarantine excision)" >&2
+        return 1
+    fi
+    # --- (d)+(e) every loss named, no silent reads ---
+    # Mirrors verify_consistent's (a)-half: same probe loops over the orig
+    # files AND the ledger-only siblings (bef0372), same every-failure-named
+    # rule. A successful read must cmp bit-exact (e); a wrong read joins
+    # failed AND wrong, so total-loss coverage (unreadable only) never
+    # excuses wrong bytes.
+    for f in $(cd "$FLK/orig4" && ls); do
+        if $B/invf-cat "$DM" "$f" "$FLK/consistent-out.bin" >/dev/null 2>&1; then
+            if cmp -s "$FLK/orig4/$f" "$FLK/consistent-out.bin"; then
+                exact_n=$((exact_n + 1))
+            else
+                failed="$failed $f"; wrong="$wrong $f"
+            fi
+        else
+            failed="$failed $f"
+        fi
+    done
+    while IFS= read -r f; do
+        [ -n "$f" ] || continue
+        case " $failed " in *" $f "*) continue;; esac
+        [ -e "$FLK/orig4/$f" ] && continue
+        if $B/invf-cat "$DM" "$f" "$FLK/consistent-out.bin" >/dev/null 2>&1; then
+            : # ledger-named with no orig oracle and readable: (a)-half does
+              # not police it (that is verify_consistent (b)'s job, not reused)
+        else
+            failed="$failed $f"
+        fi
+    done <"$FLK/consistent-d.txt"
+    rm -f "$FLK/consistent-out.bin"
+    # Total-loss coverage: the per-file ledger is explicitly incomplete
+    # (damaged-partial, not silently empty) AND both tools declare the
+    # whole namespace lost. Covers unreadable files only, never wrong ones.
+    if grep -q "damaged-partial" "$FLK/consistent-fsck.log" && \
+       grep -q "no valid base root" "$FLK/consistent-fsck.log" && \
+       grep -q "could not walk the whole namespace" "$FLK/consistent-verify.log"; then
+        total_loss=1
+        info "exhausted: ledger declares total namespace loss (damaged-partial + no valid base root + unwalkable namespace)"
+    fi
+    info "exhausted: $exact_n exact,$(echo "$failed" | wc -w) unreadable-or-wrong ($label):${failed:- none}"
+    info "exhausted: ledger fsck:[$(tr '\n' ' ' <"$FLK/consistent-dfsck.txt")] verify:[$(tr '\n' ' ' <"$FLK/consistent-dverify.txt")]"
+    for f in $failed; do
+        if grep -Fqx "$f" "$FLK/consistent-d.txt"; then continue; fi
+        case " $wrong " in *" $f "*) ;; *) [ "$total_loss" = 1 ] && continue;; esac
+        echo "  EXHAUSTED refused ($label): (d)/(e) $f unreadable-or-wrong but listed nowhere -- silent corruption or ledger gap" >&2
+        return 1
+    done
+    # --- (f) the verdict line: EXHAUSTED with the cause chain ---
+    n_failed=$(echo "$failed" | wc -w)
+    info "seal state ($label): EXHAUSTED ($why_seal; $why_rb; $why_fsck; losses: $n_failed unreadable-or-wrong, all named, $exact_n exact)"
+    return 0
+}
+
+# WP502 replay driver (validation only, no chaos): drive the leg-4 verdict
+# against a preserved dead-end artifact. The artifact holds the post-chaos
+# image (backing.img) + the corpus (orig4); the verdict regenerates every
+# log it asserts on, so the replay proves the verdict, not the old logs.
+#   FLAKEY_REPLAY=<artifact dir> FLAKEY_REPLAY_WORK=<scratch> bash tools/test-flakey.sh
+#   FLAKEY_REPLAY=<artifact dir> FLAKEY_REPLAY_WORK=<scratch> FLAKEY_REPLAY_MODE=assert bash tools/test-flakey.sh
+# full (default) copies the image + corpus into the scratch and runs the
+# 4b verdict path end to end; assert re-runs ONLY seal_exhausted_assert on
+# the scratch (the tampered-ledger negative control: empty
+# consistent-d*.txt first, and the assertion must refuse). The scratch
+# needs ~3 GB free; a replay FAIL preserves into the scratch, never the repo.
+replay_leg4() { # <mode>
+    local mode=${1:-full} src=${FLAKEY_REPLAY} work=${FLAKEY_REPLAY_WORK:-$FLK/replay}
+    if [ "$mode" = assert ]; then
+        [ -f "$work/replay.img" ] || { echo "replay: no replay.img in $work (run full mode first)" >&2; return 2; }
+        [ -d "$work/orig4" ] || { echo "replay: no orig4 in $work (run full mode first)" >&2; return 2; }
+        FLK=$work; DM=$work/replay.img; LEG=leg4-crash-mid-seal
+        seal_exhausted_assert "4b-replay"; return $?
+    fi
+    [ -f "$src/backing.img" ] || { echo "replay: no backing.img in $src" >&2; return 2; }
+    [ -d "$src/orig4" ] || { echo "replay: no orig4 in $src" >&2; return 2; }
+    mkdir -p "$work" || return 2
+    FLK=$work; DM=$work/replay.img; ART=$work; LEG=leg4-crash-mid-seal
+    cp --sparse=always "$src/backing.img" "$DM" || return 2
+    rm -rf "$FLK/orig4" && cp -a "$src/orig4" "$FLK/orig4" || return 2
+    say "replay: leg-4 4b verdict on $src"
+    seal_resolve "4b-replay"
+}
+
 # leg-4 recovery: inspect the seal state honestly BEFORE resolving it.
 # The seal ends up complete (parity verifies / re-seal repaired) or
 # absent (rolled back); files bit-exact; fsck clean either way.
+# A third outcome is proven-exhausted (WP502): the volume is lost AND the
+# FS proves it did everything (declined-for-cause rollback, named CANNOT
+# REPAIR, every loss named, no silent reads). That verdict line states
+# EXHAUSTED, never converged.
 seal_resolve() { # <label>
     local label=$1 SEAL_STATE
     $B/invf-fsck "$DM" >"$FLK/rec-fsck1.log" 2>&1
@@ -1028,7 +1223,14 @@ seal_resolve() { # <label>
     if grep -q "^parity:" "$FLK/rec-verify1.log"; then
         # seal live: verify must say the truth about it
         grep -E "^parity|^deep" "$FLK/rec-verify1.log"
-        grep -q "CORRUPT" "$FLK/rec-verify1.log" && fail "$label: content corrupt under the seal"
+        # WP502: corrupt bytes under a live seal cannot converge (no repair
+        # restores lost bytes), but the volume may still be provably
+        # exhausted. Prove it, or fail exactly as before.
+        if grep -q "CORRUPT" "$FLK/rec-verify1.log"; then
+            info "content corrupt under the seal ($label): proving exhaustion, not converging"
+            seal_exhausted "$label" && return 0
+            fail "$label: content corrupt under the seal"
+        fi
         if grep -qE "^parity: [0-9]+ sealed stripes, 0 mismatched, 0 missing, 0 extra" \
                 "$FLK/rec-verify1.log"; then
             info "seal is COMPLETE (parity verifies) [$label]"
@@ -1048,8 +1250,15 @@ seal_resolve() { # <label>
         SEAL_STATE="COMPLETE"
     else
         info "seal absent ($label): rolled back or never committed"
-        recover "$label" || fail "$label: recovery ladder dead-ended"
-        SEAL_STATE="ABSENT"
+        if recover "$label"; then
+            SEAL_STATE="ABSENT"
+        else
+            # WP502: the ladder dead-ended, but the volume may still be
+            # provably exhausted. Prove it, or fail exactly as before.
+            info "recovery ladder dead-ended ($label): proving exhaustion, not converging"
+            seal_exhausted "$label" && return 0
+            fail "$label: recovery ladder dead-ended"
+        fi
     fi
     # A drop window can take a flush's bitmap pages while keeping the
     # journal's: a realize's freed blocks then stay marked used on disk --
@@ -1911,6 +2120,13 @@ leg9() {
 # -------------------------------------------------------------- main ----
 
 echo "WP22b flakey soak: seed=$SEED soak=${SOAK_S}s dev=$DM work=$FLK"
+
+# WP502 replay hook (validation only): drive the leg-4 verdict against a
+# preserved dead-end artifact, with no dm-chaos and no other legs.
+if [ -n "${FLAKEY_REPLAY:-}" ]; then
+    replay_leg4 "${FLAKEY_REPLAY_MODE:-full}"
+    exit $?
+fi
 
 # preflight
 for t in invf-mkfs invf-cp invf-cat invf-ls invf-fsck invf-verify invf-sweep invf-rollback invf-fuse; do
