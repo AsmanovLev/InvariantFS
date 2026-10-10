@@ -918,6 +918,7 @@ const char *vol_damaged_kind(uint32_t kind)
     case INVFS_DMG_TORN_ROW:       return "torn-row";
     case INVFS_DMG_RECIPE_CORRUPT: return "recipe-corrupt";
     case INVFS_DMG_RECIPE_MISSING: return "recipe-missing";
+    case INVFS_DMG_RECIPE_INCOHERENT: return "recipe-incoherent";
     default:                       return "unknown";
     }
 }
@@ -1013,7 +1014,9 @@ int vol_damaged_files(invfs_volume *v, invfs_damaged_file *out, int cap)
             o->id = f->id;
             o->size = f->size;
             o->kind = (f->kind == INVFS_RECIPE_BAD_CORRUPT)
-                     ? INVFS_DMG_RECIPE_CORRUPT : INVFS_DMG_RECIPE_MISSING;
+                     ? INVFS_DMG_RECIPE_CORRUPT
+                     : (f->kind == INVFS_RECIPE_BAD_INCOHERENT)
+                     ? INVFS_DMG_RECIPE_INCOHERENT : INVFS_DMG_RECIPE_MISSING;
             snprintf(o->name, sizeof o->name, "%s", f->name);
         }
     }
@@ -1255,10 +1258,209 @@ static void fsck_anchor(invfs_volume *v, invfs_fsck_report *rep)
  * key range in the tree, a recipe that cannot be loaded may simply be in
  * that range -- reported as damage that -f can address, not as a lost blob
  * it cannot. */
+/* WP303: blob-sharing census. Content-blind recipe keys (the address is a
+ * hash of the recipe bytes, not of the content) let two live rows name
+ * one blob -- the leg2 shape -- so the walk that attributes sharing must
+ * expand every row, never count unique blobs. One live-set pass records
+ * (address, id, name) per content row; the report then resolves, per
+ * incoherent fault, which OTHER live inodes name the same blob. Only the
+ * address is compared here (no blob loads): sharing is attribution
+ * context for a fault the coherence check already found, never a verdict
+ * on its own -- dedupe leaves agreeing rows on one blob legitimately. */
+typedef struct {
+    uint8_t addr[INVFS_RECIPE_ADDR_LEN];
+    uint64_t id;
+    char name[192];
+} fsck_own_row;
+
+typedef struct {
+    fsck_own_row *tab;
+    size_t n, cap;
+    int overflow;
+} fsck_own_ctx;
+
+static int fsck_own_cb(invfs_volume *v, uint64_t inode_id, const char *name,
+                       void *ctx_)
+{
+    fsck_own_ctx *c = (fsck_own_ctx *)ctx_;
+    static const uint8_t zero[INVFS_RECIPE_ADDR_LEN];
+    invfs_inode in;
+    fsck_own_row *r;
+    (void)v;
+    if (vol_inode_get(v, inode_id, &in) != 1)
+        return 0;
+    if (in.type == INVFS_ITYP_DIR)
+        return 0;
+    if (in.size == 0 ||
+        memcmp(in.recipe_addr, zero, INVFS_RECIPE_ADDR_LEN) == 0)
+        return 0;
+    if (c->n == c->cap) { c->overflow = 1; return 0; }
+    r = &c->tab[c->n++];
+    memcpy(r->addr, in.recipe_addr, sizeof r->addr);
+    r->id = inode_id;
+    snprintf(r->name, sizeof r->name, "%s", name ? name : "");
+    return 0;
+}
+
+/* Detail + attribution for one incoherent fault. Re-derives the reason
+ * with the same predicate the audit ran (vol_recipe_coherence), names up
+ * to three co-owners sharing the blob, and the shared data blocks (first
+ * non-TEXT, non-reference pba plus the entry count). TEXT batches are
+ * registry-owned by design and WINDOW_SRC pbas are source inode ids, not
+ * blocks -- neither is walked here. */
+static void fsck_incoherent_note(invfs_volume *v, invfs_fsck_report *rep,
+                                 const invfs_recipe_fault *f,
+                                 const fsck_own_ctx *c)
+{
+    char b[1024];
+    invfs_inode in;
+    uint8_t *blob = NULL;
+    size_t blen = 0;
+    int reason = INVFS_COH_PARSE;
+    char why[256];
+    size_t i, k;
+    uint64_t co_ids[4];
+    char co_names[3][192];
+    uint64_t nco = 0;
+    uint64_t first_pba = 0, nshare = 0;
+    int have_row = 0;
+
+    memset(&in, 0, sizeof in);
+    if (vol_inode_get(v, f->id, &in) == 1) {
+        have_row = 1;
+        if (vol_recipe_load(v, in.recipe_addr, &blob, &blen) == 0 && blob)
+            reason = vol_recipe_coherence(f->name[0] ? f->name : NULL,
+                                          &in, blob, blen);
+    }
+    switch (reason) {
+    case INVFS_COH_SIZE: {
+        invfs_ast_hdr ah;
+        uint64_t hsz = 0;
+        if (blob && vol_ast_recipe_parse(blob, blen, &ah, NULL, NULL) == 0)
+            hsz = ah.file_size;
+        snprintf(why, sizeof why,
+                 "row size %llu != recipe size %llu -- the read path "
+                 "refuses this file",
+                 (unsigned long long)in.size, (unsigned long long)hsz);
+        break;
+    }
+    case INVFS_COH_BOUNDS:
+        snprintf(why, sizeof why,
+                 "a recipe entry escapes the recipe's own size -- the "
+                 "read path refuses this file");
+        break;
+    case INVFS_COH_OVERLAP:
+        snprintf(why, sizeof why,
+                 "recipe entries overlap in entry order -- the read path "
+                 "refuses this file");
+        break;
+    case INVFS_COH_COVERAGE:
+        snprintf(why, sizeof why,
+                 "the recipe entries do not cover the row's %llu byte(s) "
+                 "-- the read path decodes a different shape than the row "
+                 "claims",
+                 (unsigned long long)in.size);
+        break;
+    default:
+        snprintf(why, sizeof why,
+                 "the row and its recipe disagree (the audit naming it "
+                 "could not be re-derived here)");
+        break;
+    }
+    /* Co-owners: every OTHER live row naming the same blob. */
+    if (c && !c->overflow && have_row) {
+        for (i = 0; i < c->n; i++) {
+            if (c->tab[i].id != f->id &&
+                memcmp(c->tab[i].addr, in.recipe_addr,
+                       INVFS_RECIPE_ADDR_LEN) == 0) {
+                if (nco < 4) {
+                    co_ids[nco] = c->tab[i].id;
+                    if (nco < 3)
+                        snprintf(co_names[nco], sizeof co_names[nco], "%s",
+                                 c->tab[i].name[0] ? c->tab[i].name
+                                                   : "no name resolves to it");
+                }
+                nco++;
+            }
+        }
+    }
+    /* Shared data blocks, from the offender's own recipe. */
+    if (blob) {
+        invfs_ast_hdr ah;
+        const invfs_ast_block_entry *ents = NULL;
+        size_t n_ents = 0;
+        uint64_t seen[16];
+        size_t nseen = 0;
+        if (vol_ast_recipe_parse(blob, blen, &ah, &ents, &n_ents) == 0 &&
+            ents) {
+            for (i = 0; i < n_ents; i++) {
+                int dup = 0;
+                if (!ents[i].pba ||
+                    ents[i].zone == INVFS_ZONE_TEXT ||
+                    ents[i].algo == INVFS_ALGO_WINDOW_SRC)
+                    continue;
+                for (k = 0; k < nseen && k < 16; k++)
+                    if (seen[k] == ents[i].pba) { dup = 1; break; }
+                if (dup)
+                    continue;
+                if (nseen < 16)
+                    seen[nseen++] = ents[i].pba;
+                if (!first_pba)
+                    first_pba = ents[i].pba;
+                nshare++;
+            }
+        }
+    }
+    free(blob);
+    /* Head: the offender and the reason. */
+    snprintf(b, sizeof b, "inode %llu (%s): %s.",
+             (unsigned long long)f->id,
+             f->name[0] ? f->name : "no name resolves to it", why);
+    /* Tail: who else names the blob, and the block they share. nco counts
+     * the OTHER owners; with the offender that is nco+1 live inodes. */
+    if (nco > 0) {
+        char tail[640];
+        if (nco == 1)
+            snprintf(tail, sizeof tail,
+                     " The same blob is also named by inode %llu (%s): "
+                     "two live inodes name one block (double ownership).",
+                     (unsigned long long)co_ids[0], co_names[0]);
+        else
+            snprintf(tail, sizeof tail,
+                     " The same blob is also named by %llu live inode(s), "
+                     "first inode %llu (%s): %llu live inodes name one "
+                     "block (double ownership).",
+                     (unsigned long long)nco,
+                     (unsigned long long)co_ids[0], co_names[0],
+                     (unsigned long long)(nco + 1));
+        strncat(b, tail, sizeof b - strlen(b) - 1);
+        if (first_pba) {
+            snprintf(tail, sizeof tail,
+                     " Shared data block pba %llu (%llu distinct extent(s) "
+                     "in this recipe).",
+                     (unsigned long long)first_pba,
+                     (unsigned long long)nshare);
+            strncat(b, tail, sizeof b - strlen(b) - 1);
+        }
+    } else {
+        strncat(b,
+                " No other live inode names this blob.",
+                sizeof b - strlen(b) - 1);
+        if (c && c->overflow)
+            strncat(b,
+                    " (The sharing census overflowed, so co-ownership "
+                    "could not be ruled out.)",
+                    sizeof b - strlen(b) - 1);
+    }
+    fsck_note(rep, b);
+}
+
 static void fsck_recipe_report(invfs_volume *v, invfs_fsck_report *rep)
 {
     invfs_recipe_audit a;
     uint64_t i;
+    fsck_own_ctx oc;
+    int have_own = 0;
 
     if (vol_recipe_audit(v, &a) != 0) {
         rep->recipe_partial = 1;
@@ -1269,9 +1471,26 @@ static void fsck_recipe_report(invfs_volume *v, invfs_fsck_report *rep)
     }
     rep->recipe_checked = a.checked;
     rep->recipe_bad = a.bad;
+    /* WP303: the sharing census is built once, and only when an
+     * incoherent fault needs attribution. A failed census degrades to
+     * unattributed messages (have_own = 0), never to silence. */
+    memset(&oc, 0, sizeof oc);
+    for (i = 0; i < a.nfault; i++)
+        if (a.fault[i].kind == INVFS_RECIPE_BAD_INCOHERENT)
+            break;
+    if (i < a.nfault) {
+        oc.cap = 4096;
+        oc.tab = (fsck_own_row *)calloc(oc.cap, sizeof *oc.tab);
+        if (oc.tab && vol_iter_live_inodes(v, fsck_own_cb, &oc) == 0)
+            have_own = 1;
+    }
     for (i = 0; i < a.nfault; i++) {
         const invfs_recipe_fault *f = &a.fault[i];
         char b[512];
+        if (f->kind == INVFS_RECIPE_BAD_INCOHERENT) {
+            fsck_incoherent_note(v, rep, f, have_own ? &oc : NULL);
+            continue;
+        }
         snprintf(b, sizeof b,
                  "inode %llu (%s): the recipe blob its row names cannot be "
                  "read -- %s. The file is %llu byte(s) of content the volume "
@@ -1297,6 +1516,7 @@ static void fsck_recipe_report(invfs_volume *v, invfs_fsck_report *rep)
         fprintf(stderr, "fsck(v3): recipe blobs: %llu of %llu live inode(s) "
                         "with content cannot be read\n",
                 (unsigned long long)a.bad, (unsigned long long)a.checked);
+    free(oc.tab);
 }
 
 static int fsck_scan(invfs_volume *v, invfs_fsck_report *rep, int fix,

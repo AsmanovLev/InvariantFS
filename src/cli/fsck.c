@@ -51,7 +51,8 @@ int main(int argc, char **argv)
                 "      TAB-separated line per live file the volume cannot\n"
                 "      read back fully: damaged<TAB><id><TAB><name><TAB>"
                 "<reason><TAB><size>. Reasons: torn-recipe, torn-xattr,\n"
-                "      torn-row, recipe-corrupt, recipe-missing. Empty list\n"
+                "      torn-row, recipe-corrupt, recipe-missing,\n"
+                "      recipe-incoherent. Empty list\n"
                 "      with an OK verdict means nothing is damaged. Exit\n"
                 "      code unchanged.\n");
             return 2;
@@ -227,12 +228,17 @@ int main(int argc, char **argv)
             degraded = 1;
             fprintf(stderr, "invf-fsck: %s: CANNOT REPAIR: %llu live inode(s) "
                             "name a recipe blob the volume can no longer "
-                            "produce. A recipe is stored under the BLAKE3 hash "
-                            "of its own contents, so -f has nothing to rebuild "
-                            "it from and made NO change to those files -- the "
-                            "content is gone. Restore it from a backup or from "
-                            "the original image; the other files on this volume "
-                            "are unaffected and readable.\n", img,
+                            "produce, or a row/recipe pair that disagrees "
+                            "(recipe-incoherent: row size != recipe size, an "
+                            "entry out of bounds or overlapping, or a "
+                            "coverage break -- each offender is named "
+                            "above). A recipe is stored under the BLAKE3 "
+                            "hash of its own contents, so -f has nothing "
+                            "to rebuild it from and made NO change to "
+                            "those files -- the content is gone or "
+                            "unaddressable. Restore it from a backup or "
+                            "from the original image; the other files on "
+                            "this volume are unaffected and readable.\n", img,
                     (unsigned long long)rep.recipe_bad);
         }
         if (!quiet) {

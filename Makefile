@@ -249,7 +249,7 @@ CLI_MAINS := mkfs verify fsck cp cat ls stat why arctest blkio_test resize \
              metabuf_test btree_test btree_repair_test vnode overlay_test fold_test concurrency_test \
              sweep_test sweep_collect_test symlink_test large_file_test dedupe_test deflate_repro_test window_test \
              read_parallel_bitexact_test arc_concurrency_test \
-             nlink_test recipe_fsck_test cpack_guard_test orphan_test rt_slot_test anchor_test \
+             nlink_test recipe_fsck_test doubleown_test cpack_guard_test orphan_test rt_slot_test anchor_test \
              fsck_rootslot_test batch_owner_test plugin_host_test plugin_mt_test rs_stability_test seal_test \
              fsck_liveness_test scratch_policy_test v2rb_rollback_test keycmp_test \
              lane_release_test pbaref_test v2_open_test \
@@ -820,7 +820,7 @@ TEST_SHARD_DEPS = helpers $(TEST_BINS) $(OUT)/invf-arctest $(OUT)/invf-blkio_tes
       $(OUT)/invf-cpack_map_conc_test \
       $(OUT)/invf-deflate_repro_test $(OUT)/invf-plugin_host_test $(OUT)/invf-plugin_mt_test \
       $(OUT)/invf-window_test $(OUT)/invf-nlink_test \
-      $(OUT)/invf-recipe_fsck_test $(OUT)/invf-fsck_liveness_test \
+      $(OUT)/invf-recipe_fsck_test $(OUT)/invf-doubleown_test $(OUT)/invf-fsck_liveness_test \
       $(OUT)/invf-cpack_guard_test $(OUT)/invf-orphan_test \
       $(OUT)/invf-scratch_policy_test $(OUT)/invf-v2rb_rollback_test \
       $(OUT)/invf-keycmp_test $(OUT)/invf-tar_cap_test \
@@ -1192,6 +1192,7 @@ test-shard-3: $(TEST_SHARD_DEPS) test-shard-check
 	$(TESTENV) $(TESTISO) $(OUT)/invf-window_test /tmp
 	$(TESTENV) $(TESTISO) $(OUT)/invf-nlink_test /tmp
 	$(TESTENV) $(TESTISO) $(OUT)/invf-recipe_fsck_test /tmp
+	$(TESTENV) $(TESTISO) $(OUT)/invf-doubleown_test /tmp
 	$(TESTENV) $(TESTISO) $(OUT)/invf-fsck_liveness_test /tmp
 	$(TESTENV) $(OUT)/invf-cpack_guard_test
 	$(TESTENV) $(OUT)/invf-scratch_policy_test

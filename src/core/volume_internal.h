@@ -1664,6 +1664,26 @@ int vol_ast_recipe_parse(const uint8_t *blob, size_t blen,
                          invfs_ast_hdr *hdr_out,
                          const invfs_ast_block_entry **ents_out,
                          size_t *nents_out);
+/* WP303: row/recipe coherence (vol_btree.c). The read path's own
+ * predicates over a loaded+parsed blob: the row's size must equal the
+ * recipe header's file_size (vol_read_inode refuses anything else), every
+ * entry must land inside it without wrapping or overlapping, in entry
+ * order (vol_decode_ast_entries refuses anything else), and the entries
+ * must cover exactly the row's size. 0 = coherent. Returns the reason
+ * otherwise; the caller maps it to INVFS_RECIPE_BAD_INCOHERENT and to the
+ * message that names the offender. Internal \x01 owners are engine
+ * bookkeeping (their index blobs are not files -- cf. the nlink audit's
+ * exclusion), so they always report coherent here. */
+enum {
+    INVFS_COH_OK = 0,
+    INVFS_COH_SIZE = 1,      /* row size != recipe header file_size */
+    INVFS_COH_BOUNDS = 2,    /* an entry escapes the recipe size */
+    INVFS_COH_OVERLAP = 3,   /* entries overlap in entry order */
+    INVFS_COH_COVERAGE = 4,  /* entries do not cover the row's size */
+    INVFS_COH_PARSE = 5      /* the blob does not parse (caller's CORRUPT) */
+};
+int vol_recipe_coherence(const char *name, const invfs_inode *in,
+                         const uint8_t *blob, size_t blen);
 int vol_free_recipe_blocks(invfs_volume *v,
                              const uint8_t recipe_addr[INVFS_RECIPE_ADDR_LEN],
                              uint64_t keep_pba);
