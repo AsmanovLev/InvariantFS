@@ -14,9 +14,12 @@
  * WHAT THIS IS NOT. Not a byte-compat par2 (our hashes, our footer, our
  * sizes). Not whole-disk stripes (k+m <= 256 forbids it; repair cost scales
  * with the group). Not healing: v1 is detect-only — vol_seal_verify reports,
- * never rewrites (scrub auto-heal is a later WP). Not incremental: re-seal
- * is a full recompute; the allocator's dirty-stripe bitmap is still
- * maintained (seal_dirty_mark) but v1 does not consult it.
+ * never rewrites (scrub auto-heal is a later WP). Re-seal (WP404) is
+ * incremental when provable — groups whose fresh encoding compares equal
+ * to the stored parity keep their bytes (counted in dirty_skipped) — and a
+ * full recompute otherwise (fresh mount, config change, footer doubt, or
+ * --reseal-full); the allocator's dirty-stripe bitmap (seal_dirty_mark) is
+ * the continuity gate.
  *
  * MENU (fixed — no arbitrary matrix shapes, audit surface):
  *   pct  5 -> (k=20,m=1)    ~4.8% overhead

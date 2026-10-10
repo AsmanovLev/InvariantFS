@@ -20,6 +20,18 @@
 #   image D (dry-run): --dry-run --seal prints the plan (groups, parity
 #   bytes, overhead) and changes nothing (verify still shows the old seal).
 #
+#   image E (WP404 incremental re-seal, same-session helper `reseal`):
+#   clean re-seal with no write between restripes nothing (all groups
+#   skipped, verify clean) -> small same-size write re-seal restripes 1
+#   group and skips the rest (report names skipped count + parity bytes
+#   saved) -> the same corpus resealed --reseal-full rewrites everything
+#   and its parity+footer bytes are IDENTICAL to the incremental one's
+#   (equivalence proof) with identical verify output -> reconfig forces a
+#   full pass at the new geometry -> a CLI re-seal afterwards is a fresh
+#   mount, so full again -> --reseal-full escape hatch (+ conflicts, +
+#   no-seal note) -> crash-mid-INCREMENTAL-reseal (fault on the 2nd seal)
+#   fails loudly, reads prior-or-loud, and a clean re-seal heals.
+#
 # Run from the repo root after `make`:  bash tools/test-seal.sh
 # Uses /dev/shm (tmpfs) like the other soak scripts. NOTE: blkio treats
 # /dev/* paths as raw devices, so the script cd's into /dev/shm and uses
@@ -38,9 +50,15 @@ IMG=wp201seal.img        # image A: the main seal/stale/unseal line
 IMGB=wp201seal-b.img     # image B: menu geometry legs
 IMGC=wp201seal-c.img     # image C: crash-mid-seal probe
 IMGD=wp201seal-d.img     # image D: dry-run plan
+IMGE=wp404seal-e.img     # image E: WP404 incremental legs (clean)
+IMGE2=wp404seal-e2.img   # image E2: WP404 small-write incremental
+IMGE3=wp404seal-e3.img   # image E3: WP404 forced-full reference
+IMGE5=wp404seal-e5.img   # image E5: WP404 reconfig fallback
+IMGE8=wp404seal-e8.img   # image E8: WP404 crash-mid-incremental probe
+IMGN=wp404seal-n.img     # image N: WP404 --reseal-full no-seal note
 rm -rf "$WORK" && mkdir -p "$WORK/orig" "$WORK/out"
 cd /dev/shm
-rm -f "$IMG" "$IMGB" "$IMGC" "$IMGD"
+rm -f "$IMG" "$IMGB" "$IMGC" "$IMGD" "$IMGE" "$IMGE2" "$IMGE3" "$IMGE5" "$IMGE8" "$IMGN"
 
 fail() { echo "FAIL: $*" >&2; exit 1; }
 
@@ -70,6 +88,207 @@ gcc -std=gnu11 -O2 -I$REPO/src -I$REPO/src/core -I$REPO/src/codecs -o "$WORK/too
     $REPO/build/obj/zlib_stock_*.o \
     -Wl,-l:libzstd.so.1 -lz -lpthread
 RM="$WORK/tools/sealrm"
+
+cat > "$WORK/tools/reseal.c" <<'RESEAL_EOF'
+/* reseal — WP404 test helper: same-session seal -> modify -> reseal.
+ * Modes: reseal <img> <inc|full|reconfig|clean> <file>
+ *        reseal <imga> <imgb> cmp
+ * inc:        seal#1 (full) -> same-size modify -> reseal#2 (incremental).
+ * full:       same, but reseal#2 forces the full recompute (vol_seal_ex).
+ * reconfig:   same, but reseal#2 runs under a changed menu config.
+ * clean:      seal#1 -> reseal#2 with NO write between (all-skipped path).
+ * cmp:        byte-compare both seal files across two images (IDENTICAL?).
+ * Crash probe: run the inc mode with INVFS_FAULT=vol_seal_crash:2 — the
+ * countdown fires on the second seal's fault site (reseal#2), so seal#1
+ * passes and the reseal fails between the parity and footer commits.
+ */
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <time.h>
+#include "volume.h"
+
+static uint64_t now_us(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000000u + (uint64_t)ts.tv_nsec / 1000u;
+}
+
+static void preport(const char *tag, const char *mode,
+                    const invfs_seal_report *r, uint64_t us)
+{
+    printf("%s mode=%s rc=0 stripes=%llu updated=%llu unchanged=%llu "
+           "skipped=%llu usec=%llu\n",
+           tag, mode,
+           (unsigned long long)r->stripes,
+           (unsigned long long)r->updated,
+           (unsigned long long)r->unchanged,
+           (unsigned long long)r->dirty_skipped,
+           (unsigned long long)us);
+    fflush(stdout);
+}
+
+static int seal_pass(invfs_volume *v, const char *tag, const char *mode,
+                     int force_full)
+{
+    invfs_seal_report rep;
+    uint64_t t0, t1;
+    int rc;
+    memset(&rep, 0, sizeof rep);
+    t0 = now_us();
+    rc = vol_seal_ex(v, 0, force_full, &rep);
+    t1 = now_us();
+    if (rc != 0) {
+        printf("%s mode=%s rc=%d\n", tag, mode, rc);
+        fflush(stdout);
+        return -1;
+    }
+    preport(tag, mode, &rep, t1 - t0);
+    return 0;
+}
+
+static int modify_same_size(invfs_volume *v, const char *name)
+{
+    uint64_t ino = 0;
+    uint8_t *data = NULL;
+    size_t len = 0;
+    uint64_t wrc;
+    if (vol_find_rc(v, name, &ino) != 1 || !ino) {
+        fprintf(stderr, "reseal: find %s failed\n", name);
+        return -1;
+    }
+    if (vol_read_file(v, ino, &data, &len) != 0 || !data || !len) {
+        fprintf(stderr, "reseal: read %s failed\n", name);
+        free(data);
+        return -1;
+    }
+    data[len / 2] ^= 0xA5;      /* same size, different bytes, deterministic */
+    data[0] ^= 0x3C;
+    wrc = vol_replace_file(v, name, data, len);
+    free(data);
+    if (!wrc) {
+        fprintf(stderr, "reseal: replace %s failed\n", name);
+        return -1;
+    }
+    if (vol_flush(v) != 0) {
+        fprintf(stderr, "reseal: flush after modify failed\n");
+        return -1;
+    }
+    printf("MODIFIED %s %zu bytes (same size)\n", name, len);
+    fflush(stdout);
+    return 0;
+}
+
+static int read_hidden(invfs_volume *v, const char *hidden,
+                       uint8_t **out, size_t *len)
+{
+    uint64_t ino = 0;
+    *out = NULL;
+    *len = 0;
+    if (vol_find_rc(v, hidden, &ino) != 1 || !ino)
+        return -1;
+    return vol_read_file(v, ino, out, len);
+}
+
+static int do_cmp(const char *a, const char *b)
+{
+    static const char *const files[2] = {
+        "\x01seal-parity", "\x01seal-footer",
+    };
+    int err = 0, i, bad = 0;
+    invfs_volume *va = vol_open(a, &err);
+    if (!va) { fprintf(stderr, "reseal: open %s err %d\n", a, err); return 1; }
+    invfs_volume *vb = vol_open(b, &err);
+    if (!vb) {
+        fprintf(stderr, "reseal: open %s err %d\n", b, err);
+        vol_close(va);
+        return 1;
+    }
+    for (i = 0; i < 2; i++) {
+        uint8_t *da = NULL, *db = NULL;
+        size_t la = 0, lb = 0;
+        if (read_hidden(va, files[i], &da, &la) != 0 ||
+            read_hidden(vb, files[i], &db, &lb) != 0) {
+            printf("CMP %s: unreadable\n", files[i] + 1);
+            bad = 1;
+        } else if (la != lb || memcmp(da, db, la) != 0) {
+            printf("CMP %s: DIFFER (%zu vs %zu bytes)\n",
+                   files[i] + 1, la, lb);
+            bad = 1;
+        } else {
+            printf("CMP %s: IDENTICAL (%zu bytes)\n", files[i] + 1, la);
+        }
+        free(da);
+        free(db);
+    }
+    vol_close(va);
+    vol_close(vb);
+    return bad ? 1 : 0;
+}
+
+int main(int argc, char **argv)
+{
+    int err = 0;
+    invfs_volume *v;
+    const char *mode;
+    int force_full = 0;
+
+    if (argc == 4 && strcmp(argv[3], "cmp") == 0)
+        return do_cmp(argv[1], argv[2]);
+    if (argc != 4) {
+        fprintf(stderr, "usage: reseal <img> <inc|full|reconfig|clean> "
+                "<file> | reseal <imga> <imgb> cmp\n");
+        return 2;
+    }
+    mode = argv[2];
+    if (strcmp(mode, "inc") && strcmp(mode, "full") &&
+        strcmp(mode, "reconfig") && strcmp(mode, "clean")) {
+        fprintf(stderr, "reseal: bad mode %s\n", mode);
+        return 2;
+    }
+    v = vol_open(argv[1], &err);
+    if (!v) {
+        fprintf(stderr, "open err %d\n", err);
+        return 1;
+    }
+    if (seal_pass(v, "PASS1", mode, 0) != 0) {
+        vol_close(v);
+        return 1;
+    }
+    if (strcmp(mode, "clean") != 0) {
+        if (modify_same_size(v, argv[3]) != 0) {
+            vol_close(v);
+            return 1;
+        }
+    }
+    if (strcmp(mode, "full") == 0) {
+        force_full = 1;
+    } else if (strcmp(mode, "reconfig") == 0) {
+        /* pct 25 shape (k=6,m=2,rs-vm): differs from the default seal#1. */
+        vol_redun_config(v, 6, 1, 2);
+        printf("RECONFIG k=6 (menu 25) before PASS2\n");
+        fflush(stdout);
+    }
+    if (seal_pass(v, "PASS2", mode, force_full) != 0) {
+        vol_close(v);
+        return 1;
+    }
+    if (vol_flush(v) != 0) {
+        fprintf(stderr, "reseal: final flush failed\n");
+        vol_close(v);
+        return 1;
+    }
+    vol_close(v);
+    return 0;
+}
+RESEAL_EOF
+gcc -std=gnu11 -O2 -I$REPO/src -I$REPO/src/core -I$REPO/src/codecs -o "$WORK/tools/reseal" \
+    "$WORK/tools/reseal.c" \
+    $(for t in volume vol_cpack helper_exec tool_scratch vol_plugin_client vol_png vol_seal vol_repair vol_resize vol_fsck vol_crash vol_exer vol_dedupe vol_textzone vol_heat vol_sweep vol_read vol_write vol_records vol_ast vol_dirs vol_tier vol_meta_merge vol_metabuf vol_btree vol_delta vol_fold vol_reclaim vol_spt0 vol_anchor vol_walk arc crc32c lz4 flacx tarx pngx blkio miniz blake3 blake3_dispatch blake3_portable ppmd8 ppmd8enc ppmd8dec ppmd_codec codec bcj_x86 rs deflate_repro deflate_backend_system deflate_backend_stock; do printf "$REPO/build/obj/$t.o "; done) \
+    $REPO/build/obj/zlib_stock_*.o \
+    -Wl,-l:libzstd.so.1 -lz -lpthread
+RESEAL="$WORK/tools/reseal"
 
 # bit-exact check of every REGULAR corpus file against the host original
 # (symlinks compare by target, asserted separately; dirs have no bytes).
@@ -318,6 +537,161 @@ AFTER=$($B/invf-verify "$IMGD" --deep 2>&1 | grep -c "^parity:" || true)
 [ "$BEFORE" = "$AFTER" ] && [ "$BEFORE" = 1 ] \
     || fail "dry-run mutated the seal (parity legs: $BEFORE -> $AFTER)"
 echo "  dry-run left the live seal untouched"
+
+echo
+ echo "== [E] WP404 incremental re-seal (same-session helper) =="
+mkdir -p "$WORK/origE"
+python3 - <<'PY'
+import random
+random.seed(404)
+d = "/dev/shm/wp201seal/origE"
+WORDS = ("the quick brown fox jumps over lazy dogs int static return if "
+         "while for struct char void NULL size_t uint64_t\n").split()
+
+def text_file(name, size):
+    out = []; n = 0
+    while n < size:
+        w = random.choice(WORDS); out.append(w); n += len(w) + 1
+    open(d + "/" + name, "w").write(" ".join(out)[:size])
+
+for i in range(10):
+    text_file("g%d.txt" % i, 2_000_000)
+text_file("small.txt", 10_000)
+print("WP404 corpus: 10x2MB + 10KB")
+PY
+load_E() { # <img>
+    $B/invf-mkfs "$1" 0.5 >/dev/null
+    for f in g0.txt g1.txt g2.txt g3.txt g4.txt g5.txt g6.txt g7.txt g8.txt g9.txt small.txt; do
+        $B/invf-cp "$1" "$WORK/origE/$f" "$f" >/dev/null
+    done
+}
+
+echo "-- [E1] clean re-seal (no write between): all groups skipped --"
+load_E "$IMGE"
+$RESEAL "$IMGE" clean small.txt > "$WORK/e1.log" 2>&1 || { cat "$WORK/e1.log"; exit 1; }
+grep "^PASS1" "$WORK/e1.log"
+grep "^PASS2" "$WORK/e1.log"
+grep -q "^PASS1 mode=clean rc=0 stripes=[1-9][0-9]* updated=[1-9][0-9]* unchanged=0 skipped=0" "$WORK/e1.log" \
+    || fail "E1 PASS1 is not a full recompute"
+grep -q "^PASS2 mode=clean rc=0 stripes=[1-9][0-9]* updated=0 unchanged=[1-9][0-9]* skipped=[1-9][0-9]*" "$WORK/e1.log" \
+    || fail "E1 PASS2 restriped groups with nothing written"
+grep -q "incremental reseal: 0 groups restriped" "$WORK/e1.log" \
+    || fail "E1 missing the incremental report line"
+$B/invf-verify "$IMGE" --deep 2>&1 | grep -q " 0 mismatched, 0 missing, 0 extra" \
+    || fail "E1 verify not clean after all-skipped reseal"
+echo "  all-skipped incremental reseal verifies clean"
+
+echo "-- [E2] small same-size write: 1 group restriped, rest skipped --"
+load_E "$IMGE2"
+$RESEAL "$IMGE2" inc small.txt > "$WORK/e2.log" 2>&1 || { cat "$WORK/e2.log"; exit 1; }
+grep "^PASS2" "$WORK/e2.log"
+E2SKIP=$(sed -n 's/^PASS2 .* skipped=\([0-9]*\) .*/\1/p' "$WORK/e2.log")
+E2UPD=$(sed -n 's/^PASS2 .* updated=\([0-9]*\) .*/\1/p' "$WORK/e2.log")
+E2USEC=$(sed -n 's/^PASS2 .* usec=\([0-9]*\)/\1/p' "$WORK/e2.log")
+[ "${E2SKIP:-0}" -ge 1 ] || fail "E2 skipped nothing (skipped=$E2SKIP)"
+[ "${E2UPD:-99}" -lt "${E2SKIP}" ] || fail "E2 restriped too much (updated=$E2UPD skipped=$E2SKIP)"
+grep -q "incremental reseal: $E2UPD groups restriped, $E2SKIP skipped" "$WORK/e2.log" \
+    || fail "E2 report line does not name the skipped set"
+grep -q "parity bytes of writes saved" "$WORK/e2.log" \
+    || fail "E2 report line names no saved bytes"
+$B/invf-verify "$IMGE2" --deep > "$WORK/verify-e2.log" 2>&1 || { cat "$WORK/verify-e2.log"; exit 1; }
+grep -q " 0 mismatched, 0 missing, 0 extra" "$WORK/verify-e2.log" \
+    || fail "E2 verify not clean after incremental reseal"
+$B/invf-fsck "$IMGE2" 2>&1 | grep -q "^OK$" || fail "E2 fsck not clean"
+echo "  incremental: updated=$E2UPD skipped=$E2SKIP (${E2USEC}us), verify clean"
+
+echo "-- [E3] forced-full reference: parity bytes IDENTICAL (equivalence) --"
+load_E "$IMGE3"
+$RESEAL "$IMGE3" full small.txt > "$WORK/e3.log" 2>&1 || { cat "$WORK/e3.log"; exit 1; }
+grep "^PASS2" "$WORK/e3.log"
+grep -q "^PASS2 mode=full rc=0 stripes=[1-9][0-9]* updated=[1-9][0-9]* unchanged=0 skipped=0" "$WORK/e3.log" \
+    || fail "E3 PASS2 is not a full recompute"
+E3UPD=$(sed -n 's/^PASS2 .* updated=\([0-9]*\) .*/\1/p' "$WORK/e3.log")
+E3USEC=$(sed -n 's/^PASS2 .* usec=\([0-9]*\)/\1/p' "$WORK/e3.log")
+[ "$E2UPD" -lt "$E3UPD" ] || fail "incremental rewrote as much as full ($E2UPD vs $E3UPD)"
+$RESEAL "$IMGE2" "$IMGE3" cmp > "$WORK/ecmp.log" 2>&1 || { cat "$WORK/ecmp.log"; exit 1; }
+cat "$WORK/ecmp.log"
+grep -q "CMP seal-parity: IDENTICAL" "$WORK/ecmp.log" \
+    || fail "parity bytes differ incremental-vs-full"
+grep -q "CMP seal-footer: IDENTICAL" "$WORK/ecmp.log" \
+    || fail "footer bytes differ incremental-vs-full"
+$B/invf-verify "$IMGE3" --deep > "$WORK/verify-e3.log" 2>&1 || { cat "$WORK/verify-e3.log"; exit 1; }
+sed -e "s/$IMGE2/IMG/" -e "s/$IMGE3/IMG/" -e '/^blocks:/d' -e 's/uuid: [0-9a-f]*/uuid: UUID/' "$WORK/verify-e2.log" > "$WORK/ve2.n"
+sed -e "s/$IMGE2/IMG/" -e "s/$IMGE3/IMG/" -e '/^blocks:/d' -e 's/uuid: [0-9a-f]*/uuid: UUID/' "$WORK/verify-e3.log" > "$WORK/ve3.n"
+diff "$WORK/ve2.n" "$WORK/ve3.n" || fail "verify output differs incremental-vs-full"
+echo "  EQUIVALENCE: parity IDENTICAL, footer IDENTICAL, verify output identical"
+echo "  wall-time: incremental ${E2USEC}us vs full ${E3USEC}us; parity writes: $E2UPD vs $E3UPD groups"
+
+echo "-- [E4] reconfig forces the full pass at the new geometry --"
+load_E "$IMGE5"
+$RESEAL "$IMGE5" reconfig small.txt > "$WORK/e5.log" 2>&1 || { cat "$WORK/e5.log"; exit 1; }
+grep "^PASS2" "$WORK/e5.log"
+grep -q "^PASS2 mode=reconfig rc=0 stripes=[1-9][0-9]* updated=[1-9][0-9]* unchanged=0 skipped=0" "$WORK/e5.log" \
+    || fail "E4 reconfig reseal was not a full pass"
+$B/invf-verify "$IMGE5" --deep 2>&1 | grep -q " 0 mismatched, 0 missing, 0 extra" \
+    || fail "E4 verify not clean after reconfig full pass"
+echo "  config change fell back to full, verify clean"
+
+echo "-- [E5] fresh-mount CLI re-seal after incremental: full again --"
+$B/invf-sweep "$IMGE2" --seal > "$WORK/e6.log" 2>&1 || { cat "$WORK/e6.log"; exit 1; }
+grep "\[seal\]" "$WORK/e6.log"
+grep -q "(full recompute, k=9, m=1, rs-vm)" "$WORK/e6.log" \
+    || fail "E5 fresh-mount re-seal was not a full recompute"
+grep -q "sealed-at-gen-3 verified clean" "$WORK/e6.log" \
+    || fail "E5 did not advance to gen-3"
+echo "  fresh mount proves nothing: full recompute (doubt => work)"
+
+echo "-- [E6] --reseal-full escape hatch --"
+$B/invf-sweep "$IMGE2" --seal --reseal-full > "$WORK/e7.log" 2>&1 || { cat "$WORK/e7.log"; exit 1; }
+grep -q "(full recompute, k=9, m=1, rs-vm)" "$WORK/e7.log" \
+    || fail "E6 --reseal-full did not force a full recompute"
+grep -q "sealed-at-gen-4 verified clean" "$WORK/e7.log" \
+    || fail "E6 did not advance to gen-4"
+rc=0; $B/invf-sweep "$IMGE2" --unseal --reseal-full > "$WORK/e7c.log" 2>&1 || rc=$?
+[ "$rc" -ne 0 ] || fail "E6 --unseal --reseal-full accepted"
+grep -q "conflicting flags" "$WORK/e7c.log" || fail "E6 no conflicting-flags diagnostic"
+$B/invf-mkfs "$IMGN" 0.5 >/dev/null
+$B/invf-cp "$IMGN" "$WORK/origE/small.txt" small.txt >/dev/null
+$B/invf-sweep "$IMGN" --reseal-full > "$WORK/e7n.log" 2>&1 || { cat "$WORK/e7n.log"; exit 1; }
+grep -q "no seal to recompute" "$WORK/e7n.log" || fail "E6 no no-seal note"
+echo "  --reseal-full forces full; conflicts refused; no-seal noted"
+
+echo "-- [E7] crash-mid-INCREMENTAL-reseal: fails loud, heals clean --"
+load_E "$IMGE8"
+set +e
+INVFS_FAULT="vol_seal_crash:2" $RESEAL "$IMGE8" inc small.txt > "$WORK/e8.log" 2>&1
+ERC=$?
+set -e
+[ "$ERC" != 0 ] || fail "E7 faulted incremental reseal reported success"
+grep -q "vol_seal_crash.*fired" "$WORK/e8.log" || fail "E7 fault did not fire"
+grep -q "^PASS2 mode=inc rc=-1" "$WORK/e8.log" || fail "E7 PASS2 did not fail"
+echo "  faulted incremental reseal failed loudly (rc=$ERC)"
+$B/invf-ls "$IMGE8" >/dev/null 2>&1 || fail "E7 volume does not open after the fault"
+set +e
+$B/invf-verify "$IMGE8" --deep > "$WORK/e8v.log" 2>&1
+VRC=$?
+set -e
+[ "$VRC" != 0 ] || fail "E7 verify passed over a torn incremental reseal"
+grep -q "parity disagrees" "$WORK/e8v.log" || fail "E7 no parity-disagrees diagnostic"
+grep -q " 0 corrupt," "$WORK/e8v.log" || fail "E7 content damaged by the fault"
+$B/invf-fsck "$IMGE8" 2>&1 | grep -q "^OK$" || fail "E7 fsck not clean after the fault"
+echo "  prior-or-loud (footer prior, parity disagrees, content intact)"
+$B/invf-sweep "$IMGE8" --seal > "$WORK/e8-heal.log" 2>&1 || { cat "$WORK/e8-heal.log"; exit 1; }
+$B/invf-verify "$IMGE8" --deep 2>&1 | grep -q " 0 mismatched" \
+    || fail "E7 re-seal after incremental crash not clean"
+$B/invf-cat "$IMGE8" small.txt "$WORK/out/small.txt" >/dev/null
+# small.txt was deterministically modified before the faulted reseal
+# (bytes 0 and len/2 flipped); the healed volume must hold THOSE bytes.
+python3 - "$WORK/origE/small.txt" "$WORK/out/small-expect.txt" <<'PY'
+import sys
+raw = open(sys.argv[1], "rb").read()
+b = bytearray(raw)
+b[0] ^= 0x3C
+b[len(b) // 2] ^= 0xA5
+open(sys.argv[2], "wb").write(bytes(b))
+PY
+cmp -s "$WORK/out/small-expect.txt" "$WORK/out/small.txt" || fail "E7 small.txt not bit-exact"
+echo "  clean re-seal heals (verify clean, bit-exact)"
 
 echo
 echo "SEAL E2E: PASS"

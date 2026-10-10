@@ -1119,6 +1119,16 @@ int  vol_redun_state(const invfs_volume *v, uint32_t *k1, int *l2_algo,
 /* unseal != 0: free every parity block and remove the owners.
  * 0 = ok, -1 = error (incl. read-only volume: sealing mutates). */
 int vol_seal(invfs_volume *v, int unseal, invfs_seal_report *rep);
+/* WP404: vol_seal with an explicit full-recompute escape hatch.
+ * force_full != 0 skips the incremental gate (dirty bitmap, baseline
+ * validation) and recomputes every group — the pre-WP404 behaviour.
+ * The default stays incremental-when-provable: a group is skipped only
+ * when a fresh encoding of the live bytes compares equal to the stored
+ * parity (counted in unchanged AND dirty_skipped), and any doubt
+ * (fresh mount, config change, unreadable footer/parity, changed group
+ * count) falls back to the full pass. unseal/return contract as vol_seal. */
+int vol_seal_ex(invfs_volume *v, int unseal, int force_full,
+                invfs_seal_report *rep);
 
 /* verify --deep leg: recompute every sealed stripe against its stored
  * parity block. All four counters are 0 on an unsealed volume. */

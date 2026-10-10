@@ -25,6 +25,11 @@
  * files, without sweeping. With --dry-run, --seal prints the seal plan
  * (groups, parity bytes, overhead) and changes nothing.
  *
+ * WP404: a re-seal restripes only groups dirty since the last successful
+ * seal when the dirty bitmap proves continuity (fresh mount, config
+ * change, or footer doubt fall back to the full recompute); --reseal-full
+ * forces the full recompute explicitly.
+ *
  * The --redundant-* flags are the v2 spelling of the same knob and are
  * mapped onto the fixed menu: --redundant-blocks <f> snaps 1/f to the
  * nearest menu k (20/9/8/6); --redundant-paranoic <f>[:algo] snaps f*100
@@ -1359,6 +1364,7 @@ int main(int argc, char **argv)
     invfs_volume *vol;
     int err, dry = 0, seal = 0, unseal = 0, bench = 0, realize = 0;
     int seal_pct = 10;               /* WP201: --seal [5|10|20|25] */
+    int reseal_full = 0;             /* WP404: --reseal-full escape hatch */
     int no_realize = 0, stopped = 0;
     int fast = 0;
     const char *extract_dir = NULL;    /* WP23 --extract-packs mode */
@@ -1393,6 +1399,7 @@ int main(int argc, char **argv)
             fprintf(stderr,
                 "usage: %s <image> [--dry-run] [--fast] [--compact]\n"
                 "           [--seal [5|10|20|25]|--unseal]\n"
+                "           [--reseal-full]\n"
                 "           [--redundant-blocks <f>]\n"
                 "           [--redundant-paranoic <f>[:rs-vm|rs-cauchy]]\n"
                 "           [--free-redundant] [--redundant-bench]\n"
@@ -1406,6 +1413,9 @@ int main(int argc, char **argv)
                 "                         the sweep rewrites it ~1x/sec, open it\n"
                 "                         in a browser -- no server, no network)\n"
                 "           [--color auto|always|never] (default: auto; NO_COLOR honored)\n"
+                "  --reseal-full force a full parity recompute (default:\n"
+                "              restripe only groups dirty since the last\n"
+                "              seal when provable)\n"
                 "  --fast      cheap pass: RAW files take the generic\n"
                 "              per-segment recompress only (no classification,\n"
                 "              transcodes, decomposition, batching or dedupe)\n"
@@ -1427,6 +1437,7 @@ int main(int argc, char **argv)
         fprintf(stderr,
                 "usage: %s <image> [--dry-run] [--fast] [--compact]\n"
                 "           [--seal [5|10|20|25]|--unseal]\n"
+                "           [--reseal-full]\n"
                 "           [--redundant-blocks <f>]\n"
                 "           [--redundant-paranoic <f>[:rs-vm|rs-cauchy]]\n"
                 "           [--free-redundant] [--redundant-bench]\n"
@@ -1436,6 +1447,7 @@ int main(int argc, char **argv)
                 "                         blocks stay held until the next sweep)\n"
                 "           [--log <file>] (append combined stdout/stderr)\n"
                 "           [--color auto|always|never] (default: auto; NO_COLOR honored)\n"
+                "  --reseal-full force a full parity recompute\n"
                 "  --fast      cheap pass: RAW files take the generic\n"
                 "              per-segment recompress only (no classification,\n"
                 "              transcodes, decomposition, batching or dedupe)\n"
@@ -1492,6 +1504,9 @@ int main(int argc, char **argv)
         } else if (strcmp(a, "--unseal") == 0 ||
                    strcmp(a, "--free-redundant") == 0) {
             unseal = 1;
+        } else if (strcmp(a, "--reseal-full") == 0) {
+            /* WP404: force the full recompute (no incremental gate). */
+            reseal_full = 1;
         } else if (strcmp(a, "--redundant-bench") == 0) {
             bench = 1;
         } else if (strcmp(a, "--redundant-blocks") == 0 && i + 1 < argc) {
@@ -1534,6 +1549,13 @@ int main(int argc, char **argv)
      * conflicts. */
     if (unseal + bench > 0 &&
         (seal || rb_f >= 0 || rp_f >= 0 || realize || extract_dir)) {
+        fprintf(stderr, "conflicting flags\n");
+        return 2;
+    }
+    /* WP404: --reseal-full forces a recompute; with --unseal/--bench
+     * there is nothing to recompute. With --dry-run it is accepted and
+     * moot (the plan never recomputes). */
+    if (reseal_full && (unseal || bench)) {
         fprintf(stderr, "conflicting flags\n");
         return 2;
     }
@@ -1742,6 +1764,12 @@ int main(int argc, char **argv)
                         (unsigned)k1c, rs_algo_name(l2c), (unsigned)m2c);
         }
     }
+    /* WP404: --reseal-full names a recompute; with no seal running it
+     * names nothing — say so instead of silently plain-sweeping. */
+    if (reseal_full && !dry && !seal && rb_f < 0 && rp_f < 0 &&
+        !auto_reseal && !invfs_sweep_ui_active())
+        fprintf(stderr, "note: --reseal-full with no seal to recompute "
+                "(volume unsealed, no --seal); plain sweep\n");
 
     /* WP20 --unseal: free all parity blocks and remove the owners; no sweep
      * walk runs (there is nothing to recompress, only seal state to drop). */
@@ -2289,7 +2317,7 @@ progress:
 
     /* WP201: the seal stage. A requested seal runs AFTER the sweep is
      * fully flushed (parity covers the post-sweep state); a live seal
-     * with no flags auto-reseals (full recompute). Under --dry-run the
+     * with no flags auto-reseals (incremental when provable, else full). Under --dry-run the
      * stage is a read-only plan: what WOULD be sealed, in groups, bytes
      * and overhead — the volume is not touched. */
     if (seal || rb_f >= 0 || rp_f >= 0 || auto_reseal) {
@@ -2329,7 +2357,7 @@ progress:
         uint32_t k1c, m2c;
         int l2c;
         vol_redun_state(vol, &k1c, &l2c, &m2c);
-        if (vol_seal(vol, 0, &rep) != 0) {
+        if (vol_seal_ex(vol, 0, reseal_full, &rep) != 0) {
             sw_progress_suspend();
             fprintf(stderr, "seal failed\n");
             sw_stage_end("failed");
@@ -2338,9 +2366,25 @@ progress:
         }
         /* WP201: v1 report line. l2c carries the GROUP code here (there is
          * no second layer; l2_* report fields stay 0 and no [seal2] line
-         * is printed). Every seal is a full recompute, so updated ==
-         * groups and unchanged == 0 by construction, not by accident. */
+         * is printed). WP404: a full pass reports updated == groups with
+         * unchanged == 0; an incremental one names the restriped/skipped
+         * split plus the parity bytes of writes saved. */
         if (!invfs_sweep_ui_active()) {
+            if (rep.dirty_skipped > 0) {
+                uint64_t saved = rep.dirty_skipped * (uint64_t)m2c *
+                                 SEAL_SYM_BYTES;
+                printf("[seal] %llu groups, %llu parity blocks, overhead "
+                       "%.2f%% of covered data; %llu groups restriped, "
+                       "%llu skipped (%llu parity bytes of writes saved) "
+                       "(incremental, k=%u, m=%u, %s)",
+                       (unsigned long long)rep.stripes,
+                       (unsigned long long)rep.parity_blocks,
+                       rep.overhead_pct,
+                       (unsigned long long)rep.updated,
+                       (unsigned long long)rep.dirty_skipped,
+                       (unsigned long long)saved,
+                       (unsigned)k1c, (unsigned)m2c, rs_algo_name(l2c));
+            } else {
             printf("[seal] %llu groups, %llu parity blocks, overhead "
                    "%.2f%% of covered data; %llu groups (re)written "
                    "(full recompute, k=%u, m=%u, %s)",
@@ -2348,6 +2392,7 @@ progress:
                    (unsigned long long)rep.parity_blocks, rep.overhead_pct,
                    (unsigned long long)rep.updated,
                    (unsigned)k1c, (unsigned)m2c, rs_algo_name(l2c));
+            }
             if (rep.added || rep.freed)
                 printf(" (%llu added, %llu stale freed)",
                        (unsigned long long)rep.added,
