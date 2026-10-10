@@ -429,8 +429,29 @@ verify_consistent() { # <label> <origdir>
             failed="$failed $f"
         fi
     done
+    # Ledger names the orig set never contains (sweep-created siblings
+    # like t.tar!part0): absence from $failed must mean PROBED-readable,
+    # not merely unprobed -- otherwise the (b) check below concludes
+    # "reads exact" about a file nobody read (WP-J's own false
+    # positive, caught by leg3 under chaos). No oracle exists for them
+    # (no orig bytes), so readability is the verdict: unreadable joins
+    # failed (policed by (a) like the rest); readable is recorded for
+    # the divergence branch of (b) -- both read paths promise identical
+    # bytes for one inode, so a readable-but-flagged sibling is a real
+    # finding (stale mapping), not an excuse.
+    readable_extra=""
+    while IFS= read -r f; do
+        [ -n "$f" ] || continue
+        case " $failed " in *" $f "*) continue;; esac
+        [ -e "$orig/$f" ] && continue
+        if $B/invf-cat "$DM" "$f" "$FLK/consistent-out.bin" >/dev/null 2>&1; then
+            readable_extra="$readable_extra $f"
+        else
+            failed="$failed $f"
+        fi
+    done <"$FLK/consistent-d.txt"
     rm -f "$FLK/consistent-out.bin"
-    info "consistent: $exact_n exact,$(echo "$failed" | wc -w) unreadable-or-wrong ($label):${failed:- none}"
+    info "consistent: $exact_n exact,$(echo "$failed" | wc -w) unreadable-or-wrong ($label):${failed:- none}${readable_extra:+; readable-but-flagged:$readable_extra}"
     info "consistent: ledger fsck:[$(tr '\n' ' ' <"$FLK/consistent-dfsck.txt")] verify:[$(tr '\n' ' ' <"$FLK/consistent-dverify.txt")]"
     # (a) every failure named.
     for f in $failed; do
@@ -441,8 +462,11 @@ verify_consistent() { # <label> <origdir>
     done
     # (b) every listed name either failed or is excused: fsck torn-xattr
     # rows are metadata-only damage (content reads fine); a verify-CORRUPT
-    # name that reads exact is a read-path disagreement (verify vs cat) and
-    # fails -- both paths promise identical bytes, so divergence is a bug.
+    # orig name that read exact is a read-path disagreement (verify vs
+    # cat) and fails -- both paths promise identical bytes, so divergence
+    # is a bug. A ledger-named SWEEP-CREATED name (no orig oracle) that
+    # reads fine fails too, as resolution divergence (stale mapping) --
+    # but never with an "exact" claim nobody measured.
     while IFS= read -r f; do
         [ -n "$f" ] || continue
         case " $failed " in *" $f "*) continue;; esac
@@ -451,6 +475,10 @@ verify_consistent() { # <label> <origdir>
             info "  ledger names $f (torn-xattr: metadata-only, content reads exact)"
             continue
         fi
+        case " $readable_extra " in *" $f "*)
+            echo "  UNEXPLAINED ($label): $f readable via cat but ledger-named -- resolution divergence (no oracle for sweep-created names)" >&2
+            return 1;;
+        esac
         if grep -Fqx "$f" "$FLK/consistent-dverify.txt"; then
             echo "  UNEXPLAINED ($label): verify calls $f corrupt but it reads exact -- read-path disagreement" >&2
         else
