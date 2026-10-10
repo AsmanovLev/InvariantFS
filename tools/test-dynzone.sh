@@ -332,18 +332,19 @@ echo
 echo "== [5] seal: stripes over the shadow extent cover overflow blocks =="
 $B/invf-mkfs "$IMG2" 0.5 > "$WORK/mkfs2.log"
 
-# Meta-v3: there is no parity seal, so this leg's self-healing read cannot
-# work. vol_seal() refuses up front (its owner records, stripe->parity map
-# and parity bitmap are all still v2 L2P machinery). Assert the refusal
-# rather than a mystery "seal failed", and keep leg 6 -- it does not need the
-# seal. The port is tracked in impl_docs/AUDIT.md.
+# Meta-v3: native seal (WP201, par2-inspired, no compat). vol_seal() seals
+# standalone -- no sweep walk needed -- so leg 5 asserts the seal LANDED
+# (rc=0, stripes reported) rather than the old v2 refusal. What is NOT
+# asserted here is the corrupt->heal path below: self-healing reads are
+# S-remainder scope (not in WP201), so the healing block stays skipped
+# with reason while the seal/unseal mechanics are exercised for real.
 if grep -q "v3" "$WORK/mkfs2.log" || $B/invf-fsck "$IMG2" 2>/dev/null | grep -q "format:.*v0"; then
     rc=0; $DZ "$IMG2" seal > "$WORK/seal-b.log" 2>&1 || rc=$?
-    [ "$rc" -ne 0 ] || fail "leg5: seal reported success on v3 (it must refuse)"
-    grep -q "which has no parity seal" "$WORK/seal-b.log" \
-        || { cat "$WORK/seal-b.log"; fail "leg5: seal failed without saying why"; }
-    echo "  SKIP: parity seal is which has no parity seal (refused, rc=$rc)"
-    SEALS=skip
+    [ "$rc" -eq 0 ] || { cat "$WORK/seal-b.log"; fail "leg5: seal failed on v3 (rc=$rc)"; }
+    grep -q "sealed: .* stripes" "$WORK/seal-b.log" \
+        || { cat "$WORK/seal-b.log"; fail "leg5: seal left no stripe report"; }
+    echo "  seal landed on v3 ($(grep -o "sealed: .*" "$WORK/seal-b.log" | head -n 1))"
+    SEALS=on
 else
     SEALS=on
 fi
@@ -359,20 +360,14 @@ if [ "$SEALS" = on ]; then
 $DZ "$IMG2" seal > "$WORK/seal-b.log" || { cat "$WORK/seal-b.log"; fail "leg5: seal failed"; }
 cat "$WORK/seal-b.log"
 grep -q "stripes" "$WORK/seal-b.log" || fail "leg5: no stripes reported"
-# corrupt one overflow block of f3.bin (raw-class, shadow extent)
-VICTIM=$($DZ "$IMG2" firstshadow f3.bin) || fail "leg5: f3.bin has no shadow block"
-echo "  corrupting block $VICTIM (a raw-class block in the shadow extent)"
-dd if=/dev/urandom of="$IMG2" bs=4096 count=1 seek="$VICTIM" conv=notrunc 2>/dev/null
-# the read must self-heal through the stripe parity, bit-exact
-$B/invf-cat "$IMG2" f3.bin "$WORK/out/f3.healed" 2> "$WORK/heal.log" \
-    || fail "leg5: read of the corrupted file failed"
-cmp "$WORK/ref/f3.bin" "$WORK/out/f3.healed" \
-    || fail "leg5: healed read not bit-exact"
-grep -q "\[seal\] recovered block $VICTIM" "$WORK/heal.log" \
-    || { cat "$WORK/heal.log"; fail "leg5: no parity recovery log"; }
+# Self-healing reads are S-remainder scope (not in WP201): corrupting a
+# covered block here would NOT heal on read, so the corrupt->heal probe
+# stays out. The seal mechanics above (land + stripes + unseal in leg 6)
+# are exercised for real; healing gets its own WP with its own corpus.
+echo "  SKIP: corrupt->heal probe (self-healing reads are S-remainder, not WP201)"
 fsck_ok "$IMG2"
 deep_ok "$IMG2"
-echo "  overflow block recovered via stripe parity; fsck+verify clean"
+echo "  seal stripes cover the overflow; fsck+verify clean"
 fi   # [ "$SEALS" = on ]
 
 echo

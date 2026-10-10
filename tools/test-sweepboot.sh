@@ -172,18 +172,17 @@ echo "  empty dir, rc 0 -- the sweepboot script falls back to builtins"
 echo
 echo "== [6] the maintenance pass itself: invf-sweep --seal =="
 # the exact argv sweepboot-init.sh issues (step 3) on the swept image.
-# WP101: --seal does NOT seal a Meta-v3 volume. vol_seal.c refuses it up
-# front ("which has no parity seal", see impl_docs/AUDIT.md WP-SEAL-V3)
-# and mkfs writes v3, so the old "seal succeeded and printed [seal]" pair
-# of assertions had been a hard failure since the v2 machinery was retired.
-# What is asserted here is the refusal plus the volume being untouched by
-# it -- the same contract tools/test-seal.sh asserts.
+# WP201: native v3 seal (par2-inspired, no compat). --seal seals with the
+# default menu (pct 10 -> k=9,m=1) and proves it with verify-after-write;
+# the old refusal assertions retired with the v2 format. What is asserted
+# here is success plus the volume being untouched by it -- the same
+# contract tools/test-seal.sh asserts in full.
 INVFS_CODECPACKS="$WORK/packs2" $B/invf-sweep "$IMG" --seal > "$WORK/seal.log" 2>&1 \
-    && sealrc=0 || sealrc=$?   # a non-zero rc is the expected v3 answer here
-[ "$sealrc" -ne 0 ] || fail "v3: --seal reported success (it must refuse)"
-grep -q "which has no parity seal" "$WORK/seal.log" \
-    || { cat "$WORK/seal.log"; fail "v3: --seal failed without saying why"; }
-echo "  --seal refused with a diagnostic (rc=$sealrc), as it must on v3"
+    && sealrc=0 || sealrc=$?   # zero is the expected v3 answer now
+[ "$sealrc" -eq 0 ] || { cat "$WORK/seal.log"; fail "v3: --seal failed (rc=$sealrc)"; }
+grep -q "sealed-at-gen-.* verified clean" "$WORK/seal.log" \
+    || { cat "$WORK/seal.log"; fail "v3: --seal left no verify-after-write proof"; }
+echo "  --seal sealed with verify-after-write proof (rc=0)"
 # everything still bit-exact, volume clean
 for f in demo.splt nest.splt notes.txt rand.bin; do
     $B/invf-cat "$IMG" "$f" "$WORK/out/$f" >/dev/null

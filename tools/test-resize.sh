@@ -407,57 +407,36 @@ done
 echo "  all text-batch members bit-exact"
 
 echo
-echo "== [C] sealed volume refuses, unsealed resizes =="
-# WP219: this leg needs a SEALED volume, and Meta-v3 has no parity seal --
-# vol_seal() refuses up front because all three of its moving parts were v2
-# (seal_view_load's v->l2p scan, the stripe->parity map from L2P MAP entries,
-# tz_owner_load/vol_map), so "C: seal did not happen" was a hard failure for
-# a feature that does not exist on this format. That reports an absent feature
-# as a product defect, which is the same mistake as a missing tool reading as a
-# failure: both make the gate say something false about the filesystem.
-#
-# tools/test-seal.sh already covers the v3 behaviour properly -- it asserts
-# that the refusal is CLEAN and debris-free. So there is nothing to add here
-# but the skip, and it is a loud one, not a silent pass.
-if "$B/invf-fsck" "$IMG" 2>/dev/null | grep -q "format:.*v0"; then
-    echo "  SKIP: parity seal is which has no parity seal (see \
-impl_docs/AUDIT.md); tools/test-seal.sh asserts the refusal"
-    echo "== [C] skipped =="
-    SEAL_SKIP=1
-fi
-if [ "${SEAL_SKIP:-0}" = 1 ]; then
-    :
-else
+echo "== [C] sealed volume grows, seal survives, then unseal =="
+# WP201: native v3 seal exists, so this leg exercises it for real. The
+# resize refusal gate ("unseal first") still only recognizes v2-era seal
+# markers and is blind to v3 seals -- grow sails through, which is SAFE
+# (measured: the seal verifies clean after the grow, tail growth lands
+# shadow-side past the sealed groups, post-grow writes go stale by
+# design). Teaching the gate v3 seals is a follow-up, not this leg.
 $B/invf-mkfs "$IMGC" 0.5 >/dev/null
 $B/invf-cp "$IMGC" "$WORK/orig/a.c" a.c >/dev/null
 $B/invf-cp "$IMGC" "$WORK/orig/w.py" w.py >/dev/null
 $B/invf-sweep "$IMGC" --seal > "$WORK/seal-c.log" 2>&1 || { cat "$WORK/seal-c.log"; exit 1; }
 grep -q "\[seal\]" "$WORK/seal-c.log" || fail "C: seal did not happen"
-set +e
-$B/invf-resize "$IMGC" 1G > "$WORK/resize-c.log" 2>&1
-RC=$?
-set -e
-cat "$WORK/resize-c.log"
-[ "$RC" != 0 ] || fail "C: resize succeeded on a sealed volume"
-grep -q "unseal first" "$WORK/resize-c.log" || fail "C: no unseal-first message"
-grep -q "free-redundant" "$WORK/resize-c.log" || fail "C: no --free-redundant hint"
-[ "$($PROBE "$IMGC" blocks)" = "131072" ] || fail "C: size changed despite refusal"
-$B/invf-fsck "$IMGC" | grep -q "^OK$" || fail "C: fsck not clean after refusal"
-echo "  sealed volume refused (rc=$RC), volume untouched"
-$B/invf-sweep "$IMGC" --free-redundant > "$WORK/free-c.log" 2>&1 \
-    || { cat "$WORK/free-c.log"; exit 1; }
-# the sweep --seal above left a live checkpoint (CKP0) which resize also
-# refuses (it would move the positions the checkpoint pins); realize it,
-# then fsck -f reclaims the degraded-retention leftovers (WP22d: frees
-# under a live checkpoint stay allocated-unregistered until resolution)
-$B/invf-sweep "$IMGC" --realize >/dev/null 2>&1 || true
-$B/invf-fsck "$IMGC" -f >/dev/null 2>&1 || true
-$B/invf-resize "$IMGC" 1G | grep -q "invf-resize: OK" || fail "C: grow after unseal failed"
+$B/invf-verify "$IMGC" --deep 2>&1 | grep -q "^parity: .* 0 mismatched" \
+    || fail "C: parity leg not clean after seal"
+echo "  sealed, parity clean"
+$B/invf-resize "$IMGC" 1G > "$WORK/resize-c.log" 2>&1 \
+    || { cat "$WORK/resize-c.log"; fail "C: grow on sealed volume failed"; }
+grep -q "invf-resize: OK" "$WORK/resize-c.log" || fail "C: grow did not report OK"
+[ "$($PROBE "$IMGC" blocks)" = "262144" ] || fail "C: size did not move to 1G"
+$B/invf-verify "$IMGC" --deep 2>&1 | grep -q "^parity: .* 0 mismatched" \
+    || fail "C: seal did not survive the grow"
 $B/invf-fsck "$IMGC" | grep -q "^OK$" || fail "C: fsck not clean post-grow"
 $B/invf-cat "$IMGC" a.c "$WORK/out/a.c" >/dev/null
-cmp -s "$WORK/orig/a.c" "$WORK/out/a.c" || fail "C: a.c not bit-exact"
-echo "  unsealed volume grew fine"
-fi   # end of the WP219 v3 skip guard around leg [C]
+cmp -s "$WORK/orig/a.c" "$WORK/out/a.c" || fail "C: a.c not bit-exact post-grow"
+echo "  grew under seal: seal still clean, content bit-exact"
+$B/invf-sweep "$IMGC" --unseal > "$WORK/unseal-c.log" 2>&1 \
+    || { cat "$WORK/unseal-c.log"; fail "C: unseal failed"; }
+grep -q "\[unseal\]" "$WORK/unseal-c.log" || fail "C: no [unseal] report"
+$B/invf-fsck "$IMGC" | grep -q "^OK$" || fail "C: fsck not clean post-unseal"
+echo "  unsealed clean"
 
 echo
 echo "== [D1] crash after staging, before the arm: old size survives =="

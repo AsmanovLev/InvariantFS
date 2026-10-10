@@ -249,7 +249,7 @@ file.
 | **Meta-v3 area** | `RT30` descriptor + COW B+ tree base + append-only Delta Log | base pages are copy-on-write; the delta is merged by the background **fold**; the base-page pool may be free inside the metadata zone |
 | **RAW** | content-class tag for freshly written segments | new writes land here; drained into Shadow by the sweep |
 | **Shadow** | consolidated, type-clustered, deduplicated storage | grows as RAW drains into it |
-| **Seal parity** | *not implemented* — the XOR/RS implementation went with the format it belonged to | `invf-sweep --seal` refuses and says so |
+| **Seal parity** | native v3 seal (WP201, par2-inspired, no byte-compat): per-chunk RS groups + footer written last | `invf-sweep --seal [5\|10\|20\|25]` seals (default 10); `--unseal` removes |
 
 ### 2.4 The write path (most important caveat)
 
@@ -317,7 +317,7 @@ seven core stages, in this order (`tools/invf-sweep.c`):
 
 Two variants: a two-device volume inserts `tier` (hot/cold balancing) between
 `heat` and `dedupe` (`invf-sweep.c:2052`), and `--seal` appends `seal`
-(an 8th stage, which **refuses on v3** — see §2.3)
+(an 8th stage, native v3 since WP201)
 (`:2190`). Under `--dry-run`, stage 3 reports as `plan`.
 
 Note the ordering: **re-encoding (stage 3) happens before reclaiming
@@ -367,7 +367,7 @@ Manual invocation:
 ```bash
 invf-sweep /path/to/volume.img                # offline (volume unmounted)
 invf-sweep /path/to/volume.img --dry-run      # show what would happen
-invf-sweep /path/to/volume.img --seal         # not implemented; refuses
+invf-sweep /path/to/volume.img --seal         # seal with default menu (pct 10)
 
 # In FUSE: full pass, and it arms a savepoint — see the note below
 kill -USR1 $(pidof invf-fuse)                  # request sweep
