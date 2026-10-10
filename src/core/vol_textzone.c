@@ -594,6 +594,52 @@ static int tz_seal(invfs_volume *v, int binary, const uint8_t *bbuf,
     return 0;
 }
 
+/* WP117-batches: can this commit keep the pba map exact by hand?
+ *
+ * The map counts recipe entries PER ENTRY (the build does +1 per non-TEXT
+ * pba entry), while vol_free_recipe_blocks subtracts per UNIQUE pba (its
+ * intra-recipe dup loop). The two agree iff the superseded recipe names at
+ * most one map-visible (non-TEXT, non-zero-pba) entry -- the whole tz
+ * population in the common case (single-segment RAW members) -- and only
+ * then may the commit validate the map across its own publish instead of
+ * paying a full-namespace rebuild inside the free. The new recipe needs no
+ * adjustment either way: tz commits are TEXT-only and the map never counts
+ * TEXT entries.
+ *
+ * Returns 1 when the hand-kept path is exact, 0 otherwise
+ * (unreadable/unparseable/multi-entry: the free rebuilds, which is today's
+ * cost and today's answer -- a forgotten validate can only cost a walk,
+ * never a free on a stale count, by the map's own contract). The blob is
+ * content-addressed and immutable, so the recipe parsed here is the recipe
+ * the free below parses. */
+static int tz_old_recipe_single_entry(invfs_volume *v,
+                                      const uint8_t old_addr[INVFS_RECIPE_ADDR_LEN])
+{
+    uint8_t *blob = NULL;
+    size_t blen = 0;
+    invfs_ast_hdr ah;
+    const invfs_ast_block_entry *ents = NULL;
+    size_t n_ents = 0, i, nvis = 0;
+    static const uint8_t zero_addr[INVFS_RECIPE_ADDR_LEN];
+
+    if (!v || !old_addr || memcmp(old_addr, zero_addr, sizeof zero_addr) == 0)
+        return 0;
+    if (vol_recipe_load(v, old_addr, &blob, &blen) != 0 || !blob)
+        return 0;
+    if (vol_ast_recipe_parse(blob, blen, &ah, &ents, &n_ents) != 0 || !ents) {
+        free(blob);
+        return 0;
+    }
+    for (i = 0; i < n_ents; i++) {
+        if (ents[i].zone == INVFS_ZONE_TEXT || !ents[i].pba)
+            continue;
+        if (++nvis > 1)
+            break;
+    }
+    free(blob);
+    return nvis <= 1;
+}
+
 /* Rewrite one member's v3 recipe with TEXT entries naming the sealed
  * batches. Returns 0 on success/soft-skip, -1 on hard error. */
 static int tz_commit_member(invfs_volume *v, int binary,
@@ -606,6 +652,7 @@ static int tz_commit_member(invfs_volume *v, int binary,
     uint8_t addr[INVFS_RECIPE_ADDR_LEN];
     invfs_inode in;
     uint8_t old_addr[INVFS_RECIPE_ADDR_LEN];
+    int keep_map;
 
     if (!m->complete || m->fallback || m->committed || !m->n_slices)
         return 0;
@@ -639,11 +686,31 @@ static int tz_commit_member(invfs_volume *v, int binary,
     if (vol_inode_get(v, cand->inode_id, &in) != 1)
         return -1;
     memcpy(old_addr, in.recipe_addr, sizeof old_addr);
+    /* WP117-batches: every commit used to invalidate the pba map (the put
+     * below publishes a different recipe_addr) and the free after it
+     * rebuilt the map from the live set -- a full namespace walk plus one
+     * recipe load per live inode, PER MEMBER, so the flush was O(members x
+     * live). Measured: 17m40s for 8000 members on an 8800-file volume
+     * (vol_free_recipe_blocks -> pba_ref_ensure -> walk_dir, every time).
+     * When the superseded recipe has at most one map-visible entry, the
+     * map is still exact up to that one entry after the publish (the new
+     * recipe is TEXT-only, which the map never counts), so establish it
+     * before the publish -- cheap when valid, a single rebuild when a
+     * fallback sweep between commits invalidated it -- and validate across
+     * the publish; the free's own -1 then restores exactness. Multi-entry
+     * members keep today's rebuild. Same frees, same stamps, same bytes:
+     * the serial path is unchanged, only the redundant rebuilds are gone.
+     * No new locks: the pba primitives take g_pba_ref_mu themselves. */
+    keep_map = tz_old_recipe_single_entry(v, old_addr);
+    if (keep_map)
+        pba_ref_ensure(v);
     in.size = m->file_size;
     memset(&in.recipe, 0, sizeof in.recipe);
     memcpy(in.recipe_addr, addr, sizeof addr);
     if (vol_inode_delta_put(v, cand->inode_id, &in) != 0)
         return -1;
+    if (keep_map)
+        pba_ref_validate(v);
     vol_free_recipe_blocks(v, old_addr, 0);
     if (binary)
         vol_stamp_class(v, cand->inode_id, INVFS_CLASS_BATCHED_BIN,
