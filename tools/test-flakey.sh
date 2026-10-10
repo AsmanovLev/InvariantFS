@@ -73,7 +73,9 @@
 #            FLAKEY_MIN_FREE_MB (hard scratch-space floor, default 4000; 0 to
 #            override while diagnosing a "device smaller than the table" red),
 #            FLAKEY_RC_NFOLD (leg 8 crash driver's fold ceiling — it must be
-#            far larger than the cut reaches, default 3000).
+#            far larger than the cut reaches (count-based cut below lands at
+#            <=16 folds; the ceiling only bounds a runaway driver), default
+#            30000).
 #
 # Needs: dm-flakey (modprobe dm-flakey), losetup, fusermount3, python3,
 #        passwordless sudo (the script is sudo-aware; `sudo -v` first if
@@ -152,7 +154,7 @@ PC_WRITER_PID=""
 RC_WORK=${FLAKEY_RC_WORK:-}
 RC_VOL=""
 RC_SIZE_MB=${FLAKEY_RC_SIZE_MB:-512}
-RC_NFOLD=${FLAKEY_RC_NFOLD:-3000}
+RC_NFOLD=${FLAKEY_RC_NFOLD:-30000}
 RC_ROUNDS=${FLAKEY_RC_ROUNDS:-3}
 RC_NFILES=40          # real files, written through the public write path
 RC_NGEN=200           # forced base generations -> the orphans ARM A collects
@@ -1664,7 +1666,25 @@ rc_crash_round() {
         echo "        crash window closed; raise RC_NFOLD." >&2
         kill -9 "$RC_CRASH_PID" 2>/dev/null; wait "$RC_CRASH_PID" 2>/dev/null
         RC_CRASH_PID=""; return 1; }
-    sleep "$(( (RC_JITTER + i * 13) % 9 + 1 ))"   # seeded spread of cut points
+    # Deterministic cut point (COUNT-based, never time-based): the old
+    # `sleep 1..9` let the driver outrun the killer on fast hardware
+    # (3000 folds in ~8s on runner SSDs -- the driver FINISHED before the
+    # cut, failing the leg with "raise RC_NFOLD"). Cut at-or-just-past
+    # 8+N folds (N seeded by the round digit so rounds still vary; the
+    # 0.25s poll lands a few folds past the target on fast boxes and that
+    # is fine) with the ceiling more than three orders above, so the poll
+    # cannot lose the race on any hardware (escaping needs ~30000 folds
+    # inside one poll gap).
+    # The >=8 floor is kept: the bounded pass only frees once BOTH RT30
+    # slots have moved off a root, which takes a few published generations.
+    rnum=${label//[^0-9]/}; rnum=${rnum:-0}
+    target=$(( 8 + (RC_JITTER + rnum * 13) % 9 ))
+    for j in $(seq 1 400); do
+        folds=$(grep -c COSTFOLD "$log" 2>/dev/null); folds=${folds:-0}
+        [ "$folds" -ge "$target" ] && break
+        kill -0 "$RC_CRASH_PID" 2>/dev/null || break
+        sleep 0.25
+    done
     kill -9 "$RC_CRASH_PID" 2>/dev/null
     wait "$RC_CRASH_PID" 2>/dev/null; wrc=$?
     RC_CRASH_PID=""
