@@ -2757,6 +2757,43 @@ Fix: refuse only truncation (backing < superblock), tolerate larger.
 Regression: `tools/test-verify-size.sh` (grow-then-verify clean +
 bit-exact, shrink-then-verify refused with a diagnostic).
 
+## flakey leg 4 (crash-mid-seal) can fail unrecoverably by design -- proven-exhausted verdict (WP502)
+
+**Date:** 2026-10-11. **Status:** SHIPPED (this entry's commit). No engine
+change (`src/*` untouched -- the engine is the honest party here); verdict-
+only change in `tools/test-flakey.sh` (`seal_exhausted` /
+`seal_exhausted_assert` + `replay_leg4`, called from `seal_resolve`'s two
+formerly-fatal dead ends) plus this entry.
+When seeded drop windows tear two consecutive RT30 root publishes (both
+slots torn, base tree unreachable) or corrupt content under a live seal,
+the volume is UNRECOVERABLE BY DESIGN: SPT0 rollback declines for cause
+(`invf-rollback`: "the save point is DAMAGED (base_root=...)" +
+`invf-spt0: refusing to roll back: inode N: inode's pinned recipe is
+unreadable`) and `invf-fsck -f` answers CANNOT REPAIR (torn slots named
+with pbas, or quarantined ranges still holding keys live inodes need).
+The leg demanded ladder convergence anyway and failed (measured 2/9
+passes; same failure on CI). The new second passing verdict,
+proven-exhausted, passes iff ALL hold on the leg's own log artifacts:
+(a) no complete seal trusted (absent per the footer rule, or
+torn-and-named -- never a torn footer misread as committed); (b) SPT0
+rollback attempted and declined with the named cause above; (c) `fsck -f`
+attempted with CANNOT REPAIR naming the cause; (d) every unreadable-or-
+wrong probe file (orig AND ledger-only siblings) in the fsck/verify
+ledger, or covered by a declared total namespace loss
+(damaged-partial + "no valid base root" + unwalkable namespace -- wrong
+bytes are never covered, only unreadable); (e) every successful read
+cmp-verified bit-exact vs orig; (f) the verdict line states EXHAUSTED with
+the cause chain, never converged. Anything short FAILs as before.
+Proven: all six preserved dead-end artifacts replay to EXHAUSTED PASS
+(never converged, never FAIL) via
+`FLAKEY_REPLAY=<artifact> FLAKEY_REPLAY_WORK=<scratch> bash
+tools/test-flakey.sh`; rerun deterministic modulo the DM path;
+tampered-ledger negative control (emptied consistent-* ledger +
+`FLAKEY_REPLAY_MODE=assert`) refuses naming the first unnamed file; live
+`FLAKEY_ONLY=4` green in both outcomes. The converged path is
+byte-identical (success commands untouched; only former `fail` sites route
+to the new verdict).
+
 ## arc_concurrency_test runner flake (engine-ci, S-wave merge)
 
 **Date:** 2026-10-11. **Status:** FLAKE (green on rerun-failed-jobs, no
