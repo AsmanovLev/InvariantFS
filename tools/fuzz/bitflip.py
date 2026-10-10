@@ -119,21 +119,34 @@ def one_iteration(args, it, keep_dir):
                 return fails, anoms, mutation
         if setup_tool("invf-sweep", timeout=180):
             return fails, anoms, mutation
+        seal_note = ""
         if args.seal_every and it % args.seal_every == args.seal_every - 1:
-            # WP101: --seal is REFUSED on Meta-v3 (vol_seal.c: the parity
-            # machinery is still v2; refusing loudly beats half-running it
-            # -- impl_docs/AUDIT.md WP-SEAL-V3). mkfs writes v3, so every
-            # 8th iteration was recording that refusal as a fuzz failure.
-            # A refusal is now an expected, labelled outcome; a v2 refusal
-            # for any other reason still counts.
+            # WP301: exactly ONE --seal run; its result is final. This used
+            # to probe with a raw tool() call and then run --seal AGAIN via
+            # setup_tool() in the elif below -- two invocations. Once native
+            # v3 seal landed (WP201) the re-run could exit nonzero
+            # ("swept=0 skipped=6" + a seal-stage failure) and was
+            # misrecorded as a fresh-image setup failure with the argv
+            # hidden, so it read as the plain setup sweep declining every
+            # file -- exactly on the --seal-every iters. The "NOT
+            # IMPLEMENTED on Meta-v3" refusal the old comment cited no
+            # longer exists anywhere in the seal path; the branch stays as
+            # a labelled no-op in case an old binary is ever driven.
+            # See INCIDENTS.md "test-fuzz bitflip + test-usr1-savepoint"
+            # and tools/fuzz/test_bitflip_seal_step.py.
             rc, out, err = tool("invf-sweep", "--seal", timeout=180)
             blob = (out + err).decode(errors="replace")
             if rc != 0 and "NOT IMPLEMENTED on Meta-v3" in blob:
-                mutation = "seal-refused(v3);"
-            elif setup_tool("invf-sweep", "--seal", timeout=180):
+                seal_note = "seal-refused(v3);"
+            elif rc != 0:
+                fails.append(Failure(it, "seal",
+                                     "invf-sweep --seal rc=%d on a swept "
+                                     "image: %s%s"
+                                     % (rc, out.decode(errors="replace"),
+                                        err.decode(errors="replace"))))
                 return fails, anoms, mutation
             else:
-                mutation = "sealed;"
+                seal_note = "sealed;"
 
         # ---- baseline: a fresh swept image must be squeaky clean ----
         rc, out, err = tool("invf-fsck", "-q", timeout=120)
@@ -175,6 +188,8 @@ def one_iteration(args, it, keep_dir):
         COVERAGE["%s/%s" % (rname, kind)] += 1
         if args.seal_every and it % args.seal_every == args.seal_every - 1:
             COVERAGE["sealed"] += 1
+        if seal_note:
+            mutation = seal_note + mutation
         mutation = "%s region=%s %s" % (mutation, rname, mutation)
 
         # ---- post-mutation: the tools must fail cleanly, never crash ----
@@ -229,9 +244,7 @@ def main():
                     help="image-name rotation width (cases are "
                          "seed-deterministic regardless)")
     ap.add_argument("--seal-every", type=int, default=8,
-                    help="seal every Nth image before mutating (0=never; on "
-                         "Meta-v3 the seal is refused and the step is a "
-                         "no-op -- see vol_seal.c)")
+                    help="seal every Nth image before mutating (0=never)")
     ap.add_argument("--only", type=int, default=-1,
                     help="re-run a single iteration (repro mode)")
     ap.add_argument("--workdir", default="/dev/shm/invf-fuzz-bitflip")
