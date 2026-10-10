@@ -419,17 +419,27 @@ int seal_parhdr_parse(const uint8_t *buf, size_t len,
 /* Forward declarations (defined below vol_seal). */
 typedef struct seal_grouper seal_grouper;
 typedef struct seal_crc seal_crc;
+/* WP401 scrub ledger sink: growable array owned by the pass. A single
+ * walk fills it, so duplicate marks of one group (a hole's `missing`
+ * upgraded by a later parity disagreement to `mismatched`) deduplicate
+ * by scan -- a count-then-fill two-pass overcounts them, because the
+ * count pass has no array to scan. NULL sink = legacy verify behavior. */
+typedef struct {
+    invfs_seal_badgroup *arr;
+    size_t n, cap;
+} scrub_sink;
 static int seal_emit_group(invfs_volume *v, invfs_wsession *pws,
                            seal_grouper *gr, uint64_t *par_off,
                            invfs_wsession *fws, uint64_t *foot_off,
                            seal_crc *fcrc, uint32_t *ngroups,
                            unsigned datasyms, uint64_t databytes);
 static int seal_verify_locked(invfs_volume *v, invfs_seal_verify *out,
-                              uint64_t expect_seq);
+                              uint64_t expect_seq,
+                              scrub_sink *sink, int *untrusted_out);
 static int seal_feed_verify(invfs_volume *v, seal_grouper *gr,
                             const uint8_t *data, size_t len, uint64_t pino,
                             uint64_t *poff, uint32_t *gi, uint32_t ngroups,
-                            invfs_seal_verify *out);
+                            invfs_seal_verify *out, scrub_sink *sink);
 
 /* In-memory config carrier: v->rd with l1_algo==1. (RDP0 is never written;
  * the footer prelude is the on-disk record.) */
@@ -1129,7 +1139,7 @@ int vol_seal(invfs_volume *v, int unseal, invfs_seal_report *rep)
         {
             invfs_seal_verify sv;
             memset(&sv, 0, sizeof sv);
-            if (seal_verify_locked(v, &sv, seq) != 0 ||
+            if (seal_verify_locked(v, &sv, seq, NULL, NULL) != 0 ||
                 sv.sealed != ngroups || sv.mismatched || sv.missing ||
                 sv.extra) {
                 fprintf(stderr, "seal: verify-after-write failed "
@@ -1192,13 +1202,54 @@ static int seal_emit_group(invfs_volume *v, invfs_wsession *pws,
     return 0;
 }
 
+/* WP401 scrub ledger helpers (the sink type is declared above, next to
+ * the forward declarations; grown here, next to its users). */
+static int scrub_sink_grow(scrub_sink *s)
+{
+    size_t nc = s->cap ? s->cap * 2 : 16;
+    invfs_seal_badgroup *na;
+    if (nc > (size_t)16777216) nc = (size_t)16777216;
+    if (s->n >= nc) return -1;
+    na = (invfs_seal_badgroup *)realloc(s->arr, nc * sizeof *na);
+    if (!na) return -1;
+    s->arr = na;
+    s->cap = nc;
+    return 0;
+}
+static int scrub_append(scrub_sink *s, uint32_t g, const char *reason)
+{
+    if (!s) return 0;
+    if (s->n == s->cap && scrub_sink_grow(s) != 0) return -1;
+    s->arr[s->n].group = g;
+    snprintf(s->arr[s->n].reason, sizeof s->arr[s->n].reason, "%s", reason);
+    s->n++;
+    return 0;
+}
+static int scrub_mark(scrub_sink *s, uint32_t g, const char *reason)
+{
+    size_t i;
+    if (!s) return 0;
+    for (i = 0; i < s->n; i++) {
+        if (s->arr[i].group == g) {
+            if (!strcmp(reason, "mismatched"))
+                snprintf(s->arr[i].reason, sizeof s->arr[i].reason,
+                         "mismatched");
+            return 0;
+        }
+    }
+    return scrub_append(s, g, reason);
+}
+
 /* One completed verify group: compare re-encoded parity to stored bytes.
  * A stored-parity read failure counts the group mismatched (parity damage
- * is loud), and the stream still advances — never trusted, never stuck. */
+ * is loud), and the stream still advances — never trusted, never stuck.
+ * WP401: the ledger names an unreadable-parity group "missing" (it
+ * cannot be read) while the counter stays mismatched, exactly as verify
+ * counts it -- see vol_seal_scrub's contract in volume.h. */
 static int seal_feed_verify(invfs_volume *v, seal_grouper *gr,
                             const uint8_t *data, size_t len, uint64_t pino,
                             uint64_t *poff, uint32_t *gi, uint32_t ngroups,
-                            invfs_seal_verify *out)
+                            invfs_seal_verify *out, scrub_sink *sink)
 {
     static uint8_t pb[2 * SEAL_SYM_BYTES];  /* m <= 2 on the fixed menu */
     while (len) {
@@ -1214,16 +1265,20 @@ static int seal_feed_verify(invfs_volume *v, seal_grouper *gr,
             continue;
         if (*gi >= ngroups) {
             out->mismatched++;      /* more data than the seal covered */
+            if (scrub_mark(sink, *gi, "extra") != 0) return -1;
         } else if (seal_read_full(v, pino, *poff, pb,
                                   (size_t)gr->m * SEAL_SYM_BYTES) !=
                    (int)((size_t)gr->m * SEAL_SYM_BYTES)) {
             out->mismatched++;
+            if (scrub_mark(sink, *gi, "missing") != 0) return -1;
         } else {
             for (i = 0; i < gr->m; i++)
                 if (memcmp(pb + (size_t)i * SEAL_SYM_BYTES,
                            gr->par + (size_t)i * SEAL_SYM_BYTES,
                            SEAL_SYM_BYTES) != 0) {
                     out->mismatched++;
+                    if (scrub_mark(sink, *gi, "mismatched") != 0)
+                        return -1;
                     break;
                 }
             *poff += (uint64_t)gr->m * SEAL_SYM_BYTES;
@@ -1241,7 +1296,7 @@ static int seal_stream_file(invfs_volume *v, const seal_file *e,
                             seal_grouper *gr, uint64_t pino, uint64_t *poff,
                             uint32_t *gi, uint32_t ngroups,
                             invfs_seal_verify *out, uint8_t hash_out[32],
-                            uint64_t *bytes_out)
+                            uint64_t *bytes_out, scrub_sink *sink)
 {
     static uint8_t chunk[SEAL_SYM_BYTES];
     blake3_hasher hb;
@@ -1256,7 +1311,7 @@ static int seal_stream_file(invfs_volume *v, const seal_file *e,
         }
         blake3_hasher_update(&hb, t ? t : (const uint8_t *)"", tl);
         if (seal_feed_verify(v, gr, t ? t : chunk, tl, pino, poff, gi,
-                             ngroups, out) != 0) {
+                             ngroups, out, sink) != 0) {
             free(t);
             return -1;
         }
@@ -1271,7 +1326,7 @@ static int seal_stream_file(invfs_volume *v, const seal_file *e,
                 return 1;
             blake3_hasher_update(&hb, chunk, want);
             if (seal_feed_verify(v, gr, chunk, want, pino, poff, gi,
-                                 ngroups, out) != 0)
+                                 ngroups, out, sink) != 0)
                 return -1;
             nbytes += want;
             off += want;
@@ -1286,9 +1341,14 @@ static int seal_stream_file(invfs_volume *v, const seal_file *e,
 /* Full re-verify against an expected seq (0 = accept the footer's own).
  * Shared by the seal-time verify-after-write and vol_seal_verify.
  * Returns 0 with counters filled (all-zero = unsealed, silent), -1 only
- * for I/O/namespace failures that make even "unsealed" unclaimable. */
+ * for I/O/namespace failures that make even "unsealed" unclaimable.
+ * WP401: sink carries the scrub ledger (NULL = legacy verify behavior,
+ * no ledger); untrusted_out (NULL = don't report)
+ * distinguishes 1 = no footer file from 2 = footer present but
+ * untrusted (the "treated as unsealed, never trusted" shapes). */
 static int seal_verify_locked(invfs_volume *v, invfs_seal_verify *out,
-                              uint64_t expect_seq)
+                              uint64_t expect_seq,
+                              scrub_sink *sink, int *untrusted_out)
 {
     uint64_t fino = 0, pino = 0, fsz = 0, psz = 0, ctime = 0;
     uint8_t pre[SEAL_PRELUDE_LEN];
@@ -1312,10 +1372,13 @@ static int seal_verify_locked(invfs_volume *v, invfs_seal_verify *out,
     memset(&col, 0, sizeof col);
     memset(&gr, 0, sizeof gr);
     memset(out, 0, sizeof *out);
+    if (untrusted_out) *untrusted_out = 0;
     if (!v)
         return -1;
-    if (vol_find_rc(v, SEAL_FOOTER_NAME, &fino) != 1 || !fino)
+    if (vol_find_rc(v, SEAL_FOOTER_NAME, &fino) != 1 || !fino) {
+        if (untrusted_out) *untrusted_out = 1;
         return 0;                       /* unsealed: all-zero, silent */
+    }
     if (vol_stat_full(v, SEAL_FOOTER_NAME, &fino, &fsz, &ctime) != 0)
         return -1;
     if (fsz < SEAL_PRELUDE_LEN + SEAL_TRAILER_LEN ||
@@ -1323,6 +1386,7 @@ static int seal_verify_locked(invfs_volume *v, invfs_seal_verify *out,
         fprintf(stderr, "seal: footer present but implausible (%llu B); "
                 "treated as unsealed, never trusted\n",
                 (unsigned long long)fsz);
+        if (untrusted_out) *untrusted_out = 2;
         return 0;
     }
     if (seal_read_full(v, fino, 0, pre, sizeof pre) != (int)sizeof pre)
@@ -1331,6 +1395,7 @@ static int seal_verify_locked(invfs_volume *v, invfs_seal_verify *out,
         get16(pre + 8) != SEAL_FORMAT_VERSION) {
         fprintf(stderr, "seal: footer present but not a v1 footer; treated "
                 "as unsealed, never trusted\n");
+        if (untrusted_out) *untrusted_out = 2;
         return 0;
     }
     fi.k = get16(pre + 10);
@@ -1344,6 +1409,7 @@ static int seal_verify_locked(invfs_volume *v, invfs_seal_verify *out,
         fi.m > 2) {
         fprintf(stderr, "seal: footer geometry invalid; treated as "
                 "unsealed, never trusted\n");
+        if (untrusted_out) *untrusted_out = 2;
         return 0;
     }
     if (expect_seq && fi.seq != expect_seq)
@@ -1357,6 +1423,7 @@ static int seal_verify_locked(invfs_volume *v, invfs_seal_verify *out,
     if (nft > 16777216u || ngt > SEAL_MAX_NGROUPS) {
         fprintf(stderr, "seal: footer counts absurd; treated as unsealed, "
                 "never trusted\n");
+        if (untrusted_out) *untrusted_out = 2;
         return 0;
     }
     fi.nfiles = nft;
@@ -1366,6 +1433,8 @@ static int seal_verify_locked(invfs_volume *v, invfs_seal_verify *out,
          * something deleted the parity out from under a live seal. */
         out->sealed = ngt;
         out->missing = ngt;
+        { uint32_t g; for (g = 0; g < ngt; g++)
+            if (scrub_append(sink, g, "missing") != 0) goto fail; }
         fprintf(stderr, "seal: sealed-at-gen-%llu but parity file is gone; "
                 "%u groups missing\n", (unsigned long long)fi.seq, ngt);
         return 0;
@@ -1381,6 +1450,8 @@ static int seal_verify_locked(invfs_volume *v, invfs_seal_verify *out,
          * counts mismatched — loud, and a re-seal heals it. */
         out->sealed = ngt;
         out->mismatched = ngt;
+        { uint32_t g; for (g = 0; g < ngt; g++)
+            if (scrub_append(sink, g, "mismatched") != 0) goto fail; }
         fprintf(stderr, "seal: sealed-at-gen-%llu but parity disagrees "
                 "with the footer; %u groups mismatched\n",
                 (unsigned long long)fi.seq, ngt);
@@ -1437,7 +1508,7 @@ static int seal_verify_locked(invfs_volume *v, invfs_seal_verify *out,
             if (col.ents[li].type == INVFS_ITYP_REG ||
                 col.ents[li].type == INVFS_ITYP_LNK) {
                 sr = seal_stream_file(v, &col.ents[li], &gr, pino, &poff,
-                                      &gi, ngt, out, h, &nb);
+                                      &gi, ngt, out, h, &nb, sink);
                 if (sr < 0) goto fail;
                 data_bytes += nb;   /* unreadable: counted below */
             }
@@ -1459,7 +1530,7 @@ static int seal_verify_locked(invfs_volume *v, invfs_seal_verify *out,
                 uint8_t h[32];
                 uint64_t nb = 0;
                 int sr = seal_stream_file(v, e, &gr, pino, &poff, &gi,
-                                          ngt, out, h, &nb);
+                                          ngt, out, h, &nb, sink);
                 if (sr < 0) goto fail;
                 data_bytes += nb;
                 if (sr > 0 || memcmp(h, mhash, 32) != 0) {
@@ -1471,13 +1542,18 @@ static int seal_verify_locked(invfs_volume *v, invfs_seal_verify *out,
                 uint8_t h[32];
                 uint64_t nb = 0;
                 int sr = seal_stream_file(v, e, &gr, pino, &poff, &gi,
-                                          ngt, out, h, &nb);
+                                          ngt, out, h, &nb, sink);
                 if (sr < 0) goto fail;
                 data_bytes += nb;
             }
         } else {
-            /* Manifested but gone: deleted since the seal. */
+            /* Manifested but gone: deleted since the seal. The stream has
+             * a hole at the current group: it cannot be proven, so the
+             * scrub ledger names it missing (a later parity disagreement
+             * on the same group upgrades it to mismatched). */
             out->missing++;
+            if (gi < ngt && scrub_mark(sink, gi, "missing") != 0)
+                goto fail;
             stale_del++;
             stale_bytes += sz;
         }
@@ -1493,7 +1569,7 @@ static int seal_verify_locked(invfs_volume *v, invfs_seal_verify *out,
         if (col.ents[li].type == INVFS_ITYP_REG ||
             col.ents[li].type == INVFS_ITYP_LNK) {
             sr = seal_stream_file(v, &col.ents[li], &gr, pino, &poff,
-                                  &gi, ngt, out, h, &nb);
+                                  &gi, ngt, out, h, &nb, sink);
             if (sr < 0) goto fail;
             data_bytes += nb;
         }
@@ -1511,24 +1587,34 @@ static int seal_verify_locked(invfs_volume *v, invfs_seal_verify *out,
             unsigned i;
             if (gi >= ngt) {
                 out->mismatched++;
+                if (scrub_mark(sink, gi, "extra") != 0) goto fail;
             } else if (seal_read_full(v, pino, poff, pb,
                                       (size_t)fi.m * SEAL_SYM_BYTES) !=
                        (int)((size_t)fi.m * SEAL_SYM_BYTES)) {
                 out->mismatched++;
+                if (scrub_mark(sink, gi, "missing") != 0) goto fail;
             } else {
                 for (i = 0; i < fi.m; i++)
                     if (memcmp(pb + (size_t)i * SEAL_SYM_BYTES,
                                gr.par + (size_t)i * SEAL_SYM_BYTES,
                                SEAL_SYM_BYTES) != 0) {
                         out->mismatched++;
+                        if (scrub_mark(sink, gi, "mismatched") != 0)
+                            goto fail;
                         break;
                     }
                 poff += (uint64_t)fi.m * SEAL_SYM_BYTES;
             }
             gi++;
         }
-        if (gi < ngt)
+        if (gi < ngt) {
+            /* Unprovable groups: the live stream ended before reaching
+             * them. Counted mismatched, exactly as verify counts them;
+             * the ledger names them missing (no content proves them). */
+            { uint32_t g; for (g = gi; g < ngt; g++)
+                if (scrub_mark(sink, g, "missing") != 0) goto fail; }
             out->mismatched += (uint64_t)(ngt - gi);  /* unprovable groups */
+        }
     }
     /* Group entries: bounds sanity + CRC fold. Content truth comes from
      * the parity re-encode above (a lying entry with matching parity is
@@ -1547,8 +1633,10 @@ static int seal_verify_locked(invfs_volume *v, invfs_seal_verify *out,
             geoff += 10;
             ds = get16(gb);
             db = get64(gb + 2);
-            if (!ds || ds > fi.k || !db || db > (uint64_t)ds * fi.sym)
+            if (!ds || ds > fi.k || !db || db > (uint64_t)ds * fi.sym) {
                 out->mismatched++;
+                if (scrub_mark(sink, k, "mismatched") != 0) goto fail;
+            }
         }
         eoff = geoff;
     }
@@ -1591,6 +1679,9 @@ corrupt:
     fprintf(stderr, "seal: footer failed its own CRC/shape mid-stream; "
             "treated as unsealed, never trusted\n");
     memset(out, 0, sizeof *out);
+    free(sink ? sink->arr : NULL);
+    if (sink) memset(sink, 0, sizeof *sink);
+    if (untrusted_out) *untrusted_out = 2;
     return 0;
 
 fail:
@@ -1604,7 +1695,38 @@ int vol_seal_verify(invfs_volume *v, invfs_seal_verify *out)
     if (!v || !out)
         return -1;
     memset(out, 0, sizeof *out);
-    return seal_verify_locked(v, out, 0);
+    return seal_verify_locked(v, out, 0, NULL, NULL);
+}
+
+/* WP401 seal scrub entry point. Strictly read-only: this is the same
+ * re-encode-and-compare walk vol_seal_verify runs, plus the per-group
+ * ledger. No parity write, no re-seal, no heal -- those belong to
+ * vol_seal (WP201), the auto-reseal site (WP403), and --heal (WP402).
+ * One walk fills a caller-owned ledger; free(*bad_out) when done (it is
+ * NULL when no group drifted). */
+int vol_seal_scrub(invfs_volume *v, invfs_seal_badgroup **bad_out,
+                   size_t *nbad_out, invfs_seal_verify *totals_out)
+{
+    invfs_seal_verify tot;
+    scrub_sink sink;
+    int untrusted = 0;
+    int rc;
+    if (!v || !bad_out || !nbad_out || !totals_out)
+        return -1;
+    memset(&tot, 0, sizeof tot);
+    memset(totals_out, 0, sizeof *totals_out);
+    memset(&sink, 0, sizeof sink);
+    *bad_out = NULL;
+    *nbad_out = 0;
+    rc = seal_verify_locked(v, &tot, 0, &sink, &untrusted);
+    if (rc != 0 || untrusted) {
+        free(sink.arr);
+        return rc != 0 ? -1 : untrusted; /* 1 unsealed, 2 torn footer */
+    }
+    *totals_out = tot;
+    *bad_out = sink.arr;         /* NULL when no bad groups */
+    *nbad_out = sink.n;
+    return 0;
 }
 
 /* v1 is detect-only: there is nothing to repair with. (Declared in

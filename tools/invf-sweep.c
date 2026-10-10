@@ -136,6 +136,85 @@ static int seal_plan_cb(void *ctx_, const char *path, uint64_t ino,
     return 0;
 }
 
+/* WP401 seal scrub: read-only per-group parity report. Recomputes every
+ * sealed stripe against stored parity and prints the wave contract:
+ * one `seal-heal-needed <group> <reason>` line per bad group on stdout
+ * (group = 0-based index in parity-file order; reason = mismatched |
+ * missing | extra; WP402's --heal consumes these lines), then the
+ * existing `parity:` summary line. Mismatches are LOUD: a stderr banner
+ * naming the volume, the group count, and the heal command.
+ *
+ * Exit codes (documented in --help): 0 = all stripes verify, or the
+ * volume is not sealed ("not sealed", never an error); 3 = drift found
+ * (the fsck-style damage code: invf-fsck returns 3 whenever damage is
+ * found, repaired or not); 1 = tool failure (open / I-O); 2 = usage.
+ *
+ * READ-ONLY: the volume is latched read-only before the walk, and the
+ * engine call below never writes (a scrub that mutates is not a scrub).
+ * No parity writes, no re-seal, no heal -- this mode reports only. */
+static int seal_scrub_report(invfs_volume *vol, const char *img)
+{
+    invfs_seal_verify tot;
+    invfs_seal_badgroup *bad = NULL;
+    size_t nbad = 0, i;
+    uint64_t drift;
+    int rc;
+    vol_set_readonly(vol, 1);
+    memset(&tot, 0, sizeof tot);
+    /* Single read-only walk fills the ledger (a count-then-fill two-pass
+     * overcounts groups marked twice: a hole's `missing` upgraded by a
+     * later parity disagreement -- one walk, one truth). */
+    rc = vol_seal_scrub(vol, &bad, &nbad, &tot);
+    if (rc == 1) {
+        printf("not sealed\n");
+        return 0;
+    }
+    if (rc == 2) {
+        fprintf(stderr,
+                "SEAL-SCRUB DRIFT: %s: seal footer present but untrusted "
+                "(torn write?); no group can be proven -- run "
+                "'invf-sweep --heal %s' to rebuild the seal (WP402)\n",
+                img, img);
+        return 3;
+    }
+    if (rc != 0) {
+        fprintf(stderr, "seal scrub: %s: namespace/I-O failure; "
+                "no verdict\n", img);
+        return 1;
+    }
+    for (i = 0; i < nbad; i++)
+        printf("seal-heal-needed %u %s\n", bad[i].group, bad[i].reason);
+    free(bad);
+    printf("parity: %llu sealed stripes, %llu mismatched, "
+           "%llu missing, %llu extra\n",
+           (unsigned long long)tot.sealed,
+           (unsigned long long)tot.mismatched,
+           (unsigned long long)tot.missing,
+           (unsigned long long)tot.extra);
+    if (tot.sealed2 || tot.mismatched2 || tot.missing2 || tot.extra2)
+        printf("parity2: %llu sealed stripes, %llu mismatched, "
+               "%llu missing, %llu extra\n",
+               (unsigned long long)tot.sealed2,
+               (unsigned long long)tot.mismatched2,
+               (unsigned long long)tot.missing2,
+               (unsigned long long)tot.extra2);
+    drift = tot.mismatched + tot.missing + tot.extra +
+            tot.mismatched2 + tot.missing2 + tot.extra2;
+    if (drift) {
+        fprintf(stderr,
+                "SEAL-SCRUB DRIFT: %s: %llu group(s) need healing "
+                "(%llu mismatched, %llu missing, %llu extra); content "
+                "reads are unaffected -- run 'invf-sweep --heal %s' to "
+                "rebuild the seal (WP402)\n",
+                img, (unsigned long long)nbad,
+                (unsigned long long)tot.mismatched,
+                (unsigned long long)tot.missing,
+                (unsigned long long)tot.extra, img);
+        return 3;
+    }
+    return 0;
+}
+
 static void sw_progress_suspend(void);   /* static UI helper, defined below */
 /* invfs_sweep_ui_active is global (src/core/volume.h). */
 
@@ -1359,6 +1438,7 @@ int main(int argc, char **argv)
     invfs_volume *vol;
     int err, dry = 0, seal = 0, unseal = 0, bench = 0, realize = 0;
     int seal_pct = 10;               /* WP201: --seal [5|10|20|25] */
+    int verify_seal = 0;             /* WP401: --verify-seal (read-only) */
     int no_realize = 0, stopped = 0;
     int fast = 0;
     const char *extract_dir = NULL;    /* WP23 --extract-packs mode */
@@ -1393,6 +1473,10 @@ int main(int argc, char **argv)
             fprintf(stderr,
                 "usage: %s <image> [--dry-run] [--fast] [--compact]\n"
                 "           [--seal [5|10|20|25]|--unseal]\n"
+                "           [--verify-seal]  (WP401 seal scrub: read-only\n"
+                "                         per-group parity report; no sweep,\n"
+                "                         no writes. Exits 0 clean / 3 on\n"
+                "                         drift / 1 on tool failure)\n"
                 "           [--redundant-blocks <f>]\n"
                 "           [--redundant-paranoic <f>[:rs-vm|rs-cauchy]]\n"
                 "           [--free-redundant] [--redundant-bench]\n"
@@ -1427,6 +1511,10 @@ int main(int argc, char **argv)
         fprintf(stderr,
                 "usage: %s <image> [--dry-run] [--fast] [--compact]\n"
                 "           [--seal [5|10|20|25]|--unseal]\n"
+                "           [--verify-seal]  (WP401 seal scrub: read-only\n"
+                "                         per-group parity report; no sweep,\n"
+                "                         no writes. Exits 0 clean / 3 on\n"
+                "                         drift / 1 on tool failure)\n"
                 "           [--redundant-blocks <f>]\n"
                 "           [--redundant-paranoic <f>[:rs-vm|rs-cauchy]]\n"
                 "           [--free-redundant] [--redundant-bench]\n"
@@ -1492,6 +1580,9 @@ int main(int argc, char **argv)
         } else if (strcmp(a, "--unseal") == 0 ||
                    strcmp(a, "--free-redundant") == 0) {
             unseal = 1;
+        } else if (strcmp(a, "--verify-seal") == 0) {
+            /* WP401: standalone read-only scrub; no sweep walk runs. */
+            verify_seal = 1;
         } else if (strcmp(a, "--redundant-bench") == 0) {
             bench = 1;
         } else if (strcmp(a, "--redundant-blocks") == 0 && i + 1 < argc) {
@@ -1535,6 +1626,14 @@ int main(int argc, char **argv)
     if (unseal + bench > 0 &&
         (seal || rb_f >= 0 || rp_f >= 0 || realize || extract_dir)) {
         fprintf(stderr, "conflicting flags\n");
+        return 2;
+    }
+    /* WP401: the scrub is standalone and read-only -- it never runs the
+     * sweep walk (like --unseal) and combines with nothing. */
+    if (verify_seal &&
+        (seal || unseal || bench || rb_f >= 0 || rp_f >= 0 || realize ||
+         extract_dir)) {
+        fprintf(stderr, "--verify-seal is a standalone mode\n");
         return 2;
     }
     if (dry && (realize || extract_dir)) {
@@ -1664,6 +1763,17 @@ int main(int argc, char **argv)
         }
     }
     (void)vol_sb(vol);
+
+    /* WP401 --verify-seal: read-only scrub; no sweep walk, no savepoint,
+     * no checkpoint, no seal -- open, report, close. Dispatched here,
+     * before the UI/auto-reseal/dry-run plumbing below, so a scrub never
+     * arms a rollback window, never flushes, and never prints the
+     * auto-reseal diagnostic (no sweep runs, nothing is re-sealed). */
+    if (verify_seal) {
+        int vsrc = seal_scrub_report(vol, img);
+        vol_close(vol);
+        return vsrc;
+    }
 
     /* WP-M21: the inline inode-area compaction + the CMP0 recovery preflight
      * both retired; --compact is now a recognised-but-removed flag (we
