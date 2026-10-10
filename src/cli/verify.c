@@ -234,8 +234,16 @@ int main(int argc, char **argv)
             }
         }
     }
-    if (file_blocks != sb.total_blocks)
-        err("backing store %llu blocks vs superblock total_blocks %llu",
+    /* 4. backing-store size. A backing SMALLER than the superblock is a
+     *    truncated image: refuse. A LARGER backing is a legal prefix
+     *    volume (explicit-size mkfs on a bigger device, or a device
+     *    swapped for a larger one -- blocks past total_blocks are never
+     *    allocated, so the tail is simply not part of the volume).
+     *    Demanding equality here false-alarmed every such volume as
+     *    corrupt (found by flakey leg 8 arm C: 512M volume on a 2G dm
+     *    device verified 0-corrupt yet exited 1). */
+    if (file_blocks < sb.total_blocks)
+        err("backing store %llu blocks smaller than superblock total_blocks %llu (truncated?)",
             (unsigned long long)file_blocks, (unsigned long long)sb.total_blocks);
 
     /* 5. zone layout: no overlap, full coverage.

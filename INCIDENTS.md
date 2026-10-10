@@ -2733,3 +2733,16 @@ only; verify-named failures pass via (a). Plus debuggability (failed names +
 both ledger lists in the summary line) after a round of log-starved
 forensics. Proven: synthetic torn-block volume (fsck OK + CORRUPT + cat-fail
 -> PASS) and ghost-file negative control (-> FAIL naming the file).
+
+## verify false-positive on prefix volumes (found by restored flakey leg 8)
+
+**Date:** 2026-10-11. **Status:** FIXED (this entry's commit). `invf-verify`
+step 4 (`src/cli/verify.c`) demanded backing-size EQUALS superblock
+total_blocks. A volume is a prefix of its backing -- explicit-size mkfs on
+a bigger device, or a device swapped for a larger one -- so every such
+volume verified rc=1 ("backing store N vs superblock M") with 0 corrupt
+files, while fsck said OK and reads were bit-exact. Leg 8 arm C (512M
+volume on a 2G dm device) tripped over it on its first restored run.
+Fix: refuse only truncation (backing < superblock), tolerate larger.
+Regression: `tools/test-verify-size.sh` (grow-then-verify clean +
+bit-exact, shrink-then-verify refused with a diagnostic).
