@@ -2766,3 +2766,40 @@ f056627 merge run. None of the merged branches touch ARC; all four were
 green independently. Rerun of the failed job passed. If it recurs,
 suspect runner oversubscription (concurrency + timing-sensitive cache
 budget test), not the tree.
+
+## leg5 soak oracle THIRD STATE on drop-torn acked writes (harness gate, engine innocent)
+
+**Date:** 2026-10-11. **Status:** FIXED (this entry's commit,
+`wp/503-soak-oracle`, `tools/flakey/soak.py` gate only, no engine change).
+Leg5 failed `THIRD STATE: s27.bin sha e3b0c44298fc not in history`
+(artifact `tools/flakey/artifacts/leg5-soak-20261011-085551/`): a 166443-byte
+O_TRUNC write + fsync returned OK under a dm-flakey drop window, and the
+file now reads as a VALID EMPTY file (size 0, no segments, empty-string
+sha), unflagged by fsck AND verify -- a valid empty file isn't damage. The
+device ate the write after ACKing it (truncate applied, content dropped);
+no engine check can detect ACKed drops, and the suite's own CLI-phase note
+(`tools/flakey/soak.py`, F9 comment) already concedes drop is out of
+contract for whole-volume ops. But file ops run under all three modes while
+the oracle history-pins every acked write, so a drop-torn acked write can
+never satisfy the gate: green only when luck avoids straddling writes.
+Fix: the oracle is now drop-aware WITHOUT weakening up-mode strictness.
+Per-file `drop_touched` is set on any acked write/rename/delete under drop
+mode and cleared only by an acked write under up mode (which re-pins history
+strictly as before); at the gate manifest diff (`Soak.diff_manifest`)
+drop-touched files skip the history check loudly (`gate: <name>
+drop-touched, history check deferred (last acked write under drop)`) after
+fsck/verify-clean is established, while up-mode files keep byte-identical
+GHOST/unreadable/THIRD-STATE failures. The tripwire stays: an unreadable
+drop-touched file must be damage-named (bare `CORRUPT: <name>` per the
+suite's own content-evidence rule, via `Soak.damage_names`) or the gate still
+fails -- the exemption covers torn-but-valid states, never silent loss.
+Proven: (a) `--replay` of the new gate logic against the preserved state --
+s27.bin deferred with oplog provenance (last acked write under drop), 28
+strict-PASS, plus negative controls (up-mode foreign sha still THIRD STATE;
+unreadable+unnamed still FAIL; unreadable+damage-named defers); (b) live
+leg5 runs green in both shapes. Repro: `python3 tools/flakey/soak.py --replay
+<artifact> --image <artifact>/backing.img --bin bin --work <scratch>
+--replay-log <log>` (<5 min, no dm device needed). A live up-mode tear was
+NOT faulted in: overwriting blocks of a mounted image conflates metadata
+damage with oracle strictness, so the exact code path is pinned by the replay
+negative control instead.

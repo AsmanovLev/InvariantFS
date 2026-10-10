@@ -31,10 +31,12 @@ wall-clock timing jitter.
 """
 
 import argparse
+import copy
 import hashlib
 import json
 import os
 import random
+import re
 import signal
 import subprocess
 import sys
@@ -56,7 +58,17 @@ class Soak:
         self.crng = random.Random(a.seed ^ 0xC0FFEE)   # content stream
         self.t0 = time.monotonic()
         self.oplog = open(os.path.join(a.work, "oplog.txt"), "w")
-        self.model = {}        # name -> {"hist": [sha...], "deleted": bool}
+        self.model = {}        # name -> {"hist": [sha...], "deleted": bool,
+                               #          "drop_touched": bool}
+        # drop_touched (WP503): set on any acked state change (write /
+        # rename / delete) that ran under drop mode -- the device ACKed a
+        # write it may have discarded, so the pinned history may be
+        # unsatisfiable through no fault of the engine. Cleared only by an
+        # acked write under up mode, which re-pins history strictly. At the
+        # gate manifest diff a drop-touched file skips the history check
+        # (loudly logged) but must still be fsck/verify-clean and readable;
+        # an unreadable one must be damage-named or the gate still fails.
+        # Up-mode-pinned files keep byte-identical strictness.
         self.n_rounds = 0
         self.n_ops = 0
         self.n_gates = 0
@@ -67,7 +79,8 @@ class Soak:
             p = os.path.join(a.corpus, f)
             with open(p, "rb") as fh:
                 sha = hashlib.sha256(fh.read()).hexdigest()
-            self.model[f] = {"hist": [sha], "deleted": False}
+            self.model[f] = {"hist": [sha], "deleted": False,
+                             "drop_touched": False}
         signal.signal(signal.SIGTERM, self._sig)
         signal.signal(signal.SIGINT, self._sig)
 
@@ -210,6 +223,41 @@ class Soak:
         with open(outf, "rb") as f:
             return hashlib.sha256(f.read()).hexdigest()
 
+    # --------------------------------------- drop-touch tracking (WP503) --
+
+    def _note_write_acked(self, name, mode):
+        """Record the mode of an acked write for the gate diff."""
+        ent = self.model.get(name)
+        if ent is None:
+            return
+        if mode == "drop":
+            ent["drop_touched"] = True
+        elif mode == "up":
+            # a strictly-pinned acked write re-pins history as before
+            ent["drop_touched"] = False
+        # error-mode acks never enter history (ops fail loudly there);
+        # an impossible ack under error leaves the flag untouched.
+
+    def _note_rename_acked(self, src, dst, mode):
+        for n in (src, dst):
+            ent = self.model.get(n)
+            if ent is None:
+                continue
+            if mode == "drop":
+                ent["drop_touched"] = True
+            # an up-mode rename moves bytes without rewriting them: it
+            # neither pins nor unpins, so the flag is left as-is (only an
+            # acked write under up re-pins).
+
+    def _note_delete_acked(self, name, mode):
+        ent = self.model.get(name)
+        if ent is None:
+            return
+        if mode == "drop":
+            # a rollback can resurrect the pre-delete content torn
+            ent["drop_touched"] = True
+        # an up-mode delete changes no content; the flag is left as-is.
+
     # ----------------------------------------------------------- model ----
 
     def gen_content(self):
@@ -245,9 +293,11 @@ class Soak:
             self.log("op write %s -> ERR %s (mode=%s)"
                      % (name, e.strerror or e, self.mode))
             return
-        ent = self.model.setdefault(name, {"hist": [], "deleted": False})
+        ent = self.model.setdefault(name, {"hist": [], "deleted": False,
+                                          "drop_touched": False})
         ent["hist"].append(sha)
         ent["deleted"] = False
+        self._note_write_acked(name, self.mode)
         self.n_ops += 1
         self.log("op write %s %dB sha=%s ok (mode=%s)"
                  % (name, len(data), sha[:12], self.mode))
@@ -276,7 +326,9 @@ class Soak:
         # the source is gone from the live volume, but a rollback can
         # legitimately resurrect it (WP21 time travel): keep its history
         # marked-deleted so a resurrection is recognized, never a ghost
-        self.model[src] = {"hist": list(ent["hist"]), "deleted": True}
+        self.model[src] = {"hist": list(ent["hist"]), "deleted": True,
+                           "drop_touched": ent.get("drop_touched", False)}
+        self._note_rename_acked(src, dst, self.mode)
         self.n_ops += 1
         self.log("op rename %s->%s ok (mode=%s)" % (src, dst, self.mode))
     def op_delete(self):
@@ -292,6 +344,7 @@ class Soak:
                      % (name, e.strerror or e, self.mode))
             return
         self.model[name]["deleted"] = True
+        self._note_delete_acked(name, self.mode)
         self.n_ops += 1
         self.log("op delete %s ok (mode=%s)" % (name, self.mode))
 
@@ -368,6 +421,67 @@ class Soak:
         self.log("gate: fsck final rc=%d: %s" % (rc, out[-300:].replace("\n", " | ")))
         return rc == 0 and "\nOK" in ("\n" + out)
 
+    @staticmethod
+    def damage_names(verify_out):
+        """Bare `CORRUPT: <name>` files from verify --deep output.
+
+        Mirrors the suite's own content-evidence rule
+        (tools/test-flakey.sh consistent-check: only bare `CORRUPT: <name>`
+        lines name lost file bytes; `CORRUPT: inode N (...)` lines are
+        namespace-audit damage, not content tears)."""
+        names = set()
+        for ln in (verify_out or "").splitlines():
+            m = re.match(r"^  CORRUPT: ([^ ]+)\s*$", ln)
+            if m:
+                names.add(m.group(1))
+        return names
+
+    def diff_manifest(self, present, read_sha, damage):
+        """Gate manifest diff; returns the deferred (drop-touched) names.
+
+        Strictness for up-mode-pinned files is byte-identical to the
+        pre-WP503 gate: unknown name -> GHOST, unreadable -> FAIL,
+        sha outside history -> THIRD STATE FAIL. A drop-touched file
+        whose sha falls outside its history is NOT a third state -- the
+        device ACKed a write it may have discarded, so the pinned history
+        may be unsatisfiable -- and is deferred loudly instead, after the
+        caller has already established fsck/verify-clean. The silent-
+        corruption tripwire stays: an unreadable drop-touched file must be
+        damage-named (in `damage`) or the gate still fails -- the exemption
+        covers torn-but-valid states, never silent loss."""
+        deferred = []
+        for name in sorted(present):
+            ent = self.model.get(name)
+            if ent is None:
+                # a container member ("archive!part") is engine-generated
+                # content-addressed payload of its parent archive; it is
+                # tracked through the parent's read-back, never written
+                # directly. A member whose parent is PRESENT is no ghost.
+                # (A member with no live parent IS one.)
+                if "!" in name and name.split("!", 1)[0] in present:
+                    continue
+                raise SoakFail("GHOST: %s on the volume, never written"
+                               % name)
+            sha = read_sha(name)
+            if sha is None:
+                if ent.get("drop_touched") and name in (damage or set()):
+                    self.log("gate: %s drop-touched, unreadable but "
+                             "damage-named, history check deferred "
+                             "(last acked write under drop)" % name)
+                    deferred.append(name)
+                    continue
+                raise SoakFail("present but unreadable: %s" % name)
+            if sha not in ent["hist"]:
+                if ent.get("drop_touched"):
+                    self.log("gate: %s drop-touched, history check "
+                             "deferred (last acked write under drop)" % name)
+                    deferred.append(name)
+                    continue
+                raise SoakFail("THIRD STATE: %s sha %s not in history"
+                               % (name, sha[:12]))
+            ent["deleted"] = False     # present, incl. via resurrection
+        return deferred
+
     def gate(self, final=False):
         self.n_gates += 1
         self.dm_set("up")
@@ -395,26 +509,13 @@ class Soak:
         if rc != 0:
             raise SoakFail("verify not clean at gate: %s" % out[-500:])
         # manifest diff: presence => known name + content in its history
+        # (drop-touched files defer the history check loudly; up-mode
+        # files keep full strictness). verify is clean here, so the damage
+        # set is empty -- the tripwire's damage-named branch is exercised
+        # by replay, not by live gates.
         present = self.ls()
-        for name in sorted(present):
-            ent = self.model.get(name)
-            if ent is None:
-                # a container member ("archive!part") is engine-generated
-                # content-addressed payload of its parent archive; it is
-                # tracked through the parent's read-back, never written
-                # directly. A member whose parent is PRESENT is no ghost.
-                # (A member with no live parent IS one.)
-                if "!" in name and name.split("!", 1)[0] in present:
-                    continue
-                raise SoakFail("GHOST: %s on the volume, never written"
-                               % name)
-            sha = self.cat_sha(name)
-            if sha is None:
-                raise SoakFail("present but unreadable: %s" % name)
-            if sha not in ent["hist"]:
-                raise SoakFail("THIRD STATE: %s sha %s not in history"
-                               % (name, sha[:12]))
-            ent["deleted"] = False     # present, incl. via resurrection
+        deferred = self.diff_manifest(present, self.cat_sha,
+                                      self.damage_names(out))
         # everything the model believes live and that the volume shows is
         # now pinned; note resurrections explicitly for the log
         for name, ent in sorted(self.model.items()):
@@ -422,7 +523,9 @@ class Soak:
                 self.log("gate: %s resurrected (rollback), content in "
                          "history — legal" % name)
         self.log("GATE %d ok: %d files present, model tracks %d"
-                 % (self.n_gates, len(present), len(self.model)))
+                 "%s" % (self.n_gates, len(present), len(self.model),
+                           (" (%d drop-touched deferred)" % len(deferred))
+                           if deferred else ""))
         if not final:
             self.mount()
 
@@ -491,19 +594,163 @@ class Soak:
         return 0
 
 
+def replay(artifact, image, bindir, workdir, logpath):
+    """WP503 artifact replay: run the NEW gate diff against preserved state.
+
+    `artifact` holds model.json + oplog.txt from a failed leg5 run (the
+    gate died at the manifest diff, so fsck/verify were clean and the
+    damage set is empty). drop_touched is re-derived from the oplog with
+    the live rules (_note_*_acked); file bytes are read from `image` with
+    the real invf-ls/invf-cat. Verdict: every history miss must be a
+    drop-touched deferral (loud), never a THIRD STATE -- plus three
+    negative controls proving up-mode strictness is byte-identical and
+    the unreadable tripwire still fails. Returns 0 on REPLAY: PASS."""
+    with open(os.path.join(artifact, "model.json")) as f:
+        model = json.load(f)
+    with open(os.path.join(artifact, "oplog.txt")) as f:
+        oplog = f.read().splitlines()
+    os.makedirs(workdir, exist_ok=True)
+
+    def blank(m):
+        s = object.__new__(Soak)
+        s.model = copy.deepcopy(m)
+        s.n_rounds = 0
+        s.n_gates = 0
+        s.n_ops = 0
+        s.t0 = time.monotonic()
+        s.mode = "up"
+        s.oplog = open(logpath, "a")
+        s.a = argparse.Namespace(dev=image, bin=bindir, work=workdir)
+        return s
+
+    s = blank(model)
+    # re-derive drop_touched from acked ops with the live rules. Only
+    # `ok` lines match (ERR lines fail loudly and never enter history).
+    n_drop = n_up = 0
+    for ln in oplog:
+        m = re.search(r"op write (\S+) \d+B sha=\S+ ok \(mode=(\S+)\)", ln)
+        if m:
+            s._note_write_acked(m.group(1), m.group(2))
+            n_drop += m.group(2) == "drop"
+            n_up += m.group(2) == "up"
+            continue
+        m = re.search(r"op rename (\S+)->(\S+) ok \(mode=(\S+)\)", ln)
+        if m:
+            s._note_rename_acked(m.group(1), m.group(2), m.group(3))
+            n_drop += m.group(3) == "drop"
+            continue
+        m = re.search(r"op delete (\S+) ok \(mode=(\S+)\)", ln)
+        if m:
+            s._note_delete_acked(m.group(1), m.group(2))
+            n_drop += m.group(2) == "drop"
+    print("replay: oplog %d lines, %d acked-drop state changes, "
+          "%d acked-up writes" % (len(oplog), n_drop, n_up))
+    present = s.ls()
+    print("replay: %d files present on preserved image" % len(present))
+    # the preserved gate died at the diff, so verify was clean: empty
+    # damage set (a damage-named file could not have survived verify).
+    try:
+        deferred = s.diff_manifest(present, s.cat_sha, set())
+    except SoakFail as e:
+        print("REPLAY: FAIL (gate still fails: %s)" % e)
+        return 1
+    # provenance: last acked op per deferred file, straight from the oplog
+    last = {}
+    for ln in oplog:
+        for pat in (r"op write (\S+) \d+B sha=\S+ ok \(mode=\S+\)",
+                    r"op rename (\S+)->\S+ ok \(mode=\S+\)",
+                    r"op rename \S+->(\S+) ok \(mode=\S+\)",
+                    r"op delete (\S+) ok \(mode=\S+\)"):
+            m = re.search(pat, ln)
+            if m:
+                last[m.group(1)] = ln.strip()
+    ok = True
+    for name in deferred:
+        print("replay: DEFERRED %s <- %s" % (name, last.get(name, "?")))
+    strict = sorted(n for n in present if n not in deferred
+                    and s.model.get(n) is not None)
+    print("replay: %d deferred (loud, above), %d strict-PASS"
+          % (len(deferred), len(strict)))
+    if not deferred:
+        print("REPLAY: FAIL (no deferral: artifact tear not reproduced)")
+        ok = False
+    # NC1: an up-mode-pinned file reading foreign bytes must still FAIL
+    # with byte-identical THIRD STATE (prove by faulting one in-memory;
+    # faulting a live mounted image would conflate metadata damage with
+    # oracle strictness, so the exact code path is pinned here instead).
+    nc1 = [n for n in strict
+           if not s.model[n].get("drop_touched")][:1]
+    if nc1:
+        t = blank(s.model)
+        bad = "0" * 64
+        try:
+            t.diff_manifest(set(nc1), lambda n: bad, set())
+            print("REPLAY: FAIL (NC1: up-mode foreign sha not caught)")
+            ok = False
+        except SoakFail as e:
+            if "THIRD STATE" in str(e):
+                print("replay: NC1 ok (up-mode foreign sha -> %s)" % e)
+            else:
+                print("REPLAY: FAIL (NC1 wrong failure: %s)" % e)
+                ok = False
+    else:
+        print("REPLAY: FAIL (NC1: no strict file to fault)")
+        ok = False
+    # NC2: unreadable + drop-touched + NOT damage-named must still FAIL.
+    t = blank(s.model)
+    try:
+        t.diff_manifest(set(deferred[:1]), lambda n: None, set())
+        print("REPLAY: FAIL (NC2: silent unreadable not caught)")
+        ok = False
+    except SoakFail as e:
+        if "unreadable" in str(e):
+            print("replay: NC2 ok (unreadable, unnamed -> %s)" % e)
+        else:
+            print("REPLAY: FAIL (NC2 wrong failure: %s)" % e)
+            ok = False
+    # NC3: unreadable + drop-touched + damage-named defers loudly.
+    t = blank(s.model)
+    try:
+        d = t.diff_manifest(set(deferred[:1]), lambda n: None,
+                            set(deferred[:1]))
+        if d == deferred[:1]:
+            print("replay: NC3 ok (unreadable, damage-named -> deferred)")
+        else:
+            print("REPLAY: FAIL (NC3 not deferred: %s)" % d)
+            ok = False
+    except SoakFail as e:
+        print("REPLAY: FAIL (NC3 raised: %s)" % e)
+        ok = False
+    print("REPLAY: %s" % ("PASS" if ok else "FAIL"))
+    return 0 if ok else 1
+
+
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--dev", required=True)
-    ap.add_argument("--dmname", required=True)
-    ap.add_argument("--loop", required=True)
-    ap.add_argument("--sectors", type=int, required=True)
-    ap.add_argument("--mnt", required=True)
+    ap.add_argument("--dev")
+    ap.add_argument("--dmname")
+    ap.add_argument("--loop")
+    ap.add_argument("--sectors", type=int)
+    ap.add_argument("--mnt")
     ap.add_argument("--bin", required=True)
     ap.add_argument("--work", required=True)
-    ap.add_argument("--corpus", required=True)
-    ap.add_argument("--seed", type=int, required=True)
+    ap.add_argument("--corpus")
+    ap.add_argument("--seed", type=int)
     ap.add_argument("--seconds", type=float, default=210)
+    ap.add_argument("--replay", default=None,
+                    help="artifact dir (model.json+oplog.txt): run the WP503 "
+                    "gate-diff replay against --image instead of soaking")
+    ap.add_argument("--image", default=None)
+    ap.add_argument("--replay-log", default="soak-replay.log")
     a = ap.parse_args()
+    if a.replay:
+        if not a.image:
+            ap.error("--replay needs --image")
+        return replay(a.replay, a.image, a.bin, a.work, a.replay_log)
+    for k in ("dev", "dmname", "loop", "sectors", "mnt",
+              "corpus", "seed"):
+        if getattr(a, k) is None:
+            ap.error("--%s is required (or use --replay)" % k)
     s = Soak(a)
     try:
         return s.run()
