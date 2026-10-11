@@ -3,9 +3,9 @@ name: release
 # Cut per-distro packages and publish the GitHub release.
 #   - on a v* tag push: build everything and publish (this IS the release)
 #   - manual dispatch: build only, artifacts for inspection, no publish
-# v0.6.0 scope: tarball + .deb + Arch pkg as binaries; the Gentoo ebuild
-# and the Void template ship as recipes (no portage/xbps-src on hosted
-# runners); there is no RPM spec in-tree, so no .rpm.
+# v0.6.0 scope: tarball + .deb + Arch pkg + .rpm as binaries (the .rpm
+# consumes the prebuilt tarball, like Arch); the Gentoo ebuild and the
+# Void template ship as recipes (no portage/xbps-src on hosted runners).
 
 on:
   push:
@@ -35,6 +35,7 @@ jobs:
           # a shallow checkout cannot confuse describe.
           test "$(git rev-parse HEAD)" = "$(git rev-list -n 1 "$TAG")"
           grep -q "pkgver=$VER" packaging/PKGBUILD
+          grep -q "^Version: *$VER$" packaging/invfs.spec
           head -n 1 packaging/debian/changelog | grep -q "($VER-"
           echo "tree matches $TAG"
 
@@ -125,9 +126,34 @@ jobs:
             pkg/*.pkg.tar.zst
             pkg/TARBALL.sha256
 
+  rpm:
+    needs: tarball
+    runs-on: ubuntu-22.04
+    container: fedora:latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
+          path: tree
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist-tarball
+          path: rpmbuild/SOURCES
+      - name: build RPM
+        run: |
+          dnf install -y rpm-build gzip
+          cp tree/packaging/invfs.spec rpmbuild/SOURCES/
+          # The spec's Source0 is the tarball; rpmbuild unpacks it in %prep.
+          rpmbuild -bb rpmbuild/SOURCES/invfs.spec \
+            --define "_topdir $GITHUB_WORKSPACE/rpmbuild"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist-rpm
+          path: rpmbuild/RPMS/
+
   publish:
     if: github.event_name == 'push'
-    needs: [tarball, deb, arch]
+    needs: [tarball, deb, arch, rpm]
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
@@ -145,6 +171,10 @@ jobs:
         with:
           name: dist-arch
           path: assets
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist-rpm
+          path: assets
       - name: stage recipes + notes
         run: |
           # bootstrap.sh is the README one-liner entry point
@@ -157,6 +187,7 @@ jobs:
             echo "Install:"; echo "  - tarball: unpack, sudo sh packaging/install.sh";
             echo "  - debian/ubuntu: sudo dpkg -i invfs_*.deb";
             echo "  - arch: sudo pacman -U invfs-*.pkg.tar.zst";
+            echo "  - fedora/rhel: sudo rpm -i invfs-*.rpm";
             echo "  - gentoo/void: ebuild/template recipes attached (source builds)";
             echo "Codec/container packs are installed manually in this release:";
             echo "  invfs-pack install ./path/to/pack  (registry fetch: WP608, in progress)";
