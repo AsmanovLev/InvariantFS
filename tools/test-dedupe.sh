@@ -41,7 +41,8 @@ rm -f "$IMG" "$IMGCTL" "$IMGT"
 free_blocks() { $B/invf-fsck "$1" | awk '/free blocks:/ {print $3}'; }
 
 # The sweep reports the dedupe counters in its stage line:
-#   [5/7] dedupe  100.0%  171/171 ... merged=171 cross=163 intra=8 freed=4.1 MiB
+#   [5/8] dedupe  100.0%  171/171 ... merged=171 cross=163 intra=8 freed=4.1 MiB
+#   (stage totals vary with the migrate/seal/tier stages; dedupe keeps position 5 single-device)
 # Older builds printed a standalone "dedupe: merged N segments, freed N MiB"
 # line. Read either shape and normalise to "MERGED FREED_MiB" so the
 # assertions below do not care which build produced the log.

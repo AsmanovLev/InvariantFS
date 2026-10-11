@@ -25,12 +25,12 @@ PY
 "$B/invf-cp" "$WORK/test.img" "$WORK/b.bin" >/dev/null 2>&1
 "$B/invf-sweep" "$WORK/test.img" --log "$WORK/sweep.log" >"$WORK/sweep.out" 2>&1
 
-grep -q '^\[1/7\] prepare' "$WORK/sweep.out"
-grep -q '^\[3/7\] transform.*100\.0%' "$WORK/sweep.out"
-grep -q '^\[5/7\] dedupe.*cross=1 intra=1 merged=2' "$WORK/sweep.out"
-grep -q '^\[7/7\] finalize.*volume durable' "$WORK/sweep.out"
+grep -q '^\[1/[0-9]*\] prepare' "$WORK/sweep.out"
+grep -q '^\[3/[0-9]*\] transform.*100\.0%' "$WORK/sweep.out"
+grep -q '^\[5/[0-9]*\] dedupe.*cross=1 intra=1 merged=2' "$WORK/sweep.out"
+grep -q '^\[8/[0-9]*\] finalize.*volume durable' "$WORK/sweep.out"
 grep -q '^==== invf-sweep ' "$WORK/sweep.log"
-grep -q '^\[5/7\] dedupe.*cross=1 intra=1 merged=2' "$WORK/sweep.log"
+grep -q '^\[5/[0-9]*\] dedupe.*cross=1 intra=1 merged=2' "$WORK/sweep.log"
 
 if [[ "${INVFS_SWEEP_UI_VERBOSE:-0}" == "1" ]]; then
     cat "$WORK/sweep.out"

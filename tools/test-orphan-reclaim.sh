@@ -415,7 +415,7 @@ as a failure. This is the defect leg 9 exists for.
 EOF
     exit 1
 fi
-grep -q "^\[3/7\] transform *100" sw.err \
+grep -q "^\[[0-9]/[0-9]*\] transform *100" sw.err \
     || fail "leg 9: the sweep did no transform work, so the leg would pass vacuously"
 RECLAIMED=$(sed -n 's/^\[reclaim\] \([0-9]*\) orphaned.*/\1/p' sw.out | head -1)
 [ -n "$RECLAIMED" ] || fail "leg 9: the sweep printed no [reclaim] count"
@@ -439,7 +439,8 @@ echo "  free blocks: $FREE0 -> $FREE1 (net, measured by fsck -- not by the sweep
 #
 # The sound witness is a differential: the same corpus, the same sweep, the
 # collector off, compared against the collector on. The collector runs AFTER
-# the sweep's seven stages (the "[reclaim]" line lands past "[7/7] finalize"),
+# the sweep's stages (the "[reclaim]" line lands past "finalize" --
+# seven stages pre-WP601, eight with the migrate stage),
 # so everything before it is identical between the two runs and the gap
 # between them is the collector's work and nothing else.
 mkvol sw-nogate.img
