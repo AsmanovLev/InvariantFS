@@ -2860,3 +2860,20 @@ cover absent files by the named catastrophe (per-file naming is
 impossible without enumeration); readable namespaces keep the strict
 per-file demand (stale-mapping tripwire intact). Replay on the dead
 artifact yields EXHAUSTED; healthy volume refuses proof.
+
+## freed RT30 roots under chaos (bitmap/descriptor divergence, engine innocent)
+
+**Date:** 2026-10-11. **Status:** UNDERSTOOD, no fix (nothing to fix).
+Soak post-soak fsck found both RT30 slots FREED with CRC-valid bytes
+("reachable-but-free", named with pbas -- the WP303 census). Two chaos
+mechanisms produce it, both ACKed-discard shapes no ordering defeats:
+(a) dropped descriptor write + landed bitmap flush (bitmap says freed,
+descriptor still names them); (b) torn bitmap flush (raw bit-range
+write, no per-range CRC -- a torn flush silently clears bits). The
+engine orders bitmap-before-descriptor correctly and reclaim cannot
+free live roots (in-memory view is correct-by-construction; frees need
+a landed decision). Reader refuses freed slots loudly (WP-D), fsck
+census names them (WP303), verdict DAMAGED honest. Bitmap CRCs would
+turn silent divergence into fail-closed, but that is a format change
+-- recorded, not scheduled. The proven-exhausted verdicts (leg4 WP502,
+soak gate) cover the honesty side.
