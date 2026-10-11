@@ -242,6 +242,13 @@ typedef struct {
  * machinery, below); the volume only owns the array. */
 struct cpack_map_cache;
 
+/* WP605: one retained staged delta record (owned bytes for rewrite). */
+typedef struct {
+    uint64_t off;                    /* absolute volume offset staged at */
+    size_t   len;                    /* encoded record length */
+    uint8_t *bytes;                  /* owned record bytes (zero-copy) */
+} delta_staged_rec;
+
 
 typedef struct invfs_volume {
     char *path;
@@ -662,6 +669,23 @@ typedef struct invfs_volume {
     uint64_t delta_pending_bytes;      /* their record bytes */
     uint64_t delta_group_max;          /* count cap (0 = unparsed: legacy) */
     uint64_t delta_group_bytes;        /* byte cap (0 = unparsed: legacy) */
+    /* ---- WP605: staged-byte retention (rewrite after failure) ----------
+     * Group commit stages records behind one barrier; a refused fence
+     * leaves their bytes of unknown fate, and a dm table swap can drop
+     * unfenced pages for good, leaving a zero gap that strands every
+     * record appended past it (fsync-acked files ABSENT). Staged record
+     * bytes are therefore retained (zero-copy: the append buffer changes
+     * hands) until the fence that covers them succeeds, and the next fence
+     * after any failure re-writes them first -- healing the hole whether
+     * the bytes landed (rewrite is idempotent) or dropped. Rewrite is
+     * best-effort before the barrier, whose result still decides the ack.
+     * Memory is O(staged): freed on every successful fence and on close.
+     * delta_rewrite_needed is set on any fence failure, cleared on success
+     * and by close/mount. */
+    delta_staged_rec *delta_staged;    /* retained staged record bytes */
+    size_t   delta_nstaged;            /* records retained */
+    size_t   delta_cstaged;            /* retention capacity */
+    int      delta_rewrite_needed;     /* a fence failed: rewrite first */
     /* ---- WP-M14: fold trigger accounting (D2) --------------------------
      * The design gives no numeric thresholds; vol_fold.c measures replay
      * latency and fixes them (recorded there and in the WP-M14 doc). These

@@ -1821,8 +1821,14 @@ int vol_flush(invfs_volume *v)
         vol_io_error_latch(v, "v3 bitmap flush");
         return -1;
     }
-    if (vmux_barrier(v, "v3 bitmap") < 0)
+    if (vmux_barrier(v, "v3 bitmap") < 0) {
+        /* WP605: a refused flush barrier leaves staged delta bytes (which
+         * this barrier would have covered) of unknown fate; the next delta
+         * fence re-writes them. Set even when nothing is staged (harmless:
+         * the rewrite is skipped when retention is empty). */
+        v->delta_rewrite_needed = 1;
         return -1;
+    }
     /* WP98: the WP25 tier/RAW-mirror indexes need no journal to be
      * durable. The ordering rule is the copies' blocks BEFORE the owner
      * record that names them, and the owner blob is published after the
@@ -1907,10 +1913,12 @@ int vol_sync(invfs_volume *v)
      * ack exact -- vol_sync returning 0 means every staged record durable,
      * not merely written. A refused drain latches like a refused barrier. */
     if (vol_delta_drain(v) != 0) {
+        v->delta_rewrite_needed = 1;   /* WP605: heal at the next fence */
         vol_io_error_latch(v, "sync");
         return -1;
     }
     if (vmux_barrier(v, "sync") < 0) {
+        v->delta_rewrite_needed = 1;   /* WP605: heal at the next fence */
         vol_io_error_latch(v, "sync");
         return -1;
     }

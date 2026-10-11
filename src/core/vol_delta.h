@@ -93,7 +93,12 @@ void vol_delta_close(invfs_volume *v);
  * the crash states per-record barriers could already produce (replay keeps
  * the CRC-valid prefix; a row naming a lost blob reads EIO, never corrupt),
  * and a refused barrier fails the append, so a 0 was never issued past
- * bytes of unknown fate. */
+ * bytes of unknown fate. WP605: staged bytes are retained until fenced,
+ * and the next fence after any failure re-writes them first -- a dm table
+ * swap can drop unfenced pages for good, and without the rewrite the log
+ * would keep a zero gap stranding every record appended past it
+ * (fsync-acked files ABSENT). Rewrite is idempotent and best-effort; the
+ * barrier's result still decides the ack. */
 int vol_delta_append(invfs_volume *v, const uint8_t *key, uint16_t klen,
                      const uint8_t *val, uint16_t vlen, uint16_t flags);
 
