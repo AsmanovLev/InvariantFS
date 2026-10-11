@@ -2,6 +2,61 @@
 
 All notable changes to InvariantFS will be documented in this file.
 
+## [Unreleased]
+
+### Added
+- Native v3 seal parity (WP201, par2-inspired, no byte-compat): per-chunk
+  Reed-Solomon groups + footer written last; `--seal [5|10|20|25]`, `--unseal`.
+- Seal scrub / heal / policy (WP401-404): `--verify-seal` read-only drift report,
+  explicit `--heal` rebuild from parity, `--stale-mode` gating auto-reseal,
+  incremental re-seal of dirty groups only.
+- Sweep `migrate` stage (WP601): defrag relocation of fragmented live segments
+  into consolidated extents, plus explicit recompress.
+- Delta group-commit barrier batching (WP602); staged rewrite ahead of
+  post-failure fences (WP605); tombstone pads for doomed spans, rename abort
+  compensation, fence-before-ack (WP606); retire-on-fence for superseded frees,
+  op-abort doom, heal-before-every-barrier (WP607).
+- Unlink rolls back the namespace when reclaim fails (WP604); TAR lane batch
+  durability fencing across members (WP603).
+- Pack signatures: vendored ed25519, signature gate on install (WP203).
+
+### Changed
+- Soak/flakey legs accept proven-exhausted verdicts where chaos wins (WP502/503
+  + gates); e2e-full re-enabled in CI with fuzz, usr1-savepoint,
+  fuse-sweep-thread and ext4fs unskipped (fixed by WP301/302/305).
+- `invf-verify` tolerates a larger backing file, refuses only truncation.
+
+### Fixed
+- fsck detects row/recipe incoherence (WP303); sweep remap put-failure guard
+  regression test (WP304); fuzz bitflip `--seal-every` runs exactly once (WP301).
+
+## [v0.6.0] - 2026-10-08
+
+Crash-consistency hardening release.
+
+### Added
+- Durability contract: fsync on v3 + close barrier (WP80; see
+  `docs/adr/ADR-009-v3-durability-contract.md`) — acknowledged writes are
+  durable, failures leave the pre-call state, never a torn prefix.
+- SPT0 savepoint capture wired into both sweep paths (WP77); every sweep
+  (offline, watermark, `kill -USR1`, xattr) arms a rollback window.
+- Sweep parity on v3 (WP78): text PPMd + binary ZSTD/BCJ batching, restored
+  transcode/codecpack lanes; PNGR lane transcodes (WP91).
+- xattr security namespaces + permission matrix (WP82).
+- Every C containerpack as a versioned `.ivpack`/`.so` plugin (WP71); qcow2
+  pack emits the full guest disk image (WP100); zlib-qcow2 e2e coverage (WP107).
+- Two-device durability: tier/RAW-mirror indexes durable on Meta-v3 (WP98),
+  commit protocol + DEVT `sync_seq` advance with stale-mirror reporting (WP99).
+- Codecpack retry: a zero-scoring pack is retried after the text lane and
+  exe carve (WP103).
+
+### Fixed
+- SPT0 P0: rollback could publish a recipe onto reused blocks (WP96).
+- ext4fs/ntfs TEXT{PPMd} expectations (WP90); DEFER_ENOSPC gate +
+  INVFS_PROFILE contract, four masked e2e failures unbroken (WP106).
+- Test isolation per-command in a mount namespace (WP104); no hardcoded
+  host-owned values in tests (WP105).
+
 ## [v0.5.0] - 2026-09-22
 
 ### Summary
