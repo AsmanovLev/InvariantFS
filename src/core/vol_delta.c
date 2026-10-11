@@ -49,6 +49,60 @@ __attribute__((weak)) void invfs_test_delta_read_hook(const void *ref)
 }
 
 
+/* WP602: group-commit caps, parsed once per mount from the environment.
+ * Unset / 0 / malformed -> the default; an explicit 1 on the count cap is
+ * the legacy per-record barrier (the no-op flag: proves the batching is the
+ * only delta). The byte cap honours an optional K/M/G suffix (bare = bytes).
+ * A handle that never reaches here keeps 0 caps, and 0 caps barrier every
+ * append -- an unparsed handle can never skip. */
+#define VOL_DELTA_GROUP_MAX_DEFAULT   64u
+#define VOL_DELTA_GROUP_BYTES_DEFAULT (256u * 1024u)
+
+static uint64_t dl_group_bytes(const char *v, uint64_t dflt)
+{
+    char *end = NULL;
+    unsigned long long n;
+
+    if (!v || !*v)
+        return dflt;
+    n = strtoull(v, &end, 10);
+    if (end == v)
+        return dflt;
+    while (*end == ' ')
+        end++;
+    if (*end == 'K' || *end == 'k')
+        n *= 1024ULL;
+    else if (*end == 'M' || *end == 'm')
+        n *= 1024ULL * 1024ULL;
+    else if (*end == 'G' || *end == 'g')
+        n *= 1024ULL * 1024ULL * 1024ULL;
+    if (n == 0)
+        return dflt;
+    return (uint64_t)n;
+}
+
+static uint64_t dl_group_max(const char *v)
+{
+    char *end = NULL;
+    unsigned long long n;
+
+    if (!v || !*v)
+        return VOL_DELTA_GROUP_MAX_DEFAULT;
+    n = strtoull(v, &end, 10);
+    if (end == v || n == 0)
+        return VOL_DELTA_GROUP_MAX_DEFAULT;
+    return (uint64_t)n;
+}
+
+static void dl_group_parse(invfs_volume *v)
+{
+    v->delta_group_max = dl_group_max(getenv("INVFS_DELTA_GROUP_MAX"));
+    v->delta_group_bytes = dl_group_bytes(getenv("INVFS_DELTA_GROUP_BYTES"),
+                                           VOL_DELTA_GROUP_BYTES_DEFAULT);
+    v->delta_pending = 0;
+    v->delta_pending_bytes = 0;
+}
+
 void vol_delta_lock(void)
 {
     pthread_mutex_lock(&g_delta_lock);
@@ -551,6 +605,10 @@ int vol_delta_append(invfs_volume *v, const uint8_t *key, uint16_t klen,
             pthread_mutex_unlock(&g_delta_lock);
             return -1;
         }
+        /* The publish barrier covered every staged record, so the group
+         * closes here: the records below start a fresh one. */
+        v->delta_pending = 0;
+        v->delta_pending_bytes = 0;
         v->delta_segments++;
         v->delta_seg_pba = pba;
         v->delta_bump = INVFS_DELTA_SEG_HDR_LEN;
@@ -580,11 +638,27 @@ int vol_delta_append(invfs_volume *v, const uint8_t *key, uint16_t klen,
         return -1;
     }
     free(rec);
-    /* The append is the writer's critical section (design §9): make the
-     * record durable before it becomes the indexed winner. */
-    if (vmux_barrier(v, "delta append") < 0) {
-        pthread_mutex_unlock(&g_delta_lock);
-        return -1;
+    /* WP602 group commit: the append is the writer's critical section
+     * (design §9), and the fence is now the GROUP's, not the record's.
+     * The record bytes are on the device (the pwrite above returned) and
+     * the index below publishes immediately, so the session reads its own
+     * writes; one barrier closes the group when it reaches its count or
+     * byte cap, and vol_delta_drain / vol_sync / close / fold barriers
+     * fence whatever is staged. 0 caps (never mounted) barrier every
+     * append, and a count cap of 1 is the legacy shape exactly -- the
+     * batching is the only delta. A refused barrier fails the append, so
+     * a 0 is never issued past bytes of unknown fate. */
+    v->delta_pending++;
+    v->delta_pending_bytes += rl;
+    if (v->delta_group_max == 0 || v->delta_group_bytes == 0 ||
+        v->delta_pending >= v->delta_group_max ||
+        v->delta_pending_bytes >= v->delta_group_bytes) {
+        if (vmux_barrier(v, "delta append") < 0) {
+            pthread_mutex_unlock(&g_delta_lock);
+            return -1;
+        }
+        v->delta_pending = 0;
+        v->delta_pending_bytes = 0;
     }
 
     seq = ++v->delta_seq;
@@ -612,6 +686,44 @@ int vol_delta_append(invfs_volume *v, const uint8_t *key, uint16_t klen,
         v->delta_records++;
     pthread_mutex_unlock(&g_delta_lock);
     return 0;
+}
+
+int vol_delta_drain(invfs_volume *v)
+{
+    int rc;
+
+    if (!v || !v->delta_ready)
+        return 0;
+    pthread_mutex_lock(&g_delta_lock);
+    if (v->delta_pending == 0) {
+        /* Nothing staged: a covering barrier may already have fenced the
+         * group (vol_sync's flush path does), so there is nothing to pay
+         * and 0 is still the honest ack. */
+        pthread_mutex_unlock(&g_delta_lock);
+        return 0;
+    }
+    rc = vmux_barrier(v, "delta group drain");
+    if (rc == 0) {
+        v->delta_pending = 0;
+        v->delta_pending_bytes = 0;
+    }
+    /* A refused barrier (rc != 0) advances nothing -- same rule as the
+     * blkio watermark (groupcommit_test T4): no caller is told staged
+     * records are durable, and the next drain retries the flush. */
+    pthread_mutex_unlock(&g_delta_lock);
+    return rc;
+}
+
+uint64_t vol_delta_pending(invfs_volume *v)
+{
+    uint64_t n;
+
+    if (!v)
+        return 0;
+    pthread_mutex_lock(&g_delta_lock);
+    n = v->delta_pending;
+    pthread_mutex_unlock(&g_delta_lock);
+    return n;
 }
 
 int vol_delta_lookup(invfs_volume *v, const uint8_t *key, uint16_t klen,
@@ -1148,6 +1260,7 @@ int vol_delta_mount(invfs_volume *v)
     v->delta_seg_gen = 0;
     v->delta_oldest_seq = 0;
     v->delta_oldest_when = 0;
+    dl_group_parse(v);
 
     if (!v->rt_present || v->rt.delta_pba == 0) {
         v->delta_ready = 1;              /* empty recent tier */
@@ -1524,4 +1637,8 @@ void vol_delta_close(invfs_volume *v)
     v->delta_seg_gen = 0;
     v->delta_oldest_seq = 0;
     v->delta_oldest_when = 0;
+    v->delta_pending = 0;
+    v->delta_pending_bytes = 0;
+    v->delta_group_max = 0;
+    v->delta_group_bytes = 0;
 }

@@ -39,6 +39,21 @@
  *   writes makes BOTH durable (the ordering rules in vol_crash.c depend on
  *   it); and a FAILED flush advances nothing, so the next barrier retries
  *   instead of reporting a durability it never achieved.
+ *
+ * WP602 -- THE DELTA LAYER (T8-T10 + the gc-crash-write/verify modes).
+ *
+ * T1-T7 collapse flushes that have nothing new between them, but every
+ * vol_delta_append used to fence its own record, so a sweep batch member
+ * (recipe publish + row put + stamp) still paid ~3 fsyncs. WP602 stages a
+ * bounded group of appends behind one barrier instead: T8 is the red (N
+ * appends cost ceil(N/max) + the one segment rollover, not N), T9 proves
+ * the no-op flag (INVFS_DELTA_GROUP_MAX=1 restores the per-record fence
+ * exactly), T10 proves the byte cap binds independently of the count cap,
+ * and every leg reopens the volume to prove the ack is still honest -- a
+ * drained group replays present+exact. The kill -9 half (a staged tail is
+ * complete-or-absent, never torn) is tools/test-delta-groupcommit-crash.sh
+ * driving the gc-crash-write / gc-crash-verify modes below, the leg7
+ * assertion shape.
  */
 #define _GNU_SOURCE
 
@@ -53,6 +68,8 @@
 #include <dlfcn.h>
 
 #include "blkio.h"
+#include "volume_internal.h"   /* pulls in volume.h + invarifs.h */
+#include "vol_delta.h"
 
 /* ---- the interposed fsync ------------------------------------------ */
 
@@ -379,6 +396,357 @@ static void t7_broken_fd_still_reports_failure(const char *dir)
 }
 
 /* ================================================================== */
+/* WP602 T8-T10 -- the delta layer stages bounded groups behind one fence */
+/* ================================================================== */
+
+/* mkfs a scratch v3 image through the built tool (the spn_walk_tear_test
+ * shape) and open it. Prints a FAIL and returns NULL on setup failure. */
+static invfs_volume *t8_mkfs_open(const char *dir, const char *imgname)
+{
+    static char img[1024];
+    char cmd[2048];
+    const char *root;
+    invfs_volume *v;
+    int err = 0;
+
+    snprintf(img, sizeof img, "%s/%s", dir, imgname);
+    unlink(img);
+    root = getenv("PWD") ? getenv("PWD") : ".";
+    snprintf(cmd, sizeof cmd, "%s/bin/invf-mkfs %s 1 2>/dev/null",
+             root, img);
+    if (system(cmd) != 0) {
+        printf("  FAIL  t8-setup: cannot create volume with invf-mkfs\n");
+        failures++;
+        return NULL;
+    }
+    v = vol_open(img, &err);
+    if (!v) {
+        printf("  FAIL  t8-setup: vol_open failed: err=%d\n", err);
+        failures++;
+        return NULL;
+    }
+    return v;
+}
+
+static void t8_key(int i, char *out, size_t cap)
+{
+    snprintf(out, cap, "gc%05d", i);
+}
+static void t8_val(int i, char *out, size_t cap)
+{
+    snprintf(out, cap, "val-%05d-0123456789", i);
+}
+
+/* Append n records; returns -1 on the first failing append. */
+static int t8_append_n(invfs_volume *v, int from, int n)
+{
+    char key[32], val[48];
+    int i;
+
+    for (i = 0; i < n; i++) {
+        t8_key(from + i, key, sizeof key);
+        t8_val(from + i, val, sizeof val);
+        if (vol_delta_append(v, (const uint8_t *)key,
+                             (uint16_t)strlen(key),
+                             (const uint8_t *)val,
+                             (uint16_t)strlen(val), 0) != 0)
+            return -1;
+    }
+    return 0;
+}
+
+/* Every record in [from, from+n) reads back exact through a fresh lookup. */
+static int t8_all_exact(invfs_volume *v, int from, int n, const char *what)
+{
+    char key[32], val[48];
+    uint8_t got[80];
+    uint16_t flags = 0, vlen = 0;
+    int i;
+
+    for (i = 0; i < n; i++) {
+        t8_key(from + i, key, sizeof key);
+        t8_val(from + i, val, sizeof val);
+        memset(got, 0, sizeof got);
+        flags = 0;
+        vlen = 0;
+        if (vol_delta_lookup_value(v, (const uint8_t *)key,
+                                   (uint16_t)strlen(key),
+                                   got, sizeof got, &flags, &vlen) != 1 ||
+            (flags & INVFS_DELTA_FLAG_DELETE) ||
+            vlen != strlen(val) || memcmp(got, val, vlen) != 0) {
+            printf("  FAIL  %s: key %s not present+exact\n", what, key);
+            failures++;
+            return 0;
+        }
+    }
+    return 1;
+}
+
+/* T8 -- THE WP602 RED: N delta appends cost groups, not records.
+ *
+ * With the default count cap (64) and 200 small records on a fresh volume:
+ * the first append rolls a segment (header + publish: 2 fsyncs), then the
+ * groups close at 64/128/192 (3 fsyncs) and 8 records stay staged. The
+ * bound is exact (5) because the run is single-threaded and nothing else
+ * writes. Before the fix the count was exactly 202. */
+static void t8_delta_appends_share_one_fence(const char *dir)
+{
+    invfs_volume *v;
+    char what[160];
+
+    unsetenv("INVFS_DELTA_GROUP_MAX");
+    unsetenv("INVFS_DELTA_GROUP_BYTES");
+    v = t8_mkfs_open(dir, "gc-t8.img");
+    if (!v)
+        return;
+    fsync_reset();
+    ok(t8_append_n(v, 0, 200) == 0, "t8: 200 appends succeed");
+    snprintf(what, sizeof what,
+             "t8: 200 appends cost 5 fsyncs (2 rollover + 3 groups), got %ld",
+             fsync_count());
+    ok(fsync_count() == 5, what);
+    snprintf(what, sizeof what,
+             "t8: 8 records staged after 192 fenced (pending=%llu)",
+             (unsigned long long)vol_delta_pending(v));
+    ok(vol_delta_pending(v) == 8, what);
+    ok(t8_all_exact(v, 0, 200, "t8: staged reads"),
+       "t8: the session reads its own staged writes");
+    fsync_reset();
+    ok(vol_delta_drain(v) == 0, "t8: drain succeeds");
+    snprintf(what, sizeof what,
+             "t8: draining 8 staged records costs 1 fsync (got %ld)",
+             fsync_count());
+    ok(fsync_count() == 1, what);
+    ok(vol_delta_pending(v) == 0, "t8: the group is closed after drain");
+    fsync_reset();
+    ok(vol_delta_drain(v) == 0, "t8: draining an empty group succeeds");
+    ok(fsync_count() == 0, "t8: draining an empty group costs no fsync");
+    vol_close(v);
+    /* Reopen: the drained group replays present+exact -- the ack was
+     * honest. vol_close/vol_open are outside the counted region. */
+    {
+        char img[1024];
+        int err = 0;
+        snprintf(img, sizeof img, "%s/gc-t8.img", dir);
+        v = vol_open(img, &err);
+        ok(v != NULL, "t8: reopen succeeds");
+        if (v) {
+            ok(t8_all_exact(v, 0, 200, "t8: reopen"),
+               "t8: the drained group replays present+exact");
+            vol_close(v);
+        }
+    }
+    printf("  ..    t8: 200 records -> 6 fsyncs total (0.03/record, legacy 1.0)\n");
+}
+
+/* T9 -- the no-op flag: GROUP_MAX=1 restores the per-record fence exactly.
+ *
+ * Same 40 records on a fresh volume: 2 rollover + 40 record fences = 42
+ * physical fsyncs, pending 0 after every append, and the reopened content
+ * identical to a batched run's -- the batching is the only delta. */
+static void t9_group_size_1_is_legacy(const char *dir)
+{
+    invfs_volume *v;
+    char what[160];
+    int i;
+    char key[32], val[48];
+
+    setenv("INVFS_DELTA_GROUP_MAX", "1", 1);
+    unsetenv("INVFS_DELTA_GROUP_BYTES");
+    v = t8_mkfs_open(dir, "gc-t9.img");
+    if (!v) {
+        unsetenv("INVFS_DELTA_GROUP_MAX");
+        return;
+    }
+    fsync_reset();
+    for (i = 0; i < 40; i++) {
+        t8_key(i, key, sizeof key);
+        t8_val(i, val, sizeof val);
+        if (vol_delta_append(v, (const uint8_t *)key,
+                             (uint16_t)strlen(key),
+                             (const uint8_t *)val,
+                             (uint16_t)strlen(val), 0) != 0) {
+            printf("  FAIL  t9: append %d failed\n", i);
+            failures++;
+            break;
+        }
+        if (vol_delta_pending(v) != 0) {
+            printf("  FAIL  t9: pending != 0 after fenced append %d\n", i);
+            failures++;
+            break;
+        }
+    }
+    snprintf(what, sizeof what,
+             "t9: 40 fenced appends cost 42 fsyncs (2 rollover + 40), got %ld",
+             fsync_count());
+    ok(fsync_count() == 42, what);
+    fsync_reset();
+    ok(vol_delta_drain(v) == 0, "t9: drain succeeds");
+    ok(fsync_count() == 0, "t9: drain after fenced appends costs no fsync");
+    vol_close(v);
+    {
+        char img[1024];
+        int err = 0;
+        snprintf(img, sizeof img, "%s/gc-t9.img", dir);
+        v = vol_open(img, &err);
+        ok(v != NULL, "t9: reopen succeeds");
+        if (v) {
+            ok(t8_all_exact(v, 0, 40, "t9: reopen"),
+               "t9: group-size-1 content replays present+exact");
+            vol_close(v);
+        }
+    }
+    unsetenv("INVFS_DELTA_GROUP_MAX");
+    note("t9: GROUP_MAX=1 -- every append fenced, counts match legacy");
+}
+
+/* T10 -- the byte cap binds independently of the count cap.
+ *
+ * Count cap huge (never fires for 200 records), byte cap 1024: each record
+ * is ~31 bytes, so the group closes roughly every 33 records -- several
+ * fences, well under the 200 a per-record fence would cost and well over
+ * the 1 a pure count cap of this size would. Range, not exact: the byte
+ * count is record framing, not a test constant. */
+static void t10_byte_cap_binds_first(const char *dir)
+{
+    invfs_volume *v;
+    char what[160];
+
+    setenv("INVFS_DELTA_GROUP_MAX", "1000000", 1);
+    setenv("INVFS_DELTA_GROUP_BYTES", "1024", 1);
+    v = t8_mkfs_open(dir, "gc-t10.img");
+    if (!v) {
+        unsetenv("INVFS_DELTA_GROUP_MAX");
+        unsetenv("INVFS_DELTA_GROUP_BYTES");
+        return;
+    }
+    fsync_reset();
+    ok(t8_append_n(v, 0, 200) == 0, "t10: 200 appends succeed");
+    snprintf(what, sizeof what,
+             "t10: byte-capped run costs 3..40 fsyncs (got %ld)",
+             fsync_count());
+    ok(fsync_count() >= 3 && fsync_count() <= 40, what);
+    ok(t8_all_exact(v, 0, 200, "t10: staged reads"),
+       "t10: the session reads its own staged writes");
+    ok(vol_delta_drain(v) == 0, "t10: drain succeeds");
+    vol_close(v);
+    {
+        char img[1024];
+        int err = 0;
+        snprintf(img, sizeof img, "%s/gc-t10.img", dir);
+        v = vol_open(img, &err);
+        ok(v != NULL, "t10: reopen succeeds");
+        if (v) {
+            ok(t8_all_exact(v, 0, 200, "t10: reopen"),
+               "t10: the byte-capped groups replay present+exact");
+            vol_close(v);
+        }
+    }
+    unsetenv("INVFS_DELTA_GROUP_MAX");
+    unsetenv("INVFS_DELTA_GROUP_BYTES");
+    note("t10: GROUP_BYTES=1024 with a huge count cap -- bytes close groups");
+}
+
+/* ================================================================== */
+/* WP602 crash-probe modes (driven by tools/test-delta-groupcommit-crash.sh) */
+/* ================================================================== */
+
+/* gc-crash-write <img> <n_acked> <m_unacked>: append n, drain (the group
+ * ack), append m more, print STAGED and sleep until killed. Never closes:
+ * the kill -9 is the power cut, and the superblock on disk stays DIRTY. */
+static int gc_crash_write(const char *img, int n, int m)
+{
+    invfs_volume *v;
+    int err = 0;
+
+    unsetenv("INVFS_DELTA_GROUP_MAX");
+    unsetenv("INVFS_DELTA_GROUP_BYTES");
+    v = vol_open(img, &err);
+    if (!v) {
+        fprintf(stderr, "gc-crash-write: vol_open failed: err=%d\n", err);
+        return 2;
+    }
+    if (t8_append_n(v, 0, n) != 0) {
+        fprintf(stderr, "gc-crash-write: acked appends failed\n");
+        return 1;
+    }
+    if (vol_delta_drain(v) != 0) {
+        fprintf(stderr, "gc-crash-write: drain (the ack) failed\n");
+        return 1;
+    }
+    printf("DRAINED %d (pending=%llu)\n", n,
+           (unsigned long long)vol_delta_pending(v));
+    fflush(stdout);
+    if (t8_append_n(v, n, m) != 0) {
+        fprintf(stderr, "gc-crash-write: unacked appends failed\n");
+        return 1;
+    }
+    printf("STAGED %d (pending=%llu)\n", m,
+           (unsigned long long)vol_delta_pending(v));
+    fflush(stdout);
+    for (;;)
+        pause();
+    return 0;
+}
+
+/* gc-crash-verify <img> <n> <m>: reopen after the kill. The n acked records
+ * must be present+exact; each of the m unacked records must be exact or
+ * absent -- present-but-wrong is a torn tail and fails. */
+static int gc_crash_verify(const char *img, int n, int m)
+{
+    invfs_volume *v;
+    int err = 0, i, bad = 0, exact = 0, absent = 0;
+    char key[32], val[48];
+    uint8_t got[80];
+    uint16_t flags, vlen;
+
+    v = vol_open(img, &err);
+    if (!v) {
+        fprintf(stderr, "gc-crash-verify: vol_open failed: err=%d\n", err);
+        return 2;
+    }
+    for (i = 0; i < n; i++) {
+        t8_key(i, key, sizeof key);
+        t8_val(i, val, sizeof val);
+        memset(got, 0, sizeof got);
+        flags = 0;
+        vlen = 0;
+        if (vol_delta_lookup_value(v, (const uint8_t *)key,
+                                   (uint16_t)strlen(key),
+                                   got, sizeof got, &flags, &vlen) != 1 ||
+            (flags & INVFS_DELTA_FLAG_DELETE) ||
+            vlen != strlen(val) || memcmp(got, val, vlen) != 0) {
+            printf("BAD: acked key %s not present+exact\n", key);
+            bad++;
+        }
+    }
+    for (; i < n + m; i++) {
+        int rc;
+        t8_key(i, key, sizeof key);
+        t8_val(i, val, sizeof val);
+        memset(got, 0, sizeof got);
+        flags = 0;
+        vlen = 0;
+        rc = vol_delta_lookup_value(v, (const uint8_t *)key,
+                                    (uint16_t)strlen(key),
+                                    got, sizeof got, &flags, &vlen);
+        if (rc == 0) {
+            absent++;
+        } else if (rc == 1 && !(flags & INVFS_DELTA_FLAG_DELETE) &&
+                   vlen == strlen(val) && memcmp(got, val, vlen) == 0) {
+            exact++;
+        } else {
+            printf("BAD: unacked key %s torn (present but wrong)\n", key);
+            bad++;
+        }
+    }
+    printf("gc-crash-verify: acked %d/%d exact; unacked: %d exact %d absent %d bad\n",
+           n - bad < 0 ? 0 : n - bad, n, exact, absent, bad);
+    vol_close(v);
+    return bad ? 1 : 0;
+}
+
+/* ================================================================== */
 /* T5 -- concurrent writers SHARE one flush                           */
 /* ================================================================== */
 
@@ -429,6 +797,24 @@ int main(int argc, char **argv)
     long total, i, worst = 0;
     int t;
 
+    /* Crash-probe driver modes (no dir needed, no other legs run). */
+    if (argc > 1 && strcmp(argv[1], "gc-crash-write") == 0) {
+        if (argc < 5) {
+            fprintf(stderr, "usage: %s gc-crash-write <img> <n_acked> <m_unacked>\n",
+                    argv[0]);
+            return 2;
+        }
+        return gc_crash_write(argv[2], atoi(argv[3]), atoi(argv[4]));
+    }
+    if (argc > 1 && strcmp(argv[1], "gc-crash-verify") == 0) {
+        if (argc < 5) {
+            fprintf(stderr, "usage: %s gc-crash-verify <img> <n> <m>\n",
+                    argv[0]);
+            return 2;
+        }
+        return gc_crash_verify(argv[2], atoi(argv[3]), atoi(argv[4]));
+    }
+
     printf("groupcommit_test: group-commit durability + flush-count tests\n");
 
     t1_repeated_barriers_are_one_flush(dir);
@@ -437,6 +823,9 @@ int main(int argc, char **argv)
     t4_failed_flush_is_not_a_flush(dir);
     t6_resize_is_counted(dir);
     t7_broken_fd_still_reports_failure(dir);
+    t8_delta_appends_share_one_fence(dir);
+    t9_group_size_1_is_legacy(dir);
+    t10_byte_cap_binds_first(dir);
 
     /* T5 */
     scratch_path(dir, "t5");

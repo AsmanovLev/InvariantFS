@@ -641,6 +641,27 @@ typedef struct invfs_volume {
     uint64_t delta_segments;           /* segments in the chain */
     uint64_t delta_bytes;              /* record payload bytes appended */
     int      delta_ready;              /* mount replay done for this handle */
+    /* ---- WP602: delta group-commit staging (bounded barrier batching) ---
+     * The per-record barrier used to fence every append; now appends
+     * accumulate behind one barrier (see vol_delta_append). delta_pending
+     * counts records staged since the last barrier that covered them and
+     * delta_pending_bytes their record bytes; the group closes (one
+     * vmux_barrier) when either reaches its cap. The caps are parsed from
+     * the environment at vol_delta_mount (INVFS_DELTA_GROUP_MAX, default
+     * 64; INVFS_DELTA_GROUP_BYTES, default 256 KiB); a count cap of 1 is
+     * the legacy per-record barrier, and 0 caps (a handle whose delta was
+     * never mounted, e.g. unit-test synthetic volumes) also barrier every
+     * append, so an unparsed handle can never skip. Counters are
+     * conservative, not exact: a barrier issued anywhere else (fold,
+     * savepoint, fsck, vol_flush) covers staged records without resetting
+     * them here, which only shortens the next group -- it can never widen
+     * the crash window past one cap. Memory overhead is O(group): the
+     * records live on disk from their pwrite on, the index entry is what
+     * was always allocated per append. */
+    uint64_t delta_pending;            /* staged records since last barrier */
+    uint64_t delta_pending_bytes;      /* their record bytes */
+    uint64_t delta_group_max;          /* count cap (0 = unparsed: legacy) */
+    uint64_t delta_group_bytes;        /* byte cap (0 = unparsed: legacy) */
     /* ---- WP-M14: fold trigger accounting (D2) --------------------------
      * The design gives no numeric thresholds; vol_fold.c measures replay
      * latency and fixes them (recorded there and in the WP-M14 doc). These

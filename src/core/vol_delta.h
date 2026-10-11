@@ -24,11 +24,13 @@
  * appended at the bump cursor. The chain is walked toward the oldest segment
  * via prev_pba and the active (newest) segment is named by RT30.delta_pba.
  *
- * Durability: append writes the record bytes, then barriers (the append is
- * the writer's critical section in the design). A torn record — crash or a
- * partial write — fails its CRC and ends the replay; everything before it
- * is kept, so the log is always a valid prefix. Segment creation follows
- * structure-before-reference: the header is durable before RT30 names it.
+ * Durability: append writes the record bytes, then fences them with the
+ * group's barrier (WP602 group commit: one barrier per bounded group, not
+ * per record -- see vol_delta_append/vol_delta_drain). A torn record --
+ * crash or a partial write -- fails its CRC and ends the replay; everything
+ * before it is kept, so the log is always a valid prefix. Segment creation
+ * follows structure-before-reference: the header is durable before RT30
+ * names it.
  */
 #ifndef INVFS_VOL_DELTA_H
 #define INVFS_VOL_DELTA_H
@@ -75,9 +77,35 @@ void vol_delta_close(invfs_volume *v);
 /* Append one record (flags bit0 delete; val may be NULL only when vlen 0).
  * Coalesces by key: the new record becomes the index entry for `key` even
  * when it is a delete marker. Rolls to a fresh segment when the active one
- * is full. 0 = ok, -1 = error/ENOSPC/record too large for a segment. */
+ * is full. 0 = ok, -1 = error/ENOSPC/record too large for a segment.
+ *
+ * WP602 group commit: 0 means STAGED, not necessarily durable. The record
+ * bytes are on the device (its pwrite returned) and the index names it
+ * immediately, so the session reads its own writes; durability arrives
+ * with the barrier that closes the group -- the count/byte cap auto-drain
+ * inside a later append, vol_delta_drain(), or any durability promise the
+ * caller already holds (vol_sync, vol_flush, close, fold/checkpoint
+ * barriers all fence the whole handle, staged records included). A group
+ * is bounded by delta_group_max records / delta_group_bytes bytes
+ * (INVFS_DELTA_GROUP_MAX / INVFS_DELTA_GROUP_BYTES at mount, defaults 64 /
+ * 256 KiB; a count cap of 1 is the legacy per-record barrier), so the crash
+ * window is one group, never the volume. Prefixes of a group are exactly
+ * the crash states per-record barriers could already produce (replay keeps
+ * the CRC-valid prefix; a row naming a lost blob reads EIO, never corrupt),
+ * and a refused barrier fails the append, so a 0 was never issued past
+ * bytes of unknown fate. */
 int vol_delta_append(invfs_volume *v, const uint8_t *key, uint16_t klen,
                      const uint8_t *val, uint16_t vlen, uint16_t flags);
+
+/* WP602: close the staged group. Issues one vmux_barrier when records were
+ * staged since the last covering barrier and returns its result, so a 0 is
+ * the group's durability ack (every staged record durable); 0 with nothing
+ * staged (a covering barrier may already have fenced them -- vol_sync's
+ * flush path does). -1 = the barrier failed, nothing is claimed. */
+int vol_delta_drain(invfs_volume *v);
+/* WP602: records staged since the last covering barrier (0 when the group
+ * is closed). Tests / crash probes, not a durability query. */
+uint64_t vol_delta_pending(invfs_volume *v);
 
 /* Point lookup of the winning record. 1 = found (*out filled), 0 = absent,
  * -1 = error/bad arguments.

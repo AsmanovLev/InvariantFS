@@ -1868,11 +1868,12 @@ int vol_sync(invfs_volume *v)
      * the device. */
     /* WP80/A: v3 is the default full format now, not the empty/read-only
      * skeleton the WP-M1 comment described. Its pending state is the dirty
-     * block bitmap, which vol_flush persists (WP75); the delta records are
-     * already barriered at append (see Bug C in docs/architecture/META.md)
-     * and the data segments they name are written before that barrier, so a
-     * vol_flush + one barrier covers the whole fsync contract exactly as the
-     * v2 path does. Returning early here silently made FUSE .fsync a no-op. */
+     * block bitmap, which vol_flush persists (WP75); staged delta records
+     * are fenced by the drain below (WP602 group commit: appends stage
+     * behind one barrier instead of fencing every record) and the data
+     * segments they name are written before them, so a vol_flush + drain +
+     * one barrier covers the whole fsync contract exactly as the v2 path
+     * does. Returning early here silently made FUSE .fsync a no-op. */
     if (vol_flush(v) != 0) return -1;   /* flush latches its own failures */
 #ifndef _WIN32
     /* WP22c test hook (tools/test-flushfail.sh): the Nth vol_sync of the
@@ -1899,6 +1900,16 @@ int vol_sync(invfs_volume *v)
         return -1;
     }
 #endif
+    /* WP602: fence the staged delta group before acknowledging the sync.
+     * The flush above usually already covered it (its "v3 bitmap" barrier
+     * fenced the whole handle, so the drain's barrier is skipped by the
+     * blkio watermark at zero extra fsyncs); the drain is what makes the
+     * ack exact -- vol_sync returning 0 means every staged record durable,
+     * not merely written. A refused drain latches like a refused barrier. */
+    if (vol_delta_drain(v) != 0) {
+        vol_io_error_latch(v, "sync");
+        return -1;
+    }
     if (vmux_barrier(v, "sync") < 0) {
         vol_io_error_latch(v, "sync");
         return -1;

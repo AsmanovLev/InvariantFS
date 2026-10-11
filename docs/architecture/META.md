@@ -157,7 +157,7 @@ actually promise. The engine-side entry points are `vol_sync` (FUSE
 
 | Mutation | Commit point | Durable when it returns? |
 |---|---|---|
-| namespace / inode / xattr change | `vol_delta_append` (record `io_pwrite` → `vmux_barrier("delta append")` → index publish) | **yes** |
+| namespace / inode / xattr change | `vol_delta_append` (record `io_pwrite` → staged in the bounded group → group's `vmux_barrier` → index publish) | **at the group's fence**: the cap auto-drain, `vol_delta_drain`, or the next `vol_sync`/`vol_flush`/close/fold barrier (`src/core/vol_delta.c:644-665`) |
 | new delta segment | `delta_new_segment` (zeroed segment + header + barrier) | yes, before `RT30` names it |
 | file content | data segments are written before the delta record that names them; that record's barrier covers them | yes |
 | fold (base-tree COW) | `v3_publish`: bitmap flush + barrier, then `mbuf_root_publish` (`RT30` double slot + barrier) | yes, at publish |
@@ -226,16 +226,19 @@ drift from the code.
   refused (`vol_write_enabled` consults `io_latched` even on v3) and
   `vol_close` will not write CLEAN.
 
-Because the delta append already barriers each record (§4.4), the metadata
-of an acknowledged mutation is durable *before* `fsync` is called. What
-`fsync` adds on v3 is the **bitmap**: the allocation map is a derived cache
-persisted only on flush/publish, so `fsync` is the point that pins it. Data
-blocks are covered by the barrier that follows them.
+Because the delta append stages behind its group's fence (WP602, §4.4),
+the metadata of a mutation is durable at the latest when `fsync` returns:
+`vol_sync` drains the staged group before its barrier
+(`src/core/volume.c:1909`), so the acknowledgement still means what it
+says. What `fsync` adds on v3 beyond the drain is the **bitmap**: the
+allocation map is a derived cache persisted only on flush/publish, so
+`fsync` is the point that pins it. Data blocks are covered by the barrier
+that follows them.
 
 **What `fsync` does not cover, on v3:** the bitmap is *not* made durable
-before a delta record. The record is barriered at append
-(`src/core/vol_delta.c:571`); the bitmap is only written at `vol_flush`
-(`src/core/volume.c:2641`). A crash inside that window leaves a durable
+before a delta record. The record is fenced with its group
+(`src/core/vol_delta.c:644-665`); the bitmap is only written at `vol_flush`
+(`src/core/volume.c:1820`). A crash inside that window leaves a durable
 record naming blocks whose allocation bits are still clear on disk. This is
 safe by **derivation, not by ordering**: the bitmap is a derived cache
 (`vol_fsck.c:25`) and mount replay re-reserves every block a replayed segment
@@ -246,30 +249,51 @@ cannot alias a live block. `tools/delta_test.c`
 that derivation; there is deliberately no test asserting an ordering that
 does not exist.
 
-### 4.4 The per-append barrier (WP80/Bug C audit)
+### 4.4 The per-append barrier (WP80/Bug C audit, relaxed by WP602)
 
-`vol_delta_append` calls `vmux_barrier(v, "delta append")` after **every**
-record, not per batch. Audit result:
+`vol_delta_append` used to call `vmux_barrier(v, "delta append")` after
+**every** record, not per batch. Audit result:
 
-- **It is a durability ordering, not a read-consistency mechanism.**
+- **It was a durability ordering, not a read-consistency mechanism.**
   Lock-free readers (ADR-002) get their consistency from the in-RAM index
   being published *after* the record bytes are written and the sequence
   number assigned; a device barrier is irrelevant to a same-process reader.
   The in-code rationale ("make the record durable before it becomes the
-  indexed winner") is exactly that: if the append is acknowledged, the
-  record is on disk.
-- **It is intentional (design §9).** It makes each namespace mutation an
-  implicit, immediate durability point, which is why `fsync` can *appear*
-  redundant. It is a deliberate durability-for-throughput trade, not an
+  indexed winner") was exactly that: if the append was acknowledged, the
+  record was on disk.
+- **It was intentional (design §9).** It made each namespace mutation an
+  implicit, immediate durability point, which is why `fsync` could *appear*
+  redundant. It was a deliberate durability-for-throughput trade, not an
   accident.
-- **What relaxing it would require** (not done here — no measurement yet):
-  a `delta_durable` append anchor, a recovery story for the torn delta tail
-  (`vol_delta_mount` already truncates a torn tail, so replay stays safe),
-  and redefining the acknowledged-write contract as "durable at fsync, not
-  at return". Read and fold consistency would still hold, because the index
-  publish ordering is unchanged; the change is purely *when* bytes reach
-  the device. Until that is measured and the weaker contract is adopted
-  deliberately, the barrier stays.
+
+WP602 measured the cost and adopted the weaker contract deliberately:
+on a 16-text-member sweep batch fixture the per-record fence was 64 of 72
+sweep fsyncs (4.0 per member); staging bounded groups behind one barrier
+cut the sweep to 39 fsyncs (2.4 per member, the rest being base-tree
+`publish` fences owned by another layer) with byte-identical output.
+The relaxation WP80 left open is now done, on its terms:
+
+- a `delta_durable` append anchor: `vol_delta_drain()` — one barrier that
+  fences the staged group, whose 0 is the group's durability ack;
+- the torn-tail recovery story is unchanged: `vol_delta_mount` truncates a
+  torn tail, so replay stays a valid prefix and an unfenced tail is
+  complete-or-absent, never torn
+  (`tools/test-delta-groupcommit-crash.sh` is the kill -9 probe);
+- the acknowledged-write contract is "durable at the group's fence, not
+  at return": `vol_delta_append` returning 0 means staged (bytes on the
+  device, index published, session reads its own writes); the fence is the
+  count/byte cap auto-drain (`INVFS_DELTA_GROUP_MAX` default 64 /
+  `INVFS_DELTA_GROUP_BYTES` default 256 KiB, parsed at mount), an explicit
+  `vol_delta_drain`, or any durability promise the caller already holds
+  (`vol_sync` drains before its barrier; `vol_flush`/close/fold barriers
+  fence the whole handle). A count cap of 1 is the legacy per-record fence
+  exactly (`tools/groupcommit_test.c` T9 pins the counts).
+
+Read and fold consistency still hold, because the index publish ordering is
+unchanged; the change is purely *when* bytes are fenced. Crash prefixes of
+a group are exactly the crash states per-record barriers could already
+produce (each generation is self-consistent; losing the newest is a rollback
+to an older one), so no new recovery state exists.
 
 ### 4.5 `vol_close` and the CLEAN superblock
 
