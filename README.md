@@ -96,21 +96,21 @@ FUSE gives this for free. The alternatives are worse:
   compilers, package managers) to link against a proprietary SDK,
   defeating the point of a POSIX filesystem.
 
-The real overhead is not the FUSE protocol (libfuse3 uses io_uring for
-/dev/fuse I/O and is very fast). It is how the daemon handles requests
-internally. The optimizations that matter:
+The real overhead is not the FUSE protocol itself. It is how the daemon
+handles requests internally. The mechanisms that matter:
 
-* **FUSE writeback cache** (`FUSE_CAP_WRITEBACK_CACHE`) — kernel
+* **FUSE writeback cache** (`FUSE_CAP_WRITEBACK_CACHE`) — the kernel
   aggregates small writes into large aligned chunks; the daemon receives
   ideal 1 MiB+ sequential I/O for its shared-pool RAW landing zone.
-* **In-memory AST cache** — recipes loaded once at open, resolved from
-  RAM on every subsequent read. Zero disk metadata lookups in steady
-  state.
-* **Split thread pools** — fast-path pool for stat/lookup/readlink,
-  separate codec pool for decompression. A slow PPMd batch never blocks
-  an `ls -l`.
-* **Pre-fetching** — io_uring readahead on the next AST segment while
-  the current one is still decompressing.
+* **ARC segment cache** (256 MB default, tunable via `arc_limit=` /
+  `INVFS_ARC_BYTES`) — decoded segments are served from RAM on repeat
+  reads, so steady-state reads never touch the disk data path.
+* **In-memory delta index** — reads check the RAM index first and fall
+  through to the immutable B+ tree base without lock contention.
+* **Kernel readahead** — `max_readahead` is wired up, so sequential
+  reads stream while the daemon decodes.
+* **Multithreaded dispatch** — a single demand-grown `fuse_loop_mt`
+  pool overlaps kernel↔daemon IPC with the locked engine work.
 * **O(1) mount** — the `RT30` base root loads in constant time; only a short
   Delta Log replay follows, instead of the v2 full metadata scan.
 
@@ -168,7 +168,7 @@ unlink()  ->  delta delete entry appended; blocks retired, freed at the next
 
 For complete architecture specifications, see:
 * [Architecture Overview](docs/architecture/OVERVIEW.md)
-* [Meta-v3 Specification](docs/architecture/META-V3.md)
+* [Meta-v3 Specification](docs/architecture/META.md)
 * [Architecture Decision Records (ADRs)](docs/adr/README.md)
 * [CLI Usage Guide](docs/guides/CLI-USAGE.md)
 
