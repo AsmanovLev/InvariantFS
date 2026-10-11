@@ -2860,3 +2860,27 @@ cover absent files by the named catastrophe (per-file naming is
 impossible without enumeration); readable namespaces keep the strict
 per-file demand (stale-mapping tripwire intact). Replay on the dead
 artifact yields EXHAUSTED; healthy volume refuses proof.
+
+## leg4 silent MISMATCH under seal, single occurrence (migrate branch, mechanism open)
+
+**Date:** 2026-10-11. **Status:** OPEN, 1 occurrence in CI (engine-ci
+run 38103927132, soak leg4 arm 4b), 0/8 local reproductions (same seed,
+same branch). `invf-verify --deep` clean (9 files ok, 0 corrupt,
+parity clean after re-seal) but `invf-cat` readback mismatched orig on
+4 files (a.c, r.log, t.tar, w.py). No crash/kill between the two reads
+(~22s apart, reads only), so deterministic reads diverged: stale
+dirent/name mapping vs torn-but-readable bytes are both consistent
+with the evidence; neither is proven. Reopen on second occurrence --
+with an artifact, dissect read-vs-verify resolution per inode before
+any other theory.
+
+## migrate + serialize_win: windowed recipes stay put (v1 boundary)
+
+**Date:** 2026-10-11. **Status:** BOUNDARY, not a bug filed. Migrate
+republishes recipes via serialize_win for container members/siblings;
+a field report (block-4 bitmap divergence on a containerpack sweep)
+overlaps that path but is unproven against it (also consistent with
+the uninitialized-moves defect fixed in this WP, and with harness
+set -e artifacts). v1 skips windowed recipes entirely (lane-owned);
+revisiting serialize_win-after-pba-swap needs a dedicated WP with a
+deterministic repro, not drive-by analysis.
