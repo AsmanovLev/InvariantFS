@@ -101,6 +101,66 @@ static void dl_group_parse(invfs_volume *v)
                                            VOL_DELTA_GROUP_BYTES_DEFAULT);
     v->delta_pending = 0;
     v->delta_pending_bytes = 0;
+    v->delta_rewrite_needed = 0;
+}
+
+/* WP605: staged-byte retention helpers. Every caller holds g_delta_lock.
+ * Retained count always equals pending (keep on stage, pop on
+ * stage-failure, free on fence success and close), so retention is exactly
+ * the unfenced set. */
+static void dl_staged_free(invfs_volume *v)
+{
+    size_t i;
+    if (!v || !v->delta_staged)
+        return;
+    for (i = 0; i < v->delta_nstaged; i++)
+        free(v->delta_staged[i].bytes);
+    free(v->delta_staged);
+    v->delta_staged = NULL;
+    v->delta_nstaged = 0;
+    v->delta_cstaged = 0;
+}
+
+/* Retain a just-staged record (takes ownership of rec). Best-effort: on
+ * OOM the record keeps its pre-WP605 fate (fenced-or-lost with the group)
+ * and only the rewrite loses coverage for it. Returns 0 when retained. */
+static int dl_staged_keep(invfs_volume *v, uint64_t off,
+                          uint8_t *rec, size_t rl)
+{
+    delta_staged_rec *ns;
+    if (!v || !rec || rl == 0)
+        return -1;
+    if (v->delta_nstaged == v->delta_cstaged) {
+        size_t ncap = v->delta_cstaged ? v->delta_cstaged * 2 : 16;
+        ns = (delta_staged_rec *)realloc(v->delta_staged,
+                                         ncap * sizeof *ns);
+        if (!ns)
+            return -1;
+        v->delta_staged = ns;
+        v->delta_cstaged = ncap;
+    }
+    v->delta_staged[v->delta_nstaged].off = off;
+    v->delta_staged[v->delta_nstaged].len = rl;
+    v->delta_staged[v->delta_nstaged].bytes = rec;
+    v->delta_nstaged++;
+    return 0;
+}
+
+/* Re-write retained staged bytes in append order ahead of a fence that
+ * follows a failure. Best-effort: a rewrite that still fails is reported
+ * by the barrier below failing loudly (or succeeds on healed storage).
+ * Bytes that landed despite the failure are rewritten identically. */
+static void dl_staged_rewrite(invfs_volume *v)
+{
+    size_t i;
+    if (!v || !v->delta_staged)
+        return;
+    for (i = 0; i < v->delta_nstaged; i++) {
+        if (io_pwrite(&v->io, v->delta_staged[i].off,
+                      v->delta_staged[i].bytes,
+                      v->delta_staged[i].len) != 0)
+            break;   /* the barrier below reports the failure */
+    }
 }
 
 void vol_delta_lock(void)
@@ -536,8 +596,13 @@ static uint64_t delta_new_segment(invfs_volume *v, uint64_t prev)
         return 0;
     }
     free(seg);
-    if (vmux_barrier(v, "delta segment header") < 0)
+    if (vmux_barrier(v, "delta segment header") < 0) {
+        /* WP605: earlier staged bytes are of unknown fate; the next fence
+         * re-writes them. The new segment stays allocated but unnamed (an
+         * fsck orphan, reclaimed by the next -f pass). */
+        v->delta_rewrite_needed = 1;
         return 0;
+    }
     return pba;
 }
 
@@ -553,6 +618,7 @@ int vol_delta_append(invfs_volume *v, const uint8_t *key, uint16_t klen,
     uint32_t crc;
     uint8_t *rec;
     int inserted = 0;
+    int kept = 0;   /* WP605: current record retained for rewrite */
 
     if (!v || !key || klen == 0)
         return -1;
@@ -598,17 +664,28 @@ int vol_delta_append(invfs_volume *v, const uint8_t *key, uint16_t klen,
             v->rt.delta_pba = pba;
         }
         if (mbuf_rt30_store(v) != 0) {
+            /* WP605: roll the in-RAM root back to the live segment (the
+             * store may or may not have landed; the old chain is intact
+             * either way) and heal the staged tail at the next fence. */
+            v->rt.delta_pba = v->delta_seg_pba;
+            v->delta_rewrite_needed = 1;
             pthread_mutex_unlock(&g_delta_lock);
             return -1;
         }
         if (vmux_barrier(v, "delta segment publish") < 0) {
+            /* Same rollback: without the publish fence the new segment is
+             * unnamed, so the session stays on the old one. */
+            v->rt.delta_pba = v->delta_seg_pba;
+            v->delta_rewrite_needed = 1;
             pthread_mutex_unlock(&g_delta_lock);
             return -1;
         }
         /* The publish barrier covered every staged record, so the group
          * closes here: the records below start a fresh one. */
+        dl_staged_free(v);
         v->delta_pending = 0;
         v->delta_pending_bytes = 0;
+        v->delta_rewrite_needed = 0;
         v->delta_segments++;
         v->delta_seg_pba = pba;
         v->delta_bump = INVFS_DELTA_SEG_HDR_LEN;
@@ -633,11 +710,18 @@ int vol_delta_append(invfs_volume *v, const uint8_t *key, uint16_t klen,
 
     abs = v->delta_seg_pba * (uint64_t)INVFS_BLOCK_SIZE + v->delta_bump;
     if (io_pwrite(&v->io, abs, rec, rl) != 0) {
+        /* WP605: earlier staged bytes share the unknown fate; heal them at
+         * the next fence. */
+        v->delta_rewrite_needed = 1;
         free(rec);
         pthread_mutex_unlock(&g_delta_lock);
         return -1;
     }
-    free(rec);
+    /* WP605: retain the staged bytes (rec changes hands, not freed) until
+     * the fence that covers them succeeds. */
+    kept = (dl_staged_keep(v, abs, rec, rl) == 0);
+    if (!kept)
+        free(rec);   /* retention OOM: pre-WP605 fate, no leak */
     /* WP602 group commit: the append is the writer's critical section
      * (design §9), and the fence is now the GROUP's, not the record's.
      * The record bytes are on the device (the pwrite above returned) and
@@ -647,25 +731,43 @@ int vol_delta_append(invfs_volume *v, const uint8_t *key, uint16_t klen,
      * fence whatever is staged. 0 caps (never mounted) barrier every
      * append, and a count cap of 1 is the legacy shape exactly -- the
      * batching is the only delta. A refused barrier fails the append, so
-     * a 0 is never issued past bytes of unknown fate. */
+     * a 0 is never issued past bytes of unknown fate; retained staged
+     * bytes are re-written ahead of the next fence (WP605), so a table
+     * swap can never strand later records past a hole. */
     v->delta_pending++;
     v->delta_pending_bytes += rl;
     if (v->delta_group_max == 0 || v->delta_group_bytes == 0 ||
         v->delta_pending >= v->delta_group_max ||
         v->delta_pending_bytes >= v->delta_group_bytes) {
+        if (v->delta_rewrite_needed && v->delta_nstaged > 0)
+            dl_staged_rewrite(v);
         if (vmux_barrier(v, "delta append") < 0) {
+            /* The failed record was never staged: unretain (iff kept) +
+             * uncount it (it must not ride the next group); retained
+             * earlier bytes are re-written ahead of the next fence. */
+            if (kept && v->delta_nstaged > 0) {
+                free(v->delta_staged[v->delta_nstaged - 1].bytes);
+                v->delta_nstaged--;
+            }
+            v->delta_pending--;
+            v->delta_pending_bytes -= rl;
+            v->delta_rewrite_needed = 1;
             pthread_mutex_unlock(&g_delta_lock);
             return -1;
         }
+        dl_staged_free(v);
         v->delta_pending = 0;
         v->delta_pending_bytes = 0;
+        v->delta_rewrite_needed = 0;
     }
 
     seq = ++v->delta_seq;
     /* off is segment-relative: read_value/addressing re-add seg*blocksize. */
     if (di_put(v->delta_index, key, klen, v->delta_seg_pba, v->delta_bump, seq,
                flags, vlen, &inserted) != 0) {
-        /* OOM: the record is durable, the index is behind */
+        /* OOM: the record is durable, the index is behind. Its bytes stay
+         * retained when kept, so the next fence still re-writes them. */
+        v->delta_rewrite_needed = 1;
         pthread_mutex_unlock(&g_delta_lock);
         return -1;
     }
@@ -699,13 +801,25 @@ int vol_delta_drain(invfs_volume *v)
         /* Nothing staged: a covering barrier may already have fenced the
          * group (vol_sync's flush path does), so there is nothing to pay
          * and 0 is still the honest ack. */
+        if (v->delta_nstaged == 0)
+            v->delta_rewrite_needed = 0;  /* WP605: nothing to heal */
         pthread_mutex_unlock(&g_delta_lock);
         return 0;
     }
+    /* WP605: heal retained staged bytes before fencing (same rule as the
+     * append path). Usually empty (freed on every success), so this is
+     * free; after a failure it re-writes whatever the swap may have
+     * dropped, and the barrier below decides the ack. */
+    if (v->delta_rewrite_needed && v->delta_nstaged > 0)
+        dl_staged_rewrite(v);
     rc = vmux_barrier(v, "delta group drain");
     if (rc == 0) {
+        dl_staged_free(v);
         v->delta_pending = 0;
         v->delta_pending_bytes = 0;
+        v->delta_rewrite_needed = 0;
+    } else {
+        v->delta_rewrite_needed = 1;
     }
     /* A refused barrier (rc != 0) advances nothing -- same rule as the
      * blkio watermark (groupcommit_test T4): no caller is told staged
@@ -1641,4 +1755,6 @@ void vol_delta_close(invfs_volume *v)
     v->delta_pending_bytes = 0;
     v->delta_group_max = 0;
     v->delta_group_bytes = 0;
+    dl_staged_free(v);   /* WP605: retained bytes die with the session */
+    v->delta_rewrite_needed = 0;
 }
