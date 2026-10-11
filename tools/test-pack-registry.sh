@@ -18,10 +18,18 @@
 # Leg 6 (unreachable): bogus --repo degrades list to installed-only with
 #   one loud `registry ... unreachable` line; unknown pack names fail
 #   naming the registry.
+<<<<<<< HEAD
 # Leg 8 (release name@ver): `install vxr@1.0.0 --release` fetches the
 #   release tarball (releases/download/v1.0.0/), verifies it against the
 #   raw-tree sha256 listing, passes the WP203 gate, and lands on a fresh
 #   volume.
+=======
+# Leg 8 (release name@ver): `install vxr@1.0.0 --release` finds no .ivpack
+#   asset (vxr is tarball-only), prints ONE loud fallback line, then
+#   fetches the release tarball (releases/download/v1.0.0/), verifies it
+#   against the raw-tree sha256 listing, passes the WP203 gate, and
+#   lands on a fresh volume.
+>>>>>>> wp/608-pack-registry-fetch
 # Leg 9 (release latest): bare `install vxr --release` resolves the
 #   latest version (2.0.0) from the same index.json — no GitHub API.
 # Leg 10 (tampered release refuses): a re-packed tarball with a tampered
@@ -30,6 +38,33 @@
 # Leg 11 (missing version): vxr@9.9.9 fails LOUD in both modes, naming
 #   the version and the registry.
 # Leg 12 (clean): fsck OK on every image; the host roots are untouched.
+<<<<<<< HEAD
+=======
+# Leg 13 (.ivpack install): `install vxi@1.0.0 --release` prefers the
+#   .ivpack bundle (releases/download/v1.1.0/<name>-<version>.ivpack),
+#   unzips it with the system unzip (no new deps), verifies the bundle
+#   sha256 plus the raw-tree listing, takes the missing-signature path
+#   (v1.1.0 ships no manifest.sig: -y proceeds with UNSIGNED, -n
+#   reports, prompt answers), and lays out manifest + bin/ live with
+#   lib/ beside them (verified, dormant). `list` shows [ivpack].
+# Leg 14 (no-.so pack): a bundle with manifest + bin/ but no lib/
+#   installs bin-only; `list` still shows [ivpack].
+# Leg 15 (tampered .ivpack refuses): a re-packed bundle with a modified
+#   helper fails the bundle sha256 gate; the volume is unchanged, and
+#   the restored bundle installs again.
+# Leg 16 (malicious .ivpack refuses): `..`/absolute entries refuse at
+#   name validation before extract; a symlink entry refuses at the
+#   extracted-tree walk. Neither writes outside the pack dir.
+# Leg 17 (missing unzip): unzip absent from PATH fails with the distro
+#   hint, never silently.
+# Leg 18 (--release-tag): a bundle served under a custom tag installs
+#   with --release-tag; the default tag stays v1.1.0.
+# Leg 19 (list markers): one volume carrying .ivpack + raw + local
+#   installs lists [ivpack] / [raw] / [local] respectively.
+# Leg 20 (clean): fsck OK on the new images; the host root is untouched.
+# Legs 13-20 run after leg 12; vxr stays tarball-only so legs 8-12 keep
+# proving the loud fallback.
+>>>>>>> wp/608-pack-registry-fetch
 #
 # RELEASE-LAYOUT ASSUMPTION (loud, as required): the registry repo
 # (https://github.com/AsmanovLev/InvariantFS-registry) has cut ZERO tags
@@ -63,9 +98,17 @@ IMG=pr-reg.img
 IMG2=pr-reg2.img
 IMG3=pr-reg3.img
 IMG4=pr-reg4.img
+<<<<<<< HEAD
 rm -rf "$WORK" && mkdir -p "$WORK/repo/codecpacks" "$WORK/keys" "$WORK/empty"
 cd "$WORK"
 rm -f "$IMG" "$IMG2" "$IMG3" "$IMG4"
+=======
+IMG5=pr-reg5.img
+IMG6=pr-reg6.img
+rm -rf "$WORK" && mkdir -p "$WORK/repo/codecpacks" "$WORK/keys" "$WORK/empty"
+cd "$WORK"
+rm -f "$IMG" "$IMG2" "$IMG3" "$IMG4" "$IMG5" "$IMG6"
+>>>>>>> wp/608-pack-registry-fetch
 PLAT="$(uname -m)-linux-musl"
 
 export INVFS_KEYRING="$WORK/keys"
@@ -316,6 +359,14 @@ $B/invfs-pack install --repo "$FIXREPO" --volume "$IMG2" \
     || fail "release install rc=$?"
 grep -q "fetching vxr 1.0.0 release v1.0.0/vxr-1.0.0-" rel1.log \
     || fail "leg8: no release fetching line"
+<<<<<<< HEAD
+=======
+# vxr ships no .ivpack: exactly ONE loud fallback line, then the tarball.
+grep -q "no .ivpack asset for vxr 1.0.0 under tag v1.1.0" rel1.log \
+    || fail "leg8: no loud .ivpack fallback line"
+[ "$(grep -c "falling back to the release tarball" rel1.log)" = "1" ] \
+    || fail "leg8: fallback line is not exactly one"
+>>>>>>> wp/608-pack-registry-fetch
 grep -q "file(s) verified" rel1.log || fail "leg8: no sha256 verify line"
 grep -q "signature OK" rel1.log || fail "leg8: no signature-OK gate note"
 [ "$(count_packs "$IMG2")" = "1" ] || fail "leg8: pack count"
@@ -328,6 +379,11 @@ $B/invfs-pack install --repo "$FIXREPO" --volume "$IMG3" \
     || fail "release latest rc=$?"
 grep -q "fetching vxr 2.0.0 release" rel2.log \
     || fail "leg9: latest (2.0.0) not picked"
+<<<<<<< HEAD
+=======
+grep -q "no .ivpack asset for vxr 2.0.0 under tag v1.1.0" rel2.log \
+    || fail "leg9: no loud .ivpack fallback line"
+>>>>>>> wp/608-pack-registry-fetch
 grep -q "signature OK" rel2.log || fail "leg9: no signature-OK gate note"
 [ "$(count_packs "$IMG3")" = "1" ] || fail "leg9: pack count"
 pass "bare --release resolved latest from index.json"
@@ -397,4 +453,287 @@ done
     || fail "leg12: leaked into the host root"
 pass "release fsck OK, host untouched"
 
+<<<<<<< HEAD
+=======
+echo "== [13] .ivpack fixture (vxi with lib, vxn bin-only) =="
+command -v zip >/dev/null || fail "leg13: zip required for the fixture"
+# vxi 1.0.0: manifest + bin helpers + lib/vxi.so, UNSIGNED (no sig
+# sidecar, like the real v1.1.0). The raw-tree listing covers the
+# raw-tree files only; the bundle carries its own sha256 over every
+# other entry (IVPACK-RELEASES.md layout: zip -0 -X, archive root).
+VXDIR="$WORK/repo/codecpacks/vxi/1.0.0"
+mkdir -p "$VXDIR/bin" "$VXDIR/lib"
+cat > "$VXDIR/manifest" <<'EOF'
+name = vxi
+algo = 46
+caps = external
+encode = bin/enc {in} {out}
+decode = bin/dec {in} {out}
+EOF
+printf 'i-helper-001' > "$VXDIR/bin/enc"
+printf 'i-helper-002' > "$VXDIR/bin/dec"
+chmod 755 "$VXDIR/bin/enc" "$VXDIR/bin/dec"
+printf 'fake-so-bytes-vxi' > "$VXDIR/lib/vxi.so"
+( cd "$VXDIR" && sha256sum manifest bin/enc bin/dec > sha256 )
+# vxn 1.0.0: manifest + one bin helper, NO lib/ (no-.so shape).
+VNDIR="$WORK/repo/codecpacks/vxn/1.0.0"
+mkdir -p "$VNDIR/bin"
+cat > "$VNDIR/manifest" <<'EOF'
+name = vxn
+algo = 46
+caps = external
+encode = bin/run {in} {out}
+decode = bin/run {in} {out}
+EOF
+printf 'n-helper-run' > "$VNDIR/bin/run"
+chmod 755 "$VNDIR/bin/run"
+( cd "$VNDIR" && sha256sum manifest bin/run > sha256 )
+python3 - "$WORK/repo/codecpacks/index.json" <<'EOF'
+import sys, json
+p = sys.argv[1]
+d = json.load(open(p))
+d["packs"].append({"name": "vxi", "version": "1.0.0", "pack_version": 1,
+                   "algo": 46, "family": "test", "priority": 70,
+                   "manifest": "codecpacks/vxi/1.0.0/manifest",
+                   "sha256": "codecpacks/vxi/1.0.0/sha256"})
+d["packs"].append({"name": "vxn", "version": "1.0.0", "pack_version": 1,
+                   "algo": 46, "family": "test", "priority": 65,
+                   "manifest": "codecpacks/vxn/1.0.0/manifest",
+                   "sha256": "codecpacks/vxn/1.0.0/sha256"})
+json.dump(d, open(p, "w"), indent=2)
+EOF
+# pack one .ivpack per IVPACK-RELEASES.md: zip -0 -X, entries at the
+# archive root (manifest, sha256, lib/ iff present, bin/).
+mkivpack() {
+    local n="$1" ver="$2"
+    local d="$WORK/repo/codecpacks/$n/$ver" st="$WORK/ivstage"
+    local out="$WORK/repo/releases/download/v1.1.0" entries
+    rm -rf "$st"
+    mkdir -p "$st" "$out"
+    cp -a "$d/manifest" "$d/bin" "$st/"
+    [ -d "$d/lib" ] && cp -a "$d/lib" "$st/"
+    ( cd "$st" && { find manifest bin lib -type f 2>/dev/null || true; } \
+        | LC_ALL=C sort | xargs -r sha256sum > sha256 )
+    entries="manifest sha256 bin"
+    [ -d "$st/lib" ] && entries="$entries lib"
+    # shellcheck disable=SC2086: entries is intentionally split
+    ( cd "$st" && zip -0 -X -q -r "$out/$n-$ver.ivpack" $entries ) \
+        || fail "zip $n $ver"
+    rm -rf "$st"
+    unzip -l "$out/$n-$ver.ivpack" | grep -q "manifest" \
+        || fail "ivpack $n $ver has no manifest"
+}
+mkivpack vxi 1.0.0
+mkivpack vxn 1.0.0
+cp "$WORK/repo/releases/download/v1.1.0/vxi-1.0.0.ivpack" \
+    "$WORK/vxi-1.0.0.ivpack.good"
+pass "ivpack fixture ready (vxi with lib, vxn bin-only)"
+
+echo "== [13] .ivpack install (unsigned, lib dormant, [ivpack]) =="
+$B/invf-mkfs "$IMG5" 1 >/dev/null
+$B/invfs-pack install -y --repo "$FIXREPO" --volume "$IMG5" \
+    "vxi@1.0.0" --release > iv1.log 2>&1 \
+    || fail ".ivpack install rc=$?"
+grep -q "fetching vxi 1.0.0 release v1.1.0/vxi-1.0.0.ivpack" iv1.log \
+    || fail "leg13: no .ivpack fetching line"
+grep -q "(.ivpack, .*file(s) verified" iv1.log \
+    || fail "leg13: no .ivpack verified line"
+grep -qi "unsigned" iv1.log \
+    || fail "leg13: -y names no unsigned state"
+grep -q "falling back" iv1.log \
+    && fail "leg13: present .ivpack fell back"
+[ "$(count_packs "$IMG5")" = "1" ] || fail "leg13: pack count"
+$B/invfs-pack list --volume "$IMG5" 2>&1 | grep -q "\[ivpack\]" \
+    || fail "leg13: list shows no [ivpack]"
+# layout: manifest byte-verbatim + bin/ live + lib/ beside them.
+$B/invf-cat "$IMG5" .invariantfs/codecpacks/vxi.codecpack/manifest \
+    "$WORK/man.got" >/dev/null 2>&1 || fail "leg13: no manifest aboard"
+cmp "$WORK/man.got" "$VXDIR/manifest" \
+    || fail "leg13: manifest not byte-verbatim"
+$B/invf-cat "$IMG5" .invariantfs/codecpacks/vxi.codecpack/bin/enc \
+    "$WORK/enc.got" >/dev/null 2>&1 || fail "leg13: no bin/enc aboard"
+cmp "$WORK/enc.got" "$VXDIR/bin/enc" \
+    || fail "leg13: bin/enc bytes differ"
+$B/invf-cat "$IMG5" .invariantfs/codecpacks/vxi.codecpack/lib/vxi.so \
+    "$WORK/so.got" >/dev/null 2>&1 || fail "leg13: no lib/vxi.so aboard"
+cmp "$WORK/so.got" "$VXDIR/lib/vxi.so" \
+    || fail "leg13: lib/vxi.so bytes differ"
+pass ".ivpack installed unsigned (-y), manifest+bin live, lib dormant, [ivpack]"
+
+echo "== [13b] .ivpack missing-signature prompt + dry-run =="
+$B/invf-mkfs "$IMG6" 1 >/dev/null
+printf 'y\n' | $B/invfs-pack install --repo "$FIXREPO" \
+    --volume "$IMG6" "vxi@1.0.0" --release > ivprompt-y.log 2>&1 \
+    || fail "leg13b: piped-y rc=$?"
+[ "$(count_packs "$IMG6")" = "1" ] || fail "leg13b: piped-y installed nothing"
+$B/invfs-pack install -n --repo "$FIXREPO" --volume "$IMG6" \
+    "vxn@1.0.0" --release > ivprompt-n.log 2>&1 \
+    || fail "leg13b: -n rc=$?"
+grep -qi "unsigned" ivprompt-n.log \
+    || fail "leg13b: -n names no unsigned state"
+[ "$(count_packs "$IMG6")" = "1" ] \
+    || fail "leg13b: -n installed something"
+printf 'n\n' | $B/invfs-pack install --repo "$FIXREPO" \
+    --volume "$IMG6" "vxn@1.0.0" --release > ivprompt-n2.log 2>&1 \
+    && fail "leg13b: piped-n installed"
+[ "$(count_packs "$IMG6")" = "1" ] \
+    || fail "leg13b: piped-n changed the volume"
+pass "prompt-y installs, prompt-n and -n install nothing"
+
+echo "== [14] no-.so pack installs bin-only =="
+$B/invfs-pack install -y --repo "$FIXREPO" --volume "$IMG6" \
+    "vxn@1.0.0" --release > ivn.log 2>&1 \
+    || fail "leg14: no-.so install rc=$?"
+grep -q "(.ivpack, .*file(s) verified" ivn.log \
+    || fail "leg14: no .ivpack verified line"
+[ "$(count_packs "$IMG6")" = "2" ] || fail "leg14: pack count"
+$B/invf-cat "$IMG6" .invariantfs/codecpacks/vxn.codecpack/bin/run \
+    "$WORK/run.got" >/dev/null 2>&1 || fail "leg14: no bin/run aboard"
+cmp "$WORK/run.got" "$VNDIR/bin/run" \
+    || fail "leg14: bin/run bytes differ"
+$B/invf-cat "$IMG6" .invariantfs/codecpacks/vxn.codecpack/lib/vxn.so \
+    "$WORK/so-no.bin" >/dev/null 2>&1 \
+    && fail "leg14: unexpected lib/ in a no-.so pack"
+$B/invfs-pack list --volume "$IMG6" 2>&1 | grep -q "vxn.*\[ivpack\]" \
+    || fail "leg14: list shows no [ivpack] for vxn"
+pass "no-.so .ivpack installs bin-only, still [ivpack]"
+
+echo "== [15] tampered .ivpack refuses =="
+TAMPI="$WORK/repo/releases/download/v1.1.0/vxi-1.0.0.ivpack"
+rm -rf "$WORK/ivtamper"
+mkdir -p "$WORK/ivtamper"
+cp -a "$VXDIR/manifest" "$VXDIR/bin" "$VXDIR/lib" "$WORK/ivtamper/"
+cp "$VXDIR/sha256" "$WORK/ivtamper/bundle-sha256-good"
+( cd "$VXDIR" && sha256sum manifest lib/vxi.so bin/enc bin/dec \
+    > "$WORK/ivtamper/sha256" )
+printf 'X' >> "$WORK/ivtamper/bin/enc"
+( cd "$WORK/ivtamper" && zip -0 -X -q -r "$TAMPI" \
+    manifest sha256 bin lib ) || fail "repack tampered"
+before=$(count_packs "$IMG6")
+$B/invfs-pack install -y --repo "$FIXREPO" --volume "$IMG6" \
+    "vxi@1.0.0" --release > ivtamper.log 2>&1 \
+    && fail "leg15: tampered bundle installed"
+grep -q "sha256 mismatch" ivtamper.log \
+    || fail "leg15: no mismatch diagnostic"
+[ "$(count_packs "$IMG6")" = "$before" ] \
+    || fail "leg15: refusal changed the volume"
+cp "$WORK/vxi-1.0.0.ivpack.good" "$TAMPI"
+$B/invfs-pack install -y --repo "$FIXREPO" --volume "$IMG5" \
+    "vxi@1.0.0" --release > ivrestore.log 2>&1 \
+    || fail "leg15: restored bundle install rc=$?"
+[ "$(count_packs "$IMG5")" = "1" ] || fail "leg15: pack count"
+pass "tampered .ivpack refused at the sha256 gate, restored installs"
+
+echo "== [16] malicious .ivpack refuses =="
+python3 - "$TAMPI" <<'EOF'
+import sys, zipfile
+p = sys.argv[1]
+z = zipfile.ZipFile(p, "w", zipfile.ZIP_STORED)
+z.writestr("manifest", b"name = vxi\n")
+z.writestr("sha256", b"dead" * 16 + b"  manifest\n")
+z.writestr("bin/enc", b"x")
+z.writestr("../evil-probe.txt", b"evil")
+z.writestr("/abs-probe.txt", b"evil")
+z.close()
+EOF
+before=$(count_packs "$IMG6")
+$B/invfs-pack install -y --repo "$FIXREPO" --volume "$IMG6" \
+    "vxi@1.0.0" --release > ivevil.log 2>&1 \
+    && fail "leg16: escaping bundle installed"
+grep -q "escapes the pack dir" ivevil.log \
+    || fail "leg16: no escape diagnostic"
+[ "$(count_packs "$IMG6")" = "$before" ] \
+    || fail "leg16: refusal changed the volume"
+[ ! -e "$WORK/evil-probe.txt" ] \
+    || fail "leg16: escape wrote outside the pack dir"
+python3 - "$TAMPI" <<'EOF'
+import sys, zipfile
+p = sys.argv[1]
+z = zipfile.ZipFile(p, "w", zipfile.ZIP_STORED)
+man = b"name = vxi\nalgo = 46\ncaps = external\n"
+z.writestr("manifest", man)
+zi = zipfile.ZipInfo("bin/link")
+zi.create_system = 3
+zi.external_attr = (0o120777) << 16
+z.writestr(zi, "manifest")
+import hashlib
+z.writestr("sha256", hashlib.sha256(man).hexdigest().encode() +
+           b"  manifest\n" + hashlib.sha256(b"manifest").hexdigest().encode() +
+           b"  bin/link\n")
+z.close()
+EOF
+$B/invfs-pack install -y --repo "$FIXREPO" --volume "$IMG6" \
+    "vxi@1.0.0" --release > ivlink.log 2>&1 \
+    && fail "leg16: symlink bundle installed"
+grep -q "REFUSED" ivlink.log || fail "leg16: no symlink refusal"
+[ "$(count_packs "$IMG6")" = "$before" ] \
+    || fail "leg16: symlink refusal changed the volume"
+cp "$WORK/vxi-1.0.0.ivpack.good" "$TAMPI"
+pass "escaping entries refused pre-extract, symlink refused, nothing written"
+
+echo "== [17] missing unzip fails with the distro hint =="
+PATH="$WORK/empty" $B/invfs-pack install -y --repo "$FIXREPO" \
+    --volume "$IMG6" "vxi@1.0.0" --release > ivnounzip.log 2>&1 \
+    && fail "leg17: install without unzip succeeded"
+grep -q "unzip is required" ivnounzip.log \
+    || fail "leg17: no unzip-required diagnostic"
+grep -q "install unzip" ivnounzip.log \
+    || fail "leg17: no distro hint"
+[ "$(count_packs "$IMG6")" = "$before" ] \
+    || fail "leg17: refusal changed the volume"
+pass "no unzip: loud distro hint, nothing installed"
+
+echo "== [18] --release-tag override =="
+mkdir -p "$WORK/repo/releases/download/v9-custom"
+cp "$WORK/vxi-1.0.0.ivpack.good" \
+    "$WORK/repo/releases/download/v9-custom/vxi-1.0.0.ivpack"
+$B/invfs-pack install -y --repo "$FIXREPO" --volume "$IMG6" \
+    "vxi@1.0.0" --release --release-tag v9-custom > ivtag.log 2>&1 \
+    || fail "leg18: custom-tag install rc=$?"
+grep -q "release v9-custom/vxi-1.0.0.ivpack" ivtag.log \
+    || fail "leg18: custom tag not used"
+[ "$(count_packs "$IMG6")" = "$before" ] \
+    || fail "leg18: re-import changed the pack count"
+pass "--release-tag serves the bundle from the custom tag"
+
+echo "== [19] list marks [ivpack] vs [raw] vs [local] =="
+mkdir -p "$WORK/localpack/bin"
+cat > "$WORK/localpack/manifest" <<'EOF'
+name = vxl
+algo = 46
+caps = external
+encode = bin/enc {in} {out}
+decode = bin/dec {in} {out}
+EOF
+printf 'local-helper-001' > "$WORK/localpack/bin/enc"
+printf 'local-helper-002' > "$WORK/localpack/bin/dec"
+chmod 755 "$WORK/localpack/bin/enc" "$WORK/localpack/bin/dec"
+$B/invfs-pack install --repo "$FIXREPO" --volume "$IMG5" \
+    vxp > ivraw.log 2>&1 || fail "leg19: raw install rc=$?"
+$B/invfs-pack install -y --volume "$IMG5" \
+    ./localpack > ivlocal.log 2>&1 || fail "leg19: local install rc=$?"
+[ "$(count_packs "$IMG5")" = "3" ] || fail "leg19: pack count"
+$B/invfs-pack list --volume "$IMG5" > ivmarks.log 2>&1 \
+    || fail "leg19: list rc=$?"
+grep -q "vxi.*\[ivpack\]" ivmarks.log \
+    || fail "leg19: vxi not [ivpack]"
+grep -q "vxp.*\[raw\]" ivmarks.log \
+    || fail "leg19: vxp not [raw]"
+grep -q "vxl.*\[local\]" ivmarks.log \
+    || fail "leg19: vxl not [local]"
+pass "one volume lists [ivpack] + [raw] + [local]"
+
+echo "== [20] ivpack volumes clean, host untouched =="
+for _img in "$IMG5" "$IMG6"; do
+    $B/invf-fsck "$_img" | grep -q "^OK$" || fail "leg20: fsck $_img"
+done
+[ ! -e /.invariantfs/codecpacks/vxi.codecpack ] \
+    || fail "leg20: leaked into the host root"
+[ ! -e /.invariantfs/codecpacks/vxn.codecpack ] \
+    || fail "leg20: leaked into the host root"
+[ ! -e /.invariantfs/codecpacks/vxl.codecpack ] \
+    || fail "leg20: leaked into the host root"
+pass "ivpack fsck OK, host untouched"
+
+>>>>>>> wp/608-pack-registry-fetch
 echo "PASS: pack registry fetch"
