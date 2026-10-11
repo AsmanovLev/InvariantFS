@@ -1,76 +1,120 @@
-# invfs.spec — RPM for InvariantFS (Fedora/RHEL).
-#
-# Consumes the PUBLISHED RELEASE ARTIFACT (see docs/INSTALL-MATRIX.md),
-# same as the Arch PKGBUILD and the Void template: prebuilt bin/invf-*
-# plus codecpacks with helpers already built, so %build is empty and
-# packaging/install.sh — the one place the FHS layout is defined — does
-# the whole %install. No file list to drift out of sync beyond the globs
-# below, which mirror install.sh's header.
-#
-# Build (inside the release workflow; Source0 is the tarball job artifact):
-#   rpmbuild -bb packaging/invfs.spec --define "_topdir $PWD/rpmbuild" ...
-#Update Version: on every release (release.yml preflight enforces it).
+# the engine Makefile builds -O2 without -g; there is no debuginfo to split
+%global debug_package %{nil}
+# _unitdir comes from systemd-rpm-macros (a Fedora BuildRequires). Ubuntu's
+# rpm has no such macro package, so without this fallback every unit-dir
+# entry expands to a relative path and %files dies with 'File must begin
+# with "/"'. The value matches packaging/install.sh's SYSTEMDDIR
+# ($PREFIX/lib/systemd/system with this spec's PREFIX, i.e. /usr -- written
+# out longhand because even a macro-looking token inside a comment expands
+# and warns.)
+%{!?_unitdir: %global _unitdir /usr/lib/systemd/system}
 
 Name:           invfs
 Version:        0.6.0
 Release:        1%{?dist}
-Summary:        Content-addressed filesystem with a bit-exactness invariant
-License:        GPL-2.0-only
-URL:            https://github.com/AsmanovLev/InvariantFS
-Source0:        invfs-v%{version}-x86_64.tar.zst
-BuildArch:      x86_64
+Summary:        Semantic content-addressed filesystem with a bit-exactness invariant
 
-# Runtime only: the artifact ships compiled.
+License:        GPLv2
+URL:            https://github.com/AsmanovLev/InvariantFS
+Source0:        %{name}-%{version}.tar.gz
+
+# the engine is C11 + bundled zstd/lz4/miniz/blake3/flacx; the FUSE daemon
+# needs libfuse3; the Makefile links the zstd/z shared libraries directly
+BuildRequires:  gcc
+BuildRequires:  make
+BuildRequires:  pkgconf-pkg-config
+BuildRequires:  fuse3-devel
+BuildRequires:  zlib-devel
+BuildRequires:  libzstd
+BuildRequires:  systemd-rpm-macros
+
 Requires:       fuse3
-Requires:       zlib
-Requires:       zstd
-# Script-based codecpacks (raw_image) and container helpers.
-Recommends:     python3
-Recommends:     p7zip
+# cjxl/djxl power the jxl + raw_image codecpacks; absent tools simply
+# defer JPEG/RAW-camera content to generic storage (weak dep)
+Recommends:     libjxl-utils
 
 %description
-InvariantFS is a FUSE-based, single-host, content-addressed filesystem
-built around one guarantee: what you write comes back byte-identical.
-Meta-v3 on-disk format (B+ tree base + append-only Delta Log),
-content-addressed deduplicated segments, per-content codecs, container
-windowing, savepoints with rollback, and native Reed-Solomon seal parity.
+InvariantFS is a FUSE filesystem with a bit-exactness invariant: every
+compression is verified by decompress-and-compare before it is trusted;
+containers (ZIP/TAR, disk images) are decomposed into member inodes that
+flow through the whole codec pipeline recursively. Ships the CLI tools,
+the FUSE daemon, the system codecpacks, systemd sweep/verify timers
+(disabled by default) and a dracut module for booting from an
+InvariantFS root (rootfstype=invfs).
 
 %prep
-%setup -q -n invfs-v%{version}-x86_64
+%autosetup
 
 %build
-# Prebuilt artifact: nothing to compile.
+mkdir -p bin
+%make_build
 
 %install
-# Fedora: systemd units on, dracut on (Gentoo/Fedora hook), mkinitcpio and
-# initramfs-tools off (Arch/Debian hooks).
-DESTDIR=%{buildroot} PREFIX=/usr \
-WITH_SYSTEMD=1 WITH_DRACUT=1 WITH_MKINITCPIO=0 WITH_INITRAMFS_TOOLS=0 \
-sh packaging/install.sh
+# packaging/install.sh is the single source of truth for the FHS layout
+# (shared with the debian/arch packaging and unpackaged installs)
+DESTDIR=%{buildroot} PREFIX=%{_prefix} \
+    WITH_SYSTEMD=1 WITH_DRACUT=1 WITH_MKINITCPIO=0 WITH_INITRAMFS_TOOLS=0 \
+    sh packaging/install.sh
+# NOTE: no manual README install here: %doc below packages README.md into
+# the versioned docdir by itself, and a second copy under the unversioned
+# docdir trips 'Installed (but unpackaged) file(s)'.
+
+%post
+%systemd_post invfs-sweep.timer invfs-verify.timer
+
+%preun
+%systemd_preun invfs-sweep.timer invfs-verify.timer
+
+%postun
+%systemd_postun_with_reload invfs-sweep.timer invfs-verify.timer
 
 %files
-/usr/bin/invf*
-/usr/bin/invfs-pack
-/usr/sbin/mount.invfs
+%license src/LICENSE
+%doc README.md
+%{_bindir}/invf*
 /usr/sbin/fsck.invfs
 /usr/sbin/mkfs.invfs
-/usr/lib/invfs/
-/usr/lib/systemd/system/invfs-*
+/usr/sbin/mount.invfs
+/usr/lib/invfs/codecpacks/
+%{_mandir}/man7/invarifs.7*
+%{_mandir}/man1/invf-*.1*
+%{_mandir}/man8/invf-*.8*
+%{_mandir}/man8/*.invfs.8*
+%{_mandir}/man*/ru/invf-*.8*
+%{_mandir}/man*/ru/invf-*.1*
+%{_mandir}/man*/ru/invarifs.7*
+%{_unitdir}/invfs-sweep.service
+%{_unitdir}/invfs-sweep.timer
+%{_unitdir}/invfs-verify.service
+%{_unitdir}/invfs-verify.timer
 /usr/lib/dracut/modules.d/90invfs/
-/usr/share/man/man1/invf-ls.1.gz
-/usr/share/man/man7/invarifs.7.gz
-/usr/share/man/man8/invf-*.8.gz
-/usr/share/man/man8/mount.invfs.8.gz
-/usr/share/man/man8/fsck.invfs.8.gz
-/usr/share/man/man8/mkfs.invfs.8.gz
-/usr/share/man/man1/ru/invf-ls.1.gz
-/usr/share/man/man7/ru/invarifs.7.gz
-/usr/share/man/man8/ru/invf-*.8.gz
-/usr/share/man/man8/ru/mount.invfs.8.gz
-/usr/share/man/man8/ru/fsck.invfs.8.gz
-/usr/share/man/man8/ru/mkfs.invfs.8.gz
 
 %changelog
-* Sun Oct 12 2026 InvariantFS <invfs@invariantfs.local> - 0.6.0-1
-- Crash-consistency hardening release (Meta-v3, durability contract, SPT0,
-  native seal parity). First RPM.
+* Thu Oct 08 2026 InvariantFS Developers <invfs@localhost> - 0.6.0-1
+- Crash-consistency hardening: complete-or-absent writes, savepoint capture verification, fail-closed generation walks, refused-sweep purity
+* Tue Sep 22 2026 InvariantFS Developers <invfs@localhost> - 0.5.0-1
+- Meta-v3 default cutover: B+-tree base + append-only delta architecture
+- Inode-id-keyed sweep publication and RAW block reclamation
+- Native symlinks and special files (FIFO/SOCK/CHR/BLK with rdev)
+- Thread-safe pread/pwrite concurrency model
+- Hierarchical directory walk with full path resolution
+- Automated CI testing matrix
+
+* Mon Sep 14 2026 InvariantFS Developers <invfs@localhost> - 0.2.1-1
+- WP28: embed INO2 metadata in vol_create_file for 2x import speedup
+- WP29: deferred flush with watermarks in vol_pre_record (115x import speedup)
+- mkfs: cap RAW zone at dev0 capacity in multi-device mode
+- All unit + e2e + crash-fail tests pass
+
+* Sun Sep 13 2026 InvariantFS Developers <invfs@localhost> - 0.2.0-1
+- Legacy cleanup: removed 36 dead Windows-only files from legacy/
+- New man pages: invf-stats, invf-import, invf-migrate-v2, invf-ls (read-side)
+- Russian man page translations
+- Gentoo install guide (docs/GENTOO-INSTALL.md)
+- Packaging polish: debian/copyright, Homepage URLs, Architecture: any
+- configure-guest.sh bug fix ($MNT -> $M)
+
+* Fri Sep 04 2026 InvariantFS Developers <invfs@localhost> - 0.1.0-1
+- Initial packaging (WP-PKG): CLI tools, FUSE daemon, system codecpacks,
+  man pages, systemd sweep/verify timers (disabled by default), and a
+  dracut module (90invfs) for root-on-InvariantFS boots.
