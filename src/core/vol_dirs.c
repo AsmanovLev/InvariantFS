@@ -758,7 +758,6 @@ int vol_unlink(invfs_volume *v, const char *name)
     if (vol_path_lookup(v, parent, &pino) != 1)
         return -1;
     if (in.nlink <= 1) {
-        int rc = 0;
         /* WP-M17 frozen transition (design §4): drop the dirent, then the
          * count; only nlink == 0 frees the row (and, via inode_delete, the
          * xattr keys). Name-first means a crash between the two leaves nlink
@@ -816,6 +815,14 @@ int vol_unlink(invfs_volume *v, const char *name)
             return -1;
         }
         if (vol_inode_delta_delete(v, id) != 0) {
+            /* WP604: the dirent is already gone, so a bare -1 reports
+             * failure for a mutation that happened (rc==0 iff changed).
+             * The row is intact whenever the row-delete append itself did
+             * not run, so put the name back: best effort, still -1. */
+            if (vol_dirent_delta_put(v, pino, leaf, id) != 0)
+                fprintf(stderr, "invarifs: unlink %s: failed AND the "
+                        "dirent rollback failed; the namespace may be "
+                        "torn. Run invf-fsck.\n", name);
             vol_pba_ref_release(v);
             return -1;
         }
@@ -834,23 +841,51 @@ int vol_unlink(invfs_volume *v, const char *name)
          * 0 there told the caller "gone and reclaimed" while every block the
          * recipe named stayed allocated under no reachable name -- forever.
          * Report it, and name the file, so the operator knows which reclaim
-         * to chase. */
+         * to chase.
+         *
+         * WP604: reporting it is not the same as returning -1 for a mutation
+         * that already happened. The free runs AFTER the name and the row
+         * are gone, and on failure it has freed nothing (vol_ast.c: the
+         * parse/load legs return -1 having touched no refcount), so the
+         * honest answer is to put both back -- row first, dirent second,
+         * the create ordering, so a crash mid-rollback leaves an orphan
+         * row, never a dangling name -- and keep the -1 LOUD with the
+         * namespace unchanged. The file stays unreadable either way (its
+         * recipe would not load before the unlink either); fsck names it
+         * instead of silently leaking its blocks under no name. The
+         * sibling cascade below is skipped on this path: the '!' parts are
+         * still intact, and purging them while restoring the main name
+         * would strand a container without its members. Rollback is best
+         * effort: if the compensating appends fail too, the -1 stands and
+         * the message says what is missing. */
         if (in.type == INVFS_ITYP_REG &&
             vol_free_recipe_blocks(v, in.recipe_addr, 0) != 0) {
-            fprintf(stderr, "invarifs: unlink %s: recipe does not load or "
-                    "parse, so its data blocks were NOT reclaimed; the name "
-                    "is gone and the space is still allocated. Run "
-                    "invf-fsck.\n", name);
-            rc = -1;
+            int rrb = vol_inode_delta_put(v, id, &in);
+            int rdb = (rrb == 0)
+                ? vol_dirent_delta_put(v, pino, leaf, id) : -1;
+            if (rrb == 0 && rdb == 0) {
+                fprintf(stderr, "invarifs: unlink %s: recipe does not "
+                        "load or parse, so its data blocks were NOT "
+                        "reclaimed; the unlink was rolled back and the "
+                        "file is unchanged. Run invf-fsck.\n", name);
+            } else {
+                fprintf(stderr, "invarifs: unlink %s: recipe does not "
+                        "load or parse AND the rollback failed (row=%d "
+                        "dirent=%d); the namespace may be torn. Run "
+                        "invf-fsck.\n", name, rrb, rdb);
+            }
+            vol_pba_ref_release(v);
+            return -1;
         }
         /* Cascade delete container/transcode siblings if main file is
          * unlinked. Still inside the hold: this is a nested vol_unlink
          * per sibling, and the hold is depth-counted over a RECURSIVE mutex,
-         * so it nests correctly instead of unlocking early. */
+         * so it nests correctly instead of unlocking early. Reached only
+         * on success (WP604: the free-failure path above returns first). */
         if (strchr(name, '!') == NULL)
             vol_delete_siblings(v, name);
         vol_pba_ref_release(v);
-        return rc;
+        return 0;
     } else {
         /* More than one name on this inode: this unlink retires a NAME, not
          * the inode, and frees nothing -- so it needs no map at all. The row
@@ -859,8 +894,21 @@ int vol_unlink(invfs_volume *v, const char *name)
         if (vol_dirent_delta_del(v, pino, leaf) != 0)
             return -1;
         in.nlink--;
-        if (vol_inode_delta_put(v, id, &in) != 0)
+        if (vol_inode_delta_put(v, id, &in) != 0) {
+            /* WP604: the dirent is already gone, so a bare -1 reports
+             * failure for a mutation that happened. Put the name AND the
+             * count back: best effort, still -1. */
+            in.nlink++;
+            int rrb = vol_inode_delta_put(v, id, &in);
+            int rdb = (rrb == 0)
+                ? vol_dirent_delta_put(v, pino, leaf, id) : -1;
+            if (rrb != 0 || rdb != 0)
+                fprintf(stderr, "invarifs: unlink %s: failed AND the "
+                        "rollback failed (row=%d dirent=%d); the "
+                        "namespace may be torn. Run invf-fsck.\n",
+                        name, rrb, rdb);
             return -1;
+        }
     }
     return 0;
 }

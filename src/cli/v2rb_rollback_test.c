@@ -508,9 +508,12 @@ static void leg_d_unparseable_recipe(void)
     }
     {
         uint64_t got = 0;
-        ok(vol_path_lookup(g_v, "d2.bin", &got) != 1,
-           "leg D2: the name is still gone (the unlink itself is not undone "
-           "-- rolling it back would be worse)");
+        ok(vol_path_lookup(g_v, "d2.bin", &got) == 1,
+           "leg D2: the name is RESTORED (WP604: rc!=0 with the dirent "
+           "gone would report failure for a mutation that happened; "
+           "the rollback returns to status quo ante -- broken file, "
+           "present, allocated, fsck-nameable -- instead of absent + "
+           "leaked)");
     }
     {
         size_t still = 0;

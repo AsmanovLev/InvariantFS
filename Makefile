@@ -1430,6 +1430,12 @@ test-shard-4: $(TEST_SHARD_DEPS) test-shard-check
 # the free-block count does not drop across the sweep; pre-fix it drops
 # by 17 per orphaned segment and nothing ever gives them back.
 	$(TESTENV) $(TESTISO) bash tools/test-sweep-publish-rollback.sh
+# WP604: a vol_unlink that fails must not mutate (rc==0 iff the namespace
+# changed). Sealed volume, one post-seal write, then a fault-armed unlink:
+# pre-fix the recipe-free failure returned -1 with the dirent already gone.
+# The suite asserts the rollback (rc!=0, name present, bit-exact, fsck OK)
+# on both the last-link and the hardlink path, plus untouched success paths.
+	$(TESTENV) $(TESTISO) bash tools/test-unlink-rollback.sh
 	$(TESTENV) $(TESTISO) $(OUT)/invf-deflate_repro_test
 # WP203: pack signatures v1 — RFC 8032 vectors, round trip, malformed
 # sidecars, gate matrix. Pure unit (fixture dirs under argv /tmp), so
