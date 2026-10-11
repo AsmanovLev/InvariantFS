@@ -2,7 +2,34 @@
 
 All notable changes to InvariantFS will be documented in this file.
 
-## [Unreleased]
+## [v0.6.1] - 2026-10-12
+
+Pack registry fetch (WP608) + per-distro release pipeline.
+
+### Added
+- `invfs-pack` fetches packs from the registry (WP608): raw-tree mode
+  (`install <name>[@<version>]` via `codecpacks/index.json`), source-tarball
+  release mode, and `.ivpack` mode (prefers `.ivpack` bundles from registry
+  releases, loud fallback to tarballs). Same sha256 + WP203 signature gate
+  on every path (bad refuses, missing prompts); no-shell curl/tar/unzip
+  (fork+execvp); SIGPIPE-safe list output. Registry companion: v1.1.0
+  publishes 14 `.ivpack` assets (9 with lib/.so, helpers as fallback).
+- Release workflow (`.github/workflows/release.yml`, tag-triggered):
+  tarball + .deb + Arch pkg + .rpm + published GitHub release.
+  `bootstrap.sh` attached as the README one-liner entry point.
+
+### Fixed
+- Test harnesses (`invf-arctest`, `invf-blkio_test`) no longer ship in the
+  release tarball or .deb.
+- Restored the source-build `packaging/invfs.spec` after an accidental
+  overwrite (history: 76f616b clobbered, e35447d restored).
+- Merge with conflict markers briefly pushed to main (60db71b); reverted
+  (737f3dc) and relanded cleanly (e7d7749). Process note: `git status`
+  exits 0 on conflicts -- merge exit codes must be checked explicitly.
+- Soak leg4 silent-MISMATCH under seal: second occurrence logged
+  (INCIDENTS.md); soak now stages failure artifacts for dissection.
+
+## [v0.6.0-post] — everything below shipped in the v0.6.0 tag (notes merged post-tag)
 
 ### Added
 - Native v3 seal parity (WP201, par2-inspired, no byte-compat): per-chunk

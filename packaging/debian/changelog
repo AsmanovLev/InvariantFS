@@ -1,3 +1,9 @@
+invfs (0.6.1-1) unstable; urgency=medium
+
+  * Pack registry fetch (WP608): raw-tree, release-tarball and .ivpack
+    install modes with the WP203 signature gate; per-distro release
+    pipeline (release.yml) with .rpm.
+
 invfs (0.6.0-1) unstable; urgency=medium
 
   * Crash-consistency hardening: complete-or-absent writes, savepoint
