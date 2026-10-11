@@ -865,11 +865,19 @@ int vol_unlink(invfs_volume *v, const char *name)
             invfs_ast_hdr pah;
             const invfs_ast_block_entry *pents = NULL;
             size_t pnents = 0;
-            int presolved = (vol_recipe_load(v, in.recipe_addr, &probe,
-                                             &probelen) == 0 && probe &&
-                               vol_ast_recipe_parse(probe, probelen, &pah,
-                                                    &pents, &pnents) == 0 &&
-                               pents != NULL);
+            static const uint8_t zero_addr[INVFS_RECIPE_ADDR_LEN] = {0};
+            /* An empty file names no blocks: nothing to resolve, nothing
+             * to put back -- a load probe on the zero address fails and
+             * would refuse every empty-file unlink (the meta-dirent leg).
+             * vol_retire_recipe no-ops zero addrs the same way. */
+            int presolved =
+                (memcmp(in.recipe_addr, zero_addr,
+                        INVFS_RECIPE_ADDR_LEN) == 0) ||
+                (vol_recipe_load(v, in.recipe_addr, &probe,
+                                  &probelen) == 0 && probe &&
+                 vol_ast_recipe_parse(probe, probelen, &pah,
+                                       &pents, &pnents) == 0 &&
+                 pents != NULL);
             free(probe);
             if (!presolved) {
                 int rrb = vol_inode_delta_put(v, id, &in);
