@@ -139,7 +139,7 @@ jobs:
       # it from the tag itself: exactly the tagged tree, no more.
       - name: build RPM
         run: |
-          dnf install -y rpm-build gzip gcc make pkgconf-pkg-config \
+          dnf install -y git rpm-build gzip gcc make pkgconf-pkg-config \
             fuse3-devel zlib-devel libzstd systemd-rpm-macros
           VER="${TAG#v}"
           mkdir -p rpmbuild/SOURCES
