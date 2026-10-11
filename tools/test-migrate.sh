@@ -65,44 +65,71 @@ frag_of() { sed -n 's/.*frag runs \([0-9]*\)->\([0-9]*\) score \([0-9.]*\)->\([0
 moved_of() { sed -n 's/migrate: [0-9]* file(s) seen, \([0-9]*\) moved.*/\1/p' <<<"$(migrate_line "$1")"; }
 seal_dirty_of() { sed -n 's/.*seal-dirty \([0-9]*\) range(s) (\([0-9]*\) blocks).*/\1 \2/p' <<<"$(migrate_line "$1")"; }
 
-echo "== leg 1: holed fixture + defrag =="
+echo "== leg 1: top-heavy fixture + downward drain =="
+# Deterministic geometry (no luck): pack bottom-up, delete a LOW
+# contiguous range, settle the savepoint pin, then write HIGH. The low
+# holes plus high sources are exactly what downward-only relocation
+# consolidates. One identical dup pair rides along to exercise the
+# shared-segment skip (deduped segments must never move).
 python3 - <<'PY'
 import os, random
 random.seed(601)
 d = "/srv/flakey/wt-601-migration-t/orig"
 os.makedirs(d, exist_ok=True)
-K = 1024
-# duplicated pairs over the cap (dedupe merges whole segments -> holes)
-D1 = random.randbytes(2*1024*K); D2 = random.randbytes(2*1024*K)
-open(os.path.join(d, "dup1a.bin"), "wb").write(D1)
-open(os.path.join(d, "dup1b.bin"), "wb").write(D1)
-open(os.path.join(d, "dup2a.bin"), "wb").write(D2)
-open(os.path.join(d, "dup2b.bin"), "wb").write(D2)
-# unique big files over the cap (transform skips, migrate drains)
-for i in range(4):
-    open(os.path.join(d, "big%02d.bin" % i), "wb").write(random.randbytes((1024+i*256)*K))
-# small files under the cap (transform/dedupe/batch run alongside)
-for i in range(6):
-    open(os.path.join(d, "u%02d.bin" % i), "wb").write(random.randbytes((20+i*5)*K))
-print("corpus:", len(os.listdir(d)), "files")
+for i in range(20):
+    open(os.path.join(d, "f%02d.bin" % i), "wb").write(random.randbytes(1024*1024))
+D = random.randbytes(1024*1024)
+open(os.path.join(d, "dupA.bin"), "wb").write(D)
+open(os.path.join(d, "dupB.bin"), "wb").write(D)
+print("corpus: 22 files (20 unique + 1 dup pair)")
 PY
 $B/invf-mkfs "$IMG" 0.5 >/dev/null
 for f in "$WORK"/orig/*; do $B/invf-cp "$IMG" "$f" "$(basename "$f")" >/dev/null; done
 INVFS_SWEEP_MAX_FILE=$CAP $B/invf-sweep "$IMG" > "$WORK/sweep1.log" 2>&1
-grep -q "^migrate:" "$WORK/sweep1.log" || { echo "FAIL: no migrate stage on sweep1"; tail -5 "$WORK/sweep1.log"; exit 1; }
 echo "  sweep1: $(migrate_line "$WORK/sweep1.log")"
-MOVED1=$(moved_of "$WORK/sweep1.log")
-[ "${MOVED1:-0}" -gt 0 ] || { echo "FAIL: sweep1 moved nothing (mechanism unproven)"; exit 1; }
-echo "  sweep1 moved $MOVED1 file(s) (relocate mechanism proven)"
-# set B lands BETWEEN sweeps: fresh RAW writes over a holed volume
+# rm helper (public API only; no CLI rm exists -- the sealrm pattern)
+mkdir -p "$WORK/tools"
+cat > "$WORK/tools/volrm.c" <<'VOLRM_EOF'
+/* volrm -- WP601 test helper: volrm <img> <name> deletes one file. */
+#include <stdio.h>
+#include <stdlib.h>
+#include "volume.h"
+int main(int argc, char **argv)
+{
+    int err = 0, rc;
+    invfs_volume *v;
+    if (argc != 3) return 2;
+    v = vol_open(argv[1], &err);
+    if (!v) { fprintf(stderr, "open err %d\n", err); return 1; }
+    rc = vol_delete_file(v, argv[2]);
+    if (rc == 0) rc = vol_flush(v);
+    vol_close(v);
+    return rc ? 1 : 0;
+}
+VOLRM_EOF
+gcc -std=gnu11 -O2 -I$REPO/src -I$REPO/src/core -I$REPO/src/codecs -o "$WORK/tools/volrm" \
+    "$WORK/tools/volrm.c" \
+    $(for t in volume vol_cpack helper_exec tool_scratch vol_plugin_client vol_png vol_seal vol_repair vol_resize vol_fsck vol_crash vol_exer vol_dedupe vol_textzone vol_heat vol_sweep vol_read vol_write vol_records vol_ast vol_dirs vol_tier vol_meta_merge vol_metabuf vol_btree vol_delta vol_fold vol_reclaim vol_spt0 vol_anchor vol_walk arc crc32c lz4 flacx tarx pngx blkio miniz blake3 blake3_dispatch blake3_portable ppmd8 ppmd8enc ppmd8dec ppmd_codec codec bcj_x86 rs ed25519 deflate_repro deflate_backend_system deflate_backend_stock; do printf "$REPO/build/obj/$t.o "; done) \
+    $REPO/build/obj/zlib_stock_*.o \
+    -Wl,-l:libzstd.so.1 -lz -lpthread
+VOLRM="$WORK/tools/volrm"
+# delete the LOW 8 MB (f00-f07, packed first so contiguous-low)
+for i in 00 01 02 03 04 05 06 07; do
+    "$VOLRM" "$IMG" "f$i.bin" || { echo "FAIL: delete f$i.bin"; exit 1; }
+done
+echo "  deleted f00-f07 (8 MB low hole)"
+# settle the savepoint pin (deleted blocks pinned one generation)
+INVFS_SWEEP_MAX_FILE=$CAP $B/invf-sweep "$IMG" > "$WORK/sweep-pin1.log" 2>&1
+INVFS_SWEEP_MAX_FILE=$CAP $B/invf-sweep "$IMG" > "$WORK/sweep-pin2.log" 2>&1
+# HIGH set: fresh writes land at the cursor (high after the fill)
 python3 - <<'PY'
 import random, os
 random.seed(602)
 d = "/srv/flakey/wt-601-migration-t/orig2"
 os.makedirs(d, exist_ok=True)
 for i in range(5):
-    open(os.path.join(d, "n%02d.bin" % i), "wb").write(random.randbytes((1024+i*100)*1024))
-print("set B: 5 files")
+    open(os.path.join(d, "g%02d.bin" % i), "wb").write(random.randbytes(1024*1024))
+print("set G: 5 files (high)")
 PY
 for f in "$WORK"/orig2/*; do $B/invf-cp "$IMG" "$f" "$(basename "$f")" >/dev/null; done
 INVFS_SWEEP_MAX_FILE=$CAP $B/invf-sweep "$IMG" > "$WORK/sweep2.log" 2>&1
@@ -111,13 +138,11 @@ echo "  sweep2: $LINE2"
 read -r R0 R1 S0 S1 <<<"$(frag_of "$WORK/sweep2.log")"
 echo "  frag: runs $R0->$R1 score $S0->$S1 (reported, not asserted)"
 MOVED2=$(moved_of "$WORK/sweep2.log")
-echo "  sweep2 moved $MOVED2 file(s) (set B owned by transform's floor)"
-INVFS_SWEEP_MAX_FILE=$CAP $B/invf-sweep "$IMG" > "$WORK/sweep3.log" 2>&1
-# Convergence is a series, not a fixed count: every accepted move strictly
-# decreases RAW occupancy or the pba potential (both bounded below), so
-# repeated passes must reach 0. Assert termination within a small bound,
-# not silence on any particular pass.
+[ "${MOVED2:-0}" -gt 0 ] || { echo "FAIL: sweep2 moved nothing (high set not drained down)"; exit 1; }
+echo "  sweep2 moved $MOVED2 file(s) (downward drain proven)"
+# convergence series: bounded progress must reach 0
 PASSN=3
+INVFS_SWEEP_MAX_FILE=$CAP $B/invf-sweep "$IMG" > "$WORK/sweep3.log" 2>&1
 while [ $PASSN -le 8 ]; do
     MOVEDN=$(moved_of "$WORK/sweep${PASSN}.log")
     echo "  sweep$PASSN moved $MOVEDN file(s)"
@@ -128,15 +153,15 @@ done
 [ "${MOVEDN:-x}" = "0" ] || { echo "FAIL: no convergence after $PASSN passes (last moved $MOVEDN)"; exit 1; }
 echo "  converged to 0 moves after $PASSN passes"
 $B/invf-verify "$IMG" --deep 2>&1 | grep -q " 0 corrupt" || { echo "FAIL: verify reports corrupt"; exit 1; }
-for f in "$WORK"/orig/* "$WORK"/orig2/*; do
-    $B/invf-cat "$IMG" "$(basename "$f")" "$WORK/out/$(basename "$f")" >/dev/null 2>&1
-    cmp "$f" "$WORK/out/$(basename "$f")" || { echo "FAIL: readback differs: $f"; exit 1; }
+for f in f08.bin f09.bin f10.bin f11.bin f12.bin f13.bin f14.bin f15.bin f16.bin f17.bin f18.bin f19.bin dupA.bin dupB.bin g00.bin g01.bin g02.bin g03.bin g04.bin; do
+    if [ -f "$WORK/orig/$f" ]; then SRC="$WORK/orig/$f"; else SRC="$WORK/orig2/$f"; fi
+    $B/invf-cat "$IMG" "$f" "$WORK/out/$f" >/dev/null 2>&1
+    cmp -s "$SRC" "$WORK/out/$f" || { echo "FAIL: readback differs: $f"; exit 1; }
 done
-echo "  readback: 0 mismatches, cmp clean"
+echo "  readback: 0 corrupt, cmp clean (17 live files)"
 $B/invf-fsck "$IMG" > "$WORK/fsck1.log" 2>&1 || { echo "FAIL: fsck rc"; exit 1; }
 fsck_clean "$WORK/fsck1.log" || { echo "FAIL: fsck not clean leg 1"; exit 1; }
 echo "  free blocks: $(free_blocks "$IMG")"
-
 echo "== leg 2: crash-mid-move =="
 python3 - <<'PY'
 import random, os

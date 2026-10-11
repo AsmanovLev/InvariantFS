@@ -209,6 +209,16 @@ static int migrate_file(invfs_volume *v, uint64_t inode_id, const char *name,
         free(blob);
         return 0;
     }
+    /* Windowed recipes (container members/siblings) are lane-owned: the
+     * container lane manages their layout (maps, sibling sets, nested
+     * decomposition), and republishing their segments here has corrupted
+     * volume metadata in the field (freed bitmap bits under live roots).
+     * v1 does not move them -- counted, never half-done. The window
+     * interaction (republish + serialize_win) is a filed follow-up. */
+    if (n_wins > 0) {
+        free(blob);
+        return 2;
+    }
 
     ne = (invfs_ast_block_entry *)malloc(n_ents * sizeof *ne);
     if (!ne) { free(blob); return 0; }
@@ -315,14 +325,13 @@ static int migrate_file(invfs_volume *v, uint64_t inode_id, const char *name,
         }
         free(back);
         free(frame);
-        /* Publish gate: DOWNWARD moves consolidate (new below old --
-         * the potential strictly decreases), and RAW->shadow moves drain
-         * RAW by construction (RAW occupancy strictly decreases: nothing
-         * ever allocates back into RAW here, the arena is shadow-only).
-         * Shadow->shadow-upward copies are freed unpublished (budget
-         * refunded): they filled no lower hole, so publishing would trade
-         * one hole for another at best and churn the savepoint pin at
-         * worst. */
+        /* Publish gate: DOWNWARD moves only (new strictly below old).
+         * The pba potential strictly decreases per move and is bounded
+         * below, so repeated passes terminate: no ping-pong, no churn.
+         * A RAW->shadow move landing higher is refused even though it
+         * would drain RAW, because the next pass moves it back into the
+         * hole it left (measured oscillation on adjacent slots).
+         * Upward copies are freed unpublished (budget refunded). */
         if (getenv("INVFS_MIGRATE_DEBUG"))
             fprintf(stderr,
                     "[migrate-dbg] %s seg pba=%llu plen=%llu zone=%u -> new=%llu "
@@ -332,11 +341,8 @@ static int migrate_file(invfs_volume *v, uint64_t inode_id, const char *name,
                     (unsigned long long)old_plen,
                     (unsigned)ne[i].zone,
                     (unsigned long long)pba_new,
-                    (pba_new < old_pba || ne[i].zone == INVFS_ZONE_RAW)
-                        ? ((pba_new < old_pba) ? "DOWNWARD-MOVE"
-                                              : "RAW-DRAIN-MOVE")
-                        : "UPWARD-SKIP");
-        if (pba_new >= old_pba && ne[i].zone != INVFS_ZONE_RAW) {
+                    (pba_new < old_pba ? "DOWNWARD-MOVE" : "UPWARD-SKIP"));
+        if (pba_new >= old_pba) {
             vol_free_blocks(v, pba_new, new_plen);
             *skipped_up += 1;
             if (slow) {
@@ -381,13 +387,17 @@ static int migrate_file(invfs_volume *v, uint64_t inode_id, const char *name,
         n_moves++;
         pba_ref_modify(v, pba_new, +1);
         ne[i].pba = pba_new;
-        /* Consolidated into shadow: a RAW entry is retagged BINARY (the
-         * generic floor's own rule). Placement never decides class, but
-         * RAW means "awaiting sweep disposition" and this pass WAS the
-         * disposition. algo UNCHANGED: the bytes are a verbatim copy,
-         * never re-encoded. */
-        if (ne[i].zone == INVFS_ZONE_RAW)
-            ne[i].zone = INVFS_ZONE_BINARY;
+        /* The zone TAG is deliberately left exactly as it was, even
+         * when the bytes physically land in the shadow extent (RAW tag
+         * in shadow placement is ordinary post-WP-DZ). RAW means
+         * "awaiting sweep disposition" and disposition is
+         * lane-specific: a container member awaiting (nested)
+         * decomposition must stay visible to the container lane, and
+         * retagging it BINARY hides it (BINARY reads as disposed --
+         * measured: sweep #2 of test-containerpack declined a nested
+         * member its own move had retagged). Placement never decides
+         * what a block is, so the tag stays with the content, not the
+         * address. algo UNCHANGED: the bytes are a verbatim copy. */
         *budget_io -= new_plen;
         spend += new_plen;
         nmoved++;
@@ -445,8 +455,14 @@ static int migrate_file(invfs_volume *v, uint64_t inode_id, const char *name,
                 seal_dirty_mark(v, moves[r].old_pba, moves[r].old_plen);
                 *seal_ranges += 1;
                 *seal_blocks += moves[r].old_plen;
-                if (pba_ref_count(v, moves[r].old_pba) == 0)
+                if (pba_ref_count(v, moves[r].old_pba) == 0) {
+                    if (getenv("INVFS_MIGRATE_DEBUG"))
+                        fprintf(stderr,
+                                "[migrate-dbg] FREE old pba=%llu plen=%llu\n",
+                                (unsigned long long)moves[r].old_pba,
+                                (unsigned long long)moves[r].old_plen);
                     vol_free_blocks(v, moves[r].old_pba, moves[r].old_plen);
+                }
             }
             *moved_segs += nmoved;
             *moved_blocks += spend;
@@ -662,7 +678,9 @@ int vol_migrate_run(invfs_volume *v, int recompress, uint64_t max_blocks,
         } else {
             fr = migrate_file(v, ctx.cand[i].id, ctx.cand[i].name, &budget,
                               &budget_hit, &ms, &mb, &sr, &sb, &su);
-            if (fr > 0) {
+            if (fr == 2) {
+                lr.files_skipped_windows += 1;
+            } else if (fr > 0) {
                 lr.files_moved += 1;
                 lr.segments_moved += ms;
                 lr.blocks_moved += mb;
@@ -690,11 +708,11 @@ out_frag:
     vol_migrate_frag(v, &lr.free_runs_after, &lr.frag_after);
     if (!invfs_sweep_ui_active())
         printf("migrate: %zu file(s) seen, %zu moved (%zu segments, "
-               "%llu blocks, %zu upward-skipped)%s; frag runs %llu->%llu score %.3f->%.3f; "
+               "%llu blocks, %zu upward-skipped, %zu window-skipped)%s; frag runs %llu->%llu score %.3f->%.3f; "
                "seal-dirty %llu range(s) (%llu blocks)%s\n",
                lr.files_seen, lr.files_moved, lr.segments_moved,
                (unsigned long long)lr.blocks_moved,
-               lr.segments_skipped_upward,
+               lr.segments_skipped_upward, lr.files_skipped_windows,
                budget_hit ? " [budget hit]" : "",
                (unsigned long long)lr.free_runs_before,
                (unsigned long long)lr.free_runs_after,
