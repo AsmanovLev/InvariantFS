@@ -1736,6 +1736,84 @@ static void tarx_report_member_cap(const char *name, size_t n,
             name, n, lane, (int)TARX_MAX_PARTS);
 }
 
+/* WP603: TAR-lane fsync batching (durability only, never verification).
+ *
+ * Cost shape (measured WP603 probe, 200-member / 0.6 MB tar, ext4 image):
+ * 1613 fsyncs for 200 members (~8/member: each vol_create_blob_file
+ * appends an inode row + a dirent through vol_delta_append, and
+ * vol_delta.c:585 barriers after EVERY append), 8/8 /proc/syscall samples
+ * in fsync(2), 15-16 s wall at ~0.7 s CPU -- the lane is fsync-bound, the
+ * same family as WP602's per-record fencing but with the container MEMBER
+ * as the unit, which is why this is its own WP.
+ *
+ * The batching covers DURABILITY FENCING ONLY. The per-member guards --
+ * ZSTD smaller-than-original check, recipe build, size guard -- run for
+ * every member exactly as before; a member that fails still refuses exactly
+ * as today (abort + original kept). What changes is when the bytes become
+ * power-loss durable: one vmux_barrier after the whole TAR instead of one
+ * per delta record. Process-crash (kill -9) semantics are unchanged:
+ * every record is a single pwrite into the page cache, so a post-crash
+ * replay sees every complete member exact-or-absent, never spliced.
+ *
+ * Mechanism: the deferred-commit policy that already exists for this
+ * (blkio_set_commit / blkio_force_flush, src/core/blkio.h), installed on
+ * the volume's own handle(s) for the duration of the member loop and paid
+ * off with a single forced barrier at the end. WP602's delta paths are
+ * READ, not touched: they keep barrier-after-append, and the window makes
+ * those barriers defer by policy. The caller's env policy (INVFS_COMMIT_*)
+ * is saved and restored, so a custom policy survives the TAR.
+ *
+ * Concurrency: the window is per-handle. The offline sweep owns its handle
+ * outright, and the in-FUSE sweep worker holds g_io_lock for the whole
+ * pass (src/cli/fuse_fs.c), so no other writer can be mid-append on this
+ * handle while the window is open. */
+struct tar_commit_win {
+    uint64_t b0, ms0, idle0;
+    uint64_t b1, ms1, idle1;
+    int two_dev;
+};
+
+/* Open a never-auto-sync window; every barrier inside defers (returns 0
+ * owing durability) until tar_batch_end pays it. Unreachable thresholds:
+ * (uint64_t)-1 exceeds any dirty-byte count or elapsed-ms comparison a
+ * real run can produce -- the same "no reachable threshold" shape
+ * INVFS_COMMIT_NONE uses in blkio_apply_env_policy. */
+static void tar_batch_begin(invfs_volume *v, struct tar_commit_win *w)
+{
+    w->b0 = v->io.commit_bytes; w->ms0 = v->io.commit_ms;
+    w->idle0 = v->io.idle_ms;
+    blkio_set_commit(&v->io, (uint64_t)-1, (uint64_t)-1, (uint64_t)-1);
+    w->two_dev = (v->ndev == 2);
+    if (w->two_dev) {
+        w->b1 = v->io2.commit_bytes; w->ms1 = v->io2.commit_ms;
+        w->idle1 = v->io2.idle_ms;
+        blkio_set_commit(&v->io2, (uint64_t)-1, (uint64_t)-1, (uint64_t)-1);
+    }
+}
+
+/* Close the window: restore the caller's policy, then -- when asked -- pay
+ * the owed durability with ONE forced barrier covering every member plus
+ * the recipe. Returns the barrier result (0 = durable). With barrier == 0
+ * the policy is restored with no sync: the caller is on a refusal path
+ * whose own strict-mode appends (sibling purge) barrier right after and
+ * cover the deferred bytes too, since an fsync covers everything written
+ * to the fd before the call. */
+static int tar_batch_end(invfs_volume *v, struct tar_commit_win *w,
+                         int barrier)
+{
+    int rc = 0;
+    blkio_set_commit(&v->io, w->b0, w->ms0, w->idle0);
+    if (w->two_dev)
+        blkio_set_commit(&v->io2, w->b1, w->ms1, w->idle1);
+    if (barrier) {
+        blkio_force_flush(&v->io);
+        if (w->two_dev && v->io_open[1])
+            blkio_force_flush(&v->io2);
+        rc = vmux_barrier(v, "tar member batch");
+    }
+    return rc;
+}
+
 uint64_t vol_create_tar_file(invfs_volume *v, const char *name,
                              const uint8_t *tar, size_t tar_len)
 {
@@ -1744,6 +1822,7 @@ uint64_t vol_create_tar_file(invfs_volume *v, const char *name,
     uint8_t *trailer = NULL, *recipe = NULL;
     size_t rlen = 0;
     uint64_t total = 0;
+    struct tar_commit_win win;
 
     if (name_too_long_for_children(name)) return 0;
     if (tarx_extract(tar, tar_len, &members, &n, &trailer, &trailer_len) != 0) {
@@ -1773,11 +1852,15 @@ uint64_t vol_create_tar_file(invfs_volume *v, const char *name,
 
     /* parts: "name!partN", each compressed by its best algorithm */
     total = (uint64_t)rlen;
+    /* WP603: one durability window for all N members + the recipe (O(1)
+     * barriers instead of O(members)); guards stay per member below. */
+    tar_batch_begin(v, &win);
     for (i = 0; i < n; i++) {
         size_t dlen = (size_t)members[i].data_len;
         size_t plen = dlen + (members[i].pad_kind ? 0 : (size_t)members[i].pad_len);
         uint8_t *pd = (uint8_t *)malloc(plen ? plen : 1);
         if (!pd) { free(recipe); free(members); free(trailer);
+                   tar_batch_end(v, &win, 0);
                    return vol_transcode_abort(v, name); }
         memcpy(pd, tar + members[i].data_off, dlen);
         if (!members[i].pad_kind && members[i].pad_len)
@@ -1785,6 +1868,7 @@ uint64_t vol_create_tar_file(invfs_volume *v, const char *name,
         size_t bound = ZSTD_compressBound(plen);
         uint8_t *c = (uint8_t *)malloc(bound);
         if (!c) { free(pd); free(recipe); free(members); free(trailer);
+                  tar_batch_end(v, &win, 0);
                   return vol_transcode_abort(v, name); }
         size_t cl = ZSTD_compress(c, bound, pd, plen, 19);
         uint32_t algo = INVFS_ALGO_ZSTD;
@@ -1799,6 +1883,7 @@ uint64_t vol_create_tar_file(invfs_volume *v, const char *name,
         if (!pino) {
             fprintf(stderr, "[vol] part inode failed for %s\n", pn);
             free(c); free(pd); free(recipe); free(members); free(trailer);
+            tar_batch_end(v, &win, 0);
             return vol_transcode_abort(v, name);
         }
         total += (uint64_t)cl;
@@ -1811,6 +1896,7 @@ uint64_t vol_create_tar_file(invfs_volume *v, const char *name,
             fprintf(stderr, "[vol] %s: parts+recipe %llu >= tar %zu — keep original\n",
                     name, (unsigned long long)total, tar_len);
         free(recipe); free(members); free(trailer);
+        tar_batch_end(v, &win, 0);
         return vol_transcode_abort(v, name);
     }
 
@@ -1818,6 +1904,7 @@ uint64_t vol_create_tar_file(invfs_volume *v, const char *name,
     size_t bound = ZSTD_compressBound(rlen);
     uint8_t *rc = (uint8_t *)malloc(bound + 1);
     if (!rc) { free(recipe); free(members); free(trailer);
+               tar_batch_end(v, &win, 0);
                return vol_transcode_abort(v, name); }
     size_t rbl = 0;
     size_t rcl = ZSTD_compress(rc + 1, bound, recipe, rlen, 19);
@@ -1828,9 +1915,15 @@ uint64_t vol_create_tar_file(invfs_volume *v, const char *name,
     if (!ino) {
         fprintf(stderr, "[vol] tar inode failed for %s\n", name);
         free(rc); free(recipe); free(members); free(trailer);
+        tar_batch_end(v, &win, 0);
         return vol_transcode_abort(v, name);
     }
     free(rc); free(recipe); free(members); free(trailer);
+    /* The single durability point for the whole TAR: every member barrier
+     * above deferred by policy. A refused barrier fails exactly like a
+     * failed member create (abort + original kept). */
+    if (tar_batch_end(v, &win, 1) != 0)
+        return vol_transcode_abort(v, name);
     return ino;
 }
 
