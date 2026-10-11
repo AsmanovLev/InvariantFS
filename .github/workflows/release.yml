@@ -136,15 +136,17 @@ jobs:
         with:
           ref: ${{ env.TAG }}
       # The spec builds from source (Source0 is a source tarball), so mint
-      # it from the tag itself: exactly the tagged tree, no more.
+      # it from the checked-out tree. No git-in-container: the workspace
+      # mount does not carry .git, so tar the tree with the spec's prefix.
       - name: build RPM
         run: |
-          dnf install -y git rpm-build gzip gcc make pkgconf-pkg-config \
+          dnf install -y rpm-build gzip gcc make pkgconf-pkg-config \
             fuse3-devel zlib-devel libzstd systemd-rpm-macros
           VER="${TAG#v}"
           mkdir -p rpmbuild/SOURCES
-          git archive --format=tar.gz --prefix="invfs-$VER/" \
-            -o "rpmbuild/SOURCES/invfs-$VER.tar.gz" "$TAG"
+          tar --exclude=.git --exclude=./rpmbuild \
+            -czf "rpmbuild/SOURCES/invfs-$VER.tar.gz" \
+            --transform "s,^\./,invfs-$VER/," .
           rpmbuild -bb packaging/invfs.spec \
             --define "_topdir $GITHUB_WORKSPACE/rpmbuild"
       - uses: actions/upload-artifact@v4
