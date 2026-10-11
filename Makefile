@@ -166,7 +166,7 @@ UNIT_SCRATCH ?= $(if $(INVFS_UNIT_SCRATCH),$(INVFS_UNIT_SCRATCH),/tmp)
 FRB_T := $(CURDIR)/build/frbtest
 
 TOOLS   := invf-mkfs invf-verify invf-fsck invf-cp invf-cat invf-ls invf-stat \
-           invf-zip invf-arctest invf-blkio_test invf-fuse invf-import invf-sweep meta_probe \
+           invf-zip invf-fuse invf-import invf-sweep meta_probe \
            invf-stats invf-resize invf-rollback invfs-pack \
            invf-vnode invf-plugin-host
 

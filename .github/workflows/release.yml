@@ -1,0 +1,157 @@
+name: release
+
+# Cut per-distro packages and publish the GitHub release.
+#   - on a v* tag push: build everything and publish (this IS the release)
+#   - manual dispatch: build only, artifacts for inspection, no publish
+# v0.6.0 scope: tarball + .deb + Arch pkg as binaries; the Gentoo ebuild
+# and the Void template ship as recipes (no portage/xbps-src on hosted
+# runners); there is no RPM spec in-tree, so no .rpm.
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  TAG: ${{ github.ref_type == 'tag' && github.ref_name || 'v0.6.0' }}
+
+jobs:
+  preflight:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
+      - name: version coherence (tag vs tree)
+        run: |
+          VER="${TAG#v}"
+          # No VERSION file in-tree (make release generates it); the tag
+          # itself is the version source of truth here.
+          git describe --exact-match --match "v$VER" HEAD
+          grep -q "pkgver=$VER" packaging/PKGBUILD
+          head -n 1 packaging/debian/changelog | grep -q "($VER-"
+          echo "tree matches $TAG"
+
+  tarball:
+    needs: preflight
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
+      - name: dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq build-essential pkg-config \
+            libfuse3-dev zlib1g-dev libzstd-dev python3
+      - name: make release
+        run: make release
+      - name: verify checksums
+        run: cd dist && sha256sum -c SHA256SUMS
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist-tarball
+          path: |
+            dist/*.tar.zst
+            dist/SHA256SUMS
+
+  deb:
+    needs: preflight
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
+      - name: dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq build-essential pkg-config debhelper \
+            libfuse3-dev zlib1g-dev libzstd-dev python3
+      - name: debuild
+        run: debuild -us -uc -b
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist-deb
+          path: "../*.deb"
+
+  arch:
+    needs: tarball
+    runs-on: ubuntu-22.04
+    container: archlinux:latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
+          path: tree
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist-tarball
+          path: pkg
+      - name: build package
+        run: |
+          pacman -Sy --noconfirm --needed base-devel
+          useradd -m builder
+          cp tree/packaging/PKGBUILD pkg/
+          cd pkg
+          # The tarball is built in this same run: pin its real hash so the
+          # PKGBUILD a manual `makepkg` user reads matches the bytes.
+          SHA=$(sha256sum invfs-*.tar.zst | cut -d' ' -f1)
+          sed -i "s/^sha256sums=(.*)/sha256sums=('$SHA')/" PKGBUILD
+          cp "$SHA" PKGBUILD "$GITHUB_WORKSPACE/" 2>/dev/null || true
+          echo "$SHA" > TARBALL.sha256
+          chown -R builder:builder .
+          runuser -u builder -- makepkg --noconfirm
+          cp PKGBUILD "$GITHUB_WORKSPACE/PKGBUILD-$TAG" 2>/dev/null || cp PKGBUILD /github/workspace/PKGBUILD 2>/dev/null || true
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist-arch
+          path: |
+            pkg/*.pkg.tar.zst
+            pkg/TARBALL.sha256
+
+  publish:
+    if: github.event_name == 'push'
+    needs: [tarball, deb, arch]
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist-tarball
+          path: assets
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist-deb
+          path: assets
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist-arch
+          path: assets
+      - name: stage recipes + notes
+        run: |
+          cp packaging/gentoo/invfs-*.ebuild assets/ 2>/dev/null || true
+          cp packaging/void/template "assets/void-template-${TAG#v}" 2>/dev/null || true
+          cp packaging/PKGBUILD "assets/PKGBUILD-${TAG#v}" 2>/dev/null || true
+          { echo "InvariantFS $TAG — see CHANGELOG.md for the full list."; echo;
+            echo "Install:"; echo "  - tarball: unpack, sudo sh packaging/install.sh";
+            echo "  - debian/ubuntu: sudo dpkg -i invfs_*.deb";
+            echo "  - arch: sudo pacman -U invfs-*.pkg.tar.zst";
+            echo "  - gentoo/void: ebuild/template recipes attached (source builds)";
+            echo "Codec/container packs are installed manually in this release:";
+            echo "  invfs-pack install ./path/to/pack  (registry fetch: WP608, in progress)";
+          } > assets/RELEASE-NOTES.txt
+          ls assets/
+      - name: publish GitHub release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" assets/* --clobber
+          else
+            gh release create "$TAG" assets/* --title "$TAG" --notes-file assets/RELEASE-NOTES.txt
+          fi
